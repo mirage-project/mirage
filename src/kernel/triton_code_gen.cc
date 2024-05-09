@@ -344,6 +344,26 @@ std::string generate_kernel_code(mirage::threadblock::NewKernelParams params,
       } else {
         assert(false);
       }
+    } else if ((op_type >= mirage::type::TB_CONCAT_FIRST_OP_ID) &&
+                 (op_type <= mirage::type::TB_CONCAT_LAST_OP_ID)) {
+      int output_num_elements, A_concat_dim_size, B_concat_dim_size,
+          inner_size;
+      int A_smem_offset, B_smem_offset, output_smem_offset;
+      mirage::threadblock::deserialize_concat_op_parameters(
+          params.parameters,
+          param_idx,
+          output_num_elements,
+          A_concat_dim_size,
+          B_concat_dim_size,
+          inner_size,
+          A_smem_offset,
+          B_smem_offset,
+          output_smem_offset);
+      main << "\t\t" << stensor_name(output_smem_offset) << " = tl.cat("
+           << stensor_name(A_smem_offset) << ", "
+           << stensor_name(B_smem_offset) << ")\n";
+    } else {
+      assert(false && "Unsupported operator");
     }
   }
   assert(params.num_parameters == param_idx);
