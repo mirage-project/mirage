@@ -11,6 +11,7 @@ def optimize_lora(checkpoint):
     D = graph.matmul(X, A)
     E = graph.matmul(D, B)
     C = graph.matmul(X, W)
+    O = graph.add(C, E)
     if checkpoint is None:
         graphs = mi.optimize(graph, default_config="lora")
     else:
