@@ -1,0 +1,26 @@
+# Compiled object files
+*.o
+*.obj
+
+# Compiled dynamic libraries
+*.so
+*.dylib
+*.dll
+
+# Compiled executables
+*.exe
+
+# CUDA object files
+*.cu.o
+*.cu.obj
+
+# CUDA PTX files
+*.ptx
+
+# CUDA C++ dependency files
+*.d
+
+# Build directories
+build/
+bin/
+/.cache/
