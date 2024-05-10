@@ -63,12 +63,14 @@ This program outputs 69 Triton programs saved in the `demo` folder. The performa
 </p>
 
 ## Citation
-Please cite Mirage as:
+A paper describing Mirage's techniques is available [on arxiv](https://arxiv.org/abs/2405.05751). Please cite Mirage as:
 
 ``` bibtex
 @misc{wu2024mirage,
       title={A Multi-Level Superoptimizer for Tensor Programs}, 
       author={Mengdi Wu and Xinhao Cheng and Oded Padon and Zhihao Jia},
+      eprint={2405.05751},
+      archivePrefix={arXiv},
       year={2024},
 }
 ```
