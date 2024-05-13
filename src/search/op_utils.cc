@@ -43,6 +43,29 @@ bool is_unary(type::KNOperatorType op) {
   return contains(true_values, op);
 }
 
+int get_input_number(type::KNOperatorType op) {
+  if (is_unary(op)) {
+    return 1;
+  }
+  if (is_binary(op)) {
+    return 2;
+  }
+  assert(false && "Unsupported operator");
+}
+
+int get_input_number(type::TBOperatorType op) {
+  if (is_unary(op)) {
+    return 1;
+  }
+  if (is_binary(op)) {
+    return 2;
+  }
+  if (op == type::TBOperatorType::TB_CONCAT_THEN_MATMUL_OP) {
+    return 4;
+  }
+  assert(false && "Unsupported operator");
+}
+
 std::shared_ptr<AlgebraicPattern>
     get_pattern(type::KNOperatorType op,
                 DTensor const &tensor,

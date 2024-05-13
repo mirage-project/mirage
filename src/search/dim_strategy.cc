@@ -236,7 +236,7 @@ void get_nary_input(int n,
                     int num_tensors,
                     std::vector<int> &cur,
                     std::vector<std::vector<int>> &result) {
-  if (cur.size() == n) {
+  if ((int)cur.size() == n) {
     result.push_back(cur);
     return;
   }

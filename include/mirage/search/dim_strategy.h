@@ -38,9 +38,7 @@ struct DimStrategy {
     if (is_binary(op_type)) {
       return get_binary_input(all_inputs.size());
     }
-    if (op_type == type::TBOperatorType::TB_CONCAT_THEN_MATMUL_OP) {
-      return get_nary_input(all_inputs.size(), 4);
-    }
+    return get_nary_input(all_inputs.size(), get_input_number(op_type));
     assert(false && "Unsupported operator");
   }
   std::vector<std::vector<int>>
