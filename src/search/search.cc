@@ -16,7 +16,7 @@ KernelGraphGenerator::KernelGraphGenerator(
     char const *filename)
     : computation_graph(computation_graph),
       best_profile_result(ProfileResult::infinity()), config(config),
-      dim_strategy(DimStrategy(config)), filename(filename),
+      dim_strategy(DimStrategy(config)), filename(filename), search_finished(0),
       num_total_kernel_graphs(0), num_total_random_tests(0),
       num_valid_kernel_graphs(0) {}
 
@@ -434,6 +434,9 @@ void KernelGraphGenerator::generate_next_kn_operator(SearchContext<DTensor> &c,
 }
 
 void KernelGraphGenerator::generate_kernel_graphs() {
+  if (search_finished) {
+    return;
+  }
   pattern_eval();
   fingerprint_eval();
   generated_graphs.push_back(json(computation_graph));
@@ -457,6 +460,7 @@ void KernelGraphGenerator::generate_kernel_graphs() {
 
   process_outputs();
   generate_next_kn_operator(c, g, 0);
+  search_finished = true;
 
   save_checkpoint();
 
@@ -625,16 +629,6 @@ bool KernelGraphGenerator::have_same_fingerprint(
 std::vector<layout::SmemLayout> KernelGraphGenerator::get_valid_output_layout(
     threadblock::TBOperator const *op, int idx) {
   assert(idx == 0);
-  config.smem_layout_to_explore = {
-      layout::SmemRowMajor,
-      layout::SmemColumnMajor,
-      // layout::SmemRowMajorTensorOpMultiplicand_Crosswise16,
-      layout::SmemRowMajorTensorOpMultiplicand_Crosswise32,
-      layout::SmemRowMajorTensorOpMultiplicand_Crosswise64,
-      // layout::SmemColumnMajorTensorOpMultiplicand_Crosswise16,
-      layout::SmemColumnMajorTensorOpMultiplicand_Crosswise32,
-      layout::SmemColumnMajorTensorOpMultiplicand_Crosswise64,
-  };
   switch (op->op_type) {
     case type::TBOperatorType::TB_INPUT_OP:
       return config.smem_layout_to_explore;
@@ -785,6 +779,7 @@ void KernelGraphGenerator::save_checkpoint() const {
                         config,
                         callstack,
                         generated_graphs,
+                        search_finished,
                         num_total_kernel_graphs,
                         num_total_random_tests,
                         num_valid_kernel_graphs};
@@ -802,6 +797,7 @@ void KernelGraphGenerator::recovery_from_checkpoint(
   callstack = checkpoint.callstack;
   generated_graphs = checkpoint.generated_graphs;
 
+  search_finished = checkpoint.search_finished;
   num_total_kernel_graphs = checkpoint.num_total_kernel_graphs;
   num_total_random_tests = checkpoint.num_total_random_tests;
   num_valid_kernel_graphs = checkpoint.num_valid_kernel_graphs;
