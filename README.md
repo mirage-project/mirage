@@ -45,7 +45,7 @@ The search is configured by several parameters, among which `griddims` is the on
 
 Except for `griddims`, which depends on the problem sizes, the default values for other parameters are sufficient to discover FlashAttn, FlashDecoding, and many other expert-designed implementations for Attention.
 
-The `mi.superoptimize` function returns a list of mugraphs discovered by Mirage that are functionally equivalent to the input program and represent different implementations of it. Mirage uses a probabilistic equivalence verification mechanism to ensure that all discovered mugraphs are equivalent to the inpout. `graph.generate_triton_program` generates a Triton program for each mugraph.
+The `mi.superoptimize` function returns a list of mugraphs discovered by Mirage that are functionally equivalent to the input program and represent different implementations of it. Mirage uses a probabilistic equivalence verification mechanism to ensure that all discovered mugraphs are equivalent to the input. `graph.generate_triton_program` generates a Triton program for each mugraph.
 
 ```python
 for i, mugraph in enumerate(new_graphs):
