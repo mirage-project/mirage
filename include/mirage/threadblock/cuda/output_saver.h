@@ -196,15 +196,14 @@ public:
                     int num_threads,
                     MatrixCoord matrix_offset,
                     int global_offset) {
-    //assert(stensor.dim[stensor.num_dims - 2] == kRow);
-    //assert(stensor.dim[stensor.num_dims - 1] == kColumn);
-    // Currently only support half precision
+    // assert(stensor.dim[stensor.num_dims - 2] == kRow);
+    // assert(stensor.dim[stensor.num_dims - 1] == kColumn);
+    //  Currently only support half precision
     int const kThreads = 128;
-    //assert(num_threads == kThreads);
-    //assert(stensor.data_type == mirage::type::DT_FLOAT16);
-    //assert(dtensor.data_type == mirage::type::DT_FLOAT16);
-    MatrixCoord extent(
-        {dtensor_matrix_shape.x, dtensor_matrix_shape.y});
+    // assert(num_threads == kThreads);
+    // assert(stensor.data_type == mirage::type::DT_FLOAT16);
+    // assert(dtensor.data_type == mirage::type::DT_FLOAT16);
+    MatrixCoord extent({dtensor_matrix_shape.x, dtensor_matrix_shape.y});
     if (dlayout == mirage::layout::DmemRowMajor) {
       using DmemLayout = cutlass::layout::RowMajor;
       if (slayout == mirage::layout::SmemRowMajor) {
@@ -215,34 +214,33 @@ public:
                                                 kThreads,
                                                 DmemLayout,
                                                 SmemLayout>;
-        OutputSaver saver(
-            ((cutlass::half_t *)dtensor_ptr) + global_offset,
-            (cutlass::half_t *)stensor_ptr,
-            extent,
-            thread_id,
-            matrix_offset);
+        OutputSaver saver(((cutlass::half_t *)dtensor_ptr) + global_offset,
+                          (cutlass::half_t *)stensor_ptr,
+                          extent,
+                          thread_id,
+                          matrix_offset);
         saver.execute_kernel();
       } else if (
-        slayout ==
-            mirage::layout::SmemRowMajorTensorOpMultiplicand_Crosswise16 ||
-        slayout ==
-            mirage::layout::SmemRowMajorTensorOpMultiplicand_Crosswise32 ||
-        slayout ==
-            mirage::layout::SmemRowMajorTensorOpMultiplicand_Crosswise64) {
-        using SmemLayout = cutlass::layout::
-            RowMajorTensorOpMultiplicandCrosswise<16 /*bits*/, kColumn>;
+          slayout ==
+              mirage::layout::SmemRowMajorTensorOpMultiplicand_Crosswise16 ||
+          slayout ==
+              mirage::layout::SmemRowMajorTensorOpMultiplicand_Crosswise32 ||
+          slayout ==
+              mirage::layout::SmemRowMajorTensorOpMultiplicand_Crosswise64) {
+        using SmemLayout =
+            cutlass::layout::RowMajorTensorOpMultiplicandCrosswise<16 /*bits*/,
+                                                                   kColumn>;
         using OutputSaver = RowMajorOutputSaver<cutlass::half_t,
                                                 kRow,
                                                 kColumn,
                                                 kThreads,
                                                 DmemLayout,
                                                 SmemLayout>;
-        OutputSaver saver(
-            ((cutlass::half_t *)dtensor_ptr) + global_offset,
-            (cutlass::half_t *)stensor_ptr,
-            extent,
-            thread_id,
-            matrix_offset);
+        OutputSaver saver(((cutlass::half_t *)dtensor_ptr) + global_offset,
+                          (cutlass::half_t *)stensor_ptr,
+                          extent,
+                          thread_id,
+                          matrix_offset);
         saver.execute_kernel();
       } else {
         printf("smem layout = %d\n", slayout);
@@ -259,12 +257,11 @@ public:
                                                    kThreads,
                                                    DmemLayout,
                                                    SmemLayout>;
-        OutputSaver saver(
-            ((cutlass::half_t *)dtensor_ptr) + global_offset,
-            (cutlass::half_t *)stensor_ptr,
-            extent,
-            thread_id,
-            matrix_offset);
+        OutputSaver saver(((cutlass::half_t *)dtensor_ptr) + global_offset,
+                          (cutlass::half_t *)stensor_ptr,
+                          extent,
+                          thread_id,
+                          matrix_offset);
         saver.execute_kernel();
       } else if (
           slayout ==
@@ -281,12 +278,11 @@ public:
                                                    kThreads,
                                                    DmemLayout,
                                                    SmemLayout>;
-        OutputSaver saver(
-            ((cutlass::half_t *)dtensor_ptr) + global_offset,
-            (cutlass::half_t *)stensor_ptr,
-            extent,
-            thread_id,
-            matrix_offset);
+        OutputSaver saver(((cutlass::half_t *)dtensor_ptr) + global_offset,
+                          (cutlass::half_t *)stensor_ptr,
+                          extent,
+                          thread_id,
+                          matrix_offset);
         saver.execute_kernel();
       } else {
         printf("smem layout = %d\n", slayout);
@@ -299,8 +295,8 @@ public:
 class GenericOutputSaver {
 public:
   CUTLASS_DEVICE
-  GenericOutputSaver(void* dtensor_ptr,
-                     void* stensor_ptr,
+  GenericOutputSaver(void *dtensor_ptr,
+                     void *stensor_ptr,
                      int2 dtensor_matrix_shape,
                      int2 stensor_matrix_shape,
                      mirage::layout::DmemLayout dtensor_layout,
@@ -352,49 +348,49 @@ public:
                                 num_threads,
                                 matrix_offset,
                                 global_offset);
-    } 
+    }
   }
 };
 
 class TBOutputAccumFingerprinter {
 public:
   CUTLASS_DEVICE
-  TBOutputAccumFingerprinter(mirage::type::FPType* input_ptr,
-                             mirage::type::FPType* output_ptr,
+  TBOutputAccumFingerprinter(mirage::type::FPType *input_ptr,
+                             mirage::type::FPType *output_ptr,
                              int2 stensor_matrix_shape,
                              bool is_first_loop,
                              int thread_id,
                              int num_threads) {
-    //mirage::type::FPType *input_ptr =
-    //    (mirage::type::FPType *)(input.smem_offset + smem_buffer);
-    //mirage::type::FPType *output_ptr =
-    //    (mirage::type::FPType *)(output.smem_offset + smem_buffer);
-    //int num_elements = (int)input.num_elements();
+    // mirage::type::FPType *input_ptr =
+    //     (mirage::type::FPType *)(input.smem_offset + smem_buffer);
+    // mirage::type::FPType *output_ptr =
+    //     (mirage::type::FPType *)(output.smem_offset + smem_buffer);
+    // int num_elements = (int)input.num_elements();
     int num_elements = stensor_matrix_shape.x * stensor_matrix_shape.y;
     if (is_first_loop) {
       for (int idx = thread_id; idx < num_elements; idx += num_threads) {
         output_ptr[idx] = input_ptr[idx];
       }
-      //if (thread_id == 0) {
-        // printf("Accumu(0): block(%d %d %d) output(%d) input(%d)\n",
-        //        blockIdx.x,
-        //        blockIdx.y,
-        //        blockIdx.z,
-        //        output_ptr[thread_id],
-        //        input_ptr[thread_id]);
+      // if (thread_id == 0) {
+      //  printf("Accumu(0): block(%d %d %d) output(%d) input(%d)\n",
+      //         blockIdx.x,
+      //         blockIdx.y,
+      //         blockIdx.z,
+      //         output_ptr[thread_id],
+      //         input_ptr[thread_id]);
       //}
     } else {
       for (int idx = thread_id; idx < num_elements; idx += num_threads) {
         uint32_t value = input_ptr[idx];
-        //if (thread_id == 0) {
-          // printf("Accumu(1): block(%d %d %d) output_old(%d) input(%d) "
-          //        "output_new(%d)\n",
-          //        blockIdx.x,
-          //        blockIdx.y,
-          //        blockIdx.z,
-          //        output_ptr[thread_id],
-          //        input_ptr[thread_id],
-          //        (value + output_ptr[idx]) % FP_PQ);
+        // if (thread_id == 0) {
+        //  printf("Accumu(1): block(%d %d %d) output_old(%d) input(%d) "
+        //         "output_new(%d)\n",
+        //         blockIdx.x,
+        //         blockIdx.y,
+        //         blockIdx.z,
+        //         output_ptr[thread_id],
+        //         input_ptr[thread_id],
+        //         (value + output_ptr[idx]) % FP_PQ);
         //}
         output_ptr[idx] = (value + output_ptr[idx]) % FP_PQ;
       }
@@ -405,8 +401,8 @@ public:
 class TBOutputSaverFingerprinter {
 public:
   CUTLASS_DEVICE
-  TBOutputSaverFingerprinter(mirage::type::FPType* dtensor_ptr,
-                             mirage::type::FPType* stensor_ptr,
+  TBOutputSaverFingerprinter(mirage::type::FPType *dtensor_ptr,
+                             mirage::type::FPType *stensor_ptr,
                              int2 dtensor_matrix_shape,
                              int2 stensor_matrix_shape,
                              mirage::layout::DmemLayout dtensor_layout,

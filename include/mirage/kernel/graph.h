@@ -37,7 +37,7 @@ public:
   DTensor new_input(std::vector<int> const &dims,
                     mirage::type::DataType data_type,
                     mirage::layout::DmemLayout layout);
-  DTensor* new_input_ptr(std::vector<int> const &dims,
+  DTensor *new_input_ptr(std::vector<int> const &dims,
                          mirage::type::DataType data_type,
                          mirage::layout::DmemLayout layout);
   KNOperator *create_input_op(std::vector<int> const &dims,
@@ -45,32 +45,34 @@ public:
                               mirage::layout::DmemLayout layout);
   // matmul operator
   DTensor matmul(DTensor const &A, DTensor const &B);
-  DTensor* matmul(DTensor const *A, DTensor const *B);
+  DTensor *matmul(DTensor const *A, DTensor const *B);
   KNOperator *create_matmul_op(DTensor const &A, DTensor const &B);
   // elementunary operator
   DTensor exp(DTensor const &input);
-  DTensor* exp(DTensor const *input);
+  DTensor *exp(DTensor const *input);
   KNOperator *create_elementunary_op(DTensor const &input,
                                      mirage::type::KNOperatorType _type);
   // elementunary operator
   DTensor add(DTensor const &input1, DTensor const &input2);
   DTensor mul(DTensor const &input1, DTensor const &input2);
   DTensor div(DTensor const &input1, DTensor const &input2);
-  DTensor* add(DTensor const *input1, DTensor const *input2);
-  DTensor* mul(DTensor const *input1, DTensor const *input2);
-  DTensor* div(DTensor const *input1, DTensor const *input2);
+  DTensor *add(DTensor const *input1, DTensor const *input2);
+  DTensor *mul(DTensor const *input1, DTensor const *input2);
+  DTensor *div(DTensor const *input1, DTensor const *input2);
   KNOperator *create_elementbinary_op(DTensor const &input1,
                                       DTensor const &input2,
                                       mirage::type::KNOperatorType _type);
   // reduction operator
   DTensor reduction(DTensor const &input, int dim, int size = 1);
-  DTensor* reduction(DTensor const *input, int dim, int size = 1);
+  DTensor *reduction(DTensor const *input, int dim, int size = 1);
   KNOperator *create_reduction_op(DTensor const &input, int dim, int factor);
   // customized operator
-  std::vector<DTensor> customized(std::vector<DTensor> const &inputs,
-                                  mirage::threadblock::ExecutionPlan const &plan);
-  KNOperator *create_customized_op(std::vector<DTensor> const &inputs,
-                                   mirage::threadblock::ExecutionPlan const &plan);
+  std::vector<DTensor>
+      customized(std::vector<DTensor> const &inputs,
+                 mirage::threadblock::ExecutionPlan const &plan);
+  KNOperator *
+      create_customized_op(std::vector<DTensor> const &inputs,
+                           mirage::threadblock::ExecutionPlan const &plan);
   std::vector<DTensor> customized(std::vector<DTensor> const &inputs,
                                   mirage::threadblock::Graph const &_graph);
   KNOperator *create_customized_op(std::vector<DTensor> const &inputs,

@@ -13,11 +13,11 @@
  * limitations under the License.
  */
 
+#include "cutlass/cutlass.h"
 #include "mirage/threadblock/graph.h"
 #include "mirage/threadblock/matmul.h"
 #include "mirage/utils/cuda_helper.h"
 #include "mirage/utils/hash_utils.h"
-#include "cutlass/cutlass.h"
 #include <cassert>
 
 namespace mirage {

@@ -32,7 +32,7 @@ DTensor Graph::exp(DTensor const &input) {
   return output;
 }
 
-DTensor* Graph::exp(DTensor const *input) {
+DTensor *Graph::exp(DTensor const *input) {
   KNOperator *op = create_elementunary_op(*input, mirage::type::KN_EXP_OP);
   assert(op != nullptr);
   operators.push_back(op);

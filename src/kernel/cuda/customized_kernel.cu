@@ -99,15 +99,15 @@ __global__ void customized_kernel_function(
         cutlass::half_t *stensor_ptr =
             (cutlass::half_t *)(smem_buffer + input_smem_offset);
         mirage::threadblock::GenericInputLoader loader(dtensor_ptr,
-                                                    stensor_ptr,
-                                                    dtensor_matrix_shape,
-                                                    stensor_matrix_shape,
-                                                    dtensor_layout,
-                                                    stensor_layout,
-                                                    threadIdx.x,
-                                                    blockDim.x,
-                                                    matrix_offset,
-                                                    global_offset);
+                                                       stensor_ptr,
+                                                       dtensor_matrix_shape,
+                                                       stensor_matrix_shape,
+                                                       dtensor_layout,
+                                                       stensor_layout,
+                                                       threadIdx.x,
+                                                       blockDim.x,
+                                                       matrix_offset,
+                                                       global_offset);
         __syncthreads();
       } else if (op_type == mirage::type::TB_OUTPUT_OP) {
         // Only save outputs after forloop
@@ -142,8 +142,9 @@ __global__ void customized_kernel_function(
                 new_params.operator_types, op, new_params.num_operators);
 
         if (act_type == mirage::type::ACT_NONE) {
-          mirage::threadblock::GenericMatmulExecutor<mirage::type::ACT_NONE> executor(
-              A_ptr, B_ptr, C_ptr, m, n, k, thread_idx, warp_idx, lane_idx);
+          mirage::threadblock::GenericMatmulExecutor<mirage::type::ACT_NONE>
+              executor(
+                  A_ptr, B_ptr, C_ptr, m, n, k, thread_idx, warp_idx, lane_idx);
 
         } else if (act_type == mirage::type::ACT_EXP) {
           // fuse this matmul with next op
@@ -151,8 +152,9 @@ __global__ void customized_kernel_function(
           mirage::threadblock::deserialize_elementunary_op_parameters(
               new_params.parameters, param_idx, smem_offset, num_elements);
           C_ptr = (cutlass::half_t *)(smem_buffer + smem_offset);
-          mirage::threadblock::GenericMatmulExecutor<mirage::type::ACT_EXP> executor(
-              A_ptr, B_ptr, C_ptr, m, n, k, thread_idx, warp_idx, lane_idx);
+          mirage::threadblock::GenericMatmulExecutor<mirage::type::ACT_EXP>
+              executor(
+                  A_ptr, B_ptr, C_ptr, m, n, k, thread_idx, warp_idx, lane_idx);
           op += 1;
         }
         __syncthreads();
@@ -289,15 +291,15 @@ __global__ void customized_kernel_function(
     cutlass::half_t *stensor_ptr =
         (cutlass::half_t *)(smem_buffer + accum_smem_offset);
     mirage::threadblock::GenericOutputSaver saver(dtensor_ptr,
-                                               stensor_ptr,
-                                               dtensor_matrix_shape,
-                                               stensor_matrix_shape,
-                                               dtensor_layout,
-                                               stensor_layout,
-                                               threadIdx.x,
-                                               blockDim.x,
-                                               matrix_offset,
-                                               global_offset);
+                                                  stensor_ptr,
+                                                  dtensor_matrix_shape,
+                                                  stensor_matrix_shape,
+                                                  dtensor_layout,
+                                                  stensor_layout,
+                                                  threadIdx.x,
+                                                  blockDim.x,
+                                                  matrix_offset,
+                                                  global_offset);
     // No need to synchronize for output saver
     //__syncthreads();
   }
@@ -373,16 +375,17 @@ __global__ void compute_customizedop_fingerprint(
                                                 tb_offset_column};
           mirage::type::FPType *stensor_ptr =
               (mirage::type::FPType *)(smem_buffer + input_smem_offset);
-          mirage::threadblock::TBInputLoaderFingerprinter fp(dtensor_ptr,
-                                                          stensor_ptr,
-                                                          dtensor_matrix_shape,
-                                                          stensor_matrix_shape,
-                                                          dtensor_layout,
-                                                          stensor_layout,
-                                                          threadIdx.x,
-                                                          blockDim.x,
-                                                          matrix_offset,
-                                                          global_offset);
+          mirage::threadblock::TBInputLoaderFingerprinter fp(
+              dtensor_ptr,
+              stensor_ptr,
+              dtensor_matrix_shape,
+              stensor_matrix_shape,
+              dtensor_layout,
+              stensor_layout,
+              threadIdx.x,
+              blockDim.x,
+              matrix_offset,
+              global_offset);
           __syncthreads();
           break;
         }
@@ -410,12 +413,13 @@ __global__ void compute_customizedop_fingerprint(
               (mirage::type::FPType *)(smem_buffer + input_smem_offset);
           mirage::type::FPType *accum_stensor_ptr =
               (mirage::type::FPType *)(smem_buffer + accum_smem_offset);
-          mirage::threadblock::TBOutputAccumFingerprinter fp(input_stensor_ptr,
-                                                          accum_stensor_ptr,
-                                                          stensor_matrix_shape,
-                                                          (i == 0),
-                                                          threadIdx.x,
-                                                          blockDim.x);
+          mirage::threadblock::TBOutputAccumFingerprinter fp(
+              input_stensor_ptr,
+              accum_stensor_ptr,
+              stensor_matrix_shape,
+              (i == 0),
+              threadIdx.x,
+              blockDim.x);
           __syncthreads();
           // Step 2: Save final output to dmem if this is the last forloop
           if (i == forloop_range - 1) {
@@ -582,14 +586,14 @@ __global__ void compute_customizedop_fingerprint(
           mirage::type::FPType *output_ptr =
               (mirage::type::FPType *)(smem_buffer + output_smem_offset);
           mirage::threadblock::TBConcatFingerprinter fp(A_ptr,
-                                                     B_ptr,
-                                                     output_ptr,
-                                                     output_num_elements,
-                                                     A_concat_dim_size,
-                                                     B_concat_dim_size,
-                                                     inner_size,
-                                                     threadIdx.x,
-                                                     blockDim.x);
+                                                        B_ptr,
+                                                        output_ptr,
+                                                        output_num_elements,
+                                                        A_concat_dim_size,
+                                                        B_concat_dim_size,
+                                                        inner_size,
+                                                        threadIdx.x,
+                                                        blockDim.x);
           __syncthreads();
           break;
         }

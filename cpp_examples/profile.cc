@@ -2,13 +2,13 @@
 #include "mirage/search/search.h"
 #include "mirage/threadblock/graph.h"
 
-#include <iostream>
 #include <fstream>
+#include <iostream>
 
 using namespace mirage;
 using namespace mirage::search;
 
-int main(int argc, char **argv) {  
+int main(int argc, char **argv) {
   if (argc < 2) {
     std::cerr << "Miss graph file name" << std::endl;
     return 1;

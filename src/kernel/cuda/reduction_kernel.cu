@@ -13,12 +13,12 @@
  * limitations under the License.
  */
 
+#include "cutlass/fast_math.h"
 #include "mirage/kernel/device_memory_manager.h"
 #include "mirage/kernel/graph.h"
 #include "mirage/kernel/reduction.h"
 #include "mirage/utils/cuda_helper.h"
 #include "mirage/utils/hash_utils.h"
-#include "cutlass/fast_math.h"
 #include <cassert>
 
 namespace mirage {
@@ -26,7 +26,7 @@ namespace kernel {
 
 using namespace mirage::type;
 
-template<typename DT>
+template <typename DT>
 __global__ void execute_reduction(DT *input_ptr,
                                   DT *output_ptr,
                                   int num_input_elements,
@@ -40,7 +40,6 @@ __global__ void execute_reduction(DT *input_ptr,
     output_ptr[idx] = sum;
   }
 }
-
 
 bool KNReductionOp::profile(ProfileResult &result) {
   assert(input_tensors[0].data_type == DT_FLOAT16);
@@ -60,10 +59,8 @@ bool KNReductionOp::profile(ProfileResult &result) {
   checkCUDA(cudaEventCreate(&events[1]));
   checkCUDA(cudaEventRecord(events[0]));
   for (int i = 0; i < ProfileResult::NUM_ITERATIONS; i++) {
-    execute_reduction<<<num_blocks, num_threads_per_blk>>>(input_ptr,
-                                                           output_ptr,
-                                                           num_input_elements,
-                                                           num_output_elements);
+    execute_reduction<<<num_blocks, num_threads_per_blk>>>(
+        input_ptr, output_ptr, num_input_elements, num_output_elements);
   }
   float runtime_ms = 0;
   checkCUDA(cudaEventRecord(events[1]));

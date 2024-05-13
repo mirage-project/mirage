@@ -34,19 +34,19 @@ __global__ void launch_matmul_kernel(
 
   // load A & B
   mirage::threadblock::GenericInputLoader loader_A(smem_buffer,
-                                                D_A,
-                                                A,
-                                                threadIdx.x,
-                                                blockDim.x,
-                                                matrix_offset,
-                                                global_offset);
+                                                   D_A,
+                                                   A,
+                                                   threadIdx.x,
+                                                   blockDim.x,
+                                                   matrix_offset,
+                                                   global_offset);
   mirage::threadblock::GenericInputLoader loader_B(smem_buffer,
-                                                D_B,
-                                                B,
-                                                threadIdx.x,
-                                                blockDim.x,
-                                                matrix_offset,
-                                                global_offset);
+                                                   D_B,
+                                                   B,
+                                                   threadIdx.x,
+                                                   blockDim.x,
+                                                   matrix_offset,
+                                                   global_offset);
   __syncthreads();
 
   GenericMatmulExecutor executor(smem_buffer,
@@ -59,12 +59,12 @@ __global__ void launch_matmul_kernel(
 
   // output C
   mirage::threadblock::GenericOutputSaver saver(smem_buffer,
-                                             D_C,
-                                             C,
-                                             threadIdx.x,
-                                             blockDim.x,
-                                             matrix_offset,
-                                             global_offset);
+                                                D_C,
+                                                C,
+                                                threadIdx.x,
+                                                blockDim.x,
+                                                matrix_offset,
+                                                global_offset);
   __syncthreads();
 }
 
@@ -89,12 +89,18 @@ TEST(threadblock_tests, matmul) {
       C_ref.device_data(), C_ours.device_data(), C_ours.capacity());
   C_ref.sync_host();
 
-  mirage::kernel::DTensor D_A = kgraph.new_input(
-      {m, k}, mirage::type::DT_FLOAT16, mirage::layout::DmemLayout::DmemRowMajor);
-  mirage::kernel::DTensor D_B = kgraph.new_input(
-      {k, n}, mirage::type::DT_FLOAT16, mirage::layout::DmemLayout::DmemColumnMajor);
-  mirage::kernel::DTensor D_C_ours = kgraph.new_input(
-      {m, n}, mirage::type::DT_FLOAT16, mirage::layout::DmemLayout::DmemRowMajor);
+  mirage::kernel::DTensor D_A =
+      kgraph.new_input({m, k},
+                       mirage::type::DT_FLOAT16,
+                       mirage::layout::DmemLayout::DmemRowMajor);
+  mirage::kernel::DTensor D_B =
+      kgraph.new_input({k, n},
+                       mirage::type::DT_FLOAT16,
+                       mirage::layout::DmemLayout::DmemColumnMajor);
+  mirage::kernel::DTensor D_C_ours =
+      kgraph.new_input({m, n},
+                       mirage::type::DT_FLOAT16,
+                       mirage::layout::DmemLayout::DmemRowMajor);
 
   // copy inputs
   cutlass::device_memory::copy_device_to_device(
@@ -166,9 +172,10 @@ int wtf(int argc, char **argv) {
   kernel::DTensor A = graph.new_input({4096, 1024},
                                       mirage::type::DT_FLOAT16,
                                       mirage::layout::DmemLayout::DmemRowMajor);
-  kernel::DTensor B = graph.new_input({1024, 4096},
-                                      mirage::type::DT_FLOAT16,
-                                      mirage::layout::DmemLayout::DmemColumnMajor);
+  kernel::DTensor B =
+      graph.new_input({1024, 4096},
+                      mirage::type::DT_FLOAT16,
+                      mirage::layout::DmemLayout::DmemColumnMajor);
 
   {
     threadblock::ExecutionPlan plan;

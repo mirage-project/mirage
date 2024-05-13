@@ -8,4 +8,4 @@ ProfileResult ProfileResult::infinity() {
   return ProfileResult{1000};
 }
 
-}
+} // namespace mirage

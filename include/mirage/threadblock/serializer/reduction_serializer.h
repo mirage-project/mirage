@@ -33,14 +33,13 @@ void deserialize_reduction_op_parameters(int const *params,
   output_smem_offset = params[param_idx++];
 }
 
-inline
-void serialize_reduction_op_parameters(int *params,
-                                       int &param_idx,
-                                       int output_num_elements,
-                                       int reduction_degree,
-                                       int inner_range,
-                                       int input_smem_offset,
-                                       int output_smem_offset) {
+inline void serialize_reduction_op_parameters(int *params,
+                                              int &param_idx,
+                                              int output_num_elements,
+                                              int reduction_degree,
+                                              int inner_range,
+                                              int input_smem_offset,
+                                              int output_smem_offset) {
   params[param_idx++] = output_num_elements;
   params[param_idx++] = reduction_degree;
   params[param_idx++] = inner_range;

@@ -7,8 +7,8 @@ using namespace mirage;
 int main(int argc, char **argv) {
   kernel::Graph ref_graph;
   {
-    kernel::DTensor X = ref_graph.new_input(
-        {16, 8192}, type::DT_FLOAT16, layout::DmemRowMajor);
+    kernel::DTensor X =
+        ref_graph.new_input({16, 8192}, type::DT_FLOAT16, layout::DmemRowMajor);
     kernel::DTensor A = ref_graph.new_input(
         {8192, 8}, type::DT_FLOAT16, layout::DmemColumnMajor);
     kernel::DTensor B = ref_graph.new_input(
@@ -16,7 +16,7 @@ int main(int argc, char **argv) {
     kernel::DTensor D = ref_graph.matmul(X, A);
     kernel::DTensor E = ref_graph.exp(D);
     ref_graph.matmul(E, B);
-    //ref_graph.add(X, F);
+    // ref_graph.add(X, F);
     for (auto const &op : ref_graph.operators) {
       op->fingerprint();
     }
@@ -29,12 +29,12 @@ int main(int argc, char **argv) {
     printf("[cudnn kernel graph] Total runtime = %.4lfms\n", total_runtime);
   }
   kernel::Graph graph;
-  kernel::DTensor X = graph.new_input(
-      {16, 8192}, type::DT_FLOAT16, layout::DmemRowMajor);
-  kernel::DTensor A = graph.new_input(
-      {8192, 8}, type::DT_FLOAT16, layout::DmemColumnMajor);
-  kernel::DTensor B = graph.new_input(
-      {8, 8192}, type::DT_FLOAT16, layout::DmemColumnMajor);
+  kernel::DTensor X =
+      graph.new_input({16, 8192}, type::DT_FLOAT16, layout::DmemRowMajor);
+  kernel::DTensor A =
+      graph.new_input({8192, 8}, type::DT_FLOAT16, layout::DmemColumnMajor);
+  kernel::DTensor B =
+      graph.new_input({8, 8192}, type::DT_FLOAT16, layout::DmemColumnMajor);
 
   std::vector<kernel::DTensor> outputs;
   {
@@ -91,14 +91,12 @@ int main(int argc, char **argv) {
       graph.operators.back()->output_tensors[0]));
 
   clock_t st = clock();
-  search::GeneratorConfig config = search::GeneratorConfig::get_mlp_default_config();
+  search::GeneratorConfig config =
+      search::GeneratorConfig::get_mlp_default_config();
   config.fmap_to_explore = {-1};
   config.grid_dim_to_explore = {{32, 1, 1}, {64, 1, 1}};
   config.reduction_dimx = 8;
-  search::KernelGraphGenerator gen(
-      ref_graph,
-      config,
-      "checkpoint_mlp.json");
+  search::KernelGraphGenerator gen(ref_graph, config, "checkpoint_mlp.json");
   gen.generate_kernel_graphs();
 
   clock_t et = clock();

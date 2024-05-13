@@ -15,26 +15,27 @@
 
 #pragma once
 
-#include <vector_types.h>
 #include "mirage/layout.h"
+#include <vector_types.h>
 
 namespace mirage {
 namespace threadblock {
 
 CUTLASS_HOST_DEVICE
-void deserialize_input_loader_parameters(int const *params,
-                                         int &param_idx,
-                                         int3 &input_matrix_row_offset_block_stride,
-                                         int3 &input_matrix_column_offset_block_stride,
-                                         int &input_matrix_row_offset_forloop_stride,
-                                         int &input_matrix_column_offset_forloop_stride,
-                                         int3 &global_offset_block_stride,
-                                         int &global_offset_forloop_stride,
-                                         int2 &dtensor_matrix_shape,
-                                         int2 &stensor_matrix_shape,
-                                         mirage::layout::DmemLayout &dlayout,
-                                         mirage::layout::SmemLayout &slayout,
-                                         int &input_smem_offset) {
+void deserialize_input_loader_parameters(
+    int const *params,
+    int &param_idx,
+    int3 &input_matrix_row_offset_block_stride,
+    int3 &input_matrix_column_offset_block_stride,
+    int &input_matrix_row_offset_forloop_stride,
+    int &input_matrix_column_offset_forloop_stride,
+    int3 &global_offset_block_stride,
+    int &global_offset_forloop_stride,
+    int2 &dtensor_matrix_shape,
+    int2 &stensor_matrix_shape,
+    mirage::layout::DmemLayout &dlayout,
+    mirage::layout::SmemLayout &slayout,
+    int &input_smem_offset) {
   input_matrix_row_offset_block_stride.x = params[param_idx++];
   input_matrix_row_offset_block_stride.y = params[param_idx++];
   input_matrix_row_offset_block_stride.z = params[param_idx++];
@@ -57,25 +58,25 @@ void deserialize_input_loader_parameters(int const *params,
   stensor_matrix_shape.x = params[param_idx++];
   stensor_matrix_shape.y = params[param_idx++];
 
-  dlayout = (mirage::layout::DmemLayout) params[param_idx++];
-  slayout = (mirage::layout::SmemLayout) params[param_idx++];
+  dlayout = (mirage::layout::DmemLayout)params[param_idx++];
+  slayout = (mirage::layout::SmemLayout)params[param_idx++];
   input_smem_offset = params[param_idx++];
 }
 
-inline
-void serialize_input_loader_parameters(int *params,
-                                       int &param_idx,
-                                       int3 input_matrix_row_offset_block_stride,
-                                       int3 input_matrix_column_offset_block_stride,
-                                       int input_matrix_row_offset_forloop_stride,
-                                       int input_matrix_column_offset_forloop_stride,
-                                       int3 global_offset_block_stride,
-                                       int global_offset_forloop_stride,
-                                       int2 dtensor_matrix_shape,
-                                       int2 stensor_matrix_shape,
-                                       mirage::layout::DmemLayout dlayout,
-                                       mirage::layout::SmemLayout slayout,
-                                       int input_smem_offset) {
+inline void serialize_input_loader_parameters(
+    int *params,
+    int &param_idx,
+    int3 input_matrix_row_offset_block_stride,
+    int3 input_matrix_column_offset_block_stride,
+    int input_matrix_row_offset_forloop_stride,
+    int input_matrix_column_offset_forloop_stride,
+    int3 global_offset_block_stride,
+    int global_offset_forloop_stride,
+    int2 dtensor_matrix_shape,
+    int2 stensor_matrix_shape,
+    mirage::layout::DmemLayout dlayout,
+    mirage::layout::SmemLayout slayout,
+    int input_smem_offset) {
   params[param_idx++] = input_matrix_row_offset_block_stride.x;
   params[param_idx++] = input_matrix_row_offset_block_stride.y;
   params[param_idx++] = input_matrix_row_offset_block_stride.z;

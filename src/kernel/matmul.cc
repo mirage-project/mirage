@@ -32,7 +32,7 @@ DTensor Graph::matmul(DTensor const &A, DTensor const &B) {
   return output;
 }
 
-DTensor* Graph::matmul(DTensor const *A, DTensor const *B) {
+DTensor *Graph::matmul(DTensor const *A, DTensor const *B) {
   KNOperator *op = create_matmul_op(*A, *B);
   assert(op != nullptr);
   operators.push_back(op);

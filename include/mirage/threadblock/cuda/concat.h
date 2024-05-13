@@ -15,10 +15,10 @@
 
 #pragma once
 
-#include "mirage/utils/cuda_helper.h"
-#include "mirage/utils/static_switch.h"
 #include "cutlass/cutlass.h"
 #include "cutlass/fast_math.h"
+#include "mirage/utils/cuda_helper.h"
+#include "mirage/utils/static_switch.h"
 
 namespace mirage {
 namespace threadblock {
@@ -50,22 +50,23 @@ template <typename ElementType>
 class SimpleRedunctionExecutor {
 public:
   CUTLASS_DEVICE
-  SimpleRedunctionExecutor(//mirage::type::TBOperatorType type,
-                           ElementType *input_ptr,
-                           ElementType *output_ptr,
-                           int output_num_elements,
-                           int reduction_degree,
-                           int inner_range,
-                           int thread_id,
-                           int num_threads) {
+  SimpleRedunctionExecutor( // mirage::type::TBOperatorType type,
+      ElementType *input_ptr,
+      ElementType *output_ptr,
+      int output_num_elements,
+      int reduction_degree,
+      int inner_range,
+      int thread_id,
+      int num_threads) {
     // int reduction_dim = mirage::utils::get_reduction_dim(type);
     // int num_dims = output.num_dims;
-    //ElementType *input_ptr = (ElementType *)(smem_buffer + input.smem_offset);
-    //ElementType *output_ptr = (ElementType *)(smem_buffer + output.smem_offset);
+    // ElementType *input_ptr = (ElementType *)(smem_buffer +
+    // input.smem_offset); ElementType *output_ptr = (ElementType *)(smem_buffer
+    // + output.smem_offset);
 
-    //int num_output_elements = output.num_elements();
-    //int num_input_elements = input.num_elements();
-    // int reduction_degree = num_input_elements / num_output_elements;
+    // int num_output_elements = output.num_elements();
+    // int num_input_elements = input.num_elements();
+    //  int reduction_degree = num_input_elements / num_output_elements;
     perform_reduction<ElementType>(input_ptr,
                                    output_ptr,
                                    output_num_elements * reduction_degree,
@@ -89,13 +90,18 @@ public:
                         int num_threads) {
     for (int i = thread_id; i < output_num_elements; i += num_threads) {
       int inner_idx = i % inner_size;
-      int concat_dim_idx = (i / inner_size) % (A_concat_dim_size + B_concat_dim_size);
-      int outer_idx = (i / inner_size) / (A_concat_dim_size + B_concat_dim_size);
+      int concat_dim_idx =
+          (i / inner_size) % (A_concat_dim_size + B_concat_dim_size);
+      int outer_idx =
+          (i / inner_size) / (A_concat_dim_size + B_concat_dim_size);
       if (concat_dim_idx < A_concat_dim_size) {
-        int A_idx = inner_idx + concat_dim_idx * inner_size + outer_idx * inner_size * A_concat_dim_size;
+        int A_idx = inner_idx + concat_dim_idx * inner_size +
+                    outer_idx * inner_size * A_concat_dim_size;
         output_ptr[i] = A_ptr[A_idx];
       } else {
-        int B_idx = inner_idx + (concat_dim_idx - A_concat_dim_size) * inner_size + outer_idx * inner_size * B_concat_dim_size;
+        int B_idx = inner_idx +
+                    (concat_dim_idx - A_concat_dim_size) * inner_size +
+                    outer_idx * inner_size * B_concat_dim_size;
         output_ptr[i] = B_ptr[B_idx];
       }
     }

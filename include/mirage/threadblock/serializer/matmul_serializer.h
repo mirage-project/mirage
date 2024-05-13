@@ -38,15 +38,14 @@ void deserialize_matmul_op_parameters(int const *params,
   C_smem_offset = params[param_idx++];
 }
 
-inline
-void serialize_matmul_op_parameters(int *params,
-                                    int &param_idx,
-                                    int m,
-                                    int n,
-                                    int k,
-                                    int A_smem_offset,
-                                    int B_smem_offset,
-                                    int C_smem_offset) {
+inline void serialize_matmul_op_parameters(int *params,
+                                           int &param_idx,
+                                           int m,
+                                           int n,
+                                           int k,
+                                           int A_smem_offset,
+                                           int B_smem_offset,
+                                           int C_smem_offset) {
   params[param_idx++] = m;
   params[param_idx++] = n;
   params[param_idx++] = k;

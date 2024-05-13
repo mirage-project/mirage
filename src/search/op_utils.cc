@@ -168,11 +168,7 @@ std::shared_ptr<AlgebraicPattern>
     return get_pattern(op, tensors[0], opds[0]);
   }
   if (tensors.size() == 2) {
-    return get_pattern(op,
-                       tensors[0],
-                       tensors[1],
-                       opds[0],
-                       opds[1]);
+    return get_pattern(op, tensors[0], tensors[1], opds[0], opds[1]);
   }
   assert(false && "Unsupported operator");
 }
@@ -186,11 +182,7 @@ std::shared_ptr<AlgebraicPattern>
     return get_pattern(op, tensors[0], opds[0]);
   }
   if (opds.size() == 2) {
-    return get_pattern(op,
-                       tensors[0],
-                       tensors[1],
-                       opds[0],
-                       opds[1]);
+    return get_pattern(op, tensors[0], tensors[1], opds[0], opds[1]);
   }
 
   if (op == type::TBOperatorType::TB_CONCAT_THEN_MATMUL_OP) {
@@ -316,16 +308,19 @@ TBOperator *create_op(threadblock::Graph &g,
     return create_op(g, type, inputs[0], inputs[1]);
   }
   if (type == type::TBOperatorType::TB_CONCAT_THEN_MATMUL_OP) {
-    TBOperator *concat1 = g.create_concat_op(inputs[0], inputs[1], inputs[0].num_dims - 1);
+    TBOperator *concat1 =
+        g.create_concat_op(inputs[0], inputs[1], inputs[0].num_dims - 1);
     if (concat1 == nullptr) {
       return nullptr;
     }
-    TBOperator *concat2 = g.create_concat_op(inputs[2], inputs[3], inputs[2].num_dims - 2);
+    TBOperator *concat2 =
+        g.create_concat_op(inputs[2], inputs[3], inputs[2].num_dims - 2);
     if (concat2 == nullptr) {
       delete concat1;
       return nullptr;
     }
-    TBOperator *matmul = g.create_matmul_op(concat1->output_tensors[0], concat2->output_tensors[0]);
+    TBOperator *matmul = g.create_matmul_op(concat1->output_tensors[0],
+                                            concat2->output_tensors[0]);
     if (matmul == nullptr) {
       delete concat2;
       delete concat1;

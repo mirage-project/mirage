@@ -22,12 +22,10 @@ namespace threadblock {
 
 class TBConcatOp : public TBOperator {
 public:
-  TBConcatOp(Graph *_graph,
-             STensor const &A,
-             STensor const &B,
-             int concat_dim);
+  TBConcatOp(Graph *_graph, STensor const &A, STensor const &B, int concat_dim);
   ~TBConcatOp();
   operator json() const override;
+
 public:
   int concat_dim;
 };

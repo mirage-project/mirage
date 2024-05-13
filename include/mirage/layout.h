@@ -44,18 +44,25 @@ enum SmemLayout {
   SmemUnknownLayout = 299,
 };
 
-NLOHMANN_JSON_SERIALIZE_ENUM(SmemLayout,
-                             {
-                                 {SmemRowMajor, "SmemRowMajor"},
-                                 {SmemColumnMajor, "SmemColumnMajor"},
-                                 {SmemRowMajorTensorOpMultiplicand_Crosswise16, "SmemRowMajorTensorOpMultiplicand_Crosswise16"},
-                                 {SmemRowMajorTensorOpMultiplicand_Crosswise32, "SmemRowMajorTensorOpMultiplicand_Crosswise32"},
-                                 {SmemRowMajorTensorOpMultiplicand_Crosswise64, "SmemRowMajorTensorOpMultiplicand_Crosswise64"},
-                                 {SmemColumnMajorTensorOpMultiplicand_Crosswise16, "SmemColumnMajorTensorOpMultiplicand_Crosswise16"},
-                                 {SmemColumnMajorTensorOpMultiplicand_Crosswise32, "SmemColumnMajorTensorOpMultiplicand_Crosswise32"},
-                                 {SmemColumnMajorTensorOpMultiplicand_Crosswise64, "SmemColumnMajorTensorOpMultiplicand_Crosswise64"},
-                                 {SmemUnknownLayout, "SmemUnknownLayout"},
-                             })
+NLOHMANN_JSON_SERIALIZE_ENUM(
+    SmemLayout,
+    {
+        {SmemRowMajor, "SmemRowMajor"},
+        {SmemColumnMajor, "SmemColumnMajor"},
+        {SmemRowMajorTensorOpMultiplicand_Crosswise16,
+         "SmemRowMajorTensorOpMultiplicand_Crosswise16"},
+        {SmemRowMajorTensorOpMultiplicand_Crosswise32,
+         "SmemRowMajorTensorOpMultiplicand_Crosswise32"},
+        {SmemRowMajorTensorOpMultiplicand_Crosswise64,
+         "SmemRowMajorTensorOpMultiplicand_Crosswise64"},
+        {SmemColumnMajorTensorOpMultiplicand_Crosswise16,
+         "SmemColumnMajorTensorOpMultiplicand_Crosswise16"},
+        {SmemColumnMajorTensorOpMultiplicand_Crosswise32,
+         "SmemColumnMajorTensorOpMultiplicand_Crosswise32"},
+        {SmemColumnMajorTensorOpMultiplicand_Crosswise64,
+         "SmemColumnMajorTensorOpMultiplicand_Crosswise64"},
+        {SmemUnknownLayout, "SmemUnknownLayout"},
+    })
 
 } // namespace layout
 } // namespace mirage

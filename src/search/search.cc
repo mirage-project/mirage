@@ -570,8 +570,7 @@ bool KernelGraphGenerator::verify(SearchContext<DTensor> &c,
                                   kernel::Graph const &g) {
   ++num_total_kernel_graphs;
   if (num_total_kernel_graphs % 100 == 1) {
-    printf("Total kernel graphs explored: %d.\n",
-           num_total_kernel_graphs);
+    printf("Total kernel graphs explored: %d.\n", num_total_kernel_graphs);
     if (num_total_kernel_graphs % 10000 == 1) {
       save_checkpoint();
     }
@@ -747,7 +746,8 @@ void KernelGraphGenerator::optimize_layout(
 
   for (layout::DmemLayout layout :
        {layout::DmemRowMajor, layout::DmemColumnMajor}) {
-    if (g.operators[op_idx]->op_type == type::KN_MATMUL_OP && layout != layout::DmemRowMajor) {
+    if (g.operators[op_idx]->op_type == type::KN_MATMUL_OP &&
+        layout != layout::DmemRowMajor) {
       continue;
     }
     g.operators[op_idx]->output_tensors[ts_idx].layout = layout;
