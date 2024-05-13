@@ -35,7 +35,8 @@ GeneratorConfig GeneratorConfig::get_default_config() {
           layout::SmemColumnMajorTensorOpMultiplicand_Crosswise16,
           layout::SmemColumnMajorTensorOpMultiplicand_Crosswise32,
           layout::SmemColumnMajorTensorOpMultiplicand_Crosswise64,
-      } /* smem_layout_to_explore*/};
+      } /* smem_layout_to_explore*/,
+      64 /* reduction_dimx */};
 }
 
 GeneratorConfig GeneratorConfig::get_attention_default_config() {
