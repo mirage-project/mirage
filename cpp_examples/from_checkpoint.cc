@@ -14,14 +14,15 @@ int main(int argc, char **argv) {
   }
 
   clock_t st = clock();
-  
+
   search::KernelGraphGenerator gen(argv[1]);
 
   gen.generate_kernel_graphs();
 
   clock_t et = clock();
 
-  std::cout << "running time: " << (double)(et - st) / CLOCKS_PER_SEC << " sec" << std::endl;
+  std::cout << "running time: " << (double)(et - st) / CLOCKS_PER_SEC << " sec"
+            << std::endl;
 
   return 0;
 }

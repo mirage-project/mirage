@@ -41,14 +41,13 @@ void deserialize_elementbinary_op_parameters(int const *params,
   output_smem_offset = params[param_idx++];
 }
 
-inline
-void serialize_elementbinary_op_parameters(int *params,
-                                           int &param_idx,
-                                           int3 input1_shape,
-                                           int3 input2_shape,
-                                           int input1_smem_offset,
-                                           int input2_smem_offset,
-                                           int output_smem_offset) {
+inline void serialize_elementbinary_op_parameters(int *params,
+                                                  int &param_idx,
+                                                  int3 input1_shape,
+                                                  int3 input2_shape,
+                                                  int input1_smem_offset,
+                                                  int input2_smem_offset,
+                                                  int output_smem_offset) {
   params[param_idx++] = input1_shape.x;
   params[param_idx++] = input1_shape.y;
   params[param_idx++] = input1_shape.z;

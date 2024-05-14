@@ -34,7 +34,7 @@ DTensor Graph::reduction(DTensor const &input, int dim, int size) {
   return output;
 }
 
-DTensor* Graph::reduction(DTensor const *input, int dim, int size) {
+DTensor *Graph::reduction(DTensor const *input, int dim, int size) {
   KNOperator *op = create_reduction_op(*input, dim, size);
   assert(op != nullptr);
   operators.push_back(op);

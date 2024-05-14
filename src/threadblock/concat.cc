@@ -28,8 +28,8 @@ STensor Graph::concat(STensor const &A, STensor const &B, int concat_dim) {
 }
 
 TBOperator *Graph::create_concat_op(STensor const &A,
-                                       STensor const &B,
-                                       int concat_dim) {
+                                    STensor const &B,
+                                    int concat_dim) {
   if (A.num_dims != B.num_dims) {
     return nullptr;
   }
@@ -37,8 +37,9 @@ TBOperator *Graph::create_concat_op(STensor const &A,
     return nullptr;
   }
   for (int i = 0; i < A.num_dims; i++) {
-    if (i != concat_dim && A.dim[i] != B.dim[i]) 
+    if (i != concat_dim && A.dim[i] != B.dim[i]) {
       return nullptr;
+    }
   }
 
   if (smem_offset + A.size() + B.size() > (off_t)mirage::type::MAX_SMEM_SIZE) {
@@ -51,12 +52,14 @@ TBOperator *Graph::create_concat_op(STensor const &A,
 }
 
 TBConcatOp::TBConcatOp(Graph *bgraph,
-                             STensor const &A,
-                             STensor const &B,
-                             int dim)
-    : TBOperator(bgraph, (mirage::type::TBOperatorType)(
-                             mirage::type::TB_CONCAT_0_OP + dim),
-                 A, B),
+                       STensor const &A,
+                       STensor const &B,
+                       int dim)
+    : TBOperator(
+          bgraph,
+          (mirage::type::TBOperatorType)(mirage::type::TB_CONCAT_0_OP + dim),
+          A,
+          B),
       concat_dim(dim) {
   STensor output = A;
   assert(output.num_dims > concat_dim);

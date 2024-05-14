@@ -14,24 +14,26 @@
  */
 
 #include "mirage/threadblock/graph.h"
+#include "mirage/threadblock/serializer/concat_serializer.h"
 #include "mirage/threadblock/serializer/element_binary_serializer.h"
 #include "mirage/threadblock/serializer/element_unary_serializer.h"
 #include "mirage/threadblock/serializer/input_loader_serializer.h"
 #include "mirage/threadblock/serializer/matmul_serializer.h"
 #include "mirage/threadblock/serializer/output_saver_serializer.h"
 #include "mirage/threadblock/serializer/reduction_serializer.h"
-#include "mirage/threadblock/serializer/concat_serializer.h"
 #include "mirage/utils/hash_utils.h"
 
 namespace mirage {
 namespace threadblock {
 
-Graph::Graph(dim3 _grid_dim, dim3 _block_dim, int _forloop_range, int _reduction_dimx)
-    : grid_dim(_grid_dim), block_dim(_block_dim),
-      forloop_range(_forloop_range), reduction_dimx(_reduction_dimx),
-      smem_offset(0) {
-        assert(reduction_dimx > 0);
-      }
+Graph::Graph(dim3 _grid_dim,
+             dim3 _block_dim,
+             int _forloop_range,
+             int _reduction_dimx)
+    : grid_dim(_grid_dim), block_dim(_block_dim), forloop_range(_forloop_range),
+      reduction_dimx(_reduction_dimx), smem_offset(0) {
+  assert(reduction_dimx > 0);
+}
 
 size_t Graph::pair_hash::operator()(std::pair<int, int> const &p) const {
   size_t h1 = std::hash<int>{}(p.first);
@@ -272,14 +274,15 @@ NewKernelParams Graph::get_new_kernel_params(bool fingerprint) const {
         assert(B.dim[num_dims - 2] == k);
         assert(C.dim[num_dims - 2] == m);
         assert(C.dim[num_dims - 1] == n);
-        mirage::threadblock::serialize_matmul_op_parameters(params.parameters,
-                                                         params.num_parameters,
-                                                         m,
-                                                         n,
-                                                         k,
-                                                         A.smem_offset,
-                                                         B.smem_offset,
-                                                         C.smem_offset);
+        mirage::threadblock::serialize_matmul_op_parameters(
+            params.parameters,
+            params.num_parameters,
+            m,
+            n,
+            k,
+            A.smem_offset,
+            B.smem_offset,
+            C.smem_offset);
         break;
       }
       case mirage::type::TB_EXP_OP: {
@@ -297,7 +300,7 @@ NewKernelParams Graph::get_new_kernel_params(bool fingerprint) const {
             (int)input.num_elements());
         break;
       }
-      case mirage::type::TB_DIV_OP: 
+      case mirage::type::TB_DIV_OP:
       case mirage::type::TB_ADD_OP: {
         assert(operators[i]->input_tensors.size() == 2);
         assert(operators[i]->output_tensors.size() == 1);
@@ -398,8 +401,9 @@ NewKernelParams Graph::get_new_kernel_params(bool fingerprint) const {
             assert(A.dim[i] == output.dim[i]);
             assert(B.dim[i] == output.dim[i]);
           }
-          if (i > concat_dim)
+          if (i > concat_dim) {
             inner_size = inner_size * output.dim[i];
+          }
         }
         mirage::threadblock::serialize_concat_op_parameters(
             params.parameters,

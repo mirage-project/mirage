@@ -187,7 +187,7 @@ public:
   SmemIterator smem_iterator;
 };
 
-template<typename ElementType>
+template <typename ElementType>
 class SimpleRowMajorInputLoader {
 public:
   CUTLASS_DEVICE
@@ -201,13 +201,24 @@ public:
                             MatrixCoord matrix_offset,
                             int global_offset) {
 #if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800))
-    int base_offset = global_offset + matrix_offset.row() * dtensor_matrix_shape.column() + matrix_offset.column();
+    int base_offset = global_offset +
+                      matrix_offset.row() * dtensor_matrix_shape.column() +
+                      matrix_offset.column();
     // Each thread loads 16 bytes using cp.async
     for (int i = thread_id * 8; i < kRow * kColumn; i += 8 * num_threads) {
-      //smem_ptr[i] = dmem_ptr[(i / kColumn) * dtensor_matrix_shape.column() + i % kColumn];
-      unsigned smem_int_ptr = cutlass::arch::cutlass_get_smem_pointer(smem_ptr + i);
-      ElementType *global_ptr = dmem_ptr + base_offset + (i / kColumn) * dtensor_matrix_shape.column() + i % kColumn;
-      asm volatile("cp.async.ca.shared.global.L2::128B [%0], [%1], %2, %3;\n" ::"r"(smem_int_ptr), "l"(global_ptr), "n"(16), "r"(16));
+      // smem_ptr[i] = dmem_ptr[(i / kColumn) * dtensor_matrix_shape.column() +
+      // i % kColumn];
+      unsigned smem_int_ptr =
+          cutlass::arch::cutlass_get_smem_pointer(smem_ptr + i);
+      ElementType *global_ptr = dmem_ptr + base_offset +
+                                (i / kColumn) * dtensor_matrix_shape.column() +
+                                i % kColumn;
+      asm volatile(
+          "cp.async.ca.shared.global.L2::128B [%0], [%1], %2, %3;\n" ::"r"(
+              smem_int_ptr),
+          "l"(global_ptr),
+          "n"(16),
+          "r"(16));
     }
     asm volatile("cp.async.commit_group;\n" ::);
     asm volatile("cp.async.wait_all;\n" ::);
@@ -217,26 +228,36 @@ public:
   }
 };
 
-template<typename ElementType>
+template <typename ElementType>
 class SimpleColumnMajorInputLoader {
 public:
   CUTLASS_DEVICE
   SimpleColumnMajorInputLoader(ElementType *dmem_ptr,
-                            ElementType *smem_ptr,
-                            int kRow,
-                            int kColumn,
-                            MatrixCoord dtensor_matrix_shape,
-                            int thread_id,
-                            int num_threads,
-                            MatrixCoord matrix_offset,
-                            int global_offset) {
+                               ElementType *smem_ptr,
+                               int kRow,
+                               int kColumn,
+                               MatrixCoord dtensor_matrix_shape,
+                               int thread_id,
+                               int num_threads,
+                               MatrixCoord matrix_offset,
+                               int global_offset) {
 #if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800))
-    int base_offset = global_offset + matrix_offset.column() * dtensor_matrix_shape.row() + matrix_offset.row();
+    int base_offset = global_offset +
+                      matrix_offset.column() * dtensor_matrix_shape.row() +
+                      matrix_offset.row();
     // Each thread loads 16 bytes using cp.async
     for (int i = thread_id * 8; i < kRow * kColumn; i += 8 * num_threads) {
-      unsigned smem_int_ptr = cutlass::arch::cutlass_get_smem_pointer(smem_ptr + i);
-      ElementType *global_ptr = dmem_ptr + base_offset + (i / kRow) * dtensor_matrix_shape.row() + i % kRow;
-      asm volatile("cp.async.ca.shared.global.L2::128B [%0], [%1], %2, %3;\n" ::"r"(smem_int_ptr), "l"(global_ptr), "n"(16), "r"(16));
+      unsigned smem_int_ptr =
+          cutlass::arch::cutlass_get_smem_pointer(smem_ptr + i);
+      ElementType *global_ptr = dmem_ptr + base_offset +
+                                (i / kRow) * dtensor_matrix_shape.row() +
+                                i % kRow;
+      asm volatile(
+          "cp.async.ca.shared.global.L2::128B [%0], [%1], %2, %3;\n" ::"r"(
+              smem_int_ptr),
+          "l"(global_ptr),
+          "n"(16),
+          "r"(16));
     }
     asm volatile("cp.async.commit_group;\n" ::);
     asm volatile("cp.async.wait_all;\n" ::);
@@ -266,10 +287,9 @@ public:
     // assert(num_threads == kThreads);
     // assert(stensor.data_type == mirage::type::DT_FLOAT16);
     // assert(dtensor.data_type == mirage::type::DT_FLOAT16);
-    MatrixCoord extent(
-        {dtensor_matrix_shape.x, dtensor_matrix_shape.y});
-    //mirage::layout::DmemLayout dlayout = dtensor.layout;
-    //mirage::layout::SmemLayout slayout = stensor.layout;
+    MatrixCoord extent({dtensor_matrix_shape.x, dtensor_matrix_shape.y});
+    // mirage::layout::DmemLayout dlayout = dtensor.layout;
+    // mirage::layout::SmemLayout slayout = stensor.layout;
     if (dlayout == mirage::layout::DmemRowMajor) {
       using DmemLayout = cutlass::layout::RowMajor;
       if (slayout == mirage::layout::SmemRowMajor) {
@@ -280,12 +300,11 @@ public:
                                                 kThreads,
                                                 DmemLayout,
                                                 SmemLayout>;
-        InputLoader loader(
-            ((cutlass::half_t *)dtensor_ptr) + global_offset,
-            (cutlass::half_t *)stensor_ptr,
-            extent,
-            thread_id,
-            matrix_offset);
+        InputLoader loader(((cutlass::half_t *)dtensor_ptr) + global_offset,
+                           (cutlass::half_t *)stensor_ptr,
+                           extent,
+                           thread_id,
+                           matrix_offset);
       } else if (
           slayout ==
               mirage::layout::SmemRowMajorTensorOpMultiplicand_Crosswise16 ||
@@ -302,12 +321,11 @@ public:
                                                 kThreads,
                                                 DmemLayout,
                                                 SmemLayout>;
-        InputLoader loader(
-            ((cutlass::half_t *)dtensor_ptr) + global_offset,
-            (cutlass::half_t *)stensor_ptr,
-            extent,
-            thread_id,
-            matrix_offset);
+        InputLoader loader(((cutlass::half_t *)dtensor_ptr) + global_offset,
+                           (cutlass::half_t *)stensor_ptr,
+                           extent,
+                           thread_id,
+                           matrix_offset);
       }
     } else {
       // assert(dlayout == mirage::layout::DmemColumnMajor);
@@ -320,12 +338,11 @@ public:
                                                    kThreads,
                                                    DmemLayout,
                                                    SmemLayout>;
-        InputLoader loader(
-            ((cutlass::half_t *)dtensor_ptr) + global_offset,
-            (cutlass::half_t *)stensor_ptr,
-            extent,
-            thread_id,
-            matrix_offset);
+        InputLoader loader(((cutlass::half_t *)dtensor_ptr) + global_offset,
+                           (cutlass::half_t *)stensor_ptr,
+                           extent,
+                           thread_id,
+                           matrix_offset);
       } else if (
           slayout ==
               mirage::layout::SmemColumnMajorTensorOpMultiplicand_Crosswise16 ||
@@ -341,12 +358,11 @@ public:
                                                    kThreads,
                                                    DmemLayout,
                                                    SmemLayout>;
-        InputLoader loader(
-            ((cutlass::half_t *)dtensor_ptr) + global_offset,
-            (cutlass::half_t *)stensor_ptr,
-            extent,
-            thread_id,
-            matrix_offset);
+        InputLoader loader(((cutlass::half_t *)dtensor_ptr) + global_offset,
+                           (cutlass::half_t *)stensor_ptr,
+                           extent,
+                           thread_id,
+                           matrix_offset);
       }
     }
   }
@@ -355,8 +371,8 @@ public:
 class GenericInputLoader {
 public:
   CUTLASS_DEVICE
-  GenericInputLoader(void* dtensor_ptr,
-                     void* stensor_ptr,
+  GenericInputLoader(void *dtensor_ptr,
+                     void *stensor_ptr,
                      int2 dtensor_matrix_shape,
                      int2 stensor_matrix_shape,
                      mirage::layout::DmemLayout dlayout,
@@ -367,11 +383,10 @@ public:
                      int global_offset) {
     int kRow = stensor_matrix_shape.x;
     int kColumn = stensor_matrix_shape.y;
-    MatrixCoord extent(
-        {dtensor_matrix_shape.x, dtensor_matrix_shape.y});
+    MatrixCoord extent({dtensor_matrix_shape.x, dtensor_matrix_shape.y});
     if (dlayout == mirage::layout::DmemRowMajor) {
-      SimpleRowMajorInputLoader((cutlass::half_t*)dtensor_ptr,
-                                (cutlass::half_t*)stensor_ptr,
+      SimpleRowMajorInputLoader((cutlass::half_t *)dtensor_ptr,
+                                (cutlass::half_t *)stensor_ptr,
                                 kRow,
                                 kColumn,
                                 extent,
@@ -380,8 +395,8 @@ public:
                                 matrix_offset,
                                 global_offset);
     } else {
-      SimpleColumnMajorInputLoader((cutlass::half_t*)dtensor_ptr,
-                                   (cutlass::half_t*)stensor_ptr,
+      SimpleColumnMajorInputLoader((cutlass::half_t *)dtensor_ptr,
+                                   (cutlass::half_t *)stensor_ptr,
                                    kRow,
                                    kColumn,
                                    extent,
@@ -432,10 +447,10 @@ public:
                                 matrix_offset,
                                 global_offset);
     } else {
-      //if (threadIdx.x == 0 && blockIdx.x == 0) {
-      //  printf("kRow = %d kColumn = %d\n", kRow, kColumn);
-      //}
-      //assert(false && "Unimplemented");
+      // if (threadIdx.x == 0 && blockIdx.x == 0) {
+      //   printf("kRow = %d kColumn = %d\n", kRow, kColumn);
+      // }
+      // assert(false && "Unimplemented");
     }
 #endif
   }
@@ -444,8 +459,8 @@ public:
 class TBInputLoaderFingerprinter {
 public:
   CUTLASS_DEVICE
-  TBInputLoaderFingerprinter(mirage::type::FPType* dtensor_ptr,
-                             mirage::type::FPType* stensor_ptr,
+  TBInputLoaderFingerprinter(mirage::type::FPType *dtensor_ptr,
+                             mirage::type::FPType *stensor_ptr,
                              int2 dtensor_matrix_shape,
                              int2 stensor_matrix_shape,
                              mirage::layout::DmemLayout dlayout,

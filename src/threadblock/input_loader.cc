@@ -77,7 +77,7 @@ TBOperator *Graph::create_input_op(mirage::kernel::DTensor const &dtensor,
   }
 
   if (smem_offset + (off_t)tensor.size() > (off_t)mirage::type::MAX_SMEM_SIZE) {
-    //printf("smem_offset(%d) tensor.size(%d)\n", smem_offset, tensor.size());
+    // printf("smem_offset(%d) tensor.size(%d)\n", smem_offset, tensor.size());
     return nullptr;
   }
 

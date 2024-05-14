@@ -1,7 +1,7 @@
+#include "common.h"
 #include "mirage/kernel/graph.h"
 #include "mirage/search/search.h"
 #include "mirage/threadblock/graph.h"
-#include "common.h"
 
 using namespace mirage;
 
@@ -34,12 +34,12 @@ int main(int argc, char **argv) {
     printf("[cudnn kernel graph] Total runtime = %.4lfms\n", total_runtime);
   }
   kernel::Graph graph;
-  kernel::DTensor Q =
-      graph.new_input({2 * batch_size, 256, 64}, type::DT_FLOAT16, layout::DmemRowMajor);
-  kernel::DTensor K =
-      graph.new_input({2 * batch_size, 64, 4096}, type::DT_FLOAT16, layout::DmemColumnMajor);
-  kernel::DTensor V =
-      graph.new_input({2 * batch_size, 4096, 64}, type::DT_FLOAT16, layout::DmemColumnMajor);
+  kernel::DTensor Q = graph.new_input(
+      {2 * batch_size, 256, 64}, type::DT_FLOAT16, layout::DmemRowMajor);
+  kernel::DTensor K = graph.new_input(
+      {2 * batch_size, 64, 4096}, type::DT_FLOAT16, layout::DmemColumnMajor);
+  kernel::DTensor V = graph.new_input(
+      {2 * batch_size, 4096, 64}, type::DT_FLOAT16, layout::DmemColumnMajor);
   std::vector<kernel::DTensor> outputs;
   {
     threadblock::ExecutionPlan plan;
@@ -120,8 +120,9 @@ int main(int argc, char **argv) {
                                 {2 * batch_size, 8, 2},
                                 {2 * batch_size, 16, 1},
                                 {2 * batch_size, 8, 1}};
-  std::string checkpoint_file_name = "checkpoint_group_query_attn_spec_decode_bs" +
-                                     std::to_string(batch_size) + ".json";
+  std::string checkpoint_file_name =
+      "checkpoint_group_query_attn_spec_decode_bs" +
+      std::to_string(batch_size) + ".json";
   search::KernelGraphGenerator gen(
       ref_graph, config, checkpoint_file_name.data());
   gen.generate_kernel_graphs();

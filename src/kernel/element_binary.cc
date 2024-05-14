@@ -33,7 +33,7 @@ DTensor Graph::add(DTensor const &input1, DTensor const &input2) {
   return output;
 }
 
-DTensor* Graph::add(DTensor const *input1, DTensor const *input2) {
+DTensor *Graph::add(DTensor const *input1, DTensor const *input2) {
   DTensor output = add(*input1, *input2);
   return &(output.owner_op->output_tensors[0]);
 }
@@ -48,7 +48,7 @@ DTensor Graph::mul(DTensor const &input1, DTensor const &input2) {
   return output;
 }
 
-DTensor* Graph::mul(DTensor const *input1, DTensor const *input2) {
+DTensor *Graph::mul(DTensor const *input1, DTensor const *input2) {
   DTensor output = mul(*input1, *input2);
   return &(output.owner_op->output_tensors[0]);
 }
@@ -63,7 +63,7 @@ DTensor Graph::div(DTensor const &input1, DTensor const &input2) {
   return output;
 }
 
-DTensor* Graph::div(DTensor const *input1, DTensor const *input2) {
+DTensor *Graph::div(DTensor const *input1, DTensor const *input2) {
   DTensor output = div(*input1, *input2);
   return &(output.owner_op->output_tensors[0]);
 }

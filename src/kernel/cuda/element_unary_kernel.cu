@@ -13,12 +13,12 @@
  * limitations under the License.
  */
 
+#include "cutlass/fast_math.h"
 #include "mirage/kernel/device_memory_manager.h"
 #include "mirage/kernel/element_unary.h"
 #include "mirage/kernel/graph.h"
 #include "mirage/utils/cuda_helper.h"
 #include "mirage/utils/hash_utils.h"
-#include "cutlass/fast_math.h"
 #include <cassert>
 
 namespace mirage {
@@ -74,11 +74,12 @@ bool KNElementUnaryOp::profile(ProfileResult &result) {
   return true;
 }
 
-__global__ void compute_elementunary_fingerprint(mirage::type::KNOperatorType type,
-                                                 FPType *exp_lookup_table,
-                                                 mirage::type::FPType *input_ptr,
-                                                 mirage::type::FPType *output_ptr,
-                                                 int num_elements) {
+__global__ void
+    compute_elementunary_fingerprint(mirage::type::KNOperatorType type,
+                                     FPType *exp_lookup_table,
+                                     mirage::type::FPType *input_ptr,
+                                     mirage::type::FPType *output_ptr,
+                                     int num_elements) {
   int i = threadIdx.x + blockIdx.x * blockDim.x;
   if (type == mirage::type::KN_EXP_OP) {
     if (i < num_elements) {

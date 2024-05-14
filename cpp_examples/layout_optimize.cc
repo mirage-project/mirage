@@ -31,8 +31,8 @@ int main(int argc, char **argv) {
       gen.optimize_layout(g);
       gen.save_checkpoint();
       while (!g.operators.empty()) {
-          delete g.operators.back();
-          g.operators.pop_back();
+        delete g.operators.back();
+        g.operators.pop_back();
       }
     }
     std::cout << "finished graph" << (index++) << std::endl;
@@ -40,7 +40,8 @@ int main(int argc, char **argv) {
 
   clock_t et = clock();
 
-  std::cout << "running time: " << (double)(et - st) / CLOCKS_PER_SEC << " sec" << std::endl;
+  std::cout << "running time: " << (double)(et - st) / CLOCKS_PER_SEC << " sec"
+            << std::endl;
 
   return 0;
 }

@@ -54,7 +54,7 @@ DTensor Graph::new_input(std::vector<int> const &dims,
   return op->output_tensors[0];
 }
 
-DTensor* Graph::new_input_ptr(std::vector<int> const &dims,
+DTensor *Graph::new_input_ptr(std::vector<int> const &dims,
                               mirage::type::DataType data_type,
                               mirage::layout::DmemLayout layout) {
   KNOperator *op = create_input_op(dims, data_type, layout);

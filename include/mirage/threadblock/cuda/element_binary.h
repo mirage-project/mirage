@@ -37,13 +37,13 @@ public:
                         int thread_id,
                         int num_threads) {
     // FIXME: currently we assume broadcast the inner-most dim
-    //ElementType *input1_ptr = (ElementType *)(smem_buffer + input1.smem_offset);
-    //ElementType *input2_ptr = (ElementType *)(smem_buffer + input2.smem_offset);
-    //ElementType *output_ptr = (ElementType *)(smem_buffer + output.smem_offset);
-    int3 output_shape = {
-        max(input1_shape.x, input2_shape.x),
-        max(input1_shape.y, input2_shape.y),
-        max(input1_shape.z, input2_shape.z)};
+    // ElementType *input1_ptr = (ElementType *)(smem_buffer +
+    // input1.smem_offset); ElementType *input2_ptr = (ElementType
+    // *)(smem_buffer + input2.smem_offset); ElementType *output_ptr =
+    // (ElementType *)(smem_buffer + output.smem_offset);
+    int3 output_shape = {max(input1_shape.x, input2_shape.x),
+                         max(input1_shape.y, input2_shape.y),
+                         max(input1_shape.z, input2_shape.z)};
     int output_num_elements = output_shape.x * output_shape.y * output_shape.z;
     int input1_num_elements = input1_shape.x * input1_shape.y * input1_shape.z;
     int input2_num_elements = input2_shape.x * input2_shape.y * input2_shape.z;
@@ -72,9 +72,9 @@ public:
                                int3 input2_shape,
                                int thread_id,
                                int num_threads) {
-    //FPType *output_ptr = (FPType *)(smem_buffer + output.smem_offset);
-    //FPType *input1_ptr = (FPType *)(smem_buffer + input1.smem_offset);
-    //FPType *input2_ptr = (FPType *)(smem_buffer + input2.smem_offset);
+    // FPType *output_ptr = (FPType *)(smem_buffer + output.smem_offset);
+    // FPType *input1_ptr = (FPType *)(smem_buffer + input1.smem_offset);
+    // FPType *input2_ptr = (FPType *)(smem_buffer + input2.smem_offset);
     int input1_dims[3], input2_dims[3], output_dims[3];
     input1_dims[0] = input1_shape.x;
     input1_dims[1] = input1_shape.y;
@@ -82,8 +82,9 @@ public:
     input2_dims[0] = input2_shape.x;
     input2_dims[1] = input2_shape.y;
     input2_dims[2] = input2_shape.z;
-    for (int i = 0; i < 3; i++)
+    for (int i = 0; i < 3; i++) {
       output_dims[i] = max(input1_dims[i], input2_dims[i]);
+    }
     int num_elements = output_dims[0] * output_dims[1] * output_dims[2];
     if (type == mirage::type::TB_DIV_OP) {
       for (int i = thread_id; i < num_elements; i += num_threads) {

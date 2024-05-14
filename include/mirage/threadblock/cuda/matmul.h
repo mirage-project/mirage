@@ -635,24 +635,24 @@ void calculate_warp_shape(
   int m_factor = (m + inst_m - 1) / inst_m;
   int n_factor = (n + inst_n - 1) / inst_n;
   // We should have at least 4 warps in a thread block
-  //assert(m_factor * n_factor >= 4);
+  // assert(m_factor * n_factor >= 4);
   if (m_factor >= 2 && n_factor >= 2) {
     assert(m_factor % 2 == 0);
     assert(n_factor % 2 == 0);
     m_factor = m_factor / 2;
     n_factor = n_factor / 2;
   } else if (m_factor == 1) {
-    //assert(n_factor % 4 == 0);
+    // assert(n_factor % 4 == 0);
     n_factor = n_factor / min(4, n_factor);
   } else if (n_factor == 1) {
-    //assert(m_factor % 4 == 0);
+    // assert(m_factor % 4 == 0);
     m_factor = m_factor / min(4, m_factor);
   }
   warp_m = m_factor * inst_m;
   warp_n = n_factor * inst_n;
 }
 
-template<ActivationType act_type>
+template <ActivationType act_type>
 class GenericMatmulExecutor {
 public:
   CUTLASS_DEVICE
@@ -674,43 +674,41 @@ public:
     int warp_n = 0;
     calculate_warp_shape(
         m, n, InstructionShape::kM, InstructionShape::kN, warp_m, warp_n);
-    //if (thread_id == 0 && blockIdx.x == 0) {
-    //  printf("warp_m(%d) warp_n(%d)\n", warp_m, warp_n);
-    //}
+    // if (thread_id == 0 && blockIdx.x == 0) {
+    //   printf("warp_m(%d) warp_n(%d)\n", warp_m, warp_n);
+    // }
     WARP_SHAPE_M_SWITCH(warp_m, WARP_M, [&] {
       WARP_SHAPE_N_SWITCH(warp_n, WARP_N, [&] {
-          using WarpShape =
-              gemm::GemmShape<WARP_M, WARP_N, InstructionShape::kK>;
-          // TODO: consider cutlass' RowMajorTensorOpMultiplicandCrosswise
-          // layout
-          // using SmemLayoutA =
-          // cutlass::layout::RowMajorTensorOpMultiplicandCrosswise<16, 32>;
-          // using SmemLayoutB =
-          // cutlass::layout::ColumnMajorTensorOpMultiplicandCrosswise<16, 32>;
-          using Executor = MatmulExecutorV2<WarpShape,
-                                            InstructionShape,
-                                            half_t,
-                                            cutlass::layout::RowMajor,
-                                            cutlass::layout::ColumnMajor,
-                                            cutlass::layout::RowMajor,
-                                            act_type>;
-          // assert(A.layout == STensor::ROW_MAJOR &&
-          //        B.layout == STensor::COLUMN_MAJOR &&
-          //        "Layouts: mismatch between inputs and Executor.");
-          // half_t *A_ptr = (half_t *)(smem_buffer + A.smem_offset);
-          // half_t *B_ptr = (half_t *)(smem_buffer + B.smem_offset);
-          // half_t *C_ptr = (half_t *)(smem_buffer + C.smem_offset);
+        using WarpShape = gemm::GemmShape<WARP_M, WARP_N, InstructionShape::kK>;
+        // TODO: consider cutlass' RowMajorTensorOpMultiplicandCrosswise
+        // layout
+        // using SmemLayoutA =
+        // cutlass::layout::RowMajorTensorOpMultiplicandCrosswise<16, 32>;
+        // using SmemLayoutB =
+        // cutlass::layout::ColumnMajorTensorOpMultiplicandCrosswise<16, 32>;
+        using Executor = MatmulExecutorV2<WarpShape,
+                                          InstructionShape,
+                                          half_t,
+                                          cutlass::layout::RowMajor,
+                                          cutlass::layout::ColumnMajor,
+                                          cutlass::layout::RowMajor,
+                                          act_type>;
+        // assert(A.layout == STensor::ROW_MAJOR &&
+        //        B.layout == STensor::COLUMN_MAJOR &&
+        //        "Layouts: mismatch between inputs and Executor.");
+        // half_t *A_ptr = (half_t *)(smem_buffer + A.smem_offset);
+        // half_t *B_ptr = (half_t *)(smem_buffer + B.smem_offset);
+        // half_t *C_ptr = (half_t *)(smem_buffer + C.smem_offset);
 
-          Executor executor(
-              {A_ptr, Executor::TensorRefA::Layout::packed({m, k})},
-              {B_ptr, Executor::TensorRefB::Layout::packed({k, n})},
-              {C_ptr, Executor::TensorRefC::Layout::packed({m, n})},
-              m,
-              n,
-              k,
-              thread_id,
-              warp_id,
-              lane_id);
+        Executor executor({A_ptr, Executor::TensorRefA::Layout::packed({m, k})},
+                          {B_ptr, Executor::TensorRefB::Layout::packed({k, n})},
+                          {C_ptr, Executor::TensorRefC::Layout::packed({m, n})},
+                          m,
+                          n,
+                          k,
+                          thread_id,
+                          warp_id,
+                          lane_id);
       });
     });
   }

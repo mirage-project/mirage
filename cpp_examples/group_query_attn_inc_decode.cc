@@ -1,6 +1,6 @@
 #include "mirage/kernel/graph.h"
-#include "mirage/threadblock/graph.h"
 #include "mirage/search/search.h"
+#include "mirage/threadblock/graph.h"
 
 #include "common.h"
 
@@ -14,11 +14,11 @@ int main(int argc, char **argv) {
   kernel::Graph ref_graph;
   {
     kernel::DTensor Q = ref_graph.new_input(
-        {2*batch_size, 8, 64}, type::DT_FLOAT16, layout::DmemRowMajor);
+        {2 * batch_size, 8, 64}, type::DT_FLOAT16, layout::DmemRowMajor);
     kernel::DTensor K = ref_graph.new_input(
-        {2*batch_size, 64, 4096}, type::DT_FLOAT16, layout::DmemColumnMajor);
+        {2 * batch_size, 64, 4096}, type::DT_FLOAT16, layout::DmemColumnMajor);
     kernel::DTensor V = ref_graph.new_input(
-        {2*batch_size, 4096, 64}, type::DT_FLOAT16, layout::DmemColumnMajor);
+        {2 * batch_size, 4096, 64}, type::DT_FLOAT16, layout::DmemColumnMajor);
     kernel::DTensor A = ref_graph.matmul(Q, K);
     kernel::DTensor E = ref_graph.exp(A);
     kernel::DTensor S = ref_graph.reduction(E, 2 /*dim*/);
@@ -36,12 +36,12 @@ int main(int argc, char **argv) {
     printf("[cudnn kernel graph] Total runtime = %.4lfms\n", total_runtime);
   }
   kernel::Graph graph;
-  kernel::DTensor Q =
-      graph.new_input({2*batch_size, 8, 64}, type::DT_FLOAT16, layout::DmemRowMajor);
-  kernel::DTensor K =
-      graph.new_input({2*batch_size, 64, 4096}, type::DT_FLOAT16, layout::DmemColumnMajor);
-  kernel::DTensor V =
-      graph.new_input({2*batch_size, 4096, 64}, type::DT_FLOAT16, layout::DmemColumnMajor);
+  kernel::DTensor Q = graph.new_input(
+      {2 * batch_size, 8, 64}, type::DT_FLOAT16, layout::DmemRowMajor);
+  kernel::DTensor K = graph.new_input(
+      {2 * batch_size, 64, 4096}, type::DT_FLOAT16, layout::DmemColumnMajor);
+  kernel::DTensor V = graph.new_input(
+      {2 * batch_size, 4096, 64}, type::DT_FLOAT16, layout::DmemColumnMajor);
   std::vector<kernel::DTensor> outputs;
   {
     threadblock::ExecutionPlan plan;
@@ -117,14 +117,15 @@ int main(int argc, char **argv) {
 
   clock_t st = clock();
 
-  search::GeneratorConfig config = search::GeneratorConfig::get_attention_default_config();
-  config.grid_dim_to_explore = {{2 * batch_size, 16, 1}, {2 * batch_size, 8, 1}, {2 * batch_size, 1, 1}};
-  std::string checkpoint_file_name = "checkpoint_group_query_attn_inc_decode_bs" +
-                                     std::to_string(batch_size) + ".json";
+  search::GeneratorConfig config =
+      search::GeneratorConfig::get_attention_default_config();
+  config.grid_dim_to_explore = {
+      {2 * batch_size, 16, 1}, {2 * batch_size, 8, 1}, {2 * batch_size, 1, 1}};
+  std::string checkpoint_file_name =
+      "checkpoint_group_query_attn_inc_decode_bs" + std::to_string(batch_size) +
+      ".json";
   search::KernelGraphGenerator gen(
-      ref_graph,
-      config,
-      checkpoint_file_name.data());
+      ref_graph, config, checkpoint_file_name.data());
   gen.generate_kernel_graphs();
 
   clock_t et = clock();

@@ -1,5 +1,5 @@
 
 namespace miragetest {
-  const int BATCH_SIZE = 1;
-  const bool PERFORM_SEARCH = true;
-}
+int const BATCH_SIZE = 1;
+bool const PERFORM_SEARCH = true;
+} // namespace miragetest

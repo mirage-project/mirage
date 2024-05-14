@@ -1,9 +1,9 @@
-#include "mirage/threadblock/graph.h"
 #include "cutlass/cutlass.h"
 #include "cutlass/util/reference/device/tensor_fill.h"
 #include "cutlass/util/reference/host/gemm.h"
 #include "cutlass/util/reference/host/tensor_compare.h"
 #include "cutlass/util/tensor_view_io.h"
+#include "mirage/threadblock/graph.h"
 #include <curand_kernel.h>
 #include <random>
 

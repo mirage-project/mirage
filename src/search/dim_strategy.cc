@@ -264,7 +264,7 @@ std::vector<std::vector<int>> DimStrategy::get_customized_input_cand_idx(
   int num_inputs = all_input.size();
 
   if (contains(config.tbop_to_explore,
-                type::TBOperatorType::TB_CONCAT_THEN_MATMUL_OP) &&
+               type::TBOperatorType::TB_CONCAT_THEN_MATMUL_OP) &&
       all_input.size() == 4) {
     return {{0, 1, 2, 3}};
   }

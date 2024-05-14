@@ -13,7 +13,8 @@ TEST(algebraic_expression, basic) {
   int red_dim = 4096;
 
   kernel::DTensor Q = graph.new_input({64, red_dim}, mirage::type::DT_FLOAT16);
-  kernel::DTensor K = graph.new_input({red_dim, 16384}, mirage::type::DT_FLOAT16);
+  kernel::DTensor K =
+      graph.new_input({red_dim, 16384}, mirage::type::DT_FLOAT16);
 
   std::shared_ptr<AlgebraicPattern> Q_pattern = std::make_shared<Var>("q");
   std::shared_ptr<AlgebraicPattern> K_pattern = std::make_shared<Var>("k");

@@ -32,8 +32,8 @@ int main(int argc, char **argv) {
     printf("[cudnn kernel graph] Total runtime = %.4lfms\n", total_runtime);
   }
   kernel::Graph graph;
-  kernel::DTensor Q =
-      graph.new_input({32 * batch_size, 16, 64}, type::DT_FLOAT16, layout::DmemRowMajor);
+  kernel::DTensor Q = graph.new_input(
+      {32 * batch_size, 16, 64}, type::DT_FLOAT16, layout::DmemRowMajor);
   kernel::DTensor K = graph.new_input(
       {32 * batch_size, 64, 4096}, type::DT_FLOAT16, layout::DmemColumnMajor);
   kernel::DTensor V = graph.new_input(
@@ -113,14 +113,15 @@ int main(int argc, char **argv) {
   return 0;
 
   clock_t st = clock();
-  search::GeneratorConfig config = search::GeneratorConfig::get_attention_default_config();
-  config.grid_dim_to_explore = {{32 * batch_size, 4, 1}, {32 * batch_size, 1, 1}};
-  std::string checkpoint_file_name = "checkpoint_multi_head_attn_inc_decode_bs" +
-                                     std::to_string(batch_size) + ".json";
+  search::GeneratorConfig config =
+      search::GeneratorConfig::get_attention_default_config();
+  config.grid_dim_to_explore = {{32 * batch_size, 4, 1},
+                                {32 * batch_size, 1, 1}};
+  std::string checkpoint_file_name =
+      "checkpoint_multi_head_attn_inc_decode_bs" + std::to_string(batch_size) +
+      ".json";
   search::KernelGraphGenerator gen(
-      ref_graph,
-      config,
-      checkpoint_file_name.data());
+      ref_graph, config, checkpoint_file_name.data());
   gen.generate_kernel_graphs();
 
   clock_t et = clock();

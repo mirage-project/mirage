@@ -24,20 +24,20 @@ __global__ void
 
   cutlass::MatrixCoord matrix_offset = {tb_offset_row, tb_offset_column};
   mirage::threadblock::GenericInputLoader loader(smem_buffer,
-                                              D_In,
-                                              S_tensor,
-                                              threadIdx.x,
-                                              blockDim.x,
-                                              matrix_offset,
-                                              global_offset);
+                                                 D_In,
+                                                 S_tensor,
+                                                 threadIdx.x,
+                                                 blockDim.x,
+                                                 matrix_offset,
+                                                 global_offset);
   __syncthreads();
   mirage::threadblock::GenericOutputSaver saver(smem_buffer,
-                                             D_Out,
-                                             S_tensor,
-                                             threadIdx.x,
-                                             blockDim.x,
-                                             matrix_offset,
-                                             global_offset);
+                                                D_Out,
+                                                S_tensor,
+                                                threadIdx.x,
+                                                blockDim.x,
+                                                matrix_offset,
+                                                global_offset);
   __syncthreads();
 }
 

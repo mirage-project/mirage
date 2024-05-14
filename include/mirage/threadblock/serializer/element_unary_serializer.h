@@ -29,11 +29,10 @@ void deserialize_elementunary_op_parameters(int const *params,
   num_elements = params[param_idx++];
 }
 
-inline
-void serialize_elementunary_op_parameters(int *params,
-                                          int &param_idx,
-                                          int smem_offset,
-                                          int num_elements) {
+inline void serialize_elementunary_op_parameters(int *params,
+                                                 int &param_idx,
+                                                 int smem_offset,
+                                                 int num_elements) {
   params[param_idx++] = smem_offset;
   params[param_idx++] = num_elements;
 

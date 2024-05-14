@@ -62,8 +62,7 @@ TBOperator *Graph::create_reduction_to_dimx_op(STensor const &input, int dim) {
     return nullptr;
   }
 
-  TBOperator *op =
-      new TBReductionOp(this, input, dim, this->reduction_dimx);
+  TBOperator *op = new TBReductionOp(this, input, dim, this->reduction_dimx);
 
   return op;
 }
@@ -79,7 +78,8 @@ TBReductionOp::TBReductionOp(Graph *bgraph,
                                  mirage::type::TB_REDUCTION_0_TO_DIMX_OP + dim),
                  input),
       reduce_dim(dim), reduce_size(size) {
-  // mirage::type::TBOperatorType type = static_cast<mirage::type::TBOperatorType>(
+  // mirage::type::TBOperatorType type =
+  // static_cast<mirage::type::TBOperatorType>(
   //     mirage::type::TB_REDUCTION_0_OP + dim);
   // this->op_type = type;
   STensor output = input;

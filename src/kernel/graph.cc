@@ -37,7 +37,8 @@ void to_json(json &j, Graph const &g) {
 }
 
 void from_json(json const &j, Graph &g) {
-  std::unordered_map<size_t, size_t> guid_mapping; // from deseralized guid to json guid
+  std::unordered_map<size_t, size_t>
+      guid_mapping; // from deseralized guid to json guid
 
   auto get_tensor_from_guid = [&](size_t guid) {
     for (auto const &op : g.operators) {
@@ -113,9 +114,9 @@ void from_json(json const &j, Graph &g) {
         size_t guid, guidO;
         jop.at("input_tensors")[0].at("guid").get_to(guid);
         jop.at("output_tensors")[0].at("guid").get_to(guidO);
-        DTensor const &output = g.reduction(
-            get_tensor_from_guid(guid),
-            op_type - type::KNOperatorType::KN_REDUCTION_0_OP);
+        DTensor const &output =
+            g.reduction(get_tensor_from_guid(guid),
+                        op_type - type::KNOperatorType::KN_REDUCTION_0_OP);
         guid_mapping[output.guid] = guidO;
         break;
       }
@@ -137,17 +138,21 @@ void from_json(json const &j, Graph &g) {
 
         // Synchronize layouts with bgraph
         KNCustomizedOp *op = dynamic_cast<KNCustomizedOp *>(g.operators.back());
-        assert(op->bgraph.operators.size() == jop.at("bgraph").at("operators").size());
+        assert(op->bgraph.operators.size() ==
+               jop.at("bgraph").at("operators").size());
         for (size_t i = 0; i < op->bgraph.operators.size(); ++i) {
           threadblock::TBOperator *bop = op->bgraph.operators[i];
           json jbop = jop.at("bgraph").at("operators")[i];
           assert(bop->input_tensors.size() == jbop.at("input_tensors").size());
-          assert(bop->output_tensors.size() == jbop.at("output_tensors").size());
+          assert(bop->output_tensors.size() ==
+                 jbop.at("output_tensors").size());
           for (size_t j = 0; j < bop->input_tensors.size(); ++j) {
-            jbop.at("input_tensors")[j].at("layout").get_to(bop->input_tensors[j].layout);
+            jbop.at("input_tensors")[j].at("layout").get_to(
+                bop->input_tensors[j].layout);
           }
           for (size_t j = 0; j < bop->output_tensors.size(); ++j) {
-            jbop.at("output_tensors")[j].at("layout").get_to(bop->output_tensors[j].layout);
+            jbop.at("output_tensors")[j].at("layout").get_to(
+                bop->output_tensors[j].layout);
           }
         }
         break;

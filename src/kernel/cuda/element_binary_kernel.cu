@@ -13,12 +13,12 @@
  * limitations under the License.
  */
 
+#include "cutlass/fast_math.h"
 #include "mirage/kernel/device_memory_manager.h"
 #include "mirage/kernel/element_binary.h"
 #include "mirage/kernel/graph.h"
 #include "mirage/utils/cuda_helper.h"
 #include "mirage/utils/hash_utils.h"
-#include "cutlass/fast_math.h"
 #include <cassert>
 
 namespace mirage {

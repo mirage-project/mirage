@@ -15,10 +15,10 @@
 
 #pragma once
 
+#include "cutlass/cutlass.h"
 #include "mirage/layout.h"
 #include "mirage/type.h"
 #include "mirage/utils/json_utils.h"
-#include "cutlass/cutlass.h"
 #include <cstddef>
 #include <functional>
 

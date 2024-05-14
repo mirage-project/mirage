@@ -65,7 +65,10 @@ KNOperator *Graph::create_customized_op(std::vector<DTensor> const &inputs,
 KNCustomizedOp::KNCustomizedOp(std::vector<DTensor> const &_inputs,
                                ExecutionPlan const &_plan)
     : KNOperator(mirage::type::KN_CUSTOMIZED_OP, _inputs), plan(_plan),
-      bgraph(_plan.grid_dim, _plan.block_dim, _plan.forloop_range, _plan.reduction_dimx) {
+      bgraph(_plan.grid_dim,
+             _plan.block_dim,
+             _plan.forloop_range,
+             _plan.reduction_dimx) {
   assert(_inputs.size() == plan.input_map.size());
   assert(plan.forloop_dim.size() == plan.input_map.size());
   assert(plan.input_smem_layouts.size() == plan.input_map.size());
@@ -173,7 +176,8 @@ KNCustomizedOp::KNCustomizedOp(std::vector<DTensor> const &_inputs,
         dmm->allocate(dtensor);
         // Update dtensor saved by the output operator
         {
-          assert(bgraph.operators.back()->op_type == mirage::type::TB_OUTPUT_OP);
+          assert(bgraph.operators.back()->op_type ==
+                 mirage::type::TB_OUTPUT_OP);
           mirage::threadblock::TBOutputOp *output =
               static_cast<mirage::threadblock::TBOutputOp *>(
                   bgraph.operators.back());
@@ -188,7 +192,10 @@ KNCustomizedOp::KNCustomizedOp(std::vector<DTensor> const &_inputs,
 KNCustomizedOp::KNCustomizedOp(std::vector<DTensor> const &_inputs,
                                mirage::threadblock::Graph const &_graph)
     : KNOperator(mirage::type::KN_CUSTOMIZED_OP, _inputs),
-      bgraph(_graph.grid_dim, _graph.block_dim, _graph.forloop_range, _graph.reduction_dimx) {
+      bgraph(_graph.grid_dim,
+             _graph.block_dim,
+             _graph.forloop_range,
+             _graph.reduction_dimx) {
   plan.grid_dim = _graph.grid_dim;
   plan.block_dim = _graph.block_dim;
   plan.forloop_range = _graph.forloop_range;
@@ -240,7 +247,8 @@ KNCustomizedOp::KNCustomizedOp(std::vector<DTensor> const &_inputs,
         dmm->allocate(dtensor);
         // Update dtensor saved by the output operator
         {
-          assert(bgraph.operators.back()->op_type == mirage::type::TB_OUTPUT_OP);
+          assert(bgraph.operators.back()->op_type ==
+                 mirage::type::TB_OUTPUT_OP);
           mirage::threadblock::TBOutputOp *output =
               static_cast<mirage::threadblock::TBOutputOp *>(
                   bgraph.operators.back());

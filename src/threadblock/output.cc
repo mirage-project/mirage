@@ -20,7 +20,7 @@ namespace mirage {
 namespace threadblock {
 
 mirage::kernel::DTensor Graph::new_output(STensor const &stensor,
-                                       int3 output_map) {
+                                          int3 output_map) {
   TBOperator *op = create_output_op(stensor, output_map);
   assert(op != nullptr);
   operators.push_back(op);
@@ -29,7 +29,8 @@ mirage::kernel::DTensor Graph::new_output(STensor const &stensor,
 
 TBOperator *Graph::create_output_op(STensor const &stensor, int3 output_map) {
   if (smem_offset + stensor.size() >= mirage::type::MAX_SMEM_SIZE) {
-    //printf("smem_offset(%ld) stensorsize(%d)\n", smem_offset, (int)stensor.size());
+    // printf("smem_offset(%ld) stensorsize(%d)\n", smem_offset,
+    // (int)stensor.size());
     return nullptr;
   }
   TBOutputOp *op = new TBOutputOp(this, stensor, output_map);

@@ -1,7 +1,7 @@
-#include "mirage/kernel/graph.h"
-#include "mirage/threadblock/graph.h"
-#include "mirage/search/search.h"
 #include "common.h"
+#include "mirage/kernel/graph.h"
+#include "mirage/search/search.h"
+#include "mirage/threadblock/graph.h"
 
 using namespace mirage;
 
@@ -34,12 +34,12 @@ int main(int argc, char **argv) {
     printf("[cudnn kernel graph] Total runtime = %.4lfms\n", total_runtime);
   }
   kernel::Graph graph;
-  kernel::DTensor Q =
-      graph.new_input({batch_size, 4096, 64}, type::DT_FLOAT16, layout::DmemRowMajor);
-  kernel::DTensor K =
-      graph.new_input({batch_size, 64, 4096}, type::DT_FLOAT16, layout::DmemColumnMajor);
-  kernel::DTensor V =
-      graph.new_input({batch_size, 4096, 64}, type::DT_FLOAT16, layout::DmemColumnMajor);
+  kernel::DTensor Q = graph.new_input(
+      {batch_size, 4096, 64}, type::DT_FLOAT16, layout::DmemRowMajor);
+  kernel::DTensor K = graph.new_input(
+      {batch_size, 64, 4096}, type::DT_FLOAT16, layout::DmemColumnMajor);
+  kernel::DTensor V = graph.new_input(
+      {batch_size, 4096, 64}, type::DT_FLOAT16, layout::DmemColumnMajor);
   std::vector<kernel::DTensor> outputs;
   {
     threadblock::ExecutionPlan plan;
@@ -116,14 +116,16 @@ int main(int argc, char **argv) {
   printf("[2 Block Graphs] Total runtime = %.4lfms\n", total_ms);
 
   clock_t st = clock();
-  search::GeneratorConfig config = search::GeneratorConfig::get_attention_default_config();
-  config.grid_dim_to_explore = {{batch_size, 16, 16}, {batch_size, 8, 16}, {batch_size, 64, 1}, {batch_size, 128, 1}};
+  search::GeneratorConfig config =
+      search::GeneratorConfig::get_attention_default_config();
+  config.grid_dim_to_explore = {{batch_size, 16, 16},
+                                {batch_size, 8, 16},
+                                {batch_size, 64, 1},
+                                {batch_size, 128, 1}};
   std::string checkpoint_file_name = "checkpoint_multi_query_attn_prefill_bs" +
                                      std::to_string(batch_size) + ".json";
   search::KernelGraphGenerator gen(
-      ref_graph,
-      config,
-      checkpoint_file_name.data());
+      ref_graph, config, checkpoint_file_name.data());
   gen.generate_kernel_graphs();
 
   clock_t et = clock();

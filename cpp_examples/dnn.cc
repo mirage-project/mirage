@@ -1,6 +1,6 @@
 #include "mirage/kernel/graph.h"
-#include "mirage/threadblock/graph.h"
 #include "mirage/search/search.h"
+#include "mirage/threadblock/graph.h"
 
 using namespace mirage;
 
@@ -102,12 +102,10 @@ int main(int argc, char **argv) {
 
   clock_t st = clock();
 
-  search::GeneratorConfig config = search::GeneratorConfig::get_attention_default_config();
+  search::GeneratorConfig config =
+      search::GeneratorConfig::get_attention_default_config();
   config.grid_dim_to_explore = {{40, 8, 1}, {40, 1, 1}};
-  search::KernelGraphGenerator gen(
-      ref_graph,
-      config,
-      "checkpoint_dnn.json");
+  search::KernelGraphGenerator gen(ref_graph, config, "checkpoint_dnn.json");
   gen.generate_kernel_graphs();
 
   clock_t et = clock();
