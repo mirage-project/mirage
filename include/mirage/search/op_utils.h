@@ -28,6 +28,10 @@ bool is_binary(type::TBOperatorType op);
 bool is_unary(type::TBOperatorType op);
 bool is_binary(type::KNOperatorType op);
 bool is_unary(type::KNOperatorType op);
+
+int get_input_number(type::KNOperatorType);
+int get_input_number(type::TBOperatorType);
+
 std::shared_ptr<AlgebraicPattern>
     get_pattern(type::KNOperatorType op,
                 DTensor const &tensor,

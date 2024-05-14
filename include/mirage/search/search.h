@@ -51,6 +51,7 @@ struct Checkpoint {
   std::vector<LayerCheckpoint> callstack;
   std::vector<json> generated_graphs;
 
+  bool search_finished;
   int num_total_kernel_graphs;
   int num_total_random_tests;
   int num_valid_kernel_graphs;
@@ -63,6 +64,7 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(Checkpoint,
                                    config,
                                    callstack,
                                    generated_graphs,
+                                   search_finished,
                                    num_total_kernel_graphs,
                                    num_total_random_tests,
                                    num_valid_kernel_graphs);
@@ -95,6 +97,7 @@ private:
 
   std::vector<DTensor> output_tensors;
 
+  bool search_finished;
   int num_total_kernel_graphs;
   int num_total_random_tests;
   int num_valid_kernel_graphs;
