@@ -71,7 +71,6 @@ DTensor *Graph::div(DTensor const *input1, DTensor const *input2) {
 KNOperator *Graph::create_elementbinary_op(DTensor const &input1,
                                            DTensor const &input2,
                                            mirage::type::KNOperatorType type) {
-  DeviceMemoryManager *dmm = DeviceMemoryManager::get_instance();
   if (input1.num_dims != input2.num_dims) {
     return nullptr;
   }
@@ -111,16 +110,15 @@ KNElementBinaryOp::KNElementBinaryOp(DTensor const &input1,
   output.owner_op = this;
   output.owner_ts_idx = 0;
   output.guid = DTensor::next_guid++;
-  DeviceMemoryManager *dmm = DeviceMemoryManager::get_instance();
-  dmm->allocate(output);
+  output.dmm = input1.dmm;
+  output.dmm->allocate(output);
   assert(output_tensors.size() == 0);
   output_tensors.push_back(output);
 }
 
 KNElementBinaryOp::~KNElementBinaryOp() {
-  DeviceMemoryManager *dmm = DeviceMemoryManager::get_instance();
   for (int i = output_tensors.size() - 1; i >= 0; i--) {
-    dmm->free(output_tensors[i]);
+    output_tensors[i].dmm->free(output_tensors[i]);
   }
 }
 

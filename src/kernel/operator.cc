@@ -71,45 +71,38 @@ KNOperator *Graph::create_input_op(std::vector<int> const &dims,
   tensor.num_dims = dims.size();
   for (int i = tensor.num_dims - 1; i >= 0; i--) {
     tensor.dim[i] = dims[i];
-    // tensor.stride[i] = (i == tensor.num_dims - 1)
-    //                        ? 1
-    //                        : tensor.stride[i + 1] * tensor.dim[i + 1];
   }
   tensor.data_type = data_type;
 
-  DeviceMemoryManager *dmm = DeviceMemoryManager::get_instance();
   if (dmm->offset + tensor.data_size() > dmm->total_size) {
     return nullptr;
   }
-  KNInputOp *op = new KNInputOp(dims, data_type, layout);
+  KNInputOp *op = new KNInputOp(dims, data_type, layout, dmm);
   return op;
 }
 
 KNInputOp::KNInputOp(std::vector<int> const &dims,
                      mirage::type::DataType data_type,
-                     mirage::layout::DmemLayout layout)
+                     mirage::layout::DmemLayout layout,
+                     DeviceMemoryManagerWrapper *dmm)
     : KNOperator(mirage::type::KN_INPUT_OP) {
   DTensor tensor;
   tensor.num_dims = dims.size();
   for (int i = tensor.num_dims - 1; i >= 0; i--) {
     tensor.dim[i] = dims[i];
-    // tensor.stride[i] = (i == tensor.num_dims - 1)
-    //                        ? 1
-    //                        : tensor.stride[i + 1] * tensor.dim[i + 1];
   }
   tensor.data_type = data_type;
   tensor.layout = layout;
   tensor.owner_op = this;
   tensor.owner_ts_idx = 0;
   tensor.guid = DTensor::next_guid++;
-  DeviceMemoryManager *dmm = DeviceMemoryManager::get_instance();
+  tensor.dmm = dmm;
   dmm->allocate(tensor);
   output_tensors.push_back(tensor);
 }
 
 KNInputOp::~KNInputOp() {
-  DeviceMemoryManager *dmm = DeviceMemoryManager::get_instance();
-  dmm->free(output_tensors[0]);
+  output_tensors[0].dmm->free(output_tensors[0]);
 }
 
 KNInputOp::operator json() const {

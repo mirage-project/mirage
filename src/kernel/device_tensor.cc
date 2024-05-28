@@ -14,6 +14,7 @@
  */
 
 #include "mirage/kernel/device_tensor.h"
+#include "mirage/kernel/device_memory_manager.h"
 #include "mirage/utils/hash_utils.h"
 #include <functional>
 
@@ -31,6 +32,15 @@ DTensor::DTensor() {
   owner_op = nullptr;
   owner_ts_idx = -1000;
   data_ptr = nullptr;
+  fp_ptr = nullptr;
+}
+
+void DTensor::get_data_ptr() {
+  data_ptr = dmm->get_data_ptr(guid);
+}
+
+void DTensor::get_fp_ptr() {
+  fp_ptr = dmm->get_fp_ptr(guid);
 }
 
 /*
@@ -64,7 +74,7 @@ size_t hash<mirage::kernel::DTensor>::operator()(
   }
   hash_combine(ret, tensor.owner_op);
   hash_combine(ret, tensor.owner_ts_idx);
-  hash_combine(ret, tensor.data_ptr);
+  hash_combine(ret, tensor.guid);
   return ret;
 }
 

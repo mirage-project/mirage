@@ -14,6 +14,7 @@
  */
 
 #include "mirage/kernel/graph.h"
+#include "mirage/kernel/device_memory_manager.h"
 #include "mirage/utils/hash_utils.h"
 
 #include <iostream>
@@ -21,7 +22,9 @@
 namespace mirage {
 namespace kernel {
 
-Graph::Graph() {}
+Graph::Graph() {
+  dmm = new DeviceMemoryManagerWrapper();
+}
 
 size_t Graph::pair_hash::operator()(std::pair<int, int> const &p) const {
   size_t h1 = std::hash<int>{}(p.first);

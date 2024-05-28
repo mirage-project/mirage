@@ -89,16 +89,15 @@ KNMatmulOp::KNMatmulOp(DTensor const &A, DTensor const &B)
   C.owner_op = this;
   C.owner_ts_idx = 0;
   C.guid = DTensor::next_guid++;
-  DeviceMemoryManager *dmm = DeviceMemoryManager::get_instance();
-  dmm->allocate(C);
+  C.dmm = A.dmm;
+  C.dmm->allocate(C);
   assert(output_tensors.size() == 0);
   output_tensors.push_back(C);
 }
 
 KNMatmulOp::~KNMatmulOp() {
-  DeviceMemoryManager *dmm = DeviceMemoryManager::get_instance();
   for (int i = output_tensors.size() - 1; i >= 0; i--) {
-    dmm->free(output_tensors[i]);
+    output_tensors[i].dmm->free(output_tensors[i]);
   }
 }
 

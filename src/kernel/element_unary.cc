@@ -42,7 +42,6 @@ DTensor *Graph::exp(DTensor const *input) {
 
 KNOperator *Graph::create_elementunary_op(DTensor const &input,
                                           mirage::type::KNOperatorType type) {
-  DeviceMemoryManager *dmm = DeviceMemoryManager::get_instance();
   if (dmm->offset + input.data_size() > dmm->total_size) {
     return nullptr;
   }
@@ -58,16 +57,15 @@ KNElementUnaryOp::KNElementUnaryOp(DTensor const &input,
   output.owner_op = this;
   output.owner_ts_idx = 0;
   output.guid = DTensor::next_guid++;
-  DeviceMemoryManager *dmm = DeviceMemoryManager::get_instance();
-  dmm->allocate(output);
+  output.dmm = input.dmm;
+  output.dmm->allocate(output);
   assert(output_tensors.size() == 0);
   output_tensors.push_back(output);
 }
 
 KNElementUnaryOp::~KNElementUnaryOp() {
-  DeviceMemoryManager *dmm = DeviceMemoryManager::get_instance();
   for (int i = output_tensors.size() - 1; i >= 0; i--) {
-    dmm->free(output_tensors[i]);
+    output_tensors[i].dmm->free(output_tensors[i]);
   }
 }
 

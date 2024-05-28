@@ -53,7 +53,6 @@ KNOperator *Graph::create_customized_op(std::vector<DTensor> const &inputs,
     }
   }
 
-  DeviceMemoryManager *dmm = DeviceMemoryManager::get_instance();
   if (dmm->offset + output_size > dmm->total_size) {
     return nullptr;
   }
@@ -69,6 +68,7 @@ KNCustomizedOp::KNCustomizedOp(std::vector<DTensor> const &_inputs,
              _plan.block_dim,
              _plan.forloop_range,
              _plan.reduction_dimx) {
+  DeviceMemoryManagerWrapper *dmm = _inputs[0].dmm;
   assert(_inputs.size() == plan.input_map.size());
   assert(plan.forloop_dim.size() == plan.input_map.size());
   assert(plan.input_smem_layouts.size() == plan.input_map.size());
@@ -172,7 +172,7 @@ KNCustomizedOp::KNCustomizedOp(std::vector<DTensor> const &_inputs,
         dtensor.owner_op = this;
         dtensor.owner_ts_idx = static_cast<int>(output_tensors.size());
         dtensor.guid = DTensor::next_guid++;
-        DeviceMemoryManager *dmm = DeviceMemoryManager::get_instance();
+        dtensor.dmm = dmm;
         dmm->allocate(dtensor);
         // Update dtensor saved by the output operator
         {
@@ -200,6 +200,8 @@ KNCustomizedOp::KNCustomizedOp(std::vector<DTensor> const &_inputs,
   plan.block_dim = _graph.block_dim;
   plan.forloop_range = _graph.forloop_range;
   plan.reduction_dimx = _graph.reduction_dimx;
+
+  DeviceMemoryManagerWrapper *dmm = _inputs[0].dmm;
 
   for (auto const &op : _graph.operators) {
     std::vector<STensor> my_inputs;
@@ -243,7 +245,7 @@ KNCustomizedOp::KNCustomizedOp(std::vector<DTensor> const &_inputs,
         dtensor.owner_op = this;
         dtensor.owner_ts_idx = static_cast<int>(output_tensors.size());
         dtensor.guid = DTensor::next_guid++;
-        DeviceMemoryManager *dmm = DeviceMemoryManager::get_instance();
+        dtensor.dmm = dmm;
         dmm->allocate(dtensor);
         // Update dtensor saved by the output operator
         {
@@ -314,9 +316,8 @@ KNCustomizedOp::~KNCustomizedOp() {
     delete bgraph.operators.back();
     bgraph.operators.pop_back();
   }
-  DeviceMemoryManager *dmm = DeviceMemoryManager::get_instance();
   for (int i = output_tensors.size() - 1; i >= 0; i--) {
-    dmm->free(output_tensors[i]);
+    output_tensors[i].dmm->free(output_tensors[i]);
   }
 }
 

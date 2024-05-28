@@ -84,6 +84,7 @@ public:
   // std::unordered_map<std::pair<int, int>, std::pair<int, int>, pair_hash>
   // edges; std::vector<std::vector<SrcEdge>> edges;
   // mirage::kernel::OperatorFactory *operator_factory;
+  DeviceMemoryManagerWrapper *dmm;
 };
 
 void to_json(json &j, Graph const &g);

@@ -46,7 +46,8 @@ class KNInputOp : public KNOperator {
 public:
   KNInputOp(std::vector<int> const &dims,
             mirage::type::DataType data_type,
-            mirage::layout::DmemLayout layout);
+            mirage::layout::DmemLayout layout,
+            DeviceMemoryManagerWrapper *dmm);
   ~KNInputOp();
   bool profile(ProfileResult &profile);
   bool fingerprint(void);

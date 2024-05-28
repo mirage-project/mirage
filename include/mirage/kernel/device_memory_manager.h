@@ -30,8 +30,11 @@ public:
   static DeviceMemoryManager *singleton;
   DeviceMemoryManager(void);
   ~DeviceMemoryManager(void);
-  bool allocate(DTensor &tensor, bool allocate_fingerprint = true);
-  bool free(DTensor &tensor);
+  // bool allocate(DTensor &tensor, bool allocate_fingerprint = true);
+  // bool free(DTensor &tensor);
+
+  bool allocate(size_t tensor_size, void *&data_ptr);
+  bool free(void *data_ptr);
 
 public:
   static DeviceMemoryManager *get_instance();
@@ -50,6 +53,27 @@ public:
 public:
   cublasHandle_t blas;
   // cudnnHandle_t cudnn;
+};
+
+class DeviceMemoryManagerWrapper {
+public:
+  DeviceMemoryManagerWrapper();
+  ~DeviceMemoryManagerWrapper();
+
+  bool allocate(DTensor const &tensor, bool allocate_fingerprint = true);
+  bool free(DTensor const &tensor);
+  bool free_physical_memory(DTensor const &tensor);
+
+  void *get_data_ptr(size_t guid);
+  type::FPType *get_fp_ptr(size_t guid);
+
+  std::unordered_map<size_t, void *> guid2data_ptr;
+  std::unordered_map<size_t, type::FPType *> guid2fp_ptr;
+  std::unordered_map<size_t, size_t> guid2data_size;
+  std::unordered_map<size_t, size_t> guid2fp_size;
+
+  size_t offset;
+  size_t total_size;
 };
 
 } // namespace kernel
