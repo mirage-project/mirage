@@ -99,7 +99,7 @@ try:
   if not mirage_path:
       print("Please set the MIRAGE environment variable to the path of the mirage source directory.")
       raise SystemExit(1)
-   z3_path = os.path.join(mirage_path, 'deps', 'z3')
+  z3_path = os.path.join(mirage_path, 'deps', 'z3')
   build_dir = os.path.join(z3_path, 'build')
   os.makedirs(build_dir, exist_ok=True)
   subprocess.check_call(['cmake', '..'], cwd=build_dir)
