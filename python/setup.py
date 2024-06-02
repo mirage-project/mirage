@@ -130,14 +130,16 @@ setup_args = {}
 #        "data_files": [('mirage', LIB_LIST)]
 #    }
 
-
+# Create requirements list from requirements.txt
+with open(Path(__file__).parent / "requirements.txt", "r") as reqs_file:
+    requirements = reqs_file.read().strip().split("\n")
 
 
 setup(name='mirage',
     version="0.1.0",
     description="Mirage: A Multi-Level Superoptimizer for Tensor Algebra",
     zip_safe=False,
-    install_requires=[],
+    install_requires=requirements,
     packages=find_packages(),
     url='https://github.com/mirage-project/mirage',
     ext_modules=config_cython(),

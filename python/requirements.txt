@@ -1,0 +1,4 @@
+cmake>=3.24
+cython>=0.28
+cuda>=11.0
+cudnn>=8.0 
