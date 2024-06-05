@@ -71,6 +71,7 @@ except FileNotFoundError:
       z3_path = os.path.join(mirage_path, 'deps', 'z3')
       build_dir = os.path.join(z3_path, 'build')
       os.makedirs(build_dir, exist_ok=True)
+      os.chdir(build_dir)
       print("finished making 'build' directory")
       print(f"running cmake command at {build_dir}")
       subprocess.check_call(['cmake', '..'], cwd=build_dir)
@@ -101,7 +102,9 @@ try:
       raise SystemExit(1)
   z3_path = os.path.join(mirage_path, 'deps', 'z3')
   build_dir = os.path.join(z3_path, 'build')
+  os.environ['Z3_DIR'] = build_dir
   os.makedirs(build_dir, exist_ok=True)
+  os.chdir(build_dir)
   subprocess.check_call(['cmake', '..'], cwd=build_dir)
   subprocess.check_call(['make', '-j'], cwd=build_dir)
   print("Mirage runtime library built successfully.")
