@@ -95,63 +95,43 @@ DeviceMemoryManager::~DeviceMemoryManager() {
   checkCUDA(cublasDestroy(blas));
 }
 
-// bool DeviceMemoryManager::allocate(DTensor &tensor, bool
-// allocate_fingerprint) {
-//   // assert that the start of the tensor is 16 bytes aligned
-//   assert(offset % 16 == 0);
-//   void *ret_ptr = base_ptr + offset;
-//   size_t tensor_size = tensor.data_size();
-//   // make tensor_size a multiplier of 16
-//   tensor_size = (tensor_size + 15) / 16 * 16;
-//   offset += tensor_size;
-//   tensor.data_ptr = ret_ptr;
-//   allocated_tensors.push_back(std::make_pair(ret_ptr, tensor_size));
-
-//   if (allocate_fingerprint) {
-//     assert(offset % 16 == 0);
-//     ret_ptr = base_ptr + offset;
-//     size_t tensor_size = tensor.fingerprint_size();
-//     tensor_size = (tensor_size + 15) / 16 * 16;
-//     offset += tensor_size;
-//     tensor.fp_ptr = (mirage::type::FPType *)ret_ptr;
-//     allocated_tensors.push_back(std::make_pair(ret_ptr, tensor_size));
-//   }
-//   // Assert that we haven't used more than what we pre-allocated
-//   assert(offset <= total_size);
-
-//   return true;
-// }
-
-bool DeviceMemoryManager::allocate(size_t tensor_size, void *&data_ptr) {
+bool DeviceMemoryManager::allocate(DTensor &tensor, bool allocate_fingerprint) {
+  // assert that the start of the tensor is 16 bytes aligned
   assert(offset % 16 == 0);
   void *ret_ptr = base_ptr + offset;
+  size_t tensor_size = tensor.data_size();
+  // make tensor_size a multiplier of 16
   tensor_size = (tensor_size + 15) / 16 * 16;
   offset += tensor_size;
-  data_ptr = ret_ptr;
+  tensor.data_ptr = ret_ptr;
   allocated_tensors.push_back(std::make_pair(ret_ptr, tensor_size));
+
+  if (allocate_fingerprint) {
+    assert(offset % 16 == 0);
+    ret_ptr = base_ptr + offset;
+    size_t tensor_size = tensor.fingerprint_size();
+    tensor_size = (tensor_size + 15) / 16 * 16;
+    offset += tensor_size;
+    tensor.fp_ptr = (mirage::type::FPType *)ret_ptr;
+    allocated_tensors.push_back(std::make_pair(ret_ptr, tensor_size));
+  }
+  // Assert that we haven't used more than what we pre-allocated
+  assert(offset <= total_size);
 
   return true;
 }
 
-// bool DeviceMemoryManager::free(DTensor &tensor) {
-//   // Currently assume that tensors are freed in the reverse order
-//   // so ptr must be the last tensor we have created
-//   if (tensor.fp_ptr != nullptr) {
-//     assert(allocated_tensors.size() > 0);
-//     assert(allocated_tensors.back().first == tensor.fp_ptr);
-//     offset -= allocated_tensors.back().second;
-//     allocated_tensors.pop_back();
-//   }
-//   assert(allocated_tensors.size() > 0);
-//   assert(allocated_tensors.back().first == tensor.data_ptr);
-//   offset -= allocated_tensors.back().second;
-//   allocated_tensors.pop_back();
-//   return true;
-// }
-
-bool DeviceMemoryManager::free(void *data_ptr) {
+bool DeviceMemoryManager::free(DTensor &tensor) {
+  // Currently assume that tensors are freed in the reverse order
+  // so ptr must be the last tensor we have created
+  if (tensor.fp_ptr != nullptr) {
+    assert(allocated_tensors.size() > 0);
+    assert(allocated_tensors.back().first == tensor.fp_ptr);
+    offset -= allocated_tensors.back().second;
+    allocated_tensors.pop_back();
+  }
   assert(allocated_tensors.size() > 0);
-  assert(allocated_tensors.back().first == data_ptr);
+  assert(allocated_tensors.back().first == tensor.data_ptr);
   offset -= allocated_tensors.back().second;
   allocated_tensors.pop_back();
   return true;

@@ -128,7 +128,7 @@ private:
   void fingerprint_eval();
   bool have_same_fingerprint(std::vector<DTensor> const &outputs,
                              std::vector<int> const &match) const;
-  bool verify(SearchContext<DTensor> &c, kernel::Graph const &g);
+  bool verify(SearchContext<DTensor> &c, kernel::Graph &g);
   void recovery_from_checkpoint(Checkpoint const &checkpoint);
 };
 

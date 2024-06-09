@@ -23,7 +23,11 @@ namespace mirage {
 namespace kernel {
 
 Graph::Graph() {
-  dmm = new DeviceMemoryManagerWrapper();
+  dmm = new DeviceMemoryOffsetManager();
+}
+
+Graph::~Graph() {
+  delete dmm;
 }
 
 size_t Graph::pair_hash::operator()(std::pair<int, int> const &p) const {
@@ -164,6 +168,38 @@ void from_json(json const &j, Graph &g) {
         assert(false && "Cannot deserialize this operator");
     }
   }
+}
+
+void Graph::allocate_all_tensors(bool allocate_fingerprint) {
+  DeviceMemoryManager *dmm = DeviceMemoryManager::get_instance();
+  for (auto const &op : operators) {
+    for (DTensor &tensor : op->output_tensors) {
+      dmm->allocate(tensor, allocate_fingerprint);
+    }
+  }
+}
+
+void Graph::free_all_tensors() {
+  DeviceMemoryManager *dmm = DeviceMemoryManager::get_instance();
+  for (auto const &op : reversed(operators)) {
+    for (DTensor &tensor : reversed(op->output_tensors)) {
+      dmm->free(tensor);
+    }
+  }  
+}
+
+ProfileResult Graph::profile() {
+  DeviceMemoryManager *dmm = DeviceMemoryManager::get_instance();
+  std::lock_guard<std::mutex> lock(dmm->dmm_mutex);
+  allocate_all_tensors(false);
+  ProfileResult result{0};
+  for (auto &op : operators) {
+    ProfileResult op_result;
+    op->profile(op_result);
+    result.run_time += op_result.run_time;
+  }
+  free_all_tensors();
+  return result;
 }
 
 } // namespace kernel

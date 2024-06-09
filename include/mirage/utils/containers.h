@@ -41,3 +41,21 @@ std::vector<T> to_vector(int n, T *arr) {
   }
   return v;
 }
+
+template <typename T>
+struct _reversed {
+  T& iter;
+
+  auto begin() const {
+    return iter.rbegin();
+  }
+
+  auto end() const {
+    return iter.rend();
+  }
+};
+
+template <typename T>
+_reversed<T> reversed(T &&iter) {
+  return _reversed<T>{iter};
+}

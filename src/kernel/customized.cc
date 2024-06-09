@@ -68,7 +68,7 @@ KNCustomizedOp::KNCustomizedOp(std::vector<DTensor> const &_inputs,
              _plan.block_dim,
              _plan.forloop_range,
              _plan.reduction_dimx) {
-  DeviceMemoryManagerWrapper *dmm = _inputs[0].dmm;
+  DeviceMemoryOffsetManager *dmm = _inputs[0].dmm;
   assert(_inputs.size() == plan.input_map.size());
   assert(plan.forloop_dim.size() == plan.input_map.size());
   assert(plan.input_smem_layouts.size() == plan.input_map.size());
@@ -201,7 +201,7 @@ KNCustomizedOp::KNCustomizedOp(std::vector<DTensor> const &_inputs,
   plan.forloop_range = _graph.forloop_range;
   plan.reduction_dimx = _graph.reduction_dimx;
 
-  DeviceMemoryManagerWrapper *dmm = _inputs[0].dmm;
+  DeviceMemoryOffsetManager *dmm = _inputs[0].dmm;
 
   for (auto const &op : _graph.operators) {
     std::vector<STensor> my_inputs;

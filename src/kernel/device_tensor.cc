@@ -33,14 +33,8 @@ DTensor::DTensor() {
   owner_ts_idx = -1000;
   data_ptr = nullptr;
   fp_ptr = nullptr;
-}
-
-void DTensor::get_data_ptr() {
-  data_ptr = dmm->get_data_ptr(guid);
-}
-
-void DTensor::get_fp_ptr() {
-  fp_ptr = dmm->get_fp_ptr(guid);
+  data_offset = -1;
+  fp_offset = -1;
 }
 
 /*

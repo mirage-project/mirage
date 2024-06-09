@@ -27,65 +27,39 @@ namespace kernel {
 #define MAX_TENSOR_DIMS 4
 
 class KNOperator;
-class DeviceMemoryManagerWrapper;
+class DeviceMemoryOffsetManager;
 
 struct alignas(16) DTensor {
   DTensor(void);
   inline bool operator==(DTensor const &b) const {
-    return guid == b.guid;
-    // if (data_type != b.data_type) {
-    //   return false;
-    // }
-    // if (layout != b.layout) {
-    //   return false;
-    // }
-    // if (num_dims != b.num_dims) {
-    //   return false;
-    // }
-    // for (int i = 0; i < num_dims; i++) {
-    //   if (dim[i] != b.dim[i]) {
-    //     return false;
-    //   }
-    //   // if (stride[i] != b.stride[i]) {
-    //   //   return false;
-    //   // }
-    // }
-    // if (owner_op != b.owner_op) {
-    //   return false;
-    // }
-    // if (owner_ts_idx != b.owner_ts_idx) {
-    //   return false;
-    // }
-    // assert(data_ptr == b.data_ptr);
-    // return true;
+    if (data_type != b.data_type) {
+      return false;
+    }
+    if (layout != b.layout) {
+      return false;
+    }
+    if (num_dims != b.num_dims) {
+      return false;
+    }
+    for (int i = 0; i < num_dims; i++) {
+      if (dim[i] != b.dim[i]) {
+        return false;
+      }
+      // if (stride[i] != b.stride[i]) {
+      //   return false;
+      // }
+    }
+    if (owner_op != b.owner_op) {
+      return false;
+    }
+    if (owner_ts_idx != b.owner_ts_idx) {
+      return false;
+    }
+    assert(data_offset == b.data_offset);
+    return true;
   }
   inline bool operator!=(DTensor const &b) const {
-    return guid != b.guid;
-    // if (data_type != b.data_type) {
-    //   return true;
-    // }
-    // if (layout != b.layout) {
-    //   return true;
-    // }
-    // if (num_dims != b.num_dims) {
-    //   return true;
-    // }
-    // for (int i = 0; i < num_dims; i++) {
-    //   if (dim[i] != b.dim[i]) {
-    //     return true;
-    //   }
-    //   // if (stride[i] != b.stride[i]) {
-    //   //   return true;
-    //   // }
-    // }
-    // if (owner_op != b.owner_op) {
-    //   return true;
-    // }
-    // if (owner_ts_idx != b.owner_ts_idx) {
-    //   return true;
-    // }
-    // assert(data_ptr == b.data_ptr);
-    // return false;
+    return !(*this == b);
   }
 
   inline size_t num_elements() const {
@@ -108,9 +82,6 @@ struct alignas(16) DTensor {
     return num_elements() * data_type_size;
   }
 
-  void get_data_ptr();
-  void get_fp_ptr();
-
   bool has_same_fingerprint(DTensor const &ref) const;
   mirage::type::DataType data_type;
   mirage::layout::DmemLayout layout;
@@ -121,11 +92,14 @@ struct alignas(16) DTensor {
   //  DTensor fields
   KNOperator *owner_op;
   int owner_ts_idx;
+  off_t data_offset;
+  off_t fp_offset;
   // pointer to data
   void *data_ptr;
   // pointer to fingerprint
   mirage::type::FPType *fp_ptr;
-  DeviceMemoryManagerWrapper *dmm;
+
+  DeviceMemoryOffsetManager *dmm;
 
   static int next_guid;
 };

@@ -19,13 +19,12 @@
 namespace mirage {
 namespace kernel {
 
-DeviceMemoryManagerWrapper::DeviceMemoryManagerWrapper() : offset(0) {
+DeviceMemoryOffsetManager::DeviceMemoryOffsetManager() : offset(0) {
   DeviceMemoryManager *dmm = DeviceMemoryManager::get_instance();
   total_size = dmm->total_size;
 }
-DeviceMemoryManagerWrapper::~DeviceMemoryManagerWrapper() {}
 
-bool DeviceMemoryManagerWrapper::allocate(DTensor const &tensor,
+bool DeviceMemoryOffsetManager::allocate(DTensor &tensor,
                                           bool allocate_fingerprint) {
   assert(offset % 16 == 0);
   size_t data_size = tensor.data_size();
@@ -33,8 +32,9 @@ bool DeviceMemoryManagerWrapper::allocate(DTensor const &tensor,
   if (offset + data_size > total_size) {
     return false;
   }
+  tensor.data_offset = offset;
   offset += data_size;
-  guid2data_size[tensor.guid] = data_size;
+  allocated_tensors.push_back({tensor.data_offset, data_size});
 
   if (allocate_fingerprint) {
     assert(offset % 16 == 0);
@@ -43,76 +43,31 @@ bool DeviceMemoryManagerWrapper::allocate(DTensor const &tensor,
     if (offset + fingerprint_size > total_size) {
       return false;
     }
+    tensor.fp_offset = offset;
     offset += fingerprint_size;
-    guid2fp_size[tensor.guid] = fingerprint_size;
+    allocated_tensors.push_back({tensor.fp_offset, fingerprint_size});
   }
 
   return true;
 }
 
-bool DeviceMemoryManagerWrapper::free(DTensor const &tensor) {
-  assert(offset % 16 == 0);
-  assert(contains_key(guid2data_size, tensor.guid));
-  size_t data_size = guid2data_size.at(tensor.guid);
-  assert(offset >= data_size);
-  offset -= data_size;
-  if (contains_key(guid2data_ptr, tensor.guid)) {
-    DeviceMemoryManager *dmm = DeviceMemoryManager::get_instance();
-    dmm->free(guid2data_ptr.at(tensor.guid));
+bool DeviceMemoryOffsetManager::free(DTensor &tensor) {
+  if (tensor.fp_offset != -1) {
+    assert(allocated_tensors.size() > 0);
+    assert(allocated_tensors.back().first == tensor.fp_offset);
+    offset -= allocated_tensors.back().second;
+    allocated_tensors.pop_back();
+    tensor.fp_offset = -1;
   }
 
-  if (contains_key(guid2fp_size, tensor.guid)) {
-    assert(offset % 16 == 0);
-    size_t fingerprint_size = guid2fp_size.at(tensor.guid);
-    assert(offset >= fingerprint_size);
-    offset -= fingerprint_size;
-    if (contains_key(guid2fp_ptr, tensor.guid)) {
-      DeviceMemoryManager *dmm = DeviceMemoryManager::get_instance();
-      dmm->free(guid2fp_ptr.at(tensor.guid));
-    }
-  }
+  assert(tensor.data_offset != -1);
+  assert(allocated_tensors.size() > 0);
+  assert(allocated_tensors.back().first == tensor.data_offset);
+  offset -= allocated_tensors.back().second;
+  allocated_tensors.pop_back();
+  tensor.data_offset = -1;
 
   return true;
-}
-
-bool DeviceMemoryManagerWrapper::free_physical_memory(DTensor const &tensor) {
-  DeviceMemoryManager *dmm = DeviceMemoryManager::get_instance();
-
-  if (contains_key(guid2fp_ptr, tensor.guid)) {
-    dmm->free(guid2fp_ptr.at(tensor.guid));
-  }
-
-  if (contains_key(guid2data_ptr, tensor.guid)) {
-    dmm->free(guid2data_ptr.at(tensor.guid));
-  }
-
-  return true;
-}
-
-void *DeviceMemoryManagerWrapper::get_data_ptr(size_t guid) {
-  if (contains_key(guid2data_ptr, guid)) {
-    return guid2data_ptr.at(guid);
-  }
-
-  assert(contains_key(guid2data_size, guid));
-  DeviceMemoryManager *dmm = DeviceMemoryManager::get_instance();
-  void *data_ptr = nullptr;
-  dmm->allocate(guid2data_size.at(guid), data_ptr);
-  guid2data_ptr[guid] = data_ptr;
-  return data_ptr;
-}
-
-type::FPType *DeviceMemoryManagerWrapper::get_fp_ptr(size_t guid) {
-  if (contains_key(guid2fp_ptr, guid)) {
-    return guid2fp_ptr.at(guid);
-  }
-
-  assert(contains_key(guid2fp_ptr, guid));
-  DeviceMemoryManager *dmm = DeviceMemoryManager::get_instance();
-  void *fp_ptr = nullptr;
-  dmm->allocate(guid2fp_size.at(guid), fp_ptr);
-  guid2fp_ptr[guid] = (type::FPType *)fp_ptr;
-  return (type::FPType *)fp_ptr;
 }
 
 } // namespace kernel

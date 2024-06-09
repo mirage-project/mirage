@@ -47,7 +47,7 @@ public:
   KNInputOp(std::vector<int> const &dims,
             mirage::type::DataType data_type,
             mirage::layout::DmemLayout layout,
-            DeviceMemoryManagerWrapper *dmm);
+            DeviceMemoryOffsetManager *dmm);
   ~KNInputOp();
   bool profile(ProfileResult &profile);
   bool fingerprint(void);

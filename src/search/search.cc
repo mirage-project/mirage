@@ -3,6 +3,7 @@
 #include "mirage/search/dim_strategy.h"
 #include "mirage/search/op_utils.h"
 #include "mirage/utils/containers.h"
+#include "mirage/kernel/device_memory_manager.h"
 
 #include <fstream>
 #include <iostream>
@@ -438,7 +439,12 @@ void KernelGraphGenerator::generate_kernel_graphs() {
     return;
   }
   pattern_eval();
-  fingerprint_eval();
+  
+  computation_graph.allocate_all_tensors();
+  for (auto const &op : computation_graph.operators) {
+    op->fingerprint();
+  }
+
   generated_graphs.push_back(json(computation_graph));
 
   kernel::Graph g;
@@ -464,15 +470,11 @@ void KernelGraphGenerator::generate_kernel_graphs() {
 
   save_checkpoint();
 
+  computation_graph.free_all_tensors();
+
   printf("Total kernel graphs explored: %d\n", num_total_kernel_graphs);
   printf("Random tests performed: %d\n", num_total_random_tests);
   printf("Valid kernel graphs explored: %d\n", num_valid_kernel_graphs);
-}
-
-void KernelGraphGenerator::fingerprint_eval() {
-  for (auto const &op : computation_graph.operators) {
-    op->fingerprint();
-  }
 }
 
 void KernelGraphGenerator::process_outputs() {
@@ -571,7 +573,7 @@ void KernelGraphGenerator::pattern_eval() {
 }
 
 bool KernelGraphGenerator::verify(SearchContext<DTensor> &c,
-                                  kernel::Graph const &g) {
+                                  kernel::Graph &g) {
   ++num_total_kernel_graphs;
   if (num_total_kernel_graphs % 100 == 1) {
     printf("Total kernel graphs explored: %d.\n", num_total_kernel_graphs);
@@ -601,14 +603,23 @@ bool KernelGraphGenerator::verify(SearchContext<DTensor> &c,
 
   std::cout << "random testing: " << json(g) << std::endl;
 
-  for (auto const &op : g.operators) {
-    op->fingerprint();
-  }
+  {
+    kernel::DeviceMemoryManager *dmm = kernel::DeviceMemoryManager::get_instance();
+    std::lock_guard<std::mutex> lock(dmm->dmm_mutex);
 
-  for (auto const &match : get_matches(outputs.size())) {
-    if (have_same_fingerprint(outputs, match)) {
-      return true;
+    g.allocate_all_tensors(true);
+    for (auto const &op : g.operators) {
+      op->fingerprint();
     }
+
+    for (auto const &match : get_matches(outputs.size())) {
+      if (have_same_fingerprint(outputs, match)) {
+        g.free_all_tensors();
+        return true;
+      }
+    }
+
+    g.free_all_tensors();
   }
 
   return false;
@@ -758,12 +769,7 @@ void KernelGraphGenerator::optimize_layout(
 
 void KernelGraphGenerator::update_best_graph(kernel::Graph &g) {
   // std::cerr << "kernel graph candidate: " << json(g) << std::endl;
-  ProfileResult result{0};
-  for (auto op : g.operators) {
-    ProfileResult op_result;
-    op->profile(op_result);
-    result.run_time += op_result.run_time;
-  }
+  ProfileResult result = g.profile();
   if (result.run_time < best_profile_result.run_time) {
     best_graph = json(g);
     best_profile_result = result;

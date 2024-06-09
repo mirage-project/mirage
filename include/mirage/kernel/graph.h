@@ -33,6 +33,7 @@ private:
 
 public:
   Graph(void);
+  ~Graph();
   // input operator
   DTensor new_input(std::vector<int> const &dims,
                     mirage::type::DataType data_type,
@@ -77,6 +78,12 @@ public:
                                   mirage::threadblock::Graph const &_graph);
   KNOperator *create_customized_op(std::vector<DTensor> const &inputs,
                                    mirage::threadblock::Graph const &_graph);
+  // memory management
+  void allocate_all_tensors(bool allocate_fingerprint = true);
+  void free_all_tensors();
+  DeviceMemoryOffsetManager *dmm;
+  // profile
+  ProfileResult profile();
   // helper functions
   void generate_triton_program(char const *filepath);
   std::vector<mirage::kernel::KNOperator *> operators;
@@ -84,7 +91,6 @@ public:
   // std::unordered_map<std::pair<int, int>, std::pair<int, int>, pair_hash>
   // edges; std::vector<std::vector<SrcEdge>> edges;
   // mirage::kernel::OperatorFactory *operator_factory;
-  DeviceMemoryManagerWrapper *dmm;
 };
 
 void to_json(json &j, Graph const &g);
