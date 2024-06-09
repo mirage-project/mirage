@@ -13,6 +13,7 @@
 # limitations under the License.
 #
 import os
+from os import path
 import sys
 import sysconfig
 from setuptools import find_packages
@@ -30,16 +31,23 @@ def config_cython():
     try:
         from Cython.Build import cythonize
         ret = []
-        path = "mirage/_cython"
-        for fn in os.listdir(path):
+        cython_path = path.join(path.dirname(__file__), "mirage/_cython")
+        mirage_path = path.join(path.dirname(__file__), "..")
+        for fn in os.listdir(cython_path):
             if not fn.endswith(".pyx"):
                 continue
             ret.append(Extension(
                 "mirage.%s" % fn[:-4],
-                ["%s/%s" % (path, fn)],
-                include_dirs=["../include", "../deps/json/include", "../deps/cutlass/include", "/usr/local/cuda/include"],
+                ["%s/%s" % (cython_path, fn)],
+                include_dirs=[path.join(mirage_path, "include"),
+                              path.join(mirage_path, "deps", "json", "include"),
+                              path.join(mirage_path, "deps", "cutlass", "include"),
+                              "/usr/local/cuda/include"],
                 libraries=["mirage_runtime", "cudadevrt", "cudart_static", "cudnn", "cublas", "cudart", "cuda", "z3"],
-                library_dirs=["../build", "../deps/z3/build", "/usr/local/cuda/lib64", "/usr/local/cuda/lib64/stubs"],
+                library_dirs=[path.join(mirage_path, "build"),
+                              path.join(mirage_path, "deps", "z3", "build"),
+                              "/usr/local/cuda/lib64",
+                              "/usr/local/cuda/lib64/stubs"],
                 extra_compile_args=["-std=c++17"],
                 extra_link_args=["-fPIC"],
                 language="c++"))
