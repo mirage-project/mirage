@@ -30,7 +30,7 @@ DTensor::DTensor() {
   }
   owner_op = nullptr;
   owner_ts_idx = -1000;
-  data_ptr = nullptr;
+  data_offset = -1000;
 }
 
 /*
@@ -64,7 +64,7 @@ size_t hash<mirage::kernel::DTensor>::operator()(
   }
   hash_combine(ret, tensor.owner_op);
   hash_combine(ret, tensor.owner_ts_idx);
-  hash_combine(ret, tensor.data_ptr);
+  hash_combine(ret, tensor.data_offset);
   return ret;
 }
 

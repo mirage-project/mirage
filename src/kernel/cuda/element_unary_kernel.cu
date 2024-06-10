@@ -46,10 +46,12 @@ bool KNElementUnaryOp::profile(ProfileResult &result) {
   assert(input_tensors[0].num_elements() == output_tensors[0].num_elements());
   assert(input_tensors[0].data_type == DT_FLOAT16);
   assert(output_tensors[0].data_type == DT_FLOAT16);
-  cutlass::half_t *input_ptr =
-      static_cast<cutlass::half_t *>(input_tensors[0].data_ptr);
-  cutlass::half_t *output_ptr =
-      static_cast<cutlass::half_t *>(output_tensors[0].data_ptr);
+  mirage::kernel::DeviceMemoryManager *dmm =
+      mirage::kernel::DeviceMemoryManager::get_instance();
+  cutlass::half_t *input_ptr = reinterpret_cast<cutlass::half_t *>(
+      dmm->base_ptr + input_tensors[0].data_offset);
+  cutlass::half_t *output_ptr = reinterpret_cast<cutlass::half_t *>(
+      dmm->base_ptr + output_tensors[0].data_offset);
   int num_elements = input_tensors[0].num_elements();
   int const num_threads_per_blk = 1024;
   int num_blocks =
@@ -102,11 +104,16 @@ bool KNElementUnaryOp::fingerprint(void) {
       (num_elements + num_threads_per_blk - 1) / num_threads_per_blk;
   mirage::kernel::DeviceMemoryManager *dmm =
       mirage::kernel::DeviceMemoryManager::get_instance();
+  mirage::type::FPType *input_fp_ptr = reinterpret_cast<mirage::type::FPType *>(
+      dmm->base_ptr + input_tensors[0].fp_offset);
+  mirage::type::FPType *output_fp_ptr =
+      reinterpret_cast<mirage::type::FPType *>(dmm->base_ptr +
+                                               output_tensors[0].fp_offset);
   compute_elementunary_fingerprint<<<num_blocks, num_threads_per_blk>>>(
       op_type,
       dmm->exp_lookup_table,
-      input_tensors[0].fp_ptr,
-      output_tensors[0].fp_ptr,
+      input_fp_ptr,
+      output_fp_ptr,
       num_elements);
   checkCUDA(cudaDeviceSynchronize());
   return true;

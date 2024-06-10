@@ -54,7 +54,7 @@ struct alignas(16) DTensor {
     if (owner_ts_idx != b.owner_ts_idx) {
       return false;
     }
-    assert(data_ptr == b.data_ptr);
+    assert(data_offset == b.data_offset);
     return true;
   }
   inline bool operator!=(DTensor const &b) const {
@@ -81,7 +81,7 @@ struct alignas(16) DTensor {
     if (owner_ts_idx != b.owner_ts_idx) {
       return true;
     }
-    assert(data_ptr == b.data_ptr);
+    assert(data_offset == b.data_offset);
     return false;
   }
 
@@ -116,9 +116,13 @@ struct alignas(16) DTensor {
   KNOperator *owner_op;
   int owner_ts_idx;
   // pointer to data
-  void *data_ptr;
+  // void *data_ptr;
+  // offset in device memory
+  int64_t data_offset;
   // pointer to fingerprint
-  mirage::type::FPType *fp_ptr;
+  // mirage::type::FPType *fp_ptr;
+  // offset in device memory
+  int64_t fp_offset;
 
   static int next_guid;
 };

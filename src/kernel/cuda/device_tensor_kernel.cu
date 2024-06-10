@@ -13,6 +13,7 @@
  * limitations under the License.
  */
 
+#include "mirage/kernel/device_memory_manager.h"
 #include "mirage/kernel/device_tensor.h"
 #include "mirage/utils/cuda_helper.h"
 
@@ -34,11 +35,18 @@ bool DTensor::has_same_fingerprint(DTensor const &ref) const {
       return false;
     }
   }
+  mirage::kernel::DeviceMemoryManager *dmm =
+      mirage::kernel::DeviceMemoryManager::get_instance();
   mirage::type::FPType *A = (mirage::type::FPType *)malloc(fingerprint_size());
   mirage::type::FPType *B = (mirage::type::FPType *)malloc(fingerprint_size());
-  checkCUDA(cudaMemcpy(A, fp_ptr, fingerprint_size(), cudaMemcpyDeviceToHost));
-  checkCUDA(
-      cudaMemcpy(B, ref.fp_ptr, fingerprint_size(), cudaMemcpyDeviceToHost));
+  checkCUDA(cudaMemcpy(A,
+                       dmm->base_ptr + fp_offset,
+                       fingerprint_size(),
+                       cudaMemcpyDeviceToHost));
+  checkCUDA(cudaMemcpy(B,
+                       dmm->base_ptr + ref.fp_offset,
+                       fingerprint_size(),
+                       cudaMemcpyDeviceToHost));
   int num_elements = (int)this->num_elements();
   for (int i = 0; i < num_elements; i++) {
     if (A[i] != B[i]) {

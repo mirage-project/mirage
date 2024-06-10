@@ -41,7 +41,7 @@ public:
   char *base_ptr;
   off_t offset;
   size_t total_size;
-  std::vector<std::pair<void *, size_t>> allocated_tensors;
+  std::vector<std::pair<int64_t, size_t>> allocated_tensors;
   // fingerprint related fields
   mirage::type::FPType *exp_lookup_table;
   mirage::type::FPType *div_p_lookup_table;

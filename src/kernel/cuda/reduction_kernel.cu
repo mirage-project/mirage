@@ -44,10 +44,12 @@ __global__ void execute_reduction(DT *input_ptr,
 bool KNReductionOp::profile(ProfileResult &result) {
   assert(input_tensors[0].data_type == DT_FLOAT16);
   assert(output_tensors[0].data_type == DT_FLOAT16);
-  cutlass::half_t *input_ptr =
-      static_cast<cutlass::half_t *>(input_tensors[0].data_ptr);
-  cutlass::half_t *output_ptr =
-      static_cast<cutlass::half_t *>(output_tensors[0].data_ptr);
+  mirage::kernel::DeviceMemoryManager *dmm =
+      mirage::kernel::DeviceMemoryManager::get_instance();
+  cutlass::half_t *input_ptr = reinterpret_cast<cutlass::half_t *>(
+      dmm->base_ptr + input_tensors[0].data_offset);
+  cutlass::half_t *output_ptr = reinterpret_cast<cutlass::half_t *>(
+      dmm->base_ptr + output_tensors[0].data_offset);
   int num_input_elements = input_tensors[0].num_elements();
   int num_output_elements = output_tensors[0].num_elements();
   int const num_threads_per_blk = 1024;
@@ -118,9 +120,17 @@ bool KNReductionOp::fingerprint(void) {
   int reduction_factor = input_tensors[0].dim[reduction_dim_idx] /
                          output_tensors[0].dim[reduction_dim_idx];
   assert(output_stride * reduction_factor == input_stride);
+  mirage::kernel::DeviceMemoryManager *dmm =
+      mirage::kernel::DeviceMemoryManager::get_instance();
+  mirage::type::FPType *input_fp_ptr = reinterpret_cast<mirage::type::FPType *>(
+      dmm->base_ptr + input_tensors[0].fp_offset);
+  mirage::type::FPType *output_fp_ptr =
+      reinterpret_cast<mirage::type::FPType *>(dmm->base_ptr +
+                                               output_tensors[0].fp_offset);
+
   compute_reduction_fingerprint<<<num_blocks, num_threads_per_blk>>>(
-      input_tensors[0].fp_ptr,
-      output_tensors[0].fp_ptr,
+      input_fp_ptr,
+      output_fp_ptr,
       num_elements,
       reduction_factor,
       input_stride,

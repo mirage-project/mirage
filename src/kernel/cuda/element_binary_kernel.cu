@@ -54,12 +54,14 @@ bool KNElementBinaryOp::profile(ProfileResult &result) {
   assert(input_tensors[0].data_type == DT_FLOAT16);
   assert(input_tensors[1].data_type == DT_FLOAT16);
   assert(output_tensors[0].data_type == DT_FLOAT16);
-  cutlass::half_t *input1_ptr =
-      static_cast<cutlass::half_t *>(input_tensors[0].data_ptr);
-  cutlass::half_t *input2_ptr =
-      static_cast<cutlass::half_t *>(input_tensors[1].data_ptr);
-  cutlass::half_t *output_ptr =
-      static_cast<cutlass::half_t *>(output_tensors[0].data_ptr);
+  mirage::kernel::DeviceMemoryManager *dmm =
+      mirage::kernel::DeviceMemoryManager::get_instance();
+  cutlass::half_t *input1_ptr = reinterpret_cast<cutlass::half_t *>(
+      dmm->base_ptr + input_tensors[0].data_offset);
+  cutlass::half_t *input2_ptr = reinterpret_cast<cutlass::half_t *>(
+      dmm->base_ptr + input_tensors[1].data_offset);
+  cutlass::half_t *output_ptr = reinterpret_cast<cutlass::half_t *>(
+      dmm->base_ptr + output_tensors[0].data_offset);
 
   int num_elements = output_tensors[0].num_elements();
   int factor1 =
@@ -96,12 +98,23 @@ bool KNElementBinaryOp::profile(ProfileResult &result) {
 
 __global__ void
     compute_elementbinary_fingerprint(mirage::type::KNOperatorType type,
+                                      char *dmem_base_ptr,
                                       FPType *div_p_lookup_table,
                                       FPType *div_q_lookup_table,
                                       mirage::kernel::DTensor input1,
                                       mirage::kernel::DTensor input2,
                                       mirage::kernel::DTensor output,
                                       int num_elements) {
+  mirage::type::FPType *input1_fp_ptr =
+      reinterpret_cast<mirage::type::FPType *>(dmem_base_ptr +
+                                               input1.fp_offset);
+  mirage::type::FPType *input2_fp_ptr =
+      reinterpret_cast<mirage::type::FPType *>(dmem_base_ptr +
+                                               input2.fp_offset);
+  mirage::type::FPType *output_fp_ptr =
+      reinterpret_cast<mirage::type::FPType *>(dmem_base_ptr +
+                                               output.fp_offset);
+
   int i = threadIdx.x + blockIdx.x * blockDim.x;
   if (type == mirage::type::KN_ADD_OP) {
     if (i < num_elements) {
@@ -114,10 +127,10 @@ __global__ void
         input2_stride *= input2.dim[d];
         i /= output.dim[d];
       }
-      uint32_t x = input1.fp_ptr[input1_idx];
-      uint32_t y = input2.fp_ptr[input2_idx];
+      uint32_t x = input1_fp_ptr[input1_idx];
+      uint32_t y = input2_fp_ptr[input2_idx];
       uint32_t z = (x + y) % FP_PQ;
-      output.fp_ptr[threadIdx.x + blockIdx.x * blockDim.x] = z;
+      output_fp_ptr[threadIdx.x + blockIdx.x * blockDim.x] = z;
       // printf("add: output[%d] = %d input1[%d] = %d input2[%d] = %d\n",
       //     threadIdx.x + blockIdx.x * blockDim.x, z % FP_PQ,
       //     input1_idx, x, input2_idx, y);
@@ -133,10 +146,10 @@ __global__ void
         input2_stride *= input2.dim[d];
         i /= output.dim[d];
       }
-      uint32_t x = input1.fp_ptr[input1_idx];
-      uint32_t y = input2.fp_ptr[input2_idx];
+      uint32_t x = input1_fp_ptr[input1_idx];
+      uint32_t y = input2_fp_ptr[input2_idx];
       uint32_t z = (x * y) % FP_PQ;
-      output.fp_ptr[threadIdx.x + blockIdx.x * blockDim.x] = z;
+      output_fp_ptr[threadIdx.x + blockIdx.x * blockDim.x] = z;
       // printf("add: output[%d] = %d input1[%d] = %d input2[%d] = %d\n",
       //     threadIdx.x + blockIdx.x * blockDim.x, z % FP_PQ,
       //     input1_idx, x, input2_idx, y);
@@ -152,12 +165,12 @@ __global__ void
         input2_stride *= input2.dim[d];
         i /= output.dim[d];
       }
-      uint32_t x = input1.fp_ptr[input1_idx];
-      uint32_t y = input2.fp_ptr[input2_idx];
+      uint32_t x = input1_fp_ptr[input1_idx];
+      uint32_t y = input2_fp_ptr[input2_idx];
       uint32_t z =
           (x % FP_P) * div_p_lookup_table[y % FP_P] * FP_Q_MUL_P_MOD_1 +
           (x % FP_Q) * div_q_lookup_table[y % FP_Q] * FP_P_MUL_Q_MOD_1;
-      output.fp_ptr[threadIdx.x + blockIdx.x * blockDim.x] = z % FP_PQ;
+      output_fp_ptr[threadIdx.x + blockIdx.x * blockDim.x] = z % FP_PQ;
       // printf("div: output[%d] = %d input1[%d] = %d input2[%d] = %d\n",
       //     threadIdx.x + blockIdx.x * blockDim.x, z % FP_PQ,
       //     input1_idx, x, input2_idx, y);
@@ -188,6 +201,7 @@ bool KNElementBinaryOp::fingerprint(void) {
       mirage::kernel::DeviceMemoryManager::get_instance();
   compute_elementbinary_fingerprint<<<num_blocks, num_threads_per_blk>>>(
       op_type,
+      dmm->base_ptr,
       dmm->div_p_lookup_table,
       dmm->div_q_lookup_table,
       input_tensors[0],

@@ -30,8 +30,8 @@ struct alignas(16) NewKernelParams {
   int num_operators, num_parameters, num_dmem_inputs, num_dmem_outputs;
   int parameters[MAX_NUM_PARAMETERS];
   mirage::type::TBOperatorType operator_types[MAX_NUM_OPERATORS];
-  void *dmem_input_ptrs[MAX_NUM_DMEM_INPUTS];
-  void *dmem_output_ptrs[MAX_NUM_DMEM_OUTPUTS];
+  int64_t dmem_input_offsets[MAX_NUM_DMEM_INPUTS];
+  int64_t dmem_output_offsets[MAX_NUM_DMEM_OUTPUTS];
 };
 
 struct alignas(16) KernelParams {

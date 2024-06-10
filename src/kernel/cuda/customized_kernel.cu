@@ -37,7 +37,9 @@ namespace mirage {
 namespace kernel {
 
 __global__ void customized_kernel_function(
-    mirage::threadblock::NewKernelParams const new_params, int forloop_range) {
+    mirage::threadblock::NewKernelParams const new_params,
+    int forloop_range,
+    char *dmem_base_ptr) {
   // since we are using cutlass, we group all threads within a threadblock
   // as a 1-D list of threads, therefore blockDim.y and blockDim.z must be
   // 1
@@ -55,7 +57,7 @@ __global__ void customized_kernel_function(
       mirage::type::TBOperatorType op_type = new_params.operator_types[op];
       if (op_type == mirage::type::TB_INPUT_OP) {
         // Assume that InputLoaders are the first operators
-        void *dtensor_ptr = new_params.dmem_input_ptrs[op];
+        char *dtensor_ptr = dmem_base_ptr + new_params.dmem_input_offsets[op];
         int3 input_matrix_row_offset_block_stride;
         int3 input_matrix_column_offset_block_stride;
         int input_matrix_row_offset_forloop_stride;
@@ -248,8 +250,9 @@ __global__ void customized_kernel_function(
       new_params.num_operators - new_params.num_dmem_outputs;
   for (int op = output_saver_start_idx; op < new_params.num_operators; op++) {
     assert(new_params.operator_types[op] == mirage::type::TB_OUTPUT_OP);
-    void *dtensor_ptr =
-        new_params.dmem_output_ptrs[op - output_saver_start_idx];
+    char *dtensor_ptr =
+        dmem_base_ptr +
+        new_params.dmem_output_offsets[op - output_saver_start_idx];
     int3 output_matrix_row_offset_block_stride;
     int3 output_matrix_column_offset_block_stride;
     int3 global_offset_block_stride;
@@ -309,6 +312,7 @@ __global__ void customized_kernel_function(
 __global__ void compute_customizedop_fingerprint(
     mirage::threadblock::NewKernelParams new_params,
     int forloop_range,
+    char *dmem_base_ptr,
     mirage::type::FPType *exp_lookup_table,
     mirage::type::FPType *div_p_lookup_table,
     mirage::type::FPType *div_q_lookup_table) {
@@ -329,7 +333,8 @@ __global__ void compute_customizedop_fingerprint(
       switch (new_params.operator_types[op]) {
         case mirage::type::TB_INPUT_OP: {
           mirage::type::FPType *dtensor_ptr =
-              (mirage::type::FPType *)new_params.dmem_input_ptrs[op];
+              (mirage::type::FPType *)(dmem_base_ptr +
+                                       new_params.dmem_input_offsets[op]);
           int3 input_matrix_row_offset_block_stride;
           int3 input_matrix_column_offset_block_stride;
           int input_matrix_row_offset_forloop_stride;
@@ -425,8 +430,10 @@ __global__ void compute_customizedop_fingerprint(
           if (i == forloop_range - 1) {
             assert(op >= output_saver_start_idx);
             mirage::type::FPType *dtensor_ptr =
-                (mirage::type::FPType *)
-                    new_params.dmem_output_ptrs[op - output_saver_start_idx];
+                (mirage::type::FPType
+                     *)(dmem_base_ptr +
+                        new_params
+                            .dmem_output_offsets[op - output_saver_start_idx]);
             int tb_offset_row =
                 blockIdx.x * output_matrix_row_offset_block_stride.x +
                 blockIdx.y * output_matrix_row_offset_block_stride.y +
@@ -607,13 +614,15 @@ __global__ void compute_customizedop_fingerprint(
 }
 
 void KNCustomizedOp::run() {
+  mirage::kernel::DeviceMemoryManager *dmm =
+      mirage::kernel::DeviceMemoryManager::get_instance();
   // mirage::threadblock::KernelParams params = bgraph.get_kernel_params();
   mirage::threadblock::NewKernelParams new_params =
       bgraph.get_new_kernel_params(false /*fingerprint_kernel*/);
   customized_kernel_function<<<bgraph.grid_dim,
                                bgraph.block_dim,
-                               bgraph.smem_offset>>>(new_params,
-                                                     bgraph.forloop_range);
+                               bgraph.smem_offset>>>(
+      new_params, bgraph.forloop_range, dmm->base_ptr);
 }
 
 bool KNCustomizedOp::profile(ProfileResult &result) {
@@ -629,21 +638,23 @@ bool KNCustomizedOp::profile(ProfileResult &result) {
   cudaEvent_t events[2];
   checkCUDA(cudaEventCreate(&events[0]));
   checkCUDA(cudaEventCreate(&events[1]));
+  mirage::kernel::DeviceMemoryManager *dmm =
+      mirage::kernel::DeviceMemoryManager::get_instance();
   // mirage::threadblock::KernelParams params = bgraph.get_kernel_params();
   mirage::threadblock::NewKernelParams new_params =
       bgraph.get_new_kernel_params(false /*fingerprint_kernel*/);
   for (int i = 0; i < 1024; i++) {
     customized_kernel_function<<<bgraph.grid_dim,
                                  bgraph.block_dim,
-                                 bgraph.smem_offset>>>(new_params,
-                                                       bgraph.forloop_range);
+                                 bgraph.smem_offset>>>(
+        new_params, bgraph.forloop_range, dmm->base_ptr);
   }
   checkCUDA(cudaEventRecord(events[0]));
   for (int i = 0; i < ProfileResult::NUM_ITERATIONS; i++) {
     customized_kernel_function<<<bgraph.grid_dim,
                                  bgraph.block_dim,
-                                 bgraph.smem_offset>>>(new_params,
-                                                       bgraph.forloop_range);
+                                 bgraph.smem_offset>>>(
+        new_params, bgraph.forloop_range, dmm->base_ptr);
   }
   float runtime_ms = 0;
   checkCUDA(cudaEventRecord(events[1]));
@@ -674,6 +685,7 @@ bool KNCustomizedOp::fingerprint(void) {
                                      bgraph.smem_offset>>>(
       new_params,
       bgraph.forloop_range,
+      dmm->base_ptr,
       dmm->exp_lookup_table,
       dmm->div_p_lookup_table,
       dmm->div_q_lookup_table);
