@@ -7,6 +7,7 @@
 
 #include <fstream>
 #include <iostream>
+#include <thread>
 
 namespace mirage {
 namespace search {
@@ -131,20 +132,22 @@ std::vector<typename GraphType::TensorType> get_output_tensors(GraphType const &
 }
 
 void KernelGraphGenerator::enqueue(SearchContext c) {
-  // TODO: make it thread-safe
+  std::lock_guard<std::mutex> lock(queue_mutex);
   search_queue.push(c);
+  queue_cv.notify_all();
 }
 
 SearchContext KernelGraphGenerator::dequeue() {
-  // TODO: make it thread-safe
+  std::unique_lock<std::mutex> lock(queue_mutex);
+  queue_cv.wait(lock, [&] {return !search_queue.empty(); });
   SearchContext c = search_queue.front();
   search_queue.pop();
   return c;
 }
 
 bool KernelGraphGenerator::search_finished() {
-  // TODO: make it thread-safe
-  return search_queue.empty();
+  std::lock_guard<std::mutex> lock(queue_mutex);
+  return num_active_thread == 0 && search_queue.empty();
 }
 
 void KernelGraphGenerator::generate_next_operator() {
@@ -303,6 +306,14 @@ void KernelGraphGenerator::generate_next_operator() {
   }
 }
 
+void KernelGraphGenerator::launch_thread() {
+  while (!search_finished()) {
+    num_active_thread++;
+    generate_next_operator();
+    num_active_thread--;
+  }
+}
+
 bool KernelGraphGenerator::create_tb_outputs(SearchContext &c, int3 output_map) {
   std::vector<STensor> output_tensors;
   // TODO: get all output tensors
@@ -350,9 +361,13 @@ void KernelGraphGenerator::generate_kernel_graphs() {
 
   process_outputs();
 
-  // TODO: parallelize it
-  while (!search_finished()) {
-    generate_next_operator();
+  int n = std::thread::hardware_concurrency();
+  std::vector<std::thread> threads;
+  for (int i = 0; i < n; ++i) {
+    threads.push_back(std::thread(&KernelGraphGenerator::launch_thread, this));
+  }
+  for (int i = 0; i < n; ++i) {
+    threads[i].join();
   }
 
   save_checkpoint();

@@ -3,6 +3,9 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <queue>
+#include <mutex>
+#include <condition_variable>
+#include <atomic>
 
 #include "mirage/search/config.h"
 #include "mirage/search/dim_strategy.h"
@@ -85,22 +88,17 @@ private:
   int num_total_random_tests;
   int num_valid_kernel_graphs;
 
-  // std::vector<LayerCheckpoint> callstack;
   std::queue<SearchContext> search_queue;
+  std::mutex queue_mutex;
+  std::condition_variable queue_cv;
+  std::atomic<int> num_active_thread;
   void enqueue(SearchContext);
   SearchContext dequeue();
   bool search_finished();
+  void launch_thread();
 
   void generate_next_operator();
 
-  // void generate_next_tb_operator(
-  //     SearchContext<STensor> &c,
-  //     threadblock::Graph &g,
-  //     std::function<void(int)> const &create_customized_then_next_kn,
-  //     int depth);
-  // void generate_next_kn_operator(SearchContext<DTensor> &c,
-  //                                kernel::Graph &g,
-  //                                int depth);
   void optimize_layout(
       kernel::Graph &g, int op_idx, int ts_idx, int bop_idx, int bts_idx);
   void update_best_graph(kernel::Graph &g);
