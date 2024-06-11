@@ -91,6 +91,9 @@ public:
   // std::unordered_map<std::pair<int, int>, std::pair<int, int>, pair_hash>
   // edges; std::vector<std::vector<SrcEdge>> edges;
   // mirage::kernel::OperatorFactory *operator_factory;
+
+  using OpType = KNOperator;
+  using TensorType = DTensor;
 };
 
 void to_json(json &j, Graph const &g);

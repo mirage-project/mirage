@@ -114,6 +114,9 @@ public:
   // memory allocator
   off_t smem_offset;
   std::vector<std::pair<off_t, size_t>> allocated_tensors;
+
+  using OpType = TBOperator;
+  using TensorType = STensor;
 };
 
 } // namespace threadblock
