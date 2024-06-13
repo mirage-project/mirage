@@ -71,13 +71,18 @@ except FileNotFoundError:
   try:
       mirage_path = os.environ.get('MIRAGE')
       if not mirage_path:
-          print("Please set the MIRAGE environment variable to the path of the mirage source directory.")
-          raise SystemExit(1)
+        print("Please set the MIRAGE environment variable to the path of the mirage source directory.")
+        raise SystemExit(1)
+    #   ld_library_path = os.environ.get('LD_LIBRARY_PATH')
+    #   if not ld_library_path:
+    #     print("Please set the LD_LIBRARY_PATH environment variable.")
+    #     raise SystemExit(1)
+         
       z3_path = os.path.join(mirage_path, 'deps', 'z3')
       build_dir = os.path.join(z3_path, 'build')
       os.makedirs(build_dir, exist_ok=True)
       os.chdir(build_dir)
-      print("finished making 'build' directory")
+      print(f"Changed to directory: {os.getcwd()}")
       print(f"running cmake command at {build_dir}")
       subprocess.check_call(['cmake', '..'], cwd=build_dir)
       print("finished running cmake command")
@@ -85,11 +90,10 @@ except FileNotFoundError:
       subprocess.check_call(['make', '-j'], cwd=build_dir)
       print("running make command")
 
-
-
-
       # update LD_LIBRARY_PATH
-      os.environ['LD_LIBRARY_PATH'] = f"{build_dir}:{os.environ.get('LD_LIBRARY','')}"
+      print("here")
+      print(f"{build_dir}:{os.environ.get('LD_LIBRARY_PATH','')}")
+      os.environ['LD_LIBRARY_PATH'] = f"{build_dir}:{os.environ.get('LD_LIBRARY_PATH','LD_LIBRARY_PATH')}"
       print("Z3 installed successfully.")
 
 
@@ -105,15 +109,20 @@ try:
   if not mirage_path:
       print("Please set the MIRAGE environment variable to the path of the mirage source directory.")
       raise SystemExit(1)
-  z3_path = os.path.join(mirage_path, 'deps', 'z3')
-  build_dir = os.path.join(z3_path, 'build')
-  os.environ['Z3_DIR'] = build_dir
-  os.makedirs(build_dir, exist_ok=True)
-  os.chdir(build_dir)
-  subprocess.check_call(['cmake', '..'], cwd=build_dir)
-  subprocess.check_call(['make', '-j'], cwd=build_dir)
-  print("Mirage runtime library built successfully.")
+  z3_path = os.path.join(mirage_path, 'deps', 'z3', 'build')
+  os.environ['Z3_DIR'] = z3_path
 
+  os.makedirs(mirage_path, exist_ok=True)
+  os.chdir(mirage_path)
+  build_dir = os.path.join(mirage_path, 'build')
+  
+  # Create the build directory if it does not exist
+  os.makedirs(build_dir, exist_ok=True)
+  
+  subprocess.check_call(['cmake', '..'], cwd=build_dir, env=os.environ.copy())
+  subprocess.check_call(['make', '-j'], cwd=build_dir, env=os.environ.copy())
+  print("Mirage runtime library built successfully.")
+  # import pdb; pdb.set_trace()
 
 
 
