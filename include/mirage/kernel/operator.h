@@ -23,28 +23,37 @@
 namespace mirage {
 namespace kernel {
 
+class Graph;
+
 class KNOperator {
 public:
-  KNOperator(mirage::type::KNOperatorType _type);
-  KNOperator(mirage::type::KNOperatorType _type, DTensor const &input1);
-  KNOperator(mirage::type::KNOperatorType _type,
+  KNOperator(Graph *graph, mirage::type::KNOperatorType _type);
+  KNOperator(Graph *graph,
+             mirage::type::KNOperatorType _type,
+             DTensor const &input1);
+  KNOperator(Graph *graph,
+             mirage::type::KNOperatorType _type,
              DTensor const &input1,
              DTensor const &input2);
-  KNOperator(mirage::type::KNOperatorType _type,
+  KNOperator(Graph *graph,
+             mirage::type::KNOperatorType _type,
              std::vector<DTensor> const &inputs);
   virtual ~KNOperator();
   virtual bool profile(ProfileResult &result) = 0;
   virtual bool fingerprint(void) = 0;
+  virtual operator json() const = 0;
+
+public:
+  Graph *kgraph;
   mirage::type::KNOperatorType op_type;
   std::vector<DTensor> input_tensors;
   std::vector<DTensor> output_tensors;
-
-  virtual operator json() const = 0;
 };
 
 class KNInputOp : public KNOperator {
 public:
-  KNInputOp(std::vector<int> const &dims,
+  KNInputOp(Graph *_graph,
+            std::vector<int> const &dims,
             mirage::type::DataType data_type,
             mirage::layout::DmemLayout layout);
   ~KNInputOp();

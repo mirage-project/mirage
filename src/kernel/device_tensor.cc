@@ -31,6 +31,7 @@ DTensor::DTensor() {
   owner_op = nullptr;
   owner_ts_idx = -1000;
   data_offset = -1000;
+  fp_offset = -1000;
 }
 
 /*

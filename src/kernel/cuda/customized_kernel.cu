@@ -15,6 +15,7 @@
 
 #include "mirage/kernel/customized.h"
 #include "mirage/kernel/device_memory_manager.h"
+#include "mirage/kernel/graph.h"
 #include "mirage/threadblock/cuda/concat.h"
 #include "mirage/threadblock/cuda/element_binary.h"
 #include "mirage/threadblock/cuda/element_unary.h"
@@ -619,21 +620,28 @@ void KNCustomizedOp::run() {
   // mirage::threadblock::KernelParams params = bgraph.get_kernel_params();
   mirage::threadblock::NewKernelParams new_params =
       bgraph.get_new_kernel_params(false /*fingerprint_kernel*/);
+  // Assume a single GPU for now
+  assert(kgraph->gpu_dim.x == 1);
+  int gpu_id = 0;
   customized_kernel_function<<<bgraph.grid_dim,
                                bgraph.block_dim,
                                bgraph.smem_offset>>>(
-      new_params, bgraph.forloop_range, dmm->base_ptr);
+      new_params, bgraph.forloop_range, dmm->base_ptr[gpu_id]);
 }
 
 bool KNCustomizedOp::profile(ProfileResult &result) {
   printf("smem_offset = %d\n", bgraph.smem_offset);
-  int max_smem_size = mirage::type::MAX_SMEM_SIZE;
+  int max_smem_size = mirage::config::MAX_SMEM_SIZE;
   assert(bgraph.smem_offset <= max_smem_size);
   if (bgraph.smem_offset > 48 * 1024) {
     checkCUDA(cudaFuncSetAttribute(customized_kernel_function,
                                    cudaFuncAttributeMaxDynamicSharedMemorySize,
                                    bgraph.smem_offset));
   }
+  // Assume a single GPU for now
+  assert(kgraph->gpu_dim.x == 1);
+  int gpu_id = 0;
+
   checkCUDA(cudaDeviceSynchronize());
   cudaEvent_t events[2];
   checkCUDA(cudaEventCreate(&events[0]));
@@ -647,14 +655,14 @@ bool KNCustomizedOp::profile(ProfileResult &result) {
     customized_kernel_function<<<bgraph.grid_dim,
                                  bgraph.block_dim,
                                  bgraph.smem_offset>>>(
-        new_params, bgraph.forloop_range, dmm->base_ptr);
+        new_params, bgraph.forloop_range, dmm->base_ptr[gpu_id]);
   }
   checkCUDA(cudaEventRecord(events[0]));
   for (int i = 0; i < ProfileResult::NUM_ITERATIONS; i++) {
     customized_kernel_function<<<bgraph.grid_dim,
                                  bgraph.block_dim,
                                  bgraph.smem_offset>>>(
-        new_params, bgraph.forloop_range, dmm->base_ptr);
+        new_params, bgraph.forloop_range, dmm->base_ptr[gpu_id]);
   }
   float runtime_ms = 0;
   checkCUDA(cudaEventRecord(events[1]));
@@ -668,10 +676,13 @@ bool KNCustomizedOp::profile(ProfileResult &result) {
 }
 
 bool KNCustomizedOp::fingerprint(void) {
-  int max_smem_size = mirage::type::MAX_SMEM_SIZE;
+  int max_smem_size = mirage::config::MAX_SMEM_SIZE;
   // mirage::threadblock::KernelParams params = bgraph.get_kernel_params();
   mirage::threadblock::NewKernelParams new_params =
       bgraph.get_new_kernel_params(true /*fingerprint_kernel*/);
+  // assume a single GPU
+  assert(kgraph->gpu_dim.x == 1);
+  int gpu_id = 0;
   assert(bgraph.smem_offset <= max_smem_size);
   mirage::kernel::DeviceMemoryManager *dmm =
       mirage::kernel::DeviceMemoryManager::get_instance();
@@ -680,15 +691,25 @@ bool KNCustomizedOp::fingerprint(void) {
                                    cudaFuncAttributeMaxDynamicSharedMemorySize,
                                    bgraph.smem_offset));
   }
+
+  char *base_ptr = dmm->base_ptr[gpu_id];
+  mirage::type::FPType *exp_lookup_table =
+      reinterpret_cast<mirage::type::FPType *>(base_ptr +
+                                               dmm->exp_lookup_table_offset);
+  mirage::type::FPType *div_p_lookup_table =
+      reinterpret_cast<mirage::type::FPType *>(base_ptr +
+                                               dmm->div_p_lookup_table_offset);
+  mirage::type::FPType *div_q_lookup_table =
+      reinterpret_cast<mirage::type::FPType *>(base_ptr +
+                                               dmm->div_q_lookup_table_offset);
   compute_customizedop_fingerprint<<<bgraph.grid_dim,
                                      bgraph.block_dim,
-                                     bgraph.smem_offset>>>(
-      new_params,
-      bgraph.forloop_range,
-      dmm->base_ptr,
-      dmm->exp_lookup_table,
-      dmm->div_p_lookup_table,
-      dmm->div_q_lookup_table);
+                                     bgraph.smem_offset>>>(new_params,
+                                                           bgraph.forloop_range,
+                                                           base_ptr,
+                                                           exp_lookup_table,
+                                                           div_p_lookup_table,
+                                                           div_q_lookup_table);
   checkCUDA(cudaDeviceSynchronize());
   return true;
 }

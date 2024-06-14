@@ -28,27 +28,33 @@ namespace kernel {
 class DeviceMemoryManager {
 public:
   static DeviceMemoryManager *singleton;
-  DeviceMemoryManager(void);
+  DeviceMemoryManager(int num_gpus);
   ~DeviceMemoryManager(void);
-  bool allocate(DTensor &tensor, bool allocate_fingerprint = true);
-  bool free(DTensor &tensor);
+  // bool allocate(DTensor &tensor, bool allocate_fingerprint = true);
+  // bool free(DTensor &tensor);
 
 public:
   static DeviceMemoryManager *get_instance();
 
 public:
-  // fields for managing the preallocated cuda buffer
-  char *base_ptr;
-  off_t offset;
-  size_t total_size;
-  std::vector<std::pair<int64_t, size_t>> allocated_tensors;
+  // off_t offset;
+  // size_t per_gpu_memory_size;
+  // std::vector<std::pair<int64_t, size_t>> allocated_tensors;
   // fingerprint related fields
-  mirage::type::FPType *exp_lookup_table;
-  mirage::type::FPType *div_p_lookup_table;
-  mirage::type::FPType *div_q_lookup_table;
+  // mirage::type::FPType *exp_lookup_table;
+  // mirage::type::FPType *div_p_lookup_table;
+  // mirage::type::FPType *div_q_lookup_table;
+  int num_gpus;
+  off_t exp_lookup_table_offset;
+  off_t div_p_lookup_table_offset;
+  off_t div_q_lookup_table_offset;
+  off_t dmem_tensor_start_offset;
+  // fields for managing the preallocated cuda buffer
+  char *base_ptr[mirage::config::MAX_NUM_GPUS];
 
 public:
-  cublasHandle_t blas;
+  cudaStream_t stream[mirage::config::MAX_NUM_GPUS];
+  cublasHandle_t blas[mirage::config::MAX_NUM_GPUS];
   // cudnnHandle_t cudnn;
 };
 

@@ -14,6 +14,7 @@
  */
 
 #include "mirage/kernel/device_memory_manager.h"
+#include "mirage/kernel/graph.h"
 #include "mirage/kernel/operator.h"
 #include "mirage/utils/cuda_helper.h"
 
@@ -25,6 +26,7 @@ namespace mirage {
 namespace kernel {
 
 using namespace mirage::type;
+using namespace mirage::config;
 
 template <typename DT>
 __global__ void
@@ -41,6 +43,10 @@ __global__ void
 }
 
 bool KNInputOp::profile(ProfileResult &profile) {
+  // assert a single gpu
+  assert(kgraph->gpu_dim.x == 1);
+  int gpu_id = 0;
+
   profile.run_time = 0.0f;
   int const num_threads_per_blk = 1024;
   mirage::kernel::DeviceMemoryManager *dmm =
@@ -49,8 +55,10 @@ bool KNInputOp::profile(ProfileResult &profile) {
       (output_tensors[0].num_elements() + num_threads_per_blk - 1) /
       num_threads_per_blk;
   if (output_tensors[0].data_type == mirage::type::DT_FLOAT16) {
-    init_input<cutlass::half_t><<<num_blocks, num_threads_per_blk>>>(
-        dmm->base_ptr, output_tensors[0], output_tensors[0].num_elements());
+    init_input<cutlass::half_t>
+        <<<num_blocks, num_threads_per_blk>>>(dmm->base_ptr[gpu_id],
+                                              output_tensors[0],
+                                              output_tensors[0].num_elements());
   } else {
     assert(false && "Unsupported type");
   }
@@ -71,6 +79,9 @@ __global__ void init_input_fingerprint(char *dmem_base_ptr,
 }
 
 bool KNInputOp::fingerprint(void) {
+  // assert a single gpu
+  assert(kgraph->gpu_dim.x == 1);
+  int gpu_id = 0;
   int const num_threads_per_blk = 1024;
   mirage::kernel::DeviceMemoryManager *dmm =
       mirage::kernel::DeviceMemoryManager::get_instance();
@@ -78,7 +89,9 @@ bool KNInputOp::fingerprint(void) {
       (output_tensors[0].num_elements() + num_threads_per_blk - 1) /
       num_threads_per_blk;
   init_input_fingerprint<<<num_blocks, num_threads_per_blk>>>(
-      dmm->base_ptr, output_tensors[0], output_tensors[0].num_elements());
+      dmm->base_ptr[gpu_id],
+      output_tensors[0],
+      output_tensors[0].num_elements());
   checkCUDA(cudaDeviceSynchronize());
   return true;
 }

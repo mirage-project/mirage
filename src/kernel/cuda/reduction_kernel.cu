@@ -25,6 +25,7 @@ namespace mirage {
 namespace kernel {
 
 using namespace mirage::type;
+using namespace mirage::config;
 
 template <typename DT>
 __global__ void execute_reduction(DT *input_ptr,

@@ -14,6 +14,7 @@
  */
 
 #include "mirage/kernel/graph.h"
+#include "mirage/config.h"
 #include "mirage/utils/hash_utils.h"
 
 #include <iostream>
@@ -28,6 +29,74 @@ size_t Graph::pair_hash::operator()(std::pair<int, int> const &p) const {
   size_t h2 = std::hash<int>{}(p.second);
   hash_combine(h1, h2);
   return h1;
+}
+
+bool Graph::can_allocate(DTensor const &tensor, bool allocate_fingerprint) {
+  size_t accum_size = ((tensor.data_size() + 15) & ~15);
+  if (allocate_fingerprint) {
+    accum_size += ((tensor.fingerprint_size() + 15) & ~15);
+  }
+  if (dmem_offset + accum_size <= mirage::config::MAX_DMEM_SIZE) {
+    return true;
+  } else {
+    return false;
+  }
+}
+
+bool Graph::can_allocate(size_t size_in_bytes) {
+  if (dmem_offset + size_in_bytes <= mirage::config::MAX_DMEM_SIZE) {
+    return true;
+  } else {
+    return false;
+  }
+}
+
+bool Graph::allocate(DTensor &tensor, bool allocate_fingerprint) {
+  // assert that the start of the tensor is 16 bytes aligned
+  assert(dmem_offset % 16 == 0);
+  off_t ret = dmem_offset;
+
+  size_t aligns_size = ((tensor.data_size() + 15) & ~15);
+  dmem_offset += aligns_size;
+
+  allocated_tensors.push_back(std::make_pair(ret, aligns_size));
+  tensor.data_offset = ret;
+
+  if (allocate_fingerprint) {
+    assert(dmem_offset % 16 == 0);
+    ret = dmem_offset;
+    aligns_size = ((tensor.fingerprint_size() + 15) & ~15);
+    dmem_offset += aligns_size;
+    tensor.fp_offset = ret;
+    allocated_tensors.push_back(std::make_pair(ret, aligns_size));
+  }
+
+  // Assert that we haven't used more than what we pre-allocated
+  // assert(dmem_offset <= dmm->total_size);
+  return true;
+}
+
+void Graph::free(DTensor &tensor) {
+  // Currently assume that tensors are freed in the reverse order
+  // so ptr must be the last tensor we have created
+  // Note that a non-negative fp_offset means that we have
+  // allocated memory for its fingerprint
+
+  if (tensor.fp_offset >= 0) {
+    assert(allocated_tensors.size() > 0);
+    assert(allocated_tensors.back().first == tensor.fp_offset);
+    assert(allocated_tensors.back().second ==
+           ((tensor.fingerprint_size() + 15) & ~15));
+    dmem_offset -= allocated_tensors.back().second;
+    allocated_tensors.pop_back();
+    tensor.fp_offset = -1;
+  }
+  assert(allocated_tensors.size() > 0);
+  assert(allocated_tensors.back().first == tensor.data_offset);
+  assert(allocated_tensors.back().second == ((tensor.data_size() + 15) & ~15));
+  dmem_offset -= allocated_tensors.back().second;
+  allocated_tensors.pop_back();
+  tensor.data_offset = -1;
 }
 
 void to_json(json &j, Graph const &g) {

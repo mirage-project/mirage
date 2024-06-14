@@ -20,21 +20,17 @@ namespace mirage {
 namespace kernel {
 
 using namespace mirage::type;
+using namespace mirage::config;
 
 DeviceMemoryManager *DeviceMemoryManager::singleton = nullptr;
 
-DeviceMemoryManager::DeviceMemoryManager() {
-  // preallocate 10 GB of device memory
-  total_size = (size_t)10 * 1024 * 1024 * 1024;
-  offset = 0;
-  checkCUDA(cudaMalloc(&base_ptr, total_size));
-  checkCUDA(cublasCreate(&blas));
-  checkCUDA(cublasSetMathMode(blas, CUBLAS_TENSOR_OP_MATH));
+DeviceMemoryManager::DeviceMemoryManager(int _num_gpus) : num_gpus(_num_gpus) {
+  dmem_tensor_start_offset = 0;
   // fingerprint related fields
   // exponential lookup table
-  exp_lookup_table = (FPType *)base_ptr;
+  exp_lookup_table_offset = dmem_tensor_start_offset;
   // make future tensors 16 bytes aligned
-  offset += (sizeof(FPType) * FP_Q + 15) / 16 * 16;
+  dmem_tensor_start_offset += (sizeof(FPType) * FP_Q + 15) / 16 * 16;
   // check PQ relations
   assert(FP_Q < FP_P);
   assert((FP_P - 1) % FP_Q == 0);
@@ -44,14 +40,10 @@ DeviceMemoryManager::DeviceMemoryManager() {
     exp_table[i] = (exp_table[i - 1] * FP_EXP_BASE) % FP_P;
   }
   assert((exp_table[FP_Q - 1] * FP_EXP_BASE) % FP_P == 1);
-  cudaMemcpy(exp_lookup_table,
-             exp_table,
-             sizeof(FPType) * FP_Q,
-             cudaMemcpyHostToDevice);
   // division p lookup table
-  div_p_lookup_table = (FPType *)(base_ptr + offset);
+  div_p_lookup_table_offset = dmem_tensor_start_offset;
   // make future tensors 16 bytes aligned
-  offset += (sizeof(FPType) * FP_P + 15) / 16 * 16;
+  dmem_tensor_start_offset += (sizeof(FPType) * FP_P + 15) / 16 * 16;
   FPType div_p_table[FP_P];
   for (int i = 0; i < FP_P; i++) {
     div_p_table[i] = 1;
@@ -64,14 +56,10 @@ DeviceMemoryManager::DeviceMemoryManager() {
       assert(div_p_table[i] != 1);
     }
   }
-  cudaMemcpy(div_p_lookup_table,
-             div_p_table,
-             sizeof(FPType) * FP_P,
-             cudaMemcpyHostToDevice);
   // division q lookup table
-  div_q_lookup_table = (FPType *)(base_ptr + offset);
+  div_q_lookup_table_offset = dmem_tensor_start_offset;
   // make future tensors 16 bytes aligned
-  offset += (sizeof(FPType) * FP_Q + 15) / 16 * 16;
+  dmem_tensor_start_offset += (sizeof(FPType) * FP_Q + 15) / 16 * 16;
   FPType div_q_table[FP_Q];
   for (int i = 0; i < FP_Q; i++) {
     div_q_table[i] = 1;
@@ -84,17 +72,37 @@ DeviceMemoryManager::DeviceMemoryManager() {
       assert(div_q_table[i] != 1);
     }
   }
-  cudaMemcpy(div_q_lookup_table,
-             div_q_table,
-             sizeof(FPType) * FP_Q,
-             cudaMemcpyHostToDevice);
+  for (int i = 0; i < num_gpus; i++) {
+    checkCUDA(cudaSetDevice(i));
+    checkCUDA(cudaStreamCreate(&stream[i]));
+    checkCUDA(cudaMalloc(&base_ptr[i], mirage::config::MAX_DMEM_SIZE));
+    checkCUDA(cublasCreate(&blas[i]));
+    checkCUDA(cublasSetMathMode(blas[i], CUBLAS_TENSOR_OP_MATH));
+    // Copy exp_table, div_p_table, and div_q_table from DRAM to device memory
+    cudaMemcpy(base_ptr[i] + exp_lookup_table_offset,
+               exp_table,
+               sizeof(FPType) * FP_Q,
+               cudaMemcpyHostToDevice);
+    cudaMemcpy(base_ptr[i] + div_p_lookup_table_offset,
+               div_p_table,
+               sizeof(FPType) * FP_P,
+               cudaMemcpyHostToDevice);
+    cudaMemcpy(base_ptr[i] + div_q_lookup_table_offset,
+               div_q_table,
+               sizeof(FPType) * FP_Q,
+               cudaMemcpyHostToDevice);
+  }
 }
 
 DeviceMemoryManager::~DeviceMemoryManager() {
-  checkCUDA(cudaFree(base_ptr));
-  checkCUDA(cublasDestroy(blas));
+  for (int i = 0; i < num_gpus; i++) {
+    checkCUDA(cudaFree(base_ptr[i]));
+    checkCUDA(cudaStreamDestroy(stream[i]));
+    checkCUDA(cublasDestroy(blas[i]));
+  }
 }
 
+#ifdef DEADCODE
 bool DeviceMemoryManager::allocate(DTensor &tensor, bool allocate_fingerprint) {
   // assert that the start of the tensor is 16 bytes aligned
   assert(offset % 16 == 0);
@@ -138,10 +146,11 @@ bool DeviceMemoryManager::free(DTensor &tensor) {
   allocated_tensors.pop_back();
   return true;
 }
+#endif
 
 DeviceMemoryManager *DeviceMemoryManager::get_instance() {
   if (singleton == nullptr) {
-    singleton = new DeviceMemoryManager();
+    singleton = new DeviceMemoryManager(1 /*num_gpus*/);
   }
   return singleton;
 }

@@ -48,7 +48,7 @@ off_t Graph::allocate(STensor const &tensor) {
   off_t aligns_size = ((tensor.size() + 15) & ~15);
   smem_offset += aligns_size;
 
-  assert(smem_offset <= (off_t)mirage::type::MAX_SMEM_SIZE);
+  assert(smem_offset <= (off_t)mirage::config::MAX_SMEM_SIZE);
   allocated_tensors.push_back(std::make_pair(ret, aligns_size));
   return ret;
 }

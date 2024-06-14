@@ -50,17 +50,19 @@ KNOperator *
   if (input.dim[dim] % size != 0) {
     return nullptr;
   }
-  DeviceMemoryManager *dmm = DeviceMemoryManager::get_instance();
-  if (dmm->offset + input.data_size() > dmm->total_size) {
+  if (!this->can_allocate(input)) {
     return nullptr;
   }
 
-  KNReductionOp *op = new KNReductionOp(input, dim, size);
+  KNReductionOp *op = new KNReductionOp(this, input, dim, size);
   return op;
 }
 
-KNReductionOp::KNReductionOp(DTensor const &input, int dim, int size)
-    : KNOperator((KNOperatorType)(KN_REDUCTION_0_OP + dim), input),
+KNReductionOp::KNReductionOp(Graph *_kgraph,
+                             DTensor const &input,
+                             int dim,
+                             int size)
+    : KNOperator(_kgraph, (KNOperatorType)(KN_REDUCTION_0_OP + dim), input),
       reduction_dim_idx(dim), reduction_dim_size(size) {
   DTensor output = input;
   assert(dim < output.num_dims);
@@ -69,16 +71,14 @@ KNReductionOp::KNReductionOp(DTensor const &input, int dim, int size)
   output.owner_op = this;
   output.owner_ts_idx = 0;
   output.guid = DTensor::next_guid++;
-  DeviceMemoryManager *dmm = DeviceMemoryManager::get_instance();
-  dmm->allocate(output);
+  kgraph->allocate(output);
   assert(output_tensors.size() == 0);
   output_tensors.push_back(output);
 }
 
 KNReductionOp::~KNReductionOp() {
-  DeviceMemoryManager *dmm = DeviceMemoryManager::get_instance();
   for (int i = output_tensors.size() - 1; i >= 0; i--) {
-    dmm->free(output_tensors[i]);
+    kgraph->free(output_tensors[i]);
   }
 }
 

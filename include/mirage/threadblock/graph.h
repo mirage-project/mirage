@@ -15,6 +15,7 @@
 
 #pragma once
 
+#include "mirage/config.h"
 #include "mirage/kernel/device_tensor.h"
 #include "mirage/threadblock/operator.h"
 #include "mirage/threadblock/serializer/kernel_params.h"
@@ -37,7 +38,7 @@ public:
   // output-related fields
   int3 output_map; // assume that all output must use the same map
   int forloop_range;
-  int reduction_dimx = mirage::type::TB_REDUCTION_DIMX;
+  int reduction_dimx = mirage::config::DEFAULT_TB_REDUCTION_DIMX;
   dim3 grid_dim, block_dim;
 };
 

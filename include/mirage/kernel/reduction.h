@@ -22,7 +22,7 @@ namespace kernel {
 
 class KNReductionOp : public mirage::kernel::KNOperator {
 public:
-  KNReductionOp(DTensor const &input, int dim, int size);
+  KNReductionOp(Graph *_graph, DTensor const &input, int dim, int size);
   ~KNReductionOp();
   bool profile(ProfileResult &profile) override;
   bool fingerprint(void) override;

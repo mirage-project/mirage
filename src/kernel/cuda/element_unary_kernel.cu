@@ -14,6 +14,7 @@
  */
 
 #include "cutlass/fast_math.h"
+#include "mirage/config.h"
 #include "mirage/kernel/device_memory_manager.h"
 #include "mirage/kernel/element_unary.h"
 #include "mirage/kernel/graph.h"
@@ -25,6 +26,7 @@ namespace mirage {
 namespace kernel {
 
 using namespace mirage::type;
+using namespace mirage::config;
 
 template <typename DT>
 __global__ void execute_elementunary(mirage::type::KNOperatorType type,
@@ -97,6 +99,9 @@ __global__ void
 }
 
 bool KNElementUnaryOp::fingerprint(void) {
+  // Assert a single GPU
+  assert(kgraph->gpu_dim.x == 1);
+  // int gpu_id = 0;
   assert(input_tensors[0].num_elements() == output_tensors[0].num_elements());
   int num_elements = input_tensors[0].num_elements();
   int const num_threads_per_blk = 1024;
@@ -105,16 +110,15 @@ bool KNElementUnaryOp::fingerprint(void) {
   mirage::kernel::DeviceMemoryManager *dmm =
       mirage::kernel::DeviceMemoryManager::get_instance();
   mirage::type::FPType *input_fp_ptr = reinterpret_cast<mirage::type::FPType *>(
-      dmm->base_ptr + input_tensors[0].fp_offset);
+      dmm->base_ptr[0] + input_tensors[0].fp_offset);
   mirage::type::FPType *output_fp_ptr =
-      reinterpret_cast<mirage::type::FPType *>(dmm->base_ptr +
+      reinterpret_cast<mirage::type::FPType *>(dmm->base_ptr[0] +
                                                output_tensors[0].fp_offset);
+  mirage::type::FPType *exp_lookup_table =
+      reinterpret_cast<mirage::type::FPType *>(dmm->base_ptr[0] +
+                                               dmm->exp_lookup_table_offset);
   compute_elementunary_fingerprint<<<num_blocks, num_threads_per_blk>>>(
-      op_type,
-      dmm->exp_lookup_table,
-      input_fp_ptr,
-      output_fp_ptr,
-      num_elements);
+      op_type, exp_lookup_table, input_fp_ptr, output_fp_ptr, num_elements);
   checkCUDA(cudaDeviceSynchronize());
   return true;
 }

@@ -71,7 +71,7 @@ DTensor *Graph::div(DTensor const *input1, DTensor const *input2) {
 KNOperator *Graph::create_elementbinary_op(DTensor const &input1,
                                            DTensor const &input2,
                                            mirage::type::KNOperatorType type) {
-  DeviceMemoryManager *dmm = DeviceMemoryManager::get_instance();
+  // DeviceMemoryManager *dmm = DeviceMemoryManager::get_instance();
   if (input1.num_dims != input2.num_dims) {
     return nullptr;
   }
@@ -86,18 +86,19 @@ KNOperator *Graph::create_elementbinary_op(DTensor const &input1,
     output.dim[i] = std::max(input1.dim[i], input2.dim[i]);
   }
 
-  if (dmm->offset + output.data_size() > dmm->total_size) {
+  if (!can_allocate(output)) {
     return nullptr;
   }
 
-  KNElementBinaryOp *op = new KNElementBinaryOp(input1, input2, type);
+  KNElementBinaryOp *op = new KNElementBinaryOp(this, input1, input2, type);
   return op;
 }
 
-KNElementBinaryOp::KNElementBinaryOp(DTensor const &input1,
+KNElementBinaryOp::KNElementBinaryOp(Graph *_kgraph,
+                                     DTensor const &input1,
                                      DTensor const &input2,
                                      mirage::type::KNOperatorType type)
-    : mirage::kernel::KNOperator(type, input1, input2) {
+    : mirage::kernel::KNOperator(_kgraph, type, input1, input2) {
   assert(input1.num_dims == input2.num_dims);
   for (int i = 0; i < input1.num_dims; i++) {
     if (input1.dim[i] != input2.dim[i]) {
@@ -111,16 +112,14 @@ KNElementBinaryOp::KNElementBinaryOp(DTensor const &input1,
   output.owner_op = this;
   output.owner_ts_idx = 0;
   output.guid = DTensor::next_guid++;
-  DeviceMemoryManager *dmm = DeviceMemoryManager::get_instance();
-  dmm->allocate(output);
+  kgraph->allocate(output);
   assert(output_tensors.size() == 0);
   output_tensors.push_back(output);
 }
 
 KNElementBinaryOp::~KNElementBinaryOp() {
-  DeviceMemoryManager *dmm = DeviceMemoryManager::get_instance();
   for (int i = output_tensors.size() - 1; i >= 0; i--) {
-    dmm->free(output_tensors[i]);
+    kgraph->free(output_tensors[i]);
   }
 }
 
