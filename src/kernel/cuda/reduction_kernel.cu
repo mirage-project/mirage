@@ -43,14 +43,18 @@ __global__ void execute_reduction(DT *input_ptr,
 }
 
 bool KNReductionOp::profile(ProfileResult &result) {
+  // assert a single GPU
+  assert(kgraph->gpu_dim.x == 1);
+  int gpu_id = 0;
+
   assert(input_tensors[0].data_type == DT_FLOAT16);
   assert(output_tensors[0].data_type == DT_FLOAT16);
   mirage::kernel::DeviceMemoryManager *dmm =
       mirage::kernel::DeviceMemoryManager::get_instance();
   cutlass::half_t *input_ptr = reinterpret_cast<cutlass::half_t *>(
-      dmm->base_ptr + input_tensors[0].data_offset);
+      dmm->base_ptr[gpu_id] + input_tensors[0].data_offset);
   cutlass::half_t *output_ptr = reinterpret_cast<cutlass::half_t *>(
-      dmm->base_ptr + output_tensors[0].data_offset);
+      dmm->base_ptr[gpu_id] + output_tensors[0].data_offset);
   int num_input_elements = input_tensors[0].num_elements();
   int num_output_elements = output_tensors[0].num_elements();
   int const num_threads_per_blk = 1024;
@@ -108,6 +112,10 @@ __global__ void compute_reduction_fingerprint(FPType *input_ptr,
 }
 
 bool KNReductionOp::fingerprint(void) {
+  // assert a single GPU
+  assert(kgraph->gpu_dim.x == 1);
+  int gpu_id = 0;
+
   int num_elements = output_tensors[0].num_elements();
   int const num_threads_per_blk = 1024;
   int num_blocks =
@@ -124,9 +132,9 @@ bool KNReductionOp::fingerprint(void) {
   mirage::kernel::DeviceMemoryManager *dmm =
       mirage::kernel::DeviceMemoryManager::get_instance();
   mirage::type::FPType *input_fp_ptr = reinterpret_cast<mirage::type::FPType *>(
-      dmm->base_ptr + input_tensors[0].fp_offset);
+      dmm->base_ptr[gpu_id] + input_tensors[0].fp_offset);
   mirage::type::FPType *output_fp_ptr =
-      reinterpret_cast<mirage::type::FPType *>(dmm->base_ptr +
+      reinterpret_cast<mirage::type::FPType *>(dmm->base_ptr[gpu_id] +
                                                output_tensors[0].fp_offset);
 
   compute_reduction_fingerprint<<<num_blocks, num_threads_per_blk>>>(

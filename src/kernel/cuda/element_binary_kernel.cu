@@ -59,11 +59,11 @@ bool KNElementBinaryOp::profile(ProfileResult &result) {
   mirage::kernel::DeviceMemoryManager *dmm =
       mirage::kernel::DeviceMemoryManager::get_instance();
   cutlass::half_t *input1_ptr = reinterpret_cast<cutlass::half_t *>(
-      dmm->base_ptr + input_tensors[0].data_offset);
+      dmm->base_ptr[0] + input_tensors[0].data_offset);
   cutlass::half_t *input2_ptr = reinterpret_cast<cutlass::half_t *>(
-      dmm->base_ptr + input_tensors[1].data_offset);
+      dmm->base_ptr[0] + input_tensors[1].data_offset);
   cutlass::half_t *output_ptr = reinterpret_cast<cutlass::half_t *>(
-      dmm->base_ptr + output_tensors[0].data_offset);
+      dmm->base_ptr[0] + output_tensors[0].data_offset);
 
   int num_elements = output_tensors[0].num_elements();
   int factor1 =

@@ -13,6 +13,7 @@
  * limitations under the License.
  */
 
+#include "mirage/kernel/device_memory_manager.h"
 #include "mirage/kernel/graph.h"
 #include "mirage/config.h"
 #include "mirage/utils/hash_utils.h"
@@ -22,7 +23,12 @@
 namespace mirage {
 namespace kernel {
 
-Graph::Graph() {}
+Graph::Graph() {
+  gpu_dim = {1, 1, 1};
+  mirage::kernel::DeviceMemoryManager *dmm =
+      mirage::kernel::DeviceMemoryManager::get_instance();
+  dmem_offset = dmm->dmem_tensor_start_offset;
+}
 
 size_t Graph::pair_hash::operator()(std::pair<int, int> const &p) const {
   size_t h1 = std::hash<int>{}(p.first);

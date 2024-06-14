@@ -51,9 +51,9 @@ bool KNElementUnaryOp::profile(ProfileResult &result) {
   mirage::kernel::DeviceMemoryManager *dmm =
       mirage::kernel::DeviceMemoryManager::get_instance();
   cutlass::half_t *input_ptr = reinterpret_cast<cutlass::half_t *>(
-      dmm->base_ptr + input_tensors[0].data_offset);
+      dmm->base_ptr[0] + input_tensors[0].data_offset);
   cutlass::half_t *output_ptr = reinterpret_cast<cutlass::half_t *>(
-      dmm->base_ptr + output_tensors[0].data_offset);
+      dmm->base_ptr[0] + output_tensors[0].data_offset);
   int num_elements = input_tensors[0].num_elements();
   int const num_threads_per_blk = 1024;
   int num_blocks =
