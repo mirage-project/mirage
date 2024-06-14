@@ -34,19 +34,6 @@ DTensor::DTensor() {
   fp_offset = -1000;
 }
 
-/*
-DTensorShape DTensor::get_shape() const {
-  DTensorShape shape;
-  shape.data_type = data_type;
-  shape.num_dims = num_dims;
-  for (int i = 0; i < num_dims; i++) {
-    shape.dim[i] = dim[i];
-    shape.stride[i] = stride[i];
-  }
-  return shape;
-}
-*/
-
 int DTensor::next_guid = 20000;
 
 } // namespace kernel

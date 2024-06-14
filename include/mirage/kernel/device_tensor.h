@@ -15,6 +15,7 @@
 
 #pragma once
 
+#include "mirage/cpu/cmem_tensor.h"
 #include "mirage/layout.h"
 #include "mirage/type.h"
 #include "mirage/utils/json_utils.h"
@@ -106,6 +107,10 @@ struct alignas(16) DTensor {
   }
 
   bool has_same_fingerprint(DTensor const &ref) const;
+  bool has_same_fingerprint(mirage::cpu::CTensor const &ref) const;
+  mirage::cpu::CTensor copy_fingerprint_to_ctensor() const;
+
+public:
   mirage::type::DataType data_type;
   mirage::layout::DmemLayout layout;
   int num_dims;
