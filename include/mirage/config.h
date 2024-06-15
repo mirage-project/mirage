@@ -14,23 +14,24 @@
  */
 
 #pragma once
-
-#include "mirage/kernel/operator.h"
+#include <cstddef>
+#include <cstdint>
 
 namespace mirage {
-namespace kernel {
+namespace config {
 
-class KNElementUnaryOp : public mirage::kernel::KNOperator {
-public:
-  KNElementUnaryOp(Graph *_graph,
-                   DTensor const &input,
-                   mirage::type::KNOperatorType type);
-  ~KNElementUnaryOp();
-  bool profile(ProfileResult &profile) override;
-  bool fingerprint(void) override;
+uint16_t const FP_P = 227;
+uint16_t const FP_Q = 113;
+uint32_t const FP_EXP_BASE = 3;
+uint16_t const FP_PQ = 25651;
+// FP_P_MUL_Q_MOD_1 is a multiplier of P and is 1 module Q
+uint16_t const FP_P_MUL_Q_MOD_1 = 227;
+// FP_Q_MUL_P_MOD_1 is a multiplier of Q and is 1 module P
+uint16_t const FP_Q_MUL_P_MOD_1 = 25425;
+size_t const MAX_SMEM_SIZE = 96 * 1024;                       // 96 KB
+size_t const MAX_DMEM_SIZE = (size_t)10 * 1024 * 1024 * 1024; // 10GB
+int const MAX_NUM_GPUS = 16;
+int const DEFAULT_TB_REDUCTION_DIMX = 64;
 
-  operator json() const override;
-};
-
-} // namespace kernel
+} // namespace config
 } // namespace mirage

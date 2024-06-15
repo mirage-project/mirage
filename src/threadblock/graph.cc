@@ -48,7 +48,7 @@ off_t Graph::allocate(STensor const &tensor) {
   off_t aligns_size = ((tensor.size() + 15) & ~15);
   smem_offset += aligns_size;
 
-  assert(smem_offset <= (off_t)mirage::type::MAX_SMEM_SIZE);
+  assert(smem_offset <= (off_t)mirage::config::MAX_SMEM_SIZE);
   allocated_tensors.push_back(std::make_pair(ret, aligns_size));
   return ret;
 }
@@ -86,11 +86,11 @@ NewKernelParams Graph::get_new_kernel_params(bool fingerprint) const {
         int3 input_map = input_op->input_map;
         int forloop_dim = input_op->forloop_dim;
         if (fingerprint) {
-          params.dmem_input_ptrs[params.num_dmem_inputs++] =
-              input_op->dtensor.fp_ptr;
+          params.dmem_input_offsets[params.num_dmem_inputs++] =
+              input_op->dtensor.fp_offset;
         } else {
-          params.dmem_input_ptrs[params.num_dmem_inputs++] =
-              input_op->dtensor.data_ptr;
+          params.dmem_input_offsets[params.num_dmem_inputs++] =
+              input_op->dtensor.data_offset;
         }
         // Serialize parameters for input loader
         mirage::threadblock::STensor stensor = operators[i]->output_tensors[0];
@@ -187,11 +187,11 @@ NewKernelParams Graph::get_new_kernel_params(bool fingerprint) const {
         mirage::kernel::DTensor dtensor = output_op->dtensor;
         int3 output_map = output_op->output_map;
         if (fingerprint) {
-          params.dmem_output_ptrs[params.num_dmem_outputs++] =
-              output_op->dtensor.fp_ptr;
+          params.dmem_output_offsets[params.num_dmem_outputs++] =
+              output_op->dtensor.fp_offset;
         } else {
-          params.dmem_output_ptrs[params.num_dmem_outputs++] =
-              output_op->dtensor.data_ptr;
+          params.dmem_output_offsets[params.num_dmem_outputs++] =
+              output_op->dtensor.data_offset;
         }
         // Serialize parameters for input loader
         assert(operators[i]->input_tensors.size() == 1);

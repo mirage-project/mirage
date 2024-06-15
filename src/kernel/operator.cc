@@ -20,24 +20,29 @@
 namespace mirage {
 namespace kernel {
 
-KNOperator::KNOperator(mirage::type::KNOperatorType _type) : op_type(_type) {}
+KNOperator::KNOperator(Graph *_graph, mirage::type::KNOperatorType _type)
+    : kgraph(_graph), op_type(_type) {}
 
-KNOperator::KNOperator(mirage::type::KNOperatorType _type, DTensor const &A)
-    : op_type(_type) {
+KNOperator::KNOperator(Graph *_graph,
+                       mirage::type::KNOperatorType _type,
+                       DTensor const &A)
+    : kgraph(_graph), op_type(_type) {
   input_tensors.push_back(A);
 }
 
-KNOperator::KNOperator(mirage::type::KNOperatorType _type,
+KNOperator::KNOperator(Graph *_graph,
+                       mirage::type::KNOperatorType _type,
                        DTensor const &A,
                        DTensor const &B)
-    : op_type(_type) {
+    : kgraph(_graph), op_type(_type) {
   input_tensors.push_back(A);
   input_tensors.push_back(B);
 }
 
-KNOperator::KNOperator(mirage::type::KNOperatorType _type,
+KNOperator::KNOperator(Graph *_graph,
+                       mirage::type::KNOperatorType _type,
                        std::vector<DTensor> const &inputs)
-    : op_type(_type) {
+    : kgraph(_graph), op_type(_type) {
   for (auto const &i : inputs) {
     input_tensors.push_back(i);
   }
@@ -77,18 +82,18 @@ KNOperator *Graph::create_input_op(std::vector<int> const &dims,
   }
   tensor.data_type = data_type;
 
-  DeviceMemoryManager *dmm = DeviceMemoryManager::get_instance();
-  if (dmm->offset + tensor.data_size() > dmm->total_size) {
+  if (!can_allocate(tensor)) {
     return nullptr;
   }
-  KNInputOp *op = new KNInputOp(dims, data_type, layout);
+  KNInputOp *op = new KNInputOp(this, dims, data_type, layout);
   return op;
 }
 
-KNInputOp::KNInputOp(std::vector<int> const &dims,
+KNInputOp::KNInputOp(Graph *_graph,
+                     std::vector<int> const &dims,
                      mirage::type::DataType data_type,
                      mirage::layout::DmemLayout layout)
-    : KNOperator(mirage::type::KN_INPUT_OP) {
+    : KNOperator(_graph, mirage::type::KN_INPUT_OP) {
   DTensor tensor;
   tensor.num_dims = dims.size();
   for (int i = tensor.num_dims - 1; i >= 0; i--) {
@@ -102,14 +107,12 @@ KNInputOp::KNInputOp(std::vector<int> const &dims,
   tensor.owner_op = this;
   tensor.owner_ts_idx = 0;
   tensor.guid = DTensor::next_guid++;
-  DeviceMemoryManager *dmm = DeviceMemoryManager::get_instance();
-  dmm->allocate(tensor);
+  kgraph->allocate(tensor);
   output_tensors.push_back(tensor);
 }
 
 KNInputOp::~KNInputOp() {
-  DeviceMemoryManager *dmm = DeviceMemoryManager::get_instance();
-  dmm->free(output_tensors[0]);
+  kgraph->free(output_tensors[0]);
 }
 
 KNInputOp::operator json() const {

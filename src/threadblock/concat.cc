@@ -42,7 +42,8 @@ TBOperator *Graph::create_concat_op(STensor const &A,
     }
   }
 
-  if (smem_offset + A.size() + B.size() > (off_t)mirage::type::MAX_SMEM_SIZE) {
+  if (smem_offset + A.size() + B.size() >
+      (off_t)mirage::config::MAX_SMEM_SIZE) {
     return nullptr;
   }
 
