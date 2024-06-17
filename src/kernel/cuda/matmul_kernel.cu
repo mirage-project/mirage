@@ -24,14 +24,19 @@ namespace mirage {
 namespace kernel {
 
 using namespace mirage::type;
+using namespace mirage::config;
 
 bool KNMatmulOp::profile(ProfileResult &result) {
+  // TODO: currently assert a single GPU
+  assert(kgraph->gpu_dim.x == 1);
+  int gpu_id = 0;
+
   float alpha = 1.0f, beta = 0.0f;
   mirage::kernel::DeviceMemoryManager *dmm =
       mirage::kernel::DeviceMemoryManager::get_instance();
-  void *A = input_tensors[0].data_ptr;
-  void *B = input_tensors[1].data_ptr;
-  void *C = output_tensors[0].data_ptr;
+  void *A = dmm->base_ptr[gpu_id] + input_tensors[0].data_offset;
+  void *B = dmm->base_ptr[gpu_id] + input_tensors[1].data_offset;
+  void *C = dmm->base_ptr[gpu_id] + output_tensors[0].data_offset;
   int num_dims = input_tensors[0].num_dims;
   assert(input_tensors[1].num_dims == num_dims);
   assert(output_tensors[0].num_dims == num_dims);
@@ -83,7 +88,7 @@ bool KNMatmulOp::profile(ProfileResult &result) {
   checkCUDA(cudaEventRecord(events[0]));
   for (int i = 0; i < 16; i++) {
     if (batch == 1) {
-      checkCUDA(cublasGemmEx(dmm->blas,
+      checkCUDA(cublasGemmEx(dmm->blas[gpu_id],
                              trans_A,
                              trans_B,
                              row_C,
@@ -106,7 +111,7 @@ bool KNMatmulOp::profile(ProfileResult &result) {
       int strideA = row_A * column_A;
       int strideB = row_B * column_B;
       int strideC = row_C * column_C;
-      checkCUDA(cublasGemmStridedBatchedEx(dmm->blas,
+      checkCUDA(cublasGemmStridedBatchedEx(dmm->blas[gpu_id],
                                            trans_A,
                                            trans_B,
                                            row_C,
@@ -173,6 +178,10 @@ __global__ void compute_matmul_fingerprint(mirage::type::FPType *A_ptr,
 }
 
 bool KNMatmulOp::fingerprint(void) {
+  // TODO: currently assert a single GPU
+  assert(kgraph->gpu_dim.x == 1);
+  int gpu_id = 0;
+
   int num_dims = input_tensors[0].num_dims;
   int row_A = input_tensors[0].dim[num_dims - 2];
   int column_A = input_tensors[0].dim[num_dims - 1];
@@ -190,14 +199,16 @@ bool KNMatmulOp::fingerprint(void) {
   int const num_threads_per_blk = 1024;
   int num_blocks =
       (row_C * column_C + num_threads_per_blk - 1) / num_threads_per_blk;
+  mirage::kernel::DeviceMemoryManager *dmm =
+      mirage::kernel::DeviceMemoryManager::get_instance();
+  mirage::type::FPType *A_fp_ptr = reinterpret_cast<mirage::type::FPType *>(
+      dmm->base_ptr[gpu_id] + input_tensors[0].fp_offset);
+  mirage::type::FPType *B_fp_ptr = reinterpret_cast<mirage::type::FPType *>(
+      dmm->base_ptr[gpu_id] + input_tensors[1].fp_offset);
+  mirage::type::FPType *C_fp_ptr = reinterpret_cast<mirage::type::FPType *>(
+      dmm->base_ptr[gpu_id] + output_tensors[0].fp_offset);
   compute_matmul_fingerprint<<<num_blocks, num_threads_per_blk>>>(
-      input_tensors[0].fp_ptr,
-      input_tensors[1].fp_ptr,
-      output_tensors[0].fp_ptr,
-      num_batches,
-      row_C,
-      column_C,
-      row_B);
+      A_fp_ptr, B_fp_ptr, C_fp_ptr, num_batches, row_C, column_C, row_B);
   checkCUDA(cudaDeviceSynchronize());
   return true;
 }

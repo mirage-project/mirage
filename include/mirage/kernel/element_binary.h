@@ -22,7 +22,8 @@ namespace kernel {
 
 class KNElementBinaryOp : public mirage::kernel::KNOperator {
 public:
-  KNElementBinaryOp(DTensor const &input1,
+  KNElementBinaryOp(Graph *_graph,
+                    DTensor const &input1,
                     DTensor const &input2,
                     mirage::type::KNOperatorType type);
   ~KNElementBinaryOp();

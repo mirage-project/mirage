@@ -60,17 +60,16 @@ KNOperator *Graph::create_matmul_op(DTensor const &A, DTensor const &B) {
   C.dim[C.num_dims - 1] = B.dim[C.num_dims - 1];
   C.data_type = A.data_type;
 
-  DeviceMemoryManager *dmm = DeviceMemoryManager::get_instance();
-  if (dmm->offset + C.data_size() > dmm->total_size) {
+  if (!can_allocate(C)) {
     return nullptr;
   }
 
-  KNMatmulOp *op = new KNMatmulOp(A, B);
+  KNMatmulOp *op = new KNMatmulOp(this, A, B);
   return op;
 }
 
-KNMatmulOp::KNMatmulOp(DTensor const &A, DTensor const &B)
-    : mirage::kernel::KNOperator(mirage::type::KN_MATMUL_OP, A, B) {
+KNMatmulOp::KNMatmulOp(Graph *_kgraph, DTensor const &A, DTensor const &B)
+    : KNOperator(_kgraph, mirage::type::KN_MATMUL_OP, A, B) {
   DTensor C;
   assert(A.num_dims == B.num_dims);
   assert(A.dim[A.num_dims - 1] == B.dim[B.num_dims - 2]);
@@ -89,15 +88,14 @@ KNMatmulOp::KNMatmulOp(DTensor const &A, DTensor const &B)
   C.owner_op = this;
   C.owner_ts_idx = 0;
   C.guid = DTensor::next_guid++;
-  C.dmm = A.dmm;
-  C.dmm->allocate(C);
+  kgraph->allocate(C);
   assert(output_tensors.size() == 0);
   output_tensors.push_back(C);
 }
 
 KNMatmulOp::~KNMatmulOp() {
   for (int i = output_tensors.size() - 1; i >= 0; i--) {
-    output_tensors[i].dmm->free(output_tensors[i]);
+    kgraph->free(output_tensors[i]);
   }
 }
 

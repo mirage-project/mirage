@@ -23,6 +23,7 @@ namespace threadblock {
 
 using namespace cutlass;
 using namespace mirage::type;
+using namespace mirage::config;
 
 template <typename ElementType>
 class ElementBinaryExecutor {

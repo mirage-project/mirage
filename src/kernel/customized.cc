@@ -39,7 +39,7 @@ std::vector<DTensor> Graph::customized(std::vector<DTensor> const &inputs,
 
 KNOperator *Graph::create_customized_op(std::vector<DTensor> const &inputs,
                                         ExecutionPlan const &plan) {
-  KNCustomizedOp *op = new KNCustomizedOp(inputs, plan);
+  KNCustomizedOp *op = new KNCustomizedOp(this, inputs, plan);
   return op;
 }
 
@@ -50,25 +50,27 @@ KNOperator *Graph::create_customized_op(std::vector<DTensor> const &inputs,
     if (op->op_type == type::TBOperatorType::TB_OUTPUT_OP) {
       output_size +=
           static_cast<threadblock::TBOutputOp *>(op)->dtensor.data_size();
+      output_size += static_cast<threadblock::TBOutputOp *>(op)
+                         ->dtensor.fingerprint_size();
     }
   }
 
-  if (dmm->offset + output_size > dmm->total_size) {
+  if (!can_allocate(output_size)) {
     return nullptr;
   }
 
-  KNCustomizedOp *op = new KNCustomizedOp(inputs, _graph);
+  KNCustomizedOp *op = new KNCustomizedOp(this, inputs, _graph);
   return op;
 }
 
-KNCustomizedOp::KNCustomizedOp(std::vector<DTensor> const &_inputs,
+KNCustomizedOp::KNCustomizedOp(Graph *_kgraph,
+                               std::vector<DTensor> const &_inputs,
                                ExecutionPlan const &_plan)
-    : KNOperator(mirage::type::KN_CUSTOMIZED_OP, _inputs), plan(_plan),
+    : KNOperator(_kgraph, mirage::type::KN_CUSTOMIZED_OP, _inputs), plan(_plan),
       bgraph(_plan.grid_dim,
              _plan.block_dim,
              _plan.forloop_range,
              _plan.reduction_dimx) {
-  DeviceMemoryOffsetManager *dmm = _inputs[0].dmm;
   assert(_inputs.size() == plan.input_map.size());
   assert(plan.forloop_dim.size() == plan.input_map.size());
   assert(plan.input_smem_layouts.size() == plan.input_map.size());
@@ -172,8 +174,7 @@ KNCustomizedOp::KNCustomizedOp(std::vector<DTensor> const &_inputs,
         dtensor.owner_op = this;
         dtensor.owner_ts_idx = static_cast<int>(output_tensors.size());
         dtensor.guid = DTensor::next_guid++;
-        dtensor.dmm = dmm;
-        dmm->allocate(dtensor);
+        kgraph->allocate(dtensor);
         // Update dtensor saved by the output operator
         {
           assert(bgraph.operators.back()->op_type ==
@@ -189,9 +190,10 @@ KNCustomizedOp::KNCustomizedOp(std::vector<DTensor> const &_inputs,
   }
 }
 
-KNCustomizedOp::KNCustomizedOp(std::vector<DTensor> const &_inputs,
+KNCustomizedOp::KNCustomizedOp(mirage::kernel::Graph *_kgraph,
+                               std::vector<DTensor> const &_inputs,
                                mirage::threadblock::Graph const &_graph)
-    : KNOperator(mirage::type::KN_CUSTOMIZED_OP, _inputs),
+    : KNOperator(_kgraph, mirage::type::KN_CUSTOMIZED_OP, _inputs),
       bgraph(_graph.grid_dim,
              _graph.block_dim,
              _graph.forloop_range,
@@ -200,8 +202,6 @@ KNCustomizedOp::KNCustomizedOp(std::vector<DTensor> const &_inputs,
   plan.block_dim = _graph.block_dim;
   plan.forloop_range = _graph.forloop_range;
   plan.reduction_dimx = _graph.reduction_dimx;
-
-  DeviceMemoryOffsetManager *dmm = _inputs[0].dmm;
 
   for (auto const &op : _graph.operators) {
     std::vector<STensor> my_inputs;
@@ -245,8 +245,9 @@ KNCustomizedOp::KNCustomizedOp(std::vector<DTensor> const &_inputs,
         dtensor.owner_op = this;
         dtensor.owner_ts_idx = static_cast<int>(output_tensors.size());
         dtensor.guid = DTensor::next_guid++;
-        dtensor.dmm = dmm;
-        dmm->allocate(dtensor);
+        // DeviceMemoryManager *dmm = DeviceMemoryManager::get_instance();
+        // dmm->allocate(dtensor);
+        kgraph->allocate(dtensor);
         // Update dtensor saved by the output operator
         {
           assert(bgraph.operators.back()->op_type ==
@@ -316,8 +317,9 @@ KNCustomizedOp::~KNCustomizedOp() {
     delete bgraph.operators.back();
     bgraph.operators.pop_back();
   }
+  // DeviceMemoryManager *dmm = DeviceMemoryManager::get_instance();
   for (int i = output_tensors.size() - 1; i >= 0; i--) {
-    output_tensors[i].dmm->free(output_tensors[i]);
+    kgraph->free(output_tensors[i]);
   }
 }
 

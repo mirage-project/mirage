@@ -16,9 +16,8 @@
 #pragma once
 
 #include "mirage/kernel/customized.h"
-#include "mirage/kernel/operator.h"
-// #include "mirage/kernel/operator_factory.h"
 #include "mirage/kernel/device_tensor.h"
+#include "mirage/kernel/operator.h"
 #include "mirage/threadblock/graph.h"
 #include <vector>
 
@@ -33,7 +32,6 @@ private:
 
 public:
   Graph(void);
-  ~Graph();
   // input operator
   DTensor new_input(std::vector<int> const &dims,
                     mirage::type::DataType data_type,
@@ -78,15 +76,22 @@ public:
                                   mirage::threadblock::Graph const &_graph);
   KNOperator *create_customized_op(std::vector<DTensor> const &inputs,
                                    mirage::threadblock::Graph const &_graph);
-  // memory management
-  void allocate_all_tensors(bool allocate_fingerprint = true);
-  void free_all_tensors();
-  DeviceMemoryOffsetManager *dmm;
   // profile
   ProfileResult profile();
   // helper functions
   void generate_triton_program(char const *filepath);
+  bool can_allocate(DTensor const &tensor, bool allocate_fingerprint = true);
+  bool can_allocate(size_t size_in_bytes);
+  bool allocate(DTensor &tensor, bool allocate_fingerprint = true);
+  void free(DTensor &tensor);
+
+public:
   std::vector<mirage::kernel::KNOperator *> operators;
+  dim3 gpu_dim;
+  // memory allocator
+  // device memory offset manager
+  off_t dmem_offset;
+  std::vector<std::pair<off_t, size_t>> allocated_tensors;
   // std::unordered_map<std::pair<int, int>, DTensor, pair_hash> tensors;
   // std::unordered_map<std::pair<int, int>, std::pair<int, int>, pair_hash>
   // edges; std::vector<std::vector<SrcEdge>> edges;

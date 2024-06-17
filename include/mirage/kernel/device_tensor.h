@@ -15,6 +15,7 @@
 
 #pragma once
 
+#include "mirage/cpu/cmem_tensor.h"
 #include "mirage/layout.h"
 #include "mirage/type.h"
 #include "mirage/utils/json_utils.h"
@@ -27,7 +28,6 @@ namespace kernel {
 #define MAX_TENSOR_DIMS 4
 
 class KNOperator;
-class DeviceMemoryOffsetManager;
 
 struct alignas(16) DTensor {
   DTensor(void);
@@ -59,7 +59,31 @@ struct alignas(16) DTensor {
     return true;
   }
   inline bool operator!=(DTensor const &b) const {
-    return !(*this == b);
+    if (data_type != b.data_type) {
+      return true;
+    }
+    if (layout != b.layout) {
+      return true;
+    }
+    if (num_dims != b.num_dims) {
+      return true;
+    }
+    for (int i = 0; i < num_dims; i++) {
+      if (dim[i] != b.dim[i]) {
+        return true;
+      }
+      // if (stride[i] != b.stride[i]) {
+      //   return true;
+      // }
+    }
+    if (owner_op != b.owner_op) {
+      return true;
+    }
+    if (owner_ts_idx != b.owner_ts_idx) {
+      return true;
+    }
+    assert(data_offset == b.data_offset);
+    return false;
   }
 
   inline size_t num_elements() const {
@@ -83,6 +107,10 @@ struct alignas(16) DTensor {
   }
 
   bool has_same_fingerprint(DTensor const &ref) const;
+  bool has_same_fingerprint(mirage::cpu::CTensor const &ref) const;
+  mirage::cpu::CTensor copy_fingerprint_to_ctensor() const;
+
+public:
   mirage::type::DataType data_type;
   mirage::layout::DmemLayout layout;
   int num_dims;
@@ -92,14 +120,14 @@ struct alignas(16) DTensor {
   //  DTensor fields
   KNOperator *owner_op;
   int owner_ts_idx;
-  off_t data_offset;
-  off_t fp_offset;
   // pointer to data
-  void *data_ptr;
+  // void *data_ptr;
+  // offset in device memory
+  int64_t data_offset;
   // pointer to fingerprint
-  mirage::type::FPType *fp_ptr;
-
-  DeviceMemoryOffsetManager *dmm;
+  // mirage::type::FPType *fp_ptr;
+  // offset in device memory
+  int64_t fp_offset;
 
   static int next_guid;
 };

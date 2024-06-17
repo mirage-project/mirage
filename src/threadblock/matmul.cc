@@ -47,7 +47,7 @@ TBOperator *Graph::create_matmul_op(STensor const &A, STensor const &B) {
   }
   C.dim[C.num_dims - 1] = B.dim[C.num_dims - 1];
   C.data_type = A.data_type;
-  if (smem_offset + (off_t)C.size() > (off_t)mirage::type::MAX_SMEM_SIZE) {
+  if (smem_offset + (off_t)C.size() > (off_t)mirage::config::MAX_SMEM_SIZE) {
     return nullptr;
   }
 

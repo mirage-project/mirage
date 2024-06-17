@@ -64,5 +64,13 @@ NLOHMANN_JSON_SERIALIZE_ENUM(
         {SmemUnknownLayout, "SmemUnknownLayout"},
     })
 
+enum CmemLayout {
+  CmemRowMajor = 300,
+  CmemColumnMajor = 301,
+  CmemUnknownLayout = 399,
+};
+
+CmemLayout dmemlayout_to_cmemlayout(DmemLayout dmem_layout);
+
 } // namespace layout
 } // namespace mirage

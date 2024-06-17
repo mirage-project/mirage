@@ -339,7 +339,6 @@ bool KernelGraphGenerator::create_tb_outputs(SearchContext &c, int3 output_map) 
 void KernelGraphGenerator::generate_kernel_graphs() {
   pattern_eval();
 
-  computation_graph.allocate_all_tensors();
   for (auto const &op : computation_graph.operators) {
     op->fingerprint();
   }
@@ -371,8 +370,6 @@ void KernelGraphGenerator::generate_kernel_graphs() {
   }
 
   save_checkpoint();
-
-  computation_graph.free_all_tensors();
 
   printf("Total kernel graphs explored: %d\n", num_total_kernel_graphs);
   printf("Random tests performed: %d\n", num_total_random_tests);
@@ -497,19 +494,15 @@ bool KernelGraphGenerator::verify(SearchContext c) {
     ++num_total_random_tests;
     std::cout << "random testing: " << json(c.kn_graph) << std::endl;
 
-    c.kn_graph.allocate_all_tensors(true);
     for (auto const &op : c.kn_graph.operators) {
       op->fingerprint();
     }
 
     for (auto const &match : get_matches(outputs.size())) {
       if (have_same_fingerprint(outputs, match)) {
-        c.kn_graph.free_all_tensors();
         return true;
       }
     }
-
-    c.kn_graph.free_all_tensors();
   }
 
   return false;

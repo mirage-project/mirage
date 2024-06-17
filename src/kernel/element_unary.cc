@@ -42,30 +42,30 @@ DTensor *Graph::exp(DTensor const *input) {
 
 KNOperator *Graph::create_elementunary_op(DTensor const &input,
                                           mirage::type::KNOperatorType type) {
-  if (dmm->offset + input.data_size() > dmm->total_size) {
+  if (!can_allocate(input)) {
     return nullptr;
   }
 
-  KNElementUnaryOp *op = new KNElementUnaryOp(input, type);
+  KNElementUnaryOp *op = new KNElementUnaryOp(this, input, type);
   return op;
 }
 
-KNElementUnaryOp::KNElementUnaryOp(DTensor const &input,
+KNElementUnaryOp::KNElementUnaryOp(Graph *_kgraph,
+                                   DTensor const &input,
                                    mirage::type::KNOperatorType type)
-    : mirage::kernel::KNOperator(type, input) {
+    : mirage::kernel::KNOperator(_kgraph, type, input) {
   DTensor output = input;
   output.owner_op = this;
   output.owner_ts_idx = 0;
   output.guid = DTensor::next_guid++;
-  output.dmm = input.dmm;
-  output.dmm->allocate(output);
+  kgraph->allocate(output);
   assert(output_tensors.size() == 0);
   output_tensors.push_back(output);
 }
 
 KNElementUnaryOp::~KNElementUnaryOp() {
   for (int i = output_tensors.size() - 1; i >= 0; i--) {
-    output_tensors[i].dmm->free(output_tensors[i]);
+    kgraph->free(output_tensors[i]);
   }
 }
 

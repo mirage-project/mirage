@@ -35,6 +35,10 @@ int main(int argc, char **argv) {
     }
     printf("[cudnn kernel graph] Total runtime = %.4lfms\n", total_runtime);
   }
+  mirage::cpu::CTensor ref_fp = ref_graph.operators.back()
+                                    ->output_tensors[0]
+                                    .copy_fingerprint_to_ctensor();
+
   kernel::Graph graph;
   kernel::DTensor Q = graph.new_input(
       {2 * batch_size, 8, 64}, type::DT_FLOAT16, layout::DmemRowMajor);
@@ -104,8 +108,8 @@ int main(int argc, char **argv) {
   for (auto const &op : graph.operators) {
     op->fingerprint();
   }
-  assert(ref_graph.operators.back()->output_tensors[0].has_same_fingerprint(
-      graph.operators.back()->output_tensors[0]));
+  assert(
+      graph.operators.back()->output_tensors[0].has_same_fingerprint(ref_fp));
   ProfileResult result;
   float total_ms = 0.0f;
   for (auto const &op : graph.operators) {

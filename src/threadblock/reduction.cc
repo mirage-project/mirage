@@ -36,7 +36,8 @@ TBOperator *Graph::create_reduction_op(STensor const &input, int dim) {
     return nullptr;
   }
 
-  if (smem_offset + (off_t)output.size() > (off_t)mirage::type::MAX_SMEM_SIZE) {
+  if (smem_offset + (off_t)output.size() >
+      (off_t)mirage::config::MAX_SMEM_SIZE) {
     return nullptr;
   }
 
@@ -58,7 +59,8 @@ TBOperator *Graph::create_reduction_to_dimx_op(STensor const &input, int dim) {
   assert(output.layout == mirage::layout::SmemRowMajor);
   output.dim[dim] = this->reduction_dimx;
 
-  if (smem_offset + (off_t)output.size() > (off_t)mirage::type::MAX_SMEM_SIZE) {
+  if (smem_offset + (off_t)output.size() >
+      (off_t)mirage::config::MAX_SMEM_SIZE) {
     return nullptr;
   }
 
