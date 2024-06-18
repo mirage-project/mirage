@@ -61,7 +61,7 @@ TBOperator *Graph::create_elementbinary_op(STensor const &input1,
     output.dim[i] = std::max(input1.dim[i], input2.dim[i]);
   }
 
-  if (smem_offset + output.size() > (off_t)mirage::type::MAX_SMEM_SIZE) {
+  if (smem_offset + output.size() > (off_t)mirage::config::MAX_SMEM_SIZE) {
     return nullptr;
   }
 

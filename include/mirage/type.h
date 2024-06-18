@@ -1,4 +1,4 @@
-/* Copyright 2023 CMU
+/* Copyright 2023-2024 CMU
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,16 +24,6 @@ namespace mirage {
 namespace type {
 
 typedef uint16_t FPType;
-uint16_t const FP_P = 227;
-uint16_t const FP_Q = 113;
-uint32_t const FP_EXP_BASE = 3;
-uint16_t const FP_PQ = 25651;
-// FP_P_MUL_Q_MOD_1 is a multiplier of P and is 1 module Q
-uint16_t const FP_P_MUL_Q_MOD_1 = 227;
-// FP_Q_MUL_P_MOD_1 is a multiplier of Q and is 1 module P
-uint16_t const FP_Q_MUL_P_MOD_1 = 25425;
-size_t const MAX_SMEM_SIZE = 96 * 1024; // 96 KB
-int const TB_REDUCTION_DIMX = 64;
 
 enum DataType {
   DT_INT8 = 900,

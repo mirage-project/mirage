@@ -13,24 +13,22 @@
  * limitations under the License.
  */
 
-#pragma once
-
-#include "mirage/kernel/operator.h"
+#include "mirage/layout.h"
 
 namespace mirage {
-namespace kernel {
+namespace layout {
 
-class KNElementUnaryOp : public mirage::kernel::KNOperator {
-public:
-  KNElementUnaryOp(Graph *_graph,
-                   DTensor const &input,
-                   mirage::type::KNOperatorType type);
-  ~KNElementUnaryOp();
-  bool profile(ProfileResult &profile) override;
-  bool fingerprint(void) override;
+CmemLayout dmemlayout_to_cmemlayout(DmemLayout dmem_layout) {
+  switch (dmem_layout) {
+    case DmemRowMajor:
+      return CmemRowMajor;
+    case DmemColumnMajor:
+      return CmemColumnMajor;
+    default:
+      assert(false && "Cannot convert the given DmemLayout");
+      return CmemUnknownLayout;
+  }
+}
 
-  operator json() const override;
-};
-
-} // namespace kernel
+} // namespace layout
 } // namespace mirage

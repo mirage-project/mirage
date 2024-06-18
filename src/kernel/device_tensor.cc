@@ -30,21 +30,9 @@ DTensor::DTensor() {
   }
   owner_op = nullptr;
   owner_ts_idx = -1000;
-  data_ptr = nullptr;
+  data_offset = -1000;
+  fp_offset = -1000;
 }
-
-/*
-DTensorShape DTensor::get_shape() const {
-  DTensorShape shape;
-  shape.data_type = data_type;
-  shape.num_dims = num_dims;
-  for (int i = 0; i < num_dims; i++) {
-    shape.dim[i] = dim[i];
-    shape.stride[i] = stride[i];
-  }
-  return shape;
-}
-*/
 
 int DTensor::next_guid = 20000;
 
@@ -64,7 +52,7 @@ size_t hash<mirage::kernel::DTensor>::operator()(
   }
   hash_combine(ret, tensor.owner_op);
   hash_combine(ret, tensor.owner_ts_idx);
-  hash_combine(ret, tensor.data_ptr);
+  hash_combine(ret, tensor.data_offset);
   return ret;
 }
 
