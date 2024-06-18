@@ -44,7 +44,7 @@ std::vector<T> to_vector(int n, T *arr) {
 
 template <typename T>
 struct _reversed {
-  T& iter;
+  T &iter;
 
   auto begin() const {
     return iter.rbegin();

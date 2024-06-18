@@ -1,11 +1,11 @@
 #pragma once
 
+#include <atomic>
+#include <condition_variable>
+#include <mutex>
+#include <queue>
 #include <unordered_map>
 #include <unordered_set>
-#include <queue>
-#include <mutex>
-#include <condition_variable>
-#include <atomic>
 
 #include "mirage/search/config.h"
 #include "mirage/search/dim_strategy.h"
@@ -76,6 +76,7 @@ public:
 
   char const *filename;
   std::vector<json> generated_graphs;
+  int num_thread;
 
 private:
   std::vector<std::shared_ptr<AlgebraicPattern>> final_patterns;
@@ -84,9 +85,9 @@ private:
 
   std::vector<DTensor> output_tensors;
 
-  int num_total_kernel_graphs;
-  int num_total_random_tests;
-  int num_valid_kernel_graphs;
+  std::atomic<int> num_total_kernel_graphs;
+  std::atomic<int> num_total_random_tests;
+  std::atomic<int> num_valid_kernel_graphs;
 
   std::queue<SearchContext> search_queue;
   std::mutex queue_mutex;
@@ -102,7 +103,9 @@ private:
   void optimize_layout(
       kernel::Graph &g, int op_idx, int ts_idx, int bop_idx, int bts_idx);
   void update_best_graph(kernel::Graph &g);
-  bool create_tb_outputs(SearchContext &c, int3 output_map);
+  bool create_tb_outputs(SearchContext &c,
+                         int3 output_map,
+                         std::vector<std::shared_ptr<AlgebraicPattern>> &);
 
   std::vector<layout::SmemLayout>
       get_valid_output_layout(threadblock::TBOperator const *op, int idx);

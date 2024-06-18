@@ -18,9 +18,9 @@
 #include "mirage/kernel/customized.h"
 #include "mirage/kernel/matmul.h"
 #include "mirage/kernel/operator.h"
+#include <mutex>
 #include <unordered_map>
 #include <vector>
-#include <mutex>
 
 #include <cublas_v2.h>
 namespace mirage {
