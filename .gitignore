@@ -24,3 +24,6 @@
 build/
 bin/
 /.cache/
+
+#vscode
+.vscode/

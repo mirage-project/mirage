@@ -14,17 +14,23 @@
 #
 import os
 from os import path
+from pathlib import Path
 import sys
 import sysconfig
-from setuptools import find_packages
+from setuptools import find_packages, setup, Command
+import subprocess
+
 
 # need to use distutils.core for correct placement of cython dll
-if "--inplace" in sys.argv:                                                
-    from distutils.core import setup
-    from distutils.extension import Extension                              
+if "--inplace" in sys.argv:                                              
+  from distutils.core import setup
+  from distutils.extension import Extension                            
 else:
-    from setuptools import setup
-    from setuptools.extension import Extension
+  from setuptools import setup
+  from setuptools.extension import Extension
+
+
+
 
 def config_cython():
     sys_cflags = sysconfig.get_config_var("CFLAGS")
@@ -55,8 +61,80 @@ def config_cython():
     except ImportError:
         print("WARNING: cython is not installed!!!")
         return []
+    
+# install Z3 if not installed already  
+try:
+  subprocess.check_output(['z3', '--version'])
+  print('Z3 had already installed')
+except FileNotFoundError:
+  print('Z3 not found, installing Z3 right now...')
+  try:
+      mirage_path = os.environ.get('MIRAGE')
+      if not mirage_path:
+        print("Please set the MIRAGE environment variable to the path of the mirage source directory.")
+        raise SystemExit(1)
+    #   ld_library_path = os.environ.get('LD_LIBRARY_PATH')
+    #   if not ld_library_path:
+    #     print("Please set the LD_LIBRARY_PATH environment variable.")
+    #     raise SystemExit(1)
+         
+      z3_path = os.path.join(mirage_path, 'deps', 'z3')
+      build_dir = os.path.join(z3_path, 'build')
+      os.makedirs(build_dir, exist_ok=True)
+      os.chdir(build_dir)
+      print(f"Changed to directory: {os.getcwd()}")
+      print(f"running cmake command at {build_dir}")
+      subprocess.check_call(['cmake', '..'], cwd=build_dir)
+      print("finished running cmake command")
+      print(f"running make command at {build_dir}")
+      subprocess.check_call(['make', '-j'], cwd=build_dir)
+      print("running make command")
+
+      # update LD_LIBRARY_PATH
+      print("here")
+      print(f"{build_dir}:{os.environ.get('LD_LIBRARY_PATH','')}")
+      os.environ['LD_LIBRARY_PATH'] = f"{build_dir}:{os.environ.get('LD_LIBRARY_PATH','LD_LIBRARY_PATH')}"
+      print("Z3 installed successfully.")
+
+
+
+
+  except subprocess.CalledProcessError as e:
+      print("Failed to install Z3.")
+      raise SystemExit(e.returncode)
+ # build Mirage runtime library
+try:
+  os.environ['CUDACXX'] = '/usr/local/cuda/bin/nvcc'
+  mirage_path = os.environ.get('MIRAGE')
+  if not mirage_path:
+      print("Please set the MIRAGE environment variable to the path of the mirage source directory.")
+      raise SystemExit(1)
+  z3_path = os.path.join(mirage_path, 'deps', 'z3', 'build')
+  os.environ['Z3_DIR'] = z3_path
+
+  os.makedirs(mirage_path, exist_ok=True)
+  os.chdir(mirage_path)
+  build_dir = os.path.join(mirage_path, 'build')
+  
+  # Create the build directory if it does not exist
+  os.makedirs(build_dir, exist_ok=True)
+  
+  subprocess.check_call(['cmake', '..'], cwd=build_dir, env=os.environ.copy())
+  subprocess.check_call(['make', '-j'], cwd=build_dir, env=os.environ.copy())
+  print("Mirage runtime library built successfully.")
+  # import pdb; pdb.set_trace()
+
+
+
+except subprocess.CalledProcessError as e:
+  print("Failed to build runtime library.")
+  raise SystemExit(e.returncode)
+
 
 setup_args = {}
+
+
+
 
 #if not os.getenv('CONDA_BUILD'):
 #    curr_path = os.path.dirname(os.path.abspath(os.path.expanduser(__file__)))
@@ -67,13 +145,18 @@ setup_args = {}
 #        "data_files": [('mirage', LIB_LIST)]
 #    }
 
+# Create requirements list from requirements.txt
+with open(Path(__file__).parent / "requirements.txt", "r") as reqs_file:
+    requirements = reqs_file.read().strip().split("\n")
+
+
 setup(name='mirage',
-      version="0.1.0",
-      description="Mirage: A Multi-Level Superoptimizer for Tensor Algebra",
-      zip_safe=False,
-      install_requires=[],
-      packages=find_packages(),
-      url='https://github.com/mirage-project/mirage',
-      ext_modules=config_cython(),
-      #**setup_args,
-      )
+    version="0.1.0",
+    description="Mirage: A Multi-Level Superoptimizer for Tensor Algebra",
+    zip_safe=False,
+    install_requires=requirements,
+    packages=find_packages(),
+    url='https://github.com/mirage-project/mirage',
+    ext_modules=config_cython(),
+    #**setup_args,
+    )
