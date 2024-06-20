@@ -23,14 +23,15 @@ namespace transpiler {
 
 class CudaTranspiler {
 public:
-  std::string gen_header_code(std::string indent);
-  std::string gen_kernel_code(mirage::threadblock::NewKernelParams params,
-                              int forloop_range,
-                              int reduction_dimx,
-                              std::string func_name,
-                              std::vector<std::string> input_names,
-                              std::vector<std::string> output_names,
-                              std::string indent);
+  CudaTranspiler();
+  std::string generate_header_code(std::string indent);
+  std::string generate_kernel_code(mirage::threadblock::NewKernelParams params,
+                                   int forloop_range,
+                                   int reduction_dimx,
+                                   std::string func_name,
+                                   std::vector<std::string> input_names,
+                                   std::vector<std::string> output_names,
+                                   std::string indent);
 };
 
 } // namespace transpiler
