@@ -71,6 +71,7 @@ std::string gen_cuda_block_offset_calculation(int off_x,
 void gen_cuda_code_input_loader(mirage::threadblock::NewKernelParams params,
                                 int &param_idx,
                                 std::stringstream &main,
+                                std::string dtensor_name,
                                 std::string ind) {
   int3 input_matrix_row_offset_block_stride;
   int3 input_matrix_column_offset_block_stride;
@@ -121,65 +122,47 @@ void gen_cuda_code_input_loader(mirage::threadblock::NewKernelParams params,
   main << ind << "cutlass::half_t *stensor_ptr =\n"
        << ind << "    (cutlass::half_t*)(smem_buffer[(i + 1) % 2] + "
        << input_smem_offset << ");\n";
-  main << ind << "mirage::threadblock::GenericInputLoader loader(\n"
-       << ind << "    dtensor_ptr,\n"
-       << ind << "    stensor_ptr,\n"
-       << ind << "    dtensor_matrix_shape,\n"
-       << ind << "    stensor_matrix_shape,\n"
-       << ind << "    dtensor_layout,\n"
-       << ind << "    stensor_layout,\n"
-       << ind << "    threadIdx.x,\n"
-       << ind << "    blockDim.x,\n"
-       << ind << "    matrix_offset,\n"
-       << ind << "    global_offset);\n";
-}
 
-void gen_cuda_code_matmul_op(mirage::threadblock::NewKernelParams params,
-                             int &param_idx,
-                             int &op,
-                             std::stringstream &main,
-                             std::string ind) {
-  int m, n, k;
-  int A_smem_offset, B_smem_offset, C_smem_offset;
-  mirage::threadblock::deserialize_matmul_op_parameters(params.parameters,
-                                                        param_idx,
-                                                        m,
-                                                        n,
-                                                        k,
-                                                        A_smem_offset,
-                                                        B_smem_offset,
-                                                        C_smem_offset);
-  main << ind << "cutlass::half_t *_A_ptr =\n"
-       << ind << "    (cutlass::half_t*)(smem_buffer[i % 2] + " << A_smem_offset
-       << ");\n";
-  main << ind << "cutlass::half_t *_B_ptr =\n"
-       << ind << "    (cutlass::half_t*)(smem_buffer[i % 2] + " << B_smem_offset
-       << ");\n";
-  main << ind << "cutlass::half_t *_C_ptr =\n"
-       << ind << "    (cutlass::half_t*)(smem_buffer[i % 2] + " << C_smem_offset
-       << ");\n";
-  if (op < params.num_operators &&
-      params.operator_types[op + 1] == mirage::type::TB_EXP_OP) {
-    // fuse this matmul with the next exp
-    int E_smem_offset, num_elements;
-    mirage::threadblock::deserialize_elementunary_op_parameters(
-        params.parameters, param_idx, E_smem_offset, num_elements);
-    // assert inline exp
-    assert(C_smem_offset == E_smem_offset);
-    main << ind
-         << "mirage::threadblock::GenericMatmulExecutor<mirage::type::ACT_EXP> "
-            "executor(\n"
-         << ind << "_A_ptr, _B_ptr, _C_ptr, " << m << ", " << n << ", " << k
-         << ", threadIdx.x);\n";
-
-    op += 1;
+  int kRow = stensor_matrix_shape.x;
+  int kColumn = stensor_matrix_shape.y;
+  if (kColumn == dtensor_matrix_shape.y) {
+    main << ind << "int base_offset = global_offset + tb_offset_row * "
+         << dtensor_matrix_shape.y << " + tb_offset_column;\n";
   } else {
-    main << ind
-         << "mirage::threadblock::GenericMatmulExecutor<mirage::type::ACT_NONE>"
-            " executor(\n"
-         << ind << "_A_ptr, _B_ptr, _C_ptr, " << m << ", " << n << ", " << k
-         << ", threadIdx.x);\n";
+    assert(kRow == dtensor_matrix_shape.x);
+    main << ind << "int base_offset = global_offset + tb_offset_column * "
+         << dtensor_matrix_shape.x << " + tb_offset_row;\n";
   }
+  // Each thread loads 16 bytes using cp.async
+  main << ind << "for (int _idx = threadIdx.x * 8; _idx <" << kRow * kColumn
+       << "; _idx += 8 * blockDim.x) {\n";
+  main
+      << ind << "  unsigned stensor_int_ptr =\n"
+      << ind
+      << "      cutlass::arch::cutlass_get_smem_pointer(stensor_ptr + _idx);\n";
+  main << ind << "  cutlass::half_t *_dtensor_ptr = " << dtensor_name
+       << " + _idx;\n";
+  main << ind << "  asm volatile(\n"
+       << ind << "      "
+       << "\"cp.async.ca.shared.global.L2::128B [\%0], [\%1], \%2, \%3;\\n\"::"
+       << "\n"
+       << ind << "      \"r\"(stensor_int_ptr),\n"
+       << ind << "      \"l\"(_dtensor_ptr),\n"
+       << ind << "      \"n\"(16),\n"
+       << ind << "      \"r\"(16));\n";
+  main << ind << "} // end of for-loop\n";
+
+  // main << ind << "mirage::threadblock::GenericInputLoader loader(\n"
+  //      << ind << "    dtensor_ptr,\n"
+  //      << ind << "    stensor_ptr,\n"
+  //      << ind << "    dtensor_matrix_shape,\n"
+  //      << ind << "    stensor_matrix_shape,\n"
+  //      << ind << "    dtensor_layout,\n"
+  //      << ind << "    stensor_layout,\n"
+  //      << ind << "    threadIdx.x,\n"
+  //      << ind << "    blockDim.x,\n"
+  //      << ind << "    matrix_offset,\n"
+  //      << ind << "    global_offset);\n";
 }
 
 void gen_cuda_code_output_loader(mirage::threadblock::NewKernelParams params,
@@ -238,6 +221,54 @@ void gen_cuda_code_output_loader(mirage::threadblock::NewKernelParams params,
          << ind << "    blockDim.x,\n"
          << ind << "    matrix_offset,\n"
          << ind << "    global_offset);\n";
+}
+
+void gen_cuda_code_matmul_op(mirage::threadblock::NewKernelParams params,
+                             int &param_idx,
+                             int &op,
+                             std::stringstream &main,
+                             std::string ind) {
+  int m, n, k;
+  int A_smem_offset, B_smem_offset, C_smem_offset;
+  mirage::threadblock::deserialize_matmul_op_parameters(params.parameters,
+                                                        param_idx,
+                                                        m,
+                                                        n,
+                                                        k,
+                                                        A_smem_offset,
+                                                        B_smem_offset,
+                                                        C_smem_offset);
+  main << ind << "cutlass::half_t *_A_ptr =\n"
+       << ind << "    (cutlass::half_t*)(smem_buffer[i % 2] + " << A_smem_offset
+       << ");\n";
+  main << ind << "cutlass::half_t *_B_ptr =\n"
+       << ind << "    (cutlass::half_t*)(smem_buffer[i % 2] + " << B_smem_offset
+       << ");\n";
+  main << ind << "cutlass::half_t *_C_ptr =\n"
+       << ind << "    (cutlass::half_t*)(smem_buffer[i % 2] + " << C_smem_offset
+       << ");\n";
+  if (op < params.num_operators &&
+      params.operator_types[op + 1] == mirage::type::TB_EXP_OP) {
+    // fuse this matmul with the next exp
+    int E_smem_offset, num_elements;
+    mirage::threadblock::deserialize_elementunary_op_parameters(
+        params.parameters, param_idx, E_smem_offset, num_elements);
+    // assert inline exp
+    assert(C_smem_offset == E_smem_offset);
+    main << ind
+         << "mirage::threadblock::GenericMatmulExecutor<mirage::type::ACT_EXP> "
+            "executor(\n"
+         << ind << "_A_ptr, _B_ptr, _C_ptr, " << m << ", " << n << ", " << k
+         << ", threadIdx.x);\n";
+
+    op += 1;
+  } else {
+    main << ind
+         << "mirage::threadblock::GenericMatmulExecutor<mirage::type::ACT_NONE>"
+            " executor(\n"
+         << ind << "_A_ptr, _B_ptr, _C_ptr, " << m << ", " << n << ", " << k
+         << ", threadIdx.x);\n";
+  }
 }
 
 void gen_cuda_code_exp_op(mirage::threadblock::NewKernelParams params,
@@ -306,6 +337,22 @@ void gen_cuda_code_reduction_op(mirage::threadblock::NewKernelParams params,
                                                            output_smem_offset);
 }
 
+void gen_cuda_code_launch_device_func(std::stringstream &ss,
+                                      std::string func_name,
+                                      std::string prefix_arg,
+                                      std::vector<std::string> arg_names,
+                                      std::string ind) {
+  ss << ind << func_name << "(\n";
+  ss << ind << "    " << prefix_arg << ",\n";
+  for (size_t i = 0; i < arg_names.size(); i++) {
+    if (i > 0) {
+      ss << ",\n";
+    }
+    ss << ind << "    " << arg_names[i];
+  }
+  ss << ");\n";
+}
+
 std::string CudaTranspiler::generate_kernel_code(
     mirage::threadblock::NewKernelParams params,
     int forloop_range,
@@ -316,6 +363,21 @@ std::string CudaTranspiler::generate_kernel_code(
     std::string ind) {
   using namespace mirage::threadblock;
   using namespace std;
+  string input_loader_func_name =
+      "smem_input_loader_func_" + func_name.substr(func_name.length() - 1, 1);
+  stringstream input_loader_func;
+  {
+    input_loader_func << "__device__ void " << input_loader_func_name << "(\n";
+    input_loader_func << "    int i,\n";
+    for (size_t i = 0; i < input_names.size(); i++) {
+      if (i > 0) {
+        input_loader_func << ",\n";
+      }
+      input_loader_func << "    cutlass::half_t *" << input_names[i];
+    }
+    input_loader_func << ") {\n";
+  }
+  stringstream output_saver_func;
   stringstream header;
   stringstream main;
   stringstream ending;
@@ -325,28 +387,41 @@ std::string CudaTranspiler::generate_kernel_code(
       if (i > 0) {
         header << ",\n";
       }
-      header << "    void *" << input_names[i];
+      header << "    cutlass::half_t *" << input_names[i];
     }
     for (size_t i = 0; i < output_names.size(); i++) {
       header << ",\n";
-      header << "    void *" << output_names[i];
+      header << "    cutlass::half_t *" << output_names[i];
     }
     header << ") {\n";
   }
   header << ind << "extern __shared__ char smem_buffer[];\n";
+  gen_cuda_code_launch_device_func(
+      main, input_loader_func_name, "0", input_names, ind);
   main << ind << "for (int i = 0; i < " << forloop_range << "; i++) {\n";
-  int param_idx = 0;
-  int output_idx = 0;
   // increase the indent by 2 spaces since we have a for loop wrapper
   ind = ind + "  ";
+  main << ind << "// launch cp.async operators\n";
+  main << ind << "if (i + 1 < " << forloop_range << ") {\n";
+  gen_cuda_code_launch_device_func(
+      main, input_loader_func_name, "i + 1", input_names, ind + "  ");
+  main << ind << "  asm volatile(\"cp.async.wait_group 1;\\n\" ::)\n";
+  main << ind << "} else {\n";
+  main << ind << "  asm volatile(\"cp.async.wait_group 0;\\n\" ::)\n";
+  main << ind << "}\n";
+  int param_idx = 0;
+  int output_idx = 0;
   for (int op = 0; op < params.num_operators; op++) {
     mirage::type::TBOperatorType op_type = params.operator_types[op];
     switch (op_type) {
       case mirage::type::TB_INPUT_OP: {
-        main << ind << "// Load input tensor from device to shared memory\n";
-        main << ind << "{\n";
-        gen_cuda_code_input_loader(params, param_idx, main, ind + "  ");
-        main << ind << "}\n";
+        input_loader_func
+            << ind.substr(0, ind.length() - 2)
+            << "// Load input tensor from device to shared memory\n";
+        input_loader_func << ind.substr(0, ind.length() - 2) << "{\n";
+        gen_cuda_code_input_loader(
+            params, param_idx, input_loader_func, input_names[op], ind);
+        input_loader_func << ind.substr(0, ind.length() - 2) << "}\n";
         break;
       }
       case mirage::type::TB_OUTPUT_OP: {
@@ -403,11 +478,14 @@ std::string CudaTranspiler::generate_kernel_code(
   }
   // Recover the original indent
   ind = ind.substr(0, ind.length() - 2);
+  // Add commit_group at the end of the input_loader
+  input_loader_func << "  asm volatile(\"cp.async.commit_group;\\n\" ::);\n";
+  input_loader_func << "} // end of " << input_loader_func_name << "\n\n";
   main << ind << "} // end of for-loop\n";
   // End of kernel
   ending << "}\n";
   assert(params.num_parameters == param_idx);
-  return header.str() + main.str() + ending.str();
+  return input_loader_func.str() + header.str() + main.str() + ending.str();
 }
 
 CudaTranspiler::CudaTranspiler() {}
