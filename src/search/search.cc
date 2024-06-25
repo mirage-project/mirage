@@ -152,7 +152,8 @@ SearchContext KernelGraphGenerator::dequeue() {
 
 bool KernelGraphGenerator::search_finished() {
   std::lock_guard<std::mutex> lock(queue_mutex);
-  return num_active_thread == 0 && search_queue.empty();
+  // return num_active_thread == 0 && search_queue.empty();
+  return search_queue.empty();
 }
 
 void KernelGraphGenerator::generate_next_operator() {
@@ -422,7 +423,7 @@ void KernelGraphGenerator::process_outputs() {
   for (kernel::KNOperator *op : computation_graph.operators) {
     for (DTensor const &output : op->output_tensors) {
       if (num_consumers[output] == 0) {
-        output_tensors.push_back(output);
+        output_tensors.push_back(output.copy_fingerprint_to_ctensor());
         final_patterns.push_back(computation_graph_patterns.at(output));
       }
     }
@@ -508,12 +509,12 @@ void KernelGraphGenerator::pattern_eval() {
 
 bool KernelGraphGenerator::verify(SearchContext c) {
   ++num_total_kernel_graphs;
-  if (num_total_kernel_graphs % 10000 == 1) {
+  if (num_total_kernel_graphs % 1000 == 1) {
     printf("Total kernel graphs explored: %d.\n",
            num_total_kernel_graphs.load());
-    if (num_total_kernel_graphs % 10000 == 1) {
-      save_checkpoint();
-    }
+    // if (num_total_kernel_graphs % 10000 == 1) {
+    //   save_checkpoint();
+    // }
   }
 
   std::vector<DTensor> outputs = get_output_tensors(c.kn_graph);
@@ -523,12 +524,10 @@ bool KernelGraphGenerator::verify(SearchContext c) {
   }
 
   {
-    kernel::DeviceMemoryManager *dmm =
-        kernel::DeviceMemoryManager::get_instance();
-    std::lock_guard<std::mutex> lock(dmm->dmm_mutex);
+    std::lock_guard<std::mutex> lock(fp_mutex);
 
     ++num_total_random_tests;
-    std::cout << "random testing: " << json(c.kn_graph) << std::endl;
+    // std::cout << "random testing: " << json(c.kn_graph) << std::endl;
 
     for (auto const &op : c.kn_graph.operators) {
       op->fingerprint();
@@ -549,8 +548,7 @@ bool KernelGraphGenerator::have_same_fingerprint(
     std::vector<DTensor> const &outputs, std::vector<int> const &match) const {
   assert(outputs.size() == match.size());
   for (int i = 0; i < static_cast<int>(match.size()); ++i) {
-    cpu::CTensor fp = outputs[match[i]].copy_fingerprint_to_ctensor();
-    if (!output_tensors[i].has_same_fingerprint(fp)) {
+    if (!outputs[match[i]].has_same_fingerprint(output_tensors[i])) {
       return false;
     }
   }
@@ -690,7 +688,8 @@ void KernelGraphGenerator::optimize_layout(
 
 void KernelGraphGenerator::update_best_graph(kernel::Graph &g) {
   // std::cerr << "kernel graph candidate: " << json(g) << std::endl;
-  ProfileResult result = g.profile();
+  ProfileResult result;
+  // TODO: get profile result
   if (result.run_time < best_profile_result.run_time) {
     best_graph = json(g);
     best_profile_result = result;

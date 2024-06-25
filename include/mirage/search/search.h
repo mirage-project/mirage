@@ -83,11 +83,13 @@ private:
   std::unordered_map<DTensor, std::shared_ptr<AlgebraicPattern>>
       computation_graph_patterns;
 
-  std::vector<DTensor> output_tensors;
+  std::vector<cpu::CTensor> output_tensors;
 
   std::atomic<int> num_total_kernel_graphs;
   std::atomic<int> num_total_random_tests;
   std::atomic<int> num_valid_kernel_graphs;
+
+  std::mutex fp_mutex;
 
   std::queue<SearchContext> search_queue;
   std::mutex queue_mutex;

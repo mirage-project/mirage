@@ -18,7 +18,6 @@
 #include "mirage/kernel/customized.h"
 #include "mirage/kernel/matmul.h"
 #include "mirage/kernel/operator.h"
-#include <mutex>
 #include <unordered_map>
 #include <vector>
 
@@ -52,8 +51,6 @@ public:
   off_t dmem_tensor_start_offset;
   // fields for managing the preallocated cuda buffer
   char *base_ptr[mirage::config::MAX_NUM_GPUS];
-
-  std::mutex dmm_mutex;
 
 public:
   cudaStream_t stream[mirage::config::MAX_NUM_GPUS];

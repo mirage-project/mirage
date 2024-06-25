@@ -238,17 +238,5 @@ void from_json(json const &j, Graph &g) {
   }
 }
 
-ProfileResult Graph::profile() {
-  DeviceMemoryManager *dmm = DeviceMemoryManager::get_instance();
-  std::lock_guard<std::mutex> lock(dmm->dmm_mutex);
-  ProfileResult result{0};
-  for (auto &op : operators) {
-    ProfileResult op_result;
-    op->profile(op_result);
-    result.run_time += op_result.run_time;
-  }
-  return result;
-}
-
 } // namespace kernel
 } // namespace mirage
