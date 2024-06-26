@@ -63,5 +63,5 @@ make -j
 Finally, you will install the Mirage python package, which allows you to use Mirage's python package to superoptimize DNNs.
 ```bash
 cd /path-to-mirage/python
-python setup.py install
+python cython_setup.py install
 ```
