@@ -18,12 +18,27 @@
 #include "mirage/kernel/customized.h"
 #include "mirage/kernel/graph.h"
 
+#include <set>
+
 namespace mirage {
 namespace transpiler {
 
 class CudaTranspiler {
 public:
   CudaTranspiler();
+  void define_stensor_from_offset(
+      std::stringstream &ss,
+      int offset,
+      std::string name,
+      std::string ind,
+      mirage::type::DataType type = mirage::type::DT_FLOAT16);
+  void gen_cuda_code_input_loader(std::string dtensor_name, std::string indent);
+  void gen_cuda_code_output_saver(std::string indent);
+  void gen_cuda_code_matmul_op(std::string indent);
+  void gen_cuda_code_exp_op(std::string indent);
+  void gen_cuda_code_div_op(std::string indent);
+  void gen_cuda_code_reduction_op(std::string indent);
+
   std::string generate_header_code(std::string indent);
   std::string generate_kernel_code(mirage::threadblock::NewKernelParams params,
                                    int forloop_range,
@@ -32,6 +47,16 @@ public:
                                    std::vector<std::string> input_names,
                                    std::vector<std::string> output_names,
                                    std::string indent);
+
+public:
+  mirage::threadblock::NewKernelParams params;
+  int param_idx, op;
+  std::stringstream input_loader_func;
+  std::stringstream output_saver_func;
+  std::stringstream header;
+  std::stringstream main;
+  std::stringstream ending;
+  std::set<int> input_loader_smem_offsets;
 };
 
 } // namespace transpiler
