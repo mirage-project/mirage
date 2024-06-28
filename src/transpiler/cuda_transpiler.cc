@@ -148,8 +148,8 @@ void CudaTranspiler::gen_cuda_code_input_loader(std::string dtensor_name,
                            global_offset_block_stride.z,
                            global_offset_forloop_stride)
                     << ";\n";
-  input_loader_func << ind << "cutlass::MatrixCoord matrix_offset"
-                    << " = {tb_offset_row, tb_offset_column};\n";
+  // input_loader_func << ind << "cutlass::MatrixCoord matrix_offset"
+  //                   << " = {tb_offset_row, tb_offset_column};\n";
   input_loader_func << ind << "cutlass::half_t *stensor_ptr =\n"
                     << ind << "    (cutlass::half_t*)(smem_buffer + (i % 2) * "
                     << bgraph->smem_offset << " + " << input_smem_offset
@@ -168,7 +168,7 @@ void CudaTranspiler::gen_cuda_code_input_loader(std::string dtensor_name,
                       << dtensor_matrix_shape.x << " + tb_offset_row;\n";
   }
   // Each thread loads 16 bytes using cp.async
-  input_loader_func << ind << "for (int _idx = threadIdx.x * 8; _idx <"
+  input_loader_func << ind << "for (int _idx = threadIdx.x * 8; _idx < "
                     << kRow * kColumn << "; _idx += 8 * blockDim.x) {\n";
   input_loader_func
       << ind << "  unsigned stensor_int_ptr =\n"
@@ -202,7 +202,8 @@ void CudaTranspiler::gen_cuda_code_input_loader(std::string dtensor_name,
   //      << ind << "    global_offset);\n";
 }
 
-void CudaTranspiler::gen_cuda_code_output_saver(std::string ind) {
+void CudaTranspiler::gen_cuda_code_output_saver(std::string dtensor_name,
+                                                std::string ind) {
   int3 output_matrix_row_offset_block_stride;
   int3 output_matrix_column_offset_block_stride;
   int3 global_offset_block_stride;
@@ -239,22 +240,45 @@ void CudaTranspiler::gen_cuda_code_output_saver(std::string ind) {
                                               global_offset_block_stride.y,
                                               global_offset_block_stride.z)
          << ";\n";
-  ending << ind << "cutlass::MatrixCoord matrix_offset"
-         << " = {tb_offset_row, tb_offset_column};\n";
+  // ending << ind << "cutlass::MatrixCoord matrix_offset"
+  //        << " = {tb_offset_row, tb_offset_column};\n";
   ending << ind << "cutlass::half_t *stensor_ptr =\n"
          << ind << "    (cutlass::half_t*)(smem_buffer + " << input_smem_offset
          << ");\n";
-  ending << ind << "mirage::threadblock::GenericOutputSaver saver(\n"
-         << ind << "    dtensor_ptr,\n"
-         << ind << "    stensor_ptr,\n"
-         << ind << "    dtensor_matrix_shape,\n"
-         << ind << "    stensor_matrix_shape,\n"
-         << ind << "    dtensor_layout,\n"
-         << ind << "    stensor_layout,\n"
-         << ind << "    threadIdx.x,\n"
-         << ind << "    blockDim.x,\n"
-         << ind << "    matrix_offset,\n"
-         << ind << "    global_offset);\n";
+  int kRow = stensor_matrix_shape.x;
+  int kColumn = stensor_matrix_shape.y;
+  printf("stensor_matrix(%d %d) dtensor_matrix(%d %d)\n",
+         kRow,
+         kColumn,
+         dtensor_matrix_shape.x,
+         dtensor_matrix_shape.y);
+  ending << ind << "int base_offset = global_offset + tb_offset_row * "
+         << dtensor_matrix_shape.y << " + tb_offset_column;\n";
+
+  // FIXME: currently assume a row-major layout for both stensor and dtensor
+  ending << ind << "cutlass::half_t *dtensor_ptr = " << dtensor_name
+         << " + base_offset;\n";
+  // Currently assume that kColumn can divide blockDim.x
+  assert(128 % kColumn == 0);
+  int num_rows_per_iter = 128 / kColumn;
+  ending << ind << "int _col = threadIdx.x % " << kColumn << ";\n";
+  ending << ind << "for (int _row = threadIdx.x / " << num_rows_per_iter
+         << "; _row < " << kRow << "; _row += " << num_rows_per_iter << ") {\n";
+  ending << ind << "  dtensor_ptr[_row * " << dtensor_matrix_shape.y
+         << " + _col"
+         << "] = stensor_ptr[_row * " << kColumn << " + _col];\n";
+  ending << ind << "} // end of for-loop\n";
+  // ending << ind << "mirage::threadblock::GenericOutputSaver saver(\n"
+  //        << ind << "    dtensor_ptr,\n"
+  //        << ind << "    stensor_ptr,\n"
+  //        << ind << "    dtensor_matrix_shape,\n"
+  //        << ind << "    stensor_matrix_shape,\n"
+  //        << ind << "    dtensor_layout,\n"
+  //        << ind << "    stensor_layout,\n"
+  //        << ind << "    threadIdx.x,\n"
+  //        << ind << "    blockDim.x,\n"
+  //        << ind << "    matrix_offset,\n"
+  //        << ind << "    global_offset);\n";
 }
 
 void CudaTranspiler::gen_cuda_code_matmul_op(std::string ind) {
@@ -280,17 +304,19 @@ void CudaTranspiler::gen_cuda_code_matmul_op(std::string ind) {
     // assert inline exp
     assert(C_smem_offset == E_smem_offset);
     main << ind
-         << "mirage::threadblock::GenericMatmulExecutor<mirage::type::ACT_EXP> "
+         << "//"
+            "mirage::threadblock::GenericMatmulExecutor<mirage::type::ACT_EXP> "
             "executor(\n"
-         << ind << "_A_ptr, _B_ptr, _C_ptr, " << m << ", " << n << ", " << k
+         << ind << "//_A_ptr, _B_ptr, _C_ptr, " << m << ", " << n << ", " << k
          << ", threadIdx.x);\n";
 
     op += 1;
   } else {
     main << ind
-         << "mirage::threadblock::GenericMatmulExecutor<mirage::type::ACT_NONE>"
+         << "//"
+            "mirage::threadblock::GenericMatmulExecutor<mirage::type::ACT_NONE>"
             " executor(\n"
-         << ind << "_A_ptr, _B_ptr, _C_ptr, " << m << ", " << n << ", " << k
+         << ind << "//_A_ptr, _B_ptr, _C_ptr, " << m << ", " << n << ", " << k
          << ", threadIdx.x);\n";
   }
 }
@@ -439,7 +465,7 @@ std::string CudaTranspiler::generate_kernel_code(
         ending << ind.substr(0, ind.length() - 2)
                << "// Save output tensor from shared to device memory\n";
         ending << ind.substr(0, ind.length() - 2) << "{\n";
-        gen_cuda_code_output_saver(ind);
+        gen_cuda_code_output_saver(output_names[output_idx++], ind);
         ending << ind.substr(0, ind.length() - 2) << "}\n";
         break;
       }
