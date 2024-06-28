@@ -15,6 +15,7 @@
 
 #include "mirage/transpiler/cuda_transpiler.h"
 #include "mirage/kernel/graph.h"
+#include "mirage/threadblock/graph.h"
 #include "mirage/threadblock/serializer/concat_serializer.h"
 #include "mirage/threadblock/serializer/element_binary_serializer.h"
 #include "mirage/threadblock/serializer/element_unary_serializer.h"
@@ -33,6 +34,11 @@ namespace transpiler {
 std::string CudaTranspiler::generate_header_code(std::string indent) {
   std::stringstream ss;
   ss << indent << "#include<cuda.h>\n";
+  ss << indent << "#include \"cutlass/cutlass.h\"\n";
+  ss << indent << "#include \"cutlass/fast_math.h\"\n";
+  ss << indent << "#include \"cutlass/matrix_coord.h\"\n";
+  ss << indent << "#include \"cutlass/arch/memory_sm80.h\"\n";
+  ss << "\n";
   return ss.str();
 }
 
@@ -79,9 +85,10 @@ void CudaTranspiler::define_stensor_from_offset(std::stringstream &ss,
          << ind << "    (cutlass::half_t *)(";
       if (input_loader_smem_offsets.find(offset) !=
           input_loader_smem_offsets.end()) {
-        ss << "smem_buffer[i % 2] + " << offset;
+        ss << "smem_buffer + (i % 2) * " << bgraph->smem_offset << " + "
+           << offset;
       } else {
-        ss << "smem_buffer[0] + " << offset;
+        ss << "smem_buffer + " << offset;
       }
       ss << ");\n";
       break;
@@ -144,9 +151,9 @@ void CudaTranspiler::gen_cuda_code_input_loader(std::string dtensor_name,
   input_loader_func << ind << "cutlass::MatrixCoord matrix_offset"
                     << " = {tb_offset_row, tb_offset_column};\n";
   input_loader_func << ind << "cutlass::half_t *stensor_ptr =\n"
-                    << ind
-                    << "    (cutlass::half_t*)(smem_buffer[(i + 1) % 2] + "
-                    << input_smem_offset << ");\n";
+                    << ind << "    (cutlass::half_t*)(smem_buffer + (i % 2) * "
+                    << bgraph->smem_offset << " + " << input_smem_offset
+                    << ");\n";
 
   int kRow = stensor_matrix_shape.x;
   int kColumn = stensor_matrix_shape.y;
@@ -169,7 +176,7 @@ void CudaTranspiler::gen_cuda_code_input_loader(std::string dtensor_name,
       << "      cutlass::arch::cutlass_get_smem_pointer(stensor_ptr + _idx);\n";
   input_loader_func << ind
                     << "  cutlass::half_t *_dtensor_ptr = " << dtensor_name
-                    << " + _idx;\n";
+                    << " + base_offset + _idx;\n";
   input_loader_func
       << ind << "  asm volatile(\n"
       << ind << "      "
@@ -235,8 +242,8 @@ void CudaTranspiler::gen_cuda_code_output_saver(std::string ind) {
   ending << ind << "cutlass::MatrixCoord matrix_offset"
          << " = {tb_offset_row, tb_offset_column};\n";
   ending << ind << "cutlass::half_t *stensor_ptr =\n"
-         << ind << "    (cutlass::half_t*)(smem_buffer[(i + 1) % 2] + "
-         << input_smem_offset << ");\n";
+         << ind << "    (cutlass::half_t*)(smem_buffer + " << input_smem_offset
+         << ");\n";
   ending << ind << "mirage::threadblock::GenericOutputSaver saver(\n"
          << ind << "    dtensor_ptr,\n"
          << ind << "    stensor_ptr,\n"
@@ -356,13 +363,13 @@ void gen_cuda_code_launch_device_func(std::stringstream &ss,
 
 std::string CudaTranspiler::generate_kernel_code(
     mirage::threadblock::NewKernelParams _params,
-    int forloop_range,
-    int reduction_dimx,
+    mirage::threadblock::Graph const *_bgraph,
     std::string func_name,
     std::vector<std::string> input_names,
     std::vector<std::string> output_names,
     std::string ind) {
   params = _params;
+  bgraph = _bgraph;
   using namespace mirage::threadblock;
   using namespace std;
   string input_loader_func_name =
@@ -378,6 +385,7 @@ std::string CudaTranspiler::generate_kernel_code(
       input_loader_func << "    cutlass::half_t *" << input_names[i];
     }
     input_loader_func << ") {\n";
+    input_loader_func << "  extern __shared__ char smem_buffer[];\n";
   }
   output_saver_func.str("");
   header.str("");
@@ -401,16 +409,17 @@ std::string CudaTranspiler::generate_kernel_code(
   header << ind << "extern __shared__ char smem_buffer[];\n";
   gen_cuda_code_launch_device_func(
       main, input_loader_func_name, "0", input_names, ind);
-  main << ind << "for (int i = 0; i < " << forloop_range << "; i++) {\n";
+  main << ind << "for (int i = 0; i < " << bgraph->forloop_range
+       << "; i++) {\n";
   // increase the indent by 2 spaces since we have a for loop wrapper
   ind = ind + "  ";
   main << ind << "// launch cp.async operators\n";
-  main << ind << "if (i + 1 < " << forloop_range << ") {\n";
+  main << ind << "if (i + 1 < " << bgraph->forloop_range << ") {\n";
   gen_cuda_code_launch_device_func(
       main, input_loader_func_name, "i + 1", input_names, ind + "  ");
-  main << ind << "  asm volatile(\"cp.async.wait_group 1;\\n\" ::)\n";
+  main << ind << "  asm volatile(\"cp.async.wait_group 1;\\n\" ::);\n";
   main << ind << "} else {\n";
-  main << ind << "  asm volatile(\"cp.async.wait_group 0;\\n\" ::)\n";
+  main << ind << "  asm volatile(\"cp.async.wait_group 0;\\n\" ::);\n";
   main << ind << "}\n";
   param_idx = 0;
   int output_idx = 0;
@@ -523,8 +532,7 @@ void Graph::generate_cuda_program(char const *file_path) {
         }
         string kernel_code = ct.generate_kernel_code(
             params,
-            customized->bgraph.forloop_range,
-            customized->bgraph.reduction_dimx,
+            &(customized->bgraph),
             "graphdef_kernel_" + to_string(kernels.size()),
             input_names,
             output_names,
@@ -540,6 +548,7 @@ void Graph::generate_cuda_program(char const *file_path) {
 
   // Write profiling code for main program
   ofstream file(file_path);
+  file << ct.generate_header_code("");
   for (auto const &k : kernels) {
     file << k << "\n";
   }

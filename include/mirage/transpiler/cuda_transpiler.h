@@ -41,8 +41,7 @@ public:
 
   std::string generate_header_code(std::string indent);
   std::string generate_kernel_code(mirage::threadblock::NewKernelParams params,
-                                   int forloop_range,
-                                   int reduction_dimx,
+                                   mirage::threadblock::Graph const *graph,
                                    std::string func_name,
                                    std::vector<std::string> input_names,
                                    std::vector<std::string> output_names,
@@ -50,6 +49,7 @@ public:
 
 public:
   mirage::threadblock::NewKernelParams params;
+  mirage::threadblock::Graph const *bgraph;
   int param_idx, op;
   std::stringstream input_loader_func;
   std::stringstream output_saver_func;
