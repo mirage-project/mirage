@@ -633,6 +633,24 @@ void Graph::generate_cuda_program(char const *file_path) {
     }
   }
 
+  // Launch kernels for profiling runtime
+
+  main << "  checkCUDA(cudaDeviceSynchronize());\n";
+  main << "  cudaEvent_t events[2];\n";
+  main << "  checkCUDA(cudaEventCreate(&events[0]));\n";
+  main << "  checkCUDA(cudaEventCreate(&events[1]));\n";
+  main << "  for (int i = 0; i < 1024; i++) {\n";
+  main << "    mugraph_executer(gpu_base_ptrs[0]);\n";
+  main << "  }\n";
+  main << "  checkCUDA(cudaEventRecord(events[0]));\n";
+  main << "  for (int i = 0; i < 1024; i++) {\n";
+  main << "    mugraph_executer(gpu_base_ptrs[0]);\n";
+  main << "  }\n";
+  main << "  checkCUDA(cudaEventRecord(events[1]));\n";
+  main << "  checkCUDA(cudaEventSynchronize(events[1]));\n";
+  main << "  float runtime_ms;\n";
+  main << "  cudaEventElapsedTime(&runtime_ms, events[0], events[1]);\n";
+  main << "  printf(\"Runtime = \%.8lfms\\n\", runtime_ms / 1024);\n";
   main << "}\n";
   executer << "} // end of mugraph_executer\n";
 
