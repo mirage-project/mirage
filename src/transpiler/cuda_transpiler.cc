@@ -34,11 +34,22 @@ namespace transpiler {
 std::string CudaTranspiler::generate_header_code(std::string indent) {
   std::stringstream ss;
   ss << indent << "#include<cuda.h>\n";
+  ss << indent << "#include<sstream>\n";
   ss << indent << "#include \"cutlass/cutlass.h\"\n";
   ss << indent << "#include \"cutlass/fast_math.h\"\n";
   ss << indent << "#include \"cutlass/matrix_coord.h\"\n";
   ss << indent << "#include \"cutlass/arch/memory_sm80.h\"\n";
   ss << "\n";
+  ss << "#define checkCUDA(status)                         \\\n";
+  ss << "do {                                              \\\n";
+  ss << "  std::stringstream _error;                       \\\n";
+  ss << "  if (status != 0) {                              \\\n";
+  ss << "    std::cerr << \"Cuda failure: \" << status;      \\\n";
+  ss << "    exit(1);                                      \\\n";
+  ss << "  }                                               \\\n";
+  ss << "} while (0)\n";
+  ss << "\n";
+
   return ss.str();
 }
 
@@ -537,6 +548,18 @@ void Graph::generate_cuda_program(char const *file_path) {
   using namespace std;
   vector<string> kernels;
   mirage::transpiler::CudaTranspiler ct;
+  stringstream main;
+  main << "int main() {\n";
+  assert(gpu_dim.y == 1);
+  assert(gpu_dim.z == 1);
+  main << "  char * gpu_base_ptrs[" << mirage::config::MAX_NUM_GPUS << "];\n";
+  main << "  for (int i = 0; i < " << gpu_dim.x << "; i++) {\n";
+  main << "    checkCUDA(cudaSetDevice(i));\n";
+  main << "    checkCUDA(cudaMalloc(&gpu_base_ptrs[i], "
+       << mirage::config::MAX_DMEM_SIZE << "));\n";
+  main << "  } // end of for-loop\n";
+  stringstream executer;
+  executer << "void mugraph_executer(char *gpu_base_ptr) {\n";
   for (KNOperator *const op : this->operators) {
     switch (op->op_type) {
       case type::KNOperatorType::KN_INPUT_OP: {
@@ -556,14 +579,52 @@ void Graph::generate_cuda_program(char const *file_path) {
         for (auto const &t : op->output_tensors) {
           output_names.push_back("dtensor" + to_string(t.guid));
         }
-        string kernel_code = ct.generate_kernel_code(
-            params,
-            &(customized->bgraph),
-            "graphdef_kernel_" + to_string(kernels.size()),
-            input_names,
-            output_names,
-            "  " /*indent*/);
+        string kernel_name = "graphdef_kernel_" + to_string(kernels.size());
+        string kernel_code = ct.generate_kernel_code(params,
+                                                     &(customized->bgraph),
+                                                     kernel_name,
+                                                     input_names,
+                                                     output_names,
+                                                     "  " /*indent*/);
         kernels.push_back(kernel_code);
+        int smem_size = customized->bgraph.get_smem_size_with_pipeline();
+        if (smem_size > 48 * 1024) {
+          main << "  checkCUDA(cudaFuncSetAttribute(\n"
+               << "      " << kernel_name << ",\n"
+               << "      cudaFuncAttributeMaxDynamicSharedMemorySize,\n"
+               << "      " << smem_size << "));\n";
+        }
+        executer << "  // launcher kernel: " << kernel_name << "\n  {\n";
+        for (auto const &t : op->input_tensors) {
+          executer << "    cutlass::half_t *dtensor" << t.guid << " =\n"
+                   << "        (cutlass::half_t*)(gpu_base_ptr + "
+                   << t.data_offset << ");\n";
+        }
+        for (auto const &t : op->output_tensors) {
+          executer << "    cutlass::half_t *dtensor" << t.guid << " =\n"
+                   << "        (cutlass::half_t*)(gpu_base_ptr + "
+                   << t.data_offset << ");\n";
+        }
+        executer << "    dim3 grid_dim = {" << customized->bgraph.grid_dim.x
+                 << ", " << customized->bgraph.grid_dim.y << ", "
+                 << customized->bgraph.grid_dim.z << "};\n";
+        executer << "    dim3 block_dim = {" << customized->bgraph.block_dim.x
+                 << ", " << customized->bgraph.block_dim.y << ", "
+                 << customized->bgraph.block_dim.z << "};\n";
+        executer << "    " << kernel_name << "<<<";
+        executer << "grid_dim, block_dim, " << smem_size << ">>>(\n        ";
+        for (size_t i = 0; i < input_names.size(); i++) {
+          if (i > 0) {
+            executer << ", ";
+          }
+          executer << input_names[i];
+        }
+        for (size_t i = 0; i < output_names.size(); i++) {
+          executer << ", ";
+          executer << output_names[i];
+        }
+        executer << ");\n";
+        executer << "  }\n";
         break;
       }
       default: {
@@ -572,12 +633,17 @@ void Graph::generate_cuda_program(char const *file_path) {
     }
   }
 
+  main << "}\n";
+  executer << "} // end of mugraph_executer\n";
+
   // Write profiling code for main program
   ofstream file(file_path);
   file << ct.generate_header_code("");
   for (auto const &k : kernels) {
     file << k << "\n";
   }
+  file << executer.str() << "\n";
+  file << main.str();
   file.close();
 }
 
