@@ -117,7 +117,8 @@ int main(int argc, char **argv) {
   }
   printf("[2 Block Graphs] Total runtime = %.4lfms\n", total_ms);
 
-  graph.generate_triton_program("test.py");
+  graph.generate_cuda_program("test.cu");
+  return 0;
 
   clock_t st = clock();
   search::GeneratorConfig config =

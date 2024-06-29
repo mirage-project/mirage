@@ -78,6 +78,7 @@ public:
                                    mirage::threadblock::Graph const &_graph);
   // helper functions
   void generate_triton_program(char const *filepath);
+  void generate_cuda_program(char const *filepath);
   bool can_allocate(DTensor const &tensor, bool allocate_fingerprint = true);
   bool can_allocate(size_t size_in_bytes);
   bool allocate(DTensor &tensor, bool allocate_fingerprint = true);
