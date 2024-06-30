@@ -258,8 +258,7 @@ std::vector<std::vector<int>> DimStrategy::get_nary_input(int num_tensors,
 }
 
 std::vector<std::vector<int>> DimStrategy::get_customized_input_cand_idx(
-    std::vector<DTensor> const &all_input,
-    std::vector<int> const &open_tensor_idx) {
+    std::vector<DTensor> const &all_input) {
 
   int num_inputs = all_input.size();
 

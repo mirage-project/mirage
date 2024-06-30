@@ -14,6 +14,7 @@
  */
 
 #include "mirage/kernel/device_tensor.h"
+#include "mirage/kernel/device_memory_manager.h"
 #include "mirage/utils/hash_utils.h"
 #include <functional>
 

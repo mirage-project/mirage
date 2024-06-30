@@ -6,6 +6,10 @@
 using namespace mirage;
 
 int main(int argc, char **argv) {
+  int num_thread = 1;
+  if (argc > 1) {
+    num_thread = std::atoi(argv[1]);
+  }
   int batch_size = miragetest::BATCH_SIZE;
   kernel::Graph ref_graph;
   {
@@ -113,8 +117,6 @@ int main(int argc, char **argv) {
   assert(
       graph.operators.back()->output_tensors[0].has_same_fingerprint(ref_fp));
 
-  return 0;
-
   clock_t st = clock();
   search::GeneratorConfig config =
       search::GeneratorConfig::get_attention_default_config();
@@ -125,6 +127,7 @@ int main(int argc, char **argv) {
       ".json";
   search::KernelGraphGenerator gen(
       ref_graph, config, checkpoint_file_name.data());
+  gen.num_thread = num_thread;
   gen.generate_kernel_graphs();
 
   clock_t et = clock();
