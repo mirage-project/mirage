@@ -55,7 +55,6 @@ KNOperator *Graph::create_customized_op(std::vector<DTensor> const &inputs,
     }
   }
 
-  // if (dmm->offset + output_size > dmm->total_size) {
   if (!can_allocate(output_size)) {
     return nullptr;
   }

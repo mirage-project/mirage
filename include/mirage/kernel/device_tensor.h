@@ -129,7 +129,7 @@ public:
   // offset in device memory
   int64_t fp_offset;
 
-  static int next_guid;
+  static int64_t next_guid;
 };
 
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(

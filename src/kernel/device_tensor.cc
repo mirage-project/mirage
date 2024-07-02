@@ -14,6 +14,7 @@
  */
 
 #include "mirage/kernel/device_tensor.h"
+#include "mirage/kernel/device_memory_manager.h"
 #include "mirage/utils/hash_utils.h"
 #include <functional>
 
@@ -34,7 +35,7 @@ DTensor::DTensor() {
   fp_offset = -1000;
 }
 
-int DTensor::next_guid = 20000;
+int64_t DTensor::next_guid = 1000000;
 
 } // namespace kernel
 } // namespace mirage
