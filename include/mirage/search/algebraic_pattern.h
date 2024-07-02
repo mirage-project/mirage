@@ -24,7 +24,7 @@ public:
   static std::unordered_set<std::string> all_variables;
   static std::unordered_map<std::pair<std::string, std::string>, bool>
       cached_results;
-  static std::mutex cached_results_mutex;
+  static std::mutex solver_mutex;
 };
 
 class Var : public AlgebraicPattern {

@@ -13,7 +13,7 @@ namespace search {
 std::unordered_set<std::string> AlgebraicPattern::all_variables;
 std::unordered_map<std::pair<std::string, std::string>, bool>
     AlgebraicPattern::cached_results;
-std::mutex AlgebraicPattern::cached_results_mutex;
+std::mutex AlgebraicPattern::solver_mutex;
 
 z3::expr_vector to_expr_vector(z3::context &c,
                                std::vector<z3::expr> const &_vec) {
@@ -25,11 +25,10 @@ z3::expr_vector to_expr_vector(z3::context &c,
 }
 
 bool AlgebraicPattern::subpattern_to(AlgebraicPattern const &other) const {
-  std::lock_guard<std::mutex> lock(cached_results_mutex);
+  std::lock_guard<std::mutex> lock(solver_mutex);
   std::pair<std::string, std::string> str_pair =
       std::make_pair(to_string(), other.to_string());
   {
-    // std::lock_guard<std::mutex> lock(cached_results_mutex);
     if (contains_key(cached_results, str_pair)) {
       return cached_results.at(str_pair);
     }
@@ -108,7 +107,6 @@ bool AlgebraicPattern::subpattern_to(AlgebraicPattern const &other) const {
 
   bool result = s.check() == z3::unsat;
   {
-    // std::lock_guard<std::mutex> lock(cached_results_mutex);
     cached_results[str_pair] = result;
   }
   return result;
