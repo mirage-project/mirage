@@ -84,7 +84,7 @@ public:
 
 private:
   std::vector<std::shared_ptr<AlgebraicPattern>> final_patterns;
-  std::unordered_map<int, std::shared_ptr<AlgebraicPattern>>
+  std::unordered_map<int64_t, std::shared_ptr<AlgebraicPattern>>
       computation_graph_patterns;
 
   std::vector<cpu::CTensor> output_tensors;
@@ -111,7 +111,7 @@ private:
   void update_best_graph(kernel::Graph &g);
   bool create_tb_outputs(
       SearchContext &c,
-      std::unordered_map<int, std::shared_ptr<AlgebraicPattern>> const
+      std::unordered_map<int64_t, std::shared_ptr<AlgebraicPattern>> const
           &algebraic_pattern,
       int3 output_map);
 

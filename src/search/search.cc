@@ -14,7 +14,7 @@ namespace search {
 
 void pattern_eval(
     threadblock::Graph const &g,
-    std::unordered_map<int, std::shared_ptr<AlgebraicPattern>> &patterns) {
+    std::unordered_map<int64_t, std::shared_ptr<AlgebraicPattern>> &patterns) {
   for (TBOperator *op : g.operators) {
     if (op->op_type == type::TBOperatorType::TB_INPUT_OP) {
       patterns.insert(
@@ -42,7 +42,7 @@ void pattern_eval(
 
 void pattern_eval(
     kernel::Graph const &g,
-    std::unordered_map<int, std::shared_ptr<AlgebraicPattern>> &patterns) {
+    std::unordered_map<int64_t, std::shared_ptr<AlgebraicPattern>> &patterns) {
   int input_id = 0;
   for (KNOperator *op : g.operators) {
     if (op->op_type == type::KNOperatorType::KN_INPUT_OP) {
@@ -255,7 +255,7 @@ bool KernelGraphGenerator::dequeue(SearchContext &c) {
 }
 
 void KernelGraphGenerator::generate_next_operator(SearchContext const &c) {
-  std::unordered_map<int, std::shared_ptr<AlgebraicPattern>> algebraic_pattern;
+  std::unordered_map<int64_t, std::shared_ptr<AlgebraicPattern>> algebraic_pattern;
   pattern_eval(*c.kn_graph, algebraic_pattern);
   if (c.tb_graph) {
     pattern_eval(*c.tb_graph, algebraic_pattern);
@@ -378,7 +378,7 @@ void KernelGraphGenerator::generate_next_operator(SearchContext const &c) {
     for (int3 output_map :
          dim_strategy.get_output_map_cand(c.tb_graph->grid_dim)) {
       SearchContext nc = c.copy();
-      std::unordered_map<int, std::shared_ptr<AlgebraicPattern>>
+      std::unordered_map<int64_t, std::shared_ptr<AlgebraicPattern>>
           new_algebraic_pattern;
       pattern_eval(*nc.kn_graph, new_algebraic_pattern);
       pattern_eval(*nc.tb_graph, new_algebraic_pattern);
@@ -449,7 +449,7 @@ void KernelGraphGenerator::launch_thread() {
 
 bool KernelGraphGenerator::create_tb_outputs(
     SearchContext &c,
-    std::unordered_map<int, std::shared_ptr<AlgebraicPattern>> const
+    std::unordered_map<int64_t, std::shared_ptr<AlgebraicPattern>> const
         &algebraic_pattern,
     int3 output_map) {
   std::vector<STensor> output_tensors;
