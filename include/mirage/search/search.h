@@ -21,12 +21,14 @@ enum class SearchLevel {
 };
 
 struct SearchContext {
-  kernel::Graph kn_graph;
-  threadblock::Graph tb_graph;
-  std::unordered_map<int, std::shared_ptr<AlgebraicPattern>> algebraic_pattern;
+  std::shared_ptr<kernel::Graph> kn_graph;
+  std::shared_ptr<threadblock::Graph> tb_graph;
   SearchLevel level;
 
+  SearchContext copy() const;
+
   SearchContext();
+  ~SearchContext();
 };
 
 void to_json(json &j, SearchContext const &);
@@ -78,9 +80,11 @@ public:
   std::vector<json> generated_graphs;
   int num_thread;
 
+  std::chrono::milliseconds timeout;
+
 private:
   std::vector<std::shared_ptr<AlgebraicPattern>> final_patterns;
-  std::unordered_map<DTensor, std::shared_ptr<AlgebraicPattern>>
+  std::unordered_map<int, std::shared_ptr<AlgebraicPattern>>
       computation_graph_patterns;
 
   std::vector<cpu::CTensor> output_tensors;
@@ -90,31 +94,32 @@ private:
   std::atomic<int> num_valid_kernel_graphs;
 
   std::mutex fp_mutex;
+  std::mutex generated_graphs_mutex;
 
   std::queue<SearchContext> search_queue;
   std::mutex queue_mutex;
   std::condition_variable queue_cv;
   std::atomic<int> num_active_thread;
-  void enqueue(SearchContext);
-  SearchContext dequeue();
-  bool search_finished();
+  void enqueue(SearchContext const &c);
+  bool dequeue(SearchContext &c);
   void launch_thread();
 
-  void generate_next_operator();
+  void generate_next_operator(SearchContext const &c);
 
   void optimize_layout(
       kernel::Graph &g, int op_idx, int ts_idx, int bop_idx, int bts_idx);
   void update_best_graph(kernel::Graph &g);
-  bool create_tb_outputs(SearchContext &c,
-                         int3 output_map,
-                         std::vector<std::shared_ptr<AlgebraicPattern>> &);
+  bool create_tb_outputs(
+      SearchContext &c,
+      std::unordered_map<int, std::shared_ptr<AlgebraicPattern>> const
+          &algebraic_pattern,
+      int3 output_map);
 
   std::vector<layout::SmemLayout>
       get_valid_output_layout(threadblock::TBOperator const *op, int idx);
 
   void process_outputs();
   bool check_pattern(std::shared_ptr<AlgebraicPattern> pattern);
-  void pattern_eval();
   void fingerprint_eval();
   bool have_same_fingerprint(std::vector<DTensor> const &outputs,
                              std::vector<int> const &match) const;

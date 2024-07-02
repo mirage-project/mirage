@@ -61,6 +61,7 @@ private:
 
 public:
   Graph(dim3 grid_dim, dim3 block_dim, int forloop_range, int reduction_dimx);
+  Graph(std::vector<kernel::DTensor> const &inputs, ExecutionPlan const &plan);
   // input operator
   STensor new_input(mirage::kernel::DTensor const &dtensor,
                     int3 input_map,
@@ -106,6 +107,7 @@ public:
   NewKernelParams get_new_kernel_params(bool fingerprint) const;
 
   operator json() const;
+  ExecutionPlan get_plan() const;
 
 public:
   dim3 grid_dim, block_dim;

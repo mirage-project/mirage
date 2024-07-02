@@ -163,7 +163,7 @@ struct alignas(16) STensor {
   // be accumulated
   // bool accum_output;
 
-  static int next_guid;
+  static int64_t next_guid;
 };
 
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(

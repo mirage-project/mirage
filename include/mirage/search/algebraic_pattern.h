@@ -4,6 +4,7 @@
 #include "mirage/utils/json_utils.h"
 #include "z3++.h"
 #include <memory>
+#include <mutex>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -23,6 +24,7 @@ public:
   static std::unordered_set<std::string> all_variables;
   static std::unordered_map<std::pair<std::string, std::string>, bool>
       cached_results;
+  static std::mutex cached_results_mutex;
 };
 
 class Var : public AlgebraicPattern {
