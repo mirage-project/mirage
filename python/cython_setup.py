@@ -54,6 +54,7 @@ def config_cython():
         return cythonize(ret, compiler_directives={"language_level" : 3})
     except ImportError:
         print("WARNING: cython is not installed!!!")
+        raise SystemExit(1)
         return []
 
 setup_args = {}
