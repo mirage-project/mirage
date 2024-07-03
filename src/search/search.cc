@@ -255,7 +255,8 @@ bool KernelGraphGenerator::dequeue(SearchContext &c) {
 }
 
 void KernelGraphGenerator::generate_next_operator(SearchContext const &c) {
-  std::unordered_map<int64_t, std::shared_ptr<AlgebraicPattern>> algebraic_pattern;
+  std::unordered_map<int64_t, std::shared_ptr<AlgebraicPattern>>
+      algebraic_pattern;
   pattern_eval(*c.kn_graph, algebraic_pattern);
   if (c.tb_graph) {
     pattern_eval(*c.tb_graph, algebraic_pattern);
@@ -478,10 +479,11 @@ bool KernelGraphGenerator::create_tb_outputs(
     if (!check_pattern(pattern)) {
       return false;
     }
-    TBOperator *new_op = c.tb_graph->create_output_op(stensor,
-                                                      output_map,
-                                                      -1/*forloop_dim*/,
-                                                      mirage::type::TB_EPILOGUE_NONE);
+    TBOperator *new_op =
+        c.tb_graph->create_output_op(stensor,
+                                     output_map,
+                                     -1 /*forloop_dim*/,
+                                     mirage::type::TB_EPILOGUE_NONE);
     if (!new_op) {
       return false;
     }

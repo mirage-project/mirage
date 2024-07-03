@@ -540,8 +540,7 @@ std::string CudaTranspiler::generate_kernel_code(
   return input_loader_func.str() + header.str() + main.str() + ending.str();
 }
 
-CudaTranspiler::CudaTranspiler(bool _nvshmem)
-  : use_nvshmem(_nvshmem) {}
+CudaTranspiler::CudaTranspiler(bool _nvshmem) : use_nvshmem(_nvshmem) {}
 
 }; // namespace transpiler
 }; // namespace mirage

@@ -19,11 +19,13 @@
 namespace mirage {
 namespace threadblock {
 
-mirage::kernel::DTensor Graph::new_output(STensor const &stensor,
-                                          int3 output_map,
-                                          int output_forloop_dim,
-                                          mirage::type::TBEpilogueType epilogue) {
-  TBOperator *op = create_output_op(stensor, output_map, output_forloop_dim, epilogue);
+mirage::kernel::DTensor
+    Graph::new_output(STensor const &stensor,
+                      int3 output_map,
+                      int output_forloop_dim,
+                      mirage::type::TBEpilogueType epilogue) {
+  TBOperator *op =
+      create_output_op(stensor, output_map, output_forloop_dim, epilogue);
   assert(op != nullptr);
   operators.push_back(op);
   return static_cast<TBOutputOp *>(op)->dtensor;
@@ -38,7 +40,8 @@ TBOperator *Graph::create_output_op(STensor const &stensor,
     // (int)stensor.size());
     return nullptr;
   }
-  TBOutputOp *op = new TBOutputOp(this, stensor, output_map, forloop_dim, epilogue);
+  TBOutputOp *op =
+      new TBOutputOp(this, stensor, output_map, forloop_dim, epilogue);
   return op;
 }
 
@@ -48,9 +51,7 @@ TBOutputOp::TBOutputOp(Graph *_graph,
                        int _forloop_dim,
                        mirage::type::TBEpilogueType _epilogue)
     : TBOperator(_graph, mirage::type::TB_OUTPUT_OP, input),
-      output_map(_output_map),
-      forloop_dim(_forloop_dim),
-      epilogue(_epilogue) {
+      output_map(_output_map), forloop_dim(_forloop_dim), epilogue(_epilogue) {
   // Create a stensor for accumulating results
   STensor accum = input;
   accum.owner_op = this;

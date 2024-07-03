@@ -608,7 +608,8 @@ ExecutionPlan Graph::get_plan() const {
     }
     if (op->op_type == type::TB_INPUT_OP) {
       plan.input_map.push_back(static_cast<TBInputOp *>(op)->input_map);
-      plan.input_forloop_dim.push_back(static_cast<TBInputOp *>(op)->forloop_dim);
+      plan.input_forloop_dim.push_back(
+          static_cast<TBInputOp *>(op)->forloop_dim);
       plan.input_smem_layouts.push_back(
           static_cast<TBInputOp *>(op)->output_tensors[0].layout);
     } else if (op->op_type == type::TB_OUTPUT_OP) {
