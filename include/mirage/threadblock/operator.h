@@ -66,7 +66,11 @@ public:
 
 class TBOutputOp : public TBOperator {
 public:
-  TBOutputOp(Graph *_graph, STensor const &stensor, int3 output_map);
+  TBOutputOp(Graph *_graph,
+             STensor const &stensor,
+             int3 output_map,
+             int forloop_dim,
+             mirage::type::TBEpilogueType allreduce);
   ~TBOutputOp();
 
   operator json() const override;
@@ -74,6 +78,8 @@ public:
 public:
   mirage::kernel::DTensor dtensor;
   int3 output_map;
+  int forloop_dim;
+  mirage::type::TBEpilogueType epilogue;
 };
 
 } // namespace threadblock

@@ -73,14 +73,14 @@ KNCustomizedOp::KNCustomizedOp(Graph *_kgraph,
              _plan.forloop_range,
              _plan.reduction_dimx) {
   assert(_inputs.size() == plan.input_map.size());
-  assert(plan.forloop_dim.size() == plan.input_map.size());
+  assert(plan.input_forloop_dim.size() == plan.input_map.size());
   assert(plan.input_smem_layouts.size() == plan.input_map.size());
   // Step 1: computing input shapes
   // Step 1: creating a stensor for each input
   for (size_t i = 0; i < input_tensors.size(); i++) {
     bgraph.new_input(input_tensors[i],
                      plan.input_map[i],
-                     plan.forloop_dim[i],
+                     plan.input_forloop_dim[i],
                      plan.input_smem_layouts[i]);
   }
 
@@ -170,7 +170,10 @@ KNCustomizedOp::KNCustomizedOp(Graph *_kgraph,
       if (!found) {
         // TODO: change output tensor_shape
         STensor stensor = op->output_tensors[i];
-        DTensor dtensor = bgraph.new_output(stensor, plan.output_map);
+        DTensor dtensor = bgraph.new_output(stensor,
+                                            plan.output_map,
+                                            plan.output_forloop_dim,
+                                            plan.output_epilogue);
         // printf("stensor.offset(%d)\n", stensor.smem_offset);
         dtensor.owner_op = this;
         dtensor.owner_ts_idx = static_cast<int>(output_tensors.size());
@@ -233,7 +236,7 @@ KNCustomizedOp::KNCustomizedOp(mirage::kernel::Graph *_kgraph,
                          input_op->forloop_dim,
                          input_op->output_tensors[0].layout);
         plan.input_map.push_back(input_op->input_map);
-        plan.forloop_dim.push_back(input_op->forloop_dim);
+        plan.input_forloop_dim.push_back(input_op->forloop_dim);
         plan.input_smem_layouts.push_back(input_op->output_tensors[0].layout);
         break;
       }
@@ -241,8 +244,10 @@ KNCustomizedOp::KNCustomizedOp(mirage::kernel::Graph *_kgraph,
         assert(my_inputs.size() == 1);
         mirage::threadblock::TBOutputOp *output_op =
             static_cast<mirage::threadblock::TBOutputOp *>(op);
-        DTensor dtensor =
-            bgraph.new_output(my_inputs[0], output_op->output_map);
+        DTensor dtensor = bgraph.new_output(my_inputs[0],
+                                            output_op->output_map,
+                                            output_op->forloop_dim,
+                                            output_op->epilogue);
         dtensor.owner_op = this;
         dtensor.owner_ts_idx = static_cast<int>(output_tensors.size());
         dtensor.guid = DTensor::next_guid++;

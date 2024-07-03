@@ -83,7 +83,9 @@ bool KernelGraphGenerator::create_tb_outputs(SearchContext<STensor> &c,
       if (!check_pattern(pattern)) {
         return false;
       }
-      TBOperator *new_op = g.create_output_op(input, output_map);
+      // Only consider forloop_dim = -1 for output
+      // Do not consider any collective communication for now
+      TBOperator *new_op = g.create_output_op(input, output_map, -1 /*forloop_dim*/, mirage::type::TB_EPILOGUE_NONE);
       if (!new_op) {
         return false;
       }

@@ -61,8 +61,8 @@ int main(int argc, char **argv) {
         layout::SmemColumnMajor,
         layout::SmemColumnMajor,
     };
+    plan.input_forloop_dim = {1, 0, 0, -1};
     plan.output_map = {1, -1, -1};
-    plan.forloop_dim = {1, 0, 0, -1};
     plan.grid_dim = {128, 1, 1};
     plan.block_dim = {128, 1, 1};
     plan.forloop_range = 2;

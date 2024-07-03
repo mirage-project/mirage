@@ -39,6 +39,10 @@ std::string CudaTranspiler::generate_header_code(std::string indent) {
   ss << indent << "#include \"cutlass/fast_math.h\"\n";
   ss << indent << "#include \"cutlass/matrix_coord.h\"\n";
   ss << indent << "#include \"cutlass/arch/memory_sm80.h\"\n";
+  if (use_nvshmem) {
+    ss << indent << "#include \"nvshmem.h\"\n";
+    ss << indent << "#include \"nvshmemx.h\"\n";
+  }
   ss << "\n";
   ss << "#define checkCUDA(status)                         \\\n";
   ss << "do {                                              \\\n";
@@ -536,7 +540,8 @@ std::string CudaTranspiler::generate_kernel_code(
   return input_loader_func.str() + header.str() + main.str() + ending.str();
 }
 
-CudaTranspiler::CudaTranspiler() {}
+CudaTranspiler::CudaTranspiler(bool _nvshmem)
+  : use_nvshmem(_nvshmem) {}
 
 }; // namespace transpiler
 }; // namespace mirage
@@ -547,7 +552,8 @@ namespace kernel {
 void Graph::generate_cuda_program(char const *file_path) {
   using namespace std;
   vector<string> kernels;
-  mirage::transpiler::CudaTranspiler ct;
+  bool use_nvshmem = (gpu_dim.x > 1 || gpu_dim.y > 1 || gpu_dim.z > 1);
+  mirage::transpiler::CudaTranspiler ct(use_nvshmem);
   stringstream main;
   main << "int main() {\n";
   assert(gpu_dim.y == 1);
@@ -555,8 +561,13 @@ void Graph::generate_cuda_program(char const *file_path) {
   main << "  char * gpu_base_ptrs[" << mirage::config::MAX_NUM_GPUS << "];\n";
   main << "  for (int i = 0; i < " << gpu_dim.x << "; i++) {\n";
   main << "    checkCUDA(cudaSetDevice(i));\n";
-  main << "    checkCUDA(cudaMalloc(&gpu_base_ptrs[i], "
-       << mirage::config::MAX_DMEM_SIZE << "));\n";
+  if (use_nvshmem) {
+    main << "    gpu_base_ptrs[i] = nvshmem_malloc("
+         << mirage::config::MAX_DMEM_SIZE << ");\n";
+  } else {
+    main << "    checkCUDA(cudaMalloc(&gpu_base_ptrs[i], "
+         << mirage::config::MAX_DMEM_SIZE << "));\n";
+  }
   main << "  } // end of for-loop\n";
   stringstream executer;
   executer << "void mugraph_executer(char *gpu_base_ptr) {\n";
@@ -650,7 +661,7 @@ void Graph::generate_cuda_program(char const *file_path) {
   main << "  checkCUDA(cudaEventSynchronize(events[1]));\n";
   main << "  float runtime_ms;\n";
   main << "  cudaEventElapsedTime(&runtime_ms, events[0], events[1]);\n";
-  main << "  printf(\"Runtime = \%.8lfms\\n\", runtime_ms / 1024);\n";
+  main << "  printf(\"Mugraph runtime = \%.8lfms\\n\", runtime_ms / 1024);\n";
   main << "}\n";
   executer << "} // end of mugraph_executer\n";
 

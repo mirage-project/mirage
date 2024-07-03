@@ -50,8 +50,8 @@ int main(int argc, char **argv) {
         layout::SmemRowMajor,
         layout::SmemColumnMajor,
     };
+    plan.input_forloop_dim = {-1, -1};
     plan.output_map = {1, -1, -1};
-    plan.forloop_dim = {-1, -1};
     plan.grid_dim = {32, 1, 1};
     plan.block_dim = {128, 1, 1};
     plan.forloop_range = 1;
@@ -70,8 +70,8 @@ int main(int argc, char **argv) {
         layout::SmemRowMajor,
         layout::SmemColumnMajor,
     };
+    plan.input_forloop_dim = {-1, -1};
     plan.output_map = {1, -1, -1};
-    plan.forloop_dim = {-1, -1};
     plan.grid_dim = {64, 1, 1};
     plan.block_dim = {128, 1, 1};
     plan.forloop_range = 1;
