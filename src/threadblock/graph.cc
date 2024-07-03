@@ -41,14 +41,14 @@ Graph::Graph(std::vector<kernel::DTensor> const &_inputs,
       forloop_range(plan.forloop_range), reduction_dimx(plan.reduction_dimx),
       smem_offset(0) {
   assert(_inputs.size() == plan.input_map.size());
-  assert(plan.forloop_dim.size() == plan.input_map.size());
+  assert(plan.input_forloop_dim.size() == plan.input_map.size());
   assert(plan.input_smem_layouts.size() == plan.input_map.size());
   // Step 1: computing input shapes
   // Step 1: creating a stensor for each input
   for (size_t i = 0; i < _inputs.size(); i++) {
     new_input(_inputs[i],
               plan.input_map[i],
-              plan.forloop_dim[i],
+              plan.input_forloop_dim[i],
               plan.input_smem_layouts[i]);
   }
 
@@ -608,7 +608,7 @@ ExecutionPlan Graph::get_plan() const {
     }
     if (op->op_type == type::TB_INPUT_OP) {
       plan.input_map.push_back(static_cast<TBInputOp *>(op)->input_map);
-      plan.forloop_dim.push_back(static_cast<TBInputOp *>(op)->forloop_dim);
+      plan.input_forloop_dim.push_back(static_cast<TBInputOp *>(op)->forloop_dim);
       plan.input_smem_layouts.push_back(
           static_cast<TBInputOp *>(op)->output_tensors[0].layout);
     } else if (op->op_type == type::TB_OUTPUT_OP) {
