@@ -181,7 +181,10 @@ std::string generate_kernel_code(
     } else if (op_type == mirage::type::TB_OUTPUT_OP) {
       int3 output_matrix_row_offset_block_stride;
       int3 output_matrix_column_offset_block_stride;
+      int output_matrix_row_offset_forloop_stride;
+      int output_matrix_column_offset_forloop_stride;
       int3 global_offset_block_stride;
+      int global_offset_forloop_stride;
       int2 dtensor_matrix_shape, stensor_matrix_shape;
       int input_smem_offset, accum_smem_offset;
       mirage::layout::DmemLayout dtensor_layout;
@@ -191,7 +194,10 @@ std::string generate_kernel_code(
           param_idx,
           output_matrix_row_offset_block_stride,
           output_matrix_column_offset_block_stride,
+          output_matrix_row_offset_forloop_stride,
+          output_matrix_column_offset_forloop_stride,
           global_offset_block_stride,
+          global_offset_forloop_stride,
           dtensor_matrix_shape,
           stensor_matrix_shape,
           dtensor_layout,
