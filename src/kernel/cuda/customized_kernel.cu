@@ -264,6 +264,7 @@ __global__ void customized_kernel_function(
     int input_smem_offset, accum_smem_offset;
     mirage::layout::DmemLayout dtensor_layout;
     mirage::layout::SmemLayout stensor_layout;
+    mirage::type::TBEpilogueType epilogue;
     mirage::threadblock::deserialize_output_saver_parameters(
         new_params.parameters,
         param_idx,
@@ -278,7 +279,8 @@ __global__ void customized_kernel_function(
         dtensor_layout,
         stensor_layout,
         input_smem_offset,
-        accum_smem_offset);
+        accum_smem_offset,
+        epilogue);
     int tb_offset_row = blockIdx.x * output_matrix_row_offset_block_stride.x +
                         blockIdx.y * output_matrix_row_offset_block_stride.y +
                         blockIdx.z * output_matrix_row_offset_block_stride.z;
@@ -412,6 +414,7 @@ __global__ void compute_customizedop_fingerprint(
           int input_smem_offset, accum_smem_offset;
           mirage::layout::DmemLayout dtensor_layout;
           mirage::layout::SmemLayout stensor_layout;
+          mirage::type::TBEpilogueType epilogue;
           mirage::threadblock::deserialize_output_saver_parameters(
               new_params.parameters,
               param_idx,
@@ -426,7 +429,8 @@ __global__ void compute_customizedop_fingerprint(
               dtensor_layout,
               stensor_layout,
               input_smem_offset,
-              accum_smem_offset);
+              accum_smem_offset,
+              epilogue);
           mirage::type::FPType *input_stensor_ptr =
               (mirage::type::FPType *)(smem_buffer + input_smem_offset);
           mirage::type::FPType *accum_stensor_ptr =

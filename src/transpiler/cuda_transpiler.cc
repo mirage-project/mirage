@@ -202,19 +202,6 @@ void CudaTranspiler::gen_cuda_code_input_loader(std::string dtensor_name,
       << ind << "      \"n\"(16),\n"
       << ind << "      \"r\"(16));\n";
   input_loader_func << ind << "} // end of for-loop\n";
-
-  // input_loader_func << ind << "mirage::threadblock::GenericInputLoader
-  // loader(\n"
-  //      << ind << "    dtensor_ptr,\n"
-  //      << ind << "    stensor_ptr,\n"
-  //      << ind << "    dtensor_matrix_shape,\n"
-  //      << ind << "    stensor_matrix_shape,\n"
-  //      << ind << "    dtensor_layout,\n"
-  //      << ind << "    stensor_layout,\n"
-  //      << ind << "    threadIdx.x,\n"
-  //      << ind << "    blockDim.x,\n"
-  //      << ind << "    matrix_offset,\n"
-  //      << ind << "    global_offset);\n";
 }
 
 void CudaTranspiler::gen_cuda_code_output_saver(std::string dtensor_name,
@@ -229,6 +216,7 @@ void CudaTranspiler::gen_cuda_code_output_saver(std::string dtensor_name,
   int input_smem_offset, accum_smem_offset;
   mirage::layout::DmemLayout dtensor_layout;
   mirage::layout::SmemLayout stensor_layout;
+  mirage::type::TBEpilogueType epilogue;
   mirage::threadblock::deserialize_output_saver_parameters(
       params.parameters,
       param_idx,
@@ -243,29 +231,29 @@ void CudaTranspiler::gen_cuda_code_output_saver(std::string dtensor_name,
       dtensor_layout,
       stensor_layout,
       input_smem_offset,
-      accum_smem_offset);
-  ending << ind << "int tb_offset_row = "
-         << gen_cuda_block_offset_calculation(
-                output_matrix_row_offset_block_stride.x,
-                output_matrix_row_offset_block_stride.y,
-                output_matrix_row_offset_block_stride.z)
-         << ";\n";
-  ending << ind << "int tb_offset_column = "
-         << gen_cuda_block_offset_calculation(
-                output_matrix_column_offset_block_stride.x,
-                output_matrix_column_offset_block_stride.y,
-                output_matrix_column_offset_block_stride.z)
-         << ";\n";
-  ending << ind << "int global_offset = "
-         << gen_cuda_block_offset_calculation(global_offset_block_stride.x,
-                                              global_offset_block_stride.y,
-                                              global_offset_block_stride.z)
-         << ";\n";
-  // ending << ind << "cutlass::MatrixCoord matrix_offset"
-  //        << " = {tb_offset_row, tb_offset_column};\n";
-  ending << ind << "cutlass::half_t *stensor_ptr =\n"
-         << ind << "    (cutlass::half_t*)(smem_buffer + " << input_smem_offset
-         << ");\n";
+      accum_smem_offset,
+      epilogue);
+  std::stringstream code;
+  code << ind << "int tb_offset_row = "
+       << gen_cuda_block_offset_calculation(
+              output_matrix_row_offset_block_stride.x,
+              output_matrix_row_offset_block_stride.y,
+              output_matrix_row_offset_block_stride.z)
+       << ";\n";
+  code << ind << "int tb_offset_column = "
+       << gen_cuda_block_offset_calculation(
+              output_matrix_column_offset_block_stride.x,
+              output_matrix_column_offset_block_stride.y,
+              output_matrix_column_offset_block_stride.z)
+       << ";\n";
+  code << ind << "int global_offset = "
+       << gen_cuda_block_offset_calculation(global_offset_block_stride.x,
+                                            global_offset_block_stride.y,
+                                            global_offset_block_stride.z)
+       << ";\n";
+  code << ind << "cutlass::half_t *stensor_ptr =\n"
+       << ind << "    (cutlass::half_t*)(smem_buffer + " << input_smem_offset
+       << ");\n";
   int kRow = stensor_matrix_shape.x;
   int kColumn = stensor_matrix_shape.y;
   printf("stensor_matrix(%d %d) dtensor_matrix(%d %d)\n",
@@ -273,33 +261,42 @@ void CudaTranspiler::gen_cuda_code_output_saver(std::string dtensor_name,
          kColumn,
          dtensor_matrix_shape.x,
          dtensor_matrix_shape.y);
-  ending << ind << "int base_offset = global_offset + tb_offset_row * "
-         << dtensor_matrix_shape.y << " + tb_offset_column;\n";
+  code << ind << "int base_offset = global_offset + tb_offset_row * "
+       << dtensor_matrix_shape.y << " + tb_offset_column;\n";
 
   // FIXME: currently assume a row-major layout for both stensor and dtensor
-  ending << ind << "cutlass::half_t *dtensor_ptr = " << dtensor_name
-         << " + base_offset;\n";
+  code << ind << "cutlass::half_t *dtensor_ptr = " << dtensor_name
+       << " + base_offset;\n";
   // Currently assume that kColumn can divide blockDim.x
   assert(128 % kColumn == 0);
   int num_rows_per_iter = 128 / kColumn;
-  ending << ind << "int _col = threadIdx.x % " << kColumn << ";\n";
-  ending << ind << "for (int _row = threadIdx.x / " << num_rows_per_iter
-         << "; _row < " << kRow << "; _row += " << num_rows_per_iter << ") {\n";
-  ending << ind << "  dtensor_ptr[_row * " << dtensor_matrix_shape.y
-         << " + _col"
-         << "] = stensor_ptr[_row * " << kColumn << " + _col];\n";
-  ending << ind << "} // end of for-loop\n";
-  // ending << ind << "mirage::threadblock::GenericOutputSaver saver(\n"
-  //        << ind << "    dtensor_ptr,\n"
-  //        << ind << "    stensor_ptr,\n"
-  //        << ind << "    dtensor_matrix_shape,\n"
-  //        << ind << "    stensor_matrix_shape,\n"
-  //        << ind << "    dtensor_layout,\n"
-  //        << ind << "    stensor_layout,\n"
-  //        << ind << "    threadIdx.x,\n"
-  //        << ind << "    blockDim.x,\n"
-  //        << ind << "    matrix_offset,\n"
-  //        << ind << "    global_offset);\n";
+  code << ind << "int _col = threadIdx.x % " << kColumn << ";\n";
+  code << ind << "for (int _row = threadIdx.x / " << num_rows_per_iter
+       << "; _row < " << kRow << "; _row += " << num_rows_per_iter << ") {\n";
+  code << ind << "  dtensor_ptr[_row * " << dtensor_matrix_shape.y << " + _col"
+       << "] = stensor_ptr[_row * " << kColumn << " + _col];\n";
+  code << ind << "} // end of for-loop\n";
+  // We generate a nvshmem collective communication operator
+  if (use_nvshmem) {
+    switch (epilogue) {
+      case mirage::type::TB_EPILOGUE_NONE: {
+        // do nothing when epilogue is none
+        break;
+      }
+      case mirage::type::TB_EPILOGUE_ALLREDUCE: {
+        code << ind << "nvshmemx_int16_sum_reduce_block(\n"
+             << ind << "    NVSHMEM_TEAM_WORLD,\n"
+             << ind << "    dtensor_ptr,\n"
+             << ind << "    dtensor_ptr,\n"
+             << ind << "    " << kRow * kColumn << ");\n";
+        break;
+      }
+      default: {
+        assert(false && "Unsupported epilogue");
+      }
+    }
+  }
+  ending << code.str();
 }
 
 void CudaTranspiler::gen_cuda_code_matmul_op(std::string ind) {

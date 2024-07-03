@@ -37,7 +37,8 @@ void deserialize_output_saver_parameters(
     mirage::layout::DmemLayout &dlayout,
     mirage::layout::SmemLayout &slayout,
     int &output_smem_offset,
-    int &accum_smem_offset) {
+    int &accum_smem_offset,
+    mirage::type::TBEpilogueType &epilogue) {
   output_matrix_row_offset_block_stride.x = params[param_idx++];
   output_matrix_row_offset_block_stride.y = params[param_idx++];
   output_matrix_row_offset_block_stride.z = params[param_idx++];
@@ -64,6 +65,7 @@ void deserialize_output_saver_parameters(
   slayout = (mirage::layout::SmemLayout)params[param_idx++];
   output_smem_offset = params[param_idx++];
   accum_smem_offset = params[param_idx++];
+  epilogue = static_cast<mirage::type::TBEpilogueType>(params[param_idx++]);
 }
 
 inline void serialize_output_saver_parameters(
@@ -80,7 +82,8 @@ inline void serialize_output_saver_parameters(
     mirage::layout::DmemLayout dlayout,
     mirage::layout::SmemLayout slayout,
     int output_smem_offset,
-    int accum_smem_offset) {
+    int accum_smem_offset,
+    mirage::type::TBEpilogueType epilogue) {
   params[param_idx++] = output_matrix_row_offset_block_stride.x;
   params[param_idx++] = output_matrix_row_offset_block_stride.y;
   params[param_idx++] = output_matrix_row_offset_block_stride.z;
@@ -107,6 +110,7 @@ inline void serialize_output_saver_parameters(
   params[param_idx++] = slayout;
   params[param_idx++] = output_smem_offset;
   params[param_idx++] = accum_smem_offset;
+  params[param_idx++] = epilogue;
   assert(param_idx <= NewKernelParams::MAX_NUM_PARAMETERS);
 }
 

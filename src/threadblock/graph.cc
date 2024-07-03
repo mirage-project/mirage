@@ -294,26 +294,34 @@ NewKernelParams Graph::get_new_kernel_params(bool fingerprint) const {
         mirage::layout::DmemLayout dtensor_layout = dtensor.layout;
         mirage::layout::SmemLayout stensor_layout = input_stensor.layout;
         int3 output_matrix_row_offset_block_stride = {
-            (output_map.x == num_dims - 2 ? input_stensor.dim[num_dims - 2] : 0) *
+            (output_map.x == num_dims - 2 ? input_stensor.dim[num_dims - 2]
+                                          : 0) *
                 (forloop_dim == num_dims - 2 ? this->forloop_range : 1),
-            (output_map.y == num_dims - 2 ? input_stensor.dim[num_dims - 2] : 0) *
+            (output_map.y == num_dims - 2 ? input_stensor.dim[num_dims - 2]
+                                          : 0) *
                 (forloop_dim == num_dims - 2 ? this->forloop_range : 1),
-            (output_map.z == num_dims - 2 ? input_stensor.dim[num_dims - 2] : 0) *
+            (output_map.z == num_dims - 2 ? input_stensor.dim[num_dims - 2]
+                                          : 0) *
                 (forloop_dim == num_dims - 2 ? this->forloop_range : 1)};
         int3 output_matrix_column_offset_block_stride = {
-            (output_map.x == num_dims - 1 ? input_stensor.dim[num_dims - 1] : 0) *
+            (output_map.x == num_dims - 1 ? input_stensor.dim[num_dims - 1]
+                                          : 0) *
                 (forloop_dim == num_dims - 1 ? this->forloop_range : 1),
-            (output_map.y == num_dims - 1 ? input_stensor.dim[num_dims - 1] : 0) *
+            (output_map.y == num_dims - 1 ? input_stensor.dim[num_dims - 1]
+                                          : 0) *
                 (forloop_dim == num_dims - 1 ? this->forloop_range : 1),
-            (output_map.z == num_dims - 1 ? input_stensor.dim[num_dims - 1] : 0) *
+            (output_map.z == num_dims - 1 ? input_stensor.dim[num_dims - 1]
+                                          : 0) *
                 (forloop_dim == num_dims - 1 ? this->forloop_range : 1)};
         int output_matrix_row_offset_forloop_stride = 0;
         int output_matrix_column_offset_forloop_stride = 0;
         if (forloop_dim == num_dims - 2) {
-          output_matrix_row_offset_forloop_stride = input_stensor.dim[num_dims - 2];
+          output_matrix_row_offset_forloop_stride =
+              input_stensor.dim[num_dims - 2];
         }
         if (forloop_dim == num_dims - 1) {
-          output_matrix_column_offset_forloop_stride = input_stensor.dim[num_dims - 1];
+          output_matrix_column_offset_forloop_stride =
+              input_stensor.dim[num_dims - 1];
         }
         // calculate global offset beyond the last two dimensions
         // global_offset captures offsets caused by partitioning other
@@ -356,7 +364,8 @@ NewKernelParams Graph::get_new_kernel_params(bool fingerprint) const {
             dtensor_layout,
             stensor_layout,
             input_smem_offset,
-            accum_smem_offset);
+            accum_smem_offset,
+            output_op->epilogue);
         break;
       }
       case mirage::type::TB_MATMUL_OP: {

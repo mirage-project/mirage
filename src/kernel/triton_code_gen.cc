@@ -189,6 +189,7 @@ std::string generate_kernel_code(
       int input_smem_offset, accum_smem_offset;
       mirage::layout::DmemLayout dtensor_layout;
       mirage::layout::SmemLayout stensor_layout;
+      mirage::type::TBEpilogueType epilogue;
       mirage::threadblock::deserialize_output_saver_parameters(
           params.parameters,
           param_idx,
@@ -203,7 +204,8 @@ std::string generate_kernel_code(
           dtensor_layout,
           stensor_layout,
           input_smem_offset,
-          accum_smem_offset);
+          accum_smem_offset,
+          epilogue);
       header << "\t" << stensor_ptr_name(accum_smem_offset)
              << " = tl.make_block_ptr(\n"
              << "\t\tbase = " << output_names[output_idx] << " + "
