@@ -35,6 +35,85 @@ Graph::Graph(dim3 _grid_dim,
   assert(reduction_dimx > 0);
 }
 
+Graph::Graph(std::vector<kernel::DTensor> const &_inputs,
+             ExecutionPlan const &plan)
+    : grid_dim(plan.grid_dim), block_dim(plan.block_dim),
+      forloop_range(plan.forloop_range), reduction_dimx(plan.reduction_dimx),
+      smem_offset(0) {
+  assert(_inputs.size() == plan.input_map.size());
+  assert(plan.forloop_dim.size() == plan.input_map.size());
+  assert(plan.input_smem_layouts.size() == plan.input_map.size());
+  // Step 1: computing input shapes
+  // Step 1: creating a stensor for each input
+  for (size_t i = 0; i < _inputs.size(); i++) {
+    new_input(_inputs[i],
+              plan.input_map[i],
+              plan.forloop_dim[i],
+              plan.input_smem_layouts[i]);
+  }
+
+  auto const &ops = plan.ops;
+  for (auto const &op : ops) {
+    std::vector<STensor> my_inputs;
+    for (auto const &idx : op.second) {
+      // assert(bgraph.tensors.find(idx) != bgraph.tensors.end());
+      // my_inputs.push_back(bgraph.tensors[idx]);
+      assert((int)operators.size() > idx.first);
+      assert((int)operators[idx.first]->output_tensors.size() > idx.second);
+      my_inputs.push_back(operators[idx.first]->output_tensors[idx.second]);
+    }
+    switch (op.first) {
+      case mirage::type::TB_MATMUL_OP: {
+        assert(my_inputs.size() == 2);
+        matmul(my_inputs[0], my_inputs[1]);
+        break;
+      }
+      case mirage::type::TB_EXP_OP: {
+        assert(my_inputs.size() == 1);
+        exp(my_inputs[0]);
+        break;
+      }
+      case mirage::type::TB_ADD_OP: {
+        assert(my_inputs.size() == 2);
+        add(my_inputs[0], my_inputs[1]);
+        break;
+      }
+      case mirage::type::TB_DIV_OP: {
+        assert(my_inputs.size() == 2);
+        div(my_inputs[0], my_inputs[1]);
+        break;
+      }
+      case mirage::type::TB_REDUCTION_0_OP:
+      case mirage::type::TB_REDUCTION_1_OP:
+      case mirage::type::TB_REDUCTION_2_OP: {
+        assert(my_inputs.size() == 1);
+        int reduce_dim = op.first - mirage::type::TB_REDUCTION_0_OP;
+        reduction(my_inputs[0], reduce_dim);
+        break;
+      }
+      case mirage::type::TB_REDUCTION_0_TO_DIMX_OP:
+      case mirage::type::TB_REDUCTION_1_TO_DIMX_OP:
+      case mirage::type::TB_REDUCTION_2_TO_DIMX_OP: {
+        assert(my_inputs.size() == 1);
+        int reduce_dim = op.first - mirage::type::TB_REDUCTION_0_TO_DIMX_OP;
+        reduction_to_dimx(my_inputs[0], reduce_dim);
+        break;
+      }
+      case mirage::type::TB_CONCAT_0_OP:
+      case mirage::type::TB_CONCAT_1_OP:
+      case mirage::type::TB_CONCAT_2_OP: {
+        assert(my_inputs.size() == 2);
+        int concat_dim = op.first - mirage::type::TB_CONCAT_0_OP;
+        concat(my_inputs[0], my_inputs[1], concat_dim);
+        break;
+      }
+      default: {
+        assert(false && "Unsupported kernel operator");
+      }
+    }
+  }
+}
+
 size_t Graph::pair_hash::operator()(std::pair<int, int> const &p) const {
   size_t h1 = std::hash<int>{}(p.first);
   size_t h2 = std::hash<int>{}(p.second);
@@ -501,6 +580,42 @@ Graph::operator json() const {
     j["operators"].push_back(json(*op));
   }
   return j;
+}
+
+ExecutionPlan Graph::get_plan() const {
+  ExecutionPlan plan;
+  plan.grid_dim = grid_dim;
+  plan.block_dim = block_dim;
+  plan.forloop_range = forloop_range;
+  plan.reduction_dimx = reduction_dimx;
+  plan.output_map = {-1, -1, -1};
+  plan.ops.clear();
+  for (TBOperator *const op : operators) {
+    std::vector<std::pair<int, int>> indices;
+    for (size_t i = 0; i < op->input_tensors.size(); i++) {
+      int op_idx = -1, ts_idx = op->input_tensors[i].owner_ts_idx;
+      for (size_t l = 0; l < operators.size(); l++) {
+        if (operators[l] == op->input_tensors[i].owner_op) {
+          assert(op_idx == -1);
+          op_idx = static_cast<int>(l);
+        }
+      }
+      indices.push_back({op_idx, ts_idx});
+    }
+    if (op->op_type != mirage::type::TB_INPUT_OP &&
+        op->op_type != mirage::type::TB_OUTPUT_OP) {
+      plan.ops.push_back({op->op_type, indices});
+    }
+    if (op->op_type == type::TB_INPUT_OP) {
+      plan.input_map.push_back(static_cast<TBInputOp *>(op)->input_map);
+      plan.forloop_dim.push_back(static_cast<TBInputOp *>(op)->forloop_dim);
+      plan.input_smem_layouts.push_back(
+          static_cast<TBInputOp *>(op)->output_tensors[0].layout);
+    } else if (op->op_type == type::TB_OUTPUT_OP) {
+      plan.output_map = static_cast<TBOutputOp *>(op)->output_map;
+    }
+  }
+  return plan;
 }
 
 } // namespace threadblock

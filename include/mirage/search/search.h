@@ -1,5 +1,9 @@
 #pragma once
 
+#include <atomic>
+#include <condition_variable>
+#include <mutex>
+#include <queue>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -11,47 +15,33 @@
 namespace mirage {
 namespace search {
 
-template <typename TensorType>
+enum class SearchLevel {
+  LV_KERNEL,
+  LV_THREADBLOCK,
+};
+
 struct SearchContext {
-  std::vector<TensorType> all_tensors;
-  std::vector<std::shared_ptr<AlgebraicPattern>> algebraic_pattern;
-  std::vector<int> num_consumers;
-  std::vector<Order> op_order;
-  std::vector<std::shared_ptr<AlgebraicPattern>> output_pattern;
+  std::shared_ptr<kernel::Graph> kn_graph;
+  std::shared_ptr<threadblock::Graph> tb_graph;
+  SearchLevel level;
+
+  SearchContext copy() const;
+
+  SearchContext();
+  ~SearchContext();
 };
 
-struct LayerCheckpoint {
-  std::unordered_set<type::KNOperatorType> knop_explored;
-  std::unordered_set<type::TBOperatorType> tbop_explored;
-  std::unordered_set<std::vector<int>> input_idx_explored;
-  std::unordered_set<dim3> grid_dim_explored;
-  std::unordered_set<dim3> block_dim_explored;
-  std::unordered_set<std::vector<int3>> input_map_explored;
-  std::unordered_set<std::vector<int>> forloop_dim_explored;
-  std::unordered_set<int> forloop_range_explored;
-  std::unordered_set<int3> output_map_explored;
-};
-
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(LayerCheckpoint,
-                                   knop_explored,
-                                   tbop_explored,
-                                   input_idx_explored,
-                                   grid_dim_explored,
-                                   block_dim_explored,
-                                   input_map_explored,
-                                   forloop_dim_explored,
-                                   forloop_range_explored,
-                                   output_map_explored);
+void to_json(json &j, SearchContext const &);
+void from_json(json const &j, SearchContext &);
 
 struct Checkpoint {
   kernel::Graph computation_graph;
   json best_graph;
   ProfileResult best_profile_result;
   GeneratorConfig config;
-  std::vector<LayerCheckpoint> callstack;
+  std::vector<SearchContext> search_queue;
   std::vector<json> generated_graphs;
 
-  bool search_finished;
   int num_total_kernel_graphs;
   int num_total_random_tests;
   int num_valid_kernel_graphs;
@@ -62,9 +52,8 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(Checkpoint,
                                    best_graph,
                                    best_profile_result,
                                    config,
-                                   callstack,
+                                   search_queue,
                                    generated_graphs,
-                                   search_finished,
                                    num_total_kernel_graphs,
                                    num_total_random_tests,
                                    num_valid_kernel_graphs);
@@ -89,46 +78,52 @@ public:
 
   char const *filename;
   std::vector<json> generated_graphs;
+  int num_thread;
+
+  std::chrono::milliseconds timeout;
 
 private:
   std::vector<std::shared_ptr<AlgebraicPattern>> final_patterns;
-  std::unordered_map<DTensor, std::shared_ptr<AlgebraicPattern>>
+  std::unordered_map<int64_t, std::shared_ptr<AlgebraicPattern>>
       computation_graph_patterns;
 
-  std::vector<DTensor> output_tensors;
+  std::vector<cpu::CTensor> output_tensors;
 
-  bool search_finished;
-  int num_total_kernel_graphs;
-  int num_total_random_tests;
-  int num_valid_kernel_graphs;
+  std::atomic<int> num_total_kernel_graphs;
+  std::atomic<int> num_total_random_tests;
+  std::atomic<int> num_valid_kernel_graphs;
 
-  std::vector<LayerCheckpoint> callstack;
+  std::mutex fp_mutex;
+  std::mutex generated_graphs_mutex;
 
-  void generate_next_tb_operator(
-      SearchContext<STensor> &c,
-      threadblock::Graph &g,
-      std::function<void(int)> const &create_customized_then_next_kn,
-      int depth);
-  void generate_next_kn_operator(SearchContext<DTensor> &c,
-                                 kernel::Graph &g,
-                                 int depth);
+  std::queue<SearchContext> search_queue;
+  std::mutex queue_mutex;
+  std::condition_variable queue_cv;
+  std::atomic<int> num_active_thread;
+  void enqueue(SearchContext const &c);
+  bool dequeue(SearchContext &c);
+  void launch_thread();
+
+  void generate_next_operator(SearchContext const &c);
+
   void optimize_layout(
       kernel::Graph &g, int op_idx, int ts_idx, int bop_idx, int bts_idx);
   void update_best_graph(kernel::Graph &g);
-  bool create_tb_outputs(SearchContext<STensor> &c,
-                         threadblock::Graph &g,
-                         int3 output_map);
+  bool create_tb_outputs(
+      SearchContext &c,
+      std::unordered_map<int64_t, std::shared_ptr<AlgebraicPattern>> const
+          &algebraic_pattern,
+      int3 output_map);
 
   std::vector<layout::SmemLayout>
       get_valid_output_layout(threadblock::TBOperator const *op, int idx);
 
   void process_outputs();
   bool check_pattern(std::shared_ptr<AlgebraicPattern> pattern);
-  void pattern_eval();
   void fingerprint_eval();
   bool have_same_fingerprint(std::vector<DTensor> const &outputs,
                              std::vector<int> const &match) const;
-  bool verify(SearchContext<DTensor> &c, kernel::Graph const &g);
+  bool verify(SearchContext c);
   void recovery_from_checkpoint(Checkpoint const &checkpoint);
 };
 

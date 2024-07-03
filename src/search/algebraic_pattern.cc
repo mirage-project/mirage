@@ -2,6 +2,7 @@
 #include <cassert>
 #include <cmath>
 #include <iostream>
+#include <thread>
 #include <vector>
 
 #include "mirage/utils/containers.h"
@@ -12,6 +13,7 @@ namespace search {
 std::unordered_set<std::string> AlgebraicPattern::all_variables;
 std::unordered_map<std::pair<std::string, std::string>, bool>
     AlgebraicPattern::cached_results;
+std::mutex AlgebraicPattern::solver_mutex;
 
 z3::expr_vector to_expr_vector(z3::context &c,
                                std::vector<z3::expr> const &_vec) {
@@ -23,23 +25,25 @@ z3::expr_vector to_expr_vector(z3::context &c,
 }
 
 bool AlgebraicPattern::subpattern_to(AlgebraicPattern const &other) const {
+  std::lock_guard<std::mutex> lock(solver_mutex);
   std::pair<std::string, std::string> str_pair =
       std::make_pair(to_string(), other.to_string());
-  if (contains_key(cached_results, str_pair)) {
-    return cached_results.at(str_pair);
+  {
+    if (contains_key(cached_results, str_pair)) {
+      return cached_results.at(str_pair);
+    }
   }
 
-  // clock_t start_time = clock();
   z3::context c;
 
   z3::sort P = c.uninterpreted_sort("P");
   z3::sort I = c.int_sort();
 
-  z3::func_decl add = z3::function("add", P, P, P);
-  z3::func_decl mul = z3::function("mul", P, P, P);
-  z3::func_decl div = z3::function("div", P, P, P);
-  z3::func_decl exp = z3::function("exp", P, P);
-  z3::func_decl red = z3::function("red", I, P, P);
+  z3::func_decl add = c.function("add", P, P, P);
+  z3::func_decl mul = c.function("mul", P, P, P);
+  z3::func_decl div = c.function("div", P, P, P);
+  z3::func_decl exp = c.function("exp", P, P);
+  z3::func_decl red = c.function("red", I, P, P);
 
   z3::func_decl subpattern = z3::partial_order(P, 0);
 
@@ -102,11 +106,9 @@ bool AlgebraicPattern::subpattern_to(AlgebraicPattern const &other) const {
   s.add(!subpattern(pattern1, pattern2));
 
   bool result = s.check() == z3::unsat;
-  cached_results[str_pair] = result;
-  // clock_t end_time = clock();
-  // std::cerr << "solver time:" << ((double)end_time - start_time) /
-  // CLOCKS_PER_SEC << std::endl; std::cerr << "result: " << result <<
-  // std::endl;
+  {
+    cached_results[str_pair] = result;
+  }
   return result;
 }
 
@@ -132,7 +134,7 @@ Add::Add(std::shared_ptr<AlgebraicPattern> lhs,
 
 z3::expr Add::to_z3(z3::context &c) const {
   z3::sort P = c.uninterpreted_sort("P");
-  z3::func_decl add = z3::function("add", P, P, P);
+  z3::func_decl add = c.function("add", P, P, P);
   return add(lhs->to_z3(c), rhs->to_z3(c));
 }
 
@@ -146,7 +148,7 @@ Mul::Mul(std::shared_ptr<AlgebraicPattern> lhs,
 
 z3::expr Mul::to_z3(z3::context &c) const {
   z3::sort P = c.uninterpreted_sort("P");
-  z3::func_decl mul = z3::function("mul", P, P, P);
+  z3::func_decl mul = c.function("mul", P, P, P);
   return mul(lhs->to_z3(c), rhs->to_z3(c));
 }
 
@@ -160,7 +162,7 @@ Div::Div(std::shared_ptr<AlgebraicPattern> lhs,
 
 z3::expr Div::to_z3(z3::context &c) const {
   z3::sort P = c.uninterpreted_sort("P");
-  z3::func_decl div = z3::function("div", P, P, P);
+  z3::func_decl div = c.function("div", P, P, P);
   return div(lhs->to_z3(c), rhs->to_z3(c));
 }
 
@@ -172,7 +174,7 @@ Exp::Exp(std::shared_ptr<AlgebraicPattern> exponent) : exponent(exponent) {}
 
 z3::expr Exp::to_z3(z3::context &c) const {
   z3::sort P = c.uninterpreted_sort("P");
-  z3::func_decl exp = z3::function("exp", P, P);
+  z3::func_decl exp = c.function("exp", P, P);
   return exp(exponent->to_z3(c));
 }
 
@@ -185,7 +187,7 @@ Red::Red(int red_deg, std::shared_ptr<AlgebraicPattern> summand)
 
 z3::expr Red::to_z3(z3::context &c) const {
   z3::sort P = c.uninterpreted_sort("P");
-  z3::func_decl red = z3::function("red", c.int_sort(), P, P);
+  z3::func_decl red = c.function("red", c.int_sort(), P, P);
   return red(red_deg_log, summand->to_z3(c));
 }
 

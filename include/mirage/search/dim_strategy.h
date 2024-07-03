@@ -42,8 +42,7 @@ struct DimStrategy {
     assert(false && "Unsupported operator");
   }
   std::vector<std::vector<int>>
-      get_customized_input_cand_idx(std::vector<DTensor> const &all_inputs,
-                                    std::vector<int> const &open_tensor_idx);
+      get_customized_input_cand_idx(std::vector<DTensor> const &all_inputs);
 
   GeneratorConfig config;
 };
