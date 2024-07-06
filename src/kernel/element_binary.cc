@@ -112,7 +112,7 @@ KNElementBinaryOp::KNElementBinaryOp(Graph *_kgraph,
   output.owner_op = this;
   output.owner_ts_idx = 0;
   output.guid = DTensor::next_guid++;
-  kgraph->allocate(output);
+  output.smem_offset = 0;
   assert(output_tensors.size() == 0);
   output_tensors.push_back(output);
 }
