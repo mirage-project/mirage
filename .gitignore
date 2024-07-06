@@ -27,3 +27,12 @@ bin/
 
 #vscode
 .vscode/
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info
+dist/
+
+# Cython
+/python/mirage/_cython/core.cpp
