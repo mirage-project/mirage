@@ -61,6 +61,7 @@ cdef extern from "mirage/kernel/graph.h" namespace "mirage::kernel":
         DTensor* mul(const DTensor* op1, const DTensor* op2)
         DTensor* div(const DTensor* op1, const DTensor* op2)
         void generate_triton_program(const char *filepath)
+        void generate_cuda_program(const char *filepath)
 
 cdef extern from "mirage/search/search_c.h" namespace "mirage::search_c":
     ctypedef struct MInt3:

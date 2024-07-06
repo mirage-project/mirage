@@ -234,8 +234,15 @@ cdef class PyGraph:
         cdef char* cfilepath = NULL
         cfilepath = py_byte_string
         self.p_graph.generate_triton_program(cfilepath)
+    
+    def generate_cuda_program(self, str filepath):
+        assert filepath is not None, "filepath cannot be empty"
+        py_byte_string = filepath.encode('UTF-8')
+        cdef char* cfilepath = NULL
+        cfilepath = py_byte_string
+        self.p_graph.generate_cuda_program(cfilepath)
 
-def optimize(PyGraph input_graph, *, list imaps = None, list omaps = None, list griddims = None, list blockdims = None, list fmaps = None, list franges = None, str previous_checkpoint = None, str default_config = None):
+def optimize(PyGraph input_graph, *, int max_num_new_graphs = 1024, list imaps = None, list omaps = None, list griddims = None, list blockdims = None, list fmaps = None, list franges = None, str previous_checkpoint = None, str default_config = None):
     # set cimaps
     cdef vector[MInt3] cimaps
     cimaps.resize(0)
@@ -289,6 +296,7 @@ def optimize(PyGraph input_graph, *, list imaps = None, list omaps = None, list 
             cfranges[i] = franges[i]
     # allocate new graphs
     # currently support up to 1024 new graphs
+    assert max_num_new_graphs <= 1024
     cdef Graph* cnewgraphs[1024]
     # convert file path
     cdef char* cfilepath = NULL
@@ -300,7 +308,7 @@ def optimize(PyGraph input_graph, *, list imaps = None, list omaps = None, list 
     if default_config is not None:
         py_byte_string = default_config.encode('UTF-8')
         cconfig = py_byte_string
-    num = cython_optimize(input_graph.p_graph, 1024, cnewgraphs, cimaps, comaps, cgriddims, cblockdims, cfmaps, cfranges, cfilepath, cconfig)
+    num = cython_optimize(input_graph.p_graph, max_num_new_graphs, cnewgraphs, cimaps, comaps, cgriddims, cblockdims, cfmaps, cfranges, cfilepath, cconfig)
     new_graphs = list()
     for i in range(num):
         ptr = ctypes.cast(<unsigned long long>cnewgraphs[i], ctypes.c_void_p)
