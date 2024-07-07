@@ -321,7 +321,7 @@ __global__ void customized_kernel_function(
 __global__ void compute_customizedop_fingerprint(
     mirage::threadblock::NewKernelParams new_params,
     int forloop_range,
-    char *dmem_base_ptr,
+    char *dmem_fp_ptr,
     mirage::type::FPType *exp_lookup_table,
     mirage::type::FPType *div_p_lookup_table,
     mirage::type::FPType *div_q_lookup_table) {
@@ -342,7 +342,7 @@ __global__ void compute_customizedop_fingerprint(
       switch (new_params.operator_types[op]) {
         case mirage::type::TB_INPUT_OP: {
           mirage::type::FPType *dtensor_ptr =
-              (mirage::type::FPType *)(dmem_base_ptr +
+              (mirage::type::FPType *)(dmem_fp_ptr +
                                        new_params.dmem_input_offsets[op]);
           int3 input_matrix_row_offset_block_stride;
           int3 input_matrix_column_offset_block_stride;
@@ -431,41 +431,52 @@ __global__ void compute_customizedop_fingerprint(
               input_smem_offset,
               accum_smem_offset,
               epilogue);
+          bool non_zero_forloop_strides = false;
+          if ((output_matrix_row_offset_forloop_stride > 0) ||
+              (output_matrix_column_offset_forloop_stride > 0) ||
+              (global_offset_forloop_stride > 0)) {
+            non_zero_forloop_strides = true;
+          }
           mirage::type::FPType *input_stensor_ptr =
               (mirage::type::FPType *)(smem_buffer + input_smem_offset);
           mirage::type::FPType *accum_stensor_ptr =
               (mirage::type::FPType *)(smem_buffer + accum_smem_offset);
+          bool reset_output = (non_zero_forloop_strides || (i == 0));
           mirage::threadblock::TBOutputAccumFingerprinter fp(
               input_stensor_ptr,
               accum_stensor_ptr,
               stensor_matrix_shape,
-              (i == 0),
+              reset_output,
               threadIdx.x,
               blockDim.x);
           __syncthreads();
-          // Step 2: Save final output to dmem if this is the last forloop
-          if (i == forloop_range - 1) {
+          // Step 2: Save final output to dmem if (1) this is the last forloop
+          // or (2) we don't accum output since the forloop strides are non-zero
+          if ((i == forloop_range - 1) || non_zero_forloop_strides) {
             assert(op >= output_saver_start_idx);
             mirage::type::FPType *dtensor_ptr =
                 (mirage::type::FPType
-                     *)(dmem_base_ptr +
+                     *)(dmem_fp_ptr +
                         new_params
                             .dmem_output_offsets[op - output_saver_start_idx]);
             int tb_offset_row =
                 blockIdx.x * output_matrix_row_offset_block_stride.x +
                 blockIdx.y * output_matrix_row_offset_block_stride.y +
-                blockIdx.z * output_matrix_row_offset_block_stride.z;
+                blockIdx.z * output_matrix_row_offset_block_stride.z +
+                i * output_matrix_row_offset_forloop_stride;
             int tb_offset_column =
                 blockIdx.x * output_matrix_column_offset_block_stride.x +
                 blockIdx.y * output_matrix_column_offset_block_stride.y +
-                blockIdx.z * output_matrix_column_offset_block_stride.z;
+                blockIdx.z * output_matrix_column_offset_block_stride.z +
+                i * output_matrix_column_offset_forloop_stride;
             // calculate global offset beyond the last two dimensions
             // global_offset captures offsets caused by partitioning other
             // dimensions such as batch matmul global_offset is directly added
             // to dtensor_ptr by the output saver
             int global_offset = blockIdx.x * global_offset_block_stride.x +
                                 blockIdx.y * global_offset_block_stride.y +
-                                blockIdx.z * global_offset_block_stride.z;
+                                blockIdx.z * global_offset_block_stride.z +
+                                i * global_offset_forloop_stride;
             cutlass::MatrixCoord matrix_offset = {tb_offset_row,
                                                   tb_offset_column};
             mirage::threadblock::TBOutputSaverFingerprinter fp(
@@ -642,7 +653,7 @@ void KNCustomizedOp::run() {
   customized_kernel_function<<<bgraph.grid_dim,
                                bgraph.block_dim,
                                bgraph.smem_offset>>>(
-      new_params, bgraph.forloop_range, dmm->base_ptr[gpu_id]);
+      new_params, bgraph.forloop_range, dmm->data_base_ptr[gpu_id]);
 }
 
 bool KNCustomizedOp::profile(ProfileResult &result) {
@@ -671,14 +682,14 @@ bool KNCustomizedOp::profile(ProfileResult &result) {
     customized_kernel_function<<<bgraph.grid_dim,
                                  bgraph.block_dim,
                                  bgraph.smem_offset>>>(
-        new_params, bgraph.forloop_range, dmm->base_ptr[gpu_id]);
+        new_params, bgraph.forloop_range, dmm->data_base_ptr[gpu_id]);
   }
   checkCUDA(cudaEventRecord(events[0]));
   for (int i = 0; i < ProfileResult::NUM_ITERATIONS; i++) {
     customized_kernel_function<<<bgraph.grid_dim,
                                  bgraph.block_dim,
                                  bgraph.smem_offset>>>(
-        new_params, bgraph.forloop_range, dmm->base_ptr[gpu_id]);
+        new_params, bgraph.forloop_range, dmm->data_base_ptr[gpu_id]);
   }
   float runtime_ms = 0;
   checkCUDA(cudaEventRecord(events[1]));
@@ -708,21 +719,21 @@ bool KNCustomizedOp::fingerprint(void) {
                                    bgraph.smem_offset));
   }
 
-  char *base_ptr = dmm->base_ptr[gpu_id];
+  char *alloc_base_ptr = dmm->alloc_base_ptr[gpu_id];
   mirage::type::FPType *exp_lookup_table =
-      reinterpret_cast<mirage::type::FPType *>(base_ptr +
+      reinterpret_cast<mirage::type::FPType *>(alloc_base_ptr +
                                                dmm->exp_lookup_table_offset);
   mirage::type::FPType *div_p_lookup_table =
-      reinterpret_cast<mirage::type::FPType *>(base_ptr +
+      reinterpret_cast<mirage::type::FPType *>(alloc_base_ptr +
                                                dmm->div_p_lookup_table_offset);
   mirage::type::FPType *div_q_lookup_table =
-      reinterpret_cast<mirage::type::FPType *>(base_ptr +
+      reinterpret_cast<mirage::type::FPType *>(alloc_base_ptr +
                                                dmm->div_q_lookup_table_offset);
   compute_customizedop_fingerprint<<<bgraph.grid_dim,
                                      bgraph.block_dim,
                                      bgraph.smem_offset>>>(new_params,
                                                            bgraph.forloop_range,
-                                                           base_ptr,
+                                                           dmm->fp_base_ptr[gpu_id],
                                                            exp_lookup_table,
                                                            div_p_lookup_table,
                                                            div_q_lookup_table);

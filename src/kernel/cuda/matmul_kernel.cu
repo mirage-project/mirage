@@ -34,9 +34,9 @@ bool KNMatmulOp::profile(ProfileResult &result) {
   float alpha = 1.0f, beta = 0.0f;
   mirage::kernel::DeviceMemoryManager *dmm =
       mirage::kernel::DeviceMemoryManager::get_instance();
-  void *A = dmm->base_ptr[gpu_id] + input_tensors[0].data_offset;
-  void *B = dmm->base_ptr[gpu_id] + input_tensors[1].data_offset;
-  void *C = dmm->base_ptr[gpu_id] + output_tensors[0].data_offset;
+  void *A = dmm->data_base_ptr[gpu_id] + input_tensors[0].data_offset;
+  void *B = dmm->data_base_ptr[gpu_id] + input_tensors[1].data_offset;
+  void *C = dmm->data_base_ptr[gpu_id] + output_tensors[0].data_offset;
   int num_dims = input_tensors[0].num_dims;
   assert(input_tensors[1].num_dims == num_dims);
   assert(output_tensors[0].num_dims == num_dims);
@@ -202,11 +202,11 @@ bool KNMatmulOp::fingerprint(void) {
   mirage::kernel::DeviceMemoryManager *dmm =
       mirage::kernel::DeviceMemoryManager::get_instance();
   mirage::type::FPType *A_fp_ptr = reinterpret_cast<mirage::type::FPType *>(
-      dmm->base_ptr[gpu_id] + input_tensors[0].fp_offset);
+      dmm->fp_base_ptr[gpu_id] + input_tensors[0].fp_offset);
   mirage::type::FPType *B_fp_ptr = reinterpret_cast<mirage::type::FPType *>(
-      dmm->base_ptr[gpu_id] + input_tensors[1].fp_offset);
+      dmm->fp_base_ptr[gpu_id] + input_tensors[1].fp_offset);
   mirage::type::FPType *C_fp_ptr = reinterpret_cast<mirage::type::FPType *>(
-      dmm->base_ptr[gpu_id] + output_tensors[0].fp_offset);
+      dmm->fp_base_ptr[gpu_id] + output_tensors[0].fp_offset);
   compute_matmul_fingerprint<<<num_blocks, num_threads_per_blk>>>(
       A_fp_ptr, B_fp_ptr, C_fp_ptr, num_batches, row_C, column_C, row_B);
   checkCUDA(cudaDeviceSynchronize());

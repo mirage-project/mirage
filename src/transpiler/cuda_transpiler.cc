@@ -739,10 +739,10 @@ void Graph::generate_cuda_program(char const *file_path) {
   main.e("    CHECK_CUDA(cudaSetDevice(i));");
   if (use_nvshmem) {
     main.e("    gpu_base_ptrs[i] = nvshmem_malloc($);",
-            mirage::config::MAX_DMEM_SIZE);
+            mirage::config::MAX_DMEM_DATA_SIZE);
   } else {
     main.e("    CHECK_CUDA(cudaMalloc(&gpu_base_ptrs[i], $));",
-            mirage::config::MAX_DMEM_SIZE);
+            mirage::config::MAX_DMEM_DATA_SIZE);
   }
   main.e("  }");
 

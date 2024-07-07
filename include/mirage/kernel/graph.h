@@ -79,8 +79,8 @@ public:
   // helper functions
   void generate_triton_program(char const *filepath);
   void generate_cuda_program(char const *filepath);
-  bool can_allocate(DTensor const &tensor, bool allocate_fingerprint = true);
-  bool can_allocate(size_t size_in_bytes);
+  bool can_allocate(DTensor const &tensor, bool allocate_fingerprint = true) const;
+  bool can_allocate(size_t data_size_in_bytes, size_t fp_size_in_bytes) const;
   bool allocate(DTensor &tensor, bool allocate_fingerprint = true);
   void free(DTensor &tensor);
 
@@ -89,8 +89,8 @@ public:
   dim3 gpu_dim;
   // memory allocator
   // device memory offset manager
-  off_t dmem_offset;
-  std::vector<std::pair<off_t, size_t>> allocated_tensors;
+  off_t dmem_data_offset, dmem_fp_offset;
+  std::vector<std::pair<off_t, size_t>> allocated_data_tensors, allocated_fp_tensors;
   // std::unordered_map<std::pair<int, int>, DTensor, pair_hash> tensors;
   // std::unordered_map<std::pair<int, int>, std::pair<int, int>, pair_hash>
   // edges; std::vector<std::vector<SrcEdge>> edges;

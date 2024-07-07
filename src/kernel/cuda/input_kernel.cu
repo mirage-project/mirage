@@ -56,7 +56,7 @@ bool KNInputOp::profile(ProfileResult &profile) {
       num_threads_per_blk;
   if (output_tensors[0].data_type == mirage::type::DT_FLOAT16) {
     init_input<cutlass::half_t>
-        <<<num_blocks, num_threads_per_blk>>>(dmm->base_ptr[gpu_id],
+        <<<num_blocks, num_threads_per_blk>>>(dmm->data_base_ptr[gpu_id],
                                               output_tensors[0],
                                               output_tensors[0].num_elements());
   } else {
@@ -89,7 +89,7 @@ bool KNInputOp::fingerprint(void) {
       (output_tensors[0].num_elements() + num_threads_per_blk - 1) /
       num_threads_per_blk;
   init_input_fingerprint<<<num_blocks, num_threads_per_blk>>>(
-      dmm->base_ptr[gpu_id],
+      dmm->fp_base_ptr[gpu_id],
       output_tensors[0],
       output_tensors[0].num_elements());
   checkCUDA(cudaDeviceSynchronize());

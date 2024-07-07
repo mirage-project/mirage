@@ -25,12 +25,12 @@ using namespace mirage::config;
 DeviceMemoryManager *DeviceMemoryManager::singleton = nullptr;
 
 DeviceMemoryManager::DeviceMemoryManager(int _num_gpus) : num_gpus(_num_gpus) {
-  dmem_tensor_start_offset = 0;
+  off_t offset = 0;
   // fingerprint related fields
   // exponential lookup table
-  exp_lookup_table_offset = dmem_tensor_start_offset;
+  exp_lookup_table_offset = offset;
   // make future tensors 16 bytes aligned
-  dmem_tensor_start_offset += (sizeof(FPType) * FP_Q + 15) / 16 * 16;
+  offset += (sizeof(FPType) * FP_Q + 15) / 16 * 16;
   // check PQ relations
   assert(FP_Q < FP_P);
   assert((FP_P - 1) % FP_Q == 0);
@@ -41,9 +41,9 @@ DeviceMemoryManager::DeviceMemoryManager(int _num_gpus) : num_gpus(_num_gpus) {
   }
   assert((exp_table[FP_Q - 1] * FP_EXP_BASE) % FP_P == 1);
   // division p lookup table
-  div_p_lookup_table_offset = dmem_tensor_start_offset;
+  div_p_lookup_table_offset = offset;
   // make future tensors 16 bytes aligned
-  dmem_tensor_start_offset += (sizeof(FPType) * FP_P + 15) / 16 * 16;
+  offset += (sizeof(FPType) * FP_P + 15) / 16 * 16;
   FPType div_p_table[FP_P];
   for (int i = 0; i < FP_P; i++) {
     div_p_table[i] = 1;
@@ -57,9 +57,9 @@ DeviceMemoryManager::DeviceMemoryManager(int _num_gpus) : num_gpus(_num_gpus) {
     }
   }
   // division q lookup table
-  div_q_lookup_table_offset = dmem_tensor_start_offset;
+  div_q_lookup_table_offset = offset;
   // make future tensors 16 bytes aligned
-  dmem_tensor_start_offset += (sizeof(FPType) * FP_Q + 15) / 16 * 16;
+  offset += (sizeof(FPType) * FP_Q + 15) / 16 * 16;
   FPType div_q_table[FP_Q];
   for (int i = 0; i < FP_Q; i++) {
     div_q_table[i] = 1;
@@ -75,28 +75,42 @@ DeviceMemoryManager::DeviceMemoryManager(int _num_gpus) : num_gpus(_num_gpus) {
   for (int i = 0; i < num_gpus; i++) {
     checkCUDA(cudaSetDevice(i));
     checkCUDA(cudaStreamCreate(&stream[i]));
-    checkCUDA(cudaMalloc(&base_ptr[i], mirage::config::MAX_DMEM_SIZE));
+    // Note that we allocate all fingerprint buffers
+    // on the 0-th GPU to avoid inter-GPU communication
+    // for computing fingerprints
+    size_t allocated_size = mirage::config::MAX_DMEM_DATA_SIZE + offset;
+    if (i == 0) {
+      allocated_size += mirage::config::MAX_DMEM_FP_SIZE * num_gpus;
+    }
+    checkCUDA(cudaMalloc(&alloc_base_ptr[i], allocated_size));
     checkCUDA(cublasCreate(&blas[i]));
     checkCUDA(cublasSetMathMode(blas[i], CUBLAS_TENSOR_OP_MATH));
     // Copy exp_table, div_p_table, and div_q_table from DRAM to device memory
-    cudaMemcpy(base_ptr[i] + exp_lookup_table_offset,
+    cudaMemcpy(alloc_base_ptr[i] + exp_lookup_table_offset,
                exp_table,
                sizeof(FPType) * FP_Q,
                cudaMemcpyHostToDevice);
-    cudaMemcpy(base_ptr[i] + div_p_lookup_table_offset,
+    cudaMemcpy(alloc_base_ptr[i] + div_p_lookup_table_offset,
                div_p_table,
                sizeof(FPType) * FP_P,
                cudaMemcpyHostToDevice);
-    cudaMemcpy(base_ptr[i] + div_q_lookup_table_offset,
+    cudaMemcpy(alloc_base_ptr[i] + div_q_lookup_table_offset,
                div_q_table,
                sizeof(FPType) * FP_Q,
                cudaMemcpyHostToDevice);
+    data_base_ptr[i] = alloc_base_ptr[i] + offset;
+    if (i == 0) {
+      for (int k = 0; k < num_gpus; k++) {
+        fp_base_ptr[i] = data_base_ptr[i] + mirage::config::MAX_DMEM_DATA_SIZE
+                       + mirage::config::MAX_DMEM_FP_SIZE * ((size_t)k);
+      }
+    }
   }
 }
 
 DeviceMemoryManager::~DeviceMemoryManager() {
   for (int i = 0; i < num_gpus; i++) {
-    checkCUDA(cudaFree(base_ptr[i]));
+    checkCUDA(cudaFree(alloc_base_ptr[i]));
     checkCUDA(cudaStreamDestroy(stream[i]));
     checkCUDA(cublasDestroy(blas[i]));
   }

@@ -38,7 +38,7 @@ mirage::cpu::CTensor DTensor::copy_fingerprint_to_ctensor() const {
   // to ctensor
   ctensor.fp_ptr = (mirage::type::FPType *)malloc(fingerprint_size());
   checkCUDA(cudaMemcpy(ctensor.fp_ptr,
-                       dmm->base_ptr[0] + fp_offset,
+                       dmm->fp_base_ptr[0] + fp_offset,
                        fingerprint_size(),
                        cudaMemcpyDeviceToHost));
   return ctensor;
@@ -63,7 +63,7 @@ bool DTensor::has_same_fingerprint(mirage::cpu::CTensor const &ref) const {
       mirage::kernel::DeviceMemoryManager::get_instance();
   mirage::type::FPType *A = (mirage::type::FPType *)malloc(fingerprint_size());
   checkCUDA(cudaMemcpy(A,
-                       dmm->base_ptr[0] + fp_offset,
+                       dmm->fp_base_ptr[0] + fp_offset,
                        fingerprint_size(),
                        cudaMemcpyDeviceToHost));
   int num_elements = (int)this->num_elements();
@@ -97,11 +97,11 @@ bool DTensor::has_same_fingerprint(DTensor const &ref) const {
   mirage::type::FPType *A = (mirage::type::FPType *)malloc(fingerprint_size());
   mirage::type::FPType *B = (mirage::type::FPType *)malloc(fingerprint_size());
   checkCUDA(cudaMemcpy(A,
-                       dmm->base_ptr[0] + fp_offset,
+                       dmm->fp_base_ptr[0] + fp_offset,
                        fingerprint_size(),
                        cudaMemcpyDeviceToHost));
   checkCUDA(cudaMemcpy(B,
-                       dmm->base_ptr[0] + ref.fp_offset,
+                       dmm->fp_base_ptr[0] + ref.fp_offset,
                        fingerprint_size(),
                        cudaMemcpyDeviceToHost));
   int num_elements = (int)this->num_elements();

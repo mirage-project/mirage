@@ -25,9 +25,8 @@ namespace kernel {
 
 Graph::Graph() {
   gpu_dim = {1, 1, 1};
-  mirage::kernel::DeviceMemoryManager *dmm =
-      mirage::kernel::DeviceMemoryManager::get_instance();
-  dmem_offset = dmm->dmem_tensor_start_offset;
+  dmem_data_offset = 0;
+  dmem_fp_offset = 0;
 }
 
 size_t Graph::pair_hash::operator()(std::pair<int, int> const &p) const {
@@ -37,44 +36,48 @@ size_t Graph::pair_hash::operator()(std::pair<int, int> const &p) const {
   return h1;
 }
 
-bool Graph::can_allocate(DTensor const &tensor, bool allocate_fingerprint) {
-  size_t accum_size = ((tensor.data_size() + 15) & ~15);
-  if (allocate_fingerprint) {
-    accum_size += ((tensor.fingerprint_size() + 15) & ~15);
-  }
-  if (dmem_offset + accum_size <= mirage::config::MAX_DMEM_SIZE) {
-    return true;
-  } else {
+bool Graph::can_allocate(DTensor const &tensor, bool allocate_fingerprint) const {
+  size_t data_size = ((tensor.data_size() + 15) & ~15);
+  if (dmem_data_offset + data_size > mirage::config::MAX_DMEM_DATA_SIZE) {
     return false;
   }
+  if (allocate_fingerprint) {
+    size_t fp_size = ((tensor.fingerprint_size() + 15) & ~15);
+    if (dmem_fp_offset + fp_size > mirage::config::MAX_DMEM_FP_SIZE) {
+      return false;
+    }
+  }
+  return true;
 }
 
-bool Graph::can_allocate(size_t size_in_bytes) {
-  if (dmem_offset + size_in_bytes <= mirage::config::MAX_DMEM_SIZE) {
-    return true;
-  } else {
+bool Graph::can_allocate(size_t data_size_in_bytes, size_t fp_size_in_bytes) const {
+  if (dmem_data_offset + data_size_in_bytes > mirage::config::MAX_DMEM_DATA_SIZE) {
     return false;
   }
+  if (dmem_fp_offset + fp_size_in_bytes > mirage::config::MAX_DMEM_FP_SIZE) {
+    return false;
+  }
+  return true;
 }
 
 bool Graph::allocate(DTensor &tensor, bool allocate_fingerprint) {
   // assert that the start of the tensor is 16 bytes aligned
-  assert(dmem_offset % 16 == 0);
-  off_t ret = dmem_offset;
+  assert(dmem_data_offset % 16 == 0);
+  off_t ret = dmem_data_offset;
 
   size_t aligns_size = ((tensor.data_size() + 15) & ~15);
-  dmem_offset += aligns_size;
+  dmem_data_offset += aligns_size;
 
-  allocated_tensors.push_back(std::make_pair(ret, aligns_size));
+  allocated_data_tensors.push_back(std::make_pair(ret, aligns_size));
   tensor.data_offset = ret;
 
   if (allocate_fingerprint) {
-    assert(dmem_offset % 16 == 0);
-    ret = dmem_offset;
+    assert(dmem_fp_offset % 16 == 0);
+    ret = dmem_fp_offset;
     aligns_size = ((tensor.fingerprint_size() + 15) & ~15);
-    dmem_offset += aligns_size;
+    dmem_fp_offset += aligns_size;
     tensor.fp_offset = ret;
-    allocated_tensors.push_back(std::make_pair(ret, aligns_size));
+    allocated_fp_tensors.push_back(std::make_pair(ret, aligns_size));
   }
 
   // Assert that we haven't used more than what we pre-allocated
@@ -89,19 +92,19 @@ void Graph::free(DTensor &tensor) {
   // allocated memory for its fingerprint
 
   if (tensor.fp_offset >= 0) {
-    assert(allocated_tensors.size() > 0);
-    assert(allocated_tensors.back().first == tensor.fp_offset);
-    assert(allocated_tensors.back().second ==
+    assert(allocated_fp_tensors.size() > 0);
+    assert(allocated_fp_tensors.back().first == tensor.fp_offset);
+    assert(allocated_fp_tensors.back().second ==
            ((tensor.fingerprint_size() + 15) & ~15));
-    dmem_offset -= allocated_tensors.back().second;
-    allocated_tensors.pop_back();
+    dmem_fp_offset -= allocated_fp_tensors.back().second;
+    allocated_fp_tensors.pop_back();
     tensor.fp_offset = -1;
   }
-  assert(allocated_tensors.size() > 0);
-  assert(allocated_tensors.back().first == tensor.data_offset);
-  assert(allocated_tensors.back().second == ((tensor.data_size() + 15) & ~15));
-  dmem_offset -= allocated_tensors.back().second;
-  allocated_tensors.pop_back();
+  assert(allocated_data_tensors.size() > 0);
+  assert(allocated_data_tensors.back().first == tensor.data_offset);
+  assert(allocated_data_tensors.back().second == ((tensor.data_size() + 15) & ~15));
+  dmem_data_offset -= allocated_data_tensors.back().second;
+  allocated_data_tensors.pop_back();
   tensor.data_offset = -1;
 }
 
