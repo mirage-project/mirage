@@ -33,64 +33,66 @@ namespace transpiler {
 
 // We need to specialize the to_string function for char* type, so we have
 // my_to_string function here
-template<typename T>
-static std::string my_to_string(const T &value) {
-	return std::to_string(value);
+template <typename T>
+static std::string my_to_string(T const &value) {
+  return std::to_string(value);
 }
 
-template<>
-[[maybe_unused]]
-std::string my_to_string(const char* const &value) {
-	return value;
+template <>
+[[maybe_unused]] std::string my_to_string(char const *const &value) {
+  return value;
 }
 
-template<>
-[[maybe_unused]]
-std::string my_to_string(const std::string &value) {
+template <>
+[[maybe_unused]] std::string my_to_string(std::string const &value) {
   return value;
 }
 
 // A function that takes a template string and a list of elements
 // It replaces each marker in the template string with the corresponding element
 // and returns the resulting string. We can use this to generate code elegantly
-template<typename... Args>
-static std::string fmt(const std::string& fmt_str, Args... args) {
-	std::string result = fmt_str;
+template <typename... Args>
+static std::string fmt(std::string const &fmt_str, Args... args) {
+  std::string result = fmt_str;
   int num_args = sizeof...(args);
   int num_markers = std::count(result.begin(), result.end(), '$');
   if (num_args != num_markers) {
     std::cerr << "Error encountered during transpiling.";
-    std::cerr << "The number of arguments does not match the number of markers in the template string.";
+    std::cerr << "The number of arguments does not match the number of markers "
+                 "in the template string.";
     std::cerr << "fmt_str: " << fmt_str << std::endl;
-	  std::cerr << "args: "; ((std::cerr << args << " "), ...); std::cerr << std::endl;
+    std::cerr << "args: ";
+    ((std::cerr << args << " "), ...);
+    std::cerr << std::endl;
     std::cerr << "num_args: " << num_args << std::endl;
     std::cerr << "num_markers: " << num_markers << std::endl;
     exit(1);
   }
-	(result.replace(result.find("$"), 1, my_to_string(args)) , ...); 
-	return result;
+  (result.replace(result.find("$"), 1, my_to_string(args)), ...);
+  return result;
 }
 
-// A helper class for keeping all generated code, and provide some utility functions
+// A helper class for keeping all generated code, and provide some utility
+// functions
 class CodeKeeper {
 private:
   std::vector<std::string> lines;
 
 public:
   // Emit a new line
-  template<typename... Args>
-  void e(const std::string& fmt_str, Args... args) {
+  template <typename... Args>
+  void e(std::string const &fmt_str, Args... args) {
     lines.push_back(fmt(fmt_str, args...));
   }
 
   // Emit a new line
-  void operator<<(const std::string& line) {
+  void operator<<(std::string const &line) {
     lines.push_back(line);
   }
 
   // Merge two CodeKeeper objects
-  friend void operator<<(CodeKeeper& target, const CodeKeeper& source) {
-    for (const auto& line : source.lines) {
+  friend void operator<<(CodeKeeper &target, CodeKeeper const &source) {
+    for (auto const &line : source.lines) {
       target.lines.push_back(line);
     }
   }
@@ -98,7 +100,7 @@ public:
   // Return the generated code as a string
   std::string to_string() const {
     std::string result;
-    for (const auto& line : lines) {
+    for (auto const &line : lines) {
       result += line + "\n";
     }
     return result;
@@ -608,8 +610,8 @@ namespace kernel {
 
 void Graph::generate_cuda_program(char const *file_path) {
   using namespace std;
-  using mirage::transpiler::fmt;
   using mirage::transpiler::CodeKeeper;
+  using mirage::transpiler::fmt;
 
   vector<string> kernels;
   bool use_nvshmem = (gpu_dim.x > 1 || gpu_dim.y > 1 || gpu_dim.z > 1);
@@ -623,8 +625,8 @@ void Graph::generate_cuda_program(char const *file_path) {
       assert(op->output_tensors.size() == 1);
 
     } else if (op->op_type == type::KNOperatorType::KN_ADD_OP ||
-             op->op_type == type::KNOperatorType::KN_MUL_OP ||
-             op->op_type == type::KNOperatorType::KN_DIV_OP ) {
+               op->op_type == type::KNOperatorType::KN_MUL_OP ||
+               op->op_type == type::KNOperatorType::KN_DIV_OP) {
       assert(op->input_tensors.size() == 2);
       assert(op->output_tensors.size() == 1);
       string output_ptr = fmt("dtensor$", op->output_tensors[0].guid);
@@ -632,19 +634,30 @@ void Graph::generate_cuda_program(char const *file_path) {
       string input2_ptr = fmt("dtensor$", op->input_tensors[1].guid);
       size_t numel = op->output_tensors[0].num_elements();
       string kernel_name =
-        op->op_type == type::KNOperatorType::KN_ADD_OP ? "ElementAddKernel" :
-        op->op_type == type::KNOperatorType::KN_MUL_OP ? "ElementMulKernel" :
-        op->op_type == type::KNOperatorType::KN_DIV_OP ? "ElementDivKernel" :
-        "UnknownElementwiseKernel";
+          op->op_type == type::KNOperatorType::KN_ADD_OP   ? "ElementAddKernel"
+          : op->op_type == type::KNOperatorType::KN_MUL_OP ? "ElementMulKernel"
+          : op->op_type == type::KNOperatorType::KN_DIV_OP
+              ? "ElementDivKernel"
+              : "UnknownElementwiseKernel";
       executor.e("  {");
-      executor.e("    cutlass::half_t *$ = (cutlass::half_t*)(gpu_base_ptr + $);",
-                  output_ptr, op->output_tensors[0].data_offset);
-      executor.e("    cutlass::half_t *$ = (cutlass::half_t*)(gpu_base_ptr + $);",
-                  input1_ptr, op->input_tensors[0].data_offset);
-      executor.e("    cutlass::half_t *$ = (cutlass::half_t*)(gpu_base_ptr + $);",
-                  input2_ptr, op->input_tensors[1].data_offset);
+      executor.e(
+          "    cutlass::half_t *$ = (cutlass::half_t*)(gpu_base_ptr + $);",
+          output_ptr,
+          op->output_tensors[0].data_offset);
+      executor.e(
+          "    cutlass::half_t *$ = (cutlass::half_t*)(gpu_base_ptr + $);",
+          input1_ptr,
+          op->input_tensors[0].data_offset);
+      executor.e(
+          "    cutlass::half_t *$ = (cutlass::half_t*)(gpu_base_ptr + $);",
+          input2_ptr,
+          op->input_tensors[1].data_offset);
       executor.e("    $<cutlass::half_t>::run($, $, $, $);",
-                  kernel_name, output_ptr, input1_ptr, input2_ptr, numel);
+                 kernel_name,
+                 output_ptr,
+                 input1_ptr,
+                 input2_ptr,
+                 numel);
       executor.e("  }");
 
     } else if (op->op_type == type::KNOperatorType::KN_EXP_OP) {
@@ -654,12 +667,18 @@ void Graph::generate_cuda_program(char const *file_path) {
       string input_ptr = fmt("dtensor$", op->input_tensors[0].guid);
       size_t numel = op->output_tensors[0].num_elements();
       executor.e("  {");
-      executor.e("    cutlass::half_t *$ = (cutlass::half_t*)(gpu_base_ptr + $);",
-                  output_ptr, op->output_tensors[0].data_offset);
-      executor.e("    cutlass::half_t *$ = (cutlass::half_t*)(gpu_base_ptr + $);",
-                  input_ptr, op->input_tensors[0].data_offset);
+      executor.e(
+          "    cutlass::half_t *$ = (cutlass::half_t*)(gpu_base_ptr + $);",
+          output_ptr,
+          op->output_tensors[0].data_offset);
+      executor.e(
+          "    cutlass::half_t *$ = (cutlass::half_t*)(gpu_base_ptr + $);",
+          input_ptr,
+          op->input_tensors[0].data_offset);
       executor.e("    ElementExpKernel<cutlass::half_t>::run($, $, $);",
-                  output_ptr, input_ptr, numel);
+                 output_ptr,
+                 input_ptr,
+                 numel);
       executor.e("  }");
 
     } else if (op->op_type == type::KNOperatorType::KN_CUSTOMIZED_OP) {
@@ -677,55 +696,65 @@ void Graph::generate_cuda_program(char const *file_path) {
         output_names.push_back("dtensor" + to_string(t.guid));
       }
       string kernel_code = ct.generate_kernel_code(params,
-                                                    &(customized->bgraph),
-                                                    kernel_name,
-                                                    input_names,
-                                                    output_names,
-                                                    "  " /*indent*/);
+                                                   &(customized->bgraph),
+                                                   kernel_name,
+                                                   input_names,
+                                                   output_names,
+                                                   "  " /*indent*/);
       kernels.push_back(kernel_code);
       int smem_size = customized->bgraph.get_smem_size_with_pipeline();
       if (smem_size > 48 * 1024) {
-        kernel_init.e("  CHECK_CUDA(cudaFuncSetAttribute($, cudaFuncAttributeMaxDynamicSharedMemorySize, $)",
-                      kernel_name, smem_size);
+        kernel_init.e("  CHECK_CUDA(cudaFuncSetAttribute($, "
+                      "cudaFuncAttributeMaxDynamicSharedMemorySize, $)",
+                      kernel_name,
+                      smem_size);
       }
       executor.e("  // launching kernel: $", kernel_name);
       executor.e("  {");
       for (auto const &t : op->input_tensors) {
-        executor.e("    cutlass::half_t *dtensor$ = (cutlass::half_t*)(gpu_base_ptr + $);",
-                    t.guid, t.data_offset);
+        executor.e("    cutlass::half_t *dtensor$ = "
+                   "(cutlass::half_t*)(gpu_base_ptr + $);",
+                   t.guid,
+                   t.data_offset);
       }
       for (auto const &t : op->output_tensors) {
-        executor.e("    cutlass::half_t *dtensor$ = (cutlass::half_t*)(gpu_base_ptr + $);",
-                    t.guid, t.data_offset);
+        executor.e("    cutlass::half_t *dtensor$ = "
+                   "(cutlass::half_t*)(gpu_base_ptr + $);",
+                   t.guid,
+                   t.data_offset);
       }
       executor.e("    dim3 grid_dim = {$, $, $}",
-                  customized->bgraph.grid_dim.x,
-                  customized->bgraph.grid_dim.y,
-                  customized->bgraph.grid_dim.z);
+                 customized->bgraph.grid_dim.x,
+                 customized->bgraph.grid_dim.y,
+                 customized->bgraph.grid_dim.z);
       executor.e("    dim3 block_dim = {$, $, $}",
-                  customized->bgraph.block_dim.x,
-                  customized->bgraph.block_dim.y,
-                  customized->bgraph.block_dim.z);
+                 customized->bgraph.block_dim.x,
+                 customized->bgraph.block_dim.y,
+                 customized->bgraph.block_dim.z);
       executor.e("    $<<<grid_dim, block_dim, $>>>(", kernel_name, smem_size);
       string input_names_line = "";
       for (auto const &t : op->input_tensors) {
-        if (!input_names_line.empty())
+        if (!input_names_line.empty()) {
           input_names_line += ", ";
+        }
         input_names_line += fmt("dtensor$", t.guid);
       }
       string output_names_line = "";
       for (auto const &t : op->output_tensors) {
-        if (!output_names_line.empty() || !input_names_line.empty())
+        if (!output_names_line.empty() || !input_names_line.empty()) {
           output_names_line += ", ";
+        }
         output_names_line += fmt("dtensor$", t.guid);
-      } 
+      }
       executor.e("      $", input_names_line);
       executor.e("      $", output_names_line);
       executor.e("    );");
       executor.e("  }");
-      
+
     } else {
-      assert(false && ("Cannot generate CUDA operator for this operator: " + to_string(int(op->op_type))).c_str());
+      assert(false && ("Cannot generate CUDA operator for this operator: " +
+                       to_string(int(op->op_type)))
+                          .c_str());
     }
   }
   executor.e("} // end of mugraph_executer");
@@ -739,10 +768,10 @@ void Graph::generate_cuda_program(char const *file_path) {
   main.e("    CHECK_CUDA(cudaSetDevice(i));");
   if (use_nvshmem) {
     main.e("    gpu_base_ptrs[i] = nvshmem_malloc($);",
-            mirage::config::MAX_DMEM_DATA_SIZE);
+           mirage::config::MAX_DMEM_DATA_SIZE);
   } else {
     main.e("    CHECK_CUDA(cudaMalloc(&gpu_base_ptrs[i], $));",
-            mirage::config::MAX_DMEM_DATA_SIZE);
+           mirage::config::MAX_DMEM_DATA_SIZE);
   }
   main.e("  }");
 

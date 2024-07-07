@@ -77,6 +77,7 @@ bool DTensor::has_same_fingerprint(mirage::cpu::CTensor const &ref) const {
   return true;
 }
 
+#ifdef DEADCODE
 bool DTensor::has_same_fingerprint(DTensor const &ref) const {
   if (data_type != ref.data_type) {
     return false;
@@ -116,6 +117,7 @@ bool DTensor::has_same_fingerprint(DTensor const &ref) const {
   free(B);
   return true;
 }
+#endif
 
 } // namespace kernel
 } // namespace mirage

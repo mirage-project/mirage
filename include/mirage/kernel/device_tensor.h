@@ -106,7 +106,7 @@ struct alignas(16) DTensor {
     return num_elements() * data_type_size;
   }
 
-  bool has_same_fingerprint(DTensor const &ref) const;
+  // bool has_same_fingerprint(DTensor const &ref) const;
   bool has_same_fingerprint(mirage::cpu::CTensor const &ref) const;
   mirage::cpu::CTensor copy_fingerprint_to_ctensor() const;
 

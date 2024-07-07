@@ -49,7 +49,7 @@ public:
   off_t div_p_lookup_table_offset;
   off_t div_q_lookup_table_offset;
   // fields for managing the preallocated cuda buffer
-  // Note that both alloc_base_ptr[i] and data_base_ptr[i] 
+  // Note that both alloc_base_ptr[i] and data_base_ptr[i]
   // point to buffers on the i-th GPU,
   // while all fp_base_ptrs refer
   // to buffers on the 0-th GPU since we compute
@@ -58,6 +58,7 @@ public:
   char *alloc_base_ptr[mirage::config::MAX_NUM_GPUS];
   char *data_base_ptr[mirage::config::MAX_NUM_GPUS];
   char *fp_base_ptr[mirage::config::MAX_NUM_GPUS];
+
 public:
   cudaStream_t stream[mirage::config::MAX_NUM_GPUS];
   cublasHandle_t blas[mirage::config::MAX_NUM_GPUS];

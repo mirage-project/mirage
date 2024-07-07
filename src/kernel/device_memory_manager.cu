@@ -101,8 +101,8 @@ DeviceMemoryManager::DeviceMemoryManager(int _num_gpus) : num_gpus(_num_gpus) {
     data_base_ptr[i] = alloc_base_ptr[i] + offset;
     if (i == 0) {
       for (int k = 0; k < num_gpus; k++) {
-        fp_base_ptr[i] = data_base_ptr[i] + mirage::config::MAX_DMEM_DATA_SIZE
-                       + mirage::config::MAX_DMEM_FP_SIZE * ((size_t)k);
+        fp_base_ptr[i] = data_base_ptr[i] + mirage::config::MAX_DMEM_DATA_SIZE +
+                         mirage::config::MAX_DMEM_FP_SIZE * ((size_t)k);
       }
     }
   }

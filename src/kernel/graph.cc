@@ -36,7 +36,8 @@ size_t Graph::pair_hash::operator()(std::pair<int, int> const &p) const {
   return h1;
 }
 
-bool Graph::can_allocate(DTensor const &tensor, bool allocate_fingerprint) const {
+bool Graph::can_allocate(DTensor const &tensor,
+                         bool allocate_fingerprint) const {
   size_t data_size = ((tensor.data_size() + 15) & ~15);
   if (dmem_data_offset + data_size > mirage::config::MAX_DMEM_DATA_SIZE) {
     return false;
@@ -50,8 +51,10 @@ bool Graph::can_allocate(DTensor const &tensor, bool allocate_fingerprint) const
   return true;
 }
 
-bool Graph::can_allocate(size_t data_size_in_bytes, size_t fp_size_in_bytes) const {
-  if (dmem_data_offset + data_size_in_bytes > mirage::config::MAX_DMEM_DATA_SIZE) {
+bool Graph::can_allocate(size_t data_size_in_bytes,
+                         size_t fp_size_in_bytes) const {
+  if (dmem_data_offset + data_size_in_bytes >
+      mirage::config::MAX_DMEM_DATA_SIZE) {
     return false;
   }
   if (dmem_fp_offset + fp_size_in_bytes > mirage::config::MAX_DMEM_FP_SIZE) {
@@ -102,7 +105,8 @@ void Graph::free(DTensor &tensor) {
   }
   assert(allocated_data_tensors.size() > 0);
   assert(allocated_data_tensors.back().first == tensor.data_offset);
-  assert(allocated_data_tensors.back().second == ((tensor.data_size() + 15) & ~15));
+  assert(allocated_data_tensors.back().second ==
+         ((tensor.data_size() + 15) & ~15));
   dmem_data_offset -= allocated_data_tensors.back().second;
   allocated_data_tensors.pop_back();
   tensor.data_offset = -1;

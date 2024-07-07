@@ -108,14 +108,11 @@ __global__ void
                                       mirage::kernel::DTensor output,
                                       int num_elements) {
   mirage::type::FPType *input1_fp_ptr =
-      reinterpret_cast<mirage::type::FPType *>(dmem_fp_ptr +
-                                               input1.fp_offset);
+      reinterpret_cast<mirage::type::FPType *>(dmem_fp_ptr + input1.fp_offset);
   mirage::type::FPType *input2_fp_ptr =
-      reinterpret_cast<mirage::type::FPType *>(dmem_fp_ptr +
-                                               input2.fp_offset);
+      reinterpret_cast<mirage::type::FPType *>(dmem_fp_ptr + input2.fp_offset);
   mirage::type::FPType *output_fp_ptr =
-      reinterpret_cast<mirage::type::FPType *>(dmem_fp_ptr +
-                                               output.fp_offset);
+      reinterpret_cast<mirage::type::FPType *>(dmem_fp_ptr + output.fp_offset);
 
   int i = threadIdx.x + blockIdx.x * blockDim.x;
   if (type == mirage::type::KN_ADD_OP) {

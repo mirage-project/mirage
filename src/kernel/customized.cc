@@ -51,7 +51,7 @@ KNOperator *Graph::create_customized_op(std::vector<DTensor> const &inputs,
       output_data_size +=
           static_cast<threadblock::TBOutputOp *>(op)->dtensor.data_size();
       output_fp_size += static_cast<threadblock::TBOutputOp *>(op)
-                           ->dtensor.fingerprint_size();
+                            ->dtensor.fingerprint_size();
     }
   }
 

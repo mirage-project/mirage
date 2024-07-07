@@ -5,7 +5,6 @@
 #include <cutlass/cutlass.h>
 #include <cutlass/numeric_types.h>
 
-#include "utils.h"
 #include "kernel/element_binary.h"
 #include "kernel/element_unary.h"
-
+#include "utils.h"

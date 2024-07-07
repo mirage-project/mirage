@@ -731,12 +731,13 @@ bool KNCustomizedOp::fingerprint(void) {
                                                dmm->div_q_lookup_table_offset);
   compute_customizedop_fingerprint<<<bgraph.grid_dim,
                                      bgraph.block_dim,
-                                     bgraph.smem_offset>>>(new_params,
-                                                           bgraph.forloop_range,
-                                                           dmm->fp_base_ptr[gpu_id],
-                                                           exp_lookup_table,
-                                                           div_p_lookup_table,
-                                                           div_q_lookup_table);
+                                     bgraph.smem_offset>>>(
+      new_params,
+      bgraph.forloop_range,
+      dmm->fp_base_ptr[gpu_id],
+      exp_lookup_table,
+      div_p_lookup_table,
+      div_q_lookup_table);
   checkCUDA(cudaDeviceSynchronize());
   return true;
 }
