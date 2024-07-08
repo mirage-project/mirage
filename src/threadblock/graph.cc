@@ -556,6 +556,18 @@ KernelParams Graph::get_kernel_params() {
   return params;
 }
 
+int Graph::get_smem_size_with_pipeline() const {
+  int ret = smem_offset;
+  // For pipelining, we use double buffers for all input loaders
+  for (size_t i = 0; i < operators.size(); i++) {
+    if (operators[i]->op_type == mirage::type::TB_INPUT_OP) {
+      STensor stensor = operators[i]->output_tensors[0];
+      ret += stensor.size();
+    }
+  }
+  return ret;
+}
+
 Graph::operator json() const {
   json j = {{"graph_level", "thread_block_graph"},
             {"grid_dim", grid_dim},

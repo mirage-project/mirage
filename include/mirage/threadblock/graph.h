@@ -106,6 +106,8 @@ public:
   KernelParams get_kernel_params();
   NewKernelParams get_new_kernel_params(bool fingerprint) const;
 
+  int get_smem_size_with_pipeline() const;
+
   operator json() const;
   ExecutionPlan get_plan() const;
 
