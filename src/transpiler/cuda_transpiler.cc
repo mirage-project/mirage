@@ -31,26 +31,87 @@
 namespace mirage {
 namespace transpiler {
 
-std::string CudaTranspiler::generate_header_code(std::string indent) {
-  std::stringstream ss;
-  ss << indent << "#include<cuda.h>\n";
-  ss << indent << "#include<sstream>\n";
-  ss << indent << "#include \"cutlass/cutlass.h\"\n";
-  ss << indent << "#include \"cutlass/fast_math.h\"\n";
-  ss << indent << "#include \"cutlass/matrix_coord.h\"\n";
-  ss << indent << "#include \"cutlass/arch/memory_sm80.h\"\n";
-  ss << "\n";
-  ss << "#define checkCUDA(status)                         \\\n";
-  ss << "do {                                              \\\n";
-  ss << "  std::stringstream _error;                       \\\n";
-  ss << "  if (status != 0) {                              \\\n";
-  ss << "    std::cerr << \"Cuda failure: \" << status;      \\\n";
-  ss << "    exit(1);                                      \\\n";
-  ss << "  }                                               \\\n";
-  ss << "} while (0)\n";
-  ss << "\n";
+// We need to specialize the to_string function for char* type, so we have
+// my_to_string function here
+template <typename T>
+static std::string my_to_string(T const &value) {
+  return std::to_string(value);
+}
 
-  return ss.str();
+template <>
+[[maybe_unused]] std::string my_to_string(char const *const &value) {
+  return value;
+}
+
+template <>
+[[maybe_unused]] std::string my_to_string(std::string const &value) {
+  return value;
+}
+
+// A function that takes a template string and a list of elements
+// It replaces each marker in the template string with the corresponding element
+// and returns the resulting string. We can use this to generate code elegantly
+template <typename... Args>
+static std::string fmt(std::string const &fmt_str, Args... args) {
+  std::string result = fmt_str;
+  int num_args = sizeof...(args);
+  int num_markers = std::count(result.begin(), result.end(), '$');
+  if (num_args != num_markers) {
+    std::cerr << "Error encountered during transpiling.";
+    std::cerr << "The number of arguments does not match the number of markers "
+                 "in the template string.";
+    std::cerr << "fmt_str: " << fmt_str << std::endl;
+    std::cerr << "args: ";
+    ((std::cerr << args << " "), ...);
+    std::cerr << std::endl;
+    std::cerr << "num_args: " << num_args << std::endl;
+    std::cerr << "num_markers: " << num_markers << std::endl;
+    exit(1);
+  }
+  (result.replace(result.find("$"), 1, my_to_string(args)), ...);
+  return result;
+}
+
+// A helper class for keeping all generated code, and provide some utility
+// functions
+class CodeKeeper {
+private:
+  std::vector<std::string> lines;
+
+public:
+  // Emit a new line
+  template <typename... Args>
+  void e(std::string const &fmt_str, Args... args) {
+    lines.push_back(fmt(fmt_str, args...));
+  }
+
+  // Emit a new line
+  void operator<<(std::string const &line) {
+    lines.push_back(line);
+  }
+
+  // Merge two CodeKeeper objects
+  friend void operator<<(CodeKeeper &target, CodeKeeper const &source) {
+    for (auto const &line : source.lines) {
+      target.lines.push_back(line);
+    }
+  }
+
+  // Return the generated code as a string
+  std::string to_string() const {
+    std::string result;
+    for (auto const &line : lines) {
+      result += line + "\n";
+    }
+    return result;
+  }
+};
+
+std::string CudaTranspiler::generate_header_code(std::string indent) {
+  CodeKeeper ck;
+  ck.e("#define USE_NVSHMEM $", use_nvshmem);
+  ck.e("#include \"runtime.h\"");
+  return ck.to_string();
 }
 
 std::string gen_cuda_block_offset_calculation(int off_x,
@@ -198,64 +259,58 @@ void CudaTranspiler::gen_cuda_code_input_loader(std::string dtensor_name,
       << ind << "      \"n\"(16),\n"
       << ind << "      \"r\"(16));\n";
   input_loader_func << ind << "} // end of for-loop\n";
-
-  // input_loader_func << ind << "mirage::threadblock::GenericInputLoader
-  // loader(\n"
-  //      << ind << "    dtensor_ptr,\n"
-  //      << ind << "    stensor_ptr,\n"
-  //      << ind << "    dtensor_matrix_shape,\n"
-  //      << ind << "    stensor_matrix_shape,\n"
-  //      << ind << "    dtensor_layout,\n"
-  //      << ind << "    stensor_layout,\n"
-  //      << ind << "    threadIdx.x,\n"
-  //      << ind << "    blockDim.x,\n"
-  //      << ind << "    matrix_offset,\n"
-  //      << ind << "    global_offset);\n";
 }
 
 void CudaTranspiler::gen_cuda_code_output_saver(std::string dtensor_name,
                                                 std::string ind) {
   int3 output_matrix_row_offset_block_stride;
   int3 output_matrix_column_offset_block_stride;
+  int output_matrix_row_offset_forloop_stride;
+  int output_matrix_column_offset_forloop_stride;
   int3 global_offset_block_stride;
+  int global_offset_forloop_stride;
   int2 dtensor_matrix_shape, stensor_matrix_shape;
   int input_smem_offset, accum_smem_offset;
   mirage::layout::DmemLayout dtensor_layout;
   mirage::layout::SmemLayout stensor_layout;
+  mirage::type::TBEpilogueType epilogue;
   mirage::threadblock::deserialize_output_saver_parameters(
       params.parameters,
       param_idx,
       output_matrix_row_offset_block_stride,
       output_matrix_column_offset_block_stride,
+      output_matrix_row_offset_forloop_stride,
+      output_matrix_column_offset_forloop_stride,
       global_offset_block_stride,
+      global_offset_forloop_stride,
       dtensor_matrix_shape,
       stensor_matrix_shape,
       dtensor_layout,
       stensor_layout,
       input_smem_offset,
-      accum_smem_offset);
-  ending << ind << "int tb_offset_row = "
-         << gen_cuda_block_offset_calculation(
-                output_matrix_row_offset_block_stride.x,
-                output_matrix_row_offset_block_stride.y,
-                output_matrix_row_offset_block_stride.z)
-         << ";\n";
-  ending << ind << "int tb_offset_column = "
-         << gen_cuda_block_offset_calculation(
-                output_matrix_column_offset_block_stride.x,
-                output_matrix_column_offset_block_stride.y,
-                output_matrix_column_offset_block_stride.z)
-         << ";\n";
-  ending << ind << "int global_offset = "
-         << gen_cuda_block_offset_calculation(global_offset_block_stride.x,
-                                              global_offset_block_stride.y,
-                                              global_offset_block_stride.z)
-         << ";\n";
-  // ending << ind << "cutlass::MatrixCoord matrix_offset"
-  //        << " = {tb_offset_row, tb_offset_column};\n";
-  ending << ind << "cutlass::half_t *stensor_ptr =\n"
-         << ind << "    (cutlass::half_t*)(smem_buffer + " << input_smem_offset
-         << ");\n";
+      accum_smem_offset,
+      epilogue);
+  std::stringstream code;
+  code << ind << "int tb_offset_row = "
+       << gen_cuda_block_offset_calculation(
+              output_matrix_row_offset_block_stride.x,
+              output_matrix_row_offset_block_stride.y,
+              output_matrix_row_offset_block_stride.z)
+       << ";\n";
+  code << ind << "int tb_offset_column = "
+       << gen_cuda_block_offset_calculation(
+              output_matrix_column_offset_block_stride.x,
+              output_matrix_column_offset_block_stride.y,
+              output_matrix_column_offset_block_stride.z)
+       << ";\n";
+  code << ind << "int global_offset = "
+       << gen_cuda_block_offset_calculation(global_offset_block_stride.x,
+                                            global_offset_block_stride.y,
+                                            global_offset_block_stride.z)
+       << ";\n";
+  code << ind << "cutlass::half_t *stensor_ptr =\n"
+       << ind << "    (cutlass::half_t*)(smem_buffer + " << input_smem_offset
+       << ");\n";
   int kRow = stensor_matrix_shape.x;
   int kColumn = stensor_matrix_shape.y;
   printf("stensor_matrix(%d %d) dtensor_matrix(%d %d)\n",
@@ -263,33 +318,42 @@ void CudaTranspiler::gen_cuda_code_output_saver(std::string dtensor_name,
          kColumn,
          dtensor_matrix_shape.x,
          dtensor_matrix_shape.y);
-  ending << ind << "int base_offset = global_offset + tb_offset_row * "
-         << dtensor_matrix_shape.y << " + tb_offset_column;\n";
+  code << ind << "int base_offset = global_offset + tb_offset_row * "
+       << dtensor_matrix_shape.y << " + tb_offset_column;\n";
 
   // FIXME: currently assume a row-major layout for both stensor and dtensor
-  ending << ind << "cutlass::half_t *dtensor_ptr = " << dtensor_name
-         << " + base_offset;\n";
+  code << ind << "cutlass::half_t *dtensor_ptr = " << dtensor_name
+       << " + base_offset;\n";
   // Currently assume that kColumn can divide blockDim.x
   assert(128 % kColumn == 0);
   int num_rows_per_iter = 128 / kColumn;
-  ending << ind << "int _col = threadIdx.x % " << kColumn << ";\n";
-  ending << ind << "for (int _row = threadIdx.x / " << num_rows_per_iter
-         << "; _row < " << kRow << "; _row += " << num_rows_per_iter << ") {\n";
-  ending << ind << "  dtensor_ptr[_row * " << dtensor_matrix_shape.y
-         << " + _col"
-         << "] = stensor_ptr[_row * " << kColumn << " + _col];\n";
-  ending << ind << "} // end of for-loop\n";
-  // ending << ind << "mirage::threadblock::GenericOutputSaver saver(\n"
-  //        << ind << "    dtensor_ptr,\n"
-  //        << ind << "    stensor_ptr,\n"
-  //        << ind << "    dtensor_matrix_shape,\n"
-  //        << ind << "    stensor_matrix_shape,\n"
-  //        << ind << "    dtensor_layout,\n"
-  //        << ind << "    stensor_layout,\n"
-  //        << ind << "    threadIdx.x,\n"
-  //        << ind << "    blockDim.x,\n"
-  //        << ind << "    matrix_offset,\n"
-  //        << ind << "    global_offset);\n";
+  code << ind << "int _col = threadIdx.x % " << kColumn << ";\n";
+  code << ind << "for (int _row = threadIdx.x / " << num_rows_per_iter
+       << "; _row < " << kRow << "; _row += " << num_rows_per_iter << ") {\n";
+  code << ind << "  dtensor_ptr[_row * " << dtensor_matrix_shape.y << " + _col"
+       << "] = stensor_ptr[_row * " << kColumn << " + _col];\n";
+  code << ind << "} // end of for-loop\n";
+  // We generate a nvshmem collective communication operator
+  if (use_nvshmem) {
+    switch (epilogue) {
+      case mirage::type::TB_EPILOGUE_NONE: {
+        // do nothing when epilogue is none
+        break;
+      }
+      case mirage::type::TB_EPILOGUE_ALLREDUCE: {
+        code << ind << "nvshmemx_int16_sum_reduce_block(\n"
+             << ind << "    NVSHMEM_TEAM_WORLD,\n"
+             << ind << "    dtensor_ptr,\n"
+             << ind << "    dtensor_ptr,\n"
+             << ind << "    " << kRow * kColumn << ");\n";
+        break;
+      }
+      default: {
+        assert(false && "Unsupported epilogue");
+      }
+    }
+  }
+  ending << code.str();
 }
 
 void CudaTranspiler::gen_cuda_code_matmul_op(std::string ind) {
@@ -536,7 +600,7 @@ std::string CudaTranspiler::generate_kernel_code(
   return input_loader_func.str() + header.str() + main.str() + ending.str();
 }
 
-CudaTranspiler::CudaTranspiler() {}
+CudaTranspiler::CudaTranspiler(bool _nvshmem) : use_nvshmem(_nvshmem) {}
 
 }; // namespace transpiler
 }; // namespace mirage
@@ -546,122 +610,197 @@ namespace kernel {
 
 void Graph::generate_cuda_program(char const *file_path) {
   using namespace std;
+  using mirage::transpiler::CodeKeeper;
+  using mirage::transpiler::fmt;
+
   vector<string> kernels;
-  mirage::transpiler::CudaTranspiler ct;
-  stringstream main;
-  main << "int main() {\n";
-  assert(gpu_dim.y == 1);
-  assert(gpu_dim.z == 1);
-  main << "  char * gpu_base_ptrs[" << mirage::config::MAX_NUM_GPUS << "];\n";
-  main << "  for (int i = 0; i < " << gpu_dim.x << "; i++) {\n";
-  main << "    checkCUDA(cudaSetDevice(i));\n";
-  main << "    checkCUDA(cudaMalloc(&gpu_base_ptrs[i], "
-       << mirage::config::MAX_DMEM_SIZE << "));\n";
-  main << "  } // end of for-loop\n";
-  stringstream executer;
-  executer << "void mugraph_executer(char *gpu_base_ptr) {\n";
+  bool use_nvshmem = (gpu_dim.x > 1 || gpu_dim.y > 1 || gpu_dim.z > 1);
+  mirage::transpiler::CudaTranspiler ct(use_nvshmem);
+
+  CodeKeeper kernel_init; // e.g. cudaFuncSetAttribute
+  CodeKeeper executor;
+  executor.e("void mugraph_executor(char *gpu_base_ptr) {");
   for (KNOperator *const op : this->operators) {
-    switch (op->op_type) {
-      case type::KNOperatorType::KN_INPUT_OP: {
-        assert(op->output_tensors.size() == 1);
-        break;
+    if (op->op_type == type::KNOperatorType::KN_INPUT_OP) {
+      assert(op->output_tensors.size() == 1);
+
+    } else if (op->op_type == type::KNOperatorType::KN_ADD_OP ||
+               op->op_type == type::KNOperatorType::KN_MUL_OP ||
+               op->op_type == type::KNOperatorType::KN_DIV_OP) {
+      assert(op->input_tensors.size() == 2);
+      assert(op->output_tensors.size() == 1);
+      string output_ptr = fmt("dtensor$", op->output_tensors[0].guid);
+      string input1_ptr = fmt("dtensor$", op->input_tensors[0].guid);
+      string input2_ptr = fmt("dtensor$", op->input_tensors[1].guid);
+      size_t numel = op->output_tensors[0].num_elements();
+      string kernel_name =
+          op->op_type == type::KNOperatorType::KN_ADD_OP   ? "ElementAddKernel"
+          : op->op_type == type::KNOperatorType::KN_MUL_OP ? "ElementMulKernel"
+          : op->op_type == type::KNOperatorType::KN_DIV_OP
+              ? "ElementDivKernel"
+              : "UnknownElementwiseKernel";
+      executor.e("  {");
+      executor.e(
+          "    cutlass::half_t *$ = (cutlass::half_t*)(gpu_base_ptr + $);",
+          output_ptr,
+          op->output_tensors[0].data_offset);
+      executor.e(
+          "    cutlass::half_t *$ = (cutlass::half_t*)(gpu_base_ptr + $);",
+          input1_ptr,
+          op->input_tensors[0].data_offset);
+      executor.e(
+          "    cutlass::half_t *$ = (cutlass::half_t*)(gpu_base_ptr + $);",
+          input2_ptr,
+          op->input_tensors[1].data_offset);
+      executor.e("    $<cutlass::half_t>::run($, $, $, $);",
+                 kernel_name,
+                 output_ptr,
+                 input1_ptr,
+                 input2_ptr,
+                 numel);
+      executor.e("  }");
+
+    } else if (op->op_type == type::KNOperatorType::KN_EXP_OP) {
+      assert(op->input_tensors.size() == 1);
+      assert(op->output_tensors.size() == 1);
+      string output_ptr = fmt("dtensor$", op->output_tensors[0].guid);
+      string input_ptr = fmt("dtensor$", op->input_tensors[0].guid);
+      size_t numel = op->output_tensors[0].num_elements();
+      executor.e("  {");
+      executor.e(
+          "    cutlass::half_t *$ = (cutlass::half_t*)(gpu_base_ptr + $);",
+          output_ptr,
+          op->output_tensors[0].data_offset);
+      executor.e(
+          "    cutlass::half_t *$ = (cutlass::half_t*)(gpu_base_ptr + $);",
+          input_ptr,
+          op->input_tensors[0].data_offset);
+      executor.e("    ElementExpKernel<cutlass::half_t>::run($, $, $);",
+                 output_ptr,
+                 input_ptr,
+                 numel);
+      executor.e("  }");
+
+    } else if (op->op_type == type::KNOperatorType::KN_CUSTOMIZED_OP) {
+      KNCustomizedOp const *customized =
+          static_cast<KNCustomizedOp const *>(op);
+      mirage::threadblock::NewKernelParams params =
+          customized->bgraph.get_new_kernel_params(false /*fingerprint*/);
+      string kernel_name = "graphdef_kernel_" + to_string(kernels.size());
+      vector<string> input_names;
+      vector<string> output_names;
+      for (auto const &t : op->input_tensors) {
+        input_names.push_back("dtensor" + to_string(t.guid));
       }
-      case type::KNOperatorType::KN_CUSTOMIZED_OP: {
-        KNCustomizedOp const *customized =
-            static_cast<KNCustomizedOp const *>(op);
-        mirage::threadblock::NewKernelParams params =
-            customized->bgraph.get_new_kernel_params(false /*fingerprint*/);
-        vector<string> input_names;
-        vector<string> output_names;
-        for (auto const &t : op->input_tensors) {
-          input_names.push_back("dtensor" + to_string(t.guid));
-        }
-        for (auto const &t : op->output_tensors) {
-          output_names.push_back("dtensor" + to_string(t.guid));
-        }
-        string kernel_name = "graphdef_kernel_" + to_string(kernels.size());
-        string kernel_code = ct.generate_kernel_code(params,
-                                                     &(customized->bgraph),
-                                                     kernel_name,
-                                                     input_names,
-                                                     output_names,
-                                                     "  " /*indent*/);
-        kernels.push_back(kernel_code);
-        int smem_size = customized->bgraph.get_smem_size_with_pipeline();
-        if (smem_size > 48 * 1024) {
-          main << "  checkCUDA(cudaFuncSetAttribute(\n"
-               << "      " << kernel_name << ",\n"
-               << "      cudaFuncAttributeMaxDynamicSharedMemorySize,\n"
-               << "      " << smem_size << "));\n";
-        }
-        executer << "  // launcher kernel: " << kernel_name << "\n  {\n";
-        for (auto const &t : op->input_tensors) {
-          executer << "    cutlass::half_t *dtensor" << t.guid << " =\n"
-                   << "        (cutlass::half_t*)(gpu_base_ptr + "
-                   << t.data_offset << ");\n";
-        }
-        for (auto const &t : op->output_tensors) {
-          executer << "    cutlass::half_t *dtensor" << t.guid << " =\n"
-                   << "        (cutlass::half_t*)(gpu_base_ptr + "
-                   << t.data_offset << ");\n";
-        }
-        executer << "    dim3 grid_dim = {" << customized->bgraph.grid_dim.x
-                 << ", " << customized->bgraph.grid_dim.y << ", "
-                 << customized->bgraph.grid_dim.z << "};\n";
-        executer << "    dim3 block_dim = {" << customized->bgraph.block_dim.x
-                 << ", " << customized->bgraph.block_dim.y << ", "
-                 << customized->bgraph.block_dim.z << "};\n";
-        executer << "    " << kernel_name << "<<<";
-        executer << "grid_dim, block_dim, " << smem_size << ">>>(\n        ";
-        for (size_t i = 0; i < input_names.size(); i++) {
-          if (i > 0) {
-            executer << ", ";
-          }
-          executer << input_names[i];
-        }
-        for (size_t i = 0; i < output_names.size(); i++) {
-          executer << ", ";
-          executer << output_names[i];
-        }
-        executer << ");\n";
-        executer << "  }\n";
-        break;
+      for (auto const &t : op->output_tensors) {
+        output_names.push_back("dtensor" + to_string(t.guid));
       }
-      default: {
-        assert(false && "Cannot generate CUDA operator for this operator");
+      string kernel_code = ct.generate_kernel_code(params,
+                                                   &(customized->bgraph),
+                                                   kernel_name,
+                                                   input_names,
+                                                   output_names,
+                                                   "  " /*indent*/);
+      kernels.push_back(kernel_code);
+      int smem_size = customized->bgraph.get_smem_size_with_pipeline();
+      if (smem_size > 48 * 1024) {
+        kernel_init.e("  CHECK_CUDA(cudaFuncSetAttribute($, "
+                      "cudaFuncAttributeMaxDynamicSharedMemorySize, $)",
+                      kernel_name,
+                      smem_size);
       }
+      executor.e("  // launching kernel: $", kernel_name);
+      executor.e("  {");
+      for (auto const &t : op->input_tensors) {
+        executor.e("    cutlass::half_t *dtensor$ = "
+                   "(cutlass::half_t*)(gpu_base_ptr + $);",
+                   t.guid,
+                   t.data_offset);
+      }
+      for (auto const &t : op->output_tensors) {
+        executor.e("    cutlass::half_t *dtensor$ = "
+                   "(cutlass::half_t*)(gpu_base_ptr + $);",
+                   t.guid,
+                   t.data_offset);
+      }
+      executor.e("    dim3 grid_dim = {$, $, $}",
+                 customized->bgraph.grid_dim.x,
+                 customized->bgraph.grid_dim.y,
+                 customized->bgraph.grid_dim.z);
+      executor.e("    dim3 block_dim = {$, $, $}",
+                 customized->bgraph.block_dim.x,
+                 customized->bgraph.block_dim.y,
+                 customized->bgraph.block_dim.z);
+      executor.e("    $<<<grid_dim, block_dim, $>>>(", kernel_name, smem_size);
+      string input_names_line = "";
+      for (auto const &t : op->input_tensors) {
+        if (!input_names_line.empty()) {
+          input_names_line += ", ";
+        }
+        input_names_line += fmt("dtensor$", t.guid);
+      }
+      string output_names_line = "";
+      for (auto const &t : op->output_tensors) {
+        if (!output_names_line.empty() || !input_names_line.empty()) {
+          output_names_line += ", ";
+        }
+        output_names_line += fmt("dtensor$", t.guid);
+      }
+      executor.e("      $", input_names_line);
+      executor.e("      $", output_names_line);
+      executor.e("    );");
+      executor.e("  }");
+
+    } else {
+      assert(false && ("Cannot generate CUDA operator for this operator: " +
+                       to_string(int(op->op_type)))
+                          .c_str());
     }
   }
+  executor.e("} // end of mugraph_executer");
 
-  // Launch kernels for profiling runtime
+  CodeKeeper main;
+  main.e("int main() {");
+  assert(gpu_dim.y == 1);
+  assert(gpu_dim.z == 1);
+  main.e("  char *gpu_base_ptrs[$];", mirage::config::MAX_NUM_GPUS);
+  main.e("  for (int i = 0; i < $; i++) {", gpu_dim.x);
+  main.e("    CHECK_CUDA(cudaSetDevice(i));");
+  if (use_nvshmem) {
+    main.e("    gpu_base_ptrs[i] = nvshmem_malloc($);",
+           mirage::config::MAX_DMEM_DATA_SIZE);
+  } else {
+    main.e("    CHECK_CUDA(cudaMalloc(&gpu_base_ptrs[i], $));",
+           mirage::config::MAX_DMEM_DATA_SIZE);
+  }
+  main.e("  }");
 
-  main << "  checkCUDA(cudaDeviceSynchronize());\n";
-  main << "  cudaEvent_t events[2];\n";
-  main << "  checkCUDA(cudaEventCreate(&events[0]));\n";
-  main << "  checkCUDA(cudaEventCreate(&events[1]));\n";
-  main << "  for (int i = 0; i < 1024; i++) {\n";
-  main << "    mugraph_executer(gpu_base_ptrs[0]);\n";
-  main << "  }\n";
-  main << "  checkCUDA(cudaEventRecord(events[0]));\n";
-  main << "  for (int i = 0; i < 1024; i++) {\n";
-  main << "    mugraph_executer(gpu_base_ptrs[0]);\n";
-  main << "  }\n";
-  main << "  checkCUDA(cudaEventRecord(events[1]));\n";
-  main << "  checkCUDA(cudaEventSynchronize(events[1]));\n";
-  main << "  float runtime_ms;\n";
-  main << "  cudaEventElapsedTime(&runtime_ms, events[0], events[1]);\n";
-  main << "  printf(\"Runtime = \%.8lfms\\n\", runtime_ms / 1024);\n";
-  main << "}\n";
-  executer << "} // end of mugraph_executer\n";
+  main.e("  CHECK_CUDA(cudaDeviceSynchronize());");
+  main.e("  cudaEvent_t events[2];");
+  main.e("  CHECK_CUDA(cudaEventCreate(&events[0]));");
+  main.e("  CHECK_CUDA(cudaEventCreate(&events[1]));");
+  main.e("  for (int i = 0; i < 1024; i++) {");
+  main.e("    mugraph_executor(gpu_base_ptrs[0]);");
+  main.e("  }");
+  main.e("  CHECK_CUDA(cudaEventRecord(events[0]));");
+  main.e("  for (int i = 0; i < 1024; i++) {");
+  main.e("    mugraph_executor(gpu_base_ptrs[0]);");
+  main.e("  }");
+  main.e("  CHECK_CUDA(cudaEventRecord(events[1]));");
+  main.e("  CHECK_CUDA(cudaEventSynchronize(events[1]));");
+  main.e("  float runtime_ms;");
+  main.e("  cudaEventElapsedTime(&runtime_ms, events[0], events[1]);");
+  main.e("  printf(\"Mugraph runtime = %.8lfms\\n\", runtime_ms / 1024);");
+  main.e("}");
 
   // Write profiling code for main program
   ofstream file(file_path);
-  file << ct.generate_header_code("");
+  file << ct.generate_header_code("") << "\n";
   for (auto const &k : kernels) {
     file << k << "\n";
   }
-  file << executer.str() << "\n";
-  file << main.str();
+  file << executor.to_string() << "\n";
+  file << main.to_string();
   file.close();
 }
 

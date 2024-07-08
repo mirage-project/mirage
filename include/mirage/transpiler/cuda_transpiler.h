@@ -25,7 +25,7 @@ namespace transpiler {
 
 class CudaTranspiler {
 public:
-  CudaTranspiler();
+  CudaTranspiler(bool nvshmem);
   void define_stensor_from_offset(
       std::stringstream &ss,
       int offset,
@@ -51,6 +51,7 @@ public:
   mirage::threadblock::NewKernelParams params;
   mirage::threadblock::Graph const *bgraph;
   int param_idx, op;
+  bool use_nvshmem;
   std::stringstream input_loader_func;
   std::stringstream output_saver_func;
   std::stringstream header;

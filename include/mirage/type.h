@@ -123,7 +123,15 @@ enum ActivationType {
   ACT_EXP = 3001,
   ACT_RELU = 3002,
   ACT_GELU = 3003,
-  ACT_NONE = 3100
+  ACT_NONE = 3099,
 };
+
+enum TBEpilogueType {
+  TB_EPILOGUE_NONE = 3100,
+  TB_EPILOGUE_ALLREDUCE = 3101,
+  TB_EPILOGUE_ALLTOALL = 3102,
+  TB_EPILOGUE_INVALID = 3199,
+};
+
 } // namespace type
 } // namespace mirage

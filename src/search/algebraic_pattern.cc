@@ -106,9 +106,7 @@ bool AlgebraicPattern::subpattern_to(AlgebraicPattern const &other) const {
   s.add(!subpattern(pattern1, pattern2));
 
   bool result = s.check() == z3::unsat;
-  {
-    cached_results[str_pair] = result;
-  }
+  { cached_results[str_pair] = result; }
   return result;
 }
 
