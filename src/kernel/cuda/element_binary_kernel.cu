@@ -182,7 +182,6 @@ __global__ void
 bool KNElementBinaryOp::fingerprint(void) {
   // Assert a single GPU
   assert(kgraph->gpu_dim.x == 1);
-  int gpu_id = 0;
 
   assert(input_tensors[0].num_dims == output_tensors[0].num_dims);
   for (int i = 0; i < output_tensors[0].num_dims; i++) {
@@ -202,18 +201,11 @@ bool KNElementBinaryOp::fingerprint(void) {
       (num_elements + num_threads_per_blk - 1) / num_threads_per_blk;
   mirage::kernel::DeviceMemoryManager *dmm =
       mirage::kernel::DeviceMemoryManager::get_instance();
-  char *alloc_base_ptr = dmm->alloc_base_ptr[gpu_id];
-  mirage::type::FPType *div_p_lookup_table =
-      reinterpret_cast<mirage::type::FPType *>(alloc_base_ptr +
-                                               dmm->div_p_lookup_table_offset);
-  mirage::type::FPType *div_q_lookup_table =
-      reinterpret_cast<mirage::type::FPType *>(alloc_base_ptr +
-                                               dmm->div_q_lookup_table_offset);
   compute_elementbinary_fingerprint<<<num_blocks, num_threads_per_blk>>>(
       op_type,
       dmm->fp_base_ptr[0],
-      div_p_lookup_table,
-      div_q_lookup_table,
+      dmm->div_p_lookup_table,
+      dmm->div_q_lookup_table,
       input_tensors[0],
       input_tensors[1],
       output_tensors[0],

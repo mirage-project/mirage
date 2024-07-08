@@ -719,25 +719,15 @@ bool KNCustomizedOp::fingerprint(void) {
                                    bgraph.smem_offset));
   }
 
-  char *alloc_base_ptr = dmm->alloc_base_ptr[gpu_id];
-  mirage::type::FPType *exp_lookup_table =
-      reinterpret_cast<mirage::type::FPType *>(alloc_base_ptr +
-                                               dmm->exp_lookup_table_offset);
-  mirage::type::FPType *div_p_lookup_table =
-      reinterpret_cast<mirage::type::FPType *>(alloc_base_ptr +
-                                               dmm->div_p_lookup_table_offset);
-  mirage::type::FPType *div_q_lookup_table =
-      reinterpret_cast<mirage::type::FPType *>(alloc_base_ptr +
-                                               dmm->div_q_lookup_table_offset);
   compute_customizedop_fingerprint<<<bgraph.grid_dim,
                                      bgraph.block_dim,
                                      bgraph.smem_offset>>>(
       new_params,
       bgraph.forloop_range,
       dmm->fp_base_ptr[gpu_id],
-      exp_lookup_table,
-      div_p_lookup_table,
-      div_q_lookup_table);
+      dmm->exp_lookup_table,
+      dmm->div_p_lookup_table,
+      dmm->div_q_lookup_table);
   checkCUDA(cudaDeviceSynchronize());
   return true;
 }

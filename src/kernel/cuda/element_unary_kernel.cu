@@ -114,11 +114,12 @@ bool KNElementUnaryOp::fingerprint(void) {
   mirage::type::FPType *output_fp_ptr =
       reinterpret_cast<mirage::type::FPType *>(dmm->fp_base_ptr[0] +
                                                output_tensors[0].fp_offset);
-  mirage::type::FPType *exp_lookup_table =
-      reinterpret_cast<mirage::type::FPType *>(dmm->alloc_base_ptr[0] +
-                                               dmm->exp_lookup_table_offset);
   compute_elementunary_fingerprint<<<num_blocks, num_threads_per_blk>>>(
-      op_type, exp_lookup_table, input_fp_ptr, output_fp_ptr, num_elements);
+      op_type,
+      dmm->exp_lookup_table,
+      input_fp_ptr,
+      output_fp_ptr,
+      num_elements);
   checkCUDA(cudaDeviceSynchronize());
   return true;
 }
