@@ -707,9 +707,10 @@ bool KNCustomizedOp::fingerprint(void) {
   // mirage::threadblock::KernelParams params = bgraph.get_kernel_params();
   mirage::threadblock::NewKernelParams new_params =
       bgraph.get_new_kernel_params(true /*fingerprint_kernel*/);
-  // assume a single GPU
-  assert(kgraph->gpu_dim.x == 1);
-  int gpu_id = 0;
+  // assume that we only parallelize along the x dimension
+  assert(kgraph->gpu_dim.y == 1);
+  assert(kgraph->gpu_dim.z == 1);
+  
   assert(bgraph.smem_offset <= max_smem_size);
   mirage::kernel::DeviceMemoryManager *dmm =
       mirage::kernel::DeviceMemoryManager::get_instance();
@@ -719,15 +720,17 @@ bool KNCustomizedOp::fingerprint(void) {
                                    bgraph.smem_offset));
   }
 
-  compute_customizedop_fingerprint<<<bgraph.grid_dim,
-                                     bgraph.block_dim,
-                                     bgraph.smem_offset>>>(
-      new_params,
-      bgraph.forloop_range,
-      dmm->fp_base_ptr[gpu_id],
-      dmm->exp_lookup_table,
-      dmm->div_p_lookup_table,
-      dmm->div_q_lookup_table);
+  for (int gpu_id = 0; gpu_id < kgraph->gpu_dim.x; gpu_id++) {
+    compute_customizedop_fingerprint<<<bgraph.grid_dim,
+                                       bgraph.block_dim,
+                                       bgraph.smem_offset>>>(
+        new_params,
+        bgraph.forloop_range,
+        dmm->fp_base_ptr[gpu_id],
+        dmm->exp_lookup_table,
+        dmm->div_p_lookup_table,
+        dmm->div_q_lookup_table);
+  }
   checkCUDA(cudaDeviceSynchronize());
   return true;
 }

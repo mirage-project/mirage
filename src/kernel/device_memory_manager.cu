@@ -97,7 +97,7 @@ DeviceMemoryManager::DeviceMemoryManager(int _num_gpus) : num_gpus(_num_gpus) {
     if (i == 0) {
       for (int k = 0; k < num_gpus; k++) {
         checkCUDA(
-            cudaMalloc(&fp_base_ptr[i], mirage::config::MAX_DMEM_FP_SIZE));
+            cudaMalloc(&fp_base_ptr[k], mirage::config::MAX_DMEM_FP_SIZE));
       }
     }
   }
@@ -168,7 +168,9 @@ bool DeviceMemoryManager::free(DTensor &tensor) {
 
 DeviceMemoryManager *DeviceMemoryManager::get_instance() {
   if (singleton == nullptr) {
-    singleton = new DeviceMemoryManager(1 /*num_gpus*/);
+    int num_gpus;
+    checkCUDA(cudaGetDeviceCount(&num_gpus));
+    singleton = new DeviceMemoryManager(num_gpus /*num_gpus*/);
   }
   return singleton;
 }

@@ -112,9 +112,9 @@ __global__ void compute_reduction_fingerprint(FPType *input_ptr,
 }
 
 bool KNReductionOp::fingerprint(void) {
-  // assert a single GPU
-  assert(kgraph->gpu_dim.x == 1);
-  int gpu_id = 0;
+  // assert a 1-D GPU mesh
+  assert(kgraph->gpu_dim.y == 1);
+  assert(kgraph->gpu_dim.z == 1);
 
   int num_elements = output_tensors[0].num_elements();
   int const num_threads_per_blk = 1024;
@@ -131,20 +131,23 @@ bool KNReductionOp::fingerprint(void) {
   assert(output_stride * reduction_factor == input_stride);
   mirage::kernel::DeviceMemoryManager *dmm =
       mirage::kernel::DeviceMemoryManager::get_instance();
-  mirage::type::FPType *input_fp_ptr = reinterpret_cast<mirage::type::FPType *>(
-      dmm->fp_base_ptr[gpu_id] + input_tensors[0].fp_offset);
-  mirage::type::FPType *output_fp_ptr =
-      reinterpret_cast<mirage::type::FPType *>(dmm->fp_base_ptr[gpu_id] +
-                                               output_tensors[0].fp_offset);
-
-  compute_reduction_fingerprint<<<num_blocks, num_threads_per_blk>>>(
-      input_fp_ptr,
-      output_fp_ptr,
-      num_elements,
-      reduction_factor,
-      input_stride,
-      output_stride);
-  checkCUDA(cudaDeviceSynchronize());
+  // Use GPU 0 for computing fingerprint
+  checkCUDA(cudaSetDevice(0));
+  for (int gpu_id = 0; gpu_id < kgraph->gpu_dim.x; gpu_id ++) {
+    mirage::type::FPType *input_fp_ptr = reinterpret_cast<mirage::type::FPType *>(
+        dmm->fp_base_ptr[gpu_id] + input_tensors[0].fp_offset);
+    mirage::type::FPType *output_fp_ptr =
+        reinterpret_cast<mirage::type::FPType *>(dmm->fp_base_ptr[gpu_id] +
+                                                 output_tensors[0].fp_offset);
+    compute_reduction_fingerprint<<<num_blocks, num_threads_per_blk>>>(
+        input_fp_ptr,
+        output_fp_ptr,
+        num_elements,
+        reduction_factor,
+        input_stride,
+        output_stride);
+    checkCUDA(cudaDeviceSynchronize());
+  }
   return true;
 }
 

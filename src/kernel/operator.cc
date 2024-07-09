@@ -89,8 +89,9 @@ KNOperator *Graph::create_input_op(std::vector<int> const &dims,
 KNInputOp::KNInputOp(Graph *_graph,
                      std::vector<int> const &dims,
                      mirage::type::DataType data_type,
-                     mirage::layout::DmemLayout layout)
-    : KNOperator(_graph, mirage::type::KN_INPUT_OP) {
+                     mirage::layout::DmemLayout layout,
+                     int3 _input_map)
+    : KNOperator(_graph, mirage::type::KN_INPUT_OP), input_map(_input_map) {
   DTensor tensor;
   tensor.num_dims = dims.size();
   for (int i = tensor.num_dims - 1; i >= 0; i--) {

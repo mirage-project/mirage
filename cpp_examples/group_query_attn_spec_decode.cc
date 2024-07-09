@@ -9,7 +9,7 @@ int main(int argc, char **argv) {
   // Currently only optimize for these two batch sizes
   int batch_size = miragetest::BATCH_SIZE;
   assert(batch_size == 1 || batch_size == 8);
-  kernel::Graph ref_graph;
+  kernel::Graph ref_graph({4, 1, 1});
   {
     kernel::DTensor Q = ref_graph.new_input(
         {2 * batch_size, 256, 64}, type::DT_FLOAT16, layout::DmemRowMajor);
@@ -28,15 +28,15 @@ int main(int argc, char **argv) {
     ProfileResult result;
     float total_runtime = 0.0f;
     for (auto const &op : ref_graph.operators) {
-      op->profile(result);
-      total_runtime = total_runtime + result.run_time;
+      //op->profile(result);
+      //total_runtime = total_runtime + result.run_time;
     }
     printf("[cudnn kernel graph] Total runtime = %.4lfms\n", total_runtime);
   }
   mirage::cpu::CTensor ref_fp = ref_graph.operators.back()
                                     ->output_tensors[0]
                                     .copy_fingerprint_to_ctensor();
-  kernel::Graph graph;
+  kernel::Graph graph({4, 1, 1});
   kernel::DTensor Q = graph.new_input(
       {2 * batch_size, 256, 64}, type::DT_FLOAT16, layout::DmemRowMajor);
   kernel::DTensor K = graph.new_input(
@@ -112,8 +112,8 @@ int main(int argc, char **argv) {
   ProfileResult result;
   float total_ms = 0.0f;
   for (auto const &op : graph.operators) {
-    op->profile(result);
-    total_ms = total_ms + result.run_time;
+    //op->profile(result);
+    //total_ms = total_ms + result.run_time;
   }
   printf("[2 Block Graphs] Total runtime = %.4lfms\n", total_ms);
 

@@ -22,8 +22,9 @@ namespace mirage {
 namespace kernel {
 
 mirage::cpu::CTensor DTensor::copy_fingerprint_to_ctensor() const {
-  // Assume a single GPU for now
-  assert(owner_op->kgraph->gpu_dim.x == 1);
+  // Assert a 1-D GPU mesh
+  assert(owner_op->kgraph->gpu_dim.y == 1);
+  assert(owner_op->kgraph->gpu_dim.z == 1);
   mirage::cpu::CTensor ctensor;
   ctensor.data_type = data_type;
   ctensor.layout = mirage::layout::dmemlayout_to_cmemlayout(layout);
@@ -33,14 +34,18 @@ mirage::cpu::CTensor DTensor::copy_fingerprint_to_ctensor() const {
   }
   mirage::kernel::DeviceMemoryManager *dmm =
       mirage::kernel::DeviceMemoryManager::get_instance();
+  // Set device id to 0 when retrieving fingerprints
+  checkCUDA(cudaSetDevice(0));
   // FIXME: memory leakage since we do not free this fingerprint buffer
   // This is ok for now since we only copy the input mugraph's fingerprint
   // to ctensor
-  ctensor.fp_ptr = (mirage::type::FPType *)malloc(fingerprint_size());
-  checkCUDA(cudaMemcpy(ctensor.fp_ptr,
-                       dmm->fp_base_ptr[0] + fp_offset,
-                       fingerprint_size(),
-                       cudaMemcpyDeviceToHost));
+  for (int gpu_id = 0; gpu_id < owner_op->kgraph->gpu_dim.x; gpu_id ++) {
+    ctensor.fp_ptr[gpu_id] = (mirage::type::FPType *)malloc(fingerprint_size());
+    checkCUDA(cudaMemcpy(ctensor.fp_ptr,
+                         dmm->fp_base_ptr[0] + fp_offset,
+                         fingerprint_size(),
+                         cudaMemcpyDeviceToHost));
+  }
   return ctensor;
 }
 
@@ -61,16 +66,23 @@ bool DTensor::has_same_fingerprint(mirage::cpu::CTensor const &ref) const {
   }
   mirage::kernel::DeviceMemoryManager *dmm =
       mirage::kernel::DeviceMemoryManager::get_instance();
+  // Assert a 1-D GPU mesh
+  assert(owner_op->kgraph->gpu_dim.y == 1);
+  assert(owner_op->kgraph->gpu_dim.z == 1);
+  // Set device id to 0 when retrieving fingerprints
+  checkCUDA(cudaSetDevice(0));
   mirage::type::FPType *A = (mirage::type::FPType *)malloc(fingerprint_size());
-  checkCUDA(cudaMemcpy(A,
-                       dmm->fp_base_ptr[0] + fp_offset,
-                       fingerprint_size(),
-                       cudaMemcpyDeviceToHost));
-  int num_elements = (int)this->num_elements();
-  for (int i = 0; i < num_elements; i++) {
-    if (A[i] != ref.fp_ptr[i]) {
-      free(A);
-      return false;
+  for (int gpu_id = 0; gpu_id < owner_op->kgraph->gpu_dim.x; gpu_id ++) {
+    checkCUDA(cudaMemcpy(A,
+                         dmm->fp_base_ptr[gpu_id] + fp_offset,
+                         fingerprint_size(),
+                         cudaMemcpyDeviceToHost));
+    int num_elements = (int)this->num_elements();
+    for (int i = 0; i < num_elements; i++) {
+      if (A[i] != ref.fp_ptr[gpu_id][i]) {
+        free(A);
+        return false;
+      }
     }
   }
   free(A);
