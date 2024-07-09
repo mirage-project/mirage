@@ -20,6 +20,7 @@ int const MAX_NUM_KERNEL_GRAPH_OP = 5;
 int const MAX_NUM_THREADBLOCK = 2;
 int const MAX_NUM_THREADBLOCK_INPUT = 3;
 int const MAX_NUM_THREADBLOCK_OUTPUT = 2;
+int const MAX_SEARCH_THREAD = 64;
 
 struct GeneratorConfig {
   std::vector<type::KNOperatorType> knop_to_explore;

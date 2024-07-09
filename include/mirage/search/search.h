@@ -63,6 +63,7 @@ public:
   KernelGraphGenerator(kernel::Graph const &computation_graph,
                        GeneratorConfig const &config,
                        char const *filename);
+  KernelGraphGenerator(Checkpoint const &checkpoint, char const *filename);
   KernelGraphGenerator(char const *filename);
 
   void generate_kernel_graphs();
@@ -92,6 +93,7 @@ private:
   std::atomic<int> num_total_kernel_graphs;
   std::atomic<int> num_total_random_tests;
   std::atomic<int> num_valid_kernel_graphs;
+  std::atomic<int> num_total_states;
 
   std::mutex fp_mutex;
   std::mutex generated_graphs_mutex;

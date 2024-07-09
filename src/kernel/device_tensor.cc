@@ -35,7 +35,7 @@ DTensor::DTensor() {
   fp_offset = -1000;
 }
 
-int64_t DTensor::next_guid = 1000000;
+std::atomic<int64_t> DTensor::next_guid = 10000000;
 
 } // namespace kernel
 } // namespace mirage
