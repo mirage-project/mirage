@@ -6,10 +6,6 @@
 using namespace mirage;
 
 int main(int argc, char **argv) {
-  int num_thread = 1;
-  if (argc > 1) {
-    num_thread = std::atoi(argv[1]);
-  }
   int batch_size = miragetest::BATCH_SIZE;
   kernel::Graph ref_graph;
   {
@@ -127,7 +123,6 @@ int main(int argc, char **argv) {
       ".json";
   search::KernelGraphGenerator gen(
       ref_graph, config, checkpoint_file_name.data());
-  gen.num_thread = num_thread;
   gen.generate_kernel_graphs();
 
   clock_t et = clock();

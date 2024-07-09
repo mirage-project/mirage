@@ -117,7 +117,7 @@ int main(int argc, char **argv) {
     total_ms = total_ms + result.run_time;
   }
   printf("[2 Block Graphs] Total runtime = %.4lfms\n", total_ms);
-  return 0;
+  // return 0;
 
   clock_t st = clock();
 

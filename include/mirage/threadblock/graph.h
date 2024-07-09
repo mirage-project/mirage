@@ -62,6 +62,7 @@ private:
 public:
   Graph(dim3 grid_dim, dim3 block_dim, int forloop_range, int reduction_dimx);
   Graph(std::vector<kernel::DTensor> const &inputs, ExecutionPlan const &plan);
+  ~Graph();
   // input operator
   STensor new_input(mirage::kernel::DTensor const &dtensor,
                     int3 input_map,

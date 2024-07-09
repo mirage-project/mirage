@@ -35,6 +35,13 @@ Graph::Graph(dim3 _grid_dim,
   assert(reduction_dimx > 0);
 }
 
+Graph::~Graph() {
+  while (!operators.empty()) {
+    delete operators.back();
+    operators.pop_back();
+  }
+}
+
 Graph::Graph(std::vector<kernel::DTensor> const &_inputs,
              ExecutionPlan const &plan)
     : grid_dim(plan.grid_dim), block_dim(plan.block_dim),

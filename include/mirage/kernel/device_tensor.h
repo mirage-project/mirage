@@ -19,6 +19,7 @@
 #include "mirage/layout.h"
 #include "mirage/type.h"
 #include "mirage/utils/json_utils.h"
+#include <atomic>
 #include <cstddef>
 #include <functional>
 
@@ -129,7 +130,7 @@ public:
   // offset in device memory
   int64_t fp_offset;
 
-  static int64_t next_guid;
+  static std::atomic<int64_t> next_guid;
 };
 
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(

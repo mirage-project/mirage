@@ -115,6 +115,7 @@ int main(int argc, char **argv) {
       ".json";
   search::KernelGraphGenerator gen(
       ref_graph, config, checkpoint_file_name.data());
+  // gen.num_thread = 4;
   gen.generate_kernel_graphs();
 
   clock_t et = clock();
