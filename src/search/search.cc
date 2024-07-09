@@ -4,6 +4,7 @@
 #include "mirage/search/dim_strategy.h"
 #include "mirage/search/op_utils.h"
 #include "mirage/utils/containers.h"
+#include "mirage/utils/json_utils.h"
 
 #include <fstream>
 #include <iostream>
@@ -80,7 +81,8 @@ void to_json(json &j, SearchContext const &c) {
   j["kn_graph"] = json(*c.kn_graph);
   std::vector<std::pair<size_t, size_t>> inputs;
   if (c.tb_graph) {
-    j["tb_plan"] = json(c.tb_graph->get_plan());
+    threadblock::ExecutionPlan plan = c.tb_graph->get_plan();
+    j["tb_plan"] = json(plan);
     for (auto const &op : c.tb_graph->operators) {
       if (op->op_type == type::TBOperatorType::TB_INPUT_OP) {
         for (size_t i = 0; i < c.kn_graph->operators.size(); ++i) {
@@ -90,11 +92,13 @@ void to_json(json &j, SearchContext const &c) {
             if (c.kn_graph->operators[i]->output_tensors[j].guid ==
                 static_cast<threadblock::TBInputOp *>(op)->dtensor.guid) {
               inputs.push_back({i, j});
+              break;
             }
           }
         }
       }
     }
+    assert(plan.input_map.size() == inputs.size());
   }
   j["inputs"] = inputs;
   j["level"] = c.level;
@@ -124,19 +128,28 @@ KernelGraphGenerator::KernelGraphGenerator(
     char const *filename)
     : computation_graph(computation_graph),
       best_profile_result(ProfileResult::infinity()), config(config),
-      dim_strategy(DimStrategy(config)), filename(filename), num_thread(1),
+      dim_strategy(DimStrategy(config)), filename(filename),
+      num_thread(std::min((int)std::thread::hardware_concurrency(),
+                          MAX_SEARCH_THREAD)),
       timeout(1000), num_total_kernel_graphs(0), num_total_random_tests(0),
-      num_valid_kernel_graphs(0) {}
+      num_valid_kernel_graphs(0), num_total_states(0) {}
+
+KernelGraphGenerator::KernelGraphGenerator(Checkpoint const &checkpoint,
+                                           char const *filename)
+    : computation_graph(checkpoint.computation_graph),
+      best_graph(checkpoint.best_graph),
+      best_profile_result(checkpoint.best_profile_result),
+      config(checkpoint.config), dim_strategy(DimStrategy(checkpoint.config)),
+      filename(filename),
+      num_thread(std::min((int)std::thread::hardware_concurrency(),
+                          MAX_SEARCH_THREAD)),
+      timeout(1000), generated_graphs(checkpoint.generated_graphs),
+      num_total_kernel_graphs(checkpoint.num_total_kernel_graphs),
+      num_total_random_tests(checkpoint.num_total_kernel_graphs),
+      num_valid_kernel_graphs(checkpoint.num_valid_kernel_graphs) {}
 
 KernelGraphGenerator::KernelGraphGenerator(char const *filename)
-    : filename(filename) {
-  std::ifstream ifs(filename);
-  json j;
-  ifs >> j;
-  Checkpoint checkpoint;
-  from_json(j, checkpoint);
-  recovery_from_checkpoint(checkpoint);
-}
+    : KernelGraphGenerator(load_json<Checkpoint>(filename), filename) {}
 
 int count_op(type::KNOperatorType op_type, kernel::Graph const &g) {
   int counter = 0;
@@ -240,7 +253,7 @@ std::vector<typename GraphType::TensorType>
 void KernelGraphGenerator::enqueue(SearchContext const &c) {
   std::lock_guard<std::mutex> lock(queue_mutex);
   search_queue.push(c);
-  queue_cv.notify_all();
+  queue_cv.notify_one();
 }
 
 bool KernelGraphGenerator::dequeue(SearchContext &c) {
@@ -255,6 +268,11 @@ bool KernelGraphGenerator::dequeue(SearchContext &c) {
 }
 
 void KernelGraphGenerator::generate_next_operator(SearchContext const &c) {
+  ++num_total_states;
+  if (num_total_states % 10000 == 1) {
+    printf("Total states explored: %d.\n", num_total_states.load());
+    printf("Search queue size: %lu\n", search_queue.size());
+  }
   std::unordered_map<int64_t, std::shared_ptr<AlgebraicPattern>>
       algebraic_pattern;
   pattern_eval(*c.kn_graph, algebraic_pattern);
@@ -493,6 +511,7 @@ bool KernelGraphGenerator::create_tb_outputs(
 }
 
 void KernelGraphGenerator::generate_kernel_graphs() {
+  printf("num_thread: %d\n", num_thread);
   pattern_eval(computation_graph, computation_graph_patterns);
 
   for (auto const &op : computation_graph.operators) {
@@ -517,12 +536,11 @@ void KernelGraphGenerator::generate_kernel_graphs() {
 
   process_outputs();
 
-  int n = num_thread;
   std::vector<std::thread> threads;
-  for (int i = 0; i < n; ++i) {
+  for (int i = 0; i < num_thread; ++i) {
     threads.push_back(std::thread(&KernelGraphGenerator::launch_thread, this));
   }
-  for (int i = 0; i < n; ++i) {
+  for (int i = 0; i < num_thread; ++i) {
     threads[i].join();
   }
 

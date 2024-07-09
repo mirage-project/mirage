@@ -13,7 +13,7 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  clock_t st = clock();
+  auto st = std::chrono::steady_clock::now();
 
   std::unordered_set<int> index_to_skip;
   for (int i = 2; i < argc; ++i) {
@@ -38,10 +38,9 @@ int main(int argc, char **argv) {
     std::cout << "finished graph" << (index++) << std::endl;
   }
 
-  clock_t et = clock();
+  auto et = std::chrono::steady_clock::now();
 
-  std::cout << "running time: " << (double)(et - st) / CLOCKS_PER_SEC << " sec"
-            << std::endl;
+  printf("Search time = %.4lfsec\n", std::chrono::duration<double>(et - st).count());
 
   return 0;
 }

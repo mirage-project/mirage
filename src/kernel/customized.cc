@@ -318,10 +318,10 @@ KNCustomizedOp::KNCustomizedOp(mirage::kernel::Graph *_kgraph,
 }
 
 KNCustomizedOp::~KNCustomizedOp() {
-  while (!bgraph.operators.empty()) {
-    delete bgraph.operators.back();
-    bgraph.operators.pop_back();
-  }
+  // while (!bgraph.operators.empty()) {
+  //   delete bgraph.operators.back();
+  //   bgraph.operators.pop_back();
+  // }
   // DeviceMemoryManager *dmm = DeviceMemoryManager::get_instance();
   for (int i = output_tensors.size() - 1; i >= 0; i--) {
     kgraph->free(output_tensors[i]);

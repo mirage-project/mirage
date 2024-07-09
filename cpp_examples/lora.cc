@@ -82,15 +82,15 @@ int main(int argc, char **argv) {
   }
   assert(
       graph.operators.back()->output_tensors[0].has_same_fingerprint(ref_fp));
-  clock_t st = clock();
+  auto st = std::chrono::steady_clock::now();
   search::GeneratorConfig config =
       search::GeneratorConfig::get_lora_default_config();
   search::KernelGraphGenerator gen(ref_graph, config, "checkpoint_lora.json");
   gen.generate_kernel_graphs();
 
-  clock_t et = clock();
+  auto et = std::chrono::steady_clock::now();
 
-  printf("Search time = %.4lfsec\n", (float)(et - st) / CLOCKS_PER_SEC);
+  printf("Search time = %.4lfsec\n", std::chrono::duration<double>(et - st).count());
 
   return 0;
 }

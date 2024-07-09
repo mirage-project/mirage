@@ -19,7 +19,7 @@
 
 namespace mirage {
 namespace threadblock {
-int64_t STensor::next_guid = 2000000;
+std::atomic<int64_t> STensor::next_guid = 20000000;
 } // namespace threadblock
 } // namespace mirage
 
