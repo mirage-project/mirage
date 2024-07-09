@@ -358,7 +358,7 @@ public:
   TBOutputAccumFingerprinter(mirage::type::FPType *input_ptr,
                              mirage::type::FPType *output_ptr,
                              int2 stensor_matrix_shape,
-                             bool is_first_loop,
+                             bool reset_output,
                              int thread_id,
                              int num_threads) {
     // mirage::type::FPType *input_ptr =
@@ -367,7 +367,7 @@ public:
     //     (mirage::type::FPType *)(output.smem_offset + smem_buffer);
     // int num_elements = (int)input.num_elements();
     int num_elements = stensor_matrix_shape.x * stensor_matrix_shape.y;
-    if (is_first_loop) {
+    if (reset_output) {
       for (int idx = thread_id; idx < num_elements; idx += num_threads) {
         output_ptr[idx] = input_ptr[idx];
       }

@@ -63,8 +63,8 @@ int main(int argc, char **argv) {
         layout::SmemColumnMajorTensorOpMultiplicand_Crosswise64,
         layout::SmemColumnMajorTensorOpMultiplicand_Crosswise64,
     };
+    plan.input_forloop_dim = {-1, 2, 1};
     plan.output_map = {0, 2, 1};
-    plan.forloop_dim = {-1, 2, 1};
     if (batch_size == 1) {
       plan.grid_dim = {1, 8, 16};
     } else {
@@ -94,8 +94,8 @@ int main(int argc, char **argv) {
         layout::SmemRowMajor,
         layout::SmemRowMajor,
     };
+    plan.input_forloop_dim = {-1, -1};
     plan.output_map = {0, 1, -1};
-    plan.forloop_dim = {-1, -1};
     plan.grid_dim = {1, 128, 1};
     if (batch_size == 8) {
       plan.grid_dim = {8, 32, 1};

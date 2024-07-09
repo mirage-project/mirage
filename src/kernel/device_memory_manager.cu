@@ -25,12 +25,12 @@ using namespace mirage::config;
 DeviceMemoryManager *DeviceMemoryManager::singleton = nullptr;
 
 DeviceMemoryManager::DeviceMemoryManager(int _num_gpus) : num_gpus(_num_gpus) {
-  dmem_tensor_start_offset = 0;
   // fingerprint related fields
-  // exponential lookup table
-  exp_lookup_table_offset = dmem_tensor_start_offset;
+  checkCUDA(cudaSetDevice(0));
+  // Part 1: exponential lookup table
   // make future tensors 16 bytes aligned
-  dmem_tensor_start_offset += (sizeof(FPType) * FP_Q + 15) / 16 * 16;
+  checkCUDA(
+      cudaMalloc(&exp_lookup_table, (sizeof(FPType) * FP_Q + 15) / 16 * 16));
   // check PQ relations
   assert(FP_Q < FP_P);
   assert((FP_P - 1) % FP_Q == 0);
@@ -40,10 +40,14 @@ DeviceMemoryManager::DeviceMemoryManager(int _num_gpus) : num_gpus(_num_gpus) {
     exp_table[i] = (exp_table[i - 1] * FP_EXP_BASE) % FP_P;
   }
   assert((exp_table[FP_Q - 1] * FP_EXP_BASE) % FP_P == 1);
-  // division p lookup table
-  div_p_lookup_table_offset = dmem_tensor_start_offset;
+  checkCUDA(cudaMemcpy(exp_lookup_table,
+                       exp_table,
+                       sizeof(FPType) * FP_Q,
+                       cudaMemcpyHostToDevice));
+  // Part 2: division p lookup table
   // make future tensors 16 bytes aligned
-  dmem_tensor_start_offset += (sizeof(FPType) * FP_P + 15) / 16 * 16;
+  checkCUDA(
+      cudaMalloc(&div_p_lookup_table, (sizeof(FPType) * FP_P + 15) / 16 * 16));
   FPType div_p_table[FP_P];
   for (int i = 0; i < FP_P; i++) {
     div_p_table[i] = 1;
@@ -56,10 +60,14 @@ DeviceMemoryManager::DeviceMemoryManager(int _num_gpus) : num_gpus(_num_gpus) {
       assert(div_p_table[i] != 1);
     }
   }
-  // division q lookup table
-  div_q_lookup_table_offset = dmem_tensor_start_offset;
+  checkCUDA(cudaMemcpy(div_p_lookup_table,
+                       div_p_table,
+                       sizeof(FPType) * FP_P,
+                       cudaMemcpyHostToDevice));
+  // Part 3: division q lookup table
   // make future tensors 16 bytes aligned
-  dmem_tensor_start_offset += (sizeof(FPType) * FP_Q + 15) / 16 * 16;
+  checkCUDA(
+      cudaMalloc(&div_q_lookup_table, (sizeof(FPType) * FP_Q + 15) / 16 * 16));
   FPType div_q_table[FP_Q];
   for (int i = 0; i < FP_Q; i++) {
     div_q_table[i] = 1;
@@ -72,33 +80,43 @@ DeviceMemoryManager::DeviceMemoryManager(int _num_gpus) : num_gpus(_num_gpus) {
       assert(div_q_table[i] != 1);
     }
   }
+  checkCUDA(cudaMemcpy(div_q_lookup_table,
+                       div_q_table,
+                       sizeof(FPType) * FP_Q,
+                       cudaMemcpyHostToDevice));
   for (int i = 0; i < num_gpus; i++) {
     checkCUDA(cudaSetDevice(i));
     checkCUDA(cudaStreamCreate(&stream[i]));
-    checkCUDA(cudaMalloc(&base_ptr[i], mirage::config::MAX_DMEM_SIZE));
+    checkCUDA(
+        cudaMalloc(&data_base_ptr[i], mirage::config::MAX_DMEM_DATA_SIZE));
     checkCUDA(cublasCreate(&blas[i]));
     checkCUDA(cublasSetMathMode(blas[i], CUBLAS_TENSOR_OP_MATH));
-    // Copy exp_table, div_p_table, and div_q_table from DRAM to device memory
-    cudaMemcpy(base_ptr[i] + exp_lookup_table_offset,
-               exp_table,
-               sizeof(FPType) * FP_Q,
-               cudaMemcpyHostToDevice);
-    cudaMemcpy(base_ptr[i] + div_p_lookup_table_offset,
-               div_p_table,
-               sizeof(FPType) * FP_P,
-               cudaMemcpyHostToDevice);
-    cudaMemcpy(base_ptr[i] + div_q_lookup_table_offset,
-               div_q_table,
-               sizeof(FPType) * FP_Q,
-               cudaMemcpyHostToDevice);
+    // Note that we allocate all fingerprint buffers
+    // on the 0-th GPU to avoid inter-GPU communication
+    // for computing fingerprints
+    if (i == 0) {
+      for (int k = 0; k < num_gpus; k++) {
+        checkCUDA(
+            cudaMalloc(&fp_base_ptr[i], mirage::config::MAX_DMEM_FP_SIZE));
+      }
+    }
   }
 }
 
 DeviceMemoryManager::~DeviceMemoryManager() {
   for (int i = 0; i < num_gpus; i++) {
-    checkCUDA(cudaFree(base_ptr[i]));
+    cudaSetDevice(i);
+    checkCUDA(cudaFree(data_base_ptr[i]));
     checkCUDA(cudaStreamDestroy(stream[i]));
     checkCUDA(cublasDestroy(blas[i]));
+    if (i == 0) {
+      checkCUDA(cudaFree(exp_lookup_table));
+      checkCUDA(cudaFree(div_p_lookup_table));
+      checkCUDA(cudaFree(div_q_lookup_table));
+      for (int k = 0; k < num_gpus; k++) {
+        checkCUDA(cudaFree(fp_base_ptr[i]));
+      }
+    }
   }
 }
 

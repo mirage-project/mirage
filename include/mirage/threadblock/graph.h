@@ -33,10 +33,16 @@ public:
       ops;
   // input-related fields
   std::vector<int3> input_map;
-  std::vector<int> forloop_dim;
+  std::vector<int> input_forloop_dim;
   std::vector<mirage::layout::SmemLayout> input_smem_layouts;
   // output-related fields
-  int3 output_map; // assume that all output must use the same map
+  // assume that all outputs use the same map
+  int3 output_map;
+  // assume that all outputs use the same forloop_dim
+  int output_forloop_dim = -1;
+  // assume that all outputs perform the same collective communications
+  mirage::type::TBEpilogueType output_epilogue;
+  // other fields
   int forloop_range;
   int reduction_dimx = mirage::config::DEFAULT_TB_REDUCTION_DIMX;
   dim3 grid_dim, block_dim;
@@ -45,9 +51,11 @@ public:
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(ExecutionPlan,
                                    ops,
                                    input_map,
-                                   forloop_dim,
+                                   input_forloop_dim,
                                    input_smem_layouts,
                                    output_map,
+                                   output_forloop_dim,
+                                   output_epilogue,
                                    forloop_range,
                                    reduction_dimx,
                                    grid_dim,
@@ -73,8 +81,14 @@ public:
                               int forloop_dim,
                               mirage::layout::SmemLayout layout);
   // output operator
-  mirage::kernel::DTensor new_output(STensor const &stensor, int3 output_map);
-  TBOperator *create_output_op(STensor const &stensor, int3 output_map);
+  mirage::kernel::DTensor new_output(STensor const &stensor,
+                                     int3 output_map,
+                                     int forloop_dim,
+                                     mirage::type::TBEpilogueType epilogue);
+  TBOperator *create_output_op(STensor const &stensor,
+                               int3 output_map,
+                               int forloop_dim,
+                               mirage::type::TBEpilogueType epilogue);
   // matmul operator
   STensor matmul(STensor const &A, STensor const &B);
   TBOperator *create_matmul_op(STensor const &A, STensor const &B);

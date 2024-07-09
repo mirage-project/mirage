@@ -497,7 +497,11 @@ bool KernelGraphGenerator::create_tb_outputs(
     if (!check_pattern(pattern)) {
       return false;
     }
-    TBOperator *new_op = c.tb_graph->create_output_op(stensor, output_map);
+    TBOperator *new_op =
+        c.tb_graph->create_output_op(stensor,
+                                     output_map,
+                                     -1 /*forloop_dim*/,
+                                     mirage::type::TB_EPILOGUE_NONE);
     if (!new_op) {
       return false;
     }

@@ -52,9 +52,9 @@ bool KNReductionOp::profile(ProfileResult &result) {
   mirage::kernel::DeviceMemoryManager *dmm =
       mirage::kernel::DeviceMemoryManager::get_instance();
   cutlass::half_t *input_ptr = reinterpret_cast<cutlass::half_t *>(
-      dmm->base_ptr[gpu_id] + input_tensors[0].data_offset);
+      dmm->data_base_ptr[gpu_id] + input_tensors[0].data_offset);
   cutlass::half_t *output_ptr = reinterpret_cast<cutlass::half_t *>(
-      dmm->base_ptr[gpu_id] + output_tensors[0].data_offset);
+      dmm->data_base_ptr[gpu_id] + output_tensors[0].data_offset);
   int num_input_elements = input_tensors[0].num_elements();
   int num_output_elements = output_tensors[0].num_elements();
   int const num_threads_per_blk = 1024;
@@ -132,9 +132,9 @@ bool KNReductionOp::fingerprint(void) {
   mirage::kernel::DeviceMemoryManager *dmm =
       mirage::kernel::DeviceMemoryManager::get_instance();
   mirage::type::FPType *input_fp_ptr = reinterpret_cast<mirage::type::FPType *>(
-      dmm->base_ptr[gpu_id] + input_tensors[0].fp_offset);
+      dmm->fp_base_ptr[gpu_id] + input_tensors[0].fp_offset);
   mirage::type::FPType *output_fp_ptr =
-      reinterpret_cast<mirage::type::FPType *>(dmm->base_ptr[gpu_id] +
+      reinterpret_cast<mirage::type::FPType *>(dmm->fp_base_ptr[gpu_id] +
                                                output_tensors[0].fp_offset);
 
   compute_reduction_fingerprint<<<num_blocks, num_threads_per_blk>>>(

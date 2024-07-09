@@ -19,27 +19,39 @@
 namespace mirage {
 namespace threadblock {
 
-mirage::kernel::DTensor Graph::new_output(STensor const &stensor,
-                                          int3 output_map) {
-  TBOperator *op = create_output_op(stensor, output_map);
+mirage::kernel::DTensor
+    Graph::new_output(STensor const &stensor,
+                      int3 output_map,
+                      int output_forloop_dim,
+                      mirage::type::TBEpilogueType epilogue) {
+  TBOperator *op =
+      create_output_op(stensor, output_map, output_forloop_dim, epilogue);
   assert(op != nullptr);
   operators.push_back(op);
   return static_cast<TBOutputOp *>(op)->dtensor;
 }
 
-TBOperator *Graph::create_output_op(STensor const &stensor, int3 output_map) {
+TBOperator *Graph::create_output_op(STensor const &stensor,
+                                    int3 output_map,
+                                    int forloop_dim,
+                                    mirage::type::TBEpilogueType epilogue) {
   if (smem_offset + stensor.size() >= mirage::config::MAX_SMEM_SIZE) {
     // printf("smem_offset(%ld) stensorsize(%d)\n", smem_offset,
     // (int)stensor.size());
     return nullptr;
   }
-  TBOutputOp *op = new TBOutputOp(this, stensor, output_map);
+  TBOutputOp *op =
+      new TBOutputOp(this, stensor, output_map, forloop_dim, epilogue);
   return op;
 }
 
-TBOutputOp::TBOutputOp(Graph *_graph, STensor const &input, int3 _output_map)
+TBOutputOp::TBOutputOp(Graph *_graph,
+                       STensor const &input,
+                       int3 _output_map,
+                       int _forloop_dim,
+                       mirage::type::TBEpilogueType _epilogue)
     : TBOperator(_graph, mirage::type::TB_OUTPUT_OP, input),
-      output_map(_output_map) {
+      output_map(_output_map), forloop_dim(_forloop_dim), epilogue(_epilogue) {
   // Create a stensor for accumulating results
   STensor accum = input;
   accum.owner_op = this;
@@ -76,6 +88,10 @@ TBOutputOp::TBOutputOp(Graph *_graph, STensor const &input, int3 _output_map)
       assert(dtensor.dim[dim_idx] > 0);
       dtensor.dim[dim_idx] *= dim_div;
     }
+  }
+
+  if (forloop_dim >= 0) {
+    dtensor.dim[forloop_dim] *= bgraph->forloop_range;
   }
 }
 
