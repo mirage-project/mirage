@@ -66,12 +66,12 @@ bool KNInputOp::profile(ProfileResult &profile) {
   return true;
 }
 
-__global__ void init_input_fingerprint(char *dmem_base_ptr,
+__global__ void init_input_fingerprint(char *fp_base_ptr,
                                        DTensor const A,
                                        size_t num_elements) {
   int idx = (threadIdx.x + blockIdx.x * blockDim.x);
   mirage::type::FPType *fp_ptr =
-      (mirage::type::FPType *)(dmem_base_ptr + A.data_offset);
+      (mirage::type::FPType *)(fp_base_ptr + A.fp_offset);
   if (idx < num_elements) {
     // FIXME: replace this with curand to generate random numbers
     fp_ptr[idx] = idx % FP_PQ;
@@ -80,18 +80,20 @@ __global__ void init_input_fingerprint(char *dmem_base_ptr,
 
 bool KNInputOp::fingerprint(void) {
   // assert a single gpu
-  assert(kgraph->gpu_dim.x == 1);
-  int gpu_id = 0;
+  assert(kgraph->gpu_dim.y == 1);
+  assert(kgraph->gpu_dim.z == 1);
   int const num_threads_per_blk = 1024;
   mirage::kernel::DeviceMemoryManager *dmm =
       mirage::kernel::DeviceMemoryManager::get_instance();
   int num_blocks =
       (output_tensors[0].num_elements() + num_threads_per_blk - 1) /
       num_threads_per_blk;
-  init_input_fingerprint<<<num_blocks, num_threads_per_blk>>>(
-      dmm->fp_base_ptr[gpu_id],
-      output_tensors[0],
-      output_tensors[0].num_elements());
+  for (int gpu_id = 0; gpu_id < kgraph->gpu_dim.x; gpu_id ++) {
+    init_input_fingerprint<<<num_blocks, num_threads_per_blk>>>(
+        dmm->fp_base_ptr[gpu_id],
+        output_tensors[0],
+        output_tensors[0].num_elements());
+  }
   checkCUDA(cudaDeviceSynchronize());
   return true;
 }
