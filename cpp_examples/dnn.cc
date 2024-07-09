@@ -100,7 +100,7 @@ int main(int argc, char **argv) {
   }
   printf("[2 Block Graphs] Total runtime = %.4lfms\n", total_ms);
 
-  clock_t st = clock();
+  auto st = std::chrono::steady_clock::now();
 
   search::GeneratorConfig config =
       search::GeneratorConfig::get_attention_default_config();
@@ -108,9 +108,9 @@ int main(int argc, char **argv) {
   search::KernelGraphGenerator gen(ref_graph, config, "checkpoint_dnn.json");
   gen.generate_kernel_graphs();
 
-  clock_t et = clock();
+  auto et = std::chrono::steady_clock::now();
 
-  printf("Search time = %.4lfsec\n", (float)(et - st) / CLOCKS_PER_SEC);
+  printf("Search time = %.4lfsec\n", std::chrono::duration<double>(et - st).count());
 
   return 0;
 }

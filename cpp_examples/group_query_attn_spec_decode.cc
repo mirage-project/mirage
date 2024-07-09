@@ -120,7 +120,7 @@ int main(int argc, char **argv) {
   graph.generate_cuda_program("test.cu");
   // return 0;
 
-  clock_t st = clock();
+  auto st = std::chrono::steady_clock::now();
   search::GeneratorConfig config =
       search::GeneratorConfig::get_attention_default_config();
   config.grid_dim_to_explore = {{2 * batch_size, 16, 4},
@@ -134,8 +134,8 @@ int main(int argc, char **argv) {
       ref_graph, config, checkpoint_file_name.data());
   gen.generate_kernel_graphs();
 
-  clock_t et = clock();
+  auto et = std::chrono::steady_clock::now();
 
-  printf("Search time = %.4lfsec\n", (float)(et - st) / CLOCKS_PER_SEC);
+  printf("Search time = %.4lfsec\n", std::chrono::duration<double>(et - st).count());
   return 0;
 }
