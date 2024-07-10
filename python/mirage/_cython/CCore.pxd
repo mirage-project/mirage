@@ -14,6 +14,7 @@
 #
 
 from libcpp.memory cimport shared_ptr
+from libcpp.string cimport string
 from libcpp.vector cimport vector
 from libcpp cimport bool
 
@@ -83,3 +84,9 @@ cdef extern from "mirage/search/search_c.h" namespace "mirage::search_c":
                              vector[int] franges,
                              const char * check_point_file_path,
                              const char * default_config)
+
+cdef extern from "mirage/transpiler/transpiler.h" namespace "mirage::transpiler":
+    ctypedef struct TranspilerConfig:
+        int target_cc
+    cdef string transpile(const Graph *graph,
+                       const TranspilerConfig config)

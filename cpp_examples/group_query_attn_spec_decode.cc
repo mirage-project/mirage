@@ -3,6 +3,8 @@
 #include "mirage/search/search.h"
 #include "mirage/threadblock/graph.h"
 
+#include "mirage/transpiler/transpiler.h"
+
 using namespace mirage;
 
 int main(int argc, char **argv) {
@@ -117,7 +119,10 @@ int main(int argc, char **argv) {
   }
   printf("[2 Block Graphs] Total runtime = %.4lfms\n", total_ms);
 
-  graph.generate_cuda_program("test.cu");
+  transpiler::TranspilerConfig transpiler_config;
+  transpiler_config.target_cc = 80;
+  std::string program = transpiler::transpile(&graph, transpiler_config);
+  printf("%s\n", program.c_str());
   return 0;
 
   clock_t st = clock();
