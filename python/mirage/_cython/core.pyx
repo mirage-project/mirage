@@ -18,6 +18,7 @@ from cpython cimport array
 import ctypes
 import array
 import numpy as np
+from libcpp.string cimport string
 
 # Code snippet from OpenAi Triton
 
@@ -235,12 +236,11 @@ cdef class PyGraph:
         cfilepath = py_byte_string
         self.p_graph.generate_triton_program(cfilepath)
     
-    def generate_cuda_program(self, str filepath):
-        assert filepath is not None, "filepath cannot be empty"
-        py_byte_string = filepath.encode('UTF-8')
-        cdef char* cfilepath = NULL
-        cfilepath = py_byte_string
-        self.p_graph.generate_cuda_program(cfilepath)
+    def generate_cuda_program(self, *, int target_cc):
+        cdef TranspilerConfig transpiler_config
+        transpiler_config.target_cc = target_cc
+        cdef string result = transpile(self.p_graph, transpiler_config)
+        return result.decode("UTF-8")
 
 def optimize(PyGraph input_graph, *, int max_num_new_graphs = 1024, list imaps = None, list omaps = None, list griddims = None, list blockdims = None, list fmaps = None, list franges = None, str previous_checkpoint = None, str default_config = None):
     # set cimaps
