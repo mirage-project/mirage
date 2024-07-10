@@ -16,6 +16,7 @@
 #pragma once
 
 #include "cutlass/cutlass.h"
+#include "mirage/config.h"
 #include "mirage/layout.h"
 #include "mirage/type.h"
 #include <cstddef>
@@ -32,7 +33,9 @@ struct CTensor {
     for (int i = 0; i < MAX_TENSOR_DIMS; i++) {
       dim[i] = 0;
     }
-    fp_ptr = nullptr;
+    for (int i = 0; i < mirage::config::MAX_NUM_GPUS; i++) {
+      fp_ptr[i] = nullptr;
+    }
   }
 
   size_t size() const {
@@ -79,7 +82,7 @@ struct CTensor {
   mirage::layout::CmemLayout layout;
   int num_dims;
   int dim[MAX_TENSOR_DIMS];
-  mirage::type::FPType *fp_ptr;
+  mirage::type::FPType *fp_ptr[mirage::config::MAX_NUM_GPUS];
 };
 
 } // namespace cpu

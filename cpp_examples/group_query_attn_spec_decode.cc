@@ -28,8 +28,8 @@ int main(int argc, char **argv) {
     ProfileResult result;
     float total_runtime = 0.0f;
     for (auto const &op : ref_graph.operators) {
-      //op->profile(result);
-      //total_runtime = total_runtime + result.run_time;
+      // op->profile(result);
+      // total_runtime = total_runtime + result.run_time;
     }
     printf("[cudnn kernel graph] Total runtime = %.4lfms\n", total_runtime);
   }
@@ -112,8 +112,8 @@ int main(int argc, char **argv) {
   ProfileResult result;
   float total_ms = 0.0f;
   for (auto const &op : graph.operators) {
-    //op->profile(result);
-    //total_ms = total_ms + result.run_time;
+    // op->profile(result);
+    // total_ms = total_ms + result.run_time;
   }
   printf("[2 Block Graphs] Total runtime = %.4lfms\n", total_ms);
 
@@ -136,6 +136,7 @@ int main(int argc, char **argv) {
 
   auto et = std::chrono::steady_clock::now();
 
-  printf("Search time = %.4lfsec\n", std::chrono::duration<double>(et - st).count());
+  printf("Search time = %.4lfsec\n",
+         std::chrono::duration<double>(et - st).count());
   return 0;
 }

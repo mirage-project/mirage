@@ -41,7 +41,7 @@ public:
   // assume that all outputs use the same forloop_dim
   int output_forloop_dim = -1;
   // assume that all outputs perform the same collective communications
-  mirage::type::TBEpilogueType output_epilogue;
+  mirage::type::TBEpilogueType output_epilogue = mirage::type::TB_EPILOGUE_NONE;
   // other fields
   int forloop_range;
   int reduction_dimx = mirage::config::DEFAULT_TB_REDUCTION_DIMX;

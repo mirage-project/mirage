@@ -204,7 +204,7 @@ bool KNElementBinaryOp::fingerprint(void) {
       mirage::kernel::DeviceMemoryManager::get_instance();
   // Use GPU 0 for computing fingerprint
   checkCUDA(cudaSetDevice(0));
-  for (int gpu_id = 0; gpu_id < kgraph->gpu_dim.x; gpu_id ++) {
+  for (int gpu_id = 0; gpu_id < kgraph->gpu_dim.x; gpu_id++) {
     compute_elementbinary_fingerprint<<<num_blocks, num_threads_per_blk>>>(
         op_type,
         dmm->fp_base_ptr[gpu_id],

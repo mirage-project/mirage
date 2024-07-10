@@ -710,7 +710,7 @@ bool KNCustomizedOp::fingerprint(void) {
   // assume that we only parallelize along the x dimension
   assert(kgraph->gpu_dim.y == 1);
   assert(kgraph->gpu_dim.z == 1);
-  
+
   assert(bgraph.smem_offset <= max_smem_size);
   mirage::kernel::DeviceMemoryManager *dmm =
       mirage::kernel::DeviceMemoryManager::get_instance();

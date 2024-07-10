@@ -39,10 +39,10 @@ mirage::cpu::CTensor DTensor::copy_fingerprint_to_ctensor() const {
   // FIXME: memory leakage since we do not free this fingerprint buffer
   // This is ok for now since we only copy the input mugraph's fingerprint
   // to ctensor
-  for (int gpu_id = 0; gpu_id < owner_op->kgraph->gpu_dim.x; gpu_id ++) {
+  for (int gpu_id = 0; gpu_id < owner_op->kgraph->gpu_dim.x; gpu_id++) {
     ctensor.fp_ptr[gpu_id] = (mirage::type::FPType *)malloc(fingerprint_size());
-    checkCUDA(cudaMemcpy(ctensor.fp_ptr,
-                         dmm->fp_base_ptr[0] + fp_offset,
+    checkCUDA(cudaMemcpy(ctensor.fp_ptr[gpu_id],
+                         dmm->fp_base_ptr[gpu_id] + fp_offset,
                          fingerprint_size(),
                          cudaMemcpyDeviceToHost));
   }
@@ -72,7 +72,7 @@ bool DTensor::has_same_fingerprint(mirage::cpu::CTensor const &ref) const {
   // Set device id to 0 when retrieving fingerprints
   checkCUDA(cudaSetDevice(0));
   mirage::type::FPType *A = (mirage::type::FPType *)malloc(fingerprint_size());
-  for (int gpu_id = 0; gpu_id < owner_op->kgraph->gpu_dim.x; gpu_id ++) {
+  for (int gpu_id = 0; gpu_id < owner_op->kgraph->gpu_dim.x; gpu_id++) {
     checkCUDA(cudaMemcpy(A,
                          dmm->fp_base_ptr[gpu_id] + fp_offset,
                          fingerprint_size(),

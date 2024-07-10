@@ -17,6 +17,7 @@
 
 #include "cutlass/array.h"
 #include "cutlass/fast_math.h"
+#include "mirage/config.h"
 #include "mirage/type.h"
 #include <cublas_v2.h>
 #include <cudnn.h>
@@ -152,6 +153,10 @@ struct act_function<ActivationType::ACT_EXP, N> {
 
 namespace utils {
 using namespace mirage::type;
+
+struct FpPointerList {
+  mirage::type::FPType *ptrs[mirage::config::MAX_NUM_GPUS];
+};
 
 cudaDataType_t to_cuda_datatype(DataType type);
 

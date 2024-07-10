@@ -65,6 +65,10 @@ public:
   DTensor reduction(DTensor const &input, int dim, int size = 1);
   DTensor *reduction(DTensor const *input, int dim, int size = 1);
   KNOperator *create_reduction_op(DTensor const &input, int dim, int factor);
+  // allreduce operator
+  DTensor all_reduce(DTensor const &input, bool inplace);
+  DTensor *all_reduce(DTensor const *input, bool inplace);
+  KNOperator *create_all_reduce_op(DTensor const &input, bool inplace);
   // customized operator
   std::vector<DTensor>
       customized(std::vector<DTensor> const &inputs,

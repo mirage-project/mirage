@@ -133,9 +133,10 @@ bool KNReductionOp::fingerprint(void) {
       mirage::kernel::DeviceMemoryManager::get_instance();
   // Use GPU 0 for computing fingerprint
   checkCUDA(cudaSetDevice(0));
-  for (int gpu_id = 0; gpu_id < kgraph->gpu_dim.x; gpu_id ++) {
-    mirage::type::FPType *input_fp_ptr = reinterpret_cast<mirage::type::FPType *>(
-        dmm->fp_base_ptr[gpu_id] + input_tensors[0].fp_offset);
+  for (int gpu_id = 0; gpu_id < kgraph->gpu_dim.x; gpu_id++) {
+    mirage::type::FPType *input_fp_ptr =
+        reinterpret_cast<mirage::type::FPType *>(dmm->fp_base_ptr[gpu_id] +
+                                                 input_tensors[0].fp_offset);
     mirage::type::FPType *output_fp_ptr =
         reinterpret_cast<mirage::type::FPType *>(dmm->fp_base_ptr[gpu_id] +
                                                  output_tensors[0].fp_offset);

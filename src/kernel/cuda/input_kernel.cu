@@ -54,13 +54,13 @@ bool KNInputOp::profile(ProfileResult &profile) {
   int num_blocks =
       (output_tensors[0].num_elements() + num_threads_per_blk - 1) /
       num_threads_per_blk;
-  for (int gpu_id = 0; gpu_id < kgraph->gpu_dim.x; gpu_id ++) {
+  for (int gpu_id = 0; gpu_id < kgraph->gpu_dim.x; gpu_id++) {
     checkCUDA(cudaSetDevice(gpu_id));
     if (output_tensors[0].data_type == mirage::type::DT_FLOAT16) {
-      init_input<cutlass::half_t>
-          <<<num_blocks, num_threads_per_blk>>>(dmm->data_base_ptr[gpu_id],
-                                                output_tensors[0],
-                                                output_tensors[0].num_elements());
+      init_input<cutlass::half_t><<<num_blocks, num_threads_per_blk>>>(
+          dmm->data_base_ptr[gpu_id],
+          output_tensors[0],
+          output_tensors[0].num_elements());
     } else {
       assert(false && "Unsupported type");
     }
@@ -71,13 +71,14 @@ bool KNInputOp::profile(ProfileResult &profile) {
 
 __global__ void init_input_fingerprint(char *fp_base_ptr,
                                        DTensor const A,
-                                       size_t num_elements) {
+                                       size_t num_elements,
+                                       int gpu_id) {
   int idx = (threadIdx.x + blockIdx.x * blockDim.x);
   mirage::type::FPType *fp_ptr =
       (mirage::type::FPType *)(fp_base_ptr + A.fp_offset);
   if (idx < num_elements) {
     // FIXME: replace this with curand to generate random numbers
-    fp_ptr[idx] = idx % FP_PQ;
+    fp_ptr[idx] = (idx + gpu_id * num_elements) % FP_PQ;
   }
 }
 
@@ -93,11 +94,12 @@ bool KNInputOp::fingerprint(void) {
       num_threads_per_blk;
   // Use GPU 0 for computing fingerprint
   checkCUDA(cudaSetDevice(0));
-  for (int gpu_id = 0; gpu_id < kgraph->gpu_dim.x; gpu_id ++) {
+  for (int gpu_id = 0; gpu_id < kgraph->gpu_dim.x; gpu_id++) {
     init_input_fingerprint<<<num_blocks, num_threads_per_blk>>>(
         dmm->fp_base_ptr[gpu_id],
         output_tensors[0],
-        output_tensors[0].num_elements());
+        output_tensors[0].num_elements(),
+        gpu_id);
     checkCUDA(cudaDeviceSynchronize());
   }
   return true;

@@ -102,7 +102,6 @@ bool KNElementUnaryOp::fingerprint(void) {
   // assert a 1-D GPU mesh
   assert(kgraph->gpu_dim.y == 1);
   assert(kgraph->gpu_dim.z == 1);
-  // int gpu_id = 0;
   assert(input_tensors[0].num_elements() == output_tensors[0].num_elements());
   int num_elements = input_tensors[0].num_elements();
   int const num_threads_per_blk = 1024;
@@ -112,10 +111,10 @@ bool KNElementUnaryOp::fingerprint(void) {
       mirage::kernel::DeviceMemoryManager::get_instance();
   // Use GPU 0 for computing fingerprint
   checkCUDA(cudaSetDevice(0));
-  for (int gpu_id = 0; gpu_id < kgraph->gpu_dim.x; gpu_id ++) {
+  for (int gpu_id = 0; gpu_id < kgraph->gpu_dim.x; gpu_id++) {
     mirage::type::FPType *input_fp_ptr =
-        reinterpret_cast<mirage::type::FPType *>(
-            dmm->fp_base_ptr[gpu_id] + input_tensors[0].fp_offset);
+        reinterpret_cast<mirage::type::FPType *>(dmm->fp_base_ptr[gpu_id] +
+                                                 input_tensors[0].fp_offset);
     mirage::type::FPType *output_fp_ptr =
         reinterpret_cast<mirage::type::FPType *>(dmm->fp_base_ptr[gpu_id] +
                                                  output_tensors[0].fp_offset);
@@ -123,7 +122,7 @@ bool KNElementUnaryOp::fingerprint(void) {
         op_type,
         dmm->exp_lookup_table,
         input_fp_ptr,
-         output_fp_ptr,
+        output_fp_ptr,
         num_elements);
     checkCUDA(cudaDeviceSynchronize());
   }
