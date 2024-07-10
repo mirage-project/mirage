@@ -26,7 +26,7 @@
 namespace mirage {
 namespace threadblock {
 
-#define MAX_TENSOR_DIMS 4
+constexpr int MAX_TENSOR_DIMS = 4;
 
 class TBOperator;
 

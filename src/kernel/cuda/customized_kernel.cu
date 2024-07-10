@@ -657,7 +657,7 @@ void KNCustomizedOp::run() {
 }
 
 bool KNCustomizedOp::profile(ProfileResult &result) {
-  printf("smem_offset = %d\n", bgraph.smem_offset);
+  printf("smem_offset = %ld\n", bgraph.smem_offset);
   int max_smem_size = mirage::config::MAX_SMEM_SIZE;
   assert(bgraph.smem_offset <= max_smem_size);
   if (bgraph.smem_offset > 48 * 1024) {
