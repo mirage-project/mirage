@@ -23,7 +23,7 @@
 namespace mirage {
 namespace cpu {
 
-#define MAX_TENSOR_DIMS 4
+constexpr int MAX_TENSOR_DIMS = 4;
 
 struct CTensor {
   CTensor(void) {

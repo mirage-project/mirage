@@ -66,12 +66,12 @@ bool KNInputOp::profile(ProfileResult &profile) {
   return true;
 }
 
-__global__ void init_input_fingerprint(char *dmem_base_ptr,
+__global__ void init_input_fingerprint(char *fp_base_ptr,
                                        DTensor const A,
                                        size_t num_elements) {
   int idx = (threadIdx.x + blockIdx.x * blockDim.x);
   mirage::type::FPType *fp_ptr =
-      (mirage::type::FPType *)(dmem_base_ptr + A.data_offset);
+      (mirage::type::FPType *)(fp_base_ptr + A.fp_offset);
   if (idx < num_elements) {
     // FIXME: replace this with curand to generate random numbers
     fp_ptr[idx] = idx % FP_PQ;
