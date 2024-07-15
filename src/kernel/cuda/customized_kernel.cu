@@ -657,6 +657,11 @@ void KNCustomizedOp::run() {
 }
 
 bool KNCustomizedOp::profile(ProfileResult &result) {
+  // Launch kernel on a single GPU
+  // assert(kgraph->gpu_dim.x == 1);
+  int gpu_id = 0;
+  checkCUDA(cudaSetDevice(0));
+
   printf("smem_offset = %ld\n", bgraph.smem_offset);
   int max_smem_size = mirage::config::MAX_SMEM_SIZE;
   assert(bgraph.smem_offset <= max_smem_size);
@@ -665,9 +670,6 @@ bool KNCustomizedOp::profile(ProfileResult &result) {
                                    cudaFuncAttributeMaxDynamicSharedMemorySize,
                                    bgraph.smem_offset));
   }
-  // Assume a single GPU for now
-  assert(kgraph->gpu_dim.x == 1);
-  int gpu_id = 0;
 
   checkCUDA(cudaDeviceSynchronize());
   cudaEvent_t events[2];
@@ -702,11 +704,11 @@ bool KNCustomizedOp::profile(ProfileResult &result) {
   return true;
 }
 
-__global__ void compute_epilogue_fingerprint(
-    mirage::utils::FpPointerList fp_ptr_list,
-    mirage::type::TBEpilogueType type,
-    int num_gpus,
-    int num_elements) {
+__global__ void
+    compute_epilogue_fingerprint(mirage::utils::FpPointerList fp_ptr_list,
+                                 mirage::type::TBEpilogueType type,
+                                 int num_gpus,
+                                 int num_elements) {
   if (type == mirage::type::TB_EPILOGUE_NONE) {
     // Do nothing
   } else if (type == mirage::type::TB_EPILOGUE_ALLREDUCE) {

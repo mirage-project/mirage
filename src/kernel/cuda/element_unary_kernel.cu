@@ -44,7 +44,8 @@ __global__ void execute_elementunary(mirage::type::KNOperatorType type,
 }
 
 bool KNElementUnaryOp::profile(ProfileResult &result) {
-  // TODO: to be implemented
+  // Only launch kernel on a single GPU for profiling
+  checkCUDA(cudaSetDevice(0));
   assert(input_tensors[0].num_elements() == output_tensors[0].num_elements());
   assert(input_tensors[0].data_type == DT_FLOAT16);
   assert(output_tensors[0].data_type == DT_FLOAT16);

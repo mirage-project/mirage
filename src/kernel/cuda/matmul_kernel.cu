@@ -27,9 +27,9 @@ using namespace mirage::type;
 using namespace mirage::config;
 
 bool KNMatmulOp::profile(ProfileResult &result) {
-  // TODO: currently assert a single GPU
-  assert(kgraph->gpu_dim.x == 1);
+  // Only launch kernel on a single GPU for profiling
   int gpu_id = 0;
+  checkCUDA(cudaSetDevice(0));
 
   float alpha = 1.0f, beta = 0.0f;
   mirage::kernel::DeviceMemoryManager *dmm =
@@ -214,6 +214,7 @@ bool KNMatmulOp::fingerprint(void) {
         A_fp_ptr, B_fp_ptr, C_fp_ptr, num_batches, row_C, column_C, row_B);
     checkCUDA(cudaDeviceSynchronize());
   }
+  checkCUDA(cudaSetDevice(0));
   return true;
 }
 

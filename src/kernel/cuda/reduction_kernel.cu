@@ -44,8 +44,9 @@ __global__ void execute_reduction(DT *input_ptr,
 
 bool KNReductionOp::profile(ProfileResult &result) {
   // assert a single GPU
-  assert(kgraph->gpu_dim.x == 1);
+  // assert(kgraph->gpu_dim.x == 1);
   int gpu_id = 0;
+  checkCUDA(cudaSetDevice(0));
 
   assert(input_tensors[0].data_type == DT_FLOAT16);
   assert(output_tensors[0].data_type == DT_FLOAT16);
