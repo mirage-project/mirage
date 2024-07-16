@@ -79,7 +79,7 @@ public:
   std::vector<DTensor> customized(std::vector<DTensor> const &inputs,
                                   mirage::threadblock::Graph const &_graph);
   KNOperator *create_customized_op(std::vector<DTensor> const &inputs,
-                                   mirage::threadblock::Graph const &_graph);              
+                                   mirage::threadblock::Graph const &_graph);
   // helper functions
   void generate_triton_program(char const *filepath);
 

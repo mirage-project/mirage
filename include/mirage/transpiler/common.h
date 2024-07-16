@@ -15,14 +15,20 @@
 
 #pragma once
 
+#include <cstddef>
+#include <string>
+
 namespace mirage {
 namespace transpiler {
 
-struct TranspilerConfig {
-  // Target compute capability, should be compute_capability*10, e.g. A100 is 80
-  // and H100 is 90
-  int target_cc;
+// Result returned by the transpiler
+struct TranspileResult {
+	// The generated CUDA code
+	std::string code;
+
+	// The size of the buffer (should be an array on GPU), in bytes
+	size_t buf_size;
 };
 
-} // namespace transpiler
-} // namespace mirage
+}
+}

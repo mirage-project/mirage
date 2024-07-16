@@ -3,8 +3,6 @@
 #include "mirage/search/search.h"
 #include "mirage/threadblock/graph.h"
 
-#include "mirage/transpiler/transpiler.h"
-
 using namespace mirage;
 
 int main(int argc, char **argv) {
@@ -121,13 +119,7 @@ int main(int argc, char **argv) {
   }
   printf("[2 Block Graphs] Total runtime = %.4lfms\n", total_ms);
 
-  transpiler::TranspilerConfig transpiler_config;
-  transpiler_config.target_cc = 80;
-  std::string program = transpiler::transpile(&graph, transpiler_config);
-  printf("%s\n", program.c_str());
-  return 0;
-
-  auto st = std::chrono::steady_clock::now();
+  clock_t st = clock();
   search::GeneratorConfig config =
       search::GeneratorConfig::get_attention_default_config();
   config.grid_dim_to_explore = {{2 * batch_size, 16, 4},

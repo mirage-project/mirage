@@ -15,14 +15,18 @@
 
 #pragma once
 
+#include <cstddef>
+#include <string>
+#include <vector>
+
+#include "mirage/kernel/graph.h"
+#include "mirage/transpiler/common.h"
+#include "mirage/transpiler/config.h"
+
 namespace mirage {
 namespace transpiler {
 
-struct TranspilerConfig {
-  // Target compute capability, should be compute_capability*10, e.g. A100 is 80
-  // and H100 is 90
-  int target_cc;
-};
+TranspileResult transpile(const kernel::Graph *g, const TranspilerConfig &config, const std::vector<std::vector<size_t>> &input_strides, const std::vector<size_t> &output_stride);
 
-} // namespace transpiler
-} // namespace mirage
+}
+}

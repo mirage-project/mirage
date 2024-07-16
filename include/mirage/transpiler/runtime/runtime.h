@@ -2,9 +2,11 @@
 #pragma once
 
 #include <cuda_runtime_api.h>
-#include <cutlass/cutlass.h>
-#include <cutlass/numeric_types.h>
 
+#include "config.h"
+#include "execute_mugraph.h"
 #include "kernel/element_binary.h"
 #include "kernel/element_unary.h"
+#include "kernel/matmul.h"
+#include "kernel/reduction.h"
 #include "utils.h"

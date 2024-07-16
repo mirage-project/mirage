@@ -1,11 +1,16 @@
 // element_binary.h - Implementation of element wise binary operators
 #pragma once
+
 #include <cassert>
+
+#include <cute/layout.hpp>
+
+#include "utils.h"
 
 enum class ElementBinaryOpType { ADD, MUL, DIV };
 
 template <typename T, ElementBinaryOpType OP>
-__device__ __forceinline__ T perform_element_binary_op(T a, T b) {
+static __device__ __forceinline__ T perform_element_binary_op(T a, T b) {
   if constexpr (OP == ElementBinaryOpType::ADD) {
     return a + b;
   } else if constexpr (OP == ElementBinaryOpType::MUL) {
@@ -17,34 +22,38 @@ __device__ __forceinline__ T perform_element_binary_op(T a, T b) {
   }
 }
 
-// TODO: Optimize this kernel
-template <typename T, ElementBinaryOpType OP>
-__global__ void element_binary_kernel_fwd(T *__restrict__ out,
-                                          T const *__restrict__ in1,
-                                          T const *__restrict__ in2,
-                                          int numel) {
-  int idx = blockIdx.x * blockDim.x + threadIdx.x;
-  if (idx < numel) {
-    out[idx] = perform_element_binary_op<T, OP>(in1[idx], in2[idx]);
+// TODO(intlsy): Use half2
+template <typename Config>
+static __global__ void
+    element_binary_kernel_fwd(typename Config::T *__restrict__ out,
+                              typename Config::T const *__restrict__ in0,
+                              typename Config::T const *__restrict__ in1) {
+  using T = typename Config::T;
+  using Numel = typename Config::Numel;
+  auto layout = (typename Config::SrcDstLayout){};
+  int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+  if (idx < Numel{}) {
+    int64_t phy_pos = layout(idx);
+    out[phy_pos] =
+        perform_element_binary_op<T, Config::OP>(in0[phy_pos], in1[phy_pos]);
   }
 }
 
-template <typename T, ElementBinaryOpType OP>
+template <typename T_, ElementBinaryOpType OP_, typename SrcDstLayout_>
 class ElementBinaryKernel {
 public:
-  static void run(T *out, T const *in1, T const *in2, int numel) {
-    constexpr int block_size = 256;
-    int num_blocks = (numel + block_size - 1) / block_size;
-    element_binary_kernel_fwd<T, OP>
-        <<<num_blocks, block_size>>>(out, in1, in2, numel);
+  using T = T_;
+  static constexpr ElementBinaryOpType OP = OP_;
+  using SrcDstLayout = SrcDstLayout_;
+
+  using Numel = decltype(cute::size(SrcDstLayout{}));
+
+  static constexpr int BLOCK_SIZE = 512;
+  static constexpr dim3 block_shape = {BLOCK_SIZE, 1, 1};
+  static constexpr dim3 grid_shape = {CDIV(Numel::value, BLOCK_SIZE), 1, 1};
+
+  static void run(T *out, T const *in0, T const *in1) {
+    element_binary_kernel_fwd<ElementBinaryKernel<T, OP, SrcDstLayout>>
+        <<<grid_shape, block_shape>>>(out, in0, in1);
   }
 };
-
-template <typename T>
-using ElementAddKernel = ElementBinaryKernel<T, ElementBinaryOpType::ADD>;
-
-template <typename T>
-using ElementMulKernel = ElementBinaryKernel<T, ElementBinaryOpType::MUL>;
-
-template <typename T>
-using ElementDivKernel = ElementBinaryKernel<T, ElementBinaryOpType::DIV>;
