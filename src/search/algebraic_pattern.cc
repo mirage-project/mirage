@@ -10,7 +10,6 @@
 namespace mirage {
 namespace search {
 
-std::unordered_set<std::string> AlgebraicPattern::all_variables;
 std::unordered_map<std::pair<std::string, std::string>, bool>
     AlgebraicPattern::cached_results;
 std::mutex AlgebraicPattern::solver_mutex;
@@ -25,10 +24,10 @@ z3::expr_vector to_expr_vector(z3::context &c,
 }
 
 bool AlgebraicPattern::subpattern_to(AlgebraicPattern const &other) const {
-  std::lock_guard<std::mutex> lock(solver_mutex);
   std::pair<std::string, std::string> str_pair =
       std::make_pair(to_string(), other.to_string());
   {
+    std::lock_guard<std::mutex> lock(solver_mutex);
     if (contains_key(cached_results, str_pair)) {
       return cached_results.at(str_pair);
     }
@@ -51,7 +50,7 @@ bool AlgebraicPattern::subpattern_to(AlgebraicPattern const &other) const {
 
   z3::params p(c);
   p.set("mbqi", true);
-  p.set("timeout", 10u);
+  p.set("timeout", 300u);
   s.set(p);
 
   z3::expr x = c.constant("x", P);
@@ -61,7 +60,8 @@ bool AlgebraicPattern::subpattern_to(AlgebraicPattern const &other) const {
   z3::expr i1 = c.int_const("i1");
   z3::expr i2 = c.int_const("i2");
 
-  z3::expr pattern1 = to_z3(c), pattern2 = other.to_z3(c);
+  std::unordered_set<std::string> all_variables;
+  z3::expr pattern1 = to_z3(c, all_variables), pattern2 = other.to_z3(c, all_variables);
 
   for (std::string const &name1 : all_variables) {
     for (std::string const &name2 : all_variables) {
@@ -106,7 +106,10 @@ bool AlgebraicPattern::subpattern_to(AlgebraicPattern const &other) const {
   s.add(!subpattern(pattern1, pattern2));
 
   bool result = s.check() == z3::unsat;
-  { cached_results[str_pair] = result; }
+  { 
+    std::lock_guard<std::mutex> lock(solver_mutex);
+    cached_results[str_pair] = result;
+  }
   return result;
 }
 
@@ -116,7 +119,7 @@ bool AlgebraicPattern::operator==(AlgebraicPattern const &other) const {
 
 Var::Var(std::string const &name) : name(name) {}
 
-z3::expr Var::to_z3(z3::context &c) const {
+z3::expr Var::to_z3(z3::context &c, std::unordered_set<std::string> &all_variables) const {
   z3::sort P = c.uninterpreted_sort("P");
   all_variables.insert(name);
   return c.constant(name.data(), P);
@@ -130,10 +133,10 @@ Add::Add(std::shared_ptr<AlgebraicPattern> lhs,
          std::shared_ptr<AlgebraicPattern> rhs)
     : lhs(lhs), rhs(rhs) {}
 
-z3::expr Add::to_z3(z3::context &c) const {
+z3::expr Add::to_z3(z3::context &c, std::unordered_set<std::string> &all_variables) const {
   z3::sort P = c.uninterpreted_sort("P");
   z3::func_decl add = c.function("add", P, P, P);
-  return add(lhs->to_z3(c), rhs->to_z3(c));
+  return add(lhs->to_z3(c, all_variables), rhs->to_z3(c, all_variables));
 }
 
 std::string Add::to_string() const {
@@ -144,10 +147,10 @@ Mul::Mul(std::shared_ptr<AlgebraicPattern> lhs,
          std::shared_ptr<AlgebraicPattern> rhs)
     : lhs(lhs), rhs(rhs) {}
 
-z3::expr Mul::to_z3(z3::context &c) const {
+z3::expr Mul::to_z3(z3::context &c, std::unordered_set<std::string> &all_variables) const {
   z3::sort P = c.uninterpreted_sort("P");
   z3::func_decl mul = c.function("mul", P, P, P);
-  return mul(lhs->to_z3(c), rhs->to_z3(c));
+  return mul(lhs->to_z3(c, all_variables), rhs->to_z3(c, all_variables));
 }
 
 std::string Mul::to_string() const {
@@ -158,10 +161,10 @@ Div::Div(std::shared_ptr<AlgebraicPattern> lhs,
          std::shared_ptr<AlgebraicPattern> rhs)
     : lhs(lhs), rhs(rhs) {}
 
-z3::expr Div::to_z3(z3::context &c) const {
+z3::expr Div::to_z3(z3::context &c, std::unordered_set<std::string> &all_variables) const {
   z3::sort P = c.uninterpreted_sort("P");
   z3::func_decl div = c.function("div", P, P, P);
-  return div(lhs->to_z3(c), rhs->to_z3(c));
+  return div(lhs->to_z3(c, all_variables), rhs->to_z3(c, all_variables));
 }
 
 std::string Div::to_string() const {
@@ -170,10 +173,10 @@ std::string Div::to_string() const {
 
 Exp::Exp(std::shared_ptr<AlgebraicPattern> exponent) : exponent(exponent) {}
 
-z3::expr Exp::to_z3(z3::context &c) const {
+z3::expr Exp::to_z3(z3::context &c, std::unordered_set<std::string> &all_variables) const {
   z3::sort P = c.uninterpreted_sort("P");
   z3::func_decl exp = c.function("exp", P, P);
-  return exp(exponent->to_z3(c));
+  return exp(exponent->to_z3(c, all_variables));
 }
 
 std::string Exp::to_string() const {
@@ -183,10 +186,10 @@ std::string Exp::to_string() const {
 Red::Red(int red_deg, std::shared_ptr<AlgebraicPattern> summand)
     : red_deg_log(std::ceil(std::log2(red_deg))), summand(summand) {}
 
-z3::expr Red::to_z3(z3::context &c) const {
+z3::expr Red::to_z3(z3::context &c, std::unordered_set<std::string> &all_variables) const {
   z3::sort P = c.uninterpreted_sort("P");
   z3::func_decl red = c.function("red", c.int_sort(), P, P);
-  return red(red_deg_log, summand->to_z3(c));
+  return red(red_deg_log, summand->to_z3(c, all_variables));
 }
 
 std::string Red::to_string() const {

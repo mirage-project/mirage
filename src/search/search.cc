@@ -131,7 +131,7 @@ KernelGraphGenerator::KernelGraphGenerator(
       dim_strategy(DimStrategy(config)), filename(filename),
       num_thread(std::min((int)std::thread::hardware_concurrency(),
                           MAX_SEARCH_THREAD)),
-      timeout(1000), num_total_kernel_graphs(0), num_total_random_tests(0),
+      timeout(100000), num_total_kernel_graphs(0), num_total_random_tests(0),
       num_valid_kernel_graphs(0), num_total_states(0) {}
 
 KernelGraphGenerator::KernelGraphGenerator(Checkpoint const &checkpoint,
@@ -141,9 +141,9 @@ KernelGraphGenerator::KernelGraphGenerator(Checkpoint const &checkpoint,
       best_profile_result(checkpoint.best_profile_result),
       config(checkpoint.config), dim_strategy(DimStrategy(checkpoint.config)),
       filename(filename),
+      generated_graphs(checkpoint.generated_graphs), 
       num_thread(std::min((int)std::thread::hardware_concurrency(),
-                          MAX_SEARCH_THREAD)),
-      timeout(1000), generated_graphs(checkpoint.generated_graphs),
+                          MAX_SEARCH_THREAD)), timeout(100000),
       num_total_kernel_graphs(checkpoint.num_total_kernel_graphs),
       num_total_random_tests(checkpoint.num_total_kernel_graphs),
       num_valid_kernel_graphs(checkpoint.num_valid_kernel_graphs) {}
