@@ -18,6 +18,8 @@ from libcpp.string cimport string
 from libcpp.vector cimport vector
 from libcpp cimport bool
 
+ctypedef unsigned long int size_t
+
 cdef extern from "mirage/type.h" namespace "mirage::type":
     # This must be consistent with mirage/type.h
     cdef enum DataType:
@@ -85,8 +87,13 @@ cdef extern from "mirage/search/search_c.h" namespace "mirage::search_c":
                              const char * check_point_file_path,
                              const char * default_config)
 
-cdef extern from "mirage/transpiler/transpiler.h" namespace "mirage::transpiler":
+cdef extern from "mirage/transpiler/transpile.h" namespace "mirage::transpiler":
     ctypedef struct TranspilerConfig:
         int target_cc
-    cdef string transpile(const Graph *graph,
-                       const TranspilerConfig config)
+    ctypedef struct TranspileResult:
+        string code
+        size_t buf_size
+    cdef TranspileResult transpile(const Graph *graph,
+                       const TranspilerConfig config,
+                       vector[vector[size_t]] input_strides,
+                       vector[size_t] output_stride)

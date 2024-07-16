@@ -235,12 +235,6 @@ cdef class PyGraph:
         cdef char* cfilepath = NULL
         cfilepath = py_byte_string
         self.p_graph.generate_triton_program(cfilepath)
-    
-    def generate_cuda_program(self, *, int target_cc):
-        cdef TranspilerConfig transpiler_config
-        transpiler_config.target_cc = target_cc
-        cdef string result = transpile(self.p_graph, transpiler_config)
-        return result.decode("UTF-8")
 
 def optimize(PyGraph input_graph, *, int max_num_new_graphs = 1024, list imaps = None, list omaps = None, list griddims = None, list blockdims = None, list fmaps = None, list franges = None, str previous_checkpoint = None, str default_config = None):
     # set cimaps
@@ -314,3 +308,28 @@ def optimize(PyGraph input_graph, *, int max_num_new_graphs = 1024, list imaps =
         ptr = ctypes.cast(<unsigned long long>cnewgraphs[i], ctypes.c_void_p)
         new_graphs.append(PyGraph(ptr))
     return new_graphs
+
+# Generate CUDA program for a uGraph
+# Return (CUDA code, buffer size in bytes)
+def generate_cuda_program(PyGraph input_graph, *, int target_cc, list input_strides, list output_stride) -> (str, int):
+    # Set transpiler_config
+    cdef TranspilerConfig transpiler_config
+    transpiler_config.target_cc = target_cc
+    
+    # Set input_strides
+    cdef vector[vector[size_t]] cinput_strides
+    cinput_strides.resize(len(input_strides))
+    for i in range(len(input_strides)):
+        cinput_strides[i].resize(len(input_strides[i]))
+        for j in range(len(input_strides[i])):
+            cinput_strides[i][j] = input_strides[i][j]
+    
+    # Set output_strides
+    cdef vector[size_t] coutput_stride
+    coutput_stride.resize(len(output_stride))
+    for i in range(len(output_stride)):
+        coutput_stride[i] = output_stride[i]
+    
+    # Call transpile
+    cdef TranspileResult result = transpile(input_graph.p_graph, transpiler_config, cinput_strides, coutput_stride)
+    return (result.code.decode("UTF-8"), result.buf_size)

@@ -3,7 +3,7 @@
 
 #if USE_NVSHMEM
 
-#include "nvshmem.h"
-#include "nvshmemx.h"
+#include <nvshmem.h>
+#include <nvshmemx.h>
 
 #endif
