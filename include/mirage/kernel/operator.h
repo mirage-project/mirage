@@ -55,12 +55,16 @@ public:
   KNInputOp(Graph *_graph,
             std::vector<int> const &dims,
             mirage::type::DataType data_type,
-            mirage::layout::DmemLayout layout);
+            mirage::layout::DmemLayout layout,
+            int3 input_map = {-1, -1, -1});
   ~KNInputOp();
   bool profile(ProfileResult &profile);
   bool fingerprint(void);
 
   operator json() const override;
+
+public:
+  int3 input_map;
 };
 
 } // namespace kernel

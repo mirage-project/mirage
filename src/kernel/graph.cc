@@ -23,8 +23,7 @@
 namespace mirage {
 namespace kernel {
 
-Graph::Graph() {
-  gpu_dim = {1, 1, 1};
+Graph::Graph(dim3 _gpu_dim) : gpu_dim(_gpu_dim) {
   dmem_data_offset = 0;
   dmem_fp_offset = 0;
 }
