@@ -24,11 +24,14 @@ namespace transpiler {
 
 // Transpile a kernel graph into CUDA code
 // Return (code, global memory buffer size (in bytes))
-TranspileResult transpile(const kernel::Graph *g, const TranspilerConfig &config, const std::vector<std::vector<size_t>> &input_strides, const std::vector<size_t> &output_stride) {
-	Transpiler transpiler(g, config, input_strides, output_stride);
-	TranspileResult result = transpiler.generate_code();
-	return result;
+TranspileResult transpile(kernel::Graph const *g,
+                          TranspilerConfig const &config,
+                          std::vector<std::vector<size_t>> const &input_strides,
+                          std::vector<size_t> const &output_stride) {
+  Transpiler transpiler(g, config, input_strides, output_stride);
+  TranspileResult result = transpiler.generate_code();
+  return result;
 }
 
-}
-}
+} // namespace transpiler
+} // namespace mirage

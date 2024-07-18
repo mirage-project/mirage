@@ -23,12 +23,12 @@ namespace transpiler {
 
 // Result returned by the transpiler
 struct TranspileResult {
-	// The generated CUDA code
-	std::string code;
+  // The generated CUDA code
+  std::string code;
 
-	// The size of the buffer (should be an array on GPU), in bytes
-	size_t buf_size;
+  // The size of the buffer (should be an array on GPU), in bytes
+  size_t buf_size;
 };
 
-}
-}
+} // namespace transpiler
+} // namespace mirage
