@@ -30,3 +30,13 @@ void println(T const &t) {
   printf("\n");
 }
 } // namespace cute
+
+// Print a warning message at run time. This message is printed only once
+#define PRINT_RUNTIME_WARNING_ONCE(msg)                                        \
+  do {                                                                         \
+    static bool __warned = false;                                              \
+    if (!__warned) {                                                           \
+      std::cerr << "Warning: " << msg << std::endl;                            \
+      __warned = true;                                                         \
+    }                                                                          \
+  } while (0)

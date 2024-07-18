@@ -14,8 +14,8 @@
  */
 #pragma once
 
-#include <iostream>
 #include <functional>
+#include <iostream>
 #include <string>
 #include <vector>
 
@@ -53,8 +53,9 @@ template <typename T>
 }
 
 // A simple `map` function that applies a function to each element in a vector
-template<typename InT, typename OutT>
-std::vector<OutT> map(std::vector<InT> const &vec, std::function<OutT(InT)> const &f) {
+template <typename InT, typename OutT>
+std::vector<OutT> map(std::vector<InT> const &vec,
+                      std::function<OutT(InT)> const &f) {
   std::vector<OutT> result(vec.size());
   for (size_t i = 0; i < vec.size(); i++) {
     result[i] = f(vec[i]);
@@ -62,9 +63,10 @@ std::vector<OutT> map(std::vector<InT> const &vec, std::function<OutT(InT)> cons
   return result;
 }
 
-template<typename T>
+template <typename T>
 std::vector<std::string> map_to_cute_int(std::vector<T> const &vec) {
-  return map<T, std::string>(vec, [](T const &x) { return "Int<" + my_to_string(x) + ">"; });
+  return map<T, std::string>(
+      vec, [](T const &x) { return "Int<" + my_to_string(x) + ">"; });
 }
 
 // A function that takes a template string and a list of elements
@@ -101,8 +103,8 @@ private:
 
 public:
   // Emit a new line
-  // Here we support "smart indenting". If the last character is "{", we increase
-  // the indent level. If it is "}", we decrease the indent level.
+  // Here we support "smart indenting". If the last character is "{", we
+  // increase the indent level. If it is "}", we decrease the indent level.
   template <typename... Args>
   void e(std::string const &fmt_str, Args... args) {
     std::string line = fmt(fmt_str, args...);
@@ -120,7 +122,8 @@ public:
   // Merge two CodeKeeper objects
   friend void operator<<(CodeKeeper &target, CodeKeeper const &source) {
     for (auto const &line : source.lines) {
-      std::string new_line = std::string(target.cur_indent_level * NUM_INDENT_SPACES, ' ') + line;
+      std::string new_line =
+          std::string(target.cur_indent_level * NUM_INDENT_SPACES, ' ') + line;
       target.lines.push_back(new_line);
     }
   }
@@ -135,20 +138,46 @@ public:
   }
 };
 
-template<typename T>
-inline T round_to_multiple(T value, T multiple) {
+template <typename T>
+inline static T round_to_multiple(T value, T multiple) {
   return ((value + multiple - 1) / multiple) * multiple;
 }
 
 // A mapping from GPU to its compute capability
 namespace GPU_CC {
-  static constexpr int P100 = 60;
-  static constexpr int V100 = 70;
-  static constexpr int T4 = 75;
-  static constexpr int A100 = 80;
-  static constexpr int H100 = 90;
+static constexpr int P100 = 60;
+static constexpr int V100 = 70;
+static constexpr int T4 = 75;
+static constexpr int A100 = 80;
+static constexpr int H100 = 90;
+} // namespace GPU_CC
+
+// Shift `vec` cyclically to the left by `shift` positions
+template <typename T>
+inline static std::vector<T> cyclic_shift(std::vector<T> const &vec,
+                                          int shift) {
+  std::vector<T> result(vec.begin() + shift, vec.end());
+  result.insert(result.end(), vec.begin(), vec.begin() + shift);
+  return result;
 }
 
-}
+template <typename T>
+inline static std::vector<T>
+    cyclic_shift(T const *vec, size_t size, int shift) {
+  std::vector<T> result(vec, vec + size);
+  return cyclic_shift(result, shift);
 }
 
+// A handy function for shifting a dtensor and getting the layout
+inline static std::string shift_and_get_layout(kernel::DTensor const &dtensor,
+                                               DTensorMeta const &meta,
+                                               int shift_amount) {
+  return fmt("Layout<Shape<$>, Stride<$>>",
+             map_to_cute_int(
+                 cyclic_shift(dtensor.dim, dtensor.num_dims, shift_amount)),
+             map_to_cute_int(
+                 cyclic_shift(meta.strides, dtensor.num_dims, shift_amount)));
+}
+
+} // namespace transpiler
+} // namespace mirage
