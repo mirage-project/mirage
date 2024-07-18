@@ -44,7 +44,7 @@ STensor Graph::div(STensor const &input1, STensor const &input2) {
   return op->output_tensors[0];
 }
 
-TBOperator *Graph::create_elementbinary_op(STensor const &input1,
+TBElementBinaryOp::create_elementbinary_op(STensor const &input1,
                                            STensor const &input2,
                                            mirage::type::TBOperatorType _type) {
   if (input1.num_dims != input2.num_dims) {
@@ -65,8 +65,13 @@ TBOperator *Graph::create_elementbinary_op(STensor const &input1,
     return nullptr;
   }
 
-  TBElementBinaryOp *op = new TBElementBinaryOp(this, input1, input2, _type);
-  return op;
+  // TBElementBinaryOp *op = new TBElementBinaryOp(this, input1, input2, _type);
+  output.owner_op = this;
+  output.owner_ts_idx = 0;
+  output.guid = STensor::next_guid++;
+  output.smem_offset = input.smem_offset;
+    
+  output_tensors.push_back(output);
 }
 
 TBElementBinaryOp::TBElementBinaryOp(Graph *_graph,
