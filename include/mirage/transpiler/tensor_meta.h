@@ -27,51 +27,51 @@ namespace transpiler {
 // Metadata for one DTensor during transpiling
 // DTensors with the same `guid` share one TranspilerDMeta
 struct DTensorMeta {
-	bool is_input;
-	int input_idx;
-	bool is_output;
-	
-	// Stride of each dimension, in number of elements
-	// We may pad the strides to multiple of 8 to leverage `cp.async` instruction
-	// Refer to this discussion for more information about the layout of
-	// DTensor/STensor: https://github.com/mirage-project/mirage/discussions/33
-	size_t strides[kernel::MAX_TENSOR_DIMS];
+  bool is_input;
+  int input_idx;
+  bool is_output;
 
-	// Innermost dimension (dimension with stride=1)
-	int innermost_dim;
+  // Stride of each dimension, in number of elements
+  // We may pad the strides to multiple of 8 to leverage `cp.async` instruction
+  // Refer to this discussion for more information about the layout of
+  // DTensor/STensor: https://github.com/mirage-project/mirage/discussions/33
+  size_t strides[kernel::MAX_TENSOR_DIMS];
 
-	// "Perfect" means that all strides are multiples of 8
-	// All intermediate tensors are all perfect, while input/output tensors
-	// may not be perfect
-	bool is_layout_perfect;
+  // Innermost dimension (dimension with stride=1)
+  int innermost_dim;
 
-	// The start address in the global memory, in bytes
-	// This may not be the same as DTensor::data_offset since
-	// - 1. The layout has changed because of paddings
-	// - 2. We do not need to allocate fingerprints
-	// - 3. We want to use more advanced allocation strategies
-	// This addr must be aligned to 16 bytes for intermediate tensors, but
-	// may not be aligned for input/output tensors
-	// TODO(intlsy) Allow unaligned input/output tensors
-	size_t addr;
+  // "Perfect" means that all strides are multiples of 8
+  // All intermediate tensors are all perfect, while input/output tensors
+  // may not be perfect
+  bool is_layout_perfect;
+
+  // The start address in the global memory, in bytes
+  // This may not be the same as DTensor::data_offset since
+  // - 1. The layout has changed because of paddings
+  // - 2. We do not need to allocate fingerprints
+  // - 3. We want to use more advanced allocation strategies
+  // This addr must be aligned to 16 bytes for intermediate tensors, but
+  // may not be aligned for input/output tensors
+  // TODO(intlsy) Allow unaligned input/output tensors
+  size_t addr;
 };
 
 // Metadata for STensors during transpiling
 // STensors with the same `guid` share one TranspilerSMeta
 struct STensorMeta {
-	// Innermost dimension (dimension with stride=1)
-	int innermost_dim;
+  // Innermost dimension (dimension with stride=1)
+  int innermost_dim;
 
-	// Dimensions that are swizzled
-	std::vector<int> swizzled_dims;
+  // Dimensions that are swizzled
+  std::vector<int> swizzled_dims;
 
-	// The start address in the shared memory, in bytes
-	size_t addr;
+  // The start address in the shared memory, in bytes
+  size_t addr;
 
-	// Strides of each dimension, in number of elements
-	// Must be padded to multiple of 8
-	size_t strides[threadblock::MAX_TENSOR_DIMS];
+  // Strides of each dimension, in number of elements
+  // Must be padded to multiple of 8
+  size_t strides[threadblock::MAX_TENSOR_DIMS];
 };
 
-}
-}
+} // namespace transpiler
+} // namespace mirage
