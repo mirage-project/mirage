@@ -141,24 +141,21 @@ TranspileResult Transpiler::generate_code() {
         for (int i = 0; i < in0.num_dims; i++) {
           assert(in0.dim[i] == out0.dim[i]);
         }
-        // Currently we require that they have the same layout
-        for (int i = 0; i < in0.num_dims; i++) {
-          assert(meta_in0.strides[i] == meta_out0.strides[i]);
+        if (meta_in0.innermost_dim != meta_out0.innermost_dim) {
+          printf("Warning: In the current implementation of the elementwise "
+                 "unary kernel, global memory access won't be coalesced when "
+                 "input tensor's innermost_dim (%d) != output tensor's "
+                 "innermost_dim (%d)"
+                 "This may cause performance degration\n",
+                 meta_in0.innermost_dim,
+                 meta_out0.innermost_dim);
         }
         // Assemble the new shape and stride
         // We move the innermost dim to the first dim to coalesce global mem
         // access
-        vector<int> new_shape(in0.num_dims);
-        vector<size_t> new_strides(in0.num_dims);
-        int innermost_dim = meta_in0.innermost_dim;
-        for (int i = 0; i < in0.num_dims; i++) {
-          int src_dim = (i + innermost_dim) % in0.num_dims;
-          new_shape[i] = in0.dim[src_dim];
-          new_strides[i] = meta_in0.strides[src_dim];
-        }
-        string layout = fmt("Layout<Shape<$>, Stride<$>>",
-                            map_to_cute_int(new_shape),
-                            map_to_cute_int(new_strides));
+        int shift_amount = meta_in0.innermost_dim;
+        string in0_layout = shift_and_get_layout(in0, meta_in0, shift_amount);
+        string out0_layout = shift_and_get_layout(in0, meta_in0, shift_amount);
         // Get tensor ptrs
         auto [in0_ptr_name, in0_ptr_code] = get_dtensor_ptr(in0);
         auto [out0_ptr_name, out0_ptr_code] = get_dtensor_ptr(out0);
@@ -166,8 +163,9 @@ TranspileResult Transpiler::generate_code() {
         exec.e(out0_ptr_code);
         // Create kernel instance
         exec.e("using kernel = ElementUnaryKernel<half_t, "
-               "ElementUnaryOpType::EXP, $>;",
-               layout);
+               "ElementUnaryOpType::EXP, $, $>;",
+               in0_layout,
+               out0_layout);
         // Launch kernel
         exec.e("kernel::run($, $);", out0_ptr_name, in0_ptr_name);
         break;
@@ -182,30 +180,33 @@ TranspileResult Transpiler::generate_code() {
         DTensorMeta meta_in0 = dtensor_metas.at(in0.guid);
         DTensorMeta meta_in1 = dtensor_metas.at(in1.guid);
         DTensorMeta meta_out0 = dtensor_metas.at(out0.guid);
-        // The three tensors must have the same shape
+        // The three tensors must have the same shape except broadcasting
+        // dimensions
         assert(in0.num_dims == in1.num_dims && in0.num_dims == out0.num_dims);
         for (int i = 0; i < in0.num_dims; i++) {
-          assert(in0.dim[i] == in1.dim[i] && in0.dim[i] == out0.dim[i]);
+          assert(in0.dim[i] == out0.dim[i] || in0.dim[i] == 1);
+          assert(in1.dim[i] == out0.dim[i] || in1.dim[i] == 1);
         }
-        // Currently we require that they have the same layout
-        for (int i = 0; i < in0.num_dims; i++) {
-          assert(meta_in0.strides[i] == meta_in1.strides[i] &&
-                 meta_in0.strides[i] == meta_out0.strides[i]);
+        if (meta_in0.innermost_dim != meta_in1.innermost_dim ||
+            meta_in0.innermost_dim != meta_out0.innermost_dim) {
+          printf("Warning: In the current implementation of the elementwise "
+                 "binary kernel, global memory access won't be coalesced when "
+                 "input tensors' innermost_dim (%d and %d) != output tensor's "
+                 "innermost_dim (%d)"
+                 "This may cause performance degration\n",
+                 meta_in0.innermost_dim,
+                 meta_in1.innermost_dim,
+                 meta_out0.innermost_dim);
         }
         // Assemble the new shape and stride
         // We move the innermost dim to the first dim to coalesce global mem
         // access
-        vector<int> new_shape(in0.num_dims);
-        vector<size_t> new_strides(in0.num_dims);
-        int innermost_dim = meta_in0.innermost_dim;
-        for (int i = 0; i < in0.num_dims; i++) {
-          int src_dim = (i + innermost_dim) % in0.num_dims;
-          new_shape[i] = in0.dim[src_dim];
-          new_strides[i] = meta_in0.strides[src_dim];
-        }
-        string layout = fmt("Layout<Shape<$>, Stride<$>>",
-                            map_to_cute_int(new_shape),
-                            map_to_cute_int(new_strides));
+        string in0_layout =
+            shift_and_get_layout(in0, meta_in0, meta_in0.innermost_dim);
+        string in1_layout =
+            shift_and_get_layout(in1, meta_in1, meta_in1.innermost_dim);
+        string out0_layout =
+            shift_and_get_layout(out0, meta_out0, meta_out0.innermost_dim);
         // Get tensor ptrs
         auto [in0_ptr_name, in0_ptr_code] = get_dtensor_ptr(in0);
         auto [in1_ptr_name, in1_ptr_code] = get_dtensor_ptr(in1);
@@ -221,9 +222,11 @@ TranspileResult Transpiler::generate_code() {
         assert(op_type_str != "");
         // Create kernel instance
         exec.e("using kernel = ElementBinaryKernel<half_t, "
-               "ElementBinaryOpType::$, $>;",
+               "ElementBinaryOpType::$, $, $, $>;",
                op_type_str,
-               layout);
+               in0_layout,
+               in1_layout,
+               out0_layout);
         // Launch kernel
         exec.e(
             "kernel::run($, $, $);", out0_ptr_name, in0_ptr_name, in1_ptr_name);
