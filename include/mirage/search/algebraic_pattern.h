@@ -5,6 +5,7 @@
 #include "z3++.h"
 #include <memory>
 #include <mutex>
+#include <shared_mutex>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -23,7 +24,7 @@ public:
 
   static std::unordered_map<std::pair<std::string, std::string>, bool>
       cached_results;
-  static std::mutex solver_mutex;
+  static std::shared_mutex solver_mutex;
 };
 
 class Var : public AlgebraicPattern {
