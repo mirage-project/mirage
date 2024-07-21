@@ -25,11 +25,13 @@ namespace mirage {
 namespace transpiler {
 
 // Metadata for one DTensor during transpiling
-// DTensors with the same `guid` share one TranspilerDMeta
+// DTensors with the same `guid` share one DTensorMeta
 struct DTensorMeta {
-  bool is_input;
-  int input_idx;
-  bool is_output;
+  bool is_input; // Whether this tensor is an input tensor
+  int input_idx; // Index among all input tensors
+
+  bool is_output; // Whether this tensor is an output tensor
+  int output_idx; // Index among all output tensors
 
   // Stride of each dimension, in number of elements
   // We may pad the strides to multiple of 8 to leverage `cp.async` instruction
@@ -40,24 +42,19 @@ struct DTensorMeta {
   // Innermost dimension (dimension with stride=1)
   int innermost_dim;
 
-  // "Perfect" means that all strides are multiples of 8
-  // All intermediate tensors are all perfect, while input/output tensors
-  // may not be perfect
-  bool is_layout_perfect;
-
   // The start address in the global memory, in bytes
   // This may not be the same as DTensor::data_offset since
   // - 1. The layout has changed because of paddings
   // - 2. We do not need to allocate fingerprints
   // - 3. We want to use more advanced allocation strategies
   // This addr must be aligned to 16 bytes for intermediate tensors, but
-  // may not be aligned for input/output tensors
-  // TODO(intlsy) Allow unaligned input/output tensors
+  // may not be aligned for input tensors
+  // TODO(intlsy) Allow unaligned input tensors
   size_t addr;
 };
 
 // Metadata for STensors during transpiling
-// STensors with the same `guid` share one TranspilerSMeta
+// STensors with the same `guid` share one STensorMeta
 struct STensorMeta {
   // Innermost dimension (dimension with stride=1)
   int innermost_dim;

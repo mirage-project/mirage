@@ -93,7 +93,8 @@ cdef extern from "mirage/transpiler/transpile.h" namespace "mirage::transpiler":
     ctypedef struct TranspileResult:
         string code
         size_t buf_size
+        vector[vector[size_t]] output_strides
     cdef TranspileResult transpile(const Graph *graph,
                        const TranspilerConfig config,
                        vector[vector[size_t]] input_strides,
-                       vector[size_t] output_stride)
+                       vector[const DTensor*] output_tensors)

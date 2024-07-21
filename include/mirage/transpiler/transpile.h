@@ -26,10 +26,11 @@
 namespace mirage {
 namespace transpiler {
 
-TranspileResult transpile(kernel::Graph const *g,
-                          TranspilerConfig const &config,
-                          std::vector<std::vector<size_t>> const &input_strides,
-                          std::vector<size_t> const &output_stride);
+TranspileResult
+    transpile(kernel::Graph const *g,
+              TranspilerConfig const &config,
+              std::vector<std::vector<size_t>> const &input_strides,
+              std::vector<kernel::DTensor const *> const &output_tensors);
 
 }
 } // namespace mirage

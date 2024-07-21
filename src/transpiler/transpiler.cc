@@ -36,11 +36,13 @@ std::pair<string, string>
   string pointer_var_name = fmt("dtensor$", guid);
   string code = "";
   if (meta.is_input) {
-    int input_idx = meta.input_idx;
-    code = fmt(
-        "half_t *$ = (half_t*)input_tensors[$];", pointer_var_name, input_idx);
+    code = fmt("half_t *$ = (half_t*)input_tensors.at($);",
+               pointer_var_name,
+               meta.input_idx);
   } else if (meta.is_output) {
-    code = fmt("half_t *$ = (half_t*)output_tensor;", pointer_var_name);
+    code = fmt("half_t *$ = (half_t*)output_tensors.at($);",
+               pointer_var_name,
+               meta.output_idx);
   } else {
     code = fmt(
         "half_t *$ = (half_t*)((char*)buf + $);", pointer_var_name, meta.addr);
@@ -57,8 +59,9 @@ TranspileResult Transpiler::generate_code() {
   header.e("using namespace cute;");
 
   CodeKeeper exec;
-  exec.e("void execute_mugraph(std::vector<void*> input_tensors, void* "
-         "output_tensor, void* buf) {");
+  exec.e("void execute_mugraph(std::vector<void const *> input_tensors, "
+         "std::vector<void*> output_tensors"
+         ", void* buf) {");
   for (kn::KNOperator *const op : g->operators) {
     std::string op_type_str;
     to_json(op_type_str, op->op_type);
@@ -305,7 +308,13 @@ TranspileResult Transpiler::generate_code() {
   exec.e("}");
 
   string result = header.to_string() + "\n" + exec.to_string() + "\n";
-  return {result, 2ul * 1024 * 1024 * 1024};
+  vector<vector<size_t>> output_strides;
+  for (kn::DTensor const *output_tensor : output_tensors) {
+    DTensorMeta const &meta = dtensor_metas.at(output_tensor->guid);
+    output_strides.push_back(
+        vector<size_t>(meta.strides, meta.strides + output_tensor->num_dims));
+  }
+  return {result, this->d_buf_size, output_strides};
 }
 
 } // namespace transpiler
