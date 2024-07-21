@@ -51,7 +51,7 @@ bool AlgebraicPattern::subpattern_to(AlgebraicPattern const &other) const {
 
   z3::params p(c);
   p.set("mbqi", true);
-  p.set("rlimit", 100000u);
+  p.set("rlimit", 80000u);
   // p.set("timeout", 10u);
   s.set(p);
 
@@ -118,6 +118,10 @@ bool AlgebraicPattern::subpattern_to(AlgebraicPattern const &other) const {
   bool result = s.check() == z3::unsat;
   {
     std::unique_lock<std::shared_mutex> lock(solver_mutex);
+    if (rand() % 100 == 1) {
+      std::cerr << "Solver: " << std::endl;
+      std::cerr << s << std::endl;
+    }
     cached_results[str_pair] = result;
   }
   return result;
