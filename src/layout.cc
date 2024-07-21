@@ -9,6 +9,8 @@ CmemLayout dmemlayout_to_cmemlayout(DmemLayout dmem_layout) {
       return CmemLayout::CmemRowMajor;
     case DmemLayout::DmemColumnMajor:
       return CmemLayout::CmemColumnMajor;
+    default:
+      return CmemLayout::CmemUnknownLayout;
   }
 }
 

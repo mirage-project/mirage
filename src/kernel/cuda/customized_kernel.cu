@@ -657,6 +657,11 @@ void KNCustomizedOp::run() {
 }
 
 bool KNCustomizedOp::profile(ProfileResult &result) {
+  // Launch kernel on a single GPU
+  // assert(kgraph->gpu_dim.x == 1);
+  int gpu_id = 0;
+  checkCUDA(cudaSetDevice(0));
+
   printf("smem_offset = %ld\n", bgraph.smem_offset);
   int max_smem_size = mirage::config::MAX_SMEM_SIZE;
   assert(bgraph.smem_offset <= max_smem_size);
@@ -665,9 +670,6 @@ bool KNCustomizedOp::profile(ProfileResult &result) {
                                    cudaFuncAttributeMaxDynamicSharedMemorySize,
                                    bgraph.smem_offset));
   }
-  // Assume a single GPU for now
-  assert(kgraph->gpu_dim.x == 1);
-  int gpu_id = 0;
 
   checkCUDA(cudaDeviceSynchronize());
   cudaEvent_t events[2];
@@ -702,14 +704,38 @@ bool KNCustomizedOp::profile(ProfileResult &result) {
   return true;
 }
 
+__global__ void
+    compute_epilogue_fingerprint(mirage::utils::FpPointerList fp_ptr_list,
+                                 mirage::type::TBEpilogueType type,
+                                 int num_gpus,
+                                 int num_elements) {
+  if (type == mirage::type::TB_EPILOGUE_NONE) {
+    // Do nothing
+  } else if (type == mirage::type::TB_EPILOGUE_ALLREDUCE) {
+    int i = threadIdx.x + blockIdx.x * blockDim.x;
+    if (i < num_elements) {
+      uint32_t x = 0;
+      for (int k = 0; k < num_gpus; k++) {
+        x = (x + fp_ptr_list.ptrs[k][i]) % mirage::config::FP_PQ;
+      }
+      for (int k = 0; k < num_gpus; k++) {
+        fp_ptr_list.ptrs[k][i] = x;
+      }
+    }
+  } else {
+    assert(false && "Unsupported epilogue");
+  }
+}
+
 bool KNCustomizedOp::fingerprint(void) {
   int max_smem_size = mirage::config::MAX_SMEM_SIZE;
   // mirage::threadblock::KernelParams params = bgraph.get_kernel_params();
   mirage::threadblock::NewKernelParams new_params =
       bgraph.get_new_kernel_params(true /*fingerprint_kernel*/);
-  // assume a single GPU
-  assert(kgraph->gpu_dim.x == 1);
-  int gpu_id = 0;
+  // assume that we only parallelize along the x dimension
+  assert(kgraph->gpu_dim.y == 1);
+  assert(kgraph->gpu_dim.z == 1);
+
   assert(bgraph.smem_offset <= max_smem_size);
   mirage::kernel::DeviceMemoryManager *dmm =
       mirage::kernel::DeviceMemoryManager::get_instance();
@@ -719,16 +745,39 @@ bool KNCustomizedOp::fingerprint(void) {
                                    bgraph.smem_offset));
   }
 
-  compute_customizedop_fingerprint<<<bgraph.grid_dim,
-                                     bgraph.block_dim,
-                                     bgraph.smem_offset>>>(
-      new_params,
-      bgraph.forloop_range,
-      dmm->fp_base_ptr[gpu_id],
-      dmm->exp_lookup_table,
-      dmm->div_p_lookup_table,
-      dmm->div_q_lookup_table);
+  for (int gpu_id = 0; gpu_id < kgraph->gpu_dim.x; gpu_id++) {
+    compute_customizedop_fingerprint<<<bgraph.grid_dim,
+                                       bgraph.block_dim,
+                                       bgraph.smem_offset>>>(
+        new_params,
+        bgraph.forloop_range,
+        dmm->fp_base_ptr[gpu_id],
+        dmm->exp_lookup_table,
+        dmm->div_p_lookup_table,
+        dmm->div_q_lookup_table);
+  }
   checkCUDA(cudaDeviceSynchronize());
+  // Process epilogue
+  for (auto const &op : bgraph.operators) {
+    if (op->op_type == mirage::type::TB_OUTPUT_OP) {
+      mirage::threadblock::TBOutputOp const *output_op =
+          static_cast<mirage::threadblock::TBOutputOp const *>(op);
+      if (output_op->epilogue != mirage::type::TB_EPILOGUE_NONE) {
+        mirage::utils::FpPointerList fp_ptr_list;
+        for (int gpu_id = 0; gpu_id < kgraph->gpu_dim.x; gpu_id++) {
+          fp_ptr_list.ptrs[gpu_id] = reinterpret_cast<mirage::type::FPType *>(
+              dmm->fp_base_ptr[gpu_id] + output_op->dtensor.fp_offset);
+        }
+        int num_elements = output_op->dtensor.num_elements();
+        int const num_threads_per_blk = 1024;
+        int num_blocks =
+            (num_elements + num_threads_per_blk - 1) / num_threads_per_blk;
+        compute_epilogue_fingerprint<<<num_blocks, num_threads_per_blk>>>(
+            fp_ptr_list, output_op->epilogue, kgraph->gpu_dim.x, num_elements);
+        checkCUDA(cudaDeviceSynchronize());
+      }
+    }
+  }
   return true;
 }
 

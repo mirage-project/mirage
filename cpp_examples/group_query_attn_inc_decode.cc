@@ -134,7 +134,8 @@ int main(int argc, char **argv) {
 
   auto et = std::chrono::steady_clock::now();
 
-  printf("Search time = %.4lfsec\n", std::chrono::duration<double>(et - st).count());
+  printf("Search time = %.4lfsec\n",
+         std::chrono::duration<double>(et - st).count());
 
   return 0;
 }

@@ -27,9 +27,9 @@ using namespace mirage::type;
 using namespace mirage::config;
 
 bool KNMatmulOp::profile(ProfileResult &result) {
-  // TODO: currently assert a single GPU
-  assert(kgraph->gpu_dim.x == 1);
+  // Only launch kernel on a single GPU for profiling
   int gpu_id = 0;
+  checkCUDA(cudaSetDevice(0));
 
   float alpha = 1.0f, beta = 0.0f;
   mirage::kernel::DeviceMemoryManager *dmm =
@@ -178,9 +178,9 @@ __global__ void compute_matmul_fingerprint(mirage::type::FPType *A_ptr,
 }
 
 bool KNMatmulOp::fingerprint(void) {
-  // TODO: currently assert a single GPU
-  assert(kgraph->gpu_dim.x == 1);
-  int gpu_id = 0;
+  // Currently assert a single GPU
+  assert(kgraph->gpu_dim.y == 1);
+  assert(kgraph->gpu_dim.z == 1);
 
   int num_dims = input_tensors[0].num_dims;
   int row_A = input_tensors[0].dim[num_dims - 2];
@@ -201,15 +201,20 @@ bool KNMatmulOp::fingerprint(void) {
       (row_C * column_C + num_threads_per_blk - 1) / num_threads_per_blk;
   mirage::kernel::DeviceMemoryManager *dmm =
       mirage::kernel::DeviceMemoryManager::get_instance();
-  mirage::type::FPType *A_fp_ptr = reinterpret_cast<mirage::type::FPType *>(
-      dmm->fp_base_ptr[gpu_id] + input_tensors[0].fp_offset);
-  mirage::type::FPType *B_fp_ptr = reinterpret_cast<mirage::type::FPType *>(
-      dmm->fp_base_ptr[gpu_id] + input_tensors[1].fp_offset);
-  mirage::type::FPType *C_fp_ptr = reinterpret_cast<mirage::type::FPType *>(
-      dmm->fp_base_ptr[gpu_id] + output_tensors[0].fp_offset);
-  compute_matmul_fingerprint<<<num_blocks, num_threads_per_blk>>>(
-      A_fp_ptr, B_fp_ptr, C_fp_ptr, num_batches, row_C, column_C, row_B);
-  checkCUDA(cudaDeviceSynchronize());
+  // Use GPU 0 for computing fingerprint
+  checkCUDA(cudaSetDevice(0));
+  for (int gpu_id = 0; gpu_id < kgraph->gpu_dim.x; gpu_id++) {
+    mirage::type::FPType *A_fp_ptr = reinterpret_cast<mirage::type::FPType *>(
+        dmm->fp_base_ptr[gpu_id] + input_tensors[0].fp_offset);
+    mirage::type::FPType *B_fp_ptr = reinterpret_cast<mirage::type::FPType *>(
+        dmm->fp_base_ptr[gpu_id] + input_tensors[1].fp_offset);
+    mirage::type::FPType *C_fp_ptr = reinterpret_cast<mirage::type::FPType *>(
+        dmm->fp_base_ptr[gpu_id] + output_tensors[0].fp_offset);
+    compute_matmul_fingerprint<<<num_blocks, num_threads_per_blk>>>(
+        A_fp_ptr, B_fp_ptr, C_fp_ptr, num_batches, row_C, column_C, row_B);
+    checkCUDA(cudaDeviceSynchronize());
+  }
+  checkCUDA(cudaSetDevice(0));
   return true;
 }
 

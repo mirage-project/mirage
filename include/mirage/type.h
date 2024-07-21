@@ -48,6 +48,7 @@ enum KNOperatorType {
   KN_ADD_OP = 1008,
   KN_MUL_OP = 1009,
   KN_DIV_OP = 1010,
+  KN_ALLREDUCE_OP = 1011,
   KN_CUSTOMIZED_OP = 1999,
 };
 
@@ -63,6 +64,7 @@ NLOHMANN_JSON_SERIALIZE_ENUM(KNOperatorType,
                                  {KN_ADD_OP, "kn_add_op"},
                                  {KN_MUL_OP, "kn_mul_op"},
                                  {KN_DIV_OP, "kn_div_op"},
+                                 {KN_ALLREDUCE_OP, "kn_allreduce_op"},
                                  {KN_CUSTOMIZED_OP, "kn_customized_op"},
                              })
 
