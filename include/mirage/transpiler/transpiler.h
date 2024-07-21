@@ -30,6 +30,11 @@ namespace transpiler {
 
 using std::vector;
 
+namespace kn = mirage::kernel;
+namespace tb = mirage::threadblock;
+using dguid_t = decltype(kn::DTensor::guid);
+using sguid_t = decltype(tb::STensor::guid);
+
 class Transpiler {
 private:
   // The kernel graph
@@ -38,6 +43,7 @@ private:
   // User-provided configuration
   TranspilerConfig config;
   vector<vector<size_t>> input_strides;
+  vector<kernel::DTensor const *> output_tensors;
   vector<size_t> output_stride;
 
   // Distributed configuration
@@ -49,20 +55,26 @@ private:
     use_nvshmem = num_gpus > 1;
   }
 
-  // DTensor metadata
+  // Tensor metadata
+  // A list of all distinct (by guid) DTensors and STensors
+  std::vector<kn::DTensor> all_dtensors;
+  std::vector<tb::STensor> all_stensors;
   std::unordered_map<decltype(kernel::DTensor::guid), DTensorMeta>
       dtensor_metas; // DTensor guid -> metadata
-  void resolve_dtensor_meta();
-
-  // STensor metadata
   std::unordered_map<decltype(threadblock::STensor::guid), STensorMeta>
       stensor_metas; // STensor guid -> metadata
-  void resolve_stensor_meta();
+  void resolve_tensor_meta();
+  void resolve_tensor_layout();
+
+  // Memory allocation metadata
+  size_t d_buf_size; // Size of the buffer for intermediate DTensors
+  void plan_tensor_memory();
 
   void resolve_all_config() {
     this->resolve_distributed_config();
-    this->resolve_dtensor_meta();
-    this->resolve_stensor_meta();
+    this->resolve_tensor_meta();
+    this->resolve_tensor_layout();
+    this->plan_tensor_memory();
   }
 
   // Utility functions for transpiling
@@ -74,10 +86,10 @@ public:
   // Initialize the transpiler and resolve all configurations
   Transpiler(kernel::Graph const *g,
              TranspilerConfig const &config,
-             vector<vector<size_t>> input_strides,
-             vector<size_t> output_stride)
+             vector<vector<size_t>> const &input_strides,
+             vector<kernel::DTensor const *> const &output_tensors)
       : g(g), config(config), input_strides(input_strides),
-        output_stride(output_stride) {
+        output_tensors(output_tensors) {
     // Currently we only support GPUs with compute capability >= 8.0 (A100+)
     // TODO(intlsy): Support older GPUs
     if (config.target_cc < GPU_CC::A100) {

@@ -28,6 +28,9 @@ struct TranspileResult {
 
   // The size of the buffer (should be an array on GPU), in bytes
   size_t buf_size;
+
+  // Expected strides for output tensors
+  std::vector<std::vector<size_t>> output_strides;
 };
 
 } // namespace transpiler

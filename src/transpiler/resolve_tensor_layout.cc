@@ -1,0 +1,364 @@
+/* Copyright 2023-2024 CMU
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#include "mirage/transpiler/transpiler.h"
+
+#include <stdexcept>
+#include <unordered_map>
+#include <unordered_set>
+
+#include "z3++.h"
+
+#include "mirage/kernel/customized.h"
+#include "mirage/threadblock/graph.h"
+#include "mirage/threadblock/matmul.h"
+#include "mirage/threadblock/reduction.h"
+#include "mirage/transpiler/utils.h"
+
+namespace mirage {
+namespace transpiler {
+
+// Pre-defined cost for every nonperfected operator
+namespace cost {
+using cost_t = int;
+
+// In kernel-level reduction OP, the cost when innermost_dim == reduction_dim
+cost_t KN_REDUCTION_INNERMOST_EQ_REDUC_DIM = 4;
+
+// In threadblock level input OP, the cost when the stensor do not have the same
+// innermost dim as the source dtensor
+cost_t TB_INPUT_NO_WIDE_COPY = 4;
+
+// Make a dim swizzled
+cost_t SWIZZLE_DIM = 1;
+
+} // namespace cost
+
+// Resolve all tensor layouts
+// Determine the innermost dimensions for all dtensors and stensors
+// Determine the swizzled dimensions for all stensors
+// Determine strides for all tensors
+void Transpiler::resolve_tensor_layout() {
+  using dguid_t = decltype(kn::DTensor::guid);
+  using sguid_t = decltype(tb::STensor::guid);
+
+  // Create z3 context and optimizer
+  z3::context ctx;
+  z3::optimize opt(ctx);
+  z3::expr_vector costs(
+      ctx); // The optimize objective should be the sum of all costs
+
+  // Create variables denoting whether a dimension is the innermost dimension
+  // or a swizzled dimension
+  // di_x_y denotes whether the y-th dimension of DTensor x is the innermost dim
+  // si_x_y denotes whether the y-th dimension of STensor x is the innermost dim
+  // sw_x_y denotes whether the y-th dimension of STensor x is swizzled
+  std::unordered_map<dguid_t, std::vector<z3::expr>> d_innermost_vars;
+  std::unordered_map<sguid_t, std::vector<z3::expr>> s_innermost_vars;
+  std::unordered_map<sguid_t, std::vector<z3::expr>> swizzled_vars;
+  for (kn::DTensor const &dtensor : all_dtensors) {
+    int num_dims = dtensor.num_dims;
+    for (int i = 0; i < num_dims; ++i) {
+      std::string var_name = fmt("di_$_$", dtensor.guid, i);
+      d_innermost_vars[dtensor.guid].push_back(
+          ctx.bool_const(var_name.c_str()));
+    }
+  }
+  for (tb::STensor const &stensor : all_stensors) {
+    int num_dims = stensor.num_dims;
+    for (int i = 0; i < num_dims; ++i) {
+      std::string var_name = fmt("si_$_$", stensor.guid, i);
+      s_innermost_vars[stensor.guid].push_back(
+          ctx.bool_const(var_name.c_str()));
+    }
+    for (int i = 0; i < num_dims; ++i) {
+      std::string var_name = fmt("sw_$_$", stensor.guid, i);
+      swizzled_vars[stensor.guid].push_back(ctx.bool_const(var_name.c_str()));
+    }
+  }
+
+  // Create equations that limits the number of innermost dimensions to 1,
+  // and the limitation that the innermost dimension of a STensor cannot be
+  // swizzled
+  for (kn::DTensor const &dtensor : all_dtensors) {
+    int num_dims = dtensor.num_dims;
+    // Every DTensor can only have 1 innermost dim
+    z3::expr_vector innermost_exprs(ctx);
+    for (int i = 0; i < num_dims; ++i) {
+      innermost_exprs.push_back(d_innermost_vars[dtensor.guid][i]);
+    }
+    opt.add(z3::atmost(innermost_exprs, 1));
+  }
+  for (tb::STensor const &stensor : all_stensors) {
+    int num_dims = stensor.num_dims;
+    // Every STensor can only have 1 innermost dim
+    z3::expr_vector innermost_exprs(ctx);
+    for (int i = 0; i < num_dims; ++i) {
+      innermost_exprs.push_back(s_innermost_vars[stensor.guid][i]);
+    }
+    opt.add(z3::atmost(innermost_exprs, 1));
+    // The innermost dim of a STensor cannot be swizzled
+    for (int i = 0; i < num_dims; ++i) {
+      opt.add(!swizzled_vars[stensor.guid][i] ||
+              !s_innermost_vars[stensor.guid][i]);
+    }
+    // Cost for swizzling a dimension
+    for (int i = 0; i < num_dims; ++i) {
+      costs.push_back(cost::SWIZZLE_DIM * swizzled_vars[stensor.guid][i]);
+    }
+  }
+
+  // Constraits & costs for every kernel-level operator
+  int cur_input_idx = 0;
+  for (kn::KNOperator *const op : this->g->operators) {
+    switch (op->op_type) {
+      case type::KN_INPUT_OP: {
+        // Input OP
+        // The innermost dim of the input tensor must match the provided layout
+        vector<size_t> const &cur_stride = this->input_strides[cur_input_idx];
+        kn::DTensor const &tensor = op->output_tensors.at(0);
+        if (tensor.num_dims != (int)cur_stride.size()) {
+          throw std::runtime_error(
+              fmt("The number of dimensions of the stride of the $th tensor "
+                  "($) does not match the tensor's num_dims ($)",
+                  cur_input_idx,
+                  cur_stride.size(),
+                  tensor.num_dims));
+        }
+        int innermost_dim = find_innermost_dim(cur_stride);
+        if (innermost_dim == -1) {
+          throw std::runtime_error(
+              fmt("No innermost dim found for input tensor $", cur_input_idx));
+        }
+        opt.add(d_innermost_vars[tensor.guid][innermost_dim]);
+        cur_input_idx += 1;
+        break;
+      }
+      case type::KN_MATMUL_OP: {
+        // Matmul OP
+        // The innermost dim of the input & output tensors must be within the
+        // last two dims
+        kn::DTensor const &lhs = op->input_tensors.at(0);
+        kn::DTensor const &rhs = op->input_tensors.at(1);
+        kn::DTensor const &output = op->output_tensors.at(0);
+        for (kn::DTensor const &tensor : {lhs, rhs, output}) {
+          int num_dims = tensor.num_dims;
+          assert(num_dims >= 2);
+          opt.add(d_innermost_vars[tensor.guid][num_dims - 1] ||
+                  d_innermost_vars[tensor.guid][num_dims - 2]);
+        }
+        break;
+      }
+      case type::KN_REDUCTION_0_OP:
+      case type::KN_REDUCTION_1_OP:
+      case type::KN_REDUCTION_2_OP: {
+        // Reduction OP
+        int reduc_dim = op->op_type - type::KN_REDUCTION_0_OP;
+        kn::DTensor const &input = op->input_tensors.at(0);
+        kn::DTensor const &output = op->output_tensors.at(0);
+        assert(input.num_dims == output.num_dims);
+        // Currently the runtime requires that the input & output have the same
+        // innermost dim
+        for (int i = 0; i < input.num_dims; ++i) {
+          opt.add(d_innermost_vars[input.guid][i] ==
+                  d_innermost_vars[output.guid][i]);
+        }
+        // If the innermost dim == the reduction dim, add some extra cost
+        costs.push_back(cost::KN_REDUCTION_INNERMOST_EQ_REDUC_DIM *
+                        d_innermost_vars[input.guid][reduc_dim]);
+        break;
+      }
+      case type::KN_EXP_OP: {
+        // Elementwise Unary OP
+        kn::DTensor const &input = op->input_tensors.at(0);
+        kn::DTensor const &output = op->output_tensors.at(0);
+        // Currently the runtime requires that the input & output have the same
+        // innermost dim
+        assert(input.num_dims == output.num_dims);
+        for (int i = 0; i < input.num_dims; ++i) {
+          opt.add(d_innermost_vars[input.guid][i] ==
+                  d_innermost_vars[output.guid][i]);
+        }
+        break;
+      }
+      case type::KN_ADD_OP:
+      case type::KN_MUL_OP:
+      case type::KN_DIV_OP: {
+        // Elementwise Binary OP
+        kn::DTensor const &lhs = op->input_tensors.at(0);
+        kn::DTensor const &rhs = op->input_tensors.at(1);
+        kn::DTensor const &output = op->output_tensors.at(0);
+        // Currently the runtime requires that the input & output have the same
+        // innermost dim
+        assert(lhs.num_dims == rhs.num_dims && lhs.num_dims == output.num_dims);
+        for (int i = 0; i < lhs.num_dims; ++i) {
+          opt.add(d_innermost_vars[lhs.guid][i] ==
+                  d_innermost_vars[output.guid][i]);
+          opt.add(d_innermost_vars[rhs.guid][i] ==
+                  d_innermost_vars[output.guid][i]);
+        }
+        break;
+      }
+      case type::KN_CUSTOMIZED_OP: {
+        // Will be proceeded later, in the next loop
+        assert(0 && "Not supported now");
+        break;
+      }
+      default: {
+        assert("Unexpected kernel op type");
+      }
+    }
+  }
+
+  // Constraits & costs for every threadblock-level operator
+  for (kn::KNOperator const *kn_op : this->g->operators) {
+    if (kn_op->op_type == type::KN_CUSTOMIZED_OP) {
+      kn::KNCustomizedOp const *kn_customized_op =
+          dynamic_cast<kn::KNCustomizedOp const *>(kn_op);
+      tb::Graph const &tb_graph = kn_customized_op->bgraph;
+      tb::ExecutionPlan const &tb_plan = kn_customized_op->plan;
+      for (tb::TBOperator const *tb_op : tb_graph.operators) {
+        switch (tb_op->op_type) {
+          case type::TB_INPUT_OP: {
+            // TB input operator
+            tb::TBInputOp const *tb_input_op =
+                dynamic_cast<tb::TBInputOp const *>(tb_op);
+            kn::DTensor const &input = tb_input_op->dtensor;
+            tb::STensor const &output = tb_input_op->output_tensors.at(0);
+            if (this->config.target_cc < GPU_CC::T4) {
+              // Want to leverage	copying in uint128_t, so need the same
+              // innermost dim as the dtensor
+            }
+          }
+          case type::TB_MATMUL_OP: {
+            break;
+          }
+          case type::TB_REDUCTION_0_OP:
+          case type::TB_REDUCTION_1_OP:
+          case type::TB_REDUCTION_2_OP:
+          case type::TB_REDUCTION_0_TO_DIMX_OP:
+          case type::TB_REDUCTION_1_TO_DIMX_OP:
+          case type::TB_REDUCTION_2_TO_DIMX_OP: {
+            break;
+          }
+          default:
+            break;
+        }
+      }
+    }
+  }
+
+  // Optimize
+  if (costs.empty()) {
+    costs.push_back(ctx.int_val(0));
+  }
+  z3::expr objective = z3::sum(costs);
+  opt.maximize(objective);
+  z3::check_result check_result = opt.check();
+  if (check_result == z3::unsat) {
+    // No valid layout found
+    throw std::runtime_error("Z3 returned unsat. No valid layout found.");
+  } else if (check_result == z3::unknown) {
+    // ???
+    throw std::runtime_error("Z3 returned unknown.");
+  }
+  assert(check_result == z3::sat);
+
+  // Retrieve the result
+  z3::model m = opt.get_model();
+  for (kn::DTensor const &dtensor : all_dtensors) {
+    int num_dims = dtensor.num_dims;
+    int innermost_dim = -1;
+    for (int i = 0; i < num_dims; ++i) {
+      z3::expr t = m.eval(d_innermost_vars[dtensor.guid][i]);
+      if (m.eval(d_innermost_vars[dtensor.guid][i]).is_true()) {
+        innermost_dim = i;
+        break;
+      }
+    }
+    assert(innermost_dim != -1);
+    this->dtensor_metas[dtensor.guid].innermost_dim = innermost_dim;
+  }
+  for (tb::STensor const &stensor : all_stensors) {
+    int num_dims = stensor.num_dims;
+    int innermost_dim = -1;
+    for (int i = 0; i < num_dims; ++i) {
+      if (m.eval(s_innermost_vars[stensor.guid][i]).is_true()) {
+        innermost_dim = i;
+        break;
+      }
+    }
+    assert(innermost_dim != -1);
+    this->stensor_metas[stensor.guid].innermost_dim = innermost_dim;
+    for (int i = 0; i < num_dims; ++i) {
+      if (m.eval(swizzled_vars[stensor.guid][i]).is_true()) {
+        this->stensor_metas[stensor.guid].swizzled_dims.push_back(i);
+      }
+    }
+  }
+
+  // At this point we have resolved all innermost dimensions
+  // Calculate strides for all tensors
+  for (kn::DTensor const &dtensor : all_dtensors) {
+    DTensorMeta &meta = this->dtensor_metas[dtensor.guid];
+    int num_dims = dtensor.num_dims;
+    int innermost_dim = meta.innermost_dim;
+    if (meta.is_input) {
+      // Input tensor
+      // The strides are already provided
+      assert(this->input_strides[meta.input_idx].size() == (size_t)num_dims);
+      for (int i = 0; i < num_dims; ++i) {
+        meta.strides[i] = this->input_strides[meta.input_idx][i];
+      }
+      assert(meta.strides[innermost_dim] == 1);
+    } else {
+      // Intermediate tensor or output tensor
+      // The strides are calculated from the innermost dim
+      // The innermost dim has stride 1
+      size_t alignment = get_num_elems_in_16B(dtensor.data_type);
+      meta.strides[innermost_dim] = 1;
+      size_t cur_stride =
+          round_to_multiple((size_t)dtensor.dim[innermost_dim], alignment);
+      for (int i = num_dims - 1; i >= 0; --i) {
+        if (i == innermost_dim) {
+          continue;
+        }
+        meta.strides[i] = cur_stride;
+        size_t cur_dim = (size_t)dtensor.dim[i];
+        cur_stride *= round_to_multiple(cur_dim, alignment);
+      }
+    }
+  }
+  for (tb::STensor const &stensor : all_stensors) {
+    STensorMeta &meta = this->stensor_metas[stensor.guid];
+    int num_dims = stensor.num_dims;
+    int innermost_dim = meta.innermost_dim;
+    size_t alignment = get_num_elems_in_16B(stensor.data_type);
+    meta.strides[innermost_dim] = 1;
+    size_t cur_stride =
+        round_to_multiple((size_t)stensor.dim[innermost_dim], alignment);
+    for (int i = num_dims - 1; i >= 0; --i) {
+      if (i == innermost_dim) {
+        continue;
+      }
+      meta.strides[i] = cur_stride;
+      size_t cur_dim = (size_t)stensor.dim[i];
+      cur_stride *= round_to_multiple(cur_dim, alignment);
+    }
+  }
+}
+
+} // namespace transpiler
+} // namespace mirage
