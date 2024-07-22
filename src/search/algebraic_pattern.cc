@@ -118,10 +118,6 @@ bool AlgebraicPattern::subpattern_to(AlgebraicPattern const &other) const {
   bool result = s.check() == z3::unsat;
   {
     std::unique_lock<std::shared_mutex> lock(solver_mutex);
-    if (rand() % 100 == 1) {
-      std::cerr << "Solver: " << std::endl;
-      std::cerr << s << std::endl;
-    }
     cached_results[str_pair] = result;
   }
   return result;
