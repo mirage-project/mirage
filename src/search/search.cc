@@ -141,9 +141,9 @@ KernelGraphGenerator::KernelGraphGenerator(Checkpoint const &checkpoint,
       best_profile_result(checkpoint.best_profile_result),
       config(checkpoint.config), dim_strategy(DimStrategy(checkpoint.config)),
       filename(filename),
+      generated_graphs(checkpoint.generated_graphs), 
       num_thread(std::min((int)std::thread::hardware_concurrency(),
-                          MAX_SEARCH_THREAD)),
-      timeout(1000), generated_graphs(checkpoint.generated_graphs),
+                          MAX_SEARCH_THREAD)), timeout(1000),
       num_total_kernel_graphs(checkpoint.num_total_kernel_graphs),
       num_total_random_tests(checkpoint.num_total_kernel_graphs),
       num_valid_kernel_graphs(checkpoint.num_valid_kernel_graphs) {}
@@ -269,7 +269,7 @@ bool KernelGraphGenerator::dequeue(SearchContext &c) {
 
 void KernelGraphGenerator::generate_next_operator(SearchContext const &c) {
   ++num_total_states;
-  if (num_total_states % 10000 == 1) {
+  if (num_total_states % 1000 == 1) {
     printf("Total states explored: %d.\n", num_total_states.load());
     printf("Search queue size: %lu\n", search_queue.size());
   }

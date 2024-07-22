@@ -17,7 +17,7 @@ bool contains(Container const &c, typename Container::value_type const &e) {
 
 template <typename C>
 bool contains_key(C const &m, typename C::key_type const &k) {
-  return m.find(k) != m.end();
+  return m.count(k) > 0;
 }
 
 template <typename T>
