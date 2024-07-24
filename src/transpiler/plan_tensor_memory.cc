@@ -55,7 +55,8 @@ size_t get_tensor_phy_size(int num_dims,
   size_t result = 0;
   for (int i = 0; i < num_dims; ++i) {
     size_t t_result =
-        round_to_multiple((size_t)dims[i], alignment) * strides[i];
+        (dims[i] == 1 ? 1 : round_to_multiple((size_t)dims[i], alignment)) *
+        strides[i];
     result = std::max(result, t_result);
   }
   return result * type::get_datatype_size(datatype);
@@ -69,12 +70,12 @@ void Transpiler::plan_tensor_memory() {
     for (kn::DTensor &dtensor : all_dtensors) {
       dguid_t guid = dtensor.guid;
       DTensorMeta &meta = dtensor_metas[guid];
-      if (meta.is_input || meta.is_output) {
-        continue;
-      }
-      size_t size = get_tensor_phy_size(
+      size_t phy_size = get_tensor_phy_size(
           dtensor.num_dims, dtensor.dim, meta.strides, dtensor.data_type);
-      meta.addr = planner.allocate(size);
+      meta.phy_size = phy_size;
+      if (!meta.is_input && !meta.is_output) {
+        meta.addr = planner.allocate(phy_size);
+      }
     }
     this->d_buf_size = planner.get_buf_size();
   }
@@ -100,6 +101,7 @@ void Transpiler::plan_tensor_memory() {
           meta.addr = planner.allocate(size);
         }
       }
+      this->custom_op_metas[cur_op].smem_size = planner.get_buf_size();
     }
   }
 }

@@ -24,6 +24,40 @@
 namespace mirage {
 namespace transpiler {
 
+// Configuration for the transpiler
+struct TranspilerConfig {
+  // Target compute capability, should be compute_capability*10, e.g. A100 is 80
+  // and H100 is 90
+  int target_cc;
+};
+
+// Directive for an output tensor
+// The Python interface is responsible for allocating the tensor and passing
+// the obtained pointer to `execute_mugraph`. So during transpilation, we must
+// tell the Python interface how to allocate the tensor
+struct OutputTensorDirective {
+  // The physical size needed
+  size_t alloc_size;
+
+  // The shape
+  std::vector<int> shape;
+
+  // The stride
+  std::vector<size_t> strides;
+};
+
+// Result returned by the transpiler
+struct TranspileResult {
+  // The generated CUDA code
+  std::string code;
+
+  // The size of the buffer (should be an array on GPU), in bytes
+  size_t buf_size;
+
+  // Directives for output tensors
+  std::vector<OutputTensorDirective> output_directives;
+};
+
 // Metadata for one DTensor during transpiling
 // DTensors with the same `guid` share one DTensorMeta
 struct DTensorMeta {
@@ -51,6 +85,11 @@ struct DTensorMeta {
   // may not be aligned for input tensors
   // TODO(intlsy) Allow unaligned input tensors
   size_t addr;
+
+  // Physical size needed for the tensor
+  // For output tensors, we will return it back to the Python interface so that
+  // it knows how much memory to allocate
+  size_t phy_size;
 };
 
 // Metadata for STensors during transpiling
@@ -68,6 +107,12 @@ struct STensorMeta {
   // Strides of each dimension, in number of elements
   // Must be padded to multiple of 8
   size_t strides[threadblock::MAX_TENSOR_DIMS];
+};
+
+// Metadata for a KN_CUSTOMIZED_OP
+struct KNCustomizedOPMeta {
+  // Size of shared memory needed, in bytes
+  size_t smem_size;
 };
 
 } // namespace transpiler
