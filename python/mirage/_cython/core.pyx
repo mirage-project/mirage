@@ -311,7 +311,7 @@ def optimize(PyGraph input_graph, *, int max_num_new_graphs = 1024, list imaps =
 
 # Generate CUDA program for a uGraph
 # Return (CUDA code, buffer size in bytes)
-def generate_cuda_program(PyGraph input_graph, *, int target_cc, list input_strides, list output_tensors) -> (str, int, list[list[int]]):
+def generate_cuda_program(PyGraph input_graph, *, int target_cc, list input_strides, list output_tensors) -> dict:
     # Set transpiler_config
     cdef TranspilerConfig transpiler_config
     transpiler_config.target_cc = target_cc
@@ -335,13 +335,25 @@ def generate_cuda_program(PyGraph input_graph, *, int target_cc, list input_stri
     # Call transpile
     cdef TranspileResult result = transpile(input_graph.p_graph, transpiler_config, cinput_strides, coutput_tensors)
 
-    # Get output_strides
-    cdef list[list[int]] output_strides = list()
-    cdef list[int] cur_output_strides
-    for i in range(len(result.output_strides)):
+    # Get output directives
+    cdef list[dict] output_directives = list()
+    # cdef list[int] cur_output_shape
+    # cdef list[int] cur_output_strides
+    for i in range(len(result.output_directives)):
+        cur_output_shape = list()
         cur_output_strides = list()
-        for j in range(len(result.output_strides[i])):
-            cur_output_strides.append(result.output_strides[i][j])
-        output_strides.append(cur_output_strides)
+        num_dims = len(result.output_directives[i].shape)
+        for j in range(num_dims):
+            cur_output_shape.append(result.output_directives[i].shape[j])
+            cur_output_strides.append(result.output_directives[i].strides[j])
+        output_directives.append({
+            "alloc_size": result.output_directives[i].alloc_size,
+            "shape": cur_output_shape,
+            "strides": cur_output_strides
+        })
 
-    return (result.code.decode("UTF-8"), result.buf_size, output_strides)
+    return {
+        "code": result.code.decode("UTF-8"),
+        "buf_size": result.buf_size,
+        "output_directives": output_directives
+    }

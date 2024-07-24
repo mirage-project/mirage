@@ -25,6 +25,131 @@ using std::string;
 namespace kn = mirage::kernel;
 namespace tb = mirage::threadblock;
 
+// A helper function for mov_inner_dim_and_get_layout
+template <typename T>
+static std::vector<T>
+    mov_to_last_and_reverse(T const *vec, size_t numel, int idx) {
+  std::vector<T> result;
+  result.reserve(numel);
+  result.insert(result.end(), vec, vec + idx);
+  result.insert(result.end(), vec + idx + 1, vec + numel);
+  result.push_back(vec[idx]);
+  std::reverse(result.begin(), result.end());
+  return result;
+}
+
+// Move the innermost dim to the last dim, and then flip the order of the dims
+// and strides, and finally format it as a string.
+// If innermost_dim is -1, do not move the innermost dim.
+// Assume the tensor has N dimensions and the innermost dim is i, then the
+// function is equivalent to torch.permute(tensor, [i, N, N-1, ..., i+1, i-1,
+// i-2, ..., 0]) This function is helpful for element-wise ops, since the
+// processing order of elements do not affect the correctness.
+static string mov_last_reverse_and_get_layout(kernel::DTensor const &dtensor,
+                                              DTensorMeta const &meta,
+                                              int innermost_dim) {
+  if (innermost_dim == -1) {
+    innermost_dim = dtensor.num_dims - 1;
+  }
+  assert(0 <= innermost_dim && innermost_dim < dtensor.num_dims);
+  return fmt("Layout<Shape<$>, Stride<$>>",
+             map_to_cute_int(mov_to_last_and_reverse(
+                 dtensor.dim, dtensor.num_dims, innermost_dim)),
+             map_to_cute_int(mov_to_last_and_reverse(
+                 meta.strides, dtensor.num_dims, innermost_dim)));
+}
+
+static string get_cute_layout(kernel::DTensor const &dtensor,
+                              DTensorMeta const &meta) {
+  return mov_last_reverse_and_get_layout(dtensor, meta, -1);
+}
+
+// The following code are related to threadblock graph transpilation
+
+// Transpile a custom KN operator (i.e. a custom block graph) into CUDA code
+// Will return a CustomOPTranspileResult object. See comments in transpiler.h
+// for more details
+Transpiler::CustomOPTranspileResult
+    Transpiler::transpile_kn_custom_op(kn::KNCustomizedOp const *op) {
+  tb::Graph const &g = op->bgraph;
+  tb::ExecutionPlan const &plan = op->plan;
+
+  static int custom_kernel_idx_counter = 0;
+  int cur_custom_kernel_idx = custom_kernel_idx_counter++;
+  string func_name = fmt("custom_kernel_$", cur_custom_kernel_idx);
+
+  CodeKeeper code;
+  code.e(
+      "__global__ void $($, $) {",
+      func_name,
+      map<kn::DTensor, string>(op->output_tensors,
+                               [](kn::DTensor const &dtensor) -> string {
+                                 return fmt("half_t* __restrict__ dtensor$_ptr",
+                                            dtensor.guid);
+                               }),
+      map<kn::DTensor, string>(
+          op->input_tensors, [](kn::DTensor const &dtensor) -> string {
+            return fmt("half_t const* __restrict__ dtensor$_ptr", dtensor.guid);
+          }));
+  code.e("extern __shared__ char* buf[];");
+
+  // Define DTensor as cute::Tensor
+  for (kn::DTensor const &dtensor :
+       Combine(op->output_tensors, op->input_tensors)) {
+    DTensorMeta const &meta = dtensor_metas.at(dtensor.guid);
+    dguid_t guid = dtensor.guid;
+    code.e("using DTensor$Layout = $;", guid, get_cute_layout(dtensor, meta));
+    code.e("Tensor dtensor$ = make_tensor(make_gmem_ptr(dtensor$_ptr), "
+           "DTensor$Layout{});",
+           guid,
+           guid,
+           guid);
+  }
+
+  // Define G2SCopy for all input STensors
+  // For input STensor that does not have a forloop_dim, read it and save in
+  // shared mem
+  for (tb::TBOperator const *op : g.operators) {
+    if (op->op_type == type::TB_INPUT_OP) {
+      tb::TBInputOp const *cur_op = dynamic_cast<tb::TBInputOp const *>(op);
+      kn::DTensor const &dtensor = cur_op->dtensor;
+      tb::STensor const &stensor = cur_op->output_tensors.at(0);
+      DTensorMeta const &dtensor_meta = dtensor_metas.at(dtensor.guid);
+      STensorMeta const &stensor_meta = stensor_metas.at(stensor.guid);
+      assert(dtensor.num_dims == stensor.num_dims);
+      assert(dtensor.data_type == stensor.data_type);
+      int num_dims = dtensor.num_dims;
+
+      // Decide the copy atom to use
+      bool is_all_stride_aligned_16B = true;
+      size_t alignment = get_num_elems_in_16B(dtensor.data_type);
+      for (int i = 0; i < num_dims; ++i) {
+        size_t stride = dtensor_meta.strides[i];
+        is_all_stride_aligned_16B &= (stride % alignment == 0 || stride == 1);
+      }
+      bool use_chunked_copy = is_all_stride_aligned_16B;
+      bool use_async_copy =
+          is_all_stride_aligned_16B && this->config.target_cc >= GPU_CC::A100;
+      if (cur_op->forloop_dim < 0) {
+      }
+    }
+  }
+
+  // Declare the for loop
+  // TODO Remove the loop when `plan.forloop_range` is 1
+  assert(plan.forloop_range >= 1);
+  code.e("for (int for_idx = 0; for_idx < $; for_idx++) {", plan.forloop_range);
+
+  // Declare STensor fragments
+  code.e("}"); // For loop
+
+  code.e("}"); // kernel
+
+  return Transpiler::CustomOPTranspileResult{func_name, code.to_string()};
+}
+
+// The following code are related to kernel graph transpilation
+
 // Get the pointer of a DTensor. The tensor may be an input/output/intermediate
 // one Return: (pointer_var_name, code_to_get_the_pointer) For example, when
 // requesting for an input tensor, may return:
@@ -58,10 +183,17 @@ TranspileResult Transpiler::generate_code() {
   header.e("#include \"runtime.h\"");
   header.e("using namespace cute;");
 
-  CodeKeeper exec;
-  exec.e("void execute_mugraph(std::vector<void const *> input_tensors, "
-         "std::vector<void*> output_tensors"
-         ", void* buf) {");
+  CodeKeeper
+      custom_kernels; // This keeps all code for custom kernels (KNCustomizedOp)
+  CodeKeeper init;    // This keeps all code in the `_init` function (e.g.
+                      // cudaFuncSetAttribute)
+  CodeKeeper exec;    // This keeps all code in the `_execute_mugraph` function
+
+  init.e("static void _init() {");
+  exec.e(
+      "static void _execute_mugraph(std::vector<void const *> input_tensors, "
+      "std::vector<void*> output_tensors"
+      ", void* buf) {");
   for (kn::KNOperator *const op : g->operators) {
     std::string op_type_str;
     to_json(op_type_str, op->op_type);
@@ -156,9 +288,11 @@ TranspileResult Transpiler::generate_code() {
         // Assemble the new shape and stride
         // We move the innermost dim to the first dim to coalesce global mem
         // access
-        int shift_amount = meta_in0.innermost_dim;
-        string in0_layout = shift_and_get_layout(in0, meta_in0, shift_amount);
-        string out0_layout = shift_and_get_layout(in0, meta_in0, shift_amount);
+        int innermost_dim = meta_in0.innermost_dim;
+        string in0_layout =
+            mov_last_reverse_and_get_layout(in0, meta_in0, innermost_dim);
+        string out0_layout =
+            mov_last_reverse_and_get_layout(in0, meta_in0, innermost_dim);
         // Get tensor ptrs
         auto [in0_ptr_name, in0_ptr_code] = get_dtensor_ptr(in0);
         auto [out0_ptr_name, out0_ptr_code] = get_dtensor_ptr(out0);
@@ -204,12 +338,13 @@ TranspileResult Transpiler::generate_code() {
         // Assemble the new shape and stride
         // We move the innermost dim to the first dim to coalesce global mem
         // access
+        int innermost_dim = meta_in0.innermost_dim;
         string in0_layout =
-            shift_and_get_layout(in0, meta_in0, meta_in0.innermost_dim);
+            mov_last_reverse_and_get_layout(in0, meta_in0, innermost_dim);
         string in1_layout =
-            shift_and_get_layout(in1, meta_in1, meta_in1.innermost_dim);
+            mov_last_reverse_and_get_layout(in1, meta_in1, innermost_dim);
         string out0_layout =
-            shift_and_get_layout(out0, meta_out0, meta_out0.innermost_dim);
+            mov_last_reverse_and_get_layout(out0, meta_out0, innermost_dim);
         // Get tensor ptrs
         auto [in0_ptr_name, in0_ptr_code] = get_dtensor_ptr(in0);
         auto [in1_ptr_name, in1_ptr_code] = get_dtensor_ptr(in1);
@@ -298,6 +433,45 @@ TranspileResult Transpiler::generate_code() {
         exec.e("kernel::run($, $);", out0_ptr_name, in0_ptr_name);
         break;
       }
+      case type::KNOperatorType::KN_CUSTOMIZED_OP: {
+        // Customized op
+        kn::KNCustomizedOp const *cur_op =
+            dynamic_cast<kn::KNCustomizedOp const *>(op);
+        tb::ExecutionPlan const &plan = cur_op->plan;
+        assert(custom_op_metas.count(cur_op));
+        // Get DTensor ptrs
+        // We make the aggrement that, when calling a custom kernel, the
+        // arguments are in the order of "output_tensors, input_tensors"
+        vector<string> ptr_names;
+        for (kn::DTensor const &dtensor :
+             Combine(cur_op->output_tensors, cur_op->input_tensors)) {
+          auto [ptr_name, ptr_code] = get_dtensor_ptr(dtensor);
+          exec.e(ptr_code);
+          ptr_names.push_back(ptr_name);
+        }
+
+        // Transpile
+        CustomOPTranspileResult result = transpile_kn_custom_op(cur_op);
+        // Launch kernel
+        exec.e("dim3 grid_dim($, $, $);",
+               plan.grid_dim.x,
+               plan.grid_dim.y,
+               plan.grid_dim.z);
+        exec.e("dim3 block_dim($, $, $);",
+               plan.block_dim.x,
+               plan.block_dim.y,
+               plan.block_dim.z);
+        exec.e("size_t smem_size = $;", custom_op_metas[cur_op].smem_size);
+        exec.e("$<<<grid_dim, block_dim, smem_size>>>($);",
+               result.func_name,
+               ptr_names);
+        custom_kernels.e(result.code);
+        init.e("cudaFuncSetAttribute($, "
+               "cudaFuncAttributeMaxDynamicSharedMemorySize, $);",
+               result.func_name,
+               custom_op_metas[cur_op].smem_size);
+        break;
+      }
       default:
         assert(false && ("Unsupported operator type: " +
                          std::to_string(int(op->op_type)))
@@ -305,16 +479,23 @@ TranspileResult Transpiler::generate_code() {
     }
     exec.e("}");
   }
+  init.e("}");
   exec.e("}");
 
-  string result = header.to_string() + "\n" + exec.to_string() + "\n";
-  vector<vector<size_t>> output_strides;
-  for (kn::DTensor const *output_tensor : output_tensors) {
-    DTensorMeta const &meta = dtensor_metas.at(output_tensor->guid);
-    output_strides.push_back(
-        vector<size_t>(meta.strides, meta.strides + output_tensor->num_dims));
+  string code = fmt("$\n$\n$\n$\n",
+                    header.to_string(),
+                    custom_kernels.to_string(),
+                    init.to_string(),
+                    exec.to_string());
+  vector<OutputTensorDirective> output_directives;
+  for (kn::DTensor const *dtensor : this->output_tensors) {
+    DTensorMeta meta = dtensor_metas.at(dtensor->guid);
+    output_directives.push_back(OutputTensorDirective{
+        meta.phy_size,
+        vector<int>(dtensor->dim, dtensor->dim + dtensor->num_dims),
+        vector<size_t>(meta.strides, meta.strides + dtensor->num_dims)});
   }
-  return {result, this->d_buf_size, output_strides};
+  return TranspileResult{code, this->d_buf_size, output_directives};
 }
 
 } // namespace transpiler
