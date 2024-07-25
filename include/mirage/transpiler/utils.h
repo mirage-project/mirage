@@ -111,6 +111,10 @@ public:
     char last_char = line.empty() ? EOF : line.back();
     if (last_char == '}') {
       cur_indent_level -= 1;
+      if (cur_indent_level < 0) {
+        printf("Warning: `cur_indent_level` goes below 0 when transpiling\n");
+        cur_indent_level = 0;
+      }
     }
     line = std::string(cur_indent_level * NUM_INDENT_SPACES, ' ') + line;
     lines.push_back(line);
@@ -151,33 +155,6 @@ static constexpr int T4 = 75;
 static constexpr int A100 = 80;
 static constexpr int H100 = 90;
 } // namespace GPU_CC
-
-// Shift `vec` cyclically to the left by `shift` positions
-template <typename T>
-inline static std::vector<T> cyclic_shift(std::vector<T> const &vec,
-                                          int shift) {
-  std::vector<T> result(vec.begin() + shift, vec.end());
-  result.insert(result.end(), vec.begin(), vec.begin() + shift);
-  return result;
-}
-
-template <typename T>
-inline static std::vector<T>
-    cyclic_shift(T const *vec, size_t size, int shift) {
-  std::vector<T> result(vec, vec + size);
-  return cyclic_shift(result, shift);
-}
-
-// A handy function for shifting a dtensor and getting the layout
-inline static std::string shift_and_get_layout(kernel::DTensor const &dtensor,
-                                               DTensorMeta const &meta,
-                                               int shift_amount) {
-  return fmt("Layout<Shape<$>, Stride<$>>",
-             map_to_cute_int(
-                 cyclic_shift(dtensor.dim, dtensor.num_dims, shift_amount)),
-             map_to_cute_int(
-                 cyclic_shift(meta.strides, dtensor.num_dims, shift_amount)));
-}
 
 // A handy iterator class for combining two vectors
 // You can use like this:
@@ -224,20 +201,6 @@ public:
     return CombineIterator<T>(v1, v2, v1.size() + v2.size());
   }
 };
-
-// Find the last dimension with stride 1. Return -1 if not found.
-inline static int find_innermost_dim(const size_t strides[], int num_dims) {
-  for (int i = num_dims - 1; i >= 0; i--) {
-    if (strides[i] == 1) {
-      return i;
-    }
-  }
-  return -1;
-}
-
-inline static int find_innermost_dim(std::vector<size_t> const &strides) {
-  return find_innermost_dim(strides.data(), strides.size());
-}
 
 // Get the number of elements in 16 Bytes for a given datatype
 inline static size_t get_num_elems_in_16B(type::DataType datatype) {

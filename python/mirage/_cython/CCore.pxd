@@ -90,10 +90,14 @@ cdef extern from "mirage/search/search_c.h" namespace "mirage::search_c":
 cdef extern from "mirage/transpiler/transpile.h" namespace "mirage::transpiler":
     ctypedef struct TranspilerConfig:
         int target_cc
+    ctypedef struct OutputTensorDirective:
+        size_t alloc_size
+        vector[int] shape
+        vector[size_t] strides
     ctypedef struct TranspileResult:
         string code
         size_t buf_size
-        vector[vector[size_t]] output_strides
+        vector[OutputTensorDirective] output_directives
     cdef TranspileResult transpile(const Graph *graph,
                        const TranspilerConfig config,
                        vector[vector[size_t]] input_strides,

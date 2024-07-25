@@ -20,8 +20,7 @@
 #include <vector>
 
 #include "mirage/kernel/graph.h"
-#include "mirage/transpiler/common.h"
-#include "mirage/transpiler/config.h"
+#include "mirage/transpiler/structs.h"
 
 namespace mirage {
 namespace transpiler {

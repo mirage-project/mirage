@@ -12,6 +12,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+#pragma once
 
 #include <cassert>
 #include <string>
@@ -19,9 +20,7 @@
 #include <vector>
 
 #include "mirage/kernel/graph.h"
-#include "mirage/transpiler/common.h"
-#include "mirage/transpiler/config.h"
-#include "mirage/transpiler/tensor_meta.h"
+#include "mirage/transpiler/structs.h"
 #include "mirage/transpiler/utils.h"
 #include "mirage/type.h"
 
@@ -38,13 +37,12 @@ using sguid_t = decltype(tb::STensor::guid);
 class Transpiler {
 private:
   // The kernel graph
-  kernel::Graph const *g;
+  kn::Graph const *g;
 
   // User-provided configuration
   TranspilerConfig config;
   vector<vector<size_t>> input_strides;
-  vector<kernel::DTensor const *> output_tensors;
-  vector<size_t> output_stride;
+  vector<kn::DTensor const *> output_tensors;
 
   // Distributed configuration
   int num_gpus;
@@ -59,15 +57,17 @@ private:
   // A list of all distinct (by guid) DTensors and STensors
   std::vector<kn::DTensor> all_dtensors;
   std::vector<tb::STensor> all_stensors;
-  std::unordered_map<decltype(kernel::DTensor::guid), DTensorMeta>
+  std::unordered_map<decltype(kn::DTensor::guid), DTensorMeta>
       dtensor_metas; // DTensor guid -> metadata
-  std::unordered_map<decltype(threadblock::STensor::guid), STensorMeta>
+  std::unordered_map<decltype(tb::STensor::guid), STensorMeta>
       stensor_metas; // STensor guid -> metadata
   void resolve_tensor_meta();
   void resolve_tensor_layout();
 
   // Memory allocation metadata
   size_t d_buf_size; // Size of the buffer for intermediate DTensors
+  std::unordered_map<kn::KNCustomizedOp const *, KNCustomizedOPMeta>
+      custom_op_metas;
   void plan_tensor_memory();
 
   void resolve_all_config() {
@@ -80,14 +80,26 @@ private:
   // Utility functions for transpiling
   // Get the pointer to a DTensor. Return {pointer_name, code}
   std::pair<std::string, std::string>
-      get_dtensor_ptr(kernel::DTensor const &dtensor);
+      get_dtensor_ptr(kn::DTensor const &dtensor);
+
+  // Transpile a custom KN operator (a custom block graph)
+  struct CustomOPTranspileResult {
+    // The name of the generated kernel function
+    std::string func_name;
+    // The kernel function code. Should be something like:
+    // __global__ void <func_name>(InputDTensor0, ..., InputDTensorN) {
+    //  [kernel code]
+    // }
+    std::string code;
+  };
+  CustomOPTranspileResult transpile_kn_custom_op(kn::KNCustomizedOp const *op);
 
 public:
   // Initialize the transpiler and resolve all configurations
   Transpiler(kernel::Graph const *g,
              TranspilerConfig const &config,
              vector<vector<size_t>> const &input_strides,
-             vector<kernel::DTensor const *> const &output_tensors)
+             vector<kn::DTensor const *> const &output_tensors)
       : g(g), config(config), input_strides(input_strides),
         output_tensors(output_tensors) {
     // Currently we only support GPUs with compute capability >= 8.0 (A100+)

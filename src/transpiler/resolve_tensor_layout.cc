@@ -30,6 +30,21 @@
 namespace mirage {
 namespace transpiler {
 
+// Helper functions
+// Find the last dimension with stride 1. Return -1 if not found.
+static int find_innermost_dim(const size_t strides[], int num_dims) {
+  for (int i = num_dims - 1; i >= 0; i--) {
+    if (strides[i] == 1) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+static int find_innermost_dim(std::vector<size_t> const &strides) {
+  return find_innermost_dim(strides.data(), strides.size());
+}
+
 // Pre-defined cost for every nonperfected operator
 namespace cost {
 using cost_t = int;
@@ -37,9 +52,18 @@ using cost_t = int;
 // In kernel-level reduction OP, the cost when innermost_dim == reduction_dim
 cost_t KN_REDUCTION_INNERMOST_EQ_REDUC_DIM = 4;
 
-// In threadblock level input OP, the cost when the stensor do not have the same
+// In tb level input/output OP, the cost when the stensor do not have the same
 // innermost dim as the source dtensor
 cost_t TB_INPUT_NO_WIDE_COPY = 4;
+cost_t TB_OUTPUT_NO_WIDE_COPY = 4;
+
+// In tb level input/output op, the cost when ldmatrix is supported by hardware
+// but we do not use it
+cost_t TB_MATMUL_NO_LDMATRIX = 10;
+
+// In tb level input OP, the cost when cp.async is available but cannot be used
+// since the innermost dim of the stensor is not the same as the source dtensor
+cost_t TB_INPUT_NO_CP_ASYNC = 20;
 
 // Make a dim swizzled
 cost_t SWIZZLE_DIM = 1;
@@ -65,27 +89,25 @@ void Transpiler::resolve_tensor_layout() {
   // di_x_y denotes whether the y-th dimension of DTensor x is the innermost dim
   // si_x_y denotes whether the y-th dimension of STensor x is the innermost dim
   // sw_x_y denotes whether the y-th dimension of STensor x is swizzled
-  std::unordered_map<dguid_t, std::vector<z3::expr>> d_innermost_vars;
-  std::unordered_map<sguid_t, std::vector<z3::expr>> s_innermost_vars;
-  std::unordered_map<sguid_t, std::vector<z3::expr>> swizzled_vars;
+  std::unordered_map<dguid_t, std::vector<z3::expr>> d_is_innermost;
+  std::unordered_map<sguid_t, std::vector<z3::expr>> s_is_innermost;
+  std::unordered_map<sguid_t, std::vector<z3::expr>> s_is_swizzled;
   for (kn::DTensor const &dtensor : all_dtensors) {
     int num_dims = dtensor.num_dims;
     for (int i = 0; i < num_dims; ++i) {
       std::string var_name = fmt("di_$_$", dtensor.guid, i);
-      d_innermost_vars[dtensor.guid].push_back(
-          ctx.bool_const(var_name.c_str()));
+      d_is_innermost[dtensor.guid].push_back(ctx.bool_const(var_name.c_str()));
     }
   }
   for (tb::STensor const &stensor : all_stensors) {
     int num_dims = stensor.num_dims;
     for (int i = 0; i < num_dims; ++i) {
       std::string var_name = fmt("si_$_$", stensor.guid, i);
-      s_innermost_vars[stensor.guid].push_back(
-          ctx.bool_const(var_name.c_str()));
+      s_is_innermost[stensor.guid].push_back(ctx.bool_const(var_name.c_str()));
     }
     for (int i = 0; i < num_dims; ++i) {
       std::string var_name = fmt("sw_$_$", stensor.guid, i);
-      swizzled_vars[stensor.guid].push_back(ctx.bool_const(var_name.c_str()));
+      s_is_swizzled[stensor.guid].push_back(ctx.bool_const(var_name.c_str()));
     }
   }
 
@@ -97,26 +119,30 @@ void Transpiler::resolve_tensor_layout() {
     // Every DTensor can only have 1 innermost dim
     z3::expr_vector innermost_exprs(ctx);
     for (int i = 0; i < num_dims; ++i) {
-      innermost_exprs.push_back(d_innermost_vars[dtensor.guid][i]);
+      innermost_exprs.push_back(d_is_innermost[dtensor.guid][i]);
     }
     opt.add(z3::atmost(innermost_exprs, 1));
+    opt.add(z3::atleast(innermost_exprs, 1));
   }
   for (tb::STensor const &stensor : all_stensors) {
     int num_dims = stensor.num_dims;
     // Every STensor can only have 1 innermost dim
     z3::expr_vector innermost_exprs(ctx);
     for (int i = 0; i < num_dims; ++i) {
-      innermost_exprs.push_back(s_innermost_vars[stensor.guid][i]);
+      innermost_exprs.push_back(s_is_innermost[stensor.guid][i]);
     }
     opt.add(z3::atmost(innermost_exprs, 1));
+    opt.add(z3::atleast(innermost_exprs, 1));
     // The innermost dim of a STensor cannot be swizzled
     for (int i = 0; i < num_dims; ++i) {
-      opt.add(!swizzled_vars[stensor.guid][i] ||
-              !s_innermost_vars[stensor.guid][i]);
+      opt.add(!s_is_swizzled[stensor.guid][i] ||
+              !s_is_innermost[stensor.guid][i]);
     }
     // Cost for swizzling a dimension
     for (int i = 0; i < num_dims; ++i) {
-      costs.push_back(cost::SWIZZLE_DIM * swizzled_vars[stensor.guid][i]);
+      costs.push_back(z3::ite(s_is_swizzled[stensor.guid][i],
+                              ctx.int_val(cost::SWIZZLE_DIM),
+                              ctx.int_val(0)));
     }
   }
 
@@ -142,7 +168,7 @@ void Transpiler::resolve_tensor_layout() {
           throw std::runtime_error(
               fmt("No innermost dim found for input tensor $", cur_input_idx));
         }
-        opt.add(d_innermost_vars[tensor.guid][innermost_dim]);
+        opt.add(d_is_innermost[tensor.guid][innermost_dim]);
         cur_input_idx += 1;
         break;
       }
@@ -156,8 +182,8 @@ void Transpiler::resolve_tensor_layout() {
         for (kn::DTensor const &tensor : {lhs, rhs, output}) {
           int num_dims = tensor.num_dims;
           assert(num_dims >= 2);
-          opt.add(d_innermost_vars[tensor.guid][num_dims - 1] ||
-                  d_innermost_vars[tensor.guid][num_dims - 2]);
+          opt.add(d_is_innermost[tensor.guid][num_dims - 1] ||
+                  d_is_innermost[tensor.guid][num_dims - 2]);
         }
         break;
       }
@@ -172,12 +198,15 @@ void Transpiler::resolve_tensor_layout() {
         // Currently the runtime requires that the input & output have the same
         // innermost dim
         for (int i = 0; i < input.num_dims; ++i) {
-          opt.add(d_innermost_vars[input.guid][i] ==
-                  d_innermost_vars[output.guid][i]);
+          opt.add(d_is_innermost[input.guid][i] ==
+                  d_is_innermost[output.guid][i]);
         }
         // If the innermost dim == the reduction dim, add some extra cost
-        costs.push_back(cost::KN_REDUCTION_INNERMOST_EQ_REDUC_DIM *
-                        d_innermost_vars[input.guid][reduc_dim]);
+        assert(reduc_dim > 0 && reduc_dim < input.num_dims);
+        costs.push_back(
+            z3::ite(d_is_innermost[input.guid][reduc_dim],
+                    ctx.int_val(cost::KN_REDUCTION_INNERMOST_EQ_REDUC_DIM),
+                    ctx.int_val(0)));
         break;
       }
       case type::KN_EXP_OP: {
@@ -188,8 +217,8 @@ void Transpiler::resolve_tensor_layout() {
         // innermost dim
         assert(input.num_dims == output.num_dims);
         for (int i = 0; i < input.num_dims; ++i) {
-          opt.add(d_innermost_vars[input.guid][i] ==
-                  d_innermost_vars[output.guid][i]);
+          opt.add(d_is_innermost[input.guid][i] ==
+                  d_is_innermost[output.guid][i]);
         }
         break;
       }
@@ -204,16 +233,15 @@ void Transpiler::resolve_tensor_layout() {
         // innermost dim
         assert(lhs.num_dims == rhs.num_dims && lhs.num_dims == output.num_dims);
         for (int i = 0; i < lhs.num_dims; ++i) {
-          opt.add(d_innermost_vars[lhs.guid][i] ==
-                  d_innermost_vars[output.guid][i]);
-          opt.add(d_innermost_vars[rhs.guid][i] ==
-                  d_innermost_vars[output.guid][i]);
+          opt.add(d_is_innermost[lhs.guid][i] ==
+                  d_is_innermost[output.guid][i]);
+          opt.add(d_is_innermost[rhs.guid][i] ==
+                  d_is_innermost[output.guid][i]);
         }
         break;
       }
       case type::KN_CUSTOMIZED_OP: {
         // Will be proceeded later, in the next loop
-        assert(0 && "Not supported now");
         break;
       }
       default: {
@@ -228,7 +256,6 @@ void Transpiler::resolve_tensor_layout() {
       kn::KNCustomizedOp const *kn_customized_op =
           dynamic_cast<kn::KNCustomizedOp const *>(kn_op);
       tb::Graph const &tb_graph = kn_customized_op->bgraph;
-      tb::ExecutionPlan const &tb_plan = kn_customized_op->plan;
       for (tb::TBOperator const *tb_op : tb_graph.operators) {
         switch (tb_op->op_type) {
           case type::TB_INPUT_OP: {
@@ -237,12 +264,150 @@ void Transpiler::resolve_tensor_layout() {
                 dynamic_cast<tb::TBInputOp const *>(tb_op);
             kn::DTensor const &input = tb_input_op->dtensor;
             tb::STensor const &output = tb_input_op->output_tensors.at(0);
+            assert(input.num_dims == output.num_dims);
             if (this->config.target_cc < GPU_CC::T4) {
-              // Want to leverage	copying in uint128_t, so need the same
-              // innermost dim as the dtensor
+              // Want to leverage wide copy (uint128_t), so need the innermost
+              // dim to be the same
+              for (int i = 0; i < input.num_dims; ++i) {
+                costs.push_back(
+                    z3::ite(d_is_innermost[input.guid][i] &&
+                                !s_is_innermost[output.guid][i],
+                            ctx.int_val(cost::TB_INPUT_NO_WIDE_COPY),
+                            ctx.int_val(0)));
+              }
+            } else {
+              // Want to leverage cp.async copying in uint128_t, so need the
+              // innermost dim to be the same
+              for (int i = 0; i < input.num_dims; ++i) {
+                costs.push_back(z3::ite(d_is_innermost[input.guid][i] &&
+                                            !s_is_innermost[output.guid][i],
+                                        ctx.int_val(cost::TB_INPUT_NO_CP_ASYNC),
+                                        ctx.int_val(0)));
+              }
             }
+            break;
+          }
+          case type::TB_OUTPUT_OP: {
+            tb::TBOutputOp const *tb_output_op =
+                dynamic_cast<tb::TBOutputOp const *>(tb_op);
+            tb::STensor const &input = tb_output_op->input_tensors.at(0);
+            kn::DTensor const &output = tb_output_op->dtensor;
+            assert(input.num_dims == output.num_dims);
+            if (this->config.target_cc < GPU_CC::H100) {
+              // Want to leverage wide copy (uint128_t), so need the innermost
+              // dim to be the same
+              for (int i = 0; i < input.num_dims; ++i) {
+                costs.push_back(
+                    z3::ite(s_is_innermost[input.guid][i] &&
+                                !d_is_innermost[output.guid][i],
+                            ctx.int_val(cost::TB_OUTPUT_NO_WIDE_COPY),
+                            ctx.int_val(0)));
+              }
+            } else {
+              // Want to leverage cp.bulk.async (TMA instructions)
+              assert(0 && "Not implemented");
+            }
+            break;
           }
           case type::TB_MATMUL_OP: {
+            tb::STensor const &input0 = tb_op->input_tensors.at(0);
+            tb::STensor const &input1 = tb_op->input_tensors.at(1);
+            tb::STensor const &output = tb_op->output_tensors.at(0);
+            assert(input0.num_dims == input1.num_dims &&
+                   input0.num_dims == output.num_dims);
+            int num_dims = input0.num_dims;
+            assert(num_dims >= 2);
+            // Loading
+            if (this->config.target_cc >= GPU_CC::T4) {
+              // Leverage ldmatrix copying on T4+
+              for (tb::STensor const &input : {input0, input1}) {
+                // If both dims are not the innermost one, cannot use ldmatrix
+                costs.push_back(
+                    z3::ite(!s_is_innermost[input.guid][num_dims - 1] &&
+                                !s_is_innermost[input.guid][num_dims - 2],
+                            ctx.int_val(cost::TB_MATMUL_NO_LDMATRIX),
+                            ctx.int_val(0)));
+                // Need to swizzle some dimensions
+                opt.add(z3::implies(!s_is_innermost[input.guid][num_dims - 1],
+                                    s_is_swizzled[input.guid][num_dims - 1]));
+                opt.add(z3::implies(!s_is_innermost[input.guid][num_dims - 2],
+                                    s_is_swizzled[input.guid][num_dims - 2]));
+              }
+            } else {
+              // Use normal copying if ldmatrix is not supported by hardware
+              assert(0 && "Not implemented");
+            }
+            // Storing
+            if (this->config.target_cc >= GPU_CC::H100) {
+              // Leverage TMA instructions on H100+
+              assert(0 && "Not implemented");
+            } else {
+              // Use normal copying. Need to swizzle some dimensions
+              opt.add(z3::implies(!s_is_innermost[output.guid][num_dims - 1],
+                                  s_is_swizzled[output.guid][num_dims - 1]));
+              opt.add(z3::implies(!s_is_innermost[output.guid][num_dims - 2],
+                                  s_is_swizzled[output.guid][num_dims - 2]));
+            }
+            break;
+          }
+          case type::TB_EXP_OP: {
+            tb::STensor const &input = tb_op->input_tensors.at(0);
+            tb::STensor const &output = tb_op->output_tensors.at(0);
+            assert(input.num_dims == output.num_dims);
+            int num_dims = input.num_dims;
+            // Enumerate the iteration dim (i.e. threads are laid out along that
+            // dim) for the op The i-th variable means that the op is performed
+            // along the i-th dim
+            z3::expr_vector is_op_iter_dim(ctx);
+            for (int i = 0; i < num_dims; ++i) {
+              std::string var_name = fmt("op_iter_dim_$_$", output.guid, i);
+              is_op_iter_dim.push_back(ctx.bool_const(var_name.c_str()));
+            }
+            opt.add(z3::atmost(is_op_iter_dim, 1));
+            opt.add(z3::atleast(is_op_iter_dim, 1));
+            // Need to swizzle one dimension if it is not the innermost dim
+            for (int i = 0; i < num_dims; ++i) {
+              opt.add(z3::implies(is_op_iter_dim[i] &&
+                                      !s_is_innermost[input.guid][i],
+                                  s_is_swizzled[input.guid][i]));
+              opt.add(z3::implies(is_op_iter_dim[i] &&
+                                      !s_is_innermost[output.guid][i],
+                                  s_is_swizzled[output.guid][i]));
+            }
+            break;
+          }
+          case type::TB_ADD_OP:
+          case type::TB_MUL_OP:
+          case type::TB_DIV_OP: {
+            tb::STensor const &input0 = tb_op->input_tensors.at(0);
+            tb::STensor const &input1 = tb_op->input_tensors.at(1);
+            tb::STensor const &output = tb_op->output_tensors.at(0);
+            assert(input0.num_dims == input1.num_dims &&
+                   input0.num_dims == output.num_dims);
+            int num_dims = input0.num_dims;
+            // Enumerate the iteration dim (i.e. threads lay out along that dim)
+            // for the op
+            // The i-th variable means that the op is performed along the
+            // i-th dim
+            z3::expr_vector is_op_iter_dim(ctx);
+            for (int i = 0; i < num_dims; ++i) {
+              std::string var_name = fmt("op_iter_dim_$_$", output.guid, i);
+              is_op_iter_dim.push_back(ctx.bool_const(var_name.c_str()));
+            }
+            opt.add(z3::atmost(is_op_iter_dim, 1));
+            opt.add(z3::atleast(is_op_iter_dim, 1));
+            // Need to swizzle one dimension if it is not the innermost dim
+            for (int i = 0; i < num_dims; ++i) {
+              opt.add(z3::implies(is_op_iter_dim[i] &&
+                                      !s_is_innermost[input0.guid][i],
+                                  s_is_swizzled[input0.guid][i]));
+              opt.add(z3::implies(is_op_iter_dim[i] &&
+                                      !s_is_innermost[input1.guid][i],
+                                  s_is_swizzled[input1.guid][i]));
+              opt.add(z3::implies(is_op_iter_dim[i] &&
+                                      !s_is_innermost[output.guid][i],
+                                  s_is_swizzled[output.guid][i]));
+            }
             break;
           }
           case type::TB_REDUCTION_0_OP:
@@ -251,10 +416,48 @@ void Transpiler::resolve_tensor_layout() {
           case type::TB_REDUCTION_0_TO_DIMX_OP:
           case type::TB_REDUCTION_1_TO_DIMX_OP:
           case type::TB_REDUCTION_2_TO_DIMX_OP: {
+            int reduc_dim =
+                tb_op->op_type >= type::TB_REDUCTION_0_TO_DIMX_OP
+                    ? tb_op->op_type - type::TB_REDUCTION_0_TO_DIMX_OP
+                    : tb_op->op_type - type::TB_REDUCTION_0_OP;
+            tb::STensor const &input = tb_op->input_tensors.at(0);
+            tb::STensor const &output = tb_op->output_tensors.at(0);
+            int num_dims = input.num_dims;
+            assert(input.num_dims == output.num_dims);
+            assert(0 <= reduc_dim && reduc_dim < num_dims);
+            // Enumerate the iteration dim
+            z3::expr_vector is_op_iter_dim(ctx);
+            for (int i = 0; i < num_dims; ++i) {
+              std::string var_name = fmt("op_iter_dim_$_$", output.guid, i);
+              is_op_iter_dim.push_back(ctx.bool_const(var_name.c_str()));
+            }
+            opt.add(z3::atmost(is_op_iter_dim, 1));
+            opt.add(z3::atleast(is_op_iter_dim, 1));
+            // Currently, don't support the reduction dim as the iteration dim
+            opt.add(!is_op_iter_dim[reduc_dim]);
+            // Need to swizzle one dimension if it is not the innermost dim
+            for (int i = 0; i < num_dims; ++i) {
+              opt.add(z3::implies(is_op_iter_dim[i] &&
+                                      !s_is_innermost[input.guid][i],
+                                  s_is_swizzled[input.guid][i]));
+              opt.add(z3::implies(is_op_iter_dim[i] &&
+                                      !s_is_innermost[output.guid][i],
+                                  s_is_swizzled[output.guid][i]));
+            }
+            break;
+          }
+          case type::TB_CONCAT_0_OP:
+          case type::TB_CONCAT_1_OP:
+          case type::TB_CONCAT_2_OP: {
+            assert(0 && "Not implemented");
+            break;
+          }
+          case type::TB_CONCAT_THEN_MATMUL_OP: {
+            assert(0 && "Not implemented");
             break;
           }
           default:
-            break;
+            assert(fmt("Unknown TB op: $", tb_op->op_type).c_str());
         }
       }
     }
@@ -282,8 +485,8 @@ void Transpiler::resolve_tensor_layout() {
     int num_dims = dtensor.num_dims;
     int innermost_dim = -1;
     for (int i = 0; i < num_dims; ++i) {
-      z3::expr t = m.eval(d_innermost_vars[dtensor.guid][i]);
-      if (m.eval(d_innermost_vars[dtensor.guid][i]).is_true()) {
+      z3::expr t = m.eval(d_is_innermost[dtensor.guid][i]);
+      if (m.eval(d_is_innermost[dtensor.guid][i]).is_true()) {
         innermost_dim = i;
         break;
       }
@@ -295,7 +498,7 @@ void Transpiler::resolve_tensor_layout() {
     int num_dims = stensor.num_dims;
     int innermost_dim = -1;
     for (int i = 0; i < num_dims; ++i) {
-      if (m.eval(s_innermost_vars[stensor.guid][i]).is_true()) {
+      if (m.eval(s_is_innermost[stensor.guid][i]).is_true()) {
         innermost_dim = i;
         break;
       }
@@ -303,7 +506,7 @@ void Transpiler::resolve_tensor_layout() {
     assert(innermost_dim != -1);
     this->stensor_metas[stensor.guid].innermost_dim = innermost_dim;
     for (int i = 0; i < num_dims; ++i) {
-      if (m.eval(swizzled_vars[stensor.guid][i]).is_true()) {
+      if (m.eval(s_is_swizzled[stensor.guid][i]).is_true()) {
         this->stensor_metas[stensor.guid].swizzled_dims.push_back(i);
       }
     }
@@ -337,7 +540,9 @@ void Transpiler::resolve_tensor_layout() {
         }
         meta.strides[i] = cur_stride;
         size_t cur_dim = (size_t)dtensor.dim[i];
-        cur_stride *= round_to_multiple(cur_dim, alignment);
+        size_t cur_dim_rounded =
+            cur_dim == 1 ? 1 : round_to_multiple(cur_dim, alignment);
+        cur_stride *= cur_dim_rounded;
       }
     }
   }
@@ -355,7 +560,9 @@ void Transpiler::resolve_tensor_layout() {
       }
       meta.strides[i] = cur_stride;
       size_t cur_dim = (size_t)stensor.dim[i];
-      cur_stride *= round_to_multiple(cur_dim, alignment);
+      size_t cur_dim_rounded =
+          cur_dim == 1 ? 1 : round_to_multiple(cur_dim, alignment);
+      cur_stride *= cur_dim_rounded;
     }
   }
 }
