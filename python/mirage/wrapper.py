@@ -4,6 +4,7 @@ import os
 import tempfile
 import subprocess
 import shutil
+import sys
 import sysconfig
 
 from .core import generate_cuda_program
@@ -156,7 +157,10 @@ class PyGraphWrapper:
             if scheme == 'posix_local':
                 scheme = 'posix_prefix'
             py_include_dir = sysconfig.get_paths(scheme=scheme)["include"]
-            
+
+            if not os.path.exists(MIRAGE_ROOT):
+                print(f'Error: MIRAGE_ROOT ({MIRAGE_ROOT}) not found. Please set the MIRAGE_ROOT env variable correctly')
+                sys.exit(1)
             cc_cmd = [
                 cc, FILE_NAME, '-O3', f'-I{py_include_dir}', 
                 f'-I{MIRAGE_ROOT}/include/mirage/transpiler/runtime/',
