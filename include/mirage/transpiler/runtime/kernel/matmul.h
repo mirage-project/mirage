@@ -2,6 +2,8 @@
 
 #include <cublas_v2.h>
 
+namespace kn {
+
 // Convert from T to cudaDataType_t
 template <typename T>
 static inline cudaDataType_t data_t2cuda_data_type_t() {
@@ -140,3 +142,5 @@ static void gemm(
     assert(false);
   }
 }
+
+} // namespace kn

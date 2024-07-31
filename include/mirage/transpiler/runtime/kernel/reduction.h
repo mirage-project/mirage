@@ -5,6 +5,8 @@ using namespace cute;
 
 #include "utils.h"
 
+namespace kn {
+
 // The First Reduction Kernel
 // Each thread in this kernel is responsible for producing one element in the
 // output tensor. In other words, each thread reduces a segment of the input.
@@ -85,3 +87,5 @@ public:
         <<<grid_shape, block_shape>>>(out, in);
   }
 };
+
+} // namespace kn

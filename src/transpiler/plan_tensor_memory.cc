@@ -81,6 +81,9 @@ void Transpiler::plan_tensor_memory() {
   }
 
   // Plan memory for all STensors
+  // TODO(intlsy) Do not allocate memory for STensors that is the accumulator
+  // for an output operator with forloop_dim >= 0 (since we do not to
+  // accumulator)
   for (kn::KNOperator *const op : this->g->operators) {
     if (op->op_type == type::KN_CUSTOMIZED_OP) {
       // Process every KN_CUSTOMIZED_OP separately

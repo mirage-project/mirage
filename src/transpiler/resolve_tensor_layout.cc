@@ -78,6 +78,24 @@ void Transpiler::resolve_tensor_layout() {
   using dguid_t = decltype(kn::DTensor::guid);
   using sguid_t = decltype(tb::STensor::guid);
 
+  // Get a list of all STensors
+  std::vector<tb::STensor> all_stensors;
+  std::unordered_set<sguid_t> processed_sguids;
+  for (kn::KNOperator *const op : this->g->operators) {
+    if (op->op_type == type::KN_CUSTOMIZED_OP) {
+      kn::KNCustomizedOp *cur_op = dynamic_cast<kn::KNCustomizedOp *>(op);
+      for (tb::TBOperator *const tb_op : cur_op->bgraph.operators) {
+        for (tb::STensor const &stensor :
+             Combine(tb_op->input_tensors, tb_op->output_tensors)) {
+          if (processed_sguids.count(stensor.guid) == 0) {
+            processed_sguids.insert(stensor.guid);
+            all_stensors.push_back(stensor);
+          }
+        }
+      }
+    }
+  }
+
   // Create z3 context and optimizer
   z3::context ctx;
   z3::optimize opt(ctx);
@@ -291,8 +309,10 @@ void Transpiler::resolve_tensor_layout() {
             tb::TBOutputOp const *tb_output_op =
                 dynamic_cast<tb::TBOutputOp const *>(tb_op);
             tb::STensor const &input = tb_output_op->input_tensors.at(0);
+            tb::STensor const &accum = tb_output_op->output_tensors.at(0);
             kn::DTensor const &output = tb_output_op->dtensor;
-            assert(input.num_dims == output.num_dims);
+            assert(input.num_dims == output.num_dims &&
+                   input.num_dims == accum.num_dims);
             if (this->config.target_cc < GPU_CC::H100) {
               // Want to leverage wide copy (uint128_t), so need the innermost
               // dim to be the same
@@ -306,6 +326,13 @@ void Transpiler::resolve_tensor_layout() {
             } else {
               // Want to leverage cp.bulk.async (TMA instructions)
               assert(0 && "Not implemented");
+            }
+            // Force the input and the accumulator to have the same layout
+            for (int i = 0; i < input.num_dims; ++i) {
+              opt.add(s_is_innermost[input.guid][i] ==
+                      s_is_innermost[accum.guid][i]);
+              opt.add(s_is_swizzled[input.guid][i] ==
+                      s_is_swizzled[accum.guid][i]);
             }
             break;
           }
@@ -468,7 +495,7 @@ void Transpiler::resolve_tensor_layout() {
     costs.push_back(ctx.int_val(0));
   }
   z3::expr objective = z3::sum(costs);
-  opt.maximize(objective);
+  opt.minimize(objective);
   z3::check_result check_result = opt.check();
   if (check_result == z3::unsat) {
     // No valid layout found

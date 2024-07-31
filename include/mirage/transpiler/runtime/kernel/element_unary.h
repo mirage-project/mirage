@@ -7,6 +7,8 @@
 
 #include "utils.h"
 
+namespace kn {
+
 enum class ElementUnaryOpType { EXP };
 
 template <typename T, ElementUnaryOpType OP>
@@ -69,3 +71,5 @@ public:
         <<<grid_shape, block_shape>>>(out, in);
   }
 };
+
+} // namespace kn

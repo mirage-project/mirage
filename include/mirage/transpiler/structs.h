@@ -15,6 +15,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <cstddef>
 #include <vector>
 
@@ -83,7 +84,6 @@ struct DTensorMeta {
   // - 3. We want to use more advanced allocation strategies
   // This addr must be aligned to 16 bytes for intermediate tensors, but
   // may not be aligned for input tensors
-  // TODO(intlsy) Allow unaligned input tensors
   size_t addr;
 
   // Physical size needed for the tensor
@@ -107,6 +107,11 @@ struct STensorMeta {
   // Strides of each dimension, in number of elements
   // Must be padded to multiple of 8
   size_t strides[threadblock::MAX_TENSOR_DIMS];
+
+  bool is_dim_swizzled(int dim) const {
+    return std::find(swizzled_dims.begin(), swizzled_dims.end(), dim) !=
+           swizzled_dims.end();
+  }
 };
 
 // Metadata for a KN_CUSTOMIZED_OP

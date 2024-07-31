@@ -8,6 +8,8 @@ using namespace cute;
 
 #include "utils.h"
 
+namespace kn {
+
 enum class ElementBinaryOpType { ADD, MUL, DIV };
 
 template <typename T, ElementBinaryOpType OP>
@@ -96,3 +98,5 @@ public:
         <<<grid_shape, block_shape>>>(out, in0, in1);
   }
 };
+
+} // namespace kn

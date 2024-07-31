@@ -14,6 +14,7 @@
   } while (0)
 
 #define CDIV(a, b) (((a) + (b)-1) / (b))
+#define CDIV_CUTE_INT(a, b) (((a) + (b)-_1{}) / (b))
 
 template <class var_t, var_t Start, var_t End, var_t Inc, class func_t>
 constexpr void constexpr_for(func_t &&f) {
@@ -25,7 +26,7 @@ constexpr void constexpr_for(func_t &&f) {
 
 namespace cute {
 template <typename T>
-void println(T const &t) {
+__host__ __device__ void println(T const &t) {
   cute::print(t);
   printf("\n");
 }

@@ -25,27 +25,14 @@ namespace transpiler {
 
 // Resolve metadata for Tensors
 void Transpiler::resolve_tensor_meta() {
-  // get all_dtensors and all_stensors
+  // get all_dtensors
   std::unordered_set<dguid_t> processed_dguids;
-  std::unordered_set<dguid_t> processed_sguids;
   for (kernel::KNOperator *const op : this->g->operators) {
     for (kn::DTensor const &dtensor :
          Combine(op->input_tensors, op->output_tensors)) {
       if (processed_dguids.count(dtensor.guid) == 0) {
         processed_dguids.insert(dtensor.guid);
         all_dtensors.push_back(dtensor);
-      }
-    }
-    if (op->op_type == type::KN_CUSTOMIZED_OP) {
-      kn::KNCustomizedOp *cur_op = dynamic_cast<kn::KNCustomizedOp *>(op);
-      for (tb::TBOperator *const tb_op : cur_op->bgraph.operators) {
-        for (tb::STensor const &stensor :
-             Combine(tb_op->input_tensors, tb_op->output_tensors)) {
-          if (processed_sguids.count(stensor.guid) == 0) {
-            processed_sguids.insert(stensor.guid);
-            all_stensors.push_back(stensor);
-          }
-        }
       }
     }
   }

@@ -54,9 +54,8 @@ private:
   }
 
   // Tensor metadata
-  // A list of all distinct (by guid) DTensors and STensors
+  // A list of all distinct (by guid) DTensors
   std::vector<kn::DTensor> all_dtensors;
-  std::vector<tb::STensor> all_stensors;
   std::unordered_map<decltype(kn::DTensor::guid), DTensorMeta>
       dtensor_metas; // DTensor guid -> metadata
   std::unordered_map<decltype(tb::STensor::guid), STensorMeta>

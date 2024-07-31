@@ -20,6 +20,12 @@ static void _execute_mugraph(std::vector<void const *> input_tensors,
 #include "kernel/element_unary.h"
 #include "kernel/matmul.h"
 #include "kernel/reduction.h"
+#include "threadblock/element_binary.h"
+#include "threadblock/element_unary.h"
+#include "threadblock/input.h"
+#include "threadblock/matmul.h"
+#include "threadblock/output.h"
+#include "threadblock/output_accum.h"
 #include "utils.h"
 
 // Entrypoint for C/C++

@@ -31,12 +31,17 @@ inline static std::string my_to_string(T const &value) {
 
 template <>
 [[maybe_unused]] std::string my_to_string(char const *const &value) {
-  return value;
+  return std::string(value);
 }
 
 template <>
 [[maybe_unused]] std::string my_to_string(std::string const &value) {
   return value;
+}
+
+template <>
+[[maybe_unused]] std::string my_to_string(char const &value) {
+  return std::string(1, value);
 }
 
 // A vector {a, b, c, d} will be converted to "a, b, c, d"
