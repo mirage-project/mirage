@@ -90,7 +90,7 @@ public:
 
   static constexpr int BLOCK_SIZE = 512;
   static constexpr dim3 block_shape = {BLOCK_SIZE, 1, 1};
-  static constexpr dim3 grid_shape = {CDIV(Numel::value, BLOCK_SIZE), 1, 1};
+  static constexpr dim3 grid_shape = {ceil_div(Numel::value, BLOCK_SIZE), 1, 1};
 
   static void run(T *out, T const *in0, T const *in1) {
     element_binary_kernel_fwd<

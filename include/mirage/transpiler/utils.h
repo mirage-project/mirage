@@ -148,6 +148,11 @@ public:
 };
 
 template <typename T>
+inline static T ceil_div(T a, T b) {
+  return (a + b - 1) / b;
+}
+
+template <typename T>
 inline static T round_to_multiple(T value, T multiple) {
   return ((value + multiple - 1) / multiple) * multiple;
 }

@@ -72,7 +72,7 @@ public:
   static constexpr int BLOCK_SIZE = 512;
   static constexpr dim3 block_shape = {BLOCK_SIZE, 1, 1};
   static constexpr dim3 grid_shape = {
-      CDIV(size(DstLayout{}), BLOCK_SIZE), 1, 1};
+      ceil_div(size(DstLayout{}), BLOCK_SIZE), 1, 1};
 
   static void run(T *out, T const *in) {
     // Except the reduction dimension, the other dimensions should be the same.

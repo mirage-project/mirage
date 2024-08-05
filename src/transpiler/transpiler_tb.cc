@@ -147,6 +147,8 @@ Transpiler::CustomOPTranspileResult
     STensorMeta const &meta = stensor_metas.at(guid);
     code.e("half_t *stensor$_ptr = (half_t*)(buf + $);", guid, meta.addr);
   }
+  // Erase the lowest 16 bytes to 0 for GEMM
+  code.e("*((uint128_t*)buf) = 0ul;");
   code.e("");
 
   // Define G2SCopy for all input STensors, and copy STensors that do not have
@@ -425,6 +427,78 @@ Transpiler::CustomOPTranspileResult
         break;
       };
       case type::TB_MATMUL_OP: {
+        tb::STensor const &input0 = op->input_tensors.at(0);
+        tb::STensor const &input1 = op->input_tensors.at(1);
+        tb::STensor const &output = op->output_tensors.at(0);
+        STensorMeta meta0 = stensor_metas.at(input0.guid);
+        STensorMeta meta1 = stensor_metas.at(input1.guid);
+        STensorMeta meta2 = stensor_metas.at(output.guid);
+        int num_dims = input0.num_dims;
+        assert(input1.num_dims == num_dims && output.num_dims == num_dims);
+        int m = output.dim[num_dims-2];
+        int n = output.dim[num_dims-1];
+        int k = input0.dim[num_dims-1];
+        assert(input0.dim[num_dims-2] == m && input0.dim[num_dims-1] == k);
+        assert(input1.dim[num_dims-2] == k && input1.dim[num_dims-1] == n);
+        
+        // Pick up MMA atom
+        // TODO(intlsy) May calculate AB via (B^T A^T)^T when M is relatively small
+        string mma_atom_str;
+        std::tuple<int, int, int> mma_atom_mnk;
+        int mma_atom_num_threads;
+        if (GPU_CC::A100 <= config.target_cc && config.target_cc < GPU_CC::H100) {
+          if (k <= 8) {
+            mma_atom_str = "SM80_16x8x8_F16F16F16F16_TN";
+            mma_atom_mnk = {16, 8, 8};
+            mma_atom_num_threads = 32;
+          } else {
+            mma_atom_str = "SM80_16x8x16_F16F16F16F16_TN";
+            mma_atom_mnk = {16, 8, 16};
+            mma_atom_num_threads = 32;
+          }
+        } else {
+          // TODO(intlsy): Support more architectures
+          assert(0 && "Unsupported GPU Architecture");
+        }
+        auto [mma_atom_m, mma_atom_n, mma_atom_k] = mma_atom_mnk;
+
+        // Pick up TiledMMAThrLayout
+        // The algorithm is documented in `docs/transpiler/transpiler.md`
+        // TODO(intlsy) Update this algo to be more friendly to small matrix
+        // by dropping some threads
+        assert(num_threads % mma_atom_num_threads == 0);
+        int max_num_tgs = num_threads / mma_atom_num_threads; // tg = thread group
+        float best_score = -1.0f;
+        int best_num_tg_m = -1, best_num_tg_n = -1;
+        for (int num_tg_m = 1; num_tg_m <= max_num_tgs; ++num_tg_m) {
+          for (int num_tg_n = 1; num_tg_m*num_tg_n <= max_num_tgs; ++num_tg_n) {
+            int tiled_mma_m = mma_atom_m * num_tg_m;
+            int tiled_mma_n = mma_atom_n * num_tg_n;
+            int num_tiles_m = ceil_div(m, tiled_mma_m);
+            int num_tiles_n = ceil_div(n, tiled_mma_n);
+            int64_t data_moved_A = ((int64_t)num_tiles_m * tiled_mma_m) * k * num_tg_n;
+            int64_t data_moved_B = ((int64_t)num_tiles_n * tiled_mma_n) * k * num_tg_m;
+            int64_t data_moved = data_moved_A + data_moved_B;
+            float score = (1.0f/data_moved) * (num_tg_m * num_tg_n / max_num_tgs);
+            if (score > best_score) {
+              best_score = score;
+              best_num_tg_m = num_tg_m;
+              best_num_tg_n = num_tg_n;
+            }
+          }
+        }
+
+        bool is_ldmatrix_avail = config.target_cc >= GPU_CC::T4;
+        bool is_stmatrix_avail = config.target_cc >= GPU_CC::H100;
+
+        code.e("using LayoutA = $;", get_cute_layout(input0, meta0));
+        code.e("using LayoutB = $;", get_cute_layout(input1, meta1));
+        code.e("using LayoutC = $;", get_cute_layout(output, meta2));
+
+        code.e("using Kernel = tb::Matmul<half_t, $, Layout<Shape<Int<$>, Int<$>, _1>>, $, $, LayoutA, LayoutB, LayoutC, NUM_THREADS>;",
+          mma_atom_str, best_num_tg_m, best_num_tg_n, is_ldmatrix_avail, is_stmatrix_avail);
+        code.e("Kernel::run(stensor$_ptr, stensor$_ptr, stensor$_ptr, (char*)(buf+0), thread_idx);",
+          output.guid, input0.guid, input1.guid);
         break;
       };
       case type::TB_EXP_OP: {

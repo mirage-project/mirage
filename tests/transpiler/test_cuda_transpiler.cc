@@ -42,15 +42,17 @@ int main(int argc, char* argv[]) {
 			should_run = testcase.name == testcase_name;
 		}
 		if (should_run) {
-			printf("==========\n");
-			printf("Running %s...\n", testcase.name.c_str());
+			printf("==================================================\n");
+			printf("==================================================\n");
+			printf("Running testcase %s...\n", testcase.name.c_str());
 			vector<Subcase::RunResult> cur_results = testcase.run();
 			results.push_back({testcase, cur_results});
 		}
 	}
 	
 	// Print the summary
-	printf("==========\n");
+	printf("==================================================\n");
+	printf("==================================================\n");
 	printf("Summary:\n");
 	for (const auto& [testcase, subcase_results] : results) {
 		bool is_first_line = true;

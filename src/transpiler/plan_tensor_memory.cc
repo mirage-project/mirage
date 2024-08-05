@@ -90,6 +90,7 @@ void Transpiler::plan_tensor_memory() {
       kn::KNCustomizedOp *cur_op = dynamic_cast<kn::KNCustomizedOp *>(op);
       std::unordered_set<sguid_t> processed_sguid;
       MemoryPlanner planner;
+      planner.allocate(16); // The lowest 16 bytes are always zero, for matmul
       for (tb::TBOperator *const tb_op : cur_op->bgraph.operators) {
         for (tb::STensor const &stensor :
              Combine(tb_op->input_tensors, tb_op->output_tensors)) {

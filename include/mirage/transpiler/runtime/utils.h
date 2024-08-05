@@ -13,8 +13,25 @@
     }                                                                          \
   } while (0)
 
-#define CDIV(a, b) (((a) + (b)-1) / (b))
-#define CDIV_CUTE_INT(a, b) (((a) + (b)-_1{}) / (b))
+template <typename T>
+inline static constexpr T ceil_div(T a, T b) {
+  return (a + b - 1) / b;
+}
+
+template <int a, int b>
+inline static C<(a+b-1)/b> ceil_div_cute(C<a> const&, C<b> const&) {
+  return {};
+}
+
+template <typename T>
+inline static T round_to_multiple(T value, T multiple) {
+  return ((value + multiple - 1) / multiple) * multiple;
+}
+
+template <int a, int b>
+inline static C<((a+b-1)/b)*b> round_to_multiple_cute(C<a> const&, C<b> const&) {
+  return {};
+}
 
 template <class var_t, var_t Start, var_t End, var_t Inc, class func_t>
 constexpr void constexpr_for(func_t &&f) {
