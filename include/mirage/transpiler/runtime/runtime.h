@@ -26,6 +26,7 @@ static void _execute_mugraph(std::vector<void const *> input_tensors,
 #include "threadblock/matmul.h"
 #include "threadblock/output.h"
 #include "threadblock/output_accum.h"
+#include "threadblock/reduction.h"
 #include "utils.h"
 
 // Entrypoint for C/C++

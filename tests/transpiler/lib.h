@@ -191,7 +191,7 @@ struct IOTensor {
 		return result;
 	}
 
-	vector<size_t> get_phy_coord(size_t logical_pos) const {
+	vector<size_t> get_logical_coord(size_t logical_pos) const {
 		vector<size_t> result(dims.size());
 		for (int i = (int)dims.size()-1; i >= 0; --i) {
 			result[i] = logical_pos % dims[i];
@@ -333,9 +333,6 @@ public:
 		assert(NUM_OUTPUTS == 1);
 		result_dtensors[0].guid = custom_op->output_tensors[0].guid;
 		this->g.operators.push_back(custom_op);
-		// for (kn::DTensor& output : result_dtensors) {
-		// 	output.guid = kn::DTensor::next_guid++;
-		// }
 		return result_dtensors;
 	}
 
@@ -411,7 +408,7 @@ private:
 	// Run the testcase
 	RunResult run(const trans::TranspileResult &trans_result) {
 		// Import the symbol
-		printf("Running subcase %s...\n", subcase_name.c_str());
+		printf("Running subcase %s (%s)...\n", subcase_name.c_str(), cu_file_path.c_str());
 		printf("Loading generated CUDA program...\n");
 		static int so_file_idx = 0;	// Here rename every generated .so file to a different name, otherwise the so won't be reloaded
 		so_file_idx += 1;
@@ -482,7 +479,7 @@ private:
 					for (size_t i = 0; i < std::min(10ul, mismatch_indexes.size()); ++i) {
 						size_t logical_pos = mismatch_indexes[i];
 						size_t phy_pos = output.logical_pos2phy_pos(logical_pos);
-						vector<size_t> coord = output.get_phy_coord(logical_pos);
+						vector<size_t> coord = output.get_logical_coord(logical_pos);
 						float truth = (float)std_answer_h[phy_pos];
 						float answer = (float)output_ptr_h[phy_pos];
 						float abs_err = std::abs(truth - answer);

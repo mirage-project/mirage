@@ -25,7 +25,7 @@ static __global__ void
     int64_t dst_phy_pos = dst_layout(idx);
     int64_t src_phy_pos = dst_in_src_layout(idx);
     T result = (T)0;
-#pragma unroll
+    CUTE_UNROLL
     for (int i = 0; i < Config::REDUCTION_FACTOR; ++i) {
       result += in[src_phy_pos + i * Config::REDUCTION_DIM_STRIDE];
     }
@@ -44,7 +44,7 @@ public:
   using DstLayout = DstLayout_;
   static constexpr int REDUCTION_DIM = REDUCTION_DIM_;
 
-  static constexpr int NUM_DIMS = cute::rank(SrcLayout{});
+  static constexpr int NUM_DIMS = rank(SrcLayout{});
   CUTE_STATIC_ASSERT_V(rank(SrcLayout{}) == rank(DstLayout{}));
 
   CUTE_STATIC_ASSERT_V(get<REDUCTION_DIM>(shape(SrcLayout{})) %

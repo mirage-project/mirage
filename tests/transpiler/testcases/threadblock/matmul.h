@@ -2,7 +2,7 @@
 
 #include "../../lib.h"
 
-ADD_TESTCASE(Testcase("tb_matmul", {"threadblock", "correctness"}, "threadblock-level matmul op correctness test", [](Testcase* this_testcase) {
+ADD_TESTCASE(Testcase("tb_matmul", {"threadblock", "correctness", "perf"}, "threadblock-level matmul op test", [](Testcase* this_testcase) {
 	struct SubcaseConfig {
 		string subcase_name;
 		std::tuple<int, int, int> mnk;

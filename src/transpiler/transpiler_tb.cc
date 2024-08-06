@@ -599,6 +599,50 @@ Transpiler::CustomOPTranspileResult
       case type::TB_REDUCTION_0_TO_DIMX_OP:
       case type::TB_REDUCTION_1_TO_DIMX_OP:
       case type::TB_REDUCTION_2_TO_DIMX_OP: {
+        tb::STensor const &input = op->input_tensors.at(0);
+        tb::STensor const &output = op->output_tensors.at(0);
+        STensorMeta input_meta = stensor_metas.at(input.guid);
+        STensorMeta output_meta = stensor_metas.at(output.guid);
+        assert(input.num_dims == output.num_dims);
+        int num_dims = input.num_dims;
+        int reduc_dim = op->op_type >= type::TB_REDUCTION_0_TO_DIMX_OP ? op->op_type - type::TB_REDUCTION_0_TO_DIMX_OP : op->op_type - type::TB_REDUCTION_0_OP;
+        assert(0 <= reduc_dim && reduc_dim < num_dims);
+        // Find the iteration dim
+        int iter_dim = -1;
+        for (int i = 0; i < num_dims; ++i) {
+          if (i == reduc_dim) {
+            continue;
+          }
+          bool failed = false;
+          for (tb::STensor const &stensor : {input, output}) {
+            STensorMeta meta = stensor_metas.at(stensor.guid);
+            if (i != meta.innermost_dim && !meta.is_dim_swizzled(i)) {
+              failed = true;
+              break;
+            }
+          }
+          if (!failed) {
+            iter_dim = i;
+            break;
+          }
+        }
+        assert(iter_dim != -1);
+        assert(iter_dim != reduc_dim);
+        // Define layouts
+        string in_layout = mov_last_and_get_layout(
+            input, input_meta, iter_dim);
+        string out_layout = mov_last_and_get_layout(
+            output, output_meta, iter_dim);
+        int cute_reduc_dim = reduc_dim < iter_dim ? num_dims-1-reduc_dim : num_dims-reduc_dim;
+        code.e("using InLayout = $;", in_layout);
+        code.e("using OutLayout = $;", out_layout);
+        // Define and run the kernel
+        code.e("using Kernel = tb::ReductionKernel<half_t, "
+               "OutLayout, InLayout, $, NUM_THREADS>;",
+               cute_reduc_dim);
+        code.e("Kernel::run(stensor$_ptr, stensor$_ptr, thread_idx);",
+                output.guid,
+                input.guid);
         break;
       }
       case type::TB_CONCAT_0_OP:

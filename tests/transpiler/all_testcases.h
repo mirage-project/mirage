@@ -8,3 +8,4 @@
 
 #include "testcases/threadblock/elemwise.h"
 #include "testcases/threadblock/matmul.h"
+#include "testcases/threadblock/reduction.h"
