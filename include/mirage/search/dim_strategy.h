@@ -10,6 +10,8 @@ struct DimStrategy {
   DimStrategy() = default;
   DimStrategy(GeneratorConfig const &config);
 
+  std::vector<type::KNOperatorType> get_knop_cand();
+  std::vector<type::TBOperatorType> get_tbop_cand();
   std::vector<std::vector<int3>>
       get_input_map_cand(std::vector<DTensor> const &tensors, dim3 grid_dim);
   std::vector<int3> get_output_map_cand(dim3 grid_dim);
