@@ -19,7 +19,7 @@ inline static constexpr T ceil_div(T a, T b) {
 }
 
 template <int a, int b>
-inline static C<(a+b-1)/b> ceil_div_cute(C<a> const&, C<b> const&) {
+inline static C<(a + b - 1) / b> ceil_div_cute(C<a> const &, C<b> const &) {
   return {};
 }
 
@@ -29,7 +29,8 @@ inline static T round_to_multiple(T value, T multiple) {
 }
 
 template <int a, int b>
-inline static C<((a+b-1)/b)*b> round_to_multiple_cute(C<a> const&, C<b> const&) {
+inline static C<((a + b - 1) / b) * b> round_to_multiple_cute(C<a> const &,
+                                                              C<b> const &) {
   return {};
 }
 
