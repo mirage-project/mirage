@@ -9,7 +9,7 @@ int main(int argc, char **argv) {
   // Currently only optimize for these two batch sizes
   int batch_size = miragetest::BATCH_SIZE;
   assert(batch_size == 1 || batch_size == 8);
-  kernel::Graph ref_graph({4, 1, 1});
+  kernel::Graph ref_graph({1, 1, 1});
   {
     kernel::DTensor Q = ref_graph.new_input(
         {2 * batch_size, 256, 64}, type::DT_FLOAT16, layout::DmemRowMajor);
@@ -22,7 +22,7 @@ int main(int argc, char **argv) {
     kernel::DTensor S = ref_graph.reduction(E, 2 /*dim*/);
     kernel::DTensor D = ref_graph.div(E, S);
     kernel::DTensor O = ref_graph.matmul(D, V);
-    ref_graph.all_reduce(O);
+    // ref_graph.all_reduce(O);
     for (auto const &op : ref_graph.operators) {
       op->fingerprint();
     }
@@ -37,7 +37,7 @@ int main(int argc, char **argv) {
   mirage::cpu::CTensor ref_fp = ref_graph.operators.back()
                                     ->output_tensors[0]
                                     .copy_fingerprint_to_ctensor();
-  kernel::Graph graph({4, 1, 1});
+  kernel::Graph graph({1, 1, 1});
   kernel::DTensor Q = graph.new_input(
       {2 * batch_size, 256, 64}, type::DT_FLOAT16, layout::DmemRowMajor);
   kernel::DTensor K = graph.new_input(
@@ -99,7 +99,7 @@ int main(int argc, char **argv) {
     plan.block_dim = {128, 1, 1};
     plan.forloop_range = 1;
     plan.reduction_dimx = 64;
-    plan.output_epilogue = mirage::type::TB_EPILOGUE_ALLREDUCE;
+    // plan.output_epilogue = mirage::type::TB_EPILOGUE_ALLREDUCE;
     outputs = graph.customized({outputs[0], outputs[1]}, plan);
     assert(outputs.size() == 1);
   }
