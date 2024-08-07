@@ -276,11 +276,13 @@ private:
   string so_file_path;
 
 public:
+  std::shared_ptr<kn::Graph> g;
+
   Subcase(SubcaseConfig const &config,
           optional<string> const &subcase_name = nullopt,
           optional<epilogue_t> const &epilogue = nullopt)
       : subcase_name(subcase_name.value_or("")), config(config),
-        epilogue(epilogue) {
+        epilogue(epilogue), g(std::make_shared<kn::Graph>()) {
     subcase_id = next_subcase_id++;
     cu_file_path = env_config::get_generated_cu_dir() + "/" +
                    std::to_string(subcase_id) + ".cu";
@@ -292,8 +294,6 @@ public:
   void remove_so_file() {
     remove(so_file_path.c_str());
   }
-
-  kn::Graph g;
 
   // Create a new input to the graph, and add the input to the `inputs` list
   // If `strides_` is not provided, will infer a row-major layout
@@ -315,7 +315,7 @@ public:
     vector<half> data = generator(dims);
     this->inputs.push_back({dims, strides, data});
     kn::DTensor result =
-        g.new_input(dims, type::DT_FLOAT16, layout::DmemRowMajor);
+        g->new_input(dims, type::DT_FLOAT16, layout::DmemRowMajor);
     // print_dtensor(result, data);
     return result;
   }
@@ -350,12 +350,12 @@ public:
     // custom_op->output_tensors and copy them to result_dtensors To avoid
     // misalignment, we enforce the number of output tensors to be 1
     kn::KNOperator *custom_op =
-        this->g.create_customized_op(inputs, tb_graph_ptr->get_plan());
+        this->g->create_customized_op(inputs, tb_graph_ptr->get_plan());
     assert(custom_op &&
            "Error when adding the customized op to the kernel graph");
     assert(NUM_OUTPUTS == 1);
     result_dtensors[0].guid = custom_op->output_tensors[0].guid;
-    this->g.operators.push_back(custom_op);
+    this->g->operators.push_back(custom_op);
     return result_dtensors;
   }
 
@@ -374,7 +374,7 @@ private:
       output_tensor_ptrs.push_back(&output.second);
     }
     trans::TranspileResult trans_result = trans::transpile(
-        &g, config.transpiler_config, input_strides, output_tensor_ptrs);
+        g.get(), config.transpiler_config, input_strides, output_tensor_ptrs);
 
     // Print transpiled result
     printf("Code: see %s\n", cu_file_path.c_str());
@@ -653,7 +653,7 @@ public:
 
   // APIs for the `logic()` function to call
   void add_subcase(Subcase &subcase) {
-    subcases.push_back(subcase);
+    subcases.emplace_back(subcase);
   }
 };
 
