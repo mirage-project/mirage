@@ -119,7 +119,7 @@ int main(int argc, char **argv) {
   }
   printf("[2 Block Graphs] Total runtime = %.4lfms\n", total_ms);
 
-  clock_t st = clock();
+  auto st = std::chrono::steady_clock::now();
   search::GeneratorConfig config =
       search::GeneratorConfig::get_attention_default_config();
   config.grid_dim_to_explore = {{2 * batch_size, 16, 4},
