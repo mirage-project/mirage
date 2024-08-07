@@ -178,11 +178,6 @@ void generate_forloop_dim(std::vector<DTensor> const &input_tensors,
 
 std::vector<std::vector<int>> DimStrategy::get_forloop_dim_cand(
     std::vector<DTensor> const &input_tensors) {
-  if (input_tensors.size() == 3) {
-    return {{-1, 2, 1}};
-  } else {
-    return {{-1, -1}};
-  }
   std::vector<std::vector<int>> results;
   generate_forloop_dim(input_tensors, config.fmap_to_explore, {}, results);
   return results;
