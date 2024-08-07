@@ -32,6 +32,9 @@ private:
 
 public:
   Graph(dim3 gpu_dim = {1, 1, 1});
+  ~Graph();
+  Graph(Graph const &) = delete;
+  Graph &operator=(Graph const &) = delete;
   // input operator
   DTensor new_input(std::vector<int> const &dims,
                     mirage::type::DataType data_type,

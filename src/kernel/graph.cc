@@ -28,6 +28,13 @@ Graph::Graph(dim3 _gpu_dim) : gpu_dim(_gpu_dim) {
   dmem_fp_offset = 0;
 }
 
+Graph::~Graph() {
+  while (!operators.empty()) {
+    delete operators.back();
+    operators.pop_back();
+  }
+}
+
 size_t Graph::pair_hash::operator()(std::pair<int, int> const &p) const {
   size_t h1 = std::hash<int>{}(p.first);
   size_t h2 = std::hash<int>{}(p.second);
