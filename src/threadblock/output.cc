@@ -35,6 +35,7 @@ TBOperator *Graph::create_output_op(STensor const &stensor,
                                     int3 output_map,
                                     int forloop_dim,
                                     mirage::type::TBEpilogueType epilogue) {
+  assert(stensor.after_accum);
   TBOutputOp *op =
       new TBOutputOp(this, stensor, output_map, forloop_dim, epilogue);
   return op;

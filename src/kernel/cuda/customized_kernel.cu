@@ -117,6 +117,17 @@ __global__ void customized_kernel_function(
       } else if (op_type == mirage::type::TB_OUTPUT_OP) {
         // Only save outputs after forloop
         // So we do nothing for output saver
+      } else if (op_type == mirage::type::TB_FORLOOP_ACCUM_OP) {
+        // Do nothing since accum can be performed as an epilogue of
+        // the previous operator
+        int input_smem_offset, accum_smem_offset;
+        int num_elements;
+        mirage::threadblock::deserialize_forloop_accum_parameters(
+            new_params.parameters,
+            param_idx,
+            num_elements,
+            input_smem_offset,
+            accum_smem_offset);
       } else if (op_type == mirage::type::TB_MATMUL_OP) {
         int thread_idx = threadIdx.x;
         // Broadcast the warp_id computed by lane 0 to ensure dependent code
@@ -406,11 +417,11 @@ __global__ void compute_customizedop_fingerprint(
         }
         case mirage::type::TB_FORLOOP_ACCUM_OP: {
           int input_smem_offset, accum_smem_offset;
-          int2 stensor_matrix_shape;
-          mirage:;threadblock::deserialize_forloop_accum_parameters(
+          int num_elements;
+          mirage::threadblock::deserialize_forloop_accum_parameters(
               new_params.parameters,
               param_idx,
-              stensor_matrix_shape,
+              num_elements,
               input_smem_offset,
               accum_smem_offset);
           mirage::type::FPType *input_stensor_ptr =
@@ -421,7 +432,7 @@ __global__ void compute_customizedop_fingerprint(
           mirage::threadblock::TBForloopAccumFingerprinter fp(
               input_stensor_ptr,
               accum_stensor_ptr,
-              stensor_matrix_shape,
+              num_elements,
               reset_output,
               threadIdx.x,
               blockDim.x);

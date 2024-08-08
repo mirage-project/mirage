@@ -26,23 +26,21 @@ CUTLASS_HOST_DEVICE
 void deserialize_forloop_accum_parameters(
     int const *params,
     int &param_idx,
-    int2 &stensor_matrix_shape,
+    int &num_elements,
     int &input_smem_offset,
     int &accum_smem_offset) {
-  stensor_matrix_shape.x = params[param_idx++];
-  stensor_matrix_shape.y = params[param_idx++];
+  num_elements = params[param_idx++];
   input_smem_offset = params[param_idx++];
   accum_smem_offset = params[param_idx++];
 }
 
-inline void serialize_forloop_accum_params(
+inline void serialize_forloop_accum_parameters(
     int *params,
     int &param_idx,
-    int2 stensor_matrix_shape,
+    int num_elements,
     int input_smem_offset,
     int accum_smem_offset) {
-  params[param_idx++] = stensor_matrix_shape.x;
-  params[param_idx++] = stensor_matrix_shape.y;
+  params[param_idx++] = num_elements;
   params[param_idx++] = input_smem_offset;
   params[param_idx++] = accum_smem_offset;
   assert(param_idx <= NewKernelParams::MAX_NUM_PARAMETERS);

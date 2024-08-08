@@ -34,6 +34,7 @@ public:
       mirage::type::DataType type = mirage::type::DT_FLOAT16);
   void gen_cuda_code_input_loader(std::string dtensor_name, std::string indent);
   void gen_cuda_code_output_saver(std::string dtensor_name, std::string indent);
+  void gen_cuda_code_forloop_accum(std::string indent);
   void gen_cuda_code_matmul_op(std::string indent);
   void gen_cuda_code_exp_op(std::string indent);
   void gen_cuda_code_div_op(std::string indent);

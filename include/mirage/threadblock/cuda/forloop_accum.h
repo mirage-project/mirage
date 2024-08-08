@@ -30,7 +30,7 @@ public:
   CUTLASS_DEVICE
   TBForloopAccumFingerprinter(mirage::type::FPType *input_ptr,
                               mirage::type::FPType *output_ptr,
-                              int2 stensor_matrix_shape,
+                              int num_elements,
                               bool reset_output,
                               int thread_id,
                               int num_threads) {
@@ -39,7 +39,7 @@ public:
     // mirage::type::FPType *output_ptr =
     //     (mirage::type::FPType *)(output.smem_offset + smem_buffer);
     // int num_elements = (int)input.num_elements();
-    int num_elements = stensor_matrix_shape.x * stensor_matrix_shape.y;
+    // int num_elements = stensor_matrix_shape.x * stensor_matrix_shape.y;
     if (reset_output) {
       for (int idx = thread_id; idx < num_elements; idx += num_threads) {
         output_ptr[idx] = input_ptr[idx];

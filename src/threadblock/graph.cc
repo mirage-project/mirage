@@ -17,6 +17,7 @@
 #include "mirage/threadblock/serializer/concat_serializer.h"
 #include "mirage/threadblock/serializer/element_binary_serializer.h"
 #include "mirage/threadblock/serializer/element_unary_serializer.h"
+#include "mirage/threadblock/serializer/forloop_accum_serializer.h"
 #include "mirage/threadblock/serializer/input_loader_serializer.h"
 #include "mirage/threadblock/serializer/matmul_serializer.h"
 #include "mirage/threadblock/serializer/output_saver_serializer.h"
@@ -182,8 +183,10 @@ size_t Graph::calculate_shared_memory_usage(TBOperator *new_op) {
         }
         break;
       }
-      case mirage::type::TB_EXP_OP: {
+      case mirage::type::TB_EXP_OP:
+      case mirage::type::TB_FORLOOP_ACCUM_OP: {
         // inplace optimization for elementunary
+        // and accumulation
         break;
       }
       default: {
@@ -205,7 +208,7 @@ NewKernelParams Graph::get_new_kernel_params(bool fingerprint) const {
   params.num_dmem_inputs = 0;
   params.num_dmem_outputs = 0;
 
-  assert(params.num_operators <= KernelParams::MAX_NUM_OPERATORS);
+  assert(params.num_operators <= NewKernelParams::MAX_NUM_OPERATORS);
   // Our serializer assumes that input loaders are the first operators
   // and that output savers are the last operators
   for (size_t i = 0; i < operators.size(); i++) {
@@ -417,6 +420,21 @@ NewKernelParams Graph::get_new_kernel_params(bool fingerprint) const {
             stensor_layout,
             input_smem_offset,
             output_op->epilogue);
+        break;
+      }
+      case mirage::type::TB_FORLOOP_ACCUM_OP: {
+        assert(operators[i]->input_tensors.size() == 1);
+        assert(operators[i]->output_tensors.size() == 1);
+        mirage::threadblock::STensor input = operators[i]->input_tensors[0];
+        mirage::threadblock::STensor accum = operators[i]->output_tensors[0];
+        int num_elements = input.num_elements();
+        assert(input.num_elements() == accum.num_elements());
+        mirage::threadblock::serialize_forloop_accum_parameters(
+            params.parameters,
+            params.num_parameters,
+            num_elements,
+            input.smem_offset,
+            accum.smem_offset);
         break;
       }
       case mirage::type::TB_MATMUL_OP: {
