@@ -128,7 +128,7 @@ size_t Graph::pair_hash::operator()(std::pair<int, int> const &p) const {
   return h1;
 }
 
-off_t Graph::allocate(STensor const &tensor) {
+off_t Graph::allocate_fingerprint(STensor const &tensor) {
   off_t ret = smem_offset;
 
   off_t aligns_size = ((tensor.size() + 15) & ~15);
@@ -139,7 +139,7 @@ off_t Graph::allocate(STensor const &tensor) {
   return ret;
 }
 
-void Graph::free(STensor const &tensor) {
+void Graph::free_fingerprint(STensor const &tensor) {
   assert(allocated_tensors.size() > 0);
   assert(allocated_tensors.back().first == tensor.smem_offset);
   assert(allocated_tensors.back().second == ((tensor.size() + 15) & ~15));
@@ -147,10 +147,55 @@ void Graph::free(STensor const &tensor) {
   allocated_tensors.pop_back();
 }
 
-void Graph::free(std::vector<STensor> const &tensors) {
+void Graph::free_fingerprint(std::vector<STensor> const &tensors) {
   for (int i = tensors.size() - 1; i >= 0; i--) {
-    free(tensors[i]);
+    free_fingerprint(tensors[i]);
   }
+}
+
+size_t Graph::calculate_shared_memory_usage(TBOperator *new_op) {
+  size_t usage = 0;
+  if (new_op != nullptr) {
+    operators.push_back(new_op);
+  }
+
+  // currently use a simple heuristic to calculate shmem usage
+  // TODO: replace the following with a transpiler-based method
+  for (const auto& op : operators) {
+    switch (op->op_type) {
+      case mirage::type::TB_INPUT_OP:
+      case mirage::type::TB_OUTPUT_OP:
+      case mirage::type::TB_MATMUL_OP:
+      case mirage::type::TB_DIV_OP:
+      case mirage::type::TB_ADD_OP:
+      case mirage::type::TB_REDUCTION_0_OP:
+      case mirage::type::TB_REDUCTION_1_OP:
+      case mirage::type::TB_REDUCTION_2_OP:
+      case mirage::type::TB_REDUCTION_0_TO_DIMX_OP:
+      case mirage::type::TB_REDUCTION_1_TO_DIMX_OP:
+      case mirage::type::TB_REDUCTION_2_TO_DIMX_OP:
+      case mirage::type::TB_CONCAT_0_OP:
+      case mirage::type::TB_CONCAT_1_OP:
+      case mirage::type::TB_CONCAT_2_OP: {
+        for (size_t i = 0; i < op->output_tensors.size(); i++) {
+          usage += op->output_tensors[i].size();
+        }
+        break;
+      }
+      case mirage::type::TB_EXP_OP: {
+        // inplace optimization for elementunary
+        break;
+      }
+      default: {
+        assert(false && "Unsupported operator");
+      }
+    }
+  }
+
+  if (new_op != nullptr) {
+    operators.pop_back();
+  }
+  return usage;
 }
 
 NewKernelParams Graph::get_new_kernel_params(bool fingerprint) const {
@@ -282,14 +327,14 @@ NewKernelParams Graph::get_new_kernel_params(bool fingerprint) const {
         }
         // Serialize parameters for input loader
         assert(operators[i]->input_tensors.size() == 1);
-        assert(operators[i]->output_tensors.size() == 1);
+        assert(operators[i]->output_tensors.size() == 0);
         mirage::threadblock::STensor input_stensor =
             operators[i]->input_tensors[0];
-        mirage::threadblock::STensor accum_stensor =
-            operators[i]->output_tensors[0];
+        //mirage::threadblock::STensor accum_stensor =
+        //    operators[i]->output_tensors[0];
         // Assert that stensor and dtensor have the same num of dims
         int num_dims = input_stensor.num_dims;
-        assert(num_dims == accum_stensor.num_dims);
+        // assert(num_dims == accum_stensor.num_dims);
         assert(num_dims == dtensor.num_dims);
         int2 dtensor_matrix_shape, stensor_matrix_shape;
         dtensor_matrix_shape = {dtensor.dim[num_dims - 2],
@@ -297,7 +342,7 @@ NewKernelParams Graph::get_new_kernel_params(bool fingerprint) const {
         stensor_matrix_shape = {input_stensor.dim[num_dims - 2],
                                 input_stensor.dim[num_dims - 1]};
         int input_smem_offset = input_stensor.smem_offset;
-        int accum_smem_offset = accum_stensor.smem_offset;
+        // int accum_smem_offset = accum_stensor.smem_offset;
         mirage::layout::DmemLayout dtensor_layout = dtensor.layout;
         mirage::layout::SmemLayout stensor_layout = input_stensor.layout;
         int3 output_matrix_row_offset_block_stride = {
@@ -371,7 +416,6 @@ NewKernelParams Graph::get_new_kernel_params(bool fingerprint) const {
             dtensor_layout,
             stensor_layout,
             input_smem_offset,
-            accum_smem_offset,
             output_op->epilogue);
         break;
       }

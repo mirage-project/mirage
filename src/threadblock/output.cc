@@ -35,11 +35,6 @@ TBOperator *Graph::create_output_op(STensor const &stensor,
                                     int3 output_map,
                                     int forloop_dim,
                                     mirage::type::TBEpilogueType epilogue) {
-  if (smem_offset + stensor.size() >= mirage::config::MAX_SMEM_SIZE) {
-    // printf("smem_offset(%ld) stensorsize(%d)\n", smem_offset,
-    // (int)stensor.size());
-    return nullptr;
-  }
   TBOutputOp *op =
       new TBOutputOp(this, stensor, output_map, forloop_dim, epilogue);
   return op;
@@ -52,21 +47,15 @@ TBOutputOp::TBOutputOp(Graph *_graph,
                        mirage::type::TBEpilogueType _epilogue)
     : TBOperator(_graph, mirage::type::TB_OUTPUT_OP, input),
       output_map(_output_map), forloop_dim(_forloop_dim), epilogue(_epilogue) {
-  // Create a stensor for accumulating results
-  STensor accum = input;
-  accum.owner_op = this;
-  accum.owner_ts_idx = 0;
-  accum.guid = STensor::next_guid++;
-  accum.smem_offset = bgraph->allocate(accum);
+  // Output saver should not have any output stensors
   assert(output_tensors.size() == 0);
-  output_tensors.push_back(accum);
 
-  dtensor.num_dims = accum.num_dims;
-  dtensor.data_type = accum.data_type;
+  dtensor.num_dims = input.num_dims;
+  dtensor.data_type = input.data_type;
   // Currently assume that the output layouts are row-major
   dtensor.layout = mirage::layout::DmemRowMajor;
   for (int i = 0; i < dtensor.num_dims; i++) {
-    dtensor.dim[i] = accum.dim[i];
+    dtensor.dim[i] = input.dim[i];
   }
 
   for (int d = 0; d < 3; d++) {
@@ -96,7 +85,8 @@ TBOutputOp::TBOutputOp(Graph *_graph,
 }
 
 TBOutputOp::~TBOutputOp() {
-  bgraph->free(output_tensors);
+  assert(output_tensors.size() == 0);
+  //bgraph->free_fingerprint(output_tensors);
 }
 
 TBOutputOp::operator json() const {

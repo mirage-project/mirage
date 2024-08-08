@@ -39,20 +39,30 @@ TBOperator *Graph::create_matmul_op(STensor const &A, STensor const &B) {
       return nullptr;
     }
   }
-
-  STensor C;
-  C.num_dims = A.num_dims;
-  for (int i = 0; i < C.num_dims; i++) {
-    C.dim[i] = A.dim[i];
-  }
-  C.dim[C.num_dims - 1] = B.dim[C.num_dims - 1];
-  C.data_type = A.data_type;
-  if (smem_offset + (off_t)C.size() > (off_t)mirage::config::MAX_SMEM_SIZE) {
+  if (A.after_accum != B.after_accum) {
     return nullptr;
   }
 
+  //STensor C;
+  //C.num_dims = A.num_dims;
+  //for (int i = 0; i < C.num_dims; i++) {
+  //  C.dim[i] = A.dim[i];
+  //}
+  //C.dim[C.num_dims - 1] = B.dim[C.num_dims - 1];
+  //C.data_type = A.data_type;
+  //if (smem_offset + (off_t)C.size() > (off_t)mirage::config::MAX_SMEM_SIZE) {
+  //  return nullptr;
+  //}
+
   TBMatmulOp *op = new TBMatmulOp(this, A, B);
-  return op;
+  // Check shmem usage
+  size_t smem_usage = calculate_shared_memory_usage(op);
+  if (smem_usage > mirage::config::MAX_SMEM_SIZE) {
+    delete op;
+    return nullptr;
+  } else {
+    return op;
+  }
 }
 
 TBMatmulOp::TBMatmulOp(Graph *_graph, STensor const &A, STensor const &B)
@@ -76,13 +86,14 @@ TBMatmulOp::TBMatmulOp(Graph *_graph, STensor const &A, STensor const &B)
   C.owner_op = this;
   C.owner_ts_idx = 0;
   C.guid = STensor::next_guid++;
-  C.smem_offset = bgraph->allocate(C);
+  C.after_accum = A.after_accum;
+  C.smem_offset = bgraph->allocate_fingerprint(C);
   assert(output_tensors.size() == 0);
   output_tensors.push_back(C);
 }
 
 TBMatmulOp::~TBMatmulOp() {
-  bgraph->free(output_tensors);
+  bgraph->free_fingerprint(output_tensors);
 }
 
 TBMatmulOp::operator json() const {

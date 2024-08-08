@@ -19,6 +19,7 @@
 #include "mirage/threadblock/cuda/concat.h"
 #include "mirage/threadblock/cuda/element_binary.h"
 #include "mirage/threadblock/cuda/element_unary.h"
+#include "mirage/threadblock/cuda/forloop_accum.h"
 #include "mirage/threadblock/cuda/input_loader.h"
 #include "mirage/threadblock/cuda/matmul.h"
 #include "mirage/threadblock/cuda/output_saver.h"
@@ -27,6 +28,7 @@
 #include "mirage/threadblock/serializer/concat_serializer.h"
 #include "mirage/threadblock/serializer/element_binary_serializer.h"
 #include "mirage/threadblock/serializer/element_unary_serializer.h"
+#include "mirage/threadblock/serializer/forloop_accum_serializer.h"
 #include "mirage/threadblock/serializer/input_loader_serializer.h"
 #include "mirage/threadblock/serializer/matmul_serializer.h"
 #include "mirage/threadblock/serializer/output_saver_serializer.h"
@@ -261,7 +263,7 @@ __global__ void customized_kernel_function(
     int3 global_offset_block_stride;
     int global_offset_forloop_stride;
     int2 dtensor_matrix_shape, stensor_matrix_shape;
-    int input_smem_offset, accum_smem_offset;
+    int input_smem_offset;
     mirage::layout::DmemLayout dtensor_layout;
     mirage::layout::SmemLayout stensor_layout;
     mirage::type::TBEpilogueType epilogue;
@@ -279,7 +281,6 @@ __global__ void customized_kernel_function(
         dtensor_layout,
         stensor_layout,
         input_smem_offset,
-        accum_smem_offset,
         epilogue);
     int tb_offset_row = blockIdx.x * output_matrix_row_offset_block_stride.x +
                         blockIdx.y * output_matrix_row_offset_block_stride.y +
@@ -301,7 +302,7 @@ __global__ void customized_kernel_function(
     // b2b_mma_pipelined_smem_accumulator.h prologue iterators
     cutlass::MatrixCoord matrix_offset = {tb_offset_row, tb_offset_column};
     cutlass::half_t *stensor_ptr =
-        (cutlass::half_t *)(smem_buffer + accum_smem_offset);
+        (cutlass::half_t *)(smem_buffer + input_smem_offset);
     mirage::threadblock::GenericOutputSaver saver(dtensor_ptr,
                                                   stensor_ptr,
                                                   dtensor_matrix_shape,
@@ -403,6 +404,30 @@ __global__ void compute_customizedop_fingerprint(
           __syncthreads();
           break;
         }
+        case mirage::type::TB_FORLOOP_ACCUM_OP: {
+          int input_smem_offset, accum_smem_offset;
+          int2 stensor_matrix_shape;
+          mirage:;threadblock::deserialize_forloop_accum_parameters(
+              new_params.parameters,
+              param_idx,
+              stensor_matrix_shape,
+              input_smem_offset,
+              accum_smem_offset);
+          mirage::type::FPType *input_stensor_ptr =
+              (mirage::type::FPType *)(smem_buffer + input_smem_offset);
+          mirage::type::FPType *accum_stensor_ptr =
+              (mirage::type::FPType *)(smem_buffer + accum_smem_offset);
+          bool reset_output = (i == 0);
+          mirage::threadblock::TBForloopAccumFingerprinter fp(
+              input_stensor_ptr,
+              accum_stensor_ptr,
+              stensor_matrix_shape,
+              reset_output,
+              threadIdx.x,
+              blockDim.x);
+          __syncthreads();
+          break;
+        }
         case mirage::type::TB_OUTPUT_OP: {
           int3 output_matrix_row_offset_block_stride;
           int3 output_matrix_column_offset_block_stride;
@@ -411,7 +436,7 @@ __global__ void compute_customizedop_fingerprint(
           int3 global_offset_block_stride;
           int global_offset_forloop_stride;
           int2 dtensor_matrix_shape, stensor_matrix_shape;
-          int input_smem_offset, accum_smem_offset;
+          int input_smem_offset;
           mirage::layout::DmemLayout dtensor_layout;
           mirage::layout::SmemLayout stensor_layout;
           mirage::type::TBEpilogueType epilogue;
@@ -429,7 +454,6 @@ __global__ void compute_customizedop_fingerprint(
               dtensor_layout,
               stensor_layout,
               input_smem_offset,
-              accum_smem_offset,
               epilogue);
           bool non_zero_forloop_strides = false;
           if ((output_matrix_row_offset_forloop_stride > 0) ||
@@ -439,17 +463,6 @@ __global__ void compute_customizedop_fingerprint(
           }
           mirage::type::FPType *input_stensor_ptr =
               (mirage::type::FPType *)(smem_buffer + input_smem_offset);
-          mirage::type::FPType *accum_stensor_ptr =
-              (mirage::type::FPType *)(smem_buffer + accum_smem_offset);
-          bool reset_output = (non_zero_forloop_strides || (i == 0));
-          mirage::threadblock::TBOutputAccumFingerprinter fp(
-              input_stensor_ptr,
-              accum_stensor_ptr,
-              stensor_matrix_shape,
-              reset_output,
-              threadIdx.x,
-              blockDim.x);
-          __syncthreads();
           // Step 2: Save final output to dmem if (1) this is the last forloop
           // or (2) we don't accum output since the forloop strides are non-zero
           if ((i == forloop_range - 1) || non_zero_forloop_strides) {
@@ -481,7 +494,7 @@ __global__ void compute_customizedop_fingerprint(
                                                   tb_offset_column};
             mirage::threadblock::TBOutputSaverFingerprinter fp(
                 dtensor_ptr,
-                accum_stensor_ptr,
+                input_stensor_ptr,
                 dtensor_matrix_shape,
                 stensor_matrix_shape,
                 dtensor_layout,

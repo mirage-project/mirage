@@ -270,7 +270,7 @@ void CudaTranspiler::gen_cuda_code_output_saver(std::string dtensor_name,
   int3 global_offset_block_stride;
   int global_offset_forloop_stride;
   int2 dtensor_matrix_shape, stensor_matrix_shape;
-  int input_smem_offset, accum_smem_offset;
+  int input_smem_offset;
   mirage::layout::DmemLayout dtensor_layout;
   mirage::layout::SmemLayout stensor_layout;
   mirage::type::TBEpilogueType epilogue;
@@ -288,7 +288,6 @@ void CudaTranspiler::gen_cuda_code_output_saver(std::string dtensor_name,
       dtensor_layout,
       stensor_layout,
       input_smem_offset,
-      accum_smem_offset,
       epilogue);
   std::stringstream code;
   code << ind << "int tb_offset_row = "
