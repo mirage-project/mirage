@@ -352,52 +352,6 @@ public:
   }
 };
 
-class TBOutputAccumFingerprinter {
-public:
-  CUTLASS_DEVICE
-  TBOutputAccumFingerprinter(mirage::type::FPType *input_ptr,
-                             mirage::type::FPType *output_ptr,
-                             int2 stensor_matrix_shape,
-                             bool reset_output,
-                             int thread_id,
-                             int num_threads) {
-    // mirage::type::FPType *input_ptr =
-    //     (mirage::type::FPType *)(input.smem_offset + smem_buffer);
-    // mirage::type::FPType *output_ptr =
-    //     (mirage::type::FPType *)(output.smem_offset + smem_buffer);
-    // int num_elements = (int)input.num_elements();
-    int num_elements = stensor_matrix_shape.x * stensor_matrix_shape.y;
-    if (reset_output) {
-      for (int idx = thread_id; idx < num_elements; idx += num_threads) {
-        output_ptr[idx] = input_ptr[idx];
-      }
-      // if (thread_id == 0) {
-      //  printf("Accumu(0): block(%d %d %d) output(%d) input(%d)\n",
-      //         blockIdx.x,
-      //         blockIdx.y,
-      //         blockIdx.z,
-      //         output_ptr[thread_id],
-      //         input_ptr[thread_id]);
-      //}
-    } else {
-      for (int idx = thread_id; idx < num_elements; idx += num_threads) {
-        uint32_t value = input_ptr[idx];
-        // if (thread_id == 0) {
-        //  printf("Accumu(1): block(%d %d %d) output_old(%d) input(%d) "
-        //         "output_new(%d)\n",
-        //         blockIdx.x,
-        //         blockIdx.y,
-        //         blockIdx.z,
-        //         output_ptr[thread_id],
-        //         input_ptr[thread_id],
-        //         (value + output_ptr[idx]) % FP_PQ);
-        //}
-        output_ptr[idx] = (value + output_ptr[idx]) % FP_PQ;
-      }
-    }
-  }
-};
-
 class TBOutputSaverFingerprinter {
 public:
   CUTLASS_DEVICE

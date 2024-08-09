@@ -186,7 +186,7 @@ std::string generate_kernel_code(
       int3 global_offset_block_stride;
       int global_offset_forloop_stride;
       int2 dtensor_matrix_shape, stensor_matrix_shape;
-      int input_smem_offset, accum_smem_offset;
+      int input_smem_offset;
       mirage::layout::DmemLayout dtensor_layout;
       mirage::layout::SmemLayout stensor_layout;
       mirage::type::TBEpilogueType epilogue;
@@ -204,9 +204,8 @@ std::string generate_kernel_code(
           dtensor_layout,
           stensor_layout,
           input_smem_offset,
-          accum_smem_offset,
           epilogue);
-      header << "\t" << stensor_ptr_name(accum_smem_offset)
+      header << "\t" << stensor_ptr_name(input_smem_offset)
              << " = tl.make_block_ptr(\n"
              << "\t\tbase = " << output_names[output_idx] << " + "
              << block_offset_calculation(global_offset_block_stride.x,
@@ -230,14 +229,14 @@ std::string generate_kernel_code(
       // Assume row major layout for now
       header << "\t\tstrides = (" << stensor_matrix_shape.y << ", 1),\n";
       header << "\t\torder = (1, 0))\n";
-      header << "\t" << stensor_name(accum_smem_offset) << " = tl.zeros(["
+      header << "\t" << stensor_name(input_smem_offset) << " = tl.zeros(["
              << stensor_matrix_shape.x << ", " << stensor_matrix_shape.y << "]"
              << ", dtype = tl.float16)\n";
-      main << "\t\t" << stensor_name(accum_smem_offset) << " = "
-           << stensor_name(accum_smem_offset) << " + "
-           << stensor_name(input_smem_offset) << "\n";
-      ending << "\ttl.store(" << stensor_ptr_name(accum_smem_offset) << ", "
-             << stensor_name(accum_smem_offset) << ")\n";
+      //main << "\t\t" << stensor_name(input_smem_offset) << " = "
+      //     << stensor_name(input_smem_offset) << " + "
+      //     << stensor_name(input_smem_offset) << "\n";
+      ending << "\ttl.store(" << stensor_ptr_name(input_smem_offset) << ", "
+             << stensor_name(input_smem_offset) << ")\n";
       output_idx++;
     } else if (op_type == mirage::type::TB_MATMUL_OP) {
       int m, n, k;

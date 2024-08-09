@@ -19,6 +19,7 @@
 #include "mirage/threadblock/cuda/concat.h"
 #include "mirage/threadblock/cuda/element_binary.h"
 #include "mirage/threadblock/cuda/element_unary.h"
+#include "mirage/threadblock/cuda/forloop_accum.h"
 #include "mirage/threadblock/cuda/input_loader.h"
 #include "mirage/threadblock/cuda/matmul.h"
 #include "mirage/threadblock/cuda/output_saver.h"
@@ -27,6 +28,7 @@
 #include "mirage/threadblock/serializer/concat_serializer.h"
 #include "mirage/threadblock/serializer/element_binary_serializer.h"
 #include "mirage/threadblock/serializer/element_unary_serializer.h"
+#include "mirage/threadblock/serializer/forloop_accum_serializer.h"
 #include "mirage/threadblock/serializer/input_loader_serializer.h"
 #include "mirage/threadblock/serializer/matmul_serializer.h"
 #include "mirage/threadblock/serializer/output_saver_serializer.h"
@@ -115,6 +117,17 @@ __global__ void customized_kernel_function(
       } else if (op_type == mirage::type::TB_OUTPUT_OP) {
         // Only save outputs after forloop
         // So we do nothing for output saver
+      } else if (op_type == mirage::type::TB_FORLOOP_ACCUM_OP) {
+        // Do nothing since accum can be performed as an epilogue of
+        // the previous operator
+        int input_smem_offset, accum_smem_offset;
+        int num_elements;
+        mirage::threadblock::deserialize_forloop_accum_parameters(
+            new_params.parameters,
+            param_idx,
+            num_elements,
+            input_smem_offset,
+            accum_smem_offset);
       } else if (op_type == mirage::type::TB_MATMUL_OP) {
         int thread_idx = threadIdx.x;
         // Broadcast the warp_id computed by lane 0 to ensure dependent code
@@ -261,7 +274,7 @@ __global__ void customized_kernel_function(
     int3 global_offset_block_stride;
     int global_offset_forloop_stride;
     int2 dtensor_matrix_shape, stensor_matrix_shape;
-    int input_smem_offset, accum_smem_offset;
+    int input_smem_offset;
     mirage::layout::DmemLayout dtensor_layout;
     mirage::layout::SmemLayout stensor_layout;
     mirage::type::TBEpilogueType epilogue;
@@ -279,7 +292,6 @@ __global__ void customized_kernel_function(
         dtensor_layout,
         stensor_layout,
         input_smem_offset,
-        accum_smem_offset,
         epilogue);
     int tb_offset_row = blockIdx.x * output_matrix_row_offset_block_stride.x +
                         blockIdx.y * output_matrix_row_offset_block_stride.y +
@@ -301,7 +313,7 @@ __global__ void customized_kernel_function(
     // b2b_mma_pipelined_smem_accumulator.h prologue iterators
     cutlass::MatrixCoord matrix_offset = {tb_offset_row, tb_offset_column};
     cutlass::half_t *stensor_ptr =
-        (cutlass::half_t *)(smem_buffer + accum_smem_offset);
+        (cutlass::half_t *)(smem_buffer + input_smem_offset);
     mirage::threadblock::GenericOutputSaver saver(dtensor_ptr,
                                                   stensor_ptr,
                                                   dtensor_matrix_shape,
@@ -322,13 +334,16 @@ __global__ void compute_customizedop_fingerprint(
     mirage::threadblock::NewKernelParams new_params,
     int forloop_range,
     char *dmem_fp_ptr,
+    char *stensor_fp_base_ptr,
     mirage::type::FPType *exp_lookup_table,
     mirage::type::FPType *div_p_lookup_table,
     mirage::type::FPType *div_q_lookup_table) {
   // since we are using cutlass, we group all threads within a threadblock
   // as a 1-D list of threads, therefore blockDim.y and blockDim.z must be
   // 1
-  extern __shared__ char smem_buffer[];
+  //extern __shared__ char smem_buffer[];
+  int64_t thread_block_idx = blockIdx.x * gridDim.y * gridDim.z + blockIdx.y * gridDim.z + blockIdx.z;
+  char *smem_buffer = stensor_fp_base_ptr + thread_block_idx * mirage::config::MAX_SMEM_FP_SIZE;
   assert(blockDim.y == 1);
   assert(blockDim.z == 1);
 
@@ -403,6 +418,30 @@ __global__ void compute_customizedop_fingerprint(
           __syncthreads();
           break;
         }
+        case mirage::type::TB_FORLOOP_ACCUM_OP: {
+          int input_smem_offset, accum_smem_offset;
+          int num_elements;
+          mirage::threadblock::deserialize_forloop_accum_parameters(
+              new_params.parameters,
+              param_idx,
+              num_elements,
+              input_smem_offset,
+              accum_smem_offset);
+          mirage::type::FPType *input_stensor_ptr =
+              (mirage::type::FPType *)(smem_buffer + input_smem_offset);
+          mirage::type::FPType *accum_stensor_ptr =
+              (mirage::type::FPType *)(smem_buffer + accum_smem_offset);
+          bool reset_output = (i == 0);
+          mirage::threadblock::TBForloopAccumFingerprinter fp(
+              input_stensor_ptr,
+              accum_stensor_ptr,
+              num_elements,
+              reset_output,
+              threadIdx.x,
+              blockDim.x);
+          __syncthreads();
+          break;
+        }
         case mirage::type::TB_OUTPUT_OP: {
           int3 output_matrix_row_offset_block_stride;
           int3 output_matrix_column_offset_block_stride;
@@ -411,7 +450,7 @@ __global__ void compute_customizedop_fingerprint(
           int3 global_offset_block_stride;
           int global_offset_forloop_stride;
           int2 dtensor_matrix_shape, stensor_matrix_shape;
-          int input_smem_offset, accum_smem_offset;
+          int input_smem_offset;
           mirage::layout::DmemLayout dtensor_layout;
           mirage::layout::SmemLayout stensor_layout;
           mirage::type::TBEpilogueType epilogue;
@@ -429,7 +468,6 @@ __global__ void compute_customizedop_fingerprint(
               dtensor_layout,
               stensor_layout,
               input_smem_offset,
-              accum_smem_offset,
               epilogue);
           bool non_zero_forloop_strides = false;
           if ((output_matrix_row_offset_forloop_stride > 0) ||
@@ -439,17 +477,6 @@ __global__ void compute_customizedop_fingerprint(
           }
           mirage::type::FPType *input_stensor_ptr =
               (mirage::type::FPType *)(smem_buffer + input_smem_offset);
-          mirage::type::FPType *accum_stensor_ptr =
-              (mirage::type::FPType *)(smem_buffer + accum_smem_offset);
-          bool reset_output = (non_zero_forloop_strides || (i == 0));
-          mirage::threadblock::TBOutputAccumFingerprinter fp(
-              input_stensor_ptr,
-              accum_stensor_ptr,
-              stensor_matrix_shape,
-              reset_output,
-              threadIdx.x,
-              blockDim.x);
-          __syncthreads();
           // Step 2: Save final output to dmem if (1) this is the last forloop
           // or (2) we don't accum output since the forloop strides are non-zero
           if ((i == forloop_range - 1) || non_zero_forloop_strides) {
@@ -481,7 +508,7 @@ __global__ void compute_customizedop_fingerprint(
                                                   tb_offset_column};
             mirage::threadblock::TBOutputSaverFingerprinter fp(
                 dtensor_ptr,
-                accum_stensor_ptr,
+                input_stensor_ptr,
                 dtensor_matrix_shape,
                 stensor_matrix_shape,
                 dtensor_layout,
@@ -491,7 +518,7 @@ __global__ void compute_customizedop_fingerprint(
                 matrix_offset,
                 global_offset);
             // No need to syncthread when saving output to dmem
-            //__syncthreads();
+            __syncthreads();
           }
           break;
         }
@@ -728,7 +755,6 @@ __global__ void
 }
 
 bool KNCustomizedOp::fingerprint(void) {
-  int max_smem_size = mirage::config::MAX_SMEM_SIZE;
   // mirage::threadblock::KernelParams params = bgraph.get_kernel_params();
   mirage::threadblock::NewKernelParams new_params =
       bgraph.get_new_kernel_params(true /*fingerprint_kernel*/);
@@ -736,22 +762,21 @@ bool KNCustomizedOp::fingerprint(void) {
   assert(kgraph->gpu_dim.y == 1);
   assert(kgraph->gpu_dim.z == 1);
 
-  assert(bgraph.smem_offset <= max_smem_size);
+  assert(bgraph.smem_offset <= mirage::config::MAX_SMEM_FP_SIZE);
   mirage::kernel::DeviceMemoryManager *dmm =
       mirage::kernel::DeviceMemoryManager::get_instance();
-  if (bgraph.smem_offset > 48 * 1024) {
-    checkCUDA(cudaFuncSetAttribute(compute_customizedop_fingerprint,
-                                   cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                   bgraph.smem_offset));
-  }
+
+  // Make sure we don't launch more threadblocks than allowed
+  assert(bgraph.grid_dim.x * bgraph.grid_dim.y * bgraph.grid_dim.z
+         <= mirage::config::MAX_NUM_THREADBLOCKS_PER_KERNEL);
 
   for (int gpu_id = 0; gpu_id < kgraph->gpu_dim.x; gpu_id++) {
     compute_customizedop_fingerprint<<<bgraph.grid_dim,
-                                       bgraph.block_dim,
-                                       bgraph.smem_offset>>>(
+                                       bgraph.block_dim>>>(
         new_params,
         bgraph.forloop_range,
         dmm->fp_base_ptr[gpu_id],
+        dmm->stensor_fp_base_ptr,
         dmm->exp_lookup_table,
         dmm->div_p_lookup_table,
         dmm->div_q_lookup_table);

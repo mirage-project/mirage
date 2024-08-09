@@ -13,48 +13,56 @@
  * limitations under the License.
  */
 
-#include "mirage/threadblock/element_unary.h"
+#include "mirage/threadblock/forloop_accum.h"
 #include "mirage/threadblock/graph.h"
 #include "mirage/threadblock/operator.h"
 
 namespace mirage {
 namespace threadblock {
 
-STensor Graph::exp(STensor const &input) {
-  TBOperator *op = create_elementunary_op(input, mirage::type::TB_EXP_OP);
+STensor Graph::forloop_accum(STensor const &input) {
+  TBOperator *op = create_forloop_accum_op(input);
   assert(op != nullptr);
+  assert(op->output_tensors.size() == 1);
   operators.push_back(op);
   return op->output_tensors[0];
 }
 
-TBOperator *Graph::create_elementunary_op(STensor const &input,
-                                          mirage::type::TBOperatorType _type) {
-  TBElementUnaryOp *op = new TBElementUnaryOp(this, input, _type);
+TBOperator *Graph::create_forloop_accum_op(STensor const &input) {
+  // Input stensor must be before accumulation (i.e., inside forloop)
+  if (input.after_accum) {
+    return nullptr;
+  }
+  TBForloopAccumOp *op = new TBForloopAccumOp(this, input);
+  // Check shmem usage
+  size_t smem_usage = calculate_shared_memory_usage(op);
+  if (smem_usage > mirage::config::MAX_SMEM_SIZE) {
+    delete op;
+    return nullptr;
+  } else {
+    return op;
+  }
   return op;
 }
 
-TBElementUnaryOp::TBElementUnaryOp(Graph *_graph,
-                                   STensor const &input,
-                                   mirage::type::TBOperatorType _type)
-    : TBOperator(_graph, _type, input) {
+TBForloopAccumOp::TBForloopAccumOp(Graph *_graph,
+                                   STensor const &input)
+    : TBOperator(_graph, mirage::type::TB_FORLOOP_ACCUM_OP, input) {
+  assert(!input.after_accum);
   STensor output = input;
   output.owner_op = this;
   output.owner_ts_idx = 0;
-  output.guid = STensor::next_guid++;
-  output.after_accum = input.after_accum;
-  // Note that we inplace the output by default
-  // output.smem_offset = bgraph->allocate(output);
-  output.smem_offset = input.smem_offset;
-  assert(output_tensors.size() == 0);
+  output.guid = STensor::next_guid ++;
+  output.after_accum = true;
+  output.smem_offset = bgraph->allocate_fingerprint(output);
   output_tensors.push_back(output);
 }
 
-TBElementUnaryOp::~TBElementUnaryOp() {
-  // Don't free since we inplace the output by default
-  // bgraph->free(output_tensors);
+TBForloopAccumOp::~TBForloopAccumOp() {
+  bgraph->free_fingerprint(output_tensors);
 }
 
-TBElementUnaryOp::operator json() const {
+TBForloopAccumOp::operator json() const {
   return json{{"op_type", op_type},
               {"input_tensors", input_tensors},
               {"output_tensors", output_tensors}};
