@@ -334,7 +334,7 @@ __global__ void compute_customizedop_fingerprint(
     mirage::threadblock::NewKernelParams new_params,
     int forloop_range,
     char *dmem_fp_ptr,
-    char *smem_fp_base_ptr,
+    char *stensor_fp_base_ptr,
     mirage::type::FPType *exp_lookup_table,
     mirage::type::FPType *div_p_lookup_table,
     mirage::type::FPType *div_q_lookup_table) {
@@ -343,7 +343,7 @@ __global__ void compute_customizedop_fingerprint(
   // 1
   //extern __shared__ char smem_buffer[];
   int64_t thread_block_idx = blockIdx.x * gridDim.y * gridDim.z + blockIdx.y * gridDim.z + blockIdx.z;
-  char *smem_buffer = smem_fp_base_ptr + thread_block_idx * mirage::config::MAX_SMEM_FP_SIZE;
+  char *smem_buffer = stensor_fp_base_ptr + thread_block_idx * mirage::config::MAX_SMEM_FP_SIZE;
   assert(blockDim.y == 1);
   assert(blockDim.z == 1);
 
@@ -755,7 +755,6 @@ __global__ void
 }
 
 bool KNCustomizedOp::fingerprint(void) {
-  // int max_smem_size = mirage::config::MAX_SMEM_SIZE;
   // mirage::threadblock::KernelParams params = bgraph.get_kernel_params();
   mirage::threadblock::NewKernelParams new_params =
       bgraph.get_new_kernel_params(true /*fingerprint_kernel*/);
@@ -766,11 +765,7 @@ bool KNCustomizedOp::fingerprint(void) {
   assert(bgraph.smem_offset <= mirage::config::MAX_SMEM_FP_SIZE);
   mirage::kernel::DeviceMemoryManager *dmm =
       mirage::kernel::DeviceMemoryManager::get_instance();
-  //if (bgraph.smem_offset > 48 * 1024) {
-  //  checkCUDA(cudaFuncSetAttribute(compute_customizedop_fingerprint,
-  //                                 cudaFuncAttributeMaxDynamicSharedMemorySize,
-  //                                 bgraph.smem_offset));
-  //}
+
   // Make sure we don't launch more threadblocks than allowed
   assert(bgraph.grid_dim.x * bgraph.grid_dim.y * bgraph.grid_dim.z
          <= mirage::config::MAX_NUM_THREADBLOCKS_PER_KERNEL);
@@ -781,7 +776,7 @@ bool KNCustomizedOp::fingerprint(void) {
         new_params,
         bgraph.forloop_range,
         dmm->fp_base_ptr[gpu_id],
-        dmm->fp_smem_ptr,
+        dmm->stensor_fp_base_ptr,
         dmm->exp_lookup_table,
         dmm->div_p_lookup_table,
         dmm->div_q_lookup_table);

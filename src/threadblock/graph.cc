@@ -33,6 +33,9 @@ Graph::Graph(dim3 _grid_dim,
              int _reduction_dimx)
     : grid_dim(_grid_dim), block_dim(_block_dim), forloop_range(_forloop_range),
       reduction_dimx(_reduction_dimx), smem_offset(0) {
+  // A bgraph cannot have more than MAX_NUM_THREADBLOCKS_PER_KERNEL threadblocks
+  // otherwise we don't have enough buffers in device memory for saving fingerprints
+  assert(grid_dim.x * grid_dim.y * grid_dim.z <= mirage::config::MAX_NUM_THREADBLOCKS_PER_KERNEL);
   assert(reduction_dimx > 0);
 }
 
@@ -135,7 +138,9 @@ off_t Graph::allocate_fingerprint(STensor const &tensor) {
   off_t aligns_size = ((tensor.size() + 15) & ~15);
   smem_offset += aligns_size;
 
-  assert(smem_offset <= (off_t)mirage::config::MAX_SMEM_SIZE);
+  // We no longer need to check fingerprints' smem usage since
+  // we allocate a buffer in device memory for saving fingerprints
+  // assert(smem_offset <= (off_t)mirage::config::MAX_SMEM_SIZE);
   allocated_tensors.push_back(std::make_pair(ret, aligns_size));
   return ret;
 }
