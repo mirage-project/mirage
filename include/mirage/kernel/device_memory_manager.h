@@ -54,6 +54,7 @@ public:
   // communication
   char *data_base_ptr[mirage::config::MAX_NUM_GPUS];
   char *fp_base_ptr[mirage::config::MAX_NUM_GPUS];
+  char *fp_smem_ptr;
 
 public:
   cudaStream_t stream[mirage::config::MAX_NUM_GPUS];

@@ -334,13 +334,16 @@ __global__ void compute_customizedop_fingerprint(
     mirage::threadblock::NewKernelParams new_params,
     int forloop_range,
     char *dmem_fp_ptr,
+    char *smem_fp_base_ptr,
     mirage::type::FPType *exp_lookup_table,
     mirage::type::FPType *div_p_lookup_table,
     mirage::type::FPType *div_q_lookup_table) {
   // since we are using cutlass, we group all threads within a threadblock
   // as a 1-D list of threads, therefore blockDim.y and blockDim.z must be
   // 1
-  extern __shared__ char smem_buffer[];
+  //extern __shared__ char smem_buffer[];
+  int64_t thread_block_idx = blockIdx.x * gridDim.y * gridDim.z + blockIdx.y * gridDim.z + blockIdx.z;
+  char *smem_buffer = smem_fp_base_ptr + thread_block_idx * mirage::config::MAX_SMEM_FP_SIZE;
   assert(blockDim.y == 1);
   assert(blockDim.z == 1);
 
@@ -515,7 +518,7 @@ __global__ void compute_customizedop_fingerprint(
                 matrix_offset,
                 global_offset);
             // No need to syncthread when saving output to dmem
-            //__syncthreads();
+            __syncthreads();
           }
           break;
         }
@@ -752,7 +755,7 @@ __global__ void
 }
 
 bool KNCustomizedOp::fingerprint(void) {
-  int max_smem_size = mirage::config::MAX_SMEM_SIZE;
+  // int max_smem_size = mirage::config::MAX_SMEM_SIZE;
   // mirage::threadblock::KernelParams params = bgraph.get_kernel_params();
   mirage::threadblock::NewKernelParams new_params =
       bgraph.get_new_kernel_params(true /*fingerprint_kernel*/);
@@ -760,22 +763,25 @@ bool KNCustomizedOp::fingerprint(void) {
   assert(kgraph->gpu_dim.y == 1);
   assert(kgraph->gpu_dim.z == 1);
 
-  assert(bgraph.smem_offset <= max_smem_size);
+  assert(bgraph.smem_offset <= mirage::config::MAX_SMEM_FP_SIZE);
   mirage::kernel::DeviceMemoryManager *dmm =
       mirage::kernel::DeviceMemoryManager::get_instance();
-  if (bgraph.smem_offset > 48 * 1024) {
-    checkCUDA(cudaFuncSetAttribute(compute_customizedop_fingerprint,
-                                   cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                   bgraph.smem_offset));
-  }
+  //if (bgraph.smem_offset > 48 * 1024) {
+  //  checkCUDA(cudaFuncSetAttribute(compute_customizedop_fingerprint,
+  //                                 cudaFuncAttributeMaxDynamicSharedMemorySize,
+  //                                 bgraph.smem_offset));
+  //}
+  // Make sure we don't launch more threadblocks than allowed
+  assert(bgraph.grid_dim.x * bgraph.grid_dim.y * bgraph.grid_dim.z
+         <= mirage::config::MAX_NUM_THREADBLOCKS_PER_KERNEL);
 
   for (int gpu_id = 0; gpu_id < kgraph->gpu_dim.x; gpu_id++) {
     compute_customizedop_fingerprint<<<bgraph.grid_dim,
-                                       bgraph.block_dim,
-                                       bgraph.smem_offset>>>(
+                                       bgraph.block_dim>>>(
         new_params,
         bgraph.forloop_range,
         dmm->fp_base_ptr[gpu_id],
+        dmm->fp_smem_ptr,
         dmm->exp_lookup_table,
         dmm->div_p_lookup_table,
         dmm->div_q_lookup_table);
