@@ -13,6 +13,7 @@
 # limitations under the License.
 #
 import os
+import shutil
 from os import path
 from pathlib import Path
 import sys
@@ -27,6 +28,9 @@ if "--inplace" in sys.argv:
 else:
     from setuptools import setup
     from setuptools.extension import Extension
+
+import z3
+print('z3 dir:', z3.__file__, flush=True)
 
 def config_cython():
     sys_cflags = sysconfig.get_config_var("CFLAGS")
@@ -85,7 +89,8 @@ except subprocess.CalledProcessError as e:
 
 # build Mirage runtime library
 try:
-    os.environ['CUDACXX'] = '/usr/local/cuda/bin/nvcc'
+    nvcc_path = shutil.which('nvcc')
+    os.environ['CUDACXX'] = nvcc_path if nvcc_path else '/usr/local/cuda/bin/nvcc'
     mirage_path = path.dirname(__file__)
     z3_path = os.path.join(mirage_path, 'deps', 'z3', 'build')
     os.environ['Z3_DIR'] = z3_path
@@ -107,13 +112,15 @@ setup_args = {}
 # Create requirements list from requirements.txt
 with open(Path(__file__).parent / "requirements.txt", "r") as reqs_file:
     requirements = reqs_file.read().strip().split("\n")
+print(f"Requirements: {requirements}")
 
 setup(name='mirage',
       version="0.1.1",
       description="Mirage: A Multi-Level Superoptimizer for Tensor Algebra",
       zip_safe=False,
       install_requires=requirements,
-      packages=find_packages(),
+      packages=find_packages(where='python'),
+      package_dir={'': 'python'},
       url='https://github.com/mirage-project/mirage',
       ext_modules=config_cython(),
       #**setup_args,
