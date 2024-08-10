@@ -3,11 +3,9 @@ import os
 try:
     from .core import *
 except ImportError:
-    _mirage_root = os.path.dirname(__file__)
-    _z3_lib = os.path.join(_mirage_root, 'deps', 'z3', 'build')
-    print(f"Z3 library path: {_z3_lib}")
+    import z3
+    _z3_lib = os.path.join(os.path.dirname(z3.__file__), 'lib')
     os.environ['LD_LIBRARY_PATH'] = f"{_z3_lib}:{os.environ.get('LD_LIBRARY_PATH','LD_LIBRARY_PATH')}"
-    os.environ['Z3_DIR'] = _z3_lib
     
     from .core import *
 
