@@ -19,6 +19,7 @@
 #include "mirage/threadblock/serializer/concat_serializer.h"
 #include "mirage/threadblock/serializer/element_binary_serializer.h"
 #include "mirage/threadblock/serializer/element_unary_serializer.h"
+#include "mirage/threadblock/serializer/forloop_accum_serializer.h"
 #include "mirage/threadblock/serializer/input_loader_serializer.h"
 #include "mirage/threadblock/serializer/matmul_serializer.h"
 #include "mirage/threadblock/serializer/output_saver_serializer.h"
@@ -261,6 +262,20 @@ void CudaTranspiler::gen_cuda_code_input_loader(std::string dtensor_name,
   input_loader_func << ind << "} // end of for-loop\n";
 }
 
+void CudaTranspiler::gen_cuda_code_forloop_accum(std::string ind) {
+  int num_elements;
+  int input_smem_offset, accum_smem_offset;
+  mirage::threadblock::deserialize_forloop_accum_parameters(
+      params.parameters,
+      param_idx,
+      num_elements,
+      input_smem_offset,
+      accum_smem_offset);
+  // FIXME: currently we do nothing for forloop accumulation
+  // since we expect it to be implemented as an epilogue of
+  // the previous operator
+}
+
 void CudaTranspiler::gen_cuda_code_output_saver(std::string dtensor_name,
                                                 std::string ind) {
   int3 output_matrix_row_offset_block_stride;
@@ -270,7 +285,7 @@ void CudaTranspiler::gen_cuda_code_output_saver(std::string dtensor_name,
   int3 global_offset_block_stride;
   int global_offset_forloop_stride;
   int2 dtensor_matrix_shape, stensor_matrix_shape;
-  int input_smem_offset, accum_smem_offset;
+  int input_smem_offset;
   mirage::layout::DmemLayout dtensor_layout;
   mirage::layout::SmemLayout stensor_layout;
   mirage::type::TBEpilogueType epilogue;
@@ -288,7 +303,6 @@ void CudaTranspiler::gen_cuda_code_output_saver(std::string dtensor_name,
       dtensor_layout,
       stensor_layout,
       input_smem_offset,
-      accum_smem_offset,
       epilogue);
   std::stringstream code;
   code << ind << "int tb_offset_row = "
@@ -542,6 +556,10 @@ std::string CudaTranspiler::generate_kernel_code(
         ending << ind.substr(0, ind.length() - 2) << "{\n";
         gen_cuda_code_output_saver(output_names[output_idx++], ind);
         ending << ind.substr(0, ind.length() - 2) << "}\n";
+        break;
+      }
+      case mirage::type::TB_FORLOOP_ACCUM_OP: {
+        gen_cuda_code_forloop_accum(ind);
         break;
       }
       case mirage::type::TB_MATMUL_OP: {
