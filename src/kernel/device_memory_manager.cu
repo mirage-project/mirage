@@ -94,11 +94,14 @@ DeviceMemoryManager::DeviceMemoryManager(int _num_gpus) : num_gpus(_num_gpus) {
     // Note that we allocate all fingerprint buffers
     // on the 0-th GPU to avoid inter-GPU communication
     // for computing fingerprints
+    // In addition, we allocate an extra space for storing
+    // stensors' fingerprints in the device memory
     if (i == 0) {
       for (int k = 0; k < num_gpus; k++) {
         checkCUDA(
             cudaMalloc(&fp_base_ptr[k], mirage::config::MAX_DMEM_FP_SIZE));
       }
+      checkCUDA(cudaMalloc(&stensor_fp_base_ptr, mirage::config::MAX_SMEM_FP_SIZE * mirage::config::MAX_NUM_THREADBLOCKS_PER_KERNEL));
     }
   }
 }
@@ -116,6 +119,7 @@ DeviceMemoryManager::~DeviceMemoryManager() {
       for (int k = 0; k < num_gpus; k++) {
         checkCUDA(cudaFree(fp_base_ptr[i]));
       }
+      checkCUDA(cudaFree(stensor_fp_base_ptr));
     }
   }
 }

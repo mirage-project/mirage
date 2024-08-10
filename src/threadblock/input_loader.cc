@@ -33,6 +33,7 @@ TBOperator *Graph::create_input_op(mirage::kernel::DTensor const &dtensor,
                                    int3 input_map,
                                    int forloop_dim,
                                    mirage::layout::SmemLayout layout) {
+#ifdef DEADCODE
   STensor tensor;
   tensor.num_dims = dtensor.num_dims;
   tensor.data_type = dtensor.data_type;
@@ -82,8 +83,18 @@ TBOperator *Graph::create_input_op(mirage::kernel::DTensor const &dtensor,
     return nullptr;
   }
 
+#endif
+
   TBInputOp *op = new TBInputOp(this, dtensor, input_map, forloop_dim, layout);
-  return op;
+
+  // Check shmem usage
+  size_t smem_usage = calculate_shared_memory_usage(op);
+  if (smem_usage > mirage::config::MAX_SMEM_SIZE) {
+    delete op;
+    return nullptr;
+  } else {
+    return op;
+  }
 }
 
 TBInputOp::TBInputOp(Graph *_graph,
@@ -136,12 +147,13 @@ TBInputOp::TBInputOp(Graph *_graph,
   tensor.owner_op = this;
   tensor.owner_ts_idx = 0;
   tensor.guid = STensor::next_guid++;
-  tensor.smem_offset = bgraph->allocate(tensor);
+  tensor.after_accum = false;
+  tensor.smem_offset = bgraph->allocate_fingerprint(tensor);
   output_tensors.push_back(tensor);
 }
 
 TBInputOp::~TBInputOp() {
-  bgraph->free(output_tensors[0]);
+  bgraph->free_fingerprint(output_tensors[0]);
 }
 
 TBInputOp::operator json() const {
