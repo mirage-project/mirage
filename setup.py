@@ -38,8 +38,8 @@ def config_cython():
     try:
         from Cython.Build import cythonize
         ret = []
-        cython_path = path.join(path.dirname(__file__), "python/mirage/_cython")
-        mirage_path = path.dirname(__file__)
+        mirage_path = ''
+        cython_path = path.join(mirage_path, "python/mirage/_cython")
         for fn in os.listdir(cython_path):
             if not fn.endswith(".pyx"):
                 continue
@@ -63,31 +63,6 @@ def config_cython():
     except ImportError:
         print("WARNING: cython is not installed!!!")
         raise SystemExit(1)
-        return []
-    
-# try:
-#     print('Installing Z3 right now...')
-#     mirage_path = path.dirname(__file__)
-#     z3_path = os.path.join(mirage_path, 'deps', 'z3')
-#     build_dir = os.path.join(z3_path, 'build')
-#     os.makedirs(build_dir, exist_ok=True)
-#     os.chdir(build_dir)
-#     print(f"Changed to directory: {os.getcwd()}")
-#     print(f"running cmake command at {build_dir}")
-#     subprocess.check_call(['cmake', '..'], cwd=build_dir)
-#     print("finished running cmake command")
-#     print(f"running make command at {build_dir}")
-#     subprocess.check_call(['make', '-j'], cwd=build_dir)
-#     print("running make command")
-
-#     # update LD_LIBRARY_PATH
-#     print("here")
-#     print(f"{build_dir}:{os.environ.get('LD_LIBRARY_PATH','')}")
-#     os.environ['LD_LIBRARY_PATH'] = f"{build_dir}:{os.environ.get('LD_LIBRARY_PATH','LD_LIBRARY_PATH')}"
-#     print("Z3 installed successfully.")
-# except subprocess.CalledProcessError as e:
-#     print("Failed to install Z3.")
-#     raise SystemExit(e.returncode)
 
 # build Mirage runtime library
 try:
@@ -128,6 +103,6 @@ setup(name='mirage',
       package_dir={'': 'python'},
       url='https://github.com/mirage-project/mirage',
       ext_modules=config_cython(),
-    #   include_package_data=True,
+      #include_package_data=True,
       #**setup_args,
       )

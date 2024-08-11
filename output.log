@@ -1,0 +1,1244 @@
+/home/sca/miniconda3/envs/test/lib/python3.10/site-packages/_distutils_hack/__init__.py:55: UserWarning: Reliance on distutils from stdlib is deprecated. Users must rely on setuptools to provide the distutils module. Avoid importing distutils or import setuptools first, and avoid setting SETUPTOOLS_USE_DISTUTILS=stdlib. Register concerns at https://github.com/pypa/setuptools/issues/new?template=distutils-deprecation.yml
+  warnings.warn(
+Z3 path: /home/sca/miniconda3/envs/test/lib/python3.10/site-packages/z3
+-- CMake Version: 3.30.2
+-- CUDART: /usr/local/cuda/lib64/libcudart.so
+-- CUDA Driver: /usr/local/cuda/lib64/stubs/libcuda.so
+-- NVRTC: /usr/local/cuda/lib64/libnvrtc.so
+CMake Warning (dev) at cmake/cuda.cmake:24 (find_package):
+  Policy CMP0146 is not set: The FindCUDA module is removed.  Run "cmake
+  --help-policy CMP0146" for policy details.  Use the cmake_policy command to
+  set the policy and suppress this warning.
+
+Call Stack (most recent call first):
+  CMakeLists.txt:60 (find_cuda)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+-- CUDA_INCLUDE_DIRS=/usr/local/cuda/include
+-- Found CUDA_TOOLKIT_ROOT_DIR=/usr/local/cuda
+-- Found CUDA_CUDA_LIBRARY=/usr/local/cuda/lib64/stubs/libcuda.so
+-- Found CUDA_CUDART_LIBRARY=/usr/local/cuda/lib64/libcudart.so
+-- Found CUDA_NVRTC_LIBRARY=
+-- Found CUDA_CUDNN_LIBRARY=/usr/lib/x86_64-linux-gnu/libcudnn.so
+-- Found CUDA_CUBLAS_LIBRARY=/usr/local/cuda/lib64/libcublas.so
+-- CUDA_INCLUDE_DIR=/usr/local/cuda/include
+-- Z3_CXX_INCLUDE_DIRS: /home/sca/miniconda3/envs/test/lib/python3.10/site-packages/z3/include/
+-- Z3_LIBRARIES: /home/sca/miniconda3/envs/test/lib/python3.10/site-packages/z3/lib/libz3.so
+-- Using the multi-header code from /data_train/infra/sca/mirage/deps/json/include/
+-- Configuring done (0.5s)
+-- Generating done (0.1s)
+-- Build files have been written to: /data_train/infra/sca/mirage/build
+[100%] Built target mirage_runtime
+Mirage runtime library built successfully.
+Requirements: ['cmake>=3.24', 'cython>=0.28', 'z3-solver', 'numpy']
+Appending ./python/mirage/_cython/core.pyx
+running sdist
+running egg_info
+writing python/mirage.egg-info/PKG-INFO
+writing dependency_links to python/mirage.egg-info/dependency_links.txt
+writing requirements to python/mirage.egg-info/requires.txt
+writing top-level names to python/mirage.egg-info/top_level.txt
+reading manifest file 'python/mirage.egg-info/SOURCES.txt'
+reading manifest template 'MANIFEST.in'
+adding license file 'LICENSE'
+writing manifest file 'python/mirage.egg-info/SOURCES.txt'
+running check
+warning: check: missing meta-data: either (author and author_email) or (maintainer and maintainer_email) should be supplied
+
+creating mirage-0.1.1
+creating mirage-0.1.1/python
+creating mirage-0.1.1/python/mirage
+creating mirage-0.1.1/python/mirage/_cython
+creating mirage-0.1.1/cmake
+creating mirage-0.1.1/deps
+creating mirage-0.1.1/deps/cutlass
+creating mirage-0.1.1/deps/cutlass/cmake
+creating mirage-0.1.1/deps/cutlass/include
+creating mirage-0.1.1/deps/cutlass/include/cute
+creating mirage-0.1.1/deps/cutlass/include/cute/algorithm
+creating mirage-0.1.1/deps/cutlass/include/cute/arch
+creating mirage-0.1.1/deps/cutlass/include/cute/atom
+creating mirage-0.1.1/deps/cutlass/include/cute/container
+creating mirage-0.1.1/deps/cutlass/include/cute/numeric
+creating mirage-0.1.1/deps/cutlass/include/cute/util
+creating mirage-0.1.1/deps/cutlass/include/cutlass
+creating mirage-0.1.1/deps/cutlass/include/cutlass/arch
+creating mirage-0.1.1/deps/cutlass/include/cutlass/conv
+creating mirage-0.1.1/deps/cutlass/include/cutlass/conv/collective
+creating mirage-0.1.1/deps/cutlass/include/cutlass/conv/collective/builders
+creating mirage-0.1.1/deps/cutlass/include/cutlass/conv/device
+creating mirage-0.1.1/deps/cutlass/include/cutlass/conv/kernel
+creating mirage-0.1.1/deps/cutlass/include/cutlass/conv/thread
+creating mirage-0.1.1/deps/cutlass/include/cutlass/conv/threadblock
+creating mirage-0.1.1/deps/cutlass/include/cutlass/conv/warp
+creating mirage-0.1.1/deps/cutlass/include/cutlass/detail
+creating mirage-0.1.1/deps/cutlass/include/cutlass/epilogue
+creating mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/collective
+creating mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/collective/builders
+creating mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/fusion
+creating mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/thread
+creating mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/threadblock
+creating mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/threadblock/fusion
+creating mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/warp
+creating mirage-0.1.1/deps/cutlass/include/cutlass/gemm
+creating mirage-0.1.1/deps/cutlass/include/cutlass/gemm/collective
+creating mirage-0.1.1/deps/cutlass/include/cutlass/gemm/collective/builders
+creating mirage-0.1.1/deps/cutlass/include/cutlass/gemm/device
+creating mirage-0.1.1/deps/cutlass/include/cutlass/gemm/kernel
+creating mirage-0.1.1/deps/cutlass/include/cutlass/gemm/thread
+creating mirage-0.1.1/deps/cutlass/include/cutlass/gemm/threadblock
+creating mirage-0.1.1/deps/cutlass/include/cutlass/gemm/warp
+creating mirage-0.1.1/deps/cutlass/include/cutlass/layout
+creating mirage-0.1.1/deps/cutlass/include/cutlass/pipeline
+creating mirage-0.1.1/deps/cutlass/include/cutlass/platform
+creating mirage-0.1.1/deps/cutlass/include/cutlass/reduction
+creating mirage-0.1.1/deps/cutlass/include/cutlass/reduction/device
+creating mirage-0.1.1/deps/cutlass/include/cutlass/reduction/kernel
+creating mirage-0.1.1/deps/cutlass/include/cutlass/reduction/thread
+creating mirage-0.1.1/deps/cutlass/include/cutlass/thread
+creating mirage-0.1.1/deps/cutlass/include/cutlass/transform
+creating mirage-0.1.1/deps/cutlass/include/cutlass/transform/collective
+creating mirage-0.1.1/deps/cutlass/include/cutlass/transform/thread
+creating mirage-0.1.1/deps/cutlass/include/cutlass/transform/threadblock
+creating mirage-0.1.1/deps/cutlass/include/cutlass/transform/warp
+creating mirage-0.1.1/deps/cutlass/python
+creating mirage-0.1.1/deps/cutlass/python/cutlass
+creating mirage-0.1.1/deps/cutlass/python/cutlass/backend
+creating mirage-0.1.1/deps/cutlass/python/cutlass/backend/evt
+creating mirage-0.1.1/deps/cutlass/python/cutlass/backend/evt/backend
+creating mirage-0.1.1/deps/cutlass/python/cutlass/backend/evt/frontend
+creating mirage-0.1.1/deps/cutlass/python/cutlass/backend/evt/ir
+creating mirage-0.1.1/deps/cutlass/python/cutlass/backend/evt/passes
+creating mirage-0.1.1/deps/cutlass/python/cutlass/backend/utils
+creating mirage-0.1.1/deps/cutlass/python/cutlass/emit
+creating mirage-0.1.1/deps/cutlass/python/cutlass/epilogue
+creating mirage-0.1.1/deps/cutlass/python/cutlass/op
+creating mirage-0.1.1/deps/cutlass/python/cutlass/utils
+creating mirage-0.1.1/deps/cutlass/python/cutlass_library
+creating mirage-0.1.1/deps/cutlass/python/docs
+creating mirage-0.1.1/deps/cutlass/python/docs/_modules
+creating mirage-0.1.1/deps/cutlass/python/docs/_modules/cutlass
+creating mirage-0.1.1/deps/cutlass/python/docs/_modules/cutlass/emit
+creating mirage-0.1.1/deps/cutlass/python/docs/_modules/cutlass/op
+creating mirage-0.1.1/deps/cutlass/python/docs/_modules/cutlass/utils
+creating mirage-0.1.1/deps/cutlass/python/docs/_sources
+creating mirage-0.1.1/deps/cutlass/python/docs/_sources/externals
+creating mirage-0.1.1/deps/cutlass/python/docs/_static
+creating mirage-0.1.1/deps/cutlass/python/docs/_static/scripts
+creating mirage-0.1.1/deps/cutlass/python/docs/_static/styles
+creating mirage-0.1.1/deps/cutlass/python/docs/externals
+creating mirage-0.1.1/deps/cutlass/python/docs_src
+creating mirage-0.1.1/deps/cutlass/python/docs_src/source
+creating mirage-0.1.1/deps/cutlass/python/docs_src/source/_static
+creating mirage-0.1.1/deps/cutlass/python/docs_src/source/_templates
+creating mirage-0.1.1/deps/cutlass/python/docs_src/source/externals
+creating mirage-0.1.1/deps/cutlass/python/pycute
+creating mirage-0.1.1/deps/json
+creating mirage-0.1.1/deps/json/LICENSES
+creating mirage-0.1.1/deps/json/cmake
+creating mirage-0.1.1/deps/json/cmake/scripts
+creating mirage-0.1.1/deps/json/include
+creating mirage-0.1.1/deps/json/include/nlohmann
+creating mirage-0.1.1/deps/json/include/nlohmann/detail
+creating mirage-0.1.1/deps/json/include/nlohmann/detail/conversions
+creating mirage-0.1.1/deps/json/include/nlohmann/detail/input
+creating mirage-0.1.1/deps/json/include/nlohmann/detail/iterators
+creating mirage-0.1.1/deps/json/include/nlohmann/detail/meta
+creating mirage-0.1.1/deps/json/include/nlohmann/detail/meta/call_std
+creating mirage-0.1.1/deps/json/include/nlohmann/detail/output
+creating mirage-0.1.1/deps/json/include/nlohmann/thirdparty
+creating mirage-0.1.1/deps/json/include/nlohmann/thirdparty/hedley
+creating mirage-0.1.1/deps/json/single_include
+creating mirage-0.1.1/deps/json/single_include/nlohmann
+creating mirage-0.1.1/include
+creating mirage-0.1.1/include/mirage
+creating mirage-0.1.1/include/mirage/cpu
+creating mirage-0.1.1/include/mirage/kernel
+creating mirage-0.1.1/include/mirage/search
+creating mirage-0.1.1/include/mirage/threadblock
+creating mirage-0.1.1/include/mirage/threadblock/cuda
+creating mirage-0.1.1/include/mirage/threadblock/serializer
+creating mirage-0.1.1/include/mirage/transpiler
+creating mirage-0.1.1/include/mirage/transpiler/runtime
+creating mirage-0.1.1/include/mirage/transpiler/runtime/kernel
+creating mirage-0.1.1/include/mirage/utils
+creating mirage-0.1.1/include/mirage/warp
+creating mirage-0.1.1/include/mirage/warp/cuda
+creating mirage-0.1.1/mirage.egg-info
+creating mirage-0.1.1/python/mirage.egg-info
+creating mirage-0.1.1/src
+creating mirage-0.1.1/src/base
+creating mirage-0.1.1/src/kernel
+creating mirage-0.1.1/src/kernel/cuda
+creating mirage-0.1.1/src/search
+creating mirage-0.1.1/src/simulator
+creating mirage-0.1.1/src/threadblock
+creating mirage-0.1.1/src/threadblock/cuda
+creating mirage-0.1.1/src/transpiler
+creating mirage-0.1.1/src/utils
+copying files to mirage-0.1.1...
+copying CMakeLists.txt -> mirage-0.1.1
+copying LICENSE -> mirage-0.1.1
+copying MANIFEST.in -> mirage-0.1.1
+copying README.md -> mirage-0.1.1
+copying config.cmake -> mirage-0.1.1
+copying pyproject.toml -> mirage-0.1.1
+copying requirements.txt -> mirage-0.1.1
+copying setup.py -> mirage-0.1.1
+copying ./python/mirage/_cython/core.cpp -> mirage-0.1.1/./python/mirage/_cython
+copying cmake/cuda.cmake -> mirage-0.1.1/cmake
+copying deps/cutlass/.git -> mirage-0.1.1/deps/cutlass
+copying deps/cutlass/.gitignore -> mirage-0.1.1/deps/cutlass
+copying deps/cutlass/.gitmodules -> mirage-0.1.1/deps/cutlass
+copying deps/cutlass/CHANGELOG.md -> mirage-0.1.1/deps/cutlass
+copying deps/cutlass/CITATION.cff -> mirage-0.1.1/deps/cutlass
+copying deps/cutlass/CMakeLists.txt -> mirage-0.1.1/deps/cutlass
+copying deps/cutlass/CONTRIBUTORS.md -> mirage-0.1.1/deps/cutlass
+copying deps/cutlass/CUDA.cmake -> mirage-0.1.1/deps/cutlass
+copying deps/cutlass/Doxyfile -> mirage-0.1.1/deps/cutlass
+copying deps/cutlass/LICENSE.txt -> mirage-0.1.1/deps/cutlass
+copying deps/cutlass/PUBLICATIONS.md -> mirage-0.1.1/deps/cutlass
+copying deps/cutlass/README.md -> mirage-0.1.1/deps/cutlass
+copying deps/cutlass/bin2hex.cmake -> mirage-0.1.1/deps/cutlass
+copying deps/cutlass/cuBLAS.cmake -> mirage-0.1.1/deps/cutlass
+copying deps/cutlass/cuDNN.cmake -> mirage-0.1.1/deps/cutlass
+copying deps/cutlass/pyproject.toml -> mirage-0.1.1/deps/cutlass
+copying deps/cutlass/setup.cfg -> mirage-0.1.1/deps/cutlass
+copying deps/cutlass/cmake/CTestTestfile.configure.cmake -> mirage-0.1.1/deps/cutlass/cmake
+copying deps/cutlass/cmake/CTestTestfile.test.configure.cmake -> mirage-0.1.1/deps/cutlass/cmake
+copying deps/cutlass/cmake/NvidiaCutlassConfig.cmake.in -> mirage-0.1.1/deps/cutlass/cmake
+copying deps/cutlass/cmake/NvidiaCutlassPackageConfig.cmake -> mirage-0.1.1/deps/cutlass/cmake
+copying deps/cutlass/cmake/googletest.cmake -> mirage-0.1.1/deps/cutlass/cmake
+copying deps/cutlass/cmake/nop.cu -> mirage-0.1.1/deps/cutlass/cmake
+copying deps/cutlass/cmake/version_extended.h.in -> mirage-0.1.1/deps/cutlass/cmake
+copying deps/cutlass/include/cute/config.hpp -> mirage-0.1.1/deps/cutlass/include/cute
+copying deps/cutlass/include/cute/int_tuple.hpp -> mirage-0.1.1/deps/cutlass/include/cute
+copying deps/cutlass/include/cute/layout.hpp -> mirage-0.1.1/deps/cutlass/include/cute
+copying deps/cutlass/include/cute/layout_composed.hpp -> mirage-0.1.1/deps/cutlass/include/cute
+copying deps/cutlass/include/cute/pointer.hpp -> mirage-0.1.1/deps/cutlass/include/cute
+copying deps/cutlass/include/cute/pointer_base.hpp -> mirage-0.1.1/deps/cutlass/include/cute
+copying deps/cutlass/include/cute/pointer_flagged.hpp -> mirage-0.1.1/deps/cutlass/include/cute
+copying deps/cutlass/include/cute/pointer_swizzle.hpp -> mirage-0.1.1/deps/cutlass/include/cute
+copying deps/cutlass/include/cute/stride.hpp -> mirage-0.1.1/deps/cutlass/include/cute
+copying deps/cutlass/include/cute/swizzle.hpp -> mirage-0.1.1/deps/cutlass/include/cute
+copying deps/cutlass/include/cute/swizzle_layout.hpp -> mirage-0.1.1/deps/cutlass/include/cute
+copying deps/cutlass/include/cute/tensor.hpp -> mirage-0.1.1/deps/cutlass/include/cute
+copying deps/cutlass/include/cute/tensor_predicate.hpp -> mirage-0.1.1/deps/cutlass/include/cute
+copying deps/cutlass/include/cute/underscore.hpp -> mirage-0.1.1/deps/cutlass/include/cute
+copying deps/cutlass/include/cute/algorithm/axpby.hpp -> mirage-0.1.1/deps/cutlass/include/cute/algorithm
+copying deps/cutlass/include/cute/algorithm/clear.hpp -> mirage-0.1.1/deps/cutlass/include/cute/algorithm
+copying deps/cutlass/include/cute/algorithm/cooperative_copy.hpp -> mirage-0.1.1/deps/cutlass/include/cute/algorithm
+copying deps/cutlass/include/cute/algorithm/cooperative_gemm.hpp -> mirage-0.1.1/deps/cutlass/include/cute/algorithm
+copying deps/cutlass/include/cute/algorithm/copy.hpp -> mirage-0.1.1/deps/cutlass/include/cute/algorithm
+copying deps/cutlass/include/cute/algorithm/fill.hpp -> mirage-0.1.1/deps/cutlass/include/cute/algorithm
+copying deps/cutlass/include/cute/algorithm/functional.hpp -> mirage-0.1.1/deps/cutlass/include/cute/algorithm
+copying deps/cutlass/include/cute/algorithm/gemm.hpp -> mirage-0.1.1/deps/cutlass/include/cute/algorithm
+copying deps/cutlass/include/cute/algorithm/prefer.hpp -> mirage-0.1.1/deps/cutlass/include/cute/algorithm
+copying deps/cutlass/include/cute/algorithm/prefetch.hpp -> mirage-0.1.1/deps/cutlass/include/cute/algorithm
+copying deps/cutlass/include/cute/algorithm/tensor_algorithms.hpp -> mirage-0.1.1/deps/cutlass/include/cute/algorithm
+copying deps/cutlass/include/cute/algorithm/tuple_algorithms.hpp -> mirage-0.1.1/deps/cutlass/include/cute/algorithm
+copying deps/cutlass/include/cute/arch/cluster_sm90.hpp -> mirage-0.1.1/deps/cutlass/include/cute/arch
+copying deps/cutlass/include/cute/arch/copy.hpp -> mirage-0.1.1/deps/cutlass/include/cute/arch
+copying deps/cutlass/include/cute/arch/copy_sm50.hpp -> mirage-0.1.1/deps/cutlass/include/cute/arch
+copying deps/cutlass/include/cute/arch/copy_sm75.hpp -> mirage-0.1.1/deps/cutlass/include/cute/arch
+copying deps/cutlass/include/cute/arch/copy_sm80.hpp -> mirage-0.1.1/deps/cutlass/include/cute/arch
+copying deps/cutlass/include/cute/arch/copy_sm90.hpp -> mirage-0.1.1/deps/cutlass/include/cute/arch
+copying deps/cutlass/include/cute/arch/copy_sm90_desc.hpp -> mirage-0.1.1/deps/cutlass/include/cute/arch
+copying deps/cutlass/include/cute/arch/copy_sm90_tma.hpp -> mirage-0.1.1/deps/cutlass/include/cute/arch
+copying deps/cutlass/include/cute/arch/mma.hpp -> mirage-0.1.1/deps/cutlass/include/cute/arch
+copying deps/cutlass/include/cute/arch/mma_sm61.hpp -> mirage-0.1.1/deps/cutlass/include/cute/arch
+copying deps/cutlass/include/cute/arch/mma_sm70.hpp -> mirage-0.1.1/deps/cutlass/include/cute/arch
+copying deps/cutlass/include/cute/arch/mma_sm75.hpp -> mirage-0.1.1/deps/cutlass/include/cute/arch
+copying deps/cutlass/include/cute/arch/mma_sm80.hpp -> mirage-0.1.1/deps/cutlass/include/cute/arch
+copying deps/cutlass/include/cute/arch/mma_sm90.hpp -> mirage-0.1.1/deps/cutlass/include/cute/arch
+copying deps/cutlass/include/cute/arch/mma_sm90_desc.hpp -> mirage-0.1.1/deps/cutlass/include/cute/arch
+copying deps/cutlass/include/cute/arch/mma_sm90_gmma.hpp -> mirage-0.1.1/deps/cutlass/include/cute/arch
+copying deps/cutlass/include/cute/arch/util.hpp -> mirage-0.1.1/deps/cutlass/include/cute/arch
+copying deps/cutlass/include/cute/atom/copy_atom.hpp -> mirage-0.1.1/deps/cutlass/include/cute/atom
+copying deps/cutlass/include/cute/atom/copy_traits.hpp -> mirage-0.1.1/deps/cutlass/include/cute/atom
+copying deps/cutlass/include/cute/atom/copy_traits_sm50.hpp -> mirage-0.1.1/deps/cutlass/include/cute/atom
+copying deps/cutlass/include/cute/atom/copy_traits_sm75.hpp -> mirage-0.1.1/deps/cutlass/include/cute/atom
+copying deps/cutlass/include/cute/atom/copy_traits_sm80.hpp -> mirage-0.1.1/deps/cutlass/include/cute/atom
+copying deps/cutlass/include/cute/atom/copy_traits_sm90.hpp -> mirage-0.1.1/deps/cutlass/include/cute/atom
+copying deps/cutlass/include/cute/atom/copy_traits_sm90_im2col.hpp -> mirage-0.1.1/deps/cutlass/include/cute/atom
+copying deps/cutlass/include/cute/atom/copy_traits_sm90_tma.hpp -> mirage-0.1.1/deps/cutlass/include/cute/atom
+copying deps/cutlass/include/cute/atom/copy_traits_sm90_tma_swizzle.hpp -> mirage-0.1.1/deps/cutlass/include/cute/atom
+copying deps/cutlass/include/cute/atom/mma_atom.hpp -> mirage-0.1.1/deps/cutlass/include/cute/atom
+copying deps/cutlass/include/cute/atom/mma_traits.hpp -> mirage-0.1.1/deps/cutlass/include/cute/atom
+copying deps/cutlass/include/cute/atom/mma_traits_sm61.hpp -> mirage-0.1.1/deps/cutlass/include/cute/atom
+copying deps/cutlass/include/cute/atom/mma_traits_sm70.hpp -> mirage-0.1.1/deps/cutlass/include/cute/atom
+copying deps/cutlass/include/cute/atom/mma_traits_sm75.hpp -> mirage-0.1.1/deps/cutlass/include/cute/atom
+copying deps/cutlass/include/cute/atom/mma_traits_sm80.hpp -> mirage-0.1.1/deps/cutlass/include/cute/atom
+copying deps/cutlass/include/cute/atom/mma_traits_sm90.hpp -> mirage-0.1.1/deps/cutlass/include/cute/atom
+copying deps/cutlass/include/cute/atom/mma_traits_sm90_gmma.hpp -> mirage-0.1.1/deps/cutlass/include/cute/atom
+copying deps/cutlass/include/cute/container/alignment.hpp -> mirage-0.1.1/deps/cutlass/include/cute/container
+copying deps/cutlass/include/cute/container/array.hpp -> mirage-0.1.1/deps/cutlass/include/cute/container
+copying deps/cutlass/include/cute/container/array_aligned.hpp -> mirage-0.1.1/deps/cutlass/include/cute/container
+copying deps/cutlass/include/cute/container/array_subbyte.hpp -> mirage-0.1.1/deps/cutlass/include/cute/container
+copying deps/cutlass/include/cute/container/bit_field.hpp -> mirage-0.1.1/deps/cutlass/include/cute/container
+copying deps/cutlass/include/cute/container/cuda_types.hpp -> mirage-0.1.1/deps/cutlass/include/cute/container
+copying deps/cutlass/include/cute/container/tuple.hpp -> mirage-0.1.1/deps/cutlass/include/cute/container
+copying deps/cutlass/include/cute/container/type_list.hpp -> mirage-0.1.1/deps/cutlass/include/cute/container
+copying deps/cutlass/include/cute/numeric/arithmetic_tuple.hpp -> mirage-0.1.1/deps/cutlass/include/cute/numeric
+copying deps/cutlass/include/cute/numeric/complex.hpp -> mirage-0.1.1/deps/cutlass/include/cute/numeric
+copying deps/cutlass/include/cute/numeric/int.hpp -> mirage-0.1.1/deps/cutlass/include/cute/numeric
+copying deps/cutlass/include/cute/numeric/integer_sequence.hpp -> mirage-0.1.1/deps/cutlass/include/cute/numeric
+copying deps/cutlass/include/cute/numeric/integral_constant.hpp -> mirage-0.1.1/deps/cutlass/include/cute/numeric
+copying deps/cutlass/include/cute/numeric/integral_ratio.hpp -> mirage-0.1.1/deps/cutlass/include/cute/numeric
+copying deps/cutlass/include/cute/numeric/math.hpp -> mirage-0.1.1/deps/cutlass/include/cute/numeric
+copying deps/cutlass/include/cute/numeric/numeric_types.hpp -> mirage-0.1.1/deps/cutlass/include/cute/numeric
+copying deps/cutlass/include/cute/numeric/real.hpp -> mirage-0.1.1/deps/cutlass/include/cute/numeric
+copying deps/cutlass/include/cute/util/debug.hpp -> mirage-0.1.1/deps/cutlass/include/cute/util
+copying deps/cutlass/include/cute/util/print.hpp -> mirage-0.1.1/deps/cutlass/include/cute/util
+copying deps/cutlass/include/cute/util/type_traits.hpp -> mirage-0.1.1/deps/cutlass/include/cute/util
+copying deps/cutlass/include/cutlass/aligned_buffer.h -> mirage-0.1.1/deps/cutlass/include/cutlass
+copying deps/cutlass/include/cutlass/array.h -> mirage-0.1.1/deps/cutlass/include/cutlass
+copying deps/cutlass/include/cutlass/array_planar_complex.h -> mirage-0.1.1/deps/cutlass/include/cutlass
+copying deps/cutlass/include/cutlass/array_subbyte.h -> mirage-0.1.1/deps/cutlass/include/cutlass
+copying deps/cutlass/include/cutlass/barrier.h -> mirage-0.1.1/deps/cutlass/include/cutlass
+copying deps/cutlass/include/cutlass/bfloat16.h -> mirage-0.1.1/deps/cutlass/include/cutlass
+copying deps/cutlass/include/cutlass/blas3.h -> mirage-0.1.1/deps/cutlass/include/cutlass
+copying deps/cutlass/include/cutlass/blas3_types.h -> mirage-0.1.1/deps/cutlass/include/cutlass
+copying deps/cutlass/include/cutlass/block_striped.h -> mirage-0.1.1/deps/cutlass/include/cutlass
+copying deps/cutlass/include/cutlass/cluster_launch.hpp -> mirage-0.1.1/deps/cutlass/include/cutlass
+copying deps/cutlass/include/cutlass/complex.h -> mirage-0.1.1/deps/cutlass/include/cutlass
+copying deps/cutlass/include/cutlass/constants.h -> mirage-0.1.1/deps/cutlass/include/cutlass
+copying deps/cutlass/include/cutlass/coord.h -> mirage-0.1.1/deps/cutlass/include/cutlass
+copying deps/cutlass/include/cutlass/core_io.h -> mirage-0.1.1/deps/cutlass/include/cutlass
+copying deps/cutlass/include/cutlass/cuda_host_adapter.hpp -> mirage-0.1.1/deps/cutlass/include/cutlass
+copying deps/cutlass/include/cutlass/cutlass.h -> mirage-0.1.1/deps/cutlass/include/cutlass
+copying deps/cutlass/include/cutlass/device_kernel.h -> mirage-0.1.1/deps/cutlass/include/cutlass
+copying deps/cutlass/include/cutlass/fast_math.h -> mirage-0.1.1/deps/cutlass/include/cutlass
+copying deps/cutlass/include/cutlass/float8.h -> mirage-0.1.1/deps/cutlass/include/cutlass
+copying deps/cutlass/include/cutlass/floating_point_nvrtc.h -> mirage-0.1.1/deps/cutlass/include/cutlass
+copying deps/cutlass/include/cutlass/functional.h -> mirage-0.1.1/deps/cutlass/include/cutlass
+copying deps/cutlass/include/cutlass/gemm_coord.h -> mirage-0.1.1/deps/cutlass/include/cutlass
+copying deps/cutlass/include/cutlass/gemm_coord.hpp -> mirage-0.1.1/deps/cutlass/include/cutlass
+copying deps/cutlass/include/cutlass/half.h -> mirage-0.1.1/deps/cutlass/include/cutlass
+copying deps/cutlass/include/cutlass/integer_subbyte.h -> mirage-0.1.1/deps/cutlass/include/cutlass
+copying deps/cutlass/include/cutlass/kernel_hardware_info.h -> mirage-0.1.1/deps/cutlass/include/cutlass
+copying deps/cutlass/include/cutlass/kernel_hardware_info.hpp -> mirage-0.1.1/deps/cutlass/include/cutlass
+copying deps/cutlass/include/cutlass/kernel_launch.h -> mirage-0.1.1/deps/cutlass/include/cutlass
+copying deps/cutlass/include/cutlass/matrix.h -> mirage-0.1.1/deps/cutlass/include/cutlass
+copying deps/cutlass/include/cutlass/matrix_coord.h -> mirage-0.1.1/deps/cutlass/include/cutlass
+copying deps/cutlass/include/cutlass/matrix_shape.h -> mirage-0.1.1/deps/cutlass/include/cutlass
+copying deps/cutlass/include/cutlass/numeric_conversion.h -> mirage-0.1.1/deps/cutlass/include/cutlass
+copying deps/cutlass/include/cutlass/numeric_size.h -> mirage-0.1.1/deps/cutlass/include/cutlass
+copying deps/cutlass/include/cutlass/numeric_types.h -> mirage-0.1.1/deps/cutlass/include/cutlass
+copying deps/cutlass/include/cutlass/pitch_linear_coord.h -> mirage-0.1.1/deps/cutlass/include/cutlass
+copying deps/cutlass/include/cutlass/predicate_vector.h -> mirage-0.1.1/deps/cutlass/include/cutlass
+copying deps/cutlass/include/cutlass/quaternion.h -> mirage-0.1.1/deps/cutlass/include/cutlass
+copying deps/cutlass/include/cutlass/real.h -> mirage-0.1.1/deps/cutlass/include/cutlass
+copying deps/cutlass/include/cutlass/relatively_equal.h -> mirage-0.1.1/deps/cutlass/include/cutlass
+copying deps/cutlass/include/cutlass/semaphore.h -> mirage-0.1.1/deps/cutlass/include/cutlass
+copying deps/cutlass/include/cutlass/subbyte_reference.h -> mirage-0.1.1/deps/cutlass/include/cutlass
+copying deps/cutlass/include/cutlass/tensor_coord.h -> mirage-0.1.1/deps/cutlass/include/cutlass
+copying deps/cutlass/include/cutlass/tensor_ref.h -> mirage-0.1.1/deps/cutlass/include/cutlass
+copying deps/cutlass/include/cutlass/tensor_ref_planar_complex.h -> mirage-0.1.1/deps/cutlass/include/cutlass
+copying deps/cutlass/include/cutlass/tensor_view.h -> mirage-0.1.1/deps/cutlass/include/cutlass
+copying deps/cutlass/include/cutlass/tensor_view_planar_complex.h -> mirage-0.1.1/deps/cutlass/include/cutlass
+copying deps/cutlass/include/cutlass/tfloat32.h -> mirage-0.1.1/deps/cutlass/include/cutlass
+copying deps/cutlass/include/cutlass/trace.h -> mirage-0.1.1/deps/cutlass/include/cutlass
+copying deps/cutlass/include/cutlass/uint128.h -> mirage-0.1.1/deps/cutlass/include/cutlass
+copying deps/cutlass/include/cutlass/version.h -> mirage-0.1.1/deps/cutlass/include/cutlass
+copying deps/cutlass/include/cutlass/wmma_array.h -> mirage-0.1.1/deps/cutlass/include/cutlass
+copying deps/cutlass/include/cutlass/workspace.h -> mirage-0.1.1/deps/cutlass/include/cutlass
+copying deps/cutlass/include/cutlass/arch/arch.h -> mirage-0.1.1/deps/cutlass/include/cutlass/arch
+copying deps/cutlass/include/cutlass/arch/barrier.h -> mirage-0.1.1/deps/cutlass/include/cutlass/arch
+copying deps/cutlass/include/cutlass/arch/cache_operation.h -> mirage-0.1.1/deps/cutlass/include/cutlass/arch
+copying deps/cutlass/include/cutlass/arch/memory.h -> mirage-0.1.1/deps/cutlass/include/cutlass/arch
+copying deps/cutlass/include/cutlass/arch/memory_sm75.h -> mirage-0.1.1/deps/cutlass/include/cutlass/arch
+copying deps/cutlass/include/cutlass/arch/memory_sm80.h -> mirage-0.1.1/deps/cutlass/include/cutlass/arch
+copying deps/cutlass/include/cutlass/arch/mma.h -> mirage-0.1.1/deps/cutlass/include/cutlass/arch
+copying deps/cutlass/include/cutlass/arch/mma_sm50.h -> mirage-0.1.1/deps/cutlass/include/cutlass/arch
+copying deps/cutlass/include/cutlass/arch/mma_sm60.h -> mirage-0.1.1/deps/cutlass/include/cutlass/arch
+copying deps/cutlass/include/cutlass/arch/mma_sm61.h -> mirage-0.1.1/deps/cutlass/include/cutlass/arch
+copying deps/cutlass/include/cutlass/arch/mma_sm70.h -> mirage-0.1.1/deps/cutlass/include/cutlass/arch
+copying deps/cutlass/include/cutlass/arch/mma_sm75.h -> mirage-0.1.1/deps/cutlass/include/cutlass/arch
+copying deps/cutlass/include/cutlass/arch/mma_sm80.h -> mirage-0.1.1/deps/cutlass/include/cutlass/arch
+copying deps/cutlass/include/cutlass/arch/mma_sm89.h -> mirage-0.1.1/deps/cutlass/include/cutlass/arch
+copying deps/cutlass/include/cutlass/arch/mma_sm90.h -> mirage-0.1.1/deps/cutlass/include/cutlass/arch
+copying deps/cutlass/include/cutlass/arch/mma_sparse_sm80.h -> mirage-0.1.1/deps/cutlass/include/cutlass/arch
+copying deps/cutlass/include/cutlass/arch/mma_sparse_sm89.h -> mirage-0.1.1/deps/cutlass/include/cutlass/arch
+copying deps/cutlass/include/cutlass/arch/reg_reconfig.h -> mirage-0.1.1/deps/cutlass/include/cutlass/arch
+copying deps/cutlass/include/cutlass/arch/simd.h -> mirage-0.1.1/deps/cutlass/include/cutlass/arch
+copying deps/cutlass/include/cutlass/arch/simd_sm60.h -> mirage-0.1.1/deps/cutlass/include/cutlass/arch
+copying deps/cutlass/include/cutlass/arch/simd_sm61.h -> mirage-0.1.1/deps/cutlass/include/cutlass/arch
+copying deps/cutlass/include/cutlass/arch/wmma.h -> mirage-0.1.1/deps/cutlass/include/cutlass/arch
+copying deps/cutlass/include/cutlass/arch/wmma_sm70.h -> mirage-0.1.1/deps/cutlass/include/cutlass/arch
+copying deps/cutlass/include/cutlass/arch/wmma_sm72.h -> mirage-0.1.1/deps/cutlass/include/cutlass/arch
+copying deps/cutlass/include/cutlass/arch/wmma_sm75.h -> mirage-0.1.1/deps/cutlass/include/cutlass/arch
+copying deps/cutlass/include/cutlass/conv/conv2d_problem_size.h -> mirage-0.1.1/deps/cutlass/include/cutlass/conv
+copying deps/cutlass/include/cutlass/conv/conv3d_problem_size.h -> mirage-0.1.1/deps/cutlass/include/cutlass/conv
+copying deps/cutlass/include/cutlass/conv/convnd_problem_shape.hpp -> mirage-0.1.1/deps/cutlass/include/cutlass/conv
+copying deps/cutlass/include/cutlass/conv/convolution.h -> mirage-0.1.1/deps/cutlass/include/cutlass/conv
+copying deps/cutlass/include/cutlass/conv/dispatch_policy.hpp -> mirage-0.1.1/deps/cutlass/include/cutlass/conv
+copying deps/cutlass/include/cutlass/conv/collective/collective_builder.hpp -> mirage-0.1.1/deps/cutlass/include/cutlass/conv/collective
+copying deps/cutlass/include/cutlass/conv/collective/collective_conv.hpp -> mirage-0.1.1/deps/cutlass/include/cutlass/conv/collective
+copying deps/cutlass/include/cutlass/conv/collective/detail.hpp -> mirage-0.1.1/deps/cutlass/include/cutlass/conv/collective
+copying deps/cutlass/include/cutlass/conv/collective/sm90_implicit_gemm_gmma_ss_warpspecialized.hpp -> mirage-0.1.1/deps/cutlass/include/cutlass/conv/collective
+copying deps/cutlass/include/cutlass/conv/collective/builders/sm90_common.inl -> mirage-0.1.1/deps/cutlass/include/cutlass/conv/collective/builders
+copying deps/cutlass/include/cutlass/conv/collective/builders/sm90_gmma_builder.inl -> mirage-0.1.1/deps/cutlass/include/cutlass/conv/collective/builders
+copying deps/cutlass/include/cutlass/conv/device/conv_universal_adapter.hpp -> mirage-0.1.1/deps/cutlass/include/cutlass/conv/device
+copying deps/cutlass/include/cutlass/conv/device/direct_convolution.h -> mirage-0.1.1/deps/cutlass/include/cutlass/conv/device
+copying deps/cutlass/include/cutlass/conv/device/implicit_gemm_convolution.h -> mirage-0.1.1/deps/cutlass/include/cutlass/conv/device
+copying deps/cutlass/include/cutlass/conv/device/implicit_gemm_convolution_fusion.h -> mirage-0.1.1/deps/cutlass/include/cutlass/conv/device
+copying deps/cutlass/include/cutlass/conv/kernel/conv_universal.hpp -> mirage-0.1.1/deps/cutlass/include/cutlass/conv/kernel
+copying deps/cutlass/include/cutlass/conv/kernel/default_conv2d.h -> mirage-0.1.1/deps/cutlass/include/cutlass/conv/kernel
+copying deps/cutlass/include/cutlass/conv/kernel/default_conv2d_dgrad.h -> mirage-0.1.1/deps/cutlass/include/cutlass/conv/kernel
+copying deps/cutlass/include/cutlass/conv/kernel/default_conv2d_fprop.h -> mirage-0.1.1/deps/cutlass/include/cutlass/conv/kernel
+copying deps/cutlass/include/cutlass/conv/kernel/default_conv2d_fprop_fusion.h -> mirage-0.1.1/deps/cutlass/include/cutlass/conv/kernel
+copying deps/cutlass/include/cutlass/conv/kernel/default_conv2d_fprop_with_absmax.h -> mirage-0.1.1/deps/cutlass/include/cutlass/conv/kernel
+copying deps/cutlass/include/cutlass/conv/kernel/default_conv2d_fprop_with_broadcast.h -> mirage-0.1.1/deps/cutlass/include/cutlass/conv/kernel
+copying deps/cutlass/include/cutlass/conv/kernel/default_conv2d_fprop_with_reduction.h -> mirage-0.1.1/deps/cutlass/include/cutlass/conv/kernel
+copying deps/cutlass/include/cutlass/conv/kernel/default_conv2d_group_fprop.h -> mirage-0.1.1/deps/cutlass/include/cutlass/conv/kernel
+copying deps/cutlass/include/cutlass/conv/kernel/default_conv2d_wgrad.h -> mirage-0.1.1/deps/cutlass/include/cutlass/conv/kernel
+copying deps/cutlass/include/cutlass/conv/kernel/default_conv2d_wgrad_fusion.h -> mirage-0.1.1/deps/cutlass/include/cutlass/conv/kernel
+copying deps/cutlass/include/cutlass/conv/kernel/default_conv3d_dgrad.h -> mirage-0.1.1/deps/cutlass/include/cutlass/conv/kernel
+copying deps/cutlass/include/cutlass/conv/kernel/default_conv3d_fprop.h -> mirage-0.1.1/deps/cutlass/include/cutlass/conv/kernel
+copying deps/cutlass/include/cutlass/conv/kernel/default_conv3d_fprop_fusion.h -> mirage-0.1.1/deps/cutlass/include/cutlass/conv/kernel
+copying deps/cutlass/include/cutlass/conv/kernel/default_conv3d_fprop_with_broadcast.h -> mirage-0.1.1/deps/cutlass/include/cutlass/conv/kernel
+copying deps/cutlass/include/cutlass/conv/kernel/default_conv3d_wgrad.h -> mirage-0.1.1/deps/cutlass/include/cutlass/conv/kernel
+copying deps/cutlass/include/cutlass/conv/kernel/default_deconv2d.h -> mirage-0.1.1/deps/cutlass/include/cutlass/conv/kernel
+copying deps/cutlass/include/cutlass/conv/kernel/default_deconv2d_with_broadcast.h -> mirage-0.1.1/deps/cutlass/include/cutlass/conv/kernel
+copying deps/cutlass/include/cutlass/conv/kernel/default_deconv3d.h -> mirage-0.1.1/deps/cutlass/include/cutlass/conv/kernel
+copying deps/cutlass/include/cutlass/conv/kernel/default_deconv3d_with_broadcast.h -> mirage-0.1.1/deps/cutlass/include/cutlass/conv/kernel
+copying deps/cutlass/include/cutlass/conv/kernel/default_depthwise_fprop.h -> mirage-0.1.1/deps/cutlass/include/cutlass/conv/kernel
+copying deps/cutlass/include/cutlass/conv/kernel/direct_convolution.h -> mirage-0.1.1/deps/cutlass/include/cutlass/conv/kernel
+copying deps/cutlass/include/cutlass/conv/kernel/implicit_gemm_convolution.h -> mirage-0.1.1/deps/cutlass/include/cutlass/conv/kernel
+copying deps/cutlass/include/cutlass/conv/kernel/implicit_gemm_convolution_fusion.h -> mirage-0.1.1/deps/cutlass/include/cutlass/conv/kernel
+copying deps/cutlass/include/cutlass/conv/kernel/implicit_gemm_convolution_strided_dgrad.h -> mirage-0.1.1/deps/cutlass/include/cutlass/conv/kernel
+copying deps/cutlass/include/cutlass/conv/kernel/implicit_gemm_convolution_with_absmax.h -> mirage-0.1.1/deps/cutlass/include/cutlass/conv/kernel
+copying deps/cutlass/include/cutlass/conv/kernel/implicit_gemm_convolution_with_fused_epilogue.h -> mirage-0.1.1/deps/cutlass/include/cutlass/conv/kernel
+copying deps/cutlass/include/cutlass/conv/kernel/sm90_implicit_gemm_tma_warpspecialized.hpp -> mirage-0.1.1/deps/cutlass/include/cutlass/conv/kernel
+copying deps/cutlass/include/cutlass/conv/thread/depthwise_mma.h -> mirage-0.1.1/deps/cutlass/include/cutlass/conv/thread
+copying deps/cutlass/include/cutlass/conv/threadblock/conv2d_dgrad_filter_tile_access_iterator_analytic.h -> mirage-0.1.1/deps/cutlass/include/cutlass/conv/threadblock
+copying deps/cutlass/include/cutlass/conv/threadblock/conv2d_dgrad_filter_tile_access_iterator_optimized.h -> mirage-0.1.1/deps/cutlass/include/cutlass/conv/threadblock
+copying deps/cutlass/include/cutlass/conv/threadblock/conv2d_dgrad_output_gradient_tile_access_iterator_analytic.h -> mirage-0.1.1/deps/cutlass/include/cutlass/conv/threadblock
+copying deps/cutlass/include/cutlass/conv/threadblock/conv2d_dgrad_output_gradient_tile_access_iterator_optimized.h -> mirage-0.1.1/deps/cutlass/include/cutlass/conv/threadblock
+copying deps/cutlass/include/cutlass/conv/threadblock/conv2d_fprop_activation_tile_access_iterator_analytic.h -> mirage-0.1.1/deps/cutlass/include/cutlass/conv/threadblock
+copying deps/cutlass/include/cutlass/conv/threadblock/conv2d_fprop_activation_tile_access_iterator_few_channels.h -> mirage-0.1.1/deps/cutlass/include/cutlass/conv/threadblock
+copying deps/cutlass/include/cutlass/conv/threadblock/conv2d_fprop_activation_tile_access_iterator_fixed_channels.h -> mirage-0.1.1/deps/cutlass/include/cutlass/conv/threadblock
+copying deps/cutlass/include/cutlass/conv/threadblock/conv2d_fprop_activation_tile_access_iterator_optimized.h -> mirage-0.1.1/deps/cutlass/include/cutlass/conv/threadblock
+copying deps/cutlass/include/cutlass/conv/threadblock/conv2d_fprop_filter_tile_access_iterator_analytic.h -> mirage-0.1.1/deps/cutlass/include/cutlass/conv/threadblock
+copying deps/cutlass/include/cutlass/conv/threadblock/conv2d_fprop_filter_tile_access_iterator_few_channels.h -> mirage-0.1.1/deps/cutlass/include/cutlass/conv/threadblock
+copying deps/cutlass/include/cutlass/conv/threadblock/conv2d_fprop_filter_tile_access_iterator_fixed_channels.h -> mirage-0.1.1/deps/cutlass/include/cutlass/conv/threadblock
+copying deps/cutlass/include/cutlass/conv/threadblock/conv2d_fprop_filter_tile_access_iterator_optimized.h -> mirage-0.1.1/deps/cutlass/include/cutlass/conv/threadblock
+copying deps/cutlass/include/cutlass/conv/threadblock/conv2d_params.h -> mirage-0.1.1/deps/cutlass/include/cutlass/conv/threadblock
+copying deps/cutlass/include/cutlass/conv/threadblock/conv2d_tile_iterator.h -> mirage-0.1.1/deps/cutlass/include/cutlass/conv/threadblock
+copying deps/cutlass/include/cutlass/conv/threadblock/conv2d_wgrad_activation_tile_access_iterator_analytic.h -> mirage-0.1.1/deps/cutlass/include/cutlass/conv/threadblock
+copying deps/cutlass/include/cutlass/conv/threadblock/conv2d_wgrad_activation_tile_access_iterator_optimized.h -> mirage-0.1.1/deps/cutlass/include/cutlass/conv/threadblock
+copying deps/cutlass/include/cutlass/conv/threadblock/conv2d_wgrad_output_gradient_tile_access_iterator_analytic.h -> mirage-0.1.1/deps/cutlass/include/cutlass/conv/threadblock
+copying deps/cutlass/include/cutlass/conv/threadblock/conv2d_wgrad_output_gradient_tile_access_iterator_optimized.h -> mirage-0.1.1/deps/cutlass/include/cutlass/conv/threadblock
+copying deps/cutlass/include/cutlass/conv/threadblock/conv3d_dgrad_filter_tile_access_iterator_analytic.h -> mirage-0.1.1/deps/cutlass/include/cutlass/conv/threadblock
+copying deps/cutlass/include/cutlass/conv/threadblock/conv3d_dgrad_filter_tile_access_iterator_optimized.h -> mirage-0.1.1/deps/cutlass/include/cutlass/conv/threadblock
+copying deps/cutlass/include/cutlass/conv/threadblock/conv3d_dgrad_output_gradient_tile_access_iterator_analytic.h -> mirage-0.1.1/deps/cutlass/include/cutlass/conv/threadblock
+copying deps/cutlass/include/cutlass/conv/threadblock/conv3d_dgrad_output_gradient_tile_access_iterator_optimized.h -> mirage-0.1.1/deps/cutlass/include/cutlass/conv/threadblock
+copying deps/cutlass/include/cutlass/conv/threadblock/conv3d_fprop_activation_tile_access_iterator_analytic.h -> mirage-0.1.1/deps/cutlass/include/cutlass/conv/threadblock
+copying deps/cutlass/include/cutlass/conv/threadblock/conv3d_fprop_activation_tile_access_iterator_optimized.h -> mirage-0.1.1/deps/cutlass/include/cutlass/conv/threadblock
+copying deps/cutlass/include/cutlass/conv/threadblock/conv3d_fprop_filter_tile_access_iterator_analytic.h -> mirage-0.1.1/deps/cutlass/include/cutlass/conv/threadblock
+copying deps/cutlass/include/cutlass/conv/threadblock/conv3d_fprop_filter_tile_access_iterator_optimized.h -> mirage-0.1.1/deps/cutlass/include/cutlass/conv/threadblock
+copying deps/cutlass/include/cutlass/conv/threadblock/conv3d_params.h -> mirage-0.1.1/deps/cutlass/include/cutlass/conv/threadblock
+copying deps/cutlass/include/cutlass/conv/threadblock/conv3d_wgrad_activation_tile_access_iterator_analytic.h -> mirage-0.1.1/deps/cutlass/include/cutlass/conv/threadblock
+copying deps/cutlass/include/cutlass/conv/threadblock/conv3d_wgrad_activation_tile_access_iterator_optimized.h -> mirage-0.1.1/deps/cutlass/include/cutlass/conv/threadblock
+copying deps/cutlass/include/cutlass/conv/threadblock/conv3d_wgrad_output_gradient_tile_access_iterator_analytic.h -> mirage-0.1.1/deps/cutlass/include/cutlass/conv/threadblock
+copying deps/cutlass/include/cutlass/conv/threadblock/conv3d_wgrad_output_gradient_tile_access_iterator_optimized.h -> mirage-0.1.1/deps/cutlass/include/cutlass/conv/threadblock
+copying deps/cutlass/include/cutlass/conv/threadblock/depthwise_direct_conv_params.h -> mirage-0.1.1/deps/cutlass/include/cutlass/conv/threadblock
+copying deps/cutlass/include/cutlass/conv/threadblock/depthwise_fprop_activation_tile_access_iterator_direct_conv_fixed_stride_dilation.h -> mirage-0.1.1/deps/cutlass/include/cutlass/conv/threadblock
+copying deps/cutlass/include/cutlass/conv/threadblock/depthwise_fprop_activation_tile_access_iterator_direct_conv_optimized.h -> mirage-0.1.1/deps/cutlass/include/cutlass/conv/threadblock
+copying deps/cutlass/include/cutlass/conv/threadblock/depthwise_fprop_direct_conv_multistage.h -> mirage-0.1.1/deps/cutlass/include/cutlass/conv/threadblock
+copying deps/cutlass/include/cutlass/conv/threadblock/depthwise_fprop_filter_tile_access_iterator_direct_conv_optimized.h -> mirage-0.1.1/deps/cutlass/include/cutlass/conv/threadblock
+copying deps/cutlass/include/cutlass/conv/threadblock/depthwise_fprop_pipelined.h -> mirage-0.1.1/deps/cutlass/include/cutlass/conv/threadblock
+copying deps/cutlass/include/cutlass/conv/threadblock/depthwise_mma_base.h -> mirage-0.1.1/deps/cutlass/include/cutlass/conv/threadblock
+copying deps/cutlass/include/cutlass/conv/threadblock/depthwise_mma_core_with_lane_access_size.h -> mirage-0.1.1/deps/cutlass/include/cutlass/conv/threadblock
+copying deps/cutlass/include/cutlass/conv/threadblock/implicit_gemm_fprop_fusion_multistage.h -> mirage-0.1.1/deps/cutlass/include/cutlass/conv/threadblock
+copying deps/cutlass/include/cutlass/conv/threadblock/implicit_gemm_multistage.h -> mirage-0.1.1/deps/cutlass/include/cutlass/conv/threadblock
+copying deps/cutlass/include/cutlass/conv/threadblock/implicit_gemm_pipelined.h -> mirage-0.1.1/deps/cutlass/include/cutlass/conv/threadblock
+copying deps/cutlass/include/cutlass/conv/threadblock/implicit_gemm_wgrad_fusion_multistage.h -> mirage-0.1.1/deps/cutlass/include/cutlass/conv/threadblock
+copying deps/cutlass/include/cutlass/conv/threadblock/predicated_scale_bias_vector_access_iterator.h -> mirage-0.1.1/deps/cutlass/include/cutlass/conv/threadblock
+copying deps/cutlass/include/cutlass/conv/threadblock/predicated_scale_bias_vector_iterator.h -> mirage-0.1.1/deps/cutlass/include/cutlass/conv/threadblock
+copying deps/cutlass/include/cutlass/conv/threadblock/threadblock_swizzle.h -> mirage-0.1.1/deps/cutlass/include/cutlass/conv/threadblock
+copying deps/cutlass/include/cutlass/conv/warp/mma_depthwise_simt.h -> mirage-0.1.1/deps/cutlass/include/cutlass/conv/warp
+copying deps/cutlass/include/cutlass/conv/warp/mma_depthwise_simt_tile_iterator.h -> mirage-0.1.1/deps/cutlass/include/cutlass/conv/warp
+copying deps/cutlass/include/cutlass/conv/warp/scale_bias_relu_transform.h -> mirage-0.1.1/deps/cutlass/include/cutlass/conv/warp
+copying deps/cutlass/include/cutlass/detail/collective.hpp -> mirage-0.1.1/deps/cutlass/include/cutlass/detail
+copying deps/cutlass/include/cutlass/detail/dependent_false.hpp -> mirage-0.1.1/deps/cutlass/include/cutlass/detail
+copying deps/cutlass/include/cutlass/detail/helper_macros.hpp -> mirage-0.1.1/deps/cutlass/include/cutlass/detail
+copying deps/cutlass/include/cutlass/detail/layout.hpp -> mirage-0.1.1/deps/cutlass/include/cutlass/detail
+copying deps/cutlass/include/cutlass/detail/mma.hpp -> mirage-0.1.1/deps/cutlass/include/cutlass/detail
+copying deps/cutlass/include/cutlass/epilogue/dispatch_policy.hpp -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue
+copying deps/cutlass/include/cutlass/epilogue/collective/collective_builder.hpp -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/collective
+copying deps/cutlass/include/cutlass/epilogue/collective/collective_epilogue.hpp -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/collective
+copying deps/cutlass/include/cutlass/epilogue/collective/default_epilogue.hpp -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/collective
+copying deps/cutlass/include/cutlass/epilogue/collective/default_epilogue_array.hpp -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/collective
+copying deps/cutlass/include/cutlass/epilogue/collective/detail.hpp -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/collective
+copying deps/cutlass/include/cutlass/epilogue/collective/epilogue_tensor_broadcast.hpp -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/collective
+copying deps/cutlass/include/cutlass/epilogue/collective/sm70_epilogue_vectorized.hpp -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/collective
+copying deps/cutlass/include/cutlass/epilogue/collective/sm90_epilogue_tma_warpspecialized.hpp -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/collective
+copying deps/cutlass/include/cutlass/epilogue/collective/sm90_epilogue_tma_warpspecialized_bias_elementwise.hpp -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/collective
+copying deps/cutlass/include/cutlass/epilogue/collective/builders/sm90_builder.inl -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/collective/builders
+copying deps/cutlass/include/cutlass/epilogue/fusion/callbacks.hpp -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/fusion
+copying deps/cutlass/include/cutlass/epilogue/fusion/operations.hpp -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/fusion
+copying deps/cutlass/include/cutlass/epilogue/fusion/sm90_callbacks_tma_warpspecialized.hpp -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/fusion
+copying deps/cutlass/include/cutlass/epilogue/fusion/sm90_visitor_compute_tma_warpspecialized.hpp -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/fusion
+copying deps/cutlass/include/cutlass/epilogue/fusion/sm90_visitor_load_tma_warpspecialized.hpp -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/fusion
+copying deps/cutlass/include/cutlass/epilogue/fusion/sm90_visitor_store_tma_warpspecialized.hpp -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/fusion
+copying deps/cutlass/include/cutlass/epilogue/fusion/sm90_visitor_tma_warpspecialized.hpp -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/fusion
+copying deps/cutlass/include/cutlass/epilogue/thread/activation.h -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/thread
+copying deps/cutlass/include/cutlass/epilogue/thread/conversion_op.h -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/thread
+copying deps/cutlass/include/cutlass/epilogue/thread/detail.hpp -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/thread
+copying deps/cutlass/include/cutlass/epilogue/thread/linear_combination.h -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/thread
+copying deps/cutlass/include/cutlass/epilogue/thread/linear_combination_bias_elementwise.h -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/thread
+copying deps/cutlass/include/cutlass/epilogue/thread/linear_combination_bias_relu.h -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/thread
+copying deps/cutlass/include/cutlass/epilogue/thread/linear_combination_clamp.h -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/thread
+copying deps/cutlass/include/cutlass/epilogue/thread/linear_combination_dgelu.h -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/thread
+copying deps/cutlass/include/cutlass/epilogue/thread/linear_combination_drelu.h -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/thread
+copying deps/cutlass/include/cutlass/epilogue/thread/linear_combination_gelu.h -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/thread
+copying deps/cutlass/include/cutlass/epilogue/thread/linear_combination_generic.h -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/thread
+copying deps/cutlass/include/cutlass/epilogue/thread/linear_combination_generic_with_scaling.h -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/thread
+copying deps/cutlass/include/cutlass/epilogue/thread/linear_combination_hardswish.h -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/thread
+copying deps/cutlass/include/cutlass/epilogue/thread/linear_combination_leaky_relu.h -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/thread
+copying deps/cutlass/include/cutlass/epilogue/thread/linear_combination_params.h -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/thread
+copying deps/cutlass/include/cutlass/epilogue/thread/linear_combination_planar_complex.h -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/thread
+copying deps/cutlass/include/cutlass/epilogue/thread/linear_combination_relu.h -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/thread
+copying deps/cutlass/include/cutlass/epilogue/thread/linear_combination_relu0.h -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/thread
+copying deps/cutlass/include/cutlass/epilogue/thread/linear_combination_residual_block.h -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/thread
+copying deps/cutlass/include/cutlass/epilogue/thread/linear_combination_sigmoid.h -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/thread
+copying deps/cutlass/include/cutlass/epilogue/thread/linear_combination_silu.h -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/thread
+copying deps/cutlass/include/cutlass/epilogue/thread/linear_combination_tensor_broadcast.hpp -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/thread
+copying deps/cutlass/include/cutlass/epilogue/thread/linear_combination_with_elementwise.h -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/thread
+copying deps/cutlass/include/cutlass/epilogue/thread/reduction_op.h -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/thread
+copying deps/cutlass/include/cutlass/epilogue/thread/scale_type.h -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/thread
+copying deps/cutlass/include/cutlass/epilogue/threadblock/default_epilogue_complex_tensor_op.h -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/threadblock
+copying deps/cutlass/include/cutlass/epilogue/threadblock/default_epilogue_complex_tensor_op_blas3.h -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/threadblock
+copying deps/cutlass/include/cutlass/epilogue/threadblock/default_epilogue_direct_store.h -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/threadblock
+copying deps/cutlass/include/cutlass/epilogue/threadblock/default_epilogue_planar_complex.h -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/threadblock
+copying deps/cutlass/include/cutlass/epilogue/threadblock/default_epilogue_simt.h -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/threadblock
+copying deps/cutlass/include/cutlass/epilogue/threadblock/default_epilogue_tensor_op.h -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/threadblock
+copying deps/cutlass/include/cutlass/epilogue/threadblock/default_epilogue_tensor_op_blas3.h -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/threadblock
+copying deps/cutlass/include/cutlass/epilogue/threadblock/default_epilogue_volta_tensor_op.h -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/threadblock
+copying deps/cutlass/include/cutlass/epilogue/threadblock/default_epilogue_with_absmax.h -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/threadblock
+copying deps/cutlass/include/cutlass/epilogue/threadblock/default_epilogue_with_broadcast.h -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/threadblock
+copying deps/cutlass/include/cutlass/epilogue/threadblock/default_epilogue_with_reduction.h -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/threadblock
+copying deps/cutlass/include/cutlass/epilogue/threadblock/default_epilogue_wmma_tensor_op.h -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/threadblock
+copying deps/cutlass/include/cutlass/epilogue/threadblock/default_thread_map_simt.h -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/threadblock
+copying deps/cutlass/include/cutlass/epilogue/threadblock/default_thread_map_tensor_op.h -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/threadblock
+copying deps/cutlass/include/cutlass/epilogue/threadblock/default_thread_map_volta_tensor_op.h -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/threadblock
+copying deps/cutlass/include/cutlass/epilogue/threadblock/default_thread_map_wmma_tensor_op.h -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/threadblock
+copying deps/cutlass/include/cutlass/epilogue/threadblock/direct_store_epilogue_iterator.h -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/threadblock
+copying deps/cutlass/include/cutlass/epilogue/threadblock/epilogue.h -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/threadblock
+copying deps/cutlass/include/cutlass/epilogue/threadblock/epilogue_base.h -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/threadblock
+copying deps/cutlass/include/cutlass/epilogue/threadblock/epilogue_base_streamk.h -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/threadblock
+copying deps/cutlass/include/cutlass/epilogue/threadblock/epilogue_depthwise.h -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/threadblock
+copying deps/cutlass/include/cutlass/epilogue/threadblock/epilogue_direct_store.h -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/threadblock
+copying deps/cutlass/include/cutlass/epilogue/threadblock/epilogue_gemm_k_reduction.h -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/threadblock
+copying deps/cutlass/include/cutlass/epilogue/threadblock/epilogue_planar_complex.h -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/threadblock
+copying deps/cutlass/include/cutlass/epilogue/threadblock/epilogue_smem_accumulator.h -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/threadblock
+copying deps/cutlass/include/cutlass/epilogue/threadblock/epilogue_streamk_with_broadcast.h -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/threadblock
+copying deps/cutlass/include/cutlass/epilogue/threadblock/epilogue_visitor_with_softmax.h -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/threadblock
+copying deps/cutlass/include/cutlass/epilogue/threadblock/epilogue_with_absmax.h -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/threadblock
+copying deps/cutlass/include/cutlass/epilogue/threadblock/epilogue_with_broadcast.h -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/threadblock
+copying deps/cutlass/include/cutlass/epilogue/threadblock/epilogue_with_reduction.h -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/threadblock
+copying deps/cutlass/include/cutlass/epilogue/threadblock/epilogue_with_visitor.h -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/threadblock
+copying deps/cutlass/include/cutlass/epilogue/threadblock/epilogue_with_visitor_callbacks.h -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/threadblock
+copying deps/cutlass/include/cutlass/epilogue/threadblock/epilogue_workspace.h -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/threadblock
+copying deps/cutlass/include/cutlass/epilogue/threadblock/interleaved_epilogue.h -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/threadblock
+copying deps/cutlass/include/cutlass/epilogue/threadblock/output_iterator_parameter.h -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/threadblock
+copying deps/cutlass/include/cutlass/epilogue/threadblock/output_tile_thread_map.h -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/threadblock
+copying deps/cutlass/include/cutlass/epilogue/threadblock/predicated_tile_iterator.h -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/threadblock
+copying deps/cutlass/include/cutlass/epilogue/threadblock/predicated_tile_iterator_affine.h -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/threadblock
+copying deps/cutlass/include/cutlass/epilogue/threadblock/predicated_tile_iterator_affine_layout_params.h -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/threadblock
+copying deps/cutlass/include/cutlass/epilogue/threadblock/predicated_tile_iterator_blas3.h -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/threadblock
+copying deps/cutlass/include/cutlass/epilogue/threadblock/predicated_tile_iterator_conv.h -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/threadblock
+copying deps/cutlass/include/cutlass/epilogue/threadblock/predicated_tile_iterator_direct_conv.h -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/threadblock
+copying deps/cutlass/include/cutlass/epilogue/threadblock/predicated_tile_iterator_params.h -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/threadblock
+copying deps/cutlass/include/cutlass/epilogue/threadblock/predicated_tile_iterator_predicates.h -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/threadblock
+copying deps/cutlass/include/cutlass/epilogue/threadblock/predicated_tile_iterator_strided_dgrad.h -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/threadblock
+copying deps/cutlass/include/cutlass/epilogue/threadblock/shared_load_iterator.h -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/threadblock
+copying deps/cutlass/include/cutlass/epilogue/threadblock/shared_load_iterator_mixed.h -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/threadblock
+copying deps/cutlass/include/cutlass/epilogue/threadblock/shared_load_iterator_pitch_linear.h -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/threadblock
+copying deps/cutlass/include/cutlass/epilogue/threadblock/fusion/visitor_2x.hpp -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/threadblock/fusion
+copying deps/cutlass/include/cutlass/epilogue/threadblock/fusion/visitor_compute.hpp -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/threadblock/fusion
+copying deps/cutlass/include/cutlass/epilogue/threadblock/fusion/visitor_load.hpp -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/threadblock/fusion
+copying deps/cutlass/include/cutlass/epilogue/threadblock/fusion/visitor_store.hpp -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/threadblock/fusion
+copying deps/cutlass/include/cutlass/epilogue/threadblock/fusion/visitors.hpp -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/threadblock/fusion
+copying deps/cutlass/include/cutlass/epilogue/warp/fragment_iterator_complex_tensor_op.h -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/warp
+copying deps/cutlass/include/cutlass/epilogue/warp/fragment_iterator_gaussian_complex_tensor_op.h -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/warp
+copying deps/cutlass/include/cutlass/epilogue/warp/fragment_iterator_simt.h -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/warp
+copying deps/cutlass/include/cutlass/epilogue/warp/fragment_iterator_tensor_op.h -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/warp
+copying deps/cutlass/include/cutlass/epilogue/warp/fragment_iterator_volta_tensor_op.h -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/warp
+copying deps/cutlass/include/cutlass/epilogue/warp/fragment_iterator_wmma_tensor_op.h -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/warp
+copying deps/cutlass/include/cutlass/epilogue/warp/simt_policy.h -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/warp
+copying deps/cutlass/include/cutlass/epilogue/warp/tensor_op_policy.h -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/warp
+copying deps/cutlass/include/cutlass/epilogue/warp/tile_iterator_simt.h -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/warp
+copying deps/cutlass/include/cutlass/epilogue/warp/tile_iterator_tensor_op.h -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/warp
+copying deps/cutlass/include/cutlass/epilogue/warp/tile_iterator_tensor_op_mixed.h -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/warp
+copying deps/cutlass/include/cutlass/epilogue/warp/tile_iterator_volta_tensor_op.h -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/warp
+copying deps/cutlass/include/cutlass/epilogue/warp/tile_iterator_wmma_tensor_op.h -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/warp
+copying deps/cutlass/include/cutlass/epilogue/warp/volta_tensor_op_policy.h -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/warp
+copying deps/cutlass/include/cutlass/epilogue/warp/wmma_tensor_op_policy.h -> mirage-0.1.1/deps/cutlass/include/cutlass/epilogue/warp
+copying deps/cutlass/include/cutlass/gemm/dispatch_policy.hpp -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm
+copying deps/cutlass/include/cutlass/gemm/gemm.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm
+copying deps/cutlass/include/cutlass/gemm/gemm_enumerated_types.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm
+copying deps/cutlass/include/cutlass/gemm/group_array_problem_shape.hpp -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm
+copying deps/cutlass/include/cutlass/gemm/collective/collective_builder.hpp -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/collective
+copying deps/cutlass/include/cutlass/gemm/collective/collective_mma.hpp -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/collective
+copying deps/cutlass/include/cutlass/gemm/collective/fp8_accumulation.hpp -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/collective
+copying deps/cutlass/include/cutlass/gemm/collective/sm70_mma_twostage.hpp -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/collective
+copying deps/cutlass/include/cutlass/gemm/collective/sm80_mma_multistage.hpp -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/collective
+copying deps/cutlass/include/cutlass/gemm/collective/sm90_mma_array_tma_gmma_ss_warpspecialized.hpp -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/collective
+copying deps/cutlass/include/cutlass/gemm/collective/sm90_mma_multistage_gmma_rs_warpspecialized.hpp -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/collective
+copying deps/cutlass/include/cutlass/gemm/collective/sm90_mma_multistage_gmma_ss_warpspecialized.hpp -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/collective
+copying deps/cutlass/include/cutlass/gemm/collective/sm90_mma_tma_gmma_rs_warpspecialized.hpp -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/collective
+copying deps/cutlass/include/cutlass/gemm/collective/sm90_mma_tma_gmma_rs_warpspecialized_mixed_input.hpp -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/collective
+copying deps/cutlass/include/cutlass/gemm/collective/sm90_mma_tma_gmma_ss.hpp -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/collective
+copying deps/cutlass/include/cutlass/gemm/collective/sm90_mma_tma_gmma_ss_warpspecialized.hpp -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/collective
+copying deps/cutlass/include/cutlass/gemm/collective/sm90_mma_tma_gmma_ss_warpspecialized_fp8.hpp -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/collective
+copying deps/cutlass/include/cutlass/gemm/collective/builders/sm90_common.inl -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/collective/builders
+copying deps/cutlass/include/cutlass/gemm/collective/builders/sm90_gmma_builder.inl -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/collective/builders
+copying deps/cutlass/include/cutlass/gemm/device/base_grouped.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/device
+copying deps/cutlass/include/cutlass/gemm/device/default_gemm_configuration.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/device
+copying deps/cutlass/include/cutlass/gemm/device/ell_gemm.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/device
+copying deps/cutlass/include/cutlass/gemm/device/gemm.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/device
+copying deps/cutlass/include/cutlass/gemm/device/gemm_array.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/device
+copying deps/cutlass/include/cutlass/gemm/device/gemm_batched.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/device
+copying deps/cutlass/include/cutlass/gemm/device/gemm_complex.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/device
+copying deps/cutlass/include/cutlass/gemm/device/gemm_grouped.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/device
+copying deps/cutlass/include/cutlass/gemm/device/gemm_layernorm_mainloop_fusion.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/device
+copying deps/cutlass/include/cutlass/gemm/device/gemm_sparse.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/device
+copying deps/cutlass/include/cutlass/gemm/device/gemm_sparse_with_absmax.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/device
+copying deps/cutlass/include/cutlass/gemm/device/gemm_sparse_with_visitor.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/device
+copying deps/cutlass/include/cutlass/gemm/device/gemm_splitk_parallel.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/device
+copying deps/cutlass/include/cutlass/gemm/device/gemm_universal.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/device
+copying deps/cutlass/include/cutlass/gemm/device/gemm_universal_adapter.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/device
+copying deps/cutlass/include/cutlass/gemm/device/gemm_universal_base.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/device
+copying deps/cutlass/include/cutlass/gemm/device/gemm_universal_streamk_with_broadcast.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/device
+copying deps/cutlass/include/cutlass/gemm/device/gemm_universal_with_absmax.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/device
+copying deps/cutlass/include/cutlass/gemm/device/gemm_universal_with_broadcast.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/device
+copying deps/cutlass/include/cutlass/gemm/device/gemm_with_k_reduction.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/device
+copying deps/cutlass/include/cutlass/gemm/device/gemv.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/device
+copying deps/cutlass/include/cutlass/gemm/device/rank_2k.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/device
+copying deps/cutlass/include/cutlass/gemm/device/rank_2k_grouped.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/device
+copying deps/cutlass/include/cutlass/gemm/device/rank_k.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/device
+copying deps/cutlass/include/cutlass/gemm/device/symm.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/device
+copying deps/cutlass/include/cutlass/gemm/device/trmm.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/device
+copying deps/cutlass/include/cutlass/gemm/kernel/default_ell_gemm.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/kernel
+copying deps/cutlass/include/cutlass/gemm/kernel/default_gemm.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/kernel
+copying deps/cutlass/include/cutlass/gemm/kernel/default_gemm_complex.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/kernel
+copying deps/cutlass/include/cutlass/gemm/kernel/default_gemm_grouped.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/kernel
+copying deps/cutlass/include/cutlass/gemm/kernel/default_gemm_grouped_softmax_mainloop_fusion.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/kernel
+copying deps/cutlass/include/cutlass/gemm/kernel/default_gemm_layernorm_mainloop_fusion.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/kernel
+copying deps/cutlass/include/cutlass/gemm/kernel/default_gemm_planar_complex_universal.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/kernel
+copying deps/cutlass/include/cutlass/gemm/kernel/default_gemm_sparse.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/kernel
+copying deps/cutlass/include/cutlass/gemm/kernel/default_gemm_sparse_with_absmax.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/kernel
+copying deps/cutlass/include/cutlass/gemm/kernel/default_gemm_sparse_with_visitor.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/kernel
+copying deps/cutlass/include/cutlass/gemm/kernel/default_gemm_splitk_parallel.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/kernel
+copying deps/cutlass/include/cutlass/gemm/kernel/default_gemm_streamk_with_broadcast.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/kernel
+copying deps/cutlass/include/cutlass/gemm/kernel/default_gemm_universal.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/kernel
+copying deps/cutlass/include/cutlass/gemm/kernel/default_gemm_universal_with_visitor.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/kernel
+copying deps/cutlass/include/cutlass/gemm/kernel/default_gemm_with_absmax.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/kernel
+copying deps/cutlass/include/cutlass/gemm/kernel/default_gemm_with_broadcast.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/kernel
+copying deps/cutlass/include/cutlass/gemm/kernel/default_gemm_with_k_reduction.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/kernel
+copying deps/cutlass/include/cutlass/gemm/kernel/default_gemm_with_reduction.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/kernel
+copying deps/cutlass/include/cutlass/gemm/kernel/default_gemv.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/kernel
+copying deps/cutlass/include/cutlass/gemm/kernel/default_rank_2k.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/kernel
+copying deps/cutlass/include/cutlass/gemm/kernel/default_rank_2k_complex.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/kernel
+copying deps/cutlass/include/cutlass/gemm/kernel/default_rank_2k_grouped.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/kernel
+copying deps/cutlass/include/cutlass/gemm/kernel/default_rank_2k_universal.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/kernel
+copying deps/cutlass/include/cutlass/gemm/kernel/default_rank_k.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/kernel
+copying deps/cutlass/include/cutlass/gemm/kernel/default_rank_k_complex.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/kernel
+copying deps/cutlass/include/cutlass/gemm/kernel/default_rank_k_universal.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/kernel
+copying deps/cutlass/include/cutlass/gemm/kernel/default_symm.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/kernel
+copying deps/cutlass/include/cutlass/gemm/kernel/default_symm_complex.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/kernel
+copying deps/cutlass/include/cutlass/gemm/kernel/default_symm_universal.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/kernel
+copying deps/cutlass/include/cutlass/gemm/kernel/default_trmm.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/kernel
+copying deps/cutlass/include/cutlass/gemm/kernel/default_trmm_complex.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/kernel
+copying deps/cutlass/include/cutlass/gemm/kernel/default_trmm_universal.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/kernel
+copying deps/cutlass/include/cutlass/gemm/kernel/ell_gemm.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/kernel
+copying deps/cutlass/include/cutlass/gemm/kernel/gemm.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/kernel
+copying deps/cutlass/include/cutlass/gemm/kernel/gemm_array.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/kernel
+copying deps/cutlass/include/cutlass/gemm/kernel/gemm_batched.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/kernel
+copying deps/cutlass/include/cutlass/gemm/kernel/gemm_grouped.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/kernel
+copying deps/cutlass/include/cutlass/gemm/kernel/gemm_grouped_problem_visitor.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/kernel
+copying deps/cutlass/include/cutlass/gemm/kernel/gemm_grouped_softmax_mainloop_fusion.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/kernel
+copying deps/cutlass/include/cutlass/gemm/kernel/gemm_layernorm_mainloop_fusion.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/kernel
+copying deps/cutlass/include/cutlass/gemm/kernel/gemm_params.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/kernel
+copying deps/cutlass/include/cutlass/gemm/kernel/gemm_pipelined.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/kernel
+copying deps/cutlass/include/cutlass/gemm/kernel/gemm_planar_complex.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/kernel
+copying deps/cutlass/include/cutlass/gemm/kernel/gemm_planar_complex_array.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/kernel
+copying deps/cutlass/include/cutlass/gemm/kernel/gemm_splitk_parallel.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/kernel
+copying deps/cutlass/include/cutlass/gemm/kernel/gemm_streamk_with_fused_epilogue.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/kernel
+copying deps/cutlass/include/cutlass/gemm/kernel/gemm_transpose_operands.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/kernel
+copying deps/cutlass/include/cutlass/gemm/kernel/gemm_universal.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/kernel
+copying deps/cutlass/include/cutlass/gemm/kernel/gemm_universal.hpp -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/kernel
+copying deps/cutlass/include/cutlass/gemm/kernel/gemm_universal_streamk.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/kernel
+copying deps/cutlass/include/cutlass/gemm/kernel/gemm_universal_with_visitor.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/kernel
+copying deps/cutlass/include/cutlass/gemm/kernel/gemm_universal_with_visitor_streamk.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/kernel
+copying deps/cutlass/include/cutlass/gemm/kernel/gemm_with_absmax.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/kernel
+copying deps/cutlass/include/cutlass/gemm/kernel/gemm_with_fused_epilogue.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/kernel
+copying deps/cutlass/include/cutlass/gemm/kernel/gemm_with_k_reduction.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/kernel
+copying deps/cutlass/include/cutlass/gemm/kernel/gemv.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/kernel
+copying deps/cutlass/include/cutlass/gemm/kernel/gemv_batched_strided.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/kernel
+copying deps/cutlass/include/cutlass/gemm/kernel/grouped_problem_visitor.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/kernel
+copying deps/cutlass/include/cutlass/gemm/kernel/params_sparse_base.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/kernel
+copying deps/cutlass/include/cutlass/gemm/kernel/params_universal_base.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/kernel
+copying deps/cutlass/include/cutlass/gemm/kernel/rank_2k_grouped.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/kernel
+copying deps/cutlass/include/cutlass/gemm/kernel/rank_2k_grouped_problem_visitor.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/kernel
+copying deps/cutlass/include/cutlass/gemm/kernel/rank_2k_transpose_operands.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/kernel
+copying deps/cutlass/include/cutlass/gemm/kernel/rank_2k_universal.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/kernel
+copying deps/cutlass/include/cutlass/gemm/kernel/rank_k_universal.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/kernel
+copying deps/cutlass/include/cutlass/gemm/kernel/sm70_gemm.hpp -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/kernel
+copying deps/cutlass/include/cutlass/gemm/kernel/sm90_gemm_array_tma_warpspecialized_cooperative.hpp -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/kernel
+copying deps/cutlass/include/cutlass/gemm/kernel/sm90_gemm_tma.hpp -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/kernel
+copying deps/cutlass/include/cutlass/gemm/kernel/sm90_gemm_tma_warpspecialized.hpp -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/kernel
+copying deps/cutlass/include/cutlass/gemm/kernel/sm90_gemm_tma_warpspecialized_cooperative.hpp -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/kernel
+copying deps/cutlass/include/cutlass/gemm/kernel/sm90_gemm_tma_warpspecialized_pingpong.hpp -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/kernel
+copying deps/cutlass/include/cutlass/gemm/kernel/sm90_gemm_warpspecialized.hpp -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/kernel
+copying deps/cutlass/include/cutlass/gemm/kernel/sm90_gemm_warpspecialized_cooperative.hpp -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/kernel
+copying deps/cutlass/include/cutlass/gemm/kernel/sm90_gemm_warpspecialized_pingpong.hpp -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/kernel
+copying deps/cutlass/include/cutlass/gemm/kernel/sm90_tile_scheduler.hpp -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/kernel
+copying deps/cutlass/include/cutlass/gemm/kernel/sm90_tile_scheduler_group.hpp -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/kernel
+copying deps/cutlass/include/cutlass/gemm/kernel/sm90_tile_scheduler_stream_k.hpp -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/kernel
+copying deps/cutlass/include/cutlass/gemm/kernel/sparse_gemm.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/kernel
+copying deps/cutlass/include/cutlass/gemm/kernel/sparse_gemm_with_absmax.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/kernel
+copying deps/cutlass/include/cutlass/gemm/kernel/sparse_gemm_with_visitor.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/kernel
+copying deps/cutlass/include/cutlass/gemm/kernel/static_tile_scheduler.hpp -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/kernel
+copying deps/cutlass/include/cutlass/gemm/kernel/symm_universal.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/kernel
+copying deps/cutlass/include/cutlass/gemm/kernel/tile_scheduler.hpp -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/kernel
+copying deps/cutlass/include/cutlass/gemm/kernel/tile_scheduler_params.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/kernel
+copying deps/cutlass/include/cutlass/gemm/kernel/trmm_universal.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/kernel
+copying deps/cutlass/include/cutlass/gemm/thread/mma.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/thread
+copying deps/cutlass/include/cutlass/gemm/thread/mma_sm50.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/thread
+copying deps/cutlass/include/cutlass/gemm/thread/mma_sm60.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/thread
+copying deps/cutlass/include/cutlass/gemm/thread/mma_sm61.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/thread
+copying deps/cutlass/include/cutlass/gemm/threadblock/default_ell_mma.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/threadblock
+copying deps/cutlass/include/cutlass/gemm/threadblock/default_gemv_core.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/threadblock
+copying deps/cutlass/include/cutlass/gemm/threadblock/default_mma.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/threadblock
+copying deps/cutlass/include/cutlass/gemm/threadblock/default_mma_core.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/threadblock
+copying deps/cutlass/include/cutlass/gemm/threadblock/default_mma_core_simt.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/threadblock
+copying deps/cutlass/include/cutlass/gemm/threadblock/default_mma_core_sm70.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/threadblock
+copying deps/cutlass/include/cutlass/gemm/threadblock/default_mma_core_sm75.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/threadblock
+copying deps/cutlass/include/cutlass/gemm/threadblock/default_mma_core_sm80.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/threadblock
+copying deps/cutlass/include/cutlass/gemm/threadblock/default_mma_core_sparse_sm80.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/threadblock
+copying deps/cutlass/include/cutlass/gemm/threadblock/default_mma_core_with_access_size.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/threadblock
+copying deps/cutlass/include/cutlass/gemm/threadblock/default_mma_core_with_reduction.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/threadblock
+copying deps/cutlass/include/cutlass/gemm/threadblock/default_mma_core_wmma.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/threadblock
+copying deps/cutlass/include/cutlass/gemm/threadblock/default_mma_layernorm_mainloop_fusion.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/threadblock
+copying deps/cutlass/include/cutlass/gemm/threadblock/default_mma_planar_complex_multistage.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/threadblock
+copying deps/cutlass/include/cutlass/gemm/threadblock/default_mma_planar_complex_pipelined.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/threadblock
+copying deps/cutlass/include/cutlass/gemm/threadblock/default_mma_softmax_mainloop_fusion.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/threadblock
+copying deps/cutlass/include/cutlass/gemm/threadblock/default_mma_with_reduction.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/threadblock
+copying deps/cutlass/include/cutlass/gemm/threadblock/default_multistage_mma_complex.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/threadblock
+copying deps/cutlass/include/cutlass/gemm/threadblock/default_multistage_mma_complex_core.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/threadblock
+copying deps/cutlass/include/cutlass/gemm/threadblock/default_multistage_mma_complex_core_sm80.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/threadblock
+copying deps/cutlass/include/cutlass/gemm/threadblock/default_multistage_trmm_complex.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/threadblock
+copying deps/cutlass/include/cutlass/gemm/threadblock/default_sparse_mma.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/threadblock
+copying deps/cutlass/include/cutlass/gemm/threadblock/default_trmm.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/threadblock
+copying deps/cutlass/include/cutlass/gemm/threadblock/ell_mma_multistage.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/threadblock
+copying deps/cutlass/include/cutlass/gemm/threadblock/ell_mma_pipelined.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/threadblock
+copying deps/cutlass/include/cutlass/gemm/threadblock/gemv.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/threadblock
+copying deps/cutlass/include/cutlass/gemm/threadblock/index_remat.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/threadblock
+copying deps/cutlass/include/cutlass/gemm/threadblock/mma_base.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/threadblock
+copying deps/cutlass/include/cutlass/gemm/threadblock/mma_blas3_multistage.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/threadblock
+copying deps/cutlass/include/cutlass/gemm/threadblock/mma_layernorm_mainloop_fusion_multistage.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/threadblock
+copying deps/cutlass/include/cutlass/gemm/threadblock/mma_multistage.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/threadblock
+copying deps/cutlass/include/cutlass/gemm/threadblock/mma_pipelined.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/threadblock
+copying deps/cutlass/include/cutlass/gemm/threadblock/mma_planar_complex_base.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/threadblock
+copying deps/cutlass/include/cutlass/gemm/threadblock/mma_planar_complex_multistage.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/threadblock
+copying deps/cutlass/include/cutlass/gemm/threadblock/mma_planar_complex_pipelined.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/threadblock
+copying deps/cutlass/include/cutlass/gemm/threadblock/mma_singlestage.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/threadblock
+copying deps/cutlass/include/cutlass/gemm/threadblock/mma_softmax_mainloop_fusion_multistage.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/threadblock
+copying deps/cutlass/include/cutlass/gemm/threadblock/mma_sparse_base.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/threadblock
+copying deps/cutlass/include/cutlass/gemm/threadblock/mma_sparse_multistage.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/threadblock
+copying deps/cutlass/include/cutlass/gemm/threadblock/mma_with_reduction_multistage.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/threadblock
+copying deps/cutlass/include/cutlass/gemm/threadblock/threadblock_swizzle.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/threadblock
+copying deps/cutlass/include/cutlass/gemm/threadblock/threadblock_swizzle_streamk.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/threadblock
+copying deps/cutlass/include/cutlass/gemm/warp/default_mma_complex_tensor_op.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/warp
+copying deps/cutlass/include/cutlass/gemm/warp/default_mma_sparse_tensor_op.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/warp
+copying deps/cutlass/include/cutlass/gemm/warp/default_mma_tensor_op.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/warp
+copying deps/cutlass/include/cutlass/gemm/warp/default_mma_tensor_op_sm80.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/warp
+copying deps/cutlass/include/cutlass/gemm/warp/default_mma_with_reduction_tensor_op.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/warp
+copying deps/cutlass/include/cutlass/gemm/warp/default_mma_wmma_tensor_op.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/warp
+copying deps/cutlass/include/cutlass/gemm/warp/layernorm_scale_bias_transform.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/warp
+copying deps/cutlass/include/cutlass/gemm/warp/mma.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/warp
+copying deps/cutlass/include/cutlass/gemm/warp/mma_complex_tensor_op.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/warp
+copying deps/cutlass/include/cutlass/gemm/warp/mma_complex_tensor_op_fast_f32.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/warp
+copying deps/cutlass/include/cutlass/gemm/warp/mma_complex_tensor_op_tile_iterator_sm80.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/warp
+copying deps/cutlass/include/cutlass/gemm/warp/mma_gaussian_complex_tensor_op.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/warp
+copying deps/cutlass/include/cutlass/gemm/warp/mma_gaussian_complex_tensor_op_tile_iterator_sm80.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/warp
+copying deps/cutlass/include/cutlass/gemm/warp/mma_mixed_input_tensor_op.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/warp
+copying deps/cutlass/include/cutlass/gemm/warp/mma_planar_complex.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/warp
+copying deps/cutlass/include/cutlass/gemm/warp/mma_simt.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/warp
+copying deps/cutlass/include/cutlass/gemm/warp/mma_simt_policy.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/warp
+copying deps/cutlass/include/cutlass/gemm/warp/mma_simt_tile_iterator.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/warp
+copying deps/cutlass/include/cutlass/gemm/warp/mma_sparse_tensor_op.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/warp
+copying deps/cutlass/include/cutlass/gemm/warp/mma_tensor_op.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/warp
+copying deps/cutlass/include/cutlass/gemm/warp/mma_tensor_op_fast_f32.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/warp
+copying deps/cutlass/include/cutlass/gemm/warp/mma_tensor_op_fragment_iterator.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/warp
+copying deps/cutlass/include/cutlass/gemm/warp/mma_tensor_op_policy.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/warp
+copying deps/cutlass/include/cutlass/gemm/warp/mma_tensor_op_sm70.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/warp
+copying deps/cutlass/include/cutlass/gemm/warp/mma_tensor_op_tile_access_iterator.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/warp
+copying deps/cutlass/include/cutlass/gemm/warp/mma_tensor_op_tile_iterator.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/warp
+copying deps/cutlass/include/cutlass/gemm/warp/mma_tensor_op_tile_iterator_sm70.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/warp
+copying deps/cutlass/include/cutlass/gemm/warp/mma_tensor_op_tile_iterator_sm80.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/warp
+copying deps/cutlass/include/cutlass/gemm/warp/mma_tensor_op_tile_iterator_sparse.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/warp
+copying deps/cutlass/include/cutlass/gemm/warp/mma_tensor_op_tile_iterator_wmma.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/warp
+copying deps/cutlass/include/cutlass/gemm/warp/mma_tensor_op_wmma.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/warp
+copying deps/cutlass/include/cutlass/gemm/warp/mma_with_reduction_tensor_op.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/warp
+copying deps/cutlass/include/cutlass/gemm/warp/scale_bias_tile_iterator.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/warp
+copying deps/cutlass/include/cutlass/gemm/warp/softmax_scale_bias_transform.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/warp
+copying deps/cutlass/include/cutlass/gemm/warp/tile_iterator_planar_complex.h -> mirage-0.1.1/deps/cutlass/include/cutlass/gemm/warp
+copying deps/cutlass/include/cutlass/layout/layout.h -> mirage-0.1.1/deps/cutlass/include/cutlass/layout
+copying deps/cutlass/include/cutlass/layout/matrix.h -> mirage-0.1.1/deps/cutlass/include/cutlass/layout
+copying deps/cutlass/include/cutlass/layout/permute.h -> mirage-0.1.1/deps/cutlass/include/cutlass/layout
+copying deps/cutlass/include/cutlass/layout/pitch_linear.h -> mirage-0.1.1/deps/cutlass/include/cutlass/layout
+copying deps/cutlass/include/cutlass/layout/tensor.h -> mirage-0.1.1/deps/cutlass/include/cutlass/layout
+copying deps/cutlass/include/cutlass/layout/tensor_op_multiplicand_sm70.h -> mirage-0.1.1/deps/cutlass/include/cutlass/layout
+copying deps/cutlass/include/cutlass/layout/tensor_op_multiplicand_sm75.h -> mirage-0.1.1/deps/cutlass/include/cutlass/layout
+copying deps/cutlass/include/cutlass/layout/tensor_op_multiplicand_sm80.h -> mirage-0.1.1/deps/cutlass/include/cutlass/layout
+copying deps/cutlass/include/cutlass/layout/vector.h -> mirage-0.1.1/deps/cutlass/include/cutlass/layout
+copying deps/cutlass/include/cutlass/pipeline/pipeline.hpp -> mirage-0.1.1/deps/cutlass/include/cutlass/pipeline
+copying deps/cutlass/include/cutlass/pipeline/sm90_pipeline.hpp -> mirage-0.1.1/deps/cutlass/include/cutlass/pipeline
+copying deps/cutlass/include/cutlass/platform/platform.h -> mirage-0.1.1/deps/cutlass/include/cutlass/platform
+copying deps/cutlass/include/cutlass/reduction/threadblock_swizzle.h -> mirage-0.1.1/deps/cutlass/include/cutlass/reduction
+copying deps/cutlass/include/cutlass/reduction/device/reduce_split_k.h -> mirage-0.1.1/deps/cutlass/include/cutlass/reduction/device
+copying deps/cutlass/include/cutlass/reduction/device/tensor_reduce.h -> mirage-0.1.1/deps/cutlass/include/cutlass/reduction/device
+copying deps/cutlass/include/cutlass/reduction/device/tensor_reduce_affine_contiguous.h -> mirage-0.1.1/deps/cutlass/include/cutlass/reduction/device
+copying deps/cutlass/include/cutlass/reduction/device/tensor_reduce_affine_strided.h -> mirage-0.1.1/deps/cutlass/include/cutlass/reduction/device
+copying deps/cutlass/include/cutlass/reduction/kernel/reduce_softmax_final.h -> mirage-0.1.1/deps/cutlass/include/cutlass/reduction/kernel
+copying deps/cutlass/include/cutlass/reduction/kernel/reduce_split_k.h -> mirage-0.1.1/deps/cutlass/include/cutlass/reduction/kernel
+copying deps/cutlass/include/cutlass/reduction/kernel/tensor_reduce_affine_contiguous.h -> mirage-0.1.1/deps/cutlass/include/cutlass/reduction/kernel
+copying deps/cutlass/include/cutlass/reduction/kernel/tensor_reduce_affine_strided.h -> mirage-0.1.1/deps/cutlass/include/cutlass/reduction/kernel
+copying deps/cutlass/include/cutlass/reduction/thread/reduce.h -> mirage-0.1.1/deps/cutlass/include/cutlass/reduction/thread
+copying deps/cutlass/include/cutlass/reduction/thread/reduction_operators.h -> mirage-0.1.1/deps/cutlass/include/cutlass/reduction/thread
+copying deps/cutlass/include/cutlass/thread/matrix.h -> mirage-0.1.1/deps/cutlass/include/cutlass/thread
+copying deps/cutlass/include/cutlass/transform/pitch_linear_thread_map.h -> mirage-0.1.1/deps/cutlass/include/cutlass/transform
+copying deps/cutlass/include/cutlass/transform/collective/sm90_wgmma_transpose.hpp -> mirage-0.1.1/deps/cutlass/include/cutlass/transform/collective
+copying deps/cutlass/include/cutlass/transform/thread/transpose.h -> mirage-0.1.1/deps/cutlass/include/cutlass/transform/thread
+copying deps/cutlass/include/cutlass/transform/thread/unary_op.h -> mirage-0.1.1/deps/cutlass/include/cutlass/transform/thread
+copying deps/cutlass/include/cutlass/transform/threadblock/ell_iterator.h -> mirage-0.1.1/deps/cutlass/include/cutlass/transform/threadblock
+copying deps/cutlass/include/cutlass/transform/threadblock/ell_predicated_tile_access_iterator.h -> mirage-0.1.1/deps/cutlass/include/cutlass/transform/threadblock
+copying deps/cutlass/include/cutlass/transform/threadblock/ell_predicated_tile_iterator.h -> mirage-0.1.1/deps/cutlass/include/cutlass/transform/threadblock
+copying deps/cutlass/include/cutlass/transform/threadblock/predicated_scale_bias_vector_access_iterator.h -> mirage-0.1.1/deps/cutlass/include/cutlass/transform/threadblock
+copying deps/cutlass/include/cutlass/transform/threadblock/predicated_scale_bias_vector_iterator.h -> mirage-0.1.1/deps/cutlass/include/cutlass/transform/threadblock
+copying deps/cutlass/include/cutlass/transform/threadblock/predicated_tile_access_iterator.h -> mirage-0.1.1/deps/cutlass/include/cutlass/transform/threadblock
+copying deps/cutlass/include/cutlass/transform/threadblock/predicated_tile_access_iterator_2dthreadtile.h -> mirage-0.1.1/deps/cutlass/include/cutlass/transform/threadblock
+copying deps/cutlass/include/cutlass/transform/threadblock/predicated_tile_access_iterator_params.h -> mirage-0.1.1/deps/cutlass/include/cutlass/transform/threadblock
+copying deps/cutlass/include/cutlass/transform/threadblock/predicated_tile_access_iterator_triangular_matrix.h -> mirage-0.1.1/deps/cutlass/include/cutlass/transform/threadblock
+copying deps/cutlass/include/cutlass/transform/threadblock/predicated_tile_iterator.h -> mirage-0.1.1/deps/cutlass/include/cutlass/transform/threadblock
+copying deps/cutlass/include/cutlass/transform/threadblock/predicated_tile_iterator_2dthreadtile.h -> mirage-0.1.1/deps/cutlass/include/cutlass/transform/threadblock
+copying deps/cutlass/include/cutlass/transform/threadblock/predicated_tile_iterator_triangular_matrix.h -> mirage-0.1.1/deps/cutlass/include/cutlass/transform/threadblock
+copying deps/cutlass/include/cutlass/transform/threadblock/predicated_vector_access_iterator.h -> mirage-0.1.1/deps/cutlass/include/cutlass/transform/threadblock
+copying deps/cutlass/include/cutlass/transform/threadblock/regular_scale_bias_vector_access_iterator.h -> mirage-0.1.1/deps/cutlass/include/cutlass/transform/threadblock
+copying deps/cutlass/include/cutlass/transform/threadblock/regular_tile_access_iterator.h -> mirage-0.1.1/deps/cutlass/include/cutlass/transform/threadblock
+copying deps/cutlass/include/cutlass/transform/threadblock/regular_tile_access_iterator_pitch_linear.h -> mirage-0.1.1/deps/cutlass/include/cutlass/transform/threadblock
+copying deps/cutlass/include/cutlass/transform/threadblock/regular_tile_access_iterator_pitch_linear_direct_conv.h -> mirage-0.1.1/deps/cutlass/include/cutlass/transform/threadblock
+copying deps/cutlass/include/cutlass/transform/threadblock/regular_tile_access_iterator_tensor_op.h -> mirage-0.1.1/deps/cutlass/include/cutlass/transform/threadblock
+copying deps/cutlass/include/cutlass/transform/threadblock/regular_tile_access_iterator_tensor_op_sm80.h -> mirage-0.1.1/deps/cutlass/include/cutlass/transform/threadblock
+copying deps/cutlass/include/cutlass/transform/threadblock/regular_tile_iterator.h -> mirage-0.1.1/deps/cutlass/include/cutlass/transform/threadblock
+copying deps/cutlass/include/cutlass/transform/threadblock/regular_tile_iterator_pitch_linear.h -> mirage-0.1.1/deps/cutlass/include/cutlass/transform/threadblock
+copying deps/cutlass/include/cutlass/transform/threadblock/regular_tile_iterator_pitch_linear_2dthreadtile.h -> mirage-0.1.1/deps/cutlass/include/cutlass/transform/threadblock
+copying deps/cutlass/include/cutlass/transform/threadblock/regular_tile_iterator_tensor_op.h -> mirage-0.1.1/deps/cutlass/include/cutlass/transform/threadblock
+copying deps/cutlass/include/cutlass/transform/threadblock/regular_tile_iterator_tensor_op_sm70.h -> mirage-0.1.1/deps/cutlass/include/cutlass/transform/threadblock
+copying deps/cutlass/include/cutlass/transform/threadblock/vector_iterator.h -> mirage-0.1.1/deps/cutlass/include/cutlass/transform/threadblock
+copying deps/cutlass/include/cutlass/transform/warp/vector_fragment_iterator.h -> mirage-0.1.1/deps/cutlass/include/cutlass/transform/warp
+copying deps/cutlass/python/LICENSE.txt -> mirage-0.1.1/deps/cutlass/python
+copying deps/cutlass/python/README.md -> mirage-0.1.1/deps/cutlass/python
+copying deps/cutlass/python/setup_cutlass.py -> mirage-0.1.1/deps/cutlass/python
+copying deps/cutlass/python/setup_library.py -> mirage-0.1.1/deps/cutlass/python
+copying deps/cutlass/python/setup_pycute.py -> mirage-0.1.1/deps/cutlass/python
+copying deps/cutlass/python/cutlass/__init__.py -> mirage-0.1.1/deps/cutlass/python/cutlass
+copying deps/cutlass/python/cutlass/library_defaults.py -> mirage-0.1.1/deps/cutlass/python/cutlass
+copying deps/cutlass/python/cutlass/shape.py -> mirage-0.1.1/deps/cutlass/python/cutlass
+copying deps/cutlass/python/cutlass/swizzle.py -> mirage-0.1.1/deps/cutlass/python/cutlass
+copying deps/cutlass/python/cutlass/backend/__init__.py -> mirage-0.1.1/deps/cutlass/python/cutlass/backend
+copying deps/cutlass/python/cutlass/backend/arguments.py -> mirage-0.1.1/deps/cutlass/python/cutlass/backend
+copying deps/cutlass/python/cutlass/backend/c_types.py -> mirage-0.1.1/deps/cutlass/python/cutlass/backend
+copying deps/cutlass/python/cutlass/backend/compiler.py -> mirage-0.1.1/deps/cutlass/python/cutlass/backend
+copying deps/cutlass/python/cutlass/backend/conv2d_operation.py -> mirage-0.1.1/deps/cutlass/python/cutlass/backend
+copying deps/cutlass/python/cutlass/backend/epilogue.py -> mirage-0.1.1/deps/cutlass/python/cutlass/backend
+copying deps/cutlass/python/cutlass/backend/frontend.py -> mirage-0.1.1/deps/cutlass/python/cutlass/backend
+copying deps/cutlass/python/cutlass/backend/gemm_operation.py -> mirage-0.1.1/deps/cutlass/python/cutlass/backend
+copying deps/cutlass/python/cutlass/backend/library.py -> mirage-0.1.1/deps/cutlass/python/cutlass/backend
+copying deps/cutlass/python/cutlass/backend/memory_manager.py -> mirage-0.1.1/deps/cutlass/python/cutlass/backend
+copying deps/cutlass/python/cutlass/backend/operation.py -> mirage-0.1.1/deps/cutlass/python/cutlass/backend
+copying deps/cutlass/python/cutlass/backend/reduction_operation.py -> mirage-0.1.1/deps/cutlass/python/cutlass/backend
+copying deps/cutlass/python/cutlass/backend/type_hint.py -> mirage-0.1.1/deps/cutlass/python/cutlass/backend
+copying deps/cutlass/python/cutlass/backend/evt/__init__.py -> mirage-0.1.1/deps/cutlass/python/cutlass/backend/evt
+copying deps/cutlass/python/cutlass/backend/evt/epilogue.py -> mirage-0.1.1/deps/cutlass/python/cutlass/backend/evt
+copying deps/cutlass/python/cutlass/backend/evt/backend/__init__.py -> mirage-0.1.1/deps/cutlass/python/cutlass/backend/evt/backend
+copying deps/cutlass/python/cutlass/backend/evt/backend/emitter_base.py -> mirage-0.1.1/deps/cutlass/python/cutlass/backend/evt/backend
+copying deps/cutlass/python/cutlass/backend/evt/backend/sm80_emitter.py -> mirage-0.1.1/deps/cutlass/python/cutlass/backend/evt/backend
+copying deps/cutlass/python/cutlass/backend/evt/backend/sm80_nodes.py -> mirage-0.1.1/deps/cutlass/python/cutlass/backend/evt/backend
+copying deps/cutlass/python/cutlass/backend/evt/backend/sm90_emitter.py -> mirage-0.1.1/deps/cutlass/python/cutlass/backend/evt/backend
+copying deps/cutlass/python/cutlass/backend/evt/backend/sm90_nodes.py -> mirage-0.1.1/deps/cutlass/python/cutlass/backend/evt/backend
+copying deps/cutlass/python/cutlass/backend/evt/frontend/__init__.py -> mirage-0.1.1/deps/cutlass/python/cutlass/backend/evt/frontend
+copying deps/cutlass/python/cutlass/backend/evt/frontend/frontend_base.py -> mirage-0.1.1/deps/cutlass/python/cutlass/backend/evt/frontend
+copying deps/cutlass/python/cutlass/backend/evt/frontend/python_ast.py -> mirage-0.1.1/deps/cutlass/python/cutlass/backend/evt/frontend
+copying deps/cutlass/python/cutlass/backend/evt/ir/__init__.py -> mirage-0.1.1/deps/cutlass/python/cutlass/backend/evt/ir
+copying deps/cutlass/python/cutlass/backend/evt/ir/compute_nodes.py -> mirage-0.1.1/deps/cutlass/python/cutlass/backend/evt/ir
+copying deps/cutlass/python/cutlass/backend/evt/ir/dag_ir.py -> mirage-0.1.1/deps/cutlass/python/cutlass/backend/evt/ir
+copying deps/cutlass/python/cutlass/backend/evt/ir/layout_algorithm.py -> mirage-0.1.1/deps/cutlass/python/cutlass/backend/evt/ir
+copying deps/cutlass/python/cutlass/backend/evt/ir/layout_nodes.py -> mirage-0.1.1/deps/cutlass/python/cutlass/backend/evt/ir
+copying deps/cutlass/python/cutlass/backend/evt/ir/load_nodes.py -> mirage-0.1.1/deps/cutlass/python/cutlass/backend/evt/ir
+copying deps/cutlass/python/cutlass/backend/evt/ir/node.py -> mirage-0.1.1/deps/cutlass/python/cutlass/backend/evt/ir
+copying deps/cutlass/python/cutlass/backend/evt/ir/store_nodes.py -> mirage-0.1.1/deps/cutlass/python/cutlass/backend/evt/ir
+copying deps/cutlass/python/cutlass/backend/evt/ir/tensor.py -> mirage-0.1.1/deps/cutlass/python/cutlass/backend/evt/ir
+copying deps/cutlass/python/cutlass/backend/evt/passes/__init__.py -> mirage-0.1.1/deps/cutlass/python/cutlass/backend/evt/passes
+copying deps/cutlass/python/cutlass/backend/evt/passes/graph_drawer.py -> mirage-0.1.1/deps/cutlass/python/cutlass/backend/evt/passes
+copying deps/cutlass/python/cutlass/backend/evt/passes/pass_argument_type.py -> mirage-0.1.1/deps/cutlass/python/cutlass/backend/evt/passes
+copying deps/cutlass/python/cutlass/backend/evt/passes/pass_dag_2_tree.py -> mirage-0.1.1/deps/cutlass/python/cutlass/backend/evt/passes
+copying deps/cutlass/python/cutlass/backend/evt/passes/pass_fix_element_d.py -> mirage-0.1.1/deps/cutlass/python/cutlass/backend/evt/passes
+copying deps/cutlass/python/cutlass/backend/evt/passes/pass_get_impl.py -> mirage-0.1.1/deps/cutlass/python/cutlass/backend/evt/passes
+copying deps/cutlass/python/cutlass/backend/evt/passes/pass_layout_elimination.py -> mirage-0.1.1/deps/cutlass/python/cutlass/backend/evt/passes
+copying deps/cutlass/python/cutlass/backend/evt/passes/pass_manager.py -> mirage-0.1.1/deps/cutlass/python/cutlass/backend/evt/passes
+copying deps/cutlass/python/cutlass/backend/evt/passes/pass_no_op_elimination.py -> mirage-0.1.1/deps/cutlass/python/cutlass/backend/evt/passes
+copying deps/cutlass/python/cutlass/backend/evt/passes/pass_preprocess_red.py -> mirage-0.1.1/deps/cutlass/python/cutlass/backend/evt/passes
+copying deps/cutlass/python/cutlass/backend/evt/passes/pass_shape_type_propagation.py -> mirage-0.1.1/deps/cutlass/python/cutlass/backend/evt/passes
+copying deps/cutlass/python/cutlass/backend/evt/passes/smem_size_calculator.py -> mirage-0.1.1/deps/cutlass/python/cutlass/backend/evt/passes
+copying deps/cutlass/python/cutlass/backend/evt/passes/util.py -> mirage-0.1.1/deps/cutlass/python/cutlass/backend/evt/passes
+copying deps/cutlass/python/cutlass/backend/utils/__init__.py -> mirage-0.1.1/deps/cutlass/python/cutlass/backend/utils
+copying deps/cutlass/python/cutlass/backend/utils/device.py -> mirage-0.1.1/deps/cutlass/python/cutlass/backend/utils
+copying deps/cutlass/python/cutlass/emit/__init__.py -> mirage-0.1.1/deps/cutlass/python/cutlass/emit
+copying deps/cutlass/python/cutlass/emit/common.py -> mirage-0.1.1/deps/cutlass/python/cutlass/emit
+copying deps/cutlass/python/cutlass/emit/pytorch.py -> mirage-0.1.1/deps/cutlass/python/cutlass/emit
+copying deps/cutlass/python/cutlass/epilogue/__init__.py -> mirage-0.1.1/deps/cutlass/python/cutlass/epilogue
+copying deps/cutlass/python/cutlass/epilogue/epilogue.py -> mirage-0.1.1/deps/cutlass/python/cutlass/epilogue
+copying deps/cutlass/python/cutlass/epilogue/evt_ops.py -> mirage-0.1.1/deps/cutlass/python/cutlass/epilogue
+copying deps/cutlass/python/cutlass/op/__init__.py -> mirage-0.1.1/deps/cutlass/python/cutlass/op
+copying deps/cutlass/python/cutlass/op/conv.py -> mirage-0.1.1/deps/cutlass/python/cutlass/op
+copying deps/cutlass/python/cutlass/op/gemm.py -> mirage-0.1.1/deps/cutlass/python/cutlass/op
+copying deps/cutlass/python/cutlass/op/gemm_grouped.py -> mirage-0.1.1/deps/cutlass/python/cutlass/op
+copying deps/cutlass/python/cutlass/op/op.py -> mirage-0.1.1/deps/cutlass/python/cutlass/op
+copying deps/cutlass/python/cutlass/utils/__init__.py -> mirage-0.1.1/deps/cutlass/python/cutlass/utils
+copying deps/cutlass/python/cutlass/utils/check.py -> mirage-0.1.1/deps/cutlass/python/cutlass/utils
+copying deps/cutlass/python/cutlass/utils/datatypes.py -> mirage-0.1.1/deps/cutlass/python/cutlass/utils
+copying deps/cutlass/python/cutlass/utils/profiler.py -> mirage-0.1.1/deps/cutlass/python/cutlass/utils
+copying deps/cutlass/python/cutlass_library/__init__.py -> mirage-0.1.1/deps/cutlass/python/cutlass_library
+copying deps/cutlass/python/cutlass_library/conv2d_operation.py -> mirage-0.1.1/deps/cutlass/python/cutlass_library
+copying deps/cutlass/python/cutlass_library/conv3d_operation.py -> mirage-0.1.1/deps/cutlass/python/cutlass_library
+copying deps/cutlass/python/cutlass_library/conv3x_emitter.py -> mirage-0.1.1/deps/cutlass/python/cutlass_library
+copying deps/cutlass/python/cutlass_library/gemm_operation.py -> mirage-0.1.1/deps/cutlass/python/cutlass_library
+copying deps/cutlass/python/cutlass_library/generator.py -> mirage-0.1.1/deps/cutlass/python/cutlass_library
+copying deps/cutlass/python/cutlass_library/library.py -> mirage-0.1.1/deps/cutlass/python/cutlass_library
+copying deps/cutlass/python/cutlass_library/manifest.py -> mirage-0.1.1/deps/cutlass/python/cutlass_library
+copying deps/cutlass/python/cutlass_library/rank_2k_operation.py -> mirage-0.1.1/deps/cutlass/python/cutlass_library
+copying deps/cutlass/python/cutlass_library/rank_k_operation.py -> mirage-0.1.1/deps/cutlass/python/cutlass_library
+copying deps/cutlass/python/cutlass_library/symm_operation.py -> mirage-0.1.1/deps/cutlass/python/cutlass_library
+copying deps/cutlass/python/cutlass_library/trmm_operation.py -> mirage-0.1.1/deps/cutlass/python/cutlass_library
+copying deps/cutlass/python/docs/.buildinfo -> mirage-0.1.1/deps/cutlass/python/docs
+copying deps/cutlass/python/docs/contribute.html -> mirage-0.1.1/deps/cutlass/python/docs
+copying deps/cutlass/python/docs/cutlass.emit.html -> mirage-0.1.1/deps/cutlass/python/docs
+copying deps/cutlass/python/docs/cutlass.html -> mirage-0.1.1/deps/cutlass/python/docs
+copying deps/cutlass/python/docs/cutlass.op.html -> mirage-0.1.1/deps/cutlass/python/docs
+copying deps/cutlass/python/docs/cutlass.utils.html -> mirage-0.1.1/deps/cutlass/python/docs
+copying deps/cutlass/python/docs/examples.html -> mirage-0.1.1/deps/cutlass/python/docs
+copying deps/cutlass/python/docs/genindex.html -> mirage-0.1.1/deps/cutlass/python/docs
+copying deps/cutlass/python/docs/index.html -> mirage-0.1.1/deps/cutlass/python/docs
+copying deps/cutlass/python/docs/install.html -> mirage-0.1.1/deps/cutlass/python/docs
+copying deps/cutlass/python/docs/modules.html -> mirage-0.1.1/deps/cutlass/python/docs
+copying deps/cutlass/python/docs/objects.inv -> mirage-0.1.1/deps/cutlass/python/docs
+copying deps/cutlass/python/docs/py-modindex.html -> mirage-0.1.1/deps/cutlass/python/docs
+copying deps/cutlass/python/docs/search.html -> mirage-0.1.1/deps/cutlass/python/docs
+copying deps/cutlass/python/docs/searchindex.js -> mirage-0.1.1/deps/cutlass/python/docs
+copying deps/cutlass/python/docs/_modules/index.html -> mirage-0.1.1/deps/cutlass/python/docs/_modules
+copying deps/cutlass/python/docs/_modules/cutlass/epilogue.html -> mirage-0.1.1/deps/cutlass/python/docs/_modules/cutlass
+copying deps/cutlass/python/docs/_modules/cutlass/library_defaults.html -> mirage-0.1.1/deps/cutlass/python/docs/_modules/cutlass
+copying deps/cutlass/python/docs/_modules/cutlass/swizzle.html -> mirage-0.1.1/deps/cutlass/python/docs/_modules/cutlass
+copying deps/cutlass/python/docs/_modules/cutlass/emit/pytorch.html -> mirage-0.1.1/deps/cutlass/python/docs/_modules/cutlass/emit
+copying deps/cutlass/python/docs/_modules/cutlass/op/gemm.html -> mirage-0.1.1/deps/cutlass/python/docs/_modules/cutlass/op
+copying deps/cutlass/python/docs/_modules/cutlass/op/gemm_grouped.html -> mirage-0.1.1/deps/cutlass/python/docs/_modules/cutlass/op
+copying deps/cutlass/python/docs/_modules/cutlass/op/op.html -> mirage-0.1.1/deps/cutlass/python/docs/_modules/cutlass/op
+copying deps/cutlass/python/docs/_modules/cutlass/utils/check.html -> mirage-0.1.1/deps/cutlass/python/docs/_modules/cutlass/utils
+copying deps/cutlass/python/docs/_modules/cutlass/utils/datatypes.html -> mirage-0.1.1/deps/cutlass/python/docs/_modules/cutlass/utils
+copying deps/cutlass/python/docs/_sources/contribute.md.txt -> mirage-0.1.1/deps/cutlass/python/docs/_sources
+copying deps/cutlass/python/docs/_sources/cutlass.emit.rst.txt -> mirage-0.1.1/deps/cutlass/python/docs/_sources
+copying deps/cutlass/python/docs/_sources/cutlass.op.rst.txt -> mirage-0.1.1/deps/cutlass/python/docs/_sources
+copying deps/cutlass/python/docs/_sources/cutlass.rst.txt -> mirage-0.1.1/deps/cutlass/python/docs/_sources
+copying deps/cutlass/python/docs/_sources/cutlass.utils.rst.txt -> mirage-0.1.1/deps/cutlass/python/docs/_sources
+copying deps/cutlass/python/docs/_sources/examples.rst.txt -> mirage-0.1.1/deps/cutlass/python/docs/_sources
+copying deps/cutlass/python/docs/_sources/index.rst.txt -> mirage-0.1.1/deps/cutlass/python/docs/_sources
+copying deps/cutlass/python/docs/_sources/install.md.txt -> mirage-0.1.1/deps/cutlass/python/docs/_sources
+copying deps/cutlass/python/docs/_sources/modules.rst.txt -> mirage-0.1.1/deps/cutlass/python/docs/_sources
+copying deps/cutlass/python/docs/_sources/externals/00_basic_gemm.nblink.txt -> mirage-0.1.1/deps/cutlass/python/docs/_sources/externals
+copying deps/cutlass/python/docs/_sources/externals/01_epilogue.nblink.txt -> mirage-0.1.1/deps/cutlass/python/docs/_sources/externals
+copying deps/cutlass/python/docs/_sources/externals/02_pytorch_extension_grouped_gemm.nblink.txt -> mirage-0.1.1/deps/cutlass/python/docs/_sources/externals
+copying deps/cutlass/python/docs/_static/basic.css -> mirage-0.1.1/deps/cutlass/python/docs/_static
+copying deps/cutlass/python/docs/_static/check-solid.svg -> mirage-0.1.1/deps/cutlass/python/docs/_static
+copying deps/cutlass/python/docs/_static/clipboard.min.js -> mirage-0.1.1/deps/cutlass/python/docs/_static
+copying deps/cutlass/python/docs/_static/copy-button.svg -> mirage-0.1.1/deps/cutlass/python/docs/_static
+copying deps/cutlass/python/docs/_static/copybutton.css -> mirage-0.1.1/deps/cutlass/python/docs/_static
+copying deps/cutlass/python/docs/_static/copybutton.js -> mirage-0.1.1/deps/cutlass/python/docs/_static
+copying deps/cutlass/python/docs/_static/copybutton_funcs.js -> mirage-0.1.1/deps/cutlass/python/docs/_static
+copying deps/cutlass/python/docs/_static/cutlass-logo-small.png -> mirage-0.1.1/deps/cutlass/python/docs/_static
+copying deps/cutlass/python/docs/_static/debug.css -> mirage-0.1.1/deps/cutlass/python/docs/_static
+copying deps/cutlass/python/docs/_static/doctools.js -> mirage-0.1.1/deps/cutlass/python/docs/_static
+copying deps/cutlass/python/docs/_static/documentation_options.js -> mirage-0.1.1/deps/cutlass/python/docs/_static
+copying deps/cutlass/python/docs/_static/file.png -> mirage-0.1.1/deps/cutlass/python/docs/_static
+copying deps/cutlass/python/docs/_static/language_data.js -> mirage-0.1.1/deps/cutlass/python/docs/_static
+copying deps/cutlass/python/docs/_static/logo-dark-mode.png -> mirage-0.1.1/deps/cutlass/python/docs/_static
+copying deps/cutlass/python/docs/_static/logo-light-mode.png -> mirage-0.1.1/deps/cutlass/python/docs/_static
+copying deps/cutlass/python/docs/_static/minus.png -> mirage-0.1.1/deps/cutlass/python/docs/_static
+copying deps/cutlass/python/docs/_static/nbsphinx-broken-thumbnail.svg -> mirage-0.1.1/deps/cutlass/python/docs/_static
+copying deps/cutlass/python/docs/_static/nbsphinx-code-cells.css -> mirage-0.1.1/deps/cutlass/python/docs/_static
+copying deps/cutlass/python/docs/_static/nbsphinx-gallery.css -> mirage-0.1.1/deps/cutlass/python/docs/_static
+copying deps/cutlass/python/docs/_static/nbsphinx-no-thumbnail.svg -> mirage-0.1.1/deps/cutlass/python/docs/_static
+copying deps/cutlass/python/docs/_static/plus.png -> mirage-0.1.1/deps/cutlass/python/docs/_static
+copying deps/cutlass/python/docs/_static/pygments.css -> mirage-0.1.1/deps/cutlass/python/docs/_static
+copying deps/cutlass/python/docs/_static/searchtools.js -> mirage-0.1.1/deps/cutlass/python/docs/_static
+copying deps/cutlass/python/docs/_static/skeleton.css -> mirage-0.1.1/deps/cutlass/python/docs/_static
+copying deps/cutlass/python/docs/_static/sphinx_highlight.js -> mirage-0.1.1/deps/cutlass/python/docs/_static
+copying deps/cutlass/python/docs/_static/tabs.css -> mirage-0.1.1/deps/cutlass/python/docs/_static
+copying deps/cutlass/python/docs/_static/tabs.js -> mirage-0.1.1/deps/cutlass/python/docs/_static
+copying deps/cutlass/python/docs/_static/scripts/furo-extensions.js -> mirage-0.1.1/deps/cutlass/python/docs/_static/scripts
+copying deps/cutlass/python/docs/_static/scripts/furo.js -> mirage-0.1.1/deps/cutlass/python/docs/_static/scripts
+copying deps/cutlass/python/docs/_static/scripts/furo.js.LICENSE.txt -> mirage-0.1.1/deps/cutlass/python/docs/_static/scripts
+copying deps/cutlass/python/docs/_static/scripts/furo.js.map -> mirage-0.1.1/deps/cutlass/python/docs/_static/scripts
+copying deps/cutlass/python/docs/_static/styles/furo-extensions.css -> mirage-0.1.1/deps/cutlass/python/docs/_static/styles
+copying deps/cutlass/python/docs/_static/styles/furo-extensions.css.map -> mirage-0.1.1/deps/cutlass/python/docs/_static/styles
+copying deps/cutlass/python/docs/_static/styles/furo.css -> mirage-0.1.1/deps/cutlass/python/docs/_static/styles
+copying deps/cutlass/python/docs/_static/styles/furo.css.map -> mirage-0.1.1/deps/cutlass/python/docs/_static/styles
+copying deps/cutlass/python/docs/externals/00_basic_gemm.html -> mirage-0.1.1/deps/cutlass/python/docs/externals
+copying deps/cutlass/python/docs/externals/00_basic_gemm.ipynb -> mirage-0.1.1/deps/cutlass/python/docs/externals
+copying deps/cutlass/python/docs/externals/01_epilogue.html -> mirage-0.1.1/deps/cutlass/python/docs/externals
+copying deps/cutlass/python/docs/externals/01_epilogue.ipynb -> mirage-0.1.1/deps/cutlass/python/docs/externals
+copying deps/cutlass/python/docs/externals/02_pytorch_extension_grouped_gemm.html -> mirage-0.1.1/deps/cutlass/python/docs/externals
+copying deps/cutlass/python/docs/externals/02_pytorch_extension_grouped_gemm.ipynb -> mirage-0.1.1/deps/cutlass/python/docs/externals
+copying deps/cutlass/python/docs_src/Makefile -> mirage-0.1.1/deps/cutlass/python/docs_src
+copying deps/cutlass/python/docs_src/make.bat -> mirage-0.1.1/deps/cutlass/python/docs_src
+copying deps/cutlass/python/docs_src/source/conf.py -> mirage-0.1.1/deps/cutlass/python/docs_src/source
+copying deps/cutlass/python/docs_src/source/contribute.md -> mirage-0.1.1/deps/cutlass/python/docs_src/source
+copying deps/cutlass/python/docs_src/source/cutlass.emit.rst -> mirage-0.1.1/deps/cutlass/python/docs_src/source
+copying deps/cutlass/python/docs_src/source/cutlass.op.rst -> mirage-0.1.1/deps/cutlass/python/docs_src/source
+copying deps/cutlass/python/docs_src/source/cutlass.rst -> mirage-0.1.1/deps/cutlass/python/docs_src/source
+copying deps/cutlass/python/docs_src/source/cutlass.utils.rst -> mirage-0.1.1/deps/cutlass/python/docs_src/source
+copying deps/cutlass/python/docs_src/source/examples.rst -> mirage-0.1.1/deps/cutlass/python/docs_src/source
+copying deps/cutlass/python/docs_src/source/index.rst -> mirage-0.1.1/deps/cutlass/python/docs_src/source
+copying deps/cutlass/python/docs_src/source/install.md -> mirage-0.1.1/deps/cutlass/python/docs_src/source
+copying deps/cutlass/python/docs_src/source/modules.rst -> mirage-0.1.1/deps/cutlass/python/docs_src/source
+copying deps/cutlass/python/docs_src/source/_static/cutlass-logo-small.png -> mirage-0.1.1/deps/cutlass/python/docs_src/source/_static
+copying deps/cutlass/python/docs_src/source/_static/logo-dark-mode.png -> mirage-0.1.1/deps/cutlass/python/docs_src/source/_static
+copying deps/cutlass/python/docs_src/source/_static/logo-light-mode.png -> mirage-0.1.1/deps/cutlass/python/docs_src/source/_static
+copying deps/cutlass/python/docs_src/source/_templates/layout.html -> mirage-0.1.1/deps/cutlass/python/docs_src/source/_templates
+copying deps/cutlass/python/docs_src/source/externals/00_basic_gemm.nblink -> mirage-0.1.1/deps/cutlass/python/docs_src/source/externals
+copying deps/cutlass/python/docs_src/source/externals/01_epilogue.nblink -> mirage-0.1.1/deps/cutlass/python/docs_src/source/externals
+copying deps/cutlass/python/docs_src/source/externals/02_pytorch_extension_grouped_gemm.nblink -> mirage-0.1.1/deps/cutlass/python/docs_src/source/externals
+copying deps/cutlass/python/pycute/__init__.py -> mirage-0.1.1/deps/cutlass/python/pycute
+copying deps/cutlass/python/pycute/int_tuple.py -> mirage-0.1.1/deps/cutlass/python/pycute
+copying deps/cutlass/python/pycute/layout.py -> mirage-0.1.1/deps/cutlass/python/pycute
+copying deps/cutlass/python/pycute/swizzle.py -> mirage-0.1.1/deps/cutlass/python/pycute
+copying deps/cutlass/python/pycute/typing.py -> mirage-0.1.1/deps/cutlass/python/pycute
+copying deps/json/.cirrus.yml -> mirage-0.1.1/deps/json
+copying deps/json/.clang-format -> mirage-0.1.1/deps/json
+copying deps/json/.clang-tidy -> mirage-0.1.1/deps/json
+copying deps/json/.git -> mirage-0.1.1/deps/json
+copying deps/json/.gitignore -> mirage-0.1.1/deps/json
+copying deps/json/.lgtm.yml -> mirage-0.1.1/deps/json
+copying deps/json/BUILD.bazel -> mirage-0.1.1/deps/json
+copying deps/json/CITATION.cff -> mirage-0.1.1/deps/json
+copying deps/json/CMakeLists.txt -> mirage-0.1.1/deps/json
+copying deps/json/ChangeLog.md -> mirage-0.1.1/deps/json
+copying deps/json/LICENSE.MIT -> mirage-0.1.1/deps/json
+copying deps/json/Makefile -> mirage-0.1.1/deps/json
+copying deps/json/Package.swift -> mirage-0.1.1/deps/json
+copying deps/json/README.md -> mirage-0.1.1/deps/json
+copying deps/json/WORKSPACE.bazel -> mirage-0.1.1/deps/json
+copying deps/json/meson.build -> mirage-0.1.1/deps/json
+copying deps/json/nlohmann_json.natvis -> mirage-0.1.1/deps/json
+copying deps/json/wsjcpp.yml -> mirage-0.1.1/deps/json
+copying deps/json/LICENSES/Apache-2.0.txt -> mirage-0.1.1/deps/json/LICENSES
+copying deps/json/LICENSES/BSD-3-Clause.txt -> mirage-0.1.1/deps/json/LICENSES
+copying deps/json/LICENSES/GPL-3.0-only.txt -> mirage-0.1.1/deps/json/LICENSES
+copying deps/json/LICENSES/MIT.txt -> mirage-0.1.1/deps/json/LICENSES
+copying deps/json/cmake/ci.cmake -> mirage-0.1.1/deps/json/cmake
+copying deps/json/cmake/config.cmake.in -> mirage-0.1.1/deps/json/cmake
+copying deps/json/cmake/download_test_data.cmake -> mirage-0.1.1/deps/json/cmake
+copying deps/json/cmake/nlohmann_jsonConfigVersion.cmake.in -> mirage-0.1.1/deps/json/cmake
+copying deps/json/cmake/pkg-config.pc.in -> mirage-0.1.1/deps/json/cmake
+copying deps/json/cmake/test.cmake -> mirage-0.1.1/deps/json/cmake
+copying deps/json/cmake/scripts/gen_bazel_build_file.cmake -> mirage-0.1.1/deps/json/cmake/scripts
+copying deps/json/include/nlohmann/adl_serializer.hpp -> mirage-0.1.1/deps/json/include/nlohmann
+copying deps/json/include/nlohmann/byte_container_with_subtype.hpp -> mirage-0.1.1/deps/json/include/nlohmann
+copying deps/json/include/nlohmann/json.hpp -> mirage-0.1.1/deps/json/include/nlohmann
+copying deps/json/include/nlohmann/json_fwd.hpp -> mirage-0.1.1/deps/json/include/nlohmann
+copying deps/json/include/nlohmann/ordered_map.hpp -> mirage-0.1.1/deps/json/include/nlohmann
+copying deps/json/include/nlohmann/detail/abi_macros.hpp -> mirage-0.1.1/deps/json/include/nlohmann/detail
+copying deps/json/include/nlohmann/detail/exceptions.hpp -> mirage-0.1.1/deps/json/include/nlohmann/detail
+copying deps/json/include/nlohmann/detail/hash.hpp -> mirage-0.1.1/deps/json/include/nlohmann/detail
+copying deps/json/include/nlohmann/detail/json_custom_base_class.hpp -> mirage-0.1.1/deps/json/include/nlohmann/detail
+copying deps/json/include/nlohmann/detail/json_pointer.hpp -> mirage-0.1.1/deps/json/include/nlohmann/detail
+copying deps/json/include/nlohmann/detail/json_ref.hpp -> mirage-0.1.1/deps/json/include/nlohmann/detail
+copying deps/json/include/nlohmann/detail/macro_scope.hpp -> mirage-0.1.1/deps/json/include/nlohmann/detail
+copying deps/json/include/nlohmann/detail/macro_unscope.hpp -> mirage-0.1.1/deps/json/include/nlohmann/detail
+copying deps/json/include/nlohmann/detail/string_concat.hpp -> mirage-0.1.1/deps/json/include/nlohmann/detail
+copying deps/json/include/nlohmann/detail/string_escape.hpp -> mirage-0.1.1/deps/json/include/nlohmann/detail
+copying deps/json/include/nlohmann/detail/value_t.hpp -> mirage-0.1.1/deps/json/include/nlohmann/detail
+copying deps/json/include/nlohmann/detail/conversions/from_json.hpp -> mirage-0.1.1/deps/json/include/nlohmann/detail/conversions
+copying deps/json/include/nlohmann/detail/conversions/to_chars.hpp -> mirage-0.1.1/deps/json/include/nlohmann/detail/conversions
+copying deps/json/include/nlohmann/detail/conversions/to_json.hpp -> mirage-0.1.1/deps/json/include/nlohmann/detail/conversions
+copying deps/json/include/nlohmann/detail/input/binary_reader.hpp -> mirage-0.1.1/deps/json/include/nlohmann/detail/input
+copying deps/json/include/nlohmann/detail/input/input_adapters.hpp -> mirage-0.1.1/deps/json/include/nlohmann/detail/input
+copying deps/json/include/nlohmann/detail/input/json_sax.hpp -> mirage-0.1.1/deps/json/include/nlohmann/detail/input
+copying deps/json/include/nlohmann/detail/input/lexer.hpp -> mirage-0.1.1/deps/json/include/nlohmann/detail/input
+copying deps/json/include/nlohmann/detail/input/parser.hpp -> mirage-0.1.1/deps/json/include/nlohmann/detail/input
+copying deps/json/include/nlohmann/detail/input/position_t.hpp -> mirage-0.1.1/deps/json/include/nlohmann/detail/input
+copying deps/json/include/nlohmann/detail/iterators/internal_iterator.hpp -> mirage-0.1.1/deps/json/include/nlohmann/detail/iterators
+copying deps/json/include/nlohmann/detail/iterators/iter_impl.hpp -> mirage-0.1.1/deps/json/include/nlohmann/detail/iterators
+copying deps/json/include/nlohmann/detail/iterators/iteration_proxy.hpp -> mirage-0.1.1/deps/json/include/nlohmann/detail/iterators
+copying deps/json/include/nlohmann/detail/iterators/iterator_traits.hpp -> mirage-0.1.1/deps/json/include/nlohmann/detail/iterators
+copying deps/json/include/nlohmann/detail/iterators/json_reverse_iterator.hpp -> mirage-0.1.1/deps/json/include/nlohmann/detail/iterators
+copying deps/json/include/nlohmann/detail/iterators/primitive_iterator.hpp -> mirage-0.1.1/deps/json/include/nlohmann/detail/iterators
+copying deps/json/include/nlohmann/detail/meta/cpp_future.hpp -> mirage-0.1.1/deps/json/include/nlohmann/detail/meta
+copying deps/json/include/nlohmann/detail/meta/detected.hpp -> mirage-0.1.1/deps/json/include/nlohmann/detail/meta
+copying deps/json/include/nlohmann/detail/meta/identity_tag.hpp -> mirage-0.1.1/deps/json/include/nlohmann/detail/meta
+copying deps/json/include/nlohmann/detail/meta/is_sax.hpp -> mirage-0.1.1/deps/json/include/nlohmann/detail/meta
+copying deps/json/include/nlohmann/detail/meta/std_fs.hpp -> mirage-0.1.1/deps/json/include/nlohmann/detail/meta
+copying deps/json/include/nlohmann/detail/meta/type_traits.hpp -> mirage-0.1.1/deps/json/include/nlohmann/detail/meta
+copying deps/json/include/nlohmann/detail/meta/void_t.hpp -> mirage-0.1.1/deps/json/include/nlohmann/detail/meta
+copying deps/json/include/nlohmann/detail/meta/call_std/begin.hpp -> mirage-0.1.1/deps/json/include/nlohmann/detail/meta/call_std
+copying deps/json/include/nlohmann/detail/meta/call_std/end.hpp -> mirage-0.1.1/deps/json/include/nlohmann/detail/meta/call_std
+copying deps/json/include/nlohmann/detail/output/binary_writer.hpp -> mirage-0.1.1/deps/json/include/nlohmann/detail/output
+copying deps/json/include/nlohmann/detail/output/output_adapters.hpp -> mirage-0.1.1/deps/json/include/nlohmann/detail/output
+copying deps/json/include/nlohmann/detail/output/serializer.hpp -> mirage-0.1.1/deps/json/include/nlohmann/detail/output
+copying deps/json/include/nlohmann/thirdparty/hedley/hedley.hpp -> mirage-0.1.1/deps/json/include/nlohmann/thirdparty/hedley
+copying deps/json/include/nlohmann/thirdparty/hedley/hedley_undef.hpp -> mirage-0.1.1/deps/json/include/nlohmann/thirdparty/hedley
+copying deps/json/single_include/nlohmann/json.hpp -> mirage-0.1.1/deps/json/single_include/nlohmann
+copying deps/json/single_include/nlohmann/json_fwd.hpp -> mirage-0.1.1/deps/json/single_include/nlohmann
+copying include/mirage/config.h -> mirage-0.1.1/include/mirage
+copying include/mirage/layout.h -> mirage-0.1.1/include/mirage
+copying include/mirage/profile_result.h -> mirage-0.1.1/include/mirage
+copying include/mirage/simulator.h -> mirage-0.1.1/include/mirage
+copying include/mirage/type.h -> mirage-0.1.1/include/mirage
+copying include/mirage/cpu/cmem_tensor.h -> mirage-0.1.1/include/mirage/cpu
+copying include/mirage/kernel/all_reduce.h -> mirage-0.1.1/include/mirage/kernel
+copying include/mirage/kernel/customized.h -> mirage-0.1.1/include/mirage/kernel
+copying include/mirage/kernel/device_memory_manager.h -> mirage-0.1.1/include/mirage/kernel
+copying include/mirage/kernel/device_tensor.h -> mirage-0.1.1/include/mirage/kernel
+copying include/mirage/kernel/element_binary.h -> mirage-0.1.1/include/mirage/kernel
+copying include/mirage/kernel/element_unary.h -> mirage-0.1.1/include/mirage/kernel
+copying include/mirage/kernel/graph.h -> mirage-0.1.1/include/mirage/kernel
+copying include/mirage/kernel/matmul.h -> mirage-0.1.1/include/mirage/kernel
+copying include/mirage/kernel/operator.h -> mirage-0.1.1/include/mirage/kernel
+copying include/mirage/kernel/reduction.h -> mirage-0.1.1/include/mirage/kernel
+copying include/mirage/search/algebraic_pattern.h -> mirage-0.1.1/include/mirage/search
+copying include/mirage/search/config.h -> mirage-0.1.1/include/mirage/search
+copying include/mirage/search/dim_strategy.h -> mirage-0.1.1/include/mirage/search
+copying include/mirage/search/op_utils.h -> mirage-0.1.1/include/mirage/search
+copying include/mirage/search/order.h -> mirage-0.1.1/include/mirage/search
+copying include/mirage/search/search.h -> mirage-0.1.1/include/mirage/search
+copying include/mirage/search/search_c.h -> mirage-0.1.1/include/mirage/search
+copying include/mirage/threadblock/concat.h -> mirage-0.1.1/include/mirage/threadblock
+copying include/mirage/threadblock/element_binary.h -> mirage-0.1.1/include/mirage/threadblock
+copying include/mirage/threadblock/element_unary.h -> mirage-0.1.1/include/mirage/threadblock
+copying include/mirage/threadblock/forloop_accum.h -> mirage-0.1.1/include/mirage/threadblock
+copying include/mirage/threadblock/graph.h -> mirage-0.1.1/include/mirage/threadblock
+copying include/mirage/threadblock/matmul.h -> mirage-0.1.1/include/mirage/threadblock
+copying include/mirage/threadblock/operator.h -> mirage-0.1.1/include/mirage/threadblock
+copying include/mirage/threadblock/reduction.h -> mirage-0.1.1/include/mirage/threadblock
+copying include/mirage/threadblock/smem_tensor.h -> mirage-0.1.1/include/mirage/threadblock
+copying include/mirage/threadblock/cuda/concat.h -> mirage-0.1.1/include/mirage/threadblock/cuda
+copying include/mirage/threadblock/cuda/element_binary.h -> mirage-0.1.1/include/mirage/threadblock/cuda
+copying include/mirage/threadblock/cuda/element_unary.h -> mirage-0.1.1/include/mirage/threadblock/cuda
+copying include/mirage/threadblock/cuda/forloop_accum.h -> mirage-0.1.1/include/mirage/threadblock/cuda
+copying include/mirage/threadblock/cuda/input_loader.h -> mirage-0.1.1/include/mirage/threadblock/cuda
+copying include/mirage/threadblock/cuda/matmul.h -> mirage-0.1.1/include/mirage/threadblock/cuda
+copying include/mirage/threadblock/cuda/output_saver.h -> mirage-0.1.1/include/mirage/threadblock/cuda
+copying include/mirage/threadblock/cuda/reduction.h -> mirage-0.1.1/include/mirage/threadblock/cuda
+copying include/mirage/threadblock/serializer/concat_serializer.h -> mirage-0.1.1/include/mirage/threadblock/serializer
+copying include/mirage/threadblock/serializer/element_binary_serializer.h -> mirage-0.1.1/include/mirage/threadblock/serializer
+copying include/mirage/threadblock/serializer/element_unary_serializer.h -> mirage-0.1.1/include/mirage/threadblock/serializer
+copying include/mirage/threadblock/serializer/forloop_accum_serializer.h -> mirage-0.1.1/include/mirage/threadblock/serializer
+copying include/mirage/threadblock/serializer/input_loader_serializer.h -> mirage-0.1.1/include/mirage/threadblock/serializer
+copying include/mirage/threadblock/serializer/kernel_params.h -> mirage-0.1.1/include/mirage/threadblock/serializer
+copying include/mirage/threadblock/serializer/matmul_serializer.h -> mirage-0.1.1/include/mirage/threadblock/serializer
+copying include/mirage/threadblock/serializer/output_saver_serializer.h -> mirage-0.1.1/include/mirage/threadblock/serializer
+copying include/mirage/threadblock/serializer/reduction_serializer.h -> mirage-0.1.1/include/mirage/threadblock/serializer
+copying include/mirage/transpiler/cuda_transpiler.h -> mirage-0.1.1/include/mirage/transpiler
+copying include/mirage/transpiler/runtime/README.md -> mirage-0.1.1/include/mirage/transpiler/runtime
+copying include/mirage/transpiler/runtime/nvshmem.h -> mirage-0.1.1/include/mirage/transpiler/runtime
+copying include/mirage/transpiler/runtime/runtime.h -> mirage-0.1.1/include/mirage/transpiler/runtime
+copying include/mirage/transpiler/runtime/utils.h -> mirage-0.1.1/include/mirage/transpiler/runtime
+copying include/mirage/transpiler/runtime/kernel/element_binary.h -> mirage-0.1.1/include/mirage/transpiler/runtime/kernel
+copying include/mirage/transpiler/runtime/kernel/element_unary.h -> mirage-0.1.1/include/mirage/transpiler/runtime/kernel
+copying include/mirage/utils/containers.h -> mirage-0.1.1/include/mirage/utils
+copying include/mirage/utils/cuda_helper.h -> mirage-0.1.1/include/mirage/utils
+copying include/mirage/utils/hash_utils.h -> mirage-0.1.1/include/mirage/utils
+copying include/mirage/utils/json_utils.h -> mirage-0.1.1/include/mirage/utils
+copying include/mirage/utils/static_switch.h -> mirage-0.1.1/include/mirage/utils
+copying include/mirage/warp/cuda/matmul.h -> mirage-0.1.1/include/mirage/warp/cuda
+copying mirage.egg-info/PKG-INFO -> mirage-0.1.1/mirage.egg-info
+copying mirage.egg-info/SOURCES.txt -> mirage-0.1.1/mirage.egg-info
+copying mirage.egg-info/dependency_links.txt -> mirage-0.1.1/mirage.egg-info
+copying mirage.egg-info/not-zip-safe -> mirage-0.1.1/mirage.egg-info
+copying mirage.egg-info/top_level.txt -> mirage-0.1.1/mirage.egg-info
+copying python/mirage/__init__.py -> mirage-0.1.1/python/mirage
+copying python/mirage.egg-info/PKG-INFO -> mirage-0.1.1/python/mirage.egg-info
+copying python/mirage.egg-info/SOURCES.txt -> mirage-0.1.1/python/mirage.egg-info
+copying python/mirage.egg-info/dependency_links.txt -> mirage-0.1.1/python/mirage.egg-info
+copying python/mirage.egg-info/not-zip-safe -> mirage-0.1.1/python/mirage.egg-info
+copying python/mirage.egg-info/requires.txt -> mirage-0.1.1/python/mirage.egg-info
+copying python/mirage.egg-info/top_level.txt -> mirage-0.1.1/python/mirage.egg-info
+copying python/mirage/_cython/CCore.pxd -> mirage-0.1.1/python/mirage/_cython
+copying python/mirage/_cython/core.pyx -> mirage-0.1.1/python/mirage/_cython
+copying src/layout.cc -> mirage-0.1.1/src
+copying src/profile_result.cc -> mirage-0.1.1/src
+copying src/base/data_type.cc -> mirage-0.1.1/src/base
+copying src/base/layout.cc -> mirage-0.1.1/src/base
+copying src/kernel/all_reduce.cc -> mirage-0.1.1/src/kernel
+copying src/kernel/customized.cc -> mirage-0.1.1/src/kernel
+copying src/kernel/device_memory_manager.cu -> mirage-0.1.1/src/kernel
+copying src/kernel/device_tensor.cc -> mirage-0.1.1/src/kernel
+copying src/kernel/element_binary.cc -> mirage-0.1.1/src/kernel
+copying src/kernel/element_unary.cc -> mirage-0.1.1/src/kernel
+copying src/kernel/graph.cc -> mirage-0.1.1/src/kernel
+copying src/kernel/matmul.cc -> mirage-0.1.1/src/kernel
+copying src/kernel/operator.cc -> mirage-0.1.1/src/kernel
+copying src/kernel/reduction.cc -> mirage-0.1.1/src/kernel
+copying src/kernel/triton_code_gen.cc -> mirage-0.1.1/src/kernel
+copying src/kernel/cuda/all_reduce_kernel.cu -> mirage-0.1.1/src/kernel/cuda
+copying src/kernel/cuda/customized_kernel.cu -> mirage-0.1.1/src/kernel/cuda
+copying src/kernel/cuda/device_tensor_kernel.cu -> mirage-0.1.1/src/kernel/cuda
+copying src/kernel/cuda/element_binary_kernel.cu -> mirage-0.1.1/src/kernel/cuda
+copying src/kernel/cuda/element_unary_kernel.cu -> mirage-0.1.1/src/kernel/cuda
+copying src/kernel/cuda/input_kernel.cu -> mirage-0.1.1/src/kernel/cuda
+copying src/kernel/cuda/matmul_kernel.cu -> mirage-0.1.1/src/kernel/cuda
+copying src/kernel/cuda/reduction_kernel.cu -> mirage-0.1.1/src/kernel/cuda
+copying src/search/algebraic_pattern.cc -> mirage-0.1.1/src/search
+copying src/search/config.cc -> mirage-0.1.1/src/search
+copying src/search/dim_strategy.cc -> mirage-0.1.1/src/search
+copying src/search/op_utils.cc -> mirage-0.1.1/src/search
+copying src/search/order.cc -> mirage-0.1.1/src/search
+copying src/search/search.cc -> mirage-0.1.1/src/search
+copying src/search/search_c.cc -> mirage-0.1.1/src/search
+copying src/simulator/simulator.cu -> mirage-0.1.1/src/simulator
+copying src/threadblock/concat.cc -> mirage-0.1.1/src/threadblock
+copying src/threadblock/element_binary.cc -> mirage-0.1.1/src/threadblock
+copying src/threadblock/element_unary.cc -> mirage-0.1.1/src/threadblock
+copying src/threadblock/forloop_accum.cc -> mirage-0.1.1/src/threadblock
+copying src/threadblock/graph.cc -> mirage-0.1.1/src/threadblock
+copying src/threadblock/input_loader.cc -> mirage-0.1.1/src/threadblock
+copying src/threadblock/matmul.cc -> mirage-0.1.1/src/threadblock
+copying src/threadblock/operator.cc -> mirage-0.1.1/src/threadblock
+copying src/threadblock/output.cc -> mirage-0.1.1/src/threadblock
+copying src/threadblock/reduction.cc -> mirage-0.1.1/src/threadblock
+copying src/threadblock/smem_tensor.cc -> mirage-0.1.1/src/threadblock
+copying src/threadblock/cuda/element_unary.cu -> mirage-0.1.1/src/threadblock/cuda
+copying src/threadblock/cuda/input_executor.cu -> mirage-0.1.1/src/threadblock/cuda
+copying src/threadblock/cuda/matmul.cu -> mirage-0.1.1/src/threadblock/cuda
+copying src/transpiler/cuda_transpiler.cc -> mirage-0.1.1/src/transpiler
+copying src/utils/containers.cc -> mirage-0.1.1/src/utils
+copying src/utils/cuda_helper.cu -> mirage-0.1.1/src/utils
+copying src/utils/json_utils.cc -> mirage-0.1.1/src/utils
+Writing mirage-0.1.1/setup.cfg
+Creating tar archive
+removing 'mirage-0.1.1' (and everything under it)
+running bdist_wheel
+running build
+running build_py
+error: Error: setup script specifies an absolute path:
+
+    /data_train/infra/sca/mirage/python/mirage/_cython/core.cpp
+
+setup() arguments must *always* be /-separated paths relative to the
+setup.py directory, *never* absolute paths.
+
