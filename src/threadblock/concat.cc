@@ -41,15 +41,24 @@ TBOperator *Graph::create_concat_op(STensor const &A,
       return nullptr;
     }
   }
-
-  if (smem_offset + A.size() + B.size() >
-      (off_t)mirage::config::MAX_SMEM_SIZE) {
+  if (A.after_accum != B.after_accum) {
     return nullptr;
   }
 
-  TBOperator *op = new TBConcatOp(this, A, B, concat_dim);
+  //if (smem_offset + A.size() + B.size() >
+  //    (off_t)mirage::config::MAX_SMEM_SIZE) {
+  //  return nullptr;
+  //}
 
-  return op;
+  TBOperator *op = new TBConcatOp(this, A, B, concat_dim);
+  // Check shmem usage
+  size_t smem_usage = calculate_shared_memory_usage(op);
+  if (smem_usage > mirage::config::MAX_SMEM_SIZE) {
+    delete op;
+    return nullptr;
+  } else {
+    return op;
+  }
 }
 
 TBConcatOp::TBConcatOp(Graph *bgraph,
@@ -69,12 +78,13 @@ TBConcatOp::TBConcatOp(Graph *bgraph,
   output.owner_op = this;
   output.owner_ts_idx = 0;
   output.guid = STensor::next_guid++;
-  output.smem_offset = bgraph->allocate(output);
+  output.after_accum = A.after_accum;
+  output.smem_offset = bgraph->allocate_fingerprint(output);
   output_tensors.push_back(output);
 }
 
 TBConcatOp::~TBConcatOp() {
-  bgraph->free(output_tensors[0]);
+  bgraph->free_fingerprint(output_tensors[0]);
 }
 
 TBConcatOp::operator json() const {

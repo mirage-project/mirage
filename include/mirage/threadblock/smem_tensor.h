@@ -42,11 +42,13 @@ struct alignas(16) STensor {
     owner_op = nullptr;
     owner_ts_idx = -1000;
     smem_offset = 128;
-    // accum_output = false;
+    after_accum = false;
   }
 
   CUTLASS_HOST_DEVICE
   bool operator==(STensor const &b) const {
+    // Note that we don't check after_accum
+    // when comparing two stensors
     if (data_type != b.data_type) {
       return false;
     }
@@ -78,6 +80,8 @@ struct alignas(16) STensor {
 
   CUTLASS_HOST_DEVICE
   bool operator!=(STensor const &b) const {
+    // Note that we don't check after_accum
+    // when comparing two stensors
     if (data_type != b.data_type) {
       return true;
     }
@@ -159,11 +163,12 @@ struct alignas(16) STensor {
   TBOperator *owner_op;
   int owner_ts_idx;
   int smem_offset;
-  // a flag indicating whether we should accumulate output
-  // This flag is false by default and should only be set
-  // by an output saver to indicate its input should
-  // be accumulated
-  // bool accum_output;
+  // a flag indicating if the stensor is after forloop
+  // accumulation, in which case the consuming operators
+  // are outside of the forloop and considered epilogue
+  // This flag is false by default and should only be
+  // changed to true by a forloop accumulator
+  bool after_accum;
 
   static std::atomic<int64_t> next_guid;
 };
