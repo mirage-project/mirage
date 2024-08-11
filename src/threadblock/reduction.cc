@@ -28,22 +28,27 @@ STensor Graph::reduction(STensor const &input, int dim) {
 }
 
 TBOperator *Graph::create_reduction_op(STensor const &input, int dim) {
-  STensor output = input;
-  assert(output.num_dims > dim);
-  assert(output.layout == mirage::layout::SmemRowMajor);
-  output.dim[dim] = 1;
-  if (dim < output.num_dims - 2) {
-    return nullptr;
-  }
-
-  if (smem_offset + (off_t)output.size() >
-      (off_t)mirage::config::MAX_SMEM_SIZE) {
-    return nullptr;
-  }
+  //STensor output = input;
+  //assert(output.num_dims > dim);
+  //assert(output.layout == mirage::layout::SmemRowMajor);
+  //output.dim[dim] = 1;
+  //if (dim < output.num_dims - 2) {
+  //  return nullptr;
+  //}
+  //if (smem_offset + (off_t)output.size() >
+  //    (off_t)mirage::config::MAX_SMEM_SIZE) {
+  //  return nullptr;
+  //}
 
   TBOperator *op = new TBReductionOp(this, input, dim, 1 /*size*/);
-
-  return op;
+  // Check shmem usage
+  size_t smem_usage = calculate_shared_memory_usage(op);
+  if (smem_usage > mirage::config::MAX_SMEM_SIZE) {
+    delete op;
+    return nullptr;
+  } else {
+    return op;
+  }
 }
 
 STensor Graph::reduction_to_dimx(STensor const &input, int dim) {
@@ -54,19 +59,24 @@ STensor Graph::reduction_to_dimx(STensor const &input, int dim) {
 }
 
 TBOperator *Graph::create_reduction_to_dimx_op(STensor const &input, int dim) {
-  STensor output = input;
-  assert(output.num_dims > dim);
-  assert(output.layout == mirage::layout::SmemRowMajor);
-  output.dim[dim] = this->reduction_dimx;
-
-  if (smem_offset + (off_t)output.size() >
-      (off_t)mirage::config::MAX_SMEM_SIZE) {
-    return nullptr;
-  }
+  //STensor output = input;
+  //assert(output.num_dims > dim);
+  //assert(output.layout == mirage::layout::SmemRowMajor);
+  //output.dim[dim] = this->reduction_dimx;
+  //if (smem_offset + (off_t)output.size() >
+  //    (off_t)mirage::config::MAX_SMEM_SIZE) {
+  //  return nullptr;
+  //}
 
   TBOperator *op = new TBReductionOp(this, input, dim, this->reduction_dimx);
-
-  return op;
+  // Check shmem usage
+  size_t smem_usage = calculate_shared_memory_usage(op);
+  if (smem_usage > mirage::config::MAX_SMEM_SIZE) {
+    delete op;
+    return nullptr;
+  } else {
+    return op;
+  }
 }
 
 TBReductionOp::TBReductionOp(Graph *bgraph,
@@ -91,12 +101,13 @@ TBReductionOp::TBReductionOp(Graph *bgraph,
   output.owner_op = this;
   output.owner_ts_idx = 0;
   output.guid = STensor::next_guid++;
-  output.smem_offset = bgraph->allocate(output);
+  output.after_accum = input.after_accum;
+  output.smem_offset = bgraph->allocate_fingerprint(output);
   output_tensors.push_back(output);
 }
 
 TBReductionOp::~TBReductionOp() {
-  bgraph->free(output_tensors[0]);
+  bgraph->free_fingerprint(output_tensors[0]);
 }
 
 TBReductionOp::operator json() const {

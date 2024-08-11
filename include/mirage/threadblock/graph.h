@@ -71,6 +71,8 @@ public:
   Graph(dim3 grid_dim, dim3 block_dim, int forloop_range, int reduction_dimx);
   Graph(std::vector<kernel::DTensor> const &inputs, ExecutionPlan const &plan);
   ~Graph();
+  Graph(Graph const &) = delete;
+  Graph &operator=(Graph const &) = delete;
   // input operator
   STensor new_input(mirage::kernel::DTensor const &dtensor,
                     int3 input_map,
@@ -114,9 +116,14 @@ public:
   STensor concat(STensor const &A, STensor const &B, int dim);
   TBOperator *create_concat_op(STensor const &A, STensor const &B, int dim);
 
-  off_t allocate(STensor const &tensor);
-  void free(STensor const &tensor);
-  void free(std::vector<STensor> const &tensors);
+  // forloop accum operator
+  STensor forloop_accum(STensor const &input);
+  TBOperator *create_forloop_accum_op(STensor const &input);
+
+  off_t allocate_fingerprint(STensor const &tensor);
+  void free_fingerprint(STensor const &tensor);
+  void free_fingerprint(std::vector<STensor> const &tensors);
+  size_t calculate_shared_memory_usage(TBOperator *new_op);
 
   KernelParams get_kernel_params();
   NewKernelParams get_new_kernel_params(bool fingerprint) const;

@@ -22,23 +22,25 @@ int cython_optimize(mirage::kernel::Graph const *input_graph,
                     std::vector<int> frange_to_explore,
                     char const *check_point_file_path,
                     char const *default_config) {
+  // NOTE(@wmdi): Checkpointing is disabled for now
   // Load from a checkpoint
-  if (check_point_file_path != nullptr) {
-    search::KernelGraphGenerator gen(check_point_file_path);
-    gen.config.print_config();
-    // Only continue the search if we haven't discovered any graphs
-    if (gen.generated_graphs.size() == 0) {
-      gen.generate_kernel_graphs();
-    }
-    int num = 0;
-    for (json const &j : gen.generated_graphs) {
-      assert(num < max_num_graphs);
-      new_graphs[num] = new kernel::Graph();
-      from_json(j, *new_graphs[num]);
-      num++;
-    }
-    return num;
-  } else {
+  // if (check_point_file_path != nullptr) {
+  //   search::KernelGraphGenerator gen(check_point_file_path);
+  //   gen.config.print_config();
+  //   // Only continue the search if we haven't discovered any graphs
+  //   if (gen.generated_graphs.size() == 0) {
+  //     gen.generate_kernel_graphs();
+  //   }
+  //   int num = 0;
+  //   for (json const &j : gen.generated_graphs) {
+  //     assert(num < max_num_graphs);
+  //     new_graphs[num] = new kernel::Graph();
+  //     from_json(j, *new_graphs[num]);
+  //     num++;
+  //   }
+  //   return num;
+  // } else
+  {
     search::GeneratorConfig config =
         search::GeneratorConfig::get_default_config();
     if (default_config != nullptr) {

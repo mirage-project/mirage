@@ -78,6 +78,9 @@ public:
 public:
   mirage::kernel::DTensor dtensor;
   int3 output_map;
+  // Note: forloop_dim is reserved for overlapping
+  // communication and computation in multi-GPU runs
+  // and should always be -1 for now
   int forloop_dim;
   mirage::type::TBEpilogueType epilogue;
 };
