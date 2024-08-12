@@ -153,7 +153,8 @@ ADD_TESTCASE(Testcase("tb_matmul", {"threadblock", "correctness", "perf"}, "thre
 			std::shared_ptr<tb::Graph> sg = std::make_shared<tb::Graph>(grid_shape, subcase.block_dim, k / tile_k, 1);
 			tb::STensor si0 = sg->new_input(inputs[0], {0, -1, -1}, 1, layout::SmemRowMajor);
 			tb::STensor si1 = sg->new_input(inputs[1], {-1, 1, -1}, 0, layout::SmemRowMajor);
-			tb::STensor so0 = sg->matmul(si0, si1);
+			tb::STensor sx0 = sg->matmul(si0, si1);
+			tb::STensor so0 = sg->forloop_accum(sx0);
 			kn::DTensor o0 = sg->new_output(so0, {0, 1, -1}, -1, type::TB_EPILOGUE_NONE);
 			return {sg, {o0}};
 		});

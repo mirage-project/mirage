@@ -20,19 +20,16 @@
 #include <vector>
 
 #include "mirage/kernel/graph.h"
+#include "mirage/type.h"
+#include "mirage/transpiler/common.h"
 #include "mirage/transpiler/structs.h"
 #include "mirage/transpiler/utils.h"
-#include "mirage/type.h"
+#include "mirage/transpiler/sched_tb_graph.h"
 
 namespace mirage {
 namespace transpiler {
 
 using std::vector;
-
-namespace kn = mirage::kernel;
-namespace tb = mirage::threadblock;
-using dguid_t = decltype(kn::DTensor::guid);
-using sguid_t = decltype(tb::STensor::guid);
 
 class Transpiler {
 private:
@@ -81,6 +78,9 @@ private:
   std::pair<std::string, std::string>
       get_dtensor_ptr(kn::DTensor const &dtensor);
 
+  // Get the "optimal" schedule for a threadblock graph
+  TBSched get_threadblock_schedule(tb::Graph const &tb_graph);
+  
   // Transpile a custom KN operator (a custom block graph)
   struct CustomOPTranspileResult {
     // The name of the generated kernel function

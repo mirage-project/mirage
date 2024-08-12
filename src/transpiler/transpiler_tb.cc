@@ -13,6 +13,7 @@
  * limitations under the License.
  */
 
+#include "mirage/threadblock/operator.h"
 #include "mirage/transpiler/transpiler.h"
 
 #include <algorithm>
@@ -20,6 +21,8 @@
 
 #include "mirage/threadblock/graph.h"
 #include "mirage/transpiler/utils.h"
+#include "mirage/transpiler/sched_tb_graph.h"
+#include "mirage/type.h"
 
 namespace mirage {
 namespace transpiler {
@@ -93,18 +96,8 @@ Transpiler::CustomOPTranspileResult
   tb::ExecutionPlan const &plan = op->plan;
   int num_threads = plan.block_dim.x * plan.block_dim.y * plan.block_dim.z;
 
-  // Get a list of all STensors in the current kernel
-  vector<tb::STensor> all_stensors;
-  std::unordered_set<sguid_t> processed_sguids;
-  for (tb::TBOperator *const op : g.operators) {
-    for (tb::STensor const &stensor :
-         Combine(op->input_tensors, op->output_tensors)) {
-      if (processed_sguids.count(stensor.guid) == 0) {
-        processed_sguids.insert(stensor.guid);
-        all_stensors.push_back(stensor);
-      }
-    }
-  }
+  // Get the schedule
+  TBSched sched = get_threadblock_schedule(g);
 
   // Allocate a kernel name
   static int custom_kernel_idx_counter = 0;
@@ -142,6 +135,18 @@ Transpiler::CustomOPTranspileResult
   // Define STensor as cute::Tensor
   code.e("// STensors");
   code.e("extern __shared__ char buf[];");
+  // Get a list of all STensors in the current kernel
+  vector<tb::STensor> all_stensors;
+  std::unordered_set<sguid_t> processed_sguids;
+  for (tb::TBOperator *const op : g.operators) {
+    for (tb::STensor const &stensor :
+         Combine(op->input_tensors, op->output_tensors)) {
+      if (processed_sguids.count(stensor.guid) == 0) {
+        processed_sguids.insert(stensor.guid);
+        all_stensors.push_back(stensor);
+      }
+    }
+  }
   for (tb::STensor const &stensor : all_stensors) {
     sguid_t guid = stensor.guid;
     STensorMeta const &meta = stensor_metas.at(guid);
@@ -229,45 +234,46 @@ Transpiler::CustomOPTranspileResult
       } else {
         // Chunked, asynchronous copy
       }
-
-      if (cur_op->forloop_dim < 0) {
-        // For input STensor that does not have a forloop_dim, copy it
-        code.e("STensor$InputAtom::run(stensor$_ptr, dtensor$_tile_ptr, "
-               "thread_idx);",
-               stensor.guid,
-               stensor.guid,
-               dtensor.guid);
-      }
     }
+  }
+  code.e("");
+
+  // Launch G->S copy atoms for all pre-loop-ops
+  int num_pre_loop_copies = 0;
+  for (TBSchedNode const &sched_node : sched.pre_loop_nodes) {
+    // Currently only non-fused input ops are allowed to appear in pre_loop_nodes
+    // check against this condition
+    assert(sched_node.type == tb_sched_node_t::OPERATOR);
+    assert(sched_node.ops.size() == 1);
+    tb::TBOperator const *op = sched_node.ops[0];
+    assert(op->op_type == type::TB_INPUT_OP);
+    tb::TBInputOp const *cur_op = dynamic_cast<tb::TBInputOp const *>(op);
+    assert(cur_op->forloop_dim == -1);
+    num_pre_loop_copies += 1;
+    code.e("STensor$InputAtom::run(stensor$_ptr, dtensor$_tile_ptr, "
+          "thread_idx);",
+          cur_op->output_tensors.at(0).guid,
+          cur_op->output_tensors.at(0).guid,
+          cur_op->dtensor.guid);
   }
   code.e("");
 
   // Define S2GCopy for all output STensors
   code.e("// S->G copy atoms");
-  vector<string> code_after_forloop;
   for (tb::TBOperator const *op : g.operators) {
     if (op->op_type == type::TB_OUTPUT_OP) {
       tb::TBOutputOp const *cur_op = dynamic_cast<tb::TBOutputOp const *>(op);
-      // For output ops that have a forloop_dim, we copy the result at the end
-      // of a forloop iteration, which means that the source should be the input
-      // STensor, while for output ops that do not have a forloop_dim, we
-      // accumulate the result during the forloop iteration, which means that
-      // the source should be the accumulator
-      tb::STensor const &input_stensor = cur_op->input_tensors.at(0);
-      tb::STensor const &accum_stensor = cur_op->output_tensors.at(0);
-      tb::STensor const &src_stensor = cur_op->forloop_dim >= 0
-                                           ? input_stensor
-                                           : accum_stensor; // Copy source
+      tb::STensor const &stensor = cur_op->input_tensors.at(0);
       kn::DTensor const &dtensor = cur_op->dtensor;
-      STensorMeta const &stensor_meta = stensor_metas.at(src_stensor.guid);
+      STensorMeta const &stensor_meta = stensor_metas.at(stensor.guid);
       DTensorMeta const &dtensor_meta = dtensor_metas.at(dtensor.guid);
-      assert(dtensor.num_dims == src_stensor.num_dims);
-      assert(dtensor.data_type == src_stensor.data_type);
+      assert(dtensor.num_dims == stensor.num_dims);
+      assert(dtensor.data_type == stensor.data_type);
       int num_dims = dtensor.num_dims;
       int d_innermost_dim = dtensor_meta.innermost_dim;
 
       code.e("// Copy for S->G: stensor $ -> dtensor $",
-             src_stensor.guid,
+             stensor.guid,
              dtensor.guid);
 
       // Get the starting address of my tile
@@ -296,7 +302,7 @@ Transpiler::CustomOPTranspileResult
              dtensor.guid,
              offset);
       string dtensor_tile_layout = get_cute_layout(
-          mov_to_last(src_stensor.dim,
+          mov_to_last(stensor.dim,
                       dtensor.num_dims,
                       d_innermost_dim), // Here we use stensor.dim
           mov_to_last(dtensor_meta.strides, dtensor.num_dims, d_innermost_dim));
@@ -320,33 +326,393 @@ Transpiler::CustomOPTranspileResult
       code.e(
           "using STensor$OutputAtom = tb::OutputNonChunkedSyncCopy<half_t, "
           "DTensor$TileLayout, $, NUM_THREADS>;",
-          src_stensor.guid,
+          stensor.guid,
           dtensor.guid,
-          mov_last_and_get_layout(src_stensor, stensor_meta, d_innermost_dim));
-
-      if (cur_op->forloop_dim < 0) {
-        // For output tensors that do not have a forloop_dim, generate the
-        // instruction for saving the result to the output dtensor, and clear
-        // the accumulator
-        code_after_forloop.push_back(fmt("STensor$OutputAtom::run(dtensor$_"
-                                         "tile_ptr, stensor$_ptr, thread_idx);",
-                                         src_stensor.guid,
-                                         dtensor.guid,
-                                         src_stensor.guid));
-        size_t num_elems = 0;
-        for (int i = 0; i < src_stensor.num_dims; ++i) {
-          num_elems =
-              std::max(num_elems, src_stensor.dim[i] * stensor_meta.strides[i]);
-        }
-        code.e("tb::ClearOutputAccumKernel<half_t, $, "
-               "NUM_THREADS>::run(stensor$_ptr, thread_idx);",
-               num_elems,
-               accum_stensor.guid);
-      }
+          mov_last_and_get_layout(stensor, stensor_meta, d_innermost_dim));
     }
   }
+  code.e("");
 
-  code.e("__syncthreads();");
+  // Clear all accumulators
+  int num_clear_accums = 0;
+  for (tb::TBOperator const *op : g.operators) {
+    if (op->op_type == type::TB_FORLOOP_ACCUM_OP) {
+      tb::STensor const& accum = op->output_tensors.at(0);
+      STensorMeta const& accum_meta = stensor_metas.at(accum.guid);
+      size_t num_elems = 0;
+      for (int i = 0; i < accum.num_dims; ++i) {
+        num_elems =
+            std::max(num_elems, accum.dim[i] * accum_meta.strides[i]);
+      }
+      code.e("tb::ClearAccumlatorKernel<half_t, $, "
+             "NUM_THREADS>::run(stensor$_ptr, thread_idx);",
+             num_elems,
+             accum.guid);
+      num_clear_accums += 1;
+    }
+  }
+  code.e("");
+
+  if (num_pre_loop_copies > 0 || num_clear_accums > 0) {
+    code.e("__syncthreads();");
+    code.e("");
+  }
+
+  // A lambda function that transpiles an TBSchedNode
+  auto transpile_tb_sched_node = [&](TBSchedNode const &sched_node, bool is_in_loop) {
+    CodeKeeper code;
+    if (sched_node.type == tb_sched_node_t::SYNCTHREADS) {
+      code.e("__syncthreads();");
+    } else {
+      tb::TBOperator const *op = sched_node.ops[0];
+      assert(sched_node.ops.size() == 1); // TODO(intlsy): Support operator fusion
+      std::string op_type_str;
+      to_json(op_type_str, op->op_type);
+      code.e("{");
+      code.e("// OP type: $", op_type_str);
+      switch (op->op_type) {
+        case type::TB_INPUT_OP: {
+          // In this lambda function we only accept input ops within the for loop
+          tb::TBInputOp const *cur_op = dynamic_cast<tb::TBInputOp const *>(op);
+          assert(is_in_loop);
+          assert(cur_op->forloop_dim >= 0);
+          kn::DTensor const &dtensor = cur_op->dtensor;
+          tb::STensor const &stensor = cur_op->output_tensors.at(0);
+          int tile_side_len = stensor.dim[cur_op->forloop_dim];
+          size_t forloop_dim_stride =
+              dtensor_metas.at(dtensor.guid).strides[cur_op->forloop_dim];
+          code.e("STensor$InputAtom::run(stensor$_ptr, dtensor$_tile_ptr + "
+                "$*for_idx, thread_idx);",
+                stensor.guid,
+                stensor.guid,
+                dtensor.guid,
+                tile_side_len * forloop_dim_stride);
+          break;
+        }
+        case type::TB_OUTPUT_OP: {
+          tb::TBOutputOp const *cur_op = dynamic_cast<tb::TBOutputOp const *>(op);
+          // Currently in Mirage core, an output op must have forloop_dim = -1
+          assert(!is_in_loop);
+          assert(cur_op->forloop_dim == -1);
+          if (cur_op->forloop_dim >= 0) {
+            #ifdef DEADCODE
+            // For output DTensor that has a forloop_dim, copy it
+            kn::DTensor const &dtensor = cur_op->dtensor;
+            tb::STensor const &stensor = cur_op->input_tensors.at(0);
+            int tile_side_len = stensor.dim[cur_op->forloop_dim];
+            size_t forloop_dim_stride =
+                dtensor_metas.at(dtensor.guid).strides[cur_op->forloop_dim];
+            code.e("STensor$OutputAtom::run(stensor$_ptr, dtensor$_tile_ptr + "
+                  "$*for_idx, thread_idx);",
+                  stensor.guid,
+                  stensor.guid,
+                  dtensor.guid,
+                  tile_side_len * forloop_dim_stride);
+            #endif
+          } else {
+            tb::STensor const &stensor = cur_op->input_tensors.at(0);
+            kn::DTensor const &dtensor = cur_op->dtensor;
+            code.e("STensor$OutputAtom::run(dtensor$_tile_ptr, stensor$_ptr, "
+                  "thread_idx);",
+                  stensor.guid,
+                  dtensor.guid,
+                  stensor.guid);
+          }
+          break;
+        };
+        case type::TB_MATMUL_OP: {
+          tb::STensor const &input0 = op->input_tensors.at(0);
+          tb::STensor const &input1 = op->input_tensors.at(1);
+          tb::STensor const &output = op->output_tensors.at(0);
+          STensorMeta meta0 = stensor_metas.at(input0.guid);
+          STensorMeta meta1 = stensor_metas.at(input1.guid);
+          STensorMeta meta2 = stensor_metas.at(output.guid);
+          int num_dims = input0.num_dims;
+          assert(input1.num_dims == num_dims && output.num_dims == num_dims);
+          int m = output.dim[num_dims - 2];
+          int n = output.dim[num_dims - 1];
+          int k = input0.dim[num_dims - 1];
+          assert(input0.dim[num_dims - 2] == m && input0.dim[num_dims - 1] == k);
+          assert(input1.dim[num_dims - 2] == k && input1.dim[num_dims - 1] == n);
+
+          // Pick up MMA atom
+          // TODO(intlsy) May calculate AB via (B^T A^T)^T when M is relatively
+          // small
+          string mma_atom_str;
+          std::tuple<int, int, int> mma_atom_mnk;
+          int mma_atom_num_threads;
+          if (GPU_CC::A100 <= config.target_cc &&
+              config.target_cc < GPU_CC::H100) {
+            if (k <= 8) {
+              mma_atom_str = "SM80_16x8x8_F16F16F16F16_TN";
+              mma_atom_mnk = {16, 8, 8};
+              mma_atom_num_threads = 32;
+            } else {
+              mma_atom_str = "SM80_16x8x16_F16F16F16F16_TN";
+              mma_atom_mnk = {16, 8, 16};
+              mma_atom_num_threads = 32;
+            }
+          } else {
+            // TODO(intlsy): Support more architectures
+            assert(0 && "Unsupported GPU Architecture");
+          }
+          auto [mma_atom_m, mma_atom_n, mma_atom_k] = mma_atom_mnk;
+
+          // Pick up TiledMMAThrLayout
+          // The algorithm is documented in `docs/transpiler/transpiler.md`
+          // TODO(intlsy) Update this algo to be more friendly to small matrix
+          // by dropping some threads
+          assert(num_threads % mma_atom_num_threads == 0);
+          int max_num_tgs =
+              num_threads / mma_atom_num_threads; // tg = thread group
+          float best_score = -1.0f;
+          int best_num_tg_m = -1, best_num_tg_n = -1;
+          for (int num_tg_m = 1; num_tg_m <= max_num_tgs; ++num_tg_m) {
+            for (int num_tg_n = 1; num_tg_m * num_tg_n <= max_num_tgs;
+                ++num_tg_n) {
+              int tiled_mma_m = mma_atom_m * num_tg_m;
+              int tiled_mma_n = mma_atom_n * num_tg_n;
+              int num_tiles_m = ceil_div(m, tiled_mma_m);
+              int num_tiles_n = ceil_div(n, tiled_mma_n);
+              int64_t data_moved_A =
+                  ((int64_t)num_tiles_m * tiled_mma_m) * k * num_tg_n;
+              int64_t data_moved_B =
+                  ((int64_t)num_tiles_n * tiled_mma_n) * k * num_tg_m;
+              int64_t data_moved = data_moved_A + data_moved_B;
+              float score =
+                  (1.0f / data_moved) * (num_tg_m * num_tg_n / (float)max_num_tgs);
+              if (score > best_score) {
+                best_score = score;
+                best_num_tg_m = num_tg_m;
+                best_num_tg_n = num_tg_n;
+              }
+            }
+          }
+
+          bool is_ldmatrix_avail = config.target_cc >= GPU_CC::T4;
+          bool is_stmatrix_avail = config.target_cc >= GPU_CC::H100;
+
+          code.e("using LayoutA = $;", get_cute_layout(input0, meta0));
+          code.e("using LayoutB = $;", get_cute_layout(input1, meta1));
+          code.e("using LayoutC = $;", get_cute_layout(output, meta2));
+
+          code.e("using Kernel = tb::Matmul<half_t, $, Layout<Shape<Int<$>, "
+                "Int<$>, _1>>, $, $, LayoutA, LayoutB, LayoutC, NUM_THREADS>;",
+                mma_atom_str,
+                best_num_tg_m,
+                best_num_tg_n,
+                is_ldmatrix_avail,
+                is_stmatrix_avail);
+          code.e("Kernel::run(stensor$_ptr, stensor$_ptr, stensor$_ptr, "
+                "(char*)(buf+0), thread_idx);",
+                output.guid,
+                input0.guid,
+                input1.guid);
+          break;
+        };
+        case type::TB_EXP_OP: {
+          tb::STensor const &input = op->input_tensors.at(0);
+          tb::STensor const &output = op->output_tensors.at(0);
+          assert(input.num_dims == output.num_dims);
+          int num_dims = input.num_dims;
+          // Find the iteration dim
+          int iter_dim = -1;
+          for (int i = 0; i < num_dims; ++i) {
+            bool failed = false;
+            for (tb::STensor const &stensor : {input, output}) {
+              STensorMeta meta = stensor_metas.at(stensor.guid);
+              if (i != meta.innermost_dim && !meta.is_dim_swizzled(i)) {
+                failed = true;
+                break;
+              }
+            }
+            if (!failed) {
+              iter_dim = i;
+              break;
+            }
+          }
+          assert(iter_dim != -1);
+          // Define layouts
+          string in_layout = mov_last_and_get_layout(
+              input, stensor_metas.at(input.guid), iter_dim);
+          string out_layout = mov_last_and_get_layout(
+              output, stensor_metas.at(output.guid), iter_dim);
+          code.e("using InLayout = $;", in_layout);
+          code.e("using OutLayout = $;", out_layout);
+          // Define and run the kernel
+          code.e(
+              "using Kernel = tb::ElementUnaryKernel<half_t, "
+              "tb::ElementUnaryOpType::EXP, OutLayout, InLayout, NUM_THREADS>;");
+          code.e("Kernel::run(stensor$_ptr, stensor$_ptr, thread_idx);",
+                output.guid,
+                input.guid);
+          break;
+        }
+        case type::TB_ADD_OP:
+        case type::TB_MUL_OP:
+        case type::TB_DIV_OP: {
+          tb::STensor const &input0 = op->input_tensors.at(0);
+          tb::STensor const &input1 = op->input_tensors.at(1);
+          tb::STensor const &output = op->output_tensors.at(0);
+          assert(input0.num_dims == input1.num_dims &&
+                input0.num_dims == output.num_dims);
+          int num_dims = input0.num_dims;
+          // Find the iteration dim
+          int iter_dim = -1;
+          for (int i = 0; i < num_dims; ++i) {
+            bool failed = false;
+            for (tb::STensor const &stensor : {input0, input1, output}) {
+              STensorMeta meta = stensor_metas.at(stensor.guid);
+              if (i != meta.innermost_dim && !meta.is_dim_swizzled(i)) {
+                failed = true;
+                break;
+              }
+            }
+            if (!failed) {
+              iter_dim = i;
+              break;
+            }
+          }
+          assert(iter_dim != -1);
+          // Define op type
+          string op_type_str = op->op_type == type::TB_ADD_OP   ? "ADD"
+                              : op->op_type == type::TB_MUL_OP ? "MUL"
+                              : op->op_type == type::TB_DIV_OP ? "DIV"
+                                                                : "";
+          assert(op_type_str != "");
+          // Define layouts
+          string in0_layout = mov_last_and_get_layout(
+              input0, stensor_metas.at(input0.guid), iter_dim);
+          string in1_layout = mov_last_and_get_layout(
+              input1, stensor_metas.at(input1.guid), iter_dim);
+          string out_layout = mov_last_and_get_layout(
+              output, stensor_metas.at(output.guid), iter_dim);
+          code.e("using In0Layout = $;", in0_layout);
+          code.e("using In1Layout = $;", in1_layout);
+          code.e("using OutLayout = $;", out_layout);
+          // Define and run the kernel
+          code.e("using Kernel = tb::ElementBinaryKernel<half_t, "
+                "tb::ElementBinaryOpType::$, OutLayout, In0Layout, In1Layout, "
+                "NUM_THREADS>;",
+                op_type_str);
+          code.e("Kernel::run(stensor$_ptr, stensor$_ptr, stensor$_ptr, "
+                "thread_idx);",
+                output.guid,
+                input0.guid,
+                input1.guid);
+          break;
+        }
+        case type::TB_REDUCTION_0_OP:
+        case type::TB_REDUCTION_1_OP:
+        case type::TB_REDUCTION_2_OP:
+        case type::TB_REDUCTION_0_TO_DIMX_OP:
+        case type::TB_REDUCTION_1_TO_DIMX_OP:
+        case type::TB_REDUCTION_2_TO_DIMX_OP: {
+          tb::STensor const &input = op->input_tensors.at(0);
+          tb::STensor const &output = op->output_tensors.at(0);
+          STensorMeta input_meta = stensor_metas.at(input.guid);
+          STensorMeta output_meta = stensor_metas.at(output.guid);
+          assert(input.num_dims == output.num_dims);
+          int num_dims = input.num_dims;
+          int reduc_dim = op->op_type >= type::TB_REDUCTION_0_TO_DIMX_OP
+                              ? op->op_type - type::TB_REDUCTION_0_TO_DIMX_OP
+                              : op->op_type - type::TB_REDUCTION_0_OP;
+          assert(0 <= reduc_dim && reduc_dim < num_dims);
+          // Find the iteration dim
+          int iter_dim = -1;
+          for (int i = 0; i < num_dims; ++i) {
+            if (i == reduc_dim) {
+              continue;
+            }
+            bool failed = false;
+            for (tb::STensor const &stensor : {input, output}) {
+              STensorMeta meta = stensor_metas.at(stensor.guid);
+              if (i != meta.innermost_dim && !meta.is_dim_swizzled(i)) {
+                failed = true;
+                break;
+              }
+            }
+            if (!failed) {
+              iter_dim = i;
+              break;
+            }
+          }
+          assert(iter_dim != -1);
+          assert(iter_dim != reduc_dim);
+          // Define layouts
+          string in_layout = mov_last_and_get_layout(input, input_meta, iter_dim);
+          string out_layout =
+              mov_last_and_get_layout(output, output_meta, iter_dim);
+          int cute_reduc_dim = reduc_dim < iter_dim ? num_dims - 1 - reduc_dim
+                                                    : num_dims - reduc_dim;
+          code.e("using InLayout = $;", in_layout);
+          code.e("using OutLayout = $;", out_layout);
+          // Define and run the kernel
+          code.e("using Kernel = tb::ReductionKernel<half_t, "
+                "OutLayout, InLayout, $, NUM_THREADS>;",
+                cute_reduc_dim);
+          code.e("Kernel::run(stensor$_ptr, stensor$_ptr, thread_idx);",
+                output.guid,
+                input.guid);
+          break;
+        }
+        case type::TB_FORLOOP_ACCUM_OP: {
+          assert(is_in_loop);
+          tb::STensor const &input = op->input_tensors.at(0);
+          tb::STensor const &accum = op->output_tensors.at(0);
+          int num_dims = input.num_dims;
+          // Find the iteration dim
+          int iter_dim = -1;
+          for (int i = 0; i < num_dims; ++i) {
+            bool failed = false;
+            for (tb::STensor const &stensor : {input, accum}) {
+              STensorMeta meta = stensor_metas.at(stensor.guid);
+              if (i != meta.innermost_dim && !meta.is_dim_swizzled(i)) {
+                failed = true;
+                break;
+              }
+            }
+            if (!failed) {
+              iter_dim = i;
+              break;
+            }
+          }
+          assert(iter_dim != -1);
+          // Define layouts
+          string in_layout = mov_last_and_get_layout(
+              input, stensor_metas.at(input.guid), iter_dim);
+          string accum_layout = mov_last_and_get_layout(
+              accum, stensor_metas.at(accum.guid), iter_dim);
+          code.e("using Kernel = tb::ForloopAccumKernel<half_t, $, $, NUM_THREADS>;",
+                accum_layout,
+                in_layout);
+          code.e("Kernel::run(stensor$_ptr, stensor$_ptr, thread_idx);",
+                accum.guid,
+                input.guid);
+          break;
+        }
+        case type::TB_CONCAT_0_OP:
+        case type::TB_CONCAT_1_OP:
+        case type::TB_CONCAT_2_OP: {
+          assert(0 && "Not implemented");
+          break;
+        }
+        case type::TB_CONCAT_THEN_MATMUL_OP: {
+          assert(0 && "Not implemented");
+          break;
+        }
+        case type::TB_CUSTOMIZED_OP: {
+          assert(0 && "Not implemented");
+          break;
+        }
+        default: {
+          assert(fmt("Unknown TB op: $", op->op_type).c_str());
+        }
+      }
+      code.e("}");
+    }
+    return code;
+  };
 
   // Declare the for loop
   // TODO(intlsy) Remove the loop when `plan.forloop_range` is 1
@@ -354,341 +720,21 @@ Transpiler::CustomOPTranspileResult
   assert(plan.forloop_range >= 1);
   code.e("// The main loop");
   code.e("for (int for_idx = 0; for_idx < $; for_idx++) {", plan.forloop_range);
-
-  for (tb::TBOperator const *op : g.operators) {
-    std::string op_type_str;
-    to_json(op_type_str, op->op_type);
-    code.e("{");
-    code.e("// OP type: $", op_type_str);
-    switch (op->op_type) {
-      case type::TB_INPUT_OP: {
-        // For input STensor that has a forloop_dim, copy it
-        tb::TBInputOp const *cur_op = dynamic_cast<tb::TBInputOp const *>(op);
-        if (cur_op->forloop_dim >= 0) {
-          kn::DTensor const &dtensor = cur_op->dtensor;
-          tb::STensor const &stensor = cur_op->output_tensors.at(0);
-          int tile_side_len = stensor.dim[cur_op->forloop_dim];
-          size_t forloop_dim_stride =
-              dtensor_metas.at(dtensor.guid).strides[cur_op->forloop_dim];
-          code.e("STensor$InputAtom::run(stensor$_ptr, dtensor$_tile_ptr + "
-                 "$*for_idx, thread_idx);",
-                 stensor.guid,
-                 stensor.guid,
-                 dtensor.guid,
-                 tile_side_len * forloop_dim_stride);
-        }
-        break;
-      }
-      case type::TB_OUTPUT_OP: {
-        tb::TBOutputOp const *cur_op = dynamic_cast<tb::TBOutputOp const *>(op);
-        if (cur_op->forloop_dim >= 0) {
-          // For output DTensor that has a forloop_dim, copy it
-          kn::DTensor const &dtensor = cur_op->dtensor;
-          tb::STensor const &stensor = cur_op->input_tensors.at(0);
-          int tile_side_len = stensor.dim[cur_op->forloop_dim];
-          size_t forloop_dim_stride =
-              dtensor_metas.at(dtensor.guid).strides[cur_op->forloop_dim];
-          code.e("STensor$OutputAtom::run(stensor$_ptr, dtensor$_tile_ptr + "
-                 "$*for_idx, thread_idx);",
-                 stensor.guid,
-                 stensor.guid,
-                 dtensor.guid,
-                 tile_side_len * forloop_dim_stride);
-        } else {
-          // For output DTensor that does not have a forloop_dim, accumulate it
-          tb::STensor const &stensor_input = cur_op->input_tensors.at(0);
-          tb::STensor const &stensor_accum = cur_op->output_tensors.at(0);
-          STensorMeta const &stensor_input_meta =
-              stensor_metas.at(stensor_input.guid);
-          STensorMeta const &stensor_accum_meta =
-              stensor_metas.at(stensor_accum.guid);
-          // The two tensors should have the same layout
-          assert(vector<int>(stensor_input.dim,
-                             stensor_input.dim + stensor_input.num_dims) ==
-                 vector<int>(stensor_accum.dim,
-                             stensor_accum.dim + stensor_accum.num_dims));
-          assert(vector<size_t>(stensor_input_meta.strides,
-                                stensor_input_meta.strides +
-                                    stensor_input.num_dims) ==
-                 vector<size_t>(stensor_accum_meta.strides,
-                                stensor_accum_meta.strides +
-                                    stensor_accum.num_dims));
-          string layout =
-              mov_last_and_get_layout(stensor_accum,
-                                      stensor_accum_meta,
-                                      stensor_accum_meta.innermost_dim);
-          code.e(
-              "using Kernel = tb::AccumOutputKernel<half_t, $, NUM_THREADS>;",
-              layout);
-          code.e("Kernel::run(stensor$_ptr, stensor$_ptr, thread_idx);",
-                 stensor_accum.guid,
-                 stensor_input.guid);
-        }
-        break;
-      };
-      case type::TB_MATMUL_OP: {
-        tb::STensor const &input0 = op->input_tensors.at(0);
-        tb::STensor const &input1 = op->input_tensors.at(1);
-        tb::STensor const &output = op->output_tensors.at(0);
-        STensorMeta meta0 = stensor_metas.at(input0.guid);
-        STensorMeta meta1 = stensor_metas.at(input1.guid);
-        STensorMeta meta2 = stensor_metas.at(output.guid);
-        int num_dims = input0.num_dims;
-        assert(input1.num_dims == num_dims && output.num_dims == num_dims);
-        int m = output.dim[num_dims - 2];
-        int n = output.dim[num_dims - 1];
-        int k = input0.dim[num_dims - 1];
-        assert(input0.dim[num_dims - 2] == m && input0.dim[num_dims - 1] == k);
-        assert(input1.dim[num_dims - 2] == k && input1.dim[num_dims - 1] == n);
-
-        // Pick up MMA atom
-        // TODO(intlsy) May calculate AB via (B^T A^T)^T when M is relatively
-        // small
-        string mma_atom_str;
-        std::tuple<int, int, int> mma_atom_mnk;
-        int mma_atom_num_threads;
-        if (GPU_CC::A100 <= config.target_cc &&
-            config.target_cc < GPU_CC::H100) {
-          if (k <= 8) {
-            mma_atom_str = "SM80_16x8x8_F16F16F16F16_TN";
-            mma_atom_mnk = {16, 8, 8};
-            mma_atom_num_threads = 32;
-          } else {
-            mma_atom_str = "SM80_16x8x16_F16F16F16F16_TN";
-            mma_atom_mnk = {16, 8, 16};
-            mma_atom_num_threads = 32;
-          }
-        } else {
-          // TODO(intlsy): Support more architectures
-          assert(0 && "Unsupported GPU Architecture");
-        }
-        auto [mma_atom_m, mma_atom_n, mma_atom_k] = mma_atom_mnk;
-
-        // Pick up TiledMMAThrLayout
-        // The algorithm is documented in `docs/transpiler/transpiler.md`
-        // TODO(intlsy) Update this algo to be more friendly to small matrix
-        // by dropping some threads
-        assert(num_threads % mma_atom_num_threads == 0);
-        int max_num_tgs =
-            num_threads / mma_atom_num_threads; // tg = thread group
-        float best_score = -1.0f;
-        int best_num_tg_m = -1, best_num_tg_n = -1;
-        for (int num_tg_m = 1; num_tg_m <= max_num_tgs; ++num_tg_m) {
-          for (int num_tg_n = 1; num_tg_m * num_tg_n <= max_num_tgs;
-               ++num_tg_n) {
-            int tiled_mma_m = mma_atom_m * num_tg_m;
-            int tiled_mma_n = mma_atom_n * num_tg_n;
-            int num_tiles_m = ceil_div(m, tiled_mma_m);
-            int num_tiles_n = ceil_div(n, tiled_mma_n);
-            int64_t data_moved_A =
-                ((int64_t)num_tiles_m * tiled_mma_m) * k * num_tg_n;
-            int64_t data_moved_B =
-                ((int64_t)num_tiles_n * tiled_mma_n) * k * num_tg_m;
-            int64_t data_moved = data_moved_A + data_moved_B;
-            float score =
-                (1.0f / data_moved) * (num_tg_m * num_tg_n / max_num_tgs);
-            if (score > best_score) {
-              best_score = score;
-              best_num_tg_m = num_tg_m;
-              best_num_tg_n = num_tg_n;
-            }
-          }
-        }
-
-        bool is_ldmatrix_avail = config.target_cc >= GPU_CC::T4;
-        bool is_stmatrix_avail = config.target_cc >= GPU_CC::H100;
-
-        code.e("using LayoutA = $;", get_cute_layout(input0, meta0));
-        code.e("using LayoutB = $;", get_cute_layout(input1, meta1));
-        code.e("using LayoutC = $;", get_cute_layout(output, meta2));
-
-        code.e("using Kernel = tb::Matmul<half_t, $, Layout<Shape<Int<$>, "
-               "Int<$>, _1>>, $, $, LayoutA, LayoutB, LayoutC, NUM_THREADS>;",
-               mma_atom_str,
-               best_num_tg_m,
-               best_num_tg_n,
-               is_ldmatrix_avail,
-               is_stmatrix_avail);
-        code.e("Kernel::run(stensor$_ptr, stensor$_ptr, stensor$_ptr, "
-               "(char*)(buf+0), thread_idx);",
-               output.guid,
-               input0.guid,
-               input1.guid);
-        break;
-      };
-      case type::TB_EXP_OP: {
-        tb::STensor const &input = op->input_tensors.at(0);
-        tb::STensor const &output = op->output_tensors.at(0);
-        assert(input.num_dims == output.num_dims);
-        int num_dims = input.num_dims;
-        // Find the iteration dim
-        int iter_dim = -1;
-        for (int i = 0; i < num_dims; ++i) {
-          bool failed = false;
-          for (tb::STensor const &stensor : {input, output}) {
-            STensorMeta meta = stensor_metas.at(stensor.guid);
-            if (i != meta.innermost_dim && !meta.is_dim_swizzled(i)) {
-              failed = true;
-              break;
-            }
-          }
-          if (!failed) {
-            iter_dim = i;
-            break;
-          }
-        }
-        assert(iter_dim != -1);
-        // Define layouts
-        string in_layout = mov_last_and_get_layout(
-            input, stensor_metas.at(input.guid), iter_dim);
-        string out_layout = mov_last_and_get_layout(
-            output, stensor_metas.at(output.guid), iter_dim);
-        code.e("using InLayout = $;", in_layout);
-        code.e("using OutLayout = $;", out_layout);
-        // Define and run the kernel
-        code.e(
-            "using Kernel = tb::ElementUnaryKernel<half_t, "
-            "tb::ElementUnaryOpType::EXP, OutLayout, InLayout, NUM_THREADS>;");
-        code.e("Kernel::run(stensor$_ptr, stensor$_ptr, thread_idx);",
-               output.guid,
-               input.guid);
-        break;
-      }
-      case type::TB_ADD_OP:
-      case type::TB_MUL_OP:
-      case type::TB_DIV_OP: {
-        tb::STensor const &input0 = op->input_tensors.at(0);
-        tb::STensor const &input1 = op->input_tensors.at(1);
-        tb::STensor const &output = op->output_tensors.at(0);
-        assert(input0.num_dims == input1.num_dims &&
-               input0.num_dims == output.num_dims);
-        int num_dims = input0.num_dims;
-        // Find the iteration dim
-        int iter_dim = -1;
-        for (int i = 0; i < num_dims; ++i) {
-          bool failed = false;
-          for (tb::STensor const &stensor : {input0, input1, output}) {
-            STensorMeta meta = stensor_metas.at(stensor.guid);
-            if (i != meta.innermost_dim && !meta.is_dim_swizzled(i)) {
-              failed = true;
-              break;
-            }
-          }
-          if (!failed) {
-            iter_dim = i;
-            break;
-          }
-        }
-        assert(iter_dim != -1);
-        // Define op type
-        string op_type_str = op->op_type == type::TB_ADD_OP   ? "ADD"
-                             : op->op_type == type::TB_MUL_OP ? "MUL"
-                             : op->op_type == type::TB_DIV_OP ? "DIV"
-                                                              : "";
-        assert(op_type_str != "");
-        // Define layouts
-        string in0_layout = mov_last_and_get_layout(
-            input0, stensor_metas.at(input0.guid), iter_dim);
-        string in1_layout = mov_last_and_get_layout(
-            input1, stensor_metas.at(input1.guid), iter_dim);
-        string out_layout = mov_last_and_get_layout(
-            output, stensor_metas.at(output.guid), iter_dim);
-        code.e("using In0Layout = $;", in0_layout);
-        code.e("using In1Layout = $;", in1_layout);
-        code.e("using OutLayout = $;", out_layout);
-        // Define and run the kernel
-        code.e("using Kernel = tb::ElementBinaryKernel<half_t, "
-               "tb::ElementBinaryOpType::$, OutLayout, In0Layout, In1Layout, "
-               "NUM_THREADS>;",
-               op_type_str);
-        code.e("Kernel::run(stensor$_ptr, stensor$_ptr, stensor$_ptr, "
-               "thread_idx);",
-               output.guid,
-               input0.guid,
-               input1.guid);
-        break;
-      }
-      case type::TB_REDUCTION_0_OP:
-      case type::TB_REDUCTION_1_OP:
-      case type::TB_REDUCTION_2_OP:
-      case type::TB_REDUCTION_0_TO_DIMX_OP:
-      case type::TB_REDUCTION_1_TO_DIMX_OP:
-      case type::TB_REDUCTION_2_TO_DIMX_OP: {
-        tb::STensor const &input = op->input_tensors.at(0);
-        tb::STensor const &output = op->output_tensors.at(0);
-        STensorMeta input_meta = stensor_metas.at(input.guid);
-        STensorMeta output_meta = stensor_metas.at(output.guid);
-        assert(input.num_dims == output.num_dims);
-        int num_dims = input.num_dims;
-        int reduc_dim = op->op_type >= type::TB_REDUCTION_0_TO_DIMX_OP
-                            ? op->op_type - type::TB_REDUCTION_0_TO_DIMX_OP
-                            : op->op_type - type::TB_REDUCTION_0_OP;
-        assert(0 <= reduc_dim && reduc_dim < num_dims);
-        // Find the iteration dim
-        int iter_dim = -1;
-        for (int i = 0; i < num_dims; ++i) {
-          if (i == reduc_dim) {
-            continue;
-          }
-          bool failed = false;
-          for (tb::STensor const &stensor : {input, output}) {
-            STensorMeta meta = stensor_metas.at(stensor.guid);
-            if (i != meta.innermost_dim && !meta.is_dim_swizzled(i)) {
-              failed = true;
-              break;
-            }
-          }
-          if (!failed) {
-            iter_dim = i;
-            break;
-          }
-        }
-        assert(iter_dim != -1);
-        assert(iter_dim != reduc_dim);
-        // Define layouts
-        string in_layout = mov_last_and_get_layout(input, input_meta, iter_dim);
-        string out_layout =
-            mov_last_and_get_layout(output, output_meta, iter_dim);
-        int cute_reduc_dim = reduc_dim < iter_dim ? num_dims - 1 - reduc_dim
-                                                  : num_dims - reduc_dim;
-        code.e("using InLayout = $;", in_layout);
-        code.e("using OutLayout = $;", out_layout);
-        // Define and run the kernel
-        code.e("using Kernel = tb::ReductionKernel<half_t, "
-               "OutLayout, InLayout, $, NUM_THREADS>;",
-               cute_reduc_dim);
-        code.e("Kernel::run(stensor$_ptr, stensor$_ptr, thread_idx);",
-               output.guid,
-               input.guid);
-        break;
-      }
-      case type::TB_CONCAT_0_OP:
-      case type::TB_CONCAT_1_OP:
-      case type::TB_CONCAT_2_OP: {
-        assert(0 && "Not implemented");
-        break;
-      }
-      case type::TB_CONCAT_THEN_MATMUL_OP: {
-        assert(0 && "Not implemented");
-        break;
-      }
-      case type::TB_CUSTOMIZED_OP: {
-        assert(0 && "Not implemented");
-        break;
-      }
-      default: {
-        assert(fmt("Unknown TB op: $", op->op_type).c_str());
-      }
-    }
-    code.e("}");
-    code.e("__syncthreads();");
+  for (const TBSchedNode& sched_node : sched.loop_nodes) {
+    CodeKeeper res = transpile_tb_sched_node(sched_node, true);
+    code << res;
   }
   code.e("}"); // For loop
+  code.e("");
 
-  // For output ops that do not have a forloop dim, save the result in the
-  // accumulator to the output dtensor
-  for (string const &line : code_after_forloop) {
-    code.e(line);
+  if (!sched.post_loop_nodes.empty()) {
+    code.e("__syncthreads();");
+    code.e("// The epilogue (kernels outside the loop)");
+    for (const TBSchedNode& sched_node : sched.post_loop_nodes) {
+      CodeKeeper res = transpile_tb_sched_node(sched_node, false);
+      code << res;
+    }
+
   }
 
   code.e("}"); // kernel

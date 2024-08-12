@@ -63,6 +63,11 @@ public:
                                              get<2>(stride(InputLayout{}))))>;
 };
 
+enum class S2RTiledCopyType {
+  UNNIVERSAL,
+  LDMATRIX_N,
+  LDMATRIX_T
+};
 // Select the S2R (shared -> register) copy atom
 template <typename T,
           bool IS_LDMATRIX_AVAIL,
@@ -102,6 +107,7 @@ public:
   using Result = std::conditional_t<CONSECUTIVE_DIM == K_DIM,
                                     Copy_Atom<CandidateLdMatrixN, T>,
                                     Copy_Atom<CandidateLdMatrixT, T>>;
+  static constexpr S2RTiledCopyType TYPE = CONSECUTIVE_DIM == K_DIM ? S2RTiledCopyType::LDMATRIX_N : S2RTiledCopyType::LDMATRIX_T;
 };
 
 // Select the R2S (register -> shared) copy atom
@@ -277,16 +283,22 @@ public:
   static_assert(TILED_MMA_NUM_THREADS <= NUM_THREADS);
 
   // CopyAtom selection
-  using S2RTiledCopyAAtom = typename S2RTiledCopySelector<T,
+  using S2RTiledCopyASelector = S2RTiledCopySelector<T,
                                                           IS_LDMATRIX_AVAIL,
                                                           SmemLayoutA,
                                                           1,
-                                                          MMAAtomK>::Result;
-  using S2RTiledCopyBAtom = typename S2RTiledCopySelector<T,
+                                                          MMAAtomK>;
+  using S2RTiledCopyAAtom = typename S2RTiledCopyASelector::Result;
+  static constexpr S2RTiledCopyType S2R_TILED_COPY_A_TYPE = S2RTiledCopyASelector::TYPE;
+
+  using S2RTiledCopyBSelector = S2RTiledCopySelector<T,
                                                           IS_LDMATRIX_AVAIL,
                                                           SmemLayoutB,
                                                           1,
-                                                          MMAAtomK>::Result;
+                                                          MMAAtomK>;
+  using S2RTiledCopyBAtom = typename S2RTiledCopyBSelector::Result;
+  static constexpr S2RTiledCopyType S2R_TILED_COPY_B_TYPE = S2RTiledCopyBSelector::TYPE;
+
   using R2STiledCopyCAtom =
       typename R2STiledCopySelector<T, IS_STMATRIX_AVAIL, SmemLayoutC>::Result;
 
@@ -317,13 +329,17 @@ public:
     if constexpr (K{} % _8{} != _0{}) {
       // Need to pad with zero
       static constexpr int K_LEFTOVER = int(_8{} - K{} % _8{});
-      CUTE_UNROLL
-      for (int i = thread_idx; i < int(M{}) * K_LEFTOVER; i += NUM_THREADS) {
-        sA(i / K_LEFTOVER, K{} + i % K_LEFTOVER, _0{}) = (T)0;
+      if constexpr (S2R_TILED_COPY_A_TYPE == S2RTiledCopyType::LDMATRIX_N) {
+        CUTE_UNROLL
+        for (int i = thread_idx; i < int(M{}) * K_LEFTOVER; i += NUM_THREADS) {
+          sA(i / K_LEFTOVER, K{} + i % K_LEFTOVER, _0{}) = (T)0;
+        }
       }
-      CUTE_UNROLL
-      for (int i = thread_idx; i < int(N{}) * K_LEFTOVER; i += NUM_THREADS) {
-        sB(i / K_LEFTOVER, K{} + i % K_LEFTOVER, _0{}) = (T)0;
+      if constexpr (S2R_TILED_COPY_B_TYPE == S2RTiledCopyType::LDMATRIX_N) {
+        CUTE_UNROLL
+        for (int i = thread_idx; i < int(N{}) * K_LEFTOVER; i += NUM_THREADS) {
+          sB(i / K_LEFTOVER, K{} + i % K_LEFTOVER, _0{}) = (T)0;
+        }
       }
     }
     TiledMMA tiled_mma;

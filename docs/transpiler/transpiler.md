@@ -69,6 +69,36 @@ In threadblock level code, an operator (which will be transpiled to a device fun
 
 [TODO]
 
+### TB Graph Scheduling
+
+The TB graph scheduling problem is that, given a threadblock-level graph, how to get an optimal "schedule" to maximize the performance? The "schedule" here includes:
+
+- The order of operators
+- The address of the space allocated for each intermediate tensor
+
+And in order to optimize the performance, we may need to:
+
+- Minimize the number of synchronizations (`__syncthreads()`) between threadblocks
+- Minimize the peak shared memory usage
+
+Those objectives are maybe conflicting, and we need to somehow find a balance between them. Consider the following computational graph:
+
+![tb-sched-conflict-example](/docs/assets/transpiler/tb-sched-conflict-example.drawio.svg)
+
+And there are two possible schedulings:
+
+- `12 534 6 7`: 3 synchronizations (a space denotes a synchronization) with peak mem usage = 4
+- `1234 56 7`: 2 synchronizations with peak mem usage = 5
+
+Currently our heuristic is that, we always prioritize the number of synchronizations, and then the peak mem usage. So we first find an order that minimizes the number of synchronizations (if multiple orders have the same number of synchronizations, we choose a random one).
+
+To find the order with the minimum number of synchronizations, we use a modified topology sort algorithm. We label each node (threadblock operator) with a "depth", which is length of the longest path from any input operator to this node. We can calculate this depth by a dynamic programming (DP) algorithm:
+
+- For input nodes, its depth is 0
+- Otherwise, its depth is $\max_{v \in I} depth[v] + 1$, where $I$ is the set of direct input nodes of this node
+
+After that, we sort the nodes by their depth in ascending order.
+
 ## Problems and Solutions
 
 In this section, we will discuss some problems and solutions on corner cases.

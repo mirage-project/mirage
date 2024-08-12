@@ -14,10 +14,13 @@
  */
 #pragma once
 
+#include <cassert>
 #include <functional>
 #include <iostream>
 #include <string>
 #include <vector>
+
+#include "mirage/type.h"
 
 namespace mirage {
 namespace transpiler {

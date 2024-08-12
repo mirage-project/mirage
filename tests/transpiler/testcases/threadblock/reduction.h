@@ -60,7 +60,8 @@ ADD_TESTCASE(Testcase("tb_reduction_correctness", {"threadblock", "correctness"}
 			dim3 grid_shape = dim3(1, 1, 1);
 			std::shared_ptr<tb::Graph> sg = std::make_shared<tb::Graph>(grid_shape, subcase.block_dim, 1, subcase.reduction_dimx);
 			tb::STensor si0 = sg->new_input(inputs[0], {-1, -1, -1}, -1, layout::SmemRowMajor);
-			tb::STensor so0 = subcase.reduction_dimx == 1 ? sg->reduction(si0, subcase.reduction_dim) : sg->reduction_to_dimx(si0, subcase.reduction_dim);
+			tb::STensor sx0 = subcase.reduction_dimx == 1 ? sg->reduction(si0, subcase.reduction_dim) : sg->reduction_to_dimx(si0, subcase.reduction_dim);
+			tb::STensor so0 = sg->forloop_accum(sx0);
 			kn::DTensor o0 = sg->new_output(so0, {-1, -1, -1}, -1, type::TB_EPILOGUE_NONE);
 			return {sg, {o0}};
 		});

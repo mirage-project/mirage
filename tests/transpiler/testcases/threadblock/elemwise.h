@@ -2,6 +2,7 @@
 #pragma once
 
 #include "../../lib.h"
+#include "mirage/threadblock/smem_tensor.h"
 
 ADD_TESTCASE(Testcase("tb_elemwise_correctness", {"threadblock", "correctness"}, "threadblock-level elementwise op correctness test", [](Testcase* this_testcase) {
 	struct SubcaseConfig {
@@ -112,6 +113,15 @@ ADD_TESTCASE(Testcase("tb_elemwise_correctness", {"threadblock", "correctness"},
 			};
 			subcases.push_back(subcase);
 		}
+	subcases.push_back({
+		"Large 3D mixed, no forloop, 2d grid",
+		{100, 120, 140},
+		{1, 100, 12000}, {18200, 140, 1},
+		dim3(100, 3, 1),
+		dim3(128, 1, 1),
+		{0, 1, -1},
+		-1, 1
+	});
 	for (const SubcaseConfig &subcase : subcases) {
 		Subcase t({
 			1,
@@ -129,7 +139,8 @@ ADD_TESTCASE(Testcase("tb_elemwise_correctness", {"threadblock", "correctness"},
 			tb::STensor si1 = sg->new_input(inputs[1], subcase.io_map, subcase.forloop_dim, layout::SmemRowMajor);
 			tb::STensor sx0 = sg->add(si0, si1);
 			tb::STensor sx1 = sg->div(sx0, si1);
-			tb::STensor so0 = sg->exp(sx1);
+			tb::STensor sx2 = sg->exp(sx1);
+			tb::STensor so0 = sg->forloop_accum(sx2);
 			kn::DTensor o0 = sg->new_output(so0, subcase.io_map, subcase.forloop_dim, type::TB_EPILOGUE_NONE);
 			return {sg, {o0}};
 		});

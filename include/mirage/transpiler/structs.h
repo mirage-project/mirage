@@ -37,7 +37,7 @@ struct TranspilerConfig {
 // the obtained pointer to `execute_mugraph`. So during transpilation, we must
 // tell the Python interface how to allocate the tensor
 struct OutputTensorDirective {
-  // The physical size needed
+  // The physical size needed (in number of elements)
   size_t alloc_size;
 
   // The shape
@@ -89,7 +89,8 @@ struct DTensorMeta {
   // Physical size needed for the tensor
   // For output tensors, we will return it back to the Python interface so that
   // it knows how much memory to allocate
-  size_t phy_size;
+  // (in number of elements)
+  size_t num_phy_elems;
 };
 
 // Metadata for STensors during transpiling
@@ -107,6 +108,9 @@ struct STensorMeta {
   // Strides of each dimension, in number of elements
   // Must be padded to multiple of 8
   size_t strides[threadblock::MAX_TENSOR_DIMS];
+
+  // Physical size needed for the tensor (in number of elements)
+  size_t num_phy_elems;
 
   bool is_dim_swizzled(int dim) const {
     return std::find(swizzled_dims.begin(), swizzled_dims.end(), dim) !=

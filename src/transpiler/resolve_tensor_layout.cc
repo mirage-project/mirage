@@ -13,12 +13,14 @@
  * limitations under the License.
  */
 
+#include "mirage/threadblock/smem_tensor.h"
 #include "mirage/transpiler/transpiler.h"
 
 #include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
 
+#include "mirage/type.h"
 #include "z3++.h"
 
 #include "mirage/kernel/customized.h"
@@ -69,6 +71,32 @@ cost_t TB_INPUT_NO_CP_ASYNC = 20;
 cost_t SWIZZLE_DIM = 1;
 
 } // namespace cost
+
+void calc_tensor_strides(size_t strides[], size_t &num_phy_elems, int num_dims, const int dims[], int innermost_dim, int datatype_size) {
+  // An order of dimensions. We layout elements according to this order
+  vector<int> dim_order = {innermost_dim};
+  for (int i = num_dims-1; i >= 0; --i) {
+    if (i != innermost_dim) {
+      dim_order.push_back(i);
+    }
+  }
+  size_t alignment = std::max(16 / datatype_size, 1);
+  size_t cur_stride = 1;
+  bool encountered_non1_dim = false;
+  for (int dim_idx : dim_order) {
+    int cur_dim = dims[dim_idx];
+    strides[dim_idx] = cur_stride;
+    if (cur_dim != 1) {
+      if (!encountered_non1_dim) {
+        cur_stride *= round_to_multiple((size_t)cur_dim, alignment);
+        encountered_non1_dim = true;
+      } else {
+        cur_stride *= cur_dim;
+      }
+    }
+  }
+  num_phy_elems = cur_stride;
+}
 
 // Resolve all tensor layouts
 // Determine the innermost dimensions for all dtensors and stensors
@@ -309,10 +337,8 @@ void Transpiler::resolve_tensor_layout() {
             tb::TBOutputOp const *tb_output_op =
                 dynamic_cast<tb::TBOutputOp const *>(tb_op);
             tb::STensor const &input = tb_output_op->input_tensors.at(0);
-            tb::STensor const &accum = tb_output_op->output_tensors.at(0);
             kn::DTensor const &output = tb_output_op->dtensor;
-            assert(input.num_dims == output.num_dims &&
-                   input.num_dims == accum.num_dims);
+            assert(input.num_dims == output.num_dims);
             if (this->config.target_cc < GPU_CC::H100) {
               // Want to leverage wide copy (uint128_t), so need the innermost
               // dim to be the same
@@ -326,13 +352,6 @@ void Transpiler::resolve_tensor_layout() {
             } else {
               // Want to leverage cp.bulk.async (TMA instructions)
               assert(0 && "Not implemented");
-            }
-            // Force the input and the accumulator to have the same layout
-            for (int i = 0; i < input.num_dims; ++i) {
-              opt.add(s_is_innermost[input.guid][i] ==
-                      s_is_innermost[accum.guid][i]);
-              opt.add(s_is_swizzled[input.guid][i] ==
-                      s_is_swizzled[accum.guid][i]);
             }
             break;
           }
@@ -431,6 +450,28 @@ void Transpiler::resolve_tensor_layout() {
               opt.add(z3::implies(is_op_iter_dim[i] &&
                                       !s_is_innermost[input1.guid][i],
                                   s_is_swizzled[input1.guid][i]));
+              opt.add(z3::implies(is_op_iter_dim[i] &&
+                                      !s_is_innermost[output.guid][i],
+                                  s_is_swizzled[output.guid][i]));
+            }
+            break;
+          }
+          case type::TB_FORLOOP_ACCUM_OP: {
+            tb::STensor const &input = tb_op->input_tensors.at(0);
+            tb::STensor const &output = tb_op->output_tensors.at(0);
+            assert(input.num_dims == output.num_dims);
+            int num_dims = input.num_dims;
+            z3::expr_vector is_op_iter_dim(ctx);
+            for (int i = 0; i < input.num_dims; ++i) {
+              std::string var_name = fmt("op_iter_dim_$_$", output.guid, i);
+              is_op_iter_dim.push_back(ctx.bool_const(var_name.c_str()));
+            }
+            opt.add(z3::atmost(is_op_iter_dim, 1));
+            opt.add(z3::atleast(is_op_iter_dim, 1));
+            for (int i = 0; i < num_dims; ++i) {
+              opt.add(z3::implies(is_op_iter_dim[i] &&
+                                      !s_is_innermost[input.guid][i],
+                                  s_is_swizzled[input.guid][i]));
               opt.add(z3::implies(is_op_iter_dim[i] &&
                                       !s_is_innermost[output.guid][i],
                                   s_is_swizzled[output.guid][i]));
@@ -555,42 +596,16 @@ void Transpiler::resolve_tensor_layout() {
       assert(meta.strides[innermost_dim] == 1);
     } else {
       // Intermediate tensor or output tensor
-      // The strides are calculated from the innermost dim
-      // The innermost dim has stride 1
-      size_t alignment = get_num_elems_in_16B(dtensor.data_type);
-      meta.strides[innermost_dim] = 1;
-      size_t cur_stride =
-          round_to_multiple((size_t)dtensor.dim[innermost_dim], alignment);
-      for (int i = num_dims - 1; i >= 0; --i) {
-        if (i == innermost_dim) {
-          continue;
-        }
-        meta.strides[i] = cur_stride;
-        size_t cur_dim = (size_t)dtensor.dim[i];
-        size_t cur_dim_rounded =
-            cur_dim == 1 ? 1 : round_to_multiple(cur_dim, alignment);
-        cur_stride *= cur_dim_rounded;
-      }
+      calc_tensor_strides(meta.strides, meta.num_phy_elems, num_dims, dtensor.dim, innermost_dim,
+                          type::get_datatype_size(dtensor.data_type));
     }
   }
   for (tb::STensor const &stensor : all_stensors) {
     STensorMeta &meta = this->stensor_metas[stensor.guid];
     int num_dims = stensor.num_dims;
     int innermost_dim = meta.innermost_dim;
-    size_t alignment = get_num_elems_in_16B(stensor.data_type);
-    meta.strides[innermost_dim] = 1;
-    size_t cur_stride =
-        round_to_multiple((size_t)stensor.dim[innermost_dim], alignment);
-    for (int i = num_dims - 1; i >= 0; --i) {
-      if (i == innermost_dim) {
-        continue;
-      }
-      meta.strides[i] = cur_stride;
-      size_t cur_dim = (size_t)stensor.dim[i];
-      size_t cur_dim_rounded =
-          cur_dim == 1 ? 1 : round_to_multiple(cur_dim, alignment);
-      cur_stride *= cur_dim_rounded;
-    }
+    calc_tensor_strides(meta.strides, meta.num_phy_elems, num_dims, stensor.dim, innermost_dim,
+                        type::get_datatype_size(stensor.data_type));
   }
 }
 

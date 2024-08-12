@@ -46,22 +46,6 @@ public:
   }
 };
 
-// Get the size needed for a tensor, in bytes
-size_t get_tensor_phy_size(int num_dims,
-                           int const dims[],
-                           const size_t strides[],
-                           type::DataType datatype) {
-  size_t alignment = get_num_elems_in_16B(datatype);
-  size_t result = 0;
-  for (int i = 0; i < num_dims; ++i) {
-    size_t t_result =
-        (dims[i] == 1 ? 1 : round_to_multiple((size_t)dims[i], alignment)) *
-        strides[i];
-    result = std::max(result, t_result);
-  }
-  return result * type::get_datatype_size(datatype);
-}
-
 // Plan the memory for every DTensor and STensor
 void Transpiler::plan_tensor_memory() {
   // Plan memory for all DTensors
@@ -70,9 +54,7 @@ void Transpiler::plan_tensor_memory() {
     for (kn::DTensor &dtensor : all_dtensors) {
       dguid_t guid = dtensor.guid;
       DTensorMeta &meta = dtensor_metas[guid];
-      size_t phy_size = get_tensor_phy_size(
-          dtensor.num_dims, dtensor.dim, meta.strides, dtensor.data_type);
-      meta.phy_size = phy_size;
+      size_t phy_size = meta.num_phy_elems * type::get_datatype_size(dtensor.data_type);
       if (!meta.is_input && !meta.is_output) {
         meta.addr = planner.allocate(phy_size);
       }
@@ -100,8 +82,7 @@ void Transpiler::plan_tensor_memory() {
           }
           processed_sguid.insert(guid);
           STensorMeta &meta = stensor_metas[guid];
-          size_t size = get_tensor_phy_size(
-              stensor.num_dims, stensor.dim, meta.strides, stensor.data_type);
+          size_t size = meta.num_phy_elems * type::get_datatype_size(stensor.data_type);
           meta.addr = planner.allocate(size);
         }
       }
