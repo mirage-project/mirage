@@ -118,6 +118,7 @@ NLOHMANN_JSON_SERIALIZE_ENUM(
         {TB_CONCAT_0_OP, "tb_concat_0_op"},
         {TB_CONCAT_1_OP, "tb_concat_1_op"},
         {TB_CONCAT_2_OP, "tb_concat_2_op"},
+        {TB_FORLOOP_ACCUM_OP, "tb_forloop_accum_op"},
         {TB_CUSTOMIZED_OP, "tb_customized_op"},
     })
 
