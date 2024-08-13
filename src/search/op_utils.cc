@@ -94,10 +94,11 @@ std::shared_ptr<AlgebraicPattern>
     get_pattern(type::TBOperatorType op,
                 STensor const &tensor,
                 std::shared_ptr<AlgebraicPattern> opd) {
-  // Retrieve reduction_dimx from threadblock graph
+  // Retrieve reduction_dimx and forloop_range from threadblock graph
   assert(tensor.owner_op != nullptr);
   assert(tensor.owner_op->bgraph != nullptr);
   int reduction_dimx = tensor.owner_op->bgraph->reduction_dimx;
+  int forloop_range = tensor.owner_op->bgraph->forloop_range;
   switch (op) {
     case type::TBOperatorType::TB_EXP_OP:
       return std::make_shared<Exp>(opd);
@@ -128,8 +129,10 @@ std::shared_ptr<AlgebraicPattern>
         return nullptr;
       }
       return std::make_shared<Red>(tensor.dim[2] / reduction_dimx, opd);
-    case type::TBOperatorType::TB_OUTPUT_OP:
-      return opd;
+    // case type::TBOperatorType::TB_OUTPUT_OP:
+    //   return opd;
+    case type::TBOperatorType::TB_FORLOOP_ACCUM_OP:
+      return std::make_shared<Red>(forloop_range, opd);
     default:
       assert(false);
   }

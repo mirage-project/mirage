@@ -23,12 +23,8 @@ void pattern_eval(
            patterns.at(
                static_cast<threadblock::TBInputOp *>(op)->dtensor.guid)});
     } else if (op->op_type == type::TBOperatorType::TB_OUTPUT_OP) {
-      patterns.insert(
-          {static_cast<threadblock::TBOutputOp *>(op)->dtensor.guid,
-           g.forloop_range > 1
-               ? std::make_shared<Red>(g.forloop_range,
-                                       patterns.at(op->input_tensors[0].guid))
-               : patterns.at(op->input_tensors[0].guid)});
+      patterns.insert({static_cast<threadblock::TBOutputOp *>(op)->dtensor.guid,
+                       patterns.at(op->input_tensors[0].guid)});
     } else {
       std::vector<std::shared_ptr<AlgebraicPattern>> input_patterns;
       for (STensor const &input_tensor : op->input_tensors) {
@@ -64,62 +60,6 @@ void pattern_eval(
       pattern_eval(static_cast<kernel::KNCustomizedOp *>(op)->bgraph, patterns);
     }
   }
-}
-
-SearchContext::SearchContext()
-    : kn_graph(nullptr), tb_graph(nullptr), level(SearchLevel::LV_KERNEL) {}
-
-SearchContext::~SearchContext() {}
-
-SearchContext SearchContext::copy() const {
-  SearchContext c;
-  from_json(json(*this), c);
-  return c;
-}
-
-void to_json(json &j, SearchContext const &c) {
-  j["kn_graph"] = json(*c.kn_graph);
-  std::vector<std::pair<size_t, size_t>> inputs;
-  if (c.tb_graph) {
-    threadblock::ExecutionPlan plan = c.tb_graph->get_plan();
-    j["tb_plan"] = json(plan);
-    for (auto const &op : c.tb_graph->operators) {
-      if (op->op_type == type::TBOperatorType::TB_INPUT_OP) {
-        for (size_t i = 0; i < c.kn_graph->operators.size(); ++i) {
-          for (size_t j = 0;
-               j < c.kn_graph->operators[i]->output_tensors.size();
-               ++j) {
-            if (c.kn_graph->operators[i]->output_tensors[j].guid ==
-                static_cast<threadblock::TBInputOp *>(op)->dtensor.guid) {
-              inputs.push_back({i, j});
-              break;
-            }
-          }
-        }
-      }
-    }
-    assert(plan.input_map.size() == inputs.size());
-  }
-  j["inputs"] = inputs;
-  j["level"] = c.level;
-}
-
-void from_json(json const &j, SearchContext &c) {
-  c.kn_graph = std::make_shared<kernel::Graph>();
-  from_json(j["kn_graph"], *c.kn_graph);
-  std::vector<std::pair<size_t, size_t>> inputs;
-  from_json(j["inputs"], inputs);
-  if (inputs.size()) {
-    std::vector<DTensor> input_tensors;
-    threadblock::ExecutionPlan plan;
-    from_json(j["tb_plan"], plan);
-    for (auto const &id : inputs) {
-      input_tensors.push_back(
-          c.kn_graph->operators[id.first]->output_tensors[id.second]);
-    }
-    c.tb_graph = std::make_shared<threadblock::Graph>(input_tensors, plan);
-  }
-  c.level = j["level"];
 }
 
 KernelGraphGenerator::KernelGraphGenerator(
@@ -234,28 +174,12 @@ std::vector<typename GraphType::TensorType>
   return output_tensors;
 }
 
-void KernelGraphGenerator::enqueue(SearchContext const &c) {
-  std::lock_guard<std::mutex> lock(queue_mutex);
-  search_queue.push(c);
-  queue_cv.notify_one();
-}
-
-bool KernelGraphGenerator::dequeue(SearchContext &c) {
-  std::unique_lock<std::mutex> lock(queue_mutex);
-  if (!queue_cv.wait_for(
-          lock, timeout, [&] { return !search_queue.empty(); })) {
-    return false;
-  }
-  c = search_queue.front();
-  search_queue.pop();
-  return true;
-}
-
-void KernelGraphGenerator::generate_next_operator(SearchContext const &c) {
+void KernelGraphGenerator::generate_next_operator(
+    SearchContext const &c, SearchStateManager<SearchContext> *manager) {
   ++num_total_states;
   if (num_total_states % 1000 == 1) {
     printf("Total states explored: %d.\n", num_total_states.load());
-    printf("Search queue size: %lu\n", search_queue.size());
+    // printf("Search queue size: %lu\n", search_queue.size());
   }
   std::unordered_map<int64_t, std::shared_ptr<AlgebraicPattern>>
       algebraic_pattern;
@@ -306,7 +230,7 @@ void KernelGraphGenerator::generate_next_operator(SearchContext const &c) {
                         get_tensors_from_idx(*nc.kn_graph, input_idx));
           if (new_op) {
             nc.kn_graph->operators.push_back(new_op);
-            enqueue(nc);
+            manager->add_state(nc);
           }
         }
       } else {
@@ -363,7 +287,7 @@ void KernelGraphGenerator::generate_next_operator(SearchContext const &c) {
                     }
                     if (input_created) {
                       nc.level = SearchLevel::LV_THREADBLOCK;
-                      enqueue(nc);
+                      manager->add_state(nc);
                     }
                   }
                 }
@@ -395,7 +319,7 @@ void KernelGraphGenerator::generate_next_operator(SearchContext const &c) {
         assert(nc.kn_graph->operators.back()->kgraph->gpu_dim.x == 1);
         nc.level = SearchLevel::LV_KERNEL;
         nc.tb_graph = nullptr;
-        enqueue(nc);
+        manager->add_state(nc);
       }
     }
 
@@ -437,16 +361,9 @@ void KernelGraphGenerator::generate_next_operator(SearchContext const &c) {
           continue;
         }
         nc.tb_graph->operators.push_back(new_op);
-        enqueue(nc);
+        manager->add_state(nc);
       }
     }
-  }
-}
-
-void KernelGraphGenerator::launch_thread() {
-  SearchContext c;
-  while (dequeue(c)) {
-    generate_next_operator(c);
   }
 }
 
@@ -481,17 +398,35 @@ bool KernelGraphGenerator::create_threadblock_outputs(
     if (!check_pattern(pattern)) {
       return false;
     }
-    TBOperator *new_op =
-        c.tb_graph->create_output_op(stensor,
-                                     output_map,
-                                     -1 /*forloop_dim*/,
-                                     mirage::type::TB_EPILOGUE_NONE);
-    if (!new_op) {
+    TBOperator *accum = c.tb_graph->create_forloop_accum_op(stensor);
+    if (!accum) {
       return false;
     }
-    c.tb_graph->operators.push_back(new_op);
+    c.tb_graph->operators.push_back(accum);
   }
+
+  for (auto const &op : c.tb_graph->operators) {
+    if (op->op_type == type::TBOperatorType::TB_FORLOOP_ACCUM_OP) {
+      TBOperator *new_op =
+          c.tb_graph->create_output_op(op->output_tensors[0],
+                                       output_map,
+                                       -1 /*forloop_dim*/,
+                                       mirage::type::TB_EPILOGUE_NONE);
+      if (!new_op) {
+        return false;
+      }
+      c.tb_graph->operators.push_back(new_op);
+    }
+  }
+
   return true;
+}
+
+void KernelGraphGenerator::search(SearchStateManager<SearchContext> *manager) {
+  SearchContext c;
+  while (manager->pop_state(c)) {
+    generate_next_operator(c, manager);
+  }
 }
 
 void KernelGraphGenerator::generate_kernel_graphs() {
@@ -505,14 +440,52 @@ void KernelGraphGenerator::generate_kernel_graphs() {
     c.kn_graph->new_input(dim, data_type, layout);
   }
 
-  enqueue(c);
+  bool use_global_worker_queue = false;
+  if (use_global_worker_queue) {
+    SearchStateManager<SearchContext> *manager =
+        new GlobalWorkerQueueManager<SearchContext>(timeout);
+    manager->add_state(c);
 
-  std::vector<std::thread> threads;
-  for (int i = 0; i < num_thread; ++i) {
-    threads.push_back(std::thread(&KernelGraphGenerator::launch_thread, this));
-  }
-  for (int i = 0; i < num_thread; ++i) {
-    threads[i].join();
+    std::vector<std::thread> threads;
+    for (int i = 0; i < num_thread; ++i) {
+      threads.push_back(
+          std::thread(&KernelGraphGenerator::search, this, manager));
+    }
+    for (int i = 0; i < num_thread; ++i) {
+      threads[i].join();
+    }
+    delete manager;
+  } else {
+    LocalConditionalManager<SearchContext> *manager =
+        new LocalConditionalManager<SearchContext>([](SearchContext const &c) {
+          return count_op(type::KNOperatorType::KN_CUSTOMIZED_OP,
+                          *c.kn_graph) >= MAX_NUM_THREADBLOCK / 2;
+        });
+    manager->add_state(c);
+    search(manager);
+
+    std::vector<SearchStateManager<SearchContext> *> managers;
+    for (int i = 0; i < num_thread; ++i) {
+      managers.push_back(new LocalConditionalManager<SearchContext>(
+          [](SearchContext const &c) { return false; }));
+    }
+
+    SearchContext _c;
+    while (manager->pop_state_without_condition(_c)) {
+      managers[std::rand() % num_thread]->add_state(_c);
+    }
+
+    std::vector<std::thread> threads;
+    for (int i = 0; i < num_thread; ++i) {
+      threads.push_back(
+          std::thread(&KernelGraphGenerator::search, this, managers[i]));
+    }
+    for (int i = 0; i < num_thread; ++i) {
+      threads[i].join();
+      delete managers[i];
+    }
+
+    delete manager;
   }
 
   save_results();

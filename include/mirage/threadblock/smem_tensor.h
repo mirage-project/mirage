@@ -173,7 +173,7 @@ struct alignas(16) STensor {
 };
 
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(
-    STensor, data_type, layout, num_dims, dim, smem_offset, guid)
+    STensor, data_type, layout, num_dims, dim, smem_offset, guid, after_accum);
 
 } // namespace threadblock
 } // namespace mirage

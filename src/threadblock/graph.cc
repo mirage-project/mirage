@@ -118,6 +118,11 @@ Graph::Graph(std::vector<kernel::DTensor> const &_inputs,
         concat(my_inputs[0], my_inputs[1], concat_dim);
         break;
       }
+      case mirage::type::TB_FORLOOP_ACCUM_OP: {
+        assert(my_inputs.size() == 1);
+        forloop_accum(my_inputs[0]);
+        break;
+      }
       default: {
         assert(false && "Unsupported kernel operator");
       }
