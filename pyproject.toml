@@ -1,0 +1,7 @@
+[build-system]
+requires = [
+    "setuptools>=49.4.0", 
+    "cmake>=3.24",
+    "cython>=0.28",
+    "z3-solver"
+]

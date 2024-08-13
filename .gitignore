@@ -1,3 +1,5 @@
+.hypothesis/
+
 # Compiled object files
 *.o
 *.obj
