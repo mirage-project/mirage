@@ -54,6 +54,13 @@ public:
   DTensor *exp(DTensor const *input);
   DTensor silu(DTensor const &input);
   DTensor *silu(DTensor const *input);
+  DTensor square(DTensor const &input);
+  DTensor *square(DTensor const *input);
+  DTensor sqrt(DTensor const &input);
+  DTensor *sqrt(DTensor const *input);
+  DTensor elementunary(DTensor const &input, mirage::type::KNOperatorType _type);
+  DTensor *elementunary(DTensor const *input, mirage::type::KNOperatorType _type);
+
   KNOperator *create_elementunary_op(DTensor const &input,
                                      mirage::type::KNOperatorType _type);
   // elementunary operator

@@ -97,6 +97,9 @@ public:
   // element unary operator
   STensor exp(STensor const &A);
   STensor silu(STensor const &A);
+  STensor square(STensor const &A);
+  STensor sqrt(STensor const &A);
+
   TBOperator *create_elementunary_op(STensor const &A,
                                      mirage::type::TBOperatorType _type);
   STensor add(STensor const &A, STensor const &B);

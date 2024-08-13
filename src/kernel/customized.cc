@@ -101,14 +101,12 @@ KNCustomizedOp::KNCustomizedOp(Graph *_kgraph,
         bgraph.matmul(my_inputs[0], my_inputs[1]);
         break;
       }
-      case mirage::type::TB_EXP_OP: {
-        assert(my_inputs.size() == 1);
-        bgraph.exp(my_inputs[0]);
-        break;
-      }
+      case mirage::type::TB_EXP_OP:
+      case mirage::type::TB_SQUARE_OP:
+      case mirage::type::TB_SQRT_OP:
       case mirage::type::TB_SILU_OP: {
         assert(my_inputs.size() == 1);
-        bgraph.silu(my_inputs[0]);
+        bgraph.elementunary(my_inputs[0], op.first);
         break;
       }
       case mirage::type::TB_ADD_OP: {
@@ -281,14 +279,13 @@ KNCustomizedOp::KNCustomizedOp(mirage::kernel::Graph *_kgraph,
         bgraph.matmul(my_inputs[0], my_inputs[1]);
         break;
       }
-      case mirage::type::TB_EXP_OP: {
+      case mirage::type::TB_EXP_OP:
+      case mirage::type::TB_SQUARE_OP:
+      case mirage::type::TB_SQRT_OP:
+      case mirage::type::TB_SILU_OP:
+      {
         assert(my_inputs.size() == 1);
-        bgraph.exp(my_inputs[0]);
-        break;
-      }
-      case mirage::type::TB_SILU_OP: {
-        assert(my_inputs.size() == 1);
-        bgraph.silu(my_inputs[0]);
+        bgraph.elementunary(my_inputs[0], op->op_type);
         break;
       }
       case mirage::type::TB_ADD_OP: {
