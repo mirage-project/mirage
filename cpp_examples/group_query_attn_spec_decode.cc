@@ -129,9 +129,10 @@ int main(int argc, char **argv) {
   search::GeneratorConfig config =
       search::GeneratorConfig::get_attention_default_config();
   config.grid_dim_to_explore = {{2 * batch_size, 16, 4},
-                                {2 * batch_size, 8, 2},
+                                // {2 * batch_size, 8, 2},
                                 {2 * batch_size, 16, 1},
-                                {2 * batch_size, 8, 1}};
+                                // {2 * batch_size, 8, 1}
+                                };
   std::string checkpoint_file_name =
       "checkpoint_group_query_attn_spec_decode_bs" +
       std::to_string(batch_size) + ".json";

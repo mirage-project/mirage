@@ -127,8 +127,8 @@ IRange::IRange(RangeSet const &ranges, Range const &block_range)
 
 IRange IRange::forward_propagate(IRange range,
                                  kernel::KNOperator const &op,
-                                 size_t opd_idx) const {
-  switch (op->op_type) {
+                                 size_t opd_idx) {
+  switch (op.op_type) {
     case type::KNOperatorType::KN_ADD_OP:
     case type::KNOperatorType::KN_EXP_OP:
     case type::KNOperatorType::KN_MUL_OP:
@@ -168,7 +168,7 @@ IRange IRange::forward_propagate(IRange range,
 
 IRange IRange::forward_propagate(IRange range,
                                  threadblock::TBOperator const &op,
-                                 size_t opd_idx) const {
+                                 size_t opd_idx) {
   switch (op.op_type) {
     case type::TBOperatorType::TB_ADD_OP:
     case type::TBOperatorType::TB_EXP_OP:
@@ -204,7 +204,7 @@ IRange IRange::forward_propagate(IRange range,
 		case type::TB_REDUCTION_0_OP:
 		case type::TB_REDUCTION_1_OP:
 		case type::TB_REDUCTION_2_OP: {
-			int dim = op->op_type - type::TBOperatorType::TB_REDUCTION_0_OP;
+			int dim = op.op_type - type::TBOperatorType::TB_REDUCTION_0_OP;
 			return IRange(RangeSet::expand_dim(range.ranges, dim), range.block_range);
 		}
 		case type::TB_REDUCTION_0_TO_DIMX_OP:
