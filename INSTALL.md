@@ -29,39 +29,28 @@ python demo/demo_group_query_attention_spec_decode.py --checkpoint demo/checkpoi
 * Cython 0.28 or higher
 * CUDA 11.0 or higher and CUDNN 8.0 or higher
 
-### Clone github repo
 
+### Install the Mirage python package from source code
 To get started, you can clone the Mirage source code from github.
 ```bash
 git clone --recursive https://www.github.com/mirage-project/mirage
 cd mirage
 ```
 
-### Install Z3 or build Z3 from source code
-
-If the environment does not have a pre-installed Z3, you can build Z3 from source code using the following command lines
+Then, you can simple build the Mirage runtime library from source code using the following command line
 ```bash
-cd /path-to-mirage/deps/z3
-mkdir build
-cd build
-cmake ..
-make -j
-export LD_LIBRARY_PATH=/path-to-mirage/deps/z3/build:LD_LIBRARY_PATH
+pip install -e . -v 
 ```
-This will install Z3 in the `/path-to-mirage/deps/z3/build` folder and add the fold into `LD_LIBRARY_PATH`.
+All dependenices will be automatically installed.
 
-### Build the Mirage runtime library
-Second, you will need to build the Mirage runtime library. You will need to set `CUDACXX` and `Z3_DIR` to let cmake find the paths to CUDA and Z3 librarires.
+### Install the Mirage python package from Pypi
+We also provide the latest version of Mirage on Pypi. Install by running:
 ```bash
-export CUDACXX=/usr/local/cuda/bin/nvcc
-export Z3_DIR=/path-to-mirage/deps/z3/build
-mkdir build; cd build; cmake ..
-make -j
+pip install mirage
 ```
 
-### Install the Mirage python package
-Finally, you will install the Mirage python package, which allows you to use Mirage's python package to superoptimize DNNs.
+### Check your installation
+Just try to import mirage in Python. If there is no output, then Mirage and all dependencies have been successfully installed.
 ```bash
-cd /path-to-mirage/python
-python cython_setup.py install
+python -c 'import mirage'
 ```
