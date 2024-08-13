@@ -38,6 +38,11 @@ __global__ void execute_elementunary(mirage::type::KNOperatorType type,
     if (i < num_elements) {
       output_ptr[i] = cutlass::fast_exp(input_ptr[i]);
     }
+  } else if (type == mirage::type::KN_SILU_OP) {
+    if (i < num_elements) {
+      DT x = input_ptr[i];
+      output_ptr[i] = x / (1.0f + cutlass::fast_exp(-x));
+    }
   } else {
     assert(false && "Unimplemented");
   }
@@ -92,6 +97,13 @@ __global__ void
       mirage::type::FPType q_residual = val % FP_Q;
       uint32_t result = exp_lookup_table[q_residual];
       result = (result * FP_Q_MUL_P_MOD_1) % FP_PQ;
+      output_ptr[i] = result;
+    }
+  } else if (type == mirage::type::TB_SILU_OP) {
+    if (i < num_elements) {
+      mirage::type::FPType q_residual = input_ptr[i] % FP_Q;
+      uint32_t result = exp_lookup_table[q_residual];
+      result = (result * q_residual * FP_Q_MUL_P_MOD_1) % FP_PQ;
       output_ptr[i] = result;
     }
   } else {

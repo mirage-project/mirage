@@ -40,6 +40,23 @@ DTensor *Graph::exp(DTensor const *input) {
   return &op->output_tensors[0];
 }
 
+DTensor Graph::silu(DTensor const &input) {
+  KNOperator *op = create_elementunary_op(input, mirage::type::KN_SILU_OP);
+  assert(op != nullptr);
+  operators.push_back(op);
+  assert(op->output_tensors.size() == 1);
+  DTensor output = op->output_tensors[0];
+  return output;
+}
+
+DTensor *Graph::silu(DTensor const *input) {
+  KNOperator *op = create_elementunary_op(*input, mirage::type::KN_SILU_OP);
+  assert(op != nullptr);
+  operators.push_back(op);
+  assert(op->output_tensors.size() == 1);
+  return &op->output_tensors[0];
+}
+
 KNOperator *Graph::create_elementunary_op(DTensor const &input,
                                           mirage::type::KNOperatorType type) {
   if (!can_allocate(input)) {

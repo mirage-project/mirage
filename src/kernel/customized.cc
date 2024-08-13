@@ -106,6 +106,11 @@ KNCustomizedOp::KNCustomizedOp(Graph *_kgraph,
         bgraph.exp(my_inputs[0]);
         break;
       }
+      case mirage::type::TB_SILU_OP: {
+        assert(my_inputs.size() == 1);
+        bgraph.silu(my_inputs[0]);
+        break;
+      }
       case mirage::type::TB_ADD_OP: {
         assert(my_inputs.size() == 2);
         bgraph.add(my_inputs[0], my_inputs[1]);
@@ -279,6 +284,11 @@ KNCustomizedOp::KNCustomizedOp(mirage::kernel::Graph *_kgraph,
       case mirage::type::TB_EXP_OP: {
         assert(my_inputs.size() == 1);
         bgraph.exp(my_inputs[0]);
+        break;
+      }
+      case mirage::type::TB_SILU_OP: {
+        assert(my_inputs.size() == 1);
+        bgraph.silu(my_inputs[0]);
         break;
       }
       case mirage::type::TB_ADD_OP: {

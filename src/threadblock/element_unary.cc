@@ -27,6 +27,13 @@ STensor Graph::exp(STensor const &input) {
   return op->output_tensors[0];
 }
 
+STensor Graph::silu(STensor const &input) {
+  TBOperator *op = create_elementunary_op(input, mirage::type::TB_SILU_OP);
+  assert(op != nullptr);
+  operators.push_back(op);
+  return op->output_tensors[0];
+}
+
 TBOperator *Graph::create_elementunary_op(STensor const &input,
                                           mirage::type::TBOperatorType _type) {
   TBElementUnaryOp *op = new TBElementUnaryOp(this, input, _type);

@@ -96,6 +96,7 @@ public:
   TBOperator *create_matmul_op(STensor const &A, STensor const &B);
   // element unary operator
   STensor exp(STensor const &A);
+  STensor silu(STensor const &A);
   TBOperator *create_elementunary_op(STensor const &A,
                                      mirage::type::TBOperatorType _type);
   STensor add(STensor const &A, STensor const &B);

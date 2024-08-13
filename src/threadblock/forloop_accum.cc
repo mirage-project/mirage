@@ -45,14 +45,13 @@ TBOperator *Graph::create_forloop_accum_op(STensor const &input) {
   return op;
 }
 
-TBForloopAccumOp::TBForloopAccumOp(Graph *_graph,
-                                   STensor const &input)
+TBForloopAccumOp::TBForloopAccumOp(Graph *_graph, STensor const &input)
     : TBOperator(_graph, mirage::type::TB_FORLOOP_ACCUM_OP, input) {
   assert(!input.after_accum);
   STensor output = input;
   output.owner_op = this;
   output.owner_ts_idx = 0;
-  output.guid = STensor::next_guid ++;
+  output.guid = STensor::next_guid++;
   output.after_accum = true;
   output.smem_offset = bgraph->allocate_fingerprint(output);
   output_tensors.push_back(output);
