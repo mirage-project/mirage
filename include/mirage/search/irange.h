@@ -3,6 +3,7 @@
 #include "mirage/kernel/device_tensor.h"
 #include "mirage/kernel/operator.h"
 #include "mirage/threadblock/operator.h"
+#include "mirage/threadblock/graph.h"
 
 namespace mirage {
 namespace search {
@@ -22,7 +23,7 @@ public:
   static Range all_range(int num_dims);
   static Range expand_dim(Range const &range, int dim);
   static Range intersect(Range const &range1, Range const &range2);
-  static Range offset(Range cosnt &range1, std::vector<int> const &offset);
+  static Range offset(Range const &range1, std::vector<int> const &offset);
 };
 
 class RangeSet {
