@@ -81,14 +81,12 @@ Graph::Graph(std::vector<kernel::DTensor> const &_inputs,
         matmul(my_inputs[0], my_inputs[1]);
         break;
       }
-      case mirage::type::TB_EXP_OP: {
-        assert(my_inputs.size() == 1);
-        exp(my_inputs[0]);
-        break;
-      }
+      case mirage::type::TB_EXP_OP:
+      case mirage::type::TB_SQUARE_OP:
+      case mirage::type::TB_SQRT_OP:
       case mirage::type::TB_SILU_OP: {
         assert(my_inputs.size() == 1);
-        silu(my_inputs[0]);
+        elementunary(my_inputs[0], op.first);
         break;
       }
       case mirage::type::TB_ADD_OP: {
@@ -196,6 +194,8 @@ size_t Graph::calculate_shared_memory_usage(TBOperator *new_op) {
         break;
       }
       case mirage::type::TB_EXP_OP:
+      case mirage::type::TB_SQUARE_OP:
+      case mirage::type::TB_SQRT_OP:
       case mirage::type::TB_SILU_OP:
       case mirage::type::TB_FORLOOP_ACCUM_OP: {
         // inplace optimization for elementunary

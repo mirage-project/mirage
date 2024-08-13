@@ -282,8 +282,7 @@ KNCustomizedOp::KNCustomizedOp(mirage::kernel::Graph *_kgraph,
       case mirage::type::TB_EXP_OP:
       case mirage::type::TB_SQUARE_OP:
       case mirage::type::TB_SQRT_OP:
-      case mirage::type::TB_SILU_OP:
-      {
+      case mirage::type::TB_SILU_OP: {
         assert(my_inputs.size() == 1);
         bgraph.elementunary(my_inputs[0], op->op_type);
         break;

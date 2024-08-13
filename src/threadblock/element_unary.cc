@@ -21,14 +21,23 @@ namespace mirage {
 namespace threadblock {
 
 STensor Graph::exp(STensor const &input) {
-  TBOperator *op = create_elementunary_op(input, mirage::type::TB_EXP_OP);
-  assert(op != nullptr);
-  operators.push_back(op);
-  return op->output_tensors[0];
+  return elementunary(input, mirage::type::TB_EXP_OP);
+}
+
+STensor Graph::square(STensor const &input) {
+  return elementunary(input, mirage::type::TB_SQUARE_OP);
+}
+
+STensor Graph::sqrt(STensor const &input) {
+  return elementunary(input, mirage::type::TB_SQRT_OP);
 }
 
 STensor Graph::silu(STensor const &input) {
-  TBOperator *op = create_elementunary_op(input, mirage::type::TB_SILU_OP);
+  return elementunary(input, mirage::type::TB_SILU_OP);
+}
+
+STensor Graph::elementunary(STensor const &input, mirage::type::TBOperatorType type) {
+  TBOperator *op = create_elementunary_op(input, type);
   assert(op != nullptr);
   operators.push_back(op);
   return op->output_tensors[0];

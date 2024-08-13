@@ -99,6 +99,7 @@ public:
   STensor silu(STensor const &A);
   STensor square(STensor const &A);
   STensor sqrt(STensor const &A);
+  STensor elementunary(STensor const &A, mirage::type::TBOperatorType type);
 
   TBOperator *create_elementunary_op(STensor const &A,
                                      mirage::type::TBOperatorType _type);
