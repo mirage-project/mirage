@@ -50,61 +50,56 @@ TBOperator *Graph::create_elementbinary_op(STensor const &input1,
   if (input1.num_dims != input2.num_dims) {
     return nullptr;
   }
-  if (input1.after_accum != input2.after_accum) {
-    return nullptr;
-  }
   for (int i = 0; i < input1.num_dims; i++) {
     if (input1.dim[i] != input2.dim[i] && input1.dim[i] > 1 &&
         input2.dim[i] > 1) {
       return nullptr;
     }
   }
-  //STensor output = input1;
-  //for (int i = 0; i < output.num_dims; i++) {
-  //  output.dim[i] = std::max(input1.dim[i], input2.dim[i]);
-  //}
-  //if (smem_offset + output.size() > (off_t)mirage::config::MAX_SMEM_SIZE) {
-  //  return nullptr;
-  //}
-
-  TBElementBinaryOp *op = new TBElementBinaryOp(this, input1, input2, _type);
-
-  // Check shmem usage
-  size_t smem_usage = calculate_shared_memory_usage(op);
-  if (smem_usage > mirage::config::MAX_SMEM_SIZE) {
-    delete op;
-    return nullptr;
-  } else {
-    return op;
-  }
-}
-
-TBElementBinaryOp::TBElementBinaryOp(Graph *_graph,
-                                     STensor const &input1,
-                                     STensor const &input2,
-                                     mirage::type::TBOperatorType _type)
-    : TBOperator(_graph, _type, input1, input2) {
-  assert(input1.num_dims == input2.num_dims);
-  for (int i = 0; i < input1.num_dims; i++) {
-    if (input1.dim[i] != input2.dim[i]) {
-      assert(input1.dim[i] == 1 || input2.dim[i] == 1);
-    }
-  }
   STensor output = input1;
   for (int i = 0; i < output.num_dims; i++) {
     output.dim[i] = std::max(input1.dim[i], input2.dim[i]);
   }
+
+  if (smem_offset + output.size() > (off_t)mirage::config::MAX_SMEM_SIZE) {
+    return nullptr;
+  }
+
   output.owner_op = this;
   output.owner_ts_idx = 0;
   output.guid = STensor::next_guid++;
-  output.after_accum = input1.after_accum;
-  output.smem_offset = bgraph->allocate_fingerprint(output);
-  assert(output_tensors.size() == 0);
+  output.smem_offset = input1.smem_offset;
   output_tensors.push_back(output);
+
+  // TBElementBinaryOp *op = new TBElementBinaryOp(this, input1, input2, _type);
+  // return op;
 }
 
+// TBElementBinaryOp::TBElementBinaryOp(Graph *_graph,
+//                                      STensor const &input1,
+//                                      STensor const &input2,
+//                                      mirage::type::TBOperatorType _type)
+//     : TBOperator(_graph, _type, input1, input2) {
+//   assert(input1.num_dims == input2.num_dims);
+//   for (int i = 0; i < input1.num_dims; i++) {
+//     if (input1.dim[i] != input2.dim[i]) {
+//       assert(input1.dim[i] == 1 || input2.dim[i] == 1);
+//     }
+//   }
+//   STensor output = input1;
+//   for (int i = 0; i < output.num_dims; i++) {
+//     output.dim[i] = std::max(input1.dim[i], input2.dim[i]);
+//   }
+//   output.owner_op = this;
+//   output.owner_ts_idx = 0;
+//   output.guid = STensor::next_guid++;
+//   // output.smem_offset = bgraph->allocate(output);
+//   assert(output_tensors.size() == 0);
+//   output_tensors.push_back(output);
+// }
+
 TBElementBinaryOp::~TBElementBinaryOp() {
-  bgraph->free_fingerprint(output_tensors);
+  bgraph->free(output_tensors);
 }
 
 TBElementBinaryOp::operator json() const {
