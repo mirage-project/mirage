@@ -31,7 +31,8 @@ template <typename T,
           ElementUnaryOpType OP,
           typename DstLayout,
           typename SrcLayout,
-          int NUM_THREADS>
+          int NUM_THREADS,
+          class Epilogue>
 class ElementUnaryKernel {
 public:
   using Numel = decltype(cute::size(DstLayout{}));
@@ -45,7 +46,8 @@ public:
     for (int elem_idx = thread_idx; elem_idx < numel; elem_idx += NUM_THREADS) {
       int64_t dst_phy_pos = dst_layout(elem_idx);
       int64_t src_phy_pos = src_layout(elem_idx);
-      dst[dst_phy_pos] = perform_element_unary_op<T, OP>(src[src_phy_pos]);
+      T res = perform_element_unary_op<T, OP>(src[src_phy_pos]);
+      Epilogue::run(res, dst, dst_phy_pos);
     }
   }
 };

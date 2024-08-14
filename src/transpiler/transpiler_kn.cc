@@ -371,7 +371,6 @@ TranspileResult Transpiler::generate_code() {
         kn::KNCustomizedOp const *cur_op =
             dynamic_cast<kn::KNCustomizedOp const *>(op);
         tb::ExecutionPlan const &plan = cur_op->plan;
-        assert(custom_op_metas.count(cur_op));
         // Get DTensor ptrs
         // We make the aggrement that, when calling a custom kernel, the
         // arguments are in the order of "output_tensors, input_tensors"
@@ -386,19 +385,24 @@ TranspileResult Transpiler::generate_code() {
         CustomOPTranspileResult result = transpile_kn_custom_op(cur_op);
         // Checkings against grid dim and block dim
         if (config.target_cc <= GPU_CC::H100) {
-          // According to https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#features-and-technical-specifications, all GPUs up to H100 have the same restriction
-          assert(plan.grid_dim.x <= (1LL<<31)-1);
+          // According to
+          // https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#features-and-technical-specifications,
+          // all GPUs up to H100 have the same restriction
+          assert(plan.grid_dim.x <= (1LL << 31) - 1);
           assert(plan.grid_dim.y <= 65535);
           assert(plan.grid_dim.z <= 65535);
-          assert((long long)plan.grid_dim.x * plan.grid_dim.y * plan.grid_dim.z <=
-                (1LL<<31)-1);
+          assert((long long)plan.grid_dim.x * plan.grid_dim.y *
+                     plan.grid_dim.z <=
+                 (1LL << 31) - 1);
           assert(plan.block_dim.x <= 1024);
           assert(plan.block_dim.y <= 1024);
           assert(plan.block_dim.z <= 64);
-          assert((long long)plan.block_dim.x * plan.block_dim.y * plan.block_dim.z <=
-                1024);
+          assert((long long)plan.block_dim.x * plan.block_dim.y *
+                     plan.block_dim.z <=
+                 1024);
         } else {
-          // In the future, we may need to update this part for GPUs later than H100
+          // In the future, we may need to update this part for GPUs later than
+          // H100
           assert(0);
         }
         // Launch kernel
@@ -410,7 +414,7 @@ TranspileResult Transpiler::generate_code() {
                plan.block_dim.x,
                plan.block_dim.y,
                plan.block_dim.z);
-        exec.e("size_t smem_size = $;", custom_op_metas[cur_op].smem_size);
+        exec.e("size_t smem_size = $;", result.smem_size);
         exec.e("$<<<grid_dim, block_dim, smem_size>>>($);",
                result.func_name,
                ptr_names);
@@ -418,7 +422,7 @@ TranspileResult Transpiler::generate_code() {
         init.e("cudaFuncSetAttribute($, "
                "cudaFuncAttributeMaxDynamicSharedMemorySize, $);",
                result.func_name,
-               custom_op_metas[cur_op].smem_size);
+               result.smem_size);
         break;
       }
       default:

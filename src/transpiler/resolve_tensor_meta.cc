@@ -23,8 +23,8 @@
 namespace mirage {
 namespace transpiler {
 
-// Resolve metadata for Tensors
-void Transpiler::resolve_tensor_meta() {
+// Resolve metadata for DTensors
+void Transpiler::resolve_dtensor_meta() {
   // get all_dtensors
   std::unordered_set<dguid_t> processed_dguids;
   for (kernel::KNOperator *const op : this->g->operators) {

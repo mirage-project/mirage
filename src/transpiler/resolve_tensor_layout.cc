@@ -72,10 +72,15 @@ cost_t SWIZZLE_DIM = 1;
 
 } // namespace cost
 
-void calc_tensor_strides(size_t strides[], size_t &num_phy_elems, int num_dims, const int dims[], int innermost_dim, int datatype_size) {
+void calc_tensor_strides(size_t strides[],
+                         size_t &num_phy_elems,
+                         int num_dims,
+                         int const dims[],
+                         int innermost_dim,
+                         int datatype_size) {
   // An order of dimensions. We layout elements according to this order
   vector<int> dim_order = {innermost_dim};
-  for (int i = num_dims-1; i >= 0; --i) {
+  for (int i = num_dims - 1; i >= 0; --i) {
     if (i != innermost_dim) {
       dim_order.push_back(i);
     }
@@ -303,13 +308,18 @@ void Transpiler::resolve_tensor_layout() {
           dynamic_cast<kn::KNCustomizedOp const *>(kn_op);
       tb::Graph const &tb_graph = kn_customized_op->bgraph;
       for (tb::TBOperator const *tb_op : tb_graph.operators) {
+        if (is_fused_with_prev[tb_op]) {
+          continue;
+        }
+        // Now tb_op must be the "leader" of a chain of fused ops
+        tb::TBOperator const *output_op = fusion_chain[tb_op].back();
         switch (tb_op->op_type) {
           case type::TB_INPUT_OP: {
             // TB input operator
             tb::TBInputOp const *tb_input_op =
                 dynamic_cast<tb::TBInputOp const *>(tb_op);
             kn::DTensor const &input = tb_input_op->dtensor;
-            tb::STensor const &output = tb_input_op->output_tensors.at(0);
+            tb::STensor const &output = output_op->output_tensors.at(0);
             assert(input.num_dims == output.num_dims);
             if (this->config.target_cc < GPU_CC::T4) {
               // Want to leverage wide copy (uint128_t), so need the innermost
@@ -336,6 +346,7 @@ void Transpiler::resolve_tensor_layout() {
           case type::TB_OUTPUT_OP: {
             tb::TBOutputOp const *tb_output_op =
                 dynamic_cast<tb::TBOutputOp const *>(tb_op);
+            assert(tb_op == output_op);
             tb::STensor const &input = tb_output_op->input_tensors.at(0);
             kn::DTensor const &output = tb_output_op->dtensor;
             assert(input.num_dims == output.num_dims);
@@ -358,7 +369,7 @@ void Transpiler::resolve_tensor_layout() {
           case type::TB_MATMUL_OP: {
             tb::STensor const &input0 = tb_op->input_tensors.at(0);
             tb::STensor const &input1 = tb_op->input_tensors.at(1);
-            tb::STensor const &output = tb_op->output_tensors.at(0);
+            tb::STensor const &output = output_op->output_tensors.at(0);
             assert(input0.num_dims == input1.num_dims &&
                    input0.num_dims == output.num_dims);
             int num_dims = input0.num_dims;
@@ -398,7 +409,7 @@ void Transpiler::resolve_tensor_layout() {
           }
           case type::TB_EXP_OP: {
             tb::STensor const &input = tb_op->input_tensors.at(0);
-            tb::STensor const &output = tb_op->output_tensors.at(0);
+            tb::STensor const &output = output_op->output_tensors.at(0);
             assert(input.num_dims == output.num_dims);
             int num_dims = input.num_dims;
             // Enumerate the iteration dim (i.e. threads are laid out along that
@@ -427,7 +438,7 @@ void Transpiler::resolve_tensor_layout() {
           case type::TB_DIV_OP: {
             tb::STensor const &input0 = tb_op->input_tensors.at(0);
             tb::STensor const &input1 = tb_op->input_tensors.at(1);
-            tb::STensor const &output = tb_op->output_tensors.at(0);
+            tb::STensor const &output = output_op->output_tensors.at(0);
             assert(input0.num_dims == input1.num_dims &&
                    input0.num_dims == output.num_dims);
             int num_dims = input0.num_dims;
@@ -457,6 +468,7 @@ void Transpiler::resolve_tensor_layout() {
             break;
           }
           case type::TB_FORLOOP_ACCUM_OP: {
+            assert(tb_op == output_op);
             tb::STensor const &input = tb_op->input_tensors.at(0);
             tb::STensor const &output = tb_op->output_tensors.at(0);
             assert(input.num_dims == output.num_dims);
@@ -489,7 +501,7 @@ void Transpiler::resolve_tensor_layout() {
                     ? tb_op->op_type - type::TB_REDUCTION_0_TO_DIMX_OP
                     : tb_op->op_type - type::TB_REDUCTION_0_OP;
             tb::STensor const &input = tb_op->input_tensors.at(0);
-            tb::STensor const &output = tb_op->output_tensors.at(0);
+            tb::STensor const &output = output_op->output_tensors.at(0);
             int num_dims = input.num_dims;
             assert(input.num_dims == output.num_dims);
             assert(0 <= reduc_dim && reduc_dim < num_dims);
@@ -596,7 +608,11 @@ void Transpiler::resolve_tensor_layout() {
       assert(meta.strides[innermost_dim] == 1);
     } else {
       // Intermediate tensor or output tensor
-      calc_tensor_strides(meta.strides, meta.num_phy_elems, num_dims, dtensor.dim, innermost_dim,
+      calc_tensor_strides(meta.strides,
+                          meta.num_phy_elems,
+                          num_dims,
+                          dtensor.dim,
+                          innermost_dim,
                           type::get_datatype_size(dtensor.data_type));
     }
   }
@@ -604,7 +620,11 @@ void Transpiler::resolve_tensor_layout() {
     STensorMeta &meta = this->stensor_metas[stensor.guid];
     int num_dims = stensor.num_dims;
     int innermost_dim = meta.innermost_dim;
-    calc_tensor_strides(meta.strides, meta.num_phy_elems, num_dims, stensor.dim, innermost_dim,
+    calc_tensor_strides(meta.strides,
+                        meta.num_phy_elems,
+                        num_dims,
+                        stensor.dim,
+                        innermost_dim,
                         type::get_datatype_size(stensor.data_type));
   }
 }

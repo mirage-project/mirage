@@ -65,9 +65,17 @@ The next step after layout resolution is memory planning. It allocates memory fo
 
 ### Threadblock Level Data Reuse
 
-In threadblock level code, an operator (which will be transpiled to a device function) reads data from shared memory, performs computation, and writes the result back to shared memory. However, sometimes we can avoid this reading-writing by "fusing" the next kernel with the current one. For example, if a matmul is followed by an elementwise exponentiation, we can directly perform the elementwise exponentiation on the result of the matmul, instead of writing the matmul result back to shared memory, and then reading it again.
+In threadblock level code, an operator (which will be transpiled to a device function) reads data from shared memory, performs computation, and writes the result back to shared memory. However, sometimes we can avoid this reading-writing by "fusing" the next kernel (in this section, "kernel" refers to threadblock level operators) with the current one. For example, if a matmul is followed by an elementwise exponentiation, we can directly perform the elementwise exponentiation on the result of the matmul, instead of writing the matmul result back to shared memory, and then reading it again. We called this threadblock level data reuse.
 
-[TODO]
+Achieving threadblock level data reuse is not easy. If the latter kernel is not a simple elementwise operation, you need to align the data layout (for every CUDA thread, which part of data does it hold?) between the former kernel, which is really complex. Besides, if the latter kernel is not a unary (only has one input tensor) kernel, more problems will arise. For example, Assume you have two threadblock level ops, A and B, and an elementwise addition operator which takes the output of A and B as input, and assume that you want to perform A first, then you need to choose between storing the output of A in shared memory or registers. That's a complex decision.
+
+Currently, the Transpiler only considers fusion where the latter operator is an elementwise unary operator. This problem is much easier since we can always fuse an elementwise unary operator with its former operator without any concerns. We may consider more complex scenarios in the future.
+
+The logic of planning operator fusion is embedded in a complex procedure called "TB graph scheduling", which will be discussed in the next section.
+
+In the Runtime, the operator fusion is implemented as "epilogues". An epilogue is a chain of actions performed on a single element. Every node on the chain can be:
+- A unary operator, like `exp`
+- An action that involves memory operatorion, like "store" (`dst[dst_layout(dst_index)] = x`) or "store-and-accumulate" (`dst[dst_layout(dst_index)] += x`). Every chain is terminated by such an action.
 
 ### TB Graph Scheduling
 

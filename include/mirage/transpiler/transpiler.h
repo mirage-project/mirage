@@ -20,11 +20,11 @@
 #include <vector>
 
 #include "mirage/kernel/graph.h"
-#include "mirage/type.h"
 #include "mirage/transpiler/common.h"
+#include "mirage/transpiler/sched_tb_graph.h"
 #include "mirage/transpiler/structs.h"
 #include "mirage/transpiler/utils.h"
-#include "mirage/transpiler/sched_tb_graph.h"
+#include "mirage/type.h"
 
 namespace mirage {
 namespace transpiler {
@@ -57,20 +57,27 @@ private:
       dtensor_metas; // DTensor guid -> metadata
   std::unordered_map<decltype(tb::STensor::guid), STensorMeta>
       stensor_metas; // STensor guid -> metadata
-  void resolve_tensor_meta();
+  void resolve_dtensor_meta();
   void resolve_tensor_layout();
+
+  // Fusion metadata
+  std::unordered_map<tb::TBOperator const *, bool> is_fused_with_prev;
+  std::unordered_map<tb::TBOperator const *, bool> is_fused_with_next;
+  std::unordered_map<tb::TBOperator const *,
+                     std::vector<tb::TBOperator const *>>
+      fusion_chain; // Leading op |-> [fused ops]
+  void resolve_tb_fusion();
 
   // Memory allocation metadata
   size_t d_buf_size; // Size of the buffer for intermediate DTensors
-  std::unordered_map<kn::KNCustomizedOp const *, KNCustomizedOPMeta>
-      custom_op_metas;
-  void plan_tensor_memory();
+  void plan_dtensor_memory();
 
   void resolve_all_config() {
     this->resolve_distributed_config();
-    this->resolve_tensor_meta();
+    this->resolve_dtensor_meta();
+    this->resolve_tb_fusion();
     this->resolve_tensor_layout();
-    this->plan_tensor_memory();
+    this->plan_dtensor_memory();
   }
 
   // Utility functions for transpiling
@@ -80,17 +87,12 @@ private:
 
   // Get the "optimal" schedule for a threadblock graph
   TBSched get_threadblock_schedule(tb::Graph const &tb_graph);
-  
+
+  // Get the "optimal" memory plan for a threadblock graph
+  TBMemoryPlan get_threadblock_memory_plan(tb::Graph const &tb_graph,
+                                           TBSched const &tb_sched);
+
   // Transpile a custom KN operator (a custom block graph)
-  struct CustomOPTranspileResult {
-    // The name of the generated kernel function
-    std::string func_name;
-    // The kernel function code. Should be something like:
-    // __global__ void <func_name>(InputDTensor0, ..., InputDTensorN) {
-    //  [kernel code]
-    // }
-    std::string code;
-  };
   CustomOPTranspileResult transpile_kn_custom_op(kn::KNCustomizedOp const *op);
 
 public:

@@ -21,6 +21,7 @@
 
 #include "mirage/kernel/device_tensor.h"
 #include "mirage/threadblock/smem_tensor.h"
+#include "mirage/transpiler/common.h"
 
 namespace mirage {
 namespace transpiler {
@@ -57,6 +58,19 @@ struct TranspileResult {
 
   // Directives for output tensors
   std::vector<OutputTensorDirective> output_directives;
+};
+
+// Transpile a custom KN operator (a custom block graph)
+struct CustomOPTranspileResult {
+  // The name of the generated kernel function
+  std::string func_name;
+  // The size of the shared memory, in bytes
+  size_t smem_size;
+  // The kernel function code. Should be something like:
+  // __global__ void <func_name>(InputDTensor0, ..., InputDTensorN) {
+  //  [kernel code]
+  // }
+  std::string code;
 };
 
 // Metadata for one DTensor during transpiling
@@ -102,9 +116,6 @@ struct STensorMeta {
   // Dimensions that are swizzled
   std::vector<int> swizzled_dims;
 
-  // The start address in the shared memory, in bytes
-  size_t addr;
-
   // Strides of each dimension, in number of elements
   // Must be padded to multiple of 8
   size_t strides[threadblock::MAX_TENSOR_DIMS];
@@ -118,9 +129,11 @@ struct STensorMeta {
   }
 };
 
-// Metadata for a KN_CUSTOMIZED_OP
-struct KNCustomizedOPMeta {
-  // Size of shared memory needed, in bytes
+struct TBMemoryPlan {
+  // The start address of each STensor
+  std::unordered_map<sguid_t, size_t> addrs;
+
+  // The size of the shared memory buffer
   size_t smem_size;
 };
 

@@ -16,8 +16,9 @@
 #include <cute/atom/mma_traits.hpp>
 #include <cute/layout.hpp>
 #include <cute/tensor.hpp>
-
 using namespace cute;
+
+#include "element_unary.h"
 
 namespace tb {
 
@@ -63,11 +64,7 @@ public:
                                              get<2>(stride(InputLayout{}))))>;
 };
 
-enum class S2RTiledCopyType {
-  UNNIVERSAL,
-  LDMATRIX_N,
-  LDMATRIX_T
-};
+enum class S2RTiledCopyType { UNIVERSAL, LDMATRIX_N, LDMATRIX_T };
 // Select the S2R (shared -> register) copy atom
 template <typename T,
           bool IS_LDMATRIX_AVAIL,
@@ -107,9 +104,12 @@ public:
   using Result = std::conditional_t<CONSECUTIVE_DIM == K_DIM,
                                     Copy_Atom<CandidateLdMatrixN, T>,
                                     Copy_Atom<CandidateLdMatrixT, T>>;
-  static constexpr S2RTiledCopyType TYPE = CONSECUTIVE_DIM == K_DIM ? S2RTiledCopyType::LDMATRIX_N : S2RTiledCopyType::LDMATRIX_T;
+  static constexpr S2RTiledCopyType TYPE = CONSECUTIVE_DIM == K_DIM
+                                               ? S2RTiledCopyType::LDMATRIX_N
+                                               : S2RTiledCopyType::LDMATRIX_T;
 };
 
+enum class R2STiledCopyType { UNIVERSAL, STMATRIX_N, STMATRIX_T };
 // Select the R2S (register -> shared) copy atom
 template <typename T, bool IS_STMATRIX_AVAIL, class Layout>
 class R2STiledCopySelector {
@@ -120,6 +120,7 @@ class R2STiledCopySelector {
 public:
   // TODO(intlsy) Coalesc to uint32_t whenever possible
   using Result = Copy_Atom<UniversalCopy<uint16_t>, T>;
+  static constexpr R2STiledCopyType TYPE = R2STiledCopyType::UNIVERSAL;
 };
 
 template <class T,
@@ -176,6 +177,8 @@ CUTE_HOST_DEVICE void s2r_copy_with_oob_protection(
 template <class T,
           class M,
           class N,
+          int NUM_EXPS_BEFORE_STORE,
+          bool IS_STORE_ACCUM,
           class TiledCopy,
           class SrcEngine,
           class SrcLayout,
@@ -215,7 +218,18 @@ CUTE_HOST_DEVICE void r2s_copy_with_oob_protection(
     // printf("Thread %d, (%d) -> (%d, %d), %d\n", thread_idx, i, j,
     // (int)coord_m, (int)coord_n, valid);
     if (valid) {
-      dst(i) = src(i);
+      T x = src(i);
+      if constexpr (NUM_EXPS_BEFORE_STORE > 0) {
+        CUTE_UNROLL
+        for (int i = 0; i < NUM_EXPS_BEFORE_STORE; ++i) {
+          x = perform_element_unary_op<T, ElementUnaryOpType::EXP>(x);
+        }
+      }
+      if constexpr (IS_STORE_ACCUM) {
+        dst(i) += x;
+      } else {
+        dst(i) = x;
+      }
     }
   }
 }
@@ -228,7 +242,12 @@ template <typename T,
           class RealSmemLayoutA, // [K, M, ...]
           class RealSmemLayoutB, // [N, K, ...]
           class RealSmemLayoutC, // [N, M, ...]
-          int NUM_THREADS>
+          int NUM_THREADS,
+          int NUM_EXPS_BEFORE_STORE, // Since matmul may use some advanced
+                                     // instructions (like stmatrix) to store
+                                     // data, it does not use the standard
+                                     // "epilogue" semantic
+          bool IS_STORE_ACCUM>
 class Matmul {
 public:
   // Group the last few dims into one dim
@@ -283,24 +302,23 @@ public:
   static_assert(TILED_MMA_NUM_THREADS <= NUM_THREADS);
 
   // CopyAtom selection
-  using S2RTiledCopyASelector = S2RTiledCopySelector<T,
-                                                          IS_LDMATRIX_AVAIL,
-                                                          SmemLayoutA,
-                                                          1,
-                                                          MMAAtomK>;
+  using S2RTiledCopyASelector =
+      S2RTiledCopySelector<T, IS_LDMATRIX_AVAIL, SmemLayoutA, 1, MMAAtomK>;
   using S2RTiledCopyAAtom = typename S2RTiledCopyASelector::Result;
-  static constexpr S2RTiledCopyType S2R_TILED_COPY_A_TYPE = S2RTiledCopyASelector::TYPE;
+  static constexpr S2RTiledCopyType S2R_TILED_COPY_A_TYPE =
+      S2RTiledCopyASelector::TYPE;
 
-  using S2RTiledCopyBSelector = S2RTiledCopySelector<T,
-                                                          IS_LDMATRIX_AVAIL,
-                                                          SmemLayoutB,
-                                                          1,
-                                                          MMAAtomK>;
+  using S2RTiledCopyBSelector =
+      S2RTiledCopySelector<T, IS_LDMATRIX_AVAIL, SmemLayoutB, 1, MMAAtomK>;
   using S2RTiledCopyBAtom = typename S2RTiledCopyBSelector::Result;
-  static constexpr S2RTiledCopyType S2R_TILED_COPY_B_TYPE = S2RTiledCopyBSelector::TYPE;
+  static constexpr S2RTiledCopyType S2R_TILED_COPY_B_TYPE =
+      S2RTiledCopyBSelector::TYPE;
 
-  using R2STiledCopyCAtom =
-      typename R2STiledCopySelector<T, IS_STMATRIX_AVAIL, SmemLayoutC>::Result;
+  using R2STiledCopyCSelector =
+      R2STiledCopySelector<T, IS_STMATRIX_AVAIL, SmemLayoutC>;
+  using R2STiledCopyCAtom = typename R2STiledCopyCSelector::Result;
+  static constexpr R2STiledCopyType R2S_TILED_COPY_C_TYPE =
+      R2STiledCopyCSelector::TYPE;
 
   using S2RTiledCopyA =
       decltype(make_tiled_copy_A(S2RTiledCopyAAtom{}, TiledMMA{}));
@@ -406,7 +424,11 @@ public:
 
     // TODO(intlsy) Eliminate unnecessary boundary checking when the shape is
     // divisible
-    r2s_copy_with_oob_protection<T, M, N>(
+    r2s_copy_with_oob_protection<T,
+                                 M,
+                                 N,
+                                 NUM_EXPS_BEFORE_STORE,
+                                 IS_STORE_ACCUM>(
         r2s_tiled_copy_C, r2s_rC, r2s_sC(_, _, _, _0{}), thread_idx);
   }
 };

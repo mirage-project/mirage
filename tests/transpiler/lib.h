@@ -423,6 +423,7 @@ private:
         "--expt-relaxed-constexpr",
         "-arch=native",
         "-use_fast_math",
+        "-Xcompiler=-Wall",
         "-I" + env_config::get_cutlass_root() + "/include",
         "-I" + env_config::get_mirage_runtime_root()};
     string compile_command = "nvcc " + cu_file_path;
@@ -478,7 +479,8 @@ private:
       output_iotensor.strides = trans_result.output_directives[i].strides;
       half *data_d;
       CHECK_CUDA(cudaMalloc((void **)&data_d,
-                            trans_result.output_directives[i].alloc_size * sizeof(half)));
+                            trans_result.output_directives[i].alloc_size *
+                                sizeof(half)));
       output_ptrs_d.push_back(data_d);
     }
     // Allocate the buf

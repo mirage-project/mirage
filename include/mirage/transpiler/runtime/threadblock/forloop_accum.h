@@ -1,4 +1,4 @@
-// output.h - Implementation of accumulating the output
+// forloop_accum.h - Implementation of accumulating the output
 #pragma once
 
 #include "cute/config.hpp"

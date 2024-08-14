@@ -14,7 +14,8 @@ template <typename T,
           typename DstLayout,
           typename SrcLayout,
           int REDUCTION_DIM,
-          int NUM_THREADS>
+          int NUM_THREADS,
+          class Epilogue>
 class ReductionKernel {
 public:
   static constexpr int NUM_DIMS = rank(SrcLayout{});
@@ -39,15 +40,18 @@ public:
 
   static __device__ __forceinline__ void
       run(T *__restrict__ dst, T const *__restrict__ src, int thread_idx) {
+    auto dst_in_src_layout = DstInSrcLayout{};
+    auto dst_layout = DstLayout{};
     for (int dst_elem_idx = thread_idx; dst_elem_idx < DST_NUMEL;
          dst_elem_idx += NUM_THREADS) {
-      int src_elem_idx = DstInSrcLayout{}(dst_elem_idx);
+      int src_elem_idx = dst_in_src_layout(dst_elem_idx);
       T result = (T)0;
       CUTE_UNROLL
       for (int i = 0; i < REDUCTION_FACTOR; ++i) {
         result += src[src_elem_idx + i * REDUCTION_DIM_STRIDE];
       }
-      dst[DstLayout{}(dst_elem_idx)] = result;
+      auto dst_phy_pos = dst_layout(dst_elem_idx);
+      Epilogue::run(result, dst, dst_phy_pos);
     }
   }
 };

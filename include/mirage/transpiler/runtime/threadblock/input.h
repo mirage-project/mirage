@@ -26,13 +26,16 @@ public:
   CUTE_STATIC_ASSERT_V(cute::size(SrcLayout{}) == cute::size(DstLayout{}));
   using Numel = decltype(cute::size(DstLayout{}));
 
+  template <class Epilogue> // We put epilogue here for convenience
   static __device__ __forceinline__ void
       run(T *__restrict__ dst, T const *__restrict__ src, int thread_idx) {
     constexpr auto numel = Numel{};
     auto dst_layout = DstLayout{};
     auto src_layout = SrcLayout{};
     for (int elem_idx = thread_idx; elem_idx < numel; elem_idx += NUM_THREADS) {
-      dst[dst_layout(elem_idx)] = src[src_layout(elem_idx)];
+      T res = src[src_layout(elem_idx)];
+      Epilogue::run(res, dst, dst_layout(elem_idx));
+      // dst[dst_layout(elem_idx)] = res;
     }
   }
 };
