@@ -77,6 +77,20 @@ public:
   DTensor reduction(DTensor const &input, int dim, int size = 1);
   DTensor *reduction(DTensor const *input, int dim, int size = 1);
   KNOperator *create_reduction_op(DTensor const &input, int dim, int factor);
+  // normalization operator
+  DTensor rms_norm(DTensor const &input, std::vector<int> const &normalized_shape);
+  DTensor *rms_norm(DTensor const *input, std::vector<int> const &normalized_shape);
+  KNOperator *create_rms_norm_op(DTensor const &input,
+                                 std::vector<int> const &normalized_shape);
+  DTensor rms_norm(DTensor const &input,
+                   DTensor const &elementwise_afffine,
+                   std::vector<int> const &normalized_shape);
+  DTensor *rms_norm(DTensor const *input,
+                    DTensor const *elementwise_affine,
+                    std::vector<int> const &normalized_shape);
+  KNOperator *create_rms_norm_op(DTensor const &input,
+                                 DTensor const &elementwise_affine,
+                                 std::vector<int> const &normalized_shape);
   // allreduce operator
   DTensor all_reduce(DTensor const &input, bool inplace = true);
   DTensor *all_reduce(DTensor const *input, bool inplace = true);

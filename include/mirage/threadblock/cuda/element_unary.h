@@ -72,16 +72,7 @@ public:
       }
     } else if (type == mirage::type::TB_SILU_OP) {
       for (int i = thread_id; i < num_elements; i += num_threads) {
-        FPType input = base_ptr[i];
-        // Note that we use $x * e^x$ as the fingerprint for SILU
-        // (i.e., $x / (1+e^{-x})$, since plus one can be easier
-        // implemented at any level of the GPU compute hierarchy
-        // and $x / e^{-x} = x * e^x$.
-        FPType q_residual = input % FP_Q;
-        uint32_t result = exp_lookup_table[q_residual];
-        // x * e^x
-        result = (result * q_residual * FP_Q_MUL_P_MOD_1) % FP_PQ;
-        base_ptr[i] = result;
+        base_ptr[i] = compute_silu_fingerprint(base_ptr[i], exp_lookup_table);
       }
     } else {
       assert(false && "Unimplemented");

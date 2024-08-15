@@ -101,10 +101,7 @@ __global__ void
     }
   } else if (type == mirage::type::TB_SILU_OP) {
     if (i < num_elements) {
-      mirage::type::FPType q_residual = input_ptr[i] % FP_Q;
-      uint32_t result = exp_lookup_table[q_residual];
-      result = (result * q_residual * FP_Q_MUL_P_MOD_1) % FP_PQ;
-      output_ptr[i] = result;
+      output_ptr[i] = compute_silu_fingerprint(input_ptr[i], exp_lookup_table);
     }
   } else {
     assert(false && "Unimplemented");

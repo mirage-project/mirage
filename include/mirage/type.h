@@ -50,10 +50,11 @@ enum KNOperatorType {
   KN_ADD_OP = 1200,
   KN_MUL_OP = 1201,
   KN_DIV_OP = 1202,
-  // Reduction
+  // Reduction & Normalization
   KN_REDUCTION_0_OP = 1300,
   KN_REDUCTION_1_OP = 1301,
   KN_REDUCTION_2_OP = 1302,
+  KN_RMS_NORM_OP = 1350,
   // Communication
   KN_ALLREDUCE_OP = 1400,
   KN_CUSTOMIZED_OP = 1999,
@@ -92,7 +93,7 @@ enum TBOperatorType {
   TB_ADD_OP = 2200,
   TB_MUL_OP = 2201,
   TB_DIV_OP = 2202,
-  // Reduction
+  // Reduction and Normalization
   TB_REDUCTION_FIRST_OP_ID = 2300,
   TB_REDUCTION_0_OP = 2301,
   TB_REDUCTION_1_OP = 2302,
