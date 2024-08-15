@@ -20,20 +20,20 @@
 namespace mirage {
 namespace threadblock {
 
-STensor Graph::forloop_accum(STensor const &input) {
-  TBOperator *op = create_forloop_accum_op(input);
+STensor Graph::forloop_accum(STensor const &input, mirage::type::TBOperatorType type) {
+  TBOperator *op = create_forloop_accum_op(input, type);
   assert(op != nullptr);
   assert(op->output_tensors.size() == 1);
   operators.push_back(op);
   return op->output_tensors[0];
 }
 
-TBOperator *Graph::create_forloop_accum_op(STensor const &input) {
+TBOperator *Graph::create_forloop_accum_op(STensor const &input, mirage::type::TBOperatorType type) {
   // Input stensor must be before accumulation (i.e., inside forloop)
   if (input.after_accum) {
     return nullptr;
   }
-  TBForloopAccumOp *op = new TBForloopAccumOp(this, input);
+  TBForloopAccumOp *op = new TBForloopAccumOp(this, input, type);
   // Check shmem usage
   size_t smem_usage = calculate_shared_memory_usage(op);
   if (smem_usage > mirage::config::MAX_SMEM_SIZE) {
@@ -45,10 +45,30 @@ TBOperator *Graph::create_forloop_accum_op(STensor const &input) {
   return op;
 }
 
-TBForloopAccumOp::TBForloopAccumOp(Graph *_graph, STensor const &input)
-    : TBOperator(_graph, mirage::type::TB_FORLOOP_ACCUM_OP, input) {
+TBForloopAccumOp::TBForloopAccumOp(Graph *_graph,
+                                   STensor const &input,
+                                   mirage::type::TBOperatorType type)
+    : TBOperator(_graph, type, input) {
+  assert(type >= mirage::type::TB_FORLOOP_ACCUM_FIRST_OP);
+  assert(type < mirage::type::TB_FORLOOP_ACCUM_LAST_OP);
   assert(!input.after_accum);
   STensor output = input;
+  switch (type) {
+    case mirage::type::TB_FORLOOP_ACCUM_NO_RED_OP: {
+      // Do nothing
+      break;
+    }
+    case mirage::type::TB_FORLOOP_ACCUM_RED_LD_SUM_OP:
+    case mirage::type::TB_FORLOOP_ACCUM_RED_LD_MEAN_OP:
+    case mirage::type::TB_FORLOOP_ACCUM_RED_LD_RMS_OP: {
+      // Reduce the last dim to 1
+      output.dim[output.num_dims-1] = 1;
+      break;
+    }
+    default: {
+      assert(false && "Unhandled forloop accum op");
+    }
+  }
   output.owner_op = this;
   output.owner_ts_idx = 0;
   output.guid = STensor::next_guid++;

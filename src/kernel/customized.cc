@@ -143,9 +143,12 @@ KNCustomizedOp::KNCustomizedOp(Graph *_kgraph,
         bgraph.concat(my_inputs[0], my_inputs[1], concat_dim);
         break;
       }
-      case mirage::type::TB_FORLOOP_ACCUM_OP: {
+      case mirage::type::TB_FORLOOP_ACCUM_NO_RED_OP: 
+      case mirage::type::TB_FORLOOP_ACCUM_RED_LD_SUM_OP: 
+      case mirage::type::TB_FORLOOP_ACCUM_RED_LD_MEAN_OP: 
+      case mirage::type::TB_FORLOOP_ACCUM_RED_LD_RMS_OP: {
         assert(my_inputs.size() == 1);
-        bgraph.forloop_accum(my_inputs[0]);
+        bgraph.forloop_accum(my_inputs[0], op.first);
         break;
       }
       default: {

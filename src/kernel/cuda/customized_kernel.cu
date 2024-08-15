@@ -117,15 +117,20 @@ __global__ void customized_kernel_function(
       } else if (op_type == mirage::type::TB_OUTPUT_OP) {
         // Only save outputs after forloop
         // So we do nothing for output saver
-      } else if (op_type == mirage::type::TB_FORLOOP_ACCUM_OP) {
+      } else if (op_type == mirage::type::TB_FORLOOP_ACCUM_NO_RED_OP ||
+                 op_type == mirage::type::TB_FORLOOP_ACCUM_RED_LD_SUM_OP ||
+                 op_type == mirage::type::TB_FORLOOP_ACCUM_RED_LD_MEAN_OP ||
+                 op_type == mirage::type::TB_FORLOOP_ACCUM_RED_LD_RMS_OP) {
         // Do nothing since accum can be performed as an epilogue of
         // the previous operator
         int input_smem_offset, accum_smem_offset;
-        int num_elements;
+        int accum_num_elements, per_iter_reduction_degree, inner_range;
         mirage::threadblock::deserialize_forloop_accum_parameters(
             new_params.parameters,
             param_idx,
-            num_elements,
+            accum_num_elements,
+            per_iter_reduction_degree,
+            inner_range,
             input_smem_offset,
             accum_smem_offset);
       } else if (op_type == mirage::type::TB_MATMUL_OP) {
@@ -175,6 +180,8 @@ __global__ void customized_kernel_function(
         }
         __syncthreads();
       } else if (op_type == mirage::type::TB_EXP_OP ||
+                 op_type == mirage::type::TB_SQUARE_OP ||
+                 op_type == mirage::type::TB_SQRT_OP ||
                  op_type == mirage::type::TB_SILU_OP) {
         int smem_offset, num_elements;
         mirage::threadblock::deserialize_elementunary_op_parameters(
@@ -338,7 +345,9 @@ __global__ void compute_customizedop_fingerprint(
     char *stensor_fp_base_ptr,
     mirage::type::FPType *exp_lookup_table,
     mirage::type::FPType *div_p_lookup_table,
-    mirage::type::FPType *div_q_lookup_table) {
+    mirage::type::FPType *div_q_lookup_table,
+    mirage::type::FPType *sqrt_p_lookup_table,
+    mirage::type::FPType *sqrt_q_lookup_table) {
   // since we are using cutlass, we group all threads within a threadblock
   // as a 1-D list of threads, therefore blockDim.y and blockDim.z must be
   // 1
@@ -421,13 +430,18 @@ __global__ void compute_customizedop_fingerprint(
           __syncthreads();
           break;
         }
-        case mirage::type::TB_FORLOOP_ACCUM_OP: {
+        case mirage::type::TB_FORLOOP_ACCUM_NO_RED_OP:
+        case mirage::type::TB_FORLOOP_ACCUM_RED_LD_SUM_OP:
+        case mirage::type::TB_FORLOOP_ACCUM_RED_LD_MEAN_OP:
+        case mirage::type::TB_FORLOOP_ACCUM_RED_LD_RMS_OP: {
           int input_smem_offset, accum_smem_offset;
-          int num_elements;
+          int accum_num_elements, per_iter_reduction_degree, inner_range;
           mirage::threadblock::deserialize_forloop_accum_parameters(
               new_params.parameters,
               param_idx,
-              num_elements,
+              accum_num_elements,
+              per_iter_reduction_degree,
+              inner_range,
               input_smem_offset,
               accum_smem_offset);
           mirage::type::FPType *input_stensor_ptr =
@@ -435,10 +449,20 @@ __global__ void compute_customizedop_fingerprint(
           mirage::type::FPType *accum_stensor_ptr =
               (mirage::type::FPType *)(smem_buffer + accum_smem_offset);
           bool reset_output = (i == 0);
-          mirage::threadblock::TBForloopAccumFingerprinter fp(input_stensor_ptr,
+          bool post_process = (i == (forloop_range - 1));
+          mirage::threadblock::TBForloopAccumFingerprinter fp(new_params.operator_types[op],
+                                                              input_stensor_ptr,
                                                               accum_stensor_ptr,
-                                                              num_elements,
+                                                              div_p_lookup_table,
+                                                              div_q_lookup_table,
+                                                              sqrt_p_lookup_table,
+                                                              sqrt_q_lookup_table,
+                                                              accum_num_elements,
+                                                              per_iter_reduction_degree,
+                                                              inner_range,
+                                                              forloop_range,
                                                               reset_output,
+                                                              post_process,
                                                               threadIdx.x,
                                                               blockDim.x);
           __syncthreads();
@@ -781,7 +805,9 @@ bool KNCustomizedOp::fingerprint(void) {
         dmm->stensor_fp_base_ptr,
         dmm->exp_lookup_table,
         dmm->div_p_lookup_table,
-        dmm->div_q_lookup_table);
+        dmm->div_q_lookup_table,
+        dmm->sqrt_p_lookup_table,
+        dmm->sqrt_q_lookup_table);
   }
   checkCUDA(cudaDeviceSynchronize());
   // Process epilogue

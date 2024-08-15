@@ -82,8 +82,7 @@ enum TBOperatorType {
   TB_UNKOWN = 2000,
   TB_INPUT_OP = 2001,
   TB_OUTPUT_OP = 2002,
-  TB_FORLOOP_ACCUM_OP = 2003,
-  TB_MATMUL_OP = 2004,
+  TB_MATMUL_OP = 2003,
   // ElementUnary
   TB_EXP_OP = 2100,
   TB_SQUARE_OP = 2101,
@@ -109,6 +108,14 @@ enum TBOperatorType {
   TB_CONCAT_2_OP = 2402,
   TB_CONCAT_LAST_OP_ID = 2410,
   TB_CONCAT_THEN_MATMUL_OP = 2411,
+  // Forloop Accum
+  // LD indicates last dimension
+  TB_FORLOOP_ACCUM_FIRST_OP = 2500,
+  TB_FORLOOP_ACCUM_NO_RED_OP = 2500,
+  TB_FORLOOP_ACCUM_RED_LD_SUM_OP = 2501,
+  TB_FORLOOP_ACCUM_RED_LD_MEAN_OP = 2502,
+  TB_FORLOOP_ACCUM_RED_LD_RMS_OP = 2503,
+  TB_FORLOOP_ACCUM_LAST_OP = 2599,
   TB_CUSTOMIZED_OP = 2999
 };
 
@@ -138,7 +145,10 @@ NLOHMANN_JSON_SERIALIZE_ENUM(
         {TB_CONCAT_0_OP, "tb_concat_0_op"},
         {TB_CONCAT_1_OP, "tb_concat_1_op"},
         {TB_CONCAT_2_OP, "tb_concat_2_op"},
-        {TB_FORLOOP_ACCUM_OP, "tb_forloop_accum_op"},
+        {TB_FORLOOP_ACCUM_NO_RED_OP, "tb_accum_nored_op"},
+        {TB_FORLOOP_ACCUM_RED_LD_SUM_OP, "tb_accum_red_ld_sum_op"},
+        {TB_FORLOOP_ACCUM_RED_LD_MEAN_OP, "tb_accum_red_ld_mean_op"},
+        {TB_FORLOOP_ACCUM_RED_LD_RMS_OP, "tb_accum_red_ld_rms_op"},
         {TB_CUSTOMIZED_OP, "tb_customized_op"},
     })
 

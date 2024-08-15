@@ -197,7 +197,11 @@ size_t Graph::calculate_shared_memory_usage(TBOperator *new_op) {
       case mirage::type::TB_SQUARE_OP:
       case mirage::type::TB_SQRT_OP:
       case mirage::type::TB_SILU_OP:
-      case mirage::type::TB_FORLOOP_ACCUM_OP: {
+      case mirage::type::TB_FORLOOP_ACCUM_NO_RED_OP:
+      case mirage::type::TB_FORLOOP_ACCUM_RED_LD_SUM_OP:
+      case mirage::type::TB_FORLOOP_ACCUM_RED_LD_MEAN_OP:
+      case mirage::type::TB_FORLOOP_ACCUM_RED_LD_RMS_OP:
+      {
         // inplace optimization for elementunary
         // and accumulation
         break;
@@ -435,17 +439,29 @@ NewKernelParams Graph::get_new_kernel_params(bool fingerprint) const {
             output_op->epilogue);
         break;
       }
-      case mirage::type::TB_FORLOOP_ACCUM_OP: {
+      case mirage::type::TB_FORLOOP_ACCUM_NO_RED_OP: 
+      case mirage::type::TB_FORLOOP_ACCUM_RED_LD_SUM_OP: 
+      case mirage::type::TB_FORLOOP_ACCUM_RED_LD_MEAN_OP: 
+      case mirage::type::TB_FORLOOP_ACCUM_RED_LD_RMS_OP: {
+        // TODO: currently assuming we only reduce along the last dim
         assert(operators[i]->input_tensors.size() == 1);
         assert(operators[i]->output_tensors.size() == 1);
         mirage::threadblock::STensor input = operators[i]->input_tensors[0];
         mirage::threadblock::STensor accum = operators[i]->output_tensors[0];
-        int num_elements = input.num_elements();
-        assert(input.num_elements() == accum.num_elements());
+        assert(input.num_dims == accum.num_dims);
+        int per_iter_reduction_degree = input.num_elements() / accum.num_elements();
+        for (int i = 0; i < input.num_dims; i++) {
+          if (input.dim[i] != accum.dim[i]) {
+            assert(input.dim[i] == accum.dim[i] * per_iter_reduction_degree);
+          }
+        }
+        int inner_range = 1;
         mirage::threadblock::serialize_forloop_accum_parameters(
             params.parameters,
             params.num_parameters,
-            num_elements,
+            (int)accum.num_elements(),
+            per_iter_reduction_degree,
+            inner_range,
             input.smem_offset,
             accum.smem_offset);
         break;

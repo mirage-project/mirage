@@ -122,8 +122,10 @@ public:
   TBOperator *create_concat_op(STensor const &A, STensor const &B, int dim);
 
   // forloop accum operator
-  STensor forloop_accum(STensor const &input);
-  TBOperator *create_forloop_accum_op(STensor const &input);
+  STensor forloop_accum(STensor const &input,
+                        mirage::type::TBOperatorType type);
+  TBOperator *create_forloop_accum_op(STensor const &input,
+                                       mirage::type::TBOperatorType type);
 
   off_t allocate_fingerprint(STensor const &tensor);
   void free_fingerprint(STensor const &tensor);
