@@ -18,4 +18,4 @@ def new_graph():
     return graph
 
 # Current Version
-__version__ = "0.1.0"
+__version__ = "0.1.1"
