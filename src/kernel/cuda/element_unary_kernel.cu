@@ -99,7 +99,7 @@ __global__ void
       result = (result * FP_Q_MUL_P_MOD_1) % FP_PQ;
       output_ptr[i] = result;
     }
-  } else if (type == mirage::type::TB_SILU_OP) {
+  } else if (type == mirage::type::KN_SILU_OP) {
     if (i < num_elements) {
       output_ptr[i] = compute_silu_fingerprint(input_ptr[i], exp_lookup_table);
     }

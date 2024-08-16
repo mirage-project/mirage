@@ -48,19 +48,14 @@ int main(int argc, char **argv) {
   {
     threadblock::ExecutionPlan plan;
     plan.ops.push_back({mirage::type::TB_MATMUL_OP, {{0, 0}, {1, 0}}});
-    // plan.ops.push_back({mirage::type::TB_MATMUL_OP, {{3, 0}, {2, 0}}});
     plan.ops.push_back({mirage::type::TB_EXP_OP, {{3, 0}}});
     plan.ops.push_back({mirage::type::TB_MATMUL_OP, {{4, 0}, {2, 0}}});
-    // plan.ops.push_back({mirage::type::TB_REDUCTION_2_OP, {{4, 0}}});
     plan.ops.push_back({mirage::type::TB_FORLOOP_ACCUM_NO_RED_OP, {{5, 0}}});
     plan.ops.push_back({mirage::type::TB_FORLOOP_ACCUM_RED_LD_SUM_OP, {{4, 0}}});
     plan.input_map.push_back({0, -1, 1});
     plan.input_map.push_back({0, 2, -1});
     plan.input_map.push_back({0, 1, -1});
     plan.input_smem_layouts = {
-        // layout::SmemRowMajor,
-        // layout::SmemColumnMajor,
-        // layout::SmemColumnMajor,
         layout::SmemRowMajorTensorOpMultiplicand_Crosswise64,
         layout::SmemColumnMajorTensorOpMultiplicand_Crosswise64,
         layout::SmemColumnMajorTensorOpMultiplicand_Crosswise64,

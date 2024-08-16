@@ -100,12 +100,15 @@ public:
   STensor square(STensor const &A);
   STensor sqrt(STensor const &A);
   STensor elementunary(STensor const &A, mirage::type::TBOperatorType type);
-
   TBOperator *create_elementunary_op(STensor const &A,
                                      mirage::type::TBOperatorType _type);
+  // element binary operators
   STensor add(STensor const &A, STensor const &B);
   STensor mul(STensor const &A, STensor const &B);
   STensor div(STensor const &A, STensor const &B);
+  STensor elementbinary(STensor const &A,
+                        STensor const &B,
+                        mirage::type::TBOperatorType type);
   TBOperator *create_elementbinary_op(STensor const &A,
                                       STensor const &B,
                                       mirage::type::TBOperatorType _type);

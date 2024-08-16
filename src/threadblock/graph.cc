@@ -179,6 +179,7 @@ size_t Graph::calculate_shared_memory_usage(TBOperator *new_op) {
       case mirage::type::TB_MATMUL_OP:
       case mirage::type::TB_DIV_OP:
       case mirage::type::TB_ADD_OP:
+      case mirage::type::TB_MUL_OP:
       case mirage::type::TB_REDUCTION_0_OP:
       case mirage::type::TB_REDUCTION_1_OP:
       case mirage::type::TB_REDUCTION_2_OP:
@@ -515,6 +516,7 @@ NewKernelParams Graph::get_new_kernel_params(bool fingerprint) const {
         break;
       }
       case mirage::type::TB_DIV_OP:
+      case mirage::type::TB_MUL_OP:
       case mirage::type::TB_ADD_OP: {
         assert(operators[i]->input_tensors.size() == 2);
         assert(operators[i]->output_tensors.size() == 1);

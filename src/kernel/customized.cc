@@ -109,14 +109,11 @@ KNCustomizedOp::KNCustomizedOp(Graph *_kgraph,
         bgraph.elementunary(my_inputs[0], op.first);
         break;
       }
-      case mirage::type::TB_ADD_OP: {
-        assert(my_inputs.size() == 2);
-        bgraph.add(my_inputs[0], my_inputs[1]);
-        break;
-      }
+      case mirage::type::TB_ADD_OP:
+      case mirage::type::TB_MUL_OP:
       case mirage::type::TB_DIV_OP: {
         assert(my_inputs.size() == 2);
-        bgraph.div(my_inputs[0], my_inputs[1]);
+        bgraph.elementbinary(my_inputs[0], my_inputs[1], op.first);
         break;
       }
       case mirage::type::TB_REDUCTION_0_OP:
