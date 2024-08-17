@@ -87,7 +87,7 @@ TBOutputOp::TBOutputOp(Graph *_graph,
 
 TBOutputOp::~TBOutputOp() {
   assert(output_tensors.size() == 0);
-  //bgraph->free_fingerprint(output_tensors);
+  // bgraph->free_fingerprint(output_tensors);
 }
 
 TBOutputOp::operator json() const {

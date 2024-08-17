@@ -49,9 +49,9 @@ DeviceMemoryManager::DeviceMemoryManager(int _num_gpus) : num_gpus(_num_gpus) {
   checkCUDA(
       cudaMalloc(&div_p_lookup_table, (sizeof(FPType) * FP_P + 15) / 16 * 16));
   FPType div_p_table[FP_P];
-  for (int i = 0; i < FP_P; i++) {
+  for (uint32_t i = 0; i < FP_P; i++) {
     div_p_table[i] = 1;
-    for (int j = 1; j < FP_P; j++) {
+    for (uint32_t j = 1; j < FP_P; j++) {
       if ((i * j) % FP_P == 1) {
         div_p_table[i] = j;
       }
@@ -69,9 +69,9 @@ DeviceMemoryManager::DeviceMemoryManager(int _num_gpus) : num_gpus(_num_gpus) {
   checkCUDA(
       cudaMalloc(&div_q_lookup_table, (sizeof(FPType) * FP_Q + 15) / 16 * 16));
   FPType div_q_table[FP_Q];
-  for (int i = 0; i < FP_Q; i++) {
+  for (uint32_t i = 0; i < FP_Q; i++) {
     div_q_table[i] = 1;
-    for (int j = 1; j < FP_Q; j++) {
+    for (uint32_t j = 1; j < FP_Q; j++) {
       if ((i * j) % FP_Q == 1) {
         div_q_table[i] = j;
       }
@@ -84,6 +84,43 @@ DeviceMemoryManager::DeviceMemoryManager(int _num_gpus) : num_gpus(_num_gpus) {
                        div_q_table,
                        sizeof(FPType) * FP_Q,
                        cudaMemcpyHostToDevice));
+  // Part 4: sqrt p lookup table
+  // make future tensors 16 bytes aligned
+  checkCUDA(
+      cudaMalloc(&sqrt_p_lookup_table, (sizeof(FPType) * FP_P + 15) / 16 * 16));
+  // Solving the congruence b=x^2 mod p using the following formulas:
+  // if p == 3 mod 4, then x = b^{(p+1)/4} is a solution
+  assert(FP_P % 4 == 3);
+  FPType sqrt_p_table[FP_P];
+  for (uint32_t i = 0; i < FP_P; i++) {
+    sqrt_p_table[i] = 1;
+    for (uint32_t j = 0; j < (FP_P + 1) / 4; j++) {
+      sqrt_p_table[i] = (sqrt_p_table[i] * i) % FP_P;
+    }
+    //assert((sqrt_p_table[i] * sqrt_p_table[i]) % FP_P == i);
+  }
+  checkCUDA(cudaMemcpy(sqrt_p_lookup_table,
+                       sqrt_p_table,
+                       sizeof(FPType) * FP_P,
+                       cudaMemcpyHostToDevice));
+  // Part 5: sqrt q lookup table
+  // make future tensors 16 bytes aligned
+  checkCUDA(
+      cudaMalloc(&sqrt_q_lookup_table, (sizeof(FPType) * FP_Q + 15) / 16 * 16));
+  assert(FP_Q % 4 == 3);
+  FPType sqrt_q_table[FP_Q];
+  for (uint32_t i = 0; i < FP_Q; i++) {
+    sqrt_q_table[i] = 1;
+    for (uint32_t j = 0; j < (FP_Q + 1) / 4; j++) {
+      sqrt_q_table[i] = (sqrt_q_table[i] * i) % FP_Q;
+    }
+    //assert((sqrt_q_table[i] * sqrt_q_table[i]) % FP_Q == i);
+  }
+  checkCUDA(cudaMemcpy(sqrt_q_lookup_table,
+                       sqrt_q_table,
+                       sizeof(FPType) * FP_Q,
+                       cudaMemcpyHostToDevice));
+  // data and fingerprints
   for (int i = 0; i < num_gpus; i++) {
     checkCUDA(cudaSetDevice(i));
     checkCUDA(cudaStreamCreate(&stream[i]));
@@ -101,7 +138,10 @@ DeviceMemoryManager::DeviceMemoryManager(int _num_gpus) : num_gpus(_num_gpus) {
         checkCUDA(
             cudaMalloc(&fp_base_ptr[k], mirage::config::MAX_DMEM_FP_SIZE));
       }
-      checkCUDA(cudaMalloc(&stensor_fp_base_ptr, mirage::config::MAX_SMEM_FP_SIZE * mirage::config::MAX_NUM_THREADBLOCKS_PER_KERNEL));
+      checkCUDA(
+          cudaMalloc(&stensor_fp_base_ptr,
+                     mirage::config::MAX_SMEM_FP_SIZE *
+                         mirage::config::MAX_NUM_THREADBLOCKS_PER_KERNEL));
     }
   }
 }

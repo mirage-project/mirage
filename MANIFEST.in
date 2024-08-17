@@ -1,0 +1,26 @@
+include LICENSE
+include requirements.txt
+include config.cmake
+include CMakeLists.txt
+
+recursive-include include *
+recursive-include cmake *
+recursive-include src *
+
+recursive-include python/mirage/_cython *.pyx *.pxd
+
+recursive-include deps/cutlass *
+recursive-include deps/json *
+
+prune deps/cutlass/.github
+prune deps/cutlass/docs
+prune deps/cutlass/examples
+prune deps/cutlass/media
+prune deps/cutlass/test
+prune deps/cutlass/tools
+
+prune deps/json/.github
+prune deps/json/.reuse
+prune deps/json/docs
+prune deps/json/tests
+prune deps/json/tools

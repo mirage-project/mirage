@@ -44,6 +44,15 @@ STensor Graph::div(STensor const &input1, STensor const &input2) {
   return op->output_tensors[0];
 }
 
+STensor Graph::elementbinary(STensor const &input1,
+                             STensor const &input2,
+                             mirage::type::TBOperatorType type) {
+  TBOperator *op = create_elementbinary_op(input1, input2, type);
+  assert(op != nullptr);
+  operators.push_back(op);
+  return op->output_tensors[0];
+}
+
 TBOperator *Graph::create_elementbinary_op(STensor const &input1,
                                            STensor const &input2,
                                            mirage::type::TBOperatorType _type) {
@@ -59,13 +68,13 @@ TBOperator *Graph::create_elementbinary_op(STensor const &input1,
       return nullptr;
     }
   }
-  //STensor output = input1;
-  //for (int i = 0; i < output.num_dims; i++) {
-  //  output.dim[i] = std::max(input1.dim[i], input2.dim[i]);
-  //}
-  //if (smem_offset + output.size() > (off_t)mirage::config::MAX_SMEM_SIZE) {
-  //  return nullptr;
-  //}
+  // STensor output = input1;
+  // for (int i = 0; i < output.num_dims; i++) {
+  //   output.dim[i] = std::max(input1.dim[i], input2.dim[i]);
+  // }
+  // if (smem_offset + output.size() > (off_t)mirage::config::MAX_SMEM_SIZE) {
+  //   return nullptr;
+  // }
 
   TBElementBinaryOp *op = new TBElementBinaryOp(this, input1, input2, _type);
 

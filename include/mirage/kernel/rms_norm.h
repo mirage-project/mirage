@@ -15,20 +15,24 @@
 
 #pragma once
 
-#include "mirage/threadblock/operator.h"
+#include "mirage/kernel/operator.h"
 
 namespace mirage {
-namespace threadblock {
+namespace kernel {
 
-class TBForloopAccumOp : public TBOperator {
+class KNRMSNormOp : public mirage::kernel::KNOperator {
 public:
-  TBForloopAccumOp(Graph *_graph,
-                   STensor const &input,
-                   mirage::type::TBOperatorType type);
-  ~TBForloopAccumOp();
+  KNRMSNormOp(Graph *_graph,
+              DTensor const &input,
+              std::vector<int> const &normalized_shape);
+  ~KNRMSNormOp();
+  bool profile(ProfileResult &profile) override;
+  bool fingerprint(void) override;
 
   operator json() const override;
+public:
+  int normalized_size;
 };
 
-} // namespace threadblock
+} // namespace kernel
 } // namespace mirage
