@@ -467,7 +467,7 @@ void Transpiler::resolve_tensor_layout() {
             }
             break;
           }
-          case type::TB_FORLOOP_ACCUM_OP: {
+          case type::TB_FORLOOP_ACCUM_NO_RED_OP: {
             assert(tb_op == output_op);
             tb::STensor const &input = tb_op->input_tensors.at(0);
             tb::STensor const &output = tb_op->output_tensors.at(0);

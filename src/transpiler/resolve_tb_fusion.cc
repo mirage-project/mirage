@@ -37,7 +37,7 @@ void Transpiler::resolve_tb_fusion() {
     // one consumer
     for (tb::TBOperator *const op : tb_graph.operators) {
       if ((op->op_type == type::TB_EXP_OP ||
-           op->op_type == type::TB_FORLOOP_ACCUM_OP)) {
+           op->op_type == type::TB_FORLOOP_ACCUM_NO_RED_OP)) {
         tb::STensor const &input0 = op->input_tensors.at(0);
         tb::TBOperator *prev_op = input0.owner_op;
         // Don't fuse with an input op with forloop_dim = -1
@@ -46,7 +46,7 @@ void Transpiler::resolve_tb_fusion() {
           continue;
         }
         if (num_consumers.at(input0.guid) == 1 &&
-            prev_op->op_type != type::TB_FORLOOP_ACCUM_OP) {
+            prev_op->op_type != type::TB_FORLOOP_ACCUM_NO_RED_OP) {
           is_fused_with_prev[op] = true;
           is_fused_with_next[prev_op] = true;
         }

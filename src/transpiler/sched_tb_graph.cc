@@ -134,7 +134,7 @@ TBSched Transpiler::get_threadblock_schedule(tb::Graph const &tb_graph) {
     // Calculate the level of each operator
     for (tb::TBOperator *const op : tb_graph.operators) {
       if (op->op_type == type::TB_INPUT_OP ||
-          op->op_type == type::TB_FORLOOP_ACCUM_OP) {
+          op->op_type == type::TB_FORLOOP_ACCUM_NO_RED_OP) {
         op2meta[op] = {0, next_fuse_chain_idx++, 0};
       }
     }
@@ -166,7 +166,7 @@ TBSched Transpiler::get_threadblock_schedule(tb::Graph const &tb_graph) {
                                                               op2meta.end());
     sched.post_loop_nodes = ops2sched(all_ops, [&](tb::TBOperator const *op) {
       if (op->op_type == type::TB_INPUT_OP ||
-          op->op_type == type::TB_FORLOOP_ACCUM_OP) {
+          op->op_type == type::TB_FORLOOP_ACCUM_NO_RED_OP) {
         return false;
       } else {
         return true;

@@ -327,7 +327,7 @@ CustomOPTranspileResult
   // Clear all accumulators
   int num_clear_accums = 0;
   for (tb::TBOperator const *op : g.operators) {
-    if (op->op_type == type::TB_FORLOOP_ACCUM_OP) {
+    if (op->op_type == type::TB_FORLOOP_ACCUM_NO_RED_OP) {
       tb::STensor const &accum = op->output_tensors.at(0);
       STensorMeta const &accum_meta = stensor_metas.at(accum.guid);
       size_t num_elems = 0;
@@ -362,7 +362,7 @@ CustomOPTranspileResult
     string res = "tb::EpilogueStore<half_t>";
     for (size_t i = chain_size - 1; i >= 1; --i) {
       tb::TBOperator const *cur_op = chain[i];
-      if (cur_op->op_type == type::TB_FORLOOP_ACCUM_OP) {
+      if (cur_op->op_type == type::TB_FORLOOP_ACCUM_NO_RED_OP) {
         // Can only occur as the last operator in the chain
         assert(i == chain_size - 1);
         res = "tb::EpilogueStoreAccum<half_t>";
@@ -525,7 +525,7 @@ CustomOPTranspileResult
                               return op->op_type == type::TB_EXP_OP;
                             });
           bool is_store_accum =
-              sched_node.ops.back()->op_type == type::TB_FORLOOP_ACCUM_OP;
+              sched_node.ops.back()->op_type == type::TB_FORLOOP_ACCUM_NO_RED_OP;
 
           code.e("using LayoutA = $;", get_cute_layout(input0, meta0));
           code.e("using LayoutB = $;", get_cute_layout(input1, meta1));
@@ -705,7 +705,7 @@ CustomOPTranspileResult
                  input.guid);
           break;
         }
-        case type::TB_FORLOOP_ACCUM_OP: {
+        case type::TB_FORLOOP_ACCUM_NO_RED_OP: {
           assert(sched_node.ops.size() == 1); // Should not be fused
           assert(is_in_loop);
           tb::STensor const &input = op->input_tensors.at(0);
