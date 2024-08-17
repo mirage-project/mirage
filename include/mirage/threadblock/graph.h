@@ -96,11 +96,19 @@ public:
   TBOperator *create_matmul_op(STensor const &A, STensor const &B);
   // element unary operator
   STensor exp(STensor const &A);
+  STensor silu(STensor const &A);
+  STensor square(STensor const &A);
+  STensor sqrt(STensor const &A);
+  STensor elementunary(STensor const &A, mirage::type::TBOperatorType type);
   TBOperator *create_elementunary_op(STensor const &A,
                                      mirage::type::TBOperatorType _type);
+  // element binary operators
   STensor add(STensor const &A, STensor const &B);
   STensor mul(STensor const &A, STensor const &B);
   STensor div(STensor const &A, STensor const &B);
+  STensor elementbinary(STensor const &A,
+                        STensor const &B,
+                        mirage::type::TBOperatorType type);
   TBOperator *create_elementbinary_op(STensor const &A,
                                       STensor const &B,
                                       mirage::type::TBOperatorType _type);
@@ -117,8 +125,10 @@ public:
   TBOperator *create_concat_op(STensor const &A, STensor const &B, int dim);
 
   // forloop accum operator
-  STensor forloop_accum(STensor const &input);
-  TBOperator *create_forloop_accum_op(STensor const &input);
+  STensor forloop_accum(STensor const &input,
+                        mirage::type::TBOperatorType type);
+  TBOperator *create_forloop_accum_op(STensor const &input,
+                                       mirage::type::TBOperatorType type);
 
   off_t allocate_fingerprint(STensor const &tensor);
   void free_fingerprint(STensor const &tensor);

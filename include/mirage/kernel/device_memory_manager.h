@@ -40,6 +40,8 @@ public:
   mirage::type::FPType *exp_lookup_table;
   mirage::type::FPType *div_p_lookup_table;
   mirage::type::FPType *div_q_lookup_table;
+  mirage::type::FPType *sqrt_p_lookup_table;
+  mirage::type::FPType *sqrt_q_lookup_table;
   // fields for managing the preallocated cuda buffer
   // Note that data_base_ptr[i]
   // points to buffers on the i-th GPU,
@@ -50,6 +52,7 @@ public:
   char *data_base_ptr[mirage::config::MAX_NUM_GPUS];
   char *fp_base_ptr[mirage::config::MAX_NUM_GPUS];
   char *stensor_fp_base_ptr;
+
 public:
   cudaStream_t stream[mirage::config::MAX_NUM_GPUS];
   cublasHandle_t blas[mirage::config::MAX_NUM_GPUS];

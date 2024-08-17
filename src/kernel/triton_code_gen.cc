@@ -232,9 +232,9 @@ std::string generate_kernel_code(
       header << "\t" << stensor_name(input_smem_offset) << " = tl.zeros(["
              << stensor_matrix_shape.x << ", " << stensor_matrix_shape.y << "]"
              << ", dtype = tl.float16)\n";
-      //main << "\t\t" << stensor_name(input_smem_offset) << " = "
-      //     << stensor_name(input_smem_offset) << " + "
-      //     << stensor_name(input_smem_offset) << "\n";
+      // main << "\t\t" << stensor_name(input_smem_offset) << " = "
+      //      << stensor_name(input_smem_offset) << " + "
+      //      << stensor_name(input_smem_offset) << "\n";
       ending << "\ttl.store(" << stensor_ptr_name(input_smem_offset) << ", "
              << stensor_name(input_smem_offset) << ")\n";
       output_idx++;

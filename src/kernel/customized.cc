@@ -101,19 +101,19 @@ KNCustomizedOp::KNCustomizedOp(Graph *_kgraph,
         bgraph.matmul(my_inputs[0], my_inputs[1]);
         break;
       }
-      case mirage::type::TB_EXP_OP: {
+      case mirage::type::TB_EXP_OP:
+      case mirage::type::TB_SQUARE_OP:
+      case mirage::type::TB_SQRT_OP:
+      case mirage::type::TB_SILU_OP: {
         assert(my_inputs.size() == 1);
-        bgraph.exp(my_inputs[0]);
+        bgraph.elementunary(my_inputs[0], op.first);
         break;
       }
-      case mirage::type::TB_ADD_OP: {
-        assert(my_inputs.size() == 2);
-        bgraph.add(my_inputs[0], my_inputs[1]);
-        break;
-      }
+      case mirage::type::TB_ADD_OP:
+      case mirage::type::TB_MUL_OP:
       case mirage::type::TB_DIV_OP: {
         assert(my_inputs.size() == 2);
-        bgraph.div(my_inputs[0], my_inputs[1]);
+        bgraph.elementbinary(my_inputs[0], my_inputs[1], op.first);
         break;
       }
       case mirage::type::TB_REDUCTION_0_OP:
@@ -140,9 +140,12 @@ KNCustomizedOp::KNCustomizedOp(Graph *_kgraph,
         bgraph.concat(my_inputs[0], my_inputs[1], concat_dim);
         break;
       }
-      case mirage::type::TB_FORLOOP_ACCUM_OP: {
+      case mirage::type::TB_FORLOOP_ACCUM_NO_RED_OP: 
+      case mirage::type::TB_FORLOOP_ACCUM_RED_LD_SUM_OP: 
+      case mirage::type::TB_FORLOOP_ACCUM_RED_LD_MEAN_OP: 
+      case mirage::type::TB_FORLOOP_ACCUM_RED_LD_RMS_OP: {
         assert(my_inputs.size() == 1);
-        bgraph.forloop_accum(my_inputs[0]);
+        bgraph.forloop_accum(my_inputs[0], op.first);
         break;
       }
       default: {
@@ -276,9 +279,12 @@ KNCustomizedOp::KNCustomizedOp(mirage::kernel::Graph *_kgraph,
         bgraph.matmul(my_inputs[0], my_inputs[1]);
         break;
       }
-      case mirage::type::TB_EXP_OP: {
+      case mirage::type::TB_EXP_OP:
+      case mirage::type::TB_SQUARE_OP:
+      case mirage::type::TB_SQRT_OP:
+      case mirage::type::TB_SILU_OP: {
         assert(my_inputs.size() == 1);
-        bgraph.exp(my_inputs[0]);
+        bgraph.elementunary(my_inputs[0], op->op_type);
         break;
       }
       case mirage::type::TB_ADD_OP: {
