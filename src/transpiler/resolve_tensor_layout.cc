@@ -100,6 +100,10 @@ void calc_tensor_strides(size_t strides[],
       }
     }
   }
+  if (cur_stride == 1) {
+    // There is only one element in the tensor, we need to pad it to 16B
+    cur_stride = alignment;
+  }
   num_phy_elems = cur_stride;
 }
 
