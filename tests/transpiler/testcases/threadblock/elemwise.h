@@ -140,7 +140,7 @@ ADD_TESTCASE(Testcase("tb_elemwise_correctness", {"threadblock", "correctness"},
 			tb::STensor sx0 = sg->add(si0, si1);
 			tb::STensor sx1 = sg->div(sx0, si1);
 			tb::STensor sx2 = sg->exp(sx1);
-			tb::STensor so0 = sg->forloop_accum(sx2);
+			tb::STensor so0 = sg->forloop_accum(sx2, type::TB_FORLOOP_ACCUM_NO_RED_OP);
 			kn::DTensor o0 = sg->new_output(so0, subcase.io_map, subcase.forloop_dim, type::TB_EPILOGUE_NONE);
 			return {sg, {o0}};
 		});
