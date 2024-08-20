@@ -16,7 +16,7 @@ if __name__ == "__main__":
         torch.randn(12, 251, dtype=torch.float16, device='cuda:0')
     ]
     
-    outputs = graph.execute(inputs=input_tensors, outputs=[output0, output1])
+    outputs = graph(inputs=input_tensors, outputs=[output0, output1])
     
     # ========= Correctness check =========
     mid0_correct = input_tensors[0] + input_tensors[1]

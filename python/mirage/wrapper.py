@@ -94,7 +94,7 @@ class PyGraphWrapper:
     def __getattr__(self, name):  
         return getattr(self.pygraph, name)
     
-    def execute(self, **kwargs):
+    def __call__(self, **kwargs):
         results = self.compile(**kwargs)
         
         assert self.run is not None, "The graph is not compiled yet."
@@ -162,11 +162,11 @@ class PyGraphWrapper:
                 print(f'Error: MIRAGE_ROOT ({MIRAGE_ROOT}) not found. Please set the MIRAGE_ROOT env variable correctly')
                 sys.exit(1)
             cc_cmd = [
-                cc, FILE_NAME, '-O3', f'-I{py_include_dir}', 
+                cc, FILE_NAME, '-O3', f'-I{py_include_dir}',
                 f'-I{MIRAGE_ROOT}/include/mirage/transpiler/runtime/',
                 f'-I{MIRAGE_ROOT}/deps/cutlass/include',
-                '-shared', '-arch=native', '-use_fast_math', '-lcublas',
-                '-Xcompiler=-fPIC', '--expt-relaxed-constexpr',
+                '-shared', '-std=c++17', '-arch=native', '-use_fast_math',
+                '-lcublas', '-Xcompiler=-fPIC', '--expt-relaxed-constexpr',
                 '-o', so_path,
             ]
             
