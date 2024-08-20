@@ -54,7 +54,7 @@ TBMemoryPlan Transpiler::get_threadblock_memory_plan(tb::Graph const& tb_graph, 
 		}
 	}
 
-	plan.smem_size = planner.get_buf_size();
+	plan.smem_size = planner.get_buf_size();	// This size may continue to incease in transpile_kn_custom_op since we are going to allocate buffer for async copies
 	return plan;
 }
 
