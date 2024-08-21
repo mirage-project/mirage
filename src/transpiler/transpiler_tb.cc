@@ -488,23 +488,13 @@ CustomOPTranspileResult
           size_t forloop_dim_stride =
               dtensor_metas.at(dtensor.guid).strides[cur_op->forloop_dim];
           bool is_async_copy = async_copy_input_ops.count(cur_op);
-          if (!is_async_copy) {
-            code.e("STensor$InputAtom::run(stensor$_ptr, dtensor$_tile_ptr + "
-                  "$*for_idx, thread_idx);",
-                  output.guid,
-                  output.guid,
-                  dtensor.guid,
-                  tile_side_len * forloop_dim_stride);
-          } else {
-            code.e("if (for_idx+1 != $) {", plan.forloop_range);
-            code.e("STensor$InputAtom::run(stensor$_async_copy_buf, dtensor$_tile_ptr + "
-                  "$*(for_idx+1), thread_idx);",
-                  output.guid,
-                  output.guid,
-                  dtensor.guid,
-                  tile_side_len * forloop_dim_stride);
-            code.e("}");
-          }
+          assert(!is_async_copy); // Async copies should be proceeded separately
+          code.e("STensor$InputAtom::run(stensor$_ptr, dtensor$_tile_ptr + "
+                "$*for_idx, thread_idx);",
+                output.guid,
+                output.guid,
+                dtensor.guid,
+                tile_side_len * forloop_dim_stride);
           break;
         }
         case type::TB_OUTPUT_OP: {
@@ -883,24 +873,51 @@ CustomOPTranspileResult
   assert(plan.forloop_range >= 1);
   code.e("// The main loop");
   code.e("for (int for_idx = 0; for_idx < $; for_idx++) {", plan.forloop_range);
-  // Wait for the async copies in the last forloop to finish, and switch buffers
+
   if (!async_copy_input_ops.empty()) {
     code.e("{");
-    code.e("cute::cp_async_wait<0>();");
+    code.e("// Issue async copies for the next round");
+    code.e("if (for_idx+1 != $) {", plan.forloop_range);
+    for (tb::TBInputOp const* input_op : async_copy_input_ops) {
+      assert(input_op->forloop_dim >= 0);
+      kn::DTensor const &dtensor = input_op->dtensor;
+      tb::STensor const &output = input_op->output_tensors.at(0);
+      int tile_side_len = output.dim[input_op->forloop_dim];
+      size_t forloop_dim_stride =
+          dtensor_metas.at(dtensor.guid).strides[input_op->forloop_dim];
+      code.e("STensor$InputAtom::run(stensor$_ptr, dtensor$_tile_ptr + "
+            "$*(for_idx+1), thread_idx);",
+            output.guid,
+            output.guid,
+            dtensor.guid,
+            tile_side_len * forloop_dim_stride);
+    }
+    code.e("}");
+    code.e("cute::cp_async_fence();");
+
+    code.e("// Wait for the async copies in the last round to finish");
+    code.e("cute::cp_async_wait<1>();");
+
+    code.e("// Switch buffers");
     for (tb::TBInputOp const* input_op : async_copy_input_ops) {
       tb::STensor const &output = input_op->output_tensors.at(0);
       sguid_t guid = output.guid;
       code.e("SWAP(stensor$_ptr, stensor$_async_copy_buf);", guid, guid);
     }
+
     code.e("}");
   }
+
   for (TBSchedNode const &sched_node : sched.loop_nodes) {
+    if (sched_node.type == tb_sched_node_t::OPERATOR &&
+        sched_node.ops[0]->op_type == type::TB_INPUT_OP &&
+        async_copy_input_ops.count(dynamic_cast<tb::TBInputOp const *>(sched_node.ops[0]))) {
+      continue;
+    }
     CodeKeeper res = transpile_tb_sched_node(sched_node, true);
     code << res;
   }
-    if (!async_copy_input_ops.empty()) {
-      code.e("cute::cp_async_fence();");
-    }
+  
   code.e("}"); // For loop
   code.e("");
 
