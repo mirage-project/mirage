@@ -43,7 +43,7 @@ public:
 // A converter that converts a layout to a "chunked" layout, which groups every
 // `GROUP_SIZE` elements in the 0-th dimension into a single element.
 template<class InputLayout, int GROUP_SIZE>
-class ChunkedLayoutConverter {
+class InputChunkedLayoutConverter {
   using InputRank = decltype(rank(InputLayout{}));
   using GroupSize = Int<GROUP_SIZE>;
 
@@ -71,8 +71,8 @@ public:
   CUTE_STATIC_ASSERT_V(size(SrcLayout{}) == size(DstLayout{}));
 
   static constexpr int GROUP_SIZE = 16 / sizeof(T);
-  using DstChunkedLayout = typename ChunkedLayoutConverter<DstLayout, GROUP_SIZE>::Result;
-  using SrcChunkedLayout = typename ChunkedLayoutConverter<SrcLayout, GROUP_SIZE>::Result;
+  using DstChunkedLayout = typename InputChunkedLayoutConverter<DstLayout, GROUP_SIZE>::Result;
+  using SrcChunkedLayout = typename InputChunkedLayoutConverter<SrcLayout, GROUP_SIZE>::Result;
   using Numel = decltype(size(DstChunkedLayout{}));
   CUTE_STATIC_ASSERT_V(size(DstChunkedLayout{}) == size(SrcChunkedLayout{}));
 
@@ -96,8 +96,8 @@ public:
   CUTE_STATIC_ASSERT_V(size(SrcLayout{}) == size(DstLayout{}));
 
   static constexpr int GROUP_SIZE = 16 / sizeof(T);
-  using DstChunkedLayout = typename ChunkedLayoutConverter<DstLayout, GROUP_SIZE>::Result;
-  using SrcChunkedLayout = typename ChunkedLayoutConverter<SrcLayout, GROUP_SIZE>::Result;
+  using DstChunkedLayout = typename InputChunkedLayoutConverter<DstLayout, GROUP_SIZE>::Result;
+  using SrcChunkedLayout = typename InputChunkedLayoutConverter<SrcLayout, GROUP_SIZE>::Result;
   using Numel = decltype(size(DstChunkedLayout{}));
   CUTE_STATIC_ASSERT_V(size(DstChunkedLayout{}) == size(SrcChunkedLayout{}));
 

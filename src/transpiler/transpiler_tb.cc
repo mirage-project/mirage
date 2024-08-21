@@ -207,7 +207,6 @@ CustomOPTranspileResult
       STensorMeta const &stensor_meta = stensor_metas.at(stensor.guid);
       assert(dtensor.num_dims == stensor.num_dims);
       assert(dtensor.data_type == stensor.data_type);
-      int d_innermost_dim = dtensor_meta.innermost_dim;
       size_t alignment = get_num_elems_in_16B(dtensor.data_type);
 
       code.e("// Copy for G->S: dtensor $ -> stensor $",
@@ -263,6 +262,7 @@ CustomOPTranspileResult
       // TODO(intlsy) Support swizzled layout
       // TODO(intlsy) Support TMA
       if (!use_chunked_copy) {
+        int d_innermost_dim = dtensor_meta.innermost_dim;
         assert(!use_async_copy);
         string dtensor_tile_layout = get_cute_layout(
             mov_to_last(stensor.dim,
@@ -346,8 +346,7 @@ CustomOPTranspileResult
       DTensorMeta const &dtensor_meta = dtensor_metas.at(dtensor.guid);
       assert(dtensor.num_dims == stensor.num_dims);
       assert(dtensor.data_type == stensor.data_type);
-      int num_dims = dtensor.num_dims;
-      int d_innermost_dim = dtensor_meta.innermost_dim;
+      size_t alignment = get_num_elems_in_16B(dtensor.data_type);
 
       code.e("// Copy for S->G: stensor $ -> dtensor $",
              stensor.guid,
@@ -359,6 +358,7 @@ CustomOPTranspileResult
       // shape of STensor * forloop_range
       string offset = "";
       int3 omap = cur_op->output_map;
+      bool is_dtensor_offset_divisible = true;
       for (int dim = 0; dim < 3; ++dim) {
         int div_dim = dim == 0 ? omap.x : dim == 1 ? omap.y : omap.z;
         int num_tbs = dim == 0   ? plan.grid_dim.x
@@ -372,39 +372,52 @@ CustomOPTranspileResult
                         (char)"xyz"[dim],
                         dtensor.dim[div_dim] / num_tbs,
                         dtensor_meta.strides[div_dim]);
+          is_dtensor_offset_divisible &= (dtensor.dim[div_dim] / num_tbs) % alignment == 0 || dtensor_meta.strides[div_dim] % alignment == 0;
         }
       }
       code.e("half_t *dtensor$_tile_ptr = dtensor$_ptr $;",
              dtensor.guid,
              dtensor.guid,
              offset);
-      string dtensor_tile_layout = get_cute_layout(
-          mov_to_last(stensor.dim,
-                      dtensor.num_dims,
-                      d_innermost_dim), // Here we use stensor.dim
-          mov_to_last(dtensor_meta.strides, dtensor.num_dims, d_innermost_dim));
-      code.e(
-          "using DTensor$TileLayout = $;", dtensor.guid, dtensor_tile_layout);
 
-      // Decide the copy atom
-      bool is_all_stride_aligned_16B = true;
-      size_t alignment = get_num_elems_in_16B(dtensor.data_type);
-      for (int i = 0; i < num_dims; ++i) {
-        size_t stride = dtensor_meta.strides[i];
-        is_all_stride_aligned_16B &= (stride % alignment == 0 || stride == 1);
+      auto [use_chunked_copy, real_innermost_dim] = can_perform_chunked_copy(
+          stensor.num_dims,
+          stensor.dim,
+          dtensor_meta.strides,
+          stensor_meta.strides,
+          type::get_datatype_size(dtensor.data_type)
+      );
+      use_chunked_copy &= is_dtensor_offset_divisible;
+
+      if (!use_chunked_copy) {
+        int d_innermost_dim = dtensor_meta.innermost_dim;
+        string dtensor_tile_layout = get_cute_layout(
+            mov_to_last(stensor.dim,
+                        dtensor.num_dims,
+                        d_innermost_dim), // Here we use stensor.dim
+            mov_to_last(dtensor_meta.strides, dtensor.num_dims, d_innermost_dim));
+        code.e(
+            "using DTensor$TileLayout = $;", dtensor.guid, dtensor_tile_layout);
+        code.e("using STensor$OutputAtom = tb::OutputNonChunkedSyncCopy<half_t, "
+              "DTensor$TileLayout, $, NUM_THREADS>;",
+              stensor.guid,
+              dtensor.guid,
+              mov_last_and_get_layout(stensor, stensor_meta, d_innermost_dim));
+      } else {
+        string dtensor_tile_layout = get_cute_layout(
+            mov_to_last(stensor.dim,
+                        dtensor.num_dims,
+                        real_innermost_dim), // Here we use stensor.dim
+            mov_to_last(dtensor_meta.strides, dtensor.num_dims, real_innermost_dim));
+        code.e(
+            "using DTensor$TileLayout = $;", dtensor.guid, dtensor_tile_layout);
+        code.e("using STensor$OutputAtom = tb::OutputChunkedSyncCopy<half_t, "
+              "DTensor$TileLayout, $, NUM_THREADS>;",
+              stensor.guid,
+              dtensor.guid,
+              mov_last_and_get_layout(stensor, stensor_meta, real_innermost_dim));
       }
-      bool use_chunked_copy = is_all_stride_aligned_16B;
-      // Since the layout of the output tensor is designed by us (the
-      // transpiler), it should always have a friendly layout
-      assert(use_chunked_copy);
-
-      // TODO(intlsy) Support chunked copy
       // TODO(intlsy) Support TMA
-      code.e("using STensor$OutputAtom = tb::OutputNonChunkedSyncCopy<half_t, "
-             "DTensor$TileLayout, $, NUM_THREADS>;",
-             stensor.guid,
-             dtensor.guid,
-             mov_last_and_get_layout(stensor, stensor_meta, d_innermost_dim));
     }
   }
   code.e("");
