@@ -46,59 +46,44 @@ int main(int argc, char **argv) {
       {2 * batch_size, 4096, 64}, type::DT_FLOAT16, layout::DmemColumnMajor);
   std::vector<kernel::DTensor> outputs;
   {
-    threadblock::ExecutionPlan plan;
-    plan.ops.push_back({mirage::type::TB_MATMUL_OP, {{0, 0}, {1, 0}}});
-    plan.ops.push_back({mirage::type::TB_EXP_OP, {{3, 0}}});
-    plan.ops.push_back({mirage::type::TB_MATMUL_OP, {{4, 0}, {2, 0}}});
-    plan.ops.push_back({mirage::type::TB_FORLOOP_ACCUM_NO_RED_OP, {{5, 0}}});
-    plan.ops.push_back({mirage::type::TB_FORLOOP_ACCUM_RED_LD_SUM_OP, {{4, 0}}});
-    plan.input_map.push_back({0, -1, 1});
-    plan.input_map.push_back({0, 2, -1});
-    plan.input_map.push_back({0, 1, -1});
-    plan.input_smem_layouts = {
-        layout::SmemRowMajorTensorOpMultiplicand_Crosswise64,
-        layout::SmemColumnMajorTensorOpMultiplicand_Crosswise64,
-        layout::SmemColumnMajorTensorOpMultiplicand_Crosswise64,
-    };
-    plan.input_forloop_dim = {-1, 2, 1};
-    plan.output_map = {0, 2, 1};
-    if (batch_size == 1) {
-      plan.grid_dim = {2, 16, 4};
-    } else {
-      plan.grid_dim = {16, 8, 2};
+    dim3 grid_dim = {2, 16, 4}, block_dim = {128, 1, 1};
+    int forloop_range = 4, reduction_dimx = 64;
+    if (batch_size > 1) {
+      grid_dim = {16, 8, 2};
     }
-    plan.block_dim = {128, 1, 1};
-    plan.forloop_range = 4;
-    plan.reduction_dimx = 64;
-    outputs = graph.customized({Q, K, V}, plan);
+    threadblock::Graph bgraph(grid_dim, block_dim, forloop_range, reduction_dimx);
+    threadblock::STensor bQ = bgraph.new_input(Q, {0, -1, 1}, -1, layout::SmemRowMajor);
+
+    threadblock::STensor bK = bgraph.new_input(K, {0, 2, -1}, 2, layout::SmemColumnMajor);
+    threadblock::STensor bV = bgraph.new_input(V, {0, 1, -1}, 1, layout::SmemColumnMajor);
+    threadblock::STensor bA = bgraph.matmul(bQ, bK);
+    threadblock::STensor bE = bgraph.exp(bA);
+    threadblock::STensor bS = bgraph.matmul(bE, bV);
+    threadblock::STensor bO1 = bgraph.forloop_accum(bS, type::TB_FORLOOP_ACCUM_NO_RED_OP);
+    threadblock::STensor bO2 = bgraph.forloop_accum(bE, type::TB_FORLOOP_ACCUM_RED_LD_SUM_OP);
+    bgraph.new_output(bO1, {0, 2, 1}, -1, type::TB_EPILOGUE_NONE);
+    bgraph.new_output(bO2, {0, 2, 1}, -1, type::TB_EPILOGUE_NONE);
+    outputs = graph.customized({Q, K, V}, bgraph);
     assert(outputs.size() == 2);
     // kernel::DTensor o1 = graph.reduction(outputs[0], 2 /*dim*/, 64 /*size*/);
     // kernel::DTensor o2 = graph.reduction(outputs[1], 2 /*dim*/);
     // graph.div(o1, o2);
   }
   {
-    threadblock::ExecutionPlan plan;
-    plan.ops.push_back({mirage::type::TB_REDUCTION_2_TO_DIMX_OP, {{0, 0}}});
-    plan.ops.push_back({mirage::type::TB_REDUCTION_2_OP, {{1, 0}}});
-    plan.ops.push_back({mirage::type::TB_DIV_OP, {{2, 0}, {3, 0}}});
-    plan.ops.push_back({mirage::type::TB_FORLOOP_ACCUM_NO_RED_OP, {{4, 0}}});
-    plan.input_map.push_back({0, 1, -1});
-    plan.input_map.push_back({0, 1, -1});
-    plan.input_smem_layouts = {
-        layout::SmemRowMajor,
-        layout::SmemRowMajor,
-    };
-    plan.input_forloop_dim = {-1, -1};
-    plan.output_map = {0, 1, -1};
-    plan.grid_dim = {2, 16, 1};
-    if (batch_size == 8) {
-      plan.grid_dim = {16, 8, 1};
+    dim3 grid_dim = {2, 16, 1}, block_dim = {128, 1, 1};
+    int forloop_range = 1, reduction_dimx = 64;
+    if (batch_size > 1) {
+      grid_dim = {16, 8, 1};
     }
-    plan.block_dim = {128, 1, 1};
-    plan.forloop_range = 1;
-    plan.reduction_dimx = 64;
-    // plan.output_epilogue = mirage::type::TB_EPILOGUE_ALLREDUCE;
-    outputs = graph.customized({outputs[0], outputs[1]}, plan);
+    threadblock::Graph bgraph(grid_dim, block_dim, forloop_range, reduction_dimx);
+    threadblock::STensor bA = bgraph.new_input(outputs[0], {0, 1, -1}, -1, layout::SmemRowMajor);
+    threadblock::STensor bB = bgraph.new_input(outputs[1], {0, 1, -1}, -1, layout::SmemRowMajor);
+    threadblock::STensor bRA = bgraph.reduction_to_dimx(bA, 2);
+    threadblock::STensor bRB = bgraph.reduction(bB, 2);
+    threadblock::STensor bD = bgraph.div(bRA, bRB);
+    threadblock::STensor bAcc = bgraph.forloop_accum(bD, type::TB_FORLOOP_ACCUM_NO_RED_OP);
+    bgraph.new_output(bAcc, {0, 1, -1}, -1, type::TB_EPILOGUE_NONE);
+    outputs = graph.customized({outputs[0], outputs[1]}, bgraph);
     assert(outputs.size() == 1);
   }
   for (auto const &op : graph.operators) {
