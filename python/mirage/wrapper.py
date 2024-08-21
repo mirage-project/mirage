@@ -6,8 +6,9 @@ import subprocess
 import shutil
 import sys
 import sysconfig
+from typing import *
 
-from .core import generate_cuda_program
+from .core import *
 
 HARD_CODE = """
 #include <Python.h>
@@ -83,18 +84,36 @@ PyMODINIT_FUNC PyInit___mirage_launcher(void) {
 def gen_empty_tensor(alloc_size, shape, stride, device, dtype=torch.float16):
     return torch.empty(alloc_size, dtype=dtype, device=device).as_strided(shape, stride)
 
-class PyGraphWrapper:  
+class PyGraph:  
     def __init__(self, graph):  
-        self.pygraph = graph
+        self.cygraph = graph
         
         self._is_compiled = False
         self.run = None
         self._cached_results = None
-  
-    def __getattr__(self, name):  
-        return getattr(self.pygraph, name)
     
-    def execute(self, **kwargs):
+    def new_input(self, dims: Tuple, dtype: dtype = float16):
+        return self.cygraph.new_input(dims, dtype)
+    
+    def matmul(self, A: PyTensor, B: PyTensor):
+        return self.cygraph.matmul(A, B)
+    
+    def reduction(self, A: PyTensor, dim: int):
+        return self.cygraph.reduction(A, dim)
+    
+    def exp(self, A: PyTensor):
+        return self.cygraph.exp(A)
+    
+    def add(self, A: PyTensor, B: PyTensor):
+        return self.cygraph.add(A, B)
+    
+    def mul(self, A: PyTensor, B: PyTensor):
+        return self.cygraph.mul(A, B)
+      
+    def div(self, A: PyTensor, B: PyTensor):
+        return self.cygraph.div(A, B)
+    
+    def __call__(self, **kwargs):
         results = self.compile(**kwargs)
         
         assert self.run is not None, "The graph is not compiled yet."
@@ -126,13 +145,13 @@ class PyGraphWrapper:
         target_cc = kwargs.get("target_cc", torch.cuda.get_device_properties(0).major * 10 
                                + torch.cuda.get_device_properties(0).minor)
         
-        result = generate_cuda_program(self.pygraph, 
+        result = generate_cuda_program(self.cygraph, 
                                        target_cc=target_cc, 
                                        input_strides=input_strides, 
                                        output_tensors=kwargs.get("outputs", []))
         # print(result)
         
-        MIRAGE_ROOT = os.environ.get('MIRAGE_ROOT', '../../mirage')
+        MIRAGE_ROOT = os.environ.get('MIRAGE_ROOT', './')
         
         # if True:
         #     tempdir = './test/'
@@ -162,11 +181,11 @@ class PyGraphWrapper:
                 print(f'Error: MIRAGE_ROOT ({MIRAGE_ROOT}) not found. Please set the MIRAGE_ROOT env variable correctly')
                 sys.exit(1)
             cc_cmd = [
-                cc, FILE_NAME, '-O3', f'-I{py_include_dir}', 
+                cc, FILE_NAME, '-O3', f'-I{py_include_dir}',
                 f'-I{MIRAGE_ROOT}/include/mirage/transpiler/runtime/',
                 f'-I{MIRAGE_ROOT}/deps/cutlass/include',
-                '-shared', '-arch=native', '-use_fast_math', '-lcublas',
-                '-Xcompiler=-fPIC', '--expt-relaxed-constexpr',
+                '-shared', '-std=c++17', '-arch=native', '-use_fast_math',
+                '-lcublas', '-Xcompiler=-fPIC', '--expt-relaxed-constexpr',
                 '-o', so_path,
             ]
             
