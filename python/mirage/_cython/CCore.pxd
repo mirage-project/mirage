@@ -20,6 +20,16 @@ from libcpp cimport bool
 
 ctypedef unsigned long int size_t
 
+cdef extern from "vector_types.h":
+    ctypedef struct dim3:
+        unsigned int x
+        unsigned int y
+        unsigned int z
+    ctypedef struct int3:
+        int x
+        int y
+        int z
+
 cdef extern from "mirage/type.h" namespace "mirage::type":
     # This must be consistent with mirage/type.h
     cdef enum DataType:
@@ -36,7 +46,11 @@ cdef extern from "mirage/layout.h" namespace "mirage::layout":
     cdef enum DmemLayout:
         DmemRowMajor = 100,
         DmemColumnMajor = 101,
-        DmemUnknowLayout = 199,
+        DmemUnknownLayout = 199,
+    cdef enum SmemLayout:
+        SmemRowMajor = 200,
+        SmemColumnMajor = 201,
+        SmemUnknownLayout = 299
 
 cdef extern from "mirage/kernel/graph.h" namespace "mirage::kernel":
     cdef cppclass KNOperator:
@@ -52,8 +66,8 @@ cdef extern from "mirage/kernel/graph.h" namespace "mirage::kernel":
         int owner_ts_idx
         pass
 
-    cdef cppclass Graph:
-        Graph()
+    cdef cppclass KNGraph "mirage::kernel::Graph":
+        KNGraph()
         DTensor* new_input_ptr(vector[int] dims,
                                DataType data_type,
                                DmemLayout layout)
@@ -66,6 +80,28 @@ cdef extern from "mirage/kernel/graph.h" namespace "mirage::kernel":
         void generate_triton_program(const char *filepath)
         void generate_cuda_program(const char *filepath)
 
+cdef extern from "mirage/threadblock/graph.h" namespace "mirage::threadblock":
+    cdef cppclass TBOperator:
+        pass
+    ctypedef struct STensor:
+        DataType data_type
+        SmemLayout layout
+        int num_dims
+        int dim[4]
+        int owner_ts_id
+
+    cdef cppclass TBGraph "mirage::threadblock::Graph":
+        TBGraph(dim3 grid_dim,
+                dim3 block_dim,
+                int forloop_range,
+                int reduction_dimx)
+        new_input(const DTensor* dtensor,
+                  int3 input_map,
+                  int forloop_dim,
+                  SmemLayout layout)
+        matmul(const STensor *A,
+               const STensor *B)
+
 cdef extern from "mirage/search/search_c.h" namespace "mirage::search_c":
     ctypedef struct MInt3:
         int x
@@ -75,9 +111,10 @@ cdef extern from "mirage/search/search_c.h" namespace "mirage::search_c":
         unsigned int x
         unsigned int y
         unsigned int z
-    cdef int cython_optimize(const Graph *input_graph,
+
+    cdef int cython_optimize(const KNGraph *input_graph,
                              int max_num_new_graphs,
-                             Graph** new_graphs,
+                             KNGraph** new_graphs,
                              vector[MInt3] imaps,
                              vector[MInt3] omaps,
                              vector[MDim3] griddims,
@@ -98,7 +135,7 @@ cdef extern from "mirage/transpiler/transpile.h" namespace "mirage::transpiler":
         string code
         size_t buf_size
         vector[OutputTensorDirective] output_directives
-    cdef TranspileResult transpile(const Graph *graph,
+    cdef TranspileResult transpile(const KNGraph *graph,
                        const TranspilerConfig config,
                        vector[vector[size_t]] input_strides,
                        vector[const DTensor*] output_tensors)

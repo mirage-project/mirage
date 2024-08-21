@@ -178,16 +178,16 @@ cdef class PyTensor:
             assert False , "Error: index out of range"
             return None
 
-cdef class CyGraph:
-    cdef Graph *p_graph #Hold a Graph instance
+cdef class CyKNGraph:
+    cdef KNGraph *p_kgraph #Hold a KNGraph instance
 
     def __cinit__(self, graph = None):
         cdef unsigned long long ptr
         if graph is None:
-            self.p_graph = new Graph()
+            self.p_kgraph = new KNGraph()
         else:
             ptr = ctypes.cast(graph, ctypes.c_void_p).value
-            self.p_graph = <Graph*>(ptr)
+            self.p_kgraph = <KNGraph*>(ptr)
 
     def new_input(self, tuple dims, dtype : dtype = float16):
         cdef vector[int] cdims
@@ -195,37 +195,37 @@ cdef class CyGraph:
         for i in range(len(dims)):
             cdims[i] = dims[i]
         c_type = convert_dtype_to_ctype(dtype)
-        cdef DTensor* ptr = self.p_graph.new_input_ptr(cdims, c_type, DmemRowMajor)
+        cdef DTensor* ptr = self.p_kgraph.new_input_ptr(cdims, c_type, DmemRowMajor)
         t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
         return PyTensor(t)
 
     def matmul(self, PyTensor A, PyTensor B):
-        cdef DTensor* ptr = self.p_graph.matmul(A.c_ptr, B.c_ptr)
+        cdef DTensor* ptr = self.p_kgraph.matmul(A.c_ptr, B.c_ptr)
         t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
         return PyTensor(t)
 
     def reduction(self, PyTensor input, int dim):
-        cdef DTensor* ptr = self.p_graph.reduction(input.c_ptr, dim, 1)
+        cdef DTensor* ptr = self.p_kgraph.reduction(input.c_ptr, dim, 1)
         t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
         return PyTensor(t)
 
     def exp(self, PyTensor input):
-        cdef DTensor* ptr = self.p_graph.exp(input.c_ptr)
+        cdef DTensor* ptr = self.p_kgraph.exp(input.c_ptr)
         t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
         return PyTensor(t)
 
     def add(self, PyTensor A, PyTensor B):
-        cdef DTensor* ptr = self.p_graph.add(A.c_ptr, B.c_ptr)
+        cdef DTensor* ptr = self.p_kgraph.add(A.c_ptr, B.c_ptr)
         t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
         return PyTensor(t)
 
     def mul(self, PyTensor A, PyTensor B):
-        cdef DTensor* ptr = self.p_graph.mul(A.c_ptr, B.c_ptr)
+        cdef DTensor* ptr = self.p_kgraph.mul(A.c_ptr, B.c_ptr)
         t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
         return PyTensor(t)
 
     def div(self, PyTensor A, PyTensor B):
-        cdef DTensor* ptr = self.p_graph.div(A.c_ptr, B.c_ptr)
+        cdef DTensor* ptr = self.p_kgraph.div(A.c_ptr, B.c_ptr)
         t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
         return PyTensor(t)
 
@@ -234,9 +234,15 @@ cdef class CyGraph:
         py_byte_string = filepath.encode('UTF-8')
         cdef char* cfilepath = NULL
         cfilepath = py_byte_string
-        self.p_graph.generate_triton_program(cfilepath)
+        self.p_kgraph.generate_triton_program(cfilepath)
 
-def optimize(CyGraph input_graph, *, int max_num_new_graphs = 1024, list imaps = None, list omaps = None, list griddims = None, list blockdims = None, list fmaps = None, list franges = None, str previous_checkpoint = None, str default_config = None):
+cdef class CyTBGraph:
+    cdef TBGraph *p_bgraph #Hold a KNGraph instance
+
+    def __cinit__(self, dim3 grid_dim, dim3 block_dim, int forloop_range, int dimx):
+        self.p_bgraph = new TBGraph(grid_dim, block_dim, forloop_range, dimx)
+
+def optimize(CyKNGraph input_graph, *, int max_num_new_graphs = 1024, list imaps = None, list omaps = None, list griddims = None, list blockdims = None, list fmaps = None, list franges = None, str previous_checkpoint = None, str default_config = None):
     # set cimaps
     cdef vector[MInt3] cimaps
     cimaps.resize(0)
@@ -291,7 +297,7 @@ def optimize(CyGraph input_graph, *, int max_num_new_graphs = 1024, list imaps =
     # allocate new graphs
     # currently support up to 1024 new graphs
     assert max_num_new_graphs <= 1024
-    cdef Graph* cnewgraphs[1024]
+    cdef KNGraph* cnewgraphs[1024]
     # convert file path
     cdef char* cfilepath = NULL
     if previous_checkpoint is not None:
@@ -302,16 +308,16 @@ def optimize(CyGraph input_graph, *, int max_num_new_graphs = 1024, list imaps =
     if default_config is not None:
         py_byte_string = default_config.encode('UTF-8')
         cconfig = py_byte_string
-    num = cython_optimize(input_graph.p_graph, max_num_new_graphs, cnewgraphs, cimaps, comaps, cgriddims, cblockdims, cfmaps, cfranges, cfilepath, cconfig)
+    num = cython_optimize(input_graph.p_kgraph, max_num_new_graphs, cnewgraphs, cimaps, comaps, cgriddims, cblockdims, cfmaps, cfranges, cfilepath, cconfig)
     new_graphs = list()
     for i in range(num):
         ptr = ctypes.cast(<unsigned long long>cnewgraphs[i], ctypes.c_void_p)
-        new_graphs.append(CyGraph(ptr))
+        new_graphs.append(CyKNGraph(ptr))
     return new_graphs
 
 # Generate CUDA program for a uGraph
 # Return (CUDA code, buffer size in bytes)
-def generate_cuda_program(CyGraph input_graph, *, int target_cc, list input_strides, list output_tensors) -> dict:
+def generate_cuda_program(CyKNGraph input_graph, *, int target_cc, list input_strides, list output_tensors) -> dict:
     # Set transpiler_config
     cdef TranspilerConfig transpiler_config
     transpiler_config.target_cc = target_cc
@@ -333,7 +339,7 @@ def generate_cuda_program(CyGraph input_graph, *, int target_cc, list input_stri
         coutput_tensors[i] = t.c_ptr
     
     # Call transpile
-    cdef TranspileResult result = transpile(input_graph.p_graph, transpiler_config, cinput_strides, coutput_tensors)
+    cdef TranspileResult result = transpile(input_graph.p_kgraph, transpiler_config, cinput_strides, coutput_tensors)
 
     # Get output directives
     cdef list[dict] output_directives = list()
