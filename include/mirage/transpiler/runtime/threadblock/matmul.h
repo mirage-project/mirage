@@ -142,35 +142,42 @@ CUTE_HOST_DEVICE void s2r_copy_with_oob_protection(
   static_assert(SrcLayout::rank == 2);
   static_assert(DstLayout::rank == 2);
 
-  using MIndicatorLayout = Layout<Shape<M, K>, Stride<_1, _0>>;
-  using KIndicatorLayout = Layout<Shape<M, K>, Stride<_0, _1>>;
-  auto m_indicator_thrIdx_s2r_s2rM_s2rK =
-      tiled_copy.tidfrg_S(MIndicatorLayout{});
-  auto k_indicator_thrIdx_s2r_s2rM_s2rK =
-      tiled_copy.tidfrg_S(KIndicatorLayout{});
-  static_assert(is_static_v<decltype(m_indicator_thrIdx_s2r_s2rM_s2rK)>);
-  static_assert(is_static_v<decltype(k_indicator_thrIdx_s2r_s2rM_s2rK)>);
-  int offset_m = m_indicator_thrIdx_s2r_s2rM_s2rK(thread_idx, _0{}, _0{});
-  int offset_k = k_indicator_thrIdx_s2r_s2rM_s2rK(thread_idx, _0{}, _0{});
-  auto m_indicator_frag = m_indicator_thrIdx_s2r_s2rM_s2rK(
-      thread_idx, _, make_tuple(_, _)); // [S2R, S2R_M or S2R_N, S2R_K]
-  auto k_indicator_frag = k_indicator_thrIdx_s2r_s2rM_s2rK(
-      thread_idx, _, make_tuple(_, _)); // Same as above
+  using TiledMN = typename TiledCopy::Tiler_MN;
+  using TileM = decltype(get<0>(TiledMN{}));
+  using TileK = decltype(get<1>(TiledMN{}));
+  if constexpr ((M::value % TileM::value == 0) && (K::value % TileK::value == 0)) {
+    copy(tiled_copy, src, dst);
+  } else {
+    using MIndicatorLayout = Layout<Shape<M, K>, Stride<_1, _0>>;
+    using KIndicatorLayout = Layout<Shape<M, K>, Stride<_0, _1>>;
+    auto m_indicator_thrIdx_s2r_s2rM_s2rK =
+        tiled_copy.tidfrg_S(MIndicatorLayout{});
+    auto k_indicator_thrIdx_s2r_s2rM_s2rK =
+        tiled_copy.tidfrg_S(KIndicatorLayout{});
+    static_assert(is_static_v<decltype(m_indicator_thrIdx_s2r_s2rM_s2rK)>);
+    static_assert(is_static_v<decltype(k_indicator_thrIdx_s2r_s2rM_s2rK)>);
+    int offset_m = m_indicator_thrIdx_s2r_s2rM_s2rK(thread_idx, _0{}, _0{});
+    int offset_k = k_indicator_thrIdx_s2r_s2rM_s2rK(thread_idx, _0{}, _0{});
+    auto m_indicator_frag = m_indicator_thrIdx_s2r_s2rM_s2rK(
+        thread_idx, _, make_tuple(_, _)); // [S2R, S2R_M or S2R_N, S2R_K]
+    auto k_indicator_frag = k_indicator_thrIdx_s2r_s2rM_s2rK(
+        thread_idx, _, make_tuple(_, _)); // Same as above
 
-  static_assert(cosize(SrcLayout{}(_, _0{})) <= 16);
-  Tensor all_zero_tensor =
-      make_tensor(make_smem_ptr((T *)smem_allzero_ptr),
-                  Layout<decltype(shape(SrcLayout{}(_, _0{})))>{});
+    static_assert(cosize(SrcLayout{}(_, _0{})) <= 16);
+    Tensor all_zero_tensor =
+        make_tensor(make_smem_ptr((T *)smem_allzero_ptr),
+                    Layout<decltype(shape(SrcLayout{}(_, _0{})))>{});
 
-  CUTE_UNROLL
-  for (int i = 0; i < size<1>(src); ++i) {
-    auto coord_m = offset_m + m_indicator_frag(_0{}, i, s2r_k);
-    auto coord_k = offset_k + k_indicator_frag(_0{}, i, s2r_k);
-    bool valid = coord_m < M{} && coord_k < K{};
-    // printf("Thread %d, (%d, %d) -> (%d, %d), %d\n", thread_idx, i, s2r_k,
-    // (int)coord_m, (int)coord_k, valid);
-    // TODO(intlsy) Support naive UniversalCopy
-    tiled_copy.call(valid ? src(_, i) : all_zero_tensor, dst(_, i));
+    CUTE_UNROLL
+    for (int i = 0; i < size<1>(src); ++i) {
+      auto coord_m = offset_m + m_indicator_frag(_0{}, i, s2r_k);
+      auto coord_k = offset_k + k_indicator_frag(_0{}, i, s2r_k);
+      bool valid = coord_m < M{} && coord_k < K{};
+      // printf("Thread %d, (%d, %d) -> (%d, %d), %d\n", thread_idx, i, s2r_k,
+      // (int)coord_m, (int)coord_k, valid);
+      // TODO(intlsy) Support naive UniversalCopy
+      tiled_copy.call(valid ? src(_, i) : all_zero_tensor, dst(_, i));
+    }
   }
 }
 
@@ -192,32 +199,13 @@ CUTE_HOST_DEVICE void r2s_copy_with_oob_protection(
   static_assert(SrcLayout::rank == 3);
   static_assert(DstLayout::rank == 3);
 
-  using MIndicatorLayout = Layout<Shape<M, N>, Stride<_1, _0>>;
-  using NIndicatorLayout = Layout<Shape<M, N>, Stride<_0, _1>>;
-  auto m_indicator_thrIdx_r2s_r2sM_r2sN =
-      tiled_copy.tidfrg_D(MIndicatorLayout{});
-  auto n_indicator_thrIdx_r2s_r2sM_r2sN =
-      tiled_copy.tidfrg_D(NIndicatorLayout{});
-  static_assert(is_static_v<decltype(m_indicator_thrIdx_r2s_r2sM_r2sN)>);
-  static_assert(is_static_v<decltype(n_indicator_thrIdx_r2s_r2sM_r2sN)>);
-  int offset_m = m_indicator_thrIdx_r2s_r2sM_r2sN(thread_idx, _0{}, _0{});
-  int offset_n = n_indicator_thrIdx_r2s_r2sM_r2sN(thread_idx, _0{}, _0{});
-  auto m_indicator_frag = m_indicator_thrIdx_r2s_r2sM_r2sN(
-      thread_idx, _, make_tuple(_, _)); // [R2S, R2S_M, R2S_N]
-  auto n_indicator_frag = n_indicator_thrIdx_r2s_r2sM_r2sN(
-      thread_idx, _, make_tuple(_, _)); // Same as above
-
-  CUTE_UNROLL
-  for (int i = 0; i < size(src); ++i) {
-    auto coord_m = offset_m + m_indicator_frag(i);
-    auto coord_n = offset_n + n_indicator_frag(i);
-    bool valid = coord_m < M{} && coord_n < N{};
-    // TODO(intlsy) Modify this after supporting `stmatrix` on H100
-    // Cannot use a `if (valid)` since `stmatrix` needs all threads in a warp
-    // to have the same control flow, or the program will stuck
-    // printf("Thread %d, (%d) -> (%d, %d), %d\n", thread_idx, i, j,
-    // (int)coord_m, (int)coord_n, valid);
-    if (valid) {
+  using TiledMN = typename TiledCopy::Tiler_MN;
+  using TileM = decltype(get<0>(TiledMN{}));
+  using TileN = decltype(get<1>(TiledMN{}));
+  if constexpr ((M::value % TileM::value == 0) && (N::value % TileN::value == 0)) {
+    CUTE_UNROLL
+    for (int i = 0; i < size(src); ++i) {
+      // TODO(intlsy) Modify this after supporting `stmatrix` on H100
       T x = src(i);
       if constexpr (NUM_EXPS_BEFORE_STORE > 0) {
         CUTE_UNROLL
@@ -229,6 +217,47 @@ CUTE_HOST_DEVICE void r2s_copy_with_oob_protection(
         dst(i) += x;
       } else {
         dst(i) = x;
+      }
+    }
+  } else {
+    using MIndicatorLayout = Layout<Shape<M, N>, Stride<_1, _0>>;
+    using NIndicatorLayout = Layout<Shape<M, N>, Stride<_0, _1>>;
+    auto m_indicator_thrIdx_r2s_r2sM_r2sN =
+        tiled_copy.tidfrg_D(MIndicatorLayout{});
+    auto n_indicator_thrIdx_r2s_r2sM_r2sN =
+        tiled_copy.tidfrg_D(NIndicatorLayout{});
+    static_assert(is_static_v<decltype(m_indicator_thrIdx_r2s_r2sM_r2sN)>);
+    static_assert(is_static_v<decltype(n_indicator_thrIdx_r2s_r2sM_r2sN)>);
+    int offset_m = m_indicator_thrIdx_r2s_r2sM_r2sN(thread_idx, _0{}, _0{});
+    int offset_n = n_indicator_thrIdx_r2s_r2sM_r2sN(thread_idx, _0{}, _0{});
+    auto m_indicator_frag = m_indicator_thrIdx_r2s_r2sM_r2sN(
+        thread_idx, _, make_tuple(_, _)); // [R2S, R2S_M, R2S_N]
+    auto n_indicator_frag = n_indicator_thrIdx_r2s_r2sM_r2sN(
+        thread_idx, _, make_tuple(_, _)); // Same as above
+
+    CUTE_UNROLL
+    for (int i = 0; i < size(src); ++i) {
+      auto coord_m = offset_m + m_indicator_frag(i);
+      auto coord_n = offset_n + n_indicator_frag(i);
+      bool valid = coord_m < M{} && coord_n < N{};
+      // TODO(intlsy) Modify this after supporting `stmatrix` on H100
+      // Cannot use a `if (valid)` since `stmatrix` needs all threads in a warp
+      // to have the same control flow, or the program will stuck
+      // printf("Thread %d, (%d) -> (%d, %d), %d\n", thread_idx, i, j,
+      // (int)coord_m, (int)coord_n, valid);
+      if (valid) {
+        T x = src(i);
+        if constexpr (NUM_EXPS_BEFORE_STORE > 0) {
+          CUTE_UNROLL
+          for (int i = 0; i < NUM_EXPS_BEFORE_STORE; ++i) {
+            x = perform_element_unary_op<T, ElementUnaryOpType::EXP>(x);
+          }
+        }
+        if constexpr (IS_STORE_ACCUM) {
+          dst(i) += x;
+        } else {
+          dst(i) = x;
+        }
       }
     }
   }
@@ -395,8 +424,6 @@ public:
     CUTE_STATIC_ASSERT_V(shape<2>(s2r_rA) == shape<2>(s2r_rB));
     static constexpr int NUM_MMA_K_STAGES = shape<2>(s2r_sA);
 
-// TODO(intlsy) Eliminate unnecessary boundary checking when the shape is
-// divisible
 #define S2RCOPY(k_idx)                                                         \
   s2r_copy_with_oob_protection<T, M, K>(s2r_tiled_copy_A,                      \
                                         s2r_sA(_, _, k_idx, _0{}),             \
@@ -422,8 +449,6 @@ public:
       gemm(tiled_mma, mma_rC, mma_rA(_, _, i_k), mma_rB(_, _, i_k), mma_rC);
     }
 
-    // TODO(intlsy) Eliminate unnecessary boundary checking when the shape is
-    // divisible
     r2s_copy_with_oob_protection<T,
                                  M,
                                  N,
