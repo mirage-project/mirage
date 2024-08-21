@@ -59,3 +59,5 @@ __host__ __device__ void println(T const &t) {
       __warned = true;                                                         \
     }                                                                          \
   } while (0)
+
+#define SWAP(a, b) { auto tmp = a; a = b; b = tmp; }

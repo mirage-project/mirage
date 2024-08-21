@@ -14,6 +14,7 @@
  */
 
 #include "mirage/threadblock/operator.h"
+#include "mirage/transpiler/common.h"
 #include "mirage/transpiler/structs.h"
 #include "mirage/transpiler/transpiler.h"
 
@@ -86,7 +87,47 @@ static string mov_last_and_get_layout(Tensor_T const &tensor,
       mov_to_last(meta.strides, tensor.num_dims, innermost_dim));
 }
 
-// The following code are related to threadblock graph transpilation
+// Test whether consecutive `chunk_size` elements in layout A are contiguous in layout B
+// 
+// See docs/transpiler/transpiler.md for more details
+static std::pair<bool, int> can_perform_chunked_copy(
+  int num_dims,
+  const int shape[],
+  const size_t stride_dtensor[],
+  const size_t stride_stensor[],
+  size_t dtype_size
+) {
+  // Check whether the strides are 16B-aligned
+  auto is_strides_aligned_16B = [&](const size_t strides[]) -> bool {
+    size_t alignment = 16 / dtype_size;
+    bool res = true;
+    for (int i = 0; i < num_dims; ++i) {
+      size_t stride = strides[i];
+      res &= (stride % alignment == 0 || stride == 1);
+    }
+    return res;
+  };
+  if(!is_strides_aligned_16B(stride_dtensor)) {
+    return {false, 0};
+  }
+  assert(is_strides_aligned_16B(stride_stensor)); // In our current design, the layout of STensor is always 16B-aligned
+
+  // Check whether the "real innermost dim" is the same
+  auto find_real_innermost_dim = [&](const size_t strides[]) -> int {
+    for (int i = 0; i < num_dims; ++i) {
+      if (strides[i] == 1 && shape[i] != 1) {
+        return i;
+      }
+    }
+    return -1;
+  };
+  int real_innermost_dtensor = find_real_innermost_dim(stride_dtensor);
+  int real_innermost_stensor = find_real_innermost_dim(stride_stensor);
+  // assert(real_innermost_dtensor != -1);  real_innermost_dtensor can be -1 for input tensors
+  assert(real_innermost_stensor != -1);
+  return {real_innermost_dtensor == real_innermost_stensor, real_innermost_stensor};
+}
+
 
 // Transpile a custom KN operator (i.e. a custom block graph) into CUDA code
 // Will return a CustomOPTranspileResult object. See comments in transpiler.h
@@ -102,6 +143,13 @@ CustomOPTranspileResult
 
   // Get the memory allocation plan
   TBMemoryPlan mem_plan = get_threadblock_memory_plan(g, sched);
+  size_t cur_smem_size = mem_plan.smem_size;  // May increase, e.g. when we allocate buffers for async copy
+  auto allocate_buf = [&](size_t size) {
+    cur_smem_size = round_to_multiple(cur_smem_size, (size_t)16);
+    size_t offset = cur_smem_size;
+    cur_smem_size += size;
+    return offset;
+  };
 
   // Allocate a kernel name
   static int custom_kernel_idx_counter = 0;
@@ -146,9 +194,9 @@ CustomOPTranspileResult
   code.e("*((uint128_t*)buf) = 0ul;");
   code.e("");
 
-  // Define G2SCopy for all input STensors, and copy STensors that do not have
-  // forloop_dim
+  // Define G2SCopy for all input STensors
   code.e("// G->S copy atoms");
+  std::unordered_set<tb::TBInputOp const*> async_copy_input_ops;  // A list of input ops that are asynchronously G->S copied
   for (tb::TBOperator const *op : g.operators) {
     if (op->op_type == type::TB_INPUT_OP) {
       tb::TBInputOp const *cur_op = dynamic_cast<tb::TBInputOp const *>(op);
@@ -159,8 +207,8 @@ CustomOPTranspileResult
       STensorMeta const &stensor_meta = stensor_metas.at(stensor.guid);
       assert(dtensor.num_dims == stensor.num_dims);
       assert(dtensor.data_type == stensor.data_type);
-      int num_dims = dtensor.num_dims;
       int d_innermost_dim = dtensor_meta.innermost_dim;
+      size_t alignment = get_num_elems_in_16B(dtensor.data_type);
 
       code.e("// Copy for G->S: dtensor $ -> stensor $",
              dtensor.guid,
@@ -172,6 +220,7 @@ CustomOPTranspileResult
       // shape of STensor * forloop_range
       string offset = "";
       int3 imap = cur_op->input_map;
+      bool is_dtensor_offset_divisible = true;
       for (int dim = 0; dim < 3; ++dim) {
         int div_dim = dim == 0 ? imap.x : dim == 1 ? imap.y : imap.z;
         if (div_dim >= 0) {
@@ -183,47 +232,81 @@ CustomOPTranspileResult
                         (char)"xyz"[dim],
                         dtensor.dim[div_dim] / num_tbs,
                         dtensor_meta.strides[div_dim]);
+          is_dtensor_offset_divisible &= num_tbs == 1 || (dtensor.dim[div_dim] / num_tbs) % alignment == 0 || dtensor_meta.strides[div_dim] % alignment == 0;
         }
       }
+      if (cur_op->forloop_dim >= 0) {
+        int forloop_dim = cur_op->forloop_dim;
+        int forloop_range = dtensor.dim[forloop_dim];
+        size_t forloop_dim_stride = dtensor_meta.strides[forloop_dim];
+        int tile_side_len = stensor.dim[forloop_dim];
+        is_dtensor_offset_divisible &= forloop_range == 1 || tile_side_len % alignment == 0 || forloop_dim_stride % alignment == 0;
+      }
+
       code.e("const half_t *dtensor$_tile_ptr = dtensor$_ptr $;",
              dtensor.guid,
              dtensor.guid,
              offset);
-      string dtensor_tile_layout = get_cute_layout(
-          mov_to_last(stensor.dim,
-                      dtensor.num_dims,
-                      d_innermost_dim), // Here we use stensor.dim
-          mov_to_last(dtensor_meta.strides, dtensor.num_dims, d_innermost_dim));
-      code.e(
-          "using DTensor$TileLayout = $;", dtensor.guid, dtensor_tile_layout);
 
-      // Decide the copy atom to use
-      bool is_all_stride_aligned_16B = true;
-      size_t alignment = get_num_elems_in_16B(dtensor.data_type);
-      for (int i = 0; i < num_dims; ++i) {
-        size_t stride = dtensor_meta.strides[i];
-        is_all_stride_aligned_16B &= (stride % alignment == 0 || stride == 1);
-      }
-      bool use_chunked_copy = is_all_stride_aligned_16B;
+      auto [use_chunked_copy, real_innermost_dim] = can_perform_chunked_copy(
+          stensor.num_dims,
+          stensor.dim,
+          dtensor_meta.strides,
+          stensor_meta.strides,
+          type::get_datatype_size(dtensor.data_type)
+      );
+      use_chunked_copy &= is_dtensor_offset_divisible;
       bool use_async_copy =
-          is_all_stride_aligned_16B && this->config.target_cc >= GPU_CC::A100;
+          use_chunked_copy && this->config.target_cc >= GPU_CC::A100 &&
+          cur_op->forloop_dim != -1;  // Only use async copy when the input tensor has a forloop_dim
 
-      // TODO(intlsy) Support chunked copy and async copy
       // TODO(intlsy) Support swizzled layout
       // TODO(intlsy) Support TMA
-      code.e("using STensor$InputAtom = tb::InputNonChunkedSyncCopy<half_t, "
+      if (!use_chunked_copy) {
+        assert(!use_async_copy);
+        string dtensor_tile_layout = get_cute_layout(
+            mov_to_last(stensor.dim,
+                        dtensor.num_dims,
+                        d_innermost_dim), // Here we use stensor.dim
+            mov_to_last(dtensor_meta.strides, dtensor.num_dims, d_innermost_dim));
+        code.e(
+            "using DTensor$TileLayout = $;", dtensor.guid, dtensor_tile_layout);
+        // Non-chunked, synchronous copy
+        code.e("using STensor$InputAtom = tb::InputNonChunkedSyncCopy<half_t, "
              "$, DTensor$TileLayout, NUM_THREADS>;",
              stensor.guid,
              mov_last_and_get_layout(stensor, stensor_meta, d_innermost_dim),
              dtensor.guid);
-
-      if (!use_chunked_copy) {
-        assert(!use_async_copy);
-        // Non-chunked, synchronous copy
-      } else if (!use_async_copy) {
-        // Chunked, synchronous copy
       } else {
-        // Chunked, asynchronous copy
+        string dtensor_tile_layout = get_cute_layout(
+            mov_to_last(stensor.dim,
+                        dtensor.num_dims,
+                        real_innermost_dim), // Here we use stensor.dim
+            mov_to_last(dtensor_meta.strides, dtensor.num_dims, real_innermost_dim));
+        code.e(
+            "using DTensor$TileLayout = $;", dtensor.guid, dtensor_tile_layout);
+        if (!use_async_copy) {
+          // Chunked, synchronous copy
+          code.e("using STensor$InputAtom = tb::InputChunkedSyncCopy<half_t, "
+             "$, DTensor$TileLayout, NUM_THREADS>;",
+             stensor.guid,
+             mov_last_and_get_layout(stensor, stensor_meta, real_innermost_dim),
+             dtensor.guid);
+        } else {
+          // Chunked, asynchronous copy
+          async_copy_input_ops.insert(cur_op);
+          code.e("using STensor$InputAtom = tb::InputChunkedAsyncCopy<half_t, "
+             "$, DTensor$TileLayout, NUM_THREADS>;",
+             stensor.guid,
+             mov_last_and_get_layout(stensor, stensor_meta, real_innermost_dim),
+             dtensor.guid);
+          // Allocate a buffer for the async copy since we are going to pipeline it
+          size_t async_copy_buf_size = stensor_meta.num_phy_elems * type::get_datatype_size(stensor.data_type);
+          size_t async_copy_buf_addr = allocate_buf(async_copy_buf_size);
+          code.e("half_t *stensor$_async_copy_buf = (half_t*)(buf + $);",
+                 stensor.guid,
+                 async_copy_buf_addr);
+        }
       }
     }
   }
@@ -239,13 +322,15 @@ CustomOPTranspileResult
     tb::TBOperator const *op = sched_node.ops[0];
     assert(op->op_type == type::TB_INPUT_OP);
     tb::TBInputOp const *cur_op = dynamic_cast<tb::TBInputOp const *>(op);
+    tb::STensor const& stensor = cur_op->output_tensors.at(0);
     assert(cur_op->forloop_dim == -1);
+    assert(!async_copy_input_ops.count(cur_op)); // An input op in pre_loop_nodes should not be asynchronously copied since they do not have forloop_dim
     num_pre_loop_copies += 1;
-    code.e("STensor$InputAtom::run<tb::EpilogueStore<half_t>>(stensor$_ptr, "
+    code.e("STensor$InputAtom::run(stensor$_ptr, "
            "dtensor$_tile_ptr, "
            "thread_idx);",
-           cur_op->output_tensors.at(0).guid,
-           cur_op->output_tensors.at(0).guid,
+           stensor.guid,
+           stensor.guid,
            cur_op->dtensor.guid);
   }
   code.e("");
@@ -393,22 +478,33 @@ CustomOPTranspileResult
         case type::TB_INPUT_OP: {
           // In this lambda function we only accept input ops within the for
           // loop
+          assert(sched_node.ops.size() == 1); // Should not be fused
           tb::TBInputOp const *cur_op = dynamic_cast<tb::TBInputOp const *>(op);
           assert(is_in_loop);
           assert(cur_op->forloop_dim >= 0);
           kn::DTensor const &dtensor = cur_op->dtensor;
-          tb::STensor const &output = output_op->output_tensors.at(0);
+          tb::STensor const &output = cur_op->output_tensors.at(0);
           int tile_side_len = output.dim[cur_op->forloop_dim];
           size_t forloop_dim_stride =
               dtensor_metas.at(dtensor.guid).strides[cur_op->forloop_dim];
-          string epilogue = transpile_fusion_epilogue(sched_node.ops);
-          code.e("STensor$InputAtom::run<$>(stensor$_ptr, dtensor$_tile_ptr + "
-                 "$*for_idx, thread_idx);",
-                 output.guid,
-                 epilogue,
-                 output.guid,
-                 dtensor.guid,
-                 tile_side_len * forloop_dim_stride);
+          bool is_async_copy = async_copy_input_ops.count(cur_op);
+          if (!is_async_copy) {
+            code.e("STensor$InputAtom::run(stensor$_ptr, dtensor$_tile_ptr + "
+                  "$*for_idx, thread_idx);",
+                  output.guid,
+                  output.guid,
+                  dtensor.guid,
+                  tile_side_len * forloop_dim_stride);
+          } else {
+            code.e("if (for_idx+1 != $) {", plan.forloop_range);
+            code.e("STensor$InputAtom::run(stensor$_async_copy_buf, dtensor$_tile_ptr + "
+                  "$*(for_idx+1), thread_idx);",
+                  output.guid,
+                  output.guid,
+                  dtensor.guid,
+                  tile_side_len * forloop_dim_stride);
+            code.e("}");
+          }
           break;
         }
         case type::TB_OUTPUT_OP: {
@@ -765,16 +861,46 @@ CustomOPTranspileResult
     return code;
   };
 
+  // Launch async input operations for all async inputs
+  if (!async_copy_input_ops.empty()) {
+    code.e("{");
+    for (tb::TBInputOp const* input_op : async_copy_input_ops) {
+      kn::DTensor const &dtensor = input_op->dtensor;
+      tb::STensor const &output = input_op->output_tensors.at(0);
+      assert(input_op->forloop_dim >= 0);
+      code.e("STensor$InputAtom::run(stensor$_async_copy_buf, dtensor$_tile_ptr, thread_idx);",
+                 output.guid,
+                 output.guid,
+                 dtensor.guid);
+    }
+    code.e("cute::cp_async_fence();");
+    code.e("}");
+  }
+
   // Declare the for loop
   // TODO(intlsy) Remove the loop when `plan.forloop_range` is 1
   // TODO(intlsy) Loop unrolling
   assert(plan.forloop_range >= 1);
   code.e("// The main loop");
   code.e("for (int for_idx = 0; for_idx < $; for_idx++) {", plan.forloop_range);
+  // Wait for the async copies in the last forloop to finish, and switch buffers
+  if (!async_copy_input_ops.empty()) {
+    code.e("{");
+    code.e("cute::cp_async_wait<0>();");
+    for (tb::TBInputOp const* input_op : async_copy_input_ops) {
+      tb::STensor const &output = input_op->output_tensors.at(0);
+      sguid_t guid = output.guid;
+      code.e("SWAP(stensor$_ptr, stensor$_async_copy_buf);", guid, guid);
+    }
+    code.e("}");
+  }
   for (TBSchedNode const &sched_node : sched.loop_nodes) {
     CodeKeeper res = transpile_tb_sched_node(sched_node, true);
     code << res;
   }
+    if (!async_copy_input_ops.empty()) {
+      code.e("cute::cp_async_fence();");
+    }
   code.e("}"); // For loop
   code.e("");
 
@@ -790,7 +916,7 @@ CustomOPTranspileResult
   code.e("}"); // kernel
 
   return CustomOPTranspileResult{
-      func_name, mem_plan.smem_size, code.to_string()};
+      func_name, cur_smem_size, code.to_string()};
 }
 
 } // namespace transpiler

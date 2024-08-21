@@ -197,13 +197,16 @@ public:
   }
 };
 
-template <typename T>
+template <typename T1, typename T2>
 class Combine {
-  std::vector<T> const &v1;
-  std::vector<T> const &v2;
+  T1 const &v1;
+  T2 const &v2;
+  using T = std::common_type_t<typename T1::value_type, typename T2::value_type>;
 
 public:
-  Combine(std::vector<T> const &v1, std::vector<T> const &v2)
+  using value_type = T;
+  
+  Combine(T1 const &v1, T2 const &v2)
       : v1(v1), v2(v2) {}
 
   CombineIterator<T> begin() const {

@@ -16,8 +16,8 @@ class InputNotFoundError(Exception):
     pass
 
 def new_graph():
-    graph = core.PyGraph()
-    return PyGraphWrapper(graph)
+    graph = core.CyGraph()
+    return PyGraph(graph)
 
 # Current Version
 __version__ = "0.1.1"

@@ -16,7 +16,7 @@ struct OpMeta {
 };
 
 // A helper. See code below
-std::vector<TBSchedNode>
+static std::vector<TBSchedNode>
     ops2sched(vector<std::pair<tb::TBOperator const *, OpMeta>> &ops,
               std::function<bool(tb::TBOperator const *)> const &filter) {
   std::sort(ops.begin(), ops.end(), [&](auto const &a, auto const &b) {
@@ -58,6 +58,7 @@ std::vector<TBSchedNode>
   return res;
 }
 
+// Get the schedule of a custom threadblock graph
 // See docs/transpiler/transpiler.md for more details
 TBSched Transpiler::get_threadblock_schedule(tb::Graph const &tb_graph) {
   // Currently in Mirage, the output tensor of a threadblock level input op must

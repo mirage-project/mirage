@@ -133,9 +133,9 @@ struct TBMemoryPlan {
   // The start address of each STensor
   std::unordered_map<sguid_t, size_t> addrs;
 
-  // The size of the shared memory buffer
+  // The size of the shared memory buffer, in bytes
   size_t smem_size;
 };
 
 } // namespace transpiler
-} // namespace mirage
+} // namespace mirage 
