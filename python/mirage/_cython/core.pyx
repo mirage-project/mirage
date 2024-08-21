@@ -178,7 +178,7 @@ cdef class PyTensor:
             assert False , "Error: index out of range"
             return None
 
-cdef class PyGraph:
+cdef class CyGraph:
     cdef Graph *p_graph #Hold a Graph instance
 
     def __cinit__(self, graph = None):
@@ -236,7 +236,7 @@ cdef class PyGraph:
         cfilepath = py_byte_string
         self.p_graph.generate_triton_program(cfilepath)
 
-def optimize(PyGraph input_graph, *, int max_num_new_graphs = 1024, list imaps = None, list omaps = None, list griddims = None, list blockdims = None, list fmaps = None, list franges = None, str previous_checkpoint = None, str default_config = None):
+def optimize(CyGraph input_graph, *, int max_num_new_graphs = 1024, list imaps = None, list omaps = None, list griddims = None, list blockdims = None, list fmaps = None, list franges = None, str previous_checkpoint = None, str default_config = None):
     # set cimaps
     cdef vector[MInt3] cimaps
     cimaps.resize(0)
@@ -306,12 +306,12 @@ def optimize(PyGraph input_graph, *, int max_num_new_graphs = 1024, list imaps =
     new_graphs = list()
     for i in range(num):
         ptr = ctypes.cast(<unsigned long long>cnewgraphs[i], ctypes.c_void_p)
-        new_graphs.append(PyGraph(ptr))
+        new_graphs.append(CyGraph(ptr))
     return new_graphs
 
 # Generate CUDA program for a uGraph
 # Return (CUDA code, buffer size in bytes)
-def generate_cuda_program(PyGraph input_graph, *, int target_cc, list input_strides, list output_tensors) -> dict:
+def generate_cuda_program(CyGraph input_graph, *, int target_cc, list input_strides, list output_tensors) -> dict:
     # Set transpiler_config
     cdef TranspilerConfig transpiler_config
     transpiler_config.target_cc = target_cc
