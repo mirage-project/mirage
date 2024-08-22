@@ -7,15 +7,20 @@ using namespace cute;
 
 namespace tb {
 
+// Clear the accumulator
+// (Just fill the accumulator with zeros)
 template <typename T, int NUM_ELEMS, int NUM_THREADS>
 class ClearAccumlatorKernel {
 public:
-  // TODO(intlsy): Use half2
+  static constexpr int GROUP_SIZE = 16 / sizeof(T);
+  static_assert(NUM_ELEMS % GROUP_SIZE == 0); // NUM_ELEMS should always be multiple of GROUP_SIZE (guaranteed by layout resolution)
+
   static __device__ __forceinline__ void run(T *__restrict__ accum,
                                              int thread_idx) {
-    for (int elem_idx = thread_idx; elem_idx < NUM_ELEMS;
+    uint128_t* accum_128 = reinterpret_cast<uint128_t*>(accum);
+    for (int elem_idx = thread_idx; elem_idx < NUM_ELEMS / GROUP_SIZE;
          elem_idx += NUM_THREADS) {
-      accum[elem_idx] = 0;
+      accum_128[elem_idx] = 0ul;
     }
   }
 };
