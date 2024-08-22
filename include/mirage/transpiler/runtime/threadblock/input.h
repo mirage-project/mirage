@@ -32,6 +32,7 @@ public:
     constexpr auto numel = Numel{};
     auto dst_layout = DstLayout{};
     auto src_layout = SrcLayout{};
+    #pragma unroll
     for (int elem_idx = thread_idx; elem_idx < numel; elem_idx += NUM_THREADS) {
       T res = src[src_layout(elem_idx)];
       dst[dst_layout(elem_idx)] = res;
@@ -42,7 +43,7 @@ public:
 // A converter that converts a layout to a "chunked" layout, which groups every
 // `GROUP_SIZE` elements in the 0-th dimension into a single element.
 template<class InputLayout, int GROUP_SIZE>
-class ChunkedLayoutConverter {
+class InputChunkedLayoutConverter {
   using InputRank = decltype(rank(InputLayout{}));
   using GroupSize = Int<GROUP_SIZE>;
 
@@ -58,7 +59,7 @@ class ChunkedLayoutConverter {
   ));
 
 public:
-  using Result = Layout<OutputShape, OutputStride>;
+  using Result = decltype(coalesce(flatten(Layout<OutputShape, OutputStride>{})));
 };
 
 // Type 2: Chunked, synchronous copy
@@ -70,8 +71,8 @@ public:
   CUTE_STATIC_ASSERT_V(size(SrcLayout{}) == size(DstLayout{}));
 
   static constexpr int GROUP_SIZE = 16 / sizeof(T);
-  using DstChunkedLayout = typename ChunkedLayoutConverter<DstLayout, GROUP_SIZE>::Result;
-  using SrcChunkedLayout = typename ChunkedLayoutConverter<SrcLayout, GROUP_SIZE>::Result;
+  using DstChunkedLayout = typename InputChunkedLayoutConverter<DstLayout, GROUP_SIZE>::Result;
+  using SrcChunkedLayout = typename InputChunkedLayoutConverter<SrcLayout, GROUP_SIZE>::Result;
   using Numel = decltype(size(DstChunkedLayout{}));
   CUTE_STATIC_ASSERT_V(size(DstChunkedLayout{}) == size(SrcChunkedLayout{}));
 
@@ -80,6 +81,7 @@ public:
     constexpr auto numel = Numel{};
     auto dst_chunked_layout = DstChunkedLayout{};
     auto src_chunked_layout = SrcChunkedLayout{};
+    #pragma unroll
     for (int elem_idx = thread_idx; elem_idx < numel; elem_idx += NUM_THREADS) {
       uint128_t res = *((const uint128_t*)(src + src_chunked_layout(elem_idx)));
       *((uint128_t*)(dst + dst_chunked_layout(elem_idx))) = res;
@@ -94,8 +96,8 @@ public:
   CUTE_STATIC_ASSERT_V(size(SrcLayout{}) == size(DstLayout{}));
 
   static constexpr int GROUP_SIZE = 16 / sizeof(T);
-  using DstChunkedLayout = typename ChunkedLayoutConverter<DstLayout, GROUP_SIZE>::Result;
-  using SrcChunkedLayout = typename ChunkedLayoutConverter<SrcLayout, GROUP_SIZE>::Result;
+  using DstChunkedLayout = typename InputChunkedLayoutConverter<DstLayout, GROUP_SIZE>::Result;
+  using SrcChunkedLayout = typename InputChunkedLayoutConverter<SrcLayout, GROUP_SIZE>::Result;
   using Numel = decltype(size(DstChunkedLayout{}));
   CUTE_STATIC_ASSERT_V(size(DstChunkedLayout{}) == size(SrcChunkedLayout{}));
 
@@ -104,10 +106,11 @@ public:
     constexpr auto numel = Numel{};
     auto dst_chunked_layout = DstChunkedLayout{};
     auto src_chunked_layout = SrcChunkedLayout{};
+    #pragma unroll
     for (int elem_idx = thread_idx; elem_idx < numel; elem_idx += NUM_THREADS) {
       size_t src_addr = (size_t)(src + src_chunked_layout(elem_idx));
       uint32_t dst_addr = cute::cast_smem_ptr_to_uint(dst + dst_chunked_layout(elem_idx));
-      asm volatile("cp.async.cg.shared.global.L2::128B [%0], [%1], 16;"
+      asm volatile("cp.async.cg.shared.global.L2::256B [%0], [%1], 16;"
                    :: "r"(dst_addr), "l"(src_addr));
     }
   }
