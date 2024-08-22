@@ -76,8 +76,8 @@ cdef extern from "mirage/kernel/graph.h" namespace "mirage::kernel":
         int owner_ts_idx
         pass
 
-    cdef cppclass KNGraph "mirage::kernel::Graph":
-        KNGraph()
+    cdef cppclass CppKNGraph "mirage::kernel::Graph":
+        CppKNGraph()
         DTensor* new_input_ptr(vector[int] dims,
                                DataType data_type,
                                DmemLayout layout)
@@ -100,11 +100,11 @@ cdef extern from "mirage/threadblock/graph.h" namespace "mirage::threadblock":
         int dim[4]
         int owner_ts_id
 
-    cdef cppclass TBGraph "mirage::threadblock::Graph":
-        TBGraph(dim3 grid_dim,
-                dim3 block_dim,
-                int forloop_range,
-                int reduction_dimx)
+    cdef cppclass CppTBGraph "mirage::threadblock::Graph":
+        CppTBGraph(dim3 grid_dim,
+                   dim3 block_dim,
+                   int forloop_range,
+                   int reduction_dimx)
         STensor* new_input(const DTensor* dtensor,
                            int3 input_map,
                            int forloop_dim,
@@ -142,9 +142,9 @@ cdef extern from "mirage/search/search_c.h" namespace "mirage::search_c":
         unsigned int y
         unsigned int z
 
-    cdef int cython_optimize(const KNGraph *input_graph,
+    cdef int cython_optimize(const CppKNGraph *input_graph,
                              int max_num_new_graphs,
-                             KNGraph** new_graphs,
+                             CppKNGraph** new_graphs,
                              vector[MInt3] imaps,
                              vector[MInt3] omaps,
                              vector[MDim3] griddims,
@@ -165,7 +165,7 @@ cdef extern from "mirage/transpiler/transpile.h" namespace "mirage::transpiler":
         string code
         size_t buf_size
         vector[OutputTensorDirective] output_directives
-    cdef TranspileResult transpile(const KNGraph *graph,
+    cdef TranspileResult transpile(const CppKNGraph *graph,
                        const TranspilerConfig config,
                        vector[vector[size_t]] input_strides,
                        vector[const DTensor*] output_tensors)

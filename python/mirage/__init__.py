@@ -16,13 +16,13 @@ class InputNotFoundError(Exception):
     """Raised when cannot find input tensors """
     pass
 
-def new_graph():
+def new_kernel_graph():
     kgraph = core.CyKNGraph()
-    return PyKNGraph(kgraph)
+    return KNGraph(kgraph)
 
 def new_threadblock_graph(grid_dim: tuple, block_dim: tuple, forloop_range: int, reduction_dimx: int):
     bgraph = core.CyTBGraph(grid_dim, block_dim, forloop_range, reduction_dimx)
-    return PyTBGraph(bgraph)
+    return TBGraph(bgraph)
 
 # Current Version
 __version__ = "0.1.1"

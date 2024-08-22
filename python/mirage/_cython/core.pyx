@@ -247,15 +247,15 @@ cdef class PySTensor:
 
 
 cdef class CyKNGraph:
-    cdef KNGraph *p_kgraph #Hold a KNGraph instance
+    cdef CppKNGraph *p_kgraph #Hold a CppKNGraph instance
 
     def __cinit__(self, graph = None):
         cdef unsigned long long ptr
         if graph is None:
-            self.p_kgraph = new KNGraph()
+            self.p_kgraph = new CppKNGraph()
         else:
             ptr = ctypes.cast(graph, ctypes.c_void_p).value
-            self.p_kgraph = <KNGraph*>(ptr)
+            self.p_kgraph = <CppKNGraph*>(ptr)
 
     def new_input(self, tuple dims, dtype : dtype = float16):
         cdef vector[int] cdims
@@ -305,7 +305,7 @@ cdef class CyKNGraph:
         self.p_kgraph.generate_triton_program(cfilepath)
 
 cdef class CyTBGraph:
-    cdef TBGraph *p_bgraph #Hold a KNGraph instance
+    cdef CppTBGraph *p_bgraph #Hold a CppTBGraph instance
 
     def __cinit__(self, tuple grid_dim, tuple block_dim, int forloop_range, int dimx):
         assert len(grid_dim) == 3, "grid_dim must include 3 dimensions"
@@ -318,7 +318,7 @@ cdef class CyTBGraph:
         c_block_dim.x = block_dim[0]
         c_block_dim.x = block_dim[1]
         c_block_dim.x = block_dim[2]
-        self.p_bgraph = new TBGraph(c_grid_dim, c_block_dim, forloop_range, dimx)
+        self.p_bgraph = new CppTBGraph(c_grid_dim, c_block_dim, forloop_range, dimx)
     
     def new_input(self, PyDTensor dtensor, tuple input_map, int forloop_dim):
         assert len(input_map) == 3, "input_map must be of length 3"
@@ -450,7 +450,7 @@ def optimize(CyKNGraph input_graph, *, int max_num_new_graphs = 1024, list imaps
     # allocate new graphs
     # currently support up to 1024 new graphs
     assert max_num_new_graphs <= 1024
-    cdef KNGraph* cnewgraphs[1024]
+    cdef CppKNGraph* cnewgraphs[1024]
     # convert file path
     cdef char* cfilepath = NULL
     if previous_checkpoint is not None:
