@@ -19,7 +19,7 @@ static PyObject *launch(PyObject *self, PyObject *args) {
   std::vector<void const *> input_tensors;
   std::vector<void*> output_tensors;
 
-  if (!PyArg_ParseTuple(args, "OOO", &input_list, &output_list, &py_buffer)) {
+  if (!PyArg_Parsetuple(args, "OOO", &input_list, &output_list, &py_buffer)) {
     PyErr_SetString(PyExc_TypeError, "Invalid parameters");
     return NULL;
   }
@@ -92,25 +92,25 @@ class PyKNGraph:
         self.run = None
         self._cached_results = None
     
-    def new_input(self, dims: Tuple, dtype: dtype = float16):
+    def new_input(self, dims: tuple, dtype: dtype = float16):
         return self.cygraph.new_input(dims, dtype)
     
-    def matmul(self, A: PyTensor, B: PyTensor):
+    def matmul(self, A: PyDTensor, B: PyDTensor):
         return self.cygraph.matmul(A, B)
     
-    def reduction(self, A: PyTensor, dim: int):
+    def reduction(self, A: PyDTensor, dim: int):
         return self.cygraph.reduction(A, dim)
     
-    def exp(self, A: PyTensor):
+    def exp(self, A: PyDTensor):
         return self.cygraph.exp(A)
     
-    def add(self, A: PyTensor, B: PyTensor):
+    def add(self, A: PyDTensor, B: PyDTensor):
         return self.cygraph.add(A, B)
     
-    def mul(self, A: PyTensor, B: PyTensor):
+    def mul(self, A: PyDTensor, B: PyDTensor):
         return self.cygraph.mul(A, B)
       
-    def div(self, A: PyTensor, B: PyTensor):
+    def div(self, A: PyDTensor, B: PyDTensor):
         return self.cygraph.div(A, B)
     
     def __call__(self, **kwargs):

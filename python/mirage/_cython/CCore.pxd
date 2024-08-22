@@ -40,7 +40,17 @@ cdef extern from "mirage/type.h" namespace "mirage::type":
         DT_FLOAT32 = 930,
         DT_DOUBLE = 940,
         DT_UNKNOWN = 999,
-  
+    cdef enum TBEpilogueType:
+        TB_EPILOGUE_NONE = 3100,
+        TB_EPILOGUE_ALLREDUCE = 3101,
+        TB_EPILOGUE_ALLTOALL = 3102,
+        TB_EPILOGUE_INVALID = 3199,
+    cdef enum TBOperatorType:
+        TB_FORLOOP_ACCUM_NO_RED_OP = 2500,
+        TB_FORLOOP_ACCUM_RED_LD_SUM_OP = 2501,
+        TB_FORLOOP_ACCUM_RED_LD_MEAN_OP = 2502,
+        TB_FORLOOP_ACCUM_RED_LD_RMS_OP = 2503,
+
 cdef extern from "mirage/layout.h" namespace "mirage::layout":
     # This must be consistent with mirage/layout.h
     cdef enum DmemLayout:
@@ -95,12 +105,32 @@ cdef extern from "mirage/threadblock/graph.h" namespace "mirage::threadblock":
                 dim3 block_dim,
                 int forloop_range,
                 int reduction_dimx)
-        new_input(const DTensor* dtensor,
-                  int3 input_map,
-                  int forloop_dim,
-                  SmemLayout layout)
-        matmul(const STensor *A,
-               const STensor *B)
+        STensor* new_input(const DTensor* dtensor,
+                           int3 input_map,
+                           int forloop_dim,
+                           SmemLayout layout)
+        DTensor* new_output(const STensor* stensor,
+                            int3 output_map,
+                            int forloop_dim,
+                            TBEpilogueType epilogue)
+        STensor* matmul(const STensor *A,
+                        const STensor *B)
+        STensor* exp(const STensor *A)
+        STensor* silu(const STensor *A)
+        STensor* square(const STensor *A)
+        STensor* sqrt(const STensor *A)
+        STensor* add(const STensor *A,
+                     const STensor *B)
+        STensor* mul(const STensor *A,
+                     const STensor *B)
+        STensor* div(const STensor *A,
+                     const STensor *B)
+        STensor* reduction(const STensor *A, int dim)
+        STensor* concat(const STensor *A,
+                        const STensor *B,
+                        int dim)
+        STensor* forloop_accum(const STensor *A,
+                               TBOperatorType optype)
 
 cdef extern from "mirage/search/search_c.h" namespace "mirage::search_c":
     ctypedef struct MInt3:

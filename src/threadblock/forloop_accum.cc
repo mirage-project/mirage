@@ -23,9 +23,15 @@ namespace threadblock {
 STensor Graph::forloop_accum(STensor const &input, mirage::type::TBOperatorType type) {
   TBOperator *op = create_forloop_accum_op(input, type);
   assert(op != nullptr);
-  assert(op->output_tensors.size() == 1);
   operators.push_back(op);
   return op->output_tensors[0];
+}
+
+STensor *Graph::forloop_accum(STensor const *input, mirage::type::TBOperatorType type) {
+  TBOperator *op = create_forloop_accum_op(*input, type);
+  assert(op != nullptr);
+  operators.push_back(op);
+  return &op->output_tensors[0];
 }
 
 TBOperator *Graph::create_forloop_accum_op(STensor const &input, mirage::type::TBOperatorType type) {

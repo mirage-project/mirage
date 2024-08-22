@@ -27,6 +27,13 @@ STensor Graph::reduction(STensor const &input, int dim) {
   return op->output_tensors[0];
 }
 
+STensor *Graph::reduction(STensor const *input, int dim) {
+  TBOperator *op = create_reduction_op(*input, dim);
+  assert(op != nullptr);
+  operators.push_back(op);
+  return &op->output_tensors[0];
+}
+
 TBOperator *Graph::create_reduction_op(STensor const &input, int dim) {
   // STensor output = input;
   // assert(output.num_dims > dim);
