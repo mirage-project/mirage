@@ -7,5 +7,6 @@
 #include "testcases/kernel/reduction.h"
 
 #include "testcases/threadblock/elemwise.h"
+#include "testcases/threadblock/io.h"
 #include "testcases/threadblock/matmul.h"
 #include "testcases/threadblock/reduction.h"
