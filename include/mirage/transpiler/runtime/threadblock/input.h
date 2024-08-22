@@ -106,11 +106,12 @@ public:
     constexpr auto numel = Numel{};
     auto dst_chunked_layout = DstChunkedLayout{};
     auto src_chunked_layout = SrcChunkedLayout{};
+    uint32_t dst_base_addr = cute::cast_smem_ptr_to_uint(dst);
     #pragma unroll
     for (int elem_idx = thread_idx; elem_idx < numel; elem_idx += NUM_THREADS) {
       size_t src_addr = (size_t)(src + src_chunked_layout(elem_idx));
-      uint32_t dst_addr = cute::cast_smem_ptr_to_uint(dst + dst_chunked_layout(elem_idx));
-      asm volatile("cp.async.cg.shared.global.L2::256B [%0], [%1], 16;"
+      uint32_t dst_addr = dst_base_addr + dst_chunked_layout(elem_idx) * sizeof(half);
+      asm volatile("cp.async.cg.shared.global.L2::128B [%0], [%1], 16;"
                    :: "r"(dst_addr), "l"(src_addr));
     }
   }
