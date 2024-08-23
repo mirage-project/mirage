@@ -9,6 +9,7 @@ import sysconfig
 from typing import *
 
 from .core import *
+from .threadblock import *
 
 HARD_CODE = """
 #include <Python.h>
@@ -92,10 +93,10 @@ class KNGraph:
         self.run = None
         self._cached_results = None
     
-    def new_input(self, dims: tuple, dtype: dtype = float16):
+    def new_input(self, dims: tuple, dtype: dtype = float16) -> PyDTensor:
         return self.cygraph.new_input(dims, dtype)
     
-    def matmul(self, A: PyDTensor, B: PyDTensor):
+    def matmul(self, A: PyDTensor, B: PyDTensor) -> PyDTensor:
         return self.cygraph.matmul(A, B)
     
     def reduction(self, A: PyDTensor, dim: int):
@@ -113,6 +114,9 @@ class KNGraph:
     def div(self, A: PyDTensor, B: PyDTensor):
         return self.cygraph.div(A, B)
     
+    def customized(self, inputs: list[PyDTensor], bgraph: TBGraph) -> list[PyDTensor]:
+        return self.cygraph.customized(inputs, bgraph.cygraph)
+
     def __call__(self, **kwargs):
         results = self.compile(**kwargs)
         

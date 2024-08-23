@@ -87,6 +87,9 @@ cdef extern from "mirage/kernel/graph.h" namespace "mirage::kernel":
         DTensor* add(const DTensor* op1, const DTensor* op2)
         DTensor* mul(const DTensor* op1, const DTensor* op2)
         DTensor* div(const DTensor* op1, const DTensor* op2)
+        int customized(vector[const DTensor*] inputs,
+                       DTensor** outputs,
+                       CppTBGraph* bgraph)
         void generate_triton_program(const char *filepath)
         void generate_cuda_program(const char *filepath)
 

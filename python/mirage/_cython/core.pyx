@@ -297,6 +297,23 @@ cdef class CyKNGraph:
         t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
         return PyDTensor(t)
 
+    def customized(self, list[PyDTensor] inputs, CyTBGraph bgraph):
+        cdef vector[const DTensor*] cinputs
+        cdef unsigned long long ptr
+        cinputs.resize(len(inputs))
+        for i in range(len(inputs)):
+            assert(type(inputs[i]) == PyDTensor)
+            assert(inputs[i].tensor is not None)
+            ptr = ctypes.cast(inputs[i].tensor, ctypes.c_void_p).value
+            cinputs[i] = <const DTensor*>(ptr)
+        cdef DTensor* coutputs[1024]
+        num_outputs = self.p_kgraph.customized(cinputs, coutputs, bgraph.p_bgraph)
+        outputs = list()
+        for i in range(num_outputs):
+            ptr = ctypes.cast(<unsigned long long>coutputs[i], ctypes.c_void_p)
+            outputs.append(PyDTensor(ptr))
+        return outputs
+
     def generate_triton_program(self, str filepath):
         assert filepath is not None, "filepath cannot be empty"
         py_byte_string = filepath.encode('UTF-8')

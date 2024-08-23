@@ -104,6 +104,9 @@ public:
                            mirage::threadblock::ExecutionPlan const &plan);
   std::vector<DTensor> customized(std::vector<DTensor> const &inputs,
                                   mirage::threadblock::Graph const &_graph);
+  int customized(std::vector<const DTensor*> inputs,
+                 DTensor **outputs,
+                 const mirage::threadblock::Graph *bgraph);
   KNOperator *create_customized_op(std::vector<DTensor> const &inputs,
                                    mirage::threadblock::Graph const &_graph);
   // helper functions
