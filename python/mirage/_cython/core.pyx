@@ -299,13 +299,12 @@ cdef class CyKNGraph:
 
     def customized(self, list[PyDTensor] inputs, CyTBGraph bgraph):
         cdef vector[const DTensor*] cinputs
-        cdef unsigned long long ptr
         cinputs.resize(len(inputs))
+        cdef PyDTensor t
         for i in range(len(inputs)):
             assert(type(inputs[i]) == PyDTensor)
-            assert(inputs[i].tensor is not None)
-            ptr = ctypes.cast(inputs[i].tensor, ctypes.c_void_p).value
-            cinputs[i] = <const DTensor*>(ptr)
+            t = inputs[i]
+            cinputs[i] = t.c_ptr
         cdef DTensor* coutputs[1024]
         num_outputs = self.p_kgraph.customized(cinputs, coutputs, bgraph.p_bgraph)
         outputs = list()
@@ -333,8 +332,8 @@ cdef class CyTBGraph:
         c_grid_dim.z = grid_dim[2]
         cdef dim3 c_block_dim
         c_block_dim.x = block_dim[0]
-        c_block_dim.x = block_dim[1]
-        c_block_dim.x = block_dim[2]
+        c_block_dim.y = block_dim[1]
+        c_block_dim.z = block_dim[2]
         self.p_bgraph = new CppTBGraph(c_grid_dim, c_block_dim, forloop_range, dimx)
     
     def new_input(self, PyDTensor dtensor, tuple input_map, int forloop_dim):
