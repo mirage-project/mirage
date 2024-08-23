@@ -93,28 +93,28 @@ class KNGraph:
         self.run = None
         self._cached_results = None
     
-    def new_input(self, dims: tuple, dtype: dtype = float16) -> PyDTensor:
+    def new_input(self, dims: tuple, dtype: dtype = float16) -> DTensor:
         return self.cygraph.new_input(dims, dtype)
     
-    def matmul(self, A: PyDTensor, B: PyDTensor) -> PyDTensor:
+    def matmul(self, A: DTensor, B: DTensor) -> DTensor:
         return self.cygraph.matmul(A, B)
     
-    def reduction(self, A: PyDTensor, dim: int):
+    def reduction(self, A: DTensor, dim: int):
         return self.cygraph.reduction(A, dim)
     
-    def exp(self, A: PyDTensor):
+    def exp(self, A: DTensor):
         return self.cygraph.exp(A)
     
-    def add(self, A: PyDTensor, B: PyDTensor):
+    def add(self, A: DTensor, B: DTensor):
         return self.cygraph.add(A, B)
     
-    def mul(self, A: PyDTensor, B: PyDTensor):
+    def mul(self, A: DTensor, B: DTensor):
         return self.cygraph.mul(A, B)
       
-    def div(self, A: PyDTensor, B: PyDTensor):
+    def div(self, A: DTensor, B: DTensor):
         return self.cygraph.div(A, B)
     
-    def customized(self, inputs: list[PyDTensor], bgraph: TBGraph) -> list[PyDTensor]:
+    def customized(self, inputs: list[DTensor], bgraph: TBGraph) -> list[DTensor]:
         return self.cygraph.customized(inputs, bgraph.cygraph)
 
     def __call__(self, **kwargs):

@@ -65,7 +65,7 @@ cdef extern from "mirage/layout.h" namespace "mirage::layout":
 cdef extern from "mirage/kernel/graph.h" namespace "mirage::kernel":
     cdef cppclass KNOperator:
         pass
-    ctypedef struct DTensor:
+    ctypedef struct CppDTensor "mirage::kernel::DTensor":
         DataType data_type
         DmemLayout layout
         int num_dims
@@ -78,17 +78,17 @@ cdef extern from "mirage/kernel/graph.h" namespace "mirage::kernel":
 
     cdef cppclass CppKNGraph "mirage::kernel::Graph":
         CppKNGraph()
-        DTensor* new_input_ptr(vector[int] dims,
+        CppDTensor* new_input_ptr(vector[int] dims,
                                DataType data_type,
                                DmemLayout layout)
-        DTensor* matmul(const DTensor* A, const DTensor* B)
-        DTensor* reduction(const DTensor* input, int dim, int size)
-        DTensor* exp(const DTensor* input)
-        DTensor* add(const DTensor* op1, const DTensor* op2)
-        DTensor* mul(const DTensor* op1, const DTensor* op2)
-        DTensor* div(const DTensor* op1, const DTensor* op2)
-        int customized(vector[const DTensor*] inputs,
-                       DTensor** outputs,
+        CppDTensor* matmul(const CppDTensor* A, const CppDTensor* B)
+        CppDTensor* reduction(const CppDTensor* input, int dim, int size)
+        CppDTensor* exp(const CppDTensor* input)
+        CppDTensor* add(const CppDTensor* op1, const CppDTensor* op2)
+        CppDTensor* mul(const CppDTensor* op1, const CppDTensor* op2)
+        CppDTensor* div(const CppDTensor* op1, const CppDTensor* op2)
+        int customized(vector[const CppDTensor*] inputs,
+                       CppDTensor** outputs,
                        CppTBGraph* bgraph)
         void generate_triton_program(const char *filepath)
         void generate_cuda_program(const char *filepath)
@@ -96,7 +96,7 @@ cdef extern from "mirage/kernel/graph.h" namespace "mirage::kernel":
 cdef extern from "mirage/threadblock/graph.h" namespace "mirage::threadblock":
     cdef cppclass TBOperator:
         pass
-    ctypedef struct STensor:
+    ctypedef struct CppSTensor "mirage::threadblock::STensor":
         DataType data_type
         SmemLayout layout
         int num_dims
@@ -108,31 +108,31 @@ cdef extern from "mirage/threadblock/graph.h" namespace "mirage::threadblock":
                    dim3 block_dim,
                    int forloop_range,
                    int reduction_dimx)
-        STensor* new_input(const DTensor* dtensor,
+        CppSTensor* new_input(const CppDTensor* dtensor,
                            int3 input_map,
                            int forloop_dim,
                            SmemLayout layout)
-        DTensor* new_output(const STensor* stensor,
+        CppDTensor* new_output(const CppSTensor* stensor,
                             int3 output_map,
                             int forloop_dim,
                             TBEpilogueType epilogue)
-        STensor* matmul(const STensor *A,
-                        const STensor *B)
-        STensor* exp(const STensor *A)
-        STensor* silu(const STensor *A)
-        STensor* square(const STensor *A)
-        STensor* sqrt(const STensor *A)
-        STensor* add(const STensor *A,
-                     const STensor *B)
-        STensor* mul(const STensor *A,
-                     const STensor *B)
-        STensor* div(const STensor *A,
-                     const STensor *B)
-        STensor* reduction(const STensor *A, int dim)
-        STensor* concat(const STensor *A,
-                        const STensor *B,
+        CppSTensor* matmul(const CppSTensor *A,
+                        const CppSTensor *B)
+        CppSTensor* exp(const CppSTensor *A)
+        CppSTensor* silu(const CppSTensor *A)
+        CppSTensor* square(const CppSTensor *A)
+        CppSTensor* sqrt(const CppSTensor *A)
+        CppSTensor* add(const CppSTensor *A,
+                     const CppSTensor *B)
+        CppSTensor* mul(const CppSTensor *A,
+                     const CppSTensor *B)
+        CppSTensor* div(const CppSTensor *A,
+                     const CppSTensor *B)
+        CppSTensor* reduction(const CppSTensor *A, int dim)
+        CppSTensor* concat(const CppSTensor *A,
+                        const CppSTensor *B,
                         int dim)
-        STensor* forloop_accum(const STensor *A,
+        CppSTensor* forloop_accum(const CppSTensor *A,
                                TBOperatorType optype)
 
 cdef extern from "mirage/search/search_c.h" namespace "mirage::search_c":
@@ -171,4 +171,4 @@ cdef extern from "mirage/transpiler/transpile.h" namespace "mirage::transpiler":
     cdef TranspileResult transpile(const CppKNGraph *graph,
                        const TranspilerConfig config,
                        vector[vector[size_t]] input_strides,
-                       vector[const DTensor*] output_tensors)
+                       vector[const CppDTensor*] output_tensors)
