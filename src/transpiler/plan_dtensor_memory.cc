@@ -25,7 +25,7 @@ void Transpiler::plan_dtensor_memory() {
   // Currently we use a simple allocation-only strategy. In the future we may
   // incorporate more advanced strategies like memory reuse, etc.
   // Everything (size, address, alignment, etc.) in MemoryPlanner is in bytes
-  static constexpr size_t ALIGN = 16;
+  static constexpr size_t ALIGN = 128;
   class MemoryPlanner {
   private:
     size_t cur_addr = 0;

@@ -10,7 +10,7 @@ namespace transpiler {
 TBMemoryPlan Transpiler::get_threadblock_memory_plan(tb::Graph const& tb_graph, const TBSched& tb_sched) {
 	// Currently we use a simple allocation-only strategy. In the future we may
 	// incorporate more advanced strategies like memory reuse, etc.
-	static constexpr size_t ALIGN = 16;
+	static constexpr size_t ALIGN = 128;	// 128 Byte alignment. Some operations (like cp.async) performs better on 128 byte alignment (maybe due to the cache)
   class MemoryPlanner {
   private:
     size_t cur_addr = 0;
