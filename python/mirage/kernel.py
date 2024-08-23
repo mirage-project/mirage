@@ -20,7 +20,7 @@ static PyObject *launch(PyObject *self, PyObject *args) {
   std::vector<void const *> input_tensors;
   std::vector<void*> output_tensors;
 
-  if (!PyArg_Parsetuple(args, "OOO", &input_list, &output_list, &py_buffer)) {
+  if (!PyArg_ParseTuple(args, "OOO", &input_list, &output_list, &py_buffer)) {
     PyErr_SetString(PyExc_TypeError, "Invalid parameters");
     return NULL;
   }
