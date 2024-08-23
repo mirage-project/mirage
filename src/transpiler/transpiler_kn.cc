@@ -370,7 +370,8 @@ TranspileResult Transpiler::generate_code() {
         // Customized op
         kn::KNCustomizedOp const *cur_op =
             dynamic_cast<kn::KNCustomizedOp const *>(op);
-        tb::ExecutionPlan const &plan = cur_op->plan;
+        // tb::ExecutionPlan const &plan = cur_op->plan;
+        tb::Graph const &bgraph = cur_op->bgraph;
         // Get DTensor ptrs
         // We make the aggrement that, when calling a custom kernel, the
         // arguments are in the order of "output_tensors, input_tensors"
@@ -388,17 +389,17 @@ TranspileResult Transpiler::generate_code() {
           // According to
           // https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#features-and-technical-specifications,
           // all GPUs up to H100 have the same restriction
-          assert(plan.grid_dim.x <= (1LL << 31) - 1);
-          assert(plan.grid_dim.y <= 65535);
-          assert(plan.grid_dim.z <= 65535);
-          assert((long long)plan.grid_dim.x * plan.grid_dim.y *
-                     plan.grid_dim.z <=
+          assert(bgraph.grid_dim.x <= (1LL << 31) - 1);
+          assert(bgraph.grid_dim.y <= 65535);
+          assert(bgraph.grid_dim.z <= 65535);
+          assert((long long)bgraph.grid_dim.x * bgraph.grid_dim.y *
+                     bgraph.grid_dim.z <=
                  (1LL << 31) - 1);
-          assert(plan.block_dim.x <= 1024);
-          assert(plan.block_dim.y <= 1024);
-          assert(plan.block_dim.z <= 64);
-          assert((long long)plan.block_dim.x * plan.block_dim.y *
-                     plan.block_dim.z <=
+          assert(bgraph.block_dim.x <= 1024);
+          assert(bgraph.block_dim.y <= 1024);
+          assert(bgraph.block_dim.z <= 64);
+          assert((long long)bgraph.block_dim.x * bgraph.block_dim.y *
+                     bgraph.block_dim.z <=
                  1024);
         } else {
           // In the future, we may need to update this part for GPUs later than
@@ -407,13 +408,13 @@ TranspileResult Transpiler::generate_code() {
         }
         // Launch kernel
         exec.e("dim3 grid_dim($, $, $);",
-               plan.grid_dim.x,
-               plan.grid_dim.y,
-               plan.grid_dim.z);
+               bgraph.grid_dim.x,
+               bgraph.grid_dim.y,
+               bgraph.grid_dim.z);
         exec.e("dim3 block_dim($, $, $);",
-               plan.block_dim.x,
-               plan.block_dim.y,
-               plan.block_dim.z);
+               bgraph.block_dim.x,
+               bgraph.block_dim.y,
+               bgraph.block_dim.z);
         exec.e("size_t smem_size = $;", result.smem_size);
         exec.e("$<<<grid_dim, block_dim, smem_size>>>($);",
                result.func_name,

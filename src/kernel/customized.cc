@@ -29,14 +29,6 @@ namespace kernel {
 using mirage::threadblock::ExecutionPlan;
 using mirage::threadblock::STensor;
 
-std::vector<DTensor> Graph::customized(std::vector<DTensor> const &inputs,
-                                       ExecutionPlan const &plan) {
-  KNOperator *op = create_customized_op(inputs, plan);
-  assert(op != nullptr);
-  operators.push_back(op);
-  return op->output_tensors;
-}
-
 std::vector<DTensor> Graph::customized(
     std::vector<DTensor> const &inputs,
     mirage::threadblock::Graph const &bgraph) {
@@ -64,12 +56,6 @@ int Graph::customized(
 }
 
 KNOperator *Graph::create_customized_op(std::vector<DTensor> const &inputs,
-                                        ExecutionPlan const &plan) {
-  KNCustomizedOp *op = new KNCustomizedOp(this, inputs, plan);
-  return op;
-}
-
-KNOperator *Graph::create_customized_op(std::vector<DTensor> const &inputs,
                                         threadblock::Graph const &_graph) {
   size_t output_data_size = 0, output_fp_size = 0;
   for (threadblock::TBOperator *op : _graph.operators) {
@@ -89,6 +75,7 @@ KNOperator *Graph::create_customized_op(std::vector<DTensor> const &inputs,
   return op;
 }
 
+#ifdef DEADCODE
 KNCustomizedOp::KNCustomizedOp(Graph *_kgraph,
                                std::vector<DTensor> const &_inputs,
                                ExecutionPlan const &_plan)
@@ -226,6 +213,7 @@ KNCustomizedOp::KNCustomizedOp(Graph *_kgraph,
     }
   }
 }
+#endif
 
 KNCustomizedOp::KNCustomizedOp(mirage::kernel::Graph *_kgraph,
                                std::vector<DTensor> const &_inputs,
@@ -235,10 +223,10 @@ KNCustomizedOp::KNCustomizedOp(mirage::kernel::Graph *_kgraph,
              _graph.block_dim,
              _graph.forloop_range,
              _graph.reduction_dimx) {
-  plan.grid_dim = _graph.grid_dim;
-  plan.block_dim = _graph.block_dim;
-  plan.forloop_range = _graph.forloop_range;
-  plan.reduction_dimx = _graph.reduction_dimx;
+  //plan.grid_dim = _graph.grid_dim;
+  //plan.block_dim = _graph.block_dim;
+  //plan.forloop_range = _graph.forloop_range;
+  //plan.reduction_dimx = _graph.reduction_dimx;
 
   for (auto const &op : _graph.operators) {
     std::vector<STensor> my_inputs;
@@ -257,7 +245,7 @@ KNCustomizedOp::KNCustomizedOp(mirage::kernel::Graph *_kgraph,
     }
     if (op->op_type != mirage::type::TB_INPUT_OP &&
         op->op_type != mirage::type::TB_OUTPUT_OP) {
-      plan.ops.push_back({op->op_type, indices});
+      //plan.ops.push_back({op->op_type, indices});
     }
     switch (op->op_type) {
       case mirage::type::TB_INPUT_OP: {
@@ -268,9 +256,9 @@ KNCustomizedOp::KNCustomizedOp(mirage::kernel::Graph *_kgraph,
                          input_op->input_map,
                          input_op->forloop_dim,
                          input_op->output_tensors[0].layout);
-        plan.input_map.push_back(input_op->input_map);
-        plan.input_forloop_dim.push_back(input_op->forloop_dim);
-        plan.input_smem_layouts.push_back(input_op->output_tensors[0].layout);
+        //plan.input_map.push_back(input_op->input_map);
+        //plan.input_forloop_dim.push_back(input_op->forloop_dim);
+        //plan.input_smem_layouts.push_back(input_op->output_tensors[0].layout);
         break;
       }
       case mirage::type::TB_OUTPUT_OP: {
@@ -297,7 +285,7 @@ KNCustomizedOp::KNCustomizedOp(mirage::kernel::Graph *_kgraph,
           output->dtensor = dtensor;
         }
         output_tensors.push_back(dtensor);
-        plan.output_map = output_op->output_map;
+        //plan.output_map = output_op->output_map;
         break;
       }
       case mirage::type::TB_MATMUL_OP: {
@@ -313,14 +301,11 @@ KNCustomizedOp::KNCustomizedOp(mirage::kernel::Graph *_kgraph,
         bgraph.elementunary(my_inputs[0], op->op_type);
         break;
       }
-      case mirage::type::TB_ADD_OP: {
-        assert(my_inputs.size() == 2);
-        bgraph.add(my_inputs[0], my_inputs[1]);
-        break;
-      }
+      case mirage::type::TB_ADD_OP:
+      case mirage::type::TB_MUL_OP:
       case mirage::type::TB_DIV_OP: {
         assert(my_inputs.size() == 2);
-        bgraph.div(my_inputs[0], my_inputs[1]);
+        bgraph.elementbinary(my_inputs[0], my_inputs[1], op->op_type);
         break;
       }
       case mirage::type::TB_REDUCTION_0_OP:
@@ -347,6 +332,14 @@ KNCustomizedOp::KNCustomizedOp(mirage::kernel::Graph *_kgraph,
         bgraph.concat(my_inputs[0], my_inputs[1], concat_dim);
         break;
       }
+      case mirage::type::TB_FORLOOP_ACCUM_NO_RED_OP:
+      case mirage::type::TB_FORLOOP_ACCUM_RED_LD_SUM_OP:
+      case mirage::type::TB_FORLOOP_ACCUM_RED_LD_MEAN_OP:
+      case mirage::type::TB_FORLOOP_ACCUM_RED_LD_RMS_OP: {
+        assert(my_inputs.size() == 1);
+        bgraph.forloop_accum(my_inputs[0], op->op_type);
+        break;
+      }
       default: {
         assert(false && "Unsupported kernel operator");
       }
@@ -369,8 +362,7 @@ KNCustomizedOp::operator json() const {
   return json{{"op_type", op_type},
               {"input_tensors", input_tensors},
               {"output_tensors", output_tensors},
-              {"bgraph", bgraph},
-              {"plan", plan}};
+              {"bgraph", bgraph}};
 }
 
 } // namespace kernel
