@@ -40,12 +40,7 @@ class LayoutGrouper {
 public:
   using Result = std::conditional_t<
       (rank(RealLayout{}) == _2{}),
-      Layout<decltype(make_shape(get<0>(shape(RealLayout{})),
-                                 get<1>(shape(RealLayout{})),
-                                 _1{})),
-             decltype(make_stride(get<0>(stride(RealLayout{})),
-                                  get<1>(stride(RealLayout{})),
-                                  _1{}))>,
+      decltype(append<3>(RealLayout{}, Layout<_1>{})),
       decltype(group<2, rank(RealLayout{})>(RealLayout{}))>;
   CUTE_STATIC_ASSERT_V(rank(Result{}) == _3{});
 };
