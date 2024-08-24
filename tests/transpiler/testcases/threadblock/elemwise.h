@@ -55,7 +55,7 @@ ADD_TESTCASE(Testcase("tb_elemwise_correctness", {"threadblock", "correctness"},
 			dim3(dims[0], dims[1], dims[2]/7),
 			dim3(2, 3, 4),
 			{0, 1, 2},
-			0, 1	// The forloop dim can be anything since forloop_range is 1
+			-1, 1	// The forloop dim can be anything since forloop_range is 1
 		},
 		{
 			"no forloop, 3d grid 3",
@@ -63,7 +63,7 @@ ADD_TESTCASE(Testcase("tb_elemwise_correctness", {"threadblock", "correctness"},
 			dim3(dims[3]/4, dims[1], dims[0]),
 			dim3(3, 1, 1),
 			{3, 1, 0},
-			2, 1
+			-1, 1
 		},
 		// Commented out because of currently Mirage does support output forloop
 		// dim other than -1
