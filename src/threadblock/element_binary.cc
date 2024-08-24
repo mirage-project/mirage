@@ -33,7 +33,7 @@ STensor Graph::mul(STensor const &input1, STensor const &input2) {
 }
 
 STensor *Graph::mul(STensor const *input1, STensor const *input2) {
-  return elementbinary(input1, input2, mirage::type::TB_ADD_OP);
+  return elementbinary(input1, input2, mirage::type::TB_MUL_OP);
 }
 
 STensor Graph::div(STensor const &input1, STensor const &input2) {
@@ -41,7 +41,7 @@ STensor Graph::div(STensor const &input1, STensor const &input2) {
 }
 
 STensor *Graph::div(STensor const *input1, STensor const *input2) {
-  return elementbinary(input1, input2, mirage::type::TB_ADD_OP);
+  return elementbinary(input1, input2, mirage::type::TB_DIV_OP);
 }
 
 STensor Graph::elementbinary(STensor const &input1,
