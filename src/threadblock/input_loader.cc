@@ -29,6 +29,16 @@ STensor Graph::new_input(mirage::kernel::DTensor const &dtensor,
   return op->output_tensors[0];
 }
 
+STensor* Graph::new_input(mirage::kernel::DTensor const *dtensor,
+                          int3 input_map,
+                          int forloop_dim,
+                          mirage::layout::SmemLayout layout) {
+  TBOperator *op = create_input_op(*dtensor, input_map, forloop_dim, layout);
+  assert(op != nullptr);
+  operators.push_back(op);
+  return &op->output_tensors[0];
+}
+
 TBOperator *Graph::create_input_op(mirage::kernel::DTensor const &dtensor,
                                    int3 input_map,
                                    int forloop_dim,

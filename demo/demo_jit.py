@@ -4,7 +4,7 @@ import argparse
 import torch
 
 if __name__ == "__main__":
-    graph = mi.new_graph()
+    graph = mi.new_kernel_graph()
     input0 = graph.new_input(dims=(12, 251), dtype=mi.float16)
     input1 = graph.new_input(dims=(12, 251), dtype=mi.float16)
     mid0 = graph.add(input0, input1)

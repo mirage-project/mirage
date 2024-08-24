@@ -9,6 +9,7 @@ import sysconfig
 from typing import *
 
 from .core import *
+from .threadblock import *
 
 HARD_CODE = """
 #include <Python.h>
@@ -84,7 +85,7 @@ PyMODINIT_FUNC PyInit___mirage_launcher(void) {
 def gen_empty_tensor(alloc_size, shape, stride, device, dtype=torch.float16):
     return torch.empty(alloc_size, dtype=dtype, device=device).as_strided(shape, stride)
 
-class PyGraph:  
+class KNGraph:  
     def __init__(self, graph):  
         self.cygraph = graph
         
@@ -92,27 +93,30 @@ class PyGraph:
         self.run = None
         self._cached_results = None
     
-    def new_input(self, dims: Tuple, dtype: dtype = float16):
+    def new_input(self, dims: tuple, dtype: dtype = float16) -> DTensor:
         return self.cygraph.new_input(dims, dtype)
     
-    def matmul(self, A: PyTensor, B: PyTensor):
+    def matmul(self, A: DTensor, B: DTensor) -> DTensor:
         return self.cygraph.matmul(A, B)
     
-    def reduction(self, A: PyTensor, dim: int):
+    def reduction(self, A: DTensor, dim: int):
         return self.cygraph.reduction(A, dim)
     
-    def exp(self, A: PyTensor):
+    def exp(self, A: DTensor):
         return self.cygraph.exp(A)
     
-    def add(self, A: PyTensor, B: PyTensor):
+    def add(self, A: DTensor, B: DTensor):
         return self.cygraph.add(A, B)
     
-    def mul(self, A: PyTensor, B: PyTensor):
+    def mul(self, A: DTensor, B: DTensor):
         return self.cygraph.mul(A, B)
       
-    def div(self, A: PyTensor, B: PyTensor):
+    def div(self, A: DTensor, B: DTensor):
         return self.cygraph.div(A, B)
     
+    def customized(self, inputs: list[DTensor], bgraph: TBGraph) -> list[DTensor]:
+        return self.cygraph.customized(inputs, bgraph.cygraph)
+
     def __call__(self, **kwargs):
         results = self.compile(**kwargs)
         
