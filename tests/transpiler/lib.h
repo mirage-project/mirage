@@ -343,21 +343,13 @@ public:
                     std::function<add_custom_op_ret_t<NUM_OUTPUTS>(
                         vector<kn::DTensor> const &)> const &constructor) {
     auto [tb_graph_ptr, result_dtensors] = constructor(inputs);
-    // Here is an ugly workaround. The only way (in Mirage's code) to get a
-    // valid guid for a DTensor which is an output of some block graph, is to,
-    // construct a customized_op from an Execution plan. So here we convert
-    // tb_graph to an execution plan. And in order to let DTensors in
-    // `result_dtensors` have valid guids, we get those guids from
-    // custom_op->output_tensors and copy them to result_dtensors To avoid
-    // misalignment, we enforce the number of output tensors to be 1
-    kn::KNOperator *custom_op =
-        this->g->create_customized_op(inputs, tb_graph_ptr->get_plan());
-    assert(custom_op &&
-           "Error when adding the customized op to the kernel graph");
-    assert(NUM_OUTPUTS == 1);
-    result_dtensors[0].guid = custom_op->output_tensors[0].guid;
-    this->g->operators.push_back(custom_op);
-    return result_dtensors;
+    std::vector<kn::DTensor> output_dtensors = this->g->customized(inputs, *tb_graph_ptr);
+    std::array<kn::DTensor, NUM_OUTPUTS> result_dtensors_arr;
+    assert(output_dtensors.size() == NUM_OUTPUTS);
+    for (int i = 0; i < NUM_OUTPUTS; ++i) {
+      result_dtensors_arr[i] = output_dtensors[i];
+    }
+    return result_dtensors_arr;
   }
 
 private:
