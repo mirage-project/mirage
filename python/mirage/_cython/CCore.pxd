@@ -20,6 +20,16 @@ from libcpp cimport bool
 
 ctypedef unsigned long int size_t
 
+cdef extern from "vector_types.h":
+    ctypedef struct dim3:
+        unsigned int x
+        unsigned int y
+        unsigned int z
+    ctypedef struct int3:
+        int x
+        int y
+        int z
+
 cdef extern from "mirage/type.h" namespace "mirage::type":
     # This must be consistent with mirage/type.h
     cdef enum DataType:
@@ -30,18 +40,32 @@ cdef extern from "mirage/type.h" namespace "mirage::type":
         DT_FLOAT32 = 930,
         DT_DOUBLE = 940,
         DT_UNKNOWN = 999,
-  
+    cdef enum TBEpilogueType:
+        TB_EPILOGUE_NONE = 3100,
+        TB_EPILOGUE_ALLREDUCE = 3101,
+        TB_EPILOGUE_ALLTOALL = 3102,
+        TB_EPILOGUE_INVALID = 3199,
+    cdef enum TBOperatorType:
+        TB_FORLOOP_ACCUM_NO_RED_OP = 2500,
+        TB_FORLOOP_ACCUM_RED_LD_SUM_OP = 2501,
+        TB_FORLOOP_ACCUM_RED_LD_MEAN_OP = 2502,
+        TB_FORLOOP_ACCUM_RED_LD_RMS_OP = 2503,
+
 cdef extern from "mirage/layout.h" namespace "mirage::layout":
     # This must be consistent with mirage/layout.h
     cdef enum DmemLayout:
         DmemRowMajor = 100,
         DmemColumnMajor = 101,
-        DmemUnknowLayout = 199,
+        DmemUnknownLayout = 199,
+    cdef enum SmemLayout:
+        SmemRowMajor = 200,
+        SmemColumnMajor = 201,
+        SmemUnknownLayout = 299
 
 cdef extern from "mirage/kernel/graph.h" namespace "mirage::kernel":
     cdef cppclass KNOperator:
         pass
-    ctypedef struct DTensor:
+    ctypedef struct CppDTensor "mirage::kernel::DTensor":
         DataType data_type
         DmemLayout layout
         int num_dims
@@ -52,19 +76,64 @@ cdef extern from "mirage/kernel/graph.h" namespace "mirage::kernel":
         int owner_ts_idx
         pass
 
-    cdef cppclass Graph:
-        Graph()
-        DTensor* new_input_ptr(vector[int] dims,
+    cdef cppclass CppKNGraph "mirage::kernel::Graph":
+        CppKNGraph()
+        CppDTensor* new_input_ptr(vector[int] dims,
                                DataType data_type,
                                DmemLayout layout)
-        DTensor* matmul(const DTensor* A, const DTensor* B)
-        DTensor* reduction(const DTensor* input, int dim, int size)
-        DTensor* exp(const DTensor* input)
-        DTensor* add(const DTensor* op1, const DTensor* op2)
-        DTensor* mul(const DTensor* op1, const DTensor* op2)
-        DTensor* div(const DTensor* op1, const DTensor* op2)
+        CppDTensor* matmul(const CppDTensor* A, const CppDTensor* B)
+        CppDTensor* reduction(const CppDTensor* input, int dim, int size)
+        CppDTensor* exp(const CppDTensor* input)
+        CppDTensor* add(const CppDTensor* op1, const CppDTensor* op2)
+        CppDTensor* mul(const CppDTensor* op1, const CppDTensor* op2)
+        CppDTensor* div(const CppDTensor* op1, const CppDTensor* op2)
+        int customized(vector[const CppDTensor*] inputs,
+                       CppDTensor** outputs,
+                       CppTBGraph* bgraph)
         void generate_triton_program(const char *filepath)
         void generate_cuda_program(const char *filepath)
+
+cdef extern from "mirage/threadblock/graph.h" namespace "mirage::threadblock":
+    cdef cppclass TBOperator:
+        pass
+    ctypedef struct CppSTensor "mirage::threadblock::STensor":
+        DataType data_type
+        SmemLayout layout
+        int num_dims
+        int dim[4]
+        int owner_ts_id
+
+    cdef cppclass CppTBGraph "mirage::threadblock::Graph":
+        CppTBGraph(dim3 grid_dim,
+                   dim3 block_dim,
+                   int forloop_range,
+                   int reduction_dimx)
+        CppSTensor* new_input(const CppDTensor* dtensor,
+                           int3 input_map,
+                           int forloop_dim,
+                           SmemLayout layout)
+        CppDTensor* new_output(const CppSTensor* stensor,
+                            int3 output_map,
+                            int forloop_dim,
+                            TBEpilogueType epilogue)
+        CppSTensor* matmul(const CppSTensor *A,
+                        const CppSTensor *B)
+        CppSTensor* exp(const CppSTensor *A)
+        CppSTensor* silu(const CppSTensor *A)
+        CppSTensor* square(const CppSTensor *A)
+        CppSTensor* sqrt(const CppSTensor *A)
+        CppSTensor* add(const CppSTensor *A,
+                     const CppSTensor *B)
+        CppSTensor* mul(const CppSTensor *A,
+                     const CppSTensor *B)
+        CppSTensor* div(const CppSTensor *A,
+                     const CppSTensor *B)
+        CppSTensor* reduction(const CppSTensor *A, int dim)
+        CppSTensor* concat(const CppSTensor *A,
+                        const CppSTensor *B,
+                        int dim)
+        CppSTensor* forloop_accum(const CppSTensor *A,
+                               TBOperatorType optype)
 
 cdef extern from "mirage/search/search_c.h" namespace "mirage::search_c":
     ctypedef struct MInt3:
@@ -75,9 +144,10 @@ cdef extern from "mirage/search/search_c.h" namespace "mirage::search_c":
         unsigned int x
         unsigned int y
         unsigned int z
-    cdef int cython_optimize(const Graph *input_graph,
+
+    cdef int cython_optimize(const CppKNGraph *input_graph,
                              int max_num_new_graphs,
-                             Graph** new_graphs,
+                             CppKNGraph** new_graphs,
                              vector[MInt3] imaps,
                              vector[MInt3] omaps,
                              vector[MDim3] griddims,
@@ -98,7 +168,7 @@ cdef extern from "mirage/transpiler/transpile.h" namespace "mirage::transpiler":
         string code
         size_t buf_size
         vector[OutputTensorDirective] output_directives
-    cdef TranspileResult transpile(const Graph *graph,
+    cdef TranspileResult transpile(const CppKNGraph *graph,
                        const TranspilerConfig config,
                        vector[vector[size_t]] input_strides,
-                       vector[const DTensor*] output_tensors)
+                       vector[const CppDTensor*] output_tensors)

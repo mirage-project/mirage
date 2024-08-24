@@ -133,16 +133,38 @@ def convert_ctype_to_dtype(type):
     else:
         return None
 
-cdef class PyTensor:
-    cdef DTensor* c_ptr # Hold a Tensor instance
+def string_to_tbepilogue(epilogue):
+    if epilogue is None:
+        return TB_EPILOGUE_NONE
+    elif epilogue == "allreduce":
+        return TB_EPILOGUE_ALLREDUCE
+    else:
+        assert False, "Unsupported threadblock epilogue"
+        return None
+
+def string_to_accum_optype(acc):
+    if acc is None:
+        return TB_FORLOOP_ACCUM_NO_RED_OP
+    elif acc == "sum":
+        return TB_FORLOOP_ACCUM_RED_LD_SUM_OP
+    elif acc == "mean":
+        return TB_FORLOOP_ACCUM_RED_LD_MEAN_OP
+    elif acc == "rms":
+        return TB_FORLOOP_ACCUM_RED_LD_RMS_OP
+    else:
+        assert False, "Unsupported accum optype"
+        return None
+
+cdef class DTensor:
+    cdef CppDTensor* c_ptr # Hold a Tensor instance
 
     cdef inline _set_tensor(self, tensor):
         cdef unsigned long long ptr
         if tensor is None:
-            self.c_ptr = <DTensor*>(NULL)
+            self.c_ptr = <CppDTensor*>(NULL)
         else:
             ptr = ctypes.cast(tensor, ctypes.c_void_p).value
-            self.c_ptr = <DTensor*>(ptr)
+            self.c_ptr = <CppDTensor*>(ptr)
 
     property tensor:
         def __get__(self):
@@ -178,16 +200,62 @@ cdef class PyTensor:
             assert False , "Error: index out of range"
             return None
 
-cdef class CyGraph:
-    cdef Graph *p_graph #Hold a Graph instance
+cdef class STensor:
+    cdef CppSTensor* c_ptr # Hold a CppSTensor instance
+
+    cdef inline _set_tensor(self, tensor):
+        cdef unsigned long long ptr
+        if tensor is None:
+            self.c_ptr = <CppSTensor*>(NULL)
+        else:
+            ptr = ctypes.cast(tensor, ctypes.c_void_p).value
+            self.c_ptr = <CppSTensor*>(ptr)
+
+    property tensor:
+        def __get__(self):
+            if self.c_ptr == NULL:
+                return None
+            else:
+                return ctypes.cast(<unsigned long long>self.c_ptr, ctypes.c_void_p)
+        
+        def __set__(self, value):
+            self._set_tensor(value)
+
+    property num_dims:
+        def __get__(self):
+            if self.c_ptr == NULL:
+                return None
+            else:
+                return self.c_ptr.num_dims
+
+    property dtype:
+        def __get__(self):
+            if self.c_ptr == NULL:
+                return None
+            else:
+                return convert_ctype_to_dtype(self.c_ptr.data_type)
+
+    def __cinit__(self, tensor):
+        self._set_tensor(tensor)
+
+    def dim(self, int idx):
+        if (idx < self.c_ptr.num_dims):
+            return self.c_ptr.dim[idx]
+        else:
+            assert False , "Error: index out of range"
+            return None
+
+
+cdef class CyKNGraph:
+    cdef CppKNGraph *p_kgraph #Hold a CppKNGraph instance
 
     def __cinit__(self, graph = None):
         cdef unsigned long long ptr
         if graph is None:
-            self.p_graph = new Graph()
+            self.p_kgraph = new CppKNGraph()
         else:
             ptr = ctypes.cast(graph, ctypes.c_void_p).value
-            self.p_graph = <Graph*>(ptr)
+            self.p_kgraph = <CppKNGraph*>(ptr)
 
     def new_input(self, tuple dims, dtype : dtype = float16):
         cdef vector[int] cdims
@@ -195,48 +263,155 @@ cdef class CyGraph:
         for i in range(len(dims)):
             cdims[i] = dims[i]
         c_type = convert_dtype_to_ctype(dtype)
-        cdef DTensor* ptr = self.p_graph.new_input_ptr(cdims, c_type, DmemRowMajor)
+        cdef CppDTensor* ptr = self.p_kgraph.new_input_ptr(cdims, c_type, DmemRowMajor)
         t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
-        return PyTensor(t)
+        return DTensor(t)
 
-    def matmul(self, PyTensor A, PyTensor B):
-        cdef DTensor* ptr = self.p_graph.matmul(A.c_ptr, B.c_ptr)
+    def matmul(self, DTensor A, DTensor B):
+        cdef CppDTensor* ptr = self.p_kgraph.matmul(A.c_ptr, B.c_ptr)
         t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
-        return PyTensor(t)
+        return DTensor(t)
 
-    def reduction(self, PyTensor input, int dim):
-        cdef DTensor* ptr = self.p_graph.reduction(input.c_ptr, dim, 1)
+    def reduction(self, DTensor input, int dim):
+        cdef CppDTensor* ptr = self.p_kgraph.reduction(input.c_ptr, dim, 1)
         t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
-        return PyTensor(t)
+        return DTensor(t)
 
-    def exp(self, PyTensor input):
-        cdef DTensor* ptr = self.p_graph.exp(input.c_ptr)
+    def exp(self, DTensor input):
+        cdef CppDTensor* ptr = self.p_kgraph.exp(input.c_ptr)
         t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
-        return PyTensor(t)
+        return DTensor(t)
 
-    def add(self, PyTensor A, PyTensor B):
-        cdef DTensor* ptr = self.p_graph.add(A.c_ptr, B.c_ptr)
+    def add(self, DTensor A, DTensor B):
+        cdef CppDTensor* ptr = self.p_kgraph.add(A.c_ptr, B.c_ptr)
         t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
-        return PyTensor(t)
+        return DTensor(t)
 
-    def mul(self, PyTensor A, PyTensor B):
-        cdef DTensor* ptr = self.p_graph.mul(A.c_ptr, B.c_ptr)
+    def mul(self, DTensor A, DTensor B):
+        cdef CppDTensor* ptr = self.p_kgraph.mul(A.c_ptr, B.c_ptr)
         t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
-        return PyTensor(t)
+        return DTensor(t)
 
-    def div(self, PyTensor A, PyTensor B):
-        cdef DTensor* ptr = self.p_graph.div(A.c_ptr, B.c_ptr)
+    def div(self, DTensor A, DTensor B):
+        cdef CppDTensor* ptr = self.p_kgraph.div(A.c_ptr, B.c_ptr)
         t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
-        return PyTensor(t)
+        return DTensor(t)
+
+    def customized(self, list[DTensor] inputs, CyTBGraph bgraph):
+        cdef vector[const CppDTensor*] cinputs
+        cinputs.resize(len(inputs))
+        cdef DTensor t
+        for i in range(len(inputs)):
+            assert(type(inputs[i]) == DTensor)
+            t = inputs[i]
+            cinputs[i] = t.c_ptr
+        cdef CppDTensor* coutputs[1024]
+        num_outputs = self.p_kgraph.customized(cinputs, coutputs, bgraph.p_bgraph)
+        outputs = list()
+        for i in range(num_outputs):
+            ptr = ctypes.cast(<unsigned long long>coutputs[i], ctypes.c_void_p)
+            outputs.append(DTensor(ptr))
+        return outputs
 
     def generate_triton_program(self, str filepath):
         assert filepath is not None, "filepath cannot be empty"
         py_byte_string = filepath.encode('UTF-8')
         cdef char* cfilepath = NULL
         cfilepath = py_byte_string
-        self.p_graph.generate_triton_program(cfilepath)
+        self.p_kgraph.generate_triton_program(cfilepath)
 
-def optimize(CyGraph input_graph, *, int max_num_new_graphs = 1024, list imaps = None, list omaps = None, list griddims = None, list blockdims = None, list fmaps = None, list franges = None, str previous_checkpoint = None, str default_config = None):
+cdef class CyTBGraph:
+    cdef CppTBGraph *p_bgraph #Hold a CppTBGraph instance
+
+    def __cinit__(self, tuple grid_dim, tuple block_dim, int forloop_range, int dimx):
+        assert len(grid_dim) == 3, "grid_dim must include 3 dimensions"
+        assert len(block_dim) == 3, "block_dim must include 3 dimensions"
+        cdef dim3 c_grid_dim
+        c_grid_dim.x = grid_dim[0]
+        c_grid_dim.y = grid_dim[1]
+        c_grid_dim.z = grid_dim[2]
+        cdef dim3 c_block_dim
+        c_block_dim.x = block_dim[0]
+        c_block_dim.y = block_dim[1]
+        c_block_dim.z = block_dim[2]
+        self.p_bgraph = new CppTBGraph(c_grid_dim, c_block_dim, forloop_range, dimx)
+    
+    def new_input(self, DTensor dtensor, tuple input_map, int forloop_dim):
+        assert len(input_map) == 3, "input_map must be of length 3"
+        cdef int3 c_input_map
+        c_input_map.x = input_map[0]
+        c_input_map.y = input_map[1]
+        c_input_map.z = input_map[2]
+        cdef CppSTensor* ptr = self.p_bgraph.new_input(dtensor.c_ptr, c_input_map, forloop_dim, SmemRowMajor)
+        t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
+        return STensor(t)
+
+    def new_output(self, STensor stensor, tuple output_map, int forloop_dim, str epilogue = None):
+        assert len(output_map) == 3, "output_map must be of length 3"
+        cdef int3 c_output_map
+        c_output_map.x = output_map[0]
+        c_output_map.y = output_map[1]
+        c_output_map.z = output_map[2]
+        epilogue_type = string_to_tbepilogue(epilogue)
+        self.p_bgraph.new_output(stensor.c_ptr, c_output_map, forloop_dim, epilogue_type)  
+
+    def matmul(self, STensor A, STensor B):
+        cdef CppSTensor* ptr = self.p_bgraph.matmul(A.c_ptr, B.c_ptr)
+        t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
+        return STensor(t)
+
+    def exp(self, STensor A):
+        cdef CppSTensor* ptr = self.p_bgraph.exp(A.c_ptr)
+        t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
+        return STensor(t)
+
+    def silu(self, STensor A):
+        cdef CppSTensor* ptr = self.p_bgraph.silu(A.c_ptr)
+        t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
+        return STensor(t)
+
+    def square(self, STensor A):
+        cdef CppSTensor* ptr = self.p_bgraph.square(A.c_ptr)
+        t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
+        return STensor(t)
+
+    def sqrt(self, STensor A):
+        cdef CppSTensor* ptr = self.p_bgraph.sqrt(A.c_ptr)
+        t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
+        return STensor(t)
+
+    def add(self, STensor A, STensor B):
+        cdef CppSTensor* ptr = self.p_bgraph.add(A.c_ptr, B.c_ptr)
+        t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
+        return STensor(t)
+
+    def mul(self, STensor A, STensor B):
+        cdef CppSTensor* ptr = self.p_bgraph.mul(A.c_ptr, B.c_ptr)
+        t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
+        return STensor(t)
+
+    def div(self, STensor A, STensor B):
+        cdef CppSTensor* ptr = self.p_bgraph.div(A.c_ptr, B.c_ptr)
+        t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
+        return STensor(t)
+
+    def reduction(self, STensor A, int dim):
+        cdef CppSTensor* ptr = self.p_bgraph.reduction(A.c_ptr, dim)
+        t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
+        return STensor(t)
+
+    def concat(self, STensor A, STensor B, int dim):
+        cdef CppSTensor* ptr = self.p_bgraph.concat(A.c_ptr, B.c_ptr, dim)
+        t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
+        return STensor(t)
+
+    def forloop_accum(self, STensor A, str acc):
+        optype = string_to_accum_optype(acc)
+        cdef CppSTensor* ptr = self.p_bgraph.forloop_accum(A.c_ptr, optype)
+        t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
+        return STensor(t)
+
+def optimize(CyKNGraph input_graph, *, int max_num_new_graphs = 1024, list imaps = None, list omaps = None, list griddims = None, list blockdims = None, list fmaps = None, list franges = None, str previous_checkpoint = None, str default_config = None):
     # set cimaps
     cdef vector[MInt3] cimaps
     cimaps.resize(0)
@@ -291,7 +466,7 @@ def optimize(CyGraph input_graph, *, int max_num_new_graphs = 1024, list imaps =
     # allocate new graphs
     # currently support up to 1024 new graphs
     assert max_num_new_graphs <= 1024
-    cdef Graph* cnewgraphs[1024]
+    cdef CppKNGraph* cnewgraphs[1024]
     # convert file path
     cdef char* cfilepath = NULL
     if previous_checkpoint is not None:
@@ -302,16 +477,16 @@ def optimize(CyGraph input_graph, *, int max_num_new_graphs = 1024, list imaps =
     if default_config is not None:
         py_byte_string = default_config.encode('UTF-8')
         cconfig = py_byte_string
-    num = cython_optimize(input_graph.p_graph, max_num_new_graphs, cnewgraphs, cimaps, comaps, cgriddims, cblockdims, cfmaps, cfranges, cfilepath, cconfig)
+    num = cython_optimize(input_graph.p_kgraph, max_num_new_graphs, cnewgraphs, cimaps, comaps, cgriddims, cblockdims, cfmaps, cfranges, cfilepath, cconfig)
     new_graphs = list()
     for i in range(num):
         ptr = ctypes.cast(<unsigned long long>cnewgraphs[i], ctypes.c_void_p)
-        new_graphs.append(CyGraph(ptr))
+        new_graphs.append(CyKNGraph(ptr))
     return new_graphs
 
 # Generate CUDA program for a uGraph
 # Return (CUDA code, buffer size in bytes)
-def generate_cuda_program(CyGraph input_graph, *, int target_cc, list input_strides, list output_tensors) -> dict:
+def generate_cuda_program(CyKNGraph input_graph, *, int target_cc, list input_strides, list output_tensors) -> dict:
     # Set transpiler_config
     cdef TranspilerConfig transpiler_config
     transpiler_config.target_cc = target_cc
@@ -325,15 +500,15 @@ def generate_cuda_program(CyGraph input_graph, *, int target_cc, list input_stri
             cinput_strides[i][j] = input_strides[i][j]
     
     # Set output_tensors
-    cdef vector[const DTensor*] coutput_tensors
+    cdef vector[const CppDTensor*] coutput_tensors
     coutput_tensors.resize(len(output_tensors))
-    cdef PyTensor t
+    cdef DTensor t
     for i in range(len(output_tensors)):
         t = output_tensors[i]
         coutput_tensors[i] = t.c_ptr
     
     # Call transpile
-    cdef TranspileResult result = transpile(input_graph.p_graph, transpiler_config, cinput_strides, coutput_tensors)
+    cdef TranspileResult result = transpile(input_graph.p_kgraph, transpiler_config, cinput_strides, coutput_tensors)
 
     # Get output directives
     cdef list[dict] output_directives = list()

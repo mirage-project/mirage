@@ -135,8 +135,7 @@ static std::pair<bool, int> can_perform_chunked_copy(
 CustomOPTranspileResult
     Transpiler::transpile_kn_custom_op(kn::KNCustomizedOp const *op) {
   tb::Graph const &g = op->bgraph;
-  tb::ExecutionPlan const &plan = op->plan;
-  int num_threads = plan.block_dim.x * plan.block_dim.y * plan.block_dim.z;
+  int num_threads = g.block_dim.x * g.block_dim.y * g.block_dim.z;
 
   // Get the schedule
   TBSched sched = get_threadblock_schedule(g);
@@ -174,10 +173,10 @@ CustomOPTranspileResult
 
   // Define thread idx
   string thread_idx;
-  if (plan.block_dim.y > 1 || plan.block_dim.z > 1) {
+  if (g.block_dim.y > 1 || g.block_dim.z > 1) {
     thread_idx = fmt("threadIdx.x + threadIdx.y * $ + threadIdx.z * $",
-                     plan.block_dim.x,
-                     plan.block_dim.x * plan.block_dim.y);
+                     g.block_dim.x,
+                     g.block_dim.x * g.block_dim.y);
   } else {
     thread_idx = "threadIdx.x";
   }
@@ -224,9 +223,9 @@ CustomOPTranspileResult
         int div_dim = dim == 0 ? imap.x : dim == 1 ? imap.y : imap.z;
         if (div_dim >= 0) {
           // Dim `div_dim` is divided along `dim`
-          int num_tbs = dim == 0   ? plan.grid_dim.x
-                        : dim == 1 ? plan.grid_dim.y
-                                   : plan.grid_dim.z;
+          int num_tbs = dim == 0   ? g.grid_dim.x
+                        : dim == 1 ? g.grid_dim.y
+                                   : g.grid_dim.z;
           offset += fmt(" + blockIdx.$*$*$",
                         (char)"xyz"[dim],
                         dtensor.dim[div_dim] / num_tbs,
@@ -361,9 +360,9 @@ CustomOPTranspileResult
       bool is_dtensor_offset_divisible = true;
       for (int dim = 0; dim < 3; ++dim) {
         int div_dim = dim == 0 ? omap.x : dim == 1 ? omap.y : omap.z;
-        int num_tbs = dim == 0   ? plan.grid_dim.x
-                      : dim == 1 ? plan.grid_dim.y
-                                 : plan.grid_dim.z;
+        int num_tbs = dim == 0   ? g.grid_dim.x
+                      : dim == 1 ? g.grid_dim.y
+                                 : g.grid_dim.z;
         if (num_tbs > 1) {
           // The output tensor MUST be divided along this dimension, as stated
           // in the paper
@@ -881,16 +880,16 @@ CustomOPTranspileResult
   }
 
   // Declare the for loop
-  // TODO(intlsy) Remove the loop when `plan.forloop_range` is 1
+  // TODO(intlsy) Remove the loop when `g.forloop_range` is 1
   // TODO(intlsy) Loop unrolling
-  assert(plan.forloop_range >= 1);
+  assert(g.forloop_range >= 1);
   code.e("// The main loop");
-  code.e("for (int for_idx = 0; for_idx < $; for_idx++) {", plan.forloop_range);
+  code.e("for (int for_idx = 0; for_idx < $; for_idx++) {", g.forloop_range);
 
   if (!async_copy_input_ops.empty()) {
     code.e("{");
     code.e("// Issue async copies for the next round");
-    code.e("if (for_idx+1 != $) {", plan.forloop_range);
+    code.e("if (for_idx+1 != $) {", g.forloop_range);
     for (tb::TBInputOp const* input_op : async_copy_input_ops) {
       assert(input_op->forloop_dim >= 0);
       kn::DTensor const &dtensor = input_op->dtensor;
