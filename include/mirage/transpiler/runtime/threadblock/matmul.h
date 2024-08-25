@@ -351,8 +351,45 @@ public:
   using R2STiledCopyC =
       decltype(make_tiled_copy_C(R2STiledCopyCAtom{}, TiledMMA{}));
 
+  static __device__ __forceinline__ auto
+    get_mma_rC(
+      int thread_idx
+    ) {
+    // Make a fake tensor
+    Tensor sC_fake = make_tensor(make_smem_ptr((half_t*)nullptr), SmemLayoutC{});
+    TiledMMA tiled_mma;
+    ThrMMA thr_mma = tiled_mma.get_slice(thread_idx);
+    Tensor mma_rC =
+        thr_mma.partition_fragment_C(sC_fake(_, _, _0{})); // (MMA, MMA_M, MMA_N)
+    clear(mma_rC);
+    return mma_rC;
+  }
+
+  template<class AccumRegFrag>
   static __device__ __forceinline__ void
-      run(T *__restrict__ c_ptr,
+    write_back_mma_rC(
+      T* __restrict__ c_ptr,
+      const AccumRegFrag& mma_rC,
+      int thread_idx
+    ) {
+    Tensor sC = make_tensor(make_smem_ptr(c_ptr), SmemLayoutC{}); // [M, N, B]
+    R2STiledCopyC r2s_tiled_copy_C;
+    ThrCopy r2s_tiled_copy_C_thr = r2s_tiled_copy_C.get_slice(thread_idx);
+    Tensor r2s_rC =
+        r2s_tiled_copy_C_thr.retile_S(mma_rC); // (R2S, R2S_M, R2S_N)
+    Tensor r2s_sC =
+        r2s_tiled_copy_C_thr.partition_D(sC); // (R2S, R2S_M, R2S_N, B)
+    r2s_copy_with_oob_protection<T,
+                                M,
+                                N,
+                                NUM_EXPS_BEFORE_STORE,
+                                IS_STORE_ACCUM>(
+        r2s_tiled_copy_C, r2s_rC, r2s_sC(_, _, _, _0{}), thread_idx);
+  }
+
+  template<typename MMARc>
+  static __device__ __forceinline__ void
+      run(MMARc &mma_rC,
           T *__restrict__ a_ptr, // Do not define a_ptr and b_ptr as const here,
                                  // since we may pad remaining part on the
                                  // k-axis with 0
@@ -363,9 +400,20 @@ public:
       return;
     }
 
-    Tensor sA = make_tensor(make_smem_ptr(a_ptr), SmemLayoutA{}); // [M, K, B]
-    Tensor sB = make_tensor(make_smem_ptr(b_ptr), SmemLayoutB{}); // [N, K, B]
-    Tensor sC = make_tensor(make_smem_ptr(c_ptr), SmemLayoutC{}); // [M, N, B]
+    // Tensor sA = make_tensor(make_smem_ptr(a_ptr), tile_to_shape(
+    //   Layout<Shape<_8, _8>, Stride<_8, _1>>{},
+    //   SmemLayoutA{}
+    // )); // [M, K, B]
+    Tensor sA = make_tensor(make_smem_ptr(a_ptr), SmemLayoutA{});
+    // Tensor sB = make_tensor(make_smem_ptr(b_ptr), tile_to_shape(
+    //   Layout<Shape<_8, _8>, Stride<_8, _1>>{},
+    //   SmemLayoutB{}
+    // )); // [N, K, B]
+    Tensor sB = make_tensor(make_smem_ptr(b_ptr), SmemLayoutB{});
+    // Tensor sC = make_tensor(make_smem_ptr(c_ptr), tile_to_shape(
+    //   Layout<Shape<_8, _8>, Stride<_8, _1>>{},
+    //   SmemLayoutC{}
+    // )); // [M, N, B]
     CUTE_STATIC_ASSERT_V(rank(sA) == _3{});
 
     if constexpr (K{} % _8{} != _0{}) {
@@ -390,9 +438,7 @@ public:
         thr_mma.partition_fragment_A(sA(_, _, _0{})); // (MMA, MMA_M, MMA_K)
     Tensor mma_rB =
         thr_mma.partition_fragment_B(sB(_, _, _0{})); // (MMA, MMA_N, MMA_K)
-    Tensor mma_rC =
-        thr_mma.partition_fragment_C(sC(_, _, _0{})); // (MMA, MMA_M, MMA_N)
-    clear(mma_rC);
+
 
     S2RTiledCopyA s2r_tiled_copy_A;
     ThrCopy s2r_tiled_copy_A_thr = s2r_tiled_copy_A.get_slice(thread_idx);
@@ -407,13 +453,6 @@ public:
         s2r_tiled_copy_B_thr.partition_S(sB); // (S2R, S2R_N, S2R_K, B)
     Tensor s2r_rB =
         s2r_tiled_copy_B_thr.retile_D(mma_rB); // (S2R, S2R_N, S2R_K)
-
-    R2STiledCopyC r2s_tiled_copy_C;
-    ThrCopy r2s_tiled_copy_C_thr = r2s_tiled_copy_C.get_slice(thread_idx);
-    Tensor r2s_rC =
-        r2s_tiled_copy_C_thr.retile_S(mma_rC); // (R2S, R2S_M, R2S_N)
-    Tensor r2s_sC =
-        r2s_tiled_copy_C_thr.partition_D(sC); // (R2S, R2S_M, R2S_N, B)
 
     CUTE_STATIC_ASSERT_V(shape<2>(s2r_rA) == shape<2>(mma_rA));
     CUTE_STATIC_ASSERT_V(shape<2>(s2r_rA) == shape<2>(s2r_rB));
@@ -443,13 +482,6 @@ public:
       }
       gemm(tiled_mma, mma_rC, mma_rA(_, _, i_k), mma_rB(_, _, i_k), mma_rC);
     }
-
-    r2s_copy_with_oob_protection<T,
-                                 M,
-                                 N,
-                                 NUM_EXPS_BEFORE_STORE,
-                                 IS_STORE_ACCUM>(
-        r2s_tiled_copy_C, r2s_rC, r2s_sC(_, _, _, _0{}), thread_idx);
   }
 };
 

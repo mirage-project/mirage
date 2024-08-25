@@ -63,6 +63,7 @@ private:
   // Fusion metadata
   std::unordered_map<tb::TBOperator const *, bool> is_fused_with_prev;
   std::unordered_map<tb::TBOperator const *, bool> is_fused_with_next;
+  std::unordered_map<tb::TBOperator const *, tb::TBOperator const *> chain_leading_op;  // op |-> leading op
   std::unordered_map<tb::TBOperator const *,
                      std::vector<tb::TBOperator const *>>
       fusion_chain; // Leading op |-> [fused ops]

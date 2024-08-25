@@ -9,6 +9,12 @@ namespace transpiler {
 
 enum class tb_sched_node_t { OPERATOR, SYNCTHREADS };
 
+// Metadata associated with a TBSchedNode
+struct TBSchedNodeMeta {
+  // Metadata associated with this sched node
+  bool is_accum_in_reg; // Whether or not to put the forloop accumulator in register files, if there is any TB_FORLOOP_ACCUM_OP
+};
+
 // A "node" in the final schedule
 // A "schedule" is the execution order of all operators in a threadblock
 // graph. It's important since it affects the number of `__syncthreads()` and
@@ -18,8 +24,10 @@ public:
   tb_sched_node_t type;
 
   // The following fields are only valid if type == OPERATOR
-  // We use a vector here since we may perform operator fusion
+  // We use a vector here since we may perform operator fusion (threadblock-level data reuse)
   std::vector<tb::TBOperator const *> ops;
+
+  TBSchedNodeMeta meta;
 };
 
 // A schedule of a threadblock graph

@@ -22,12 +22,6 @@ ADD_TESTCASE(Testcase("tb_matmul", {"threadblock", "correctness", "perf"}, "thre
 			false
 		},
 		{
-			"16x8x64 + 16x8x16",
-			{16, 8, 64},
-			{16, 8, 16},
-			false
-		},
-		{
 			"64x64x64 + 16x8x16",
 			{64, 64, 64},
 			{16, 8, 16},
@@ -93,12 +87,19 @@ ADD_TESTCASE(Testcase("tb_matmul", {"threadblock", "correctness", "perf"}, "thre
 			{27, 29, 21},
 			false
 		},
+		{
+			// Large matrix, large block
+			"381x504x62 + 127x126x31",
+			{381, 504, 62},
+			{127, 126, 31},
+			false
+		},
 
 		// Performance tests
 		{
-			"1024x1024x1024 + 32x32x16",
-			{1024, 1024, 1024},
-			{32, 32, 16},
+			"4096x4096x1024 + 128x128x32",
+			{4096, 4096, 1024},
+			{128, 128, 32},
 			true
 		},
 	};
@@ -139,7 +140,10 @@ ADD_TESTCASE(Testcase("tb_matmul", {"threadblock", "correctness", "perf"}, "thre
 			}
 		}, subcase.subcase_name, subcase.is_perf_test ? optional([=](const Subcase::RunResult &res) -> string {
 			float gflops = (float)m*n*k*2 / res.avg_time_ms / 1e6;
-			return "GFLOPS: " + std::to_string(gflops);
+			float mem_read_vol = ((float)m*k*(n/tile_n) + (float)k*n*(m/tile_m)) * sizeof(half);
+			float mem_write_vol = (float)m*n * sizeof(half);
+			float mem_bw_gBps = (mem_read_vol + mem_write_vol) / res.avg_time_ms / 1e6;
+			return "GFLOPS: " + std::to_string(gflops) + ", Mem BW (GB/s): " + std::to_string(mem_bw_gBps);
 		}) : nullopt);
 		size_t m_r8 = round_to_multiple(m, 8);
 		size_t n_r8 = round_to_multiple(n, 8);

@@ -13,9 +13,32 @@ struct OpMeta {
   int level;
   int fuse_chain_idx; // For grouping fused operators together when sorting
   int pos_in_fuse_chain;
+
+  // Metadata for generating the final TBSchedNodeMeta
+  bool is_accum_in_reg;
 };
 
-// A helper. See code below
+// Given all OpMetas for OPs on a fusion chain, generate its TBSchedNodeMeta
+static TBSchedNodeMeta get_tb_sched_node_meta(
+  vector<std::pair<tb::TBOperator const *, OpMeta>> &ops_on_chain
+) {
+  // Only place the accumulator fragment in registers when
+  // 1. The last operator is a FORLOOP_ACCUM_NO_RED_OP and it is in registers
+  // 2. The first operator is a MATMUL_OP and there is no other operator (e.g. exp)
+  // In the future may add more rules
+  bool is_accum_in_reg = ops_on_chain.back().first->op_type == type::TB_FORLOOP_ACCUM_NO_RED_OP &&
+                          ops_on_chain.back().second.is_accum_in_reg && 
+                          ops_on_chain.at(0).first->op_type == type::TB_MATMUL_OP &&
+                          ops_on_chain.size() == 2;
+  return {
+    is_accum_in_reg
+  };
+}
+
+// A helper function for generating TBSched
+// First, the caller should prepare a list of `OpMetas`. This function will sort
+// them to fusion chains, generate TBSchedNoteMetas, and finally generate the
+// TBSchedNodes.
 static std::vector<TBSchedNode>
     ops2sched(vector<std::pair<tb::TBOperator const *, OpMeta>> &ops,
               std::function<bool(tb::TBOperator const *)> const &filter) {
@@ -52,7 +75,9 @@ static std::vector<TBSchedNode>
     for (int i = cur_op_idx; i < nxt_op_idx; i++) {
       fused_ops.push_back(ops[i].first);
     }
-    res.push_back({tb_sched_node_t::OPERATOR, fused_ops});
+    auto cur_fusion_chain = vector<std::pair<tb::TBOperator const *, OpMeta>>(
+        ops.begin() + cur_op_idx, ops.begin() + nxt_op_idx);
+    res.push_back({tb_sched_node_t::OPERATOR, fused_ops, get_tb_sched_node_meta(cur_fusion_chain)});
     cur_op_idx = nxt_op_idx;
   }
   return res;
@@ -85,6 +110,7 @@ TBSched Transpiler::get_threadblock_schedule(tb::Graph const &tb_graph) {
 
   // Generate `loop_nodes`
   {
+    size_t per_thread_accum_numel_tot = 0;
     int next_fuse_chain_idx = 0;
     std::unordered_map<tb::TBOperator const *, OpMeta> op2meta;
     // Calculate the level of each operator
@@ -114,6 +140,24 @@ TBSched Transpiler::get_threadblock_schedule(tb::Graph const &tb_graph) {
             res = std::max(res, op2meta[input_op].level);
           }
           op2meta[op] = {res + 1, next_fuse_chain_idx++, 0};
+        }
+      }
+      if (op->op_type == type::TB_FORLOOP_ACCUM_NO_RED_OP) {
+        // Decide whether or not to put the forloop accumulator in register files
+        size_t accum_numel = op->output_tensors.at(0).num_elements();
+        size_t num_thrs = tb_graph.block_dim.x * tb_graph.block_dim.y *
+                          tb_graph.block_dim.z;
+        size_t per_thr_accum_numel = accum_numel / num_thrs;
+        // Use a simple heuristic to decide whether or not to put the forloop
+        // accumulator in register files
+        // Every thread can have at most 255 32-bit registers (according to
+        // https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#features-and-technical-specifications)
+        // So we allow accumulators to take up to 192 registers
+        if (per_thread_accum_numel_tot + per_thr_accum_numel <= 192) {
+          op2meta[op].is_accum_in_reg = true;
+          per_thread_accum_numel_tot += per_thr_accum_numel;
+        } else {
+          op2meta[op].is_accum_in_reg = false;
         }
       }
     }

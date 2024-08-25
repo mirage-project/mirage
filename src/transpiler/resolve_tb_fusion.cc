@@ -58,13 +58,13 @@ void Transpiler::resolve_tb_fusion() {
       }
     }
     // Construct `fusion_chain`
-    for (tb::TBOperator *const op : tb_graph.operators) {
-      if (is_fused_with_next[op]) {
+    for (tb::TBOperator *const last_op : tb_graph.operators) {
+      if (is_fused_with_next[last_op]) {
         continue;
       }
       // Now op is the tail of a fusion chain
       std::vector<tb::TBOperator const *> fused_ops;
-      tb::TBOperator *cur_op = op;
+      tb::TBOperator *cur_op = last_op;
       while (true) {
         fused_ops.push_back(cur_op);
         if (is_fused_with_prev[cur_op]) {
@@ -73,8 +73,12 @@ void Transpiler::resolve_tb_fusion() {
           break;
         }
       }
+      tb::TBOperator *const leading_op = cur_op;
       std::reverse(fused_ops.begin(), fused_ops.end());
-      fusion_chain[fused_ops[0]] = fused_ops;
+      fusion_chain[leading_op] = fused_ops;
+      for (tb::TBOperator const *op : fused_ops) {
+        chain_leading_op[op] = leading_op;
+      } 
     }
   }
 }
