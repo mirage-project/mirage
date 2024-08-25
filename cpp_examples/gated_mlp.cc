@@ -42,28 +42,19 @@ int main(int argc, char **argv) {
 
   std::vector<kernel::DTensor> outputs;
   {
-    threadblock::ExecutionPlan plan;
-    plan.ops.push_back({mirage::type::TB_MATMUL_OP, {{0, 0}, {1, 0}}});
-    plan.ops.push_back({mirage::type::TB_MATMUL_OP, {{0, 0}, {2, 0}}});
-    plan.ops.push_back({mirage::type::TB_FORLOOP_ACCUM_NO_RED_OP, {{3, 0}}});
-    plan.ops.push_back({mirage::type::TB_FORLOOP_ACCUM_NO_RED_OP, {{4, 0}}});
-    plan.ops.push_back({mirage::type::TB_SILU_OP, {{5, 0}}});
-    plan.ops.push_back({mirage::type::TB_MUL_OP, {{7, 0}, {6, 0}}});
-    plan.input_map.push_back({-1, -1, -1});
-    plan.input_map.push_back({1, -1, -1});
-    plan.input_map.push_back({1, -1, -1});
-    plan.input_smem_layouts = {
-        layout::SmemRowMajor,
-        layout::SmemColumnMajor,
-        layout::SmemColumnMajor,
-    };
-    plan.input_forloop_dim = {1, 0, 0};
-    plan.output_map = {1, -1, -1};
-    plan.grid_dim = {64, 1, 1};
-    plan.block_dim = {128, 1, 1};
-    plan.forloop_range = 64;
-    plan.reduction_dimx = 64;
-    outputs = graph.customized({X, W1, W3}, plan);
+    namespace tb = mirage::threadblock;
+    dim3 grid_dim = {64, 1, 1}, block_dim = {128, 1, 1};
+    tb::Graph bgraph(grid_dim, block_dim, 64, 64);
+    tb::STensor bX = bgraph.new_input(X, {-1, -1, -1}, 1, layout::SmemRowMajor);
+    tb::STensor bW1 = bgraph.new_input(W1, {1, -1, -1}, 0, layout::SmemColumnMajor);
+    tb::STensor bW3 = bgraph.new_input(W3, {1, -1, -1}, 0, layout::SmemColumnMajor);
+    tb::STensor bD1 = bgraph.matmul(bX, bW1);
+    tb::STensor bD2 = bgraph.matmul(bX, bW3);
+    bD1 = bgraph.forloop_accum(bD1, type::TB_FORLOOP_ACCUM_NO_RED_OP);
+    bD2 = bgraph.forloop_accum(bD2, type::TB_FORLOOP_ACCUM_NO_RED_OP);
+    bD1 = bgraph.silu(bD1);
+    bgraph.mark_output(bgraph.mul(bD1, bD2), {1, -1, -1}, -1, type::TB_EPILOGUE_NONE);
+    outputs = graph.customized({X, W1, W3}, bgraph);
     assert(outputs.size() == 1);
   }
 

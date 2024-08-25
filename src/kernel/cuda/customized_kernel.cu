@@ -120,7 +120,8 @@ __global__ void customized_kernel_function(
       } else if (op_type == mirage::type::TB_FORLOOP_ACCUM_NO_RED_OP ||
                  op_type == mirage::type::TB_FORLOOP_ACCUM_RED_LD_SUM_OP ||
                  op_type == mirage::type::TB_FORLOOP_ACCUM_RED_LD_MEAN_OP ||
-                 op_type == mirage::type::TB_FORLOOP_ACCUM_RED_LD_RMS_OP) {
+                 op_type == mirage::type::TB_FORLOOP_ACCUM_RED_LD_RMS_OP ||
+                 op_type == mirage::type::TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP) {
         // Do nothing since accum can be performed as an epilogue of
         // the previous operator
         int input_smem_offset, accum_smem_offset;
@@ -433,7 +434,8 @@ __global__ void compute_customizedop_fingerprint(
         case mirage::type::TB_FORLOOP_ACCUM_NO_RED_OP:
         case mirage::type::TB_FORLOOP_ACCUM_RED_LD_SUM_OP:
         case mirage::type::TB_FORLOOP_ACCUM_RED_LD_MEAN_OP:
-        case mirage::type::TB_FORLOOP_ACCUM_RED_LD_RMS_OP: {
+        case mirage::type::TB_FORLOOP_ACCUM_RED_LD_RMS_OP:
+        case mirage::type::TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP: {
           int input_smem_offset, accum_smem_offset;
           int accum_num_elements, per_iter_reduction_degree, inner_range;
           mirage::threadblock::deserialize_forloop_accum_parameters(
@@ -589,6 +591,8 @@ __global__ void compute_customizedop_fingerprint(
           __syncthreads();
           break;
         }
+        case mirage::type::TB_ADD_OP:
+        case mirage::type::TB_MUL_OP:
         case mirage::type::TB_DIV_OP: {
           int3 input1_shape, input2_shape;
           int input1_smem_offset, input2_smem_offset, output_smem_offset;

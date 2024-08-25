@@ -152,7 +152,8 @@ KNCustomizedOp::KNCustomizedOp(Graph *_kgraph,
       case mirage::type::TB_FORLOOP_ACCUM_NO_RED_OP: 
       case mirage::type::TB_FORLOOP_ACCUM_RED_LD_SUM_OP: 
       case mirage::type::TB_FORLOOP_ACCUM_RED_LD_MEAN_OP: 
-      case mirage::type::TB_FORLOOP_ACCUM_RED_LD_RMS_OP: {
+      case mirage::type::TB_FORLOOP_ACCUM_RED_LD_RMS_OP:
+      case mirage::type::TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP: {
         assert(my_inputs.size() == 1);
         bgraph.forloop_accum(my_inputs[0], op.first);
         break;
@@ -186,7 +187,7 @@ KNCustomizedOp::KNCustomizedOp(Graph *_kgraph,
       if (!found) {
         // TODO: change output tensor_shape
         STensor stensor = op->output_tensors[i];
-        DTensor dtensor = bgraph.new_output(stensor,
+        DTensor dtensor = bgraph.mark_output(stensor,
                                             plan.output_map,
                                             plan.output_forloop_dim,
                                             plan.output_epilogue);
@@ -261,7 +262,7 @@ KNCustomizedOp::KNCustomizedOp(mirage::kernel::Graph *_kgraph,
         assert(my_inputs.size() == 1);
         mirage::threadblock::TBOutputOp *output_op =
             static_cast<mirage::threadblock::TBOutputOp *>(op);
-        DTensor dtensor = bgraph.new_output(my_inputs[0],
+        DTensor dtensor = bgraph.mark_output(my_inputs[0],
                                             output_op->output_map,
                                             output_op->forloop_dim,
                                             output_op->epilogue);
@@ -331,7 +332,8 @@ KNCustomizedOp::KNCustomizedOp(mirage::kernel::Graph *_kgraph,
       case mirage::type::TB_FORLOOP_ACCUM_NO_RED_OP:
       case mirage::type::TB_FORLOOP_ACCUM_RED_LD_SUM_OP:
       case mirage::type::TB_FORLOOP_ACCUM_RED_LD_MEAN_OP:
-      case mirage::type::TB_FORLOOP_ACCUM_RED_LD_RMS_OP: {
+      case mirage::type::TB_FORLOOP_ACCUM_RED_LD_RMS_OP:
+      case mirage::type::TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP: {
         assert(my_inputs.size() == 1);
         bgraph.forloop_accum(my_inputs[0], op->op_type);
         break;

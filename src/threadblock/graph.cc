@@ -202,7 +202,7 @@ size_t Graph::calculate_shared_memory_usage(TBOperator *new_op) {
       case mirage::type::TB_FORLOOP_ACCUM_RED_LD_SUM_OP:
       case mirage::type::TB_FORLOOP_ACCUM_RED_LD_MEAN_OP:
       case mirage::type::TB_FORLOOP_ACCUM_RED_LD_RMS_OP:
-      {
+      case mirage::type::TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP: {
         // inplace optimization for elementunary
         // and accumulation
         break;
@@ -443,7 +443,8 @@ NewKernelParams Graph::get_new_kernel_params(bool fingerprint) const {
       case mirage::type::TB_FORLOOP_ACCUM_NO_RED_OP: 
       case mirage::type::TB_FORLOOP_ACCUM_RED_LD_SUM_OP: 
       case mirage::type::TB_FORLOOP_ACCUM_RED_LD_MEAN_OP: 
-      case mirage::type::TB_FORLOOP_ACCUM_RED_LD_RMS_OP: {
+      case mirage::type::TB_FORLOOP_ACCUM_RED_LD_RMS_OP:
+      case mirage::type::TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP: {
         // TODO: currently assuming we only reduce along the last dim
         assert(operators[i]->input_tensors.size() == 1);
         assert(operators[i]->output_tensors.size() == 1);
@@ -456,7 +457,7 @@ NewKernelParams Graph::get_new_kernel_params(bool fingerprint) const {
             assert(input.dim[i] == accum.dim[i] * per_iter_reduction_degree);
           }
         }
-        int inner_range = 1;
+        int inner_range = accum.dim[accum.num_dims-1];
         mirage::threadblock::serialize_forloop_accum_parameters(
             params.parameters,
             params.num_parameters,
