@@ -231,6 +231,19 @@ NewKernelParams Graph::get_new_kernel_params(bool fingerprint) const {
   // and that output savers are the last operators
   for (size_t i = 0; i < operators.size(); i++) {
     params.operator_types[i] = operators[i]->op_type;
+    if (operators[i]->op_type == mirage::type::TB_INPUT_OP) {
+      // We set input saver's operator_after_accum to be false
+      params.operator_after_accum[i] = false;
+    } else {
+      // We set operator_after_accum based on the operator's input
+      // stensors
+      assert(operators[i]->input_tensors.size() > 0);
+      params.operator_after_accum[i] = operators[i]->input_tensors[0].after_accum;
+      // assert consistency between operator's input stensors
+      for (const auto& t : operators[i]->input_tensors) {
+        assert(params.operator_after_accum[i] == t.after_accum);
+      }
+    }
     switch (operators[i]->op_type) {
       case mirage::type::TB_INPUT_OP: {
         TBInputOp *input_op = static_cast<TBInputOp *>(operators[i]);
