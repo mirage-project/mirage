@@ -6,7 +6,7 @@ Superoptimizing Gated MLP
 Introduction
 ============
 
-Gated MLP layers are currently used in large language models (e.g., LLAMA-3). It uses a gating layer to .
+Gated MLP layers are currently used in many large language models (e.g., LLAMA-2, LLAMA-3, and their varients). The computation graph for gated MLP is shown as follows.
 
 .. image:: /tutorials/images/gated_mlp_computation_graph.png
    :alt: Computation Graph for Gated MLP
