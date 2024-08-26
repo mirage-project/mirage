@@ -168,11 +168,14 @@ void from_json(json const &j, Graph &g) {
         guid_mapping[output.guid] = guidO;
         break;
       }
-      case type::KNOperatorType::KN_EXP_OP: {
+      case type::KNOperatorType::KN_EXP_OP: 
+      case type::KNOperatorType::KN_SQUARE_OP: 
+      case type::KNOperatorType::KN_SQRT_OP: 
+      case type::KNOperatorType::KN_SILU_OP: {
         size_t guid, guidO;
         jop.at("input_tensors")[0].at("guid").get_to(guid);
         jop.at("output_tensors")[0].at("guid").get_to(guidO);
-        DTensor const &output = g.exp(get_tensor_from_guid(guid));
+        DTensor const &output = g.elementunary(get_tensor_from_guid(guid), op_type);
         guid_mapping[output.guid] = guidO;
         break;
       }
@@ -217,7 +220,8 @@ void from_json(json const &j, Graph &g) {
         }
         threadblock::ExecutionPlan plan;
         jop.at("plan").get_to(plan);
-        std::vector<DTensor> outputs = g.customized(inputs, plan);
+        threadblock::Graph bgraph(inputs, plan);
+        std::vector<DTensor> outputs = g.customized(inputs, bgraph);
         for (size_t i = 0; i < outputs.size(); ++i) {
           size_t guidO;
           jop.at("output_tensors")[i].at("guid").get_to(guidO);

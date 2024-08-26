@@ -263,14 +263,15 @@ void CudaTranspiler::gen_cuda_code_input_loader(std::string dtensor_name,
 }
 
 void CudaTranspiler::gen_cuda_code_forloop_accum(std::string ind) {
-  int num_elements;
+  int output_num_elements, per_iter_reduction_degree, inner_range;
   int input_smem_offset, accum_smem_offset;
-  mirage::threadblock::deserialize_forloop_accum_parameters(
-      params.parameters,
-      param_idx,
-      num_elements,
-      input_smem_offset,
-      accum_smem_offset);
+  mirage::threadblock::deserialize_forloop_accum_parameters(params.parameters,
+                                                            param_idx,
+                                                            output_num_elements,
+                                                            per_iter_reduction_degree,
+                                                            inner_range,
+                                                            input_smem_offset,
+                                                            accum_smem_offset);
   // FIXME: currently we do nothing for forloop accumulation
   // since we expect it to be implemented as an epilogue of
   // the previous operator
@@ -558,7 +559,10 @@ std::string CudaTranspiler::generate_kernel_code(
         ending << ind.substr(0, ind.length() - 2) << "}\n";
         break;
       }
-      case mirage::type::TB_FORLOOP_ACCUM_OP: {
+      case mirage::type::TB_FORLOOP_ACCUM_NO_RED_OP:
+      case mirage::type::TB_FORLOOP_ACCUM_RED_LD_SUM_OP:
+      case mirage::type::TB_FORLOOP_ACCUM_RED_LD_MEAN_OP:
+      case mirage::type::TB_FORLOOP_ACCUM_RED_LD_RMS_OP: {
         gen_cuda_code_forloop_accum(ind);
         break;
       }
