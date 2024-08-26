@@ -61,7 +61,8 @@ public:
       }
     } else if (type == TB_FORLOOP_ACCUM_RED_LD_SUM_OP ||
                type == TB_FORLOOP_ACCUM_RED_LD_MEAN_OP ||
-               type == TB_FORLOOP_ACCUM_RED_LD_RMS_OP) {
+               type == TB_FORLOOP_ACCUM_RED_LD_RMS_OP ||
+               type == TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP) {
       bool compute_square = false;
       if (type == TB_FORLOOP_ACCUM_RED_LD_RMS_OP) {
         compute_square = true;

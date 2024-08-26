@@ -95,13 +95,6 @@ public:
   DTensor all_reduce(DTensor const &input, bool inplace = true);
   DTensor *all_reduce(DTensor const *input, bool inplace = true);
   KNOperator *create_all_reduce_op(DTensor const &input, bool inplace);
-  // customized operator
-  //std::vector<DTensor>
-  //    customized(std::vector<DTensor> const &inputs,
-  //               mirage::threadblock::ExecutionPlan const &plan);
-  //KNOperator *
-  //    create_customized_op(std::vector<DTensor> const &inputs,
-  //                         mirage::threadblock::ExecutionPlan const &plan);
   std::vector<DTensor> customized(std::vector<DTensor> const &inputs,
                                   mirage::threadblock::Graph const &_graph);
   int customized(std::vector<const DTensor*> inputs,
