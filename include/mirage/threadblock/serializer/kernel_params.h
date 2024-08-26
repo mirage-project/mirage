@@ -32,6 +32,7 @@ struct alignas(16) NewKernelParams {
   mirage::type::TBOperatorType operator_types[MAX_NUM_OPERATORS];
   int64_t dmem_input_offsets[MAX_NUM_DMEM_INPUTS];
   int64_t dmem_output_offsets[MAX_NUM_DMEM_OUTPUTS];
+  bool operator_after_accum[MAX_NUM_OPERATORS];
 };
 
 struct alignas(16) KernelParams {

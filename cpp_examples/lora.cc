@@ -46,28 +46,19 @@ int main(int argc, char **argv) {
 
   std::vector<kernel::DTensor> outputs;
   {
-    threadblock::ExecutionPlan plan;
-    plan.ops.push_back({mirage::type::TB_MATMUL_OP, {{0, 0}, {2, 0}}});
-    plan.ops.push_back({mirage::type::TB_CONCAT_1_OP, {{0, 0}, {4, 0}}});
-    plan.ops.push_back({mirage::type::TB_CONCAT_0_OP, {{1, 0}, {3, 0}}});
-    plan.ops.push_back({mirage::type::TB_MATMUL_OP, {{5, 0}, {6, 0}}});
-    plan.input_map.push_back({-1, -1, -1});
-    plan.input_map.push_back({1, -1, -1});
-    plan.input_map.push_back({-1, -1, -1});
-    plan.input_map.push_back({1, -1, -1});
-    plan.input_smem_layouts = {
-        layout::SmemRowMajor,
-        layout::SmemColumnMajor,
-        layout::SmemColumnMajor,
-        layout::SmemColumnMajor,
-    };
-    plan.input_forloop_dim = {1, 0, 0, -1};
-    plan.output_map = {1, -1, -1};
-    plan.grid_dim = {128, 1, 1};
-    plan.block_dim = {128, 1, 1};
-    plan.forloop_range = 2;
-    plan.reduction_dimx = 64;
-    outputs = graph.customized({X, W, A, B}, plan);
+    dim3 grid_dim = {128, 1, 1}, block_dim = {128, 1, 1};
+    threadblock::Graph bgraph(grid_dim, block_dim, 2, 64);
+    threadblock::STensor bX = bgraph.new_input(X, {-1, -1, -1}, 1, layout::SmemRowMajor);
+    threadblock::STensor bW = bgraph.new_input(W, {1, -1, -1}, 0, layout::SmemRowMajor);
+    threadblock::STensor bA = bgraph.new_input(A, {-1, -1, -1}, 0, layout::SmemRowMajor);
+    threadblock::STensor bB = bgraph.new_input(B, {1, -1, -1}, -1, layout::SmemRowMajor);
+    threadblock::STensor bD = bgraph.matmul(bX, bA);
+    threadblock::STensor bC = bgraph.concat(bX, bD, 1/*dim*/);
+    threadblock::STensor bE = bgraph.concat(bW, bB, 0/*dim*/);
+    threadblock::STensor bO = bgraph.matmul(bC, bE);
+    bO = bgraph.forloop_accum(bO, type::TB_FORLOOP_ACCUM_NO_RED_OP);
+    bgraph.mark_output(bO, {1, -1, -1}, -1, type::TB_EPILOGUE_NONE);
+    outputs = graph.customized({X, W, A, B}, bgraph);
     assert(outputs.size() == 1);
   }
   ProfileResult result;

@@ -15,7 +15,8 @@ int main(int argc, char **argv) {
         {4096, 4096}, type::DT_FLOAT16, layout::DmemColumnMajor);
     kernel::DTensor D1 = ref_graph.matmul(X, W1);
     kernel::DTensor D2 = ref_graph.matmul(X, W3);
-    ref_graph.mul(ref_graph.silu(D1), D2);
+    D1 = ref_graph.silu(D1);
+    ref_graph.mul(D1, D2);
     // ref_graph.add(X, F);
     for (auto const &op : ref_graph.operators) {
       op->fingerprint();
@@ -34,36 +35,26 @@ int main(int argc, char **argv) {
 
   kernel::Graph graph;
   kernel::DTensor X =
-      ref_graph.new_input({16, 4096}, type::DT_FLOAT16, layout::DmemRowMajor);
-  kernel::DTensor W1 = ref_graph.new_input(
+      graph.new_input({16, 4096}, type::DT_FLOAT16, layout::DmemRowMajor);
+  kernel::DTensor W1 = graph.new_input(
       {4096, 4096}, type::DT_FLOAT16, layout::DmemColumnMajor);
-  kernel::DTensor W3 = ref_graph.new_input(
+  kernel::DTensor W3 = graph.new_input(
       {4096, 4096}, type::DT_FLOAT16, layout::DmemColumnMajor);
-
-  std::vector<kernel::DTensor> outputs;
   {
-    threadblock::ExecutionPlan plan;
-    plan.ops.push_back({mirage::type::TB_MATMUL_OP, {{0, 0}, {1, 0}}});
-    plan.ops.push_back({mirage::type::TB_MATMUL_OP, {{0, 0}, {2, 0}}});
-    plan.ops.push_back({mirage::type::TB_FORLOOP_ACCUM_NO_RED_OP, {{3, 0}}});
-    plan.ops.push_back({mirage::type::TB_FORLOOP_ACCUM_NO_RED_OP, {{4, 0}}});
-    plan.ops.push_back({mirage::type::TB_SILU_OP, {{5, 0}}});
-    plan.ops.push_back({mirage::type::TB_MUL_OP, {{7, 0}, {6, 0}}});
-    plan.input_map.push_back({-1, -1, -1});
-    plan.input_map.push_back({1, -1, -1});
-    plan.input_map.push_back({1, -1, -1});
-    plan.input_smem_layouts = {
-        layout::SmemRowMajor,
-        layout::SmemColumnMajor,
-        layout::SmemColumnMajor,
-    };
-    plan.input_forloop_dim = {1, 0, 0};
-    plan.output_map = {1, -1, -1};
-    plan.grid_dim = {64, 1, 1};
-    plan.block_dim = {128, 1, 1};
-    plan.forloop_range = 64;
-    plan.reduction_dimx = 64;
-    outputs = graph.customized({X, W1, W3}, plan);
+    namespace tb = mirage::threadblock;
+    dim3 grid_dim = {64, 1, 1}, block_dim = {128, 1, 1};
+    tb::Graph bgraph(grid_dim, block_dim, 64, 64);
+    tb::STensor bX = bgraph.new_input(X, {-1, -1, -1}, 1, layout::SmemRowMajor);
+    tb::STensor bW1 = bgraph.new_input(W1, {1, -1, -1}, 0, layout::SmemRowMajor);
+    tb::STensor bW3 = bgraph.new_input(W3, {1, -1, -1}, 0, layout::SmemRowMajor);
+    tb::STensor bD1 = bgraph.matmul(bX, bW1);
+    tb::STensor bD2 = bgraph.matmul(bX, bW3);
+    bD1 = bgraph.forloop_accum(bD1, type::TB_FORLOOP_ACCUM_NO_RED_OP);
+    bD2 = bgraph.forloop_accum(bD2, type::TB_FORLOOP_ACCUM_NO_RED_OP);
+    bD1 = bgraph.silu(bD1);
+    tb::STensor bO = bgraph.mul(bD1, bD2);
+    bgraph.mark_output(bO, {1, -1, -1}, -1, type::TB_EPILOGUE_NONE);
+    std::vector<kernel::DTensor> outputs = graph.customized({X, W1, W3}, bgraph);
     assert(outputs.size() == 1);
   }
 

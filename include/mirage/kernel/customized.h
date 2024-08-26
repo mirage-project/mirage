@@ -27,9 +27,6 @@ namespace kernel {
 
 class KNCustomizedOp : public mirage::kernel::KNOperator {
 public:
-  //KNCustomizedOp(Graph *_kgraph,
-  //               std::vector<DTensor> const &inputs,
-  //               mirage::threadblock::ExecutionPlan const &plan);
   KNCustomizedOp(Graph *_kgraph,
                  std::vector<DTensor> const &inputs,
                  mirage::threadblock::Graph const &_graph);
@@ -41,7 +38,6 @@ public:
   operator json() const override;
 
 public:
-  // mirage::threadblock::ExecutionPlan plan;
   mirage::threadblock::Graph bgraph;
 };
 
