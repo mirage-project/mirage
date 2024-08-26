@@ -16,16 +16,17 @@ Low-rank adaption (LoRA) has been widely used to adapt a pre-trained model to sp
 The following code snippet demonstrates superoptimizing LoRA adapters in Mirage.
 
 .. code-block:: Python
+
    import torch
-    graph = mi.new_graph()
-    X = graph.new_input(dims=(16, 256), dtype=mi.float16)
-    W = graph.new_input(dims=(256, 4096), dtype=mi.float16)
-    A = graph.new_input(dims=(256, 16), dtype=mi.float16)
-    B = graph.new_input(dims=(16, 4096), dtype=mi.float16)
-    D = graph.matmul(X, A)
-    E = graph.matmul(D, B)
-    C = graph.matmul(X, W)
-    O = graph.add(C, E)
+   graph = mi.new_graph()
+   X = graph.new_input(dims=(16, 256), dtype=mi.float16)
+   W = graph.new_input(dims=(256, 4096), dtype=mi.float16)
+   A = graph.new_input(dims=(256, 16), dtype=mi.float16)
+   B = graph.new_input(dims=(16, 4096), dtype=mi.float16)
+   D = graph.matmul(X, A)
+   E = graph.matmul(D, B)
+   C = graph.matmul(X, W)
+   O = graph.add(C, E)
 
 
 
