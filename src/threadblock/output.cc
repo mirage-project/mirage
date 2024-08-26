@@ -20,10 +20,10 @@ namespace mirage {
 namespace threadblock {
 
 mirage::kernel::DTensor
-    Graph::new_output(STensor const &stensor,
-                      int3 output_map,
-                      int output_forloop_dim,
-                      mirage::type::TBEpilogueType epilogue) {
+    Graph::mark_output(STensor const &stensor,
+                       int3 output_map,
+                       int output_forloop_dim,
+                       mirage::type::TBEpilogueType epilogue) {
   TBOperator *op =
       create_output_op(stensor, output_map, output_forloop_dim, epilogue);
   assert(op != nullptr);
@@ -35,7 +35,11 @@ TBOperator *Graph::create_output_op(STensor const &stensor,
                                     int3 output_map,
                                     int forloop_dim,
                                     mirage::type::TBEpilogueType epilogue) {
-  assert(stensor.after_accum);
+  // TODO(jiazhihao): this check requires an accum operator before output saver
+  // we should remove the check when generating distributed kernels
+  if (!stensor.after_accum) {
+    return nullptr;
+  }
   TBOutputOp *op =
       new TBOutputOp(this, stensor, output_map, forloop_dim, epilogue);
   return op;

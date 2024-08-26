@@ -562,7 +562,8 @@ std::string CudaTranspiler::generate_kernel_code(
       case mirage::type::TB_FORLOOP_ACCUM_NO_RED_OP:
       case mirage::type::TB_FORLOOP_ACCUM_RED_LD_SUM_OP:
       case mirage::type::TB_FORLOOP_ACCUM_RED_LD_MEAN_OP:
-      case mirage::type::TB_FORLOOP_ACCUM_RED_LD_RMS_OP: {
+      case mirage::type::TB_FORLOOP_ACCUM_RED_LD_RMS_OP:
+      case mirage::type::TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP: {
         gen_cuda_code_forloop_accum(ind);
         break;
       }

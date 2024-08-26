@@ -26,16 +26,7 @@
 namespace mirage {
 namespace kernel {
 
-using mirage::threadblock::ExecutionPlan;
 using mirage::threadblock::STensor;
-
-//std::vector<DTensor> Graph::customized(std::vector<DTensor> const &inputs,
-//                                       ExecutionPlan const &plan) {
-//  KNOperator *op = create_customized_op(inputs, plan);
-//  assert(op != nullptr);
-//  operators.push_back(op);
-//  return op->output_tensors;
-//}
 
 std::vector<DTensor> Graph::customized(std::vector<DTensor> const &inputs,
                                        threadblock::Graph const &bgraph) {
@@ -44,12 +35,6 @@ std::vector<DTensor> Graph::customized(std::vector<DTensor> const &inputs,
   operators.push_back(op);
   return op->output_tensors;
 }
-
-// KNOperator *Graph::create_customized_op(std::vector<DTensor> const &inputs,
-//                                         ExecutionPlan const &plan) {
-//   KNCustomizedOp *op = new KNCustomizedOp(this, inputs, plan);
-//   return op;
-// }
 
 KNOperator *Graph::create_customized_op(std::vector<DTensor> const &inputs,
                                         threadblock::Graph const &_graph) {
@@ -70,146 +55,6 @@ KNOperator *Graph::create_customized_op(std::vector<DTensor> const &inputs,
   KNCustomizedOp *op = new KNCustomizedOp(this, inputs, _graph);
   return op;
 }
-
-#ifdef DEADCODE
-KNCustomizedOp::KNCustomizedOp(Graph *_kgraph,
-                               std::vector<DTensor> const &_inputs,
-                               ExecutionPlan const &_plan)
-    : KNOperator(_kgraph, mirage::type::KN_CUSTOMIZED_OP, _inputs), plan(_plan),
-      bgraph(_plan.grid_dim,
-             _plan.block_dim,
-             _plan.forloop_range,
-             _plan.reduction_dimx) {
-  assert(_inputs.size() == plan.input_map.size());
-  assert(plan.input_forloop_dim.size() == plan.input_map.size());
-  assert(plan.input_smem_layouts.size() == plan.input_map.size());
-  // Step 1: computing input shapes
-  // Step 1: creating a stensor for each input
-  for (size_t i = 0; i < input_tensors.size(); i++) {
-    bgraph.new_input(input_tensors[i],
-                     plan.input_map[i],
-                     plan.input_forloop_dim[i],
-                     plan.input_smem_layouts[i]);
-  }
-
-  auto const &ops = plan.ops;
-  for (auto const &op : ops) {
-    std::vector<STensor> my_inputs;
-    for (auto const &idx : op.second) {
-      // assert(bgraph.tensors.find(idx) != bgraph.tensors.end());
-      // my_inputs.push_back(bgraph.tensors[idx]);
-      assert((int)bgraph.operators.size() > idx.first);
-      assert((int)bgraph.operators[idx.first]->output_tensors.size() >
-             idx.second);
-      my_inputs.push_back(
-          bgraph.operators[idx.first]->output_tensors[idx.second]);
-    }
-    switch (op.first) {
-      case mirage::type::TB_MATMUL_OP: {
-        assert(my_inputs.size() == 2);
-        bgraph.matmul(my_inputs[0], my_inputs[1]);
-        break;
-      }
-      case mirage::type::TB_EXP_OP:
-      case mirage::type::TB_SQUARE_OP:
-      case mirage::type::TB_SQRT_OP:
-      case mirage::type::TB_SILU_OP: {
-        assert(my_inputs.size() == 1);
-        bgraph.elementunary(my_inputs[0], op.first);
-        break;
-      }
-      case mirage::type::TB_ADD_OP:
-      case mirage::type::TB_MUL_OP:
-      case mirage::type::TB_DIV_OP: {
-        assert(my_inputs.size() == 2);
-        bgraph.elementbinary(my_inputs[0], my_inputs[1], op.first);
-        break;
-      }
-      case mirage::type::TB_REDUCTION_0_OP:
-      case mirage::type::TB_REDUCTION_1_OP:
-      case mirage::type::TB_REDUCTION_2_OP: {
-        assert(my_inputs.size() == 1);
-        int reduce_dim = op.first - mirage::type::TB_REDUCTION_0_OP;
-        bgraph.reduction(my_inputs[0], reduce_dim);
-        break;
-      }
-      case mirage::type::TB_REDUCTION_0_TO_DIMX_OP:
-      case mirage::type::TB_REDUCTION_1_TO_DIMX_OP:
-      case mirage::type::TB_REDUCTION_2_TO_DIMX_OP: {
-        assert(my_inputs.size() == 1);
-        int reduce_dim = op.first - mirage::type::TB_REDUCTION_0_TO_DIMX_OP;
-        bgraph.reduction_to_dimx(my_inputs[0], reduce_dim);
-        break;
-      }
-      case mirage::type::TB_CONCAT_0_OP:
-      case mirage::type::TB_CONCAT_1_OP:
-      case mirage::type::TB_CONCAT_2_OP: {
-        assert(my_inputs.size() == 2);
-        int concat_dim = op.first - mirage::type::TB_CONCAT_0_OP;
-        bgraph.concat(my_inputs[0], my_inputs[1], concat_dim);
-        break;
-      }
-      case mirage::type::TB_FORLOOP_ACCUM_NO_RED_OP: 
-      case mirage::type::TB_FORLOOP_ACCUM_RED_LD_SUM_OP: 
-      case mirage::type::TB_FORLOOP_ACCUM_RED_LD_MEAN_OP: 
-      case mirage::type::TB_FORLOOP_ACCUM_RED_LD_RMS_OP: {
-        assert(my_inputs.size() == 1);
-        bgraph.forloop_accum(my_inputs[0], op.first);
-        break;
-      }
-      default: {
-        assert(false && "Unsupported kernel operator");
-      }
-    }
-  }
-
-  assert(output_tensors.size() == 0);
-  // Identify outputs: a tensor is an output if it is not used by
-  // any other operators
-  size_t num_operators = bgraph.operators.size();
-  for (size_t op1_idx = 0; op1_idx < num_operators; op1_idx++) {
-    mirage::threadblock::TBOperator const *op = bgraph.operators[op1_idx];
-    if (op->op_type == mirage::type::TB_INPUT_OP) {
-      // Skip input loader
-      continue;
-    }
-    for (size_t i = 0; i < op->output_tensors.size(); i++) {
-      bool found = false;
-      for (size_t op2_idx = op1_idx + 1; op2_idx < num_operators; op2_idx++) {
-        mirage::threadblock::TBOperator const *op2 = bgraph.operators[op2_idx];
-        for (size_t j = 0; j < op2->input_tensors.size(); j++) {
-          if (op2->input_tensors[j] == op->output_tensors[i]) {
-            found = true;
-          }
-        }
-      }
-      if (!found) {
-        // TODO: change output tensor_shape
-        STensor stensor = op->output_tensors[i];
-        DTensor dtensor = bgraph.new_output(stensor,
-                                            plan.output_map,
-                                            plan.output_forloop_dim,
-                                            plan.output_epilogue);
-        // printf("stensor.offset(%d)\n", stensor.smem_offset);
-        dtensor.owner_op = this;
-        dtensor.owner_ts_idx = static_cast<int>(output_tensors.size());
-        dtensor.guid = DTensor::next_guid++;
-        kgraph->allocate(dtensor);
-        // Update dtensor saved by the output operator
-        {
-          assert(bgraph.operators.back()->op_type ==
-                 mirage::type::TB_OUTPUT_OP);
-          mirage::threadblock::TBOutputOp *output =
-              static_cast<mirage::threadblock::TBOutputOp *>(
-                  bgraph.operators.back());
-          output->dtensor = dtensor;
-        }
-        output_tensors.push_back(dtensor);
-      }
-    }
-  }
-}
-#endif
 
 KNCustomizedOp::KNCustomizedOp(mirage::kernel::Graph *_kgraph,
                                std::vector<DTensor> const &_inputs,
@@ -261,7 +106,7 @@ KNCustomizedOp::KNCustomizedOp(mirage::kernel::Graph *_kgraph,
         assert(my_inputs.size() == 1);
         mirage::threadblock::TBOutputOp *output_op =
             static_cast<mirage::threadblock::TBOutputOp *>(op);
-        DTensor dtensor = bgraph.new_output(my_inputs[0],
+        DTensor dtensor = bgraph.mark_output(my_inputs[0],
                                             output_op->output_map,
                                             output_op->forloop_dim,
                                             output_op->epilogue);
@@ -331,7 +176,8 @@ KNCustomizedOp::KNCustomizedOp(mirage::kernel::Graph *_kgraph,
       case mirage::type::TB_FORLOOP_ACCUM_NO_RED_OP:
       case mirage::type::TB_FORLOOP_ACCUM_RED_LD_SUM_OP:
       case mirage::type::TB_FORLOOP_ACCUM_RED_LD_MEAN_OP:
-      case mirage::type::TB_FORLOOP_ACCUM_RED_LD_RMS_OP: {
+      case mirage::type::TB_FORLOOP_ACCUM_RED_LD_RMS_OP:
+      case mirage::type::TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP: {
         assert(my_inputs.size() == 1);
         bgraph.forloop_accum(my_inputs[0], op->op_type);
         break;

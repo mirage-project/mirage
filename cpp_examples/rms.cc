@@ -34,24 +34,17 @@ int main(int argc, char **argv) {
       {4096, 4096}, type::DT_FLOAT16, layout::DmemRowMajor);
 
   {
-    threadblock::ExecutionPlan plan;
-    plan.ops.push_back({mirage::type::TB_MATMUL_OP, {{0, 0}, {1, 0}}});
-    plan.ops.push_back({mirage::type::TB_FORLOOP_ACCUM_RED_LD_RMS_OP, {{0, 0}}});
-    plan.ops.push_back({mirage::type::TB_FORLOOP_ACCUM_NO_RED_OP, {{2, 0}}});
-    plan.ops.push_back({mirage::type::TB_DIV_OP, {{4, 0}, {3, 0}}});
-    plan.input_map.push_back({-1, -1, -1});
-    plan.input_map.push_back({1, -1, -1});
-    plan.input_smem_layouts = {
-        layout::SmemRowMajor,
-        layout::SmemRowMajor,
-    };
-    plan.input_forloop_dim = {1, 0};
-    plan.output_map = {1, -1, -1};
-    plan.grid_dim = {64, 1, 1};
-    plan.block_dim = {128, 1, 1};
-    plan.forloop_range = 64;
-    plan.reduction_dimx = 64;
-    std::vector<kernel::DTensor> outputs = graph.customized({X, W}, plan);
+    dim3 grid_dim = {64, 1, 1}, block_dim = {128, 1, 1};
+    namespace tb = mirage::threadblock;
+    tb::Graph bgraph(grid_dim, block_dim, 64, 64);
+    tb::STensor bX = bgraph.new_input(X, {-1, -1, -1}, 1, layout::SmemRowMajor);
+    tb::STensor bW = bgraph.new_input(W, {1, -1, -1}, 0, layout::SmemRowMajor);
+    tb::STensor bM = bgraph.matmul(bX, bW);
+    tb::STensor bAccX = bgraph.forloop_accum(bX, type::TB_FORLOOP_ACCUM_RED_LD_RMS_OP);
+    tb::STensor bAccM = bgraph.forloop_accum(bM, type::TB_FORLOOP_ACCUM_NO_RED_OP);
+    tb::STensor bO = bgraph.div(bAccM, bAccX);
+    bgraph.mark_output(bO, {1, -1, -1}, -1, type::TB_EPILOGUE_NONE);
+    std::vector<kernel::DTensor> outputs = graph.customized({X, W}, bgraph);
     assert(outputs.size() == 1);
   }
 

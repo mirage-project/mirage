@@ -202,7 +202,7 @@ size_t Graph::calculate_shared_memory_usage(TBOperator *new_op) {
       case mirage::type::TB_FORLOOP_ACCUM_RED_LD_SUM_OP:
       case mirage::type::TB_FORLOOP_ACCUM_RED_LD_MEAN_OP:
       case mirage::type::TB_FORLOOP_ACCUM_RED_LD_RMS_OP:
-      {
+      case mirage::type::TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP: {
         // inplace optimization for elementunary
         // and accumulation
         break;
@@ -231,6 +231,19 @@ NewKernelParams Graph::get_new_kernel_params(bool fingerprint) const {
   // and that output savers are the last operators
   for (size_t i = 0; i < operators.size(); i++) {
     params.operator_types[i] = operators[i]->op_type;
+    if (operators[i]->op_type == mirage::type::TB_INPUT_OP) {
+      // We set input saver's operator_after_accum to be false
+      params.operator_after_accum[i] = false;
+    } else {
+      // We set operator_after_accum based on the operator's input
+      // stensors
+      assert(operators[i]->input_tensors.size() > 0);
+      params.operator_after_accum[i] = operators[i]->input_tensors[0].after_accum;
+      // assert consistency between operator's input stensors
+      for (const auto& t : operators[i]->input_tensors) {
+        assert(params.operator_after_accum[i] == t.after_accum);
+      }
+    }
     switch (operators[i]->op_type) {
       case mirage::type::TB_INPUT_OP: {
         TBInputOp *input_op = static_cast<TBInputOp *>(operators[i]);
@@ -443,7 +456,8 @@ NewKernelParams Graph::get_new_kernel_params(bool fingerprint) const {
       case mirage::type::TB_FORLOOP_ACCUM_NO_RED_OP: 
       case mirage::type::TB_FORLOOP_ACCUM_RED_LD_SUM_OP: 
       case mirage::type::TB_FORLOOP_ACCUM_RED_LD_MEAN_OP: 
-      case mirage::type::TB_FORLOOP_ACCUM_RED_LD_RMS_OP: {
+      case mirage::type::TB_FORLOOP_ACCUM_RED_LD_RMS_OP:
+      case mirage::type::TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP: {
         // TODO: currently assuming we only reduce along the last dim
         assert(operators[i]->input_tensors.size() == 1);
         assert(operators[i]->output_tensors.size() == 1);
@@ -456,7 +470,7 @@ NewKernelParams Graph::get_new_kernel_params(bool fingerprint) const {
             assert(input.dim[i] == accum.dim[i] * per_iter_reduction_degree);
           }
         }
-        int inner_range = 1;
+        int inner_range = accum.dim[accum.num_dims-1];
         mirage::threadblock::serialize_forloop_accum_parameters(
             params.parameters,
             params.num_parameters,

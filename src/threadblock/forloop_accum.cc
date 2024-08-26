@@ -65,6 +65,11 @@ TBForloopAccumOp::TBForloopAccumOp(Graph *_graph,
       output.dim[output.num_dims-1] = 1;
       break;
     }
+    case mirage::type::TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP: {
+      // Reduce the last dim to reduction_dimx
+      output.dim[output.num_dims-1] = bgraph->reduction_dimx;
+      break;
+    }
     default: {
       assert(false && "Unhandled forloop accum op");
     }
