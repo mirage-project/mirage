@@ -8,7 +8,7 @@ Introduction
 
 Low-rank adaption (LoRA) has been widely used to adapt a pre-trained model to specialized domains and tasks. These LoRA adapters are generally inserted into the linear layers of a model, leveraging the low-rank decomposition concept to construct trainable parameters inserted into the original model weights.
 
-.. image:: /images/lora_kernel_graph.png
+.. image:: /tutorials/images/lora_kernel_graph.png
    :alt: Computation Graph for LoRA
    :align: center
 

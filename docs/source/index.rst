@@ -11,7 +11,7 @@ Getting Started
 ---------------
 
 - Follow the :doc:`instllation <installation>` to install Mirage
-- Take a look at the `tutorials <tutorials/index>` to learn how to use Mirage to superoptimize your DNNs
+- Take a look at the :doc:`tutorials <tutorials/index>` to learn how to use Mirage to superoptimize your DNNs
 
 .. toctree::
    :maxdepth: 1
