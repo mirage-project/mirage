@@ -42,41 +42,29 @@ int main(int argc, char **argv) {
 
   std::vector<kernel::DTensor> outputs;
   {
-    threadblock::ExecutionPlan plan;
-    plan.ops.push_back({mirage::type::TB_MATMUL_OP, {{0, 0}, {1, 0}}});
-    plan.input_map.push_back({1, -1, -1});
-    plan.input_map.push_back({0, -1, -1});
-    plan.input_smem_layouts = {
-        layout::SmemRowMajor,
-        layout::SmemColumnMajor,
-    };
-    plan.input_forloop_dim = {-1, -1};
-    plan.output_map = {1, -1, -1};
-    plan.grid_dim = {32, 1, 1};
-    plan.block_dim = {128, 1, 1};
-    plan.forloop_range = 1;
-    plan.reduction_dimx = 8;
-    outputs = graph.customized({X, A}, plan);
+    dim3 grid_dim = {32, 1, 1}, block_dim = {128, 1, 1};
+    namespace tb = mirage::threadblock;
+    tb::Graph bgraph(grid_dim, block_dim, 1, 8);
+    tb::STensor bX = bgraph.new_input(X, {1, -1, -1}, -1, layout::SmemRowMajor);
+    tb::STensor bA = bgraph.new_input(A, {0, -1, -1}, -1, layout::SmemRowMajor);
+    tb::STensor bO = bgraph.matmul(bX, bA);
+    bO = bgraph.forloop_accum(bO, type::TB_FORLOOP_ACCUM_NO_RED_OP);
+    bgraph.mark_output(bO, {1, -1, -1}, -1, type::TB_EPILOGUE_NONE);
+    outputs = graph.customized({X, A}, bgraph);
     assert(outputs.size() == 1);
   }
   {
-    threadblock::ExecutionPlan plan;
-    plan.ops.push_back({mirage::type::TB_REDUCTION_1_TO_DIMX_OP, {{0, 0}}});
-    plan.ops.push_back({mirage::type::TB_EXP_OP, {{2, 0}}});
-    plan.ops.push_back({mirage::type::TB_MATMUL_OP, {{3, 0}, {1, 0}}});
-    plan.input_map.push_back({-1, -1, -1});
-    plan.input_map.push_back({1, -1, -1});
-    plan.input_smem_layouts = {
-        layout::SmemRowMajor,
-        layout::SmemColumnMajor,
-    };
-    plan.input_forloop_dim = {-1, -1};
-    plan.output_map = {1, -1, -1};
-    plan.grid_dim = {64, 1, 1};
-    plan.block_dim = {128, 1, 1};
-    plan.forloop_range = 1;
-    plan.reduction_dimx = 8;
-    outputs = graph.customized({outputs[0], B}, plan);
+    dim3 grid_dim = {64, 1, 1}, block_dim = {128, 1, 1};
+    namespace tb = mirage::threadblock;
+    tb::Graph bgraph(grid_dim, block_dim, 1, 8);
+    tb::STensor bX = bgraph.new_input(outputs[0], {-1, -1, -1}, -1, layout::SmemRowMajor);
+    tb::STensor bB = bgraph.new_input(B, {1, -1, -1}, -1, layout::SmemRowMajor);
+    tb::STensor bR = bgraph.forloop_accum(bX, type::TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP);
+    bB = bgraph.forloop_accum(bB, type::TB_FORLOOP_ACCUM_NO_RED_OP);
+    tb::STensor bE = bgraph.exp(bR);
+    tb::STensor bO = bgraph.matmul(bE, bB);
+    bgraph.mark_output(bO, {1, -1, -1}, -1, type::TB_EPILOGUE_NONE);
+    outputs = graph.customized({outputs[0], B}, bgraph);
     assert(outputs.size() == 1);
   }
 
