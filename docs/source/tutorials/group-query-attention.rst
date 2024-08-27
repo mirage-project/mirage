@@ -7,6 +7,7 @@ Introduction
 ============
 
 .. code-block:: Python
+
     import torch
     import mirage as mi
     graph = mi.new_kernel_graph()
