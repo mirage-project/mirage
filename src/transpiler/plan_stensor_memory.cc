@@ -241,6 +241,7 @@ AllocResult plan_memory(vector<TensorDecl> const &tensor_decls) {
 
 TBMemoryPlan Transpiler::get_threadblock_memory_plan(tb::Graph const& tb_graph, const TBSched& tb_sched) {
 	using memory_planner::Range, memory_planner::TensorDecl, memory_planner::AllocResult, memory_planner::ALIGNMENT;
+	static constexpr sguid_t PIPELINED_INPUT_BUF_GUID_OFFSET = 10000000;	// Should be larger than the number of STensors
 
 	// Generate all tensor declarations
 	// The i-th pre_loop_nodes is executed during time slice #i
@@ -372,6 +373,20 @@ TBMemoryPlan Transpiler::get_threadblock_memory_plan(tb::Graph const& tb_graph, 
 			tensor_decls.push_back({output_tensor.guid, phy_size, i+2*T, earlist_free_time});
 		}
 	}
+
+	// Buffers for software-pipelined inputs
+	for (int i = 0; i < (int)tb_sched.loop_nodes.size(); ++i) {
+		TBSchedNode const& node = tb_sched.loop_nodes[i];
+		if (node.type != tb_sched_node_t::OPERATOR) {
+			continue;
+		}
+		auto [op, op_meta] = node.ops.front();
+		if (op->op_type == type::TB_INPUT_OP && op_meta.is_pipelined_input) {
+			tb::STensor const& stensor = op->output_tensors.at(0);
+			size_t phy_size = get_phy_size(stensor);
+			tensor_decls.push_back({stensor.guid + PIPELINED_INPUT_BUF_GUID_OFFSET, phy_size, T-1, 2*T});
+		}
+	}
 	
 	// Run the memory planner
 	AllocResult alloc_result = memory_planner::plan_memory(tensor_decls);
@@ -383,6 +398,9 @@ TBMemoryPlan Transpiler::get_threadblock_memory_plan(tb::Graph const& tb_graph, 
 		for (const TBSchedNode &node : Combine(Combine(tb_sched.pre_loop_nodes, tb_sched.loop_nodes), tb_sched.post_loop_nodes)) {
 			if (node.type == tb_sched_node_t::OPERATOR) {
 				num_stensors += (int)node.ops.back().first->output_tensors.size();
+				if (node.ops.front().second.is_pipelined_input) {
+					num_stensors += 1;
+				}
 			}
 		}
 		assert(num_stensors == (int)alloc_result.addrs.size());
@@ -392,10 +410,12 @@ TBMemoryPlan Transpiler::get_threadblock_memory_plan(tb::Graph const& tb_graph, 
 	TBMemoryPlan plan;
 	plan.smem_size = alloc_result.peak_memory_usage;
 	plan.addrs = alloc_result.addrs;
+	plan.pipelined_input_buf_guid_offset = PIPELINED_INPUT_BUF_GUID_OFFSET;
 
 	// Leave the first 16 bytes of the shared memory for matmul operators
+	// TODO(intlsy) Remove this if there is not Matmul op or do not need padding
 	assert(ALIGNMENT >= 16);
-	plan.smem_size += ALIGNMENT;	// This size may continue to incease in transpile_kn_custom_op since we are going to allocate buffer for async copies
+	plan.smem_size += ALIGNMENT;
 	for (auto& kv : plan.addrs) {
 		kv.second += ALIGNMENT;
 	}

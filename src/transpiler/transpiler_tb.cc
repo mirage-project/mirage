@@ -101,13 +101,6 @@ CustomOPTranspileResult
 
   // Get the memory allocation plan
   TBMemoryPlan mem_plan = get_threadblock_memory_plan(g, sched);
-  size_t cur_smem_size = mem_plan.smem_size;  // May increase, e.g. when we allocate buffers for async copy
-  auto allocate_buf = [&](size_t size) {
-    cur_smem_size = round_to_multiple(cur_smem_size, (size_t)16);
-    size_t offset = cur_smem_size;
-    cur_smem_size += size;
-    return offset;
-  };
 
   // Allocate a kernel name
   static int custom_kernel_idx_counter = 0;
@@ -241,12 +234,9 @@ CustomOPTranspileResult
              stensor.guid,
              mov_last_and_get_layout(stensor, stensor_meta, real_innermost_dim),
              dtensor.guid);
-          // Allocate a buffer for the async copy since we are going to pipeline it
-          size_t async_copy_buf_size = stensor_meta.num_phy_elems * type::get_datatype_size(stensor.data_type);
-          size_t async_copy_buf_addr = allocate_buf(async_copy_buf_size);
-          code.e("half_t *stensor$_async_copy_buf = (half_t*)(buf + $);",
+          code.e("half_t *stensor$_async_copy_buf = stensor$_ptr;",
                  stensor.guid,
-                 async_copy_buf_addr);
+                 stensor.guid + mem_plan.pipelined_input_buf_guid_offset);
         }
       }
     }
@@ -935,7 +925,7 @@ CustomOPTranspileResult
   code.e("}"); // kernel
 
   return CustomOPTranspileResult{
-      func_name, cur_smem_size, code.to_string()};
+      func_name, mem_plan.smem_size, code.to_string()};
 }
 
 } // namespace transpiler
