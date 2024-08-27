@@ -13,6 +13,7 @@
  * limitations under the License.
  */
 
+#include "mirage/threadblock/forloop_accum.h"
 #include "mirage/threadblock/operator.h"
 #include "mirage/transpiler/common.h"
 #include "mirage/transpiler/structs.h"
@@ -87,48 +88,6 @@ static string mov_last_and_get_layout(Tensor_T const &tensor,
       mov_to_last(meta.strides, tensor.num_dims, innermost_dim));
 }
 
-// Test whether consecutive `chunk_size` elements in layout A are contiguous in layout B
-// 
-// See docs/transpiler/transpiler.md for more details
-static std::pair<bool, int> can_perform_chunked_copy(
-  int num_dims,
-  const int shape[],
-  const size_t stride_dtensor[],
-  const size_t stride_stensor[],
-  size_t dtype_size
-) {
-  // Check whether the strides are 16B-aligned
-  auto is_strides_aligned_16B = [&](const size_t strides[]) -> bool {
-    size_t alignment = 16 / dtype_size;
-    bool res = true;
-    for (int i = 0; i < num_dims; ++i) {
-      size_t stride = strides[i];
-      res &= (stride % alignment == 0 || stride == 1);
-    }
-    return res;
-  };
-  if(!is_strides_aligned_16B(stride_dtensor)) {
-    return {false, 0};
-  }
-  assert(is_strides_aligned_16B(stride_stensor)); // In our current design, the layout of STensor is always 16B-aligned
-
-  // Check whether the "real innermost dim" is the same
-  auto find_real_innermost_dim = [&](const size_t strides[]) -> int {
-    for (int i = 0; i < num_dims; ++i) {
-      if (strides[i] == 1 && shape[i] != 1) {
-        return i;
-      }
-    }
-    return -1;
-  };
-  int real_innermost_dtensor = find_real_innermost_dim(stride_dtensor);
-  int real_innermost_stensor = find_real_innermost_dim(stride_stensor);
-  // assert(real_innermost_dtensor != -1);  real_innermost_dtensor can be -1 for input tensors
-  assert(real_innermost_stensor != -1);
-  return {real_innermost_dtensor == real_innermost_stensor, real_innermost_stensor};
-}
-
-
 // Transpile a custom KN operator (i.e. a custom block graph) into CUDA code
 // Will return a CustomOPTranspileResult object. See comments in transpiler.h
 // for more details
@@ -195,18 +154,18 @@ CustomOPTranspileResult
 
   // Define G2SCopy for all input STensors
   code.e("// G->S copy atoms");
-  std::unordered_set<tb::TBInputOp const*> async_copy_input_ops;  // A list of input ops that are asynchronously G->S copied
-  for (tb::TBOperator const *op : g.operators) {
-    if (op->op_type == type::TB_INPUT_OP) {
-      tb::TBInputOp const *cur_op = dynamic_cast<tb::TBInputOp const *>(op);
-      tb::TBOperator const *output_op = fusion_chain.at(op).back();
+  std::unordered_set<tb::TBInputOp const*> pipelined_input_ops;  // A list of input ops that are software pipelined (asynchronously G->S copied)
+  for (TBSchedNode const& node : Combine(Combine(sched.pre_loop_nodes, sched.loop_nodes), sched.post_loop_nodes)) {
+    if (node.type == tb_sched_node_t::OPERATOR && node.ops.front().first->op_type == type::TB_INPUT_OP) {
+      auto [_op, op_meta] = node.ops.front();
+      tb::TBInputOp const *cur_op = dynamic_cast<tb::TBInputOp const *>(_op);
+      tb::TBOperator const *output_op = fusion_chain.at(cur_op).back();
       kn::DTensor const &dtensor = cur_op->dtensor;
       tb::STensor const &stensor = output_op->output_tensors.at(0);
       DTensorMeta const &dtensor_meta = dtensor_metas.at(dtensor.guid);
       STensorMeta const &stensor_meta = stensor_metas.at(stensor.guid);
       assert(dtensor.num_dims == stensor.num_dims);
       assert(dtensor.data_type == stensor.data_type);
-      size_t alignment = get_num_elems_in_16B(dtensor.data_type);
 
       code.e("// Copy for G->S: dtensor $ -> stensor $",
              dtensor.guid,
@@ -218,7 +177,6 @@ CustomOPTranspileResult
       // shape of STensor * forloop_range
       string offset = "";
       int3 imap = cur_op->input_map;
-      bool is_dtensor_offset_divisible = true;
       for (int dim = 0; dim < 3; ++dim) {
         int div_dim = dim == 0 ? imap.x : dim == 1 ? imap.y : imap.z;
         if (div_dim >= 0) {
@@ -230,15 +188,7 @@ CustomOPTranspileResult
                         (char)"xyz"[dim],
                         dtensor.dim[div_dim] / num_tbs,
                         dtensor_meta.strides[div_dim]);
-          is_dtensor_offset_divisible &= num_tbs == 1 || (dtensor.dim[div_dim] / num_tbs) % alignment == 0 || dtensor_meta.strides[div_dim] % alignment == 0;
         }
-      }
-      if (cur_op->forloop_dim >= 0) {
-        int forloop_dim = cur_op->forloop_dim;
-        int forloop_range = dtensor.dim[forloop_dim];
-        size_t forloop_dim_stride = dtensor_meta.strides[forloop_dim];
-        int tile_side_len = stensor.dim[forloop_dim];
-        is_dtensor_offset_divisible &= forloop_range == 1 || tile_side_len % alignment == 0 || forloop_dim_stride % alignment == 0;
       }
 
       code.e("const half_t *dtensor$_tile_ptr = dtensor$_ptr $;",
@@ -246,17 +196,9 @@ CustomOPTranspileResult
              dtensor.guid,
              offset);
 
-      auto [use_chunked_copy, real_innermost_dim] = can_perform_chunked_copy(
-          stensor.num_dims,
-          stensor.dim,
-          dtensor_meta.strides,
-          stensor_meta.strides,
-          type::get_datatype_size(dtensor.data_type)
-      );
-      use_chunked_copy &= is_dtensor_offset_divisible;
-      bool use_async_copy =
-          use_chunked_copy && this->config.target_cc >= GPU_CC::A100 &&
-          cur_op->forloop_dim != -1;  // Only use async copy when the input tensor has a forloop_dim
+      bool use_chunked_copy = op_meta.is_chunked_input;
+      int real_innermost_dim = op_meta.chunked_input_real_innermost_dim;
+      bool use_async_copy = op_meta.is_pipelined_input;
 
       // TODO(intlsy) Support swizzled layout
       // TODO(intlsy) Support TMA
@@ -293,7 +235,7 @@ CustomOPTranspileResult
              dtensor.guid);
         } else {
           // Chunked, asynchronous copy
-          async_copy_input_ops.insert(cur_op);
+          pipelined_input_ops.insert(cur_op);
           code.e("using STensor$InputAtom = tb::InputChunkedAsyncCopy<half_t, "
              "$, DTensor$TileLayout, NUM_THREADS>;",
              stensor.guid,
@@ -318,12 +260,12 @@ CustomOPTranspileResult
     // pre_loop_nodes check against this condition
     assert(sched_node.type == tb_sched_node_t::OPERATOR);
     assert(sched_node.ops.size() == 1); // Should not be fused
-    tb::TBOperator const *op = sched_node.ops[0];
+    tb::TBOperator const *op = sched_node.ops[0].first;
     assert(op->op_type == type::TB_INPUT_OP);
     tb::TBInputOp const *cur_op = dynamic_cast<tb::TBInputOp const *>(op);
     tb::STensor const& stensor = cur_op->output_tensors.at(0);
     assert(cur_op->forloop_dim == -1);
-    assert(!async_copy_input_ops.count(cur_op)); // An input op in pre_loop_nodes should not be asynchronously copied since they do not have forloop_dim
+    assert(!pipelined_input_ops.count(cur_op)); // An input op in pre_loop_nodes should not be software pipelined since they do not have forloop_dim
     num_pre_loop_copies += 1;
     code.e("STensor$InputAtom::run(stensor$_ptr, "
            "dtensor$_tile_ptr, "
@@ -336,16 +278,16 @@ CustomOPTranspileResult
 
   // Define S2GCopy for all output STensors
   code.e("// S->G copy atoms");
-  for (tb::TBOperator const *op : g.operators) {
-    if (op->op_type == type::TB_OUTPUT_OP) {
-      tb::TBOutputOp const *cur_op = dynamic_cast<tb::TBOutputOp const *>(op);
+  for (TBSchedNode const& node : Combine(Combine(sched.pre_loop_nodes, sched.loop_nodes), sched.post_loop_nodes)) {
+    if (node.type == tb_sched_node_t::OPERATOR && node.ops.front().first->op_type == type::TB_OUTPUT_OP) {
+      auto [_op, op_meta] = node.ops.front();
+      tb::TBOutputOp const *cur_op = dynamic_cast<tb::TBOutputOp const *>(_op);
       tb::STensor const &stensor = cur_op->input_tensors.at(0);
       kn::DTensor const &dtensor = cur_op->dtensor;
       STensorMeta const &stensor_meta = stensor_metas.at(stensor.guid);
       DTensorMeta const &dtensor_meta = dtensor_metas.at(dtensor.guid);
       assert(dtensor.num_dims == stensor.num_dims);
       assert(dtensor.data_type == stensor.data_type);
-      size_t alignment = get_num_elems_in_16B(dtensor.data_type);
 
       code.e("// Copy for S->G: stensor $ -> dtensor $",
              stensor.guid,
@@ -357,7 +299,6 @@ CustomOPTranspileResult
       // shape of STensor * forloop_range
       string offset = "";
       int3 omap = cur_op->output_map;
-      bool is_dtensor_offset_divisible = true;
       for (int dim = 0; dim < 3; ++dim) {
         int div_dim = dim == 0 ? omap.x : dim == 1 ? omap.y : omap.z;
         int num_tbs = dim == 0   ? g.grid_dim.x
@@ -371,7 +312,6 @@ CustomOPTranspileResult
                         (char)"xyz"[dim],
                         dtensor.dim[div_dim] / num_tbs,
                         dtensor_meta.strides[div_dim]);
-          is_dtensor_offset_divisible &= (dtensor.dim[div_dim] / num_tbs) % alignment == 0 || dtensor_meta.strides[div_dim] % alignment == 0;
         }
       }
       code.e("half_t *dtensor$_tile_ptr = dtensor$_ptr $;",
@@ -379,14 +319,8 @@ CustomOPTranspileResult
              dtensor.guid,
              offset);
 
-      auto [use_chunked_copy, real_innermost_dim] = can_perform_chunked_copy(
-          stensor.num_dims,
-          stensor.dim,
-          dtensor_meta.strides,
-          stensor_meta.strides,
-          type::get_datatype_size(dtensor.data_type)
-      );
-      use_chunked_copy &= is_dtensor_offset_divisible;
+      bool use_chunked_copy = op_meta.is_chunked_output;
+      int real_innermost_dim = op_meta.chunked_output_real_innermost_dim;
 
       if (!use_chunked_copy) {
         int d_innermost_dim = dtensor_meta.innermost_dim;
@@ -423,9 +357,15 @@ CustomOPTranspileResult
 
   // Clear all accumulators
   int num_clear_accums = 0;
-  for (tb::TBOperator const *op : g.operators) {
-    if (op->op_type == type::TB_FORLOOP_ACCUM_NO_RED_OP) {
-      tb::STensor const &accum = op->output_tensors.at(0);
+  for (TBSchedNode const& node : sched.loop_nodes) {
+    if (node.type != tb_sched_node_t::OPERATOR) {
+      continue;
+    }
+    auto [last_op, last_op_meta] = node.ops.back();
+    if (last_op->op_type == type::TB_FORLOOP_ACCUM_NO_RED_OP && 
+        !last_op_meta.is_accum_in_reg) {
+      tb::TBForloopAccumOp const* accum_op = dynamic_cast<tb::TBForloopAccumOp const*>(last_op);
+      tb::STensor const &accum = accum_op->output_tensors.at(0);
       STensorMeta const &accum_meta = stensor_metas.at(accum.guid);
       size_t num_elems = 0;
       for (int i = 0; i < accum.num_dims; ++i) {
@@ -440,8 +380,139 @@ CustomOPTranspileResult
   }
   code.e("");
 
+  // Pre-define all matmul ops and allocate accumulators (if needed)
+  // Since we may want to place the accumulator of a matmul op in register files,
+  // we may need to allocate the accumulator in advance, and that requires us to
+  // define the kernel (`using Matmul$Kernel = ...`) in advance
+  for (TBSchedNode const& node : Combine(sched.loop_nodes, sched.post_loop_nodes)) {
+    if (node.type == tb_sched_node_t::OPERATOR && node.ops.front().first->op_type == type::TB_MATMUL_OP) {
+      tb::TBOperator const* op = node.ops.front().first;
+      tb::TBOperator const* output_op = node.ops.back().first;
+      tb::STensor const &input0 = op->input_tensors.at(0);
+      tb::STensor const &input1 = op->input_tensors.at(1);
+      tb::STensor const &output = output_op->output_tensors.at(0);
+      STensorMeta meta0 = stensor_metas.at(input0.guid);
+      STensorMeta meta1 = stensor_metas.at(input1.guid);
+      STensorMeta meta2 = stensor_metas.at(output.guid);
+      int num_dims = input0.num_dims;
+      assert(input1.num_dims == num_dims && output.num_dims == num_dims);
+      int m = output.dim[num_dims - 2];
+      int n = output.dim[num_dims - 1];
+      int k = input0.dim[num_dims - 1];
+      assert(input0.dim[num_dims - 2] == m &&
+              input0.dim[num_dims - 1] == k);
+      assert(input1.dim[num_dims - 2] == k &&
+              input1.dim[num_dims - 1] == n);
+
+      // Pick up MMA atom
+      // TODO(intlsy) May calculate AB via (B^T A^T)^T when M is relatively
+      // small
+      string mma_atom_str;
+      std::tuple<int, int, int> mma_atom_mnk;
+      int mma_atom_num_threads;
+      if (GPU_CC::A100 <= config.target_cc &&
+          config.target_cc < GPU_CC::H100) {
+        if (k <= 8) {
+          mma_atom_str = "SM80_16x8x8_F16F16F16F16_TN";
+          mma_atom_mnk = {16, 8, 8};
+          mma_atom_num_threads = 32;
+        } else {
+          mma_atom_str = "SM80_16x8x16_F16F16F16F16_TN";
+          mma_atom_mnk = {16, 8, 16};
+          mma_atom_num_threads = 32;
+        }
+      } else {
+        // TODO(intlsy): Support more architectures
+        assert(0 && "Unsupported GPU Architecture");
+      }
+      auto [mma_atom_m, mma_atom_n, mma_atom_k] = mma_atom_mnk;
+
+      // Pick up TiledMMAThrLayout
+      // The algorithm is documented in `docs/transpiler/transpiler.md`
+      // TODO(intlsy) Update this algo to be more friendly to small matrix
+      // by dropping some threads
+      assert(num_threads % mma_atom_num_threads == 0);
+      int max_num_tgs =
+          num_threads / mma_atom_num_threads; // tg = thread group
+      float best_score = -1.0f;
+      int best_num_tg_m = -1, best_num_tg_n = -1;
+      for (int num_tg_m = 1; num_tg_m <= max_num_tgs; ++num_tg_m) {
+        for (int num_tg_n = 1; num_tg_m * num_tg_n <= max_num_tgs;
+              ++num_tg_n) {
+          int tiled_mma_m = mma_atom_m * num_tg_m;
+          int tiled_mma_n = mma_atom_n * num_tg_n;
+          int num_tiles_m = ceil_div(m, tiled_mma_m);
+          int num_tiles_n = ceil_div(n, tiled_mma_n);
+          int64_t data_moved_A =
+              ((int64_t)num_tiles_m * tiled_mma_m) * k * num_tg_n;
+          int64_t data_moved_B =
+              ((int64_t)num_tiles_n * tiled_mma_n) * k * num_tg_m;
+          int64_t data_moved = data_moved_A + data_moved_B;
+          float score = (1.0f / data_moved) *
+                        (num_tg_m * num_tg_n / (float)max_num_tgs);
+          if (score > best_score) {
+            best_score = score;
+            best_num_tg_m = num_tg_m;
+            best_num_tg_n = num_tg_n;
+          }
+        }
+      }
+
+      bool is_ldmatrix_avail = config.target_cc >= GPU_CC::T4;
+      bool is_stmatrix_avail = config.target_cc >= GPU_CC::H100;
+
+      int num_exps_before_store =
+          std::count_if(node.ops.begin(),
+                        node.ops.end(),
+                        [](auto &op_and_meta) {
+                          return op_and_meta.first->op_type == type::TB_EXP_OP;
+                        });
+      bool is_store_accum =
+          node.ops.back().first->op_type == type::TB_FORLOOP_ACCUM_NO_RED_OP;
+      bool is_accum_in_reg = node.ops.back().second.is_accum_in_reg;
+
+      code.e("using LayoutA = $;", get_cute_layout(input0, meta0));
+      code.e("using LayoutB = $;", get_cute_layout(input1, meta1));
+      code.e("using LayoutC = $;", get_cute_layout(output, meta2));
+
+      code.e("using Matmul$Kernel = tb::Matmul<half_t, $, Layout<Shape<Int<$>, "
+              "Int<$>, _1>>, $, $, LayoutA, LayoutB, LayoutC, NUM_THREADS, "
+              "$, $>;",
+              output.guid,
+              mma_atom_str,
+              best_num_tg_m,
+              best_num_tg_n,
+              is_ldmatrix_avail,
+              is_stmatrix_avail,
+              num_exps_before_store,
+              is_accum_in_reg ? false : is_store_accum);
+      // Allocate accumulators in register files (if needed)
+      if (is_accum_in_reg) {
+        code.e("auto matmul_$_accum = Matmul$Kernel::get_mma_rC(thread_idx);", output.guid, output.guid);
+      }
+      code.e("");
+    }
+  }
+
   if (num_pre_loop_copies > 0 || num_clear_accums > 0) {
     code.e("__syncthreads();");
+    code.e("");
+  }
+
+  // Launch async input operations for all async inputs
+  if (!pipelined_input_ops.empty()) {
+    code.e("{");
+    for (tb::TBInputOp const* input_op : pipelined_input_ops) {
+      kn::DTensor const &dtensor = input_op->dtensor;
+      tb::STensor const &output = input_op->output_tensors.at(0);
+      assert(input_op->forloop_dim >= 0);
+      code.e("STensor$InputAtom::run(stensor$_async_copy_buf, dtensor$_tile_ptr, thread_idx);",
+                 output.guid,
+                 output.guid,
+                 dtensor.guid);
+    }
+    code.e("cute::cp_async_fence();");
+    code.e("}");
     code.e("");
   }
 
@@ -449,7 +520,7 @@ CustomOPTranspileResult
   // epilogue Will automatically ignore the first operator in the `chain`
   // argument
   auto transpile_fusion_epilogue =
-      [&](std::vector<tb::TBOperator const *> const &chain) -> string {
+      [&](std::vector<std::pair<tb::TBOperator const *, TBSchedOpMeta>> const &chain) -> string {
     size_t chain_size = chain.size();
     if (chain_size == 1) {
       // Not fused with anything
@@ -458,7 +529,7 @@ CustomOPTranspileResult
     // Deal with the last operator
     string res = "tb::EpilogueStore<half_t>";
     for (size_t i = chain_size - 1; i >= 1; --i) {
-      tb::TBOperator const *cur_op = chain[i];
+      tb::TBOperator const *cur_op = chain[i].first;
       if (cur_op->op_type == type::TB_FORLOOP_ACCUM_NO_RED_OP) {
         // Can only occur as the last operator in the chain
         assert(i == chain_size - 1);
@@ -479,9 +550,9 @@ CustomOPTranspileResult
     if (sched_node.type == tb_sched_node_t::SYNCTHREADS) {
       code.e("__syncthreads();");
     } else {
-      tb::TBOperator const *op = sched_node.ops[0];
-      tb::TBOperator const *output_op = fusion_chain.at(op).back();
-      assert(output_op == sched_node.ops.back());
+      auto [op, first_op_meta] = sched_node.ops.front();
+      auto [output_op, output_op_meta] = sched_node.ops.back();
+      assert(output_op == fusion_chain.at(op).back());
       std::string op_type_str;
       to_json(op_type_str, op->op_type);
       code.e("{");
@@ -499,7 +570,7 @@ CustomOPTranspileResult
           int tile_side_len = output.dim[cur_op->forloop_dim];
           size_t forloop_dim_stride =
               dtensor_metas.at(dtensor.guid).strides[cur_op->forloop_dim];
-          bool is_async_copy = async_copy_input_ops.count(cur_op);
+          bool is_async_copy = pipelined_input_ops.count(cur_op);
           assert(!is_async_copy); // Async copies should be proceeded separately
           code.e("STensor$InputAtom::run(stensor$_ptr, dtensor$_tile_ptr + "
                 "$*for_idx, thread_idx);",
@@ -517,6 +588,7 @@ CustomOPTranspileResult
           assert(!is_in_loop);
           assert(cur_op->forloop_dim == -1);
           if (cur_op->forloop_dim >= 0) {
+            assert(0);
 #ifdef DEADCODE
             // For output DTensor that has a forloop_dim, copy it
             kn::DTensor const &dtensor = cur_op->dtensor;
@@ -541,111 +613,22 @@ CustomOPTranspileResult
                    stensor.guid);
           }
           break;
-        };
+        }
         case type::TB_MATMUL_OP: {
           tb::STensor const &input0 = op->input_tensors.at(0);
           tb::STensor const &input1 = op->input_tensors.at(1);
           tb::STensor const &output = output_op->output_tensors.at(0);
-          STensorMeta meta0 = stensor_metas.at(input0.guid);
-          STensorMeta meta1 = stensor_metas.at(input1.guid);
-          STensorMeta meta2 = stensor_metas.at(output.guid);
-          int num_dims = input0.num_dims;
-          assert(input1.num_dims == num_dims && output.num_dims == num_dims);
-          int m = output.dim[num_dims - 2];
-          int n = output.dim[num_dims - 1];
-          int k = input0.dim[num_dims - 1];
-          assert(input0.dim[num_dims - 2] == m &&
-                 input0.dim[num_dims - 1] == k);
-          assert(input1.dim[num_dims - 2] == k &&
-                 input1.dim[num_dims - 1] == n);
-
-          // Pick up MMA atom
-          // TODO(intlsy) May calculate AB via (B^T A^T)^T when M is relatively
-          // small
-          string mma_atom_str;
-          std::tuple<int, int, int> mma_atom_mnk;
-          int mma_atom_num_threads;
-          if (GPU_CC::A100 <= config.target_cc &&
-              config.target_cc < GPU_CC::H100) {
-            if (k <= 8) {
-              mma_atom_str = "SM80_16x8x8_F16F16F16F16_TN";
-              mma_atom_mnk = {16, 8, 8};
-              mma_atom_num_threads = 32;
-            } else {
-              mma_atom_str = "SM80_16x8x16_F16F16F16F16_TN";
-              mma_atom_mnk = {16, 8, 16};
-              mma_atom_num_threads = 32;
-            }
+          sguid_t output_guid = output.guid;
+          if (output_op_meta.is_accum_in_reg) {
+            // Accumulator is in register
+            code.e("Matmul$Kernel::run(matmul_$_accum, stensor$_ptr, stensor$_ptr, (char*)(buf+0), thread_idx);", output_guid, output_guid, input0.guid, input1.guid);
           } else {
-            // TODO(intlsy): Support more architectures
-            assert(0 && "Unsupported GPU Architecture");
+            code.e("auto mma_rC = Matmul$Kernel::get_mma_rC(thread_idx);", output_guid);
+            code.e("Matmul$Kernel::run(mma_rC, stensor$_ptr, stensor$_ptr, (char*)(buf+0), thread_idx);", output_guid, input0.guid, input1.guid);
+            code.e("Matmul$Kernel::write_back_mma_rC(stensor$_ptr, mma_rC, thread_idx);", output_guid, output_guid);
           }
-          auto [mma_atom_m, mma_atom_n, mma_atom_k] = mma_atom_mnk;
-
-          // Pick up TiledMMAThrLayout
-          // The algorithm is documented in `docs/transpiler/transpiler.md`
-          // TODO(intlsy) Update this algo to be more friendly to small matrix
-          // by dropping some threads
-          assert(num_threads % mma_atom_num_threads == 0);
-          int max_num_tgs =
-              num_threads / mma_atom_num_threads; // tg = thread group
-          float best_score = -1.0f;
-          int best_num_tg_m = -1, best_num_tg_n = -1;
-          for (int num_tg_m = 1; num_tg_m <= max_num_tgs; ++num_tg_m) {
-            for (int num_tg_n = 1; num_tg_m * num_tg_n <= max_num_tgs;
-                 ++num_tg_n) {
-              int tiled_mma_m = mma_atom_m * num_tg_m;
-              int tiled_mma_n = mma_atom_n * num_tg_n;
-              int num_tiles_m = ceil_div(m, tiled_mma_m);
-              int num_tiles_n = ceil_div(n, tiled_mma_n);
-              int64_t data_moved_A =
-                  ((int64_t)num_tiles_m * tiled_mma_m) * k * num_tg_n;
-              int64_t data_moved_B =
-                  ((int64_t)num_tiles_n * tiled_mma_n) * k * num_tg_m;
-              int64_t data_moved = data_moved_A + data_moved_B;
-              float score = (1.0f / data_moved) *
-                            (num_tg_m * num_tg_n / (float)max_num_tgs);
-              if (score > best_score) {
-                best_score = score;
-                best_num_tg_m = num_tg_m;
-                best_num_tg_n = num_tg_n;
-              }
-            }
-          }
-
-          bool is_ldmatrix_avail = config.target_cc >= GPU_CC::T4;
-          bool is_stmatrix_avail = config.target_cc >= GPU_CC::H100;
-
-          int num_exps_before_store =
-              std::count_if(sched_node.ops.begin(),
-                            sched_node.ops.end(),
-                            [](tb::TBOperator const *op) {
-                              return op->op_type == type::TB_EXP_OP;
-                            });
-          bool is_store_accum =
-              sched_node.ops.back()->op_type == type::TB_FORLOOP_ACCUM_NO_RED_OP;
-
-          code.e("using LayoutA = $;", get_cute_layout(input0, meta0));
-          code.e("using LayoutB = $;", get_cute_layout(input1, meta1));
-          code.e("using LayoutC = $;", get_cute_layout(output, meta2));
-
-          code.e("using Kernel = tb::Matmul<half_t, $, Layout<Shape<Int<$>, "
-                 "Int<$>, _1>>, $, $, LayoutA, LayoutB, LayoutC, NUM_THREADS, "
-                 "$, $>;",
-                 mma_atom_str,
-                 best_num_tg_m,
-                 best_num_tg_n,
-                 is_ldmatrix_avail,
-                 is_stmatrix_avail,
-                 num_exps_before_store,
-                 is_store_accum);
-          code.e("Kernel::run(stensor$_ptr, stensor$_ptr, stensor$_ptr, "
-                 "(char*)(buf+0), thread_idx);",
-                 output.guid,
-                 input0.guid,
-                 input1.guid);
           break;
-        };
+        }
         case type::TB_EXP_OP: {
           tb::STensor const &input = op->input_tensors.at(0);
           tb::STensor const &output = output_op->output_tensors.at(0);
@@ -862,23 +845,7 @@ CustomOPTranspileResult
     }
     return code;
   };
-
-  // Launch async input operations for all async inputs
-  if (!async_copy_input_ops.empty()) {
-    code.e("{");
-    for (tb::TBInputOp const* input_op : async_copy_input_ops) {
-      kn::DTensor const &dtensor = input_op->dtensor;
-      tb::STensor const &output = input_op->output_tensors.at(0);
-      assert(input_op->forloop_dim >= 0);
-      code.e("STensor$InputAtom::run(stensor$_async_copy_buf, dtensor$_tile_ptr, thread_idx);",
-                 output.guid,
-                 output.guid,
-                 dtensor.guid);
-    }
-    code.e("cute::cp_async_fence();");
-    code.e("}");
-  }
-
+  
   // Declare the for loop
   // TODO(intlsy) Remove the loop when `g.forloop_range` is 1
   // TODO(intlsy) Loop unrolling
@@ -886,11 +853,11 @@ CustomOPTranspileResult
   code.e("// The main loop");
   code.e("for (int for_idx = 0; for_idx < $; for_idx++) {", g.forloop_range);
 
-  if (!async_copy_input_ops.empty()) {
+  if (!pipelined_input_ops.empty()) {
     code.e("{");
     code.e("// Issue async copies for the next round");
     code.e("if (for_idx+1 != $) {", g.forloop_range);
-    for (tb::TBInputOp const* input_op : async_copy_input_ops) {
+    for (tb::TBInputOp const* input_op : pipelined_input_ops) {
       assert(input_op->forloop_dim >= 0);
       kn::DTensor const &dtensor = input_op->dtensor;
       tb::STensor const &output = input_op->output_tensors.at(0);
@@ -911,7 +878,7 @@ CustomOPTranspileResult
     code.e("cute::cp_async_wait<1>();");
 
     code.e("// Switch buffers");
-    for (tb::TBInputOp const* input_op : async_copy_input_ops) {
+    for (tb::TBInputOp const* input_op : pipelined_input_ops) {
       tb::STensor const &output = input_op->output_tensors.at(0);
       sguid_t guid = output.guid;
       code.e("SWAP(stensor$_ptr, stensor$_async_copy_buf);", guid, guid);
@@ -922,8 +889,8 @@ CustomOPTranspileResult
 
   for (TBSchedNode const &sched_node : sched.loop_nodes) {
     if (sched_node.type == tb_sched_node_t::OPERATOR &&
-        sched_node.ops[0]->op_type == type::TB_INPUT_OP &&
-        async_copy_input_ops.count(dynamic_cast<tb::TBInputOp const *>(sched_node.ops[0]))) {
+        sched_node.ops[0].first->op_type == type::TB_INPUT_OP &&
+        pipelined_input_ops.count(dynamic_cast<tb::TBInputOp const *>(sched_node.ops[0].first))) {
       continue;
     }
     CodeKeeper res = transpile_tb_sched_node(sched_node, true);
@@ -933,9 +900,23 @@ CustomOPTranspileResult
   code.e("}"); // For loop
   code.e("");
 
+  // Write back in-register accumulators
+  for (TBSchedNode const& node : sched.loop_nodes) {
+    if (node.type != tb_sched_node_t::OPERATOR) {
+      continue;
+    }
+    auto [last_op, last_op_meta] = node.ops.back();
+    if (last_op->op_type == type::TB_FORLOOP_ACCUM_NO_RED_OP && 
+        last_op_meta.is_accum_in_reg) {
+      tb::TBForloopAccumOp const* accum_op = dynamic_cast<tb::TBForloopAccumOp const*>(last_op);
+      tb::STensor const &accum = accum_op->output_tensors.at(0);
+      code.e("Matmul$Kernel::write_back_mma_rC(stensor$_ptr, matmul_$_accum, thread_idx);", accum.guid, accum.guid, accum.guid);
+    }
+  }
+
   if (!sched.post_loop_nodes.empty()) {
-    code.e("__syncthreads();");
     code.e("// The epilogue (kernels outside the loop)");
+    code.e("__syncthreads();");
     for (TBSchedNode const &sched_node : sched.post_loop_nodes) {
       CodeKeeper res = transpile_tb_sched_node(sched_node, false);
       code << res;
