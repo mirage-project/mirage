@@ -901,6 +901,8 @@ CustomOPTranspileResult
   code.e("");
 
   // Write back in-register accumulators
+  int num_in_reg_accums = 0;
+  CodeKeeper in_reg_writeback;
   for (TBSchedNode const& node : sched.loop_nodes) {
     if (node.type != tb_sched_node_t::OPERATOR) {
       continue;
@@ -910,10 +912,17 @@ CustomOPTranspileResult
         last_op_meta.is_accum_in_reg) {
       tb::TBForloopAccumOp const* accum_op = dynamic_cast<tb::TBForloopAccumOp const*>(last_op);
       tb::STensor const &accum = accum_op->output_tensors.at(0);
-      code.e("Matmul$Kernel::write_back_mma_rC(stensor$_ptr, matmul_$_accum, thread_idx);", accum.guid, accum.guid, accum.guid);
+      in_reg_writeback.e("Matmul$Kernel::write_back_mma_rC(stensor$_ptr, matmul_$_accum, thread_idx);", accum.guid, accum.guid, accum.guid);
+      num_in_reg_accums += 1;
     }
   }
+  if (num_in_reg_accums > 0) {
+    code.e("// Write back in-register accumulators");
+    code.e("__syncthreads();"); // Need this __syncthreads() to make sure no thread is still in the for loop
+    code << in_reg_writeback;
+  }
 
+  // Transpile the epilogue of the kernel
   if (!sched.post_loop_nodes.empty()) {
     code.e("// The epilogue (kernels outside the loop)");
     code.e("__syncthreads();");
