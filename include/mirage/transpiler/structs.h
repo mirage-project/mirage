@@ -135,7 +135,13 @@ struct TBMemoryPlan {
 
   // The size of the shared memory buffer, in bytes
   size_t smem_size;
+
+  // The guid offset of a async input buffer
+  // (i.e. if the guid of the output STensor of a software pipelined input is
+  // $x$, then the guid of the async input buffer is $x +
+  // pipelined_input_buf_guid_offset$)
+  sguid_t pipelined_input_buf_guid_offset;
 };
 
 } // namespace transpiler
-} // namespace mirage 
+} // namespace mirage

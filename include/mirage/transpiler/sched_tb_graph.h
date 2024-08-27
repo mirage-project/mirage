@@ -35,7 +35,8 @@ public:
   tb_sched_node_t type;
 
   // The following fields are only valid if type == OPERATOR
-  // We use a vector here since we may perform operator fusion (threadblock-level data reuse)
+  // We use a vector here since we may perform operator fusion
+  // (threadblock-level data reuse)
   std::vector<std::pair<tb::TBOperator const *, TBSchedOpMeta>> ops;
 };
 

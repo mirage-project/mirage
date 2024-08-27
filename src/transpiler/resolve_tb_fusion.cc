@@ -78,7 +78,7 @@ void Transpiler::resolve_tb_fusion() {
       fusion_chain[leading_op] = fused_ops;
       for (tb::TBOperator const *op : fused_ops) {
         chain_leading_op[op] = leading_op;
-      } 
+      }
     }
   }
 }

@@ -12,15 +12,15 @@ namespace transpiler {
 
 using std::vector, std::pair;
 
-// Test whether consecutive `chunk_size` elements in layout A are contiguous in layout B
-// 
+// Test whether consecutive `chunk_size` elements in layout A are contiguous in
+// layout B
+//
 // See docs/transpiler/transpiler.md for more details
-static pair<bool, int> can_perform_chunked_copy(
-  tb::STensor const& stensor,
-  STensorMeta const& stensor_meta,
-  kn::DTensor const& dtensor,
-  DTensorMeta const& dtensor_meta
-) {
+static pair<bool, int>
+    can_perform_chunked_copy(tb::STensor const &stensor,
+                             STensorMeta const &stensor_meta,
+                             kn::DTensor const &dtensor,
+                             DTensorMeta const &dtensor_meta) {
   // Check whether all strides of the DTensor are 16B-aligned
   {
     size_t alignment = 16 / type::get_datatype_size(stensor.data_type);
@@ -35,7 +35,8 @@ static pair<bool, int> can_perform_chunked_copy(
   };
 
   // Check whether the "real innermost dim" is the same
-  auto find_real_innermost_dim = [&](int num_dims, const int shape[], const size_t strides[]) -> int {
+  auto find_real_innermost_dim =
+      [&](int num_dims, int const shape[], const size_t strides[]) -> int {
     for (int i = 0; i < num_dims; ++i) {
       if (strides[i] == 1 && shape[i] != 1) {
         return i;
@@ -43,11 +44,15 @@ static pair<bool, int> can_perform_chunked_copy(
     }
     return -1;
   };
-  int real_innermost_dtensor = find_real_innermost_dim(dtensor.num_dims, dtensor.dim, dtensor_meta.strides);
-  int real_innermost_stensor = find_real_innermost_dim(stensor.num_dims, stensor.dim, stensor_meta.strides);
-  // assert(real_innermost_dtensor != -1);  real_innermost_dtensor can be -1 for input tensors
+  int real_innermost_dtensor = find_real_innermost_dim(
+      dtensor.num_dims, dtensor.dim, dtensor_meta.strides);
+  int real_innermost_stensor = find_real_innermost_dim(
+      stensor.num_dims, stensor.dim, stensor_meta.strides);
+  // assert(real_innermost_dtensor != -1);  real_innermost_dtensor can be -1 for
+  // input tensors
   assert(real_innermost_stensor != -1);
-  return {real_innermost_dtensor == real_innermost_stensor, real_innermost_stensor};
+  return {real_innermost_dtensor == real_innermost_stensor,
+          real_innermost_stensor};
 }
 
 struct OpChainingMeta {
@@ -57,7 +62,7 @@ struct OpChainingMeta {
 };
 
 struct ChainPiece {
-  tb::TBOperator const* op;
+  tb::TBOperator const *op;
   OpChainingMeta chaining_meta;
   TBSchedOpMeta op_meta;
 };
@@ -67,32 +72,33 @@ struct ChainPiece {
 // example, we may only want to put the accumulator in register files if the
 // leading operator of the chain is a matmul. This process is called "refining
 // opmeta on chain"
-static void refine_opmeta_on_chain(vector<pair<tb::TBOperator const *, TBSchedOpMeta>> &chain) {
+static void refine_opmeta_on_chain(
+    vector<pair<tb::TBOperator const *, TBSchedOpMeta>> &chain) {
   // Only place the accumulator fragment in registers when
   // 1. The last operator is a FORLOOP_ACCUM_NO_RED_OP and it is in registers
-  // 2. The first operator is a MATMUL_OP and there is no other operator (e.g. exp)
-  // In the future may add more rules here
+  // 2. The first operator is a MATMUL_OP and there is no other operator (e.g.
+  // exp) In the future may add more rules here
   chain.back().second.is_accum_in_reg &=
-    chain.front().first->op_type == type::TB_MATMUL_OP &&
-    chain.size() == 2;
+      chain.front().first->op_type == type::TB_MATMUL_OP && chain.size() == 2;
 }
 
 // A helper function for generating TBSched
-// First, the caller should prepare a list of `ChainPiece`s. This function will sort
-// them to fusion chains, and generate a list of TBSchedNodes. It also inserts
-// `syncthreads` when necessary
+// First, the caller should prepare a list of `ChainPiece`s. This function will
+// sort them to fusion chains, and generate a list of TBSchedNodes. It also
+// inserts `syncthreads` when necessary
 static vector<TBSchedNode>
     ops2sched(vector<ChainPiece> &ops,
               std::function<bool(tb::TBOperator const *)> const &filter,
               bool is_in_loop) {
-  std::sort(ops.begin(), ops.end(), [&](ChainPiece const &a, ChainPiece const &b) {
-    const OpChainingMeta &meta_a = a.chaining_meta;
-    const OpChainingMeta &meta_b = b.chaining_meta;
-    return meta_a.level != meta_b.level ? meta_a.level < meta_b.level
-           : meta_a.fuse_chain_idx != meta_b.fuse_chain_idx
-               ? meta_a.fuse_chain_idx < meta_b.fuse_chain_idx
-               : meta_a.pos_in_fuse_chain < meta_b.pos_in_fuse_chain;
-  });
+  std::sort(
+      ops.begin(), ops.end(), [&](ChainPiece const &a, ChainPiece const &b) {
+        const OpChainingMeta &meta_a = a.chaining_meta;
+        const OpChainingMeta &meta_b = b.chaining_meta;
+        return meta_a.level != meta_b.level ? meta_a.level < meta_b.level
+               : meta_a.fuse_chain_idx != meta_b.fuse_chain_idx
+                   ? meta_a.fuse_chain_idx < meta_b.fuse_chain_idx
+                   : meta_a.pos_in_fuse_chain < meta_b.pos_in_fuse_chain;
+      });
   vector<TBSchedNode> res;
   int last_level = -1;
   int num_ops = ops.size();
@@ -101,7 +107,8 @@ static vector<TBSchedNode>
     if (!filter(op)) {
       // Skip this operator
       assert(cur_op_idx + 1 == num_ops ||
-             ops[cur_op_idx + 1].chaining_meta.fuse_chain_idx != meta.fuse_chain_idx);
+             ops[cur_op_idx + 1].chaining_meta.fuse_chain_idx !=
+                 meta.fuse_chain_idx);
       cur_op_idx++;
       continue;
     }
@@ -113,7 +120,8 @@ static vector<TBSchedNode>
     // Get the current fusion chain
     int nxt_op_idx = cur_op_idx + 1;
     while (nxt_op_idx < num_ops &&
-           ops[nxt_op_idx].chaining_meta.fuse_chain_idx == meta.fuse_chain_idx) {
+           ops[nxt_op_idx].chaining_meta.fuse_chain_idx ==
+               meta.fuse_chain_idx) {
       nxt_op_idx++;
     }
     vector<pair<tb::TBOperator const *, TBSchedOpMeta>> cur_fusion_chain;
@@ -135,7 +143,7 @@ TBSched Transpiler::get_threadblock_schedule(tb::Graph const &tb_graph) {
   TBSched sched;
 
   // Get TBSchedOpMeta for all ops individually
-  // In this stage, we do not consider the interference on different 
+  // In this stage, we do not consider the interference on different
   std::unordered_map<tb::TBOperator const *, TBSchedOpMeta> op2op_meta;
   {
     size_t per_thread_accum_numel_tot = 0;
@@ -145,7 +153,7 @@ TBSched Transpiler::get_threadblock_schedule(tb::Graph const &tb_graph) {
         // Decide whether or not to use chunked copy and async copy
         assert(is_fused_with_prev[op] == false);
         assert(is_fused_with_next[op] == false);
-        tb::TBInputOp const* input_op = dynamic_cast<tb::TBInputOp const *>(op);
+        tb::TBInputOp const *input_op = dynamic_cast<tb::TBInputOp const *>(op);
         tb::STensor stensor = input_op->output_tensors.at(0);
         kn::DTensor dtensor = input_op->dtensor;
         STensorMeta stensor_meta = stensor_metas.at(stensor.guid);
@@ -160,9 +168,14 @@ TBSched Transpiler::get_threadblock_schedule(tb::Graph const &tb_graph) {
             // Dim `div_dim` is divided along `dim`
             int num_tbs = dim == 0   ? tb_graph.grid_dim.x
                           : dim == 1 ? tb_graph.grid_dim.y
-                                    : tb_graph.grid_dim.z;
-            // Can refer to the offset calculation in `transpiler_tb.cc` for the condition below
-            is_dtensor_offset_divisible &= num_tbs == 1 || (dtensor.dim[div_dim] / num_tbs * dtensor_meta.strides[div_dim]) % alignment == 0;
+                                     : tb_graph.grid_dim.z;
+            // Can refer to the offset calculation in `transpiler_tb.cc` for the
+            // condition below
+            is_dtensor_offset_divisible &=
+                num_tbs == 1 || (dtensor.dim[div_dim] / num_tbs *
+                                 dtensor_meta.strides[div_dim]) %
+                                        alignment ==
+                                    0;
           }
         }
         if (input_op->forloop_dim != -1) {
@@ -170,18 +183,25 @@ TBSched Transpiler::get_threadblock_schedule(tb::Graph const &tb_graph) {
           int forloop_range = dtensor.dim[forloop_dim];
           size_t forloop_dim_stride = dtensor_meta.strides[forloop_dim];
           int tile_side_len = stensor.dim[forloop_dim];
-          is_dtensor_offset_divisible &= forloop_range == 1 || (tile_side_len*forloop_dim_stride) % alignment == 0;
+          is_dtensor_offset_divisible &=
+              forloop_range == 1 ||
+              (tile_side_len * forloop_dim_stride) % alignment == 0;
         }
 
-        std::tie(op_meta.is_chunked_input, op_meta.chunked_input_real_innermost_dim) = can_perform_chunked_copy(
-          stensor, stensor_meta, dtensor, dtensor_meta);
+        std::tie(op_meta.is_chunked_input,
+                 op_meta.chunked_input_real_innermost_dim) =
+            can_perform_chunked_copy(
+                stensor, stensor_meta, dtensor, dtensor_meta);
         op_meta.is_chunked_input &= is_dtensor_offset_divisible;
-        op_meta.is_pipelined_input = op_meta.is_chunked_input && input_op->forloop_dim != -1 && config.target_cc >= GPU_CC::A100;
+        op_meta.is_pipelined_input = op_meta.is_chunked_input &&
+                                     input_op->forloop_dim != -1 &&
+                                     config.target_cc >= GPU_CC::A100;
       } else if (op->op_type == type::TB_OUTPUT_OP) {
         // Decide whether or not to use chunked copy
         assert(is_fused_with_prev[op] == false);
         assert(is_fused_with_next[op] == false);
-        tb::TBOutputOp const* output_op = dynamic_cast<tb::TBOutputOp const *>(op);
+        tb::TBOutputOp const *output_op =
+            dynamic_cast<tb::TBOutputOp const *>(op);
         tb::STensor stensor = output_op->input_tensors.at(0);
         kn::DTensor dtensor = output_op->dtensor;
         STensorMeta stensor_meta = stensor_metas.at(stensor.guid);
@@ -199,17 +219,23 @@ TBSched Transpiler::get_threadblock_schedule(tb::Graph const &tb_graph) {
             // The output tensor MUST be divided along this dimension, as stated
             // in the paper
             assert(div_dim >= 0);
-            is_dtensor_offset_divisible &= (dtensor.dim[div_dim] / num_tbs * dtensor_meta.strides[div_dim]) % alignment == 0;
+            is_dtensor_offset_divisible &= (dtensor.dim[div_dim] / num_tbs *
+                                            dtensor_meta.strides[div_dim]) %
+                                               alignment ==
+                                           0;
           }
         }
-        std::tie(op_meta.is_chunked_output, op_meta.chunked_output_real_innermost_dim) = can_perform_chunked_copy(
-          stensor, stensor_meta, dtensor, dtensor_meta);
+        std::tie(op_meta.is_chunked_output,
+                 op_meta.chunked_output_real_innermost_dim) =
+            can_perform_chunked_copy(
+                stensor, stensor_meta, dtensor, dtensor_meta);
         op_meta.is_chunked_output &= is_dtensor_offset_divisible;
       } else if (op->op_type == type::TB_FORLOOP_ACCUM_NO_RED_OP) {
-        // Decide whether or not to put the forloop accumulator in register files
+        // Decide whether or not to put the forloop accumulator in register
+        // files
         size_t accum_numel = op->output_tensors.at(0).num_elements();
-        size_t num_thrs = tb_graph.block_dim.x * tb_graph.block_dim.y *
-                          tb_graph.block_dim.z;
+        size_t num_thrs =
+            tb_graph.block_dim.x * tb_graph.block_dim.y * tb_graph.block_dim.z;
         size_t per_thr_accum_numel = accum_numel / num_thrs;
         // Use a simple heuristic to decide whether or not to put the forloop
         // accumulator in register files
@@ -230,7 +256,8 @@ TBSched Transpiler::get_threadblock_schedule(tb::Graph const &tb_graph) {
   // Generate `pre_loop_nodes`
   // Currently it only contains input ops with forloop_dim = -1
   // TODO(intlsy) If the output of an input operator is never used in the for
-  // loop (only used after the for loop), we can safely move it to post_forloop_nodes
+  // loop (only used after the for loop), we can safely move it to
+  // post_forloop_nodes
   int next_chain_idx = 0;
   {
     vector<ChainPiece> pieces;
@@ -241,9 +268,8 @@ TBSched Transpiler::get_threadblock_schedule(tb::Graph const &tb_graph) {
         pieces.push_back({op, {0, next_chain_idx++, 0}, op2op_meta.at(op)});
       }
     }
-    sched.pre_loop_nodes = ops2sched(pieces, [](tb::TBOperator const *op) {
-      return true;
-    }, false);
+    sched.pre_loop_nodes = ops2sched(
+        pieces, [](tb::TBOperator const *op) { return true; }, false);
   }
 
   // Generate `loop_nodes`
@@ -264,37 +290,35 @@ TBSched Transpiler::get_threadblock_schedule(tb::Graph const &tb_graph) {
           // If this operator is fused with the previous operator
           tb::TBOperator *prev_op = op->input_tensors.at(0).owner_op;
           OpChainingMeta prev_chaining_meta = op2chaining_meta.at(prev_op);
-          op2chaining_meta[op] = {
-            prev_chaining_meta.level,
-            prev_chaining_meta.fuse_chain_idx,
-            prev_chaining_meta.pos_in_fuse_chain + 1
-          };
+          op2chaining_meta[op] = {prev_chaining_meta.level,
+                                  prev_chaining_meta.fuse_chain_idx,
+                                  prev_chaining_meta.pos_in_fuse_chain + 1};
         } else {
           int res = 0;
           for (tb::STensor const &input : op->input_tensors) {
             tb::TBOperator *input_op = input.owner_op;
             res = std::max(res, op2chaining_meta.at(input_op).level);
           }
-          op2chaining_meta[op] = {
-            res + 1,
-            next_chain_idx++,
-            0
-          };
+          op2chaining_meta[op] = {res + 1, next_chain_idx++, 0};
         }
       }
     }
     vector<ChainPiece> chain_pieces;
-    for (auto const& [op, chaining_meta] : op2chaining_meta) {
+    for (auto const &[op, chaining_meta] : op2chaining_meta) {
       chain_pieces.push_back({op, chaining_meta, op2op_meta.at(op)});
     }
-    sched.loop_nodes = ops2sched(chain_pieces, [&](tb::TBOperator const *op) {
-      if (op->op_type != type::TB_INPUT_OP) {
-        return true;
-      } else {
-        tb::TBInputOp const *input_op = dynamic_cast<tb::TBInputOp const *>(op);
-        return input_op->forloop_dim != -1;
-      }
-    }, true);
+    sched.loop_nodes = ops2sched(
+        chain_pieces,
+        [&](tb::TBOperator const *op) {
+          if (op->op_type != type::TB_INPUT_OP) {
+            return true;
+          } else {
+            tb::TBInputOp const *input_op =
+                dynamic_cast<tb::TBInputOp const *>(op);
+            return input_op->forloop_dim != -1;
+          }
+        },
+        true);
   }
 
   {
@@ -315,37 +339,34 @@ TBSched Transpiler::get_threadblock_schedule(tb::Graph const &tb_graph) {
           // If this operator is fused with the previous operator
           tb::TBOperator *prev_op = op->input_tensors.at(0).owner_op;
           OpChainingMeta prev_chaining_meta = op2chaining_meta.at(prev_op);
-          op2chaining_meta[op] = {
-            prev_chaining_meta.level,
-            prev_chaining_meta.fuse_chain_idx,
-            prev_chaining_meta.pos_in_fuse_chain + 1
-          };
+          op2chaining_meta[op] = {prev_chaining_meta.level,
+                                  prev_chaining_meta.fuse_chain_idx,
+                                  prev_chaining_meta.pos_in_fuse_chain + 1};
         } else {
           int res = 0;
           for (tb::STensor const &input : op->input_tensors) {
             tb::TBOperator *input_op = input.owner_op;
             res = std::max(res, op2chaining_meta.at(input_op).level);
           }
-          op2chaining_meta[op] = {
-            res + 1,
-            next_chain_idx++,
-            0
-          };
+          op2chaining_meta[op] = {res + 1, next_chain_idx++, 0};
         }
       }
     }
     vector<ChainPiece> chain_pieces;
-    for (auto const& [op, chaining_meta] : op2chaining_meta) {
+    for (auto const &[op, chaining_meta] : op2chaining_meta) {
       chain_pieces.push_back({op, chaining_meta, op2op_meta.at(op)});
     }
-    sched.post_loop_nodes = ops2sched(chain_pieces, [&](tb::TBOperator const *op) {
-      if (op->op_type == type::TB_INPUT_OP ||
-          op->op_type == type::TB_FORLOOP_ACCUM_NO_RED_OP) {
-        return false;
-      } else {
-        return true;
-      }
-    }, false);
+    sched.post_loop_nodes = ops2sched(
+        chain_pieces,
+        [&](tb::TBOperator const *op) {
+          if (op->op_type == type::TB_INPUT_OP ||
+              op->op_type == type::TB_FORLOOP_ACCUM_NO_RED_OP) {
+            return false;
+          } else {
+            return true;
+          }
+        },
+        false);
   }
 
   // Some sanity checks

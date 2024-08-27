@@ -38,10 +38,10 @@ class LayoutGrouper {
   CUTE_STATIC_ASSERT_V(rank(RealLayout{}) >= _2{});
 
 public:
-  using Result = std::conditional_t<
-      (rank(RealLayout{}) == _2{}),
-      decltype(append<3>(RealLayout{}, Layout<_1>{})),
-      decltype(group<2, rank(RealLayout{})>(RealLayout{}))>;
+  using Result =
+      std::conditional_t<(rank(RealLayout{}) == _2{}),
+                         decltype(append<3>(RealLayout{}, Layout<_1>{})),
+                         decltype(group<2, rank(RealLayout{})>(RealLayout{}))>;
   CUTE_STATIC_ASSERT_V(rank(Result{}) == _3{});
 };
 
@@ -140,7 +140,8 @@ CUTE_HOST_DEVICE void s2r_copy_with_oob_protection(
   using TiledMN = typename TiledCopy::Tiler_MN;
   using TileM = decltype(get<0>(TiledMN{}));
   using TileK = decltype(get<1>(TiledMN{}));
-  if constexpr ((M::value % TileM::value == 0) && (K::value % TileK::value == 0)) {
+  if constexpr ((M::value % TileM::value == 0) &&
+                (K::value % TileK::value == 0)) {
     copy(tiled_copy, src, dst);
   } else {
     using MIndicatorLayout = Layout<Shape<M, K>, Stride<_1, _0>>;
@@ -197,7 +198,8 @@ CUTE_HOST_DEVICE void r2s_copy_with_oob_protection(
   using TiledMN = typename TiledCopy::Tiler_MN;
   using TileM = decltype(get<0>(TiledMN{}));
   using TileN = decltype(get<1>(TiledMN{}));
-  if constexpr ((M::value % TileM::value == 0) && (N::value % TileN::value == 0)) {
+  if constexpr ((M::value % TileM::value == 0) &&
+                (N::value % TileN::value == 0)) {
     CUTE_UNROLL
     for (int i = 0; i < size(src); ++i) {
       // TODO(intlsy) Modify this after supporting `stmatrix` on H100
@@ -351,27 +353,21 @@ public:
   using R2STiledCopyC =
       decltype(make_tiled_copy_C(R2STiledCopyCAtom{}, TiledMMA{}));
 
-  static __device__ __forceinline__ auto
-    get_mma_rC(
-      int thread_idx
-    ) {
+  static __device__ __forceinline__ auto get_mma_rC(int thread_idx) {
     // Make a fake tensor
-    Tensor sC_fake = make_tensor(make_smem_ptr((half_t*)nullptr), SmemLayoutC{});
+    Tensor sC_fake =
+        make_tensor(make_smem_ptr((half_t *)nullptr), SmemLayoutC{});
     TiledMMA tiled_mma;
     ThrMMA thr_mma = tiled_mma.get_slice(thread_idx);
-    Tensor mma_rC =
-        thr_mma.partition_fragment_C(sC_fake(_, _, _0{})); // (MMA, MMA_M, MMA_N)
+    Tensor mma_rC = thr_mma.partition_fragment_C(
+        sC_fake(_, _, _0{})); // (MMA, MMA_M, MMA_N)
     clear(mma_rC);
     return mma_rC;
   }
 
-  template<class AccumRegFrag>
-  static __device__ __forceinline__ void
-    write_back_mma_rC(
-      T* __restrict__ c_ptr,
-      const AccumRegFrag& mma_rC,
-      int thread_idx
-    ) {
+  template <class AccumRegFrag>
+  static __device__ __forceinline__ void write_back_mma_rC(
+      T *__restrict__ c_ptr, AccumRegFrag const &mma_rC, int thread_idx) {
     Tensor sC = make_tensor(make_smem_ptr(c_ptr), SmemLayoutC{}); // [M, N, B]
     R2STiledCopyC r2s_tiled_copy_C;
     ThrCopy r2s_tiled_copy_C_thr = r2s_tiled_copy_C.get_slice(thread_idx);
@@ -380,14 +376,14 @@ public:
     Tensor r2s_sC =
         r2s_tiled_copy_C_thr.partition_D(sC); // (R2S, R2S_M, R2S_N, B)
     r2s_copy_with_oob_protection<T,
-                                M,
-                                N,
-                                NUM_EXPS_BEFORE_STORE,
-                                IS_STORE_ACCUM>(
+                                 M,
+                                 N,
+                                 NUM_EXPS_BEFORE_STORE,
+                                 IS_STORE_ACCUM>(
         r2s_tiled_copy_C, r2s_rC, r2s_sC(_, _, _, _0{}), thread_idx);
   }
 
-  template<typename MMARc>
+  template <typename MMARc>
   static __device__ __forceinline__ void
       run(MMARc &mma_rC,
           T *__restrict__ a_ptr, // Do not define a_ptr and b_ptr as const here,
@@ -438,7 +434,6 @@ public:
         thr_mma.partition_fragment_A(sA(_, _, _0{})); // (MMA, MMA_M, MMA_K)
     Tensor mma_rB =
         thr_mma.partition_fragment_B(sB(_, _, _0{})); // (MMA, MMA_N, MMA_K)
-
 
     S2RTiledCopyA s2r_tiled_copy_A;
     ThrCopy s2r_tiled_copy_A_thr = s2r_tiled_copy_A.get_slice(thread_idx);

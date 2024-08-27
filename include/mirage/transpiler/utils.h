@@ -173,21 +173,26 @@ static constexpr int H100 = 90;
 // You can use like this:
 // for (auto elem : Combine(vector1, vector2))
 // The combine iterator is a const iterator, which means that, you can do this:
-// 
+//
 // for (const int& x : Combine(v1, v2)) ...
 //
 // but not this:
 //
 // for (int& x : Combine(v1, v2)) ...
-// (NOTE to do this in the future we may have something like `MutCombineIterator`)
+// (NOTE to do this in the future we may have something like
+// `MutCombineIterator`)
 template <typename T, class Iter1, class Iter2>
 class CombineIterator {
   Iter1 range1_start, range1_end, iter1;
   Iter2 range2_start, range2_end, iter2;
 
 public:
-  CombineIterator(Iter1 const &range1_start, Iter1 const &range1_end, Iter1 const &iter1,
-                  Iter2 const &range2_start, Iter2 const &range2_end, Iter2 const &iter2)
+  CombineIterator(Iter1 const &range1_start,
+                  Iter1 const &range1_end,
+                  Iter1 const &iter1,
+                  Iter2 const &range2_start,
+                  Iter2 const &range2_end,
+                  Iter2 const &iter2)
       : range1_start(range1_start), range1_end(range1_end), iter1(iter1),
         range2_start(range2_start), range2_end(range2_end), iter2(iter2) {}
 
@@ -203,7 +208,7 @@ public:
     }
   }
 
-  T const& operator*() const {
+  T const &operator*() const {
     if (iter1 != range1_end) {
       return *iter1;
     } else {
@@ -214,27 +219,31 @@ public:
 
 template <typename T1, typename T2>
 class Combine {
-  using T = std::common_type_t<typename T1::value_type, typename T2::value_type>;
+  using T =
+      std::common_type_t<typename T1::value_type, typename T2::value_type>;
 
   using Iter1 = typename T1::const_iterator;
   using Iter2 = typename T2::const_iterator;
 
-	Iter1 begin1, end1;
-	Iter2 begin2, end2;
+  Iter1 begin1, end1;
+  Iter2 begin2, end2;
 
 public:
   using value_type = T;
-	using const_iterator = CombineIterator<T, Iter1, Iter2>;
-  
+  using const_iterator = CombineIterator<T, Iter1, Iter2>;
+
   Combine(T1 const &v1, T2 const &v2)
-      : begin1(v1.begin()), end1(v1.end()), begin2(v2.begin()), end2(v2.end()) {}
-	
+      : begin1(v1.begin()), end1(v1.end()), begin2(v2.begin()), end2(v2.end()) {
+  }
+
   CombineIterator<T, Iter1, Iter2> begin() const {
-    return CombineIterator<T, Iter1, Iter2>(begin1, end1, begin1, begin2, end2, begin2);
+    return CombineIterator<T, Iter1, Iter2>(
+        begin1, end1, begin1, begin2, end2, begin2);
   }
 
   CombineIterator<T, Iter1, Iter2> end() const {
-    return CombineIterator<T, Iter1, Iter2>(begin1, end1, end1, begin2, end2, end2);
+    return CombineIterator<T, Iter1, Iter2>(
+        begin1, end1, end1, begin2, end2, end2);
   }
 };
 

@@ -32,7 +32,7 @@ public:
     constexpr auto numel = Numel{};
     auto dst_layout = DstLayout{};
     auto src_layout = SrcLayout{};
-    #pragma unroll
+#pragma unroll
     for (int elem_idx = thread_idx; elem_idx < numel; elem_idx += NUM_THREADS) {
       T res = src[src_layout(elem_idx)];
       dst[dst_layout(elem_idx)] = res;
@@ -42,24 +42,23 @@ public:
 
 // A converter that converts a layout to a "chunked" layout, which groups every
 // `GROUP_SIZE` elements in the 0-th dimension into a single element.
-template<class InputLayout, int GROUP_SIZE>
+template <class InputLayout, int GROUP_SIZE>
 class InputChunkedLayoutConverter {
   using InputRank = decltype(rank(InputLayout{}));
   using GroupSize = Int<GROUP_SIZE>;
 
   using InputShape = decltype(shape(InputLayout{}));
-  using OutputShape = decltype(make_shape(
-    ceil_div_cute(get<0>(InputShape{}), GroupSize{}),
-    take<1, InputRank::value>(InputShape{})
-  ));
+  using OutputShape =
+      decltype(make_shape(ceil_div_cute(get<0>(InputShape{}), GroupSize{}),
+                          take<1, InputRank::value>(InputShape{})));
   using InputStride = decltype(stride(InputLayout{}));
-  using OutputStride = decltype(make_stride(
-    get<0>(InputStride{}) * GroupSize{},
-    take<1, InputRank::value>(InputStride{})
-  ));
+  using OutputStride =
+      decltype(make_stride(get<0>(InputStride{}) * GroupSize{},
+                           take<1, InputRank::value>(InputStride{})));
 
 public:
-  using Result = decltype(coalesce(flatten(Layout<OutputShape, OutputStride>{})));
+  using Result =
+      decltype(coalesce(flatten(Layout<OutputShape, OutputStride>{})));
 };
 
 // Type 2: Chunked, synchronous copy
@@ -71,20 +70,23 @@ public:
   CUTE_STATIC_ASSERT_V(size(SrcLayout{}) == size(DstLayout{}));
 
   static constexpr int GROUP_SIZE = 16 / sizeof(T);
-  using DstChunkedLayout = typename InputChunkedLayoutConverter<DstLayout, GROUP_SIZE>::Result;
-  using SrcChunkedLayout = typename InputChunkedLayoutConverter<SrcLayout, GROUP_SIZE>::Result;
+  using DstChunkedLayout =
+      typename InputChunkedLayoutConverter<DstLayout, GROUP_SIZE>::Result;
+  using SrcChunkedLayout =
+      typename InputChunkedLayoutConverter<SrcLayout, GROUP_SIZE>::Result;
   using Numel = decltype(size(DstChunkedLayout{}));
   CUTE_STATIC_ASSERT_V(size(DstChunkedLayout{}) == size(SrcChunkedLayout{}));
 
   static __device__ __forceinline__ void
-    run(T *__restrict__ dst, T const *__restrict__ src, int thread_idx) {
+      run(T *__restrict__ dst, T const *__restrict__ src, int thread_idx) {
     constexpr auto numel = Numel{};
     auto dst_chunked_layout = DstChunkedLayout{};
     auto src_chunked_layout = SrcChunkedLayout{};
-    #pragma unroll
+#pragma unroll
     for (int elem_idx = thread_idx; elem_idx < numel; elem_idx += NUM_THREADS) {
-      uint128_t res = *((const uint128_t*)(src + src_chunked_layout(elem_idx)));
-      *((uint128_t*)(dst + dst_chunked_layout(elem_idx))) = res;
+      uint128_t res =
+          *((uint128_t const *)(src + src_chunked_layout(elem_idx)));
+      *((uint128_t *)(dst + dst_chunked_layout(elem_idx))) = res;
     }
   }
 };
@@ -96,23 +98,27 @@ public:
   CUTE_STATIC_ASSERT_V(size(SrcLayout{}) == size(DstLayout{}));
 
   static constexpr int GROUP_SIZE = 16 / sizeof(T);
-  using DstChunkedLayout = typename InputChunkedLayoutConverter<DstLayout, GROUP_SIZE>::Result;
-  using SrcChunkedLayout = typename InputChunkedLayoutConverter<SrcLayout, GROUP_SIZE>::Result;
+  using DstChunkedLayout =
+      typename InputChunkedLayoutConverter<DstLayout, GROUP_SIZE>::Result;
+  using SrcChunkedLayout =
+      typename InputChunkedLayoutConverter<SrcLayout, GROUP_SIZE>::Result;
   using Numel = decltype(size(DstChunkedLayout{}));
   CUTE_STATIC_ASSERT_V(size(DstChunkedLayout{}) == size(SrcChunkedLayout{}));
 
   static __device__ __forceinline__ void
-    run(T *__restrict__ dst, T const *__restrict__ src, int thread_idx) {
+      run(T *__restrict__ dst, T const *__restrict__ src, int thread_idx) {
     constexpr auto numel = Numel{};
     auto dst_chunked_layout = DstChunkedLayout{};
     auto src_chunked_layout = SrcChunkedLayout{};
     uint32_t dst_base_addr = cute::cast_smem_ptr_to_uint(dst);
-    #pragma unroll
+#pragma unroll
     for (int elem_idx = thread_idx; elem_idx < numel; elem_idx += NUM_THREADS) {
       size_t src_addr = (size_t)(src + src_chunked_layout(elem_idx));
-      uint32_t dst_addr = dst_base_addr + dst_chunked_layout(elem_idx) * sizeof(half);
-      asm volatile("cp.async.cg.shared.global.L2::128B [%0], [%1], 16;"
-                   :: "r"(dst_addr), "l"(src_addr));
+      uint32_t dst_addr =
+          dst_base_addr + dst_chunked_layout(elem_idx) * sizeof(half);
+      asm volatile(
+          "cp.async.cg.shared.global.L2::128B [%0], [%1], 16;" ::"r"(dst_addr),
+          "l"(src_addr));
     }
   }
 };

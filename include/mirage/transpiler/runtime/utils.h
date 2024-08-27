@@ -60,4 +60,9 @@ __host__ __device__ void println(T const &t) {
     }                                                                          \
   } while (0)
 
-#define SWAP(a, b) { auto tmp = a; a = b; b = tmp; }
+#define SWAP(a, b)                                                             \
+  {                                                                            \
+    auto tmp = a;                                                              \
+    a = b;                                                                     \
+    b = tmp;                                                                   \
+  }

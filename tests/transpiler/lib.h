@@ -343,7 +343,8 @@ public:
                     std::function<add_custom_op_ret_t<NUM_OUTPUTS>(
                         vector<kn::DTensor> const &)> const &constructor) {
     auto [tb_graph_ptr, result_dtensors] = constructor(inputs);
-    std::vector<kn::DTensor> output_dtensors = this->g->customized(inputs, *tb_graph_ptr);
+    std::vector<kn::DTensor> output_dtensors =
+        this->g->customized(inputs, *tb_graph_ptr);
     std::array<kn::DTensor, NUM_OUTPUTS> result_dtensors_arr;
     assert(output_dtensors.size() == NUM_OUTPUTS);
     for (int i = 0; i < NUM_OUTPUTS; ++i) {
