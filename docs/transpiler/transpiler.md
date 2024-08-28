@@ -56,8 +56,9 @@ The Transpiler can be divided into several steps:
 4. **Kernel-Level Transpile.** Transpile each kernel operator one by one, that is:
   - If the operator is a pre-defined kernel operator (say, a Matmul), we call the corresponding function in the Runtime.
   - If the operator is a custom operator (`KN_CUSTOMIZED_OP`), we call the function `transpile_kn_custom_op` which transpiles the custom operator into a CUDA kernel (a function marked with `__global__`). This includes:
-    1. **TB Graph Scheduling and Memory Planning.** Choose the order of operators to perform, and allocate memory for every intermediate `STensor`.
-    2. **Threadblock-Level Transpile.** Transpile the threadblock level code based on the TB graph scheduling and memory planning.
+    1. **TB Graph Scheduling.** Choose the order of operators to perform, which we called "TB Sched". From another perspective, this step translates the threadblock-level graph (which can be seen as a graph IR) into a sequence of operators (similar to a linear IR).
+    2. **Memory Planning.** Allocate memory for every `STensor`.
+    3. **Threadblock-Level Transpilation.** Transpile the threadblock level code based on the TB graph scheduling and memory planning.
 
 ## Algorithms
 
@@ -67,11 +68,15 @@ In threadblock level code, an operator (which will be transpiled to a device fun
 
 Achieving threadblock level data reuse is not easy. If the latter kernel is not a simple elementwise operation, you need to align the data layout (for every CUDA thread, which part of data does it hold?) between the former kernel, which is really complex. Besides, if the latter kernel is not a unary (only has one input tensor) kernel, more problems will arise. For example, Assume you have two threadblock level ops, A and B, and an elementwise addition operator which takes the output of A and B as input, and assume that you want to perform A first, then you need to choose between storing the output of A in shared memory or registers. That's a complex decision.
 
-Currently, the Transpiler only considers fusion where the latter operator is an elementwise unary operator. This problem is much easier since we can always fuse an elementwise unary operator with its former operator without any concerns. We may consider more complex scenarios in the future.
+Currently, the Transpiler only considers fusion where the latter operator is an elementwise unary operator (e.g. exp or accumulate). This problem is much easier since we can always fuse an elementwise unary operator with its former operator without any concerns. We may consider more complex scenarios in the future.
 
 In the Runtime, the operator fusion is implemented as "epilogues". An epilogue is a chain of actions performed on a single element. Every node on the chain can be:
 - A unary operator, like `exp`
 - An action that involves memory operatorion, like "store" (`dst[dst_layout(dst_index)] = x`) or "store-and-accumulate" (`dst[dst_layout(dst_index)] += x`). Every chain is terminated by such an action.
+
+During fusion, we are actually "chaining" operators, which means that we are dividing the original threadblock-level graph into several chains. Every chain contains a "leading" operator, and a series (possibly zero) elementwise-unary operators. Here is an illustration:
+
+![tb-sched-conflict-example](/docs/assets/transpiler/tb-sched-conflict-example.drawio.svg)
 
 ### Layout Resolution
 
@@ -87,17 +92,14 @@ Here we use a heuristic to calculate the strides, implemented in the function `c
 
 ### TB Graph Scheduling and Memory Planning
 
-The TB graph scheduling problem is that, given a threadblock-level graph, how to get an optimal "schedule" to maximize the performance? The "schedule" here includes:
+The TB graph scheduling problem is that, given a threadblock-level graph, how to get an optimal "schedule" to maximize the performance? 
 
-- The order of operators ("schedule")
-- The address of the space allocated for each intermediate tensor ("memory plan")
-
-And in order to optimize the performance, we may need to:
+The schedule has an impact on the performance in several aspects:
 
 - Minimize the number of synchronizations (`__syncthreads()`) between threadblocks
-- Minimize the peak shared memory usage
+- Minimize the peak shared memory usage (since different schedules result in different tensor lifetimes, which may affect the peak shared memory usage)
 
-Those objectives are maybe conflicting, and we need to somehow find a balance between them. Consider the following computational graph:
+Those objectives are sometimes conflicting, and we need to somehow find a balance between them. For example, consider the following computational graph:
 
 ![tb-sched-conflict-example](/docs/assets/transpiler/tb-sched-conflict-example.drawio.svg)
 
@@ -106,16 +108,40 @@ And there are two possible schedulings:
 - `12 534 6 7`: 3 synchronizations (a space denotes a synchronization) with peak mem usage = 4
 - `1234 56 7`: 2 synchronizations with peak mem usage = 5
 
-Currently our heuristic is that, we always prioritize the number of synchronizations, and then the peak mem usage. So we first find an order that minimizes the number of synchronizations (if multiple orders have the same number of synchronizations, we choose a random one).
+You can see that the former schedule results in lower peak mem usage but more synchronizations, while the latter schedule results in fewer synchronizations but higher peak mem usage. Which one is better? It's hard to say.
+
+Currently our heuristic is that, we always prioritize the number of synchronizations, and then the peak mem usage. So we first find an order that minimizes the number of synchronizations (if multiple orders have the same number of synchronizations, we choose a random one), and then try to minimize the peak mem usage under this order.
+
+### TB Graph Scheduling
 
 To find the order with the minimum number of synchronizations, we use a modified topology sort algorithm. We label each node (threadblock operator) with a "depth", which is length of the longest path from any input operator to this node. We can calculate this depth by a dynamic programming (DP) algorithm:
 
 - For input nodes, its depth is 0
+- If an operator is fused with a previous operator, it has the same depth as the previous one
 - Otherwise, its depth is $\max_{v \in I} depth[v] + 1$, where $I$ is the set of direct input nodes of this node
 
-After that, we sort the nodes by their depth in ascending order, and perform a synchronization when the depth of the latter node is greater than the former node. This is how we obtain the schedule.
+After that, we sort the nodes by their depth in ascending order, and perform a synchronization when the depth of the latter node is greater than the former node. This is how we obtain the order of operators.
 
-For memory planning, it's actually a NP-Complete problem. We just run some heuristics (first fit, best fit, last fit, random, etc.) and choose the one with the minimum peak shared memory usage.
+In this step, we also generate relative metadata for every operator. For example, for input operators, we decide whether or not to use chunked input (copying in 128 bits) and/or software pipelining. This is achieved by the following steps:
+
+- First we generate metadata for every operator independently
+- Some metadata may depend on the other operators on the same chain. For example, we only put the accumulator into register files (instead of shared memory) if the "leading operator" of the chain is a matmul op. To deal with this case, we furthermore "refine" the metadata on the chain when chaining operators together. This is implemented in the function `refine_opmeta_on_chain`.
+
+Finally, we end with a linear order of operators, with metadata attached.
+
+From another perspective, this step effectively translates the threadblock-level graph (which can be seen as a graph IR) into another linear IR for further processing.
+
+### Memory Planning
+
+Now we have decided the schedule (i.e. the order of operators). Now it's time to allocate memory for every STensor.
+
+Let's first introduce the Dynamic Storage Allocation (DSA) problem. The DSA problem is that, given a list of objects (each object has a size, a allocate time, and a free time), how to allocate memory (i.e. provide a start address for every object) to minimize the peak memory usage? Formally speaking, a DSA input $I$ consists of $n$ triples of numbers, i.e. $I = \{(s_1, l_1, r_1), \dots, (s_n, l_n, r_n)\}$, where $s_i$ is the size of the $i$-th object, and $[l_i, r_i)$ is the time interval that the $i$-th object is alive. The output is a list of $n$ integers, i.e. $O = \{a_1, \dots, a_n\}$, where $a_i$ is the start address of the $i$-th object, such that if $[l_i, r_i) \cap [l_j, r_j) \neq \phi\ (i \neq j)$, then $[a_i, a_i+s_i) \cap [a_j, a_j+s_j)$ should be $\phi$. This problem also have a nice geometric interpretation: You can view each triple $(s_i, l_i, r_i)$ asan axis-parallel rectangle with a projection $(l_i, r_i)$ on the x-axis and a height of $s_i$. You are only allowed to slide the rectangles along the y-axis. The objective is to pack all rectangles into a minimum height without overlapping.
+
+Firstly, we show how we formulate the memory planning problem as DSA problem. For the size of every STensor, we can easily calculate it when doing layout resolution. For the time interval (lifetime), we carefully catorgorize STensors into the following types, and calculate the lifetime for every STensor:
+
+![tensor-lifecycle](/docs/assets/transpiler/tensor-lifecycle.drawio.svg)
+
+Then we can try to solve the DSA problem. Unfortunately, it's actually a NP-Complete problem. We just run some heuristics (first fit, best fit, last fit, random, etc.) and choose the one with the minimum peak shared memory usage.
 
 ## Problems and Solutions
 
@@ -166,3 +192,17 @@ Iterating every 16 bytes in the DTensor and checking whether they are contiguous
 To solve this, we first find the "real innermost dimension", which is defined as "the non-1 dimension with a stride of 1" (that dimension must be unique). Our chunked copy is performed "along" that dimension (you may refer to the Runtime for details). We can just check whether the first 8 element in the real innermost dimension are contiguous in the STensor. If they are, we can derive that every 16 Bytes in the DTensor are contiguous in the STensor via some linear algebra, and we can use chunked copy.
 
 The logic mentioned above is implemented in the function `can_use_chunked_copy`. 
+
+### When and How to Store the Accumulator in Register File (instead of Shared Memory)
+
+Sometimes we can get a large performance gain if we store the accumulator in the register file instead of shared memory, for example, in matrix multiplication. Then the problem is:
+- How to decide whether to store the accumulator in the register file or shared memory?
+- How to implement this?
+
+(BTW, this is an example of that "the Transpiler is both an algorithm challenge and an engineering challenge")
+
+Let's start from the first question. I think the main corcern should be the limited number of registers. According to [NVIDIA's document](https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#features-and-technical-specifications), each thread can use up to 255 32-bit registers. That's not too much.
+
+Currently we use a simple heuristic to decide this: we first check the per-thread register burden if we store the accumulator in the register file. If it's less than 192, we store the accumulator in the register file. Otherwise, we store it in shared memory. We may use advanced techniques in the future.
+
+The second question is how to implement this. Currently this is only implemented for matmul operator since we can obtain a huge performance gain on matmul while storing the accumulator in the register file. TODO
