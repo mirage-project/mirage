@@ -112,7 +112,7 @@ ADD_TESTCASE(Testcase("tb_input_output", {"threadblock", "correctness", "perf"},
 			std::shared_ptr<tb::Graph> sg = std::make_shared<tb::Graph>(grid_dim, subcase.block_dim, forloop_range, 1);
 			tb::STensor sinput = sg->new_input(inputs[0], {0, 1, -1}, 2, layout::SmemRowMajor);
 			tb::STensor soutput = sg->forloop_accum(sinput, type::TB_FORLOOP_ACCUM_NO_RED_OP);
-			kn::DTensor output = sg->new_output(soutput, {0, 1, -1}, -1, type::TB_EPILOGUE_NONE);
+			kn::DTensor output = sg->mark_output(soutput, {0, 1, -1}, -1, type::TB_EPILOGUE_NONE);
 			return {sg, {output}};
 		});
 

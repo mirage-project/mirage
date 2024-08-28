@@ -62,7 +62,7 @@ ADD_TESTCASE(Testcase("tb_reduction_correctness", {"threadblock", "correctness"}
 			tb::STensor si0 = sg->new_input(inputs[0], {-1, -1, -1}, -1, layout::SmemRowMajor);
 			tb::STensor sx0 = subcase.reduction_dimx == 1 ? sg->reduction(si0, subcase.reduction_dim) : sg->reduction_to_dimx(si0, subcase.reduction_dim);
 			tb::STensor so0 = sg->forloop_accum(sx0, type::TB_FORLOOP_ACCUM_NO_RED_OP);
-			kn::DTensor o0 = sg->new_output(so0, {-1, -1, -1}, -1, type::TB_EPILOGUE_NONE);
+			kn::DTensor o0 = sg->mark_output(so0, {-1, -1, -1}, -1, type::TB_EPILOGUE_NONE);
 			return {sg, {o0}};
 		});
 		t.mark_output(o0, subcase.dst_dims, [=]() {
