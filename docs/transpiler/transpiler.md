@@ -205,4 +205,28 @@ Let's start from the first question. I think the main corcern should be the limi
 
 Currently we use a simple heuristic to decide this: we first check the per-thread register burden if we store the accumulator in the register file. If it's less than 192, we store the accumulator in the register file. Otherwise, we store it in shared memory. We may use advanced techniques in the future.
 
-The second question is how to implement this. Currently this is only implemented for matmul operator since we can obtain a huge performance gain on matmul while storing the accumulator in the register file. TODO
+The second question is how to implement this. Currently this is only implemented for matmul operator since we can obtain a huge performance gain on matmul when storing the accumulator in the register file. To implement this, three methods are implemented for the `tb::Matmul` kernel in the Runtime:
+
+- `get_mma_rC()`: Get a fragment (tensor on register) that stores the accumulator
+- `run()`: Perform the matmul operation
+- `write_back_mma_rC()`: Write the fragment back to shared memory
+
+If we are going to store the accumulator on register file, the program looks like this:
+
+```cpp
+auto t = get_mma_rc();
+for (...) {
+  run(t, ...);
+}
+write_back_mma_rc(t, ...);
+```
+
+If we are going to store the accumulator in shared memory, the program looks like this:
+
+```cpp
+for (...) {
+  auto t = get_mma_rc();
+  run(t, ...);
+  write_back_mma_rc(t, ...);
+}
+```
