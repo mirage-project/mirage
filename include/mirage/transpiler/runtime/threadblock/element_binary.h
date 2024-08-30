@@ -26,6 +26,10 @@ static __device__ __forceinline__ T perform_element_binary_op(T a, T b) {
   }
 }
 
+// Get a layout that converts a logical coordinate in DstLayout to a logical
+// coordinate in SrcLayout, so that the composition of this layout and SrcLayout
+// results in a layout that converts a logical coordinate in DstLayout to a
+// physical coordinate in SrcLayout.
 template<typename DstLayout, typename SrcLayout>
 class DstCoord2SrcCoordGetter {
   using DstShape = decltype(shape(DstLayout{}));
