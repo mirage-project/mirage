@@ -74,14 +74,6 @@ private:
   size_t d_buf_size; // Size of the buffer for intermediate DTensors
   void plan_dtensor_memory();
 
-  void resolve_all_config() {
-    this->resolve_distributed_config();
-    this->resolve_dtensor_meta();
-    this->resolve_tb_fusion();
-    this->resolve_tensor_layout();
-    this->plan_dtensor_memory();
-  }
-
   // Utility functions for transpiling
   // Get the pointer to a DTensor. Return {pointer_name, code}
   std::pair<std::string, std::string>
@@ -97,6 +89,9 @@ private:
   // Transpile a custom KN operator (a custom block graph)
   CustomOPTranspileResult transpile_kn_custom_op(kn::KNCustomizedOp const *op);
 
+  // Transpile the whole uGraph
+  TranspileResult transpile_ugraph();
+
 public:
   // Initialize the transpiler and resolve all configurations
   Transpiler(kernel::Graph const *g,
@@ -110,10 +105,16 @@ public:
     if (config.target_cc < GPU_CC::A100) {
       throw std::runtime_error("Unsupported target compute capability");
     }
-    this->resolve_all_config();
   }
 
-  TranspileResult generate_code();
+  TranspileResult generate_code() {
+    this->resolve_distributed_config();
+    this->resolve_dtensor_meta();
+    this->resolve_tb_fusion();
+    this->resolve_tensor_layout();
+    this->plan_dtensor_memory();
+    return this->transpile_ugraph();
+  }
 };
 
 } // namespace transpiler
