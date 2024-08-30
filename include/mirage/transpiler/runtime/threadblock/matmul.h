@@ -240,7 +240,7 @@ CUTE_HOST_DEVICE void r2s_copy_with_oob_protection(
       // TODO(intlsy) Modify this after supporting `stmatrix` on H100
       // Cannot use a `if (valid)` since `stmatrix` needs all threads in a warp
       // to have the same control flow, or the program will stuck
-      // printf("Thread %d, (%d) -> (%d, %d), %d\n", thread_idx, i, j,
+      // printf("Thread %d, (%d) -> (%d, %d), %d\n", thread_idx, i,
       // (int)coord_m, (int)coord_n, valid);
       if (valid) {
         T x = src(i);
@@ -368,6 +368,9 @@ public:
   template <class AccumRegFrag>
   static __device__ __forceinline__ void write_back_mma_rC(
       T *__restrict__ c_ptr, AccumRegFrag const &mma_rC, int thread_idx) {
+    if (thread_idx >= TILED_MMA_NUM_THREADS) {
+      return;
+    }
     Tensor sC = make_tensor(make_smem_ptr(c_ptr), SmemLayoutC{}); // [M, N, B]
     R2STiledCopyC r2s_tiled_copy_C;
     ThrCopy r2s_tiled_copy_C_thr = r2s_tiled_copy_C.get_slice(thread_idx);
