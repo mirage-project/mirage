@@ -40,53 +40,53 @@ public:
   }
 };
 
-// A converter that converts a layout to a "chunked" layout, which groups every
-// `GROUP_SIZE` elements in the 0-th dimension into a single element.
-template <class InputLayout, int GROUP_SIZE>
-class InputChunkedLayoutConverter {
-  using InputRank = decltype(rank(InputLayout{}));
-  using GroupSize = Int<GROUP_SIZE>;
-
+// Get a mapping from chunk coordinate to original coordinate
+// 
+// Assume the shape of the tensor is (A0, A1, ...) (where A0 is the innermost
+// dim), then if we merge elements in the same chunk into one element, the shape
+// would be (A0', A1, ...), where A0' is the number of chunks in the innermost
+// dim (ceil(A0 / CHUNK_SIZE)).
+//
+// This class returns such a mapping. It takes a coordinate in the "chunk space"
+// and converts it to a coordinate in the "original space".
+template <class InputLayout, int CHUNK_SIZE>
+class GetChunkedCoord2Coord {
   using InputShape = decltype(shape(InputLayout{}));
-  using OutputShape =
-      decltype(make_shape(ceil_div_cute(get<0>(InputShape{}), GroupSize{}),
-                          take<1, InputRank::value>(InputShape{})));
-  using InputStride = decltype(stride(InputLayout{}));
-  using OutputStride =
-      decltype(make_stride(get<0>(InputStride{}) * GroupSize{},
-                           take<1, InputRank::value>(InputStride{})));
+  static constexpr int INNERMOST_DIM_SIZE = get<0>(InputShape{}).value;
+  static constexpr int INNERMOST_DIM_NUM_CHUNKS = ceil_div(INNERMOST_DIM_SIZE, CHUNK_SIZE);
+  
+  using Result_ = decltype(make_layout(
+    replace<0>(InputShape{}, Int<INNERMOST_DIM_NUM_CHUNKS>{}),
+    replace<0>(stride(make_layout(InputShape{}, LayoutLeft{})), Int<CHUNK_SIZE>{})
+  ));
 
 public:
-  using Result =
-      decltype(coalesce(flatten(Layout<OutputShape, OutputStride>{})));
+  using Result = decltype(coalesce(Result_{}));
 };
 
 // Type 2: Chunked, synchronous copy
 // The real innermost dim should be the first dimension
-// Every element in DstLayout and SrcLayout will be treated as a uint128_t
 template <typename T, class DstLayout, class SrcLayout, int NUM_THREADS>
 class InputChunkedSyncCopy {
 public:
   CUTE_STATIC_ASSERT_V(size(SrcLayout{}) == size(DstLayout{}));
 
-  static constexpr int GROUP_SIZE = 16 / sizeof(T);
-  using DstChunkedLayout =
-      typename InputChunkedLayoutConverter<DstLayout, GROUP_SIZE>::Result;
-  using SrcChunkedLayout =
-      typename InputChunkedLayoutConverter<SrcLayout, GROUP_SIZE>::Result;
-  using Numel = decltype(size(DstChunkedLayout{}));
-  CUTE_STATIC_ASSERT_V(size(DstChunkedLayout{}) == size(SrcChunkedLayout{}));
+  static constexpr int CHUNK_SIZE = 16 / sizeof(T);
+  using SrcChunkedCoord2Coord = typename GetChunkedCoord2Coord<SrcLayout, CHUNK_SIZE>::Result;
+  using DstChunkedCoord2Coord = typename GetChunkedCoord2Coord<DstLayout, CHUNK_SIZE>::Result;
+  static constexpr int NUM_CHUNKS = size(SrcChunkedCoord2Coord{}).value;
 
   static __device__ __forceinline__ void
       run(T *__restrict__ dst, T const *__restrict__ src, int thread_idx) {
-    constexpr auto numel = Numel{};
-    auto dst_chunked_layout = DstChunkedLayout{};
-    auto src_chunked_layout = SrcChunkedLayout{};
+    auto src_layout = SrcLayout{};
+    auto dst_layout = DstLayout{};
+    auto src_chunked_coord2coord = SrcChunkedCoord2Coord{};
+    auto dst_chunked_coord2coord = DstChunkedCoord2Coord{};
 #pragma unroll
-    for (int elem_idx = thread_idx; elem_idx < numel; elem_idx += NUM_THREADS) {
+    for (int chunk_idx = thread_idx; chunk_idx < NUM_CHUNKS; chunk_idx += NUM_THREADS) {
       uint128_t res =
-          *((uint128_t const *)(src + src_chunked_layout(elem_idx)));
-      *((uint128_t *)(dst + dst_chunked_layout(elem_idx))) = res;
+          *((uint128_t const *)(src + src_layout(src_chunked_coord2coord(chunk_idx))));
+      *((uint128_t *)(dst + dst_layout(dst_chunked_coord2coord(chunk_idx)))) = res;
     }
   }
 };
@@ -96,26 +96,24 @@ template <typename T, class DstLayout, class SrcLayout, int NUM_THREADS>
 class InputChunkedAsyncCopy {
 public:
   CUTE_STATIC_ASSERT_V(size(SrcLayout{}) == size(DstLayout{}));
-
-  static constexpr int GROUP_SIZE = 16 / sizeof(T);
-  using DstChunkedLayout =
-      typename InputChunkedLayoutConverter<DstLayout, GROUP_SIZE>::Result;
-  using SrcChunkedLayout =
-      typename InputChunkedLayoutConverter<SrcLayout, GROUP_SIZE>::Result;
-  using Numel = decltype(size(DstChunkedLayout{}));
-  CUTE_STATIC_ASSERT_V(size(DstChunkedLayout{}) == size(SrcChunkedLayout{}));
+  
+  static constexpr int CHUNK_SIZE = 16 / sizeof(T);
+  using SrcChunkedCoord2Coord = typename GetChunkedCoord2Coord<SrcLayout, CHUNK_SIZE>::Result;
+  using DstChunkedCoord2Coord = typename GetChunkedCoord2Coord<DstLayout, CHUNK_SIZE>::Result;
+  static constexpr int NUM_CHUNKS = size(SrcChunkedCoord2Coord{}).value;
 
   static __device__ __forceinline__ void
       run(T *__restrict__ dst, T const *__restrict__ src, int thread_idx) {
-    constexpr auto numel = Numel{};
-    auto dst_chunked_layout = DstChunkedLayout{};
-    auto src_chunked_layout = SrcChunkedLayout{};
+    auto src_layout = SrcLayout{};
+    auto dst_layout = DstLayout{};
+    auto src_chunked_coord2coord = SrcChunkedCoord2Coord{};
+    auto dst_chunked_coord2coord = DstChunkedCoord2Coord{};
     uint32_t dst_base_addr = cute::cast_smem_ptr_to_uint(dst);
 #pragma unroll
-    for (int elem_idx = thread_idx; elem_idx < numel; elem_idx += NUM_THREADS) {
-      size_t src_addr = (size_t)(src + src_chunked_layout(elem_idx));
+    for (int chunk_idx = thread_idx; chunk_idx < NUM_CHUNKS; chunk_idx += NUM_THREADS) {
+      size_t src_addr = (size_t)(src + src_layout(src_chunked_coord2coord(chunk_idx)));
       uint32_t dst_addr =
-          dst_base_addr + dst_chunked_layout(elem_idx) * sizeof(half);
+          dst_base_addr + dst_layout(dst_chunked_coord2coord(chunk_idx)) * sizeof(T);
       asm volatile(
           "cp.async.cg.shared.global.L2::128B [%0], [%1], 16;" ::"r"(dst_addr),
           "l"(src_addr));
