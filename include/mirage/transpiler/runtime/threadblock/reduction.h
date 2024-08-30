@@ -1,7 +1,6 @@
-// redyctuib.h - Implementation of thread block level reduction operators
+// reduction.h - Implementation of thread block level reduction operators
 #pragma once
 
-#include "cute/stride.hpp"
 #include <cassert>
 
 #include <cute/layout.hpp>
