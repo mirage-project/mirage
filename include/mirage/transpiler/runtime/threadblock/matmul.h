@@ -46,17 +46,24 @@ public:
 };
 
 // Dim01Swapper - Swap the first two dims of the input layout
+//
+// Assume the shape of the input layout $i$ is (A0, A1, A2), then the output
+// layout $o$ has a shape of (A1, A0, A2), and $i(a0, a1, a2) = o(a1, a0, a2)$ holds
 template <class InputLayout>
 class Dim01Swapper {
   CUTE_STATIC_ASSERT_V(rank(InputLayout{}) == _3{});
 
+  using A0 = decltype(get<0>(shape(InputLayout{})));
+  using A1 = decltype(get<1>(shape(InputLayout{})));
+  using A2 = decltype(get<2>(shape(InputLayout{})));
+  using TransposeCoordLayout = Layout<
+    Shape<A1, A0, A2>,
+    Stride<A0, _1, decltype(A0{}*A1{})>
+  >;
+  using Result_ = decltype(composition(InputLayout{}, TransposeCoordLayout{}));
+
 public:
-  using Result = Layout<decltype(make_shape(get<1>(shape(InputLayout{})),
-                                            get<0>(shape(InputLayout{})),
-                                            get<2>(shape(InputLayout{})))),
-                        decltype(make_stride(get<1>(stride(InputLayout{})),
-                                             get<0>(stride(InputLayout{})),
-                                             get<2>(stride(InputLayout{}))))>;
+  using Result = decltype(coalesce(Result_{}, Step<_1, _1, _1>{})); // By-mode coalescing
 };
 
 enum class S2RTiledCopyType { UNIVERSAL, LDMATRIX_N, LDMATRIX_T };
@@ -72,8 +79,8 @@ class S2RTiledCopySelector {
   // divisible by the shape of TiledMMA)
   static_assert(IS_LDMATRIX_AVAIL);
 
-  static constexpr bool IS_DIM0_INNERMOST = get<0>(stride(Layout{})) == _1{};
-  static constexpr bool IS_DIM1_INNERMOST = get<1>(stride(Layout{})) == _1{};
+  static constexpr bool IS_DIM0_INNERMOST = (Layout{})(_1{}, _0{}, _0{}) == _1{};
+  static constexpr bool IS_DIM1_INNERMOST = (Layout{})(_0{}, _1{}, _0{}) == _1{};
   static constexpr int CONSECUTIVE_DIM = IS_DIM0_INNERMOST ? 0 : 1;
 
   // TODO(intlsy) Fallback to normal copy when this is not true
@@ -399,20 +406,8 @@ public:
       return;
     }
 
-    // Tensor sA = make_tensor(make_smem_ptr(a_ptr), tile_to_shape(
-    //   Layout<Shape<_8, _8>, Stride<_8, _1>>{},
-    //   SmemLayoutA{}
-    // )); // [M, K, B]
-    Tensor sA = make_tensor(make_smem_ptr(a_ptr), SmemLayoutA{});
-    // Tensor sB = make_tensor(make_smem_ptr(b_ptr), tile_to_shape(
-    //   Layout<Shape<_8, _8>, Stride<_8, _1>>{},
-    //   SmemLayoutB{}
-    // )); // [N, K, B]
-    Tensor sB = make_tensor(make_smem_ptr(b_ptr), SmemLayoutB{});
-    // Tensor sC = make_tensor(make_smem_ptr(c_ptr), tile_to_shape(
-    //   Layout<Shape<_8, _8>, Stride<_8, _1>>{},
-    //   SmemLayoutC{}
-    // )); // [M, N, B]
+    Tensor sA = make_tensor(make_smem_ptr(a_ptr), SmemLayoutA{}); // [M, K, B]
+    Tensor sB = make_tensor(make_smem_ptr(b_ptr), SmemLayoutB{}); // [N, K, B]
     CUTE_STATIC_ASSERT_V(rank(sA) == _3{});
 
     if constexpr (K{} % _8{} != _0{}) {
