@@ -160,8 +160,6 @@ And then, let's talk about how we incorporate these swizzling methods into the T
 
 2. After that, for every STensor, we decide how to swizzle the layout. If the number of chunks in the innermost dimension, we use the xor method. Otherwise, we use the shift method.
 
-NOTE. Currently we always use the shift method since the XOR method seems not playing well with matmul. I'm not sure whether it's a bug of the Transpiler, or a bug of the CuTe library. Further investigation needed.
-
 ### Memory Planning
 
 Now we have decided the schedule (i.e. the order of operators). Now it's time to allocate memory for every STensor.
