@@ -487,9 +487,9 @@ CustomOPTranspileResult
           node.ops.back().first->op_type == type::TB_FORLOOP_ACCUM_NO_RED_OP;
       bool is_accum_in_reg = node.ops.back().second.is_accum_in_reg;
 
-      code.e("using Layout$A = $;", output.guid, get_cute_layout(input0, meta0));
-      code.e("using Layout$B = $;", output.guid, get_cute_layout(input1, meta1));
-      code.e("using Layout$C = $;", output.guid, get_cute_layout(output, meta2));
+      code.e("using Layout$A = $;", output.guid, get_stensor_layout(input0, meta0));
+      code.e("using Layout$B = $;", output.guid, get_stensor_layout(input1, meta1));
+      code.e("using Layout$C = $;", output.guid, get_stensor_layout(output, meta2));
 
       code.e("using Matmul$Kernel = tb::Matmul<half_t, $, Layout<Shape<Int<$>, "
              "Int<$>, _1>>, $, $, Layout$A, Layout$B, Layout$C, NUM_THREADS, "
