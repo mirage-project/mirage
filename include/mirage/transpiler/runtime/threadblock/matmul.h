@@ -419,9 +419,9 @@ public:
     Tensor s2r_rB =
         s2r_tiled_copy_B_thr.retile_D(mma_rB); // (S2R, S2R_N, S2R_K)
 
-    CUTE_STATIC_ASSERT_V(shape<2>(s2r_rA) == shape<2>(mma_rA));
-    CUTE_STATIC_ASSERT_V(shape<2>(s2r_rA) == shape<2>(s2r_rB));
-    static constexpr int NUM_MMA_K_STAGES = shape<2>(s2r_sA);
+    CUTE_STATIC_ASSERT_V(size(shape<2>(s2r_rA)) == size(shape<2>(mma_rA)));
+    CUTE_STATIC_ASSERT_V(size(shape<2>(s2r_rA)) == size(shape<2>(s2r_rB)));
+    static constexpr int NUM_MMA_K_STAGES = size(shape<2>(s2r_sA));
 
 #define S2RCOPY(k_idx)                                                         \
   s2r_copy_with_oob_protection<T, M, K>(s2r_tiled_copy_A,                      \
