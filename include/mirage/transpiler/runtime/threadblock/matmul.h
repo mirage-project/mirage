@@ -391,10 +391,19 @@ public:
     }
     TiledMMA tiled_mma;
     ThrMMA thr_mma = tiled_mma.get_slice(thread_idx);
+
     Tensor mma_rA =
         thr_mma.partition_fragment_A(sA); // (MMA, MMA_M, MMA_K)
     Tensor mma_rB =
         thr_mma.partition_fragment_B(sB); // (MMA, MMA_N, MMA_K)
+
+    // NOTE. If you encountered the issue 
+    // 
+    // static_assert(decltype(size(rB) == Int<RegNumB>{})::value);
+    // 
+    // Please upgrade your Cutlass version to at least 3.5.1 (commit e1976daacc7b030ba672217eb5d96f5a663df4ab)
+    // Refer to this link for more information:
+    // https://github.com/NVIDIA/cutlass/issues/1766
 
     S2RTiledCopyA s2r_tiled_copy_A;
     ThrCopy s2r_tiled_copy_A_thr = s2r_tiled_copy_A.get_slice(thread_idx);
@@ -410,9 +419,9 @@ public:
     Tensor s2r_rB =
         s2r_tiled_copy_B_thr.retile_D(mma_rB); // (S2R, S2R_N, S2R_K)
 
-    CUTE_STATIC_ASSERT_V(shape<2>(s2r_rA) == shape<2>(mma_rA));
-    CUTE_STATIC_ASSERT_V(shape<2>(s2r_rA) == shape<2>(s2r_rB));
-    static constexpr int NUM_MMA_K_STAGES = shape<2>(s2r_sA);
+    CUTE_STATIC_ASSERT_V(size(shape<2>(s2r_rA)) == size(shape<2>(mma_rA)));
+    CUTE_STATIC_ASSERT_V(size(shape<2>(s2r_rA)) == size(shape<2>(s2r_rB)));
+    static constexpr int NUM_MMA_K_STAGES = size(shape<2>(s2r_sA));
 
 #define S2RCOPY(k_idx)                                                         \
   s2r_copy_with_oob_protection<T, M, K>(s2r_tiled_copy_A,                      \
