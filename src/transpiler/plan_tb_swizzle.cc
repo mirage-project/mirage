@@ -1,4 +1,5 @@
 #include <unordered_map>
+#include <unordered_set>
 #include "mirage/transpiler/transpiler.h"
 
 namespace mirage {
@@ -10,15 +11,16 @@ void Transpiler::get_threadblock_swizzle_plan(tb::Graph const &tb_graph,
 	// Get a list of all STensors that is not fused
 	std::vector<tb::STensor> all_stensors;
 	{
+		std::unordered_set<sguid_t> seen_guids;
 		for (const TBSchedNode &node : Combine(Combine(sched.pre_loop_nodes, sched.loop_nodes), sched.post_loop_nodes)) {
 			if (node.type != tb_sched_node_t::OPERATOR) {
 				continue;
 			}
-			for (const tb::STensor &stensor : node.ops.front().first->input_tensors) {
-				all_stensors.push_back(stensor);
-			}
-			for (const tb::STensor &stensor : node.ops.back().first->output_tensors) {
-				all_stensors.push_back(stensor);
+			for (const tb::STensor &stensor : Combine(node.ops.front().first->input_tensors, node.ops.back().first->output_tensors)) {
+				if (!seen_guids.count(stensor.guid)) {
+					seen_guids.insert(stensor.guid);
+					all_stensors.push_back(stensor);
+				}
 			}
 		}
 	}
@@ -137,7 +139,7 @@ void Transpiler::get_threadblock_swizzle_plan(tb::Graph const &tb_graph,
 			assert(stensor.dim[meta.innermost_dim] != 1);
 			meta.strides[meta.innermost_dim] = 1;
   		size_t cur_stride = new_num_chunks_in_inner_dim * chunk_size_num_elems;
-			printf("Shift-based swizzled. New innermost stride: %lu -> %lu\n", num_chunks_in_inner_dim*chunk_size_num_elems, cur_stride);
+			printf("%u -> %lu\n", num_chunks_in_inner_dim * chunk_size_num_elems, cur_stride);
 			for (int i = num_dims-1; i >= 0; --i) {
 				if (i == meta.innermost_dim) {
 					continue;

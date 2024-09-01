@@ -94,6 +94,13 @@ ADD_TESTCASE(Testcase("tb_matmul", {"threadblock", "correctness", "perf"}, "thre
 			{127, 126, 31},
 			false
 		},
+		{
+			// Should trigger shift swizzle
+			"92x94x64 + 46x47x32",
+			{92, 94, 64},
+			{46, 47, 32},
+			false
+		},
 
 		// Performance tests
 		{
