@@ -487,12 +487,12 @@ CustomOPTranspileResult
           node.ops.back().first->op_type == type::TB_FORLOOP_ACCUM_NO_RED_OP;
       bool is_accum_in_reg = node.ops.back().second.is_accum_in_reg;
 
-      code.e("using LayoutA = $;", get_stensor_layout(input0, meta0));
-      code.e("using LayoutB = $;", get_stensor_layout(input1, meta1));
-      code.e("using LayoutC = $;", get_stensor_layout(output, meta2));
+      code.e("using Matmul$LayoutA = $;", output.guid, get_stensor_layout(input0, meta0));
+      code.e("using Matmul$LayoutB = $;", output.guid, get_stensor_layout(input1, meta1));
+      code.e("using Matmul$LayoutC = $;", output.guid, get_stensor_layout(output, meta2));
 
       code.e("using Matmul$Kernel = tb::Matmul<half_t, $, Layout<Shape<Int<$>, "
-             "Int<$>, _1>>, $, $, LayoutA, LayoutB, LayoutC, NUM_THREADS, "
+             "Int<$>, _1>>, $, $, Matmul$LayoutA, Matmul$LayoutB, Matmul$LayoutC, NUM_THREADS, "
              "$, $>;",
              output.guid,
              mma_atom_str,
@@ -500,6 +500,9 @@ CustomOPTranspileResult
              best_num_tg_n,
              is_ldmatrix_avail,
              is_stmatrix_avail,
+             output.guid,
+             output.guid,
+             output.guid,
              num_exps_before_store,
              is_accum_in_reg ? false : is_store_accum);
       // Allocate accumulators in register files (if needed)
