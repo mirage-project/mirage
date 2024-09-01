@@ -139,7 +139,7 @@ void Transpiler::get_threadblock_swizzle_plan(tb::Graph const &tb_graph,
 			assert(stensor.dim[meta.innermost_dim] != 1);
 			meta.strides[meta.innermost_dim] = 1;
   		size_t cur_stride = new_num_chunks_in_inner_dim * chunk_size_num_elems;
-			printf("%u -> %lu\n", num_chunks_in_inner_dim * chunk_size_num_elems, cur_stride);
+			// printf("%u -> %lu\n", num_chunks_in_inner_dim * chunk_size_num_elems, cur_stride);
 			for (int i = num_dims-1; i >= 0; --i) {
 				if (i == meta.innermost_dim) {
 					continue;
