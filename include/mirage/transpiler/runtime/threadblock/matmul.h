@@ -27,36 +27,24 @@ C<std::max(x, y)> max(C<x> const &, C<y> const &) {
   return {};
 }
 
-// LayoutGrouper - Return a new layout with a rank of 3
-// If the input layout has a rank of 2, append a dim of 1 to the end
-// If the input layout's rank is greater than 2, group the last (rank-2) dims
-// into one This convert the input layout to a shape of "[MATRIX-SIZE-0,
-// MATRIX-SIZE-1, BATCH-SIZE]"
-template <class RealLayout>
-class LayoutGrouper {
-  static_assert(is_static_v<RealLayout>);
-  CUTE_STATIC_ASSERT_V(rank(RealLayout{}) >= _2{});
-
-public:
-  using Result =
-      std::conditional_t<(rank(RealLayout{}) == _2{}),
-                         decltype(append<3>(RealLayout{}, Layout<_1>{})),
-                         decltype(group<2, rank(RealLayout{})>(RealLayout{}))>;
-  CUTE_STATIC_ASSERT_V(rank(Result{}) == _3{});
-};
-
 // Dim01Swapper - Swap the first two dims of the input layout
+//
+// Assume the shape of the input layout $i$ is (A0, A1, A2), then the output
+// layout $o$ has a shape of (A1, A0, A2), and $i(a0, a1, a2) = o(a1, a0, a2)$ holds
 template <class InputLayout>
 class Dim01Swapper {
-  CUTE_STATIC_ASSERT_V(rank(InputLayout{}) == _3{});
+  CUTE_STATIC_ASSERT_V(rank(InputLayout{}) == _2{});
+
+  using A0 = decltype(get<0>(shape(InputLayout{})));
+  using A1 = decltype(get<1>(shape(InputLayout{})));
+  using TransposeCoordLayout = Layout<
+    Shape<A1, A0>,
+    Stride<A0, _1>
+  >;
+  using Result_ = decltype(composition(InputLayout{}, TransposeCoordLayout{}));
 
 public:
-  using Result = Layout<decltype(make_shape(get<1>(shape(InputLayout{})),
-                                            get<0>(shape(InputLayout{})),
-                                            get<2>(shape(InputLayout{})))),
-                        decltype(make_stride(get<1>(stride(InputLayout{})),
-                                             get<0>(stride(InputLayout{})),
-                                             get<2>(stride(InputLayout{}))))>;
+  using Result = decltype(coalesce(Result_{}, Step<_1, _1>{})); // By-mode coalescing
 };
 
 enum class S2RTiledCopyType { UNIVERSAL, LDMATRIX_N, LDMATRIX_T };
@@ -72,8 +60,8 @@ class S2RTiledCopySelector {
   // divisible by the shape of TiledMMA)
   static_assert(IS_LDMATRIX_AVAIL);
 
-  static constexpr bool IS_DIM0_INNERMOST = get<0>(stride(Layout{})) == _1{};
-  static constexpr bool IS_DIM1_INNERMOST = get<1>(stride(Layout{})) == _1{};
+  static constexpr bool IS_DIM0_INNERMOST = (Layout{})(_1{}, _0{}) == _1{};
+  static constexpr bool IS_DIM1_INNERMOST = (Layout{})(_0{}, _1{}) == _1{};
   static constexpr int CONSECUTIVE_DIM = IS_DIM0_INNERMOST ? 0 : 1;
 
   // TODO(intlsy) Fallback to normal copy when this is not true
@@ -190,7 +178,7 @@ template <class T,
 CUTE_HOST_DEVICE void r2s_copy_with_oob_protection(
     TiledCopy const &tiled_copy,
     Tensor<SrcEngine, SrcLayout> const &src, // [R2S, R2S_M, R2S_N]
-    Tensor<DstEngine, DstLayout> &&dst,      // The same as src
+    Tensor<DstEngine, DstLayout> &dst,      // The same as src
     int thread_idx) {
   static_assert(SrcLayout::rank == 3);
   static_assert(DstLayout::rank == 3);
@@ -265,9 +253,9 @@ template <typename T,
           class TiledMMAThrLayout,
           bool IS_LDMATRIX_AVAIL,
           bool IS_STMATRIX_AVAIL,
-          class RealSmemLayoutA, // [K, M, ...]
-          class RealSmemLayoutB, // [N, K, ...]
-          class RealSmemLayoutC, // [N, M, ...]
+          class SmemLayoutA_, // [K, M]
+          class SmemLayoutB_, // [N, K]
+          class SmemLayoutC_, // [N, M]
           int NUM_THREADS,
           int NUM_EXPS_BEFORE_STORE, // Since matmul may use some advanced
                                      // instructions (like stmatrix) to store
@@ -276,34 +264,17 @@ template <typename T,
           bool IS_STORE_ACCUM>
 class Matmul {
 public:
-  // Group the last few dims into one dim
-  CUTE_STATIC_ASSERT_V(rank(RealSmemLayoutA{}) == rank(RealSmemLayoutB{}) &&
-                       rank(RealSmemLayoutB{}) == rank(RealSmemLayoutC{}));
-  using SmemLayoutA_ =
-      typename LayoutGrouper<RealSmemLayoutA>::Result; // [K, M, B]
-  using SmemLayoutB_ =
-      typename LayoutGrouper<RealSmemLayoutB>::Result; // [N, K, B]
-  using SmemLayoutC_ =
-      typename LayoutGrouper<RealSmemLayoutC>::Result; // [N, M, B]
+  CUTE_STATIC_ASSERT_V(rank(SmemLayoutA_{}) == _2{});
+  CUTE_STATIC_ASSERT_V(rank(SmemLayoutB_{}) == _2{});
+  CUTE_STATIC_ASSERT_V(rank(SmemLayoutC_{}) == _2{});
 
-  using SmemLayoutA = typename Dim01Swapper<SmemLayoutA_>::Result; // [M, K, B]
-  using SmemLayoutB = SmemLayoutB_;                                // [N, K, B]
-  using SmemLayoutC = typename Dim01Swapper<SmemLayoutC_>::Result; // [M, N, B]
-
-  // Currently Mirage only supports STensor with the last 2 dims (in our case,
-  // the first 2 dims) > 1. So the last dim of SmemLayoutA/B/C should always
-  // be 1
-  // TODO(intlsy) Relax this assumption
-  CUTE_STATIC_ASSERT_V(rank(SmemLayoutA{}) == _3{});
-  CUTE_STATIC_ASSERT_V(rank(SmemLayoutB{}) == _3{});
-  CUTE_STATIC_ASSERT_V(rank(SmemLayoutC{}) == _3{});
-  CUTE_STATIC_ASSERT_V(get<2>(shape(SmemLayoutA{})) == _1{});
-  CUTE_STATIC_ASSERT_V(get<2>(shape(SmemLayoutB{})) == _1{});
-  CUTE_STATIC_ASSERT_V(get<2>(shape(SmemLayoutC{})) == _1{});
+  using SmemLayoutA = typename Dim01Swapper<SmemLayoutA_>::Result; // [M, K]
+  using SmemLayoutB = SmemLayoutB_;                                // [N, K]
+  using SmemLayoutC = typename Dim01Swapper<SmemLayoutC_>::Result; // [M, N]
 
   // Shape checking
-  // Expect A have a shape of [M, K, B], B have a shape of [N, K, B], and
-  // C have a shape of [M, N, B]
+  // Expect A have a shape of [M, K], B have a shape of [N, K], and
+  // C have a shape of [M, N]
   using M = decltype(get<0>(shape(SmemLayoutA{})));
   using K = decltype(get<1>(shape(SmemLayoutA{})));
   using N = decltype(get<0>(shape(SmemLayoutB{})));
@@ -360,7 +331,7 @@ public:
     TiledMMA tiled_mma;
     ThrMMA thr_mma = tiled_mma.get_slice(thread_idx);
     Tensor mma_rC = thr_mma.partition_fragment_C(
-        sC_fake(_, _, _0{})); // (MMA, MMA_M, MMA_N)
+        sC_fake); // (MMA, MMA_M, MMA_N)
     clear(mma_rC);
     return mma_rC;
   }
@@ -371,19 +342,19 @@ public:
     if (thread_idx >= TILED_MMA_NUM_THREADS) {
       return;
     }
-    Tensor sC = make_tensor(make_smem_ptr(c_ptr), SmemLayoutC{}); // [M, N, B]
+    Tensor sC = make_tensor(make_smem_ptr(c_ptr), SmemLayoutC{}); // [M, N]
     R2STiledCopyC r2s_tiled_copy_C;
     ThrCopy r2s_tiled_copy_C_thr = r2s_tiled_copy_C.get_slice(thread_idx);
     Tensor r2s_rC =
         r2s_tiled_copy_C_thr.retile_S(mma_rC); // (R2S, R2S_M, R2S_N)
     Tensor r2s_sC =
-        r2s_tiled_copy_C_thr.partition_D(sC); // (R2S, R2S_M, R2S_N, B)
+        r2s_tiled_copy_C_thr.partition_D(sC); // (R2S, R2S_M, R2S_N)
     r2s_copy_with_oob_protection<T,
                                  M,
                                  N,
                                  NUM_EXPS_BEFORE_STORE,
                                  IS_STORE_ACCUM>(
-        r2s_tiled_copy_C, r2s_rC, r2s_sC(_, _, _, _0{}), thread_idx);
+        r2s_tiled_copy_C, r2s_rC, r2s_sC, thread_idx);
   }
 
   template <typename MMARc>
@@ -399,21 +370,8 @@ public:
       return;
     }
 
-    // Tensor sA = make_tensor(make_smem_ptr(a_ptr), tile_to_shape(
-    //   Layout<Shape<_8, _8>, Stride<_8, _1>>{},
-    //   SmemLayoutA{}
-    // )); // [M, K, B]
-    Tensor sA = make_tensor(make_smem_ptr(a_ptr), SmemLayoutA{});
-    // Tensor sB = make_tensor(make_smem_ptr(b_ptr), tile_to_shape(
-    //   Layout<Shape<_8, _8>, Stride<_8, _1>>{},
-    //   SmemLayoutB{}
-    // )); // [N, K, B]
-    Tensor sB = make_tensor(make_smem_ptr(b_ptr), SmemLayoutB{});
-    // Tensor sC = make_tensor(make_smem_ptr(c_ptr), tile_to_shape(
-    //   Layout<Shape<_8, _8>, Stride<_8, _1>>{},
-    //   SmemLayoutC{}
-    // )); // [M, N, B]
-    CUTE_STATIC_ASSERT_V(rank(sA) == _3{});
+    Tensor sA = make_tensor(make_smem_ptr(a_ptr), SmemLayoutA{}); // [M, K]
+    Tensor sB = make_tensor(make_smem_ptr(b_ptr), SmemLayoutB{}); // [N, K]
 
     if constexpr (K{} % _8{} != _0{}) {
       // Need to pad with zero
@@ -421,34 +379,34 @@ public:
       if constexpr (S2R_TILED_COPY_A_TYPE == S2RTiledCopyType::LDMATRIX_N) {
         CUTE_UNROLL
         for (int i = thread_idx; i < int(M{}) * K_LEFTOVER; i += NUM_THREADS) {
-          sA(i / K_LEFTOVER, K{} + i % K_LEFTOVER, _0{}) = (T)0;
+          sA(i / K_LEFTOVER, K{} + i % K_LEFTOVER) = (T)0;
         }
       }
       if constexpr (S2R_TILED_COPY_B_TYPE == S2RTiledCopyType::LDMATRIX_N) {
         CUTE_UNROLL
         for (int i = thread_idx; i < int(N{}) * K_LEFTOVER; i += NUM_THREADS) {
-          sB(i / K_LEFTOVER, K{} + i % K_LEFTOVER, _0{}) = (T)0;
+          sB(i / K_LEFTOVER, K{} + i % K_LEFTOVER) = (T)0;
         }
       }
     }
     TiledMMA tiled_mma;
     ThrMMA thr_mma = tiled_mma.get_slice(thread_idx);
     Tensor mma_rA =
-        thr_mma.partition_fragment_A(sA(_, _, _0{})); // (MMA, MMA_M, MMA_K)
+        thr_mma.partition_fragment_A(sA); // (MMA, MMA_M, MMA_K)
     Tensor mma_rB =
-        thr_mma.partition_fragment_B(sB(_, _, _0{})); // (MMA, MMA_N, MMA_K)
+        thr_mma.partition_fragment_B(sB); // (MMA, MMA_N, MMA_K)
 
     S2RTiledCopyA s2r_tiled_copy_A;
     ThrCopy s2r_tiled_copy_A_thr = s2r_tiled_copy_A.get_slice(thread_idx);
     Tensor s2r_sA =
-        s2r_tiled_copy_A_thr.partition_S(sA); // (S2R, S2R_M, S2R_K, B)
+        s2r_tiled_copy_A_thr.partition_S(sA); // (S2R, S2R_M, S2R_K)
     Tensor s2r_rA =
         s2r_tiled_copy_A_thr.retile_D(mma_rA); // (S2R, S2R_M, S2R_K)
 
     S2RTiledCopyB s2r_tiled_copy_B;
     ThrCopy s2r_tiled_copy_B_thr = s2r_tiled_copy_B.get_slice(thread_idx);
     Tensor s2r_sB =
-        s2r_tiled_copy_B_thr.partition_S(sB); // (S2R, S2R_N, S2R_K, B)
+        s2r_tiled_copy_B_thr.partition_S(sB); // (S2R, S2R_N, S2R_K)
     Tensor s2r_rB =
         s2r_tiled_copy_B_thr.retile_D(mma_rB); // (S2R, S2R_N, S2R_K)
 
@@ -458,13 +416,13 @@ public:
 
 #define S2RCOPY(k_idx)                                                         \
   s2r_copy_with_oob_protection<T, M, K>(s2r_tiled_copy_A,                      \
-                                        s2r_sA(_, _, k_idx, _0{}),             \
+                                        s2r_sA(_, _, k_idx),             \
                                         s2r_rA(_, _, k_idx),                   \
                                         smem_allzero_ptr,                      \
                                         k_idx,                                 \
                                         thread_idx);                           \
   s2r_copy_with_oob_protection<T, N, K>(s2r_tiled_copy_B,                      \
-                                        s2r_sB(_, _, k_idx, _0{}),             \
+                                        s2r_sB(_, _, k_idx),             \
                                         s2r_rB(_, _, k_idx),                   \
                                         smem_allzero_ptr,                      \
                                         k_idx,                                 \

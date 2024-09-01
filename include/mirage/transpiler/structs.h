@@ -84,8 +84,8 @@ struct DTensorMeta {
 
   // Stride of each dimension, in number of elements
   // We may pad the strides to multiple of 8 to leverage `cp.async` instruction
-  // Refer to this discussion for more information about the layout of
-  // DTensor/STensor: https://github.com/mirage-project/mirage/discussions/33
+  // Refer to the document for more information about the layout of
+  // DTensor/STensor
   size_t strides[kernel::MAX_TENSOR_DIMS];
 
   // Innermost dimension (dimension with stride=1)
@@ -113,8 +113,10 @@ struct STensorMeta {
   // Innermost dimension (dimension with stride=1)
   int innermost_dim;
 
-  // Dimensions that are swizzled
-  std::vector<int> swizzled_dims;
+  // Dimension that is swizzled
+  // Currently we only allow swizzling one dimension
+  // -1 means no swizzling
+  int swizzled_dim;
 
   // Strides of each dimension, in number of elements
   // Must be padded to multiple of 8
@@ -123,10 +125,11 @@ struct STensorMeta {
   // Physical size needed for the tensor (in number of elements)
   size_t num_phy_elems;
 
-  bool is_dim_swizzled(int dim) const {
-    return std::find(swizzled_dims.begin(), swizzled_dims.end(), dim) !=
-           swizzled_dims.end();
-  }
+  // Whether this tensor needs to be XOR-based swizzled
+  bool is_xor_swizzled;
+
+  // XOR-based swizzling parameters
+  int xor_swizzle_b, xor_swizzle_m, xor_swizzle_s;
 };
 
 struct TBMemoryPlan {

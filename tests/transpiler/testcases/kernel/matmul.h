@@ -20,9 +20,9 @@ ADD_TESTCASE(Testcase("matmul_correctness", {"kernel", "correctness"}, "kernel-l
 }));
 
 ADD_TESTCASE(Testcase("matmul_perf", {"kernel", "perf"}, "kernel-level matmul performance test", [](Testcase* this_testcase) {
-	const int batch_size = 16;
-	const int m = 2048;
-	const int n = 1024;
+	const int batch_size = 1;
+	const int m = 4096;
+	const int n = 4096;
 	const int k = 1024;
 	auto epilogue = [=](const Subcase::RunResult &res) -> string {
 		return "GFLOPS: " + std::to_string((double)batch_size*m*n*k*2 / res.avg_time_ms / 1e6);

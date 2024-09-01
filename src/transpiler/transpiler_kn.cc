@@ -108,7 +108,7 @@ std::pair<string, string>
   return {pointer_var_name, code};
 }
 
-TranspileResult Transpiler::generate_code() {
+TranspileResult Transpiler::transpile_ugraph() {
   // Generate header
   CodeKeeper header;
   header.e("#define NUM_GPUS $", num_gpus);

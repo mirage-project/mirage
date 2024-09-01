@@ -589,9 +589,14 @@ void Transpiler::resolve_tensor_layout() {
     }
     assert(innermost_dim != -1);
     this->stensor_metas[stensor.guid].innermost_dim = innermost_dim;
+
+    this->stensor_metas[stensor.guid].swizzled_dim = -1;
     for (int i = 0; i < num_dims; ++i) {
       if (m.eval(s_is_swizzled[stensor.guid][i]).is_true()) {
-        this->stensor_metas[stensor.guid].swizzled_dims.push_back(i);
+        this->stensor_metas[stensor.guid].swizzled_dim = i;
+        // Only swizzle the first met dim since an STensor can only have up to
+        // 2 dimensions
+        break;
       }
     }
   }

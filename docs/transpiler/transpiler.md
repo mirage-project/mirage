@@ -76,7 +76,7 @@ In the Runtime, the operator fusion is implemented as "epilogues". An epilogue i
 
 During fusion, we are actually "chaining" operators, which means that we are dividing the original threadblock-level graph into several chains. Every chain contains a "leading" operator, and a series (possibly zero) elementwise-unary operators. Here is an illustration:
 
-![tb-sched-conflict-example](/docs/assets/transpiler/tb-sched-conflict-example.drawio.svg)
+![tb-fusion-chain-example](/docs/assets/transpiler/tb-fusion-chain.drawio.svg)
 
 ### Layout Resolution
 
@@ -86,9 +86,11 @@ The layout is crucial for the performance of the generated code. For example, if
 
 To resolve layouts for all tensors, we first constructs an boolean ILP problem to decide the "innermost dimension", the dimension with a stride of 1, of every `DTensor` and `STensor`. For every dimension of every tensor, we have a boolean variable indicating whether it's the innermost dimension. After that, we add a set of restrictions (stands for restrictions proposed by kernels in the Runtime, like cuBLAS requires the innermost dim to be among the last two dimensions), and build the optimization target (one operator under different layouts may have different performance, and we want to minimize the total "cost"). After that, we use the Z3 solver to find the optimal solution.
 
+In the equation mentioned above, for each dimension in every `STensor`, we also have another boolean variable indicating whether this dimension is "swizzled", or in other words, this dimension is not the innermost dimension but threads may access data along this dimension. Under this scenario, we can swizzle the layout of this dimension to avoid bank conflicts. For more information about swizzling, please refer to the "How to Swizzle" section in "Problems and Solutions".
+
 After deciding the innermost dimension, it's time to calculate the strides. The stride of one dimension is the number of elements between two consecutive elements in this dimension. For example, for a row-major 2D tensor with shape $[m, n]$, it has a stride of $[n, 1]$. The physical address of an element is the dot product between its coordinates and the stride, while in our example, an element with coordinates $(i, j)$ has a physical address of $i \times n + j$.
 
-Here we use a heuristic to calculate the strides, implemented in the function `calc_tensor_strides`. Assume the innermost dim of one tensor is dimension #k, and the number of dimensions is N. We first decide an "order" of all dimensions, which is $[k, N-1, N-2, \dots, k+1, k-1, \dots, 1, 0]$, and then assign strides based on that order (see `calc_tensor_strides` for details). We also pad the first non-1 dimension to a multiple of 8 (since there are 8 halfs in 16 Bytes) to ensure the address of the starting element of every dimension (with coords looks like $(0, 0, \dots, 0, M, 0, \dots, 0)$) is aligned to 16 Bytes.
+Here we use a heuristic to calculate the strides, implemented in the function `calc_tensor_strides`. Assume the innermost dim of one tensor is dimension #k, and the number of dimensions is N. We first decide an "order" of all dimensions, which is $[k, N-1, N-2, \dots, k+1, k-1, \dots, 1, 0]$, and then assign strides based on that order (see `calc_tensor_strides` for details). We also pad the first non-1 dimension to a multiple of 8 (since there are 8 halfs in 16 Bytes) to ensure the address of the starting element of every dimension (with coords looks like $(0, 0, \dots, 0, M, 0, \dots, 0)$) is aligned to 16 Bytes (comment: This doesn't hold if shift-based swizzling is used later).
 
 ### TB Graph Scheduling and Memory Planning
 
@@ -130,6 +132,30 @@ In this step, we also generate relative metadata for every operator. For example
 Finally, we end with a linear order of operators, with metadata attached.
 
 From another perspective, this step effectively translates the threadblock-level graph (which can be seen as a graph IR) into another linear IR for further processing.
+
+### Decide How to Swizzle
+
+Sometimes we need to swizzle the layout of an `STensor` in order to avoid bank conflict. For example, when loading a 8x8 or 16x16 submatrix using the `ldmatrix` instruction, different threads may request data from the same bank if no swizzling is applied, leading to performance degration.
+
+Generally speaking, there are two methods to swizzle a layout: "xor method" and "shift method".
+
+The idea of the xor method is to calculate the bitwise XOR between the row number and the original address, and use that as the new address, i.e. $new\_addr = old\_addr \oplus row$. That's the one used in `cute::Swizzle`.
+
+Let's take an example. Assume we have a $8 \times 8$ tensor with row-major layout. We also have 8 banks (physical address $i$ will be mapped to bank $i \mod 8$). Here is an illustration of the original layout and the swizzled layout:
+
+![swizzle-xor-example](/docs/assets/transpiler/swizzle-xor-example.drawio.svg)
+
+This swizzling method requires no memory overhead, but it can only be used when the number of columns is a power of 2. For logic deciding the swizzling parameters ($B$, $M$, and $S$), please refer to code in `plan_tb_swizzle.cc`.
+
+Another method is the shift method. The idea is to calculate the new address by $new\_addr = old\_addr + row \times shift$, where $shift$ is a constant chosen by us. Intuitively, it looks like to "enlarge" the stride of the row to "shift" banks. This method can be used no matter how many columns the tensor has, but it requires a memory overhead of $shift \times \text{num\_rows}$. Here is an example:
+
+![swizzle-shift-example](/docs/assets/transpiler/swizzle-shift-example.drawio.svg)
+
+According to number theory, we can totally avoid bank conflict if the greatest common divisor (GCD) between the new stride (original stride + shift) and the number of banks is $1$. Since the number of banks is usually a power of 2, we can always find a shift $\in \{0, 1\}$ that satisfies this requirement, so the memory overhead is quite small.
+
+And then, let's talk about how we incorporate these swizzling methods into the Transpiler.
+
+1. First, some instructions require every $chunk$ element to be contiguous and in-order, e.g. when performing `ldmatrix` instruction or chunked copying, every 8 halfs should be consecutive in memory. We calculate this "chunk size" after TB graph scheduling since the metadata of every operator is ready at that time.
 
 ### Memory Planning
 
