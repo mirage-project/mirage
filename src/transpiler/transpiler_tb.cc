@@ -15,6 +15,7 @@
 
 #include "mirage/threadblock/forloop_accum.h"
 #include "mirage/threadblock/operator.h"
+#include "mirage/threadblock/smem_tensor.h"
 #include "mirage/transpiler/common.h"
 #include "mirage/transpiler/structs.h"
 #include "mirage/transpiler/transpiler.h"
@@ -33,6 +34,8 @@ namespace transpiler {
 using std::string;
 namespace kn = mirage::kernel;
 namespace tb = mirage::threadblock;
+
+namespace get_layout_detail {
 
 // Get a CuTe layout from dims and strides
 //
@@ -58,7 +61,7 @@ static string get_cute_layout(Tensor_T const &tensor, Meta_T const &meta) {
       vector<size_t>(meta.strides, meta.strides + tensor.num_dims));
 }
 
-// A helper function for mov_inner_dim_and_get_layout
+// A helper function
 template <typename T>
 static std::vector<T> mov_to_last(T const *vec, size_t numel, int idx) {
   std::vector<T> result;
@@ -68,6 +71,20 @@ static std::vector<T> mov_to_last(T const *vec, size_t numel, int idx) {
   result.push_back(vec[idx]);
   return result;
 }
+} // namespace get_layout_detail
+
+// Get the layout of a STensor
+static string get_stensor_layout(tb::STensor const &stensor, STensorMeta const &meta) {
+  if (!meta.is_xor_swizzled) {
+    // Do not need to swizzle
+    // (Probably swizzled by SHIFT-based swizzling, but we do not care about that)
+    return get_layout_detail::get_cute_layout(stensor, meta);
+  } else {
+    // XOR-based swizzling 
+    return fmt("decltype(composition(Swizzle<$, $, $>{}, ${}))",
+    meta.xor_swizzle_b, meta.xor_swizzle_m, meta.xor_swizzle_s, get_layout_detail::get_cute_layout(stensor, meta));
+  }
+}
 
 // Move the innermost dim to the last dim, and format it as a CuTe layout
 // string.
@@ -75,17 +92,30 @@ static std::vector<T> mov_to_last(T const *vec, size_t numel, int idx) {
 // Assume the tensor has N dimensions and the innermost dim is i, then the
 // function is equivalent to torch.permute(tensor, [0, 1, ..., i-1, i+1, ..., N,
 // i])
-//
-// This function is helpful for element-wise ops, since the
-// processing order of elements do not affect the correctness.
-template <typename Tensor_T, typename Meta_T>
-static string mov_last_and_get_layout(Tensor_T const &tensor,
-                                      Meta_T const &meta,
-                                      int innermost_dim) {
-  assert(0 <= innermost_dim && innermost_dim < tensor.num_dims);
+static string mov_last_get_stensor_layout(tb::STensor const &stensor, STensorMeta const &meta, int innermost_dim) {
+  tb::STensor new_stensor = stensor;
+  STensorMeta new_meta = meta;
+  new_meta.swizzled_dim = -1;
+  for (int i = 0; i < stensor.num_dims; ++i) {
+    int src_dim = i == stensor.num_dims-1 ? innermost_dim : i < innermost_dim ? i : i+1;
+    new_stensor.dim[i] = stensor.dim[src_dim];
+    new_meta.strides[i] = meta.strides[src_dim];
+    if (src_dim == meta.swizzled_dim)
+      new_meta.swizzled_dim = i;
+  }
+  new_meta.innermost_dim = stensor.num_dims - 1;
+  return get_stensor_layout(new_stensor, new_meta);
+}
+
+// Get the layout of a DTensor tile for input/output operators
+static string get_dtensor_tile_layout(kn::DTensor const& dtensor, DTensorMeta const& d_meta, tb::STensor const& stensor, STensorMeta const& s_meta, int d_innermost_dim) {
+  using namespace get_layout_detail;
   return get_cute_layout(
-      mov_to_last(tensor.dim, tensor.num_dims, innermost_dim),
-      mov_to_last(meta.strides, tensor.num_dims, innermost_dim));
+            mov_to_last(stensor.dim,
+                        dtensor.num_dims,
+                        d_innermost_dim), // Here we use stensor.dim
+            mov_to_last(
+                d_meta.strides, dtensor.num_dims, d_innermost_dim));
 }
 
 // Transpile a custom KN operator (i.e. a custom block graph) into CUDA code
@@ -98,6 +128,8 @@ CustomOPTranspileResult
 
   // Get the schedule
   TBSched sched = get_threadblock_schedule(g);
+
+  get_threadblock_swizzle_plan(g, sched);
 
   // Get the memory allocation plan
   TBMemoryPlan mem_plan = get_threadblock_memory_plan(g, sched);
@@ -203,27 +235,17 @@ CustomOPTranspileResult
       if (!use_chunked_copy) {
         int d_innermost_dim = dtensor_meta.innermost_dim;
         assert(!use_async_copy);
-        string dtensor_tile_layout = get_cute_layout(
-            mov_to_last(stensor.dim,
-                        dtensor.num_dims,
-                        d_innermost_dim), // Here we use stensor.dim
-            mov_to_last(
-                dtensor_meta.strides, dtensor.num_dims, d_innermost_dim));
+        string dtensor_tile_layout = get_dtensor_tile_layout(dtensor, dtensor_meta, stensor, stensor_meta, d_innermost_dim);
         code.e(
             "using DTensor$TileLayout = $;", dtensor.guid, dtensor_tile_layout);
         // Non-chunked, synchronous copy
         code.e("using STensor$InputAtom = tb::InputNonChunkedSyncCopy<half_t, "
                "$, DTensor$TileLayout, NUM_THREADS>;",
                stensor.guid,
-               mov_last_and_get_layout(stensor, stensor_meta, d_innermost_dim),
+               mov_last_get_stensor_layout(stensor, stensor_meta, d_innermost_dim),
                dtensor.guid);
       } else {
-        string dtensor_tile_layout = get_cute_layout(
-            mov_to_last(stensor.dim,
-                        dtensor.num_dims,
-                        real_innermost_dim), // Here we use stensor.dim
-            mov_to_last(
-                dtensor_meta.strides, dtensor.num_dims, real_innermost_dim));
+        string dtensor_tile_layout = get_dtensor_tile_layout(dtensor, dtensor_meta, stensor, stensor_meta, real_innermost_dim);
         code.e(
             "using DTensor$TileLayout = $;", dtensor.guid, dtensor_tile_layout);
         if (!use_async_copy) {
@@ -231,7 +253,7 @@ CustomOPTranspileResult
           code.e("using STensor$InputAtom = tb::InputChunkedSyncCopy<half_t, "
                  "$, DTensor$TileLayout, NUM_THREADS>;",
                  stensor.guid,
-                 mov_last_and_get_layout(
+                 mov_last_get_stensor_layout(
                      stensor, stensor_meta, real_innermost_dim),
                  dtensor.guid);
         } else {
@@ -240,7 +262,7 @@ CustomOPTranspileResult
           code.e("using STensor$InputAtom = tb::InputChunkedAsyncCopy<half_t, "
                  "$, DTensor$TileLayout, NUM_THREADS>;",
                  stensor.guid,
-                 mov_last_and_get_layout(
+                 mov_last_get_stensor_layout(
                      stensor, stensor_meta, real_innermost_dim),
                  dtensor.guid);
           code.e("half_t *stensor$_async_copy_buf = stensor$_ptr;",
@@ -328,12 +350,7 @@ CustomOPTranspileResult
 
       if (!use_chunked_copy) {
         int d_innermost_dim = dtensor_meta.innermost_dim;
-        string dtensor_tile_layout = get_cute_layout(
-            mov_to_last(stensor.dim,
-                        dtensor.num_dims,
-                        d_innermost_dim), // Here we use stensor.dim
-            mov_to_last(
-                dtensor_meta.strides, dtensor.num_dims, d_innermost_dim));
+        string dtensor_tile_layout = get_dtensor_tile_layout(dtensor, dtensor_meta, stensor, stensor_meta, d_innermost_dim);
         code.e(
             "using DTensor$TileLayout = $;", dtensor.guid, dtensor_tile_layout);
         code.e(
@@ -341,14 +358,9 @@ CustomOPTranspileResult
             "DTensor$TileLayout, $, NUM_THREADS>;",
             stensor.guid,
             dtensor.guid,
-            mov_last_and_get_layout(stensor, stensor_meta, d_innermost_dim));
+            mov_last_get_stensor_layout(stensor, stensor_meta, d_innermost_dim));
       } else {
-        string dtensor_tile_layout = get_cute_layout(
-            mov_to_last(stensor.dim,
-                        dtensor.num_dims,
-                        real_innermost_dim), // Here we use stensor.dim
-            mov_to_last(
-                dtensor_meta.strides, dtensor.num_dims, real_innermost_dim));
+        string dtensor_tile_layout = get_dtensor_tile_layout(dtensor, dtensor_meta, stensor, stensor_meta, real_innermost_dim);
         code.e(
             "using DTensor$TileLayout = $;", dtensor.guid, dtensor_tile_layout);
         code.e(
@@ -356,7 +368,7 @@ CustomOPTranspileResult
             "DTensor$TileLayout, $, NUM_THREADS>;",
             stensor.guid,
             dtensor.guid,
-            mov_last_and_get_layout(stensor, stensor_meta, real_innermost_dim));
+            mov_last_get_stensor_layout(stensor, stensor_meta, real_innermost_dim));
       }
       // TODO(intlsy) Support TMA
     }
@@ -475,9 +487,9 @@ CustomOPTranspileResult
           node.ops.back().first->op_type == type::TB_FORLOOP_ACCUM_NO_RED_OP;
       bool is_accum_in_reg = node.ops.back().second.is_accum_in_reg;
 
-      code.e("using LayoutA = $;", get_cute_layout(input0, meta0));
-      code.e("using LayoutB = $;", get_cute_layout(input1, meta1));
-      code.e("using LayoutC = $;", get_cute_layout(output, meta2));
+      code.e("using LayoutA = $;", get_stensor_layout(input0, meta0));
+      code.e("using LayoutB = $;", get_stensor_layout(input1, meta1));
+      code.e("using LayoutC = $;", get_stensor_layout(output, meta2));
 
       code.e("using Matmul$Kernel = tb::Matmul<half_t, $, Layout<Shape<Int<$>, "
              "Int<$>, _1>>, $, $, LayoutA, LayoutB, LayoutC, NUM_THREADS, "
@@ -661,7 +673,7 @@ CustomOPTranspileResult
             bool failed = false;
             for (tb::STensor const &stensor : {input, output}) {
               STensorMeta meta = stensor_metas.at(stensor.guid);
-              if (i != meta.innermost_dim && !meta.is_dim_swizzled(i)) {
+              if (i != meta.innermost_dim && meta.swizzled_dim != i) {
                 failed = true;
                 break;
               }
@@ -673,9 +685,9 @@ CustomOPTranspileResult
           }
           assert(iter_dim != -1);
           // Define layouts
-          string in_layout = mov_last_and_get_layout(
+          string in_layout = mov_last_get_stensor_layout(
               input, stensor_metas.at(input.guid), iter_dim);
-          string final_out_layout = mov_last_and_get_layout(
+          string final_out_layout = mov_last_get_stensor_layout(
               output, stensor_metas.at(output.guid), iter_dim);
           code.e("using InLayout = $;", in_layout);
           code.e("using OutLayout = $;", final_out_layout);
@@ -706,7 +718,7 @@ CustomOPTranspileResult
             bool failed = false;
             for (tb::STensor const &stensor : {input0, input1, output}) {
               STensorMeta meta = stensor_metas.at(stensor.guid);
-              if (i != meta.innermost_dim && !meta.is_dim_swizzled(i)) {
+              if (i != meta.innermost_dim && meta.swizzled_dim != i) {
                 failed = true;
                 break;
               }
@@ -724,11 +736,11 @@ CustomOPTranspileResult
                                                                 : "";
           assert(op_type_str != "");
           // Define layouts
-          string in0_layout = mov_last_and_get_layout(
+          string in0_layout = mov_last_get_stensor_layout(
               input0, stensor_metas.at(input0.guid), iter_dim);
-          string in1_layout = mov_last_and_get_layout(
+          string in1_layout = mov_last_get_stensor_layout(
               input1, stensor_metas.at(input1.guid), iter_dim);
-          string final_out_layout = mov_last_and_get_layout(
+          string final_out_layout = mov_last_get_stensor_layout(
               output, stensor_metas.at(output.guid), iter_dim);
           code.e("using In0Layout = $;", in0_layout);
           code.e("using In1Layout = $;", in1_layout);
@@ -757,7 +769,6 @@ CustomOPTranspileResult
           tb::STensor const &input = op->input_tensors.at(0);
           tb::STensor const &output = output_op->output_tensors.at(0);
           STensorMeta input_meta = stensor_metas.at(input.guid);
-          STensorMeta orig_output_meta = stensor_metas.at(output.guid);
           STensorMeta final_output_meta = stensor_metas.at(output.guid);
           assert(input.num_dims == output.num_dims);
           int num_dims = input.num_dims;
@@ -774,7 +785,7 @@ CustomOPTranspileResult
             bool failed = false;
             for (tb::STensor const &stensor : {input, output}) {
               STensorMeta meta = stensor_metas.at(stensor.guid);
-              if (i != meta.innermost_dim && !meta.is_dim_swizzled(i)) {
+              if (i != meta.innermost_dim && meta.swizzled_dim != i) {
                 failed = true;
                 break;
               }
@@ -788,9 +799,9 @@ CustomOPTranspileResult
           assert(iter_dim != reduc_dim);
           // Define layouts
           string in_layout =
-              mov_last_and_get_layout(input, input_meta, iter_dim);
+              mov_last_get_stensor_layout(input, input_meta, iter_dim);
           string final_out_layout =
-              mov_last_and_get_layout(output, final_output_meta, iter_dim);
+              mov_last_get_stensor_layout(output, final_output_meta, iter_dim);
           int cute_reduc_dim = reduc_dim < iter_dim ? num_dims - 1 - reduc_dim
                                                     : num_dims - reduc_dim;
           code.e("using InLayout = $;", in_layout);
@@ -819,7 +830,7 @@ CustomOPTranspileResult
             bool failed = false;
             for (tb::STensor const &stensor : {input, accum}) {
               STensorMeta meta = stensor_metas.at(stensor.guid);
-              if (i != meta.innermost_dim && !meta.is_dim_swizzled(i)) {
+              if (i != meta.innermost_dim && meta.swizzled_dim != i) {
                 failed = true;
                 break;
               }
@@ -831,9 +842,9 @@ CustomOPTranspileResult
           }
           assert(iter_dim != -1);
           // Define layouts
-          string in_layout = mov_last_and_get_layout(
+          string in_layout = mov_last_get_stensor_layout(
               input, stensor_metas.at(input.guid), iter_dim);
-          string accum_layout = mov_last_and_get_layout(
+          string accum_layout = mov_last_get_stensor_layout(
               accum, stensor_metas.at(accum.guid), iter_dim);
           code.e("using Kernel = tb::ForloopAccumKernel<half_t, $, $, "
                  "NUM_THREADS>;",
