@@ -330,17 +330,8 @@ public:
         make_tensor(make_smem_ptr((half_t *)nullptr), SmemLayoutC{});
     TiledMMA tiled_mma;
     ThrMMA thr_mma = tiled_mma.get_slice(thread_idx);
-
-    Tensor mma_sC = thr_mma.partition_C(sC_fake);
-    Tensor mma_rC = make_fragment_like<half_t>(shape(mma_sC)); // (MMA, MMA_M, MMA_N)
-
-    /*
-    We do not use the following code because of a bug in CuTe:
-    https://github.com/NVIDIA/cutlass/issues/1766
     Tensor mma_rC = thr_mma.partition_fragment_C(
         sC_fake); // (MMA, MMA_M, MMA_N)
-    */
-    
     clear(mma_rC);
     return mma_rC;
   }
@@ -401,19 +392,18 @@ public:
     TiledMMA tiled_mma;
     ThrMMA thr_mma = tiled_mma.get_slice(thread_idx);
 
-    /*
-    We do not use the following code because of a bug in CuTe:
-    https://github.com/NVIDIA/cutlass/issues/1766
     Tensor mma_rA =
         thr_mma.partition_fragment_A(sA); // (MMA, MMA_M, MMA_K)
     Tensor mma_rB =
         thr_mma.partition_fragment_B(sB); // (MMA, MMA_N, MMA_K)
-    */
 
-    Tensor mma_sA = thr_mma.partition_A(sA);
-    Tensor mma_rA = make_fragment_like<half_t>(shape(mma_sA));
-    Tensor mma_sB = thr_mma.partition_B(sB);
-    Tensor mma_rB = make_fragment_like<half_t>(shape(mma_sB));
+    // NOTE. If you encountered the issue 
+    // 
+    // static_assert(decltype(size(rB) == Int<RegNumB>{})::value);
+    // 
+    // Please upgrade your Cutlass version to at least 3.5.1 (commit e1976daacc7b030ba672217eb5d96f5a663df4ab)
+    // Refer to this link for more information:
+    // https://github.com/NVIDIA/cutlass/issues/1766
 
     S2RTiledCopyA s2r_tiled_copy_A;
     ThrCopy s2r_tiled_copy_A_thr = s2r_tiled_copy_A.get_slice(thread_idx);
