@@ -47,6 +47,11 @@ template <>
   return std::string(1, value);
 }
 
+template <>
+[[maybe_unused]] std::string my_to_string(bool const &value) {
+  return value ? "true" : "false";
+}
+
 // A vector {a, b, c, d} will be converted to "a, b, c, d"
 template <typename T>
 [[maybe_unused]] std::string my_to_string(std::vector<T> const &vec) {

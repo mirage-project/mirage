@@ -147,7 +147,7 @@ Let's take an example. Assume we have a $8 \times 8$ tensor with row-major layou
 
 This swizzling method requires no memory overhead, but it can only be used when the number of columns is a power of 2. For logic deciding the swizzling parameters ($B$, $M$, and $S$), please refer to code in `plan_tb_swizzle.cc`.
 
-Another method is the shift method. The idea is to calculate the new address by $new\_addr = old\_addr + row \times shift$, where $shift$ is a constant chosen by us. Intuitively, it looks like to "enlarge" the stride of the row to "shift" banks. This method can be used no matter how many columns the tensor has, but it requires a memory overhead of $shift \times \text{num\_rows}$. Here is an example:
+Another method is the shift method. The idea is to calculate the new address by $new\_addr = old\_addr + row \times shift$, where $shift$ is a constant chosen by us. Intuitively, it looks like to "enlarge" the stride of the row to "shift" banks. This method can be used no matter how many columns the tensor has, but it requires a memory overhead of $shift \times num\_rows$. Here is an example:
 
 ![swizzle-shift-example](/docs/assets/transpiler/swizzle-shift-example.drawio.svg)
 
