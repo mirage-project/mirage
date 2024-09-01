@@ -114,8 +114,7 @@ ADD_TESTCASE(Testcase("tb_matmul", {"threadblock", "correctness", "perf"}, "thre
 		{true, true}, {true, false}, {false, true}, {false, false}
 	};
 	vector<dim3> block_dim_subcases = {
-		// {32, 1, 1},
-		{32, 2, 1}, {128, 1, 1}, {8, 8, 4}
+		{32, 1, 1}, {32, 2, 1}, {128, 1, 1}, {8, 8, 4}
 	};
 	vector<SubcaseConfig> subcases;
 	for (const SubcaseConfig &shape_subcase : shape_subcases)

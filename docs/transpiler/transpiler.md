@@ -57,8 +57,9 @@ The Transpiler can be divided into several steps:
   - If the operator is a pre-defined kernel operator (say, a Matmul), we call the corresponding function in the Runtime.
   - If the operator is a custom operator (`KN_CUSTOMIZED_OP`), we call the function `transpile_kn_custom_op` which transpiles the custom operator into a CUDA kernel (a function marked with `__global__`). This includes:
     1. **TB Graph Scheduling.** Choose the order of operators to perform, which we called "TB Sched". From another perspective, this step translates the threadblock-level graph (which can be seen as a graph IR) into a sequence of operators (similar to a linear IR).
-    2. **Memory Planning.** Allocate memory for every `STensor`.
-    3. **Threadblock-Level Transpilation.** Transpile the threadblock level code based on the TB graph scheduling and memory planning.
+    2. **Swizzle Planning.** Plan how to swizzle the layout of every `STensor` to avoid bank conflicts.
+    3. **Memory Planning.** Allocate memory for every `STensor`.
+    4. **Threadblock-Level Transpilation.** Transpile the threadblock level code based on the TB graph scheduling and memory planning.
 
 ## Algorithms
 
@@ -156,6 +157,10 @@ According to number theory, we can totally avoid bank conflict if the greatest c
 And then, let's talk about how we incorporate these swizzling methods into the Transpiler.
 
 1. First, some instructions require every $chunk$ element to be contiguous and in-order, e.g. when performing `ldmatrix` instruction or chunked copying, every 8 halfs should be consecutive in memory. We calculate this "chunk size" after TB graph scheduling since the metadata of every operator is ready at that time.
+
+2. After that, for every STensor, we decide how to swizzle the layout. If the number of chunks in the innermost dimension, we use the xor method. Otherwise, we use the shift method.
+
+NOTE. Currently we always use the shift method since the XOR method seems not playing well with matmul. I'm not sure whether it's a bug of the Transpiler, or a bug of the CuTe library. Further investigation needed.
 
 ### Memory Planning
 
