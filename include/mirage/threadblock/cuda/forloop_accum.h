@@ -71,7 +71,5 @@ public:
   }
 };
 
-
 } // namespace threadblock
 } // namespace mirage
-

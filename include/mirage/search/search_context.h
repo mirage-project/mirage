@@ -9,7 +9,7 @@
 
 namespace mirage {
 namespace search {
-  
+
 enum class SearchLevel {
   LV_KERNEL,
   LV_THREADBLOCK,
@@ -29,5 +29,5 @@ struct SearchContext {
 void to_json(json &j, SearchContext const &);
 void from_json(json const &j, SearchContext &);
 
-} // namespace search 
-}
+} // namespace search
+} // namespace mirage

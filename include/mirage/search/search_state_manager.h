@@ -5,7 +5,6 @@
 #include <mutex>
 #include <queue>
 
-
 namespace mirage {
 namespace search {
 
@@ -24,7 +23,7 @@ template <typename T>
 class GlobalWorkerQueueManager : public SearchStateManager<T> {
 public:
   GlobalWorkerQueueManager(std::chrono::milliseconds timeout = 1000)
-      : timeout(timeout) {};
+      : timeout(timeout){};
 
   void add_state(T const &c) override {
     std::lock_guard<std::mutex> lock(queue_mutex);
@@ -58,7 +57,8 @@ private:
 template <typename T>
 class LocalConditionalManager : public SearchStateManager<T> {
 public:
-  LocalConditionalManager(std::function<bool(T const &)> const &stop_condition) : stop_condition(stop_condition) {}
+  LocalConditionalManager(std::function<bool(T const &)> const &stop_condition)
+      : stop_condition(stop_condition) {}
 
   void add_state(T const &c) override {
     search_queue.push(c);
@@ -94,5 +94,5 @@ private:
   std::function<bool(T const &)> stop_condition;
 };
 
-}
-}
+} // namespace search
+} // namespace mirage

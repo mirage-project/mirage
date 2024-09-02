@@ -19,7 +19,8 @@ public:
   }
 
   template <typename U>
-  friend std::ostream &operator<<(std::ostream &os, PropagationPath<U> const &path);
+  friend std::ostream &operator<<(std::ostream &os,
+                                  PropagationPath<U> const &path);
 
 private:
   std::unordered_set<T> existed;
@@ -35,5 +36,5 @@ std::ostream &operator<<(std::ostream &os, PropagationPath<T> const &path) {
   return os;
 }
 
-}
-}
+} // namespace search
+} // namespace mirage

@@ -45,10 +45,10 @@ TBOperator *Graph::create_concat_op(STensor const &A,
     return nullptr;
   }
 
-  //if (smem_offset + A.size() + B.size() >
-  //    (off_t)mirage::config::MAX_SMEM_SIZE) {
-  //  return nullptr;
-  //}
+  // if (smem_offset + A.size() + B.size() >
+  //     (off_t)mirage::config::MAX_SMEM_SIZE) {
+  //   return nullptr;
+  // }
 
   TBOperator *op = new TBConcatOp(this, A, B, concat_dim);
   // Check shmem usage

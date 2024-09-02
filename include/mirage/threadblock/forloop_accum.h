@@ -22,8 +22,7 @@ namespace threadblock {
 
 class TBForloopAccumOp : public TBOperator {
 public:
-  TBForloopAccumOp(Graph *_graph,
-                   STensor const &input);
+  TBForloopAccumOp(Graph *_graph, STensor const &input);
   ~TBForloopAccumOp();
 
   operator json() const override;

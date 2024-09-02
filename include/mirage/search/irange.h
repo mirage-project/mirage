@@ -151,17 +151,15 @@ std::unordered_map<size_t, IKNRange> range_propagate(
     kernel::Graph const &graph,
     std::shared_ptr<threadblock::Graph const> tb_graph = nullptr);
 
-bool check_range(
-    std::pair<size_t, IKNRange> const &init_range,
-    std::vector<IKNRange> const &target_ranges,
-    kernel::Graph const &graph,
-    std::shared_ptr<threadblock::Graph const> tb_graph = nullptr);
+bool check_range(std::pair<size_t, IKNRange> const &init_range,
+                 std::vector<IKNRange> const &target_ranges,
+                 kernel::Graph const &graph,
+                 std::shared_ptr<threadblock::Graph const> tb_graph = nullptr);
 
-bool check_range(
-    std::vector<std::pair<size_t, IKNRange>> const &init_ranges,
-    std::vector<std::vector<IKNRange>> const &target_ranges,
-    kernel::Graph const &graph,
-    std::shared_ptr<threadblock::Graph const> tb_graph = nullptr);
+bool check_range(std::vector<std::pair<size_t, IKNRange>> const &init_ranges,
+                 std::vector<std::vector<IKNRange>> const &target_ranges,
+                 kernel::Graph const &graph,
+                 std::shared_ptr<threadblock::Graph const> tb_graph = nullptr);
 
 std::vector<std::pair<size_t, IKNRange>>
     get_init_ranges(kernel::Graph const &graph);

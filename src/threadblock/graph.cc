@@ -34,8 +34,10 @@ Graph::Graph(dim3 _grid_dim,
     : grid_dim(_grid_dim), block_dim(_block_dim), forloop_range(_forloop_range),
       reduction_dimx(_reduction_dimx), smem_offset(0) {
   // A bgraph cannot have more than MAX_NUM_THREADBLOCKS_PER_KERNEL threadblocks
-  // otherwise we don't have enough buffers in device memory for saving fingerprints
-  assert(grid_dim.x * grid_dim.y * grid_dim.z <= mirage::config::MAX_NUM_THREADBLOCKS_PER_KERNEL);
+  // otherwise we don't have enough buffers in device memory for saving
+  // fingerprints
+  assert(grid_dim.x * grid_dim.y * grid_dim.z <=
+         mirage::config::MAX_NUM_THREADBLOCKS_PER_KERNEL);
   assert(reduction_dimx > 0);
 }
 
@@ -172,7 +174,7 @@ size_t Graph::calculate_shared_memory_usage(TBOperator *new_op) {
 
   // currently use a simple heuristic to calculate shmem usage
   // TODO: replace the following with a transpiler-based method
-  for (const auto& op : operators) {
+  for (auto const &op : operators) {
     switch (op->op_type) {
       case mirage::type::TB_INPUT_OP:
       case mirage::type::TB_OUTPUT_OP:
@@ -343,9 +345,9 @@ NewKernelParams Graph::get_new_kernel_params(bool fingerprint) const {
         assert(operators[i]->output_tensors.size() == 0);
         mirage::threadblock::STensor input_stensor =
             operators[i]->input_tensors[0];
-        //mirage::threadblock::STensor accum_stensor =
-        //    operators[i]->output_tensors[0];
-        // Assert that stensor and dtensor have the same num of dims
+        // mirage::threadblock::STensor accum_stensor =
+        //     operators[i]->output_tensors[0];
+        //  Assert that stensor and dtensor have the same num of dims
         int num_dims = input_stensor.num_dims;
         // assert(num_dims == accum_stensor.num_dims);
         assert(num_dims == dtensor.num_dims);

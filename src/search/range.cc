@@ -101,5 +101,5 @@ std::ostream &operator<<(std::ostream &os, Range const &range) {
   return os;
 }
 
-}
-}
+} // namespace search
+} // namespace mirage

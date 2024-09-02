@@ -341,9 +341,11 @@ __global__ void compute_customizedop_fingerprint(
   // since we are using cutlass, we group all threads within a threadblock
   // as a 1-D list of threads, therefore blockDim.y and blockDim.z must be
   // 1
-  //extern __shared__ char smem_buffer[];
-  int64_t thread_block_idx = blockIdx.x * gridDim.y * gridDim.z + blockIdx.y * gridDim.z + blockIdx.z;
-  char *smem_buffer = stensor_fp_base_ptr + thread_block_idx * mirage::config::MAX_SMEM_FP_SIZE;
+  // extern __shared__ char smem_buffer[];
+  int64_t thread_block_idx =
+      blockIdx.x * gridDim.y * gridDim.z + blockIdx.y * gridDim.z + blockIdx.z;
+  char *smem_buffer =
+      stensor_fp_base_ptr + thread_block_idx * mirage::config::MAX_SMEM_FP_SIZE;
   assert(blockDim.y == 1);
   assert(blockDim.z == 1);
 
@@ -432,13 +434,12 @@ __global__ void compute_customizedop_fingerprint(
           mirage::type::FPType *accum_stensor_ptr =
               (mirage::type::FPType *)(smem_buffer + accum_smem_offset);
           bool reset_output = (i == 0);
-          mirage::threadblock::TBForloopAccumFingerprinter fp(
-              input_stensor_ptr,
-              accum_stensor_ptr,
-              num_elements,
-              reset_output,
-              threadIdx.x,
-              blockDim.x);
+          mirage::threadblock::TBForloopAccumFingerprinter fp(input_stensor_ptr,
+                                                              accum_stensor_ptr,
+                                                              num_elements,
+                                                              reset_output,
+                                                              threadIdx.x,
+                                                              blockDim.x);
           __syncthreads();
           break;
         }
@@ -767,12 +768,11 @@ bool KNCustomizedOp::fingerprint(void) {
       mirage::kernel::DeviceMemoryManager::get_instance();
 
   // Make sure we don't launch more threadblocks than allowed
-  assert(bgraph.grid_dim.x * bgraph.grid_dim.y * bgraph.grid_dim.z
-         <= mirage::config::MAX_NUM_THREADBLOCKS_PER_KERNEL);
+  assert(bgraph.grid_dim.x * bgraph.grid_dim.y * bgraph.grid_dim.z <=
+         mirage::config::MAX_NUM_THREADBLOCKS_PER_KERNEL);
 
   for (int gpu_id = 0; gpu_id < kgraph->gpu_dim.x; gpu_id++) {
-    compute_customizedop_fingerprint<<<bgraph.grid_dim,
-                                       bgraph.block_dim>>>(
+    compute_customizedop_fingerprint<<<bgraph.grid_dim, bgraph.block_dim>>>(
         new_params,
         bgraph.forloop_range,
         dmm->fp_base_ptr[gpu_id],

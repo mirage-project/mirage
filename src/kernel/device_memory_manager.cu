@@ -101,7 +101,10 @@ DeviceMemoryManager::DeviceMemoryManager(int _num_gpus) : num_gpus(_num_gpus) {
         checkCUDA(
             cudaMalloc(&fp_base_ptr[k], mirage::config::MAX_DMEM_FP_SIZE));
       }
-      checkCUDA(cudaMalloc(&stensor_fp_base_ptr, mirage::config::MAX_SMEM_FP_SIZE * mirage::config::MAX_NUM_THREADBLOCKS_PER_KERNEL));
+      checkCUDA(
+          cudaMalloc(&stensor_fp_base_ptr,
+                     mirage::config::MAX_SMEM_FP_SIZE *
+                         mirage::config::MAX_NUM_THREADBLOCKS_PER_KERNEL));
     }
   }
 }

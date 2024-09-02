@@ -365,7 +365,8 @@ void KernelGraphGenerator::generate_next_operator(
           continue;
         };
         nc.tb_graph->operators.push_back(new_op);
-        if (check_range(init_ranges, target_ranges, *nc.kn_graph, nc.tb_graph)) {
+        if (check_range(
+                init_ranges, target_ranges, *nc.kn_graph, nc.tb_graph)) {
           manager->add_state(nc);
         }
       }

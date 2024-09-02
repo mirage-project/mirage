@@ -1,8 +1,8 @@
 #pragma once
 
+#include <cassert>
 #include <iostream>
 #include <vector>
-#include <cassert>
 
 namespace mirage {
 namespace search {
@@ -56,5 +56,5 @@ std::ostream &operator<<(std::ostream &os, Range const &range);
 
 using KNRange = Range;
 
-}
-}
+} // namespace search
+} // namespace mirage

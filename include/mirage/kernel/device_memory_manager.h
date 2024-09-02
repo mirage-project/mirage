@@ -50,6 +50,7 @@ public:
   char *data_base_ptr[mirage::config::MAX_NUM_GPUS];
   char *fp_base_ptr[mirage::config::MAX_NUM_GPUS];
   char *stensor_fp_base_ptr;
+
 public:
   cudaStream_t stream[mirage::config::MAX_NUM_GPUS];
   cublasHandle_t blas[mirage::config::MAX_NUM_GPUS];

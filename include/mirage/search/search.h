@@ -1,17 +1,17 @@
 #pragma once
 
 #include <atomic>
+#include <functional>
 #include <unordered_map>
 #include <unordered_set>
-#include <functional>
 
 #include "mirage/search/config.h"
 #include "mirage/search/dim_strategy.h"
+#include "mirage/search/irange.h"
 #include "mirage/search/order.h"
-#include "mirage/utils/json_utils.h"
 #include "mirage/search/search_context.h"
 #include "mirage/search/search_state_manager.h"
-#include "mirage/search/irange.h"
+#include "mirage/utils/json_utils.h"
 
 namespace mirage {
 namespace search {
@@ -57,7 +57,8 @@ private:
 
   void search(SearchStateManager<SearchContext> *manager);
 
-  void generate_next_operator(SearchContext const &c, SearchStateManager<SearchContext> *manager);
+  void generate_next_operator(SearchContext const &c,
+                              SearchStateManager<SearchContext> *manager);
 
   bool create_threadblock_outputs(
       SearchContext &c,

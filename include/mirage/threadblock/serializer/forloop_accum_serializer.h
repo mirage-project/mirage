@@ -23,23 +23,21 @@ namespace mirage {
 namespace threadblock {
 
 CUTLASS_HOST_DEVICE
-void deserialize_forloop_accum_parameters(
-    int const *params,
-    int &param_idx,
-    int &num_elements,
-    int &input_smem_offset,
-    int &accum_smem_offset) {
+void deserialize_forloop_accum_parameters(int const *params,
+                                          int &param_idx,
+                                          int &num_elements,
+                                          int &input_smem_offset,
+                                          int &accum_smem_offset) {
   num_elements = params[param_idx++];
   input_smem_offset = params[param_idx++];
   accum_smem_offset = params[param_idx++];
 }
 
-inline void serialize_forloop_accum_parameters(
-    int *params,
-    int &param_idx,
-    int num_elements,
-    int input_smem_offset,
-    int accum_smem_offset) {
+inline void serialize_forloop_accum_parameters(int *params,
+                                               int &param_idx,
+                                               int num_elements,
+                                               int input_smem_offset,
+                                               int accum_smem_offset) {
   params[param_idx++] = num_elements;
   params[param_idx++] = input_smem_offset;
   params[param_idx++] = accum_smem_offset;

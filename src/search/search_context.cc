@@ -59,5 +59,5 @@ void from_json(json const &j, SearchContext &c) {
   c.level = j["level"];
 }
 
-}
-}
+} // namespace search
+} // namespace mirage

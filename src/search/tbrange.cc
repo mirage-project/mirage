@@ -54,7 +54,8 @@ bool TBRange::is_subrange(TBRange const &range) const {
 }
 
 std::ostream &operator<<(std::ostream &os, TBRange const &range) {
-  os << range.tensor_range << "|" << range.block_range << "|" << range.forloop_range;
+  os << range.tensor_range << "|" << range.block_range << "|"
+     << range.forloop_range;
   return os;
 }
 

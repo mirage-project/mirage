@@ -65,7 +65,8 @@ public:
 
   RangeSet<R, T> combine(RangeSet const &ranges2) const {
     return RangeSet<R, T>(vector_concat(ranges, ranges2.ranges),
-                       vector_concat(paths, ranges2.paths)).simplify();
+                          vector_concat(paths, ranges2.paths))
+        .simplify();
   }
 
   RangeSet<R, T> offset(std::vector<int> const &off) const {

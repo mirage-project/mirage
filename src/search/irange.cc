@@ -1036,8 +1036,8 @@ std::vector<std::pair<size_t, IKNRange>>
     }
   }
   for (auto &[idx, range] : init_ranges) {
-    range.range_set = range.range_set.truncate(
-        graph.operators[idx]->output_tensors[0]);
+    range.range_set =
+        range.range_set.truncate(graph.operators[idx]->output_tensors[0]);
   }
   return init_ranges;
 }
