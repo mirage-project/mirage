@@ -11,6 +11,7 @@
 #include "mirage/utils/json_utils.h"
 #include "mirage/search/search_context.h"
 #include "mirage/search/search_state_manager.h"
+#include "mirage/search/irange.h"
 
 namespace mirage {
 namespace search {
@@ -49,6 +50,10 @@ private:
 
   std::mutex fp_mutex;
   std::mutex generated_graphs_mutex;
+
+  // Ranges-related fields
+  std::vector<std::pair<size_t, IKNRange>> init_ranges;
+  std::vector<std::vector<IKNRange>> target_ranges;
 
   void search(SearchStateManager<SearchContext> *manager);
 

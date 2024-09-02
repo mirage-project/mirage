@@ -43,6 +43,23 @@ std::vector<T> to_vector(int n, T *arr) {
 }
 
 template <typename T>
+std::vector<T> vector_concat(std::vector<T> const &v1,
+                             std::vector<T> const &v2) {
+  std::vector<T> v = v1;
+  v.insert(v.end(), v2.begin(), v2.end());
+  return v;
+}
+
+template <typename T, typename F>
+std::vector<std::invoke_result_t<F, T>> vector_map(std::vector<T> const &v, F f) {
+  std::vector<std::invoke_result_t<F, T>> new_v;
+  for (auto const &x : v) {
+    new_v.push_back(f(x));
+  }
+  return new_v;
+}
+
+template <typename T>
 struct _reversed {
   T &iter;
 

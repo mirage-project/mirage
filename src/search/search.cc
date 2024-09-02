@@ -230,7 +230,9 @@ void KernelGraphGenerator::generate_next_operator(
                         get_tensors_from_idx(*nc.kn_graph, input_idx));
           if (new_op) {
             nc.kn_graph->operators.push_back(new_op);
-            manager->add_state(nc);
+            if (check_range(init_ranges, target_ranges, *nc.kn_graph)) {
+              manager->add_state(nc);
+            }
           }
         }
       } else {
@@ -319,7 +321,9 @@ void KernelGraphGenerator::generate_next_operator(
         assert(nc.kn_graph->operators.back()->kgraph->gpu_dim.x == 1);
         nc.level = SearchLevel::LV_KERNEL;
         nc.tb_graph = nullptr;
-        manager->add_state(nc);
+        if (check_range(init_ranges, target_ranges, *nc.kn_graph)) {
+          manager->add_state(nc);
+        }
       }
     }
 
@@ -359,9 +363,11 @@ void KernelGraphGenerator::generate_next_operator(
                       get_tensors_from_idx(*nc.tb_graph, input_idx));
         if (!new_op) {
           continue;
-        }
+        };
         nc.tb_graph->operators.push_back(new_op);
-        manager->add_state(nc);
+        if (check_range(init_ranges, target_ranges, *nc.kn_graph, nc.tb_graph)) {
+          manager->add_state(nc);
+        }
       }
     }
   }
@@ -496,7 +502,6 @@ void KernelGraphGenerator::generate_kernel_graphs() {
 }
 
 void KernelGraphGenerator::preprocess(kernel::Graph const &computation_graph) {
-
   for (kernel::KNOperator *op : computation_graph.operators) {
     if (op->op_type == type::KNOperatorType::KN_INPUT_OP) {
       computation_graph_input_attrs.push_back(
@@ -509,6 +514,10 @@ void KernelGraphGenerator::preprocess(kernel::Graph const &computation_graph) {
   std::unordered_map<int64_t, std::shared_ptr<AlgebraicPattern>>
       computation_graph_patterns;
   pattern_eval(computation_graph, computation_graph_patterns);
+
+  init_ranges = get_init_ranges(computation_graph);
+  target_ranges = get_interact_ranges(init_ranges, computation_graph);
+  assert(init_ranges.size() == target_ranges.size());
 
   for (auto const &op : computation_graph.operators) {
     op->fingerprint();
