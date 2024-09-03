@@ -76,6 +76,9 @@ Range Range::offset(std::vector<int> const &offset) const {
 }
 
 Range Range::transpose(int dim1, int dim2) const {
+  if (is_empty()) {
+    return Range();
+  }
   assert(dim1 < (int)lower.size());
   assert(dim2 < (int)lower.size());
   std::vector<int> lower_ = lower;
