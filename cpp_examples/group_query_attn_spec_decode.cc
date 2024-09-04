@@ -104,9 +104,6 @@ int main(int argc, char **argv) {
   }
   printf("[2 Block Graphs] Total runtime = %.4lfms\n", total_ms);
 
-  graph.generate_cuda_program("test.cu");
-  // return 0;
-
   auto st = std::chrono::steady_clock::now();
   search::GeneratorConfig config =
       search::GeneratorConfig::get_attention_default_config();

@@ -36,6 +36,23 @@ std::vector<DTensor> Graph::customized(std::vector<DTensor> const &inputs,
   return op->output_tensors;
 }
 
+int Graph::customized(
+    std::vector<const DTensor*> _inputs,
+    DTensor **outputs,
+    const mirage::threadblock::Graph *bgraph) {
+  std::vector<DTensor> inputs;
+  for (const auto& t : _inputs) {
+    inputs.push_back(*t);
+  }
+  KNOperator *op = create_customized_op(inputs, *bgraph);
+  assert(op != nullptr);
+  operators.push_back(op);
+  for (size_t i = 0; i < op->output_tensors.size(); i++) {
+    outputs[i] = &op->output_tensors[i];
+  }
+  return op->output_tensors.size();
+}
+
 KNOperator *Graph::create_customized_op(std::vector<DTensor> const &inputs,
                                         threadblock::Graph const &_graph) {
   size_t output_data_size = 0, output_fp_size = 0;

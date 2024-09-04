@@ -97,11 +97,14 @@ public:
   KNOperator *create_all_reduce_op(DTensor const &input, bool inplace);
   std::vector<DTensor> customized(std::vector<DTensor> const &inputs,
                                   mirage::threadblock::Graph const &_graph);
+  int customized(std::vector<const DTensor*> inputs,
+                 DTensor **outputs,
+                 const mirage::threadblock::Graph *bgraph);
   KNOperator *create_customized_op(std::vector<DTensor> const &inputs,
                                    mirage::threadblock::Graph const &_graph);
   // helper functions
   void generate_triton_program(char const *filepath);
-  void generate_cuda_program(char const *filepath);
+
   bool can_allocate(DTensor const &tensor,
                     bool allocate_fingerprint = true) const;
   bool can_allocate(size_t data_size_in_bytes, size_t fp_size_in_bytes) const;
