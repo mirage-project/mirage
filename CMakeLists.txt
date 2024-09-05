@@ -79,10 +79,15 @@ include_directories(deps/cutlass/tools/util/include)
 #include_directories(${MIRAGE_INCLUDE_DIRS})
 
 #set Z3
-find_package(Z3 REQUIRED)
-message(STATUS "Z3_FOUND: ${Z3_FOUND}")
-message(STATUS "Found Z3 ${Z3_VERSION_STRING}")
-message(STATUS "Z3_DIR: ${Z3_DIR}")
+if(Z3_CXX_INCLUDE_DIRS AND Z3_LIBRARIES)
+  message(STATUS "Z3_CXX_INCLUDE_DIRS: ${Z3_CXX_INCLUDE_DIRS}")
+  message(STATUS "Z3_LIBRARIES: ${Z3_LIBRARIES}")
+else()
+  find_package(Z3 REQUIRED)
+  message(STATUS "Z3_FOUND: ${Z3_FOUND}")
+  message(STATUS "Found Z3 ${Z3_VERSION_STRING}")
+  message(STATUS "Z3_DIR: ${Z3_DIR}")
+endif()
 include_directories(${Z3_CXX_INCLUDE_DIRS})
 #target_link_libraries(mirage_runtime PUBLIC ${Z3_LIBRARIES})
 list(APPEND MIRAGE_LINK_LIBS ${Z3_LIBRARIES})
@@ -263,6 +268,28 @@ if ("${BUILD_CPP_EXAMPLES}" STREQUAL "ON")
   target_link_libraries(${CPP_EXAMPLES_BIN} mirage_runtime)
 endif()
 
+# RMS
+if ("${BUILD_CPP_EXAMPLES}" STREQUAL "ON")
+  set(CPP_EXAMPLES_DIR cpp_examples)
+  set(CPP_EXAMPLES_BIN rms)
+  file(GLOB CPP_EXAMPLES_SRCS ${CPP_EXAMPLES_DIR}/${CPP_EXAMPLES_BIN}.cc)
+  add_executable(${CPP_EXAMPLES_BIN} ${CPP_EXAMPLES_SRCS})
+  set_target_properties(${CPP_EXAMPLES_BIN}
+    PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CPP_EXAMPLES_DIR})
+  target_link_libraries(${CPP_EXAMPLES_BIN} mirage_runtime)
+endif()
+
+# GatedMLP
+if ("${BUILD_CPP_EXAMPLES}" STREQUAL "ON")
+  set(CPP_EXAMPLES_DIR cpp_examples)
+  set(CPP_EXAMPLES_BIN gated_mlp)
+  file(GLOB CPP_EXAMPLES_SRCS ${CPP_EXAMPLES_DIR}/${CPP_EXAMPLES_BIN}.cc)
+  add_executable(${CPP_EXAMPLES_BIN} ${CPP_EXAMPLES_SRCS})
+  set_target_properties(${CPP_EXAMPLES_BIN}
+    PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CPP_EXAMPLES_DIR})
+  target_link_libraries(${CPP_EXAMPLES_BIN} mirage_runtime)
+endif()
+
 if ("${BUILD_CPP_EXAMPLES}" STREQUAL "ON")
   set(CPP_EXAMPLES_DIR cpp_examples)
   set(CPP_EXAMPLES_BIN profile)
@@ -275,18 +302,7 @@ endif()
 
 option(MIRAGE_BUILD_UNIT_TEST "build unit tests" OFF)
 
-# GTest
 if (MIRAGE_BUILD_UNIT_TEST)
   enable_testing()
-  find_package(GTest)
-  if(NOT GTest_FOUND)
-    include(FetchContent)
-    FetchContent_Declare(
-      googletest
-      URL https://github.com/google/googletest/archive/03597a01ee50ed33e9dfd640b249b4be3799d395.zip
-    )
-    FetchContent_MakeAvailable(googletest)
-  endif()
-  include_directories(${GTEST_INCLUDE_DIRS})
   add_subdirectory(tests)
 endif()

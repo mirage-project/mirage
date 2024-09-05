@@ -20,14 +20,14 @@
 namespace mirage {
 namespace config {
 
-uint16_t const FP_P = 227;
-uint16_t const FP_Q = 113;
+uint16_t const FP_P = 167;
+uint16_t const FP_Q = 83;
 uint32_t const FP_EXP_BASE = 3;
-uint16_t const FP_PQ = 25651;
+uint16_t const FP_PQ = 13861;
 // FP_P_MUL_Q_MOD_1 is a multiplier of P and is 1 module Q
-uint16_t const FP_P_MUL_Q_MOD_1 = 227;
+uint16_t const FP_P_MUL_Q_MOD_1 = 167;
 // FP_Q_MUL_P_MOD_1 is a multiplier of Q and is 1 module P
-uint16_t const FP_Q_MUL_P_MOD_1 = 25425;
+uint16_t const FP_Q_MUL_P_MOD_1 = 13695;
 size_t const MAX_SMEM_SIZE = 96 * 1024; // 96 KB
 // Note that we actually save stensors' fingerprints on GPU device memory
 // so MAX_SMEM_FP_SIZE can be larger than MAX_SMEM_SIZE

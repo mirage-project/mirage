@@ -24,7 +24,39 @@ namespace mirage {
 namespace kernel {
 
 DTensor Graph::exp(DTensor const &input) {
-  KNOperator *op = create_elementunary_op(input, mirage::type::KN_EXP_OP);
+  return elementunary(input, mirage::type::KN_EXP_OP);
+}
+
+DTensor *Graph::exp(DTensor const *input) {
+  return elementunary(input, mirage::type::KN_EXP_OP);
+}
+
+DTensor Graph::square(DTensor const &input) {
+  return elementunary(input, mirage::type::KN_SQUARE_OP);
+}
+
+DTensor *Graph::square(DTensor const *input) {
+  return elementunary(input, mirage::type::KN_SQUARE_OP);
+}
+
+DTensor Graph::sqrt(DTensor const &input) {
+  return elementunary(input, mirage::type::KN_SQRT_OP);
+}
+
+DTensor *Graph::sqrt(DTensor const *input) {
+  return elementunary(input, mirage::type::KN_SQRT_OP);
+}
+
+DTensor Graph::silu(DTensor const &input) {
+  return elementunary(input, mirage::type::KN_SILU_OP);
+}
+
+DTensor *Graph::silu(DTensor const *input) {
+  return elementunary(input, mirage::type::KN_SILU_OP);
+}
+
+DTensor Graph::elementunary(DTensor const &input, mirage::type::KNOperatorType type) {
+  KNOperator *op = create_elementunary_op(input, type);
   assert(op != nullptr);
   operators.push_back(op);
   assert(op->output_tensors.size() == 1);
@@ -32,8 +64,8 @@ DTensor Graph::exp(DTensor const &input) {
   return output;
 }
 
-DTensor *Graph::exp(DTensor const *input) {
-  KNOperator *op = create_elementunary_op(*input, mirage::type::KN_EXP_OP);
+DTensor *Graph::elementunary(DTensor const *input, mirage::type::KNOperatorType type) {
+  KNOperator *op = create_elementunary_op(*input, type);
   assert(op != nullptr);
   operators.push_back(op);
   assert(op->output_tensors.size() == 1);

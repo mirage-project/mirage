@@ -141,6 +141,7 @@ struct alignas(16) STensor {
 
   CUTLASS_HOST_DEVICE
   size_t num_elements() const {
+    static_assert(MAX_TENSOR_DIMS <= 4);
     if (num_dims == 4) {
       return dim[0] * dim[1] * dim[2] * dim[3];
     } else if (num_dims == 3) {

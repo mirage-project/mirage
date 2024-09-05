@@ -25,24 +25,25 @@ namespace threadblock {
 CUTLASS_HOST_DEVICE
 void deserialize_forloop_accum_parameters(int const *params,
                                           int &param_idx,
-                                          int &num_elements,
+                                          int &accum_num_elements,
+                                          int &per_iter_reduction_degree,
+                                          int &inner_range,
                                           int &input_smem_offset,
                                           int &accum_smem_offset) {
-  num_elements = params[param_idx++];
+  accum_num_elements = params[param_idx++];
+  per_iter_reduction_degree = params[param_idx++];
+  inner_range = params[param_idx++];
   input_smem_offset = params[param_idx++];
   accum_smem_offset = params[param_idx++];
 }
 
 inline void serialize_forloop_accum_parameters(int *params,
                                                int &param_idx,
-                                               int num_elements,
-                                               int input_smem_offset,
-                                               int accum_smem_offset) {
-  params[param_idx++] = num_elements;
+                                               int accum_num_elements,
+  params[param_idx++] = inner_range;
   params[param_idx++] = input_smem_offset;
   params[param_idx++] = accum_smem_offset;
   assert(param_idx <= NewKernelParams::MAX_NUM_PARAMETERS);
 }
 
 } // namespace threadblock
-} // namespace mirage

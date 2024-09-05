@@ -27,6 +27,13 @@ STensor Graph::matmul(STensor const &A, STensor const &B) {
   return op->output_tensors[0];
 }
 
+STensor *Graph::matmul(STensor const *A, STensor const *B) {
+  TBOperator *op = create_matmul_op(*A, *B);
+  assert(op != nullptr);
+  operators.push_back(op);
+  return &op->output_tensors[0];
+}
+
 TBOperator *Graph::create_matmul_op(STensor const &A, STensor const &B) {
   if (A.num_dims != B.num_dims) {
     return nullptr;

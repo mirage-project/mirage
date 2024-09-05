@@ -81,9 +81,12 @@ Graph::Graph(std::vector<kernel::DTensor> const &_inputs,
         matmul(my_inputs[0], my_inputs[1]);
         break;
       }
-      case mirage::type::TB_EXP_OP: {
+      case mirage::type::TB_EXP_OP:
+      case mirage::type::TB_SQUARE_OP:
+      case mirage::type::TB_SQRT_OP:
+      case mirage::type::TB_SILU_OP: {
         assert(my_inputs.size() == 1);
-        exp(my_inputs[0]);
+        elementunary(my_inputs[0], op.first);
         break;
       }
       case mirage::type::TB_ADD_OP: {
@@ -181,6 +184,7 @@ size_t Graph::calculate_shared_memory_usage(TBOperator *new_op) {
       case mirage::type::TB_MATMUL_OP:
       case mirage::type::TB_DIV_OP:
       case mirage::type::TB_ADD_OP:
+      case mirage::type::TB_MUL_OP:
       case mirage::type::TB_REDUCTION_0_OP:
       case mirage::type::TB_REDUCTION_1_OP:
       case mirage::type::TB_REDUCTION_2_OP:
@@ -196,7 +200,14 @@ size_t Graph::calculate_shared_memory_usage(TBOperator *new_op) {
         break;
       }
       case mirage::type::TB_EXP_OP:
-      case mirage::type::TB_FORLOOP_ACCUM_OP: {
+      case mirage::type::TB_SQUARE_OP:
+      case mirage::type::TB_SQRT_OP:
+      case mirage::type::TB_SILU_OP:
+      case mirage::type::TB_FORLOOP_ACCUM_NO_RED_OP:
+      case mirage::type::TB_FORLOOP_ACCUM_RED_LD_SUM_OP:
+      case mirage::type::TB_FORLOOP_ACCUM_RED_LD_MEAN_OP:
+      case mirage::type::TB_FORLOOP_ACCUM_RED_LD_RMS_OP:
+      case mirage::type::TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP: {
         // inplace optimization for elementunary
         // and accumulation
         break;
@@ -225,6 +236,19 @@ NewKernelParams Graph::get_new_kernel_params(bool fingerprint) const {
   // and that output savers are the last operators
   for (size_t i = 0; i < operators.size(); i++) {
     params.operator_types[i] = operators[i]->op_type;
+    if (operators[i]->op_type == mirage::type::TB_INPUT_OP) {
+      // We set input saver's operator_after_accum to be false
+      params.operator_after_accum[i] = false;
+    } else {
+      // We set operator_after_accum based on the operator's input
+      // stensors
+      assert(operators[i]->input_tensors.size() > 0);
+      params.operator_after_accum[i] = operators[i]->input_tensors[0].after_accum;
+      // assert consistency between operator's input stensors
+      for (const auto& t : operators[i]->input_tensors) {
+        assert(params.operator_after_accum[i] == t.after_accum);
+      }
+    }
     switch (operators[i]->op_type) {
       case mirage::type::TB_INPUT_OP: {
         TBInputOp *input_op = static_cast<TBInputOp *>(operators[i]);
@@ -434,17 +458,30 @@ NewKernelParams Graph::get_new_kernel_params(bool fingerprint) const {
             output_op->epilogue);
         break;
       }
-      case mirage::type::TB_FORLOOP_ACCUM_OP: {
+      case mirage::type::TB_FORLOOP_ACCUM_NO_RED_OP: 
+      case mirage::type::TB_FORLOOP_ACCUM_RED_LD_SUM_OP: 
+      case mirage::type::TB_FORLOOP_ACCUM_RED_LD_MEAN_OP: 
+      case mirage::type::TB_FORLOOP_ACCUM_RED_LD_RMS_OP:
+      case mirage::type::TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP: {
+        // TODO: currently assuming we only reduce along the last dim
         assert(operators[i]->input_tensors.size() == 1);
         assert(operators[i]->output_tensors.size() == 1);
         mirage::threadblock::STensor input = operators[i]->input_tensors[0];
         mirage::threadblock::STensor accum = operators[i]->output_tensors[0];
-        int num_elements = input.num_elements();
-        assert(input.num_elements() == accum.num_elements());
+        assert(input.num_dims == accum.num_dims);
+        int per_iter_reduction_degree = input.num_elements() / accum.num_elements();
+        for (int i = 0; i < input.num_dims; i++) {
+          if (input.dim[i] != accum.dim[i]) {
+            assert(input.dim[i] == accum.dim[i] * per_iter_reduction_degree);
+          }
+        }
+        int inner_range = accum.dim[accum.num_dims-1];
         mirage::threadblock::serialize_forloop_accum_parameters(
             params.parameters,
             params.num_parameters,
-            num_elements,
+            (int)accum.num_elements(),
+            per_iter_reduction_degree,
+            inner_range,
             input.smem_offset,
             accum.smem_offset);
         break;
@@ -481,7 +518,8 @@ NewKernelParams Graph::get_new_kernel_params(bool fingerprint) const {
             C.smem_offset);
         break;
       }
-      case mirage::type::TB_EXP_OP: {
+      case mirage::type::TB_EXP_OP:
+      case mirage::type::TB_SILU_OP: {
         assert(operators[i]->input_tensors.size() == 1);
         assert(operators[i]->output_tensors.size() == 1);
         mirage::threadblock::STensor input = operators[i]->input_tensors[0];
@@ -497,6 +535,7 @@ NewKernelParams Graph::get_new_kernel_params(bool fingerprint) const {
         break;
       }
       case mirage::type::TB_DIV_OP:
+      case mirage::type::TB_MUL_OP:
       case mirage::type::TB_ADD_OP: {
         assert(operators[i]->input_tensors.size() == 2);
         assert(operators[i]->output_tensors.size() == 1);

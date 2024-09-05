@@ -27,6 +27,13 @@ STensor Graph::concat(STensor const &A, STensor const &B, int concat_dim) {
   return op->output_tensors[0];
 }
 
+STensor *Graph::concat(STensor const *A, STensor const *B, int concat_dim) {
+  TBOperator *op = create_concat_op(*A, *B, concat_dim);
+  assert(op != nullptr);
+  operators.push_back(op);
+  return &op->output_tensors[0];
+}
+
 TBOperator *Graph::create_concat_op(STensor const &A,
                                     STensor const &B,
                                     int concat_dim) {

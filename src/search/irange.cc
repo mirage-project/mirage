@@ -252,7 +252,8 @@ KNRange propagate_from_stensor_to_dtensor(TBRange const &range,
           range.forloop_range.lower[0] * stensor.dim[forloop_dim] +
           range.tensor_range.upper[forloop_dim];
     } else {
-      assert(false && "TBD");
+      return KNRange();
+      // assert(false && "TBD");
     }
   }
 
@@ -308,8 +309,8 @@ IKNRange forward_propagate(IKNRange const &range,
     case type::KNOperatorType::KN_ALLREDUCE_OP:
       assert(false && "TBD");
     case type::KNOperatorType::KN_MATMUL_OP: {
-      int dim_to_extend = opd_idx == 0 ? op.output_tensors[0].num_dims - 2
-                                       : op.output_tensors[0].num_dims - 1;
+      int dim_to_extend = opd_idx == 0 ? op.output_tensors[0].num_dims - 1
+                                       : op.output_tensors[0].num_dims - 2;
       ret = IKNRange(range.range_set.extend_dim(dim_to_extend)
                          .truncate(op.output_tensors[0]));
       break;
@@ -355,8 +356,8 @@ IKNRange backward_propagate(IKNRange const &knrange,
       break;
     }
     case type::KNOperatorType::KN_MATMUL_OP: {
-      int dim_to_extend = opd_idx == 0 ? op.input_tensors[0].num_dims - 2
-                                       : op.input_tensors[1].num_dims - 1;
+      int dim_to_extend = opd_idx == 0 ? op.input_tensors[0].num_dims - 1
+                                       : op.input_tensors[1].num_dims - 2;
       ret = IKNRange(knrange.range_set.extend_dim(dim_to_extend)
                          .truncate(op.input_tensors[opd_idx]));
       break;
@@ -583,8 +584,8 @@ ITBRange forward_propagate(ITBRange const &tbrange,
       }
     }
     case type::TB_MATMUL_OP: {
-      int dim_to_extend = opd_idx == 0 ? op.output_tensors[0].num_dims - 2
-                                       : op.output_tensors[0].num_dims - 1;
+      int dim_to_extend = opd_idx == 0 ? op.output_tensors[0].num_dims - 1
+                                       : op.output_tensors[0].num_dims - 2;
       ret = ITBRange(tbrange.range_set.extend_dim(dim_to_extend)
                          .truncate(op.output_tensors[0]));
       break;
@@ -658,8 +659,8 @@ ITBRange backward_propagate(ITBRange const &tbrange,
       break;
     }
     case type::TB_MATMUL_OP: {
-      int dim_to_extend = opd_idx == 0 ? op.input_tensors[0].num_dims - 2
-                                       : op.input_tensors[1].num_dims - 1;
+      int dim_to_extend = opd_idx == 0 ? op.input_tensors[0].num_dims - 1
+                                       : op.input_tensors[1].num_dims - 2;
       ret = ITBRange(tbrange.range_set.extend_dim(dim_to_extend)
                          .truncate(op.input_tensors[opd_idx]));
       break;
@@ -1016,21 +1017,25 @@ bool check_range(std::vector<std::pair<size_t, IKNRange>> const &init_ranges,
 
 std::vector<std::pair<size_t, IKNRange>>
     get_init_ranges(kernel::Graph const &graph) {
+
+  auto get_points = [](kernel::DTensor const &dtensor) {
+    std::vector<std::vector<int>> points;
+    points.push_back(std::vector<int>(dtensor.num_dims, 0));
+    {
+      std::vector<int> random_point;
+      for (int i = 0; i < dtensor.num_dims; ++i) {
+        random_point.push_back(rand() % dtensor.dim[i]);
+      }
+      points.push_back(random_point);
+    }
+    return points;
+  };
+
   std::vector<std::pair<size_t, IKNRange>> init_ranges;
   for (size_t i = 0; i < graph.operators.size(); ++i) {
     if (graph.operators[i]->op_type == type::KNOperatorType::KN_INPUT_OP) {
-      init_ranges.push_back(std::make_pair(
-          i,
-          IKNRange::point_range(std::vector<int>(
-              graph.operators[i]->output_tensors[0].num_dims, 0))));
-      init_ranges.push_back(std::make_pair(
-          i,
-          IKNRange::point_range(std::vector<int>(
-              graph.operators[i]->output_tensors[0].num_dims, 1))));
-      for (int d = 0; d < graph.operators[i]->output_tensors[0].num_dims; ++d) {
-        std::vector<int> point(graph.operators[i]->output_tensors[0].num_dims,
-                               0);
-        point[d] = 1;
+      for (auto const &point :
+           get_points(graph.operators[i]->output_tensors[0])) {
         init_ranges.push_back(std::make_pair(i, IKNRange::point_range(point)));
       }
     }

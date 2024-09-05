@@ -117,15 +117,21 @@ __global__ void customized_kernel_function(
       } else if (op_type == mirage::type::TB_OUTPUT_OP) {
         // Only save outputs after forloop
         // So we do nothing for output saver
-      } else if (op_type == mirage::type::TB_FORLOOP_ACCUM_OP) {
+      } else if (op_type == mirage::type::TB_FORLOOP_ACCUM_NO_RED_OP ||
+                 op_type == mirage::type::TB_FORLOOP_ACCUM_RED_LD_SUM_OP ||
+                 op_type == mirage::type::TB_FORLOOP_ACCUM_RED_LD_MEAN_OP ||
+                 op_type == mirage::type::TB_FORLOOP_ACCUM_RED_LD_RMS_OP ||
+                 op_type == mirage::type::TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP) {
         // Do nothing since accum can be performed as an epilogue of
         // the previous operator
         int input_smem_offset, accum_smem_offset;
-        int num_elements;
+        int accum_num_elements, per_iter_reduction_degree, inner_range;
         mirage::threadblock::deserialize_forloop_accum_parameters(
             new_params.parameters,
             param_idx,
-            num_elements,
+            accum_num_elements,
+            per_iter_reduction_degree,
+            inner_range,
             input_smem_offset,
             accum_smem_offset);
       } else if (op_type == mirage::type::TB_MATMUL_OP) {
@@ -174,7 +180,10 @@ __global__ void customized_kernel_function(
           op += 1;
         }
         __syncthreads();
-      } else if (op_type == mirage::type::TB_EXP_OP) {
+      } else if (op_type == mirage::type::TB_EXP_OP ||
+                 op_type == mirage::type::TB_SQUARE_OP ||
+                 op_type == mirage::type::TB_SQRT_OP ||
+                 op_type == mirage::type::TB_SILU_OP) {
         int smem_offset, num_elements;
         mirage::threadblock::deserialize_elementunary_op_parameters(
             new_params.parameters, param_idx, smem_offset, num_elements);
@@ -183,7 +192,9 @@ __global__ void customized_kernel_function(
         mirage::threadblock::ElementUnaryExecutor<cutlass::half_t> executor(
             op_type, base_ptr, num_elements, threadIdx.x, blockDim.x);
         __syncthreads();
-      } else if (op_type == mirage::type::TB_DIV_OP) {
+      } else if (op_type == mirage::type::TB_DIV_OP ||
+                 op_type == mirage::type::TB_ADD_OP ||
+                 op_type == mirage::type::TB_MUL_OP)  {
         int3 input1_shape, input2_shape;
         int input1_smem_offset, input2_smem_offset, output_smem_offset;
         mirage::threadblock::deserialize_elementbinary_op_parameters(
@@ -337,7 +348,9 @@ __global__ void compute_customizedop_fingerprint(
     char *stensor_fp_base_ptr,
     mirage::type::FPType *exp_lookup_table,
     mirage::type::FPType *div_p_lookup_table,
-    mirage::type::FPType *div_q_lookup_table) {
+    mirage::type::FPType *div_q_lookup_table,
+    mirage::type::FPType *sqrt_p_lookup_table,
+    mirage::type::FPType *sqrt_q_lookup_table) {
   // since we are using cutlass, we group all threads within a threadblock
   // as a 1-D list of threads, therefore blockDim.y and blockDim.z must be
   // 1
@@ -356,6 +369,13 @@ __global__ void compute_customizedop_fingerprint(
     param_idx = 0;
     // start executing operators
     for (int op = 0; op < new_params.num_operators; op++) {
+      bool skip_operator_after_forloop_accum = false;
+      if (new_params.operator_after_accum[op] && (i < forloop_range - 1)) {
+        // Only perform operators that are after forloop accum
+        // in the last iteration (i.e., i == forloop_range - 1)
+        // Skip the operator in other iterations
+        skip_operator_after_forloop_accum = true;
+      }
       switch (new_params.operator_types[op]) {
         case mirage::type::TB_INPUT_OP: {
           mirage::type::FPType *dtensor_ptr =
@@ -385,7 +405,8 @@ __global__ void compute_customizedop_fingerprint(
               dtensor_layout,
               stensor_layout,
               input_smem_offset);
-
+          // input loader is always before forloop accum
+          assert(!skip_operator_after_forloop_accum);
           // Note that input_matrix_offset_forloop_stride's x and y indicates
           // row and column
           int tb_offset_row =
@@ -420,24 +441,43 @@ __global__ void compute_customizedop_fingerprint(
           __syncthreads();
           break;
         }
-        case mirage::type::TB_FORLOOP_ACCUM_OP: {
+        case mirage::type::TB_FORLOOP_ACCUM_NO_RED_OP:
+        case mirage::type::TB_FORLOOP_ACCUM_RED_LD_SUM_OP:
+        case mirage::type::TB_FORLOOP_ACCUM_RED_LD_MEAN_OP:
+        case mirage::type::TB_FORLOOP_ACCUM_RED_LD_RMS_OP:
+        case mirage::type::TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP: {
           int input_smem_offset, accum_smem_offset;
-          int num_elements;
+          int accum_num_elements, per_iter_reduction_degree, inner_range;
           mirage::threadblock::deserialize_forloop_accum_parameters(
               new_params.parameters,
               param_idx,
-              num_elements,
+              accum_num_elements,
+              per_iter_reduction_degree,
+              inner_range,
               input_smem_offset,
               accum_smem_offset);
+          // Forloop accum is NOT after forloop accum: since we should
+          // accumulate in each iteration
+          assert(!skip_operator_after_forloop_accum);
           mirage::type::FPType *input_stensor_ptr =
               (mirage::type::FPType *)(smem_buffer + input_smem_offset);
           mirage::type::FPType *accum_stensor_ptr =
               (mirage::type::FPType *)(smem_buffer + accum_smem_offset);
-          bool reset_output = (i == 0);
-          mirage::threadblock::TBForloopAccumFingerprinter fp(input_stensor_ptr,
+          bool reset_output = (i == 0); 
+          bool post_process = (i == (forloop_range - 1));
+          mirage::threadblock::TBForloopAccumFingerprinter fp(new_params.operator_types[op],
+                                                              input_stensor_ptr,
                                                               accum_stensor_ptr,
-                                                              num_elements,
+                                                              div_p_lookup_table,
+                                                              div_q_lookup_table,
+                                                              sqrt_p_lookup_table,
+                                                              sqrt_q_lookup_table,
+                                                              accum_num_elements,
+                                                              per_iter_reduction_degree,
+                                                              inner_range,
+                                                              forloop_range,
                                                               reset_output,
+                                                              post_process,
                                                               threadIdx.x,
                                                               blockDim.x);
           __syncthreads();
@@ -470,6 +510,12 @@ __global__ void compute_customizedop_fingerprint(
               stensor_layout,
               input_smem_offset,
               epilogue);
+          // Skip the current operator's fingerprint calculation
+          // since it is after forloop accum and we are not at the
+          // last iteration yet
+          if (skip_operator_after_forloop_accum) {
+            continue;
+          }
           bool non_zero_forloop_strides = false;
           if ((output_matrix_row_offset_forloop_stride > 0) ||
               (output_matrix_column_offset_forloop_stride > 0) ||
@@ -535,6 +581,12 @@ __global__ void compute_customizedop_fingerprint(
               A_smem_offset,
               B_smem_offset,
               C_smem_offset);
+          // Skip the current operator's fingerprint calculation
+          // since it is after forloop accum and we are not at the
+          // last iteration yet
+          if (skip_operator_after_forloop_accum) {
+            continue;
+          }
           mirage::type::FPType *A_ptr =
               (mirage::type::FPType *)(smem_buffer + A_smem_offset);
           mirage::type::FPType *B_ptr =
@@ -547,12 +599,19 @@ __global__ void compute_customizedop_fingerprint(
           __syncthreads();
           break;
         }
-        case mirage::type::TB_EXP_OP: {
+        case mirage::type::TB_EXP_OP:
+        case mirage::type::TB_SILU_OP: {
           int smem_offset, num_elements;
           mirage::threadblock::deserialize_elementunary_op_parameters(
               new_params.parameters, param_idx, smem_offset, num_elements);
           mirage::type::FPType *base_ptr =
               (mirage::type::FPType *)(smem_buffer + smem_offset);
+          // Skip the current operator's fingerprint calculation
+          // since it is after forloop accum and we are not at the
+          // last iteration yet
+          if (skip_operator_after_forloop_accum) {
+            continue;
+          }
           mirage::threadblock::TBElementUnaryFingerPrinter fp(
               new_params.operator_types[op],
               exp_lookup_table /*lookup_table*/,
@@ -563,6 +622,8 @@ __global__ void compute_customizedop_fingerprint(
           __syncthreads();
           break;
         }
+        case mirage::type::TB_ADD_OP:
+        case mirage::type::TB_MUL_OP:
         case mirage::type::TB_DIV_OP: {
           int3 input1_shape, input2_shape;
           int input1_smem_offset, input2_smem_offset, output_smem_offset;
@@ -580,6 +641,12 @@ __global__ void compute_customizedop_fingerprint(
               (mirage::type::FPType *)(smem_buffer + input2_smem_offset);
           mirage::type::FPType *output_ptr =
               (mirage::type::FPType *)(smem_buffer + output_smem_offset);
+          // Skip the current operator's fingerprint calculation
+          // since it is after forloop accum and we are not at the
+          // last iteration yet
+          if (skip_operator_after_forloop_accum) {
+            continue;
+          }
           mirage::threadblock::TBElementBinaryFingerPrinter fp(
               new_params.operator_types[op],
               div_p_lookup_table /*div_p_lookup*/,
@@ -614,6 +681,12 @@ __global__ void compute_customizedop_fingerprint(
               (mirage::type::FPType *)(smem_buffer + output_smem_offset);
           mirage::type::FPType *input_ptr =
               (mirage::type::FPType *)(smem_buffer + input_smem_offset);
+          // Skip the current operator's fingerprint calculation
+          // since it is after forloop accum and we are not at the
+          // last iteration yet
+          if (skip_operator_after_forloop_accum) {
+            continue;
+          }
           mirage::threadblock::TBReductionFingerprinter fp(
               new_params.operator_types[op],
               input_ptr,
@@ -648,6 +721,12 @@ __global__ void compute_customizedop_fingerprint(
               (mirage::type::FPType *)(smem_buffer + B_smem_offset);
           mirage::type::FPType *output_ptr =
               (mirage::type::FPType *)(smem_buffer + output_smem_offset);
+          // Skip the current operator's fingerprint calculation
+          // since it is after forloop accum and we are not at the
+          // last iteration yet
+          if (skip_operator_after_forloop_accum) {
+            continue;
+          }
           mirage::threadblock::TBConcatFingerprinter fp(A_ptr,
                                                         B_ptr,
                                                         output_ptr,
@@ -779,7 +858,9 @@ bool KNCustomizedOp::fingerprint(void) {
         dmm->stensor_fp_base_ptr,
         dmm->exp_lookup_table,
         dmm->div_p_lookup_table,
-        dmm->div_q_lookup_table);
+        dmm->div_q_lookup_table,
+        dmm->sqrt_p_lookup_table,
+        dmm->sqrt_q_lookup_table);
   }
   checkCUDA(cudaDeviceSynchronize());
   // Process epilogue

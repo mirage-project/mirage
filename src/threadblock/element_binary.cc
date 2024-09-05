@@ -21,28 +21,47 @@ namespace mirage {
 namespace threadblock {
 
 STensor Graph::add(STensor const &input1, STensor const &input2) {
-  TBOperator *op =
-      create_elementbinary_op(input1, input2, mirage::type::TB_ADD_OP);
-  assert(op != nullptr);
-  operators.push_back(op);
-  return op->output_tensors[0];
+  return elementbinary(input1, input2, mirage::type::TB_ADD_OP);
+}
+
+STensor *Graph::add(STensor const *input1, STensor const *input2) {
+  return elementbinary(input1, input2, mirage::type::TB_ADD_OP);
 }
 
 STensor Graph::mul(STensor const &input1, STensor const &input2) {
-  TBOperator *op =
-      create_elementbinary_op(input1, input2, mirage::type::TB_MUL_OP);
+  return elementbinary(input1, input2, mirage::type::TB_MUL_OP);
+}
+
+STensor *Graph::mul(STensor const *input1, STensor const *input2) {
+  return elementbinary(input1, input2, mirage::type::TB_MUL_OP);
+}
+
+STensor Graph::div(STensor const &input1, STensor const &input2) {
+  return elementbinary(input1, input2, mirage::type::TB_DIV_OP);
+}
+
+STensor *Graph::div(STensor const *input1, STensor const *input2) {
+  return elementbinary(input1, input2, mirage::type::TB_DIV_OP);
+}
+
+STensor Graph::elementbinary(STensor const &input1,
+                             STensor const &input2,
+                             mirage::type::TBOperatorType type) {
+  TBOperator *op = create_elementbinary_op(input1, input2, type);
   assert(op != nullptr);
   operators.push_back(op);
   return op->output_tensors[0];
 }
 
-STensor Graph::div(STensor const &input1, STensor const &input2) {
-  TBOperator *op =
-      create_elementbinary_op(input1, input2, mirage::type::TB_DIV_OP);
+STensor *Graph::elementbinary(STensor const *input1,
+                              STensor const *input2,
+                              mirage::type::TBOperatorType type) {
+  TBOperator *op = create_elementbinary_op(*input1, *input2, type);
   assert(op != nullptr);
   operators.push_back(op);
-  return op->output_tensors[0];
+  return &op->output_tensors[0];
 }
+
 
 TBOperator *Graph::create_elementbinary_op(STensor const &input1,
                                            STensor const &input2,

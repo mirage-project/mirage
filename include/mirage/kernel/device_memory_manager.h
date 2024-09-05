@@ -40,6 +40,8 @@ public:
   mirage::type::FPType *exp_lookup_table;
   mirage::type::FPType *div_p_lookup_table;
   mirage::type::FPType *div_q_lookup_table;
+  mirage::type::FPType *sqrt_p_lookup_table;
+  mirage::type::FPType *sqrt_q_lookup_table;
   // fields for managing the preallocated cuda buffer
   // Note that data_base_ptr[i]
   // points to buffers on the i-th GPU,

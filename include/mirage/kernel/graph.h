@@ -52,6 +52,15 @@ public:
   // elementunary operator
   DTensor exp(DTensor const &input);
   DTensor *exp(DTensor const *input);
+  DTensor silu(DTensor const &input);
+  DTensor *silu(DTensor const *input);
+  DTensor square(DTensor const &input);
+  DTensor *square(DTensor const *input);
+  DTensor sqrt(DTensor const &input);
+  DTensor *sqrt(DTensor const *input);
+  DTensor elementunary(DTensor const &input, mirage::type::KNOperatorType _type);
+  DTensor *elementunary(DTensor const *input, mirage::type::KNOperatorType _type);
+
   KNOperator *create_elementunary_op(DTensor const &input,
                                      mirage::type::KNOperatorType _type);
   // elementunary operator
@@ -68,24 +77,34 @@ public:
   DTensor reduction(DTensor const &input, int dim, int size = 1);
   DTensor *reduction(DTensor const *input, int dim, int size = 1);
   KNOperator *create_reduction_op(DTensor const &input, int dim, int factor);
+  // normalization operator
+  DTensor rms_norm(DTensor const &input, std::vector<int> const &normalized_shape);
+  DTensor *rms_norm(DTensor const *input, std::vector<int> const &normalized_shape);
+  KNOperator *create_rms_norm_op(DTensor const &input,
+                                 std::vector<int> const &normalized_shape);
+  DTensor rms_norm(DTensor const &input,
+                   DTensor const &elementwise_afffine,
+                   std::vector<int> const &normalized_shape);
+  DTensor *rms_norm(DTensor const *input,
+                    DTensor const *elementwise_affine,
+                    std::vector<int> const &normalized_shape);
+  KNOperator *create_rms_norm_op(DTensor const &input,
+                                 DTensor const &elementwise_affine,
+                                 std::vector<int> const &normalized_shape);
   // allreduce operator
   DTensor all_reduce(DTensor const &input, bool inplace = true);
   DTensor *all_reduce(DTensor const *input, bool inplace = true);
   KNOperator *create_all_reduce_op(DTensor const &input, bool inplace);
-  // customized operator
-  std::vector<DTensor>
-      customized(std::vector<DTensor> const &inputs,
-                 mirage::threadblock::ExecutionPlan const &plan);
-  KNOperator *
-      create_customized_op(std::vector<DTensor> const &inputs,
-                           mirage::threadblock::ExecutionPlan const &plan);
   std::vector<DTensor> customized(std::vector<DTensor> const &inputs,
                                   mirage::threadblock::Graph const &_graph);
+  int customized(std::vector<const DTensor*> inputs,
+                 DTensor **outputs,
+                 const mirage::threadblock::Graph *bgraph);
   KNOperator *create_customized_op(std::vector<DTensor> const &inputs,
                                    mirage::threadblock::Graph const &_graph);
   // helper functions
   void generate_triton_program(char const *filepath);
-  void generate_cuda_program(char const *filepath);
+
   bool can_allocate(DTensor const &tensor,
                     bool allocate_fingerprint = true) const;
   bool can_allocate(size_t data_size_in_bytes, size_t fp_size_in_bytes) const;

@@ -54,6 +54,14 @@ public:
       for (int i = 0; i < output_num_elements; i += num_threads) {
         output_ptr[i] = input1_ptr[i / factor1] / input2_ptr[i / factor2];
       }
+    } else if (op_type == mirage::type::TB_MUL_OP) {
+      for (int i = 0; i < output_num_elements; i += num_threads) {
+        output_ptr[i] = input1_ptr[i / factor1] * input2_ptr[i / factor2];
+      }
+    } else if (op_type == mirage::type::TB_ADD_OP) {
+      for (int i = 0; i < output_num_elements; i += num_threads) {
+        output_ptr[i] = input1_ptr[i / factor1] + input2_ptr[i / factor2];
+      }
     } else {
       assert(false && "Unsupported operator");
     }
@@ -87,27 +95,31 @@ public:
       output_dims[i] = max(input1_dims[i], input2_dims[i]);
     }
     int num_elements = output_dims[0] * output_dims[1] * output_dims[2];
-    if (type == mirage::type::TB_DIV_OP) {
-      for (int i = thread_id; i < num_elements; i += num_threads) {
-        int idx = i;
-        int input1_stride = 1, input1_idx = 0;
-        int input2_stride = 1, input2_idx = 0;
-        for (int d = 2; d >= 0; d--) {
-          input1_idx += (idx % input1_dims[d]) * input1_stride;
-          input2_idx += (idx % input2_dims[d]) * input2_stride;
-          input1_stride *= input1_dims[d];
-          input2_stride *= input2_dims[d];
-          idx /= output_dims[d];
-        }
-        uint32_t x = input1_ptr[input1_idx];
-        uint32_t y = input2_ptr[input2_idx];
+    for (int i = thread_id; i < num_elements; i += num_threads) {
+      int idx = i;
+      int input1_stride = 1, input1_idx = 0;
+      int input2_stride = 1, input2_idx = 0;
+      for (int d = 2; d >= 0; d--) {
+        input1_idx += (idx % input1_dims[d]) * input1_stride;
+        input2_idx += (idx % input2_dims[d]) * input2_stride;
+        input1_stride *= input1_dims[d];
+        input2_stride *= input2_dims[d];
+        idx /= output_dims[d];
+      }
+      uint32_t x = input1_ptr[input1_idx];
+      uint32_t y = input2_ptr[input2_idx];
+      if (type == mirage::type::TB_DIV_OP) {
         uint32_t z =
             (x % FP_P) * div_p_lookup_table[y % FP_P] * FP_Q_MUL_P_MOD_1 +
             (x % FP_Q) * div_q_lookup_table[y % FP_Q] * FP_P_MUL_Q_MOD_1;
         output_ptr[i] = z % FP_PQ;
+      } else if (type == mirage::type::TB_ADD_OP) {
+        output_ptr[i] = (x + y) % FP_PQ;
+      } else if (type == mirage::type::TB_MUL_OP) {
+        output_ptr[i] = (x * y) % FP_PQ;
+      } else {
+        assert(false && "Unimplemented op");
       }
-    } else {
-      assert(false && "Unimplemented");
     }
   }
 };
