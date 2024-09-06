@@ -463,7 +463,7 @@ __global__ void compute_customizedop_fingerprint(
               (mirage::type::FPType *)(smem_buffer + input_smem_offset);
           mirage::type::FPType *accum_stensor_ptr =
               (mirage::type::FPType *)(smem_buffer + accum_smem_offset);
-          bool reset_output = (i == 0);
+          bool reset_output = (i == 0); 
           bool post_process = (i == (forloop_range - 1));
           mirage::threadblock::TBForloopAccumFingerprinter fp(new_params.operator_types[op],
                                                               input_stensor_ptr,

@@ -218,9 +218,8 @@ void from_json(json const &j, Graph &g) {
           jinput.at("guid").get_to(guid);
           inputs.push_back(get_tensor_from_guid(guid));
         }
-        threadblock::ExecutionPlan plan;
-        jop.at("plan").get_to(plan);
-        threadblock::Graph bgraph(inputs, plan);
+        threadblock::Graph bgraph;
+        from_json(jop.at("bgraph"), bgraph);
         std::vector<DTensor> outputs = g.customized(inputs, bgraph);
         for (size_t i = 0; i < outputs.size(); ++i) {
           size_t guidO;
