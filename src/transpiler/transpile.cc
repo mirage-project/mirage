@@ -164,7 +164,6 @@ Transpiler(kernel::Graph const *graph,
   }
 }
 
-
 // Transpile a kernel graph into CUDA code
 // Return (code, global memory buffer size (in bytes))
 TranspileResult

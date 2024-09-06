@@ -94,7 +94,7 @@ with open(Path(__file__).parent / "requirements.txt", "r") as reqs_file:
     requirements = reqs_file.read().strip().split("\n")
 print(f"Requirements: {requirements}")
 
-setup(name='mirage',
+setup(name='mirage-project',
       version="0.1.1",
       description="Mirage: A Multi-Level Superoptimizer for Tensor Algebra",
       zip_safe=False,

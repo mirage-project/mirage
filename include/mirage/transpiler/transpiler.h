@@ -103,8 +103,6 @@ public:
              TranspilerConfig const &config,
              vector<vector<size_t>> const &input_strides,
              vector<kn::DTensor const *> const &output_tensors);
-      : g(g), config(config), input_strides(input_strides),
-        output_tensors(output_tensors);
 
   TranspileResult generate_code() {
     this->resolve_distributed_config();
