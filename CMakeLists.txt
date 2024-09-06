@@ -181,7 +181,7 @@ if ("${BUILD_CPP_EXAMPLES}" STREQUAL "ON")
 endif()
 
 # Group-Query Attention Spec Decoding
-if ("${BUILD_CPP_EXAMPLES}" STREQUAL "ON")
+if ("${BUILD_CPP_EXAMPLES}" STREQUAL "OFF")
   set(CPP_EXAMPLES_DIR cpp_examples)
   set(CPP_EXAMPLES_BIN group_query_attn_spec_decode)
   file(GLOB CPP_EXAMPLES_SRCS ${CPP_EXAMPLES_DIR}/${CPP_EXAMPLES_BIN}.cc)

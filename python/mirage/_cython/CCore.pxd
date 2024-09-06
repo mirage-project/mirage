@@ -50,6 +50,7 @@ cdef extern from "mirage/type.h" namespace "mirage::type":
         TB_FORLOOP_ACCUM_RED_LD_SUM_OP = 2501,
         TB_FORLOOP_ACCUM_RED_LD_MEAN_OP = 2502,
         TB_FORLOOP_ACCUM_RED_LD_RMS_OP = 2503,
+        TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP = 2504,
 
 cdef extern from "mirage/layout.h" namespace "mirage::layout":
     # This must be consistent with mirage/layout.h
