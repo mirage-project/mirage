@@ -34,7 +34,7 @@ using std::vector;
 class Transpiler {
 private:
   // The kernel graph
-  kn::Graph const *g;
+  std::shared_ptr<kn::Graph> g;
 
   // User-provided configuration
   TranspilerConfig config;
