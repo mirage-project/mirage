@@ -68,6 +68,7 @@ private:
   };
 
 public:
+  Graph();
   Graph(dim3 grid_dim, dim3 block_dim, int forloop_range, int reduction_dimx);
   Graph(std::vector<kernel::DTensor> const &inputs, ExecutionPlan const &plan);
   ~Graph();
@@ -180,6 +181,8 @@ public:
   using OpType = TBOperator;
   using TensorType = STensor;
 };
+
+void from_json(const json &j, Graph &g);
 
 } // namespace threadblock
 } // namespace mirage

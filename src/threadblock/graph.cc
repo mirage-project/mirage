@@ -27,6 +27,10 @@
 namespace mirage {
 namespace threadblock {
 
+Graph::Graph()
+    : grid_dim(1, 1, 1), block_dim(1, 1, 1), forloop_range(1),
+      reduction_dimx(1), smem_offset(0) {}
+
 Graph::Graph(dim3 _grid_dim,
              dim3 _block_dim,
              int _forloop_range,
@@ -123,13 +127,17 @@ Graph::Graph(std::vector<kernel::DTensor> const &_inputs,
         concat(my_inputs[0], my_inputs[1], concat_dim);
         break;
       }
-      case mirage::type::TB_FORLOOP_ACCUM_OP: {
+      case mirage::type::TB_FORLOOP_ACCUM_NO_RED_OP:
+      case mirage::type::TB_FORLOOP_ACCUM_RED_LD_MEAN_OP:
+      case mirage::type::TB_FORLOOP_ACCUM_RED_LD_SUM_OP:
+      case mirage::type::TB_FORLOOP_ACCUM_RED_LD_RMS_OP:
+      case mirage::type::TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP: {
         assert(my_inputs.size() == 1);
-        forloop_accum(my_inputs[0]);
+        forloop_accum(my_inputs[0], op.first);
         break;
       }
       default: {
-        assert(false && "Unsupported kernel operator");
+        assert(false && "Unsupported block operator");
       }
     }
   }
@@ -243,9 +251,10 @@ NewKernelParams Graph::get_new_kernel_params(bool fingerprint) const {
       // We set operator_after_accum based on the operator's input
       // stensors
       assert(operators[i]->input_tensors.size() > 0);
-      params.operator_after_accum[i] = operators[i]->input_tensors[0].after_accum;
+      params.operator_after_accum[i] =
+          operators[i]->input_tensors[0].after_accum;
       // assert consistency between operator's input stensors
-      for (const auto& t : operators[i]->input_tensors) {
+      for (auto const &t : operators[i]->input_tensors) {
         assert(params.operator_after_accum[i] == t.after_accum);
       }
     }
@@ -458,9 +467,9 @@ NewKernelParams Graph::get_new_kernel_params(bool fingerprint) const {
             output_op->epilogue);
         break;
       }
-      case mirage::type::TB_FORLOOP_ACCUM_NO_RED_OP: 
-      case mirage::type::TB_FORLOOP_ACCUM_RED_LD_SUM_OP: 
-      case mirage::type::TB_FORLOOP_ACCUM_RED_LD_MEAN_OP: 
+      case mirage::type::TB_FORLOOP_ACCUM_NO_RED_OP:
+      case mirage::type::TB_FORLOOP_ACCUM_RED_LD_SUM_OP:
+      case mirage::type::TB_FORLOOP_ACCUM_RED_LD_MEAN_OP:
       case mirage::type::TB_FORLOOP_ACCUM_RED_LD_RMS_OP:
       case mirage::type::TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP: {
         // TODO: currently assuming we only reduce along the last dim
@@ -469,13 +478,14 @@ NewKernelParams Graph::get_new_kernel_params(bool fingerprint) const {
         mirage::threadblock::STensor input = operators[i]->input_tensors[0];
         mirage::threadblock::STensor accum = operators[i]->output_tensors[0];
         assert(input.num_dims == accum.num_dims);
-        int per_iter_reduction_degree = input.num_elements() / accum.num_elements();
+        int per_iter_reduction_degree =
+            input.num_elements() / accum.num_elements();
         for (int i = 0; i < input.num_dims; i++) {
           if (input.dim[i] != accum.dim[i]) {
             assert(input.dim[i] == accum.dim[i] * per_iter_reduction_degree);
           }
         }
-        int inner_range = accum.dim[accum.num_dims-1];
+        int inner_range = accum.dim[accum.num_dims - 1];
         mirage::threadblock::serialize_forloop_accum_parameters(
             params.parameters,
             params.num_parameters,
@@ -656,7 +666,7 @@ NewKernelParams Graph::get_new_kernel_params(bool fingerprint) const {
         assert(false && "Unsupported TB operator");
       }
     } // switch
-  }   // for-loop
+  } // for-loop
   // Our serializer assumes that input loaders are the first operators
   // and that output savers are the last operators
   for (int i = 0; i < params.num_dmem_inputs; i++) {
@@ -736,6 +746,131 @@ Graph::operator json() const {
     j["operators"].push_back(json(*op));
   }
   return j;
+}
+
+void from_json(json const &j, Graph &graph) {
+  graph.grid_dim = j.at("grid_dim").get<dim3>();
+  graph.block_dim = j.at("block_dim").get<dim3>();
+  graph.forloop_range = j.at("forloop_range").get<int>();
+  graph.reduction_dimx = j.at("reduction_dimx").get<int>();
+  graph.operators.clear();
+  graph.smem_offset = j.at("smem_offset").get<int>();
+
+  std::unordered_map<int, int> guid_mapping;
+  auto get_tensor_from_guid = [&](int guid) {
+    for (auto const &op : graph.operators) {
+      for (auto const &tensor : op->output_tensors) {
+        if (guid_mapping.at(tensor.guid) == guid) {
+          return tensor;
+        }
+      }
+    }
+    assert(false);
+  };
+
+  for (json const &op : j["operators"]) {
+    type::TBOperatorType op_type = op.at("op_type").get<type::TBOperatorType>();
+    switch (op_type) {
+      case type::TBOperatorType::TB_INPUT_OP: {
+        STensor const &output =
+            graph.new_input(op.at("dtensor").get<kernel::DTensor>(),
+                            op.at("input_map").get<int3>(),
+                            op.at("forloop_dim").get<int>(),
+                            layout::SmemRowMajor);
+        guid_mapping[output.guid] = op.at("output_tensors")[0].at("guid").get<int>();
+        break;
+      }
+      case type::TBOperatorType::TB_OUTPUT_OP: {
+        graph.mark_output(get_tensor_from_guid(
+                              op.at("input_tensors")[0].at("guid").get<int>()),
+                          op.at("output_map").get<int3>(),
+                          -1,
+                          type::TBEpilogueType::TB_EPILOGUE_NONE);
+        break;
+      }
+      case type::TBOperatorType::TB_MATMUL_OP: {
+        STensor const &output = graph.matmul(
+            get_tensor_from_guid(
+                op.at("input_tensors")[0].at("guid").get<int>()),
+            get_tensor_from_guid(
+                op.at("input_tensors")[1].at("guid").get<int>()));
+        guid_mapping[output.guid] = op.at("output_tensors")[0].at("guid").get<int>();
+        break;
+      }
+      case type::TBOperatorType::TB_EXP_OP:
+      case type::TBOperatorType::TB_SILU_OP:
+      case type::TBOperatorType::TB_SQUARE_OP:
+      case type::TBOperatorType::TB_SQRT_OP: {
+        STensor const &output = graph.elementunary(
+            get_tensor_from_guid(
+                op.at("input_tensors")[0].at("guid").get<int>()),
+            op_type);
+        guid_mapping[output.guid] = op.at("output_tensors")[0].at("guid").get<int>();
+        break;
+      }
+      case type::TBOperatorType::TB_ADD_OP:
+      case type::TBOperatorType::TB_MUL_OP:
+      case type::TBOperatorType::TB_DIV_OP: {
+        STensor const &output = graph.elementbinary(
+            get_tensor_from_guid(
+                op.at("input_tensors")[0].at("guid").get<int>()),
+            get_tensor_from_guid(
+                op.at("input_tensors")[1].at("guid").get<int>()),
+            op_type);
+        guid_mapping[output.guid] = op.at("output_tensors")[0].at("guid").get<int>();
+        break;
+      }
+      case type::TBOperatorType::TB_REDUCTION_0_OP:
+      case type::TBOperatorType::TB_REDUCTION_1_OP:
+      case type::TBOperatorType::TB_REDUCTION_2_OP: {
+        int dim = op_type - type::TBOperatorType::TB_REDUCTION_0_OP;
+        STensor const &output = graph.reduction(
+            get_tensor_from_guid(
+                op.at("input_tensors")[0].at("guid").get<int>()),
+            dim);
+        guid_mapping[output.guid] = op.at("output_tensors")[0].at("guid").get<int>();
+        break;
+      }
+      case type::TBOperatorType::TB_REDUCTION_0_TO_DIMX_OP:
+      case type::TBOperatorType::TB_REDUCTION_1_TO_DIMX_OP:
+      case type::TBOperatorType::TB_REDUCTION_2_TO_DIMX_OP: {
+        int dim = op_type - type::TBOperatorType::TB_REDUCTION_0_TO_DIMX_OP;
+        STensor const &output = graph.reduction_to_dimx(
+            get_tensor_from_guid(
+                op.at("input_tensors")[0].at("guid").get<int>()),
+            dim);
+        guid_mapping[output.guid] = op.at("output_tensors")[0].at("guid").get<int>();
+        break;
+      }
+      case type::TBOperatorType::TB_CONCAT_0_OP:
+      case type::TBOperatorType::TB_CONCAT_1_OP:
+      case type::TBOperatorType::TB_CONCAT_2_OP: {
+        int dim = op_type - type::TBOperatorType::TB_CONCAT_0_OP;
+        STensor const &output = graph.concat(
+            get_tensor_from_guid(
+                op.at("input_tensors")[0].at("guid").get<int>()),
+            get_tensor_from_guid(
+                op.at("input_tensors")[1].at("guid").get<int>()),
+            dim);
+        guid_mapping[output.guid] = op.at("output_tensors")[0].at("guid").get<int>();
+        break;
+      }
+      case type::TBOperatorType::TB_FORLOOP_ACCUM_NO_RED_OP:
+      case type::TBOperatorType::TB_FORLOOP_ACCUM_RED_LD_SUM_OP:
+      case type::TBOperatorType::TB_FORLOOP_ACCUM_RED_LD_MEAN_OP:
+      case type::TBOperatorType::TB_FORLOOP_ACCUM_RED_LD_RMS_OP:
+      case type::TBOperatorType::TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP: {
+        STensor const &output = graph.forloop_accum(
+            get_tensor_from_guid(
+                op.at("input_tensors")[0].at("guid").get<int>()),
+            op_type);
+        guid_mapping[output.guid] = op.at("output_tensors")[0].at("guid").get<int>();
+        break;
+      }
+      default:
+        assert(false && "Unsupported operator");
+    }
+  }
 }
 
 ExecutionPlan Graph::get_plan() const {

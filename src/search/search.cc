@@ -386,6 +386,9 @@ bool KernelGraphGenerator::create_threadblock_outputs(
         if (op->op_type == type::TBOperatorType::TB_INPUT_OP) {
           return false;
         }
+        if (!tensor.after_accum) {
+          return false;
+        }
         output_tensors.push_back(tensor);
       }
     }
@@ -396,34 +399,17 @@ bool KernelGraphGenerator::create_threadblock_outputs(
   }
 
   for (STensor const &stensor : output_tensors) {
+    assert(stensor.after_accum);
     assert(contains_key(algebraic_pattern, stensor.guid));
-    std::shared_ptr<AlgebraicPattern> pattern =
-        c.tb_graph->forloop_range > 1
-            ? std::make_shared<Red>(c.tb_graph->forloop_range,
-                                    algebraic_pattern.at(stensor.guid))
-            : algebraic_pattern.at(stensor.guid);
-    if (!check_pattern(pattern)) {
+    TBOperator *new_op =
+        c.tb_graph->create_output_op(stensor,
+                                      output_map,
+                                      -1 /*forloop_dim*/,
+                                      mirage::type::TB_EPILOGUE_NONE);
+    if (!new_op) {
       return false;
     }
-    TBOperator *accum = c.tb_graph->create_forloop_accum_op(stensor);
-    if (!accum) {
-      return false;
-    }
-    c.tb_graph->operators.push_back(accum);
-  }
-
-  for (auto const &op : c.tb_graph->operators) {
-    if (op->op_type == type::TBOperatorType::TB_FORLOOP_ACCUM_OP) {
-      TBOperator *new_op =
-          c.tb_graph->create_output_op(op->output_tensors[0],
-                                       output_map,
-                                       -1 /*forloop_dim*/,
-                                       mirage::type::TB_EPILOGUE_NONE);
-      if (!new_op) {
-        return false;
-      }
-      c.tb_graph->operators.push_back(new_op);
-    }
+    c.tb_graph->operators.push_back(new_op);
   }
 
   return true;

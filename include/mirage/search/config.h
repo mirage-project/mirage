@@ -15,7 +15,7 @@ using kernel::KNOperator;
 using threadblock::STensor;
 using threadblock::TBOperator;
 
-int const MAX_NUM_THREADBLOCK_GRAPH_OP = 7; // Outputs not counted
+int const MAX_NUM_THREADBLOCK_GRAPH_OP = 8; // Outputs not counted
 int const MAX_NUM_KERNEL_GRAPH_OP = 5;
 int const MAX_NUM_THREADBLOCK = 2;
 int const MAX_NUM_THREADBLOCK_INPUT = 3;
