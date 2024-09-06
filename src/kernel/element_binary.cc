@@ -24,38 +24,34 @@ namespace mirage {
 namespace kernel {
 
 DTensor Graph::add(DTensor const &input1, DTensor const &input2) {
-  KNOperator *op =
-      create_elementbinary_op(input1, input2, mirage::type::KN_ADD_OP);
-  assert(op != nullptr);
-  operators.push_back(op);
-  assert(op->output_tensors.size() == 1);
-  DTensor output = op->output_tensors[0];
-  return output;
+  return elementbinary(input1, input2, mirage::type::KN_ADD_OP);
 }
 
 DTensor *Graph::add(DTensor const *input1, DTensor const *input2) {
-  DTensor output = add(*input1, *input2);
-  return &(output.owner_op->output_tensors[0]);
+  return elementbinary(input1, input2, mirage::type::KN_ADD_OP);
 }
 
 DTensor Graph::mul(DTensor const &input1, DTensor const &input2) {
-  KNOperator *op =
-      create_elementbinary_op(input1, input2, mirage::type::KN_MUL_OP);
-  assert(op != nullptr);
-  operators.push_back(op);
-  assert(op->output_tensors.size() == 1);
-  DTensor output = op->output_tensors[0];
-  return output;
+  return elementbinary(input1, input2, mirage::type::KN_MUL_OP);
 }
 
 DTensor *Graph::mul(DTensor const *input1, DTensor const *input2) {
-  DTensor output = mul(*input1, *input2);
-  return &(output.owner_op->output_tensors[0]);
+  return elementbinary(input1, input2, mirage::type::KN_MUL_OP);
 }
 
 DTensor Graph::div(DTensor const &input1, DTensor const &input2) {
+  return elementbinary(input1, input2, mirage::type::KN_DIV_OP);
+}
+
+DTensor *Graph::div(DTensor const *input1, DTensor const *input2) {
+  return elementbinary(input1, input2, mirage::type::KN_DIV_OP);
+}
+
+DTensor Graph::elementbinary(DTensor const &input1,
+                             DTensor const &input2,
+                             mirage::type::KNOperatorType type) {
   KNOperator *op =
-      create_elementbinary_op(input1, input2, mirage::type::KN_DIV_OP);
+      create_elementbinary_op(input1, input2, type);
   assert(op != nullptr);
   operators.push_back(op);
   assert(op->output_tensors.size() == 1);
@@ -63,10 +59,13 @@ DTensor Graph::div(DTensor const &input1, DTensor const &input2) {
   return output;
 }
 
-DTensor *Graph::div(DTensor const *input1, DTensor const *input2) {
-  DTensor output = div(*input1, *input2);
+DTensor *Graph::elementbinary(DTensor const *input1,
+                              DTensor const *input2,
+                              mirage::type::KNOperatorType type) {
+  DTensor output = elementbinary(*input1, *input2, type);
   return &(output.owner_op->output_tensors[0]);
 }
+
 
 KNOperator *Graph::create_elementbinary_op(DTensor const &input1,
                                            DTensor const &input2,

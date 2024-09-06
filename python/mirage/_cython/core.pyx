@@ -151,6 +151,8 @@ def string_to_accum_optype(acc):
         return TB_FORLOOP_ACCUM_RED_LD_MEAN_OP
     elif acc == "rms":
         return TB_FORLOOP_ACCUM_RED_LD_RMS_OP
+    elif acc == "sum_todimx":
+        return TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP
     else:
         assert False, "Unsupported accum optype"
         return None
