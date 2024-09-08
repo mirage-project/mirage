@@ -241,6 +241,7 @@ Transpiler::Transpiler(kernel::Graph const *graph,
         this->mugraph_output_tensors.insert(this->mugraph_output_tensors.end(),
                                             dtensor_outputs.begin(),
                                             dtensor_outputs.end());
+        break;
       }
     }
   }
