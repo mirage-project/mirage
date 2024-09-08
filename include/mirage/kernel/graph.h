@@ -58,8 +58,10 @@ public:
   DTensor *square(DTensor const *input);
   DTensor sqrt(DTensor const &input);
   DTensor *sqrt(DTensor const *input);
-  DTensor elementunary(DTensor const &input, mirage::type::KNOperatorType _type);
-  DTensor *elementunary(DTensor const *input, mirage::type::KNOperatorType _type);
+  DTensor elementunary(DTensor const &input,
+                       mirage::type::KNOperatorType _type);
+  DTensor *elementunary(DTensor const *input,
+                        mirage::type::KNOperatorType _type);
 
   KNOperator *create_elementunary_op(DTensor const &input,
                                      mirage::type::KNOperatorType _type);
@@ -70,8 +72,12 @@ public:
   DTensor *add(DTensor const *input1, DTensor const *input2);
   DTensor *mul(DTensor const *input1, DTensor const *input2);
   DTensor *div(DTensor const *input1, DTensor const *input2);
-  DTensor elementbinary(DTensor const &input1, DTensor const &input2, mirage::type::KNOperatorType _type);
-  DTensor *elementbinary(DTensor const *input1, DTensor const *input2, mirage::type::KNOperatorType _type);
+  DTensor elementbinary(DTensor const &input1,
+                        DTensor const &input2,
+                        mirage::type::KNOperatorType _type);
+  DTensor *elementbinary(DTensor const *input1,
+                         DTensor const *input2,
+                         mirage::type::KNOperatorType _type);
   KNOperator *create_elementbinary_op(DTensor const &input1,
                                       DTensor const &input2,
                                       mirage::type::KNOperatorType _type);
@@ -80,8 +86,10 @@ public:
   DTensor *reduction(DTensor const *input, int dim, int size = 1);
   KNOperator *create_reduction_op(DTensor const &input, int dim, int factor);
   // normalization operator
-  DTensor rms_norm(DTensor const &input, std::vector<int> const &normalized_shape);
-  DTensor *rms_norm(DTensor const *input, std::vector<int> const &normalized_shape);
+  DTensor rms_norm(DTensor const &input,
+                   std::vector<int> const &normalized_shape);
+  DTensor *rms_norm(DTensor const *input,
+                    std::vector<int> const &normalized_shape);
   KNOperator *create_rms_norm_op(DTensor const &input,
                                  std::vector<int> const &normalized_shape);
   DTensor rms_norm(DTensor const &input,
@@ -99,9 +107,9 @@ public:
   KNOperator *create_all_reduce_op(DTensor const &input, bool inplace);
   std::vector<DTensor> customized(std::vector<DTensor> const &inputs,
                                   mirage::threadblock::Graph const &_graph);
-  int customized(std::vector<const DTensor*> inputs,
+  int customized(std::vector<DTensor const *> inputs,
                  DTensor **outputs,
-                 const mirage::threadblock::Graph *bgraph);
+                 mirage::threadblock::Graph const *bgraph);
   KNOperator *create_customized_op(std::vector<DTensor> const &inputs,
                                    mirage::threadblock::Graph const &_graph);
   // helper functions

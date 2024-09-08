@@ -51,15 +51,21 @@ int main(int argc, char **argv) {
     if (batch_size > 1) {
       grid_dim = {16, 8, 2};
     }
-    threadblock::Graph bgraph(grid_dim, block_dim, forloop_range, reduction_dimx);
-    threadblock::STensor bQ = bgraph.new_input(Q, {0, -1, 1}, -1, layout::SmemRowMajor);
-    threadblock::STensor bK = bgraph.new_input(K, {0, 2, -1}, 2, layout::SmemColumnMajor);
-    threadblock::STensor bV = bgraph.new_input(V, {0, 1, -1}, 1, layout::SmemColumnMajor);
+    threadblock::Graph bgraph(
+        grid_dim, block_dim, forloop_range, reduction_dimx);
+    threadblock::STensor bQ =
+        bgraph.new_input(Q, {0, -1, 1}, -1, layout::SmemRowMajor);
+    threadblock::STensor bK =
+        bgraph.new_input(K, {0, 2, -1}, 2, layout::SmemColumnMajor);
+    threadblock::STensor bV =
+        bgraph.new_input(V, {0, 1, -1}, 1, layout::SmemColumnMajor);
     threadblock::STensor bA = bgraph.matmul(bQ, bK);
     threadblock::STensor bE = bgraph.exp(bA);
     threadblock::STensor bS = bgraph.matmul(bE, bV);
-    threadblock::STensor bO1 = bgraph.forloop_accum(bS, type::TB_FORLOOP_ACCUM_NO_RED_OP);
-    threadblock::STensor bO2 = bgraph.forloop_accum(bE, type::TB_FORLOOP_ACCUM_RED_LD_SUM_OP);
+    threadblock::STensor bO1 =
+        bgraph.forloop_accum(bS, type::TB_FORLOOP_ACCUM_NO_RED_OP);
+    threadblock::STensor bO2 =
+        bgraph.forloop_accum(bE, type::TB_FORLOOP_ACCUM_RED_LD_SUM_OP);
     bgraph.mark_output(bO1, {0, 2, 1}, -1, type::TB_EPILOGUE_NONE);
     bgraph.mark_output(bO2, {0, 2, 1}, -1, type::TB_EPILOGUE_NONE);
     outputs = graph.customized({Q, K, V}, bgraph);
@@ -74,16 +80,22 @@ int main(int argc, char **argv) {
     if (batch_size > 1) {
       grid_dim = {16, 8, 1};
     }
-    threadblock::Graph bgraph(grid_dim, block_dim, forloop_range, reduction_dimx);
-    threadblock::STensor bA = bgraph.new_input(outputs[0], {0, 1, -1}, -1, layout::SmemRowMajor);
-    threadblock::STensor bB = bgraph.new_input(outputs[1], {0, 1, -1}, -1, layout::SmemRowMajor);
-    threadblock::STensor bRA = bgraph.forloop_accum(bA, type::TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP);
-    threadblock::STensor bRB = bgraph.forloop_accum(bB, type::TB_FORLOOP_ACCUM_RED_LD_SUM_OP);
+    threadblock::Graph bgraph(
+        grid_dim, block_dim, forloop_range, reduction_dimx);
+    threadblock::STensor bA =
+        bgraph.new_input(outputs[0], {0, 1, -1}, -1, layout::SmemRowMajor);
+    threadblock::STensor bB =
+        bgraph.new_input(outputs[1], {0, 1, -1}, -1, layout::SmemRowMajor);
+    threadblock::STensor bRA =
+        bgraph.forloop_accum(bA, type::TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP);
+    threadblock::STensor bRB =
+        bgraph.forloop_accum(bB, type::TB_FORLOOP_ACCUM_RED_LD_SUM_OP);
     // threadblock::STensor bRA = bgraph.reduction_to_dimx(bA, 2);
     // threadblock::STensor bRB = bgraph.reduction(bB, 2);
     threadblock::STensor bD = bgraph.div(bRA, bRB);
     threadblock::STensor bAcc = bD;
-    //threadblock::STensor bAcc = bgraph.forloop_accum(bD, type::TB_FORLOOP_ACCUM_NO_RED_OP);
+    // threadblock::STensor bAcc = bgraph.forloop_accum(bD,
+    // type::TB_FORLOOP_ACCUM_NO_RED_OP);
     bgraph.mark_output(bAcc, {0, 1, -1}, -1, type::TB_EPILOGUE_NONE);
     outputs = graph.customized({outputs[0], outputs[1]}, bgraph);
     assert(outputs.size() == 1);

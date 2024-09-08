@@ -57,9 +57,11 @@ int main(int argc, char **argv) {
     dim3 grid_dim = {64, 1, 1}, block_dim = {128, 1, 1};
     namespace tb = mirage::threadblock;
     tb::Graph bgraph(grid_dim, block_dim, 1, 8);
-    tb::STensor bX = bgraph.new_input(outputs[0], {-1, -1, -1}, -1, layout::SmemRowMajor);
+    tb::STensor bX =
+        bgraph.new_input(outputs[0], {-1, -1, -1}, -1, layout::SmemRowMajor);
     tb::STensor bB = bgraph.new_input(B, {1, -1, -1}, -1, layout::SmemRowMajor);
-    tb::STensor bR = bgraph.forloop_accum(bX, type::TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP);
+    tb::STensor bR =
+        bgraph.forloop_accum(bX, type::TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP);
     bB = bgraph.forloop_accum(bB, type::TB_FORLOOP_ACCUM_NO_RED_OP);
     tb::STensor bE = bgraph.exp(bR);
     tb::STensor bO = bgraph.matmul(bE, bB);

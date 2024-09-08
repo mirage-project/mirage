@@ -97,7 +97,7 @@ DeviceMemoryManager::DeviceMemoryManager(int _num_gpus) : num_gpus(_num_gpus) {
     for (uint32_t j = 0; j < (FP_P + 1) / 4; j++) {
       sqrt_p_table[i] = (sqrt_p_table[i] * i) % FP_P;
     }
-    //assert((sqrt_p_table[i] * sqrt_p_table[i]) % FP_P == i);
+    // assert((sqrt_p_table[i] * sqrt_p_table[i]) % FP_P == i);
   }
   checkCUDA(cudaMemcpy(sqrt_p_lookup_table,
                        sqrt_p_table,
@@ -114,7 +114,7 @@ DeviceMemoryManager::DeviceMemoryManager(int _num_gpus) : num_gpus(_num_gpus) {
     for (uint32_t j = 0; j < (FP_Q + 1) / 4; j++) {
       sqrt_q_table[i] = (sqrt_q_table[i] * i) % FP_Q;
     }
-    //assert((sqrt_q_table[i] * sqrt_q_table[i]) % FP_Q == i);
+    // assert((sqrt_q_table[i] * sqrt_q_table[i]) % FP_Q == i);
   }
   checkCUDA(cudaMemcpy(sqrt_q_lookup_table,
                        sqrt_q_table,

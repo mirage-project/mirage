@@ -47,7 +47,8 @@ DTensor *Graph::rms_norm(DTensor const *input,
 DTensor Graph::rms_norm(DTensor const &input,
                         DTensor const &elementwise_affine,
                         std::vector<int> const &normalized_shape) {
-  KNOperator *op = create_rms_norm_op(input, elementwise_affine, normalized_shape);
+  KNOperator *op =
+      create_rms_norm_op(input, elementwise_affine, normalized_shape);
   assert(op != nullptr);
   operators.push_back(op);
   assert(op->output_tensors.size() == 1);
@@ -58,15 +59,17 @@ DTensor Graph::rms_norm(DTensor const &input,
 DTensor *Graph::rms_norm(DTensor const *input,
                          DTensor const *elementwise_affine,
                          std::vector<int> const &normalized_shape) {
-  KNOperator *op = create_rms_norm_op(*input, *elementwise_affine, normalized_shape);
+  KNOperator *op =
+      create_rms_norm_op(*input, *elementwise_affine, normalized_shape);
   assert(op != nullptr);
   operators.push_back(op);
   assert(op->output_tensors.size() == 1);
   return &op->output_tensors[0];
 }
 
-KNOperator *Graph::create_rms_norm_op(DTensor const &input,
-                                     std::vector<int> const &normalized_shape) {
+KNOperator *
+    Graph::create_rms_norm_op(DTensor const &input,
+                              std::vector<int> const &normalized_shape) {
   int num_norm_dims = normalized_shape.size();
   if (num_norm_dims > input.num_dims) {
     return nullptr;
@@ -84,9 +87,10 @@ KNOperator *Graph::create_rms_norm_op(DTensor const &input,
   return op;
 }
 
-KNOperator *Graph::create_rms_norm_op(DTensor const &input,
-                                      DTensor const &elementwise_affine,
-                                      std::vector<int> const &normalized_shape) {
+KNOperator *
+    Graph::create_rms_norm_op(DTensor const &input,
+                              DTensor const &elementwise_affine,
+                              std::vector<int> const &normalized_shape) {
   // We currently only allow normalizing the last dimension
   assert(false && "To be implemented");
 }
@@ -118,7 +122,6 @@ KNRMSNormOp::operator json() const {
               {"input_tensors", input_tensors},
               {"output_tensors", output_tensors}};
 }
-
 
 } // namespace kernel
 } // namespace mirage

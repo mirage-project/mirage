@@ -44,13 +44,16 @@ int main(int argc, char **argv) {
     namespace tb = mirage::threadblock;
     dim3 grid_dim = {8, 32, 1}, block_dim = {128, 1, 1};
     tb::Graph bgraph(grid_dim, block_dim, 16, 64);
-    tb::STensor bX = bgraph.new_input(output, {0, -1, -1}, 2, layout::SmemRowMajor);
-    tb::STensor bB = bgraph.new_input(B, {0, 2, -1}, 1, layout::SmemColumnMajor);
+    tb::STensor bX =
+        bgraph.new_input(output, {0, -1, -1}, 2, layout::SmemRowMajor);
+    tb::STensor bB =
+        bgraph.new_input(B, {0, 2, -1}, 1, layout::SmemColumnMajor);
     tb::STensor bE = bgraph.exp(bX);
     tb::STensor bO = bgraph.matmul(bE, bB);
     bO = bgraph.forloop_accum(bO, type::TB_FORLOOP_ACCUM_NO_RED_OP);
     bgraph.mark_output(bO, {0, 2, -1}, -1, type::TB_EPILOGUE_NONE);
-    std::vector<kernel::DTensor> outputs = graph.customized({output, B}, bgraph);
+    std::vector<kernel::DTensor> outputs =
+        graph.customized({output, B}, bgraph);
     assert(outputs.size() == 1);
   }
 

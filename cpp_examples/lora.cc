@@ -48,13 +48,17 @@ int main(int argc, char **argv) {
   {
     dim3 grid_dim = {128, 1, 1}, block_dim = {128, 1, 1};
     threadblock::Graph bgraph(grid_dim, block_dim, 2, 64);
-    threadblock::STensor bX = bgraph.new_input(X, {-1, -1, -1}, 1, layout::SmemRowMajor);
-    threadblock::STensor bW = bgraph.new_input(W, {1, -1, -1}, 0, layout::SmemRowMajor);
-    threadblock::STensor bA = bgraph.new_input(A, {-1, -1, -1}, 0, layout::SmemRowMajor);
-    threadblock::STensor bB = bgraph.new_input(B, {1, -1, -1}, -1, layout::SmemRowMajor);
+    threadblock::STensor bX =
+        bgraph.new_input(X, {-1, -1, -1}, 1, layout::SmemRowMajor);
+    threadblock::STensor bW =
+        bgraph.new_input(W, {1, -1, -1}, 0, layout::SmemRowMajor);
+    threadblock::STensor bA =
+        bgraph.new_input(A, {-1, -1, -1}, 0, layout::SmemRowMajor);
+    threadblock::STensor bB =
+        bgraph.new_input(B, {1, -1, -1}, -1, layout::SmemRowMajor);
     threadblock::STensor bD = bgraph.matmul(bX, bA);
-    threadblock::STensor bC = bgraph.concat(bX, bD, 1/*dim*/);
-    threadblock::STensor bE = bgraph.concat(bW, bB, 0/*dim*/);
+    threadblock::STensor bC = bgraph.concat(bX, bD, 1 /*dim*/);
+    threadblock::STensor bE = bgraph.concat(bW, bB, 0 /*dim*/);
     threadblock::STensor bO = bgraph.matmul(bC, bE);
     bO = bgraph.forloop_accum(bO, type::TB_FORLOOP_ACCUM_NO_RED_OP);
     bgraph.mark_output(bO, {1, -1, -1}, -1, type::TB_EPILOGUE_NONE);

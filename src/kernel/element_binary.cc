@@ -50,8 +50,7 @@ DTensor *Graph::div(DTensor const *input1, DTensor const *input2) {
 DTensor Graph::elementbinary(DTensor const &input1,
                              DTensor const &input2,
                              mirage::type::KNOperatorType type) {
-  KNOperator *op =
-      create_elementbinary_op(input1, input2, type);
+  KNOperator *op = create_elementbinary_op(input1, input2, type);
   assert(op != nullptr);
   operators.push_back(op);
   assert(op->output_tensors.size() == 1);
@@ -65,7 +64,6 @@ DTensor *Graph::elementbinary(DTensor const *input1,
   DTensor output = elementbinary(*input1, *input2, type);
   return &(output.owner_op->output_tensors[0]);
 }
-
 
 KNOperator *Graph::create_elementbinary_op(DTensor const &input1,
                                            DTensor const &input2,

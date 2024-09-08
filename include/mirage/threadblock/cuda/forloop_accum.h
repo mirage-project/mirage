@@ -68,8 +68,9 @@ public:
         compute_square = true;
       }
       for (int idx = thread_id; idx < output_num_elements; idx += num_threads) {
-        int pos = (idx / inner_range) * (inner_range * per_iter_reduction_degree) +
-                idx % inner_range;
+        int pos =
+            (idx / inner_range) * (inner_range * per_iter_reduction_degree) +
+            idx % inner_range;
         uint32_t result = 0;
         for (int k = 0; k < per_iter_reduction_degree; k++) {
           uint32_t x = input_ptr[pos];

@@ -62,7 +62,6 @@ STensor *Graph::elementbinary(STensor const *input1,
   return &op->output_tensors[0];
 }
 
-
 TBOperator *Graph::create_elementbinary_op(STensor const &input1,
                                            STensor const &input2,
                                            mirage::type::TBOperatorType _type) {

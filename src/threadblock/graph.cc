@@ -666,7 +666,7 @@ NewKernelParams Graph::get_new_kernel_params(bool fingerprint) const {
         assert(false && "Unsupported TB operator");
       }
     } // switch
-  } // for-loop
+  }   // for-loop
   // Our serializer assumes that input loaders are the first operators
   // and that output savers are the last operators
   for (int i = 0; i < params.num_dmem_inputs; i++) {
@@ -777,7 +777,8 @@ void from_json(json const &j, Graph &graph) {
                             op.at("input_map").get<int3>(),
                             op.at("forloop_dim").get<int>(),
                             layout::SmemRowMajor);
-        guid_mapping[output.guid] = op.at("output_tensors")[0].at("guid").get<int>();
+        guid_mapping[output.guid] =
+            op.at("output_tensors")[0].at("guid").get<int>();
         break;
       }
       case type::TBOperatorType::TB_OUTPUT_OP: {
@@ -789,12 +790,13 @@ void from_json(json const &j, Graph &graph) {
         break;
       }
       case type::TBOperatorType::TB_MATMUL_OP: {
-        STensor const &output = graph.matmul(
-            get_tensor_from_guid(
-                op.at("input_tensors")[0].at("guid").get<int>()),
-            get_tensor_from_guid(
-                op.at("input_tensors")[1].at("guid").get<int>()));
-        guid_mapping[output.guid] = op.at("output_tensors")[0].at("guid").get<int>();
+        STensor const &output =
+            graph.matmul(get_tensor_from_guid(
+                             op.at("input_tensors")[0].at("guid").get<int>()),
+                         get_tensor_from_guid(
+                             op.at("input_tensors")[1].at("guid").get<int>()));
+        guid_mapping[output.guid] =
+            op.at("output_tensors")[0].at("guid").get<int>();
         break;
       }
       case type::TBOperatorType::TB_EXP_OP:
@@ -805,7 +807,8 @@ void from_json(json const &j, Graph &graph) {
             get_tensor_from_guid(
                 op.at("input_tensors")[0].at("guid").get<int>()),
             op_type);
-        guid_mapping[output.guid] = op.at("output_tensors")[0].at("guid").get<int>();
+        guid_mapping[output.guid] =
+            op.at("output_tensors")[0].at("guid").get<int>();
         break;
       }
       case type::TBOperatorType::TB_ADD_OP:
@@ -817,7 +820,8 @@ void from_json(json const &j, Graph &graph) {
             get_tensor_from_guid(
                 op.at("input_tensors")[1].at("guid").get<int>()),
             op_type);
-        guid_mapping[output.guid] = op.at("output_tensors")[0].at("guid").get<int>();
+        guid_mapping[output.guid] =
+            op.at("output_tensors")[0].at("guid").get<int>();
         break;
       }
       case type::TBOperatorType::TB_REDUCTION_0_OP:
@@ -828,7 +832,8 @@ void from_json(json const &j, Graph &graph) {
             get_tensor_from_guid(
                 op.at("input_tensors")[0].at("guid").get<int>()),
             dim);
-        guid_mapping[output.guid] = op.at("output_tensors")[0].at("guid").get<int>();
+        guid_mapping[output.guid] =
+            op.at("output_tensors")[0].at("guid").get<int>();
         break;
       }
       case type::TBOperatorType::TB_REDUCTION_0_TO_DIMX_OP:
@@ -839,20 +844,22 @@ void from_json(json const &j, Graph &graph) {
             get_tensor_from_guid(
                 op.at("input_tensors")[0].at("guid").get<int>()),
             dim);
-        guid_mapping[output.guid] = op.at("output_tensors")[0].at("guid").get<int>();
+        guid_mapping[output.guid] =
+            op.at("output_tensors")[0].at("guid").get<int>();
         break;
       }
       case type::TBOperatorType::TB_CONCAT_0_OP:
       case type::TBOperatorType::TB_CONCAT_1_OP:
       case type::TBOperatorType::TB_CONCAT_2_OP: {
         int dim = op_type - type::TBOperatorType::TB_CONCAT_0_OP;
-        STensor const &output = graph.concat(
-            get_tensor_from_guid(
-                op.at("input_tensors")[0].at("guid").get<int>()),
-            get_tensor_from_guid(
-                op.at("input_tensors")[1].at("guid").get<int>()),
-            dim);
-        guid_mapping[output.guid] = op.at("output_tensors")[0].at("guid").get<int>();
+        STensor const &output =
+            graph.concat(get_tensor_from_guid(
+                             op.at("input_tensors")[0].at("guid").get<int>()),
+                         get_tensor_from_guid(
+                             op.at("input_tensors")[1].at("guid").get<int>()),
+                         dim);
+        guid_mapping[output.guid] =
+            op.at("output_tensors")[0].at("guid").get<int>();
         break;
       }
       case type::TBOperatorType::TB_FORLOOP_ACCUM_NO_RED_OP:
@@ -864,7 +871,8 @@ void from_json(json const &j, Graph &graph) {
             get_tensor_from_guid(
                 op.at("input_tensors")[0].at("guid").get<int>()),
             op_type);
-        guid_mapping[output.guid] = op.at("output_tensors")[0].at("guid").get<int>();
+        guid_mapping[output.guid] =
+            op.at("output_tensors")[0].at("guid").get<int>();
         break;
       }
       default:

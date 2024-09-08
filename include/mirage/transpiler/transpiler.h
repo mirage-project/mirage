@@ -85,7 +85,7 @@ private:
   // Get the swizzle plan for a threadblock graph
   // (This function modifies STensorMeta directly, so it returns void)
   void get_threadblock_swizzle_plan(tb::Graph const &tb_graph,
-                                           TBSched const &sched);
+                                    TBSched const &sched);
 
   // Get the "optimal" memory plan for a threadblock graph
   TBMemoryPlan get_threadblock_memory_plan(tb::Graph const &tb_graph,

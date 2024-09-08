@@ -74,15 +74,20 @@ static std::vector<T> mov_to_last(T const *vec, size_t numel, int idx) {
 } // namespace get_layout_detail
 
 // Get the layout of a STensor
-static string get_stensor_layout(tb::STensor const &stensor, STensorMeta const &meta) {
+static string get_stensor_layout(tb::STensor const &stensor,
+                                 STensorMeta const &meta) {
   if (!meta.is_xor_swizzled) {
     // Do not need to swizzle
-    // (Probably swizzled by SHIFT-based swizzling, but we do not care about that)
+    // (Probably swizzled by SHIFT-based swizzling, but we do not care about
+    // that)
     return get_layout_detail::get_cute_layout(stensor, meta);
   } else {
-    // XOR-based swizzling 
+    // XOR-based swizzling
     return fmt("decltype(composition(Swizzle<$, $, $>{}, ${}))",
-    meta.xor_swizzle_b, meta.xor_swizzle_m, meta.xor_swizzle_s, get_layout_detail::get_cute_layout(stensor, meta));
+               meta.xor_swizzle_b,
+               meta.xor_swizzle_m,
+               meta.xor_swizzle_s,
+               get_layout_detail::get_cute_layout(stensor, meta));
   }
 }
 
@@ -92,30 +97,38 @@ static string get_stensor_layout(tb::STensor const &stensor, STensorMeta const &
 // Assume the tensor has N dimensions and the innermost dim is i, then the
 // function is equivalent to torch.permute(tensor, [0, 1, ..., i-1, i+1, ..., N,
 // i])
-static string mov_last_get_stensor_layout(tb::STensor const &stensor, STensorMeta const &meta, int innermost_dim) {
+static string mov_last_get_stensor_layout(tb::STensor const &stensor,
+                                          STensorMeta const &meta,
+                                          int innermost_dim) {
   tb::STensor new_stensor = stensor;
   STensorMeta new_meta = meta;
   new_meta.swizzled_dim = -1;
   for (int i = 0; i < stensor.num_dims; ++i) {
-    int src_dim = i == stensor.num_dims-1 ? innermost_dim : i < innermost_dim ? i : i+1;
+    int src_dim = i == stensor.num_dims - 1 ? innermost_dim
+                  : i < innermost_dim       ? i
+                                            : i + 1;
     new_stensor.dim[i] = stensor.dim[src_dim];
     new_meta.strides[i] = meta.strides[src_dim];
-    if (src_dim == meta.swizzled_dim)
+    if (src_dim == meta.swizzled_dim) {
       new_meta.swizzled_dim = i;
+    }
   }
   new_meta.innermost_dim = stensor.num_dims - 1;
   return get_stensor_layout(new_stensor, new_meta);
 }
 
 // Get the layout of a DTensor tile for input/output operators
-static string get_dtensor_tile_layout(kn::DTensor const& dtensor, DTensorMeta const& d_meta, tb::STensor const& stensor, STensorMeta const& s_meta, int d_innermost_dim) {
+static string get_dtensor_tile_layout(kn::DTensor const &dtensor,
+                                      DTensorMeta const &d_meta,
+                                      tb::STensor const &stensor,
+                                      STensorMeta const &s_meta,
+                                      int d_innermost_dim) {
   using namespace get_layout_detail;
   return get_cute_layout(
-            mov_to_last(stensor.dim,
-                        dtensor.num_dims,
-                        d_innermost_dim), // Here we use stensor.dim
-            mov_to_last(
-                d_meta.strides, dtensor.num_dims, d_innermost_dim));
+      mov_to_last(stensor.dim,
+                  dtensor.num_dims,
+                  d_innermost_dim), // Here we use stensor.dim
+      mov_to_last(d_meta.strides, dtensor.num_dims, d_innermost_dim));
 }
 
 // Transpile a custom KN operator (i.e. a custom block graph) into CUDA code
@@ -235,17 +248,20 @@ CustomOPTranspileResult
       if (!use_chunked_copy) {
         int d_innermost_dim = dtensor_meta.innermost_dim;
         assert(!use_async_copy);
-        string dtensor_tile_layout = get_dtensor_tile_layout(dtensor, dtensor_meta, stensor, stensor_meta, d_innermost_dim);
+        string dtensor_tile_layout = get_dtensor_tile_layout(
+            dtensor, dtensor_meta, stensor, stensor_meta, d_innermost_dim);
         code.e(
             "using DTensor$TileLayout = $;", dtensor.guid, dtensor_tile_layout);
         // Non-chunked, synchronous copy
-        code.e("using STensor$InputAtom = tb::InputNonChunkedSyncCopy<half_t, "
-               "$, DTensor$TileLayout, NUM_THREADS>;",
-               stensor.guid,
-               mov_last_get_stensor_layout(stensor, stensor_meta, d_innermost_dim),
-               dtensor.guid);
+        code.e(
+            "using STensor$InputAtom = tb::InputNonChunkedSyncCopy<half_t, "
+            "$, DTensor$TileLayout, NUM_THREADS>;",
+            stensor.guid,
+            mov_last_get_stensor_layout(stensor, stensor_meta, d_innermost_dim),
+            dtensor.guid);
       } else {
-        string dtensor_tile_layout = get_dtensor_tile_layout(dtensor, dtensor_meta, stensor, stensor_meta, real_innermost_dim);
+        string dtensor_tile_layout = get_dtensor_tile_layout(
+            dtensor, dtensor_meta, stensor, stensor_meta, real_innermost_dim);
         code.e(
             "using DTensor$TileLayout = $;", dtensor.guid, dtensor_tile_layout);
         if (!use_async_copy) {
@@ -350,7 +366,8 @@ CustomOPTranspileResult
 
       if (!use_chunked_copy) {
         int d_innermost_dim = dtensor_meta.innermost_dim;
-        string dtensor_tile_layout = get_dtensor_tile_layout(dtensor, dtensor_meta, stensor, stensor_meta, d_innermost_dim);
+        string dtensor_tile_layout = get_dtensor_tile_layout(
+            dtensor, dtensor_meta, stensor, stensor_meta, d_innermost_dim);
         code.e(
             "using DTensor$TileLayout = $;", dtensor.guid, dtensor_tile_layout);
         code.e(
@@ -358,17 +375,19 @@ CustomOPTranspileResult
             "DTensor$TileLayout, $, NUM_THREADS>;",
             stensor.guid,
             dtensor.guid,
-            mov_last_get_stensor_layout(stensor, stensor_meta, d_innermost_dim));
+            mov_last_get_stensor_layout(
+                stensor, stensor_meta, d_innermost_dim));
       } else {
-        string dtensor_tile_layout = get_dtensor_tile_layout(dtensor, dtensor_meta, stensor, stensor_meta, real_innermost_dim);
+        string dtensor_tile_layout = get_dtensor_tile_layout(
+            dtensor, dtensor_meta, stensor, stensor_meta, real_innermost_dim);
         code.e(
             "using DTensor$TileLayout = $;", dtensor.guid, dtensor_tile_layout);
-        code.e(
-            "using STensor$OutputAtom = tb::OutputChunkedSyncCopy<half_t, "
-            "DTensor$TileLayout, $, NUM_THREADS>;",
-            stensor.guid,
-            dtensor.guid,
-            mov_last_get_stensor_layout(stensor, stensor_meta, real_innermost_dim));
+        code.e("using STensor$OutputAtom = tb::OutputChunkedSyncCopy<half_t, "
+               "DTensor$TileLayout, $, NUM_THREADS>;",
+               stensor.guid,
+               dtensor.guid,
+               mov_last_get_stensor_layout(
+                   stensor, stensor_meta, real_innermost_dim));
       }
       // TODO(intlsy) Support TMA
     }
@@ -487,12 +506,19 @@ CustomOPTranspileResult
           node.ops.back().first->op_type == type::TB_FORLOOP_ACCUM_NO_RED_OP;
       bool is_accum_in_reg = node.ops.back().second.is_accum_in_reg;
 
-      code.e("using Matmul$LayoutA = $;", output.guid, get_stensor_layout(input0, meta0));
-      code.e("using Matmul$LayoutB = $;", output.guid, get_stensor_layout(input1, meta1));
-      code.e("using Matmul$LayoutC = $;", output.guid, get_stensor_layout(output, meta2));
+      code.e("using Matmul$LayoutA = $;",
+             output.guid,
+             get_stensor_layout(input0, meta0));
+      code.e("using Matmul$LayoutB = $;",
+             output.guid,
+             get_stensor_layout(input1, meta1));
+      code.e("using Matmul$LayoutC = $;",
+             output.guid,
+             get_stensor_layout(output, meta2));
 
       code.e("using Matmul$Kernel = tb::Matmul<half_t, $, Layout<Shape<Int<$>, "
-             "Int<$>, _1>>, $, $, Matmul$LayoutA, Matmul$LayoutB, Matmul$LayoutC, NUM_THREADS, "
+             "Int<$>, _1>>, $, $, Matmul$LayoutA, Matmul$LayoutB, "
+             "Matmul$LayoutC, NUM_THREADS, "
              "$, $>;",
              output.guid,
              mma_atom_str,
