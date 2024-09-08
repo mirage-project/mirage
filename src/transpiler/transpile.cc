@@ -238,9 +238,9 @@ Transpiler::Transpiler(kernel::Graph const *graph,
 
     for (auto const &output_tensor_ptr : output_tensors) {
       if (output_tensor_ptr->owner_op == op) {
-        for (auto const &dt : dtensor_outputs) {
-          this->mugraph_output_tensors.push_back(dt);
-        }
+        this->mugraph_output_tensors.insert(this->mugraph_output_tensors.end(),
+                                            dtensor_outputs.begin(),
+                                            dtensor_outputs.end());
       }
     }
   }
