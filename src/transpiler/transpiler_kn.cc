@@ -443,6 +443,7 @@ TranspileResult Transpiler::transpile_ugraph() {
                     exec.to_string());
   vector<OutputTensorDirective> output_directives;
   for (kn::DTensor const *dtensor : this->output_tensors) {
+    assert(dtensor_metas.find(dtensor->guid) != dtensor_metas.end());
     DTensorMeta meta = dtensor_metas.at(dtensor->guid);
     output_directives.push_back(OutputTensorDirective{
         meta.num_phy_elems,
