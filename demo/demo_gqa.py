@@ -26,7 +26,7 @@ if __name__ == "__main__":
     bA = tbgraph2.forloop_accum(bA, "sum_todimx")
     bB = tbgraph2.forloop_accum(bB, "sum")
     bO = tbgraph2.div(bA, bB)
-    tbgraph2.new_output(bO, output_map=(0, 1, -1))
+    tbgraph2.new_output(stensor=bO, output_map=(0, 1, -1))
     O = graph.customized(O, tbgraph2)
     
     input_tensors = [

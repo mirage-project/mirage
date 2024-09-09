@@ -442,7 +442,6 @@ TranspileResult Transpiler::transpile_ugraph() {
                     init.to_string(),
                     exec.to_string());
   vector<OutputTensorDirective> output_directives;
-
   for (kn::DTensor const &dtensor : this->mugraph_output_tensors) {
     assert(dtensor_metas.find(dtensor.guid) != dtensor_metas.end());
 
