@@ -39,7 +39,7 @@ private:
   // User-provided configuration
   TranspilerConfig config;
   vector<vector<size_t>> input_strides;
-  vector<kn::DTensor const *> output_tensors;
+  vector<kn::DTensor> mugraph_output_tensors;
 
   // Distributed configuration
   int num_gpus;
@@ -85,7 +85,7 @@ private:
   // Get the swizzle plan for a threadblock graph
   // (This function modifies STensorMeta directly, so it returns void)
   void get_threadblock_swizzle_plan(tb::Graph const &tb_graph,
-                                           TBSched const &sched);
+                                    TBSched const &sched);
 
   // Get the "optimal" memory plan for a threadblock graph
   TBMemoryPlan get_threadblock_memory_plan(tb::Graph const &tb_graph,
