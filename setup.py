@@ -19,6 +19,7 @@ from pathlib import Path
 import sys
 import sysconfig
 from setuptools import find_packages, setup, Command
+from contextlib import contextmanager
 import subprocess
 
 # need to use distutils.core for correct placement of cython dll
@@ -94,15 +95,32 @@ with open(Path(__file__).parent / "requirements.txt", "r") as reqs_file:
     requirements = reqs_file.read().strip().split("\n")
 print(f"Requirements: {requirements}")
 
-setup(name='mirage-project',
-      version="0.1.1",
-      description="Mirage: A Multi-Level Superoptimizer for Tensor Algebra",
-      zip_safe=False,
-      install_requires=requirements,
-      packages=find_packages(where='python'),
-      package_dir={'': 'python'},
-      url='https://github.com/mirage-project/mirage',
-      ext_modules=config_cython(),
-      #include_package_data=True,
-      #**setup_args,
-      )
+INCLUDE_BASE = "python/mirage/include"
+@contextmanager
+def copy_include():
+    if not path.exists(INCLUDE_BASE):
+        src_dirs = ["deps/cutlass/include", "deps/json/include", "include/mirage/transpiler/runtime"]
+        for src_dir in src_dirs:
+            shutil.copytree(src_dir, path.join(INCLUDE_BASE, src_dir))
+        yield True
+    else:
+        yield False
+    shutil.rmtree(INCLUDE_BASE)
+
+with copy_include() as copied:
+    if not copied:
+        print("WARNING: include directory already exists. Not copying again. "
+              f"This may cause issues. Please remove {INCLUDE_BASE} and rerun setup.py", flush=True)
+    
+    setup(name='mirage-project',
+          version="0.1.1",
+          description="Mirage: A Multi-Level Superoptimizer for Tensor Algebra",
+          zip_safe=False,
+          install_requires=requirements,
+          packages=find_packages(where='python'),
+          package_dir={'': 'python'},
+          url='https://github.com/mirage-project/mirage',
+          ext_modules=config_cython(),
+          include_package_data=True,
+          #**setup_args,
+          )
