@@ -346,6 +346,7 @@ TBSched Transpiler::get_threadblock_schedule(tb::Graph const &tb_graph) {
           int res = 0;
           for (tb::STensor const &input : op->input_tensors) {
             tb::TBOperator *input_op = input.owner_op;
+            assert(op2chaining_meta.find(input_op) != op2chaining_meta.end());
             res = std::max(res, op2chaining_meta.at(input_op).level);
           }
           op2chaining_meta[op] = {res + 1, next_chain_idx++, 0};

@@ -51,8 +51,8 @@ void Transpiler::resolve_dtensor_meta() {
 
   // Set output label and idx for output DTensors
   int cur_output_idx = 0;
-  for (kn::DTensor const *output_dtensor : this->output_tensors) {
-    dguid_t guid = output_dtensor->guid;
+  for (auto const &output_dtensor : this->mugraph_output_tensors) {
+    dguid_t guid = output_dtensor.guid;
     this->dtensor_metas[guid].is_output = true;
     this->dtensor_metas[guid].output_idx = cur_output_idx;
     cur_output_idx += 1;

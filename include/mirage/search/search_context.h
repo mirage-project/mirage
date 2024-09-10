@@ -22,8 +22,5 @@ struct SearchContext {
   std::vector<json> generated_graphs;
 };
 
-// void to_json(json &j, SearchContext const &);
-// void from_json(json const &j, SearchContext &);
-
 } // namespace search
 } // namespace mirage

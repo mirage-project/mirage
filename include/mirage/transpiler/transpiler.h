@@ -34,12 +34,12 @@ using std::vector;
 class Transpiler {
 private:
   // The kernel graph
-  kn::Graph const *g;
+  std::shared_ptr<kn::Graph> g;
 
   // User-provided configuration
   TranspilerConfig config;
   vector<vector<size_t>> input_strides;
-  vector<kn::DTensor const *> output_tensors;
+  vector<kn::DTensor> mugraph_output_tensors;
 
   // Distributed configuration
   int num_gpus;
@@ -85,7 +85,7 @@ private:
   // Get the swizzle plan for a threadblock graph
   // (This function modifies STensorMeta directly, so it returns void)
   void get_threadblock_swizzle_plan(tb::Graph const &tb_graph,
-                                           TBSched const &sched);
+                                    TBSched const &sched);
 
   // Get the "optimal" memory plan for a threadblock graph
   TBMemoryPlan get_threadblock_memory_plan(tb::Graph const &tb_graph,
@@ -102,15 +102,7 @@ public:
   Transpiler(kernel::Graph const *g,
              TranspilerConfig const &config,
              vector<vector<size_t>> const &input_strides,
-             vector<kn::DTensor const *> const &output_tensors)
-      : g(g), config(config), input_strides(input_strides),
-        output_tensors(output_tensors) {
-    // Currently we only support GPUs with compute capability >= 8.0 (A100+)
-    // TODO(intlsy): Support older GPUs
-    if (config.target_cc < GPU_CC::A100) {
-      throw std::runtime_error("Unsupported target compute capability");
-    }
-  }
+             vector<kn::DTensor const *> const &output_tensors);
 
   TranspileResult generate_code() {
     this->resolve_distributed_config();

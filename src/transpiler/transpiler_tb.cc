@@ -55,10 +55,10 @@ static string get_cute_layout(vector<int> dims, vector<size_t> strides) {
 }
 
 template <typename Tensor_T, typename Meta_T>
-static string get_cute_layout(Tensor_T const &tensor, Meta_T const &meta) {
+static string get_cute_layout(Tensor_T const &tensor, Meta_T const &meta, int start_dim) {
   return get_cute_layout(
-      vector<int>(tensor.dim, tensor.dim + tensor.num_dims),
-      vector<size_t>(meta.strides, meta.strides + tensor.num_dims));
+      vector<int>(tensor.dim + start_dim, tensor.dim + tensor.num_dims),
+      vector<size_t>(meta.strides + start_dim, meta.strides + tensor.num_dims));
 }
 
 // A helper function
@@ -74,15 +74,15 @@ static std::vector<T> mov_to_last(T const *vec, size_t numel, int idx) {
 } // namespace get_layout_detail
 
 // Get the layout of a STensor
-static string get_stensor_layout(tb::STensor const &stensor, STensorMeta const &meta) {
+static string get_stensor_layout(tb::STensor const &stensor, STensorMeta const &meta, int start_dim = 0) {
   if (!meta.is_xor_swizzled) {
     // Do not need to swizzle
     // (Probably swizzled by SHIFT-based swizzling, but we do not care about that)
-    return get_layout_detail::get_cute_layout(stensor, meta);
+    return get_layout_detail::get_cute_layout(stensor, meta, start_dim);
   } else {
     // XOR-based swizzling 
     return fmt("decltype(composition(Swizzle<$, $, $>{}, ${}))",
-    meta.xor_swizzle_b, meta.xor_swizzle_m, meta.xor_swizzle_s, get_layout_detail::get_cute_layout(stensor, meta));
+    meta.xor_swizzle_b, meta.xor_swizzle_m, meta.xor_swizzle_s, get_layout_detail::get_cute_layout(stensor, meta, start_dim));
   }
 }
 
@@ -487,9 +487,11 @@ CustomOPTranspileResult
           node.ops.back().first->op_type == type::TB_FORLOOP_ACCUM_NO_RED_OP;
       bool is_accum_in_reg = node.ops.back().second.is_accum_in_reg;
 
-      code.e("using Matmul$LayoutA = $;", output.guid, get_stensor_layout(input0, meta0));
-      code.e("using Matmul$LayoutB = $;", output.guid, get_stensor_layout(input1, meta1));
-      code.e("using Matmul$LayoutC = $;", output.guid, get_stensor_layout(output, meta2));
+      // For threadblock matmul, cute requires 2-d matrices as inputs / outputs, we assert that all other leading
+      // dimensions are of size 1, and only use the last two dimensions when generating layouts
+      code.e("using Matmul$LayoutA = $;", output.guid, get_stensor_layout(input0, meta0, num_dims - 2/*start_dim*/));
+      code.e("using Matmul$LayoutB = $;", output.guid, get_stensor_layout(input1, meta1, num_dims - 2/*start_dim*/));
+      code.e("using Matmul$LayoutC = $;", output.guid, get_stensor_layout(output, meta2, num_dims - 2/*start_dim*/));
 
       code.e("using Matmul$Kernel = tb::Matmul<half_t, $, Layout<Shape<Int<$>, "
              "Int<$>, _1>>, $, $, Matmul$LayoutA, Matmul$LayoutB, Matmul$LayoutC, NUM_THREADS, "
