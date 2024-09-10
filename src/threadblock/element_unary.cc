@@ -52,14 +52,16 @@ STensor *Graph::silu(STensor const *input) {
   return elementunary(input, mirage::type::TB_SILU_OP);
 }
 
-STensor Graph::elementunary(STensor const &input, mirage::type::TBOperatorType type) {
+STensor Graph::elementunary(STensor const &input,
+                            mirage::type::TBOperatorType type) {
   TBOperator *op = create_elementunary_op(input, type);
   assert(op != nullptr);
   operators.push_back(op);
   return op->output_tensors[0];
 }
 
-STensor *Graph::elementunary(STensor const *input, mirage::type::TBOperatorType type) {
+STensor *Graph::elementunary(STensor const *input,
+                             mirage::type::TBOperatorType type) {
   TBOperator *op = create_elementunary_op(*input, type);
   assert(op != nullptr);
   operators.push_back(op);

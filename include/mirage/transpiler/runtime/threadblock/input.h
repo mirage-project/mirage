@@ -41,7 +41,7 @@ public:
 };
 
 // Get a mapping from chunk coordinate to original coordinate
-// 
+//
 // Assume the shape of the tensor is (A0, A1, ...) (where A0 is the innermost
 // dim), then if we merge elements in the same chunk into one element, the shape
 // would be (A0', A1, ...), where A0' is the number of chunks in the innermost
@@ -53,12 +53,13 @@ template <class InputLayout, int CHUNK_SIZE>
 class GetChunkedCoord2Coord {
   using InputShape = decltype(shape(InputLayout{}));
   static constexpr int INNERMOST_DIM_SIZE = get<0>(InputShape{}).value;
-  static constexpr int INNERMOST_DIM_NUM_CHUNKS = ceil_div(INNERMOST_DIM_SIZE, CHUNK_SIZE);
-  
+  static constexpr int INNERMOST_DIM_NUM_CHUNKS =
+      ceil_div(INNERMOST_DIM_SIZE, CHUNK_SIZE);
+
   using Result_ = decltype(make_layout(
-    replace<0>(InputShape{}, Int<INNERMOST_DIM_NUM_CHUNKS>{}),
-    replace<0>(stride(make_layout(InputShape{}, LayoutLeft{})), Int<CHUNK_SIZE>{})
-  ));
+      replace<0>(InputShape{}, Int<INNERMOST_DIM_NUM_CHUNKS>{}),
+      replace<0>(stride(make_layout(InputShape{}, LayoutLeft{})),
+                 Int<CHUNK_SIZE>{})));
 
 public:
   using Result = decltype(coalesce(Result_{}));
@@ -72,8 +73,10 @@ public:
   CUTE_STATIC_ASSERT_V(size(SrcLayout{}) == size(DstLayout{}));
 
   static constexpr int CHUNK_SIZE = 16 / sizeof(T);
-  using SrcChunkedCoord2Coord = typename GetChunkedCoord2Coord<SrcLayout, CHUNK_SIZE>::Result;
-  using DstChunkedCoord2Coord = typename GetChunkedCoord2Coord<DstLayout, CHUNK_SIZE>::Result;
+  using SrcChunkedCoord2Coord =
+      typename GetChunkedCoord2Coord<SrcLayout, CHUNK_SIZE>::Result;
+  using DstChunkedCoord2Coord =
+      typename GetChunkedCoord2Coord<DstLayout, CHUNK_SIZE>::Result;
   static constexpr int NUM_CHUNKS = size(SrcChunkedCoord2Coord{}).value;
 
   static __device__ __forceinline__ void
@@ -83,10 +86,13 @@ public:
     auto src_chunked_coord2coord = SrcChunkedCoord2Coord{};
     auto dst_chunked_coord2coord = DstChunkedCoord2Coord{};
 #pragma unroll
-    for (int chunk_idx = thread_idx; chunk_idx < NUM_CHUNKS; chunk_idx += NUM_THREADS) {
+    for (int chunk_idx = thread_idx; chunk_idx < NUM_CHUNKS;
+         chunk_idx += NUM_THREADS) {
       uint128_t res =
-          *((uint128_t const *)(src + src_layout(src_chunked_coord2coord(chunk_idx))));
-      *((uint128_t *)(dst + dst_layout(dst_chunked_coord2coord(chunk_idx)))) = res;
+          *((uint128_t const *)(src + src_layout(
+                                          src_chunked_coord2coord(chunk_idx))));
+      *((uint128_t *)(dst + dst_layout(dst_chunked_coord2coord(chunk_idx)))) =
+          res;
     }
   }
 };
@@ -96,10 +102,12 @@ template <typename T, class DstLayout, class SrcLayout, int NUM_THREADS>
 class InputChunkedAsyncCopy {
 public:
   CUTE_STATIC_ASSERT_V(size(SrcLayout{}) == size(DstLayout{}));
-  
+
   static constexpr int CHUNK_SIZE = 16 / sizeof(T);
-  using SrcChunkedCoord2Coord = typename GetChunkedCoord2Coord<SrcLayout, CHUNK_SIZE>::Result;
-  using DstChunkedCoord2Coord = typename GetChunkedCoord2Coord<DstLayout, CHUNK_SIZE>::Result;
+  using SrcChunkedCoord2Coord =
+      typename GetChunkedCoord2Coord<SrcLayout, CHUNK_SIZE>::Result;
+  using DstChunkedCoord2Coord =
+      typename GetChunkedCoord2Coord<DstLayout, CHUNK_SIZE>::Result;
   static constexpr int NUM_CHUNKS = size(SrcChunkedCoord2Coord{}).value;
 
   static __device__ __forceinline__ void
@@ -110,10 +118,13 @@ public:
     auto dst_chunked_coord2coord = DstChunkedCoord2Coord{};
     uint32_t dst_base_addr = cute::cast_smem_ptr_to_uint(dst);
 #pragma unroll
-    for (int chunk_idx = thread_idx; chunk_idx < NUM_CHUNKS; chunk_idx += NUM_THREADS) {
-      size_t src_addr = (size_t)(src + src_layout(src_chunked_coord2coord(chunk_idx)));
+    for (int chunk_idx = thread_idx; chunk_idx < NUM_CHUNKS;
+         chunk_idx += NUM_THREADS) {
+      size_t src_addr =
+          (size_t)(src + src_layout(src_chunked_coord2coord(chunk_idx)));
       uint32_t dst_addr =
-          dst_base_addr + dst_layout(dst_chunked_coord2coord(chunk_idx)) * sizeof(T);
+          dst_base_addr +
+          dst_layout(dst_chunked_coord2coord(chunk_idx)) * sizeof(T);
       asm volatile(
           "cp.async.cg.shared.global.L2::128B [%0], [%1], 16;" ::"r"(dst_addr),
           "l"(src_addr));

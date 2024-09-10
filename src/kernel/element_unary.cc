@@ -55,7 +55,8 @@ DTensor *Graph::silu(DTensor const *input) {
   return elementunary(input, mirage::type::KN_SILU_OP);
 }
 
-DTensor Graph::elementunary(DTensor const &input, mirage::type::KNOperatorType type) {
+DTensor Graph::elementunary(DTensor const &input,
+                            mirage::type::KNOperatorType type) {
   KNOperator *op = create_elementunary_op(input, type);
   assert(op != nullptr);
   operators.push_back(op);
@@ -64,7 +65,8 @@ DTensor Graph::elementunary(DTensor const &input, mirage::type::KNOperatorType t
   return output;
 }
 
-DTensor *Graph::elementunary(DTensor const *input, mirage::type::KNOperatorType type) {
+DTensor *Graph::elementunary(DTensor const *input,
+                             mirage::type::KNOperatorType type) {
   KNOperator *op = create_elementunary_op(*input, type);
   assert(op != nullptr);
   operators.push_back(op);

@@ -43,7 +43,6 @@ mirage::kernel::DTensor *
   return &(static_cast<TBOutputOp *>(op)->dtensor);
 }
 
-
 TBOperator *Graph::create_output_op(STensor const &stensor,
                                     int3 output_map,
                                     int forloop_dim,

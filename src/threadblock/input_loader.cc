@@ -29,7 +29,7 @@ STensor Graph::new_input(mirage::kernel::DTensor const &dtensor,
   return op->output_tensors[0];
 }
 
-STensor* Graph::new_input(mirage::kernel::DTensor const *dtensor,
+STensor *Graph::new_input(mirage::kernel::DTensor const *dtensor,
                           int3 input_map,
                           int forloop_dim,
                           mirage::layout::SmemLayout layout) {

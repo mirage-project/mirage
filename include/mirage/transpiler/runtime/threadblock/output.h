@@ -10,8 +10,8 @@
 
 #pragma once
 
-#include <cute/layout.hpp>
 #include "input.h"
+#include <cute/layout.hpp>
 using namespace cute;
 
 namespace tb {
@@ -19,12 +19,14 @@ namespace tb {
 // Type 1: Non-chunked, synchronous copy
 // The same as the input case
 template <typename T, class DstLayout, class SrcLayout, int NUM_THREADS>
-using OutputNonChunkedSyncCopy = InputNonChunkedSyncCopy<T, DstLayout, SrcLayout, NUM_THREADS>;
+using OutputNonChunkedSyncCopy =
+    InputNonChunkedSyncCopy<T, DstLayout, SrcLayout, NUM_THREADS>;
 
 // Type 2: Chunked, synchronous copy
 // The same as the input case
 template <typename T, class DstLayout, class SrcLayout, int NUM_THREADS>
-using OutputChunkedSyncCopy = InputChunkedSyncCopy<T, DstLayout, SrcLayout, NUM_THREADS>;
+using OutputChunkedSyncCopy =
+    InputChunkedSyncCopy<T, DstLayout, SrcLayout, NUM_THREADS>;
 
 // Type 3: Copy using the Tensor Memory Accelerator (TMA)
 
