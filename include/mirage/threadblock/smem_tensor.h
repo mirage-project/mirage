@@ -141,6 +141,7 @@ struct alignas(16) STensor {
 
   CUTLASS_HOST_DEVICE
   size_t num_elements() const {
+    static_assert(MAX_TENSOR_DIMS <= 4);
     if (num_dims == 4) {
       return dim[0] * dim[1] * dim[2] * dim[3];
     } else if (num_dims == 3) {
@@ -173,7 +174,7 @@ struct alignas(16) STensor {
 };
 
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(
-    STensor, data_type, layout, num_dims, dim, smem_offset, guid)
+    STensor, data_type, layout, num_dims, dim, smem_offset, guid, after_accum);
 
 } // namespace threadblock
 } // namespace mirage

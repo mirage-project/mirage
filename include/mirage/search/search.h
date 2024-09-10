@@ -1,38 +1,20 @@
 #pragma once
 
 #include <atomic>
-#include <condition_variable>
-#include <mutex>
-#include <queue>
+#include <functional>
 #include <unordered_map>
 #include <unordered_set>
 
 #include "mirage/search/config.h"
 #include "mirage/search/dim_strategy.h"
+#include "mirage/search/irange.h"
 #include "mirage/search/order.h"
+#include "mirage/search/search_context.h"
+#include "mirage/search/search_state_manager.h"
 #include "mirage/utils/json_utils.h"
 
 namespace mirage {
 namespace search {
-
-enum class SearchLevel {
-  LV_KERNEL,
-  LV_THREADBLOCK,
-};
-
-struct SearchContext {
-  std::shared_ptr<kernel::Graph> kn_graph;
-  std::shared_ptr<threadblock::Graph> tb_graph;
-  SearchLevel level;
-
-  SearchContext copy() const;
-
-  SearchContext();
-  ~SearchContext();
-};
-
-void to_json(json &j, SearchContext const &);
-void from_json(json const &j, SearchContext &);
 
 class KernelGraphGenerator {
 public:
@@ -41,7 +23,6 @@ public:
                        char const *filename);
 
   void generate_kernel_graphs();
-  void optimize_layout(kernel::Graph &g);
 
   json best_graph;
   ProfileResult best_profile_result;
@@ -70,15 +51,14 @@ private:
   std::mutex fp_mutex;
   std::mutex generated_graphs_mutex;
 
-  std::queue<SearchContext> search_queue;
-  std::mutex queue_mutex;
-  std::condition_variable queue_cv;
-  std::atomic<int> num_active_thread;
-  void enqueue(SearchContext const &c);
-  bool dequeue(SearchContext &c);
-  void launch_thread();
+  // Ranges-related fields
+  std::vector<std::pair<size_t, IKNRange>> init_ranges;
+  std::vector<std::vector<IKNRange>> target_ranges;
 
-  void generate_next_operator(SearchContext const &c);
+  void search(SearchStateManager<SearchContext> *manager);
+
+  void generate_next_operator(SearchContext const &c,
+                              SearchStateManager<SearchContext> *manager);
 
   bool create_threadblock_outputs(
       SearchContext &c,

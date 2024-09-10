@@ -23,9 +23,15 @@ namespace threadblock {
 STensor Graph::forloop_accum(STensor const &input, mirage::type::TBOperatorType type) {
   TBOperator *op = create_forloop_accum_op(input, type);
   assert(op != nullptr);
-  assert(op->output_tensors.size() == 1);
   operators.push_back(op);
   return op->output_tensors[0];
+}
+
+STensor *Graph::forloop_accum(STensor const *input, mirage::type::TBOperatorType type) {
+  TBOperator *op = create_forloop_accum_op(*input, type);
+  assert(op != nullptr);
+  operators.push_back(op);
+  return &op->output_tensors[0];
 }
 
 TBOperator *Graph::create_forloop_accum_op(STensor const &input, mirage::type::TBOperatorType type) {
@@ -63,6 +69,11 @@ TBForloopAccumOp::TBForloopAccumOp(Graph *_graph,
     case mirage::type::TB_FORLOOP_ACCUM_RED_LD_RMS_OP: {
       // Reduce the last dim to 1
       output.dim[output.num_dims-1] = 1;
+      break;
+    }
+    case mirage::type::TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP: {
+      // Reduce the last dim to reduction_dimx
+      output.dim[output.num_dims-1] = bgraph->reduction_dimx;
       break;
     }
     default: {

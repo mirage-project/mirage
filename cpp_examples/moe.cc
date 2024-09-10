@@ -41,22 +41,16 @@ int main(int argc, char **argv) {
 
   kernel::DTensor output = graph.matmul(X, A);
   {
-    threadblock::ExecutionPlan plan;
-    plan.ops.push_back({mirage::type::TB_EXP_OP, {{0, 0}}});
-    plan.ops.push_back({mirage::type::TB_MATMUL_OP, {{2, 0}, {1, 0}}});
-    plan.input_map.push_back({0, -1, -1});
-    plan.input_map.push_back({0, 2, -1});
-    plan.input_smem_layouts = {
-        layout::SmemRowMajor,
-        layout::SmemColumnMajor,
-    };
-    plan.input_forloop_dim = {2, 1};
-    plan.output_map = {0, 2, -1};
-    plan.grid_dim = {8, 32, 1};
-    plan.block_dim = {128, 1, 1};
-    plan.forloop_range = 16;
-    plan.reduction_dimx = 64;
-    std::vector<kernel::DTensor> outputs = graph.customized({output, B}, plan);
+    namespace tb = mirage::threadblock;
+    dim3 grid_dim = {8, 32, 1}, block_dim = {128, 1, 1};
+    tb::Graph bgraph(grid_dim, block_dim, 16, 64);
+    tb::STensor bX = bgraph.new_input(output, {0, -1, -1}, 2, layout::SmemRowMajor);
+    tb::STensor bB = bgraph.new_input(B, {0, 2, -1}, 1, layout::SmemColumnMajor);
+    tb::STensor bE = bgraph.exp(bX);
+    tb::STensor bO = bgraph.matmul(bE, bB);
+    bO = bgraph.forloop_accum(bO, type::TB_FORLOOP_ACCUM_NO_RED_OP);
+    bgraph.mark_output(bO, {0, 2, -1}, -1, type::TB_EPILOGUE_NONE);
+    std::vector<kernel::DTensor> outputs = graph.customized({output, B}, bgraph);
     assert(outputs.size() == 1);
   }
 

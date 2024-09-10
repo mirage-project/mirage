@@ -18,9 +18,11 @@ bool is_unary(type::TBOperatorType op) {
       type::TBOperatorType::TB_REDUCTION_0_OP,
       type::TBOperatorType::TB_REDUCTION_1_OP,
       type::TBOperatorType::TB_REDUCTION_2_OP,
-      type::TBOperatorType::TB_REDUCTION_0_TO_DIMX_OP,
-      type::TBOperatorType::TB_REDUCTION_1_TO_DIMX_OP,
-      type::TBOperatorType::TB_REDUCTION_2_TO_DIMX_OP,
+      type::TBOperatorType::TB_FORLOOP_ACCUM_NO_RED_OP,
+      type::TBOperatorType::TB_FORLOOP_ACCUM_RED_LD_MEAN_OP,
+      type::TBOperatorType::TB_FORLOOP_ACCUM_RED_LD_SUM_OP,
+      type::TBOperatorType::TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP,
+      type::TBOperatorType::TB_FORLOOP_ACCUM_RED_LD_RMS_OP,
   };
   return contains(true_values, op);
 }
@@ -94,10 +96,11 @@ std::shared_ptr<AlgebraicPattern>
     get_pattern(type::TBOperatorType op,
                 STensor const &tensor,
                 std::shared_ptr<AlgebraicPattern> opd) {
-  // Retrieve reduction_dimx from threadblock graph
+  // Retrieve reduction_dimx and forloop_range from threadblock graph
   assert(tensor.owner_op != nullptr);
   assert(tensor.owner_op->bgraph != nullptr);
   int reduction_dimx = tensor.owner_op->bgraph->reduction_dimx;
+  int forloop_range = tensor.owner_op->bgraph->forloop_range;
   switch (op) {
     case type::TBOperatorType::TB_EXP_OP:
       return std::make_shared<Exp>(opd);
@@ -128,8 +131,22 @@ std::shared_ptr<AlgebraicPattern>
         return nullptr;
       }
       return std::make_shared<Red>(tensor.dim[2] / reduction_dimx, opd);
-    case type::TBOperatorType::TB_OUTPUT_OP:
-      return opd;
+    case type::TBOperatorType::TB_FORLOOP_ACCUM_NO_RED_OP: {
+      return std::make_shared<Red>(forloop_range, opd);
+    }
+    case type::TBOperatorType::TB_FORLOOP_ACCUM_RED_LD_MEAN_OP:
+    case type::TBOperatorType::TB_FORLOOP_ACCUM_RED_LD_SUM_OP: {
+      return std::make_shared<Red>(forloop_range * tensor.dim[tensor.num_dims - 1], opd);
+    }
+    case type::TBOperatorType::TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP: {
+      if (tensor.dim[tensor.num_dims - 1] <= reduction_dimx) {
+        return nullptr;
+      }
+      return std::make_shared<Red>(forloop_range * tensor.dim[tensor.num_dims - 1] / reduction_dimx, opd);
+    }
+    case type::TBOperatorType::TB_FORLOOP_ACCUM_RED_LD_RMS_OP: {
+      assert(false && "TBD");
+    }
     default:
       assert(false);
   }
@@ -300,6 +317,13 @@ TBOperator *create_op(threadblock::Graph &g,
         return nullptr;
       }
       return g.create_reduction_to_dimx_op(input, dim);
+    }
+    case type::TBOperatorType::TB_FORLOOP_ACCUM_NO_RED_OP:
+    case type::TBOperatorType::TB_FORLOOP_ACCUM_RED_LD_MEAN_OP:
+    case type::TBOperatorType::TB_FORLOOP_ACCUM_RED_LD_SUM_OP:
+    case type::TBOperatorType::TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP:
+    case type::TBOperatorType::TB_FORLOOP_ACCUM_RED_LD_RMS_OP: {
+      return g.create_forloop_accum_op(input, type);
     }
     default:
       assert(false && "Unsupported operator");
