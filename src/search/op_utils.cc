@@ -136,13 +136,16 @@ std::shared_ptr<AlgebraicPattern>
     }
     case type::TBOperatorType::TB_FORLOOP_ACCUM_RED_LD_MEAN_OP:
     case type::TBOperatorType::TB_FORLOOP_ACCUM_RED_LD_SUM_OP: {
-      return std::make_shared<Red>(forloop_range * tensor.dim[tensor.num_dims - 1], opd);
+      return std::make_shared<Red>(
+          forloop_range * tensor.dim[tensor.num_dims - 1], opd);
     }
     case type::TBOperatorType::TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP: {
       if (tensor.dim[tensor.num_dims - 1] <= reduction_dimx) {
         return nullptr;
       }
-      return std::make_shared<Red>(forloop_range * tensor.dim[tensor.num_dims - 1] / reduction_dimx, opd);
+      return std::make_shared<Red>(
+          forloop_range * tensor.dim[tensor.num_dims - 1] / reduction_dimx,
+          opd);
     }
     case type::TBOperatorType::TB_FORLOOP_ACCUM_RED_LD_RMS_OP: {
       assert(false && "TBD");

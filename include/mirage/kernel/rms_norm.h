@@ -30,6 +30,7 @@ public:
   bool fingerprint(void) override;
 
   operator json() const override;
+
 public:
   int normalized_size;
 };

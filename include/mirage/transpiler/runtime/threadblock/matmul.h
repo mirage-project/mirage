@@ -30,21 +30,20 @@ C<std::max(x, y)> max(C<x> const &, C<y> const &) {
 // Dim01Swapper - Swap the first two dims of the input layout
 //
 // Assume the shape of the input layout $i$ is (A0, A1, A2), then the output
-// layout $o$ has a shape of (A1, A0, A2), and $i(a0, a1, a2) = o(a1, a0, a2)$ holds
+// layout $o$ has a shape of (A1, A0, A2), and $i(a0, a1, a2) = o(a1, a0, a2)$
+// holds
 template <class InputLayout>
 class Dim01Swapper {
   CUTE_STATIC_ASSERT_V(rank(InputLayout{}) == _2{});
 
   using A0 = decltype(get<0>(shape(InputLayout{})));
   using A1 = decltype(get<1>(shape(InputLayout{})));
-  using TransposeCoordLayout = Layout<
-    Shape<A1, A0>,
-    Stride<A0, _1>
-  >;
+  using TransposeCoordLayout = Layout<Shape<A1, A0>, Stride<A0, _1>>;
   using Result_ = decltype(composition(InputLayout{}, TransposeCoordLayout{}));
 
 public:
-  using Result = decltype(coalesce(Result_{}, Step<_1, _1>{})); // By-mode coalescing
+  using Result =
+      decltype(coalesce(Result_{}, Step<_1, _1>{})); // By-mode coalescing
 };
 
 enum class S2RTiledCopyType { UNIVERSAL, LDMATRIX_N, LDMATRIX_T };
@@ -178,7 +177,7 @@ template <class T,
 CUTE_HOST_DEVICE void r2s_copy_with_oob_protection(
     TiledCopy const &tiled_copy,
     Tensor<SrcEngine, SrcLayout> const &src, // [R2S, R2S_M, R2S_N]
-    Tensor<DstEngine, DstLayout> &dst,      // The same as src
+    Tensor<DstEngine, DstLayout> &dst,       // The same as src
     int thread_idx) {
   static_assert(SrcLayout::rank == 3);
   static_assert(DstLayout::rank == 3);
@@ -330,8 +329,8 @@ public:
         make_tensor(make_smem_ptr((half_t *)nullptr), SmemLayoutC{});
     TiledMMA tiled_mma;
     ThrMMA thr_mma = tiled_mma.get_slice(thread_idx);
-    Tensor mma_rC = thr_mma.partition_fragment_C(
-        sC_fake); // (MMA, MMA_M, MMA_N)
+    Tensor mma_rC =
+        thr_mma.partition_fragment_C(sC_fake); // (MMA, MMA_M, MMA_N)
     clear(mma_rC);
     return mma_rC;
   }
@@ -346,9 +345,8 @@ public:
     R2STiledCopyC r2s_tiled_copy_C;
     ThrCopy r2s_tiled_copy_C_thr = r2s_tiled_copy_C.get_slice(thread_idx);
     Tensor r2s_rC =
-        r2s_tiled_copy_C_thr.retile_S(mma_rC); // (R2S, R2S_M, R2S_N)
-    Tensor r2s_sC =
-        r2s_tiled_copy_C_thr.partition_D(sC); // (R2S, R2S_M, R2S_N)
+        r2s_tiled_copy_C_thr.retile_S(mma_rC);            // (R2S, R2S_M, R2S_N)
+    Tensor r2s_sC = r2s_tiled_copy_C_thr.partition_D(sC); // (R2S, R2S_M, R2S_N)
     r2s_copy_with_oob_protection<T,
                                  M,
                                  N,
@@ -392,30 +390,26 @@ public:
     TiledMMA tiled_mma;
     ThrMMA thr_mma = tiled_mma.get_slice(thread_idx);
 
-    Tensor mma_rA =
-        thr_mma.partition_fragment_A(sA); // (MMA, MMA_M, MMA_K)
-    Tensor mma_rB =
-        thr_mma.partition_fragment_B(sB); // (MMA, MMA_N, MMA_K)
+    Tensor mma_rA = thr_mma.partition_fragment_A(sA); // (MMA, MMA_M, MMA_K)
+    Tensor mma_rB = thr_mma.partition_fragment_B(sB); // (MMA, MMA_N, MMA_K)
 
-    // NOTE. If you encountered the issue 
-    // 
+    // NOTE. If you encountered the issue
+    //
     // static_assert(decltype(size(rB) == Int<RegNumB>{})::value);
-    // 
-    // Please upgrade your Cutlass version to at least 3.5.1 (commit e1976daacc7b030ba672217eb5d96f5a663df4ab)
-    // Refer to this link for more information:
-    // https://github.com/NVIDIA/cutlass/issues/1766
+    //
+    // Please upgrade your Cutlass version to at least 3.5.1 (commit
+    // e1976daacc7b030ba672217eb5d96f5a663df4ab) Refer to this link for more
+    // information: https://github.com/NVIDIA/cutlass/issues/1766
 
     S2RTiledCopyA s2r_tiled_copy_A;
     ThrCopy s2r_tiled_copy_A_thr = s2r_tiled_copy_A.get_slice(thread_idx);
-    Tensor s2r_sA =
-        s2r_tiled_copy_A_thr.partition_S(sA); // (S2R, S2R_M, S2R_K)
+    Tensor s2r_sA = s2r_tiled_copy_A_thr.partition_S(sA); // (S2R, S2R_M, S2R_K)
     Tensor s2r_rA =
         s2r_tiled_copy_A_thr.retile_D(mma_rA); // (S2R, S2R_M, S2R_K)
 
     S2RTiledCopyB s2r_tiled_copy_B;
     ThrCopy s2r_tiled_copy_B_thr = s2r_tiled_copy_B.get_slice(thread_idx);
-    Tensor s2r_sB =
-        s2r_tiled_copy_B_thr.partition_S(sB); // (S2R, S2R_N, S2R_K)
+    Tensor s2r_sB = s2r_tiled_copy_B_thr.partition_S(sB); // (S2R, S2R_N, S2R_K)
     Tensor s2r_rB =
         s2r_tiled_copy_B_thr.retile_D(mma_rB); // (S2R, S2R_N, S2R_K)
 
@@ -425,13 +419,13 @@ public:
 
 #define S2RCOPY(k_idx)                                                         \
   s2r_copy_with_oob_protection<T, M, K>(s2r_tiled_copy_A,                      \
-                                        s2r_sA(_, _, k_idx),             \
+                                        s2r_sA(_, _, k_idx),                   \
                                         s2r_rA(_, _, k_idx),                   \
                                         smem_allzero_ptr,                      \
                                         k_idx,                                 \
                                         thread_idx);                           \
   s2r_copy_with_oob_protection<T, N, K>(s2r_tiled_copy_B,                      \
-                                        s2r_sB(_, _, k_idx),             \
+                                        s2r_sB(_, _, k_idx),                   \
                                         s2r_rB(_, _, k_idx),                   \
                                         smem_allzero_ptr,                      \
                                         k_idx,                                 \

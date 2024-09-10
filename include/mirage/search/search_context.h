@@ -19,15 +19,8 @@ struct SearchContext {
   std::shared_ptr<kernel::Graph> kn_graph;
   std::shared_ptr<threadblock::Graph> tb_graph;
   SearchLevel level;
-
-  SearchContext copy() const;
-
-  SearchContext();
-  ~SearchContext();
+  std::vector<json> generated_graphs;
 };
-
-void to_json(json &j, SearchContext const &);
-void from_json(json const &j, SearchContext &);
 
 } // namespace search
 } // namespace mirage

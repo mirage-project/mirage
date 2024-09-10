@@ -55,10 +55,11 @@ private:
   std::vector<std::pair<size_t, IKNRange>> init_ranges;
   std::vector<std::vector<IKNRange>> target_ranges;
 
-  void search(SearchStateManager<SearchContext> *manager);
+  void search_from_graphs(std::vector<json> const &kernel_graphs);
 
-  void generate_next_operator(SearchContext const &c,
-                              SearchStateManager<SearchContext> *manager);
+  void generate_next_operator(
+      SearchContext &c,
+      std::function<bool(kernel::Graph const &)> const &verify);
 
   bool create_threadblock_outputs(
       SearchContext &c,
@@ -70,7 +71,7 @@ private:
   bool check_pattern(std::shared_ptr<AlgebraicPattern> pattern);
   bool have_same_fingerprint(std::vector<DTensor> const &outputs,
                              std::vector<int> const &match) const;
-  bool verify(SearchContext c);
+  bool verify(kernel::Graph const &g);
 
   void save_results() const;
 };
