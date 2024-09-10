@@ -6,7 +6,7 @@ Superoptimizing RMSNorm and Linear
 Introduction
 ============
 
-This tutorial demonstates how to superoptimize RMSNorm (https://arxiv.org/pdf/1910.07467) following by a linear layer. Instead of launching separate kernels for these two layers, Mirage is able to automatically generate a customized kernel that fuses the computation of RMSNorm and the following matrix multiplication. The uGraph of the customized kernel is shown as follows.
+This tutorial demonstates how to superoptimize RMSNorm (https://arxiv.org/pdf/1910.07467) following by a linear layer. Instead of launching separate kernels for these two layers, Mirage is able to automatically generate a customized kernel that fuses the computation of RMSNorm and the following matrix multiplication. 
 
 .. code-block:: Python
 
@@ -19,6 +19,11 @@ This tutorial demonstates how to superoptimize RMSNorm (https://arxiv.org/pdf/19
     graph.mark_output(O)
     optimized_graph = mi.superoptimize(graph)
 
+The uGraph of the customized kernel is shown as follows.
+
+.. image:: /tutorials/images/rms_norm_linear_ugraph.png
+   :alt: uGraph for RMSNorm and Linear
+   :align: center
 
 As we have demonstrated in other tutorials, optimized ugraphs can be directly executed as a fuction, and doing so will automatically launch the customized kernel discovered by Mirage.
 

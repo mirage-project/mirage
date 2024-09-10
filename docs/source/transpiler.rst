@@ -1,6 +1,6 @@
 :tocdepth: 1
 *************
-Building from source
+CUDA Transpiler
 *************
 
 .. mdinclude:: ../transpiler/transpiler.md
