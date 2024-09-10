@@ -26,41 +26,6 @@
 namespace mirage {
 namespace threadblock {
 
-class ExecutionPlan {
-public:
-  std::vector<
-      std::pair<mirage::type::TBOperatorType, std::vector<std::pair<int, int>>>>
-      ops;
-  // input-related fields
-  std::vector<int3> input_map;
-  std::vector<int> input_forloop_dim;
-  std::vector<mirage::layout::SmemLayout> input_smem_layouts;
-  // output-related fields
-  // assume that all outputs use the same map
-  int3 output_map;
-  // assume that all outputs use the same forloop_dim
-  int output_forloop_dim = -1;
-  // assume that all outputs perform the same collective communications
-  mirage::type::TBEpilogueType output_epilogue = mirage::type::TB_EPILOGUE_NONE;
-  // other fields
-  int forloop_range;
-  int reduction_dimx = mirage::config::DEFAULT_TB_REDUCTION_DIMX;
-  dim3 grid_dim, block_dim;
-};
-
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(ExecutionPlan,
-                                   ops,
-                                   input_map,
-                                   input_forloop_dim,
-                                   input_smem_layouts,
-                                   output_map,
-                                   output_forloop_dim,
-                                   output_epilogue,
-                                   forloop_range,
-                                   reduction_dimx,
-                                   grid_dim,
-                                   block_dim)
-
 class Graph {
 private:
   struct pair_hash {
@@ -70,7 +35,6 @@ private:
 public:
   Graph();
   Graph(dim3 grid_dim, dim3 block_dim, int forloop_range, int reduction_dimx);
-  Graph(std::vector<kernel::DTensor> const &inputs, ExecutionPlan const &plan);
   ~Graph();
   Graph(Graph const &) = delete;
   Graph &operator=(Graph const &) = delete;
@@ -167,7 +131,6 @@ public:
   int get_smem_size_with_pipeline() const;
 
   operator json() const;
-  ExecutionPlan get_plan() const;
 
 public:
   dim3 grid_dim, block_dim;

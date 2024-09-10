@@ -86,7 +86,6 @@ KNCustomizedOp::KNCustomizedOp(mirage::kernel::Graph *_kgraph,
   //plan.forloop_range = _graph.forloop_range;
   //plan.reduction_dimx = _graph.reduction_dimx;
 
-  size_t input_idx = 0;
   for (auto const &op : _graph.operators) {
     std::vector<STensor> my_inputs;
     std::vector<std::pair<int, int>> indices;
@@ -111,8 +110,7 @@ KNCustomizedOp::KNCustomizedOp(mirage::kernel::Graph *_kgraph,
         assert(my_inputs.size() == 0);
         mirage::threadblock::TBInputOp *input_op =
             static_cast<mirage::threadblock::TBInputOp *>(op);
-        DTensor const &dtensor = _inputs[input_idx++];
-        bgraph.new_input(dtensor,
+        bgraph.new_input(input_op->dtensor,
                          input_op->input_map,
                          input_op->forloop_dim,
                          input_op->output_tensors[0].layout);
