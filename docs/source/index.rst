@@ -20,6 +20,7 @@ Getting Started
    
    installation
    tutorials/index
+   transpiler
 
 .. Indices and tables
 .. ==================
