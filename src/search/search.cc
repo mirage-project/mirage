@@ -394,9 +394,9 @@ bool KernelGraphGenerator::create_threadblock_outputs(
     assert(contains_key(algebraic_pattern, stensor.guid));
     TBOperator *new_op =
         c.tb_graph->create_output_op(stensor,
-                                      output_map,
-                                      -1 /*forloop_dim*/,
-                                      mirage::type::TB_EPILOGUE_NONE);
+                                     output_map,
+                                     -1 /*forloop_dim*/,
+                                     mirage::type::TB_EPILOGUE_NONE);
     if (!new_op) {
       return false;
     }
@@ -446,9 +446,8 @@ void KernelGraphGenerator::generate_kernel_graphs() {
   }
   std::vector<std::thread> threads;
   for (int i = 0; i < num_thread; ++i) {
-    threads.push_back(std::thread(&KernelGraphGenerator::search_from_graphs,
-                                  this,
-                                  middle_states[i]));
+    threads.push_back(std::thread(
+        &KernelGraphGenerator::search_from_graphs, this, middle_states[i]));
   }
   for (auto &thread : threads) {
     thread.join();

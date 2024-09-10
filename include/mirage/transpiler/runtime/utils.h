@@ -66,4 +66,3 @@ __host__ __device__ void println(T const &t) {
     a = b;                                                                     \
     b = tmp;                                                                   \
   }
-  

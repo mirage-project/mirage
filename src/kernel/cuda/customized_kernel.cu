@@ -194,7 +194,7 @@ __global__ void customized_kernel_function(
         __syncthreads();
       } else if (op_type == mirage::type::TB_DIV_OP ||
                  op_type == mirage::type::TB_ADD_OP ||
-                 op_type == mirage::type::TB_MUL_OP)  {
+                 op_type == mirage::type::TB_MUL_OP) {
         int3 input1_shape, input2_shape;
         int input1_smem_offset, input2_smem_offset, output_smem_offset;
         mirage::threadblock::deserialize_elementbinary_op_parameters(
@@ -463,23 +463,24 @@ __global__ void compute_customizedop_fingerprint(
               (mirage::type::FPType *)(smem_buffer + input_smem_offset);
           mirage::type::FPType *accum_stensor_ptr =
               (mirage::type::FPType *)(smem_buffer + accum_smem_offset);
-          bool reset_output = (i == 0); 
+          bool reset_output = (i == 0);
           bool post_process = (i == (forloop_range - 1));
-          mirage::threadblock::TBForloopAccumFingerprinter fp(new_params.operator_types[op],
-                                                              input_stensor_ptr,
-                                                              accum_stensor_ptr,
-                                                              div_p_lookup_table,
-                                                              div_q_lookup_table,
-                                                              sqrt_p_lookup_table,
-                                                              sqrt_q_lookup_table,
-                                                              accum_num_elements,
-                                                              per_iter_reduction_degree,
-                                                              inner_range,
-                                                              forloop_range,
-                                                              reset_output,
-                                                              post_process,
-                                                              threadIdx.x,
-                                                              blockDim.x);
+          mirage::threadblock::TBForloopAccumFingerprinter fp(
+              new_params.operator_types[op],
+              input_stensor_ptr,
+              accum_stensor_ptr,
+              div_p_lookup_table,
+              div_q_lookup_table,
+              sqrt_p_lookup_table,
+              sqrt_q_lookup_table,
+              accum_num_elements,
+              per_iter_reduction_degree,
+              inner_range,
+              forloop_range,
+              reset_output,
+              post_process,
+              threadIdx.x,
+              blockDim.x);
           __syncthreads();
           break;
         }

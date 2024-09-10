@@ -132,9 +132,8 @@ CUTLASS_DEVICE float block_sum_fp32(float sum) {
 using namespace mirage::type;
 using namespace mirage::config;
 
-inline __device__
-FPType compute_silu_fingerprint(FPType input,
-                                FPType *exp_lookup_table) {
+inline __device__ FPType compute_silu_fingerprint(FPType input,
+                                                  FPType *exp_lookup_table) {
   // Note that we use $x * e^x$ as the fingerprint for SILU
   // (i.e., $x / (1+e^{-x})$, since plus one can be easier
   // implemented at any level of the GPU compute hierarchy

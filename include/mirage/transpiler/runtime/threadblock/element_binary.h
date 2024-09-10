@@ -30,7 +30,7 @@ static __device__ __forceinline__ T perform_element_binary_op(T a, T b) {
 // coordinate in SrcLayout, so that the composition of this layout and SrcLayout
 // results in a layout that converts a logical coordinate in DstLayout to a
 // physical coordinate in SrcLayout.
-template<typename DstLayout, typename SrcLayout>
+template <typename DstLayout, typename SrcLayout>
 class DstCoord2SrcCoordGetter {
   using DstShape = decltype(shape(DstLayout{}));
   using SrcShape = decltype(shape(SrcLayout{}));
@@ -51,13 +51,17 @@ class ElementBinaryKernel {
 public:
   using Numel = decltype(cute::size(DstLayout{}));
 
-  using DstCoord2Src0Coord = typename DstCoord2SrcCoordGetter<DstLayout, Src0Layout>::Result;
-  using DstCoord2Src1Coord = typename DstCoord2SrcCoordGetter<DstLayout, Src1Layout>::Result;
+  using DstCoord2Src0Coord =
+      typename DstCoord2SrcCoordGetter<DstLayout, Src0Layout>::Result;
+  using DstCoord2Src1Coord =
+      typename DstCoord2SrcCoordGetter<DstLayout, Src1Layout>::Result;
   static_assert(is_static_v<DstCoord2Src0Coord>);
   static_assert(is_static_v<DstCoord2Src1Coord>);
 
-  using DstCoord2Src0PhyPos = decltype(coalesce(composition(Src0Layout{}, DstCoord2Src0Coord{})));
-  using DstCoord2Src1PhyPos = decltype(coalesce(composition(Src1Layout{}, DstCoord2Src1Coord{})));
+  using DstCoord2Src0PhyPos =
+      decltype(coalesce(composition(Src0Layout{}, DstCoord2Src0Coord{})));
+  using DstCoord2Src1PhyPos =
+      decltype(coalesce(composition(Src1Layout{}, DstCoord2Src1Coord{})));
   static_assert(is_static_v<DstCoord2Src0PhyPos>);
   static_assert(is_static_v<DstCoord2Src1PhyPos>);
 

@@ -29,13 +29,17 @@ public:
       get<REDUCTION_DIM>(shape(SrcLayout{})) /
       get<REDUCTION_DIM>(shape(DstLayout{}));
 
-  using SrcShapeStride = decltype(stride(make_layout(shape(SrcLayout{}), LayoutLeft{})));
-  using SrcReductionDimCoordStride = decltype(get<REDUCTION_DIM>(SrcShapeStride{}));
-  static constexpr int SRC_REDUCTION_DIM_COORD_STRIDE = SrcReductionDimCoordStride::value;
+  using SrcShapeStride =
+      decltype(stride(make_layout(shape(SrcLayout{}), LayoutLeft{})));
+  using SrcReductionDimCoordStride =
+      decltype(get<REDUCTION_DIM>(SrcShapeStride{}));
+  static constexpr int SRC_REDUCTION_DIM_COORD_STRIDE =
+      SrcReductionDimCoordStride::value;
   using DstCoord2SrcCoord = decltype(make_layout(
-    shape(DstLayout{}),
-    replace<REDUCTION_DIM>(SrcShapeStride{}, Int<REDUCTION_FACTOR * SRC_REDUCTION_DIM_COORD_STRIDE>{})
-  ));
+      shape(DstLayout{}),
+      replace<REDUCTION_DIM>(
+          SrcShapeStride{},
+          Int<REDUCTION_FACTOR * SRC_REDUCTION_DIM_COORD_STRIDE>{})));
   static_assert(is_static_v<DstCoord2SrcCoord>);
 
   static __device__ __forceinline__ void
@@ -45,11 +49,14 @@ public:
     auto dst_coord2src_coord = DstCoord2SrcCoord{};
     for (int dst_elem_idx = thread_idx; dst_elem_idx < DST_NUMEL;
          dst_elem_idx += NUM_THREADS) {
-      int src_elem_idx = dst_coord2src_coord(dst_elem_idx); // The logical index of the first element in the reduction group
+      int src_elem_idx =
+          dst_coord2src_coord(dst_elem_idx); // The logical index of the first
+                                             // element in the reduction group
       T result = (T)0;
       CUTE_UNROLL
       for (int i = 0; i < REDUCTION_FACTOR; ++i) {
-        result += src[src_layout(src_elem_idx + i*SRC_REDUCTION_DIM_COORD_STRIDE)];
+        result +=
+            src[src_layout(src_elem_idx + i * SRC_REDUCTION_DIM_COORD_STRIDE)];
       }
       auto dst_phy_pos = dst_layout(dst_elem_idx);
       Epilogue::run(result, dst, dst_phy_pos);

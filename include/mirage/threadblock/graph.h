@@ -53,9 +53,9 @@ public:
                               mirage::layout::SmemLayout layout);
   // output operator
   mirage::kernel::DTensor mark_output(STensor const &stensor,
-                                     int3 output_map,
-                                     int forloop_dim,
-                                     mirage::type::TBEpilogueType epilogue);
+                                      int3 output_map,
+                                      int forloop_dim,
+                                      mirage::type::TBEpilogueType epilogue);
   mirage::kernel::DTensor *new_output(STensor const *stensor,
                                       int3 output_map,
                                       int forloop_dim,
@@ -93,7 +93,7 @@ public:
                         mirage::type::TBOperatorType type);
   STensor *elementbinary(STensor const *A,
                          STensor const *B,
-                        mirage::type::TBOperatorType type);
+                         mirage::type::TBOperatorType type);
   TBOperator *create_elementbinary_op(STensor const &A,
                                       STensor const &B,
                                       mirage::type::TBOperatorType _type);
@@ -117,7 +117,7 @@ public:
   STensor *forloop_accum(STensor const *input,
                          mirage::type::TBOperatorType type);
   TBOperator *create_forloop_accum_op(STensor const &input,
-                                       mirage::type::TBOperatorType type);
+                                      mirage::type::TBOperatorType type);
 
   // fingerprint related memory management
   off_t allocate_fingerprint(STensor const &tensor);
@@ -145,7 +145,7 @@ public:
   using TensorType = STensor;
 };
 
-void from_json(const json &j, Graph &g);
+void from_json(json const &j, Graph &g);
 
 } // namespace threadblock
 } // namespace mirage
