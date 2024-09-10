@@ -46,7 +46,7 @@ All dependenices will be automatically installed.
 ### Install the Mirage python package from Pypi
 We also provide the latest version of Mirage on Pypi. Install by running:
 ```bash
-pip install mirage
+pip install mirage-project
 ```
 
 ### Check your installation

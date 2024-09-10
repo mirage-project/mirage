@@ -155,7 +155,8 @@ class KNGraph:
                                        output_tensors=kwargs.get("outputs", []))
         # print(result)
         
-        MIRAGE_ROOT = os.environ.get('MIRAGE_ROOT', './')
+        MIRAGE_ROOT = os.environ.get('MIRAGE_ROOT', 
+                                     os.path.join(os.path.dirname(__file__), 'include'))
         
         # if True:
         #     tempdir = './test/'
