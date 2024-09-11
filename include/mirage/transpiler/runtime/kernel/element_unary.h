@@ -18,7 +18,7 @@ static __device__ __forceinline__ T perform_element_unary_op(T a) {
   } else if (OP == ElementUnaryOpType::SILU) {
     return (T)(a * (T(1) / (T(1) + fast_exp(-a))));
   } else {
-    assert(0);
+    assert(0 && "unsupport datatype in kn elementunary");
   }
 }
 
@@ -54,7 +54,7 @@ public:
   using T = T_;
   if constexpr (!(std::is_same_v<T, cutlass::half_t> ||
                   std::is_same_v<T, __half>)) {
-    assert(0 && "unsupport datatype");
+    assert(0 && "unsupport datatype in kn elementunary");
   }
   static constexpr ElementUnaryOpType OP = OP_;
   using SrcLayout = SrcLayout_;

@@ -11,19 +11,17 @@ using namespace cute;
 
 namespace tb {
 
-enum class ElementUnaryOpType { EXP };
+enum class ElementUnaryOpType { EXP, SILU };
 
 template <typename T, ElementUnaryOpType OP>
 static __device__ __forceinline__ T perform_element_unary_op(T a) {
   if constexpr (OP == ElementUnaryOpType::EXP) {
-    if constexpr (std::is_same_v<T, cutlass::half_t> ||
-                  std::is_same_v<T, __half>) {
-      return (T)expf((float)a);
-    } else {
-      assert(0);
-    }
+    return (T)expf((float)a);
   } else {
-    assert(0);
+    return (T)(a * (T(1) / (T(1) + fast_exp(-a))));
+  }
+  else {
+    assert(0 && "unsupport optype in tb elementunary");
   }
 }
 
@@ -36,6 +34,11 @@ template <typename T,
 class ElementUnaryKernel {
 public:
   using Numel = decltype(cute::size(DstLayout{}));
+
+  if constexpr (!(std::is_same_v<T, cutlass::half_t> ||
+                  std::is_same_v<T, __half>)) {
+    assert(0 && "unsupport datatype in tb elementunary");
+  }
 
   // TODO(intlsy): Use half2
   static __device__ __forceinline__ void
