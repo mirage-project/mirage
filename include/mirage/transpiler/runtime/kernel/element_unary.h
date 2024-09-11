@@ -13,6 +13,10 @@ enum class ElementUnaryOpType { EXP, SILU };
 
 template <typename T, ElementUnaryOpType OP>
 static __device__ __forceinline__ T perform_element_unary_op(T a) {
+  if constexpr (!(std::is_same_v<T, cutlass::half_t> ||
+                  std::is_same_v<T, __half>)) {
+    assert(0 && "unsupport datatype in kn elementunary");
+  }
   if constexpr (OP == ElementUnaryOpType::EXP) {
     return (T)expf((float)a);
   } else if (OP == ElementUnaryOpType::SILU) {
@@ -52,10 +56,6 @@ template <typename T_,
 class ElementUnaryKernel {
 public:
   using T = T_;
-  if constexpr (!(std::is_same_v<T, cutlass::half_t> ||
-                  std::is_same_v<T, __half>)) {
-    assert(0 && "unsupport datatype in kn elementunary");
-  }
   static constexpr ElementUnaryOpType OP = OP_;
   using SrcLayout = SrcLayout_;
   using DstLayout = DstLayout_;
