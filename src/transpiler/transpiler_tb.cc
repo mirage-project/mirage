@@ -133,6 +133,21 @@ static string get_dtensor_tile_layout(kn::DTensor const &dtensor,
       mov_to_last(d_meta.strides, dtensor.num_dims, d_innermost_dim));
 }
 
+static string get_tb_op_str(type::TBOperatorType type) {
+  auto toString = [](type::TBOperatorType type) -> string {
+    switch (type) {
+      case type::TB_EXP_OP:
+        return "EXP";
+      case type::TB_SILU_OP:
+        return "SILU";
+      default:
+        assert(0);
+    }
+  };
+
+  return toString(type);
+}
+
 // Transpile a custom KN operator (i.e. a custom block graph) into CUDA code
 // Will return a CustomOPTranspileResult object. See comments in transpiler.h
 // for more details
@@ -590,6 +605,8 @@ CustomOPTranspileResult
         res = "tb::EpilogueStoreAccum<half_t>";
       } else if (cur_op->op_type == type::TB_EXP_OP) {
         res = fmt("tb::EpilogueExp<half_t, $>", res);
+      } else if (cur_op->op_type == type::TB_SILU_OP) {
+        res = fmt("tb::EpilogueSILU<half_t, $>", res);
       } else {
         assert(0 && "Unknown operator type");
       }
@@ -696,7 +713,8 @@ CustomOPTranspileResult
           }
           break;
         }
-        case type::TB_EXP_OP: {
+        case type::TB_EXP_OP:
+        case type::TB_SILU_OP: {
           tb::STensor const &input = op->input_tensors.at(0);
           tb::STensor const &output = output_op->output_tensors.at(0);
           assert(input.num_dims == output.num_dims);
@@ -729,8 +747,9 @@ CustomOPTranspileResult
           string epilogue = transpile_fusion_epilogue(sched_node.ops);
           // Define and run the kernel
           code.e("using Kernel = tb::ElementUnaryKernel<half_t, "
-                 "tb::ElementUnaryOpType::EXP, OutLayout, InLayout, "
+                 "tb::ElementUnaryOpType::$, OutLayout, InLayout, "
                  "NUM_THREADS, $>;",
+                 get_tb_op_str(op->op_type),
                  epilogue);
           code.e("Kernel::run(stensor$_ptr, stensor$_ptr, thread_idx);",
                  output.guid,
