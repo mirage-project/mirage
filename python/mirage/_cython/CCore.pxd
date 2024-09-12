@@ -91,6 +91,7 @@ cdef extern from "mirage/kernel/graph.h" namespace "mirage::kernel":
         int customized(vector[const CppDTensor*] inputs,
                        CppDTensor** outputs,
                        CppTBGraph* bgraph)
+        int get_input_dtensors(CppDTensor** cinputs)
         void generate_triton_program(const char *filepath)
         void generate_cuda_program(const char *filepath)
 
@@ -146,17 +147,16 @@ cdef extern from "mirage/search/search_c.h" namespace "mirage::search_c":
         unsigned int y
         unsigned int z
 
-    cdef int cython_optimize(const CppKNGraph *input_graph,
-                             int max_num_new_graphs,
-                             CppKNGraph** new_graphs,
-                             vector[MInt3] imaps,
-                             vector[MInt3] omaps,
-                             vector[MDim3] griddims,
-                             vector[MDim3] blockdims,
-                             vector[int] fmaps,
-                             vector[int] franges,
-                             const char * check_point_file_path,
-                             const char * default_config)
+    cdef int cython_search(const CppKNGraph *input_graph,
+                           int max_num_new_graphs,
+                           CppKNGraph** new_graphs,
+                           vector[MInt3] imaps,
+                           vector[MInt3] omaps,
+                           vector[MDim3] griddims,
+                           vector[MDim3] blockdims,
+                           vector[int] fmaps,
+                           vector[int] franges,
+                           const char * default_config)
 
 cdef extern from "mirage/transpiler/transpile.h" namespace "mirage::transpiler":
     ctypedef struct TranspilerConfig:
