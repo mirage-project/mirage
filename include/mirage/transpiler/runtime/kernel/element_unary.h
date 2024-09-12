@@ -9,7 +9,7 @@
 
 namespace kn {
 
-enum class ElementUnaryOpType { EXP, SILU };
+enum class ElementUnaryOpType { EXP, SILU, SQUARE, SQRT };
 
 template <typename T, ElementUnaryOpType OP>
 static __device__ __forceinline__ T perform_element_unary_op(T a) {
@@ -21,6 +21,10 @@ static __device__ __forceinline__ T perform_element_unary_op(T a) {
     return (T)expf((float)a);
   } else if (OP == ElementUnaryOpType::SILU) {
     return (T)(a * (T(1) / (T(1) + fast_exp(-a))));
+  } else if (OP == ElementUnaryOpType::SQUARE) {
+    return (T)(a * a);
+  } else if (OP == ElementUnaryOpType::SQRT) {
+    return (T)(sqrtf((float)a));
   } else {
     assert(0 && "unsupport datatype in kn elementunary");
   }

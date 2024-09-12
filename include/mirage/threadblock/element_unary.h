@@ -26,10 +26,14 @@ class TBElementUnaryOp : public TBOperator {
 public:
   TBElementUnaryOp(Graph *_graph,
                    STensor const &_input,
-                   mirage::type::TBOperatorType _type);
+                   mirage::type::TBOperatorType _type,
+                   float const scalar);
   ~TBElementUnaryOp();
 
   operator json() const override;
+
+public:
+  float const scalar;
 };
 
 } // namespace threadblock
