@@ -209,7 +209,9 @@ z3::expr Silu::to_z3(z3::context &c,
   return silu(a->to_z3(c, all_variables));
 }
 
-std::string Silu::to_string() const { return "silu(" + a->to_string() + ")"; }
+std::string Silu::to_string() const {
+  return "silu(" + a->to_string() + ")";
+}
 
 Red::Red(int red_deg, std::shared_ptr<AlgebraicPattern> summand)
     : red_deg_log(std::ceil(std::log2(red_deg))), summand(summand) {}

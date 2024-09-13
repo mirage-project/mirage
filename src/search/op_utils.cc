@@ -34,7 +34,8 @@ bool is_binary(type::KNOperatorType op) {
       type::KNOperatorType::KN_ADD_OP,
       type::KNOperatorType::KN_MATMUL_OP,
       type::KNOperatorType::KN_DIV_OP,
-      type::KNOperatorType::KN_MUL_OP,};
+      type::KNOperatorType::KN_MUL_OP,
+  };
   return contains(true_values, op);
 }
 
