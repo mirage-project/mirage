@@ -436,10 +436,14 @@ void KernelGraphGenerator::generate_kernel_graphs() {
     c.kn_graph->new_input(dim, data_type, layout);
   }
 
+  auto start_time = std::chrono::steady_clock::now();
+
   generate_next_operator(c, [](kernel::Graph const &g) {
     return count_op(type::KNOperatorType::KN_CUSTOMIZED_OP, g) >=
            MAX_NUM_THREADBLOCK / 2;
   });
+  printf("[Search] First step finished. Time elapsed: %fsec\n", 
+         std::chrono::duration<double>(std::chrono::steady_clock::now() - start_time).count());
   std::vector<std::vector<json>> middle_states(num_thread);
   for (size_t i = 0; i < c.generated_graphs.size(); ++i) {
     middle_states[i % num_thread].push_back(c.generated_graphs[i]);
@@ -455,9 +459,11 @@ void KernelGraphGenerator::generate_kernel_graphs() {
 
   save_results();
 
-  printf("Total kernel graphs explored: %d\n", num_total_kernel_graphs.load());
-  printf("Random tests performed: %d\n", num_total_random_tests.load());
-  printf("Valid kernel graphs explored: %d\n", num_valid_kernel_graphs.load());
+  printf("[Search] Second step finished. Time elapsed: %fsec\n", 
+         std::chrono::duration<double>(std::chrono::steady_clock::now() - start_time).count());
+  printf("[Search] Total kernel graphs explored: %d\n", num_total_kernel_graphs.load());
+  printf("[Search] Random tests performed: %d\n", num_total_random_tests.load());
+  printf("[Serach] Valid kernel graphs explored: %d\n", num_valid_kernel_graphs.load());
 }
 
 void KernelGraphGenerator::preprocess(kernel::Graph const &computation_graph) {

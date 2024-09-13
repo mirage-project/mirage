@@ -72,5 +72,20 @@ int main(int argc, char **argv) {
   }
   printf("[2 Block Graphs] Total runtime = %.4lfms\n", total_ms);
 
+  auto st = std::chrono::steady_clock::now();
+
+  search::GeneratorConfig config =
+      search::GeneratorConfig::get_mlp_default_config();
+  config.grid_dim_to_explore = {{64, 1, 1}};
+  std::string checkpoint_file_name = "checkpoint_gated_mlp.json";
+  search::KernelGraphGenerator gen(
+      ref_graph, config, checkpoint_file_name.data());
+  gen.generate_kernel_graphs();
+
+  auto et = std::chrono::steady_clock::now();
+
+  printf("Search time = %.4lfsec\n",
+         std::chrono::duration<double>(et - st).count());
+
   return 0;
 }

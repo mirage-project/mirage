@@ -8,13 +8,15 @@ bool is_binary(type::TBOperatorType op) {
   std::unordered_set<type::TBOperatorType> true_values{
       type::TBOperatorType::TB_ADD_OP,
       type::TBOperatorType::TB_MATMUL_OP,
-      type::TBOperatorType::TB_DIV_OP};
+      type::TBOperatorType::TB_DIV_OP,
+      type::TBOperatorType::TB_MUL_OP};
   return contains(true_values, op);
 }
 
 bool is_unary(type::TBOperatorType op) {
   std::unordered_set<type::TBOperatorType> true_values{
       type::TBOperatorType::TB_EXP_OP,
+      type::TBOperatorType::TB_SILU_OP,
       type::TBOperatorType::TB_REDUCTION_0_OP,
       type::TBOperatorType::TB_REDUCTION_1_OP,
       type::TBOperatorType::TB_REDUCTION_2_OP,
@@ -31,7 +33,8 @@ bool is_binary(type::KNOperatorType op) {
   std::unordered_set<type::KNOperatorType> true_values{
       type::KNOperatorType::KN_ADD_OP,
       type::KNOperatorType::KN_MATMUL_OP,
-      type::KNOperatorType::KN_DIV_OP};
+      type::KNOperatorType::KN_DIV_OP,
+      type::KNOperatorType::KN_MUL_OP,};
   return contains(true_values, op);
 }
 
@@ -41,6 +44,7 @@ bool is_unary(type::KNOperatorType op) {
       type::KNOperatorType::KN_REDUCTION_1_OP,
       type::KNOperatorType::KN_REDUCTION_2_OP,
       type::KNOperatorType::KN_EXP_OP,
+      type::KNOperatorType::KN_SILU_OP,
   };
   return contains(true_values, op);
 }
@@ -87,6 +91,8 @@ std::shared_ptr<AlgebraicPattern>
       return std::make_shared<Red>(tensor.dim[2], opd);
     case type::KNOperatorType::KN_EXP_OP:
       return std::make_shared<Exp>(opd);
+    case type::KNOperatorType::KN_SILU_OP:
+      return std::make_shared<Silu>(opd);
     default:
       assert(false);
   }
@@ -104,6 +110,8 @@ std::shared_ptr<AlgebraicPattern>
   switch (op) {
     case type::TBOperatorType::TB_EXP_OP:
       return std::make_shared<Exp>(opd);
+    case type::TBOperatorType::TB_SILU_OP:
+      return std::make_shared<Silu>(opd);
     case type::TBOperatorType::TB_REDUCTION_0_OP:
       return std::make_shared<Red>(tensor.dim[0], opd);
     case type::TBOperatorType::TB_REDUCTION_1_OP:
@@ -174,6 +182,8 @@ std::shared_ptr<AlgebraicPattern>
       return std::make_shared<Add>(lhs, rhs);
     case type::KNOperatorType::KN_DIV_OP:
       return std::make_shared<Div>(lhs, rhs);
+    case type::KNOperatorType::KN_MUL_OP:
+      return std::make_shared<Mul>(lhs, rhs);
     default:
       assert(false);
   }
@@ -198,6 +208,8 @@ std::shared_ptr<AlgebraicPattern>
       return std::make_shared<Add>(lhs, rhs);
     case type::TBOperatorType::TB_DIV_OP:
       return std::make_shared<Div>(lhs, rhs);
+    case type::TBOperatorType::TB_MUL_OP:
+      return std::make_shared<Mul>(lhs, rhs);
     default:
       assert(false);
   }
@@ -258,6 +270,7 @@ KNOperator *create_op(kernel::Graph &g,
     case type::KNOperatorType::KN_REDUCTION_2_OP:
       return g.create_reduction_op(input, 2, 1);
     case type::KNOperatorType::KN_EXP_OP:
+    case type::KNOperatorType::KN_SILU_OP:
       return g.create_elementunary_op(input, type);
     default:
       assert(false && "Unsupported operator");
@@ -273,6 +286,7 @@ KNOperator *create_op(kernel::Graph &g,
       return g.create_matmul_op(input1, input2);
     case type::KNOperatorType::KN_DIV_OP:
     case type::KNOperatorType::KN_ADD_OP:
+    case type::KNOperatorType::KN_MUL_OP:
       return g.create_elementbinary_op(input1, input2, type);
     default:
       assert(false && "Unsupported operator");
@@ -296,6 +310,7 @@ TBOperator *create_op(threadblock::Graph &g,
                       STensor const &input) {
   switch (type) {
     case type::TBOperatorType::TB_EXP_OP:
+    case type::TBOperatorType::TB_SILU_OP:
       return g.create_elementunary_op(input, type);
     case type::TBOperatorType::TB_REDUCTION_0_OP:
     case type::TBOperatorType::TB_REDUCTION_1_OP:
@@ -342,6 +357,7 @@ TBOperator *create_op(threadblock::Graph &g,
       return g.create_matmul_op(input1, input2);
     case type::TBOperatorType::TB_DIV_OP:
     case type::TBOperatorType::TB_ADD_OP:
+    case type::TBOperatorType::TB_MUL_OP:
       return g.create_elementbinary_op(input1, input2, type);
     default:
       assert(false && "Unsupported operator");
