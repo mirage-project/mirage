@@ -43,58 +43,6 @@ TBOperator *Graph::create_input_op(mirage::kernel::DTensor const &dtensor,
                                    int3 input_map,
                                    int forloop_dim,
                                    mirage::layout::SmemLayout layout) {
-#ifdef DEADCODE
-  STensor tensor;
-  tensor.num_dims = dtensor.num_dims;
-  tensor.data_type = dtensor.data_type;
-  for (int i = 0; i < tensor.num_dims; i++) {
-    tensor.dim[i] = dtensor.dim[i];
-  }
-
-  for (int d = 0; d < 3; d++) {
-    int dim_idx = -1;
-    int dim_div = 1;
-    if (d == 0 && grid_dim.x > 1) {
-      dim_idx = input_map.x;
-      dim_div = grid_dim.x;
-    }
-    if (d == 1 && grid_dim.y > 1) {
-      dim_idx = input_map.y;
-      dim_div = grid_dim.y;
-    }
-    if (d == 2 && grid_dim.z > 1) {
-      dim_idx = input_map.z;
-      dim_div = grid_dim.z;
-    }
-    if (dim_idx >= 0) {
-      assert(tensor.dim[dim_idx] > 0);
-      assert(tensor.dim[dim_idx] % dim_div == 0);
-      tensor.dim[dim_idx] /= dim_div;
-    }
-  }
-
-  if (forloop_dim >= 0) {
-    assert(tensor.dim[forloop_dim] > 0);
-    assert(tensor.dim[forloop_dim] % forloop_range == 0);
-    tensor.dim[forloop_dim] /= forloop_range;
-  }
-  // our data loader only supports 2D matrices
-  // (i.e., only the last two dims can be larger than 1
-  for (int i = 0; i < tensor.num_dims - 2; i++) {
-    if (tensor.dim[i] != 1) {
-      return nullptr;
-    }
-    // assert(tensor.dim[i] == 1);
-  }
-
-  if (smem_offset + (off_t)tensor.size() >
-      (off_t)mirage::config::MAX_SMEM_SIZE) {
-    // printf("smem_offset(%d) tensor.size(%d)\n", smem_offset, tensor.size());
-    return nullptr;
-  }
-
-#endif
-
   TBInputOp *op = new TBInputOp(this, dtensor, input_map, forloop_dim, layout);
 
   // Check shmem usage
@@ -150,10 +98,6 @@ TBInputOp::TBInputOp(Graph *_graph,
     tensor.dim[forloop_dim] /= bgraph->forloop_range;
   }
 
-  // Our data loader only supports 2D matrices
-  for (int i = 0; i < tensor.num_dims - 2; i++) {
-    assert(tensor.dim[i] == 1);
-  }
   tensor.owner_op = this;
   tensor.owner_ts_idx = 0;
   tensor.guid = STensor::next_guid++;
