@@ -43,6 +43,7 @@ bool AlgebraicPattern::subpattern_to(AlgebraicPattern const &other) const {
   z3::func_decl mul = c.function("mul", P, P, P);
   z3::func_decl div = c.function("div", P, P, P);
   z3::func_decl exp = c.function("exp", P, P);
+  z3::func_decl silu = c.function("silu", P, P);
   z3::func_decl red = c.function("red", I, P, P);
 
   z3::func_decl subpattern = c.function("subpattern", P, P, c.bool_sort());
@@ -98,6 +99,7 @@ bool AlgebraicPattern::subpattern_to(AlgebraicPattern const &other) const {
   s.add(forall(x, y, subpattern(x, div(x, y))));
   s.add(forall(x, y, subpattern(y, div(x, y))));
   s.add(forall(x, subpattern(x, exp(x))));
+  s.add(forall(x, subpattern(x, silu(x))));
   s.add(forall(x, i, subpattern(x, red(i, x))));
 
   s.add(forall(x, x == red(c.int_val(0), x)));
@@ -196,6 +198,19 @@ z3::expr Exp::to_z3(z3::context &c,
 
 std::string Exp::to_string() const {
   return "e^" + exponent->to_string();
+}
+
+Silu::Silu(std::shared_ptr<AlgebraicPattern> a) : a(a) {}
+
+z3::expr Silu::to_z3(z3::context &c,
+                     std::unordered_set<std::string> &all_variables) const {
+  z3::sort P = c.uninterpreted_sort("P");
+  z3::func_decl silu = c.function("silu", P, P);
+  return silu(a->to_z3(c, all_variables));
+}
+
+std::string Silu::to_string() const {
+  return "silu(" + a->to_string() + ")";
 }
 
 Red::Red(int red_deg, std::shared_ptr<AlgebraicPattern> summand)
