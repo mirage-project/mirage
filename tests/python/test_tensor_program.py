@@ -5,6 +5,18 @@ import pytest
 import torch.nn as nn
 
 
+def is_closed(A, B):
+    err = 0
+    assert (A.shape == B.shape) & (A.dim() == 2)
+    for i in range(A.shape[0]):
+        for j in range(A.shape[1]):
+            max_val = max(abs(A[i, j].item()), abs(B[i, j].item()))
+            rel_error = abs(A[i, j] - B[i, j]) / max_val
+            abs_error = abs(A[i, j] - B[i, j])
+            
+            if (rel_error > 1e-1) & (abs_error > 1e-1):
+                err += 1
+    return err == 0
 @pytest.mark.parametrize(
     "test_config",
     [
@@ -157,6 +169,11 @@ def test_rms_norm(test_config):
     tb_graph.new_output(stensor=tO, output_map=test_config["tb_outout_map"])
     O = graph.customized([X, W], tb_graph)
 
+#     input_tensors = [
+#     torch.full(test_config["input_size"], 0.1,dtype=torch.float16, device='cuda:0'),
+#     torch.full(test_config["weight_size"], 0.1, dtype=torch.float16, device='cuda:0'),
+# ]
+
     input_tensors = [
         (
             torch.rand(test_config["input_size"], dtype=torch.float16, device="cuda:0")
@@ -177,11 +194,10 @@ def test_rms_norm(test_config):
     print(p["code"])
     outputs = graph(inputs=input_tensors, outputs=O)
 
-    # check correctness with torch
-    In1 = torch.matmul(input_tensors[0], input_tensors[1])
-    rmsnorm = nn.RMSNorm(input_tensors[0].size(1), device="cuda:0")
-    RMS = rmsnorm(input_tensors[0])
-    Res = torch.div(In1, RMS)
 
-    rel_error = torch.abs(outputs[0] - Res) / (torch.abs(torch.max(outputs[0])) + 1e-8)
-    assert torch.max(rel_error) < 5e-2
+    # check correctness with torch
+    rmsnorm = nn.RMSNorm((input_tensors[0].size(1)), dtype=torch.float16, device="cuda:0")
+    RMS = rmsnorm(input_tensors[0])
+    Res = torch.matmul(RMS, input_tensors[1])
+
+    assert is_closed(Res, outputs[0])

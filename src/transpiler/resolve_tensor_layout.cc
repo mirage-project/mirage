@@ -414,7 +414,11 @@ void Transpiler::resolve_tensor_layout() {
             }
             break;
           }
-          case type::TB_EXP_OP: {
+          case type::TB_EXP_OP:
+          case type::TB_SILU_OP:
+          case type::TB_SQUARE_OP:
+          case type::TB_SQRT_OP:
+          case type::TB_MUL_SCALAR_OP: {
             tb::STensor const &input = tb_op->input_tensors.at(0);
             tb::STensor const &output = output_op->output_tensors.at(0);
             assert(input.num_dims == output.num_dims);
