@@ -206,3 +206,35 @@ class KNGraph:
         self._is_compiled = True
         self._cached_results = result
         return self._cached_results
+
+    def superoptimize(self, **kwargs):
+        cygraphs = search(self.cygraph)
+        all_graphs = [KNGraph(g) for g in cygraphs]
+
+        # profile and use the best graph
+        best_graph, best_perf = None, float('inf')
+        for g in all_graphs:
+            dtensors = g.cygraph.get_input_dtensors()
+            input_tensors = list()
+            for t in dtensors:
+                dims = [t.dim(i) for i in range(t.num_dims)]
+                print("dims", dims)
+                input_tensors.append(torch.randn(dims, dtype=torch.float16, device='cuda:0'))
+            starter = torch.cuda.Event(enable_timing=True)
+            ender = torch.cuda.Event(enable_timing=True)
+            for _ in range(16):
+                g(inputs=input_tensors)
+            torch.cuda.synchronize()
+            starter.record()
+            for _ in range(1000):
+                g(inputs=input_tensors)
+            ender.record()
+            torch.cuda.synchronize()
+            perf = starter.elapsed_time(ender) / 1000
+            print("perf = ", perf)
+            print(g)
+            if perf < best_perf:
+                best_graph, best_perf = g, perf
+
+        return best_graph
+

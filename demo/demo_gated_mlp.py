@@ -7,7 +7,7 @@ if __name__ == "__main__":
     X = graph.new_input(dims=(8, 4096), dtype=mi.float16)
     W1 = graph.new_input(dims=(4096, 4096), dtype=mi.float16)
     W2 = graph.new_input(dims=(4096, 4096), dtype=mi.float16)
-    tb_graph = mi.new_threadblock_graph(grid_dim=(64,1,1), block_dim=(128,1,1), forloop_range=64, reduction_dimx=64)
+    tb_graph = mi.new_threadblock_graph(grid_dim=(64,1,1), block_dim=(128,1,1), forloop_range=32, reduction_dimx=64)
     tX = tb_graph.new_input(dtensor=X, input_map=(-1, -1, -1), forloop_dim=1)
     tW1 = tb_graph.new_input(dtensor=W1, input_map=(1, -1, -1), forloop_dim=0)
     tW2 = tb_graph.new_input(dtensor=W2, input_map=(1, -1, -1), forloop_dim=0)
@@ -29,12 +29,13 @@ if __name__ == "__main__":
     input_strides = [tensor.stride() for tensor in input_tensors]
     p = mi.generate_cuda_program(graph.cygraph, target_cc=86, input_strides=input_strides, output_tensors=O)
     print(p["code"])
+    silu = torch.nn.SiLU()
     # warm up runs
     for _ in range(16):
-        outputs = graph(inputs=input_tensors, outputs=O)
+        outputs = graph(inputs=input_tensors)
         D = torch.matmul(input_tensors[0], input_tensors[1])
         E = torch.matmul(input_tensors[0], input_tensors[2])
-        O = torch.mul(torch.relu(D), E)
+        O = torch.mul(silu(D), E)
 
     torch.cuda.synchronize()
 
@@ -43,10 +44,10 @@ if __name__ == "__main__":
     timings=np.zeros((repetitions,1))
     starter.record()
     for rep in range(repetitions):
-        outputs = graph(inputs=input_tensors, outputs=O)
+        outputs = graph(inputs=input_tensors)
         #D = torch.matmul(input_tensors[0], input_tensors[1])
         #E = torch.matmul(input_tensors[0], input_tensors[2])
-        #O = torch.mul(torch.relu(D), E)
+        #O = torch.mul(silu(D), E)
         #timings[rep] = curr_time
     ender.record()
     torch.cuda.synchronize()

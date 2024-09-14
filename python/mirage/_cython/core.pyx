@@ -20,7 +20,7 @@ import array
 import numpy as np
 from libcpp.string cimport string
 
-# Code snippet from OpenAi Triton
+# Code snippet from OpenAI Triton
 
 class dtype:
     SINT_TYPES = ['int8', 'int16', 'int32', 'int64']
@@ -322,6 +322,16 @@ cdef class CyKNGraph:
         cfilepath = py_byte_string
         self.p_kgraph.generate_triton_program(cfilepath)
 
+    def get_input_dtensors(self):
+        cdef CppDTensor* cinputs[1024]
+        num = self.p_kgraph.get_input_dtensors(cinputs)
+        inputs = list()
+        for i in range(num):
+            ptr = ctypes.cast(<unsigned long long>cinputs[i], ctypes.c_void_p)
+            inputs.append(DTensor(ptr))
+        return inputs
+
+
 cdef class CyTBGraph:
     cdef CppTBGraph *p_bgraph #Hold a CppTBGraph instance
 
@@ -413,7 +423,7 @@ cdef class CyTBGraph:
         t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
         return STensor(t)
 
-def optimize(CyKNGraph input_graph, *, int max_num_new_graphs = 1024, list imaps = None, list omaps = None, list griddims = None, list blockdims = None, list fmaps = None, list franges = None, str previous_checkpoint = None, str default_config = None):
+def search(CyKNGraph input_graph, *, int max_num_new_graphs = 1024, list imaps = None, list omaps = None, list griddims = None, list blockdims = None, list fmaps = None, list franges = None, str previous_checkpoint = None, str default_config = None):
     # set cimaps
     cdef vector[MInt3] cimaps
     cimaps.resize(0)
@@ -469,21 +479,17 @@ def optimize(CyKNGraph input_graph, *, int max_num_new_graphs = 1024, list imaps
     # currently support up to 1024 new graphs
     assert max_num_new_graphs <= 1024
     cdef CppKNGraph* cnewgraphs[1024]
-    # convert file path
-    cdef char* cfilepath = NULL
-    if previous_checkpoint is not None:
-        py_byte_string = previous_checkpoint.encode('UTF-8')
-        cfilepath = py_byte_string
     # convert config description
     cdef char* cconfig = NULL
     if default_config is not None:
         py_byte_string = default_config.encode('UTF-8')
         cconfig = py_byte_string
-    num = cython_optimize(input_graph.p_kgraph, max_num_new_graphs, cnewgraphs, cimaps, comaps, cgriddims, cblockdims, cfmaps, cfranges, cfilepath, cconfig)
+    num = cython_search(input_graph.p_kgraph, max_num_new_graphs, cnewgraphs, cimaps, comaps, cgriddims, cblockdims, cfmaps, cfranges, cconfig)
     new_graphs = list()
     for i in range(num):
         ptr = ctypes.cast(<unsigned long long>cnewgraphs[i], ctypes.c_void_p)
         new_graphs.append(CyKNGraph(ptr))
+
     return new_graphs
 
 # Generate CUDA program for a uGraph
