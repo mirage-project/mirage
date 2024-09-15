@@ -27,7 +27,7 @@ public:
   TBElementUnaryOp(Graph *_graph,
                    STensor const &_input,
                    mirage::type::TBOperatorType _type,
-                   float const scalar);
+                   float const &scalar);
   ~TBElementUnaryOp();
 
   operator json() const override;

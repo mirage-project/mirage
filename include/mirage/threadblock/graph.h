@@ -77,17 +77,17 @@ public:
   STensor *square(STensor const *A);
   STensor sqrt(STensor const &A);
   STensor *sqrt(STensor const *A);
-  STensor mul_scalar(STensor const &A, float scalar);
-  STensor *mul_scalar(STensor const *A, float scalar);
+  STensor mul_scalar(STensor const &A, float const &scalar);
+  STensor *mul_scalar(STensor const *A, float const &scalar);
   STensor elementunary(STensor const &A,
                        mirage::type::TBOperatorType type,
-                       float const scalar = 0.0f);
+                       float const &scalar = 0.0f);
   STensor *elementunary(STensor const *A,
                         mirage::type::TBOperatorType type,
-                        float const scalar = 0.0f);
+                        float const &scalar = 0.0f);
   TBOperator *create_elementunary_op(STensor const &A,
                                      mirage::type::TBOperatorType _type,
-                                     float const scalar = 0.0f);
+                                     float const &scalar = 0.0f);
   // element binary operators
   STensor add(STensor const &A, STensor const &B);
   STensor *add(STensor const *A, STensor const *B);
