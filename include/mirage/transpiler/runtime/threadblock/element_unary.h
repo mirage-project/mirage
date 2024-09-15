@@ -30,9 +30,11 @@ static __device__ __forceinline__ T
     return (T)(sqrtf((float)a));
   } else if (OP == ElementUnaryOpType::MULSCALAR) {
     return (T)(scalar * (float)a);
+  } else {
+    assert(0 && "unsupport optype in tb elementunary");
   }
 
-  assert(0 && "unsupport optype in tb elementunary");
+  return (T)0.0;
 }
 
 template <typename T,
