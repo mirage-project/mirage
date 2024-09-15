@@ -89,6 +89,7 @@ enum TBOperatorType {
   TB_SQUARE_OP = 2101,
   TB_SQRT_OP = 2102,
   TB_SILU_OP = 2103,
+  TB_MUL_SCALAR_OP = 2104,
   // ElementBinary
   TB_ADD_OP = 2200,
   TB_MUL_OP = 2201,
@@ -135,6 +136,7 @@ NLOHMANN_JSON_SERIALIZE_ENUM(
         {TB_SQUARE_OP, "tb_square_op"},
         {TB_SQRT_OP, "tb_sqrt_op"},
         {TB_SILU_OP, "tb_silu_op"},
+        {TB_MUL_SCALAR_OP, "tb_mul_scalar_op"},
         {TB_ADD_OP, "tb_add_op"},
         {TB_MUL_OP, "tb_mul_op"},
         {TB_DIV_OP, "tb_div_op"},

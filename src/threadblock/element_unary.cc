@@ -52,16 +52,26 @@ STensor *Graph::silu(STensor const *input) {
   return elementunary(input, mirage::type::TB_SILU_OP);
 }
 
+STensor Graph::mul_scalar(STensor const &input, float const &scalar) {
+  return elementunary(input, mirage::type::TB_MUL_SCALAR_OP, scalar);
+}
+
+STensor *Graph::mul_scalar(STensor const *input, float const &scalar) {
+  return elementunary(input, mirage::type::TB_MUL_SCALAR_OP, scalar);
+}
+
 STensor Graph::elementunary(STensor const &input,
-                            mirage::type::TBOperatorType type) {
-  TBOperator *op = create_elementunary_op(input, type);
+                            mirage::type::TBOperatorType type,
+                            float const &scalar) {
+  TBOperator *op = create_elementunary_op(input, type, scalar);
   assert(op != nullptr);
   operators.push_back(op);
   return op->output_tensors[0];
 }
 
 STensor *Graph::elementunary(STensor const *input,
-                             mirage::type::TBOperatorType type) {
+                             mirage::type::TBOperatorType type,
+                             float const &scalar) {
   TBOperator *op = create_elementunary_op(*input, type);
   assert(op != nullptr);
   operators.push_back(op);
@@ -69,15 +79,17 @@ STensor *Graph::elementunary(STensor const *input,
 }
 
 TBOperator *Graph::create_elementunary_op(STensor const &input,
-                                          mirage::type::TBOperatorType _type) {
-  TBElementUnaryOp *op = new TBElementUnaryOp(this, input, _type);
+                                          mirage::type::TBOperatorType _type,
+                                          float const &scalar) {
+  TBElementUnaryOp *op = new TBElementUnaryOp(this, input, _type, scalar);
   return op;
 }
 
 TBElementUnaryOp::TBElementUnaryOp(Graph *_graph,
                                    STensor const &input,
-                                   mirage::type::TBOperatorType _type)
-    : TBOperator(_graph, _type, input) {
+                                   mirage::type::TBOperatorType _type,
+                                   float const &scalar)
+    : TBOperator(_graph, _type, input), scalar(scalar) {
   STensor output = input;
   output.owner_op = this;
   output.owner_ts_idx = 0;

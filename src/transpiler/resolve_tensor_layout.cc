@@ -34,7 +34,7 @@ namespace transpiler {
 
 // Helper functions
 // Find the last dimension with stride 1. Return -1 if not found.
-static int find_innermost_dim(const size_t strides[], int num_dims) {
+static int find_innermost_dim(size_t const strides[], int num_dims) {
   for (int i = num_dims - 1; i >= 0; i--) {
     if (strides[i] == 1) {
       return i;
@@ -264,7 +264,10 @@ void Transpiler::resolve_tensor_layout() {
                     ctx.int_val(0)));
         break;
       }
-      case type::KN_EXP_OP: {
+      case type::KN_EXP_OP:
+      case type::KN_SQUARE_OP:
+      case type::KN_SQRT_OP:
+      case type::KN_SILU_OP: {
         // Elementwise Unary OP
         kn::DTensor const &input = op->input_tensors.at(0);
         kn::DTensor const &output = op->output_tensors.at(0);
@@ -411,7 +414,11 @@ void Transpiler::resolve_tensor_layout() {
             }
             break;
           }
-          case type::TB_EXP_OP: {
+          case type::TB_EXP_OP:
+          case type::TB_SILU_OP:
+          case type::TB_SQUARE_OP:
+          case type::TB_SQRT_OP:
+          case type::TB_MUL_SCALAR_OP: {
             tb::STensor const &input = tb_op->input_tensors.at(0);
             tb::STensor const &output = output_op->output_tensors.at(0);
             assert(input.num_dims == output.num_dims);

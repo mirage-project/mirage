@@ -108,6 +108,24 @@ std::pair<string, string>
   return {pointer_var_name, code};
 }
 
+static string get_kn_op_str(type::KNOperatorType type) {
+  auto toString = [](type::KNOperatorType type) -> string {
+    switch (type) {
+      case type::KN_EXP_OP:
+        return "EXP";
+      case type::KN_SILU_OP:
+        return "SILU";
+      case type::KN_SQUARE_OP:
+        return "SQUARE";
+      case type::KN_SQRT_OP:
+        return "SQRT";
+      default:
+        assert(0);
+    }
+  };
+  return toString(type);
+}
+
 TranspileResult Transpiler::transpile_ugraph() {
   // Generate header
   CodeKeeper header;
@@ -116,11 +134,11 @@ TranspileResult Transpiler::transpile_ugraph() {
   header.e("#include \"runtime.h\"");
   header.e("using namespace cute;");
 
-  CodeKeeper
-      custom_kernels; // This keeps all code for custom kernels (KNCustomizedOp)
-  CodeKeeper init;    // This keeps all code in the `_init` function (e.g.
-                      // cudaFuncSetAttribute)
-  CodeKeeper exec;    // This keeps all code in the `_execute_mugraph` function
+  CodeKeeper custom_kernels; // This keeps all code for custom kernels
+                             // (KNCustomizedOp)
+  CodeKeeper init; // This keeps all code in the `_init` function (e.g.
+                   // cudaFuncSetAttribute)
+  CodeKeeper exec; // This keeps all code in the `_execute_mugraph` function
 
   init.e("static void _init() {");
   exec.e(
@@ -198,7 +216,10 @@ TranspileResult Transpiler::transpile_ugraph() {
                batch_stride_C);
         break;
       }
-      case type::KNOperatorType::KN_EXP_OP: {
+      case type::KNOperatorType::KN_EXP_OP:
+      case type::KNOperatorType::KN_SILU_OP:
+      case type::KNOperatorType::KN_SQUARE_OP:
+      case type::KNOperatorType::KN_SQRT_OP: {
         // Elemwise unary op
         kn::DTensor &in0 = op->input_tensors.at(0);
         kn::DTensor &out0 = op->output_tensors.at(0);
@@ -233,7 +254,8 @@ TranspileResult Transpiler::transpile_ugraph() {
         exec.e(out0_ptr_code);
         // Create kernel instance
         exec.e("using kernel = kn::ElementUnaryKernel<half_t, "
-               "kn::ElementUnaryOpType::EXP, $, $>;",
+               "kn::ElementUnaryOpType::$, $, $>;",
+               get_kn_op_str(op->op_type),
                in0_layout,
                out0_layout);
         // Launch kernel
@@ -326,7 +348,8 @@ TranspileResult Transpiler::transpile_ugraph() {
         // Assemble the new shape and stride
         if (meta_in0.innermost_dim == reduction_dim) {
           printf(
-              "Warning: In the current implementation of the reduction kernel, "
+              "Warning: In the current implementation of the reduction "
+              "kernel, "
               "global memory access won't be coalesced when reduction_dim == "
               "innermost_dim. This may cause performance degration\n");
         }
@@ -402,8 +425,8 @@ TranspileResult Transpiler::transpile_ugraph() {
                      bgraph.block_dim.z <=
                  1024);
         } else {
-          // In the future, we may need to update this part for GPUs later than
-          // H100
+          // In the future, we may need to update this part for GPUs later
+          // than H100
           assert(0);
         }
         // Launch kernel

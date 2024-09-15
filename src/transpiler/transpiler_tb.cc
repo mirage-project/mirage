@@ -13,6 +13,7 @@
  * limitations under the License.
  */
 
+#include "mirage/threadblock/element_unary.h"
 #include "mirage/threadblock/forloop_accum.h"
 #include "mirage/threadblock/operator.h"
 #include "mirage/threadblock/smem_tensor.h"
@@ -131,6 +132,27 @@ static string get_dtensor_tile_layout(kn::DTensor const &dtensor,
                   dtensor.num_dims,
                   d_innermost_dim), // Here we use stensor.dim
       mov_to_last(d_meta.strides, dtensor.num_dims, d_innermost_dim));
+}
+
+static string get_tb_op_str(type::TBOperatorType type) {
+  auto toString = [](type::TBOperatorType type) -> string {
+    switch (type) {
+      case type::TB_EXP_OP:
+        return "EXP";
+      case type::TB_SILU_OP:
+        return "SILU";
+      case type::TB_SQUARE_OP:
+        return "SQUARE";
+      case type::TB_SQRT_OP:
+        return "SQRT";
+      case type::TB_MUL_SCALAR_OP:
+        return "MULSCALAR";
+      default:
+        assert(0);
+    }
+  };
+
+  return toString(type);
 }
 
 // Transpile a custom KN operator (i.e. a custom block graph) into CUDA code
@@ -590,6 +612,14 @@ CustomOPTranspileResult
         res = "tb::EpilogueStoreAccum<half_t>";
       } else if (cur_op->op_type == type::TB_EXP_OP) {
         res = fmt("tb::EpilogueExp<half_t, $>", res);
+      } else if (cur_op->op_type == type::TB_SILU_OP) {
+        res = fmt("tb::EpilogueSILU<half_t, $>", res);
+      } else if (cur_op->op_type == type::TB_SQUARE_OP) {
+        res = fmt("tb::EpilogueSquare<half_t, $>", res);
+      } else if (cur_op->op_type == type::TB_SQRT_OP) {
+        res = fmt("tb::EpilogueSqrt<half_t, $>", res);
+      } else if (cur_op->op_type == type::TB_MUL_SCALAR_OP) {
+        res = fmt("tb::EpilogueMulScalar<half_t, $>", res);
       } else {
         assert(0 && "Unknown operator type");
       }
@@ -696,13 +726,23 @@ CustomOPTranspileResult
           }
           break;
         }
-        case type::TB_EXP_OP: {
-          tb::STensor const &input = op->input_tensors.at(0);
+        case type::TB_EXP_OP:
+        case type::TB_SILU_OP:
+        case type::TB_SQUARE_OP:
+        case type::TB_SQRT_OP:
+        case type::TB_MUL_SCALAR_OP: {
+          tb::TBElementUnaryOp const *cur_op =
+              dynamic_cast<tb::TBElementUnaryOp const *>(op);
+          tb::STensor const &input = cur_op->input_tensors.at(0);
           tb::STensor const &output = output_op->output_tensors.at(0);
           assert(input.num_dims == output.num_dims);
           int num_dims = input.num_dims;
           // Find the iteration dim
           int iter_dim = -1;
+
+          // at least one dim exists that fullfill the requirement:
+          // dim i in input&output tensor == meta.innermost_dim or
+          // meta.swizzled_dim
           for (int i = 0; i < num_dims; ++i) {
             bool failed = false;
             for (tb::STensor const &stensor : {input, output}) {
@@ -729,12 +769,14 @@ CustomOPTranspileResult
           string epilogue = transpile_fusion_epilogue(sched_node.ops);
           // Define and run the kernel
           code.e("using Kernel = tb::ElementUnaryKernel<half_t, "
-                 "tb::ElementUnaryOpType::EXP, OutLayout, InLayout, "
+                 "tb::ElementUnaryOpType::$, OutLayout, InLayout, "
                  "NUM_THREADS, $>;",
+                 get_tb_op_str(cur_op->op_type),
                  epilogue);
-          code.e("Kernel::run(stensor$_ptr, stensor$_ptr, thread_idx);",
+          code.e("Kernel::run(stensor$_ptr, stensor$_ptr, thread_idx, $);",
                  output.guid,
-                 input.guid);
+                 input.guid,
+                 cur_op->scalar);
           break;
         }
         case type::TB_ADD_OP:

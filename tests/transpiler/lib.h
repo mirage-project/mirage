@@ -417,6 +417,7 @@ private:
         "-arch=native",
         "-use_fast_math",
         "-Xcompiler=-Wall",
+        "-std=c++17",
         "-I" + env_config::get_cutlass_root() + "/include",
         "-I" + env_config::get_mirage_runtime_root()};
     string compile_command = "nvcc " + cu_file_path;
