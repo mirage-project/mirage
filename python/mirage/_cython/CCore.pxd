@@ -85,6 +85,7 @@ cdef extern from "mirage/kernel/graph.h" namespace "mirage::kernel":
         CppDTensor* matmul(const CppDTensor* A, const CppDTensor* B)
         CppDTensor* reduction(const CppDTensor* input, int dim, int size)
         CppDTensor* exp(const CppDTensor* input)
+        CppDTensor* silu(const CppDTensor* input)
         CppDTensor* add(const CppDTensor* op1, const CppDTensor* op2)
         CppDTensor* mul(const CppDTensor* op1, const CppDTensor* op2)
         CppDTensor* div(const CppDTensor* op1, const CppDTensor* op2)
