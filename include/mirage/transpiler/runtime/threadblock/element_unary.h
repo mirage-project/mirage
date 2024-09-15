@@ -24,11 +24,11 @@ static __device__ __forceinline__ T
     return (T)expf((float)a);
   } else if constexpr (OP == ElementUnaryOpType::SILU) {
     return (T)(((float)a) * (1.0f / (1.0f + expf((float)a))));
-  } else if (OP == ElementUnaryOpType::SQUARE) {
+  } else if constexpr (OP == ElementUnaryOpType::SQUARE) {
     return (T)((float)a * (float)a);
-  } else if (OP == ElementUnaryOpType::SQRT) {
+  } else if constexpr (OP == ElementUnaryOpType::SQRT) {
     return (T)(sqrtf((float)a));
-  } else if (OP == ElementUnaryOpType::MULSCALAR) {
+  } else if constexpr (OP == ElementUnaryOpType::MULSCALAR) {
     return (T)(scalar * (float)a);
   } else {
     assert(0 && "unsupport optype in tb elementunary");
