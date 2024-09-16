@@ -286,7 +286,8 @@ IKNRange forward_propagate(IKNRange const &range,
                            size_t opd_idx) {
   IKNRange ret;
   switch (op.op_type) {
-    case type::KNOperatorType::KN_EXP_OP: {
+    case type::KNOperatorType::KN_EXP_OP:
+    case type::KNOperatorType::KN_SILU_OP: {
       ret = EXP_AS_IDENTITY ? range : IKNRange();
       break;
     }
@@ -338,7 +339,8 @@ IKNRange backward_propagate(IKNRange const &knrange,
                             size_t opd_idx) {
   IKNRange ret;
   switch (op.op_type) {
-    case type::KNOperatorType::KN_EXP_OP: {
+    case type::KNOperatorType::KN_EXP_OP:
+    case type::KNOperatorType::KN_SILU_OP: {
       ret = EXP_AS_IDENTITY ? knrange : IKNRange();
       break;
     }
@@ -550,7 +552,8 @@ ITBRange forward_propagate(ITBRange const &tbrange,
                            size_t opd_idx) {
   ITBRange ret;
   switch (op.op_type) {
-    case type::TBOperatorType::TB_EXP_OP: {
+    case type::TBOperatorType::TB_EXP_OP:
+    case type::TBOperatorType::TB_SILU_OP: {
       ret = EXP_AS_IDENTITY ? tbrange : ITBRange();
       break;
     }
@@ -632,7 +635,8 @@ ITBRange backward_propagate(ITBRange const &tbrange,
                             size_t opd_idx) {
   ITBRange ret;
   switch (op.op_type) {
-    case type::TBOperatorType::TB_EXP_OP: {
+    case type::TBOperatorType::TB_EXP_OP:
+    case type::TBOperatorType::TB_SILU_OP: {
       ret = EXP_AS_IDENTITY ? tbrange : ITBRange();
       break;
     }

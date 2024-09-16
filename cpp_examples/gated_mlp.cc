@@ -36,17 +36,19 @@ int main(int argc, char **argv) {
   kernel::Graph graph;
   kernel::DTensor X =
       graph.new_input({16, 4096}, type::DT_FLOAT16, layout::DmemRowMajor);
-  kernel::DTensor W1 = graph.new_input(
-      {4096, 4096}, type::DT_FLOAT16, layout::DmemColumnMajor);
-  kernel::DTensor W3 = graph.new_input(
-      {4096, 4096}, type::DT_FLOAT16, layout::DmemColumnMajor);
+  kernel::DTensor W1 =
+      graph.new_input({4096, 4096}, type::DT_FLOAT16, layout::DmemColumnMajor);
+  kernel::DTensor W3 =
+      graph.new_input({4096, 4096}, type::DT_FLOAT16, layout::DmemColumnMajor);
   {
     namespace tb = mirage::threadblock;
     dim3 grid_dim = {64, 1, 1}, block_dim = {128, 1, 1};
     tb::Graph bgraph(grid_dim, block_dim, 64, 64);
     tb::STensor bX = bgraph.new_input(X, {-1, -1, -1}, 1, layout::SmemRowMajor);
-    tb::STensor bW1 = bgraph.new_input(W1, {1, -1, -1}, 0, layout::SmemRowMajor);
-    tb::STensor bW3 = bgraph.new_input(W3, {1, -1, -1}, 0, layout::SmemRowMajor);
+    tb::STensor bW1 =
+        bgraph.new_input(W1, {1, -1, -1}, 0, layout::SmemRowMajor);
+    tb::STensor bW3 =
+        bgraph.new_input(W3, {1, -1, -1}, 0, layout::SmemRowMajor);
     tb::STensor bD1 = bgraph.matmul(bX, bW1);
     tb::STensor bD2 = bgraph.matmul(bX, bW3);
     bD1 = bgraph.forloop_accum(bD1, type::TB_FORLOOP_ACCUM_NO_RED_OP);
@@ -54,7 +56,8 @@ int main(int argc, char **argv) {
     bD1 = bgraph.silu(bD1);
     tb::STensor bO = bgraph.mul(bD1, bD2);
     bgraph.mark_output(bO, {1, -1, -1}, -1, type::TB_EPILOGUE_NONE);
-    std::vector<kernel::DTensor> outputs = graph.customized({X, W1, W3}, bgraph);
+    std::vector<kernel::DTensor> outputs =
+        graph.customized({X, W1, W3}, bgraph);
     assert(outputs.size() == 1);
   }
 
@@ -71,6 +74,21 @@ int main(int argc, char **argv) {
     total_ms = total_ms + result.run_time;
   }
   printf("[2 Block Graphs] Total runtime = %.4lfms\n", total_ms);
+
+  auto st = std::chrono::steady_clock::now();
+
+  search::GeneratorConfig config =
+      search::GeneratorConfig::get_mlp_default_config();
+  config.grid_dim_to_explore = {{64, 1, 1}};
+  std::string checkpoint_file_name = "checkpoint_gated_mlp.json";
+  search::KernelGraphGenerator gen(
+      ref_graph, config, checkpoint_file_name.data());
+  gen.generate_kernel_graphs();
+
+  auto et = std::chrono::steady_clock::now();
+
+  printf("Search time = %.4lfsec\n",
+         std::chrono::duration<double>(et - st).count());
 
   return 0;
 }

@@ -120,6 +120,7 @@ size_t Graph::calculate_shared_memory_usage(TBOperator *new_op) {
       case mirage::type::TB_SQUARE_OP:
       case mirage::type::TB_SQRT_OP:
       case mirage::type::TB_SILU_OP:
+      case mirage::type::TB_MUL_SCALAR_OP:
       case mirage::type::TB_FORLOOP_ACCUM_NO_RED_OP:
       case mirage::type::TB_FORLOOP_ACCUM_RED_LD_SUM_OP:
       case mirage::type::TB_FORLOOP_ACCUM_RED_LD_MEAN_OP:
@@ -438,7 +439,10 @@ NewKernelParams Graph::get_new_kernel_params(bool fingerprint) const {
         break;
       }
       case mirage::type::TB_EXP_OP:
-      case mirage::type::TB_SILU_OP: {
+      case mirage::type::TB_SILU_OP:
+      case mirage::type::TB_SQUARE_OP:
+      case mirage::type::TB_SQRT_OP:
+      case mirage::type::TB_MUL_SCALAR_OP: {
         assert(operators[i]->input_tensors.size() == 1);
         assert(operators[i]->output_tensors.size() == 1);
         mirage::threadblock::STensor input = operators[i]->input_tensors[0];
@@ -575,7 +579,7 @@ NewKernelParams Graph::get_new_kernel_params(bool fingerprint) const {
         assert(false && "Unsupported TB operator");
       }
     } // switch
-  }   // for-loop
+  } // for-loop
   // Our serializer assumes that input loaders are the first operators
   // and that output savers are the last operators
   for (int i = 0; i < params.num_dmem_inputs; i++) {
@@ -711,7 +715,8 @@ void from_json(json const &j, Graph &graph) {
       case type::TBOperatorType::TB_EXP_OP:
       case type::TBOperatorType::TB_SILU_OP:
       case type::TBOperatorType::TB_SQUARE_OP:
-      case type::TBOperatorType::TB_SQRT_OP: {
+      case type::TBOperatorType::TB_SQRT_OP:
+      case type::TBOperatorType::TB_MUL_SCALAR_OP: {
         STensor const &output = graph.elementunary(
             get_tensor_from_guid(
                 op.at("input_tensors")[0].at("guid").get<int>()),

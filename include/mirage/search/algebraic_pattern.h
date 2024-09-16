@@ -77,6 +77,15 @@ public:
   std::shared_ptr<AlgebraicPattern> exponent;
 };
 
+class Silu : public AlgebraicPattern {
+public:
+  Silu(std::shared_ptr<AlgebraicPattern> a);
+  z3::expr to_z3(z3::context &c,
+                 std::unordered_set<std::string> &all_variables) const override;
+  std::string to_string() const override;
+  std::shared_ptr<AlgebraicPattern> a;
+};
+
 class Red : public AlgebraicPattern {
 public:
   Red(int red_deg, std::shared_ptr<AlgebraicPattern> summand);

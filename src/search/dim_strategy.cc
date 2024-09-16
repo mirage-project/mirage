@@ -7,20 +7,20 @@ DimStrategy::DimStrategy(GeneratorConfig const &config) : config(config) {}
 
 std::vector<type::KNOperatorType> DimStrategy::get_knop_cand() {
   std::vector<type::KNOperatorType> cands = config.knop_to_explore;
-  std::random_shuffle(cands.begin(), cands.end());
+  // std::random_shuffle(cands.begin(), cands.end());
   return cands;
 }
 
 std::vector<type::TBOperatorType> DimStrategy::get_tbop_cand() {
   std::vector<type::TBOperatorType> cands = config.tbop_to_explore;
-  std::random_shuffle(cands.begin(), cands.end());
+  // std::random_shuffle(cands.begin(), cands.end());
   return cands;
 }
 
 std::vector<dim3>
     DimStrategy::get_grid_dim_cand(std::vector<DTensor> const &tensors) {
   std::vector<dim3> cands = config.grid_dim_to_explore;
-  std::random_shuffle(cands.begin(), cands.end());
+  // std::random_shuffle(cands.begin(), cands.end());
   return cands;
 }
 
@@ -28,7 +28,7 @@ std::vector<dim3>
     DimStrategy::get_block_dim_cand(std::vector<DTensor> const &tensors,
                                     dim3 grid_dim) {
   std::vector<dim3> cands = config.block_dim_to_explore;
-  std::random_shuffle(cands.begin(), cands.end());
+  // std::random_shuffle(cands.begin(), cands.end());
   return cands;
 }
 
@@ -131,7 +131,7 @@ std::vector<std::vector<int3>>
     generate_input_map_cand(
         tensors, grid_dim, config.imap_to_explore, {}, results);
   }
-  std::random_shuffle(results.begin(), results.end());
+  // std::random_shuffle(results.begin(), results.end());
   return results;
 }
 
@@ -152,7 +152,7 @@ std::vector<int3> DimStrategy::get_output_map_cand(dim3 grid_dim) {
     }
     results.push_back(output_map);
   }
-  std::random_shuffle(results.begin(), results.end());
+  // std::random_shuffle(results.begin(), results.end());
   return results;
 }
 
@@ -229,7 +229,7 @@ std::vector<int> DimStrategy::get_forloop_range_cand(
       results.push_back(x);
     }
   }
-  std::random_shuffle(results.begin(), results.end());
+  // std::random_shuffle(results.begin(), results.end());
   return results;
 }
 
@@ -238,7 +238,7 @@ std::vector<std::vector<int>> DimStrategy::get_unary_input(int num_tensors) {
   for (int i = 0; i < num_tensors; ++i) {
     result.push_back({i});
   }
-  std::random_shuffle(result.begin(), result.end());
+  // std::random_shuffle(result.begin(), result.end());
   return result;
 }
 
@@ -249,7 +249,7 @@ std::vector<std::vector<int>> DimStrategy::get_binary_input(int num_tensors) {
       result.push_back({i, j});
     }
   }
-  std::random_shuffle(result.begin(), result.end());
+  // std::random_shuffle(result.begin(), result.end());
   return result;
 }
 
@@ -275,7 +275,7 @@ std::vector<std::vector<int>> DimStrategy::get_nary_input(int num_tensors,
   std::vector<std::vector<int>> result;
   std::vector<int> cur;
   mirage::search::get_nary_input(n, num_tensors, cur, result);
-  std::random_shuffle(result.begin(), result.end());
+  // std::random_shuffle(result.begin(), result.end());
   return result;
 }
 

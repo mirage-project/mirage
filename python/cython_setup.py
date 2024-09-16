@@ -46,6 +46,7 @@ def config_cython():
                 libraries=["mirage_runtime", "cudadevrt", "cudart_static", "cudnn", "cublas", "cudart", "cuda", "z3"],
                 library_dirs=[path.join(mirage_path, "build"),
                               path.join(mirage_path, "deps", "z3", "build"),
+                              "/usr/local/cuda/lib",
                               "/usr/local/cuda/lib64",
                               "/usr/local/cuda/lib64/stubs"],
                 extra_compile_args=["-std=c++17"],
