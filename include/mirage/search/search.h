@@ -24,17 +24,12 @@ public:
 
   void generate_kernel_graphs();
 
-  json best_graph;
-  ProfileResult best_profile_result;
-
   GeneratorConfig config;
   DimStrategy dim_strategy;
 
   char const *filename;
   std::vector<json> generated_graphs;
   int num_thread;
-
-  std::chrono::milliseconds timeout;
 
 private:
   std::vector<std::shared_ptr<AlgebraicPattern>>
@@ -55,11 +50,12 @@ private:
   std::vector<std::pair<size_t, IKNRange>> init_ranges;
   std::vector<std::vector<IKNRange>> target_ranges;
 
-  void search_from_graphs(std::vector<json> const &kernel_graphs);
+  void search_from(std::vector<SerializedSearchContext> const &contexts);
 
   void generate_next_operator(
       SearchContext &c,
-      std::function<bool(kernel::Graph const &)> const &verify);
+      std::function<bool(SearchContext const &)> const &verify,
+      std::vector<SerializedSearchContext> &verified);
 
   bool create_threadblock_outputs(
       SearchContext &c,
