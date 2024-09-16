@@ -111,6 +111,10 @@ void KernelGraphGenerator::generate_next_operator(
   if (num_total_states % 1000 == 1) {
     printf("Total states explored: %d.\n", num_total_states.load());
   }
+  if (verify(c)) {
+    verified.push_back(SerializedSearchContext(c));
+    return;
+  }
 
   std::unordered_map<int64_t, std::shared_ptr<AlgebraicPattern>>
       algebraic_pattern;
@@ -121,10 +125,6 @@ void KernelGraphGenerator::generate_next_operator(
   if (c.level == SearchLevel::LV_KERNEL) {
     assert(c.tb_graph == nullptr);
     // Case K1: finish and verify the current graph
-    if (verify(c)) {
-      verified.push_back(SerializedSearchContext(c));
-      return;
-    }
     if (c.kn_graph->operators.size() >= MAX_NUM_KERNEL_GRAPH_OP) {
       return;
     }
@@ -342,7 +342,11 @@ void KernelGraphGenerator::search_from(
     SearchContext c = sc.deserialize();
     std::vector<SerializedSearchContext> verified;
     generate_next_operator(
-        c, [this](SearchContext const &c) { return this->verify(*c.kn_graph); }, verified);
+        c,
+        [this](SearchContext const &c) {
+          return c.level == SearchLevel::LV_KERNEL && this->verify(*c.kn_graph);
+        },
+        verified);
     {
       std::lock_guard<std::mutex> lock(generated_graphs_mutex);
       for (auto const &v : verified) {
@@ -367,23 +371,18 @@ void KernelGraphGenerator::generate_kernel_graphs() {
   auto start_time = std::chrono::steady_clock::now();
 
   std::vector<SerializedSearchContext> middle_states;
-  generate_next_operator(c, [](SearchContext const &c) {
-    int num_threadblock_ops = 0;
-    for (auto const &op : c.kn_graph->operators) {
-      if (op->op_type == type::KNOperatorType::KN_CUSTOMIZED_OP) {
-        num_threadblock_ops += static_cast<kernel::KNCustomizedOp *>(op)
-                                   ->bgraph.operators.size();
-      }
-    }
-    return num_threadblock_ops >= MAX_NUM_THREADBLOCK *
-                                      MAX_NUM_THREADBLOCK_GRAPH_OP /
-                                      (MAX_NUM_THREADBLOCK + 1);
-  }, middle_states);
+  generate_next_operator(
+      c,
+      [this](SearchContext const &c) {
+        return c.tb_graph != nullptr || this->verify(*c.kn_graph);
+      },
+      middle_states);
   printf("[Search] First step finished. Time elapsed: %fsec\n",
          std::chrono::duration<double>(std::chrono::steady_clock::now() -
                                        start_time)
              .count());
-  std::vector<std::vector<SerializedSearchContext>> split_middle_states(num_thread);
+  std::vector<std::vector<SerializedSearchContext>> split_middle_states(
+      num_thread);
   for (size_t i = 0; i < middle_states.size(); ++i) {
     split_middle_states[i % num_thread].push_back(middle_states[i]);
   }
