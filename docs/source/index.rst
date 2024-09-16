@@ -19,8 +19,9 @@ Getting Started
    :hidden:
    
    installation
-   tutorials/index
+   mugraph
    transpiler
+   tutorials/index
 
 .. Indices and tables
 .. ==================
