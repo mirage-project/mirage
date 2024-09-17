@@ -220,6 +220,17 @@ Transpiler::Transpiler(kernel::Graph const *graph,
               stensor_mapping[bop->output_tensors[0].guid] = st;
               break;
             }
+            case TB_RMS_NORM_OP: {
+              assert(stensor_inputs.size() == 1);
+              threadblock::STensor st = stensor_inputs[0];
+              st = tbg->square(st);
+              st = tbg->mul_scalar(st, (1.0f / st.dim[st.num_dims - 1]));
+              // st = tbg->reduction(st, st.num_dims - 1);
+              st = tbg->sqrt(st);
+              st = tbg->div(stensor_inputs[0], st);
+              stensor_mapping[bop->output_tensors[0].guid] = st;
+              break;
+            }
             default: {
               assert(false && "Unsupported tb operator");
             }
@@ -248,7 +259,9 @@ Transpiler::Transpiler(kernel::Graph const *graph,
     }
   }
 
-  // Make sure there is no non-default forloop accum tb operators in g
+  // Check the following:
+  // 1. there is no non-default forloop accum tb operators in g
+  // 2. there is no threadblock rms_norm operators in g (should be decomposed) 
   for (auto const &op : g->operators) {
     if (op->op_type == KN_CUSTOMIZED_OP) {
       kernel::KNCustomizedOp *customized_op =
@@ -257,6 +270,9 @@ Transpiler::Transpiler(kernel::Graph const *graph,
         if (bop->op_type >= TB_FORLOOP_ACCUM_FIRST_OP &&
             bop->op_type <= TB_FORLOOP_ACCUM_LAST_OP) {
           assert(bop->op_type == TB_FORLOOP_ACCUM_NO_RED_OP);
+        }
+        if (bop->op_type == TB_RMS_NORM_OP) {
+          assert(false);
         }
       }
     }

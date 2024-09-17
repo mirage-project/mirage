@@ -113,6 +113,11 @@ public:
   STensor reduction_to_dimx(STensor const &A, int dim);
   TBOperator *create_reduction_to_dimx_op(STensor const &A, int dim);
 
+  // rms_norm operator
+  STensor rms_norm(STensor const &A);
+  STensor *rms_norm(STensor const *A);
+  TBOperator *create_rms_norm_op(STensor const &A);
+
   // concat operator
   STensor concat(STensor const &A, STensor const &B, int dim);
   STensor *concat(STensor const *A, STensor const *B, int dim);

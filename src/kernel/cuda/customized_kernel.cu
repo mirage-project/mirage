@@ -24,6 +24,7 @@
 #include "mirage/threadblock/cuda/matmul.h"
 #include "mirage/threadblock/cuda/output_saver.h"
 #include "mirage/threadblock/cuda/reduction.h"
+#include "mirage/threadblock/cuda/rms_norm.h"
 #include "mirage/threadblock/graph.h"
 #include "mirage/threadblock/serializer/concat_serializer.h"
 #include "mirage/threadblock/serializer/element_binary_serializer.h"
@@ -33,6 +34,7 @@
 #include "mirage/threadblock/serializer/matmul_serializer.h"
 #include "mirage/threadblock/serializer/output_saver_serializer.h"
 #include "mirage/threadblock/serializer/reduction_serializer.h"
+#include "mirage/threadblock/serializer/rms_norm_serializer.h"
 #include "mirage/utils/cuda_helper.h"
 #include "mirage/warp/cuda/matmul.h"
 
@@ -248,6 +250,16 @@ __global__ void customized_kernel_function(
             threadIdx.x,
             blockDim.x);
         __syncthreads();
+      } else if (op_type == mirage::type::TB_RMS_NORM_OP) {
+        int output_num_elements, norm_size;
+        int input_smem_offset, output_smem_offset;
+        mirage::threadblock::deserialize_rms_norm_op_parameters(
+            new_params.parameters,
+            param_idx,
+            output_num_elements,
+            norm_size,
+            input_smem_offset,
+            output_smem_offset);
       } else if ((op_type >= mirage::type::TB_CONCAT_FIRST_OP_ID) &&
                  (op_type <= mirage::type::TB_CONCAT_LAST_OP_ID)) {
         int output_num_elements, A_concat_dim_size, B_concat_dim_size,
@@ -695,6 +707,34 @@ __global__ void compute_customizedop_fingerprint(
               output_num_elements,
               reduction_degree,
               inner_range,
+              threadIdx.x,
+              blockDim.x);
+          __syncthreads();
+          break;
+        }
+        case mirage::type::TB_RMS_NORM_OP: {
+          int output_num_elements, norm_size;
+	  int input_smem_offset, output_smem_offset;
+          mirage::threadblock::deserialize_rms_norm_op_parameters(
+              new_params.parameters,
+              param_idx,
+              output_num_elements,
+              norm_size,
+              input_smem_offset,
+              output_smem_offset);
+          mirage::type::FPType *output_ptr =
+              (mirage::type::FPType *)(smem_buffer + output_smem_offset);
+          mirage::type::FPType *input_ptr =
+              (mirage::type::FPType *)(smem_buffer + input_smem_offset);
+          mirage::threadblock::TBRmsNormFingerPrinter fp(
+              input_ptr,
+              output_ptr,
+              div_p_lookup_table,
+              div_q_lookup_table,
+              sqrt_p_lookup_table,
+              sqrt_q_lookup_table,
+              output_num_elements,
+              norm_size,
               threadIdx.x,
               blockDim.x);
           __syncthreads();
