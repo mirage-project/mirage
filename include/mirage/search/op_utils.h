@@ -83,5 +83,7 @@ TBOperator *create_op(threadblock::Graph &g,
                       type::TBOperatorType type,
                       std::vector<STensor> const &inputs);
 
+int count_op_of_type(type::KNOperatorType op_type, kernel::Graph const &g);
+
 } // namespace search
 } // namespace mirage

@@ -16,6 +16,7 @@
 #include "mirage/kernel/customized.h"
 #include "mirage/kernel/device_memory_manager.h"
 #include "mirage/kernel/graph.h"
+#include "mirage/threadblock/element_unary.h"
 #include "mirage/threadblock/graph.h"
 #include "mirage/threadblock/operator.h"
 #include "mirage/threadblock/reduction.h"
@@ -155,9 +156,12 @@ KNCustomizedOp::KNCustomizedOp(mirage::kernel::Graph *_kgraph,
       case mirage::type::TB_EXP_OP:
       case mirage::type::TB_SQUARE_OP:
       case mirage::type::TB_SQRT_OP:
-      case mirage::type::TB_SILU_OP: {
+      case mirage::type::TB_SILU_OP:
+      case mirage::type::TB_MUL_SCALAR_OP: {
         assert(my_inputs.size() == 1);
-        bgraph.elementunary(my_inputs[0], op->op_type);
+        mirage::threadblock::TBElementUnaryOp const *cur_op =
+            dynamic_cast<mirage::threadblock::TBElementUnaryOp const *>(op);
+        bgraph.elementunary(my_inputs[0], cur_op->op_type, cur_op->scalar);
         break;
       }
       case mirage::type::TB_ADD_OP:

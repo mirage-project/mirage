@@ -7,6 +7,7 @@ namespace search {
 bool is_binary(type::TBOperatorType op) {
   std::unordered_set<type::TBOperatorType> true_values{
       type::TBOperatorType::TB_ADD_OP,
+      type::TBOperatorType::TB_MUL_OP,
       type::TBOperatorType::TB_MATMUL_OP,
       type::TBOperatorType::TB_DIV_OP,
       type::TBOperatorType::TB_MUL_OP};
@@ -32,6 +33,7 @@ bool is_unary(type::TBOperatorType op) {
 bool is_binary(type::KNOperatorType op) {
   std::unordered_set<type::KNOperatorType> true_values{
       type::KNOperatorType::KN_ADD_OP,
+      type::KNOperatorType::KN_MUL_OP,
       type::KNOperatorType::KN_MATMUL_OP,
       type::KNOperatorType::KN_DIV_OP,
       type::KNOperatorType::KN_MUL_OP,
@@ -398,6 +400,16 @@ TBOperator *create_op(threadblock::Graph &g,
     return matmul;
   }
   return nullptr;
+}
+
+int count_op_of_type(type::KNOperatorType op_type, kernel::Graph const &g) {
+  int counter = 0;
+  for (auto const &op : g.operators) {
+    if (op->op_type == op_type) {
+      ++counter;
+    }
+  }
+  return counter;
 }
 
 } // namespace search

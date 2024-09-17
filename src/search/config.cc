@@ -62,6 +62,7 @@ GeneratorConfig GeneratorConfig::get_attention_default_config() {
               {0, 2, -1},
               {0, 1, -1},
               {0, -1, -1},
+              {0, 2, -1},
               {0, 1, -1},
           } /* imap_to_explore */,
           {{{0, -1, 1}, {0, 2, -1}, {0, 1, -1}},
@@ -96,15 +97,13 @@ GeneratorConfig GeneratorConfig::get_attention_default_config() {
 }
 
 GeneratorConfig GeneratorConfig::get_mlp_default_config() {
-  return {{
-              type::KN_MATMUL_OP,
-              type::KN_EXP_OP,
-              type::KN_DIV_OP,
-              type::KN_ADD_OP,
-              type::KN_MUL_OP,
-              type::KN_SILU_OP,
-              type::KN_CUSTOMIZED_OP,
-          },
+  return {{type::KN_MATMUL_OP,
+           type::KN_EXP_OP,
+           type::KN_DIV_OP,
+           type::KN_ADD_OP,
+           type::KN_MUL_OP,
+           type::KN_SILU_OP,
+           type::KN_CUSTOMIZED_OP},
           {
               type::TB_MATMUL_OP,
               type::TB_EXP_OP,
@@ -117,7 +116,7 @@ GeneratorConfig GeneratorConfig::get_mlp_default_config() {
           {{0, -1, -1}, {1, -1, -1}, {-1, -1, -1}} /* imap_to_explore */,
           {} /* imap_comb_to_explore*/,
           {{1, -1, -1}} /* omap_to_explore */,
-          {{16, 1, 1}, {16, 2, 1}} /* grid_dim_to_explore*/,
+          {{16, 1, 1}, {16, 2, 1}, {64, 1, 1}} /* grid_dim_to_explore*/,
           {{128, 1, 1}} /* block_dim_to_explore */,
           {-1, 0, 1} /* fmap_to_explore */,
           {4, 16, 64} /* frange_to_explore */,

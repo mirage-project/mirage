@@ -42,6 +42,17 @@ size_t Graph::pair_hash::operator()(std::pair<int, int> const &p) const {
   return h1;
 }
 
+int Graph::get_input_dtensors(DTensor ** inputs) {
+  int num_inputs = 0;
+  for (const auto& op : this->operators) {
+    if (op->op_type == mirage::type::KN_INPUT_OP) {
+      assert(op->output_tensors.size() == 1);
+      inputs[num_inputs++] = &op->output_tensors[0];
+    }
+  }
+  return num_inputs;
+}
+
 bool Graph::can_allocate(DTensor const &tensor,
                          bool allocate_fingerprint) const {
   size_t data_size = ((tensor.data_size() + 15) & ~15);
@@ -180,23 +191,15 @@ void from_json(json const &j, Graph &g) {
         guid_mapping[output.guid] = guidO;
         break;
       }
-      case type::KNOperatorType::KN_DIV_OP: {
+      case type::KNOperatorType::KN_DIV_OP:
+      case type::KNOperatorType::KN_ADD_OP:
+      case type::KNOperatorType::KN_MUL_OP: {
         size_t guidA, guidB, guidO;
         jop.at("input_tensors")[0].at("guid").get_to(guidA);
         jop.at("input_tensors")[1].at("guid").get_to(guidB);
         jop.at("output_tensors")[0].at("guid").get_to(guidO);
         DTensor const &output =
-            g.div(get_tensor_from_guid(guidA), get_tensor_from_guid(guidB));
-        guid_mapping[output.guid] = guidO;
-        break;
-      }
-      case type::KNOperatorType::KN_ADD_OP: {
-        size_t guidA, guidB, guidO;
-        jop.at("input_tensors")[0].at("guid").get_to(guidA);
-        jop.at("input_tensors")[1].at("guid").get_to(guidB);
-        jop.at("output_tensors")[0].at("guid").get_to(guidO);
-        DTensor const &output =
-            g.add(get_tensor_from_guid(guidA), get_tensor_from_guid(guidB));
+            g.elementbinary(get_tensor_from_guid(guidA), get_tensor_from_guid(guidB), op_type);
         guid_mapping[output.guid] = guidO;
         break;
       }
