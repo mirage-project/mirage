@@ -158,6 +158,8 @@ NLOHMANN_JSON_SERIALIZE_ENUM(
         {TB_CUSTOMIZED_OP, "tb_customized_op"},
     })
 
+bool is_threadblock_element_unary(TBOperatorType op_type);
+
 enum ActivationType {
   ACT_UNKOWN = 3000,
   ACT_EXP = 3001,

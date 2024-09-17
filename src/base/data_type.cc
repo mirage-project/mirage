@@ -35,5 +35,18 @@ size_t get_datatype_size(DataType type) {
   }
 }
 
+bool is_threadblock_element_unary(TBOperatorType op_type) {
+  switch (op_type) {
+    case TB_EXP_OP:
+    case TB_SQUARE_OP:
+    case TB_SQRT_OP:
+    case TB_SILU_OP:
+    case TB_MUL_SCALAR_OP:
+      return true;
+    default:
+      return false;
+  }
+}
+
 } // namespace type
 } // namespace mirage

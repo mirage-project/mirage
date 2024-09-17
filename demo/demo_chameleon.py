@@ -11,7 +11,7 @@ if __name__ == "__main__":
     bQ = tbgraph1.new_input(dtensor=Q, input_map=(0, -1, 1), forloop_dim=-1)
     bK = tbgraph1.new_input(dtensor=K, input_map=(0, 2, -1), forloop_dim=2)
     bV = tbgraph1.new_input(dtensor=V, input_map=(0, 1, -1), forloop_dim=1)
-    # bV = tbgraph1.rms_norm(bV)
+    bV = tbgraph1.rms_norm(bV)
     bA = tbgraph1.matmul(bQ, bK)
     bE = tbgraph1.exp(bA)
     bS = tbgraph1.matmul(bE, bV)
