@@ -279,6 +279,15 @@ cdef class CyKNGraph:
         t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
         return DTensor(t)
 
+    def rms_norm(self, DTensor input, tuple normalized_shape):
+        cdef vector[int] cshape
+        cshape.resize(len(normalized_shape))
+        for i in range(len(normalized_shape)):
+            cshape[i] = normalized_shape[i]
+        cdef CppDTensor* ptr = self.p_kgraph.rms_norm(input.c_ptr, cshape)
+        t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
+        return DTensor(t)
+
     def exp(self, DTensor input):
         cdef CppDTensor* ptr = self.p_kgraph.exp(input.c_ptr)
         t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
@@ -414,6 +423,11 @@ cdef class CyTBGraph:
 
     def reduction(self, STensor A, int dim):
         cdef CppSTensor* ptr = self.p_bgraph.reduction(A.c_ptr, dim)
+        t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
+        return STensor(t)
+
+    def rms_norm(self, STensor A):
+        cdef CppSTensor* ptr = self.p_bgraph.rms_norm(A.c_ptr)
         t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
         return STensor(t)
 

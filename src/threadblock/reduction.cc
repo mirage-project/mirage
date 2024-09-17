@@ -35,18 +35,6 @@ STensor *Graph::reduction(STensor const *input, int dim) {
 }
 
 TBOperator *Graph::create_reduction_op(STensor const &input, int dim) {
-  // STensor output = input;
-  // assert(output.num_dims > dim);
-  // assert(output.layout == mirage::layout::SmemRowMajor);
-  // output.dim[dim] = 1;
-  // if (dim < output.num_dims - 2) {
-  //   return nullptr;
-  // }
-  // if (smem_offset + (off_t)output.size() >
-  //     (off_t)mirage::config::MAX_SMEM_SIZE) {
-  //   return nullptr;
-  // }
-
   TBOperator *op = new TBReductionOp(this, input, dim, 1 /*size*/);
   // Check shmem usage
   size_t smem_usage = calculate_shared_memory_usage(op);

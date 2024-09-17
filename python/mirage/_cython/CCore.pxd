@@ -84,6 +84,7 @@ cdef extern from "mirage/kernel/graph.h" namespace "mirage::kernel":
                                DmemLayout layout)
         CppDTensor* matmul(const CppDTensor* A, const CppDTensor* B)
         CppDTensor* reduction(const CppDTensor* input, int dim, int size)
+        CppDTensor* rms_norm(const CppDTensor* input, vector[int])
         CppDTensor* exp(const CppDTensor* input)
         CppDTensor* silu(const CppDTensor* input)
         CppDTensor* add(const CppDTensor* op1, const CppDTensor* op2)
@@ -132,6 +133,7 @@ cdef extern from "mirage/threadblock/graph.h" namespace "mirage::threadblock":
         CppSTensor* div(const CppSTensor *A,
                      const CppSTensor *B)
         CppSTensor* reduction(const CppSTensor *A, int dim)
+        CppSTensor* rms_norm(const CppSTensor *A)
         CppSTensor* concat(const CppSTensor *A,
                         const CppSTensor *B,
                         int dim)

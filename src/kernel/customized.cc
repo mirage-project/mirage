@@ -187,6 +187,11 @@ KNCustomizedOp::KNCustomizedOp(mirage::kernel::Graph *_kgraph,
         bgraph.reduction_to_dimx(my_inputs[0], reduce_dim);
         break;
       }
+      case mirage::type::TB_RMS_NORM_OP: {
+        assert(my_inputs.size() == 1);
+        bgraph.rms_norm(my_inputs[0]);
+        break;
+      }
       case mirage::type::TB_CONCAT_0_OP:
       case mirage::type::TB_CONCAT_1_OP:
       case mirage::type::TB_CONCAT_2_OP: {
@@ -205,7 +210,7 @@ KNCustomizedOp::KNCustomizedOp(mirage::kernel::Graph *_kgraph,
         break;
       }
       default: {
-        assert(false && "Unsupported kernel operator");
+        assert(false && "Unsupported threadblock operator");
       }
     }
   }

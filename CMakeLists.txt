@@ -290,6 +290,17 @@ if ("${BUILD_CPP_EXAMPLES}" STREQUAL "ON")
   target_link_libraries(${CPP_EXAMPLES_BIN} mirage_runtime)
 endif()
 
+# Chameleon
+if ("${BUILD_CPP_EXAMPLES}" STREQUAL "ON")
+  set(CPP_EXAMPLES_DIR cpp_examples)
+  set(CPP_EXAMPLES_BIN chameleon)
+  file(GLOB CPP_EXAMPLES_SRCS ${CPP_EXAMPLES_DIR}/${CPP_EXAMPLES_BIN}.cc)
+  add_executable(${CPP_EXAMPLES_BIN} ${CPP_EXAMPLES_SRCS})
+  set_target_properties(${CPP_EXAMPLES_BIN}
+    PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CPP_EXAMPLES_DIR})
+  target_link_libraries(${CPP_EXAMPLES_BIN} mirage_runtime)
+endif()
+
 if ("${BUILD_CPP_EXAMPLES}" STREQUAL "ON")
   set(CPP_EXAMPLES_DIR cpp_examples)
   set(CPP_EXAMPLES_BIN profile)
