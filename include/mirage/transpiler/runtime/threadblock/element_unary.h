@@ -51,7 +51,9 @@ public:
   static __device__ __forceinline__ void run(T *__restrict__ dst,
                                              T const *__restrict__ src,
                                              int thread_idx,
-                                             float scalar) {
+                                             float scalar,
+                                             const float *epilogue_scalars) {
+
     constexpr auto numel = Numel{}.value;
     auto dst_layout = DstLayout{};
     auto src_layout = SrcLayout{};
@@ -59,7 +61,7 @@ public:
       int64_t dst_phy_pos = dst_layout(elem_idx);
       int64_t src_phy_pos = src_layout(elem_idx);
       T res = perform_element_unary_op<T, OP>(src[src_phy_pos], scalar);
-      Epilogue::run(res, dst, dst_phy_pos);
+      Epilogue::run(res, dst, dst_phy_pos, epilogue_scalars);
     }
   }
 };

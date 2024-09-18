@@ -134,6 +134,28 @@ static string get_dtensor_tile_layout(kn::DTensor const &dtensor,
       mov_to_last(d_meta.strides, dtensor.num_dims, d_innermost_dim));
 }
 
+static string append_epilogue_scalars(
+    std::vector<std::pair<tb::TBOperator const *, TBSchedOpMeta>> const
+        &chain) {
+  string res = "const float scalars[] = {";
+  if (chain.size() == 1) {
+    return res.append("0.0f};");
+  }
+  for (size_t i = 1; i < chain.size(); i++) {
+    if (i == chain.size() - 1) {
+      // last one is EpilogueStore
+      res.append("0.0f};");
+    } else if (is_tb_element_unary_op(chain.at(i).first->op_type)) {
+      tb::TBElementUnaryOp const *tb_unary_op =
+          dynamic_cast<tb::TBElementUnaryOp const *>(chain.at(i).first);
+      res.append(fmt("$f, ", tb_unary_op->scalar));
+    } else {
+      res.append("0.0f, ");
+    }
+  }
+  return res;
+}
+
 static string get_tb_op_str(type::TBOperatorType type) {
   auto toString = [](type::TBOperatorType type) -> string {
     switch (type) {
@@ -773,7 +795,11 @@ CustomOPTranspileResult
                  "NUM_THREADS, $>;",
                  get_tb_op_str(cur_op->op_type),
                  epilogue);
-          code.e("Kernel::run(stensor$_ptr, stensor$_ptr, thread_idx, $);",
+          // add scalar chains for epilogue
+          // code.e("const float scalars[] = {A, B, C}");
+          code.e(append_epilogue_scalars(sched_node.ops));
+          code.e("Kernel::run(stensor$_ptr, stensor$_ptr, thread_idx, $, "
+                 "scalars);",
                  output.guid,
                  input.guid,
                  cur_op->scalar);
@@ -829,8 +855,9 @@ CustomOPTranspileResult
                  "NUM_THREADS, $>;",
                  op_type_str,
                  epilogue);
+          code.e(append_epilogue_scalars(sched_node.ops));
           code.e("Kernel::run(stensor$_ptr, stensor$_ptr, stensor$_ptr, "
-                 "thread_idx);",
+                 "thread_idx, scalars);",
                  output.guid,
                  input0.guid,
                  input1.guid);
@@ -889,9 +916,11 @@ CustomOPTranspileResult
                  "OutLayout, InLayout, $, NUM_THREADS, $>;",
                  cute_reduc_dim,
                  epilogue);
-          code.e("Kernel::run(stensor$_ptr, stensor$_ptr, thread_idx);",
-                 output.guid,
-                 input.guid);
+          code.e(append_epilogue_scalars(sched_node.ops));
+          code.e(
+              "Kernel::run(stensor$_ptr, stensor$_ptr, thread_idx, scalars);",
+              output.guid,
+              input.guid);
           break;
         }
         case type::TB_FORLOOP_ACCUM_NO_RED_OP: {
