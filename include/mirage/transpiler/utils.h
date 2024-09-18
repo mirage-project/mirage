@@ -165,12 +165,6 @@ inline static T round_to_multiple(T value, T multiple) {
   return ((value + multiple - 1) / multiple) * multiple;
 }
 
-// inline bool is_tb_element_unary_op(type::TBOperatorType op_type) {
-//   return (op_type == type::TB_EXP_OP) || (op_type == type::TB_SQRT_OP) ||
-//          (op_type == type::TB_SILU_OP) || (op_type == type::TB_SQRT_OP) ||
-//          (op_type == type::TB_MUL_SCALAR_OP);
-// }
-
 // A mapping from GPU to its compute capability
 namespace GPU_CC {
 static constexpr int P100 = 60;
