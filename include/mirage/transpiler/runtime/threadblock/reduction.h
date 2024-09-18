@@ -42,8 +42,10 @@ public:
           Int<REDUCTION_FACTOR * SRC_REDUCTION_DIM_COORD_STRIDE>{})));
   static_assert(is_static_v<DstCoord2SrcCoord>);
 
-  static __device__ __forceinline__ void
-      run(T *__restrict__ dst, T const *__restrict__ src, int thread_idx) {
+  static __device__ __forceinline__ void run(T *__restrict__ dst,
+                                             T const *__restrict__ src,
+                                             int thread_idx,
+                                             float const *epilogue_scalars) {
     auto src_layout = SrcLayout{};
     auto dst_layout = DstLayout{};
     auto dst_coord2src_coord = DstCoord2SrcCoord{};
@@ -59,7 +61,7 @@ public:
             src[src_layout(src_elem_idx + i * SRC_REDUCTION_DIM_COORD_STRIDE)];
       }
       auto dst_phy_pos = dst_layout(dst_elem_idx);
-      Epilogue::run(result, dst, dst_phy_pos);
+      Epilogue::run(result, dst, dst_phy_pos, epilogue_scalars);
     }
   }
 };

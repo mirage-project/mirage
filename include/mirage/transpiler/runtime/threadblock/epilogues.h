@@ -20,7 +20,10 @@ template <typename T, bool IS_ACCUM>
 class EpilogueStoreMaybeAccum {
 public:
   CUTE_DEVICE
-  static void run(T const &data, T *__restrict__ dst_ptr, int64_t dst_phy_pos) {
+  static void run(T const &data,
+                  T *__restrict__ dst_ptr,
+                  int64_t dst_phy_pos,
+                  float const *epilogue_scalars = nullptr) {
     if constexpr (IS_ACCUM) {
       dst_ptr[dst_phy_pos] += data;
     } else {
@@ -39,9 +42,13 @@ template <typename T, class NextEpilogue>
 class EpilogueExp {
 public:
   CUTE_DEVICE
-  static void run(T const &data, T *__restrict__ dst_ptr, int64_t dst_phy_pos) {
+  static void run(T const &data,
+                  T *__restrict__ dst_ptr,
+                  int64_t dst_phy_pos,
+                  float const *epilogue_scalars) {
+    assert(epilogue_scalars);
     T x = perform_element_unary_op<T, ElementUnaryOpType::EXP>(data);
-    NextEpilogue::run(x, dst_ptr, dst_phy_pos);
+    NextEpilogue::run(x, dst_ptr, dst_phy_pos, ++epilogue_scalars);
   }
 };
 
@@ -49,9 +56,13 @@ template <typename T, class NextEpilogue>
 class EpilogueSILU {
 public:
   CUTE_DEVICE
-  static void run(T const &data, T *__restrict__ dst_ptr, int64_t dst_phy_pos) {
+  static void run(T const &data,
+                  T *__restrict__ dst_ptr,
+                  int64_t dst_phy_pos,
+                  float const *epilogue_scalars) {
+    assert(epilogue_scalars);
     T x = perform_element_unary_op<T, ElementUnaryOpType::SILU>(data);
-    NextEpilogue::run(x, dst_ptr, dst_phy_pos);
+    NextEpilogue::run(x, dst_ptr, dst_phy_pos, ++epilogue_scalars);
   }
 };
 
@@ -59,9 +70,13 @@ template <typename T, class NextEpilogue>
 class EpilogueSquare {
 public:
   CUTE_DEVICE
-  static void run(T const &data, T *__restrict__ dst_ptr, int64_t dst_phy_pos) {
+  static void run(T const &data,
+                  T *__restrict__ dst_ptr,
+                  int64_t dst_phy_pos,
+                  float const *epilogue_scalars) {
+    assert(epilogue_scalars);
     T x = perform_element_unary_op<T, ElementUnaryOpType::SQUARE>(data);
-    NextEpilogue::run(x, dst_ptr, dst_phy_pos);
+    NextEpilogue::run(x, dst_ptr, dst_phy_pos, ++epilogue_scalars);
   }
 };
 
@@ -69,9 +84,13 @@ template <typename T, class NextEpilogue>
 class EpilogueSqrt {
 public:
   CUTE_DEVICE
-  static void run(T const &data, T *__restrict__ dst_ptr, int64_t dst_phy_pos) {
+  static void run(T const &data,
+                  T *__restrict__ dst_ptr,
+                  int64_t dst_phy_pos,
+                  float const *epilogue_scalars) {
+    assert(epilogue_scalars);
     T x = perform_element_unary_op<T, ElementUnaryOpType::SQRT>(data);
-    NextEpilogue::run(x, dst_ptr, dst_phy_pos);
+    NextEpilogue::run(x, dst_ptr, dst_phy_pos, ++epilogue_scalars);
   }
 };
 
@@ -79,9 +98,14 @@ template <typename T, class NextEpilogue>
 class EpilogueMulScalar {
 public:
   CUTE_DEVICE
-  static void run(T const &data, T *__restrict__ dst_ptr, int64_t dst_phy_pos) {
-    T x = perform_element_unary_op<T, ElementUnaryOpType::MULSCALAR>(data);
-    NextEpilogue::run(x, dst_ptr, dst_phy_pos);
+  static void run(T const &data,
+                  T *__restrict__ dst_ptr,
+                  int64_t dst_phy_pos,
+                  float const *epilogue_scalars) {
+    assert(epilogue_scalars);
+    T x = perform_element_unary_op<T, ElementUnaryOpType::MULSCALAR>(
+        data, epilogue_scalars[0]);
+    NextEpilogue::run(x, dst_ptr, dst_phy_pos, ++epilogue_scalars);
   }
 };
 
