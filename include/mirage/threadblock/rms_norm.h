@@ -13,40 +13,22 @@
  * limitations under the License.
  */
 
-#include "mirage/type.h"
+#pragma once
+
+#include "mirage/threadblock/operator.h"
 
 namespace mirage {
-namespace type {
+namespace threadblock {
 
-size_t get_datatype_size(DataType type) {
-  switch (type) {
-    case DT_INT8:
-      return 1;
-    case DT_BFLOAT16:
-    case DT_FLOAT16:
-      return 2;
-    case DT_FLOAT32:
-      return 4;
-    case DT_DOUBLE:
-      return 8;
-    case DT_UNKNOWN:
-    default:
-      assert(false);
-  }
-}
+using namespace cutlass;
 
-bool is_threadblock_element_unary(TBOperatorType op_type) {
-  switch (op_type) {
-    case TB_EXP_OP:
-    case TB_SQUARE_OP:
-    case TB_SQRT_OP:
-    case TB_SILU_OP:
-    case TB_MUL_SCALAR_OP:
-      return true;
-    default:
-      return false;
-  }
-}
+class TBRmsNormOp : public TBOperator {
+public:
+  TBRmsNormOp(Graph *_graph, STensor const &_input);
+  ~TBRmsNormOp();
 
-} // namespace type
+  operator json() const override;
+};
+
+} // namespace threadblock
 } // namespace mirage

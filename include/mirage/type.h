@@ -102,7 +102,8 @@ enum TBOperatorType {
   TB_REDUCTION_0_TO_DIMX_OP = 2304,
   TB_REDUCTION_1_TO_DIMX_OP = 2305,
   TB_REDUCTION_2_TO_DIMX_OP = 2306,
-  TB_REDUCTION_LAST_OP_ID = 2399,
+  TB_REDUCTION_LAST_OP_ID = 2349,
+  TB_RMS_NORM_OP = 2350,
   // Concat
   TB_CONCAT_FIRST_OP_ID = 2400,
   TB_CONCAT_0_OP = 2400,
@@ -156,6 +157,8 @@ NLOHMANN_JSON_SERIALIZE_ENUM(
         {TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP, "tb_accum_redtox_ld_sum_op"},
         {TB_CUSTOMIZED_OP, "tb_customized_op"},
     })
+
+bool is_threadblock_element_unary(TBOperatorType op_type);
 
 enum ActivationType {
   ACT_UNKOWN = 3000,

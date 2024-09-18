@@ -641,9 +641,6 @@ CustomOPTranspileResult
       } else if (cur_op->op_type == type::TB_SQRT_OP) {
         res = fmt("tb::EpilogueSqrt<half_t, $>", res);
       } else if (cur_op->op_type == type::TB_MUL_SCALAR_OP) {
-        // tb::TBElementUnaryOp const *tb_unary_op =
-        //     dynamic_cast<tb::TBElementUnaryOp const *>(cur_op);
-        // assert(tb_unary_op);
         res = fmt("tb::EpilogueMulScalar<half_t, $>", res);
       } else {
         assert(0 && "Unknown operator type");
@@ -801,21 +798,6 @@ CustomOPTranspileResult
           // add scalar chains for epilogue
           // code.e("const float scalars[] = {A, B, C}");
           code.e(append_epilogue_scalars(sched_node.ops));
-          // code.e("const float scalars[] = {");
-          // for (size_t i = 1; i < sched_node.ops.size(); i++) {
-          //   if (i == sched_node.ops.size() - 1) {
-          //     // last one is EpilogueStore
-          //     code.e("0.0f };");
-          //   } else if (is_tb_element_unary_op(
-          //                  sched_node.ops.at(i).first->op_type)) {
-          //     tb::TBElementUnaryOp const *tb_unary_op =
-          //         dynamic_cast<tb::TBElementUnaryOp const *>(
-          //             sched_node.ops.at(i).first);
-          //     code.e("$f, ", tb_unary_op->scalar);
-          //   } else {
-          //     code.e("0.0f, ");
-          //   }
-          // }
           code.e("Kernel::run(stensor$_ptr, stensor$_ptr, thread_idx, $, "
                  "scalars);",
                  output.guid,

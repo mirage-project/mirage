@@ -53,6 +53,7 @@ public:
                                              int thread_idx,
                                              float scalar,
                                              const float *epilogue_scalars) {
+
     constexpr auto numel = Numel{}.value;
     auto dst_layout = DstLayout{};
     auto src_layout = SrcLayout{};
