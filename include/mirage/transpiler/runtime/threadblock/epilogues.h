@@ -23,7 +23,7 @@ public:
   static void run(T const &data,
                   T *__restrict__ dst_ptr,
                   int64_t dst_phy_pos,
-                  float const *epilogue_scalars = nullptr) {
+                  float const *epilogue_scalars) {
     if constexpr (IS_ACCUM) {
       dst_ptr[dst_phy_pos] += data;
     } else {

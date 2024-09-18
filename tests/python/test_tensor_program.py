@@ -80,23 +80,23 @@ def test_gated_mlp(test_config):
     input_tensors = [
         (
             torch.rand(test_config["input_size"], dtype=torch.float16, device="cuda:0")
-            * 0.5
+            * (- 0.5)
         )
-        - 1,
+        + 1,
         (
             torch.rand(
                 test_config["weight1_size"], dtype=torch.float16, device="cuda:0"
             )
-            * 0.5
+            * (- 0.5)
         )
-        - 1,
+        + 1,
         (
             torch.rand(
                 test_config["weight2_size"], dtype=torch.float16, device="cuda:0"
             )
-            * 0.5
+            * (- 0.5)
         )
-        - 1,
+        + 1,
     ]
 
     input_strides = [tensor.stride() for tensor in input_tensors]
@@ -179,14 +179,14 @@ def test_rms_norm(test_config):
     input_tensors = [
         (
             torch.rand(test_config["input_size"], dtype=torch.float16, device="cuda:0")
-            * 0.5
+             * (- 0.5)
         )
-        - 1,
+        + 1,
         (
             torch.rand(test_config["weight_size"], dtype=torch.float16, device="cuda:0")
-            * 0.5
+             * (- 0.5)
         )
-        - 1,
+        + 1,
     ]
 
     input_strides = [tensor.stride() for tensor in input_tensors]
