@@ -109,44 +109,4 @@ public:
   }
 };
 
-template <typename T, class NextEpilogue>
-class EpilogueSILU {
-public:
-  CUTE_DEVICE
-  static void run(T const &data, T *__restrict__ dst_ptr, int64_t dst_phy_pos) {
-    T x = perform_element_unary_op<T, ElementUnaryOpType::SILU>(data);
-    NextEpilogue::run(x, dst_ptr, dst_phy_pos);
-  }
-};
-
-template <typename T, class NextEpilogue>
-class EpilogueSquare {
-public:
-  CUTE_DEVICE
-  static void run(T const &data, T *__restrict__ dst_ptr, int64_t dst_phy_pos) {
-    T x = perform_element_unary_op<T, ElementUnaryOpType::SQUARE>(data);
-    NextEpilogue::run(x, dst_ptr, dst_phy_pos);
-  }
-};
-
-template <typename T, class NextEpilogue>
-class EpilogueSqrt {
-public:
-  CUTE_DEVICE
-  static void run(T const &data, T *__restrict__ dst_ptr, int64_t dst_phy_pos) {
-    T x = perform_element_unary_op<T, ElementUnaryOpType::SQRT>(data);
-    NextEpilogue::run(x, dst_ptr, dst_phy_pos);
-  }
-};
-
-template <typename T, class NextEpilogue>
-class EpilogueMulScalar {
-public:
-  CUTE_DEVICE
-  static void run(T const &data, T *__restrict__ dst_ptr, int64_t dst_phy_pos) {
-    T x = perform_element_unary_op<T, ElementUnaryOpType::MULSCALAR>(data);
-    NextEpilogue::run(x, dst_ptr, dst_phy_pos);
-  }
-};
-
 } // namespace tb

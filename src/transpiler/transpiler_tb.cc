@@ -145,7 +145,7 @@ static string append_epilogue_scalars(
     if (i == chain.size() - 1) {
       // last one is EpilogueStore
       res.append("0.0f};");
-    } else if (is_tb_element_unary_op(chain.at(i).first->op_type)) {
+    } else if (is_threadblock_element_unary(chain.at(i).first->op_type)) {
       tb::TBElementUnaryOp const *tb_unary_op =
           dynamic_cast<tb::TBElementUnaryOp const *>(chain.at(i).first);
       res.append(fmt("$f, ", tb_unary_op->scalar));
