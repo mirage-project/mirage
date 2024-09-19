@@ -15,20 +15,13 @@ using kernel::KNOperator;
 using threadblock::STensor;
 using threadblock::TBOperator;
 
-// int const MAX_NUM_THREADBLOCK_GRAPH_OP = 9; // Outputs not counted
-// int const MAX_NUM_KERNEL_GRAPH_OP = 5;
-// int const MAX_NUM_THREADBLOCK = 2;
-// int const MAX_NUM_THREADBLOCK_INPUT = 3;
-// int const MAX_NUM_THREADBLOCK_OUTPUT = 2;
-// int const MAX_SEARCH_THREAD = 8;
-
 struct GeneratorConfig {
-  int max_num_threadblock_graph_op;
-  int max_num_kernel_graph_op;
-  int max_num_threadblock_graphs;
-  int max_num_threadblock_graph_inputs;
-  int max_num_threadblock_graph_outputs;
-  int search_thread;
+  size_t max_num_threadblock_graph_op;
+  size_t max_num_kernel_graph_op;
+  size_t max_num_threadblock_graphs;
+  size_t max_num_threadblock_graph_inputs;
+  size_t max_num_threadblock_graph_outputs;
+  size_t search_thread;
 
   std::vector<type::KNOperatorType> knop_to_explore;
   std::vector<type::TBOperatorType> tbop_to_explore;
@@ -40,16 +33,15 @@ struct GeneratorConfig {
   std::vector<int> fmap_to_explore;
   std::vector<int> frange_to_explore;
   int reduction_dimx;
-  bool enable_attention_specific_optimization;
-  bool enable_concat_matmul_transformation;
+  bool randomized_branches; // Only for developers to tune the search performance
+  bool _enable_attention_specific_optimization;
+  bool _enable_concat_matmul_transformation;
 
   void show() const;
+  void enable_attention_specific_optimization();
+  void enable_concat_matmul_transformation();
 
   static GeneratorConfig get_default_config();
-  // TODO: Remove the following configs and use the heusristic in DimStrategy
-  static GeneratorConfig get_attention_default_config();
-  static GeneratorConfig get_mlp_default_config();
-  static GeneratorConfig get_lora_default_config();
 };
 
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(GeneratorConfig,
@@ -69,8 +61,8 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(GeneratorConfig,
                                    fmap_to_explore,
                                    frange_to_explore,
                                    reduction_dimx,
-                                   enable_attention_specific_optimization,
-                                   enable_concat_matmul_transformation);
+                                   _enable_attention_specific_optimization,
+                                   _enable_concat_matmul_transformation);
 
 } // namespace search
 } // namespace mirage

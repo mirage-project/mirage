@@ -402,7 +402,7 @@ TBOperator *create_op(threadblock::Graph &g,
   return nullptr;
 }
 
-int count_op_of_type(type::KNOperatorType op_type, kernel::Graph const &g) {
+size_t count_op_of_type(type::KNOperatorType op_type, kernel::Graph const &g) {
   int counter = 0;
   for (auto const &op : g.operators) {
     if (op->op_type == op_type) {

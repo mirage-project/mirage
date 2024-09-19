@@ -44,11 +44,10 @@ int cython_search(mirage::kernel::Graph const *input_graph,
         search::GeneratorConfig::get_default_config();
     if (default_config != nullptr) {
       if (!strcmp(default_config, "attention")) {
-        config = search::GeneratorConfig::get_attention_default_config();
+        config.enable_attention_specific_optimization();
       } else if (!strcmp(default_config, "lora")) {
-        config = search::GeneratorConfig::get_lora_default_config();
+        config.enable_concat_matmul_transformation();
       } else if (!strcmp(default_config, "mlp")) {
-        config = search::GeneratorConfig::get_mlp_default_config();
       }
     }
     // Customized imaps

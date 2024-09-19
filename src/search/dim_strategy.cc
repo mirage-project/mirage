@@ -7,20 +7,100 @@ DimStrategy::DimStrategy(GeneratorConfig const &config) : config(config) {}
 
 std::vector<type::KNOperatorType> DimStrategy::get_knop_cand() {
   std::vector<type::KNOperatorType> cands = config.knop_to_explore;
-  // std::random_shuffle(cands.begin(), cands.end());
+  if (config.randomized_branches) {
+    std::random_shuffle(cands.begin(), cands.end());
+  }
   return cands;
 }
 
 std::vector<type::TBOperatorType> DimStrategy::get_tbop_cand() {
   std::vector<type::TBOperatorType> cands = config.tbop_to_explore;
-  // std::random_shuffle(cands.begin(), cands.end());
+  if (config._enable_concat_matmul_transformation) {
+    cands.push_back(type::TBOperatorType::TB_CONCAT_THEN_MATMUL_OP);
+    cands = deduplicate(cands);
+  }
+  if (config.randomized_branches) {
+    std::random_shuffle(cands.begin(), cands.end());
+  }
   return cands;
 }
 
 std::vector<dim3>
     DimStrategy::get_grid_dim_cand(std::vector<DTensor> const &tensors) {
+
+  auto filter = [](std::vector<int> const &tips, int x) {
+    for (int tip : tips) {
+      if (tip % x == 0) {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  auto generate_1d_grids = [&](std::vector<int> const &tips) {
+    std::vector<dim3> cands;
+    for (size_t x = 4; x <= 128; x *= 2) {
+      if (filter(tips, x)) {
+        cands.push_back({x, 1, 1});
+      }
+    }
+    return cands;
+  };
+
+  auto generate_2d_grids = [&](int x, std::vector<int> const &tips) {
+    std::vector<dim3> cands;
+    for (size_t y = 1; y <= 64; y *= 2) {
+      if (filter(tips, y)) {
+        cands.push_back({x, y, 1});
+      }
+    }
+    return cands;
+  };
+
+  auto is_all_n_dim = [&](int n) {
+    for (DTensor const &tensor : tensors) {
+      if (tensor.num_dims != n) {
+        return false;
+      }
+    }
+    return true;
+  };
+
+  auto get_batch = [&] {
+    if (is_all_n_dim(2)) {
+      return tensors[0].dim[0];
+    }
+    if (is_all_n_dim(3)) {
+      return tensors[0].dim[0];
+    }
+    return -1;
+  };
+
+  auto get_tips = [&] {
+    std::unordered_set<int> tips;
+    for (DTensor const &tensor : tensors) {
+      for (int i = 0; i < tensor.num_dims; ++i) {
+        tips.insert(tensor.dim[i]);
+      }
+    }
+    return std::vector<int>(tips.begin(), tips.end());
+  };
+
   std::vector<dim3> cands = config.grid_dim_to_explore;
-  // std::random_shuffle(cands.begin(), cands.end());
+
+  cands = vector_concat(cands, generate_1d_grids(get_tips()));
+  if (config._enable_attention_specific_optimization) {
+    int batch = get_batch();
+    if (batch != -1) {
+      cands = vector_concat(cands, generate_2d_grids(batch, get_tips()));
+    }
+  }
+
+  cands = deduplicate(cands);
+
+  if (config.randomized_branches) {
+    std::random_shuffle(cands.begin(), cands.end());
+  }
   return cands;
 }
 
@@ -28,7 +108,9 @@ std::vector<dim3>
     DimStrategy::get_block_dim_cand(std::vector<DTensor> const &tensors,
                                     dim3 grid_dim) {
   std::vector<dim3> cands = config.block_dim_to_explore;
-  // std::random_shuffle(cands.begin(), cands.end());
+  if (config.randomized_branches) {
+    std::random_shuffle(cands.begin(), cands.end());
+  }
   return cands;
 }
 
@@ -121,23 +203,49 @@ std::vector<std::vector<int3>>
     DimStrategy::get_input_map_cand(std::vector<DTensor> const &tensors,
                                     dim3 grid_dim) {
   std::vector<std::vector<int3>> results;
-  if (config.imap_to_explore.empty()) {
+  if (!config.imap_comb_to_explore.empty()) {
     for (auto const &input_maps : config.imap_comb_to_explore) {
       if (is_valid_input_map(tensors, grid_dim, input_maps)) {
         results.push_back(input_maps);
       }
     }
-  } else {
+  } else if (!config.imap_to_explore.empty()) {
     generate_input_map_cand(
         tensors, grid_dim, config.imap_to_explore, {}, results);
+  } else {
+    std::vector<int3> imap_to_explore = {
+        {-1, -1, -1},
+        {0, -1, -1},
+        {0, -1, 1},
+        {0, 1, -1},
+        {0, 2, -1},
+        {1, -1, -1},
+    };
+    generate_input_map_cand(tensors, grid_dim, imap_to_explore, {}, results);
   }
-  // std::random_shuffle(results.begin(), results.end());
+  if (config.randomized_branches) {
+    std::random_shuffle(results.begin(), results.end());
+  }
   return results;
 }
 
 std::vector<int3> DimStrategy::get_output_map_cand(dim3 grid_dim) {
   std::vector<int3> results;
-  for (int3 output_map : config.omap_to_explore) {
+  std::vector<int3> omap_to_explore = config.omap_to_explore;
+  omap_to_explore = vector_concat(omap_to_explore,
+                                  {
+                                      {0, 1, -1},
+                                      {0, 2, 1},
+                                      {0, 2, -1},
+                                      {0, -1, -1},
+                                      {-1, 2, 1},
+                                      {-1, 1, -1},
+                                      {-1, 2, -1},
+                                      {-1, -1, -1},
+                                      {1, -1, -1}
+                                  });
+  omap_to_explore = deduplicate(omap_to_explore);
+  for (int3 output_map : omap_to_explore) {
     if ((grid_dim.x == 1 && output_map.x != -1) ||
         (grid_dim.x > 1 && output_map.x == -1)) {
       continue;
@@ -152,7 +260,9 @@ std::vector<int3> DimStrategy::get_output_map_cand(dim3 grid_dim) {
     }
     results.push_back(output_map);
   }
-  // std::random_shuffle(results.begin(), results.end());
+  if (config.randomized_branches) {
+    std::random_shuffle(results.begin(), results.end());
+  }
   return results;
 }
 
@@ -179,7 +289,14 @@ void generate_forloop_dim(std::vector<DTensor> const &input_tensors,
 std::vector<std::vector<int>> DimStrategy::get_forloop_dim_cand(
     std::vector<DTensor> const &input_tensors) {
   std::vector<std::vector<int>> results;
+  std::vector<int> fmap_to_explore = {-1, 0, 1, 2};
+  if (!config.fmap_to_explore.empty()) {
+    fmap_to_explore = config.fmap_to_explore;
+  }
   generate_forloop_dim(input_tensors, config.fmap_to_explore, {}, results);
+  if (config.randomized_branches) {
+    std::random_shuffle(results.begin(), results.end());
+  }
   return results;
 }
 
@@ -229,7 +346,9 @@ std::vector<int> DimStrategy::get_forloop_range_cand(
       results.push_back(x);
     }
   }
-  // std::random_shuffle(results.begin(), results.end());
+  if (config.randomized_branches) {
+    std::random_shuffle(results.begin(), results.end());
+  }
   return results;
 }
 
@@ -238,7 +357,9 @@ std::vector<std::vector<int>> DimStrategy::get_unary_input(int num_tensors) {
   for (int i = 0; i < num_tensors; ++i) {
     result.push_back({i});
   }
-  // std::random_shuffle(result.begin(), result.end());
+  if (config.randomized_branches) {
+    std::random_shuffle(result.begin(), result.end());
+  }
   return result;
 }
 
@@ -249,7 +370,9 @@ std::vector<std::vector<int>> DimStrategy::get_binary_input(int num_tensors) {
       result.push_back({i, j});
     }
   }
-  // std::random_shuffle(result.begin(), result.end());
+  if (config.randomized_branches) {
+    std::random_shuffle(result.begin(), result.end());
+  }
   return result;
 }
 
@@ -275,7 +398,9 @@ std::vector<std::vector<int>> DimStrategy::get_nary_input(int num_tensors,
   std::vector<std::vector<int>> result;
   std::vector<int> cur;
   mirage::search::get_nary_input(n, num_tensors, cur, result);
-  // std::random_shuffle(result.begin(), result.end());
+  if (config.randomized_branches) {
+    std::random_shuffle(result.begin(), result.end());
+  }
   return result;
 }
 

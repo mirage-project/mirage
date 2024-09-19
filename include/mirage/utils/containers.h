@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <vector>
 #include <vector_types.h>
+#include <unordered_set>
 
 template <typename Container>
 typename Container::const_iterator
@@ -58,6 +59,12 @@ std::vector<std::invoke_result_t<F, T>> vector_map(std::vector<T> const &v,
     new_v.push_back(f(x));
   }
   return new_v;
+}
+
+template <typename T>
+std::vector<T> deduplicate(std::vector<T> const &v) {
+  std::unordered_set<T> s(v.begin(), v.end());
+  return std::vector<T>(s.begin(), s.end());
 }
 
 template <typename T>
