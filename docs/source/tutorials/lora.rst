@@ -28,7 +28,7 @@ The following code snippet demonstrates superoptimizing LoRA adapters in Mirage.
    O = graph.add(C, E)
    opt_graph = graph.superoptimize()
 
-.. image:: tutorials/images/lora_performance.png
+.. image:: /tutorials/images/lora_performance.png
     :alt: LoRA performance
     :align: center
     :width: 400

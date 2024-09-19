@@ -11,6 +11,7 @@ GPU Hierarchy
 .. image:: /images/gpu_hierarchy.png
    :alt: GPU compute and memory hierarchy
    :align: center
+   :width: 600
 
 The above figure shows the hierarchy of today’s GPUs. Computation on GPUs is organized as kernels, each of which is a function executed simultaneously on multiple GPU cores in a single-program-multiple-data (SPMD) fashion. A kernel includes a grid of thread blocks, each of which is executed on one GPU streaming multiprocessor and includes multiple threads to perform computation on individual data elements. Each thread is associated with a per-thread register file, and all threads within a thread block can access shared memory to enable collective operations. Finally, all inputs and outputs of a kernel are stored in GPU device memory.
 
