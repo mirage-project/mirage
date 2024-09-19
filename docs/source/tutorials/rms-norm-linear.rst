@@ -38,6 +38,7 @@ Mirage introduces uGraph, a multi-level graph structure to represent the computa
 
 .. image:: /tutorials/images/rms_norm_linear_performance.png
    :alt: Performance comparison with PyTorch
+   :width: 400
    :align: center
 
 The object `optimized_graph` can directly run as a function, and doing so will let Mirage transpile the uGraph into CUDA code, compile the code for execution, and launch the compiled kernel.
