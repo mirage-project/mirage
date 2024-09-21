@@ -52,7 +52,7 @@ public:
                                              T const *__restrict__ src,
                                              int thread_idx,
                                              float scalar,
-                                             const float *epilogue_scalars) {
+                                             float const *epilogue_scalars) {
 
     constexpr auto numel = Numel{}.value;
     auto dst_layout = DstLayout{};
