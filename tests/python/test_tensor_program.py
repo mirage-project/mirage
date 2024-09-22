@@ -76,27 +76,27 @@ def test_gated_mlp(test_config):
     tb_graph.new_output(stensor=tO, output_map=test_config["tb_outout_map"])
     O = graph.customized([X, W1, W2], tb_graph)
 
-    # uniform distribution from -0.5 to 0.5
+    # uniform distribution from 0 to 0.5
     input_tensors = [
         (
             torch.rand(test_config["input_size"], dtype=torch.float16, device="cuda:0")
-            * 0.5
+            * (-0.5)
         )
-        - 1,
+        + 1,
         (
             torch.rand(
                 test_config["weight1_size"], dtype=torch.float16, device="cuda:0"
             )
-            * 0.5
+            * (-0.5)
         )
-        - 1,
+        + 1,
         (
             torch.rand(
                 test_config["weight2_size"], dtype=torch.float16, device="cuda:0"
             )
-            * 0.5
+            * (-0.5)
         )
-        - 1,
+        + 1,
     ]
 
     input_strides = [tensor.stride() for tensor in input_tensors]
@@ -114,8 +114,132 @@ def test_gated_mlp(test_config):
     assert is_closed(outputs[0], Res)
 
 
-def test_group_query_attention():
-    assert 1
+@pytest.mark.parametrize(
+    "test_config",
+    [
+        {
+            "query_size": (2, 256, 64),
+            "key_size": (2, 64, 4096),
+            "value_size": (2, 4096, 64),
+            "tb1_grid_dim": (2, 16, 4),
+            "tb1_block_dim": (128, 1, 1),
+            "tb1_forloop_range": 4,
+            "tb1_reduction_dimx": 64,
+            "tb1_qinput_map": (0, -1, 1),
+            "tb1_kinput_map": (0, 2, -1),
+            "tb1_vinput_map": (0, 1, -1),
+            "tb1_qforloop_dim": -1,
+            "tb1_kforloop_dim": 2,
+            "tb1_vforloop_dim": 1,
+            "tb1_outout_map1": (0, 2, 1),
+            "tb1_outout_map2": (0, 2, 1),
+            "tb2_grid_dim": (2, 16, 1),
+            "tb2_block_dim": (128, 1, 1),
+            "tb2_forloop_range": 1,
+            "tb2_reduction_dimx": 64,
+            "tb2_input_map1": (0, 1, -1),
+            "tb2_input_map2": (0, 1, -1),
+            "tb2_forloop_dim1": -1,
+            "tb2_forloop_dim2": -1,
+            "tb1_outout_map": (0, 1, -1),
+        }
+    ],
+)
+def test_group_query_attention(test_config):
+    graph = mi.new_kernel_graph()
+    Q = graph.new_input(dims=test_config["query_size"], dtype=mi.float16)
+    K = graph.new_input(dims=test_config["key_size"], dtype=mi.float16)
+    V = graph.new_input(dims=test_config["value_size"], dtype=mi.float16)
+    tbgraph1 = mi.new_threadblock_graph(
+        grid_dim=test_config["tb1_grid_dim"],
+        block_dim=test_config["tb1_block_dim"],
+        forloop_range=test_config["tb1_forloop_range"],
+        reduction_dimx=test_config["tb1_reduction_dimx"],
+    )
+
+    bQ = tbgraph1.new_input(
+        dtensor=Q,
+        input_map=test_config["tb1_qinput_map"],
+        forloop_dim=test_config["tb1_qforloop_dim"],
+    )
+    bK = tbgraph1.new_input(
+        dtensor=K,
+        input_map=test_config["tb1_kinput_map"],
+        forloop_dim=test_config["tb1_kforloop_dim"],
+    )
+    bV = tbgraph1.new_input(
+        dtensor=V,
+        input_map=test_config["tb1_vinput_map"],
+        forloop_dim=test_config["tb1_vforloop_dim"],
+    )
+    bA = tbgraph1.matmul(bQ, bK)
+    bE = tbgraph1.exp(bA)
+    bS = tbgraph1.matmul(bE, bV)
+    bO1 = tbgraph1.forloop_accum(bS)
+    bO2 = tbgraph1.forloop_accum(bE, "sum")
+    tbgraph1.new_output(stensor=bO1, output_map=test_config["tb1_outout_map1"])
+    tbgraph1.new_output(stensor=bO2, output_map=test_config["tb1_outout_map2"])
+    O = graph.customized([Q, K, V], tbgraph1)
+
+    tbgraph2 = mi.new_threadblock_graph(
+        grid_dim=test_config["tb2_grid_dim"],
+        block_dim=test_config["tb2_block_dim"],
+        forloop_range=test_config["tb2_forloop_range"],
+        reduction_dimx=test_config["tb2_reduction_dimx"],
+    )
+    bA = tbgraph2.new_input(
+        dtensor=O[0],
+        input_map=test_config["tb2_input_map1"],
+        forloop_dim=test_config["tb2_forloop_dim1"],
+    )
+    bB = tbgraph2.new_input(
+        dtensor=O[1],
+        input_map=test_config["tb2_input_map2"],
+        forloop_dim=test_config["tb2_forloop_dim2"],
+    )
+    bA = tbgraph2.forloop_accum(bA, "sum_todimx")
+    bB = tbgraph2.forloop_accum(bB, "sum")
+    bO = tbgraph2.div(bA, bB)
+    tbgraph2.new_output(stensor=bO, output_map=test_config["tb1_outout_map"])
+    O = graph.customized(O, tbgraph2)
+
+    input_tensors = [
+        (
+            torch.randn(test_config["query_size"], dtype=torch.float16, device="cuda:0")
+            * 0.2
+            - 0.1
+        ),
+        (
+            torch.randn(test_config["key_size"], dtype=torch.float16, device="cuda:0")
+            * 0.2
+            - 0.1
+        ),
+        (
+            torch.randn(test_config["value_size"], dtype=torch.float16, device="cuda:0")
+            * 0.2
+            - 0.1
+        ),
+    ]
+
+    input_strides = [tensor.stride() for tensor in input_tensors]
+    p = mi.generate_cuda_program(
+        graph.cygraph, target_cc=86, input_strides=input_strides, output_tensors=O
+    )
+    print(p["code"])
+    outputs = graph(inputs=input_tensors, outputs=O)
+
+    attention_score = torch.matmul(input_tensors[0], input_tensors[1])
+    attention_weights = torch.softmax(attention_score, dim=-1)
+
+    attention_output = torch.matmul(attention_weights, input_tensors[2])
+
+    assert is_closed(
+        outputs[0].reshape(outputs[0].size(0), -1),
+        attention_output.reshape(
+            attention_output.size(0),
+            -1,
+        ),
+    )
 
 
 def test_group_query_attention_spec_decoding():
@@ -171,22 +295,17 @@ def test_rms_norm(test_config):
     tb_graph.new_output(stensor=tO, output_map=test_config["tb_outout_map"])
     O = graph.customized([X, W], tb_graph)
 
-    #     input_tensors = [
-    #     torch.full(test_config["input_size"], 0.1,dtype=torch.float16, device='cuda:0'),
-    #     torch.full(test_config["weight_size"], 0.1, dtype=torch.float16, device='cuda:0'),
-    # ]
-
     input_tensors = [
         (
             torch.rand(test_config["input_size"], dtype=torch.float16, device="cuda:0")
-            * 0.5
+            * (-0.5)
         )
-        - 1,
+        + 1,
         (
             torch.rand(test_config["weight_size"], dtype=torch.float16, device="cuda:0")
-            * 0.5
+            * (-0.5)
         )
-        - 1,
+        + 1,
     ]
 
     input_strides = [tensor.stride() for tensor in input_tensors]
