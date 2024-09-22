@@ -363,12 +363,11 @@ TBMemoryPlan Transpiler::get_threadblock_memory_plan(tb::Graph const &tb_graph,
       int earlist_free_time =
           find_earlist_free_time(accum.guid, tb_sched.post_loop_nodes, 2 * T);
       if (last_op_meta.is_accum_in_reg) {
-        int first_used_time = 2 * T;
         // find_first_used_time(accum.guid, tb_sched.post_loop_nodes, 2 * T);
-        assert(first_used_time != -1 &&
-               "An accumulator is not used after the for loop");
+        // assert(first_used_time != -1 &&
+        //        "An accumulator is not used after the for loop");
         tensor_decls.push_back(
-            {accum.guid, phy_size, first_used_time, earlist_free_time});
+            {accum.guid, phy_size, 2 * T, earlist_free_time});
       } else {
         tensor_decls.push_back({accum.guid,
                                 phy_size,

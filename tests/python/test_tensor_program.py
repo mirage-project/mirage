@@ -204,9 +204,21 @@ def test_group_query_attention(test_config):
     O = graph.customized(O, tbgraph2)
 
     input_tensors = [
-        (torch.randn((2, 256, 64), dtype=torch.float16, device="cuda:0") * 0.2 - 0.1),
-        (torch.randn((2, 64, 4096), dtype=torch.float16, device="cuda:0") * 0.2 - 0.1),
-        (torch.randn((2, 4096, 64), dtype=torch.float16, device="cuda:0") * 0.2 - 0.1),
+        (
+            torch.randn(test_config["query_size"], dtype=torch.float16, device="cuda:0")
+            * 0.2
+            - 0.1
+        ),
+        (
+            torch.randn(test_config["key_size"], dtype=torch.float16, device="cuda:0")
+            * 0.2
+            - 0.1
+        ),
+        (
+            torch.randn(test_config["value_size"], dtype=torch.float16, device="cuda:0")
+            * 0.2
+            - 0.1
+        ),
     ]
 
     input_strides = [tensor.stride() for tensor in input_tensors]
