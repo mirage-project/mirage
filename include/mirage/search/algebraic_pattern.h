@@ -86,7 +86,8 @@ public:
   std::shared_ptr<AlgebraicPattern> a;
 };
 
-// Note(@Mengdi): Replace it with Sqr and Sqrt once we have related algebraic transformation
+// Note(@Mengdi): Replace it with Sqr and Sqrt once we have related algebraic
+// transformation
 class RMS : public AlgebraicPattern {
 public:
   RMS(int red_deg, std::shared_ptr<AlgebraicPattern> elems);

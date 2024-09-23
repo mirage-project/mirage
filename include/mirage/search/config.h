@@ -72,7 +72,7 @@ struct TBGraphConfig {
   std::vector<int> fmaps;
   int frange;
 
-  bool operator==(const TBGraphConfig &other) const;
+  bool operator==(TBGraphConfig const &other) const;
   void show() const;
 };
 

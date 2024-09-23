@@ -328,13 +328,12 @@ IKNRange forward_propagate(IKNRange const &range,
     case type::KNOperatorType::KN_RMS_NORM_OP: {
       int num_norm_dims = 0, s = 1;
       ret = range;
-      while (s < static_cast<kernel::KNRMSNormOp const&>(op).normalized_size) {
+      while (s < static_cast<kernel::KNRMSNormOp const &>(op).normalized_size) {
         num_norm_dims++;
         s *= op.output_tensors[0]
                  .dim[op.output_tensors[0].num_dims - num_norm_dims];
-        ret = IKNRange(
-            ret.range_set
-                .extend_dim(op.output_tensors[0].num_dims - num_norm_dims));
+        ret = IKNRange(ret.range_set.extend_dim(op.output_tensors[0].num_dims -
+                                                num_norm_dims));
       }
       ret = IKNRange(ret.range_set.truncate(op.output_tensors[0]));
       break;
@@ -390,13 +389,12 @@ IKNRange backward_propagate(IKNRange const &knrange,
     case type::KNOperatorType::KN_RMS_NORM_OP: {
       int num_norm_dims = 0, s = 1;
       ret = knrange;
-      while (s < static_cast<kernel::KNRMSNormOp const&>(op).normalized_size) {
+      while (s < static_cast<kernel::KNRMSNormOp const &>(op).normalized_size) {
         num_norm_dims++;
         s *= op.output_tensors[0]
                  .dim[op.output_tensors[0].num_dims - num_norm_dims];
-        ret = IKNRange(
-            ret.range_set
-                .extend_dim(op.output_tensors[0].num_dims - num_norm_dims));
+        ret = IKNRange(ret.range_set.extend_dim(op.output_tensors[0].num_dims -
+                                                num_norm_dims));
       }
       ret = IKNRange(ret.range_set.truncate(op.output_tensors[0]));
       break;

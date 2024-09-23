@@ -41,11 +41,12 @@ void pattern_eval(
     } else if (op->op_type == type::KNOperatorType::KN_RMS_NORM_OP) {
       std::shared_ptr<AlgebraicPattern> input_pattern =
           patterns.at(op->input_tensors[0].guid);
-      std::shared_ptr<AlgebraicPattern> denominator_pattern = std::make_shared<RMS>(
-          static_cast<kernel::KNRMSNormOp *>(op)->normalized_size,
-          input_pattern);
-      std::shared_ptr<AlgebraicPattern> output_pattern = std::make_shared<Div>(
-          input_pattern, denominator_pattern);
+      std::shared_ptr<AlgebraicPattern> denominator_pattern =
+          std::make_shared<RMS>(
+              static_cast<kernel::KNRMSNormOp *>(op)->normalized_size,
+              input_pattern);
+      std::shared_ptr<AlgebraicPattern> output_pattern =
+          std::make_shared<Div>(input_pattern, denominator_pattern);
       patterns.insert({op->output_tensors[0].guid, output_pattern});
     } else if (op->op_type != type::KNOperatorType::KN_CUSTOMIZED_OP) {
       std::vector<std::shared_ptr<AlgebraicPattern>> input_patterns;

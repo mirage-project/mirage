@@ -19,9 +19,9 @@ KernelGraphGenerator::KernelGraphGenerator(
     GeneratorConfig const &config,
     char const *filename)
     : config(config), dim_strategy(DimStrategy(config)), filename(filename),
-      num_thread(config.search_thread),
-      num_total_kernel_graphs(0), num_total_random_tests(0),
-      num_valid_kernel_graphs(0), num_total_states(0) {
+      num_thread(config.search_thread), num_total_kernel_graphs(0),
+      num_total_random_tests(0), num_valid_kernel_graphs(0),
+      num_total_states(0) {
   preprocess(computation_graph);
 }
 
@@ -163,7 +163,8 @@ void KernelGraphGenerator::generate_next_operator(
       } else {
         // Case K3: generate a graph-def kernel operator
         if (count_op_of_type(type::KNOperatorType::KN_CUSTOMIZED_OP,
-                             *c.kn_graph) >= config.max_num_threadblock_graphs) {
+                             *c.kn_graph) >=
+            config.max_num_threadblock_graphs) {
           continue;
         }
         static std::unordered_set<TBGraphConfig> displayed_tbgraph_configs;
@@ -191,7 +192,11 @@ void KernelGraphGenerator::generate_next_operator(
                                                            block_dim,
                                                            forloop_dim)) {
                     {
-                      TBGraphConfig cfg{grid_dim, block_dim, input_map, forloop_dim, forloop_range};
+                      TBGraphConfig cfg{grid_dim,
+                                        block_dim,
+                                        input_map,
+                                        forloop_dim,
+                                        forloop_range};
                       if (!contains(displayed_tbgraph_configs, cfg)) {
                         cfg.show();
                         displayed_tbgraph_configs.insert(cfg);

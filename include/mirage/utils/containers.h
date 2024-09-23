@@ -1,9 +1,9 @@
 #pragma once
 
 #include <algorithm>
+#include <unordered_set>
 #include <vector>
 #include <vector_types.h>
-#include <unordered_set>
 
 template <typename Container>
 typename Container::const_iterator

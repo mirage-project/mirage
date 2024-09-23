@@ -234,17 +234,15 @@ std::vector<int3> DimStrategy::get_output_map_cand(dim3 grid_dim) {
   std::vector<int3> results;
   std::vector<int3> omap_to_explore = config.omap_to_explore;
   omap_to_explore = vector_concat(omap_to_explore,
-                                  {
-                                      {0, 1, -1},
-                                      {0, 2, 1},
-                                      {0, 2, -1},
-                                      {0, -1, -1},
-                                      {-1, 2, 1},
-                                      {-1, 1, -1},
-                                      {-1, 2, -1},
-                                      {-1, -1, -1},
-                                      {1, -1, -1}
-                                  });
+                                  {{0, 1, -1},
+                                   {0, 2, 1},
+                                   {0, 2, -1},
+                                   {0, -1, -1},
+                                   {-1, 2, 1},
+                                   {-1, 1, -1},
+                                   {-1, 2, -1},
+                                   {-1, -1, -1},
+                                   {1, -1, -1}});
   omap_to_explore = deduplicate(omap_to_explore);
   for (int3 output_map : omap_to_explore) {
     if ((grid_dim.x == 1 && output_map.x != -1) ||
