@@ -24,8 +24,10 @@ void from_json(json const &j, SearchContext &c) {
     for (size_t i = 0; i < c.tb_graph->operators.size(); ++i) {
       auto op = c.tb_graph->operators[i];
       if (op->op_type == type::TBOperatorType::TB_INPUT_OP) {
-        auto index = get_index(j.at("tb_graph").at("operators")[i].at("dtensor").at("guid"));
-        static_cast<threadblock::TBInputOp *>(op)->dtensor = c.kn_graph->operators[index.first]->output_tensors[index.second];
+        auto index = get_index(
+            j.at("tb_graph").at("operators")[i].at("dtensor").at("guid"));
+        static_cast<threadblock::TBInputOp *>(op)->dtensor =
+            c.kn_graph->operators[index.first]->output_tensors[index.second];
       }
     }
   }

@@ -1,7 +1,7 @@
 #pragma once
 
-#include "mirage/search/algebraic_pattern.h"
 #include "mirage/kernel/graph.h"
+#include "mirage/search/algebraic_pattern.h"
 #include "mirage/threadblock/graph.h"
 
 namespace mirage {

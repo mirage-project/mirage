@@ -48,6 +48,7 @@ bool is_unary(type::KNOperatorType op) {
       type::KNOperatorType::KN_REDUCTION_2_OP,
       type::KNOperatorType::KN_EXP_OP,
       type::KNOperatorType::KN_SILU_OP,
+      type::KNOperatorType::KN_RMS_NORM_OP,
   };
   return contains(true_values, op);
 }
@@ -159,7 +160,8 @@ std::shared_ptr<AlgebraicPattern>
           opd);
     }
     case type::TBOperatorType::TB_FORLOOP_ACCUM_RED_LD_RMS_OP: {
-      assert(false && "TBD");
+      return std::make_shared<RMS>(
+          forloop_range * tensor.dim[tensor.num_dims - 1], opd);
     }
     default:
       assert(false);
@@ -402,7 +404,7 @@ TBOperator *create_op(threadblock::Graph &g,
   return nullptr;
 }
 
-int count_op_of_type(type::KNOperatorType op_type, kernel::Graph const &g) {
+size_t count_op_of_type(type::KNOperatorType op_type, kernel::Graph const &g) {
   int counter = 0;
   for (auto const &op : g.operators) {
     if (op->op_type == op_type) {

@@ -44,6 +44,7 @@ bool AlgebraicPattern::subpattern_to(AlgebraicPattern const &other) const {
   z3::func_decl div = c.function("div", P, P, P);
   z3::func_decl exp = c.function("exp", P, P);
   z3::func_decl silu = c.function("silu", P, P);
+  z3::func_decl rms = c.function("rms", I, P, P);
   z3::func_decl red = c.function("red", I, P, P);
 
   z3::func_decl subpattern = c.function("subpattern", P, P, c.bool_sort());
@@ -100,6 +101,7 @@ bool AlgebraicPattern::subpattern_to(AlgebraicPattern const &other) const {
   s.add(forall(x, y, subpattern(y, div(x, y))));
   s.add(forall(x, subpattern(x, exp(x))));
   s.add(forall(x, subpattern(x, silu(x))));
+  s.add(forall(x, i, subpattern(x, rms(i, x))));
   s.add(forall(x, i, subpattern(x, red(i, x))));
 
   s.add(forall(x, x == red(c.int_val(0), x)));
@@ -211,6 +213,20 @@ z3::expr Silu::to_z3(z3::context &c,
 
 std::string Silu::to_string() const {
   return "silu(" + a->to_string() + ")";
+}
+
+RMS::RMS(int red_deg, std::shared_ptr<AlgebraicPattern> elems)
+    : red_deg(red_deg), elems(elems) {}
+
+z3::expr RMS::to_z3(z3::context &c,
+                    std::unordered_set<std::string> &all_variables) const {
+  z3::sort P = c.uninterpreted_sort("P");
+  z3::func_decl rms = c.function("rms", c.int_sort(), P, P);
+  return rms(c.int_val(red_deg), elems->to_z3(c, all_variables));
+}
+
+std::string RMS::to_string() const {
+  return "rms(" + std::to_string(red_deg) + ", " + elems->to_string() + ")";
 }
 
 Red::Red(int red_deg, std::shared_ptr<AlgebraicPattern> summand)
