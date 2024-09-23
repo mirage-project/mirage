@@ -272,25 +272,25 @@ TBMemoryPlan Transpiler::get_threadblock_memory_plan(tb::Graph const &tb_graph,
     return stensor_meta.num_phy_elems *
            type::get_datatype_size(stensor.data_type);
   };
-  auto find_first_used_time = [](sguid_t sguid,
-                                 vector<TBSchedNode> const &nodes,
-                                 int time_delta) -> int {
-    int first_used_time = -1;
-    for (size_t i = 0; i < nodes.size(); ++i) {
-      TBSchedNode const &node = nodes[i];
-      if (node.type != tb_sched_node_t::OPERATOR) {
-        continue;
-      }
-      for (tb::STensor const &input_tensor :
-           node.ops.front().first->input_tensors) {
-        if (input_tensor.guid == sguid) {
-          first_used_time = i + time_delta;
-          break;
-        }
-      }
-    }
-    return first_used_time;
-  };
+  // auto find_first_used_time = [](sguid_t sguid,
+  //                                vector<TBSchedNode> const &nodes,
+  //                                int time_delta) -> int {
+  //   int first_used_time = -1;
+  //   for (size_t i = 0; i < nodes.size(); ++i) {
+  //     TBSchedNode const &node = nodes[i];
+  //     if (node.type != tb_sched_node_t::OPERATOR) {
+  //       continue;
+  //     }
+  //     for (tb::STensor const &input_tensor :
+  //          node.ops.front().first->input_tensors) {
+  //       if (input_tensor.guid == sguid) {
+  //         first_used_time = i + time_delta;
+  //         break;
+  //       }
+  //     }
+  //   }
+  //   return first_used_time;
+  // };
   auto find_last_used_time = [](sguid_t sguid,
                                 vector<TBSchedNode> const &nodes,
                                 int time_delta) -> int {
@@ -363,12 +363,11 @@ TBMemoryPlan Transpiler::get_threadblock_memory_plan(tb::Graph const &tb_graph,
       int earlist_free_time =
           find_earlist_free_time(accum.guid, tb_sched.post_loop_nodes, 2 * T);
       if (last_op_meta.is_accum_in_reg) {
-        int first_used_time =
-            find_first_used_time(accum.guid, tb_sched.post_loop_nodes, 2 * T);
-        assert(first_used_time != -1 &&
-               "An accumulator is not used after the for loop");
+        // find_first_used_time(accum.guid, tb_sched.post_loop_nodes, 2 * T);
+        // assert(first_used_time != -1 &&
+        //        "An accumulator is not used after the for loop");
         tensor_decls.push_back(
-            {accum.guid, phy_size, first_used_time, earlist_free_time});
+            {accum.guid, phy_size, 2 * T, earlist_free_time});
       } else {
         tensor_decls.push_back({accum.guid,
                                 phy_size,

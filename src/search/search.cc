@@ -19,10 +19,9 @@ KernelGraphGenerator::KernelGraphGenerator(
     GeneratorConfig const &config,
     char const *filename)
     : config(config), dim_strategy(DimStrategy(config)), filename(filename),
-      num_thread(std::min((int)std::thread::hardware_concurrency(),
-                          MAX_SEARCH_THREAD)),
-      num_total_kernel_graphs(0), num_total_random_tests(0),
-      num_valid_kernel_graphs(0), num_total_states(0) {
+      num_thread(config.search_thread), num_total_kernel_graphs(0),
+      num_total_random_tests(0), num_valid_kernel_graphs(0),
+      num_total_states(0) {
   preprocess(computation_graph);
 }
 
@@ -125,7 +124,7 @@ void KernelGraphGenerator::generate_next_operator(
   if (c.level == SearchLevel::LV_KERNEL) {
     assert(c.tb_graph == nullptr);
     // Case K1: finish and verify the current graph
-    if (c.kn_graph->operators.size() >= MAX_NUM_KERNEL_GRAPH_OP) {
+    if (c.kn_graph->operators.size() >= config.max_num_kernel_graph_op) {
       return;
     }
     std::vector<DTensor> all_tensors = get_all_tensors(*c.kn_graph);
@@ -164,9 +163,11 @@ void KernelGraphGenerator::generate_next_operator(
       } else {
         // Case K3: generate a graph-def kernel operator
         if (count_op_of_type(type::KNOperatorType::KN_CUSTOMIZED_OP,
-                             *c.kn_graph) >= MAX_NUM_THREADBLOCK) {
+                             *c.kn_graph) >=
+            config.max_num_threadblock_graphs) {
           continue;
         }
+        static std::unordered_set<TBGraphConfig> displayed_tbgraph_configs;
         for (auto const &input_tensor_idx :
              dim_strategy.get_customized_input_cand_idx(all_tensors)) {
           Order order(input_tensor_idx, static_cast<int>(op_type));
@@ -190,6 +191,17 @@ void KernelGraphGenerator::generate_next_operator(
                                                            grid_dim,
                                                            block_dim,
                                                            forloop_dim)) {
+                    {
+                      TBGraphConfig cfg{grid_dim,
+                                        block_dim,
+                                        input_map,
+                                        forloop_dim,
+                                        forloop_range};
+                      if (!contains(displayed_tbgraph_configs, cfg)) {
+                        cfg.show();
+                        displayed_tbgraph_configs.insert(cfg);
+                      }
+                    }
                     c.tb_graph = std::make_shared<threadblock::Graph>(
                         grid_dim,
                         block_dim,
@@ -254,7 +266,7 @@ void KernelGraphGenerator::generate_next_operator(
       }
     }
 
-    if (c.tb_graph->operators.size() >= MAX_NUM_THREADBLOCK_GRAPH_OP) {
+    if (c.tb_graph->operators.size() >= config.max_num_threadblock_graph_op) {
       return;
     }
 
@@ -315,7 +327,7 @@ bool KernelGraphGenerator::create_threadblock_outputs(
     }
   }
 
-  if (output_tensors.size() > MAX_NUM_THREADBLOCK_OUTPUT) {
+  if (output_tensors.size() > config.max_num_threadblock_graph_outputs) {
     return false;
   }
 

@@ -86,6 +86,18 @@ public:
   std::shared_ptr<AlgebraicPattern> a;
 };
 
+// Note(@Mengdi): Replace it with Sqr and Sqrt once we have related algebraic
+// transformation
+class RMS : public AlgebraicPattern {
+public:
+  RMS(int red_deg, std::shared_ptr<AlgebraicPattern> elems);
+  z3::expr to_z3(z3::context &c,
+                 std::unordered_set<std::string> &all_variables) const override;
+  std::string to_string() const override;
+  int red_deg;
+  std::shared_ptr<AlgebraicPattern> elems;
+};
+
 class Red : public AlgebraicPattern {
 public:
   Red(int red_deg, std::shared_ptr<AlgebraicPattern> summand);

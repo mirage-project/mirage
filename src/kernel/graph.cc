@@ -42,9 +42,9 @@ size_t Graph::pair_hash::operator()(std::pair<int, int> const &p) const {
   return h1;
 }
 
-int Graph::get_input_dtensors(DTensor ** inputs) {
+int Graph::get_input_dtensors(DTensor **inputs) {
   int num_inputs = 0;
-  for (const auto& op : this->operators) {
+  for (auto const &op : this->operators) {
     if (op->op_type == mirage::type::KN_INPUT_OP) {
       assert(op->output_tensors.size() == 1);
       inputs[num_inputs++] = &op->output_tensors[0];
@@ -198,8 +198,8 @@ void from_json(json const &j, Graph &g) {
         jop.at("input_tensors")[0].at("guid").get_to(guidA);
         jop.at("input_tensors")[1].at("guid").get_to(guidB);
         jop.at("output_tensors")[0].at("guid").get_to(guidO);
-        DTensor const &output =
-            g.elementbinary(get_tensor_from_guid(guidA), get_tensor_from_guid(guidB), op_type);
+        DTensor const &output = g.elementbinary(
+            get_tensor_from_guid(guidA), get_tensor_from_guid(guidB), op_type);
         guid_mapping[output.guid] = guidO;
         break;
       }
