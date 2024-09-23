@@ -48,6 +48,7 @@ bool is_unary(type::KNOperatorType op) {
       type::KNOperatorType::KN_REDUCTION_2_OP,
       type::KNOperatorType::KN_EXP_OP,
       type::KNOperatorType::KN_SILU_OP,
+      type::KNOperatorType::KN_RMS_NORM_OP,
   };
   return contains(true_values, op);
 }
@@ -159,7 +160,8 @@ std::shared_ptr<AlgebraicPattern>
           opd);
     }
     case type::TBOperatorType::TB_FORLOOP_ACCUM_RED_LD_RMS_OP: {
-      assert(false && "TBD");
+      return std::make_shared<RMS>(
+          forloop_range * tensor.dim[tensor.num_dims - 1], opd);
     }
     default:
       assert(false);

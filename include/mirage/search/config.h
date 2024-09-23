@@ -6,6 +6,7 @@
 #include "mirage/kernel/graph.h"
 #include "mirage/threadblock/graph.h"
 #include "mirage/type.h"
+#include "mirage/utils/hash_utils.h"
 
 namespace mirage {
 namespace search {
@@ -33,7 +34,8 @@ struct GeneratorConfig {
   std::vector<int> fmap_to_explore;
   std::vector<int> frange_to_explore;
   int reduction_dimx;
-  bool randomized_branches; // Only for developers to tune the search performance
+  bool
+      randomized_branches; // Only for developers to tune the search performance
   bool _enable_attention_specific_optimization;
   bool _enable_concat_matmul_transformation;
 
@@ -64,5 +66,24 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(GeneratorConfig,
                                    _enable_attention_specific_optimization,
                                    _enable_concat_matmul_transformation);
 
+struct TBGraphConfig {
+  dim3 grid_dim, block_dim;
+  std::vector<int3> imaps;
+  std::vector<int> fmaps;
+  int frange;
+
+  bool operator==(const TBGraphConfig &other) const;
+  void show() const;
+};
+
 } // namespace search
 } // namespace mirage
+
+namespace std {
+
+template <>
+struct hash<mirage::search::TBGraphConfig> {
+  size_t operator()(mirage::search::TBGraphConfig const &config) const;
+};
+
+} // namespace std

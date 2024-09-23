@@ -1,4 +1,5 @@
 #include "mirage/search/irange.h"
+#include "mirage/kernel/rms_norm.h"
 #include "mirage/utils/containers.h"
 
 #include <iostream>
@@ -324,6 +325,20 @@ IKNRange forward_propagate(IKNRange const &range,
           range.range_set.extend_dim(dim).truncate(op.output_tensors[0]));
       break;
     }
+    case type::KNOperatorType::KN_RMS_NORM_OP: {
+      int num_norm_dims = 0, s = 1;
+      ret = range;
+      while (s < static_cast<kernel::KNRMSNormOp const&>(op).normalized_size) {
+        num_norm_dims++;
+        s *= op.output_tensors[0]
+                 .dim[op.output_tensors[0].num_dims - num_norm_dims];
+        ret = IKNRange(
+            ret.range_set
+                .extend_dim(op.output_tensors[0].num_dims - num_norm_dims));
+      }
+      ret = IKNRange(ret.range_set.truncate(op.output_tensors[0]));
+      break;
+    }
     default:
       assert(false && "Invalid operator type");
   }
@@ -370,6 +385,20 @@ IKNRange backward_propagate(IKNRange const &knrange,
       int dim = op.op_type - type::KNOperatorType::KN_REDUCTION_0_OP;
       ret = IKNRange(knrange.range_set.extend_dim(dim).truncate(
           op.input_tensors[opd_idx]));
+      break;
+    }
+    case type::KNOperatorType::KN_RMS_NORM_OP: {
+      int num_norm_dims = 0, s = 1;
+      ret = knrange;
+      while (s < static_cast<kernel::KNRMSNormOp const&>(op).normalized_size) {
+        num_norm_dims++;
+        s *= op.output_tensors[0]
+                 .dim[op.output_tensors[0].num_dims - num_norm_dims];
+        ret = IKNRange(
+            ret.range_set
+                .extend_dim(op.output_tensors[0].num_dims - num_norm_dims));
+      }
+      ret = IKNRange(ret.range_set.truncate(op.output_tensors[0]));
       break;
     }
 

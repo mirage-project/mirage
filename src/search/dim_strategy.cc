@@ -108,6 +108,7 @@ std::vector<dim3>
     DimStrategy::get_block_dim_cand(std::vector<DTensor> const &tensors,
                                     dim3 grid_dim) {
   std::vector<dim3> cands = config.block_dim_to_explore;
+  cands.push_back({128, 1, 1});
   if (config.randomized_branches) {
     std::random_shuffle(cands.begin(), cands.end());
   }
@@ -293,7 +294,7 @@ std::vector<std::vector<int>> DimStrategy::get_forloop_dim_cand(
   if (!config.fmap_to_explore.empty()) {
     fmap_to_explore = config.fmap_to_explore;
   }
-  generate_forloop_dim(input_tensors, config.fmap_to_explore, {}, results);
+  generate_forloop_dim(input_tensors, fmap_to_explore, {}, results);
   if (config.randomized_branches) {
     std::random_shuffle(results.begin(), results.end());
   }

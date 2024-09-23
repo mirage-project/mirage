@@ -1,4 +1,5 @@
 #include "mirage/search/pattern_eval.h"
+#include "mirage/kernel/rms_norm.h"
 #include "mirage/search/op_utils.h"
 
 namespace mirage {
@@ -37,6 +38,15 @@ void pattern_eval(
       patterns.insert({op->output_tensors[0].guid,
                        std::make_shared<Var>("v_" + std::to_string(input_id))});
       input_id++;
+    } else if (op->op_type == type::KNOperatorType::KN_RMS_NORM_OP) {
+      std::shared_ptr<AlgebraicPattern> input_pattern =
+          patterns.at(op->input_tensors[0].guid);
+      std::shared_ptr<AlgebraicPattern> denominator_pattern = std::make_shared<RMS>(
+          static_cast<kernel::KNRMSNormOp *>(op)->normalized_size,
+          input_pattern);
+      std::shared_ptr<AlgebraicPattern> output_pattern = std::make_shared<Div>(
+          input_pattern, denominator_pattern);
+      patterns.insert({op->output_tensors[0].guid, output_pattern});
     } else if (op->op_type != type::KNOperatorType::KN_CUSTOMIZED_OP) {
       std::vector<std::shared_ptr<AlgebraicPattern>> input_patterns;
       for (auto const &input_tensor : op->input_tensors) {
@@ -53,5 +63,5 @@ void pattern_eval(
   }
 }
 
-}  // namespace search
-}  // namespace mirage
+} // namespace search
+} // namespace mirage

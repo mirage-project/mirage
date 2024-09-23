@@ -166,6 +166,7 @@ void KernelGraphGenerator::generate_next_operator(
                              *c.kn_graph) >= config.max_num_threadblock_graphs) {
           continue;
         }
+        static std::unordered_set<TBGraphConfig> displayed_tbgraph_configs;
         for (auto const &input_tensor_idx :
              dim_strategy.get_customized_input_cand_idx(all_tensors)) {
           Order order(input_tensor_idx, static_cast<int>(op_type));
@@ -189,6 +190,13 @@ void KernelGraphGenerator::generate_next_operator(
                                                            grid_dim,
                                                            block_dim,
                                                            forloop_dim)) {
+                    {
+                      TBGraphConfig cfg{grid_dim, block_dim, input_map, forloop_dim, forloop_range};
+                      if (!contains(displayed_tbgraph_configs, cfg)) {
+                        cfg.show();
+                        displayed_tbgraph_configs.insert(cfg);
+                      }
+                    }
                     c.tb_graph = std::make_shared<threadblock::Graph>(
                         grid_dim,
                         block_dim,

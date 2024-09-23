@@ -31,6 +31,7 @@ GeneratorConfig GeneratorConfig::get_default_config() {
           type::TB_FORLOOP_ACCUM_RED_LD_SUM_OP,
           type::TB_FORLOOP_ACCUM_RED_LD_MEAN_OP,
           type::TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP,
+          type::TB_FORLOOP_ACCUM_RED_LD_RMS_OP,
       } /* tbop_to_explore */,
       {} /* imap_to_explore*/,
       {} /* imap_comb_to_explore */,
@@ -38,7 +39,11 @@ GeneratorConfig GeneratorConfig::get_default_config() {
       {} /* grid_dim_to_explore*/,
       {} /* block_dim_to_explore */,
       {} /* fmap_to_explore */,
-      {4, 16, 64} /* frange_to_explore */,
+      {
+          4,
+          16,
+          64,
+      } /* frange_to_explore */,
       64 /* reduction_dimx */,
       false /* enable_attention_specific_optimization */,
       false /* enable_concat_matmul_transformation */,
@@ -92,5 +97,41 @@ void GeneratorConfig::show() const {
   printf("\n");
 }
 
+bool TBGraphConfig::operator==(TBGraphConfig const &other) const {
+  return grid_dim == other.grid_dim && block_dim == other.block_dim &&
+         imaps == other.imaps && fmaps == other.fmaps && frange == other.frange;
+}
+
+void TBGraphConfig::show() const {
+  printf("========== Threadblock Graph Configuration ==========\n");
+  printf("  grid dim: (%d, %d, %d)\n", grid_dim.x, grid_dim.y, grid_dim.z);
+  printf("  block dim: (%d, %d, %d)\n", block_dim.x, block_dim.y, block_dim.z);
+  printf("  imaps:\n");
+  for (auto const &imap : imaps) {
+    printf("    (%d, %d, %d)\n", imap.x, imap.y, imap.z);
+  }
+  printf("  fmaps:");
+  for (auto const &fmap : fmaps) {
+    printf("%d ", fmap);
+  }
+  printf("\n");
+  printf("  frange: %d\n", frange);
+}
+
 } // namespace search
 } // namespace mirage
+
+namespace std {
+
+size_t hash<mirage::search::TBGraphConfig>::operator()(
+    mirage::search::TBGraphConfig const &config) const {
+  size_t hash = 0;
+  hash_combine(hash, config.grid_dim);
+  hash_combine(hash, config.block_dim);
+  hash_combine(hash, config.imaps);
+  hash_combine(hash, config.fmaps);
+  hash_combine(hash, config.frange);
+  return hash;
+}
+
+} // namespace std
