@@ -2,9 +2,17 @@ import mirage as mi
 import numpy as np
 import torch
 
+silu = torch.nn.SiLU()
+#@torch.compile
+def torch_gated_mlp(X, W1, W2):
+    D = torch.matmul(X, W1)
+    E = torch.matmul(X, W2)
+    O = torch.mul(silu(D), E)
+    return O
+
 if __name__ == "__main__":
     graph = mi.new_kernel_graph()
-    X = graph.new_input(dims=(8, 4096), dtype=mi.float16)
+    X = graph.new_input(dims=(16, 4096), dtype=mi.float16)
     W1 = graph.new_input(dims=(4096, 4096), dtype=mi.float16)
     W2 = graph.new_input(dims=(4096, 4096), dtype=mi.float16)
     tb_graph = mi.new_threadblock_graph(grid_dim=(64,1,1), block_dim=(128,1,1), forloop_range=32, reduction_dimx=64)
@@ -21,7 +29,7 @@ if __name__ == "__main__":
     O = graph.customized([X, W1, W2], tb_graph)
     
     input_tensors = [
-        torch.randn(8, 4096, dtype=torch.float16, device='cuda:0'),
+        torch.randn(16, 4096, dtype=torch.float16, device='cuda:0'),
         torch.randn(4096, 4096, dtype=torch.float16, device='cuda:0'),
         torch.randn(4096, 4096, dtype=torch.float16, device='cuda:0')
     ]
@@ -33,9 +41,7 @@ if __name__ == "__main__":
     # warm up runs
     for _ in range(16):
         outputs = graph(inputs=input_tensors)
-        D = torch.matmul(input_tensors[0], input_tensors[1])
-        E = torch.matmul(input_tensors[0], input_tensors[2])
-        O = torch.mul(silu(D), E)
+        #torch_gated_mlp(input_tensors[0], input_tensors[1], input_tensors[2])
 
     torch.cuda.synchronize()
 
@@ -45,10 +51,7 @@ if __name__ == "__main__":
     starter.record()
     for rep in range(repetitions):
         outputs = graph(inputs=input_tensors)
-        #D = torch.matmul(input_tensors[0], input_tensors[1])
-        #E = torch.matmul(input_tensors[0], input_tensors[2])
-        #O = torch.mul(silu(D), E)
-        #timings[rep] = curr_time
+        #torch_gated_mlp(input_tensors[0], input_tensors[1], input_tensors[2])
     ender.record()
     torch.cuda.synchronize()
     curr_time = starter.elapsed_time(ender)

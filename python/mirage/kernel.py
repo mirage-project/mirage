@@ -85,7 +85,7 @@ PyMODINIT_FUNC PyInit___mirage_launcher(void) {
 def gen_empty_tensor(alloc_size, shape, stride, device, dtype=torch.float16):
     return torch.empty(alloc_size, dtype=dtype, device=device).as_strided(shape, stride)
 
-class KNGraph:  
+class KNGraph:
     def __init__(self, graph):  
         self.cygraph = graph
         
