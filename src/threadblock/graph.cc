@@ -22,6 +22,7 @@
 #include "mirage/threadblock/serializer/matmul_serializer.h"
 #include "mirage/threadblock/serializer/output_saver_serializer.h"
 #include "mirage/threadblock/serializer/reduction_serializer.h"
+#include "mirage/threadblock/serializer/rms_norm_serializer.h"
 #include "mirage/utils/hash_utils.h"
 
 namespace mirage {
@@ -99,15 +100,20 @@ size_t Graph::calculate_shared_memory_usage(TBOperator *new_op) {
       case mirage::type::TB_INPUT_OP:
       case mirage::type::TB_OUTPUT_OP:
       case mirage::type::TB_MATMUL_OP:
+      // Element-wise binary
       case mirage::type::TB_DIV_OP:
       case mirage::type::TB_ADD_OP:
       case mirage::type::TB_MUL_OP:
+      // Reduction
       case mirage::type::TB_REDUCTION_0_OP:
       case mirage::type::TB_REDUCTION_1_OP:
       case mirage::type::TB_REDUCTION_2_OP:
       case mirage::type::TB_REDUCTION_0_TO_DIMX_OP:
       case mirage::type::TB_REDUCTION_1_TO_DIMX_OP:
       case mirage::type::TB_REDUCTION_2_TO_DIMX_OP:
+      // Normalization
+      case mirage::type::TB_RMS_NORM_OP:
+      // Concat
       case mirage::type::TB_CONCAT_0_OP:
       case mirage::type::TB_CONCAT_1_OP:
       case mirage::type::TB_CONCAT_2_OP: {
@@ -116,11 +122,13 @@ size_t Graph::calculate_shared_memory_usage(TBOperator *new_op) {
         }
         break;
       }
+      // Element-wise unary
       case mirage::type::TB_EXP_OP:
       case mirage::type::TB_SQUARE_OP:
       case mirage::type::TB_SQRT_OP:
       case mirage::type::TB_SILU_OP:
       case mirage::type::TB_MUL_SCALAR_OP:
+      // Forloop accumulator
       case mirage::type::TB_FORLOOP_ACCUM_NO_RED_OP:
       case mirage::type::TB_FORLOOP_ACCUM_RED_LD_SUM_OP:
       case mirage::type::TB_FORLOOP_ACCUM_RED_LD_MEAN_OP:
@@ -540,6 +548,23 @@ NewKernelParams Graph::get_new_kernel_params(bool fingerprint) const {
             output.smem_offset);
         break;
       }
+      case mirage::type::TB_RMS_NORM_OP: {
+        assert(operators[i]->input_tensors.size() == 1);
+        assert(operators[i]->output_tensors.size() == 1);
+        mirage::threadblock::STensor input = operators[i]->input_tensors[0];
+        mirage::threadblock::STensor output = operators[i]->output_tensors[0];
+        int norm_size = output.dim[output.num_dims-1];
+	printf("norm_size(%d) num_elements(%d)\n", norm_size, (int)output.num_elements());
+        assert(input.num_elements() == output.num_elements());
+        mirage::threadblock::serialize_rms_norm_op_parameters(
+            params.parameters,
+            params.num_parameters,
+            (int)output.num_elements(),
+            norm_size,
+            input.smem_offset,
+            output.smem_offset);
+        break;
+      }
       case mirage::type::TB_CONCAT_0_OP:
       case mirage::type::TB_CONCAT_1_OP:
       case mirage::type::TB_CONCAT_2_OP: {
@@ -579,7 +604,7 @@ NewKernelParams Graph::get_new_kernel_params(bool fingerprint) const {
         assert(false && "Unsupported TB operator");
       }
     } // switch
-  } // for-loop
+  }   // for-loop
   // Our serializer assumes that input loaders are the first operators
   // and that output savers are the last operators
   for (int i = 0; i < params.num_dmem_inputs; i++) {

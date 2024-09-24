@@ -204,9 +204,11 @@ Transpiler::Transpiler(kernel::Graph const *graph,
               assert(bop->output_tensors.size() == 1);
               threadblock::STensor st = stensor_inputs[0];
               st = tbg->square(st);
+              size_t normalization_factor =
+                  st.dim[st.num_dims - 1] * customized_op->bgraph.forloop_range;
+              st = tbg->mul_scalar(st, (1.0f / normalization_factor));
               st = tbg->forloop_accum(st, TB_FORLOOP_ACCUM_NO_RED_OP);
-              st = tbg->mul_scalar(st, (1.0f / st.dim[st.num_dims - 1]));
-              // st = tbg->reduction(st, st.num_dims - 1);
+              st = tbg->reduction(st, st.num_dims - 1);
               st = tbg->sqrt(st);
               stensor_mapping[bop->output_tensors[0].guid] = st;
               break;
@@ -217,6 +219,17 @@ Transpiler::Transpiler(kernel::Graph const *graph,
               threadblock::STensor st = tbg->forloop_accum(
                   stensor_inputs[0], TB_FORLOOP_ACCUM_NO_RED_OP);
               st = tbg->reduction_to_dimx(st, st.num_dims - 1);
+              stensor_mapping[bop->output_tensors[0].guid] = st;
+              break;
+            }
+            case TB_RMS_NORM_OP: {
+              assert(stensor_inputs.size() == 1);
+              threadblock::STensor st = stensor_inputs[0];
+              st = tbg->square(st);
+              st = tbg->mul_scalar(st, (1.0f / st.dim[st.num_dims - 1]));
+              // st = tbg->reduction(st, st.num_dims - 1);
+              st = tbg->sqrt(st);
+              st = tbg->div(stensor_inputs[0], st);
               stensor_mapping[bop->output_tensors[0].guid] = st;
               break;
             }
@@ -248,7 +261,9 @@ Transpiler::Transpiler(kernel::Graph const *graph,
     }
   }
 
-  // Make sure there is no non-default forloop accum tb operators in g
+  // Check the following:
+  // 1. there is no non-default forloop accum tb operators in g
+  // 2. there is no threadblock rms_norm operators in g (should be decomposed) 
   for (auto const &op : g->operators) {
     if (op->op_type == KN_CUSTOMIZED_OP) {
       kernel::KNCustomizedOp *customized_op =
@@ -257,6 +272,9 @@ Transpiler::Transpiler(kernel::Graph const *graph,
         if (bop->op_type >= TB_FORLOOP_ACCUM_FIRST_OP &&
             bop->op_type <= TB_FORLOOP_ACCUM_LAST_OP) {
           assert(bop->op_type == TB_FORLOOP_ACCUM_NO_RED_OP);
+        }
+        if (bop->op_type == TB_RMS_NORM_OP) {
+          assert(false);
         }
       }
     }

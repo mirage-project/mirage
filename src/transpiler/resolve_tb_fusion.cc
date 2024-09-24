@@ -32,12 +32,13 @@ void Transpiler::resolve_tb_fusion() {
         num_consumers[input.guid] += 1;
       }
     }
-    // Currently we only fuse elementwise unary operators (exp / accum) with
+    // Currently we only fuse elementwise unary operators and 
+    // forloop_accum_no_red with
     // the previous operator, when the output of the previous operator has only
     // one consumer
     for (tb::TBOperator *const op : tb_graph.operators) {
-      if ((op->op_type == type::TB_EXP_OP ||
-           op->op_type == type::TB_FORLOOP_ACCUM_NO_RED_OP)) {
+      if ((type::is_threadblock_element_unary(op->op_type)) ||
+          (op->op_type == type::TB_FORLOOP_ACCUM_NO_RED_OP)) {
         tb::STensor const &input0 = op->input_tensors.at(0);
         tb::TBOperator *prev_op = input0.owner_op;
         // Don't fuse with an input op with forloop_dim = -1
@@ -45,10 +46,10 @@ void Transpiler::resolve_tb_fusion() {
             dynamic_cast<tb::TBInputOp *>(prev_op)->forloop_dim == -1) {
           continue;
         }
-        // Do not fuse with FORLOOP_ACCUM_NO_RED_OP since the accum is performed
-        // within the loop body while the current operator is outside the loop
-        // Do not fuse with input op since we may perform chunked or async
-        // input ops
+        // Do not fuse with FORLOOP_ACCUM_NO_RED_OP since the accum is
+        // performed within the loop body while the current operator is
+        // outside the loop Do not fuse with input op since we may perform
+        // chunked or async input ops
         if (num_consumers.at(input0.guid) == 1 &&
             prev_op->op_type != type::TB_FORLOOP_ACCUM_NO_RED_OP &&
             prev_op->op_type != type::TB_INPUT_OP) {

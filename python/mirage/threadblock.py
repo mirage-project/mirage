@@ -37,6 +37,9 @@ class TBGraph:
     def reduction(self, A: STensor, dim: int):
         return self.cygraph.reduction(A, dim)
 
+    def rms_norm(self, A: STensor):
+        return self.cygraph.rms_norm(A)
+
     def concat(self, A: STensor, B: STensor, dim: int):
         return self.cygraph.concat(A, B, dim)
 

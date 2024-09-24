@@ -5,172 +5,62 @@ namespace search {
 
 GeneratorConfig GeneratorConfig::get_default_config() {
   return {
-      {type::KN_MATMUL_OP,
-       type::KN_REDUCTION_1_OP,
-       type::KN_REDUCTION_2_OP,
-       type::KN_EXP_OP,
-       type::KN_DIV_OP,
-       type::KN_CUSTOMIZED_OP},
-      {type::TB_MATMUL_OP,
-       type::TB_REDUCTION_1_OP,
-       type::TB_REDUCTION_2_OP,
-       type::TB_EXP_OP,
-       type::TB_DIV_OP,
-       type::TB_REDUCTION_1_TO_DIMX_OP,
-       type::TB_REDUCTION_2_TO_DIMX_OP},
-      {int3{0, 1, -1},
-       int3{0, 2, -1},
-       int3{0, -1, -1},
-       int3{0, -1, 1}} /* imap_to_explore*/,
-      {} /* imap_comb_to_explore */,
-      {int3{0, 1, -1},
-       int3{0, 2, -1},
-       int3{0, -1, -1},
-       int3{0, 2, 1}} /* omap_to_explore */,
-      {dim3{16, 1, 1}, dim3{16, 2, 1}, dim3{16, 4, 1}} /* grid_dim_to_explore*/,
-      {dim3{128, 1, 1}} /* block_dim_to_explore */,
-      {-1, 1, 2} /* fmap_to_explore */,
-      {1, 4, 8, 16} /* frange_to_explore */,
+      9 /* max_num_threadblock_graph_op */,
+      5 /* max_num_kernel_graph_op */,
+      1 /* max_num_threadblock_graphs */,
+      3 /* max_num_threadblock_graph_inputs */,
+      2 /* max_num_threadblock_graph_outputs */,
+      8 /* search_thread */,
       {
-          layout::SmemRowMajor,
-          layout::SmemColumnMajor,
-          layout::SmemRowMajorTensorOpMultiplicand_Crosswise16,
-          layout::SmemRowMajorTensorOpMultiplicand_Crosswise32,
-          layout::SmemRowMajorTensorOpMultiplicand_Crosswise64,
-          layout::SmemColumnMajorTensorOpMultiplicand_Crosswise16,
-          layout::SmemColumnMajorTensorOpMultiplicand_Crosswise32,
-          layout::SmemColumnMajorTensorOpMultiplicand_Crosswise64,
-      } /* smem_layout_to_explore*/,
-      64 /* reduction_dimx */};
+          type::KN_MATMUL_OP,
+          type::KN_EXP_OP,
+          type::KN_SILU_OP,
+          type::KN_ADD_OP,
+          type::KN_MUL_OP,
+          type::KN_DIV_OP,
+          type::KN_CUSTOMIZED_OP,
+      } /* knop_to_explore */,
+      {
+          type::TB_MATMUL_OP,
+          type::TB_EXP_OP,
+          type::TB_SILU_OP,
+          type::TB_ADD_OP,
+          type::TB_MUL_OP,
+          type::TB_DIV_OP,
+          type::TB_FORLOOP_ACCUM_NO_RED_OP,
+          type::TB_FORLOOP_ACCUM_RED_LD_SUM_OP,
+          type::TB_FORLOOP_ACCUM_RED_LD_MEAN_OP,
+          type::TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP,
+          type::TB_FORLOOP_ACCUM_RED_LD_RMS_OP,
+      } /* tbop_to_explore */,
+      {} /* imap_to_explore*/,
+      {} /* imap_comb_to_explore */,
+      {} /* omap_to_explore */,
+      {} /* grid_dim_to_explore*/,
+      {} /* block_dim_to_explore */,
+      {} /* fmap_to_explore */,
+      {
+          4,
+          16,
+          64,
+      } /* frange_to_explore */,
+      64 /* reduction_dimx */,
+      false /* enable_attention_specific_optimization */,
+      false /* enable_concat_matmul_transformation */,
+      false /* randomized_branches */,
+  };
 }
 
-GeneratorConfig GeneratorConfig::get_attention_default_config() {
-  return {{
-              type::KN_MATMUL_OP,
-              type::KN_REDUCTION_0_OP,
-              type::KN_REDUCTION_1_OP,
-              type::KN_REDUCTION_2_OP,
-              type::KN_EXP_OP,
-              type::KN_DIV_OP,
-              type::KN_CUSTOMIZED_OP,
-          },
-          {
-              type::TB_MATMUL_OP,
-              type::TB_EXP_OP,
-              type::TB_DIV_OP,
-              type::TB_FORLOOP_ACCUM_NO_RED_OP,
-              type::TB_FORLOOP_ACCUM_RED_LD_SUM_OP,
-              type::TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP,
-          },
-          {
-              {0, -1, 1},
-              {0, 2, -1},
-              {0, 1, -1},
-              {0, -1, -1},
-              {0, 2, -1},
-              {0, 1, -1},
-          } /* imap_to_explore */,
-          {{{0, -1, 1}, {0, 2, -1}, {0, 1, -1}},
-           {{0, -1, -1}, {0, 2, -1}, {0, 1, -1}},
-           {{0, -1, -1}, {0, -1, -1}},
-           {{0, 1, -1}, {0, 1, -1}}} /* imap_comb_to_explore*/,
-          {
-              {0, 1, -1},
-              {0, 2, 1},
-              {0, 2, -1},
-              {0, -1, -1},
-              {-1, 2, 1},
-              {-1, 1, -1},
-              {-1, 2, -1},
-              {-1, -1, -1},
-          } /* omap_to_explore */,
-          {{16, 1, 1}, {16, 2, 1}} /* grid_dim_to_explore*/,
-          {{128, 1, 1}} /* block_dim_to_explore */,
-          {-1, 1, 2} /* fmap_to_explore */,
-          {4, 8} /* frange_to_explore */,
-          {
-              layout::SmemRowMajor,
-              layout::SmemColumnMajor,
-              layout::SmemRowMajorTensorOpMultiplicand_Crosswise16,
-              layout::SmemRowMajorTensorOpMultiplicand_Crosswise32,
-              layout::SmemRowMajorTensorOpMultiplicand_Crosswise64,
-              layout::SmemColumnMajorTensorOpMultiplicand_Crosswise16,
-              layout::SmemColumnMajorTensorOpMultiplicand_Crosswise32,
-              layout::SmemColumnMajorTensorOpMultiplicand_Crosswise64,
-          } /* smem_layout_to_explore*/,
-          64 /* reduction_dimx */};
+void GeneratorConfig::enable_attention_specific_optimization() {
+  _enable_attention_specific_optimization = true;
+  max_num_threadblock_graphs = 2;
 }
 
-GeneratorConfig GeneratorConfig::get_mlp_default_config() {
-  return {{type::KN_MATMUL_OP,
-           type::KN_EXP_OP,
-           type::KN_DIV_OP,
-           type::KN_ADD_OP,
-           type::KN_MUL_OP,
-           type::KN_SILU_OP,
-           type::KN_CUSTOMIZED_OP},
-          {
-              type::TB_MATMUL_OP,
-              type::TB_EXP_OP,
-              type::TB_DIV_OP,
-              type::TB_SILU_OP,
-              type::TB_MUL_OP,
-              type::TB_ADD_OP,
-              type::TB_FORLOOP_ACCUM_NO_RED_OP,
-          },
-          {{0, -1, -1}, {1, -1, -1}, {-1, -1, -1}} /* imap_to_explore */,
-          {} /* imap_comb_to_explore*/,
-          {{1, -1, -1}} /* omap_to_explore */,
-          {{16, 1, 1}, {16, 2, 1}} /* grid_dim_to_explore*/,
-          {{128, 1, 1}} /* block_dim_to_explore */,
-          {-1, 0, 1} /* fmap_to_explore */,
-          {4, 16, 64} /* frange_to_explore */,
-          {
-              layout::SmemRowMajor,
-              layout::SmemColumnMajor,
-              layout::SmemRowMajorTensorOpMultiplicand_Crosswise16,
-              layout::SmemRowMajorTensorOpMultiplicand_Crosswise32,
-              layout::SmemRowMajorTensorOpMultiplicand_Crosswise64,
-              layout::SmemColumnMajorTensorOpMultiplicand_Crosswise16,
-              layout::SmemColumnMajorTensorOpMultiplicand_Crosswise32,
-              layout::SmemColumnMajorTensorOpMultiplicand_Crosswise64,
-          } /* smem_layout_to_explore*/,
-          64 /* reduction_dimx */};
+void GeneratorConfig::enable_concat_matmul_transformation() {
+  _enable_concat_matmul_transformation = true;
 }
 
-GeneratorConfig GeneratorConfig::get_lora_default_config() {
-  return {{
-              type::KN_MATMUL_OP,
-              type::KN_REDUCTION_1_OP,
-              type::KN_CUSTOMIZED_OP,
-          },
-          {
-              type::TB_MATMUL_OP,
-              type::TB_REDUCTION_1_OP,
-              type::TB_REDUCTION_1_TO_DIMX_OP,
-              type::TBOperatorType::TB_CONCAT_THEN_MATMUL_OP,
-          },
-          {{1, -1, -1}, {-1, -1, -1}} /* imap_to_explore */,
-          {} /* imap_comb_to_explore*/,
-          {{1, -1, -1}} /* omap_to_explore */,
-          {{128, 1, 1}} /* grid_dim_to_explore*/,
-          {{128, 1, 1}} /* block_dim_to_explore */,
-          {-1, 0, 1} /* fmap_to_explore */,
-          {2, 4} /* frange_to_explore */,
-          {
-              layout::SmemRowMajor,
-              layout::SmemColumnMajor,
-              layout::SmemRowMajorTensorOpMultiplicand_Crosswise16,
-              layout::SmemRowMajorTensorOpMultiplicand_Crosswise32,
-              layout::SmemRowMajorTensorOpMultiplicand_Crosswise64,
-              layout::SmemColumnMajorTensorOpMultiplicand_Crosswise16,
-              layout::SmemColumnMajorTensorOpMultiplicand_Crosswise32,
-              layout::SmemColumnMajorTensorOpMultiplicand_Crosswise64,
-          } /* smem_layout_to_explore*/,
-          64 /* reduction_dimx */};
-}
-
-void GeneratorConfig::print_config() const {
+void GeneratorConfig::show() const {
   printf("========== Search Configuration ==========\n");
   printf("  imaps to explore:\n");
   for (auto const &imap : imap_to_explore) {
@@ -207,5 +97,41 @@ void GeneratorConfig::print_config() const {
   printf("\n");
 }
 
+bool TBGraphConfig::operator==(TBGraphConfig const &other) const {
+  return grid_dim == other.grid_dim && block_dim == other.block_dim &&
+         imaps == other.imaps && fmaps == other.fmaps && frange == other.frange;
+}
+
+void TBGraphConfig::show() const {
+  printf("========== Threadblock Graph Configuration ==========\n");
+  printf("  grid dim: (%d, %d, %d)\n", grid_dim.x, grid_dim.y, grid_dim.z);
+  printf("  block dim: (%d, %d, %d)\n", block_dim.x, block_dim.y, block_dim.z);
+  printf("  imaps:\n");
+  for (auto const &imap : imaps) {
+    printf("    (%d, %d, %d)\n", imap.x, imap.y, imap.z);
+  }
+  printf("  fmaps:");
+  for (auto const &fmap : fmaps) {
+    printf("%d ", fmap);
+  }
+  printf("\n");
+  printf("  frange: %d\n", frange);
+}
+
 } // namespace search
 } // namespace mirage
+
+namespace std {
+
+size_t hash<mirage::search::TBGraphConfig>::operator()(
+    mirage::search::TBGraphConfig const &config) const {
+  size_t hash = 0;
+  hash_combine(hash, config.grid_dim);
+  hash_combine(hash, config.block_dim);
+  hash_combine(hash, config.imaps);
+  hash_combine(hash, config.fmaps);
+  hash_combine(hash, config.frange);
+  return hash;
+}
+
+} // namespace std

@@ -3,6 +3,7 @@
 #include "mirage/kernel/device_memory_manager.h"
 #include "mirage/search/dim_strategy.h"
 #include "mirage/search/op_utils.h"
+#include "mirage/search/pattern_eval.h"
 #include "mirage/utils/containers.h"
 #include "mirage/utils/json_utils.h"
 
@@ -13,88 +14,15 @@
 namespace mirage {
 namespace search {
 
-void pattern_eval(
-    threadblock::Graph const &g,
-    std::unordered_map<int64_t, std::shared_ptr<AlgebraicPattern>> &patterns) {
-  for (TBOperator *op : g.operators) {
-    if (op->op_type == type::TBOperatorType::TB_INPUT_OP) {
-      patterns.insert(
-          {op->output_tensors[0].guid,
-           patterns.at(
-               static_cast<threadblock::TBInputOp *>(op)->dtensor.guid)});
-    } else if (op->op_type == type::TBOperatorType::TB_OUTPUT_OP) {
-      patterns.insert({static_cast<threadblock::TBOutputOp *>(op)->dtensor.guid,
-                       patterns.at(op->input_tensors[0].guid)});
-    } else {
-      std::vector<std::shared_ptr<AlgebraicPattern>> input_patterns;
-      for (STensor const &input_tensor : op->input_tensors) {
-        input_patterns.push_back(patterns.at(input_tensor.guid));
-      }
-      patterns.insert(
-          {op->output_tensors[0].guid,
-           get_pattern(op->op_type, op->input_tensors, input_patterns)});
-    }
-  }
-}
-
-void pattern_eval(
-    kernel::Graph const &g,
-    std::unordered_map<int64_t, std::shared_ptr<AlgebraicPattern>> &patterns) {
-  int input_id = 0;
-  for (KNOperator *op : g.operators) {
-    if (op->op_type == type::KNOperatorType::KN_INPUT_OP) {
-      patterns.insert({op->output_tensors[0].guid,
-                       std::make_shared<Var>("v_" + std::to_string(input_id))});
-      input_id++;
-    } else if (op->op_type != type::KNOperatorType::KN_CUSTOMIZED_OP) {
-      std::vector<std::shared_ptr<AlgebraicPattern>> input_patterns;
-      for (DTensor const &input_tensor : op->input_tensors) {
-        assert(contains_key(patterns, input_tensor.guid));
-        input_patterns.push_back(patterns.at(input_tensor.guid));
-      }
-      patterns.insert(
-          {op->output_tensors[0].guid,
-           get_pattern(op->op_type, op->input_tensors, input_patterns)});
-    } else {
-      assert(op->op_type == type::KNOperatorType::KN_CUSTOMIZED_OP);
-      pattern_eval(static_cast<kernel::KNCustomizedOp *>(op)->bgraph, patterns);
-    }
-  }
-}
-
 KernelGraphGenerator::KernelGraphGenerator(
     kernel::Graph const &computation_graph,
     GeneratorConfig const &config,
     char const *filename)
-    : best_profile_result(ProfileResult::infinity()), config(config),
-      dim_strategy(DimStrategy(config)), filename(filename),
-      num_thread(std::min((int)std::thread::hardware_concurrency(),
-                          MAX_SEARCH_THREAD)),
-      timeout(1000), num_total_kernel_graphs(0), num_total_random_tests(0),
-      num_valid_kernel_graphs(0), num_total_states(0) {
+    : config(config), dim_strategy(DimStrategy(config)), filename(filename),
+      num_thread(config.search_thread), num_total_kernel_graphs(0),
+      num_total_random_tests(0), num_valid_kernel_graphs(0),
+      num_total_states(0) {
   preprocess(computation_graph);
-}
-
-int count_op(type::KNOperatorType op_type, kernel::Graph const &g) {
-  int counter = 0;
-  for (auto const &op : g.operators) {
-    if (op->op_type == op_type) {
-      ++counter;
-    }
-  }
-  return counter;
-}
-
-std::vector<std::vector<int>> get_matches(int num_outputs) {
-  std::vector<std::vector<int>> results;
-  std::vector<int> perm;
-  for (int i = 0; i < num_outputs; ++i) {
-    perm.push_back(i);
-  }
-  do {
-    results.push_back(perm);
-  } while (std::next_permutation(perm.begin(), perm.end()));
-  return results;
 }
 
 template <typename GraphType>
@@ -176,10 +104,15 @@ std::vector<typename GraphType::TensorType>
 
 void KernelGraphGenerator::generate_next_operator(
     SearchContext &c,
-    std::function<bool(kernel::Graph const &)> const &verify) {
+    std::function<bool(SearchContext const &)> const &verify,
+    std::vector<SerializedSearchContext> &verified) {
   ++num_total_states;
   if (num_total_states % 1000 == 1) {
     printf("Total states explored: %d.\n", num_total_states.load());
+  }
+  if (verify(c)) {
+    verified.push_back(SerializedSearchContext(c));
+    return;
   }
 
   std::unordered_map<int64_t, std::shared_ptr<AlgebraicPattern>>
@@ -191,11 +124,7 @@ void KernelGraphGenerator::generate_next_operator(
   if (c.level == SearchLevel::LV_KERNEL) {
     assert(c.tb_graph == nullptr);
     // Case K1: finish and verify the current graph
-    if (verify(*c.kn_graph)) {
-      c.generated_graphs.push_back(json(*c.kn_graph));
-      return;
-    }
-    if (c.kn_graph->operators.size() >= MAX_NUM_KERNEL_GRAPH_OP) {
+    if (c.kn_graph->operators.size() >= config.max_num_kernel_graph_op) {
       return;
     }
     std::vector<DTensor> all_tensors = get_all_tensors(*c.kn_graph);
@@ -225,7 +154,7 @@ void KernelGraphGenerator::generate_next_operator(
           if (new_op) {
             c.kn_graph->operators.push_back(new_op);
             if (check_range(init_ranges, target_ranges, *c.kn_graph)) {
-              generate_next_operator(c, verify);
+              generate_next_operator(c, verify, verified);
             }
             delete c.kn_graph->operators.back();
             c.kn_graph->operators.pop_back();
@@ -233,10 +162,12 @@ void KernelGraphGenerator::generate_next_operator(
         }
       } else {
         // Case K3: generate a graph-def kernel operator
-        if (count_op(type::KNOperatorType::KN_CUSTOMIZED_OP, *c.kn_graph) >=
-            MAX_NUM_THREADBLOCK) {
+        if (count_op_of_type(type::KNOperatorType::KN_CUSTOMIZED_OP,
+                             *c.kn_graph) >=
+            config.max_num_threadblock_graphs) {
           continue;
         }
+        static std::unordered_set<TBGraphConfig> displayed_tbgraph_configs;
         for (auto const &input_tensor_idx :
              dim_strategy.get_customized_input_cand_idx(all_tensors)) {
           Order order(input_tensor_idx, static_cast<int>(op_type));
@@ -260,6 +191,17 @@ void KernelGraphGenerator::generate_next_operator(
                                                            grid_dim,
                                                            block_dim,
                                                            forloop_dim)) {
+                    {
+                      TBGraphConfig cfg{grid_dim,
+                                        block_dim,
+                                        input_map,
+                                        forloop_dim,
+                                        forloop_range};
+                      if (!contains(displayed_tbgraph_configs, cfg)) {
+                        cfg.show();
+                        displayed_tbgraph_configs.insert(cfg);
+                      }
+                    }
                     c.tb_graph = std::make_shared<threadblock::Graph>(
                         grid_dim,
                         block_dim,
@@ -281,7 +223,7 @@ void KernelGraphGenerator::generate_next_operator(
                     }
                     if (input_created) {
                       c.level = SearchLevel::LV_THREADBLOCK;
-                      generate_next_operator(c, verify);
+                      generate_next_operator(c, verify, verified);
                       c.level = SearchLevel::LV_KERNEL;
                     }
                     c.tb_graph = nullptr;
@@ -311,7 +253,7 @@ void KernelGraphGenerator::generate_next_operator(
         std::shared_ptr<threadblock::Graph> tb_graph = c.tb_graph;
         c.tb_graph = nullptr;
         if (check_range(init_ranges, target_ranges, *c.kn_graph)) {
-          generate_next_operator(c, verify);
+          generate_next_operator(c, verify, verified);
         }
         c.tb_graph = tb_graph;
         c.level = SearchLevel::LV_THREADBLOCK;
@@ -324,7 +266,7 @@ void KernelGraphGenerator::generate_next_operator(
       }
     }
 
-    if (c.tb_graph->operators.size() >= MAX_NUM_THREADBLOCK_GRAPH_OP) {
+    if (c.tb_graph->operators.size() >= config.max_num_threadblock_graph_op) {
       return;
     }
 
@@ -356,7 +298,7 @@ void KernelGraphGenerator::generate_next_operator(
         };
         c.tb_graph->operators.push_back(new_op);
         if (check_range(init_ranges, target_ranges, *c.kn_graph, c.tb_graph)) {
-          generate_next_operator(c, verify);
+          generate_next_operator(c, verify, verified);
         }
         delete c.tb_graph->operators.back();
         c.tb_graph->operators.pop_back();
@@ -385,7 +327,7 @@ bool KernelGraphGenerator::create_threadblock_outputs(
     }
   }
 
-  if (output_tensors.size() > MAX_NUM_THREADBLOCK_OUTPUT) {
+  if (output_tensors.size() > config.max_num_threadblock_graph_outputs) {
     return false;
   }
 
@@ -406,20 +348,22 @@ bool KernelGraphGenerator::create_threadblock_outputs(
   return true;
 }
 
-void KernelGraphGenerator::search_from_graphs(
-    std::vector<json> const &kernel_graphs) {
-  for (auto const &kernel_graph : kernel_graphs) {
-    SearchContext c;
-    c.kn_graph = std::make_shared<kernel::Graph>();
-    c.level = SearchLevel::LV_KERNEL;
-    from_json(kernel_graph, *c.kn_graph);
+void KernelGraphGenerator::search_from(
+    std::vector<SerializedSearchContext> const &contexts) {
+  for (auto const &sc : contexts) {
+    SearchContext c = sc.deserialize();
+    std::vector<SerializedSearchContext> verified;
     generate_next_operator(
-        c, [this](kernel::Graph const &g) { return this->verify(g); });
+        c,
+        [this](SearchContext const &c) {
+          return c.level == SearchLevel::LV_KERNEL && this->verify(*c.kn_graph);
+        },
+        verified);
     {
       std::lock_guard<std::mutex> lock(generated_graphs_mutex);
-      generated_graphs.insert(generated_graphs.end(),
-                              c.generated_graphs.begin(),
-                              c.generated_graphs.end());
+      for (auto const &v : verified) {
+        generated_graphs.push_back(json(*v.deserialize().kn_graph));
+      }
     }
   }
 }
@@ -438,22 +382,26 @@ void KernelGraphGenerator::generate_kernel_graphs() {
 
   auto start_time = std::chrono::steady_clock::now();
 
-  generate_next_operator(c, [](kernel::Graph const &g) {
-    return count_op(type::KNOperatorType::KN_CUSTOMIZED_OP, g) >=
-           MAX_NUM_THREADBLOCK / 2;
-  });
+  std::vector<SerializedSearchContext> middle_states;
+  generate_next_operator(
+      c,
+      [this](SearchContext const &c) {
+        return c.tb_graph != nullptr || this->verify(*c.kn_graph);
+      },
+      middle_states);
   printf("[Search] First step finished. Time elapsed: %fsec\n",
          std::chrono::duration<double>(std::chrono::steady_clock::now() -
                                        start_time)
              .count());
-  std::vector<std::vector<json>> middle_states(num_thread);
-  for (size_t i = 0; i < c.generated_graphs.size(); ++i) {
-    middle_states[i % num_thread].push_back(c.generated_graphs[i]);
+  std::vector<std::vector<SerializedSearchContext>> split_middle_states(
+      num_thread);
+  for (size_t i = 0; i < middle_states.size(); ++i) {
+    split_middle_states[i % num_thread].push_back(middle_states[i]);
   }
   std::vector<std::thread> threads;
   for (int i = 0; i < num_thread; ++i) {
     threads.push_back(std::thread(
-        &KernelGraphGenerator::search_from_graphs, this, middle_states[i]));
+        &KernelGraphGenerator::search_from, this, split_middle_states[i]));
   }
   for (auto &thread : threads) {
     thread.join();
@@ -548,6 +496,18 @@ bool KernelGraphGenerator::verify(kernel::Graph const &g) {
     for (auto const &op : g.operators) {
       op->fingerprint();
     }
+
+    auto get_matches = [](int num_outputs) {
+      std::vector<std::vector<int>> results;
+      std::vector<int> perm;
+      for (int i = 0; i < num_outputs; ++i) {
+        perm.push_back(i);
+      }
+      do {
+        results.push_back(perm);
+      } while (std::next_permutation(perm.begin(), perm.end()));
+      return results;
+    };
 
     for (auto const &match : get_matches(outputs.size())) {
       if (have_same_fingerprint(outputs, match)) {
