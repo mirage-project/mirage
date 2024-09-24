@@ -9,7 +9,7 @@ if __name__ == "__main__":
     W2 = graph.new_input(dims=(4096, 4096), dtype=mi.float16)
     O1 = graph.matmul(X, W1)
     O2 = graph.matmul(X, W2)
-    # O1 = graph.silu(O1)
+    O1 = graph.silu(O1)
     O = graph.mul(O1, O2)
     input_tensors = [
         torch.randn(8, 4096, dtype=torch.float16, device='cuda:0'),
