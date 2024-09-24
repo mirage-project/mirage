@@ -116,7 +116,10 @@ class KNGraph:
       
     def div(self, A: DTensor, B: DTensor):
         return self.cygraph.div(A, B)
-    
+
+    def rms_norm(self, A: DTensor, normalized_shape: tuple):
+        return self.cygraph.rms_norm(A, normalized_shape)
+
     def customized(self, inputs: list[DTensor], bgraph: TBGraph) -> list[DTensor]:
         return self.cygraph.customized(inputs, bgraph.cygraph)
 
@@ -216,15 +219,15 @@ class KNGraph:
 
         # profile and use the best graph
         best_graph, best_perf = None, float('inf')
-        for g in all_graphs:
+        for idx, g in enumerate(all_graphs):
             dtensors = g.cygraph.get_input_dtensors()
             input_tensors = list()
             for t in dtensors:
                 dims = [t.dim(i) for i in range(t.num_dims)]
-                print("dims", dims)
                 input_tensors.append(torch.randn(dims, dtype=torch.float16, device='cuda:0'))
             starter = torch.cuda.Event(enable_timing=True)
             ender = torch.cuda.Event(enable_timing=True)
+            print("Transpiling muGraph {}...".format(idx))
             for _ in range(16):
                 g(inputs=input_tensors)
             torch.cuda.synchronize()
@@ -234,8 +237,7 @@ class KNGraph:
             ender.record()
             torch.cuda.synchronize()
             perf = starter.elapsed_time(ender) / 1000
-            print("perf = ", perf)
-            print(g)
+            print("Profiling muGraph {} performance (ms) = {}".format(idx, perf))
             if perf < best_perf:
                 best_graph, best_perf = g, perf
 
