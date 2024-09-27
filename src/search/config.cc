@@ -62,6 +62,12 @@ void GeneratorConfig::enable_concat_matmul_transformation() {
 
 void GeneratorConfig::show() const {
   printf("========== Search Configuration ==========\n");
+  printf("  max num threadblock graph op: %zu\n", max_num_threadblock_graph_op);
+  printf("  max num kernel_graph op: %zu\n", max_num_kernel_graph_op);
+  printf("  max num threadblock graphs: %zu\n", max_num_threadblock_graphs);
+  printf("  max num threadblock graph inputs: %zu\n", max_num_threadblock_graph_inputs);
+  printf("  max num threadblock graph outputs: %zu\n", max_num_threadblock_graph_outputs);
+  printf("  search_thread: %zu\n", search_thread);
   printf("  imaps to explore:\n");
   for (auto const &imap : imap_to_explore) {
     printf("    (%d, %d, %d)\n", imap.x, imap.y, imap.z);

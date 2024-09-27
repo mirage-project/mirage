@@ -369,8 +369,6 @@ void KernelGraphGenerator::search_from(
 }
 
 void KernelGraphGenerator::generate_kernel_graphs() {
-  printf("num_thread: %d\n", num_thread);
-
   SearchContext c;
   c.level = SearchLevel::LV_KERNEL;
   c.kn_graph = std::make_shared<kernel::Graph>();
