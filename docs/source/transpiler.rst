@@ -32,7 +32,7 @@ The “Transpiler” is a part of Mirage’s codebase (under
 takes a Mirage’s computational graph as input and returns the generated
 CUDA code. Here is an example of a piece of generated code:
 
-.. code:: cpp
+.. code-block:: cpp
 
     #define NUM_GPUS 1
     #define USE_NVSHMEM 0
@@ -575,7 +575,7 @@ kernel in the Runtime:
 If we are going to store the accumulator on register file, the program
 looks like this:
 
-.. code:: cpp
+.. code-block:: cpp
 
     auto t = get_mma_rc();
     for (...) {
@@ -586,7 +586,7 @@ looks like this:
 If we are going to store the accumulator in shared memory, the program
 looks like this:
 
-.. code:: cpp
+.. code-block:: cpp
 
     for (...) {
       auto t = get_mma_rc();
