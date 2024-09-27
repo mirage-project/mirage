@@ -1,4 +1,6 @@
 #include "mirage/search/dim_strategy.h"
+#include "mirage/config.h"
+#include "mirage/utils/containers.h"
 
 namespace mirage {
 namespace search {
@@ -28,7 +30,7 @@ std::vector<type::TBOperatorType> DimStrategy::get_tbop_cand() {
 std::vector<dim3>
     DimStrategy::get_grid_dim_cand(std::vector<DTensor> const &tensors) {
 
-  auto filter = [](std::vector<int> const &tips, int x) {
+  auto tip_filter = [](std::vector<int> const &tips, int x) {
     for (int tip : tips) {
       if (tip % x == 0) {
         return true;
@@ -40,7 +42,7 @@ std::vector<dim3>
   auto generate_1d_grids = [&](std::vector<int> const &tips) {
     std::vector<dim3> cands;
     for (size_t x = 4; x <= 128; x *= 2) {
-      if (filter(tips, x)) {
+      if (tip_filter(tips, x)) {
         cands.push_back({x, 1, 1});
       }
     }
@@ -49,8 +51,8 @@ std::vector<dim3>
 
   auto generate_2d_grids = [&](int x, std::vector<int> const &tips) {
     std::vector<dim3> cands;
-    for (size_t y = 1; y <= 64; y *= 2) {
-      if (filter(tips, y)) {
+    for (size_t y = 1; y <= 16; y *= 2) {
+      if (tip_filter(tips, y)) {
         cands.push_back({x, y, 1});
       }
     }
@@ -97,6 +99,9 @@ std::vector<dim3>
   }
 
   cands = deduplicate(cands);
+  cands = filter(cands, [](dim3 const &dim) {
+    return dim.x * dim.y * dim.z <= config::MAX_NUM_THREADBLOCKS_PER_KERNEL;
+  });
 
   if (config.randomized_branches) {
     std::random_shuffle(cands.begin(), cands.end());
@@ -215,13 +220,15 @@ std::vector<std::vector<int3>>
         tensors, grid_dim, config.imap_to_explore, {}, results);
   } else {
     std::vector<int3> imap_to_explore = {
-        {-1, -1, -1},
         {0, -1, -1},
         {0, -1, 1},
         {0, 1, -1},
         {0, 2, -1},
-        {1, -1, -1},
     };
+    if (!config._enable_attention_specific_optimization) {
+      imap_to_explore.push_back({-1, -1, -1});
+      imap_to_explore.push_back({1, -1, -1});
+    }
     generate_input_map_cand(tensors, grid_dim, imap_to_explore, {}, results);
   }
   if (config.randomized_branches) {
@@ -234,15 +241,19 @@ std::vector<int3> DimStrategy::get_output_map_cand(dim3 grid_dim) {
   std::vector<int3> results;
   std::vector<int3> omap_to_explore = config.omap_to_explore;
   omap_to_explore = vector_concat(omap_to_explore,
-                                  {{0, 1, -1},
-                                   {0, 2, 1},
-                                   {0, 2, -1},
-                                   {0, -1, -1},
-                                   {-1, 2, 1},
-                                   {-1, 1, -1},
-                                   {-1, 2, -1},
-                                   {-1, -1, -1},
-                                   {1, -1, -1}});
+                                  {
+                                      {0, 1, -1},
+                                      {0, 2, 1},
+                                      {0, 2, -1},
+                                      {0, -1, -1},
+                                      {-1, 2, 1},
+                                      {-1, 1, -1},
+                                      {-1, 2, -1},
+                                      {-1, -1, -1},
+                                  });
+  if (!config._enable_attention_specific_optimization) {
+    omap_to_explore.push_back({1, -1, -1});
+  }
   omap_to_explore = deduplicate(omap_to_explore);
   for (int3 output_map : omap_to_explore) {
     if ((grid_dim.x == 1 && output_map.x != -1) ||

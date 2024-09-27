@@ -12,6 +12,7 @@ public:
   TBRange(Range tensor_range, Range block_range, Range forloop_range);
 
   bool is_empty() const;
+  bool is_valid() const;
 
   bool is_all(threadblock::STensor const &tensor,
               int dim,

@@ -5,14 +5,17 @@
 namespace mirage {
 namespace search {
 
-Range::Range() {}
+Range::Range(bool valid) : valid(valid) {}
 
-Range::Range(std::vector<int> lower, std::vector<int> upper)
-    : lower(lower), upper(upper) {
+Range::Range(std::vector<int> lower, std::vector<int> upper, bool valid)
+    : lower(lower), upper(upper), valid(valid) {
   assert(lower.size() == upper.size());
 }
 
 bool Range::is_subrange(Range const &range) const {
+  if (!is_valid() || !range.is_valid()) {
+    return false;
+  }
   if (is_empty()) {
     return true;
   }
@@ -40,6 +43,10 @@ bool Range::is_empty() const {
   return false;
 }
 
+bool Range::is_valid() const {
+  return valid;
+}
+
 Range Range::point_range(std::vector<int> const &point) {
   std::vector<int> upper;
   for (size_t i = 0; i < point.size(); ++i) {
@@ -62,7 +69,7 @@ Range Range::extend_dim(int dim) const {
   std::vector<int> upper_ = upper;
   lower_[dim] = 0;
   upper_[dim] = INF;
-  return Range(lower_, upper_);
+  return Range(lower_, upper_, valid);
 }
 
 Range Range::offset(std::vector<int> const &offset) const {
@@ -72,7 +79,7 @@ Range Range::offset(std::vector<int> const &offset) const {
     lower_[i] += offset[i];
     upper_[i] += offset[i];
   }
-  return Range(lower_, upper_);
+  return Range(lower_, upper_, valid);
 }
 
 Range Range::transpose(int dim1, int dim2) const {
@@ -85,11 +92,15 @@ Range Range::transpose(int dim1, int dim2) const {
   std::vector<int> upper_ = upper;
   std::swap(lower_[dim1], lower_[dim2]);
   std::swap(upper_[dim1], upper_[dim2]);
-  return Range(lower_, upper_);
+  return Range(lower_, upper_, valid);
 }
 
 Range Range::empty_range() {
   return Range();
+}
+
+Range Range::invalid_range() {
+  return Range(false);
 }
 
 std::ostream &operator<<(std::ostream &os, Range const &range) {

@@ -55,6 +55,20 @@ int Graph::customized(std::vector<DTensor const *> _inputs,
 
 KNOperator *Graph::create_customized_op(std::vector<DTensor> const &inputs,
                                         threadblock::Graph const &_graph) {
+  // Assert that _graph's dtensor inputs align with inputs
+  {
+    int num_inputs = 0;
+    for (const auto& op : _graph.operators) {
+      if (op->op_type == mirage::type::TB_INPUT_OP) {
+        const mirage::threadblock::TBInputOp* input_op
+            = static_cast<const mirage::threadblock::TBInputOp*>(op);
+        assert(inputs[num_inputs] == input_op->dtensor);
+        num_inputs ++;
+      }
+    }
+    assert(num_inputs == (int) inputs.size());
+  }
+  // Calculate fingerprint sizes
   size_t output_data_size = 0, output_fp_size = 0;
   for (threadblock::TBOperator *op : _graph.operators) {
     if (op->op_type == type::TBOperatorType::TB_OUTPUT_OP) {
