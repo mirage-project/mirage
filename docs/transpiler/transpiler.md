@@ -168,7 +168,7 @@ Let's first introduce the Dynamic Storage Allocation (DSA) problem. The DSA prob
 
 Firstly, we show how we formulate the memory planning problem as DSA problem. For the size of every STensor, we can easily calculate it when doing layout resolution. For the time interval (lifetime), we carefully catorgorize STensors into the following types, and calculate the lifetime for every STensor:
 
-![tensor-lifecycle](/docs/assets/transpiler/tensor-lifecycle.drawio.svg)
+![tensor-lifecycle](tensor-lifecycle.drawio.svg)
 
 Then we can try to solve the DSA problem. Unfortunately, it's actually a NP-Complete problem. We just run some heuristics (first fit, best fit, last fit, random, etc.) and choose the one with the minimum peak shared memory usage.
 
@@ -188,7 +188,7 @@ However, the story is different when the size of the matrices is not divisible b
 
 As the figure below shows, the black grids are 16x16 tiles, and the green rectangle is the matrix that is not divisible by the MMA size. Areas marked with blue are out-of-bound elements. When performing `ldmatrix` on those areas, we must find a valid memory address to feed the `ldmatrix` instruction, instead of using the out-of-bound address. We do not care about their value. Areas marked with red are out-of-bound elements that may affect the final result. In addition to finding a valid memory address, we must also ensure that those elements are zero.
 
-![mma-non-divisible-example](/docs/assets/transpiler/mma-non-divisible-example.drawio.svg)
+![mma-non-divisible-example](mma-non-divisible-example.drawio.svg)
 
 Let's recap what `ldmatrix` does. As documented [here](https://docs.nvidia.com/cuda/parallel-thread-execution/#warp-level-matrix-instructions-ldmatrix), it has 3 variants: `.num = .x1`, `.num = .x2`, and `.num = .x4`. For simplicity, we only consider the `.num = .x4` variant. In this case, each thread provides an address which points to 8 elements in shared memory (those 8 elements should be in consecutive in one row or one column), and after this instruction, each thread will have 8 elements in registers, which will be fed to the MMA instruction.
 
