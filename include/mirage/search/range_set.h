@@ -24,6 +24,15 @@ public:
     return true;
   }
 
+  bool is_valid() const {
+    for (auto const &r : ranges) {
+      if (!r.is_valid()) {
+        return false;
+      }
+    }
+    return true;
+  }
+
   void append(R const &range, PropagationPath<T> const &path) {
     ranges.push_back(range);
     paths.push_back(path);

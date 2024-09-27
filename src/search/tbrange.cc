@@ -14,6 +14,11 @@ bool TBRange::is_empty() const {
          forloop_range.is_empty();
 }
 
+bool TBRange::is_valid() const {
+  return tensor_range.is_valid() && block_range.is_valid() &&
+         forloop_range.is_valid();
+}
+
 bool TBRange::is_all(threadblock::STensor const &tensor,
                      int dim,
                      int forloop_dim,

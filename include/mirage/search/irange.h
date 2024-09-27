@@ -29,6 +29,7 @@ public:
   bool is_subrange(IKNRange const &range) const;
   bool is_subrange(Range const &range) const;
   bool is_empty() const;
+  bool is_valid() const;
   void simplify();
 
   static IKNRange point_range(std::vector<int> const &point);
@@ -73,6 +74,7 @@ public:
   ITBRange extend_forloop_dim() const;
   void simplify();
   bool is_empty() const;
+  bool is_valid() const;
 
 public:
   RangeSet<TBRange, size_t> range_set;

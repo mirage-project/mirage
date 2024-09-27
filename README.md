@@ -2,9 +2,13 @@
 
 Mirage is a tensor algebra superoptimizer that automatically discovers highly-optimized tensor programs for DNNs. Mirage automatically identifies and verifies sophisticated optimizations, many of which require joint optimization at the kernel, thread block, and thread levels of the GPU compute hierarchy. For an input DNN, Mirage searches the space of potential tensor programs that are functionally equivalent to the given DNN to discover highly-optimized candidates. This approach allows Mirage to find new custom kernels that outperform existing expert-designed ones. 
 
-## Installation
+## Quick Installation
 
-The quickest way to try Mirage is through our prebuilt [docker images](INSTALL.md). You can also [install Mirage from source](INSTALL.md).
+The quickest way to try Mirage is installing the latest stable release from pip:
+```bash
+pip install mirage-project
+```
+You can also [install Mirage from source](INSTALL.md).
 
 ## Quickstart
 
