@@ -61,6 +61,17 @@ std::vector<std::invoke_result_t<F, T>> vector_map(std::vector<T> const &v,
   return new_v;
 }
 
+template <typename T, typename F>
+T filter(T const &c, F f) {
+  T new_c;
+  for (auto const &x : c) {
+    if (f(x)) {
+      new_c.push_back(x);
+    }
+  }
+  return new_c;
+}
+
 template <typename T>
 std::vector<T> deduplicate(std::vector<T> const &v) {
   std::unordered_set<T> s(v.begin(), v.end());

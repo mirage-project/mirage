@@ -9,11 +9,12 @@ namespace search {
 
 class Range {
 public:
-  Range();
-  Range(std::vector<int> lower, std::vector<int> upper);
+  Range(bool valid = true);
+  Range(std::vector<int> lower, std::vector<int> upper, bool valid = true);
 
   bool is_subrange(Range const &range) const;
   bool is_empty() const;
+  bool is_valid() const;
 
   bool is_all(int l, int r, int dim) const {
     assert(dim >= 0);
@@ -45,11 +46,13 @@ public:
   static Range point_range(std::vector<int> const &point);
   static Range all_range(int num_dims);
   static Range empty_range();
+  static Range invalid_range();
 
   static int constexpr INF = 1e9;
 
 public:
   std::vector<int> lower, upper;
+  bool valid;
 };
 
 std::ostream &operator<<(std::ostream &os, Range const &range);
