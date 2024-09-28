@@ -13,7 +13,7 @@ num_kv_tokens = 4096
 rms_norm4k = torch.nn.RMSNorm(4096, device='cuda:0', dtype=torch.float16)
 rms_norm128 = torch.nn.RMSNorm(128, device='cuda:0', dtype=torch.float16)
 silu = torch.nn.SiLU()
-#@torch.compile()
+@torch.compile(mode="reduce-overhead")
 def torch_llama(X, Wqkv, Wo, W13, W2, Kcache, Vcache):
     X = rms_norm4k(X)
     Xqkv = torch.matmul(X, Wqkv)
