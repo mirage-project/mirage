@@ -1,6 +1,6 @@
-# Mirage: A Multi-level Superoptimizer for Tensor Algebra
+# Mirage: Generating Fast GPU Kernels for Python Programs
 
-Mirage is a tensor algebra superoptimizer that automatically discovers highly-optimized tensor programs for DNNs. Mirage automatically identifies and verifies sophisticated optimizations, many of which require joint optimization at the kernel, thread block, and thread levels of the GPU compute hierarchy. For an input DNN, Mirage searches the space of potential tensor programs that are functionally equivalent to the given DNN to discover highly-optimized candidates. This approach allows Mirage to find new custom kernels that outperform existing expert-designed ones. 
+Mirage is a tool that automatically generates fast GPU kernels for PyTorch programs through superoptimization techniques. For example, to get fast GPU kernels for attention, users only need to write a few lines of Python code to describe attention's computation. For a given PyTorch program, Mirage automatically searches the space of potential GPU kernels that are functionally equivalent to the input program and discovers highly-optimized kernel candidates. This approach allows Mirage to find new custom kernels that outperform existing expert-designed ones.
 
 ## Quick Installation
 
@@ -12,9 +12,9 @@ You can also [install Mirage from source](INSTALL.md).
 
 ## Quickstart
 
-As a tensor algebra superoptimizer, Mirage can be used to optimize arbitrary DNNs. We use two examples to show how to use Mirage to automatically generate CUDA kernels for group-query attention (GQA) in LLAMA-3-70B and low-rank adapter (LoRA). These Mirage-generated kernels outperform existing manually-optimized kernels.
+As a tensor algebra superoptimizer, Mirage can be used to accelerate arbitrary DNNs. We use two examples to show how to use Mirage to automatically generate GPU kernels that outperform existing hand-written alternatives. More examples are available in [tutorials](https://mirage-project.readthedocs.io/en/latest/tutorials/index.html).
 
-### Superoptimizing group-query attention (GQA)
+### Group-query attention (GQA)
 
 The follow code snippet shows how to use Mirage to automatically generate highly-optimized CUDA programs for group-query attention (GQA) in LLAMA-3-70B. We assume the model is served in half precision and is tensor model parallelized across 4 GPUs to fit in GPU device memory. Therefore, the GQA operator computes attention across 8 query heads and 2 key-value heads.
 
@@ -22,7 +22,7 @@ First, we define the computation graph for GQA, which takes three input tensors 
 
 ```python
 import mirage as mi
-graph = mi.new_graph()
+graph = mi.new_kernel_graph()
 Q = graph.new_input(dims=(2, 256, 64), dtype=mi.float16)
 K = graph.new_input(dims=(2, 64, 4096), dtype=mi.float16)
 V = graph.new_input(dims=(2, 4096, 64), dtype=mi.float16)
@@ -33,38 +33,50 @@ D = graph.div(E, S)
 O = graph.matmul(D, V)
 ```
 
-Second, we will use `mi.superoptimize` to superoptimize GQA. Mirage will automatically search the space of potential mugraphs that are functionally equivalent to the input graph to discover highly-optimized CUDA programs. MuGraphs are a new multi-level graph representation in Mirage that specifies computation at the kernel, thread block, and thread levels of the GPU compute hierarchy. Mirage can automatically find mugraphs that represent today's expert-designed GPU optimizations such as FlashAttention, FlashDecoding, and FlashInfer. In addition, Mirage also discovers other mugraphs that outperform these expert-designed implementations for certain cases.
+Second, we will use `mi.superoptimize` to superoptimize GQA. Mirage will automatically search the space of potential mugraphs that are functionally equivalent to the input graph to discover highly-optimized CUDA programs. MuGraphs are a new multi-level graph representation in Mirage that specifies computation at the kernel, thread block, and thread levels of the GPU compute hierarchy. An introduction to uGraph is available [here](https://mirage-project.readthedocs.io/en/latest/mugraph.html). Mirage can automatically find uGraphs that represent today's expert-designed GPU optimizations such as FlashAttention, FlashDecoding, and FlashInfer. In addition, Mirage also discovers other uGraphs that outperform these expert-designed implementations for certain cases.
 
 ```python
-new_graphs = mi.superoptimize(graph, griddims=[(2, 16, 1), (2, 16, 4)])
+optimized_graph = graph.superoptimize(config="attention")
 ```
-The search is configured by several parameters, among which `griddims` is the one you are likely to reset for your problem sizes. The default values for these parameters are tailored for multi-head, multi-query, and group-query attention. You can update them to superoptimize other neural architectures such as low-rank adapters, mixture-of-experts, and more. A more detailed definition for these parameters is available in [our paper](#citation).
 
-* `griddims`: specify the possible number of thread blocks within a kernel. Default (for multi-head attention with 16 heads per GPU): `(16, 1, 1), (16, 2, 1), (16, 4, 1)`.
-* `blockdims`: specify the possible number of threads within a thread block. Default: `(128, 1, 1)`.
-* `imaps`: potential mappings between data dimensions of an input tensor and `griddims`. Default (for all attention variants): `(0, -1, -1), (0, 1, -1), (0, 2, -1), (0, -1, 1)`. Note that a positive number indicates the input tensor is **partitioned** along that grid dimension, while `-1` indicates the input tensor is **replicated** (see the paper for details).
-* `omaps`: potential mappings between data dimensions of an output tensor and `griddims`. Default (for all attention variants): `(0, -1, -1), (0, 1, -1), (0, 2, -1), (0, 2, 1)]`. The semantic is similar to `imaps`.
-* `fmaps`: potential mappings between data dimensions of an input tensor and the for-loop dimension of the thread block. Default: `-1, 1, 2`. Similar to `imaps`, a positive number indicates the input tensor is **partitioned** and `-1` indicates the tensor is **replicated**.
-* `franges`: possible for-loop ranges to be considered during the search. Default: `1, 4, 8, 16`.
-
-Except for `griddims`, which depends on the problem sizes, the default values for other parameters are sufficient to discover FlashAttn, FlashDecoding, and many other expert-designed implementations for Attention.
-
-The `mi.superoptimize` function returns a list of mugraphs discovered by Mirage that are functionally equivalent to the input program and represent different implementations of it. Mirage uses a probabilistic equivalence verification mechanism to ensure that all discovered mugraphs are equivalent to the input. `graph.generate_triton_program` generates a Triton program for each mugraph.
+The `superoptimize` function returns the best uGraph discovered by Mirage. The object `optimized_graph` can directly run as a function, and doing so will let Mirage transpile the uGraph into CUDA code, compile the code for execution, and launch the compiled kernel. This allows users to directly run Mirage-generated kernels in their Python programs.
 
 ```python
-for i, mugraph in enumerate(new_graphs):
-    mugraph.generate_triton_program("generated_program_{}.py".format(i))
+import torch
+input_tensors = [
+    torch.randn(64, 1, 128, dtype=torch.float16, device='cuda:0'),
+    torch.randn(64, 128, 4096, dtype=torch.float16, device='cuda:0'),
+    torch.randn(64, 4096, 128, dtype=torch.float16, device='cuda:0')
+]
+# Launch the Mirage-generated kernel to perform attention
+output = optimized_graph(input_tensors)
 ```
 
-The above search procedure takes around 4 hours and discovers 69 potential tensor programs for implementing GQA. To bypass the search and directly check the generated programs, we can start from a previous checkpoint of the search by running
-```bash
-python demo/demo_group_query_attention_spec_decode.py --checkpoint demo/checkpoint_group_query_attn_spec_decode.json
-```
-This program outputs 69 Triton programs saved in the `demo` folder. The performance of these programs on a NVIDIA A100 GPU is shown as follows. Note that some generated programs perform small matrix multiplications within a thread block. These programs cannot be directly supported by the current Triton compiler, as it requires all dimensions of a matrix multiplication must be at least 16. The best program discovered by Mirage is 2x faster than FlashDecoding and 1.5x faster than FlashInfer.
+### RMSNorm + MatMul
 
-<p align="center">
-<img src="img/group_query_attnetion_spec_decode.png?raw=true" alt="Group Query Attention SpecDecode" height="320"/>
-</p>
+This example demonstates how to generate fast kernels that compute [RMSNorm](https://arxiv.org/pdf/1910.07467) following by a linear layer. We can use Mirage to automatically generate a highly optimized kernel that fuses RMSNorm and MatMul.
+```python
+import mirage as mi
+graph = mi.new_kernel_graph()
+X = graph.new_input(dims=(16, 4096), dtype=mi.float16)
+W = graph.new_input(dims=(406, 4096), dtype=mi.float16)
+O = graph.matmul(graph.rms_norm(X), W)
+graph.mark_output(O)
+optimized_graph = graph.superoptimize()
+
+import torch
+input_tensors = [
+    torch.randn(16, 4096, dtype=torch.float16, device='cuda:0'),
+    torch.randn(4096, 4096, dtype=torch.float16, device='cuda:0')
+]
+optimized_graph(input_tensors)
+```
+The `optimized_graph` is 1.5-1.7x faster than running the two operators sequentially and can be directly used in your Python program.
+
+## Contribution
+Please let us know if you encounter any bugs or have any suggestions by [submitting an issue](https://github.com/mirage-project/mirage/issues).
+
+We welcome all contributions to Mirage from bug fixes to new features and extensions.
 
 ## Citation
 A paper describing Mirage's techniques is available [on arxiv](https://arxiv.org/abs/2405.05751). Please cite Mirage as:

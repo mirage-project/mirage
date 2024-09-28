@@ -3,13 +3,13 @@ import argparse
 import os
 import torch
 
-#@torch.compile
+@torch.compile(backend="cudagraphs")
 def torch_lora(X, W, A, B):
-    #D = torch.matmul(X, A)
-    #E = torch.matmul(D, B)
+    D = torch.matmul(X, A)
+    E = torch.matmul(D, B)
     C = torch.matmul(X, W)
-    #O = torch.add(C, E)
-    return C
+    O = torch.add(C, E)
+    return O
 
 def optimize_lora(checkpoint):
     graph = mi.new_kernel_graph()
