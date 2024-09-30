@@ -15,6 +15,11 @@ if __name__ == "__main__":
         torch.randn(4096, 4096, dtype=torch.float16, device='cuda:0'),
     ]
 
+    outputs = optimized_graph(inputs=input_tensors)
+    output = outputs[0]
+    print(output.shape)
+    print(output.stride(0), output.stride(1))
+
     for _ in range(16):
         optimized_graph(inputs=input_tensors)
 
