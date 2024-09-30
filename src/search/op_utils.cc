@@ -18,6 +18,7 @@ bool is_unary(type::TBOperatorType op) {
   std::unordered_set<type::TBOperatorType> true_values{
       type::TBOperatorType::TB_EXP_OP,
       type::TBOperatorType::TB_SILU_OP,
+      type::TBOperatorType::TB_RMS_NORM_OP,
       type::TBOperatorType::TB_REDUCTION_0_OP,
       type::TBOperatorType::TB_REDUCTION_1_OP,
       type::TBOperatorType::TB_REDUCTION_2_OP,
@@ -116,6 +117,10 @@ std::shared_ptr<AlgebraicPattern>
       return std::make_shared<Exp>(opd);
     case type::TBOperatorType::TB_SILU_OP:
       return std::make_shared<Silu>(opd);
+    case type::TBOperatorType::TB_RMS_NORM_OP: {
+      return std::make_shared<Div>(
+          opd, std::make_shared<RMS>(tensor.dim[tensor.num_dims - 1], opd));
+    }
     case type::TBOperatorType::TB_REDUCTION_0_OP:
       return std::make_shared<Red>(tensor.dim[0], opd);
     case type::TBOperatorType::TB_REDUCTION_1_OP:
@@ -317,6 +322,8 @@ TBOperator *create_op(threadblock::Graph &g,
     case type::TBOperatorType::TB_EXP_OP:
     case type::TBOperatorType::TB_SILU_OP:
       return g.create_elementunary_op(input, type);
+    case type::TBOperatorType::TB_RMS_NORM_OP:
+      return g.create_rms_norm_op(input);
     case type::TBOperatorType::TB_REDUCTION_0_OP:
     case type::TBOperatorType::TB_REDUCTION_1_OP:
     case type::TBOperatorType::TB_REDUCTION_2_OP: {
