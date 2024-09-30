@@ -30,30 +30,25 @@ std::vector<type::TBOperatorType> DimStrategy::get_tbop_cand() {
 std::vector<dim3>
     DimStrategy::get_grid_dim_cand(std::vector<DTensor> const &tensors) {
 
-  auto tip_filter = [](std::vector<int> const &tips, int x) {
-    for (int tip : tips) {
-      if (tip % x == 0) {
-        return true;
-      }
-    }
-    return false;
-  };
-
-  auto generate_1d_grids = [&](std::vector<int> const &tips) {
+  auto generate_1d_grids = [&](std::vector<int> const &dims) {
     std::vector<dim3> cands;
-    for (size_t x = 4; x <= 128; x *= 2) {
-      if (tip_filter(tips, x)) {
-        cands.push_back({x, 1, 1});
+    for (size_t x = 32; x <= 64; x *= 2) {
+      for (int dim : dims) {
+        if (dim % x == 0) {
+          cands.push_back({dim / x, 1, 1});
+        }
       }
     }
     return cands;
   };
 
-  auto generate_2d_grids = [&](int x, std::vector<int> const &tips) {
+  auto generate_2d_grids = [&](int x, std::vector<int> const &dims) {
     std::vector<dim3> cands;
-    for (size_t y = 1; y <= 16; y *= 2) {
-      if (tip_filter(tips, y)) {
-        cands.push_back({x, y, 1});
+    for (size_t y = 32; y <= 64; y *= 2) {
+      for (int dim : dims) {
+        if (dim % y == 0) {
+          cands.push_back({x, dim / y, 1});
+        }
       }
     }
     return cands;
@@ -78,30 +73,34 @@ std::vector<dim3>
     return -1;
   };
 
-  auto get_tips = [&] {
-    std::unordered_set<int> tips;
+  auto get_dims = [&] {
+    std::unordered_set<int> dims;
     for (DTensor const &tensor : tensors) {
       for (int i = 0; i < tensor.num_dims; ++i) {
-        tips.insert(tensor.dim[i]);
+        dims.insert(tensor.dim[i]);
       }
     }
-    return std::vector<int>(tips.begin(), tips.end());
+    return std::vector<int>(dims.begin(), dims.end());
   };
 
   std::vector<dim3> cands = config.grid_dim_to_explore;
 
-  cands = vector_concat(cands, generate_1d_grids(get_tips()));
+  cands = vector_concat(cands, generate_1d_grids(get_dims()));
   if (config._enable_attention_specific_optimization) {
     int batch = get_batch();
     if (batch != -1) {
-      cands = vector_concat(cands, generate_2d_grids(batch, get_tips()));
+      cands = vector_concat(cands, generate_2d_grids(batch, get_dims()));
+    }
+    if (tensors.size() > 2) {
+      cands.push_back({batch, 16, 4});
     }
   }
+  cands = filter(cands, [](dim3 const &dim) {
+    int num_threadblocks = dim.x * dim.y * dim.z;
+    return 32 <= num_threadblocks && num_threadblocks <= config::MAX_NUM_THREADBLOCKS_PER_KERNEL;
+  });
 
   cands = deduplicate(cands);
-  cands = filter(cands, [](dim3 const &dim) {
-    return dim.x * dim.y * dim.z <= config::MAX_NUM_THREADBLOCKS_PER_KERNEL;
-  });
 
   if (config.randomized_branches) {
     std::random_shuffle(cands.begin(), cands.end());
@@ -220,7 +219,6 @@ std::vector<std::vector<int3>>
         tensors, grid_dim, config.imap_to_explore, {}, results);
   } else {
     std::vector<int3> imap_to_explore = {
-        {0, -1, -1},
         {0, -1, 1},
         {0, 1, -1},
         {0, 2, -1},
@@ -329,6 +327,9 @@ std::vector<int> DimStrategy::get_forloop_range_cand(
   std::vector<int> results;
 
   for (int x : config.frange_to_explore) {
+    if (config._enable_attention_specific_optimization && x > 8) {
+      continue;
+    }
     bool feasible = true;
     for (size_t i = 0; i < input_tensors.size(); ++i) {
       if (forloop_dim[i] == -1) {

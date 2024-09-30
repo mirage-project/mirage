@@ -750,6 +750,14 @@ void from_json(json const &j, Graph &graph) {
             op.at("output_tensors")[0].at("guid").get<int>();
         break;
       }
+      case type::TBOperatorType::TB_RMS_NORM_OP: {
+        STensor const &output = graph.rms_norm(
+            get_tensor_from_guid(
+                op.at("input_tensors")[0].at("guid").get<int>()));
+        guid_mapping[output.guid] =
+            op.at("output_tensors")[0].at("guid").get<int>();
+        break;
+      }
       case type::TBOperatorType::TB_ADD_OP:
       case type::TBOperatorType::TB_MUL_OP:
       case type::TBOperatorType::TB_DIV_OP: {
