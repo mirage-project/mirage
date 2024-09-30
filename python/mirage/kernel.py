@@ -213,8 +213,8 @@ class KNGraph:
         self._cached_results = result
         return self._cached_results
 
-    def superoptimize(self, imaps : list = None, omaps : list = None, griddims : list = None, blockdims : list = None, fmaps : list = None, franges : list = None, config : str = None):
-        cygraphs = search(self.cygraph, imaps=imaps, omaps=omaps, griddims=griddims, blockdims=blockdims, fmaps=fmaps, franges=franges, default_config=config)
+    def superoptimize(self, imaps : list = None, omaps : list = None, griddims : list = None, blockdims : list = None, fmaps : list = None, franges : list = None, verbose : bool = False, config : str = None):
+        cygraphs = search(self.cygraph, imaps=imaps, omaps=omaps, griddims=griddims, blockdims=blockdims, fmaps=fmaps, franges=franges, verbose=verbose, default_config=config)
         all_graphs = [KNGraph(g) for g in cygraphs]
 
         # profile and use the best graph

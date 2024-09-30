@@ -159,6 +159,7 @@ cdef extern from "mirage/search/search_c.h" namespace "mirage::search_c":
                            vector[MDim3] blockdims,
                            vector[int] fmaps,
                            vector[int] franges,
+                           bool verbose,
                            const char * default_config)
 
 cdef extern from "mirage/transpiler/transpile.h" namespace "mirage::transpiler":

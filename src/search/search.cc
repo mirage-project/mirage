@@ -17,9 +17,10 @@ namespace search {
 KernelGraphGenerator::KernelGraphGenerator(
     kernel::Graph const &computation_graph,
     GeneratorConfig const &config,
-    char const *filename)
+    char const *filename,
+    bool verbose)
     : config(config), dim_strategy(DimStrategy(config)), filename(filename),
-      num_thread(config.search_thread), num_total_kernel_graphs(0),
+      num_thread(config.search_thread), verbose(verbose),
       num_total_random_tests(0), num_valid_kernel_graphs(0),
       num_total_states(0) {
   preprocess(computation_graph);
@@ -107,8 +108,8 @@ void KernelGraphGenerator::generate_next_operator(
     std::function<bool(SearchContext const &)> const &verify,
     std::vector<SerializedSearchContext> &verified) {
   ++num_total_states;
-  if (num_total_states % 1000 == 1) {
-    printf("Total states explored: %d.\n", num_total_states.load());
+  if (num_total_states % 100 == 1) {
+    show_statistics();
   }
   if (verify(c)) {
     verified.push_back(SerializedSearchContext(c));
@@ -191,7 +192,7 @@ void KernelGraphGenerator::generate_next_operator(
                                                            grid_dim,
                                                            block_dim,
                                                            forloop_dim)) {
-                    {
+                    if (verbose) {
                       TBGraphConfig cfg{grid_dim,
                                         block_dim,
                                         input_map,
@@ -369,6 +370,7 @@ void KernelGraphGenerator::search_from(
 }
 
 void KernelGraphGenerator::generate_kernel_graphs() {
+  start_time = std::chrono::steady_clock::now();
   SearchContext c;
   c.level = SearchLevel::LV_KERNEL;
   c.kn_graph = std::make_shared<kernel::Graph>();
@@ -378,8 +380,6 @@ void KernelGraphGenerator::generate_kernel_graphs() {
     c.kn_graph->new_input(dim, data_type, layout);
   }
 
-  auto start_time = std::chrono::steady_clock::now();
-
   std::vector<SerializedSearchContext> middle_states;
   generate_next_operator(
       c,
@@ -387,10 +387,9 @@ void KernelGraphGenerator::generate_kernel_graphs() {
         return c.tb_graph != nullptr || this->verify(*c.kn_graph);
       },
       middle_states);
-  printf("[Search] First step finished. Time elapsed: %fsec\n",
-         std::chrono::duration<double>(std::chrono::steady_clock::now() -
-                                       start_time)
-             .count());
+  printf("\n");
+  printf("[Search] First step finished. Time elapsed: %lfsec\n",
+         get_elapsed_time_in_sec());
   std::vector<std::vector<SerializedSearchContext>> split_middle_states(
       num_thread);
   for (size_t i = 0; i < middle_states.size(); ++i) {
@@ -407,12 +406,12 @@ void KernelGraphGenerator::generate_kernel_graphs() {
 
   save_results();
 
+  printf("\n");
   printf("[Search] Second step finished. Time elapsed: %fsec\n",
          std::chrono::duration<double>(std::chrono::steady_clock::now() -
                                        start_time)
              .count());
-  printf("[Search] Total kernel graphs explored: %d\n",
-         num_total_kernel_graphs.load());
+  printf("[Search] Total states explored: %d\n", num_total_states.load());
   printf("[Search] Random tests performed: %d\n",
          num_total_random_tests.load());
   printf("[Serach] Valid kernel graphs explored: %d\n",
@@ -474,12 +473,6 @@ bool KernelGraphGenerator::check_pattern(
 }
 
 bool KernelGraphGenerator::verify(kernel::Graph const &g) {
-  ++num_total_kernel_graphs;
-  if (num_total_kernel_graphs % 1000 == 1) {
-    printf("Total kernel graphs explored: %d.\n",
-           num_total_kernel_graphs.load());
-  }
-
   std::vector<DTensor> outputs = get_output_tensors(g);
 
   if (outputs.size() != computation_graph_output_patterns.size()) {
@@ -533,6 +526,21 @@ bool KernelGraphGenerator::have_same_fingerprint(
 void KernelGraphGenerator::save_results() const {
   std::ofstream ofs(filename);
   ofs << json(generated_graphs);
+}
+
+double KernelGraphGenerator::get_elapsed_time_in_sec() const {
+  return std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                       start_time)
+      .count();
+}
+
+void KernelGraphGenerator::show_statistics() const {
+  printf(
+      "[Search] States: %d, Random tests: %d, Valid mugraphs: %d, Time: %lf\r",
+      num_total_states.load(),
+      num_total_random_tests.load(),
+      num_valid_kernel_graphs.load(),
+      get_elapsed_time_in_sec());
 }
 
 } // namespace search
