@@ -629,6 +629,11 @@ ITBRange forward_propagate(ITBRange const &tbrange,
                          .truncate(op.output_tensors[0]));
       break;
     }
+    case type::TB_RMS_NORM_OP: {
+      ret = ITBRange(tbrange.range_set.extend_dim(op.output_tensors[0].num_dims - 1)
+                         .truncate(op.output_tensors[0]));
+      break;
+    }
     case type::TB_FORLOOP_ACCUM_NO_RED_OP: {
       ret = tbrange.extend_forloop_dim();
       break;
@@ -674,6 +679,12 @@ ITBRange backward_propagate(ITBRange const &tbrange,
     case type::TBOperatorType::TB_EXP_OP:
     case type::TBOperatorType::TB_SILU_OP: {
       ret = EXP_AS_IDENTITY ? tbrange : ITBRange();
+      break;
+    }
+    case type::TBOperatorType::TB_RMS_NORM_OP: {
+      ret = ITBRange(
+          tbrange.range_set.extend_dim(op.input_tensors[opd_idx].num_dims - 1)
+              .truncate(op.input_tensors[opd_idx]));
       break;
     }
     case type::TBOperatorType::TB_ADD_OP:
