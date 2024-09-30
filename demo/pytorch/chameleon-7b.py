@@ -7,7 +7,7 @@ import flashinfer
 n_local_heads = 32
 n_local_kv_heads = 32
 head_dim = 128
-num_tokens = 1
+num_tokens = 8
 num_kv_tokens = 4096
 
 rms_norm4k = torch.nn.RMSNorm(4096, device='cuda:0', dtype=torch.float16)

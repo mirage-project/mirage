@@ -114,7 +114,7 @@ with copy_include() as copied:
               f"This may cause issues. Please remove {INCLUDE_BASE} and rerun setup.py", flush=True)
     
     setup(name='mirage-project',
-          version="0.1.1",
+          version="0.2.0",
           description="Mirage: A Multi-Level Superoptimizer for Tensor Algebra",
           zip_safe=False,
           install_requires=requirements,
