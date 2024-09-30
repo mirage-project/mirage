@@ -442,7 +442,7 @@ cdef class CyTBGraph:
         t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
         return STensor(t)
 
-def search(CyKNGraph input_graph, *, int max_num_new_graphs = 1024, list imaps = None, list omaps = None, list griddims = None, list blockdims = None, list fmaps = None, list franges = None, str previous_checkpoint = None, str default_config = None):
+def search(CyKNGraph input_graph, *, int max_num_new_graphs = 1024, list imaps = None, list omaps = None, list griddims = None, list blockdims = None, list fmaps = None, list franges = None, str previous_checkpoint = None, bool verbose, str default_config = None):
     # set cimaps
     cdef vector[MInt3] cimaps
     cimaps.resize(0)
@@ -498,12 +498,14 @@ def search(CyKNGraph input_graph, *, int max_num_new_graphs = 1024, list imaps =
     # currently support up to 1024 new graphs
     assert max_num_new_graphs <= 1024
     cdef CppKNGraph* cnewgraphs[1024]
+    # set verbose
+    cverbose = verbose
     # convert config description
     cdef char* cconfig = NULL
     if default_config is not None:
         py_byte_string = default_config.encode('UTF-8')
         cconfig = py_byte_string
-    num = cython_search(input_graph.p_kgraph, max_num_new_graphs, cnewgraphs, cimaps, comaps, cgriddims, cblockdims, cfmaps, cfranges, cconfig)
+    num = cython_search(input_graph.p_kgraph, max_num_new_graphs, cnewgraphs, cimaps, comaps, cgriddims, cblockdims, cfmaps, cfranges, cverbose, cconfig)
     new_graphs = list()
     for i in range(num):
         ptr = ctypes.cast(<unsigned long long>cnewgraphs[i], ctypes.c_void_p)
