@@ -20,6 +20,7 @@ int cython_search(mirage::kernel::Graph const *input_graph,
                   std::vector<MDim3> block_dim_to_explore,
                   std::vector<int> fmap_to_explore,
                   std::vector<int> frange_to_explore,
+                  bool verbose,
                   char const *default_config) {
   // NOTE(@wmdi): Checkpointing is disabled for now
   // Load from a checkpoint
@@ -94,7 +95,7 @@ int cython_search(mirage::kernel::Graph const *input_graph,
       }
     }
     search::KernelGraphGenerator gen(
-        *input_graph, config, "mirage_search_checkpoint.json");
+        *input_graph, config, "mirage_search_checkpoint.json", verbose);
     gen.config.show();
     gen.generate_kernel_graphs();
     int num = 0;
