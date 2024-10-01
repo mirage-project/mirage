@@ -12,12 +12,13 @@ GeneratorConfig GeneratorConfig::get_default_config() {
       2 /* max_num_threadblock_graph_outputs */,
       8 /* search_thread */,
       {
-          // type::KN_MATMUL_OP,
-          // type::KN_EXP_OP,
-          // type::KN_SILU_OP,
-          // type::KN_ADD_OP,
-          // type::KN_MUL_OP,
-          // type::KN_DIV_OP,
+          type::KN_MATMUL_OP,
+          type::KN_EXP_OP,
+          type::KN_SILU_OP,
+          type::KN_ADD_OP,
+          type::KN_MUL_OP,
+          type::KN_DIV_OP,
+          type::KN_REDUCTION_2_OP,
           type::KN_CUSTOMIZED_OP,
       } /* knop_to_explore */,
       {
@@ -54,7 +55,7 @@ GeneratorConfig GeneratorConfig::get_default_config() {
 
 void GeneratorConfig::enable_attention_specific_optimization() {
   _enable_attention_specific_optimization = true;
-  max_num_threadblock_graphs = 2;
+  max_num_kernel_graph_op = 7;
 }
 
 void GeneratorConfig::enable_concat_matmul_transformation() {
