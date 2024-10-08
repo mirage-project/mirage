@@ -70,6 +70,7 @@ Transpiler::Transpiler(kernel::Graph const *graph,
     switch (op->op_type) {
       case KN_INPUT_OP: {
         // Assert that an input op has exactly one output dtensor
+        kernel::KNInputOp * input_op = static_cast<kernel::KNInputOp*>(op);
         assert(op->output_tensors.size() == 1);
         kernel::DTensor const &dtensor = op->output_tensors[0];
         std::vector<int> dims;
@@ -77,7 +78,7 @@ Transpiler::Transpiler(kernel::Graph const *graph,
           dims.push_back(dtensor.dim[i]);
         }
         kernel::DTensor dt =
-            g->new_input(dims, dtensor.data_type, dtensor.layout);
+            g->new_input(dims, input_op->input_strides, dtensor.data_type, dtensor.layout);
         dtensor_mapping[op->output_tensors[0].guid] = dt;
         dtensor_outputs.push_back(dt);
         break;

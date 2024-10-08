@@ -259,13 +259,17 @@ cdef class CyKNGraph:
             ptr = ctypes.cast(graph, ctypes.c_void_p).value
             self.p_kgraph = <CppKNGraph*>(ptr)
 
-    def new_input(self, tuple dims, dtype : dtype = float16):
-        cdef vector[int] cdims
+    def new_input(self, tuple dims, tuple strides, dtype : dtype = float16):
+        cdef vector[int] cdims, cstrides
         cdims.resize(len(dims))
         for i in range(len(dims)):
             cdims[i] = dims[i]
+        cstrides.resize(len(strides))
+        for i in range(len(strides)):
+            cstrides[i] = strides[i]
+
         c_type = convert_dtype_to_ctype(dtype)
-        cdef CppDTensor* ptr = self.p_kgraph.new_input_ptr(cdims, c_type, DmemRowMajor)
+        cdef CppDTensor* ptr = self.p_kgraph.new_input_ptr(cdims, cstrides, c_type, DmemRowMajor)
         t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
         return DTensor(t)
 
@@ -345,6 +349,13 @@ cdef class CyKNGraph:
             inputs.append(DTensor(ptr))
         return inputs
 
+    def get_input_dtensor_layout(self, DTensor A):
+        cdef int cstrides[128]
+        num = self.p_kgraph.get_input_dtensor_layout(A.c_ptr, cstrides)
+        strides = list()
+        for i in range(num):
+            strides.append(cstrides[i])
+        return tuple(strides)
 
 cdef class CyTBGraph:
     cdef CppTBGraph *p_bgraph #Hold a CppTBGraph instance

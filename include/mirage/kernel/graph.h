@@ -37,12 +37,15 @@ public:
   Graph &operator=(Graph const &) = delete;
   // input operator
   DTensor new_input(std::vector<int> const &dims,
+                    std::vector<int> const &strides,
                     mirage::type::DataType data_type,
                     mirage::layout::DmemLayout layout);
   DTensor *new_input_ptr(std::vector<int> const &dims,
+                         std::vector<int> const &strides,
                          mirage::type::DataType data_type,
                          mirage::layout::DmemLayout layout);
   KNOperator *create_input_op(std::vector<int> const &dims,
+                              std::vector<int> const &strides,
                               mirage::type::DataType data_type,
                               mirage::layout::DmemLayout layout);
   // matmul operator
@@ -114,6 +117,7 @@ public:
                                    mirage::threadblock::Graph const &_graph);
   // helper functions
   int get_input_dtensors(DTensor **inputs);
+  int get_input_dtensor_layout(DTensor const *input, int *strides);
   void generate_triton_program(char const *filepath);
 
   bool can_allocate(DTensor const &tensor,

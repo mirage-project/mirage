@@ -54,6 +54,7 @@ class KNInputOp : public KNOperator {
 public:
   KNInputOp(Graph *_graph,
             std::vector<int> const &dims,
+            std::vector<int> const &strides,
             mirage::type::DataType data_type,
             mirage::layout::DmemLayout layout,
             int3 input_map = {-1, -1, -1});
@@ -64,6 +65,7 @@ public:
   operator json() const override;
 
 public:
+  std::vector<int> input_strides;
   int3 input_map;
 };
 

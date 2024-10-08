@@ -51,24 +51,27 @@ KNOperator::KNOperator(Graph *_graph,
 KNOperator::~KNOperator() {}
 
 DTensor Graph::new_input(std::vector<int> const &dims,
+                         std::vector<int> const &strides,
                          mirage::type::DataType data_type,
                          mirage::layout::DmemLayout layout) {
-  KNOperator *op = create_input_op(dims, data_type, layout);
+  KNOperator *op = create_input_op(dims, strides, data_type, layout);
   assert(op != nullptr);
   operators.push_back(op);
   return op->output_tensors[0];
 }
 
 DTensor *Graph::new_input_ptr(std::vector<int> const &dims,
+                              std::vector<int> const &strides,
                               mirage::type::DataType data_type,
                               mirage::layout::DmemLayout layout) {
-  KNOperator *op = create_input_op(dims, data_type, layout);
+  KNOperator *op = create_input_op(dims, strides, data_type, layout);
   assert(op != nullptr);
   operators.push_back(op);
   return &op->output_tensors[0];
 }
 
 KNOperator *Graph::create_input_op(std::vector<int> const &dims,
+                                   std::vector<int> const &strides,
                                    mirage::type::DataType data_type,
                                    mirage::layout::DmemLayout layout) {
   DTensor tensor;
@@ -82,16 +85,18 @@ KNOperator *Graph::create_input_op(std::vector<int> const &dims,
   if (!can_allocate(tensor)) {
     return nullptr;
   }
-  KNInputOp *op = new KNInputOp(this, dims, data_type, layout);
+  KNInputOp *op = new KNInputOp(this, dims, strides, data_type, layout);
   return op;
 }
 
 KNInputOp::KNInputOp(Graph *_graph,
                      std::vector<int> const &dims,
+                     std::vector<int> const &strides,
                      mirage::type::DataType data_type,
                      mirage::layout::DmemLayout layout,
                      int3 _input_map)
-    : KNOperator(_graph, mirage::type::KN_INPUT_OP), input_map(_input_map) {
+    : KNOperator(_graph, mirage::type::KN_INPUT_OP),
+      input_strides(strides), input_map(_input_map) {
   DTensor tensor;
   tensor.num_dims = dims.size();
   for (int i = tensor.num_dims - 1; i >= 0; i--) {

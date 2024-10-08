@@ -93,8 +93,16 @@ class KNGraph:
         self.run = None
         self._cached_results = None
     
-    def new_input(self, dims: tuple, dtype: dtype = float16) -> DTensor:
-        return self.cygraph.new_input(dims, dtype)
+    def new_input(self, dims: tuple, strides: tuple = None, dtype: dtype = float16) -> DTensor:
+        # use the default strided layout if strides = None
+        if strides is None:
+            total_elements = 1
+            strides = []
+            for d in reversed(dims):
+                strides.append(total_elements)
+                total_elements *= d
+            strides = reversed(strides)
+        return self.cygraph.new_input(dims, tuple(strides), dtype)
     
     def matmul(self, A: DTensor, B: DTensor) -> DTensor:
         return self.cygraph.matmul(A, B)
@@ -152,12 +160,18 @@ class KNGraph:
         
         input_tensors = kwargs.get("inputs", [])
         input_strides = [tensor.stride() for tensor in input_tensors]
+        # Check that the input_strides match uGraph's specification
+        dtensors = self.cygraph.get_input_dtensors()
+        assert len(dtensors) == len(input_tensors), "Given number of inputs do not match the uGraph's inputs"
+        for i in range(len(dtensors)):
+            assert input_strides[i] == self.cygraph.get_input_dtensor_layout(dtensors[i]), "Input tensor's strides do not match the uGraph's input tensor stride"
         target_cc = kwargs.get("target_cc", torch.cuda.get_device_properties(0).major * 10 
                                + torch.cuda.get_device_properties(0).minor)
         
         result = generate_cuda_program(self.cygraph, 
                                        target_cc=target_cc, 
                                        input_strides=input_strides, 
+                                       output_strides=kwargs.get("output_strides", None),
                                        output_tensors=kwargs.get("outputs", []))
         # print(result)
         
