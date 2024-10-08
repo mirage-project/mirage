@@ -10,6 +10,7 @@ from typing import *
 
 from .core import *
 from .threadblock import *
+from .visualizer import *
 
 HARD_CODE = """
 #include <Python.h>
@@ -92,6 +93,7 @@ class KNGraph:
         self._is_compiled = False
         self.run = None
         self._cached_results = None
+        self.visualizer = None
     
     def new_input(self, dims: tuple, dtype: dtype = float16) -> DTensor:
         return self.cygraph.new_input(dims, dtype)
@@ -243,3 +245,9 @@ class KNGraph:
 
         return best_graph
 
+    def visualize(self, graph_name, file_name=None):
+        if file_name is None:
+            file_name = graph_name
+        operators = self.cygraph.get_graph_structure()
+        self.visualizer = visualizer(graph_name, file_name)
+        self.visualizer.draw_graphs(operators)

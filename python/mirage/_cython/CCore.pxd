@@ -45,12 +45,69 @@ cdef extern from "mirage/type.h" namespace "mirage::type":
         TB_EPILOGUE_ALLREDUCE = 3101,
         TB_EPILOGUE_ALLTOALL = 3102,
         TB_EPILOGUE_INVALID = 3199,
+    cdef enum KNOperatorType:
+        KN_UNKOWN = 1000,
+        KN_INPUT_OP = 1001,
+        KN_MATMUL_OP = 1003,
+        # ElementUnary
+        KN_EXP_OP = 1100,
+        KN_SQUARE_OP = 1101,
+        KN_SQRT_OP = 1102,
+        KN_SILU_OP = 1103,
+        # ElementBinary
+        KN_ADD_OP = 1200,
+        KN_MUL_OP = 1201,
+        KN_DIV_OP = 1202,
+        # Reduction & Normalization
+        KN_REDUCTION_0_OP = 1300,
+        KN_REDUCTION_1_OP = 1301,
+        KN_REDUCTION_2_OP = 1302,
+        KN_RMS_NORM_OP = 1350,
+        # Communication
+        KN_ALLREDUCE_OP = 1400,
+        KN_CUSTOMIZED_OP = 1999,
     cdef enum TBOperatorType:
+        TB_UNKOWN = 2000,
+        TB_INPUT_OP = 2001,
+        TB_OUTPUT_OP = 2002,
+        TB_MATMUL_OP = 2003,
+        // ElementUnary
+        TB_EXP_OP = 2100,
+        TB_SQUARE_OP = 2101,
+        TB_SQRT_OP = 2102,
+        TB_SILU_OP = 2103,
+        TB_MUL_SCALAR_OP = 2104,
+        // ElementBinary
+        TB_ADD_OP = 2200,
+        TB_MUL_OP = 2201,
+        TB_DIV_OP = 2202,
+        // Reduction and Normalization
+        TB_REDUCTION_FIRST_OP_ID = 2300,
+        TB_REDUCTION_0_OP = 2301,
+        TB_REDUCTION_1_OP = 2302,
+        TB_REDUCTION_2_OP = 2303,
+        TB_REDUCTION_0_TO_DIMX_OP = 2304,
+        TB_REDUCTION_1_TO_DIMX_OP = 2305,
+        TB_REDUCTION_2_TO_DIMX_OP = 2306,
+        TB_REDUCTION_LAST_OP_ID = 2349,
+        TB_RMS_NORM_OP = 2350,
+        // Concat
+        TB_CONCAT_FIRST_OP_ID = 2400,
+        TB_CONCAT_0_OP = 2400,
+        TB_CONCAT_1_OP = 2401,
+        TB_CONCAT_2_OP = 2402,
+        TB_CONCAT_LAST_OP_ID = 2410,
+        TB_CONCAT_THEN_MATMUL_OP = 2411,
+        // Forloop Accum
+        // LD indicates last dimension
+        TB_FORLOOP_ACCUM_FIRST_OP = 2500,
         TB_FORLOOP_ACCUM_NO_RED_OP = 2500,
         TB_FORLOOP_ACCUM_RED_LD_SUM_OP = 2501,
         TB_FORLOOP_ACCUM_RED_LD_MEAN_OP = 2502,
         TB_FORLOOP_ACCUM_RED_LD_RMS_OP = 2503,
         TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP = 2504,
+        TB_FORLOOP_ACCUM_LAST_OP = 2599,
+        TB_CUSTOMIZED_OP = 2999
 
 cdef extern from "mirage/layout.h" namespace "mirage::layout":
     # This must be consistent with mirage/layout.h
@@ -63,9 +120,9 @@ cdef extern from "mirage/layout.h" namespace "mirage::layout":
         SmemColumnMajor = 201,
         SmemUnknownLayout = 299
 
+cdef cppclass CppTBGraph
+
 cdef extern from "mirage/kernel/graph.h" namespace "mirage::kernel":
-    cdef cppclass KNOperator:
-        pass
     ctypedef struct CppDTensor "mirage::kernel::DTensor":
         DataType data_type
         DmemLayout layout
@@ -76,6 +133,14 @@ cdef extern from "mirage/kernel/graph.h" namespace "mirage::kernel":
         #void *data_ptr
         int owner_ts_idx
         pass
+
+    cdef cppclass CppKNOperator "mirage::kernel::KNOperator":
+        KNOperatorType op_type
+        vector[CppDTensor] input_tensors
+        vector[CppDTensor] output_tensors
+ 
+    cdef cppclass CppKNCustomizedOp(CppKNOperator):
+        CppTBGraph bgraph
 
     cdef cppclass CppKNGraph "mirage::kernel::Graph":
         CppKNGraph()
@@ -96,16 +161,20 @@ cdef extern from "mirage/kernel/graph.h" namespace "mirage::kernel":
         int get_input_dtensors(CppDTensor** cinputs)
         void generate_triton_program(const char *filepath)
         void generate_cuda_program(const char *filepath)
+        vector[CppKNOperator*] operators
 
 cdef extern from "mirage/threadblock/graph.h" namespace "mirage::threadblock":
-    cdef cppclass TBOperator:
-        pass
     ctypedef struct CppSTensor "mirage::threadblock::STensor":
         DataType data_type
         SmemLayout layout
         int num_dims
         int dim[4]
         int owner_ts_id
+    
+    cdef cppclass CppTBOperator "mirage::threadblock::TBOperator":
+        TBOperatorType op_type
+        vector[CppSTensor] input_tensors
+        vector[CppSTensor] output_tensors
 
     cdef cppclass CppTBGraph "mirage::threadblock::Graph":
         CppTBGraph(dim3 grid_dim,
@@ -139,6 +208,11 @@ cdef extern from "mirage/threadblock/graph.h" namespace "mirage::threadblock":
                         int dim)
         CppSTensor* forloop_accum(const CppSTensor *A,
                                TBOperatorType optype)
+        dim3 grid_dim
+        dim3 block_dim
+        int forloop_range
+        int reduction_dimx
+        vector[CppSTensor*] operators
 
 cdef extern from "mirage/search/search_c.h" namespace "mirage::search_c":
     ctypedef struct MInt3:

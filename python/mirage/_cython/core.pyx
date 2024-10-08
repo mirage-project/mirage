@@ -101,6 +101,100 @@ bfloat16 = dtype('bf16')
 float32 = dtype('fp32')
 float64 = dtype('fp64')
 
+def get_kn_operator_type_string(int op_type):
+    if op_type == 1000:
+        return "kn_unkown"
+    elif op_type == 1001:
+        return "kn_input_op"
+    elif op_type == 1003:
+        return "kn_matmul_op"
+    elif op_type == 1100:
+        return "kn_exp_op"
+    elif op_type == 1101:
+        return "kn_square_op"
+    elif op_type == 1102:
+        return "kn_sqrt_op"
+    elif op_type == 1103:
+        return "kn_silu_op"
+    elif op_type == 1200:
+        return "kn_add_op"
+    elif op_type == 1201:
+        return "kn_mul_op"
+    elif op_type == 1202:
+        return "kn_div_op"
+    elif op_type == 1300:
+        return "kn_reduction_0_op"
+    elif op_type == 1301:
+        return "kn_reduction_1_op"
+    elif op_type == 1302:
+        return "kn_reduction_2_op"
+    elif op_type == 1350:
+        return "kn_rms_norm_op"
+    elif op_type == 1400:
+        return "kn_allreduce_op"
+    elif op_type == 1999:
+        return "kn_customized_op"
+    else:
+        return "unknown_op_type"
+
+
+def get_tb_operator_type_string(int op_type):
+    if op_type == 2000:
+        return "tb_unkown"
+    elif op_type == 2001:
+        return "tb_input_op"
+    elif op_type == 2002:
+        return "tb_output_op"
+    elif op_type == 2003:
+        return "tb_matmul_op"
+    elif op_type == 2100:
+        return "tb_exp_op"
+    elif op_type == 2101:
+        return "tb_square_op"
+    elif op_type == 2102:
+        return "tb_sqrt_op"
+    elif op_type == 2103:
+        return "tb_silu_op"
+    elif op_type == 2104:
+        return "tb_mul_scalar_op"
+    elif op_type == 2200:
+        return "tb_add_op"
+    elif op_type == 2201:
+        return "tb_mul_op"
+    elif op_type == 2202:
+        return "tb_div_op"
+    elif op_type == 2301:
+        return "tb_reduction_0_op"
+    elif op_type == 2302:
+        return "tb_reduction_1_op"
+    elif op_type == 2303:
+        return "tb_reduction_2_op"
+    elif op_type == 2350:
+        return "tb_rms_norm_op"
+    elif op_type == 2400:
+        return "tb_concat_0_op"
+    elif op_type == 2401:
+        return "tb_concat_1_op"
+    elif op_type == 2402:
+        return "tb_concat_2_op"
+    elif op_type == 2411:
+        return "tb_concat_then_matmul_op"
+    elif op_type == 2500:
+        return "tb_forloop_accum_no_red_op"
+    elif op_type == 2501:
+        return "tb_forloop_accum_red_ld_sum_op"
+    elif op_type == 2502:
+        return "tb_forloop_accum_red_ld_mean_op"
+    elif op_type == 2503:
+        return "tb_forloop_accum_red_ld_rms_op"
+    elif op_type == 2504:
+        return "tb_forloop_accum_redtox_ld_sum_op"
+    elif op_type == 2999:
+        return "tb_customized_op"
+    else:
+        return "unknown_op_type"
+
+
 def convert_dtype_to_ctype(type : dtype):
     if type.is_int8():
         return DT_INT8
@@ -192,6 +286,13 @@ cdef class DTensor:
             else:
                 return convert_ctype_to_dtype(self.c_ptr.data_type)
 
+    property guid:
+        def __get__(self):
+            if self.c_ptr == NULL:
+                return None
+            else:
+                return self.c_ptr.guid
+
     def __cinit__(self, tensor):
         self._set_tensor(tensor)
 
@@ -236,6 +337,13 @@ cdef class STensor:
                 return None
             else:
                 return convert_ctype_to_dtype(self.c_ptr.data_type)
+
+    property guid:
+        def __get__(self):
+            if self.c_ptr == NULL:
+                return None
+            else:
+                return self.c_ptr.guid
 
     def __cinit__(self, tensor):
         self._set_tensor(tensor)
@@ -344,7 +452,58 @@ cdef class CyKNGraph:
             ptr = ctypes.cast(<unsigned long long>cinputs[i], ctypes.c_void_p)
             inputs.append(DTensor(ptr))
         return inputs
+    
+    # visualizer utils
 
+    def _kn_tensor_to_dict(self, CppDTensor t):
+        return {
+            "num_dims": t.num_dims,
+            "dims": [t.dim[i] for i in range(t.num_dims)],
+            "guid": t.guid
+        }
+
+    def _tb_tensor_to_dict(self, CppSTensor t):
+        return {
+            "num_dims": t.num_dims,
+            "dims": [t.dim[i] for i in range(t.num_dims)],
+            "guid": t.guid
+        }
+
+    def _get_tb_operator_info(self, CppTBOperator* op):
+        return {
+            "op_type": get_tb_operator_type_string(int(op.op_type)),
+            "input_tensors": [self._tb_tensor_to_dict(t) for t in op.input_tensors],
+            "output_tensors": [self._tb_tensor_to_dict(t) for t in op.output_tensors],
+        }
+
+    def _get_bgraph_info(self, CppKNCustomizedOp* op):
+        return {
+            "grid_dim": [op.bgraph.grid_dim.x, op.bgraph.grid_dim.y, op.bgraph.grid_dim.z],
+            "forloop_range": op.bgraph.forloop_range,
+            "operators": [self._get_tb_operator_info(op.bgraph.operators[i]) for i in range(op.bgraph.operators.size())]
+        }
+
+    def _get_kn_operator_info(self, CppKNOperator* op):
+        if op.op_type == KN_OPERATOR_CUSTOMIZED:
+            return {
+                "op_type": get_kn_operator_type_string(int(op.op_type)),
+                "input_tensors": [self._kn_tensor_to_dict(t) for t in op.input_tensors],
+                "output_tensors": [self._kn_tensor_to_dict(t) for t in op.output_tensors],
+                "bgraph": self._get_bgraph_info(<CppKNCustomizedOp*>op)
+            }
+        else:
+            return {
+                "op_type": get_kn_operator_type_string(int(op.op_type)),
+                "input_tensors": [self._kn_tensor_to_dict(t) for t in op.input_tensors],
+                "output_tensors": [self._kn_tensor_to_dict(t) for t in op.output_tensors],
+            }
+
+    def get_graph_structure(self):
+        operators = []
+        ops = self.p_kgraph.operators
+        for i in range(ops.size()):
+            operators.append(self._get_kn_operator_info(ops[i]))
+        return operators
 
 cdef class CyTBGraph:
     cdef CppTBGraph *p_bgraph #Hold a CppTBGraph instance
