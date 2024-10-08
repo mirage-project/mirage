@@ -30,6 +30,10 @@ V = torch.matmul(U, W13)
 V1, V3 = V.chunk(2, -1) # split omitted in the above figure
 output = torch.matmul(silu(V1) * V3, W2) # silu and this matmul omitted in the above figure
 ```
+<p align="center">
+<img src="img/llama-3-8b-rms-norm-linear.png?raw=true" alt="Mirage generates kernels that fuses RMSNorm and Linear" height="280"/>
+</p>
+
 To accelerate Transformer computation, we can use Mirage to generate GPU kernels that fuse RMSNorm and Linear, as shown in the code snippet below. Generating optimized kernels only requires write a few lines of code to describe the desired computation. The `get_mirage_kernel` function below returns the best kernel discovered by Mirage. These kernels can directly run as functions in your PyTorch programs. This kernel is 1.5–1.7x faster than running the two operators separately in PyTorch.
 
 ```python

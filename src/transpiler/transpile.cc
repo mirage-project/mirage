@@ -32,13 +32,27 @@ DT get_tensor_in_new_graph(std::unordered_map<size_t, DT> mapping,
 Transpiler::Transpiler(kernel::Graph const *graph,
                        TranspilerConfig const &config,
                        vector<vector<size_t>> const &input_strides,
-                       vector<kernel::DTensor const *> const &output_tensors)
+                       vector<kernel::DTensor const *> const &hint_output_tensors)
     : config(config), input_strides(input_strides) {
   // Currently we only support GPUs with compute capability >= 8.0 (A100+)
   // TODO(intlsy): Support older GPUs
   if (config.target_cc < GPU_CC::A100) {
     throw std::runtime_error("Unsupported target compute capability");
   }
+
+  // Currently assert a single output tensor and the tensor must belong to
+  // the last KNOp of the graph
+  // TODO(zhihao): support more general cases
+  assert(hint_output_tensors.size() <= 1 &&
+      "Mirage's transpiler currently assumes a single output tensor; "
+      "Report this issue to the Mirage developers"); 
+  vector<kernel::DTensor> graph_output_tensors;
+  assert(graph->operators.back()->output_tensors.size() == 1);
+  graph_output_tensors = graph->operators.back()->output_tensors;
+  if (hint_output_tensors.size() == 1) {
+    assert(hint_output_tensors[0]->owner_op == graph_output_tensors[0].owner_op);
+  }
+
   // using mirage::type namespace to simplify code
   using namespace mirage::type;
   // We need to construct a new kernel graph by decomposing forloop accumulators
@@ -251,8 +265,8 @@ Transpiler::Transpiler(kernel::Graph const *graph,
       }
     }
 
-    for (auto const &output_tensor_ptr : output_tensors) {
-      if (output_tensor_ptr->owner_op == op) {
+    for (auto const &t : graph_output_tensors) {
+      if (t.owner_op == op) {
         this->mugraph_output_tensors.insert(this->mugraph_output_tensors.end(),
                                             dtensor_outputs.begin(),
                                             dtensor_outputs.end());

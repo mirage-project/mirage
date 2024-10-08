@@ -77,7 +77,7 @@ In the Runtime, the operator fusion is implemented as "epilogues". An epilogue i
 
 During fusion, we are actually "chaining" operators, which means that we are dividing the original threadblock-level graph into several chains. Every chain contains a "leading" operator, and a series (possibly zero) elementwise-unary operators. Here is an illustration:
 
-![tb-fusion-chain-example](/docs/assets/transpiler/tb-fusion-chain.drawio.svg)
+![tb-fusion-chain-example](tb-fusion-chain.drawio.svg)
 
 ### Layout Resolution
 
@@ -104,7 +104,7 @@ The schedule has an impact on the performance in several aspects:
 
 Those objectives are sometimes conflicting, and we need to somehow find a balance between them. For example, consider the following computational graph:
 
-![tb-sched-conflict-example](/docs/assets/transpiler/tb-sched-conflict-example.drawio.svg)
+![tb-sched-conflict-example](tb-sched-conflict-example.drawio.svg)
 
 And there are two possible schedulings:
 
@@ -144,13 +144,13 @@ The idea of the xor method is to calculate the bitwise XOR between the row numbe
 
 Let's take an example. Assume we have a $8 \times 8$ tensor with row-major layout. We also have 8 banks (physical address $i$ will be mapped to bank $i \mod 8$). Here is an illustration of the original layout and the swizzled layout:
 
-![swizzle-xor-example](/docs/assets/transpiler/swizzle-xor-example.drawio.svg)
+![swizzle-xor-example](swizzle-xor-example.drawio.svg)
 
 This swizzling method requires no memory overhead, but it can only be used when the number of columns is a power of 2. For logic deciding the swizzling parameters ($B$, $M$, and $S$), please refer to code in `plan_tb_swizzle.cc`.
 
 Another method is the shift method. The idea is to calculate the new address by $new\_addr = old\_addr + row \times shift$, where $shift$ is a constant chosen by us. Intuitively, it looks like to "enlarge" the stride of the row to "shift" banks. This method can be used no matter how many columns the tensor has, but it requires a memory overhead of $shift \times num\_rows$. Here is an example:
 
-![swizzle-shift-example](/docs/assets/transpiler/swizzle-shift-example.drawio.svg)
+![swizzle-shift-example](swizzle-shift-example.drawio.svg)
 
 According to number theory, we can totally avoid bank conflict if the greatest common divisor (GCD) between the new stride (original stride + shift) and the number of banks is $1$. Since the number of banks is usually a power of 2, we can always find a shift $\in \{0, 1\}$ that satisfies this requirement, so the memory overhead is quite small.
 
@@ -168,7 +168,7 @@ Let's first introduce the Dynamic Storage Allocation (DSA) problem. The DSA prob
 
 Firstly, we show how we formulate the memory planning problem as DSA problem. For the size of every STensor, we can easily calculate it when doing layout resolution. For the time interval (lifetime), we carefully catorgorize STensors into the following types, and calculate the lifetime for every STensor:
 
-![tensor-lifecycle](/docs/assets/transpiler/tensor-lifecycle.drawio.svg)
+![tensor-lifecycle](tensor-lifecycle.drawio.svg)
 
 Then we can try to solve the DSA problem. Unfortunately, it's actually a NP-Complete problem. We just run some heuristics (first fit, best fit, last fit, random, etc.) and choose the one with the minimum peak shared memory usage.
 
@@ -188,7 +188,7 @@ However, the story is different when the size of the matrices is not divisible b
 
 As the figure below shows, the black grids are 16x16 tiles, and the green rectangle is the matrix that is not divisible by the MMA size. Areas marked with blue are out-of-bound elements. When performing `ldmatrix` on those areas, we must find a valid memory address to feed the `ldmatrix` instruction, instead of using the out-of-bound address. We do not care about their value. Areas marked with red are out-of-bound elements that may affect the final result. In addition to finding a valid memory address, we must also ensure that those elements are zero.
 
-![mma-non-divisible-example](/docs/assets/transpiler/mma-non-divisible-example.drawio.svg)
+![mma-non-divisible-example](mma-non-divisible-example.drawio.svg)
 
 Let's recap what `ldmatrix` does. As documented [here](https://docs.nvidia.com/cuda/parallel-thread-execution/#warp-level-matrix-instructions-ldmatrix), it has 3 variants: `.num = .x1`, `.num = .x2`, and `.num = .x4`. For simplicity, we only consider the `.num = .x4` variant. In this case, each thread provides an address which points to 8 elements in shared memory (those 8 elements should be in consecutive in one row or one column), and after this instruction, each thread will have 8 elements in registers, which will be fed to the MMA instruction.
 
@@ -208,7 +208,7 @@ CuTe provides the primitive `MMAAtom` to represent one basic matrix multiplicati
 
 Usually we have a number of threads that is a multiple of that group size, and while performing MMA, we want to distribute the large MMA jobs to every group, letting every group of threads perform serveral `MMAAtom`s (the `thr_layout` parameter in `make_tiled_mma`). For example, assume we are using `SM80_16x8x16_F16F16F16F16_TN` so the group size is 32, and we have 128 threads (4 groups). Assume the size of the entire MMA job is 64x32x16 (mxnxk), there are 4 methods to assign `MMAAtom`s to thread groups, as shown below (letters on squares indicating which group reads/writes data in this square):
 
-![mma-thr-layout-example](/docs/assets/transpiler/mma-thr-layout-example.drawio.svg)
+![mma-thr-layout-example](mma-thr-layout-example.drawio.svg)
 
 We need to find an optimal `thr_layout` which minimize the cost of data copying. To achieve this, we enumerate the number of groups along the m and n axes (we usually set the number of groups along the k axis to 1), then calculate the number of MMA atom calls and the total volume of data copied. Finally, we choose the layout with the minimum cost.
 
