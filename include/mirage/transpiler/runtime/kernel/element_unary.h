@@ -20,7 +20,7 @@ static __device__ __forceinline__ T perform_element_unary_op(T a) {
   if constexpr (OP == ElementUnaryOpType::EXP) {
     return (T)expf((float)a);
   } else if constexpr (OP == ElementUnaryOpType::SILU) {
-    return (T)(((float)a) * (1.0f / (1.0f + expf((float)a))));
+    return (T)(((float)a) * (1.0f / (1.0f + expf((float)-a))));
   } else if constexpr (OP == ElementUnaryOpType::SQUARE) {
     return (T)((float)a * (float)a);
   } else if constexpr (OP == ElementUnaryOpType::SQRT) {
