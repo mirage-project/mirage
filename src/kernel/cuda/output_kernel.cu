@@ -13,22 +13,24 @@
  * limitations under the License.
  */
 
-#pragma once
-
-#include <cstddef>
-#include <string>
-#include <vector>
-
+#include "mirage/kernel/device_memory_manager.h"
 #include "mirage/kernel/graph.h"
-#include "mirage/transpiler/structs.h"
+#include "mirage/kernel/operator.h"
+#include "mirage/utils/cuda_helper.h"
 
 namespace mirage {
-namespace transpiler {
+namespace kernel {
 
-TranspileResult
-    transpile(kernel::Graph const *g,
-              TranspilerConfig const &config,
-              std::vector<std::vector<size_t>> const &input_strides);
-
+bool KNOutputOp::profile(ProfileResult &profile) {
+  // Do nothing
+  profile.run_time = 0.0f;
+  return true;
 }
+
+bool KNOutputOp::fingerprint(void) {
+  // Do nothing
+  return true;
+}
+
+} // namespace kernel
 } // namespace mirage

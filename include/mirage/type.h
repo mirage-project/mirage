@@ -40,6 +40,7 @@ size_t get_datatype_size(DataType type);
 enum KNOperatorType {
   KN_UNKOWN = 1000,
   KN_INPUT_OP = 1001,
+  KN_OUTPUT_OP = 1002,
   KN_MATMUL_OP = 1003,
   // ElementUnary
   KN_EXP_OP = 1100,
@@ -64,6 +65,7 @@ NLOHMANN_JSON_SERIALIZE_ENUM(KNOperatorType,
                              {
                                  {KN_UNKOWN, "kn_unkown"},
                                  {KN_INPUT_OP, "kn_input_op"},
+                                 {KN_OUTPUT_OP, "kn_output_op"},
                                  {KN_MATMUL_OP, "kn_matmul_op"},
                                  {KN_REDUCTION_0_OP, "kn_reduction_0_op"},
                                  {KN_REDUCTION_1_OP, "kn_reduction_1_op"},

@@ -29,6 +29,7 @@ if __name__ == "__main__":
     tbgraph2.new_output(stensor=bO, output_map=(0, 1, -1))
     O = graph.customized(O, tbgraph2)
     
+    graph.mark_output(O[0])
     input_tensors = [
         torch.randn(2, 256, 64, dtype=torch.float16, device='cuda:0'),
         torch.randn(2, 64, 4096, dtype=torch.float16, device='cuda:0'),
@@ -36,11 +37,11 @@ if __name__ == "__main__":
     ]
 
     input_strides = [tensor.stride() for tensor in input_tensors]
-    p = mi.generate_cuda_program(graph.cygraph, target_cc=86, input_strides=input_strides, output_tensors=O)
+    p = mi.generate_cuda_program(graph.cygraph, target_cc=86, input_strides=input_strides)
     print(p["code"])
     # warm up runs
     for _ in range(16):
-        outputs = graph(inputs=input_tensors, outputs=O)
+        outputs = graph(inputs=input_tensors)
     torch.cuda.synchronize()
 
     starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
@@ -48,7 +49,7 @@ if __name__ == "__main__":
     timings=np.zeros((repetitions,1))
     starter.record()
     for rep in range(repetitions):
-        outputs = graph(inputs=input_tensors, outputs=O)
+        outputs = graph(inputs=input_tensors)
     ender.record()
     torch.cuda.synchronize()
     curr_time = starter.elapsed_time(ender)

@@ -39,6 +39,10 @@ private:
   // User-provided configuration
   TranspilerConfig config;
   vector<vector<size_t>> input_strides;
+  // Note that for certain output tensors, the output_stride vector
+  // is empty, indicating that users do not specify a layout and
+  // the transpiler can choose an arbitrary layout for that output tensor
+  vector<vector<size_t>> output_strides;
   vector<kn::DTensor> mugraph_output_tensors;
 
   // Distributed configuration
@@ -101,8 +105,7 @@ public:
   // Initialize the transpiler and resolve all configurations
   Transpiler(kernel::Graph const *g,
              TranspilerConfig const &config,
-             vector<vector<size_t>> const &input_strides,
-             vector<kn::DTensor const *> const &output_tensors);
+             vector<vector<size_t>> const &input_strides);
 
   TranspileResult generate_code() {
     this->resolve_distributed_config();
