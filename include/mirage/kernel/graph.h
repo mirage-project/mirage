@@ -37,17 +37,24 @@ public:
   Graph &operator=(Graph const &) = delete;
   // input operator
   DTensor new_input(std::vector<int> const &dims,
-                    std::vector<int> const &strides,
+                    std::vector<size_t> const &strides,
                     mirage::type::DataType data_type,
                     mirage::layout::DmemLayout layout);
   DTensor *new_input_ptr(std::vector<int> const &dims,
-                         std::vector<int> const &strides,
+                         std::vector<size_t> const &strides,
                          mirage::type::DataType data_type,
                          mirage::layout::DmemLayout layout);
   KNOperator *create_input_op(std::vector<int> const &dims,
-                              std::vector<int> const &strides,
+                              std::vector<size_t> const &strides,
                               mirage::type::DataType data_type,
                               mirage::layout::DmemLayout layout);
+  // output operator
+  void mark_output(DTensor const &A);
+  void mark_output(DTensor const *A);
+  void mark_output(DTensor const &A, std::vector<size_t> const &strides);
+  void mark_output(DTensor const *A, std::vector<size_t> const &strides);
+  KNOperator *create_output_op(DTensor const &A,
+                               std::vector<size_t> const &strides);
   // matmul operator
   DTensor matmul(DTensor const &A, DTensor const &B);
   DTensor *matmul(DTensor const *A, DTensor const *B);

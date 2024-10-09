@@ -104,6 +104,9 @@ class KNGraph:
             strides = reversed(strides)
         return self.cygraph.new_input(dims, tuple(strides), dtype)
     
+    def mark_output(self, A: DTensor, strides: tuple = None):
+        return self.cygraph.mark_output(A, strides)
+
     def matmul(self, A: DTensor, B: DTensor) -> DTensor:
         return self.cygraph.matmul(A, B)
     
@@ -170,9 +173,7 @@ class KNGraph:
         
         result = generate_cuda_program(self.cygraph, 
                                        target_cc=target_cc, 
-                                       input_strides=input_strides, 
-                                       output_strides=kwargs.get("output_strides", None),
-                                       output_tensors=kwargs.get("outputs", []))
+                                       input_strides=input_strides)
         # print(result)
         
         MIRAGE_ROOT = os.environ.get('MIRAGE_ROOT', 

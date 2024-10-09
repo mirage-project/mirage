@@ -80,9 +80,10 @@ cdef extern from "mirage/kernel/graph.h" namespace "mirage::kernel":
     cdef cppclass CppKNGraph "mirage::kernel::Graph":
         CppKNGraph()
         CppDTensor* new_input_ptr(vector[int] dims,
-                                  vector[int] strides,
+                                  vector[size_t] strides,
                                   DataType data_type,
                                   DmemLayout layout)
+        void mark_output(const CppDTensor* A, vector[size_t] strides)
         CppDTensor* matmul(const CppDTensor* A, const CppDTensor* B)
         CppDTensor* reduction(const CppDTensor* input, int dim, int size)
         CppDTensor* rms_norm(const CppDTensor* input, vector[int])
@@ -177,5 +178,4 @@ cdef extern from "mirage/transpiler/transpile.h" namespace "mirage::transpiler":
         vector[OutputTensorDirective] output_directives
     cdef TranspileResult transpile(const CppKNGraph *graph,
                        const TranspilerConfig config,
-                       vector[vector[size_t]] input_strides,
-                       vector[const CppDTensor*] output_tensors)
+                       vector[vector[size_t]] input_strides)

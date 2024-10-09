@@ -381,7 +381,7 @@ void KernelGraphGenerator::generate_kernel_graphs() {
     // Currently use the default strided layout
     // FIXME: remove the layout attr since we use the strides
     // to describe the layout
-    std::vector<int> strides;
+    std::vector<size_t> strides;
     int num_elements = 1;
     for (size_t i = 0; i < dim.size(); i++) {
       strides.push_back(num_elements);

@@ -22,6 +22,7 @@ if __name__ == "__main__":
     tO = tb_graph.div(tAccM, tAccX)
     tb_graph.new_output(stensor=tO, output_map=(1, -1, -1))
     O = graph.customized([X, W], tb_graph)
+    graph.mark_output(O[0])
     
     input_tensors = [
         torch.randn(16, 4096, dtype=torch.float16, device='cuda:0'),
@@ -29,12 +30,12 @@ if __name__ == "__main__":
     ]
 
     input_strides = [tensor.stride() for tensor in input_tensors]
-    p = mi.generate_cuda_program(graph.cygraph, target_cc=80, input_strides=input_strides, output_tensors=O)
+    p = mi.generate_cuda_program(graph.cygraph, target_cc=80, input_strides=input_strides)
     print(p["code"])
     # warm up runs
     for _ in range(16):
-        #outputs = graph(inputs=input_tensors, outputs=O)
-        torch_rms_norm(input_tensors[0], input_tensors[1])
+        outputs = graph(inputs=input_tensors)
+        #torch_rms_norm(input_tensors[0], input_tensors[1])
 
 
     torch.cuda.synchronize()
@@ -44,8 +45,8 @@ if __name__ == "__main__":
     timings=np.zeros((repetitions,1))
     starter.record()
     for rep in range(repetitions):
-        #outputs = graph(inputs=input_tensors, outputs=O)
-        torch_rms_norm(input_tensors[0], input_tensors[1])
+        outputs = graph(inputs=input_tensors)
+        #torch_rms_norm(input_tensors[0], input_tensors[1])
 
     ender.record()
     torch.cuda.synchronize()

@@ -184,7 +184,7 @@ void from_json(json const &j, Graph &g) {
         std::vector<int> dims = to_vector(num_dim, dim);
         // FIXME: the input strides should be obtained from the json file
         // Currently we assume the default strided layout
-        std::vector<int> strides;
+        std::vector<size_t> strides;
         int num_elements = 1;
         for (size_t i = 0; i < dims.size(); i++) {
           strides.push_back(num_elements);

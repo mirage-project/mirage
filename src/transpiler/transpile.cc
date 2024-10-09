@@ -29,28 +29,14 @@ DT get_tensor_in_new_graph(std::unordered_map<size_t, DT> mapping,
   return mapping[tensor_in_old_graph.guid];
 }
 
-Transpiler::Transpiler(kernel::Graph const *graph,
-                       TranspilerConfig const &config,
-                       vector<vector<size_t>> const &input_strides,
-                       vector<kernel::DTensor const *> const &hint_output_tensors)
-    : config(config), input_strides(input_strides) {
+Transpiler::Transpiler(kernel::Graph const *_graph,
+                       TranspilerConfig const &_config,
+                       vector<vector<size_t>> const &_input_strides)
+    : config(_config), input_strides(_input_strides) {
   // Currently we only support GPUs with compute capability >= 8.0 (A100+)
   // TODO(intlsy): Support older GPUs
   if (config.target_cc < GPU_CC::A100) {
     throw std::runtime_error("Unsupported target compute capability");
-  }
-
-  // Currently assert a single output tensor and the tensor must belong to
-  // the last KNOp of the graph
-  // TODO(zhihao): support more general cases
-  assert(hint_output_tensors.size() <= 1 &&
-      "Mirage's transpiler currently assumes a single output tensor; "
-      "Report this issue to the Mirage developers"); 
-  vector<kernel::DTensor> graph_output_tensors;
-  assert(graph->operators.back()->output_tensors.size() == 1);
-  graph_output_tensors = graph->operators.back()->output_tensors;
-  if (hint_output_tensors.size() == 1) {
-    assert(hint_output_tensors[0]->owner_op == graph_output_tensors[0].owner_op);
   }
 
   // using mirage::type namespace to simplify code
@@ -60,7 +46,8 @@ Transpiler::Transpiler(kernel::Graph const *graph,
   g = std::make_shared<kernel::Graph>();
   std::unordered_map<size_t, kernel::DTensor> dtensor_mapping;
 
-  for (auto const &op : graph->operators) {
+  int input_dtensor_idx = 0;
+  for (auto const &op : _graph->operators) {
     // Preparing dtensors in the new graph
     std::vector<kernel::DTensor> dtensor_inputs;
     std::vector<kernel::DTensor> dtensor_outputs;
@@ -77,10 +64,24 @@ Transpiler::Transpiler(kernel::Graph const *graph,
         for (int i = 0; i < dtensor.num_dims; i++) {
           dims.push_back(dtensor.dim[i]);
         }
+        // Assert that the input_strides of given tensors match the input_stride
+	// defined in mugraph
+	assert(input_dtensor_idx < (int) input_strides.size());
+	assert(input_op->input_strides == input_strides[input_dtensor_idx++]);
         kernel::DTensor dt =
             g->new_input(dims, input_op->input_strides, dtensor.data_type, dtensor.layout);
         dtensor_mapping[op->output_tensors[0].guid] = dt;
         dtensor_outputs.push_back(dt);
+        break;
+      }
+      case KN_OUTPUT_OP: {
+        // Each KNOutputOp takes one input and has no output
+        assert(dtensor_inputs.size() == 1);
+        kernel::KNOutputOp * output_op = static_cast<kernel::KNOutputOp*>(op);
+	output_strides.push_back(output_op->output_strides);
+        this->mugraph_output_tensors.insert(this->mugraph_output_tensors.end(),
+                                            dtensor_inputs.begin(),
+                                            dtensor_inputs.end());
         break;
       }
       case KN_MATMUL_OP: {
@@ -265,15 +266,6 @@ Transpiler::Transpiler(kernel::Graph const *graph,
         assert(false && "Unsupported operator");
       }
     }
-
-    for (auto const &t : graph_output_tensors) {
-      if (t.owner_op == op) {
-        this->mugraph_output_tensors.insert(this->mugraph_output_tensors.end(),
-                                            dtensor_outputs.begin(),
-                                            dtensor_outputs.end());
-        break;
-      }
-    }
   }
 
   // Check the following:
@@ -301,9 +293,8 @@ Transpiler::Transpiler(kernel::Graph const *graph,
 TranspileResult
     transpile(kernel::Graph const *g,
               TranspilerConfig const &config,
-              std::vector<std::vector<size_t>> const &input_strides,
-              std::vector<kernel::DTensor const *> const &output_tensors) {
-  Transpiler transpiler(g, config, input_strides, output_tensors);
+              std::vector<std::vector<size_t>> const &input_strides) {
+  Transpiler transpiler(g, config, input_strides);
   TranspileResult result = transpiler.generate_code();
   return result;
 }
