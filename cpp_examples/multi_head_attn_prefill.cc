@@ -9,12 +9,18 @@ int main(int argc, char **argv) {
   int batch_size = miragetest::BATCH_SIZE;
   kernel::Graph ref_graph;
   {
-    kernel::DTensor Q = ref_graph.new_input(
-        {32 * batch_size, 256, 64}, type::DT_FLOAT16, layout::DmemRowMajor);
-    kernel::DTensor K = ref_graph.new_input(
-        {32 * batch_size, 64, 1024}, type::DT_FLOAT16, layout::DmemColumnMajor);
-    kernel::DTensor V = ref_graph.new_input(
-        {32 * batch_size, 1024, 64}, type::DT_FLOAT16, layout::DmemColumnMajor);
+    kernel::DTensor Q = ref_graph.new_input({32 * batch_size, 256, 64},
+                                            {16384, 64, 1},
+                                            type::DT_FLOAT16,
+                                            layout::DmemRowMajor);
+    kernel::DTensor K = ref_graph.new_input({32 * batch_size, 64, 1024},
+                                            {65536, 1024, 1},
+                                            type::DT_FLOAT16,
+                                            layout::DmemColumnMajor);
+    kernel::DTensor V = ref_graph.new_input({32 * batch_size, 1024, 64},
+                                            {65536, 64, 1},
+                                            type::DT_FLOAT16,
+                                            layout::DmemColumnMajor);
     kernel::DTensor A = ref_graph.matmul(Q, K);
     kernel::DTensor E = ref_graph.exp(A);
     kernel::DTensor S = ref_graph.reduction(E, 2 /*dim*/);
@@ -36,12 +42,18 @@ int main(int argc, char **argv) {
                                     .copy_fingerprint_to_ctensor();
 
   kernel::Graph graph;
-  kernel::DTensor Q = graph.new_input(
-      {32 * batch_size, 256, 64}, type::DT_FLOAT16, layout::DmemRowMajor);
-  kernel::DTensor K = graph.new_input(
-      {32 * batch_size, 64, 1024}, type::DT_FLOAT16, layout::DmemColumnMajor);
-  kernel::DTensor V = graph.new_input(
-      {32 * batch_size, 1024, 64}, type::DT_FLOAT16, layout::DmemColumnMajor);
+  kernel::DTensor Q = graph.new_input({32 * batch_size, 256, 64},
+                                      {16384, 64, 1},
+                                      type::DT_FLOAT16,
+                                      layout::DmemRowMajor);
+  kernel::DTensor K = graph.new_input({32 * batch_size, 64, 1024},
+                                      {65536, 1024, 1},
+                                      type::DT_FLOAT16,
+                                      layout::DmemColumnMajor);
+  kernel::DTensor V = graph.new_input({32 * batch_size, 1024, 64},
+                                      {65536, 64, 1},
+                                      type::DT_FLOAT16,
+                                      layout::DmemColumnMajor);
   std::vector<kernel::DTensor> outputs;
   {
     threadblock::ExecutionPlan plan;

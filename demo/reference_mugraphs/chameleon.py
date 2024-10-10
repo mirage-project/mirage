@@ -47,7 +47,7 @@ if __name__ == "__main__":
     ]
 
     input_strides = [tensor.stride() for tensor in input_tensors]
-    p = mi.generate_cuda_program(graph.cygraph, target_cc=86, input_strides=input_strides, output_tensors=O)
+    p = mi.generate_cuda_program(graph.cygraph, target_cc=86, input_strides=input_strides)
     print(p["code"])
     # warm up runs
     for _ in range(16):
