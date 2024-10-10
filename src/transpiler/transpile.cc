@@ -50,14 +50,13 @@ Transpiler::Transpiler(kernel::Graph const *_graph,
   for (auto const &op : _graph->operators) {
     // Preparing dtensors in the new graph
     std::vector<kernel::DTensor> dtensor_inputs;
-    std::vector<kernel::DTensor> dtensor_outputs;
     for (auto const &t : op->input_tensors) {
       dtensor_inputs.push_back(get_tensor_in_new_graph(dtensor_mapping, t));
     }
     switch (op->op_type) {
       case KN_INPUT_OP: {
         // Assert that an input op has exactly one output dtensor
-        kernel::KNInputOp * input_op = static_cast<kernel::KNInputOp*>(op);
+        kernel::KNInputOp *input_op = static_cast<kernel::KNInputOp *>(op);
         assert(op->output_tensors.size() == 1);
         kernel::DTensor const &dtensor = op->output_tensors[0];
         std::vector<int> dims;
@@ -65,20 +64,24 @@ Transpiler::Transpiler(kernel::Graph const *_graph,
           dims.push_back(dtensor.dim[i]);
         }
         // Assert that the input_strides of given tensors match the input_stride
-	// defined in mugraph
-	assert(input_dtensor_idx < (int) input_strides.size());
-	assert(input_op->input_strides == input_strides[input_dtensor_idx++]);
-        kernel::DTensor dt =
-            g->new_input(dims, input_op->input_strides, dtensor.data_type, dtensor.layout);
+        // defined in mugraph
+        assert(input_dtensor_idx < (int)input_strides.size());
+        assert(input_op->input_strides == input_strides[input_dtensor_idx++]);
+        kernel::DTensor dt = g->new_input(
+            dims, input_op->input_strides, dtensor.data_type, dtensor.layout);
         dtensor_mapping[op->output_tensors[0].guid] = dt;
-        dtensor_outputs.push_back(dt);
         break;
       }
       case KN_OUTPUT_OP: {
         // Each KNOutputOp takes one input and has no output
         assert(dtensor_inputs.size() == 1);
-        kernel::KNOutputOp * output_op = static_cast<kernel::KNOutputOp*>(op);
-	output_strides.push_back(output_op->output_strides);
+        kernel::KNOutputOp *output_op = static_cast<kernel::KNOutputOp *>(op);
+        g->mark_output(dtensor_inputs[0], output_op->output_strides);
+        if (!output_op->output_strides.empty()) {
+          assert(output_op->output_strides.size() ==
+                 dtensor_inputs[0].num_dims);
+          output_strides.push_back(output_op->output_strides);
+        }
         this->mugraph_output_tensors.insert(this->mugraph_output_tensors.end(),
                                             dtensor_inputs.begin(),
                                             dtensor_inputs.end());
@@ -90,7 +93,6 @@ Transpiler::Transpiler(kernel::Graph const *_graph,
         assert(op->output_tensors.size() == 1);
         kernel::DTensor dt = g->matmul(dtensor_inputs[0], dtensor_inputs[1]);
         dtensor_mapping[op->output_tensors[0].guid] = dt;
-        dtensor_outputs.push_back(dt);
         break;
       }
       case KN_EXP_OP:
@@ -101,7 +103,6 @@ Transpiler::Transpiler(kernel::Graph const *_graph,
         assert(op->output_tensors.size() == 1);
         kernel::DTensor dt = g->elementunary(dtensor_inputs[0], op->op_type);
         dtensor_mapping[op->output_tensors[0].guid] = dt;
-        dtensor_outputs.push_back(dt);
         break;
       }
       case KN_ADD_OP:
@@ -112,7 +113,6 @@ Transpiler::Transpiler(kernel::Graph const *_graph,
         kernel::DTensor dt =
             g->elementbinary(dtensor_inputs[0], dtensor_inputs[1], op->op_type);
         dtensor_mapping[op->output_tensors[0].guid] = dt;
-        dtensor_outputs.push_back(dt);
         break;
       }
       case KN_REDUCTION_0_OP:
@@ -258,7 +258,6 @@ Transpiler::Transpiler(kernel::Graph const *_graph,
         assert(dts.size() == op->output_tensors.size());
         for (size_t i = 0; i < dts.size(); i++) {
           dtensor_mapping[op->output_tensors[i].guid] = dts[i];
-          dtensor_outputs.push_back(dts[i]);
         }
         break;
       }
@@ -270,7 +269,7 @@ Transpiler::Transpiler(kernel::Graph const *_graph,
 
   // Check the following:
   // 1. there is no non-default forloop accum tb operators in g
-  // 2. there is no threadblock rms_norm operators in g (should be decomposed) 
+  // 2. there is no threadblock rms_norm operators in g (should be decomposed)
   for (auto const &op : g->operators) {
     if (op->op_type == KN_CUSTOMIZED_OP) {
       kernel::KNCustomizedOp *customized_op =

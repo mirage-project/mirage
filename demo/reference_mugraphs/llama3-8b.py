@@ -25,6 +25,7 @@ def get_rms_linear():
     tO = tb_graph.div(tAccM, tAccX)
     tb_graph.new_output(stensor=tO, output_map=(1, -1, -1))
     O = graph.customized([X, W], tb_graph)
+    graph.mark_output(O[0])
     return graph
 
 def get_rms_linear2():
@@ -40,6 +41,7 @@ def get_rms_linear2():
     tO = tb_graph.div(tAccM, tAccX)
     tb_graph.new_output(stensor=tO, output_map=(1, -1, -1))
     O = graph.customized([X, W], tb_graph)
+    graph.mark_output(O[0])
     return graph
    
 def mirage_llama(X, Wqkv, Wo, W13, W2, Kcache, Vcache, kernels):

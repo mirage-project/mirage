@@ -8,11 +8,15 @@ int main(int argc, char **argv) {
   kernel::Graph ref_graph;
   {
     kernel::DTensor X = ref_graph.new_input(
-        {8, 8, 4096}, type::DT_FLOAT16, layout::DmemRowMajor);
-    kernel::DTensor A = ref_graph.new_input(
-        {8, 4096, 4096}, type::DT_FLOAT16, layout::DmemColumnMajor);
-    kernel::DTensor B = ref_graph.new_input(
-        {8, 4096, 4096}, type::DT_FLOAT16, layout::DmemColumnMajor);
+        {8, 8, 4096}, {32768, 4096, 1}, type::DT_FLOAT16, layout::DmemRowMajor);
+    kernel::DTensor A = ref_graph.new_input({8, 4096, 4096},
+                                            {16777216, 4096, 1},
+                                            type::DT_FLOAT16,
+                                            layout::DmemColumnMajor);
+    kernel::DTensor B = ref_graph.new_input({8, 4096, 4096},
+                                            {16777216, 4096, 1},
+                                            type::DT_FLOAT16,
+                                            layout::DmemColumnMajor);
     kernel::DTensor D = ref_graph.matmul(X, A);
     kernel::DTensor E = ref_graph.exp(D);
     ref_graph.matmul(E, B);
@@ -32,25 +36,32 @@ int main(int argc, char **argv) {
                                     ->output_tensors[0]
                                     .copy_fingerprint_to_ctensor();
   kernel::Graph graph;
-  kernel::DTensor X =
-      graph.new_input({8, 8, 4096}, type::DT_FLOAT16, layout::DmemRowMajor);
-  kernel::DTensor A = graph.new_input(
-      {8, 4096, 4096}, type::DT_FLOAT16, layout::DmemColumnMajor);
-  kernel::DTensor B = graph.new_input(
-      {8, 4096, 4096}, type::DT_FLOAT16, layout::DmemColumnMajor);
+  kernel::DTensor X = graph.new_input(
+      {8, 8, 4096}, {32768, 4096, 1}, type::DT_FLOAT16, layout::DmemRowMajor);
+  kernel::DTensor A = graph.new_input({8, 4096, 4096},
+                                      {16777216, 4096, 1},
+                                      type::DT_FLOAT16,
+                                      layout::DmemColumnMajor);
+  kernel::DTensor B = graph.new_input({8, 4096, 4096},
+                                      {16777216, 4096, 1},
+                                      type::DT_FLOAT16,
+                                      layout::DmemColumnMajor);
 
   kernel::DTensor output = graph.matmul(X, A);
   {
     namespace tb = mirage::threadblock;
     dim3 grid_dim = {8, 32, 1}, block_dim = {128, 1, 1};
     tb::Graph bgraph(grid_dim, block_dim, 16, 64);
-    tb::STensor bX = bgraph.new_input(output, {0, -1, -1}, 2, layout::SmemRowMajor);
-    tb::STensor bB = bgraph.new_input(B, {0, 2, -1}, 1, layout::SmemColumnMajor);
+    tb::STensor bX =
+        bgraph.new_input(output, {0, -1, -1}, 2, layout::SmemRowMajor);
+    tb::STensor bB =
+        bgraph.new_input(B, {0, 2, -1}, 1, layout::SmemColumnMajor);
     tb::STensor bE = bgraph.exp(bX);
     tb::STensor bO = bgraph.matmul(bE, bB);
     bO = bgraph.forloop_accum(bO, type::TB_FORLOOP_ACCUM_NO_RED_OP);
     bgraph.mark_output(bO, {0, 2, -1}, -1, type::TB_EPILOGUE_NONE);
-    std::vector<kernel::DTensor> outputs = graph.customized({output, B}, bgraph);
+    std::vector<kernel::DTensor> outputs =
+        graph.customized({output, B}, bgraph);
     assert(outputs.size() == 1);
   }
 

@@ -13,9 +13,9 @@
  * limitations under the License.
  */
 
-#include "mirage/kernel/operator.h"
 #include "mirage/kernel/device_memory_manager.h"
 #include "mirage/kernel/graph.h"
+#include "mirage/kernel/operator.h"
 
 namespace mirage {
 namespace kernel {
@@ -30,16 +30,14 @@ void Graph::mark_output(DTensor const *A) {
   return mark_output(A);
 }
 
-void Graph::mark_output(DTensor const &A,
-                        std::vector<size_t> const &strides) {
+void Graph::mark_output(DTensor const &A, std::vector<size_t> const &strides) {
   KNOperator *op = create_output_op(A, strides);
   assert(op != nullptr);
   operators.push_back(op);
   assert(op->output_tensors.size() == 0);
 }
 
-void Graph::mark_output(DTensor const *A,
-                        std::vector<size_t> const &strides) {
+void Graph::mark_output(DTensor const *A, std::vector<size_t> const &strides) {
   KNOperator *op = create_output_op(*A, strides);
   assert(op != nullptr);
   operators.push_back(op);
