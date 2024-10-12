@@ -262,6 +262,13 @@ cdef class DTensor:
             ptr = ctypes.cast(tensor, ctypes.c_void_p).value
             self.c_ptr = <CppDTensor*>(ptr)
 
+    property guid:
+        def __get__(self):
+            if self.c_ptr == NULL:
+                return None
+            else:
+                return self.c_ptr.guid
+
     property tensor:
         def __get__(self):
             if self.c_ptr == NULL:
@@ -285,13 +292,6 @@ cdef class DTensor:
                 return None
             else:
                 return convert_ctype_to_dtype(self.c_ptr.data_type)
-
-    property guid:
-        def __get__(self):
-            if self.c_ptr == NULL:
-                return None
-            else:
-                return self.c_ptr.guid
 
     def __cinit__(self, tensor):
         self._set_tensor(tensor)
@@ -313,7 +313,12 @@ cdef class STensor:
         else:
             ptr = ctypes.cast(tensor, ctypes.c_void_p).value
             self.c_ptr = <CppSTensor*>(ptr)
-
+    property guid:
+        def __get__(self):
+            if self.c_ptr == NULL:
+                return None
+            else:
+                return self.c_ptr.guid
     property tensor:
         def __get__(self):
             if self.c_ptr == NULL:
@@ -338,13 +343,6 @@ cdef class STensor:
             else:
                 return convert_ctype_to_dtype(self.c_ptr.data_type)
 
-    property guid:
-        def __get__(self):
-            if self.c_ptr == NULL:
-                return None
-            else:
-                return self.c_ptr.guid
-
     def __cinit__(self, tensor):
         self._set_tensor(tensor)
 
@@ -354,6 +352,78 @@ cdef class STensor:
         else:
             assert False , "Error: index out of range"
             return None
+
+cdef class CyKNOperator:
+    cdef CppKNOperator* c_ptr # Hold a CppKNOperator instance
+
+    cdef inline _set_operator(self, op):
+        cdef unsigned long long ptr
+        if op is None:
+            self.c_ptr = <CppKNOperator*>(NULL)
+        else:
+            # ptr = ctypes.cast(op, ctypes.c_void_p).value
+            # self.c_ptr = <CppKNOperator*>(ptr)
+            self.c_ptr = <CppKNOperator*>(op)
+
+    property input_tensors:
+        def __get__(self):
+            if self.c_ptr == NULL:
+                return None
+            else:
+                return [DTensor(t) for t in self.c_ptr.input_tensors]
+
+    property output_tensors:
+        def __get__(self):
+            if self.c_ptr == NULL:
+                return None
+            else:
+                return [DTensor(t) for t in self.c_ptr.output_tensors]
+
+    property op_type:
+        def __get__(self):
+            if self.c_ptr == NULL:
+                return None
+            else:
+                return get_kn_operator_type_string(int(self.c_ptr.op_type))
+
+    def __cinit__(self, CppKNOperator* op):
+        # self._set_operator(op)
+        self.c_ptr = op
+
+cdef class CyTBOperator:
+    cdef CppTBOperator* c_ptr # Hold a CppTBOperator instance
+
+    cdef inline _set_operator(self, op):
+        cdef unsigned long long ptr
+        if op is None:
+            self.c_ptr = <CppTBOperator*>(NULL)
+        else:
+            ptr = ctypes.cast(op, ctypes.c_void_p).value
+            self.c_ptr = <CppTBOperator*>(ptr)
+
+    property input_tensors:
+        def __get__(self):
+            if self.c_ptr == NULL:
+                return None
+            else:
+                return [STensor(t) for t in self.c_ptr.input_tensors]
+
+    property output_tensors:
+        def __get__(self):
+            if self.c_ptr == NULL:
+                return None
+            else:
+                return [STensor(t) for t in self.c_ptr.output_tensors]
+
+    property op_type:
+        def __get__(self):
+            if self.c_ptr == NULL:
+                return None
+            else:
+                return get_tb_operator_type_string(int(self.c_ptr.op_type))
+
+    def __cinit__(self, op):
+        self._set_operator(op)
 
 
 cdef class CyKNGraph:
@@ -421,7 +491,7 @@ cdef class CyKNGraph:
         t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
         return DTensor(t)
 
-    def customized(self, list[DTensor] inputs, CyTBGraph bgraph):
+    def customized(self, list inputs, CyTBGraph bgraph):
         cdef vector[const CppDTensor*] cinputs
         cinputs.resize(len(inputs))
         cdef DTensor t
@@ -455,41 +525,41 @@ cdef class CyKNGraph:
     
     # visualizer utils
 
-    def _kn_tensor_to_dict(self, CppDTensor t):
+    def _kn_tensor_to_dict(self, DTensor t):
         return {
             "num_dims": t.num_dims,
             "dims": [t.dim[i] for i in range(t.num_dims)],
             "guid": t.guid
         }
 
-    def _tb_tensor_to_dict(self, CppSTensor t):
+    def _tb_tensor_to_dict(self, STensor t):
         return {
             "num_dims": t.num_dims,
             "dims": [t.dim[i] for i in range(t.num_dims)],
             "guid": t.guid
         }
 
-    def _get_tb_operator_info(self, CppTBOperator* op):
+    def _get_tb_operator_info(self, CyTBOperator op):
         return {
             "op_type": get_tb_operator_type_string(int(op.op_type)),
             "input_tensors": [self._tb_tensor_to_dict(t) for t in op.input_tensors],
             "output_tensors": [self._tb_tensor_to_dict(t) for t in op.output_tensors],
         }
 
-    def _get_bgraph_info(self, CppKNCustomizedOp* op):
+    def _get_bgraph_info(self, CyKNOperator op):
         return {
             "grid_dim": [op.bgraph.grid_dim.x, op.bgraph.grid_dim.y, op.bgraph.grid_dim.z],
             "forloop_range": op.bgraph.forloop_range,
-            "operators": [self._get_tb_operator_info(op.bgraph.operators[i]) for i in range(op.bgraph.operators.size())]
+            "operators": [self._get_tb_operator_info(CyTBOperator(<CppTBOperator*>op.bgraph.operators[i])) for i in op.bgraph.operators.size()]
         }
 
-    def _get_kn_operator_info(self, CppKNOperator* op):
-        if op.op_type == KN_OPERATOR_CUSTOMIZED:
+    def _get_kn_operator_info(self, CyKNOperator op):
+        if op.op_type == KN_CUSTOMIZED_OP:
             return {
                 "op_type": get_kn_operator_type_string(int(op.op_type)),
                 "input_tensors": [self._kn_tensor_to_dict(t) for t in op.input_tensors],
                 "output_tensors": [self._kn_tensor_to_dict(t) for t in op.output_tensors],
-                "bgraph": self._get_bgraph_info(<CppKNCustomizedOp*>op)
+                "bgraph": self._get_bgraph_info(op._ptrc)
             }
         else:
             return {
@@ -501,8 +571,10 @@ cdef class CyKNGraph:
     def get_graph_structure(self):
         operators = []
         ops = self.p_kgraph.operators
+        cdef CppKNOperator* operator_ptr
         for i in range(ops.size()):
-            operators.append(self._get_kn_operator_info(ops[i]))
+            operator_ptr = ops[i] 
+            operators.append(self._get_kn_operator_info(CyKNOperator(operator_ptr)))
         return operators
 
 cdef class CyTBGraph:

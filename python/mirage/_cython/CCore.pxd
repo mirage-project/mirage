@@ -71,17 +71,17 @@ cdef extern from "mirage/type.h" namespace "mirage::type":
         TB_INPUT_OP = 2001,
         TB_OUTPUT_OP = 2002,
         TB_MATMUL_OP = 2003,
-        // ElementUnary
+        # ElementUnary
         TB_EXP_OP = 2100,
         TB_SQUARE_OP = 2101,
         TB_SQRT_OP = 2102,
         TB_SILU_OP = 2103,
         TB_MUL_SCALAR_OP = 2104,
-        // ElementBinary
+        # ElementBinary
         TB_ADD_OP = 2200,
         TB_MUL_OP = 2201,
         TB_DIV_OP = 2202,
-        // Reduction and Normalization
+        # Reduction and Normalization
         TB_REDUCTION_FIRST_OP_ID = 2300,
         TB_REDUCTION_0_OP = 2301,
         TB_REDUCTION_1_OP = 2302,
@@ -91,15 +91,15 @@ cdef extern from "mirage/type.h" namespace "mirage::type":
         TB_REDUCTION_2_TO_DIMX_OP = 2306,
         TB_REDUCTION_LAST_OP_ID = 2349,
         TB_RMS_NORM_OP = 2350,
-        // Concat
+        # Concat
         TB_CONCAT_FIRST_OP_ID = 2400,
         TB_CONCAT_0_OP = 2400,
         TB_CONCAT_1_OP = 2401,
         TB_CONCAT_2_OP = 2402,
         TB_CONCAT_LAST_OP_ID = 2410,
         TB_CONCAT_THEN_MATMUL_OP = 2411,
-        // Forloop Accum
-        // LD indicates last dimension
+        # Forloop Accum
+        # LD indicates last dimension
         TB_FORLOOP_ACCUM_FIRST_OP = 2500,
         TB_FORLOOP_ACCUM_NO_RED_OP = 2500,
         TB_FORLOOP_ACCUM_RED_LD_SUM_OP = 2501,
@@ -170,6 +170,7 @@ cdef extern from "mirage/threadblock/graph.h" namespace "mirage::threadblock":
         int num_dims
         int dim[4]
         int owner_ts_id
+        size_t guid
     
     cdef cppclass CppTBOperator "mirage::threadblock::TBOperator":
         TBOperatorType op_type
@@ -212,7 +213,7 @@ cdef extern from "mirage/threadblock/graph.h" namespace "mirage::threadblock":
         dim3 block_dim
         int forloop_range
         int reduction_dimx
-        vector[CppSTensor*] operators
+        vector[CppTBOperator*] operators
 
 cdef extern from "mirage/search/search_c.h" namespace "mirage::search_c":
     ctypedef struct MInt3:
