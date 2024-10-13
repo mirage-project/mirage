@@ -21,6 +21,7 @@ def optimize_lora(checkpoint):
     E = graph.matmul(D, B)
     C = graph.matmul(X, W)
     O = graph.add(C, E)
+    graph.mark_output(O)
 
     input_tensors = [
         torch.randn(16, 4096, dtype=torch.float16, device='cuda:0'),

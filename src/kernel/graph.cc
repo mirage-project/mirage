@@ -18,6 +18,7 @@
 #include "mirage/kernel/device_memory_manager.h"
 #include "mirage/utils/hash_utils.h"
 
+#include <algorithm>
 #include <iostream>
 
 namespace mirage {
@@ -51,6 +52,22 @@ int Graph::get_input_dtensors(DTensor **inputs) {
     }
   }
   return num_inputs;
+}
+
+int Graph::get_input_dtensor_layout(DTensor const *input, int *strides) {
+  for (auto const &op : this->operators) {
+    if (op == input->owner_op) {
+      assert(op->op_type == mirage::type::KN_INPUT_OP && "input is not an KNInputOp");
+      KNInputOp * input_op = static_cast<KNInputOp*>(op);
+      int num_dims = (int) input_op->input_strides.size();
+      for (int i = 0; i < num_dims; i++) {
+        strides[i] = input_op->input_strides[i];
+      }
+      return num_dims;
+    }
+  }
+  assert(false && "Cannot find input dtensor");
+  return 0;
 }
 
 bool Graph::can_allocate(DTensor const &tensor,
@@ -165,7 +182,16 @@ void from_json(json const &j, Graph &g) {
         jop.at("output_tensors")[0].at("layout").get_to(layout);
         jop.at("output_tensors")[0].at("guid").get_to(guidO);
         std::vector<int> dims = to_vector(num_dim, dim);
-        DTensor const &output = g.new_input(dims, data_type, layout);
+        // FIXME: the input strides should be obtained from the json file
+        // Currently we assume the default strided layout
+        std::vector<size_t> strides;
+        int num_elements = 1;
+        for (size_t i = 0; i < dims.size(); i++) {
+          strides.push_back(num_elements);
+          num_elements *= dims[dims.size() - 1 - i];
+        }
+        std::reverse(strides.begin(), strides.end());
+        DTensor const &output = g.new_input(dims, strides, data_type, layout);
         guid_mapping[output.guid] = guidO;
         break;
       }

@@ -7,7 +7,7 @@ import torch.nn as nn
 
 def is_closed(A, B):
     err = 0
-    assert (A.shape == B.shape) & (A.dim() == 2)
+    assert (A.shape == B.shape) & (A.stride() == B.stride()) & (A.dim() == 2)
     for i in range(A.shape[0]):
         for j in range(A.shape[1]):
             max_val = max(abs(A[i, j].item()), abs(B[i, j].item()))
@@ -75,7 +75,7 @@ def test_gated_mlp(test_config):
     tO = tb_graph.mul(tS, tA2)
     tb_graph.new_output(stensor=tO, output_map=test_config["tb_outout_map"])
     O = graph.customized([X, W1, W2], tb_graph)
-
+    graph.mark_output(O[0], (test_config["input_size"][1], 1))
     # uniform distribution from 0 to 0.5
     input_tensors = [
         (
@@ -100,10 +100,10 @@ def test_gated_mlp(test_config):
     ]
 
     input_strides = [tensor.stride() for tensor in input_tensors]
-    p = mi.generate_cuda_program(
-        graph.cygraph, target_cc=86, input_strides=input_strides, output_tensors=O
-    )
-    print(p["code"])
+    # p = mi.generate_cuda_program(
+    #     graph.cygraph, target_cc=86, input_strides=input_strides
+    # )
+    # print(p["code"])
     outputs = graph(inputs=input_tensors, outputs=O)
 
     # check correctness with torch
@@ -202,6 +202,14 @@ def test_group_query_attention(test_config):
     bO = tbgraph2.div(bA, bB)
     tbgraph2.new_output(stensor=bO, output_map=test_config["tb1_outout_map"])
     O = graph.customized(O, tbgraph2)
+    graph.mark_output(
+        O[0],
+        (
+            test_config["query_size"][1] * test_config["query_size"][2],
+            test_config["query_size"][2],
+            1,
+        ),
+    )
 
     input_tensors = [
         (
@@ -222,10 +230,10 @@ def test_group_query_attention(test_config):
     ]
 
     input_strides = [tensor.stride() for tensor in input_tensors]
-    p = mi.generate_cuda_program(
-        graph.cygraph, target_cc=86, input_strides=input_strides, output_tensors=O
-    )
-    print(p["code"])
+    # p = mi.generate_cuda_program(
+    #     graph.cygraph, target_cc=86, input_strides=input_strides
+    # )
+    # print(p["code"])
     outputs = graph(inputs=input_tensors, outputs=O)
 
     attention_score = torch.matmul(input_tensors[0], input_tensors[1])
@@ -270,8 +278,8 @@ def test_lora():
 )
 def test_rms_norm(test_config):
     graph = mi.new_kernel_graph()
-    X = graph.new_input(test_config["input_size"], dtype=mi.float16)
-    W = graph.new_input(test_config["weight_size"], dtype=mi.float16)
+    X = graph.new_input(test_config["input_size"], (1, 8), dtype=mi.float16)
+    W = graph.new_input(test_config["weight_size"],(1, 4096), dtype=mi.float16)
     tb_graph = mi.new_threadblock_graph(
         grid_dim=test_config["grid_dim"],
         block_dim=test_config["block_dim"],
@@ -295,6 +303,9 @@ def test_rms_norm(test_config):
     tb_graph.new_output(stensor=tO, output_map=test_config["tb_outout_map"])
     O = graph.customized([X, W], tb_graph)
 
+    # stride(4096, 1)
+    graph.mark_output(O[0], (test_config["input_size"][1], 1))
+
     input_tensors = [
         (
             torch.rand(test_config["input_size"], dtype=torch.float16, device="cuda:0")
@@ -309,10 +320,10 @@ def test_rms_norm(test_config):
     ]
 
     input_strides = [tensor.stride() for tensor in input_tensors]
-    p = mi.generate_cuda_program(
-        graph.cygraph, target_cc=86, input_strides=input_strides, output_tensors=O
-    )
-    print(p["code"])
+    # p = mi.generate_cuda_program(
+    #     graph.cygraph, target_cc=86, input_strides=input_strides
+    # )
+    # print(p["code"])
     outputs = graph(inputs=input_tensors, outputs=O)
 
     # check correctness with torch

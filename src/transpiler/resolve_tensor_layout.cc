@@ -202,7 +202,7 @@ void Transpiler::resolve_tensor_layout() {
   }
 
   // Constraits & costs for every kernel-level operator
-  int cur_input_idx = 0;
+  int cur_input_idx = 0, cur_output_idx = 0;
   for (kn::KNOperator *const op : this->g->operators) {
     switch (op->op_type) {
       case type::KN_INPUT_OP: {
@@ -225,6 +225,30 @@ void Transpiler::resolve_tensor_layout() {
         }
         opt.add(d_is_innermost[tensor.guid][innermost_dim]);
         cur_input_idx += 1;
+        break;
+      }
+      case type::KN_OUTPUT_OP: {
+        // if output strides provided
+        if (this->output_strides.size() > cur_output_idx) {
+          vector<size_t> const &cur_stride =
+              this->output_strides[cur_output_idx];
+          kn::DTensor const &tensor = op->input_tensors.at(0);
+          if (tensor.num_dims != (int)cur_stride.size()) {
+            throw std::runtime_error(
+                fmt("The number of dimensions of the stride of the $th tensor "
+                    "($) does not match the tensor's num_dims ($)",
+                    cur_output_idx,
+                    cur_stride.size(),
+                    tensor.num_dims));
+          }
+          int innermost_dim = find_innermost_dim(cur_stride);
+          if (innermost_dim == -1) {
+            throw std::runtime_error(fmt(
+                "No innermost dim found for input tensor $", cur_output_idx));
+          }
+          opt.add(d_is_innermost[tensor.guid][innermost_dim]);
+        }
+        cur_output_idx += 1;
         break;
       }
       case type::KN_MATMUL_OP: {
@@ -621,6 +645,15 @@ void Transpiler::resolve_tensor_layout() {
       for (int i = 0; i < num_dims; ++i) {
         meta.strides[i] = this->input_strides[meta.input_idx][i];
       }
+      assert(meta.strides[innermost_dim] == 1);
+    } else if (meta.is_output && (meta.output_idx < output_strides.size())) {
+      // with user provided output stride
+      size_t total_ele = 1;
+      for (int i = 0; i < num_dims; ++i) {
+        meta.strides[i] = this->output_strides[meta.output_idx][i];
+        total_ele *= dtensor.dim[i];
+      }
+      meta.num_phy_elems = total_ele;
       assert(meta.strides[innermost_dim] == 1);
     } else {
       // Intermediate tensor or output tensor

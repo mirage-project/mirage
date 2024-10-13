@@ -259,15 +259,30 @@ cdef class CyKNGraph:
             ptr = ctypes.cast(graph, ctypes.c_void_p).value
             self.p_kgraph = <CppKNGraph*>(ptr)
 
-    def new_input(self, tuple dims, dtype : dtype = float16):
+    def new_input(self, tuple dims, tuple strides, dtype : dtype = float16):
         cdef vector[int] cdims
+        cdef vector[size_t] cstrides
         cdims.resize(len(dims))
         for i in range(len(dims)):
             cdims[i] = dims[i]
+        cstrides.resize(len(strides))
+        for i in range(len(strides)):
+            cstrides[i] = strides[i]
+
         c_type = convert_dtype_to_ctype(dtype)
-        cdef CppDTensor* ptr = self.p_kgraph.new_input_ptr(cdims, c_type, DmemRowMajor)
+        cdef CppDTensor* ptr = self.p_kgraph.new_input_ptr(cdims, cstrides, c_type, DmemRowMajor)
         t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
         return DTensor(t)
+
+    def mark_output(self, DTensor A, tuple strides):
+        cdef vector[size_t] cstrides
+        if strides is None:
+            cstrides.resize(0)
+        else:
+            cstrides.resize(len(strides))
+            for i in range(len(strides)):
+                cstrides[i] = strides[i]
+        self.p_kgraph.mark_output(A.c_ptr, cstrides)
 
     def matmul(self, DTensor A, DTensor B):
         cdef CppDTensor* ptr = self.p_kgraph.matmul(A.c_ptr, B.c_ptr)
@@ -345,6 +360,13 @@ cdef class CyKNGraph:
             inputs.append(DTensor(ptr))
         return inputs
 
+    def get_input_dtensor_layout(self, DTensor A):
+        cdef int cstrides[128]
+        num = self.p_kgraph.get_input_dtensor_layout(A.c_ptr, cstrides)
+        strides = list()
+        for i in range(num):
+            strides.append(cstrides[i])
+        return tuple(strides)
 
 cdef class CyTBGraph:
     cdef CppTBGraph *p_bgraph #Hold a CppTBGraph instance
@@ -515,7 +537,7 @@ def search(CyKNGraph input_graph, *, int max_num_new_graphs = 1024, list imaps =
 
 # Generate CUDA program for a uGraph
 # Return (CUDA code, buffer size in bytes)
-def generate_cuda_program(CyKNGraph input_graph, *, int target_cc, list input_strides, list output_tensors) -> dict:
+def generate_cuda_program(CyKNGraph input_graph, *, int target_cc, list input_strides) -> dict:
     # Set transpiler_config
     cdef TranspilerConfig transpiler_config
     transpiler_config.target_cc = target_cc
@@ -528,16 +550,8 @@ def generate_cuda_program(CyKNGraph input_graph, *, int target_cc, list input_st
         for j in range(len(input_strides[i])):
             cinput_strides[i][j] = input_strides[i][j]
     
-    # Set output_tensors
-    cdef vector[const CppDTensor*] coutput_tensors
-    coutput_tensors.resize(len(output_tensors))
-    cdef DTensor t
-    for i in range(len(output_tensors)):
-        t = output_tensors[i]
-        coutput_tensors[i] = t.c_ptr
-    
     # Call transpile
-    cdef TranspileResult result = transpile(input_graph.p_kgraph, transpiler_config, cinput_strides, coutput_tensors)
+    cdef TranspileResult result = transpile(input_graph.p_kgraph, transpiler_config, cinput_strides)
 
     # Get output directives
     cdef list[dict] output_directives = list()
