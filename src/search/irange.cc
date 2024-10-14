@@ -427,15 +427,6 @@ IKNRange multiplicative_interact(IKNRange const &knrange,
       }
       break;
     }
-    case type::KNOperatorType::KN_DIV_OP: {
-      if (opd_idx_from != opd_idx_to) {
-        ret =
-            IKNRange(knrange.range_set
-                         .extend_dim(op.input_tensors[opd_idx_to].num_dims - 1)
-                         .truncate(op.input_tensors[opd_idx_to]));
-      }
-      break;
-    }
     case type::KNOperatorType::KN_MATMUL_OP: {
       if (opd_idx_from != opd_idx_to) {
         int num_dims = op.input_tensors[opd_idx_to].num_dims;
@@ -774,15 +765,6 @@ ITBRange multiplicative_interact(ITBRange const &range,
         ret = ITBRange(range.range_set.transpose(num_dims - 2, num_dims - 1)
                            .extend_dim(dim_to_extend)
                            .truncate(op.input_tensors[opd_idx_to]));
-      }
-      break;
-    }
-    case type::TBOperatorType::TB_DIV_OP: {
-      if (opd_idx_from != opd_idx_to) {
-        ret =
-            ITBRange(range.range_set
-                         .extend_dim(op.input_tensors[opd_idx_to].num_dims - 1)
-                         .truncate(op.input_tensors[opd_idx_to]));
       }
       break;
     }

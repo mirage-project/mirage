@@ -269,7 +269,8 @@ if ("${BUILD_CPP_EXAMPLES}" STREQUAL "ON")
 endif()
 
 # RMS
-if ("${BUILD_CPP_EXAMPLES}" STREQUAL "ON")
+# if ("${BUILD_CPP_EXAMPLES}" STREQUAL "ON")
+if (true)
   set(CPP_EXAMPLES_DIR cpp_examples)
   set(CPP_EXAMPLES_BIN rms)
   file(GLOB CPP_EXAMPLES_SRCS ${CPP_EXAMPLES_DIR}/${CPP_EXAMPLES_BIN}.cc)
@@ -280,7 +281,8 @@ if ("${BUILD_CPP_EXAMPLES}" STREQUAL "ON")
 endif()
 
 # GatedMLP
-if ("${BUILD_CPP_EXAMPLES}" STREQUAL "ON")
+# if ("${BUILD_CPP_EXAMPLES}" STREQUAL "ON")
+if (true)
   set(CPP_EXAMPLES_DIR cpp_examples)
   set(CPP_EXAMPLES_BIN gated_mlp)
   file(GLOB CPP_EXAMPLES_SRCS ${CPP_EXAMPLES_DIR}/${CPP_EXAMPLES_BIN}.cc)
@@ -291,7 +293,8 @@ if ("${BUILD_CPP_EXAMPLES}" STREQUAL "ON")
 endif()
 
 # Chameleon
-if ("${BUILD_CPP_EXAMPLES}" STREQUAL "ON")
+# if ("${BUILD_CPP_EXAMPLES}" STREQUAL "ON")
+if (true)
   set(CPP_EXAMPLES_DIR cpp_examples)
   set(CPP_EXAMPLES_BIN chameleon)
   file(GLOB CPP_EXAMPLES_SRCS ${CPP_EXAMPLES_DIR}/${CPP_EXAMPLES_BIN}.cc)

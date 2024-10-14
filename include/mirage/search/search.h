@@ -63,17 +63,9 @@ private:
       std::function<bool(SearchContext const &)> const &verify,
       std::vector<SerializedSearchContext> &verified);
 
-  bool create_threadblock_outputs(
-      SearchContext &c,
-      std::unordered_map<int64_t, std::shared_ptr<AlgebraicPattern>> const
-          &algebraic_pattern,
-      int3 output_map);
-
   void preprocess(kernel::Graph const &computation_graph);
   bool check_pattern(std::shared_ptr<AlgebraicPattern> pattern);
-  bool have_same_fingerprint(std::vector<DTensor> const &outputs,
-                             std::vector<int> const &match) const;
-  bool verify(kernel::Graph const &g);
+  bool verify(kernel::Graph &g);
 
   void save_results() const;
   double get_elapsed_time_in_sec() const;
