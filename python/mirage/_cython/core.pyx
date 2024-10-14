@@ -361,9 +361,8 @@ cdef class CyKNOperator:
         if op is None:
             self.c_ptr = <CppKNOperator*>(NULL)
         else:
-            # ptr = ctypes.cast(op, ctypes.c_void_p).value
-            # self.c_ptr = <CppKNOperator*>(ptr)
-            self.c_ptr = <CppKNOperator*>(op)
+            ptr = ctypes.cast(op, ctypes.c_void_p).value
+            self.c_ptr = <CppKNOperator*>(ptr)
 
     property input_tensors:
         def __get__(self):
@@ -386,9 +385,8 @@ cdef class CyKNOperator:
             else:
                 return get_kn_operator_type_string(int(self.c_ptr.op_type))
 
-    def __cinit__(self, CppKNOperator* op):
-        # self._set_operator(op)
-        self.c_ptr = op
+    def __cinit__(self, op):
+        self._set_operator(op)
 
 cdef class CyTBOperator:
     cdef CppTBOperator* c_ptr # Hold a CppTBOperator instance
@@ -550,7 +548,7 @@ cdef class CyKNGraph:
         return {
             "grid_dim": [op.bgraph.grid_dim.x, op.bgraph.grid_dim.y, op.bgraph.grid_dim.z],
             "forloop_range": op.bgraph.forloop_range,
-            "operators": [self._get_tb_operator_info(CyTBOperator(<CppTBOperator*>op.bgraph.operators[i])) for i in op.bgraph.operators.size()]
+            "operators": [self._get_tb_operator_info(CyTBOperator(op.bgraph.operators[i])) for i in op.bgraph.operators.size()]
         }
 
     def _get_kn_operator_info(self, CyKNOperator op):
@@ -571,10 +569,10 @@ cdef class CyKNGraph:
     def get_graph_structure(self):
         operators = []
         ops = self.p_kgraph.operators
-        cdef CppKNOperator* operator_ptr
         for i in range(ops.size()):
-            operator_ptr = ops[i] 
-            operators.append(self._get_kn_operator_info(CyKNOperator(operator_ptr)))
+            op = CyKNOperator()
+            op.c_ptr = ops[i]
+            operators.append(self._get_kn_operator_info(op))
         return operators
 
 cdef class CyTBGraph:
