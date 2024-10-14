@@ -20,14 +20,22 @@
 namespace mirage {
 namespace kernel {
 
+std::vector<size_t> get_default_strides(DTensor const &A) {
+  std::vector<size_t> strides(A.num_dims);
+  size_t stride = 1;
+  for (int i = A.num_dims - 1; i >= 0; --i) {
+    strides[i] = stride;
+    stride *= A.dim[i];
+  }
+  return strides;
+}
+
 void Graph::mark_output(DTensor const &A) {
-  std::vector<size_t> strides;
-  return mark_output(A);
+  return mark_output(A, get_default_strides(A));
 }
 
 void Graph::mark_output(DTensor const *A) {
-  std::vector<size_t> strides;
-  return mark_output(A);
+  return mark_output(A, get_default_strides(*A));
 }
 
 void Graph::mark_output(DTensor const &A, std::vector<size_t> const &strides) {
