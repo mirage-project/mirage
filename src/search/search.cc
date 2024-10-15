@@ -377,7 +377,18 @@ void KernelGraphGenerator::generate_kernel_graphs() {
 
   for (auto const &input_attr : computation_graph_input_attrs) {
     auto [dim, data_type, layout] = input_attr;
-    c.kn_graph->new_input(dim, data_type, layout);
+    // FIXME: strides should be an additional attr for KNInputOp
+    // Currently use the default strided layout
+    // FIXME: remove the layout attr since we use the strides
+    // to describe the layout
+    std::vector<size_t> strides;
+    int num_elements = 1;
+    for (size_t i = 0; i < dim.size(); i++) {
+      strides.push_back(num_elements);
+      num_elements *= dim[dim.size() - 1 - i];
+    }
+    std::reverse(strides.begin(), strides.end());
+    c.kn_graph->new_input(dim, strides, data_type, layout);
   }
 
   std::vector<SerializedSearchContext> middle_states;

@@ -151,8 +151,9 @@ TranspileResult Transpiler::transpile_ugraph() {
     exec.e("{");
     exec.e("// OP type: $", op_type_str);
     switch (op->op_type) {
-      case type::KNOperatorType::KN_INPUT_OP: {
-        // Input op
+      case type::KNOperatorType::KN_INPUT_OP:
+      case type::KNOperatorType::KN_OUTPUT_OP: {
+        // Input/Output op
         break;
       }
       case type::KNOperatorType::KN_MATMUL_OP: {

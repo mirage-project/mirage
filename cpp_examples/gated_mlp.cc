@@ -7,12 +7,12 @@ using namespace mirage;
 int main(int argc, char **argv) {
   kernel::Graph ref_graph;
   {
-    kernel::DTensor X =
-        ref_graph.new_input({16, 4096}, type::DT_FLOAT16, layout::DmemRowMajor);
+    kernel::DTensor X = ref_graph.new_input(
+        {16, 4096}, {4096, 1}, type::DT_FLOAT16, layout::DmemRowMajor);
     kernel::DTensor W1 = ref_graph.new_input(
-        {4096, 4096}, type::DT_FLOAT16, layout::DmemColumnMajor);
+        {4096, 4096}, {4096, 1}, type::DT_FLOAT16, layout::DmemColumnMajor);
     kernel::DTensor W3 = ref_graph.new_input(
-        {4096, 4096}, type::DT_FLOAT16, layout::DmemColumnMajor);
+        {4096, 4096}, {4096, 1}, type::DT_FLOAT16, layout::DmemColumnMajor);
     kernel::DTensor D1 = ref_graph.matmul(X, W1);
     kernel::DTensor D2 = ref_graph.matmul(X, W3);
     D1 = ref_graph.silu(D1);
@@ -34,12 +34,12 @@ int main(int argc, char **argv) {
                                     .copy_fingerprint_to_ctensor();
 
   kernel::Graph graph;
-  kernel::DTensor X =
-      graph.new_input({16, 4096}, type::DT_FLOAT16, layout::DmemRowMajor);
-  kernel::DTensor W1 =
-      graph.new_input({4096, 4096}, type::DT_FLOAT16, layout::DmemColumnMajor);
-  kernel::DTensor W3 =
-      graph.new_input({4096, 4096}, type::DT_FLOAT16, layout::DmemColumnMajor);
+  kernel::DTensor X = graph.new_input(
+      {16, 4096}, {4096, 1}, type::DT_FLOAT16, layout::DmemRowMajor);
+  kernel::DTensor W1 = graph.new_input(
+      {4096, 4096}, {4096, 1}, type::DT_FLOAT16, layout::DmemColumnMajor);
+  kernel::DTensor W3 = graph.new_input(
+      {4096, 4096}, {4096, 1}, type::DT_FLOAT16, layout::DmemColumnMajor);
   {
     namespace tb = mirage::threadblock;
     dim3 grid_dim = {64, 1, 1}, block_dim = {128, 1, 1};

@@ -27,6 +27,7 @@ if __name__ == "__main__":
     tO = tb_graph.mul(tS, tA2)
     tb_graph.new_output(stensor=tO, output_map=(1, -1, -1))
     O = graph.customized([X, W1, W2], tb_graph)
+    graph.mark_output(O[0])
     
     input_tensors = [
         torch.randn(16, 4096, dtype=torch.float16, device='cuda:0'),
@@ -35,7 +36,7 @@ if __name__ == "__main__":
     ]
 
     input_strides = [tensor.stride() for tensor in input_tensors]
-    p = mi.generate_cuda_program(graph.cygraph, target_cc=86, input_strides=input_strides, output_tensors=O)
+    p = mi.generate_cuda_program(graph.cygraph, target_cc=86, input_strides=input_strides)
     print(p["code"])
     silu = torch.nn.SiLU()
     # warm up runs
