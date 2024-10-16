@@ -25,4 +25,4 @@ def new_threadblock_graph(grid_dim: tuple, block_dim: tuple, forloop_range: int,
     return TBGraph(bgraph)
 
 # Current Version
-__version__ = "0.2.0"
+__version__ = "0.2.1"
