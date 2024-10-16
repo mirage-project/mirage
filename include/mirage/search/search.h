@@ -38,7 +38,7 @@ private:
   std::vector<std::shared_ptr<AlgebraicPattern>>
       computation_graph_output_patterns;
   std::vector<cpu::CTensor> computation_graph_output_tensors;
-  std::vector<std::tuple<std::vector<int>, type::DataType, layout::DmemLayout>>
+  std::vector<std::tuple<std::vector<int>, type::DataType, layout::DmemLayout, std::vector<size_t>>>
       computation_graph_input_attrs;
 
   // Statistics-related fields

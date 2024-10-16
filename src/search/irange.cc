@@ -453,6 +453,9 @@ IKNRange multiplicative_interact(IKNRange const &knrange,
 std::vector<IKNRange>
     forward_propagate(std::vector<IKNRange> const &input_ranges,
                       kernel::KNOperator const &op) {
+  if (op.op_type == type::KNOperatorType::KN_OUTPUT_OP) {
+    return {};
+  }
   if (op.op_type == type::KNOperatorType::KN_CUSTOMIZED_OP) {
     assert(op.input_tensors.size() == input_ranges.size());
     std::unordered_map<size_t, IKNRange> forward_ranges;
@@ -483,6 +486,9 @@ std::vector<IKNRange>
 std::vector<IKNRange>
     backward_propagate(std::vector<IKNRange> const &output_ranges,
                        kernel::KNOperator const &op) {
+  if (op.op_type == type::KNOperatorType::KN_OUTPUT_OP) {
+    return {};
+  }
   if (op.op_type == type::KNOperatorType::KN_CUSTOMIZED_OP) {
     assert(op.output_tensors.size() == output_ranges.size());
     std::unordered_map<size_t, IKNRange> backward_ranges;
@@ -840,6 +846,9 @@ void range_propagate_backward(
     std::unordered_map<size_t, IKNRange> &backward_ranges,
     kernel::Graph const &graph) {
   for (auto const &op : reversed(graph.operators)) {
+    if (op->op_type == type::KNOperatorType::KN_OUTPUT_OP) {
+      continue;
+    }
     std::vector<IKNRange> output_ranges;
     for (auto const &output_tensor : op->output_tensors) {
       output_ranges.push_back(backward_ranges[output_tensor.guid]);

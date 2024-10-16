@@ -366,18 +366,9 @@ void KernelGraphGenerator::generate_kernel_graphs() {
   c.kn_graph = std::make_shared<kernel::Graph>();
 
   for (auto const &input_attr : computation_graph_input_attrs) {
-    auto [dim, data_type, layout] = input_attr;
-    // FIXME: strides should be an additional attr for KNInputOp
-    // Currently use the default strided layout
+    auto [dim, data_type, layout, strides] = input_attr;
     // FIXME: remove the layout attr since we use the strides
     // to describe the layout
-    std::vector<size_t> strides;
-    int num_elements = 1;
-    for (size_t i = 0; i < dim.size(); i++) {
-      strides.push_back(num_elements);
-      num_elements *= dim[dim.size() - 1 - i];
-    }
-    std::reverse(strides.begin(), strides.end());
     c.kn_graph->new_input(dim, strides, data_type, layout);
   }
 
@@ -425,7 +416,8 @@ void KernelGraphGenerator::preprocess(kernel::Graph const &computation_graph) {
       computation_graph_input_attrs.push_back(
           {to_vector(op->output_tensors[0].num_dims, op->output_tensors[0].dim),
            op->output_tensors[0].data_type,
-           op->output_tensors[0].layout});
+           op->output_tensors[0].layout,
+           static_cast<kernel::KNInputOp *>(op)->input_strides});
     }
   }
 
@@ -443,9 +435,9 @@ void KernelGraphGenerator::preprocess(kernel::Graph const &computation_graph) {
 
   for (kernel::KNOperator *op : computation_graph.operators) {
     if (op->op_type == type::KNOperatorType::KN_OUTPUT_OP) {
-      computation_graph_output_tensors.push_back(op->output_tensors[0].copy_fingerprint_to_ctensor());
+      computation_graph_output_tensors.push_back(op->input_tensors[0].copy_fingerprint_to_ctensor());
       computation_graph_output_patterns.push_back(
-          computation_graph_patterns.at(op->output_tensors[0].guid));
+          computation_graph_patterns.at(op->input_tensors[0].guid));
     }
   }
 }

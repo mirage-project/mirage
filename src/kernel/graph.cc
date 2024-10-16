@@ -175,24 +175,25 @@ void from_json(json const &j, Graph &g) {
         int num_dim, dim[MAX_TENSOR_DIMS];
         type::DataType data_type;
         layout::DmemLayout layout;
+        std::vector<size_t> input_strides;
         size_t guidO;
         jop.at("output_tensors")[0].at("num_dims").get_to(num_dim);
         jop.at("output_tensors")[0].at("dim").get_to(dim);
+        jop.at("input_strides").get_to(input_strides);
         jop.at("output_tensors")[0].at("data_type").get_to(data_type);
         jop.at("output_tensors")[0].at("layout").get_to(layout);
         jop.at("output_tensors")[0].at("guid").get_to(guidO);
         std::vector<int> dims = to_vector(num_dim, dim);
-        // FIXME: the input strides should be obtained from the json file
-        // Currently we assume the default strided layout
-        std::vector<size_t> strides;
-        int num_elements = 1;
-        for (size_t i = 0; i < dims.size(); i++) {
-          strides.push_back(num_elements);
-          num_elements *= dims[dims.size() - 1 - i];
-        }
-        std::reverse(strides.begin(), strides.end());
-        DTensor const &output = g.new_input(dims, strides, data_type, layout);
+        DTensor const &output = g.new_input(dims, input_strides, data_type, layout);
         guid_mapping[output.guid] = guidO;
+        break;
+      }
+      case type::KNOperatorType::KN_OUTPUT_OP: {
+        size_t guid;
+        jop.at("output_tensors")[0].at("guid").get_to(guid);
+        std::vector<size_t> output_strides;
+        jop.at("output_strides").get_to(output_strides);
+        g.mark_output(get_tensor_from_guid(guid), output_strides);
         break;
       }
       case type::KNOperatorType::KN_MATMUL_OP: {

@@ -87,6 +87,8 @@ KNInputOp::~KNInputOp() {
 
 KNInputOp::operator json() const {
   return json{{"op_type", op_type},
+              {"input_strides", input_strides},
+              {"input_map", input_map},
               {"input_tensors", input_tensors},
               {"output_tensors", output_tensors}};
 }
