@@ -554,7 +554,7 @@ NewKernelParams Graph::get_new_kernel_params(bool fingerprint) const {
         mirage::threadblock::STensor input = operators[i]->input_tensors[0];
         mirage::threadblock::STensor output = operators[i]->output_tensors[0];
         int norm_size = output.dim[output.num_dims-1];
-	printf("norm_size(%d) num_elements(%d)\n", norm_size, (int)output.num_elements());
+	// printf("norm_size(%d) num_elements(%d)\n", norm_size, (int)output.num_elements());
         assert(input.num_elements() == output.num_elements());
         mirage::threadblock::serialize_rms_norm_op_parameters(
             params.parameters,

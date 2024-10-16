@@ -11,6 +11,7 @@ if __name__ == "__main__":
     O2 = graph.matmul(X, W2)
     O1 = graph.silu(O1)
     O = graph.mul(O1, O2)
+    graph.mark_output(O)
     optimized_graph = graph.superoptimize(config="mlp")
 
     input_tensors = [

@@ -12,6 +12,7 @@ if __name__ == "__main__":
     E = graph.matmul(D, B)
     C = graph.matmul(X, W)
     O = graph.add(C, E)
+    graph.mark_output(O)
     optimized_graph = graph.superoptimize(config="lora")
 
     input_tensors = [

@@ -133,18 +133,11 @@ int main(int argc, char **argv) {
 
   auto st = std::chrono::steady_clock::now();
   search::GeneratorConfig config =
-      search::GeneratorConfig::get_attention_default_config();
-  config.grid_dim_to_explore = {
-      {2 * batch_size, 16, 4},
-      // {2 * batch_size, 8, 2},
-      {2 * batch_size, 16, 1},
-      // {2 * batch_size, 8, 1}
-  };
-  std::string checkpoint_file_name =
-      "checkpoint_group_query_attn_spec_decode_bs" +
-      std::to_string(batch_size) + ".json";
-  search::KernelGraphGenerator gen(
-      ref_graph, config, checkpoint_file_name.data());
+      search::GeneratorConfig::get_default_config();
+  config.enable_attention_specific_optimization();
+  std::string results_filename =
+      "results_chameleon_bs" + std::to_string(batch_size) + ".json";
+  search::KernelGraphGenerator gen(ref_graph, config, results_filename.data(), true);
   gen.generate_kernel_graphs();
 
   auto et = std::chrono::steady_clock::now();
