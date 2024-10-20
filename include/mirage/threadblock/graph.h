@@ -145,7 +145,7 @@ public:
   operator json() const;
 
 public:
-  dim3 grid_dim, block_dim;
+  dim3 grid_dim, block_dim, cluster_dim;
   int forloop_range;
   int reduction_dimx;
   std::vector<mirage::threadblock::TBOperator *> operators;

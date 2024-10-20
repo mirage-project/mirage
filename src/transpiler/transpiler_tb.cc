@@ -200,21 +200,42 @@ CustomOPTranspileResult
 
   // Generate code prologue
   CodeKeeper code;
-  code.e(
-      "__global__ void __launch_bounds__($) $($, $) {",
-      num_threads,
-      func_name,
-      map<kn::DTensor, string>(op->output_tensors,
-                               [](kn::DTensor const &dtensor) -> string {
-                                 return fmt("half_t* __restrict__ dtensor$_ptr",
-                                            dtensor.guid);
-                               }),
-      map<kn::DTensor, string>(
-          op->input_tensors, [](kn::DTensor const &dtensor) -> string {
-            return fmt("half_t const* __restrict__ dtensor$_ptr", dtensor.guid);
-          }));
-
-  // Define thread idx
+  if (GPU_CC::H100 > config.target_cc) {
+    code.e("__global__ void __launch_bounds__($) $($, $) {",
+           num_threads,
+           func_name,
+           map<kn::DTensor, string>(
+               op->output_tensors,
+               [](kn::DTensor const &dtensor) -> string {
+                 return fmt("half_t* __restrict__ dtensor$_ptr", dtensor.guid);
+               }),
+           map<kn::DTensor, string>(
+               op->input_tensors, [](kn::DTensor const &dtensor) -> string {
+                 return fmt("half_t const* __restrict__ dtensor$_ptr",
+                            dtensor.guid);
+               }));
+  } else if (GPU_CC::H100 == config.target_cc) {
+    assert(g.cluster_dim.x > 0 && g.cluster_dim.y > 0 && g.cluster_dim.z > 0);
+    code.e("__global__ void __cluster_dims__($, $, $) __launch_bounds__($) "
+           "$($, $) {",
+           g.cluster_dim.x,
+           g.cluster_dim.y,
+           g.cluster_dim.z,
+           num_threads,
+           func_name,
+           map<kn::DTensor, string>(
+               op->output_tensors,
+               [](kn::DTensor const &dtensor) -> string {
+                 return fmt("half_t* __restrict__ dtensor$_ptr", dtensor.guid);
+               }),
+           map<kn::DTensor, string>(
+               op->input_tensors, [](kn::DTensor const &dtensor) -> string {
+                 return fmt("half_t const* __restrict__ dtensor$_ptr",
+                            dtensor.guid);
+               }));
+  } else {
+    assert(0);
+  }
   string thread_idx;
   if (g.block_dim.y > 1 || g.block_dim.z > 1) {
     thread_idx = fmt("threadIdx.x + threadIdx.y * $ + threadIdx.z * $",
@@ -318,6 +339,17 @@ CustomOPTranspileResult
                  mov_last_get_stensor_layout(
                      stensor, stensor_meta, real_innermost_dim),
                  dtensor.guid);
+        } else if (config.target_cc == GPU_CC::H100) {
+          pipelined_input_ops.insert(cur_op);
+          // make tma
+          code.e("tma = ***");
+          code.e("using STensor$InputAtom = tb::InputTMAAsyncCopy<half_t, "
+                 "$, DTensor$TileLayout, tma>;",
+                 stensor.guid,
+                 mov_last_get_stensor_layout(
+                     stensor, stensor_meta, real_innermost_dim),
+                 dtensor.guid);
+
         } else {
           // Chunked, asynchronous copy
           pipelined_input_ops.insert(cur_op);
@@ -327,6 +359,11 @@ CustomOPTranspileResult
                  mov_last_get_stensor_layout(
                      stensor, stensor_meta, real_innermost_dim),
                  dtensor.guid);
+          printf("print d & s tensor layout\n");
+          std::cout << dtensor_tile_layout << "\n";
+          std::cout << mov_last_get_stensor_layout(
+                           stensor, stensor_meta, real_innermost_dim)
+                    << "\n";
           code.e("half_t *stensor$_async_copy_buf = stensor$_ptr;",
                  stensor.guid,
                  stensor.guid + mem_plan.pipelined_input_buf_guid_offset);
@@ -506,6 +543,14 @@ CustomOPTranspileResult
           mma_atom_mnk = {16, 8, 16};
           mma_atom_num_threads = 32;
         }
+      } else if (GPUCC::H100 == config.target_cc) {
+        assert(k % 16 == 0);
+        // Hopper wgmma
+        assert(num_threads >= 128);
+        mma_atom_str = "SM90_64x64x16_F16F16F16_SS";
+        mma_atom_mnk = {64, 64, 16};
+        mma_atom_num_threads = 128;
+
       } else {
         // TODO(intlsy): Support more architectures
         assert(0 && "Unsupported GPU Architecture");
@@ -598,17 +643,32 @@ CustomOPTranspileResult
   // Launch async input operations for all async inputs
   if (!pipelined_input_ops.empty()) {
     code.e("{");
-    for (tb::TBInputOp const *input_op : pipelined_input_ops) {
-      kn::DTensor const &dtensor = input_op->dtensor;
-      tb::STensor const &output = input_op->output_tensors.at(0);
-      assert(input_op->forloop_dim >= 0);
-      code.e("STensor$InputAtom::run(stensor$_async_copy_buf, "
-             "dtensor$_tile_ptr, thread_idx);",
-             output.guid,
-             output.guid,
-             dtensor.guid);
+    if (config.target_cc == GPU_CC::H100) {
+      for (tb::TBInputOp const *input_op : pipelined_input_ops) {
+        kn::DTensor const &dtensor = input_op->dtensor;
+        tb::STensor const &output = input_op->output_tensors.at(0);
+        assert(input_op->forloop_dim >= 0);
+        code.e("__shared__ uint64_t tma_load_mbar;");
+        code.e("STensor$InputAtom::run(stensor$_async_copy_buf, "
+               "dtensor$_tile_ptr, tma_load_mbar);",
+               output.guid,
+               output.guid,
+               dtensor.guid);
+      }
+    } else {
+      for (tb::TBInputOp const *input_op : pipelined_input_ops) {
+        kn::DTensor const &dtensor = input_op->dtensor;
+        tb::STensor const &output = input_op->output_tensors.at(0);
+        assert(input_op->forloop_dim >= 0);
+        code.e("STensor$InputAtom::run(stensor$_async_copy_buf, "
+               "dtensor$_tile_ptr, thread_idx);",
+               output.guid,
+               output.guid,
+               dtensor.guid);
+      }
+      code.e("cute::cp_async_fence();");
     }
-    code.e("cute::cp_async_fence();");
+
     code.e("}");
     code.e("");
   }
@@ -994,25 +1054,47 @@ CustomOPTranspileResult
     code.e("{");
     code.e("// Issue async copies for the next round");
     code.e("if (for_idx+1 != $) {", g.forloop_range);
-    for (tb::TBInputOp const *input_op : pipelined_input_ops) {
-      assert(input_op->forloop_dim >= 0);
-      kn::DTensor const &dtensor = input_op->dtensor;
-      tb::STensor const &output = input_op->output_tensors.at(0);
-      int tile_side_len = output.dim[input_op->forloop_dim];
-      size_t forloop_dim_stride =
-          dtensor_metas.at(dtensor.guid).strides[input_op->forloop_dim];
-      code.e("STensor$InputAtom::run(stensor$_ptr, dtensor$_tile_ptr + "
-             "$*(for_idx+1), thread_idx);",
-             output.guid,
-             output.guid,
-             dtensor.guid,
-             tile_side_len * forloop_dim_stride);
-    }
-    code.e("}");
-    code.e("cute::cp_async_fence();");
 
-    code.e("// Wait for the async copies in the last round to finish");
-    code.e("cute::cp_async_wait<1>();");
+    if (config.target_cc == GPU_CC::H100) {
+      for (tb::TBInputOp const *input_op : pipelined_input_ops) {
+        assert(input_op->forloop_dim >= 0);
+        kn::DTensor const &dtensor = input_op->dtensor;
+        tb::STensor const &output = input_op->output_tensors.at(0);
+        int tile_side_len = output.dim[input_op->forloop_dim];
+        size_t forloop_dim_stride =
+            dtensor_metas.at(dtensor.guid).strides[input_op->forloop_dim];
+        code.e("STensor$InputAtom::run(stensor$_ptr, dtensor$_tile_ptr + "
+               "$*(for_idx+1), tma_load_mbar);",
+               output.guid,
+               output.guid,
+               dtensor.guid,
+               tile_side_len * forloop_dim_stride);
+      }
+      code.e("}");
+
+      code.e("// Wait for the async copies in the last round to finish");
+      code.e("cute::wait_barrier(tma_load_mbar, 0);");
+    } else {
+      for (tb::TBInputOp const *input_op : pipelined_input_ops) {
+        assert(input_op->forloop_dim >= 0);
+        kn::DTensor const &dtensor = input_op->dtensor;
+        tb::STensor const &output = input_op->output_tensors.at(0);
+        int tile_side_len = output.dim[input_op->forloop_dim];
+        size_t forloop_dim_stride =
+            dtensor_metas.at(dtensor.guid).strides[input_op->forloop_dim];
+        code.e("STensor$InputAtom::run(stensor$_ptr, dtensor$_tile_ptr + "
+               "$*(for_idx+1), thread_idx);",
+               output.guid,
+               output.guid,
+               dtensor.guid,
+               tile_side_len * forloop_dim_stride);
+      }
+      code.e("}");
+      code.e("cute::cp_async_fence();");
+
+      code.e("// Wait for the async copies in the last round to finish");
+      code.e("cute::cp_async_wait<1>();");
+    }
 
     code.e("// Switch buffers");
     for (tb::TBInputOp const *input_op : pipelined_input_ops) {

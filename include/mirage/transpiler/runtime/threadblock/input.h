@@ -14,6 +14,7 @@
 
 #pragma once
 
+#include "cute/arch/cluster_sm90.hpp"
 #include <cstdint>
 #include <cute/layout.hpp>
 using namespace cute;
@@ -117,9 +118,29 @@ public:
     auto src_chunked_coord2coord = SrcChunkedCoord2Coord{};
     auto dst_chunked_coord2coord = DstChunkedCoord2Coord{};
     uint32_t dst_base_addr = cute::cast_smem_ptr_to_uint(dst);
+
 #pragma unroll
     for (int chunk_idx = thread_idx; chunk_idx < NUM_CHUNKS;
          chunk_idx += NUM_THREADS) {
+      // if (threadIdx.x == 0 && blockIdx.x == 0 && chunk_idx == 0) {
+      //   printf("blockIdx.x %d, blockIdx.y %d, blockIdx.z %d, chunk_idx %d, "
+      //          "NUM_CHUNKS %d,  %d \n",
+      //          blockIdx.x,
+      //          blockIdx.y,
+      //          blockIdx.z,
+      //          chunk_idx,
+      //          NUM_CHUNKS,
+      //          size(SrcLayout{}));
+      //   printf("\n");
+      //   // print(size(shape(SrcLayout{})));
+      //   print(size(SrcLayout{}));
+      //   printf("\n");
+      // }
+      if (threadIdx.x == 0 && blockIdx.x == 0) {
+        // cute::print(SrcLayout{});
+        // cute::print(DstLayout{});
+        // cute::print(GMMA::Layout_MN_SW128_Atom<half>{});
+      }
       size_t src_addr =
           (size_t)(src + src_layout(src_chunked_coord2coord(chunk_idx)));
       uint32_t dst_addr =
@@ -132,6 +153,30 @@ public:
   }
 };
 
-// Type 4: Copy using the Tensor Memory Accelerator (TMA)
+// Type 4 : Copy using the Tensor Memory
+//          Accelerator(TMA)
+template <typename T, class TMA, class DstLayout, class SrcLayout>
+class InputTMAAsyncCopy {
+public:
+  CUTE_STATIC_ASSERT_V(size(SrcLayout{}) == size(DstLayout{}));
+  static constexpr int tmaTransactionBytes = size(SrcLayout{});
+
+  static __device__ __forceinline__ void run(TMA tma,
+                                             T *__restrict__ dst,
+                                             T const *__restrict__ src,
+                                             uint64_t tma_load_mbar) {
+
+    int warp_idx = cutlass::canonical_warp_idx_sync();
+    int lane_predicate = cute::elect_one_sync();
+    Tensor sA = make_tensor(src, SrcLayout{});
+    Tensor gA = make_tensor(dst, DstLayout{});
+    if (warp_idx == 0 && lane_predicate) {
+      initialize_barrier(tma_load_mbar, 1);
+      set_barrier_transaction_bytes(tma_load_mbar, tmaTransactionBytes);
+      copy(tma.with(tma_load_mbar), gA, sA);
+    }
+    __syncthreads();
+  }
+};
 
 } // namespace tb
