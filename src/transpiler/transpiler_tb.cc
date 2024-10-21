@@ -344,26 +344,36 @@ CustomOPTranspileResult
           // make tma
           string smem_layout = mov_last_get_stensor_layout(
               stensor, stensor_meta, real_innermost_dim);
-          code.e("auto gT = make_tensor<half_t>(dtensor$_tile_ptr, "
-                 "DTensor$TileLayout)",
-                 dtensor.guid,
-                 dtensor.guid);
 
-          code.e("auto tma =  make_tma_copy<half_t>(SM90_TMA_LOAD{}, gT, "
-                 "$, "
-                 "$, Int<1>{});",
-                 smem_layout,
+          // gmem tensor
+
+          string gmem_layout =
+              get_cute_layout(dtensor.dims, dtensor_meta.strides);
+
+          code.e("using TMA = decltype(make_tma_copy<half_t>(SM90_TMA_LOAD{}, "
+                 "make_tensor<half_t>(make_gmem_ptr(dtensor_$_ptr), $), $",
+                 dtensor.guid,
+                 gmem_layout,
                  smem_layout);
+          //     code.e("auto gT = "
+          //            "make_tensor<half_t>(make_gmem_ptr(dtensor_$_ptr), $)",
+          //            dtensor.guid,
+          //            gmem_layout);
+
+          // // TODO xinhaoc: add multicast copy
+          // code.e("auto tma =  make_tma_copy<half_t>(SM90_TMA_LOAD{}, gT, $",
+          //        smem_layout);
 
           int num_stage = 0;
 
           // stages should equal to the forloop_range
           assert(num_stage == g.forloop_range);
           code.e("using STensor$InputAtom = tb::InputTMAAsyncCopy<half_t, "
-                 "$, DTensor$TileLayout, decltype(tma)>;",
+                 "$, DTensor$TileLayout, TMA>;",
                  stensor.guid,
                  smem_layout,
-                 dtensor.guid);
+                 dtensor.guid,
+                 TMA tma);
 
         } else {
           // Chunked, asynchronous copy

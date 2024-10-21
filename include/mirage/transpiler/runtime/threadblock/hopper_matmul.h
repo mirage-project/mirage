@@ -62,65 +62,6 @@ public:
 
 template <class T,
           class M,
-          class K,
-          class TiledCopy,
-          class SrcEngine,
-          class SrcLayout,
-          class DstEngine,
-          class DstLayout>
-CUTE_HOST_DEVICE void s2r_copy_with_oob_protection(
-    TiledCopy const &tiled_copy,
-    Tensor<SrcEngine, SrcLayout> const &src, // [S2R, S2R_M] or [S2R, S2R_N]
-    Tensor<DstEngine, DstLayout> &&dst,      // The same as src
-    char const *smem_allzero_ptr, // Points to somewhere on the shared memory
-                                  // with at least 16 bytes of zeros
-    int s2r_k,
-    int thread_idx) {
-  static_assert(SrcLayout::rank == 2);
-  static_assert(DstLayout::rank == 2);
-
-  using TiledMN = typename TiledCopy::Tiler_MN;
-  using TileM = decltype(get<0>(TiledMN{}));
-  using TileK = decltype(get<1>(TiledMN{}));
-  if constexpr ((M::value % TileM::value == 0) &&
-                (K::value % TileK::value == 0)) {
-    copy(tiled_copy, src, dst);
-  } else {
-    using MIndicatorLayout = Layout<Shape<M, K>, Stride<_1, _0>>;
-    using KIndicatorLayout = Layout<Shape<M, K>, Stride<_0, _1>>;
-    auto m_indicator_thrIdx_s2r_s2rM_s2rK =
-        tiled_copy.tidfrg_S(MIndicatorLayout{});
-    auto k_indicator_thrIdx_s2r_s2rM_s2rK =
-        tiled_copy.tidfrg_S(KIndicatorLayout{});
-    static_assert(is_static_v<decltype(m_indicator_thrIdx_s2r_s2rM_s2rK)>);
-    static_assert(is_static_v<decltype(k_indicator_thrIdx_s2r_s2rM_s2rK)>);
-    int offset_m = m_indicator_thrIdx_s2r_s2rM_s2rK(thread_idx, _0{}, _0{});
-    int offset_k = k_indicator_thrIdx_s2r_s2rM_s2rK(thread_idx, _0{}, _0{});
-    auto m_indicator_frag = m_indicator_thrIdx_s2r_s2rM_s2rK(
-        thread_idx, _, make_tuple(_, _)); // [S2R, S2R_M or S2R_N, S2R_K]
-    auto k_indicator_frag = k_indicator_thrIdx_s2r_s2rM_s2rK(
-        thread_idx, _, make_tuple(_, _)); // Same as above
-
-    static_assert(cosize(SrcLayout{}(_, _0{})) <= 16);
-    Tensor all_zero_tensor =
-        make_tensor(make_smem_ptr((T *)smem_allzero_ptr),
-                    Layout<decltype(shape(SrcLayout{}(_, _0{})))>{});
-
-    CUTE_UNROLL
-    for (int i = 0; i < size<1>(src); ++i) {
-      auto coord_m = offset_m + m_indicator_frag(_0{}, i, s2r_k);
-      auto coord_k = offset_k + k_indicator_frag(_0{}, i, s2r_k);
-      bool valid = coord_m < M{} && coord_k < K{};
-      // printf("Thread %d, (%d, %d) -> (%d, %d), %d\n", thread_idx, i, s2r_k,
-      // (int)coord_m, (int)coord_k, valid);
-      // TODO(intlsy) Support naive UniversalCopy
-      tiled_copy.call(valid ? src(_, i) : all_zero_tensor, dst(_, i));
-    }
-  }
-}
-
-template <class T,
-          class M,
           class N,
           int NUM_EXPS_BEFORE_STORE,
           bool IS_STORE_ACCUM,
@@ -203,7 +144,6 @@ CUTE_HOST_DEVICE void r2s_copy_with_oob_protection(
 }
 
 template <typename T,
-          class MMAAtom,
           class TiledMMAThrLayout,
           bool IS_LDMATRIX_AVAIL,
           bool IS_STMATRIX_AVAIL,
@@ -216,7 +156,16 @@ template <typename T,
                                      // data, it does not use the standard
                                      // "epilogue" semantic
           bool IS_STORE_ACCUM>
-class Matmul {
+class Matmul<T,
+             SM90_64x64x16_F16F16F16_SS,
+             TiledMMAThrLayout,
+             IS_LDMATRIX_AVAIL,
+             true,
+             SmemLayoutA_,
+             SmemLayoutB_,
+             SmemLayoutC_,
+             NUM_THREADS,
+             NUM_EXPS_BEFORE_STORE> {
 public:
   CUTE_STATIC_ASSERT_V(rank(SmemLayoutA_{}) == _2{});
   CUTE_STATIC_ASSERT_V(rank(SmemLayoutB_{}) == _2{});

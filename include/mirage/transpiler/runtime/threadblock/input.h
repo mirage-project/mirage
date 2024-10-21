@@ -155,35 +155,33 @@ public:
 
 // Type 4 : Copy using the Tensor Memory
 //          Accelerator(TMA)
-template <typename T, class TMA, class DstLayout, class SrcLayout>
+template <typename T, class TMA, class DstLayout, class SrcLayout, class TMA>
 class InputTMAAsyncCopy {
 public:
   CUTE_STATIC_ASSERT_V(size(SrcLayout{}) == size(DstLayout{}));
   static constexpr int tmaTransactionBytes = size(SrcLayout{});
+  using CTA_TILER = shape(SrcLayout{});
 
   static __device__ __forceinline__ void run(TMA tma,
                                              T *__restrict__ dst,
                                              T const *__restrict__ src,
                                              uint64_t tma_load_mbar,
-                                             int forloop_idx) {
+                                             int forloop_idx,
+                                             TMA tma) {
 
     int warp_idx = cutlass::canonical_warp_idx_sync();
     int lane_predicate = cute::elect_one_sync();
-    // Tensor sA = make_tensor(src, SrcLayout{});
-    // Tensor gA = make_tensor(dst, DstLayout{});
 
-    // get threadblock local tile with stages
-    // coor_id: forloop_idx, and blockIdx,
+    Tensor mA = tma.get_tma_tensor(shape(DstLayout{}));
 
     auto cta_coord = make_coord(blockIdx.x, blockIdx.y, _);
+    auto gA = local_tile(mA, CTA_TILER{}, cta_coord, Step<_1, X, _1>{});
 
-    Tensor gA = local_tile(mA, cta_tiler, cta_coord, Step<_1, X, _1>{});
-
-    tAgA, tAsA = tma_partition(tma_a,
-                               Int<0>{},
-                               Layout<_1>{},
-                               group_modes<0, 2>(sA),
-                               group_modes<0, 2>(gA));
+    auto tAgA, tAsA = tma_partition(tma,
+                                    Int<0>{},
+                                    Layout<_1>{},
+                                    group_modes<0, 2>(sA),
+                                    group_modes<0, 2>(gA));
     if (warp_idx == 0 && lane_predicate) {
       initialize_barrier(tma_load_mbar, 1);
       set_barrier_transaction_bytes(tma_load_mbar, tmaTransactionBytes);
