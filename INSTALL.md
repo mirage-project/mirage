@@ -34,6 +34,31 @@ Just try to import mirage in Python. If there is no output, then Mirage and all 
 python -c 'import mirage'
 ```
 
+## Build Standalone C++ library
+If you want to build standalone c++ library, you can follow the steps below.
+Given that MIRAGE_ROOT points to top-level mirage project folder.
+* Build the Z3 from source.
+```bash
+cd $MIRAGE_ROOT/deps/z3
+mkdir build; cd build
+cmake ..
+make -j
+```
+* Export Z3 build directory.
+```bash
+export Z3_DIR=$MIRAGE_ROOT/deps/z3/build
+```
+* Build mirage from source.
+```bash
+cd $MIRAGE_ROOT
+mkdir build; cd build
+cmake ..
+make -j
+make install
+```
+By default, mirage build process will generate a static library. To install mirage in your directory of choice
+specify -CMAKE_INSTALL_PREFIX=path/to/your/directory as a cmake option.
+
 ## Docker images
 
 We require [docker](https://docs.docker.com/engine/installation/) and [nvidia-docker](https://github.com/NVIDIA/nvidia-docker/) to run the Mirage [docker images](https://hub.docker.com/r/mlso/mirage).
