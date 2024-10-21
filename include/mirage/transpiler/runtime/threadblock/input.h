@@ -164,16 +164,30 @@ public:
   static __device__ __forceinline__ void run(TMA tma,
                                              T *__restrict__ dst,
                                              T const *__restrict__ src,
-                                             uint64_t tma_load_mbar) {
+                                             uint64_t tma_load_mbar,
+                                             int forloop_idx) {
 
     int warp_idx = cutlass::canonical_warp_idx_sync();
     int lane_predicate = cute::elect_one_sync();
-    Tensor sA = make_tensor(src, SrcLayout{});
-    Tensor gA = make_tensor(dst, DstLayout{});
+    // Tensor sA = make_tensor(src, SrcLayout{});
+    // Tensor gA = make_tensor(dst, DstLayout{});
+
+    // get threadblock local tile with stages
+    // coor_id: forloop_idx, and blockIdx,
+
+    auto cta_coord = make_coord(blockIdx.x, blockIdx.y, _);
+
+    Tensor gA = local_tile(mA, cta_tiler, cta_coord, Step<_1, X, _1>{});
+
+    tAgA, tAsA = tma_partition(tma_a,
+                               Int<0>{},
+                               Layout<_1>{},
+                               group_modes<0, 2>(sA),
+                               group_modes<0, 2>(gA));
     if (warp_idx == 0 && lane_predicate) {
       initialize_barrier(tma_load_mbar, 1);
       set_barrier_transaction_bytes(tma_load_mbar, tmaTransactionBytes);
-      copy(tma.with(tma_load_mbar), gA, sA);
+      copy(tma.with(tma_load_mbar), tAgA(_, forloop_idx), tAsA(_, forloop_idx));
     }
     __syncthreads();
   }

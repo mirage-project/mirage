@@ -393,7 +393,14 @@ void Transpiler::resolve_tensor_layout() {
               }
             } else {
               // Want to leverage cp.bulk.async (TMA instructions)
-              assert(0 && "Not implemented");
+              for (int i = 0; i < input.num_dims; ++i) {
+                costs.push_back(
+                    z3::ite(s_is_innermost[input.guid][i] &&
+                                !d_is_innermost[output.guid][i],
+                            ctx.int_val(cost::TB_OUTPUT_NO_WIDE_COPY),
+                            ctx.int_val(0)));
+              }
+              // assert(0 && "Not implemented");
             }
             break;
           }
@@ -406,8 +413,23 @@ void Transpiler::resolve_tensor_layout() {
             int num_dims = input0.num_dims;
             assert(num_dims >= 2);
             // Loading
-            if (this->config.target_cc >= GPU_CC::T4) {
+            if (this->config.target_cc >= GPU_CC::T4 &&
+                this->config.target_cc < GPU_CC::H100) {
               // Leverage ldmatrix copying on T4+
+              for (tb::STensor const &input : {input0, input1}) {
+                // If both dims are not the innermost one, cannot use ldmatrix
+                costs.push_back(
+                    z3::ite(!s_is_innermost[input.guid][num_dims - 1] &&
+                                !s_is_innermost[input.guid][num_dims - 2],
+                            ctx.int_val(cost::TB_MATMUL_NO_LDMATRIX),
+                            ctx.int_val(0)));
+                // Need to swizzle some dimensions
+                opt.add(z3::implies(!s_is_innermost[input.guid][num_dims - 1],
+                                    s_is_swizzled[input.guid][num_dims - 1]));
+                opt.add(z3::implies(!s_is_innermost[input.guid][num_dims - 2],
+                                    s_is_swizzled[input.guid][num_dims - 2]));
+              }
+            } else if (this->config.target_cc == GPU_CC::H100) {
               for (tb::STensor const &input : {input0, input1}) {
                 // If both dims are not the innermost one, cannot use ldmatrix
                 costs.push_back(
@@ -427,8 +449,12 @@ void Transpiler::resolve_tensor_layout() {
             }
             // Storing
             if (this->config.target_cc >= GPU_CC::H100) {
-              // Leverage TMA instructions on H100+
-              assert(0 && "Not implemented");
+              opt.add(z3::implies(!s_is_innermost[output.guid][num_dims - 1],
+                                  s_is_swizzled[output.guid][num_dims - 1]));
+              opt.add(z3::implies(!s_is_innermost[output.guid][num_dims - 2],
+                                  s_is_swizzled[output.guid][num_dims - 2]));
+              // no copy needed, for example: SM90_64x64x16_F16F16F16_SS
+              // assert(0 && "Not implemented");
             } else {
               // Use normal copying. Need to swizzle some dimensions
               opt.add(z3::implies(!s_is_innermost[output.guid][num_dims - 1],

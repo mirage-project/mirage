@@ -342,12 +342,27 @@ CustomOPTranspileResult
         } else if (config.target_cc == GPU_CC::H100) {
           pipelined_input_ops.insert(cur_op);
           // make tma
-          code.e("tma = ***");
+          string smem_layout = mov_last_get_stensor_layout(
+              stensor, stensor_meta, real_innermost_dim);
+          code.e("auto gT = make_tensor<half_t>(dtensor$_tile_ptr, "
+                 "DTensor$TileLayout)",
+                 dtensor.guid,
+                 dtensor.guid);
+
+          code.e("auto tma =  make_tma_copy<half_t>(SM90_TMA_LOAD{}, gT, "
+                 "$, "
+                 "$, Int<1>{});",
+                 smem_layout,
+                 smem_layout);
+
+          int num_stage = 0;
+
+          // stages should equal to the forloop_range
+          assert(num_stage == g.forloop_range);
           code.e("using STensor$InputAtom = tb::InputTMAAsyncCopy<half_t, "
-                 "$, DTensor$TileLayout, tma>;",
+                 "$, DTensor$TileLayout, decltype(tma)>;",
                  stensor.guid,
-                 mov_last_get_stensor_layout(
-                     stensor, stensor_meta, real_innermost_dim),
+                 smem_layout,
                  dtensor.guid);
 
         } else {
@@ -543,7 +558,7 @@ CustomOPTranspileResult
           mma_atom_mnk = {16, 8, 16};
           mma_atom_num_threads = 32;
         }
-      } else if (GPUCC::H100 == config.target_cc) {
+      } else if (GPU_CC::H100 == config.target_cc) {
         assert(k % 16 == 0);
         // Hopper wgmma
         assert(num_threads >= 128);

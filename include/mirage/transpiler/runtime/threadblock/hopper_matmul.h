@@ -46,51 +46,6 @@ public:
       decltype(coalesce(Result_{}, Step<_1, _1>{})); // By-mode coalescing
 };
 
-enum class S2RTiledCopyType { UNIVERSAL, LDMATRIX_N, LDMATRIX_T };
-// Select the S2R (shared -> register) copy atom
-template <typename T,
-          bool IS_LDMATRIX_AVAIL,
-          class Layout,
-          int K_DIM,
-          class MMAAtomK>
-class S2RTiledCopySelector {
-  // TODO(intlsy) Add support for architectures that do not support LDMATRIX
-  // (don't forget to consider the case where the shape of the matrix is not
-  // divisible by the shape of TiledMMA)
-  static_assert(IS_LDMATRIX_AVAIL);
-
-  static constexpr bool IS_DIM0_INNERMOST = (Layout{})(_1{}, _0{}) == _1{};
-  static constexpr bool IS_DIM1_INNERMOST = (Layout{})(_0{}, _1{}) == _1{};
-  static constexpr int CONSECUTIVE_DIM = IS_DIM0_INNERMOST ? 0 : 1;
-
-  // TODO(intlsy) Fallback to normal copy when this is not true
-  static_assert(IS_DIM0_INNERMOST || IS_DIM1_INNERMOST);
-
-public:
-  // Since we want to pipeline S->R copy and MMA, we would like the MMAAtom and
-  // the CopyAtom to have the same shape on the K dim
-  using CandidateLdMatrixN = std::conditional_t<
-      MMAAtomK{} == _16{},
-      SM75_U32x4_LDSM_N,
-      std::conditional_t<MMAAtomK{} == _8{}, SM75_U32x2_LDSM_N, void>>;
-  using CandidateLdMatrixT = std::conditional_t<
-      MMAAtomK{} == _16{},
-      SM75_U16x8_LDSM_T,
-      std::conditional_t<MMAAtomK{} == _8{}, SM75_U16x4_LDSM_T, void>>;
-  static_assert(!std::is_same_v<CandidateLdMatrixN, void>);
-  static_assert(!std::is_same_v<CandidateLdMatrixT, void>);
-
-  // If `ldmatrix` is available and the innermost dim is among the first two
-  // dims, use `ldmatrix` or `ldmatrix.trans`. Otherwise, use the universal copy
-  // atom
-  using Result = std::conditional_t<CONSECUTIVE_DIM == K_DIM,
-                                    Copy_Atom<CandidateLdMatrixN, T>,
-                                    Copy_Atom<CandidateLdMatrixT, T>>;
-  static constexpr S2RTiledCopyType TYPE = CONSECUTIVE_DIM == K_DIM
-                                               ? S2RTiledCopyType::LDMATRIX_N
-                                               : S2RTiledCopyType::LDMATRIX_T;
-};
-
 enum class R2STiledCopyType { UNIVERSAL, STMATRIX_N, STMATRIX_T };
 // Select the R2S (register -> shared) copy atom
 template <typename T, bool IS_STMATRIX_AVAIL, class Layout>
