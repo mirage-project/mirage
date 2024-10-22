@@ -120,10 +120,10 @@ cdef extern from "mirage/layout.h" namespace "mirage::layout":
         SmemColumnMajor = 201,
         SmemUnknownLayout = 299
 
-cdef cppclass CppTBGraph
+cdef cppclass CppTBGraph "mirage::threadblock::Graph"
 
-cdef extern from "mirage/kernel/graph.h" namespace "mirage::kernel":
-    ctypedef struct CppDTensor "mirage::kernel::DTensor":
+cdef extern from "mirage/kernel/device_tensor.h" namespace "mirage::kernel":
+    cdef struct CppDTensor "mirage::kernel::DTensor":
         DataType data_type
         DmemLayout layout
         int num_dims
@@ -132,15 +132,19 @@ cdef extern from "mirage/kernel/graph.h" namespace "mirage::kernel":
         #KNOperator *owner_op
         #void *data_ptr
         int owner_ts_idx
-        pass
+
+cdef extern from "mirage/kernel/graph.h" namespace "mirage::kernel":
 
     cdef cppclass CppKNOperator "mirage::kernel::KNOperator":
         KNOperatorType op_type
         vector[CppDTensor] input_tensors
         vector[CppDTensor] output_tensors
+        int get_input_dtensors(CppDTensor** cinputs)
+        int get_output_dtensors(CppDTensor** cinputs)
  
-    cdef cppclass CppKNCustomizedOp(CppKNOperator):
+    cdef cppclass CppKNCustomizedOp "mirage::kernel::KNCustomizedOp"(CppKNOperator):
         CppTBGraph bgraph
+        void get_bgraph(CppTBGraph** bgraph)
 
     cdef cppclass CppKNGraph "mirage::kernel::Graph":
         CppKNGraph()
@@ -169,13 +173,25 @@ cdef extern from "mirage/threadblock/graph.h" namespace "mirage::threadblock":
         SmemLayout layout
         int num_dims
         int dim[4]
-        int owner_ts_id
+        int owner_ts_idx
         size_t guid
     
     cdef cppclass CppTBOperator "mirage::threadblock::TBOperator":
         TBOperatorType op_type
         vector[CppSTensor] input_tensors
         vector[CppSTensor] output_tensors
+        int get_input_stensors(CppSTensor** cinputs)
+        int get_output_stensors(CppSTensor** cinputs)
+
+    cdef cppclass CppTBInputOp "mirage::threadblock::TBInputOp"(CppTBOperator):
+        int forloop_dim
+        int3 input_map
+        size_t get_dtensor_guid()
+
+    cdef cppclass CppTBOutputOp "mirage::threadblock::TBOutputOp"(CppTBOperator):
+        int forloop_dim
+        int3 output_map
+        size_t get_dtensor_guid()
 
     cdef cppclass CppTBGraph "mirage::threadblock::Graph":
         CppTBGraph(dim3 grid_dim,

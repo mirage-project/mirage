@@ -6,18 +6,21 @@ colors_map = {
         "node": "#70a148",
         "bg": "#e0edd5",
         "edge": "#527536",
+        "edge_label": "black",
         "io": "#527536",
     },
     "block": {
         "node": "#5a8fcb",
         "bg": "#dbe8f5",
         "edge": "#4273b1",
+        "edge_label": "black",
         "io": "#527536",
     },
     "thread": {
         "node": "#f5c342",
         "bg": "#fdf2d0",
         "edge": "#b89230",
+        "edge_label": "black",
         "io": "#4273b1",  # 输入输出节点和边的颜色
     }
 }
@@ -70,7 +73,8 @@ op_nodelabel_mapping = {
     "tb_accum_red_ld_mean_op": "Accum Red\nLD Mean",
     "tb_accum_red_ld_rms_op": "Accum Red\nLD RMS",
     "tb_accum_redtox_ld_sum_op": "Accum RedtoX\nLD Sum",
-    "tb_customized_op": "Customized\nOp"
+    "tb_customized_op": "Customized\nOp",
+    "tb_forloop_accum_no_red_op": "Forloop Accum\nNo Red", # Add by hand
 }
 guid_tensors_map = {}
 
@@ -78,8 +82,9 @@ tensor_name_suffix = "'"
 phi_symbol = "\u2205"
 arrow_symbol = "↔"
 
-def draw_edge(G, from_node, to_node, color, label=None):
-    G.edge(from_node, to_node, color=color, penwidth="3", label=label, fontname="sans-serif", fontsize=edge_font_size, fontcolor=color)
+def draw_edge(G, from_node, to_node, graph_type, label=None):
+    G.edge(from_node, to_node, color=colors_map[graph_type]["edge"], penwidth="6", 
+           label=label, fontname="sans-serif", fontsize=edge_font_size, fontcolor=colors_map[graph_type]["edge_label"])
 
 def get_format_str(operator_data):
     s = ""
@@ -126,9 +131,8 @@ class kernel_node(node):
         return not self.output_tensors
 
     def draw(self, G):
-        print(self.label)
         G.node(self.name, label=self.label, color=self.color, style="rounded,filled", shape="box",
-               penwidth="0", fontsize=node_font_size, fontcolor="white", fontname="sans-serif")
+               penwidth="0", fontsize=node_font_size, fontcolor="white", fontname="sans-serif", margin="0.4,0.4")
         
 class block_node(node):
     def __init__(self, name, op_type, id, label, iomap=None, forloop_dim=None, forloop_range=None):
@@ -176,18 +180,18 @@ class block_node(node):
             G.node(tensor_node_name, label=self.original_tensor.name + "'\n" + str(shape_before_loop) + "\n" + self.iomap_str,
                      color=tensor_color, style="filled", shape="box", penwidth="0", fontsize=tensor_node_font_size, fontcolor="white", fontname="sans-serif")
             G.node(self.name, label=self.label + "\n" + self.formap_str, color=self.color, style="rounded,filled",
-                   shape="box", penwidth="0", fontsize=node_font_size, fontcolor="white", fontname="sans-serif")
-            G.edge(tensor_node_name, self.name, color=tensor_color, penwidth="3")
+                   shape="box", penwidth="0", fontsize=node_font_size, fontcolor="white", fontname="sans-serif", margin="0.4,0.4")
+            draw_edge(G, tensor_node_name, self.name, "block")
         elif self.is_output_node():
             tensor_node_name = self.original_tensor.name + "'_output"
             G.node(self.name, label=self.label, color=self.color, style="rounded,filled",
-                   shape="box", penwidth="0", fontsize=node_font_size, fontcolor="white", fontname="sans-serif")
+                   shape="box", penwidth="0", fontsize=node_font_size, fontcolor="white", fontname="sans-serif", margin="0.4,0.4")
             G.node(tensor_node_name, label=self.original_tensor.name + "'\n" + str(self.input_tensors[0].shape) + "\n" + self.iomap_str,
                      color=tensor_color, style="filled", shape="box", penwidth="0", fontsize=tensor_node_font_size, fontcolor="white", fontname="sans-serif")
-            G.edge(self.name, tensor_node_name, color=tensor_color, penwidth="3")
+            draw_edge(G, self.name, tensor_node_name, "block")
         else:
             G.node(self.name, label=self.label, color=self.color, style="rounded,filled",
-                     shape="box", penwidth="0", fontsize=node_font_size, fontcolor="white", fontname="sans-serif")
+                     shape="box", penwidth="0", fontsize=node_font_size, fontcolor="white", fontname="sans-serif", margin="0.4,0.4")
 
 class tensor:
     def _init_(self, guid, color, shape):
@@ -198,43 +202,47 @@ class tensor:
         self.shape = shape
 
 class kernel_tensor(tensor):
-    def __init__(self, guid, name, shape):
+    def __init__(self, guid, shape):
         super()._init_(guid, colors_map["kernel"]["io"], shape)
-        self.name = name
+        self.name = None
         guid_tensors_map[guid] = self
     
     def draw(self, G):
         if self.next_nodes:
             for next_node in self.next_nodes:
-                if self.last_node and next_node:
-                    print("Drawing Kernel tensor ", self.name, self.guid, " between ", self.last_node.name, " and ", next_node.name)
                 if self.last_node.is_customized_node() or next_node.is_customized_node():
                     G.node(self.name, label=self.name + "\n" + str(self.shape), color=self.color, style="filled", shape="box",
                         penwidth="0", fontsize=tensor_node_font_size, fontcolor="white", fontname="sans-serif")
                     if not (self.last_node.is_input_node()):
-                        G.edge(self.last_node.name, self.name, color=self.color, penwidth="3")
+                        draw_edge(G, self.last_node.name, self.name, "kernel")
                     if next_node:
-                        G.edge(self.name, next_node.name, color=self.color, penwidth="3")
+                        draw_edge(G, self.name, next_node.name, "kernel")
                 elif self.last_node.is_input_node():
+                    if not self.name:
+                        self.name = str(self.guid)
                     G.node(self.name, label=str(self.shape), color=self.color, style="filled", shape="box",
                         penwidth="0", fontsize=tensor_node_font_size, fontcolor="white", fontname="sans-serif")
-                    G.edge(self.name, next_node.name, color=self.color, penwidth="3")
+                    draw_edge(G, self.name, next_node.name, "kernel")
                 elif not next_node:
+                    if not self.name:
+                        self.name = str(self.guid)
                     G.node(self.name, label=str(self.shape), color=self.color, style="filled", shape="box",
                         penwidth="0", fontsize=tensor_node_font_size, fontcolor="white", fontname="sans-serif")
-                    G.edge(self.last_node.name, self.name, color=self.color, penwidth="3")
+                    draw_edge(G, self.last_node.name, self.name, "kernel")
                 else:
-                    print("Connecting ", self.last_node.name, " to ", next_node.name)
-                    G.edge(self.last_node.name, next_node.name, color=self.color, penwidth="3", label=str(self.shape),
-                        fontname="sans-serif", fontsize=edge_font_size, fontcolor=self.color, labeldistance="2.0")
+                    draw_edge(G, self.last_node.name, next_node.name, "kernel", label=str(self.shape))
         elif self.last_node.is_customized_node():
-                G.node(self.name, label=self.name + "\n" + str(self.shape), color=self.color, style="filled", shape="box",
+                if not self.name:
+                    G.node(self.name, label=str(self.shape), color=self.color, style="filled", shape="box",
                     penwidth="0", fontsize=tensor_node_font_size, fontcolor="white", fontname="sans-serif")
-                G.edge(self.last_node.name, self.name, color=self.color, penwidth="3")
+                else:
+                    G.node(self.name, label=self.name + "\n" + str(self.shape), color=self.color, style="filled", shape="box",
+                        penwidth="0", fontsize=tensor_node_font_size, fontcolor="white", fontname="sans-serif")
+                draw_edge(G, self.last_node.name, self.name, "kernel")
         else:
             G.node(self.last_node.name+"_output_tensor", label=str(self.shape), color=self.color, style="filled", shape="box",
                 penwidth="0", fontsize=tensor_node_font_size, fontcolor="white", fontname="sans-serif")
-            G.edge(self.last_node.name, self.last_node.name+"_output_tensor", color=self.color, penwidth="3")
+            draw_edge(G, self.last_node.name, self.last_node.name+"_output_tensor", "kernel")
             
 class block_tensor(tensor):
     def __init__(self, guid, shape):
@@ -243,8 +251,7 @@ class block_tensor(tensor):
     
     def draw(self, G):
         for next_node in self.next_nodes:
-            G.edge(self.last_node.name, next_node.name, color=self.color, penwidth="3", label=str(self.shape),
-                    fontname="sans-serif", fontsize=edge_font_size, fontcolor=self.color, labeldistance="0.1", labelangle="90")
+           draw_edge(G, self.last_node.name, next_node.name, "block", label=str(self.shape))
 
 
 class graph:
@@ -274,7 +281,7 @@ class kernel_graph(graph):
                 if tensor_guid in guid_tensors_map:
                     tensor = guid_tensors_map[tensor_guid]
                 else:
-                    tensor = kernel_tensor(tensor_guid, None, input_tensor["dim"][:input_tensor["num_dims"]])
+                    tensor = kernel_tensor(tensor_guid, input_tensor["dim"][:input_tensor["num_dims"]])
                 if new_node.is_customized_node() and not tensor.name:
                     tensor.name = next(self.letter_sequence)
                 tensor.next_nodes.append(new_node)
@@ -288,8 +295,7 @@ class kernel_graph(graph):
                 if tensor_guid in guid_tensors_map:
                     tensor = guid_tensors_map[tensor_guid]
                 else:
-                    print("Creating new tensor with guid ", tensor_guid)
-                    tensor = kernel_tensor(tensor_guid, None, output_tensor["dim"][:output_tensor["num_dims"]])
+                    tensor = kernel_tensor(tensor_guid, output_tensor["dim"][:output_tensor["num_dims"]])
                 if new_node.is_customized_node() and not tensor.name:
                     tensor.name = next(self.letter_sequence)
                 tensor.last_node = new_node
@@ -329,7 +335,6 @@ class kernel_graph(graph):
                 else:
                     node.draw(sub)
             for tensor in self.tensors:
-                print("Drawing kernel tensor ", tensor.name, tensor.guid)
                 tensor.draw(sub)
 
 class block_graph(graph):
@@ -390,15 +395,12 @@ class block_graph(graph):
                 new_node.input_tensors.append(tensor)
             if "dtensor" in node_data:
                 new_node.original_tensor = guid_tensors_map[node_data["dtensor"]["guid"]]
-                print("new node name is ", new_node.name, " ID is ", new_node.id)
-                print("original_tensor:", new_node.original_tensor.name)
 
             self.nodes.append(new_node)
         return nodes
 
     def draw_graph(self, G):
         with G.subgraph(name="cluster" + self.label) as sub:
-            print("Drawing block graph ", self.label, " with bg color ", self.bg_color)
             sub.attr(rankdir='LR', splines='ortho', bgcolor=self.bg_color, fontname="sans-serif", 
             label=self.label + self.get_grid_size_and_forloop(), labelloc='t', labeljust='l',
             labeldistance="1.5", fontsize=graph_label_font_size, fontcolor="black", style="filled", penwidth="0")
@@ -424,7 +426,7 @@ class visualizer:
             self.G.save(self.output_filename + ".dot")
             print(f"Graph saved as {self.output_filename}.dot")
         if png:
-            self.G.render(self.output_filename + ".png", cleanup=True)
+            self.G.render(self.output_filename, cleanup=True)
             print(f"Graph saved as {self.output_filename}.png")
         
 
@@ -442,7 +444,7 @@ def handle_graph_data(graph_data, graph_title, output_filename, dot=True, png=Tr
         G.save(output_filename + ".dot")
         print(f"Graph saved as {output_filename}.dot")
     if png:
-        G.render(output_filename + ".png", cleanup=True)
+        G.render(output_filename, cleanup=True)
         print(f"Graph saved as {output_filename}.png")
 
 
@@ -454,11 +456,9 @@ if __name__ == "__main__":
 
     if isinstance(data, list):
         if all(isinstance(item, list) for item in data):
-            print("Multiple combined graphs detected.")
             for idx, graph_list in enumerate(data):
                 handle_graph_data(graph_list, graph_title=f"Combined graph {idx+1}", output_filename=f"reframe_outcome/reframe_combined_graph_{idx+1}")
         elif all(is_graph_data(item) for item in data):
-            print("Single combined graph detected.")
             handle_graph_data(data, graph_title="Combined graph", output_filename="reframe_outcome/reframe_combined_graph")
         else:
             print("Invalid data format.")

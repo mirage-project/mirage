@@ -44,3 +44,4 @@ dist/
 
 # Visualizer results
 *.png
+*.dot
