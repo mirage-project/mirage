@@ -106,6 +106,8 @@ def get_kn_operator_type_string(int op_type):
         return "kn_unkown"
     elif op_type == 1001:
         return "kn_input_op"
+    elif op_type == 1002:
+        return "kn_output_op"
     elif op_type == 1003:
         return "kn_matmul_op"
     elif op_type == 1100:
@@ -135,7 +137,7 @@ def get_kn_operator_type_string(int op_type):
     elif op_type == 1999:
         return "kn_customized_op"
     else:
-        return "unknown_op_type"
+        return "unknown_op_type" + str(op_type)
 
 
 def get_tb_operator_type_string(int op_type):
@@ -169,6 +171,14 @@ def get_tb_operator_type_string(int op_type):
         return "tb_reduction_1_op"
     elif op_type == 2303:
         return "tb_reduction_2_op"
+    elif op_type == 2304:
+        return "tb_reduction_0_to_dimx_op"
+    elif op_type == 2305:
+        return "tb_reduction_1_to_dimx_op"
+    elif op_type == 2306:
+        return "tb_reduction_2_to_dimx_op"
+    elif op_type == 2349:
+        return "tb_reduction_last_op_id"
     elif op_type == 2350:
         return "tb_rms_norm_op"
     elif op_type == 2400:
@@ -192,7 +202,7 @@ def get_tb_operator_type_string(int op_type):
     elif op_type == 2999:
         return "tb_customized_op"
     else:
-        return "unknown_op_type"
+        return "unknown_op_type" + str(op_type)
 
 
 def convert_dtype_to_ctype(type : dtype):
