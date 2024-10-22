@@ -230,6 +230,10 @@ KNCustomizedOp::KNCustomizedOp(mirage::kernel::Graph *_kgraph,
   }
 }
 
+void KNCustomizedOp::get_bgraph(mirage::threadblock::Graph** bgraph_) {
+  *bgraph_ = &(this->bgraph);
+}
+
 KNCustomizedOp::~KNCustomizedOp() {
   // while (!bgraph.operators.empty()) {
   //   delete bgraph.operators.back();
