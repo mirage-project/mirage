@@ -51,6 +51,7 @@ def get_chameleon_attention():
     bQ = tbgraph1.new_input(dtensor=Q, input_map=(0, -1, 1), forloop_dim=-1)
     bK = tbgraph1.new_input(dtensor=K, input_map=(0, 2, -1), forloop_dim=2)
     bV = tbgraph1.new_input(dtensor=V, input_map=(0, 1, -1), forloop_dim=1)
+    bQ = tbgraph1.rms_norm(bQ)
     bA = tbgraph1.matmul(bQ, bK)
     bE = tbgraph1.exp(bA)
     bS = tbgraph1.matmul(bE, bV)
@@ -69,7 +70,6 @@ def get_chameleon_attention():
     tbgraph2.new_output(stensor=bO, output_map=(0, 1, -1))
     O = graph.customized(O, tbgraph2)
     return graph, O
-
 
 def mirage_chameleon(X, Wqkv, Wo, W13, W2, Kcache, Vcache, kernels):
     func, outputs = kernels[0]

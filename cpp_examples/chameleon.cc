@@ -11,12 +11,18 @@ int main(int argc, char **argv) {
   assert(batch_size == 1 || batch_size == 8);
   kernel::Graph ref_graph({1, 1, 1});
   {
-    kernel::DTensor Q = ref_graph.new_input(
-        {2 * batch_size, 256, 64}, type::DT_FLOAT16, layout::DmemRowMajor);
-    kernel::DTensor K = ref_graph.new_input(
-        {2 * batch_size, 64, 4096}, type::DT_FLOAT16, layout::DmemColumnMajor);
-    kernel::DTensor V = ref_graph.new_input(
-        {2 * batch_size, 4096, 64}, type::DT_FLOAT16, layout::DmemColumnMajor);
+    kernel::DTensor Q = ref_graph.new_input({2 * batch_size, 256, 64},
+                                            {16384, 64, 1},
+                                            type::DT_FLOAT16,
+                                            layout::DmemRowMajor);
+    kernel::DTensor K = ref_graph.new_input({2 * batch_size, 64, 4096},
+                                            {262144, 4096, 1},
+                                            type::DT_FLOAT16,
+                                            layout::DmemColumnMajor);
+    kernel::DTensor V = ref_graph.new_input({2 * batch_size, 4096, 64},
+                                            {262144, 64, 1},
+                                            type::DT_FLOAT16,
+                                            layout::DmemColumnMajor);
     // Q = ref_graph.rms_norm(Q, {Q.dim[2]});
     V = ref_graph.rms_norm(V, {V.dim[2]});
     kernel::DTensor A = ref_graph.matmul(Q, K);
@@ -40,12 +46,18 @@ int main(int argc, char **argv) {
                                     ->output_tensors[0]
                                     .copy_fingerprint_to_ctensor();
   kernel::Graph graph({1, 1, 1});
-  kernel::DTensor Q = graph.new_input(
-      {2 * batch_size, 256, 64}, type::DT_FLOAT16, layout::DmemRowMajor);
-  kernel::DTensor K = graph.new_input(
-      {2 * batch_size, 64, 4096}, type::DT_FLOAT16, layout::DmemColumnMajor);
-  kernel::DTensor V = graph.new_input(
-      {2 * batch_size, 4096, 64}, type::DT_FLOAT16, layout::DmemColumnMajor);
+  kernel::DTensor Q = graph.new_input({2 * batch_size, 256, 64},
+                                      {16384, 64, 1},
+                                      type::DT_FLOAT16,
+                                      layout::DmemRowMajor);
+  kernel::DTensor K = graph.new_input({2 * batch_size, 64, 4096},
+                                      {262144, 4096, 1},
+                                      type::DT_FLOAT16,
+                                      layout::DmemColumnMajor);
+  kernel::DTensor V = graph.new_input({2 * batch_size, 4096, 64},
+                                      {262144, 64, 1},
+                                      type::DT_FLOAT16,
+                                      layout::DmemColumnMajor);
   std::vector<kernel::DTensor> outputs;
   {
     dim3 grid_dim = {2, 16, 4}, block_dim = {128, 1, 1};
@@ -53,16 +65,22 @@ int main(int argc, char **argv) {
     if (batch_size > 1) {
       grid_dim = {16, 8, 2};
     }
-    threadblock::Graph bgraph(grid_dim, block_dim, forloop_range, reduction_dimx);
-    threadblock::STensor bQ = bgraph.new_input(Q, {0, -1, 1}, -1, layout::SmemRowMajor);
-    threadblock::STensor bK = bgraph.new_input(K, {0, 2, -1}, 2, layout::SmemColumnMajor);
-    threadblock::STensor bV = bgraph.new_input(V, {0, 1, -1}, 1, layout::SmemColumnMajor);
+    threadblock::Graph bgraph(
+        grid_dim, block_dim, forloop_range, reduction_dimx);
+    threadblock::STensor bQ =
+        bgraph.new_input(Q, {0, -1, 1}, -1, layout::SmemRowMajor);
+    threadblock::STensor bK =
+        bgraph.new_input(K, {0, 2, -1}, 2, layout::SmemColumnMajor);
+    threadblock::STensor bV =
+        bgraph.new_input(V, {0, 1, -1}, 1, layout::SmemColumnMajor);
     bV = bgraph.rms_norm(bV);
     threadblock::STensor bA = bgraph.matmul(bQ, bK);
     threadblock::STensor bE = bgraph.exp(bA);
     threadblock::STensor bS = bgraph.matmul(bE, bV);
-    threadblock::STensor bO1 = bgraph.forloop_accum(bS, type::TB_FORLOOP_ACCUM_NO_RED_OP);
-    threadblock::STensor bO2 = bgraph.forloop_accum(bE, type::TB_FORLOOP_ACCUM_RED_LD_SUM_OP);
+    threadblock::STensor bO1 =
+        bgraph.forloop_accum(bS, type::TB_FORLOOP_ACCUM_NO_RED_OP);
+    threadblock::STensor bO2 =
+        bgraph.forloop_accum(bE, type::TB_FORLOOP_ACCUM_RED_LD_SUM_OP);
     bgraph.mark_output(bO1, {0, 2, 1}, -1, type::TB_EPILOGUE_NONE);
     bgraph.mark_output(bO2, {0, 2, 1}, -1, type::TB_EPILOGUE_NONE);
     outputs = graph.customized({Q, K, V}, bgraph);
@@ -77,16 +95,22 @@ int main(int argc, char **argv) {
     if (batch_size > 1) {
       grid_dim = {16, 8, 1};
     }
-    threadblock::Graph bgraph(grid_dim, block_dim, forloop_range, reduction_dimx);
-    threadblock::STensor bA = bgraph.new_input(outputs[0], {0, 1, -1}, -1, layout::SmemRowMajor);
-    threadblock::STensor bB = bgraph.new_input(outputs[1], {0, 1, -1}, -1, layout::SmemRowMajor);
-    threadblock::STensor bRA = bgraph.forloop_accum(bA, type::TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP);
-    threadblock::STensor bRB = bgraph.forloop_accum(bB, type::TB_FORLOOP_ACCUM_RED_LD_SUM_OP);
+    threadblock::Graph bgraph(
+        grid_dim, block_dim, forloop_range, reduction_dimx);
+    threadblock::STensor bA =
+        bgraph.new_input(outputs[0], {0, 1, -1}, -1, layout::SmemRowMajor);
+    threadblock::STensor bB =
+        bgraph.new_input(outputs[1], {0, 1, -1}, -1, layout::SmemRowMajor);
+    threadblock::STensor bRA =
+        bgraph.forloop_accum(bA, type::TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP);
+    threadblock::STensor bRB =
+        bgraph.forloop_accum(bB, type::TB_FORLOOP_ACCUM_RED_LD_SUM_OP);
     // threadblock::STensor bRA = bgraph.reduction_to_dimx(bA, 2);
     // threadblock::STensor bRB = bgraph.reduction(bB, 2);
     threadblock::STensor bD = bgraph.div(bRA, bRB);
     threadblock::STensor bAcc = bD;
-    //threadblock::STensor bAcc = bgraph.forloop_accum(bD, type::TB_FORLOOP_ACCUM_NO_RED_OP);
+    // threadblock::STensor bAcc = bgraph.forloop_accum(bD,
+    // type::TB_FORLOOP_ACCUM_NO_RED_OP);
     bgraph.mark_output(bAcc, {0, 1, -1}, -1, type::TB_EPILOGUE_NONE);
     outputs = graph.customized({outputs[0], outputs[1]}, bgraph);
     assert(outputs.size() == 1);
@@ -109,18 +133,11 @@ int main(int argc, char **argv) {
 
   auto st = std::chrono::steady_clock::now();
   search::GeneratorConfig config =
-      search::GeneratorConfig::get_attention_default_config();
-  config.grid_dim_to_explore = {
-      {2 * batch_size, 16, 4},
-      // {2 * batch_size, 8, 2},
-      {2 * batch_size, 16, 1},
-      // {2 * batch_size, 8, 1}
-  };
-  std::string checkpoint_file_name =
-      "checkpoint_group_query_attn_spec_decode_bs" +
-      std::to_string(batch_size) + ".json";
-  search::KernelGraphGenerator gen(
-      ref_graph, config, checkpoint_file_name.data());
+      search::GeneratorConfig::get_default_config();
+  config.enable_attention_specific_optimization();
+  std::string results_filename =
+      "results_chameleon_bs" + std::to_string(batch_size) + ".json";
+  search::KernelGraphGenerator gen(ref_graph, config, results_filename.data(), true);
   gen.generate_kernel_graphs();
 
   auto et = std::chrono::steady_clock::now();

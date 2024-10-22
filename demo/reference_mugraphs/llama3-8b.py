@@ -25,7 +25,8 @@ def get_rms_linear():
     tO = tb_graph.div(tAccM, tAccX)
     tb_graph.new_output(stensor=tO, output_map=(1, -1, -1))
     O = graph.customized([X, W], tb_graph)
-    return graph, O
+    graph.mark_output(O[0])
+    return graph
 
 def get_rms_linear2():
     graph = mi.new_kernel_graph()
@@ -40,11 +41,12 @@ def get_rms_linear2():
     tO = tb_graph.div(tAccM, tAccX)
     tb_graph.new_output(stensor=tO, output_map=(1, -1, -1))
     O = graph.customized([X, W], tb_graph)
-    return graph, O
+    graph.mark_output(O[0])
+    return graph
    
 def mirage_llama(X, Wqkv, Wo, W13, W2, Kcache, Vcache, kernels):
-    func, outputs = kernels[0]
-    outputs = func(inputs=[X, Wqkv], outputs=outputs)
+    func = kernels[0]
+    outputs = func(inputs=[X, Wqkv])
     Xqkv = outputs[0]
     Xq = Xqkv[:, : (n_local_heads * head_dim)]
     output_shape = Xq.shape
@@ -59,8 +61,8 @@ def mirage_llama(X, Wqkv, Wo, W13, W2, Kcache, Vcache, kernels):
     output = torch.matmul(output.reshape(output_shape), Wo)
     # RMSNorm
     X = output
-    func, outputs = kernels[1]
-    outputs = func(inputs=[X, W13], outputs=outputs)
+    func = kernels[1]
+    outputs = func(inputs=[X, W13])
     X13 = outputs[0]
     X1, X3 = X13.chunk(2, -1)
     output = torch.matmul(X1, W2)

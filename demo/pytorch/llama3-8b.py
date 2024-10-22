@@ -13,7 +13,7 @@ num_kv_tokens = 4096
 rms_norm4k = torch.nn.RMSNorm(4096, device='cuda:0', dtype=torch.float16)
 rms_norm128 = torch.nn.RMSNorm(128, device='cuda:0', dtype=torch.float16)
 silu = torch.nn.SiLU()
-#@torch.compile()
+@torch.compile(mode="reduce-overhead")
 def torch_llama(X, Wqkv, Wo, W13, W2, Kcache, Vcache):
     X = rms_norm4k(X)
     Xqkv = torch.matmul(X, Wqkv)
@@ -24,8 +24,6 @@ def torch_llama(X, Wqkv, Wo, W13, W2, Kcache, Vcache):
     Xq = Xq.view(Xq.shape[0], n_local_heads, head_dim)
     Xk = Xk.view(Xk.shape[0], n_local_kv_heads, head_dim)
     Xv = Xv.view(Xv.shape[0], n_local_kv_heads, head_dim)
-    #Xq = rms_norm128(Xq)
-    #Xv = rms_norm128(Xv)
     output = flashinfer.single_prefill_with_kv_cache(Xq, Kcache, Vcache, causal=True)
     output = torch.matmul(output.reshape(output_shape), Wo)
     # RMSNorm
