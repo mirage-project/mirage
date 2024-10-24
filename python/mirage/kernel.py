@@ -122,7 +122,7 @@ class KNGraph:
 
         self._is_compiled = False
         self.run = None
-        self.valid_cuda_kernels = False
+        self._valid_cuda_kernels = False
         self._cached_results = None
 
     def new_input(
@@ -175,7 +175,7 @@ class KNGraph:
 
     def valid_kernels(self):
         assert self._is_compiled, "Should check kernel validness after compilation"
-        return self.valid_cuda_kernels
+        return self._valid_cuda_kernels
 
     def __call__(self, **kwargs):
         results = self.compile(**kwargs)
@@ -183,7 +183,7 @@ class KNGraph:
         assert self.run is not None, "The graph is not compiled yet."
 
         # directly return if the Transpiler cannot generate valid CUDA kernels
-        if not self.valid_cuda_kernels:
+        if not self._valid_cuda_kernels:
             return None
 
         input_tensors = kwargs.get("inputs", [])
@@ -236,10 +236,15 @@ class KNGraph:
         )
         # print(result)
         if result["max_smem_size"] > get_shared_memory_capacity(target_cc):
+            print(result["max_smem_size"], get_shared_memory_capacity(target_cc))
             # the transpiled kernel exceeds shared memory limit
             self._is_compiled = True
-            self.valid_cuda_kernels = False
-            return None
+            self._valid_cuda_kernels = False
+
+            if async_:
+                return Handle([], None)
+            else:
+                return None
 
         MIRAGE_ROOT = os.environ.get(
             "MIRAGE_ROOT", os.path.join(os.path.dirname(__file__), "include")
@@ -314,7 +319,6 @@ class KNGraph:
         if async_:
             ret = subprocess.Popen(cc_cmd)
             return Handle([ret], remain_op)
-        
         else:
             ret = subprocess.check_call(cc_cmd)
             return remain_op()
@@ -376,8 +380,6 @@ class KNGraph:
             
             starter = torch.cuda.Event(enable_timing=True)
             ender = torch.cuda.Event(enable_timing=True)
-            print("Transpiling muGraph {}...".format(idx))
-            g.compile(inputs=input_tensors)
             if not g.valid_kernels():
                 print("muGraph {} requires more shared memory than hardware limit; skipping".format(idx))
                 continue
