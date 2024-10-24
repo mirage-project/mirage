@@ -202,7 +202,7 @@ class KNGraph:
 
         return output_tensors
 
-    def compile(self, async_=False,  **kwargs):
+    def compile(self, async_=False, **kwargs):
         if self._is_compiled:
             return self._cached_results
 
