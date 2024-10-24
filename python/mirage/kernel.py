@@ -301,7 +301,7 @@ class KNGraph:
         
         else:
             ret = subprocess.check_call(cc_cmd)
-            remain_op()
+            return remain_op()
         
         # so_path = './test.cpython-38-x86_64-linux-gnu.so'
 
