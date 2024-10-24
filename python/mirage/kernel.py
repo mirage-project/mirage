@@ -10,6 +10,7 @@ from typing import *
 
 from .core import *
 from .threadblock import *
+from .utils import *
 
 HARD_CODE = """
 #include <Python.h>
@@ -110,6 +111,7 @@ class KNGraph:
 
         self._is_compiled = False
         self.run = None
+        self.valid_cuda_kernels = False
         self._cached_results = None
 
     def new_input(
@@ -160,10 +162,18 @@ class KNGraph:
     def customized(self, inputs: list[DTensor], bgraph: TBGraph) -> list[DTensor]:
         return self.cygraph.customized(inputs, bgraph.cygraph)
 
+    def valid_kernels(self):
+        assert self._is_compiled, "Should check kernel validness after compilation"
+        return self.valid_cuda_kernels
+
     def __call__(self, **kwargs):
         results = self.compile(**kwargs)
 
         assert self.run is not None, "The graph is not compiled yet."
+
+        # directly return if the Transpiler cannot generate valid CUDA kernels
+        if not self.valid_cuda_kernels:
+            return None
 
         input_tensors = kwargs.get("inputs", [])
 
@@ -214,6 +224,11 @@ class KNGraph:
             self.cygraph, target_cc=target_cc, input_strides=input_strides
         )
         # print(result)
+        if result["max_smem_size"] > get_shared_memory_capacity(target_cc):
+            # the transpiled kernel exceeds shared memory limit
+            self._is_compiled = True
+            self.valid_cuda_kernels = False
+            return None
 
         MIRAGE_ROOT = os.environ.get(
             "MIRAGE_ROOT", os.path.join(os.path.dirname(__file__), "include")
@@ -279,6 +294,7 @@ class KNGraph:
             self.run = getattr(mod, "launch")
 
         self._is_compiled = True
+        self.valid_cuda_kernels = True
         self._cached_results = result
         return self._cached_results
 
@@ -319,6 +335,11 @@ class KNGraph:
             starter = torch.cuda.Event(enable_timing=True)
             ender = torch.cuda.Event(enable_timing=True)
             print("Transpiling muGraph {}...".format(idx))
+            g.compile(inputs=input_tensors)
+            if not g.valid_kernels():
+                print("muGraph {} requires more shared memory than hardware limit; skipping".format(idx))
+                continue
+            # Warmup runs
             for _ in range(16):
                 g(inputs=input_tensors)
             torch.cuda.synchronize()
