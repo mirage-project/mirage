@@ -32,7 +32,7 @@ void Transpiler::resolve_tb_fusion() {
         num_consumers[input.guid] += 1;
       }
     }
-    // Currently we only fuse elementwise unary operators and 
+    // Currently we only fuse elementwise unary operators and
     // forloop_accum_no_red with
     // the previous operator, when the output of the previous operator has only
     // one consumer

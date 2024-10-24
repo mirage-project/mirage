@@ -468,6 +468,14 @@ TBMemoryPlan Transpiler::get_threadblock_memory_plan(tb::Graph const &tb_graph,
     kv.second += ALIGNMENT;
   }
 
+  if (plan.smem_size > mirage::config::MAX_SMEM_SIZE) {
+    printf("Warning: planned smem_size(%zu) exceeds MAX_SMEM_SIZE(%zu)\n",
+           plan.smem_size,
+           mirage::config::MAX_SMEM_SIZE);
+    // for (const auto &kv : plan.addrs)
+    //   printf("sguid(%zu) offset(%zu)\n", kv.first, kv.second);
+  }
+
   return plan;
 }
 

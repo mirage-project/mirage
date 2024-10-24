@@ -97,7 +97,8 @@ std::vector<dim3>
   }
   cands = filter(cands, [](dim3 const &dim) {
     int num_threadblocks = dim.x * dim.y * dim.z;
-    return 32 <= num_threadblocks && num_threadblocks <= config::MAX_NUM_THREADBLOCKS_PER_KERNEL;
+    return 32 <= num_threadblocks &&
+           num_threadblocks <= config::MAX_NUM_THREADBLOCKS_PER_KERNEL;
   });
 
   cands = deduplicate(cands);

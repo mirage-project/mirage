@@ -127,15 +127,47 @@ size_t Graph::calculate_shared_memory_usage(TBOperator *new_op) {
       case mirage::type::TB_SQUARE_OP:
       case mirage::type::TB_SQRT_OP:
       case mirage::type::TB_SILU_OP:
-      case mirage::type::TB_MUL_SCALAR_OP:
+      case mirage::type::TB_MUL_SCALAR_OP: {
+        // inplace optimization for element-wise unary
+        break;
+      }
       // Forloop accumulator
-      case mirage::type::TB_FORLOOP_ACCUM_NO_RED_OP:
-      case mirage::type::TB_FORLOOP_ACCUM_RED_LD_SUM_OP:
-      case mirage::type::TB_FORLOOP_ACCUM_RED_LD_MEAN_OP:
-      case mirage::type::TB_FORLOOP_ACCUM_RED_LD_RMS_OP:
+      case mirage::type::TB_FORLOOP_ACCUM_NO_RED_OP: {
+        // inplace optimization for non-reduction accum
+        break;
+      }
+      case mirage::type::TB_FORLOOP_ACCUM_RED_LD_SUM_OP: {
+        // we will inline accumulation but need to perform
+        // a redue_sum
+        assert(op->output_tensors.size() == 1);
+        usage += op->output_tensors[0].size();
+        break;
+      }
+      case mirage::type::TB_FORLOOP_ACCUM_RED_LD_MEAN_OP: {
+        // we will inline accumulation but need to perform
+        // a reduction
+        assert(op->output_tensors.size() == 1);
+        usage += op->output_tensors[0].size();
+        break;
+      }
+      case mirage::type::TB_FORLOOP_ACCUM_RED_LD_RMS_OP: {
+        // This operator will be transpiled to the following operators:
+        // 1. square (element-wise unary)
+        // 2. mul_scalar (element-wise unary)
+        // 3. forloop_accum (non-reduction accumulator)
+        // 4. reduction
+        // 5. sqrt (element-wise unary)
+        // So we only need to allocate shared memory for reduction, whose
+        // size is the same as output_tensors[0]
+        assert(op->output_tensors.size() == 1);
+        usage += op->output_tensors[0].size();
+        break;
+      }
       case mirage::type::TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP: {
-        // inplace optimization for elementunary
-        // and accumulation
+        // we will inline accumulation but need to perform
+        // a reduuction_to_dimx
+        assert(op->output_tensors.size() == 1);
+        usage += op->output_tensors[0].size();
         break;
       }
       default: {
@@ -553,8 +585,9 @@ NewKernelParams Graph::get_new_kernel_params(bool fingerprint) const {
         assert(operators[i]->output_tensors.size() == 1);
         mirage::threadblock::STensor input = operators[i]->input_tensors[0];
         mirage::threadblock::STensor output = operators[i]->output_tensors[0];
-        int norm_size = output.dim[output.num_dims-1];
-	// printf("norm_size(%d) num_elements(%d)\n", norm_size, (int)output.num_elements());
+        int norm_size = output.dim[output.num_dims - 1];
+        // printf("norm_size(%d) num_elements(%d)\n", norm_size,
+        // (int)output.num_elements());
         assert(input.num_elements() == output.num_elements());
         mirage::threadblock::serialize_rms_norm_op_parameters(
             params.parameters,
@@ -751,9 +784,8 @@ void from_json(json const &j, Graph &graph) {
         break;
       }
       case type::TBOperatorType::TB_RMS_NORM_OP: {
-        STensor const &output = graph.rms_norm(
-            get_tensor_from_guid(
-                op.at("input_tensors")[0].at("guid").get<int>()));
+        STensor const &output = graph.rms_norm(get_tensor_from_guid(
+            op.at("input_tensors")[0].at("guid").get<int>()));
         guid_mapping[output.guid] =
             op.at("output_tensors")[0].at("guid").get<int>();
         break;

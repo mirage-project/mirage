@@ -137,7 +137,8 @@ int main(int argc, char **argv) {
   config.enable_attention_specific_optimization();
   std::string results_filename =
       "results_chameleon_bs" + std::to_string(batch_size) + ".json";
-  search::KernelGraphGenerator gen(ref_graph, config, results_filename.data(), true);
+  search::KernelGraphGenerator gen(
+      ref_graph, config, results_filename.data(), true);
   gen.generate_kernel_graphs();
 
   auto et = std::chrono::steady_clock::now();

@@ -56,6 +56,9 @@ struct TranspileResult {
   // The size of the buffer (should be an array on GPU), in bytes
   size_t buf_size;
 
+  // The maximum smem size used by a kernel, in bytes
+  size_t max_smem_size;
+
   // Directives for output tensors
   std::vector<OutputTensorDirective> output_directives;
 };
