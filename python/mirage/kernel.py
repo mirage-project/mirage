@@ -116,6 +116,7 @@ class Handle:
         if self.remain_op:
             self.remain_op()
 
+
 class KNGraph:
     def __init__(self, graph):
         self.cygraph = graph
@@ -180,11 +181,11 @@ class KNGraph:
     def __call__(self, **kwargs):
         results = self.compile(**kwargs)
 
-        assert self.run is not None, "The graph is not compiled yet."
-
         # directly return if the Transpiler cannot generate valid CUDA kernels
         if not self._valid_cuda_kernels:
             return None
+
+        assert self.run is not None, "The graph is not compiled yet."
 
         input_tensors = kwargs.get("inputs", [])
 
@@ -236,8 +237,10 @@ class KNGraph:
         )
         # print(result)
         if result["max_smem_size"] > get_shared_memory_capacity(target_cc):
-            print(result["max_smem_size"], get_shared_memory_capacity(target_cc))
             # the transpiled kernel exceeds shared memory limit
+            print(
+                f"required shared memory size {result['max_smem_size']} exceed max shared memory size of current gpu arch {get_shared_memory_capacity(target_cc)}"
+            )
             self._is_compiled = True
             self._valid_cuda_kernels = False
 
@@ -301,7 +304,6 @@ class KNGraph:
             so_path,
         ]
 
-
         def remain_op():
             import importlib.util
 
@@ -315,14 +317,14 @@ class KNGraph:
             self._cached_results = result
             tempdir_obj.cleanup()
             return self._cached_results
-    
+
         if async_:
             ret = subprocess.Popen(cc_cmd)
             return Handle([ret], remain_op)
         else:
             ret = subprocess.check_call(cc_cmd)
             return remain_op()
-        
+
         # so_path = './test.cpython-38-x86_64-linux-gnu.so'
 
     def superoptimize(
@@ -361,7 +363,7 @@ class KNGraph:
                 input_tensors.append(
                     torch.randn(dims, dtype=torch.float16, device="cuda:0")
                 )
-            
+
             starter = torch.cuda.Event(enable_timing=True)
             ender = torch.cuda.Event(enable_timing=True)
             print("Transpiling muGraph {}...".format(idx))
@@ -377,11 +379,15 @@ class KNGraph:
                 input_tensors.append(
                     torch.randn(dims, dtype=torch.float16, device="cuda:0")
                 )
-            
+
             starter = torch.cuda.Event(enable_timing=True)
             ender = torch.cuda.Event(enable_timing=True)
             if not g.valid_kernels():
-                print("muGraph {} requires more shared memory than hardware limit; skipping".format(idx))
+                print(
+                    "muGraph {} requires more shared memory than hardware limit; skipping".format(
+                        idx
+                    )
+                )
                 continue
             # Warmup runs
             for _ in range(16):
