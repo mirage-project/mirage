@@ -17,7 +17,7 @@ HARD_CODE = """
 static PyObject *launch(PyObject *self, PyObject *args) {
   PyObject *input_list, *output_list, *py_buffer;
   void *buffer;
-  std::vector<void const *> input_tensors;
+  std::vector<void *> input_tensors;
   std::vector<void*> output_tensors;
 
   if (!PyArg_ParseTuple(args, "OOO", &input_list, &output_list, &py_buffer)) {
@@ -213,7 +213,7 @@ class KNGraph:
         result = generate_cuda_program(
             self.cygraph, target_cc=target_cc, input_strides=input_strides
         )
-        # print(result)
+        print(result["code"])
 
         MIRAGE_ROOT = os.environ.get(
             "MIRAGE_ROOT", os.path.join(os.path.dirname(__file__), "include")

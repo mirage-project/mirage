@@ -60,6 +60,19 @@ struct TranspileResult {
   std::vector<OutputTensorDirective> output_directives;
 };
 
+struct TMAParams {
+    size_t input_id;                              // ID of the TMA
+    size_t guid;
+    std::string srcLayout;                 // String representing the layout
+    std::string dstLayout;                 // String representing the layout
+    std::string tile_size;                   // String representing the tile
+    std::tuple<int, int, int> clusterSize; // Tuple for cluster size
+
+    // Constructor for convenience
+    TMAParams(size_t input_id, size_t guid, const std::string& srcLayout, const std::string& dstLayout, const std::string& tile_size, const std::tuple<int, int, int>& clusterSize)
+        : input_id(input_id), guid(guid), srcLayout(srcLayout), dstLayout(dstLayout), tile_size(tile_size), clusterSize(clusterSize) {}
+};
+
 // Transpile a custom KN operator (a custom block graph)
 struct CustomOPTranspileResult {
   // The name of the generated kernel function
@@ -71,6 +84,7 @@ struct CustomOPTranspileResult {
   //  [kernel code]
   // }
   std::string code;
+  std::vector<TMAParams> tmaParamsList; 
 };
 
 // Metadata for one DTensor during transpiling
