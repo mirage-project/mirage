@@ -13,9 +13,9 @@
  * limitations under the License.
  */
 
-#include "mirage/kernel/operator.h"
 #include "mirage/kernel/device_memory_manager.h"
 #include "mirage/kernel/graph.h"
+#include "mirage/kernel/operator.h"
 
 namespace mirage {
 namespace kernel {
@@ -65,8 +65,8 @@ KNInputOp::KNInputOp(Graph *_graph,
                      mirage::type::DataType data_type,
                      mirage::layout::DmemLayout layout,
                      int3 _input_map)
-    : KNOperator(_graph, mirage::type::KN_INPUT_OP),
-      input_strides(strides), input_map(_input_map) {
+    : KNOperator(_graph, mirage::type::KN_INPUT_OP), input_strides(strides),
+      input_map(_input_map) {
   DTensor tensor;
   tensor.num_dims = dims.size();
   for (int i = tensor.num_dims - 1; i >= 0; i--) {

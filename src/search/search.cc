@@ -265,9 +265,9 @@ void KernelGraphGenerator::generate_next_operator(
         assert(contains_key(algebraic_pattern, stensor.guid));
         TBOperator *new_op =
             c.tb_graph->create_output_op(stensor,
-                                        output_map,
-                                        -1 /*forloop_dim*/,
-                                        mirage::type::TB_EPILOGUE_NONE);
+                                         output_map,
+                                         -1 /*forloop_dim*/,
+                                         mirage::type::TB_EPILOGUE_NONE);
         if (!new_op) {
           return false;
         }
@@ -435,7 +435,8 @@ void KernelGraphGenerator::preprocess(kernel::Graph const &computation_graph) {
 
   for (kernel::KNOperator *op : computation_graph.operators) {
     if (op->op_type == type::KNOperatorType::KN_OUTPUT_OP) {
-      computation_graph_output_tensors.push_back(op->input_tensors[0].copy_fingerprint_to_ctensor());
+      computation_graph_output_tensors.push_back(
+          op->input_tensors[0].copy_fingerprint_to_ctensor());
       computation_graph_output_patterns.push_back(
           computation_graph_patterns.at(op->input_tensors[0].guid));
     }
@@ -490,7 +491,8 @@ bool KernelGraphGenerator::verify(kernel::Graph &g) {
     };
 
     auto unmark_outputs = [&](std::vector<int> const &match) {
-      while (g.operators.back()->op_type == type::KNOperatorType::KN_OUTPUT_OP) {
+      while (g.operators.back()->op_type ==
+             type::KNOperatorType::KN_OUTPUT_OP) {
         delete g.operators.back();
         g.operators.pop_back();
       }
