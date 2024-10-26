@@ -10,6 +10,7 @@ from typing import *
 
 from .core import *
 from .threadblock import *
+from .visualizer import *
 from .utils import *
 
 HARD_CODE = """
@@ -125,6 +126,7 @@ class KNGraph:
         self.run = None
         self._valid_cuda_kernels = False
         self._cached_results = None
+        self.visualizer = None
 
     def new_input(
         self, dims: tuple, strides: tuple = None, dtype: dtype = float16
@@ -404,3 +406,8 @@ class KNGraph:
                 best_graph, best_perf = g, perf
 
         return best_graph
+
+    def visualize(self, file_name):
+        operators = self.cygraph.get_graph_structure()
+        self.visualizer = visualizer(file_name)
+        self.visualizer.draw_graphs(operators)

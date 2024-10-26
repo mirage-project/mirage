@@ -2,6 +2,7 @@ import mirage as mi
 import argparse
 import os
 import torch
+from mirage import visualizer
 
 @torch.compile(backend="cudagraphs")
 def torch_lora(X, W, A, B):
@@ -44,7 +45,7 @@ def optimize_lora(checkpoint):
     curr_time = starter.elapsed_time(ender)
     mean_syn = curr_time / 1000
     print(mean_syn)
-            
+    graph.visualize("lora")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

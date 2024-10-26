@@ -38,3 +38,10 @@ dist/
 
 # Cython
 /python/mirage/_cython/core.cpp
+
+# Mac OS .DS_Store
+.DS_Store
+
+# Visualizer results
+*.png
+*.dot
