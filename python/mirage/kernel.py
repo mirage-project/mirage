@@ -356,7 +356,7 @@ class KNGraph:
         best_graph, best_perf = None, float("inf")
 
         handles = []
-        print("warm up")
+        print("Transpiling discovered {} muGraphs ...".format(len(all_graphs)))
         for idx, g in enumerate(all_graphs):
             dtensors = g.cygraph.get_input_dtensors()
             input_tensors = list()
@@ -368,7 +368,6 @@ class KNGraph:
 
             starter = torch.cuda.Event(enable_timing=True)
             ender = torch.cuda.Event(enable_timing=True)
-            print("Transpiling muGraph {}...".format(idx))
             handle = g.compile(async_=True, inputs=input_tensors)
             handles.append(handle)
         for handle in handles:
@@ -385,11 +384,7 @@ class KNGraph:
             starter = torch.cuda.Event(enable_timing=True)
             ender = torch.cuda.Event(enable_timing=True)
             if not g.valid_kernels():
-                print(
-                    "muGraph {} requires more shared memory than hardware limit; skipping".format(
-                        idx
-                    )
-                )
+                print("muGraph {}: skipping since its shared memory usage exceed limit".format(idx))
                 continue
             # Warmup runs
             for _ in range(16):
@@ -401,7 +396,7 @@ class KNGraph:
             ender.record()
             torch.cuda.synchronize()
             perf = starter.elapsed_time(ender) / 1000
-            print("Profiling muGraph {} performance (ms) = {}".format(idx, perf))
+            print("muGraph {}: profiled performance (ms) = {}".format(idx, perf))
             if perf < best_perf:
                 best_graph, best_perf = g, perf
 
