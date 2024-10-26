@@ -74,6 +74,7 @@ op_nodelabel_mapping = {
     "tb_accum_red_ld_rms_op": "Accum Red\nLD RMS",
     "tb_accum_redtox_ld_sum_op": "Accum RedtoX\nLD Sum",
     "tb_customized_op": "Customized\nOp",
+    "tb_forloop_accum_first_op": "Forloop Accum\nFirst",
     "tb_forloop_accum_no_red_op": "Forloop Accum\nNo Red", # Add by hand
 }
 guid_tensors_map = {}
@@ -410,11 +411,11 @@ class block_graph(graph):
                 tensor.draw(sub)
 
 class visualizer:
-    def __init__(self, graph_title, output_filename):
+    def __init__(self, output_filename):
         self.graphs = []
         self.output_filename = output_filename
         self.letter_sequence = letter_sequence()
-        self.G = gv.Digraph(format='png', name=graph_title)
+        self.G = gv.Digraph(format='png', name="Kernel Graph")
         self.G.attr(rankdir='LR', splines='ortho', bgcolor="#ffffff", fontname="sans-serif",
            nodesep="1.6", ranksep="0.3", fontsize="16", fontcolor="black", compound="true")
         self.new_kernel_graph = kernel_graph("Kernel Graph")

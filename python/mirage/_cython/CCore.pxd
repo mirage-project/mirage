@@ -48,6 +48,7 @@ cdef extern from "mirage/type.h" namespace "mirage::type":
     cdef enum KNOperatorType:
         KN_UNKOWN = 1000,
         KN_INPUT_OP = 1001,
+        KN_OUTPUT_OP = 1002,
         KN_MATMUL_OP = 1003,
         # ElementUnary
         KN_EXP_OP = 1100,

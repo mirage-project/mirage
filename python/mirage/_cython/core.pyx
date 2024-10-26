@@ -102,104 +102,112 @@ float32 = dtype('fp32')
 float64 = dtype('fp64')
 
 def get_kn_operator_type_string(int op_type):
-    if op_type == 1000:
-        return "kn_unkown"
-    elif op_type == 1001:
+    if op_type == KN_UNKOWN:
+        return "kn_unknown"
+    elif op_type == KN_INPUT_OP:
         return "kn_input_op"
-    elif op_type == 1002:
+    elif op_type == KN_OUTPUT_OP:
         return "kn_output_op"
-    elif op_type == 1003:
+    elif op_type == KN_MATMUL_OP:
         return "kn_matmul_op"
-    elif op_type == 1100:
+    elif op_type == KN_EXP_OP:
         return "kn_exp_op"
-    elif op_type == 1101:
+    elif op_type == KN_SQUARE_OP:
         return "kn_square_op"
-    elif op_type == 1102:
+    elif op_type == KN_SQRT_OP:
         return "kn_sqrt_op"
-    elif op_type == 1103:
+    elif op_type == KN_SILU_OP:
         return "kn_silu_op"
-    elif op_type == 1200:
+    elif op_type == KN_ADD_OP:
         return "kn_add_op"
-    elif op_type == 1201:
+    elif op_type == KN_MUL_OP:
         return "kn_mul_op"
-    elif op_type == 1202:
+    elif op_type == KN_DIV_OP:
         return "kn_div_op"
-    elif op_type == 1300:
+    elif op_type == KN_REDUCTION_0_OP:
         return "kn_reduction_0_op"
-    elif op_type == 1301:
+    elif op_type == KN_REDUCTION_1_OP:
         return "kn_reduction_1_op"
-    elif op_type == 1302:
+    elif op_type == KN_REDUCTION_2_OP:
         return "kn_reduction_2_op"
-    elif op_type == 1350:
+    elif op_type == KN_RMS_NORM_OP:
         return "kn_rms_norm_op"
-    elif op_type == 1400:
+    elif op_type == KN_ALLREDUCE_OP:
         return "kn_allreduce_op"
-    elif op_type == 1999:
+    elif op_type == KN_CUSTOMIZED_OP:
         return "kn_customized_op"
     else:
         return "unknown_op_type" + str(op_type)
 
 
 def get_tb_operator_type_string(int op_type):
-    if op_type == 2000:
-        return "tb_unkown"
-    elif op_type == 2001:
+    if op_type == TB_UNKOWN:
+        return "tb_unknown"
+    elif op_type == TB_INPUT_OP:
         return "tb_input_op"
-    elif op_type == 2002:
+    elif op_type == TB_OUTPUT_OP:
         return "tb_output_op"
-    elif op_type == 2003:
+    elif op_type == TB_MATMUL_OP:
         return "tb_matmul_op"
-    elif op_type == 2100:
+    elif op_type == TB_EXP_OP:
         return "tb_exp_op"
-    elif op_type == 2101:
+    elif op_type == TB_SQUARE_OP:
         return "tb_square_op"
-    elif op_type == 2102:
+    elif op_type == TB_SQRT_OP:
         return "tb_sqrt_op"
-    elif op_type == 2103:
+    elif op_type == TB_SILU_OP:
         return "tb_silu_op"
-    elif op_type == 2104:
+    elif op_type == TB_MUL_SCALAR_OP:
         return "tb_mul_scalar_op"
-    elif op_type == 2200:
+    elif op_type == TB_ADD_OP:
         return "tb_add_op"
-    elif op_type == 2201:
+    elif op_type == TB_MUL_OP:
         return "tb_mul_op"
-    elif op_type == 2202:
+    elif op_type == TB_DIV_OP:
         return "tb_div_op"
-    elif op_type == 2301:
+    elif op_type == TB_REDUCTION_FIRST_OP_ID:
+        return "tb_reduction_first_op_id"
+    elif op_type == TB_REDUCTION_0_OP:
         return "tb_reduction_0_op"
-    elif op_type == 2302:
+    elif op_type == TB_REDUCTION_1_OP:
         return "tb_reduction_1_op"
-    elif op_type == 2303:
+    elif op_type == TB_REDUCTION_2_OP:
         return "tb_reduction_2_op"
-    elif op_type == 2304:
+    elif op_type == TB_REDUCTION_0_TO_DIMX_OP:
         return "tb_reduction_0_to_dimx_op"
-    elif op_type == 2305:
+    elif op_type == TB_REDUCTION_1_TO_DIMX_OP:
         return "tb_reduction_1_to_dimx_op"
-    elif op_type == 2306:
+    elif op_type == TB_REDUCTION_2_TO_DIMX_OP:
         return "tb_reduction_2_to_dimx_op"
-    elif op_type == 2349:
+    elif op_type == TB_REDUCTION_LAST_OP_ID:
         return "tb_reduction_last_op_id"
-    elif op_type == 2350:
+    elif op_type == TB_RMS_NORM_OP:
         return "tb_rms_norm_op"
-    elif op_type == 2400:
+    elif op_type == TB_CONCAT_FIRST_OP_ID:
+        return "tb_concat_first_op_id"
+    elif op_type == TB_CONCAT_0_OP:
         return "tb_concat_0_op"
-    elif op_type == 2401:
+    elif op_type == TB_CONCAT_1_OP:
         return "tb_concat_1_op"
-    elif op_type == 2402:
+    elif op_type == TB_CONCAT_2_OP:
         return "tb_concat_2_op"
-    elif op_type == 2411:
+    elif op_type == TB_CONCAT_LAST_OP_ID:
+        return "tb_concat_last_op_id"
+    elif op_type == TB_CONCAT_THEN_MATMUL_OP:
         return "tb_concat_then_matmul_op"
-    elif op_type == 2500:
+    elif op_type == TB_FORLOOP_ACCUM_FIRST_OP:
+        return "tb_forloop_accum_first_op"
+    elif op_type == TB_FORLOOP_ACCUM_NO_RED_OP:
         return "tb_forloop_accum_no_red_op"
-    elif op_type == 2501:
+    elif op_type == TB_FORLOOP_ACCUM_RED_LD_SUM_OP:
         return "tb_forloop_accum_red_ld_sum_op"
-    elif op_type == 2502:
+    elif op_type == TB_FORLOOP_ACCUM_RED_LD_MEAN_OP:
         return "tb_forloop_accum_red_ld_mean_op"
-    elif op_type == 2503:
+    elif op_type == TB_FORLOOP_ACCUM_RED_LD_RMS_OP:
         return "tb_forloop_accum_red_ld_rms_op"
-    elif op_type == 2504:
+    elif op_type == TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP:
         return "tb_forloop_accum_redtox_ld_sum_op"
-    elif op_type == 2999:
+    elif op_type == TB_CUSTOMIZED_OP:
         return "tb_customized_op"
     else:
         return "unknown_op_type" + str(op_type)
@@ -840,10 +848,6 @@ cdef class CyTBGraph:
                 "y": self.p_bgraph.grid_dim.y,
                 "z": self.p_bgraph.grid_dim.z
             }
-
-    property block_dim:
-        def __get__(self):
-            return [self.p_bgraph.block_dim.x, self.p_bgraph.block_dim.y, self.p_bgraph.block_dim.z]
 
     property forloop_range:
         def __get__(self):

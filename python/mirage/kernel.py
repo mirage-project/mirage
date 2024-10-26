@@ -336,9 +336,7 @@ class KNGraph:
 
         return best_graph
 
-    def visualize(self, graph_name, file_name=None):
-        if file_name is None:
-            file_name = graph_name
+    def visualize(self, file_name):
         operators = self.cygraph.get_graph_structure()
-        self.visualizer = visualizer(graph_name, file_name)
+        self.visualizer = visualizer(file_name)
         self.visualizer.draw_graphs(operators)

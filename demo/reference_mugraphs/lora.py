@@ -45,7 +45,7 @@ def optimize_lora(checkpoint):
     curr_time = starter.elapsed_time(ender)
     mean_syn = curr_time / 1000
     print(mean_syn)
-    graph.visualize("lora", "lora")
+    graph.visualize("lora")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
