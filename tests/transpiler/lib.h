@@ -621,7 +621,10 @@ public:
           std::min(start_subcase + num_compile_threads, num_subcases);
       printf(
           "================================================================\n");
-      printf("Processing subcase %d ~ %d (%d in total)\n", start_subcase, end_subcase - 1, num_subcases);
+      printf("Processing subcase %d ~ %d (%d in total)\n",
+             start_subcase,
+             end_subcase - 1,
+             num_subcases);
       // Transpile them one by one (serial)
       printf("Step 0: Transpile\n");
       for (int i = start_subcase; i < end_subcase; ++i) {

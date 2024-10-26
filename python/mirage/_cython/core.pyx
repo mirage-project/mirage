@@ -972,5 +972,6 @@ def generate_cuda_program(CyKNGraph input_graph, *, int target_cc, list input_st
     return {
         "code": result.code.decode("UTF-8"),
         "buf_size": result.buf_size,
+        "max_smem_size": result.max_smem_size,
         "output_directives": output_directives
     }

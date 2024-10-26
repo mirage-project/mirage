@@ -11,6 +11,7 @@ from typing import *
 from .core import *
 from .threadblock import *
 from .visualizer import *
+from .utils import *
 
 HARD_CODE = """
 #include <Python.h>
@@ -105,12 +106,25 @@ def gen_empty_tensor(alloc_size, shape, stride, device, dtype=torch.float16):
     return torch.empty(alloc_size, dtype=dtype, device=device).as_strided(shape, stride)
 
 
+class Handle:
+    def __init__(self, handles=[], remain_op=None) -> None:
+        self.handles = handles
+        self.remain_op = remain_op
+
+    def wait(self):
+        for handle in self.handles:
+            handle.wait()
+        if self.remain_op:
+            self.remain_op()
+
+
 class KNGraph:
     def __init__(self, graph):
         self.cygraph = graph
 
         self._is_compiled = False
         self.run = None
+        self._valid_cuda_kernels = False
         self._cached_results = None
         self.visualizer = None
 
@@ -162,8 +176,16 @@ class KNGraph:
     def customized(self, inputs: list[DTensor], bgraph: TBGraph) -> list[DTensor]:
         return self.cygraph.customized(inputs, bgraph.cygraph)
 
+    def valid_kernels(self):
+        assert self._is_compiled, "Should check kernel validness after compilation"
+        return self._valid_cuda_kernels
+
     def __call__(self, **kwargs):
         results = self.compile(**kwargs)
+
+        # directly return if the Transpiler cannot generate valid CUDA kernels
+        if not self._valid_cuda_kernels:
+            return None
 
         assert self.run is not None, "The graph is not compiled yet."
 
@@ -193,7 +215,7 @@ class KNGraph:
 
         return output_tensors
 
-    def compile(self, **kwargs):
+    def compile(self, async_=False, **kwargs):
         if self._is_compiled:
             return self._cached_results
 
@@ -216,6 +238,18 @@ class KNGraph:
             self.cygraph, target_cc=target_cc, input_strides=input_strides
         )
         # print(result)
+        if result["max_smem_size"] > get_shared_memory_capacity(target_cc):
+            # the transpiled kernel exceeds shared memory limit
+            print(
+                f"required shared memory size {result['max_smem_size']} exceed max shared memory size of current gpu arch {get_shared_memory_capacity(target_cc)}"
+            )
+            self._is_compiled = True
+            self._valid_cuda_kernels = False
+
+            if async_:
+                return Handle([], None)
+            else:
+                return None
 
         MIRAGE_ROOT = os.environ.get(
             "MIRAGE_ROOT", os.path.join(os.path.dirname(__file__), "include")
@@ -223,56 +257,56 @@ class KNGraph:
 
         # if True:
         #     tempdir = './test/'
-        with tempfile.TemporaryDirectory() as tempdir:
-            FILE_NAME = os.path.join(tempdir, "test.cu")
-            so_path = os.path.join(tempdir, "test.cpython-38-x86_64-linux-gnu.so")
 
-            with open(FILE_NAME, "w") as f:
-                f.write(result["code"] + HARD_CODE)
+        tempdir_obj = tempfile.TemporaryDirectory()
+        tempdir = tempdir_obj.name
+        FILE_NAME = os.path.join(tempdir, "test.cu")
+        so_path = os.path.join(tempdir, "test.cpython-38-x86_64-linux-gnu.so")
 
-            cc = shutil.which("nvcc")
-            if cc is None:
-                raise RuntimeError(
-                    "nvcc not found. Please make sure you have installed CUDA."
-                )
+        with open(FILE_NAME, "w") as f:
+            f.write(result["code"] + HARD_CODE)
 
-            # This function was renamed and made public in Python 3.10
-            if hasattr(sysconfig, "get_default_scheme"):
-                scheme = sysconfig.get_default_scheme()
-            else:
-                scheme = sysconfig._get_default_scheme()
-            # 'posix_local' is a custom scheme on Debian. However, starting Python 3.10, the default install
-            # path changes to include 'local'. This change is required to use triton with system-wide python.
-            if scheme == "posix_local":
-                scheme = "posix_prefix"
-            py_include_dir = sysconfig.get_paths(scheme=scheme)["include"]
+        cc = shutil.which("nvcc")
+        if cc is None:
+            raise RuntimeError(
+                "nvcc not found. Please make sure you have installed CUDA."
+            )
 
-            if not os.path.exists(MIRAGE_ROOT):
-                print(
-                    f"Error: MIRAGE_ROOT ({MIRAGE_ROOT}) not found. Please set the MIRAGE_ROOT env variable correctly"
-                )
-                sys.exit(1)
-            cc_cmd = [
-                cc,
-                FILE_NAME,
-                "-O3",
-                f"-I{py_include_dir}",
-                f"-I{MIRAGE_ROOT}/include/mirage/transpiler/runtime/",
-                f"-I{MIRAGE_ROOT}/deps/cutlass/include",
-                "-shared",
-                "-std=c++17",
-                "-arch=native",
-                "-use_fast_math",
-                "-lcublas",
-                "-Xcompiler=-fPIC",
-                "--expt-relaxed-constexpr",
-                "-o",
-                so_path,
-            ]
+        # This function was renamed and made public in Python 3.10
+        if hasattr(sysconfig, "get_default_scheme"):
+            scheme = sysconfig.get_default_scheme()
+        else:
+            scheme = sysconfig._get_default_scheme()
+        # 'posix_local' is a custom scheme on Debian. However, starting Python 3.10, the default install
+        # path changes to include 'local'. This change is required to use triton with system-wide python.
+        if scheme == "posix_local":
+            scheme = "posix_prefix"
+        py_include_dir = sysconfig.get_paths(scheme=scheme)["include"]
 
-            ret = subprocess.check_call(cc_cmd)
-            # so_path = './test.cpython-38-x86_64-linux-gnu.so'
+        if not os.path.exists(MIRAGE_ROOT):
+            print(
+                f"Error: MIRAGE_ROOT ({MIRAGE_ROOT}) not found. Please set the MIRAGE_ROOT env variable correctly"
+            )
+            sys.exit(1)
+        cc_cmd = [
+            cc,
+            FILE_NAME,
+            "-O3",
+            f"-I{py_include_dir}",
+            f"-I{MIRAGE_ROOT}/include/mirage/transpiler/runtime/",
+            f"-I{MIRAGE_ROOT}/deps/cutlass/include",
+            "-shared",
+            "-std=c++17",
+            "-arch=native",
+            "-use_fast_math",
+            "-lcublas",
+            "-Xcompiler=-fPIC",
+            "--expt-relaxed-constexpr",
+            "-o",
+            so_path,
+        ]
 
+        def remain_op():
             import importlib.util
 
             spec = importlib.util.spec_from_file_location("__mirage_launcher", so_path)
@@ -280,9 +314,20 @@ class KNGraph:
             spec.loader.exec_module(mod)
             self.run = getattr(mod, "launch")
 
-        self._is_compiled = True
-        self._cached_results = result
-        return self._cached_results
+            self._is_compiled = True
+            self._valid_cuda_kernels = True
+            self._cached_results = result
+            tempdir_obj.cleanup()
+            return self._cached_results
+
+        if async_:
+            ret = subprocess.Popen(cc_cmd)
+            return Handle([ret], remain_op)
+        else:
+            ret = subprocess.check_call(cc_cmd)
+            return remain_op()
+
+        # so_path = './test.cpython-38-x86_64-linux-gnu.so'
 
     def superoptimize(
         self,
@@ -307,9 +352,11 @@ class KNGraph:
             default_config=config,
         )
         all_graphs = [KNGraph(g) for g in cygraphs]
-
         # profile and use the best graph
         best_graph, best_perf = None, float("inf")
+
+        handles = []
+        print("warm up")
         for idx, g in enumerate(all_graphs):
             dtensors = g.cygraph.get_input_dtensors()
             input_tensors = list()
@@ -318,9 +365,33 @@ class KNGraph:
                 input_tensors.append(
                     torch.randn(dims, dtype=torch.float16, device="cuda:0")
                 )
+
             starter = torch.cuda.Event(enable_timing=True)
             ender = torch.cuda.Event(enable_timing=True)
             print("Transpiling muGraph {}...".format(idx))
+            handle = g.compile(async_=True, inputs=input_tensors)
+            handles.append(handle)
+        for handle in handles:
+            handle.wait()
+        for idx, g in enumerate(all_graphs):
+            dtensors = g.cygraph.get_input_dtensors()
+            input_tensors = list()
+            for t in dtensors:
+                dims = [t.dim(i) for i in range(t.num_dims)]
+                input_tensors.append(
+                    torch.randn(dims, dtype=torch.float16, device="cuda:0")
+                )
+
+            starter = torch.cuda.Event(enable_timing=True)
+            ender = torch.cuda.Event(enable_timing=True)
+            if not g.valid_kernels():
+                print(
+                    "muGraph {} requires more shared memory than hardware limit; skipping".format(
+                        idx
+                    )
+                )
+                continue
+            # Warmup runs
             for _ in range(16):
                 g(inputs=input_tensors)
             torch.cuda.synchronize()
