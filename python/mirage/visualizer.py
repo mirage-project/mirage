@@ -132,8 +132,9 @@ class kernel_node(node):
         return not self.output_tensors
 
     def draw(self, G):
-        G.node(self.name, label=self.label, color=self.color, style="rounded,filled", shape="box",
-               penwidth="0", fontsize=node_font_size, fontcolor="white", fontname="sans-serif", margin="0.4,0.4")
+        if not self.is_output_node():
+            G.node(self.name, label=self.label, color=self.color, style="rounded,filled", shape="box",
+                penwidth="0", fontsize=node_font_size, fontcolor="white", fontname="sans-serif", margin="0.4,0.4")
         
 class block_node(node):
     def __init__(self, name, op_type, id, label, iomap=None, forloop_dim=None, forloop_range=None):
@@ -216,15 +217,16 @@ class kernel_tensor(tensor):
                         penwidth="0", fontsize=tensor_node_font_size, fontcolor="white", fontname="sans-serif")
                     if not (self.last_node.is_input_node()):
                         draw_edge(G, self.last_node.name, self.name, "kernel")
-                    if next_node:
+                    if not (next_node.is_output_node()):
                         draw_edge(G, self.name, next_node.name, "kernel")
                 elif self.last_node.is_input_node():
                     if not self.name:
                         self.name = str(self.guid)
                     G.node(self.name, label=str(self.shape), color=self.color, style="filled", shape="box",
                         penwidth="0", fontsize=tensor_node_font_size, fontcolor="white", fontname="sans-serif")
-                    draw_edge(G, self.name, next_node.name, "kernel")
-                elif not next_node:
+                    if not (next_node.is_output_node()):
+                        draw_edge(G, self.name, next_node.name, "kernel")
+                elif next_node.is_output_node():
                     if not self.name:
                         self.name = str(self.guid)
                     G.node(self.name, label=str(self.shape), color=self.color, style="filled", shape="box",
@@ -232,19 +234,7 @@ class kernel_tensor(tensor):
                     draw_edge(G, self.last_node.name, self.name, "kernel")
                 else:
                     draw_edge(G, self.last_node.name, next_node.name, "kernel", label=str(self.shape))
-        elif self.last_node.is_customized_node():
-                if not self.name:
-                    G.node(self.name, label=str(self.shape), color=self.color, style="filled", shape="box",
-                    penwidth="0", fontsize=tensor_node_font_size, fontcolor="white", fontname="sans-serif")
-                else:
-                    G.node(self.name, label=self.name + "\n" + str(self.shape), color=self.color, style="filled", shape="box",
-                        penwidth="0", fontsize=tensor_node_font_size, fontcolor="white", fontname="sans-serif")
-                draw_edge(G, self.last_node.name, self.name, "kernel")
-        else:
-            G.node(self.last_node.name+"_output_tensor", label=str(self.shape), color=self.color, style="filled", shape="box",
-                penwidth="0", fontsize=tensor_node_font_size, fontcolor="white", fontname="sans-serif")
-            draw_edge(G, self.last_node.name, self.last_node.name+"_output_tensor", "kernel")
-            
+
 class block_tensor(tensor):
     def __init__(self, guid, shape):
         super()._init_(guid, colors_map["block"]["edge"], shape)
