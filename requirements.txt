@@ -3,3 +3,4 @@ cython>=0.28
 z3-solver
 # torch>=2.0
 numpy
+graphviz
