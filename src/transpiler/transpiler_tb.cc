@@ -193,11 +193,13 @@ CustomOPTranspileResult
   // Get the memory allocation plan
   TBMemoryPlan mem_plan = get_threadblock_memory_plan(g, sched);
 
+  std::vector<TMAParams> tmaParamsList;
+
   // Allocate a kernel name
   static int custom_kernel_idx_counter = 0;
   int cur_custom_kernel_idx = custom_kernel_idx_counter++;
   string func_name = fmt("custom_kernel_$", cur_custom_kernel_idx);
-  string tma = std::string("CUTE_GRID_CONSTANT TMA1 const tma_10000004, CUTE_GRID_CONSTANT TMA2 const tma_10000005");
+
   // string tma = std::string("CUTE_GRID_CONSTANT TMA1 const tma_10000002");
 
   // Generate code prologue
@@ -216,42 +218,7 @@ CustomOPTranspileResult
                  return fmt("half_t const* __restrict__ dtensor$_ptr",
                             dtensor.guid);
                }));
-  } else if (GPU_CC::H100 == config.target_cc) {
-    assert(g.cluster_dim.x > 0 && g.cluster_dim.y > 0 && g.cluster_dim.z > 0);
-     code.e("template <class TMA1, class TMA2>");
-    // code.e("template <class TMA1>");
-     code.e("__global__ void  __launch_bounds__($) "
-           "$($, $, $) {",
-           num_threads,
-           func_name,
-          tma,
-           map<kn::DTensor, string>(
-               op->output_tensors,
-               [](kn::DTensor const &dtensor) -> string {
-                 return fmt("half_t* dtensor$_ptr", dtensor.guid);
-               }),
-           map<kn::DTensor, string>(
-               op->input_tensors, [](kn::DTensor const &dtensor) -> string {
-                 return fmt("half_t const* dtensor$_ptr", dtensor.guid);
-               }));
-    // code.e("__global__ void __cluster_dims__($, $, $) __launch_bounds__($) "
-    //        "$($, $, $) {",
-    //        g.cluster_dim.x,
-    //        g.cluster_dim.y,
-    //        g.cluster_dim.z,
-    //        num_threads,
-    //        func_name,
-    //        tma,
-    //        map<kn::DTensor, string>(
-    //            op->output_tensors,
-    //            [](kn::DTensor const &dtensor) -> string {
-    //              return fmt("half_t* __restrict__ dtensor$_ptr", dtensor.guid);
-    //            }),
-    //        map<kn::DTensor, string>(
-    //            op->input_tensors, [](kn::DTensor const &dtensor) -> string {
-    //              return fmt("half_t * __restrict__ dtensor$_ptr", dtensor.guid);
-    //            }));
-  } else {
+  } else if (GPU_CC::H100 < config.target_cc) {
     assert(0);
   }
   string thread_idx;
@@ -359,8 +326,7 @@ CustomOPTranspileResult
                  mov_last_get_stensor_layout(
                      stensor, stensor_meta, real_innermost_dim),
                  dtensor.guid);
-        }
-        else if (config.target_cc == GPU_CC::H100) {
+        } else if (config.target_cc == GPU_CC::H100) {
           pipelined_input_ops.insert(cur_op);
           // make tma
           string smem_layout = mov_last_get_stensor_layout(
@@ -372,50 +338,24 @@ CustomOPTranspileResult
               vector<size_t>(dtensor_meta.strides,
                              dtensor_meta.strides + dtensor.num_dims));
 
-          // code.e("Layout gmem_layout = make_layout(make_shape(4096,
-          // 16));");
-          // code.e("auto smem_layout   = make_layout(make_shape(_64{},
-          // _16{}),
-          // // "
-          //        "GenRowMajor{});");
-          // code.e("auto smem_layout = ${};", smem_layout);
-          // code.e("Tensor g_$ = make_tensor(make_gmem_ptr<half_t>(dtensor$_ptr), ${});",
-          //     stensor.guid,
-          //     dtensor.guid,
-          //     gmem_layout);
-
-          // code.e(
-          //     "Tensor g_$ = make_tensor(make_gmem_ptr<half_t>(dtensor10000003_ptr), ${});",
-          //     stensor.guid,
-          //     gmem_layout);
-          //  code.e(
-          //     "Tensor g_$ = make_tensor(make_gmem_ptr(T), ${});",
-          //     stensor.guid,
-          //     gmem_layout);
-
-
-          // code.e("auto tma_$ = make_tma_copy<half_t>(SM90_TMA_LOAD{}, g_$, ${}, shape(${}), Int<1>{}); ",
-          //        stensor.guid,
-          //        stensor.guid,
-          //        smem_layout,
-          //        smem_layout);
-          // code.e(
-          //     "using TMA_$ = decltype(make_tma_copy<half_t>(SM90_TMA_LOAD{}, g_$,  ${}));", stensor.guid, stensor.guid, smem_layout);
-
-          // code.e("TMA_$ tma_$;", stensor.guid, stensor.guid);
-          code.e("using STensor$InputAtom = tb::InputTMAAsyncCopy<half_t, $, $, decltype(tma_$)>;",
+          code.e("using STensor$InputAtom = tb::InputTMAAsyncCopy<half_t, $, "
+                 "$, decltype(tma_$)>;",
                  stensor.guid,
                  smem_layout,
                  gmem_layout,
                  dtensor.guid);
-          // code.e("__shared__ uint64_t tma_load_mbar_$ = tma_load_mbar_x[0];", stensor.guid);
 
+          tmaParamsList.push_back((TMAParams(meta.input_idx,
+                                             dtensor.guid,
+                                             gmem_layout,
+                                             smem_layout,
+                                             "Shape" + "(" + smem_layout + ")",
+                                             {1, 1, 1})));
           code.e("half_t *stensor$_async_copy_buf = stensor$_ptr;",
                  stensor.guid,
                  stensor.guid + mem_plan.pipelined_input_buf_guid_offset);
 
-        }
-        else {
+        } else {
           // Chunked, asynchronous copy
           pipelined_input_ops.insert(cur_op);
           code.e("using STensor$InputAtom = tb::InputChunkedAsyncCopy<half_t, "
@@ -437,6 +377,43 @@ CustomOPTranspileResult
     }
   }
   code.e("");
+
+  // add tma templates for H100
+  if (GPU_CC::H100 == config.target_cc) {
+
+    assert(g.cluster_dim.x > 0 && g.cluster_dim.y > 0 && g.cluster_dim.z > 0);
+    string tma;
+    string tmplt;
+    for (TMAParams params : tmaParamsList) {
+      tmplt.append("TMA_" + string(params.guid));
+      tma.append("CUTE_GRID_CONSTANT " + "TMA_" + params.guid + " const " +
+                 "tma_" + string(params.guid));
+      if (params != tmaParamsList.end()) {
+        tmplt.append(", ");
+        tma.append(", ");
+      } else {
+        tmplt.append(">");
+      }
+    }
+
+    code.e(tmpl, false);
+    code.e("__global__ void  __launch_bounds__($) "
+           "$($, $, $) {",
+           num_threads,
+           func_name,
+           tma,
+           map<kn::DTensor, string>(op->output_tensors,
+                                    [](kn::DTensor const &dtensor) -> string {
+                                      return fmt("half_t* dtensor$_ptr",
+                                                 dtensor.guid);
+                                    }),
+           map<kn::DTensor, string>(op->input_tensors,
+                                    [](kn::DTensor const &dtensor) -> string {
+                                      return fmt("half_t const* dtensor$_ptr",
+                                                 dtensor.guid);
+                                    }),
+           false);
+  }
 
   // Launch G->S copy atoms for all pre-loop-ops
   int num_pre_loop_copies = 0;
@@ -733,7 +710,8 @@ CustomOPTranspileResult
         tb::STensor const &output = input_op->output_tensors.at(0);
         assert(input_op->forloop_dim >= 0);
 
-        code.e("STensor$InputAtom::run(tma_$, stensor$_async_copy_buf, dtensor$_tile_ptr, "
+        code.e("STensor$InputAtom::run(tma_$, stensor$_async_copy_buf, "
+               "dtensor$_tile_ptr, "
                " tma_load_mbar_x_$, 0);",
                output.guid,
                dtensor.guid,
@@ -741,8 +719,7 @@ CustomOPTranspileResult
                dtensor.guid,
                dtensor.guid);
       }
-    } else
-    {
+    } else {
       for (tb::TBInputOp const *input_op : pipelined_input_ops) {
         kn::DTensor const &dtensor = input_op->dtensor;
         tb::STensor const &output = input_op->output_tensors.at(0);
@@ -1166,8 +1143,7 @@ CustomOPTranspileResult
         // code.e("cute::wait_barrier(tma_load_mbar_$, 0);", output.guid);
       }
 
-    } else
-    {
+    } else {
       for (tb::TBInputOp const *input_op : pipelined_input_ops) {
         assert(input_op->forloop_dim >= 0);
         kn::DTensor const &dtensor = input_op->dtensor;

@@ -444,7 +444,7 @@ TranspileResult Transpiler::transpile_ugraph() {
         for (kn::DTensor const &dtensor : cur_op->input_tensors) {
           auto guid = dtensor.guid;
           DTensorMeta const &meta = dtensor_metas.at(guid);
-          result.tmaParamsList.push_back(TMAParams(meta.input_idx, guid, "Layout<Shape<Int<1024>, Int<32>>, Stride<Int<1>, Int<1024>>>{}", "Layout<Shape<Int<32>, Int<32>>, Stride<Int<1>, Int<32>>>{}", "Shape<Int<32>, Int<32>>{}", {1, 1, 1}));
+          // result.tmaParamsList.push_back(TMAParams(meta.input_idx, guid, "Layout<Shape<Int<1024>, Int<32>>, Stride<Int<1>, Int<1024>>>{}", "Layout<Shape<Int<32>, Int<32>>, Stride<Int<1>, Int<32>>>{}", "Shape<Int<32>, Int<32>>{}", {1, 1, 1}));
         }
 
         //for inputs that needs async copy, init the tmas
@@ -454,15 +454,6 @@ TranspileResult Transpiler::transpile_ugraph() {
           exec.e("auto tma_$ = make_tma_copy<half_t>(SM90_TMA_LOAD{}, gA_$, $, $, Int<1>{});", tmaParams.guid, tmaParams.guid,tmaParams.dstLayout, tmaParams.tile_size);
           tmas.append(fmt("tma_$, ", tmaParams.guid));
         }
-
-        // exec.e("Tensor g_20000006 = make_tensor(make_gmem_ptr<half_t>(dtensor10000002), Layout<Shape<Int<64>, Int<64>>, Stride<Int<1>, Int<64>>>{});");
-        // exec.e("auto tma_20000006 = make_tma_copy<half_t>(SM90_TMA_LOAD{}, g_20000006, Layout<Shape<Int<64>, Int<64>>, Stride<Int<1>, Int<64>>>{}, shape(Layout<Shape<Int<64>, Int<64>>, Stride<Int<1>, Int<64>>>{}), Int<1>{}); ");
-        // exec.e("Tensor gA = make_tensor(make_gmem_ptr<half_t>(raw_pointer_cast(dtensor10000002)), make_layout(make_shape(64, 64)));");
-        
-        // exec.e("Tensor gA = make_tensor(make_gmem_ptr<half_t>(dtensor10000002, Layout<Shape<Int<64>, Int<64>>, Stride<Int<1>, Int<64>>>{}));");
-
-        // exec.e("auto tma_20000006 = make_tma_copy<half_t>(SM90_TMA_LOAD{}, gA, make_layout(Shape<_64, _64>{}), Shape<_64, _64>{}, Int<1>{});");
-        // string tma_20000006 = std::string("tma_20000006");
         exec.e("$<<<grid_dim, block_dim, smem_size>>>($ $);",
                result.func_name,
                tmas,
