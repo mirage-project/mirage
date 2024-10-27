@@ -195,8 +195,6 @@ def get_tb_operator_type_string(int op_type):
         return "tb_concat_last_op_id"
     elif op_type == TB_CONCAT_THEN_MATMUL_OP:
         return "tb_concat_then_matmul_op"
-    elif op_type == TB_FORLOOP_ACCUM_FIRST_OP:
-        return "tb_forloop_accum_first_op"
     elif op_type == TB_FORLOOP_ACCUM_NO_RED_OP:
         return "tb_forloop_accum_no_red_op"
     elif op_type == TB_FORLOOP_ACCUM_RED_LD_SUM_OP:
