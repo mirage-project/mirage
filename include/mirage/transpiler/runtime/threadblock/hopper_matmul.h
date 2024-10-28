@@ -115,44 +115,55 @@ public:
     if (thread_idx >= TILED_MMA_NUM_THREADS) {
       return;
     }
+
     TiledMMA tiled_mma;
 
-    Tensor sA = make_tensor(make_smem_ptr(a_ptr), SmemLayoutA{}); // [M, K]
-    Tensor sB = make_tensor(make_smem_ptr(b_ptr), SmemLayoutB{}); // [N, K]
+    auto sA_l =
+        tile_to_shape(GMMA::Layout_MN_SW128_Atom<T>{}, shape(SmemLayoutA{}));
+    auto sB_l =
+        tile_to_shape(GMMA::Layout_MN_SW128_Atom<T>{}, shape(SmemLayoutB{}));
+
+    Tensor sA = make_tensor(make_smem_ptr(a_ptr), sA_l); // [M, K]
+    Tensor sB = make_tensor(make_smem_ptr(b_ptr), sB_l); // [N, K]
 
     ThrMMA thr_mma = tiled_mma.get_thread_slice(threadIdx.x);
     Tensor tCsA = thr_mma.partition_A(sA); // (MMA,MMA_M,MMA_K,PIPE)
     Tensor tCsB = thr_mma.partition_B(sB); // (MMA,MMA_N,MMA_K,PIPE)
 
-    if (thread0()) {
-      print("sA: ");
-      cute::print(sA);
-      printf("\n");
-
-      print("sB: ");
-      cute::print(sB);
-      printf("\n");
-      print("tCsA: ");
-      cute::print(tCsA);
-      printf("\n");
-      print("tCsB: ");
-      cute::print(tCsB);
-      printf("\n");
-      assert(false);
-    }
-
-    // cute::warpgroup_wait<0>();
-
-    // // Allocate "fragments"
     Tensor tCrA = thr_mma.make_fragment_A(tCsA); // (MMA,MMA_M,MMA_K,PIPE)
     Tensor tCrB = thr_mma.make_fragment_B(tCsB); // (MMA,MMA_N,MMA_K,PIPE)
 
-    static constexpr int NUM_MMA_K_STAGES = size(shape<2>(sA));
+    if (thread0()) {
+      // print("see A: ");
+      // print_tensor(sA);
+
+      // print("see B: ");
+      // print_tensor(sB);
+      // print("mma_rC: ");
+      // cute::print(mma_rC);
+      // printf("\n");
+
+      // print("tCrB: ");
+      // cute::print(tCrB);
+      // printf("\n");
+      // print("tCsA: ");
+      // cute::print(tCsA);
+      // printf("\n");
+      // print("tCsB: ");
+      // cute::print(tCsB);
+      // printf("\n");
+    }
+
+    // // cute::warpgroup_wait<0>();
+
+    // // // Allocate "fragments"
+
+    // static constexpr int NUM_MMA_K_STAGES = size(shape<2>(sA));
 
     CUTE_UNROLL
-    for (int i_k = 0; i_k < NUM_MMA_K_STAGES; ++i_k) {
+    for (int i_k = 0; i_k < 1; ++i_k) {
       cute::warpgroup_arrive();
-      gemm(tiled_mma, mma_rC, tCrA(_, _, i_k), tCrB(_, _, i_k), mma_rC);
+      gemm(tiled_mma, mma_rC, tCrA, tCrB, mma_rC);
       cute::warpgroup_commit_batch();
       cute::warpgroup_wait<0>();
     }

@@ -141,10 +141,9 @@ TranspileResult Transpiler::transpile_ugraph() {
   CodeKeeper exec; // This keeps all code in the `_execute_mugraph` function
 
   init.e("static void _init() {");
-  exec.e(
-      "static void _execute_mugraph(std::vector<void *> input_tensors, "
-      "std::vector<void*> output_tensors"
-      ", void* buf) {");
+  exec.e("static void _execute_mugraph(std::vector<void *> input_tensors, "
+         "std::vector<void*> output_tensors"
+         ", void* buf) {");
   for (kn::KNOperator *const op : g->operators) {
     std::string op_type_str;
     to_json(op_type_str, op->op_type);
@@ -439,34 +438,56 @@ TranspileResult Transpiler::transpile_ugraph() {
                bgraph.block_dim.x,
                bgraph.block_dim.y,
                bgraph.block_dim.z);
-        exec.e("size_t smem_size = $;", result.smem_size + 20000);
+        exec.e("size_t smem_size = $;",
+               result.smem_size +
+                   result.tmaParamsList.size() * sizeof(uint64_t));
+        // init
 
         for (kn::DTensor const &dtensor : cur_op->input_tensors) {
           auto guid = dtensor.guid;
           DTensorMeta const &meta = dtensor_metas.at(guid);
-          // result.tmaParamsList.push_back(TMAParams(meta.input_idx, guid, "Layout<Shape<Int<1024>, Int<32>>, Stride<Int<1>, Int<1024>>>{}", "Layout<Shape<Int<32>, Int<32>>, Stride<Int<1>, Int<32>>>{}", "Shape<Int<32>, Int<32>>{}", {1, 1, 1}));
+          // result.tmaParamsList.push_back(TMAParams(meta.input_idx, guid,
+          // "Layout<Shape<Int<1024>, Int<32>>, Stride<Int<1>, Int<1024>>>{}",
+          // "Layout<Shape<Int<32>, Int<32>>, Stride<Int<1>, Int<32>>>{}",
+          // "Shape<Int<32>, Int<32>>{}", {1, 1, 1}));
         }
 
-        //for inputs that needs async copy, init the tmas
+        // for inputs that needs async copy, init the tmas
         std::string tmas;
-        for(const auto &tmaParams : result.tmaParamsList){
-          exec.e("Tensor gA_$ = make_tensor(make_gmem_ptr<half_t>(dtensor$), $);", tmaParams.guid, tmaParams.guid, tmaParams.srcLayout);
-          exec.e("auto tma_$ = make_tma_copy<half_t>(SM90_TMA_LOAD{}, gA_$, $, $, Int<1>{});", tmaParams.guid, tmaParams.guid,tmaParams.dstLayout, tmaParams.tile_size);
+        for (auto const &tmaParams : result.tmaParamsList) {
+          exec.e("Tensor gA_$ = make_tensor(make_gmem_ptr<half_t>(dtensor$), "
+                 "${});",
+                 tmaParams.guid,
+                 tmaParams.guid,
+                 tmaParams.srcLayout);
+          exec.e(
+              "auto tma_$ = make_tma_copy<half_t>(SM90_TMA_LOAD{}, gA_$, ${}, "
+              "$, Int<1>{});",
+              tmaParams.guid,
+              tmaParams.guid,
+              tmaParams.dstLayout,
+              tmaParams.tile_size);
           tmas.append(fmt("tma_$, ", tmaParams.guid));
         }
+
+        exec.e("cudaFuncSetAttribute($<decltype(tma_10000003), "
+               "decltype(tma_10000004)>, "
+               "cudaFuncAttributeMaxDynamicSharedMemorySize, $);",
+               result.func_name,
+               result.smem_size +
+                   result.tmaParamsList.size() * sizeof(uint64_t));
         exec.e("$<<<grid_dim, block_dim, smem_size>>>($ $);",
                result.func_name,
                tmas,
                ptr_names);
 
-        
         custom_kernels.e(result.code);
 
-  //       exec.e("cudaDeviceSynchronize();");
-  // exec.e(" cudaError_t error = cudaGetLastError();");
-  // exec.e("if(error != cudaSuccess){");
-  //   exec.e("std::cout << cudaGetErrorString(error);");
-  // exec.e("}");
+        //       exec.e("cudaDeviceSynchronize();");
+        // exec.e(" cudaError_t error = cudaGetLastError();");
+        // exec.e("if(error != cudaSuccess){");
+        //   exec.e("std::cout << cudaGetErrorString(error);");
+        // exec.e("}");
         // init.e("cudaFuncSetAttribute($, "
         //        "cudaFuncAttributeMaxDynamicSharedMemorySize, $);",
         //        result.func_name,

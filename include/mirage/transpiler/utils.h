@@ -119,7 +119,23 @@ public:
   // Here we support "smart indenting". If the last character is "{", we
   // increase the indent level. If it is "}", we decrease the indent level.
   template <typename... Args>
-  void e(std::string const &fmt_str, Args... args, bool insert_end=true) {
+  void e_front(std::string const &fmt_str, Args... args) {
+    std::string line = fmt(fmt_str, args...);
+    // char last_char = line.empty() ? EOF : line.back();
+    // if (last_char == '}') {
+    //   cur_indent_level -= 1;
+    //   if (cur_indent_level < 0) {
+    //     printf("Warning: `cur_indent_level` goes below 0 when
+    //     transpiling\n"); cur_indent_level = 0;
+    //   }
+    // }
+    // line = std::string(cur_indent_level * NUM_INDENT_SPACES, ' ') + line;
+
+    lines.emplace(lines.begin(), line);
+  }
+
+  template <typename... Args>
+  void e(std::string const &fmt_str, Args... args) {
     std::string line = fmt(fmt_str, args...);
     char last_char = line.empty() ? EOF : line.back();
     if (last_char == '}') {
@@ -130,18 +146,12 @@ public:
       }
     }
     line = std::string(cur_indent_level * NUM_INDENT_SPACES, ' ') + line;
+    lines.push_back(line);
 
-    if(insert_end){
-      lines.push_back(line);
-    }else{
-      lines.emplace(lines.begin(), line);
-    }
-    
     if (last_char == '{') {
       cur_indent_level += 1;
     }
   }
-
 
   // Merge two CodeKeeper objects
   friend void operator<<(CodeKeeper &target, CodeKeeper const &source) {

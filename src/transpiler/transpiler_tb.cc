@@ -235,11 +235,12 @@ CustomOPTranspileResult
   // Define STensor as cute::Tensor
   code.e("// STensors");
   code.e("extern __shared__ char buf[];");
+  size_t addr_end = mem_plan.smem_size;
   for (auto [guid, addr] : mem_plan.addrs) {
     code.e("half_t *stensor$_ptr = (half_t*)(buf + $);", guid, addr);
   }
-  code.e("uint64_t *tma_load_mbar_x_10000004 = (uint64_t*)(buf + 20000);");
-  code.e("uint64_t *tma_load_mbar_x_10000005 = (uint64_t*)(buf + 30000);");
+  // code.e("uint64_t *tma_load_mbar_x_10000004 = (uint64_t*)(buf + 20000);");
+  // code.e("uint64_t *tma_load_mbar_x_10000005 = (uint64_t*)(buf + 30000);");
   // Erase the lowest 16 bytes to 0 for GEMM
   code.e("*((uint128_t*)buf) = 0ul;");
   code.e("");
@@ -345,11 +346,16 @@ CustomOPTranspileResult
                  gmem_layout,
                  dtensor.guid);
 
-          tmaParamsList.push_back((TMAParams(meta.input_idx,
+          code.e("uint64_t *tma_load_mbar_x_$ = (uint64_t*)(buf + $);",
+                 dtensor.guid,
+                 addr_end);
+          addr_end += sizeof(uint64_t);
+
+          tmaParamsList.push_back((TMAParams(dtensor_meta.input_idx,
                                              dtensor.guid,
                                              gmem_layout,
                                              smem_layout,
-                                             "Shape" + "(" + smem_layout + ")",
+                                             fmt("shape(${})", smem_layout),
                                              {1, 1, 1})));
           code.e("half_t *stensor$_async_copy_buf = stensor$_ptr;",
                  stensor.guid,
@@ -384,11 +390,16 @@ CustomOPTranspileResult
     assert(g.cluster_dim.x > 0 && g.cluster_dim.y > 0 && g.cluster_dim.z > 0);
     string tma;
     string tmplt;
-    for (TMAParams params : tmaParamsList) {
-      tmplt.append("TMA_" + string(params.guid));
-      tma.append("CUTE_GRID_CONSTANT " + "TMA_" + params.guid + " const " +
-                 "tma_" + string(params.guid));
-      if (params != tmaParamsList.end()) {
+    for (size_t i = 0; i < tmaParamsList.size(); ++i) {
+      if (i == 0) {
+        tmplt.append("template <");
+      }
+      TMAParams &params = tmaParamsList.at(i);
+      tmplt.append("class TMA_" + std::to_string(params.guid));
+      tma.append("CUTE_GRID_CONSTANT TMA_" + std::to_string(params.guid) +
+                 " const " + "tma_" + std::to_string(params.guid));
+
+      if (i != tmaParamsList.size() - 1) {
         tmplt.append(", ");
         tma.append(", ");
       } else {
@@ -396,23 +407,22 @@ CustomOPTranspileResult
       }
     }
 
-    code.e(tmpl, false);
-    code.e("__global__ void  __launch_bounds__($) "
-           "$($, $, $) {",
-           num_threads,
-           func_name,
-           tma,
-           map<kn::DTensor, string>(op->output_tensors,
-                                    [](kn::DTensor const &dtensor) -> string {
-                                      return fmt("half_t* dtensor$_ptr",
-                                                 dtensor.guid);
-                                    }),
-           map<kn::DTensor, string>(op->input_tensors,
-                                    [](kn::DTensor const &dtensor) -> string {
-                                      return fmt("half_t const* dtensor$_ptr",
-                                                 dtensor.guid);
-                                    }),
-           false);
+    code.e_front(
+        "__global__ void  __launch_bounds__($) "
+        "$($, $, $) {",
+        num_threads,
+        func_name,
+        tma,
+        map<kn::DTensor, string>(op->output_tensors,
+                                 [](kn::DTensor const &dtensor) -> string {
+                                   return fmt("half_t* dtensor$_ptr",
+                                              dtensor.guid);
+                                 }),
+        map<kn::DTensor, string>(
+            op->input_tensors, [](kn::DTensor const &dtensor) -> string {
+              return fmt("half_t const* dtensor$_ptr", dtensor.guid);
+            }));
+    code.e_front(tmplt);
   }
 
   // Launch G->S copy atoms for all pre-loop-ops
@@ -575,8 +585,7 @@ CustomOPTranspileResult
       string mma_atom_str;
       std::tuple<int, int, int> mma_atom_mnk;
       int mma_atom_num_threads;
-      if (GPU_CC::A100 <= config.target_cc &&
-          config.target_cc <= GPU_CC::H100) {
+      if (GPU_CC::A100 <= config.target_cc && config.target_cc < GPU_CC::H100) {
         if (k <= 8) {
           mma_atom_str = "SM80_16x8x8_F16F16F16F16_TN";
           mma_atom_mnk = {16, 8, 8};
@@ -586,20 +595,19 @@ CustomOPTranspileResult
           mma_atom_mnk = {16, 8, 16};
           mma_atom_num_threads = 32;
         }
-      }
-      // else if (GPU_CC::H100 == config.target_cc) {
-      //   assert(k % 16 == 0);
-      //   // Hopper wgmma
-      //   assert(num_threads >= 128);
-      //   mma_atom_str =
-      //       "SM90_64x64x16_F16F16F16_SS<GMMA::Major::MN, GMMA::Major::MN>";
-      //   mma_atom_mnk = {64, 64, 16};
-      //   mma_atom_num_threads = 128;
+      } else if (GPU_CC::H100 == config.target_cc) {
+        assert(k % 16 == 0);
+        // Hopper wgmma
+        assert(num_threads >= 128);
+        mma_atom_str =
+            "SM90_64x64x16_F16F16F16_SS<GMMA::Major::MN, GMMA::Major::MN>";
+        mma_atom_mnk = {64, 64, 16};
+        mma_atom_num_threads = 128;
 
-      // } else {
-      //   // TODO(intlsy): Support more architectures
-      //   assert(0 && "Unsupported GPU Architecture");
-      // }
+      } else {
+        // TODO(intlsy): Support more architectures
+        assert(0 && "Unsupported GPU Architecture");
+      }
       auto [mma_atom_m, mma_atom_n, mma_atom_k] = mma_atom_mnk;
 
       // Pick up TiledMMAThrLayout
@@ -655,8 +663,24 @@ CustomOPTranspileResult
              output.guid,
              get_stensor_layout(output, meta2, num_dims - 2 /*start_dim*/));
 
-      // code.e("using Matmul$Kernel = tb::Hopper_Matmul<half_t, $, "
-      //        "Layout<Shape<Int<$>, "
+      code.e("using Matmul$Kernel = tb::Hopper_Matmul<half_t, $, "
+             "Layout<Shape<Int<$>, "
+             "Int<$>, _1>>, $, $, Matmul$LayoutA, Matmul$LayoutB, "
+             "Matmul$LayoutC, NUM_THREADS, "
+             "$, $>;",
+             output.guid,
+             mma_atom_str,
+             1,
+             1,
+             is_ldmatrix_avail,
+             is_stmatrix_avail,
+             output.guid,
+             output.guid,
+             output.guid,
+             num_exps_before_store,
+             is_accum_in_reg ? false : is_store_accum);
+      // code.e("using Matmul$Kernel = tb::Matmul<half_t, $,
+      // Layout<Shape<Int<$>, "
       //        "Int<$>, _1>>, $, $, Matmul$LayoutA, Matmul$LayoutB, "
       //        "Matmul$LayoutC, NUM_THREADS, "
       //        "$, $>;",
@@ -671,21 +695,6 @@ CustomOPTranspileResult
       //        output.guid,
       //        num_exps_before_store,
       //        is_accum_in_reg ? false : is_store_accum);
-      code.e("using Matmul$Kernel = tb::Matmul<half_t, $, Layout<Shape<Int<$>, "
-             "Int<$>, _1>>, $, $, Matmul$LayoutA, Matmul$LayoutB, "
-             "Matmul$LayoutC, NUM_THREADS, "
-             "$, $>;",
-             output.guid,
-             mma_atom_str,
-             best_num_tg_m,
-             best_num_tg_n,
-             is_ldmatrix_avail,
-             is_stmatrix_avail,
-             output.guid,
-             output.guid,
-             output.guid,
-             num_exps_before_store,
-             is_accum_in_reg ? false : is_store_accum);
       // Allocate accumulators in register files (if needed)
       if (is_accum_in_reg) {
         code.e("auto matmul_$_accum = Matmul$Kernel::get_mma_rC(thread_idx);",
@@ -1230,7 +1239,7 @@ CustomOPTranspileResult
   code.e("}"); // kernel
 
   return CustomOPTranspileResult{
-      func_name, mem_plan.smem_size, code.to_string()};
+      func_name, mem_plan.smem_size, code.to_string(), tmaParamsList};
 }
 
 } // namespace transpiler

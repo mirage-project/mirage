@@ -162,17 +162,22 @@ public:
   static constexpr int tmaTransactionBytes = 2 * size(DstLayout{});
   using CTA_TILER = decltype(shape(DstLayout{}));
   static __device__ __forceinline__ void run(TMA const &tma,
-                                              T * dst,
-                                              T const* src,
-                                             uint64_t * tma_load_mbar,
-                                             int forloop_idx) {
+                                             T *dst,
+                                             T const *src,
+                                             uint64_t *tma_load_mbar,
+                                             unsigned forloop_idx) {
     Tensor mA = tma.get_tma_tensor(shape(SrcLayout{}));
+
     auto cta_coord = make_coord(forloop_idx, blockIdx.x);
+    auto cta_coord_t = make_coord(blockIdx.x, forloop_idx);
 
-    
-    //  Tensor gA = local_tile(mA, CTA_TILER{}, cta_coord, Step<_1, _1>{});
+    Tensor gA =
+        local_tile(mA,
+                   CTA_TILER{},
+                   size<1>(SrcLayout{}) == 2048 ? cta_coord_t : cta_coord,
+                   Step<_1, _1>{});
 
-    Tensor gA = local_tile(mA, CTA_TILER{}, cta_coord);
+    // Tensor gA = local_tile(mA, CTA_TILER{}, cta_coord);
     // Tensor gA = flat_divide(mA, shape(DstLayout{}));
     Tensor sA = make_tensor(make_smem_ptr(dst), DstLayout{});
 
@@ -200,12 +205,11 @@ public:
     __syncthreads();
     wait_barrier(tma_load_mbar[0], 0);
     __syncthreads();
-     
 
     // if(threadIdx.x == 0){
     //   print("mA: \n");
-    //   printf("(uintptr_t)ptr1 - (uintptr_t)ptr2; %lu\n", 0x7a79d5fffb80 - 0x7a79aa604000);
-    //   print("mbar %p\n", (void*)tma.get_tma_descriptor());
+    //   printf("(uintptr_t)ptr1 - (uintptr_t)ptr2; %lu\n", 0x7a79d5fffb80 -
+    //   0x7a79aa604000); print("mbar %p\n", (void*)tma.get_tma_descriptor());
     //   // print("TMA desc     : "); print(tma.tma_desc_); print("\n");
     //   print("output dtensor %p", (void*)dtensor);
     //   print(mA);
@@ -245,7 +249,6 @@ public:
     //   print("first ele of src: %f\n", (float)(src[64 * 64 - 1]));
     //   print("first ele of src: %f\n", (float)(src[64]));
 
-
     //   print("first ele of dst: %f\n", (float)(dst[0]));
     //   print("first ele of dst: %f\n", (float)(dst[64 * 64 - 1]));
     //   print("first ele of dst: %f\n", (float)(dst[64]));
@@ -254,9 +257,6 @@ public:
 
     // int warp_idx = cutlass::canonical_warp_idx_sync();
     // int lane_predicate = cute::elect_one_sync();
-
- 
-    
   }
 };
 
