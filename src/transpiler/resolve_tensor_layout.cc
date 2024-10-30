@@ -95,7 +95,7 @@ void calc_tensor_strides(size_t* strides,
   bool encountered_non1_dim = false;
   for (int dim_idx : dim_order) {
     int cur_dim = dims[dim_idx];
-    if (strides==nullptr) {
+    if (strides!=nullptr) {
       strides[dim_idx] = cur_stride;
     }
     if (cur_dim != 1) {
@@ -379,21 +379,6 @@ void Transpiler::resolve_tensor_layout() {
                                         ctx.int_val(0)));
               }
             }
-	    // Add cost related to shared memory usage
-            for (int i = 0; i < input.num_dims; ++i) {
-              size_t num_phy_elems;
-              calc_tensor_strides(nullptr,
-                                  num_phy_elems,
-                                  output.num_dims,
-                                  output.dim,
-                                  i,
-                                  type::get_datatype_size(output.data_type));
-              int smem_usage_cost = num_phy_elems
-                                  * type::get_datatype_size(output.data_type);
-              costs.push_back(z3::ite(s_is_innermost[output.guid][i],
-                                      ctx.int_val(smem_usage_cost),
-                                      ctx.int_val(0)));
-            }
             break;
           }
           case type::TB_OUTPUT_OP: {
@@ -597,6 +582,24 @@ void Transpiler::resolve_tensor_layout() {
             assert(fmt("Unknown TB op: $", tb_op->op_type).c_str());
         }
       }
+    }
+  }
+
+  // Add stensors' cost related to shared memory usage
+  for (tb::STensor const &stensor : all_stensors) {
+    for (int i = 0; i < stensor.num_dims; ++i) {
+      size_t num_phy_elems;
+      calc_tensor_strides(nullptr,
+                          num_phy_elems,
+                          stensor.num_dims,
+                          stensor.dim,
+                          i,
+                          type::get_datatype_size(stensor.data_type));
+      int smem_usage_cost = num_phy_elems
+                          * type::get_datatype_size(stensor.data_type);
+      costs.push_back(z3::ite(s_is_innermost[stensor.guid][i],
+                              ctx.int_val(smem_usage_cost),
+                              ctx.int_val(0)));
     }
   }
 
