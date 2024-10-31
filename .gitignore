@@ -45,3 +45,4 @@ dist/
 # Visualizer results
 *.png
 *.dot
+!docs/**/*.png
