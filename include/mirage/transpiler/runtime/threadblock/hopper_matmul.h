@@ -16,12 +16,30 @@
 #include <cute/atom/mma_traits.hpp>
 #include <cute/layout.hpp>
 #include <cute/tensor.hpp>
-#include <threadblock/matmul.h>
+#include <threadblock/shared_reg_copy.h>
 using namespace cute;
 
 #include "element_unary.h"
 
 namespace tb {
+
+template <class T, class BLK_MN0>
+CUTE_HOST_DEVICE constexpr auto smem_layout_selector() {
+  if constexpr (BLK_MN0 % size<0>(GMMA::Layout_MN_SW128_Atom<T>{}) == 0) {
+    return GMMA::Layout_MN_SW128_Atom<T>{};
+  } else if constexpr (BLK_MN0 % size<0>(GMMA::Layout_MN_SW64_Atom<T>{}) == 0) {
+    return GMMA::Layout_MN_SW64_Atom<T>{};
+  } else if constexpr (BLK_MN0 % size<0>(GMMA::Layout_MN_SW32_Atom<T>{}) == 0) {
+    return GMMA::Layout_MN_SW32_Atom<T>{};
+  } else if constexpr (BLK_MN0 % size<0>(GMMA::Layout_MN_INTER_Atom<T>{}) ==
+                       0) {
+    return GMMA::Layout_MN_INTER_Atom<T>{};
+  } else {
+    static_assert(BLK_MN0 % size<0>(GMMA::Layout_MN_INTER_Atom<T>{}) == 0,
+                  "BLK_MN0 must be a multiple of "
+                  "size<0>(GMMA::Layout_MN_INTER_Atom<T>{})");
+  }
+}
 
 template <typename T,
           class MMAAtom,
@@ -46,6 +64,10 @@ public:
   using SmemLayoutA = typename Dim01Swapper<SmemLayoutA_>::Result; // [M, K]
   using SmemLayoutB = SmemLayoutB_;                                // [N, K]
   using SmemLayoutC = typename Dim01Swapper<SmemLayoutC_>::Result; // [M, N]
+
+  using TileALayout = smem_layout_selector<SmemLayoutA>;
+
+  using TileBLayout = smem_layout_selector<SmemLayoutB>;
 
   // Shape checking
   // Expect A have a shape of [M, K], B have a shape of [N, K], and
@@ -115,13 +137,10 @@ public:
     if (thread_idx >= TILED_MMA_NUM_THREADS) {
       return;
     }
-
     TiledMMA tiled_mma;
 
-    auto sA_l =
-        tile_to_shape(GMMA::Layout_MN_SW128_Atom<T>{}, shape(SmemLayoutA{}));
-    auto sB_l =
-        tile_to_shape(GMMA::Layout_MN_SW128_Atom<T>{}, shape(SmemLayoutB{}));
+    auto sA_l = tile_to_shape(TileALayout{}, shape(SmemLayoutA{}));
+    auto sB_l = tile_to_shape(TileBLayout{}, shape(SmemLayoutB{}));
 
     Tensor sA = make_tensor(make_smem_ptr(a_ptr), sA_l); // [M, K]
     Tensor sB = make_tensor(make_smem_ptr(b_ptr), sB_l); // [N, K]
@@ -133,14 +152,26 @@ public:
     Tensor tCrA = thr_mma.make_fragment_A(tCsA); // (MMA,MMA_M,MMA_K,PIPE)
     Tensor tCrB = thr_mma.make_fragment_B(tCsB); // (MMA,MMA_N,MMA_K,PIPE)
 
+    // auto k_tile_count = size<3>(tCrA);
+
+    auto k_tile_count = 1;
+
+    CUTE_UNROLL
+    for (int i_k = 0; i_k < k_tile_count; ++i_k) {
+      cute::warpgroup_arrive();
+      gemm(tiled_mma, mma_rC, tCrA, tCrB, mma_rC);
+      cute::warpgroup_commit_batch();
+      cute::warpgroup_wait<0>();
+    }
+
     if (thread0()) {
       // print("see A: ");
       // print_tensor(sA);
 
       // print("see B: ");
       // print_tensor(sB);
-      // print("mma_rC: ");
-      // cute::print(mma_rC);
+      print("mma_rC: ");
+      print_tensor(mma_rC);
       // printf("\n");
 
       // print("tCrB: ");
@@ -152,20 +183,6 @@ public:
       // print("tCsB: ");
       // cute::print(tCsB);
       // printf("\n");
-    }
-
-    // // cute::warpgroup_wait<0>();
-
-    // // // Allocate "fragments"
-
-    // static constexpr int NUM_MMA_K_STAGES = size(shape<2>(sA));
-
-    CUTE_UNROLL
-    for (int i_k = 0; i_k < 1; ++i_k) {
-      cute::warpgroup_arrive();
-      gemm(tiled_mma, mma_rC, tCrA, tCrB, mma_rC);
-      cute::warpgroup_commit_batch();
-      cute::warpgroup_wait<0>();
     }
   }
 };

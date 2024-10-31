@@ -159,7 +159,7 @@ template <typename T, class DstLayout, class SrcLayout, class TMA>
 class InputTMAAsyncCopy {
 public:
   CUTE_STATIC_ASSERT_V(rank(SrcLayout{}) == rank(DstLayout{}));
-  static constexpr int tmaTransactionBytes = 2 * size(DstLayout{});
+  static constexpr int tmaTransactionBytes = sizeof(T) * size(DstLayout{});
   using CTA_TILER = decltype(shape(DstLayout{}));
   static __device__ __forceinline__ void run(TMA const &tma,
                                              T *dst,
@@ -187,15 +187,16 @@ public:
 
     Tensor tAsA = group_modes<1, rank(tAsA_x)>(tAsA_x);
     Tensor tAgA = group_modes<1, rank(tAgA_x)>(tAgA_x); // (TMA,REST)
-    // if(threadIdx.x == 0){
-    //   printf("gA:   ");
-    //   print(gA);
-    //   print("\n");
-    //   print("dst layout: ");
-    //   print(size(DstLayout{}));
-    //   print("\n");
-
-    // }
+    if (thread0() && forloop_idx == 0) {
+      printf("gA:   ");
+      print(gA);
+      print("\n");
+      print("dst layout: ");
+      print(DstLayout{});
+      print("\n");
+      print(SrcLayout{});
+      print("\n");
+    }
     if (threadIdx.x == 0) {
       tma_load_mbar[0] = 0;
       initialize_barrier(tma_load_mbar[0], 1);

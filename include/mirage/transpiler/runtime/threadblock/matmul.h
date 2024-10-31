@@ -202,9 +202,6 @@ CUTE_HOST_DEVICE void r2s_copy_with_oob_protection(
       if constexpr (IS_STORE_ACCUM) {
         dst(i) += x;
       } else {
-        if (thread0()) {
-          printf("store %f\n", (float)x);
-        }
         dst(i) = x;
       }
     }
