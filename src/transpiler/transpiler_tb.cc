@@ -75,6 +75,29 @@ static std::vector<T> mov_to_last(T const *vec, size_t numel, int idx) {
 }
 } // namespace get_layout_detail
 
+// int3 imap = cur_op->input_map;
+// for (int dim = 0; dim < 3; ++dim) {
+//   int div_dim = dim == 0 ? imap.x : dim == 1 ? imap.y : imap.z;
+//   if (div_dim >= 0) {
+//     // Dim `div_dim` is divided along `dim`
+//     int num_tbs = dim == 0   ? g.grid_dim.x
+//                   : dim == 1 ? g.grid_dim.y
+//                              : g.grid_dim.z;
+//     offset += fmt(" + blockIdx.$*$*$",
+//                   (char)"xyz"[dim],
+//                   dtensor.dim[div_dim] / num_tbs,
+//                   dtensor_meta.strides[div_dim]);
+//   }
+// }
+staic std::vector
+    get_input_partition_map(int3 imap, dim3 grid_dim, int forloop_dim) {
+  std::vector<int> partition(3);
+  for (int dim = 0; dim < 3; dim++) {
+    int div_dim = dim == 0 ? imap.x : dim == 1 ? imap.y : imap.z;
+    vector.at()
+  }
+}
+
 // Get the layout of a STensor
 static string get_stensor_layout(tb::STensor const &stensor,
                                  STensorMeta const &meta,
@@ -338,6 +361,9 @@ CustomOPTranspileResult
               vector<int>(dtensor.dim, dtensor.dim + dtensor.num_dims),
               vector<size_t>(dtensor_meta.strides,
                              dtensor_meta.strides + dtensor.num_dims));
+
+          imap;
+          int forloop_dim = cur_op->forloop_dim;
 
           code.e("using STensor$InputAtom = tb::InputTMAAsyncCopy<half_t, $, "
                  "$, decltype(tma_$)>;",
@@ -1121,7 +1147,8 @@ CustomOPTranspileResult
   // TODO(intlsy) Loop unrolling
   assert(g.forloop_range >= 1);
   code.e("// The main loop");
-  code.e("for (int for_idx = 0; for_idx < $; for_idx++) {", g.forloop_range);
+  code.e("for (uint32_t for_idx = 0; for_idx < $; for_idx++) {",
+         g.forloop_range);
 
   if (!pipelined_input_ops.empty()) {
     code.e("{");

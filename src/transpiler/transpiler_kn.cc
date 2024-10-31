@@ -452,9 +452,11 @@ TranspileResult Transpiler::transpile_ugraph() {
           // "Shape<Int<32>, Int<32>>{}", {1, 1, 1}));
         }
 
-        // for inputs that needs async copy, init the tmas
+        // for inputs that needs tma async copy, init the TMAs
         std::string tmas;
-        for (auto const &tmaParams : result.tmaParamsList) {
+        std::string tma_tmps;
+        for (int i = 0; i < result.tmaParamsList.size(); i++) {
+          auto const &tmaParams = result.tmaParamsList.at(i);
           exec.e("Tensor gA_$ = make_tensor(make_gmem_ptr<half_t>(dtensor$), "
                  "${});",
                  tmaParams.guid,
@@ -468,12 +470,17 @@ TranspileResult Transpiler::transpile_ugraph() {
               tmaParams.dstLayout,
               tmaParams.tile_size);
           tmas.append(fmt("tma_$, ", tmaParams.guid));
+          tma_tmps.append(fma("decltype(tma_$)", tmaParams.guid));
+
+          if (i != result.tmaParamsList.size() - 1) {
+            tma_tmps.append(", ");
+          }
         }
 
-        exec.e("cudaFuncSetAttribute($<decltype(tma_10000003), "
-               "decltype(tma_10000004)>, "
+        exec.e("cudaFuncSetAttribute($<$>, "
                "cudaFuncAttributeMaxDynamicSharedMemorySize, $);",
                result.func_name,
+               tma_tmps,
                result.smem_size +
                    result.tmaParamsList.size() * sizeof(uint64_t));
         exec.e("$<<<grid_dim, block_dim, smem_size>>>($ $);",
@@ -483,15 +490,6 @@ TranspileResult Transpiler::transpile_ugraph() {
 
         custom_kernels.e(result.code);
 
-        //       exec.e("cudaDeviceSynchronize();");
-        // exec.e(" cudaError_t error = cudaGetLastError();");
-        // exec.e("if(error != cudaSuccess){");
-        //   exec.e("std::cout << cudaGetErrorString(error);");
-        // exec.e("}");
-        // init.e("cudaFuncSetAttribute($, "
-        //        "cudaFuncAttributeMaxDynamicSharedMemorySize, $);",
-        //        result.func_name,
-        //        result.smem_size + 32);
         break;
       }
       default:

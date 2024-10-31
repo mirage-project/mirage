@@ -46,23 +46,22 @@ public:
   CUTE_STATIC_ASSERT_V(rank(SmemLayoutB_{}) == _2{});
   CUTE_STATIC_ASSERT_V(rank(SmemLayoutC_{}) == _2{});
 
+  static_assert(NUM_THREADS / NumThreadsPerWarpGroup == _2{});
+
   using SmemLayoutA = typename Dim01Swapper<SmemLayoutA_>::Result; // [M, K]
   using SmemLayoutB = SmemLayoutB_;                                // [N, K]
   using SmemLayoutC = typename Dim01Swapper<SmemLayoutC_>::Result; // [M, N]
 
-  using TileALayout = smem_layout_selector<SmemLayoutA>;
+  using SmemAtomLayoutA = smem_layout_selector<size<0> SmemLayoutA{}>;
+  using SmemAtomLayoutB = smem_layout_selector<size<0> SmemLayoutB{}>;
 
-  using TileBLayout = smem_layout_selector<SmemLayoutB>;
+  // change it to dynamic;
+  static constexpr int KStages = 3;
 
-  using Input_A = tb::InputTMAAsyncCopy<T, SmemLayoutA, SrcLayoutA, TMA_A>;
-  using Input_B = tb::InputTMAAsyncCopy<T, SmemLayoutB, SrcLayoutB, TMA_B>;
+  // using Input_A = tb::InputTMAAsyncCopy<T, SmemLayoutA, SrcLayoutA, TMA_A>;
+  // using Input_B = tb::InputTMAAsyncCopy<T, SmemLayoutB, SrcLayoutB, TMA_B>;
 
-  using MMA = tb::Hopper_Matmul<>;
-
-  static int const NumThreadsPerWarp = 32;
-  static int const NumThreadsPerWarpGroup = 128;
-  static int const NumWarpsPerWarpGroup =
-      NumThreadsPerWarpGroup / NumThreadsPerWarp;
+  // using MMA = tb::Hopper_Matmul<>;
 
   enum class WarpGroupRole {
     Producer = 0,
@@ -146,6 +145,8 @@ public:
   template <typename MMARc>
   static __device__ __forceinline__ void
       run(MMARc &mma_rC,
+          TMA const &tma_load_a,
+          TMA const &tma_load_b,
           T *__restrict__ a_ptr, // Do not define a_ptr and b_ptr as const here,
                                  // since we may pad remaining part on the
                                  // k-axis with 0
@@ -155,6 +156,9 @@ public:
     if (thread_idx >= TILED_MMA_NUM_THREADS) {
       return;
     }
+
+    auto k_tile_iter = cute::make_coord_iterator(shape<2>(SrcLayoutA{}));
+    auto k_tile_count = size<2>(SrcLayoutA{});
 
     // Shared memory;
     SharedStorage &shared_storage =
@@ -191,21 +195,44 @@ public:
                                        mainloop_pipeline_params,
                                        Int<_1, _1, _1>{});
 
+    // Copy
     if (warp_group_role == WarpGroupRole::Producer) {
       if (producer_warp_role == ProducerWarpRole::MainloopEpilogue) {
 
-        // init barrier
-        mainloop_pipeline.producer_acquire(smem_pipe_write);
-        using BarrierType = typename MainloopPipeline::ProducerBarrierType;
-        BarrierType *tma_barrier =
-            mainloop_pipeline.producer_get_barrier(smem_pipe_write);
+        for (; k_tile_count > 0; --k_tile_count) {
+          // init barrier
+          mainloop_pipeline.producer_acquire(smem_pipe_write);
+          using BarrierType = typename MainloopPipeline::ProducerBarrierType;
+          BarrierType *tma_barrier =
+              mainloop_pipeline.producer_get_barrier(smem_pipe_write);
 
-        int write_stage = smem_pipe_write.index();
-        // copy
-        Input_A::run();
-        Input_B::run();
+          int write_stage = smem_pipe_write.index();
 
-        ++smem_pipe_write;
+          auto cta_tma_a = tma_load_a.get_slice(Int<0>{}); // CTA slice
+          Tensor tAgA_x =
+              cta_tma_a.partition_S(gA); // (TMA,TMA_M,TMA_N,REST_M,REST_N)
+          Tensor tAsA_x = cta_tma_a.partition_D(sA); // (TMA,TMA_M,TMA_N)
+
+          auto cta_tma_b = tma_load_a.get_slice(Int<0>{}); // CTA slice
+          Tensor tBgB_x =
+              cta_tma_b.partition_S(gA); // (TMA,TMA_M,TMA_N,REST_M,REST_N)
+          Tensor tBsB_x = cta_tma_b.partition_D(sA); // (TMA,TMA_M,TMA_N)
+
+          Tensor tAsA = group_modes<1, rank(tAsA_x)>(tAsA_x);
+          Tensor tAgA = group_modes<1, rank(tAgA_x)>(tAgA_x); // (TMA,REST)
+
+          Tensor tBsB = group_modes<1, rank(tAsB_x)>(tBsB_x);
+          Tensor tBgB = group_modes<1, rank(tAgB_x)>(tBgB_x); // (TMA,REST)
+
+          copy(tma_load_a.with(*tma_barrier),
+               tAgA(_, _, *k_tile_iter),
+               tAsA(_, _, write_stage));
+          copy(mainloop_params.tma_load_b.with(*tma_barrier),
+               tBgB(_, _, *k_tile_iter),
+               tBsB(_, _, write_stage));
+
+          ++smem_pipe_write;
+        }
 
         // what's this
         // mainloop_pipe_producer_state.advance(k_tile_count);
@@ -214,7 +241,7 @@ public:
         //   mainloop_pipe_producer_state);
       }
     } else if (warp_group_role == WarpGroupRole::Consumer) {
-      // mma
+      // MMA
       PipelineState smem_pipe_release = smem_pipe_read;
 
       auto barrier_token = mainloop_pipeline.consumer_try_wait(smem_pipe_read);
@@ -229,24 +256,17 @@ public:
 
       // make stages here
 
-      //    using SmemLayoutA = decltype(tile_to_shape(
-      //     SmemLayoutAtomA{},
-      //     make_shape(shape<0>(TileShape{}), shape<2>(TileShape{}),
-      //     Int<DispatchPolicy::Stages>{}),
-      //     cute::conditional_t<::cutlass::gemm::detail::is_major<0,
-      //     StrideA>(), Step<_2, _1, _3>, Step<_1, _2, _3>>{}));
-      // using SmemLayoutB = decltype(tile_to_shape(
-      //     SmemLayoutAtomB{},
-      //     make_shape(shape<1>(TileShape{}), shape<2>(TileShape{}),
-      //     Int<DispatchPolicy::Stages>{}),
-      //     cute::conditional_t<::cutlass::gemm::detail::is_major<0,
-      //     StrideB>(), Step<_2, _1, _3>, Step<_1, _2, _3>>{}));
+      auto sA_l = tile_to_shape(
+          SmemAtomLayoutA{},
+          make_shape(size<0> SmemLayoutA{}, size<1> SmemLayoutA{}, KStages));
+      auto sB_l = tile_to_shape(
+          SmemAtomLayoutB{},
+          shape(size<0> SmemLayoutB{}, size<1> SmemLayoutB{}, KStages));
 
-      auto sA_l = tile_to_shape(TileALayout{}, shape(SmemLayoutA{}));
-      auto sB_l = tile_to_shape(TileBLayout{}, shape(SmemLayoutB{}));
-
-      Tensor sA = make_tensor(make_smem_ptr(a_ptr), sA_l); // [M, K]
-      Tensor sB = make_tensor(make_smem_ptr(b_ptr), sB_l); // [N, K]
+      Tensor sA =
+          make_tensor(make_smem_ptr(a_ptr), sA_l); // [TILE_M, TILE_K, KStage]
+      Tensor sB =
+          make_tensor(make_smem_ptr(b_ptr), sB_l); // [TILE_N, TILE_K, KStage]
 
       ThrMMA thr_mma = tiled_mma.get_thread_slice(threadIdx.x);
       Tensor tCsA = thr_mma.partition_A(sA); // (MMA,MMA_M,MMA_K,PIPE)
@@ -255,11 +275,18 @@ public:
       Tensor tCrA = thr_mma.make_fragment_A(tCsA); // (MMA,MMA_M,MMA_K,PIPE)
       Tensor tCrB = thr_mma.make_fragment_B(tCsB); // (MMA,MMA_N,MMA_K,PIPE)
 
+      CUTE_STATIC_ASSERT_V(Int<KStages>{} == size<2>(sA)); // PIPE
+      CUTE_STATIC_ASSERT_V(Int<KStages>{} == size<2>(sB)); // PIPE
+
       // auto k_tile_count = 1;
 
       CUTE_UNROLL
       for (int i_k = 0; i_k < k_tile_count; ++i_k) {
-        gemm(tiled_mma, mma_rC, tCrA, tCrB, mma_rC);
+        gemm(tiled_mma,
+             mma_rC,
+             tCrA(_, _, read_stage),
+             tCrB(_, _, read_stage),
+             mma_rC);
       }
 
       warpgroup_commit_batch();
