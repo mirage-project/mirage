@@ -16,15 +16,17 @@
 #include <cute/atom/mma_traits.hpp>
 #include <cute/layout.hpp>
 #include <cute/tensor.hpp>
-#include <threadblock/shared_reg_copy.h>
+#include <threadblock/matmul.h>
+// #include <threadblock/shared_reg_copy.h>
 using namespace cute;
 
 #include "element_unary.h"
 
 namespace tb {
 
-template <class T, class BLK_MN0>
+template <class T, class BLK_MN>
 CUTE_HOST_DEVICE constexpr auto smem_layout_selector() {
+  auto BLK_MN0 = size<0>(BLK_MN{});
   if constexpr (BLK_MN0 % size<0>(GMMA::Layout_MN_SW128_Atom<T>{}) == 0) {
     return GMMA::Layout_MN_SW128_Atom<T>{};
   } else if constexpr (BLK_MN0 % size<0>(GMMA::Layout_MN_SW64_Atom<T>{}) == 0) {
@@ -65,9 +67,9 @@ public:
   using SmemLayoutB = SmemLayoutB_;                                // [N, K]
   using SmemLayoutC = typename Dim01Swapper<SmemLayoutC_>::Result; // [M, N]
 
-  using TileALayout = smem_layout_selector<SmemLayoutA>;
+  using TileALayout = decltype(smem_layout_selector<T, SmemLayoutA>());
 
-  using TileBLayout = smem_layout_selector<SmemLayoutB>;
+  using TileBLayout = decltype(smem_layout_selector<T, SmemLayoutB>());
 
   // Shape checking
   // Expect A have a shape of [M, K], B have a shape of [N, K], and
@@ -95,12 +97,21 @@ public:
 
   static __device__ __forceinline__ auto get_mma_rC(int thread_idx) {
     // Make a fake tensor
+
+    // auto sc_l = tile_to_shape(TileALayout{}, shape(SmemLayoutA{}));
     Tensor sC_fake =
         make_tensor(make_smem_ptr((half_t *)nullptr), SmemLayoutC{});
+
+    // if (thread0()) {
+    //   print("scccc: ");
+    //   print(sC_fake);
+    //   print("\n");
+    // }
     TiledMMA tiled_mma;
     ThrMMA thr_mma = tiled_mma.get_slice(thread_idx);
     Tensor mma_rC =
         thr_mma.partition_fragment_C(sC_fake); // (MMA, MMA_M, MMA_N)
+
     clear(mma_rC);
     return mma_rC;
   }
@@ -142,6 +153,9 @@ public:
     auto sA_l = tile_to_shape(TileALayout{}, shape(SmemLayoutA{}));
     auto sB_l = tile_to_shape(TileBLayout{}, shape(SmemLayoutB{}));
 
+    // 16 * 64
+    // 64 * 64
+
     Tensor sA = make_tensor(make_smem_ptr(a_ptr), sA_l); // [M, K]
     Tensor sB = make_tensor(make_smem_ptr(b_ptr), sB_l); // [N, K]
 
@@ -152,7 +166,30 @@ public:
     Tensor tCrA = thr_mma.make_fragment_A(tCsA); // (MMA,MMA_M,MMA_K,PIPE)
     Tensor tCrB = thr_mma.make_fragment_B(tCsB); // (MMA,MMA_N,MMA_K,PIPE)
 
-    // auto k_tile_count = size<3>(tCrA);
+    // if (thread0()) {
+    //   print("tile: ");
+    //   print(shape(SmemLayoutA{}));
+    //   print("\n");
+    //   print("atom: ");
+    //   print(TileALayout{});
+    //   print("\n");
+
+    //   print("sA: ");
+    //   print(sA);
+    //   print("\n");
+
+    //   print("sB: ");
+    //   print(sB);
+    //   print("\n");
+
+    //   print("tCsA: ");
+    //   print(tCsA);
+    //   print("\n");
+
+    //   print("tCsB: ");
+    //   print(tCsB);
+    //   print("\n");
+    // }
 
     auto k_tile_count = 1;
 
@@ -164,14 +201,16 @@ public:
       cute::warpgroup_wait<0>();
     }
 
-    if (thread0()) {
+    if (blockIdx.x == 0 && (threadIdx.x == 1)) {
       // print("see A: ");
       // print_tensor(sA);
+      // print("\n");
 
       // print("see B: ");
       // print_tensor(sB);
-      print("mma_rC: ");
-      print_tensor(mma_rC);
+      // print("mma_rC: threadIdx %d: ", threadIdx.x);
+
+      // print_tensor(mma_rC);
       // printf("\n");
 
       // print("tCrB: ");
@@ -183,6 +222,8 @@ public:
       // print("tCsB: ");
       // cute::print(tCsB);
       // printf("\n");
+
+      // printf("----------------\n");
     }
   }
 };

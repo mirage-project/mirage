@@ -75,29 +75,6 @@ static std::vector<T> mov_to_last(T const *vec, size_t numel, int idx) {
 }
 } // namespace get_layout_detail
 
-// int3 imap = cur_op->input_map;
-// for (int dim = 0; dim < 3; ++dim) {
-//   int div_dim = dim == 0 ? imap.x : dim == 1 ? imap.y : imap.z;
-//   if (div_dim >= 0) {
-//     // Dim `div_dim` is divided along `dim`
-//     int num_tbs = dim == 0   ? g.grid_dim.x
-//                   : dim == 1 ? g.grid_dim.y
-//                              : g.grid_dim.z;
-//     offset += fmt(" + blockIdx.$*$*$",
-//                   (char)"xyz"[dim],
-//                   dtensor.dim[div_dim] / num_tbs,
-//                   dtensor_meta.strides[div_dim]);
-//   }
-// }
-staic std::vector
-    get_input_partition_map(int3 imap, dim3 grid_dim, int forloop_dim) {
-  std::vector<int> partition(3);
-  for (int dim = 0; dim < 3; dim++) {
-    int div_dim = dim == 0 ? imap.x : dim == 1 ? imap.y : imap.z;
-    vector.at()
-  }
-}
-
 // Get the layout of a STensor
 static string get_stensor_layout(tb::STensor const &stensor,
                                  STensorMeta const &meta,
@@ -747,12 +724,16 @@ CustomOPTranspileResult
 
         code.e("STensor$InputAtom::run(tma_$, stensor$_async_copy_buf, "
                "dtensor$_tile_ptr, "
-               " tma_load_mbar_x_$, 0);",
+               " tma_load_mbar_x_$, 0, $, $, $, $);",
                output.guid,
                dtensor.guid,
                output.guid,
                dtensor.guid,
-               dtensor.guid);
+               dtensor.guid,
+               input_op->forloop_dim,
+               input_op->input_map.x,
+               input_op->input_map.y,
+               input_op->input_map.z);
       }
     } else {
       for (tb::TBInputOp const *input_op : pipelined_input_ops) {
@@ -1164,12 +1145,16 @@ CustomOPTranspileResult
         size_t forloop_dim_stride =
             dtensor_metas.at(dtensor.guid).strides[input_op->forloop_dim];
         code.e("STensor$InputAtom::run(tma_$, stensor$_ptr, dtensor$_tile_ptr, "
-               "tma_load_mbar_x_$, for_idx + 1);",
+               "tma_load_mbar_x_$, for_idx + 1, $, $, $, $);",
                output.guid,
                dtensor.guid,
                output.guid,
                dtensor.guid,
-               dtensor.guid);
+               dtensor.guid,
+               input_op->forloop_dim,
+               input_op->input_map.x,
+               input_op->input_map.y,
+               input_op->input_map.z);
       }
       code.e("}");
 

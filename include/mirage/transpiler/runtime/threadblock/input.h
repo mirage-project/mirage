@@ -153,6 +153,66 @@ public:
   }
 };
 
+static __device__ __forceinline__ auto tma_make_coord(int forloop_dim,
+                                                      int forloop_idx,
+                                                      int imap_x,
+                                                      int imap_y,
+                                                      int imap_z,
+                                                      int rank,
+                                                      int *res) {
+
+  assert(rank == 2);
+  res[0] = -1;
+  res[1] = -1;
+  res[2] = -1;
+  if (forloop_dim == 0) {
+    res[0] = forloop_idx;
+  } else if (forloop_dim == 1) {
+    res[1] = forloop_idx;
+  } else if (forloop_dim == 2) {
+    res[2] = forloop_idx;
+  }
+
+  if (imap_x != -1) {
+    int div_dim = imap_x == 0 ? 0 : imap_x == 1 ? 1 : 2;
+    res[div_dim] =
+        imap_x == forloop_dim ? forloop_idx * blockIdx.x : blockIdx.x;
+  }
+  if (imap_y != -1) {
+    int div_dim = imap_y == 0 ? 0 : imap_y == 1 ? 1 : 2;
+    res[div_dim] =
+        imap_y == forloop_dim ? forloop_idx * blockIdx.y : blockIdx.y;
+  }
+  if (imap_z != -1) {
+    // z = imap_z == forloop_dim ? forloop_idx * blockIdx.y : blockIdx.y;
+    int div_dim = imap_z == 0 ? 0 : imap_z == 1 ? 1 : 2;
+    res[div_dim] =
+        imap_z == forloop_dim ? forloop_idx * blockIdx.z : blockIdx.z;
+  }
+
+  // if (thread0()) {
+  //   printf("imap xyz %d %d %d\n", imap_x, imap_y, imap_z);
+  //   printf("xyz %d %d %d\n", res[0], res[1], res[2]);
+  // }
+
+  if (res[0] >= 0 && res[1] >= 0) {
+    return make_coord(res[0], res[1]);
+  } else if (res[0] >= 0 && res[2] >= 0) {
+    assert(false);
+  } else if (res[1] >= 0 && res[2] >= 0) {
+    assert(false);
+  } else if (res[0] >= 0) {
+    return make_coord(res[0], 0);
+  } else if (res[1] >= 0) {
+    return make_coord(0, res[1]);
+  } else if (res[2] >= 0) {
+    assert(false);
+  } else {
+    return make_coord(0, 0);
+  }
+
+  return make_coord(0, 0);
+}
 // Type 4 : Copy using the Tensor Memory
 //          Accelerator(TMA)
 template <typename T, class DstLayout, class SrcLayout, class TMA>
@@ -165,20 +225,40 @@ public:
                                              T *dst,
                                              T const *src,
                                              uint64_t *tma_load_mbar,
-                                             unsigned forloop_idx) {
+                                             unsigned forloop_idx,
+                                             unsigned forloop_dim,
+                                             int imapx,
+                                             int imapy,
+                                             int imapz) {
     Tensor mA = tma.get_tma_tensor(shape(SrcLayout{}));
 
     auto cta_coord = make_coord(forloop_idx, blockIdx.x);
     auto cta_coord_t = make_coord(blockIdx.x, forloop_idx);
+    // int coord_value[3];
+    // auto cta_coord = make_coord(0, 0);
+    // coord_value);
+    // auto cta_coord = tma_make_coord(forloop_dim,
+    //                                 forloop_idx,
+    //                                 imapx,
+    //                                 imapy,
+    //                                 imapz,
+    //                                 rank(SrcLayout{}),
+    //                                 coord_value);
+
+    // if (blockIdx.x == 63 && threadIdx.x == 0) {
+    //   printf("block Idx %d, for idx %d\n", blockIdx.x, forloop_idx);
+    //   print(cta_coord);
+    //   print("\n");
+    // }
+
+    // Tensor gA = local_tile(mA, CTA_TILER{}, cta_coord);
+    // Tensor gA = local_tile(mA, CTA_TILER{}, cta_coord, Step<_1, _1, _1>{});
 
     Tensor gA =
         local_tile(mA,
                    CTA_TILER{},
-                   size<1>(SrcLayout{}) == 2048 ? cta_coord_t : cta_coord,
+                   size<1>(SrcLayout{}) == 4096 ? cta_coord_t : cta_coord,
                    Step<_1, _1>{});
-
-    // Tensor gA = local_tile(mA, CTA_TILER{}, cta_coord);
-    // Tensor gA = flat_divide(mA, shape(DstLayout{}));
     Tensor sA = make_tensor(make_smem_ptr(dst), DstLayout{});
 
     auto cta_tma = tma.get_slice(Int<0>{});  // CTA slice
@@ -187,77 +267,33 @@ public:
 
     Tensor tAsA = group_modes<1, rank(tAsA_x)>(tAsA_x);
     Tensor tAgA = group_modes<1, rank(tAgA_x)>(tAgA_x); // (TMA,REST)
-    if (thread0() && forloop_idx == 0) {
-      printf("gA:   ");
-      print(gA);
-      print("\n");
-      print("dst layout: ");
-      print(DstLayout{});
-      print("\n");
-      print(SrcLayout{});
-      print("\n");
+    if (thread0() && forloop_idx == 1) {
+      // printf("gA:   ");
+      // print(gA);
+      // print("\n");
+      // print("dst layout: ");
+      // print(DstLayout{});
+      // print("\n");
+      // print(SrcLayout{});
+      // print("\n");
+      // print("cta_coord: ");
+      // print(cta_coord);
+      // print("\n");
+      // print("SrcLayout: ");
+      // print(SrcLayout{});
+      // print("\n");
+      // print_tensor(sA);
     }
     if (threadIdx.x == 0) {
       tma_load_mbar[0] = 0;
       initialize_barrier(tma_load_mbar[0], 1);
       set_barrier_transaction_bytes(tma_load_mbar[0], tmaTransactionBytes);
-      copy(tma.with(tma_load_mbar[0]), tAgA(_, 0), tAsA(_, 0));
+      // copy(tma.with(tma_load_mbar[0]), tAgA(_, 0), tAsA(_, 0));
+      copy(tma.with(tma_load_mbar[0]), tAgA, tAsA);
     }
     __syncthreads();
     wait_barrier(tma_load_mbar[0], 0);
-    __syncthreads();
-
-    // if(threadIdx.x == 0){
-    //   print("mA: \n");
-    //   printf("(uintptr_t)ptr1 - (uintptr_t)ptr2; %lu\n", 0x7a79d5fffb80 -
-    //   0x7a79aa604000); print("mbar %p\n", (void*)tma.get_tma_descriptor());
-    //   // print("TMA desc     : "); print(tma.tma_desc_); print("\n");
-    //   print("output dtensor %p", (void*)dtensor);
-    //   print(mA);
-    //   print("\n");
-    //   print("coord: ");
-    //   print(cta_coord);
-    //   print("\n");
-    //   print("tAgA_x: ");
-    //   print(tAgA_x);
-    //   print("\n");
-    //   // print("\n");
-    //   print("tAsA_x: ");
-    //   print(tAsA_x);
-
-    //   print("\n");
-    //   print("tAsA: ");
-    //   print(tAsA(_, 0));
-    //   print("\n");
-    //   print("tAgA: ");
-    //   print(tAgA);
-    //   print("\n");
-    //  print("tgaaaa: ");
-    //   print(tAgA(_, 0));
-    //   print("\n");
-    //   print("tma_load_mbar_x: ");
-    //   print(tma_load_mbar[0]);
-
-    // printf("Address of src: %p\n", (void*)src);
-    //   printf("Address of dst: %p\n", (void*)dst);
-    //   print("ma: ");
-    //   print(mA);
-
-    //   print(tma);
-    //   print("\n");
-
-    //   print("first ele of src: %f\n", (float)(src[0]));
-    //   print("first ele of src: %f\n", (float)(src[64 * 64 - 1]));
-    //   print("first ele of src: %f\n", (float)(src[64]));
-
-    //   print("first ele of dst: %f\n", (float)(dst[0]));
-    //   print("first ele of dst: %f\n", (float)(dst[64 * 64 - 1]));
-    //   print("first ele of dst: %f\n", (float)(dst[64]));
-
-    // }
-
-    // int warp_idx = cutlass::canonical_warp_idx_sync();
-    // int lane_predicate = cute::elect_one_sync();
+    // __syncthreads();
   }
 };
 

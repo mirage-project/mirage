@@ -470,7 +470,7 @@ TranspileResult Transpiler::transpile_ugraph() {
               tmaParams.dstLayout,
               tmaParams.tile_size);
           tmas.append(fmt("tma_$, ", tmaParams.guid));
-          tma_tmps.append(fma("decltype(tma_$)", tmaParams.guid));
+          tma_tmps.append(fmt("decltype(tma_$)", tmaParams.guid));
 
           if (i != result.tmaParamsList.size() - 1) {
             tma_tmps.append(", ");
