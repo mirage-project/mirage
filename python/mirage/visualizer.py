@@ -38,6 +38,7 @@ op_nodelabel_mapping = {
     "tb_input_op": "Input",
     "tb_output_op": "Output",
     "tb_mul_op": "Multiply",
+    "tb_accum_red_ld_rms_op":"Accum\n(Reduction=RMS)",
     "tb_matmul_op": "MatMul",
     "tb_accum_nored_op": "AccumNoRed",
     "kn_unkown": "Unknown",
