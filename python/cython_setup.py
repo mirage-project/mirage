@@ -43,14 +43,14 @@ def config_cython():
                               path.join(mirage_path, "deps", "json", "include"),
                               path.join(mirage_path, "deps", "cutlass", "include"),
                               "/usr/local/cuda/include"],
-                libraries=["mirage_runtime", "cudadevrt", "cudart_static", "cudnn", "cublas", "cudart", "cuda", "z3"],
+                libraries=["mirage_runtime", "cudadevrt", "cudart_static", "cudnn", "cublas", "cudart", "cuda", "z3", "gomp"],
                 library_dirs=[path.join(mirage_path, "build"),
                               path.join(mirage_path, "deps", "z3", "build"),
                               "/usr/local/cuda/lib",
                               "/usr/local/cuda/lib64",
                               "/usr/local/cuda/lib64/stubs"],
-                extra_compile_args=["-std=c++17"],
-                extra_link_args=["-fPIC"],
+                extra_compile_args=["-std=c++17", "-fopenmp"],
+                extra_link_args=["-fPIC", "-fopenmp"],
                 language="c++"))
         return cythonize(ret, compiler_directives={"language_level" : 3})
     except ImportError:
