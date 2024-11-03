@@ -53,6 +53,9 @@ private:
   std::atomic<int> num_tasks;
   size_t max_depth;
 
+  // 
+  std::unordered_map<std::string, bool> seen_patterns;
+
   // Ranges-related fields
   std::vector<std::pair<size_t, IKNRange>> init_ranges;
   std::vector<std::vector<IKNRange>> target_ranges;

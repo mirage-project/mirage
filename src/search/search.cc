@@ -157,7 +157,7 @@ void KernelGraphGenerator::generate_next_operator(
             c.kn_graph->operators.push_back(new_op);
             if (check_range(init_ranges, target_ranges, *c.kn_graph)) {
               if (depth < max_depth) {
-                num_tasks++;
+                // num_tasks++;
                 SearchContext c_tmp = SerializedSearchContext(c).deserialize();
                 #pragma omp task 
                 {                  
@@ -236,7 +236,7 @@ void KernelGraphGenerator::generate_next_operator(
                       c.level = SearchLevel::LV_THREADBLOCK;
 
                     if (depth < max_depth) {
-                      num_tasks++;
+                      // num_tasks++;
                       SearchContext c_tmp = SerializedSearchContext(c).deserialize();
                       #pragma omp task 
                       {
@@ -312,7 +312,7 @@ void KernelGraphGenerator::generate_next_operator(
         c.tb_graph = nullptr;
         if (check_range(init_ranges, target_ranges, *c.kn_graph)) {
           if (depth < max_depth) {
-            num_tasks++;
+            // num_tasks++;
             SearchContext c_tmp = SerializedSearchContext(c).deserialize();
             #pragma omp task 
             {
@@ -366,7 +366,7 @@ void KernelGraphGenerator::generate_next_operator(
         c.tb_graph->operators.push_back(new_op);
         if (check_range(init_ranges, target_ranges, *c.kn_graph, c.tb_graph)) {
           if (depth < max_depth) {
-            num_tasks++;
+            // num_tasks++;
             SearchContext c_tmp = SerializedSearchContext(c).deserialize();
             #pragma omp task 
             {
@@ -412,7 +412,7 @@ void KernelGraphGenerator::generate_kernel_graphs() {
     }
   }
 
-  printf("num_tasks = %d tasks\n", num_tasks.load());
+  // printf("num_tasks = %d tasks\n", num_tasks.load());
 
   save_results();
 
@@ -465,10 +465,24 @@ bool KernelGraphGenerator::check_pattern(
   if (!pattern) {
     return false;
   }
+
+  if (seen_patterns.find(pattern->to_string()) != seen_patterns.end()) {
+    return seen_patterns[pattern->to_string()];
+  }
+
   for (auto const &final_pattern : computation_graph_output_patterns) {
     if (pattern->subpattern_to(*final_pattern)) {
+
+      #pragma omp critical
+      {
+        seen_patterns[pattern->to_string()] = true;
+      }
       return true;
     }
+  }
+  #pragma omp critical
+  {
+    seen_patterns[pattern->to_string()] = false;
   }
   return false;
 }
@@ -479,8 +493,6 @@ bool KernelGraphGenerator::verify(kernel::Graph &g) {
   if (outputs.size() != computation_graph_output_patterns.size()) {
     return false;
   }
-
-    // std::lock_guard<std::mutex> lock(fp_mutex);
 
     ++num_total_random_tests;
 
@@ -524,7 +536,6 @@ bool KernelGraphGenerator::verify(kernel::Graph &g) {
     };
 
     auto save_graph = [&]() {
-      // std::lock_guard<std::mutex> lock(generated_graphs_mutex);
       #pragma omp critical
       {
         generated_graphs.push_back(json(g));
