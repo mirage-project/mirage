@@ -34,7 +34,9 @@ void pattern_eval(
     std::unordered_map<int64_t, std::shared_ptr<AlgebraicPattern>> &patterns) {
   int input_id = 0;
   for (auto const &op : g.operators) {
-    if (op->op_type == type::KNOperatorType::KN_INPUT_OP) {
+    if (op->op_type == type::KNOperatorType::KN_OUTPUT_OP) {
+      continue;
+    } else if (op->op_type == type::KNOperatorType::KN_INPUT_OP) {
       patterns.insert({op->output_tensors[0].guid,
                        std::make_shared<Var>("v_" + std::to_string(input_id))});
       input_id++;

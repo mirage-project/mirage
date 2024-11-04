@@ -46,8 +46,7 @@ TBOperator *Graph::create_rms_norm_op(STensor const &input) {
   }
 }
 
-TBRmsNormOp::TBRmsNormOp(Graph *_graph,
-                         STensor const &input)
+TBRmsNormOp::TBRmsNormOp(Graph *_graph, STensor const &input)
     : TBOperator(_graph, mirage::type::TB_RMS_NORM_OP, input) {
   STensor output = input;
   output.owner_op = this;

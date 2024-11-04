@@ -1,6 +1,7 @@
 import mirage as mi
 import argparse
 import os
+import torch
 
 def optimize_llama_70B(checkpoint):
     graph = mi.new_kernel_graph()
@@ -12,6 +13,7 @@ def optimize_llama_70B(checkpoint):
     S = graph.reduction(E, 2)
     D = graph.div(E, S)
     O = graph.matmul(D, V)
+    graph.mark_output(O)
     best_graph = graph.superoptimize(config="attention")
     return best_graph
 

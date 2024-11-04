@@ -50,6 +50,7 @@ bool is_unary(type::KNOperatorType op) {
       type::KNOperatorType::KN_EXP_OP,
       type::KNOperatorType::KN_SILU_OP,
       type::KNOperatorType::KN_RMS_NORM_OP,
+      type::KNOperatorType::KN_OUTPUT_OP,
   };
   return contains(true_values, op);
 }
@@ -98,6 +99,8 @@ std::shared_ptr<AlgebraicPattern>
       return std::make_shared<Exp>(opd);
     case type::KNOperatorType::KN_SILU_OP:
       return std::make_shared<Silu>(opd);
+    case type::KNOperatorType::KN_OUTPUT_OP:
+      return opd;
     default:
       assert(false);
   }

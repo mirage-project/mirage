@@ -78,8 +78,7 @@ int main(int argc, char **argv) {
   auto st = std::chrono::steady_clock::now();
 
   search::GeneratorConfig config =
-      search::GeneratorConfig::get_mlp_default_config();
-  config.grid_dim_to_explore = {{64, 1, 1}};
+      search::GeneratorConfig::get_default_config();
   std::string checkpoint_file_name = "checkpoint_gated_mlp.json";
   search::KernelGraphGenerator gen(
       ref_graph, config, checkpoint_file_name.data());
