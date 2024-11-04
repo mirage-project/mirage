@@ -31,11 +31,11 @@ RUN git clone --recurse-submodules https://github.com/mirage-project/mirage.git
 
 # Install Python requirements
 WORKDIR /root/mirage
-RUN /opt/python/cp38-cp38/bin/pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple && \
-    /opt/python/cp39-cp39/bin/pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple && \
-    /opt/python/cp310-cp310/bin/pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple && \
-    /opt/python/cp311-cp311/bin/pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple && \
-    /opt/python/cp312-cp312/bin/pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+RUN /opt/python/cp38-cp38/bin/pip install -r requirements.txt && \
+    /opt/python/cp39-cp39/bin/pip install -r requirements.txt && \
+    /opt/python/cp310-cp310/bin/pip install -r requirements.txt && \
+    /opt/python/cp311-cp311/bin/pip install -r requirements.txt && \
+    /opt/python/cp312-cp312/bin/pip install -r requirements.txt
 
 # Clean up
 RUN dnf clean all && \
