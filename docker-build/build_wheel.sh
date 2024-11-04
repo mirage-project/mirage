@@ -1,6 +1,8 @@
 #!/bin/bash
 # export NVCC_APPEND_FLAGS='-allow-unsupported-compiler'
 
+# run this script in the root directory of the project (inside the docker container)
+
 CUDA_VERSION_LIST=("12.2" "11.8")
 PYTHON_VERSION_LIST=(cp38 cp39 cp310 cp311 cp312)
 
