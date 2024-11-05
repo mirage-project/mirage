@@ -15,6 +15,7 @@
 #pragma once
 
 #include "cute/arch/cluster_sm90.hpp"
+#include "cutlass/gemm/gemm.h"
 #include <cstdint>
 #include <cute/layout.hpp>
 using namespace cute;
@@ -122,25 +123,6 @@ public:
 #pragma unroll
     for (int chunk_idx = thread_idx; chunk_idx < NUM_CHUNKS;
          chunk_idx += NUM_THREADS) {
-      // if (threadIdx.x == 0 && blockIdx.x == 0 && chunk_idx == 0) {
-      //   printf("blockIdx.x %d, blockIdx.y %d, blockIdx.z %d, chunk_idx %d, "
-      //          "NUM_CHUNKS %d,  %d \n",
-      //          blockIdx.x,
-      //          blockIdx.y,
-      //          blockIdx.z,
-      //          chunk_idx,
-      //          NUM_CHUNKS,
-      //          size(SrcLayout{}));
-      //   printf("\n");
-      //   // print(size(shape(SrcLayout{})));
-      //   print(size(SrcLayout{}));
-      //   printf("\n");
-      // }
-      if (threadIdx.x == 0 && blockIdx.x == 0) {
-        // cute::print(SrcLayout{});
-        // cute::print(DstLayout{});
-        // cute::print(GMMA::Layout_MN_SW128_Atom<half>{});
-      }
       size_t src_addr =
           (size_t)(src + src_layout(src_chunked_coord2coord(chunk_idx)));
       uint32_t dst_addr =
@@ -232,33 +214,19 @@ public:
                                              int imapz) {
     Tensor mA = tma.get_tma_tensor(shape(SrcLayout{}));
 
-    auto cta_coord = make_coord(forloop_idx, blockIdx.x);
-    auto cta_coord_t = make_coord(blockIdx.x, forloop_idx);
     // int coord_value[3];
     // auto cta_coord = make_coord(0, 0);
     // coord_value);
-    // auto cta_coord = tma_make_coord(forloop_dim,
-    //                                 forloop_idx,
-    //                                 imapx,
-    //                                 imapy,
-    //                                 imapz,
-    //                                 rank(SrcLayout{}),
-    //                                 coord_value);
+    auto cta_coord = tma_make_coord(forloop_dim,
+                                    forloop_idx,
+                                    imapx,
+                                    imapy,
+                                    imapz,
+                                    rank(SrcLayout{}),
+                                    coord_value);
 
-    // if (blockIdx.x == 63 && threadIdx.x == 0) {
-    //   printf("block Idx %d, for idx %d\n", blockIdx.x, forloop_idx);
-    //   print(cta_coord);
-    //   print("\n");
-    // }
+    Tensor gA = local_tile(mA, CTA_TILER{}, cta_coord);
 
-    // Tensor gA = local_tile(mA, CTA_TILER{}, cta_coord);
-    // Tensor gA = local_tile(mA, CTA_TILER{}, cta_coord, Step<_1, _1, _1>{});
-
-    Tensor gA =
-        local_tile(mA,
-                   CTA_TILER{},
-                   size<1>(SrcLayout{}) == 4096 ? cta_coord_t : cta_coord,
-                   Step<_1, _1>{});
     Tensor sA = make_tensor(make_smem_ptr(dst), DstLayout{});
 
     auto cta_tma = tma.get_slice(Int<0>{});  // CTA slice
@@ -267,32 +235,57 @@ public:
 
     Tensor tAsA = group_modes<1, rank(tAsA_x)>(tAsA_x);
     Tensor tAgA = group_modes<1, rank(tAgA_x)>(tAgA_x); // (TMA,REST)
-    if (thread0() && forloop_idx == 1) {
-      // printf("gA:   ");
-      // print(gA);
-      // print("\n");
-      // print("dst layout: ");
-      // print(DstLayout{});
-      // print("\n");
-      // print(SrcLayout{});
-      // print("\n");
-      // print("cta_coord: ");
-      // print(cta_coord);
-      // print("\n");
-      // print("SrcLayout: ");
-      // print(SrcLayout{});
-      // print("\n");
-      // print_tensor(sA);
-    }
     if (threadIdx.x == 0) {
       tma_load_mbar[0] = 0;
       initialize_barrier(tma_load_mbar[0], 1);
       set_barrier_transaction_bytes(tma_load_mbar[0], tmaTransactionBytes);
-      // copy(tma.with(tma_load_mbar[0]), tAgA(_, 0), tAsA(_, 0));
       copy(tma.with(tma_load_mbar[0]), tAgA, tAsA);
     }
     __syncthreads();
     wait_barrier(tma_load_mbar[0], 0);
+
+    // Tensor sA = make_tensor(make_smem_ptr(dst),
+    // make_layout(make_shape(_64{},_64{}), make_stride(_64{}, _1{}));
+
+    // if (thread0() && forloop_idx == 0 && forloop_dim == 1) {
+
+    //   print("abc: ");
+    //   print(sA);
+    //   // printf("gA:   ");
+    //   // print(gA);
+    //   // print("\n");
+    //   // print("dst layout: ");
+    //   // print(DstLayout{});
+    //   // print("\n");
+    //   // print(SrcLayout{});
+    //   print("\n");
+    //   // print("cta_coord: ");
+    //   // print(cta_coord);
+    //   // print("\n");
+    //   // print("SrcLayout: ");
+    //   // print(SrcLayout{});
+    //   // print("\n");
+    //   // print_tensor(sA);
+    // } else if (thread0() && forloop_idx == 0 && forloop_dim == 0) {
+    //   print("abcdsd: ");
+    //   print(sA);
+    //   print(
+    //       cutlass::gemm::detail::is_mn_major_A<cutlass::layout::ColumnMajor>());
+    //   print(cutlass::gemm::detail::is_mn_major_B<cutlass::layout::RowMajor>());
+
+    //   // print(cutlass::gemm::detail::is_mn_major_A<decltype(make_layout(
+    //   //           make_shape(_64{}, _64{}), make_stride(_64{}, _1{})))>());
+    //   // print(cutlass::gemm::detail::is_mn_major_B<decltype(make_layout(
+    //   //           make_shape(_64{}, _64{}), make_stride(_64{}, _1{})))>());
+    //   print("\n");
+    // }
+
+    // if (thread0() && forloop_idx == 0 && forloop_idx == 0 && forloop_dim ==
+    // 1) {
+    //   // print("copy n: ");
+    //   // print_tensor(tAsA);
+    //   // print("\n");
+    // }
     // __syncthreads();
   }
 };

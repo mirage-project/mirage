@@ -141,9 +141,10 @@ TranspileResult Transpiler::transpile_ugraph() {
   CodeKeeper exec; // This keeps all code in the `_execute_mugraph` function
 
   init.e("static void _init() {");
-  exec.e("static void _execute_mugraph(std::vector<void *> input_tensors, "
-         "std::vector<void*> output_tensors"
-         ", void* buf) {");
+  exec.e(
+      "static void _execute_mugraph(std::vector<void const *> input_tensors, "
+      "std::vector<void*> output_tensors"
+      ", void* buf) {");
   for (kn::KNOperator *const op : g->operators) {
     std::string op_type_str;
     to_json(op_type_str, op->op_type);
@@ -462,13 +463,14 @@ TranspileResult Transpiler::transpile_ugraph() {
                  tmaParams.guid,
                  tmaParams.guid,
                  tmaParams.srcLayout);
-          exec.e(
-              "auto tma_$ = make_tma_copy<half_t>(SM90_TMA_LOAD{}, gA_$, ${}, "
-              "$, Int<1>{});",
-              tmaParams.guid,
-              tmaParams.guid,
-              tmaParams.dstLayout,
-              tmaParams.tile_size);
+          exec.e("auto tma_$ = make_tma_copy<half_t>(SM90_TMA_LOAD{}, gA_$, "
+                 "${}, "
+                 "$, Int<1>{});",
+                 tmaParams.guid,
+                 tmaParams.guid,
+                 tmaParams.dstLayout,
+                 tmaParams.tile_size);
+
           tmas.append(fmt("tma_$, ", tmaParams.guid));
           tma_tmps.append(fmt("decltype(tma_$)", tmaParams.guid));
 
