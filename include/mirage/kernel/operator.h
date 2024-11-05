@@ -38,6 +38,9 @@ public:
   KNOperator(Graph *graph,
              mirage::type::KNOperatorType _type,
              std::vector<DTensor> const &inputs);
+  int get_input_dtensors(DTensor** inputs);
+  int get_output_dtensors(DTensor** inputs);
+
   virtual ~KNOperator();
   virtual bool profile(ProfileResult &result) = 0;
   virtual bool fingerprint(void) = 0;
@@ -74,7 +77,7 @@ public:
   KNOutputOp(Graph *_graph,
              DTensor const &A,
              std::vector<size_t> const &strides,
-	     int3 output_map = {-1, -1, -1});
+             int3 output_map = {-1, -1, -1});
   ~KNOutputOp();
   bool profile(ProfileResult &profile);
   bool fingerprint(void);
@@ -85,7 +88,6 @@ public:
   std::vector<size_t> output_strides;
   int3 output_map;
 };
-
 
 } // namespace kernel
 } // namespace mirage

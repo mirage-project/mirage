@@ -127,6 +127,7 @@ static string get_kn_op_str(type::KNOperatorType type) {
 }
 
 TranspileResult Transpiler::transpile_ugraph() {
+  size_t max_smem_size = 0;
   // Generate header
   CodeKeeper header;
   header.e("#define NUM_GPUS $", num_gpus);
@@ -408,6 +409,9 @@ TranspileResult Transpiler::transpile_ugraph() {
         }
         // Transpile
         CustomOPTranspileResult result = transpile_kn_custom_op(cur_op);
+        if (result.smem_size > max_smem_size) {
+          max_smem_size = result.smem_size;
+        }
         // Checkings against grid dim and block dim
         if (config.target_cc <= GPU_CC::H100) {
           // According to
@@ -475,7 +479,8 @@ TranspileResult Transpiler::transpile_ugraph() {
         vector<int>(dtensor.dim, dtensor.dim + dtensor.num_dims),
         vector<size_t>(meta.strides, meta.strides + dtensor.num_dims)});
   }
-  return TranspileResult{code, this->d_buf_size, output_directives};
+  return TranspileResult{
+      code, this->d_buf_size, max_smem_size, output_directives};
 }
 
 } // namespace transpiler

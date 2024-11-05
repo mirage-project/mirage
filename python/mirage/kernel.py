@@ -10,6 +10,8 @@ from typing import *
 
 from .core import *
 from .threadblock import *
+from .visualizer import *
+from .utils import *
 
 HARD_CODE = """
 #include <Python.h>
@@ -115,13 +117,16 @@ class Handle:
         if self.remain_op:
             self.remain_op()
 
+
 class KNGraph:
     def __init__(self, graph):
         self.cygraph = graph
 
         self._is_compiled = False
         self.run = None
+        self._valid_cuda_kernels = False
         self._cached_results = None
+        self.visualizer = None
 
     def new_input(
         self, dims: tuple, strides: tuple = None, dtype: dtype = float16
@@ -171,8 +176,16 @@ class KNGraph:
     def customized(self, inputs: list[DTensor], bgraph: TBGraph) -> list[DTensor]:
         return self.cygraph.customized(inputs, bgraph.cygraph)
 
+    def valid_kernels(self):
+        assert self._is_compiled, "Should check kernel validness after compilation"
+        return self._valid_cuda_kernels
+
     def __call__(self, **kwargs):
         results = self.compile(**kwargs)
+
+        # directly return if the Transpiler cannot generate valid CUDA kernels
+        if not self._valid_cuda_kernels:
+            return None
 
         assert self.run is not None, "The graph is not compiled yet."
 
@@ -225,6 +238,18 @@ class KNGraph:
             self.cygraph, target_cc=target_cc, input_strides=input_strides
         )
         # print(result)
+        if result["max_smem_size"] > get_shared_memory_capacity(target_cc):
+            # the transpiled kernel exceeds shared memory limit
+            print(
+                f"required shared memory size {result['max_smem_size']} exceed max shared memory size of current gpu arch {get_shared_memory_capacity(target_cc)}"
+            )
+            self._is_compiled = True
+            self._valid_cuda_kernels = False
+
+            if async_:
+                return Handle([], None)
+            else:
+                return None
 
         MIRAGE_ROOT = os.environ.get(
             "MIRAGE_ROOT", os.path.join(os.path.dirname(__file__), "include")
@@ -281,7 +306,6 @@ class KNGraph:
             so_path,
         ]
 
-
         def remain_op():
             import importlib.util
 
@@ -291,21 +315,19 @@ class KNGraph:
             self.run = getattr(mod, "launch")
 
             self._is_compiled = True
+            self._valid_cuda_kernels = True
             self._cached_results = result
             tempdir_obj.cleanup()
             return self._cached_results
-    
+
         if async_:
             ret = subprocess.Popen(cc_cmd)
             return Handle([ret], remain_op)
-        
         else:
             ret = subprocess.check_call(cc_cmd)
             return remain_op()
-        
+
         # so_path = './test.cpython-38-x86_64-linux-gnu.so'
-
-
 
     def superoptimize(
         self,
@@ -334,7 +356,7 @@ class KNGraph:
         best_graph, best_perf = None, float("inf")
 
         handles = []
-        print("warm up")
+        print("Transpiling discovered {} muGraphs ...".format(len(all_graphs)))
         for idx, g in enumerate(all_graphs):
             dtensors = g.cygraph.get_input_dtensors()
             input_tensors = list()
@@ -343,10 +365,9 @@ class KNGraph:
                 input_tensors.append(
                     torch.randn(dims, dtype=torch.float16, device="cuda:0")
                 )
-            
+
             starter = torch.cuda.Event(enable_timing=True)
             ender = torch.cuda.Event(enable_timing=True)
-            print("Transpiling muGraph {}...".format(idx))
             handle = g.compile(async_=True, inputs=input_tensors)
             handles.append(handle)
         for handle in handles:
@@ -359,10 +380,13 @@ class KNGraph:
                 input_tensors.append(
                     torch.randn(dims, dtype=torch.float16, device="cuda:0")
                 )
-            
+
             starter = torch.cuda.Event(enable_timing=True)
             ender = torch.cuda.Event(enable_timing=True)
-            print("Transpiling muGraph {}...".format(idx))
+            if not g.valid_kernels():
+                print("muGraph {}: skipping since its shared memory usage exceed limit".format(idx))
+                continue
+            # Warmup runs
             for _ in range(16):
                 g(inputs=input_tensors)
             torch.cuda.synchronize()
@@ -372,8 +396,13 @@ class KNGraph:
             ender.record()
             torch.cuda.synchronize()
             perf = starter.elapsed_time(ender) / 1000
-            print("Profiling muGraph {} performance (ms) = {}".format(idx, perf))
+            print("muGraph {}: profiled performance (ms) = {}".format(idx, perf))
             if perf < best_perf:
                 best_graph, best_perf = g, perf
 
         return best_graph
+
+    def visualize(self, file_name):
+        operators = self.cygraph.get_graph_structure()
+        self.visualizer = visualizer(file_name)
+        self.visualizer.draw_graphs(operators)
