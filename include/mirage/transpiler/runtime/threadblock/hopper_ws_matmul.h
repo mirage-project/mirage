@@ -233,12 +233,6 @@ public:
 
           ++smem_pipe_write;
         }
-
-        // what's this
-        // mainloop_pipe_producer_state.advance(k_tile_count);
-        //   // Make sure mainloop consumer has been waited upon before issuing
-        //   epilogue load collective_mainloop.load_tail(mainloop_pipeline,
-        //   mainloop_pipe_producer_state);
       }
     } else if (warp_group_role == WarpGroupRole::Consumer) {
       // MMA

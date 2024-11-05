@@ -32,11 +32,27 @@ void Transpiler::resolve_tb_fusion() {
         num_consumers[input.guid] += 1;
       }
     }
-    // Currently we only fuse elementwise unary operators and 
+    // Currently we only fuse elementwise unary operators and
     // forloop_accum_no_red with
     // the previous operator, when the output of the previous operator has only
     // one consumer
     for (tb::TBOperator *const op : tb_graph.operators) {
+
+      // if (op->op_type == type::TB_MATMUL_OP) {
+      //   tb::STensor const &input0 = op->input_tensors.at(0);
+      //   tb::STensor const &input1 = op->input_tensors.at(1);
+      //   if (input0.owner_op->op_type == type::TB_INPUT_OP &&
+      //       input1.owner_op->op_type == type::TB_INPUT_OP &&
+      //       config.target_cc == 90 && tb_graph.num_warp_groups >= 2) {
+      //     // fuse the input with mma with WS
+      //     is_fused_with_prev[op] = true;
+      //     is_fused_with_next[input0.owner_op] = true;
+      //     is_fused_with_next[input1.owner_op] = true;
+
+      //     // change the op type
+      //     op->op_type = type::TB_INPUT_MATMUL_OP;
+      //   }
+      // }
       if ((type::is_threadblock_element_unary(op->op_type)) ||
           (op->op_type == type::TB_FORLOOP_ACCUM_NO_RED_OP)) {
         tb::STensor const &input0 = op->input_tensors.at(0);
@@ -68,6 +84,11 @@ void Transpiler::resolve_tb_fusion() {
       tb::TBOperator *cur_op = last_op;
       while (true) {
         fused_ops.push_back(cur_op);
+
+        // if (is_fused_with_prev[cur_op] &&
+        //     cur_op->op_type == type::TB_INPUT_MATMUL_OP) {
+
+        // } else
         if (is_fused_with_prev[cur_op]) {
           cur_op = cur_op->input_tensors.at(0).owner_op;
         } else {
