@@ -1,9 +1,9 @@
 #include "mirage/search/search.h"
 #include "mirage/kernel/customized.h"
 #include "mirage/kernel/device_memory_manager.h"
+#include "mirage/search/abstract_expr/abstract_expr_eval.h"
 #include "mirage/search/dim_strategy.h"
 #include "mirage/search/op_utils.h"
-#include "mirage/search/pattern_eval.h"
 #include "mirage/utils/containers.h"
 #include "mirage/utils/json_utils.h"
 
@@ -116,11 +116,10 @@ void KernelGraphGenerator::generate_next_operator(
     return;
   }
 
-  std::unordered_map<int64_t, std::shared_ptr<AlgebraicPattern>>
-      algebraic_pattern;
-  pattern_eval(*c.kn_graph, algebraic_pattern);
+  std::unordered_map<int64_t, std::shared_ptr<AbstractExpr>> algebraic_pattern;
+  abstract_expr_eval(*c.kn_graph, algebraic_pattern);
   if (c.tb_graph) {
-    pattern_eval(*c.tb_graph, algebraic_pattern);
+    abstract_expr_eval(*c.tb_graph, algebraic_pattern);
   }
   if (c.level == SearchLevel::LV_KERNEL) {
     assert(c.tb_graph == nullptr);
@@ -140,12 +139,12 @@ void KernelGraphGenerator::generate_next_operator(
           }
           std::vector<DTensor> input_tensors =
               get_tensors_from_idx(*c.kn_graph, input_idx);
-          std::vector<std::shared_ptr<AlgebraicPattern>> input_patterns;
+          std::vector<std::shared_ptr<AbstractExpr>> input_patterns;
           for (auto const &t : input_tensors) {
             assert(contains_key(algebraic_pattern, t.guid));
             input_patterns.push_back(algebraic_pattern.at(t.guid));
           }
-          std::shared_ptr<AlgebraicPattern> pattern =
+          std::shared_ptr<AbstractExpr> pattern =
               get_pattern(op_type, input_tensors, input_patterns);
           if (!check_pattern(pattern)) {
             continue;
@@ -319,12 +318,12 @@ void KernelGraphGenerator::generate_next_operator(
         }
         std::vector<STensor> input_tensors =
             get_tensors_from_idx(*c.tb_graph, input_idx);
-        std::vector<std::shared_ptr<AlgebraicPattern>> input_patterns;
+        std::vector<std::shared_ptr<AbstractExpr>> input_patterns;
         for (auto const &t : input_tensors) {
           assert(contains_key(algebraic_pattern, t.guid));
           input_patterns.push_back(algebraic_pattern.at(t.guid));
         }
-        std::shared_ptr<AlgebraicPattern> pattern =
+        std::shared_ptr<AbstractExpr> pattern =
             get_pattern(op_type, input_tensors, input_patterns);
         if (!check_pattern(pattern)) {
           continue;
@@ -421,9 +420,9 @@ void KernelGraphGenerator::preprocess(kernel::Graph const &computation_graph) {
     }
   }
 
-  std::unordered_map<int64_t, std::shared_ptr<AlgebraicPattern>>
+  std::unordered_map<int64_t, std::shared_ptr<AbstractExpr>>
       computation_graph_patterns;
-  pattern_eval(computation_graph, computation_graph_patterns);
+  abstract_expr_eval(computation_graph, computation_graph_patterns);
 
   init_ranges = get_init_ranges(computation_graph);
   target_ranges = get_interact_ranges(init_ranges, computation_graph);
@@ -444,7 +443,7 @@ void KernelGraphGenerator::preprocess(kernel::Graph const &computation_graph) {
 }
 
 bool KernelGraphGenerator::check_pattern(
-    std::shared_ptr<AlgebraicPattern> pattern) {
+    std::shared_ptr<AbstractExpr> pattern) {
   if (!pattern) {
     return false;
   }

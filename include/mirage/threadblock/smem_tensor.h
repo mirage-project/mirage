@@ -157,7 +157,7 @@ struct alignas(16) STensor {
   mirage::layout::SmemLayout layout;
   int num_dims;
   int dim[MAX_TENSOR_DIMS];
-  int guid;
+  type::GuidType guid;
   // int stride[MAX_TENSOR_DIMS];
   //  STensor fields
   TBOperator *owner_op;

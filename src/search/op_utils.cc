@@ -78,10 +78,9 @@ int get_input_number(type::TBOperatorType op) {
   assert(false && "Unsupported operator");
 }
 
-std::shared_ptr<AlgebraicPattern>
-    get_pattern(type::KNOperatorType op,
-                DTensor const &tensor,
-                std::shared_ptr<AlgebraicPattern> opd) {
+std::shared_ptr<AbstractExpr> get_pattern(type::KNOperatorType op,
+                                          DTensor const &tensor,
+                                          std::shared_ptr<AbstractExpr> opd) {
   switch (op) {
     case type::KNOperatorType::KN_REDUCTION_0_OP:
       return std::make_shared<Red>(tensor.dim[0], opd);
@@ -106,10 +105,9 @@ std::shared_ptr<AlgebraicPattern>
   }
 }
 
-std::shared_ptr<AlgebraicPattern>
-    get_pattern(type::TBOperatorType op,
-                STensor const &tensor,
-                std::shared_ptr<AlgebraicPattern> opd) {
+std::shared_ptr<AbstractExpr> get_pattern(type::TBOperatorType op,
+                                          STensor const &tensor,
+                                          std::shared_ptr<AbstractExpr> opd) {
   // Retrieve reduction_dimx and forloop_range from threadblock graph
   assert(tensor.owner_op != nullptr);
   assert(tensor.owner_op->bgraph != nullptr);
@@ -176,12 +174,11 @@ std::shared_ptr<AlgebraicPattern>
   }
 }
 
-std::shared_ptr<AlgebraicPattern>
-    get_pattern(type::KNOperatorType op,
-                DTensor const &tensor_l,
-                DTensor const &tensor_r,
-                std::shared_ptr<AlgebraicPattern> lhs,
-                std::shared_ptr<AlgebraicPattern> rhs) {
+std::shared_ptr<AbstractExpr> get_pattern(type::KNOperatorType op,
+                                          DTensor const &tensor_l,
+                                          DTensor const &tensor_r,
+                                          std::shared_ptr<AbstractExpr> lhs,
+                                          std::shared_ptr<AbstractExpr> rhs) {
 
   switch (op) {
     case type::KNOperatorType::KN_MATMUL_OP:
@@ -202,12 +199,11 @@ std::shared_ptr<AlgebraicPattern>
   }
 }
 
-std::shared_ptr<AlgebraicPattern>
-    get_pattern(type::TBOperatorType op,
-                STensor const &tensor_l,
-                STensor const &tensor_r,
-                std::shared_ptr<AlgebraicPattern> lhs,
-                std::shared_ptr<AlgebraicPattern> rhs) {
+std::shared_ptr<AbstractExpr> get_pattern(type::TBOperatorType op,
+                                          STensor const &tensor_l,
+                                          STensor const &tensor_r,
+                                          std::shared_ptr<AbstractExpr> lhs,
+                                          std::shared_ptr<AbstractExpr> rhs) {
 
   switch (op) {
     case type::TBOperatorType::TB_MATMUL_OP:
@@ -228,10 +224,10 @@ std::shared_ptr<AlgebraicPattern>
   }
 }
 
-std::shared_ptr<AlgebraicPattern>
+std::shared_ptr<AbstractExpr>
     get_pattern(type::KNOperatorType op,
                 std::vector<DTensor> const &tensors,
-                std::vector<std::shared_ptr<AlgebraicPattern>> const &opds) {
+                std::vector<std::shared_ptr<AbstractExpr>> const &opds) {
   if (tensors.size() == 1) {
     return get_pattern(op, tensors[0], opds[0]);
   }
@@ -241,10 +237,10 @@ std::shared_ptr<AlgebraicPattern>
   assert(false && "Unsupported operator");
 }
 
-std::shared_ptr<AlgebraicPattern>
+std::shared_ptr<AbstractExpr>
     get_pattern(type::TBOperatorType op,
                 std::vector<STensor> const &tensors,
-                std::vector<std::shared_ptr<AlgebraicPattern>> const &opds) {
+                std::vector<std::shared_ptr<AbstractExpr>> const &opds) {
 
   if (opds.size() == 1) {
     return get_pattern(op, tensors[0], opds[0]);

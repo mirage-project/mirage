@@ -7,7 +7,7 @@
 
 #include "mirage/search/config.h"
 #include "mirage/search/dim_strategy.h"
-#include "mirage/search/irange.h"
+#include "mirage/search/range_propagation/irange.h"
 #include "mirage/search/order.h"
 #include "mirage/search/search_context.h"
 #include "mirage/search/search_state_manager.h"
@@ -35,8 +35,7 @@ public:
 
 private:
   // Computation graph-related fields
-  std::vector<std::shared_ptr<AlgebraicPattern>>
-      computation_graph_output_patterns;
+  std::vector<std::shared_ptr<AbstractExpr>> computation_graph_output_patterns;
   std::vector<cpu::CTensor> computation_graph_output_tensors;
   std::vector<std::tuple<std::vector<int>,
                          type::DataType,
@@ -67,7 +66,7 @@ private:
       std::vector<SerializedSearchContext> &verified);
 
   void preprocess(kernel::Graph const &computation_graph);
-  bool check_pattern(std::shared_ptr<AlgebraicPattern> pattern);
+  bool check_pattern(std::shared_ptr<AbstractExpr> pattern);
   bool verify(kernel::Graph &g);
 
   void save_results() const;
