@@ -7,15 +7,26 @@ FormalVerifier::FormalVerifier(kernel::Graph const &input_graph) {
   input_exprs = get_concrete_exprs(input_graph, ctx);
 }
 
-bool FormalVerifier::verify(kernel::Graph const &graph,
-                            std::vector<int> const &match) {
+OutputMatch FormalVerifier::verify(kernel::Graph const &graph) {
   std::vector<z3::expr> graph_exprs = get_concrete_exprs(graph, ctx);
-  for (size_t i = 0; i < match.size(); i++) {
-    if (!is_equivalent(input_exprs[i], graph_exprs[match[i]], ctx)) {
-      return false;
+  assert(input_exprs.size() == graph_exprs.size());
+
+  auto verify_with_match = [&](OutputMatch const &match) {
+    for (size_t i = 0; i < match.size(); i++) {
+      if (!is_equivalent(input_exprs[i], graph_exprs[match[i]], ctx)) {
+        return false;
+      }
+    }
+    return true;
+  };
+
+  OutputMatch match(input_exprs.size());
+  while (match.next()) {
+    if (verify_with_match(match)) {
+      return match;
     }
   }
-  return true;
+  return OutputMatch::invalid_match();
 }
 
 std::vector<z3::expr> get_concrete_exprs(kernel::Graph const &graph,
@@ -179,7 +190,8 @@ std::vector<z3::expr> get_concrete_exprs(kernel::Graph const &graph,
           a = reduce(a, df);
           static int redtox_id = 0;
           z3::expr reddim = ctx.constant(("reddim" + std::to_string(redtox_id++)).data(), D);
-          int reduce_degree = op->input_tensors[0].dim[op->input_tensors[0].num_dims - 1] / op->output_tensors[0].dim[op->output_tensors[0].num_dims - 1];
+          int reduce_degree = op->input_tensors[0].dim[op->input_tensors[0].num_dims - 1]
+                            / op->output_tensors[0].dim[op->output_tensors[0].num_dims - 1];
           a = partition(a, data_dim[0], reddim, ctx.int_val(reduce_degree));
           tensor_exprs.emplace(op->output_tensors[0].guid, reduce(a, reddim));
           break;
@@ -227,6 +239,14 @@ std::vector<z3::expr> get_concrete_exprs(kernel::Graph const &graph,
   auto calc_dtensor_exprs = [&](kernel::Graph const &graph) {
     for (kernel::KNOperator *op : graph.operators) {
       switch (op->op_type) {
+        case type::KNOperatorType::KN_INPUT_OP: {
+          static int input_id = 0;
+          tensor_exprs.emplace(op->output_tensors[0].guid, ctx.constant(("input" + std::to_string(input_id++)).data(), T));
+          break;
+        }
+        case type::KNOperatorType::KN_OUTPUT_OP: {
+          break;
+        }
         case type::KNOperatorType::KN_ADD_OP: {
           z3::expr lhs = tensor_exprs.at(op->input_tensors[0].guid);
           z3::expr rhs = tensor_exprs.at(op->input_tensors[1].guid);
@@ -284,7 +304,17 @@ std::vector<z3::expr> get_concrete_exprs(kernel::Graph const &graph,
     }
   };
 
-  return calc_dtensor_exprs(graph);
+  calc_dtensor_exprs(graph);
+
+  std::vector<z3::expr> output_exprs;
+
+  for (kernel::KNOperator *op : graph.operators) {
+    if (op->op_type == type::KNOperatorType::KN_OUTPUT_OP) {
+      output_exprs.push_back(tensor_exprs.at(op->input_tensors[0].guid));
+    }
+  }
+
+  return output_exprs;
 }
 
 bool is_equivalent(z3::expr const &lhs, z3::expr const &rhs, z3::context &ctx) {
@@ -333,8 +363,6 @@ bool is_equivalent(z3::expr const &lhs, z3::expr const &rhs, z3::context &ctx) {
   z3::expr i0 = ctx.constant("i0", I);
   z3::expr i1 = ctx.constant("i1", I);
 
-  z3::solver slv(ctx);
-
   slv.add(forall(t0, t1, ew_add(t0, t1) == ew_add(t1, t0)));
   slv.add(forall(t0, t1, ew_mul(t0, t1) == ew_mul(t1, t0)));
   slv.add(forall(t0, t1, t2, ew_add(t0, ew_add(t1, t2)) == ew_add(ew_add(t0, t1), t2)));
@@ -345,10 +373,10 @@ bool is_equivalent(z3::expr const &lhs, z3::expr const &rhs, z3::context &ctx) {
   slv.add(forall(t0, t1, t2, matmul(ew_add(t0, t1), t2) == ew_add(matmul(t0, t2), matmul(t1, t2))));
   slv.add(forall(t0, t1, t2, matmul(t0, ew_add(t1, t2)) == ew_add(matmul(t0, t1), matmul(t0, t2))));
 
-  slv.add(forall(t0, d0, reduce(reduce(t0, d0), d0) == reduce(t0, d0)));
+  slv.add(forall(t0, d0, reduce(sum(t0, d0), d0) == reduce(t0, d0)));
 
-  slv.add(forall(t0, d0, d1, combine(partition(t0, d0, d1, i0), d0, d1) == t0));
-  slv.add(forall(t0, d0, d1, partition(combine(t0, d0, d1, i0), d0, d1) == t0));
+  slv.add(forall(to_expr_vector({t0, d0, d1, i0}), combine(partition(t0, d0, d1, i0), d0, d1) == t0));
+  slv.add(forall(to_expr_vector({t0, d0, d1, i0}), partition(combine(t0, d0, d1, i0), d0, d1) == t0));
 
   {
     z3::expr_vector args = to_expr_vector({t0, d0, d1, d2, i0, i1});

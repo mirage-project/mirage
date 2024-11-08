@@ -12,6 +12,7 @@
 #include "mirage/search/search_context.h"
 #include "mirage/search/search_state_manager.h"
 #include "mirage/utils/json_utils.h"
+#include "mirage/search/verification/verifier.h"
 
 namespace mirage {
 namespace search {
@@ -36,7 +37,6 @@ public:
 private:
   // Computation graph-related fields
   std::vector<std::shared_ptr<AbstractExpr>> computation_graph_output_patterns;
-  std::vector<cpu::CTensor> computation_graph_output_tensors;
   std::vector<std::tuple<std::vector<int>,
                          type::DataType,
                          layout::DmemLayout,
@@ -57,6 +57,9 @@ private:
   // Ranges-related fields
   std::vector<std::pair<size_t, IKNRange>> init_ranges;
   std::vector<std::vector<IKNRange>> target_ranges;
+
+  // Verifier
+  std::shared_ptr<Verifier> verifier, verifier_; // TODO before commit: verifier_ is for debugging and should not appear in any PR
 
   void search_from(std::vector<SerializedSearchContext> const &contexts);
 

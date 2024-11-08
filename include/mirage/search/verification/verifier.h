@@ -1,6 +1,7 @@
 #pragma once
 
 #include "mirage/kernel/graph.h"
+#include "mirage/search/verification/output_match.h"
 
 namespace mirage {
 namespace search {
@@ -8,7 +9,7 @@ namespace search {
 class Verifier {
 public:
     Verifier() = default;
-    virtual bool verify(kernel::Graph const &graph, std::vector<int> const& match) = 0;
+    virtual OutputMatch verify(kernel::Graph const &graph) = 0;
     virtual ~Verifier() = default;
 };
 

@@ -10,7 +10,7 @@ namespace search {
 class FormalVerifier : public Verifier {
 public:
   FormalVerifier(kernel::Graph const &input_graph);
-  virtual bool verify(kernel::Graph const &graph, std::vector<int> const &match) override;
+  virtual OutputMatch verify(kernel::Graph const &graph) override;
 
 private:
   std::vector<z3::expr> input_exprs;

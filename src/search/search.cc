@@ -6,6 +6,8 @@
 #include "mirage/search/op_utils.h"
 #include "mirage/utils/containers.h"
 #include "mirage/utils/json_utils.h"
+#include "mirage/search/verification/formal_verifier.h"
+#include "mirage/search/verification/probabilistic_verifier.h"
 
 #include <fstream>
 #include <iostream>
@@ -428,18 +430,15 @@ void KernelGraphGenerator::preprocess(kernel::Graph const &computation_graph) {
   target_ranges = get_interact_ranges(init_ranges, computation_graph);
   assert(init_ranges.size() == target_ranges.size());
 
-  for (auto const &op : computation_graph.operators) {
-    op->fingerprint();
-  }
-
   for (kernel::KNOperator *op : computation_graph.operators) {
     if (op->op_type == type::KNOperatorType::KN_OUTPUT_OP) {
-      computation_graph_output_tensors.push_back(
-          op->input_tensors[0].copy_fingerprint_to_ctensor());
       computation_graph_output_patterns.push_back(
           computation_graph_patterns.at(op->input_tensors[0].guid));
     }
   }
+
+  verifier = std::make_shared<ProbabilisticVerifier>(computation_graph);
+  verifier_ = std::make_shared<FormalVerifier>(computation_graph);
 }
 
 bool KernelGraphGenerator::check_pattern(
@@ -463,33 +462,14 @@ bool KernelGraphGenerator::verify(kernel::Graph &g) {
   }
 
   {
-    std::lock_guard<std::mutex> lock(fp_mutex);
-
     ++num_total_random_tests;
-
-    for (auto const &op : g.operators) {
-      op->fingerprint();
-    }
-
-    auto get_matches = [](int num_outputs) {
-      std::vector<std::vector<int>> results;
-      std::vector<int> perm;
-      for (int i = 0; i < num_outputs; ++i) {
-        perm.push_back(i);
-      }
-      do {
-        results.push_back(perm);
-      } while (std::next_permutation(perm.begin(), perm.end()));
-      return results;
-    };
-
-    auto mark_outputs = [&](std::vector<int> const &match) {
-      for (size_t i = 0; i < match.size(); ++i) {
+    auto mark_outputs = [&](OutputMatch const &match) {
+      for (size_t i = 0; i < outputs.size(); ++i) {
         g.mark_output(outputs[match[i]]);
       }
     };
 
-    auto unmark_outputs = [&](std::vector<int> const &match) {
+    auto unmark_outputs = [&]() {
       while (g.operators.back()->op_type ==
              type::KNOperatorType::KN_OUTPUT_OP) {
         delete g.operators.back();
@@ -497,29 +477,21 @@ bool KernelGraphGenerator::verify(kernel::Graph &g) {
       }
     };
 
-    auto have_same_fingerprint = [&](std::vector<int> const &match) {
-      for (size_t i = 0; i < match.size(); ++i) {
-        if (!outputs[match[i]].has_same_fingerprint(
-                computation_graph_output_tensors[i])) {
-          return false;
-        }
-      }
-      return true;
-    };
-
     auto save_graph = [&]() {
       std::lock_guard<std::mutex> lock(generated_graphs_mutex);
       generated_graphs.push_back(json(g));
     };
 
-    for (auto const &match : get_matches(outputs.size())) {
-      if (have_same_fingerprint(match)) {
-        ++num_valid_kernel_graphs;
-        mark_outputs(match);
-        save_graph();
-        unmark_outputs(match);
-        return true;
-      }
+    mark_outputs(OutputMatch(outputs.size()));
+    OutputMatch match = verifier->verify(g);
+    if (match.is_valid()) {
+      ++num_valid_kernel_graphs;
+      // Re-mark the outputs to match the order in the computation graph
+      unmark_outputs();
+      mark_outputs(match);
+      save_graph();
+      unmark_outputs();
+      return true;
     }
   }
 
