@@ -20,7 +20,7 @@ KernelGraphGenerator::KernelGraphGenerator(
     char const *filename,
     bool verbose)
     : config(config), dim_strategy(DimStrategy(config)), filename(filename),
-      num_thread(config.search_thread), verbose(verbose),
+      num_thread(8), verbose(verbose),
       num_total_random_tests(0), num_valid_kernel_graphs(0),
       num_total_states(0), num_tasks(0), max_depth(5) {
   preprocess(computation_graph);
@@ -157,7 +157,7 @@ void KernelGraphGenerator::generate_next_operator(
             c.kn_graph->operators.push_back(new_op);
             if (check_range(init_ranges, target_ranges, *c.kn_graph)) {
               if (depth < max_depth) {
-                // num_tasks++;
+                num_tasks++;
                 SearchContext c_tmp = SerializedSearchContext(c).deserialize();
                 #pragma omp task 
                 {                  
@@ -236,7 +236,7 @@ void KernelGraphGenerator::generate_next_operator(
                       c.level = SearchLevel::LV_THREADBLOCK;
 
                     if (depth < max_depth) {
-                      // num_tasks++;
+                      num_tasks++;
                       SearchContext c_tmp = SerializedSearchContext(c).deserialize();
                       #pragma omp task 
                       {
@@ -312,7 +312,7 @@ void KernelGraphGenerator::generate_next_operator(
         c.tb_graph = nullptr;
         if (check_range(init_ranges, target_ranges, *c.kn_graph)) {
           if (depth < max_depth) {
-            // num_tasks++;
+            num_tasks++;
             SearchContext c_tmp = SerializedSearchContext(c).deserialize();
             #pragma omp task 
             {
@@ -366,7 +366,7 @@ void KernelGraphGenerator::generate_next_operator(
         c.tb_graph->operators.push_back(new_op);
         if (check_range(init_ranges, target_ranges, *c.kn_graph, c.tb_graph)) {
           if (depth < max_depth) {
-            // num_tasks++;
+            num_tasks++;
             SearchContext c_tmp = SerializedSearchContext(c).deserialize();
             #pragma omp task 
             {
@@ -398,6 +398,7 @@ void KernelGraphGenerator::generate_kernel_graphs() {
 
   std::vector<SerializedSearchContext> verified;
 
+  printf("num_thread = %d\n", num_thread);
   #pragma omp parallel num_threads(num_thread)
   {
     #pragma omp single
@@ -412,7 +413,7 @@ void KernelGraphGenerator::generate_kernel_graphs() {
     }
   }
 
-  // printf("num_tasks = %d tasks\n", num_tasks.load());
+  printf("num_tasks = %d tasks\n", num_tasks.load());
 
   save_results();
 
