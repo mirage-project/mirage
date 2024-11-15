@@ -13,12 +13,12 @@
  * limitations under the License.
  */
 
+#include "mirage/nki_transpiler/transpile.h"
 #include "mirage/threadblock/element_unary.h"
 #include "mirage/threadblock/forloop_accum.h"
+#include "mirage/threadblock/graph.h"
 #include "mirage/threadblock/operator.h"
 #include "mirage/threadblock/smem_tensor.h"
-#include "mirage/threadblock/graph.h"
-#include "mirage/nki_transpiler/transpile.h"
 #include "mirage/transpiler/utils.h"
 
 #include <algorithm>
@@ -29,10 +29,10 @@ namespace nki_transpiler {
 namespace kn = mirage::kernel;
 namespace tb = mirage::threadblock;
 
-using std::string;
-using mirage::transpiler::fmt;
 using mirage::transpiler::CodeKeeper;
+using mirage::transpiler::fmt;
 using mirage::transpiler::map;
+using std::string;
 
 NKICustomOPTranspileResult
     NKITranspiler::transpile_kn_custom_op(kn::KNCustomizedOp const *op) {
@@ -45,22 +45,22 @@ NKICustomOPTranspileResult
   CodeKeeper code;
   code.e("@nki_jit");
   code.e("def $($, $):",
-      func_name,
-      map<kn::DTensor, string>(op->output_tensors,
-                               [](kn::DTensor const &dtensor) -> string {
-                                 return fmt("dtensor$", dtensor.guid);
-                               }),
-      map<kn::DTensor, string>(op->input_tensors,
-                               [](kn::DTensor const &dtensor) -> string {
-                                 return fmt("dtensor$", dtensor.guid);
-                               }));
+         func_name,
+         map<kn::DTensor, string>(op->output_tensors,
+                                  [](kn::DTensor const &dtensor) -> string {
+                                    return fmt("dtensor$", dtensor.guid);
+                                  }),
+         map<kn::DTensor, string>(op->input_tensors,
+                                  [](kn::DTensor const &dtensor) -> string {
+                                    return fmt("dtensor$", dtensor.guid);
+                                  }));
   code.inc_indent();
   if (g.forloop_range > 1) {
     code.e("for l in range($):", g.forloop_range);
     code.inc_indent();
   }
   // Generate code for operators before accum
-  for (tb::TBOperator * tb_op : g.operators) {
+  for (tb::TBOperator *tb_op : g.operators) {
     bool after_accum = false;
     for (tb::STensor const &input : tb_op->input_tensors) {
       if (input.after_accum) {
@@ -72,22 +72,21 @@ NKICustomOPTranspileResult
     }
     switch (tb_op->op_type) {
       case type::TB_INPUT_OP: {
-        tb::TBInputOp const *input_op = static_cast<tb::TBInputOp const *>(tb_op);
+        tb::TBInputOp const *input_op =
+            static_cast<tb::TBInputOp const *>(tb_op);
         kn::DTensor const &dtensor = input_op->dtensor;
         tb::STensor const &stensor = input_op->output_tensors.at(0);
         int3 imap = input_op->input_map;
         std::string range;
         for (int i = 0; i < stensor.num_dims; i++) {
-          for (int dim = 0; dim < 3; dim ++) {
+          for (int dim = 0; dim < 3; dim++) {
             int div_dim = dim == 0 ? imap.x : dim == 1 ? imap.y : imap.z;
             if (div_dim >= 0) {
-
             }
           }
         }
         // Generate code for TB Input
-        code.e("$ = nl.load($)",
-            fmt("stensor$", stensor.guid));
+        code.e("$ = nl.load($)", fmt("stensor$", stensor.guid));
         break;
       }
       default: {

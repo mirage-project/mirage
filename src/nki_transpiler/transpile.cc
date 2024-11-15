@@ -14,9 +14,9 @@
  */
 
 #include "mirage/nki_transpiler/transpile.h"
-#include "mirage/transpiler/utils.h"
 #include "mirage/kernel/graph.h"
 #include "mirage/threadblock/graph.h"
+#include "mirage/transpiler/utils.h"
 #include <cassert>
 
 #include "z3++.h"
@@ -24,10 +24,10 @@
 namespace mirage {
 namespace nki_transpiler {
 
-using mirage::transpiler::Combine;
-using mirage::transpiler::fmt;
 using mirage::transpiler::ceil_div;
 using mirage::transpiler::CodeKeeper;
+using mirage::transpiler::Combine;
+using mirage::transpiler::fmt;
 
 namespace cost {
 using cost_t = int;
@@ -36,7 +36,6 @@ using cost_t = int;
 cost_t NKI_TB_TRANSPOSE = 1;
 
 } // namespace cost
-
 
 template <typename DT>
 DT get_tensor_in_new_graph(std::unordered_map<size_t, DT> mapping,
@@ -345,15 +344,15 @@ void NKITranspiler::resolve_tensor_layout() {
   for (kn::KNOperator const *kn_op : this->g->operators) {
     if (kn_op->op_type == type::KN_CUSTOMIZED_OP) {
       kn::KNCustomizedOp const *kn_customized_op =
-          static_cast<kn::KNCustomizedOp const*>(kn_op);
+          static_cast<kn::KNCustomizedOp const *>(kn_op);
       tb::Graph const &tb_graph = kn_customized_op->bgraph;
       for (tb::TBOperator const *tb_op : tb_graph.operators) {
         switch (tb_op->op_type) {
           case type::TB_INPUT_OP: {
             // TB input operator
-            //tb::TBInputOp const *tb_input_op =
+            // tb::TBInputOp const *tb_input_op =
             //    static_cast<tb::TBInputOp const *>(tb_op);
-            //tb::STensor const &output = tb_op->output_tensors.at(0);
+            // tb::STensor const &output = tb_op->output_tensors.at(0);
             // TODO: does the cost of loading stensor from HBM to SBUF
             // depend on the partition dimension???
             // Currently do nothing
@@ -373,19 +372,18 @@ void NKITranspiler::resolve_tensor_layout() {
                    input0.num_dims == output.num_dims);
             int num_dims = input0.num_dims;
             assert(num_dims >= 2);
-            // Add a transpose cost if input0's last dim is not the 
+            // Add a transpose cost if input0's last dim is not the
             // partition dim
-            costs.push_back(
-                z3::ite(!s_is_partition[input0.guid][num_dims - 1],
-                        ctx.int_val(cost::NKI_TB_TRANSPOSE),
-                        ctx.int_val(0)));
+            costs.push_back(z3::ite(!s_is_partition[input0.guid][num_dims - 1],
+                                    ctx.int_val(cost::NKI_TB_TRANSPOSE),
+                                    ctx.int_val(0)));
             // Add a transpose cost if input1's last dim is not the
             // partition dim
-            costs.push_back(
-                z3::ite(!s_is_partition[input1.guid][num_dims - 2],
-                        ctx.int_val(cost::NKI_TB_TRANSPOSE),
-                        ctx.int_val(0)));
-            // NKI's matmul interface: (https://awsdocs-neuron.readthedocs-hosted.com/en/latest/general/nki/api/generated/nki.isa.nc_matmul.html)
+            costs.push_back(z3::ite(!s_is_partition[input1.guid][num_dims - 2],
+                                    ctx.int_val(cost::NKI_TB_TRANSPOSE),
+                                    ctx.int_val(0)));
+            // NKI's matmul interface:
+            // (https://awsdocs-neuron.readthedocs-hosted.com/en/latest/general/nki/api/generated/nki.isa.nc_matmul.html)
             // requires the stationary operand is at most 128x128, while the
             // moving operand is at most 128x512. As a result,
             // the transpiler has two choices when transpiling matmul:
@@ -393,18 +391,18 @@ void NKITranspiler::resolve_tensor_layout() {
             // Case 2: input1 is stationary and input0 is moving
             // We compute the number of matmuls for them and pick the more
             // efficient one
-            int num_matmul_for_case1 = ceil_div(input0.dim[num_dims-2], 128)
-                                     * ceil_div(input1.dim[num_dims-1], 512);
-            int num_matmul_for_case2 = ceil_div(input1.dim[num_dims-1], 128)
-                                     * ceil_div(input0.dim[num_dims-2], 512);
+            int num_matmul_for_case1 = ceil_div(input0.dim[num_dims - 2], 128) *
+                                       ceil_div(input1.dim[num_dims - 1], 512);
+            int num_matmul_for_case2 = ceil_div(input1.dim[num_dims - 1], 128) *
+                                       ceil_div(input0.dim[num_dims - 2], 512);
             if (num_matmul_for_case1 < num_matmul_for_case2) {
               // Enforce using case 1 by setting output.dim[num_dims-2] as
               // the partition dim for the output
-              opt.add(s_is_partition[output.guid][num_dims-2]);
+              opt.add(s_is_partition[output.guid][num_dims - 2]);
             } else if (num_matmul_for_case1 > num_matmul_for_case2) {
               // Enforce using case 2 by setting output.dim[num_dims-1] as
               // the partition dim for the output
-              opt.add(s_is_partition[output.guid][num_dims-1]);
+              opt.add(s_is_partition[output.guid][num_dims - 1]);
             }
             break;
           }
@@ -419,10 +417,10 @@ void NKITranspiler::resolve_tensor_layout() {
             int num_dims = input.num_dims;
             // Need a transpose is input and output pick different partition dim
             for (int i = 0; i < num_dims; i++) {
-              costs.push_back(
-                  z3::ite(!s_is_partition[input.guid][i] && s_is_partition[output.guid][i],
-                          ctx.int_val(cost::NKI_TB_TRANSPOSE),
-                          ctx.int_val(0)));
+              costs.push_back(z3::ite(!s_is_partition[input.guid][i] &&
+                                          s_is_partition[output.guid][i],
+                                      ctx.int_val(cost::NKI_TB_TRANSPOSE),
+                                      ctx.int_val(0)));
             }
             break;
           }
@@ -436,16 +434,18 @@ void NKITranspiler::resolve_tensor_layout() {
                    input0.num_dims == output.num_dims);
             int num_dims = input0.num_dims;
             for (int i = 0; i < num_dims; i++) {
-              // Need a transpose if input0 and output pick different partition dim
-              costs.push_back(
-                  z3::ite(!s_is_partition[input0.guid][i] && s_is_partition[output.guid][i],
-                          ctx.int_val(cost::NKI_TB_TRANSPOSE),
-                          ctx.int_val(0)));
-              // Need a transpose if input1 and output pick different partition dim
-              costs.push_back(
-                  z3::ite(!s_is_partition[input1.guid][i] && s_is_partition[output.guid][i],
-                          ctx.int_val(cost::NKI_TB_TRANSPOSE),
-                          ctx.int_val(0)));
+              // Need a transpose if input0 and output pick different partition
+              // dim
+              costs.push_back(z3::ite(!s_is_partition[input0.guid][i] &&
+                                          s_is_partition[output.guid][i],
+                                      ctx.int_val(cost::NKI_TB_TRANSPOSE),
+                                      ctx.int_val(0)));
+              // Need a transpose if input1 and output pick different partition
+              // dim
+              costs.push_back(z3::ite(!s_is_partition[input1.guid][i] &&
+                                          s_is_partition[output.guid][i],
+                                      ctx.int_val(cost::NKI_TB_TRANSPOSE),
+                                      ctx.int_val(0)));
             }
             break;
           }
@@ -473,11 +473,12 @@ void NKITranspiler::resolve_tensor_layout() {
             opt.add(!s_is_partition[input.guid][reduc_dim]);
             opt.add(!s_is_partition[output.guid][reduc_dim]);
             for (int i = 0; i < num_dims; i++) {
-              // Need a transpose if input and output pick different partition dim
-              costs.push_back(
-                  z3::ite(!s_is_partition[input.guid][i] && s_is_partition[output.guid][i],
-                          ctx.int_val(cost::NKI_TB_TRANSPOSE),
-                          ctx.int_val(0)));
+              // Need a transpose if input and output pick different partition
+              // dim
+              costs.push_back(z3::ite(!s_is_partition[input.guid][i] &&
+                                          s_is_partition[output.guid][i],
+                                      ctx.int_val(cost::NKI_TB_TRANSPOSE),
+                                      ctx.int_val(0)));
             }
             break;
           }
@@ -542,7 +543,7 @@ NKITranspileResult NKITranspiler::transpile_ugraph() {
             dynamic_cast<kn::KNCustomizedOp const *>(op);
         // tb::ExecutionPlan const &plan = cur_op->plan;
         tb::Graph const &bgraph = cur_op->bgraph;
-	std::vector<std::string> dtensor_names;
+        std::vector<std::string> dtensor_names;
         for (kn::DTensor const &dtensor :
              Combine(cur_op->output_tensors, cur_op->input_tensors)) {
           std::string dtensor_name = fmt("dtensor$", dtensor.guid);
@@ -552,15 +553,13 @@ NKITranspileResult NKITranspiler::transpile_ugraph() {
         NKICustomOPTranspileResult result = transpile_kn_custom_op(cur_op);
         // Launch kernels
         custom_kernels.e(result.code);
-        exec.e("$[$, $, $]($)",
-                result.func_name,
-                dtensor_names);
+        exec.e("$[$, $, $]($)", result.func_name, dtensor_names);
         break;
       }
       default: {
         // TODO: discuss with the NKI team on how to implement
         // operators at the kernel level
-	assert(false && "To be implemented");
+        assert(false && "To be implemented");
       }
     }
   }
@@ -584,5 +583,5 @@ NKITranspileResult transpile(kernel::Graph const *g,
   return result;
 }
 
-} // nki_transpiler
+} // namespace nki_transpiler
 } // namespace mirage

@@ -119,7 +119,9 @@ TBInputOp::operator json() const {
               {"forloop_dim", forloop_dim}};
 }
 
-size_t TBInputOp::get_dtensor_guid() { return dtensor.guid; }
+size_t TBInputOp::get_dtensor_guid() {
+  return dtensor.guid;
+}
 
 } // namespace threadblock
 } // namespace mirage

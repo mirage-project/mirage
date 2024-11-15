@@ -40,7 +40,6 @@ struct STensorMeta {
   size_t num_phy_elems;
 };
 
-
 struct NKITranspilerConfig {
   // Target compute capability
   int target_cc;
@@ -78,13 +77,13 @@ public:
                 NKITranspilerConfig const &_config);
   NKITranspileResult generate_code();
   void resolve_tensor_layout();
-  NKICustomOPTranspileResult transpile_kn_custom_op(kn::KNCustomizedOp const *op);
+  NKICustomOPTranspileResult
+      transpile_kn_custom_op(kn::KNCustomizedOp const *op);
   NKITranspileResult transpile_ugraph();
 };
 
-NKITranspileResult
-    transpile(kernel::Graph const *g,
-              NKITranspilerConfig const &config);
+NKITranspileResult transpile(kernel::Graph const *g,
+                             NKITranspilerConfig const &config);
 
-} // namespace nkitranspiler
+} // namespace nki_transpiler
 } // namespace mirage
