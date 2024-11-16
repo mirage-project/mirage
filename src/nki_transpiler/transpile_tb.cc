@@ -55,8 +55,20 @@ NKICustomOPTranspileResult
                                     return fmt("dtensor$", dtensor.guid);
                                   }));
   code.inc_indent();
+  // Initialize all accum stensors
+  for (tb::TBOperator *tb_op : g.operators) {
+    if (tb_op->op_type == type::TB_FORLOOP_ACCUM_NO_RED_OP) {
+      tb::STensor const &stensor = tb_op->output_tensors.at(0);
+      std::string shape = "";
+      for (int i = 0; i < stensor.num_dims; i++) {
+        shape += fmt("$,", stensor.dim[i]);
+      }
+      code.e("$ = nl.zeros(($), dtype=nl.float16, buffer=nl.sbuf",
+             fmt("stensor$", stensor.guid), shape);
+    }
+  }
   if (g.forloop_range > 1) {
-    code.e("for l in range($):", g.forloop_range);
+    code.e("for i in range($):", g.forloop_range);
     code.inc_indent();
   }
   // Generate code for operators before accum
@@ -77,26 +89,69 @@ NKICustomOPTranspileResult
         kn::DTensor const &dtensor = input_op->dtensor;
         tb::STensor const &stensor = input_op->output_tensors.at(0);
         int3 imap = input_op->input_map;
-        std::string range;
+        int forloop_dim = input_op->forloop_dim;
+        std::string range = "";
         for (int i = 0; i < stensor.num_dims; i++) {
-          for (int dim = 0; dim < 3; dim++) {
-            int div_dim = dim == 0 ? imap.x : dim == 1 ? imap.y : imap.z;
-            if (div_dim >= 0) {
-            }
+          if (imap.x == i) {
+            int dim_range = stensor.dim[i] / g.grid_dim.x;
+            range += fmt("$*$:$*$",
+                "nl.program_id(0)", dim_range,
+                "(nl.program_id(0)+1)", dim_range);
+          } else if(imap.y == i) {
+            int dim_range = stensor.dim[i] / g.grid_dim.y;
+            range += fmt("$*$:$*$",
+                "nl.program_id(1)", dim_range,
+                "(nl.program_id(1)+1)", dim_range);
+          } else if (imap.z == i) {
+            int dim_range = stensor.dim[i] / g.grid_dim.z;
+            range += fmt("$*$:$*$",
+                "nl.program_id(2)", dim_range,
+                "(nl.program_id(2)+1)", dim_range);
+          } else if (forloop_dim == i) {
+            int dim_range = stensor.dim[i] / g.forloop_range;
+            range += fmt("$*$:$*$",
+                "i", dim_range, "(i+1)", dim_range);
+          } else {
+            range += fmt("$:$", 0, stensor.dim[i]);
+          }
+          if (i < stensor.num_dims - 1) {
+            range += ",";
           }
         }
         // Generate code for TB Input
-        code.e("$ = nl.load($)", fmt("stensor$", stensor.guid));
+        code.e("$ = nl.load($[$])",
+               fmt("stensor$", stensor.guid),
+               fmt("dtensor$", dtensor.guid),
+               range);
+        break;
+      }
+      case type::TB_MATMUL_OP: {
+        tb::STensor const &input0 = tb_op->input_tensors.at(0);
+        tb::STensor const &input1 = tb_op->input_tensors.at(1);
+        tb::STensor const &output = tb_op->output_tensors.at(0);
+        STensorMeta meta0 = stensor_metas.at(input0.guid);
+        STensorMeta meta1 = stensor_metas.at(input1.guid);
+        STensorMeta meta2 = stensor_metas.at(output.guid);
+        break;
+      }
+      case type::TB_FORLOOP_ACCUM_NO_RED_OP: {
+        tb::STensor const &input = tb_op->input_tensors.at(0);
+        tb::STensor const &output = tb_op->output_tensors.at(0);
+        code.e("$ = nl.add($, $)",
+               fmt("stensor$", output.guid),
+               fmt("stensor$", input.guid),
+               fmt("stensor$", output.guid));
         break;
       }
       default: {
-        assert(false);
+        assert(false && fmt("Unsupported op_type: $", tb_op->op_type));
       }
     }
   }
   if (g.forloop_range > 1) {
     code.dec_indent();
   }
+  return NKICustomOPTranspileResult{func_name, code.to_string()};
 }
 
 } // namespace nki_transpiler

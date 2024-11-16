@@ -553,7 +553,12 @@ NKITranspileResult NKITranspiler::transpile_ugraph() {
         NKICustomOPTranspileResult result = transpile_kn_custom_op(cur_op);
         // Launch kernels
         custom_kernels.e(result.code);
-        exec.e("$[$, $, $]($)", result.func_name, dtensor_names);
+        exec.e("$[$, $, $]($)",
+               result.func_name,
+               bgraph.grid_dim.x,
+               bgraph.grid_dim.y,
+               bgraph.grid_dim.z,
+               dtensor_names);
         break;
       }
       default: {
@@ -564,7 +569,7 @@ NKITranspileResult NKITranspiler::transpile_ugraph() {
     }
   }
 
-  std::string code = fmt("$\n$\n",
+  std::string code = fmt("$\n$\n$",
                          header.to_string(),
                          custom_kernels.to_string(),
                          exec.to_string());

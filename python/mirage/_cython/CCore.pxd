@@ -272,3 +272,11 @@ cdef extern from "mirage/transpiler/transpile.h" namespace "mirage::transpiler":
     cdef TranspileResult transpile(const CppKNGraph *graph,
                        const TranspilerConfig config,
                        vector[vector[size_t]] input_strides)
+
+cdef extern from "mirage/nki_transpiler/transpile.h" namespace "mirage::nki_transpiler":
+    ctypedef struct NKITranspilerConfig:
+        int target_cc
+    ctypedef struct NKITranspileResult:
+        string code
+    cdef NKITranspileResult transpile(const CppKNGraph *graph,
+                                      const NKITranspilerConfig config)

@@ -973,3 +973,16 @@ def generate_cuda_program(CyKNGraph input_graph, *, int target_cc, list input_st
         "max_smem_size": result.max_smem_size,
         "output_directives": output_directives
     }
+
+def generate_nki_program(CyKNGraph input_graph, *, int target_cc) -> dict:
+    # Set transpiler_config
+    cdef NKITranspilerConfig transpiler_config
+    transpiler_config.target_cc = target_cc
+    
+    # Call transpile
+    cdef NKITranspileResult result = transpile(input_graph.p_kgraph, transpiler_config)
+
+    return {
+        "code": result.code.decode("UTF-8"),
+    }
+
