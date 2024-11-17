@@ -526,14 +526,42 @@ NKITranspileResult NKITranspiler::transpile_ugraph() {
   // Generate header
   CodeKeeper header;
   header.e("import neuronxcc.nki.language as nl");
+  header.e("import neuronxcc.nki.isa as nisa");
   header.e("from torch_neuronx import nki_jit");
   CodeKeeper exec;
+  exec.e("if __name__ == \"__main__\":");
+  exec.inc_indent();
+  exec.e("import torch");
+  exec.e("from torch_xla.core import xla_model as xm");
+  exec.e("device = xm.xla_device()");
+  for (kn::KNOperator *const op : g->operators) {
+    if (op->op_type == type::KNOperatorType::KN_INPUT_OP) {
+      std::string shape;
+      kn::DTensor dtensor = op->output_tensors.at(0);
+      for (int i = 0; i < dtensor.num_dims; i++) {
+        shape += fmt("$,", dtensor.dim[i]);
+      }
+      exec.e("$ = torch.randn(($), dtype=torch.float16).to(device=device)",
+             fmt("dtensor$", dtensor.guid),
+             shape);
+    }
+    if (op->op_type == type::KNOperatorType::KN_OUTPUT_OP) {
+      std::string shape;
+      kn::DTensor dtensor = op->input_tensors.at(0);
+      for (int i = 0; i < dtensor.num_dims; i++) {
+        shape += fmt("$,", dtensor.dim[i]);
+      }
+      exec.e("$ = torch.randn(($), dtype=torch.float16).to(device=device)",
+             fmt("dtensor$", dtensor.guid),
+             shape);
+    }
+  }
   CodeKeeper custom_kernels;
   for (kn::KNOperator *const op : g->operators) {
     switch (op->op_type) {
       case type::KNOperatorType::KN_INPUT_OP:
       case type::KNOperatorType::KN_OUTPUT_OP: {
-        // Input/Output op
+        // input and output have been processed before
         break;
       }
       case type::KNOperatorType::KN_CUSTOMIZED_OP: {
