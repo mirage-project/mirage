@@ -144,8 +144,7 @@ std::string Var::to_string() const {
   return name;
 }
 
-Add::Add(std::shared_ptr<AbstractExpr> lhs,
-         std::shared_ptr<AbstractExpr> rhs)
+Add::Add(std::shared_ptr<AbstractExpr> lhs, std::shared_ptr<AbstractExpr> rhs)
     : lhs(lhs), rhs(rhs) {}
 
 z3::expr Add::to_z3(z3::context &c,
@@ -159,8 +158,7 @@ std::string Add::to_string() const {
   return "(" + lhs->to_string() + "+" + rhs->to_string() + ")";
 }
 
-Mul::Mul(std::shared_ptr<AbstractExpr> lhs,
-         std::shared_ptr<AbstractExpr> rhs)
+Mul::Mul(std::shared_ptr<AbstractExpr> lhs, std::shared_ptr<AbstractExpr> rhs)
     : lhs(lhs), rhs(rhs) {}
 
 z3::expr Mul::to_z3(z3::context &c,
@@ -174,8 +172,7 @@ std::string Mul::to_string() const {
   return "(" + lhs->to_string() + rhs->to_string() + ")";
 }
 
-Div::Div(std::shared_ptr<AbstractExpr> lhs,
-         std::shared_ptr<AbstractExpr> rhs)
+Div::Div(std::shared_ptr<AbstractExpr> lhs, std::shared_ptr<AbstractExpr> rhs)
     : lhs(lhs), rhs(rhs) {}
 
 z3::expr Div::to_z3(z3::context &c,

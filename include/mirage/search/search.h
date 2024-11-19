@@ -7,12 +7,12 @@
 
 #include "mirage/search/config.h"
 #include "mirage/search/dim_strategy.h"
-#include "mirage/search/range_propagation/irange.h"
 #include "mirage/search/order.h"
+#include "mirage/search/range_propagation/irange.h"
 #include "mirage/search/search_context.h"
 #include "mirage/search/search_state_manager.h"
-#include "mirage/utils/json_utils.h"
 #include "mirage/search/verification/verifier.h"
+#include "mirage/utils/json_utils.h"
 
 namespace mirage {
 namespace search {
@@ -59,7 +59,7 @@ private:
   std::vector<std::vector<IKNRange>> target_ranges;
 
   // Verifier
-  std::shared_ptr<Verifier> verifier, verifier_; // TODO before commit: verifier_ is for debugging and should not appear in any PR
+  std::shared_ptr<Verifier> verifier;
 
   void search_from(std::vector<SerializedSearchContext> const &contexts);
 

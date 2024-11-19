@@ -40,8 +40,7 @@ public:
 
 class Add : public AbstractExpr {
 public:
-  Add(std::shared_ptr<AbstractExpr> lhs,
-      std::shared_ptr<AbstractExpr> rhs);
+  Add(std::shared_ptr<AbstractExpr> lhs, std::shared_ptr<AbstractExpr> rhs);
   z3::expr to_z3(z3::context &c,
                  std::unordered_set<std::string> &all_variables) const override;
   std::string to_string() const override;
@@ -50,8 +49,7 @@ public:
 
 class Mul : public AbstractExpr {
 public:
-  Mul(std::shared_ptr<AbstractExpr> lhs,
-      std::shared_ptr<AbstractExpr> rhs);
+  Mul(std::shared_ptr<AbstractExpr> lhs, std::shared_ptr<AbstractExpr> rhs);
   z3::expr to_z3(z3::context &c,
                  std::unordered_set<std::string> &all_variables) const override;
   std::string to_string() const override;
@@ -60,8 +58,7 @@ public:
 
 class Div : public AbstractExpr {
 public:
-  Div(std::shared_ptr<AbstractExpr> lhs,
-      std::shared_ptr<AbstractExpr> rhs);
+  Div(std::shared_ptr<AbstractExpr> lhs, std::shared_ptr<AbstractExpr> rhs);
   z3::expr to_z3(z3::context &c,
                  std::unordered_set<std::string> &all_variables) const override;
   std::string to_string() const override;

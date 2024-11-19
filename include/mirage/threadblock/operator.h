@@ -36,8 +36,8 @@ public:
   TBOperator(Graph *graph,
              mirage::type::TBOperatorType,
              std::vector<STensor> const &inputs);
-  int get_input_stensors(STensor** inputs);
-  int get_output_stensors(STensor** inputs);
+  int get_input_stensors(STensor **inputs);
+  int get_output_stensors(STensor **inputs);
 
   virtual ~TBOperator();
 

@@ -8,11 +8,10 @@ namespace search {
 
 class Verifier {
 public:
-    Verifier() = default;
-    virtual OutputMatch verify(kernel::Graph const &graph) = 0;
-    virtual ~Verifier() = default;
+  Verifier() = default;
+  virtual OutputMatch verify(kernel::Graph const &graph) = 0;
+  virtual ~Verifier() = default;
 };
 
-}
-}
-
+} // namespace search
+} // namespace mirage

@@ -34,5 +34,5 @@ bool OutputMatch::is_valid() const {
   return _valid;
 }
 
-}
-}
+} // namespace search
+} // namespace mirage

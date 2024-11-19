@@ -17,10 +17,10 @@ public:
 
 private:
   OutputMatch(std::vector<int> match, bool _valid);
-  
+
   std::vector<int> match;
   bool _valid;
 };
 
-}
-}
+} // namespace search
+} // namespace mirage

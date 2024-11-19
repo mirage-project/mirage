@@ -4,10 +4,10 @@
 #include "mirage/search/abstract_expr/abstract_expr_eval.h"
 #include "mirage/search/dim_strategy.h"
 #include "mirage/search/op_utils.h"
-#include "mirage/utils/containers.h"
-#include "mirage/utils/json_utils.h"
 #include "mirage/search/verification/formal_verifier.h"
 #include "mirage/search/verification/probabilistic_verifier.h"
+#include "mirage/utils/containers.h"
+#include "mirage/utils/json_utils.h"
 
 #include <fstream>
 #include <iostream>
@@ -64,20 +64,6 @@ Order get_max_op_order(GraphType const &g) {
     input_idx.push_back(guid2index.at(input.guid));
   }
   return Order(input_idx, static_cast<int>(g.operators.back()->op_type));
-}
-
-template <typename GraphType>
-int get_num_consumers(GraphType const &g,
-                      typename GraphType::TensorType const &tensor) {
-  int num_consumers = 0;
-  for (auto const &op : g.operators) {
-    for (auto const &t : op->input_tensors) {
-      if (t.guid == tensor.guid) {
-        num_consumers++;
-      }
-    }
-  }
-  return num_consumers;
 }
 
 std::vector<DTensor> get_input_tensors(threadblock::Graph const &g) {
@@ -437,8 +423,11 @@ void KernelGraphGenerator::preprocess(kernel::Graph const &computation_graph) {
     }
   }
 
-  verifier = std::make_shared<ProbabilisticVerifier>(computation_graph);
-  verifier_ = std::make_shared<FormalVerifier>(computation_graph);
+  if (config.verifier_type == VerifierType::PROBABILISTIC_VERIFIER) {
+    this->verifier = std::make_shared<ProbabilisticVerifier>(computation_graph);
+  } else {
+    this->verifier = std::make_shared<FormalVerifier>(computation_graph);
+  }
 }
 
 bool KernelGraphGenerator::check_pattern(
@@ -482,12 +471,9 @@ bool KernelGraphGenerator::verify(kernel::Graph &g) {
       generated_graphs.push_back(json(g));
     };
 
-    mark_outputs(OutputMatch(outputs.size()));
     OutputMatch match = verifier->verify(g);
     if (match.is_valid()) {
       ++num_valid_kernel_graphs;
-      // Re-mark the outputs to match the order in the computation graph
-      unmark_outputs();
       mark_outputs(match);
       save_graph();
       unmark_outputs();

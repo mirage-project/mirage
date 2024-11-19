@@ -43,10 +43,9 @@ void abstract_expr_eval(
     } else if (op->op_type == type::KNOperatorType::KN_RMS_NORM_OP) {
       std::shared_ptr<AbstractExpr> input_pattern =
           patterns.at(op->input_tensors[0].guid);
-      std::shared_ptr<AbstractExpr> denominator_pattern =
-          std::make_shared<RMS>(
-              static_cast<kernel::KNRMSNormOp *>(op)->normalized_size,
-              input_pattern);
+      std::shared_ptr<AbstractExpr> denominator_pattern = std::make_shared<RMS>(
+          static_cast<kernel::KNRMSNormOp *>(op)->normalized_size,
+          input_pattern);
       std::shared_ptr<AbstractExpr> output_pattern =
           std::make_shared<Div>(input_pattern, denominator_pattern);
       patterns.insert({op->output_tensors[0].guid, output_pattern});
@@ -61,7 +60,8 @@ void abstract_expr_eval(
            get_pattern(op->op_type, op->input_tensors, input_patterns)});
     } else {
       assert(op->op_type == type::KNOperatorType::KN_CUSTOMIZED_OP);
-      abstract_expr_eval(static_cast<kernel::KNCustomizedOp *>(op)->bgraph, patterns);
+      abstract_expr_eval(static_cast<kernel::KNCustomizedOp *>(op)->bgraph,
+                         patterns);
     }
   }
 }

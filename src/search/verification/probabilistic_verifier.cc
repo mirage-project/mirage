@@ -1,7 +1,10 @@
 #include "mirage/search/verification/probabilistic_verifier.h"
+#include "mirage/search/op_utils.h"
 
 namespace mirage {
 namespace search {
+
+std::mutex ProbabilisticVerifier::fp_mutex;
 
 ProbabilisticVerifier::ProbabilisticVerifier(kernel::Graph const &input_graph) {
   for (auto const &op : input_graph.operators) {
@@ -23,8 +26,13 @@ OutputMatch ProbabilisticVerifier::verify(kernel::Graph const &graph) {
 
   for (auto const &op : graph.operators) {
     op->fingerprint();
-    if (op->op_type == type::KNOperatorType::KN_OUTPUT_OP) {
-      fingerprints.push_back(op->input_tensors[0]);
+  }
+
+  for (auto const &op : graph.operators) {
+    for (auto const &tensor : op->output_tensors) {
+      if (get_num_consumers(graph, tensor) == 0) {
+        fingerprints.push_back(tensor);
+      }
     }
   }
 
@@ -43,11 +51,12 @@ OutputMatch ProbabilisticVerifier::verify(kernel::Graph const &graph) {
   OutputMatch match(fingerprints.size());
   do {
     if (verify_with_match(match)) {
+      assert(match.is_valid());
       return match;
     }
   } while (match.next());
   return OutputMatch::invalid_match();
 }
 
-}
-}
+} // namespace search
+} // namespace mirage

@@ -24,6 +24,20 @@ size_t get_operator_hash(Op i, Op j, OpType op) {
   return h;
 }
 
+template <typename GraphType>
+int get_num_consumers(GraphType const &g,
+                      typename GraphType::TensorType const &tensor) {
+  int num_consumers = 0;
+  for (auto const &op : g.operators) {
+    for (auto const &t : op->input_tensors) {
+      if (t.guid == tensor.guid) {
+        num_consumers++;
+      }
+    }
+  }
+  return num_consumers;
+}
+
 bool is_binary(type::TBOperatorType op);
 bool is_unary(type::TBOperatorType op);
 bool is_binary(type::KNOperatorType op);
