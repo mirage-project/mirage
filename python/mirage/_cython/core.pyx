@@ -986,3 +986,12 @@ def generate_nki_program(CyKNGraph input_graph, *, int target_cc) -> dict:
         "code": result.code.decode("UTF-8"),
     }
 
+def generate_triton_program(CyKNGraph input_graph, *, int target_cc) -> dict:
+    cdef TritonTranspilerConfig transpiler_config
+    transpiler_config.target_cc = target_cc
+
+    cdef TritonTranspileResult result = transpile(input_graph.p_kgraph, transpiler_config)
+
+    return {
+        "code": result.code.decode("UTF-8"),
+    }
