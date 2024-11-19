@@ -14,10 +14,5 @@ namespace tb = mirage::threadblock;
 using dguid_t = decltype(kn::DTensor::guid); // Guid of a DTensor
 using sguid_t = decltype(tb::STensor::guid); // Guid of a STensor
 
-static int const NumThreadsPerWarp = 32;
-static int const NumThreadsPerWarpGroup = 128;
-static int const NumWarpsPerWarpGroup =
-    NumThreadsPerWarpGroup / NumThreadsPerWarp;
-
 } // namespace transpiler
 } // namespace mirage

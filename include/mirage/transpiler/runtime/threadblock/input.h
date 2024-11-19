@@ -15,6 +15,8 @@
 #pragma once
 
 #include "cute/arch/cluster_sm90.hpp"
+#include "cutlass/pipeline/pipeline.hpp"
+#include "hopper_mainloop_params.h"
 #include "cutlass/gemm/gemm.h"
 #include <cstdint>
 #include <cute/layout.hpp>
@@ -135,158 +137,214 @@ public:
   }
 };
 
-static __device__ __forceinline__ auto tma_make_coord(int forloop_dim,
-                                                      int forloop_idx,
-                                                      int imap_x,
-                                                      int imap_y,
-                                                      int imap_z,
-                                                      int rank,
-                                                      int *res) {
+// static __device__ __forceinline__ auto tma_make_coord(int forloop_dim,
+//                                                       int forloop_idx,
+//                                                       int imap_x,
+//                                                       int imap_y,
+//                                                       int imap_z,
+//                                                       int rank,
+//                                                       int *res) {
 
-  assert(rank == 2);
-  res[0] = -1;
-  res[1] = -1;
-  res[2] = -1;
-  if (forloop_dim == 0) {
-    res[0] = forloop_idx;
-  } else if (forloop_dim == 1) {
-    res[1] = forloop_idx;
-  } else if (forloop_dim == 2) {
-    res[2] = forloop_idx;
-  }
+//   assert(rank == 2);
+//   res[0] = -1;
+//   res[1] = -1;
+//   res[2] = -1;
+//   if (forloop_dim == 0) {
+//     res[0] = forloop_idx;
+//   } else if (forloop_dim == 1) {
+//     res[1] = forloop_idx;
+//   } else if (forloop_dim == 2) {
+//     res[2] = forloop_idx;
+//   }
 
-  if (imap_x != -1) {
-    int div_dim = imap_x == 0 ? 0 : imap_x == 1 ? 1 : 2;
-    res[div_dim] =
-        imap_x == forloop_dim ? forloop_idx * blockIdx.x : blockIdx.x;
-  }
-  if (imap_y != -1) {
-    int div_dim = imap_y == 0 ? 0 : imap_y == 1 ? 1 : 2;
-    res[div_dim] =
-        imap_y == forloop_dim ? forloop_idx * blockIdx.y : blockIdx.y;
-  }
-  if (imap_z != -1) {
-    // z = imap_z == forloop_dim ? forloop_idx * blockIdx.y : blockIdx.y;
-    int div_dim = imap_z == 0 ? 0 : imap_z == 1 ? 1 : 2;
-    res[div_dim] =
-        imap_z == forloop_dim ? forloop_idx * blockIdx.z : blockIdx.z;
-  }
+//   if (imap_x != -1) {
+//     int div_dim = imap_x == 0 ? 0 : imap_x == 1 ? 1 : 2;
+//     res[div_dim] =
+//         imap_x == forloop_dim ? forloop_idx * blockIdx.x : blockIdx.x;
+//   }
+//   if (imap_y != -1) {
+//     int div_dim = imap_y == 0 ? 0 : imap_y == 1 ? 1 : 2;
+//     res[div_dim] =
+//         imap_y == forloop_dim ? forloop_idx * blockIdx.y : blockIdx.y;
+//   }
+//   if (imap_z != -1) {
+//     // z = imap_z == forloop_dim ? forloop_idx * blockIdx.y : blockIdx.y;
+//     int div_dim = imap_z == 0 ? 0 : imap_z == 1 ? 1 : 2;
+//     res[div_dim] =
+//         imap_z == forloop_dim ? forloop_idx * blockIdx.z : blockIdx.z;
+//   }
 
-  // if (thread0()) {
-  //   printf("imap xyz %d %d %d\n", imap_x, imap_y, imap_z);
-  //   printf("xyz %d %d %d\n", res[0], res[1], res[2]);
-  // }
+//   // if (thread0()) {
+//   //   printf("imap xyz %d %d %d\n", imap_x, imap_y, imap_z);
+//   //   printf("xyz %d %d %d\n", res[0], res[1], res[2]);
+//   // }
 
-  if (res[0] >= 0 && res[1] >= 0) {
-    return make_coord(res[0], res[1]);
-  } else if (res[0] >= 0 && res[2] >= 0) {
-    assert(false);
-  } else if (res[1] >= 0 && res[2] >= 0) {
-    assert(false);
-  } else if (res[0] >= 0) {
-    return make_coord(res[0], 0);
-  } else if (res[1] >= 0) {
-    return make_coord(0, res[1]);
-  } else if (res[2] >= 0) {
-    assert(false);
-  } else {
-    return make_coord(0, 0);
-  }
+//   if (res[0] >= 0 && res[1] >= 0) {
+//     return make_coord(res[0], res[1]);
+//   } else if (res[0] >= 0 && res[2] >= 0) {
+//     assert(false);
+//   } else if (res[1] >= 0 && res[2] >= 0) {
+//     assert(false);
+//   } else if (res[0] >= 0) {
+//     return make_coord(res[0], 0);
+//   } else if (res[1] >= 0) {
+//     return make_coord(0, res[1]);
+//   } else if (res[2] >= 0) {
+//     assert(false);
+//   } else {
+//     return make_coord(0, 0);
+//   }
 
-  return make_coord(0, 0);
-}
+//   return make_coord(0, 0);
+// }
+
+// static __device__ __forceinline__ auto tma_make_coord(int imap_x,
+//                                                       int imap_y,
+//                                                       int imap_z) {
+
+//   if(imap_x != 0){
+//     return make_coord(blockIdx.x, _);
+//   }
+
+//   return make_coord(_, _);
+// }
 // Type 4 : Copy using the Tensor Memory
 //          Accelerator(TMA)
-template <typename T, class DstLayout, class SrcLayout, class TMA>
+template <typename T, class DstLayout, class SrcLayout, class TMA, class MainloopPipeline, class PipelineState>
 class InputTMAAsyncCopy {
 public:
   CUTE_STATIC_ASSERT_V(rank(SrcLayout{}) == rank(DstLayout{}));
   static constexpr int tmaTransactionBytes = sizeof(T) * size(DstLayout{});
   using CTA_TILER = decltype(shape(DstLayout{}));
+
+  // using CTA_TILER = decltype(replace<0>(SrcLayout{}, shape<1>(DstLayout{})));
+  // using CTA_TILER = decltype(make_shape(shape<0>(SrcLayout{}), shape<1>(DstLayout{})));
+
+  //tile shape = 64, 4096
+  //TODO, change it
+  using SrcPipeLayput = decltype(make_shape(shape<0>(SrcLayout{}), shape<0>(DstLayout{})));
+  
+  using DstPipeLayout = decltype(tile_to_shape(
+        DstLayout{},
+        make_shape(shape<0>(DstLayout{}), shape<1>(DstLayout{}), Int<kStages>{}), Step<_1, _2, _3>{}));
+  // 4096, 64, 2
+  static __device__ __forceinline__ void prefetch(TMA const &tma){
+    cute::prefetch_tma_descriptor(tma.get_tma_descriptor());
+  }
+
   static __device__ __forceinline__ void run(TMA const &tma,
                                              T *dst,
                                              T const *src,
-                                             uint64_t *tma_load_mbar,
-                                             unsigned forloop_idx,
+                                             MainloopPipeline pipeline,
+                                             PipelineState &smem_pipe_write,
+                                             unsigned k_tile_count,
                                              unsigned forloop_dim,
                                              int imapx,
                                              int imapy,
-                                             int imapz) {
-    Tensor mA = tma.get_tma_tensor(shape(SrcLayout{}));
+                                             int imapz,
+                                             int warp_idx, tb::WarpGroupRole warp_group_role, int warp_idx_in_warp_group, int warp_group_thread_idx, int lane_predicate) {
 
-    // int coord_value[3];
-    // auto cta_coord = make_coord(0, 0);
-    // coord_value);
-    auto cta_coord = tma_make_coord(forloop_dim,
-                                    forloop_idx,
-                                    imapx,
-                                    imapy,
-                                    imapz,
-                                    rank(SrcLayout{}),
-                                    coord_value);
+    if(lane_predicate){
+      // Tensor mA = tma.get_tma_tensor(append<3>(shape(SrcLayout{}), Int<1>{}));
 
-    Tensor gA = local_tile(mA, CTA_TILER{}, cta_coord);
+      Tensor mA = tma.get_tma_tensor(shape(SrcPipeLayput{}));
+      // Coord<2> cta_coord = imapx == -1 ? make_coord(_, _) : make_coord(blockIdx.x, _); 
+      
+      // auto cta_coord = make_coord(0, 0);
+      Tensor gA = local_tile(mA, CTA_TILER{}, make_coord(_, _)); 
+      // Tensor gA = local_tile(mA, CTA_TILER{}, cta_coord);
+      Tensor sA = make_tensor(make_smem_ptr(dst), DstPipeLayout{});
 
-    Tensor sA = make_tensor(make_smem_ptr(dst), DstLayout{});
+      auto cta_tma = tma.get_slice(Int<0>{});  // CTA slice
+      Tensor tAgA_x = cta_tma.partition_S(gA); // (TMA,TMA_M,TMA_N,REST_M,REST_N)
+      Tensor tAsA_x = cta_tma.partition_D(sA); // (TMA,TMA_M,TMA_N)
+      Tensor tAsA = group_modes<1, rank(tAsA_x)>(tAsA_x);
+      Tensor tAgA = group_modes<1, rank(tAgA_x)>(tAgA_x); // (TMA,REST)
 
-    auto cta_tma = tma.get_slice(Int<0>{});  // CTA slice
-    Tensor tAgA_x = cta_tma.partition_S(gA); // (TMA,TMA_M,TMA_N,REST_M,REST_N)
-    Tensor tAsA_x = cta_tma.partition_D(sA); // (TMA,TMA_M,TMA_N)
+        
+      if(blockIdx.x == 0){
+        // print("sdsdsds: ");
+        // print(warp_idx);
+        // print("\n");
+        // print(warp_idx_in_warp_group);
+        // print("\n");
+        // print("mA: ");
+        // print(mA);
+        // print("\n");
 
-    Tensor tAsA = group_modes<1, rank(tAsA_x)>(tAsA_x);
-    Tensor tAgA = group_modes<1, rank(tAgA_x)>(tAgA_x); // (TMA,REST)
-    if (threadIdx.x == 0) {
-      tma_load_mbar[0] = 0;
-      initialize_barrier(tma_load_mbar[0], 1);
-      set_barrier_transaction_bytes(tma_load_mbar[0], tmaTransactionBytes);
-      copy(tma.with(tma_load_mbar[0]), tAgA, tAsA);
+        // print("gA: ");
+        // print(gA);
+        // print("\n");
+
+        // print("sA: ");
+        // print(sA);
+        // print("\n");
+
+
+        // print("tAgA: ");
+        // print(tAgA);
+        // print("\n");
+
+        // print("tAsA: ");
+        // print(tAsA);
+        // print("\n");
+
+        // print("tma");
+        // print(tma);
+        // print("\n");
+      }
+      auto k_tile_iter  = cute::make_coord_iterator(k_tile_count);
+      CUTLASS_PRAGMA_NO_UNROLL
+      for (; k_tile_count > 0; --k_tile_count){
+        pipeline.producer_acquire(smem_pipe_write);
+        using BarrierType = typename MainloopPipeline::ProducerBarrierType;
+        BarrierType *tma_barrier = pipeline.producer_get_barrier(smem_pipe_write);
+
+        int write_stage = smem_pipe_write.index();
+
+        // printf("write stage: %d\n", write_stage);
+        // copy(tma.with(*tma_barrier), tAgA(_, _, *k_tile_iter), tAsA(_, _, write_stage));
+        ++k_tile_iter;
+
+        // Advance smem_pipe_write
+        ++smem_pipe_write;
+      }
+
+      if(lane_predicate){
+          pipeline.producer_tail(smem_pipe_write);
+      }
+
+          // int coord_value[3];
+          // auto cta_coord = make_coord(0, 0);
+          // coord_value);
+          // auto cta_coord = tma_make_coord(forloop_dim,
+          //                                 forloop_idx,
+          //                                 imapx,
+          //                                 imapy,
+          //                                 imapz,
+          //                                 rank(SrcLayout{}),
+          //                                 coord_value);
+
+          
+
+          // Tensor sA = make_tensor(make_smem_ptr(dst), DstLayout{});
+
+          // auto cta_tma = tma.get_slice(Int<0>{});  // CTA slice
+          // Tensor tAgA_x = cta_tma.partition_S(gA); // (TMA,TMA_M,TMA_N,REST_M,REST_N)
+          // Tensor tAsA_x = cta_tma.partition_D(sA); // (TMA,TMA_M,TMA_N)
+
+          // Tensor tAsA = group_modes<1, rank(tAsA_x)>(tAsA_x);
+          // Tensor tAgA = group_modes<1, rank(tAgA_x)>(tAgA_x); // (TMA,REST)
+          // // if (threadIdx.x == 0) {
+          // //   tma_load_mbar[0] = 0;
+          // //   initialize_barrier(tma_load_mbar[0], 1);
+          // //   set_barrier_transaction_bytes(tma_load_mbar[0], tmaTransactionBytes);
+          // //   copy(tma.with(tma_load_mbar[0]), tAgA, tAsA);
+          // // }
+          // // __syncthreads();
+          // // wait_barrier(tma_load_mbar[0], 0);
     }
-    __syncthreads();
-    wait_barrier(tma_load_mbar[0], 0);
-
-    // Tensor sA = make_tensor(make_smem_ptr(dst),
-    // make_layout(make_shape(_64{},_64{}), make_stride(_64{}, _1{}));
-
-    // if (thread0() && forloop_idx == 0 && forloop_dim == 1) {
-
-    //   print("abc: ");
-    //   print(sA);
-    //   // printf("gA:   ");
-    //   // print(gA);
-    //   // print("\n");
-    //   // print("dst layout: ");
-    //   // print(DstLayout{});
-    //   // print("\n");
-    //   // print(SrcLayout{});
-    //   print("\n");
-    //   // print("cta_coord: ");
-    //   // print(cta_coord);
-    //   // print("\n");
-    //   // print("SrcLayout: ");
-    //   // print(SrcLayout{});
-    //   // print("\n");
-    //   // print_tensor(sA);
-    // } else if (thread0() && forloop_idx == 0 && forloop_dim == 0) {
-    //   print("abcdsd: ");
-    //   print(sA);
-    //   print(
-    //       cutlass::gemm::detail::is_mn_major_A<cutlass::layout::ColumnMajor>());
-    //   print(cutlass::gemm::detail::is_mn_major_B<cutlass::layout::RowMajor>());
-
-    //   // print(cutlass::gemm::detail::is_mn_major_A<decltype(make_layout(
-    //   //           make_shape(_64{}, _64{}), make_stride(_64{}, _1{})))>());
-    //   // print(cutlass::gemm::detail::is_mn_major_B<decltype(make_layout(
-    //   //           make_shape(_64{}, _64{}), make_stride(_64{}, _1{})))>());
-    //   print("\n");
-    // }
-
-    // if (thread0() && forloop_idx == 0 && forloop_idx == 0 && forloop_dim ==
-    // 1) {
-    //   // print("copy n: ");
-    //   // print_tensor(tAsA);
-    //   // print("\n");
-    // }
-    // __syncthreads();
+    
   }
 };
 

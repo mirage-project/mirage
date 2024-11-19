@@ -63,14 +63,15 @@ struct TranspileResult {
 struct TMAParams {
     size_t input_id;                              // ID of the TMA
     size_t guid;
+    size_t sguid;
     std::string srcLayout;                 // String representing the layout
     std::string dstLayout;                 // String representing the layout
     std::string tile_size;                   // String representing the tile
     std::tuple<int, int, int> clusterSize; // Tuple for cluster size
 
     // Constructor for convenience
-    TMAParams(size_t input_id, size_t guid, const std::string& srcLayout, const std::string& dstLayout, const std::string& tile_size, const std::tuple<int, int, int>& clusterSize)
-        : input_id(input_id), guid(guid), srcLayout(srcLayout), dstLayout(dstLayout), tile_size(tile_size), clusterSize(clusterSize) {}
+    TMAParams(size_t input_id, size_t guid, size_t sguid, const std::string& srcLayout, const std::string& dstLayout, const std::string& tile_size, const std::tuple<int, int, int>& clusterSize)
+        : input_id(input_id), guid(guid), sguid(sguid), srcLayout(srcLayout), dstLayout(dstLayout), tile_size(tile_size), clusterSize(clusterSize) {}
 };
 
 // Transpile a custom KN operator (a custom block graph)

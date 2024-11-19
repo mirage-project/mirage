@@ -60,7 +60,9 @@ template <typename T,
                                      // instructions (like stmatrix) to store
                                      // data, it does not use the standard
                                      // "epilogue" semantic
-          bool IS_STORE_ACCUM>
+          bool IS_STORE_ACCUM,
+          class MainloopPipeline, 
+          class PipelineState>
 class Hopper_Matmul {
 public:
   CUTE_STATIC_ASSERT_V(rank(SmemLayoutA_{}) == _2{});
@@ -145,10 +147,14 @@ public:
           T *__restrict__ b_ptr,
           char const *__restrict__ smem_allzero_ptr,
           int thread_idx,
-          int for_idx) {
-    if (thread_idx >= TILED_MMA_NUM_THREADS) {
-      return;
-    }
+          int for_idx,
+          MainloopPipeline pipeline_a,
+          MainloopPipeline pipeline_b,
+          PipelineState& smem_pipe_read) {
+    // if (thread_idx >= TILED_MMA_NUM_THREADS) {
+    //   return;
+    // }
+    return;
     TiledMMA tiled_mma;
 
     auto sA_l = tile_to_shape(TileALayout{}, shape(SmemLayoutA{}));
@@ -166,11 +172,22 @@ public:
     Tensor tCrB = thr_mma.make_fragment_B(tCsB); // (MMA,MMA_N,MMA_K,PIPE)
 
     // auto k_tile_count = size<2>(tCrA);
+    auto consumer_wait = [](auto& pipeline, auto& smem_pipe_read) {
+            auto barrier_token = pipeline.consumer_try_wait(smem_pipe_read);
+            pipeline.consumer_wait(smem_pipe_read, barrier_token);
+        };
+    
+    consumer_wait(pipeline_a, smem_pipe_read);
+    consumer_wait(pipeline_b, smem_pipe_read);
 
-    cute::warpgroup_arrive();
-    gemm(tiled_mma, mma_rC, tCrA, tCrB, mma_rC);
-    cute::warpgroup_commit_batch();
-    cute::warpgroup_wait<0>();
+    int read_stage = smem_pipe_read.index();
+
+    // cute::warpgroup_arrive();
+    gemm(tiled_mma, mma_rC, tCrA(_, _, read_stage), tCrB(_, _, read_stage), mma_rC);
+    // cute::warpgroup_commit_batch();
+    // cute::warpgroup_wait<0>();
+    pipeline_a.consumer_release(smem_pipe_read);
+    pipeline_b.consumer_release(smem_pipe_read);
   }
 };
 

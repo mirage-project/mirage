@@ -407,7 +407,13 @@ TranspileResult Transpiler::transpile_ugraph() {
           ptr_names.push_back(ptr_name);
         }
         // Transpile
-        CustomOPTranspileResult result = transpile_kn_custom_op(cur_op);
+        CustomOPTranspileResult result;
+        if(config.target_cc == GPU_CC::H100){
+          result = transpile_kn_custom_op_hopper(cur_op);
+        }else{
+          result = transpile_kn_custom_op(cur_op);
+        }
+       
         // Checkings against grid dim and block dim
         if (config.target_cc <= GPU_CC::H100) {
           // According to
@@ -441,7 +447,7 @@ TranspileResult Transpiler::transpile_ugraph() {
                bgraph.block_dim.z);
         exec.e("size_t smem_size = $;",
                result.smem_size +
-                   result.tmaParamsList.size() * sizeof(uint64_t));
+                   result.tmaParamsList.size() * sizeof(uint64_t) + 1000);
         // init
 
         for (kn::DTensor const &dtensor : cur_op->input_tensors) {
@@ -470,6 +476,10 @@ TranspileResult Transpiler::transpile_ugraph() {
                  tmaParams.guid,
                  tmaParams.dstLayout,
                  tmaParams.tile_size);
+          // exec.e("auto tma_$ = make_tma_copy<half_t>(SM90_TMA_LOAD{}, gA_$, ${}, make_shape(_4096{}, _64{}), Int<1>{});",
+          //        tmaParams.guid,
+          //        tmaParams.guid,
+          //        tmaParams.dstLayout);
 
           tmas.append(fmt("tma_$, ", tmaParams.guid));
           tma_tmps.append(fmt("decltype(tma_$)", tmaParams.guid));
@@ -484,11 +494,16 @@ TranspileResult Transpiler::transpile_ugraph() {
                result.func_name,
                tma_tmps,
                result.smem_size +
-                   result.tmaParamsList.size() * sizeof(uint64_t));
+                   result.tmaParamsList.size() * sizeof(uint64_t) + 1000);
         exec.e("$<<<grid_dim, block_dim, smem_size>>>($ $);",
                result.func_name,
                tmas,
                ptr_names);
+        exec.e("cudaError_t error = cudaGetLastError();");
+        exec.e("if (error != cudaSuccess) {");
+        exec.e("std::cerr << cudaGetErrorString(error) << std::endl;");
+        exec.e("}");
+    
 
         custom_kernels.e(result.code);
 
