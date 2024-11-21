@@ -401,6 +401,8 @@ class KNGraph:
             return best_graph
         elif backend == "nki":
             return all_graphs
+        elif backend == "triton":
+            return all_graphs
         else:
             assert False, "Unsupported backend"
             return None

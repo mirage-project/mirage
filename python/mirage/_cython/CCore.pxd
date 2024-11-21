@@ -280,3 +280,11 @@ cdef extern from "mirage/nki_transpiler/transpile.h" namespace "mirage::nki_tran
         string code
     cdef NKITranspileResult transpile(const CppKNGraph *graph,
                                       const NKITranspilerConfig config)
+
+cdef extern from "mirage/triton_transpiler/transpile.h" namespace "mirage::triton_transpiler":
+    ctypedef struct TritonTranspilerConfig:
+        int target_cc
+    ctypedef struct TritonTranspileResult:
+        string code
+    cdef TritonTranspileResult transpile(const CppKNGraph *graph,
+                                         const TritonTranspilerConfig config)
