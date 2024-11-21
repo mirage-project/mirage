@@ -10,7 +10,8 @@ void abstract_expr_eval(
     std::unordered_map<int64_t, std::shared_ptr<AbstractExpr>> &patterns) {
   for (size_t i = 0; i < g.operators.size(); ++i) {
     auto const &op = g.operators[i];
-    if (op->output_tensors.size() > 0 && contains_key(patterns, op->output_tensors[0].guid)) {
+    if (op->output_tensors.size() > 0 &&
+        contains_key(patterns, op->output_tensors[0].guid)) {
       continue;
     }
     if (op->op_type == type::TBOperatorType::TB_INPUT_OP) {
@@ -22,7 +23,8 @@ void abstract_expr_eval(
       patterns.insert({static_cast<threadblock::TBOutputOp *>(op)->dtensor.guid,
                        patterns.at(op->input_tensors[0].guid)});
     } else if (op->op_type == type::TBOperatorType::TB_CONCAT_1_OP) {
-      assert(g.operators[i + 1]->op_type == type::TBOperatorType::TB_CONCAT_0_OP);
+      assert(g.operators[i + 1]->op_type ==
+             type::TBOperatorType::TB_CONCAT_0_OP);
       assert(g.operators[i + 2]->op_type == type::TBOperatorType::TB_MATMUL_OP);
       std::vector<threadblock::STensor> input_tensors;
       input_tensors.push_back(op->input_tensors[0]);
@@ -38,7 +40,9 @@ void abstract_expr_eval(
       patterns.insert({g.operators[i + 1]->output_tensors[0].guid, nullptr});
       patterns.insert(
           {g.operators[i + 2]->output_tensors[0].guid,
-           get_pattern(type::TBOperatorType::TB_CONCAT_THEN_MATMUL_OP, input_tensors, input_patterns)});
+           get_pattern(type::TBOperatorType::TB_CONCAT_THEN_MATMUL_OP,
+                       input_tensors,
+                       input_patterns)});
     } else {
       std::vector<std::shared_ptr<AbstractExpr>> input_patterns;
       for (auto const &input_tensor : op->input_tensors) {

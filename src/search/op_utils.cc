@@ -78,8 +78,8 @@ int get_input_number(type::TBOperatorType op) {
   assert(false && "Unsupported operator");
 }
 
-std::shared_ptr<AbstractExpr> make_reduction_pattern(int dim,
-                                                     std::shared_ptr<AbstractExpr> opd) {
+std::shared_ptr<AbstractExpr>
+    make_reduction_pattern(int dim, std::shared_ptr<AbstractExpr> opd) {
   if (dim == 1) {
     return opd;
   }
@@ -164,7 +164,8 @@ std::shared_ptr<AbstractExpr> get_pattern(type::TBOperatorType op,
     }
     case type::TBOperatorType::TB_FORLOOP_ACCUM_RED_LD_MEAN_OP:
     case type::TBOperatorType::TB_FORLOOP_ACCUM_RED_LD_SUM_OP: {
-      return make_reduction_pattern(forloop_range * tensor.dim[tensor.num_dims - 1], opd);
+      return make_reduction_pattern(
+          forloop_range * tensor.dim[tensor.num_dims - 1], opd);
     }
     case type::TBOperatorType::TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP: {
       if (tensor.dim[tensor.num_dims - 1] <= reduction_dimx) {
@@ -272,8 +273,11 @@ std::shared_ptr<AbstractExpr>
     int num_dims = tensors[0].num_dims;
     int reduction_dim1 = tensors[0].dim[num_dims - 1],
         reduction_dim2 = tensors[1].dim[num_dims - 1];
-    return std::make_shared<Add>(make_reduction_pattern(reduction_dim1, std::make_shared<Mul>(opds[0], opds[2])),
-                                 make_reduction_pattern(reduction_dim2, std::make_shared<Mul>(opds[1], opds[3])));
+    return std::make_shared<Add>(
+        make_reduction_pattern(reduction_dim1,
+                               std::make_shared<Mul>(opds[0], opds[2])),
+        make_reduction_pattern(reduction_dim2,
+                               std::make_shared<Mul>(opds[1], opds[3])));
   }
   assert(false && "Unsupported operator");
 }
@@ -430,7 +434,8 @@ size_t count_op_of_type(type::KNOperatorType op_type, kernel::Graph const &g) {
   return counter;
 }
 
-size_t count_op_of_type(type::TBOperatorType op_type, threadblock::Graph const &g) {
+size_t count_op_of_type(type::TBOperatorType op_type,
+                        threadblock::Graph const &g) {
   int counter = 0;
   for (auto const &op : g.operators) {
     if (op->op_type == op_type) {

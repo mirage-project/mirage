@@ -22,9 +22,9 @@ KernelGraphGenerator::KernelGraphGenerator(
     char const *filename,
     bool verbose)
     : config(config), dim_strategy(DimStrategy(config)), filename(filename),
-      num_thread(config.search_thread), verbose(verbose), num_total_random_tests(0),
-      num_valid_kernel_graphs(0), num_total_states(0), num_tasks(0),
-      max_depth(5) {
+      num_thread(config.search_thread), verbose(verbose),
+      num_total_random_tests(0), num_valid_kernel_graphs(0),
+      num_total_states(0), num_tasks(0), max_depth(5) {
   preprocess(computation_graph);
 }
 
@@ -325,7 +325,8 @@ void KernelGraphGenerator::generate_next_operator(
     // Case B2: Generate pre-defined threadblock operator
     std::vector<STensor> all_tensors = get_all_tensors(*c.tb_graph);
     for (type::TBOperatorType op_type : dim_strategy.get_tbop_cand()) {
-      if (count_op_of_type(type::TBOperatorType::TB_CONCAT_0_OP, *c.tb_graph) >= 1 &&
+      if (count_op_of_type(type::TBOperatorType::TB_CONCAT_0_OP, *c.tb_graph) >=
+              1 &&
           op_type == type::TBOperatorType::TB_CONCAT_THEN_MATMUL_OP) {
         continue;
       }
