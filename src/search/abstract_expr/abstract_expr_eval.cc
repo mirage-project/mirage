@@ -8,7 +8,11 @@ namespace search {
 void abstract_expr_eval(
     threadblock::Graph const &g,
     std::unordered_map<int64_t, std::shared_ptr<AbstractExpr>> &patterns) {
-  for (auto const &op : g.operators) {
+  for (size_t i = 0; i < g.operators.size(); ++i) {
+    auto const &op = g.operators[i];
+    if (op->output_tensors.size() > 0 && contains_key(patterns, op->output_tensors[0].guid)) {
+      continue;
+    }
     if (op->op_type == type::TBOperatorType::TB_INPUT_OP) {
       patterns.insert(
           {op->output_tensors[0].guid,
@@ -17,6 +21,24 @@ void abstract_expr_eval(
     } else if (op->op_type == type::TBOperatorType::TB_OUTPUT_OP) {
       patterns.insert({static_cast<threadblock::TBOutputOp *>(op)->dtensor.guid,
                        patterns.at(op->input_tensors[0].guid)});
+    } else if (op->op_type == type::TBOperatorType::TB_CONCAT_1_OP) {
+      assert(g.operators[i + 1]->op_type == type::TBOperatorType::TB_CONCAT_0_OP);
+      assert(g.operators[i + 2]->op_type == type::TBOperatorType::TB_MATMUL_OP);
+      std::vector<threadblock::STensor> input_tensors;
+      input_tensors.push_back(op->input_tensors[0]);
+      input_tensors.push_back(op->input_tensors[1]);
+      input_tensors.push_back(g.operators[i + 1]->input_tensors[0]);
+      input_tensors.push_back(g.operators[i + 1]->input_tensors[1]);
+      std::vector<std::shared_ptr<AbstractExpr>> input_patterns;
+      for (auto const &input_tensor : input_tensors) {
+        assert(contains_key(patterns, input_tensor.guid));
+        input_patterns.push_back(patterns.at(input_tensor.guid));
+      }
+      patterns.insert({op->output_tensors[0].guid, nullptr});
+      patterns.insert({g.operators[i + 1]->output_tensors[0].guid, nullptr});
+      patterns.insert(
+          {g.operators[i + 2]->output_tensors[0].guid,
+           get_pattern(type::TBOperatorType::TB_CONCAT_THEN_MATMUL_OP, input_tensors, input_patterns)});
     } else {
       std::vector<std::shared_ptr<AbstractExpr>> input_patterns;
       for (auto const &input_tensor : op->input_tensors) {

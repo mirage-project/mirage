@@ -145,7 +145,10 @@ std::string Var::to_string() const {
 }
 
 Add::Add(std::shared_ptr<AbstractExpr> lhs, std::shared_ptr<AbstractExpr> rhs)
-    : lhs(lhs), rhs(rhs) {}
+    : lhs(lhs), rhs(rhs) {
+  assert(lhs);
+  assert(rhs);
+}
 
 z3::expr Add::to_z3(z3::context &c,
                     std::unordered_set<std::string> &all_variables) const {
@@ -159,7 +162,10 @@ std::string Add::to_string() const {
 }
 
 Mul::Mul(std::shared_ptr<AbstractExpr> lhs, std::shared_ptr<AbstractExpr> rhs)
-    : lhs(lhs), rhs(rhs) {}
+    : lhs(lhs), rhs(rhs) {
+  assert(lhs);
+  assert(rhs);
+}
 
 z3::expr Mul::to_z3(z3::context &c,
                     std::unordered_set<std::string> &all_variables) const {
@@ -173,7 +179,10 @@ std::string Mul::to_string() const {
 }
 
 Div::Div(std::shared_ptr<AbstractExpr> lhs, std::shared_ptr<AbstractExpr> rhs)
-    : lhs(lhs), rhs(rhs) {}
+    : lhs(lhs), rhs(rhs) {
+  assert(lhs);
+  assert(rhs);
+}
 
 z3::expr Div::to_z3(z3::context &c,
                     std::unordered_set<std::string> &all_variables) const {
@@ -186,7 +195,9 @@ std::string Div::to_string() const {
   return "(" + lhs->to_string() + "/" + rhs->to_string() + ")";
 }
 
-Exp::Exp(std::shared_ptr<AbstractExpr> exponent) : exponent(exponent) {}
+Exp::Exp(std::shared_ptr<AbstractExpr> exponent) : exponent(exponent) {
+  assert(exponent);
+}
 
 z3::expr Exp::to_z3(z3::context &c,
                     std::unordered_set<std::string> &all_variables) const {
@@ -199,7 +210,9 @@ std::string Exp::to_string() const {
   return "e^" + exponent->to_string();
 }
 
-Silu::Silu(std::shared_ptr<AbstractExpr> a) : a(a) {}
+Silu::Silu(std::shared_ptr<AbstractExpr> a) : a(a) {
+  assert(a);
+}
 
 z3::expr Silu::to_z3(z3::context &c,
                      std::unordered_set<std::string> &all_variables) const {
@@ -213,7 +226,9 @@ std::string Silu::to_string() const {
 }
 
 RMS::RMS(int red_deg, std::shared_ptr<AbstractExpr> elems)
-    : red_deg(red_deg), elems(elems) {}
+    : red_deg(red_deg), elems(elems) {
+  assert(elems);
+}
 
 z3::expr RMS::to_z3(z3::context &c,
                     std::unordered_set<std::string> &all_variables) const {
@@ -227,7 +242,10 @@ std::string RMS::to_string() const {
 }
 
 Red::Red(int red_deg, std::shared_ptr<AbstractExpr> summand)
-    : red_deg_log(std::ceil(std::log2(red_deg))), summand(summand) {}
+    : red_deg_log(std::ceil(std::log2(red_deg))), summand(summand) {
+  assert(red_deg > 1);
+  assert(summand);
+}
 
 z3::expr Red::to_z3(z3::context &c,
                     std::unordered_set<std::string> &all_variables) const {

@@ -33,6 +33,9 @@ std::vector<dim3>
   auto generate_1d_grids = [&](std::vector<int> const &dims) {
     std::vector<dim3> cands;
     for (size_t x = 8; x <= 128; x *= 2) {
+      if (x != 32) {
+        continue;
+      }
       for (int dim : dims) {
         if (dim % x == 0) {
           cands.push_back({dim / x, 1, 1});
@@ -421,8 +424,7 @@ std::vector<std::vector<int>> DimStrategy::get_customized_input_cand_idx(
 
   int num_inputs = all_input.size();
 
-  if (contains(config.tbop_to_explore,
-               type::TBOperatorType::TB_CONCAT_THEN_MATMUL_OP) &&
+  if (config._enable_concat_matmul_transformation &&
       all_input.size() == 4) {
     return {{0, 1, 2, 3}};
   }

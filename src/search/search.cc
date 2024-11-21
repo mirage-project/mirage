@@ -298,6 +298,10 @@ void KernelGraphGenerator::generate_next_operator(
     // Case B2: Generate pre-defined threadblock operator
     std::vector<STensor> all_tensors = get_all_tensors(*c.tb_graph);
     for (type::TBOperatorType op_type : dim_strategy.get_tbop_cand()) {
+      if (count_op_of_type(type::TBOperatorType::TB_CONCAT_0_OP, *c.tb_graph) >= 1 &&
+          op_type == type::TBOperatorType::TB_CONCAT_THEN_MATMUL_OP) {
+        continue;
+      }
       for (auto const &input_idx :
            dim_strategy.get_input_cand_idx(op_type, all_tensors)) {
         Order order(input_idx, static_cast<int>(op_type));
@@ -317,16 +321,17 @@ void KernelGraphGenerator::generate_next_operator(
           continue;
         }
 
+        TBOperator *last_op = c.tb_graph->operators.back();
         TBOperator *new_op = create_op(*c.tb_graph, op_type, input_tensors);
         if (!new_op) {
           continue;
-        };
-        c.tb_graph->operators.push_back(new_op);
-        if (check_range(init_ranges, target_ranges, *c.kn_graph, c.tb_graph)) {
-          generate_next_operator(c, verify, verified);
         }
-        delete c.tb_graph->operators.back();
-        c.tb_graph->operators.pop_back();
+        c.tb_graph->operators.push_back(new_op);
+        generate_next_operator(c, verify, verified);
+        while (c.tb_graph->operators.back() != last_op) {
+          delete c.tb_graph->operators.back();
+          c.tb_graph->operators.pop_back();
+        }
       }
     }
   }
@@ -428,7 +433,6 @@ void KernelGraphGenerator::preprocess(kernel::Graph const &computation_graph) {
   } else {
     this->verifier = std::make_shared<FormalVerifier>(computation_graph);
   }
-  this->_verfifier = std::make_shared<FormalVerifier>(computation_graph);
 }
 
 bool KernelGraphGenerator::check_pattern(

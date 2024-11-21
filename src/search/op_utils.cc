@@ -78,9 +78,18 @@ int get_input_number(type::TBOperatorType op) {
   assert(false && "Unsupported operator");
 }
 
+std::shared_ptr<AbstractExpr> make_reduction_pattern(int dim,
+                                                     std::shared_ptr<AbstractExpr> opd) {
+  if (dim == 1) {
+    return opd;
+  }
+  return std::make_shared<Red>(dim, opd);
+}
+
 std::shared_ptr<AbstractExpr> get_pattern(type::KNOperatorType op,
                                           DTensor const &tensor,
                                           std::shared_ptr<AbstractExpr> opd) {
+  assert(opd != nullptr);
   switch (op) {
     case type::KNOperatorType::KN_REDUCTION_0_OP:
       return std::make_shared<Red>(tensor.dim[0], opd);
@@ -108,6 +117,7 @@ std::shared_ptr<AbstractExpr> get_pattern(type::KNOperatorType op,
 std::shared_ptr<AbstractExpr> get_pattern(type::TBOperatorType op,
                                           STensor const &tensor,
                                           std::shared_ptr<AbstractExpr> opd) {
+  assert(opd != nullptr);
   // Retrieve reduction_dimx and forloop_range from threadblock graph
   assert(tensor.owner_op != nullptr);
   assert(tensor.owner_op->bgraph != nullptr);
@@ -180,6 +190,8 @@ std::shared_ptr<AbstractExpr> get_pattern(type::KNOperatorType op,
                                           std::shared_ptr<AbstractExpr> lhs,
                                           std::shared_ptr<AbstractExpr> rhs) {
 
+  assert(lhs != nullptr);
+  assert(rhs != nullptr);
   switch (op) {
     case type::KNOperatorType::KN_MATMUL_OP:
       if (tensor_l.dim[tensor_l.num_dims - 1] > 1) {
@@ -204,7 +216,8 @@ std::shared_ptr<AbstractExpr> get_pattern(type::TBOperatorType op,
                                           STensor const &tensor_r,
                                           std::shared_ptr<AbstractExpr> lhs,
                                           std::shared_ptr<AbstractExpr> rhs) {
-
+  assert(lhs != nullptr);
+  assert(rhs != nullptr);
   switch (op) {
     case type::TBOperatorType::TB_MATMUL_OP:
       if (tensor_l.dim[tensor_l.num_dims - 1] > 1) {
@@ -228,6 +241,11 @@ std::shared_ptr<AbstractExpr>
     get_pattern(type::KNOperatorType op,
                 std::vector<DTensor> const &tensors,
                 std::vector<std::shared_ptr<AbstractExpr>> const &opds) {
+  for (auto const &expr : opds) {
+    if (!expr) {
+      return nullptr;
+    }
+  }
   if (tensors.size() == 1) {
     return get_pattern(op, tensors[0], opds[0]);
   }
@@ -241,7 +259,11 @@ std::shared_ptr<AbstractExpr>
     get_pattern(type::TBOperatorType op,
                 std::vector<STensor> const &tensors,
                 std::vector<std::shared_ptr<AbstractExpr>> const &opds) {
-
+  for (auto const &expr : opds) {
+    if (!expr) {
+      return nullptr;
+    }
+  }
   if (opds.size() == 1) {
     return get_pattern(op, tensors[0], opds[0]);
   }
@@ -259,11 +281,8 @@ std::shared_ptr<AbstractExpr>
     int num_dims = tensors[0].num_dims;
     int reduction_dim1 = tensors[0].dim[num_dims - 1],
         reduction_dim2 = tensors[1].dim[num_dims - 1];
-    return std::make_shared<Add>(
-        std::make_shared<Red>(reduction_dim1,
-                              std::make_shared<Mul>(opds[0], opds[2])),
-        std::make_shared<Red>(reduction_dim2,
-                              std::make_shared<Mul>(opds[1], opds[3])));
+    return std::make_shared<Add>(make_reduction_pattern(reduction_dim1, std::make_shared<Mul>(opds[0], opds[2])),
+                                 make_reduction_pattern(reduction_dim2, std::make_shared<Mul>(opds[1], opds[3])));
   }
   assert(false && "Unsupported operator");
 }
@@ -411,6 +430,16 @@ TBOperator *create_op(threadblock::Graph &g,
 }
 
 size_t count_op_of_type(type::KNOperatorType op_type, kernel::Graph const &g) {
+  int counter = 0;
+  for (auto const &op : g.operators) {
+    if (op->op_type == op_type) {
+      ++counter;
+    }
+  }
+  return counter;
+}
+
+size_t count_op_of_type(type::TBOperatorType op_type, threadblock::Graph const &g) {
   int counter = 0;
   for (auto const &op : g.operators) {
     if (op->op_type == op_type) {
