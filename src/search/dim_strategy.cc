@@ -33,9 +33,6 @@ std::vector<dim3>
   auto generate_1d_grids = [&](std::vector<int> const &dims) {
     std::vector<dim3> cands;
     for (size_t x = 8; x <= 128; x *= 2) {
-      if (x != 32) {
-        continue;
-      }
       for (int dim : dims) {
         if (dim % x == 0) {
           cands.push_back({dim / x, 1, 1});
