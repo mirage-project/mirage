@@ -192,11 +192,7 @@ void from_json(json const &j, Graph &g) {
       }
       case type::KNOperatorType::KN_OUTPUT_OP: {
         size_t guid;
-<<<<<<< HEAD
-        jop.at("input_tensors")[0].at("guid").get_to(guid); 
-=======
         jop.at("input_tensors")[0].at("guid").get_to(guid);
->>>>>>> mirage/main
         std::vector<size_t> output_strides;
         jop.at("output_strides").get_to(output_strides);
         g.mark_output(get_tensor_from_guid(guid), output_strides);
