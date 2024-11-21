@@ -714,7 +714,7 @@ __global__ void compute_customizedop_fingerprint(
         }
         case mirage::type::TB_RMS_NORM_OP: {
           int output_num_elements, norm_size;
-	  int input_smem_offset, output_smem_offset;
+          int input_smem_offset, output_smem_offset;
           mirage::threadblock::deserialize_rms_norm_op_parameters(
               new_params.parameters,
               param_idx,
@@ -726,17 +726,16 @@ __global__ void compute_customizedop_fingerprint(
               (mirage::type::FPType *)(smem_buffer + output_smem_offset);
           mirage::type::FPType *input_ptr =
               (mirage::type::FPType *)(smem_buffer + input_smem_offset);
-          mirage::threadblock::TBRmsNormFingerPrinter fp(
-              input_ptr,
-              output_ptr,
-              div_p_lookup_table,
-              div_q_lookup_table,
-              sqrt_p_lookup_table,
-              sqrt_q_lookup_table,
-              output_num_elements,
-              norm_size,
-              threadIdx.x,
-              blockDim.x);
+          mirage::threadblock::TBRmsNormFingerPrinter fp(input_ptr,
+                                                         output_ptr,
+                                                         div_p_lookup_table,
+                                                         div_q_lookup_table,
+                                                         sqrt_p_lookup_table,
+                                                         sqrt_q_lookup_table,
+                                                         output_num_elements,
+                                                         norm_size,
+                                                         threadIdx.x,
+                                                         blockDim.x);
           __syncthreads();
           break;
         }

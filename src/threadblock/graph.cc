@@ -553,8 +553,9 @@ NewKernelParams Graph::get_new_kernel_params(bool fingerprint) const {
         assert(operators[i]->output_tensors.size() == 1);
         mirage::threadblock::STensor input = operators[i]->input_tensors[0];
         mirage::threadblock::STensor output = operators[i]->output_tensors[0];
-        int norm_size = output.dim[output.num_dims-1];
-	// printf("norm_size(%d) num_elements(%d)\n", norm_size, (int)output.num_elements());
+        int norm_size = output.dim[output.num_dims - 1];
+        // printf("norm_size(%d) num_elements(%d)\n", norm_size,
+        // (int)output.num_elements());
         assert(input.num_elements() == output.num_elements());
         mirage::threadblock::serialize_rms_norm_op_parameters(
             params.parameters,
@@ -751,9 +752,8 @@ void from_json(json const &j, Graph &graph) {
         break;
       }
       case type::TBOperatorType::TB_RMS_NORM_OP: {
-        STensor const &output = graph.rms_norm(
-            get_tensor_from_guid(
-                op.at("input_tensors")[0].at("guid").get<int>()));
+        STensor const &output = graph.rms_norm(get_tensor_from_guid(
+            op.at("input_tensors")[0].at("guid").get<int>()));
         guid_mapping[output.guid] =
             op.at("output_tensors")[0].at("guid").get<int>();
         break;

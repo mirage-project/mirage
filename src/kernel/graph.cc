@@ -57,9 +57,10 @@ int Graph::get_input_dtensors(DTensor **inputs) {
 int Graph::get_input_dtensor_layout(DTensor const *input, int *strides) {
   for (auto const &op : this->operators) {
     if (op == input->owner_op) {
-      assert(op->op_type == mirage::type::KN_INPUT_OP && "input is not an KNInputOp");
-      KNInputOp * input_op = static_cast<KNInputOp*>(op);
-      int num_dims = (int) input_op->input_strides.size();
+      assert(op->op_type == mirage::type::KN_INPUT_OP &&
+             "input is not an KNInputOp");
+      KNInputOp *input_op = static_cast<KNInputOp *>(op);
+      int num_dims = (int)input_op->input_strides.size();
       for (int i = 0; i < num_dims; i++) {
         strides[i] = input_op->input_strides[i];
       }
@@ -184,7 +185,8 @@ void from_json(json const &j, Graph &g) {
         jop.at("output_tensors")[0].at("layout").get_to(layout);
         jop.at("output_tensors")[0].at("guid").get_to(guidO);
         std::vector<int> dims = to_vector(num_dim, dim);
-        DTensor const &output = g.new_input(dims, input_strides, data_type, layout);
+        DTensor const &output =
+            g.new_input(dims, input_strides, data_type, layout);
         guid_mapping[output.guid] = guidO;
         break;
       }

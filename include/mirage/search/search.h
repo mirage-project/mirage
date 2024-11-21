@@ -38,7 +38,10 @@ private:
   std::vector<std::shared_ptr<AlgebraicPattern>>
       computation_graph_output_patterns;
   std::vector<cpu::CTensor> computation_graph_output_tensors;
-  std::vector<std::tuple<std::vector<int>, type::DataType, layout::DmemLayout, std::vector<size_t>>>
+  std::vector<std::tuple<std::vector<int>,
+                         type::DataType,
+                         layout::DmemLayout,
+                         std::vector<size_t>>>
       computation_graph_input_attrs;
 
   // Statistics-related fields
@@ -46,14 +49,14 @@ private:
   std::atomic<int> num_valid_kernel_graphs;
   std::atomic<int> num_total_states;
 
-  // Time  
+  // Time
   std::chrono::time_point<std::chrono::steady_clock> start_time;
 
   // count number of tasks
   std::atomic<int> num_tasks;
   size_t max_depth;
 
-  // 
+  //
   std::unordered_map<std::string, bool> seen_patterns;
 
   // Ranges-related fields

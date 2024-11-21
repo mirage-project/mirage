@@ -24,11 +24,11 @@ namespace threadblock {
 
 CUTLASS_HOST_DEVICE
 void deserialize_rms_norm_op_parameters(int const *params,
-                                     int &param_idx,
-                                     int &output_num_elements,
-                                     int &norm_size,
-                                     int &input_smem_offset,
-                                     int &output_smem_offset) {
+                                        int &param_idx,
+                                        int &output_num_elements,
+                                        int &norm_size,
+                                        int &input_smem_offset,
+                                        int &output_smem_offset) {
   output_num_elements = params[param_idx++];
   norm_size = params[param_idx++];
   input_smem_offset = params[param_idx++];
@@ -36,11 +36,11 @@ void deserialize_rms_norm_op_parameters(int const *params,
 }
 
 inline void serialize_rms_norm_op_parameters(int *params,
-                                          int &param_idx,
-                                          int output_num_elements,
-                                          int norm_size,
-                                          int input_smem_offset,
-                                          int output_smem_offset) {
+                                             int &param_idx,
+                                             int output_num_elements,
+                                             int norm_size,
+                                             int input_smem_offset,
+                                             int output_smem_offset) {
   params[param_idx++] = output_num_elements;
   params[param_idx++] = norm_size;
   params[param_idx++] = input_smem_offset;
