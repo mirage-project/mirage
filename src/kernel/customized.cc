@@ -58,15 +58,15 @@ KNOperator *Graph::create_customized_op(std::vector<DTensor> const &inputs,
   // Assert that _graph's dtensor inputs align with inputs
   {
     int num_inputs = 0;
-    for (const auto& op : _graph.operators) {
+    for (auto const &op : _graph.operators) {
       if (op->op_type == mirage::type::TB_INPUT_OP) {
-        const mirage::threadblock::TBInputOp* input_op
-            = static_cast<const mirage::threadblock::TBInputOp*>(op);
+        mirage::threadblock::TBInputOp const *input_op =
+            static_cast<mirage::threadblock::TBInputOp const *>(op);
         assert(inputs[num_inputs] == input_op->dtensor);
-        num_inputs ++;
+        num_inputs++;
       }
     }
-    assert(num_inputs == (int) inputs.size());
+    assert(num_inputs == (int)inputs.size());
   }
   // Calculate fingerprint sizes
   size_t output_data_size = 0, output_fp_size = 0;
@@ -228,6 +228,10 @@ KNCustomizedOp::KNCustomizedOp(mirage::kernel::Graph *_kgraph,
       }
     }
   }
+}
+
+void KNCustomizedOp::get_bgraph(mirage::threadblock::Graph** bgraph_) {
+  *bgraph_ = &(this->bgraph);
 }
 
 KNCustomizedOp::~KNCustomizedOp() {

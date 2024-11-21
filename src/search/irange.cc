@@ -60,7 +60,8 @@ TBRange propagate_from_dtensor_to_stensor(KNRange const &range,
                                           int forloop_dim,
                                           int forloop_range) {
   if (!range.is_valid()) {
-    return TBRange(Range::invalid_range(), Range::invalid_range(), Range::invalid_range());
+    return TBRange(
+        Range::invalid_range(), Range::invalid_range(), Range::invalid_range());
   }
   if (range.is_empty()) {
     return TBRange();
@@ -627,8 +628,9 @@ ITBRange forward_propagate(ITBRange const &tbrange,
       break;
     }
     case type::TB_RMS_NORM_OP: {
-      ret = ITBRange(tbrange.range_set.extend_dim(op.output_tensors[0].num_dims - 1)
-                         .truncate(op.output_tensors[0]));
+      ret = ITBRange(
+          tbrange.range_set.extend_dim(op.output_tensors[0].num_dims - 1)
+              .truncate(op.output_tensors[0]));
       break;
     }
     case type::TB_FORLOOP_ACCUM_NO_RED_OP: {

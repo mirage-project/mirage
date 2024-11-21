@@ -7,6 +7,12 @@ pip install mirage-project
 
 Mirage can also be built from source code using the following instructions.
 
+## Intall from pre-built wheel
+We provide some pre-built binary wheels in [Release Page](https://github.com/mirage-project/mirage/releases/latest). For example, to install mirage 0.2.2 compiled with CUDA 12.2 for python 3.10, using the following command:
+```bash
+pip install https://github.com/mirage-project/mirage/releases/download/v0.2.2/mirage_project-0.2.2+cu122-cp310-cp310-linux_x86_64.whl
+```
+
 ## Install from source code
 
 ### Prerequisties

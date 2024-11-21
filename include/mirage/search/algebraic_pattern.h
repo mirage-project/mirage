@@ -23,10 +23,6 @@ public:
   bool subpattern_to(AlgebraicPattern const &other) const;
   bool operator==(AlgebraicPattern const &other) const;
   virtual std::string to_string() const = 0;
-
-  static std::unordered_map<std::pair<std::string, std::string>, bool>
-      cached_results;
-  static std::shared_mutex solver_mutex;
 };
 
 class Var : public AlgebraicPattern {
