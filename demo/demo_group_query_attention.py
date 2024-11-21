@@ -1,6 +1,7 @@
 import mirage as mi
 import argparse
 import os
+import torch
 
 def optimize_llama_70B(checkpoint):
     graph = mi.new_kernel_graph()

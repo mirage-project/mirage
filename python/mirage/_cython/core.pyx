@@ -101,6 +101,116 @@ bfloat16 = dtype('bf16')
 float32 = dtype('fp32')
 float64 = dtype('fp64')
 
+def get_kn_operator_type_string(int op_type):
+    if op_type == KN_UNKOWN:
+        return "kn_unknown"
+    elif op_type == KN_INPUT_OP:
+        return "kn_input_op"
+    elif op_type == KN_OUTPUT_OP:
+        return "kn_output_op"
+    elif op_type == KN_MATMUL_OP:
+        return "kn_matmul_op"
+    elif op_type == KN_EXP_OP:
+        return "kn_exp_op"
+    elif op_type == KN_SQUARE_OP:
+        return "kn_square_op"
+    elif op_type == KN_SQRT_OP:
+        return "kn_sqrt_op"
+    elif op_type == KN_SILU_OP:
+        return "kn_silu_op"
+    elif op_type == KN_ADD_OP:
+        return "kn_add_op"
+    elif op_type == KN_MUL_OP:
+        return "kn_mul_op"
+    elif op_type == KN_DIV_OP:
+        return "kn_div_op"
+    elif op_type == KN_REDUCTION_0_OP:
+        return "kn_reduction_0_op"
+    elif op_type == KN_REDUCTION_1_OP:
+        return "kn_reduction_1_op"
+    elif op_type == KN_REDUCTION_2_OP:
+        return "kn_reduction_2_op"
+    elif op_type == KN_RMS_NORM_OP:
+        return "kn_rms_norm_op"
+    elif op_type == KN_ALLREDUCE_OP:
+        return "kn_allreduce_op"
+    elif op_type == KN_CUSTOMIZED_OP:
+        return "kn_customized_op"
+    else:
+        return "unknown_op_type" + str(op_type)
+
+
+def get_tb_operator_type_string(int op_type):
+    if op_type == TB_UNKOWN:
+        return "tb_unknown"
+    elif op_type == TB_INPUT_OP:
+        return "tb_input_op"
+    elif op_type == TB_OUTPUT_OP:
+        return "tb_output_op"
+    elif op_type == TB_MATMUL_OP:
+        return "tb_matmul_op"
+    elif op_type == TB_EXP_OP:
+        return "tb_exp_op"
+    elif op_type == TB_SQUARE_OP:
+        return "tb_square_op"
+    elif op_type == TB_SQRT_OP:
+        return "tb_sqrt_op"
+    elif op_type == TB_SILU_OP:
+        return "tb_silu_op"
+    elif op_type == TB_MUL_SCALAR_OP:
+        return "tb_mul_scalar_op"
+    elif op_type == TB_ADD_OP:
+        return "tb_add_op"
+    elif op_type == TB_MUL_OP:
+        return "tb_mul_op"
+    elif op_type == TB_DIV_OP:
+        return "tb_div_op"
+    elif op_type == TB_REDUCTION_FIRST_OP_ID:
+        return "tb_reduction_first_op_id"
+    elif op_type == TB_REDUCTION_0_OP:
+        return "tb_reduction_0_op"
+    elif op_type == TB_REDUCTION_1_OP:
+        return "tb_reduction_1_op"
+    elif op_type == TB_REDUCTION_2_OP:
+        return "tb_reduction_2_op"
+    elif op_type == TB_REDUCTION_0_TO_DIMX_OP:
+        return "tb_reduction_0_to_dimx_op"
+    elif op_type == TB_REDUCTION_1_TO_DIMX_OP:
+        return "tb_reduction_1_to_dimx_op"
+    elif op_type == TB_REDUCTION_2_TO_DIMX_OP:
+        return "tb_reduction_2_to_dimx_op"
+    elif op_type == TB_REDUCTION_LAST_OP_ID:
+        return "tb_reduction_last_op_id"
+    elif op_type == TB_RMS_NORM_OP:
+        return "tb_rms_norm_op"
+    elif op_type == TB_CONCAT_FIRST_OP_ID:
+        return "tb_concat_first_op_id"
+    elif op_type == TB_CONCAT_0_OP:
+        return "tb_concat_0_op"
+    elif op_type == TB_CONCAT_1_OP:
+        return "tb_concat_1_op"
+    elif op_type == TB_CONCAT_2_OP:
+        return "tb_concat_2_op"
+    elif op_type == TB_CONCAT_LAST_OP_ID:
+        return "tb_concat_last_op_id"
+    elif op_type == TB_CONCAT_THEN_MATMUL_OP:
+        return "tb_concat_then_matmul_op"
+    elif op_type == TB_FORLOOP_ACCUM_NO_RED_OP:
+        return "tb_forloop_accum_no_red_op"
+    elif op_type == TB_FORLOOP_ACCUM_RED_LD_SUM_OP:
+        return "tb_forloop_accum_red_ld_sum_op"
+    elif op_type == TB_FORLOOP_ACCUM_RED_LD_MEAN_OP:
+        return "tb_forloop_accum_red_ld_mean_op"
+    elif op_type == TB_FORLOOP_ACCUM_RED_LD_RMS_OP:
+        return "tb_forloop_accum_red_ld_rms_op"
+    elif op_type == TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP:
+        return "tb_forloop_accum_redtox_ld_sum_op"
+    elif op_type == TB_CUSTOMIZED_OP:
+        return "tb_customized_op"
+    else:
+        return "unknown_op_type" + str(op_type)
+
+
 def convert_dtype_to_ctype(type : dtype):
     if type.is_int8():
         return DT_INT8
@@ -168,6 +278,13 @@ cdef class DTensor:
             ptr = ctypes.cast(tensor, ctypes.c_void_p).value
             self.c_ptr = <CppDTensor*>(ptr)
 
+    property guid:
+        def __get__(self):
+            if self.c_ptr == NULL:
+                return None
+            else:
+                return self.c_ptr.guid
+
     property tensor:
         def __get__(self):
             if self.c_ptr == NULL:
@@ -181,6 +298,7 @@ cdef class DTensor:
     property num_dims:
         def __get__(self):
             if self.c_ptr == NULL:
+                print("Error: tensor is None in num_dims property")
                 return None
             else:
                 return self.c_ptr.num_dims
@@ -212,7 +330,12 @@ cdef class STensor:
         else:
             ptr = ctypes.cast(tensor, ctypes.c_void_p).value
             self.c_ptr = <CppSTensor*>(ptr)
-
+    property guid:
+        def __get__(self):
+            if self.c_ptr == NULL:
+                return None
+            else:
+                return self.c_ptr.guid
     property tensor:
         def __get__(self):
             if self.c_ptr == NULL:
@@ -240,13 +363,181 @@ cdef class STensor:
     def __cinit__(self, tensor):
         self._set_tensor(tensor)
 
-    def dim(self, int idx):
+    def dim(self, int idx):  
         if (idx < self.c_ptr.num_dims):
             return self.c_ptr.dim[idx]
         else:
             assert False , "Error: index out of range"
             return None
 
+cdef class CyKNOperator:
+    cdef CppKNOperator* c_ptr # Hold a CppKNOperator instance
+
+    cdef inline _set_operator(self, op):
+        cdef unsigned long long ptr
+        if op is None:
+            self.c_ptr = <CppKNOperator*>(NULL)
+        else:
+            ptr = ctypes.cast(op, ctypes.c_void_p).value
+            self.c_ptr = <CppKNOperator*>(ptr)
+    
+    def get_input_dtensors(self):
+        cdef CppDTensor* cinputs[1024]
+        num = self.c_ptr.get_input_dtensors(cinputs)
+        inputs = list()
+        for i in range(num):
+            ptr = ctypes.cast(<unsigned long long>cinputs[i], ctypes.c_void_p)
+            inputs.append(DTensor(ptr))
+        return inputs
+
+    def get_output_dtensors(self):
+        cdef CppDTensor* coutputs[1024]
+        num = self.c_ptr.get_output_dtensors(coutputs)
+        outputs = list()
+        for i in range(num):
+            ptr = ctypes.cast(<unsigned long long>coutputs[i], ctypes.c_void_p)
+            outputs.append(DTensor(ptr))
+        return outputs
+
+    property op_type:
+        def __get__(self):
+            if self.c_ptr == NULL:
+                return None
+            else:
+                return get_kn_operator_type_string(int(self.c_ptr.op_type))
+
+    def __cinit__(self, op):
+        self._set_operator(op)
+
+cdef class CyKNCustomizedOp(CyKNOperator):
+    cdef CppKNCustomizedOp* c_customized_ptr
+
+    def __cinit__(self, op):
+        cdef unsigned long long ptr
+        if op is None:
+            self.c_customized_ptr = <CppKNCustomizedOp*>(NULL)
+        else:
+            ptr = ctypes.cast(op, ctypes.c_void_p).value
+            self.c_customized_ptr = <CppKNCustomizedOp*>(ptr)
+
+    def get_bgraph(self):
+        cdef CppTBGraph* bgraph
+        self.c_customized_ptr.get_bgraph(&bgraph)
+
+        ptr = ctypes.cast(<unsigned long long>bgraph, ctypes.c_void_p)
+        cybgraph = CyTBGraph(bgraph = ptr)
+        return cybgraph
+
+cdef class CyTBOperator:
+    cdef CppTBOperator* c_ptr # Hold a CppTBOperator instance
+
+    cdef inline _set_operator(self, op):
+        cdef unsigned long long ptr
+        if op is None:
+            self.c_ptr = <CppTBOperator*>(NULL)
+        else:
+            ptr = ctypes.cast(op, ctypes.c_void_p).value
+            self.c_ptr = <CppTBOperator*>(ptr)
+
+    def get_input_stensors(self):
+        cdef CppSTensor* cinputs[1024]
+        num = self.c_ptr.get_input_stensors(cinputs)
+        inputs = list()
+        for i in range(num):
+            ptr = ctypes.cast(<unsigned long long>cinputs[i], ctypes.c_void_p)
+            inputs.append(STensor(ptr))
+        return inputs
+
+    def get_output_stensors(self):
+        cdef CppSTensor* coutputs[1024]
+        num = self.c_ptr.get_output_stensors(coutputs)
+        outputs = list()
+        for i in range(num):
+            ptr = ctypes.cast(<unsigned long long>coutputs[i], ctypes.c_void_p)
+            outputs.append(STensor(ptr))
+        return outputs
+
+    property op_type:
+        def __get__(self):
+            if self.c_ptr == NULL:
+                return None
+            else:
+                return get_tb_operator_type_string(int(self.c_ptr.op_type))
+
+    def __cinit__(self, op):
+        self._set_operator(op)
+
+cdef class CyTBInputOp(CyTBOperator):
+    cdef CppTBInputOp* c_input_ptr
+
+    def __cinit__(self, op):
+        cdef unsigned long long ptr
+        if op is None:
+            self.c_input_ptr = <CppTBInputOp*>(NULL)
+        else:
+            ptr = ctypes.cast(op, ctypes.c_void_p).value
+            self.c_input_ptr = <CppTBInputOp*>(ptr)
+
+    property input_map:
+        def __get__(self):
+            if self.c_input_ptr == NULL:
+                return None
+            else:
+                return {
+                    "x": self.c_input_ptr.input_map.x,
+                    "y": self.c_input_ptr.input_map.y,
+                    "z": self.c_input_ptr.input_map.z
+                }
+
+    property forloop_dim:
+        def __get__(self):
+            if self.c_input_ptr == NULL:
+                return None
+            else:
+                return self.c_input_ptr.forloop_dim
+
+    property dtensor_guid:
+        def __get__(self):
+            if self.c_input_ptr == NULL:
+                return None
+            else:
+                return self.c_input_ptr.get_dtensor_guid()
+
+cdef class CyTBOutputOp(CyTBOperator):
+    cdef CppTBOutputOp* c_output_ptr
+
+    def __cinit__(self, op):
+        cdef unsigned long long ptr
+        if op is None:
+            self.c_output_ptr = <CppTBOutputOp*>(NULL)
+        else:
+            ptr = ctypes.cast(op, ctypes.c_void_p).value
+            self.c_output_ptr = <CppTBOutputOp*>(ptr)
+
+    property output_map:
+        def __get__(self):
+            if self.c_output_ptr == NULL:
+                return None
+            else:
+                return {
+                    "x": self.c_output_ptr.output_map.x,
+                    "y": self.c_output_ptr.output_map.y,
+                    "z": self.c_output_ptr.output_map.z
+                }
+
+    property forloop_dim:
+        def __get__(self):
+            if self.c_output_ptr == NULL:
+                return None
+            else:
+                return self.c_output_ptr.forloop_dim
+
+    property dtensor_guid:
+        def __get__(self):
+            if self.c_output_ptr == NULL:
+                return None
+            else:
+                return self.c_output_ptr.get_dtensor_guid()
 
 cdef class CyKNGraph:
     cdef CppKNGraph *p_kgraph #Hold a CppKNGraph instance
@@ -328,7 +619,7 @@ cdef class CyKNGraph:
         t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
         return DTensor(t)
 
-    def customized(self, list[DTensor] inputs, CyTBGraph bgraph):
+    def customized(self, list inputs, CyTBGraph bgraph):
         cdef vector[const CppDTensor*] cinputs
         cinputs.resize(len(inputs))
         cdef DTensor t
@@ -359,6 +650,77 @@ cdef class CyKNGraph:
             ptr = ctypes.cast(<unsigned long long>cinputs[i], ctypes.c_void_p)
             inputs.append(DTensor(ptr))
         return inputs
+    
+    # visualizer utils
+
+    def _kn_tensor_to_dict(self, DTensor t):
+        return {
+            "num_dims": t.num_dims,
+            "dim": [t.dim(i) for i in range(t.num_dims)],
+            "guid": t.guid
+        }
+
+    def _tb_tensor_to_dict(self, STensor t):
+        return {
+            "num_dims": t.num_dims,
+            "dim": [t.dim(i) for i in range(t.num_dims)],
+            "guid": t.guid
+        }
+
+    def _get_tb_operator_info(self, CyTBOperator op):
+        ans = {
+            "op_type": op.op_type,
+            "input_tensors": [self._tb_tensor_to_dict(t) for t in op.get_input_stensors()],
+            "output_tensors": [self._tb_tensor_to_dict(t) for t in op.get_output_stensors()],
+        }
+        if "input" in op.op_type:
+            input_op = CyTBInputOp(ctypes.cast(<unsigned long long>(op.c_ptr), ctypes.c_void_p))
+            ans["input_map"] = input_op.input_map
+            ans["forloop_dim"] = input_op.forloop_dim
+            ans["dtensor"] = {
+                "guid": input_op.dtensor_guid
+            }
+        elif "output" in op.op_type:
+            output_op = CyTBOutputOp(ctypes.cast(<unsigned long long>(op.c_ptr), ctypes.c_void_p))
+            ans["output_map"] = output_op.output_map
+            ans["forloop_dim"] = output_op.forloop_dim
+            ans["dtensor"] = {
+                "guid": output_op.dtensor_guid
+            }
+        return ans
+
+    def _get_bgraph_info(self, CyKNOperator op):
+        cop = CyKNCustomizedOp(ctypes.cast(<unsigned long long>(op.c_ptr), ctypes.c_void_p))
+        bgraph = cop.get_bgraph()
+        return {
+            "grid_dim": bgraph.grid_dim,
+            "forloop_range": bgraph.forloop_range,
+            "operators": [self._get_tb_operator_info(i) for i in bgraph.operators]
+        }
+
+    def _get_kn_operator_info(self, CyKNOperator op):
+        if op.op_type == "kn_customized_op":
+            return {
+                "op_type": op.op_type,
+                "input_tensors": [self._kn_tensor_to_dict(t) for t in op.get_input_dtensors()],
+                "output_tensors": [self._kn_tensor_to_dict(t) for t in op.get_output_dtensors()],
+                "bgraph": self._get_bgraph_info(op)
+            }
+        else:
+            return {
+                "op_type": op.op_type,
+                "input_tensors": [self._kn_tensor_to_dict(t) for t in op.get_input_dtensors()],
+                "output_tensors": [self._kn_tensor_to_dict(t) for t in op.get_output_dtensors()],
+            }
+
+    def get_graph_structure(self):
+        operators = []
+        ops = self.p_kgraph.operators
+        for i in range(ops.size()):
+            op = CyKNOperator(None)
+            op.c_ptr = ops[i]
+            operators.append(self._get_kn_operator_info(op))
+        return operators
 
     def get_input_dtensor_layout(self, DTensor A):
         cdef int cstrides[128]
@@ -371,18 +733,31 @@ cdef class CyKNGraph:
 cdef class CyTBGraph:
     cdef CppTBGraph *p_bgraph #Hold a CppTBGraph instance
 
-    def __cinit__(self, tuple grid_dim, tuple block_dim, int forloop_range, int dimx):
-        assert len(grid_dim) == 3, "grid_dim must include 3 dimensions"
-        assert len(block_dim) == 3, "block_dim must include 3 dimensions"
+    def __cinit__(self, tuple grid_dim = (), tuple block_dim = (), int forloop_range = -1, int dimx = -1, bgraph = None):
+        cdef unsigned long long ptr
         cdef dim3 c_grid_dim
-        c_grid_dim.x = grid_dim[0]
-        c_grid_dim.y = grid_dim[1]
-        c_grid_dim.z = grid_dim[2]
         cdef dim3 c_block_dim
-        c_block_dim.x = block_dim[0]
-        c_block_dim.y = block_dim[1]
-        c_block_dim.z = block_dim[2]
-        self.p_bgraph = new CppTBGraph(c_grid_dim, c_block_dim, forloop_range, dimx)
+        if bgraph is None:
+            if len(grid_dim) == 0 or len(block_dim) == 0 or forloop_range == -1 or dimx == -1:
+                assert False, "grid_dim, block_dim, forloop_range, dimx must be provided"
+            assert len(grid_dim) == 3, "grid_dim must include 3 dimensions"
+            assert len(block_dim) == 3, "block_dim must include 3 dimensions"
+            c_grid_dim.x = grid_dim[0]
+            c_grid_dim.y = grid_dim[1]
+            c_grid_dim.z = grid_dim[2]
+            c_block_dim.x = block_dim[0]
+            c_block_dim.y = block_dim[1]
+            c_block_dim.z = block_dim[2]
+            self.p_bgraph = new CppTBGraph(c_grid_dim, c_block_dim, forloop_range, dimx)
+        else:
+            ptr = ctypes.cast(bgraph, ctypes.c_void_p).value
+            if isinstance(bgraph, int):
+                self.p_bgraph = <CppTBGraph*>(ptr)
+            elif isinstance(bgraph, ctypes.c_void_p):
+                self.p_bgraph = <CppTBGraph*>(ptr)
+            else:
+                assert False, "bgraph must be an integer or ctypes.c_void_p, but got " + str(type(bgraph))
+            
     
     def new_input(self, DTensor dtensor, tuple input_map, int forloop_dim):
         assert len(input_map) == 3, "input_map must be of length 3"
@@ -463,6 +838,28 @@ cdef class CyTBGraph:
         cdef CppSTensor* ptr = self.p_bgraph.forloop_accum(A.c_ptr, optype)
         t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
         return STensor(t)
+
+    property grid_dim:
+        def __get__(self):
+            return {
+                "x": self.p_bgraph.grid_dim.x,
+                "y": self.p_bgraph.grid_dim.y,
+                "z": self.p_bgraph.grid_dim.z
+            }
+
+    property forloop_range:
+        def __get__(self):
+            return self.p_bgraph.forloop_range
+
+    property operators:
+        def __get__(self):
+            cdef vector[CppTBOperator*] coperators
+            coperators = self.p_bgraph.operators
+            operators = list()
+            for i in range(coperators.size()):
+                ptr = ctypes.cast(<unsigned long long>coperators[i], ctypes.c_void_p)
+                operators.append(CyTBOperator(ptr))
+            return operators
 
 def search(CyKNGraph input_graph, *, int max_num_new_graphs = 1024, list imaps = None, list omaps = None, list griddims = None, list blockdims = None, list fmaps = None, list franges = None, str previous_checkpoint = None, bool verbose, str default_config = None):
     # set cimaps
@@ -573,5 +970,6 @@ def generate_cuda_program(CyKNGraph input_graph, *, int target_cc, list input_st
     return {
         "code": result.code.decode("UTF-8"),
         "buf_size": result.buf_size,
+        "max_smem_size": result.max_smem_size,
         "output_directives": output_directives
     }

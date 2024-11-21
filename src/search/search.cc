@@ -513,12 +513,32 @@ bool KernelGraphGenerator::verify(kernel::Graph &g) {
     }
   };
 
-  auto unmark_outputs = [&](std::vector<int> const &match) {
-    while (g.operators.back()->op_type == type::KNOperatorType::KN_OUTPUT_OP) {
-      delete g.operators.back();
-      g.operators.pop_back();
-    }
-  };
+
+    auto get_matches = [](int num_outputs) {
+      std::vector<std::vector<int>> results;
+      std::vector<int> perm;
+      for (int i = 0; i < num_outputs; ++i) {
+        perm.push_back(i);
+      }
+      do {
+        results.push_back(perm);
+      } while (std::next_permutation(perm.begin(), perm.end()));
+      return results;
+    };
+
+    auto mark_outputs = [&](std::vector<int> const &match) {
+      for (size_t i = 0; i < match.size(); ++i) {
+        g.mark_output(outputs[match[i]]);
+      }
+    };
+
+    auto unmark_outputs = [&](std::vector<int> const &match) {
+      while (g.operators.back()->op_type ==
+             type::KNOperatorType::KN_OUTPUT_OP) {
+        delete g.operators.back();
+        g.operators.pop_back();
+      }
+    };
 
   auto have_same_fingerprint = [&](std::vector<int> const &match) {
     for (size_t i = 0; i < match.size(); ++i) {

@@ -52,27 +52,32 @@ namespace cost {
 using cost_t = int;
 
 // In kernel-level reduction OP, the cost when innermost_dim == reduction_dim
-cost_t KN_REDUCTION_INNERMOST_EQ_REDUC_DIM = 4;
+cost_t KN_REDUCTION_INNERMOST_EQ_REDUC_DIM = 4000;
 
 // In tb level input/output OP, the cost when the stensor do not have the same
 // innermost dim as the source dtensor
-cost_t TB_INPUT_NO_WIDE_COPY = 4;
-cost_t TB_OUTPUT_NO_WIDE_COPY = 4;
+cost_t TB_INPUT_NO_WIDE_COPY = 4000;
+cost_t TB_OUTPUT_NO_WIDE_COPY = 4000;
 
 // In tb level input/output op, the cost when ldmatrix is supported by hardware
 // but we do not use it
-cost_t TB_MATMUL_NO_LDMATRIX = 10;
+cost_t TB_MATMUL_NO_LDMATRIX = 10000;
 
 // In tb level input OP, the cost when cp.async is available but cannot be used
 // since the innermost dim of the stensor is not the same as the source dtensor
-cost_t TB_INPUT_NO_CP_ASYNC = 20;
+cost_t TB_INPUT_NO_CP_ASYNC = 20000;
 
 // Make a dim swizzled
-cost_t SWIZZLE_DIM = 1;
+cost_t SWIZZLE_DIM = 1000;
+
+// The cost of allocate 1B of shared memory for stensor is 1
+cost_t SMEM_FACTOR = 1;
 
 } // namespace cost
 
-void calc_tensor_strides(size_t strides[],
+// This function calculate strides and num_phy_elems
+// When strides==nullptr, strides calculation is skipped
+void calc_tensor_strides(size_t* strides,
                          size_t &num_phy_elems,
                          int num_dims,
                          int const dims[],
@@ -90,7 +95,9 @@ void calc_tensor_strides(size_t strides[],
   bool encountered_non1_dim = false;
   for (int dim_idx : dim_order) {
     int cur_dim = dims[dim_idx];
-    strides[dim_idx] = cur_stride;
+    if (strides!=nullptr) {
+      strides[dim_idx] = cur_stride;
+    }
     if (cur_dim != 1) {
       if (!encountered_non1_dim) {
         cur_stride *= round_to_multiple((size_t)cur_dim, alignment);
@@ -575,6 +582,24 @@ void Transpiler::resolve_tensor_layout() {
             assert(fmt("Unknown TB op: $", tb_op->op_type).c_str());
         }
       }
+    }
+  }
+
+  // Add stensors' cost related to shared memory usage
+  for (tb::STensor const &stensor : all_stensors) {
+    for (int i = 0; i < stensor.num_dims; ++i) {
+      size_t num_phy_elems;
+      calc_tensor_strides(nullptr,
+                          num_phy_elems,
+                          stensor.num_dims,
+                          stensor.dim,
+                          i,
+                          type::get_datatype_size(stensor.data_type));
+      int smem_usage_cost = num_phy_elems
+                          * type::get_datatype_size(stensor.data_type);
+      costs.push_back(z3::ite(s_is_innermost[stensor.guid][i],
+                              ctx.int_val(smem_usage_cost),
+                              ctx.int_val(0)));
     }
   }
 
