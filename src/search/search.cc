@@ -361,6 +361,7 @@ void KernelGraphGenerator::generate_next_operator(
         if (!new_op) {
           continue;
         };
+        TBOperator *last_op = c.tb_graph->operators.back();
         c.tb_graph->operators.push_back(new_op);
         if (check_range(init_ranges, target_ranges, *c.kn_graph, c.tb_graph)) {
           if (depth < max_depth) {
@@ -372,8 +373,10 @@ void KernelGraphGenerator::generate_next_operator(
             generate_next_operator(c, verify, verified, depth + 1);
           }
         }
-        delete c.tb_graph->operators.back();
-        c.tb_graph->operators.pop_back();
+        while (c.tb_graph->operators.back() != last_op) {
+          delete c.tb_graph->operators.back();
+          c.tb_graph->operators.pop_back();
+        }
       }
     }
   }
