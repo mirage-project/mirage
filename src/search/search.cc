@@ -428,6 +428,7 @@ void KernelGraphGenerator::preprocess(kernel::Graph const &computation_graph) {
   } else {
     this->verifier = std::make_shared<FormalVerifier>(computation_graph);
   }
+  this->_verfifier = std::make_shared<FormalVerifier>(computation_graph);
 }
 
 bool KernelGraphGenerator::check_pattern(
