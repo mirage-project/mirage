@@ -20,7 +20,7 @@ KernelGraphGenerator::KernelGraphGenerator(
     char const *filename,
     bool verbose)
     : config(config), dim_strategy(DimStrategy(config)), filename(filename),
-      num_thread(8), verbose(verbose), num_total_random_tests(0),
+      num_thread(config.search_thread), verbose(verbose), num_total_random_tests(0),
       num_valid_kernel_graphs(0), num_total_states(0), num_tasks(0),
       max_depth(5) {
   preprocess(computation_graph);
