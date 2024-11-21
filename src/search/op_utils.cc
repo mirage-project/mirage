@@ -92,17 +92,17 @@ std::shared_ptr<AbstractExpr> get_pattern(type::KNOperatorType op,
   assert(opd != nullptr);
   switch (op) {
     case type::KNOperatorType::KN_REDUCTION_0_OP:
-      return std::make_shared<Red>(tensor.dim[0], opd);
+      return make_reduction_pattern(tensor.dim[0], opd);
     case type::KNOperatorType::KN_REDUCTION_1_OP:
       if (tensor.num_dims <= 1) {
         return nullptr;
       }
-      return std::make_shared<Red>(tensor.dim[1], opd);
+      return make_reduction_pattern(tensor.dim[1], opd);
     case type::KNOperatorType::KN_REDUCTION_2_OP:
       if (tensor.num_dims <= 2) {
         return nullptr;
       }
-      return std::make_shared<Red>(tensor.dim[2], opd);
+      return make_reduction_pattern(tensor.dim[2], opd);
     case type::KNOperatorType::KN_EXP_OP:
       return std::make_shared<Exp>(opd);
     case type::KNOperatorType::KN_SILU_OP:
@@ -133,45 +133,44 @@ std::shared_ptr<AbstractExpr> get_pattern(type::TBOperatorType op,
           opd, std::make_shared<RMS>(tensor.dim[tensor.num_dims - 1], opd));
     }
     case type::TBOperatorType::TB_REDUCTION_0_OP:
-      return std::make_shared<Red>(tensor.dim[0], opd);
+      return make_reduction_pattern(tensor.dim[0], opd);
     case type::TBOperatorType::TB_REDUCTION_1_OP:
       if (tensor.num_dims <= 1) {
         return nullptr;
       }
-      return std::make_shared<Red>(tensor.dim[1], opd);
+      return make_reduction_pattern(tensor.dim[1], opd);
     case type::TBOperatorType::TB_REDUCTION_2_OP:
       if (tensor.num_dims <= 2) {
         return nullptr;
       }
-      return std::make_shared<Red>(tensor.dim[2], opd);
+      return make_reduction_pattern(tensor.dim[2], opd);
     case type::TBOperatorType::TB_REDUCTION_0_TO_DIMX_OP:
       if (tensor.dim[0] <= reduction_dimx) {
         return nullptr;
       }
-      return std::make_shared<Red>(tensor.dim[0] / reduction_dimx, opd);
+      return make_reduction_pattern(tensor.dim[0] / reduction_dimx, opd);
     case type::TBOperatorType::TB_REDUCTION_1_TO_DIMX_OP:
       if (tensor.num_dims <= 1 || tensor.dim[1] <= reduction_dimx) {
         return nullptr;
       }
-      return std::make_shared<Red>(tensor.dim[1] / reduction_dimx, opd);
+      return make_reduction_pattern(tensor.dim[1] / reduction_dimx, opd);
     case type::TBOperatorType::TB_REDUCTION_2_TO_DIMX_OP:
       if (tensor.num_dims <= 2 || tensor.dim[2] <= reduction_dimx) {
         return nullptr;
       }
-      return std::make_shared<Red>(tensor.dim[2] / reduction_dimx, opd);
+      return make_reduction_pattern(tensor.dim[2] / reduction_dimx, opd);
     case type::TBOperatorType::TB_FORLOOP_ACCUM_NO_RED_OP: {
-      return std::make_shared<Red>(forloop_range, opd);
+      return make_reduction_pattern(forloop_range, opd);
     }
     case type::TBOperatorType::TB_FORLOOP_ACCUM_RED_LD_MEAN_OP:
     case type::TBOperatorType::TB_FORLOOP_ACCUM_RED_LD_SUM_OP: {
-      return std::make_shared<Red>(
-          forloop_range * tensor.dim[tensor.num_dims - 1], opd);
+      return make_reduction_pattern(forloop_range * tensor.dim[tensor.num_dims - 1], opd);
     }
     case type::TBOperatorType::TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP: {
       if (tensor.dim[tensor.num_dims - 1] <= reduction_dimx) {
         return nullptr;
       }
-      return std::make_shared<Red>(
+      return make_reduction_pattern(
           forloop_range * tensor.dim[tensor.num_dims - 1] / reduction_dimx,
           opd);
     }
@@ -194,12 +193,8 @@ std::shared_ptr<AbstractExpr> get_pattern(type::KNOperatorType op,
   assert(rhs != nullptr);
   switch (op) {
     case type::KNOperatorType::KN_MATMUL_OP:
-      if (tensor_l.dim[tensor_l.num_dims - 1] > 1) {
-        return std::make_shared<Red>(tensor_l.dim[tensor_l.num_dims - 1],
-                                     std::make_shared<Mul>(lhs, rhs));
-      } else {
-        return std::make_shared<Mul>(lhs, rhs);
-      }
+      return make_reduction_pattern(tensor_l.dim[tensor_l.num_dims - 1],
+                                    std::make_shared<Mul>(lhs, rhs));
     case type::KNOperatorType::KN_ADD_OP:
       return std::make_shared<Add>(lhs, rhs);
     case type::KNOperatorType::KN_DIV_OP:
@@ -220,12 +215,8 @@ std::shared_ptr<AbstractExpr> get_pattern(type::TBOperatorType op,
   assert(rhs != nullptr);
   switch (op) {
     case type::TBOperatorType::TB_MATMUL_OP:
-      if (tensor_l.dim[tensor_l.num_dims - 1] > 1) {
-        return std::make_shared<Red>(tensor_l.dim[tensor_l.num_dims - 1],
-                                     std::make_shared<Mul>(lhs, rhs));
-      } else {
-        return std::make_shared<Mul>(lhs, rhs);
-      }
+      return make_reduction_pattern(tensor_l.dim[tensor_l.num_dims - 1],
+                                    std::make_shared<Mul>(lhs, rhs));
     case type::TBOperatorType::TB_ADD_OP:
       return std::make_shared<Add>(lhs, rhs);
     case type::TBOperatorType::TB_DIV_OP:

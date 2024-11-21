@@ -11,10 +11,6 @@
 namespace mirage {
 namespace search {
 
-std::unordered_map<std::pair<std::string, std::string>, bool>
-    AbstractExpr::cached_results;
-std::shared_mutex AbstractExpr::solver_mutex;
-
 z3::expr_vector to_expr_vector(z3::context &c,
                                std::vector<z3::expr> const &_vec) {
   z3::expr_vector vec(c);
@@ -25,15 +21,6 @@ z3::expr_vector to_expr_vector(z3::context &c,
 }
 
 bool AbstractExpr::subpattern_to(AbstractExpr const &other) const {
-  std::pair<std::string, std::string> str_pair =
-      std::make_pair(to_string(), other.to_string());
-  {
-    std::shared_lock<std::shared_mutex> lock(solver_mutex);
-    if (contains_key(cached_results, str_pair)) {
-      return cached_results.at(str_pair);
-    }
-  }
-
   z3::context c;
 
   z3::sort P = c.uninterpreted_sort("P");
@@ -120,10 +107,6 @@ bool AbstractExpr::subpattern_to(AbstractExpr const &other) const {
   s.add(!subpattern(pattern1, pattern2));
 
   bool result = s.check() == z3::unsat;
-  {
-    std::unique_lock<std::shared_mutex> lock(solver_mutex);
-    cached_results[str_pair] = result;
-  }
   return result;
 }
 
