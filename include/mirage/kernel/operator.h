@@ -38,8 +38,8 @@ public:
   KNOperator(Graph *graph,
              mirage::type::KNOperatorType _type,
              std::vector<DTensor> const &inputs);
-  int get_input_dtensors(DTensor** inputs);
-  int get_output_dtensors(DTensor** inputs);
+  int get_input_dtensors(DTensor **inputs);
+  int get_output_dtensors(DTensor **inputs);
 
   virtual ~KNOperator();
   virtual bool profile(ProfileResult &result) = 0;

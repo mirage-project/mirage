@@ -1,4 +1,4 @@
-#include "mirage/search/range.h"
+#include "mirage/search/range_propagation/range.h"
 
 #include <algorithm>
 
