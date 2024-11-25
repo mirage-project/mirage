@@ -10,5 +10,6 @@ if __name__ == "__main__":
     O = graph.matmul(D, W)
     graph.mark_output(O)
     optimized_graph = graph.superoptimize(config="mlp", backend="nki")
-    g = optimized_graph[0]
-    print(mi.generate_nki_program(g.cygraph, target_cc=10)["code"])
+    for g in optimized_graph:
+        print("Next MuGraph")
+        print(mi.generate_nki_program(g.cygraph, target_cc=10)["code"])
