@@ -84,32 +84,36 @@ NKICustomOPTranspileResult
       // We determine whether we want to transpose the accum based on
       // tb_op's input. This is because, in the case tb_op's input
       // and output have different partition_dim, we defer the transpose
-      // to be performed after forloop to reduce cost
-      tb::STensor const &stensor = tb_op->input_tensors.at(0);
-      STensorMeta meta = stensor_metas.at(stensor.guid);
-      // Assert that only the last two dims can have size larger than 1
-      for (int i = 0; i < stensor.num_dims - 2; i++) {
-        assert(stensor.dim[i] == 1);
+      // to be performed after forloop to reduce cost.
+      tb::STensor const &input = tb_op->input_tensors.at(0);
+      tb::STensor const &accum = tb_op->output_tensors.at(0);
+      STensorMeta const &input_meta = stensor_metas.at(input.guid);
+      // Assert properties of input and output tensors.
+      assert(input.num_dims == accum.num_dims &&
+             "input and output should have the same dimensions");
+      for (int i = 0; i < input.num_dims - 2; i++) {
+        assert(input.dim[i] == 1 && "expected a dimension with size 1");
       }
-      if (stensor.num_dims == 1) {
+
+      if (input.num_dims == 1) {
         // Create a 1D tile
         code.e("$ = nl.zeros(($), dtype=nl.float16, buffer=nl.sbuf)",
-               fmt("stensor$", stensor.guid),
-               stensor.dim[0]);
+               fmt("stensor$", accum.guid),
+               input.dim[0]);
       } else {
         // Create a 2D tile
-        if (meta.partition_dim == stensor.num_dims - 2) {
+        if (input_meta.partition_dim == input.num_dims - 2) {
           code.e("$ = nl.zeros(($, $), dtype=nl.float16, buffer=nl.sbuf)",
-                 fmt("stensor$", stensor.guid),
-                 stensor.dim[stensor.num_dims - 2],
-                 stensor.dim[stensor.num_dims - 1]);
+                 fmt("stensor$", accum.guid),
+                 input.dim[input.num_dims - 2],
+                 input.dim[input.num_dims - 1]);
         } else {
-          assert(meta.partition_dim == stensor.num_dims - 1);
+          assert(input_meta.partition_dim == input.num_dims - 1);
           // num_dims - 1 is the partition_dim
           code.e("$ = nl.zeros(($, $), dtype=nl.float16, buffer=nl.sbuf)",
-                 fmt("stensor$", stensor.guid),
-                 stensor.dim[stensor.num_dims - 1],
-                 stensor.dim[stensor.num_dims - 2]);
+                 fmt("stensor$", accum.guid),
+                 input.dim[input.num_dims - 1],
+                 input.dim[input.num_dims - 2]);
         }
       }
     }
