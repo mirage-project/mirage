@@ -254,6 +254,7 @@ cdef extern from "mirage/search/search_c.h" namespace "mirage::search_c":
                            vector[MDim3] blockdims,
                            vector[int] fmaps,
                            vector[int] franges,
+                           const char * filename,
                            bool verbose,
                            const char * default_config)
 

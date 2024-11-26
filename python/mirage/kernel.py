@@ -339,6 +339,7 @@ class KNGraph:
         franges: list = None,
         verbose: bool = False,
         config: str = None,
+        previous_checkpoint: str = None,
     ):
         cygraphs = search(
             self.cygraph,
@@ -348,6 +349,7 @@ class KNGraph:
             blockdims=blockdims,
             fmaps=fmaps,
             franges=franges,
+            previous_checkpoint=previous_checkpoint,
             verbose=verbose,
             default_config=config,
         )

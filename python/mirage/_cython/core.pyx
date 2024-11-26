@@ -919,12 +919,17 @@ def search(CyKNGraph input_graph, *, int max_num_new_graphs = 1024, list imaps =
     cdef CppKNGraph* cnewgraphs[1024]
     # set verbose
     cverbose = verbose
+    # set previous_checkpoint
+    cdef char* cprevious_checkpoint = NULL
+    if previous_checkpoint is not None:
+        py_byte_string = previous_checkpoint.encode('UTF-8')
+        cprevious_checkpoint = py_byte_string
     # convert config description
     cdef char* cconfig = NULL
     if default_config is not None:
         py_byte_string = default_config.encode('UTF-8')
         cconfig = py_byte_string
-    num = cython_search(input_graph.p_kgraph, max_num_new_graphs, cnewgraphs, cimaps, comaps, cgriddims, cblockdims, cfmaps, cfranges, cverbose, cconfig)
+    num = cython_search(input_graph.p_kgraph, max_num_new_graphs, cnewgraphs, cimaps, comaps, cgriddims, cblockdims, cfmaps, cfranges, cprevious_checkpoint, cverbose, cconfig)
     new_graphs = list()
     for i in range(num):
         ptr = ctypes.cast(<unsigned long long>cnewgraphs[i], ctypes.c_void_p)
