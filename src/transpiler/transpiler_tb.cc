@@ -1078,8 +1078,10 @@ CustomOPTranspileResult
 
   code.e("}"); // kernel
 
-  return CustomOPTranspileResult{
-      func_name, mem_plan.smem_size, code.to_string()};
+  return CustomOPTranspileResult{CustomOPTranspileResult::SUCCESS,
+                                 func_name,
+                                 mem_plan.smem_size,
+                                 code.to_string()};
 }
 
 } // namespace transpiler
