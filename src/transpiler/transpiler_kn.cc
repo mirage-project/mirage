@@ -409,6 +409,18 @@ TranspileResult Transpiler::transpile_ugraph() {
         }
         // Transpile
         CustomOPTranspileResult result = transpile_kn_custom_op(cur_op);
+        if (result.state != CustomOPTranspileResult::SUCCESS) {
+          vector<OutputTensorDirective> output_directives;
+          TranspileResult::State state;
+          switch (result.state) {
+            case CustomOPTranspileResult::INSUFFICIENT_SHARED_MEMORY:
+              state = TranspileResult::INSUFFICIENT_SHARED_MEMORY;
+              break;
+            default:
+              state = TranspileResult::UNKNOWN_ERRORS;
+          }
+          return TranspileResult{state, "", 0, 0, output_directives};
+        }
         if (result.smem_size > max_smem_size) {
           max_smem_size = result.smem_size;
         }
@@ -479,8 +491,11 @@ TranspileResult Transpiler::transpile_ugraph() {
         vector<int>(dtensor.dim, dtensor.dim + dtensor.num_dims),
         vector<size_t>(meta.strides, meta.strides + dtensor.num_dims)});
   }
-  return TranspileResult{
-      code, this->d_buf_size, max_smem_size, output_directives};
+  return TranspileResult{TranspileResult::SUCCESS,
+                         code,
+                         this->d_buf_size,
+                         max_smem_size,
+                         output_directives};
 }
 
 } // namespace transpiler

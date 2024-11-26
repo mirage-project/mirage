@@ -50,6 +50,16 @@ struct OutputTensorDirective {
 
 // Result returned by the transpiler
 struct TranspileResult {
+  enum State {
+    SUCCESS = 0,
+    INSUFFICIENT_SHARED_MEMORY = 1,
+    UNKNOWN_ERRORS = 999,
+  };
+
+  // A state indicating whether the transpile kernel is
+  // valid or not
+  State state;
+
   // The generated CUDA code
   std::string code;
 
@@ -65,6 +75,14 @@ struct TranspileResult {
 
 // Transpile a custom KN operator (a custom block graph)
 struct CustomOPTranspileResult {
+  enum State {
+    SUCCESS = 0,
+    INSUFFICIENT_SHARED_MEMORY = 1,
+    UNKNOWN_ERRORS = 999,
+  };
+  // A state indicating whether the transpile kernel is
+  // valid or not
+  State state;
   // The name of the generated kernel function
   std::string func_name;
   // The size of the shared memory, in bytes
