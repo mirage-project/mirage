@@ -222,7 +222,7 @@ NKICustomOPTranspileResult
         // Add a nl.transpose if input0's partition dim is not
         // output.num_dims - 1
         if (meta0.partition_dim != output.num_dims - 1) {
-          operand0 = fmt("nl.transpose(stensor$))", input0.guid);
+          operand0 = fmt("nl.transpose(stensor$)", input0.guid);
         }
         // Add a nl.transpose if input1's partition dim is not
         // output.num_dims - 2
