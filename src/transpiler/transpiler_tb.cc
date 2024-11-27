@@ -779,6 +779,8 @@ CustomOPTranspileResult
               break;
             }
           }
+          assert(iter_dim != -1);
+#ifdef DEADCODE
           if (iter_dim == -1) {
             // We cannot find a dim that satisfies our assumption:
             // dim i in input&output tensor == meta.innermost_dim or
@@ -786,7 +788,7 @@ CustomOPTranspileResult
             // We return a CUDA_T_LAYOUT_ERROR
             return CUDA_T_LAYOUT_ERROR;
           }
-          assert(iter_dim != -1);
+#endif
           // Define layouts
           string in_layout = mov_last_get_stensor_layout(
               input, stensor_metas.at(input.guid), iter_dim);
