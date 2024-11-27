@@ -651,8 +651,8 @@ CustomOPTranspileResult
 
   // A lambda function that transpiles an TBSchedNode
   auto transpile_tb_sched_node = [&](TBSchedNode const &sched_node,
+                                     CodeKeeper &code,
                                      bool is_in_loop) {
-    CodeKeeper code;
     if (sched_node.type == tb_sched_node_t::SYNCTHREADS) {
       code.e("__syncthreads();");
     } else {
@@ -778,6 +778,13 @@ CustomOPTranspileResult
               iter_dim = i;
               break;
             }
+          }
+          if (iter_dim == -1) {
+            // We cannot find a dim that satisfies our assumption:
+            // dim i in input&output tensor == meta.innermost_dim or
+            // meta.swizzled_dim
+            // We return a CUDA_T_LAYOUT_ERROR
+            return CUDA_T_LAYOUT_ERROR;
           }
           assert(iter_dim != -1);
           // Define layouts
@@ -980,7 +987,7 @@ CustomOPTranspileResult
       }
       code.e("}");
     }
-    return code;
+    return CUDA_T_SUCCESS;
   };
 
   // Declare the for loop
@@ -1031,8 +1038,12 @@ CustomOPTranspileResult
             dynamic_cast<tb::TBInputOp const *>(sched_node.ops[0].first))) {
       continue;
     }
-    CodeKeeper res = transpile_tb_sched_node(sched_node, true);
+    CodeKeeper res;
+    TranspileErrorType err = transpile_tb_sched_node(sched_node, res, true);
     code << res;
+    if (err != CUDA_T_SUCCESS) {
+      return CustomOPTranspileResult{err, func_name, 0, ""};
+    }
   }
 
   code.e("}"); // For loop
@@ -1071,15 +1082,19 @@ CustomOPTranspileResult
     code.e("// The epilogue (kernels outside the loop)");
     code.e("__syncthreads();");
     for (TBSchedNode const &sched_node : sched.post_loop_nodes) {
-      CodeKeeper res = transpile_tb_sched_node(sched_node, false);
+      CodeKeeper res;
+      TranspileErrorType err = transpile_tb_sched_node(sched_node, res, false);
       code << res;
+      if (err != CUDA_T_SUCCESS) {
+        return CustomOPTranspileResult{err, func_name, 0, ""};
+      }
     }
   }
 
   code.e("}"); // kernel
 
   return CustomOPTranspileResult{
-      func_name, mem_plan.smem_size, code.to_string()};
+      CUDA_T_SUCCESS, func_name, mem_plan.smem_size, code.to_string()};
 }
 
 } // namespace transpiler
