@@ -5,10 +5,6 @@ using namespace cute;
 
 namespace tb {
 
-// static int const NumThreadsPerWarp = 32;
-// static int const NumThreadsPerWarpGroup = 128;
-// static int const NumWarpsPerWarpGroup =
-//     NumThreadsPerWarpGroup / NumThreadsPerWarp;
 
 static int const kStages = 2;
 
@@ -24,9 +20,16 @@ struct SharedStorage {
 };
 
 enum class WarpGroupRole {
-    Producer = 0,
-    Consumer = 1,
+    Producer = 1,
+    Consumer = 0,
 };
+
+enum class ProducerWarpRole {
+      MainloopEpilogue = 0,
+      Warp1 = 1,
+      Warp2 = 2,
+      Warp3 = 3
+    };
 
 }
 

@@ -14,10 +14,12 @@
 
 #pragma once
 
+#include <cutlass/arch/reg_reconfig.h>
 #include "cute/arch/cluster_sm90.hpp"
 #include "cutlass/pipeline/pipeline.hpp"
 #include "hopper_mainloop_params.h"
 #include "cutlass/gemm/gemm.h"
+#include "cutlass/gemm/collective/builders/sm90_common.inl"
 #include <cstdint>
 #include <cute/layout.hpp>
 using namespace cute;
@@ -91,7 +93,7 @@ public:
     auto dst_chunked_coord2coord = DstChunkedCoord2Coord{};
 #pragma unroll
     for (int chunk_idx = thread_idx; chunk_idx < NUM_CHUNKS;
-         chunk_idx += NUM_THREADS) {
+         chunk_idx += 128) {
       uint128_t res =
           *((uint128_t const *)(src + src_layout(
                                           src_chunked_coord2coord(chunk_idx))));
@@ -137,212 +139,139 @@ public:
   }
 };
 
-// static __device__ __forceinline__ auto tma_make_coord(int forloop_dim,
-//                                                       int forloop_idx,
-//                                                       int imap_x,
-//                                                       int imap_y,
-//                                                       int imap_z,
-//                                                       int rank,
-//                                                       int *res) {
-
-//   assert(rank == 2);
-//   res[0] = -1;
-//   res[1] = -1;
-//   res[2] = -1;
-//   if (forloop_dim == 0) {
-//     res[0] = forloop_idx;
-//   } else if (forloop_dim == 1) {
-//     res[1] = forloop_idx;
-//   } else if (forloop_dim == 2) {
-//     res[2] = forloop_idx;
-//   }
-
-//   if (imap_x != -1) {
-//     int div_dim = imap_x == 0 ? 0 : imap_x == 1 ? 1 : 2;
-//     res[div_dim] =
-//         imap_x == forloop_dim ? forloop_idx * blockIdx.x : blockIdx.x;
-//   }
-//   if (imap_y != -1) {
-//     int div_dim = imap_y == 0 ? 0 : imap_y == 1 ? 1 : 2;
-//     res[div_dim] =
-//         imap_y == forloop_dim ? forloop_idx * blockIdx.y : blockIdx.y;
-//   }
-//   if (imap_z != -1) {
-//     // z = imap_z == forloop_dim ? forloop_idx * blockIdx.y : blockIdx.y;
-//     int div_dim = imap_z == 0 ? 0 : imap_z == 1 ? 1 : 2;
-//     res[div_dim] =
-//         imap_z == forloop_dim ? forloop_idx * blockIdx.z : blockIdx.z;
-//   }
-
-//   // if (thread0()) {
-//   //   printf("imap xyz %d %d %d\n", imap_x, imap_y, imap_z);
-//   //   printf("xyz %d %d %d\n", res[0], res[1], res[2]);
-//   // }
-
-//   if (res[0] >= 0 && res[1] >= 0) {
-//     return make_coord(res[0], res[1]);
-//   } else if (res[0] >= 0 && res[2] >= 0) {
-//     assert(false);
-//   } else if (res[1] >= 0 && res[2] >= 0) {
-//     assert(false);
-//   } else if (res[0] >= 0) {
-//     return make_coord(res[0], 0);
-//   } else if (res[1] >= 0) {
-//     return make_coord(0, res[1]);
-//   } else if (res[2] >= 0) {
-//     assert(false);
-//   } else {
-//     return make_coord(0, 0);
-//   }
-
-//   return make_coord(0, 0);
-// }
-
-// static __device__ __forceinline__ auto tma_make_coord(int imap_x,
-//                                                       int imap_y,
-//                                                       int imap_z) {
-
-//   if(imap_x != 0){
-//     return make_coord(blockIdx.x, _);
-//   }
-
-//   return make_coord(_, _);
-// }
-// Type 4 : Copy using the Tensor Memory
-//          Accelerator(TMA)
 template <typename T, class DstLayout, class SrcLayout, class TMA, class MainloopPipeline, class PipelineState>
 class InputTMAAsyncCopy {
 public:
   CUTE_STATIC_ASSERT_V(rank(SrcLayout{}) == rank(DstLayout{}));
-  static constexpr int tmaTransactionBytes = sizeof(T) * size(DstLayout{});
+  
   using CTA_TILER = decltype(shape(DstLayout{}));
 
-  // using CTA_TILER = decltype(replace<0>(SrcLayout{}, shape<1>(DstLayout{})));
-  // using CTA_TILER = decltype(make_shape(shape<0>(SrcLayout{}), shape<1>(DstLayout{})));
-
-  //tile shape = 64, 4096
-  //TODO, change it
-  using SrcPipeLayput = decltype(make_shape(shape<0>(SrcLayout{}), shape<0>(DstLayout{})));
-  
-  using DstPipeLayout = decltype(tile_to_shape(
-        DstLayout{},
-        make_shape(shape<0>(DstLayout{}), shape<1>(DstLayout{}), Int<kStages>{}), Step<_1, _2, _3>{}));
+  // using CTA_TILER = typename std::conditional<(stride<0>(DstLayout{}) == _1{}), decltype(make_shape(shape<1>(DstLayout{}), shape<0>(DstLayout{})))
+  // ,decltype(make_shape(shape<0>(DstLayout{}), shape<1>(DstLayout{})))>::type;
+  // using DstPipeLayout = decltype(tile_to_shape(
+  //       DstLayout{},
+  //       make_shape(shape<0>(DstLayout{}), shape<1>(DstLayout{}), Int<kStages>{}), Step<_1, _2, _3>{}));
   // 4096, 64, 2
+
+  static constexpr GMMA::Major GmmaMajor = (shape<0>(DstLayout{}) == _1{} ? GMMA::Major::K : GMMA::Major::MN);
+  using SmemLayoutAtom = decltype(cutlass::gemm::collective::detail::ss_smem_selector<
+      GmmaMajor, half_t, decltype(get<0>(DstLayout{})), decltype(get<1>(DstLayout{}))>());
+
+  using DstPipeLayout = decltype(tile_to_shape(
+        SmemLayoutAtom{},
+        make_shape(shape<0>(DstLayout{}), shape<1>(DstLayout{}), Int<kStages>{}), Step<_1, _2, _3>{}));
+  using MainloopPipelines = MainloopPipeline;
+  using PipelineStates = PipelineState;
+  using SrcLayouts = SrcLayout;
+  using DstLayouts = DstLayout;
+  using TMAs = TMA; 
+  static constexpr int tmaTransactionBytes = sizeof(T) * size(DstPipeLayout{}) / kStages;
+  
   static __device__ __forceinline__ void prefetch(TMA const &tma){
     cute::prefetch_tma_descriptor(tma.get_tma_descriptor());
   }
+};
 
-  static __device__ __forceinline__ void run(TMA const &tma,
-                                             T *dst,
-                                             T const *src,
+template<class TMACopy1, class TMACopy2>
+class TMACopyPipeline2{
+
+public:
+    using T = half_t;
+    using TMA_A =  TMACopy1;
+    using TMA_B =  TMACopy2;
+    using CopyA = typename TMA_A::TMAs;
+    using CopyB = typename TMA_B::TMAs;
+    using MainloopPipeline = typename TMA_A::MainloopPipelines;
+    using PipelineState = typename TMA_A::PipelineStates;
+    using SrcLayout_A = typename TMA_A::SrcLayouts;
+    using SrcLayout_B = typename TMA_B::SrcLayouts;
+    using CTA_TILER_A = typename TMA_A::CTA_TILER;
+    using CTA_TILER_B = typename TMA_B::CTA_TILER;
+    using DstPipeLayout_A = typename TMACopy1::DstPipeLayout;
+    using DstPipeLayout_B = typename TMACopy2::DstPipeLayout;
+    static __device__ __forceinline__ void run(CopyA const &tma_a,
+                                                CopyB const &tma_b,
+                                             T *dst_a,
+                                             T *dst_b,
                                              MainloopPipeline pipeline,
                                              PipelineState &smem_pipe_write,
                                              unsigned k_tile_count,
-                                             unsigned forloop_dim,
-                                             int imapx,
-                                             int imapy,
-                                             int imapz,
-                                             int warp_idx, tb::WarpGroupRole warp_group_role, int warp_idx_in_warp_group, int warp_group_thread_idx, int lane_predicate) {
-
+                                             int imapx_a,
+                                             int imapy_a,
+                                             int imapz_a,
+                                             int imapx_b,
+                                             int imapy_b,
+                                             int imapz_b,
+                                             int lane_predicate) {
     if(lane_predicate){
-      // Tensor mA = tma.get_tma_tensor(append<3>(shape(SrcLayout{}), Int<1>{}));
-
-      Tensor mA = tma.get_tma_tensor(shape(SrcPipeLayput{}));
-      // Coord<2> cta_coord = imapx == -1 ? make_coord(_, _) : make_coord(blockIdx.x, _); 
       
-      // auto cta_coord = make_coord(0, 0);
-      Tensor gA = local_tile(mA, CTA_TILER{}, make_coord(_, _)); 
-      // Tensor gA = local_tile(mA, CTA_TILER{}, cta_coord);
-      Tensor sA = make_tensor(make_smem_ptr(dst), DstPipeLayout{});
-
-      auto cta_tma = tma.get_slice(Int<0>{});  // CTA slice
-      Tensor tAgA_x = cta_tma.partition_S(gA); // (TMA,TMA_M,TMA_N,REST_M,REST_N)
-      Tensor tAsA_x = cta_tma.partition_D(sA); // (TMA,TMA_M,TMA_N)
-      Tensor tAsA = group_modes<1, rank(tAsA_x)>(tAsA_x);
-      Tensor tAgA = group_modes<1, rank(tAgA_x)>(tAgA_x); // (TMA,REST)
-
-        
-      if(blockIdx.x == 0){
-        // print("sdsdsds: ");
-        // print(warp_idx);
-        // print("\n");
-        // print(warp_idx_in_warp_group);
-        // print("\n");
-        // print("mA: ");
-        // print(mA);
-        // print("\n");
-
-        // print("gA: ");
-        // print(gA);
-        // print("\n");
-
-        // print("sA: ");
-        // print(sA);
-        // print("\n");
+      Tensor mA = tma_a.get_tma_tensor(shape(SrcLayout_A{}));
+      Tensor mB = tma_b.get_tma_tensor(shape(SrcLayout_B{}));
+      
+      Tensor gA_mkl = local_tile(mA, CTA_TILER_A{}, make_coord(_, _)); 
+      Tensor gA = gA_mkl(_, _, _, (imapx_a > 0 ? blockIdx.x : 0));
+      Tensor sA = make_tensor(make_smem_ptr(dst_a), DstPipeLayout_A{});
 
 
-        // print("tAgA: ");
-        // print(tAgA);
-        // print("\n");
+      auto cta_tma_a = tma_a.get_slice(Int<0>{});  // CTA slice
+      Tensor tAgA = cta_tma_a.partition_S(gA); // (TMA,TMA_M,TMA_N,REST_M,REST_N)
+      Tensor tAsA = cta_tma_a.partition_D(sA); // (TMA,TMA_M,TMA_N)
 
-        // print("tAsA: ");
-        // print(tAsA);
-        // print("\n");
+      Tensor gB_mkl = local_tile(mB, CTA_TILER_B{}, make_coord(_, _)); 
+      // since
+      Tensor gB = gB_mkl(_, _, (imapx_b > 0 ? blockIdx.x : 0), _);
+      Tensor sB = make_tensor(make_smem_ptr(dst_b), DstPipeLayout_B{});
 
-        // print("tma");
-        // print(tma);
-        // print("\n");
-      }
+
+      auto cta_tma_b = tma_b.get_slice(Int<0>{});  // CTA slice
+      Tensor tBgB = cta_tma_b.partition_S(gB); // (TMA,TMA_M,TMA_N,REST_M,REST_N)
+      Tensor tBsB = cta_tma_b.partition_D(sB); // (TMA,TMA_M,TMA_N)
+
+      //manully set
+      k_tile_count = 64;
       auto k_tile_iter  = cute::make_coord_iterator(k_tile_count);
       CUTLASS_PRAGMA_NO_UNROLL
       for (; k_tile_count > 0; --k_tile_count){
+        //  if(blockIdx.x == 0 && blockIdx.y == 0){
+        //   printf("producer acuire\n");
+        //  }
         pipeline.producer_acquire(smem_pipe_write);
         using BarrierType = typename MainloopPipeline::ProducerBarrierType;
         BarrierType *tma_barrier = pipeline.producer_get_barrier(smem_pipe_write);
-
+       
         int write_stage = smem_pipe_write.index();
+        //  if(blockIdx.x == 0 && blockIdx.y == 0){
+        //   print("\n");
+        //   printf("write stage %d\n", (TMA_A::tmaTransactionBytes + TMA_B::tmaTransactionBytes));
+        //  }
+        //   print(tAgA);
+        //   print("\n");
+        //   print(tAsA);
+        //   print("\n");
+        //   print(CTA_TILER_A{});
+        //   print("\n");
 
-        // printf("write stage: %d\n", write_stage);
-        // copy(tma.with(*tma_barrier), tAgA(_, _, *k_tile_iter), tAsA(_, _, write_stage));
+        //   print(CTA_TILER_B{});
+        //   print("\n");
+          
+        //   print(tBgB);
+        //   print("\n");
+        //   print(tBsB);
+
+        // //   print("\n");
+        // }
+        copy(tma_a.with(*tma_barrier), tAgA(_, _, _, *k_tile_iter), tAsA(_, _, _, write_stage));
+        copy(tma_b.with(*tma_barrier), tBgB(_, _, _, *k_tile_iter), tBsB(_, _, _, write_stage));
+
+        // pipeline.producer_commit(smem_pipe_write, (TMA_A::tmaTransactionBytes + TMA_B::tmaTransactionBytes));
         ++k_tile_iter;
-
         // Advance smem_pipe_write
         ++smem_pipe_write;
+
       }
 
-      if(lane_predicate){
-          pipeline.producer_tail(smem_pipe_write);
-      }
-
-          // int coord_value[3];
-          // auto cta_coord = make_coord(0, 0);
-          // coord_value);
-          // auto cta_coord = tma_make_coord(forloop_dim,
-          //                                 forloop_idx,
-          //                                 imapx,
-          //                                 imapy,
-          //                                 imapz,
-          //                                 rank(SrcLayout{}),
-          //                                 coord_value);
-
-          
-
-          // Tensor sA = make_tensor(make_smem_ptr(dst), DstLayout{});
-
-          // auto cta_tma = tma.get_slice(Int<0>{});  // CTA slice
-          // Tensor tAgA_x = cta_tma.partition_S(gA); // (TMA,TMA_M,TMA_N,REST_M,REST_N)
-          // Tensor tAsA_x = cta_tma.partition_D(sA); // (TMA,TMA_M,TMA_N)
-
-          // Tensor tAsA = group_modes<1, rank(tAsA_x)>(tAsA_x);
-          // Tensor tAgA = group_modes<1, rank(tAgA_x)>(tAgA_x); // (TMA,REST)
-          // // if (threadIdx.x == 0) {
-          // //   tma_load_mbar[0] = 0;
-          // //   initialize_barrier(tma_load_mbar[0], 1);
-          // //   set_barrier_transaction_bytes(tma_load_mbar[0], tmaTransactionBytes);
-          // //   copy(tma.with(tma_load_mbar[0]), tAgA, tAsA);
-          // // }
-          // // __syncthreads();
-          // // wait_barrier(tma_load_mbar[0], 0);
+      // smem_pipe_write.advance(k_tile_count);
+      // pipeline.producer_tail(smem_pipe_write);
     }
     
   }

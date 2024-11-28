@@ -29,6 +29,8 @@
 #include "mirage/transpiler/utils.h"
 #include "mirage/type.h"
 
+#include "cutlass/gemm/collective/builders/sm90_common.inl"
+
 namespace mirage {
 namespace transpiler {
 
@@ -86,11 +88,12 @@ static string get_stensor_layout(tb::STensor const &stensor,
     return get_layout_detail::get_cute_layout(stensor, meta, start_dim);
   } else {
     // XOR-based swizzling
-    return fmt("decltype(composition(Swizzle<$, $, $>{}, ${}))",
-               3,
-               4,
-               3,
-               get_layout_detail::get_cute_layout(stensor, meta, start_dim));
+    // return fmt("decltype(composition(Swizzle<$, $, $>{}, ${}))",
+    //            3,
+    //            4,
+    //            3,
+    //            get_layout_detail::get_cute_layout(stensor, meta, start_dim));
+    return get_layout_detail::get_cute_layout(stensor, meta, start_dim);
   }
 }
 
@@ -177,6 +180,47 @@ static string get_tb_op_str(type::TBOperatorType type) {
   return toString(type);
 }
 
+void Transpiler::get_hopper_tmas(CodeKeeper &code, std::vector<TMAParams> tmaParamsList){
+
+    // for (int i = 0; i < tmaParamsList.size(); i++) {
+
+    // }
+    code.e("template <typename... DstLayouts, typename... SrcLayouts, typename... T, std::size_t... Index>");
+    code.e("auto _get_tma_params_impl(std::tuple<DstLayouts...> dst_layouts, std::tuple<SrcLayouts...> src_layouts, std::tuple<T*...> dtensors, std::index_sequence<Index...>) {");
+
+    
+    // code.e("constexpr int num_tensors = sizeof...(T);");
+
+    code.e("auto make_tma = [](auto* dtensor, auto dst_layout, auto src_layout) {");
+    // code.e("using GmmaMajor = conditional_t<is_same_v<decltype(get<0>(dst_layout)), _1>, GMMA::Major::MN, GMMA::Major::K>;");
+    code.e("static constexpr GMMA::Major GmmaMajor = (cute::shape<0>(dst_layout) == _1{} ? GMMA::Major::K : GMMA::Major::MN);");
+
+    // code.e("using SmemLayoutAtom = decltype(detail::ss_smem_selector< GmmaMajor, T, decltype(get<0>(dst_layout)), decltype(get<1>(dst_layout))>());");
+    code.e("using SmemLayoutAtom = decltype(cutlass::gemm::collective::detail::ss_smem_selector<GmmaMajor, half_t, decltype(get<0>(dst_layout)), decltype(get<1>(dst_layout))>());");
+    
+    // code.e("using CTA_TILER = typename std::conditional<(stride<0>(dst_layout) == _1{}), decltype(make_shape(shape<1>(dst_layout), shape<0>(dst_layout))),decltype(make_shape(shape<0>(dst_layout), shape<1>(dst_layout)))>::type;");
+    code.e("using CTA_TILER = decltype(shape(dst_layout));");
+
+    code.e("using DstPipeLayout = decltype(tile_to_shape(SmemLayoutAtom{},make_shape(shape<0>(dst_layout), shape<1>(dst_layout), Int<tb::kStages>{}), Step<_1, _2, _3>{}));");
+
+    code.e("auto g_tensor = make_tensor(make_gmem_ptr<half_t>(dtensor), src_layout);");
+
+    code.e("return make_tma_copy<half_t>(SM90_TMA_LOAD{}, g_tensor, DstPipeLayout{}(_, _, Int<0>{}), CTA_TILER{},Int<1>{});");
+    code.e("};");
+
+    code.e("return std::make_tuple(make_tma(std::get<Index>(dtensors), std::get<Index>(dst_layouts), std::get<Index>(src_layouts))...);");
+    code.e("}");
+    code.e("");
+
+    code.e("template <typename... DstLayouts, typename... SrcLayouts, typename... T>");
+    code.e("auto _get_tma_params(std::tuple<DstLayouts...> dst_layouts, std::tuple<SrcLayouts...> src_layouts, T*... dtensors) {");
+    code.e("static_assert(sizeof...(DstLayouts) == sizeof...(SrcLayouts));");
+    code.e("static_assert(sizeof...(DstLayouts) == sizeof...(T));");
+    code.e("constexpr std::size_t NumLayouts = sizeof...(DstLayouts);");
+    code.e("return _get_tma_params_impl(dst_layouts,src_layouts,std::make_tuple(dtensors...), std::make_index_sequence<NumLayouts>{});");
+    code.e("}");
+}
+
 // Transpile a custom KN operator (i.e. a custom block graph) into CUDA code
 // Will return a CustomOPTranspileResult object. See comments in transpiler.h
 // for more details
@@ -229,8 +273,8 @@ CustomOPTranspileResult
   code.e("using PipelineState = typename cutlass::PipelineState<2>;");
   code.e("using SharedStorage = tb::SharedStorage<MainloopPipeline, 2>;");
   code.e("using PipelineParams = typename MainloopPipeline::Params;");
-  code.e("PipelineParams pipeline_params;");
-  code.e("int pipeine_index = 0;");
+  // code.e("PipelineParams pipeline_params;");
+  // code.e("int pipeine_index = 0;");
   code.e("SharedStorage& shared_storage = *reinterpret_cast<SharedStorage*>(buf + $);", addr_end);
   // Erase the lowest 16 bytes to 0 for GEMM
   code.e("*((uint128_t*)buf) = 0ul;");
@@ -243,8 +287,8 @@ CustomOPTranspileResult
                            // (asynchronously G->S copied)
 
   //how many async pipelines needed                         
-  std::unordered_set<tb::TBOperator const *>
-      copy_pipelines;
+  // std::unordered_set<tb::TBOperator const *>
+  std::vector<std::vector<tb::TBOperator const *>> copy_pipelines;
   for (TBSchedNode const &node :
        Combine(Combine(sched.pre_loop_nodes, sched.loop_nodes),
                sched.post_loop_nodes)) {
@@ -322,11 +366,6 @@ if (config.target_cc == GPU_CC::H100) {
                  smem_layout,
                  gmem_layout,
                  dtensor.guid);
-
-          // code.e("uint64_t *tma_load_mbar_x_$ = (uint64_t*)(buf + $);",
-          //        dtensor.guid,
-          //        addr_end);
-
           addr_end += sizeof(uint64_t);
 
          
@@ -556,6 +595,8 @@ if (config.target_cc == GPU_CC::H100) {
       assert(input0.dim[num_dims - 2] == m && input0.dim[num_dims - 1] == k);
       assert(input1.dim[num_dims - 2] == k && input1.dim[num_dims - 1] == n);
 
+      copy_pipelines.push_back({input0.owner_op, input1.owner_op});
+
       // Pick up MMA atom
       // TODO(intlsy) May calculate AB via (B^T A^T)^T when M is relatively
       // small
@@ -676,44 +717,132 @@ if (config.target_cc == GPU_CC::H100) {
 
 
   // Launch async input operations for all async inputs
-  if (!pipelined_input_ops.empty()) {
-    if (config.target_cc == GPU_CC::H100) {
-      for (tb::TBInputOp const *input_op : pipelined_input_ops) {
-        kn::DTensor const &dtensor = input_op->dtensor;
-        tb::STensor const &output = input_op->output_tensors.at(0);
-        assert(input_op->forloop_dim >= 0);
+  // if (!pipelined_input_ops.empty()) {
+  //   if (config.target_cc == GPU_CC::H100) {
+  //     for (tb::TBInputOp const *input_op : pipelined_input_ops) {
+  //       kn::DTensor const &dtensor = input_op->dtensor;
+  //       tb::STensor const &output = input_op->output_tensors.at(0);
+  //       assert(input_op->forloop_dim >= 0);
 
-        code.e("PipelineState smem_pipe_write_$ = cutlass::make_producer_start_state<MainloopPipeline>();", output.guid);
-        //ktile_count = forloop range
-        code.e("pipeline_params.transaction_bytes = STensor$InputAtom::tmaTransactionBytes;", output.guid);
-        code.e("pipeline_params.role = warp_group_role == tb::WarpGroupRole::Producer  ? MainloopPipeline::ThreadCategory::Producer : MainloopPipeline::ThreadCategory::Consumer;");
+  //       code.e("PipelineState smem_pipe_write_$ = cutlass::make_producer_start_state<MainloopPipeline>();", output.guid);
+  //       //ktile_count = forloop range
+  //       code.e("pipeline_params.transaction_bytes = STensor$InputAtom::tmaTransactionBytes;", output.guid);
+  //       code.e("pipeline_params.role = warp_group_role == tb::WarpGroupRole::Producer  ? MainloopPipeline::ThreadCategory::Producer : MainloopPipeline::ThreadCategory::Consumer;");
        
-        code.e("pipeline_params.is_leader = warp_group_thread_idx == 0;");
-        code.e("pipeline_params.num_consumers = cutlass::NumThreadsPerWarpGroup;");
+  //       code.e("pipeline_params.is_leader = warp_group_thread_idx == 0;");
+  //       code.e("pipeline_params.num_consumers = cutlass::NumThreadsPerWarpGroup;");
 
-        code.e("MainloopPipeline pipeline_$(shared_storage.pipelines[pipeine_index++].mainloop, pipeline_params, Shape<_1, _1, _1>{});", output.guid);
+  //       code.e("MainloopPipeline pipeline_$(shared_storage.pipelines[pipeine_index++].mainloop, pipeline_params, Shape<_1, _1, _1>{});", output.guid);
         
-        code.e("if (warp_group_role == tb::WarpGroupRole::Producer) {");
-        code.e("if (warp_idx_in_warp_group == 0) {");
-        code.e("STensor$InputAtom::run(tma_$, stensor$_async_copy_buf, "
-               "dtensor$_tile_ptr, pipeline_$,  smem_pipe_write_$, $, $, $, $, $, warp_idx, warp_group_role, warp_idx_in_warp_group, warp_group_thread_idx, lane_predicate);",
-               output.guid,
-               dtensor.guid,
-               output.guid,
-               dtensor.guid,
-               output.guid,
-               output.guid,
-               g.forloop_range,
-               input_op->forloop_dim,
-               input_op->input_map.x,
-               input_op->input_map.y,
-               input_op->input_map.z);
-        code.e("}");
-        code.e("}");
+  //       code.e("if (warp_group_role == tb::WarpGroupRole::Producer) {");
+  //       code.e("if (warp_idx_in_warp_group == 0) {");
+  //       code.e("STensor$InputAtom::run(tma_$, stensor$_async_copy_buf, "
+  //              "dtensor$_tile_ptr, pipeline_$,  smem_pipe_write_$, $, $, $, $, $, lane_predicate);",
+  //              output.guid,
+  //              dtensor.guid,
+  //              output.guid,
+  //              dtensor.guid,
+  //              output.guid,
+  //              output.guid,
+  //              g.forloop_range,
+  //              input_op->forloop_dim,
+  //              input_op->input_map.x,
+  //              input_op->input_map.y,
+  //              input_op->input_map.z);
+  //       code.e("}");
+  //       code.e("}");
+  //     }
+  //   } 
+  //   code.e("");
+  // }
+    
+    int pipe_idx = 0;
+    code.e("auto producer_warp_role = tb::ProducerWarpRole(warp_idx_in_warp_group);");
+    for (const auto& pipeline : copy_pipelines) {
+      //int number = xxx;
+      
+      int input_num = pipeline.size();
+      assert(input_num > 0);
+      
+
+      tb::TBOperator const *input_op0 = pipeline.at(0);
+      tb::STensor const &input_tensor0 = input_op0->output_tensors.at(0);
+      code.e(fmt("PipelineParams pipeline_params_$;", input_tensor0.guid));
+      if(input_num == 1){
+        
+        // kn::DTensor const &dtensor = input_op0->dtensor;
+        
+        code.e(fmt("using InputPipeline_$ = tb::TMACopyPipeline1<STensor$InputAtom>;",pipe_idx, input_tensor0.guid));
+        code.e("pipeline_params_$.transaction_bytes = STensor$InputAtom::tmaTransactionBytes;", input_tensor0.guid, input_tensor0.guid);
+
+      }else if(input_num == 2){
+        tb::TBOperator const *input_op1 = pipeline.at(1);
+        tb::STensor const &input_tensor1 = input_op1->output_tensors.at(0);
+        code.e(fmt("using InputPipeline = tb::TMACopyPipeline2<STensor$InputAtom, STensor$InputAtom>;", input_tensor0.guid, input_tensor1.guid));
+        code.e(fmt("pipeline_params_$.transaction_bytes = STensor$InputAtom::tmaTransactionBytes + STensor$InputAtom::tmaTransactionBytes;", input_tensor0.guid, input_tensor0.guid, input_tensor1.guid));
+      }else{
+        assert(0);
       }
-    } 
+      pipe_idx++;
+
+      code.e(fmt("PipelineState smem_pipe_write_$ = cutlass::make_producer_start_state<MainloopPipeline>();", input_tensor0.guid));
+      code.e(fmt("PipelineState smem_pipe_read_$;", input_tensor0.guid));
+        //ktile_count = forloop range
+      code.e(fmt("pipeline_params_$.role = ((warp_group_role == tb::WarpGroupRole::Producer) && (producer_warp_role == tb::ProducerWarpRole::MainloopEpilogue))  ? MainloopPipeline::ThreadCategory::Producer : MainloopPipeline::ThreadCategory::Consumer;", input_tensor0.guid));
+      code.e(fmt("pipeline_params_$.is_leader = warp_group_thread_idx == 0;", input_tensor0.guid));
+      code.e(fmt("pipeline_params_$.num_consumers = cutlass::NumThreadsPerWarpGroup;", input_tensor0.guid));
+      code.e(fmt("MainloopPipeline pipeline_$(shared_storage.pipelines[$].mainloop, pipeline_params_$, Shape<_1, _1, _1>{});", input_tensor0.guid, pipe_idx, input_tensor0.guid));
+      
+    }
+    // run pipelines
+    assert(pipe_idx < 3);
+    pipe_idx = 0;
+    code.e("if (warp_group_role == tb::WarpGroupRole::Producer) {");
+    code.e("if (warp_idx_in_warp_group == 0) {");
+    for (const auto& pipeline : copy_pipelines) {
+      int input_num = pipeline.size();
+      tb::TBOperator const *input_op0 = pipeline.at(0);
+      tb::TBInputOp const *cur_op0 = dynamic_cast<tb::TBInputOp const *>(input_op0);
+      tb::STensor const &input_tensor0 = input_op0->output_tensors.at(0);
+      kn::DTensor const &dtensor0 = cur_op0->dtensor;
+      
+      assert(input_num > 0);
+      if(input_num == 1){
+        code.e(fmt("InputPipeline::run(tma_$, stensor$_async_copy_buf, pipeline_$, smem_pipe_write_$, $, $, $, $, lane_predicate);", dtensor0.guid, input_tensor0.guid, input_tensor0.guid, input_tensor0.guid, g.forloop_range, cur_op0->input_map.x, cur_op0->input_map.y, cur_op0->input_map.z));
+      }
+      else if(input_num == 2){
+        tb::TBOperator const *input_op1 = pipeline.at(1);
+        tb::TBInputOp const *cur_op1 = dynamic_cast<tb::TBInputOp const *>(input_op1);
+        tb::STensor const &input_tensor1 = input_op1->output_tensors.at(0);
+        kn::DTensor const &dtensor1 = cur_op1->dtensor;
+        
+          code.e("InputPipeline::run(tma_$, tma_$, stensor$_async_copy_buf, stensor$_async_copy_buf, pipeline_$, smem_pipe_write_$, $, $, $, $, $, $, $, lane_predicate);", dtensor0.guid, dtensor1.guid, input_tensor0.guid, input_tensor1.guid, input_tensor0.guid, input_tensor0.guid, g.forloop_range, cur_op0->input_map.x, cur_op0->input_map.y, cur_op0->input_map.z, cur_op1->input_map.x, cur_op1->input_map.y, cur_op1->input_map.z);
+      }else{
+        assert(0);
+      }
+
+      
+    }
+    code.e("}");
+    code.e("}");
+    
+    
+    // code.e("STensor$InputAtom::run(tma_$, stensor$_async_copy_buf, "
+    //         "dtensor$_tile_ptr, pipeline_$,  smem_pipe_write_$, $, $, $, $, $, lane_predicate);",
+    //         output.guid,
+    //         dtensor.guid,
+    //         output.guid,
+    //         dtensor.guid,
+    //         output.guid,
+    //         output.guid,
+    //         g.forloop_range,
+    //         input_op->forloop_dim,
+    //         input_op->input_map.x,
+    //         input_op->input_map.y,
+    //         input_op->input_map.z);
+
+    
     code.e("");
-  }
 
   
   
@@ -796,27 +925,28 @@ if (config.target_cc == GPU_CC::H100) {
 
           if (output_op_meta.is_accum_in_reg) {
             // Accumulator is in register
-            code.e("PipelineState smem_pipe_read_$;", output_guid);
-            code.e("Matmul$Kernel::run(matmul_$_accum, stensor$_ptr, "
-                   "stensor$_ptr, (char*)(buf+0), thread_idx, for_idx, pipeline_$, pipeline_$, smem_pipe_read_$);",
+            code.e("auto matmul_$_accum = Matmul$Kernel::get_mma_rC(thread_idx);",
+               output.guid,
+               output.guid);
+            code.e("Matmul$Kernel::run(matmul_$_accum, stensor$_async_copy_buf, "
+                   "stensor$_async_copy_buf, (char*)(buf+0), thread_idx, pipeline_$, smem_pipe_read_$);",
                    output_guid,
                    output_guid,
                    input0.guid,
                    input1.guid,
-                   input0.guid,
                    input1.guid,
-                   output_guid);
+                   input0.guid);
           } else {
             code.e("auto mma_rC = Matmul$Kernel::get_mma_rC(thread_idx);",
                    output_guid);
-            code.e("Matmul$Kernel::run(mma_rC, stensor$_ptr, stensor$_ptr, "
-                   "(char*)(buf+0), thread_idx, for_idx, pipeline_$, pipeline_$, smem_pipe_read_$);",
+            code.e("Matmul$Kernel::run(mma_rC, stensor$_async_copy_buf, stensor$_async_copy_buf "
+                   "(char*)(buf+0), thread_idx, pipeline_$, pipeline_$, smem_pipe_read_$);",
                    output_guid,
                    input0.guid,
                    input1.guid,
                    input0.guid,
                    input1.guid,
-                   output_guid);
+                   input0.guid);
             code.e("Matmul$Kernel::write_back_mma_rC(stensor$_ptr, mma_rC, "
                    "thread_idx);",
                    output_guid,
@@ -1065,9 +1195,16 @@ if (config.target_cc == GPU_CC::H100) {
 
   code.e("if (warp_group_role == tb::WarpGroupRole::Consumer) {");
   assert(g.forloop_range >= 1);
-  code.e("// The main loop");
+  code.e("// Consumer main loop");
+ 
   code.e("for (uint32_t for_idx = 0; for_idx < $; for_idx++) {",
          g.forloop_range);
+  
+  // //init pipelines
+  // for (const auto &pipeline : copy_pipelines) {
+  //     code.e("PipelineState smem_pipe_read_$;", pipeline->output_tensors.at(0).guid);
+  // }
+
 
   for (TBSchedNode const &sched_node : sched.loop_nodes) {
     if (sched_node.type == tb_sched_node_t::OPERATOR &&
@@ -1080,8 +1217,7 @@ if (config.target_cc == GPU_CC::H100) {
     code << res;
   }
   code.e("}"); // For loop
-  code.e("}");
-  code.e("");
+  
 
   // Write back in-register accumulators
   int num_in_reg_accums = 0;
@@ -1108,20 +1244,23 @@ if (config.target_cc == GPU_CC::H100) {
   }
   if (num_in_reg_accums > 0) {
     code.e("// Write back in-register accumulators");
-    code.e("__syncthreads();"); // Need this __syncthreads() to make sure no
-                                // thread is still in the for loop
+    // code.e("__syncthreads();"); // Need this __syncthreads() to make sure no
+    //                             // thread is still in the for loop
     code << in_reg_writeback;
   }
 
   // Transpile the epilogue of the kernel
   if (!sched.post_loop_nodes.empty()) {
     code.e("// The epilogue (kernels outside the loop)");
-    code.e("__syncthreads();");
+    // code.e("__syncthreads();");
     for (TBSchedNode const &sched_node : sched.post_loop_nodes) {
       CodeKeeper res = transpile_tb_sched_node(sched_node, false);
       code << res;
     }
   }
+  code.e("}");
+  code.e("");
+  code.e("__syncthreads();");
 
   code.e("}"); // kernel
 

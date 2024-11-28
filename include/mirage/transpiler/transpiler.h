@@ -99,6 +99,8 @@ private:
   CustomOPTranspileResult transpile_kn_custom_op(kn::KNCustomizedOp const *op);
   CustomOPTranspileResult transpile_kn_custom_op_hopper(kn::KNCustomizedOp const *op);
 
+  void get_hopper_tmas(CodeKeeper &code, std::vector<TMAParams> tmaParamsList);
+
   // Transpile the whole uGraph
   TranspileResult transpile_ugraph();
 
