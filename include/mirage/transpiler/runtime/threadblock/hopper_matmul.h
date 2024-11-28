@@ -24,28 +24,28 @@ using namespace cute;
 
 namespace tb {
 
-template <class T, class BLK_MN>
-CUTE_HOST_DEVICE constexpr auto smem_layout_selector() {
+// template <class T, class BLK_MN>
+// CUTE_HOST_DEVICE constexpr auto smem_layout_selector() {
 
-  return GMMA::Layout_K_SW128_Atom<T>{};
-  // auto BLK_MN0 = size<0>(BLK_MN{});
-  // if constexpr (BLK_MN0 % size<0>(GMMA::Layout_MN_SW128_Atom<T>{}) == 0) {
-  //   return GMMA::Layout_MN_SW128_Atom<T>{};
-  // } else if constexpr (BLK_MN0 % size<0>(GMMA::Layout_MN_SW64_Atom<T>{}) ==
-  // 0) {
-  //   return GMMA::Layout_MN_SW64_Atom<T>{};
-  // } else if constexpr (BLK_MN0 % size<0>(GMMA::Layout_MN_SW32_Atom<T>{}) ==
-  // 0) {
-  //   return GMMA::Layout_MN_SW32_Atom<T>{};
-  // } else if constexpr (BLK_MN0 % size<0>(GMMA::Layout_MN_INTER_Atom<T>{}) ==
-  //                      0) {
-  //   return GMMA::Layout_MN_INTER_Atom<T>{};
-  // } else {
-  //   static_assert(BLK_MN0 % size<0>(GMMA::Layout_MN_INTER_Atom<T>{}) == 0,
-  //                 "BLK_MN0 must be a multiple of "
-  //                 "size<0>(GMMA::Layout_MN_INTER_Atom<T>{})");
-  // }
-}
+//   return GMMA::Layout_K_SW128_Atom<T>{};
+//   // auto BLK_MN0 = size<0>(BLK_MN{});
+//   // if constexpr (BLK_MN0 % size<0>(GMMA::Layout_MN_SW128_Atom<T>{}) == 0) {
+//   //   return GMMA::Layout_MN_SW128_Atom<T>{};
+//   // } else if constexpr (BLK_MN0 % size<0>(GMMA::Layout_MN_SW64_Atom<T>{}) ==
+//   // 0) {
+//   //   return GMMA::Layout_MN_SW64_Atom<T>{};
+//   // } else if constexpr (BLK_MN0 % size<0>(GMMA::Layout_MN_SW32_Atom<T>{}) ==
+//   // 0) {
+//   //   return GMMA::Layout_MN_SW32_Atom<T>{};
+//   // } else if constexpr (BLK_MN0 % size<0>(GMMA::Layout_MN_INTER_Atom<T>{}) ==
+//   //                      0) {
+//   //   return GMMA::Layout_MN_INTER_Atom<T>{};
+//   // } else {
+//   //   static_assert(BLK_MN0 % size<0>(GMMA::Layout_MN_INTER_Atom<T>{}) == 0,
+//   //                 "BLK_MN0 must be a multiple of "
+//   //                 "size<0>(GMMA::Layout_MN_INTER_Atom<T>{})");
+//   // }
+// }
 
 template <typename T,
           class MMAAtom,
@@ -82,10 +82,17 @@ public:
   // using TileALayout = decltype(smem_layout_selector<T, SmemLayoutA>());
   // using SmemLayoutAtomA = 
   // decltype(cutlass::gemm::collective::detail::ss_smem_selector<GmmaMajor, half_t, decltype(get<0>(dst_layout)), decltype(get<1>(dst_layout))>());
+  static constexpr GMMA::Major GmmaMajorA = (stride<0>(SmemLayoutA{}) == _1{} ? GMMA::Major::MN : GMMA::Major::K);
+  static constexpr GMMA::Major GmmaMajoB = (stride<0>(SmemLayoutB{}) == _1{} ? GMMA::Major::MN : GMMA::Major::K);
+  using TileALayout = decltype(cutlass::gemm::collective::detail::ss_smem_selector<
+      GmmaMajor, half_t, decltype(get<0>(SmemLayoutA{})), decltype(get<1>(SmemLayoutA{}))>());
 
-  using TileALayout = GMMA::Layout_K_SW128_Atom<T>;
+  using TileBLayout = decltype(cutlass::gemm::collective::detail::ss_smem_selector<
+      GmmaMajor, half_t, decltype(get<0>(SmemLayoutB{})), decltype(get<1>(SmemLayoutB{}))>());
 
-  using TileBLayout = GMMA::Layout_MN_SW128_Atom<T>;
+//   using TileALayout = GMMA::Layout_K_SW128_Atom<T>;
+
+//   using TileBLayout = GMMA::Layout_MN_SW128_Atom<T>;
 
   // Shape checking
   // Expect A have a shape of [M, K], B have a shape of [N, K], and
@@ -181,9 +188,6 @@ public:
         TileBLayout{},
         make_shape(shape<0>(SmemLayoutB{}), shape<1>(SmemLayoutB{}), Int<2>{}), Step<_1, _2, _3>{});
 
-    // auto sA_l = tile_to_shape(TileALayout{}, shape(SmemLayoutA{}));
-
-    // auto sB_l = tile_to_shape(TileBLayout{}, shape(SmemLayoutB{}));
 
     Tensor sA = make_tensor(make_smem_ptr(a_ptr), sA_l); // [M, K]
     Tensor sB = make_tensor(make_smem_ptr(b_ptr), sB_l); // [N, K]

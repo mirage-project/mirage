@@ -145,15 +145,8 @@ public:
   CUTE_STATIC_ASSERT_V(rank(SrcLayout{}) == rank(DstLayout{}));
   
   using CTA_TILER = decltype(shape(DstLayout{}));
-
-  // using CTA_TILER = typename std::conditional<(stride<0>(DstLayout{}) == _1{}), decltype(make_shape(shape<1>(DstLayout{}), shape<0>(DstLayout{})))
-  // ,decltype(make_shape(shape<0>(DstLayout{}), shape<1>(DstLayout{})))>::type;
-  // using DstPipeLayout = decltype(tile_to_shape(
-  //       DstLayout{},
-  //       make_shape(shape<0>(DstLayout{}), shape<1>(DstLayout{}), Int<kStages>{}), Step<_1, _2, _3>{}));
-  // 4096, 64, 2
-
-  static constexpr GMMA::Major GmmaMajor = (shape<0>(DstLayout{}) == _1{} ? GMMA::Major::K : GMMA::Major::MN);
+  //N major/K major
+  static constexpr GMMA::Major GmmaMajor = (stride<0>(DstLayout{}) == _1{} ? GMMA::Major::MN : GMMA::Major::K);
   using SmemLayoutAtom = decltype(cutlass::gemm::collective::detail::ss_smem_selector<
       GmmaMajor, half_t, decltype(get<0>(DstLayout{})), decltype(get<1>(DstLayout{}))>());
 

@@ -182,18 +182,12 @@ static string get_tb_op_str(type::TBOperatorType type) {
 
 void Transpiler::get_hopper_tmas(CodeKeeper &code, std::vector<TMAParams> tmaParamsList){
 
-    // for (int i = 0; i < tmaParamsList.size(); i++) {
-
-    // }
+    code.e("");
     code.e("template <typename... DstLayouts, typename... SrcLayouts, typename... T, std::size_t... Index>");
     code.e("auto _get_tma_params_impl(std::tuple<DstLayouts...> dst_layouts, std::tuple<SrcLayouts...> src_layouts, std::tuple<T*...> dtensors, std::index_sequence<Index...>) {");
 
-    
-    // code.e("constexpr int num_tensors = sizeof...(T);");
-
     code.e("auto make_tma = [](auto* dtensor, auto dst_layout, auto src_layout) {");
-    // code.e("using GmmaMajor = conditional_t<is_same_v<decltype(get<0>(dst_layout)), _1>, GMMA::Major::MN, GMMA::Major::K>;");
-    code.e("static constexpr GMMA::Major GmmaMajor = (cute::shape<0>(dst_layout) == _1{} ? GMMA::Major::K : GMMA::Major::MN);");
+    code.e("static constexpr GMMA::Major GmmaMajor = (cute::stride<0>(dst_layout) == _1{} ? GMMA::Major::MN : GMMA::Major::K);");
 
     // code.e("using SmemLayoutAtom = decltype(detail::ss_smem_selector< GmmaMajor, T, decltype(get<0>(dst_layout)), decltype(get<1>(dst_layout))>());");
     code.e("using SmemLayoutAtom = decltype(cutlass::gemm::collective::detail::ss_smem_selector<GmmaMajor, half_t, decltype(get<0>(dst_layout)), decltype(get<1>(dst_layout))>());");
@@ -212,6 +206,7 @@ void Transpiler::get_hopper_tmas(CodeKeeper &code, std::vector<TMAParams> tmaPar
     code.e("}");
     code.e("");
 
+    code.e("");
     code.e("template <typename... DstLayouts, typename... SrcLayouts, typename... T>");
     code.e("auto _get_tma_params(std::tuple<DstLayouts...> dst_layouts, std::tuple<SrcLayouts...> src_layouts, T*... dtensors) {");
     code.e("static_assert(sizeof...(DstLayouts) == sizeof...(SrcLayouts));");
@@ -715,46 +710,6 @@ if (config.target_cc == GPU_CC::H100) {
   code.e("}");
 
 
-
-  // Launch async input operations for all async inputs
-  // if (!pipelined_input_ops.empty()) {
-  //   if (config.target_cc == GPU_CC::H100) {
-  //     for (tb::TBInputOp const *input_op : pipelined_input_ops) {
-  //       kn::DTensor const &dtensor = input_op->dtensor;
-  //       tb::STensor const &output = input_op->output_tensors.at(0);
-  //       assert(input_op->forloop_dim >= 0);
-
-  //       code.e("PipelineState smem_pipe_write_$ = cutlass::make_producer_start_state<MainloopPipeline>();", output.guid);
-  //       //ktile_count = forloop range
-  //       code.e("pipeline_params.transaction_bytes = STensor$InputAtom::tmaTransactionBytes;", output.guid);
-  //       code.e("pipeline_params.role = warp_group_role == tb::WarpGroupRole::Producer  ? MainloopPipeline::ThreadCategory::Producer : MainloopPipeline::ThreadCategory::Consumer;");
-       
-  //       code.e("pipeline_params.is_leader = warp_group_thread_idx == 0;");
-  //       code.e("pipeline_params.num_consumers = cutlass::NumThreadsPerWarpGroup;");
-
-  //       code.e("MainloopPipeline pipeline_$(shared_storage.pipelines[pipeine_index++].mainloop, pipeline_params, Shape<_1, _1, _1>{});", output.guid);
-        
-  //       code.e("if (warp_group_role == tb::WarpGroupRole::Producer) {");
-  //       code.e("if (warp_idx_in_warp_group == 0) {");
-  //       code.e("STensor$InputAtom::run(tma_$, stensor$_async_copy_buf, "
-  //              "dtensor$_tile_ptr, pipeline_$,  smem_pipe_write_$, $, $, $, $, $, lane_predicate);",
-  //              output.guid,
-  //              dtensor.guid,
-  //              output.guid,
-  //              dtensor.guid,
-  //              output.guid,
-  //              output.guid,
-  //              g.forloop_range,
-  //              input_op->forloop_dim,
-  //              input_op->input_map.x,
-  //              input_op->input_map.y,
-  //              input_op->input_map.z);
-  //       code.e("}");
-  //       code.e("}");
-  //     }
-  //   } 
-  //   code.e("");
-  // }
     
     int pipe_idx = 0;
     code.e("auto producer_warp_role = tb::ProducerWarpRole(warp_idx_in_warp_group);");
