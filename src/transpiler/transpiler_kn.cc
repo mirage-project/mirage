@@ -409,6 +409,11 @@ TranspileResult Transpiler::transpile_ugraph() {
         }
         // Transpile
         CustomOPTranspileResult result = transpile_kn_custom_op(cur_op);
+        if (result.error_type != CUDA_T_SUCCESS) {
+          vector<OutputTensorDirective> output_directives;
+          return TranspileResult{
+              result.error_type, "", 0, 0, output_directives};
+        }
         if (result.smem_size > max_smem_size) {
           max_smem_size = result.smem_size;
         }
@@ -480,7 +485,7 @@ TranspileResult Transpiler::transpile_ugraph() {
         vector<size_t>(meta.strides, meta.strides + dtensor.num_dims)});
   }
   return TranspileResult{
-      code, this->d_buf_size, max_smem_size, output_directives};
+      CUDA_T_SUCCESS, code, this->d_buf_size, max_smem_size, output_directives};
 }
 
 } // namespace transpiler
