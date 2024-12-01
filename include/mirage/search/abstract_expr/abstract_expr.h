@@ -12,24 +12,20 @@
 namespace mirage {
 namespace search {
 
-class AlgebraicPattern {
+class AbstractExpr {
 public:
-  AlgebraicPattern() = default;
-  virtual ~AlgebraicPattern() = default;
+  AbstractExpr() = default;
+  virtual ~AbstractExpr() = default;
 
   virtual z3::expr
       to_z3(z3::context &c,
             std::unordered_set<std::string> &all_variables) const = 0;
-  bool subpattern_to(AlgebraicPattern const &other) const;
-  bool operator==(AlgebraicPattern const &other) const;
+  bool subpattern_to(AbstractExpr const &other) const;
+  bool operator==(AbstractExpr const &other) const;
   virtual std::string to_string() const = 0;
-
-  static std::unordered_map<std::pair<std::string, std::string>, bool>
-      cached_results;
-  static std::shared_mutex solver_mutex;
 };
 
-class Var : public AlgebraicPattern {
+class Var : public AbstractExpr {
 public:
   Var(std::string const &name);
   z3::expr to_z3(z3::context &c,
@@ -38,74 +34,71 @@ public:
   std::string name;
 };
 
-class Add : public AlgebraicPattern {
+class Add : public AbstractExpr {
 public:
-  Add(std::shared_ptr<AlgebraicPattern> lhs,
-      std::shared_ptr<AlgebraicPattern> rhs);
+  Add(std::shared_ptr<AbstractExpr> lhs, std::shared_ptr<AbstractExpr> rhs);
   z3::expr to_z3(z3::context &c,
                  std::unordered_set<std::string> &all_variables) const override;
   std::string to_string() const override;
-  std::shared_ptr<AlgebraicPattern> lhs, rhs;
+  std::shared_ptr<AbstractExpr> lhs, rhs;
 };
 
-class Mul : public AlgebraicPattern {
+class Mul : public AbstractExpr {
 public:
-  Mul(std::shared_ptr<AlgebraicPattern> lhs,
-      std::shared_ptr<AlgebraicPattern> rhs);
+  Mul(std::shared_ptr<AbstractExpr> lhs, std::shared_ptr<AbstractExpr> rhs);
   z3::expr to_z3(z3::context &c,
                  std::unordered_set<std::string> &all_variables) const override;
   std::string to_string() const override;
-  std::shared_ptr<AlgebraicPattern> lhs, rhs;
+  std::shared_ptr<AbstractExpr> lhs, rhs;
 };
 
-class Div : public AlgebraicPattern {
+class Div : public AbstractExpr {
 public:
-  Div(std::shared_ptr<AlgebraicPattern> lhs,
-      std::shared_ptr<AlgebraicPattern> rhs);
+  Div(std::shared_ptr<AbstractExpr> lhs, std::shared_ptr<AbstractExpr> rhs);
   z3::expr to_z3(z3::context &c,
                  std::unordered_set<std::string> &all_variables) const override;
   std::string to_string() const override;
-  std::shared_ptr<AlgebraicPattern> lhs, rhs;
+  std::shared_ptr<AbstractExpr> lhs, rhs;
 };
 
-class Exp : public AlgebraicPattern {
+class Exp : public AbstractExpr {
 public:
-  Exp(std::shared_ptr<AlgebraicPattern> exponent);
+  Exp(std::shared_ptr<AbstractExpr> exponent);
   z3::expr to_z3(z3::context &c,
                  std::unordered_set<std::string> &all_variables) const override;
   std::string to_string() const override;
-  std::shared_ptr<AlgebraicPattern> exponent;
+  std::shared_ptr<AbstractExpr> exponent;
 };
 
-class Silu : public AlgebraicPattern {
+class Silu : public AbstractExpr {
 public:
-  Silu(std::shared_ptr<AlgebraicPattern> a);
+  Silu(std::shared_ptr<AbstractExpr> a);
   z3::expr to_z3(z3::context &c,
                  std::unordered_set<std::string> &all_variables) const override;
   std::string to_string() const override;
-  std::shared_ptr<AlgebraicPattern> a;
+  std::shared_ptr<AbstractExpr> a;
 };
 
 // Note(@Mengdi): Replace it with Sqr and Sqrt once we have related algebraic
 // transformation
-class RMS : public AlgebraicPattern {
+class RMS : public AbstractExpr {
 public:
-  RMS(int red_deg, std::shared_ptr<AlgebraicPattern> elems);
+  RMS(int red_deg, std::shared_ptr<AbstractExpr> elems);
   z3::expr to_z3(z3::context &c,
                  std::unordered_set<std::string> &all_variables) const override;
   std::string to_string() const override;
   int red_deg;
-  std::shared_ptr<AlgebraicPattern> elems;
+  std::shared_ptr<AbstractExpr> elems;
 };
 
-class Red : public AlgebraicPattern {
+class Red : public AbstractExpr {
 public:
-  Red(int red_deg, std::shared_ptr<AlgebraicPattern> summand);
+  Red(int red_deg, std::shared_ptr<AbstractExpr> summand);
   z3::expr to_z3(z3::context &c,
                  std::unordered_set<std::string> &all_variables) const override;
   std::string to_string() const override;
   int red_deg_log;
-  std::shared_ptr<AlgebraicPattern> summand;
+  std::shared_ptr<AbstractExpr> summand;
 };
 
 } // namespace search

@@ -195,6 +195,12 @@ void Transpiler::resolve_tensor_layout() {
     }
     opt.add(z3::atmost(innermost_exprs, 1));
     opt.add(z3::atleast(innermost_exprs, 1));
+    // Every STensor can have at most 1 swizzle dim
+    z3::expr_vector swizzled_exprs(ctx);
+    for (int i = 0; i < num_dims; ++i) {
+      swizzled_exprs.push_back(s_is_swizzled[stensor.guid][i]);
+    }
+    opt.add(z3::atmost(swizzled_exprs, 1));
     // The innermost dim of a STensor cannot be swizzled
     for (int i = 0; i < num_dims; ++i) {
       opt.add(!s_is_swizzled[stensor.guid][i] ||

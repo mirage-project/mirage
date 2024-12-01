@@ -1,4 +1,4 @@
-#include "mirage/search/irange.h"
+#include "mirage/search/range_propagation/irange.h"
 #include "mirage/kernel/rms_norm.h"
 #include "mirage/utils/containers.h"
 

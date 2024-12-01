@@ -71,11 +71,11 @@ op_nodelabel_mapping = {
     "tb_concat_1_op": "Concat 1",
     "tb_concat_2_op": "Concat 2",
     "tb_customized_op": "Customized\nOp",
-    "tb_forloop_accum_no_red_op": "ForloopAccum\n(No Reduction)",
-    "tb_forloop_accum_red_ld_sum_op": "ForloopAccum\n(Reduction=Sum)",
-    "tb_forloop_accum_red_ld_mean_op": "ForloopAccum\n(Reduction=Mean)",
-    "tb_forloop_accum_red_ld_rms_op": "ForloopAccum\n(Reduction=RMS)",
-    "tb_forloop_accum_redtox_ld_sum_op": "ForloopAccum\n(ReduceToDimx=Sum)",
+    "tb_accum_no_red_op": "ForloopAccum\n(No Reduction)",
+    "tb_accum_red_ld_sum_op": "ForloopAccum\n(Reduction=Sum)",
+    "tb_accum_red_ld_mean_op": "ForloopAccum\n(Reduction=Mean)",
+    "tb_accum_red_ld_rms_op": "ForloopAccum\n(Reduction=RMS)",
+    "tb_accum_redtox_ld_sum_op": "ForloopAccum\n(ReduceToDimx=Sum)",
 }
 guid_tensors_map = {}
 
