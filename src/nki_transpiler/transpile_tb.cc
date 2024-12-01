@@ -85,8 +85,17 @@ NKICustomOPTranspileResult
       // tb_op's input. This is because, in the case tb_op's input
       // and output have different partition_dim, we defer the transpose
       // to be performed after forloop to reduce cost
-      tb::STensor const &stensor = tb_op->input_tensors.at(0);
-      STensorMeta meta = stensor_metas.at(stensor.guid);
+      tb::STensor const &stensor = tb_op->output_tensors.at(0);
+      tb::STensor const &before_accum_stensor = tb_op->input_tensors.at(0);
+      // Assert that the two tensors have the same shape
+      assert(stensor.num_dims == before_accum_stensor.num_dims);
+      for (int i = 0; i < stensor.num_dims; i++) {
+        assert(stensor.dim[i] == before_accum_stensor.dim[i]);
+      }
+      // We use before_accum_tensor's as the layout for the accumulator;
+      // this can postpone necessary transpose to be perform after
+      // for loop
+      STensorMeta meta = stensor_metas.at(before_accum_stensor.guid);
       // Assert that only the last two dims can have size larger than 1
       for (int i = 0; i < stensor.num_dims - 2; i++) {
         assert(stensor.dim[i] == 1);
@@ -208,25 +217,34 @@ NKICustomOPTranspileResult
         tb::STensor const &output = tb_op->output_tensors.at(0);
         STensorMeta meta0 = stensor_metas.at(input0.guid);
         STensorMeta meta1 = stensor_metas.at(input1.guid);
-        // FIXME:Currently assert no transpose
-        assert(meta0.partition_dim == output.num_dims - 1);
-        assert(meta1.partition_dim == output.num_dims - 2);
+        std::string operand0 = fmt("stensor$", input0.guid);
+        std::string operand1 = fmt("stensor$", input1.guid);
+        // Add a nl.transpose if input0's partition dim is not
+        // output.num_dims - 1
+        if (meta0.partition_dim != output.num_dims - 1) {
+          operand0 = fmt("nl.transpose(stensor$)", input0.guid);
+        }
+        // Add a nl.transpose if input1's partition dim is not
+        // output.num_dims - 2
+        if (meta1.partition_dim != output.num_dims - 2) {
+          operand1 = fmt("nl.transpose(stensor$))", input1.guid);
+        }
         STensorMeta meta2 = stensor_metas.at(output.guid);
         if (meta2.partition_dim == output.num_dims - 2) {
           // First oprand: input0
           // Second operand: input1
           code.e("$ = nisa.nc_matmul($, $)",
                  fmt("stensor$", output.guid),
-                 fmt("stensor$", input0.guid),
-                 fmt("stensor$", input1.guid));
+                 operand0,
+                 operand1);
         } else {
           // First oprand: input1
           // Second operand: input0
           assert(meta2.partition_dim == output.num_dims - 1);
           code.e("$ = nisa.nc_matmul($, $)",
                  fmt("stensor$", output.guid),
-                 fmt("stensor$", input1.guid),
-                 fmt("stensor$", input0.guid));
+                 operand1,
+                 operand0);
         }
         break;
       }
