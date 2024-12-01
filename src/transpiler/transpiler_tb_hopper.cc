@@ -57,6 +57,13 @@ static string get_cute_layout(vector<int> dims, vector<size_t> strides) {
              map_to_cute_int(strides));
 }
 
+static string get_reversed_cute_layout(vector<int> dims, vector<size_t> strides) {
+  assert(dims.size() == strides.size());
+  return fmt("Layout<Shape<$>, Stride<$>>",
+             map_to_cute_int(dims),
+             map_to_cute_int(strides));
+}
+
 template <typename Tensor_T, typename Meta_T>
 static string
     get_cute_layout(Tensor_T const &tensor, Meta_T const &meta, int start_dim) {
@@ -64,6 +71,14 @@ static string
       vector<int>(tensor.dim + start_dim, tensor.dim + tensor.num_dims),
       vector<size_t>(meta.strides + start_dim, meta.strides + tensor.num_dims));
 }
+
+template <typename Tensor_T, typename Meta_T>
+static string
+    get_swap_01_layout(Tensor_T const &tensor, Meta_T const &meta, int start_dim) {
+      return get_reversed_cute_layout(
+      vector<int>(tensor.dim + start_dim, tensor.dim + tensor.num_dims),
+      vector<size_t>(meta.strides + start_dim, meta.strides + tensor.num_dims));
+    }
 
 // A helper function
 template <typename T>
@@ -80,7 +95,32 @@ static std::vector<T> mov_to_last(T const *vec, size_t numel, int idx) {
 // Get the layout of a STensor
 static string get_stensor_layout(tb::STensor const &stensor,
                                  STensorMeta const &meta,
-                                 int start_dim = 0) {
+                                 int start_dim = 0,
+                                 bool swap01 = false) {
+
+  if(swap01){
+    if (!meta.is_xor_swizzled) {
+    // Do not need to swizzle
+    // (Probably swizzled by SHIFT-based swizzling, but we do not care about
+    // that)
+    return get_layout_detail::get_swap_01_layout(stensor, meta, start_dim);
+  } else {
+      // XOR-based swizzling
+      // return fmt("decltype(composition(Swizzle<$, $, $>{}, ${}))",
+      //            3,
+      //            4,
+      //            3,
+      //            get_layout_detail::get_cute_layout(stensor, meta, start_dim));
+      // return get_layout_detail::get_cute_layout(stensor, meta, start_dim);
+      return fmt("decltype(composition(Swizzle<$, $, $>{}, ${}))",
+                meta.xor_swizzle_b,
+                meta.xor_swizzle_m,
+                meta.xor_swizzle_s,
+                get_layout_detail::get_swap_01_layout(stensor, meta, start_dim));
+  }
+  }  
+
+
   if (!meta.is_xor_swizzled) {
     // Do not need to swizzle
     // (Probably swizzled by SHIFT-based swizzling, but we do not care about
@@ -93,7 +133,12 @@ static string get_stensor_layout(tb::STensor const &stensor,
     //            4,
     //            3,
     //            get_layout_detail::get_cute_layout(stensor, meta, start_dim));
-    return get_layout_detail::get_cute_layout(stensor, meta, start_dim);
+    // return get_layout_detail::get_cute_layout(stensor, meta, start_dim);
+     return fmt("decltype(composition(Swizzle<$, $, $>{}, ${}))",
+               meta.xor_swizzle_b,
+               meta.xor_swizzle_m,
+               meta.xor_swizzle_s,
+               get_layout_detail::get_cute_layout(stensor, meta, start_dim));
   }
 }
 
@@ -105,7 +150,8 @@ static string get_stensor_layout(tb::STensor const &stensor,
 // i])
 static string mov_last_get_stensor_layout(tb::STensor const &stensor,
                                           STensorMeta const &meta,
-                                          int innermost_dim) {
+                                          int innermost_dim,
+                                          bool swap01 = false) {
   tb::STensor new_stensor = stensor;
   STensorMeta new_meta = meta;
   new_meta.swizzled_dim = -1;
@@ -120,7 +166,7 @@ static string mov_last_get_stensor_layout(tb::STensor const &stensor,
     }
   }
   new_meta.innermost_dim = stensor.num_dims - 1;
-  return get_stensor_layout(new_stensor, new_meta);
+  return get_stensor_layout(new_stensor, new_meta, swap01);
 }
 
 // Get the layout of a DTensor tile for input/output operators
@@ -183,36 +229,51 @@ static string get_tb_op_str(type::TBOperatorType type) {
 void Transpiler::get_hopper_tmas(CodeKeeper &code, std::vector<TMAParams> tmaParamsList){
 
     code.e("");
-    code.e("template <typename... DstLayouts, typename... SrcLayouts, typename... T, std::size_t... Index>");
+    code.e("template <typename... DstLayouts, typename... SrcLayouts, typename... T, bool... MInputs, std::size_t... Index>");
     code.e("auto _get_tma_params_impl(std::tuple<DstLayouts...> dst_layouts, std::tuple<SrcLayouts...> src_layouts, std::tuple<T*...> dtensors, std::index_sequence<Index...>) {");
 
-    code.e("auto make_tma = [](auto* dtensor, auto dst_layout, auto src_layout) {");
-    code.e("static constexpr GMMA::Major GmmaMajor = (cute::stride<0>(dst_layout) == _1{} ? GMMA::Major::MN : GMMA::Major::K);");
+    code.e("auto make_tma = [](auto* dtensor, auto dst_layout, auto src_layout, bool MInput) {");
+    // code.e("static constexpr GMMA::Major GmmaMajor = (cute::stride<0>(dst_layout) == _1{} ? GMMA::Major::MN : GMMA::Major::K);");
 
     // code.e("using SmemLayoutAtom = decltype(detail::ss_smem_selector< GmmaMajor, T, decltype(get<0>(dst_layout)), decltype(get<1>(dst_layout))>());");
-    code.e("using SmemLayoutAtom = decltype(cutlass::gemm::collective::detail::ss_smem_selector<GmmaMajor, half_t, decltype(get<0>(dst_layout)), decltype(get<1>(dst_layout))>());");
-    
-    // code.e("using CTA_TILER = typename std::conditional<(stride<0>(dst_layout) == _1{}), decltype(make_shape(shape<1>(dst_layout), shape<0>(dst_layout))),decltype(make_shape(shape<0>(dst_layout), shape<1>(dst_layout)))>::type;");
-    code.e("using CTA_TILER = decltype(shape(dst_layout));");
+    // code.e("using SmemLayoutAtom = decltype(cutlass::gemm::collective::detail::ss_smem_selector<GmmaMajor, half_t, decltype(get<0>(dst_layout)), decltype(get<1>(dst_layout))>());");
+    // code.e("using SmemLayoutAtom = MInput ? decltype(detail::ss_smem_selector<GmmaMajor, half_t, decltype(get<1>(dst_layout)), decltype(get<0>(dst_layout))>()) : decltype(detail::ss_smem_selector<GmmaMajor, half_t, decltype(get<0>(dst_layout)), decltype(get<1>(dst_layout))>());");
+    // code.e("using DstPipeLayout = MInput ? decltype(tile_to_shape(SmemLayoutAtom{},make_shape(shape<1>(dtensor), shape<0>(dtensor), Int<tb::kStages>{}), Step<_1, _2, _3>{})) : decltype(tile_to_shape(SmemLayoutAtom{},make_shape(shape<0>(dst_layout), shape<1>(dst_layout), Int<tb::kStages>{}), Step<_1, _2, _3>{}));");
+    // // code.e("using CTA_TILER = typename std::conditional<(stride<0>(dst_layout) == _1{}), decltype(make_shape(shape<1>(dst_layout), shape<0>(dst_layout))),decltype(make_shape(shape<0>(dst_layout), shape<1>(dst_layout)))>::type;");
+    // code.e("using CTA_TILER = decltype(shape(dst_layout));");
 
-    code.e("using DstPipeLayout = decltype(tile_to_shape(SmemLayoutAtom{},make_shape(shape<0>(dst_layout), shape<1>(dst_layout), Int<tb::kStages>{}), Step<_1, _2, _3>{}));");
+    // // code.e("using DstPipeLayout = decltype(tile_to_shape(SmemLayoutAtom{},make_shape(shape<0>(dst_layout), shape<1>(dst_layout), Int<tb::kStages>{}), Step<_1, _2, _3>{}));");
+    // code.e("using DstPipeLayout = decltype(tile_to_shape(dst_layout ,make_shape(shape<0>(dst_layout), shape<1>(dst_layout), Int<tb::kStages>{}), Step<_1, _2, _3>{}));");
+    code.e("static constexpr cute::GMMA::Major GmmaMajor = MInput ? GMMA::Major::K : GMMA::Major::MN;");
 
+    code.e("using DstMNKLayout = std::conditional_t<MInput, typename tb::InputDim01Swapper<decltype(dst_layout)>::Result, decltype(dst_layout)>;");
+
+    code.e("using SmemLayoutAtom = decltype(cutlass::gemm::collective::detail::ss_smem_selector<GmmaMajor, half_t, decltype(get<0>(DstMNKLayout{})), decltype(get<1>(DstMNKLayout{}))>());");
+
+    code.e("using DstPipeLayout = decltype(tile_to_shape(SmemLayoutAtom{},make_shape(shape<0>(DstMNKLayout{}), shape<1>(DstMNKLayout{}), Int<tb::kStages>{}), Step<_1, _2, _3>{}));");
     code.e("auto g_tensor = make_tensor(make_gmem_ptr<half_t>(dtensor), src_layout);");
+    code.e("return make_tma_copy<half_t>(SM90_TMA_LOAD{}, g_tensor, DstPipeLayout{}(_, _, Int<0>{}));");
 
-    code.e("return make_tma_copy<half_t>(SM90_TMA_LOAD{}, g_tensor, DstPipeLayout{}(_, _, Int<0>{}), CTA_TILER{},Int<1>{});");
+    // code.e("return make_tma_copy<half_t>(SM90_TMA_LOAD{}, g_tensor, DstPipeLayout{}(_, _, Int<0>{}), CTA_TILER{},Int<1>{});");
     code.e("};");
 
-    code.e("return std::make_tuple(make_tma(std::get<Index>(dtensors), std::get<Index>(dst_layouts), std::get<Index>(src_layouts))...);");
+    code.e("return std::make_tuple(make_tma(std::get<Index>(dtensors), std::get<Index>(dst_layouts), std::get<Index>(src_layouts), MInputs)...);");
     code.e("}");
     code.e("");
 
     code.e("");
     code.e("template <typename... DstLayouts, typename... SrcLayouts, typename... T>");
-    code.e("auto _get_tma_params(std::tuple<DstLayouts...> dst_layouts, std::tuple<SrcLayouts...> src_layouts, T*... dtensors) {");
+    code.e("auto _get_tma_params(std::tuple<DstLayouts...> dst_layouts, std::tuple<SrcLayouts...> src_layouts, const bool* minputs, T*... dtensors) {");
     code.e("static_assert(sizeof...(DstLayouts) == sizeof...(SrcLayouts));");
     code.e("static_assert(sizeof...(DstLayouts) == sizeof...(T));");
     code.e("constexpr std::size_t NumLayouts = sizeof...(DstLayouts);");
-    code.e("return _get_tma_params_impl(dst_layouts,src_layouts,std::make_tuple(dtensors...), std::make_index_sequence<NumLayouts>{});");
+    // Helper lambda to convert array to parameter pack
+    code.e("auto unpack_minputs = [&]<std::size_t... Index>(std::index_sequence<Index...>) {");
+    code.e("return _get_tma_params_impl<DstLayouts..., SrcLayouts..., T..., (minputs[Index])...>(dst_layouts,src_layouts,std::make_tuple(dtensors...),std::make_index_sequence<NumLayouts>{});");
+    code.e("};");
+    // Call the lambda with the size of the array
+    code.e("return unpack_minputs(std::make_index_sequence<NumLayouts>{});");
+    // code.e("return _get_tma_params_impl<DstLayouts..., SrcLayouts..., T..., MInputs...>(dst_layouts,src_layouts,std::make_tuple(dtensors...), std::make_index_sequence<NumLayouts>{});");
     code.e("}");
 }
 
@@ -229,7 +290,7 @@ CustomOPTranspileResult
   // Get the schedule
   TBSched sched = get_threadblock_schedule(g);
 
-  get_threadblock_swizzle_plan(g, sched);
+  get_threadblock_swizzle_plan_hopper(g, sched);
 
   // Get the memory allocation plan
   TBMemoryPlan mem_plan = get_threadblock_memory_plan(g, sched);
@@ -332,7 +393,7 @@ CustomOPTranspileResult
       int real_innermost_dim = op_meta.chunked_input_real_innermost_dim;
       bool use_async_copy = op_meta.is_pipelined_input;
 
-      assert(use_chunked_copy && use_async_copy);
+      // assert(use_chunked_copy && use_async_copy);
 
       // TODO(intlsy) Support swizzled layout
       // TODO(intlsy) Support TMA
@@ -340,8 +401,6 @@ if (config.target_cc == GPU_CC::H100) {
           pipelined_input_ops.insert(cur_op);
           assert(cur_op->output_tensors.size() == 1);
           // make tma
-          string smem_layout = mov_last_get_stensor_layout(
-              stensor, stensor_meta, real_innermost_dim);
 
           // gmem tensor
           string gmem_layout = get_layout_detail::get_cute_layout(
@@ -351,16 +410,44 @@ if (config.target_cc == GPU_CC::H100) {
 
           imap;
           int forloop_dim = cur_op->forloop_dim;
+          // bool m_input = false;
+          // printf("node op size %d\n", node.ops.size());
+
+          // //if next op is matmul, decide mn major
+          // if(node.ops.size() > 1 && node.ops.at(1).first->op_type == type::TB_MATMUL_OP){
+          //   auto _mmop = node.ops.at(1).first;
+          //   // tb::TB_MATMUL_OP const *mm_op = dynamic_cast<tb::TB_MATMUL_OP const *>(_mmop);
+          //   printf("m_input %d, %d\n", cur_op->output_tensors.at(0).guid, _mmop->input_tensors.at(0).guid);
+          //   if(cur_op->output_tensors.at(0).guid == _mmop->input_tensors.at(0).guid){
+          //       m_input = true;
+          //   }
+          // }
+          
+          // //decide m n major
+          // if((cur_op->output_tensors.at(0).owner_op->op_type == type::TB_MATMUL_OP) &&
+          // (cur_op->output_tensors.at(0).guid == cur_op->output_tensors.at(0).owner_op->input_tensors.at(0).guid)){
+          //     m_input = true;
+          // }else if((cur_op->output_tensors.at(0).owner_op->op_type == type::TB_MATMUL_OP )&&
+          // (cur_op->output_tensors.at(0) == cur_op->output_tensors.at(0).owner_op->input_tensors.at(1))){
+          //     m_input = false;
+          // }
+
+          printf("m_input is %d\n", stensor_meta.m_input);
+
+          string smem_layout = mov_last_get_stensor_layout(
+              stensor, stensor_meta, real_innermost_dim);
+          
+          //get major M/k
+          // get M or N
 
           //issue a pipeline
-          
-          
           code.e("using STensor$InputAtom = tb::InputTMAAsyncCopy<half_t, $, "
-                 "$, decltype(tma_$), MainloopPipeline, PipelineState>;",
+                 "$, decltype(tma_$), MainloopPipeline, PipelineState, $>;",
                  stensor.guid,
                  smem_layout,
                  gmem_layout,
-                 dtensor.guid);
+                 dtensor.guid,
+                 stensor_meta.m_input);
           addr_end += sizeof(uint64_t);
 
          
@@ -369,6 +456,7 @@ if (config.target_cc == GPU_CC::H100) {
                                              stensor.guid,
                                              gmem_layout,
                                              smem_layout,
+                                             stensor_meta.m_input,
                                              fmt("shape(${})", smem_layout),
                                              {1, 1, 1})));
           code.e("half_t *stensor$_async_copy_buf = stensor$_ptr;",
@@ -576,6 +664,7 @@ if (config.target_cc == GPU_CC::H100) {
         node.ops.front().first->op_type == type::TB_MATMUL_OP) {
       tb::TBOperator const *op = node.ops.front().first;
       tb::TBOperator const *output_op = node.ops.back().first;
+      printf("node.ops %d\n", node.ops.size());
       tb::STensor const &input0 = op->input_tensors.at(0);
       tb::STensor const &input1 = op->input_tensors.at(1);
       tb::STensor const &output = output_op->output_tensors.at(0);
@@ -687,6 +776,7 @@ if (config.target_cc == GPU_CC::H100) {
         code.e("auto matmul_$_accum = Matmul$Kernel::get_mma_rC(thread_idx);",
                output.guid,
                output.guid);
+        code.e(fmt("PipelineState smem_pipe_read_$;", output.guid));
       }
       code.e("");
 
@@ -722,31 +812,35 @@ if (config.target_cc == GPU_CC::H100) {
 
       tb::TBOperator const *input_op0 = pipeline.at(0);
       tb::STensor const &input_tensor0 = input_op0->output_tensors.at(0);
-      code.e(fmt("PipelineParams pipeline_params_$;", input_tensor0.guid));
+      code.e(fmt("PipelineParams pipeline_params_$;", pipe_idx));
+       code.e(fmt("PipelineState smem_pipe_write_$ = cutlass::make_producer_start_state<MainloopPipeline>();", pipe_idx));
+      // code.e(fmt("PipelineState smem_pipe_read_$;", input_tensor0.guid));
+        //ktile_count = forloop range
+      code.e(fmt("pipeline_params_$.role = ((warp_group_role == tb::WarpGroupRole::Producer) && (producer_warp_role == tb::ProducerWarpRole::MainloopEpilogue))  ? MainloopPipeline::ThreadCategory::Producer : MainloopPipeline::ThreadCategory::Consumer;", pipe_idx));
+      code.e(fmt("pipeline_params_$.is_leader = warp_group_thread_idx == 0;", pipe_idx));
+      code.e(fmt("pipeline_params_$.num_consumers = cutlass::NumThreadsPerWarpGroup;", pipe_idx));
+
       if(input_num == 1){
         
         // kn::DTensor const &dtensor = input_op0->dtensor;
         
         code.e(fmt("using InputPipeline_$ = tb::TMACopyPipeline1<STensor$InputAtom>;",pipe_idx, input_tensor0.guid));
-        code.e("pipeline_params_$.transaction_bytes = STensor$InputAtom::tmaTransactionBytes;", input_tensor0.guid, input_tensor0.guid);
+        code.e("pipeline_params_$.transaction_bytes = STensor$InputAtom::tmaTransactionBytes;", pipe_idx, input_tensor0.guid);
+        code.e(fmt("MainloopPipeline pipeline_$(shared_storage.pipelines[$].mainloop, pipeline_params_$, Shape<_1, _1, _1>{});", input_tensor0.guid, pipe_idx, pipe_idx));
 
       }else if(input_num == 2){
         tb::TBOperator const *input_op1 = pipeline.at(1);
         tb::STensor const &input_tensor1 = input_op1->output_tensors.at(0);
         code.e(fmt("using InputPipeline = tb::TMACopyPipeline2<STensor$InputAtom, STensor$InputAtom>;", input_tensor0.guid, input_tensor1.guid));
-        code.e(fmt("pipeline_params_$.transaction_bytes = STensor$InputAtom::tmaTransactionBytes + STensor$InputAtom::tmaTransactionBytes;", input_tensor0.guid, input_tensor0.guid, input_tensor1.guid));
+        code.e(fmt("pipeline_params_$.transaction_bytes = STensor$InputAtom::tmaTransactionBytes + STensor$InputAtom::tmaTransactionBytes;", pipe_idx, input_tensor0.guid, input_tensor1.guid));
+        code.e(fmt("MainloopPipeline pipeline_$(shared_storage.pipelines[$].mainloop, pipeline_params_$, Shape<_1, _1, _1>{});", std::to_string(input_tensor0.guid) + "_" + std::to_string(input_tensor1.guid), pipe_idx, pipe_idx));
       }else{
         assert(0);
       }
-      pipe_idx++;
+      
 
-      code.e(fmt("PipelineState smem_pipe_write_$ = cutlass::make_producer_start_state<MainloopPipeline>();", input_tensor0.guid));
-      code.e(fmt("PipelineState smem_pipe_read_$;", input_tensor0.guid));
-        //ktile_count = forloop range
-      code.e(fmt("pipeline_params_$.role = ((warp_group_role == tb::WarpGroupRole::Producer) && (producer_warp_role == tb::ProducerWarpRole::MainloopEpilogue))  ? MainloopPipeline::ThreadCategory::Producer : MainloopPipeline::ThreadCategory::Consumer;", input_tensor0.guid));
-      code.e(fmt("pipeline_params_$.is_leader = warp_group_thread_idx == 0;", input_tensor0.guid));
-      code.e(fmt("pipeline_params_$.num_consumers = cutlass::NumThreadsPerWarpGroup;", input_tensor0.guid));
-      code.e(fmt("MainloopPipeline pipeline_$(shared_storage.pipelines[$].mainloop, pipeline_params_$, Shape<_1, _1, _1>{});", input_tensor0.guid, pipe_idx, input_tensor0.guid));
+           
+      pipe_idx++;
       
     }
     // run pipelines
@@ -763,7 +857,7 @@ if (config.target_cc == GPU_CC::H100) {
       
       assert(input_num > 0);
       if(input_num == 1){
-        code.e(fmt("InputPipeline::run(tma_$, stensor$_async_copy_buf, pipeline_$, smem_pipe_write_$, $, $, $, $, lane_predicate);", dtensor0.guid, input_tensor0.guid, input_tensor0.guid, input_tensor0.guid, g.forloop_range, cur_op0->input_map.x, cur_op0->input_map.y, cur_op0->input_map.z));
+        code.e(fmt("InputPipeline::run(tma_$, stensor$_async_copy_buf, pipeline_$, smem_pipe_write_$, $, $, $, $, lane_predicate);", dtensor0.guid, input_tensor0.guid, input_tensor0.guid, pipe_idx, g.forloop_range, cur_op0->input_map.x, cur_op0->input_map.y, cur_op0->input_map.z));
       }
       else if(input_num == 2){
         tb::TBOperator const *input_op1 = pipeline.at(1);
@@ -771,31 +865,17 @@ if (config.target_cc == GPU_CC::H100) {
         tb::STensor const &input_tensor1 = input_op1->output_tensors.at(0);
         kn::DTensor const &dtensor1 = cur_op1->dtensor;
         
-          code.e("InputPipeline::run(tma_$, tma_$, stensor$_async_copy_buf, stensor$_async_copy_buf, pipeline_$, smem_pipe_write_$, $, $, $, $, $, $, $, lane_predicate);", dtensor0.guid, dtensor1.guid, input_tensor0.guid, input_tensor1.guid, input_tensor0.guid, input_tensor0.guid, g.forloop_range, cur_op0->input_map.x, cur_op0->input_map.y, cur_op0->input_map.z, cur_op1->input_map.x, cur_op1->input_map.y, cur_op1->input_map.z);
+          code.e("InputPipeline::run(tma_$, tma_$, stensor$_async_copy_buf, stensor$_async_copy_buf, pipeline_$, smem_pipe_write_$, $, $, $, $, $, $, $, lane_predicate);", dtensor0.guid, dtensor1.guid, input_tensor0.guid, input_tensor1.guid, std::to_string(input_tensor0.guid) + "_" + std::to_string(input_tensor1.guid), pipe_idx, g.forloop_range, cur_op0->input_map.x, cur_op0->input_map.y, cur_op0->input_map.z, cur_op1->input_map.x, cur_op1->input_map.y, cur_op1->input_map.z);
       }else{
         assert(0);
       }
+      pipe_idx++;
 
       
     }
     code.e("}");
     code.e("}");
     
-    
-    // code.e("STensor$InputAtom::run(tma_$, stensor$_async_copy_buf, "
-    //         "dtensor$_tile_ptr, pipeline_$,  smem_pipe_write_$, $, $, $, $, $, lane_predicate);",
-    //         output.guid,
-    //         dtensor.guid,
-    //         output.guid,
-    //         dtensor.guid,
-    //         output.guid,
-    //         output.guid,
-    //         g.forloop_range,
-    //         input_op->forloop_dim,
-    //         input_op->input_map.x,
-    //         input_op->input_map.y,
-    //         input_op->input_map.z);
-
     
     code.e("");
 
@@ -880,17 +960,17 @@ if (config.target_cc == GPU_CC::H100) {
 
           if (output_op_meta.is_accum_in_reg) {
             // Accumulator is in register
-            code.e("auto matmul_$_accum = Matmul$Kernel::get_mma_rC(thread_idx);",
-               output.guid,
-               output.guid);
+            // code.e("auto matmul_$_accum = Matmul$Kernel::get_mma_rC(thread_idx);",
+            //    output.guid,
+            //    output.guid);
             code.e("Matmul$Kernel::run(matmul_$_accum, stensor$_async_copy_buf, "
                    "stensor$_async_copy_buf, (char*)(buf+0), thread_idx, pipeline_$, smem_pipe_read_$);",
                    output_guid,
                    output_guid,
                    input0.guid,
                    input1.guid,
-                   input1.guid,
-                   input0.guid);
+                   std::to_string(input0.guid) + "_" + std::to_string(input1.guid),
+                   output_guid);
           } else {
             code.e("auto mma_rC = Matmul$Kernel::get_mma_rC(thread_idx);",
                    output_guid);
@@ -901,7 +981,7 @@ if (config.target_cc == GPU_CC::H100) {
                    input1.guid,
                    input0.guid,
                    input1.guid,
-                   input0.guid);
+                   output_guid);
             code.e("Matmul$Kernel::write_back_mma_rC(stensor$_ptr, mma_rC, "
                    "thread_idx);",
                    output_guid,
@@ -1151,14 +1231,11 @@ if (config.target_cc == GPU_CC::H100) {
   code.e("if (warp_group_role == tb::WarpGroupRole::Consumer) {");
   assert(g.forloop_range >= 1);
   code.e("// Consumer main loop");
+  // code.e("auto matmul_20000015_accum = Matmul20000015Kernel::get_mma_rC(thread_idx);");
  
   code.e("for (uint32_t for_idx = 0; for_idx < $; for_idx++) {",
          g.forloop_range);
   
-  // //init pipelines
-  // for (const auto &pipeline : copy_pipelines) {
-  //     code.e("PipelineState smem_pipe_read_$;", pipeline->output_tensors.at(0).guid);
-  // }
 
 
   for (TBSchedNode const &sched_node : sched.loop_nodes) {

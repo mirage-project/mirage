@@ -471,11 +471,13 @@ TranspileResult Transpiler::transpile_ugraph() {
         std::string src_layouts;
         std::string dst_layouts;
         std::string dtensors;
+        std::string m_inputs;
         for (int i = 0; i < result.tmaParamsList.size(); i++) {
           auto const &tmaParams = result.tmaParamsList.at(i);
           src_layouts.append(tmaParams.srcLayout).append("{}");
           dst_layouts.append(tmaParams.dstLayout).append("{}");
           dtensors.append(fmt("dtensor$", tmaParams.guid));
+          m_inputs.append(tmaParams.m_input ? "true" : "false");
           // exec.e("Tensor gA_$ = make_tensor(make_gmem_ptr<half_t>(dtensor$), "
           //        "${});",
           //        tmaParams.guid,
@@ -498,11 +500,14 @@ TranspileResult Transpiler::transpile_ugraph() {
             dtensors.append(", ");
             dst_layouts.append(", ");
             src_layouts.append(", ");
+            m_inputs.append(", ");
           }
         }
 
+        exec.e(fmt("constexpr bool minputs[] = {$};", m_inputs));
+
         // exec.e(fmt("static constexpr int NUM_TMAS = $;", result.tmaParamsList.size()));
-        exec.e(fmt("auto tma_copies = _get_tma_params(std::make_tuple($), std::make_tuple($), $);", dst_layouts, src_layouts, dtensors));
+        exec.e(fmt("auto tma_copies = _get_tma_params(std::make_tuple($), std::make_tuple($), minputs,  $);", dst_layouts, src_layouts, dtensors));
         for(int i = 0; i < result.tmaParamsList.size(); i++){
           exec.e(fmt("auto tma_$ = std::get<$>(tma_copies);",result.tmaParamsList.at(i).guid, i));
         }

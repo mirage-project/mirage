@@ -26,6 +26,20 @@ using namespace cute;
 
 namespace tb {
 
+template <class InputLayout>
+class InputDim01Swapper {
+  CUTE_STATIC_ASSERT_V(rank(InputLayout{}) == _2{});
+
+  using A0 = decltype(get<0>(shape(InputLayout{})));
+  using A1 = decltype(get<1>(shape(InputLayout{})));
+  using TransposeCoordLayout = Layout<Shape<A1, A0>, Stride<A0, _1>>;
+  using Result_ = decltype(composition(InputLayout{}, TransposeCoordLayout{}));
+
+public:
+  using Result =
+      decltype(coalesce(Result_{}, Step<_1, _1>{})); // By-mode coalescing
+};
+
 // Type 1: Non-chunked, synchronous copy
 template <typename T, class DstLayout, class SrcLayout, int NUM_THREADS>
 class InputNonChunkedSyncCopy {
@@ -139,20 +153,59 @@ public:
   }
 };
 
-template <typename T, class DstLayout, class SrcLayout, class TMA, class MainloopPipeline, class PipelineState>
+template <typename T, class DstLayout, class SrcLayout, class TMA, class MainloopPipeline, class PipelineState, bool MInput>
 class InputTMAAsyncCopy {
 public:
   CUTE_STATIC_ASSERT_V(rank(SrcLayout{}) == rank(DstLayout{}));
   
   using CTA_TILER = decltype(shape(DstLayout{}));
   //N major/K major
-  static constexpr GMMA::Major GmmaMajor = (stride<0>(DstLayout{}) == _1{} ? GMMA::Major::MN : GMMA::Major::K);
-  using SmemLayoutAtom = decltype(cutlass::gemm::collective::detail::ss_smem_selector<
-      GmmaMajor, half_t, decltype(get<0>(DstLayout{})), decltype(get<1>(DstLayout{}))>());
+
+  // static constexpr GMMA::Major GmmaMajor = MInput ? (stride<0>(DstLayout{}) == _1{} ? GMMA::Major::K : GMMA::Major::MN) : (stride<0>(DstLayout{}) == _1{} ? GMMA::Major::MN : GMMA::Major::K);
+  // static constexpr GMMA::Major GmmaMajor = MInput ? (DstLayout{}.stride()[0] == _1{} ? GMMA::Major::K : GMMA::Major::MN) : (DstLayout{}.stride()[0] ? GMMA::Major::MN : GMMA::Major::K);
+
+  //if Minput is true, it's a KM input, swap it to MK major
+
+  static constexpr cute::GMMA::Major GmmaMajor = MInput ? GMMA::Major::K : GMMA::Major::MN;
+
+  using DstMNKLayout = std::conditional_t<MInput, typename InputDim01Swapper<DstLayout>::Result, DstLayout>;
+
+  using SmemLayoutAtom = decltype(cutlass::gemm::collective::detail::ss_smem_selector<GmmaMajor, half_t, decltype(get<0>(DstMNKLayout{})), decltype(get<1>(DstMNKLayout{}))>());
 
   using DstPipeLayout = decltype(tile_to_shape(
         SmemLayoutAtom{},
-        make_shape(shape<0>(DstLayout{}), shape<1>(DstLayout{}), Int<kStages>{}), Step<_1, _2, _3>{}));
+        make_shape(shape<0>(DstMNKLayout{}), shape<1>(DstMNKLayout{}), Int<kStages>{}), Step<_1, _2, _3>{}));
+
+  // using MN = std::conditional_t<MInput, decltype(get<1>(DstLayout{})), decltype(get<0>(DstLayout{}))>;
+  // using K = std::conditional_t<MInput, decltype(get<0>(DstLayout{})), decltype(get<1>(DstLayout{}))>;
+  //64, 16, 1, 64 -> 16, 64, 64, 1
+  // using DstLayouts = MInput ?  : DstLayout;
+
+  // static constexpr GMMA::Major GmmaMajor = MInput ? (DstLayout{}.stride()[0] == _1{} ? GMMA::Major::K : GMMA::Major::MN) : (DstLayout{}.stride()[0] ? GMMA::Major::MN : GMMA::Major::K);
+  // using SmemLayoutAtom = decltype(cutlass::gemm::collective::detail::ss_smem_selector<GmmaMajor, half_t, MN, K>);
+  // using SmemLayoutAtom = std::conditional_t<MInput, decltype(cutlass::gemm::collective::detail::ss_smem_selector<
+  //     GmmaMajor, half_t, decltype(get<1>(DstLayout{})), decltype(get<0>(DstLayout{}))>()), decltype(cutlass::gemm::collective::detail::ss_smem_selector<
+  //     GmmaMajor, half_t, decltype(get<0>(DstLayout{})), decltype(get<1>(DstLayout{}))>())>;
+
+
+  // using DstPipeLayout = std::conditional_t<MInput, decltype(tile_to_shape(
+  //       SmemLayoutAtom{},
+  //       make_shape(shape<1>(DstLayout{}), shape<0>(DstLayout{}), Int<kStages>{}), Step<_1, _2, _3>{})), 
+  //       decltype(tile_to_shape(
+  //       SmemLayoutAtom{},
+  //       make_shape(shape<0>(DstLayout{}), shape<1>(DstLayout{}), Int<kStages>{}), Step<_1, _2, _3>{}))>;
+
+  // using DstPipeLayout = DstLayout;
+  // 64, 16, M, K -> 16, 64, M -> K -> 8, 64, M -> K
+
+  // using DstPipeLayout = decltype(tile_to_shape(
+  //       SmemLayoutAtom{},
+  //       make_shape(shape<0>(DstLayout{}), shape<1>(DstLayout{}), Int<kStages>{}), Step<_1, _2, _3>{}));
+  // // using DstPipeLayout = MInput ? decltype(tile_to_shape(
+  //       SmemLayoutAtom{},
+  //       make_shape(shape<1>(DstLayout{}), shape<0>(DstLayout{}), Int<kStages>{}), Step<_1, _2, _3>{})) : decltype(tile_to_shape(
+  //       SmemLayoutAtom{},
+  //       make_shape(shape<0>(DstLayout{}), shape<1>(DstLayout{}), Int<kStages>{}), Step<_1, _2, _3>{}));
   using MainloopPipelines = MainloopPipeline;
   using PipelineStates = PipelineState;
   using SrcLayouts = SrcLayout;
@@ -162,6 +215,12 @@ public:
   
   static __device__ __forceinline__ void prefetch(TMA const &tma){
     cute::prefetch_tma_descriptor(tma.get_tma_descriptor());
+    if(thread0()){
+      print(SmemLayoutAtom{});
+      print("\n");
+      print(DstPipeLayout{});
+      print("\n");
+    }
   }
 };
 
@@ -198,70 +257,74 @@ public:
                                              int lane_predicate) {
     if(lane_predicate){
       
-      Tensor mA = tma_a.get_tma_tensor(shape(SrcLayout_A{}));
-      Tensor mB = tma_b.get_tma_tensor(shape(SrcLayout_B{}));
+      // Tensor mA = tma_a.get_tma_tensor(shape(SrcLayout_A{}));
+      // Tensor mB = tma_b.get_tma_tensor(shape(SrcLayout_B{}));
       
-      Tensor gA_mkl = local_tile(mA, CTA_TILER_A{}, make_coord(_, _)); 
-      Tensor gA = gA_mkl(_, _, _, (imapx_a > 0 ? blockIdx.x : 0));
-      Tensor sA = make_tensor(make_smem_ptr(dst_a), DstPipeLayout_A{});
+      // Tensor gA_mkl = local_tile(mA, CTA_TILER_A{}, make_coord(_, _)); 
+      // Tensor gA = gA_mkl(_, _, _, (imapx_a > 0 ? blockIdx.x : 0));
+      // Tensor sA = make_tensor(make_smem_ptr(dst_a), DstPipeLayout_A{});
 
 
-      auto cta_tma_a = tma_a.get_slice(Int<0>{});  // CTA slice
-      Tensor tAgA = cta_tma_a.partition_S(gA); // (TMA,TMA_M,TMA_N,REST_M,REST_N)
-      Tensor tAsA = cta_tma_a.partition_D(sA); // (TMA,TMA_M,TMA_N)
+      // auto cta_tma_a = tma_a.get_slice(Int<0>{});  // CTA slice
+      // Tensor tAgA = cta_tma_a.partition_S(gA); // (TMA,TMA_M,TMA_N,REST_M,REST_N)
+      // Tensor tAsA = cta_tma_a.partition_D(sA); // (TMA,TMA_M,TMA_N)
 
-      Tensor gB_mkl = local_tile(mB, CTA_TILER_B{}, make_coord(_, _)); 
-      // since
-      Tensor gB = gB_mkl(_, _, (imapx_b > 0 ? blockIdx.x : 0), _);
-      Tensor sB = make_tensor(make_smem_ptr(dst_b), DstPipeLayout_B{});
+      // Tensor gB_mkl = local_tile(mB, CTA_TILER_B{}, make_coord(_, _)); 
+      // // since
+      // Tensor gB = gB_mkl(_, _, (imapx_b > 0 ? blockIdx.x : 0), _);
+      // Tensor sB = make_tensor(make_smem_ptr(dst_b), DstPipeLayout_B{});
 
 
-      auto cta_tma_b = tma_b.get_slice(Int<0>{});  // CTA slice
-      Tensor tBgB = cta_tma_b.partition_S(gB); // (TMA,TMA_M,TMA_N,REST_M,REST_N)
-      Tensor tBsB = cta_tma_b.partition_D(sB); // (TMA,TMA_M,TMA_N)
+      // auto cta_tma_b = tma_b.get_slice(Int<0>{});  // CTA slice
+      // Tensor tBgB = cta_tma_b.partition_S(gB); // (TMA,TMA_M,TMA_N,REST_M,REST_N)
+      // Tensor tBsB = cta_tma_b.partition_D(sB); // (TMA,TMA_M,TMA_N)
 
-      //manully set
-      k_tile_count = 64;
-      auto k_tile_iter  = cute::make_coord_iterator(k_tile_count);
-      CUTLASS_PRAGMA_NO_UNROLL
-      for (; k_tile_count > 0; --k_tile_count){
-        //  if(blockIdx.x == 0 && blockIdx.y == 0){
-        //   printf("producer acuire\n");
-        //  }
-        pipeline.producer_acquire(smem_pipe_write);
-        using BarrierType = typename MainloopPipeline::ProducerBarrierType;
-        BarrierType *tma_barrier = pipeline.producer_get_barrier(smem_pipe_write);
+      // //manully set
+      // k_tile_count = 64;
+      // auto k_tile_iter  = cute::make_coord_iterator(k_tile_count);
+      // CUTLASS_PRAGMA_NO_UNROLL
+      // for (; k_tile_count > 0; --k_tile_count){
+      //   //  if(blockIdx.x == 0 && blockIdx.y == 0){
+      //   //   printf("producer acuire\n");
+      //   //  }
+      //   pipeline.producer_acquire(smem_pipe_write);
+      //   using BarrierType = typename MainloopPipeline::ProducerBarrierType;
+      //   BarrierType *tma_barrier = pipeline.producer_get_barrier(smem_pipe_write);
        
-        int write_stage = smem_pipe_write.index();
-        //  if(blockIdx.x == 0 && blockIdx.y == 0){
-        //   print("\n");
-        //   printf("write stage %d\n", (TMA_A::tmaTransactionBytes + TMA_B::tmaTransactionBytes));
-        //  }
-        //   print(tAgA);
-        //   print("\n");
-        //   print(tAsA);
-        //   print("\n");
-        //   print(CTA_TILER_A{});
-        //   print("\n");
+      //   int write_stage = smem_pipe_write.index();
+      //   //  if(blockIdx.x == 0 && blockIdx.y == 0){
+      //   //   print("\n");
+      //   //   printf("write stage %d\n", (TMA_A::tmaTransactionBytes + TMA_B::tmaTransactionBytes));
+      //   //   print(DstPipeLayout_A{});
+      //   //   print("\n");
+      //   //   print(sA);
+      //   //   print("\n");
+      //   //  }
+      //   //   print(tAgA);
+      //   //   print("\n");
+      //   //   print(tAsA);
+      //   //   print("\n");
+      //   //   print(CTA_TILER_A{});
+      //   //   print("\n");
 
-        //   print(CTA_TILER_B{});
-        //   print("\n");
+      //   //   print(CTA_TILER_B{});
+      //   //   print("\n");
           
-        //   print(tBgB);
-        //   print("\n");
-        //   print(tBsB);
+      //   //   print(tBgB);
+      //   //   print("\n");
+      //   //   print(tBsB);
 
-        // //   print("\n");
-        // }
-        copy(tma_a.with(*tma_barrier), tAgA(_, _, _, *k_tile_iter), tAsA(_, _, _, write_stage));
-        copy(tma_b.with(*tma_barrier), tBgB(_, _, _, *k_tile_iter), tBsB(_, _, _, write_stage));
+      //   // //   print("\n");
+      //   // }
+      //   copy(tma_a.with(*tma_barrier), tAgA(_, _, _, *k_tile_iter), tAsA(_, _, _, write_stage));
+      //   copy(tma_b.with(*tma_barrier), tBgB(_, _, _, *k_tile_iter), tBsB(_, _, _, write_stage));
 
-        // pipeline.producer_commit(smem_pipe_write, (TMA_A::tmaTransactionBytes + TMA_B::tmaTransactionBytes));
-        ++k_tile_iter;
-        // Advance smem_pipe_write
-        ++smem_pipe_write;
+      //   // pipeline.producer_commit(smem_pipe_write, (TMA_A::tmaTransactionBytes + TMA_B::tmaTransactionBytes));
+      //   ++k_tile_iter;
+      //   // Advance smem_pipe_write
+      //   ++smem_pipe_write;
 
-      }
+      // }
 
       // smem_pipe_write.advance(k_tile_count);
       // pipeline.producer_tail(smem_pipe_write);
