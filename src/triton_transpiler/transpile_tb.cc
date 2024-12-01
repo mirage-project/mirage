@@ -21,6 +21,21 @@
 #include "mirage/threadblock/smem_tensor.h"
 #include "mirage/transpiler/utils.h"
 
+inline int round_up_to_power_of_2(int n) {
+    if (n <= 0) return 1;
+    n--;
+    n |= n >> 1;
+    n |= n >> 2;
+    n |= n >> 4;
+    n |= n >> 8;
+    n |= n >> 16;
+    return (n + 1) >= 16 ? (n + 1) : 16;
+}
+
+inline bool is_power_of_2(int n) {
+    return n > 0 && (n & (n - 1)) == 0;
+}
+
 namespace mirage {
 namespace triton_transpiler {
 
@@ -33,6 +48,21 @@ using mirage::transpiler::fmt;
 using mirage::transpiler::map;
 using std::string;
 
+inline std::string get_tensor_shape(const tb::STensor& stensor) {
+    std::string shape = "";
+    for (int i = 0; i < stensor.num_dims; i++) {
+        shape += fmt("$,", stensor.dim[i]);
+    }
+    return shape;
+}
+
+std::vector<int> adjust_tensor_dims(const tb::STensor& stensor) {
+    std::vector<int> adjusted_dims;
+    for (int i = 0; i < stensor.num_dims; i++) {
+        adjusted_dims.push_back(round_up_to_power_of_2(stensor.dim[i]));
+    }
+    return adjusted_dims;
+}
 
 string operator_type_to_triton(type::TBOperatorType type) {
   switch (type) {
@@ -47,6 +77,109 @@ string operator_type_to_triton(type::TBOperatorType type) {
     default:
       assert(false && "Unsupported operator type");
   }
+}
+
+std::string generate_mask_expr(const tb::STensor& stensor, 
+                             const std::vector<int>& adjusted_dims,
+                             const int3& map, 
+                             int forloop_dim = -1) {
+    std::vector<std::string> mask_conditions;
+    
+    for (int i = 0; i < stensor.num_dims; i++) {
+        // Only create mask if dimension was padded
+        if (stensor.dim[i] != adjusted_dims[i]) {
+            std::string base_expr;
+            
+            // Handle different dimensions
+            if (i == stensor.num_dims - 1) {
+                base_expr = "tl.arange(0, $)[None, :]";
+            } else {
+                base_expr = "tl.arange(0, $)[:, None]";
+            }
+            
+            std::string condition = fmt("$ < $", 
+                fmt(base_expr, adjusted_dims[i]),
+                stensor.dim[i]);
+            
+            condition = fmt("($) < $",
+                fmt(base_expr, adjusted_dims[i]),
+                stensor.dim[i]);
+            
+            mask_conditions.push_back(condition);
+        }
+    }
+    
+    if (mask_conditions.empty()) {
+        return "";
+    }
+    
+    // Combine all conditions
+    std::string mask_expr = mask_conditions[0];
+    for (size_t i = 1; i < mask_conditions.size(); i++) {
+        mask_expr += " & " + mask_conditions[i];
+    }
+    
+    return mask_expr;
+}
+
+// Generate expression for a dimension
+std::string get_input_dim_expr(int dim_idx, const int3& imap, int forloop_dim, int forloop_range, int block_size) {
+    std::string base_expr = "tl.arange(0, $)";
+    std::vector<std::string> offset_terms;
+    std::cout << "block_size: " << block_size << "forloop_range: " << forloop_range << std::endl;
+
+    if (imap.x == dim_idx) {
+        offset_terms.push_back(fmt("tl.program_id(0) * $", block_size));
+    }
+    if (imap.y == dim_idx) {
+        offset_terms.push_back(fmt("tl.program_id(1) * $", block_size));
+    }
+    if (imap.z == dim_idx) {
+        offset_terms.push_back(fmt("tl.program_id(2) * $", block_size));
+    }
+
+    if (forloop_dim == dim_idx) {
+        offset_terms.push_back(fmt("i * $", block_size));
+    }
+
+    std::string result = fmt(base_expr, round_up_to_power_of_2(block_size));
+    if (!offset_terms.empty()) {
+        std::string offset = offset_terms[0];
+        for (size_t i = 1; i < offset_terms.size(); i++) {
+            offset += " + " + offset_terms[i];
+        }
+        result = fmt("$ + $", offset, result);
+    }
+
+    return result;
+}
+
+std::string get_output_dim_expr(int dim_idx, const int3& omap, int block_size) {
+    std::string base_expr = "tl.arange(0, $)";
+    std::vector<std::string> offset_terms;
+
+    // 处理program_id映射
+    if (omap.x == dim_idx) {
+        offset_terms.push_back(fmt("tl.program_id(0) * $", block_size));
+    }
+    if (omap.y == dim_idx) {
+        offset_terms.push_back(fmt("tl.program_id(1) * $", block_size));
+    }
+    if (omap.z == dim_idx) {
+        offset_terms.push_back(fmt("tl.program_id(2) * $", block_size));
+    }
+
+    // 组合表达式
+    std::string result = fmt(base_expr, round_up_to_power_of_2(block_size));
+    if (!offset_terms.empty()) {
+        std::string offset = offset_terms[0];
+        for (size_t i = 1; i < offset_terms.size(); i++) {
+            offset += " + " + offset_terms[i];
+        }
+        result = fmt("$ + $", offset, result);
+    }
+
+    return result;
 }
 
 TritonCustomOPTranspileResult
@@ -74,16 +207,19 @@ TritonTranspiler::transpile_kn_custom_op(kn::KNCustomizedOp const *op) {
   for (tb::TBOperator *tb_op : g.operators) {
     if (tb_op->op_type == type::TB_FORLOOP_ACCUM_NO_RED_OP) {
       tb::STensor const &stensor = tb_op->output_tensors.at(0);
+      std::vector<int> adjusted_dims = adjust_tensor_dims(stensor);
       // STensorMeta meta = stensor_metas.at(stensor.guid);
       
       // Create accumulator with appropriate shape
       std::string shape = "";
       for (int i = 0; i < stensor.num_dims; i++) {
-        shape += fmt("$,", stensor.dim[i]);
+        // shape += fmt("$,", stensor.dim[i]);
+        shape += fmt("$,", adjusted_dims[i]);
       }
       code.e("$ = tl.zeros(($), dtype=tl.float32)",
              fmt("stensor$", stensor.guid),
              shape);
+      code.e("# Original shape: ($)", get_tensor_shape(stensor));
     }
   }
   // Generate forloop if needed
@@ -109,57 +245,36 @@ TritonTranspiler::transpile_kn_custom_op(kn::KNCustomizedOp const *op) {
             static_cast<tb::TBInputOp const *>(tb_op);
         kn::DTensor const &dtensor = input_op->dtensor;
         tb::STensor const &stensor = input_op->output_tensors.at(0);
+        std::vector<int> adjusted_dims = adjust_tensor_dims(stensor);
 
         int3 imap = input_op->input_map;
         int forloop_dim = input_op->forloop_dim;
-        std::string ptr_expr;
 
-        if (stensor.num_dims == 1) {
-            // 1D case
-            if (forloop_dim != -1) {
-                ptr_expr = fmt("i * $ + tl.arange(0, $)", 
-                    stensor.dim[forloop_dim], 
-                    stensor.dim[forloop_dim]);
-            } else if (imap.x != -1) {
-                ptr_expr = fmt("tl.program_id(0) * $ + tl.arange(0, $)",
-                    stensor.dim[imap.x],
-                    stensor.dim[imap.x]);
-            }
-        } 
-        else if (stensor.num_dims == 2) {
-            // 2D case - M x N matrix
-            int M = stensor.dim[0];
-            int N = stensor.dim[1];
-            
-            std::string m_expr, n_expr;
-            
-            // M dimension (rows)
-            if (imap.x == 0) {
-                m_expr = fmt("tl.program_id(0) * $ + tl.arange(0, $)", M, M);
-            } else if (forloop_dim == 0) {
-                m_expr = fmt("i * $ + tl.arange(0, $)", M, M);
-            } else {
-                m_expr = fmt("tl.arange(0, $)", M);
-            }
-            
-            // N dimension (cols)
-            if (imap.x == 1) {
-                n_expr = fmt("tl.program_id(0) * $ + tl.arange(0, $)", N, N);
-            } else if (forloop_dim == 1) {
-                n_expr = fmt("i * $ + tl.arange(0, $)", N, N);
-            } else {
-                n_expr = fmt("tl.arange(0, $)", N);
-            }
-            
-            ptr_expr = fmt("($)[:, None] * $ + ($)[None, :]", 
-                m_expr, N, n_expr);
+        std::vector<int> stride(dtensor.num_dims, 1);
+        for (int i = dtensor.num_dims - 2; i >= 0; i--) {
+          stride[i] = stride[i + 1] * dtensor.dim[i + 1];
         }
 
+        std::vector<std::string> dim_exprs;
+        for (int i = 0; i < stensor.num_dims; i++) {
+            dim_exprs.push_back(get_input_dim_expr(i, imap, forloop_dim, g.forloop_range, stensor.dim[i]));
+        }
+        std::string ptr_expr = dim_exprs[0];
+        if (stensor.num_dims > 1) {
+            ptr_expr = fmt("($)[:, None] * $ + ($)[None, :] * $", 
+                          dim_exprs[0], stride[0], dim_exprs[1], stride[1]);
+        }
+        // Generate mask for valid data
+        std::string mask_expr = generate_mask_expr(stensor, adjusted_dims,
+                                                input_op->input_map,
+                                                input_op->forloop_dim);
+
         // Generate load instruction
-        code.e("$ = tl.load($ + $)",
+        code.e("$ = tl.load($ + $, mask=$)",
               fmt("stensor$", stensor.guid),
               fmt("dtensor$", dtensor.guid),
-              ptr_expr);
+              ptr_expr,
+              mask_expr.empty() ? "None" : mask_expr);
         break;
       }
 
@@ -172,6 +287,12 @@ TritonTranspiler::transpile_kn_custom_op(kn::KNCustomizedOp const *op) {
         tb::STensor const &input0 = tb_op->input_tensors.at(0);
         tb::STensor const &input1 = tb_op->input_tensors.at(1);
         tb::STensor const &output = tb_op->output_tensors.at(0);
+
+        std::vector<int> adjusted_dims0 = adjust_tensor_dims(input0);
+        std::vector<int> adjusted_dims1 = adjust_tensor_dims(input1);
+        std::string mask0 = generate_mask_expr(input0, adjusted_dims0, {-1,-1,-1});
+        std::string mask1 = generate_mask_expr(input1, adjusted_dims1, {-1,-1,-1});     
+
         code.e("$ = tl.dot($, $)",
                fmt("stensor$", output.guid),
                fmt("stensor$", input0.guid),
@@ -263,24 +384,23 @@ TritonTranspiler::transpile_kn_custom_op(kn::KNCustomizedOp const *op) {
       case type::TB_REDUCTION_2_OP: {
         tb::STensor const &input = tb_op->input_tensors.at(0);
         tb::STensor const &output = tb_op->output_tensors.at(0);
+        std::vector<int> adjusted_dims = adjust_tensor_dims(input);
+        std::string mask_expr = generate_mask_expr(input, adjusted_dims, {-1,-1,-1});
+                
         int reduc_dim = tb_op->op_type - type::TB_REDUCTION_0_OP;
-        code.e("$ = tl.sum($, axis=$)",
-               fmt("stensor$", output.guid),
-               fmt("stensor$", input.guid),
-               reduc_dim);
-        // keep dims
-        string keep_dims = "";
-        for (int i = 0; i < output.num_dims; i++) {
-          if (i == reduc_dim) {
-            keep_dims += "None";
-          } else {
-            keep_dims += ":";
-          }
-          if (i < output.num_dims - 1) {
-            keep_dims += ",";
-          }
+
+        if (!mask_expr.empty()) {
+            code.e("$ = tl.sum($ * $, axis=$, keep_dims=True)",
+                    fmt("stensor$", output.guid),
+                    mask_expr,
+                    fmt("stensor$", input.guid),
+                    reduc_dim);
+        } else {
+            code.e("$ = tl.sum($, axis=$, keep_dims=True)",
+                    fmt("stensor$", output.guid),
+                    fmt("stensor$", input.guid),
+                    reduc_dim);
         }
-        code.e("$ = $[$]", fmt("stensor$", output.guid), fmt("stensor$", output.guid), keep_dims);
         break;
       }
 
@@ -315,59 +435,42 @@ TritonTranspiler::transpile_kn_custom_op(kn::KNCustomizedOp const *op) {
                   static_cast<tb::TBOutputOp const *>(tb_op);
               kn::DTensor const &dtensor = output_op->dtensor;
               tb::STensor const &stensor = output_op->input_tensors.at(0);
+              std::vector<int> adjusted_dims = adjust_tensor_dims(stensor);
 
               int3 omap = output_op->output_map;
-              std::string ptr_expr;
 
-              if (stensor.num_dims == 1) {
-                  // 1D case
-                  if (omap.x != -1) {
-                      ptr_expr = fmt("tl.program_id(0) * $ + tl.arange(0, $)",
-                          stensor.dim[omap.x],
-                          stensor.dim[omap.x]);
-                  }
-              } 
-              else if (stensor.num_dims == 2) {
-                  // 2D case - M x N matrix
-                  int M = stensor.dim[0];
-                  int N = stensor.dim[1];
-                  
-                  std::string m_expr, n_expr;
-                  
-                  // M dimension (rows)
-                  if (omap.x == 0) {
-                      m_expr = fmt("tl.program_id(0) * $ + tl.arange(0, $)", M, M);
-                  } else {
-                      m_expr = fmt("tl.arange(0, $)", M);
-                  }
-                  
-                  // N dimension (cols)
-                  if (omap.x == 1) {
-                      n_expr = fmt("tl.program_id(0) * $ + tl.arange(0, $)", N, N);
-                  } else if (omap.y == 1) {
-                      n_expr = fmt("tl.program_id(1) * $ + tl.arange(0, $)", N, N);
-                  } else {
-                      n_expr = fmt("tl.arange(0, $)", N);
-                  }
-                  
-                  // Combine expressions with proper broadcasting
-                  ptr_expr = fmt("($)[:, None] * $ + ($)[None, :]", 
-                      m_expr, N, n_expr);
+              std::vector<int> stride(dtensor.num_dims, 1);
+              for (int i = dtensor.num_dims - 2; i >= 0; i--) {
+                  stride[i] = stride[i + 1] * dtensor.dim[i + 1];
               }
 
-              // Handle transpose if needed
-              // bool need_transpose = (meta.partition_dim == stensor.num_dims - 1);
-              // if (need_transpose) {
-              //     code.e("$_trans = tl.trans($)",
-              //           fmt("stensor$", stensor.guid),
-              //           fmt("stensor$", stensor.guid));
-              // }
+              std::vector<std::string> dim_exprs;
+              for (int i = 0; i < stensor.num_dims; i++) {
+                  dim_exprs.push_back(get_output_dim_expr(i, omap, stensor.dim[i]));
+              }
 
-              // Generate store instruction
-              code.e("tl.store($ + $, $)",
-                    fmt("dtensor$", dtensor.guid),
-                    ptr_expr,
-                    fmt("stensor$", stensor.guid));
+              std::string ptr_expr;
+              
+              ptr_expr = dim_exprs[0];
+              if (stensor.num_dims > 1) {
+                  ptr_expr = fmt("($)[:, None] * $ + ($)[None, :]", 
+                                dim_exprs[0], stride[0], dim_exprs[1]);
+              }
+              std::string mask_expr = generate_mask_expr(stensor, adjusted_dims,
+                                                        output_op->output_map);
+
+              if (!mask_expr.empty()) {
+                  code.e("tl.store($ + $, $, mask=$)",
+                          fmt("dtensor$", output_op->dtensor.guid),
+                          ptr_expr,
+                          fmt("stensor$", stensor.guid),
+                          mask_expr == "" ? "None" : mask_expr);
+              } else {
+                  code.e("tl.store($ + $, $)",
+                          fmt("dtensor$", output_op->dtensor.guid),
+                          ptr_expr,
+                          fmt("stensor$", stensor.guid));
+              }
 
               break;
           }
@@ -430,25 +533,23 @@ TritonTranspiler::transpile_kn_custom_op(kn::KNCustomizedOp const *op) {
           case type::TB_REDUCTION_2_OP: {
               tb::STensor const &input = tb_op->input_tensors.at(0);
               tb::STensor const &output = tb_op->output_tensors.at(0);
+              std::vector<int> adjusted_dims = adjust_tensor_dims(input);
+              std::string mask_expr = generate_mask_expr(input, adjusted_dims, {-1,-1,-1});
+
               int reduc_dim = tb_op->op_type - type::TB_REDUCTION_0_OP;
               
-              code.e("$ = tl.sum($, axis=$)",
-                    fmt("stensor$", output.guid),
-                    fmt("stensor$", input.guid),
-                    reduc_dim);
-              // keep dims
-              string keep_dims = "";
-              for (int i = 0; i < output.num_dims; i++) {
-                if (i == reduc_dim) {
-                  keep_dims += "None";
-                } else {
-                  keep_dims += ":";
-                }
-                if (i < output.num_dims - 1) {
-                  keep_dims += ",";
-                }
+              if (!mask_expr.empty()) {
+                  code.e("$ = tl.sum($ * $, axis=$, keep_dims=True)",
+                          fmt("stensor$", output.guid),
+                          mask_expr == "" ? "1.0" : mask_expr,
+                          fmt("stensor$", input.guid),
+                          reduc_dim);
+              } else {
+                  code.e("$ = tl.sum($, axis=$, keep_dims=True)",
+                          fmt("stensor$", output.guid),
+                          fmt("stensor$", input.guid),
+                          reduc_dim);
               }
-              code.e("$ = $[$]", fmt("stensor$", output.guid), fmt("stensor$", output.guid), keep_dims);
               break;
           }
           default: {
