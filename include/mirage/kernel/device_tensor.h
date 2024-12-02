@@ -116,7 +116,7 @@ public:
   mirage::layout::DmemLayout layout;
   int num_dims;
   int dim[MAX_TENSOR_DIMS];
-  size_t guid;
+  type::GuidType guid;
   // int stride[MAX_TENSOR_DIMS];
   //  DTensor fields
   KNOperator *owner_op;

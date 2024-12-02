@@ -16,6 +16,11 @@ using kernel::KNOperator;
 using threadblock::STensor;
 using threadblock::TBOperator;
 
+enum class VerifierType {
+  PROBABILISTIC_VERIFIER,
+  FORMAL_VERIFIER,
+};
+
 struct GeneratorConfig {
   size_t max_num_threadblock_graph_op;
   size_t max_num_kernel_graph_op;
@@ -23,6 +28,8 @@ struct GeneratorConfig {
   size_t max_num_threadblock_graph_inputs;
   size_t max_num_threadblock_graph_outputs;
   size_t search_thread;
+
+  VerifierType verifier_type;
 
   std::vector<type::KNOperatorType> knop_to_explore;
   std::vector<type::TBOperatorType> tbop_to_explore;

@@ -30,6 +30,7 @@ int main(int argc, char **argv) {
     kernel::DTensor S = ref_graph.reduction(E, 2 /*dim*/);
     kernel::DTensor D = ref_graph.div(E, S);
     kernel::DTensor O = ref_graph.matmul(D, V);
+    ref_graph.mark_output(O);
     // ref_graph.all_reduce(O);
     for (auto const &op : ref_graph.operators) {
       op->fingerprint();
@@ -43,7 +44,7 @@ int main(int argc, char **argv) {
     printf("[cudnn kernel graph] Total runtime = %.4lfms\n", total_runtime);
   }
   mirage::cpu::CTensor ref_fp = ref_graph.operators.back()
-                                    ->output_tensors[0]
+                                    ->input_tensors[0]
                                     .copy_fingerprint_to_ctensor();
   kernel::Graph graph({1, 1, 1});
   kernel::DTensor Q = graph.new_input({2 * batch_size, 256, 64},
@@ -115,13 +116,13 @@ int main(int argc, char **argv) {
     outputs = graph.customized({outputs[0], outputs[1]}, bgraph);
     assert(outputs.size() == 1);
   }
+  graph.mark_output(outputs[0]);
   for (auto const &op : graph.operators) {
     op->fingerprint();
   }
   // assert(ref_graph.operators.back()->output_tensors[0].has_same_fingerprint(
   //     graph.operators.back()->output_tensors[0]));
-  assert(
-      graph.operators.back()->output_tensors[0].has_same_fingerprint(ref_fp));
+  assert(graph.operators.back()->input_tensors[0].has_same_fingerprint(ref_fp));
 
   ProfileResult result;
   float total_ms = 0.0f;
@@ -137,8 +138,7 @@ int main(int argc, char **argv) {
   config.enable_attention_specific_optimization();
   std::string results_filename =
       "results_chameleon_bs" + std::to_string(batch_size) + ".json";
-  search::KernelGraphGenerator gen(
-      ref_graph, config, results_filename.data(), true);
+  search::KernelGraphGenerator gen(ref_graph, config, results_filename.data());
   gen.generate_kernel_graphs();
 
   auto et = std::chrono::steady_clock::now();

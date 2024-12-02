@@ -4,27 +4,28 @@ import triton.ops as ops
 import torch
 
 @triton.jit
-def custom_kernel_0(dtensor10009983: tl.tensor, dtensor10009981: tl.tensor, dtensor10009982: tl.tensor):
-  stensor20213901 = tl.zeros((16,64,), dtype=tl.float32)
-  stensor20213905 = tl.zeros((16,128,), dtype=tl.float32)
+def custom_kernel_23(dtensor10010052: tl.tensor, dtensor10010050: tl.tensor, dtensor10010051: tl.tensor):
+  stensor20214361 = tl.zeros((16,64,), dtype=tl.float32)
+  # Original shape: (16,64,)
+  stensor20214365 = tl.zeros((16,256,), dtype=tl.float32)
+  # Original shape: (16,192,)
   for i in range(64):
-    stensor20213897 = tl.load(dtensor10009981 + (tl.arange(0, 16))[:, None] * 64 + (i * 64 + tl.arange(0, 64))[None, :])
-    stensor20213898 = tl.load(dtensor10009982 + (i * 64 + tl.arange(0, 64))[:, None] * 128 + (tl.program_id(0) * 128 + tl.arange(0, 128))[None, :])
-    stensor20213899 = stensor20213897 * stensor20213897
-    stensor20213900 = stensor20213899 * 0.000244
-    stensor20213901 += stensor20213900
-    stensor20213904 = tl.dot(stensor20213897, stensor20213898)
-    stensor20213905 += stensor20213904
-  stensor20213902 = tl.sum(stensor20213901, axis=1)
-  stensor20213902 = stensor20213902[:,None]
-  stensor20213903 = tl.sqrt(stensor20213902)
-  stensor20213906 = tl.fdiv(stensor20213905, stensor20213903)
-  tl.store(dtensor10009983 + (tl.arange(0, 16))[:, None] * 128 + (tl.program_id(0) * 128 + tl.arange(0, 128))[None, :], stensor20213906)
+    stensor20214357 = tl.load(dtensor10010050 + (tl.arange(0, 16))[:, None] * 4096 + (i * 64 + tl.arange(0, 64))[None, :] * 1, mask=None)
+    stensor20214358 = tl.load(dtensor10010051 + (i * 64 + tl.arange(0, 64))[:, None] * 6144 + (tl.program_id(0) * 192 + tl.arange(0, 256))[None, :] * 1, mask=(tl.arange(0, 256)[None, :]) < 192)
+    stensor20214359 = stensor20214357 * stensor20214357
+    stensor20214360 = stensor20214359 * 0.000244
+    stensor20214361 += stensor20214360
+    stensor20214364 = tl.dot(stensor20214357, stensor20214358)
+    stensor20214365 += stensor20214364
+  stensor20214362 = tl.sum(stensor20214361, axis=1, keep_dims=True)
+  stensor20214363 = tl.sqrt(stensor20214362)
+  stensor20214366 = tl.fdiv(stensor20214365, stensor20214363)
+  tl.store(dtensor10010052 + (tl.arange(0, 16))[:, None] * 6144 + (tl.program_id(0) * 192 + tl.arange(0, 256))[None, :], stensor20214366, mask=(tl.arange(0, 256)[None, :]) < 192)
 
 
 if __name__ == "__main__":
   device = torch.device('cuda')
-  dtensor10009981 = torch.randn((16,4096,), dtype=torch.float16).to(device=device)
-  dtensor10009982 = torch.randn((4096,6144,), dtype=torch.float16).to(device=device)
-  dtensor10009983 = torch.randn((16,6144,), dtype=torch.float16).to(device=device)
-  custom_kernel_0[(48, 1, 1)](dtensor10009983, dtensor10009981, dtensor10009982)
+  dtensor10010050 = torch.randn((16,4096,), dtype=torch.float16).to(device=device)
+  dtensor10010051 = torch.randn((4096,6144,), dtype=torch.float16).to(device=device)
+  dtensor10010052 = torch.randn((16,6144,), dtype=torch.float16).to(device=device)
+  custom_kernel_23[(32, 1, 1)](dtensor10010052, dtensor10010050, dtensor10010051)

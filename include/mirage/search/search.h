@@ -7,10 +7,11 @@
 
 #include "mirage/search/config.h"
 #include "mirage/search/dim_strategy.h"
-#include "mirage/search/irange.h"
 #include "mirage/search/order.h"
+#include "mirage/search/range_propagation/irange.h"
 #include "mirage/search/search_context.h"
 #include "mirage/search/search_state_manager.h"
+#include "mirage/search/verification/verifier.h"
 #include "mirage/utils/json_utils.h"
 
 namespace mirage {
@@ -35,9 +36,7 @@ public:
 
 private:
   // Computation graph-related fields
-  std::vector<std::shared_ptr<AlgebraicPattern>>
-      computation_graph_output_patterns;
-  std::vector<cpu::CTensor> computation_graph_output_tensors;
+  std::vector<std::shared_ptr<AbstractExpr>> computation_graph_output_patterns;
   std::vector<std::tuple<std::vector<int>,
                          type::DataType,
                          layout::DmemLayout,
@@ -52,22 +51,28 @@ private:
   // Time
   std::chrono::time_point<std::chrono::steady_clock> start_time;
 
-  std::mutex fp_mutex;
-  std::mutex generated_graphs_mutex;
+  // count number of tasks
+  std::atomic<int> num_tasks;
+  size_t max_depth;
+
+  //
+  std::unordered_map<std::string, bool> seen_patterns;
 
   // Ranges-related fields
   std::vector<std::pair<size_t, IKNRange>> init_ranges;
   std::vector<std::vector<IKNRange>> target_ranges;
 
-  void search_from(std::vector<SerializedSearchContext> const &contexts);
+  // Verifier
+  std::shared_ptr<Verifier> verifier;
 
   void generate_next_operator(
       SearchContext &c,
       std::function<bool(SearchContext const &)> const &verify,
-      std::vector<SerializedSearchContext> &verified);
+      std::vector<SerializedSearchContext> &verified,
+      size_t depth);
 
   void preprocess(kernel::Graph const &computation_graph);
-  bool check_pattern(std::shared_ptr<AlgebraicPattern> pattern);
+  bool check_pattern(std::shared_ptr<AbstractExpr> pattern);
   bool verify(kernel::Graph &g);
 
   void save_results() const;

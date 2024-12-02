@@ -12,6 +12,7 @@ from .core import *
 from .threadblock import *
 from .visualizer import *
 from .utils import *
+from .triton_profiler import *
 
 HARD_CODE = """
 #include <Python.h>
@@ -402,7 +403,10 @@ class KNGraph:
         elif backend == "nki":
             return all_graphs
         elif backend == "triton":
-            return all_graphs
+            return profile_and_select_best_graph(all_graphs, 
+                                                 target_cc=torch.cuda.get_device_properties(0).major * 10 
+                                                 + torch.cuda.get_device_properties(0).minor,
+                                                 warmup_iters=16, profile_iters=1000, debug_mode=False)
         else:
             assert False, "Unsupported backend"
             return None
