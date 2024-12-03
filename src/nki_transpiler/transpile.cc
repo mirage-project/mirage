@@ -292,7 +292,7 @@ NKITranspiler::NKITranspiler(kernel::Graph const *_graph,
   }
 }
 
-void NKITranspiler::resolve_tensor_layout() {
+std::optional<NKIErrorInfo> NKITranspiler::resolve_tensor_layout() {
   // Get a list of all STensors
   std::vector<tb::STensor> all_stensors;
   std::unordered_set<sguid_t> processed_sguids;
@@ -497,13 +497,17 @@ void NKITranspiler::resolve_tensor_layout() {
   z3::expr objective = z3::sum(costs);
   opt.minimize(objective);
   z3::check_result check_result = opt.check();
-  if (check_result == z3::unsat) {
-    // No valid layout found
-    throw std::runtime_error("Z3 returned unsat. No valid layout found.");
-  } else if (check_result == z3::unknown) {
-    // ???
-    throw std::runtime_error("Z3 returned unknown.");
+
+  // z3 can't provide a sat, generate the error state.
+  if (check_result != z3::sat) {
+    std::string msg = check_result == z3::unsat
+                          ? "Z3 unsat: No valid stensor layout found."
+                          : "Z3 unknown: While resolving stensor layout.";
+    std::vector<std::string> error_msgs;
+    error_msgs.emplace_back(std::move(msg));
+    return error_msgs;
   }
+
   assert(check_result == z3::sat);
 
   // Retrieve the result
@@ -520,6 +524,7 @@ void NKITranspiler::resolve_tensor_layout() {
     assert(partition_dim != -1);
     this->stensor_metas[stensor.guid].partition_dim = partition_dim;
   }
+  return std::nullopt;
 }
 
 NKITranspileResult NKITranspiler::transpile_ugraph() {
@@ -601,11 +606,14 @@ NKITranspileResult NKITranspiler::transpile_ugraph() {
                          header.to_string(),
                          custom_kernels.to_string(),
                          exec.to_string());
-  return NKITranspileResult{code};
+  return NKITranspileResult{std::move(code)};
 }
 
 NKITranspileResult NKITranspiler::generate_code() {
-  this->resolve_tensor_layout();
+  auto maybe_error = this->resolve_tensor_layout();
+  if (maybe_error.has_value()) { // contains error
+    return NKITranspileResult{"", maybe_error.value()};
+  }
   return this->transpile_ugraph();
 }
 
