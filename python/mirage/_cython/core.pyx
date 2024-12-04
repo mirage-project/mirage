@@ -981,9 +981,11 @@ def generate_nki_program(CyKNGraph input_graph, *, int target_cc) -> dict:
     
     # Call transpile
     cdef NKITranspileResult result = transpile(input_graph.p_kgraph, transpiler_config)
+    cdef list error_list = [error.decode("UTF-8") for error in result.error_state.errors]
 
     return {
         "code": result.code.decode("UTF-8"),
+        "errors": error_list,
     }
 
 def generate_triton_program(CyKNGraph input_graph, *, int target_cc) -> dict:
