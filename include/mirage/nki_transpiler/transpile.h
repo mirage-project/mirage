@@ -16,6 +16,7 @@
 #pragma once
 
 #include <cstddef>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -45,6 +46,15 @@ struct NKITranspilerConfig {
   int target_cc;
 };
 
+// Descriptive transpiler errors.
+// Currently, only layout errors are reported, further descriptive
+// errors can be added to provide info to users.
+struct NKIErrorInfo {
+  std::vector<std::string> errors;
+  NKIErrorInfo() = default;
+  NKIErrorInfo(std::vector<std::string> err) : errors(err) {}
+};
+
 // Transpile a custom KN operator (a custom block graph)
 struct NKICustomOPTranspileResult {
   // The name of the generated kernel function
@@ -61,6 +71,15 @@ struct NKITranspileResult {
 
   // The size of the buffer (should be an array on Trainium), in bytes
   // size_t buf_size;
+
+  // Transpiler errors for a valid mugraphs.
+  NKIErrorInfo error_state;
+
+  // Default constructor to build py extensions
+  NKITranspileResult() : code(""), error_state(NKIErrorInfo()) {}
+  explicit NKITranspileResult(std::string code_,
+                              NKIErrorInfo err_ = NKIErrorInfo())
+      : code(std::move(code_)), error_state(err_) {}
 };
 
 class NKITranspiler {
@@ -76,7 +95,7 @@ public:
   NKITranspiler(kernel::Graph const *_graph,
                 NKITranspilerConfig const &_config);
   NKITranspileResult generate_code();
-  void resolve_tensor_layout();
+  std::optional<NKIErrorInfo> resolve_tensor_layout();
   NKICustomOPTranspileResult
       transpile_kn_custom_op(kn::KNCustomizedOp const *op);
   NKITranspileResult transpile_ugraph();
