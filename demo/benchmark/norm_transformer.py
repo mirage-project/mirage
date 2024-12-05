@@ -12,19 +12,22 @@ if __name__ == "__main__":
     filename = args.file
 
     graph = mi.new_kernel_graph()
-    X = graph.new_input(dims=(16, 4096), dtype=mi.float16)
-    alpha = graph.new_input(dims=(16, 4096), dtype=mi.float16)
-    X_norm = graph.rms_norm(X, normalized_shape=(4096,)) # TODO: replace with standard L2 norm
-    A = graph.add(X_norm, alpha) # TODO: replace with subtract
+    H = graph.new_input(dims=(32, 4096), dtype=mi.float16)
+    X = graph.new_input(dims=(32, 4096), dtype=mi.float16)
+    alpha = graph.new_input(dims=(32, 4096), dtype=mi.float16)
+    H_norm = graph.rms_norm(H, normalized_shape=(4096,)) # TODO: replace with standard L2 norm
+    A = graph.add(H_norm, X) # TODO: replace with subtract
     B = graph.mul(alpha, A)
     C = graph.add(X, B)
     O = graph.rms_norm(C, normalized_shape=(4096,)) # TODO: replace with standard L2 norm
-    graph.new_output(O)
+    graph.mark_output(O)
+    
     optimized_graph = graph.superoptimize(previous_checkpoint=filename)
 
     input_tensors = [
-        torch.randn(16, 4096, dtype=torch.float16, device='cuda:0'),
-        torch.randn(16, 4096, dtype=torch.float16, device='cuda:0')
+        torch.randn(32, 4096, dtype=torch.float16, device='cuda:0'),
+        torch.randn(32, 4096, dtype=torch.float16, device='cuda:0'),
+        torch.randn(32, 4096, dtype=torch.float16, device='cuda:0')
     ]
 
     for _ in range(16):
