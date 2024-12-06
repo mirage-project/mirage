@@ -12,7 +12,7 @@ if __name__ == "__main__":
     filename = args.file
 
     graph = mi.new_kernel_graph()
-    X = graph.new_input(dims=(16, 4096), dtype=mi.float16)
+    X = graph.new_input(dims=(2 * batch_size, 4096), dtype=mi.float16)
     W = graph.new_input(dims=(4096, 6144), dtype=mi.float16)
     D = graph.rms_norm(X, normalized_shape=(4096,))
     O = graph.matmul(D, W)
@@ -20,7 +20,7 @@ if __name__ == "__main__":
     optimized_graph = graph.superoptimize(config="mlp", previous_checkpoint=filename)
 
     input_tensors = [
-        torch.randn(16, 4096, dtype=torch.float16, device='cuda:0'),
+        torch.randn(2 * batch_size, 4096, dtype=torch.float16, device='cuda:0'),
         torch.randn(4096, 4096, dtype=torch.float16, device='cuda:0'),
     ]
 
