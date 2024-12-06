@@ -105,6 +105,9 @@ public:
 
   static __device__ __forceinline__ auto get_mma_rC(int thread_idx) {
     // Make a fake tensor
+    // if (thread_idx >= TILED_MMA_NUM_THREADS) {
+    //   return;
+    // }
    
 //    auto sC_l = tile_to_shape(
 //         SmemLayoutC{},
@@ -113,11 +116,10 @@ public:
         make_tensor(make_smem_ptr((half_t *)nullptr), SmemLayoutC{});
 
     TiledMMA tiled_mma;
-    ThrMMA thr_mma = tiled_mma.get_slice(0);
+    ThrMMA thr_mma = tiled_mma.get_slice(thread_idx);
     Tensor mma_rC =
         thr_mma.partition_fragment_C(sC_fake); // (MMA, MMA_M, MMA_N)
   
-
     clear(mma_rC);
     return mma_rC;
   }
@@ -128,6 +130,16 @@ public:
     if (thread_idx >= TILED_MMA_NUM_THREADS) {
       return;
     }
+    // cutlass::arch::NamedBarrier::sync(128, 8);
+
+    // if(threadIdx.x == 0){
+    //   printf("xxxx %d\n", blockIdx.x);
+    // }
+    
+    // if(threadIdx.x == 0 && blockIdx.x == 0 && blockIdx.y == 0){
+    //   printf("xxxx\n");
+    // }
+    
 
     Tensor sC = make_tensor(make_smem_ptr(c_ptr), SmemLayoutC{}); // [M, N]
     R2STiledCopyC r2s_tiled_copy_C;
@@ -161,92 +173,33 @@ public:
           int thread_idx,
           MainloopPipeline pipeline,
           PipelineState& smem_pipe_read) {
-    // TiledMMA tiled_mma;
-    // // cutlass::arch::warpgroup_reg_dealloc<232>();
 
-    // auto sA_l = tile_to_shape(
-    //     TileALayout{},
-    //     make_shape(shape<0>(SmemLayoutA{}), shape<1>(SmemLayoutA{}), Int<2>{}), Step<_1, _2, _3>{});
+        
+        TiledMMA tiled_mma;
 
-    // auto sB_l = tile_to_shape(
-    //     TileBLayout{},
-    //     make_shape(shape<0>(SmemLayoutB{}), shape<1>(SmemLayoutB{}), Int<2>{}), Step<_1, _2, _3>{});
+    auto sA_l = tile_to_shape(
+        TileALayout{},
+        make_shape(shape<0>(SmemLayoutA{}), shape<1>(SmemLayoutA{}), Int<1>{}), Step<_1, _2, _3>{});
 
-    // //  auto sA_l = tile_to_shape(
-    // //     SmemLayoutA{},
-    // //     make_shape(shape<0>(SmemLayoutA{}), shape<1>(SmemLayoutA{}), Int<2>{}), Step<_1, _2, _3>{});
+    auto sB_l = tile_to_shape(
+        TileBLayout{},
+        make_shape(shape<0>(SmemLayoutB{}), shape<1>(SmemLayoutB{}), Int<2>{}), Step<_1, _2, _3>{});
 
-    // // auto sB_l = tile_to_shape(
-    // //     SmemLayoutB{},
-    // //     make_shape(shape<0>(SmemLayoutB{}), shape<1>(SmemLayoutB{}), Int<2>{}), Step<_1, _2, _3>{});
+    Tensor sA = make_tensor(make_smem_ptr(a_ptr), sA_l); // [M, K]
+    Tensor sB = make_tensor(make_smem_ptr(b_ptr), sB_l); // [N, K]
 
+    ThrMMA thr_mma = tiled_mma.get_thread_slice(threadIdx.x);
+    Tensor tCsA = thr_mma.partition_A(sA); // (MMA,MMA_M,MMA_K,PIPE)
+    Tensor tCsB = thr_mma.partition_B(sB); // (MMA,MMA_N,MMA_K,PIPE)
 
-    // Tensor sA = make_tensor(make_smem_ptr(a_ptr), sA_l); // [M, K]
-    // Tensor sB = make_tensor(make_smem_ptr(b_ptr), sB_l); // [N, K]
+    Tensor tCrA = thr_mma.make_fragment_A(tCsA); // (MMA,MMA_M,MMA_K,PIPE)
+    Tensor tCrB = thr_mma.make_fragment_B(tCsB); // (MMA,MMA_N,MMA_K,PIPE)
+    int read_stage = smem_pipe_read.index();
 
-    // ThrMMA thr_mma = tiled_mma.get_thread_slice(0);
-    // Tensor tCsA = thr_mma.partition_A(sA); // (MMA,MMA_M,MMA_K,PIPE)
-    // Tensor tCsB = thr_mma.partition_B(sB); // (MMA,MMA_N,MMA_K,PIPE)
-
-    // Tensor tCrA = thr_mma.make_fragment_A(tCsA); // (MMA,MMA_M,MMA_K,PIPE)
-    // Tensor tCrB = thr_mma.make_fragment_B(tCsB); // (MMA,MMA_N,MMA_K,PIPE)
-
-    //  auto consumer_wait = [](auto& pipeline, auto& smem_pipe_read) {
-    //         auto barrier_token = pipeline.consumer_try_wait(smem_pipe_read);
-    //         pipeline.consumer_wait(smem_pipe_read, barrier_token);
-    // };
-    
-    // // auto k_tile_count = 64; 
-    // // CUTLASS_PRAGMA_NO_UNROLL
-    // //   for (; k_tile_count > 0; --k_tile_count){
-    
-    //  if(threadIdx.x == 0 && blockIdx.x == 0){
-    //   printf("pre read\n");
-    //   print(SmemLayoutA{});
-    //   print("\n");
-    //   print(SmemLayoutA_{});
-    //   print("\n");
-      
-    // }
-    // // PipelineState smem_pipe_release = smem_pipe_read;
-    // consumer_wait(pipeline, smem_pipe_read);
-    // int read_stage = smem_pipe_read.index();
-    // // if(threadIdx.x == 0 && blockIdx.x == 0){
-    // //   printf("tCsA stage: %d\n", read_stage);
-    // //   print(tCsA);
-    // //   print("\n");
-    // //   // print(sB_l);
-    // //   // print("\n");
-      
-    // // }
-    
-    // // warpgroup_fence_operand(mma_rC);
-    // cute::warpgroup_arrive();
-    // gemm(tiled_mma, tCrA(_, _, _, read_stage), tCrB(_, _, _, read_stage), mma_rC);
-    // cute::warpgroup_commit_batch();
-    // cute::warpgroup_wait<0>();
-    // // warpgroup_fence_operand(mma_rC);
-
-    // // if(blockIdx.x == 0 && threadIdx.x == 0){
-    // //   print("mma_rC: %d\n", threadIdx.x);
-    // //   print(TileALayout{});
-    // //   print("\n");
-    // //   print(TileBLayout{});
-    // //   print("\n");
-    // //   // print(stride<1>(SmemLayoutA{}));
-    // //   // print("\n");
-    // //   // print(SmemLayoutA{});
-    // //   // print("\n");
-    // // //   print(GmmaMajorA);
-    // // //   print("\n");
-    // // //   print(GmmaMajorB);
-    // // //   print("\n");
-    // // }
-
-    
-    // pipeline.consumer_release(smem_pipe_read);
-    // ++smem_pipe_read;
-  
+    cute::warpgroup_arrive();
+    gemm(tiled_mma, tCrA(_, _, _, 0), tCrB(_, _, _, read_stage), mma_rC);
+    cute::warpgroup_commit_batch();
+    cute::warpgroup_wait<0>();
 }
 };
 

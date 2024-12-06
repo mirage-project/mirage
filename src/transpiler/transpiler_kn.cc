@@ -463,7 +463,7 @@ TranspileResult Transpiler::transpile_ugraph() {
 
         // get tma params;
         if(config.target_cc >= GPU_CC::H100){
-          get_hopper_tmas(hopper_tma, result.tmaParamsList);
+          // get_hopper_tmas(hopper_tma, result.tmaParamsList);
 
            // for inputs that needs tma async copy, init the TMAs
         std::string tmas;
@@ -472,12 +472,14 @@ TranspileResult Transpiler::transpile_ugraph() {
         std::string dst_layouts;
         std::string dtensors;
         std::string m_inputs;
+        std::string m_inputs_array;
         for (int i = 0; i < result.tmaParamsList.size(); i++) {
           auto const &tmaParams = result.tmaParamsList.at(i);
           src_layouts.append(tmaParams.srcLayout).append("{}");
           dst_layouts.append(tmaParams.dstLayout).append("{}");
           dtensors.append(fmt("dtensor$", tmaParams.guid));
           m_inputs.append(tmaParams.m_input ? "true" : "false");
+          m_inputs_array.append(fmt("minputs[$]", i));
           // exec.e("Tensor gA_$ = make_tensor(make_gmem_ptr<half_t>(dtensor$), "
           //        "${});",
           //        tmaParams.guid,
@@ -501,22 +503,54 @@ TranspileResult Transpiler::transpile_ugraph() {
             dst_layouts.append(", ");
             src_layouts.append(", ");
             m_inputs.append(", ");
+            m_inputs_array.append(", ");
           }
         }
 
-        exec.e(fmt("constexpr bool minputs[] = {$};", m_inputs));
+        exec.e(fmt("std::vector<bool> minputs = {$};", m_inputs));
 
         // exec.e(fmt("static constexpr int NUM_TMAS = $;", result.tmaParamsList.size()));
-        exec.e(fmt("auto tma_copies = _get_tma_params(std::make_tuple($), std::make_tuple($), minputs,  $);", dst_layouts, src_layouts, dtensors));
+        // exec.e(fmt("auto tma_copies = _get_tma_params(std::make_tuple($), std::make_tuple($), minputs,  $);", dst_layouts, src_layouts, dtensors));
         for(int i = 0; i < result.tmaParamsList.size(); i++){
-          exec.e(fmt("auto tma_$ = std::get<$>(tma_copies);",result.tmaParamsList.at(i).guid, i));
+          auto const &tmaParams = result.tmaParamsList.at(i);
+          if(tmaParams.m_input){
+              exec.e(fmt("static constexpr cute::GMMA::Major GmmaMajor_$ = GMMA::Major::K;", tmaParams.guid));
+              // exec.e(fmt("using DstMNKLayout_$ = typename tb::InputDim01Swapper<$>::Result;", tmaParams.guid, tmaParams.dstLayout));
+              // exec.e(fmt("using SrcMNKLayout_$ = typename tb::InputDim01Swapper<$>::Result;", tmaParams.guid, tmaParams.srcLayout));
+              
+          }else{
+              exec.e(fmt("static constexpr cute::GMMA::Major GmmaMajor_$ = GMMA::Major::MN;", tmaParams.guid));
+              // exec.e(fmt("using DstMNKLayout_$ = $;", tmaParams.guid, tmaParams.dstLayout));
+              // exec.e(fmt("using SrcMNKLayout_$ = $;", tmaParams.guid, tmaParams.srcLayout));
+          }
+          exec.e(fmt("using DstMNKLayout_$ = $;", tmaParams.guid, tmaParams.dstLayout));
+          exec.e(fmt("using SrcMNKLayout_$ = $;", tmaParams.guid, tmaParams.srcLayout));
+ 
+
+          exec.e(fmt("using SmemLayoutAtom_$ = decltype(cutlass::gemm::collective::detail::ss_smem_selector<GmmaMajor_$, half_t, decltype(get<0>(DstMNKLayout_${})), decltype(get<1>(DstMNKLayout_${}))>());", tmaParams.guid, tmaParams.guid, tmaParams.guid, tmaParams.guid));
+          exec.e(fmt("using DstPipeLayout_$ = decltype(tile_to_shape(SmemLayoutAtom_${}, make_shape(shape<0>(DstMNKLayout_${}), shape<1>(DstMNKLayout_${}), Int<tb::kStages>{}), Step<_1, _2, _3>{}));", tmaParams.guid, tmaParams.guid, tmaParams.guid, tmaParams.guid));
+          exec.e(fmt("auto g_tensor_$ = make_tensor(make_gmem_ptr<half_t>(dtensor$), SrcMNKLayout_${});", tmaParams.guid, tmaParams.guid, tmaParams.guid));
+          exec.e(fmt("auto tma_$ = make_tma_copy(SM90_TMA_LOAD{}, g_tensor_$, DstPipeLayout_${}(_, _, Int<0>{}));", tmaParams.guid, tmaParams.guid, tmaParams.guid));
+          
+          // exec.e(fmt("auto tma_$ = std::get<$>(tma_copies);",result.tmaParamsList.at(i).guid, i));
+          exec.e("");
         }
-        exec.e("cudaFuncSetAttribute($<$>, "
+
+        if(result.tmaParamsList.size() > 0){
+          exec.e("cudaFuncSetAttribute($<$>, "
                "cudaFuncAttributeMaxDynamicSharedMemorySize, $);",
                result.func_name,
                tma_tmps,
                result.smem_size +
                    result.tmaParamsList.size() * sizeof(uint64_t) + 3000);
+        }else{
+          exec.e("cudaFuncSetAttribute($, "
+               "cudaFuncAttributeMaxDynamicSharedMemorySize, $);",
+               result.func_name,
+               result.smem_size +
+                   result.tmaParamsList.size() * sizeof(uint64_t) + 3000);
+        }
+        
         exec.e("$<<<grid_dim, block_dim, smem_size>>>($ $);",
                result.func_name,
                tmas,
@@ -533,10 +567,10 @@ TranspileResult Transpiler::transpile_ugraph() {
     }
 
         
-        exec.e("cudaError_t error = cudaGetLastError();");
-        exec.e("if (error != cudaSuccess) {");
-        exec.e("std::cerr << cudaGetErrorString(error) << std::endl;");
-        exec.e("}");
+        // exec.e("cudaError_t error = cudaGetLastError();");
+        // exec.e("if (error != cudaSuccess) {");
+        // exec.e("printf(\"CUDA Error: %s\\n\", cudaGetErrorString(error));");
+        // exec.e("}");
     
 
         custom_kernels.e(result.code);
