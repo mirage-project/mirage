@@ -8,24 +8,25 @@ head_dim = 128
 intermediate_size = 11008
 num_tokens = 4
 num_kv_tokens = 4096
+batch_size = 8
 
 def get_rms_linear():
     graph = mi.new_kernel_graph()
-    X = graph.new_input(dims=(num_tokens, 4096), dtype=mi.float16)
+    X = graph.new_input(dims=(batch_size * num_tokens, 4096), dtype=mi.float16)
     W = graph.new_input(dims=(4096, n_local_heads * head_dim + 2 * n_local_kv_heads * head_dim), dtype=mi.float16)
     D = graph.rms_norm(X, normalized_shape=(4096,))
     O = graph.matmul(D, W)
     graph.mark_output(O)
-    return graph.superoptimize(config="mlp", previous_checkpoint="chameleon_rms_linear.json")
+    return graph.superoptimize(config="mlp", previous_checkpoint=f"chameleon_rms_linear_bs{batch_size}.json")
 
 def get_rms_linear2():
     graph = mi.new_kernel_graph()
-    X = graph.new_input(dims=(num_tokens, 4096), dtype=mi.float16)
+    X = graph.new_input(dims=(batch_size * num_tokens, 4096), dtype=mi.float16)
     W = graph.new_input(dims=(4096, intermediate_size * 2), dtype=mi.float16)
     D = graph.rms_norm(X, normalized_shape=(4096,))
     O = graph.matmul(D, W)
     graph.mark_output(O)
-    return graph.superoptimize(config="mlp", previous_checkpoint="chameleon_rms_linear2.json")
+    return graph.superoptimize(config="mlp", previous_checkpoint=f"chameleon_rms_linear2_bs{batch_size}.json")
 
 def get_chameleon_attention():
     graph = mi.new_kernel_graph()
@@ -38,7 +39,7 @@ def get_chameleon_attention():
     D = graph.div(E, S)
     O = graph.matmul(D, V)
     graph.mark_output(O)
-    return graph.superoptimize(config="attention", previous_checkpoint="chameleon_attention.json")
+    return graph.superoptimize(config="attention", previous_checkpoint="chameleon_attention_bs{batch_size}.json")
 
 def mirage_chameleon(X, Wqkv, Wo, W13, W2, Kcache, Vcache, kernels):
     func = kernels[0]
@@ -68,7 +69,7 @@ def mirage_chameleon(X, Wqkv, Wo, W13, W2, Kcache, Vcache, kernels):
     return output
 
 if __name__ == "__main__":
-    X = torch.randn(num_tokens, 4096, dtype=torch.float16, device='cuda:0')
+    X = torch.randn(batch_size * num_tokens, 4096, dtype=torch.float16, device='cuda:0')
     Wqkv = torch.randn(4096, n_local_heads * head_dim + 2 * n_local_kv_heads * head_dim, dtype=torch.float16, device='cuda:0')
     Wo = torch.randn(n_local_heads * head_dim, 4096, dtype=torch.float16, device='cuda:0')
     W13 = torch.randn(4096, intermediate_size * 2, dtype=torch.float16, device='cuda:0')

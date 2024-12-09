@@ -10,20 +10,21 @@ head_dim = 128
 intermediate_size = 14336
 num_tokens = 1
 num_kv_tokens = 4096
+batch_size = 8
 
 silu = torch.nn.SiLU()
 def get_rms_linear():
     graph = mi.new_kernel_graph()
-    X = graph.new_input(dims=(num_tokens, 4096), dtype=mi.float16)
+    X = graph.new_input(dims=(batch_size * num_tokens, 4096), dtype=mi.float16)
     W = graph.new_input(dims=(4096, n_local_heads * head_dim + 2 * n_local_kv_heads * head_dim), dtype=mi.float16)
     D = graph.rms_norm(X, normalized_shape=(4096,))
     O = graph.matmul(D, W)
     graph.mark_output(O)
-    return graph.superoptimize(config="mlp", previous_checkpoint="llama_rms_linear.json")
+    return graph.superoptimize(config="mlp", previous_checkpoint="llama_rms_linear_bs{batch_size}.json")
 
 def get_lora():
     graph = mi.new_kernel_graph()
-    X = graph.new_input(dims=(num_tokens, 4096), dtype=mi.float16)
+    X = graph.new_input(dims=(batch_size * num_tokens, 4096), dtype=mi.float16)
     W = graph.new_input(dims=(4096, intermediate_size * 2), dtype=mi.float16)
     A = graph.new_input(dims=(4096, 16), dtype=mi.float16)
     B = graph.new_input(dims=(16, intermediate_size * 2), dtype=mi.float16)
@@ -50,7 +51,7 @@ def get_lora():
 
 def get_lora2():
     graph = mi.new_kernel_graph()
-    X = graph.new_input(dims=(num_tokens, 14336), dtype=mi.float16)
+    X = graph.new_input(dims=(batch_size * num_tokens, 14336), dtype=mi.float16)
     W = graph.new_input(dims=(14336, 4096), dtype=mi.float16)
     A = graph.new_input(dims=(14336, 16), dtype=mi.float16)
     B = graph.new_input(dims=(16, 4096), dtype=mi.float16)
@@ -102,7 +103,7 @@ def mirage_llama(X, Wqkv, Wo, W13, W2, Kcache, Vcache, A1, B1, A2, B2, kernels):
 
 
 if __name__ == "__main__":
-    X = torch.randn(num_tokens, 4096, dtype=torch.float16, device='cuda:0')
+    X = torch.randn(batch_size * num_tokens, 4096, dtype=torch.float16, device='cuda:0')
     Wqkv = torch.randn(4096, n_local_heads * head_dim + 2 * n_local_kv_heads * head_dim, dtype=torch.float16, device='cuda:0')
     Wo = torch.randn(n_local_heads * head_dim, 4096, dtype=torch.float16, device='cuda:0')
     W13 = torch.randn(4096, intermediate_size * 2, dtype=torch.float16, device='cuda:0')

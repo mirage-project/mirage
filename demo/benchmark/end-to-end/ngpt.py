@@ -8,27 +8,28 @@ head_dim = 128
 intermediate_size = 4096
 num_tokens = 4
 num_kv_tokens = 4096
+batch_size = 8
 
 def get_norm1():
     graph = mi.new_kernel_graph()
-    X = graph.new_input(dims=(num_tokens, 4096), dtype=mi.float16)
+    X = graph.new_input(dims=(batch_size * num_tokens, 4096), dtype=mi.float16)
     W = graph.new_input(dims=(4096, n_local_heads * head_dim + 2 * n_local_kv_heads * head_dim), dtype=mi.float16)
     D = graph.matmul(X, W)
     O = graph.rms_norm(D, normalized_shape=(n_local_heads * head_dim + 2 * n_local_kv_heads * head_dim,))
     graph.mark_output(O)
-    return graph.superoptimize(previous_checkpoint="ngpt_norm1.json")
+    return graph.superoptimize(previous_checkpoint="ngpt_norm1_bs{batch_size}.json")
 
 def get_norm2():
     graph = mi.new_kernel_graph()
-    X = graph.new_input(dims=(num_tokens, 4096), dtype=mi.float16)
+    X = graph.new_input(dims=(batch_size * num_tokens, 4096), dtype=mi.float16)
     W = graph.new_input(dims=(4096, intermediate_size * 2), dtype=mi.float16)
-    alpha = graph.new_input(dims=(num_tokens, intermediate_size * 2), dtype=mi.float16)
+    alpha = graph.new_input(dims=(batch_size * num_tokens, intermediate_size * 2), dtype=mi.float16)
     D = graph.matmul(X, W)
     A = graph.rms_norm(D, normalized_shape=(intermediate_size * 2,)) # TODO: replace with standard L2 norm
     B = graph.mul(A, alpha)
     O = graph.rms_norm(B, normalized_shape=(intermediate_size * 2,)) # TODO: replace with standard L2 norm
     graph.mark_output(O)
-    return graph.superoptimize(previous_checkpoint="ngpt_norm2.json")
+    return graph.superoptimize(previous_checkpoint="ngpt_norm2_bs{batch_size}.json")
 
 def mirage_ngpt(X, Wqkv, Wo, W13, W2, Kcache, Vcache, alpha, kernels):
     func = kernels[0]
@@ -58,14 +59,14 @@ def mirage_ngpt(X, Wqkv, Wo, W13, W2, Kcache, Vcache, alpha, kernels):
     return output
 
 if __name__ == "__main__":
-    X = torch.randn(num_tokens, 4096, dtype=torch.float16, device='cuda:0')
+    X = torch.randn(batch_size * num_tokens, 4096, dtype=torch.float16, device='cuda:0')
     Wqkv = torch.randn(4096, n_local_heads * head_dim + 2 * n_local_kv_heads * head_dim, dtype=torch.float16, device='cuda:0')
     Wo = torch.randn(n_local_heads * head_dim, 4096, dtype=torch.float16, device='cuda:0')
     W13 = torch.randn(4096, intermediate_size * 2, dtype=torch.float16, device='cuda:0')
     W2 = torch.rand(intermediate_size, 4096, dtype=torch.float16, device='cuda:0')
     Kcache = torch.rand(num_kv_tokens, n_local_kv_heads, head_dim, dtype=torch.float16, device='cuda:0')
     Vcache = torch.rand(num_kv_tokens, n_local_kv_heads, head_dim, dtype=torch.float16, device='cuda:0')
-    alpha = torch.rand(num_tokens, intermediate_size * 2, dtype=torch.float16, device='cuda:0')
+    alpha = torch.rand(batch_size * num_tokens, intermediate_size * 2, dtype=torch.float16, device='cuda:0')
 
     k1 = get_norm1()
     k2 = get_norm2()
