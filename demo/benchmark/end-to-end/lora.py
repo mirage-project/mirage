@@ -21,22 +21,13 @@ def get_rms_linear():
     graph.mark_output(O)
     return graph.superoptimize(config="mlp", previous_checkpoint="llama_rms_linear.json")
 
-def get_rms_linear2():
-    graph = mi.new_kernel_graph()
-    X = graph.new_input(dims=(num_tokens, 4096), dtype=mi.float16)
-    W = graph.new_input(dims=(4096, intermediate_size * 2), dtype=mi.float16)
-    D = graph.rms_norm(X, normalized_shape=(4096,))
-    O = graph.matmul(D, W)
-    graph.mark_output(O)
-    return graph.superoptimize(config="mlp", previous_checkpoint="llama_rms_linear2.json")
-
 def get_lora():
     graph = mi.new_kernel_graph()
     X = graph.new_input(dims=(num_tokens, 4096), dtype=mi.float16)
-    W = graph.new_input(dims=(4096, 4096), dtype=mi.float16)
+    W = graph.new_input(dims=(4096, intermediate_size * 2), dtype=mi.float16)
     A = graph.new_input(dims=(4096, 16), dtype=mi.float16)
-    B = graph.new_input(dims=(16, 4096), dtype=mi.float16)
-    tb_graph = mi.new_threadblock_graph(grid_dim=(128,1,1), block_dim=(128,1,1), forloop_range=16, reduction_dimx=64)
+    B = graph.new_input(dims=(16, intermediate_size * 2), dtype=mi.float16)
+    tb_graph = mi.new_threadblock_graph(grid_dim=(448,1,1), block_dim=(128,1,1), forloop_range=64, reduction_dimx=64)
     tX = tb_graph.new_input(dtensor=X, input_map=(-1, -1, -1), forloop_dim=1)
     tW = tb_graph.new_input(dtensor=W, input_map=(1, -1, -1), forloop_dim=0)
     tA = tb_graph.new_input(dtensor=A, input_map=(-1, -1, -1), forloop_dim=0)
@@ -45,12 +36,14 @@ def get_lora():
     # tC = tb_graph.concat(tX, tD, dim=1)
     # tE = tb_graph.concat(tW, tB, dim=0)
     # tO = tb_graph.matmul(tC, tE)
+    tAccX = tb_graph.forloop_accum(tX, "rms")
     tC = tb_graph.matmul(tX, tW)
     tD = tb_graph.matmul(tX, tA)
     tE = tb_graph.matmul(tD, tB)
-    tO = tb_graph.add(tC, tE)
-    tAccumO = tb_graph.forloop_accum(tO)
-    tb_graph.new_output(stensor=tAccumO, output_map=(1, -1, -1))
+    tM = tb_graph.add(tC, tE)
+    tAccM = tb_graph.forloop_accum(tM)
+    tO = tb_graph.div(tAccM, tAccX)
+    tb_graph.new_output(stensor=tO, output_map=(1, -1, -1))
     O = graph.customized([X, W, A, B], tb_graph)
     graph.mark_output(O[0])
     return graph
@@ -94,20 +87,14 @@ def mirage_llama(X, Wqkv, Wo, W13, W2, Kcache, Vcache, A1, B1, A2, B2, kernels):
     #Xq = rms_norm2(Xq)
     #Xk = rms_norm2(Xk)
     output = flashinfer.single_prefill_with_kv_cache(Xq, Kcache, Vcache, causal=True)
-    output = output.reshape(output_shape)
-    # output = torch.matmul(output.reshape(output_shape), Wo)
-    # LoRA1
-    func = kernels[2]
-    outputs = func(inputs=[output, Wo, A1, B1])
-    output = outputs[0]
-    # RMSNorm
+    output = torch.matmul(output.reshape(output_shape), Wo)
+    # RMSNorm + LoRA1
     X = output
-    func = kernels[1]
-    outputs = func(inputs=[X, W13])
+    func = kernels[2]
+    outputs = func(inputs=[X, W13, A1, B1])
     X13 = outputs[0]
     X1, X3 = X13.chunk(2, -1)
     # LoRA2
-    # output = torch.matmul(X1, W2)
     func = kernels[3]
     outputs = func(inputs=[X1, W2, A2, B2])
     output = outputs[0]
@@ -123,12 +110,12 @@ if __name__ == "__main__":
     Kcache = torch.rand(num_kv_tokens, n_local_kv_heads, head_dim, dtype=torch.float16, device='cuda:0')
     Vcache = torch.rand(num_kv_tokens, n_local_kv_heads, head_dim, dtype=torch.float16, device='cuda:0')
     A1 = torch.rand(4096, 16, dtype=torch.float16, device='cuda:0')
-    B1 = torch.rand(16, 4096, dtype=torch.float16, device='cuda:0')
+    B1 = torch.rand(16, 14336 * 2, dtype=torch.float16, device='cuda:0')
     A2 = torch.rand(14336, 16, dtype=torch.float16, device='cuda:0')
     B2 = torch.rand(16, 4096, dtype=torch.float16, device='cuda:0')
 
     k1 = get_rms_linear()
-    k2 = get_rms_linear2()
+    k2 = None
     k3 = get_lora()
     k4 = get_lora2()
     kernels = [k1, k2, k3, k4]
