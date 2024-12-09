@@ -10,13 +10,13 @@ head_dim = 128
 num_tokens = 1
 num_kv_tokens = 4096
 
-rms_norm4k = torch.nn.RMSNorm(4096, device='cuda:0', dtype=torch.float16)
-rms_norm128 = torch.nn.RMSNorm(128, device='cuda:0', dtype=torch.float16)
+rms_norm1 = torch.nn.RMSNorm(n_local_heads * head_dim + 2 * n_local_kv_heads * head_dim, device='cuda:0', dtype=torch.float16)
+rms_norm2 = torch.nn.RMSNorm(14336 * 2, device='cuda:0', dtype=torch.float16)
 silu = torch.nn.SiLU()
 
-def torch_llama(X, Wqkv, Wo, W13, W2, Kcache, Vcache):
-    X = rms_norm4k(X)
+def torch_ngpt(X, Wqkv, Wo, W13, W2, Kcache, Vcache, alpha):
     Xqkv = torch.matmul(X, Wqkv)
+    Xqkv = rms_norm1(Xqkv)
     Xq = Xqkv[:, : (n_local_heads * head_dim)]
     output_shape = Xq.shape
     Xkv = Xqkv[:, (n_local_heads * head_dim) :]
@@ -26,10 +26,12 @@ def torch_llama(X, Wqkv, Wo, W13, W2, Kcache, Vcache):
     Xv = Xv.view(Xv.shape[0], n_local_kv_heads, head_dim)
     output = flashinfer.single_prefill_with_kv_cache(Xq, Kcache, Vcache, causal=True)
     output = torch.matmul(output.reshape(output_shape), Wo)
-    # RMSNorm
+    # Norm
     X = output
-    X = rms_norm4k(X)
     X13 = torch.matmul(X, W13)
+    X13 = rms_norm2(X13)
+    X13 = torch.mul(X13, alpha)
+    X13 = rms_norm2(X13)
     X1, X3 = X13.chunk(2, -1)
     output = torch.matmul(silu(X1) * X3, W2)
     return output
@@ -42,13 +44,14 @@ if __name__ == "__main__":
     W2 = torch.rand(14336, 4096, dtype=torch.float16, device='cuda:0')
     Kcache = torch.rand(num_kv_tokens, n_local_kv_heads, head_dim, dtype=torch.float16, device='cuda:0')
     Vcache = torch.rand(num_kv_tokens, n_local_kv_heads, head_dim, dtype=torch.float16, device='cuda:0')
+    alpha = torch.rand(num_tokens, 14336 * 2, dtype=torch.float16, device='cuda:0')
     for _ in range(16):
-        torch_llama(X, Wqkv, Wo, W13, W2, Kcache, Vcache)
+        torch_ngpt(X, Wqkv, Wo, W13, W2, Kcache, Vcache, alpha)
     torch.cuda.synchronize()
     starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
     starter.record()
     for _ in range(1000):
-        torch_llama(X, Wqkv, Wo, W13, W2, Kcache, Vcache)
+        torch_ngpt(X, Wqkv, Wo, W13, W2, Kcache, Vcache, alpha)
     ender.record()
     torch.cuda.synchronize()
     curr_time = starter.elapsed_time(ender)
