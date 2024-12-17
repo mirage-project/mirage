@@ -44,7 +44,6 @@ def run_with_debug():
 """
             code = generate_triton_program(graph.cygraph, target_cc=target_cc)["code"]
             
-            # 移除原始代码中的__main__部分
             code_lines = code.split('\n')
             main_start = -1
             kernel_start = -1
@@ -63,7 +62,6 @@ def run_with_debug():
             else:
                 main_code = ""
             
-            # 添加调试输出
             debug_code = """
         print("Debug: Initializing CUDA device")
         device = torch.device('cuda')
@@ -82,7 +80,7 @@ def run_with_debug():
 if __name__ == "__main__":
     run_with_debug()
 """
-            # final_file = error_handling + code + debug_code + main_code + error_handling_end
+
             final_file = header + '\n'.join(header_code) + '\n'.join(kernel_code) + error_handling + debug_code + main_code + error_handling_end
             f.write(final_file)
             with open(f"generated_debug_code_{self.cnt}.py", "w") as _f:
@@ -93,7 +91,6 @@ if __name__ == "__main__":
         """Profile execution time by running the module multiple times with progress bars"""
         try:
             # First try a single run to check for errors with full output
-            tqdm.write(f"\nTesting kernel {desc}...")
             process = subprocess.run(
                 [sys.executable, module_path],
                 capture_output=True,
@@ -114,39 +111,31 @@ if __name__ == "__main__":
                     raise RuntimeError("Initial kernel test failed")
                 
             # Warmup runs
-            with tqdm(total=self.warmup_iters + self.profile_iters,
-                        desc=f"{desc} (warmup)", 
-                        position=1, 
-                        leave=False) as pbar:
-                
-                for _ in range(self.warmup_iters):
-                    subprocess.run([sys.executable, module_path], 
-                                    stdout=subprocess.DEVNULL if not self.debug else None,
-                                    stderr=subprocess.DEVNULL if not self.debug else None,
-                                    check=False  # 不立即检查返回值，我们自己处理错误
+            for _ in range(self.warmup_iters):
+                subprocess.run([sys.executable, module_path], 
+                                stdout=subprocess.DEVNULL if not self.debug else None,
+                                stderr=subprocess.DEVNULL if not self.debug else None,
+                                check=False  # Ignore errors during warmup
+                            )
+            
+            # Profile runs
+            starter = torch.cuda.Event(enable_timing=True)
+            ender = torch.cuda.Event(enable_timing=True)
+            
+            torch.cuda.synchronize()
+            starter.record()
+            
+            for _ in range(self.profile_iters):
+                subprocess.run([sys.executable, module_path], 
+                                check=True,
+                                stdout=subprocess.DEVNULL if not self.debug else None,
+                                stderr=subprocess.DEVNULL if not self.debug else None,
                                 )
-                    pbar.update(1)
                 
-                # Profile runs
-                pbar.set_description(f"{desc} (profiling)")
-                starter = torch.cuda.Event(enable_timing=True)
-                ender = torch.cuda.Event(enable_timing=True)
-                
-                torch.cuda.synchronize()
-                starter.record()
-                
-                for _ in range(self.profile_iters):
-                    subprocess.run([sys.executable, module_path], 
-                                    check=True,
-                                    stdout=subprocess.DEVNULL if not self.debug else None,
-                                    stderr=subprocess.DEVNULL if not self.debug else None,
-                                    )
-                    pbar.update(1)
-                    
-                ender.record()
-                torch.cuda.synchronize()
-                self.success_num += 1
-                return starter.elapsed_time(ender) / self.profile_iters
+            ender.record()
+            torch.cuda.synchronize()
+            self.success_num += 1
+            return starter.elapsed_time(ender) / self.profile_iters
             
         except subprocess.CalledProcessError as e:
             tqdm.write("\nError Details:")

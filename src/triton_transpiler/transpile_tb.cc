@@ -126,7 +126,6 @@ std::string generate_mask_expr(const tb::STensor& stensor,
 std::string get_input_dim_expr(int dim_idx, const int3& imap, int forloop_dim, int forloop_range, int block_size) {
     std::string base_expr = "tl.arange(0, $)";
     std::vector<std::string> offset_terms;
-    std::cout << "block_size: " << block_size << "forloop_range: " << forloop_range << std::endl;
 
     if (imap.x == dim_idx) {
         offset_terms.push_back(fmt("tl.program_id(0) * $", block_size));

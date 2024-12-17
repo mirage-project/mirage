@@ -253,7 +253,7 @@ class KNGraph:
                 return None
 
         MIRAGE_ROOT = os.environ.get(
-            "MIRAGE_ROOT", os.path.join(os.path.dirname(__file__), "include")
+            "MIRAGE_ROOT", os.path.join(os.path.dirname(__file__), "../../include")
         )
 
         # if True:
@@ -340,7 +340,9 @@ class KNGraph:
         franges: list = None,
         verbose: bool = False,
         config: str = None,
-        backend: str = "cuda"
+        backend: str = "cuda",
+        warmup_iters: int = 16,
+        profile_iters: int = 1000,
     ):
         cygraphs = search(
             self.cygraph,
@@ -387,15 +389,15 @@ class KNGraph:
                     print("muGraph {}: skipping since its shared memory usage exceed limit".format(idx))
                     continue
                 # Warmup runs
-                for _ in range(16):
+                for _ in range(warmup_iters):
                     g(inputs=input_tensors)
                 torch.cuda.synchronize()
                 starter.record()
-                for _ in range(1000):
+                for _ in range(profile_iters):
                     g(inputs=input_tensors)
                 ender.record()
                 torch.cuda.synchronize()
-                perf = starter.elapsed_time(ender) / 1000
+                perf = starter.elapsed_time(ender) / profile_iters
                 print("muGraph {}: profiled performance (ms) = {}".format(idx, perf))
                 if perf < best_perf:
                     best_graph, best_perf = g, perf
@@ -406,7 +408,7 @@ class KNGraph:
             return profile_and_select_best_graph(all_graphs, 
                                                  target_cc=torch.cuda.get_device_properties(0).major * 10 
                                                  + torch.cuda.get_device_properties(0).minor,
-                                                 warmup_iters=16, profile_iters=1000, debug_mode=False)
+                                                 warmup_iters=warmup_iters, profile_iters=profile_iters, debug_mode=verbose)
         else:
             assert False, "Unsupported backend"
             return None
