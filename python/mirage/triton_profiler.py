@@ -19,11 +19,55 @@ class TritonProfiler:
         
     def _generate_code_file(self, graph, target_cc: int) -> Tuple[str, str]:
         """Generate triton code for a graph and save to temp file"""
+
         with tempfile.NamedTemporaryFile(suffix='.py', delete=False, mode='w') as f:
             code = generate_triton_program(graph.cygraph, target_cc=target_cc)["code"]
-            with open(f"generated_code_{self.cnt}.py", "w") as _f:
-                _f.write(code)
-            f.write(code)
+            code_lines = code.split('\n')
+            main_start = -1
+            kernel_start = -1
+
+            for i, line in enumerate(code_lines):
+                if 'if __name__ == "__main__":' in line:
+                    main_start = i
+                if '@triton.jit' in line and kernel_start == -1:
+                    kernel_start = i
+            
+            if main_start != -1:
+                main_code = code_lines[main_start+1:]
+                kernel_code = code_lines[kernel_start:main_start]
+                header_code = code_lines[:kernel_start]
+                main_code = '\n'.join('        ' + line.strip() for line in main_code if line.strip())
+            else:
+                main_code = ""
+
+            run_kernel_code = f"""
+def run_kernel():
+    # Warmup iterations
+    for _ in range({self.warmup_iters}):
+{main_code}
+    
+    # Profile iterations
+    starter = torch.cuda.Event(enable_timing=True)
+    ender = torch.cuda.Event(enable_timing=True)
+    torch.cuda.synchronize()
+    starter.record()
+    for _ in range({self.profile_iters}):
+{main_code}
+    ender.record()
+    torch.cuda.synchronize()
+    elapsed_time = starter.elapsed_time(ender) / {self.profile_iters}
+    print(f'Average time per iteration: {{elapsed_time:.3f}} ms')
+
+if __name__ == "__main__":
+    print("Running kernel...")
+    run_kernel()
+
+"""
+            final_code = '\n'.join(header_code) + '\n'.join(kernel_code) + run_kernel_code
+            
+            with open(f"generated_code_{self.cnt}.py", "w") as _f: #TODO: Remove this debug line
+                _f.write(final_code)
+            f.write(final_code)
             return f.name, code
         
     def _generate_debug_code_file(self, graph, target_cc: int) -> Tuple[str, str]:
@@ -32,7 +76,6 @@ class TritonProfiler:
             header = """
 import sys
 import traceback
-import torch
 """
             error_handling = """
 def run_with_debug():
@@ -50,13 +93,14 @@ def run_with_debug():
             for i, line in enumerate(code_lines):
                 if 'if __name__ == "__main__":' in line:
                     main_start = i
-                if '@triton.jit' in line:
+                if '@triton.jit' in line and kernel_start == -1:
                     kernel_start = i
 
             
             if main_start != -1:
                 main_code = code_lines[main_start+1:]
                 kernel_code = code_lines[kernel_start:main_start]
+                kernel_name = kernel_code[0].split('(')[0].split(' ')[-1]
                 header_code = code_lines[:kernel_start]
                 main_code = '\n'.join('        ' + line.strip() for line in main_code if line.strip())
             else:
@@ -89,52 +133,20 @@ if __name__ == "__main__":
     def _run_profile(self, module_path: str, desc: str = "") -> float:
         """Profile execution time by running the module multiple times with progress bars"""
         try:
-            # First try a single run to check for errors with full output
             process = subprocess.run(
                 [sys.executable, module_path],
                 capture_output=True,
-                text=True
+                text=True,
+                check=True
             )
             
-            # Always print output in debug mode
-            if self.debug or process.returncode != 0:
-                tqdm.write("\nDebug Output:")
-                if process.stdout:
-                    tqdm.write("Stdout:")
-                    tqdm.write(process.stdout)
-                if process.stderr:
-                    tqdm.write("Stderr:")
-                    tqdm.write(process.stderr)
-                
-                if process.returncode != 0:
-                    raise RuntimeError("Initial kernel test failed")
-                
-            # Warmup runs
-            for _ in range(self.warmup_iters):
-                subprocess.run([sys.executable, module_path], 
-                                stdout=subprocess.DEVNULL if not self.debug else None,
-                                stderr=subprocess.DEVNULL if not self.debug else None,
-                                check=False  # Ignore errors during warmup
-                            )
+            # Parse the average time from the output
+            for line in process.stdout.splitlines():
+                if "Average time per iteration" in line:
+                    self.success_num += 1
+                    return float(line.split(":")[-1].strip().split(" ")[0])
             
-            # Profile runs
-            starter = torch.cuda.Event(enable_timing=True)
-            ender = torch.cuda.Event(enable_timing=True)
-            
-            torch.cuda.synchronize()
-            starter.record()
-            
-            for _ in range(self.profile_iters):
-                subprocess.run([sys.executable, module_path], 
-                                check=True,
-                                stdout=subprocess.DEVNULL if not self.debug else None,
-                                stderr=subprocess.DEVNULL if not self.debug else None,
-                                )
-                
-            ender.record()
-            torch.cuda.synchronize()
-            self.success_num += 1
-            return starter.elapsed_time(ender) / self.profile_iters
+            raise RuntimeError("Failed to extract timing from output")
             
         except subprocess.CalledProcessError as e:
             tqdm.write("\nError Details:")
