@@ -80,7 +80,6 @@ def run_with_debug():
 if __name__ == "__main__":
     run_with_debug()
 """
-
             final_file = header + '\n'.join(header_code) + '\n'.join(kernel_code) + error_handling + debug_code + main_code + error_handling_end
             f.write(final_file)
             with open(f"generated_debug_code_{self.cnt}.py", "w") as _f:
