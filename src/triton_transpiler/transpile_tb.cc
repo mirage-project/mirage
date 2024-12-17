@@ -295,8 +295,8 @@ TritonTranspiler::transpile_kn_custom_op(kn::KNCustomizedOp const *op) {
 
         code.e("$ = tl.dot($, $)",
                fmt("stensor$", output.guid),
-               fmt("stensor$", input0.guid),
-               fmt("stensor$", input1.guid));
+               fmt("stensor$.to(tl.float32)", input0.guid),
+               fmt("stensor$.to(tl.float32)", input1.guid));
         break;
       }
 
