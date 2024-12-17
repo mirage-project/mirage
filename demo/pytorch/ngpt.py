@@ -4,15 +4,16 @@ import os
 import torch
 import flashinfer
 
-n_local_heads = 32
-n_local_kv_heads = 8
+n_local_heads = 12
+n_local_kv_heads = 12
 head_dim = 128
-num_tokens = 1
+num_tokens = 4
 num_kv_tokens = 4096
+intermediate_size = 4096
 batch_size = 8
 
 rms_norm1 = torch.nn.RMSNorm(n_local_heads * head_dim + 2 * n_local_kv_heads * head_dim, device='cuda:0', dtype=torch.float16)
-rms_norm2 = torch.nn.RMSNorm(14336 * 2, device='cuda:0', dtype=torch.float16)
+rms_norm2 = torch.nn.RMSNorm(intermediate_size * 2, device='cuda:0', dtype=torch.float16)
 silu = torch.nn.SiLU()
 
 def torch_ngpt(X, Wqkv, Wo, W13, W2, Kcache, Vcache, alpha):
@@ -41,11 +42,11 @@ if __name__ == "__main__":
     X = torch.randn(batch_size * num_tokens, 4096, dtype=torch.float16, device='cuda:0')
     Wqkv = torch.randn(4096, n_local_heads * head_dim + 2 * n_local_kv_heads * head_dim, dtype=torch.float16, device='cuda:0')
     Wo = torch.randn(n_local_heads * head_dim, 4096, dtype=torch.float16, device='cuda:0')
-    W13 = torch.randn(4096, 14336 * 2, dtype=torch.float16, device='cuda:0')
-    W2 = torch.rand(14336, 4096, dtype=torch.float16, device='cuda:0')
+    W13 = torch.randn(4096, intermediate_size * 2, dtype=torch.float16, device='cuda:0')
+    W2 = torch.rand(intermediate_size, 4096, dtype=torch.float16, device='cuda:0')
     Kcache = torch.rand(num_kv_tokens, n_local_kv_heads, head_dim, dtype=torch.float16, device='cuda:0')
     Vcache = torch.rand(num_kv_tokens, n_local_kv_heads, head_dim, dtype=torch.float16, device='cuda:0')
-    alpha = torch.rand(num_tokens, 14336 * 2, dtype=torch.float16, device='cuda:0')
+    alpha = torch.rand(batch_size * num_tokens, intermediate_size * 2, dtype=torch.float16, device='cuda:0')
     for _ in range(16):
         torch_ngpt(X, Wqkv, Wo, W13, W2, Kcache, Vcache, alpha)
     torch.cuda.synchronize()
