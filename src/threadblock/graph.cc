@@ -725,7 +725,7 @@ void from_json(json const &j, Graph &graph) {
   graph.forloop_range = j.at("forloop_range").get<int>();
   graph.reduction_dimx = j.at("reduction_dimx").get<int>();
   graph.operators.clear();
-  graph.smem_offset = j.at("smem_offset").get<int>();
+  graph.smem_offset = 0;
 
   std::unordered_map<int, int> guid_mapping;
   auto get_tensor_from_guid = [&](int guid) {
