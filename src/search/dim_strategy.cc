@@ -32,7 +32,7 @@ std::vector<dim3>
 
   auto generate_1d_grids = [&](std::vector<int> const &dims) {
     std::vector<dim3> cands;
-    for (size_t x = 8; x <= 128; x *= 2) {
+    for (size_t x = 8; x <= 64; x *= 2) {
       for (int dim : dims) {
         if (dim % x == 0) {
           cands.push_back({dim / x, 1, 1});
@@ -44,7 +44,7 @@ std::vector<dim3>
 
   auto generate_2d_grids = [&](int x, std::vector<int> const &dims) {
     std::vector<dim3> cands;
-    for (size_t y = 32; y <= 64; y *= 2) {
+    for (size_t y : {8, 64, 128, 256}) {
       for (int dim : dims) {
         if (dim % y == 0) {
           cands.push_back({x, dim / y, 1});
@@ -84,10 +84,10 @@ std::vector<dim3>
   };
 
   std::vector<dim3> cands = config.grid_dim_to_explore;
+  int batch = get_batch();
 
   cands = vector_concat(cands, generate_1d_grids(get_dims()));
   if (config._enable_attention_specific_optimization) {
-    int batch = get_batch();
     if (batch != -1) {
       cands = vector_concat(cands, generate_2d_grids(batch, get_dims()));
     }
@@ -100,6 +100,10 @@ std::vector<dim3>
     return 32 <= num_threadblocks &&
            num_threadblocks <= config::MAX_NUM_THREADBLOCKS_PER_KERNEL;
   });
+
+  if (batch != -1 && batch <= config::MAX_NUM_THREADBLOCKS_PER_KERNEL) {
+    cands.push_back({batch, 1, 1});
+  }
 
   cands = deduplicate(cands);
 
@@ -227,6 +231,7 @@ std::vector<std::vector<int3>>
     if (!config._enable_attention_specific_optimization) {
       imap_to_explore.push_back({-1, -1, -1});
       imap_to_explore.push_back({1, -1, -1});
+      imap_to_explore.push_back({0, -1, -1});
     }
     generate_input_map_cand(tensors, grid_dim, imap_to_explore, {}, results);
   }

@@ -340,9 +340,14 @@ class KNGraph:
         franges: list = None,
         verbose: bool = False,
         config: str = None,
+<<<<<<< HEAD
         backend: str = "cuda",
         warmup_iters: int = 16,
         profile_iters: int = 1000,
+=======
+        previous_checkpoint: str = None,
+        backend: str = "cuda"
+>>>>>>> origin/main
     ):
         cygraphs = search(
             self.cygraph,
@@ -352,6 +357,7 @@ class KNGraph:
             blockdims=blockdims,
             fmaps=fmaps,
             franges=franges,
+            previous_checkpoint=previous_checkpoint,
             verbose=verbose,
             default_config=config,
         )

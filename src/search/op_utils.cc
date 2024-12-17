@@ -404,21 +404,24 @@ TBOperator *create_op(threadblock::Graph &g,
     if (concat1 == nullptr) {
       return nullptr;
     }
+    g.operators.push_back(concat1);
     TBOperator *concat2 =
         g.create_concat_op(inputs[2], inputs[3], inputs[2].num_dims - 2);
     if (concat2 == nullptr) {
       delete concat1;
+      g.operators.pop_back();
       return nullptr;
     }
+    g.operators.push_back(concat2);
     TBOperator *matmul = g.create_matmul_op(concat1->output_tensors[0],
                                             concat2->output_tensors[0]);
     if (matmul == nullptr) {
       delete concat2;
       delete concat1;
+      g.operators.pop_back();
+      g.operators.pop_back();
       return nullptr;
     }
-    g.operators.push_back(concat1);
-    g.operators.push_back(concat2);
     return matmul;
   }
   return nullptr;

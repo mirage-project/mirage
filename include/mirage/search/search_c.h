@@ -22,6 +22,7 @@ int cython_search(mirage::kernel::Graph const *input_graph,
                   std::vector<MDim3> block_dim_to_explore,
                   std::vector<int> fmap_to_explore,
                   std::vector<int> frange_to_explore,
+                  char const *filename,
                   bool verbose,
                   char const *default_config);
 } // namespace search_c
