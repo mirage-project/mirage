@@ -52,6 +52,7 @@ struct TritonCustomOPTranspileResult {
 struct TritonTranspileResult {
   // The generated Triton code
   std::string code;
+  std::vector<std::vector<int>> output_shapes;
 };
 
 class TritonTranspiler {

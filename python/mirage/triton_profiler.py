@@ -17,11 +17,14 @@ class TritonProfiler:
         self.fail_num = 0
         self.cnt = 0
         
-    def _generate_code_file(self, graph, target_cc: int) -> Tuple[str, str]:
+    def _generate_profile_code_file(self, graph, target_cc: int) -> Tuple[str, str]:
         """Generate triton code for a graph and save to temp file"""
 
         with tempfile.NamedTemporaryFile(suffix='.py', delete=False, mode='w') as f:
-            code = generate_triton_program(graph.cygraph, target_cc=target_cc)["code"]
+            result = generate_triton_program(graph.cygraph, target_cc=target_cc)
+            code = result["code"]
+            output_shapes = result["output_shapes"]
+
             code_lines = code.split('\n')
             main_start = -1
             kernel_start = -1
@@ -41,7 +44,7 @@ class TritonProfiler:
                 main_code = ""
 
             run_kernel_code = f"""
-def run_kernel():
+def profile_kernel():
     # Warmup iterations
     for _ in range({self.warmup_iters}):
 {main_code}
@@ -60,7 +63,7 @@ def run_kernel():
 
 if __name__ == "__main__":
     print("Running kernel...")
-    run_kernel()
+    profile_kernel()
 
 """
             final_code = '\n'.join(header_code) + '\n'.join(kernel_code) + run_kernel_code
@@ -68,7 +71,7 @@ if __name__ == "__main__":
             with open(f"generated_code_{self.cnt}.py", "w") as _f: #TODO: Remove this debug line
                 _f.write(final_code)
             f.write(final_code)
-            return f.name, code
+            return f.name, code, output_shapes
         
     def _generate_debug_code_file(self, graph, target_cc: int) -> Tuple[str, str]:
         """Generate triton code for a graph and save to temp file"""
@@ -85,7 +88,9 @@ def run_with_debug():
     
     try:
 """
-            code = generate_triton_program(graph.cygraph, target_cc=target_cc)["code"]
+            result = generate_triton_program(graph.cygraph, target_cc=target_cc)
+            code = result["code"]
+            output_shapes = result["output_shapes"]
             
             code_lines = code.split('\n')
             main_start = -1
@@ -128,9 +133,9 @@ if __name__ == "__main__":
             f.write(final_file)
             with open(f"generated_debug_code_{self.cnt}.py", "w") as _f:
                 _f.write(final_file)
-            return f.name, code
+            return f.name, code, output_shapes
 
-    def _run_profile(self, module_path: str, desc: str = "") -> float:
+    def _run_profile(self, module_path: str) -> float:
         """Profile execution time by running the module multiple times with progress bars"""
         try:
             process = subprocess.run(
@@ -169,6 +174,8 @@ if __name__ == "__main__":
         results = []
         best_graph = None
         best_perf = float('inf')
+        best_file_path = None
+        best_output_shapes = None
         
         print(f"Profiling {len(graphs)} candidate graphs...")
         
@@ -177,27 +184,23 @@ if __name__ == "__main__":
                 try:
                     # Generate and save code
                     if self.debug:
-                        code_path, code = self._generate_debug_code_file(g, target_cc)
+                        code_path, code, output_shapes = self._generate_debug_code_file(g, target_cc)
                     else:
-                        code_path, code = self._generate_code_file(g, target_cc)
+                        code_path, code, output_shapes = self._generate_profile_code_file(g, target_cc)
                     
-                    try:
-                        # Profile the graph with progress description
-                        desc = f"Graph {idx}"
-                        perf = self._run_profile(code_path, desc)
-                        
-                        tqdm.write(f"Graph {idx}: {perf:.3f} ms")
-                        
-                        results.append((g, perf, code))
-                        
-                        if perf < best_perf and perf > 0:
-                            best_graph = g
-                            best_perf = perf
-                            tqdm.write(f"New best performance: {perf:.3f} ms")
-                            
-                    finally:
-                        # Cleanup temporary file
-                        os.unlink(code_path)
+                    # Profile the graph with progress description
+                    perf = self._run_profile(code_path)
+                    
+                    tqdm.write(f"Graph {idx}: {perf:.3f} ms")
+                    
+                    results.append((g, perf, code))
+                    
+                    if perf < best_perf and perf > 0:
+                        best_graph = g
+                        best_perf = perf
+                        best_file_path = code_path
+                        best_output_shapes = output_shapes
+                        tqdm.write(f"New best performance: {perf:.3f} ms")
                         
                 except Exception as e:
                     tqdm.write(f"Error profiling graph {idx}: {str(e)}")
@@ -209,7 +212,7 @@ if __name__ == "__main__":
                 
         print(f"\nBest performance: {best_perf:.3f} ms")
         print(f"Successes: {self.success_num}, Failures: {self.fail_num}")
-        return best_graph, best_perf, results
+        return best_graph, best_file_path, best_output_shapes
 
 def profile_and_select_best_graph(graphs: List, 
                                 target_cc: int = 10,
@@ -218,5 +221,5 @@ def profile_and_select_best_graph(graphs: List,
                                 debug_mode: bool = False) -> object:
     """Helper function to profile graphs and select the best one"""
     profiler = TritonProfiler(warmup_iters, profile_iters, debug_mode)
-    best_graph, _, _ = profiler.profile_graphs(graphs, target_cc)
-    return best_graph
+    best_graph, best_file_path, best_output_shapes = profiler.profile_graphs(graphs, target_cc)
+    return best_graph, best_file_path, best_output_shapes

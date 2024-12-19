@@ -290,5 +290,6 @@ cdef extern from "mirage/triton_transpiler/transpile.h" namespace "mirage::trito
         int target_cc
     ctypedef struct TritonTranspileResult:
         string code
+        vector[vector[int]] output_shapes
     cdef TritonTranspileResult transpile(const CppKNGraph *graph,
                                          const TritonTranspilerConfig config)
