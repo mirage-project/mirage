@@ -129,6 +129,8 @@ class KNGraph:
         self._cached_results = None
         self.visualizer = None
 
+        self.backend = "cuda"
+
     def new_input(
         self, dims: tuple, strides: tuple = None, dtype: dtype = float16
     ) -> DTensor:
@@ -182,6 +184,33 @@ class KNGraph:
         return self._valid_cuda_kernels
 
     def __call__(self, **kwargs):
+        if self.backend == "cuda":
+            return self.cuda_call(**kwargs)
+        elif self.backend == "nki":
+            raise NotImplementedError("NKI backend is not implemented yet")
+        elif self.backend == "triton":
+            return self.triton_call(**kwargs)
+
+    def triton_call(self, **kwargs):
+        assert self.run is not None, "The graph is not compiled to triton yet."
+        input_tensors = kwargs.get("inputs", [])
+
+        output_shapes = self._cached_results["output_shapes"]
+        output_tensors = [
+            torch.zeros(shape, dtype=torch.float16, device=input_tensors[0].device) for shape in output_shapes
+        ]
+        print("Input tensors:")
+        for t in input_tensors:
+            print(f"Shape: {t.shape}, dtype: {t.dtype}, device: {t.device}")
+
+        print("Output tensors:")
+        for t in output_tensors:
+            print(f"Shape: {t.shape}, dtype: {t.dtype}, device: {t.device}")
+
+        self.run(*input_tensors, *output_tensors)
+        return output_tensors
+
+    def cuda_call(self, **kwargs):
         results = self.compile(**kwargs)
 
         # directly return if the Transpiler cannot generate valid CUDA kernels
@@ -253,7 +282,7 @@ class KNGraph:
                 return None
 
         MIRAGE_ROOT = os.environ.get(
-            "MIRAGE_ROOT", os.path.join(os.path.dirname(__file__), "include")
+            "MIRAGE_ROOT", os.path.join(os.path.dirname(__file__), "../../include")
         )
 
         # if True:
@@ -340,8 +369,10 @@ class KNGraph:
         franges: list = None,
         verbose: bool = False,
         config: str = None,
+        backend: str = "cuda",
+        warmup_iters: int = 16,
+        profile_iters: int = 1000,
         previous_checkpoint: str = None,
-        backend: str = "cuda"
     ):
         cygraphs = search(
             self.cygraph,
@@ -389,26 +420,41 @@ class KNGraph:
                     print("muGraph {}: skipping since its shared memory usage exceed limit".format(idx))
                     continue
                 # Warmup runs
-                for _ in range(16):
+                for _ in range(warmup_iters):
                     g(inputs=input_tensors)
                 torch.cuda.synchronize()
                 starter.record()
-                for _ in range(1000):
+                for _ in range(profile_iters):
                     g(inputs=input_tensors)
                 ender.record()
                 torch.cuda.synchronize()
-                perf = starter.elapsed_time(ender) / 1000
+                perf = starter.elapsed_time(ender) / profile_iters
                 print("muGraph {}: profiled performance (ms) = {}".format(idx, perf))
                 if perf < best_perf:
                     best_graph, best_perf = g, perf
+            best_graph.backend = "cuda"
             return best_graph
         elif backend == "nki":
             return all_graphs
         elif backend == "triton":
-            return profile_and_select_best_graph(all_graphs, 
+            best_graph, best_file_path, best_output_shapes = profile_and_select_best_graph(all_graphs, 
                                                  target_cc=torch.cuda.get_device_properties(0).major * 10 
                                                  + torch.cuda.get_device_properties(0).minor,
-                                                 warmup_iters=16, profile_iters=1000, debug_mode=False)
+                                                 warmup_iters=warmup_iters, profile_iters=profile_iters, debug_mode=verbose)
+            # load execute_mugraph func from the generated file
+            if not os.path.exists(best_file_path):
+                raise FileNotFoundError(f"File not found: {best_file_path}")
+            import importlib.util
+            spec = importlib.util.spec_from_file_location("__mirage_launcher", best_file_path)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            if hasattr(mod, "execute_mugraph"):
+                best_graph.run = getattr(mod, "execute_mugraph")
+            else:
+                raise AttributeError("The module does not contain an 'execute_mugraph' function.")
+            best_graph._cached_results = {"output_shapes": best_output_shapes}
+            best_graph.backend = "triton"
+            return best_graph
         else:
             assert False, "Unsupported backend"
             return None

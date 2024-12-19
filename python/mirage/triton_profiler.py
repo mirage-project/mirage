@@ -17,14 +17,61 @@ class TritonProfiler:
         self.fail_num = 0
         self.cnt = 0
         
-    def _generate_code_file(self, graph, target_cc: int) -> Tuple[str, str]:
+    def _generate_profile_code_file(self, graph, target_cc: int) -> Tuple[str, str]:
         """Generate triton code for a graph and save to temp file"""
+
         with tempfile.NamedTemporaryFile(suffix='.py', delete=False, mode='w') as f:
-            code = generate_triton_program(graph.cygraph, target_cc=target_cc)["code"]
-            with open(f"generated_code_{self.cnt}.py", "w") as _f:
-                _f.write(code)
-            f.write(code)
-            return f.name, code
+            result = generate_triton_program(graph.cygraph, target_cc=target_cc)
+            code = result["code"]
+            output_shapes = result["output_shapes"]
+
+            code_lines = code.split('\n')
+            main_start = -1
+            kernel_start = -1
+
+            for i, line in enumerate(code_lines):
+                if 'if __name__ == "__main__":' in line:
+                    main_start = i
+                if '@triton.jit' in line and kernel_start == -1:
+                    kernel_start = i
+            
+            if main_start != -1:
+                main_code = code_lines[main_start+1:]
+                kernel_code = code_lines[kernel_start:main_start]
+                header_code = code_lines[:kernel_start]
+                main_code = '\n'.join('        ' + line.strip() for line in main_code if line.strip())
+            else:
+                main_code = ""
+
+            run_kernel_code = f"""
+def profile_kernel():
+    # Warmup iterations
+    for _ in range({self.warmup_iters}):
+{main_code}
+    
+    # Profile iterations
+    starter = torch.cuda.Event(enable_timing=True)
+    ender = torch.cuda.Event(enable_timing=True)
+    torch.cuda.synchronize()
+    starter.record()
+    for _ in range({self.profile_iters}):
+{main_code}
+    ender.record()
+    torch.cuda.synchronize()
+    elapsed_time = starter.elapsed_time(ender) / {self.profile_iters}
+    print(f'Average time per iteration: {{elapsed_time:.3f}} ms')
+
+if __name__ == "__main__":
+    print("Running kernel...")
+    profile_kernel()
+
+"""
+            final_code = '\n'.join(header_code) + '\n'.join(kernel_code) + run_kernel_code
+            
+            with open(f"generated_code_{self.cnt}.py", "w") as _f: #TODO: Remove this debug line
+                _f.write(final_code)
+            f.write(final_code)
+            return f.name, code, output_shapes
         
     def _generate_debug_code_file(self, graph, target_cc: int) -> Tuple[str, str]:
         """Generate triton code for a graph and save to temp file"""
@@ -32,7 +79,6 @@ class TritonProfiler:
             header = """
 import sys
 import traceback
-import torch
 """
             error_handling = """
 def run_with_debug():
@@ -42,28 +88,29 @@ def run_with_debug():
     
     try:
 """
-            code = generate_triton_program(graph.cygraph, target_cc=target_cc)["code"]
+            result = generate_triton_program(graph.cygraph, target_cc=target_cc)
+            code = result["code"]
+            output_shapes = result["output_shapes"]
             
-            # 移除原始代码中的__main__部分
             code_lines = code.split('\n')
             main_start = -1
             kernel_start = -1
             for i, line in enumerate(code_lines):
                 if 'if __name__ == "__main__":' in line:
                     main_start = i
-                if '@triton.jit' in line:
+                if '@triton.jit' in line and kernel_start == -1:
                     kernel_start = i
 
             
             if main_start != -1:
                 main_code = code_lines[main_start+1:]
                 kernel_code = code_lines[kernel_start:main_start]
+                kernel_name = kernel_code[0].split('(')[0].split(' ')[-1]
                 header_code = code_lines[:kernel_start]
                 main_code = '\n'.join('        ' + line.strip() for line in main_code if line.strip())
             else:
                 main_code = ""
             
-            # 添加调试输出
             debug_code = """
         print("Debug: Initializing CUDA device")
         device = torch.device('cuda')
@@ -82,71 +129,29 @@ def run_with_debug():
 if __name__ == "__main__":
     run_with_debug()
 """
-            # final_file = error_handling + code + debug_code + main_code + error_handling_end
             final_file = header + '\n'.join(header_code) + '\n'.join(kernel_code) + error_handling + debug_code + main_code + error_handling_end
             f.write(final_file)
             with open(f"generated_debug_code_{self.cnt}.py", "w") as _f:
                 _f.write(final_file)
-            return f.name, code
+            return f.name, code, output_shapes
 
-    def _run_profile(self, module_path: str, desc: str = "") -> float:
+    def _run_profile(self, module_path: str) -> float:
         """Profile execution time by running the module multiple times with progress bars"""
         try:
-            # First try a single run to check for errors with full output
-            tqdm.write(f"\nTesting kernel {desc}...")
             process = subprocess.run(
                 [sys.executable, module_path],
                 capture_output=True,
-                text=True
+                text=True,
+                check=True
             )
             
-            # Always print output in debug mode
-            if self.debug or process.returncode != 0:
-                tqdm.write("\nDebug Output:")
-                if process.stdout:
-                    tqdm.write("Stdout:")
-                    tqdm.write(process.stdout)
-                if process.stderr:
-                    tqdm.write("Stderr:")
-                    tqdm.write(process.stderr)
-                
-                if process.returncode != 0:
-                    raise RuntimeError("Initial kernel test failed")
-                
-            # Warmup runs
-            with tqdm(total=self.warmup_iters + self.profile_iters,
-                        desc=f"{desc} (warmup)", 
-                        position=1, 
-                        leave=False) as pbar:
-                
-                for _ in range(self.warmup_iters):
-                    subprocess.run([sys.executable, module_path], 
-                                    stdout=subprocess.DEVNULL if not self.debug else None,
-                                    stderr=subprocess.DEVNULL if not self.debug else None,
-                                    check=False  # 不立即检查返回值，我们自己处理错误
-                                )
-                    pbar.update(1)
-                
-                # Profile runs
-                pbar.set_description(f"{desc} (profiling)")
-                starter = torch.cuda.Event(enable_timing=True)
-                ender = torch.cuda.Event(enable_timing=True)
-                
-                torch.cuda.synchronize()
-                starter.record()
-                
-                for _ in range(self.profile_iters):
-                    subprocess.run([sys.executable, module_path], 
-                                    check=True,
-                                    stdout=subprocess.DEVNULL if not self.debug else None,
-                                    stderr=subprocess.DEVNULL if not self.debug else None,
-                                    )
-                    pbar.update(1)
-                    
-                ender.record()
-                torch.cuda.synchronize()
-                self.success_num += 1
-                return starter.elapsed_time(ender) / self.profile_iters
+            # Parse the average time from the output
+            for line in process.stdout.splitlines():
+                if "Average time per iteration" in line:
+                    self.success_num += 1
+                    return float(line.split(":")[-1].strip().split(" ")[0])
+            
+            raise RuntimeError("Failed to extract timing from output")
             
         except subprocess.CalledProcessError as e:
             tqdm.write("\nError Details:")
@@ -169,6 +174,8 @@ if __name__ == "__main__":
         results = []
         best_graph = None
         best_perf = float('inf')
+        best_file_path = None
+        best_output_shapes = None
         
         print(f"Profiling {len(graphs)} candidate graphs...")
         
@@ -177,27 +184,23 @@ if __name__ == "__main__":
                 try:
                     # Generate and save code
                     if self.debug:
-                        code_path, code = self._generate_debug_code_file(g, target_cc)
+                        code_path, code, output_shapes = self._generate_debug_code_file(g, target_cc)
                     else:
-                        code_path, code = self._generate_code_file(g, target_cc)
+                        code_path, code, output_shapes = self._generate_profile_code_file(g, target_cc)
                     
-                    try:
-                        # Profile the graph with progress description
-                        desc = f"Graph {idx}"
-                        perf = self._run_profile(code_path, desc)
-                        
-                        tqdm.write(f"Graph {idx}: {perf:.3f} ms")
-                        
-                        results.append((g, perf, code))
-                        
-                        if perf < best_perf and perf > 0:
-                            best_graph = g
-                            best_perf = perf
-                            tqdm.write(f"New best performance: {perf:.3f} ms")
-                            
-                    finally:
-                        # Cleanup temporary file
-                        os.unlink(code_path)
+                    # Profile the graph with progress description
+                    perf = self._run_profile(code_path)
+                    
+                    tqdm.write(f"Graph {idx}: {perf:.3f} ms")
+                    
+                    results.append((g, perf, code))
+                    
+                    if perf < best_perf and perf > 0:
+                        best_graph = g
+                        best_perf = perf
+                        best_file_path = code_path
+                        best_output_shapes = output_shapes
+                        tqdm.write(f"New best performance: {perf:.3f} ms")
                         
                 except Exception as e:
                     tqdm.write(f"Error profiling graph {idx}: {str(e)}")
@@ -209,7 +212,7 @@ if __name__ == "__main__":
                 
         print(f"\nBest performance: {best_perf:.3f} ms")
         print(f"Successes: {self.success_num}, Failures: {self.fail_num}")
-        return best_graph, best_perf, results
+        return best_graph, best_file_path, best_output_shapes
 
 def profile_and_select_best_graph(graphs: List, 
                                 target_cc: int = 10,
@@ -218,5 +221,5 @@ def profile_and_select_best_graph(graphs: List,
                                 debug_mode: bool = False) -> object:
     """Helper function to profile graphs and select the best one"""
     profiler = TritonProfiler(warmup_iters, profile_iters, debug_mode)
-    best_graph, _, _ = profiler.profile_graphs(graphs, target_cc)
-    return best_graph
+    best_graph, best_file_path, best_output_shapes = profiler.profile_graphs(graphs, target_cc)
+    return best_graph, best_file_path, best_output_shapes

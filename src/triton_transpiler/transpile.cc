@@ -290,6 +290,10 @@ TritonTranspileResult TritonTranspiler::transpile_ugraph() {
   exec.e("if __name__ == \"__main__\":");
   exec.inc_indent();
   exec.e("device = torch.device('cuda')");
+
+  CodeKeeper entrance_func;
+  std::vector<std::string> input_tensor_names;
+  std::vector<std::string> output_tensor_names;
   
   using namespace mirage::type;
   // Initialize input and output tensors
@@ -301,8 +305,8 @@ TritonTranspileResult TritonTranspiler::transpile_ugraph() {
         shape += fmt("$,", dtensor.dim[i]);
       }
       exec.e("$ = torch.randn(($), dtype=torch.float16).to(device=device)",
-             fmt("dtensor$", dtensor.guid),
-             shape);
+             fmt("dtensor$", dtensor.guid), shape);
+      input_tensor_names.push_back(fmt("dtensor$", dtensor.guid));
     }
     if (op->op_type == KN_OUTPUT_OP) {
       std::string shape;
@@ -310,11 +314,28 @@ TritonTranspileResult TritonTranspiler::transpile_ugraph() {
       for (int i = 0; i < dtensor.num_dims; i++) {
         shape += fmt("$,", dtensor.dim[i]);
       }
-      exec.e("$ = torch.randn(($), dtype=torch.float16).to(device=device)",
-             fmt("dtensor$", dtensor.guid),
-             shape);
+      exec.e("$ = torch.zeros(($), dtype=torch.float16).to(device=device)",
+             fmt("dtensor$", dtensor.guid), shape);
+      output_tensor_names.push_back(fmt("dtensor$", dtensor.guid));
     }
   }
+  std::string input_tensor_str;
+  std::string output_tensor_str;
+  for(int i = 0; i < input_tensor_names.size(); i++) {
+    input_tensor_str += input_tensor_names[i];
+    if (i != input_tensor_names.size() - 1) {
+      input_tensor_str += ", ";
+    }
+  }
+  for(int i = 0; i < output_tensor_names.size(); i++) {
+    output_tensor_str += output_tensor_names[i];
+    if (i != output_tensor_names.size() - 1) {
+      output_tensor_str += ", ";
+    }
+  }
+  entrance_func.e("def execute_mugraph($, $):", input_tensor_str, output_tensor_str);
+  entrance_func.inc_indent();
+  entrance_func.e("device = torch.device('cuda')");
 
   // Generate custom kernels (only for truly custom operations)
   CodeKeeper custom_kernels;
@@ -342,12 +363,14 @@ TritonTranspileResult TritonTranspiler::transpile_ugraph() {
         
         // Add kernel definition and launch
         custom_kernels.e(result.code);
-        exec.e("$[($, $, $)]($)",
-               result.func_name,
-               bgraph.grid_dim.x,
-               bgraph.grid_dim.y,
-               bgraph.grid_dim.z,
-               tensor_names);
+        std::string new_line = fmt("$[($, $, $)]($)",
+                                  result.func_name,
+                                  bgraph.grid_dim.x,
+                                  bgraph.grid_dim.y,
+                                  bgraph.grid_dim.z,
+                                  tensor_names);
+        exec.e(new_line);
+        entrance_func.e(new_line);
         break;
       }
       
@@ -355,10 +378,12 @@ TritonTranspileResult TritonTranspiler::transpile_ugraph() {
         kn::DTensor &input0 = op->input_tensors[0];
         kn::DTensor &input1 = op->input_tensors[1];
         kn::DTensor &output = op->output_tensors[0];
-        exec.e("$ = ops.matmul($, $)",
-               fmt("dtensor$", output.guid),
-               fmt("dtensor$", input0.guid),
-               fmt("dtensor$", input1.guid));
+        std::string new_line = fmt("$ = ops.matmul($, $)",
+                                   fmt("dtensor$", output.guid),
+                                   fmt("dtensor$", input0.guid),
+                                   fmt("dtensor$", input1.guid));
+        exec.e(new_line);
+        entrance_func.e(new_line);
         break;
       }
       
@@ -366,10 +391,12 @@ TritonTranspileResult TritonTranspiler::transpile_ugraph() {
         kn::DTensor &input0 = op->input_tensors[0];
         kn::DTensor &input1 = op->input_tensors[1];
         kn::DTensor &output = op->output_tensors[0];
-        exec.e("$ = ops.add($, $)",
-               fmt("dtensor$", output.guid),
-               fmt("dtensor$", input0.guid),
-               fmt("dtensor$", input1.guid));
+        std::string new_line = fmt("$ = ops.add($, $)",
+                                   fmt("dtensor$", output.guid),
+                                   fmt("dtensor$", input0.guid),
+                                   fmt("dtensor$", input1.guid));
+        exec.e(new_line);
+        entrance_func.e(new_line);
         break;
       }
       
@@ -377,10 +404,12 @@ TritonTranspileResult TritonTranspiler::transpile_ugraph() {
         kn::DTensor &input0 = op->input_tensors[0];
         kn::DTensor &input1 = op->input_tensors[1];
         kn::DTensor &output = op->output_tensors[0];
-        exec.e("$ = ops.multiply($, $)", 
-               fmt("dtensor$", output.guid),
-               fmt("dtensor$", input0.guid),
-               fmt("dtensor$", input1.guid));
+        std::string new_line = fmt("$ = ops.multiply($, $)",
+                                   fmt("dtensor$", output.guid),
+                                   fmt("dtensor$", input0.guid),
+                                   fmt("dtensor$", input1.guid));
+        exec.e(new_line);
+        entrance_func.e(new_line);
         break;
       }
       
@@ -388,38 +417,46 @@ TritonTranspileResult TritonTranspiler::transpile_ugraph() {
         kn::DTensor &input0 = op->input_tensors[0];
         kn::DTensor &input1 = op->input_tensors[1];
         kn::DTensor &output = op->output_tensors[0];
-        exec.e("$ = ops.divide($, $)",
-               fmt("dtensor$", output.guid),
-               fmt("dtensor$", input0.guid),
-               fmt("dtensor$", input1.guid));
+        std::string new_line = fmt("$ = ops.divide($, $)",
+                                   fmt("dtensor$", output.guid),
+                                   fmt("dtensor$", input0.guid),
+                                   fmt("dtensor$", input1.guid));
+        exec.e(new_line);
+        entrance_func.e(new_line);
         break;
       }
       
       case KN_EXP_OP: {
         kn::DTensor &input = op->input_tensors[0];
         kn::DTensor &output = op->output_tensors[0];
-        exec.e("$ = ops.exp($)",
-               fmt("dtensor$", output.guid),
-               fmt("dtensor$", input.guid));
+        std::string new_line = fmt("$ = ops.exp($)",
+                                   fmt("dtensor$", output.guid),
+                                   fmt("dtensor$", input.guid));
+        exec.e(new_line);
+        entrance_func.e(new_line);
         break;
       }
       
       case KN_SQRT_OP: {
         kn::DTensor &input = op->input_tensors[0];
         kn::DTensor &output = op->output_tensors[0];
-        exec.e("$ = ops.sqrt($)",
-               fmt("dtensor$", output.guid),
-               fmt("dtensor$", input.guid));
+        std::string new_line = fmt("$ = ops.sqrt($)",
+                                   fmt("dtensor$", output.guid),
+                                   fmt("dtensor$", input.guid));
+        exec.e(new_line);
+        entrance_func.e(new_line);
         break;
       }
       
       case KN_SQUARE_OP: {
         kn::DTensor &input = op->input_tensors[0];
         kn::DTensor &output = op->output_tensors[0];
-        exec.e("$ = $ * $",  // Using direct multiplication for square
-               fmt("dtensor$", output.guid),
-               fmt("dtensor$", input.guid),
-               fmt("dtensor$", input.guid));
+        std::string new_line = fmt("$ = $ * $",
+                                    fmt("dtensor$", output.guid),
+                                    fmt("dtensor$", input.guid),
+                                    fmt("dtensor$", input.guid));
+        exec.e(new_line);
+        entrance_func.e(new_line);
         break;
       }
       
@@ -429,21 +466,28 @@ TritonTranspileResult TritonTranspiler::transpile_ugraph() {
         kn::DTensor &input = op->input_tensors[0];
         kn::DTensor &output = op->output_tensors[0];
         int dim = op->op_type - KN_REDUCTION_0_OP;
-        exec.e("$ = ops.reduce.sum($, dim=$)",
-               fmt("dtensor$", output.guid),
-               fmt("dtensor$", input.guid),
-               dim);
+        std::string new_line = fmt("$ = ops.reduce.sum($, dim=$)",
+                                   fmt("dtensor$", output.guid),
+                                   fmt("dtensor$", input.guid),
+                                   dim);
+        exec.e(new_line);
+        entrance_func.e(new_line);
         break;
       }
     }
   }
 
   // Combine all sections
-  std::string code = fmt("$\n$\n$",
+  std::string code = fmt("$\n$\n$\n$",
                         header.to_string(),
                         custom_kernels.to_string(),
+                        entrance_func.to_string(),
                         exec.to_string());
-  return TritonTranspileResult{code};
+  std::vector<std::vector<int>> output_shapes;
+  for (kn::DTensor const &dtensor : this->mugraph_output_tensors) {
+    output_shapes.push_back(std::vector<int>(dtensor.dim, dtensor.dim + dtensor.num_dims));
+  }
+  return TritonTranspileResult{code, output_shapes};
 }
 
 

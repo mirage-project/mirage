@@ -114,10 +114,20 @@ std::string generate_mask_expr(const tb::STensor& stensor,
     }
     
     // Combine all conditions
-    std::string mask_expr = mask_conditions[0];
-    for (size_t i = 1; i < mask_conditions.size(); i++) {
-        mask_expr += " & " + mask_conditions[i];
+    std::string start = "";
+    std::string end = "";
+    if (mask_conditions.size() > 1) {
+        start = "((";
+        end = "))";
+    } else {
+        start = "(";
+        end = ")";
     }
+    std::string mask_expr = start + mask_conditions[0];
+    for (size_t i = 1; i < mask_conditions.size(); i++) {
+        mask_expr += ")&(" + mask_conditions[i];
+    }
+    mask_expr += end;
     
     return mask_expr;
 }
@@ -126,7 +136,6 @@ std::string generate_mask_expr(const tb::STensor& stensor,
 std::string get_input_dim_expr(int dim_idx, const int3& imap, int forloop_dim, int forloop_range, int block_size) {
     std::string base_expr = "tl.arange(0, $)";
     std::vector<std::string> offset_terms;
-    std::cout << "block_size: " << block_size << "forloop_range: " << forloop_range << std::endl;
 
     if (imap.x == dim_idx) {
         offset_terms.push_back(fmt("tl.program_id(0) * $", block_size));
@@ -295,8 +304,8 @@ TritonTranspiler::transpile_kn_custom_op(kn::KNCustomizedOp const *op) {
 
         code.e("$ = tl.dot($, $)",
                fmt("stensor$", output.guid),
-               fmt("stensor$", input0.guid),
-               fmt("stensor$", input1.guid));
+               fmt("stensor$.to(tl.float32)", input0.guid),
+               fmt("stensor$.to(tl.float32)", input1.guid));
         break;
       }
 
@@ -552,8 +561,25 @@ TritonTranspiler::transpile_kn_custom_op(kn::KNCustomizedOp const *op) {
               }
               break;
           }
+          case type::TB_MATMUL_OP: {
+              tb::STensor const &input0 = tb_op->input_tensors.at(0);
+              tb::STensor const &input1 = tb_op->input_tensors.at(1);
+              tb::STensor const &output = tb_op->output_tensors.at(0);
+
+              std::vector<int> adjusted_dims0 = adjust_tensor_dims(input0);
+              std::vector<int> adjusted_dims1 = adjust_tensor_dims(input1);
+              std::string mask0 = generate_mask_expr(input0, adjusted_dims0, {-1,-1,-1});
+              std::string mask1 = generate_mask_expr(input1, adjusted_dims1, {-1,-1,-1});
+
+              code.e("$ = tl.dot($, $)",
+                    fmt("stensor$", output.guid),
+                    fmt("stensor$.to(tl.float32)", input0.guid),
+                    fmt("stensor$.to(tl.float32)", input1.guid));
+              break;
+          }
           default: {
-              assert(false && fmt("Unsupported op_type:$", tb_op->op_type).c_str());
+              std::cout << "Unsupported op_type: " << tb_op->op_type << std::endl;
+              throw std::runtime_error(fmt("Unsupported op_type: $", tb_op->op_type));
           }
       }
   }

@@ -1001,4 +1001,5 @@ def generate_triton_program(CyKNGraph input_graph, *, int target_cc) -> dict:
 
     return {
         "code": result.code.decode("UTF-8"),
+        "output_shapes": result.output_shapes
     }
