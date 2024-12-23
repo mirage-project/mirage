@@ -4,3 +4,4 @@ z3-solver
 # torch>=2.0
 numpy
 graphviz
+tqdm
