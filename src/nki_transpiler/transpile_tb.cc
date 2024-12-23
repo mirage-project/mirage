@@ -539,6 +539,32 @@ NKICustomOPTranspileResult
                fmt("stensor$", input.guid));
         break;
       }
+      case type::TB_REDUCTION_0_TO_DIMX_OP:
+      case type::TB_REDUCTION_1_TO_DIMX_OP:
+      case type::TB_REDUCTION_2_TO_DIMX_OP: {
+        // May need to recompute
+        int reduc_dim = tb_op->op_type >= type::TB_REDUCTION_0_TO_DIMX_OP
+                            ? tb_op->op_type - type::TB_REDUCTION_0_TO_DIMX_OP
+                            : tb_op->op_type - type::TB_REDUCTION_0_OP;
+        tb::STensor const &input = tb_op->input_tensors.at(0);
+        tb::STensor const &output = tb_op->output_tensors.at(0);
+        STensorMeta meta0 = stensor_metas.at(input.guid);
+        STensorMeta meta1 = stensor_metas.at(output.guid);
+        // FIXME: currently assume no change of partition dim in reduction
+        assert(meta0.partition_dim == meta1.partition_dim);
+        int num_dims = input.num_dims;
+        // assert that reduc_dim is among the last two dimensions since
+        // we omit all other leading dims (which must have a dim size of 1)
+        assert(num_dims - 2 <= reduc_dim && reduc_dim < num_dims);
+        // Cannot pick partition dim as the reduce_dim
+        assert(reduc_dim != meta0.partition_dim);
+        // reduction is perform on axis=1, since axis=0 maps to
+        // the partition dim
+        code.e("$ = nl.sum($, axis=1, keepdims=True)",
+               fmt("stensor$", output.guid),
+               fmt("stensor$", input.guid));
+        break;
+      }
       default: {
         assert(false && fmt("Unsupported op_type:$", tb_op->op_type).c_str());
       }

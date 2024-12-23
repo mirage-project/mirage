@@ -87,7 +87,7 @@ try:
   
     # Create the build directory if it does not exist
     os.makedirs(build_dir, exist_ok=True)
-    subprocess.check_call(['cmake', '..', 
+    subprocess.check_call(['cmake', '..', '-DCMAKE_BUILD_TYPE=Debug',
                            '-DZ3_CXX_INCLUDE_DIRS=' + z3_path + '/include/',
                            '-DZ3_LIBRARIES=' + path.join(z3_path, 'lib', 'libz3.so'),
                            '-DCMAKE_C_COMPILER=' + os.environ['CC'],
