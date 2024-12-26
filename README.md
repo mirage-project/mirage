@@ -72,7 +72,7 @@ A paper describing Mirage's techniques is available [on arxiv](https://arxiv.org
 ``` bibtex
 @misc{wu2024mirage,
       title={A Multi-Level Superoptimizer for Tensor Programs}, 
-      author={Mengdi Wu and Xinhao Cheng and Oded Padon and Zhihao Jia},
+      author={Mengdi Wu and Xinhao Cheng and Shengyu Liu and Chunan Shi and Jianan Ji and Kit Ao and Praveen Velliengiri and Xupeng Miao and Oded Padon and Zhihao Jia},
       eprint={2405.05751},
       archivePrefix={arXiv},
       year={2024},
