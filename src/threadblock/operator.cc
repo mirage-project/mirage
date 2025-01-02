@@ -38,14 +38,14 @@ TBOperator::TBOperator(Graph *_graph,
   input_tensors.push_back(input2);
 }
 
-int TBOperator::get_input_stensors(STensor** inputs) {
+int TBOperator::get_input_stensors(STensor **inputs) {
   for (size_t i = 0; i < input_tensors.size(); ++i) {
     inputs[i] = &input_tensors[i];
   }
   return input_tensors.size();
 }
 
-int TBOperator::get_output_stensors(STensor** outputs) {
+int TBOperator::get_output_stensors(STensor **outputs) {
   for (size_t i = 0; i < output_tensors.size(); ++i) {
     outputs[i] = &output_tensors[i];
   }

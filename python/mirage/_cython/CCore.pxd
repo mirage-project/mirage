@@ -254,6 +254,7 @@ cdef extern from "mirage/search/search_c.h" namespace "mirage::search_c":
                            vector[MDim3] blockdims,
                            vector[int] fmaps,
                            vector[int] franges,
+                           const char * filename,
                            bool verbose,
                            const char * default_config)
 
@@ -272,3 +273,23 @@ cdef extern from "mirage/transpiler/transpile.h" namespace "mirage::transpiler":
     cdef TranspileResult transpile(const CppKNGraph *graph,
                        const TranspilerConfig config,
                        vector[vector[size_t]] input_strides)
+
+cdef extern from "mirage/nki_transpiler/transpile.h" namespace "mirage::nki_transpiler":
+    ctypedef struct NKITranspilerConfig:
+        int target_cc
+    ctypedef struct NKIErrorInfo:
+        vector[string] errors
+    ctypedef struct NKITranspileResult:
+        string code
+        NKIErrorInfo error_state
+    cdef NKITranspileResult transpile(const CppKNGraph *graph,
+                                      const NKITranspilerConfig config)
+
+cdef extern from "mirage/triton_transpiler/transpile.h" namespace "mirage::triton_transpiler":
+    ctypedef struct TritonTranspilerConfig:
+        int target_cc
+    ctypedef struct TritonTranspileResult:
+        string code
+        vector[vector[int]] output_shapes
+    cdef TritonTranspileResult transpile(const CppKNGraph *graph,
+                                         const TritonTranspilerConfig config)

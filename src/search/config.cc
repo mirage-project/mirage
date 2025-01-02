@@ -11,6 +11,7 @@ GeneratorConfig GeneratorConfig::get_default_config() {
       3 /* max_num_threadblock_graph_inputs */,
       2 /* max_num_threadblock_graph_outputs */,
       8 /* search_thread */,
+      VerifierType::PROBABILISTIC_VERIFIER,
       {
           type::KN_MATMUL_OP,
           type::KN_EXP_OP,
@@ -18,7 +19,7 @@ GeneratorConfig GeneratorConfig::get_default_config() {
           type::KN_ADD_OP,
           type::KN_MUL_OP,
           type::KN_DIV_OP,
-          type::KN_REDUCTION_2_OP,
+          // type::KN_REDUCTION_2_OP,
           type::KN_CUSTOMIZED_OP,
       } /* knop_to_explore */,
       {
@@ -31,8 +32,8 @@ GeneratorConfig GeneratorConfig::get_default_config() {
           type::TB_RMS_NORM_OP,
           type::TB_FORLOOP_ACCUM_NO_RED_OP,
           type::TB_FORLOOP_ACCUM_RED_LD_SUM_OP,
-          type::TB_FORLOOP_ACCUM_RED_LD_MEAN_OP,
-          type::TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP,
+          // type::TB_FORLOOP_ACCUM_RED_LD_MEAN_OP,
+          // type::TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP,
           type::TB_FORLOOP_ACCUM_RED_LD_RMS_OP,
       } /* tbop_to_explore */,
       {} /* imap_to_explore*/,
@@ -55,7 +56,9 @@ GeneratorConfig GeneratorConfig::get_default_config() {
 
 void GeneratorConfig::enable_attention_specific_optimization() {
   _enable_attention_specific_optimization = true;
-  max_num_kernel_graph_op = 7;
+  max_num_threadblock_graphs = 2;
+  tbop_to_explore.push_back(type::TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP);
+  deduplicate(tbop_to_explore);
 }
 
 void GeneratorConfig::enable_concat_matmul_transformation() {

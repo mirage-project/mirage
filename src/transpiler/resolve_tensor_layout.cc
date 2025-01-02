@@ -77,7 +77,7 @@ cost_t SMEM_FACTOR = 1;
 
 // This function calculate strides and num_phy_elems
 // When strides==nullptr, strides calculation is skipped
-void calc_tensor_strides(size_t* strides,
+void calc_tensor_strides(size_t *strides,
                          size_t &num_phy_elems,
                          int num_dims,
                          int const dims[],
@@ -95,7 +95,7 @@ void calc_tensor_strides(size_t* strides,
   bool encountered_non1_dim = false;
   for (int dim_idx : dim_order) {
     int cur_dim = dims[dim_idx];
-    if (strides!=nullptr) {
+    if (strides != nullptr) {
       strides[dim_idx] = cur_stride;
     }
     if (cur_dim != 1) {
@@ -195,6 +195,12 @@ void Transpiler::resolve_tensor_layout() {
     }
     opt.add(z3::atmost(innermost_exprs, 1));
     opt.add(z3::atleast(innermost_exprs, 1));
+    // Every STensor can have at most 1 swizzle dim
+    z3::expr_vector swizzled_exprs(ctx);
+    for (int i = 0; i < num_dims; ++i) {
+      swizzled_exprs.push_back(s_is_swizzled[stensor.guid][i]);
+    }
+    opt.add(z3::atmost(swizzled_exprs, 1));
     // The innermost dim of a STensor cannot be swizzled
     for (int i = 0; i < num_dims; ++i) {
       opt.add(!s_is_swizzled[stensor.guid][i] ||
@@ -595,8 +601,8 @@ void Transpiler::resolve_tensor_layout() {
                           stensor.dim,
                           i,
                           type::get_datatype_size(stensor.data_type));
-      int smem_usage_cost = num_phy_elems
-                          * type::get_datatype_size(stensor.data_type);
+      int smem_usage_cost =
+          num_phy_elems * type::get_datatype_size(stensor.data_type);
       costs.push_back(z3::ite(s_is_innermost[stensor.guid][i],
                               ctx.int_val(smem_usage_cost),
                               ctx.int_val(0)));

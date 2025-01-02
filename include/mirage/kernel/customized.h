@@ -39,7 +39,7 @@ public:
 
 public:
   mirage::threadblock::Graph bgraph;
-  void get_bgraph(mirage::threadblock::Graph** bgraph);
+  void get_bgraph(mirage::threadblock::Graph **bgraph);
 };
 
 } // namespace kernel

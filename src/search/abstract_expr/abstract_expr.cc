@@ -1,4 +1,4 @@
-#include "mirage/search/algebraic_pattern.h"
+#include "mirage/search/abstract_expr/abstract_expr.h"
 #include <atomic>
 #include <cassert>
 #include <cmath>
@@ -20,7 +20,7 @@ z3::expr_vector to_expr_vector(z3::context &c,
   return vec;
 }
 
-bool AlgebraicPattern::subpattern_to(AlgebraicPattern const &other) const {
+bool AbstractExpr::subpattern_to(AbstractExpr const &other) const {
   z3::context c;
 
   z3::sort P = c.uninterpreted_sort("P");
@@ -110,7 +110,7 @@ bool AlgebraicPattern::subpattern_to(AlgebraicPattern const &other) const {
   return result;
 }
 
-bool AlgebraicPattern::operator==(AlgebraicPattern const &other) const {
+bool AbstractExpr::operator==(AbstractExpr const &other) const {
   return subpattern_to(other) && other.subpattern_to(*this);
 }
 
@@ -127,9 +127,11 @@ std::string Var::to_string() const {
   return name;
 }
 
-Add::Add(std::shared_ptr<AlgebraicPattern> lhs,
-         std::shared_ptr<AlgebraicPattern> rhs)
-    : lhs(lhs), rhs(rhs) {}
+Add::Add(std::shared_ptr<AbstractExpr> lhs, std::shared_ptr<AbstractExpr> rhs)
+    : lhs(lhs), rhs(rhs) {
+  assert(lhs);
+  assert(rhs);
+}
 
 z3::expr Add::to_z3(z3::context &c,
                     std::unordered_set<std::string> &all_variables) const {
@@ -142,9 +144,11 @@ std::string Add::to_string() const {
   return "(" + lhs->to_string() + "+" + rhs->to_string() + ")";
 }
 
-Mul::Mul(std::shared_ptr<AlgebraicPattern> lhs,
-         std::shared_ptr<AlgebraicPattern> rhs)
-    : lhs(lhs), rhs(rhs) {}
+Mul::Mul(std::shared_ptr<AbstractExpr> lhs, std::shared_ptr<AbstractExpr> rhs)
+    : lhs(lhs), rhs(rhs) {
+  assert(lhs);
+  assert(rhs);
+}
 
 z3::expr Mul::to_z3(z3::context &c,
                     std::unordered_set<std::string> &all_variables) const {
@@ -157,9 +161,11 @@ std::string Mul::to_string() const {
   return "(" + lhs->to_string() + rhs->to_string() + ")";
 }
 
-Div::Div(std::shared_ptr<AlgebraicPattern> lhs,
-         std::shared_ptr<AlgebraicPattern> rhs)
-    : lhs(lhs), rhs(rhs) {}
+Div::Div(std::shared_ptr<AbstractExpr> lhs, std::shared_ptr<AbstractExpr> rhs)
+    : lhs(lhs), rhs(rhs) {
+  assert(lhs);
+  assert(rhs);
+}
 
 z3::expr Div::to_z3(z3::context &c,
                     std::unordered_set<std::string> &all_variables) const {
@@ -172,7 +178,9 @@ std::string Div::to_string() const {
   return "(" + lhs->to_string() + "/" + rhs->to_string() + ")";
 }
 
-Exp::Exp(std::shared_ptr<AlgebraicPattern> exponent) : exponent(exponent) {}
+Exp::Exp(std::shared_ptr<AbstractExpr> exponent) : exponent(exponent) {
+  assert(exponent);
+}
 
 z3::expr Exp::to_z3(z3::context &c,
                     std::unordered_set<std::string> &all_variables) const {
@@ -185,7 +193,9 @@ std::string Exp::to_string() const {
   return "e^" + exponent->to_string();
 }
 
-Silu::Silu(std::shared_ptr<AlgebraicPattern> a) : a(a) {}
+Silu::Silu(std::shared_ptr<AbstractExpr> a) : a(a) {
+  assert(a);
+}
 
 z3::expr Silu::to_z3(z3::context &c,
                      std::unordered_set<std::string> &all_variables) const {
@@ -198,8 +208,10 @@ std::string Silu::to_string() const {
   return "silu(" + a->to_string() + ")";
 }
 
-RMS::RMS(int red_deg, std::shared_ptr<AlgebraicPattern> elems)
-    : red_deg(red_deg), elems(elems) {}
+RMS::RMS(int red_deg, std::shared_ptr<AbstractExpr> elems)
+    : red_deg(red_deg), elems(elems) {
+  assert(elems);
+}
 
 z3::expr RMS::to_z3(z3::context &c,
                     std::unordered_set<std::string> &all_variables) const {
@@ -212,8 +224,11 @@ std::string RMS::to_string() const {
   return "rms(" + std::to_string(red_deg) + ", " + elems->to_string() + ")";
 }
 
-Red::Red(int red_deg, std::shared_ptr<AlgebraicPattern> summand)
-    : red_deg_log(std::ceil(std::log2(red_deg))), summand(summand) {}
+Red::Red(int red_deg, std::shared_ptr<AbstractExpr> summand)
+    : red_deg_log(std::ceil(std::log2(red_deg))), summand(summand) {
+  assert(red_deg > 1);
+  assert(summand);
+}
 
 z3::expr Red::to_z3(z3::context &c,
                     std::unordered_set<std::string> &all_variables) const {

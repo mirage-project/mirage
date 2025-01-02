@@ -24,6 +24,7 @@ namespace mirage {
 namespace type {
 
 typedef uint16_t FPType;
+typedef int64_t GuidType;
 
 enum DataType {
   DT_INT8 = 900,

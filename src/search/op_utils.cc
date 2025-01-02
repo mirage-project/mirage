@@ -78,23 +78,31 @@ int get_input_number(type::TBOperatorType op) {
   assert(false && "Unsupported operator");
 }
 
-std::shared_ptr<AlgebraicPattern>
-    get_pattern(type::KNOperatorType op,
-                DTensor const &tensor,
-                std::shared_ptr<AlgebraicPattern> opd) {
+std::shared_ptr<AbstractExpr>
+    make_reduction_pattern(int dim, std::shared_ptr<AbstractExpr> opd) {
+  if (dim == 1) {
+    return opd;
+  }
+  return std::make_shared<Red>(dim, opd);
+}
+
+std::shared_ptr<AbstractExpr> get_pattern(type::KNOperatorType op,
+                                          DTensor const &tensor,
+                                          std::shared_ptr<AbstractExpr> opd) {
+  assert(opd != nullptr);
   switch (op) {
     case type::KNOperatorType::KN_REDUCTION_0_OP:
-      return std::make_shared<Red>(tensor.dim[0], opd);
+      return make_reduction_pattern(tensor.dim[0], opd);
     case type::KNOperatorType::KN_REDUCTION_1_OP:
       if (tensor.num_dims <= 1) {
         return nullptr;
       }
-      return std::make_shared<Red>(tensor.dim[1], opd);
+      return make_reduction_pattern(tensor.dim[1], opd);
     case type::KNOperatorType::KN_REDUCTION_2_OP:
       if (tensor.num_dims <= 2) {
         return nullptr;
       }
-      return std::make_shared<Red>(tensor.dim[2], opd);
+      return make_reduction_pattern(tensor.dim[2], opd);
     case type::KNOperatorType::KN_EXP_OP:
       return std::make_shared<Exp>(opd);
     case type::KNOperatorType::KN_SILU_OP:
@@ -106,10 +114,10 @@ std::shared_ptr<AlgebraicPattern>
   }
 }
 
-std::shared_ptr<AlgebraicPattern>
-    get_pattern(type::TBOperatorType op,
-                STensor const &tensor,
-                std::shared_ptr<AlgebraicPattern> opd) {
+std::shared_ptr<AbstractExpr> get_pattern(type::TBOperatorType op,
+                                          STensor const &tensor,
+                                          std::shared_ptr<AbstractExpr> opd) {
+  assert(opd != nullptr);
   // Retrieve reduction_dimx and forloop_range from threadblock graph
   assert(tensor.owner_op != nullptr);
   assert(tensor.owner_op->bgraph != nullptr);
@@ -125,45 +133,45 @@ std::shared_ptr<AlgebraicPattern>
           opd, std::make_shared<RMS>(tensor.dim[tensor.num_dims - 1], opd));
     }
     case type::TBOperatorType::TB_REDUCTION_0_OP:
-      return std::make_shared<Red>(tensor.dim[0], opd);
+      return make_reduction_pattern(tensor.dim[0], opd);
     case type::TBOperatorType::TB_REDUCTION_1_OP:
       if (tensor.num_dims <= 1) {
         return nullptr;
       }
-      return std::make_shared<Red>(tensor.dim[1], opd);
+      return make_reduction_pattern(tensor.dim[1], opd);
     case type::TBOperatorType::TB_REDUCTION_2_OP:
       if (tensor.num_dims <= 2) {
         return nullptr;
       }
-      return std::make_shared<Red>(tensor.dim[2], opd);
+      return make_reduction_pattern(tensor.dim[2], opd);
     case type::TBOperatorType::TB_REDUCTION_0_TO_DIMX_OP:
       if (tensor.dim[0] <= reduction_dimx) {
         return nullptr;
       }
-      return std::make_shared<Red>(tensor.dim[0] / reduction_dimx, opd);
+      return make_reduction_pattern(tensor.dim[0] / reduction_dimx, opd);
     case type::TBOperatorType::TB_REDUCTION_1_TO_DIMX_OP:
       if (tensor.num_dims <= 1 || tensor.dim[1] <= reduction_dimx) {
         return nullptr;
       }
-      return std::make_shared<Red>(tensor.dim[1] / reduction_dimx, opd);
+      return make_reduction_pattern(tensor.dim[1] / reduction_dimx, opd);
     case type::TBOperatorType::TB_REDUCTION_2_TO_DIMX_OP:
       if (tensor.num_dims <= 2 || tensor.dim[2] <= reduction_dimx) {
         return nullptr;
       }
-      return std::make_shared<Red>(tensor.dim[2] / reduction_dimx, opd);
+      return make_reduction_pattern(tensor.dim[2] / reduction_dimx, opd);
     case type::TBOperatorType::TB_FORLOOP_ACCUM_NO_RED_OP: {
-      return std::make_shared<Red>(forloop_range, opd);
+      return make_reduction_pattern(forloop_range, opd);
     }
     case type::TBOperatorType::TB_FORLOOP_ACCUM_RED_LD_MEAN_OP:
     case type::TBOperatorType::TB_FORLOOP_ACCUM_RED_LD_SUM_OP: {
-      return std::make_shared<Red>(
+      return make_reduction_pattern(
           forloop_range * tensor.dim[tensor.num_dims - 1], opd);
     }
     case type::TBOperatorType::TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP: {
       if (tensor.dim[tensor.num_dims - 1] <= reduction_dimx) {
         return nullptr;
       }
-      return std::make_shared<Red>(
+      return make_reduction_pattern(
           forloop_range * tensor.dim[tensor.num_dims - 1] / reduction_dimx,
           opd);
     }
@@ -176,21 +184,18 @@ std::shared_ptr<AlgebraicPattern>
   }
 }
 
-std::shared_ptr<AlgebraicPattern>
-    get_pattern(type::KNOperatorType op,
-                DTensor const &tensor_l,
-                DTensor const &tensor_r,
-                std::shared_ptr<AlgebraicPattern> lhs,
-                std::shared_ptr<AlgebraicPattern> rhs) {
+std::shared_ptr<AbstractExpr> get_pattern(type::KNOperatorType op,
+                                          DTensor const &tensor_l,
+                                          DTensor const &tensor_r,
+                                          std::shared_ptr<AbstractExpr> lhs,
+                                          std::shared_ptr<AbstractExpr> rhs) {
 
+  assert(lhs != nullptr);
+  assert(rhs != nullptr);
   switch (op) {
     case type::KNOperatorType::KN_MATMUL_OP:
-      if (tensor_l.dim[tensor_l.num_dims - 1] > 1) {
-        return std::make_shared<Red>(tensor_l.dim[tensor_l.num_dims - 1],
-                                     std::make_shared<Mul>(lhs, rhs));
-      } else {
-        return std::make_shared<Mul>(lhs, rhs);
-      }
+      return make_reduction_pattern(tensor_l.dim[tensor_l.num_dims - 1],
+                                    std::make_shared<Mul>(lhs, rhs));
     case type::KNOperatorType::KN_ADD_OP:
       return std::make_shared<Add>(lhs, rhs);
     case type::KNOperatorType::KN_DIV_OP:
@@ -202,21 +207,17 @@ std::shared_ptr<AlgebraicPattern>
   }
 }
 
-std::shared_ptr<AlgebraicPattern>
-    get_pattern(type::TBOperatorType op,
-                STensor const &tensor_l,
-                STensor const &tensor_r,
-                std::shared_ptr<AlgebraicPattern> lhs,
-                std::shared_ptr<AlgebraicPattern> rhs) {
-
+std::shared_ptr<AbstractExpr> get_pattern(type::TBOperatorType op,
+                                          STensor const &tensor_l,
+                                          STensor const &tensor_r,
+                                          std::shared_ptr<AbstractExpr> lhs,
+                                          std::shared_ptr<AbstractExpr> rhs) {
+  assert(lhs != nullptr);
+  assert(rhs != nullptr);
   switch (op) {
     case type::TBOperatorType::TB_MATMUL_OP:
-      if (tensor_l.dim[tensor_l.num_dims - 1] > 1) {
-        return std::make_shared<Red>(tensor_l.dim[tensor_l.num_dims - 1],
-                                     std::make_shared<Mul>(lhs, rhs));
-      } else {
-        return std::make_shared<Mul>(lhs, rhs);
-      }
+      return make_reduction_pattern(tensor_l.dim[tensor_l.num_dims - 1],
+                                    std::make_shared<Mul>(lhs, rhs));
     case type::TBOperatorType::TB_ADD_OP:
       return std::make_shared<Add>(lhs, rhs);
     case type::TBOperatorType::TB_DIV_OP:
@@ -228,10 +229,15 @@ std::shared_ptr<AlgebraicPattern>
   }
 }
 
-std::shared_ptr<AlgebraicPattern>
+std::shared_ptr<AbstractExpr>
     get_pattern(type::KNOperatorType op,
                 std::vector<DTensor> const &tensors,
-                std::vector<std::shared_ptr<AlgebraicPattern>> const &opds) {
+                std::vector<std::shared_ptr<AbstractExpr>> const &opds) {
+  for (auto const &expr : opds) {
+    if (!expr) {
+      return nullptr;
+    }
+  }
   if (tensors.size() == 1) {
     return get_pattern(op, tensors[0], opds[0]);
   }
@@ -241,11 +247,15 @@ std::shared_ptr<AlgebraicPattern>
   assert(false && "Unsupported operator");
 }
 
-std::shared_ptr<AlgebraicPattern>
+std::shared_ptr<AbstractExpr>
     get_pattern(type::TBOperatorType op,
                 std::vector<STensor> const &tensors,
-                std::vector<std::shared_ptr<AlgebraicPattern>> const &opds) {
-
+                std::vector<std::shared_ptr<AbstractExpr>> const &opds) {
+  for (auto const &expr : opds) {
+    if (!expr) {
+      return nullptr;
+    }
+  }
   if (opds.size() == 1) {
     return get_pattern(op, tensors[0], opds[0]);
   }
@@ -264,10 +274,10 @@ std::shared_ptr<AlgebraicPattern>
     int reduction_dim1 = tensors[0].dim[num_dims - 1],
         reduction_dim2 = tensors[1].dim[num_dims - 1];
     return std::make_shared<Add>(
-        std::make_shared<Red>(reduction_dim1,
-                              std::make_shared<Mul>(opds[0], opds[2])),
-        std::make_shared<Red>(reduction_dim2,
-                              std::make_shared<Mul>(opds[1], opds[3])));
+        make_reduction_pattern(reduction_dim1,
+                               std::make_shared<Mul>(opds[0], opds[2])),
+        make_reduction_pattern(reduction_dim2,
+                               std::make_shared<Mul>(opds[1], opds[3])));
   }
   assert(false && "Unsupported operator");
 }
@@ -394,27 +404,41 @@ TBOperator *create_op(threadblock::Graph &g,
     if (concat1 == nullptr) {
       return nullptr;
     }
+    g.operators.push_back(concat1);
     TBOperator *concat2 =
         g.create_concat_op(inputs[2], inputs[3], inputs[2].num_dims - 2);
     if (concat2 == nullptr) {
       delete concat1;
+      g.operators.pop_back();
       return nullptr;
     }
+    g.operators.push_back(concat2);
     TBOperator *matmul = g.create_matmul_op(concat1->output_tensors[0],
                                             concat2->output_tensors[0]);
     if (matmul == nullptr) {
       delete concat2;
       delete concat1;
+      g.operators.pop_back();
+      g.operators.pop_back();
       return nullptr;
     }
-    g.operators.push_back(concat1);
-    g.operators.push_back(concat2);
     return matmul;
   }
   return nullptr;
 }
 
 size_t count_op_of_type(type::KNOperatorType op_type, kernel::Graph const &g) {
+  int counter = 0;
+  for (auto const &op : g.operators) {
+    if (op->op_type == op_type) {
+      ++counter;
+    }
+  }
+  return counter;
+}
+
+size_t count_op_of_type(type::TBOperatorType op_type,
+                        threadblock::Graph const &g) {
   int counter = 0;
   for (auto const &op : g.operators) {
     if (op->op_type == op_type) {

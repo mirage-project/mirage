@@ -1,4 +1,4 @@
-#include "mirage/search/tbrange.h"
+#include "mirage/search/range_propagation/tbrange.h"
 
 namespace mirage {
 namespace search {
