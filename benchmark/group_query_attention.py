@@ -21,7 +21,7 @@ if __name__ == "__main__":
     D = graph.div(E, S)
     O = graph.matmul(D, V)
     graph.mark_output(O)
-    optimized_graph = graph.superoptimize(config="attention", backend="nki", previous_checkpoint=filename)
+    optimized_graph = graph.superoptimize(config="attention", previous_checkpoint=filename)
 
     input_tensors = [
         torch.randn(2 * batch_size, 256, 64, dtype=torch.float16, device='cuda:0'),
