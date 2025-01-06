@@ -544,7 +544,7 @@ NKITranspileResult NKITranspiler::transpile_ugraph() {
   exec.e("from torch_xla.core import xla_model as xm");
   exec.e("device = xm.xla_device()");
   for (kn::KNOperator *const op : g->operators) {
-    for (kn::DTensor const & dtensor : op->output_tensors) {
+    for (kn::DTensor const &dtensor : op->output_tensors) {
       std::string shape;
       for (int i = 0; i < dtensor.num_dims; i++) {
         shape += fmt("$,", dtensor.dim[i]);
