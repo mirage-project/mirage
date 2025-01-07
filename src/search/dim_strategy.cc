@@ -427,8 +427,7 @@ std::vector<std::vector<int>> DimStrategy::get_customized_input_cand_idx(
   int num_inputs = all_input.size();
 
 <<<<<<< HEAD
-  if (config._enable_concat_matmul_transformation &&
-      all_input.size() == 4) {
+  if (config._enable_concat_matmul_transformation && all_input.size() == 4) {
 =======
   if (config._enable_concat_matmul_transformation && all_input.size() == 4) {
 >>>>>>> upstream/main
