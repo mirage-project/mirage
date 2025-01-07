@@ -149,62 +149,83 @@ NKICustomOPTranspileResult
         for (int i = 0; i < stensor.num_dims - 2; i++) {
           assert(stensor.dim[i] == 1);
         }
-        string instruction = "nl.load";
-        if (meta.partition_dim == stensor.num_dims - 1) {
-          instruction = "nl.load_transpose2d";
+        bool transposed = false;
+        std::string range = "";
+        if (meta.partition_dim == stensor.num_dims - 2) {
+          // Normal case
+          code.e("$ = nl.ndarray(($, $), dtype=nl.float16, buffer=nl.sbuf)",
+                 fmt("stensor$", stensor.guid),
+                 stensor.dim[stensor.num_dims - 2],
+                 stensor.dim[stensor.num_dims - 1]);
+        } else {
+          // Tranposed case
+          assert(meta.partition_dim == stensor.num_dims - 1);
+          // partition dim is the innermost dimension so we need
+          // to use load_transposed2d
+          transposed = true;
+          code.e("$ = nl.ndarray(($, $), dtype=nl.float16, buffer=nl.sbuf)",
+                 fmt("stensor$", stensor.guid),
+                 stensor.dim[stensor.num_dims - 1],
+                 stensor.dim[stensor.num_dims - 2]);
         }
+
         int3 imap = input_op->input_map;
         int forloop_dim = input_op->forloop_dim;
-        std::string range = "";
         for (int i = 0; i < stensor.num_dims; i++) {
+          std::string index;
           if (imap.x == i) {
-            range += fmt("$*$:$*$",
-                         "nl.program_id(0)",
-                         stensor.dim[i],
-                         "(nl.program_id(0)+1)",
-                         stensor.dim[i]);
+            int scale_factor = stensor.dim[i];
+            if (forloop_dim == i) {
+              scale_factor *= g.forloop_range;
+            }
+            index = fmt("nl.program_id(0) * $", scale_factor);
           } else if (imap.y == i) {
-            range += fmt("$*$:$*$",
-                         "nl.program_id(1)",
-                         stensor.dim[i],
-                         "(nl.program_id(1)+1)",
-                         stensor.dim[i]);
+            int scale_factor = stensor.dim[i];
+            if (forloop_dim == i) {
+              scale_factor *= g.forloop_range;
+            }
+            index = fmt("nl.program_id(1) * $", scale_factor);
           } else if (imap.z == i) {
-            range += fmt("$*$:$*$",
-                         "nl.program_id(2)",
-                         stensor.dim[i],
-                         "(nl.program_id(2)+1)",
-                         stensor.dim[i]);
-          } else if (forloop_dim == i) {
-            range +=
-                fmt("$*$:$*$", "i", stensor.dim[i], "(i+1)", stensor.dim[i]);
-          } else {
-            range += fmt("$:$", 0, stensor.dim[i]);
+            int scale_factor = stensor.dim[i];
+            if (forloop_dim == i) {
+              scale_factor *= g.forloop_range;
+            }
+            index = fmt("nl.program_id(2) * $", scale_factor);
           }
+          if (forloop_dim == i) {
+            if (index == "") {
+              index = fmt("i * $", stensor.dim[i]);
+            } else {
+              index = index + fmt("+ i * $", stensor.dim[i]);
+            }
+          }
+          if (i == stensor.num_dims - 2) {
+            if (index == "") {
+              index = fmt("nl.arange($)[:, None]", stensor.dim[i]);
+            } else {
+              index = index + fmt(" + nl.arange($)[:, None]", stensor.dim[i]);
+            }
+          } else if (i == stensor.num_dims - 1) {
+            if (index == "") {
+              index = fmt("nl.arange($)[None, :]", stensor.dim[i]);
+            } else {
+              index = index + fmt(" + nl.arange($)[None, :]", stensor.dim[i]);
+            }
+          }
+          if (index == "") {
+            index = "0";
+          }
+          range += index;
           if (i < stensor.num_dims - 1) {
-            range += ",";
+            range += ", ";
           }
         }
-        std::string range_suffix = "";
-        if (stensor.num_dims == 2 || stensor.num_dims == 1) {
-        } else if (stensor.num_dims == 3) {
-          range_suffix = "[0]";
-        } else if (stensor.num_dims == 4) {
-          range_suffix = "[0,0]";
-        } else {
-          assert(false && "Currently unsupported dim size");
-        }
+
         code.e("$ = $($[$])",
                fmt("stensor$", stensor.guid),
-               instruction,
+               transposed ? "nl.load_transpose2d" : "nl.load",
                fmt("dtensor$", dtensor.guid),
                range);
-        if (range_suffix.length() > 0) {
-          code.e("$ = $$",
-                 fmt("stensor$", stensor.guid),
-                 fmt("stensor$", stensor.guid),
-                 range_suffix);
-        }
         break;
       }
       case type::TB_OUTPUT_OP: {
@@ -409,45 +430,37 @@ NKICustomOPTranspileResult
         int3 omap = output_op->output_map;
         std::string range = "";
         for (int i = 0; i < stensor.num_dims; i++) {
+          std::string index;
           if (omap.x == i) {
-            range += fmt("$*$:$*$",
-                         "nl.program_id(0)",
-                         stensor.dim[i],
-                         "(nl.program_id(0)+1)",
-                         stensor.dim[i]);
+            index = fmt("nl.program_id(0) * $", stensor.dim[i]);
           } else if (omap.y == i) {
-            range += fmt("$*$:$*$",
-                         "nl.program_id(1)",
-                         stensor.dim[i],
-                         "(nl.program_id(1)+1)",
-                         stensor.dim[i]);
+            index = fmt("nl.program_id(1) * $", stensor.dim[i]);
           } else if (omap.z == i) {
-            range += fmt("$*$:$*$",
-                         "nl.program_id(2)",
-                         stensor.dim[i],
-                         "(nl.program_id(2)+1)",
-                         stensor.dim[i]);
-          } else {
-            range += fmt("$:$", 0, stensor.dim[i]);
+            index = fmt("nl.program_id(2) * $", stensor.dim[i]);
           }
+          if (i == stensor.num_dims - 2) {
+            if (index == "") {
+              index = fmt("nl.arange($)[:, None]", stensor.dim[i]);
+            } else {
+              index = index + fmt(" + nl.arange($)[:, None]", stensor.dim[i]);
+            }
+          } else if (i == stensor.num_dims - 1) {
+            if (index == "") {
+              index = fmt("nl.arange($)[None, :]", stensor.dim[i]);
+            } else {
+              index = index + fmt(" + nl.arange($)[None, :]", stensor.dim[i]);
+            }
+          }
+          if (index == "") {
+            index = "0";
+          }
+          range += index;
           if (i < stensor.num_dims - 1) {
-            range += ",";
+            range += ", ";
           }
         }
-        // Generate code for TB Output
-        std::string range_prefix = "";
-        if (stensor.num_dims == 1 || stensor.num_dims == 2) {
-          // Do nothing
-        } else if (stensor.num_dims == 3) {
-          range_prefix = "0,";
-        } else if (stensor.num_dims == 4) {
-          range_prefix = "0,0,";
-        } else {
-          assert(false && "Currently unsupported dim size");
-        }
-        code.e("nl.store($[$$], $)",
+        code.e("nl.store($[$], $)",
                fmt("dtensor$", dtensor.guid),
-               range_prefix,
                range,
                need_transpose ? fmt("nl.transpose(stensor$)", stensor.guid)
                               : fmt("stensor$", stensor.guid));
@@ -527,6 +540,32 @@ NKICustomOPTranspileResult
         assert(meta0.partition_dim == meta1.partition_dim);
         int num_dims = input.num_dims;
         assert(input.num_dims == output.num_dims);
+        // assert that reduc_dim is among the last two dimensions since
+        // we omit all other leading dims (which must have a dim size of 1)
+        assert(num_dims - 2 <= reduc_dim && reduc_dim < num_dims);
+        // Cannot pick partition dim as the reduce_dim
+        assert(reduc_dim != meta0.partition_dim);
+        // reduction is perform on axis=1, since axis=0 maps to
+        // the partition dim
+        code.e("$ = nl.sum($, axis=1, keepdims=True)",
+               fmt("stensor$", output.guid),
+               fmt("stensor$", input.guid));
+        break;
+      }
+      case type::TB_REDUCTION_0_TO_DIMX_OP:
+      case type::TB_REDUCTION_1_TO_DIMX_OP:
+      case type::TB_REDUCTION_2_TO_DIMX_OP: {
+        // May need to recompute
+        int reduc_dim = tb_op->op_type >= type::TB_REDUCTION_0_TO_DIMX_OP
+                            ? tb_op->op_type - type::TB_REDUCTION_0_TO_DIMX_OP
+                            : tb_op->op_type - type::TB_REDUCTION_0_OP;
+        tb::STensor const &input = tb_op->input_tensors.at(0);
+        tb::STensor const &output = tb_op->output_tensors.at(0);
+        STensorMeta meta0 = stensor_metas.at(input.guid);
+        STensorMeta meta1 = stensor_metas.at(output.guid);
+        // FIXME: currently assume no change of partition dim in reduction
+        assert(meta0.partition_dim == meta1.partition_dim);
+        int num_dims = input.num_dims;
         // assert that reduc_dim is among the last two dimensions since
         // we omit all other leading dims (which must have a dim size of 1)
         assert(num_dims - 2 <= reduc_dim && reduc_dim < num_dims);

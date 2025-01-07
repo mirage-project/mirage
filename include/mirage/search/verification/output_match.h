@@ -2,7 +2,6 @@
 
 #include <cstddef>
 #include <vector>
-#include <cstddef>
 
 namespace mirage {
 namespace search {

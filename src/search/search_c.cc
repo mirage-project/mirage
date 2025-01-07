@@ -92,7 +92,8 @@ int cython_search(mirage::kernel::Graph const *input_graph,
         config.frange_to_explore.push_back(frange);
       }
     }
-    const char *result_filename = filename ? filename : "mirage_search_checkpoint.json";
+    char const *result_filename =
+        filename ? filename : "mirage_search_checkpoint.json";
     search::KernelGraphGenerator gen(
         *input_graph, config, result_filename, verbose);
     gen.config.show();
