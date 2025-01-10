@@ -3,6 +3,7 @@
 #include "mirage/search/graph_template/tensor_template.h"
 #include "mirage/search/graph_template/op_template.h"
 #include "mirage/search/graph_template/tensor_dim_constraint.h"
+#include "mirage/search/graph_template/dim_var_assignments.h"
 #include "mirage/kernel/graph.h"
 #include "mirage/threadblock/graph.h"
 
@@ -16,7 +17,7 @@ class TBGraphTemplate {
 public:
   TBGraphTemplate();
 
-  mirage::threadblock::Graph to_threadblock_graph(std::unordered_map<tensor_dim_var_index_t, int> const &assignment);
+  threadblock::Graph *to_threadblock_graph(DimVarAssignments const &assignments, std::vector<kernel::DTensor> const &inputs);
   bool add_operator(type::TBOperatorType op_type, std::vector<int> input_indices);
   bool add_input(DTensorTemplate dtensor, int3 input_map, int forloop_dim);
   bool add_output(int input_index, int3 output_map, int forloop_dim, mirage::type::TBEpilogueType epilogue_type);
@@ -38,7 +39,7 @@ class KNGraphTemplate {
 public:
   KNGraphTemplate() = default;
 
-  mirage::kernel::Graph to_kernel_graph(std::unordered_map<tensor_dim_var_index_t, int> const &assignment);
+  kernel::Graph *to_kernel_graph(DimVarAssignments const &assignments);
   bool add_operator(type::KNOperatorType op_type, std::vector<int> input_indices);
   bool add_customized_operator(TBGraphTemplate tb_graph, std::vector<int> input_indices);
   bool add_input(std::vector<int> input_dims, std::vector<size_t> input_strides, int3 input_map);

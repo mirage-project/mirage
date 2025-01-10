@@ -1,5 +1,6 @@
 #include "mirage/search/graph_template/graph_template.h"
 #include "mirage/search/graph_template/op_args.h"
+#include "mirage/search/op_utils.h"
 
 namespace mirage {
 namespace search {
@@ -16,8 +17,28 @@ TBGraphTemplate::TBGraphTemplate() :
   forloop_range(TensorDimTemplate(std::make_shared<TensorDimVar>(next_dim_variable_index++)))
 {}
 
-mirage::threadblock::Graph TBGraphTemplate::to_threadblock_graph(std::unordered_map<tensor_dim_var_index_t, int> const &assignment) {
-  // TODO
+threadblock::Graph *TBGraphTemplate::to_threadblock_graph(DimVarAssignments const &assignments, std::vector<kernel::DTensor> const &inputs) {
+  dim3 grid_dim_val(assignments.get_value(grid_dim[0]), assignments.get_value(grid_dim[1]), assignments.get_value(grid_dim[2]));
+  dim3 block_dim_val(assignments.get_value(block_dim[0]), assignments.get_value(block_dim[1]), assignments.get_value(block_dim[2]));
+  int forloop_range_val = assignments.get_value(forloop_range);
+  threadblock::Graph *graph = new threadblock::Graph(grid_dim_val, block_dim_val, forloop_range_val, reduction_dimx);
+
+  std::vector<threadblock::STensor> tensors_val;
+
+  for (size_t i = 0; i < this->operators.size(); ++i) {
+    std::vector<threadblock::STensor> input_tensors;
+    for (int input_index : this->input_indices[i]) {
+      input_tensors.push_back(tensors_val[input_index]);
+    }
+    threadblock::TBOperator *op = create_op(*graph, this->operators[i].op_type, input_tensors);
+    if (op == nullptr) {
+      delete graph;
+      return nullptr;
+    }
+    graph->operators.push_back(op);
+    tensors_val.push_back(op->output_tensors[0]);
+  }
+  return graph;
 }
 
 bool TBGraphTemplate::add_operator(type::TBOperatorType op_type, std::vector<int> input_indices) {
@@ -295,8 +316,35 @@ bool TBGraphTemplate::add_output(int input_index, int3 output_map, int forloop_d
   return true;
 }
 
-mirage::kernel::Graph KNGraphTemplate::to_kernel_graph(std::unordered_map<tensor_dim_var_index_t, int> const &assignment) {
-  // TODO
+mirage::kernel::Graph *KNGraphTemplate::to_kernel_graph(DimVarAssignments const &assignments) {
+  kernel::Graph *graph = new kernel::Graph();
+  std::vector<kernel::DTensor> tensors_val;
+  for (size_t i = 0; i < this->operators.size(); ++i) {
+    std::vector<kernel::DTensor> input_tensors;
+    for (int input_index : this->input_indices[i]) {
+      input_tensors.push_back(tensors_val[input_index]);
+    }
+    kernel::KNOperator *op = nullptr;
+    if (this->operators[i].op_type == type::KNOperatorType::KN_CUSTOMIZED_OP) {
+      std::shared_ptr<KNCustomizedOpArgs> args = std::static_pointer_cast<KNCustomizedOpArgs>(this->operators[i].args);
+      threadblock::Graph *tb_graph = args->tb_graph_template.to_threadblock_graph(assignments, input_tensors);
+      if (tb_graph == nullptr) {
+        delete graph;
+        return nullptr;
+      }
+      op = graph->create_customized_op(input_tensors, *tb_graph);
+    } else {
+      op = create_op(*graph, this->operators[i].op_type, input_tensors);
+    }
+    if (op == nullptr) {
+      delete graph;
+      return nullptr;
+    }
+    for (DTensor const &output_tensor : op->output_tensors) {
+      tensors_val.push_back(output_tensor);
+    }
+  }
+  return graph;
 }
 
 bool KNGraphTemplate::add_operator(type::KNOperatorType op_type, std::vector<int> input_indices) {
