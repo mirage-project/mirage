@@ -39,6 +39,7 @@ bool check_satisfiability(std::vector<TensorDimConstraint> const &pre_conds,
         }
       }
     }
+    return true;
   };
 
   for (TensorDimConstraint const &constraint : constraints) {

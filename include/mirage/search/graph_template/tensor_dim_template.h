@@ -1,3 +1,5 @@
+#pragma once
+
 #include "mirage/search/graph_template/tensor_dim_expr.h"
 
 namespace mirage {

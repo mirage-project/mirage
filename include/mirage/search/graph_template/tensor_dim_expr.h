@@ -1,3 +1,5 @@
+#pragma once
+
 #include <memory>
 #include <string>
 
@@ -10,10 +12,12 @@ public:
   virtual ~TensorDimExpr() = default;
 };
 
+using tensor_dim_var_index_t = uint32_t;
+
 class TensorDimVar : public TensorDimExpr {
 public:
-  TensorDimVar(int index);
-  int index;
+  TensorDimVar(tensor_dim_var_index_t index);
+  tensor_dim_var_index_t index;
 };
 
 class TensorDimConst : public TensorDimExpr {
@@ -25,6 +29,12 @@ public:
 class TensorDimAdd : public TensorDimExpr {
 public:
   TensorDimAdd(std::shared_ptr<TensorDimExpr> lhs, std::shared_ptr<TensorDimExpr> rhs);
+  std::shared_ptr<TensorDimExpr> lhs, rhs;
+};
+
+class TensorDimMul : public TensorDimExpr {
+public:
+  TensorDimMul(std::shared_ptr<TensorDimExpr> lhs, std::shared_ptr<TensorDimExpr> rhs);
   std::shared_ptr<TensorDimExpr> lhs, rhs;
 };
 

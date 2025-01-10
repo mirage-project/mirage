@@ -1,3 +1,5 @@
+#pragma once
+
 #include "mirage/search/graph_template/tensor_template.h"
 #include "mirage/search/graph_template/op_template.h"
 #include "mirage/search/graph_template/tensor_dim_constraint.h"
@@ -5,6 +7,7 @@
 #include "mirage/threadblock/graph.h"
 
 #include <vector_types.h>
+#include <unordered_map>
 
 namespace mirage {
 namespace search {
@@ -13,11 +16,13 @@ class TBGraphTemplate {
 public:
   TBGraphTemplate();
 
-  mirage::threadblock::Graph to_threadblock_graph();
+  mirage::threadblock::Graph to_threadblock_graph(std::unordered_map<tensor_dim_var_index_t, int> const &assignment);
   bool add_operator(type::TBOperatorType op_type, std::vector<int> input_indices);
+  bool add_input(DTensorTemplate dtensor, int3 input_map, int forloop_dim);
+  bool add_output(int input_index, int3 output_map, int forloop_dim, mirage::type::TBEpilogueType epilogue_type);
 
-  dim3 grid_dim, block_dim;
-  int forloop_range;
+  std::vector<TensorDimTemplate> grid_dim, block_dim;
+  TensorDimTemplate forloop_range;
   int reduction_dimx;
   std::vector<TBOpTemplate> operators;
   std::vector<STensorTemplate> tensors;
@@ -25,15 +30,19 @@ public:
   std::vector<std::vector<int>> output_indices;
 
   std::vector<TensorDimConstraint> conds;
+
+  static tensor_dim_var_index_t next_dim_variable_index;
 };
 
 class KNGraphTemplate {
 public:
   KNGraphTemplate() = default;
 
-  mirage::kernel::Graph to_kernel_graph();
+  mirage::kernel::Graph to_kernel_graph(std::unordered_map<tensor_dim_var_index_t, int> const &assignment);
   bool add_operator(type::KNOperatorType op_type, std::vector<int> input_indices);
-  bool add_customized_operator(TBGraphTemplate tb_graph, std::vector<int> input_indices); 
+  bool add_customized_operator(TBGraphTemplate tb_graph, std::vector<int> input_indices);
+  bool add_input(std::vector<int> input_dims, std::vector<size_t> input_strides, int3 input_map);
+  bool add_output(int input_index, std::vector<size_t> output_strides, int3 output_map);
 
   std::vector<KNOpTemplate> operators;
   std::vector<DTensorTemplate> tensors;
