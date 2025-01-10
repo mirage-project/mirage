@@ -17,13 +17,13 @@ KNReductionOpArgs::KNReductionOpArgs(int reduction_dim_idx,
 
 KNRMSNormOpArgs::KNRMSNormOpArgs(int normalized_size) : normalized_size(normalized_size) {}
 
-KNCustomizedOpArgs::KNCustomizedOpArgs(TBGraphTemplate tb_graph_template)
+KNCustomizedOpArgs::KNCustomizedOpArgs(SymbolicTBGraph tb_graph_template)
     : tb_graph_template(tb_graph_template) {}
 
-TBInputOpArgs::TBInputOpArgs(DTensorTemplate dtensor, int3 input_map, int forloop_dim)
+TBInputOpArgs::TBInputOpArgs(SymbolicDTensor dtensor, int3 input_map, int forloop_dim)
     : dtensor(dtensor), input_map(input_map), forloop_dim(forloop_dim) {}
 
-TBOutputOpArgs::TBOutputOpArgs(DTensorTemplate dtensor, int3 output_map, int forloop_dim, mirage::type::TBEpilogueType epilogue)
+TBOutputOpArgs::TBOutputOpArgs(SymbolicDTensor dtensor, int3 output_map, int forloop_dim, mirage::type::TBEpilogueType epilogue)
     : dtensor(dtensor), output_map(output_map), forloop_dim(forloop_dim), epilogue(epilogue) {}
 
 TBConcatOpArgs::TBConcatOpArgs(int concat_dim) : concat_dim(concat_dim) {}

@@ -5,9 +5,9 @@
 namespace mirage {
 namespace search {
 
-class TensorDimTemplate {
+class SymbolicTensorDim {
 public:
-  TensorDimTemplate(std::shared_ptr<TensorDimExpr> dim_expr);
+  SymbolicTensorDim(std::shared_ptr<TensorDimExpr> dim_expr);
 
   std::shared_ptr<TensorDimExpr> dim_expr;
 };

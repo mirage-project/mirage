@@ -5,7 +5,7 @@
 namespace mirage {
 namespace search {
 
-class TensorDimTemplate;
+class SymbolicTensorDim;
 
 using tensor_dim_var_index_t = uint32_t;
 
@@ -14,7 +14,7 @@ public:
   DimVarAssignments() = default;
 
   void assign(tensor_dim_var_index_t dim_var_index, int value);
-  int get_value(TensorDimTemplate const &dim_expr) const;
+  int get_value(SymbolicTensorDim const &dim_expr) const;
   int get_value(tensor_dim_var_index_t dim_var_index) const;
 
 private:

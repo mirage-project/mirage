@@ -1,6 +1,6 @@
 #pragma once
 
-#include "mirage/search/graph_template/graph_template.h"
+#include "mirage/search/graph_template/symbolic_graph.h"
 #include "mirage/type.h"
 
 #include <vector>
@@ -46,26 +46,26 @@ public:
   int normalized_size;
 };
 
-class TBGraphTemplate;
+class SymbolicTBGraph;
 
 class KNCustomizedOpArgs : public OpArgs {
 public:
-  KNCustomizedOpArgs(TBGraphTemplate tb_graph_template);
-  TBGraphTemplate tb_graph_template;
+  KNCustomizedOpArgs(SymbolicTBGraph tb_graph_template);
+  SymbolicTBGraph tb_graph_template;
 };
 
 class TBInputOpArgs : public OpArgs {
 public:
-  TBInputOpArgs(DTensorTemplate dtensor, int3 input_map, int forloop_dim);
-  DTensorTemplate dtensor;
+  TBInputOpArgs(SymbolicDTensor dtensor, int3 input_map, int forloop_dim);
+  SymbolicDTensor dtensor;
   int3 input_map;
   int forloop_dim;
 };
 
 class TBOutputOpArgs : public OpArgs {
 public:
-  TBOutputOpArgs(DTensorTemplate dtensor, int3 output_map, int forloop_dim, mirage::type::TBEpilogueType epilogue);
-  DTensorTemplate dtensor;
+  TBOutputOpArgs(SymbolicDTensor dtensor, int3 output_map, int forloop_dim, mirage::type::TBEpilogueType epilogue);
+  SymbolicDTensor dtensor;
   int3 output_map;
   int forloop_dim;
   mirage::type::TBEpilogueType epilogue;

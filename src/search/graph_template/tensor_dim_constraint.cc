@@ -5,10 +5,10 @@
 namespace mirage {
 namespace search {
 
-TensorDimConstraint::TensorDimConstraint(ConstraintType type, TensorDimTemplate lhs, TensorDimTemplate rhs)
+TensorDimConstraint::TensorDimConstraint(ConstraintType type, SymbolicTensorDim lhs, SymbolicTensorDim rhs)
     : type(type), lhs(lhs), rhs(rhs) {}
 
-TensorDimConstraint make_equal_constraint(TensorDimTemplate lhs, TensorDimTemplate rhs) {
+TensorDimConstraint make_equal_constraint(SymbolicTensorDim lhs, SymbolicTensorDim rhs) {
   return TensorDimConstraint(ConstraintType::EQUAL, lhs, rhs);
 }
 
