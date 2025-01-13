@@ -86,7 +86,7 @@ std::shared_ptr<AbstractExpr>
   return std::make_shared<Red>(dim, opd);
 }
 
-std::shared_ptr<AbstractExpr> get_pattern(type::KNOperatorType op,
+std::shared_ptr<AbstractExpr> get_abstract_expr(type::KNOperatorType op,
                                           DTensor const &tensor,
                                           std::shared_ptr<AbstractExpr> opd) {
   assert(opd != nullptr);
@@ -114,7 +114,7 @@ std::shared_ptr<AbstractExpr> get_pattern(type::KNOperatorType op,
   }
 }
 
-std::shared_ptr<AbstractExpr> get_pattern(type::TBOperatorType op,
+std::shared_ptr<AbstractExpr> get_abstract_expr(type::TBOperatorType op,
                                           STensor const &tensor,
                                           std::shared_ptr<AbstractExpr> opd) {
   assert(opd != nullptr);
@@ -184,7 +184,7 @@ std::shared_ptr<AbstractExpr> get_pattern(type::TBOperatorType op,
   }
 }
 
-std::shared_ptr<AbstractExpr> get_pattern(type::KNOperatorType op,
+std::shared_ptr<AbstractExpr> get_abstract_expr(type::KNOperatorType op,
                                           DTensor const &tensor_l,
                                           DTensor const &tensor_r,
                                           std::shared_ptr<AbstractExpr> lhs,
@@ -207,7 +207,7 @@ std::shared_ptr<AbstractExpr> get_pattern(type::KNOperatorType op,
   }
 }
 
-std::shared_ptr<AbstractExpr> get_pattern(type::TBOperatorType op,
+std::shared_ptr<AbstractExpr> get_abstract_expr(type::TBOperatorType op,
                                           STensor const &tensor_l,
                                           STensor const &tensor_r,
                                           std::shared_ptr<AbstractExpr> lhs,
@@ -230,7 +230,7 @@ std::shared_ptr<AbstractExpr> get_pattern(type::TBOperatorType op,
 }
 
 std::shared_ptr<AbstractExpr>
-    get_pattern(type::KNOperatorType op,
+    get_abstract_expr(type::KNOperatorType op,
                 std::vector<DTensor> const &tensors,
                 std::vector<std::shared_ptr<AbstractExpr>> const &opds) {
   for (auto const &expr : opds) {
@@ -239,16 +239,16 @@ std::shared_ptr<AbstractExpr>
     }
   }
   if (tensors.size() == 1) {
-    return get_pattern(op, tensors[0], opds[0]);
+    return get_abstract_expr(op, tensors[0], opds[0]);
   }
   if (tensors.size() == 2) {
-    return get_pattern(op, tensors[0], tensors[1], opds[0], opds[1]);
+    return get_abstract_expr(op, tensors[0], tensors[1], opds[0], opds[1]);
   }
   assert(false && "Unsupported operator");
 }
 
 std::shared_ptr<AbstractExpr>
-    get_pattern(type::TBOperatorType op,
+    get_abstract_expr(type::TBOperatorType op,
                 std::vector<STensor> const &tensors,
                 std::vector<std::shared_ptr<AbstractExpr>> const &opds) {
   for (auto const &expr : opds) {
@@ -257,10 +257,10 @@ std::shared_ptr<AbstractExpr>
     }
   }
   if (opds.size() == 1) {
-    return get_pattern(op, tensors[0], opds[0]);
+    return get_abstract_expr(op, tensors[0], opds[0]);
   }
   if (opds.size() == 2) {
-    return get_pattern(op, tensors[0], tensors[1], opds[0], opds[1]);
+    return get_abstract_expr(op, tensors[0], tensors[1], opds[0], opds[1]);
   }
 
   if (op == type::TBOperatorType::TB_CONCAT_THEN_MATMUL_OP) {

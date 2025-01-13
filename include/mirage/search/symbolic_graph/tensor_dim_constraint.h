@@ -1,6 +1,6 @@
 #pragma once
 
-#include "mirage/search/graph_template/symbolic_tensor_dim.h"
+#include "mirage/search/symbolic_graph/symbolic_tensor_dim.h"
 
 #include <vector>
 

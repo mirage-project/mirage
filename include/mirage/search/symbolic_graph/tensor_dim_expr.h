@@ -1,6 +1,6 @@
 #pragma once
 
-#include "mirage/search/graph_template/dim_var_assignments.h"
+#include "mirage/search/symbolic_graph/dim_var_assignments.h"
 
 #include <memory>
 #include <string>

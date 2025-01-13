@@ -20,7 +20,7 @@ public:
   virtual z3::expr
       to_z3(z3::context &c,
             std::unordered_set<std::string> &all_variables) const = 0;
-  bool subpattern_to(AbstractExpr const &other) const;
+  bool subexpr_to(AbstractExpr const &other) const;
   bool operator==(AbstractExpr const &other) const;
   virtual std::string to_string() const = 0;
 };

@@ -1,6 +1,6 @@
 #pragma once
 
-#include "mirage/search/graph_template/symbolic_graph.h"
+#include "mirage/search/symbolic_graph/symbolic_graph.h"
 #include "mirage/type.h"
 
 #include <vector>

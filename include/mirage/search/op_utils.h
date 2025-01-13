@@ -3,26 +3,10 @@
 #include "mirage/search/abstract_expr/abstract_expr.h"
 #include "mirage/search/config.h"
 #include "mirage/utils/hash_utils.h"
+#include "mirage/search/symbolic_graph/symbolic_graph.h"
 
 namespace mirage {
 namespace search {
-
-template <typename Op, typename OpType>
-size_t get_operator_hash(Op i, OpType op) {
-  size_t h = 0;
-  hash_combine(h, i);
-  hash_combine(h, op);
-  return h;
-}
-
-template <typename Op, typename OpType>
-size_t get_operator_hash(Op i, Op j, OpType op) {
-  size_t h = 0;
-  hash_combine(h, i);
-  hash_combine(h, j);
-  hash_combine(h, op);
-  return h;
-}
 
 template <typename GraphType>
 int get_num_consumers(GraphType const &g,
@@ -46,29 +30,39 @@ bool is_unary(type::KNOperatorType op);
 int get_input_number(type::KNOperatorType);
 int get_input_number(type::TBOperatorType);
 
-std::shared_ptr<AbstractExpr> get_pattern(type::KNOperatorType op,
+std::shared_ptr<AbstractExpr> get_abstract_expr(type::KNOperatorType op,
                                           DTensor const &tensor,
                                           std::shared_ptr<AbstractExpr> opd);
-std::shared_ptr<AbstractExpr> get_pattern(type::TBOperatorType op,
+std::shared_ptr<AbstractExpr> get_abstract_expr(type::TBOperatorType op,
                                           STensor const &tensor,
                                           std::shared_ptr<AbstractExpr> opd);
 std::shared_ptr<AbstractExpr>
-    get_pattern(type::KNOperatorType op,
+    get_abstract_expr(type::KNOperatorType op,
                 std::vector<DTensor> const &tensors,
                 std::vector<std::shared_ptr<AbstractExpr>> const &opds);
-std::shared_ptr<AbstractExpr> get_pattern(type::KNOperatorType op,
+std::shared_ptr<AbstractExpr> get_abstract_expr(type::KNOperatorType op,
                                           DTensor const &input1,
                                           DTensor const &input2,
                                           std::shared_ptr<AbstractExpr> lhs,
                                           std::shared_ptr<AbstractExpr> rhs);
-std::shared_ptr<AbstractExpr> get_pattern(type::TBOperatorType op,
+std::shared_ptr<AbstractExpr> get_abstract_expr(type::TBOperatorType op,
                                           STensor const &input1,
                                           STensor const &input2,
                                           std::shared_ptr<AbstractExpr> lhs,
                                           std::shared_ptr<AbstractExpr> rhs);
 std::shared_ptr<AbstractExpr>
-    get_pattern(type::TBOperatorType op,
+    get_abstract_expr(type::TBOperatorType op,
                 std::vector<STensor> const &tensors,
+                std::vector<std::shared_ptr<AbstractExpr>> const &opds);
+
+std::shared_ptr<AbstractExpr>
+    get_abstract_expr(type::KNOperatorType op,
+                std::vector<SymbolicDTensor> const &tensors,
+                std::vector<std::shared_ptr<AbstractExpr>> const &opds);
+
+std::shared_ptr<AbstractExpr>
+    get_abstract_expr(type::TBOperatorType op,
+                std::vector<SymbolicSTensor> const &tensors,
                 std::vector<std::shared_ptr<AbstractExpr>> const &opds);
 
 KNOperator *create_op(kernel::Graph &g,
@@ -96,6 +90,10 @@ TBOperator *create_op(threadblock::Graph &g,
 size_t count_op_of_type(type::KNOperatorType op_type, kernel::Graph const &g);
 size_t count_op_of_type(type::TBOperatorType op_type,
                         threadblock::Graph const &g);
+size_t count_op_of_type(type::KNOperatorType op_type,
+                        SymbolicKNGraph const &g);
+size_t count_op_of_type(type::TBOperatorType op_type,
+                        SymbolicTBGraph const &g);
 
 } // namespace search
 } // namespace mirage

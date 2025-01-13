@@ -1,4 +1,4 @@
-#include "mirage/search/graph_template/tensor_dim_expr.h"
+#include "mirage/search/symbolic_graph/tensor_dim_expr.h"
 
 namespace mirage {
 namespace search {

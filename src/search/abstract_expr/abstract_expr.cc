@@ -20,7 +20,7 @@ z3::expr_vector to_expr_vector(z3::context &c,
   return vec;
 }
 
-bool AbstractExpr::subpattern_to(AbstractExpr const &other) const {
+bool AbstractExpr::subexpr_to(AbstractExpr const &other) const {
   z3::context c;
 
   z3::sort P = c.uninterpreted_sort("P");
@@ -111,7 +111,7 @@ bool AbstractExpr::subpattern_to(AbstractExpr const &other) const {
 }
 
 bool AbstractExpr::operator==(AbstractExpr const &other) const {
-  return subpattern_to(other) && other.subpattern_to(*this);
+  return subexpr_to(other) && other.subexpr_to(*this);
 }
 
 Var::Var(std::string const &name) : name(name) {}

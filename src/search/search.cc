@@ -66,6 +66,16 @@ Order get_max_op_order(GraphType const &g) {
   return Order(input_idx, static_cast<int>(g.operators.back()->op_type));
 }
 
+template <>
+Order get_max_op_order(SymbolicKNGraph const &g) {
+  return Order(g.input_indices.back(), static_cast<int>(g.operators.back().op_type));
+}
+
+template <>
+Order get_max_op_order(SymbolicTBGraph const &g) {
+  return Order(g.input_indices.back(), static_cast<int>(g.operators.back().op_type));
+}
+
 std::vector<DTensor> get_input_tensors(threadblock::Graph const &g) {
   std::vector<DTensor> input_tensors;
   for (auto const &op : g.operators) {
@@ -105,10 +115,10 @@ void KernelGraphGenerator::generate_next_operator(
     return;
   }
 
-  std::unordered_map<int64_t, std::shared_ptr<AbstractExpr>> algebraic_pattern;
-  abstract_expr_eval(*c.kn_graph, algebraic_pattern);
+  std::unordered_map<int64_t, std::shared_ptr<AbstractExpr>> algebraic_expr;
+  abstract_expr_eval(*c.kn_graph, algebraic_expr);
   if (c.tb_graph) {
-    abstract_expr_eval(*c.tb_graph, algebraic_pattern);
+    abstract_expr_eval(*c.tb_graph, algebraic_expr);
   }
   if (c.level == SearchLevel::LV_KERNEL) {
     assert(c.tb_graph == nullptr);
@@ -128,14 +138,14 @@ void KernelGraphGenerator::generate_next_operator(
           }
           std::vector<DTensor> input_tensors =
               get_tensors_from_idx(*c.kn_graph, input_idx);
-          std::vector<std::shared_ptr<AbstractExpr>> input_patterns;
+          std::vector<std::shared_ptr<AbstractExpr>> input_exprs;
           for (auto const &t : input_tensors) {
-            assert(contains_key(algebraic_pattern, t.guid));
-            input_patterns.push_back(algebraic_pattern.at(t.guid));
+            assert(contains_key(algebraic_expr, t.guid));
+            input_exprs.push_back(algebraic_expr.at(t.guid));
           }
-          std::shared_ptr<AbstractExpr> pattern =
-              get_pattern(op_type, input_tensors, input_patterns);
-          if (!check_pattern(pattern)) {
+          std::shared_ptr<AbstractExpr> expr =
+              get_abstract_expr(op_type, input_tensors, input_exprs);
+          if (!check_abstract_expr(expr)) {
             continue;
           }
 
@@ -269,7 +279,7 @@ void KernelGraphGenerator::generate_next_operator(
 
       for (STensor const &stensor : output_tensors) {
         assert(stensor.after_accum);
-        assert(contains_key(algebraic_pattern, stensor.guid));
+        assert(contains_key(algebraic_expr, stensor.guid));
         TBOperator *new_op =
             c.tb_graph->create_output_op(stensor,
                                          output_map,
@@ -338,14 +348,14 @@ void KernelGraphGenerator::generate_next_operator(
         }
         std::vector<STensor> input_tensors =
             get_tensors_from_idx(*c.tb_graph, input_idx);
-        std::vector<std::shared_ptr<AbstractExpr>> input_patterns;
+        std::vector<std::shared_ptr<AbstractExpr>> input_exprs;
         for (auto const &t : input_tensors) {
-          assert(contains_key(algebraic_pattern, t.guid));
-          input_patterns.push_back(algebraic_pattern.at(t.guid));
+          assert(contains_key(algebraic_expr, t.guid));
+          input_exprs.push_back(algebraic_expr.at(t.guid));
         }
-        std::shared_ptr<AbstractExpr> pattern =
-            get_pattern(op_type, input_tensors, input_patterns);
-        if (!check_pattern(pattern)) {
+        std::shared_ptr<AbstractExpr> expr =
+            get_abstract_expr(op_type, input_tensors, input_exprs);
+        if (!check_abstract_expr(expr)) {
           continue;
         }
 
@@ -431,8 +441,8 @@ void KernelGraphGenerator::preprocess(kernel::Graph const &computation_graph) {
   }
 
   std::unordered_map<int64_t, std::shared_ptr<AbstractExpr>>
-      computation_graph_patterns;
-  abstract_expr_eval(computation_graph, computation_graph_patterns);
+      computation_graph_exprs;
+  abstract_expr_eval(computation_graph, computation_graph_exprs);
 
   init_ranges = get_init_ranges(computation_graph);
   target_ranges = get_interact_ranges(init_ranges, computation_graph);
@@ -440,8 +450,8 @@ void KernelGraphGenerator::preprocess(kernel::Graph const &computation_graph) {
 
   for (kernel::KNOperator *op : computation_graph.operators) {
     if (op->op_type == type::KNOperatorType::KN_OUTPUT_OP) {
-      computation_graph_output_patterns.push_back(
-          computation_graph_patterns.at(op->input_tensors[0].guid));
+      computation_graph_output_exprs.push_back(
+          computation_graph_exprs.at(op->input_tensors[0].guid));
     }
   }
 
@@ -452,33 +462,33 @@ void KernelGraphGenerator::preprocess(kernel::Graph const &computation_graph) {
   }
 }
 
-bool KernelGraphGenerator::check_pattern(
-    std::shared_ptr<AbstractExpr> pattern) {
-  if (!pattern) {
+bool KernelGraphGenerator::check_abstract_expr(
+    std::shared_ptr<AbstractExpr> expr) {
+  if (!expr) {
     return false;
   }
 
-  if (seen_patterns.find(pattern->to_string()) != seen_patterns.end()) {
-    return seen_patterns[pattern->to_string()];
+  if (seen_exprs.find(expr->to_string()) != seen_exprs.end()) {
+    return seen_exprs[expr->to_string()];
   }
 
-  for (auto const &final_pattern : computation_graph_output_patterns) {
-    if (pattern->subpattern_to(*final_pattern)) {
+  for (auto const &final_expr : computation_graph_output_exprs) {
+    if (expr->subexpr_to(*final_expr)) {
 
 #pragma omp critical
-      { seen_patterns[pattern->to_string()] = true; }
+      { seen_exprs[expr->to_string()] = true; }
       return true;
     }
   }
 #pragma omp critical
-  { seen_patterns[pattern->to_string()] = false; }
+  { seen_exprs[expr->to_string()] = false; }
   return false;
 }
 
 bool KernelGraphGenerator::verify(kernel::Graph &g) {
   std::vector<DTensor> outputs = get_output_tensors(g);
 
-  if (outputs.size() != computation_graph_output_patterns.size()) {
+  if (outputs.size() != computation_graph_output_exprs.size()) {
     return false;
   }
 
@@ -534,6 +544,215 @@ void KernelGraphGenerator::show_statistics() const {
       num_total_random_tests.load(),
       num_valid_kernel_graphs.load(),
       get_elapsed_time_in_sec());
+}
+
+void KernelGraphGenerator::generate_next_symbolic_operator(
+    std::shared_ptr<SymbolicKNGraph> kn_graph,
+    std::shared_ptr<SymbolicTBGraph> tb_graph,
+    std::vector<int> input_dtensor_indices_for_tb_graph,
+    SearchLevel level) {
+  
+
+  if (level == SearchLevel::LV_KERNEL) {
+    // In kernel-level search, tb_graph is always empty
+    assert(tb_graph == nullptr);
+    assert(input_dtensor_indices_for_tb_graph.empty());
+
+    // Case K1: finish and verify the current graph
+    if (instantiate_symbolic_graph(*kn_graph)) {
+      return;
+    }
+
+    // Obtain abstract expressions
+    std::vector<std::shared_ptr<AbstractExpr>> abs_exprs;
+    abstract_expr_eval(*kn_graph, abs_exprs);
+
+    // Upper bound of the number of operators
+    if (kn_graph->operators.size() >= config.max_num_kernel_graph_op) {
+      return;
+    }
+
+    for (type::KNOperatorType op_type : dim_strategy.get_knop_cand()) {
+      if (op_type != type::KNOperatorType::KN_CUSTOMIZED_OP) {
+        // Case K2: generate a pre-defined kernel operator
+        for (auto const &input_idx : dim_strategy.get_input_cand_idx(op_type, kn_graph->tensors)) {
+          // Only generate operators in the increasing order of the order
+          Order order(input_idx, static_cast<int>(op_type));
+          if (order <= get_max_op_order(*kn_graph)) {
+            continue;
+          }
+
+          // Input symbolic tensors
+          std::vector<SymbolicDTensor> input_tensors = vector_map(input_idx, [&](int i) {
+            return kn_graph->tensors[i];
+          });
+          // Abstract expressions of input tensors
+          std::vector<std::shared_ptr<AbstractExpr>> input_exprs = vector_map(input_idx, [&](int i) {
+            return abs_exprs[i];
+          });
+          // Obtain the abstract expression of the output tensor
+          std::shared_ptr<AbstractExpr> expr = get_abstract_expr(op_type, input_tensors, input_exprs);          
+          // Check if the abstract expression is a subexpression of the final output
+          if (!check_abstract_expr(expr)) {
+            continue;
+          }
+
+          // Now we pass all the checks, create the operator
+          if (kn_graph->add_operator(op_type, input_idx)) {
+            // Recursively generate the next operator
+            generate_next_symbolic_operator(kn_graph, tb_graph, input_dtensor_indices_for_tb_graph, level);
+            // Revert the changes
+            kn_graph->remove_last_operator();
+          }
+        }
+      } else {
+        // Case K3: generate a graph-def kernel operator
+        if (count_op_of_type(type::KNOperatorType::KN_CUSTOMIZED_OP, *kn_graph) >= config.max_num_threadblock_graphs) {
+          continue;
+        }
+
+        for (auto const &input_tensor_idx : dim_strategy.get_customized_input_cand_idx(kn_graph->tensors)) {
+          // Only generate operators in the increasing order of the order
+          Order order(input_tensor_idx, static_cast<int>(op_type));
+          if (order <= get_max_op_order(*kn_graph)) {
+            continue;
+          }
+
+          // Input symbolic tensors
+          std::vector<SymbolicDTensor> input_tensors = vector_map(input_tensor_idx, [&](int i) {
+            return kn_graph->tensors[i];
+          });
+
+          // Enumerate all possible input maps and forloop dimensions
+          for (std::vector<int3> const &input_map : dim_strategy.get_input_map_cand(input_tensors)) {
+            for (std::vector<int> const &forloop_dim : dim_strategy.get_forloop_dim_cand(input_tensors)) {
+              std::shared_ptr<SymbolicTBGraph> new_tb_graph = std::make_shared<SymbolicTBGraph>();
+              new_tb_graph->reduction_dimx = config.reduction_dimx;
+
+              // Try to create input operators
+              bool input_created = true;
+              for (size_t i = 0; i < input_tensors.size(); ++i) {
+                SymbolicDTensor dtensor = input_tensors[i];
+                if (!new_tb_graph->add_input(dtensor, input_map[i], forloop_dim[i])) {
+                  input_created = false;
+                  break;
+                }
+              }
+
+              if (input_created) {
+                // Recursively generate the next operator
+                generate_next_symbolic_operator(kn_graph, new_tb_graph, input_tensor_idx, SearchLevel::LV_THREADBLOCK);
+              }
+            }
+          }
+        }
+      }
+    }
+  } else {
+    // threadblock-level search
+    assert(tb_graph != nullptr);
+
+    // Case B1: Create the customized operator and return to kernel-level search
+    auto create_threadblock_outputs = [&](int3 output_map) {
+      // Compute the nubmer of consumers for each tensor
+      std::vector<int> num_consumers(tb_graph->tensors.size(), 0);
+      for (auto const input_indices : tb_graph->input_indices) {
+        for (int input_index : input_indices) {
+          num_consumers[input_index]++;
+        }
+      }
+      // Output tensors are the tensors without consumers
+      std::vector<int> output_tensor_indices;
+      for (size_t i = 0; i < tb_graph->tensors.size(); ++i) {
+        if (num_consumers[i] == 0) {
+          if (!tb_graph->tensors[i].after_accum) {
+            return false;
+          }
+          output_tensor_indices.push_back(i);
+        }
+      }
+      // Upper bound of the number of output tensors
+      if (output_tensor_indices.size() > config.max_num_threadblock_graph_outputs) {
+        return false;
+      }
+
+      // Add output operators
+      for (int output_index : output_tensor_indices) {
+        if (!tb_graph->add_output(output_index, output_map, -1, mirage::type::TBEpilogueType::TB_EPILOGUE_NONE)) {
+          return false;
+        }
+      }
+
+      return true;
+    };
+
+    for (int3 output_map : dim_strategy.get_output_map_cand(*tb_graph)) {
+      if (create_threadblock_outputs(output_map)) {
+        // Create the customized operator
+        if (kn_graph->add_customized_operator(*tb_graph, input_dtensor_indices_for_tb_graph)) {
+          // Recursively generate the next operator
+          generate_next_symbolic_operator(kn_graph, nullptr, {}, SearchLevel::LV_KERNEL);
+          // Revert the changes
+          kn_graph->remove_last_operator();
+        }
+      }
+      // Revert the changes
+      while (tb_graph->operators.back().op_type == type::TBOperatorType::TB_OUTPUT_OP) {
+        tb_graph->remove_last_operator();
+      }
+    }
+
+    // Upper bound of the number of operators
+    if (tb_graph->operators.size() >= config.max_num_threadblock_graph_op) {
+      return;
+    }
+
+    // Evaluate the abstract expressions
+    std::vector<std::shared_ptr<AbstractExpr>> abs_exprs;
+    {
+      std::vector<std::shared_ptr<AbstractExpr>> kn_abs_exprs, input_exprs;
+      abstract_expr_eval(*kn_graph, kn_abs_exprs);
+      input_exprs = vector_map(input_dtensor_indices_for_tb_graph, [&](int i) {
+        return kn_abs_exprs[i];
+      });
+      abstract_expr_eval(*tb_graph, input_exprs, abs_exprs);
+    }
+
+    // Case B2: Generate pre-defined threadblock operator
+    for (type::TBOperatorType op_type : dim_strategy.get_tbop_cand()) {
+      for (auto const &input_idx : dim_strategy.get_input_cand_idx(op_type, tb_graph->tensors)) {
+        // Only generate operators in the increasing order of the order
+        Order order(input_idx, static_cast<int>(op_type));
+        if (order <= get_max_op_order(*tb_graph)) {
+          continue;
+        }
+
+        // Input symbolic tensors
+        std::vector<SymbolicSTensor> input_tensors = vector_map(input_idx, [&](int i) {
+          return tb_graph->tensors[i];
+        });
+        // Abstract expressions of input tensors
+        std::vector<std::shared_ptr<AbstractExpr>> input_exprs = vector_map(input_idx, [&](int i) {
+          return abs_exprs[i];
+        });
+
+        // Obtain the abstract expression of the output tensor
+        std::shared_ptr<AbstractExpr> expr = get_abstract_expr(op_type, input_tensors, input_exprs);
+        // Check if the abstract expression is a subexpression of the final output
+        if (!check_abstract_expr(expr)) {
+          continue;
+        }
+
+        // Now we pass all the checks, create the operator
+        if (tb_graph->add_operator(op_type, input_idx)) {
+          // Recursively generate the next operator
+          generate_next_symbolic_operator(kn_graph, tb_graph, input_dtensor_indices_for_tb_graph, level);
+          // Revert the changes
+          tb_graph->remove_last_operator();
+        }
+      }
+    }
+  }
 }
 
 } // namespace search

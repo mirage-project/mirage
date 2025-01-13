@@ -1,4 +1,4 @@
-#include "mirage/search/graph_template/symbolic_tensor.h"
+#include "mirage/search/symbolic_graph/symbolic_tensor.h"
 
 namespace mirage {
 namespace search {

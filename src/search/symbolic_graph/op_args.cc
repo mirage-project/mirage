@@ -1,4 +1,4 @@
-#include "mirage/search/graph_template/op_args.h"
+#include "mirage/search/symbolic_graph/op_args.h"
 
 namespace mirage {
 namespace search {

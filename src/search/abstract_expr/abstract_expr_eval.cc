@@ -40,7 +40,7 @@ void abstract_expr_eval(
       patterns.insert({g.operators[i + 1]->output_tensors[0].guid, nullptr});
       patterns.insert(
           {g.operators[i + 2]->output_tensors[0].guid,
-           get_pattern(type::TBOperatorType::TB_CONCAT_THEN_MATMUL_OP,
+           get_abstract_expr(type::TBOperatorType::TB_CONCAT_THEN_MATMUL_OP,
                        input_tensors,
                        input_patterns)});
     } else {
@@ -50,7 +50,7 @@ void abstract_expr_eval(
       }
       patterns.insert(
           {op->output_tensors[0].guid,
-           get_pattern(op->op_type, op->input_tensors, input_patterns)});
+           get_abstract_expr(op->op_type, op->input_tensors, input_patterns)});
     }
   }
 }
@@ -83,7 +83,7 @@ void abstract_expr_eval(
       }
       patterns.insert(
           {op->output_tensors[0].guid,
-           get_pattern(op->op_type, op->input_tensors, input_patterns)});
+           get_abstract_expr(op->op_type, op->input_tensors, input_patterns)});
     } else {
       assert(op->op_type == type::KNOperatorType::KN_CUSTOMIZED_OP);
       abstract_expr_eval(static_cast<kernel::KNCustomizedOp *>(op)->bgraph,

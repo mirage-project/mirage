@@ -1,5 +1,5 @@
-#include "mirage/search/graph_template/symbolic_graph.h"
-#include "mirage/search/graph_template/op_args.h"
+#include "mirage/search/symbolic_graph/symbolic_graph.h"
+#include "mirage/search/symbolic_graph/op_args.h"
 #include "mirage/search/op_utils.h"
 
 namespace mirage {

@@ -1,9 +1,9 @@
 #pragma once
 
-#include "mirage/search/graph_template/symbolic_tensor.h"
-#include "mirage/search/graph_template/symbolic_op.h"
-#include "mirage/search/graph_template/tensor_dim_constraint.h"
-#include "mirage/search/graph_template/dim_var_assignments.h"
+#include "mirage/search/symbolic_graph/symbolic_tensor.h"
+#include "mirage/search/symbolic_graph/symbolic_op.h"
+#include "mirage/search/symbolic_graph/tensor_dim_constraint.h"
+#include "mirage/search/symbolic_graph/dim_var_assignments.h"
 #include "mirage/kernel/graph.h"
 #include "mirage/threadblock/graph.h"
 
@@ -21,6 +21,7 @@ public:
   bool add_operator(type::TBOperatorType op_type, std::vector<int> input_indices);
   bool add_input(SymbolicDTensor dtensor, int3 input_map, int forloop_dim);
   bool add_output(int input_index, int3 output_map, int forloop_dim, mirage::type::TBEpilogueType epilogue_type);
+  bool remove_last_operator();
 
   std::vector<SymbolicTensorDim> grid_dim, block_dim;
   SymbolicTensorDim forloop_range;
@@ -44,6 +45,7 @@ public:
   bool add_customized_operator(SymbolicTBGraph tb_graph, std::vector<int> input_indices);
   bool add_input(std::vector<int> input_dims, std::vector<size_t> input_strides, int3 input_map);
   bool add_output(int input_index, std::vector<size_t> output_strides, int3 output_map);
+  bool remove_last_operator();
 
   std::vector<SymbolicKNOp> operators;
   std::vector<SymbolicDTensor> tensors;
