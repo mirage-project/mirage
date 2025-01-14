@@ -451,29 +451,19 @@ TranspileResult Transpiler::transpile_ugraph() {
         // for inputs that needs tma async copy, init the TMAs
         std::string tmas;
         std::string tma_tmps;
-        std::string src_layouts;
-        std::string dst_layouts;
-        std::string dtensors;
         std::string m_inputs;
-        std::string m_inputs_array;
         for (int i = 0; i < result.tmaParamsList.size(); i++) {
           auto const &tmaParams = result.tmaParamsList.at(i);
-          src_layouts.append(tmaParams.srcLayout).append("{}");
           dst_layouts.append(tmaParams.dstLayout).append("{}");
           dtensors.append(fmt("dtensor$", tmaParams.guid));
           m_inputs.append(tmaParams.m_input ? "true" : "false");
-          m_inputs_array.append(fmt("minputs[$]", i));
 
           tmas.append(fmt("tma_$, ", tmaParams.guid));
           tma_tmps.append(fmt("decltype(tma_$)", tmaParams.guid));
 
           if (i != result.tmaParamsList.size() - 1) {
             tma_tmps.append(", ");
-            dtensors.append(", ");
-            dst_layouts.append(", ");
-            src_layouts.append(", ");
             m_inputs.append(", ");
-            m_inputs_array.append(", ");
           }
         }
 
