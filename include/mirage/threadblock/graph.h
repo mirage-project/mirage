@@ -148,9 +148,6 @@ public:
   dim3 grid_dim, block_dim, cluster_dim;
   int forloop_range;
   int reduction_dimx;
-  int num_warp_groups;
-  int mma_warp_groups;
-  int load_warp_groups;
   std::vector<mirage::threadblock::TBOperator *> operators;
   // memory allocator
   off_t smem_offset;

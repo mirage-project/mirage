@@ -50,20 +50,5 @@ public:
   std::vector<TBSchedNode> post_loop_nodes; // Nodes after the for loop
 };
 
-class HopperPipesNode {
-public:
-  int num_inputs;
-  int num_outputs = 1;
-
-  // The following fields are only valid if type == OPERATOR
-  // We use a vector here since we may perform operator fusion
-  // (threadblock-level data reuse)
-  std::vector<std::pair<tb::TBOperator const *, TBSchedOpMeta>> ops;
-};
-
-// class HopperPipelines{
-//   std::vector<HopperPipesNode> pipes;
-// }
-
 } // namespace transpiler
 } // namespace mirage

@@ -187,10 +187,8 @@ CUTE_HOST_DEVICE void r2s_copy_with_oob_protection(
   using TileN = decltype(get<1>(TiledMN{}));
   if constexpr ((M::value % TileM::value == 0) &&
                 (N::value % TileN::value == 0)) {
-
     CUTE_UNROLL
     for (int i = 0; i < size(src); ++i) {
-
       // TODO(intlsy) Modify this after supporting `stmatrix` on H100
       T x = src(i);
       if constexpr (NUM_EXPS_BEFORE_STORE > 0) {

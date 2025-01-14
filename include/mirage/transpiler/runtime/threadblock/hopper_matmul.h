@@ -62,15 +62,6 @@ using TileALayout = decltype(cutlass::gemm::collective::detail::ss_smem_selector
       GmmaMajorA, half_t, decltype(get<0>(SmemLayoutA{})), decltype(get<1>(SmemLayoutA{}))>());
 using TileBLayout = decltype(cutlass::gemm::collective::detail::ss_smem_selector<
       GmmaMajorB, half_t, decltype(get<0>(SmemLayoutB{})), decltype(get<1>(SmemLayoutB{}))>());
-
-// Sw<3,4,3> o smem_ptr[16b](unset) o (_8,_64):(_64,_1)
-//64 64, 64, 1
-// hape<Int<64>, Int<64>>, Stride<Int<1>, Int<64>>>
-//(composition(Swizzle<3, 4, 3>{}, Layout<Shape<Int<64>, Int<64>>, Stride<Int<1>, Int<64>>>{}));
-
-//   using TileALayout = GMMA::Layout_K_SW128_Atom<T>;
-//   using TileBLayout = GMMA::Layout_MN_SW128_Atom<T>;
-
   // Shape checking
   // Expect A have a shape of [M, K], B have a shape of [N, K], and
   // C have a shape of [M, N]
@@ -81,8 +72,12 @@ using TileBLayout = decltype(cutlass::gemm::collective::detail::ss_smem_selector
   CUTE_STATIC_ASSERT_V(M{} == get<0>(shape(SmemLayoutC{})));
   CUTE_STATIC_ASSERT_V(N{} == get<1>(shape(SmemLayoutC{})));
 
-  using TiledMMA = decltype(make_tiled_mma(
-      SM90_64x32x16_F16F16F16_SS<GMMA::Major::K, GMMA::Major::MN>{}));
+//   using TiledMMA = decltype(make_tiled_mma(
+//       SM90_64x32x16_F16F16F16_SS<GMMA::Major::K, GMMA::Major::MN>{}));
+  
+  //TODO xinhaoc case that not fit the selector
+  using TiledMMA = decltype(cute::make_tiled_mma(cute::GMMA::ss_op_selector<
+      T, T, T, decltype(make_shape(M{}, N{}, K{})), GmmaMajorA, GmmaMajorB>()));
 
 //   using TiledMMA = decltype(make_tiled_mma(
 //       SM90_64x64x16_F16F16F16_SS<GmmaMajorA, GmmaMajorB>{}));

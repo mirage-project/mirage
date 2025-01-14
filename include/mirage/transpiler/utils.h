@@ -120,16 +120,6 @@ public:
   template <typename... Args>
   void e_front(std::string const &fmt_str, Args... args) {
     std::string line = fmt(fmt_str, args...);
-    // char last_char = line.empty() ? EOF : line.back();
-    // if (last_char == '}') {
-    //   cur_indent_level -= 1;
-    //   if (cur_indent_level < 0) {
-    //     printf("Warning: `cur_indent_level` goes below 0 when
-    //     transpiling\n"); cur_indent_level = 0;
-    //   }
-    // }
-    // line = std::string(cur_indent_level * NUM_INDENT_SPACES, ' ') + line;
-
     lines.emplace(lines.begin(), line);
   }
 

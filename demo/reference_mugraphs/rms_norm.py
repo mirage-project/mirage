@@ -13,7 +13,7 @@ if __name__ == "__main__":
     graph = mi.new_kernel_graph()
     X = graph.new_input(dims=(16, 4096), dtype=mi.float16)
     W = graph.new_input(dims=(4096, 4096), dtype=mi.float16)
-    tb_graph = mi.new_threadblock_graph(grid_dim=(128,1,1), block_dim=(256,1,1), forloop_range=16, reduction_dimx=64)
+    tb_graph = mi.new_threadblock_graph(grid_dim=(64,1,1), block_dim=(128,1,1), forloop_range=64, reduction_dimx=64)
     tX = tb_graph.new_input(dtensor=X, input_map=(-1, -1, -1), forloop_dim=1)
     tW = tb_graph.new_input(dtensor=W, input_map=(1, -1, -1), forloop_dim=0)
     tM = tb_graph.matmul(tX, tW)
@@ -29,51 +29,29 @@ if __name__ == "__main__":
         torch.randn(4096, 4096, dtype=torch.float16, device='cuda:0'),
     ]
 
-    # input_strides = [tensor.stride() for tensor in input_tensors]
-    # p = mi.generate_cuda_program(graph.cygraph, target_cc=90, input_strides=input_strides)
-    # print(p["code"])
+    input_strides = [tensor.stride() for tensor in input_tensors]
+    p = mi.generate_cuda_program(graph.cygraph, target_cc=80, input_strides=input_strides)
+    print(p["code"])
     # warm up runs
-    # outputs = graph(inputs=input_tensors)
-    # print(outputs[0])
     for _ in range(16):
         outputs = graph(inputs=input_tensors)
-        # torch_rms_norm(input_tensors[0], input_tensors[1])
+        #torch_rms_norm(input_tensors[0], input_tensors[1])
 
 
     torch.cuda.synchronize()
 
     starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
-    repetitions = 10000
+    repetitions = 1000
     timings=np.zeros((repetitions,1))
     starter.record()
     for rep in range(repetitions):
         outputs = graph(inputs=input_tensors)
-        # torch_rms_norm(input_tensors[0], input_tensors[1])
+        #torch_rms_norm(input_tensors[0], input_tensors[1])
 
     ender.record()
     torch.cuda.synchronize()
     curr_time = starter.elapsed_time(ender)
 
-    mean_syn = curr_time / 10000
+    mean_syn = curr_time / 1000
     #print(timings)
     print(mean_syn)
-
-    #0.03794822311401367
-    #0.0972893798828125
-
-    # starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
-    # repetitions = 10000
-    # timings=np.zeros((repetitions,1))
-    # starter.record()
-    # for rep in range(repetitions):
-    #     outputs = graph(inputs=input_tensors)
-    #     # torch_rms_norm(input_tensors[0], input_tensors[1])
-
-    # ender.record()
-    # torch.cuda.synchronize()
-    # curr_time = starter.elapsed_time(ender)
-
-    # mean_syn = curr_time / 10000
-    # #print(timings)
-    # #0.019898208618164062
-    # print(mean_syn)

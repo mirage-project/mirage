@@ -12,10 +12,10 @@ def torch_gated_mlp(X, W1, W2):
 
 if __name__ == "__main__":
     graph = mi.new_kernel_graph()
-    X = graph.new_input(dims=(8, 4096), dtype=mi.float16)
+    X = graph.new_input(dims=(16, 4096), dtype=mi.float16)
     W1 = graph.new_input(dims=(4096, 4096), dtype=mi.float16)
     W2 = graph.new_input(dims=(4096, 4096), dtype=mi.float16)
-    tb_graph = mi.new_threadblock_graph(grid_dim=(128,1,1), block_dim=(256,1,1), forloop_range=16, reduction_dimx=64)
+    tb_graph = mi.new_threadblock_graph(grid_dim=(64,1,1), block_dim=(128,1,1), forloop_range=32, reduction_dimx=64)
     tX = tb_graph.new_input(dtensor=X, input_map=(-1, -1, -1), forloop_dim=1)
     tW1 = tb_graph.new_input(dtensor=W1, input_map=(1, -1, -1), forloop_dim=0)
     tW2 = tb_graph.new_input(dtensor=W2, input_map=(1, -1, -1), forloop_dim=0)
@@ -30,36 +30,34 @@ if __name__ == "__main__":
     graph.mark_output(O[0])
     
     input_tensors = [
-        torch.randn(8, 4096, dtype=torch.float16, device='cuda:0'),
+        torch.randn(16, 4096, dtype=torch.float16, device='cuda:0'),
         torch.randn(4096, 4096, dtype=torch.float16, device='cuda:0'),
         torch.randn(4096, 4096, dtype=torch.float16, device='cuda:0')
     ]
 
-    outputs = graph(inputs=input_tensors)
-    print(outputs[0])
-
-    # input_strides = [tensor.stride() for tensor in input_tensors]
-    # p = mi.generate_cuda_program(graph.cygraph, target_cc=86, input_strides=input_strides)
-    # print(p["code"])
-    # silu = torch.nn.SiLU()
+    input_strides = [tensor.stride() for tensor in input_tensors]
+    p = mi.generate_cuda_program(graph.cygraph, target_cc=86, input_strides=input_strides)
+    print(p["code"])
+    silu = torch.nn.SiLU()
     # warm up runs
     for _ in range(16):
         outputs = graph(inputs=input_tensors)
-        # torch_gated_mlp(input_tensors[0], input_tensors[1], input_tensors[2])
+        #torch_gated_mlp(input_tensors[0], input_tensors[1], input_tensors[2])
 
     torch.cuda.synchronize()
 
     starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
-    repetitions = 10000
+    repetitions = 1000
     timings=np.zeros((repetitions,1))
     starter.record()
     for rep in range(repetitions):
         outputs = graph(inputs=input_tensors)
-        # torch_gated_mlp(input_tensors[0], input_tensors[1], input_tensors[2])
+        #torch_gated_mlp(input_tensors[0], input_tensors[1], input_tensors[2])
     ender.record()
     torch.cuda.synchronize()
     curr_time = starter.elapsed_time(ender)
 
-    mean_syn = curr_time / 10000
+    mean_syn = curr_time / 1000
     #print(timings)
     print(mean_syn)
+    graph.visualize("gated_mlp")

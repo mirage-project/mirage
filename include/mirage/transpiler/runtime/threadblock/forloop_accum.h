@@ -39,7 +39,6 @@ public:
     constexpr auto numel = Numel{};
     auto accum_layout = AccumLayout{};
     auto src_layout = SrcLayout{};
-    
     for (int elem_idx = thread_idx; elem_idx < numel; elem_idx += NUM_THREADS) {
       accum[accum_layout(elem_idx)] += src[src_layout(elem_idx)];
     }

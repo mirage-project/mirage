@@ -536,11 +536,6 @@ TranspileResult Transpiler::transpile_ugraph() {
                ptr_names);
       }
 
-      // exec.e("cudaError_t error = cudaGetLastError();");
-      // exec.e("if (error != cudaSuccess) {");
-      // exec.e("printf(\"CUDA Error: %s\\n\", cudaGetErrorString(error));");
-      // exec.e("}");
-
       custom_kernels.e(result.code);
 
       break;
