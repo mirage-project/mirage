@@ -1,6 +1,6 @@
-sphinx
-sphinx_rtd_theme
-m2r2
+sphinx==7.4.7
+sphinx_rtd_theme==2.0.0
+m2r2==0.3.3
 breathe
 exhale
 numpy
