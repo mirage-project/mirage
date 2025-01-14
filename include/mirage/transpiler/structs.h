@@ -68,6 +68,37 @@ struct TranspileResult {
   std::vector<OutputTensorDirective> output_directives;
 };
 
+struct TMAParams {
+  size_t input_id; // ID of the TMA
+  size_t guid;
+  size_t sguid;
+  std::string srcLayout; // String representing the layout
+  std::string dstLayout; // String representing the layout
+  std::string tile_size; // String representing the tile
+  bool m_input;
+  std::tuple<int, int, int> clusterSize; // Tuple for cluster size
+  std::vector<int> original_shape;
+  std::vector<size_t> original_stride;
+  std::vector<int> partition_logic;
+  int forloop_range;
+  int forloop_dim;
+
+  // Constructor for convenience
+  TMAParams(size_t input_id, size_t guid, size_t sguid,
+            const std::string &srcLayout, const std::string &dstLayout,
+            const bool m_input, const std::string &tile_size,
+            const std::tuple<int, int, int> &clusterSize,
+            const std::vector<int> &original_shape,
+            const std::vector<size_t> &original_stride,
+            const std::vector<int> &partition_logic, int forloop_range,
+            int forloop_dim)
+      : input_id(input_id), guid(guid), sguid(sguid), srcLayout(srcLayout),
+        dstLayout(dstLayout), m_input(m_input), tile_size(tile_size),
+        clusterSize(clusterSize), original_shape(original_shape),
+        original_stride(original_stride), partition_logic(partition_logic),
+        forloop_range(forloop_range), forloop_dim(forloop_dim) {}
+};
+
 // Transpile a custom KN operator (a custom block graph)
 struct CustomOPTranspileResult {
   // A state indicating whether the transpile kernel is
@@ -83,6 +114,7 @@ struct CustomOPTranspileResult {
   //  [kernel code]
   // }
   std::string code;
+  std::vector<TMAParams> tmaParamsList;
 };
 
 // Metadata for one DTensor during transpiling
@@ -139,6 +171,9 @@ struct STensorMeta {
 
   // Whether this tensor needs to be XOR-based swizzled
   bool is_xor_swizzled;
+
+  // Major K for M input
+  bool m_input = false;
 
   // XOR-based swizzling parameters
   int xor_swizzle_b, xor_swizzle_m, xor_swizzle_s;
