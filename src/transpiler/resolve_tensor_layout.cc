@@ -432,6 +432,7 @@ void Transpiler::resolve_tensor_layout() {
             } else if (this->config.target_cc == GPU_CC::H100) {
               for (tb::STensor const &input : {input0, input1}) {
                 // If both dims are not the innermost one, cannot use ldmatrix
+                stensor_metas[input0.guid].m_input = true;
                 costs.push_back(
                     z3::ite(!s_is_innermost[input.guid][num_dims - 1] &&
                                 !s_is_innermost[input.guid][num_dims - 2],

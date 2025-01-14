@@ -14,21 +14,22 @@
  */
 #pragma once
 
+#include "mirage/type.h"
 #include <cassert>
+#include <cute/layout.hpp>
 #include <functional>
 #include <iostream>
 #include <string>
 #include <vector>
 
-#include "mirage/type.h"
+using namespace cute;
 
 namespace mirage {
 namespace transpiler {
 
 // We need to specialize the to_string function for char* type, so we have
 // my_to_string function here
-template <typename T>
-inline static std::string my_to_string(T const &value) {
+template <typename T> inline static std::string my_to_string(T const &value) {
   return std::to_string(value);
 }
 
@@ -42,13 +43,11 @@ template <>
   return value;
 }
 
-template <>
-[[maybe_unused]] std::string my_to_string(char const &value) {
+template <> [[maybe_unused]] std::string my_to_string(char const &value) {
   return std::string(1, value);
 }
 
-template <>
-[[maybe_unused]] std::string my_to_string(bool const &value) {
+template <> [[maybe_unused]] std::string my_to_string(bool const &value) {
   return value ? "true" : "false";
 }
 
@@ -134,8 +133,7 @@ public:
     lines.emplace(lines.begin(), line);
   }
 
-  template <typename... Args>
-  void e(std::string const &fmt_str, Args... args) {
+  template <typename... Args> void e(std::string const &fmt_str, Args... args) {
     std::string line = fmt(fmt_str, args...);
     char last_char = line.empty() ? EOF : line.back();
     if (last_char == '}') {
@@ -172,13 +170,11 @@ public:
   }
 };
 
-template <typename T>
-inline static T ceil_div(T a, T b) {
+template <typename T> inline static T ceil_div(T a, T b) {
   return (a + b - 1) / b;
 }
 
-template <typename T>
-inline static T round_to_multiple(T value, T multiple) {
+template <typename T> inline static T round_to_multiple(T value, T multiple) {
   return ((value + multiple - 1) / multiple) * multiple;
 }
 
@@ -203,18 +199,14 @@ static constexpr int H100 = 90;
 // for (int& x : Combine(v1, v2)) ...
 // (NOTE to do this in the future we may have something like
 // `MutCombineIterator`)
-template <typename T, class Iter1, class Iter2>
-class CombineIterator {
+template <typename T, class Iter1, class Iter2> class CombineIterator {
   Iter1 range1_start, range1_end, iter1;
   Iter2 range2_start, range2_end, iter2;
 
 public:
-  CombineIterator(Iter1 const &range1_start,
-                  Iter1 const &range1_end,
-                  Iter1 const &iter1,
-                  Iter2 const &range2_start,
-                  Iter2 const &range2_end,
-                  Iter2 const &iter2)
+  CombineIterator(Iter1 const &range1_start, Iter1 const &range1_end,
+                  Iter1 const &iter1, Iter2 const &range2_start,
+                  Iter2 const &range2_end, Iter2 const &iter2)
       : range1_start(range1_start), range1_end(range1_end), iter1(iter1),
         range2_start(range2_start), range2_end(range2_end), iter2(iter2) {}
 
@@ -239,8 +231,7 @@ public:
   }
 };
 
-template <typename T1, typename T2>
-class Combine {
+template <typename T1, typename T2> class Combine {
   using T =
       std::common_type_t<typename T1::value_type, typename T2::value_type>;
 
@@ -259,13 +250,13 @@ public:
   }
 
   CombineIterator<T, Iter1, Iter2> begin() const {
-    return CombineIterator<T, Iter1, Iter2>(
-        begin1, end1, begin1, begin2, end2, begin2);
+    return CombineIterator<T, Iter1, Iter2>(begin1, end1, begin1, begin2, end2,
+                                            begin2);
   }
 
   CombineIterator<T, Iter1, Iter2> end() const {
-    return CombineIterator<T, Iter1, Iter2>(
-        begin1, end1, end1, begin2, end2, end2);
+    return CombineIterator<T, Iter1, Iter2>(begin1, end1, end1, begin2, end2,
+                                            end2);
   }
 };
 
@@ -273,6 +264,95 @@ public:
 inline static size_t get_num_elems_in_16B(type::DataType datatype) {
   size_t elem_size = type::get_datatype_size(datatype);
   return std::max(16 / elem_size, 1ul);
+}
+
+// Generalized function to compute a new layout after partitioning and expanding
+// to grid dimensions
+inline auto generate_partitioned_and_expanded_layout(
+    // Layout<ShapeType, StrideType> original_layout, // Original layout (Shape
+    // + Stride)
+    dim3 grid_dim, // Grid dimensions (x, y, z)
+    std::vector<int> original_shape, std::vector<size_t> original_stride,
+    std::vector<int>
+        partition_logic, // Partitioning logic: gridDim[i] maps to layout_dim[j]
+    int forloop_range, int forloop_dim) {
+
+  int num_dims = original_shape.size();
+
+  std::vector<int> new_shape_values(num_dims);
+  std::vector<size_t> new_stride_values(num_dims);
+
+  int gridX_stride = 1, gridY_stride = 1, gridZ_stride = 1, forloop_stride = 1;
+  int gridX_shape = 1, gridY_shape = 1, gridZ_shape = 1, forloop_shape = 1;
+
+
+  // Loop over each dimension in the original layout
+  for (int dim = 0; dim < num_dims; ++dim) {
+    int partition_grid_dim =
+        partition_logic[dim]; // Which grid dimension (x=0, y=1, z=2) partitions
+                              // this dimension
+
+    if (partition_grid_dim >= 0 ||
+        forloop_dim == dim) { // If this dimension is partitioned
+      if (partition_grid_dim >= 0) {
+        int partition_factor = (dim == 0)   ? grid_dim.x
+                               : (dim == 1) ? grid_dim.y
+                                            : grid_dim.z;
+        // Adjust shape by dividing it by the partition factor
+        new_shape_values[partition_grid_dim] =
+            original_shape.at(dim) / partition_factor;
+        // Stride remains the same because partitioning does not affect layout's
+        // memory strides
+        new_stride_values[partition_grid_dim] = original_stride.at(dim);
+
+        if (dim == 0) {
+          gridX_stride =
+              original_stride.at(dim) * new_shape_values[partition_grid_dim];
+          gridX_shape = grid_dim.x;
+        } else if (dim == 1) {
+          gridY_stride =
+              original_stride.at(dim) * new_shape_values[partition_grid_dim];
+          gridY_shape = grid_dim.y;
+        } else if (dim == 2) {
+          gridZ_stride =
+              original_stride.at(dim) * new_shape_values[partition_grid_dim];
+          gridZ_shape = grid_dim.z;
+        }
+      }
+      if (forloop_dim == dim) {
+        // forloop dim does not equal to partition dim
+        assert(partition_grid_dim < 0);
+        // partition by forloop dim
+        new_shape_values[dim] = original_shape.at(dim) / forloop_range;
+        new_stride_values[dim] = original_stride.at(dim);
+        forloop_stride = original_stride.at(dim) * new_shape_values[dim];
+        forloop_shape = forloop_range;
+      }
+    } else { // If this dimension is not partitioned
+      // Keep the original shape and stride
+      new_shape_values[dim] = original_shape.at(dim);
+      new_stride_values[dim] = original_stride.at(dim);
+    }
+  }
+
+  // Add extra dimensions for gridDim.x, gridDim.y, and gridDim.z
+  new_shape_values.push_back(gridX_shape); // Add gridDim.x as a new dimension
+  new_shape_values.push_back(gridY_shape); // Add gridDim.y as a new dimension
+  new_shape_values.push_back(gridZ_shape); // Add gridDim.z as a new dimension
+  new_shape_values.push_back(forloop_shape);
+
+  // Append the new strides
+  new_stride_values.push_back(gridX_stride);
+  new_stride_values.push_back(gridY_stride);
+  new_stride_values.push_back(gridZ_stride);
+  new_stride_values.push_back(forloop_stride);
+
+
+  assert(new_shape_values.size() == new_stride_values.size());
+
+  return fmt("Layout<Shape<$>, Stride<$>>", map_to_cute_int(new_shape_values),
+             map_to_cute_int(new_stride_values));
+
 }
 
 } // namespace transpiler

@@ -81,7 +81,7 @@ private:
   // Utility functions for transpiling
   // Get the pointer to a DTensor. Return {pointer_name, code}
   std::pair<std::string, std::string>
-      get_dtensor_ptr(kn::DTensor const &dtensor);
+  get_dtensor_ptr(kn::DTensor const &dtensor);
 
   // Get the "optimal" schedule for a threadblock graph
   TBSched get_threadblock_schedule(tb::Graph const &tb_graph);
@@ -92,15 +92,17 @@ private:
                                     TBSched const &sched);
 
   void get_threadblock_swizzle_plan_hopper(tb::Graph const &tb_graph,
-                                    TBSched const &sched);
+                                           TBSched const &sched);
 
   // Get the "optimal" memory plan for a threadblock graph
   TBMemoryPlan get_threadblock_memory_plan(tb::Graph const &tb_graph,
-                                           TBSched const &tb_sched);
+                                           TBSched const &tb_sched,
+                                           bool hopper_arch = false);
 
   // Transpile a custom KN operator (a custom block graph)
   CustomOPTranspileResult transpile_kn_custom_op(kn::KNCustomizedOp const *op);
-  CustomOPTranspileResult transpile_kn_custom_op_hopper(kn::KNCustomizedOp const *op);
+  CustomOPTranspileResult
+  transpile_kn_custom_op_hopper(kn::KNCustomizedOp const *op);
 
   void get_hopper_tmas(CodeKeeper &code, std::vector<TMAParams> tmaParamsList);
 
@@ -109,8 +111,7 @@ private:
 
 public:
   // Initialize the transpiler and resolve all configurations
-  Transpiler(kernel::Graph const *g,
-             TranspilerConfig const &config,
+  Transpiler(kernel::Graph const *g, TranspilerConfig const &config,
              vector<vector<size_t>> const &input_strides);
 
   TranspileResult generate_code() {
