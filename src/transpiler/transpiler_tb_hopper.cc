@@ -411,8 +411,6 @@ Transpiler::transpile_kn_custom_op_hopper(kn::KNCustomizedOp const *op) {
           string smem_layout = mov_last_get_stensor_layout(
               stensor, stensor_meta, real_innermost_dim, !m_input);
 
-          // Layout<Shape<Int<128>, Int<64>, Int<0>, Int<0>, Int<0>, Int<32>>,
-          // Stride<Int<1>, Int<4096>, Int<0>, Int<0>, Int<0>, Int<128>>>
           auto [dims, strides] = get_layout_detail::get_cute_layout_array(
               vector<int>(dtensor.dim, dtensor.dim + dtensor.num_dims),
               vector<size_t>(dtensor_meta.strides,
