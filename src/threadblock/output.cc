@@ -113,5 +113,10 @@ TBOutputOp::operator json() const {
               {"dtensor", dtensor},
               {"output_map", output_map}};
 }
+
+size_t TBOutputOp::get_dtensor_guid() {
+  return dtensor.guid;
+}
+
 } // namespace threadblock
 } // namespace mirage

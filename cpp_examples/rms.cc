@@ -64,7 +64,7 @@ int main(int argc, char **argv) {
   printf("[2 Block Graphs] Total runtime = %.4lfms\n", total_ms);
   search::GeneratorConfig config =
       search::GeneratorConfig::get_default_config();
-  std::string checkpoint_file_name = "checkpoint_gated_mlp.json";
+  std::string checkpoint_file_name = "checkpoint_rms.json";
   search::KernelGraphGenerator gen(
       ref_graph, config, checkpoint_file_name.data());
   gen.generate_kernel_graphs();

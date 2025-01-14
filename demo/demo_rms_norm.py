@@ -8,6 +8,7 @@ if __name__ == "__main__":
     W = graph.new_input(dims=(4096, 6144), dtype=mi.float16)
     D = graph.rms_norm(X, normalized_shape=(4096,))
     O = graph.matmul(D, W)
+    graph.mark_output(O)
     optimized_graph = graph.superoptimize(config="mlp")
 
     input_tensors = [

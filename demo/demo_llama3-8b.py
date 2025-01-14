@@ -18,6 +18,7 @@ def get_rms_linear_kernel(num_tokens, output_dim):
     W = graph.new_input(dims=(4096, output_dim), dtype=mi.float16)
     D = graph.rms_norm(X, normalized_shape=(4096,))
     O = graph.matmul(D, W)
+    graph.mark_output(O)
     return graph.superoptimize(config="mlp")
    
 def mirage_llama(X, Wqkv, Wo, W13, W2, Kcache, Vcache, kernels):

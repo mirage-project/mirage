@@ -69,6 +69,8 @@ KNOutputOp::~KNOutputOp() {}
 
 KNOutputOp::operator json() const {
   return json{{"op_type", op_type},
+              {"output_strides", output_strides},
+              {"output_map", output_map},
               {"input_tensors", input_tensors},
               {"output_tensors", output_tensors}};
 }

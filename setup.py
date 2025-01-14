@@ -52,14 +52,14 @@ def config_cython():
                               path.join(mirage_path, "deps", "cutlass", "include"),
                               path.join(z3_path, "include"),
                               "/usr/local/cuda/include"],
-                libraries=["mirage_runtime", "cudadevrt", "cudart_static", "cudnn", "cublas", "cudart", "cuda", "z3"],
+                libraries=["mirage_runtime", "cudadevrt", "cudart_static", "cudnn", "cublas", "cudart", "cuda", "z3", "gomp"],
                 library_dirs=[path.join(mirage_path, "build"),
                               path.join(z3_path, "lib"),
                               "/usr/local/cuda/lib",
                               "/usr/local/cuda/lib64",
                               "/usr/local/cuda/lib64/stubs"],
-                extra_compile_args=["-std=c++17"],
-                extra_link_args=["-fPIC"],
+                extra_compile_args=["-std=c++17", "-fopenmp"],
+                extra_link_args=["-fPIC", "-fopenmp"],
                 language="c++"))
         return cythonize(ret, compiler_directives={"language_level" : 3})
     except ImportError:
@@ -73,15 +73,25 @@ try:
     mirage_path = path.dirname(__file__)
     # z3_path = os.path.join(mirage_path, 'deps', 'z3', 'build')
     # os.environ['Z3_DIR'] = z3_path
+    if mirage_path == '':
+        mirage_path = '.'
     os.makedirs(mirage_path, exist_ok=True)
     os.chdir(mirage_path)
     build_dir = os.path.join(mirage_path, 'build')
+    
+    cc_path = shutil.which('gcc')
+    os.environ['CC'] = cc_path if cc_path else '/usr/bin/gcc'
+    cxx_path = shutil.which('g++')
+    os.environ['CXX'] = cxx_path if cxx_path else '/usr/bin/g++'
+    print(f"CC: {os.environ['CC']}, CXX: {os.environ['CXX']}", flush=True)
   
     # Create the build directory if it does not exist
     os.makedirs(build_dir, exist_ok=True)
-    subprocess.check_call(['cmake', '..', 
+    subprocess.check_call(['cmake', '..',
                            '-DZ3_CXX_INCLUDE_DIRS=' + z3_path + '/include/',
                            '-DZ3_LIBRARIES=' + path.join(z3_path, 'lib', 'libz3.so'),
+                           '-DCMAKE_C_COMPILER=' + os.environ['CC'],
+                           '-DCMAKE_CXX_COMPILER=' + os.environ['CXX'],
                           ], cwd=build_dir, env=os.environ.copy())
     subprocess.check_call(['make', '-j'], cwd=build_dir, env=os.environ.copy())
     print("Mirage runtime library built successfully.")
@@ -114,7 +124,7 @@ with copy_include() as copied:
               f"This may cause issues. Please remove {INCLUDE_BASE} and rerun setup.py", flush=True)
     
     setup(name='mirage-project',
-          version="0.2.1",
+          version="0.2.2",
           description="Mirage: A Multi-Level Superoptimizer for Tensor Algebra",
           zip_safe=False,
           install_requires=requirements,

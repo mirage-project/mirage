@@ -1,9 +1,11 @@
 #include "mirage/search/search.h"
 #include "mirage/kernel/customized.h"
 #include "mirage/kernel/device_memory_manager.h"
+#include "mirage/search/abstract_expr/abstract_expr_eval.h"
 #include "mirage/search/dim_strategy.h"
 #include "mirage/search/op_utils.h"
-#include "mirage/search/pattern_eval.h"
+#include "mirage/search/verification/formal_verifier.h"
+#include "mirage/search/verification/probabilistic_verifier.h"
 #include "mirage/utils/containers.h"
 #include "mirage/utils/json_utils.h"
 
@@ -22,7 +24,7 @@ KernelGraphGenerator::KernelGraphGenerator(
     : config(config), dim_strategy(DimStrategy(config)), filename(filename),
       num_thread(config.search_thread), verbose(verbose),
       num_total_random_tests(0), num_valid_kernel_graphs(0),
-      num_total_states(0) {
+      num_total_states(0), num_tasks(0), max_depth(5) {
   preprocess(computation_graph);
 }
 
@@ -64,20 +66,6 @@ Order get_max_op_order(GraphType const &g) {
   return Order(input_idx, static_cast<int>(g.operators.back()->op_type));
 }
 
-template <typename GraphType>
-int get_num_consumers(GraphType const &g,
-                      typename GraphType::TensorType const &tensor) {
-  int num_consumers = 0;
-  for (auto const &op : g.operators) {
-    for (auto const &t : op->input_tensors) {
-      if (t.guid == tensor.guid) {
-        num_consumers++;
-      }
-    }
-  }
-  return num_consumers;
-}
-
 std::vector<DTensor> get_input_tensors(threadblock::Graph const &g) {
   std::vector<DTensor> input_tensors;
   for (auto const &op : g.operators) {
@@ -106,7 +94,8 @@ std::vector<typename GraphType::TensorType>
 void KernelGraphGenerator::generate_next_operator(
     SearchContext &c,
     std::function<bool(SearchContext const &)> const &verify,
-    std::vector<SerializedSearchContext> &verified) {
+    std::vector<SerializedSearchContext> &verified,
+    size_t depth) {
   ++num_total_states;
   if (num_total_states % 100 == 1) {
     show_statistics();
@@ -116,11 +105,10 @@ void KernelGraphGenerator::generate_next_operator(
     return;
   }
 
-  std::unordered_map<int64_t, std::shared_ptr<AlgebraicPattern>>
-      algebraic_pattern;
-  pattern_eval(*c.kn_graph, algebraic_pattern);
+  std::unordered_map<int64_t, std::shared_ptr<AbstractExpr>> algebraic_pattern;
+  abstract_expr_eval(*c.kn_graph, algebraic_pattern);
   if (c.tb_graph) {
-    pattern_eval(*c.tb_graph, algebraic_pattern);
+    abstract_expr_eval(*c.tb_graph, algebraic_pattern);
   }
   if (c.level == SearchLevel::LV_KERNEL) {
     assert(c.tb_graph == nullptr);
@@ -140,12 +128,12 @@ void KernelGraphGenerator::generate_next_operator(
           }
           std::vector<DTensor> input_tensors =
               get_tensors_from_idx(*c.kn_graph, input_idx);
-          std::vector<std::shared_ptr<AlgebraicPattern>> input_patterns;
+          std::vector<std::shared_ptr<AbstractExpr>> input_patterns;
           for (auto const &t : input_tensors) {
             assert(contains_key(algebraic_pattern, t.guid));
             input_patterns.push_back(algebraic_pattern.at(t.guid));
           }
-          std::shared_ptr<AlgebraicPattern> pattern =
+          std::shared_ptr<AbstractExpr> pattern =
               get_pattern(op_type, input_tensors, input_patterns);
           if (!check_pattern(pattern)) {
             continue;
@@ -155,7 +143,14 @@ void KernelGraphGenerator::generate_next_operator(
           if (new_op) {
             c.kn_graph->operators.push_back(new_op);
             if (check_range(init_ranges, target_ranges, *c.kn_graph)) {
-              generate_next_operator(c, verify, verified);
+              if (depth < max_depth) {
+                num_tasks++;
+                SearchContext c_tmp = SerializedSearchContext(c).deserialize();
+#pragma omp task
+                { generate_next_operator(c_tmp, verify, verified, depth + 1); }
+              } else {
+                generate_next_operator(c, verify, verified, depth + 1);
+              }
             }
             delete c.kn_graph->operators.back();
             c.kn_graph->operators.pop_back();
@@ -224,7 +219,19 @@ void KernelGraphGenerator::generate_next_operator(
                     }
                     if (input_created) {
                       c.level = SearchLevel::LV_THREADBLOCK;
-                      generate_next_operator(c, verify, verified);
+
+                      if (depth < max_depth) {
+                        num_tasks++;
+                        SearchContext c_tmp =
+                            SerializedSearchContext(c).deserialize();
+#pragma omp task
+                        {
+                          generate_next_operator(
+                              c_tmp, verify, verified, depth + 1);
+                        }
+                      } else {
+                        generate_next_operator(c, verify, verified, depth + 1);
+                      }
                       c.level = SearchLevel::LV_KERNEL;
                     }
                     c.tb_graph = nullptr;
@@ -240,10 +247,47 @@ void KernelGraphGenerator::generate_next_operator(
     // threadblock-level search
     assert(c.tb_graph != nullptr);
 
+    auto create_threadblock_outputs = [&](int3 output_map) {
+      std::vector<STensor> output_tensors;
+      for (auto const &op : c.tb_graph->operators) {
+        for (auto const &tensor : op->output_tensors) {
+          if (get_num_consumers(*c.tb_graph, tensor) == 0) {
+            if (op->op_type == type::TBOperatorType::TB_INPUT_OP) {
+              return false;
+            }
+            if (!tensor.after_accum) {
+              return false;
+            }
+            output_tensors.push_back(tensor);
+          }
+        }
+      }
+
+      if (output_tensors.size() > config.max_num_threadblock_graph_outputs) {
+        return false;
+      }
+
+      for (STensor const &stensor : output_tensors) {
+        assert(stensor.after_accum);
+        assert(contains_key(algebraic_pattern, stensor.guid));
+        TBOperator *new_op =
+            c.tb_graph->create_output_op(stensor,
+                                         output_map,
+                                         -1 /*forloop_dim*/,
+                                         mirage::type::TB_EPILOGUE_NONE);
+        if (!new_op) {
+          return false;
+        }
+        c.tb_graph->operators.push_back(new_op);
+      }
+
+      return true;
+    };
+
     // Case B1. Finish and return to kernel-level search
     for (int3 output_map :
          dim_strategy.get_output_map_cand(c.tb_graph->grid_dim)) {
-      if (create_threadblock_outputs(c, algebraic_pattern, output_map)) {
+      if (create_threadblock_outputs(output_map)) {
         KNOperator *new_op = c.kn_graph->create_customized_op(
             get_input_tensors(*c.tb_graph), *c.tb_graph);
         if (!new_op) {
@@ -254,7 +298,14 @@ void KernelGraphGenerator::generate_next_operator(
         std::shared_ptr<threadblock::Graph> tb_graph = c.tb_graph;
         c.tb_graph = nullptr;
         if (check_range(init_ranges, target_ranges, *c.kn_graph)) {
-          generate_next_operator(c, verify, verified);
+          if (depth < max_depth) {
+            num_tasks++;
+            SearchContext c_tmp = SerializedSearchContext(c).deserialize();
+#pragma omp task
+            { generate_next_operator(c_tmp, verify, verified, depth + 1); }
+          } else {
+            generate_next_operator(c, verify, verified, depth + 1);
+          }
         }
         c.tb_graph = tb_graph;
         c.level = SearchLevel::LV_THREADBLOCK;
@@ -274,6 +325,11 @@ void KernelGraphGenerator::generate_next_operator(
     // Case B2: Generate pre-defined threadblock operator
     std::vector<STensor> all_tensors = get_all_tensors(*c.tb_graph);
     for (type::TBOperatorType op_type : dim_strategy.get_tbop_cand()) {
+      if (count_op_of_type(type::TBOperatorType::TB_CONCAT_0_OP, *c.tb_graph) >=
+              1 &&
+          op_type == type::TBOperatorType::TB_CONCAT_THEN_MATMUL_OP) {
+        continue;
+      }
       for (auto const &input_idx :
            dim_strategy.get_input_cand_idx(op_type, all_tensors)) {
         Order order(input_idx, static_cast<int>(op_type));
@@ -282,88 +338,35 @@ void KernelGraphGenerator::generate_next_operator(
         }
         std::vector<STensor> input_tensors =
             get_tensors_from_idx(*c.tb_graph, input_idx);
-        std::vector<std::shared_ptr<AlgebraicPattern>> input_patterns;
+        std::vector<std::shared_ptr<AbstractExpr>> input_patterns;
         for (auto const &t : input_tensors) {
           assert(contains_key(algebraic_pattern, t.guid));
           input_patterns.push_back(algebraic_pattern.at(t.guid));
         }
-        std::shared_ptr<AlgebraicPattern> pattern =
+        std::shared_ptr<AbstractExpr> pattern =
             get_pattern(op_type, input_tensors, input_patterns);
         if (!check_pattern(pattern)) {
           continue;
         }
 
+        TBOperator *last_op = c.tb_graph->operators.back();
         TBOperator *new_op = create_op(*c.tb_graph, op_type, input_tensors);
         if (!new_op) {
           continue;
-        };
+        }
         c.tb_graph->operators.push_back(new_op);
-        if (check_range(init_ranges, target_ranges, *c.kn_graph, c.tb_graph)) {
-          generate_next_operator(c, verify, verified);
+        if (depth < max_depth) {
+          num_tasks++;
+          SearchContext c_tmp = SerializedSearchContext(c).deserialize();
+#pragma omp task
+          { generate_next_operator(c_tmp, verify, verified, depth + 1); }
+        } else {
+          generate_next_operator(c, verify, verified, depth + 1);
         }
-        delete c.tb_graph->operators.back();
-        c.tb_graph->operators.pop_back();
-      }
-    }
-  }
-}
-
-bool KernelGraphGenerator::create_threadblock_outputs(
-    SearchContext &c,
-    std::unordered_map<int64_t, std::shared_ptr<AlgebraicPattern>> const
-        &algebraic_pattern,
-    int3 output_map) {
-  std::vector<STensor> output_tensors;
-  for (auto const &op : c.tb_graph->operators) {
-    for (auto const &tensor : op->output_tensors) {
-      if (get_num_consumers(*c.tb_graph, tensor) == 0) {
-        if (op->op_type == type::TBOperatorType::TB_INPUT_OP) {
-          return false;
+        while (c.tb_graph->operators.back() != last_op) {
+          delete c.tb_graph->operators.back();
+          c.tb_graph->operators.pop_back();
         }
-        if (!tensor.after_accum) {
-          return false;
-        }
-        output_tensors.push_back(tensor);
-      }
-    }
-  }
-
-  if (output_tensors.size() > config.max_num_threadblock_graph_outputs) {
-    return false;
-  }
-
-  for (STensor const &stensor : output_tensors) {
-    assert(stensor.after_accum);
-    assert(contains_key(algebraic_pattern, stensor.guid));
-    TBOperator *new_op =
-        c.tb_graph->create_output_op(stensor,
-                                     output_map,
-                                     -1 /*forloop_dim*/,
-                                     mirage::type::TB_EPILOGUE_NONE);
-    if (!new_op) {
-      return false;
-    }
-    c.tb_graph->operators.push_back(new_op);
-  }
-
-  return true;
-}
-
-void KernelGraphGenerator::search_from(
-    std::vector<SerializedSearchContext> const &contexts) {
-  for (auto const &sc : contexts) {
-    SearchContext c = sc.deserialize();
-    std::vector<SerializedSearchContext> verified;
-    generate_next_operator(
-        c,
-        [this](SearchContext const &c) {
-          return c.level == SearchLevel::LV_KERNEL && this->verify(*c.kn_graph);
-        },
-        verified);
-    {
-      std::lock_guard<std::mutex> lock(generated_graphs_mutex);
-      for (auto const &v : verified) {
-        generated_graphs.push_back(json(*v.deserialize().kn_graph));
       }
     }
   }
@@ -376,44 +379,31 @@ void KernelGraphGenerator::generate_kernel_graphs() {
   c.kn_graph = std::make_shared<kernel::Graph>();
 
   for (auto const &input_attr : computation_graph_input_attrs) {
-    auto [dim, data_type, layout] = input_attr;
-    // FIXME: strides should be an additional attr for KNInputOp
-    // Currently use the default strided layout
+    auto [dim, data_type, layout, strides] = input_attr;
     // FIXME: remove the layout attr since we use the strides
     // to describe the layout
-    std::vector<size_t> strides;
-    int num_elements = 1;
-    for (size_t i = 0; i < dim.size(); i++) {
-      strides.push_back(num_elements);
-      num_elements *= dim[dim.size() - 1 - i];
-    }
-    std::reverse(strides.begin(), strides.end());
     c.kn_graph->new_input(dim, strides, data_type, layout);
   }
 
-  std::vector<SerializedSearchContext> middle_states;
-  generate_next_operator(
-      c,
-      [this](SearchContext const &c) {
-        return c.tb_graph != nullptr || this->verify(*c.kn_graph);
-      },
-      middle_states);
-  printf("\n");
-  printf("[Search] First step finished. Time elapsed: %lfsec\n",
-         get_elapsed_time_in_sec());
-  std::vector<std::vector<SerializedSearchContext>> split_middle_states(
-      num_thread);
-  for (size_t i = 0; i < middle_states.size(); ++i) {
-    split_middle_states[i % num_thread].push_back(middle_states[i]);
+  std::vector<SerializedSearchContext> verified;
+
+  printf("num_thread = %d\n", num_thread);
+#pragma omp parallel num_threads(num_thread)
+  {
+#pragma omp single
+    {
+      generate_next_operator(
+          c,
+          [this](SearchContext const &c) {
+            return c.level == SearchLevel::LV_KERNEL &&
+                   this->verify(*c.kn_graph);
+          },
+          verified,
+          0);
+    }
   }
-  std::vector<std::thread> threads;
-  for (int i = 0; i < num_thread; ++i) {
-    threads.push_back(std::thread(
-        &KernelGraphGenerator::search_from, this, split_middle_states[i]));
-  }
-  for (auto &thread : threads) {
-    thread.join();
-  }
+
+  printf("num_tasks = %d tasks\n", num_tasks.load());
 
   save_results();
 
@@ -435,55 +425,57 @@ void KernelGraphGenerator::preprocess(kernel::Graph const &computation_graph) {
       computation_graph_input_attrs.push_back(
           {to_vector(op->output_tensors[0].num_dims, op->output_tensors[0].dim),
            op->output_tensors[0].data_type,
-           op->output_tensors[0].layout});
+           op->output_tensors[0].layout,
+           static_cast<kernel::KNInputOp *>(op)->input_strides});
     }
   }
 
-  std::unordered_map<int64_t, std::shared_ptr<AlgebraicPattern>>
+  std::unordered_map<int64_t, std::shared_ptr<AbstractExpr>>
       computation_graph_patterns;
-  pattern_eval(computation_graph, computation_graph_patterns);
+  abstract_expr_eval(computation_graph, computation_graph_patterns);
 
   init_ranges = get_init_ranges(computation_graph);
   target_ranges = get_interact_ranges(init_ranges, computation_graph);
   assert(init_ranges.size() == target_ranges.size());
 
-  for (auto const &op : computation_graph.operators) {
-    op->fingerprint();
-  }
-
-  std::unordered_map<DTensor, int> num_consumers;
   for (kernel::KNOperator *op : computation_graph.operators) {
-    for (DTensor const &input : op->input_tensors) {
-      num_consumers[input]++;
+    if (op->op_type == type::KNOperatorType::KN_OUTPUT_OP) {
+      computation_graph_output_patterns.push_back(
+          computation_graph_patterns.at(op->input_tensors[0].guid));
     }
   }
 
-  for (kernel::KNOperator *op : computation_graph.operators) {
-    for (DTensor const &output : op->output_tensors) {
-      if (num_consumers[output] == 0) {
-        computation_graph_output_tensors.push_back(
-            output.copy_fingerprint_to_ctensor());
-        computation_graph_output_patterns.push_back(
-            computation_graph_patterns.at(output.guid));
-      }
-    }
+  if (config.verifier_type == VerifierType::PROBABILISTIC_VERIFIER) {
+    this->verifier = std::make_shared<ProbabilisticVerifier>(computation_graph);
+  } else {
+    this->verifier = std::make_shared<FormalVerifier>(computation_graph);
   }
 }
 
 bool KernelGraphGenerator::check_pattern(
-    std::shared_ptr<AlgebraicPattern> pattern) {
+    std::shared_ptr<AbstractExpr> pattern) {
   if (!pattern) {
     return false;
   }
+
+  if (seen_patterns.find(pattern->to_string()) != seen_patterns.end()) {
+    return seen_patterns[pattern->to_string()];
+  }
+
   for (auto const &final_pattern : computation_graph_output_patterns) {
     if (pattern->subpattern_to(*final_pattern)) {
+
+#pragma omp critical
+      { seen_patterns[pattern->to_string()] = true; }
       return true;
     }
   }
+#pragma omp critical
+  { seen_patterns[pattern->to_string()] = false; }
   return false;
 }
 
-bool KernelGraphGenerator::verify(kernel::Graph const &g) {
+bool KernelGraphGenerator::verify(kernel::Graph &g) {
   std::vector<DTensor> outputs = get_output_tensors(g);
 
   if (outputs.size() != computation_graph_output_patterns.size()) {
@@ -491,47 +483,37 @@ bool KernelGraphGenerator::verify(kernel::Graph const &g) {
   }
 
   {
-    std::lock_guard<std::mutex> lock(fp_mutex);
-
     ++num_total_random_tests;
-
-    for (auto const &op : g.operators) {
-      op->fingerprint();
-    }
-
-    auto get_matches = [](int num_outputs) {
-      std::vector<std::vector<int>> results;
-      std::vector<int> perm;
-      for (int i = 0; i < num_outputs; ++i) {
-        perm.push_back(i);
+    auto mark_outputs = [&](OutputMatch const &match) {
+      for (size_t i = 0; i < outputs.size(); ++i) {
+        g.mark_output(outputs[match[i]]);
       }
-      do {
-        results.push_back(perm);
-      } while (std::next_permutation(perm.begin(), perm.end()));
-      return results;
     };
 
-    for (auto const &match : get_matches(outputs.size())) {
-      if (have_same_fingerprint(outputs, match)) {
-        ++num_valid_kernel_graphs;
-        return true;
+    auto unmark_outputs = [&]() {
+      while (g.operators.back()->op_type ==
+             type::KNOperatorType::KN_OUTPUT_OP) {
+        delete g.operators.back();
+        g.operators.pop_back();
       }
+    };
+
+    auto save_graph = [&]() {
+#pragma omp critical
+      { generated_graphs.push_back(json(g)); }
+    };
+
+    OutputMatch match = verifier->verify(g);
+    if (match.is_valid()) {
+      ++num_valid_kernel_graphs;
+      mark_outputs(match);
+      save_graph();
+      unmark_outputs();
+      return true;
     }
   }
 
   return false;
-}
-
-bool KernelGraphGenerator::have_same_fingerprint(
-    std::vector<DTensor> const &outputs, std::vector<int> const &match) const {
-  assert(outputs.size() == match.size());
-  for (int i = 0; i < static_cast<int>(match.size()); ++i) {
-    if (!outputs[match[i]].has_same_fingerprint(
-            computation_graph_output_tensors[i])) {
-      return false;
-    }
-  }
-  return true;
 }
 
 void KernelGraphGenerator::save_results() const {

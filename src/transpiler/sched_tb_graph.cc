@@ -42,7 +42,9 @@ static pair<bool, int>
         return i;
       }
     }
-    return -1;
+    // In the case where all dimensions are of size 1
+    // return the last dim as the inner most dim
+    return num_dims - 1;
   };
   int real_innermost_dtensor = find_real_innermost_dim(
       dtensor.num_dims, dtensor.dim, dtensor_meta.strides);

@@ -126,6 +126,7 @@ static string get_kn_op_str(type::KNOperatorType type) {
 }
 
 TranspileResult Transpiler::transpile_ugraph() {
+  size_t max_smem_size = 0;
   // Generate header
   
   CodeKeeper header;
@@ -394,6 +395,15 @@ TranspileResult Transpiler::transpile_ugraph() {
       } else {
         result = transpile_kn_custom_op(cur_op);
       }
+      
+      if (result.error_type != CUDA_T_SUCCESS) {
+          vector<OutputTensorDirective> output_directives;
+          return TranspileResult{
+              result.error_type, "", 0, 0, output_directives};
+        }
+      if (result.smem_size > max_smem_size) {
+        max_smem_size = result.smem_size;
+      }
 
       // Checkings against grid dim and block dim
       if (config.target_cc <= GPU_CC::H100) {
@@ -563,7 +573,8 @@ TranspileResult Transpiler::transpile_ugraph() {
         vector<int>(dtensor.dim, dtensor.dim + dtensor.num_dims),
         vector<size_t>(meta.strides, meta.strides + dtensor.num_dims)});
   }
-  return TranspileResult{code, this->d_buf_size, output_directives};
+  return TranspileResult{
+      CUDA_T_SUCCESS, code, this->d_buf_size, max_smem_size, output_directives};
 }
 
 } // namespace transpiler

@@ -327,6 +327,7 @@ class KNGraph:
         with open(FILE_NAME, "w") as f:
             f.write(result["code"] + HARD_CODE)
 
+
         cc = shutil.which("nvcc")
         if cc is None:
             raise RuntimeError(
@@ -350,6 +351,7 @@ class KNGraph:
             )
             sys.exit(1)
         cc_cmd = get_cc_cmd(target_cc, cc, FILE_NAME, py_include_dir, MIRAGE_ROOT, so_path)
+
 
         def remain_op():
             import importlib.util

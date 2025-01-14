@@ -20,26 +20,24 @@ int cython_search(mirage::kernel::Graph const *input_graph,
                   std::vector<MDim3> block_dim_to_explore,
                   std::vector<int> fmap_to_explore,
                   std::vector<int> frange_to_explore,
+                  char const *filename,
                   bool verbose,
                   char const *default_config) {
-  // NOTE(@wmdi): Checkpointing is disabled for now
-  // Load from a checkpoint
-  // if (check_point_file_path != nullptr) {
-  //   search::KernelGraphGenerator gen(check_point_file_path);
-  //   gen.config.print_config();
-  //   // Only continue the search if we haven't discovered any graphs
-  //   if (gen.generated_graphs.size() == 0) {
-  //     gen.generate_kernel_graphs();
-  //   }
-  //   int num = 0;
-  //   for (json const &j : gen.generated_graphs) {
-  //     assert(num < max_num_graphs);
-  //     new_graphs[num] = new kernel::Graph();
-  //     from_json(j, *new_graphs[num]);
-  //     num++;
-  //   }
-  //   return num;
-  // } else
+  if (filename) {
+    std::ifstream generated_graphs_file(filename, std::ifstream::binary);
+    if (generated_graphs_file) {
+      json j;
+      generated_graphs_file >> j;
+      int num = 0;
+      for (json const &graph : j) {
+        assert(num < max_num_graphs);
+        new_graphs[num] = new kernel::Graph();
+        from_json(graph, *new_graphs[num]);
+        num++;
+      }
+      return num;
+    }
+  }
   {
     search::GeneratorConfig config =
         search::GeneratorConfig::get_default_config();
@@ -94,8 +92,10 @@ int cython_search(mirage::kernel::Graph const *input_graph,
         config.frange_to_explore.push_back(frange);
       }
     }
+    char const *result_filename =
+        filename ? filename : "mirage_search_checkpoint.json";
     search::KernelGraphGenerator gen(
-        *input_graph, config, "mirage_search_checkpoint.json", verbose);
+        *input_graph, config, result_filename, verbose);
     gen.config.show();
     gen.generate_kernel_graphs();
     int num = 0;

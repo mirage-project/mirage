@@ -22,6 +22,7 @@
 #include "mirage/kernel/device_tensor.h"
 #include "mirage/threadblock/smem_tensor.h"
 #include "mirage/transpiler/common.h"
+#include "mirage/transpiler/error_types.h"
 
 namespace mirage {
 namespace transpiler {
@@ -50,11 +51,18 @@ struct OutputTensorDirective {
 
 // Result returned by the transpiler
 struct TranspileResult {
+  // A state indicating whether the transpile kernel is
+  // valid or not
+  TranspileErrorType error_type;
+
   // The generated CUDA code
   std::string code;
 
   // The size of the buffer (should be an array on GPU), in bytes
   size_t buf_size;
+
+  // The maximum smem size used by a kernel, in bytes
+  size_t max_smem_size;
 
   // Directives for output tensors
   std::vector<OutputTensorDirective> output_directives;
@@ -93,6 +101,10 @@ struct TMAParams {
 
 // Transpile a custom KN operator (a custom block graph)
 struct CustomOPTranspileResult {
+  // A state indicating whether the transpile kernel is
+  // valid or not
+  TranspileErrorType error_type;
+
   // The name of the generated kernel function
   std::string func_name;
   // The size of the shared memory, in bytes

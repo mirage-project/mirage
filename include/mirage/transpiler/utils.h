@@ -141,6 +141,20 @@ public:
     }
   }
 
+  // Manually increase the indent level by 1
+  void inc_indent() {
+    cur_indent_level += 1;
+  }
+
+  // Manually decrease the indent level by 1
+  void dec_indent() {
+    cur_indent_level -= 1;
+    if (cur_indent_level < 0) {
+      printf("Warning: `cur_indent_level` goes below 0 when transpiling\n");
+      cur_indent_level = 0;
+    }
+  }
+
   // Merge two CodeKeeper objects
   friend void operator<<(CodeKeeper &target, CodeKeeper const &source) {
     for (auto const &line : source.lines) {

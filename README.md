@@ -8,6 +8,12 @@ The quickest way to try Mirage is installing the latest stable release from pip:
 ```bash
 pip install mirage-project
 ```
+
+We also provide some pre-built binary wheels in the [Release Page](https://github.com/mirage-project/mirage/releases/latest). For example, to install mirage 0.2.2 compiled with CUDA 12.2 for python 3.10, using the following command:
+```bash
+pip install https://github.com/mirage-project/mirage/releases/download/v0.2.2/mirage_project-0.2.2+cu122-cp310-cp310-linux_x86_64.whl
+```
+
 You can also install Mirage from source code:
 ```bash
 git clone --recursive https://www.github.com/mirage-project/mirage
@@ -66,7 +72,7 @@ A paper describing Mirage's techniques is available [on arxiv](https://arxiv.org
 ``` bibtex
 @misc{wu2024mirage,
       title={A Multi-Level Superoptimizer for Tensor Programs}, 
-      author={Mengdi Wu and Xinhao Cheng and Oded Padon and Zhihao Jia},
+      author={Mengdi Wu and Xinhao Cheng and Shengyu Liu and Chunan Shi and Jianan Ji and Kit Ao and Praveen Velliengiri and Xupeng Miao and Oded Padon and Zhihao Jia},
       eprint={2405.05751},
       archivePrefix={arXiv},
       year={2024},

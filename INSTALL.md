@@ -7,6 +7,12 @@ pip install mirage-project
 
 Mirage can also be built from source code using the following instructions.
 
+## Intall from pre-built wheel
+We provide some pre-built binary wheels in [Release Page](https://github.com/mirage-project/mirage/releases/latest). For example, to install mirage 0.2.2 compiled with CUDA 12.2 for python 3.10, using the following command:
+```bash
+pip install https://github.com/mirage-project/mirage/releases/download/v0.2.2/mirage_project-0.2.2+cu122-cp310-cp310-linux_x86_64.whl
+```
+
 ## Install from source code
 
 ### Prerequisties
@@ -33,6 +39,31 @@ Just try to import mirage in Python. If there is no output, then Mirage and all 
 ```bash
 python -c 'import mirage'
 ```
+
+## Build Standalone C++ library
+If you want to build standalone c++ library, you can follow the steps below.
+Given that MIRAGE_ROOT points to top-level mirage project folder.
+* Build the Z3 from source.
+```bash
+cd $MIRAGE_ROOT/deps/z3
+mkdir build; cd build
+cmake ..
+make -j
+```
+* Export Z3 build directory.
+```bash
+export Z3_DIR=$MIRAGE_ROOT/deps/z3/build
+```
+* Build mirage from source.
+```bash
+cd $MIRAGE_ROOT
+mkdir build; cd build
+cmake ..
+make -j
+make install
+```
+By default, mirage build process will generate a static library. To install mirage in your directory of choice
+specify -CMAKE_INSTALL_PREFIX=path/to/your/directory as a cmake option.
 
 ## Docker images
 

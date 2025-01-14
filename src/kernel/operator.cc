@@ -50,5 +50,18 @@ KNOperator::KNOperator(Graph *_graph,
 
 KNOperator::~KNOperator() {}
 
+int KNOperator::get_input_dtensors(DTensor **inputs) {
+  for (size_t i = 0; i < input_tensors.size(); ++i) {
+    inputs[i] = &input_tensors[i];
+  }
+  return input_tensors.size();
+}
+
+int KNOperator::get_output_dtensors(DTensor **outputs) {
+  for (size_t i = 0; i < output_tensors.size(); ++i) {
+    outputs[i] = &output_tensors[i];
+  }
+  return output_tensors.size();
+}
 } // namespace kernel
 } // namespace mirage
