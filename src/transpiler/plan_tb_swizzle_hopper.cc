@@ -6,7 +6,7 @@ namespace mirage {
 namespace transpiler {
 
 // Get the swizzle plan for a threadblock
-//change the layout to a tile of following layouts
+// change the layout to a tile of following layouts
 
 static constexpr int MIN_LAYOUT_SiZE = 8;
 
@@ -14,11 +14,11 @@ static constexpr int MIN_LAYOUT_SiZE = 8;
 // Layout_K_SW64_Atom
 // Layout_K_SW32_Atom
 // Layout_K_INTER_Atom
-//K == 64, m == 8
+// K == 64, m == 8
 // Sw<3,4,3> o smem_ptr[16b](unset) o (_8,_64):(_64,_1)
 // Sw<2,4,3> o smem_ptr[16b](unset) o (_8,_32):(_32,_1)
 // Sw<1,4,3> o smem_ptr[16b](unset) o (_8,_16):(_16,_1)
-// Sw<0,4,3> o smem_ptr[16b](unset) o (_8,_8):(_8,_1) 
+// Sw<0,4,3> o smem_ptr[16b](unset) o (_8,_8):(_8,_1)
 
 // MN major
 // Layout_MN_SW128_Atom
@@ -31,27 +31,26 @@ static constexpr int MIN_LAYOUT_SiZE = 8;
 // Sw<0,4,3> o smem_ptr[16b](unset) o (_8,_8):(_1,_8)
 
 // Layout atom to tile shape:
-//product along the first dimension, then the second
-void get_layout_atom_swizzle(tb::STensor const &stensor, STensorMeta &meta){
+// product along the first dimension, then the second
+void get_layout_atom_swizzle(tb::STensor const &stensor, STensorMeta &meta) {
 
   assert(meta.strides[meta.innermost_dim] == 1);
-   if(stensor.dim[meta.innermost_dim] % 64 == 0){
-      meta.xor_swizzle_b = 3;
-    }else if(stensor.dim[meta.innermost_dim] % 32 == 0){
-      meta.xor_swizzle_b = 2;
-    }else if(stensor.dim[meta.innermost_dim] % 16 == 0){
-      meta.xor_swizzle_b = 1;
-    }else if(stensor.dim[meta.innermost_dim] % 8 == 0){
-        meta.xor_swizzle_b = 0;
-    }
-    
-    meta.xor_swizzle_m = 4;
-    meta.xor_swizzle_s = 3;
+  if (stensor.dim[meta.innermost_dim] % 64 == 0) {
+    meta.xor_swizzle_b = 3;
+  } else if (stensor.dim[meta.innermost_dim] % 32 == 0) {
+    meta.xor_swizzle_b = 2;
+  } else if (stensor.dim[meta.innermost_dim] % 16 == 0) {
+    meta.xor_swizzle_b = 1;
+  } else if (stensor.dim[meta.innermost_dim] % 8 == 0) {
+    meta.xor_swizzle_b = 0;
+  }
 
+  meta.xor_swizzle_m = 4;
+  meta.xor_swizzle_s = 3;
 }
 
 void Transpiler::get_threadblock_swizzle_plan_hopper(tb::Graph const &tb_graph,
-                                              TBSched const &sched) {
+                                                     TBSched const &sched) {
   // Get a list of all STensors that is not fused
   std::vector<tb::STensor> all_stensors;
   {
@@ -210,7 +209,8 @@ void Transpiler::get_threadblock_swizzle_plan_hopper(tb::Graph const &tb_graph,
     //   assert(stensor.dim[meta.swizzled_dim] % MIN_LAYOUT_SiZE == 0);
     //   meta.strides[meta.innermost_dim] = 1;
     //   size_t cur_stride = new_num_chunks_in_inner_dim * chunk_size_num_elems;
-    //   // printf("%u -> %lu\n", num_chunks_in_inner_dim * chunk_size_num_elems,
+    //   // printf("%u -> %lu\n", num_chunks_in_inner_dim *
+    //   chunk_size_num_elems,
     //   // cur_stride);
     //   for (int i = num_dims - 1; i >= 0; --i) {
     //     if (i == meta.innermost_dim) {

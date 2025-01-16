@@ -185,8 +185,9 @@ class FirstFitMemoryPlanner : public OnlineAllocMemoryPlannerBase {
 protected:
   Range select_range(size_t size) override {
     auto it = std::find_if(
-        free_ranges.begin(), free_ranges.end(),
-        [&](Range const &range) { return range.second - range.first >= size; });
+        free_ranges.begin(), free_ranges.end(), [&](Range const &range) {
+          return range.second - range.first >= size;
+        });
     assert(it != free_ranges.end() &&
            "No enough free space for the new tensor");
     return {it->first, it->first + size};
@@ -291,7 +292,8 @@ TBMemoryPlan Transpiler::get_threadblock_memory_plan(tb::Graph const &tb_graph,
   //   }
   //   return first_used_time;
   // };
-  auto find_last_used_time = [](sguid_t sguid, vector<TBSchedNode> const &nodes,
+  auto find_last_used_time = [](sguid_t sguid,
+                                vector<TBSchedNode> const &nodes,
                                 int time_delta) -> int {
     int last_used_time = -1;
     for (size_t i = 0; i < nodes.size(); ++i) {
@@ -309,7 +311,8 @@ TBMemoryPlan Transpiler::get_threadblock_memory_plan(tb::Graph const &tb_graph,
     return last_used_time;
   };
   auto find_earlist_free_time =
-      [&find_last_used_time](sguid_t sguid, vector<TBSchedNode> const &nodes,
+      [&find_last_used_time](sguid_t sguid,
+                             vector<TBSchedNode> const &nodes,
                              int time_delta) -> int {
     int last_used_time = find_last_used_time(sguid, nodes, time_delta);
     if (last_used_time == -1) {
@@ -367,7 +370,9 @@ TBMemoryPlan Transpiler::get_threadblock_memory_plan(tb::Graph const &tb_graph,
         tensor_decls.push_back(
             {accum.guid, phy_size, 2 * T, earlist_free_time});
       } else {
-        tensor_decls.push_back({accum.guid, phy_size, T - 1,
+        tensor_decls.push_back({accum.guid,
+                                phy_size,
+                                T - 1,
                                 earlist_free_time}); // Use T-1 here since we
                                                      // should clear the accum
       }
@@ -432,7 +437,9 @@ TBMemoryPlan Transpiler::get_threadblock_memory_plan(tb::Graph const &tb_graph,
         tb::STensor const &stensor = op->output_tensors.at(0);
         size_t phy_size = get_phy_size(stensor);
         tensor_decls.push_back({stensor.guid + PIPELINED_INPUT_BUF_GUID_OFFSET,
-                                phy_size, T - 1, 2 * T});
+                                phy_size,
+                                T - 1,
+                                2 * T});
       }
     }
   }

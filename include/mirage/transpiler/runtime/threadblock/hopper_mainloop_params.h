@@ -7,7 +7,8 @@ namespace tb {
 
 static int const kStages = 2;
 
-template <typename MainloopPipeline, size_t N> struct SharedStorage {
+template <typename MainloopPipeline, size_t N>
+struct SharedStorage {
   struct PipelineStorage : cute::aligned_struct<16, _1> {
     using MainloopPipelineStorage = typename MainloopPipeline::SharedStorage;
     alignas(16) MainloopPipelineStorage mainloop;
