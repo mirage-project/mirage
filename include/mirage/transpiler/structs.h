@@ -84,13 +84,18 @@ struct TMAParams {
   int forloop_dim;
 
   // Constructor for convenience
-  TMAParams(size_t input_id, size_t guid, size_t sguid,
-            const std::string &srcLayout, const std::string &dstLayout,
-            const bool m_input, const std::string &tile_size,
-            const std::tuple<int, int, int> &clusterSize,
-            const std::vector<int> &original_shape,
-            const std::vector<size_t> &original_stride,
-            const std::vector<int> &partition_logic, int forloop_range,
+  TMAParams(size_t input_id,
+            size_t guid,
+            size_t sguid,
+            std::string const &srcLayout,
+            std::string const &dstLayout,
+            bool const m_input,
+            std::string const &tile_size,
+            std::tuple<int, int, int> const &clusterSize,
+            std::vector<int> const &original_shape,
+            std::vector<size_t> const &original_stride,
+            std::vector<int> const &partition_logic,
+            int forloop_range,
             int forloop_dim)
       : input_id(input_id), guid(guid), sguid(sguid), srcLayout(srcLayout),
         dstLayout(dstLayout), m_input(m_input), tile_size(tile_size),
