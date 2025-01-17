@@ -106,7 +106,7 @@ def get_cc_cmd(target, cc, FILE_NAME, py_include_dir, MIRAGE_ROOT, so_path):
     if target == 90:
         specific_cmd = [
             "-arch=sm_90a",
-            "-gencode=arch=compute_90,code=sm_90",
+            "-gencode=arch=compute_90a,code=sm_90a",
             "-DCUTLASS_NVCC_ARCHS=90a",
         ]
     else:
@@ -298,7 +298,7 @@ class KNGraph:
         result = generate_cuda_program(
             self.cygraph, target_cc=target_cc, input_strides=input_strides
         )
-        # print(result)
+        # print(result["code"])
         if result["max_smem_size"] > get_shared_memory_capacity(target_cc):
             # the transpiled kernel exceeds shared memory limit
             print(

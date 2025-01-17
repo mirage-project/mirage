@@ -82,6 +82,7 @@ struct TMAParams {
   std::vector<int> partition_logic;
   int forloop_range;
   int forloop_dim;
+  std::string tiledCopy;
 
   // Constructor for convenience
   TMAParams(size_t input_id,
@@ -96,12 +97,13 @@ struct TMAParams {
             std::vector<size_t> const &original_stride,
             std::vector<int> const &partition_logic,
             int forloop_range,
-            int forloop_dim)
+            int forloop_dim,
+            std::string const &tiledCopy)
       : input_id(input_id), guid(guid), sguid(sguid), srcLayout(srcLayout),
         dstLayout(dstLayout), m_input(m_input), tile_size(tile_size),
         clusterSize(clusterSize), original_shape(original_shape),
         original_stride(original_stride), partition_logic(partition_logic),
-        forloop_range(forloop_range), forloop_dim(forloop_dim) {}
+        forloop_range(forloop_range), forloop_dim(forloop_dim), tiledCopy(tiledCopy){}
 };
 
 // Transpile a custom KN operator (a custom block graph)

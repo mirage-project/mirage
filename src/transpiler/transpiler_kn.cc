@@ -484,8 +484,6 @@ TranspileResult Transpiler::transpile_ugraph() {
           std::string m_inputs;
           for (int i = 0; i < result.tmaParamsList.size(); i++) {
             auto const &tmaParams = result.tmaParamsList.at(i);
-            dst_layouts.append(tmaParams.dstLayout).append("{}");
-            dtensors.append(fmt("dtensor$", tmaParams.guid));
             m_inputs.append(tmaParams.m_input ? "true" : "false");
 
             tmas.append(fmt("tma_$, ", tmaParams.guid));
@@ -543,11 +541,15 @@ TranspileResult Transpiler::transpile_ugraph() {
                        tmaParams.guid,
                        tmaParams.guid));
             exec.e(
-                fmt("auto tma_$ = make_tma_copy(SM90_TMA_LOAD{}, g_tensor_$, "
-                    "DstPipeLayout_${}(_, _, Int<0>{}));",
+                fmt("auto tma_$ = make_tma_copy($, g_tensor_$, "
+                    "DstPipeLayout_${}(_, _, Int<0>{}, Shape<_$, _$, _$>{}));",
+                    tmaParams.guid,
+                    tmaParams.tiledCopy,
                     tmaParams.guid,
                     tmaParams.guid,
-                    tmaParams.guid));
+                    std::get<0>(tmaParams.clusterSize),
+                    std::get<1>(tmaParams.clusterSize),
+                    std::get<2>(tmaParams.clusterSize)));
 
             exec.e("");
           }

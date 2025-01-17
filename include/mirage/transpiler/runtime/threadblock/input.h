@@ -222,7 +222,8 @@ public:
                                              int imapx_b,
                                              int imapy_b,
                                              int imapz_b,
-                                             int lane_predicate) {
+                                             int lane_predicate,
+                                             uint32_t block_rank_in_cluster) {
     if (lane_predicate) {
 
       Tensor mA = tma_a.get_tma_tensor(shape(SrcLayout_A{}));
@@ -246,12 +247,26 @@ public:
       Tensor gB = mB(blkCoordB);
       Tensor sB = make_tensor(make_smem_ptr(dst_b), DstPipeLayout_B{});
 
-      auto cta_tma_a = tma_a.get_slice(Int<0>{}); // CTA slice
-      Tensor tAgA = cta_tma_a.partition_S(gA);
-      Tensor tAsA = cta_tma_a.partition_D(sA);
-      auto cta_tma_b = tma_b.get_slice(Int<0>{}); // CTA slice
-      Tensor tBgB = cta_tma_b.partition_S(gB);
-      Tensor tBsB = cta_tma_b.partition_D(sB);
+
+      //
+      constexpr uint32_t cluster_shape_x = 1;
+      uint2 cluster_local_block_id = {block_rank_in_cluster % cluster_shape_x, block_rank_in_cluster / cluster_shape_x};
+
+      auto block_tma_a = tma_a.get_slice(block_rank_in_cluster);
+      auto block_tma_b = tma_b.get_slice(0);
+
+      // auto cta_tma_a = tma_a.get_slice(Int<0>{}); // CTA slice
+      // Tensor tAgA = cta_tma_a.partition_S(gA);
+      // Tensor tAsA = cta_tma_a.partition_D(sA);
+      // auto cta_tma_b = tma_b.get_slice(Int<0>{}); // CTA slice
+      // Tensor tBgB = cta_tma_b.partition_S(gB);
+      // Tensor tBsB = cta_tma_b.partition_D(sB);
+
+      Tensor tAgA = block_tma_a.partition_S(gA); 
+      Tensor tAsA = block_tma_a.partition_D(sA); 
+
+      Tensor tBgB = block_tma_b.partition_S(gB); 
+      Tensor tBsB = block_tma_b.partition_D(sB);
 
       Tensor tAgAX = group_modes<0, rank(tAgA) - 1>(tAgA); // REST, Forloop
       Tensor tAsAX = group_modes<0, rank(tAsA) - 1>(tAsA);
@@ -259,6 +274,11 @@ public:
       Tensor tBsBX = group_modes<0, rank(tBsB) - 1>(tBsB);
 
       auto k_tile_iter = cute::make_coord_iterator(k_tile_count);
+
+      uint16_t mcast_mask_a = 3;
+      uint16_t mcast_mask_b = 0;
+
+      
 
       CUTE_UNROLL
       for (; k_tile_count > 0; --k_tile_count) {
@@ -269,10 +289,14 @@ public:
             pipeline.producer_get_barrier(smem_pipe_write);
         int write_stage = smem_pipe_write.index();
 
-        copy(tma_a.with(*tma_barrier),
+       
+        copy(tma_a.with(*tma_barrier, mcast_mask_a),
              tAgAX(_, *k_tile_iter),
              tAsAX(_, write_stage));
-        copy(tma_b.with(*tma_barrier),
+         if(blockIdx.x == 1){
+        printf("mask %d\n", block_rank_in_cluster);
+      }
+        copy(tma_b.with(*tma_barrier, mcast_mask_b),
              tBgBX(_, *k_tile_iter),
              tBsBX(_, write_stage));
         // pipeline.producer_commit(smem_pipe_write, (TMA_A::tmaTransactionBytes
@@ -305,7 +329,8 @@ public:
                                              int imapx_a,
                                              int imapy_a,
                                              int imapz_a,
-                                             int lane_predicate) {
+                                             int lane_predicate,
+                                             uint32_t block_rank_in_cluster) {
     if (lane_predicate) {
 
       Tensor mA = tma_a.get_tma_tensor(shape(SrcLayout_A{}));
@@ -390,7 +415,8 @@ public:
                                              int imapx_c,
                                              int imapy_c,
                                              int imapz_c,
-                                             int lane_predicate) {
+                                             int lane_predicate,
+                                             uint32_t block_rank_in_cluster) {
     if (lane_predicate) {
 
       Tensor mA = tma_a.get_tma_tensor(shape(SrcLayout_A{}));
