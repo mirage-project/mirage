@@ -85,25 +85,20 @@ struct TMAParams {
   std::string tiledCopy;
 
   // Constructor for convenience
-  TMAParams(size_t input_id,
-            size_t guid,
-            size_t sguid,
-            std::string const &srcLayout,
-            std::string const &dstLayout,
-            bool const m_input,
-            std::string const &tile_size,
+  TMAParams(size_t input_id, size_t guid, size_t sguid,
+            std::string const &srcLayout, std::string const &dstLayout,
+            bool const m_input, std::string const &tile_size,
             std::tuple<int, int, int> const &clusterSize,
             std::vector<int> const &original_shape,
             std::vector<size_t> const &original_stride,
-            std::vector<int> const &partition_logic,
-            int forloop_range,
-            int forloop_dim,
-            std::string const &tiledCopy)
+            std::vector<int> const &partition_logic, int forloop_range,
+            int forloop_dim, std::string const &tiledCopy)
       : input_id(input_id), guid(guid), sguid(sguid), srcLayout(srcLayout),
         dstLayout(dstLayout), m_input(m_input), tile_size(tile_size),
         clusterSize(clusterSize), original_shape(original_shape),
         original_stride(original_stride), partition_logic(partition_logic),
-        forloop_range(forloop_range), forloop_dim(forloop_dim), tiledCopy(tiledCopy){}
+        forloop_range(forloop_range), forloop_dim(forloop_dim),
+        tiledCopy(tiledCopy) {}
 };
 
 // Transpile a custom KN operator (a custom block graph)

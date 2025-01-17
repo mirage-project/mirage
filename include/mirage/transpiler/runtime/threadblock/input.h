@@ -26,8 +26,7 @@ using namespace cute;
 
 namespace tb {
 
-template <class InputLayout>
-class InputDim01Swapper {
+template <class InputLayout> class InputDim01Swapper {
   CUTE_STATIC_ASSERT_V(rank(InputLayout{}) == _2{});
 
   using A0 = decltype(get<0>(shape(InputLayout{})));
@@ -48,7 +47,7 @@ public:
   using Numel = decltype(cute::size(DstLayout{}));
 
   static __device__ __forceinline__ void
-      run(T *__restrict__ dst, T const *__restrict__ src, int thread_idx) {
+  run(T *__restrict__ dst, T const *__restrict__ src, int thread_idx) {
     constexpr auto numel = Numel{};
     auto dst_layout = DstLayout{};
     auto src_layout = SrcLayout{};
@@ -69,8 +68,7 @@ public:
 //
 // This class returns such a mapping. It takes a coordinate in the "chunk space"
 // and converts it to a coordinate in the "original space".
-template <class InputLayout, int CHUNK_SIZE>
-class GetChunkedCoord2Coord {
+template <class InputLayout, int CHUNK_SIZE> class GetChunkedCoord2Coord {
   using InputShape = decltype(shape(InputLayout{}));
   static constexpr int INNERMOST_DIM_SIZE = get<0>(InputShape{}).value;
   static constexpr int INNERMOST_DIM_NUM_CHUNKS =
@@ -100,7 +98,7 @@ public:
   static constexpr int NUM_CHUNKS = size(SrcChunkedCoord2Coord{}).value;
 
   static __device__ __forceinline__ void
-      run(T *__restrict__ dst, T const *__restrict__ src, int thread_idx) {
+  run(T *__restrict__ dst, T const *__restrict__ src, int thread_idx) {
     auto src_layout = SrcLayout{};
     auto dst_layout = DstLayout{};
     auto src_chunked_coord2coord = SrcChunkedCoord2Coord{};
@@ -130,7 +128,7 @@ public:
   static constexpr int NUM_CHUNKS = size(SrcChunkedCoord2Coord{}).value;
 
   static __device__ __forceinline__ void
-      run(T *__restrict__ dst, T const *__restrict__ src, int thread_idx) {
+  run(T *__restrict__ dst, T const *__restrict__ src, int thread_idx) {
     auto src_layout = SrcLayout{};
     auto dst_layout = DstLayout{};
     auto src_chunked_coord2coord = SrcChunkedCoord2Coord{};
@@ -152,13 +150,8 @@ public:
   }
 };
 
-template <typename T,
-          class DstLayout,
-          class SrcLayout,
-          class TMA,
-          class MainloopPipeline,
-          class PipelineState,
-          bool MInput>
+template <typename T, class DstLayout, class SrcLayout, class TMA,
+          class MainloopPipeline, class PipelineState, bool MInput>
 class InputTMAAsyncCopy {
 public:
   using CTA_TILER =
@@ -168,16 +161,13 @@ public:
   using DstMNKLayout = DstLayout;
   using SmemLayoutAtom =
       decltype(cutlass::gemm::collective::detail::ss_smem_selector<
-               GmmaMajor,
-               half_t,
-               decltype(get<0>(DstMNKLayout{})),
+               GmmaMajor, half_t, decltype(get<0>(DstMNKLayout{})),
                decltype(get<1>(DstMNKLayout{}))>());
 
   // A, B, X, Y, Z, Stage
   using DstPipeLayout = decltype(tile_to_shape(
-      SmemLayoutAtom{},
-      make_shape(
-          shape<0>(DstMNKLayout{}), shape<1>(DstMNKLayout{}), Int<kStages>{})));
+      SmemLayoutAtom{}, make_shape(shape<0>(DstMNKLayout{}),
+                                   shape<1>(DstMNKLayout{}), Int<kStages>{})));
 
   using MainloopPipelines = MainloopPipeline;
   using PipelineStates = PipelineState;
@@ -192,8 +182,7 @@ public:
   }
 };
 
-template <class TMACopy1, class TMACopy2>
-class TMACopyPipeline2 {
+template <class TMACopy1, class TMACopy2> class TMACopyPipeline2 {
 
 public:
   using T = half_t;
@@ -209,48 +198,33 @@ public:
   using CTA_TILER_B = typename TMA_B::CTA_TILER;
   using DstPipeLayout_A = typename TMACopy1::DstPipeLayout;
   using DstPipeLayout_B = typename TMACopy2::DstPipeLayout;
-  static __device__ __forceinline__ void run(CopyA const &tma_a,
-                                             CopyB const &tma_b,
-                                             T *dst_a,
-                                             T *dst_b,
-                                             MainloopPipeline pipeline,
-                                             PipelineState &smem_pipe_write,
-                                             unsigned k_tile_count,
-                                             int imapx_a,
-                                             int imapy_a,
-                                             int imapz_a,
-                                             int imapx_b,
-                                             int imapy_b,
-                                             int imapz_b,
-                                             int lane_predicate,
-                                             uint32_t block_rank_in_cluster) {
+  static __device__ __forceinline__ void
+  run(CopyA const &tma_a, CopyB const &tma_b, T *dst_a, T *dst_b,
+      MainloopPipeline pipeline, PipelineState &smem_pipe_write,
+      unsigned k_tile_count, int imapx_a, int imapy_a, int imapz_a, int imapx_b,
+      int imapy_b, int imapz_b, int lane_predicate,
+      uint32_t block_rank_in_cluster) {
     if (lane_predicate) {
 
       Tensor mA = tma_a.get_tma_tensor(shape(SrcLayout_A{}));
       Tensor mB = tma_b.get_tma_tensor(shape(SrcLayout_B{}));
 
       // （CTA_M, CTA_K, X, Y, Z, FORLOOP）
-      auto blkCoordA = make_coord(_,
-                                  _,
-                                  imapx_a >= 0 ? blockIdx.x : 0,
+      auto blkCoordA = make_coord(_, _, imapx_a >= 0 ? blockIdx.x : 0,
                                   imapy_a >= 0 ? blockIdx.y : 0,
-                                  imapz_a >= 0 ? blockIdx.z : 0,
-                                  _);
+                                  imapz_a >= 0 ? blockIdx.z : 0, _);
       Tensor gA = mA(blkCoordA);
       Tensor sA = make_tensor(make_smem_ptr(dst_a), DstPipeLayout_A{});
-      auto blkCoordB = make_coord(_,
-                                  _,
-                                  imapx_b >= 0 ? blockIdx.x : 0,
+      auto blkCoordB = make_coord(_, _, imapx_b >= 0 ? blockIdx.x : 0,
                                   imapy_b >= 0 ? blockIdx.y : 0,
-                                  imapz_b >= 0 ? blockIdx.z : 0,
-                                  _);
+                                  imapz_b >= 0 ? blockIdx.z : 0, _);
       Tensor gB = mB(blkCoordB);
       Tensor sB = make_tensor(make_smem_ptr(dst_b), DstPipeLayout_B{});
 
-
       //
       constexpr uint32_t cluster_shape_x = 1;
-      uint2 cluster_local_block_id = {block_rank_in_cluster % cluster_shape_x, block_rank_in_cluster / cluster_shape_x};
+      uint2 cluster_local_block_id = {block_rank_in_cluster % cluster_shape_x,
+                                      block_rank_in_cluster / cluster_shape_x};
 
       auto block_tma_a = tma_a.get_slice(block_rank_in_cluster);
       auto block_tma_b = tma_b.get_slice(0);
@@ -262,10 +236,10 @@ public:
       // Tensor tBgB = cta_tma_b.partition_S(gB);
       // Tensor tBsB = cta_tma_b.partition_D(sB);
 
-      Tensor tAgA = block_tma_a.partition_S(gA); 
-      Tensor tAsA = block_tma_a.partition_D(sA); 
+      Tensor tAgA = block_tma_a.partition_S(gA);
+      Tensor tAsA = block_tma_a.partition_D(sA);
 
-      Tensor tBgB = block_tma_b.partition_S(gB); 
+      Tensor tBgB = block_tma_b.partition_S(gB);
       Tensor tBsB = block_tma_b.partition_D(sB);
 
       Tensor tAgAX = group_modes<0, rank(tAgA) - 1>(tAgA); // REST, Forloop
@@ -278,8 +252,6 @@ public:
       uint16_t mcast_mask_a = 3;
       uint16_t mcast_mask_b = 0;
 
-      
-
       CUTE_UNROLL
       for (; k_tile_count > 0; --k_tile_count) {
 
@@ -289,15 +261,9 @@ public:
             pipeline.producer_get_barrier(smem_pipe_write);
         int write_stage = smem_pipe_write.index();
 
-       
-        copy(tma_a.with(*tma_barrier, mcast_mask_a),
-             tAgAX(_, *k_tile_iter),
+        copy(tma_a.with(*tma_barrier, mcast_mask_a), tAgAX(_, *k_tile_iter),
              tAsAX(_, write_stage));
-         if(blockIdx.x == 1){
-        printf("mask %d\n", block_rank_in_cluster);
-      }
-        copy(tma_b.with(*tma_barrier, mcast_mask_b),
-             tBgBX(_, *k_tile_iter),
+        copy(tma_b.with(*tma_barrier, mcast_mask_b), tBgBX(_, *k_tile_iter),
              tBsBX(_, write_stage));
         // pipeline.producer_commit(smem_pipe_write, (TMA_A::tmaTransactionBytes
         // + TMA_B::tmaTransactionBytes)); Advance smem_pipe_write
@@ -308,8 +274,7 @@ public:
   }
 };
 
-template <class TMACopy>
-class TMACopyPipeline1 {
+template <class TMACopy> class TMACopyPipeline1 {
 
 public:
   using T = half_t;
@@ -321,27 +286,19 @@ public:
   using CTA_TILER_A = typename TMA_A::CTA_TILER;
 
   using DstPipeLayout_A = typename TMACopy::DstPipeLayout;
-  static __device__ __forceinline__ void run(CopyA const &tma_a,
-                                             T *dst_a,
-                                             MainloopPipeline pipeline,
-                                             PipelineState &smem_pipe_write,
-                                             unsigned k_tile_count,
-                                             int imapx_a,
-                                             int imapy_a,
-                                             int imapz_a,
-                                             int lane_predicate,
-                                             uint32_t block_rank_in_cluster) {
+  static __device__ __forceinline__ void
+  run(CopyA const &tma_a, T *dst_a, MainloopPipeline pipeline,
+      PipelineState &smem_pipe_write, unsigned k_tile_count, int imapx_a,
+      int imapy_a, int imapz_a, int lane_predicate,
+      uint32_t block_rank_in_cluster) {
     if (lane_predicate) {
 
       Tensor mA = tma_a.get_tma_tensor(shape(SrcLayout_A{}));
 
       // （CTA_M, CTA_K, X, Y, Z, FORLOOP）
-      auto blkCoordA = make_coord(_,
-                                  _,
-                                  imapx_a >= 0 ? blockIdx.x : 0,
+      auto blkCoordA = make_coord(_, _, imapx_a >= 0 ? blockIdx.x : 0,
                                   imapy_a >= 0 ? blockIdx.y : 0,
-                                  imapz_a >= 0 ? blockIdx.z : 0,
-                                  _);
+                                  imapz_a >= 0 ? blockIdx.z : 0, _);
       Tensor gA = mA(blkCoordA);
       Tensor sA = make_tensor(make_smem_ptr(dst_a), DstPipeLayout_A{});
 
@@ -363,8 +320,7 @@ public:
             pipeline.producer_get_barrier(smem_pipe_write);
         int write_stage = smem_pipe_write.index();
 
-        copy(tma_a.with(*tma_barrier),
-             tAgAX(_, *k_tile_iter),
+        copy(tma_a.with(*tma_barrier), tAgAX(_, *k_tile_iter),
              tAsAX(_, write_stage));
         // pipeline.producer_commit(smem_pipe_write, (TMA_A::tmaTransactionBytes
         // + TMA_B::tmaTransactionBytes)); Advance smem_pipe_write
@@ -397,56 +353,34 @@ public:
   using DstPipeLayout_A = typename TMACopy1::DstPipeLayout;
   using DstPipeLayout_B = typename TMACopy2::DstPipeLayout;
   using DstPipeLayout_C = typename TMACopy3::DstPipeLayout;
-  static __device__ __forceinline__ void run(CopyA const &tma_a,
-                                             CopyB const &tma_b,
-                                             CopyB const &tma_c,
-                                             T *dst_a,
-                                             T *dst_b,
-                                             T *dst_c,
-                                             MainloopPipeline pipeline,
-                                             PipelineState &smem_pipe_write,
-                                             unsigned k_tile_count,
-                                             int imapx_a,
-                                             int imapy_a,
-                                             int imapz_a,
-                                             int imapx_b,
-                                             int imapy_b,
-                                             int imapz_b,
-                                             int imapx_c,
-                                             int imapy_c,
-                                             int imapz_c,
-                                             int lane_predicate,
-                                             uint32_t block_rank_in_cluster) {
+  static __device__ __forceinline__ void
+  run(CopyA const &tma_a, CopyB const &tma_b, CopyB const &tma_c, T *dst_a,
+      T *dst_b, T *dst_c, MainloopPipeline pipeline,
+      PipelineState &smem_pipe_write, unsigned k_tile_count, int imapx_a,
+      int imapy_a, int imapz_a, int imapx_b, int imapy_b, int imapz_b,
+      int imapx_c, int imapy_c, int imapz_c, int lane_predicate,
+      uint32_t block_rank_in_cluster) {
     if (lane_predicate) {
 
       Tensor mA = tma_a.get_tma_tensor(shape(SrcLayout_A{}));
       Tensor mB = tma_b.get_tma_tensor(shape(SrcLayout_B{}));
       Tensor mC = tma_c.get_tma_tensor(shape(SrcLayout_C{}));
 
-      auto blkCoordA = make_coord(_,
-                                  _,
-                                  imapx_a >= 0 ? blockIdx.x : 0,
+      auto blkCoordA = make_coord(_, _, imapx_a >= 0 ? blockIdx.x : 0,
                                   imapy_a >= 0 ? blockIdx.y : 0,
-                                  imapz_a >= 0 ? blockIdx.z : 0,
-                                  _);
+                                  imapz_a >= 0 ? blockIdx.z : 0, _);
       Tensor gA = mA(blkCoordA);
 
       Tensor sA = make_tensor(make_smem_ptr(dst_a), DstPipeLayout_A{});
-      auto blkCoordB = make_coord(_,
-                                  _,
-                                  imapx_b >= 0 ? blockIdx.x : 0,
+      auto blkCoordB = make_coord(_, _, imapx_b >= 0 ? blockIdx.x : 0,
                                   imapy_b >= 0 ? blockIdx.y : 0,
-                                  imapz_b >= 0 ? blockIdx.z : 0,
-                                  _);
+                                  imapz_b >= 0 ? blockIdx.z : 0, _);
       Tensor gB = mB(blkCoordB);
       Tensor sB = make_tensor(make_smem_ptr(dst_b), DstPipeLayout_B{});
 
-      auto blkCoordC = make_coord(_,
-                                  _,
-                                  imapx_c >= 0 ? blockIdx.x : 0,
+      auto blkCoordC = make_coord(_, _, imapx_c >= 0 ? blockIdx.x : 0,
                                   imapy_c >= 0 ? blockIdx.y : 0,
-                                  imapz_c >= 0 ? blockIdx.z : 0,
-                                  _);
+                                  imapz_c >= 0 ? blockIdx.z : 0, _);
       Tensor gC = mC(blkCoordC);
       Tensor sC = make_tensor(make_smem_ptr(dst_c), DstPipeLayout_C{});
 
@@ -481,14 +415,11 @@ public:
             pipeline.producer_get_barrier(smem_pipe_write);
         int write_stage = smem_pipe_write.index();
 
-        copy(tma_a.with(*tma_barrier),
-             tAgAX(_, *k_tile_iter),
+        copy(tma_a.with(*tma_barrier), tAgAX(_, *k_tile_iter),
              tAsAX(_, write_stage));
-        copy(tma_b.with(*tma_barrier),
-             tBgBX(_, *k_tile_iter),
+        copy(tma_b.with(*tma_barrier), tBgBX(_, *k_tile_iter),
              tBsBX(_, write_stage));
-        copy(tma_c.with(*tma_barrier),
-             tCgCX(_, *k_tile_iter),
+        copy(tma_c.with(*tma_barrier), tCgCX(_, *k_tile_iter),
              tCsCX(_, write_stage));
         // pipeline.producer_commit(smem_pipe_write,
         // (TMA_A::tmaTransactionBytes));

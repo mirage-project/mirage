@@ -42,8 +42,7 @@ static string get_cute_layout(vector<int> dims, vector<size_t> strides) {
   assert(dims.size() == strides.size());
   std::reverse(dims.begin(), dims.end());
   std::reverse(strides.begin(), strides.end());
-  return fmt("Layout<Shape<$>, Stride<$>>",
-             map_to_cute_int(dims),
+  return fmt("Layout<Shape<$>, Stride<$>>", map_to_cute_int(dims),
              map_to_cute_int(strides));
 }
 
@@ -76,8 +75,7 @@ static std::vector<T> mov_to_last(T const *vec, size_t numel, int idx) {
 // processing order of elements do not affect the correctness.
 template <typename Tensor_T, typename Meta_T>
 static string mov_last_and_get_layout(Tensor_T const &tensor,
-                                      Meta_T const &meta,
-                                      int innermost_dim) {
+                                      Meta_T const &meta, int innermost_dim) {
   assert(0 <= innermost_dim && innermost_dim < tensor.num_dims);
   return get_cute_layout(
       mov_to_last(tensor.dim, tensor.num_dims, innermost_dim),
@@ -91,22 +89,20 @@ static string mov_last_and_get_layout(Tensor_T const &tensor,
 // requesting for an input tensor, may return:
 // ("dtensor1000000", "half_t* dtensor1000000 = input_tensors[0];")
 std::pair<string, string>
-    Transpiler::get_dtensor_ptr(kn::DTensor const &dtensor) {
+Transpiler::get_dtensor_ptr(kn::DTensor const &dtensor) {
   auto guid = dtensor.guid;
   DTensorMeta const &meta = dtensor_metas.at(guid);
   string pointer_var_name = fmt("dtensor$", guid);
   string code = "";
   if (meta.is_input) {
-    code = fmt("half_t *$ = (half_t*)input_tensors.at($);",
-               pointer_var_name,
+    code = fmt("half_t *$ = (half_t*)input_tensors.at($);", pointer_var_name,
                meta.input_idx);
   } else if (meta.is_output) {
-    code = fmt("half_t *$ = (half_t*)output_tensors.at($);",
-               pointer_var_name,
+    code = fmt("half_t *$ = (half_t*)output_tensors.at($);", pointer_var_name,
                meta.output_idx);
   } else {
-    code = fmt(
-        "half_t *$ = (half_t*)((char*)buf + $);", pointer_var_name, meta.addr);
+    code = fmt("half_t *$ = (half_t*)((char*)buf + $);", pointer_var_name,
+               meta.addr);
   }
   return {pointer_var_name, code};
 }
@@ -114,16 +110,16 @@ std::pair<string, string>
 static string get_kn_op_str(type::KNOperatorType type) {
   auto toString = [](type::KNOperatorType type) -> string {
     switch (type) {
-      case type::KN_EXP_OP:
-        return "EXP";
-      case type::KN_SILU_OP:
-        return "SILU";
-      case type::KN_SQUARE_OP:
-        return "SQUARE";
-      case type::KN_SQRT_OP:
-        return "SQRT";
-      default:
-        assert(0);
+    case type::KN_EXP_OP:
+      return "EXP";
+    case type::KN_SILU_OP:
+      return "SILU";
+    case type::KN_SQUARE_OP:
+      return "SQUARE";
+    case type::KN_SQRT_OP:
+      return "SQRT";
+    default:
+      assert(0);
     }
   };
   return toString(type);
@@ -158,452 +154,405 @@ TranspileResult Transpiler::transpile_ugraph() {
     exec.e("{");
     exec.e("// OP type: $", op_type_str);
     switch (op->op_type) {
-      case type::KNOperatorType::KN_INPUT_OP:
-      case type::KNOperatorType::KN_OUTPUT_OP: {
-        // Input/Output op
-        break;
+    case type::KNOperatorType::KN_INPUT_OP:
+    case type::KNOperatorType::KN_OUTPUT_OP: {
+      // Input/Output op
+      break;
+    }
+    case type::KNOperatorType::KN_MATMUL_OP: {
+      // Matrix multiplication. Going to call cuBLAS
+      kn::DTensor &in0 = op->input_tensors.at(0);
+      kn::DTensor &in1 = op->input_tensors.at(1);
+      kn::DTensor &out0 = op->output_tensors.at(0);
+      DTensorMeta meta_in0 = dtensor_metas.at(in0.guid);
+      DTensorMeta meta_in1 = dtensor_metas.at(in1.guid);
+      DTensorMeta meta_out0 = dtensor_metas.at(out0.guid);
+      // Both tensors should have their innermost dim as the last two dims
+      assert(meta_in0.innermost_dim >= in0.num_dims - 2);
+      assert(meta_in1.innermost_dim >= in1.num_dims - 2);
+      assert(meta_out0.innermost_dim >= out0.num_dims - 2);
+      // Get tensor ptrs
+      auto [in0_ptr_name, in0_ptr_code] = get_dtensor_ptr(in0);
+      auto [in1_ptr_name, in1_ptr_code] = get_dtensor_ptr(in1);
+      auto [out0_ptr_name, out0_ptr_code] = get_dtensor_ptr(out0);
+      exec.e(in0_ptr_code);
+      exec.e(in1_ptr_code);
+      exec.e(out0_ptr_code);
+      // Calculate info about matrix shape
+      int m = in0.dim[in0.num_dims - 2];
+      int k = in0.dim[in0.num_dims - 1];
+      int n = in1.dim[in1.num_dims - 1];
+      assert(k == in1.dim[in1.num_dims - 2]);
+      assert(m == out0.dim[out0.num_dims - 2]);
+      assert(n == out0.dim[out0.num_dims - 1]);
+      // Calculate info about batching
+      assert(in0.num_dims == in1.num_dims);
+      assert(in0.num_dims == out0.num_dims);
+      size_t batch_size = 1;
+      for (int i = 0; i < in0.num_dims - 2; i++) {
+        assert(in0.dim[i] == in1.dim[i] && in0.dim[i] == out0.dim[i]);
+        batch_size *= in0.dim[i];
       }
-      case type::KNOperatorType::KN_MATMUL_OP: {
-        // Matrix multiplication. Going to call cuBLAS
-        kn::DTensor &in0 = op->input_tensors.at(0);
-        kn::DTensor &in1 = op->input_tensors.at(1);
-        kn::DTensor &out0 = op->output_tensors.at(0);
-        DTensorMeta meta_in0 = dtensor_metas.at(in0.guid);
-        DTensorMeta meta_in1 = dtensor_metas.at(in1.guid);
-        DTensorMeta meta_out0 = dtensor_metas.at(out0.guid);
-        // Both tensors should have their innermost dim as the last two dims
-        assert(meta_in0.innermost_dim >= in0.num_dims - 2);
-        assert(meta_in1.innermost_dim >= in1.num_dims - 2);
-        assert(meta_out0.innermost_dim >= out0.num_dims - 2);
-        // Get tensor ptrs
-        auto [in0_ptr_name, in0_ptr_code] = get_dtensor_ptr(in0);
-        auto [in1_ptr_name, in1_ptr_code] = get_dtensor_ptr(in1);
-        auto [out0_ptr_name, out0_ptr_code] = get_dtensor_ptr(out0);
-        exec.e(in0_ptr_code);
-        exec.e(in1_ptr_code);
-        exec.e(out0_ptr_code);
-        // Calculate info about matrix shape
-        int m = in0.dim[in0.num_dims - 2];
-        int k = in0.dim[in0.num_dims - 1];
-        int n = in1.dim[in1.num_dims - 1];
-        assert(k == in1.dim[in1.num_dims - 2]);
-        assert(m == out0.dim[out0.num_dims - 2]);
-        assert(n == out0.dim[out0.num_dims - 1]);
-        // Calculate info about batching
-        assert(in0.num_dims == in1.num_dims);
-        assert(in0.num_dims == out0.num_dims);
-        size_t batch_size = 1;
-        for (int i = 0; i < in0.num_dims - 2; i++) {
-          assert(in0.dim[i] == in1.dim[i] && in0.dim[i] == out0.dim[i]);
-          batch_size *= in0.dim[i];
-        }
-        size_t batch_stride_A =
-            in0.num_dims == 2 ? 0 : meta_in0.strides[in0.num_dims - 3];
-        size_t batch_stride_B =
-            in1.num_dims == 2 ? 0 : meta_in1.strides[in1.num_dims - 3];
-        size_t batch_stride_C =
-            out0.num_dims == 2 ? 0 : meta_out0.strides[out0.num_dims - 3];
-        // Run GEMM
-        exec.e("kn::gemm<CUBLAS_COMPUTE_16F>($,$,$, $,$,$, $,$, $,$, $,$, $, "
-               "$,$,$);",
-               out0_ptr_name,
-               in0_ptr_name,
-               in1_ptr_name,
-               m,
-               n,
-               k,
-               meta_in0.strides[in0.num_dims - 2],
-               meta_in0.strides[in0.num_dims - 1],
-               meta_in1.strides[in1.num_dims - 2],
-               meta_in1.strides[in1.num_dims - 1],
-               meta_out0.strides[out0.num_dims - 2],
-               meta_out0.strides[out0.num_dims - 1],
-               batch_size,
-               batch_stride_A,
-               batch_stride_B,
-               batch_stride_C);
-        break;
+      size_t batch_stride_A =
+          in0.num_dims == 2 ? 0 : meta_in0.strides[in0.num_dims - 3];
+      size_t batch_stride_B =
+          in1.num_dims == 2 ? 0 : meta_in1.strides[in1.num_dims - 3];
+      size_t batch_stride_C =
+          out0.num_dims == 2 ? 0 : meta_out0.strides[out0.num_dims - 3];
+      // Run GEMM
+      exec.e("kn::gemm<CUBLAS_COMPUTE_16F>($,$,$, $,$,$, $,$, $,$, $,$, $, "
+             "$,$,$);",
+             out0_ptr_name, in0_ptr_name, in1_ptr_name, m, n, k,
+             meta_in0.strides[in0.num_dims - 2],
+             meta_in0.strides[in0.num_dims - 1],
+             meta_in1.strides[in1.num_dims - 2],
+             meta_in1.strides[in1.num_dims - 1],
+             meta_out0.strides[out0.num_dims - 2],
+             meta_out0.strides[out0.num_dims - 1], batch_size, batch_stride_A,
+             batch_stride_B, batch_stride_C);
+      break;
+    }
+    case type::KNOperatorType::KN_EXP_OP:
+    case type::KNOperatorType::KN_SILU_OP:
+    case type::KNOperatorType::KN_SQUARE_OP:
+    case type::KNOperatorType::KN_SQRT_OP: {
+      // Elemwise unary op
+      kn::DTensor &in0 = op->input_tensors.at(0);
+      kn::DTensor &out0 = op->output_tensors.at(0);
+      DTensorMeta meta_in0 = dtensor_metas.at(in0.guid);
+      DTensorMeta meta_out0 = dtensor_metas.at(out0.guid);
+      // The two tensors must have the same shape
+      assert(in0.num_dims == out0.num_dims);
+      for (int i = 0; i < in0.num_dims; i++) {
+        assert(in0.dim[i] == out0.dim[i]);
       }
-      case type::KNOperatorType::KN_EXP_OP:
-      case type::KNOperatorType::KN_SILU_OP:
-      case type::KNOperatorType::KN_SQUARE_OP:
-      case type::KNOperatorType::KN_SQRT_OP: {
-        // Elemwise unary op
-        kn::DTensor &in0 = op->input_tensors.at(0);
-        kn::DTensor &out0 = op->output_tensors.at(0);
-        DTensorMeta meta_in0 = dtensor_metas.at(in0.guid);
-        DTensorMeta meta_out0 = dtensor_metas.at(out0.guid);
-        // The two tensors must have the same shape
-        assert(in0.num_dims == out0.num_dims);
-        for (int i = 0; i < in0.num_dims; i++) {
+      if (meta_in0.innermost_dim != meta_out0.innermost_dim) {
+        printf("Warning: In the current implementation of the elementwise "
+               "unary kernel, global memory access won't be coalesced when "
+               "input tensor's innermost_dim (%d) != output tensor's "
+               "innermost_dim (%d)"
+               "This may cause performance degration\n",
+               meta_in0.innermost_dim, meta_out0.innermost_dim);
+      }
+      // Assemble the new shape and stride
+      // We move the innermost dim to the first dim to coalesce global mem
+      // access
+      int innermost_dim = meta_in0.innermost_dim;
+      string in0_layout = mov_last_and_get_layout(in0, meta_in0, innermost_dim);
+      string out0_layout =
+          mov_last_and_get_layout(in0, meta_in0, innermost_dim);
+      // Get tensor ptrs
+      auto [in0_ptr_name, in0_ptr_code] = get_dtensor_ptr(in0);
+      auto [out0_ptr_name, out0_ptr_code] = get_dtensor_ptr(out0);
+      exec.e(in0_ptr_code);
+      exec.e(out0_ptr_code);
+      // Create kernel instance
+      exec.e("using kernel = kn::ElementUnaryKernel<half_t, "
+             "kn::ElementUnaryOpType::$, $, $>;",
+             get_kn_op_str(op->op_type), in0_layout, out0_layout);
+      // Launch kernel
+      exec.e("kernel::run($, $);", out0_ptr_name, in0_ptr_name);
+      break;
+    }
+    case type::KNOperatorType::KN_ADD_OP:
+    case type::KNOperatorType::KN_MUL_OP:
+    case type::KNOperatorType::KN_DIV_OP: {
+      // Elemwise binary op
+      kn::DTensor &in0 = op->input_tensors.at(0);
+      kn::DTensor &in1 = op->input_tensors.at(1);
+      kn::DTensor &out0 = op->output_tensors.at(0);
+      DTensorMeta meta_in0 = dtensor_metas.at(in0.guid);
+      DTensorMeta meta_in1 = dtensor_metas.at(in1.guid);
+      DTensorMeta meta_out0 = dtensor_metas.at(out0.guid);
+      // The three tensors must have the same shape except broadcasting
+      // dimensions
+      assert(in0.num_dims == in1.num_dims && in0.num_dims == out0.num_dims);
+      for (int i = 0; i < in0.num_dims; i++) {
+        assert(in0.dim[i] == out0.dim[i] || in0.dim[i] == 1);
+        assert(in1.dim[i] == out0.dim[i] || in1.dim[i] == 1);
+      }
+      if (meta_in0.innermost_dim != meta_in1.innermost_dim ||
+          meta_in0.innermost_dim != meta_out0.innermost_dim) {
+        printf("Warning: In the current implementation of the elementwise "
+               "binary kernel, global memory access won't be coalesced when "
+               "input tensors' innermost_dim (%d and %d) != output tensor's "
+               "innermost_dim (%d)"
+               "This may cause performance degration\n",
+               meta_in0.innermost_dim, meta_in1.innermost_dim,
+               meta_out0.innermost_dim);
+      }
+      // Assemble the new shape and stride
+      // We move the innermost dim to the first dim to coalesce global mem
+      // access
+      int innermost_dim = meta_in0.innermost_dim;
+      string in0_layout = mov_last_and_get_layout(in0, meta_in0, innermost_dim);
+      string in1_layout = mov_last_and_get_layout(in1, meta_in1, innermost_dim);
+      string out0_layout =
+          mov_last_and_get_layout(out0, meta_out0, innermost_dim);
+      // Get tensor ptrs
+      auto [in0_ptr_name, in0_ptr_code] = get_dtensor_ptr(in0);
+      auto [in1_ptr_name, in1_ptr_code] = get_dtensor_ptr(in1);
+      auto [out0_ptr_name, out0_ptr_code] = get_dtensor_ptr(out0);
+      exec.e(in0_ptr_code);
+      exec.e(in1_ptr_code);
+      exec.e(out0_ptr_code);
+      // Get OPType
+      string op_type_str = op->op_type == type::KN_ADD_OP   ? "ADD"
+                           : op->op_type == type::KN_MUL_OP ? "MUL"
+                           : op->op_type == type::KN_DIV_OP ? "DIV"
+                                                            : "";
+      assert(op_type_str != "");
+      // Create kernel instance
+      exec.e("using kernel = kn::ElementBinaryKernel<half_t, "
+             "kn::ElementBinaryOpType::$, $, $, $>;",
+             op_type_str, in0_layout, in1_layout, out0_layout);
+      // Launch kernel
+      exec.e("kernel::run($, $, $);", out0_ptr_name, in0_ptr_name,
+             in1_ptr_name);
+      break;
+    }
+    case type::KNOperatorType::KN_REDUCTION_0_OP:
+    case type::KNOperatorType::KN_REDUCTION_1_OP:
+    case type::KNOperatorType::KN_REDUCTION_2_OP: {
+      // Reduction op
+      int reduction_dim = op->op_type - type::KN_REDUCTION_0_OP;
+      kn::DTensor &in0 = op->input_tensors.at(0);
+      kn::DTensor &out0 = op->output_tensors.at(0);
+      DTensorMeta meta_in0 = dtensor_metas.at(in0.guid);
+      DTensorMeta meta_out0 = dtensor_metas.at(out0.guid);
+      // The two tensors must have the same shape (except the reduction dim)
+      assert(in0.num_dims == out0.num_dims);
+      for (int i = 0; i < in0.num_dims; i++) {
+        if (i != reduction_dim) {
           assert(in0.dim[i] == out0.dim[i]);
         }
-        if (meta_in0.innermost_dim != meta_out0.innermost_dim) {
-          printf("Warning: In the current implementation of the elementwise "
-                 "unary kernel, global memory access won't be coalesced when "
-                 "input tensor's innermost_dim (%d) != output tensor's "
-                 "innermost_dim (%d)"
-                 "This may cause performance degration\n",
-                 meta_in0.innermost_dim,
-                 meta_out0.innermost_dim);
-        }
-        // Assemble the new shape and stride
-        // We move the innermost dim to the first dim to coalesce global mem
-        // access
-        int innermost_dim = meta_in0.innermost_dim;
-        string in0_layout =
-            mov_last_and_get_layout(in0, meta_in0, innermost_dim);
-        string out0_layout =
-            mov_last_and_get_layout(in0, meta_in0, innermost_dim);
-        // Get tensor ptrs
-        auto [in0_ptr_name, in0_ptr_code] = get_dtensor_ptr(in0);
-        auto [out0_ptr_name, out0_ptr_code] = get_dtensor_ptr(out0);
-        exec.e(in0_ptr_code);
-        exec.e(out0_ptr_code);
-        // Create kernel instance
-        exec.e("using kernel = kn::ElementUnaryKernel<half_t, "
-               "kn::ElementUnaryOpType::$, $, $>;",
-               get_kn_op_str(op->op_type),
-               in0_layout,
-               out0_layout);
-        // Launch kernel
-        exec.e("kernel::run($, $);", out0_ptr_name, in0_ptr_name);
-        break;
       }
-      case type::KNOperatorType::KN_ADD_OP:
-      case type::KNOperatorType::KN_MUL_OP:
-      case type::KNOperatorType::KN_DIV_OP: {
-        // Elemwise binary op
-        kn::DTensor &in0 = op->input_tensors.at(0);
-        kn::DTensor &in1 = op->input_tensors.at(1);
-        kn::DTensor &out0 = op->output_tensors.at(0);
-        DTensorMeta meta_in0 = dtensor_metas.at(in0.guid);
-        DTensorMeta meta_in1 = dtensor_metas.at(in1.guid);
-        DTensorMeta meta_out0 = dtensor_metas.at(out0.guid);
-        // The three tensors must have the same shape except broadcasting
-        // dimensions
-        assert(in0.num_dims == in1.num_dims && in0.num_dims == out0.num_dims);
-        for (int i = 0; i < in0.num_dims; i++) {
-          assert(in0.dim[i] == out0.dim[i] || in0.dim[i] == 1);
-          assert(in1.dim[i] == out0.dim[i] || in1.dim[i] == 1);
-        }
-        if (meta_in0.innermost_dim != meta_in1.innermost_dim ||
-            meta_in0.innermost_dim != meta_out0.innermost_dim) {
-          printf("Warning: In the current implementation of the elementwise "
-                 "binary kernel, global memory access won't be coalesced when "
-                 "input tensors' innermost_dim (%d and %d) != output tensor's "
-                 "innermost_dim (%d)"
-                 "This may cause performance degration\n",
-                 meta_in0.innermost_dim,
-                 meta_in1.innermost_dim,
-                 meta_out0.innermost_dim);
-        }
-        // Assemble the new shape and stride
-        // We move the innermost dim to the first dim to coalesce global mem
-        // access
-        int innermost_dim = meta_in0.innermost_dim;
-        string in0_layout =
-            mov_last_and_get_layout(in0, meta_in0, innermost_dim);
-        string in1_layout =
-            mov_last_and_get_layout(in1, meta_in1, innermost_dim);
-        string out0_layout =
-            mov_last_and_get_layout(out0, meta_out0, innermost_dim);
-        // Get tensor ptrs
-        auto [in0_ptr_name, in0_ptr_code] = get_dtensor_ptr(in0);
-        auto [in1_ptr_name, in1_ptr_code] = get_dtensor_ptr(in1);
-        auto [out0_ptr_name, out0_ptr_code] = get_dtensor_ptr(out0);
-        exec.e(in0_ptr_code);
-        exec.e(in1_ptr_code);
-        exec.e(out0_ptr_code);
-        // Get OPType
-        string op_type_str = op->op_type == type::KN_ADD_OP   ? "ADD"
-                             : op->op_type == type::KN_MUL_OP ? "MUL"
-                             : op->op_type == type::KN_DIV_OP ? "DIV"
-                                                              : "";
-        assert(op_type_str != "");
-        // Create kernel instance
-        exec.e("using kernel = kn::ElementBinaryKernel<half_t, "
-               "kn::ElementBinaryOpType::$, $, $, $>;",
-               op_type_str,
-               in0_layout,
-               in1_layout,
-               out0_layout);
-        // Launch kernel
-        exec.e(
-            "kernel::run($, $, $);", out0_ptr_name, in0_ptr_name, in1_ptr_name);
-        break;
+      // Currently we require them to have the same innermost_dim
+      assert(meta_in0.innermost_dim == meta_out0.innermost_dim);
+      // The size of the reduction dim must be divisible
+      assert(in0.dim[reduction_dim] % out0.dim[reduction_dim] == 0);
+      // Assemble the new shape and stride
+      if (meta_in0.innermost_dim == reduction_dim) {
+        printf("Warning: In the current implementation of the reduction "
+               "kernel, "
+               "global memory access won't be coalesced when reduction_dim == "
+               "innermost_dim. This may cause performance degration\n");
       }
-      case type::KNOperatorType::KN_REDUCTION_0_OP:
-      case type::KNOperatorType::KN_REDUCTION_1_OP:
-      case type::KNOperatorType::KN_REDUCTION_2_OP: {
-        // Reduction op
-        int reduction_dim = op->op_type - type::KN_REDUCTION_0_OP;
-        kn::DTensor &in0 = op->input_tensors.at(0);
-        kn::DTensor &out0 = op->output_tensors.at(0);
-        DTensorMeta meta_in0 = dtensor_metas.at(in0.guid);
-        DTensorMeta meta_out0 = dtensor_metas.at(out0.guid);
-        // The two tensors must have the same shape (except the reduction dim)
-        assert(in0.num_dims == out0.num_dims);
-        for (int i = 0; i < in0.num_dims; i++) {
-          if (i != reduction_dim) {
-            assert(in0.dim[i] == out0.dim[i]);
+      // We move the innermost dim to the first dim to coalesce global mem
+      // access
+      vector<int> new_shape_in0(in0.num_dims);
+      vector<int> new_shape_out0(in0.num_dims);
+      vector<size_t> new_strides_in0(in0.num_dims);
+      vector<size_t> new_strides_out0(in0.num_dims);
+      for (int i = 0; i < in0.num_dims; i++) {
+        int src_dim = (i + meta_in0.innermost_dim) % in0.num_dims;
+        new_shape_in0[i] = in0.dim[src_dim];
+        new_shape_out0[i] = out0.dim[src_dim];
+        new_strides_in0[i] = meta_in0.strides[src_dim];
+        new_strides_out0[i] = meta_out0.strides[src_dim];
+      }
+      int new_reduction_dim =
+          (reduction_dim + in0.num_dims - meta_in0.innermost_dim) %
+          in0.num_dims;
+      string layout_in0 =
+          fmt("Layout<Shape<$>, Stride<$>>", map_to_cute_int(new_shape_in0),
+              map_to_cute_int(new_strides_in0));
+      string layout_out0 =
+          fmt("Layout<Shape<$>, Stride<$>>", map_to_cute_int(new_shape_out0),
+              map_to_cute_int(new_strides_out0));
+      // Get tensor ptrs
+      auto [in0_ptr_name, in0_ptr_code] = get_dtensor_ptr(in0);
+      auto [out0_ptr_name, out0_ptr_code] = get_dtensor_ptr(out0);
+      exec.e(in0_ptr_code);
+      exec.e(out0_ptr_code);
+      // Create kernel instance
+      exec.e("using kernel = kn::ReductionKernel<half_t, $, $, $>;", layout_in0,
+             layout_out0, new_reduction_dim);
+      // Launch kernel
+      exec.e("kernel::run($, $);", out0_ptr_name, in0_ptr_name);
+      break;
+    }
+    case type::KNOperatorType::KN_CUSTOMIZED_OP: {
+      // Customized op
+      kn::KNCustomizedOp const *cur_op =
+          dynamic_cast<kn::KNCustomizedOp const *>(op);
+      // tb::ExecutionPlan const &plan = cur_op->plan;
+      tb::Graph const &bgraph = cur_op->bgraph;
+      // Get DTensor ptrs
+      // We make the aggrement that, when calling a custom kernel, the
+      // arguments are in the order of "output_tensors, input_tensors"
+      vector<string> ptr_names;
+      for (kn::DTensor const &dtensor :
+           Combine(cur_op->output_tensors, cur_op->input_tensors)) {
+        auto [ptr_name, ptr_code] = get_dtensor_ptr(dtensor);
+        exec.e(ptr_code);
+        ptr_names.push_back(ptr_name);
+      }
+      // Transpile
+      CustomOPTranspileResult result;
+      if (config.target_cc == GPU_CC::H100) {
+        result = transpile_kn_custom_op_hopper(cur_op);
+      } else {
+        result = transpile_kn_custom_op(cur_op);
+      }
+
+      if (result.error_type != CUDA_T_SUCCESS) {
+        vector<OutputTensorDirective> output_directives;
+        return TranspileResult{result.error_type, "", 0, 0, output_directives};
+      }
+      if (result.smem_size > max_smem_size) {
+        max_smem_size = result.smem_size;
+      }
+
+      // Checkings against grid dim and block dim
+      if (config.target_cc <= GPU_CC::H100) {
+        // According to
+        // https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#features-and-technical-specifications,
+        // all GPUs up to H100 have the same restriction
+        assert(bgraph.grid_dim.x <= (1LL << 31) - 1);
+        assert(bgraph.grid_dim.y <= 65535);
+        assert(bgraph.grid_dim.z <= 65535);
+        assert((long long)bgraph.grid_dim.x * bgraph.grid_dim.y *
+                   bgraph.grid_dim.z <=
+               (1LL << 31) - 1);
+        assert(bgraph.block_dim.x <= 1024);
+        assert(bgraph.block_dim.y <= 1024);
+        assert(bgraph.block_dim.z <= 64);
+        assert((long long)bgraph.block_dim.x * bgraph.block_dim.y *
+                   bgraph.block_dim.z <=
+               1024);
+      } else {
+        // In the future, we may need to update this part for GPUs later
+        // than H100
+        assert(0);
+      }
+      // Launch kernel
+      exec.e("dim3 grid_dim($, $, $);", bgraph.grid_dim.x, bgraph.grid_dim.y,
+             bgraph.grid_dim.z);
+      exec.e("dim3 block_dim($, $, $);", bgraph.block_dim.x, bgraph.block_dim.y,
+             bgraph.block_dim.z);
+      exec.e("size_t smem_size = $;",
+             result.smem_size + result.tmaParamsList.size() * sizeof(uint64_t) +
+                 SHARE_PIPELINE_SIZE);
+      // init
+
+      exec.e("");
+      exec.e("// define tmas");
+      for (kn::DTensor const &dtensor : cur_op->input_tensors) {
+        auto guid = dtensor.guid;
+        DTensorMeta const &meta = dtensor_metas.at(guid);
+      }
+
+      // get tma params;
+      if (config.target_cc >= GPU_CC::H100) {
+        // get_hopper_tmas(hopper_tma, result.tmaParamsList);
+
+        // for inputs that needs tma async copy, init the TMAs
+        std::string tmas;
+        std::string tma_tmps;
+        std::string m_inputs;
+        for (int i = 0; i < result.tmaParamsList.size(); i++) {
+          auto const &tmaParams = result.tmaParamsList.at(i);
+          m_inputs.append(tmaParams.m_input ? "true" : "false");
+
+          tmas.append(fmt("tma_$, ", tmaParams.guid));
+          tma_tmps.append(fmt("decltype(tma_$)", tmaParams.guid));
+
+          if (i != result.tmaParamsList.size() - 1) {
+            tma_tmps.append(", ");
+            m_inputs.append(", ");
           }
         }
-        // Currently we require them to have the same innermost_dim
-        assert(meta_in0.innermost_dim == meta_out0.innermost_dim);
-        // The size of the reduction dim must be divisible
-        assert(in0.dim[reduction_dim] % out0.dim[reduction_dim] == 0);
-        // Assemble the new shape and stride
-        if (meta_in0.innermost_dim == reduction_dim) {
-          printf(
-              "Warning: In the current implementation of the reduction "
-              "kernel, "
-              "global memory access won't be coalesced when reduction_dim == "
-              "innermost_dim. This may cause performance degration\n");
-        }
-        // We move the innermost dim to the first dim to coalesce global mem
-        // access
-        vector<int> new_shape_in0(in0.num_dims);
-        vector<int> new_shape_out0(in0.num_dims);
-        vector<size_t> new_strides_in0(in0.num_dims);
-        vector<size_t> new_strides_out0(in0.num_dims);
-        for (int i = 0; i < in0.num_dims; i++) {
-          int src_dim = (i + meta_in0.innermost_dim) % in0.num_dims;
-          new_shape_in0[i] = in0.dim[src_dim];
-          new_shape_out0[i] = out0.dim[src_dim];
-          new_strides_in0[i] = meta_in0.strides[src_dim];
-          new_strides_out0[i] = meta_out0.strides[src_dim];
-        }
-        int new_reduction_dim =
-            (reduction_dim + in0.num_dims - meta_in0.innermost_dim) %
-            in0.num_dims;
-        string layout_in0 = fmt("Layout<Shape<$>, Stride<$>>",
-                                map_to_cute_int(new_shape_in0),
-                                map_to_cute_int(new_strides_in0));
-        string layout_out0 = fmt("Layout<Shape<$>, Stride<$>>",
-                                 map_to_cute_int(new_shape_out0),
-                                 map_to_cute_int(new_strides_out0));
-        // Get tensor ptrs
-        auto [in0_ptr_name, in0_ptr_code] = get_dtensor_ptr(in0);
-        auto [out0_ptr_name, out0_ptr_code] = get_dtensor_ptr(out0);
-        exec.e(in0_ptr_code);
-        exec.e(out0_ptr_code);
-        // Create kernel instance
-        exec.e("using kernel = kn::ReductionKernel<half_t, $, $, $>;",
-               layout_in0,
-               layout_out0,
-               new_reduction_dim);
-        // Launch kernel
-        exec.e("kernel::run($, $);", out0_ptr_name, in0_ptr_name);
-        break;
-      }
-      case type::KNOperatorType::KN_CUSTOMIZED_OP: {
-        // Customized op
-        kn::KNCustomizedOp const *cur_op =
-            dynamic_cast<kn::KNCustomizedOp const *>(op);
-        // tb::ExecutionPlan const &plan = cur_op->plan;
-        tb::Graph const &bgraph = cur_op->bgraph;
-        // Get DTensor ptrs
-        // We make the aggrement that, when calling a custom kernel, the
-        // arguments are in the order of "output_tensors, input_tensors"
-        vector<string> ptr_names;
-        for (kn::DTensor const &dtensor :
-             Combine(cur_op->output_tensors, cur_op->input_tensors)) {
-          auto [ptr_name, ptr_code] = get_dtensor_ptr(dtensor);
-          exec.e(ptr_code);
-          ptr_names.push_back(ptr_name);
-        }
-        // Transpile
-        CustomOPTranspileResult result;
-        if (config.target_cc == GPU_CC::H100) {
-          result = transpile_kn_custom_op_hopper(cur_op);
-        } else {
-          result = transpile_kn_custom_op(cur_op);
-        }
 
-        if (result.error_type != CUDA_T_SUCCESS) {
-          vector<OutputTensorDirective> output_directives;
-          return TranspileResult{
-              result.error_type, "", 0, 0, output_directives};
-        }
-        if (result.smem_size > max_smem_size) {
-          max_smem_size = result.smem_size;
-        }
+        exec.e(fmt("std::vector<bool> minputs = {$};", m_inputs));
+        for (int i = 0; i < result.tmaParamsList.size(); i++) {
+          auto const &tmaParams = result.tmaParamsList.at(i);
 
-        // Checkings against grid dim and block dim
-        if (config.target_cc <= GPU_CC::H100) {
-          // According to
-          // https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#features-and-technical-specifications,
-          // all GPUs up to H100 have the same restriction
-          assert(bgraph.grid_dim.x <= (1LL << 31) - 1);
-          assert(bgraph.grid_dim.y <= 65535);
-          assert(bgraph.grid_dim.z <= 65535);
-          assert((long long)bgraph.grid_dim.x * bgraph.grid_dim.y *
-                     bgraph.grid_dim.z <=
-                 (1LL << 31) - 1);
-          assert(bgraph.block_dim.x <= 1024);
-          assert(bgraph.block_dim.y <= 1024);
-          assert(bgraph.block_dim.z <= 64);
-          assert((long long)bgraph.block_dim.x * bgraph.block_dim.y *
-                     bgraph.block_dim.z <=
-                 1024);
-        } else {
-          // In the future, we may need to update this part for GPUs later
-          // than H100
-          assert(0);
-        }
-        // Launch kernel
-        exec.e("dim3 grid_dim($, $, $);",
-               bgraph.grid_dim.x,
-               bgraph.grid_dim.y,
-               bgraph.grid_dim.z);
-        exec.e("dim3 block_dim($, $, $);",
-               bgraph.block_dim.x,
-               bgraph.block_dim.y,
-               bgraph.block_dim.z);
-        exec.e("size_t smem_size = $;",
-               result.smem_size +
-                   result.tmaParamsList.size() * sizeof(uint64_t) +
-                   SHARE_PIPELINE_SIZE);
-        // init
-
-        exec.e("");
-        exec.e("// define tmas");
-        for (kn::DTensor const &dtensor : cur_op->input_tensors) {
-          auto guid = dtensor.guid;
-          DTensorMeta const &meta = dtensor_metas.at(guid);
-        }
-
-        // get tma params;
-        if (config.target_cc >= GPU_CC::H100) {
-          // get_hopper_tmas(hopper_tma, result.tmaParamsList);
-
-          // for inputs that needs tma async copy, init the TMAs
-          std::string tmas;
-          std::string tma_tmps;
-          std::string m_inputs;
-          for (int i = 0; i < result.tmaParamsList.size(); i++) {
-            auto const &tmaParams = result.tmaParamsList.at(i);
-            m_inputs.append(tmaParams.m_input ? "true" : "false");
-
-            tmas.append(fmt("tma_$, ", tmaParams.guid));
-            tma_tmps.append(fmt("decltype(tma_$)", tmaParams.guid));
-
-            if (i != result.tmaParamsList.size() - 1) {
-              tma_tmps.append(", ");
-              m_inputs.append(", ");
-            }
-          }
-
-          exec.e(fmt("std::vector<bool> minputs = {$};", m_inputs));
-          for (int i = 0; i < result.tmaParamsList.size(); i++) {
-            auto const &tmaParams = result.tmaParamsList.at(i);
-
-            if (tmaParams.m_input) {
-              exec.e(fmt("static constexpr cute::GMMA::Major GmmaMajor_$ = "
-                         "GMMA::Major::K;",
-                         tmaParams.guid));
-            } else {
-              exec.e(fmt("static constexpr cute::GMMA::Major GmmaMajor_$ = "
-                         "GMMA::Major::MN;",
-                         tmaParams.guid));
-            }
-            exec.e(fmt("using DstMNKLayout_$ = $;",
-                       tmaParams.guid,
-                       tmaParams.dstLayout));
-
-            exec.e(fmt("using SrcMNKLayout_$ = $;",
-                       tmaParams.guid,
-                       tmaParams.srcLayout));
-
-            exec.e(fmt(
-                "using SmemLayoutAtom_$ = "
-                "decltype(cutlass::gemm::collective::detail::ss_smem_selector<"
-                "GmmaMajor_$, half_t, decltype(get<0>(DstMNKLayout_${})), "
-                "decltype(get<1>(DstMNKLayout_${}))>());",
-                tmaParams.guid,
-                tmaParams.guid,
-                tmaParams.guid,
-                tmaParams.guid));
-            exec.e(fmt("using DstPipeLayout_$ = "
-                       "decltype(tile_to_shape(SmemLayoutAtom_${}, "
-                       "make_shape(shape<0>(DstMNKLayout_${}), "
-                       "shape<1>(DstMNKLayout_${}), Int<tb::kStages>{}), "
-                       "Step<_1, _2, _3>{}));",
-                       tmaParams.guid,
-                       tmaParams.guid,
-                       tmaParams.guid,
+          if (tmaParams.m_input) {
+            exec.e(fmt("static constexpr cute::GMMA::Major GmmaMajor_$ = "
+                       "GMMA::Major::K;",
                        tmaParams.guid));
-            exec.e(fmt("auto g_tensor_$ = "
-                       "make_tensor(make_gmem_ptr<half_t>(dtensor$), "
-                       "SrcMNKLayout_${});",
-                       tmaParams.guid,
-                       tmaParams.guid,
-                       tmaParams.guid));
-            exec.e(
-                fmt("auto tma_$ = make_tma_copy($, g_tensor_$, "
-                    "DstPipeLayout_${}(_, _, Int<0>{}, Shape<_$, _$, _$>{}));",
-                    tmaParams.guid,
-                    tmaParams.tiledCopy,
-                    tmaParams.guid,
-                    tmaParams.guid,
-                    std::get<0>(tmaParams.clusterSize),
-                    std::get<1>(tmaParams.clusterSize),
-                    std::get<2>(tmaParams.clusterSize)));
-
-            exec.e("");
-          }
-
-          if (result.tmaParamsList.size() > 0) {
-            exec.e("cudaFuncSetAttribute($<$>, "
-                   "cudaFuncAttributeMaxDynamicSharedMemorySize, $);",
-                   result.func_name,
-                   tma_tmps,
-                   result.smem_size +
-                       result.tmaParamsList.size() * sizeof(uint64_t) + 3000);
           } else {
-            exec.e("cudaFuncSetAttribute($, "
-                   "cudaFuncAttributeMaxDynamicSharedMemorySize, $);",
-                   result.func_name,
-                   result.smem_size +
-                       result.tmaParamsList.size() * sizeof(uint64_t) + 3000);
+            exec.e(fmt("static constexpr cute::GMMA::Major GmmaMajor_$ = "
+                       "GMMA::Major::MN;",
+                       tmaParams.guid));
           }
+          exec.e(fmt("using DstMNKLayout_$ = $;", tmaParams.guid,
+                     tmaParams.dstLayout));
 
-          exec.e("$<<<grid_dim, block_dim, smem_size>>>($ $);",
-                 result.func_name,
-                 tmas,
-                 ptr_names);
+          exec.e(fmt("using SrcMNKLayout_$ = $;", tmaParams.guid,
+                     tmaParams.srcLayout));
+
+          exec.e(fmt(
+              "using SmemLayoutAtom_$ = "
+              "decltype(cutlass::gemm::collective::detail::ss_smem_selector<"
+              "GmmaMajor_$, half_t, decltype(get<0>(DstMNKLayout_${})), "
+              "decltype(get<1>(DstMNKLayout_${}))>());",
+              tmaParams.guid, tmaParams.guid, tmaParams.guid, tmaParams.guid));
+          exec.e(fmt("using DstPipeLayout_$ = "
+                     "decltype(tile_to_shape(SmemLayoutAtom_${}, "
+                     "make_shape(shape<0>(DstMNKLayout_${}), "
+                     "shape<1>(DstMNKLayout_${}), Int<tb::kStages>{}), "
+                     "Step<_1, _2, _3>{}));",
+                     tmaParams.guid, tmaParams.guid, tmaParams.guid,
+                     tmaParams.guid));
+          exec.e(fmt("auto g_tensor_$ = "
+                     "make_tensor(make_gmem_ptr<half_t>(dtensor$), "
+                     "SrcMNKLayout_${});",
+                     tmaParams.guid, tmaParams.guid, tmaParams.guid));
+          exec.e(fmt("auto tma_$ = make_tma_copy($, g_tensor_$, "
+                     "DstPipeLayout_${}(_, _, Int<0>{}, Shape<_$, _$, _$>{}));",
+                     tmaParams.guid, tmaParams.tiledCopy, tmaParams.guid,
+                     tmaParams.guid, std::get<0>(tmaParams.clusterSize),
+                     std::get<1>(tmaParams.clusterSize),
+                     std::get<2>(tmaParams.clusterSize)));
+
+          exec.e("");
+        }
+
+        if (result.tmaParamsList.size() > 0) {
+          exec.e("cudaFuncSetAttribute($<$>, "
+                 "cudaFuncAttributeMaxDynamicSharedMemorySize, $);",
+                 result.func_name, tma_tmps,
+                 result.smem_size +
+                     result.tmaParamsList.size() * sizeof(uint64_t) + 3000);
         } else {
           exec.e("cudaFuncSetAttribute($, "
                  "cudaFuncAttributeMaxDynamicSharedMemorySize, $);",
                  result.func_name,
                  result.smem_size +
                      result.tmaParamsList.size() * sizeof(uint64_t) + 3000);
-          exec.e("$<<<grid_dim, block_dim, smem_size>>>( $);",
-                 result.func_name,
-                 ptr_names);
         }
 
-        custom_kernels.e(result.code);
-
-        break;
+        exec.e("$<<<grid_dim, block_dim, smem_size>>>($ $);", result.func_name,
+               tmas, ptr_names);
+      } else {
+        exec.e("cudaFuncSetAttribute($, "
+               "cudaFuncAttributeMaxDynamicSharedMemorySize, $);",
+               result.func_name,
+               result.smem_size +
+                   result.tmaParamsList.size() * sizeof(uint64_t) + 3000);
+        exec.e("$<<<grid_dim, block_dim, smem_size>>>( $);", result.func_name,
+               ptr_names);
       }
-      default:
-        assert(false && ("Unsupported operator type: " +
-                         std::to_string(int(op->op_type)))
-                            .c_str());
+
+      custom_kernels.e(result.code);
+
+      break;
+    }
+    default:
+      assert(false &&
+             ("Unsupported operator type: " + std::to_string(int(op->op_type)))
+                 .c_str());
     }
     exec.e("}");
   }
   init.e("}");
   exec.e("}");
 
-  string code = fmt("$\n$\n$\n$\n$\n",
-                    header.to_string(),
-                    custom_kernels.to_string(),
-                    init.to_string(),
-                    hopper_tma.to_string(),
-                    exec.to_string());
+  string code =
+      fmt("$\n$\n$\n$\n$\n", header.to_string(), custom_kernels.to_string(),
+          init.to_string(), hopper_tma.to_string(), exec.to_string());
   vector<OutputTensorDirective> output_directives;
   for (kn::DTensor const &dtensor : this->mugraph_output_tensors) {
     assert(dtensor_metas.find(dtensor.guid) != dtensor_metas.end());
@@ -614,8 +563,8 @@ TranspileResult Transpiler::transpile_ugraph() {
         vector<int>(dtensor.dim, dtensor.dim + dtensor.num_dims),
         vector<size_t>(meta.strides, meta.strides + dtensor.num_dims)});
   }
-  return TranspileResult{
-      CUDA_T_SUCCESS, code, this->d_buf_size, max_smem_size, output_directives};
+  return TranspileResult{CUDA_T_SUCCESS, code, this->d_buf_size, max_smem_size,
+                         output_directives};
 }
 
 } // namespace transpiler

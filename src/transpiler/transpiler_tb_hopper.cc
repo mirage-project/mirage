@@ -467,7 +467,8 @@ Transpiler::transpile_kn_custom_op_hopper(kn::KNCustomizedOp const *op) {
           tmaParamsList.push_back((TMAParams(
               dtensor_meta.input_idx, dtensor.guid, stensor.guid, SrcMNKLayout,
               smem_layout, stensor_meta.m_input, fmt("shape(${})", smem_layout),
-              {cluster_size.at(0), cluster_size.at(1), cluster_size.at(2)}, dims, strides, partition_logic, g.forloop_range,
+              {cluster_size.at(0), cluster_size.at(1), cluster_size.at(2)},
+              dims, strides, partition_logic, g.forloop_range,
               m_input ? forloop_dim : (dtensor.num_dims - 1 - forloop_dim),
               tiledCopy)));
         }
