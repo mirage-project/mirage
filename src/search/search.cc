@@ -710,12 +710,12 @@ void KernelGraphGenerator::generate_next_symbolic_operator(
     // Evaluate the abstract expressions
     std::vector<std::shared_ptr<AbstractExpr>> abs_exprs;
     {
-      std::vector<std::shared_ptr<AbstractExpr>> kn_abs_exprs, input_exprs;
+      std::vector<std::shared_ptr<AbstractExpr>> kn_abs_exprs, input_exprs, output_exprs;
       abstract_expr_eval(*kn_graph, kn_abs_exprs);
       input_exprs = vector_map(input_dtensor_indices_for_tb_graph, [&](int i) {
         return kn_abs_exprs[i];
       });
-      abstract_expr_eval(*tb_graph, input_exprs, abs_exprs);
+      abstract_expr_eval(*tb_graph, input_exprs, abs_exprs, output_exprs);
     }
 
     // Case B2: Generate pre-defined threadblock operator

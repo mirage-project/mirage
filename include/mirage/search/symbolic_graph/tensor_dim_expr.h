@@ -14,6 +14,11 @@ public:
   virtual ~TensorDimExpr() = default;
 
   virtual int get_value(DimVarAssignments const &assignments) const = 0;
+  virtual bool is_var() const;
+  virtual bool is_const() const;
+  virtual bool is_add() const;
+  virtual bool is_mul() const;
+  virtual bool is_div() const;
 };
 
 class TensorDimVar : public TensorDimExpr {
@@ -22,6 +27,7 @@ public:
   tensor_dim_var_index_t index;
 
   int get_value(DimVarAssignments const &assignments) const override;
+  bool is_var() const override;
 };
 
 class TensorDimConst : public TensorDimExpr {
@@ -30,6 +36,7 @@ public:
   int value;
 
   int get_value(DimVarAssignments const &assignments) const override;
+  bool is_const() const override;
 };
 
 class TensorDimAdd : public TensorDimExpr {
@@ -38,6 +45,7 @@ public:
   std::shared_ptr<TensorDimExpr> lhs, rhs;
 
   int get_value(DimVarAssignments const &assignments) const override;
+  bool is_add() const override;
 };
 
 class TensorDimMul : public TensorDimExpr {
@@ -46,6 +54,7 @@ public:
   std::shared_ptr<TensorDimExpr> lhs, rhs;
 
   int get_value(DimVarAssignments const &assignments) const override;
+  bool is_mul() const override;
 };
 
 class TensorDimDiv : public TensorDimExpr {
@@ -54,6 +63,7 @@ public:
   std::shared_ptr<TensorDimExpr> lhs, rhs;
 
   int get_value(DimVarAssignments const &assignments) const override;
+  bool is_div() const override;
 };
 
 }
