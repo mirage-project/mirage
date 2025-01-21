@@ -18,7 +18,8 @@ public:
 
 class SymbolicSTensor {
 public:
-  SymbolicSTensor(std::vector<SymbolicTensorDim> dim_templates, bool after_accum);
+  SymbolicSTensor(std::vector<SymbolicTensorDim> dim_templates,
+                  bool after_accum);
 
   std::vector<SymbolicTensorDim> dims;
   bool after_accum;
@@ -26,5 +27,5 @@ public:
   operator json() const;
 };
 
-}
-}
+} // namespace search
+} // namespace mirage

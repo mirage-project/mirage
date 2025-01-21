@@ -11,9 +11,9 @@
 #include "mirage/search/range_propagation/irange.h"
 #include "mirage/search/search_context.h"
 #include "mirage/search/search_state_manager.h"
+#include "mirage/search/symbolic_graph/symbolic_graph.h"
 #include "mirage/search/verification/verifier.h"
 #include "mirage/utils/json_utils.h"
-#include "mirage/search/symbolic_graph/symbolic_graph.h"
 
 namespace mirage {
 namespace search {
@@ -76,10 +76,10 @@ private:
 
   // symbolic method
   void generate_next_symbolic_operator(
-    std::shared_ptr<SymbolicKNGraph> kn_graph,
-    std::shared_ptr<SymbolicTBGraph> tb_graph,
-    std::vector<int> input_dtensor_indices_for_tb_graph,
-    SearchLevel level);
+      std::shared_ptr<SymbolicKNGraph> kn_graph,
+      std::shared_ptr<SymbolicTBGraph> tb_graph,
+      std::vector<int> input_dtensor_indices_for_tb_graph,
+      SearchLevel level);
   bool instantiate_symbolic_graph(SymbolicKNGraph const &symbolic_graph);
 
   void preprocess(kernel::Graph const &computation_graph);

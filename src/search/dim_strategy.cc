@@ -436,7 +436,10 @@ std::vector<std::vector<int>> DimStrategy::get_customized_input_cand_idx(
   }
 }
 
-void generate_input_map_cand(std::vector<SymbolicDTensor> const &tensors, std::vector<int3> imap_to_explore, std::vector<int3> cur, std::vector<std::vector<int3>> &results) {
+void generate_input_map_cand(std::vector<SymbolicDTensor> const &tensors,
+                             std::vector<int3> imap_to_explore,
+                             std::vector<int3> cur,
+                             std::vector<std::vector<int3>> &results) {
   if (cur.size() == tensors.size()) {
     results.push_back(cur);
     return;
@@ -448,8 +451,8 @@ void generate_input_map_cand(std::vector<SymbolicDTensor> const &tensors, std::v
   }
 }
 
-std::vector<std::vector<int3>>
-      DimStrategy::get_input_map_cand(std::vector<SymbolicDTensor> const &tensors) {
+std::vector<std::vector<int3>> DimStrategy::get_input_map_cand(
+    std::vector<SymbolicDTensor> const &tensors) {
   std::vector<std::vector<int3>> results;
   std::vector<int3> imap_to_explore = {
       {0, -1, 1},
@@ -466,7 +469,8 @@ std::vector<std::vector<int3>>
   return results;
 }
 
-std::vector<int3> DimStrategy::get_output_map_cand(SymbolicTBGraph const &tb_graph) {
+std::vector<int3>
+    DimStrategy::get_output_map_cand(SymbolicTBGraph const &tb_graph) {
   std::vector<int3> results;
   std::vector<int3> omap_to_explore = config.omap_to_explore;
   omap_to_explore = vector_concat(omap_to_explore,
@@ -502,8 +506,8 @@ void generate_forloop_dim(std::vector<SymbolicDTensor> const &input_tensors,
   }
 }
 
-std::vector<std::vector<int>>
-      DimStrategy::get_forloop_dim_cand(std::vector<SymbolicDTensor> const &input_tensers) {
+std::vector<std::vector<int>> DimStrategy::get_forloop_dim_cand(
+    std::vector<SymbolicDTensor> const &input_tensers) {
   std::vector<std::vector<int>> results;
   std::vector<int> fmap_to_explore = {-1, 0, 1, 2};
   if (!config.fmap_to_explore.empty()) {
@@ -516,9 +520,8 @@ std::vector<std::vector<int>>
   return results;
 }
 
-
-std::vector<std::vector<int>>
-    DimStrategy::get_customized_input_cand_idx(std::vector<SymbolicDTensor> const &all_inputs) {      
+std::vector<std::vector<int>> DimStrategy::get_customized_input_cand_idx(
+    std::vector<SymbolicDTensor> const &all_inputs) {
   int num_inputs = all_inputs.size();
 
   if (all_inputs.size() == 3) {

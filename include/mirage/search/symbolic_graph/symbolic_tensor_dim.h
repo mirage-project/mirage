@@ -14,5 +14,5 @@ public:
   operator json() const;
 };
 
-}
-}
+} // namespace search
+} // namespace mirage

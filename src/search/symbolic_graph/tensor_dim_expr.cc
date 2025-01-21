@@ -7,11 +7,17 @@ TensorDimVar::TensorDimVar(tensor_dim_var_index_t index) : index(index) {}
 
 TensorDimConst::TensorDimConst(int value) : value(value) {}
 
-TensorDimAdd::TensorDimAdd(std::shared_ptr<TensorDimExpr> lhs, std::shared_ptr<TensorDimExpr> rhs) : lhs(lhs), rhs(rhs) {}
+TensorDimAdd::TensorDimAdd(std::shared_ptr<TensorDimExpr> lhs,
+                           std::shared_ptr<TensorDimExpr> rhs)
+    : lhs(lhs), rhs(rhs) {}
 
-TensorDimMul::TensorDimMul(std::shared_ptr<TensorDimExpr> lhs, std::shared_ptr<TensorDimExpr> rhs) : lhs(lhs), rhs(rhs) {}
+TensorDimMul::TensorDimMul(std::shared_ptr<TensorDimExpr> lhs,
+                           std::shared_ptr<TensorDimExpr> rhs)
+    : lhs(lhs), rhs(rhs) {}
 
-TensorDimDiv::TensorDimDiv(std::shared_ptr<TensorDimExpr> lhs, std::shared_ptr<TensorDimExpr> rhs) : lhs(lhs), rhs(rhs) {}
+TensorDimDiv::TensorDimDiv(std::shared_ptr<TensorDimExpr> lhs,
+                           std::shared_ptr<TensorDimExpr> rhs)
+    : lhs(lhs), rhs(rhs) {}
 
 std::shared_ptr<TensorDimVar> dim_expr_make_var(tensor_dim_var_index_t index) {
   return std::make_shared<TensorDimVar>(index);
@@ -21,15 +27,21 @@ std::shared_ptr<TensorDimConst> dim_expr_make_const(int value) {
   return std::make_shared<TensorDimConst>(value);
 }
 
-std::shared_ptr<TensorDimAdd> dim_expr_make_add(std::shared_ptr<TensorDimExpr> lhs, std::shared_ptr<TensorDimExpr> rhs) {
+std::shared_ptr<TensorDimAdd>
+    dim_expr_make_add(std::shared_ptr<TensorDimExpr> lhs,
+                      std::shared_ptr<TensorDimExpr> rhs) {
   return std::make_shared<TensorDimAdd>(lhs, rhs);
 }
 
-std::shared_ptr<TensorDimMul> dim_expr_make_mul(std::shared_ptr<TensorDimExpr> lhs, std::shared_ptr<TensorDimExpr> rhs) {
+std::shared_ptr<TensorDimMul>
+    dim_expr_make_mul(std::shared_ptr<TensorDimExpr> lhs,
+                      std::shared_ptr<TensorDimExpr> rhs) {
   return std::make_shared<TensorDimMul>(lhs, rhs);
 }
 
-std::shared_ptr<TensorDimDiv> dim_expr_make_div(std::shared_ptr<TensorDimExpr> lhs, std::shared_ptr<TensorDimExpr> rhs) {
+std::shared_ptr<TensorDimDiv>
+    dim_expr_make_div(std::shared_ptr<TensorDimExpr> lhs,
+                      std::shared_ptr<TensorDimExpr> rhs) {
   return std::make_shared<TensorDimDiv>(lhs, rhs);
 }
 
@@ -113,5 +125,5 @@ TensorDimDiv::operator json() const {
   return json{{"opt", "div"}, {"lhs", *lhs}, {"rhs", *rhs}};
 }
 
-}
-}
+} // namespace search
+} // namespace mirage

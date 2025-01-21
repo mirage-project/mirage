@@ -245,33 +245,36 @@ std::shared_ptr<AbstractExpr> abstract_expr_make_var(std::string const &name) {
   return std::make_shared<Var>(name);
 }
 
-std::shared_ptr<AbstractExpr> abstract_expr_make_add(
-    std::shared_ptr<AbstractExpr> lhs, std::shared_ptr<AbstractExpr> rhs) {
+std::shared_ptr<AbstractExpr>
+    abstract_expr_make_add(std::shared_ptr<AbstractExpr> lhs,
+                           std::shared_ptr<AbstractExpr> rhs) {
   return std::make_shared<Add>(lhs, rhs);
 }
 
-std::shared_ptr<AbstractExpr> abstract_expr_make_mul(
-    std::shared_ptr<AbstractExpr> lhs, std::shared_ptr<AbstractExpr> rhs) {
+std::shared_ptr<AbstractExpr>
+    abstract_expr_make_mul(std::shared_ptr<AbstractExpr> lhs,
+                           std::shared_ptr<AbstractExpr> rhs) {
   return std::make_shared<Mul>(lhs, rhs);
 }
 
-std::shared_ptr<AbstractExpr> abstract_expr_make_div(
-    std::shared_ptr<AbstractExpr> lhs, std::shared_ptr<AbstractExpr> rhs) {
+std::shared_ptr<AbstractExpr>
+    abstract_expr_make_div(std::shared_ptr<AbstractExpr> lhs,
+                           std::shared_ptr<AbstractExpr> rhs) {
   return std::make_shared<Div>(lhs, rhs);
 }
 
-std::shared_ptr<AbstractExpr> abstract_expr_make_exp(
-    std::shared_ptr<AbstractExpr> exponent) {
+std::shared_ptr<AbstractExpr>
+    abstract_expr_make_exp(std::shared_ptr<AbstractExpr> exponent) {
   return std::make_shared<Exp>(exponent);
 }
 
-std::shared_ptr<AbstractExpr> abstract_expr_make_silu(
-    std::shared_ptr<AbstractExpr> a) {
+std::shared_ptr<AbstractExpr>
+    abstract_expr_make_silu(std::shared_ptr<AbstractExpr> a) {
   return std::make_shared<Silu>(a);
 }
 
-std::shared_ptr<AbstractExpr> abstract_expr_make_rms(
-    int red_deg, std::shared_ptr<AbstractExpr> elems) {
+std::shared_ptr<AbstractExpr>
+    abstract_expr_make_rms(int red_deg, std::shared_ptr<AbstractExpr> elems) {
   assert(red_deg > 0);
   if (red_deg == 1) {
     return elems;
@@ -279,15 +282,14 @@ std::shared_ptr<AbstractExpr> abstract_expr_make_rms(
   return std::make_shared<RMS>(red_deg, elems);
 }
 
-std::shared_ptr<AbstractExpr> abstract_expr_make_red(
-    int red_deg, std::shared_ptr<AbstractExpr> summand) {
+std::shared_ptr<AbstractExpr>
+    abstract_expr_make_red(int red_deg, std::shared_ptr<AbstractExpr> summand) {
   assert(red_deg > 0);
   if (red_deg == 1) {
     return summand;
   }
   return std::make_shared<Red>(red_deg, summand);
 }
-
 
 } // namespace search
 } // namespace mirage

@@ -50,8 +50,8 @@ struct DimStrategy {
   }
   std::vector<std::vector<int>>
       get_customized_input_cand_idx(std::vector<DTensor> const &all_inputs);
-  std::vector<std::vector<int>>
-      get_customized_input_cand_idx(std::vector<SymbolicDTensor> const &all_inputs);
+  std::vector<std::vector<int>> get_customized_input_cand_idx(
+      std::vector<SymbolicDTensor> const &all_inputs);
 
   GeneratorConfig config;
 };

@@ -80,7 +80,10 @@ public:
 
 class TBOutputOpArgs : public OpArgs {
 public:
-  TBOutputOpArgs(SymbolicDTensor dtensor, int3 output_map, int forloop_dim, mirage::type::TBEpilogueType epilogue);
+  TBOutputOpArgs(SymbolicDTensor dtensor,
+                 int3 output_map,
+                 int forloop_dim,
+                 mirage::type::TBEpilogueType epilogue);
   SymbolicDTensor dtensor;
   int3 output_map;
   int forloop_dim;
@@ -121,5 +124,5 @@ public:
   operator json() const override;
 };
 
-}
-}
+} // namespace search
+} // namespace mirage

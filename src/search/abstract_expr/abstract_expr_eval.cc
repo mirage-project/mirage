@@ -18,11 +18,10 @@ void abstract_expr_eval(
     if (op->op_type == type::TBOperatorType::TB_INPUT_OP) {
       exprs.insert(
           {op->output_tensors[0].guid,
-           exprs.at(
-               static_cast<threadblock::TBInputOp *>(op)->dtensor.guid)});
+           exprs.at(static_cast<threadblock::TBInputOp *>(op)->dtensor.guid)});
     } else if (op->op_type == type::TBOperatorType::TB_OUTPUT_OP) {
       exprs.insert({static_cast<threadblock::TBOutputOp *>(op)->dtensor.guid,
-                       exprs.at(op->input_tensors[0].guid)});
+                    exprs.at(op->input_tensors[0].guid)});
     } else if (op->op_type == type::TBOperatorType::TB_CONCAT_1_OP) {
       assert(g.operators[i + 1]->op_type ==
              type::TBOperatorType::TB_CONCAT_0_OP);
@@ -42,8 +41,8 @@ void abstract_expr_eval(
       exprs.insert(
           {g.operators[i + 2]->output_tensors[0].guid,
            get_abstract_expr(type::TBOperatorType::TB_CONCAT_THEN_MATMUL_OP,
-                       input_tensors,
-                       input_exprs)});
+                             input_tensors,
+                             input_exprs)});
     } else {
       std::vector<std::shared_ptr<AbstractExpr>> input_exprs;
       for (auto const &input_tensor : op->input_tensors) {
@@ -65,14 +64,13 @@ void abstract_expr_eval(
       continue;
     } else if (op->op_type == type::KNOperatorType::KN_INPUT_OP) {
       exprs.insert({op->output_tensors[0].guid,
-                       std::make_shared<Var>("v_" + std::to_string(input_id))});
+                    std::make_shared<Var>("v_" + std::to_string(input_id))});
       input_id++;
     } else if (op->op_type == type::KNOperatorType::KN_RMS_NORM_OP) {
       std::shared_ptr<AbstractExpr> input_expr =
           exprs.at(op->input_tensors[0].guid);
       std::shared_ptr<AbstractExpr> denominator_expr = std::make_shared<RMS>(
-          static_cast<kernel::KNRMSNormOp *>(op)->normalized_size,
-          input_expr);
+          static_cast<kernel::KNRMSNormOp *>(op)->normalized_size, input_expr);
       std::shared_ptr<AbstractExpr> output_expr =
           std::make_shared<Div>(input_expr, denominator_expr);
       exprs.insert({op->output_tensors[0].guid, output_expr});
@@ -106,56 +104,48 @@ void abstract_expr_eval(SymbolicKNGraph const &kn_graph,
       input_id++;
     } else if (kn_graph.operators[i].op_type != type::KN_CUSTOMIZED_OP) {
       // Evaluate the expression for pre-defined operators
-      std::vector<SymbolicDTensor> input_tensors = vector_map(
-          kn_graph.input_indices[i],
-          [&](int i) { return kn_graph.tensors[i]; });
+      std::vector<SymbolicDTensor> input_tensors =
+          vector_map(kn_graph.input_indices[i],
+                     [&](int i) { return kn_graph.tensors[i]; });
       std::vector<std::shared_ptr<AbstractExpr>> input_exprs = vector_map(
-          kn_graph.input_indices[i],
-          [&](int i) { return exprs[i]; });
-      exprs.push_back(get_abstract_expr(kn_graph.operators[i].op_type,
-                                        input_tensors,
-                                        input_exprs,
-                                        kn_graph));
+          kn_graph.input_indices[i], [&](int i) { return exprs[i]; });
+      exprs.push_back(get_abstract_expr(
+          kn_graph.operators[i].op_type, input_tensors, input_exprs, kn_graph));
     } else {
       // Evaluate the expression for customized operators
       assert(kn_graph.operators[i].op_type == type::KN_CUSTOMIZED_OP);
       std::vector<std::shared_ptr<AbstractExpr>> input_exprs = vector_map(
-          kn_graph.input_indices[i],
-          [&](int i) { return exprs[i]; });
+          kn_graph.input_indices[i], [&](int i) { return exprs[i]; });
       std::vector<std::shared_ptr<AbstractExpr>> tb_graph_exprs, output_exprs;
       SymbolicTBGraph const &tb_graph =
           std::static_pointer_cast<KNCustomizedOpArgs>(
               kn_graph.operators[i].args)
               ->tb_graph_template;
-      abstract_expr_eval(tb_graph,
-                         input_exprs,
-                         tb_graph_exprs,
-                         output_exprs);
+      abstract_expr_eval(tb_graph, input_exprs, tb_graph_exprs, output_exprs);
       exprs.insert(exprs.end(), output_exprs.begin(), output_exprs.end());
     }
   }
 }
 
-void abstract_expr_eval(SymbolicTBGraph const &tb_graph,
-                        std::vector<std::shared_ptr<AbstractExpr>> const &input_exprs,
-                        std::vector<std::shared_ptr<AbstractExpr>> &exprs,
-                        std::vector<std::shared_ptr<AbstractExpr>> &output_exprs) {
+void abstract_expr_eval(
+    SymbolicTBGraph const &tb_graph,
+    std::vector<std::shared_ptr<AbstractExpr>> const &input_exprs,
+    std::vector<std::shared_ptr<AbstractExpr>> &exprs,
+    std::vector<std::shared_ptr<AbstractExpr>> &output_exprs) {
   for (size_t i = 0; i < tb_graph.operators.size(); ++i) {
     if (tb_graph.operators[i].op_type == type::TBOperatorType::TB_INPUT_OP) {
       exprs.push_back(input_exprs[i]);
-    } else if (tb_graph.operators[i].op_type == type::TBOperatorType::TB_OUTPUT_OP) {
+    } else if (tb_graph.operators[i].op_type ==
+               type::TBOperatorType::TB_OUTPUT_OP) {
       output_exprs.push_back(exprs[tb_graph.input_indices[i][0]]);
     } else {
-      std::vector<SymbolicSTensor> input_tensors = vector_map(
-          tb_graph.input_indices[i],
-          [&](int i) { return tb_graph.tensors[i]; });
+      std::vector<SymbolicSTensor> input_tensors =
+          vector_map(tb_graph.input_indices[i],
+                     [&](int i) { return tb_graph.tensors[i]; });
       std::vector<std::shared_ptr<AbstractExpr>> input_exprs = vector_map(
-          tb_graph.input_indices[i],
-          [&](int i) { return exprs[i]; });
-      exprs.push_back(get_abstract_expr(tb_graph.operators[i].op_type,
-                                        input_tensors,
-                                        input_exprs,
-                                        tb_graph));
+          tb_graph.input_indices[i], [&](int i) { return exprs[i]; });
+      exprs.push_back(get_abstract_expr(
+          tb_graph.operators[i].op_type, input_tensors, input_exprs, tb_graph));
     }
   }
 }

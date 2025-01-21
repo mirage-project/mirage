@@ -5,28 +5,33 @@
 namespace mirage {
 namespace search {
 
-TensorDimConstraint::TensorDimConstraint(ConstraintType type, SymbolicTensorDim lhs, SymbolicTensorDim rhs)
+TensorDimConstraint::TensorDimConstraint(ConstraintType type,
+                                         SymbolicTensorDim lhs,
+                                         SymbolicTensorDim rhs)
     : type(type), lhs(lhs), rhs(rhs) {}
 
 TensorDimConstraint::operator json() const {
   return json{
-    {"type", type},
-    {"lhs", lhs},
-    {"rhs", rhs},
+      {"type", type},
+      {"lhs", lhs},
+      {"rhs", rhs},
   };
 }
 
-TensorDimConstraint make_equal_constraint(SymbolicTensorDim lhs, SymbolicTensorDim rhs) {
+TensorDimConstraint make_equal_constraint(SymbolicTensorDim lhs,
+                                          SymbolicTensorDim rhs) {
   return TensorDimConstraint(ConstraintType::EQUAL, lhs, rhs);
 }
 
-TensorDimConstraint make_equal_or_one_constraint(SymbolicTensorDim lhs, SymbolicTensorDim rhs) {
+TensorDimConstraint make_equal_or_one_constraint(SymbolicTensorDim lhs,
+                                                 SymbolicTensorDim rhs) {
   return TensorDimConstraint(ConstraintType::EQUAL_OR_ONE, lhs, rhs);
 }
 
 bool check_satisfiability(std::vector<TensorDimConstraint> const &pre_conds,
                           std::vector<TensorDimConstraint> const &constraints) {
-  auto probably_equal = [](std::shared_ptr<TensorDimExpr> el, std::shared_ptr<TensorDimExpr> er) {
+  auto probably_equal = [](std::shared_ptr<TensorDimExpr> el,
+                           std::shared_ptr<TensorDimExpr> er) {
     {
       TensorDimConst *cl = dynamic_cast<TensorDimConst *>(el.get());
       TensorDimConst *cr = dynamic_cast<TensorDimConst *>(er.get());
@@ -56,7 +61,8 @@ bool check_satisfiability(std::vector<TensorDimConstraint> const &pre_conds,
 
   for (TensorDimConstraint const &constraint : constraints) {
     // rule-based checking for now
-    std::shared_ptr<TensorDimExpr> el = constraint.lhs.dim_expr, er = constraint.rhs.dim_expr;
+    std::shared_ptr<TensorDimExpr> el = constraint.lhs.dim_expr,
+                                   er = constraint.rhs.dim_expr;
     if (constraint.type == ConstraintType::EQUAL) {
       return probably_equal(el, er);
     }
@@ -78,5 +84,5 @@ bool check_satisfiability(std::vector<TensorDimConstraint> const &pre_conds,
   return true;
 }
 
-}
-}
+} // namespace search
+} // namespace mirage
