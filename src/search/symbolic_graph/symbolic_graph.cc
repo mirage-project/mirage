@@ -17,7 +17,20 @@ SymbolicTBGraph::SymbolicTBGraph() :
   forloop_range(SymbolicTensorDim(std::make_shared<TensorDimVar>(next_dim_variable_index++)))
 {}
 
-threadblock::Graph *SymbolicTBGraph::to_threadblock_graph(DimVarAssignments const &assignments, std::vector<kernel::DTensor> const &inputs) {
+bool SymbolicTBGraph::remove_last_operator() {
+  if (operators.empty()) {
+    return false;
+  }
+  operators.pop_back();
+  for (size_t i = 0; i < output_indices.back().size(); i++) {
+    tensors.pop_back();
+  }
+  input_indices.pop_back();
+  output_indices.pop_back();
+  return true;
+}
+
+threadblock::Graph *SymbolicTBGraph::to_threadblock_graph(DimVarAssignments const &assignments, std::vector<kernel::DTensor> const &inputs) const {
   dim3 grid_dim_val(assignments.get_value(grid_dim[0]), assignments.get_value(grid_dim[1]), assignments.get_value(grid_dim[2]));
   dim3 block_dim_val(assignments.get_value(block_dim[0]), assignments.get_value(block_dim[1]), assignments.get_value(block_dim[2]));
   int forloop_range_val = assignments.get_value(forloop_range);
@@ -316,7 +329,7 @@ bool SymbolicTBGraph::add_output(int input_index, int3 output_map, int forloop_d
   return true;
 }
 
-mirage::kernel::Graph *SymbolicKNGraph::to_kernel_graph(DimVarAssignments const &assignments) {
+mirage::kernel::Graph *SymbolicKNGraph::to_kernel_graph(DimVarAssignments const &assignments) const {
   kernel::Graph *graph = new kernel::Graph();
   std::vector<kernel::DTensor> tensors_val;
   for (size_t i = 0; i < this->operators.size(); ++i) {
@@ -345,6 +358,19 @@ mirage::kernel::Graph *SymbolicKNGraph::to_kernel_graph(DimVarAssignments const 
     }
   }
   return graph;
+}
+
+bool SymbolicKNGraph::remove_last_operator() {
+  if (operators.empty()) {
+    return false;
+  }
+  operators.pop_back();
+  for (int _ : output_indices.back()) {
+    tensors.pop_back();
+  }
+  input_indices.pop_back();
+  output_indices.pop_back();
+  return true;
 }
 
 bool SymbolicKNGraph::add_operator(type::KNOperatorType op_type, std::vector<int> input_indices) {
@@ -481,6 +507,30 @@ bool SymbolicKNGraph::add_output(int input_index, std::vector<size_t> output_str
   this->input_indices.push_back({input_index});
   this->output_indices.push_back({});
   return true;
+}
+
+SymbolicTBGraph::operator json() const {
+  return json{
+    {"grid_dim", grid_dim},
+    {"block_dim", block_dim},
+    {"forloop_range", forloop_range},
+    {"reduction_dimx", reduction_dimx},
+    {"operators", operators},
+    {"tensors", tensors},
+    {"input_indices", input_indices},
+    {"output_indices", output_indices},
+    {"conds", conds},
+  };
+}
+
+SymbolicKNGraph::operator json() const {
+  return json{
+    {"operators", operators},
+    {"tensors", tensors},
+    {"input_indices", input_indices},
+    {"output_indices", output_indices},
+    {"conds", conds},
+  };
 }
 
 }

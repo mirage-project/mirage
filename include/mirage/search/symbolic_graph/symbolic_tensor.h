@@ -12,6 +12,8 @@ public:
   SymbolicDTensor(std::vector<SymbolicTensorDim> dim_templates);
 
   std::vector<SymbolicTensorDim> dims;
+
+  operator json() const;
 };
 
 class SymbolicSTensor {
@@ -20,6 +22,8 @@ public:
 
   std::vector<SymbolicTensorDim> dims;
   bool after_accum;
+
+  operator json() const;
 };
 
 }

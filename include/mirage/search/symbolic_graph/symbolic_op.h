@@ -15,6 +15,8 @@ public:
 
   type::KNOperatorType op_type;
   std::shared_ptr<OpArgs> args;
+
+  operator json() const;
 };
 
 class SymbolicTBOp {
@@ -24,6 +26,8 @@ public:
 
   type::TBOperatorType op_type;
   std::shared_ptr<OpArgs> args;
+
+  operator json() const;
 };
 
 }

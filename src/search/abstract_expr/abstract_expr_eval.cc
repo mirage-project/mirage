@@ -114,7 +114,8 @@ void abstract_expr_eval(SymbolicKNGraph const &kn_graph,
           [&](int i) { return exprs[i]; });
       exprs.push_back(get_abstract_expr(kn_graph.operators[i].op_type,
                                         input_tensors,
-                                        input_exprs));
+                                        input_exprs,
+                                        kn_graph));
     } else {
       // Evaluate the expression for customized operators
       assert(kn_graph.operators[i].op_type == type::KN_CUSTOMIZED_OP);
@@ -153,7 +154,8 @@ void abstract_expr_eval(SymbolicTBGraph const &tb_graph,
           [&](int i) { return exprs[i]; });
       exprs.push_back(get_abstract_expr(tb_graph.operators[i].op_type,
                                         input_tensors,
-                                        input_exprs));
+                                        input_exprs,
+                                        tb_graph));
     }
   }
 }

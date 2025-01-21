@@ -12,5 +12,19 @@ SymbolicTBOp::SymbolicTBOp(type::TBOperatorType op_type, std::shared_ptr<OpArgs>
 
 SymbolicTBOp::SymbolicTBOp(type::TBOperatorType op_type) : op_type(op_type), args(std::make_shared<EmptyOpArgs>()) {}
 
+SymbolicKNOp::operator json() const {
+  return json{
+    {"op_type", op_type},
+    {"args", *args},
+  };
+}
+
+SymbolicTBOp::operator json() const {
+  return json{
+    {"op_type", op_type},
+    {"args", *args},
+  };
+}
+
 }
 }

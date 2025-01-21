@@ -1,6 +1,7 @@
 #pragma once
 
 #include "mirage/search/symbolic_graph/dim_var_assignments.h"
+#include "mirage/utils/json_utils.h"
 
 #include <memory>
 #include <string>
@@ -19,6 +20,8 @@ public:
   virtual bool is_add() const;
   virtual bool is_mul() const;
   virtual bool is_div() const;
+
+  virtual operator json() const = 0;
 };
 
 class TensorDimVar : public TensorDimExpr {
@@ -28,7 +31,11 @@ public:
 
   int get_value(DimVarAssignments const &assignments) const override;
   bool is_var() const override;
+
+  operator json() const override;
 };
+
+std::shared_ptr<TensorDimVar> dim_expr_make_var(tensor_dim_var_index_t index);
 
 class TensorDimConst : public TensorDimExpr {
 public:
@@ -37,7 +44,11 @@ public:
 
   int get_value(DimVarAssignments const &assignments) const override;
   bool is_const() const override;
+
+  operator json() const override;
 };
+
+std::shared_ptr<TensorDimConst> dim_expr_make_const(int value);
 
 class TensorDimAdd : public TensorDimExpr {
 public:
@@ -46,7 +57,11 @@ public:
 
   int get_value(DimVarAssignments const &assignments) const override;
   bool is_add() const override;
+
+  operator json() const override;
 };
+
+std::shared_ptr<TensorDimAdd> dim_expr_make_add(std::shared_ptr<TensorDimExpr> lhs, std::shared_ptr<TensorDimExpr> rhs);
 
 class TensorDimMul : public TensorDimExpr {
 public:
@@ -55,7 +70,11 @@ public:
 
   int get_value(DimVarAssignments const &assignments) const override;
   bool is_mul() const override;
+
+  operator json() const override;
 };
+
+std::shared_ptr<TensorDimMul> dim_expr_make_mul(std::shared_ptr<TensorDimExpr> lhs, std::shared_ptr<TensorDimExpr> rhs);
 
 class TensorDimDiv : public TensorDimExpr {
 public:
@@ -64,7 +83,11 @@ public:
 
   int get_value(DimVarAssignments const &assignments) const override;
   bool is_div() const override;
+
+  operator json() const override;
 };
+
+std::shared_ptr<TensorDimDiv> dim_expr_make_div(std::shared_ptr<TensorDimExpr> lhs, std::shared_ptr<TensorDimExpr> rhs);
 
 }
 }

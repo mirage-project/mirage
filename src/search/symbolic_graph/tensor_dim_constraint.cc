@@ -8,8 +8,20 @@ namespace search {
 TensorDimConstraint::TensorDimConstraint(ConstraintType type, SymbolicTensorDim lhs, SymbolicTensorDim rhs)
     : type(type), lhs(lhs), rhs(rhs) {}
 
+TensorDimConstraint::operator json() const {
+  return json{
+    {"type", type},
+    {"lhs", lhs},
+    {"rhs", rhs},
+  };
+}
+
 TensorDimConstraint make_equal_constraint(SymbolicTensorDim lhs, SymbolicTensorDim rhs) {
   return TensorDimConstraint(ConstraintType::EQUAL, lhs, rhs);
+}
+
+TensorDimConstraint make_equal_or_one_constraint(SymbolicTensorDim lhs, SymbolicTensorDim rhs) {
+  return TensorDimConstraint(ConstraintType::EQUAL_OR_ONE, lhs, rhs);
 }
 
 bool check_satisfiability(std::vector<TensorDimConstraint> const &pre_conds,

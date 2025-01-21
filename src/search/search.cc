@@ -8,6 +8,7 @@
 #include "mirage/search/verification/probabilistic_verifier.h"
 #include "mirage/utils/containers.h"
 #include "mirage/utils/json_utils.h"
+#include "mirage/search/symbolic_graph/op_args.h"
 
 #include <fstream>
 #include <iostream>
@@ -24,7 +25,7 @@ KernelGraphGenerator::KernelGraphGenerator(
     : config(config), dim_strategy(DimStrategy(config)), filename(filename),
       num_thread(config.search_thread), verbose(verbose),
       num_total_random_tests(0), num_valid_kernel_graphs(0),
-      num_total_states(0), num_tasks(0), max_depth(5) {
+      num_total_states(0), num_symbolic_graphs(0), num_tasks(0), max_depth(5) {
   preprocess(computation_graph);
 }
 
@@ -429,6 +430,24 @@ void KernelGraphGenerator::generate_kernel_graphs() {
          num_valid_kernel_graphs.load());
 }
 
+void KernelGraphGenerator::generate_kernel_graphs_symbolic() {
+  start_time = std::chrono::steady_clock::now();
+  std::shared_ptr<SymbolicKNGraph> kn_graph = std::make_shared<SymbolicKNGraph>();
+
+  for (auto const &input_attr : computation_graph_input_attrs) {
+    auto [dim, data_type, layout, strides] = input_attr;
+    // FIXME: remove the layout attr since we use the strides
+    // to describe the layout
+    kn_graph->add_input(dim, strides);
+  }
+
+  generate_next_symbolic_operator(kn_graph, nullptr, {}, SearchLevel::LV_KERNEL);
+  printf("[Search] Symbolic search finished. Time elapsed: %fsec\n",
+         std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                       start_time)
+             .count());
+}
+
 void KernelGraphGenerator::preprocess(kernel::Graph const &computation_graph) {
   for (kernel::KNOperator *op : computation_graph.operators) {
     if (op->op_type == type::KNOperatorType::KN_INPUT_OP) {
@@ -591,7 +610,7 @@ void KernelGraphGenerator::generate_next_symbolic_operator(
             return abs_exprs[i];
           });
           // Obtain the abstract expression of the output tensor
-          std::shared_ptr<AbstractExpr> expr = get_abstract_expr(op_type, input_tensors, input_exprs);          
+          std::shared_ptr<AbstractExpr> expr = get_abstract_expr(op_type, input_tensors, input_exprs, *kn_graph);          
           // Check if the abstract expression is a subexpression of the final output
           if (!check_abstract_expr(expr)) {
             continue;
@@ -737,7 +756,7 @@ void KernelGraphGenerator::generate_next_symbolic_operator(
         });
 
         // Obtain the abstract expression of the output tensor
-        std::shared_ptr<AbstractExpr> expr = get_abstract_expr(op_type, input_tensors, input_exprs);
+        std::shared_ptr<AbstractExpr> expr = get_abstract_expr(op_type, input_tensors, input_exprs, *tb_graph);
         // Check if the abstract expression is a subexpression of the final output
         if (!check_abstract_expr(expr)) {
           continue;
@@ -753,6 +772,79 @@ void KernelGraphGenerator::generate_next_symbolic_operator(
       }
     }
   }
+}
+
+bool KernelGraphGenerator::instantiate_symbolic_graph(SymbolicKNGraph const &symbolic_graph) {
+  {
+    ++num_symbolic_graphs;
+    return false;
+  }
+
+  // TODO: move to SearchConfig
+  std::vector<int> grid_dim_cands = {1, 4, 8, 16, 32, 64, 128};
+  std::vector<int> frange_cands = {1, 2, 4, 8, 16, 32, 64};
+
+  auto get_var_index = [](SymbolicTensorDim const &dim) {
+    assert(dim.dim_expr->is_var());
+    std::shared_ptr<TensorDimVar> var = std::static_pointer_cast<TensorDimVar>(dim.dim_expr);
+    return var->index;
+  };
+
+  auto combine_candidate_assignments = [](std::vector<std::vector<DimVarAssignments>> const &assignment_sets) {
+    std::vector<DimVarAssignments> combined_assignments = assignment_sets[0];
+    for (size_t i = 1; i < assignment_sets.size(); ++i) {
+      std::vector<DimVarAssignments> new_combined_assignments;
+      for (DimVarAssignments const &assignments : combined_assignments) {
+        for (DimVarAssignments const &new_assignments : assignment_sets[i]) {
+          new_combined_assignments.push_back(combine_assignments(assignments, new_assignments));
+        }
+      }
+      combined_assignments = new_combined_assignments;
+    }
+    return combined_assignments;
+  };
+
+  auto get_tb_graph_assignments = [&](SymbolicTBGraph const &tb_graph) {
+    std::vector<DimVarAssignments> candidate_assignments;
+    for (int grid_dim_x : grid_dim_cands) {
+      for (int grid_dim_y : grid_dim_cands) {
+        for (int grid_dim_z : grid_dim_cands) {
+          for (int frange : frange_cands) {
+            DimVarAssignments assignments;
+            assignments.assign(get_var_index(tb_graph.grid_dim[0]), grid_dim_x);
+            assignments.assign(get_var_index(tb_graph.grid_dim[1]), grid_dim_y);
+            assignments.assign(get_var_index(tb_graph.grid_dim[2]), grid_dim_z);
+            assignments.assign(get_var_index(tb_graph.forloop_range), frange);
+            candidate_assignments.push_back(assignments);
+          }
+        }
+      }
+    }
+    return candidate_assignments;
+  };
+
+  auto get_kn_graph_assignments = [&](SymbolicKNGraph const &kn_graph) {
+    std::vector<std::vector<DimVarAssignments>> assignment_sets;
+    for (SymbolicKNOp const &op : kn_graph.operators) {
+      if (op.op_type == type::KNOperatorType::KN_CUSTOMIZED_OP) {
+        std::shared_ptr<KNCustomizedOpArgs> args = std::static_pointer_cast<KNCustomizedOpArgs>(op.args);
+        std::vector<DimVarAssignments> tb_graph_assignments = get_tb_graph_assignments(args->tb_graph_template);
+        assignment_sets.push_back(tb_graph_assignments);
+      }
+    }
+    return combine_candidate_assignments(assignment_sets);
+  };
+
+  bool at_least_one_valid = false;
+  for (DimVarAssignments const &assignments : get_kn_graph_assignments(symbolic_graph)) {
+    kernel::Graph *instantiated_graph = symbolic_graph.to_kernel_graph(assignments);
+    if (verify(*instantiated_graph)) {
+      at_least_one_valid = true;
+      this->generated_graphs.push_back(json(*instantiated_graph));
+    }
+  }
+
+  return at_least_one_valid;
 }
 
 } // namespace search

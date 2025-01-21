@@ -26,6 +26,7 @@ public:
                        bool verbose = false);
 
   void generate_kernel_graphs();
+  void generate_kernel_graphs_symbolic();
 
   GeneratorConfig config;
   DimStrategy dim_strategy;
@@ -48,6 +49,7 @@ private:
   std::atomic<int> num_total_random_tests;
   std::atomic<int> num_valid_kernel_graphs;
   std::atomic<int> num_total_states;
+  std::atomic<int> num_symbolic_graphs;
 
   // Time
   std::chrono::time_point<std::chrono::steady_clock> start_time;

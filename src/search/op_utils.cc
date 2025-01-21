@@ -78,35 +78,27 @@ int get_input_number(type::TBOperatorType op) {
   assert(false && "Unsupported operator");
 }
 
-std::shared_ptr<AbstractExpr>
-    make_reduction_pattern(int dim, std::shared_ptr<AbstractExpr> opd) {
-  if (dim == 1) {
-    return opd;
-  }
-  return std::make_shared<Red>(dim, opd);
-}
-
 std::shared_ptr<AbstractExpr> get_abstract_expr(type::KNOperatorType op,
                                           DTensor const &tensor,
                                           std::shared_ptr<AbstractExpr> opd) {
   assert(opd != nullptr);
   switch (op) {
     case type::KNOperatorType::KN_REDUCTION_0_OP:
-      return make_reduction_pattern(tensor.dim[0], opd);
+      return abstract_expr_make_red(tensor.dim[0], opd);
     case type::KNOperatorType::KN_REDUCTION_1_OP:
       if (tensor.num_dims <= 1) {
         return nullptr;
       }
-      return make_reduction_pattern(tensor.dim[1], opd);
+      return abstract_expr_make_red(tensor.dim[1], opd);
     case type::KNOperatorType::KN_REDUCTION_2_OP:
       if (tensor.num_dims <= 2) {
         return nullptr;
       }
-      return make_reduction_pattern(tensor.dim[2], opd);
+      return abstract_expr_make_red(tensor.dim[2], opd);
     case type::KNOperatorType::KN_EXP_OP:
-      return std::make_shared<Exp>(opd);
+      return abstract_expr_make_exp(opd);
     case type::KNOperatorType::KN_SILU_OP:
-      return std::make_shared<Silu>(opd);
+      return abstract_expr_make_silu(opd);
     case type::KNOperatorType::KN_OUTPUT_OP:
       return opd;
     default:
@@ -125,58 +117,57 @@ std::shared_ptr<AbstractExpr> get_abstract_expr(type::TBOperatorType op,
   int forloop_range = tensor.owner_op->bgraph->forloop_range;
   switch (op) {
     case type::TBOperatorType::TB_EXP_OP:
-      return std::make_shared<Exp>(opd);
+      return abstract_expr_make_exp(opd);
     case type::TBOperatorType::TB_SILU_OP:
-      return std::make_shared<Silu>(opd);
+      return abstract_expr_make_silu(opd);
     case type::TBOperatorType::TB_RMS_NORM_OP: {
-      return std::make_shared<Div>(
-          opd, std::make_shared<RMS>(tensor.dim[tensor.num_dims - 1], opd));
+      return abstract_expr_make_div(opd, abstract_expr_make_rms(tensor.dim[tensor.num_dims - 1], opd));
     }
     case type::TBOperatorType::TB_REDUCTION_0_OP:
-      return make_reduction_pattern(tensor.dim[0], opd);
+      return abstract_expr_make_red(tensor.dim[0], opd);
     case type::TBOperatorType::TB_REDUCTION_1_OP:
       if (tensor.num_dims <= 1) {
         return nullptr;
       }
-      return make_reduction_pattern(tensor.dim[1], opd);
+      return abstract_expr_make_red(tensor.dim[1], opd);
     case type::TBOperatorType::TB_REDUCTION_2_OP:
       if (tensor.num_dims <= 2) {
         return nullptr;
       }
-      return make_reduction_pattern(tensor.dim[2], opd);
+      return abstract_expr_make_red(tensor.dim[2], opd);
     case type::TBOperatorType::TB_REDUCTION_0_TO_DIMX_OP:
       if (tensor.dim[0] <= reduction_dimx) {
         return nullptr;
       }
-      return make_reduction_pattern(tensor.dim[0] / reduction_dimx, opd);
+      return abstract_expr_make_red(tensor.dim[0] / reduction_dimx, opd);
     case type::TBOperatorType::TB_REDUCTION_1_TO_DIMX_OP:
       if (tensor.num_dims <= 1 || tensor.dim[1] <= reduction_dimx) {
         return nullptr;
       }
-      return make_reduction_pattern(tensor.dim[1] / reduction_dimx, opd);
+      return abstract_expr_make_red(tensor.dim[1] / reduction_dimx, opd);
     case type::TBOperatorType::TB_REDUCTION_2_TO_DIMX_OP:
       if (tensor.num_dims <= 2 || tensor.dim[2] <= reduction_dimx) {
         return nullptr;
       }
-      return make_reduction_pattern(tensor.dim[2] / reduction_dimx, opd);
+      return abstract_expr_make_red(tensor.dim[2] / reduction_dimx, opd);
     case type::TBOperatorType::TB_FORLOOP_ACCUM_NO_RED_OP: {
-      return make_reduction_pattern(forloop_range, opd);
+      return abstract_expr_make_red(forloop_range, opd);
     }
     case type::TBOperatorType::TB_FORLOOP_ACCUM_RED_LD_MEAN_OP:
     case type::TBOperatorType::TB_FORLOOP_ACCUM_RED_LD_SUM_OP: {
-      return make_reduction_pattern(
+      return abstract_expr_make_red(
           forloop_range * tensor.dim[tensor.num_dims - 1], opd);
     }
     case type::TBOperatorType::TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP: {
       if (tensor.dim[tensor.num_dims - 1] <= reduction_dimx) {
         return nullptr;
       }
-      return make_reduction_pattern(
+      return abstract_expr_make_red(
           forloop_range * tensor.dim[tensor.num_dims - 1] / reduction_dimx,
           opd);
     }
     case type::TBOperatorType::TB_FORLOOP_ACCUM_RED_LD_RMS_OP: {
-      return std::make_shared<RMS>(
+      abstract_expr_make_rms(
           forloop_range * tensor.dim[tensor.num_dims - 1], opd);
     }
     default:
@@ -194,14 +185,14 @@ std::shared_ptr<AbstractExpr> get_abstract_expr(type::KNOperatorType op,
   assert(rhs != nullptr);
   switch (op) {
     case type::KNOperatorType::KN_MATMUL_OP:
-      return make_reduction_pattern(tensor_l.dim[tensor_l.num_dims - 1],
-                                    std::make_shared<Mul>(lhs, rhs));
+      return abstract_expr_make_red(tensor_l.dim[tensor_l.num_dims - 1],
+                                    abstract_expr_make_mul(lhs, rhs));
     case type::KNOperatorType::KN_ADD_OP:
-      return std::make_shared<Add>(lhs, rhs);
+      return abstract_expr_make_add(lhs, rhs);
     case type::KNOperatorType::KN_DIV_OP:
-      return std::make_shared<Div>(lhs, rhs);
+      return abstract_expr_make_div(lhs, rhs);
     case type::KNOperatorType::KN_MUL_OP:
-      return std::make_shared<Mul>(lhs, rhs);
+      return abstract_expr_make_mul(lhs, rhs);
     default:
       assert(false);
   }
@@ -216,14 +207,14 @@ std::shared_ptr<AbstractExpr> get_abstract_expr(type::TBOperatorType op,
   assert(rhs != nullptr);
   switch (op) {
     case type::TBOperatorType::TB_MATMUL_OP:
-      return make_reduction_pattern(tensor_l.dim[tensor_l.num_dims - 1],
-                                    std::make_shared<Mul>(lhs, rhs));
+      return abstract_expr_make_red(tensor_l.dim[tensor_l.num_dims - 1],
+                                    abstract_expr_make_mul(lhs, rhs));
     case type::TBOperatorType::TB_ADD_OP:
-      return std::make_shared<Add>(lhs, rhs);
+      return abstract_expr_make_add(lhs, rhs);
     case type::TBOperatorType::TB_DIV_OP:
-      return std::make_shared<Div>(lhs, rhs);
+      return abstract_expr_make_div(lhs, rhs);
     case type::TBOperatorType::TB_MUL_OP:
-      return std::make_shared<Mul>(lhs, rhs);
+      return abstract_expr_make_mul(lhs, rhs);
     default:
       assert(false);
   }
@@ -273,11 +264,11 @@ std::shared_ptr<AbstractExpr>
     int num_dims = tensors[0].num_dims;
     int reduction_dim1 = tensors[0].dim[num_dims - 1],
         reduction_dim2 = tensors[1].dim[num_dims - 1];
-    return std::make_shared<Add>(
-        make_reduction_pattern(reduction_dim1,
-                               std::make_shared<Mul>(opds[0], opds[2])),
-        make_reduction_pattern(reduction_dim2,
-                               std::make_shared<Mul>(opds[1], opds[3])));
+    return abstract_expr_make_add(
+        abstract_expr_make_red(reduction_dim1,
+                               abstract_expr_make_mul(opds[0], opds[2])),
+        abstract_expr_make_red(reduction_dim2,
+                               abstract_expr_make_mul(opds[1], opds[3])));
   }
   assert(false && "Unsupported operator");
 }
@@ -318,8 +309,7 @@ std::shared_ptr<AbstractExpr>
     get_abstract_expr(type::TBOperatorType op,
                 std::vector<SymbolicSTensor> const &tensors,
                 std::vector<std::shared_ptr<AbstractExpr>> const &opds,
-                std::shared_ptr<TensorDimExpr> const &forloop_range,
-                int reduction_dimx) {
+                SymbolicTBGraph const &g) {
   // NOTE(@Mengdi Wu): We use the minimium possible size for symbolic tensor dimensions. This may lead to missing pruning opportunities, but it ensures the correctness of the pruning
   switch (op) {
     case type::TBOperatorType::TB_INPUT_OP:
@@ -363,29 +353,25 @@ std::shared_ptr<AbstractExpr>
     }
     case type::TBOperatorType::TB_FORLOOP_ACCUM_NO_RED_OP: {
       assert(opds.size() == 1);
-      assert(forloop_range != nullptr);
-      int reduction_size = get_dimension_size_lower_bound(forloop_range);
+      int reduction_size = get_dimension_size_lower_bound(g.forloop_range);
       return abstract_expr_make_red(reduction_size, opds[0]);
     }
     case type::TBOperatorType::TB_FORLOOP_ACCUM_RED_LD_RMS_OP: {
       assert(opds.size() == 1);
-      assert(forloop_range != nullptr);
-      std::shared_ptr<TensorDimExpr> reduction_size_expr = std::make_shared<TensorDimMul>(forloop_range, tensors[0].dims[tensors[0].dims.size() - 1].dim_expr);
+      std::shared_ptr<TensorDimExpr> reduction_size_expr = dim_expr_make_mul(g.forloop_range.dim_expr, tensors[0].dims[tensors[0].dims.size() - 1].dim_expr);
       int reduction_size = get_dimension_size_lower_bound(reduction_size_expr);
       return abstract_expr_make_rms(reduction_size, opds[0]);
     }
     case type::TBOperatorType::TB_FORLOOP_ACCUM_RED_LD_SUM_OP: {
       assert(opds.size() == 1);
-      assert(forloop_range != nullptr);
-      std::shared_ptr<TensorDimExpr> reduction_size_expr = std::make_shared<TensorDimMul>(forloop_range, tensors[0].dims[tensors[0].dims.size() - 1].dim_expr);
+      std::shared_ptr<TensorDimExpr> reduction_size_expr = dim_expr_make_mul(g.forloop_range.dim_expr, tensors[0].dims[tensors[0].dims.size() - 1].dim_expr);
       int reduction_size = get_dimension_size_lower_bound(reduction_size_expr);
       return abstract_expr_make_red(reduction_size, opds[0]);
     }
     case type::TBOperatorType::TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP: {
       assert(opds.size() == 1);
-      assert(forloop_range != nullptr);
-      std::shared_ptr<TensorDimExpr> reduction_size_expr = std::make_shared<TensorDimMul>(forloop_range, tensors[0].dims[tensors[0].dims.size() - 1].dim_expr);
-      reduction_size_expr = std::make_shared<TensorDimDiv>(reduction_size_expr, std::make_shared<TensorDimConst>(reduction_dimx));
+      std::shared_ptr<TensorDimExpr> reduction_size_expr = dim_expr_make_mul(g.forloop_range.dim_expr, tensors[0].dims[tensors[0].dims.size() - 1].dim_expr);
+      reduction_size_expr = dim_expr_make_div(reduction_size_expr, dim_expr_make_const(g.reduction_dimx));
       int reduction_size = get_dimension_size_lower_bound(reduction_size_expr);
       return abstract_expr_make_red(reduction_size, opds[0]);
     }
@@ -399,7 +385,8 @@ std::shared_ptr<AbstractExpr>
 std::shared_ptr<AbstractExpr>
     get_abstract_expr(type::KNOperatorType op,
                 std::vector<SymbolicDTensor> const &tensors,
-                std::vector<std::shared_ptr<AbstractExpr>> const &opds) {
+                std::vector<std::shared_ptr<AbstractExpr>> const &opds,
+                SymbolicKNGraph const &g) {
   switch (op) {
     case type::KNOperatorType::KN_MATMUL_OP: {
       assert(opds.size() == 2);
@@ -598,6 +585,28 @@ size_t count_op_of_type(type::TBOperatorType op_type,
   int counter = 0;
   for (auto const &op : g.operators) {
     if (op->op_type == op_type) {
+      ++counter;
+    }
+  }
+  return counter;
+}
+
+size_t count_op_of_type(type::KNOperatorType op_type,
+                        SymbolicKNGraph const &g) {
+  int counter = 0;
+  for (auto const &op : g.operators) {
+    if (op.op_type == op_type) {
+      ++counter;
+    }
+  }
+  return counter;
+}
+
+size_t count_op_of_type(type::TBOperatorType op_type,
+                        SymbolicTBGraph const &g) {
+  int counter = 0;
+  for (auto const &op : g.operators) {
+    if (op.op_type == op_type) {
       ++counter;
     }
   }

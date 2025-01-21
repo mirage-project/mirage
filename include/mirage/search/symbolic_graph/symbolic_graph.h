@@ -17,7 +17,7 @@ class SymbolicTBGraph {
 public:
   SymbolicTBGraph();
 
-  threadblock::Graph *to_threadblock_graph(DimVarAssignments const &assignments, std::vector<kernel::DTensor> const &inputs);
+  threadblock::Graph *to_threadblock_graph(DimVarAssignments const &assignments, std::vector<kernel::DTensor> const &inputs) const;
   bool add_operator(type::TBOperatorType op_type, std::vector<int> input_indices);
   bool add_input(SymbolicDTensor dtensor, int3 input_map, int forloop_dim);
   bool add_output(int input_index, int3 output_map, int forloop_dim, mirage::type::TBEpilogueType epilogue_type);
@@ -34,16 +34,18 @@ public:
   std::vector<TensorDimConstraint> conds;
 
   static tensor_dim_var_index_t next_dim_variable_index;
+
+  operator json() const;
 };
 
 class SymbolicKNGraph {
 public:
   SymbolicKNGraph() = default;
 
-  kernel::Graph *to_kernel_graph(DimVarAssignments const &assignments);
+  kernel::Graph *to_kernel_graph(DimVarAssignments const &assignments) const;
   bool add_operator(type::KNOperatorType op_type, std::vector<int> input_indices);
   bool add_customized_operator(SymbolicTBGraph tb_graph, std::vector<int> input_indices);
-  bool add_input(std::vector<int> input_dims, std::vector<size_t> input_strides, int3 input_map);
+  bool add_input(std::vector<int> input_dims, std::vector<size_t> input_strides, int3 input_map = {-1, -1, -1});
   bool add_output(int input_index, std::vector<size_t> output_strides, int3 output_map);
   bool remove_last_operator();
 
@@ -53,6 +55,8 @@ public:
   std::vector<std::vector<int>> output_indices;
 
   std::vector<TensorDimConstraint> conds;
+
+  operator json() const;
 };
 
 }

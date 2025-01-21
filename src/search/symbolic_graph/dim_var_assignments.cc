@@ -4,6 +4,9 @@
 namespace mirage {
 namespace search {
 
+DimVarAssignments::DimVarAssignments(std::unordered_map<tensor_dim_var_index_t, int> const &assignments)
+    : assignments(assignments) {}
+
 void DimVarAssignments::assign(tensor_dim_var_index_t dim_var_index, int value) {
   assignments[dim_var_index] = value;
 }
@@ -14,6 +17,21 @@ int DimVarAssignments::get_value(SymbolicTensorDim const &dim_template) const {
 
 int DimVarAssignments::get_value(tensor_dim_var_index_t dim_var_index) const {
   return assignments.at(dim_var_index);
+}
+
+DimVarAssignments DimVarAssignments::combine(DimVarAssignments const &rhs) const {
+  DimVarAssignments combined_assignments;
+  for (auto const &kv : assignments) {
+    combined_assignments.assign(kv.first, kv.second);
+  }
+  for (auto const &kv : rhs.assignments) {
+    combined_assignments.assign(kv.first, kv.second);
+  }
+  return combined_assignments;
+}
+
+DimVarAssignments combine_assignments(DimVarAssignments const &lhs, DimVarAssignments const &rhs) {
+  return lhs.combine(rhs);
 }
 
 }
