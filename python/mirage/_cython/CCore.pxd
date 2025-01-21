@@ -202,6 +202,8 @@ cdef extern from "mirage/threadblock/graph.h" namespace "mirage::threadblock":
                    dim3 block_dim,
                    int forloop_range,
                    int reduction_dimx)
+
+        assign_task(const CppSTensor* stensor, vector<int> warpgroup_ids)
         CppSTensor* new_input(const CppDTensor* dtensor,
                            int3 input_map,
                            int forloop_dim,

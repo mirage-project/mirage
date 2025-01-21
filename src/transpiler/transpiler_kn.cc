@@ -139,6 +139,10 @@ TranspileResult Transpiler::transpile_ugraph() {
   header.e("#include \"runtime.h\"");
   header.e("using namespace cute;");
 
+  if (config.target_cc == GPU_CC::H100) {
+    header.e("#define ARCH_GRACE_HOPPER");
+  }
+
   CodeKeeper custom_kernels; // This keeps all code for custom kernels
                              // (KNCustomizedOp)
   CodeKeeper init; // This keeps all code in the `_init` function (e.g.

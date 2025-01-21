@@ -39,10 +39,12 @@ public:
   Graph(Graph const &) = delete;
   Graph &operator=(Graph const &) = delete;
   // input operator
-  STensor new_input(mirage::kernel::DTensor const &dtensor,
-                    int3 input_map,
-                    int forloop_dim,
-                    mirage::layout::SmemLayout layout);
+  void assign_task(mirage::kernel::DTensor const &stensor,
+                   vector<int> warpgroup_ids) STensor
+      new_input(mirage::kernel::DTensor const &dtensor,
+                int3 input_map,
+                int forloop_dim,
+                mirage::layout::SmemLayout layout);
   STensor *new_input(mirage::kernel::DTensor const *dtensor,
                      int3 input_map,
                      int forloop_dim,
@@ -152,6 +154,13 @@ public:
   // memory allocator
   off_t smem_offset;
   std::vector<std::pair<off_t, size_t>> allocated_tensors;
+
+
+  //wg schduler variables
+  int num_total_warp_groups = 2;
+  int pipe_stage = 2;
+  std::unordered_set<int> producer_wgs;
+  std::unordered_set<int> consumer_wgs;
 
   using OpType = TBOperator;
   using TensorType = STensor;

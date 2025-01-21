@@ -269,6 +269,8 @@ CustomOPTranspileResult
     Transpiler::transpile_kn_custom_op_hopper(kn::KNCustomizedOp const *op) {
   tb::Graph const &g = op->bgraph;
   int num_threads = g.block_dim.x * g.block_dim.y * g.block_dim.z;
+  int pipe_stage = g.pipe_stage;
+  int num_total_warp_groups = g.num_total_warp_groups;
 
   assert(GPU_CC::H100 == config.target_cc);
 
@@ -308,9 +310,9 @@ CustomOPTranspileResult
     code.e("half_t *stensor$_ptr = (half_t*)(buf + $);", guid, addr);
   }
 
-  code.e("using MainloopPipeline = typename cutlass::PipelineTmaAsync<2>;");
-  code.e("using PipelineState = typename cutlass::PipelineState<2>;");
-  code.e("using SharedStorage = tb::SharedStorage<MainloopPipeline, 2>;");
+  code.e("using MainloopPipeline = typename cutlass::PipelineTmaAsync<$>;", g.pipe_stage);
+  code.e("using PipelineState = typename cutlass::PipelineState<$>;", g.pipe_stage);
+  code.e("using SharedStorage = tb::SharedStorage<MainloopPipeline, $>;", g.pipe_stage);
   code.e("using PipelineParams = typename MainloopPipeline::Params;");
   // code.e("PipelineParams pipeline_params;");
   // code.e("int pipeine_index = 0;");
@@ -518,13 +520,14 @@ CustomOPTranspileResult
   code.e("// warp group and warp information");
 
   code.e("int warp_idx = cutlass::canonical_warp_idx_sync();");
-  code.e("auto warp_group_role = "
-         "tb::WarpGroupRole(cutlass::canonical_warp_group_idx());");
+  code.e("int warpgroup_idx = cutlass::canonical_warp_group_idx();")
+//   code.e("auto warp_group_role = "
+//          "tb::WarpGroupRole(cutlass::canonical_warp_group_idx());");
   code.e(
       "int warp_idx_in_warp_group = warp_idx % cutlass::NumWarpsPerWarpGroup;");
   code.e("int warp_group_thread_idx = thread_idx % "
          "cutlass::NumThreadsPerWarpGroup;");
-  code.e("int lane_predicate = cute::elect_one_sync();");
+  // code.e("int lane_predicate = cute::elect_one_sync();");
 
   code.e("");
 
@@ -633,6 +636,10 @@ CustomOPTranspileResult
   code.e("");
 
   // Clear all accumulators
+  // get all pipeline stensors
+
+
+  std::set<int> pipeline_release_tensors;
   int num_clear_accums = 0;
   for (TBSchedNode const &node : sched.loop_nodes) {
     if (node.type != tb_sched_node_t::OPERATOR) {
@@ -654,7 +661,15 @@ CustomOPTranspileResult
              num_elems,
              accum.guid);
       num_clear_accums += 1;
+    }else if(last_op->op_type == type::TB_INPUT_OP){
+        tb::TBInputOp *input_op = dynamic_cast<tb::TBInputOp *>(last_op);
+        if(input_op->forloop_dim != -1){
+          //record a pipeline start
+          pipeline_release_tensors.insert(input_op->output_tensors.at(0).guid);
+        }
+      }
     }
+
   }
   code.e("");
 
@@ -685,51 +700,12 @@ CustomOPTranspileResult
       // Pick up MMA atom
       // TODO(intlsy) May calculate AB via (B^T A^T)^T when M is relatively
       // small
-      string mma_atom_str;
-      std::tuple<int, int, int> mma_atom_mnk;
-      int mma_atom_num_threads;
       if (GPU_CC::H100 == config.target_cc) {
-        // assert(k % 16 == 0);
         // Hopper wgmma
         assert(num_threads >= 128);
-        mma_atom_str =
-            "SM90_64x64x16_F16F16F16_SS<GMMA::Major::MN, GMMA::Major::MN>";
-        mma_atom_mnk = {64, 64, 16};
-        mma_atom_num_threads = 128;
-
       } else {
         // TODO(intlsy): Support more architectures
         assert(0 && "Unsupported GPU Architecture");
-      }
-      auto [mma_atom_m, mma_atom_n, mma_atom_k] = mma_atom_mnk;
-
-      // Pick up TiledMMAThrLayout
-      // The algorithm is documented in `docs/transpiler/transpiler.md`
-      // TODO(intlsy) Update this algo to be more friendly to small matrix
-      // by dropping some threads
-      assert(num_threads % mma_atom_num_threads == 0);
-      int max_num_tgs = num_threads / mma_atom_num_threads; // tg = thread group
-      float best_score = -1.0f;
-      int best_num_tg_m = -1, best_num_tg_n = -1;
-      for (int num_tg_m = 1; num_tg_m <= max_num_tgs; ++num_tg_m) {
-        for (int num_tg_n = 1; num_tg_m * num_tg_n <= max_num_tgs; ++num_tg_n) {
-          int tiled_mma_m = mma_atom_m * num_tg_m;
-          int tiled_mma_n = mma_atom_n * num_tg_n;
-          int num_tiles_m = ceil_div(m, tiled_mma_m);
-          int num_tiles_n = ceil_div(n, tiled_mma_n);
-          int64_t data_moved_A =
-              ((int64_t)num_tiles_m * tiled_mma_m) * k * num_tg_n;
-          int64_t data_moved_B =
-              ((int64_t)num_tiles_n * tiled_mma_n) * k * num_tg_m;
-          int64_t data_moved = data_moved_A + data_moved_B;
-          float score =
-              (1.0f / data_moved) * (num_tg_m * num_tg_n / (float)max_num_tgs);
-          if (score > best_score) {
-            best_score = score;
-            best_num_tg_m = num_tg_m;
-            best_num_tg_n = num_tg_n;
-          }
-        }
       }
 
       bool is_ldmatrix_avail = config.target_cc >= GPU_CC::T4;
@@ -781,6 +757,38 @@ CustomOPTranspileResult
     code.e("__syncthreads();");
     code.e("");
   }
+
+  // define pipelines
+  for(int i = 0; i < producer_wgs.size(); i++){
+    int warpgroup_id = producer_wgs.at(i);
+    code.e("if(warpgroup_idx == $) {", warpgroup_id);
+
+    for()
+    code.e("}");
+  }
+  
+
+  //prefetch
+  for(int i = 0; i < producer_wgs.size(); i++){
+    int warpgroup_id = producer_wgs.at(i);
+    code.e("if(warpgroup_idx == $) {", warpgroup_id);
+
+    for()
+    code.e("}");
+  }
+
+  //run inputs
+  for(int i = 0; i < producer_wgs.size(); i++){
+    int warpgroup_id = producer_wgs.at(i);
+    code.e("if(warpgroup_idx == $) {", warpgroup_id);
+
+    for()
+    code.e("}");
+  }
+
+
+
+
 
   // int pipe_idx = 0;
   code.e("auto producer_warp_role = "
@@ -1114,8 +1122,6 @@ CustomOPTranspileResult
                  "NUM_THREADS, $>;",
                  get_tb_op_str(cur_op->op_type),
                  epilogue);
-          // add scalar chains for epilogue
-          // code.e("const float scalars[] = {A, B, C}");
           code.e(append_epilogue_scalars(sched_node.ops));
           code.e("Kernel::run(stensor$_ptr, stensor$_ptr, thread_idx, $, "
                  "scalars);",

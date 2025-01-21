@@ -270,8 +270,10 @@ TBMemoryPlan Transpiler::get_threadblock_memory_plan(tb::Graph const &tb_graph,
 
   auto get_phy_size = [&](tb::STensor const &stensor) {
     STensorMeta const &stensor_meta = stensor_metas.at(stensor.guid);
+    // replicate the stensor with the partition dimension of warp groups
     return stensor_meta.num_phy_elems *
-           type::get_datatype_size(stensor.data_type);
+           type::get_datatype_size(stensor.data_type) * warp_partition_dim;
+    
   };
   // auto find_first_used_time = [](sguid_t sguid,
   //                                vector<TBSchedNode> const &nodes,
@@ -367,8 +369,10 @@ TBMemoryPlan Transpiler::get_threadblock_memory_plan(tb::Graph const &tb_graph,
         // find_first_used_time(accum.guid, tb_sched.post_loop_nodes, 2 * T);
         // assert(first_used_time != -1 &&
         //        "An accumulator is not used after the for loop");
+
+        //buffer X number of pipe_stage
         tensor_decls.push_back(
-            {accum.guid, phy_size, 2 * T, earlist_free_time});
+            {accum.guid, phy_size, tb_graph.pipe_stage * T, earlist_free_time});
       } else {
         tensor_decls.push_back({accum.guid,
                                 phy_size,

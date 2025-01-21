@@ -20,9 +20,14 @@ def new_kernel_graph():
     kgraph = core.CyKNGraph()
     return KNGraph(kgraph)
 
-def new_threadblock_graph(grid_dim: tuple, block_dim: tuple, forloop_range: int, reduction_dimx: int):
-    bgraph = core.CyTBGraph(grid_dim, block_dim, forloop_range, reduction_dimx)
+def new_threadblock_graph(grid_dim: tuple, block_dim: tuple, forloop_range: int, reduction_dimx: int, pipe_stage: int, num_warp_groups : int):
+    bgraph = core.CyTBGraph(grid_dim, block_dim, forloop_range, reduction_dimx, pipe_stage, num_warp_groups)
     return TBGraph(bgraph)
+
+# def new_threadblock_async_graph(grid_dim: tuple, block_dim: tuple, forloop_range: int, reduction_dimx: int, stage: int, num_warp_groups : int):
+#     assert(kstage <= forloop_range)
+#     bgraph = core.CyTBGraph(grid_dim, block_dim, forloop_range, reduction_dimx, kstage, num_warp_groups)
+#     return TBASYNCGraph(bgraph)
 
 # Current Version
 __version__ = "0.2.2"

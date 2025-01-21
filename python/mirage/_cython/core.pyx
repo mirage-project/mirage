@@ -733,7 +733,7 @@ cdef class CyKNGraph:
 cdef class CyTBGraph:
     cdef CppTBGraph *p_bgraph #Hold a CppTBGraph instance
 
-    def __cinit__(self, tuple grid_dim = (), tuple block_dim = (), int forloop_range = -1, int dimx = -1, bgraph = None):
+    def __cinit__(self, tuple grid_dim = (), tuple block_dim = (), int forloop_range = -1, int dimx = -1, int pipe_stage = 2, int num_warp_groups = 2, bgraph = None):
         cdef unsigned long long ptr
         cdef dim3 c_grid_dim
         cdef dim3 c_block_dim
