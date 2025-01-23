@@ -5,8 +5,11 @@ class TBGraph:
         self.cygraph = graph
     
     #assign a task to the task group
-    def assign_task(self, stensor: STensor, warpgroup_ids: list):
-        self.cygraph.assign_task(stensor, warpgroup_ids)
+    # def assign_task(self, stensor: STensor, warpgroup_ids: list):
+    #     self.cygraph.assign_task(stensor, warpgroup_ids)
+    
+    def add_warpgroup_config(self, pipeline_stage: int, num_warp_groups: int):
+        self.cygraph.add_warpgroup_config(pipe_stage, num_warp_groups)
 
     def new_input(self, dtensor: DTensor, input_map: tuple, forloop_dim: int):
         return self.cygraph.new_input(dtensor, input_map, forloop_dim)

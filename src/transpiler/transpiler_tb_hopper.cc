@@ -262,6 +262,20 @@ static string get_tb_op_str(type::TBOperatorType type) {
   return toString(type);
 }
 
+static void add_loop_node_consumer_wait_if_need(const TBOperator *op, bool is_in_loop){
+    if(!is_in_loop){
+      return;
+    }
+    for(int i = 0; i < op->input_tensors.size(); i++){
+      int64_t input_id = op->input_tensors.at(i).guid;
+      if(pipeline_inputs.find(input_id) != pipeline_inputs.end()){
+         code.e("consumer_wait(pipeline_$, smem_pipe_read_$);", input_id, input_id);
+         //only wait once
+         pipeline_inputs.erase(input_id);
+      }
+    }
+  }
+
 // Transpile a custom KN operator (i.e. a custom block graph) into CUDA code
 // Will return a CustomOPTranspileResult object. See comments in transpiler.h
 // for more details
@@ -270,7 +284,7 @@ CustomOPTranspileResult
   tb::Graph const &g = op->bgraph;
   int num_threads = g.block_dim.x * g.block_dim.y * g.block_dim.z;
   int pipe_stage = g.pipe_stage;
-  int num_total_warp_groups = g.num_total_warp_groups;
+  
 
   assert(GPU_CC::H100 == config.target_cc);
 
@@ -302,6 +316,8 @@ CustomOPTranspileResult
   code.e("int thread_idx = $;", thread_idx);
   code.e("static constexpr int NUM_THREADS = $;", 128);
 
+  code.e("static constexpr int CONSUMER_NUM_THREADS = $;", NUM_THREADS_PER_GROUP * g.num_consumer_wgs);
+
   // Define STensor as cute::Tensor
   code.e("// STensors");
   code.e("extern __shared__ char buf[];");
@@ -329,9 +345,10 @@ CustomOPTranspileResult
       pipelined_input_ops; // A list of input ops that are software pipelined
                            // (asynchronously G->S copied)
 
-  std::map<int, std::vector<tb::TBOperator const *>> copy_pipelines;
-  std::unordered_set<sguid_t> tma_inputs;
+  // std::map<int, std::vector<tb::TBOperator const *>> copy_pipelines;
   std::vector<tb::TBOperator const *> pipeline_inputs;
+
+  std::map<int64_t, tb::TBOperator const *> pipeline_inputs;
 
   // for release smem_read;
   std::vector<sguid_t> smem_read_output_guids;
@@ -445,15 +462,17 @@ CustomOPTranspileResult
               g.forloop_range,
               m_input ? forloop_dim : (dtensor.num_dims - 1 - forloop_dim));
 
+          code.e("HopperAsyncPipeline<$, STensor$InputAtom::tmaTransactionBytes> hopper_async_pipeline_$", g.pipe_stage ,stensor.guid, stensor.guid);
           code.e("using STensor$InputAtom = tb::InputTMAAsyncCopy<half_t, $, "
-                 "$, decltype(tma_$), MainloopPipeline, PipelineState, $>;",
+                 "$, decltype(tma_$), HopperAsyncPipeline, $, $>;",
                  stensor.guid,
                  smem_layout,
                  SrcMNKLayout,
                  dtensor.guid,
-                 stensor_meta.m_input);
+                 stensor_meta.m_input,
+                 g.forloop_range);
           addr_end += sizeof(uint64_t);
-          pipeline_inputs.push_back(cur_op);
+          pipeline_inputs.push_back(stensor.guid, cur_op);
 
           tmaParamsList.push_back((TMAParams(
               dtensor_meta.input_idx,
@@ -517,16 +536,16 @@ CustomOPTranspileResult
   }
 
   // warp group information
-  code.e("// warp group and warp information");
+//   code.e("// warp group and warp information");
 
-  code.e("int warp_idx = cutlass::canonical_warp_idx_sync();");
-  code.e("int warpgroup_idx = cutlass::canonical_warp_group_idx();")
-//   code.e("auto warp_group_role = "
-//          "tb::WarpGroupRole(cutlass::canonical_warp_group_idx());");
-  code.e(
-      "int warp_idx_in_warp_group = warp_idx % cutlass::NumWarpsPerWarpGroup;");
-  code.e("int warp_group_thread_idx = thread_idx % "
-         "cutlass::NumThreadsPerWarpGroup;");
+//   code.e("int warp_idx = cutlass::canonical_warp_idx_sync();");
+//   code.e("int warpgroup_idx = cutlass::canonical_warp_group_idx();")
+// //   code.e("auto warp_group_role = "
+// //          "tb::WarpGroupRole(cutlass::canonical_warp_group_idx());");
+//   code.e(
+//       "int warp_idx_in_warp_group = warp_idx % cutlass::NumWarpsPerWarpGroup;");
+//   code.e("int warp_group_thread_idx = thread_idx % "
+//          "cutlass::NumThreadsPerWarpGroup;");
   // code.e("int lane_predicate = cute::elect_one_sync();");
 
   code.e("");
@@ -758,190 +777,197 @@ CustomOPTranspileResult
     code.e("");
   }
 
-  // define pipelines
-  for(int i = 0; i < producer_wgs.size(); i++){
-    int warpgroup_id = producer_wgs.at(i);
-    code.e("if(warpgroup_idx == $) {", warpgroup_id);
-
-    for()
-    code.e("}");
-  }
   
 
-  //prefetch
-  for(int i = 0; i < producer_wgs.size(); i++){
-    int warpgroup_id = producer_wgs.at(i);
-    code.e("if(warpgroup_idx == $) {", warpgroup_id);
-
-    for()
-    code.e("}");
+  //prefetch tma descriptors
+  for(const auto &[stensor_id, op] in pipeline_inputs){
+     for(const auto &[stensor_id, op] in pipeline_inputs){
+      tb::TBInputOp const *cur_op0 =
+        dynamic_cast<tb::TBInputOp const *>(op);
+      code.e(fmt("STensor$InputAtom::prefetch(tma_$);",
+                 cur_op0->dtensor.guid));
+  }
   }
 
-  //run inputs
-  for(int i = 0; i < producer_wgs.size(); i++){
-    int warpgroup_id = producer_wgs.at(i);
-    code.e("if(warpgroup_idx == $) {", warpgroup_id);
-
-    for()
-    code.e("}");
+  //define tma copy pipelines
+  for(const auto &[stensor_id, op] in pipeline_inputs){
+     code.e("HopperAsyncPipeline.init($)", );
   }
+  code.e("__syncthreads();");
 
+  
+  
 
-
-
-
-  // int pipe_idx = 0;
-  code.e("auto producer_warp_role = "
-         "tb::ProducerWarpRole(warp_idx_in_warp_group);");
-  int pipeline_inputs_num = pipeline_inputs.size();
-
-  if (pipeline_inputs_num > 0) {
-
-    code.e(fmt("PipelineParams pipeline_params;"));
-    code.e(fmt("PipelineState smem_pipe_read;"));
-    code.e(fmt("pipeline_params.role = ((warp_group_role == "
-               "tb::WarpGroupRole::Producer) && (producer_warp_role == "
-               "tb::ProducerWarpRole::MainloopEpilogue))  ? "
-               "MainloopPipeline::ThreadCategory::Producer : "
-               "MainloopPipeline::ThreadCategory::Consumer;"));
-    code.e(fmt("pipeline_params.is_leader = warp_group_thread_idx == 0;"));
-    code.e(fmt(
-        "pipeline_params.num_consumers = cutlass::NumThreadsPerWarpGroup;"));
-    tb::TBOperator const *input_op0 = pipeline_inputs.at(0);
-    tb::STensor const &input_tensor0 = input_op0->output_tensors.at(0);
-
-    if (pipeline_inputs_num == 1) {
-      code.e(
-          fmt("using InputPipeline = tb::TMACopyPipeline1<STensor$InputAtom>;",
-              input_tensor0.guid));
-      code.e("pipeline_params.transaction_bytes = "
-             "STensor$InputAtom::tmaTransactionBytes;",
-             input_tensor0.guid);
-    } else if (pipeline_inputs_num == 2) {
-      tb::TBOperator const *input_op1 = pipeline_inputs.at(1);
-      tb::STensor const &input_tensor1 = input_op1->output_tensors.at(0);
-      code.e(fmt("using InputPipeline = "
-                 "tb::TMACopyPipeline2<STensor$InputAtom, STensor$InputAtom>;",
-                 input_tensor0.guid,
-                 input_tensor1.guid));
-      code.e(fmt("pipeline_params.transaction_bytes = "
-                 "STensor$InputAtom::tmaTransactionBytes + "
-                 "STensor$InputAtom::tmaTransactionBytes;",
-                 input_tensor0.guid,
-                 input_tensor1.guid));
-    } else if (pipeline_inputs_num == 3) {
-      tb::TBOperator const *input_op1 = pipeline_inputs.at(1);
-      tb::STensor const &input_tensor1 = input_op1->output_tensors.at(0);
-      tb::TBOperator const *input_op2 = pipeline_inputs.at(2);
-      tb::STensor const &input_tensor2 = input_op2->output_tensors.at(0);
-      code.e(
-          fmt("using InputPipeline = tb::TMACopyPipeline3<STensor$InputAtom, "
-              "STensor$InputAtom, STensor$InputAtom>;",
-              input_tensor0.guid,
-              input_tensor1.guid,
-              input_tensor2.guid));
-      code.e(fmt("pipeline_params.transaction_bytes = "
-                 "STensor$InputAtom::tmaTransactionBytes + "
-                 "STensor$InputAtom::tmaTransactionBytes + "
-                 "STensor$InputAtom::tmaTransactionBytes;",
-                 input_tensor0.guid,
-                 input_tensor1.guid,
-                 input_tensor2.guid));
-    } else {
-      assert(false && "at most three inputs");
-    }
-    code.e(
-        fmt("MainloopPipeline pipeline(shared_storage.pipelines[0].mainloop, "
-            "pipeline_params, Shape<_1, _1, _1>{});"));
-    code.e(fmt("PipelineState smem_pipe_write = "
-               "cutlass::make_producer_start_state<MainloopPipeline>();"));
-
-    code.e("__syncthreads();");
-    code.e("if ((warp_group_role == tb::WarpGroupRole::Producer) && "
-           "(warp_idx_in_warp_group == 0)) {");
-    for (int i = 0; i < tmaParamsList.size(); i++) {
-      auto const &tmaParams = tmaParamsList.at(i);
-      code.e("STensor$InputAtom::prefetch(tma_$);",
-             tmaParams.sguid,
-             tmaParams.guid);
-    }
-    code.e("}");
-
-    code.e("if (warp_group_role == tb::WarpGroupRole::Producer) {");
-    code.e("if (warp_idx_in_warp_group == 0) {");
-
-    tb::TBInputOp const *cur_op0 =
-        dynamic_cast<tb::TBInputOp const *>(input_op0);
-    kn::DTensor const &dtensor0 = cur_op0->dtensor;
-    if (pipeline_inputs_num == 1) {
-      code.e(fmt("InputPipeline::run(tma_$, stensor$_ptr, pipeline, "
-                 "smem_pipe_write, $, $, $, $, lane_predicate);",
-                 dtensor0.guid,
-                 input_tensor0.guid,
+  //run producers
+  code.e("if (tb::warpgroup_id() == $) {", g.num_consumer_wgs);
+    code.e("if (tb::warp_id() % NUM_WARPS_PER_GROUP == 0) {");
+     for(const auto &[stensor_id, op] in pipeline_inputs){
+      tb::TBInputOp const *cur_op0 =
+        dynamic_cast<tb::TBInputOp const *>(op);
+      code.e(fmt("STensor$InputAtom::run(tma_$, stensor$_ptr, pipeline, "
+                 "smem_pipe_write, $, $, $, $);",
+                 cur_op0->dtensor.guid,
+                 stensor_id,
                  g.forloop_range,
                  cur_op0->input_map.x,
                  cur_op0->input_map.y,
                  cur_op0->input_map.z));
-    } else if (pipeline_inputs_num == 2) {
-      tb::TBOperator const *input_op1 = pipeline_inputs.at(1);
-      tb::STensor const &input_tensor1 = input_op1->output_tensors.at(0);
-      tb::TBInputOp const *cur_op1 =
-          dynamic_cast<tb::TBInputOp const *>(input_op1);
-      kn::DTensor const &dtensor1 = cur_op1->dtensor;
-
-      code.e("InputPipeline::run(tma_$, tma_$, stensor$_ptr, stensor$_ptr, "
-             "pipeline, smem_pipe_write, $, $, $, $, $, $, $, lane_predicate);",
-             dtensor0.guid,
-             dtensor1.guid,
-             input_tensor0.guid,
-             input_tensor1.guid,
-             g.forloop_range,
-             cur_op0->input_map.x,
-             cur_op0->input_map.y,
-             cur_op0->input_map.z,
-             cur_op1->input_map.x,
-             cur_op1->input_map.y,
-             cur_op1->input_map.z);
-    } else if (pipeline_inputs_num == 3) {
-      tb::TBOperator const *input_op1 = pipeline_inputs.at(1);
-      tb::STensor const &input_tensor1 = input_op1->output_tensors.at(0);
-      tb::TBInputOp const *cur_op1 =
-          dynamic_cast<tb::TBInputOp const *>(input_op1);
-      kn::DTensor const &dtensor1 = cur_op1->dtensor;
-
-      tb::TBOperator const *input_op2 = pipeline_inputs.at(2);
-      tb::STensor const &input_tensor2 = input_op2->output_tensors.at(0);
-      tb::TBInputOp const *cur_op2 =
-          dynamic_cast<tb::TBInputOp const *>(input_op2);
-      kn::DTensor const &dtensor2 = cur_op2->dtensor;
-
-      code.e("InputPipeline::run(tma_$, tma_$, tma_$, stensor$_ptr, "
-             "stensor$_ptr, stensor$_ptr, pipeline, smem_pipe_write, $, $, $, "
-             "$, $, $, $, $, $, $, lane_predicate);",
-             dtensor0.guid,
-             dtensor1.guid,
-             dtensor2.guid,
-             input_tensor0.guid,
-             input_tensor1.guid,
-             input_tensor2.guid,
-             g.forloop_range,
-             cur_op0->input_map.x,
-             cur_op0->input_map.y,
-             cur_op0->input_map.z,
-             cur_op1->input_map.x,
-             cur_op1->input_map.y,
-             cur_op1->input_map.z,
-             cur_op2->input_map.x,
-             cur_op2->input_map.y,
-             cur_op2->input_map.z);
-    } else {
-      assert(false && "at most three inputs");
-    }
-    code.e("}");
-    code.e("}");
-
-    code.e("");
   }
+  code.e("}");
+  code.e("}");
+
+
+  // code.e("auto producer_warp_role = "
+  //        "tb::ProducerWarpRole(warp_idx_in_warp_group);");
+  // int pipeline_inputs_num = pipeline_inputs.size();
+
+  // if (pipeline_inputs_num > 0) {
+
+  //   code.e(fmt("PipelineParams pipeline_params;"));
+  //   code.e(fmt("PipelineState smem_pipe_read;"));
+  //   code.e(fmt("pipeline_params.role = ((warp_group_role == "
+  //              "tb::WarpGroupRole::Producer) && (producer_warp_role == "
+  //              "tb::ProducerWarpRole::MainloopEpilogue))  ? "
+  //              "MainloopPipeline::ThreadCategory::Producer : "
+  //              "MainloopPipeline::ThreadCategory::Consumer;"));
+  //   code.e(fmt("pipeline_params.is_leader = warp_group_thread_idx == 0;"));
+  //   code.e(fmt(
+  //       "pipeline_params.num_consumers = cutlass::NumThreadsPerWarpGroup;"));
+  //   tb::TBOperator const *input_op0 = pipeline_inputs.at(0);
+  //   tb::STensor const &input_tensor0 = input_op0->output_tensors.at(0);
+
+  //   if (pipeline_inputs_num == 1) {
+  //     code.e(
+  //         fmt("using InputPipeline = tb::TMACopyPipeline1<STensor$InputAtom>;",
+  //             input_tensor0.guid));
+  //     code.e("pipeline_params.transaction_bytes = "
+  //            "STensor$InputAtom::tmaTransactionBytes;",
+  //            input_tensor0.guid);
+  //   } else if (pipeline_inputs_num == 2) {
+  //     tb::TBOperator const *input_op1 = pipeline_inputs.at(1);
+  //     tb::STensor const &input_tensor1 = input_op1->output_tensors.at(0);
+  //     code.e(fmt("using InputPipeline = "
+  //                "tb::TMACopyPipeline2<STensor$InputAtom, STensor$InputAtom>;",
+  //                input_tensor0.guid,
+  //                input_tensor1.guid));
+  //     code.e(fmt("pipeline_params.transaction_bytes = "
+  //                "STensor$InputAtom::tmaTransactionBytes + "
+  //                "STensor$InputAtom::tmaTransactionBytes;",
+  //                input_tensor0.guid,
+  //                input_tensor1.guid));
+  //   } else if (pipeline_inputs_num == 3) {
+  //     tb::TBOperator const *input_op1 = pipeline_inputs.at(1);
+  //     tb::STensor const &input_tensor1 = input_op1->output_tensors.at(0);
+  //     tb::TBOperator const *input_op2 = pipeline_inputs.at(2);
+  //     tb::STensor const &input_tensor2 = input_op2->output_tensors.at(0);
+  //     code.e(
+  //         fmt("using InputPipeline = tb::TMACopyPipeline3<STensor$InputAtom, "
+  //             "STensor$InputAtom, STensor$InputAtom>;",
+  //             input_tensor0.guid,
+  //             input_tensor1.guid,
+  //             input_tensor2.guid));
+  //     code.e(fmt("pipeline_params.transaction_bytes = "
+  //                "STensor$InputAtom::tmaTransactionBytes + "
+  //                "STensor$InputAtom::tmaTransactionBytes + "
+  //                "STensor$InputAtom::tmaTransactionBytes;",
+  //                input_tensor0.guid,
+  //                input_tensor1.guid,
+  //                input_tensor2.guid));
+  //   } else {
+  //     assert(false && "at most three inputs");
+  //   }
+  //   code.e(
+  //       fmt("MainloopPipeline pipeline(shared_storage.pipelines[0].mainloop, "
+  //           "pipeline_params, Shape<_1, _1, _1>{});"));
+  //   code.e(fmt("PipelineState smem_pipe_write = "
+  //              "cutlass::make_producer_start_state<MainloopPipeline>();"));
+
+  //   code.e("__syncthreads();");
+  //   code.e("if ((warp_group_role == tb::WarpGroupRole::Producer) && "
+  //          "(warp_idx_in_warp_group == 0)) {");
+  //   for (int i = 0; i < tmaParamsList.size(); i++) {
+  //     auto const &tmaParams = tmaParamsList.at(i);
+  //     code.e("STensor$InputAtom::prefetch(tma_$);",
+  //            tmaParams.sguid,
+  //            tmaParams.guid);
+  //   }
+  //   code.e("}");
+
+  //   code.e("if (warp_group_role == tb::WarpGroupRole::Producer) {");
+  //   code.e("if (warp_idx_in_warp_group == 0) {");
+
+  //   tb::TBInputOp const *cur_op0 =
+  //       dynamic_cast<tb::TBInputOp const *>(input_op0);
+  //   kn::DTensor const &dtensor0 = cur_op0->dtensor;
+  //   if (pipeline_inputs_num == 1) {
+  //     code.e(fmt("InputPipeline::run(tma_$, stensor$_ptr, pipeline, "
+  //                "smem_pipe_write, $, $, $, $, lane_predicate);",
+  //                dtensor0.guid,
+  //                input_tensor0.guid,
+  //                g.forloop_range,
+  //                cur_op0->input_map.x,
+  //                cur_op0->input_map.y,
+  //                cur_op0->input_map.z));
+  //   } else if (pipeline_inputs_num == 2) {
+  //     tb::TBOperator const *input_op1 = pipeline_inputs.at(1);
+  //     tb::STensor const &input_tensor1 = input_op1->output_tensors.at(0);
+  //     tb::TBInputOp const *cur_op1 =
+  //         dynamic_cast<tb::TBInputOp const *>(input_op1);
+  //     kn::DTensor const &dtensor1 = cur_op1->dtensor;
+
+  //     code.e("InputPipeline::run(tma_$, tma_$, stensor$_ptr, stensor$_ptr, "
+  //            "pipeline, smem_pipe_write, $, $, $, $, $, $, $, lane_predicate);",
+  //            dtensor0.guid,
+  //            dtensor1.guid,
+  //            input_tensor0.guid,
+  //            input_tensor1.guid,
+  //            g.forloop_range,
+  //            cur_op0->input_map.x,
+  //            cur_op0->input_map.y,
+  //            cur_op0->input_map.z,
+  //            cur_op1->input_map.x,
+  //            cur_op1->input_map.y,
+  //            cur_op1->input_map.z);
+  //   } else if (pipeline_inputs_num == 3) {
+  //     tb::TBOperator const *input_op1 = pipeline_inputs.at(1);
+  //     tb::STensor const &input_tensor1 = input_op1->output_tensors.at(0);
+  //     tb::TBInputOp const *cur_op1 =
+  //         dynamic_cast<tb::TBInputOp const *>(input_op1);
+  //     kn::DTensor const &dtensor1 = cur_op1->dtensor;
+
+  //     tb::TBOperator const *input_op2 = pipeline_inputs.at(2);
+  //     tb::STensor const &input_tensor2 = input_op2->output_tensors.at(0);
+  //     tb::TBInputOp const *cur_op2 =
+  //         dynamic_cast<tb::TBInputOp const *>(input_op2);
+  //     kn::DTensor const &dtensor2 = cur_op2->dtensor;
+
+  //     code.e("InputPipeline::run(tma_$, tma_$, tma_$, stensor$_ptr, "
+  //            "stensor$_ptr, stensor$_ptr, pipeline, smem_pipe_write, $, $, $, "
+  //            "$, $, $, $, $, $, $, lane_predicate);",
+  //            dtensor0.guid,
+  //            dtensor1.guid,
+  //            dtensor2.guid,
+  //            input_tensor0.guid,
+  //            input_tensor1.guid,
+  //            input_tensor2.guid,
+  //            g.forloop_range,
+  //            cur_op0->input_map.x,
+  //            cur_op0->input_map.y,
+  //            cur_op0->input_map.z,
+  //            cur_op1->input_map.x,
+  //            cur_op1->input_map.y,
+  //            cur_op1->input_map.z,
+  //            cur_op2->input_map.x,
+  //            cur_op2->input_map.y,
+  //            cur_op2->input_map.z);
+  //   } else {
+  //     assert(false && "at most three inputs");
+  //   }
+  //   code.e("}");
+  //   code.e("}");
+
+  //   code.e("");
+  // }
 
   // A lambda function that transpiles a chain of (fusable) operators to an
   // epilogue Will automatically ignore the first operator in the `chain`
@@ -979,6 +1005,7 @@ CustomOPTranspileResult
     return res;
   };
 
+
   // A lambda function that transpiles an TBSchedNode
   auto transpile_tb_sched_node = [&](TBSchedNode const &sched_node,
                                      bool is_in_loop) {
@@ -993,6 +1020,9 @@ CustomOPTranspileResult
       to_json(op_type_str, op->op_type);
       code.e("{");
       code.e("// OP type: $", op_type_str);
+
+      add_loop_node_consumer_wait_if_need(op, is_in_loop);
+
       switch (op->op_type) {
         case type::TB_OUTPUT_OP: {
           assert(sched_node.ops.size() == 1); // Should not be fused
@@ -1022,7 +1052,6 @@ CustomOPTranspileResult
 
           // always pipeline for MMA
           if (pipeline_inputs.size() > 0) {
-            // assert(copy_pipelines.find(output_guid) != copy_pipelines.end());
 
             smem_read_output_guids.push_back(output_guid);
             // code.e(fmt("PipelineState smem_pipe_read_$;", output_guid));

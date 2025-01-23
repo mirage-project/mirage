@@ -39,9 +39,11 @@ public:
   Graph(Graph const &) = delete;
   Graph &operator=(Graph const &) = delete;
   // input operator
-  void assign_task(mirage::kernel::DTensor const &stensor,
-                   vector<int> warpgroup_ids) STensor
-      new_input(mirage::kernel::DTensor const &dtensor,
+  // void assign_task(mirage::kernel::DTensor const &stensor,
+  //                  vector<int> warpgroup_ids); 
+
+ void add_warpgroup_config(int pipeline_stage, int num_warp_groups);                 
+ STensor new_input(mirage::kernel::DTensor const &dtensor,
                 int3 input_map,
                 int forloop_dim,
                 mirage::layout::SmemLayout layout);
@@ -156,11 +158,12 @@ public:
   std::vector<std::pair<off_t, size_t>> allocated_tensors;
 
 
-  //wg schduler variables
-  int num_total_warp_groups = 2;
+  //warp group related variables
+  //[  producer wgs,                        consumer wgs             ]
+  //[0, num_producer_wgs - 1, num_producer_wgs + num_consumer_wgs - 1]
+  int num_producer_wgs = 1;
+  int num_consumer_wgs = 1;
   int pipe_stage = 2;
-  std::unordered_set<int> producer_wgs;
-  std::unordered_set<int> consumer_wgs;
 
   using OpType = TBOperator;
   using TensorType = STensor;

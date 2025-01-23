@@ -272,7 +272,7 @@ TBMemoryPlan Transpiler::get_threadblock_memory_plan(tb::Graph const &tb_graph,
     STensorMeta const &stensor_meta = stensor_metas.at(stensor.guid);
     // replicate the stensor with the partition dimension of warp groups
     return stensor_meta.num_phy_elems *
-           type::get_datatype_size(stensor.data_type) * warp_partition_dim;
+           type::get_datatype_size(stensor.data_type);
     
   };
   // auto find_first_used_time = [](sguid_t sguid,

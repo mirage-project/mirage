@@ -140,7 +140,7 @@ TranspileResult Transpiler::transpile_ugraph() {
   header.e("using namespace cute;");
 
   if (config.target_cc == GPU_CC::H100) {
-    header.e("#define ARCH_GRACE_HOPPER");
+    header.e("#define MIRAGE_GRACE_HOPPER");
   }
 
   CodeKeeper custom_kernels; // This keeps all code for custom kernels
@@ -534,12 +534,13 @@ TranspileResult Transpiler::transpile_ugraph() {
             exec.e(fmt("using DstPipeLayout_$ = "
                        "decltype(tile_to_shape(SmemLayoutAtom_${}, "
                        "make_shape(shape<0>(DstMNKLayout_${}), "
-                       "shape<1>(DstMNKLayout_${}), Int<tb::kStages>{}), "
+                       "shape<1>(DstMNKLayout_${}), Int<$>{}), "
                        "Step<_1, _2, _3>{}));",
                        tmaParams.guid,
                        tmaParams.guid,
                        tmaParams.guid,
-                       tmaParams.guid));
+                       tmaParams.guid,
+                       bgraph.pipe_stage));
             exec.e(fmt("auto g_tensor_$ = "
                        "make_tensor(make_gmem_ptr<half_t>(dtensor$), "
                        "SrcMNKLayout_${});",

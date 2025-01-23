@@ -5,8 +5,6 @@ using namespace cute;
 
 namespace tb {
 
-static int const kStages = 2;
-
 template <typename MainloopPipeline, size_t N>
 struct SharedStorage {
   struct PipelineStorage : cute::aligned_struct<16, _1> {
