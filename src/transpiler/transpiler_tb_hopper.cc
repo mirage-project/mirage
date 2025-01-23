@@ -303,6 +303,10 @@ CustomOPTranspileResult
   int cur_custom_kernel_idx = custom_kernel_idx_counter++;
   string func_name = fmt("custom_kernel_$", cur_custom_kernel_idx);
 
+  if (g.block_dim.x < NUM_THREADS_PER_GROUP * 2) {
+    return CustomOPTranspileResult{CUDA_T_CONFIG_ERROR, func_name, 0, ""};
+  }
+
   // Generate code prologue
   CodeKeeper code;
   string thread_idx;
@@ -1008,10 +1012,11 @@ CustomOPTranspileResult
 
   // A lambda function that transpiles an TBSchedNode
   auto transpile_tb_sched_node = [&](TBSchedNode const &sched_node,
+  CodeKeeper &code,
                                      bool is_in_loop) {
     CodeKeeper code;
     if (sched_node.type == tb_sched_node_t::SYNCTHREADS) {
-      code.e("cutlass::arch::NamedBarrier::sync(128, 8);");
+      code.e("warpgroup_sync(8);");
     } else {
       auto [op, first_op_meta] = sched_node.ops.front();
       auto [output_op, output_op_meta] = sched_node.ops.back();
@@ -1334,7 +1339,7 @@ CustomOPTranspileResult
       }
       code.e("}");
     }
-    return code;
+    return CUDA_T_SUCCESS;
   };
 
   // Declare the for loop
@@ -1361,8 +1366,12 @@ CustomOPTranspileResult
             dynamic_cast<tb::TBInputOp const *>(sched_node.ops[0].first))) {
       continue;
     }
-    CodeKeeper res = transpile_tb_sched_node(sched_node, true);
+    CodeKeeper res;
+    TranspileErrorType err = transpile_tb_sched_node(sched_node, res, true);
     code << res;
+    if (err != CUDA_T_SUCCESS) {
+      return CustomOPTranspileResult{err, func_name, 0, ""};
+    }
   }
 
   if (pipeline_inputs.size() > 0) {
@@ -1396,7 +1405,7 @@ CustomOPTranspileResult
   }
   if (num_in_reg_accums > 0) {
     code.e("// Write back in-register accumulators");
-    code.e("cutlass::arch::NamedBarrier::sync(128, 8);");
+    code.e("warpgroup_sync(8);");
     // code.e("__syncthreads();"); // Need this __syncthreads() to make sure no
     //                             // thread is still in the for loop
     code << in_reg_writeback;
@@ -1405,10 +1414,14 @@ CustomOPTranspileResult
   // Transpile the epilogue of the kernel
   if (!sched.post_loop_nodes.empty()) {
     code.e("// The epilogue (kernels outside the loop)");
-    code.e("cutlass::arch::NamedBarrier::sync(128, 8);");
+    code.e("warpgroup_sync(8);");
     for (TBSchedNode const &sched_node : sched.post_loop_nodes) {
-      CodeKeeper res = transpile_tb_sched_node(sched_node, false);
+     CodeKeeper res;
+      TranspileErrorType err = transpile_tb_sched_node(sched_node, res, false);
       code << res;
+      if (err != CUDA_T_SUCCESS) {
+        return CustomOPTranspileResult{err, func_name, 0, ""};
+      }
     }
   }
   code.e("}");
@@ -1417,8 +1430,8 @@ CustomOPTranspileResult
 
   code.e("}"); // kernel
 
-  return CustomOPTranspileResult{
-      func_name, mem_plan.smem_size, code.to_string(), tmaParamsList};
+  return CustomOPTranspileResult{CUDA_T_SUCCESS, func_name, mem_plan.smem_size,
+                                 code.to_string(), tmaParamsList};
 }
 
 } // namespace transpiler

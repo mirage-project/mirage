@@ -60,7 +60,7 @@ static __device__ __forceinline__ increase_regs(){
 }
 
 // sync inside a warp group
-static __device__ __forceinline__ sync(uint32_t barrier_id){
+static __device__ __forceinline__ warpgroup_sync(uint32_t barrier_id){
 #if MIRAGE_GRACE_HOPPER
     asm volatile("bar.sync %0, %1;\n" :: "r"(barrier_id), "n"(NUM_THREADS_PER_GROUP));
 #elif defined(__CUDA_ARCH__)
