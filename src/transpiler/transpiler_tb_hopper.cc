@@ -719,12 +719,19 @@ Transpiler::transpile_kn_custom_op_hopper(kn::KNCustomizedOp const *op) {
 
   
   //  code.e("__syncthreads();");
-
+  
+  code.e("int warpgroup_id = tb::warpgroup_id();");
   // run producers
-  code.e("if (tb::warpgroup_id() == $) {", g.num_consumer_wgs);
+  code.e("if (warpgroup_id == $) {", g.num_consumer_wgs);
   code.e("if (tb::warp_id_in_wg() == 0) {");
+  
 
- code.e("for (uint32_t for_idx = 0; for_idx < $; for_idx++) {",
+  //allocate register files
+  uint32_t tma_reg = g.num_consumer_wgs == 1 ? 56 : 32;
+  code.e("tb::wg_decrease_regs<$>();", tma_reg);
+
+
+  code.e("for (uint32_t for_idx = 0; for_idx < $; for_idx++) {",
          g.forloop_range);
   for (const auto &[stensor_id, op] : pipeline_inputs) {
     code.e(fmt("STensor$InputAtom::run(tma_$, stensor$_ptr, "
@@ -777,6 +784,7 @@ Transpiler::transpile_kn_custom_op_hopper(kn::KNCustomizedOp const *op) {
                                      CodeKeeper &code,
                                      std::map<int64_t, tb::TBInputOp const *>
                                          &pipeline_inputs,
+                                     int warpgroup_id,
                                      bool is_in_loop) {
     if (sched_node.type == tb_sched_node_t::SYNCTHREADS) {
       code.e("tb::warpgroup_sync(8);");
@@ -818,7 +826,6 @@ Transpiler::transpile_kn_custom_op_hopper(kn::KNCustomizedOp const *op) {
 
         // always pipeline for MMA
         if (need_advance_pipeline) {
-
           smem_read_output_guids.push_back(output_guid);
           // code.e(fmt("PipelineState smem_pipe_read_$;", output_guid));
           if (output_op_meta.is_accum_in_reg) {
@@ -826,7 +833,6 @@ Transpiler::transpile_kn_custom_op_hopper(kn::KNCustomizedOp const *op) {
             code.e("Matmul$Kernel::run(matmul_$_accum, stensor$_ptr, stensor$_ptr, (char*)(buf+0), thread_idx, read_idx_$);",
                    output_guid, output_guid, input0.guid, input1.guid, pipe_ids.at(0));
           } else {
-
             code.e("auto mma_rC = Matmul$Kernel::get_mma_rC(thread_idx);",
                    output_guid);
             code.e("Matmul$Kernel::run(mma_rC, stensor$_ptr, stensor$_ptr, "
@@ -1091,11 +1097,16 @@ Transpiler::transpile_kn_custom_op_hopper(kn::KNCustomizedOp const *op) {
   // code.e("if (warp_group_role == tb::WarpGroupRole::Consumer) {");
   code.e("else {");
   assert(g.forloop_range >= 1);
+
+
+  //allocate register files for wgmma
+  uint32_t mma_reg = g.num_consumer_wgs == 1 ? 256 : (g.num_consumer_wgs == 2 ? 232 : 160);
+  code.e("tb::wg_increase_regs<$>();", mma_reg);
   code.e("// Consumer main loop");
   code.e("for (uint32_t for_idx = 0; for_idx < $; for_idx++) {",
          g.forloop_range);
 
-
+  //warpgroup_id
   for (TBSchedNode const &sched_node : sched.loop_nodes) {
     if (sched_node.type == tb_sched_node_t::OPERATOR &&
         sched_node.ops[0].first->op_type == type::TB_INPUT_OP &&
@@ -1105,7 +1116,7 @@ Transpiler::transpile_kn_custom_op_hopper(kn::KNCustomizedOp const *op) {
     }
     CodeKeeper res;
     TranspileErrorType err =
-        transpile_tb_sched_node(sched_node, res, pipeline_inputs, true);
+        transpile_tb_sched_node(sched_node, res, pipeline_inputs, warpgroup_id, true);
     code << res;
     if (err != CUDA_T_SUCCESS) {
       return CustomOPTranspileResult{err, func_name, 0, ""};
