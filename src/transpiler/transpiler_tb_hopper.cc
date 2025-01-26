@@ -447,8 +447,8 @@ Transpiler::transpile_kn_custom_op_hopper(kn::KNCustomizedOp const *op) {
               m_input ? forloop_dim : (dtensor.num_dims - 1 - forloop_dim));
            code.e(
               "tb::HopperAsyncPipeline<$> "
-              "hopper_async_pipeline_$((void *) (buf + $), (tb::warpgroup_id() == $ && tb::warp_id() % mirage::config::NUM_WARPS_PER_GROUP == 0), tb::warpgroup_id() < $, $);",
-              g.pipe_stage, stensor.guid, addr_end + pipe_index * 1000, g.num_consumer_wgs, g.num_consumer_wgs,stensor_meta.num_phy_elems * type::get_datatype_size(stensor.data_type));
+              "hopper_async_pipeline_$((void *) (buf + $), (tb::warpgroup_id() == $ && tb::warp_id() % mirage::config::NUM_WARPS_PER_GROUP == 0), tb::warpgroup_id() < $, $, $);",
+              g.pipe_stage, stensor.guid, addr_end + pipe_index * 1000, g.num_consumer_wgs, g.num_consumer_wgs,stensor_meta.num_phy_elems * type::get_datatype_size(stensor.data_type), g.num_consumer_wgs);
 
           code.e("using STensor$InputAtom = tb::InputTMAAsyncCopy<half_t, $, "
                  "$, decltype(tma_$), decltype(hopper_async_pipeline_$), $, $>;",
@@ -723,12 +723,11 @@ Transpiler::transpile_kn_custom_op_hopper(kn::KNCustomizedOp const *op) {
   code.e("int warpgroup_id = tb::warpgroup_id();");
   // run producers
   code.e("if (warpgroup_id == $) {", g.num_consumer_wgs);
-  code.e("if (tb::warp_id_in_wg() == 0) {");
-  
-
-  //allocate register files
+   //allocate tma register files 
   uint32_t tma_reg = g.num_consumer_wgs == 1 ? 56 : 32;
+  
   code.e("tb::wg_decrease_regs<$>();", tma_reg);
+  code.e("if (tb::warp_id_in_wg() == 0) {");
 
 
   code.e("for (uint32_t for_idx = 0; for_idx < $; for_idx++) {",
@@ -784,10 +783,9 @@ Transpiler::transpile_kn_custom_op_hopper(kn::KNCustomizedOp const *op) {
                                      CodeKeeper &code,
                                      std::map<int64_t, tb::TBInputOp const *>
                                          &pipeline_inputs,
-                                     int warpgroup_id,
                                      bool is_in_loop) {
     if (sched_node.type == tb_sched_node_t::SYNCTHREADS) {
-      code.e("tb::warpgroup_sync(8);");
+      code.e("tb::warpgroup_sync(128, 8 + warpgroud_id);");
     } else {
       auto [op, first_op_meta] = sched_node.ops.front();
       auto [output_op, output_op_meta] = sched_node.ops.back();
@@ -1116,7 +1114,7 @@ Transpiler::transpile_kn_custom_op_hopper(kn::KNCustomizedOp const *op) {
     }
     CodeKeeper res;
     TranspileErrorType err =
-        transpile_tb_sched_node(sched_node, res, pipeline_inputs, warpgroup_id, true);
+        transpile_tb_sched_node(sched_node, res, pipeline_inputs, true);
     code << res;
     if (err != CUDA_T_SUCCESS) {
       return CustomOPTranspileResult{err, func_name, 0, ""};
@@ -1147,7 +1145,7 @@ Transpiler::transpile_kn_custom_op_hopper(kn::KNCustomizedOp const *op) {
   }
   if (num_in_reg_accums > 0) {
     code.e("// Write back in-register accumulators");
-    code.e("tb::warpgroup_sync(8);");
+    code.e("tb::warpgroup_sync(128, 8 + warpgroud_id);");
     // code.e("__syncthreads();"); // Need this __syncthreads() to make sure no
     //                             // thread is still in the for loop
     code << in_reg_writeback;
@@ -1156,7 +1154,7 @@ Transpiler::transpile_kn_custom_op_hopper(kn::KNCustomizedOp const *op) {
   // Transpile the epilogue of the kernel
   if (!sched.post_loop_nodes.empty()) {
     code.e("// The epilogue (kernels outside the loop)");
-    code.e("tb::warpgroup_sync(8);");
+    code.e("tb::warpgroup_sync(128, 8 + warpgroud_id);");
     for (TBSchedNode const &sched_node : sched.post_loop_nodes) {
       CodeKeeper res;
       TranspileErrorType err =

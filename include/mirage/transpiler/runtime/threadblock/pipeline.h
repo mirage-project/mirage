@@ -38,7 +38,7 @@ namespace tb {
 
             CUTLASS_DEVICE
             HopperAsyncPipeline(
-            void* __restrict__ shared_memory_offset, bool producer, bool consumer, uint32_t transactionBytes)
+            void* __restrict__ shared_memory_offset, bool producer, bool consumer, uint32_t transactionBytes, int num_consumer_wgs)
             : smem_pipe_read(),
                smem_pipe_write(cutlass::make_producer_start_state<MainloopPipeline>()),
                pipeline_params{
@@ -47,7 +47,7 @@ namespace tb {
                      ? MainloopPipeline::ThreadCategory::Producer 
                      : (consumer ? MainloopPipeline::ThreadCategory::Consumer :  MainloopPipeline::ThreadCategory::NonParticipant),
                   (threadIdx.x % cutlass::NumThreadsPerWarpGroup) == 0,
-                  cutlass::NumThreadsPerWarpGroup
+                  cutlass::NumThreadsPerWarpGroup * num_consumer_wgs
                },
                pipeline_storage(shared_memory_offset),
                pipeline(*(pipeline_storage.mainloop), pipeline_params, Shape<_1, _1, _1>{})
