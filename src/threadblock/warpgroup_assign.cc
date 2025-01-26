@@ -1,5 +1,4 @@
 #include "mirage/threadblock/graph.h"
-#include "mirage/threadblock/operator.h"
 
 namespace mirage {
 namespace threadblock {
@@ -7,10 +6,12 @@ namespace threadblock {
   void Graph::add_warpgroup_config(int pipeline_stage, int num_warp_groups){
     assert(num_warp_groups >= 2 && "at least a producer and a consumer is needed");
     assert(num_warp_groups <= config::MAX_NUM_WARP_GROUPS && "MAX NUM WARP GROUPS is 4");
-    this.pipe_stage = pipeline_stage;
-    this.num_consumer_wgs = num_warp_groups - this.num_producer_wgs;
+    pipe_stage = pipeline_stage;
+
+    printf("pipe_stage %d, pipeline_stage %d, %d\n", pipe_stage, pipeline_stage, this->pipe_stage);
+    num_consumer_wgs = num_warp_groups - num_producer_wgs;
     assert(pipe_stage % num_consumer_wgs == 0 && "for now assume workloads are balanced acroos consumer wgs");
-    assert(NUM_THREADS_PER_WARP_GROUP * num_warp_groups == g.block_dim.x);
+    assert(config::NUM_THREADS_PER_WARP_GROUP * num_warp_groups == block_dim.x);
   }
 
 //   void Graph::assign_task(mirage::kernel::DTensor const &stensor, vector<int> warpgroup_ids) {

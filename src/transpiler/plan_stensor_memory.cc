@@ -372,7 +372,7 @@ TBMemoryPlan Transpiler::get_threadblock_memory_plan(tb::Graph const &tb_graph,
 
         //buffer X number of pipe_stage
         tensor_decls.push_back(
-            {accum.guid, phy_size, tb_graph.pipe_stage * T, earlist_free_time});
+            {accum.guid, phy_size, 2 * T, earlist_free_time});
       } else {
         tensor_decls.push_back({accum.guid,
                                 phy_size,
@@ -401,7 +401,7 @@ TBMemoryPlan Transpiler::get_threadblock_memory_plan(tb::Graph const &tb_graph,
         if (last_op->op_type == type::TB_INPUT_OP &&
             last_op_meta.is_pipelined_input && hopper_arch) {
           tensor_decls.push_back(
-              {output_tensor.guid, phy_size * 2, i + T, earlist_free_time});
+              {output_tensor.guid, phy_size * tb_graph.pipe_stage, i + T, earlist_free_time});
         } else {
           tensor_decls.push_back(
               {output_tensor.guid, phy_size, i + T, earlist_free_time});

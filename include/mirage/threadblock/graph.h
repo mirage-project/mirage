@@ -39,8 +39,6 @@ public:
   Graph(Graph const &) = delete;
   Graph &operator=(Graph const &) = delete;
   // input operator
-  // void assign_task(mirage::kernel::DTensor const &stensor,
-  //                  vector<int> warpgroup_ids); 
 
  void add_warpgroup_config(int pipeline_stage, int num_warp_groups);                 
  STensor new_input(mirage::kernel::DTensor const &dtensor,

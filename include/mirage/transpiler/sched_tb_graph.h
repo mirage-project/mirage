@@ -52,10 +52,5 @@ public:
 };
 
 
-class WGSched{
-   // record the end of the pipeline with stensor guid
-   std::vector<int> pipeline;
-}
-
 } // namespace transpiler
 } // namespace mirage

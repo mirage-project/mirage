@@ -160,7 +160,7 @@ template <typename T,
           // class PipelineState,
           class HopperAsyncPipeline,
           bool MInput,
-          int forloop_range>
+          int K_ITER>
 class InputTMAAsyncCopy {
 public:
   using CTA_TILER =
@@ -188,15 +188,15 @@ public:
     cute::prefetch_tma_descriptor(tma.get_tma_descriptor());
   }
   
-  static __device__ __forceinline__ void run(CopyA const &tma_a,
+  static __device__ __forceinline__ void run(TMA const &tma_a,
                                              T *dst_a,
                                              int imapx_a,
                                              int imapy_a,
                                              int imapz_a,
-                                             int lane_predicate,
-                                             HopperAsyncPipeline pipeline) {
-    if (lane_predicate) {
-      Tensor mA = tma_a.get_tma_tensor(shape(SrcLayout_A{}));
+                                             int k_tile_iter,
+                                             HopperAsyncPipeline &pipeline) {                                        
+    if (threadIdx.x == 128) {
+      Tensor mA = tma_a.get_tma_tensor(shape(SrcLayout{}));
       // （CTA_M, CTA_K, X, Y, Z, FORLOOP）
       auto blkCoordA = make_coord(_,
                                   _,
@@ -205,7 +205,7 @@ public:
                                   imapz_a >= 0 ? blockIdx.z : 0,
                                   _);
       Tensor gA = mA(blkCoordA);
-      Tensor sA = make_tensor(make_smem_ptr(dst_a), DstPipeLayout_A{});
+      Tensor sA = make_tensor(make_smem_ptr(dst_a), DstPipeLayout{});
 
       auto cta_tma_a = tma_a.get_slice(Int<0>{}); // CTA slice
 
@@ -216,17 +216,19 @@ public:
       Tensor tAsAX = group_modes<0, rank(tAsA) - 1>(tAsA);
 
 
-      auto k_tile_iter = cute::make_coord_iterator(forloop_range);
+      // auto k_tile_iter = cute::make_coord_iterator(K_ITER);
+      // int k_tile_count = K_ITER;
 
-      CUTE_UNROLL
-      for (; forloop_range > 0; --forloop_range) {
-        auto tma_barrier, write_stage = pipeline.producer_acquire();
+      // CUTE_UNROLL
+      // for (; k_tile_count > 0; --k_tile_count) {
+        auto [tma_barrier, write_stage] = pipeline.producer_acquire();
         copy(tma_a.with(*tma_barrier),
-             tAgAX(_, *k_tile_iter),
+             tAgAX(_, k_tile_iter),
              tAsAX(_, write_stage));
-        ++k_tile_iter;
+        // pipeline.producer_commit();
+        // ++k_tile_iter;
         pipeline.producer_advance();
-      }
+      // }
     }
   }
 };

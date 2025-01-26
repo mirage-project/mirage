@@ -36,9 +36,7 @@ template <typename T,
                                      // instructions (like stmatrix) to store
                                      // data, it does not use the standard
                                      // "epilogue" semantic
-          bool IS_STORE_ACCUM,
-          class MainloopPipeline,
-          class PipelineState>
+          bool IS_STORE_ACCUM>
 class Hopper_Matmul {
 public:
   CUTE_STATIC_ASSERT_V(rank(SmemLayoutA_{}) == _2{});
@@ -106,7 +104,6 @@ public:
 
   static __device__ __forceinline__ auto get_mma_rC(int thread_idx) {
     // Make a fake tensor
-
     Tensor sC_fake =
         make_tensor(make_smem_ptr((half_t *)nullptr), SmemLayoutC{});
 
@@ -114,6 +111,7 @@ public:
     ThrMMA thr_mma = tiled_mma.get_slice(thread_idx);
     Tensor mma_rC =
         thr_mma.partition_fragment_C(sC_fake); // (MMA, MMA_M, MMA_N)
+
 
     clear(mma_rC);
     return mma_rC;
@@ -150,8 +148,7 @@ public:
           T *__restrict__ b_ptr,
           char const *__restrict__ smem_allzero_ptr,
           int thread_idx,
-          MainloopPipeline pipeline,
-          PipelineState &smem_pipe_read) {
+          int read_stage) {
     // cutlass::arch::warpgroup_reg_alloc<192>();
     TiledMMA tiled_mma;
     auto sA_l = tile_to_shape(
@@ -173,7 +170,7 @@ public:
 
     Tensor tCrA = thr_mma.make_fragment_A(tCsA); // (MMA,MMA_M,MMA_K,PIPE)
     Tensor tCrB = thr_mma.make_fragment_B(tCsB); // (MMA,MMA_N,MMA_K,PIPE)
-    int read_stage = smem_pipe_read.index();
+    // int read_stage = smem_pipe_read.index();
 
     warpgroup_fence_operand(mma_rC);
     cute::warpgroup_arrive();
@@ -184,6 +181,7 @@ public:
     cute::warpgroup_commit_batch();
     cute::warpgroup_wait<0>();
     warpgroup_fence_operand(mma_rC);
+
   }
 
   // no pipe version

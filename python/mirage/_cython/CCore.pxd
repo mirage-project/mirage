@@ -203,8 +203,8 @@ cdef extern from "mirage/threadblock/graph.h" namespace "mirage::threadblock":
                    int forloop_range,
                    int reduction_dimx)
 
-        assign_task(const CppSTensor* stensor, vector<int> warpgroup_ids)
-        add_warpgroup_config(int pipeline_stages, int num_warp_groups)
+        void add_warpgroup_config(int pipeline_stage, int num_warp_groups)
+
         CppSTensor* new_input(const CppDTensor* dtensor,
                            int3 input_map,
                            int forloop_dim,
@@ -236,6 +236,9 @@ cdef extern from "mirage/threadblock/graph.h" namespace "mirage::threadblock":
         dim3 block_dim
         int forloop_range
         int reduction_dimx
+        int pipe_stage
+        int num_producer_wgs
+        int num_consumer_wgs
         vector[CppTBOperator*] operators
 
 cdef extern from "mirage/search/search_c.h" namespace "mirage::search_c":

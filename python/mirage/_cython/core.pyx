@@ -733,7 +733,7 @@ cdef class CyKNGraph:
 cdef class CyTBGraph:
     cdef CppTBGraph *p_bgraph #Hold a CppTBGraph instance
 
-    def __cinit__(self, tuple grid_dim = (), tuple block_dim = (), int forloop_range = -1, int dimx = -1, int pipe_stage = 2, int num_warp_groups = 2, bgraph = None):
+    def __cinit__(self, tuple grid_dim = (), tuple block_dim = (), int forloop_range = -1, int dimx = -1, bgraph = None):
         cdef unsigned long long ptr
         cdef dim3 c_grid_dim
         cdef dim3 c_block_dim
@@ -758,6 +758,8 @@ cdef class CyTBGraph:
             else:
                 assert False, "bgraph must be an integer or ctypes.c_void_p, but got " + str(type(bgraph))
             
+    def add_warpgroup_config(self, int pipeline_stage, int num_warp_groups):
+        self.p_bgraph.add_warpgroup_config(pipeline_stage, num_warp_groups)
     
     def new_input(self, DTensor dtensor, tuple input_map, int forloop_dim):
         assert len(input_map) == 3, "input_map must be of length 3"
