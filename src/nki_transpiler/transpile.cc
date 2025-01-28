@@ -335,6 +335,10 @@ std::optional<NKIErrorInfo> NKITranspiler::resolve_tensor_layout() {
       if (stensor.dim[i] > 128) {
         opt.add(!s_is_partition[stensor.guid][i]);
       }
+      // A partition dimension must be the last two dims
+      if ((i != num_dims - 1) && (i != num_dims - 2)) {
+        opt.add(!s_is_partition[stensor.guid][i]);
+      }
     }
     opt.add(z3::atmost(partition_exprs, 1));
     opt.add(z3::atleast(partition_exprs, 1));
@@ -540,6 +544,16 @@ NKITranspileResult NKITranspiler::transpile_ugraph() {
   exec.e("from torch_xla.core import xla_model as xm");
   exec.e("device = xm.xla_device()");
   for (kn::KNOperator *const op : g->operators) {
+    for (kn::DTensor const &dtensor : op->output_tensors) {
+      std::string shape;
+      for (int i = 0; i < dtensor.num_dims; i++) {
+        shape += fmt("$,", dtensor.dim[i]);
+      }
+      exec.e("$ = torch.randn(($), dtype=torch.float16).to(device=device)",
+             fmt("dtensor$", dtensor.guid),
+             shape);
+    }
+#ifdef DEADCODE
     if (op->op_type == type::KNOperatorType::KN_INPUT_OP) {
       std::string shape;
       kn::DTensor dtensor = op->output_tensors.at(0);
@@ -560,6 +574,7 @@ NKITranspileResult NKITranspiler::transpile_ugraph() {
              fmt("dtensor$", dtensor.guid),
              shape);
     }
+#endif
   }
   CodeKeeper custom_kernels;
   for (kn::KNOperator *const op : g->operators) {

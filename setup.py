@@ -87,7 +87,7 @@ try:
   
     # Create the build directory if it does not exist
     os.makedirs(build_dir, exist_ok=True)
-    subprocess.check_call(['cmake', '..', 
+    subprocess.check_call(['cmake', '..',
                            '-DZ3_CXX_INCLUDE_DIRS=' + z3_path + '/include/',
                            '-DZ3_LIBRARIES=' + path.join(z3_path, 'lib', 'libz3.so'),
                            '-DCMAKE_C_COMPILER=' + os.environ['CC'],
@@ -124,7 +124,7 @@ with copy_include() as copied:
               f"This may cause issues. Please remove {INCLUDE_BASE} and rerun setup.py", flush=True)
     
     setup(name='mirage-project',
-          version="0.2.2",
+          version="0.2.3",
           description="Mirage: A Multi-Level Superoptimizer for Tensor Algebra",
           zip_safe=False,
           install_requires=requirements,

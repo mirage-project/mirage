@@ -85,6 +85,37 @@ PyMODINIT_FUNC PyInit___mirage_launcher(void) {
 }
 """
 
+def get_cc_cmd(target, cc, FILE_NAME, py_include_dir, MIRAGE_ROOT, so_path):
+    common_cmd = [
+        cc,
+        FILE_NAME,
+        "-O3",
+        f"-I{py_include_dir}",
+        f"-I{MIRAGE_ROOT}/include/mirage/transpiler/runtime/",
+        f"-I{MIRAGE_ROOT}/deps/cutlass/include",
+        "-shared",
+        "-std=c++17",
+        "-use_fast_math",
+        "-lcublas",
+        "-Xcompiler=-fPIC",
+        "--expt-relaxed-constexpr",
+        "-o",
+        so_path,
+    ]
+
+    if target == 90:
+        specific_cmd = [
+            "-arch=sm_90a",
+            "-gencode=arch=compute_90,code=sm_90",
+            "-DCUTLASS_NVCC_ARCHS=90a",
+        ]
+    else:
+        specific_cmd = [
+            "-arch=native",
+        ]
+
+    return common_cmd[:6] + specific_cmd + common_cmd[6:]
+
 
 def check_stride(dims, strides, layout="row-major"):
     curr_stride = 1
@@ -296,6 +327,7 @@ class KNGraph:
         with open(FILE_NAME, "w") as f:
             f.write(result["code"] + HARD_CODE)
 
+
         cc = shutil.which("nvcc")
         if cc is None:
             raise RuntimeError(
@@ -318,23 +350,8 @@ class KNGraph:
                 f"Error: MIRAGE_ROOT ({MIRAGE_ROOT}) not found. Please set the MIRAGE_ROOT env variable correctly"
             )
             sys.exit(1)
-        cc_cmd = [
-            cc,
-            FILE_NAME,
-            "-O3",
-            f"-I{py_include_dir}",
-            f"-I{MIRAGE_ROOT}/include/mirage/transpiler/runtime/",
-            f"-I{MIRAGE_ROOT}/deps/cutlass/include",
-            "-shared",
-            "-std=c++17",
-            "-arch=native",
-            "-use_fast_math",
-            "-lcublas",
-            "-Xcompiler=-fPIC",
-            "--expt-relaxed-constexpr",
-            "-o",
-            so_path,
-        ]
+        cc_cmd = get_cc_cmd(target_cc, cc, FILE_NAME, py_include_dir, MIRAGE_ROOT, so_path)
+
 
         def remain_op():
             import importlib.util

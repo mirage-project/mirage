@@ -16,10 +16,10 @@
 #pragma once
 
 #include <cstddef>
-#include <string>
-#include <vector>
 #include <memory>
+#include <string>
 #include <unordered_map>
+#include <vector>
 
 #include "mirage/kernel/graph.h"
 #include "mirage/threadblock/graph.h"
@@ -42,7 +42,7 @@ struct TritonTranspilerConfig {
 
 // Result of transpiling a custom kernel operator
 struct TritonCustomOPTranspileResult {
-  // Generated kernel function name  
+  // Generated kernel function name
   std::string func_name;
   // Generated Triton kernel code
   std::string code;
@@ -64,26 +64,25 @@ private:
   std::vector<mirage::kernel::DTensor> mugraph_output_tensors;
   std::unordered_map<decltype(tb::STensor::guid), STensorMeta>
       stensor_metas; // STensor guid -> metadata
-  
+
   // Internal counter for kernel naming
   static int kernel_idx_counter;
 
 public:
   TritonTranspiler(kernel::Graph const *_graph,
-                   TritonTranspilerConfig const &_config);                   
+                   TritonTranspilerConfig const &_config);
   // Main entry point for code generation
   TritonTranspileResult generate_code();
   // Transpile a custom kernel operator
-  TritonCustomOPTranspileResult 
+  TritonCustomOPTranspileResult
       transpile_kn_custom_op(kn::KNCustomizedOp const *op);
-      
+
   // Transpile the kernel graph
   TritonTranspileResult transpile_ugraph();
-
 };
 
 TritonTranspileResult transpile(kernel::Graph const *g,
-                               TritonTranspilerConfig const &config);
+                                TritonTranspilerConfig const &config);
 
 } // namespace triton_transpiler
 } // namespace mirage

@@ -20,7 +20,8 @@ Getting Started
    
    installation
    mugraph
-   transpiler
+   cuda-transpiler
+   triton-transpiler
    tutorials/index
 
 .. Indices and tables

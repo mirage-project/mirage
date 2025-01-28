@@ -170,6 +170,7 @@ Transpiler::Transpiler(kernel::Graph const *_graph,
               threadblock::STensor st =
                   tbg->matmul(stensor_inputs[0], stensor_inputs[1]);
               stensor_mapping[bop->output_tensors[0].guid] = st;
+              stensor_metas[bop->input_tensors[0].guid].m_input = true;
               break;
             }
             case TB_EXP_OP:

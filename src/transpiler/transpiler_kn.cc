@@ -23,6 +23,9 @@
 namespace mirage {
 namespace transpiler {
 
+// hopper pipeline size
+static constexpr size_t SHARE_PIPELINE_SIZE = 40;
+
 using std::string;
 namespace kn = mirage::kernel;
 namespace tb = mirage::threadblock;
@@ -129,6 +132,7 @@ static string get_kn_op_str(type::KNOperatorType type) {
 TranspileResult Transpiler::transpile_ugraph() {
   size_t max_smem_size = 0;
   // Generate header
+
   CodeKeeper header;
   header.e("#define NUM_GPUS $", num_gpus);
   header.e("#define USE_NVSHMEM $", use_nvshmem);
@@ -140,6 +144,8 @@ TranspileResult Transpiler::transpile_ugraph() {
   CodeKeeper init; // This keeps all code in the `_init` function (e.g.
                    // cudaFuncSetAttribute)
   CodeKeeper exec; // This keeps all code in the `_execute_mugraph` function
+
+  CodeKeeper hopper_tma;
 
   init.e("static void _init() {");
   exec.e(
@@ -408,7 +414,13 @@ TranspileResult Transpiler::transpile_ugraph() {
           ptr_names.push_back(ptr_name);
         }
         // Transpile
-        CustomOPTranspileResult result = transpile_kn_custom_op(cur_op);
+        CustomOPTranspileResult result;
+        if (config.target_cc == GPU_CC::H100) {
+          result = transpile_kn_custom_op_hopper(cur_op);
+        } else {
+          result = transpile_kn_custom_op(cur_op);
+        }
+
         if (result.error_type != CUDA_T_SUCCESS) {
           vector<OutputTensorDirective> output_directives;
           return TranspileResult{
@@ -417,6 +429,7 @@ TranspileResult Transpiler::transpile_ugraph() {
         if (result.smem_size > max_smem_size) {
           max_smem_size = result.smem_size;
         }
+
         // Checkings against grid dim and block dim
         if (config.target_cc <= GPU_CC::H100) {
           // According to
@@ -448,15 +461,129 @@ TranspileResult Transpiler::transpile_ugraph() {
                bgraph.block_dim.x,
                bgraph.block_dim.y,
                bgraph.block_dim.z);
-        exec.e("size_t smem_size = $;", result.smem_size);
-        exec.e("$<<<grid_dim, block_dim, smem_size>>>($);",
-               result.func_name,
-               ptr_names);
+        exec.e("size_t smem_size = $;",
+               result.smem_size +
+                   result.tmaParamsList.size() * sizeof(uint64_t) +
+                   SHARE_PIPELINE_SIZE);
+        // init
+
+        exec.e("");
+        exec.e("// define tmas");
+        for (kn::DTensor const &dtensor : cur_op->input_tensors) {
+          auto guid = dtensor.guid;
+          DTensorMeta const &meta = dtensor_metas.at(guid);
+        }
+
+        // get tma params;
+        if (config.target_cc >= GPU_CC::H100) {
+          // get_hopper_tmas(hopper_tma, result.tmaParamsList);
+
+          // for inputs that needs tma async copy, init the TMAs
+          std::string tmas;
+          std::string tma_tmps;
+          std::string m_inputs;
+          for (int i = 0; i < result.tmaParamsList.size(); i++) {
+            auto const &tmaParams = result.tmaParamsList.at(i);
+            dst_layouts.append(tmaParams.dstLayout).append("{}");
+            dtensors.append(fmt("dtensor$", tmaParams.guid));
+            m_inputs.append(tmaParams.m_input ? "true" : "false");
+
+            tmas.append(fmt("tma_$, ", tmaParams.guid));
+            tma_tmps.append(fmt("decltype(tma_$)", tmaParams.guid));
+
+            if (i != result.tmaParamsList.size() - 1) {
+              tma_tmps.append(", ");
+              m_inputs.append(", ");
+            }
+          }
+
+          exec.e(fmt("std::vector<bool> minputs = {$};", m_inputs));
+          for (int i = 0; i < result.tmaParamsList.size(); i++) {
+            auto const &tmaParams = result.tmaParamsList.at(i);
+
+            if (tmaParams.m_input) {
+              exec.e(fmt("static constexpr cute::GMMA::Major GmmaMajor_$ = "
+                         "GMMA::Major::K;",
+                         tmaParams.guid));
+            } else {
+              exec.e(fmt("static constexpr cute::GMMA::Major GmmaMajor_$ = "
+                         "GMMA::Major::MN;",
+                         tmaParams.guid));
+            }
+            exec.e(fmt("using DstMNKLayout_$ = $;",
+                       tmaParams.guid,
+                       tmaParams.dstLayout));
+
+            exec.e(fmt("using SrcMNKLayout_$ = $;",
+                       tmaParams.guid,
+                       tmaParams.srcLayout));
+
+            exec.e(fmt(
+                "using SmemLayoutAtom_$ = "
+                "decltype(cutlass::gemm::collective::detail::ss_smem_selector<"
+                "GmmaMajor_$, half_t, decltype(get<0>(DstMNKLayout_${})), "
+                "decltype(get<1>(DstMNKLayout_${}))>());",
+                tmaParams.guid,
+                tmaParams.guid,
+                tmaParams.guid,
+                tmaParams.guid));
+            exec.e(fmt("using DstPipeLayout_$ = "
+                       "decltype(tile_to_shape(SmemLayoutAtom_${}, "
+                       "make_shape(shape<0>(DstMNKLayout_${}), "
+                       "shape<1>(DstMNKLayout_${}), Int<tb::kStages>{}), "
+                       "Step<_1, _2, _3>{}));",
+                       tmaParams.guid,
+                       tmaParams.guid,
+                       tmaParams.guid,
+                       tmaParams.guid));
+            exec.e(fmt("auto g_tensor_$ = "
+                       "make_tensor(make_gmem_ptr<half_t>(dtensor$), "
+                       "SrcMNKLayout_${});",
+                       tmaParams.guid,
+                       tmaParams.guid,
+                       tmaParams.guid));
+            exec.e(
+                fmt("auto tma_$ = make_tma_copy(SM90_TMA_LOAD{}, g_tensor_$, "
+                    "DstPipeLayout_${}(_, _, Int<0>{}));",
+                    tmaParams.guid,
+                    tmaParams.guid,
+                    tmaParams.guid));
+
+            exec.e("");
+          }
+
+          if (result.tmaParamsList.size() > 0) {
+            exec.e("cudaFuncSetAttribute($<$>, "
+                   "cudaFuncAttributeMaxDynamicSharedMemorySize, $);",
+                   result.func_name,
+                   tma_tmps,
+                   result.smem_size +
+                       result.tmaParamsList.size() * sizeof(uint64_t) + 3000);
+          } else {
+            exec.e("cudaFuncSetAttribute($, "
+                   "cudaFuncAttributeMaxDynamicSharedMemorySize, $);",
+                   result.func_name,
+                   result.smem_size +
+                       result.tmaParamsList.size() * sizeof(uint64_t) + 3000);
+          }
+
+          exec.e("$<<<grid_dim, block_dim, smem_size>>>($ $);",
+                 result.func_name,
+                 tmas,
+                 ptr_names);
+        } else {
+          exec.e("cudaFuncSetAttribute($, "
+                 "cudaFuncAttributeMaxDynamicSharedMemorySize, $);",
+                 result.func_name,
+                 result.smem_size +
+                     result.tmaParamsList.size() * sizeof(uint64_t) + 3000);
+          exec.e("$<<<grid_dim, block_dim, smem_size>>>( $);",
+                 result.func_name,
+                 ptr_names);
+        }
+
         custom_kernels.e(result.code);
-        init.e("cudaFuncSetAttribute($, "
-               "cudaFuncAttributeMaxDynamicSharedMemorySize, $);",
-               result.func_name,
-               result.smem_size);
+
         break;
       }
       default:
@@ -469,10 +596,11 @@ TranspileResult Transpiler::transpile_ugraph() {
   init.e("}");
   exec.e("}");
 
-  string code = fmt("$\n$\n$\n$\n",
+  string code = fmt("$\n$\n$\n$\n$\n",
                     header.to_string(),
                     custom_kernels.to_string(),
                     init.to_string(),
+                    hopper_tma.to_string(),
                     exec.to_string());
   vector<OutputTensorDirective> output_directives;
   for (kn::DTensor const &dtensor : this->mugraph_output_tensors) {
