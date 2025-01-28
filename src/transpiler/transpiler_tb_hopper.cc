@@ -973,8 +973,8 @@ CustomOPTranspileResult
 
   // A lambda function that transpiles an TBSchedNode
   auto transpile_tb_sched_node = [&](TBSchedNode const &sched_node,
+                                     CodeKeeper &code,
                                      bool is_in_loop) {
-    CodeKeeper code;
     if (sched_node.type == tb_sched_node_t::SYNCTHREADS) {
       code.e("cutlass::arch::NamedBarrier::sync(128, 8);");
     } else {
@@ -1299,7 +1299,7 @@ CustomOPTranspileResult
       }
       code.e("}");
     }
-    return code;
+    return CUDA_T_SUCCESS;
   };
 
   // Declare the for loop
@@ -1326,8 +1326,12 @@ CustomOPTranspileResult
             dynamic_cast<tb::TBInputOp const *>(sched_node.ops[0].first))) {
       continue;
     }
-    CodeKeeper res = transpile_tb_sched_node(sched_node, true);
+    CodeKeeper res;
+    TranspileErrorType err = transpile_tb_sched_node(sched_node, res, true);
     code << res;
+    if (err != CUDA_T_SUCCESS) {
+      return CustomOPTranspileResult{err, func_name, 0, ""};
+    }
   }
 
   if (pipeline_inputs.size() > 0) {
@@ -1372,8 +1376,13 @@ CustomOPTranspileResult
     code.e("// The epilogue (kernels outside the loop)");
     code.e("cutlass::arch::NamedBarrier::sync(128, 8);");
     for (TBSchedNode const &sched_node : sched.post_loop_nodes) {
-      CodeKeeper res = transpile_tb_sched_node(sched_node, false);
+      CodeKeeper res;
+      TranspileErrorType err = transpile_tb_sched_node(sched_node, res, false);
       code << res;
+
+      if (err != CUDA_T_SUCCESS) {
+        return CustomOPTranspileResult{err, func_name, 0, ""};
+      }
     }
   }
   code.e("}");
@@ -1382,8 +1391,11 @@ CustomOPTranspileResult
 
   code.e("}"); // kernel
 
-  return CustomOPTranspileResult{
-      func_name, mem_plan.smem_size, code.to_string(), tmaParamsList};
+  return CustomOPTranspileResult{CUDA_T_SUCCESS,
+                                 func_name,
+                                 mem_plan.smem_size,
+                                 code.to_string(),
+                                 tmaParamsList};
 }
 
 } // namespace transpiler
