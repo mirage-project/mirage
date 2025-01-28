@@ -484,8 +484,6 @@ TranspileResult Transpiler::transpile_ugraph() {
           std::string m_inputs;
           for (int i = 0; i < result.tmaParamsList.size(); i++) {
             auto const &tmaParams = result.tmaParamsList.at(i);
-            dst_layouts.append(tmaParams.dstLayout).append("{}");
-            dtensors.append(fmt("dtensor$", tmaParams.guid));
             m_inputs.append(tmaParams.m_input ? "true" : "false");
 
             tmas.append(fmt("tma_$, ", tmaParams.guid));
