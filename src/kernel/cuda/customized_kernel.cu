@@ -862,7 +862,7 @@ __global__ void
   } else if (type == mirage::type::TB_EPILOGUE_ALLREDUCE) {
     int i = threadIdx.x + blockIdx.x * blockDim.x;
     if (i < num_elements) {
-      uint32_t x = 0;
+      FPType x = 0;
       for (int k = 0; k < num_gpus; k++) {
         x = utils::compute_add_fingerprint(x, fp_ptr_list.ptrs[k][i]);
       }

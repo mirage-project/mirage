@@ -41,7 +41,7 @@ public:
     int num_samples = output_num_elements / norm_size;
     assert(output_num_elements == num_samples * norm_size);
     for (int idx = thread_id; idx < num_samples; idx += num_threads) {
-      uint32_t square_sum = 0;
+      FPType square_sum = 0;
       for (int k = 0; k < norm_size; k++) {
         int pos = idx * norm_size + k;
         FPType x = input_ptr[pos];

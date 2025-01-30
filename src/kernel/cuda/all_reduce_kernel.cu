@@ -40,7 +40,7 @@ __global__ void compute_allreduce_fingerprint(
     mirage::utils::FpPointerList fp_ptr_list, int num_gpus, int num_elements) {
   int i = threadIdx.x + blockIdx.x * blockDim.x;
   if (i < num_elements) {
-    uint32_t x = 0;
+    FPType x = 0;
     for (int k = 0; k < num_gpus; k++) {
       x = compute_add_fingerprint(x, fp_ptr_list.ptrs[k][i]);
     }
