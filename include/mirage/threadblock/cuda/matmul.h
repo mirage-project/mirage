@@ -17,6 +17,7 @@
 
 #include "mirage/threadblock/smem_tensor.h"
 #include "mirage/utils/cuda_helper.h"
+#include "mirage/utils/fingerprint_functions.h"
 #include "mirage/utils/static_switch.h"
 
 #include "cutlass/aligned_buffer.h"
@@ -50,6 +51,7 @@ namespace threadblock {
 
 using namespace cutlass;
 using namespace mirage::type;
+using namespace mirage::utils;
 
 template <typename WarpShape,
           typename InstructionShape,
@@ -773,13 +775,14 @@ public:
     // int a_k_size = A.dim[A.num_dims - 1];
     int b_n_size = c_n_size;
     for (int i = thread_id; i < num_elements; i += num_threads) {
-      uint32_t result = 0;
+      FPType result = 0;
       int m = i / c_n_size;
       int n = i % c_n_size;
       for (int k = 0; k < a_k_size; k++) {
-        uint32_t a_value = A_ptr[m * a_k_size + k];
-        uint32_t b_value = B_ptr[k * b_n_size + n];
-        result = (result + a_value * b_value) % FP_PQ;
+        FPType a = A_ptr[m * a_k_size + k];
+        FPType b = B_ptr[k * b_n_size + n];
+        FPType ab = compute_mul_fingerprint(a, b);
+        result = compute_add_fingerprint(result, ab);
         if (false && thread_id == 0) {
           printf("i(%d) block(%d %d %d) result(%d) a_value(%d) b_value(%d)"
                  "n(%d) m(%d) k(%d) a_k_size(%d) b_n_size(%d) c_n_size(%d)\n",
@@ -788,8 +791,8 @@ public:
                  blockIdx.y,
                  blockIdx.z,
                  (int)result,
-                 (int)a_value,
-                 (int)b_value,
+                 (int)a,
+                 (int)b,
                  n,
                  m,
                  k,

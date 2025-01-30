@@ -18,6 +18,7 @@
 #include "cutlass/cutlass.h"
 #include "cutlass/fast_math.h"
 #include "mirage/utils/cuda_helper.h"
+#include "mirage/utils/fingerprint_functions.h"
 #include "mirage/utils/static_switch.h"
 
 namespace mirage {
@@ -25,6 +26,7 @@ namespace threadblock {
 
 using namespace cutlass;
 using namespace mirage::type;
+using namespace mirage::utils;
 
 template <typename ElementType>
 class RedunctionExecutor {
@@ -148,9 +150,9 @@ public:
     for (int i = thread_id; i < output_num_elements; i += num_threads) {
       int pos = (i / inner_range) * (inner_range * reduction_degree) +
                 i % inner_range;
-      uint32_t result = 0;
+      FPType result = 0;
       for (int k = 0; k < reduction_degree; k++) {
-        result = (result + input_ptr[pos]) % FP_PQ;
+        result = compute_add_fingerprint(result, input_ptr[pos]);
         pos += inner_range;
       }
       output_ptr[i] = result;
