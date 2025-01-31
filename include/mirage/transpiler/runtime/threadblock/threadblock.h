@@ -10,4 +10,4 @@
 #include "threadblock/output.h"
 #include "threadblock/reduction.h"
 #include "threadblock/pipeline.h"
-#include "threadblock/warpgroup.h"
+#include "threadblock/utils.h"

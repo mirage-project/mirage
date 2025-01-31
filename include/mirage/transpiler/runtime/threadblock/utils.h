@@ -44,7 +44,7 @@ static __device__ __forceinline__ void wg_increase_regs(){
 }
 
 // sync inside a warp group
-static __device__ __forceinline__ void warpgroup_sync(uint32_t barrier_id){
+static __device__ __forceinline__ void warpgroup_sync(uint32_t barrier_id, int x){
     
 #ifdef MIRAGE_GRACE_HOPPER
     asm volatile("bar.sync %0, %1;\n" :: "r"(barrier_id), "n"(mirage::config::NUM_THREADS_PER_GROUP));

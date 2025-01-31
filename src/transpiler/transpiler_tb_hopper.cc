@@ -700,10 +700,10 @@ Transpiler::transpile_kn_custom_op_hopper(kn::KNCustomizedOp const *op) {
       code.e("using Matmul$Kernel = tb::Hopper_Matmul<half_t, "
              "$, $, Matmul$LayoutA, Matmul$LayoutB, "
              "Matmul$LayoutC, NUM_THREADS, "
-             "$, $>;",
+             "$, $, $>;",
              output.guid, is_ldmatrix_avail, is_stmatrix_avail, output.guid,
              output.guid, output.guid, num_exps_before_store,
-             is_accum_in_reg ? false : is_store_accum);
+             is_accum_in_reg ? false : is_store_accum, g.num_consumer_wgs > 1 ? true: false);
       if (is_accum_in_reg) {
         code.e("auto matmul_$_accum = Matmul$Kernel::get_mma_rC(thread_idx);",
                output.guid, output.guid);
@@ -711,6 +711,7 @@ Transpiler::transpile_kn_custom_op_hopper(kn::KNCustomizedOp const *op) {
       code.e("");
     }
   }
+  code.e("__syncthreads();");
 
   if (num_pre_loop_copies > 0 || num_clear_accums > 0) {
     code.e("__syncthreads();");
@@ -784,8 +785,10 @@ Transpiler::transpile_kn_custom_op_hopper(kn::KNCustomizedOp const *op) {
                                      std::map<int64_t, tb::TBInputOp const *>
                                          &pipeline_inputs,
                                      bool is_in_loop) {
-    if (sched_node.type == tb_sched_node_t::SYNCTHREADS) {
-      code.e("tb::warpgroup_sync(128, 8 + warpgroud_id);");
+    if (sched_node.type == tb_sched_node_t::SYNCTHREADS && is_in_loop) {
+      code.e("tb::warpgroup_sync(128, 9 + warpgroup_id);");
+    }else if(sched_node.type == tb_sched_node_t::SYNCTHREADS){
+      code.e("tb::warpgroup_sync(CONSUMER_NUM_THREADS, 8);");
     } else {
       auto [op, first_op_meta] = sched_node.ops.front();
       auto [output_op, output_op_meta] = sched_node.ops.back();
@@ -903,7 +906,7 @@ Transpiler::transpile_kn_custom_op_hopper(kn::KNCustomizedOp const *op) {
         // Define and run the kernel
         code.e("using Kernel = tb::ElementUnaryKernel<half_t, "
                "tb::ElementUnaryOpType::$, OutLayout, InLayout, "
-               "NUM_THREADS, $>;",
+               "CONSUMER_NUM_THREADS, $>;",
                get_tb_op_str(cur_op->op_type), epilogue);
         code.e(append_epilogue_scalars(sched_node.ops));
         code.e("Kernel::run(stensor$_ptr, stensor$_ptr, thread_idx, $, "
@@ -958,7 +961,7 @@ Transpiler::transpile_kn_custom_op_hopper(kn::KNCustomizedOp const *op) {
         // Define and run the kernel
         code.e("using Kernel = tb::ElementBinaryKernel<half_t, "
                "tb::ElementBinaryOpType::$, OutLayout, In0Layout, In1Layout, "
-               "NUM_THREADS, $>;",
+               "CONSUMER_NUM_THREADS, $>;",
                op_type_str, epilogue);
         code.e(append_epilogue_scalars(sched_node.ops));
         code.e("Kernel::run(stensor$_ptr, stensor$_ptr, stensor$_ptr, "
@@ -1016,7 +1019,7 @@ Transpiler::transpile_kn_custom_op_hopper(kn::KNCustomizedOp const *op) {
         string epilogue = transpile_fusion_epilogue(sched_node.ops);
         // Define and run the kernel
         code.e("using Kernel = tb::ReductionKernel<half_t, "
-               "OutLayout, InLayout, $, NUM_THREADS, $>;",
+               "OutLayout, InLayout, $, CONSUMER_NUM_THREADS, $>;",
                cute_reduc_dim, epilogue);
         code.e(append_epilogue_scalars(sched_node.ops));
         code.e("Kernel::run(stensor$_ptr, stensor$_ptr, thread_idx, scalars);",
@@ -1145,7 +1148,7 @@ Transpiler::transpile_kn_custom_op_hopper(kn::KNCustomizedOp const *op) {
   }
   if (num_in_reg_accums > 0) {
     code.e("// Write back in-register accumulators");
-    code.e("tb::warpgroup_sync(128, 8 + warpgroud_id);");
+    code.e("tb::warpgroup_sync(CONSUMER_NUM_THREADS, 8);");
     // code.e("__syncthreads();"); // Need this __syncthreads() to make sure no
     //                             // thread is still in the for loop
     code << in_reg_writeback;
@@ -1154,7 +1157,7 @@ Transpiler::transpile_kn_custom_op_hopper(kn::KNCustomizedOp const *op) {
   // Transpile the epilogue of the kernel
   if (!sched.post_loop_nodes.empty()) {
     code.e("// The epilogue (kernels outside the loop)");
-    code.e("tb::warpgroup_sync(128, 8 + warpgroud_id);");
+    code.e("tb::warpgroup_sync(CONSUMER_NUM_THREADS, 8);");
     for (TBSchedNode const &sched_node : sched.post_loop_nodes) {
       CodeKeeper res;
       TranspileErrorType err =

@@ -38,7 +38,7 @@ namespace tb {
 
             CUTLASS_DEVICE
             HopperAsyncPipeline(
-            void* __restrict__ shared_memory_offset, bool producer, bool consumer, uint32_t transactionBytes, int num_consumer_wgs)
+            void* __restrict__ shared_memory_offset, bool producer, bool consumer, uint32_t transactionBytes, uint32_t num_consumer_wgs)
             : smem_pipe_read(),
                smem_pipe_write(cutlass::make_producer_start_state<MainloopPipeline>()),
                pipeline_params{

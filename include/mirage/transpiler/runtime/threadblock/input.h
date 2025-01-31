@@ -195,7 +195,7 @@ public:
                                              int imapz_a,
                                              int k_tile_iter,
                                              HopperAsyncPipeline &pipeline) {                                        
-    if (threadIdx.x == 128) {
+    if (lane_id() == 0) {
       Tensor mA = tma_a.get_tma_tensor(shape(SrcLayout{}));
       // （CTA_M, CTA_K, X, Y, Z, FORLOOP）
       auto blkCoordA = make_coord(_,
@@ -218,6 +218,7 @@ public:
 
       // auto k_tile_iter = cute::make_coord_iterator(K_ITER);
       // int k_tile_count = K_ITER;
+
 
       // CUTE_UNROLL
       // for (; k_tile_count > 0; --k_tile_count) {
