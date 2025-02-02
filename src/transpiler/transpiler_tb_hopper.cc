@@ -284,7 +284,6 @@ CustomOPTranspileResult
 Transpiler::transpile_kn_custom_op_hopper(kn::KNCustomizedOp const *op) {
   tb::Graph const &g = op->bgraph;
   int num_threads = g.block_dim.x * g.block_dim.y * g.block_dim.z;
-  int pipe_stage = g.pipe_stage;
 
   assert(GPU_CC::H100 == config.target_cc);
 
@@ -448,7 +447,7 @@ Transpiler::transpile_kn_custom_op_hopper(kn::KNCustomizedOp const *op) {
            code.e(
               "tb::HopperAsyncPipeline<$> "
               "hopper_async_pipeline_$((void *) (buf + $), (tb::warpgroup_id() == $ && tb::warp_id() % mirage::config::NUM_WARPS_PER_GROUP == 0), tb::warpgroup_id() < $, $, $);",
-              g.pipe_stage, stensor.guid, addr_end + pipe_index * 1000, g.num_consumer_wgs, g.num_consumer_wgs,stensor_meta.num_phy_elems * type::get_datatype_size(stensor.data_type), g.num_consumer_wgs);
+              config.pipeline_stage, stensor.guid, addr_end + pipe_index * 1000, g.num_consumer_wgs, g.num_consumer_wgs,stensor_meta.num_phy_elems * type::get_datatype_size(stensor.data_type), g.num_consumer_wgs);
 
           code.e("using STensor$InputAtom = tb::InputTMAAsyncCopy<half_t, $, "
                  "$, decltype(tma_$), decltype(hopper_async_pipeline_$), $, $>;",

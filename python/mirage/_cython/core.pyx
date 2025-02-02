@@ -941,10 +941,12 @@ def search(CyKNGraph input_graph, *, int max_num_new_graphs = 1024, list imaps =
 
 # Generate CUDA program for a uGraph
 # Return (CUDA code, buffer size in bytes)
-def generate_cuda_program(CyKNGraph input_graph, *, int target_cc, list input_strides) -> dict:
+def generate_cuda_program(CyKNGraph input_graph, *, int target_cc, list input_strides, int num_warp_groups = 1, int pipeline_stage = 2) -> dict:
     # Set transpiler_config
     cdef TranspilerConfig transpiler_config
     transpiler_config.target_cc = target_cc
+    transpiler_config.num_warp_groups = num_warp_groups;
+    transpiler_config.pipeline_stage = pipeline_stage;
     
     # Set input_strides
     cdef vector[vector[size_t]] cinput_strides

@@ -159,9 +159,9 @@ public:
   //warp group related variables
   //[  producer wgs,                        consumer wgs             ]
   //[0, num_producer_wgs - 1, num_producer_wgs + num_consumer_wgs - 1]
-  int num_producer_wgs = 1;
-  int num_consumer_wgs = 1;
-  int pipe_stage = 2;
+  // int num_producer_wgs = 1;
+  // int num_consumer_wgs = 1;
+  // int pipe_stage = 2;
 
   using OpType = TBOperator;
   using TensorType = STensor;

@@ -296,7 +296,7 @@ class KNGraph:
         )
 
         result = generate_cuda_program(
-            self.cygraph, target_cc=target_cc, input_strides=input_strides
+            self.cygraph, target_cc=target_cc, input_strides=input_strides, 
         )
         # print(result)
         if result["max_smem_size"] > get_shared_memory_capacity(target_cc):
