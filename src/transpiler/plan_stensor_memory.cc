@@ -272,7 +272,6 @@ TBMemoryPlan Transpiler::get_threadblock_memory_plan(tb::Graph const &tb_graph,
     STensorMeta const &stensor_meta = stensor_metas.at(stensor.guid);
     return stensor_meta.num_phy_elems *
            type::get_datatype_size(stensor.data_type);
-    
   };
   // auto find_first_used_time = [](sguid_t sguid,
   //                                vector<TBSchedNode> const &nodes,
@@ -369,7 +368,7 @@ TBMemoryPlan Transpiler::get_threadblock_memory_plan(tb::Graph const &tb_graph,
         // assert(first_used_time != -1 &&
         //        "An accumulator is not used after the for loop");
 
-        //buffer X number of pipe_stage
+        // buffer X number of pipe_stage
         tensor_decls.push_back(
             {accum.guid, phy_size, 2 * T, earlist_free_time});
       } else {
@@ -399,8 +398,10 @@ TBMemoryPlan Transpiler::get_threadblock_memory_plan(tb::Graph const &tb_graph,
         // in hopper the doubule buffer needs to be continously allocated
         if (last_op->op_type == type::TB_INPUT_OP &&
             last_op_meta.is_pipelined_input && hopper_arch) {
-          tensor_decls.push_back(
-              {output_tensor.guid, phy_size * config.pipeline_stages, i + T, earlist_free_time});
+          tensor_decls.push_back({output_tensor.guid,
+                                  phy_size * config.pipeline_stages,
+                                  i + T,
+                                  earlist_free_time});
         } else {
           tensor_decls.push_back(
               {output_tensor.guid, phy_size, i + T, earlist_free_time});

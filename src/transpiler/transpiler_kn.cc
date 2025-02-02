@@ -139,7 +139,6 @@ TranspileResult Transpiler::transpile_ugraph() {
   header.e("#include \"runtime.h\"");
   header.e("using namespace cute;");
 
-
   CodeKeeper custom_kernels; // This keeps all code for custom kernels
                              // (KNCustomizedOp)
   CodeKeeper init; // This keeps all code in the `_init` function (e.g.
@@ -462,8 +461,7 @@ TranspileResult Transpiler::transpile_ugraph() {
                bgraph.block_dim.x,
                bgraph.block_dim.y,
                bgraph.block_dim.z);
-        exec.e("size_t smem_size = $;",
-               result.smem_size);
+        exec.e("size_t smem_size = $;", result.smem_size);
         // init
 
         exec.e("");
@@ -576,11 +574,13 @@ TranspileResult Transpiler::transpile_ugraph() {
                  result.func_name,
                  ptr_names);
         }
-      //   exec.e("cudaDeviceSynchronize();");
-      //   exec.e("cudaError_t err = cudaGetLastError(); // Retrieve the last CUDA error\n"
-      //  "if (err != cudaSuccess) {\n"
-      //  "    std::cout << \"CUDA Error after \" << \": \" << cudaGetErrorString(err) << std::endl;\n"
-      //  "}\n");
+        //   exec.e("cudaDeviceSynchronize();");
+        //   exec.e("cudaError_t err = cudaGetLastError(); // Retrieve the last
+        //   CUDA error\n"
+        //  "if (err != cudaSuccess) {\n"
+        //  "    std::cout << \"CUDA Error after \" << \": \" <<
+        //  cudaGetErrorString(err) << std::endl;\n"
+        //  "}\n");
 
         custom_kernels.e(result.code);
 

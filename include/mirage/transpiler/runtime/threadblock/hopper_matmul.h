@@ -82,7 +82,8 @@ public:
 
   // TODO xinhaoc case that not fit the selector
   using AtomLayoutMNK = cute::conditional_t<IS_COORPERATIVE,
-      Layout<Shape<_2,_1,_1>>, Layout<Shape<_1,_1,_1>>>;
+                                            Layout<Shape<_2, _1, _1>>,
+                                            Layout<Shape<_1, _1, _1>>>;
 
   using TiledMMA = decltype(cute::make_tiled_mma(
       cute::GMMA::ss_op_selector<T,
@@ -90,13 +91,15 @@ public:
                                  T,
                                  decltype(make_shape(M{}, N{}, K{})),
                                  GmmaMajorA,
-                                 GmmaMajorB>(), AtomLayoutMNK{}));
+                                 GmmaMajorB>(),
+      AtomLayoutMNK{}));
 
   //   using TiledMMA = decltype(make_tiled_mma(
   //       SM90_64x64x16_F16F16F16_SS<GmmaMajorA, GmmaMajorB>{}));
 
   static constexpr int TILED_MMA_NUM_THREADS = thr_size(TiledMMA{});
-  static_assert(TILED_MMA_NUM_THREADS == NUM_THREADS *  (IS_COORPERATIVE ? 2 : 1));
+  static_assert(TILED_MMA_NUM_THREADS ==
+                NUM_THREADS * (IS_COORPERATIVE ? 2 : 1));
 
   using R2STiledCopyCSelector =
       R2STiledCopySelector<T, IS_STMATRIX_AVAIL, SmemLayoutC>;
@@ -108,7 +111,7 @@ public:
 
   static __device__ __forceinline__ auto get_mma_rC(int thread_idx) {
     // Make a fake tensor
-    
+
     Tensor sC_fake =
         make_tensor(make_smem_ptr((half_t *)nullptr), SmemLayoutC{});
 
@@ -116,7 +119,6 @@ public:
     ThrMMA thr_mma = tiled_mma.get_slice(thread_idx % 128);
     Tensor mma_rC =
         thr_mma.partition_fragment_C(sC_fake); // (MMA, MMA_M, MMA_N)
-
 
     clear(mma_rC);
     return mma_rC;
@@ -169,18 +171,13 @@ public:
     Tensor sA = make_tensor(make_smem_ptr(a_ptr), sA_l); // [M, K]
     Tensor sB = make_tensor(make_smem_ptr(b_ptr), sB_l); // [N, K]
 
-   
-
     ThrMMA thr_mma = tiled_mma.get_thread_slice(threadIdx.x);
     Tensor tCsA = thr_mma.partition_A(sA); // (MMA,MMA_M,MMA_K,PIPE)
     Tensor tCsB = thr_mma.partition_B(sB); // (MMA,MMA_N,MMA_K,PIPE)
 
-
-
     Tensor tCrA = thr_mma.make_fragment_A(tCsA); // (MMA,MMA_M,MMA_K,PIPE)
     Tensor tCrB = thr_mma.make_fragment_B(tCsB); // (MMA,MMA_N,MMA_K,PIPE)
     // int read_stage = smem_pipe_read.index();
-
 
     warpgroup_fence_operand(mma_rC);
     cute::warpgroup_arrive();
@@ -191,7 +188,6 @@ public:
     cute::warpgroup_commit_batch();
     cute::warpgroup_wait<0>();
     warpgroup_fence_operand(mma_rC);
-
   }
 
   // no pipe version

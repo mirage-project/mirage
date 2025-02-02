@@ -175,10 +175,11 @@ public:
                decltype(get<1>(DstMNKLayout{}))>());
 
   // A, B, X, Y, Z, Stage
-  using DstPipeLayout = decltype(tile_to_shape(
-      SmemLayoutAtom{},
-      make_shape(
-          shape<0>(DstMNKLayout{}), shape<1>(DstMNKLayout{}), Int<HopperAsyncPipeline::Stage>{})));
+  using DstPipeLayout =
+      decltype(tile_to_shape(SmemLayoutAtom{},
+                             make_shape(shape<0>(DstMNKLayout{}),
+                                        shape<1>(DstMNKLayout{}),
+                                        Int<HopperAsyncPipeline::Stage>{})));
 
   static constexpr int tmaTransactionBytes =
       sizeof(T) * size(DstPipeLayout{}) / HopperAsyncPipeline::Stage;
@@ -186,14 +187,14 @@ public:
   static __device__ __forceinline__ void prefetch(TMA const &tma) {
     cute::prefetch_tma_descriptor(tma.get_tma_descriptor());
   }
-  
+
   static __device__ __forceinline__ void run(TMA const &tma_a,
                                              T *dst_a,
                                              int imapx_a,
                                              int imapy_a,
                                              int imapz_a,
                                              int k_tile_iter,
-                                             HopperAsyncPipeline &pipeline) {                                        
+                                             HopperAsyncPipeline &pipeline) {
     if (lane_id() == 0) {
       Tensor mA = tma_a.get_tma_tensor(shape(SrcLayout{}));
       // （CTA_M, CTA_K, X, Y, Z, FORLOOP）
@@ -208,18 +209,16 @@ public:
 
       auto cta_tma_a = tma_a.get_slice(Int<0>{}); // CTA slice
 
-
       Tensor tAgA = cta_tma_a.partition_S(gA);
       Tensor tAsA = cta_tma_a.partition_D(sA);
       Tensor tAgAX = group_modes<0, rank(tAgA) - 1>(tAgA); // REST, Forloop
       Tensor tAsAX = group_modes<0, rank(tAsA) - 1>(tAsA);
 
-
-        auto [tma_barrier, write_stage] = pipeline.producer_acquire();
-        copy(tma_a.with(*tma_barrier),
-             tAgAX(_, k_tile_iter),
-             tAsAX(_, write_stage));
-        pipeline.producer_advance();
+      auto [tma_barrier, write_stage] = pipeline.producer_acquire();
+      copy(tma_a.with(*tma_barrier),
+           tAgAX(_, k_tile_iter),
+           tAsAX(_, write_stage));
+      pipeline.producer_advance();
     }
   }
 };
