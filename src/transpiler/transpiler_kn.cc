@@ -574,13 +574,6 @@ TranspileResult Transpiler::transpile_ugraph() {
                  result.func_name,
                  ptr_names);
         }
-        //   exec.e("cudaDeviceSynchronize();");
-        //   exec.e("cudaError_t err = cudaGetLastError(); // Retrieve the last
-        //   CUDA error\n"
-        //  "if (err != cudaSuccess) {\n"
-        //  "    std::cout << \"CUDA Error after \" << \": \" <<
-        //  cudaGetErrorString(err) << std::endl;\n"
-        //  "}\n");
 
         custom_kernels.e(result.code);
 
