@@ -270,7 +270,6 @@ TBMemoryPlan Transpiler::get_threadblock_memory_plan(tb::Graph const &tb_graph,
 
   auto get_phy_size = [&](tb::STensor const &stensor) {
     STensorMeta const &stensor_meta = stensor_metas.at(stensor.guid);
-    // replicate the stensor with the partition dimension of warp groups
     return stensor_meta.num_phy_elems *
            type::get_datatype_size(stensor.data_type);
     

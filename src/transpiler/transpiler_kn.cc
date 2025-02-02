@@ -463,7 +463,7 @@ TranspileResult Transpiler::transpile_ugraph() {
                bgraph.block_dim.y,
                bgraph.block_dim.z);
         exec.e("size_t smem_size = $;",
-               result.smem_size + 3000);
+               result.smem_size);
         // init
 
         exec.e("");
@@ -555,12 +555,12 @@ TranspileResult Transpiler::transpile_ugraph() {
                    "cudaFuncAttributeMaxDynamicSharedMemorySize, $);",
                    result.func_name,
                    tma_tmps,
-                   result.smem_size + 3000);
+                   result.smem_size);
           } else {
             exec.e("cudaFuncSetAttribute($, "
                    "cudaFuncAttributeMaxDynamicSharedMemorySize, $);",
                    result.func_name,
-                   result.smem_size + 3000);
+                   result.smem_size);
           }
 
           exec.e("$<<<grid_dim, block_dim, smem_size>>>($ $);",
@@ -571,8 +571,7 @@ TranspileResult Transpiler::transpile_ugraph() {
           exec.e("cudaFuncSetAttribute($, "
                  "cudaFuncAttributeMaxDynamicSharedMemorySize, $);",
                  result.func_name,
-                 result.smem_size +
-                     result.tmaParamsList.size() * sizeof(uint64_t) + 3000);
+                 result.smem_size);
           exec.e("$<<<grid_dim, block_dim, smem_size>>>( $);",
                  result.func_name,
                  ptr_names);

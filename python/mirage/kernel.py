@@ -107,7 +107,6 @@ def get_cc_cmd(target, cc, FILE_NAME, py_include_dir, MIRAGE_ROOT, so_path):
         specific_cmd = [
             "-arch=sm_90a",
             "-gencode=arch=compute_90a,code=sm_90a",
-            "-DCUTLASS_NVCC_ARCHS=90a",
         ]
     else:
         specific_cmd = [
@@ -409,20 +408,41 @@ class KNGraph:
         if backend == "cuda":
             # profile and use the best graph
             best_graph, best_perf = None, float("inf")
-            handles = []
             print("Transpiling discovered {} muGraphs ...".format(len(all_graphs)))
-            for idx, g in enumerate(all_graphs):
-                dtensors = g.cygraph.get_input_dtensors()
-                input_tensors = list()
-                for t in dtensors:
-                    dims = [t.dim(i) for i in range(t.num_dims)]
-                    input_tensors.append(
-                        torch.randn(dims, dtype=torch.float16, device="cuda:0")
-                    )
-                starter = torch.cuda.Event(enable_timing=True)
-                ender = torch.cuda.Event(enable_timing=True)
-                handle = g.compile(async_=True, inputs=input_tensors)
-                handles.append(handle)
+            handles = []
+
+            target_cc = torch.cuda.get_device_properties(0).major * 10 + torch.cuda.get_device_properties(0).minor
+            if target_cc >= 90:
+                pipeline_stages_list = [2, 3, 4]
+                num_warp_groups_list = [2, 3, 4]
+                for idx, g in enumerate(all_graphs):
+                    for pipeline_stages in pipeline_stages_list:
+                        for num_warp_groups in num_warp_groups_list:
+                            dtensors = g.cygraph.get_input_dtensors()
+                            input_tensors = list()
+                            for t in dtensors:
+                                dims = [t.dim(i) for i in range(t.num_dims)]
+                                input_tensors.append(
+                                    torch.randn(dims, dtype=torch.float16, device="cuda:0")
+                                )
+                            starter = torch.cuda.Event(enable_timing=True)
+                            ender = torch.cuda.Event(enable_timing=True)
+                            new_g = g
+                            handle = new_g.compile(async_=True, inputs=input_tensors, pipeline_stages=pipeline_stages, num_warp_groups=num_warp_groups)
+                            handles.append(handle)
+            else:
+                for idx, g in enumerate(all_graphs):
+                    dtensors = g.cygraph.get_input_dtensors()
+                    input_tensors = list()
+                    for t in dtensors:
+                        dims = [t.dim(i) for i in range(t.num_dims)]
+                        input_tensors.append(
+                            torch.randn(dims, dtype=torch.float16, device="cuda:0")
+                        )
+                    starter = torch.cuda.Event(enable_timing=True)
+                    ender = torch.cuda.Event(enable_timing=True)
+                    handle = g.compile(async_=True, inputs=input_tensors)
+                    handles.append(handle)
             for handle in handles:
                 handle.wait()
             for idx, g in enumerate(all_graphs):

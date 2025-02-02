@@ -285,6 +285,11 @@ Transpiler::transpile_kn_custom_op_hopper(kn::KNCustomizedOp const *op) {
   tb::Graph const &g = op->bgraph;
   int num_threads = g.block_dim.x * g.block_dim.y * g.block_dim.z;
 
+  // Allocate a kernel name
+  static int custom_kernel_idx_counter = 0;
+  int cur_custom_kernel_idx = custom_kernel_idx_counter++;
+  string func_name = fmt("custom_kernel_$", cur_custom_kernel_idx);
+
   
   if(GPU_CC::H100 != config.target_cc || (config::MAX_NUM_WARP_GROUPS < config.num_consumer_wgs + config.num_producer_wgs)
 || (num_threads != (config.num_consumer_wgs + config.num_producer_wgs) * 128)){
@@ -303,11 +308,6 @@ Transpiler::transpile_kn_custom_op_hopper(kn::KNCustomizedOp const *op) {
   TBMemoryPlan mem_plan = get_threadblock_memory_plan(g, sched, true);
 
   std::vector<TMAParams> tmaParamsList;
-
-  // Allocate a kernel name
-  static int custom_kernel_idx_counter = 0;
-  int cur_custom_kernel_idx = custom_kernel_idx_counter++;
-  string func_name = fmt("custom_kernel_$", cur_custom_kernel_idx);
 
   // Generate code prologue
   CodeKeeper code;
