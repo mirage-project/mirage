@@ -34,7 +34,8 @@ struct TranspilerConfig {
   int target_cc;
 
   // features for GPUs >= Grace Hopper
-  int num_warp_groups;
+  int num_consumer_wgs;
+  int num_producer_wgs;
   int pipeline_stages;
 };
 

@@ -19,7 +19,7 @@ static __device__ __forceinline__ int warp_id(){
 }
 
 static __device__ __forceinline__ int warpgroup_id(){
-    return __shfl_sync(0xffffffff, threadIdx.x / mirage::config::NUM_THREADS_PER_WARP_GROUP, 0);
+    return __shfl_sync(0xffffffff, threadIdx.x / mirage::config::NUM_THREADS_PER_GROUP, 0);
 }
 
 // decrease register files in a wg

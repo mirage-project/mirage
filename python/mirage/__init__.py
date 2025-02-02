@@ -23,6 +23,6 @@ def new_kernel_graph():
 def new_threadblock_graph(grid_dim: tuple, block_dim: tuple, forloop_range: int, reduction_dimx: int):
     bgraph = core.CyTBGraph(grid_dim, block_dim, forloop_range, reduction_dimx)
     return TBGraph(bgraph)
-    
+
 # Current Version
 __version__ = "0.2.2"

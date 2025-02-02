@@ -285,7 +285,14 @@ Transpiler::transpile_kn_custom_op_hopper(kn::KNCustomizedOp const *op) {
   tb::Graph const &g = op->bgraph;
   int num_threads = g.block_dim.x * g.block_dim.y * g.block_dim.z;
 
-  assert(GPU_CC::H100 == config.target_cc);
+  
+  if(GPU_CC::H100 != config.target_cc || (config::MAX_NUM_WARP_GROUPS < config.num_consumer_wgs + config.num_producer_wgs)
+|| (num_threads != (config.num_consumer_wgs + config.num_producer_wgs) * 128)){
+  return CustomOPTranspileResult{CUDA_T_CONFIG_ERROR, func_name, 0, ""};
+}
+
+  
+  int barrier_size = 16 * config.pipeline_stages;
 
   // Get the schedule
   TBSched sched = get_threadblock_schedule(g);
@@ -302,10 +309,6 @@ Transpiler::transpile_kn_custom_op_hopper(kn::KNCustomizedOp const *op) {
   int cur_custom_kernel_idx = custom_kernel_idx_counter++;
   string func_name = fmt("custom_kernel_$", cur_custom_kernel_idx);
 
-  if (g.block_dim.x < config::NUM_THREADS_PER_WARP_GROUP * 2) {
-    return CustomOPTranspileResult{CUDA_T_CONFIG_ERROR, func_name, 0, ""};
-  }
-
   // Generate code prologue
   CodeKeeper code;
   string thread_idx;
@@ -319,12 +322,12 @@ Transpiler::transpile_kn_custom_op_hopper(kn::KNCustomizedOp const *op) {
   code.e("static constexpr int NUM_THREADS = $;", 128);
 
   code.e("static constexpr int CONSUMER_NUM_THREADS = $;",
-         config::NUM_THREADS_PER_WARP_GROUP * g.num_consumer_wgs);
+         config::NUM_THREADS_PER_GROUP * config.num_consumer_wgs);
 
   // Define STensor as cute::Tensor
   code.e("// STensors");
   code.e("extern __shared__ char buf[];");
-  size_t addr_end = mem_plan.smem_size;
+  size_t barrier_addr = mem_plan.smem_size;
   for (auto [guid, addr] : mem_plan.addrs) {
     code.e("half_t *stensor$_ptr = (half_t*)(buf + $);", guid, addr);
   }
@@ -447,7 +450,7 @@ Transpiler::transpile_kn_custom_op_hopper(kn::KNCustomizedOp const *op) {
            code.e(
               "tb::HopperAsyncPipeline<$> "
               "hopper_async_pipeline_$((void *) (buf + $), (tb::warpgroup_id() == $ && tb::warp_id() % mirage::config::NUM_WARPS_PER_GROUP == 0), tb::warpgroup_id() < $, $, $);",
-              config.pipeline_stage, stensor.guid, addr_end + pipe_index * 1000, g.num_consumer_wgs, g.num_consumer_wgs,stensor_meta.num_phy_elems * type::get_datatype_size(stensor.data_type), g.num_consumer_wgs);
+              config.pipeline_stages, stensor.guid, barrier_addr + pipe_index * barrier_size, config.num_consumer_wgs, config.num_consumer_wgs,stensor_meta.num_phy_elems * type::get_datatype_size(stensor.data_type), config.num_consumer_wgs);
 
           code.e("using STensor$InputAtom = tb::InputTMAAsyncCopy<half_t, $, "
                  "$, decltype(tma_$), decltype(hopper_async_pipeline_$), $, $>;",
@@ -702,7 +705,7 @@ Transpiler::transpile_kn_custom_op_hopper(kn::KNCustomizedOp const *op) {
              "$, $, $>;",
              output.guid, is_ldmatrix_avail, is_stmatrix_avail, output.guid,
              output.guid, output.guid, num_exps_before_store,
-             is_accum_in_reg ? false : is_store_accum, g.num_consumer_wgs > 1 ? true: false);
+             is_accum_in_reg ? false : is_store_accum, config.num_consumer_wgs > 1 ? true: false);
       if (is_accum_in_reg) {
         code.e("auto matmul_$_accum = Matmul$Kernel::get_mma_rC(thread_idx);",
                output.guid, output.guid);
@@ -722,9 +725,9 @@ Transpiler::transpile_kn_custom_op_hopper(kn::KNCustomizedOp const *op) {
   
   code.e("int warpgroup_id = tb::warpgroup_id();");
   // run producers
-  code.e("if (warpgroup_id == $) {", g.num_consumer_wgs);
+  code.e("if (warpgroup_id == $) {", config.num_consumer_wgs);
    //allocate tma register files 
-  uint32_t tma_reg = g.num_consumer_wgs == 1 ? 56 : 32;
+  uint32_t tma_reg = config.num_consumer_wgs == 1 ? 56 : 32;
   
   code.e("tb::wg_decrease_regs<$>();", tma_reg);
   code.e("if (tb::warp_id_in_wg() == 0) {");
@@ -1100,7 +1103,7 @@ Transpiler::transpile_kn_custom_op_hopper(kn::KNCustomizedOp const *op) {
 
 
   //allocate register files for wgmma
-  uint32_t mma_reg = g.num_consumer_wgs == 1 ? 256 : (g.num_consumer_wgs == 2 ? 232 : 160);
+  uint32_t mma_reg = config.num_consumer_wgs == 1 ? 256 : (config.num_consumer_wgs == 2 ? 232 : 160);
   code.e("tb::wg_increase_regs<$>();", mma_reg);
   code.e("// Consumer main loop");
   code.e("for (uint32_t for_idx = 0; for_idx < $; for_idx++) {",
@@ -1173,7 +1176,7 @@ Transpiler::transpile_kn_custom_op_hopper(kn::KNCustomizedOp const *op) {
 
   code.e("}"); // kernel
 
-  mem_plan.smem_size += tmaParamsList.size() * config::SHARE_PIPELINE_SIZE;
+  mem_plan.smem_size += tmaParamsList.size() * config.pipeline_stages * 16;
 
   return CustomOPTranspileResult{CUDA_T_SUCCESS, func_name, mem_plan.smem_size,
                                  code.to_string(), tmaParamsList};

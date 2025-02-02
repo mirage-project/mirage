@@ -25,7 +25,6 @@ struct TBSchedOpMeta {
   // Whether or not to use chunked output
   bool is_chunked_output = false;
   int chunked_output_real_innermost_dim = false;
-
 };
 
 // A "node" in the final schedule
@@ -50,7 +49,6 @@ public:
   std::vector<TBSchedNode> loop_nodes;      // Nodes inside the for loop
   std::vector<TBSchedNode> post_loop_nodes; // Nodes after the for loop
 };
-
 
 } // namespace transpiler
 } // namespace mirage

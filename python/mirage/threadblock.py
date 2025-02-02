@@ -4,9 +4,6 @@ class TBGraph:
     def __init__(self, graph):
         self.cygraph = graph
 
-    def add_warpgroup_config(self, pipeline_stage: int, num_warp_groups: int):
-        self.cygraph.add_warpgroup_config(pipeline_stage, num_warp_groups)
-
     def new_input(self, dtensor: DTensor, input_map: tuple, forloop_dim: int):
         return self.cygraph.new_input(dtensor, input_map, forloop_dim)
 

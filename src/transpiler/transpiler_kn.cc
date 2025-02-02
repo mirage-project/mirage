@@ -23,9 +23,6 @@
 namespace mirage {
 namespace transpiler {
 
-// hopper pipeline size
-// static constexpr size_t SHARE_PIPELINE_SIZE = 40;
-
 using std::string;
 namespace kn = mirage::kernel;
 namespace tb = mirage::threadblock;
@@ -536,7 +533,7 @@ TranspileResult Transpiler::transpile_ugraph() {
                        tmaParams.guid,
                        tmaParams.guid,
                        tmaParams.guid,
-                       bgraph.pipe_stage));
+                       config.pipeline_stages));
             exec.e(fmt("auto g_tensor_$ = "
                        "make_tensor(make_gmem_ptr<half_t>(dtensor$), "
                        "SrcMNKLayout_${});",

@@ -12,7 +12,7 @@ namespace tb {
 
          MainloopPipelineStorage* mainloop;
 
-         CUTLASS_DEVICE
+         __device__ __forceinline__
          PipelineStorage(void* __restrict__ shared_memory_offset) {
             mainloop = reinterpret_cast<MainloopPipelineStorage*>(shared_memory_offset);
          }
@@ -36,7 +36,7 @@ namespace tb {
 
             PipelineStorage<MainloopPipeline> pipeline_storage;
 
-            CUTLASS_DEVICE
+            __device__ __forceinline__
             HopperAsyncPipeline(
             void* __restrict__ shared_memory_offset, bool producer, bool consumer, uint32_t transactionBytes, uint32_t num_consumer_wgs)
             : smem_pipe_read(),

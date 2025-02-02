@@ -48,10 +48,6 @@ public:
   mirage::type::TBOperatorType op_type;
   std::vector<STensor> input_tensors;
   std::vector<STensor> output_tensors;
-
-  // which warp is responsible for the compute,
-  // if not specified, it indicates the op is partitioned along all wgs
-  std::vector<int> warp_ids;
 };
 
 class TBInputOp : public TBOperator {

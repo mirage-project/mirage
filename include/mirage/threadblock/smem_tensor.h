@@ -171,9 +171,6 @@ struct alignas(16) STensor {
   bool after_accum;
 
   static std::atomic<int64_t> next_guid;
-
-  // > 0 indicate the stensor is sliced along different wgs
-  int warp_partition_dim = 1;
 };
 
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(
