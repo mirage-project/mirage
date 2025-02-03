@@ -71,12 +71,16 @@ public:
   // element unary operator
   STensor exp(STensor const &A);
   STensor *exp(STensor const *A);
-  STensor silu(STensor const &A);
-  STensor *silu(STensor const *A);
   STensor square(STensor const &A);
   STensor *square(STensor const *A);
   STensor sqrt(STensor const &A);
   STensor *sqrt(STensor const *A);
+  STensor silu(STensor const &A);
+  STensor *silu(STensor const *A);
+  STensor relu(STensor const &A);
+  STensor *relu(STensor const *A);
+  STensor clamp(STensor const &A, float const &min_val, float const &max_val);
+  STensor *clamp(STensor const *A, float const &min_val, float const &max_val);
   STensor mul_scalar(STensor const &A, float const &scalar);
   STensor *mul_scalar(STensor const *A, float const &scalar);
   STensor elementunary(STensor const &A,

@@ -161,14 +161,18 @@ static string get_tb_op_str(type::TBOperatorType type) {
     switch (type) {
       case type::TB_EXP_OP:
         return "EXP";
-      case type::TB_SILU_OP:
-        return "SILU";
       case type::TB_SQUARE_OP:
         return "SQUARE";
       case type::TB_SQRT_OP:
         return "SQRT";
       case type::TB_MUL_SCALAR_OP:
         return "MULSCALAR";
+      case type::TB_SILU_OP:
+        return "SILU";
+      case type::TB_RELU_OP:
+        return "RELU";
+      case type::TB_CLAMP_OP:
+        return "CLAMP";
       default:
         assert(0);
     }
@@ -749,9 +753,11 @@ CustomOPTranspileResult
           break;
         }
         case type::TB_EXP_OP:
-        case type::TB_SILU_OP:
         case type::TB_SQUARE_OP:
         case type::TB_SQRT_OP:
+        case type::TB_SILU_OP:
+        case type::TB_RELU_OP:
+        case type::TB_CLAMP_OP:
         case type::TB_MUL_SCALAR_OP: {
           tb::TBElementUnaryOp const *cur_op =
               dynamic_cast<tb::TBElementUnaryOp const *>(op);

@@ -80,5 +80,27 @@ inline __device__ FPType compute_silu_fingerprint(FPType input,
   return result;
 }
 
+inline __device__ FPType compute_clamp_fingerprint(FPType input) {
+  // We use min(max(FP_Q/3, input), FP_Q*2/3) to approximate clamp
+  // Note that we ignore the input arguments to clamp
+  // https://pytorch.org/docs/main/generated/torch.clamp.html
+  uint32_t q_residual = input % FP_Q;
+  uint32_t p_residual = input % FP_P;
+  q_residual = min(2 * FP_Q / 3, max(FP_Q / 3, q_residual));
+  p_residual = min(2 * FP_P / 3, max(FP_P / 3, p_residual));
+  uint32_t z = p_residual * FP_Q_MUL_P_MOD_1 + q_residual * FP_P_MUL_Q_MOD_1;
+  return z % FP_PQ;
+}
+
+inline __device__ FPType compute_relu_fingerprint(FPType input) {
+  // We use max(FP_Q/2, input) to approximate relu
+  uint32_t q_residual = input % FP_Q;
+  uint32_t p_residual = input % FP_P;
+  q_residual = max(FP_Q / 2, q_residual);
+  p_residual = max(FP_P / 2, p_residual);
+  uint32_t z = p_residual * FP_Q_MUL_P_MOD_1 + q_residual * FP_P_MUL_Q_MOD_1;
+  return z % FP_PQ;
+}
+
 } // namespace utils
 } // namespace mirage

@@ -103,7 +103,9 @@ NKITranspiler::NKITranspiler(kernel::Graph const *_graph,
       case KN_EXP_OP:
       case KN_SQUARE_OP:
       case KN_SQRT_OP:
-      case KN_SILU_OP: {
+      case KN_SILU_OP:
+      case KN_RELU_OP:
+      case KN_CLAMP_OP: {
         assert(dtensor_inputs.size() == 1);
         assert(op->output_tensors.size() == 1);
         kernel::DTensor dt = g->elementunary(dtensor_inputs[0], op->op_type);
@@ -181,6 +183,8 @@ NKITranspiler::NKITranspiler(kernel::Graph const *_graph,
             case TB_SQUARE_OP:
             case TB_SQRT_OP:
             case TB_SILU_OP:
+            case TB_RELU_OP:
+            case TB_CLAMP_OP:
             case TB_MUL_SCALAR_OP: {
               assert(stensor_inputs.size() == 1);
               threadblock::STensor st =
@@ -414,6 +418,8 @@ std::optional<NKIErrorInfo> NKITranspiler::resolve_tensor_layout() {
           case type::TB_SILU_OP:
           case type::TB_SQUARE_OP:
           case type::TB_SQRT_OP:
+          case type::TB_RELU_OP:
+          case type::TB_CLAMP_OP:
           case type::TB_MUL_SCALAR_OP: {
             tb::STensor const &input = tb_op->input_tensors.at(0);
             tb::STensor const &output = tb_op->output_tensors.at(0);

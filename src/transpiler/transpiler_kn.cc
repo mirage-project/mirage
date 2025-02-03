@@ -122,6 +122,10 @@ static string get_kn_op_str(type::KNOperatorType type) {
         return "SQUARE";
       case type::KN_SQRT_OP:
         return "SQRT";
+      case type::KN_RELU_OP:
+        return "RELU";
+      case type::KN_CLAMP_OP:
+        return "CLAMP";
       default:
         assert(0);
     }

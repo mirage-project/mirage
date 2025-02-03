@@ -131,19 +131,6 @@ CUTLASS_DEVICE float block_sum_fp32(float sum) {
 
 using namespace mirage::type;
 
-inline __device__ FPType compute_clamp_fingerprint(FPType input) {
-  // We use min(max(FP_Q/3, input), FP_Q*2/3) to approximate clamp
-  // Note that we ignore the input arguments to clamp
-  // https://pytorch.org/docs/main/generated/torch.clamp.html
-  FPType q_residual = input % FP_Q;
-  FPType p_residual = input % FP_P;
-}
-
-inline __device__ FPType compute_relu_fingerprint(FPType input) {
-  // relu is a special case of clamp
-  return compute_clamp_fingerprint(input);
-}
-
 template <ActivationType act_type, int N>
 struct act_function {
   CUTLASS_DEVICE cutlass::Array<cutlass::half_t, N>

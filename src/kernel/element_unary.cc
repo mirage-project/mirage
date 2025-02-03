@@ -55,6 +55,28 @@ DTensor *Graph::silu(DTensor const *input) {
   return elementunary(input, mirage::type::KN_SILU_OP);
 }
 
+DTensor Graph::relu(DTensor const &input) {
+  return elementunary(input, mirage::type::KN_RELU_OP);
+}
+
+DTensor *Graph::relu(DTensor const *input) {
+  return elementunary(input, mirage::type::KN_RELU_OP);
+}
+
+DTensor Graph::clamp(DTensor const &input,
+                     float const &min_val,
+                     float const &max_val) {
+  assert(false && "To be implemented");
+  return elementunary(input, mirage::type::KN_CLAMP_OP);
+}
+
+DTensor *Graph::clamp(DTensor const *input,
+                      float const &min_val,
+                      float const &max_val) {
+  assert(false && "To be implemented");
+  return elementunary(input, mirage::type::KN_CLAMP_OP);
+}
+
 DTensor Graph::elementunary(DTensor const &input,
                             mirage::type::KNOperatorType type) {
   KNOperator *op = create_elementunary_op(input, type);

@@ -42,6 +42,7 @@
 namespace mirage {
 namespace kernel {
 
+// TODO: deprecated; to be removed
 __global__ void customized_kernel_function(
     mirage::threadblock::NewKernelParams const new_params,
     int forloop_range,
@@ -614,7 +615,9 @@ __global__ void compute_customizedop_fingerprint(
           break;
         }
         case mirage::type::TB_EXP_OP:
-        case mirage::type::TB_SILU_OP: {
+        case mirage::type::TB_SILU_OP:
+        case mirage::type::TB_RELU_OP:
+        case mirage::type::TB_CLAMP_OP: {
           int smem_offset, num_elements;
           mirage::threadblock::deserialize_elementunary_op_parameters(
               new_params.parameters, param_idx, smem_offset, num_elements);
