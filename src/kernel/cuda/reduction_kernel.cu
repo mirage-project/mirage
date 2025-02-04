@@ -18,6 +18,7 @@
 #include "mirage/kernel/graph.h"
 #include "mirage/kernel/reduction.h"
 #include "mirage/utils/cuda_helper.h"
+#include "mirage/utils/fingerprint_functions.h"
 #include "mirage/utils/hash_utils.h"
 #include <cassert>
 
@@ -26,6 +27,7 @@ namespace kernel {
 
 using namespace mirage::type;
 using namespace mirage::config;
+using namespace mirage::utils;
 
 template <typename DT>
 __global__ void execute_reduction(DT *input_ptr,
@@ -90,12 +92,12 @@ __global__ void compute_reduction_fingerprint(FPType *input_ptr,
                                               int output_stride) {
   int i = threadIdx.x + blockIdx.x * blockDim.x;
   if (i < num_elements) {
-    uint32_t result = 0;
+    FPType result = 0;
     int n = i / output_stride;
     int m = i % output_stride;
     for (int k = 0; k < reduction_factor; k++) {
-      result = (result + input_ptr[n * input_stride + m + k * output_stride]) %
-               FP_PQ;
+      FPType input = input_ptr[n * input_stride + m + k * output_stride];
+      result = compute_add_fingerprint(result, input);
       if (threadIdx.x == 0 && blockIdx.x == 0 && blockIdx.y == 0) {
         // printf("result(%d) output_stride(%d) input_stride(%d) i(%d), n(%d) "
         //        "m(%d) k(%d)\n",
