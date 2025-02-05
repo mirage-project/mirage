@@ -20,7 +20,7 @@ public:
   virtual z3::expr
       to_z3(z3::context &c,
             std::unordered_set<std::string> &all_variables) const = 0;
-  bool subpattern_to(AbstractExpr const &other) const;
+  bool subexpr_to(AbstractExpr const &other) const;
   bool operator==(AbstractExpr const &other) const;
   virtual std::string to_string() const = 0;
 };
@@ -34,6 +34,8 @@ public:
   std::string name;
 };
 
+std::shared_ptr<AbstractExpr> abstract_expr_make_var(std::string const &name);
+
 class Add : public AbstractExpr {
 public:
   Add(std::shared_ptr<AbstractExpr> lhs, std::shared_ptr<AbstractExpr> rhs);
@@ -42,6 +44,10 @@ public:
   std::string to_string() const override;
   std::shared_ptr<AbstractExpr> lhs, rhs;
 };
+
+std::shared_ptr<AbstractExpr>
+    abstract_expr_make_add(std::shared_ptr<AbstractExpr> lhs,
+                           std::shared_ptr<AbstractExpr> rhs);
 
 class Mul : public AbstractExpr {
 public:
@@ -52,6 +58,10 @@ public:
   std::shared_ptr<AbstractExpr> lhs, rhs;
 };
 
+std::shared_ptr<AbstractExpr>
+    abstract_expr_make_mul(std::shared_ptr<AbstractExpr> lhs,
+                           std::shared_ptr<AbstractExpr> rhs);
+
 class Div : public AbstractExpr {
 public:
   Div(std::shared_ptr<AbstractExpr> lhs, std::shared_ptr<AbstractExpr> rhs);
@@ -60,6 +70,10 @@ public:
   std::string to_string() const override;
   std::shared_ptr<AbstractExpr> lhs, rhs;
 };
+
+std::shared_ptr<AbstractExpr>
+    abstract_expr_make_div(std::shared_ptr<AbstractExpr> lhs,
+                           std::shared_ptr<AbstractExpr> rhs);
 
 class Exp : public AbstractExpr {
 public:
@@ -70,6 +84,9 @@ public:
   std::shared_ptr<AbstractExpr> exponent;
 };
 
+std::shared_ptr<AbstractExpr>
+    abstract_expr_make_exp(std::shared_ptr<AbstractExpr> exponent);
+
 class Silu : public AbstractExpr {
 public:
   Silu(std::shared_ptr<AbstractExpr> a);
@@ -78,6 +95,9 @@ public:
   std::string to_string() const override;
   std::shared_ptr<AbstractExpr> a;
 };
+
+std::shared_ptr<AbstractExpr>
+    abstract_expr_make_silu(std::shared_ptr<AbstractExpr> a);
 
 // Note(@Mengdi): Replace it with Sqr and Sqrt once we have related algebraic
 // transformation
@@ -91,6 +111,9 @@ public:
   std::shared_ptr<AbstractExpr> elems;
 };
 
+std::shared_ptr<AbstractExpr>
+    abstract_expr_make_rms(int red_deg, std::shared_ptr<AbstractExpr> elems);
+
 class Red : public AbstractExpr {
 public:
   Red(int red_deg, std::shared_ptr<AbstractExpr> summand);
@@ -100,6 +123,9 @@ public:
   int red_deg_log;
   std::shared_ptr<AbstractExpr> summand;
 };
+
+std::shared_ptr<AbstractExpr>
+    abstract_expr_make_red(int red_deg, std::shared_ptr<AbstractExpr> summand);
 
 } // namespace search
 } // namespace mirage
