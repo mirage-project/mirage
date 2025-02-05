@@ -1,0 +1,1 @@
+// communication.h - Implementation of thread block level nvshmem functions allreduce/allgather/reducescatter

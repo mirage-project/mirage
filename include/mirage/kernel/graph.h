@@ -38,14 +38,17 @@ public:
   // input operator
   DTensor new_input(std::vector<int> const &dims,
                     std::vector<size_t> const &strides,
+                    int3 input_map,
                     mirage::type::DataType data_type,
                     mirage::layout::DmemLayout layout);
   DTensor *new_input_ptr(std::vector<int> const &dims,
                          std::vector<size_t> const &strides,
+                         int3 input_map,
                          mirage::type::DataType data_type,
                          mirage::layout::DmemLayout layout);
   KNOperator *create_input_op(std::vector<int> const &dims,
                               std::vector<size_t> const &strides,
+                              int3 input_map,
                               mirage::type::DataType data_type,
                               mirage::layout::DmemLayout layout);
   // output operator

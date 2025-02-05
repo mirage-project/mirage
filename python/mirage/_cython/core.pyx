@@ -542,26 +542,35 @@ cdef class CyTBOutputOp(CyTBOperator):
 cdef class CyKNGraph:
     cdef CppKNGraph *p_kgraph #Hold a CppKNGraph instance
 
-    def __cinit__(self, graph = None):
+    def __cinit__(self, tuple gpu_dim = (), graph = None):
         cdef unsigned long long ptr
+        cdef dim3 c_gpu_dim
         if graph is None:
-            self.p_kgraph = new CppKNGraph()
+            c_gpu_dim.x = gpu_dim[0]
+            c_gpu_dim.y = gpu_dim[1]
+            c_gpu_dim.z = gpu_dim[2]
+            self.p_kgraph = new CppKNGraph(c_gpu_dim)
         else:
             ptr = ctypes.cast(graph, ctypes.c_void_p).value
             self.p_kgraph = <CppKNGraph*>(ptr)
 
-    def new_input(self, tuple dims, tuple strides, dtype : dtype = float16):
+    def new_input(self, tuple dims, tuple strides, tuple gpu_input_map, dtype : dtype = float16):
         cdef vector[int] cdims
         cdef vector[size_t] cstrides
+        cdef int3 input_map
         cdims.resize(len(dims))
         for i in range(len(dims)):
             cdims[i] = dims[i]
         cstrides.resize(len(strides))
         for i in range(len(strides)):
             cstrides[i] = strides[i]
+        
+        input_map.x = gpu_input_map[0]
+        input_map.y = gpu_input_map[1]
+        input_map.z = gpu_input_map[2]
 
         c_type = convert_dtype_to_ctype(dtype)
-        cdef CppDTensor* ptr = self.p_kgraph.new_input_ptr(cdims, cstrides, c_type, DmemRowMajor)
+        cdef CppDTensor* ptr = self.p_kgraph.new_input_ptr(cdims, cstrides, input_map, c_type, DmemRowMajor)
         t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
         return DTensor(t)
 
@@ -650,6 +659,14 @@ cdef class CyKNGraph:
             ptr = ctypes.cast(<unsigned long long>cinputs[i], ctypes.c_void_p)
             inputs.append(DTensor(ptr))
         return inputs
+
+    property gpu_dim:
+        def __get__(self):
+            return {
+                "x": self.p_kgraph.gpu_dim.x,
+                "y": self.p_kgraph.gpu_dim.y,
+                "z": self.p_kgraph.gpu_dim.z
+            }
     
     # visualizer utils
 

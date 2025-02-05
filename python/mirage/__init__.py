@@ -16,8 +16,8 @@ class InputNotFoundError(Exception):
     """Raised when cannot find input tensors """
     pass
 
-def new_kernel_graph():
-    kgraph = core.CyKNGraph()
+def new_kernel_graph(gpu_dim: tuple):
+    kgraph = core.CyKNGraph(gpu_dim)
     return KNGraph(kgraph)
 
 def new_threadblock_graph(grid_dim: tuple, block_dim: tuple, forloop_range: int, reduction_dimx: int):

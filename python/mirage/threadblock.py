@@ -7,8 +7,8 @@ class TBGraph:
     def new_input(self, dtensor: DTensor, input_map: tuple, forloop_dim: int):
         return self.cygraph.new_input(dtensor, input_map, forloop_dim)
 
-    def new_output(self, stensor: STensor, output_map: tuple, forloop_dim: int = -1):
-        return self.cygraph.new_output(stensor, output_map, forloop_dim)
+    def new_output(self, stensor: STensor, output_map: tuple, forloop_dim: int = -1, epilogue: str = None):
+        return self.cygraph.new_output(stensor, output_map, forloop_dim, epilogue)
 
     def matmul(self, A: STensor, B: STensor):
         return self.cygraph.matmul(A, B)
