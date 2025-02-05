@@ -52,6 +52,28 @@ STensor *Graph::silu(STensor const *input) {
   return elementunary(input, mirage::type::TB_SILU_OP);
 }
 
+STensor Graph::relu(STensor const &input) {
+  return elementunary(input, mirage::type::TB_RELU_OP);
+}
+
+STensor *Graph::relu(STensor const *input) {
+  return elementunary(input, mirage::type::TB_RELU_OP);
+}
+
+STensor Graph::clamp(STensor const &input,
+                     float const &min_val,
+                     float const &max_val) {
+  assert(false && "To be implemented");
+  return elementunary(input, mirage::type::TB_CLAMP_OP);
+}
+
+STensor *Graph::clamp(STensor const *input,
+                      float const &min_val,
+                      float const &max_val) {
+  assert(false && "To be implemented");
+  return elementunary(input, mirage::type::TB_CLAMP_OP);
+}
+
 STensor Graph::mul_scalar(STensor const &input, float const &scalar) {
   return elementunary(input, mirage::type::TB_MUL_SCALAR_OP, scalar);
 }

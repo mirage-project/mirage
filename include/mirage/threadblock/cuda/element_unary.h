@@ -71,6 +71,14 @@ public:
       for (int i = thread_id; i < num_elements; i += num_threads) {
         base_ptr[i] = compute_silu_fingerprint(base_ptr[i], exp_lookup_table);
       }
+    } else if (type == mirage::type::TB_RELU_OP) {
+      for (int i = thread_id; i < num_elements; i += num_threads) {
+        base_ptr[i] = compute_relu_fingerprint(base_ptr[i]);
+      }
+    } else if (type == mirage::type::TB_CLAMP_OP) {
+      for (int i = thread_id; i < num_elements; i += num_threads) {
+        base_ptr[i] = compute_clamp_fingerprint(base_ptr[i]);
+      }
     } else {
       assert(false && "Unimplemented");
     }

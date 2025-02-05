@@ -44,6 +44,10 @@ string tb_operator_type_to_nki(type::TBOperatorType type) {
       return "nl.square";
     case type::TB_SQRT_OP:
       return "nl.sqrt";
+    case type::TB_RELU_OP:
+      return "nl.relu";
+    case type::TB_CLAMP_OP:
+      return "nl.clamp";
     case type::TB_MUL_SCALAR_OP:
       return "nl.multiply";
     case type::TB_ADD_OP:
@@ -470,6 +474,8 @@ NKICustomOPTranspileResult
       case type::TB_SILU_OP:
       case type::TB_SQUARE_OP:
       case type::TB_SQRT_OP:
+      case type::TB_RELU_OP:
+      case type::TB_CLAMP_OP:
       case type::TB_MUL_SCALAR_OP: {
         tb::STensor const &input = tb_op->input_tensors.at(0);
         tb::STensor const &output = tb_op->output_tensors.at(0);

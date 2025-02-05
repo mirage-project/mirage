@@ -118,6 +118,14 @@ def get_kn_operator_type_string(int op_type):
         return "kn_sqrt_op"
     elif op_type == KN_SILU_OP:
         return "kn_silu_op"
+    elif op_type == KN_SIGMOID_OP:
+        return "kn_sigmoid_op"
+    elif op_type == KN_RELU_OP:
+        return "kn_relu_op"
+    elif op_type == KN_CLAMP_OP:
+        return "kn_clamp_op"
+    elif op_type == KN_LOG_OP:
+        return "kn_log_op"
     elif op_type == KN_ADD_OP:
         return "kn_add_op"
     elif op_type == KN_MUL_OP:

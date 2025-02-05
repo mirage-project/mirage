@@ -127,6 +127,8 @@ size_t Graph::calculate_shared_memory_usage(TBOperator *new_op) {
       case mirage::type::TB_SQUARE_OP:
       case mirage::type::TB_SQRT_OP:
       case mirage::type::TB_SILU_OP:
+      case mirage::type::TB_RELU_OP:
+      case mirage::type::TB_CLAMP_OP:
       case mirage::type::TB_MUL_SCALAR_OP: {
         // inplace optimization for element-wise unary
         break;
@@ -479,9 +481,11 @@ NewKernelParams Graph::get_new_kernel_params(bool fingerprint) const {
         break;
       }
       case mirage::type::TB_EXP_OP:
-      case mirage::type::TB_SILU_OP:
       case mirage::type::TB_SQUARE_OP:
       case mirage::type::TB_SQRT_OP:
+      case mirage::type::TB_SILU_OP:
+      case mirage::type::TB_RELU_OP:
+      case mirage::type::TB_CLAMP_OP:
       case mirage::type::TB_MUL_SCALAR_OP: {
         assert(operators[i]->input_tensors.size() == 1);
         assert(operators[i]->output_tensors.size() == 1);
@@ -771,9 +775,11 @@ void from_json(json const &j, Graph &graph) {
         break;
       }
       case type::TBOperatorType::TB_EXP_OP:
-      case type::TBOperatorType::TB_SILU_OP:
       case type::TBOperatorType::TB_SQUARE_OP:
       case type::TBOperatorType::TB_SQRT_OP:
+      case type::TBOperatorType::TB_SILU_OP:
+      case type::TBOperatorType::TB_RELU_OP:
+      case type::TBOperatorType::TB_CLAMP_OP:
       case type::TBOperatorType::TB_MUL_SCALAR_OP: {
         STensor const &output = graph.elementunary(
             get_tensor_from_guid(
