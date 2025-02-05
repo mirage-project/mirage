@@ -644,6 +644,10 @@ cdef class CyKNGraph:
             outputs.append(DTensor(ptr))
         return outputs
 
+    # TODO (linsj20)
+    def allreduce(self, DTensor input, reduce_op="sum"):
+        pass
+
     def generate_triton_program(self, str filepath):
         assert filepath is not None, "filepath cannot be empty"
         py_byte_string = filepath.encode('UTF-8')

@@ -219,6 +219,10 @@ class KNGraph:
     def customized(self, inputs: list[DTensor], bgraph: TBGraph) -> list[DTensor]:
         return self.cygraph.customized(inputs, bgraph.cygraph)
 
+    # TODO (linsj20)
+    def allreduce(self, A: DTensor, reduce_op="sum"):
+        pass
+
     def valid_kernels(self):
         assert self._is_compiled, "Should check kernel validness after compilation"
         return self._valid_cuda_kernels
@@ -488,8 +492,8 @@ class KNGraph:
         elif backend == "nki":
             return all_graphs
         elif backend == "triton":
-            best_graph, best_file_path, best_output_shapes = profile_and_select_best_graph(all_graphs, 
-                                                 target_cc=torch.cuda.get_device_properties(0).major * 10 
+            best_graph, best_file_path, best_output_shapes = profile_and_select_best_graph(all_graphs,
+                                                 target_cc=torch.cuda.get_device_properties(0).major * 10
                                                  + torch.cuda.get_device_properties(0).minor,
                                                  warmup_iters=warmup_iters, profile_iters=profile_iters, debug_mode=verbose)
             # load execute_mugraph func from the generated file

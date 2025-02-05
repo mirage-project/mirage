@@ -136,6 +136,7 @@ TranspileResult Transpiler::transpile_ugraph() {
 
   CodeKeeper header;
   header.e("#define NUM_GPUS $", num_gpus);
+  // TODO (linsj20)
   header.e("#define USE_NVSHMEM $", use_nvshmem);
   if (config.target_cc == GPU_CC::H100) {
     header.e("#define MIRAGE_GRACE_HOPPER");
@@ -401,6 +402,7 @@ TranspileResult Transpiler::transpile_ugraph() {
         exec.e("kernel::run($, $);", out0_ptr_name, in0_ptr_name);
         break;
       }
+      // TODO (linsj20)
       case type::KNOperatorType::KN_CUSTOMIZED_OP: {
 
         // define nvshemem

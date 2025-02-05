@@ -51,6 +51,7 @@ private:
                     // distributed)
   void resolve_distributed_config() {
     num_gpus = g->gpu_dim.x * g->gpu_dim.y * g->gpu_dim.z;
+    // TODO (linsj20)
     use_nvshmem = num_gpus > 1;
   }
 
