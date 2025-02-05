@@ -130,7 +130,8 @@ int main(int argc, char **argv) {
 
   auto st = std::chrono::steady_clock::now();
   search::GeneratorConfig config =
-      search::GeneratorConfig::get_attention_default_config();
+      search::GeneratorConfig::get_default_config();
+  config.enable_attention_specific_optimization();
   config.grid_dim_to_explore = {
       {2 * batch_size, 16, 4},
       // {2 * batch_size, 8, 2},

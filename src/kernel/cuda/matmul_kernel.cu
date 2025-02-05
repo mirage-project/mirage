@@ -17,6 +17,7 @@
 #include "mirage/kernel/graph.h"
 #include "mirage/kernel/matmul.h"
 #include "mirage/utils/cuda_helper.h"
+#include "mirage/utils/fingerprint_functions.h"
 #include "mirage/utils/hash_utils.h"
 #include <cassert>
 
@@ -25,6 +26,7 @@ namespace kernel {
 
 using namespace mirage::type;
 using namespace mirage::config;
+using namespace mirage::utils;
 
 bool KNMatmulOp::profile(ProfileResult &result) {
   // Only launch kernel on a single GPU for profiling
@@ -161,11 +163,12 @@ __global__ void compute_matmul_fingerprint(mirage::type::FPType *A_ptr,
   int nk = n * k;
   if (row_idx < m) {
     for (int b = 0; b < num_batches; b++) {
-      uint32_t result = 0;
+      mirage::type::FPType result = 0;
       for (int i = 0; i < k; i++) {
-        uint32_t A_value = A_ptr[b * mk + row_idx * k + i];
-        uint32_t B_value = B_ptr[b * nk + i * n + col_idx];
-        result = (result + A_value * B_value) % FP_PQ;
+        mirage::type::FPType x = A_ptr[b * mk + row_idx * k + i];
+        mirage::type::FPType y = B_ptr[b * nk + i * n + col_idx];
+        mirage::type::FPType z = utils::compute_mul_fingerprint(x, y);
+        result = utils::compute_add_fingerprint(result, z);
       }
       if (threadIdx.x == 0 && blockIdx.x == 0 && blockIdx.y == 0) {
         // printf("C[%d] = %d\n",
