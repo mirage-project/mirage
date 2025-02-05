@@ -19,6 +19,7 @@
 #include "mirage/kernel/element_unary.h"
 #include "mirage/kernel/graph.h"
 #include "mirage/utils/cuda_helper.h"
+#include "mirage/utils/fingerprint_functions.h"
 #include "mirage/utils/hash_utils.h"
 #include <cassert>
 
@@ -27,6 +28,7 @@ namespace kernel {
 
 using namespace mirage::type;
 using namespace mirage::config;
+using namespace mirage::utils;
 
 template <typename DT>
 __global__ void execute_elementunary(mirage::type::KNOperatorType type,
@@ -93,11 +95,7 @@ __global__ void
   int i = threadIdx.x + blockIdx.x * blockDim.x;
   if (type == mirage::type::KN_EXP_OP) {
     if (i < num_elements) {
-      mirage::type::FPType val = input_ptr[i];
-      mirage::type::FPType q_residual = val % FP_Q;
-      uint32_t result = exp_lookup_table[q_residual];
-      result = (result * FP_Q_MUL_P_MOD_1) % FP_PQ;
-      output_ptr[i] = result;
+      output_ptr[i] = compute_exp_fingerprint(input_ptr[i], exp_lookup_table);
     }
   } else if (type == mirage::type::KN_SILU_OP) {
     if (i < num_elements) {

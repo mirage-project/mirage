@@ -15,12 +15,15 @@
 
 #pragma once
 
+#include "mirage/utils/fingerprint_functions.h"
+
 namespace mirage {
 namespace threadblock {
 
 using namespace cutlass;
 using namespace mirage::type;
 using namespace mirage::config;
+using namespace mirage::utils;
 
 class TBRmsNormFingerPrinter {
 public:
@@ -38,34 +41,32 @@ public:
     int num_samples = output_num_elements / norm_size;
     assert(output_num_elements == num_samples * norm_size);
     for (int idx = thread_id; idx < num_samples; idx += num_threads) {
-      uint32_t square_sum = 0;
+      FPType square_sum = 0;
       for (int k = 0; k < norm_size; k++) {
         int pos = idx * norm_size + k;
-        uint32_t x = input_ptr[pos] % FP_PQ;
-        x = (x * x) % FP_PQ;
-        square_sum = (square_sum + x) % FP_PQ;
+        FPType x = input_ptr[pos];
+        x = compute_mul_fingerprint(x, x);
+        square_sum = compute_add_fingerprint(square_sum, x);
       }
       // Compute rooted mean square
-      uint32_t rms = 0;
+      FPType rms = 0;
       {
-        uint32_t x = square_sum;
-        uint32_t n = norm_size;
+        FPType x = square_sum;
+        FPType n = norm_size % FP_PQ;
         // Compute z = x / n;
-        uint32_t z =
-            (x % FP_P) * div_p_lookup_table[n % FP_P] * FP_Q_MUL_P_MOD_1 +
-            (x % FP_Q) * div_q_lookup_table[n % FP_Q] * FP_P_MUL_Q_MOD_1;
+        FPType z = compute_div_fingerprint(
+            x, n, div_p_lookup_table, div_q_lookup_table);
         // Perform sqrt for root-mean-square
-        rms = sqrt_p_lookup_table[z % FP_P] * FP_Q_MUL_P_MOD_1 +
-              sqrt_q_lookup_table[z % FP_Q] * FP_P_MUL_Q_MOD_1;
+        rms = compute_sqrt_fingerprint(
+            z, sqrt_p_lookup_table, sqrt_q_lookup_table);
       }
       for (int k = 0; k < norm_size; k++) {
         int pos = idx * norm_size + k;
-        uint32_t x = input_ptr[pos] % FP_PQ;
+        FPType x = input_ptr[pos];
         // Compute z = x / rms
-        uint32_t z =
-            (x % FP_P) * div_p_lookup_table[rms % FP_P] * FP_Q_MUL_P_MOD_1 +
-            (x % FP_Q) * div_q_lookup_table[rms % FP_Q] * FP_P_MUL_Q_MOD_1;
-        output_ptr[pos] = z % FP_PQ;
+        FPType z = compute_div_fingerprint(
+            x, rms, div_p_lookup_table, div_q_lookup_table);
+        output_ptr[pos] = z;
       }
     }
   }

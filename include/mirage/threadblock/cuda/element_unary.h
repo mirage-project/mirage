@@ -17,12 +17,14 @@
 
 #include "cutlass/cutlass.h"
 #include "cutlass/fast_math.h"
+#include "mirage/utils/fingerprint_functions.h"
 
 namespace mirage {
 namespace threadblock {
 
 using namespace cutlass;
 using namespace mirage::type;
+using namespace mirage::utils;
 
 template <typename ElementType>
 class ElementUnaryExecutor {
@@ -63,12 +65,7 @@ public:
     // int num_elements = output.num_elements();
     if (type == mirage::type::TB_EXP_OP) {
       for (int i = thread_id; i < num_elements; i += num_threads) {
-        FPType input = base_ptr[i];
-        // FPType p_residual = input % FP_P;
-        FPType q_residual = input % FP_Q;
-        uint32_t result = exp_lookup_table[q_residual];
-        result = (result * FP_Q_MUL_P_MOD_1) % FP_PQ;
-        base_ptr[i] = result;
+        base_ptr[i] = compute_exp_fingerprint(base_ptr[i], exp_lookup_table);
       }
     } else if (type == mirage::type::TB_SILU_OP) {
       for (int i = thread_id; i < num_elements; i += num_threads) {

@@ -36,6 +36,7 @@
 #include "mirage/threadblock/serializer/reduction_serializer.h"
 #include "mirage/threadblock/serializer/rms_norm_serializer.h"
 #include "mirage/utils/cuda_helper.h"
+#include "mirage/utils/fingerprint_functions.h"
 #include "mirage/warp/cuda/matmul.h"
 
 namespace mirage {
@@ -861,9 +862,9 @@ __global__ void
   } else if (type == mirage::type::TB_EPILOGUE_ALLREDUCE) {
     int i = threadIdx.x + blockIdx.x * blockDim.x;
     if (i < num_elements) {
-      uint32_t x = 0;
+      FPType x = 0;
       for (int k = 0; k < num_gpus; k++) {
-        x = (x + fp_ptr_list.ptrs[k][i]) % mirage::config::FP_PQ;
+        x = utils::compute_add_fingerprint(x, fp_ptr_list.ptrs[k][i]);
       }
       for (int k = 0; k < num_gpus; k++) {
         fp_ptr_list.ptrs[k][i] = x;
