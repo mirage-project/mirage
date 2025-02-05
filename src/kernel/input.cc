@@ -22,9 +22,10 @@ namespace kernel {
 
 DTensor Graph::new_input(std::vector<int> const &dims,
                          std::vector<size_t> const &strides,
+                         int3 input_map,
                          mirage::type::DataType data_type,
                          mirage::layout::DmemLayout layout) {
-  KNOperator *op = create_input_op(dims, strides, data_type, layout);
+  KNOperator *op = create_input_op(dims, strides, input_map, data_type, layout);
   assert(op != nullptr);
   operators.push_back(op);
   return op->output_tensors[0];
@@ -32,9 +33,10 @@ DTensor Graph::new_input(std::vector<int> const &dims,
 
 DTensor *Graph::new_input_ptr(std::vector<int> const &dims,
                               std::vector<size_t> const &strides,
+                              int3 input_map,
                               mirage::type::DataType data_type,
                               mirage::layout::DmemLayout layout) {
-  KNOperator *op = create_input_op(dims, strides, data_type, layout);
+  KNOperator *op = create_input_op(dims, strides, input_map, data_type, layout);
   assert(op != nullptr);
   operators.push_back(op);
   return &op->output_tensors[0];
@@ -42,6 +44,7 @@ DTensor *Graph::new_input_ptr(std::vector<int> const &dims,
 
 KNOperator *Graph::create_input_op(std::vector<int> const &dims,
                                    std::vector<size_t> const &strides,
+                                   int3 input_map,
                                    mirage::type::DataType data_type,
                                    mirage::layout::DmemLayout layout) {
   DTensor tensor;
@@ -52,10 +55,12 @@ KNOperator *Graph::create_input_op(std::vector<int> const &dims,
   }
   tensor.data_type = data_type;
 
-  if (!can_allocate(tensor)) {
+  KNInputOp *op =
+      new KNInputOp(this, dims, strides, data_type, layout, input_map);
+
+  if (!can_allocate(op->output_tensors[0])) {
     return nullptr;
   }
-  KNInputOp *op = new KNInputOp(this, dims, strides, data_type, layout);
   return op;
 }
 
@@ -72,6 +77,30 @@ KNInputOp::KNInputOp(Graph *_graph,
   for (int i = tensor.num_dims - 1; i >= 0; i--) {
     tensor.dim[i] = dims[i];
   }
+
+  for (int d = 0; d < 3; d++) {
+    int dim_idx = -1;
+    int dim_div = 1;
+    if (d == 0 && kgraph->gpu_dim.x > 1) {
+      dim_idx = input_map.x;
+      dim_div = kgraph->gpu_dim.x;
+    }
+    if (d == 1 && kgraph->gpu_dim.y > 1) {
+      dim_idx = input_map.y;
+      dim_div = kgraph->gpu_dim.y;
+    }
+    if (d == 2 && kgraph->gpu_dim.z > 1) {
+      dim_idx = input_map.z;
+      dim_div = kgraph->gpu_dim.z;
+    }
+
+    if (dim_idx >= 0) {
+      assert(tensor.dim[dim_idx] > 0);
+      assert(tensor.dim[dim_idx] % dim_div == 0);
+      tensor.dim[dim_idx] /= dim_div;
+    }
+  }
+
   tensor.data_type = data_type;
   tensor.layout = layout;
   tensor.owner_op = this;

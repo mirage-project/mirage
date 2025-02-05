@@ -162,7 +162,7 @@ class KNGraph:
         self.backend = "cuda"
 
     def new_input(
-        self, dims: tuple, strides: tuple = None, dtype: dtype = float16
+        self, dims: tuple, strides: tuple = None, gpu_input_map: tuple = None, dtype: dtype = float16
     ) -> DTensor:
         # use the default strided layout if strides = None
         if strides is None:
@@ -177,7 +177,7 @@ class KNGraph:
             assert check_stride(dims, strides, "row-major") | check_stride(
                 dims, strides, "column-major"
             )
-        return self.cygraph.new_input(dims, tuple(strides), dtype)
+        return self.cygraph.new_input(dims, tuple(strides), gpu_input_map, dtype)
 
     def mark_output(self, A: DTensor, strides: tuple = None):
         return self.cygraph.mark_output(A, strides)
