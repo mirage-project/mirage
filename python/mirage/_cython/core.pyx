@@ -757,7 +757,6 @@ cdef class CyTBGraph:
                 self.p_bgraph = <CppTBGraph*>(ptr)
             else:
                 assert False, "bgraph must be an integer or ctypes.c_void_p, but got " + str(type(bgraph))
-            
     
     def new_input(self, DTensor dtensor, tuple input_map, int forloop_dim):
         assert len(input_map) == 3, "input_map must be of length 3"
@@ -939,10 +938,13 @@ def search(CyKNGraph input_graph, *, int max_num_new_graphs = 1024, list imaps =
 
 # Generate CUDA program for a uGraph
 # Return (CUDA code, buffer size in bytes)
-def generate_cuda_program(CyKNGraph input_graph, *, int target_cc, list input_strides) -> dict:
+def generate_cuda_program(CyKNGraph input_graph, *, int target_cc, list input_strides, int num_warp_groups, int pipeline_stages) -> dict:
     # Set transpiler_config
     cdef TranspilerConfig transpiler_config
     transpiler_config.target_cc = target_cc
+    transpiler_config.num_producer_wgs = 1;
+    transpiler_config.num_consumer_wgs = num_warp_groups - 1;
+    transpiler_config.pipeline_stages = pipeline_stages;
     
     # Set input_strides
     cdef vector[vector[size_t]] cinput_strides
