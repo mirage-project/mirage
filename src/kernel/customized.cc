@@ -99,7 +99,6 @@ KNCustomizedOp::KNCustomizedOp(mirage::kernel::Graph *_kgraph,
   // plan.block_dim = _graph.block_dim;
   // plan.forloop_range = _graph.forloop_range;
   // plan.reduction_dimx = _graph.reduction_dimx;
-
   size_t input_idx = 0;
   for (auto const &op : _graph.operators) {
     std::vector<STensor> my_inputs;

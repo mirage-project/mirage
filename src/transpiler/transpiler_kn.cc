@@ -23,9 +23,6 @@
 namespace mirage {
 namespace transpiler {
 
-// hopper pipeline size
-static constexpr size_t SHARE_PIPELINE_SIZE = 40;
-
 using std::string;
 namespace kn = mirage::kernel;
 namespace tb = mirage::threadblock;
@@ -140,6 +137,9 @@ TranspileResult Transpiler::transpile_ugraph() {
   CodeKeeper header;
   header.e("#define NUM_GPUS $", num_gpus);
   header.e("#define USE_NVSHMEM $", use_nvshmem);
+  if (config.target_cc == GPU_CC::H100) {
+    header.e("#define MIRAGE_GRACE_HOPPER");
+  }
   header.e("#include \"runtime.h\"");
   header.e("using namespace cute;");
 
@@ -465,10 +465,7 @@ TranspileResult Transpiler::transpile_ugraph() {
                bgraph.block_dim.x,
                bgraph.block_dim.y,
                bgraph.block_dim.z);
-        exec.e("size_t smem_size = $;",
-               result.smem_size +
-                   result.tmaParamsList.size() * sizeof(uint64_t) +
-                   SHARE_PIPELINE_SIZE);
+        exec.e("size_t smem_size = $;", result.smem_size);
         // init
 
         exec.e("");
@@ -532,12 +529,13 @@ TranspileResult Transpiler::transpile_ugraph() {
             exec.e(fmt("using DstPipeLayout_$ = "
                        "decltype(tile_to_shape(SmemLayoutAtom_${}, "
                        "make_shape(shape<0>(DstMNKLayout_${}), "
-                       "shape<1>(DstMNKLayout_${}), Int<tb::kStages>{}), "
+                       "shape<1>(DstMNKLayout_${}), Int<$>{}), "
                        "Step<_1, _2, _3>{}));",
                        tmaParams.guid,
                        tmaParams.guid,
                        tmaParams.guid,
-                       tmaParams.guid));
+                       tmaParams.guid,
+                       config.pipeline_stages));
             exec.e(fmt("auto g_tensor_$ = "
                        "make_tensor(make_gmem_ptr<half_t>(dtensor$), "
                        "SrcMNKLayout_${});",
@@ -559,14 +557,12 @@ TranspileResult Transpiler::transpile_ugraph() {
                    "cudaFuncAttributeMaxDynamicSharedMemorySize, $);",
                    result.func_name,
                    tma_tmps,
-                   result.smem_size +
-                       result.tmaParamsList.size() * sizeof(uint64_t) + 3000);
+                   result.smem_size);
           } else {
             exec.e("cudaFuncSetAttribute($, "
                    "cudaFuncAttributeMaxDynamicSharedMemorySize, $);",
                    result.func_name,
-                   result.smem_size +
-                       result.tmaParamsList.size() * sizeof(uint64_t) + 3000);
+                   result.smem_size);
           }
 
           exec.e("$<<<grid_dim, block_dim, smem_size>>>($ $);",
@@ -577,8 +573,7 @@ TranspileResult Transpiler::transpile_ugraph() {
           exec.e("cudaFuncSetAttribute($, "
                  "cudaFuncAttributeMaxDynamicSharedMemorySize, $);",
                  result.func_name,
-                 result.smem_size +
-                     result.tmaParamsList.size() * sizeof(uint64_t) + 3000);
+                 result.smem_size);
           exec.e("$<<<grid_dim, block_dim, smem_size>>>( $);",
                  result.func_name,
                  ptr_names);
