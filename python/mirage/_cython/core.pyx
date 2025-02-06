@@ -645,8 +645,13 @@ cdef class CyKNGraph:
         return outputs
 
     # TODO (linsj20)
-    def allreduce(self, DTensor input, reduce_op="sum"):
-        pass
+    def allreduce(self, DTensor input, reduce_op="sum", inplace=False):
+        if reduce_op != "sum":
+            cdef CppDTensor* ptr = self.p_kgraph.allreduce(input.c_ptr, inplace)
+        else:
+            raise RuntimeError(f"Unrecognized Reduction: {reduce_op}")
+        t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
+        return DTensor(t)
 
     def generate_triton_program(self, str filepath):
         assert filepath is not None, "filepath cannot be empty"

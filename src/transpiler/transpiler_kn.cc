@@ -138,6 +138,7 @@ TranspileResult Transpiler::transpile_ugraph() {
   header.e("#define NUM_GPUS $", num_gpus);
   // TODO (linsj20)
   header.e("#define USE_NVSHMEM $", use_nvshmem);
+  header.e("#define USE_NCCL $", use_nccl);
   if (config.target_cc == GPU_CC::H100) {
     header.e("#define MIRAGE_GRACE_HOPPER");
   }
@@ -153,10 +154,34 @@ TranspileResult Transpiler::transpile_ugraph() {
   CodeKeeper hopper_tma;
 
   init.e("static void _init() {");
+
   exec.e(
       "static void _execute_mugraph(std::vector<void const *> input_tensors, "
       "std::vector<void*> output_tensors"
       ", void* buf, int rank) {");
+
+  if (use_nccl) {
+    exec.e("// Initialize MPI");
+    exec.e("int my_rank, world_size;"
+    exec.e("MPI_INIT();");
+    exec.e("MPI_Comm_rank(MPI_COMM_WORLD, &my_rank);");
+    exec.e("MPI_Comm_size(MPI_COMM_WORLD, &world_size);");
+    exec.e("")
+    exec.e("// Set device to local rank");
+    exec.e("cudaSetDevice(my_rank);");
+    exec.e("cudaStream_t s;");
+    exec.e("ncclComm_t comm;");
+    exec.e("");
+    exec.e("// Initialize NCCL");
+    exec.e("cudaStream_t s;");
+    exec.e("cudaStreamCreate(&s);");
+    exec.e("ncclComm_t comm;");
+    exec.e("ncclUniqueId id;");
+    exec.e("if (my_rank == 0) ncclGetUniqueId(&id);");
+    exec.e("MPI_Bcast(&id, sizeof(id), MPI_BYTE, 0, MPI_COMM_WORLD);");
+    exec.e("NCCLCHECK(ncclCommInitRank(&comm, world_size, id, my_rank));");
+  }
+
   for (kn::KNOperator *const op : g->operators) {
     std::string op_type_str;
     to_json(op_type_str, op->op_type);
@@ -403,6 +428,22 @@ TranspileResult Transpiler::transpile_ugraph() {
         break;
       }
       // TODO (linsj20)
+      case type::KNOperatorType::KN_ALLREDUCE_OP: {
+        // Allreduce op
+        kn::DTensor &in0 = op->input_tensors.at(0);
+        kn::DTensor &out0 = op->output_tensors.at(0);
+        DTensorMeta meta_in0 = dtensor_metas.at(in0.guid);
+        DTensorMeta meta_out0 = dtensor_metas.at(out0.guid);
+        // Input and output tensor should have the same amount of elements
+        assert(meta_in0.num_phy_elems == meta_out0.num_phy_elems);
+        auto [in0_ptr_name, in0_ptr_code] = get_dtensor_ptr(in0);
+        auto [out0_ptr_name, out0_ptr_code] = get_dtensor_ptr(out0);
+        exec.e(in0_ptr_code);
+        exec.e(out0_ptr_code);
+        exec.e("NCCLCHECK(ncclAllReduce((const void*)$, (void*)$, $, ncclFloat16, ncclSum, comm, s));", in0_ptr_code, out0_ptr_name, meta_in0.num_phy_elems);
+        // Synchronous Commnunication
+        exec.e("cudaStreamSynchronize(s);");
+      }
       case type::KNOperatorType::KN_CUSTOMIZED_OP: {
 
         // define nvshemem
@@ -596,6 +637,14 @@ TranspileResult Transpiler::transpile_ugraph() {
     }
     exec.e("}");
   }
+
+  if (use_nccl) {
+    exec.e("// Finalize NCCL and MPI");
+    exec.e("ncclCommDestroy(comm);");
+    exec.e("CUDACHECK(cudaStreamDestroy(s));");
+    exec.e("MPI_Finalize();");
+  }
+
   init.e("}");
   exec.e("}");
 

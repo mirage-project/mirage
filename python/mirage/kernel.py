@@ -220,8 +220,8 @@ class KNGraph:
         return self.cygraph.customized(inputs, bgraph.cygraph)
 
     # TODO (linsj20)
-    def allreduce(self, A: DTensor, reduce_op="sum"):
-        pass
+    def allreduce(self, A: DTensor, reduce_op="sum", inplace=False):
+        return self.cygraph.allreduce(A, reduce_op, inplace)
 
     def valid_kernels(self):
         assert self._is_compiled, "Should check kernel validness after compilation"

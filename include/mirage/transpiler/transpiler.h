@@ -47,11 +47,14 @@ private:
 
   // Distributed configuration
   int num_gpus;
+  bool use_nccl; // Whether to use NCCL (<=> whether the kernel is
+                    // distributed within one node)
   bool use_nvshmem; // Whether to use NVSHMEM (<=> whether the kernel is
-                    // distributed)
+                    // distributed across nodes)
   void resolve_distributed_config() {
     num_gpus = g->gpu_dim.x * g->gpu_dim.y * g->gpu_dim.z;
     // TODO (linsj20)
+    use_nccl = num_gpus > 1;
     use_nvshmem = num_gpus > 1;
   }
 
