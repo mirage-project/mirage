@@ -204,6 +204,7 @@ cdef extern from "mirage/threadblock/graph.h" namespace "mirage::threadblock":
                    dim3 block_dim,
                    int forloop_range,
                    int reduction_dimx)
+
         CppSTensor* new_input(const CppDTensor* dtensor,
                            int3 input_map,
                            int forloop_dim,
@@ -263,6 +264,9 @@ cdef extern from "mirage/search/search_c.h" namespace "mirage::search_c":
 cdef extern from "mirage/transpiler/transpile.h" namespace "mirage::transpiler":
     ctypedef struct TranspilerConfig:
         int target_cc
+        int num_consumer_wgs
+        int num_producer_wgs;
+        int pipeline_stages;
     ctypedef struct OutputTensorDirective:
         size_t alloc_size
         vector[int] shape

@@ -37,6 +37,9 @@ size_t const MAX_DMEM_FP_SIZE = (size_t)2 * 1024 * 1024 * 1024;   // 2 GB
 size_t const MAX_NUM_THREADBLOCKS_PER_KERNEL = 1024;
 int const MAX_NUM_GPUS = 16;
 int const DEFAULT_TB_REDUCTION_DIMX = 64;
-
+int const MAX_NUM_WARP_GROUPS = 4;
+int const NUM_THREADS_PER_WARP = 32;
+int const NUM_WARPS_PER_GROUP = 4;
+int const NUM_THREADS_PER_GROUP = NUM_WARPS_PER_GROUP * NUM_THREADS_PER_WARP;
 } // namespace config
 } // namespace mirage
