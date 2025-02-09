@@ -74,6 +74,8 @@ public:
   STensor *exp(STensor const *A);
   STensor silu(STensor const &A);
   STensor *silu(STensor const *A);
+  STensor gelu(STensor const &A);
+  STensor *gelu(STensor const *A);
   STensor square(STensor const &A);
   STensor *square(STensor const *A);
   STensor sqrt(STensor const &A);

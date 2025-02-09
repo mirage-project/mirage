@@ -31,6 +31,7 @@ bool AbstractExpr::subpattern_to(AbstractExpr const &other) const {
   z3::func_decl div = c.function("div", P, P, P);
   z3::func_decl exp = c.function("exp", P, P);
   z3::func_decl silu = c.function("silu", P, P);
+  z3::func_decl gelu = c.function("gelu", P, P);
   z3::func_decl rms = c.function("rms", I, P, P);
   z3::func_decl red = c.function("red", I, P, P);
 
@@ -88,6 +89,7 @@ bool AbstractExpr::subpattern_to(AbstractExpr const &other) const {
   s.add(forall(x, y, subpattern(y, div(x, y))));
   s.add(forall(x, subpattern(x, exp(x))));
   s.add(forall(x, subpattern(x, silu(x))));
+  s.add(forall(x, subpattern(x, gelu(x))));
   s.add(forall(x, i, subpattern(x, rms(i, x))));
   s.add(forall(x, i, subpattern(x, red(i, x))));
 
@@ -206,6 +208,21 @@ z3::expr Silu::to_z3(z3::context &c,
 
 std::string Silu::to_string() const {
   return "silu(" + a->to_string() + ")";
+}
+
+Gelu::Gelu(std::shared_ptr<AbstractExpr> a) : a(a) {
+  assert(a);
+}
+
+z3::expr Gelu::to_z3(z3::context &c,
+                     std::unordered_set<std::string> &all_variables) const {
+  z3::sort P = c.uninterpreted_sort("P");
+  z3::func_decl gelu = c.function("gelu", P, P);
+  return gelu(a->to_z3(c, all_variables));
+}
+
+std::string Gelu::to_string() const {
+  return "gelu(" + a->to_string() + ")";
 }
 
 RMS::RMS(int red_deg, std::shared_ptr<AbstractExpr> elems)
