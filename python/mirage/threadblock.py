@@ -19,6 +19,9 @@ class TBGraph:
     def silu(self, A: STensor):
         return self.cygraph.silu(A)
 
+    def gelu(self, A: STensor):
+        return self.cygraph.gelu(A)
+
     def square(self, A: STensor):
         return self.cygraph.square(A)
 

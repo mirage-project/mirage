@@ -118,6 +118,8 @@ def get_kn_operator_type_string(int op_type):
         return "kn_sqrt_op"
     elif op_type == KN_SILU_OP:
         return "kn_silu_op"
+    elif op_type == KN_GELU_OP:
+        return "kn_gelu_op"
     elif op_type == KN_ADD_OP:
         return "kn_add_op"
     elif op_type == KN_MUL_OP:
@@ -157,6 +159,8 @@ def get_tb_operator_type_string(int op_type):
         return "tb_sqrt_op"
     elif op_type == TB_SILU_OP:
         return "tb_silu_op"
+    elif op_type == TB_GELU_OP:
+        return "tb_gelu_op"
     elif op_type == TB_MUL_SCALAR_OP:
         return "tb_mul_scalar_op"
     elif op_type == TB_ADD_OP:
@@ -603,6 +607,11 @@ cdef class CyKNGraph:
         cdef CppDTensor* ptr = self.p_kgraph.silu(input.c_ptr)
         t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
         return DTensor(t)
+    
+    def gelu(self, DTensor input):
+        cdef CppDTensor* ptr = self.p_kgraph.gelu(input.c_ptr)
+        t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
+        return DTensor(t)
 
     def add(self, DTensor A, DTensor B):
         cdef CppDTensor* ptr = self.p_kgraph.add(A.c_ptr, B.c_ptr)
@@ -789,6 +798,11 @@ cdef class CyTBGraph:
 
     def silu(self, STensor A):
         cdef CppSTensor* ptr = self.p_bgraph.silu(A.c_ptr)
+        t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
+        return STensor(t)
+    
+    def gelu(self, STensor A):
+        cdef CppSTensor* ptr = self.p_bgraph.gelu(A.c_ptr)
         t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
         return STensor(t)
 

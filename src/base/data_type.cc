@@ -41,6 +41,7 @@ bool is_threadblock_element_unary(TBOperatorType op_type) {
     case TB_SQUARE_OP:
     case TB_SQRT_OP:
     case TB_SILU_OP:
+    case TB_GELU_OP:
     case TB_MUL_SCALAR_OP:
       return true;
     default:

@@ -19,6 +19,8 @@
 #include "cutlass/fast_math.h"
 #include "mirage/utils/fingerprint_functions.h"
 
+#include <cmath>
+
 namespace mirage {
 namespace threadblock {
 
@@ -46,6 +48,12 @@ public:
         ElementType x = base_ptr[thread_id];
         base_ptr[thread_id] = x / (1 + cutlass::fast_exp(-x));
       }
+    } else if (op_type == mirage::type::TB_GELU_OP) {
+      for (int i = thread_id; i < num_elements; i += num_threads) {
+        ElementType x = base_ptr[thread_id];
+        // assuming floating point
+        base_ptr[thread_id] = (x / 2.0f) * (1.0f + erff(x / sqrtf(2.0f)));
+      }
     }
   }
 };
@@ -70,6 +78,10 @@ public:
     } else if (type == mirage::type::TB_SILU_OP) {
       for (int i = thread_id; i < num_elements; i += num_threads) {
         base_ptr[i] = compute_silu_fingerprint(base_ptr[i], exp_lookup_table);
+      }
+    } else if (type == mirage::type::TB_GELU_OP) {
+      for (int i = thread_id; i < num_elements; i += num_threads) {
+        base_ptr[i] = compute_gelu_fingerprint(base_ptr[i], exp_lookup_table);
       }
     } else {
       assert(false && "Unimplemented");

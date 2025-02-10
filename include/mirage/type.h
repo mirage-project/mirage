@@ -175,7 +175,6 @@ enum ActivationType {
   ACT_RELU = 3002,
   ACT_GELU = 3003,
   ACT_SILU = 3004,
-  ACT_GELU = 3005,
   ACT_NONE = 3099,
 };
 

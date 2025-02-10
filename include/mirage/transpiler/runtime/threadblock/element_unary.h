@@ -11,7 +11,7 @@ using namespace cute;
 
 namespace tb {
 
-enum class ElementUnaryOpType { EXP, SILU, SQUARE, SQRT, MULSCALAR };
+enum class ElementUnaryOpType { EXP, SILU, GELU, SQUARE, SQRT, MULSCALAR };
 
 template <typename T, ElementUnaryOpType OP>
 static __device__ __forceinline__ T
@@ -24,6 +24,8 @@ static __device__ __forceinline__ T
     return (T)expf((float)a);
   } else if constexpr (OP == ElementUnaryOpType::SILU) {
     return (T)(((float)a) * (1.0f / (1.0f + expf((float)-a))));
+  } else if constexpr (OP == ElementUnaryOpType::GELU) {
+    return (T)((((float)a) / 2.0f)*(1.0f + erff(((float)a) / sqrtf(2.0f))));
   } else if constexpr (OP == ElementUnaryOpType::SQUARE) {
     return (T)((float)a * (float)a);
   } else if constexpr (OP == ElementUnaryOpType::SQRT) {
