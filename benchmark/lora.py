@@ -34,14 +34,14 @@ if __name__ == "__main__":
         optimized_graph(inputs=input_tensors)
 
     torch.cuda.synchronize()
-    # starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
-    # starter.record()
-    # for _ in range(1000):
-    #     optimized_graph(inputs=input_tensors)
-    # ender.record()
-    # torch.cuda.synchronize()
-    # curr_time = starter.elapsed_time(ender)
-    # mean_syn = curr_time / 1000
+    starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+    starter.record()
+    for _ in range(1000):
+        optimized_graph(inputs=input_tensors)
+    ender.record()
+    torch.cuda.synchronize()
+    curr_time = starter.elapsed_time(ender)
+    mean_syn = curr_time / 1000
 
-    # print(mean_syn)
+    print(mean_syn)
 
