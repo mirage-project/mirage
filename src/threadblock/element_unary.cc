@@ -52,6 +52,14 @@ STensor *Graph::silu(STensor const *input) {
   return elementunary(input, mirage::type::TB_SILU_OP);
 }
 
+STensor Graph::gelu(STensor const &input) {
+  return elementunary(input, mirage::type::TB_GELU_OP);
+}
+
+STensor *Graph::gelu(STensor const *input) {
+  return elementunary(input, mirage::type::TB_GELU_OP);
+}
+
 STensor Graph::mul_scalar(STensor const &input, float const &scalar) {
   return elementunary(input, mirage::type::TB_MUL_SCALAR_OP, scalar);
 }
