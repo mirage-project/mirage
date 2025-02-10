@@ -21,7 +21,7 @@ if __name__ == "__main__":
     C = graph.matmul(X, W)
     O = graph.add(C, E)
     graph.mark_output(O)
-    optimized_graph = graph.superoptimize(config="lora", previous_checkpoint=filename, backend="triton", save_graphs=True, warmup_iters=2, profile_iters=6)
+    optimized_graph = graph.superoptimize(config="lora", previous_checkpoint=filename, backend="triton", save_codes=True, warmup_iters=2, profile_iters=6)
 
     input_tensors = [
         torch.randn(16, 256, dtype=torch.float16, device='cuda:0'),
