@@ -39,6 +39,7 @@ public:
   Graph(Graph const &) = delete;
   Graph &operator=(Graph const &) = delete;
   // input operator
+
   STensor new_input(mirage::kernel::DTensor const &dtensor,
                     int3 input_map,
                     int forloop_dim,

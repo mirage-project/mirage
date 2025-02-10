@@ -19,6 +19,7 @@
 #include "mirage/kernel/element_binary.h"
 #include "mirage/kernel/graph.h"
 #include "mirage/utils/cuda_helper.h"
+#include "mirage/utils/fingerprint_functions.h"
 #include "mirage/utils/hash_utils.h"
 #include <cassert>
 
@@ -27,6 +28,7 @@ namespace kernel {
 
 using namespace mirage::type;
 using namespace mirage::config;
+using namespace mirage::utils;
 
 template <typename DT>
 __global__ void execute_elementbinary(mirage::type::KNOperatorType type,
@@ -128,9 +130,9 @@ __global__ void
         input2_stride *= input2.dim[d];
         i /= output.dim[d];
       }
-      uint32_t x = input1_fp_ptr[input1_idx];
-      uint32_t y = input2_fp_ptr[input2_idx];
-      uint32_t z = (x + y) % FP_PQ;
+      FPType x = input1_fp_ptr[input1_idx];
+      FPType y = input2_fp_ptr[input2_idx];
+      FPType z = compute_add_fingerprint(x, y);
       output_fp_ptr[threadIdx.x + blockIdx.x * blockDim.x] = z;
       // printf("add: output[%d] = %d input1[%d] = %d input2[%d] = %d\n",
       //     threadIdx.x + blockIdx.x * blockDim.x, z % FP_PQ,
@@ -147,9 +149,9 @@ __global__ void
         input2_stride *= input2.dim[d];
         i /= output.dim[d];
       }
-      uint32_t x = input1_fp_ptr[input1_idx];
-      uint32_t y = input2_fp_ptr[input2_idx];
-      uint32_t z = (x * y) % FP_PQ;
+      FPType x = input1_fp_ptr[input1_idx];
+      FPType y = input2_fp_ptr[input2_idx];
+      FPType z = compute_mul_fingerprint(x, y);
       output_fp_ptr[threadIdx.x + blockIdx.x * blockDim.x] = z;
       // printf("add: output[%d] = %d input1[%d] = %d input2[%d] = %d\n",
       //     threadIdx.x + blockIdx.x * blockDim.x, z % FP_PQ,
@@ -166,12 +168,11 @@ __global__ void
         input2_stride *= input2.dim[d];
         i /= output.dim[d];
       }
-      uint32_t x = input1_fp_ptr[input1_idx];
-      uint32_t y = input2_fp_ptr[input2_idx];
-      uint32_t z =
-          (x % FP_P) * div_p_lookup_table[y % FP_P] * FP_Q_MUL_P_MOD_1 +
-          (x % FP_Q) * div_q_lookup_table[y % FP_Q] * FP_P_MUL_Q_MOD_1;
-      output_fp_ptr[threadIdx.x + blockIdx.x * blockDim.x] = z % FP_PQ;
+      FPType x = input1_fp_ptr[input1_idx];
+      FPType y = input2_fp_ptr[input2_idx];
+      FPType z =
+          compute_div_fingerprint(x, y, div_p_lookup_table, div_q_lookup_table);
+      output_fp_ptr[threadIdx.x + blockIdx.x * blockDim.x] = z;
       // printf("div: output[%d] = %d input1[%d] = %d input2[%d] = %d\n",
       //     threadIdx.x + blockIdx.x * blockDim.x, z % FP_PQ,
       //     input1_idx, x, input2_idx, y);

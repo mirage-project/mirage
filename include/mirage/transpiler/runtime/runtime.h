@@ -21,16 +21,7 @@ static void _execute_mugraph(std::vector<void const *> input_tensors,
 #include "kernel/element_unary.h"
 #include "kernel/matmul.h"
 #include "kernel/reduction.h"
-#include "threadblock/element_binary.h"
-#include "threadblock/element_unary.h"
-#include "threadblock/epilogues.h"
-#include "threadblock/forloop_accum.h"
-#include "threadblock/hopper_matmul.h"
-#include "threadblock/input.h"
-#include "threadblock/matmul.h"
-#include "threadblock/output.h"
-#include "threadblock/reduction.h"
-// #include "threadblock/hopper_mainloop_params.h"
+#include "threadblock/threadblock.h"
 #include "utils.h"
 
 // Entrypoint for C/C++

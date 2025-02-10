@@ -166,62 +166,6 @@ void Transpiler::get_threadblock_swizzle_plan_hopper(tb::Graph const &tb_graph,
 
     meta.is_xor_swizzled = true;
     get_layout_atom_swizzle(stensor, meta);
-
-    // if (is_power_of_2(num_chunks_in_inner_dim)) {
-    //   // num_chunks is a power of 2, using the swizzling method based on XOR
-    //   meta.is_xor_swizzled = true;
-    //   if (num_chunks_in_inner_dim > num_chunks_in_128B) {
-    //     meta.xor_swizzle_b = log2(num_chunks_in_128B);
-    //     meta.xor_swizzle_m = log2(16);
-    //     meta.xor_swizzle_s = log2(8);
-    //   } else {
-    //     meta.xor_swizzle_b =
-    //         log2(num_chunks_in_128B /
-    //              (num_chunks_in_128B /
-    //               num_chunks_in_inner_dim)); // Actually
-    //                                          // log2(num_chunks_in_inner_dim)
-    //     meta.xor_swizzle_m = log2(16);
-    //     meta.xor_swizzle_s = log2(num_chunks_in_128B);
-    //   }
-    // } else {
-    //   // Using the swizzling method based on shift
-
-    //   // Find the new number of chunks in the inner dimension
-    //   std::function<int(int, int)> gcd = [&](int a, int b) {
-    //     if (b == 0) {
-    //       return a;
-    //     }
-    //     return gcd(b, a % b);
-    //   };
-    //   int new_num_chunks_in_inner_dim = num_chunks_in_inner_dim;
-    //   while (gcd(new_num_chunks_in_inner_dim, num_chunks_in_128B) != 1) {
-    //     new_num_chunks_in_inner_dim++;
-    //   }
-
-    //   // Update the layout
-    //   // This rule should be aligned with resolve_tensor_layout.cc
-    //   assert(stensor.dim[meta.innermost_dim] != 1);
-
-    //   assert(stensor.dim[meta.innermost_dim] >= MIN_LAYOUT_SiZE);
-    //   assert(stensor.dim[meta.swizzled_dim] >= MIN_LAYOUT_SiZE);
-
-    //   assert(stensor.dim[meta.innermost_dim] % MIN_LAYOUT_SiZE == 0);
-    //   assert(stensor.dim[meta.swizzled_dim] % MIN_LAYOUT_SiZE == 0);
-    //   meta.strides[meta.innermost_dim] = 1;
-    //   size_t cur_stride = new_num_chunks_in_inner_dim * chunk_size_num_elems;
-    //   // printf("%u -> %lu\n", num_chunks_in_inner_dim *
-    //   chunk_size_num_elems,
-    //   // cur_stride);
-    //   for (int i = num_dims - 1; i >= 0; --i) {
-    //     if (i == meta.innermost_dim) {
-    //       continue;
-    //     }
-    //     meta.strides[i] = cur_stride;
-    //     int cur_dim = stensor.dim[i];
-    //     cur_stride *= cur_dim;
-    //   }
-    //   meta.num_phy_elems = cur_stride;
-    // }
   }
 }
 
