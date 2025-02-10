@@ -21,7 +21,7 @@ if __name__ == "__main__":
     C = graph.matmul(X, W)
     O = graph.add(C, E)
     graph.mark_output(O)
-    optimized_graph = graph.superoptimize(config="lora", previous_checkpoint=filename)
+    optimized_graph = graph.superoptimize(config="lora", previous_checkpoint=filename, backend="triton", save_graphs=True, warmup_iters=2, profile_iters=6)
 
     input_tensors = [
         torch.randn(16, 256, dtype=torch.float16, device='cuda:0'),
@@ -30,18 +30,18 @@ if __name__ == "__main__":
         torch.randn(16, 4096, dtype=torch.float16, device='cuda:0')
     ]
 
-    for _ in range(16):
+    for _ in range(1):
         optimized_graph(inputs=input_tensors)
 
     torch.cuda.synchronize()
-    starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
-    starter.record()
-    for _ in range(1000):
-        optimized_graph(inputs=input_tensors)
-    ender.record()
-    torch.cuda.synchronize()
-    curr_time = starter.elapsed_time(ender)
-    mean_syn = curr_time / 1000
+    # starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+    # starter.record()
+    # for _ in range(1000):
+    #     optimized_graph(inputs=input_tensors)
+    # ender.record()
+    # torch.cuda.synchronize()
+    # curr_time = starter.elapsed_time(ender)
+    # mean_syn = curr_time / 1000
 
-    print(mean_syn)
+    # print(mean_syn)
 

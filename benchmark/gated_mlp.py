@@ -20,7 +20,8 @@ if __name__ == "__main__":
     O1 = graph.silu(O1)
     O = graph.mul(O1, O2)
     graph.mark_output(O)
-    optimized_graph = graph.superoptimize(config="mlp", previous_checkpoint=filename)
+    optimized_graph = graph.superoptimize(config="mlp", backend="triton", previous_checkpoint=filename, save_codes=True, warmup_iters=2, profile_iters=6)
+    # optimized_graph = graph.superoptimize(config="mlp", previous_checkpoint=filename)
 
     input_tensors = [
         torch.randn(8, 4096, dtype=torch.float16, device='cuda:0'),
