@@ -645,11 +645,10 @@ cdef class CyKNGraph:
         return outputs
 
     # TODO (linsj20)
-    def allreduce(self, DTensor input, reduce_op="sum", inplace=False):
+    def all_reduce(self, DTensor input, reduce_op="sum", inplace=False):
         if reduce_op != "sum":
-            cdef CppDTensor* ptr = self.p_kgraph.allreduce(input.c_ptr, inplace)
-        else:
             raise RuntimeError(f"Unrecognized Reduction: {reduce_op}")
+        cdef CppDTensor* ptr = self.p_kgraph.all_reduce(input.c_ptr, inplace)
         t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
         return DTensor(t)
 

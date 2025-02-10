@@ -15,6 +15,7 @@
 
 #include "mirage/transpiler/transpile.h"
 #include "mirage/kernel/graph.h"
+#include "mirage/kernel/all_reduce.h"
 #include "mirage/threadblock/graph.h"
 #include "mirage/transpiler/transpiler.h"
 #include <cassert>
@@ -127,6 +128,15 @@ Transpiler::Transpiler(kernel::Graph const *_graph,
       }
       case KN_RMS_NORM_OP: {
         assert(false && "To be implemented");
+        break;
+      }
+      case KN_ALLREDUCE_OP: {
+        kernel::KNAllReduceOp *allreduce_op = static_cast<kernel::KNAllReduceOp *>(op);
+        assert(dtensor_inputs.size() == 1);
+        assert(allreduce_op->output_tensors.size() == 1);
+        kernel::DTensor dt =
+            g->all_reduce(dtensor_inputs[0], allreduce_op->inplace);
+        dtensor_mapping[allreduce_op->output_tensors[0].guid] = dt;
         break;
       }
       case KN_CUSTOMIZED_OP: {

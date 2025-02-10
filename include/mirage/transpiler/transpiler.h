@@ -25,6 +25,7 @@
 #include "mirage/transpiler/structs.h"
 #include "mirage/transpiler/utils.h"
 #include "mirage/type.h"
+#include <stdio.h>
 
 namespace mirage {
 namespace transpiler {
@@ -56,6 +57,7 @@ private:
     // TODO (linsj20)
     use_nccl = num_gpus > 1;
     use_nvshmem = num_gpus > 1;
+    use_nvshmem = false;
   }
 
   // Tensor metadata

@@ -1,5 +1,6 @@
 import mirage as mi
 import numpy as np
+import torch
 
 
 if __name__ == "__main__":
@@ -21,8 +22,8 @@ if __name__ == "__main__":
     graph.mark_output(OR)
 
     input_tensors = [
-        torch.randn(64, 2048, dtype=torch.float16, device='cuda:0'),
-        torch.randn(2048, 4096, dtype=torch.float16, device='cuda:0'),
+        torch.randn(64, 4096, dtype=torch.float16, device='cuda:0'),
+        torch.randn(4096, 4096, dtype=torch.float16, device='cuda:0'),
     ]
 
     input_strides = [tensor.stride() for tensor in input_tensors]

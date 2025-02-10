@@ -162,11 +162,11 @@ TranspileResult Transpiler::transpile_ugraph() {
 
   if (use_nccl) {
     exec.e("// Initialize MPI");
-    exec.e("int my_rank, world_size;"
+    exec.e("int my_rank, world_size;");
     exec.e("MPI_INIT();");
     exec.e("MPI_Comm_rank(MPI_COMM_WORLD, &my_rank);");
     exec.e("MPI_Comm_size(MPI_COMM_WORLD, &world_size);");
-    exec.e("")
+    exec.e("");
     exec.e("// Set device to local rank");
     exec.e("cudaSetDevice(my_rank);");
     exec.e("cudaStream_t s;");
@@ -443,6 +443,7 @@ TranspileResult Transpiler::transpile_ugraph() {
         exec.e("NCCLCHECK(ncclAllReduce((const void*)$, (void*)$, $, ncclFloat16, ncclSum, comm, s));", in0_ptr_code, out0_ptr_name, meta_in0.num_phy_elems);
         // Synchronous Commnunication
         exec.e("cudaStreamSynchronize(s);");
+        break;
       }
       case type::KNOperatorType::KN_CUSTOMIZED_OP: {
 

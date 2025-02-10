@@ -221,7 +221,7 @@ class KNGraph:
 
     # TODO (linsj20)
     def allreduce(self, A: DTensor, reduce_op="sum", inplace=False):
-        return self.cygraph.allreduce(A, reduce_op, inplace)
+        return self.cygraph.all_reduce(A, reduce_op, inplace)
 
     def valid_kernels(self):
         assert self._is_compiled, "Should check kernel validness after compilation"
