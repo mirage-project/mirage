@@ -162,15 +162,16 @@ TranspileResult Transpiler::transpile_ugraph() {
 
   if (use_nccl) {
     exec.e("// Initialize MPI");
+    exec.e("int argc = 1;");
+    exec.e("const char* argv[] = {\"_execute_mugraph\"};");
+    exec.e("char** argv_ptr = const_cast<char**>(argv);");
+    exec.e("MPI_Init(&argc, &argv_ptr);");
     exec.e("int my_rank, world_size;");
-    exec.e("MPI_INIT();");
     exec.e("MPI_Comm_rank(MPI_COMM_WORLD, &my_rank);");
     exec.e("MPI_Comm_size(MPI_COMM_WORLD, &world_size);");
     exec.e("");
     exec.e("// Set device to local rank");
     exec.e("cudaSetDevice(my_rank);");
-    exec.e("cudaStream_t s;");
-    exec.e("ncclComm_t comm;");
     exec.e("");
     exec.e("// Initialize NCCL");
     exec.e("cudaStream_t s;");
@@ -440,7 +441,7 @@ TranspileResult Transpiler::transpile_ugraph() {
         auto [out0_ptr_name, out0_ptr_code] = get_dtensor_ptr(out0);
         exec.e(in0_ptr_code);
         exec.e(out0_ptr_code);
-        exec.e("NCCLCHECK(ncclAllReduce((const void*)$, (void*)$, $, ncclFloat16, ncclSum, comm, s));", in0_ptr_code, out0_ptr_name, meta_in0.num_phy_elems);
+        exec.e("NCCLCHECK(ncclAllReduce((const void*)$, (void*)$, $, ncclFloat16, ncclSum, comm, s));", in0_ptr_name, out0_ptr_name, meta_in0.num_phy_elems);
         // Synchronous Commnunication
         exec.e("cudaStreamSynchronize(s);");
         break;
@@ -642,7 +643,7 @@ TranspileResult Transpiler::transpile_ugraph() {
   if (use_nccl) {
     exec.e("// Finalize NCCL and MPI");
     exec.e("ncclCommDestroy(comm);");
-    exec.e("CUDACHECK(cudaStreamDestroy(s));");
+    exec.e("cudaStreamDestroy(s);");
     exec.e("MPI_Finalize();");
   }
 
