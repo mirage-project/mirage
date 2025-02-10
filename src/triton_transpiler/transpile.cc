@@ -324,7 +324,7 @@ TritonTranspileResult TritonTranspiler::transpile_ugraph() {
       output_tensor_names.push_back(fmt("dtensor$", dtensor.guid));
     }
     else if (op->op_type != KN_OUTPUT_OP) {
-      for (int i = 0; i < op->output_tensors.size(); i++) {
+      for (int i = 0; i < (int)(op->output_tensors.size()); i++) {
         kn::DTensor dtensor = op->output_tensors.at(i);
         std::string shape;
         for (int j = 0; j < dtensor.num_dims; j++) {
