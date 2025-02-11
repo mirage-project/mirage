@@ -482,14 +482,10 @@ NewKernelParams Graph::get_new_kernel_params(bool fingerprint) const {
         break;
       }
       case mirage::type::TB_EXP_OP:
-<<<<<<< HEAD
-=======
-      case mirage::type::TB_SILU_OP:
-      case mirage::type::TB_GELU_OP:
->>>>>>> 546551d8156b60e34a19fad9c35f64cb89bda068
       case mirage::type::TB_SQUARE_OP:
       case mirage::type::TB_SQRT_OP:
       case mirage::type::TB_SILU_OP:
+      case mirage::type::TB_GELU_OP:
       case mirage::type::TB_RELU_OP:
       case mirage::type::TB_CLAMP_OP:
       case mirage::type::TB_MUL_SCALAR_OP: {
@@ -781,14 +777,10 @@ void from_json(json const &j, Graph &graph) {
         break;
       }
       case type::TBOperatorType::TB_EXP_OP:
-<<<<<<< HEAD
-=======
-      case type::TBOperatorType::TB_SILU_OP:
-      case type::TBOperatorType::TB_GELU_OP:
->>>>>>> 546551d8156b60e34a19fad9c35f64cb89bda068
       case type::TBOperatorType::TB_SQUARE_OP:
       case type::TBOperatorType::TB_SQRT_OP:
       case type::TBOperatorType::TB_SILU_OP:
+      case type::TBOperatorType::TB_GELU_OP:
       case type::TBOperatorType::TB_RELU_OP:
       case type::TBOperatorType::TB_CLAMP_OP:
       case type::TBOperatorType::TB_MUL_SCALAR_OP: {

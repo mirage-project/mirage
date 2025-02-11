@@ -81,7 +81,7 @@ inline __device__ FPType compute_silu_fingerprint(FPType input,
 }
 
 inline __device__ FPType compute_gelu_fingerprint(FPType input,
-  FPType *exp_lookup_table) {
+                                                  FPType *exp_lookup_table) {
   // Approximating GeLU as x*sigmoid(1.702x)
   FPType q_residual = input % FP_Q;
   FPType scaling_factor = 1.702f;

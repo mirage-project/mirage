@@ -49,7 +49,7 @@ __global__ void execute_elementunary(mirage::type::KNOperatorType type,
     if (i < num_elements) {
       DT x = input_ptr[i];
       output_ptr[i] = (x / 2.0f) * (1.0f + erff(x / sqrtf(2.0f)));
-    } 
+    }
   } else {
     assert(false && "Unimplemented");
   }
@@ -103,8 +103,8 @@ __global__ void
       output_ptr[i] = compute_exp_fingerprint(input_ptr[i], exp_lookup_table);
     } else if (type == mirage::type::KN_SILU_OP) {
       output_ptr[i] = compute_silu_fingerprint(input_ptr[i], exp_lookup_table);
-    } else if (type == mirage::type__KN_GELU_OP) {
-      output_ptr[i] = compute_gelu_fingerprint(input_ptr, exp_lookup_table);
+    } else if (type == mirage::type::KN_GELU_OP) {
+      output_ptr[i] = compute_gelu_fingerprint(input_ptr[i], exp_lookup_table);
     } else if (type == mirage::type::KN_RELU_OP) {
       output_ptr[i] = compute_relu_fingerprint(input_ptr[i]);
     } else if (type == mirage::type::KN_CLAMP_OP) {

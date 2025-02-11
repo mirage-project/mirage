@@ -83,7 +83,7 @@ class Gelu : public AbstractExpr {
 public:
   Gelu(std::shared_ptr<AbstractExpr> a);
   z3::expr to_z3(z3::context &c,
-                  std::unordered_set<std::string> &all_variables) const override;
+                 std::unordered_set<std::string> &all_variables) const override;
   std::string to_string() const override;
   std::shared_ptr<AbstractExpr> a;
 };

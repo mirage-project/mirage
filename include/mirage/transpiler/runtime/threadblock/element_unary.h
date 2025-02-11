@@ -25,7 +25,7 @@ static __device__ __forceinline__ T
   } else if constexpr (OP == ElementUnaryOpType::SILU) {
     return (T)(((float)a) * (1.0f / (1.0f + expf((float)-a))));
   } else if constexpr (OP == ElementUnaryOpType::GELU) {
-    return (T)((((float)a) / 2.0f)*(1.0f + erff(((float)a) / sqrtf(2.0f))));
+    return (T)((((float)a) / 2.0f) * (1.0f + erff(((float)a) / sqrtf(2.0f))));
   } else if constexpr (OP == ElementUnaryOpType::SQUARE) {
     return (T)((float)a * (float)a);
   } else if constexpr (OP == ElementUnaryOpType::SQRT) {
