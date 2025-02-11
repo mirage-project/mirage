@@ -7,9 +7,18 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--bs', type=int, default=1)
     parser.add_argument('--file', type=str, default='group_query_attention.json')
+    parser.add_argument('--backend', type=str, default='cuda')
+    parser.add_argument('--warmup', type=int, default=16)
+    parser.add_argument('--profile', type=int, default=1000)
+    parser.add_argument('--save_codes', type=bool, default=False)
+
     args = parser.parse_args()
     batch_size = args.bs
     filename = args.file
+    backend = args.backend
+    warmup_iters = args.warmup
+    profile_iters = args.profile
+    save_codes = args.save_codes
 
     graph = mi.new_kernel_graph()
     Q = graph.new_input(dims=(2 * batch_size, 256, 64), dtype=mi.float16)
@@ -21,7 +30,7 @@ if __name__ == "__main__":
     D = graph.div(E, S)
     O = graph.matmul(D, V)
     graph.mark_output(O)
-    optimized_graph = graph.superoptimize(config="attention", previous_checkpoint=filename)
+    optimized_graph = graph.superoptimize(config="attention", previous_checkpoint=filename, backend=backend, save_codes=save_codes, warmup_iters=warmup_iters, profile_iters=profile_iters)
 
     input_tensors = [
         torch.randn(2 * batch_size, 256, 64, dtype=torch.float16, device='cuda:0'),
