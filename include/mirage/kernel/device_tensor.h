@@ -131,6 +131,8 @@ public:
   int64_t fp_offset;
 
   static std::atomic<int64_t> next_guid;
+
+  bool is_nvshmem_tensor = false;
 };
 
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(

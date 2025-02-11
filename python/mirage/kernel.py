@@ -22,8 +22,9 @@ static PyObject *launch(PyObject *self, PyObject *args) {
   void *buffer;
   std::vector<void const *> input_tensors;
   std::vector<void*> output_tensors;
+  int rank; 
 
-  if (!PyArg_ParseTuple(args, "OOO", &input_list, &output_list, &py_buffer)) {
+  if (!PyArg_ParseTuple(args, "OOOi", &input_list, &output_list, &py_buffer, &rank)) {
     PyErr_SetString(PyExc_TypeError, "Invalid parameters");
     return NULL;
   }
@@ -40,7 +41,7 @@ static PyObject *launch(PyObject *self, PyObject *args) {
     PyObject *item = PyList_GetItem(input_list, i);
     void* tensor = PyLong_AsVoidPtr(item);
     if(!tensor) {
-      PyErr_Format(PyExc_TypeError, "Failed to convert item %d (input) to void pointer", i);
+      PyErr_Format(PyExc_TypeError, "Failed to convert item %d (input) to void pointer", (int)i);
       return NULL;
     }
     input_tensors.push_back(PyLong_AsVoidPtr(item));
@@ -50,17 +51,19 @@ static PyObject *launch(PyObject *self, PyObject *args) {
     PyObject *item = PyList_GetItem(output_list, i);
     void* tensor = PyLong_AsVoidPtr(item);
     if(!tensor) {
-      PyErr_Format(PyExc_TypeError, "Failed to convert item %d (output) to void pointer", i);
+      PyErr_Format(PyExc_TypeError, "Failed to convert item %d (output) to void pointer", (int)i);
       return NULL;
     }
     output_tensors.push_back(PyLong_AsVoidPtr(item));
   }
 
   buffer = PyLong_AsVoidPtr(py_buffer);
-  execute_mugraph(input_tensors, output_tensors, buffer);
+  
+  execute_mugraph(input_tensors, output_tensors, buffer, rank);
 
   Py_RETURN_NONE;
 }
+
 
 static PyMethodDef ModuleMethods[] = {
   {"launch", launch, METH_VARARGS, "Entry point for all kernels with this signature"},
@@ -93,8 +96,15 @@ def get_cc_cmd(target, cc, FILE_NAME, py_include_dir, MIRAGE_ROOT, so_path):
         f"-I{py_include_dir}",
         f"-I{MIRAGE_ROOT}/include/mirage/transpiler/runtime/",
         f"-I{MIRAGE_ROOT}/deps/cutlass/include",
+        f"-I/usr/include/nvshmem_12",
+        # f"-I/usr/include/openmpi-x86_64",
+        f"-L/usr/lib64/nvshmem/12",
+        "-lnvshmem",
+        # "-lnvshmem_device",
+        "-ccbin=mpic++",
         "-shared",
         "-std=c++17",
+        "-rdc=true",
         "-use_fast_math",
         "-lcublas",
         "-Xcompiler=-fPIC",
@@ -250,6 +260,7 @@ class KNGraph:
         assert self.run is not None, "The graph is not compiled yet."
 
         input_tensors = kwargs.get("inputs", [])
+        rank = kwargs.get("rank", 0)
 
         # TODO: dtype and device
         buffer_tensor = torch.empty(
@@ -271,7 +282,7 @@ class KNGraph:
         input_tensors_ptr = [tensor.data_ptr() for tensor in input_tensors]
         output_tensors_ptr = [tensor.data_ptr() for tensor in output_tensors]
 
-        self.run(input_tensors_ptr, output_tensors_ptr, buffer_tensor_ptr)
+        self.run(input_tensors_ptr, output_tensors_ptr, buffer_tensor_ptr, rank)
 
         return output_tensors
 
@@ -299,7 +310,8 @@ class KNGraph:
         result = generate_cuda_program(
             self.cygraph, target_cc=target_cc, input_strides=input_strides, num_warp_groups = num_warp_groups, pipeline_stages = pipeline_stages
         )
-        # print(result)
+
+        print(result['code'])
         if result["max_smem_size"] > get_shared_memory_capacity(target_cc):
             # the transpiled kernel exceeds shared memory limit
             print(

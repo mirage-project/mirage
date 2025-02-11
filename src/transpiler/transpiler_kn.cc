@@ -97,6 +97,10 @@ std::pair<string, string>
     code = fmt("half_t *$ = (half_t*)input_tensors.at($);",
                pointer_var_name,
                meta.input_idx);
+  } else if (meta.is_output && dtensor.is_nvshmem_tensor) {
+    code = fmt("half_t *$ = to_nvshmem_ptr<half_t>($);",
+               pointer_var_name,
+               meta.num_phy_elems);
   } else if (meta.is_output) {
     code = fmt("half_t *$ = (half_t*)output_tensors.at($);",
                pointer_var_name,
@@ -151,7 +155,7 @@ TranspileResult Transpiler::transpile_ugraph() {
   exec.e(
       "static void _execute_mugraph(std::vector<void const *> input_tensors, "
       "std::vector<void*> output_tensors"
-      ", void* buf) {");
+      ", void* buf, int rank) {");
   for (kn::KNOperator *const op : g->operators) {
     std::string op_type_str;
     to_json(op_type_str, op->op_type);
@@ -398,6 +402,11 @@ TranspileResult Transpiler::transpile_ugraph() {
         break;
       }
       case type::KNOperatorType::KN_CUSTOMIZED_OP: {
+
+        // define nvshemem
+        if (use_nvshmem) {
+          exec.e("initialize_mpi_nvshmem(rank);");
+        }
         // Customized op
         kn::KNCustomizedOp const *cur_op =
             dynamic_cast<kn::KNCustomizedOp const *>(op);
@@ -465,15 +474,10 @@ TranspileResult Transpiler::transpile_ugraph() {
         // init
 
         exec.e("");
-        exec.e("// define tmas");
-        for (kn::DTensor const &dtensor : cur_op->input_tensors) {
-          auto guid = dtensor.guid;
-          DTensorMeta const &meta = dtensor_metas.at(guid);
-        }
 
         // get tma params;
         if (config.target_cc >= GPU_CC::H100) {
-          // get_hopper_tmas(hopper_tma, result.tmaParamsList);
+          exec.e("// define tmas");
 
           // for inputs that needs tma async copy, init the TMAs
           std::string tmas;
@@ -573,6 +577,10 @@ TranspileResult Transpiler::transpile_ugraph() {
           exec.e("$<<<grid_dim, block_dim, smem_size>>>( $);",
                  result.func_name,
                  ptr_names);
+        }
+
+        if (use_nvshmem) {
+          exec.e("finalize_mpi_nvshmem();");
         }
 
         custom_kernels.e(result.code);

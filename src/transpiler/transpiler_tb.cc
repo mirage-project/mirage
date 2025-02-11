@@ -710,6 +710,12 @@ CustomOPTranspileResult
                    tile_side_len * forloop_dim_stride);
 #endif
           } else {
+            // tb epilogue communication
+            type::TBEpilogueType type = cur_op->epilogue;
+
+            if (type == type::TBEpilogueType::TB_EPILOGUE_ALLREDUCE) {
+            }
+
             tb::STensor const &stensor = cur_op->input_tensors.at(0);
             kn::DTensor const &dtensor = cur_op->dtensor;
             code.e("STensor$OutputAtom::run(dtensor$_tile_ptr, stensor$_ptr, "
@@ -1092,6 +1098,7 @@ CustomOPTranspileResult
       }
     }
   }
+
 
   code.e("}"); // kernel
 

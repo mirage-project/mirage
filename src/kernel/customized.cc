@@ -145,6 +145,8 @@ KNCustomizedOp::KNCustomizedOp(mirage::kernel::Graph *_kgraph,
         dtensor.owner_op = this;
         dtensor.owner_ts_idx = static_cast<int>(output_tensors.size());
         dtensor.guid = DTensor::next_guid++;
+        dtensor.is_nvshmem_tensor =
+            output_op->epilogue == mirage::type::TB_EPILOGUE_ALLREDUCE;
         // DeviceMemoryManager *dmm = DeviceMemoryManager::get_instance();
         // dmm->allocate(dtensor);
         kgraph->allocate(dtensor);

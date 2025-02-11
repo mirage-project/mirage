@@ -44,6 +44,7 @@ Transpiler::Transpiler(kernel::Graph const *_graph,
   // We need to construct a new kernel graph by decomposing forloop accumulators
   // into the non-reduction accumulator type to enable transpiler optimizations
   g = std::make_shared<kernel::Graph>();
+  g->gpu_dim = _graph->gpu_dim;
   std::unordered_map<size_t, kernel::DTensor> dtensor_mapping;
 
   int input_dtensor_idx = 0;
