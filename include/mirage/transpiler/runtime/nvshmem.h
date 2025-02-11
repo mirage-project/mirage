@@ -3,7 +3,46 @@
 
 #if USE_NVSHMEM
 
+#include <mpi.h>
 #include <nvshmem.h>
 #include <nvshmemx.h>
 
 #endif
+
+static inline void initialize_mpi_nvshmem(int rank) {
+  // Initialize MPI
+  MPI_Init(NULL, NULL);
+  MPI_Comm mpi_comm;
+  cudaSetDevice(rank);
+
+#if USE_NVSHMEM
+  // Initialize NVSHMEM after MPI
+  nvshmemx_init_attr_t attr;
+  mpi_comm = MPI_COMM_WORLD;
+  attr.mpi_comm = &mpi_comm;
+  MPI_Barrier(MPI_COMM_WORLD);
+  nvshmemx_init_attr(NVSHMEMX_INIT_WITH_MPI_COMM, &attr);
+  nvshmem_barrier_all();
+
+#endif
+}
+
+static inline void finalize_mpi_nvshmem() {
+
+#if USE_NVSHMEM
+  nvshmem_barrier_all();
+  nvshmem_finalize();
+#endif
+  MPI_Finalize();
+}
+
+// todo remove this function to allocate pointer only once
+template <typename T>
+static inline T *to_nvshmem_ptr(std::size_t num_elements) {
+#if USE_NVSHMEM
+  void *ptr = nvshmem_malloc(num_elements * sizeof(T));
+  return static_cast<T *>(nvshmem_ptr(ptr, nvshmem_my_pe()));
+#else
+  assert(0);
+#endif
+}

@@ -13,7 +13,8 @@
 static void _init();
 static void _execute_mugraph(std::vector<void const *> input_tensors,
                              std::vector<void *> output_tensors,
-                             void *buf);
+                             void *buf,
+                             int rank = 0);
 
 // Runtime libraries
 #include "config.h"
@@ -21,18 +22,20 @@ static void _execute_mugraph(std::vector<void const *> input_tensors,
 #include "kernel/element_unary.h"
 #include "kernel/matmul.h"
 #include "kernel/reduction.h"
+#include "nvshmem.h"
 #include "threadblock/threadblock.h"
 #include "utils.h"
 
 // Entrypoint for C/C++
 extern "C" void execute_mugraph(std::vector<void const *> input_tensors,
                                 std::vector<void *> output_tensors,
-                                void *buf) {
+                                void *buf,
+                                int rank = 0) {
   static bool inited = false;
   if (!inited) {
     _init();
   }
-  _execute_mugraph(input_tensors, output_tensors, buf);
+  _execute_mugraph(input_tensors, output_tensors, buf, rank);
 }
 
 // A wrappr around `execute_mugraph` which uses C arrays instead of vectors
@@ -41,10 +44,11 @@ void execute_mugraph_wrapper(void const *input_tensors[],
                              size_t num_input_tensors,
                              void *output_tensors[],
                              size_t num_output_tensors,
-                             void *buf) {
+                             void *buf,
+                             int rank = 0) {
   std::vector<void const *> input_tensors_vec(
       input_tensors, input_tensors + num_input_tensors);
   std::vector<void *> output_tensors_vec(output_tensors,
                                          output_tensors + num_output_tensors);
-  execute_mugraph(input_tensors_vec, output_tensors_vec, buf);
+  execute_mugraph(input_tensors_vec, output_tensors_vec, buf, rank);
 }
