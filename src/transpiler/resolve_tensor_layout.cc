@@ -305,6 +305,7 @@ void Transpiler::resolve_tensor_layout() {
       case type::KN_SQUARE_OP:
       case type::KN_SQRT_OP:
       case type::KN_SILU_OP:
+      case type::KN_GELU_OP:
       case type::KN_RELU_OP:
       case type::KN_CLAMP_OP: {
         // Elementwise Unary OP
@@ -484,6 +485,7 @@ void Transpiler::resolve_tensor_layout() {
           case type::TB_SQUARE_OP:
           case type::TB_SQRT_OP:
           case type::TB_SILU_OP:
+          case type::TB_GELU_OP:
           case type::TB_RELU_OP:
           case type::TB_CLAMP_OP:
           case type::TB_MUL_SCALAR_OP: {

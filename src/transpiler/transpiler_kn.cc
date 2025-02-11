@@ -115,6 +115,8 @@ static string get_kn_op_str(type::KNOperatorType type) {
         return "EXP";
       case type::KN_SILU_OP:
         return "SILU";
+      case type::KN_GELU_OP:
+        return "GELU";
       case type::KN_SQUARE_OP:
         return "SQUARE";
       case type::KN_SQRT_OP:
@@ -230,6 +232,7 @@ TranspileResult Transpiler::transpile_ugraph() {
       }
       case type::KNOperatorType::KN_EXP_OP:
       case type::KNOperatorType::KN_SILU_OP:
+      case type::KNOperatorType::KN_GELU_OP:
       case type::KNOperatorType::KN_SQUARE_OP:
       case type::KNOperatorType::KN_SQRT_OP: {
         // Elemwise unary op

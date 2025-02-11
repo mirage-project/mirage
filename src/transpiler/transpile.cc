@@ -99,6 +99,7 @@ Transpiler::Transpiler(kernel::Graph const *_graph,
       case KN_SQUARE_OP:
       case KN_SQRT_OP:
       case KN_SILU_OP:
+      case KN_GELU_OP:
       case KN_RELU_OP:
       case KN_CLAMP_OP: {
         assert(dtensor_inputs.size() == 1);
@@ -179,6 +180,7 @@ Transpiler::Transpiler(kernel::Graph const *_graph,
             case TB_SQUARE_OP:
             case TB_SQRT_OP:
             case TB_SILU_OP:
+            case TB_GELU_OP:
             case TB_RELU_OP:
             case TB_CLAMP_OP:
             case TB_MUL_SCALAR_OP: {

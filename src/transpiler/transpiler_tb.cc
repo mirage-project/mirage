@@ -169,6 +169,8 @@ static string get_tb_op_str(type::TBOperatorType type) {
         return "MULSCALAR";
       case type::TB_SILU_OP:
         return "SILU";
+      case type::TB_GELU_OP:
+        return "GELU";
       case type::TB_RELU_OP:
         return "RELU";
       case type::TB_CLAMP_OP:
@@ -640,6 +642,8 @@ CustomOPTranspileResult
         res = fmt("tb::EpilogueExp<half_t, $>", res);
       } else if (cur_op->op_type == type::TB_SILU_OP) {
         res = fmt("tb::EpilogueSILU<half_t, $>", res);
+      } else if (cur_op->op_type == type::TB_GELU_OP) {
+        res = fmt("tb::EpilogueGELU<half_t, $>", res);
       } else if (cur_op->op_type == type::TB_SQUARE_OP) {
         res = fmt("tb::EpilogueSquare<half_t, $>", res);
       } else if (cur_op->op_type == type::TB_SQRT_OP) {
@@ -756,6 +760,7 @@ CustomOPTranspileResult
         case type::TB_SQUARE_OP:
         case type::TB_SQRT_OP:
         case type::TB_SILU_OP:
+        case type::TB_GELU_OP:
         case type::TB_RELU_OP:
         case type::TB_CLAMP_OP:
         case type::TB_MUL_SCALAR_OP: {
