@@ -45,6 +45,11 @@ __global__ void execute_elementunary(mirage::type::KNOperatorType type,
       DT x = input_ptr[i];
       output_ptr[i] = x / (1.0f + cutlass::fast_exp(-x));
     }
+  } else if (type == mirage::type::KN_GELU_OP) {
+    if (i < num_elements) {
+      DT x = input_ptr[i];
+      output_ptr[i] = (x / 2.0f) * (1.0f + erff(x / sqrtf(2.0f)));
+    } 
   } else {
     assert(false && "Unimplemented");
   }
@@ -100,6 +105,10 @@ __global__ void
   } else if (type == mirage::type::KN_SILU_OP) {
     if (i < num_elements) {
       output_ptr[i] = compute_silu_fingerprint(input_ptr[i], exp_lookup_table);
+    }
+  } else if (type == mirage::type::KN_GELU_OP) {
+    if (i < num_elements) {
+      output_ptr[i] = compute_gelu_fingerprint(input_ptr[i], exp_lookup_table);
     }
   } else {
     assert(false && "Unimplemented");

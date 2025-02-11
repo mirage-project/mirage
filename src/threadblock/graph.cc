@@ -127,6 +127,7 @@ size_t Graph::calculate_shared_memory_usage(TBOperator *new_op) {
       case mirage::type::TB_SQUARE_OP:
       case mirage::type::TB_SQRT_OP:
       case mirage::type::TB_SILU_OP:
+      case mirage::type::TB_GELU_OP:
       case mirage::type::TB_MUL_SCALAR_OP: {
         // inplace optimization for element-wise unary
         break;
@@ -480,6 +481,7 @@ NewKernelParams Graph::get_new_kernel_params(bool fingerprint) const {
       }
       case mirage::type::TB_EXP_OP:
       case mirage::type::TB_SILU_OP:
+      case mirage::type::TB_GELU_OP:
       case mirage::type::TB_SQUARE_OP:
       case mirage::type::TB_SQRT_OP:
       case mirage::type::TB_MUL_SCALAR_OP: {
@@ -772,6 +774,7 @@ void from_json(json const &j, Graph &graph) {
       }
       case type::TBOperatorType::TB_EXP_OP:
       case type::TBOperatorType::TB_SILU_OP:
+      case type::TBOperatorType::TB_GELU_OP:
       case type::TBOperatorType::TB_SQUARE_OP:
       case type::TBOperatorType::TB_SQRT_OP:
       case type::TBOperatorType::TB_MUL_SCALAR_OP: {

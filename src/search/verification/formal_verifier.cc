@@ -80,6 +80,7 @@ std::vector<z3::expr>
   z3::func_decl rms = ctx.function("rms", T, T);
   z3::func_decl rms_norm = ctx.function("rms_norm", T, T);
   z3::func_decl silu = ctx.function("silu", T, T);
+  z3::func_decl gelu = ctx.function("gelu", T, T);
   z3::func_decl partition = ctx.function("partition", T, D, D, I, T);
   z3::func_decl combine = ctx.function("combine", T, D, D, T);
   z3::func_decl replicate = ctx.function("replicate", T, D, I, T);
@@ -296,6 +297,11 @@ std::vector<z3::expr>
           tensor_exprs.emplace(op->output_tensors[0].guid, silu(a));
           break;
         }
+        case type::TBOperatorType::TB_GELU_OP: {
+          z3::expr a = tensor_exprs.at(op->input_tensors[0].guid);
+          tensor_exprs.emplace(op->output_tensors[0].guid, gelu(a));
+          break;
+        }
         default:
           assert(false && "Unsupported operator type");
       }
@@ -362,6 +368,11 @@ std::vector<z3::expr>
         case type::KNOperatorType::KN_SILU_OP: {
           z3::expr a = tensor_exprs.at(op->input_tensors[0].guid);
           tensor_exprs.emplace(op->output_tensors[0].guid, silu(a));
+          break;
+        }
+        case type::KNOperatorType::KN_GELU_OP: {
+          z3::expr a = tensor_exprs.at(op->input_tensors[0].guid);
+          tensor_exprs.emplace(op->output_tensors[0].guid, gelu(a));
           break;
         }
         case type::KNOperatorType::KN_CUSTOMIZED_OP: {
@@ -438,6 +449,7 @@ bool is_equivalent(z3::expr const &lhs,
   z3::func_decl rms = ctx.function("rms", T, T);
   z3::func_decl rms_norm = ctx.function("rms_norm", T, T);
   z3::func_decl silu = ctx.function("silu", T, T);
+  z3::func_decl gelu = ctx.function("gelu", T, T);
   z3::func_decl partition = ctx.function("partition", T, D, D, I, T);
   z3::func_decl combine = ctx.function("combine", T, D, D, T);
   z3::func_decl replicate = ctx.function("replicate", T, D, I, T);
@@ -649,7 +661,7 @@ bool is_equivalent(z3::expr const &lhs,
 
   {
     // element-wise unary
-    std::vector<z3::func_decl> ops = {ew_exp, silu};
+    std::vector<z3::func_decl> ops = {ew_exp, silu, gelu};
     for (z3::func_decl op : ops) {
       z3::expr partitioned = partition(t0, d0, d1, i0);
       z3::expr op_partitioned = op(partitioned);

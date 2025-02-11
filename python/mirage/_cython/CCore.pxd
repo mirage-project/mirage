@@ -55,6 +55,7 @@ cdef extern from "mirage/type.h" namespace "mirage::type":
         KN_SQUARE_OP = 1101,
         KN_SQRT_OP = 1102,
         KN_SILU_OP = 1103,
+        KN_GELU_OP = 1104,
         # ElementBinary
         KN_ADD_OP = 1200,
         KN_MUL_OP = 1201,
@@ -77,6 +78,7 @@ cdef extern from "mirage/type.h" namespace "mirage::type":
         TB_SQUARE_OP = 2101,
         TB_SQRT_OP = 2102,
         TB_SILU_OP = 2103,
+        TB_GELU_OP = 2105,
         TB_MUL_SCALAR_OP = 2104,
         # ElementBinary
         TB_ADD_OP = 2200,
@@ -159,6 +161,7 @@ cdef extern from "mirage/kernel/graph.h" namespace "mirage::kernel":
         CppDTensor* rms_norm(const CppDTensor* input, vector[int])
         CppDTensor* exp(const CppDTensor* input)
         CppDTensor* silu(const CppDTensor* input)
+        CppDTensor* gelu(const CppDTensor* input)
         CppDTensor* add(const CppDTensor* op1, const CppDTensor* op2)
         CppDTensor* mul(const CppDTensor* op1, const CppDTensor* op2)
         CppDTensor* div(const CppDTensor* op1, const CppDTensor* op2)
@@ -215,6 +218,7 @@ cdef extern from "mirage/threadblock/graph.h" namespace "mirage::threadblock":
                         const CppSTensor *B)
         CppSTensor* exp(const CppSTensor *A)
         CppSTensor* silu(const CppSTensor *A)
+        CppSTensor* gelu(const CppSTensor *A)
         CppSTensor* square(const CppSTensor *A)
         CppSTensor* sqrt(const CppSTensor *A)
         CppSTensor* add(const CppSTensor *A,

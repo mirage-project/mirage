@@ -194,6 +194,9 @@ class KNGraph:
     def silu(self, A: DTensor):
         return self.cygraph.silu(A)
 
+    def gelu(self, A: DTensor):
+        return self.cygraph.gelu(A)
+
     def add(self, A: DTensor, B: DTensor):
         return self.cygraph.add(A, B)
 

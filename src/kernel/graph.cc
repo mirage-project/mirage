@@ -211,7 +211,8 @@ void from_json(json const &j, Graph &g) {
       case type::KNOperatorType::KN_EXP_OP:
       case type::KNOperatorType::KN_SQUARE_OP:
       case type::KNOperatorType::KN_SQRT_OP:
-      case type::KNOperatorType::KN_SILU_OP: {
+      case type::KNOperatorType::KN_SILU_OP:
+      case type::KNOperatorType::KN_GELU_OP : {
         size_t guid, guidO;
         jop.at("input_tensors")[0].at("guid").get_to(guid);
         jop.at("output_tensors")[0].at("guid").get_to(guidO);

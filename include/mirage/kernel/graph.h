@@ -64,6 +64,8 @@ public:
   DTensor *exp(DTensor const *input);
   DTensor silu(DTensor const &input);
   DTensor *silu(DTensor const *input);
+  DTensor gelu(DTensor const &input);
+  DTensor *gelu(DTensor const *input);
   DTensor square(DTensor const &input);
   DTensor *square(DTensor const *input);
   DTensor sqrt(DTensor const &input);
