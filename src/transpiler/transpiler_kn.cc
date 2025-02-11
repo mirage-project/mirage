@@ -161,11 +161,11 @@ TranspileResult Transpiler::transpile_ugraph() {
       ", void* buf, int rank) {");
 
   if (use_nccl) {
-    exec.e("// Initialize MPI");
-    exec.e("int argc = 1;");
-    exec.e("const char* argv[] = {\"_execute_mugraph\"};");
-    exec.e("char** argv_ptr = const_cast<char**>(argv);");
-    exec.e("MPI_Init(&argc, &argv_ptr);");
+    //exec.e("// Initialize MPI");
+    //exec.e("int argc = 1;");
+    //exec.e("const char* argv[] = {\"_execute_mugraph\"};");
+    //exec.e("char** argv_ptr = const_cast<char**>(argv);");
+    //exec.e("MPI_Init(&argc, &argv_ptr);");
     exec.e("int my_rank, world_size;");
     exec.e("MPI_Comm_rank(MPI_COMM_WORLD, &my_rank);");
     exec.e("MPI_Comm_size(MPI_COMM_WORLD, &world_size);");
@@ -175,7 +175,9 @@ TranspileResult Transpiler::transpile_ugraph() {
     exec.e("");
     exec.e("// Initialize NCCL");
     exec.e("cudaStream_t s;");
-    exec.e("cudaStreamCreate(&s);");
+    // TODO (linsj20) Why doesn't this work?
+    //exec.e("cudaStreamCreate(&s);");
+    exec.e("cudaStreamCreateWithFlags(&s, cudaStreamNonBlocking);");
     exec.e("ncclComm_t comm;");
     exec.e("ncclUniqueId id;");
     exec.e("if (my_rank == 0) ncclGetUniqueId(&id);");
@@ -644,7 +646,7 @@ TranspileResult Transpiler::transpile_ugraph() {
     exec.e("// Finalize NCCL and MPI");
     exec.e("ncclCommDestroy(comm);");
     exec.e("cudaStreamDestroy(s);");
-    exec.e("MPI_Finalize();");
+    //exec.e("MPI_Finalize();");
   }
 
   init.e("}");

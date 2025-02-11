@@ -964,6 +964,17 @@ def search(CyKNGraph input_graph, *, int max_num_new_graphs = 1024, list imaps =
 # Generate CUDA program for a uGraph
 # Return (CUDA code, buffer size in bytes)
 def generate_cuda_program(CyKNGraph input_graph, *, int target_cc, list input_strides, int num_warp_groups = -1, int pipeline_stages = -1) -> dict:
+    # Only rank 0 gets to transpile
+    gpu_dim = input_graph.gpu_dim
+    if gpu_dim['x'] * gpu_dim['y'] * gpu_dim['z'] > 1:
+        from mpi4py import MPI
+        comm = MPI.COMM_WORLD
+        rank = comm.Get_rank()
+        if rank != 0:
+            results = None
+            results = comm.bcast(results, root=0)
+            return results
+
     # Set transpiler_config
     cdef TranspilerConfig transpiler_config
     transpiler_config.target_cc = target_cc
@@ -1001,12 +1012,16 @@ def generate_cuda_program(CyKNGraph input_graph, *, int target_cc, list input_st
             "strides": cur_output_strides
         })
 
-    return {
+    results = {
         "code": result.code.decode("UTF-8"),
         "buf_size": result.buf_size,
         "max_smem_size": result.max_smem_size,
         "output_directives": output_directives
     }
+
+    if gpu_dim['x'] * gpu_dim['y'] * gpu_dim['z'] > 1:
+        results = comm.bcast(results, root=0)
+    return results
 
 def generate_nki_program(CyKNGraph input_graph, *, int target_cc) -> dict:
     # Set transpiler_config
