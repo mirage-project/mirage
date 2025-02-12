@@ -75,10 +75,13 @@ string operator_type_to_triton(type::TBOperatorType type) {
     case type::TB_SQRT_OP:
       return "tl.sqrt";
     case type::TB_DIV_OP:
-      return "tl.fdiv"; // TODO: AttributeError: module 'triton.language' has no
-                        // attribute 'div_rn'
+      return "tl.fdiv"; // TODO: AttributeError: module 'triton.language' has no attribute 'div_rn'
+    case type::TB_ADD_OP:
+      return "+";
+    case type::TB_MUL_OP:
+      return "*";
     default:
-      assert(false && "Unsupported operator type");
+      assert(false && "Unsupported operator type in operator_type_to_triton()");
   }
 }
 
@@ -364,7 +367,6 @@ TritonCustomOPTranspileResult
                unary->scalar);
         break;
       }
-
       case type::TB_ADD_OP:
       case type::TB_MUL_OP: {
         tb::STensor const &input0 = tb_op->input_tensors.at(0);
@@ -372,22 +374,13 @@ TritonCustomOPTranspileResult
         tb::STensor const &output = tb_op->output_tensors.at(0);
         assert(input0.num_dims == input1.num_dims);
         assert(input1.num_dims == output.num_dims);
-        string op_str;
-        switch (tb_op->op_type) {
-          case type::TB_ADD_OP:
-            op_str = "+";
-            break;
-          case type::TB_MUL_OP:
-            op_str = "*";
-            break;
-        }
+        string op_str = operator_type_to_triton(tb_op->op_type);
         code.e("$ = $ $ $",
                fmt("stensor$", output.guid),
                fmt("stensor$", input0.guid),
                op_str,
                fmt("stensor$", input1.guid));
       }
-
       case type::TB_DIV_OP: {
         tb::STensor const &input0 = tb_op->input_tensors.at(0);
         tb::STensor const &input1 = tb_op->input_tensors.at(1);

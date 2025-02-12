@@ -227,18 +227,19 @@ class KNGraph:
     def triton_call(self, **kwargs):
         assert self.run is not None, "The graph is not compiled to triton yet."
         input_tensors = kwargs.get("inputs", [])
+        verbose = kwargs.get("verbose", False)
 
         output_shapes = self._cached_results["output_shapes"]
         output_tensors = [
             torch.zeros(shape, dtype=torch.float16, device=input_tensors[0].device) for shape in output_shapes
         ]
-        print("Input tensors:")
-        for t in input_tensors:
-            print(f"Shape: {t.shape}, dtype: {t.dtype}, device: {t.device}")
-
-        print("Output tensors:")
-        for t in output_tensors:
-            print(f"Shape: {t.shape}, dtype: {t.dtype}, device: {t.device}")
+        if(verbose):
+            print("Input tensors:")
+            for t in input_tensors:
+                print(f"Shape: {t.shape}, dtype: {t.dtype}, device: {t.device}")
+            print("Output tensors:")
+            for t in output_tensors:
+                print(f"Shape: {t.shape}, dtype: {t.dtype}, device: {t.device}")
 
         self.run(*input_tensors, *output_tensors)
         return output_tensors
@@ -325,11 +326,21 @@ class KNGraph:
 
         tempdir_obj = tempfile.TemporaryDirectory()
         tempdir = tempdir_obj.name
+        saved_addr = ""
+        file_id = kwargs.get("file_id", -1)
+        if file_id != -1:
+            print(f"file_id: {file_id}")
+            saved_addr = f"./generated_codes/{file_id}/"
         FILE_NAME = os.path.join(tempdir, "test.cu")
         so_path = os.path.join(tempdir, "test.cpython-38-x86_64-linux-gnu.so")
 
         with open(FILE_NAME, "w") as f:
             f.write(result["code"] + HARD_CODE)
+            if saved_addr != "":
+                print(f"saved_addr: {saved_addr}")
+                os.makedirs(saved_addr, exist_ok=True)
+                with open(saved_addr + "test" + str(file_id) + ".cu", "w") as f:
+                    f.write(result["code"] + HARD_CODE)
 
 
         cc = shutil.which("nvcc")
@@ -394,6 +405,7 @@ class KNGraph:
         warmup_iters: int = 16,
         profile_iters: int = 1000,
         previous_checkpoint: str = None,
+        save_codes: bool = False,
     ):
         cygraphs = search(
             self.cygraph,
@@ -479,11 +491,17 @@ class KNGraph:
         elif backend == "nki":
             return all_graphs
         elif backend == "triton":
+            MIRAGE_ROOT = os.environ.get(
+                "MIRAGE_ROOT", os.path.join(os.path.dirname(__file__), "../../include")
+            )
+            os.environ["KERNELS_PATH"] = os.path.join(MIRAGE_ROOT, "mirage/transpiler/runtime") # for triton
             best_graph, best_file_path, best_output_shapes = profile_and_select_best_graph(all_graphs, 
                                                  target_cc=torch.cuda.get_device_properties(0).major * 10 
                                                  + torch.cuda.get_device_properties(0).minor,
-                                                 warmup_iters=warmup_iters, profile_iters=profile_iters, debug_mode=verbose)
+                                                 warmup_iters=warmup_iters, profile_iters=profile_iters, debug_mode=verbose,
+                                                 save_codes=save_codes)
             # load execute_mugraph func from the generated file
+            print(f"Loading the best muGraph from {best_file_path}")
             if not os.path.exists(best_file_path):
                 raise FileNotFoundError(f"File not found: {best_file_path}")
             import importlib.util
