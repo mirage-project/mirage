@@ -28,6 +28,8 @@ public:
   SymbolicTensorDim lhs, rhs;
 
   operator json() const;
+  bool operator==(TensorDimConstraint const &other) const;
+  z3::expr to_z3(z3::context &c) const;
 };
 
 TensorDimConstraint make_equal_constraint(SymbolicTensorDim lhs,
@@ -36,8 +38,17 @@ TensorDimConstraint make_equal_constraint(SymbolicTensorDim lhs,
 TensorDimConstraint make_equal_or_one_constraint(SymbolicTensorDim lhs,
                                                  SymbolicTensorDim rhs);
 
-bool check_satisfiability(std::vector<TensorDimConstraint> const &pre_conds,
-                          std::vector<TensorDimConstraint> const &constraints);
+bool check_satisfiability(std::unordered_set<TensorDimConstraint> const &pre_conds,
+                          std::unordered_set<TensorDimConstraint> const &constraints);
 
 } // namespace search
 } // namespace mirage
+
+namespace std {
+
+template <>
+struct hash<mirage::search::TensorDimConstraint> {
+  size_t operator()(mirage::search::TensorDimConstraint const &constraint) const;
+};
+
+} // namespace std

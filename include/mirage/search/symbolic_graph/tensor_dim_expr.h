@@ -2,6 +2,7 @@
 
 #include "mirage/search/symbolic_graph/dim_var_assignments.h"
 #include "mirage/utils/json_utils.h"
+#include "z3++.h"
 
 #include <memory>
 #include <string>
@@ -15,13 +16,17 @@ public:
   virtual ~TensorDimExpr() = default;
 
   virtual int get_value(DimVarAssignments const &assignments) const = 0;
+  virtual z3::expr to_z3(z3::context &c, bool log_scaled = true) const = 0;
+  virtual std::string to_string() const = 0;
   virtual bool is_var() const;
   virtual bool is_const() const;
   virtual bool is_add() const;
   virtual bool is_mul() const;
   virtual bool is_div() const;
 
+  virtual size_t hash() const = 0;
   virtual operator json() const = 0;
+  virtual bool same_expr_as(std::shared_ptr<TensorDimExpr>) const = 0;
 };
 
 class TensorDimVar : public TensorDimExpr {
@@ -30,9 +35,13 @@ public:
   tensor_dim_var_index_t index;
 
   int get_value(DimVarAssignments const &assignments) const override;
+  z3::expr to_z3(z3::context &c, bool log_scaled) const override;
+  std::string to_string() const override;
   bool is_var() const override;
 
+  size_t hash() const override;
   operator json() const override;
+  bool same_expr_as(std::shared_ptr<TensorDimExpr>) const override;
 };
 
 std::shared_ptr<TensorDimVar> dim_expr_make_var(tensor_dim_var_index_t index);
@@ -43,9 +52,13 @@ public:
   int value;
 
   int get_value(DimVarAssignments const &assignments) const override;
+  z3::expr to_z3(z3::context &c, bool log_scaled) const override;
+  std::string to_string() const override;
   bool is_const() const override;
 
+  size_t hash() const override;
   operator json() const override;
+  bool same_expr_as(std::shared_ptr<TensorDimExpr>) const override;
 };
 
 std::shared_ptr<TensorDimConst> dim_expr_make_const(int value);
@@ -57,9 +70,13 @@ public:
   std::shared_ptr<TensorDimExpr> lhs, rhs;
 
   int get_value(DimVarAssignments const &assignments) const override;
+  z3::expr to_z3(z3::context &c, bool log_scaled) const override;
+  std::string to_string() const override;
   bool is_add() const override;
 
+  size_t hash() const override;
   operator json() const override;
+  bool same_expr_as(std::shared_ptr<TensorDimExpr>) const override;
 };
 
 std::shared_ptr<TensorDimAdd>
@@ -73,9 +90,13 @@ public:
   std::shared_ptr<TensorDimExpr> lhs, rhs;
 
   int get_value(DimVarAssignments const &assignments) const override;
+  z3::expr to_z3(z3::context &c, bool log_scaled) const override;
+  std::string to_string() const override;
   bool is_mul() const override;
 
+  size_t hash() const override;
   operator json() const override;
+  bool same_expr_as(std::shared_ptr<TensorDimExpr>) const override;
 };
 
 std::shared_ptr<TensorDimMul>
@@ -89,9 +110,13 @@ public:
   std::shared_ptr<TensorDimExpr> lhs, rhs;
 
   int get_value(DimVarAssignments const &assignments) const override;
+  z3::expr to_z3(z3::context &c, bool log_scaled) const override;
+  std::string to_string() const override;
   bool is_div() const override;
 
+  size_t hash() const override;
   operator json() const override;
+  bool same_expr_as(std::shared_ptr<TensorDimExpr>) const override;
 };
 
 std::shared_ptr<TensorDimDiv>

@@ -12,7 +12,18 @@ public:
   std::shared_ptr<TensorDimExpr> dim_expr;
 
   operator json() const;
+  bool operator==(SymbolicTensorDim const &other) const;
 };
 
 } // namespace search
 } // namespace mirage
+
+
+namespace std {
+
+template <>
+struct hash<mirage::search::SymbolicTensorDim> {
+  size_t operator()(mirage::search::SymbolicTensorDim const &dim) const;
+};
+
+}

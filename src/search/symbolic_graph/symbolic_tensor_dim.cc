@@ -10,5 +10,19 @@ SymbolicTensorDim::operator json() const {
   return json{{"dim_expr", *dim_expr}};
 }
 
+bool SymbolicTensorDim::operator==(SymbolicTensorDim const &other) const {
+  return dim_expr->same_expr_as(other.dim_expr);
+}
+
 } // namespace search
 } // namespace mirage
+
+
+namespace std {
+
+size_t hash<mirage::search::SymbolicTensorDim>::operator()(
+    mirage::search::SymbolicTensorDim const &dim) const {
+  return dim.dim_expr->hash();
+}
+
+}

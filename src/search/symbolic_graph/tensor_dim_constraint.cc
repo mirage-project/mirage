@@ -1,4 +1,5 @@
 #include "mirage/search/symbolic_graph/tensor_dim_constraint.h"
+#include "mirage/utils/hash_utils.h"
 
 #include <unordered_map>
 
@@ -18,6 +19,22 @@ TensorDimConstraint::operator json() const {
   };
 }
 
+bool TensorDimConstraint::operator==(TensorDimConstraint const &other) const {
+  return type == other.type && lhs == other.lhs && rhs == other.rhs;
+}
+
+z3::expr TensorDimConstraint::to_z3(z3::context &c) const {
+  z3::expr l = lhs.dim_expr->to_z3(c), r = rhs.dim_expr->to_z3(c);
+  switch (type) {
+    case ConstraintType::EQUAL:
+      return l == r;
+    case ConstraintType::EQUAL_OR_ONE:
+      return l == r || l == 1 || r == 1;
+    default:
+      assert(false && "Unsupported constraint type");
+  }
+}
+
 TensorDimConstraint make_equal_constraint(SymbolicTensorDim lhs,
                                           SymbolicTensorDim rhs) {
   return TensorDimConstraint(ConstraintType::EQUAL, lhs, rhs);
@@ -28,8 +45,8 @@ TensorDimConstraint make_equal_or_one_constraint(SymbolicTensorDim lhs,
   return TensorDimConstraint(ConstraintType::EQUAL_OR_ONE, lhs, rhs);
 }
 
-bool check_satisfiability(std::vector<TensorDimConstraint> const &pre_conds,
-                          std::vector<TensorDimConstraint> const &constraints) {
+bool check_satisfiability(std::unordered_set<TensorDimConstraint> const &pre_conds,
+                          std::unordered_set<TensorDimConstraint> const &constraints) {
   auto probably_equal = [](std::shared_ptr<TensorDimExpr> el,
                            std::shared_ptr<TensorDimExpr> er) {
     {
@@ -86,3 +103,17 @@ bool check_satisfiability(std::vector<TensorDimConstraint> const &pre_conds,
 
 } // namespace search
 } // namespace mirage
+
+
+namespace std {
+
+size_t hash<mirage::search::TensorDimConstraint>::operator()(
+    mirage::search::TensorDimConstraint const &constraint) const {
+  size_t seed = 0;
+  hash_combine(seed, constraint.type);
+  hash_combine(seed, constraint.lhs);
+  hash_combine(seed, constraint.rhs);
+  return seed;
+}
+
+}

@@ -2,6 +2,7 @@
 
 #include "mirage/utils/hash_utils.h"
 #include "mirage/utils/json_utils.h"
+#include "mirage/search/symbolic_graph/tensor_dim_constraint.h"
 #include "z3++.h"
 #include <memory>
 #include <mutex>
@@ -17,20 +18,19 @@ public:
   AbstractExpr() = default;
   virtual ~AbstractExpr() = default;
 
-  virtual z3::expr
-      to_z3(z3::context &c,
-            std::unordered_set<std::string> &all_variables) const = 0;
-  bool subexpr_to(AbstractExpr const &other) const;
+  virtual z3::expr to_z3(z3::context &c) const = 0;
+  bool subexpr_to(AbstractExpr const &other, std::unordered_set<TensorDimConstraint> const &constraints = {}) const;
   bool operator==(AbstractExpr const &other) const;
+  virtual std::shared_ptr<AbstractExpr> simplify() const = 0;
   virtual std::string to_string() const = 0;
 };
 
 class Var : public AbstractExpr {
 public:
   Var(std::string const &name);
-  z3::expr to_z3(z3::context &c,
-                 std::unordered_set<std::string> &all_variables) const override;
+  z3::expr to_z3(z3::context &c) const override;
   std::string to_string() const override;
+  std::shared_ptr<AbstractExpr> simplify() const override;
   std::string name;
 };
 
@@ -39,9 +39,9 @@ std::shared_ptr<AbstractExpr> abstract_expr_make_var(std::string const &name);
 class Add : public AbstractExpr {
 public:
   Add(std::shared_ptr<AbstractExpr> lhs, std::shared_ptr<AbstractExpr> rhs);
-  z3::expr to_z3(z3::context &c,
-                 std::unordered_set<std::string> &all_variables) const override;
+  z3::expr to_z3(z3::context &c) const override;
   std::string to_string() const override;
+  std::shared_ptr<AbstractExpr> simplify() const override;
   std::shared_ptr<AbstractExpr> lhs, rhs;
 };
 
@@ -52,9 +52,9 @@ std::shared_ptr<AbstractExpr>
 class Mul : public AbstractExpr {
 public:
   Mul(std::shared_ptr<AbstractExpr> lhs, std::shared_ptr<AbstractExpr> rhs);
-  z3::expr to_z3(z3::context &c,
-                 std::unordered_set<std::string> &all_variables) const override;
+  z3::expr to_z3(z3::context &c) const override;
   std::string to_string() const override;
+  std::shared_ptr<AbstractExpr> simplify() const override;
   std::shared_ptr<AbstractExpr> lhs, rhs;
 };
 
@@ -65,9 +65,9 @@ std::shared_ptr<AbstractExpr>
 class Div : public AbstractExpr {
 public:
   Div(std::shared_ptr<AbstractExpr> lhs, std::shared_ptr<AbstractExpr> rhs);
-  z3::expr to_z3(z3::context &c,
-                 std::unordered_set<std::string> &all_variables) const override;
+  z3::expr to_z3(z3::context &c) const override;
   std::string to_string() const override;
+  std::shared_ptr<AbstractExpr> simplify() const override;
   std::shared_ptr<AbstractExpr> lhs, rhs;
 };
 
@@ -78,9 +78,9 @@ std::shared_ptr<AbstractExpr>
 class Exp : public AbstractExpr {
 public:
   Exp(std::shared_ptr<AbstractExpr> exponent);
-  z3::expr to_z3(z3::context &c,
-                 std::unordered_set<std::string> &all_variables) const override;
+  z3::expr to_z3(z3::context &c) const override;
   std::string to_string() const override;
+  std::shared_ptr<AbstractExpr> simplify() const override;
   std::shared_ptr<AbstractExpr> exponent;
 };
 
@@ -90,9 +90,9 @@ std::shared_ptr<AbstractExpr>
 class Silu : public AbstractExpr {
 public:
   Silu(std::shared_ptr<AbstractExpr> a);
-  z3::expr to_z3(z3::context &c,
-                 std::unordered_set<std::string> &all_variables) const override;
+  z3::expr to_z3(z3::context &c) const override;
   std::string to_string() const override;
+  std::shared_ptr<AbstractExpr> simplify() const override;
   std::shared_ptr<AbstractExpr> a;
 };
 
@@ -103,29 +103,39 @@ std::shared_ptr<AbstractExpr>
 // transformation
 class RMS : public AbstractExpr {
 public:
-  RMS(int red_deg, std::shared_ptr<AbstractExpr> elems);
-  z3::expr to_z3(z3::context &c,
-                 std::unordered_set<std::string> &all_variables) const override;
+  RMS(std::shared_ptr<TensorDimExpr> reduction_degree, std::shared_ptr<AbstractExpr> elems);
+  z3::expr to_z3(z3::context &c) const override;
   std::string to_string() const override;
-  int red_deg;
+  std::shared_ptr<AbstractExpr> simplify() const override;
+  std::shared_ptr<TensorDimExpr> reduction_degree;
   std::shared_ptr<AbstractExpr> elems;
 };
 
 std::shared_ptr<AbstractExpr>
-    abstract_expr_make_rms(int red_deg, std::shared_ptr<AbstractExpr> elems);
+    abstract_expr_make_rms(int reduction_degree, std::shared_ptr<AbstractExpr> elems);
+std::shared_ptr<AbstractExpr>
+    abstract_expr_make_rms(std::shared_ptr<TensorDimExpr> reduction_degree, std::shared_ptr<AbstractExpr> elems);
+std::shared_ptr<AbstractExpr>
+    abstract_expr_make_rms(SymbolicTensorDim const &reduction_dim, std::shared_ptr<AbstractExpr> elems);
 
 class Red : public AbstractExpr {
 public:
-  Red(int red_deg, std::shared_ptr<AbstractExpr> summand);
-  z3::expr to_z3(z3::context &c,
-                 std::unordered_set<std::string> &all_variables) const override;
+  Red(std::shared_ptr<TensorDimExpr> reduction_degree, std::shared_ptr<AbstractExpr> summand);
+  z3::expr to_z3(z3::context &c) const override;
   std::string to_string() const override;
-  int red_deg_log;
+  std::shared_ptr<AbstractExpr> simplify() const override;
+  std::shared_ptr<TensorDimExpr> reduction_degree;
   std::shared_ptr<AbstractExpr> summand;
 };
 
 std::shared_ptr<AbstractExpr>
-    abstract_expr_make_red(int red_deg, std::shared_ptr<AbstractExpr> summand);
+    abstract_expr_make_red(int reduction_degree, std::shared_ptr<AbstractExpr> summand);
+
+std::shared_ptr<AbstractExpr>
+    abstract_expr_make_red(std::shared_ptr<TensorDimExpr> reduction_degree, std::shared_ptr<AbstractExpr> summand);
+
+std::shared_ptr<AbstractExpr>
+    abstract_expr_make_red(SymbolicTensorDim const &reduction_dim, std::shared_ptr<AbstractExpr> summand);
 
 } // namespace search
 } // namespace mirage

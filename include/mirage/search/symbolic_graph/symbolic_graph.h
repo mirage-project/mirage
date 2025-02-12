@@ -8,6 +8,7 @@
 #include "mirage/threadblock/graph.h"
 
 #include <unordered_map>
+#include <unordered_set>
 #include <vector_types.h>
 
 namespace mirage {
@@ -37,7 +38,7 @@ public:
   std::vector<std::vector<int>> input_indices;
   std::vector<std::vector<int>> output_indices;
 
-  std::vector<TensorDimConstraint> conds;
+  std::unordered_set<TensorDimConstraint> conds;
 
   static tensor_dim_var_index_t next_dim_variable_index;
 
@@ -66,7 +67,7 @@ public:
   std::vector<std::vector<int>> input_indices;
   std::vector<std::vector<int>> output_indices;
 
-  std::vector<TensorDimConstraint> conds;
+  std::unordered_set<TensorDimConstraint> conds;
 
   operator json() const;
 };

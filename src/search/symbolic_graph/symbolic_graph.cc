@@ -89,16 +89,16 @@ bool SymbolicTBGraph::add_operator(type::TBOperatorType op_type,
         return false;
       }
       {
-        std::vector<TensorDimConstraint> constraints;
+        std::unordered_set<TensorDimConstraint> constraints;
         for (size_t i = 0; i < A.dims.size(); i++) {
           if ((int)i != concat_dim) {
-            constraints.push_back(make_equal_constraint(A.dims[i], B.dims[i]));
+            constraints.insert(make_equal_constraint(A.dims[i], B.dims[i]));
           }
         }
         if (!check_satisfiability(this->conds, constraints)) {
           return false;
         }
-        conds.insert(conds.end(), constraints.begin(), constraints.end());
+        conds = set_union(conds, constraints);
       }
       this->operators.push_back(
           SymbolicTBOp(op_type, std::make_shared<TBConcatOpArgs>(concat_dim)));
@@ -144,15 +144,15 @@ bool SymbolicTBGraph::add_operator(type::TBOperatorType op_type,
         return false;
       }
       {
-        std::vector<TensorDimConstraint> constraints;
+        std::unordered_set<TensorDimConstraint> constraints;
         for (size_t i = 0; i < A.dims.size(); i++) {
-          constraints.push_back(
+          constraints.insert(
               make_equal_or_one_constraint(A.dims[i], B.dims[i]));
         }
         if (!check_satisfiability(this->conds, constraints)) {
           return false;
         }
-        conds.insert(conds.end(), constraints.begin(), constraints.end());
+        conds = set_union(conds, constraints);
       }
       this->operators.push_back(SymbolicTBOp(op_type));
       this->tensors.push_back(A);
@@ -201,21 +201,21 @@ bool SymbolicTBGraph::add_operator(type::TBOperatorType op_type,
         return false;
       }
       {
-        std::vector<TensorDimConstraint> constraints;
+        std::unordered_set<TensorDimConstraint> constraints;
         for (size_t i = 0; i < A.dims.size() - 2; i++) {
-          constraints.push_back(make_equal_constraint(
+          constraints.insert(make_equal_constraint(
               A.dims[i],
               SymbolicTensorDim(std::make_shared<TensorDimConst>(1))));
-          constraints.push_back(make_equal_constraint(
+          constraints.insert(make_equal_constraint(
               B.dims[i],
               SymbolicTensorDim(std::make_shared<TensorDimConst>(1))));
         }
-        constraints.push_back(make_equal_constraint(A.dims[A.dims.size() - 1],
+        constraints.insert(make_equal_constraint(A.dims[A.dims.size() - 1],
                                                     B.dims[B.dims.size() - 2]));
         if (!check_satisfiability(this->conds, constraints)) {
           return false;
         }
-        conds.insert(conds.end(), constraints.begin(), constraints.end());
+        conds = set_union(conds, constraints);
       }
       this->operators.push_back(SymbolicTBOp(op_type));
       {
@@ -317,8 +317,8 @@ bool SymbolicTBGraph::add_input(SymbolicDTensor dtensor,
       dim_idx = input_map.z;
     }
     if (dim_idx >= 0) {
-      dim_templates.push_back(SymbolicTensorDim(std::make_shared<TensorDimDiv>(
-          dim_templates[dim_idx].dim_expr, grid_dim[d].dim_expr)));
+      dim_templates[dim_idx] = SymbolicTensorDim(std::make_shared<TensorDimDiv>(
+          dim_templates[dim_idx].dim_expr, grid_dim[d].dim_expr));
     }
   }
   if (forloop_dim >= 0) {
@@ -436,15 +436,15 @@ bool SymbolicKNGraph::add_operator(type::KNOperatorType op_type,
         return false;
       }
       {
-        std::vector<TensorDimConstraint> constraints;
+        std::unordered_set<TensorDimConstraint> constraints;
         for (size_t i = 0; i < A.dims.size(); i++) {
-          constraints.push_back(
+          constraints.insert(
               make_equal_or_one_constraint(A.dims[i], B.dims[i]));
         }
         if (!check_satisfiability(this->conds, constraints)) {
           return false;
         }
-        conds.insert(conds.end(), constraints.begin(), constraints.end());
+        conds = set_union(conds, constraints);
       }
       this->operators.push_back(SymbolicKNOp(op_type));
       this->tensors.push_back(A);
@@ -472,16 +472,16 @@ bool SymbolicKNGraph::add_operator(type::KNOperatorType op_type,
         return false;
       }
       {
-        std::vector<TensorDimConstraint> constraints;
+        std::unordered_set<TensorDimConstraint> constraints;
         for (size_t i = 0; i < A.dims.size() - 2; i++) {
-          constraints.push_back(make_equal_constraint(A.dims[i], B.dims[i]));
+          constraints.insert(make_equal_constraint(A.dims[i], B.dims[i]));
         }
-        constraints.push_back(make_equal_constraint(A.dims[A.dims.size() - 1],
+        constraints.insert(make_equal_constraint(A.dims[A.dims.size() - 1],
                                                     B.dims[B.dims.size() - 2]));
         if (!check_satisfiability(this->conds, constraints)) {
           return false;
         }
-        conds.insert(conds.end(), constraints.begin(), constraints.end());
+        conds = set_union(conds, constraints);
       }
       this->operators.push_back(SymbolicKNOp(op_type));
       {

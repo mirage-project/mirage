@@ -446,6 +446,7 @@ void KernelGraphGenerator::generate_kernel_graphs_symbolic() {
 
   generate_next_symbolic_operator(
       kn_graph, nullptr, {}, SearchLevel::LV_KERNEL);
+  std::cerr << num_symbolic_graphs << std::endl;
   printf("[Search] Symbolic search finished. Time elapsed: %fsec\n",
          std::chrono::duration<double>(std::chrono::steady_clock::now() -
                                        start_time)
@@ -490,6 +491,8 @@ bool KernelGraphGenerator::check_abstract_expr(
   if (!expr) {
     return false;
   }
+
+  expr = expr->simplify();
 
   if (seen_exprs.find(expr->to_string()) != seen_exprs.end()) {
     return seen_exprs[expr->to_string()];
@@ -784,8 +787,10 @@ void KernelGraphGenerator::generate_next_symbolic_operator(
           continue;
         }
 
+        std::cerr << "pass abstract expr" << std::endl;
         // Now we pass all the checks, create the operator
         if (tb_graph->add_operator(op_type, input_idx)) {
+          std::cerr << "pass add operator" << std::endl;
           // Recursively generate the next operator
           generate_next_symbolic_operator(
               kn_graph, tb_graph, input_dtensor_indices_for_tb_graph, level);
@@ -801,6 +806,7 @@ bool KernelGraphGenerator::instantiate_symbolic_graph(
     SymbolicKNGraph const &symbolic_graph) {
   {
     ++num_symbolic_graphs;
+    std::cerr << "symbolic graph: " << json(symbolic_graph) << std::endl;
     return false;
   }
 

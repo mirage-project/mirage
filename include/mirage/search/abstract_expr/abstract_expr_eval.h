@@ -1,9 +1,6 @@
 #pragma once
 
-#include "mirage/kernel/graph.h"
-#include "mirage/search/abstract_expr/abstract_expr.h"
-#include "mirage/search/symbolic_graph/symbolic_graph.h"
-#include "mirage/threadblock/graph.h"
+#include "mirage/search/abstract_expr/abstract_expr_for_ops.h"
 
 namespace mirage {
 namespace search {

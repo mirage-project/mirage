@@ -8,7 +8,7 @@ namespace search {
 
 void abstract_expr_eval(
     threadblock::Graph const &g,
-    std::unordered_map<int64_t, std::shared_ptr<AbstractExpr>> &exprs) {
+    std::unordered_map<type::GuidType, std::shared_ptr<AbstractExpr>> &exprs) {
   for (size_t i = 0; i < g.operators.size(); ++i) {
     auto const &op = g.operators[i];
     if (op->output_tensors.size() > 0 &&
@@ -57,7 +57,7 @@ void abstract_expr_eval(
 
 void abstract_expr_eval(
     kernel::Graph const &g,
-    std::unordered_map<int64_t, std::shared_ptr<AbstractExpr>> &exprs) {
+    std::unordered_map<type::GuidType, std::shared_ptr<AbstractExpr>> &exprs) {
   int input_id = 0;
   for (auto const &op : g.operators) {
     if (op->op_type == type::KNOperatorType::KN_OUTPUT_OP) {
@@ -69,10 +69,10 @@ void abstract_expr_eval(
     } else if (op->op_type == type::KNOperatorType::KN_RMS_NORM_OP) {
       std::shared_ptr<AbstractExpr> input_expr =
           exprs.at(op->input_tensors[0].guid);
-      std::shared_ptr<AbstractExpr> denominator_expr = std::make_shared<RMS>(
+      std::shared_ptr<AbstractExpr> denominator_expr = abstract_expr_make_rms(
           static_cast<kernel::KNRMSNormOp *>(op)->normalized_size, input_expr);
       std::shared_ptr<AbstractExpr> output_expr =
-          std::make_shared<Div>(input_expr, denominator_expr);
+          abstract_expr_make_div(input_expr, denominator_expr);
       exprs.insert({op->output_tensors[0].guid, output_expr});
     } else if (op->op_type != type::KNOperatorType::KN_CUSTOMIZED_OP) {
       std::vector<std::shared_ptr<AbstractExpr>> input_exprs;
