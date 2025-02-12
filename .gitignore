@@ -51,3 +51,4 @@ wheelhouse/
 # Triton transpiler
 demo/mirage_search_checkpoint.json
 demo/*generated*
+benchmark/*generated*
