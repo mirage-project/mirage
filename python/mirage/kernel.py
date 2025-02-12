@@ -22,7 +22,7 @@ static PyObject *launch(PyObject *self, PyObject *args) {
   void *buffer;
   std::vector<void const *> input_tensors;
   std::vector<void*> output_tensors;
-  int rank; 
+  int rank;
 
   if (!PyArg_ParseTuple(args, "OOOi", &input_list, &output_list, &py_buffer, &rank)) {
     PyErr_SetString(PyExc_TypeError, "Invalid parameters");
@@ -58,7 +58,7 @@ static PyObject *launch(PyObject *self, PyObject *args) {
   }
 
   buffer = PyLong_AsVoidPtr(py_buffer);
-  
+
   execute_mugraph(input_tensors, output_tensors, buffer, rank);
 
   Py_RETURN_NONE;
@@ -88,7 +88,7 @@ PyMODINIT_FUNC PyInit___mirage_launcher(void) {
 }
 """
 
-def get_cc_cmd(target, cc, FILE_NAME, py_include_dir, MIRAGE_ROOT, so_path):
+def get_cc_cmd(target, cc, FILE_NAME, py_include_dir, MIRAGE_ROOT, NCCL_ROOT, MPI_ROOT, so_path):
     common_cmd = [
         cc,
         FILE_NAME,
@@ -102,11 +102,17 @@ def get_cc_cmd(target, cc, FILE_NAME, py_include_dir, MIRAGE_ROOT, so_path):
         "-lnvshmem",
         # "-lnvshmem_device",
         "-ccbin=mpic++",
+        f"-I{NCCL_ROOT}/include",
+        f"-L/{NCCL_ROOT}/lib",
+        f"-I{MPI_ROOT}/include",
+        f"-L/{MPI_ROOT}/lib",
         "-shared",
         "-std=c++17",
         "-rdc=true",
         "-use_fast_math",
         "-lcublas",
+        "-lnccl",
+        "-lmpi",
         "-Xcompiler=-fPIC",
         "--expt-relaxed-constexpr",
         "-o",
@@ -219,6 +225,10 @@ class KNGraph:
     def customized(self, inputs: list[DTensor], bgraph: TBGraph) -> list[DTensor]:
         return self.cygraph.customized(inputs, bgraph.cygraph)
 
+    # TODO (linsj20)
+    def allreduce(self, A: DTensor, reduce_op="sum", inplace=False):
+        return self.cygraph.all_reduce(A, reduce_op, inplace)
+
     def valid_kernels(self):
         assert self._is_compiled, "Should check kernel validness after compilation"
         return self._valid_cuda_kernels
@@ -326,8 +336,24 @@ class KNGraph:
                 return None
 
         MIRAGE_ROOT = os.environ.get(
-            "MIRAGE_ROOT", os.path.join(os.path.dirname(__file__), "../../include")
+            "MIRAGE_ROOT", os.path.join(os.path.dirname(__file__), "../..")
         )
+
+        # TODO (linsj20)
+        NCCL_ROOT = os.environ.get("NCCL_HOME")
+        if not os.path.exists(NCCL_ROOT):
+            print(
+                f"Warning: NCCL_ROOT ({NCCL_ROOT}) not found. Disable distributed kernel generation."
+            )
+            sys.exit(1)
+
+        # TODO (linsj20)
+        MPI_ROOT = os.environ.get("MPI_HOME")
+        if not os.path.exists(MPI_ROOT):
+            print(
+                f"Warning: MPI_ROOT ({MPI_ROOT}) not found. Disable distributed kernel generation."
+            )
+            sys.exit(1)
 
         # if True:
         #     tempdir = './test/'
@@ -340,6 +366,9 @@ class KNGraph:
         with open(FILE_NAME, "w") as f:
             f.write(result["code"] + HARD_CODE)
 
+        # TMP
+        with open("./test.cu", "w") as f:
+            f.write(result["code"] + HARD_CODE)
 
         cc = shutil.which("nvcc")
         if cc is None:
@@ -363,7 +392,7 @@ class KNGraph:
                 f"Error: MIRAGE_ROOT ({MIRAGE_ROOT}) not found. Please set the MIRAGE_ROOT env variable correctly"
             )
             sys.exit(1)
-        cc_cmd = get_cc_cmd(target_cc, cc, FILE_NAME, py_include_dir, MIRAGE_ROOT, so_path)
+        cc_cmd = get_cc_cmd(target_cc, cc, FILE_NAME, py_include_dir, MIRAGE_ROOT, NCCL_ROOT, MPI_ROOT, so_path)
 
 
         def remain_op():
@@ -488,8 +517,8 @@ class KNGraph:
         elif backend == "nki":
             return all_graphs
         elif backend == "triton":
-            best_graph, best_file_path, best_output_shapes = profile_and_select_best_graph(all_graphs, 
-                                                 target_cc=torch.cuda.get_device_properties(0).major * 10 
+            best_graph, best_file_path, best_output_shapes = profile_and_select_best_graph(all_graphs,
+                                                 target_cc=torch.cuda.get_device_properties(0).major * 10
                                                  + torch.cuda.get_device_properties(0).minor,
                                                  warmup_iters=warmup_iters, profile_iters=profile_iters, debug_mode=verbose)
             # load execute_mugraph func from the generated file
