@@ -76,6 +76,16 @@ static __device__ __forceinline__ void
   return __waitComplete
 }
 
+// Set the destination block-ID in cluster for a given SMEM Address
+static __device__ __forceinline__ uint32_t set_block_rank(uint64_t smemAddr,
+                                                          uint32_t rank) {
+  uint32_t result;
+  asm volatile("mapa.shared::cluster.u64  %0, %1, %2;\n"
+               : "=r"(result)
+               : "r"(smemAddr), "r"(rank));
+  return result;
+}
+
 // reduction
 template <typename T, int CLUSTER_SIZE, int NUM_THREADS, int BUF_SIZE>
 class ClusterReduction {
@@ -94,8 +104,8 @@ class ClusterReduction {
 
     if (block_rank != 0) {
       unsigned int block0rank = 0;
-      uint64_t *remote_bar = cluster.map_shared_rank(bar, block0rank);
-      T *remote_receive_buffer = cluster.map_shared_rank(dst, block0rank);
+      uint64_t *remote_bar = set_block_rank(bar, block0rank);
+      T *remote_receive_buffer = set_block_rank(dst, block0rank);
 
       arrival_token = mbarrier_arrive_expect(bar, THREAD_COUNT);
 
@@ -113,9 +123,8 @@ class ClusterReduction {
     if (block_rank == 0) {
       for (int b = 1; b < CLUSTER_SIZE; b++) {
         unsigned int target_blockrank = b;
-        uint64_t *remote_bar = cluster.map_shared_rank(bar, target_blockrank);
-        T *remote_receive_buffer =
-            cluster.map_shared_rank(dst, target_blockrank);
+        uint64_t *remote_bar = set_block_rank(bar, target_blockrank);
+        T *remote_receive_buffer = set_block_rank(dst, target_blockrank);
 
         arrival_token = mbarrier_arrive_expect(bar, THREAD_COUNT);
 
