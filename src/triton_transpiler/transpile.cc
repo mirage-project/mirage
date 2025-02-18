@@ -17,6 +17,10 @@
 #include "mirage/threadblock/graph.h"
 #include "mirage/transpiler/utils.h"
 
+#define BLOCK_SIZE_X 128
+#define BLOCK_SIZE_Y 1
+#define CEIL_DIV(a, b) (((a) + (b) - 1) / (b))
+
 namespace mirage {
 namespace triton_transpiler {
 
@@ -70,7 +74,7 @@ TritonTranspiler::TritonTranspiler(kernel::Graph const *_graph,
         g->mark_output(dtensor_inputs[0], output_op->output_strides);
         if (!output_op->output_strides.empty()) {
           assert(output_op->output_strides.size() ==
-                 dtensor_inputs[0].num_dims);
+                 static_cast<size_t>(dtensor_inputs[0].num_dims));
         }
         this->mugraph_output_tensors.insert(this->mugraph_output_tensors.end(),
                                             dtensor_inputs.begin(),
@@ -284,6 +288,10 @@ TritonTranspileResult TritonTranspiler::transpile_ugraph() {
   header.e("import triton.language as tl");
   header.e("import triton.ops as ops");
   header.e("import torch");
+  header.e("import sys");
+  header.e("import os");
+  header.e("sys.path.append(os.environ['KERNELS_PATH'])");
+  header.e("from triton_kernels import *");
 
   // Generate execution section
   CodeKeeper exec;
@@ -293,10 +301,12 @@ TritonTranspileResult TritonTranspiler::transpile_ugraph() {
 
   CodeKeeper entrance_func;
   std::vector<std::string> input_tensor_names;
+  std::vector<std::string> middle_tensor_names;
+  std::vector<std::string> middle_tensor_shapes;
   std::vector<std::string> output_tensor_names;
 
   using namespace mirage::type;
-  // Initialize input and output tensors
+  // Initialize input, output tensors and middle tensors
   for (kn::KNOperator *const op : g->operators) {
     if (op->op_type == KN_INPUT_OP) {
       std::string shape;
@@ -309,27 +319,44 @@ TritonTranspileResult TritonTranspiler::transpile_ugraph() {
              shape);
       input_tensor_names.push_back(fmt("dtensor$", dtensor.guid));
     }
-    if (op->op_type == KN_OUTPUT_OP) {
-      std::string shape;
+    else if (op->op_type == KN_OUTPUT_OP) {
       kn::DTensor dtensor = op->input_tensors.at(0);
-      for (int i = 0; i < dtensor.num_dims; i++) {
-        shape += fmt("$,", dtensor.dim[i]);
-      }
-      exec.e("$ = torch.zeros(($), dtype=torch.float16).to(device=device)",
-             fmt("dtensor$", dtensor.guid),
-             shape);
       output_tensor_names.push_back(fmt("dtensor$", dtensor.guid));
     }
+    else if (op->op_type != KN_OUTPUT_OP) {
+      for (int i = 0; i < (int)(op->output_tensors.size()); i++) {
+        kn::DTensor dtensor = op->output_tensors.at(i);
+        std::string shape;
+        for (int j = 0; j < dtensor.num_dims; j++) {
+          shape += fmt("$,", dtensor.dim[j]);
+        }
+        exec.e("$ = torch.zeros(($), dtype=torch.float16).to(device=device)",
+               fmt("dtensor$", dtensor.guid),
+               shape);
+        middle_tensor_names.push_back(fmt("dtensor$", dtensor.guid));
+        middle_tensor_shapes.push_back(shape);
+      }
+    }
   }
+  // Delete output_tensor names from middle tensor names
+  for (size_t i = 0; i < output_tensor_names.size(); i++) {
+    for (size_t j = 0; j < middle_tensor_names.size(); j++) {
+      if (output_tensor_names[i] == middle_tensor_names[j]) {
+        middle_tensor_names.erase(middle_tensor_names.begin() + j);
+        middle_tensor_shapes.erase(middle_tensor_shapes.begin() + j);
+      }
+    }
+  }
+
   std::string input_tensor_str;
   std::string output_tensor_str;
-  for (int i = 0; i < input_tensor_names.size(); i++) {
+  for (size_t i = 0; i < input_tensor_names.size(); i++) {
     input_tensor_str += input_tensor_names[i];
     if (i != input_tensor_names.size() - 1) {
       input_tensor_str += ", ";
     }
   }
-  for (int i = 0; i < output_tensor_names.size(); i++) {
+  for (size_t i = 0; i < output_tensor_names.size(); i++) {
     output_tensor_str += output_tensor_names[i];
     if (i != output_tensor_names.size() - 1) {
       output_tensor_str += ", ";
@@ -339,6 +366,11 @@ TritonTranspileResult TritonTranspiler::transpile_ugraph() {
       "def execute_mugraph($, $):", input_tensor_str, output_tensor_str);
   entrance_func.inc_indent();
   entrance_func.e("device = torch.device('cuda')");
+  for(size_t i = 0; i < middle_tensor_names.size(); i++) {
+    entrance_func.e("$ = torch.zeros(($), dtype=torch.float16).to(device=device)", 
+                    middle_tensor_names[i],
+                    middle_tensor_shapes[i]);
+  }
 
   // Generate custom kernels (only for truly custom operations)
   CodeKeeper custom_kernels;
@@ -386,78 +418,60 @@ TritonTranspileResult TritonTranspiler::transpile_ugraph() {
                                    fmt("dtensor$", input0.guid),
                                    fmt("dtensor$", input1.guid));
         exec.e(new_line);
-        entrance_func.e(new_line);
+        // if output of this op is in output_tensor_names
+        // we should use .copy_() to copy the result back
+        if (std::find(output_tensor_names.begin(), output_tensor_names.end(), 
+            fmt("dtensor$", output.guid)) != output_tensor_names.end()) {
+          entrance_func.e(fmt("$.copy_($)", 
+          fmt("dtensor$", output.guid), 
+          fmt("ops.matmul($, $)", 
+          fmt("dtensor$", input0.guid), 
+          fmt("dtensor$", input1.guid))));
+        }
+        else 
+          entrance_func.e(new_line);
         break;
       }
 
-      case KN_ADD_OP: {
-        kn::DTensor &input0 = op->input_tensors[0];
-        kn::DTensor &input1 = op->input_tensors[1];
-        kn::DTensor &output = op->output_tensors[0];
-        std::string new_line = fmt("$ = ops.add($, $)",
-                                   fmt("dtensor$", output.guid),
-                                   fmt("dtensor$", input0.guid),
-                                   fmt("dtensor$", input1.guid));
-        exec.e(new_line);
-        entrance_func.e(new_line);
-        break;
-      }
-
-      case KN_MUL_OP: {
-        kn::DTensor &input0 = op->input_tensors[0];
-        kn::DTensor &input1 = op->input_tensors[1];
-        kn::DTensor &output = op->output_tensors[0];
-        std::string new_line = fmt("$ = ops.multiply($, $)",
-                                   fmt("dtensor$", output.guid),
-                                   fmt("dtensor$", input0.guid),
-                                   fmt("dtensor$", input1.guid));
-        exec.e(new_line);
-        entrance_func.e(new_line);
-        break;
-      }
-
+      case KN_ADD_OP:
+      case KN_MUL_OP:
       case KN_DIV_OP: {
         kn::DTensor &input0 = op->input_tensors[0];
         kn::DTensor &input1 = op->input_tensors[1];
         kn::DTensor &output = op->output_tensors[0];
-        std::string new_line = fmt("$ = ops.divide($, $)",
-                                   fmt("dtensor$", output.guid),
-                                   fmt("dtensor$", input0.guid),
-                                   fmt("dtensor$", input1.guid));
+        int M = CEIL_DIV(input0.dim[0], BLOCK_SIZE_Y);
+        int N = CEIL_DIV(input0.dim[1], BLOCK_SIZE_X);
+
+        std::string grid = fmt("($, $)", M, N); //TODO: Currently only support 2D
+        std::string new_line = fmt("elementwise_binary_kernel[$]($, $, $, $, $, $)",
+                                    grid,
+                                    fmt("dtensor$", input0.guid),
+                                    fmt("dtensor$", input1.guid),
+                                    fmt("dtensor$", output.guid),
+                                    M,
+                                    N,
+                                    op->op_type);
         exec.e(new_line);
         entrance_func.e(new_line);
         break;
       }
 
-      case KN_EXP_OP: {
-        kn::DTensor &input = op->input_tensors[0];
-        kn::DTensor &output = op->output_tensors[0];
-        std::string new_line = fmt("$ = ops.exp($)",
-                                   fmt("dtensor$", output.guid),
-                                   fmt("dtensor$", input.guid));
-        exec.e(new_line);
-        entrance_func.e(new_line);
-        break;
-      }
-
-      case KN_SQRT_OP: {
-        kn::DTensor &input = op->input_tensors[0];
-        kn::DTensor &output = op->output_tensors[0];
-        std::string new_line = fmt("$ = ops.sqrt($)",
-                                   fmt("dtensor$", output.guid),
-                                   fmt("dtensor$", input.guid));
-        exec.e(new_line);
-        entrance_func.e(new_line);
-        break;
-      }
-
+      case KN_EXP_OP:
+      case KN_SQRT_OP:
       case KN_SQUARE_OP: {
         kn::DTensor &input = op->input_tensors[0];
         kn::DTensor &output = op->output_tensors[0];
-        std::string new_line = fmt("$ = $ * $",
-                                   fmt("dtensor$", output.guid),
-                                   fmt("dtensor$", input.guid),
-                                   fmt("dtensor$", input.guid));
+        int M = CEIL_DIV(input.dim[0], BLOCK_SIZE_Y);
+        int N = CEIL_DIV(input.dim[1], BLOCK_SIZE_X);
+
+        std::string grid = fmt("($, $)", M, N); //TODO: Currently only support 2D
+        std::string new_line = fmt("elementwise_unary_kernel[$]($, $, $, $, $)",
+                                    grid,
+                                    fmt("dtensor$", input.guid),
+                                    fmt("dtensor$", output.guid),
+                                    M,
+                                    N,
+                                    op->op_type);
         exec.e(new_line);
         entrance_func.e(new_line);
         break;
@@ -469,12 +483,38 @@ TritonTranspileResult TritonTranspiler::transpile_ugraph() {
         kn::DTensor &input = op->input_tensors[0];
         kn::DTensor &output = op->output_tensors[0];
         int dim = op->op_type - KN_REDUCTION_0_OP;
-        std::string new_line = fmt("$ = ops.reduce.sum($, dim=$)",
-                                   fmt("dtensor$", output.guid),
-                                   fmt("dtensor$", input.guid),
-                                   dim);
+        int M = CEIL_DIV(input.dim[0], BLOCK_SIZE_Y);
+        int N = CEIL_DIV(input.dim[1], BLOCK_SIZE_X);
+        std::string grid = fmt("($, $)", M, N); //TODO: Currently only support 2D
+        std::string new_line = fmt("reduce_sum_kernel[$]($, $, $, $, $)",
+                                    grid,
+                                    fmt("dtensor$", input.guid),
+                                    fmt("dtensor$", output.guid),
+                                    M,
+                                    N,
+                                    dim);
         exec.e(new_line);
         entrance_func.e(new_line);
+        break;
+      }
+      // case KN_MUL_SCALAR_OP:
+      // case KN_SILU_OP:
+      // case KN_SIGMOID_OP:
+      // case KN_LOG_OP:
+      // case KN_RMS_NORM_OP:
+      // case KN_CONCAT_FIRST_OP_ID:
+      // case KN_CONCAT_0_OP:
+      // case KN_CONCAT_1_OP:
+      // case KN_CONCAT_2_OP:
+      // case KN_CONCAT_LAST_OP_ID:
+      // case KN_SPLIT_FIRST_OP_ID:
+      // case KN_SPLIT_0_OP:
+      // case KN_SPLIT_1_OP:
+      // case KN_SPLIT_2_OP:
+      // case KN_SPLIT_LAST_OP_ID:
+      // case KN_ALLREDUCE_OP:
+      default: {
+        assert(false && "To be implemented");
         break;
       }
     }
