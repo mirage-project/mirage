@@ -5,10 +5,10 @@
 namespace mirage {
 namespace search {
 
-tensor_dim_var_index_t SymbolicTBGraph::next_dim_variable_index = 0;
-
-SymbolicTBGraph::SymbolicTBGraph()
-    : grid_dim({SymbolicTensorDim(
+SymbolicTBGraph::SymbolicTBGraph(tensor_dim_var_index_t dim_variable_index_base)
+    : dim_variable_index_base(dim_variable_index_base),
+      next_dim_variable_index(dim_variable_index_base),
+      grid_dim({SymbolicTensorDim(
                     std::make_shared<TensorDimVar>(next_dim_variable_index++)),
                 SymbolicTensorDim(
                     std::make_shared<TensorDimVar>(next_dim_variable_index++)),
@@ -18,7 +18,9 @@ SymbolicTBGraph::SymbolicTBGraph()
                  SymbolicTensorDim(std::make_shared<TensorDimConst>(1)),
                  SymbolicTensorDim(std::make_shared<TensorDimConst>(1))}),
       forloop_range(SymbolicTensorDim(
-          std::make_shared<TensorDimVar>(next_dim_variable_index++))) {}
+          std::make_shared<TensorDimVar>(next_dim_variable_index++))) {
+  assert(next_dim_variable_index == dim_variable_index_base + 4);
+}
 
 bool SymbolicTBGraph::remove_last_operator() {
   if (operators.empty()) {
@@ -108,9 +110,9 @@ bool SymbolicTBGraph::add_operator(type::TBOperatorType op_type,
           if ((int)i != concat_dim) {
             dim_templates.push_back(A.dims[i]);
           } else {
-            std::shared_ptr<TensorDimExpr> dim_expr =
-                std::make_shared<TensorDimAdd>(A.dims[i].dim_expr,
-                                               B.dims[i].dim_expr);
+            std::shared_ptr<TensorDimExpr const> dim_expr =
+                std::make_shared<TensorDimAdd const>(A.dims[i].dim_expr,
+                                                     B.dims[i].dim_expr);
             dim_templates.push_back(SymbolicTensorDim(dim_expr));
           }
         }
@@ -211,7 +213,7 @@ bool SymbolicTBGraph::add_operator(type::TBOperatorType op_type,
               SymbolicTensorDim(std::make_shared<TensorDimConst>(1))));
         }
         constraints.insert(make_equal_constraint(A.dims[A.dims.size() - 1],
-                                                    B.dims[B.dims.size() - 2]));
+                                                 B.dims[B.dims.size() - 2]));
         if (!check_satisfiability(this->conds, constraints)) {
           return false;
         }
@@ -299,8 +301,8 @@ bool SymbolicTBGraph::add_input(SymbolicDTensor dtensor,
                                 int3 input_map,
                                 int forloop_dim) {
   // create op template
-  std::shared_ptr<OpArgs> args =
-      std::make_shared<TBInputOpArgs>(dtensor, input_map, forloop_dim);
+  std::shared_ptr<OpArgs const> args =
+      std::make_shared<TBInputOpArgs const>(dtensor, input_map, forloop_dim);
   SymbolicTBOp op(type::TBOperatorType::TB_INPUT_OP, args);
   operators.push_back(op);
   // create stensor template
@@ -366,7 +368,7 @@ bool SymbolicTBGraph::add_output(int input_index,
   SymbolicDTensor dtensor(dim_templates);
 
   // create op template
-  std::shared_ptr<OpArgs> args = std::make_shared<TBOutputOpArgs>(
+  std::shared_ptr<OpArgs const> args = std::make_shared<TBOutputOpArgs const>(
       dtensor, output_map, forloop_dim, epilogue_type);
   SymbolicTBOp op(type::TBOperatorType::TB_OUTPUT_OP, args);
   operators.push_back(op);
@@ -386,8 +388,9 @@ mirage::kernel::Graph *SymbolicKNGraph::to_kernel_graph(
     }
     kernel::KNOperator *op = nullptr;
     if (this->operators[i].op_type == type::KNOperatorType::KN_CUSTOMIZED_OP) {
-      std::shared_ptr<KNCustomizedOpArgs> args =
-          std::static_pointer_cast<KNCustomizedOpArgs>(this->operators[i].args);
+      std::shared_ptr<KNCustomizedOpArgs const> args =
+          std::static_pointer_cast<KNCustomizedOpArgs const>(
+              this->operators[i].args);
       threadblock::Graph *tb_graph =
           args->tb_graph_template.to_threadblock_graph(assignments,
                                                        input_tensors);
@@ -413,6 +416,12 @@ mirage::kernel::Graph *SymbolicKNGraph::to_kernel_graph(
 bool SymbolicKNGraph::remove_last_operator() {
   if (operators.empty()) {
     return false;
+  }
+  if (operators.back().op_type == type::KNOperatorType::KN_CUSTOMIZED_OP) {
+    SymbolicKNOp op = operators.back();
+    std::shared_ptr<KNCustomizedOpArgs const> args =
+        std::static_pointer_cast<KNCustomizedOpArgs const>(op.args);
+    next_dim_variable_index = args->tb_graph_template.dim_variable_index_base;
   }
   operators.pop_back();
   for (int _ : output_indices.back()) {
@@ -477,7 +486,7 @@ bool SymbolicKNGraph::add_operator(type::KNOperatorType op_type,
           constraints.insert(make_equal_constraint(A.dims[i], B.dims[i]));
         }
         constraints.insert(make_equal_constraint(A.dims[A.dims.size() - 1],
-                                                    B.dims[B.dims.size() - 2]));
+                                                 B.dims[B.dims.size() - 2]));
         if (!check_satisfiability(this->conds, constraints)) {
           return false;
         }
@@ -538,14 +547,15 @@ bool SymbolicKNGraph::add_customized_operator(SymbolicTBGraph tb_graph,
   std::vector<int> output_indices;
   for (auto const &op : tb_graph.operators) {
     if (op.op_type == type::TBOperatorType::TB_OUTPUT_OP) {
-      std::shared_ptr<TBOutputOpArgs> args =
-          std::dynamic_pointer_cast<TBOutputOpArgs>(op.args);
+      std::shared_ptr<TBOutputOpArgs const> args =
+          std::static_pointer_cast<TBOutputOpArgs const>(op.args);
       output_indices.push_back((int)this->tensors.size());
       this->tensors.push_back(args->dtensor);
     }
   }
   this->input_indices.push_back(input_indices);
   this->output_indices.push_back(output_indices);
+  this->next_dim_variable_index = tb_graph.next_dim_variable_index;
   return true;
 }
 

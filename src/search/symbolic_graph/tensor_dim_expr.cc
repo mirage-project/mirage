@@ -8,42 +8,43 @@ TensorDimVar::TensorDimVar(tensor_dim_var_index_t index) : index(index) {}
 
 TensorDimConst::TensorDimConst(int value) : value(value) {}
 
-TensorDimAdd::TensorDimAdd(std::shared_ptr<TensorDimExpr> lhs,
-                           std::shared_ptr<TensorDimExpr> rhs)
+TensorDimAdd::TensorDimAdd(std::shared_ptr<TensorDimExpr const> lhs,
+                           std::shared_ptr<TensorDimExpr const> rhs)
     : lhs(lhs), rhs(rhs) {}
 
-TensorDimMul::TensorDimMul(std::shared_ptr<TensorDimExpr> lhs,
-                           std::shared_ptr<TensorDimExpr> rhs)
+TensorDimMul::TensorDimMul(std::shared_ptr<TensorDimExpr const> lhs,
+                           std::shared_ptr<TensorDimExpr const> rhs)
     : lhs(lhs), rhs(rhs) {}
 
-TensorDimDiv::TensorDimDiv(std::shared_ptr<TensorDimExpr> lhs,
-                           std::shared_ptr<TensorDimExpr> rhs)
+TensorDimDiv::TensorDimDiv(std::shared_ptr<TensorDimExpr const> lhs,
+                           std::shared_ptr<TensorDimExpr const> rhs)
     : lhs(lhs), rhs(rhs) {}
 
-std::shared_ptr<TensorDimVar> dim_expr_make_var(tensor_dim_var_index_t index) {
-  return std::make_shared<TensorDimVar>(index);
+std::shared_ptr<TensorDimVar const>
+    dim_expr_make_var(tensor_dim_var_index_t index) {
+  return std::make_shared<TensorDimVar const>(index);
 }
 
-std::shared_ptr<TensorDimConst> dim_expr_make_const(int value) {
-  return std::make_shared<TensorDimConst>(value);
+std::shared_ptr<TensorDimConst const> dim_expr_make_const(int value) {
+  return std::make_shared<TensorDimConst const>(value);
 }
 
-std::shared_ptr<TensorDimAdd>
-    dim_expr_make_add(std::shared_ptr<TensorDimExpr> lhs,
-                      std::shared_ptr<TensorDimExpr> rhs) {
-  return std::make_shared<TensorDimAdd>(lhs, rhs);
+std::shared_ptr<TensorDimAdd const>
+    dim_expr_make_add(std::shared_ptr<TensorDimExpr const> lhs,
+                      std::shared_ptr<TensorDimExpr const> rhs) {
+  return std::make_shared<TensorDimAdd const>(lhs, rhs);
 }
 
-std::shared_ptr<TensorDimMul>
-    dim_expr_make_mul(std::shared_ptr<TensorDimExpr> lhs,
-                      std::shared_ptr<TensorDimExpr> rhs) {
-  return std::make_shared<TensorDimMul>(lhs, rhs);
+std::shared_ptr<TensorDimMul const>
+    dim_expr_make_mul(std::shared_ptr<TensorDimExpr const> lhs,
+                      std::shared_ptr<TensorDimExpr const> rhs) {
+  return std::make_shared<TensorDimMul const>(lhs, rhs);
 }
 
-std::shared_ptr<TensorDimDiv>
-    dim_expr_make_div(std::shared_ptr<TensorDimExpr> lhs,
-                      std::shared_ptr<TensorDimExpr> rhs) {
-  return std::make_shared<TensorDimDiv>(lhs, rhs);
+std::shared_ptr<TensorDimDiv const>
+    dim_expr_make_div(std::shared_ptr<TensorDimExpr const> lhs,
+                      std::shared_ptr<TensorDimExpr const> rhs) {
+  return std::make_shared<TensorDimDiv const>(lhs, rhs);
 }
 
 int TensorDimVar::get_value(DimVarAssignments const &assignments) const {
@@ -159,41 +160,46 @@ size_t TensorDimDiv::hash() const {
   return h;
 }
 
-bool TensorDimVar::same_expr_as(std::shared_ptr<TensorDimExpr> other) const {
+bool TensorDimVar::same_expr_as(
+    std::shared_ptr<TensorDimExpr const> other) const {
   if (!other->is_var()) {
     return false;
   }
-  return index == std::static_pointer_cast<TensorDimVar>(other)->index;
+  return index == std::static_pointer_cast<TensorDimVar const>(other)->index;
 }
 
-bool TensorDimConst::same_expr_as(std::shared_ptr<TensorDimExpr> other) const {
+bool TensorDimConst::same_expr_as(
+    std::shared_ptr<TensorDimExpr const> other) const {
   if (!other->is_const()) {
     return false;
   }
-  return value == std::static_pointer_cast<TensorDimConst>(other)->value;
+  return value == std::static_pointer_cast<TensorDimConst const>(other)->value;
 }
 
-bool TensorDimAdd::same_expr_as(std::shared_ptr<TensorDimExpr> other) const {
+bool TensorDimAdd::same_expr_as(
+    std::shared_ptr<TensorDimExpr const> other) const {
   if (!other->is_add()) {
     return false;
   }
-  auto other_add = std::static_pointer_cast<TensorDimAdd>(other);
+  auto other_add = std::static_pointer_cast<TensorDimAdd const>(other);
   return lhs->same_expr_as(other_add->lhs) && rhs->same_expr_as(other_add->rhs);
 }
 
-bool TensorDimMul::same_expr_as(std::shared_ptr<TensorDimExpr> other) const {
+bool TensorDimMul::same_expr_as(
+    std::shared_ptr<TensorDimExpr const> other) const {
   if (!other->is_mul()) {
     return false;
   }
-  auto other_mul = std::static_pointer_cast<TensorDimMul>(other);
+  auto other_mul = std::static_pointer_cast<TensorDimMul const>(other);
   return lhs->same_expr_as(other_mul->lhs) && rhs->same_expr_as(other_mul->rhs);
 }
 
-bool TensorDimDiv::same_expr_as(std::shared_ptr<TensorDimExpr> other) const {
+bool TensorDimDiv::same_expr_as(
+    std::shared_ptr<TensorDimExpr const> other) const {
   if (!other->is_div()) {
     return false;
   }
-  auto other_div = std::static_pointer_cast<TensorDimDiv>(other);
+  auto other_div = std::static_pointer_cast<TensorDimDiv const>(other);
   return lhs->same_expr_as(other_div->lhs) && rhs->same_expr_as(other_div->rhs);
 }
 
@@ -212,7 +218,8 @@ z3::expr TensorDimConst::to_z3(z3::context &c, bool log_scaled) const {
 
 z3::expr TensorDimAdd::to_z3(z3::context &c, bool log_scaled) const {
   if (log_scaled) {
-    assert(false && "Do not support addition between log scaled symbolic dimensions");
+    assert(false &&
+           "Do not support addition between log scaled symbolic dimensions");
   }
   return lhs->to_z3(c, log_scaled) + rhs->to_z3(c, log_scaled);
 }

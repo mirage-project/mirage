@@ -16,7 +16,7 @@ namespace search {
 
 class SymbolicTBGraph {
 public:
-  SymbolicTBGraph();
+  SymbolicTBGraph(tensor_dim_var_index_t dim_variable_index_base);
 
   threadblock::Graph *
       to_threadblock_graph(DimVarAssignments const &assignments,
@@ -30,6 +30,9 @@ public:
                   mirage::type::TBEpilogueType epilogue_type);
   bool remove_last_operator();
 
+  tensor_dim_var_index_t dim_variable_index_base;
+  tensor_dim_var_index_t next_dim_variable_index;
+
   std::vector<SymbolicTensorDim> grid_dim, block_dim;
   SymbolicTensorDim forloop_range;
   int reduction_dimx;
@@ -39,8 +42,6 @@ public:
   std::vector<std::vector<int>> output_indices;
 
   std::unordered_set<TensorDimConstraint> conds;
-
-  static tensor_dim_var_index_t next_dim_variable_index;
 
   operator json() const;
 };
@@ -61,6 +62,8 @@ public:
                   std::vector<size_t> output_strides,
                   int3 output_map);
   bool remove_last_operator();
+
+  tensor_dim_var_index_t next_dim_variable_index;
 
   std::vector<SymbolicKNOp> operators;
   std::vector<SymbolicDTensor> tensors;

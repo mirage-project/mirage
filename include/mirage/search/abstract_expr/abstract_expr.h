@@ -1,8 +1,8 @@
 #pragma once
 
+#include "mirage/search/symbolic_graph/tensor_dim_constraint.h"
 #include "mirage/utils/hash_utils.h"
 #include "mirage/utils/json_utils.h"
-#include "mirage/search/symbolic_graph/tensor_dim_constraint.h"
 #include "z3++.h"
 #include <memory>
 #include <mutex>
@@ -19,7 +19,9 @@ public:
   virtual ~AbstractExpr() = default;
 
   virtual z3::expr to_z3(z3::context &c) const = 0;
-  bool subexpr_to(AbstractExpr const &other, std::unordered_set<TensorDimConstraint> const &constraints = {}) const;
+  bool subexpr_to(
+      AbstractExpr const &other,
+      std::unordered_set<TensorDimConstraint> const &constraints = {}) const;
   bool operator==(AbstractExpr const &other) const;
   virtual std::shared_ptr<AbstractExpr> simplify() const = 0;
   virtual std::string to_string() const = 0;
@@ -103,39 +105,47 @@ std::shared_ptr<AbstractExpr>
 // transformation
 class RMS : public AbstractExpr {
 public:
-  RMS(std::shared_ptr<TensorDimExpr> reduction_degree, std::shared_ptr<AbstractExpr> elems);
+  RMS(std::shared_ptr<TensorDimExpr const> reduction_degree,
+      std::shared_ptr<AbstractExpr> elems);
   z3::expr to_z3(z3::context &c) const override;
   std::string to_string() const override;
   std::shared_ptr<AbstractExpr> simplify() const override;
-  std::shared_ptr<TensorDimExpr> reduction_degree;
+  std::shared_ptr<TensorDimExpr const> reduction_degree;
   std::shared_ptr<AbstractExpr> elems;
 };
 
 std::shared_ptr<AbstractExpr>
-    abstract_expr_make_rms(int reduction_degree, std::shared_ptr<AbstractExpr> elems);
+    abstract_expr_make_rms(int reduction_degree,
+                           std::shared_ptr<AbstractExpr> elems);
+std::shared_ptr<AbstractExpr> abstract_expr_make_rms(
+    std::shared_ptr<TensorDimExpr const> reduction_degree,
+    std::shared_ptr<AbstractExpr> elems);
 std::shared_ptr<AbstractExpr>
-    abstract_expr_make_rms(std::shared_ptr<TensorDimExpr> reduction_degree, std::shared_ptr<AbstractExpr> elems);
-std::shared_ptr<AbstractExpr>
-    abstract_expr_make_rms(SymbolicTensorDim const &reduction_dim, std::shared_ptr<AbstractExpr> elems);
+    abstract_expr_make_rms(SymbolicTensorDim const &reduction_dim,
+                           std::shared_ptr<AbstractExpr> elems);
 
 class Red : public AbstractExpr {
 public:
-  Red(std::shared_ptr<TensorDimExpr> reduction_degree, std::shared_ptr<AbstractExpr> summand);
+  Red(std::shared_ptr<TensorDimExpr const> reduction_degree,
+      std::shared_ptr<AbstractExpr> summand);
   z3::expr to_z3(z3::context &c) const override;
   std::string to_string() const override;
   std::shared_ptr<AbstractExpr> simplify() const override;
-  std::shared_ptr<TensorDimExpr> reduction_degree;
+  std::shared_ptr<TensorDimExpr const> reduction_degree;
   std::shared_ptr<AbstractExpr> summand;
 };
 
 std::shared_ptr<AbstractExpr>
-    abstract_expr_make_red(int reduction_degree, std::shared_ptr<AbstractExpr> summand);
+    abstract_expr_make_red(int reduction_degree,
+                           std::shared_ptr<AbstractExpr> summand);
+
+std::shared_ptr<AbstractExpr> abstract_expr_make_red(
+    std::shared_ptr<TensorDimExpr const> reduction_degree,
+    std::shared_ptr<AbstractExpr> summand);
 
 std::shared_ptr<AbstractExpr>
-    abstract_expr_make_red(std::shared_ptr<TensorDimExpr> reduction_degree, std::shared_ptr<AbstractExpr> summand);
-
-std::shared_ptr<AbstractExpr>
-    abstract_expr_make_red(SymbolicTensorDim const &reduction_dim, std::shared_ptr<AbstractExpr> summand);
+    abstract_expr_make_red(SymbolicTensorDim const &reduction_dim,
+                           std::shared_ptr<AbstractExpr> summand);
 
 } // namespace search
 } // namespace mirage

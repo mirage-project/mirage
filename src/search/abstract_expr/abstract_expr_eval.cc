@@ -118,7 +118,7 @@ void abstract_expr_eval(SymbolicKNGraph const &kn_graph,
           kn_graph.input_indices[i], [&](int i) { return exprs[i]; });
       std::vector<std::shared_ptr<AbstractExpr>> tb_graph_exprs, output_exprs;
       SymbolicTBGraph const &tb_graph =
-          std::static_pointer_cast<KNCustomizedOpArgs>(
+          std::static_pointer_cast<KNCustomizedOpArgs const>(
               kn_graph.operators[i].args)
               ->tb_graph_template;
       abstract_expr_eval(tb_graph, input_exprs, tb_graph_exprs, output_exprs);

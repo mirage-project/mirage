@@ -79,7 +79,8 @@ private:
       std::shared_ptr<SymbolicKNGraph> kn_graph,
       std::shared_ptr<SymbolicTBGraph> tb_graph,
       std::vector<int> input_dtensor_indices_for_tb_graph,
-      SearchLevel level);
+      SearchLevel level,
+      int search_depth);
   bool instantiate_symbolic_graph(SymbolicKNGraph const &symbolic_graph);
 
   void preprocess(kernel::Graph const &computation_graph);

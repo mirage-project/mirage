@@ -3,7 +3,8 @@
 namespace mirage {
 namespace search {
 
-SymbolicTensorDim::SymbolicTensorDim(std::shared_ptr<TensorDimExpr> dim_expr)
+SymbolicTensorDim::SymbolicTensorDim(
+    std::shared_ptr<TensorDimExpr const> dim_expr)
     : dim_expr(dim_expr) {}
 
 SymbolicTensorDim::operator json() const {
@@ -17,7 +18,6 @@ bool SymbolicTensorDim::operator==(SymbolicTensorDim const &other) const {
 } // namespace search
 } // namespace mirage
 
-
 namespace std {
 
 size_t hash<mirage::search::SymbolicTensorDim>::operator()(
@@ -25,4 +25,4 @@ size_t hash<mirage::search::SymbolicTensorDim>::operator()(
   return dim.dim_expr->hash();
 }
 
-}
+} // namespace std

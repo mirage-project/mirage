@@ -38,8 +38,9 @@ TensorDimConstraint make_equal_constraint(SymbolicTensorDim lhs,
 TensorDimConstraint make_equal_or_one_constraint(SymbolicTensorDim lhs,
                                                  SymbolicTensorDim rhs);
 
-bool check_satisfiability(std::unordered_set<TensorDimConstraint> const &pre_conds,
-                          std::unordered_set<TensorDimConstraint> const &constraints);
+bool check_satisfiability(
+    std::unordered_set<TensorDimConstraint> const &pre_conds,
+    std::unordered_set<TensorDimConstraint> const &constraints);
 
 } // namespace search
 } // namespace mirage
@@ -48,7 +49,8 @@ namespace std {
 
 template <>
 struct hash<mirage::search::TensorDimConstraint> {
-  size_t operator()(mirage::search::TensorDimConstraint const &constraint) const;
+  size_t
+      operator()(mirage::search::TensorDimConstraint const &constraint) const;
 };
 
 } // namespace std

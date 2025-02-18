@@ -45,13 +45,15 @@ TensorDimConstraint make_equal_or_one_constraint(SymbolicTensorDim lhs,
   return TensorDimConstraint(ConstraintType::EQUAL_OR_ONE, lhs, rhs);
 }
 
-bool check_satisfiability(std::unordered_set<TensorDimConstraint> const &pre_conds,
-                          std::unordered_set<TensorDimConstraint> const &constraints) {
-  auto probably_equal = [](std::shared_ptr<TensorDimExpr> el,
-                           std::shared_ptr<TensorDimExpr> er) {
+bool check_satisfiability(
+    std::unordered_set<TensorDimConstraint> const &pre_conds,
+    std::unordered_set<TensorDimConstraint> const &constraints) {
+  auto probably_equal = [](std::shared_ptr<TensorDimExpr const> el,
+                           std::shared_ptr<TensorDimExpr const> er) {
     {
-      TensorDimConst *cl = dynamic_cast<TensorDimConst *>(el.get());
-      TensorDimConst *cr = dynamic_cast<TensorDimConst *>(er.get());
+      std::shared_ptr<TensorDimConst const>
+          cl = std::dynamic_pointer_cast<TensorDimConst const>(el),
+          cr = std::dynamic_pointer_cast<TensorDimConst const>(er);
       if (cl && cr) {
         if (cl->value != cr->value) {
           return false;
@@ -59,13 +61,16 @@ bool check_satisfiability(std::unordered_set<TensorDimConstraint> const &pre_con
       }
     }
     {
-      TensorDimDiv *dl = dynamic_cast<TensorDimDiv *>(el.get());
-      TensorDimDiv *dr = dynamic_cast<TensorDimDiv *>(er.get());
+      std::shared_ptr<TensorDimDiv const>
+          dl = std::dynamic_pointer_cast<TensorDimDiv const>(el),
+          dr = std::dynamic_pointer_cast<TensorDimDiv const>(er);
       if (dl && dr) {
-        TensorDimConst *cll = dynamic_cast<TensorDimConst *>(dl->lhs.get());
-        TensorDimConst *crl = dynamic_cast<TensorDimConst *>(dr->lhs.get());
-        TensorDimVar *clr = dynamic_cast<TensorDimVar *>(dl->rhs.get());
-        TensorDimVar *crr = dynamic_cast<TensorDimVar *>(dr->rhs.get());
+        std::shared_ptr<TensorDimConst const>
+            cll = std::dynamic_pointer_cast<TensorDimConst const>(dl->lhs),
+            crl = std::dynamic_pointer_cast<TensorDimConst const>(dr->lhs);
+        std::shared_ptr<TensorDimVar const>
+            clr = std::dynamic_pointer_cast<TensorDimVar const>(dl->rhs),
+            crr = std::dynamic_pointer_cast<TensorDimVar const>(dr->rhs);
         if (cll && crl && clr && crr) {
           if (cll->value != crl->value || clr->index == crr->index) {
             return false;
@@ -78,8 +83,8 @@ bool check_satisfiability(std::unordered_set<TensorDimConstraint> const &pre_con
 
   for (TensorDimConstraint const &constraint : constraints) {
     // rule-based checking for now
-    std::shared_ptr<TensorDimExpr> el = constraint.lhs.dim_expr,
-                                   er = constraint.rhs.dim_expr;
+    std::shared_ptr<TensorDimExpr const> el = constraint.lhs.dim_expr,
+                                         er = constraint.rhs.dim_expr;
     if (constraint.type == ConstraintType::EQUAL) {
       return probably_equal(el, er);
     }
@@ -88,8 +93,9 @@ bool check_satisfiability(std::unordered_set<TensorDimConstraint> const &pre_con
         return true;
       }
       {
-        TensorDimConst *cl = dynamic_cast<TensorDimConst *>(el.get());
-        TensorDimConst *cr = dynamic_cast<TensorDimConst *>(er.get());
+        std::shared_ptr<TensorDimConst const>
+            cl = std::dynamic_pointer_cast<TensorDimConst const>(el),
+            cr = std::dynamic_pointer_cast<TensorDimConst const>(er);
         if (cl && cr) {
           if (cl->value == 1 || cr->value == 1) {
             return true;
@@ -104,7 +110,6 @@ bool check_satisfiability(std::unordered_set<TensorDimConstraint> const &pre_con
 } // namespace search
 } // namespace mirage
 
-
 namespace std {
 
 size_t hash<mirage::search::TensorDimConstraint>::operator()(
@@ -116,4 +121,4 @@ size_t hash<mirage::search::TensorDimConstraint>::operator()(
   return seed;
 }
 
-}
+} // namespace std

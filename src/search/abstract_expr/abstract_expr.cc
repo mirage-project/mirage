@@ -6,14 +6,16 @@
 #include <thread>
 #include <vector>
 
+#include "mirage/search/symbolic_graph/tensor_dim_expr.h"
 #include "mirage/utils/containers.h"
 #include "mirage/utils/z3_utils.h"
-#include "mirage/search/symbolic_graph/tensor_dim_expr.h"
 
 namespace mirage {
 namespace search {
 
-bool AbstractExpr::subexpr_to(AbstractExpr const &other, std::unordered_set<TensorDimConstraint> const &constraints) const {
+bool AbstractExpr::subexpr_to(
+    AbstractExpr const &other,
+    std::unordered_set<TensorDimConstraint> const &constraints) const {
   // Z3 context
   z3::context c;
 
@@ -68,10 +70,7 @@ bool AbstractExpr::subexpr_to(AbstractExpr const &other, std::unordered_set<Tens
   // Subexpression axioms
   s.add(forall(x, subexpr(x, x)));
   s.add(
-      forall(x,
-             y,
-             z,
-             implies(subexpr(x, y) && subexpr(y, z), subexpr(x, z))));
+      forall(x, y, z, implies(subexpr(x, y) && subexpr(y, z), subexpr(x, z))));
 
   s.add(forall(x, y, subexpr(x, add(x, y))));
   s.add(forall(x, y, subexpr(x, mul(x, y))));
@@ -100,8 +99,7 @@ bool AbstractExpr::subexpr_to(AbstractExpr const &other, std::unordered_set<Tens
   s.add(forall(x, y, i, red(i, div(x, y)) == div(red(i, x), y)));
 
   // Lemmas
-  s.add(
-      forall(x, i1, i2, implies(i1 <= i2, subexpr(red(i1, x), red(i2, x)))));
+  s.add(forall(x, i1, i2, implies(i1 <= i2, subexpr(red(i1, x), red(i2, x)))));
 
   // Theorem to prove
   {
@@ -112,7 +110,8 @@ bool AbstractExpr::subexpr_to(AbstractExpr const &other, std::unordered_set<Tens
       dim_constraints = dim_constraints && constraint.to_z3(c);
     }
 
-    z3::expr_vector dim_vars = get_free_vars({dim_constraints, expr1, expr2}, I);
+    z3::expr_vector dim_vars =
+        get_free_vars({dim_constraints, expr1, expr2}, I);
 
     for (z3::expr const &dim_var : dim_vars) {
       // NOTE: assume log-scaled
@@ -128,7 +127,13 @@ bool AbstractExpr::subexpr_to(AbstractExpr const &other, std::unordered_set<Tens
     // s.add(z3::forall(dim_vars, !(dim_constraints && subexpr(expr1, expr2))));
   }
 
+  // compute the time
+  auto start = std::chrono::high_resolution_clock::now();
   bool result = s.check() == z3::unsat;
+  auto end = std::chrono::high_resolution_clock::now();
+  std::chrono::duration<double> elapsed = end - start;
+  std::cout << result << " Elapsed time: " << elapsed.count() << " seconds"
+            << std::endl;
   return result;
 }
 
@@ -223,7 +228,8 @@ std::string Silu::to_string() const {
   return "silu(" + a->to_string() + ")";
 }
 
-RMS::RMS(std::shared_ptr<TensorDimExpr> reduction_degree, std::shared_ptr<AbstractExpr> elems)
+RMS::RMS(std::shared_ptr<TensorDimExpr const> reduction_degree,
+         std::shared_ptr<AbstractExpr> elems)
     : reduction_degree(reduction_degree), elems(elems) {
   assert(elems);
 }
@@ -235,10 +241,12 @@ z3::expr RMS::to_z3(z3::context &c) const {
 }
 
 std::string RMS::to_string() const {
-  return "rms(" + reduction_degree->to_string() + ", " + elems->to_string() + ")";
+  return "rms(" + reduction_degree->to_string() + ", " + elems->to_string() +
+         ")";
 }
 
-Red::Red(std::shared_ptr<TensorDimExpr> reduction_degree, std::shared_ptr<AbstractExpr> summand)
+Red::Red(std::shared_ptr<TensorDimExpr const> reduction_degree,
+         std::shared_ptr<AbstractExpr> summand)
     : reduction_degree(reduction_degree), summand(summand) {
   assert(summand);
 }
@@ -250,7 +258,8 @@ z3::expr Red::to_z3(z3::context &c) const {
 }
 
 std::string Red::to_string() const {
-  return "r(" + reduction_degree->to_string() + ", " + summand->to_string() + ")";
+  return "r(" + reduction_degree->to_string() + ", " + summand->to_string() +
+         ")";
 }
 
 std::shared_ptr<AbstractExpr> abstract_expr_make_var(std::string const &name) {
@@ -285,31 +294,37 @@ std::shared_ptr<AbstractExpr>
   return std::make_shared<Silu>(a);
 }
 std::shared_ptr<AbstractExpr>
-    abstract_expr_make_rms(int reduction_degree, std::shared_ptr<AbstractExpr> elems) {
+    abstract_expr_make_rms(int reduction_degree,
+                           std::shared_ptr<AbstractExpr> elems) {
   return abstract_expr_make_rms(dim_expr_make_const(reduction_degree), elems);
 }
 
-std::shared_ptr<AbstractExpr>
-    abstract_expr_make_rms(std::shared_ptr<TensorDimExpr> reduction_degree, std::shared_ptr<AbstractExpr> elems) {
+std::shared_ptr<AbstractExpr> abstract_expr_make_rms(
+    std::shared_ptr<TensorDimExpr const> reduction_degree,
+    std::shared_ptr<AbstractExpr> elems) {
   return std::make_shared<RMS>(reduction_degree, elems);
 }
 
 std::shared_ptr<AbstractExpr>
-    abstract_expr_make_rms(SymbolicTensorDim const &reduction_dim, std::shared_ptr<AbstractExpr> elems) {
+    abstract_expr_make_rms(SymbolicTensorDim const &reduction_dim,
+                           std::shared_ptr<AbstractExpr> elems) {
   return abstract_expr_make_rms(reduction_dim.dim_expr, elems);
 }
 
 std::shared_ptr<AbstractExpr>
-    abstract_expr_make_red(int reduction_degree, std::shared_ptr<AbstractExpr> summand) {
+    abstract_expr_make_red(int reduction_degree,
+                           std::shared_ptr<AbstractExpr> summand) {
   return abstract_expr_make_red(dim_expr_make_const(reduction_degree), summand);
 }
 
-std::shared_ptr<AbstractExpr>
-    abstract_expr_make_red(std::shared_ptr<TensorDimExpr> reduction_degree, std::shared_ptr<AbstractExpr> summand) {
+std::shared_ptr<AbstractExpr> abstract_expr_make_red(
+    std::shared_ptr<TensorDimExpr const> reduction_degree,
+    std::shared_ptr<AbstractExpr> summand) {
   return std::make_shared<Red>(reduction_degree, summand);
 }
 std::shared_ptr<AbstractExpr>
-    abstract_expr_make_red(SymbolicTensorDim const &reduction_dim, std::shared_ptr<AbstractExpr> summand) {
+    abstract_expr_make_red(SymbolicTensorDim const &reduction_dim,
+                           std::shared_ptr<AbstractExpr> summand) {
   return abstract_expr_make_red(reduction_dim.dim_expr, summand);
 }
 
@@ -326,14 +341,17 @@ std::shared_ptr<AbstractExpr> Mul::simplify() const {
 }
 
 std::shared_ptr<AbstractExpr> Div::simplify() const {
-  std::shared_ptr<AbstractExpr> lhs_simplified = lhs->simplify(), rhs_simplified = rhs->simplify();
+  std::shared_ptr<AbstractExpr> lhs_simplified = lhs->simplify(),
+                                rhs_simplified = rhs->simplify();
   if (std::dynamic_pointer_cast<Div>(lhs_simplified)) {
     std::shared_ptr<Div> div = std::static_pointer_cast<Div>(lhs_simplified);
-    return abstract_expr_make_div(div->lhs, abstract_expr_make_mul(div->rhs, rhs_simplified));
+    return abstract_expr_make_div(
+        div->lhs, abstract_expr_make_mul(div->rhs, rhs_simplified));
   }
   if (std::dynamic_pointer_cast<Div>(rhs_simplified)) {
     std::shared_ptr<Div> div = std::static_pointer_cast<Div>(rhs_simplified);
-    return abstract_expr_make_div(abstract_expr_make_mul(lhs_simplified, div->rhs), div->lhs);
+    return abstract_expr_make_div(
+        abstract_expr_make_mul(lhs_simplified, div->rhs), div->lhs);
   }
   return abstract_expr_make_div(lhs_simplified, rhs_simplified);
 }
@@ -353,8 +371,11 @@ std::shared_ptr<AbstractExpr> RMS::simplify() const {
 std::shared_ptr<AbstractExpr> Red::simplify() const {
   std::shared_ptr<AbstractExpr> summand_simplified = summand->simplify();
   if (std::dynamic_pointer_cast<Red>(summand_simplified)) {
-    std::shared_ptr<Red> red = std::static_pointer_cast<Red>(summand_simplified);
-    return abstract_expr_make_red(dim_expr_make_mul(reduction_degree, red->reduction_degree), red->summand);
+    std::shared_ptr<Red> red =
+        std::static_pointer_cast<Red>(summand_simplified);
+    return abstract_expr_make_red(
+        dim_expr_make_mul(reduction_degree, red->reduction_degree),
+        red->summand);
   }
   return abstract_expr_make_red(reduction_degree, summand_simplified);
 }

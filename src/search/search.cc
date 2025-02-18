@@ -445,7 +445,7 @@ void KernelGraphGenerator::generate_kernel_graphs_symbolic() {
   }
 
   generate_next_symbolic_operator(
-      kn_graph, nullptr, {}, SearchLevel::LV_KERNEL);
+      kn_graph, nullptr, {}, SearchLevel::LV_KERNEL, 0);
   std::cerr << num_symbolic_graphs << std::endl;
   printf("[Search] Symbolic search finished. Time elapsed: %fsec\n",
          std::chrono::duration<double>(std::chrono::steady_clock::now() -
@@ -576,7 +576,28 @@ void KernelGraphGenerator::generate_next_symbolic_operator(
     std::shared_ptr<SymbolicKNGraph> kn_graph,
     std::shared_ptr<SymbolicTBGraph> tb_graph,
     std::vector<int> input_dtensor_indices_for_tb_graph,
-    SearchLevel level) {
+    SearchLevel level,
+    int search_depth) {
+
+  if (0 < search_depth && search_depth <= max_depth) {
+    std::shared_ptr<SymbolicKNGraph> kn_graph_copy =
+        std::make_shared<SymbolicKNGraph>(*kn_graph);
+    std::shared_ptr<SymbolicTBGraph> tb_graph_copy;
+    if (tb_graph) {
+      tb_graph_copy = std::make_shared<SymbolicTBGraph>(*tb_graph);
+    }
+#pragma omp task
+    generate_next_symbolic_operator(kn_graph_copy,
+                                    tb_graph_copy,
+                                    input_dtensor_indices_for_tb_graph,
+                                    level,
+                                    -search_depth);
+    return;
+  }
+
+  if (search_depth < 0) {
+    search_depth = -search_depth;
+  }
 
   if (level == SearchLevel::LV_KERNEL) {
     // In kernel-level search, tb_graph is always empty
@@ -626,8 +647,11 @@ void KernelGraphGenerator::generate_next_symbolic_operator(
           // Now we pass all the checks, create the operator
           if (kn_graph->add_operator(op_type, input_idx)) {
             // Recursively generate the next operator
-            generate_next_symbolic_operator(
-                kn_graph, tb_graph, input_dtensor_indices_for_tb_graph, level);
+            generate_next_symbolic_operator(kn_graph,
+                                            tb_graph,
+                                            input_dtensor_indices_for_tb_graph,
+                                            level,
+                                            search_depth + 1);
             // Revert the changes
             kn_graph->remove_last_operator();
           }
@@ -657,7 +681,8 @@ void KernelGraphGenerator::generate_next_symbolic_operator(
             for (std::vector<int> const &forloop_dim :
                  dim_strategy.get_forloop_dim_cand(input_tensors)) {
               std::shared_ptr<SymbolicTBGraph> new_tb_graph =
-                  std::make_shared<SymbolicTBGraph>();
+                  std::make_shared<SymbolicTBGraph>(
+                      kn_graph->next_dim_variable_index);
               new_tb_graph->reduction_dimx = config.reduction_dimx;
 
               // Try to create input operators
@@ -676,7 +701,8 @@ void KernelGraphGenerator::generate_next_symbolic_operator(
                 generate_next_symbolic_operator(kn_graph,
                                                 new_tb_graph,
                                                 input_tensor_idx,
-                                                SearchLevel::LV_THREADBLOCK);
+                                                SearchLevel::LV_THREADBLOCK,
+                                                search_depth + 1);
               }
             }
           }
@@ -733,7 +759,7 @@ void KernelGraphGenerator::generate_next_symbolic_operator(
                 *tb_graph, input_dtensor_indices_for_tb_graph)) {
           // Recursively generate the next operator
           generate_next_symbolic_operator(
-              kn_graph, nullptr, {}, SearchLevel::LV_KERNEL);
+              kn_graph, nullptr, {}, SearchLevel::LV_KERNEL, search_depth + 1);
           // Revert the changes
           kn_graph->remove_last_operator();
         }
@@ -787,13 +813,14 @@ void KernelGraphGenerator::generate_next_symbolic_operator(
           continue;
         }
 
-        std::cerr << "pass abstract expr" << std::endl;
         // Now we pass all the checks, create the operator
         if (tb_graph->add_operator(op_type, input_idx)) {
-          std::cerr << "pass add operator" << std::endl;
           // Recursively generate the next operator
-          generate_next_symbolic_operator(
-              kn_graph, tb_graph, input_dtensor_indices_for_tb_graph, level);
+          generate_next_symbolic_operator(kn_graph,
+                                          tb_graph,
+                                          input_dtensor_indices_for_tb_graph,
+                                          level,
+                                          search_depth + 1);
           // Revert the changes
           tb_graph->remove_last_operator();
         }
@@ -816,8 +843,8 @@ bool KernelGraphGenerator::instantiate_symbolic_graph(
 
   auto get_var_index = [](SymbolicTensorDim const &dim) {
     assert(dim.dim_expr->is_var());
-    std::shared_ptr<TensorDimVar> var =
-        std::static_pointer_cast<TensorDimVar>(dim.dim_expr);
+    std::shared_ptr<TensorDimVar const> var =
+        std::static_pointer_cast<TensorDimVar const>(dim.dim_expr);
     return var->index;
   };
 
@@ -862,8 +889,8 @@ bool KernelGraphGenerator::instantiate_symbolic_graph(
     std::vector<std::vector<DimVarAssignments>> assignment_sets;
     for (SymbolicKNOp const &op : kn_graph.operators) {
       if (op.op_type == type::KNOperatorType::KN_CUSTOMIZED_OP) {
-        std::shared_ptr<KNCustomizedOpArgs> args =
-            std::static_pointer_cast<KNCustomizedOpArgs>(op.args);
+        std::shared_ptr<KNCustomizedOpArgs const> args =
+            std::static_pointer_cast<KNCustomizedOpArgs const>(op.args);
         std::vector<DimVarAssignments> tb_graph_assignments =
             get_tb_graph_assignments(args->tb_graph_template);
         assignment_sets.push_back(tb_graph_assignments);

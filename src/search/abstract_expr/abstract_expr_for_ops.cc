@@ -63,7 +63,9 @@ std::shared_ptr<AbstractExpr>
       return abstract_expr_make_silu(opds[0]);
     case type::TBOperatorType::TB_RMS_NORM_OP: {
       return abstract_expr_make_div(
-          opds[0], abstract_expr_make_rms(tensors[0].dim[tensors[0].num_dims - 1], opds[0]));
+          opds[0],
+          abstract_expr_make_rms(tensors[0].dim[tensors[0].num_dims - 1],
+                                 opds[0]));
     }
     case type::TBOperatorType::TB_REDUCTION_0_OP:
       return abstract_expr_make_red(tensors[0].dim[0], opds[0]);
@@ -81,17 +83,20 @@ std::shared_ptr<AbstractExpr>
       if (tensors[0].dim[0] <= reduction_dimx) {
         return nullptr;
       }
-      return abstract_expr_make_red(tensors[0].dim[0] / reduction_dimx, opds[0]);
+      return abstract_expr_make_red(tensors[0].dim[0] / reduction_dimx,
+                                    opds[0]);
     case type::TBOperatorType::TB_REDUCTION_1_TO_DIMX_OP:
       if (tensors[0].num_dims <= 1 || tensors[0].dim[1] <= reduction_dimx) {
         return nullptr;
       }
-      return abstract_expr_make_red(tensors[0].dim[1] / reduction_dimx, opds[0]);
+      return abstract_expr_make_red(tensors[0].dim[1] / reduction_dimx,
+                                    opds[0]);
     case type::TBOperatorType::TB_REDUCTION_2_TO_DIMX_OP:
       if (tensors[0].num_dims <= 2 || tensors[0].dim[2] <= reduction_dimx) {
         return nullptr;
       }
-      return abstract_expr_make_red(tensors[0].dim[2] / reduction_dimx, opds[0]);
+      return abstract_expr_make_red(tensors[0].dim[2] / reduction_dimx,
+                                    opds[0]);
     case type::TBOperatorType::TB_FORLOOP_ACCUM_NO_RED_OP: {
       return abstract_expr_make_red(forloop_range, opds[0]);
     }
@@ -105,12 +110,13 @@ std::shared_ptr<AbstractExpr>
         return nullptr;
       }
       return abstract_expr_make_red(
-          forloop_range * tensors[0].dim[tensors[0].num_dims - 1] / reduction_dimx,
+          forloop_range * tensors[0].dim[tensors[0].num_dims - 1] /
+              reduction_dimx,
           opds[0]);
     }
     case type::TBOperatorType::TB_FORLOOP_ACCUM_RED_LD_RMS_OP: {
-      abstract_expr_make_rms(forloop_range * tensors[0].dim[tensors[0].num_dims - 1],
-                             opds[0]);
+      abstract_expr_make_rms(
+          forloop_range * tensors[0].dim[tensors[0].num_dims - 1], opds[0]);
     }
     case type::TBOperatorType::TB_MATMUL_OP:
       return abstract_expr_make_red(tensors[0].dim[tensors[0].num_dims - 1],
@@ -133,16 +139,17 @@ std::shared_ptr<AbstractExpr>
           reduction_dim2 = tensors[1].dim[num_dims - 1];
       return abstract_expr_make_add(
           abstract_expr_make_red(reduction_dim1,
-                                abstract_expr_make_mul(opds[0], opds[2])),
+                                 abstract_expr_make_mul(opds[0], opds[2])),
           abstract_expr_make_red(reduction_dim2,
-                                abstract_expr_make_mul(opds[1], opds[3])));
+                                 abstract_expr_make_mul(opds[1], opds[3])));
     }
     default:
       assert(false && "Unsupported operator");
   }
 }
 
-// int get_dimension_size_lower_bound(std::shared_ptr<TensorDimExpr> const &expr) {
+// int get_dimension_size_lower_bound(std::shared_ptr<TensorDimExpr> const
+// &expr) {
 //   if (expr->is_const()) {
 //     return std::static_pointer_cast<TensorDimConst>(expr)->value;
 //   }
@@ -219,7 +226,9 @@ std::shared_ptr<AbstractExpr>
     case type::TBOperatorType::TB_RMS_NORM_OP: {
       assert(opds.size() == 1);
       return abstract_expr_make_div(
-          opds[0], abstract_expr_make_rms(tensors[0].dims[tensors[0].dims.size() - 1], opds[0]));
+          opds[0],
+          abstract_expr_make_rms(tensors[0].dims[tensors[0].dims.size() - 1],
+                                 opds[0]));
     }
     case type::TBOperatorType::TB_FORLOOP_ACCUM_NO_RED_OP: {
       assert(opds.size() == 1);
@@ -227,23 +236,26 @@ std::shared_ptr<AbstractExpr>
     }
     case type::TBOperatorType::TB_FORLOOP_ACCUM_RED_LD_RMS_OP: {
       assert(opds.size() == 1);
-      std::shared_ptr<TensorDimExpr> reduction_size_expr = dim_expr_make_mul(
-          g.forloop_range.dim_expr,
-          tensors[0].dims[tensors[0].dims.size() - 1].dim_expr);
+      std::shared_ptr<TensorDimExpr const> reduction_size_expr =
+          dim_expr_make_mul(
+              g.forloop_range.dim_expr,
+              tensors[0].dims[tensors[0].dims.size() - 1].dim_expr);
       return abstract_expr_make_rms(reduction_size_expr, opds[0]);
     }
     case type::TBOperatorType::TB_FORLOOP_ACCUM_RED_LD_SUM_OP: {
       assert(opds.size() == 1);
-      std::shared_ptr<TensorDimExpr> reduction_size_expr = dim_expr_make_mul(
-          g.forloop_range.dim_expr,
-          tensors[0].dims[tensors[0].dims.size() - 1].dim_expr);
+      std::shared_ptr<TensorDimExpr const> reduction_size_expr =
+          dim_expr_make_mul(
+              g.forloop_range.dim_expr,
+              tensors[0].dims[tensors[0].dims.size() - 1].dim_expr);
       return abstract_expr_make_red(reduction_size_expr, opds[0]);
     }
     case type::TBOperatorType::TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP: {
       assert(opds.size() == 1);
-      std::shared_ptr<TensorDimExpr> reduction_size_expr = dim_expr_make_mul(
-          g.forloop_range.dim_expr,
-          tensors[0].dims[tensors[0].dims.size() - 1].dim_expr);
+      std::shared_ptr<TensorDimExpr const> reduction_size_expr =
+          dim_expr_make_mul(
+              g.forloop_range.dim_expr,
+              tensors[0].dims[tensors[0].dims.size() - 1].dim_expr);
       reduction_size_expr = dim_expr_make_div(
           reduction_size_expr, dim_expr_make_const(g.reduction_dimx));
       return abstract_expr_make_red(reduction_size_expr, opds[0]);
@@ -289,7 +301,9 @@ std::shared_ptr<AbstractExpr>
     case type::KNOperatorType::KN_RMS_NORM_OP: {
       assert(opds.size() == 1);
       return abstract_expr_make_div(
-          opds[0], abstract_expr_make_rms(tensors[0].dims[tensors[0].dims.size() - 1], opds[0]));
+          opds[0],
+          abstract_expr_make_rms(tensors[0].dims[tensors[0].dims.size() - 1],
+                                 opds[0]));
     }
     default: {
       fprintf(stderr, "Unsupported operator: %d\n", (int)op);
@@ -298,5 +312,5 @@ std::shared_ptr<AbstractExpr>
   }
 }
 
-}
-}
+} // namespace search
+} // namespace mirage

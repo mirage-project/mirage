@@ -7,12 +7,13 @@ namespace mirage {
 z3::expr_vector to_expr_vector(std::vector<z3::expr> const &_vec);
 
 /*
-  * Adapted from https://github.com/Z3Prover/z3/blob/e3566288a48e9e88346b9e8eac44472d1c34aff6/examples/c%2B%2B/example.cpp#L807C1-L834C2
-*/
+ * Adapted from
+ * https://github.com/Z3Prover/z3/blob/e3566288a48e9e88346b9e8eac44472d1c34aff6/examples/c%2B%2B/example.cpp#L807C1-L834C2
+ */
 template <typename F>
-void visit(std::vector<bool>& visited, z3::expr const &e, F const &func) {
+void visit(std::vector<bool> &visited, z3::expr const &e, F const &func) {
   if (visited.size() <= e.id()) {
-    visited.resize(e.id()+1, false);
+    visited.resize(e.id() + 1, false);
   }
   if (visited[e.id()]) {
     return;
@@ -24,17 +25,16 @@ void visit(std::vector<bool>& visited, z3::expr const &e, F const &func) {
   if (e.is_app()) {
     unsigned num = e.num_args();
     for (unsigned i = 0; i < num; i++) {
-        visit(visited, e.arg(i), func);
+      visit(visited, e.arg(i), func);
     }
-  }
-  else if (e.is_quantifier()) {
+  } else if (e.is_quantifier()) {
     visit(visited, e.body(), func);
-  }
-  else { 
+  } else {
     assert(e.is_var());
   }
 }
 
-z3::expr_vector get_free_vars(std::vector<z3::expr> const &e, z3::sort const &s);
+z3::expr_vector get_free_vars(std::vector<z3::expr> const &e,
+                              z3::sort const &s);
 
-}
+} // namespace mirage

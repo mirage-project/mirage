@@ -29,5 +29,5 @@ std::shared_ptr<AbstractExpr>
                       std::vector<std::shared_ptr<AbstractExpr>> const &opds,
                       SymbolicTBGraph const &g);
 
-}
-}
+} // namespace search
+} // namespace mirage
