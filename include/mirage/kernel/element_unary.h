@@ -32,5 +32,15 @@ public:
   operator json() const override;
 };
 
+class KNClampUnaryOp : public KNElementUnaryOp {
+  KNClampUnaryOp(Graph *_graph,
+                 DTensor const &input,
+                 float min_val,
+                 float max_val);
+  public:
+    float min_val;
+    float max_val;
+};
+
 } // namespace kernel
 } // namespace mirage

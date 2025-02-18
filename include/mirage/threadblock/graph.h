@@ -95,6 +95,17 @@ public:
   TBOperator *create_elementunary_op(STensor const &A,
                                      mirage::type::TBOperatorType _type,
                                      float const &scalar = 0.0f);
+
+  STensor elementunary_clamp(STensor const &A,
+                             float const &min_val,
+                             float const &max_val);
+  STensor *elementunary_clamp(STensor const *A,
+                              float const &min_val,
+                              float const &max_val);
+  TBOperator *create_elementunary_clamp_op(STensor const &A,
+                                           float const &min_val,
+                                           float const &max_val);
+
   // element binary operators
   STensor add(STensor const &A, STensor const &B);
   STensor *add(STensor const *A, STensor const *B);
