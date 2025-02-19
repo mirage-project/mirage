@@ -171,6 +171,8 @@ KNCustomizedOp::KNCustomizedOp(mirage::kernel::Graph *_kgraph,
       case mirage::type::TB_SQRT_OP:
       case mirage::type::TB_SILU_OP:
       case mirage::type::TB_GELU_OP:
+      case mirage::type::TB_RELU_OP:
+      case mirage::type::TB_CLAMP_OP:
       case mirage::type::TB_MUL_SCALAR_OP: {
         assert(my_inputs.size() == 1);
         mirage::threadblock::TBElementUnaryOp const *cur_op =

@@ -305,7 +305,9 @@ void Transpiler::resolve_tensor_layout() {
       case type::KN_SQUARE_OP:
       case type::KN_SQRT_OP:
       case type::KN_SILU_OP:
-      case type::KN_GELU_OP: {
+      case type::KN_GELU_OP:
+      case type::KN_RELU_OP:
+      case type::KN_CLAMP_OP: {
         // Elementwise Unary OP
         kn::DTensor const &input = op->input_tensors.at(0);
         kn::DTensor const &output = op->output_tensors.at(0);
@@ -480,10 +482,12 @@ void Transpiler::resolve_tensor_layout() {
             break;
           }
           case type::TB_EXP_OP:
-          case type::TB_SILU_OP:
-          case type::TB_GELU_OP:
           case type::TB_SQUARE_OP:
           case type::TB_SQRT_OP:
+          case type::TB_SILU_OP:
+          case type::TB_GELU_OP:
+          case type::TB_RELU_OP:
+          case type::TB_CLAMP_OP:
           case type::TB_MUL_SCALAR_OP: {
             tb::STensor const &input = tb_op->input_tensors.at(0);
             tb::STensor const &output = output_op->output_tensors.at(0);

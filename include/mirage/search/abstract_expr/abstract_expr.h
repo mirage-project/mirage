@@ -83,10 +83,30 @@ class Gelu : public AbstractExpr {
 public:
   Gelu(std::shared_ptr<AbstractExpr> a);
   z3::expr to_z3(z3::context &c,
-                  std::unordered_set<std::string> &all_variables) const override;
+                 std::unordered_set<std::string> &all_variables) const override;
   std::string to_string() const override;
   std::shared_ptr<AbstractExpr> a;
 };
+
+class Relu : public AbstractExpr {
+  public:
+    Relu(std::shared_ptr<AbstractExpr> a);
+    z3::expr to_z3(z3::context &c,
+                   std::unordered_set<std::string> &all_variables) const override;
+    std::string to_string() const override;
+    std::shared_ptr<AbstractExpr> a;
+};
+
+class Clamp : public AbstractExpr {
+  public:
+    Clamp(float min_val, float max_val, std::shared_ptr<AbstractExpr> elems);
+    z3::expr to_z3(z3::context &c,
+                   std::unordered_set<std::string> &all_variables) const override;
+    std::string to_string() const override;
+    float min_val;
+    float max_val;
+    std::shared_ptr<AbstractExpr> elems;
+  };
 
 // Note(@Mengdi): Replace it with Sqr and Sqrt once we have related algebraic
 // transformation

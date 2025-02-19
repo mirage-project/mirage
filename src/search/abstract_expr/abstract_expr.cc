@@ -225,6 +225,37 @@ std::string Gelu::to_string() const {
   return "gelu(" + a->to_string() + ")";
 }
 
+Relu::Relu(std::shared_ptr<AbstractExpr> a) : a(a) {
+  assert(a);
+}
+
+z3::expr Relu::to_z3(z3::context &c,
+                     std::unordered_set<std::string> &all_variables) const {
+  z3::sort P = c.uninterpreted_sort("P");
+  z3::func_decl relu = c.function("relu", P, P);
+  return relu(a->to_z3(c, all_variables));
+}
+
+std::string Relu::to_string() const {
+  return "relu(" + a->to_string() + ")";
+}
+
+Clamp::Clamp(float min_val, float max_val, std::shared_ptr<AbstractExpr> elems)
+    : min_val(min_val), max_val(max_val), elems(elems) {
+  assert(elems);
+}
+
+z3::expr Clamp::to_z3(z3::context &c,
+                    std::unordered_set<std::string> &all_variables) const {
+  z3::sort P = c.uninterpreted_sort("P");
+  z3::func_decl rms = c.function("clamp", c.fpa_sort(8, 23), c.fpa_sort(8, 23), P, P);
+  return rms(c.fpa_val(min_val), c.fpa_val(max_val), elems->to_z3(c, all_variables));
+}
+
+std::string Clamp::to_string() const {
+  return "clamp(" + std::to_string(min_val) + " <= x <= " + std::to_string(max_val) + ", " + elems->to_string() + ")";
+}
+
 RMS::RMS(int red_deg, std::shared_ptr<AbstractExpr> elems)
     : red_deg(red_deg), elems(elems) {
   assert(elems);
