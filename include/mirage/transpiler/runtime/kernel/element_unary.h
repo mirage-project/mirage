@@ -6,10 +6,11 @@
 #include <cute/layout.hpp>
 
 #include "utils.h"
+#include "mirage/type.h"
 
 namespace kn {
 
-enum class ElementUnaryOpType { EXP, SILU, GELU, SQUARE, SQRT };
+enum class ElementUnaryOpType { EXP, SILU, GELU, RELU, CLAMP, SQUARE, SQRT };
 
 template <typename T, ElementUnaryOpType OP>
 static __device__ __forceinline__ T perform_element_unary_op(T a) {
@@ -27,6 +28,10 @@ static __device__ __forceinline__ T perform_element_unary_op(T a) {
     return (T)((float)a * (float)a);
   } else if constexpr (OP == ElementUnaryOpType::SQRT) {
     return (T)(sqrtf((float)a));
+  } else if constexpr (OP == ElementUnaryOpType::RELU) {
+    return (T)(fmaxf(0.f, (float)a));
+  } else if constexpr(OP == ElementUnaryOpType::CLAMP) {
+    return (T)(fmaxf(mirage::type::CLAMP_MIN_MAX["min_val"], fminf((float)a, mirage::type::CLAMP_MIN_MAX["max_val"])));
   } else {
     assert(0 && "unsupport datatype in kn elementunary");
   }

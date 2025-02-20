@@ -71,12 +71,16 @@ STensor *Graph::relu(STensor const *input) {
 STensor Graph::clamp(STensor const &input,
                      float const &min_val,
                      float const &max_val) {
+  type::CLAMP_MIN_MAX["min_val"] = min_val;
+  type::CLAMP_MIN_MAX["max_val"] = max_val;
   return elementunary_clamp(input, min_val, max_val);
 }
 
 STensor *Graph::clamp(STensor const *input,
                       float const &min_val,
                       float const &max_val) {
+  type::CLAMP_MIN_MAX["min_val"] = min_val;
+  type::CLAMP_MIN_MAX["max_val"] = max_val;
   return elementunary_clamp(input, min_val, max_val);
 }
 
@@ -101,7 +105,7 @@ return &op->output_tensors[0];
 TBOperator *Graph::create_elementunary_clamp_op(STensor const &input,
                                                 float const &min_val,
                                                 float const &max_val) {
-TBElementUnaryOp *op = new TBElementUnaryOp(this, input, mirage::type::TB_CLAMP_OP, min_val, max_val);
+TBElementUnaryOp *op = new TBClampUnaryOp(this, input, min_val, max_val);
 return op;
 }
 

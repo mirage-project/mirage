@@ -197,6 +197,12 @@ class KNGraph:
     def gelu(self, A: DTensor):
         return self.cygraph.gelu(A)
 
+    def relu(self, A: DTensor):
+        return self.cygraph.relu(A)
+    
+    def clamp(self, A: DTensor, min_val: float, max_val: float):
+        return self.cygraph.clamp(A, min_val, max_val)
+
     def add(self, A: DTensor, B: DTensor):
         return self.cygraph.add(A, B)
 

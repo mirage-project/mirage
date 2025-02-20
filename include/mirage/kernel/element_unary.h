@@ -33,13 +33,15 @@ public:
 };
 
 class KNClampUnaryOp : public KNElementUnaryOp {
+public:
   KNClampUnaryOp(Graph *_graph,
                  DTensor const &input,
                  float min_val,
                  float max_val);
-  public:
-    float min_val;
-    float max_val;
+  
+public:
+  float min_val;
+  float max_val;
 };
 
 } // namespace kernel

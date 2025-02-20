@@ -188,7 +188,9 @@ __global__ void customized_kernel_function(
                  op_type == mirage::type::TB_SQUARE_OP ||
                  op_type == mirage::type::TB_SQRT_OP ||
                  op_type == mirage::type::TB_SILU_OP ||
-                 op_type == mirage::type::TB_GELU_OP) {
+                 op_type == mirage::type::TB_GELU_OP ||
+                 op_type == mirage::type::TB_RELU_OP ||
+                 op_type == mirage::type::TB_CLAMP_OP) {
         int smem_offset, num_elements;
         mirage::threadblock::deserialize_elementunary_op_parameters(
             new_params.parameters, param_idx, smem_offset, num_elements);

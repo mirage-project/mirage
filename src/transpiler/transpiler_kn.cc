@@ -233,6 +233,8 @@ TranspileResult Transpiler::transpile_ugraph() {
       case type::KNOperatorType::KN_EXP_OP:
       case type::KNOperatorType::KN_SILU_OP:
       case type::KNOperatorType::KN_GELU_OP:
+      case type::KNOperatorType::KN_RELU_OP:
+      case type::KNOperatorType::KN_CLAMP_OP:
       case type::KNOperatorType::KN_SQUARE_OP:
       case type::KNOperatorType::KN_SQRT_OP: {
         // Elemwise unary op

@@ -50,6 +50,26 @@ __global__ void execute_elementunary(mirage::type::KNOperatorType type,
       DT x = input_ptr[i];
       output_ptr[i] = (x / 2.0f) * (1.0f + erff(x / sqrtf(2.0f)));
     }
+  } else if (type == mirage::type::KN_RELU_OP) {
+    if (i < num_elements) {
+      DT x = input_ptr[i];
+      if (x > 0.0f) {
+        output_ptr[i] = x;
+      } else {
+        output_ptr[i] = 0.0f;
+      }
+    }
+  } else if (type == mirage::type::KN_CLAMP_OP) {
+    if (i < num_elements) {
+      DT x = input_ptr[i];
+      if (x < mirage::type::CLAMP_MIN_MAX["min_val"]) {
+        output_ptr[i] = mirage::type::CLAMP_MIN_MAX["min_val"];
+      } else if (x > mirage::type::CLAMP_MIN_MAX["max_val"]) {
+        output_ptr[i] = mirage::type::CLAMP_MIN_MAX["max_val"];
+      } else {
+        output_ptr[i] = x;
+      }
+    }
   } else {
     assert(false && "Unimplemented");
   }

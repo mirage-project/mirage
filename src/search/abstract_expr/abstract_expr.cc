@@ -248,8 +248,8 @@ Clamp::Clamp(float min_val, float max_val, std::shared_ptr<AbstractExpr> elems)
 z3::expr Clamp::to_z3(z3::context &c,
                     std::unordered_set<std::string> &all_variables) const {
   z3::sort P = c.uninterpreted_sort("P");
-  z3::func_decl rms = c.function("clamp", c.fpa_sort(8, 23), c.fpa_sort(8, 23), P, P);
-  return rms(c.fpa_val(min_val), c.fpa_val(max_val), elems->to_z3(c, all_variables));
+  z3::func_decl clamp = c.function("clamp", c.fpa_sort(8, 23), c.fpa_sort(8, 23), P, P);
+  return clamp(c.fpa_val(min_val), c.fpa_val(max_val), elems->to_z3(c, all_variables));
 }
 
 std::string Clamp::to_string() const {

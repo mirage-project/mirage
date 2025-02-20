@@ -54,6 +54,24 @@ public:
         // assuming floating point
         base_ptr[thread_id] = (x / 2.0f) * (1.0f + erff(x / sqrtf(2.0f)));
       }
+    } else if (op_type == mirage::type::TB_RELU_OP) {
+      for (int i = thread_id; i < num_elements; i += num_threads) {
+        ElementType x = base_ptr[thread_id];
+        if (x > 0.f) {
+          base_ptr[thread_id] = x;
+        } else {
+          base_ptr[thread_id] = 0.f;
+        }
+      }
+    } else if (op_type == mirage::type::TB_CLAMP_OP) {
+      ElementType x = base_ptr[thread_id];
+      if (x < mirage::type::CLAMP_MIN_MAX["min_val"]) {
+        base_ptr[thread_id] = mirage::type::CLAMP_MIN_MAX["min_val"];
+      } else if (x > mirage::type::CLAMP_MIN_MAX["max_val"]) {
+        base_ptr[thread_id] = mirage::type::CLAMP_MIN_MAX["min_val"];
+      } else {
+        base_ptr[thread_id] = x;
+      }
     }
   }
 };

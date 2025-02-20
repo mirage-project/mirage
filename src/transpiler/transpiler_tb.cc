@@ -644,6 +644,10 @@ CustomOPTranspileResult
         res = fmt("tb::EpilogueSILU<half_t, $>", res);
       } else if (cur_op->op_type == type::TB_GELU_OP) {
         res = fmt("tb::EpilogueGELU<half_t, $>", res);
+      } else if (cur_op->op_type == type::TB_RELU_OP) {
+        res = fmt("tb::EpilogueRELU<half_t, $>", res);
+      } else if (cur_op->op_type == type::TB_CLAMP_OP) {
+        res = fmt("tb::EpilogueClamp<half_t, $>", res);
       } else if (cur_op->op_type == type::TB_SQUARE_OP) {
         res = fmt("tb::EpilogueSquare<half_t, $>", res);
       } else if (cur_op->op_type == type::TB_SQRT_OP) {

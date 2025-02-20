@@ -17,6 +17,7 @@
 
 #include "mirage/config.h"
 #include "mirage/type.h"
+#include <algorithm>
 
 namespace mirage {
 namespace utils {
@@ -84,7 +85,7 @@ inline __device__ FPType compute_gelu_fingerprint(FPType input,
                                                   FPType *exp_lookup_table) {
   // Approximating GeLU as x*sigmoid(1.702x)
   FPType q_residual = input % FP_Q;
-  FPType scaling_factor = 1.702f;
+  FPType scaling_factor = 2;
   FPType scaled_q_residual = (scaling_factor * q_residual) % FP_Q;
   uint32_t result = exp_lookup_table[scaled_q_residual];
   result = (result * q_residual * FP_Q_MUL_P_MOD_1) % FP_PQ;
@@ -97,8 +98,8 @@ inline __device__ FPType compute_clamp_fingerprint(FPType input) {
   // https://pytorch.org/docs/main/generated/torch.clamp.html
   uint32_t q_residual = input % FP_Q;
   uint32_t p_residual = input % FP_P;
-  q_residual = min(2 * FP_Q / 3, max(FP_Q / 3, q_residual));
-  p_residual = min(2 * FP_P / 3, max(FP_P / 3, p_residual));
+  q_residual = std::min(2 * FP_Q / 3, std::max(FP_Q / 3, (int) q_residual));
+  p_residual = std::min(2 * FP_P / 3, std::max(FP_P / 3, (int) p_residual));
   uint32_t z = p_residual * FP_Q_MUL_P_MOD_1 + q_residual * FP_P_MUL_Q_MOD_1;
   return z % FP_PQ;
 }
@@ -107,8 +108,8 @@ inline __device__ FPType compute_relu_fingerprint(FPType input) {
   // We use max(FP_Q/2, input) to approximate relu
   uint32_t q_residual = input % FP_Q;
   uint32_t p_residual = input % FP_P;
-  q_residual = max(FP_Q / 2, q_residual);
-  p_residual = max(FP_P / 2, p_residual);
+  q_residual = std::max(FP_Q / 2, (int) q_residual);
+  p_residual = std::max(FP_P / 2, (int) p_residual);
   uint32_t z = p_residual * FP_Q_MUL_P_MOD_1 + q_residual * FP_P_MUL_Q_MOD_1;
   return z % FP_PQ;
 }
