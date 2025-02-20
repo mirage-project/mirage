@@ -41,37 +41,38 @@ public:
     // int num_elements = output.num_elements();
     if (op_type == mirage::type::TB_EXP_OP) {
       for (int i = thread_id; i < num_elements; i += num_threads) {
-        base_ptr[thread_id] = cutlass::fast_exp(base_ptr[thread_id]);
+        base_ptr[i] = cutlass::fast_exp(base_ptr[i]);
       }
     } else if (op_type == mirage::type::TB_SILU_OP) {
       for (int i = thread_id; i < num_elements; i += num_threads) {
-        ElementType x = base_ptr[thread_id];
-        base_ptr[thread_id] = x / (1 + cutlass::fast_exp(-x));
+        ElementType x = base_ptr[i];
+        base_ptr[i] = x / (1 + cutlass::fast_exp(-x));
       }
     } else if (op_type == mirage::type::TB_GELU_OP) {
       for (int i = thread_id; i < num_elements; i += num_threads) {
-        ElementType x = base_ptr[thread_id];
+        ElementType x = base_ptr[i];
         // assuming floating point
-        base_ptr[thread_id] = (x / 2.0f) * (1.0f + erff(x / sqrtf(2.0f)));
+        base_ptr[i] = (x / 2.0f) * (1.0f + erff(x / sqrtf(2.0f)));
       }
     } else if (op_type == mirage::type::TB_RELU_OP) {
       for (int i = thread_id; i < num_elements; i += num_threads) {
-        ElementType x = base_ptr[thread_id];
+        ElementType x = base_ptr[i];
         if (x > 0.f) {
-          base_ptr[thread_id] = x;
+          base_ptr[i] = x;
         } else {
-          base_ptr[thread_id] = 0.f;
+          base_ptr[i] = 0.f;
         }
       }
     } else if (op_type == mirage::type::TB_CLAMP_OP) {
-      ElementType x = base_ptr[thread_id];
-      if (x < mirage::type::CLAMP_MIN_MAX["min_val"]) {
-        base_ptr[thread_id] = mirage::type::CLAMP_MIN_MAX["min_val"];
-      } else if (x > mirage::type::CLAMP_MIN_MAX["max_val"]) {
-        base_ptr[thread_id] = mirage::type::CLAMP_MIN_MAX["min_val"];
-      } else {
-        base_ptr[thread_id] = x;
-      }
+      assert(false && "Not implemented");
+      // ElementType x = base_ptr[thread_id];
+      // if (x < mirage::type::CLAMP_MIN_MAX["min_val"]) {
+      //   base_ptr[thread_id] = mirage::type::CLAMP_MIN_MAX["min_val"];
+      // } else if (x > mirage::type::CLAMP_MIN_MAX["max_val"]) {
+      //   base_ptr[thread_id] = mirage::type::CLAMP_MIN_MAX["min_val"];
+      // } else {
+      //   base_ptr[thread_id] = x;
+      // }
     }
   }
 };

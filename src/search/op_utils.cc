@@ -118,7 +118,7 @@ std::shared_ptr<AbstractExpr> get_pattern(type::KNOperatorType op,
     case type::KNOperatorType::KN_RELU_OP:
       return std::make_shared<Relu>(opd);
     case type::KNOperatorType::KN_CLAMP_OP:
-      return std::make_shared<Clamp>(opd);
+      return std::make_shared<Clamp>(type::CLAMP_MIN_MAX["min_val"], type::CLAMP_MIN_MAX["max_val"], opd);
     case type::KNOperatorType::KN_OUTPUT_OP:
       return opd;
     default:

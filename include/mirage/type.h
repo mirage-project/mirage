@@ -29,7 +29,7 @@ typedef uint16_t FPType;
 typedef int64_t GuidType;
 
 // only to be used in create_op in search.cc
-std::unordered_map<std::string, float> CLAMP_MIN_MAX;
+inline std::unordered_map<std::string, float> CLAMP_MIN_MAX;
 
 enum DataType {
   // 1-bit types

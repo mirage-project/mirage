@@ -30,6 +30,8 @@ using namespace mirage::type;
 using namespace mirage::config;
 using namespace mirage::utils;
 
+__constant__ float CLAMP_MIN_MAX_DEVICE[2];
+
 template <typename DT>
 __global__ void execute_elementunary(mirage::type::KNOperatorType type,
                                      DT *input_ptr,
@@ -62,10 +64,10 @@ __global__ void execute_elementunary(mirage::type::KNOperatorType type,
   } else if (type == mirage::type::KN_CLAMP_OP) {
     if (i < num_elements) {
       DT x = input_ptr[i];
-      if (x < mirage::type::CLAMP_MIN_MAX["min_val"]) {
-        output_ptr[i] = mirage::type::CLAMP_MIN_MAX["min_val"];
-      } else if (x > mirage::type::CLAMP_MIN_MAX["max_val"]) {
-        output_ptr[i] = mirage::type::CLAMP_MIN_MAX["max_val"];
+      if (x < CLAMP_MIN_MAX_DEVICE[0]) {
+        output_ptr[i] = CLAMP_MIN_MAX_DEVICE[0];
+      } else if (x > CLAMP_MIN_MAX_DEVICE[1]) {
+        output_ptr[i] = CLAMP_MIN_MAX_DEVICE[1];
       } else {
         output_ptr[i] = x;
       }
@@ -96,6 +98,13 @@ bool KNElementUnaryOp::profile(ProfileResult &result) {
   checkCUDA(cudaEventCreate(&events[0]));
   checkCUDA(cudaEventCreate(&events[1]));
   checkCUDA(cudaEventRecord(events[0]));
+  
+  if (op_type == mirage::type::KNOperatorType::KN_CLAMP_OP) {
+    KNClampUnaryOp *clamp_op = dynamic_cast<KNClampUnaryOp *>(this);
+    float CLAMP_MIN_MAX_HOST[2] = {clamp_op->min_val, clamp_op->max_val};
+    cudaMemcpyToSymbol(CLAMP_MIN_MAX_DEVICE, CLAMP_MIN_MAX_HOST, sizeof(float) * 2);
+  }
+
   for (int i = 0; i < ProfileResult::NUM_ITERATIONS; i++) {
     execute_elementunary<<<num_blocks, num_threads_per_blk>>>(
         op_type, input_ptr, output_ptr, num_elements);
