@@ -8,7 +8,6 @@
 using namespace cute;
 
 #include "utils.h"
-#include "mirage/type.h"
 
 namespace tb {
 
@@ -30,7 +29,7 @@ static __device__ __forceinline__ T
   } else if constexpr (OP == ElementUnaryOpType::RELU) {
     return (T)(fmaxf(0.f, (float)a));
   } else if constexpr (OP == ElementUnaryOpType::CLAMP) {
-    return (T)(fmaxf(mirage::type::CLAMP_MIN_MAX["min_val"], fminf((float)a, mirage::type::CLAMP_MIN_MAX["max_val"])));
+    return (T)(fmaxf(0.f, fminf((float)a, 1.f)));
   } else if constexpr (OP == ElementUnaryOpType::SQUARE) {
     return (T)((float)a * (float)a);
   } else if constexpr (OP == ElementUnaryOpType::SQRT) {
