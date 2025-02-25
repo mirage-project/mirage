@@ -223,7 +223,13 @@ void from_json(json const &j, Graph &g) {
         break;
       }
       case type::KNOperatorType::KN_CLAMP_OP: {
-        assert(false && "Not Implemented");
+        size_t guid, guidO;
+        jop.at("input_tensors")[0].at("guid").get_to(guid);
+        jop.at("output_tensors")[0].at("guid").get_to(guidO);
+        DTensor const &output =
+            g.elementunary_clamp(get_tensor_from_guid(guid), type::CLAMP_MIN_MAX["min_val"], type::CLAMP_MIN_MAX["max_val"]);
+        guid_mapping[output.guid] = guidO;
+        break;
       }
       case type::KNOperatorType::KN_DIV_OP:
       case type::KNOperatorType::KN_ADD_OP:

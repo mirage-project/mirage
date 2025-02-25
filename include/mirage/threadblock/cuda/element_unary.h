@@ -22,6 +22,7 @@
 #include <cmath>
 
 namespace mirage {
+__constant__ float CLAMP_MIN_MAX_DEVICE[2];
 namespace threadblock {
 
 using namespace cutlass;
@@ -64,15 +65,14 @@ public:
         }
       }
     } else if (op_type == mirage::type::TB_CLAMP_OP) {
-      assert(false && "Not implemented");
-      // ElementType x = base_ptr[thread_id];
-      // if (x < mirage::type::CLAMP_MIN_MAX["min_val"]) {
-      //   base_ptr[thread_id] = mirage::type::CLAMP_MIN_MAX["min_val"];
-      // } else if (x > mirage::type::CLAMP_MIN_MAX["max_val"]) {
-      //   base_ptr[thread_id] = mirage::type::CLAMP_MIN_MAX["min_val"];
-      // } else {
-      //   base_ptr[thread_id] = x;
-      // }
+      ElementType x = base_ptr[thread_id];
+      if (x < CLAMP_MIN_MAX_DEVICE[0]) {
+        base_ptr[thread_id] = CLAMP_MIN_MAX_DEVICE[0];
+      } else if (x > CLAMP_MIN_MAX_DEVICE[1]) {
+        base_ptr[thread_id] = CLAMP_MIN_MAX_DEVICE[1];
+      } else {
+        base_ptr[thread_id] = x;
+      }
     }
   }
 };
