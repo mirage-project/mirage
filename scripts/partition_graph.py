@@ -1,5 +1,7 @@
 import torch
 from itertools import combinations as comb
+import mirage as mi
+import time
 
 ids_to_nodes = {}
 
@@ -11,6 +13,7 @@ class Operator:
         self.output_ops = output_ops
         self.input_tensor_shapes = input_tensor_shapes
         self.output_tensor_shapes = output_tensor_shapes
+        self.inputs = []
 
 def build_computational_graph(op_node, unique_operators):
     unique_operators.add(op_node.name)
@@ -100,6 +103,56 @@ def partition_graph(dummy_loss, min_num_ops=2, max_num_ops=4, UNSUPPORTED_OPS=se
     get_partitions(loss_node, min_num_ops, max_num_ops, visited_start_nodes, all_subgraphs, UNSUPPORTED_OPS)
 
     return all_subgraphs, unique_operators
+
+def function_map(graph, func, inputs):
+    # annoying casing goes here
+    pass
+
+def to_kernel_graph(subgraph):
+    graph = mi.new_kernel_graph()
+    dims = []
+    for op, output_ops in subgraph.items():
+        if op.input_ops == []:
+            inputs = []
+            for input_tensor in op.input_tensor_shapes:
+                dims.append(input_tensor)
+                inputs.append(graph.new_input(dims=input_tensor, dtype=mi.float16))
+        # This def isn't the way to do it but need to figure out the reflection
+
+        res = function_map(graph, op.fn, inputs)
+        if op.output_ops == []:
+            graph.mark_output(res)
+        for output_op in output_ops:
+            output_op.inputs.append(res)
+    return graph, dims
+        
+def generate_all_kernels(dummy_loss, max_num_ops=3, UNSUPPORTED_OPS=set(["torch::autograd::AccumulateGrad", 
+                                                              "NllLossBackward0", 
+                                                              "EmbeddingBackward0"])):
+    subgraphs, unique_operators = partition_graph(dummy_loss, max_num_ops, UNSUPPORTED_OPS)
+    kernel_input_dims = []
+    all_kernels = []
+    for subgraph in subgraphs:
+        kernel_graph, dims = to_kernel_graph(subgraph)
+        all_kernels.append(kernel_graph.superoptimize())
+        kernel_input_dims.append(dims)
+    return all_kernels, kernel_input_dims
+
+def time_kernels(kernels, device, iterations=1):
+    times = []
+    for kernel, dims in kernels:
+        total_time = 0
+        for _ in range(iterations):
+            inputs = []
+            for dim in dims:
+                inputs.append(torch.randn(dim, requires_grad=True).to(device))
+            start = time.time()
+            _ = kernel(*inputs)
+            total_time += time.time() - start
+        times.append(total_time / iterations)
+    return times
+
+
 
 """
 Example usage:
