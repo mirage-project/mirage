@@ -30,6 +30,8 @@ using namespace mirage::type;
 using namespace mirage::config;
 using namespace mirage::utils;
 
+__constant__ float CLAMP_MIN_MAX_DEVICE[2];
+
 template <typename DT>
 __global__ void execute_elementunary(mirage::type::KNOperatorType type,
                                      DT *input_ptr,
@@ -49,7 +51,27 @@ __global__ void execute_elementunary(mirage::type::KNOperatorType type,
     if (i < num_elements) {
       DT x = input_ptr[i];
       output_ptr[i] = (x / 2.0f) * (1.0f + erff(x / sqrtf(2.0f)));
-    } 
+    }
+  } else if (type == mirage::type::KN_RELU_OP) {
+    if (i < num_elements) {
+      DT x = input_ptr[i];
+      if (x > 0.0f) {
+        output_ptr[i] = x;
+      } else {
+        output_ptr[i] = 0.0f;
+      }
+    }
+  } else if (type == mirage::type::KN_CLAMP_OP) {
+    if (i < num_elements) {
+      DT x = input_ptr[i];
+      if (x < CLAMP_MIN_MAX_DEVICE[0]) {
+        output_ptr[i] = CLAMP_MIN_MAX_DEVICE[0];
+      } else if (x > CLAMP_MIN_MAX_DEVICE[1]) {
+        output_ptr[i] = CLAMP_MIN_MAX_DEVICE[1];
+      } else {
+        output_ptr[i] = x;
+      }
+    }
   } else {
     assert(false && "Unimplemented");
   }
@@ -76,6 +98,13 @@ bool KNElementUnaryOp::profile(ProfileResult &result) {
   checkCUDA(cudaEventCreate(&events[0]));
   checkCUDA(cudaEventCreate(&events[1]));
   checkCUDA(cudaEventRecord(events[0]));
+  
+  if (op_type == mirage::type::KNOperatorType::KN_CLAMP_OP) {
+    KNClampUnaryOp *clamp_op = dynamic_cast<KNClampUnaryOp *>(this);
+    float CLAMP_MIN_MAX_HOST[2] = {clamp_op->min_val, clamp_op->max_val};
+    cudaMemcpyToSymbol(CLAMP_MIN_MAX_DEVICE, CLAMP_MIN_MAX_HOST, sizeof(float) * 2);
+  }
+
   for (int i = 0; i < ProfileResult::NUM_ITERATIONS; i++) {
     execute_elementunary<<<num_blocks, num_threads_per_blk>>>(
         op_type, input_ptr, output_ptr, num_elements);
@@ -98,20 +127,20 @@ __global__ void
                                      mirage::type::FPType *output_ptr,
                                      int num_elements) {
   int i = threadIdx.x + blockIdx.x * blockDim.x;
-  if (type == mirage::type::KN_EXP_OP) {
-    if (i < num_elements) {
+  if (i < num_elements) {
+    if (type == mirage::type::KN_EXP_OP) {
       output_ptr[i] = compute_exp_fingerprint(input_ptr[i], exp_lookup_table);
-    }
-  } else if (type == mirage::type::KN_SILU_OP) {
-    if (i < num_elements) {
+    } else if (type == mirage::type::KN_SILU_OP) {
       output_ptr[i] = compute_silu_fingerprint(input_ptr[i], exp_lookup_table);
-    }
-  } else if (type == mirage::type::KN_GELU_OP) {
-    if (i < num_elements) {
+    } else if (type == mirage::type::KN_GELU_OP) {
       output_ptr[i] = compute_gelu_fingerprint(input_ptr[i], exp_lookup_table);
+    } else if (type == mirage::type::KN_RELU_OP) {
+      output_ptr[i] = compute_relu_fingerprint(input_ptr[i]);
+    } else if (type == mirage::type::KN_CLAMP_OP) {
+      output_ptr[i] = compute_clamp_fingerprint(input_ptr[i]);
+    } else {
+      assert(false && "Unimplemented");
     }
-  } else {
-    assert(false && "Unimplemented");
   }
 }
 

@@ -25,6 +25,7 @@ bool AbstractExpr::subpattern_to(AbstractExpr const &other) const {
 
   z3::sort P = c.uninterpreted_sort("P");
   z3::sort I = c.int_sort();
+  z3::sort F = c.fpa_sort(8, 24);
 
   z3::func_decl add = c.function("add", P, P, P);
   z3::func_decl mul = c.function("mul", P, P, P);
@@ -32,6 +33,8 @@ bool AbstractExpr::subpattern_to(AbstractExpr const &other) const {
   z3::func_decl exp = c.function("exp", P, P);
   z3::func_decl silu = c.function("silu", P, P);
   z3::func_decl gelu = c.function("gelu", P, P);
+  z3::func_decl relu = c.function("relu", P, P);
+  z3::func_decl clamp = c.function("clamp", F, F, P, P);
   z3::func_decl rms = c.function("rms", I, P, P);
   z3::func_decl red = c.function("red", I, P, P);
 
@@ -51,6 +54,8 @@ bool AbstractExpr::subpattern_to(AbstractExpr const &other) const {
   z3::expr i = c.int_const("i");
   z3::expr i1 = c.int_const("i1");
   z3::expr i2 = c.int_const("i2");
+  z3::expr f = c.fpa_const("f", 8, 24);
+  z3::expr f1 = c.fpa_const("f", 8, 24);
 
   std::unordered_set<std::string> all_variables;
   z3::expr pattern1 = to_z3(c, all_variables),
@@ -90,6 +95,8 @@ bool AbstractExpr::subpattern_to(AbstractExpr const &other) const {
   s.add(forall(x, subpattern(x, exp(x))));
   s.add(forall(x, subpattern(x, silu(x))));
   s.add(forall(x, subpattern(x, gelu(x))));
+  s.add(forall(x, subpattern(x, relu(x))));
+  s.add(forall(x, f, f1, subpattern(x, clamp(f, f1, x))));
   s.add(forall(x, i, subpattern(x, rms(i, x))));
   s.add(forall(x, i, subpattern(x, red(i, x))));
 
@@ -223,6 +230,37 @@ z3::expr Gelu::to_z3(z3::context &c,
 
 std::string Gelu::to_string() const {
   return "gelu(" + a->to_string() + ")";
+}
+
+Relu::Relu(std::shared_ptr<AbstractExpr> a) : a(a) {
+  assert(a);
+}
+
+z3::expr Relu::to_z3(z3::context &c,
+                     std::unordered_set<std::string> &all_variables) const {
+  z3::sort P = c.uninterpreted_sort("P");
+  z3::func_decl relu = c.function("relu", P, P);
+  return relu(a->to_z3(c, all_variables));
+}
+
+std::string Relu::to_string() const {
+  return "relu(" + a->to_string() + ")";
+}
+
+Clamp::Clamp(float min_val, float max_val, std::shared_ptr<AbstractExpr> elems)
+    : min_val(min_val), max_val(max_val), elems(elems) {
+  assert(elems);
+}
+
+z3::expr Clamp::to_z3(z3::context &c,
+                    std::unordered_set<std::string> &all_variables) const {
+  z3::sort P = c.uninterpreted_sort("P");
+  z3::func_decl clamp = c.function("clamp", c.fpa_sort(8, 24), c.fpa_sort(8, 24), P, P);
+  return clamp(c.fpa_val(min_val), c.fpa_val(max_val), elems->to_z3(c, all_variables));
+}
+
+std::string Clamp::to_string() const {
+  return "clamp(" + std::to_string(min_val) + " <= x <= " + std::to_string(max_val) + ", " + elems->to_string() + ")";
 }
 
 RMS::RMS(int red_deg, std::shared_ptr<AbstractExpr> elems)

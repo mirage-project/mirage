@@ -120,6 +120,14 @@ def get_kn_operator_type_string(int op_type):
         return "kn_silu_op"
     elif op_type == KN_GELU_OP:
         return "kn_gelu_op"
+    elif op_type == KN_SIGMOID_OP:
+        return "kn_sigmoid_op"
+    elif op_type == KN_RELU_OP:
+        return "kn_relu_op"
+    elif op_type == KN_CLAMP_OP:
+        return "kn_clamp_op"
+    elif op_type == KN_LOG_OP:
+        return "kn_log_op"
     elif op_type == KN_ADD_OP:
         return "kn_add_op"
     elif op_type == KN_MUL_OP:
@@ -161,6 +169,10 @@ def get_tb_operator_type_string(int op_type):
         return "tb_silu_op"
     elif op_type == TB_GELU_OP:
         return "tb_gelu_op"
+    elif op_type == TB_RELU_OP:
+        return "tb_relu_op"
+    elif op_type == TB_CLAMP_OP:
+        return "tb_clamp_op"
     elif op_type == TB_MUL_SCALAR_OP:
         return "tb_mul_scalar_op"
     elif op_type == TB_ADD_OP:
@@ -612,6 +624,16 @@ cdef class CyKNGraph:
         cdef CppDTensor* ptr = self.p_kgraph.gelu(input.c_ptr)
         t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
         return DTensor(t)
+    
+    def relu(self, DTensor input):
+        cdef CppDTensor* ptr = self.p_kgraph.relu(input.c_ptr)
+        t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
+        return DTensor(t)
+    
+    def clamp(self, DTensor input, float min_val, float max_val):
+        cdef CppDTensor* ptr = self.p_kgraph.clamp(input.c_ptr, min_val, max_val)
+        t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
+        return DTensor(t)
 
     def add(self, DTensor A, DTensor B):
         cdef CppDTensor* ptr = self.p_kgraph.add(A.c_ptr, B.c_ptr)
@@ -805,7 +827,17 @@ cdef class CyTBGraph:
         cdef CppSTensor* ptr = self.p_bgraph.gelu(A.c_ptr)
         t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
         return STensor(t)
-
+    
+    def relu(self, STensor A):
+        cdef CppSTensor* ptr = self.p_bgraph.relu(A.c_ptr)
+        t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
+        return STensor(t)
+    
+    def clamp(self, STensor A, float min_val, float max_val):
+        cdef CppSTensor* ptr = self.p_bgraph.clamp(A.c_ptr, min_val, max_val)
+        t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
+        return STensor(t)
+        
     def square(self, STensor A):
         cdef CppSTensor* ptr = self.p_bgraph.square(A.c_ptr)
         t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)

@@ -72,14 +72,18 @@ public:
   // element unary operator
   STensor exp(STensor const &A);
   STensor *exp(STensor const *A);
-  STensor silu(STensor const &A);
-  STensor *silu(STensor const *A);
-  STensor gelu(STensor const &A);
-  STensor *gelu(STensor const *A);
   STensor square(STensor const &A);
   STensor *square(STensor const *A);
   STensor sqrt(STensor const &A);
   STensor *sqrt(STensor const *A);
+  STensor silu(STensor const &A);
+  STensor *silu(STensor const *A);
+  STensor gelu(STensor const &A);
+  STensor *gelu(STensor const *A);
+  STensor relu(STensor const &A);
+  STensor *relu(STensor const *A);
+  STensor clamp(STensor const &A, float const &min_val, float const &max_val);
+  STensor *clamp(STensor const *A, float const &min_val, float const &max_val);
   STensor mul_scalar(STensor const &A, float const &scalar);
   STensor *mul_scalar(STensor const *A, float const &scalar);
   STensor elementunary(STensor const &A,
@@ -91,6 +95,17 @@ public:
   TBOperator *create_elementunary_op(STensor const &A,
                                      mirage::type::TBOperatorType _type,
                                      float const &scalar = 0.0f);
+
+  STensor elementunary_clamp(STensor const &A,
+                             float const &min_val,
+                             float const &max_val);
+  STensor *elementunary_clamp(STensor const *A,
+                              float const &min_val,
+                              float const &max_val);
+  TBOperator *create_elementunary_clamp_op(STensor const &A,
+                                           float const &min_val,
+                                           float const &max_val);
+
   // element binary operators
   STensor add(STensor const &A, STensor const &B);
   STensor *add(STensor const *A, STensor const *B);

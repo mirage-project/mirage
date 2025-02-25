@@ -22,6 +22,7 @@
 #include <cmath>
 
 namespace mirage {
+__constant__ float CLAMP_MIN_MAX_DEVICE[2];
 namespace threadblock {
 
 using namespace cutlass;
@@ -41,18 +42,36 @@ public:
     // int num_elements = output.num_elements();
     if (op_type == mirage::type::TB_EXP_OP) {
       for (int i = thread_id; i < num_elements; i += num_threads) {
-        base_ptr[thread_id] = cutlass::fast_exp(base_ptr[thread_id]);
+        base_ptr[i] = cutlass::fast_exp(base_ptr[i]);
       }
     } else if (op_type == mirage::type::TB_SILU_OP) {
       for (int i = thread_id; i < num_elements; i += num_threads) {
-        ElementType x = base_ptr[thread_id];
-        base_ptr[thread_id] = x / (1 + cutlass::fast_exp(-x));
+        ElementType x = base_ptr[i];
+        base_ptr[i] = x / (1 + cutlass::fast_exp(-x));
       }
     } else if (op_type == mirage::type::TB_GELU_OP) {
       for (int i = thread_id; i < num_elements; i += num_threads) {
-        ElementType x = base_ptr[thread_id];
+        ElementType x = base_ptr[i];
         // assuming floating point
-        base_ptr[thread_id] = (x / 2.0f) * (1.0f + erff(x / sqrtf(2.0f)));
+        base_ptr[i] = (x / 2.0f) * (1.0f + erff(x / sqrtf(2.0f)));
+      }
+    } else if (op_type == mirage::type::TB_RELU_OP) {
+      for (int i = thread_id; i < num_elements; i += num_threads) {
+        ElementType x = base_ptr[i];
+        if (x > 0.f) {
+          base_ptr[i] = x;
+        } else {
+          base_ptr[i] = 0.f;
+        }
+      }
+    } else if (op_type == mirage::type::TB_CLAMP_OP) {
+      ElementType x = base_ptr[thread_id];
+      if (x < CLAMP_MIN_MAX_DEVICE[0]) {
+        base_ptr[thread_id] = CLAMP_MIN_MAX_DEVICE[0];
+      } else if (x > CLAMP_MIN_MAX_DEVICE[1]) {
+        base_ptr[thread_id] = CLAMP_MIN_MAX_DEVICE[1];
+      } else {
+        base_ptr[thread_id] = x;
       }
     }
   }
@@ -78,6 +97,14 @@ public:
     } else if (type == mirage::type::TB_SILU_OP) {
       for (int i = thread_id; i < num_elements; i += num_threads) {
         base_ptr[i] = compute_silu_fingerprint(base_ptr[i], exp_lookup_table);
+      }
+    } else if (type == mirage::type::TB_RELU_OP) {
+      for (int i = thread_id; i < num_elements; i += num_threads) {
+        base_ptr[i] = compute_relu_fingerprint(base_ptr[i]);
+      }
+    } else if (type == mirage::type::TB_CLAMP_OP) {
+      for (int i = thread_id; i < num_elements; i += num_threads) {
+        base_ptr[i] = compute_clamp_fingerprint(base_ptr[i]);
       }
     } else if (type == mirage::type::TB_GELU_OP) {
       for (int i = thread_id; i < num_elements; i += num_threads) {
