@@ -110,6 +110,10 @@ cdef extern from "mirage/type.h" namespace "mirage::type":
         TB_FORLOOP_ACCUM_RED_LD_RMS_OP = 2503,
         TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP = 2504,
         TB_FORLOOP_ACCUM_LAST_OP = 2599,
+
+        TB_CLUSTER_ACCUM_NO_RED_OP = 2600,
+        TB_CLUSTER_ACCUM_RED_LD_SUM_OP = 2601,
+
         TB_CUSTOMIZED_OP = 2999
 
 cdef extern from "mirage/layout.h" namespace "mirage::layout":
@@ -205,6 +209,12 @@ cdef extern from "mirage/threadblock/graph.h" namespace "mirage::threadblock":
                    dim3 block_dim,
                    int forloop_range,
                    int reduction_dimx)
+                   
+        CppTBGraph(dim3 grid_dim,
+               dim3 cluster_dim,
+               dim3 block_dim,
+               int forloop_range,
+               int reduction_dimx)
 
         CppSTensor* new_input(const CppDTensor* dtensor,
                            int3 input_map,
@@ -234,8 +244,12 @@ cdef extern from "mirage/threadblock/graph.h" namespace "mirage::threadblock":
                         int dim)
         CppSTensor* forloop_accum(const CppSTensor *A,
                                TBOperatorType optype)
+        CppSTensor* cluster_accum(const CppSTensor *A,
+                               TBOperatorType optype)
+
         dim3 grid_dim
         dim3 block_dim
+        dim3 cluster_dim
         int forloop_range
         int reduction_dimx
         vector[CppTBOperator*] operators

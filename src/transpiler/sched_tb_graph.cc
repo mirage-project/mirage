@@ -158,7 +158,7 @@ TBSched Transpiler::get_threadblock_schedule(tb::Graph const &tb_graph) {
         tb::TBInputOp const *input_op = dynamic_cast<tb::TBInputOp const *>(op);
         tb::STensor stensor = input_op->output_tensors.at(0);
         kn::DTensor dtensor = input_op->dtensor;
-        STensorMeta stensor_meta = stensor_metas.at(stensor.guid);
+        STensorMeta &stensor_meta = stensor_metas.at(stensor.guid);
         DTensorMeta dtensor_meta = dtensor_metas.at(dtensor.guid);
         int3 imap = input_op->input_map;
         size_t alignment = get_num_elems_in_16B(dtensor.data_type);
@@ -198,6 +198,7 @@ TBSched Transpiler::get_threadblock_schedule(tb::Graph const &tb_graph) {
         op_meta.is_pipelined_input = op_meta.is_chunked_input &&
                                      input_op->forloop_dim != -1 &&
                                      config.target_cc >= GPU_CC::A100;
+        stensor_meta.is_pipelined_input = op_meta.is_pipelined_input;
       } else if (op->op_type == type::TB_OUTPUT_OP) {
         // Decide whether or not to use chunked copy
         assert(is_fused_with_prev[op] == false);
@@ -210,6 +211,7 @@ TBSched Transpiler::get_threadblock_schedule(tb::Graph const &tb_graph) {
         DTensorMeta dtensor_meta = dtensor_metas.at(dtensor.guid);
         int3 omap = output_op->output_map;
         size_t alignment = get_num_elems_in_16B(dtensor.data_type);
+        printf("omap xyz %d, %d, %d\n", omap.x, omap.y, omap.z);
 
         bool is_dtensor_offset_divisible = true;
         for (int dim = 0; dim < 3; ++dim) {
@@ -217,6 +219,7 @@ TBSched Transpiler::get_threadblock_schedule(tb::Graph const &tb_graph) {
           int num_tbs = dim == 0   ? tb_graph.grid_dim.x
                         : dim == 1 ? tb_graph.grid_dim.y
                                    : tb_graph.grid_dim.z;
+
           if (num_tbs > 1) {
             // The output tensor MUST be divided along this dimension, as stated
             // in the paper

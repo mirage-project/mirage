@@ -311,11 +311,15 @@ CustomOPTranspileResult
       (config::MAX_NUM_WARP_GROUPS <
        config.num_consumer_wgs + config.num_producer_wgs) ||
       (num_threads !=
-       (config.num_consumer_wgs + config.num_producer_wgs) * 128)) {
+           (config.num_consumer_wgs + config.num_producer_wgs) * 128 &&
+       (g.forloop_range > 1))) {
     return CustomOPTranspileResult{CUDA_T_CONFIG_ERROR, func_name, 0, ""};
   }
 
-  int barrier_size = 16 * config.pipeline_stages;
+  int tma_barrier_size = 16 * config.pipeline_stages;
+
+  // int 64
+  int cluster_barrier_size = 8;
 
   // Get the schedule
   TBSched sched = get_threadblock_schedule(g);
@@ -405,6 +409,13 @@ CustomOPTranspileResult
       int real_innermost_dim = op_meta.chunked_input_real_innermost_dim;
       bool use_async_copy = op_meta.is_pipelined_input;
 
+      if (!(use_chunked_copy) || (!use_async_copy)) {
+        code.e("const half_t *dtensor$_tile_ptr = dtensor$_ptr $;",
+               dtensor.guid,
+               dtensor.guid,
+               offset);
+      }
+
       // assert(use_chunked_copy && use_async_copy);
 
       // TODO(intlsy) Support swizzled layout
@@ -465,12 +476,13 @@ CustomOPTranspileResult
               imap.z >= 0 ? (dtensor.num_dims - 1 - imap.z) : -1};
 
           string SrcMNKLayout = generate_partitioned_and_expanded_layout(
-              dim3(g.grid_dim.x, g.grid_dim.x, g.grid_dim.x),
+              dim3(g.grid_dim.x, g.grid_dim.y, g.grid_dim.z),
               dims,
               strides,
               partition_logic,
               g.forloop_range,
               m_input ? forloop_dim : (dtensor.num_dims - 1 - forloop_dim));
+
           code.e(
               "tb::HopperAsyncPipeline<$> "
               "hopper_async_pipeline_$((void *) (buf + $), (tb::warpgroup_id() "
@@ -478,7 +490,7 @@ CustomOPTranspileResult
               "0), tb::warpgroup_id() < $, $, $);",
               config.pipeline_stages,
               stensor.guid,
-              barrier_addr + pipe_index * barrier_size,
+              barrier_addr,
               config.num_consumer_wgs,
               config.num_consumer_wgs,
               stensor_meta.num_phy_elems *
@@ -496,6 +508,7 @@ CustomOPTranspileResult
               stensor_meta.m_input,
               g.forloop_range);
           pipe_index++;
+          barrier_addr += tma_barrier_size;
 
           pipeline_inputs[stensor.guid] = cur_op;
 
@@ -524,6 +537,7 @@ CustomOPTranspileResult
   if (GPU_CC::H100 == config.target_cc) {
 
     assert(g.cluster_dim.x > 0 && g.cluster_dim.y > 0 && g.cluster_dim.z > 0);
+
     string tma;
     string tmplt;
     for (size_t i = 0; i < tmaParamsList.size(); ++i) {
@@ -544,9 +558,12 @@ CustomOPTranspileResult
     }
 
     code.e_front(
-        "__global__ void  __launch_bounds__($) "
+        "__global__ void  __launch_bounds__($) __cluster_dims__($, $, $) "
         "$($ $, $) {",
         num_threads,
+        g.cluster_dim.x,
+        g.cluster_dim.y,
+        g.cluster_dim.z,
         func_name,
         tma,
         map<kn::DTensor, string>(op->output_tensors,
@@ -559,6 +576,14 @@ CustomOPTranspileResult
               return fmt("half_t const* dtensor$_ptr", dtensor.guid);
             }));
     code.e_front(tmplt);
+  }
+
+  // add mem_size based on tma copies
+  mem_plan.smem_size += tmaParamsList.size() * config.pipeline_stages * 16;
+
+  if (g.cluster_dim.x > 1 || g.cluster_dim.y > 1 || g.cluster_dim.z > 1) {
+    mem_plan.smem_size += cluster_barrier_size;
+    code.e("uint64_t* cluster_barrier = (uint64_t *) (buf + $);", barrier_addr);
   }
 
   // Erase the lowest 16 bytes to 0 for GEMM
@@ -757,11 +782,10 @@ CustomOPTranspileResult
       code.e("using Matmul$LayoutC = $;",
              output.guid,
              get_stensor_layout(output, meta2, num_dims - 2 /*start_dim*/));
-
       code.e("using Matmul$Kernel = tb::Hopper_Matmul<half_t, "
              "$, $, Matmul$LayoutA, Matmul$LayoutB, "
              "Matmul$LayoutC, NUM_THREADS, "
-             "$, $, $>;",
+             "$, $, $, $, $, $>;",
              output.guid,
              is_ldmatrix_avail,
              is_stmatrix_avail,
@@ -770,7 +794,10 @@ CustomOPTranspileResult
              output.guid,
              num_exps_before_store,
              is_accum_in_reg ? false : is_store_accum,
-             config.num_consumer_wgs > 1 ? true : false);
+             config.num_consumer_wgs > 1 ? true : false,
+             meta0.is_pipelined_input,
+             meta1.is_pipelined_input,
+             config.pipeline_stages);
       if (is_accum_in_reg) {
         code.e("auto matmul_$_accum = Matmul$Kernel::get_mma_rC(thread_idx);",
                output.guid,
@@ -786,33 +813,37 @@ CustomOPTranspileResult
     code.e("");
   }
 
-  //  code.e("__syncthreads();");
+  bool pipe_tma = !pipeline_inputs.empty();
 
-  code.e("int warpgroup_id = tb::warpgroup_id();");
-  // run producers
-  code.e("if (warpgroup_id == $) {", config.num_consumer_wgs);
-  // allocate tma register files
-  uint32_t tma_reg = config.num_consumer_wgs == 1 ? 56 : 32;
+  // if there is asyc copy defined
+  if (pipe_tma) {
 
-  code.e("tb::wg_decrease_regs<$>();", tma_reg);
-  code.e("if (tb::warp_id_in_wg() == 0) {");
+    code.e("int warpgroup_id = tb::warpgroup_id();");
+    // run producers
+    code.e("if (warpgroup_id == $) {", config.num_consumer_wgs);
+    // allocate tma register files
+    uint32_t tma_reg = config.num_consumer_wgs == 1 ? 56 : 32;
 
-  code.e("for (uint32_t for_idx = 0; for_idx < $; for_idx++) {",
-         g.forloop_range);
-  for (auto const &[stensor_id, op] : pipeline_inputs) {
-    code.e(fmt("STensor$InputAtom::run(tma_$, stensor$_ptr, "
-               " $, $, $, for_idx, hopper_async_pipeline_$);",
-               stensor_id,
-               op->dtensor.guid,
-               stensor_id,
-               op->input_map.x,
-               op->input_map.y,
-               op->input_map.z,
-               stensor_id));
+    // code.e("tb::wg_decrease_regs<$>();", tma_reg);
+    code.e("if (tb::warp_id_in_wg() == 0) {");
+
+    code.e("for (uint32_t for_idx = 0; for_idx < $; for_idx++) {",
+           g.forloop_range);
+    for (auto const &[stensor_id, op] : pipeline_inputs) {
+      code.e(fmt("STensor$InputAtom::run(tma_$, stensor$_ptr, "
+                 " $, $, $, for_idx, hopper_async_pipeline_$);",
+                 stensor_id,
+                 op->dtensor.guid,
+                 stensor_id,
+                 op->input_map.x,
+                 op->input_map.y,
+                 op->input_map.z,
+                 stensor_id));
+    }
+    code.e("}");
+    code.e("}");
+    code.e("}");
   }
-  code.e("}");
-  code.e("}");
-  code.e("}");
 
   // A lambda function that transpiles a chain of (fusable) operators to an
   // epilogue Will automatically ignore the first operator in the `chain`
@@ -859,9 +890,9 @@ CustomOPTranspileResult
                                          &pipeline_inputs,
                                      bool is_in_loop) {
     if (sched_node.type == tb_sched_node_t::SYNCTHREADS && is_in_loop) {
-      code.e("tb::warpgroup_sync(128, 9 + warpgroup_id);");
+      code.e("tb::warpgroup_sync(9 + warpgroup_id);");
     } else if (sched_node.type == tb_sched_node_t::SYNCTHREADS) {
-      code.e("tb::warpgroup_sync(CONSUMER_NUM_THREADS, 8);");
+      code.e("tb::warpgroup_sync(8);");
     } else {
       auto [op, first_op_meta] = sched_node.ops.front();
       auto [output_op, output_op_meta] = sched_node.ops.back();
@@ -1165,6 +1196,20 @@ CustomOPTranspileResult
                  input.guid);
           break;
         }
+        case type::TB_CLUSTER_ACCUM_RED_LD_SUM_OP: {
+          tb::STensor const &input = op->input_tensors.at(0);
+          tb::STensor const &accum = op->output_tensors.at(0);
+          code.e(
+              "using Kernel = tb::ClusterReduction<half_t, $, NUM_THREADS, $>;",
+              g.cluster_dim.x,
+              input.size());
+          code.e("Kernel::run(cluster_barrier, stensor$_ptr, stensor$_ptr, "
+                 "blockIdx.y %  $, thread_idx);",
+                 accum.guid,
+                 input.guid,
+                 g.cluster_dim.y);
+          break;
+        }
         case type::TB_CONCAT_0_OP:
         case type::TB_CONCAT_1_OP:
         case type::TB_CONCAT_2_OP: {
@@ -1198,15 +1243,17 @@ CustomOPTranspileResult
   // TODO(intlsy) Remove the loop when `g.forloop_range` is 1
   // TODO(intlsy) Loop unrolling
 
-  // code.e("if (warp_group_role == tb::WarpGroupRole::Consumer) {");
-  code.e("else {");
+  if (pipe_tma) {
+    code.e("else {");
+  }
+
   assert(g.forloop_range >= 1);
 
   // allocate register files for wgmma
   uint32_t mma_reg = config.num_consumer_wgs == 1
                          ? 256
                          : (config.num_consumer_wgs == 2 ? 232 : 160);
-  code.e("tb::wg_increase_regs<$>();", mma_reg);
+  // code.e("tb::wg_increase_regs<$>();", mma_reg);
   code.e("// Consumer main loop");
   code.e("for (uint32_t for_idx = 0; for_idx < $; for_idx++) {",
          g.forloop_range);
@@ -1227,6 +1274,8 @@ CustomOPTranspileResult
       return CustomOPTranspileResult{err, func_name, 0, ""};
     }
   }
+  // code.e("hopper_async_pipeline_20000022.consumer_release();");
+  // code.e("hopper_async_pipeline_20000023.consumer_release();");
 
   code.e("}"); // For loop
 
@@ -1254,7 +1303,7 @@ CustomOPTranspileResult
   }
   if (num_in_reg_accums > 0) {
     code.e("// Write back in-register accumulators");
-    code.e("tb::warpgroup_sync(CONSUMER_NUM_THREADS, 8);");
+    code.e("tb::warpgroup_sync(8);");
     // code.e("__syncthreads();"); // Need this __syncthreads() to make sure no
     //                             // thread is still in the for loop
     code << in_reg_writeback;
@@ -1263,7 +1312,7 @@ CustomOPTranspileResult
   // Transpile the epilogue of the kernel
   if (!sched.post_loop_nodes.empty()) {
     code.e("// The epilogue (kernels outside the loop)");
-    code.e("tb::warpgroup_sync(CONSUMER_NUM_THREADS, 8);");
+    code.e("tb::warpgroup_sync(8);");
     for (TBSchedNode const &sched_node : sched.post_loop_nodes) {
       CodeKeeper res;
       TranspileErrorType err =
@@ -1274,13 +1323,14 @@ CustomOPTranspileResult
       }
     }
   }
-  code.e("}");
-  code.e("");
-  // code.e("__syncthreads();");
+
+  if (pipe_tma) {
+    code.e("}");
+  }
 
   code.e("}"); // kernel
 
-  mem_plan.smem_size += tmaParamsList.size() * config.pipeline_stages * 16;
+  // mem_plan.smem_size += tmaParamsList.size() * config.pipeline_stages * 16;
 
   return CustomOPTranspileResult{CUDA_T_SUCCESS,
                                  func_name,

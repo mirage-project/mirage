@@ -256,6 +256,15 @@ def string_to_tbepilogue(epilogue):
         assert False, "Unsupported threadblock epilogue"
         return None
 
+def string_to_cluster_accum_optype(acc):
+    if acc is None:
+        return TB_CLUSTER_ACCUM_NO_RED_OP
+    elif acc == "sum":
+        return TB_CLUSTER_ACCUM_RED_LD_SUM_OP
+    else:
+        assert False, "Unsupported cluster accum optype"
+        return None
+
 def string_to_accum_optype(acc):
     if acc is None:
         return TB_FORLOOP_ACCUM_NO_RED_OP
@@ -742,9 +751,10 @@ cdef class CyKNGraph:
 cdef class CyTBGraph:
     cdef CppTBGraph *p_bgraph #Hold a CppTBGraph instance
 
-    def __cinit__(self, tuple grid_dim = (), tuple block_dim = (), int forloop_range = -1, int dimx = -1, bgraph = None):
+    def __cinit__(self, tuple grid_dim = (), tuple cluster_dim=(), tuple block_dim = (), int forloop_range = -1, int dimx = -1, bgraph = None):
         cdef unsigned long long ptr
         cdef dim3 c_grid_dim
+        cdef dim3 c_cluster_dim
         cdef dim3 c_block_dim
         if bgraph is None:
             if len(grid_dim) == 0 or len(block_dim) == 0 or forloop_range == -1 or dimx == -1:
@@ -757,7 +767,15 @@ cdef class CyTBGraph:
             c_block_dim.x = block_dim[0]
             c_block_dim.y = block_dim[1]
             c_block_dim.z = block_dim[2]
-            self.p_bgraph = new CppTBGraph(c_grid_dim, c_block_dim, forloop_range, dimx)
+
+            if len(cluster_dim) != 0:
+                assert len(cluster_dim) == 3, "cluster_dim must include 3 dimensions"
+                c_cluster_dim.x = cluster_dim[0]
+                c_cluster_dim.y = cluster_dim[1]
+                c_cluster_dim.z = cluster_dim[2]
+                self.p_bgraph = new CppTBGraph(c_grid_dim, c_cluster_dim, c_block_dim, forloop_range, dimx)
+            else:
+                self.p_bgraph = new CppTBGraph(c_grid_dim, c_block_dim, forloop_range, dimx)
         else:
             ptr = ctypes.cast(bgraph, ctypes.c_void_p).value
             if isinstance(bgraph, int):
@@ -849,6 +867,12 @@ cdef class CyTBGraph:
     def forloop_accum(self, STensor A, str acc):
         optype = string_to_accum_optype(acc)
         cdef CppSTensor* ptr = self.p_bgraph.forloop_accum(A.c_ptr, optype)
+        t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
+        return STensor(t)
+    
+    def cluster_accum(self, STensor A, str acc):
+        optype = string_to_cluster_accum_optype(acc)
+        cdef CppSTensor* ptr = self.p_bgraph.cluster_accum(A.c_ptr, optype)
         t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
         return STensor(t)
 

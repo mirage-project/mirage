@@ -46,6 +46,22 @@ Graph::Graph(dim3 _grid_dim,
   assert(reduction_dimx > 0);
 }
 
+Graph::Graph(dim3 _grid_dim,
+             dim3 _cluster_dim,
+             dim3 _block_dim,
+             int _forloop_range,
+             int _reduction_dimx)
+    : grid_dim(_grid_dim), cluster_dim(_cluster_dim), block_dim(_block_dim),
+      forloop_range(_forloop_range), reduction_dimx(_reduction_dimx),
+      smem_offset(0) {
+  // A bgraph cannot have more than MAX_NUM_THREADBLOCKS_PER_KERNEL threadblocks
+  // otherwise we don't have enough buffers in device memory for saving
+  // fingerprints
+  assert(grid_dim.x * grid_dim.y * grid_dim.z <=
+         mirage::config::MAX_NUM_THREADBLOCKS_PER_KERNEL);
+  assert(reduction_dimx > 0);
+}
+
 Graph::~Graph() {
   while (!operators.empty()) {
     delete operators.back();
@@ -167,6 +183,11 @@ size_t Graph::calculate_shared_memory_usage(TBOperator *new_op) {
       case mirage::type::TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP: {
         // we will inline accumulation but need to perform
         // a reduuction_to_dimx
+        assert(op->output_tensors.size() == 1);
+        usage += op->output_tensors[0].size();
+        break;
+      }
+      case mirage::type::TB_CLUSTER_ACCUM_RED_LD_SUM_OP: {
         assert(op->output_tensors.size() == 1);
         usage += op->output_tensors[0].size();
         break;

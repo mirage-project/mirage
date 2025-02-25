@@ -48,3 +48,5 @@ class TBGraph:
 
     def forloop_accum(self, A: STensor, acc: str = None):
         return self.cygraph.forloop_accum(A, acc)
+    def cluster_accum(self, A: STensor, acc: str = None):
+        return self.cygraph.cluster_accum(A, acc)

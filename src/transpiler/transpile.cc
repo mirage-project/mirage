@@ -133,6 +133,7 @@ Transpiler::Transpiler(kernel::Graph const *_graph,
         std::shared_ptr<threadblock::Graph> tbg =
             std::make_shared<threadblock::Graph>(
                 customized_op->bgraph.grid_dim,
+                customized_op->bgraph.cluster_dim,
                 customized_op->bgraph.block_dim,
                 customized_op->bgraph.forloop_range,
                 customized_op->bgraph.reduction_dimx);
@@ -238,6 +239,14 @@ Transpiler::Transpiler(kernel::Graph const *_graph,
               threadblock::STensor st = tbg->forloop_accum(
                   stensor_inputs[0], TB_FORLOOP_ACCUM_NO_RED_OP);
               st = tbg->reduction_to_dimx(st, st.num_dims - 1);
+              stensor_mapping[bop->output_tensors[0].guid] = st;
+              break;
+            }
+            case TB_CLUSTER_ACCUM_RED_LD_SUM_OP: {
+              assert(stensor_inputs.size() == 1);
+              assert(bop->output_tensors.size() == 1);
+              threadblock::STensor st = tbg->cluster_accum(
+                  stensor_inputs[0], TB_CLUSTER_ACCUM_RED_LD_SUM_OP);
               stensor_mapping[bop->output_tensors[0].guid] = st;
               break;
             }

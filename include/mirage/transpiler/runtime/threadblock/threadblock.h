@@ -1,6 +1,5 @@
 #pragma once
 
-#include "threadblock/cluster.h"
 #include "threadblock/element_binary.h"
 #include "threadblock/element_unary.h"
 #include "threadblock/epilogues.h"
@@ -11,4 +10,5 @@
 #include "threadblock/output.h"
 #include "threadblock/pipeline.h"
 #include "threadblock/reduction.h"
+#include "threadblock/tb_cluster.h"
 #include "threadblock/utils.h"

@@ -35,6 +35,11 @@ private:
 public:
   Graph();
   Graph(dim3 grid_dim, dim3 block_dim, int forloop_range, int reduction_dimx);
+  Graph(dim3 grid_dim,
+        dim3 cluster_dim,
+        dim3 block_dim,
+        int forloop_range,
+        int reduction_dimx);
   ~Graph();
   Graph(Graph const &) = delete;
   Graph &operator=(Graph const &) = delete;
@@ -134,6 +139,14 @@ public:
   TBOperator *create_forloop_accum_op(STensor const &input,
                                       mirage::type::TBOperatorType type);
 
+  STensor cluster_accum(STensor const &input,
+                        mirage::type::TBOperatorType type);
+
+  STensor *cluster_accum(STensor const *input,
+                         mirage::type::TBOperatorType type);
+  TBOperator *create_cluster_accum_op(STensor const &input,
+                                      mirage::type::TBOperatorType type);
+
   // fingerprint related memory management
   off_t allocate_fingerprint(STensor const &tensor);
   void free_fingerprint(STensor const &tensor);
@@ -148,7 +161,8 @@ public:
   operator json() const;
 
 public:
-  dim3 grid_dim, block_dim, cluster_dim;
+  dim3 grid_dim, block_dim;
+  dim3 cluster_dim = dim3(1, 1, 1);
   int forloop_range;
   int reduction_dimx;
   std::vector<mirage::threadblock::TBOperator *> operators;

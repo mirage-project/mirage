@@ -92,6 +92,7 @@ KNCustomizedOp::KNCustomizedOp(mirage::kernel::Graph *_kgraph,
                                mirage::threadblock::Graph const &_graph)
     : KNOperator(_kgraph, mirage::type::KN_CUSTOMIZED_OP, _inputs),
       bgraph(_graph.grid_dim,
+             _graph.cluster_dim,
              _graph.block_dim,
              _graph.forloop_range,
              _graph.reduction_dimx) {
@@ -221,6 +222,11 @@ KNCustomizedOp::KNCustomizedOp(mirage::kernel::Graph *_kgraph,
       case mirage::type::TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP: {
         assert(my_inputs.size() == 1);
         bgraph.forloop_accum(my_inputs[0], op->op_type);
+        break;
+      }
+      case mirage::type::TB_CLUSTER_ACCUM_RED_LD_SUM_OP: {
+        assert(my_inputs.size() == 1);
+        bgraph.cluster_accum(my_inputs[0], op->op_type);
         break;
       }
       default: {
