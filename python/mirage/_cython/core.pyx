@@ -1053,3 +1053,6 @@ def generate_triton_program(CyKNGraph input_graph, *, int target_cc) -> dict:
         "code": result.code.decode("UTF-8"),
         "output_shapes": result.output_shapes
     }
+
+def set_gpu_device_id(gpu_id: int):
+    cython_set_gpu_device_id(gpu_id)
