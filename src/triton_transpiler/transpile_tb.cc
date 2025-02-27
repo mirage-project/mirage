@@ -75,7 +75,8 @@ string operator_type_to_triton(type::TBOperatorType type) {
     case type::TB_SQRT_OP:
       return "tl.sqrt";
     case type::TB_DIV_OP:
-      return "tl.fdiv"; // TODO: AttributeError: module 'triton.language' has no attribute 'div_rn'
+      return "tl.fdiv"; // TODO: AttributeError: module 'triton.language' has no
+                        // attribute 'div_rn'
     case type::TB_ADD_OP:
       return "+";
     case type::TB_MUL_OP:

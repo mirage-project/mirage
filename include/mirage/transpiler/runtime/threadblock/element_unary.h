@@ -11,7 +11,16 @@ using namespace cute;
 
 namespace tb {
 
-enum class ElementUnaryOpType { EXP, SILU, GELU, RELU, CLAMP, SQUARE, SQRT, MULSCALAR };
+enum class ElementUnaryOpType {
+  EXP,
+  SILU,
+  GELU,
+  RELU,
+  CLAMP,
+  SQUARE,
+  SQRT,
+  MULSCALAR
+};
 
 template <typename T, ElementUnaryOpType OP>
 static __device__ __forceinline__ T

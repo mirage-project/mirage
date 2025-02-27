@@ -615,6 +615,27 @@ NKITranspileResult NKITranspiler::transpile_ugraph() {
                dtensor_names);
         break;
       }
+      case type::KN_ADD_OP:
+      case type::KN_MUL_OP:
+      case type::KN_DIV_OP: {
+        kn::KNElementBinaryOp const *cur_op =
+            dynamic_cast<kn::KNElementBinaryOp const *>(op);
+        std::vector<std::string> dtensor_names;
+        for (kn::DTensor const &dtensor :
+             Combine(cur_op->output_tensors, cur_op->input_tensors)) {
+          std::string dtensor_name = fmt("dtensor$", dtensor.guid);
+          dtensor_names.push_back(dtensor_name);
+        }
+        // Transpile
+        auto result = transpile_kn_op(cur_op);
+        if (result.has_value()) {
+          custom_kernels.e(result.value().code);
+          // launch a single SPMD kernel
+          exec.e("$($)", result.value().func_name, dtensor_names);
+        }
+        break;
+      }
+
       default: {
         // TODO: discuss with the NKI team on how to implement
         // operators at the kernel level

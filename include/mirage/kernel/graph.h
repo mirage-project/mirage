@@ -83,7 +83,7 @@ public:
 
   KNOperator *create_elementunary_op(DTensor const &input,
                                      mirage::type::KNOperatorType _type);
-  
+
   DTensor elementunary_clamp(DTensor const &input,
                              float const &min_val,
                              float const &max_val);
@@ -94,7 +94,7 @@ public:
   KNOperator *create_elementunary_clamp_op(DTensor const &input,
                                            float const &min_val,
                                            float const &max_val);
-  
+
   // elementunary operator
   DTensor add(DTensor const &input1, DTensor const &input2);
   DTensor mul(DTensor const &input1, DTensor const &input2);
