@@ -13,6 +13,7 @@ from .threadblock import *
 from .visualizer import *
 from .utils import *
 from .triton_profiler import *
+from .global_config import global_config
 
 HARD_CODE = """
 #include <Python.h>
@@ -403,7 +404,7 @@ class KNGraph:
                 return None
 
         if async_:
-            ret = subprocess.Popen(cc_cmd)
+            ret = subprocess.Popen(cc_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
             return Handle([ret], remain_op)
         else:
             ret = subprocess.check_call(cc_cmd)
@@ -458,7 +459,7 @@ class KNGraph:
                             for t in dtensors:
                                 dims = [t.dim(i) for i in range(t.num_dims)]
                                 input_tensors.append(
-                                    torch.randn(dims, dtype=torch.float16, device="cuda:0")
+                                    torch.randn(dims, dtype=torch.float16, device="cuda:{}".format(global_config.gpu_device_id))
                                 )
                             starter = torch.cuda.Event(enable_timing=True)
                             ender = torch.cuda.Event(enable_timing=True)
@@ -472,7 +473,7 @@ class KNGraph:
                     for t in dtensors:
                         dims = [t.dim(i) for i in range(t.num_dims)]
                         input_tensors.append(
-                            torch.randn(dims, dtype=torch.float16, device="cuda:0")
+                            torch.randn(dims, dtype=torch.float16, device="cuda:{}".format(global_config.gpu_device_id))
                         )
                     starter = torch.cuda.Event(enable_timing=True)
                     ender = torch.cuda.Event(enable_timing=True)
@@ -486,7 +487,7 @@ class KNGraph:
                 for t in dtensors:
                     dims = [t.dim(i) for i in range(t.num_dims)]
                     input_tensors.append(
-                        torch.randn(dims, dtype=torch.float16, device="cuda:0")
+                        torch.randn(dims, dtype=torch.float16, device="cuda:{}".format(global_config.gpu_device_id))
                     )
                 starter = torch.cuda.Event(enable_timing=True)
                 ender = torch.cuda.Event(enable_timing=True)

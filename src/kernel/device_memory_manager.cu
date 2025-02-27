@@ -152,10 +152,12 @@ DeviceMemoryManager::DeviceMemoryManager(int _num_gpus, int _gpu_id)
 
 DeviceMemoryManager::~DeviceMemoryManager() {
   for (int i = 0; i < num_gpus; i++) {
+#ifdef DEADCODE
     cudaSetDevice(i);
     checkCUDA(cudaFree(data_base_ptr[i]));
     checkCUDA(cudaStreamDestroy(stream[i]));
     checkCUDA(cublasDestroy(blas[i]));
+#endif
     if (i == 0) {
       checkCUDA(cudaFree(exp_lookup_table));
       checkCUDA(cudaFree(div_p_lookup_table));

@@ -3,17 +3,19 @@ import numpy as np
 import torch
 
 if __name__ == "__main__":
+    mi.set_gpu_device_id(7)
+    print("global_config", mi.global_config.gpu_device_id)
     graph = mi.new_kernel_graph()
-    X = graph.new_input(dims=(1, 7168), dtype=mi.float16)
-    W = graph.new_input(dims=(7168, 16384), dtype=mi.float16)
-    D = graph.rms_norm(X, normalized_shape=(7168,))
+    X = graph.new_input(dims=(1, 4096), dtype=mi.float16)
+    W = graph.new_input(dims=(4096, 16384), dtype=mi.float16)
+    D = graph.rms_norm(X, normalized_shape=(4096,))
     O = graph.matmul(D, W)
     graph.mark_output(O)
     optimized_graph = graph.superoptimize(config="mlp")
 
     input_tensors = [
-        torch.randn(16, 7168, dtype=torch.float16, device='cuda:0'),
-        torch.randn(7168, 16384, dtype=torch.float16, device='cuda:0'),
+        torch.randn(16, 4096, dtype=torch.float16, device='cuda:7'),
+        torch.randn(4096, 16384, dtype=torch.float16, device='cuda:7'),
     ]
 
     outputs = optimized_graph(inputs=input_tensors)
