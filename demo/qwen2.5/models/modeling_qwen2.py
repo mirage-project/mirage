@@ -829,13 +829,6 @@ class Qwen2Model(Qwen2PreTrainedModel):
         if (input_ids is None) ^ (inputs_embeds is not None):
             raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
 
-        if self.gradient_checkpointing and self.training:
-            if use_cache:
-                logger.warning_once(
-                    "`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`..."
-                )
-                use_cache = False
-
         # kept for BC (non `Cache` `past_key_values` inputs)
         return_legacy_cache = False
         if use_cache and not isinstance(past_key_values, Cache):
@@ -1105,8 +1098,7 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
     def get_decoder(self):
         return self.model
 
-    @add_start_docstrings_to_model_forward(QWEN2_INPUTS_DOCSTRING)
-    @replace_return_docstrings(output_type=CausalLMOutputWithPast, config_class=_CONFIG_FOR_DOC)
+    @torch.inference_mode()
     def forward(
         self,
         input_ids: torch.LongTensor = None,
@@ -1154,7 +1146,14 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         "Hey, are you conscious? Can you talk to me?\nI'm not conscious, but I can talk to you."
         ```"""
 
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
+        print("input_ids", input_ids)
+        print("attention_mask", attention_mask)
+        print("position_ids", position_ids)
+        print("inputs_embeds", inputs_embeds)
+        print("output_attentions", self.config.output_attentions)
+        print("output_hidden_states", output_hidden_states)
+        print("return_dict", return_dict)
+        output_attentions = self.config.output_attentions
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
