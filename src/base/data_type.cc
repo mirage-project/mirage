@@ -36,6 +36,29 @@ size_t get_datatype_size(DataType type) {
   }
 }
 
+std::string get_datatype_str(DataType dtype) {
+  switch (dtype) {
+    case DT_INT4:
+      return "int4";
+    case DT_FLOAT8:
+      return "float8";
+    case DT_INT8:
+      return "int8";
+    case DT_BFLOAT16:
+      return "bfloat16_t";
+    case DT_FLOAT16:
+      return "half_t";
+    case DT_UINT16:
+      return "uint16";
+    case DT_FLOAT32:
+      return "float32";
+    case DT_DOUBLE:
+      return "double";
+    default:
+      return "unknown";
+  }
+}
+
 bool is_threadblock_element_unary(TBOperatorType op_type) {
   switch (op_type) {
     case TB_EXP_OP:

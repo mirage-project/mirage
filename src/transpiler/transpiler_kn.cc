@@ -19,6 +19,7 @@
 #include <unordered_set>
 
 #include "mirage/transpiler/utils.h"
+#include "mirage/type.h"
 
 namespace mirage {
 namespace transpiler {
@@ -94,16 +95,23 @@ std::pair<string, string>
   string pointer_var_name = fmt("dtensor$", guid);
   string code = "";
   if (meta.is_input) {
-    code = fmt("half_t *$ = (half_t*)input_tensors.at($);",
+    code = fmt("$ *$ = ($*)input_tensors.at($);",
+               get_datatype_str(dtensor.data_type),
                pointer_var_name,
+               get_datatype_str(dtensor.data_type),
                meta.input_idx);
   } else if (meta.is_output) {
-    code = fmt("half_t *$ = (half_t*)output_tensors.at($);",
+    code = fmt("$ *$ = ($*)output_tensors.at($);",
+               get_datatype_str(dtensor.data_type),
                pointer_var_name,
+               get_datatype_str(dtensor.data_type),
                meta.output_idx);
   } else {
-    code = fmt(
-        "half_t *$ = (half_t*)((char*)buf + $);", pointer_var_name, meta.addr);
+    code = fmt("$ *$ = ($*)((char*)buf + $);",
+               get_datatype_str(dtensor.data_type),
+               pointer_var_name,
+               get_datatype_str(dtensor.data_type),
+               meta.addr);
   }
   return {pointer_var_name, code};
 }
@@ -270,8 +278,9 @@ TranspileResult Transpiler::transpile_ugraph() {
         exec.e(in0_ptr_code);
         exec.e(out0_ptr_code);
         // Create kernel instance
-        exec.e("using kernel = kn::ElementUnaryKernel<half_t, "
+        exec.e("using kernel = kn::ElementUnaryKernel<$, "
                "kn::ElementUnaryOpType::$, $, $>;",
+               get_datatype_str(in0.data_type),
                get_kn_op_str(op->op_type),
                in0_layout,
                out0_layout);
@@ -331,8 +340,9 @@ TranspileResult Transpiler::transpile_ugraph() {
                                                               : "";
         assert(op_type_str != "");
         // Create kernel instance
-        exec.e("using kernel = kn::ElementBinaryKernel<half_t, "
+        exec.e("using kernel = kn::ElementBinaryKernel<$, "
                "kn::ElementBinaryOpType::$, $, $, $>;",
+               get_datatype_str(in0.data_type),
                op_type_str,
                in0_layout,
                in1_layout,
@@ -398,7 +408,8 @@ TranspileResult Transpiler::transpile_ugraph() {
         exec.e(in0_ptr_code);
         exec.e(out0_ptr_code);
         // Create kernel instance
-        exec.e("using kernel = kn::ReductionKernel<half_t, $, $, $>;",
+        exec.e("using kernel = kn::ReductionKernel<$, $, $, $>;",
+               get_datatype_str(in0.data_type),
                layout_in0,
                layout_out0,
                new_reduction_dim);

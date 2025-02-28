@@ -272,7 +272,7 @@ class KNGraph:
                 meta["shape"],
                 meta["strides"],
                 device=input_tensors[0].device,
-                dtype=torch.float16,
+                dtype=input_tensors[0].dtype,
             )
             for meta in results["output_directives"]
         ]
