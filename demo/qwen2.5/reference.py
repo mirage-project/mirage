@@ -30,8 +30,8 @@ prev_pos = 0
 print("input_ids", prompt_len, tokens[:,0:prompt_len])
 print("model.config", model.config)
 for cur_pos in range(prompt_len, prompt_len + 512):
-    logits = model.forward(input_ids = tokens[:,prev_pos:cur_pos], position_ids = positions[:,prev_pos:cur_pos], use_cache = True, return_dict = True)
-    next_token = logits.logits.argmax(dim=-1)
+    logits = model.forward(input_ids = tokens[:,prev_pos:cur_pos], position_ids = positions[:,prev_pos:cur_pos], use_cache = True)
+    next_token = logits.argmax(dim=-1)
     next_token = next_token[0, -1]
     tokens[0, cur_pos] = next_token
     prev_pos = cur_pos
