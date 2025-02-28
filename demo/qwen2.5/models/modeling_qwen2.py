@@ -57,13 +57,6 @@ if is_flash_attn_2_available():
     from transformers.modeling_flash_attention_utils import _flash_attention_forward
 
 
-logger = logging.get_logger(__name__)
-
-
-_CHECKPOINT_FOR_DOC = "Qwen/Qwen2-7B"
-_CONFIG_FOR_DOC = "Qwen2Config"
-
-
 # Copied from transformers.models.llama.modeling_llama.LlamaRMSNorm with Llama->Qwen2
 class Qwen2RMSNorm(nn.Module):
     def __init__(self, hidden_size, eps=1e-6):
@@ -100,6 +93,7 @@ class Qwen2RotaryEmbedding(nn.Module):
         # TODO (joao): remove the `if` below, only used for BC
         self.rope_kwargs = {}
         if config is None:
+            assert False
             logger.warning_once(
                 "`Qwen2RotaryEmbedding` can now be fully parameterized by passing the model config through the "
                 "`config` argument. All other arguments will be removed in v4.46"
@@ -151,6 +145,7 @@ class Qwen2RotaryEmbedding(nn.Module):
     @torch.no_grad()
     def forward(self, x, position_ids):
         if "dynamic" in self.rope_type:
+            assert False
             self._dynamic_frequency_update(position_ids, device=x.device)
 
         # Core RoPE block
@@ -436,7 +431,6 @@ class Qwen2FlashAttention2(Qwen2Attention):
 
         return attn_output, attn_weights, past_key_value
 
-
 class Qwen2SdpaAttention(Qwen2Attention):
     """
     Qwen2 attention module using torch.nn.functional.scaled_dot_product_attention. This module inherits from
@@ -596,10 +590,6 @@ QWEN2_START_DOCSTRING = r"""
 """
 
 
-@add_start_docstrings(
-    "The bare Qwen2 Model outputting raw hidden-states without any specific head on top.",
-    QWEN2_START_DOCSTRING,
-)
 class Qwen2PreTrainedModel(PreTrainedModel):
     config_class = Qwen2Config
     base_model_prefix = "model"
