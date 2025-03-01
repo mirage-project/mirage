@@ -19,8 +19,8 @@
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
-#include <unordered_map>
 #include <string>
+#include <unordered_map>
 
 namespace mirage {
 namespace type {
@@ -61,6 +61,7 @@ enum DataType {
 };
 
 size_t get_datatype_size(DataType type);
+std::string get_datatype_str(DataType dtype);
 
 enum KNOperatorType {
   KN_UNKOWN = 1000,
