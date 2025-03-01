@@ -14,6 +14,7 @@ enum class ElementUnaryOpType { EXP, SILU, GELU, RELU, CLAMP, SQUARE, SQRT };
 template <typename T, ElementUnaryOpType OP>
 static __device__ __forceinline__ T perform_element_unary_op(T a) {
   if constexpr (!(std::is_same_v<T, cutlass::half_t> ||
+                  std::is_same_v<T, cutlass::bfloat16_t> ||
                   std::is_same_v<T, __half>)) {
     assert(0 && "unsupport datatype in kn elementunary");
   }
@@ -29,7 +30,7 @@ static __device__ __forceinline__ T perform_element_unary_op(T a) {
     return (T)(sqrtf((float)a));
   } else if constexpr (OP == ElementUnaryOpType::RELU) {
     return (T)(fmaxf(0.f, (float)a));
-  } else if constexpr(OP == ElementUnaryOpType::CLAMP) {
+  } else if constexpr (OP == ElementUnaryOpType::CLAMP) {
     return (T)(fmaxf(0.f, fminf((float)a, 1.f)));
   } else {
     assert(0 && "unsupport datatype in kn elementunary");

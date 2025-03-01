@@ -11,12 +11,22 @@ using namespace cute;
 
 namespace tb {
 
-enum class ElementUnaryOpType { EXP, SILU, GELU, RELU, CLAMP, SQUARE, SQRT, MULSCALAR };
+enum class ElementUnaryOpType {
+  EXP,
+  SILU,
+  GELU,
+  RELU,
+  CLAMP,
+  SQUARE,
+  SQRT,
+  MULSCALAR
+};
 
 template <typename T, ElementUnaryOpType OP>
 static __device__ __forceinline__ T
     perform_element_unary_op(T a, float scalar = 0.0f) {
   if constexpr (!(std::is_same_v<T, cutlass::half_t> ||
+                  std::is_same_v<T, cutlass::bfloat16_t> ||
                   std::is_same_v<T, __half>)) {
     assert(0 && "unsupport datatype in tb elementunary");
   }
