@@ -39,14 +39,6 @@ for cur_pos in range(prompt_len, prompt_len + 512):
     if (next_token == model.config.eos_token_id):
         break
 
-#generated_ids = model.generate(
-#    **model_inputs,
-#    max_new_tokens=512
-#)
-#generated_ids = [
-#    output_ids[len(input_ids):] for input_ids, output_ids in zip(model_inputs.input_ids, generated_ids)
-#]
-
 generated_ids=tokens[:, :prev_pos]
 
 response = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]

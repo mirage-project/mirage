@@ -98,11 +98,12 @@ bool KNElementUnaryOp::profile(ProfileResult &result) {
   checkCUDA(cudaEventCreate(&events[0]));
   checkCUDA(cudaEventCreate(&events[1]));
   checkCUDA(cudaEventRecord(events[0]));
-  
+
   if (op_type == mirage::type::KNOperatorType::KN_CLAMP_OP) {
     KNClampUnaryOp *clamp_op = dynamic_cast<KNClampUnaryOp *>(this);
     float CLAMP_MIN_MAX_HOST[2] = {clamp_op->min_val, clamp_op->max_val};
-    cudaMemcpyToSymbol(CLAMP_MIN_MAX_DEVICE, CLAMP_MIN_MAX_HOST, sizeof(float) * 2);
+    cudaMemcpyToSymbol(
+        CLAMP_MIN_MAX_DEVICE, CLAMP_MIN_MAX_HOST, sizeof(float) * 2);
   }
 
   for (int i = 0; i < ProfileResult::NUM_ITERATIONS; i++) {

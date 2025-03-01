@@ -25,10 +25,11 @@ using namespace mirage::config;
 DeviceMemoryManager *DeviceMemoryManager::singleton = nullptr;
 
 DeviceMemoryManager::DeviceMemoryManager(int _num_gpus, int _gpu_id)
-  : num_gpus(_num_gpus), gpu_id(_gpu_id) {
+    : num_gpus(_num_gpus), gpu_id(_gpu_id) {
   // fingerprint related fields
   checkCUDA(cudaSetDevice(gpu_id));
-  printf("Mirage::DeviceMemoryManager: gpu_id(%d) num_gpus(%d)", gpu_id, num_gpus);
+  printf(
+      "Mirage::DeviceMemoryManager: gpu_id(%d) num_gpus(%d)", gpu_id, num_gpus);
   // Part 1: exponential lookup table
   // make future tensors 16 bytes aligned
   checkCUDA(
