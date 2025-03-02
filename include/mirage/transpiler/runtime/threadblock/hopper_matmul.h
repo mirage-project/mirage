@@ -89,13 +89,10 @@ public:
       cute::GMMA::ss_op_selector<T,
                                  T,
                                  T,
-                                 decltype(make_shape(M{}, N{}, K{})),
+                                 decltype(make_shape(cute::Int<(M::value < 64 ? 64 : M::value)>{}, N{}, K{})),
                                  GmmaMajorA,
                                  GmmaMajorB>(),
       AtomLayoutMNK{}));
-
-  //   using TiledMMA = decltype(make_tiled_mma(
-  //       SM90_64x64x16_F16F16F16_SS<GmmaMajorA, GmmaMajorB>{}));
 
   static constexpr int TILED_MMA_NUM_THREADS = thr_size(TiledMMA{});
   static_assert(TILED_MMA_NUM_THREADS ==
