@@ -316,6 +316,7 @@ CustomOPTranspileResult
        config.num_consumer_wgs + config.num_producer_wgs) ||
       (num_threads !=
        (config.num_consumer_wgs + config.num_producer_wgs) * 128)) {
+    assert(false && "compiler assertion failure");
     return CustomOPTranspileResult{CUDA_T_CONFIG_ERROR, func_name, 0, ""};
   }
 
@@ -867,9 +868,9 @@ CustomOPTranspileResult
                                          &pipeline_inputs,
                                      bool is_in_loop) {
     if (sched_node.type == tb_sched_node_t::SYNCTHREADS && is_in_loop) {
-      code.e("tb::warpgroup_sync(128, 9 + warpgroup_id);");
+      code.e("tb::wg_sync<128>(9 + warpgroup_id);");
     } else if (sched_node.type == tb_sched_node_t::SYNCTHREADS) {
-      code.e("tb::warpgroup_sync(CONSUMER_NUM_THREADS, 8);");
+      code.e("tb::wg_sync<CONSUMER_NUM_THREADS>(8);");
     } else {
       auto [op, first_op_meta] = sched_node.ops.front();
       auto [output_op, output_op_meta] = sched_node.ops.back();
@@ -1193,12 +1194,6 @@ CustomOPTranspileResult
           assert(fmt("Unknown TB op: $", op->op_type).c_str());
         }
       }
-
-      if (need_advance_pipeline) {
-        for (auto const &pipe_id : pipe_ids) {
-          code.e("hopper_async_pipeline_$.consumer_release();", pipe_id);
-        }
-      }
       code.e("}");
     }
     return CUDA_T_SUCCESS;
@@ -1216,11 +1211,13 @@ CustomOPTranspileResult
   uint32_t mma_reg = config.num_consumer_wgs == 1
                          ? 256
                          : (config.num_consumer_wgs == 2 ? 232 : 160);
+  std::map<int64_t, tb::TBInputOp const *> copy_of_inputs = pipeline_inputs;
   code.e("tb::wg_increase_regs<$>();", mma_reg);
   code.e("// Consumer main loop");
   code.e("for (uint32_t for_idx = 0; for_idx < $; for_idx++) {",
          g.forloop_range);
-
+ 
+ 
   // warpgroup_id
   for (TBSchedNode const &sched_node : sched.loop_nodes) {
     if (sched_node.type == tb_sched_node_t::OPERATOR &&
@@ -1230,13 +1227,22 @@ CustomOPTranspileResult
       continue;
     }
     CodeKeeper res;
+
+    
     TranspileErrorType err =
         transpile_tb_sched_node(sched_node, res, pipeline_inputs, true);
+
     code << res;
     if (err != CUDA_T_SUCCESS) {
       return CustomOPTranspileResult{err, func_name, 0, ""};
     }
   }
+
+if (!copy_of_inputs.empty()) {
+    for (auto const& [pipe_id, op] : copy_of_inputs) {
+      code.e("hopper_async_pipeline_$.consumer_release();", pipe_id);
+    }
+}
 
   code.e("}"); // For loop
 
@@ -1264,7 +1270,7 @@ CustomOPTranspileResult
   }
   if (num_in_reg_accums > 0) {
     code.e("// Write back in-register accumulators");
-    code.e("tb::warpgroup_sync(CONSUMER_NUM_THREADS, 8);");
+    code.e("tb::wg_sync<CONSUMER_NUM_THREADS>(8);");
     // code.e("__syncthreads();"); // Need this __syncthreads() to make sure no
     //                             // thread is still in the for loop
     code << in_reg_writeback;
@@ -1273,7 +1279,7 @@ CustomOPTranspileResult
   // Transpile the epilogue of the kernel
   if (!sched.post_loop_nodes.empty()) {
     code.e("// The epilogue (kernels outside the loop)");
-    code.e("tb::warpgroup_sync(CONSUMER_NUM_THREADS, 8);");
+    code.e("tb::wg_sync<CONSUMER_NUM_THREADS>(8);");
     for (TBSchedNode const &sched_node : sched.post_loop_nodes) {
       CodeKeeper res;
       TranspileErrorType err =
