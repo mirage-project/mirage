@@ -118,6 +118,16 @@ def get_kn_operator_type_string(int op_type):
         return "kn_sqrt_op"
     elif op_type == KN_SILU_OP:
         return "kn_silu_op"
+    elif op_type == KN_GELU_OP:
+        return "kn_gelu_op"
+    elif op_type == KN_SIGMOID_OP:
+        return "kn_sigmoid_op"
+    elif op_type == KN_RELU_OP:
+        return "kn_relu_op"
+    elif op_type == KN_CLAMP_OP:
+        return "kn_clamp_op"
+    elif op_type == KN_LOG_OP:
+        return "kn_log_op"
     elif op_type == KN_ADD_OP:
         return "kn_add_op"
     elif op_type == KN_MUL_OP:
@@ -157,6 +167,12 @@ def get_tb_operator_type_string(int op_type):
         return "tb_sqrt_op"
     elif op_type == TB_SILU_OP:
         return "tb_silu_op"
+    elif op_type == TB_GELU_OP:
+        return "tb_gelu_op"
+    elif op_type == TB_RELU_OP:
+        return "tb_relu_op"
+    elif op_type == TB_CLAMP_OP:
+        return "tb_clamp_op"
     elif op_type == TB_MUL_SCALAR_OP:
         return "tb_mul_scalar_op"
     elif op_type == TB_ADD_OP:
@@ -603,6 +619,21 @@ cdef class CyKNGraph:
         cdef CppDTensor* ptr = self.p_kgraph.silu(input.c_ptr)
         t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
         return DTensor(t)
+    
+    def gelu(self, DTensor input):
+        cdef CppDTensor* ptr = self.p_kgraph.gelu(input.c_ptr)
+        t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
+        return DTensor(t)
+    
+    def relu(self, DTensor input):
+        cdef CppDTensor* ptr = self.p_kgraph.relu(input.c_ptr)
+        t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
+        return DTensor(t)
+    
+    def clamp(self, DTensor input, float min_val, float max_val):
+        cdef CppDTensor* ptr = self.p_kgraph.clamp(input.c_ptr, min_val, max_val)
+        t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
+        return DTensor(t)
 
     def add(self, DTensor A, DTensor B):
         cdef CppDTensor* ptr = self.p_kgraph.add(A.c_ptr, B.c_ptr)
@@ -757,7 +788,6 @@ cdef class CyTBGraph:
                 self.p_bgraph = <CppTBGraph*>(ptr)
             else:
                 assert False, "bgraph must be an integer or ctypes.c_void_p, but got " + str(type(bgraph))
-            
     
     def new_input(self, DTensor dtensor, tuple input_map, int forloop_dim):
         assert len(input_map) == 3, "input_map must be of length 3"
@@ -792,7 +822,22 @@ cdef class CyTBGraph:
         cdef CppSTensor* ptr = self.p_bgraph.silu(A.c_ptr)
         t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
         return STensor(t)
-
+    
+    def gelu(self, STensor A):
+        cdef CppSTensor* ptr = self.p_bgraph.gelu(A.c_ptr)
+        t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
+        return STensor(t)
+    
+    def relu(self, STensor A):
+        cdef CppSTensor* ptr = self.p_bgraph.relu(A.c_ptr)
+        t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
+        return STensor(t)
+    
+    def clamp(self, STensor A, float min_val, float max_val):
+        cdef CppSTensor* ptr = self.p_bgraph.clamp(A.c_ptr, min_val, max_val)
+        t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
+        return STensor(t)
+        
     def square(self, STensor A):
         cdef CppSTensor* ptr = self.p_bgraph.square(A.c_ptr)
         t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
@@ -939,10 +984,15 @@ def search(CyKNGraph input_graph, *, int max_num_new_graphs = 1024, list imaps =
 
 # Generate CUDA program for a uGraph
 # Return (CUDA code, buffer size in bytes)
-def generate_cuda_program(CyKNGraph input_graph, *, int target_cc, list input_strides) -> dict:
+def generate_cuda_program(CyKNGraph input_graph, *, int target_cc, list input_strides, int num_warp_groups = -1, int pipeline_stages = -1) -> dict:
     # Set transpiler_config
     cdef TranspilerConfig transpiler_config
     transpiler_config.target_cc = target_cc
+
+    if num_warp_groups != -1 and pipeline_stages != -1:
+        transpiler_config.num_producer_wgs = 1;
+        transpiler_config.num_consumer_wgs = num_warp_groups - 1;
+        transpiler_config.pipeline_stages = pipeline_stages;
     
     # Set input_strides
     cdef vector[vector[size_t]] cinput_strides

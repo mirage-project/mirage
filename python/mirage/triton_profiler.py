@@ -9,13 +9,14 @@ from typing import List, Tuple, Optional
 from tqdm import tqdm
 
 class TritonProfiler:
-    def __init__(self, warmup_iters: int = 16, profile_iters: int = 1000, debug: bool = False):
+    def __init__(self, warmup_iters: int = 16, profile_iters: int = 1000, debug: bool = False, save_codes: bool = False):
         self.warmup_iters = warmup_iters
         self.profile_iters = profile_iters
         self.debug = debug
         self.success_num = 0
         self.fail_num = 0
         self.cnt = 0
+        self.save_codes = save_codes
         
     def _generate_profile_code_file(self, graph, target_cc: int) -> Tuple[str, str]:
         """Generate triton code for a graph and save to temp file"""
@@ -68,8 +69,9 @@ if __name__ == "__main__":
 """
             final_code = '\n'.join(header_code) + '\n'.join(kernel_code) + run_kernel_code
             
-            with open(f"generated_code_{self.cnt}.py", "w") as _f: #TODO: Remove this debug line
-                _f.write(final_code)
+            if self.save_codes:
+                with open(f"generated_codes/generated_code_{self.cnt}.py", "w") as _f:
+                    _f.write(final_code)
             f.write(final_code)
             return f.name, code, output_shapes
         
@@ -218,8 +220,10 @@ def profile_and_select_best_graph(graphs: List,
                                 target_cc: int = 10,
                                 warmup_iters: int = 16,
                                 profile_iters: int = 1000,
-                                debug_mode: bool = False) -> object:
+                                debug_mode: bool = False,
+                                save_codes: bool = False
+                                ) -> object:
     """Helper function to profile graphs and select the best one"""
-    profiler = TritonProfiler(warmup_iters, profile_iters, debug_mode)
+    profiler = TritonProfiler(warmup_iters, profile_iters, debug_mode, save_codes)
     best_graph, best_file_path, best_output_shapes = profiler.profile_graphs(graphs, target_cc)
     return best_graph, best_file_path, best_output_shapes

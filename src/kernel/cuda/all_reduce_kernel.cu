@@ -19,6 +19,7 @@
 #include "mirage/kernel/device_memory_manager.h"
 #include "mirage/kernel/graph.h"
 #include "mirage/utils/cuda_helper.h"
+#include "mirage/utils/fingerprint_functions.h"
 #include "mirage/utils/hash_utils.h"
 #include <cassert>
 
@@ -27,6 +28,7 @@ namespace kernel {
 
 using namespace mirage::type;
 using namespace mirage::config;
+using namespace mirage::utils;
 
 bool KNAllReduceOp::profile(ProfileResult &result) {
   // TODO: to be implemented
@@ -38,9 +40,9 @@ __global__ void compute_allreduce_fingerprint(
     mirage::utils::FpPointerList fp_ptr_list, int num_gpus, int num_elements) {
   int i = threadIdx.x + blockIdx.x * blockDim.x;
   if (i < num_elements) {
-    uint32_t x = 0;
+    FPType x = 0;
     for (int k = 0; k < num_gpus; k++) {
-      x = (x + fp_ptr_list.ptrs[k][i]) % FP_PQ;
+      x = compute_add_fingerprint(x, fp_ptr_list.ptrs[k][i]);
     }
     for (int k = 0; k < num_gpus; k++) {
       fp_ptr_list.ptrs[k][i] = x;

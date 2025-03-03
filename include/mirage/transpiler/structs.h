@@ -32,6 +32,11 @@ struct TranspilerConfig {
   // Target compute capability, should be compute_capability*10, e.g. A100 is 80
   // and H100 is 90
   int target_cc;
+
+  // features for GPUs >= Grace Hopper
+  int num_consumer_wgs;
+  int num_producer_wgs;
+  int pipeline_stages;
 };
 
 // Directive for an output tensor

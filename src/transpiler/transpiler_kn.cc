@@ -19,12 +19,10 @@
 #include <unordered_set>
 
 #include "mirage/transpiler/utils.h"
+#include "mirage/type.h"
 
 namespace mirage {
 namespace transpiler {
-
-// hopper pipeline size
-static constexpr size_t SHARE_PIPELINE_SIZE = 40;
 
 using std::string;
 namespace kn = mirage::kernel;
@@ -97,16 +95,23 @@ std::pair<string, string>
   string pointer_var_name = fmt("dtensor$", guid);
   string code = "";
   if (meta.is_input) {
-    code = fmt("half_t *$ = (half_t*)input_tensors.at($);",
+    code = fmt("$ *$ = ($*)input_tensors.at($);",
+               get_datatype_str(dtensor.data_type),
                pointer_var_name,
+               get_datatype_str(dtensor.data_type),
                meta.input_idx);
   } else if (meta.is_output) {
-    code = fmt("half_t *$ = (half_t*)output_tensors.at($);",
+    code = fmt("$ *$ = ($*)output_tensors.at($);",
+               get_datatype_str(dtensor.data_type),
                pointer_var_name,
+               get_datatype_str(dtensor.data_type),
                meta.output_idx);
   } else {
-    code = fmt(
-        "half_t *$ = (half_t*)((char*)buf + $);", pointer_var_name, meta.addr);
+    code = fmt("$ *$ = ($*)((char*)buf + $);",
+               get_datatype_str(dtensor.data_type),
+               pointer_var_name,
+               get_datatype_str(dtensor.data_type),
+               meta.addr);
   }
   return {pointer_var_name, code};
 }
@@ -118,10 +123,16 @@ static string get_kn_op_str(type::KNOperatorType type) {
         return "EXP";
       case type::KN_SILU_OP:
         return "SILU";
+      case type::KN_GELU_OP:
+        return "GELU";
       case type::KN_SQUARE_OP:
         return "SQUARE";
       case type::KN_SQRT_OP:
         return "SQRT";
+      case type::KN_RELU_OP:
+        return "RELU";
+      case type::KN_CLAMP_OP:
+        return "CLAMP";
       default:
         assert(0);
     }
@@ -136,6 +147,9 @@ TranspileResult Transpiler::transpile_ugraph() {
   CodeKeeper header;
   header.e("#define NUM_GPUS $", num_gpus);
   header.e("#define USE_NVSHMEM $", use_nvshmem);
+  if (config.target_cc == GPU_CC::H100) {
+    header.e("#define MIRAGE_GRACE_HOPPER");
+  }
   header.e("#include \"runtime.h\"");
   header.e("using namespace cute;");
 
@@ -226,6 +240,9 @@ TranspileResult Transpiler::transpile_ugraph() {
       }
       case type::KNOperatorType::KN_EXP_OP:
       case type::KNOperatorType::KN_SILU_OP:
+      case type::KNOperatorType::KN_GELU_OP:
+      case type::KNOperatorType::KN_RELU_OP:
+      case type::KNOperatorType::KN_CLAMP_OP:
       case type::KNOperatorType::KN_SQUARE_OP:
       case type::KNOperatorType::KN_SQRT_OP: {
         // Elemwise unary op
@@ -261,8 +278,9 @@ TranspileResult Transpiler::transpile_ugraph() {
         exec.e(in0_ptr_code);
         exec.e(out0_ptr_code);
         // Create kernel instance
-        exec.e("using kernel = kn::ElementUnaryKernel<half_t, "
+        exec.e("using kernel = kn::ElementUnaryKernel<$, "
                "kn::ElementUnaryOpType::$, $, $>;",
+               get_datatype_str(in0.data_type),
                get_kn_op_str(op->op_type),
                in0_layout,
                out0_layout);
@@ -322,8 +340,9 @@ TranspileResult Transpiler::transpile_ugraph() {
                                                               : "";
         assert(op_type_str != "");
         // Create kernel instance
-        exec.e("using kernel = kn::ElementBinaryKernel<half_t, "
+        exec.e("using kernel = kn::ElementBinaryKernel<$, "
                "kn::ElementBinaryOpType::$, $, $, $>;",
+               get_datatype_str(in0.data_type),
                op_type_str,
                in0_layout,
                in1_layout,
@@ -389,7 +408,8 @@ TranspileResult Transpiler::transpile_ugraph() {
         exec.e(in0_ptr_code);
         exec.e(out0_ptr_code);
         // Create kernel instance
-        exec.e("using kernel = kn::ReductionKernel<half_t, $, $, $>;",
+        exec.e("using kernel = kn::ReductionKernel<$, $, $, $>;",
+               get_datatype_str(in0.data_type),
                layout_in0,
                layout_out0,
                new_reduction_dim);
@@ -461,10 +481,7 @@ TranspileResult Transpiler::transpile_ugraph() {
                bgraph.block_dim.x,
                bgraph.block_dim.y,
                bgraph.block_dim.z);
-        exec.e("size_t smem_size = $;",
-               result.smem_size +
-                   result.tmaParamsList.size() * sizeof(uint64_t) +
-                   SHARE_PIPELINE_SIZE);
+        exec.e("size_t smem_size = $;", result.smem_size);
         // init
 
         exec.e("");
@@ -484,8 +501,6 @@ TranspileResult Transpiler::transpile_ugraph() {
           std::string m_inputs;
           for (int i = 0; i < result.tmaParamsList.size(); i++) {
             auto const &tmaParams = result.tmaParamsList.at(i);
-            dst_layouts.append(tmaParams.dstLayout).append("{}");
-            dtensors.append(fmt("dtensor$", tmaParams.guid));
             m_inputs.append(tmaParams.m_input ? "true" : "false");
 
             tmas.append(fmt("tma_$, ", tmaParams.guid));
@@ -530,12 +545,13 @@ TranspileResult Transpiler::transpile_ugraph() {
             exec.e(fmt("using DstPipeLayout_$ = "
                        "decltype(tile_to_shape(SmemLayoutAtom_${}, "
                        "make_shape(shape<0>(DstMNKLayout_${}), "
-                       "shape<1>(DstMNKLayout_${}), Int<tb::kStages>{}), "
+                       "shape<1>(DstMNKLayout_${}), Int<$>{}), "
                        "Step<_1, _2, _3>{}));",
                        tmaParams.guid,
                        tmaParams.guid,
                        tmaParams.guid,
-                       tmaParams.guid));
+                       tmaParams.guid,
+                       config.pipeline_stages));
             exec.e(fmt("auto g_tensor_$ = "
                        "make_tensor(make_gmem_ptr<half_t>(dtensor$), "
                        "SrcMNKLayout_${});",
@@ -557,14 +573,12 @@ TranspileResult Transpiler::transpile_ugraph() {
                    "cudaFuncAttributeMaxDynamicSharedMemorySize, $);",
                    result.func_name,
                    tma_tmps,
-                   result.smem_size +
-                       result.tmaParamsList.size() * sizeof(uint64_t) + 3000);
+                   result.smem_size);
           } else {
             exec.e("cudaFuncSetAttribute($, "
                    "cudaFuncAttributeMaxDynamicSharedMemorySize, $);",
                    result.func_name,
-                   result.smem_size +
-                       result.tmaParamsList.size() * sizeof(uint64_t) + 3000);
+                   result.smem_size);
           }
 
           exec.e("$<<<grid_dim, block_dim, smem_size>>>($ $);",
@@ -575,8 +589,7 @@ TranspileResult Transpiler::transpile_ugraph() {
           exec.e("cudaFuncSetAttribute($, "
                  "cudaFuncAttributeMaxDynamicSharedMemorySize, $);",
                  result.func_name,
-                 result.smem_size +
-                     result.tmaParamsList.size() * sizeof(uint64_t) + 3000);
+                 result.smem_size);
           exec.e("$<<<grid_dim, block_dim, smem_size>>>( $);",
                  result.func_name,
                  ptr_names);

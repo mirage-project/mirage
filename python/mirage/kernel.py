@@ -106,8 +106,7 @@ def get_cc_cmd(target, cc, FILE_NAME, py_include_dir, MIRAGE_ROOT, so_path):
     if target == 90:
         specific_cmd = [
             "-arch=sm_90a",
-            "-gencode=arch=compute_90,code=sm_90",
-            "-DCUTLASS_NVCC_ARCHS=90a",
+            "-gencode=arch=compute_90a,code=sm_90a",
         ]
     else:
         specific_cmd = [
@@ -195,6 +194,15 @@ class KNGraph:
     def silu(self, A: DTensor):
         return self.cygraph.silu(A)
 
+    def gelu(self, A: DTensor):
+        return self.cygraph.gelu(A)
+
+    def relu(self, A: DTensor):
+        return self.cygraph.relu(A)
+    
+    def clamp(self, A: DTensor, min_val: float, max_val: float):
+        return self.cygraph.clamp(A, min_val, max_val)
+
     def add(self, A: DTensor, B: DTensor):
         return self.cygraph.add(A, B)
 
@@ -225,18 +233,19 @@ class KNGraph:
     def triton_call(self, **kwargs):
         assert self.run is not None, "The graph is not compiled to triton yet."
         input_tensors = kwargs.get("inputs", [])
+        verbose = kwargs.get("verbose", False)
 
         output_shapes = self._cached_results["output_shapes"]
         output_tensors = [
-            torch.zeros(shape, dtype=torch.float16, device=input_tensors[0].device) for shape in output_shapes
+            torch.zeros(shape, dtype=input_tensors[0].dtype, device=input_tensors[0].device) for shape in output_shapes
         ]
-        print("Input tensors:")
-        for t in input_tensors:
-            print(f"Shape: {t.shape}, dtype: {t.dtype}, device: {t.device}")
-
-        print("Output tensors:")
-        for t in output_tensors:
-            print(f"Shape: {t.shape}, dtype: {t.dtype}, device: {t.device}")
+        if(verbose):
+            print("Input tensors:")
+            for t in input_tensors:
+                print(f"Shape: {t.shape}, dtype: {t.dtype}, device: {t.device}")
+            print("Output tensors:")
+            for t in output_tensors:
+                print(f"Shape: {t.shape}, dtype: {t.dtype}, device: {t.device}")
 
         self.run(*input_tensors, *output_tensors)
         return output_tensors
@@ -263,7 +272,7 @@ class KNGraph:
                 meta["shape"],
                 meta["strides"],
                 device=input_tensors[0].device,
-                dtype=torch.float16,
+                dtype=input_tensors[0].dtype,
             )
             for meta in results["output_directives"]
         ]
@@ -294,9 +303,11 @@ class KNGraph:
             torch.cuda.get_device_properties(0).major * 10
             + torch.cuda.get_device_properties(0).minor,
         )
+        num_warp_groups = kwargs.get("num_warp_groups", 2)
+        pipeline_stages = kwargs.get("pipeline_stages", 2)
 
         result = generate_cuda_program(
-            self.cygraph, target_cc=target_cc, input_strides=input_strides
+            self.cygraph, target_cc=target_cc, input_strides=input_strides, num_warp_groups = num_warp_groups, pipeline_stages = pipeline_stages
         )
         # print(result)
         if result["max_smem_size"] > get_shared_memory_capacity(target_cc):
@@ -321,11 +332,21 @@ class KNGraph:
 
         tempdir_obj = tempfile.TemporaryDirectory()
         tempdir = tempdir_obj.name
+        saved_addr = ""
+        file_id = kwargs.get("file_id", -1)
+        if file_id != -1:
+            print(f"file_id: {file_id}")
+            saved_addr = f"./generated_codes/{file_id}/"
         FILE_NAME = os.path.join(tempdir, "test.cu")
         so_path = os.path.join(tempdir, "test.cpython-38-x86_64-linux-gnu.so")
 
         with open(FILE_NAME, "w") as f:
             f.write(result["code"] + HARD_CODE)
+            if saved_addr != "":
+                print(f"saved_addr: {saved_addr}")
+                os.makedirs(saved_addr, exist_ok=True)
+                with open(saved_addr + "test" + str(file_id) + ".cu", "w") as f:
+                    f.write(result["code"] + HARD_CODE)
 
 
         cc = shutil.which("nvcc")
@@ -390,6 +411,7 @@ class KNGraph:
         warmup_iters: int = 16,
         profile_iters: int = 1000,
         previous_checkpoint: str = None,
+        save_codes: bool = False,
     ):
         cygraphs = search(
             self.cygraph,
@@ -407,20 +429,41 @@ class KNGraph:
         if backend == "cuda":
             # profile and use the best graph
             best_graph, best_perf = None, float("inf")
-            handles = []
             print("Transpiling discovered {} muGraphs ...".format(len(all_graphs)))
-            for idx, g in enumerate(all_graphs):
-                dtensors = g.cygraph.get_input_dtensors()
-                input_tensors = list()
-                for t in dtensors:
-                    dims = [t.dim(i) for i in range(t.num_dims)]
-                    input_tensors.append(
-                        torch.randn(dims, dtype=torch.float16, device="cuda:0")
-                    )
-                starter = torch.cuda.Event(enable_timing=True)
-                ender = torch.cuda.Event(enable_timing=True)
-                handle = g.compile(async_=True, inputs=input_tensors)
-                handles.append(handle)
+            handles = []
+
+            target_cc = torch.cuda.get_device_properties(0).major * 10 + torch.cuda.get_device_properties(0).minor
+            if target_cc >= 90:
+                pipeline_stages_list = [2, 3, 4]
+                num_warp_groups_list = [2, 3, 4]
+                for idx, g in enumerate(all_graphs):
+                    for pipeline_stages in pipeline_stages_list:
+                        for num_warp_groups in num_warp_groups_list:
+                            dtensors = g.cygraph.get_input_dtensors()
+                            input_tensors = list()
+                            for t in dtensors:
+                                dims = [t.dim(i) for i in range(t.num_dims)]
+                                input_tensors.append(
+                                    torch.randn(dims, dtype=t.dtype, device="cuda:0")
+                                )
+                            starter = torch.cuda.Event(enable_timing=True)
+                            ender = torch.cuda.Event(enable_timing=True)
+                            new_g = g
+                            handle = new_g.compile(async_=True, inputs=input_tensors, pipeline_stages=pipeline_stages, num_warp_groups=num_warp_groups)
+                            handles.append(handle)
+            else:
+                for idx, g in enumerate(all_graphs):
+                    dtensors = g.cygraph.get_input_dtensors()
+                    input_tensors = list()
+                    for t in dtensors:
+                        dims = [t.dim(i) for i in range(t.num_dims)]
+                        input_tensors.append(
+                            torch.randn(dims, dtype=t.dtype, device="cuda:0")
+                        )
+                    starter = torch.cuda.Event(enable_timing=True)
+                    ender = torch.cuda.Event(enable_timing=True)
+                    handle = g.compile(async_=True, inputs=input_tensors)
+                    handles.append(handle)
             for handle in handles:
                 handle.wait()
             for idx, g in enumerate(all_graphs):
@@ -429,7 +472,7 @@ class KNGraph:
                 for t in dtensors:
                     dims = [t.dim(i) for i in range(t.num_dims)]
                     input_tensors.append(
-                        torch.randn(dims, dtype=torch.float16, device="cuda:0")
+                        torch.randn(dims, dtype=t.dtype, device="cuda:0")
                     )
                 starter = torch.cuda.Event(enable_timing=True)
                 ender = torch.cuda.Event(enable_timing=True)
@@ -454,11 +497,17 @@ class KNGraph:
         elif backend == "nki":
             return all_graphs
         elif backend == "triton":
+            MIRAGE_ROOT = os.environ.get(
+                "MIRAGE_ROOT", os.path.join(os.path.dirname(__file__), "../../include")
+            )
+            os.environ["KERNELS_PATH"] = os.path.join(MIRAGE_ROOT, "mirage/transpiler/runtime") # for triton
             best_graph, best_file_path, best_output_shapes = profile_and_select_best_graph(all_graphs, 
                                                  target_cc=torch.cuda.get_device_properties(0).major * 10 
                                                  + torch.cuda.get_device_properties(0).minor,
-                                                 warmup_iters=warmup_iters, profile_iters=profile_iters, debug_mode=verbose)
+                                                 warmup_iters=warmup_iters, profile_iters=profile_iters, debug_mode=verbose,
+                                                 save_codes=save_codes)
             # load execute_mugraph func from the generated file
+            print(f"Loading the best muGraph from {best_file_path}")
             if not os.path.exists(best_file_path):
                 raise FileNotFoundError(f"File not found: {best_file_path}")
             import importlib.util
