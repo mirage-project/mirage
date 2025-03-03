@@ -21,6 +21,11 @@ int DimVarAssignments::get_value(tensor_dim_var_index_t dim_var_index) const {
   return assignments.at(dim_var_index);
 }
 
+bool DimVarAssignments::has_assignment(
+    tensor_dim_var_index_t dim_var_index) const {
+  return assignments.find(dim_var_index) != assignments.end();
+}
+
 DimVarAssignments
     DimVarAssignments::combine(DimVarAssignments const &rhs) const {
   DimVarAssignments combined_assignments;

@@ -118,7 +118,8 @@ void KernelGraphGenerator::generate_next_operator(
     return;
   }
 
-  std::unordered_map<int64_t, std::shared_ptr<AbstractExpr>> algebraic_expr;
+  std::unordered_map<int64_t, std::shared_ptr<AbstractExpr const>>
+      algebraic_expr;
   abstract_expr_eval(*c.kn_graph, algebraic_expr);
   if (c.tb_graph) {
     abstract_expr_eval(*c.tb_graph, algebraic_expr);
@@ -141,12 +142,12 @@ void KernelGraphGenerator::generate_next_operator(
           }
           std::vector<DTensor> input_tensors =
               get_tensors_from_idx(*c.kn_graph, input_idx);
-          std::vector<std::shared_ptr<AbstractExpr>> input_exprs;
+          std::vector<std::shared_ptr<AbstractExpr const>> input_exprs;
           for (auto const &t : input_tensors) {
             assert(contains_key(algebraic_expr, t.guid));
             input_exprs.push_back(algebraic_expr.at(t.guid));
           }
-          std::shared_ptr<AbstractExpr> expr =
+          std::shared_ptr<AbstractExpr const> expr =
               get_abstract_expr(op_type, input_tensors, input_exprs);
           if (!check_abstract_expr(expr)) {
             continue;
@@ -351,12 +352,12 @@ void KernelGraphGenerator::generate_next_operator(
         }
         std::vector<STensor> input_tensors =
             get_tensors_from_idx(*c.tb_graph, input_idx);
-        std::vector<std::shared_ptr<AbstractExpr>> input_exprs;
+        std::vector<std::shared_ptr<AbstractExpr const>> input_exprs;
         for (auto const &t : input_tensors) {
           assert(contains_key(algebraic_expr, t.guid));
           input_exprs.push_back(algebraic_expr.at(t.guid));
         }
-        std::shared_ptr<AbstractExpr> expr =
+        std::shared_ptr<AbstractExpr const> expr =
             get_abstract_expr(op_type, input_tensors, input_exprs);
         if (!check_abstract_expr(expr)) {
           continue;
@@ -464,7 +465,7 @@ void KernelGraphGenerator::preprocess(kernel::Graph const &computation_graph) {
     }
   }
 
-  std::unordered_map<int64_t, std::shared_ptr<AbstractExpr>>
+  std::unordered_map<int64_t, std::shared_ptr<AbstractExpr const>>
       computation_graph_exprs;
   abstract_expr_eval(computation_graph, computation_graph_exprs);
 
@@ -487,7 +488,7 @@ void KernelGraphGenerator::preprocess(kernel::Graph const &computation_graph) {
 }
 
 bool KernelGraphGenerator::check_abstract_expr(
-    std::shared_ptr<AbstractExpr> expr) {
+    std::shared_ptr<AbstractExpr const> expr) {
   if (!expr) {
     return false;
   }
@@ -586,7 +587,7 @@ void KernelGraphGenerator::generate_next_symbolic_operator(
     if (tb_graph) {
       tb_graph_copy = std::make_shared<SymbolicTBGraph>(*tb_graph);
     }
-#pragma omp task
+// #pragma omp task
     generate_next_symbolic_operator(kn_graph_copy,
                                     tb_graph_copy,
                                     input_dtensor_indices_for_tb_graph,
@@ -610,7 +611,7 @@ void KernelGraphGenerator::generate_next_symbolic_operator(
     }
 
     // Obtain abstract expressions
-    std::vector<std::shared_ptr<AbstractExpr>> abs_exprs;
+    std::vector<std::shared_ptr<AbstractExpr const>> abs_exprs;
     abstract_expr_eval(*kn_graph, abs_exprs);
 
     // Upper bound of the number of operators
@@ -633,10 +634,10 @@ void KernelGraphGenerator::generate_next_symbolic_operator(
           std::vector<SymbolicDTensor> input_tensors = vector_map(
               input_idx, [&](int i) { return kn_graph->tensors[i]; });
           // Abstract expressions of input tensors
-          std::vector<std::shared_ptr<AbstractExpr>> input_exprs =
+          std::vector<std::shared_ptr<AbstractExpr const>> input_exprs =
               vector_map(input_idx, [&](int i) { return abs_exprs[i]; });
           // Obtain the abstract expression of the output tensor
-          std::shared_ptr<AbstractExpr> expr =
+          std::shared_ptr<AbstractExpr const> expr =
               get_abstract_expr(op_type, input_tensors, input_exprs, *kn_graph);
           // Check if the abstract expression is a subexpression of the final
           // output
@@ -675,36 +676,28 @@ void KernelGraphGenerator::generate_next_symbolic_operator(
           std::vector<SymbolicDTensor> input_tensors = vector_map(
               input_tensor_idx, [&](int i) { return kn_graph->tensors[i]; });
 
-          // Enumerate all possible input maps and forloop dimensions
-          for (std::vector<int3> const &input_map :
-               dim_strategy.get_input_map_cand(input_tensors)) {
-            for (std::vector<int> const &forloop_dim :
-                 dim_strategy.get_forloop_dim_cand(input_tensors)) {
-              std::shared_ptr<SymbolicTBGraph> new_tb_graph =
-                  std::make_shared<SymbolicTBGraph>(
-                      kn_graph->next_dim_variable_index);
-              new_tb_graph->reduction_dimx = config.reduction_dimx;
+          std::shared_ptr<SymbolicTBGraph> new_tb_graph =
+              std::make_shared<SymbolicTBGraph>(
+                  kn_graph->next_dim_variable_index);
+          new_tb_graph->reduction_dimx = config.reduction_dimx;
 
-              // Try to create input operators
-              bool input_created = true;
-              for (size_t i = 0; i < input_tensors.size(); ++i) {
-                SymbolicDTensor dtensor = input_tensors[i];
-                if (!new_tb_graph->add_input(
-                        dtensor, input_map[i], forloop_dim[i])) {
-                  input_created = false;
-                  break;
-                }
-              }
-
-              if (input_created) {
-                // Recursively generate the next operator
-                generate_next_symbolic_operator(kn_graph,
-                                                new_tb_graph,
-                                                input_tensor_idx,
-                                                SearchLevel::LV_THREADBLOCK,
-                                                search_depth + 1);
-              }
+          // Try to create input operators
+          bool input_created = true;
+          for (size_t i = 0; i < input_tensors.size(); ++i) {
+            SymbolicDTensor dtensor = input_tensors[i];
+            if (!new_tb_graph->add_input(dtensor)) {
+              input_created = false;
+              break;
             }
+          }
+
+          if (input_created) {
+            // Recursively generate the next operator
+            generate_next_symbolic_operator(kn_graph,
+                                            new_tb_graph,
+                                            input_tensor_idx,
+                                            SearchLevel::LV_THREADBLOCK,
+                                            search_depth + 1);
           }
         }
       }
@@ -777,10 +770,10 @@ void KernelGraphGenerator::generate_next_symbolic_operator(
     }
 
     // Evaluate the abstract expressions
-    std::vector<std::shared_ptr<AbstractExpr>> abs_exprs;
+    std::vector<std::shared_ptr<AbstractExpr const>> abs_exprs;
     {
-      std::vector<std::shared_ptr<AbstractExpr>> kn_abs_exprs, input_exprs,
-          output_exprs;
+      std::vector<std::shared_ptr<AbstractExpr const>> kn_abs_exprs,
+          input_exprs, output_exprs;
       abstract_expr_eval(*kn_graph, kn_abs_exprs);
       input_exprs = vector_map(input_dtensor_indices_for_tb_graph,
                                [&](int i) { return kn_abs_exprs[i]; });
@@ -801,11 +794,11 @@ void KernelGraphGenerator::generate_next_symbolic_operator(
         std::vector<SymbolicSTensor> input_tensors =
             vector_map(input_idx, [&](int i) { return tb_graph->tensors[i]; });
         // Abstract expressions of input tensors
-        std::vector<std::shared_ptr<AbstractExpr>> input_exprs =
+        std::vector<std::shared_ptr<AbstractExpr const>> input_exprs =
             vector_map(input_idx, [&](int i) { return abs_exprs[i]; });
 
         // Obtain the abstract expression of the output tensor
-        std::shared_ptr<AbstractExpr> expr =
+        std::shared_ptr<AbstractExpr const> expr =
             get_abstract_expr(op_type, input_tensors, input_exprs, *tb_graph);
         // Check if the abstract expression is a subexpression of the final
         // output

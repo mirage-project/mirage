@@ -7,29 +7,37 @@ namespace mirage {
 namespace search {
 
 TensorDimConstraint::TensorDimConstraint(ConstraintType type,
-                                         SymbolicTensorDim lhs,
-                                         SymbolicTensorDim rhs)
-    : type(type), lhs(lhs), rhs(rhs) {}
+                                         std::vector<SymbolicTensorDim> dims)
+    : type(type), dims(dims) {}
 
 TensorDimConstraint::operator json() const {
   return json{
       {"type", type},
-      {"lhs", lhs},
-      {"rhs", rhs},
+      {"dims", dims},
   };
 }
 
 bool TensorDimConstraint::operator==(TensorDimConstraint const &other) const {
-  return type == other.type && lhs == other.lhs && rhs == other.rhs;
+  return type == other.type && dims == other.dims;
 }
 
-z3::expr TensorDimConstraint::to_z3(z3::context &c) const {
-  z3::expr l = lhs.dim_expr->to_z3(c), r = rhs.dim_expr->to_z3(c);
+z3::expr TensorDimConstraint::to_z3(z3::context &c,
+                                    DimVarAssignments const &assign) const {
+  std::vector<z3::expr> exprs;
+  for (SymbolicTensorDim const &dim : dims) {
+    exprs.push_back(dim.dim_expr->to_z3(c, assign));
+  }
+
   switch (type) {
-    case ConstraintType::EQUAL:
-      return l == r;
-    case ConstraintType::EQUAL_OR_ONE:
-      return l == r || l == 1 || r == 1;
+    case ConstraintType::EQUAL: {
+      
+    }
+    case ConstraintType::EQUAL_OR_ONE: {
+
+    }
+    case ConstraintType::NON_NEGATIVE: {
+
+    }
     default:
       assert(false && "Unsupported constraint type");
   }
@@ -43,6 +51,24 @@ TensorDimConstraint make_equal_constraint(SymbolicTensorDim lhs,
 TensorDimConstraint make_equal_or_one_constraint(SymbolicTensorDim lhs,
                                                  SymbolicTensorDim rhs) {
   return TensorDimConstraint(ConstraintType::EQUAL_OR_ONE, lhs, rhs);
+}
+
+TensorDimConstraint make_non_negative_constraint(SymbolicTensorDim dim) {
+  return TensorDimConstraint(ConstraintType::NON_NEGATIVE, dim);
+}
+
+TensorDimConstraint make_sum_leq_one_constraint(
+    std::vector<SymbolicTensorDim> dims) {
+  // sum(dims) - 1 is non-positive
+  dims.push_back(SymbolicTensorDim(
+      std::make_shared<TensorDimConst const>(-1)));
+  return TensorDimConstraint(ConstraintType::NON_POSITIVE, dims);
+}
+
+TensorDimConstraint make_sum_geq_zero_constraint(
+    std::vector<SymbolicTensorDim> dims) {
+  // sum(dims) is non-negative
+  return TensorDimConstraint(ConstraintType::NON_NEGATIVE, dims);
 }
 
 bool check_satisfiability(

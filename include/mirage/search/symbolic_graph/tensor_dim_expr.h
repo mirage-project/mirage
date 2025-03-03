@@ -16,26 +16,38 @@ public:
   virtual ~TensorDimExpr() = default;
 
   virtual int get_value(DimVarAssignments const &assignments) const = 0;
-  virtual z3::expr to_z3(z3::context &c, bool log_scaled = true) const = 0;
+  virtual z3::expr to_z3(z3::context &c,
+                         DimVarAssignments const &assign,
+                         bool log_scaled = true) const = 0;
   virtual std::string to_string() const = 0;
   virtual bool is_var() const;
   virtual bool is_const() const;
   virtual bool is_add() const;
   virtual bool is_mul() const;
   virtual bool is_div() const;
+  virtual bool is_pow() const;
 
   virtual size_t hash() const = 0;
   virtual operator json() const = 0;
   virtual bool same_expr_as(std::shared_ptr<TensorDimExpr const>) const = 0;
 };
 
+enum class TensorDimVarType {
+  INT,
+  BOOL,
+};
+
 class TensorDimVar : public TensorDimExpr {
 public:
-  TensorDimVar(tensor_dim_var_index_t index);
+  TensorDimVar(tensor_dim_var_index_t index,
+               TensorDimVarType type = TensorDimVarType::INT);
   tensor_dim_var_index_t index;
+  TensorDimVarType type;
 
   int get_value(DimVarAssignments const &assignments) const override;
-  z3::expr to_z3(z3::context &c, bool log_scaled) const override;
+  z3::expr to_z3(z3::context &c,
+                 DimVarAssignments const &assign,
+                 bool log_scaled) const override;
   std::string to_string() const override;
   bool is_var() const override;
 
@@ -45,7 +57,8 @@ public:
 };
 
 std::shared_ptr<TensorDimVar const>
-    dim_expr_make_var(tensor_dim_var_index_t index);
+    dim_expr_make_var(tensor_dim_var_index_t index,
+                      TensorDimVarType type = TensorDimVarType::INT);
 
 class TensorDimConst : public TensorDimExpr {
 public:
@@ -53,7 +66,9 @@ public:
   int value;
 
   int get_value(DimVarAssignments const &assignments) const override;
-  z3::expr to_z3(z3::context &c, bool log_scaled) const override;
+  z3::expr to_z3(z3::context &c,
+                 DimVarAssignments const &assign,
+                 bool log_scaled) const override;
   std::string to_string() const override;
   bool is_const() const override;
 
@@ -71,7 +86,9 @@ public:
   std::shared_ptr<TensorDimExpr const> lhs, rhs;
 
   int get_value(DimVarAssignments const &assignments) const override;
-  z3::expr to_z3(z3::context &c, bool log_scaled) const override;
+  z3::expr to_z3(z3::context &c,
+                 DimVarAssignments const &assign,
+                 bool log_scaled) const override;
   std::string to_string() const override;
   bool is_add() const override;
 
@@ -91,7 +108,9 @@ public:
   std::shared_ptr<TensorDimExpr const> lhs, rhs;
 
   int get_value(DimVarAssignments const &assignments) const override;
-  z3::expr to_z3(z3::context &c, bool log_scaled) const override;
+  z3::expr to_z3(z3::context &c,
+                 DimVarAssignments const &assign,
+                 bool log_scaled) const override;
   std::string to_string() const override;
   bool is_mul() const override;
 
@@ -111,7 +130,9 @@ public:
   std::shared_ptr<TensorDimExpr const> lhs, rhs;
 
   int get_value(DimVarAssignments const &assignments) const override;
-  z3::expr to_z3(z3::context &c, bool log_scaled) const override;
+  z3::expr to_z3(z3::context &c,
+                 DimVarAssignments const &assign,
+                 bool log_scaled) const override;
   std::string to_string() const override;
   bool is_div() const override;
 
@@ -123,6 +144,28 @@ public:
 std::shared_ptr<TensorDimDiv const>
     dim_expr_make_div(std::shared_ptr<TensorDimExpr const> lhs,
                       std::shared_ptr<TensorDimExpr const> rhs);
+
+// NOTE: only supported in log-scaled expr
+class TensorDimPow : public TensorDimExpr {
+public:
+  TensorDimPow(std::shared_ptr<TensorDimExpr const> base,
+               std::shared_ptr<TensorDimExpr const> exp);
+  std::shared_ptr<TensorDimExpr const> base, exp;
+
+  int get_value(DimVarAssignments const &assignments) const override;
+  z3::expr to_z3(z3::context &c,
+                 DimVarAssignments const &assign,
+                 bool log_scaled) const override;
+  std::string to_string() const override;
+  bool is_pow() const override;
+  size_t hash() const override;
+  operator json() const override;
+  bool same_expr_as(std::shared_ptr<TensorDimExpr const>) const override;
+};
+
+std::shared_ptr<TensorDimPow const>
+    dim_expr_make_pow(std::shared_ptr<TensorDimExpr const> base,
+                      std::shared_ptr<TensorDimExpr const> exp);
 
 } // namespace search
 } // namespace mirage

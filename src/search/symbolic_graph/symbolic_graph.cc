@@ -18,9 +18,7 @@ SymbolicTBGraph::SymbolicTBGraph(tensor_dim_var_index_t dim_variable_index_base)
                  SymbolicTensorDim(std::make_shared<TensorDimConst>(1)),
                  SymbolicTensorDim(std::make_shared<TensorDimConst>(1))}),
       forloop_range(SymbolicTensorDim(
-          std::make_shared<TensorDimVar>(next_dim_variable_index++))) {
-  assert(next_dim_variable_index == dim_variable_index_base + 4);
-}
+          std::make_shared<TensorDimVar>(next_dim_variable_index++))) {}
 
 bool SymbolicTBGraph::remove_last_operator() {
   if (operators.empty()) {
@@ -297,42 +295,49 @@ bool SymbolicTBGraph::add_operator(type::TBOperatorType op_type,
   return true;
 }
 
-bool SymbolicTBGraph::add_input(SymbolicDTensor dtensor,
-                                int3 input_map,
-                                int forloop_dim) {
-  // create op template
+bool SymbolicTBGraph::add_input(SymbolicDTensor dtensor, SymbolicMap const &imap) {
   std::shared_ptr<OpArgs const> args =
-      std::make_shared<TBInputOpArgs const>(dtensor, input_map, forloop_dim);
+      std::make_shared<TBInputOpArgs const>(dtensor, imap);
   SymbolicTBOp op(type::TBOperatorType::TB_INPUT_OP, args);
+
+  auto compute_symbolic_stensor = [](SymbolicDTensor const &dtensor,
+                                      SymbolicMap const &imap) {
+    std::vector<SymbolicTensorDim> dim_templates = dtensor.dims;
+    assert(dim_templates.size() == imap.num_tensor_dims);
+    for (size_t i = 0; i < dim_templates.size(); ++i) {
+      for (SymbolicTensorDim const &device_dim : imap.device_dims) {
+        dim_templates[i] = dim_templates[i] / (devide_dim ^ imap.map_mat.at({device_dim, i}));
+      }
+    }
+    return SymbolicSTensor(dim_templates, false);
+  };
+  SymbolicSTensor tensor = compute_symbolic_stensor(dtensor, imap);
+
   operators.push_back(op);
-  // create stensor template
-  std::vector<SymbolicTensorDim> dim_templates = dtensor.dims;
-  for (int d = 0; d < 3; ++d) {
-    int dim_idx = -1;
-    if (d == 0) {
-      dim_idx = input_map.x;
-    }
-    if (d == 1) {
-      dim_idx = input_map.y;
-    }
-    if (d == 2) {
-      dim_idx = input_map.z;
-    }
-    if (dim_idx >= 0) {
-      dim_templates[dim_idx] = SymbolicTensorDim(std::make_shared<TensorDimDiv>(
-          dim_templates[dim_idx].dim_expr, grid_dim[d].dim_expr));
-    }
-  }
-  if (forloop_dim >= 0) {
-    dim_templates[forloop_dim] =
-        SymbolicTensorDim(std::make_shared<TensorDimDiv>(
-            dim_templates[forloop_dim].dim_expr, forloop_range.dim_expr));
-  }
-  SymbolicSTensor tensor(dim_templates, false);
   tensors.push_back(tensor);
   input_indices.push_back({});
   output_indices.push_back({(int)tensors.size() - 1});
   return true;
+}
+
+bool SymbolicTBGraph::add_input(SymbolicDTensor dtensor) {
+  SymbolicMap imap(/*symbolic_dims=*/{grid_dim[0], grid_dim[1], grid_dim[2], forloop_range},
+                   /*num_tensor_dims=*/dtensor.dims.size(),
+                  /*index_counter=*/next_dim_variable_index);
+  return add_input(dtensor, imap);
+}
+
+bool SymbolicTBGraph::add_input(SymbolicDTensor dtensor,
+                                int3 input_map,
+                                int forloop_dim) {
+  SymbolicMap imap(/*symbolic_dims=*/{
+                        grid_dim[0], grid_dim[1], grid_dim[2], forloop_range},
+                    /*num_tensor_dims=*/dtensor.dims.size(),
+                    /*mapped_dims=*/{{grid_dim[0], input_map.x},
+                                      {grid_dim[1], input_map.y},
+                                      {grid_dim[2], input_map.z},
+                                      {forloop_range, forloop_dim}});
+  return add_input(dtensor, imap);
 }
 
 bool SymbolicTBGraph::add_output(int input_index,

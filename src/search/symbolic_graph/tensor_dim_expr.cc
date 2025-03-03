@@ -4,7 +4,8 @@
 namespace mirage {
 namespace search {
 
-TensorDimVar::TensorDimVar(tensor_dim_var_index_t index) : index(index) {}
+TensorDimVar::TensorDimVar(tensor_dim_var_index_t index, TensorDimVarType type)
+    : index(index), type(type) {}
 
 TensorDimConst::TensorDimConst(int value) : value(value) {}
 
@@ -20,9 +21,13 @@ TensorDimDiv::TensorDimDiv(std::shared_ptr<TensorDimExpr const> lhs,
                            std::shared_ptr<TensorDimExpr const> rhs)
     : lhs(lhs), rhs(rhs) {}
 
+TensorDimPow::TensorDimPow(std::shared_ptr<TensorDimExpr const> base,
+                           std::shared_ptr<TensorDimExpr const> exp)
+    : base(base), exp(exp) {}
+
 std::shared_ptr<TensorDimVar const>
-    dim_expr_make_var(tensor_dim_var_index_t index) {
-  return std::make_shared<TensorDimVar const>(index);
+    dim_expr_make_var(tensor_dim_var_index_t index, TensorDimVarType type) {
+  return std::make_shared<TensorDimVar const>(index, type);
 }
 
 std::shared_ptr<TensorDimConst const> dim_expr_make_const(int value) {
@@ -47,6 +52,12 @@ std::shared_ptr<TensorDimDiv const>
   return std::make_shared<TensorDimDiv const>(lhs, rhs);
 }
 
+std::shared_ptr<TensorDimPow const>
+    dim_expr_make_pow(std::shared_ptr<TensorDimExpr const> base,
+                      std::shared_ptr<TensorDimExpr const> exp) {
+  return std::make_shared<TensorDimPow const>(base, exp);
+}
+
 int TensorDimVar::get_value(DimVarAssignments const &assignments) const {
   return assignments.get_value(index);
 }
@@ -67,6 +78,17 @@ int TensorDimDiv::get_value(DimVarAssignments const &assignments) const {
   return lhs->get_value(assignments) / rhs->get_value(assignments);
 }
 
+int TensorDimPow::get_value(DimVarAssignments const &assignments) const {
+  auto int_pow = [](int base, int exp) {
+    int result = 1;
+    for (int i = 0; i < exp; i++) {
+      result *= base;
+    }
+    return result;
+  };
+  return int_pow(base->get_value(assignments), exp->get_value(assignments));
+}
+
 bool TensorDimExpr::is_var() const {
   return false;
 }
@@ -84,6 +106,10 @@ bool TensorDimExpr::is_mul() const {
 }
 
 bool TensorDimExpr::is_div() const {
+  return false;
+}
+
+bool TensorDimExpr::is_pow() const {
   return false;
 }
 
@@ -107,8 +133,12 @@ bool TensorDimDiv::is_div() const {
   return true;
 }
 
+bool TensorDimPow::is_pow() const {
+  return true;
+}
+
 TensorDimVar::operator json() const {
-  return json{{"opt", "var"}, {"index", index}};
+  return json{{"opt", "var"}, {"index", index}, {"type", type}};
 }
 
 TensorDimConst::operator json() const {
@@ -125,6 +155,10 @@ TensorDimMul::operator json() const {
 
 TensorDimDiv::operator json() const {
   return json{{"opt", "div"}, {"lhs", *lhs}, {"rhs", *rhs}};
+}
+
+TensorDimPow::operator json() const {
+  return json{{"opt", "pow"}, {"base", *base}, {"exp", *exp}};
 }
 
 size_t TensorDimVar::hash() const {
@@ -160,12 +194,20 @@ size_t TensorDimDiv::hash() const {
   return h;
 }
 
+size_t TensorDimPow::hash() const {
+  size_t h = 5;
+  hash_combine(h, base->hash());
+  hash_combine(h, exp->hash());
+  return h;
+}
+
 bool TensorDimVar::same_expr_as(
     std::shared_ptr<TensorDimExpr const> other) const {
   if (!other->is_var()) {
     return false;
   }
-  return index == std::static_pointer_cast<TensorDimVar const>(other)->index;
+  return index == std::static_pointer_cast<TensorDimVar const>(other)->index &&
+         type == std::static_pointer_cast<TensorDimVar const>(other)->type;
 }
 
 bool TensorDimConst::same_expr_as(
@@ -203,12 +245,41 @@ bool TensorDimDiv::same_expr_as(
   return lhs->same_expr_as(other_div->lhs) && rhs->same_expr_as(other_div->rhs);
 }
 
-z3::expr TensorDimVar::to_z3(z3::context &c, bool log_scaled) const {
-  std::string z3_var_name = "tensor_dim_var_" + std::to_string(index);
-  return c.int_const(z3_var_name.c_str());
+bool TensorDimPow::same_expr_as(
+    std::shared_ptr<TensorDimExpr const> other) const {
+  if (!other->is_pow()) {
+    return false;
+  }
+  auto other_pow = std::static_pointer_cast<TensorDimPow const>(other);
+  return base->same_expr_as(other_pow->base) && exp->same_expr_as(other_pow->exp);
 }
 
-z3::expr TensorDimConst::to_z3(z3::context &c, bool log_scaled) const {
+z3::expr TensorDimVar::to_z3(z3::context &c,
+                             DimVarAssignments const &assign,
+                             bool log_scaled) const {
+  if (assign.has_assignment(index)) {
+    if (type == TensorDimVarType::BOOL) {
+      return c.bool_val(assign.get_value(index) != 0);
+    }
+    if (log_scaled) {
+      int log_scaled_value = std::ceil(std::log2(assign.get_value(index)));
+      return c.int_val(log_scaled_value);
+    }
+    return c.int_val(assign.get_value(index));
+  }
+  if (type == TensorDimVarType::BOOL) {
+    std::string z3_var_name = "map_var_" + std::to_string(index);
+    return c.bool_const(z3_var_name.c_str());
+  } else {
+    assert(type == TensorDimVarType::INT);
+    std::string z3_var_name = "tensor_dim_var_" + std::to_string(index);
+    return c.int_const(z3_var_name.c_str());
+  }
+}
+
+z3::expr TensorDimConst::to_z3(z3::context &c,
+                               DimVarAssignments const &assign,
+                               bool log_scaled) const {
   if (log_scaled) {
     int log_scaled_value = std::ceil(std::log2(value));
     return c.int_val(log_scaled_value);
@@ -216,29 +287,50 @@ z3::expr TensorDimConst::to_z3(z3::context &c, bool log_scaled) const {
   return c.int_val(value);
 }
 
-z3::expr TensorDimAdd::to_z3(z3::context &c, bool log_scaled) const {
+z3::expr TensorDimAdd::to_z3(z3::context &c,
+                             DimVarAssignments const &assign,
+                             bool log_scaled) const {
   if (log_scaled) {
     assert(false &&
            "Do not support addition between log scaled symbolic dimensions");
   }
-  return lhs->to_z3(c, log_scaled) + rhs->to_z3(c, log_scaled);
+  return lhs->to_z3(c, assign, log_scaled) + rhs->to_z3(c, assign, log_scaled);
 }
 
-z3::expr TensorDimMul::to_z3(z3::context &c, bool log_scaled) const {
+z3::expr TensorDimMul::to_z3(z3::context &c,
+                             DimVarAssignments const &assign,
+                             bool log_scaled) const {
   if (log_scaled) {
-    return lhs->to_z3(c, log_scaled) + rhs->to_z3(c, log_scaled);
+    return lhs->to_z3(c, assign, log_scaled) +
+           rhs->to_z3(c, assign, log_scaled);
   }
-  return lhs->to_z3(c, log_scaled) * rhs->to_z3(c, log_scaled);
+  return lhs->to_z3(c, assign, log_scaled) * rhs->to_z3(c, assign, log_scaled);
 }
 
-z3::expr TensorDimDiv::to_z3(z3::context &c, bool log_scaled) const {
+z3::expr TensorDimDiv::to_z3(z3::context &c,
+                             DimVarAssignments const &assign,
+                             bool log_scaled) const {
   if (log_scaled) {
-    return lhs->to_z3(c, log_scaled) - rhs->to_z3(c, log_scaled);
+    return lhs->to_z3(c, assign, log_scaled) -
+           rhs->to_z3(c, assign, log_scaled);
   }
-  return lhs->to_z3(c, log_scaled) / rhs->to_z3(c, log_scaled);
+  return lhs->to_z3(c, assign, log_scaled) / rhs->to_z3(c, assign, log_scaled);
+}
+
+z3::expr TensorDimPow::to_z3(z3::context &c,
+                             DimVarAssignments const &assign,
+                             bool log_scaled) const {
+  if (log_scaled) {
+    return base->to_z3(c, assign, log_scaled) *
+           exp->to_z3(c, assign, false);
+  }
+  assert(false && "Power is only supported in log-scaled expr");
 }
 
 std::string TensorDimVar::to_string() const {
+  if (type == TensorDimVarType::BOOL) {
+    return "bool_var_" + std::to_string(index);
+  }
   return "var_" + std::to_string(index);
 }
 

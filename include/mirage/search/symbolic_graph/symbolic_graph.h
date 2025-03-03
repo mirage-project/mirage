@@ -17,13 +17,20 @@ namespace search {
 class SymbolicTBGraph {
 public:
   SymbolicTBGraph(tensor_dim_var_index_t dim_variable_index_base);
+  std::vector<DimVarAssignments> enumerate_assignments() const;
 
   threadblock::Graph *
       to_threadblock_graph(DimVarAssignments const &assignments,
                            std::vector<kernel::DTensor> const &inputs) const;
   bool add_operator(type::TBOperatorType op_type,
                     std::vector<int> input_indices);
+  bool add_input(SymbolicDTensor dtensor, SymbolicMap const &imap);
+  bool add_input(SymbolicDTensor dtensor);
   bool add_input(SymbolicDTensor dtensor, int3 input_map, int forloop_dim);
+  // bool add_output(int input_index,
+  //                 SymbolicMap const &omap,
+  //                 mirage::type::TBEpilogueType epilogue_type);
+  // bool add_output(int input_index, mirage::type::TBEpilogueType epilogue_type);
   bool add_output(int input_index,
                   int3 output_map,
                   int forloop_dim,
@@ -51,6 +58,7 @@ public:
   SymbolicKNGraph() = default;
 
   kernel::Graph *to_kernel_graph(DimVarAssignments const &assignments) const;
+  // std::vector<DimVarAssignments> enumerate_assignments() const;
   bool add_operator(type::KNOperatorType op_type,
                     std::vector<int> input_indices);
   bool add_customized_operator(SymbolicTBGraph tb_graph,

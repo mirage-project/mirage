@@ -8,7 +8,8 @@ namespace search {
 
 void abstract_expr_eval(
     threadblock::Graph const &g,
-    std::unordered_map<type::GuidType, std::shared_ptr<AbstractExpr>> &exprs) {
+    std::unordered_map<type::GuidType, std::shared_ptr<AbstractExpr const>>
+        &exprs) {
   for (size_t i = 0; i < g.operators.size(); ++i) {
     auto const &op = g.operators[i];
     if (op->output_tensors.size() > 0 &&
@@ -31,7 +32,7 @@ void abstract_expr_eval(
       input_tensors.push_back(op->input_tensors[1]);
       input_tensors.push_back(g.operators[i + 1]->input_tensors[0]);
       input_tensors.push_back(g.operators[i + 1]->input_tensors[1]);
-      std::vector<std::shared_ptr<AbstractExpr>> input_exprs;
+      std::vector<std::shared_ptr<AbstractExpr const>> input_exprs;
       for (auto const &input_tensor : input_tensors) {
         assert(contains_key(exprs, input_tensor.guid));
         input_exprs.push_back(exprs.at(input_tensor.guid));
@@ -44,7 +45,7 @@ void abstract_expr_eval(
                              input_tensors,
                              input_exprs)});
     } else {
-      std::vector<std::shared_ptr<AbstractExpr>> input_exprs;
+      std::vector<std::shared_ptr<AbstractExpr const>> input_exprs;
       for (auto const &input_tensor : op->input_tensors) {
         input_exprs.push_back(exprs.at(input_tensor.guid));
       }
@@ -57,7 +58,8 @@ void abstract_expr_eval(
 
 void abstract_expr_eval(
     kernel::Graph const &g,
-    std::unordered_map<type::GuidType, std::shared_ptr<AbstractExpr>> &exprs) {
+    std::unordered_map<type::GuidType, std::shared_ptr<AbstractExpr const>>
+        &exprs) {
   int input_id = 0;
   for (auto const &op : g.operators) {
     if (op->op_type == type::KNOperatorType::KN_OUTPUT_OP) {
@@ -67,15 +69,17 @@ void abstract_expr_eval(
                     std::make_shared<Var>("v_" + std::to_string(input_id))});
       input_id++;
     } else if (op->op_type == type::KNOperatorType::KN_RMS_NORM_OP) {
-      std::shared_ptr<AbstractExpr> input_expr =
+      std::shared_ptr<AbstractExpr const> input_expr =
           exprs.at(op->input_tensors[0].guid);
-      std::shared_ptr<AbstractExpr> denominator_expr = abstract_expr_make_rms(
-          static_cast<kernel::KNRMSNormOp *>(op)->normalized_size, input_expr);
-      std::shared_ptr<AbstractExpr> output_expr =
+      std::shared_ptr<AbstractExpr const> denominator_expr =
+          abstract_expr_make_rms(
+              static_cast<kernel::KNRMSNormOp *>(op)->normalized_size,
+              input_expr);
+      std::shared_ptr<AbstractExpr const> output_expr =
           abstract_expr_make_div(input_expr, denominator_expr);
       exprs.insert({op->output_tensors[0].guid, output_expr});
     } else if (op->op_type != type::KNOperatorType::KN_CUSTOMIZED_OP) {
-      std::vector<std::shared_ptr<AbstractExpr>> input_exprs;
+      std::vector<std::shared_ptr<AbstractExpr const>> input_exprs;
       for (auto const &input_tensor : op->input_tensors) {
         assert(contains_key(exprs, input_tensor.guid));
         input_exprs.push_back(exprs.at(input_tensor.guid));
@@ -91,8 +95,9 @@ void abstract_expr_eval(
   }
 }
 
-void abstract_expr_eval(SymbolicKNGraph const &kn_graph,
-                        std::vector<std::shared_ptr<AbstractExpr>> &exprs) {
+void abstract_expr_eval(
+    SymbolicKNGraph const &kn_graph,
+    std::vector<std::shared_ptr<AbstractExpr const>> &exprs) {
   int input_id = 0;
   for (size_t i = 0; i < kn_graph.operators.size(); ++i) {
     if (kn_graph.operators[i].op_type == type::KN_OUTPUT_OP) {
@@ -107,16 +112,17 @@ void abstract_expr_eval(SymbolicKNGraph const &kn_graph,
       std::vector<SymbolicDTensor> input_tensors =
           vector_map(kn_graph.input_indices[i],
                      [&](int i) { return kn_graph.tensors[i]; });
-      std::vector<std::shared_ptr<AbstractExpr>> input_exprs = vector_map(
+      std::vector<std::shared_ptr<AbstractExpr const>> input_exprs = vector_map(
           kn_graph.input_indices[i], [&](int i) { return exprs[i]; });
       exprs.push_back(get_abstract_expr(
           kn_graph.operators[i].op_type, input_tensors, input_exprs, kn_graph));
     } else {
       // Evaluate the expression for customized operators
       assert(kn_graph.operators[i].op_type == type::KN_CUSTOMIZED_OP);
-      std::vector<std::shared_ptr<AbstractExpr>> input_exprs = vector_map(
+      std::vector<std::shared_ptr<AbstractExpr const>> input_exprs = vector_map(
           kn_graph.input_indices[i], [&](int i) { return exprs[i]; });
-      std::vector<std::shared_ptr<AbstractExpr>> tb_graph_exprs, output_exprs;
+      std::vector<std::shared_ptr<AbstractExpr const>> tb_graph_exprs,
+          output_exprs;
       SymbolicTBGraph const &tb_graph =
           std::static_pointer_cast<KNCustomizedOpArgs const>(
               kn_graph.operators[i].args)
@@ -129,9 +135,9 @@ void abstract_expr_eval(SymbolicKNGraph const &kn_graph,
 
 void abstract_expr_eval(
     SymbolicTBGraph const &tb_graph,
-    std::vector<std::shared_ptr<AbstractExpr>> const &input_exprs,
-    std::vector<std::shared_ptr<AbstractExpr>> &exprs,
-    std::vector<std::shared_ptr<AbstractExpr>> &output_exprs) {
+    std::vector<std::shared_ptr<AbstractExpr const>> const &input_exprs,
+    std::vector<std::shared_ptr<AbstractExpr const>> &exprs,
+    std::vector<std::shared_ptr<AbstractExpr const>> &output_exprs) {
   for (size_t i = 0; i < tb_graph.operators.size(); ++i) {
     if (tb_graph.operators[i].op_type == type::TBOperatorType::TB_INPUT_OP) {
       exprs.push_back(input_exprs[i]);
@@ -142,7 +148,7 @@ void abstract_expr_eval(
       std::vector<SymbolicSTensor> input_tensors =
           vector_map(tb_graph.input_indices[i],
                      [&](int i) { return tb_graph.tensors[i]; });
-      std::vector<std::shared_ptr<AbstractExpr>> input_exprs = vector_map(
+      std::vector<std::shared_ptr<AbstractExpr const>> input_exprs = vector_map(
           tb_graph.input_indices[i], [&](int i) { return exprs[i]; });
       exprs.push_back(get_abstract_expr(
           tb_graph.operators[i].op_type, input_tensors, input_exprs, tb_graph));

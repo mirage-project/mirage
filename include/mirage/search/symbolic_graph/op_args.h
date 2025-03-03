@@ -1,6 +1,7 @@
 #pragma once
 
 #include "mirage/search/symbolic_graph/symbolic_graph.h"
+#include "mirage/search/symbolic_graph/symbolic_map.h"
 #include "mirage/type.h"
 
 #include <vector>
@@ -70,10 +71,9 @@ public:
 
 class TBInputOpArgs : public OpArgs {
 public:
-  TBInputOpArgs(SymbolicDTensor dtensor, int3 input_map, int forloop_dim);
+  TBInputOpArgs(SymbolicDTensor dtensor, SymbolicMap const &imap);
   SymbolicDTensor dtensor;
-  int3 input_map;
-  int forloop_dim;
+  SymbolicMap imap;
 
   operator json() const override;
 };
@@ -81,12 +81,10 @@ public:
 class TBOutputOpArgs : public OpArgs {
 public:
   TBOutputOpArgs(SymbolicDTensor dtensor,
-                 int3 output_map,
-                 int forloop_dim,
+                 SymbolicMap const &omap,
                  mirage::type::TBEpilogueType epilogue);
   SymbolicDTensor dtensor;
-  int3 output_map;
-  int forloop_dim;
+  SymbolicMap omap;
   mirage::type::TBEpilogueType epilogue;
 
   operator json() const override;

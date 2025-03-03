@@ -3,10 +3,10 @@
 namespace mirage {
 namespace search {
 
-std::shared_ptr<AbstractExpr>
-    get_abstract_expr(type::KNOperatorType op,
-                      std::vector<kernel::DTensor> const &tensors,
-                      std::vector<std::shared_ptr<AbstractExpr>> const &opds) {
+std::shared_ptr<AbstractExpr const> get_abstract_expr(
+    type::KNOperatorType op,
+    std::vector<kernel::DTensor> const &tensors,
+    std::vector<std::shared_ptr<AbstractExpr const>> const &opds) {
   for (auto const &expr : opds) {
     if (!expr) {
       return nullptr;
@@ -45,10 +45,10 @@ std::shared_ptr<AbstractExpr>
   }
 }
 
-std::shared_ptr<AbstractExpr>
-    get_abstract_expr(type::TBOperatorType op,
-                      std::vector<threadblock::STensor> const &tensors,
-                      std::vector<std::shared_ptr<AbstractExpr>> const &opds) {
+std::shared_ptr<AbstractExpr const> get_abstract_expr(
+    type::TBOperatorType op,
+    std::vector<threadblock::STensor> const &tensors,
+    std::vector<std::shared_ptr<AbstractExpr const>> const &opds) {
   for (auto const &expr : opds) {
     if (!expr) {
       return nullptr;
@@ -183,11 +183,11 @@ std::shared_ptr<AbstractExpr>
 //   return get_dimension_size_lower_bound(dim.dim_expr);
 // }
 
-std::shared_ptr<AbstractExpr>
-    get_abstract_expr(type::TBOperatorType op,
-                      std::vector<SymbolicSTensor> const &tensors,
-                      std::vector<std::shared_ptr<AbstractExpr>> const &opds,
-                      SymbolicTBGraph const &g) {
+std::shared_ptr<AbstractExpr const> get_abstract_expr(
+    type::TBOperatorType op,
+    std::vector<SymbolicSTensor> const &tensors,
+    std::vector<std::shared_ptr<AbstractExpr const>> const &opds,
+    SymbolicTBGraph const &g) {
   switch (op) {
     case type::TBOperatorType::TB_INPUT_OP:
     case type::TBOperatorType::TB_OUTPUT_OP: {
@@ -267,11 +267,11 @@ std::shared_ptr<AbstractExpr>
   }
 }
 
-std::shared_ptr<AbstractExpr>
-    get_abstract_expr(type::KNOperatorType op,
-                      std::vector<SymbolicDTensor> const &tensors,
-                      std::vector<std::shared_ptr<AbstractExpr>> const &opds,
-                      SymbolicKNGraph const &g) {
+std::shared_ptr<AbstractExpr const> get_abstract_expr(
+    type::KNOperatorType op,
+    std::vector<SymbolicDTensor> const &tensors,
+    std::vector<std::shared_ptr<AbstractExpr const>> const &opds,
+    SymbolicKNGraph const &g) {
   switch (op) {
     case type::KNOperatorType::KN_MATMUL_OP: {
       assert(opds.size() == 2);
