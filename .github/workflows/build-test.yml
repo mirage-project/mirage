@@ -22,6 +22,13 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Install CUDA
+        uses: Jimver/cuda-toolkit@v0.2.16
+        id: cuda-toolkit
+        with:
+          cuda: "12.1.1"
+          use-github-cache: "false"
+
       - name: Install Dependencies
         run: |
           sudo apt update
@@ -34,18 +41,12 @@ jobs:
 
           pip3 install --upgrade cython
 
-          # Install CUDA 12
-          CUDA_VERSION=12
+          # Install cuDNN 9
           UBUNTU_VERSION=$(lsb_release -rs | tr -d '.')
           wget -c -q "https://developer.download.nvidia.com/compute/cuda/repos/ubuntu${UBUNTU_VERSION}/x86_64/cuda-keyring_1.1-1_all.deb"
           sudo dpkg -i cuda-keyring_1.1-1_all.deb
-          sudo apt update
-          sudo apt install -y cuda-${CUDA_VERSION}
-          export PATH=/usr/local/cuda-${CUDA_VERSION}/bin${PATH:+:${PATH}}
-          export LD_LIBRARY_PATH=/usr/local/cuda-${CUDA_VERSION}/lib64${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}
-          nvcc --version  # Check CUDA version
-
-          # Install cuDNN 9
+          sudo apt update -y
+          rm -f cuda-keyring_1.1-1_all.deb
           sudo apt-get install -y libcudnn9-cuda-12 libcudnn9-dev-cuda-12 libcudnn9-samples
           sudo ldconfig
 
