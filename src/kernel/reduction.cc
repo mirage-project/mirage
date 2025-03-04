@@ -25,8 +25,8 @@ namespace kernel {
 
 using namespace mirage::type;
 
-DTensor Graph::reduction(DTensor const &input, int chunk_size, int dim) {
-  KNOperator *op = create_reduction_op(input, chunk_size, dim);
+DTensor Graph::reduction(DTensor const &input, int dim, int size) {
+  KNOperator *op = create_reduction_op(input, dim, size);
   assert(op != nullptr);
   operators.push_back(op);
   assert(op->output_tensors.size() == 1);
@@ -34,15 +34,13 @@ DTensor Graph::reduction(DTensor const &input, int chunk_size, int dim) {
   return output;
 }
 
-DTensor *Graph::reduction(DTensor const *input, int chunk_size, int dim) {
-  KNOperator *op = create_reduction_op(*input, chunk_size, dim);
+DTensor *Graph::reduction(DTensor const *input, int dim, int size) {
+  KNOperator *op = create_reduction_op(*input, dim, size);
   assert(op != nullptr);
   operators.push_back(op);
   assert(op->output_tensors.size() == 1);
-  DTensor *output = &op->output_tensors[0];
-  return output;
+  return &op->output_tensors[0];
 }
-
 
 KNOperator *
     Graph::create_reduction_op(DTensor const &input, int dim, int size) {
