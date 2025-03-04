@@ -1,0 +1,39 @@
+name: "Build Test"
+
+on:
+  pull_request:
+    branches:
+      - main
+      - ci
+
+jobs:
+  test:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install Dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y cmake g++ make libboost-all-dev
+
+      - name: Build Z3 from Source
+        run: |
+          export MIRAGE_ROOT=${{ github.workspace }}
+          cd $MIRAGE_ROOT/deps/z3
+          mkdir -p build && cd build
+          cmake ..
+          make -j$(nproc)
+          echo "Z3_DIR=$MIRAGE_ROOT/deps/z3/build" >> $GITHUB_ENV
+
+      - name: Build Mirage from Source
+        run: |
+          export MIRAGE_ROOT=${{ github.workspace }}
+          cd $MIRAGE_ROOT
+          mkdir -p build && cd build
+          cmake ..
+          make -j$(nproc)
+          make install
