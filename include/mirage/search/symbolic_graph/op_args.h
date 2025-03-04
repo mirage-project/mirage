@@ -81,10 +81,12 @@ public:
 class TBOutputOpArgs : public OpArgs {
 public:
   TBOutputOpArgs(SymbolicDTensor dtensor,
-                 SymbolicMap const &omap,
+                 int3 output_map,
+                 int forloop_dim,
                  mirage::type::TBEpilogueType epilogue);
   SymbolicDTensor dtensor;
-  SymbolicMap omap;
+  int3 output_map;
+  int forloop_dim;
   mirage::type::TBEpilogueType epilogue;
 
   operator json() const override;

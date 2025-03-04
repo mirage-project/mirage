@@ -13,7 +13,7 @@ public:
 
   operator json() const;
   bool operator==(SymbolicTensorDim const &other) const;
-  
+
   SymbolicTensorDim operator+(SymbolicTensorDim const &other) const;
   SymbolicTensorDim operator*(SymbolicTensorDim const &other) const;
   SymbolicTensorDim operator/(SymbolicTensorDim const &other) const;

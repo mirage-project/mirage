@@ -30,13 +30,10 @@ z3::expr TensorDimConstraint::to_z3(z3::context &c,
 
   switch (type) {
     case ConstraintType::EQUAL: {
-      
     }
     case ConstraintType::EQUAL_OR_ONE: {
-
     }
     case ConstraintType::NON_NEGATIVE: {
-
     }
     default:
       assert(false && "Unsupported constraint type");
@@ -45,28 +42,27 @@ z3::expr TensorDimConstraint::to_z3(z3::context &c,
 
 TensorDimConstraint make_equal_constraint(SymbolicTensorDim lhs,
                                           SymbolicTensorDim rhs) {
-  return TensorDimConstraint(ConstraintType::EQUAL, lhs, rhs);
+  return TensorDimConstraint(ConstraintType::EQUAL, {lhs, rhs});
 }
 
 TensorDimConstraint make_equal_or_one_constraint(SymbolicTensorDim lhs,
                                                  SymbolicTensorDim rhs) {
-  return TensorDimConstraint(ConstraintType::EQUAL_OR_ONE, lhs, rhs);
+  return TensorDimConstraint(ConstraintType::EQUAL_OR_ONE, {lhs, rhs});
 }
 
 TensorDimConstraint make_non_negative_constraint(SymbolicTensorDim dim) {
-  return TensorDimConstraint(ConstraintType::NON_NEGATIVE, dim);
+  return TensorDimConstraint(ConstraintType::NON_NEGATIVE, {dim});
 }
 
-TensorDimConstraint make_sum_leq_one_constraint(
-    std::vector<SymbolicTensorDim> dims) {
+TensorDimConstraint
+    make_sum_leq_one_constraint(std::vector<SymbolicTensorDim> dims) {
   // sum(dims) - 1 is non-positive
-  dims.push_back(SymbolicTensorDim(
-      std::make_shared<TensorDimConst const>(-1)));
+  dims.push_back(SymbolicTensorDim(std::make_shared<TensorDimConst const>(-1)));
   return TensorDimConstraint(ConstraintType::NON_POSITIVE, dims);
 }
 
-TensorDimConstraint make_sum_geq_zero_constraint(
-    std::vector<SymbolicTensorDim> dims) {
+TensorDimConstraint
+    make_sum_geq_zero_constraint(std::vector<SymbolicTensorDim> dims) {
   // sum(dims) is non-negative
   return TensorDimConstraint(ConstraintType::NON_NEGATIVE, dims);
 }
@@ -109,12 +105,13 @@ bool check_satisfiability(
 
   for (TensorDimConstraint const &constraint : constraints) {
     // rule-based checking for now
-    std::shared_ptr<TensorDimExpr const> el = constraint.lhs.dim_expr,
-                                         er = constraint.rhs.dim_expr;
     if (constraint.type == ConstraintType::EQUAL) {
-      return probably_equal(el, er);
+      return probably_equal(constraint.dims[0].dim_expr,
+                            constraint.dims[1].dim_expr);
     }
     if (constraint.type == ConstraintType::EQUAL_OR_ONE) {
+      std::shared_ptr<TensorDimExpr const> el = constraint.dims[0].dim_expr,
+                                           er = constraint.dims[1].dim_expr;
       if (probably_equal(el, er)) {
         return true;
       }
@@ -142,8 +139,10 @@ size_t hash<mirage::search::TensorDimConstraint>::operator()(
     mirage::search::TensorDimConstraint const &constraint) const {
   size_t seed = 0;
   hash_combine(seed, constraint.type);
-  hash_combine(seed, constraint.lhs);
-  hash_combine(seed, constraint.rhs);
+  hash_combine(seed, constraint.dims.size());
+  for (mirage::search::SymbolicTensorDim const &dim : constraint.dims) {
+    hash_combine(seed, dim);
+  }
   return seed;
 }
 

@@ -587,7 +587,7 @@ void KernelGraphGenerator::generate_next_symbolic_operator(
     if (tb_graph) {
       tb_graph_copy = std::make_shared<SymbolicTBGraph>(*tb_graph);
     }
-// #pragma omp task
+    // #pragma omp task
     generate_next_symbolic_operator(kn_graph_copy,
                                     tb_graph_copy,
                                     input_dtensor_indices_for_tb_graph,

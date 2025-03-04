@@ -149,6 +149,8 @@ bool AbstractExpr::subexpr_to(
       return true;
     }
   }
+
+  return false;
 }
 
 bool AbstractExpr::operator==(AbstractExpr const &other) const {

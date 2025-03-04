@@ -21,10 +21,8 @@ KNRMSNormOpArgs::KNRMSNormOpArgs(int normalized_size)
 KNCustomizedOpArgs::KNCustomizedOpArgs(SymbolicTBGraph tb_graph_template)
     : tb_graph_template(tb_graph_template) {}
 
-TBInputOpArgs::TBInputOpArgs(SymbolicDTensor dtensor,
-                             int3 input_map,
-                             int forloop_dim)
-    : dtensor(dtensor), input_map(input_map), forloop_dim(forloop_dim) {}
+TBInputOpArgs::TBInputOpArgs(SymbolicDTensor dtensor, SymbolicMap const &imap)
+    : dtensor(dtensor), imap(imap) {}
 
 TBOutputOpArgs::TBOutputOpArgs(SymbolicDTensor dtensor,
                                int3 output_map,
@@ -72,9 +70,7 @@ KNCustomizedOpArgs::operator json() const {
 }
 
 TBInputOpArgs::operator json() const {
-  return json{{"dtensor", dtensor},
-              {"input_map", input_map},
-              {"forloop_dim", forloop_dim}};
+  return json{{"dtensor", dtensor}, {"input_map", imap}};
 }
 
 TBOutputOpArgs::operator json() const {

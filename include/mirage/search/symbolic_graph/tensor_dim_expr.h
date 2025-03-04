@@ -26,6 +26,7 @@ public:
   virtual bool is_mul() const;
   virtual bool is_div() const;
   virtual bool is_pow() const;
+  virtual bool is_ite() const;
 
   virtual size_t hash() const = 0;
   virtual operator json() const = 0;
@@ -166,6 +167,28 @@ public:
 std::shared_ptr<TensorDimPow const>
     dim_expr_make_pow(std::shared_ptr<TensorDimExpr const> base,
                       std::shared_ptr<TensorDimExpr const> exp);
+
+class TensorDimIte : public TensorDimExpr {
+public:
+  TensorDimIte(std::shared_ptr<TensorDimExpr const> cond,
+               std::shared_ptr<TensorDimExpr const> true_case,
+               std::shared_ptr<TensorDimExpr const> false_case);
+  std::shared_ptr<TensorDimExpr const> cond, true_case, false_case;
+  int get_value(DimVarAssignments const &assignments) const override;
+  z3::expr to_z3(z3::context &c,
+                 DimVarAssignments const &assign,
+                 bool log_scaled) const override;
+  std::string to_string() const override;
+  bool is_ite() const override;
+  size_t hash() const override;
+  operator json() const override;
+  bool same_expr_as(std::shared_ptr<TensorDimExpr const>) const override;
+};
+
+std::shared_ptr<TensorDimIte const>
+    dim_expr_make_ite(std::shared_ptr<TensorDimExpr const> cond,
+                      std::shared_ptr<TensorDimExpr const> true_case,
+                      std::shared_ptr<TensorDimExpr const> false_case);
 
 } // namespace search
 } // namespace mirage

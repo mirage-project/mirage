@@ -2,6 +2,7 @@
 
 #include "mirage/kernel/graph.h"
 #include "mirage/search/symbolic_graph/dim_var_assignments.h"
+#include "mirage/search/symbolic_graph/symbolic_map.h"
 #include "mirage/search/symbolic_graph/symbolic_op.h"
 #include "mirage/search/symbolic_graph/symbolic_tensor.h"
 #include "mirage/search/symbolic_graph/tensor_dim_constraint.h"
@@ -30,7 +31,8 @@ public:
   // bool add_output(int input_index,
   //                 SymbolicMap const &omap,
   //                 mirage::type::TBEpilogueType epilogue_type);
-  // bool add_output(int input_index, mirage::type::TBEpilogueType epilogue_type);
+  // bool add_output(int input_index, mirage::type::TBEpilogueType
+  // epilogue_type);
   bool add_output(int input_index,
                   int3 output_map,
                   int forloop_dim,

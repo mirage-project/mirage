@@ -25,6 +25,11 @@ TensorDimPow::TensorDimPow(std::shared_ptr<TensorDimExpr const> base,
                            std::shared_ptr<TensorDimExpr const> exp)
     : base(base), exp(exp) {}
 
+TensorDimIte::TensorDimIte(std::shared_ptr<TensorDimExpr const> cond,
+                           std::shared_ptr<TensorDimExpr const> true_case,
+                           std::shared_ptr<TensorDimExpr const> false_case)
+    : cond(cond), true_case(true_case), false_case(false_case) {}
+
 std::shared_ptr<TensorDimVar const>
     dim_expr_make_var(tensor_dim_var_index_t index, TensorDimVarType type) {
   return std::make_shared<TensorDimVar const>(index, type);
@@ -58,6 +63,13 @@ std::shared_ptr<TensorDimPow const>
   return std::make_shared<TensorDimPow const>(base, exp);
 }
 
+std::shared_ptr<TensorDimIte const>
+    dim_expr_make_ite(std::shared_ptr<TensorDimExpr const> cond,
+                      std::shared_ptr<TensorDimExpr const> true_case,
+                      std::shared_ptr<TensorDimExpr const> false_case) {
+  return std::make_shared<TensorDimIte const>(cond, true_case, false_case);
+}
+
 int TensorDimVar::get_value(DimVarAssignments const &assignments) const {
   return assignments.get_value(index);
 }
@@ -89,6 +101,14 @@ int TensorDimPow::get_value(DimVarAssignments const &assignments) const {
   return int_pow(base->get_value(assignments), exp->get_value(assignments));
 }
 
+int TensorDimIte::get_value(DimVarAssignments const &assignments) const {
+  if (cond->get_value(assignments) != 0) {
+    return true_case->get_value(assignments);
+  } else {
+    return false_case->get_value(assignments);
+  }
+}
+
 bool TensorDimExpr::is_var() const {
   return false;
 }
@@ -110,6 +130,10 @@ bool TensorDimExpr::is_div() const {
 }
 
 bool TensorDimExpr::is_pow() const {
+  return false;
+}
+
+bool TensorDimExpr::is_ite() const {
   return false;
 }
 
@@ -137,6 +161,10 @@ bool TensorDimPow::is_pow() const {
   return true;
 }
 
+bool TensorDimIte::is_ite() const {
+  return true;
+}
+
 TensorDimVar::operator json() const {
   return json{{"opt", "var"}, {"index", index}, {"type", type}};
 }
@@ -159,6 +187,13 @@ TensorDimDiv::operator json() const {
 
 TensorDimPow::operator json() const {
   return json{{"opt", "pow"}, {"base", *base}, {"exp", *exp}};
+}
+
+TensorDimIte::operator json() const {
+  return json{{"opt", "ite"},
+              {"cond", *cond},
+              {"true_case", *true_case},
+              {"false_case", *false_case}};
 }
 
 size_t TensorDimVar::hash() const {
@@ -198,6 +233,14 @@ size_t TensorDimPow::hash() const {
   size_t h = 5;
   hash_combine(h, base->hash());
   hash_combine(h, exp->hash());
+  return h;
+}
+
+size_t TensorDimIte::hash() const {
+  size_t h = 6;
+  hash_combine(h, cond->hash());
+  hash_combine(h, true_case->hash());
+  hash_combine(h, false_case->hash());
   return h;
 }
 
@@ -251,7 +294,19 @@ bool TensorDimPow::same_expr_as(
     return false;
   }
   auto other_pow = std::static_pointer_cast<TensorDimPow const>(other);
-  return base->same_expr_as(other_pow->base) && exp->same_expr_as(other_pow->exp);
+  return base->same_expr_as(other_pow->base) &&
+         exp->same_expr_as(other_pow->exp);
+}
+
+bool TensorDimIte::same_expr_as(
+    std::shared_ptr<TensorDimExpr const> other) const {
+  if (!other->is_ite()) {
+    return false;
+  }
+  auto other_ite = std::static_pointer_cast<TensorDimIte const>(other);
+  return cond->same_expr_as(other_ite->cond) &&
+         true_case->same_expr_as(other_ite->true_case) &&
+         false_case->same_expr_as(other_ite->false_case);
 }
 
 z3::expr TensorDimVar::to_z3(z3::context &c,
@@ -321,10 +376,17 @@ z3::expr TensorDimPow::to_z3(z3::context &c,
                              DimVarAssignments const &assign,
                              bool log_scaled) const {
   if (log_scaled) {
-    return base->to_z3(c, assign, log_scaled) *
-           exp->to_z3(c, assign, false);
+    return base->to_z3(c, assign, log_scaled) * exp->to_z3(c, assign, false);
   }
   assert(false && "Power is only supported in log-scaled expr");
+}
+
+z3::expr TensorDimIte::to_z3(z3::context &c,
+                             DimVarAssignments const &assign,
+                             bool log_scaled) const {
+  return z3::ite(cond->to_z3(c, assign, log_scaled),
+                 true_case->to_z3(c, assign, log_scaled),
+                 false_case->to_z3(c, assign, log_scaled));
 }
 
 std::string TensorDimVar::to_string() const {
@@ -348,6 +410,15 @@ std::string TensorDimMul::to_string() const {
 
 std::string TensorDimDiv::to_string() const {
   return lhs->to_string() + " / " + rhs->to_string();
+}
+
+std::string TensorDimPow::to_string() const {
+  return "pow(" + base->to_string() + ", " + exp->to_string() + ")";
+}
+
+std::string TensorDimIte::to_string() const {
+  return "ite(" + cond->to_string() + ", " + true_case->to_string() + ", " +
+         false_case->to_string() + ")";
 }
 
 } // namespace search

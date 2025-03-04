@@ -295,18 +295,20 @@ bool SymbolicTBGraph::add_operator(type::TBOperatorType op_type,
   return true;
 }
 
-bool SymbolicTBGraph::add_input(SymbolicDTensor dtensor, SymbolicMap const &imap) {
+bool SymbolicTBGraph::add_input(SymbolicDTensor dtensor,
+                                SymbolicMap const &imap) {
   std::shared_ptr<OpArgs const> args =
       std::make_shared<TBInputOpArgs const>(dtensor, imap);
   SymbolicTBOp op(type::TBOperatorType::TB_INPUT_OP, args);
 
   auto compute_symbolic_stensor = [](SymbolicDTensor const &dtensor,
-                                      SymbolicMap const &imap) {
+                                     SymbolicMap const &imap) {
     std::vector<SymbolicTensorDim> dim_templates = dtensor.dims;
     assert(dim_templates.size() == imap.num_tensor_dims);
     for (size_t i = 0; i < dim_templates.size(); ++i) {
       for (SymbolicTensorDim const &device_dim : imap.device_dims) {
-        dim_templates[i] = dim_templates[i] / (devide_dim ^ imap.map_mat.at({device_dim, i}));
+        dim_templates[i] =
+            dim_templates[i] / (device_dim ^ imap.map_mat.at({device_dim, i}));
       }
     }
     return SymbolicSTensor(dim_templates, false);
@@ -317,26 +319,51 @@ bool SymbolicTBGraph::add_input(SymbolicDTensor dtensor, SymbolicMap const &imap
   tensors.push_back(tensor);
   input_indices.push_back({});
   output_indices.push_back({(int)tensors.size() - 1});
+
+  {
+    std::unordered_set<TensorDimConstraint> constraints;
+    for (size_t i = 0; i < dtensor.dims.size(); ++i) {
+      std::vector<SymbolicTensorDim> dims;
+      for (SymbolicTensorDim const &device_dim : imap.device_dims) {
+        dims.push_back(SymbolicTensorDim(imap.map_mat.at({device_dim, i})));
+      }
+      dims.pop_back(); // exclude forloop dim
+      constraints.insert(make_sum_geq_zero_constraint(dims));
+      constraints.insert(make_sum_leq_one_constraint(dims));
+    }
+    for (SymbolicTensorDim const &device_dim : imap.device_dims) {
+      std::vector<SymbolicTensorDim> dims;
+      for (size_t i = 0; i < dtensor.dims.size(); ++i) {
+        dims.push_back(SymbolicTensorDim(imap.map_mat.at({device_dim, i})));
+      }
+    }
+    if (!check_satisfiability(conds, constraints)) {
+      return false;
+    }
+    conds = set_union(conds, constraints);
+  }
   return true;
 }
 
 bool SymbolicTBGraph::add_input(SymbolicDTensor dtensor) {
-  SymbolicMap imap(/*symbolic_dims=*/{grid_dim[0], grid_dim[1], grid_dim[2], forloop_range},
-                   /*num_tensor_dims=*/dtensor.dims.size(),
-                  /*index_counter=*/next_dim_variable_index);
+  SymbolicMap imap(
+      /*symbolic_dims=*/{grid_dim[0], grid_dim[1], grid_dim[2], forloop_range},
+      /*num_tensor_dims=*/dtensor.dims.size(),
+      /*index_counter=*/next_dim_variable_index);
   return add_input(dtensor, imap);
 }
 
 bool SymbolicTBGraph::add_input(SymbolicDTensor dtensor,
                                 int3 input_map,
                                 int forloop_dim) {
-  SymbolicMap imap(/*symbolic_dims=*/{
-                        grid_dim[0], grid_dim[1], grid_dim[2], forloop_range},
-                    /*num_tensor_dims=*/dtensor.dims.size(),
-                    /*mapped_dims=*/{{grid_dim[0], input_map.x},
-                                      {grid_dim[1], input_map.y},
-                                      {grid_dim[2], input_map.z},
-                                      {forloop_range, forloop_dim}});
+  SymbolicMap imap(
+      /*symbolic_dims=*/{grid_dim[0], grid_dim[1], grid_dim[2], forloop_range},
+      /*num_tensor_dims=*/dtensor.dims.size(),
+      /*mapped_dims=*/
+      {{grid_dim[0], input_map.x},
+       {grid_dim[1], input_map.y},
+       {grid_dim[2], input_map.z},
+       {forloop_range, forloop_dim}});
   return add_input(dtensor, imap);
 }
 

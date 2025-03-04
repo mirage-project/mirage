@@ -19,6 +19,8 @@ NLOHMANN_JSON_SERIALIZE_ENUM(ConstraintType,
                              {
                                  {ConstraintType::EQUAL, "EQUAL"},
                                  {ConstraintType::EQUAL_OR_ONE, "EQUAL_OR_ONE"},
+                                 {ConstraintType::NON_NEGATIVE, "NON_NEGATIVE"},
+                                 {ConstraintType::NON_POSITIVE, "NON_POSITIVE"},
                              })
 
 class TensorDimConstraint {
@@ -42,9 +44,11 @@ TensorDimConstraint make_non_negative_constraint(SymbolicTensorDim dim);
 
 TensorDimConstraint make_non_positive_constraint(SymbolicTensorDim dim);
 
-TensorDimConstraint make_sum_leq_one_constraint(std::vector<SymbolicTensorDim> dims);
+TensorDimConstraint
+    make_sum_leq_one_constraint(std::vector<SymbolicTensorDim> dims);
 
-TensorDimConstraint make_sum_geq_zero_constraint(std::vector<SymbolicTensorDim> dims);
+TensorDimConstraint
+    make_sum_geq_zero_constraint(std::vector<SymbolicTensorDim> dims);
 
 bool check_satisfiability(
     std::unordered_set<TensorDimConstraint> const &pre_conds,
