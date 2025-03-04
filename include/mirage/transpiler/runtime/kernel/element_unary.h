@@ -15,7 +15,7 @@ template <typename T, ElementUnaryOpType OP>
 static __device__ __forceinline__ T perform_element_unary_op(T a) {
   if constexpr (!(std::is_same_v<T, cutlass::half_t> ||
                   std::is_same_v<T, cutlass::bfloat16_t> ||
-                  std::is_same_v<T, __half>)) {
+                  std::is_same_v<T, float> || std::is_same_v<T, __half>)) {
     assert(0 && "unsupport datatype in kn elementunary");
   }
   if constexpr (OP == ElementUnaryOpType::EXP) {

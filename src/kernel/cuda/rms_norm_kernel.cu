@@ -80,8 +80,9 @@ bool KNRMSNormOp::fingerprint(void) {
       (num_samples + num_threads_per_blk - 1) / num_threads_per_blk;
   mirage::kernel::DeviceMemoryManager *dmm =
       mirage::kernel::DeviceMemoryManager::get_instance();
-  // Use GPU 0 for computing fingerprint
-  checkCUDA(cudaSetDevice(0));
+  // Use GPU dmm->gpu_id for computing fingerprint
+  checkCUDA(cudaSetDevice(dmm->gpu_id));
+
   for (int gpu_id = 0; gpu_id < kgraph->gpu_dim.x; gpu_id++) {
     mirage::type::FPType *input_fp_ptr =
         reinterpret_cast<mirage::type::FPType *>(dmm->fp_base_ptr[gpu_id] +

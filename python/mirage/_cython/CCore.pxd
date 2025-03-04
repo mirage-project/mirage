@@ -332,3 +332,6 @@ cdef extern from "mirage/triton_transpiler/transpile.h" namespace "mirage::trito
         vector[vector[int]] output_shapes
     cdef TritonTranspileResult transpile(const CppKNGraph *graph,
                                          const TritonTranspilerConfig config)
+
+cdef extern from "mirage/kernel/device_memory_manager.h" namespace "mirage::kernel":
+    cdef int cython_set_gpu_device_id(int gpu_id)

@@ -29,6 +29,7 @@ using namespace mirage::config;
 using namespace mirage::utils;
 
 bool KNMatmulOp::profile(ProfileResult &result) {
+  assert(false);
   // Only launch kernel on a single GPU for profiling
   int gpu_id = 0;
   checkCUDA(cudaSetDevice(0));
@@ -204,8 +205,9 @@ bool KNMatmulOp::fingerprint(void) {
       (row_C * column_C + num_threads_per_blk - 1) / num_threads_per_blk;
   mirage::kernel::DeviceMemoryManager *dmm =
       mirage::kernel::DeviceMemoryManager::get_instance();
-  // Use GPU 0 for computing fingerprint
-  checkCUDA(cudaSetDevice(0));
+  // Use GPU dmm->gpu_id for computing fingerprint
+  checkCUDA(cudaSetDevice(dmm->gpu_id));
+
   for (int gpu_id = 0; gpu_id < kgraph->gpu_dim.x; gpu_id++) {
     mirage::type::FPType *A_fp_ptr = reinterpret_cast<mirage::type::FPType *>(
         dmm->fp_base_ptr[gpu_id] + input_tensors[0].fp_offset);
@@ -217,7 +219,6 @@ bool KNMatmulOp::fingerprint(void) {
         A_fp_ptr, B_fp_ptr, C_fp_ptr, num_batches, row_C, column_C, row_B);
     checkCUDA(cudaDeviceSynchronize());
   }
-  checkCUDA(cudaSetDevice(0));
   return true;
 }
 

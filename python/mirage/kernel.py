@@ -13,6 +13,7 @@ from .threadblock import *
 from .visualizer import *
 from .utils import *
 from .triton_profiler import *
+from .global_config import global_config
 
 HARD_CODE = """
 #include <Python.h>
@@ -222,6 +223,10 @@ class KNGraph:
         assert self._is_compiled, "Should check kernel validness after compilation"
         return self._valid_cuda_kernels
 
+    def get_error_message(self):
+        assert self._is_compiled, "Should check error message after compilation"
+        return self._error_message
+
     def __call__(self, **kwargs):
         if self.backend == "cuda":
             return self.cuda_call(**kwargs)
@@ -317,6 +322,7 @@ class KNGraph:
             )
             self._is_compiled = True
             self._valid_cuda_kernels = False
+            self._error_message = "shared memory usage exceed limit"
 
             if async_:
                 return Handle([], None)
@@ -376,20 +382,29 @@ class KNGraph:
 
         def remain_op():
             import importlib.util
+            try:
+                spec = importlib.util.spec_from_file_location("__mirage_launcher", so_path)
+                mod = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+                self.run = getattr(mod, "launch")
 
-            spec = importlib.util.spec_from_file_location("__mirage_launcher", so_path)
-            mod = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(mod)
-            self.run = getattr(mod, "launch")
-
-            self._is_compiled = True
-            self._valid_cuda_kernels = True
-            self._cached_results = result
-            tempdir_obj.cleanup()
-            return self._cached_results
+                self._is_compiled = True
+                self._valid_cuda_kernels = True
+                self._cached_results = result
+                self._error_message = "No error"
+                tempdir_obj.cleanup()
+                return self._cached_results
+            except ImportError:
+                # cannot import the built shared library likely due to 
+                # compilation errors
+                self._is_compiled = True
+                self._valid_cuda_kernels = False
+                self._cached_results = None
+                self._error_message = "CUDA compilation error"
+                return None
 
         if async_:
-            ret = subprocess.Popen(cc_cmd)
+            ret = subprocess.Popen(cc_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
             return Handle([ret], remain_op)
         else:
             ret = subprocess.check_call(cc_cmd)
@@ -444,7 +459,7 @@ class KNGraph:
                             for t in dtensors:
                                 dims = [t.dim(i) for i in range(t.num_dims)]
                                 input_tensors.append(
-                                    torch.randn(dims, dtype=t.dtype, device="cuda:0")
+                                    torch.randn(dims, dtype=t.dtype, device="cuda:{}".format(global_config.gpu_device_id))
                                 )
                             starter = torch.cuda.Event(enable_timing=True)
                             ender = torch.cuda.Event(enable_timing=True)
@@ -457,8 +472,9 @@ class KNGraph:
                     input_tensors = list()
                     for t in dtensors:
                         dims = [t.dim(i) for i in range(t.num_dims)]
+                        dtype = convert_dtype_to_torch_type(t.dtype)
                         input_tensors.append(
-                            torch.randn(dims, dtype=t.dtype, device="cuda:0")
+                            torch.randn(dims, dtype=dtype, device="cuda:{}".format(global_config.gpu_device_id))
                         )
                     starter = torch.cuda.Event(enable_timing=True)
                     ender = torch.cuda.Event(enable_timing=True)
@@ -471,13 +487,14 @@ class KNGraph:
                 input_tensors = list()
                 for t in dtensors:
                     dims = [t.dim(i) for i in range(t.num_dims)]
+                    dtype = convert_dtype_to_torch_type(t.dtype)
                     input_tensors.append(
-                        torch.randn(dims, dtype=t.dtype, device="cuda:0")
+                        torch.randn(dims, dtype=dtype, device="cuda:{}".format(global_config.gpu_device_id))
                     )
                 starter = torch.cuda.Event(enable_timing=True)
                 ender = torch.cuda.Event(enable_timing=True)
                 if not g.valid_kernels():
-                    print("muGraph {}: skipping since its shared memory usage exceed limit".format(idx))
+                    print("muGraph {}: {}".format(idx, g.get_error_message()))
                     continue
                 # Warmup runs
                 for _ in range(warmup_iters):
