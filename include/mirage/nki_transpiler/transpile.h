@@ -20,6 +20,7 @@
 #include <string>
 #include <vector>
 
+#include "mirage/kernel/element_binary.h"
 #include "mirage/kernel/graph.h"
 #include "mirage/transpiler/structs.h"
 
@@ -98,6 +99,8 @@ public:
   std::optional<NKIErrorInfo> resolve_tensor_layout();
   NKICustomOPTranspileResult
       transpile_kn_custom_op(kn::KNCustomizedOp const *op);
+  std::optional<NKICustomOPTranspileResult>
+      transpile_kn_op(kn::KNOperator const *op);
   NKITranspileResult transpile_ugraph();
 };
 

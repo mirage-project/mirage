@@ -20,41 +20,49 @@
 #include "mirage/threadblock/operator.h"
 #include "mirage/threadblock/smem_tensor.h"
 #include "mirage/transpiler/utils.h"
+#include "mirage/type.h"
 
 #include <algorithm>
+#include <utility>
+#include <vector>
 
 namespace mirage {
 namespace nki_transpiler {
 
 namespace kn = mirage::kernel;
 namespace tb = mirage::threadblock;
+namespace ty = mirage::type;
 
 using mirage::transpiler::CodeKeeper;
 using mirage::transpiler::fmt;
 using mirage::transpiler::map;
 using std::string;
 
-string tb_operator_type_to_nki(type::TBOperatorType type) {
+template <typename T>
+static string ugraph_operator_type_to_nki(const T type) {
   switch (type) {
-    case type::TB_EXP_OP:
+    case ty::TB_EXP_OP:
       return "nl.exp";
-    case type::TB_SILU_OP:
-      return "nl.erf";
-    case type::TB_SQUARE_OP:
+    case ty::TB_SILU_OP:
+      return "nl.silu";
+    case ty::TB_SQUARE_OP:
       return "nl.square";
-    case type::TB_SQRT_OP:
+    case ty::TB_SQRT_OP:
       return "nl.sqrt";
-    case type::TB_RELU_OP:
+    case ty::TB_RELU_OP:
       return "nl.relu";
-    case type::TB_CLAMP_OP:
+    case ty::TB_CLAMP_OP:
       return "nl.clamp";
-    case type::TB_MUL_SCALAR_OP:
+    case ty::TB_MUL_SCALAR_OP:
       return "nl.multiply";
-    case type::TB_ADD_OP:
+    case ty::TB_ADD_OP:
+    case ty::KN_ADD_OP:
       return "nl.add";
-    case type::TB_MUL_OP:
+    case ty::TB_MUL_OP:
+    case ty::KN_MUL_OP:
       return "nl.multiply";
-    case type::TB_DIV_OP:
+    case ty::TB_DIV_OP:
+    case ty::KN_DIV_OP:
       return "nl.divide";
     default:
       assert(false);
@@ -308,17 +316,19 @@ NKICustomOPTranspileResult
         }
         if (meta0.partition_dim != meta1.partition_dim) {
           // Need a transpose before elementwise
-          code.e("$ = $(nl.transpose($)$)",
-                 fmt("stensor$", output.guid),
-                 tb_operator_type_to_nki(tb_op->op_type),
-                 fmt("stensor$", input.guid),
-                 optional_second_operand);
+          code.e(
+              "$ = $(nl.transpose($)$)",
+              fmt("stensor$", output.guid),
+              ugraph_operator_type_to_nki<ty::TBOperatorType>(tb_op->op_type),
+              fmt("stensor$", input.guid),
+              optional_second_operand);
         } else {
-          code.e("$ = $($$)",
-                 fmt("stensor$", output.guid),
-                 tb_operator_type_to_nki(tb_op->op_type),
-                 fmt("stensor$", input.guid),
-                 optional_second_operand);
+          code.e(
+              "$ = $($$)",
+              fmt("stensor$", output.guid),
+              ugraph_operator_type_to_nki<ty::TBOperatorType>(tb_op->op_type),
+              fmt("stensor$", input.guid),
+              optional_second_operand);
         }
         break;
       }
@@ -342,7 +352,7 @@ NKICustomOPTranspileResult
         }
         code.e("$ = $($, $)",
                fmt("stensor$", output.guid),
-               tb_operator_type_to_nki(tb_op->op_type),
+               ugraph_operator_type_to_nki<ty::TBOperatorType>(tb_op->op_type),
                transpose0 ? fmt("nl.transpose(stensor$)", input0.guid)
                           : fmt("stensor$", input0.guid),
                transpose1 ? fmt("nl.transpose(stensor$)", input1.guid)
@@ -490,17 +500,19 @@ NKICustomOPTranspileResult
         }
         if (meta0.partition_dim != meta1.partition_dim) {
           // Need a transpose before elementwise
-          code.e("$ = $(nl.transpose($)$)",
-                 fmt("stensor$", output.guid),
-                 tb_operator_type_to_nki(tb_op->op_type),
-                 fmt("stensor$", input.guid),
-                 optional_second_operand);
+          code.e(
+              "$ = $(nl.transpose($)$)",
+              fmt("stensor$", output.guid),
+              ugraph_operator_type_to_nki<ty::TBOperatorType>(tb_op->op_type),
+              fmt("stensor$", input.guid),
+              optional_second_operand);
         } else {
-          code.e("$ = $($$)",
-                 fmt("stensor$", output.guid),
-                 tb_operator_type_to_nki(tb_op->op_type),
-                 fmt("stensor$", input.guid),
-                 optional_second_operand);
+          code.e(
+              "$ = $($$)",
+              fmt("stensor$", output.guid),
+              ugraph_operator_type_to_nki<ty::TBOperatorType>(tb_op->op_type),
+              fmt("stensor$", input.guid),
+              optional_second_operand);
         }
         break;
       }
@@ -524,7 +536,7 @@ NKICustomOPTranspileResult
         }
         code.e("$ = $($, $)",
                fmt("stensor$", output.guid),
-               tb_operator_type_to_nki(tb_op->op_type),
+               ugraph_operator_type_to_nki<ty::TBOperatorType>(tb_op->op_type),
                transpose0 ? fmt("nl.transpose(stensor$)", input0.guid)
                           : fmt("stensor$", input0.guid),
                transpose1 ? fmt("nl.transpose(stensor$)", input1.guid)
@@ -592,5 +604,133 @@ NKICustomOPTranspileResult
   return NKICustomOPTranspileResult{func_name, code.to_string()};
 }
 
+// generate NKI kernels for supported binary operator at kernel level.
+std::optional<NKICustomOPTranspileResult>
+    NKITranspiler::transpile_kn_op(kn::KNOperator const *op) {
+  kn::KNElementBinaryOp const *binary_op =
+      dynamic_cast<kn::KNElementBinaryOp const *>(op);
+  if (!binary_op || binary_op->input_tensors[0].num_dims > 2) {
+    return std::nullopt;
+  }
+
+  // Transpile add,mul,div operators
+  static int nki_block_kernel_counter = 0;
+  int cur_block_kernel_idx = nki_block_kernel_counter++;
+  string func_name = fmt("block_kernel_$", cur_block_kernel_idx);
+
+  // partition size 0th axis - 128, 1th axis 512
+  // ToDo: handle dimensions greater than 2
+  std::vector<std::pair<string, int>> axis_span{{"ix", 128}, {"jx", 512}};
+  auto const &inputs = op->input_tensors;
+  auto const &output = op->output_tensors;
+  int const num_dims = inputs[0].num_dims;
+
+  // generate function signature
+  CodeKeeper code;
+  code.e("@nki_jit");
+  code.e("def $($, $):",
+         func_name,
+         map<kn::DTensor, string>(op->output_tensors,
+                                  [](kn::DTensor const &dtensor) -> string {
+                                    return fmt("dtensor$", dtensor.guid);
+                                  }),
+         map<kn::DTensor, string>(op->input_tensors,
+                                  [](kn::DTensor const &dtensor) -> string {
+                                    return fmt("dtensor$", dtensor.guid);
+                                  }));
+  code.inc_indent();
+
+  auto emit_affineloops = [&]() {
+    for (int i = 0; i < num_dims; i++) {
+      code.e("for $ in nl.affine_range(($.shape[$] + $ - 1) // $):",
+             axis_span[i].first[0],
+             fmt("dtensor$", inputs[0].guid),
+             i,
+             axis_span[i].second,
+             axis_span[i].second);
+      code.inc_indent();
+    }
+  };
+  emit_affineloops();
+
+  // emit compute indices
+  auto emit_indices = [&]() {
+    for (int i = 0; i < num_dims; i++) {
+      code.e("$ = $ * $ + nl.arange($)[$, $]",
+             axis_span[i].first,
+             axis_span[i].first[0],
+             axis_span[i].second,
+             axis_span[i].second,
+             i == 0 ? ":" : "None",
+             i == 0 ? "None" : ":");
+    }
+  };
+  emit_indices();
+
+  // generate mask
+  std::string mask;
+  for (int i = 0; i < num_dims; i++) {
+    mask += fmt("($ < $.shape[$])",
+                axis_span[i].first,
+                fmt("dtensor$", inputs[0].guid),
+                i);
+    if (i != num_dims - 1) {
+      mask += " & ";
+    }
+  }
+  code.e("mask_ = ($)", mask);
+
+  auto emit_load = [&](kn::DTensor const &tensor, std::string const &mk) {
+    if (num_dims == 2) {
+      code.e("$_tile = nl.load($[$, $], mask = $)",
+             fmt("dtensor$", tensor.guid),
+             fmt("dtensor$", tensor.guid),
+             axis_span[0].first,
+             axis_span[1].first,
+             mk);
+    } else {
+      code.e("$_tile = nl.load($[$], mask = $)",
+             fmt("dtensor$", tensor.guid),
+             fmt("dtensor$", tensor.guid),
+             axis_span[0].first,
+             mk);
+    }
+  };
+  emit_load(inputs[0], "mask_");
+  emit_load(inputs[1], "mask_");
+
+  // compute
+  code.e("result_tile = $($, $)",
+         ugraph_operator_type_to_nki<ty::KNOperatorType>(binary_op->op_type),
+         fmt("dtensor$_tile", inputs[0].guid),
+         fmt("dtensor$_tile", inputs[1].guid));
+
+  auto emit_store = [&](kn::DTensor const &tensor,
+                        std::string const &tile,
+                        std::string const &mk) {
+    if (num_dims == 2) {
+      code.e("nl.store($[$, $], value = $, mask = $)",
+             fmt("dtensor$", tensor.guid),
+             axis_span[0].first,
+             axis_span[1].first,
+             tile,
+             mk);
+    } else {
+      code.e("nl.store($[$], value = $, mask = $)",
+             fmt("dtensor$", tensor.guid),
+             axis_span[0].first,
+             tile,
+             mk);
+    }
+  };
+  // masked store
+  emit_store(output[0], "result_tile", "mask_");
+
+  for (int i = 0; i < num_dims; i++) {
+    code.dec_indent();
+  }
+
+  return NKICustomOPTranspileResult{func_name, code.to_string()};
+}
 } // namespace nki_transpiler
 } // namespace mirage

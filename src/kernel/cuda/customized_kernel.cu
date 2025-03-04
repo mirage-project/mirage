@@ -806,8 +806,10 @@ void KNCustomizedOp::run() {
   assert(kgraph->gpu_dim.x == 1);
   int gpu_id = 0;
   if (!mirage::type::CLAMP_MIN_MAX.empty()) {
-    float CLAMP_MIN_MAX_HOST[2] = {mirage::type::CLAMP_MIN_MAX["min_val"], mirage::type::CLAMP_MIN_MAX["max_val"]};
-    cudaMemcpyToSymbol(CLAMP_MIN_MAX_DEVICE, CLAMP_MIN_MAX_HOST, sizeof(float) * 2);
+    float CLAMP_MIN_MAX_HOST[2] = {mirage::type::CLAMP_MIN_MAX["min_val"],
+                                   mirage::type::CLAMP_MIN_MAX["max_val"]};
+    cudaMemcpyToSymbol(
+        CLAMP_MIN_MAX_DEVICE, CLAMP_MIN_MAX_HOST, sizeof(float) * 2);
   }
   customized_kernel_function<<<bgraph.grid_dim,
                                bgraph.block_dim,
@@ -822,8 +824,10 @@ bool KNCustomizedOp::profile(ProfileResult &result) {
   checkCUDA(cudaSetDevice(0));
 
   if (!mirage::type::CLAMP_MIN_MAX.empty()) {
-    float CLAMP_MIN_MAX_HOST[2] = {mirage::type::CLAMP_MIN_MAX["min_val"], mirage::type::CLAMP_MIN_MAX["max_val"]};
-    cudaMemcpyToSymbol(CLAMP_MIN_MAX_DEVICE, CLAMP_MIN_MAX_HOST, sizeof(float) * 2);
+    float CLAMP_MIN_MAX_HOST[2] = {mirage::type::CLAMP_MIN_MAX["min_val"],
+                                   mirage::type::CLAMP_MIN_MAX["max_val"]};
+    cudaMemcpyToSymbol(
+        CLAMP_MIN_MAX_DEVICE, CLAMP_MIN_MAX_HOST, sizeof(float) * 2);
   }
 
   printf("smem_offset = %ld\n", bgraph.smem_offset);
