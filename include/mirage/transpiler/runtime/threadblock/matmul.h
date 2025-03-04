@@ -194,7 +194,7 @@ CUTE_HOST_DEVICE void r2s_copy_with_oob_protection(
       if constexpr (NUM_EXPS_BEFORE_STORE > 0) {
         CUTE_UNROLL
         for (int i = 0; i < NUM_EXPS_BEFORE_STORE; ++i) {
-          x = perform_element_unary_op<T, ElementUnaryOpType::EXP>(x);
+          x = perform_element_unary_op<float, ElementUnaryOpType::EXP>(x);
         }
       }
       if constexpr (IS_STORE_ACCUM) {
@@ -230,17 +230,17 @@ CUTE_HOST_DEVICE void r2s_copy_with_oob_protection(
       // printf("Thread %d, (%d) -> (%d, %d), %d\n", thread_idx, i,
       // (int)coord_m, (int)coord_n, valid);
       if (valid) {
-        T x = src(i);
+        float x = src(i);
         if constexpr (NUM_EXPS_BEFORE_STORE > 0) {
           CUTE_UNROLL
           for (int i = 0; i < NUM_EXPS_BEFORE_STORE; ++i) {
-            x = perform_element_unary_op<T, ElementUnaryOpType::EXP>(x);
+            x = perform_element_unary_op<float, ElementUnaryOpType::EXP>(x);
           }
         }
         if constexpr (IS_STORE_ACCUM) {
-          dst(i) += x;
+          dst(i) += T(x);
         } else {
-          dst(i) = x;
+          dst(i) = T(x);
         }
       }
     }
