@@ -143,8 +143,10 @@ public:
   KNOperator *create_customized_op(std::vector<DTensor> const &inputs,
                                    mirage::threadblock::Graph const &_graph);
   // helper functions
-  int get_input_dtensors(DTensor **inputs);
-  int get_input_dtensor_layout(DTensor const *input, int *strides);
+  int get_num_input_dtensors() const;
+  int get_num_output_dtensors() const;
+  int get_input_dtensors(DTensor **inputs) const;
+  int get_input_dtensor_layout(DTensor const *input, int *strides) const;
   void generate_triton_program(char const *filepath);
 
   bool can_allocate(DTensor const &tensor,
@@ -155,6 +157,7 @@ public:
 
   // hash related functions
   size_t get_owner_independent_hash() const;
+
 public:
   std::vector<mirage::kernel::KNOperator *> operators;
   dim3 gpu_dim;

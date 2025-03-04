@@ -14,6 +14,7 @@ from .visualizer import *
 from .utils import *
 from .triton_profiler import *
 from .global_config import global_config
+from .graph_dataset import graph_dataset
 
 HARD_CODE = """
 #include <Python.h>
@@ -269,6 +270,8 @@ class KNGraph:
 
         input_tensors = kwargs.get("inputs", [])
 
+        assert self.cygraph.get_num_inputs() == len(input_tensors), "Expected {} input tensors, got {}".format(self.cygraph.get_num_inputs(), len(input_tensors))
+
         # TODO: dtype and device
         buffer_tensor = torch.empty(
             results["buf_size"], dtype=torch.uint8, device=input_tensors[0].device
@@ -424,6 +427,7 @@ class KNGraph:
         fmaps: list = None,
         franges: list = None,
         verbose: bool = False,
+        disable_graph_dataset: bool = False,
         config: str = None,
         backend: str = "cuda",
         warmup_iters: int = 16,
@@ -431,6 +435,18 @@ class KNGraph:
         previous_checkpoint: str = None,
         save_codes: bool = False,
     ):
+        if not disable_graph_dataset:
+            cached_graph = graph_dataset.find(
+                self.cygraph,
+                imaps=imaps,
+                omaps=omaps,
+                griddims=griddims,
+                blockdims=blockdims,
+                fmaps=fmaps,
+                franges=franges,
+                backend=backend)
+            if cached_graph is not None:
+                return cached_graph
         cygraphs = search(
             self.cygraph,
             imaps=imaps,
@@ -513,6 +529,17 @@ class KNGraph:
                 if perf < best_perf:
                     best_graph, best_perf = g, perf
             best_graph.backend = "cuda"
+            if not disable_graph_dataset:
+                graph_dataset.store(
+                    input_graph=self.cygraph,
+                    optimized_graph=best_graph,
+                    imaps=imaps,
+                    omaps=omaps,
+                    griddims=griddims,
+                    blockdims=blockdims,
+                    fmaps=fmaps,
+                    franges=franges,
+                    backend=backend)
             return best_graph
         elif backend == "nki":
             return all_graphs
@@ -540,6 +567,18 @@ class KNGraph:
                 raise AttributeError("The module does not contain an 'execute_mugraph' function.")
             best_graph._cached_results = {"output_shapes": best_output_shapes}
             best_graph.backend = "triton"
+            if not disable_graph_dataset:
+                graph_dataset.store(
+                    input_graph=self.cygraph,
+                    optimized_graph=best_graph,
+                    imaps=imaps,
+                    omaps=omaps,
+                    griddims=griddims,
+                    blockdims=blockdims,
+                    fmaps=fmaps,
+                    franges=franges,
+                    backend=backend)
+
             return best_graph
         else:
             assert False, "Unsupported backend"

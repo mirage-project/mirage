@@ -68,11 +68,11 @@ int KNOperator::get_output_dtensors(DTensor **outputs) {
 /*virtual*/
 size_t KNOperator::get_owner_independent_hash() const {
   size_t ret = std::hash<int>()(op_type);
-  for (const auto & t : input_tensors) {
+  for (auto const &t : input_tensors) {
     size_t h = t.get_owner_independent_hash();
     hash_combine(ret, h);
   }
-  for (const auto & t : output_tensors) {
+  for (auto const &t : output_tensors) {
     size_t h = t.get_owner_independent_hash();
     hash_combine(ret, h);
   }

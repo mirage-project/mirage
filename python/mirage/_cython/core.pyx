@@ -773,6 +773,12 @@ cdef class CyKNGraph:
             operators.append(self._get_kn_operator_info(op))
         return operators
 
+    def get_num_inputs(self):
+        return self.p_kgraph.get_num_input_dtensors()
+
+    def get_num_outputs(self):
+        return self.p_kgraph.get_num_output_dtensors()
+
     def get_input_dtensor_layout(self, DTensor A):
         cdef int cstrides[128]
         num = self.p_kgraph.get_input_dtensor_layout(A.c_ptr, cstrides)

@@ -43,7 +43,7 @@ size_t Graph::pair_hash::operator()(std::pair<int, int> const &p) const {
   return h1;
 }
 
-int Graph::get_input_dtensors(DTensor **inputs) {
+int Graph::get_input_dtensors(DTensor **inputs) const {
   int num_inputs = 0;
   for (auto const &op : this->operators) {
     if (op->op_type == mirage::type::KN_INPUT_OP) {
@@ -54,7 +54,27 @@ int Graph::get_input_dtensors(DTensor **inputs) {
   return num_inputs;
 }
 
-int Graph::get_input_dtensor_layout(DTensor const *input, int *strides) {
+int Graph::get_num_input_dtensors() const {
+  int num_inputs = 0;
+  for (auto const &op : this->operators) {
+    if (op->op_type == mirage::type::KN_INPUT_OP) {
+      num_inputs++;
+    }
+  }
+  return num_inputs;
+}
+
+int Graph::get_num_output_dtensors() const {
+  int num_outputs = 0;
+  for (auto const &op : this->operators) {
+    if (op->op_type == mirage::type::KN_OUTPUT_OP) {
+      num_outputs++;
+    }
+  }
+  return num_outputs;
+}
+
+int Graph::get_input_dtensor_layout(DTensor const *input, int *strides) const {
   for (auto const &op : this->operators) {
     if (op == input->owner_op) {
       assert(op->op_type == mirage::type::KN_INPUT_OP &&
@@ -290,7 +310,7 @@ void from_json(json const &j, Graph &g) {
 size_t Graph::get_owner_independent_hash() const {
   size_t ret = 0;
   hash_combine(ret, gpu_dim);
-  for (const auto& op : operators) {
+  for (auto const &op : operators) {
     size_t h = op->get_owner_independent_hash();
     hash_combine(ret, h);
   }

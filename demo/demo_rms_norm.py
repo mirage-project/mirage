@@ -19,7 +19,7 @@ if __name__ == "__main__":
 
     input_tensors = [
         torch.randn(1, 7168, dtype=torch_dtype, device='cuda:7'),
-        torch.randn(1, 7168, dtype=torch_dtype, device='cuda:7'),
+        #torch.randn(1, 7168, dtype=torch_dtype, device='cuda:7'),
         torch.randn(7168, 16384, dtype=torch_dtype, device='cuda:7'),
     ]
 

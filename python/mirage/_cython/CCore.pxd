@@ -197,6 +197,8 @@ cdef extern from "mirage/kernel/graph.h" namespace "mirage::kernel":
         int customized(vector[const CppDTensor*] inputs,
                        CppDTensor** outputs,
                        CppTBGraph* bgraph)
+        int get_num_input_dtensors()
+        int get_num_output_dtensors()
         int get_input_dtensors(CppDTensor** cinputs)
         int get_input_dtensor_layout(const CppDTensor *input, int *strides)
         void generate_triton_program(const char *filepath)

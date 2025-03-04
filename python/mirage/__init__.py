@@ -30,4 +30,6 @@ def new_threadblock_graph(grid_dim: tuple, block_dim: tuple, forloop_range: int,
 
 # Other Configurations
 from .global_config import global_config
+# Graph Datasets
+from .graph_dataset import graph_dataset
 from .version import __version__
