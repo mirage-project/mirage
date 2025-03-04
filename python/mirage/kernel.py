@@ -219,6 +219,9 @@ class KNGraph:
     def customized(self, inputs: list[DTensor], bgraph: TBGraph) -> list[DTensor]:
         return self.cygraph.customized(inputs, bgraph.cygraph)
 
+    def get_owner_independent_hash(self):
+        return self.cygraph.get_owner_independent_hash()
+
     def valid_kernels(self):
         assert self._is_compiled, "Should check kernel validness after compilation"
         return self._valid_cuda_kernels

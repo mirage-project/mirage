@@ -153,6 +153,8 @@ public:
   bool allocate(DTensor &tensor, bool allocate_fingerprint = true);
   void free(DTensor &tensor);
 
+  // hash related functions
+  size_t get_owner_independent_hash() const;
 public:
   std::vector<mirage::kernel::KNOperator *> operators;
   dim3 gpu_dim;

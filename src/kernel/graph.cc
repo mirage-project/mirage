@@ -287,5 +287,15 @@ void from_json(json const &j, Graph &g) {
   }
 }
 
+size_t Graph::get_owner_independent_hash() const {
+  size_t ret = 0;
+  hash_combine(ret, gpu_dim);
+  for (const auto& op : operators) {
+    size_t h = op->get_owner_independent_hash();
+    hash_combine(ret, h);
+  }
+  return ret;
+}
+
 } // namespace kernel
 } // namespace mirage

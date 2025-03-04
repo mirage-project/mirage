@@ -699,6 +699,9 @@ cdef class CyKNGraph:
             inputs.append(DTensor(ptr))
         return inputs
     
+    def get_owner_independent_hash(self):
+        return self.p_kgraph.get_owner_independent_hash()
+
     # visualizer utils
 
     def _kn_tensor_to_dict(self, DTensor t):
