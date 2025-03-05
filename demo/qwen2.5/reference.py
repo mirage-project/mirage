@@ -8,6 +8,7 @@ torch.cuda.set_device(0)
 with torch.device("cuda"):
     model = Qwen2ForCausalLM.from_pretrained(model_name)
     model.fuse_weights()
+    model.superoptimize_kernels()
 tokenizer = AutoTokenizer.from_pretrained(model_name)
 
 prompt = "Give me a short introduction to large language model."

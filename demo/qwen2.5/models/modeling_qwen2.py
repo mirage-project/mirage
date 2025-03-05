@@ -52,6 +52,7 @@ from transformers.utils import (
 from .configuration_qwen2 import Qwen2Config
 
 import flashinfer
+import mirage as mi
 
 if is_flash_attn_2_available():
     from transformers.modeling_flash_attention_utils import _flash_attention_forward
@@ -177,7 +178,11 @@ class Qwen2MLP(nn.Module):
     def fuse_weights(self):
         self.fused_weight = torch.transpose(torch.cat((self.gate_proj.weight, self.up_proj.weight), 0), 0, 1)
 
-    def forward(self, hidden_state):
+    def superoptimize_kernels(self):
+        graph = mi.new_kernel_graph()
+
+    def forward(self, input_layernorm, hidden_state):
+        hidden_state = input_layernorm(hidden_state)
         output = torch.matmul(hidden_state, self.fused_weight)
         gate_output, up_output = torch.chunk(output, 2, -1)
         return self.down_proj(self.act_fn(gate_output) * up_output)
@@ -216,6 +221,9 @@ class Qwen2Attention(nn.Module):
     def fuse_weights(self):
         self.fused_weight = torch.transpose(torch.cat((self.q_proj.weight, self.k_proj.weight, self.v_proj.weight), 0), 0, 1)
         self.fused_bias = torch.cat((self.q_proj.bias, self.k_proj.bias, self.v_proj.bias), 0)
+
+    def superoptimize_kernels(self):
+        pass
 
     def forward(
         self,
@@ -287,6 +295,10 @@ class Qwen2DecoderLayer(nn.Module):
         self.mlp.fuse_weights()
         self.self_attn.fuse_weights()
 
+    def superoptimize_kernels(self):
+        self.mlp.superoptimize_kernels()
+        self.self_attn.superoptimize_kernels()
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -328,8 +340,8 @@ class Qwen2DecoderLayer(nn.Module):
 
         # Fully Connected
         residual = hidden_states
-        hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states = self.mlp(hidden_states)
+        #hidden_states = self.post_attention_layernorm(hidden_states)
+        hidden_states = self.mlp(self.post_attention_layernorm, hidden_states)
         hidden_states = residual + hidden_states
 
         outputs = (hidden_states,)
@@ -450,6 +462,10 @@ class Qwen2Model(Qwen2PreTrainedModel):
         for decoder_layer in self.layers:
             decoder_layer.fuse_weights()
 
+    def superoptimize_kernels(self):
+        for decoder_layer in self.layers:
+            decoder_layer.superoptimize_kernels()
+
     def get_input_embeddings(self):
         return self.embed_tokens
 
@@ -531,6 +547,9 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
 
     def fuse_weights(self):
         self.model.fuse_weights()
+
+    def superoptimize_kernels(self):
+        self.model.superoptimize_kernels()
 
     @torch.inference_mode()
     def forward(
