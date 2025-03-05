@@ -243,8 +243,6 @@ class Qwen2Attention(nn.Module):
         input_layernorm,
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
-        cache_position: Optional[torch.LongTensor] = None,
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # will become mandatory in v4.46
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         bsz, q_len, _ = hidden_states.size()
@@ -307,8 +305,6 @@ class Qwen2DecoderLayer(nn.Module):
         self,
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
-        cache_position: Optional[torch.LongTensor] = None,
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # will become mandatory in v4.46
         **kwargs,
     ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
@@ -317,8 +313,6 @@ class Qwen2DecoderLayer(nn.Module):
             hidden_states (`torch.FloatTensor`): input to the layer of shape `(batch, seq_len, embed_dim)`
             attention_mask (`torch.FloatTensor`, *optional*): attention mask of size
                 `(batch, sequence_length)` where padding elements are indicated by 0.
-            cache_position (`torch.LongTensor` of shape `(sequence_length)`, *optional*):
-                Indices depicting the position of the input sequence tokens in the sequence.
             position_embeddings (`Tuple[torch.FloatTensor, torch.FloatTensor]`, *optional*):
                 Tuple containing the cosine and sine positional embeddings of shape `(batch_size, seq_len, head_dim)`,
                 with `head_dim` being the embedding dimension of each attention head.
@@ -336,8 +330,6 @@ class Qwen2DecoderLayer(nn.Module):
             input_layernorm = self.input_layernorm,
             hidden_states=hidden_states,
             attention_mask=attention_mask,
-            position_ids=position_ids,
-            cache_position=cache_position,
             position_embeddings=position_embeddings,
         )
         hidden_states = residual + hidden_states
@@ -432,10 +424,6 @@ QWEN2_INPUTS_DOCSTRING = r"""
             Optionally, instead of passing `input_ids` you can choose to directly pass an embedded representation. This
             is useful if you want more control over how to convert `input_ids` indices into associated vectors than the
             model's internal embedding lookup matrix.
-        cache_position (`torch.LongTensor` of shape `(sequence_length)`, *optional*):
-            Indices depicting the position of the input sequence tokens in the sequence. Contrarily to `position_ids`,
-            this tensor is not affected by padding. It is used to update the cache in the correct position and to infer
-            the complete sequence length.
 """
 
 class Qwen2Model(Qwen2PreTrainedModel):
@@ -480,10 +468,8 @@ class Qwen2Model(Qwen2PreTrainedModel):
         self,
         input_ids: torch.LongTensor = None,
         attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
-        cache_position: Optional[torch.LongTensor] = None,
     ) -> Union[Tuple, BaseModelOutputWithPast]:
         inputs_embeds = self.embed_tokens(input_ids)
         
@@ -502,8 +488,6 @@ class Qwen2Model(Qwen2PreTrainedModel):
             layer_outputs = decoder_layer(
                 hidden_states,
                 attention_mask=causal_mask,
-                position_ids=position_ids,
-                cache_position=cache_position,
                 position_embeddings=position_embeddings,
             )
 
@@ -554,10 +538,8 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         self,
         input_ids: torch.LongTensor = None,
         attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
-        cache_position: Optional[torch.LongTensor] = None,
         num_logits_to_keep: int = 0,
         **loss_kwargs,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
@@ -589,18 +571,14 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
 
         #print("input_ids", input_ids)
         #print("attention_mask", attention_mask)
-        #print("position_ids", position_ids)
         #print("inputs_embeds", inputs_embeds)
-        #print("cache_position", cache_position)
 
         # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
         outputs = self.model(
             input_ids=input_ids,
             attention_mask=attention_mask,
-            position_ids=position_ids,
             position_embeddings=position_embeddings,
             inputs_embeds=inputs_embeds,
-            cache_position=cache_position,
         )
 
         hidden_states = outputs[0]
