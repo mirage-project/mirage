@@ -456,7 +456,7 @@ class KNGraph:
                             for t in dtensors:
                                 dims = [t.dim(i) for i in range(t.num_dims)]
                                 input_tensors.append(
-                                    torch.randn(*dims, dtype=dtype_map[str(t.dtype)], device="cuda:0")
+                                    torch.randn(dims, dtype=dtype_map[str(t.dtype)], device="cuda:0")
                                 )
                             starter = torch.cuda.Event(enable_timing=True)
                             ender = torch.cuda.Event(enable_timing=True)
@@ -484,7 +484,7 @@ class KNGraph:
                 for t in dtensors:
                     dims = [t.dim(i) for i in range(t.num_dims)]
                     input_tensors.append(
-                        torch.randn(*dims, dtype=dtype_map[str(t.dtype)], device="cuda:0")
+                        torch.randn(dims, dtype=dtype_map[str(t.dtype)], device="cuda:0")
                     )
                 starter = torch.cuda.Event(enable_timing=True)
                 ender = torch.cuda.Event(enable_timing=True)
