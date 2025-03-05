@@ -487,14 +487,6 @@ class Qwen2Model(Qwen2PreTrainedModel):
     ) -> Union[Tuple, BaseModelOutputWithPast]:
         inputs_embeds = self.embed_tokens(input_ids)
         
-        if cache_position is None:
-            past_seen_tokens = 0
-            cache_position = torch.arange(
-                past_seen_tokens, past_seen_tokens + inputs_embeds.shape[1], device=inputs_embeds.device
-            )
-        if position_ids is None:
-            position_ids = cache_position.unsqueeze(0)
-
         causal_mask = None
 
         hidden_states = inputs_embeds
