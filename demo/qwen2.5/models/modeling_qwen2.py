@@ -174,8 +174,14 @@ class Qwen2MLP(nn.Module):
         self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=False)
         self.act_fn = ACT2FN[config.hidden_act]
 
+    def fuse_weights(self):
+        self.fused_weight = torch.transpose(torch.cat((self.gate_proj.weight, self.up_proj.weight), 0), 0, 1)
+
     def forward(self, hidden_state):
-        return self.down_proj(self.act_fn(self.gate_proj(hidden_state)) * self.up_proj(hidden_state))
+        output = torch.matmul(hidden_state, self.fused_weight)
+        gate_output, up_output = torch.chunk(output, 2, -1)
+        return self.down_proj(self.act_fn(gate_output) * up_output)
+        #return self.down_proj(self.act_fn(self.gate_proj(hidden_state)) * self.up_proj(hidden_state))
 
 class Qwen2Attention(nn.Module):
     """
@@ -207,8 +213,13 @@ class Qwen2Attention(nn.Module):
 
         self.rotary_emb = Qwen2RotaryEmbedding(config=self.config)
 
+    def fuse_weights(self):
+        self.fused_weight = torch.transpose(torch.cat((self.q_proj.weight, self.k_proj.weight, self.v_proj.weight), 0), 0, 1)
+        self.fused_bias = torch.cat((self.q_proj.bias, self.k_proj.bias, self.v_proj.bias), 0)
+
     def forward(
         self,
+        input_layernorm,
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
@@ -217,9 +228,15 @@ class Qwen2Attention(nn.Module):
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         bsz, q_len, _ = hidden_states.size()
 
-        query_states = self.q_proj(hidden_states)
-        key_states = self.k_proj(hidden_states)
-        value_states = self.v_proj(hidden_states)
+        hidden_states = input_layernorm(hidden_states)
+        xqkv = torch.matmul(hidden_states, self.fused_weight) + self.fused_bias
+        query_states = xqkv[:, :, : (self.num_heads * self.head_dim)]
+        xkv = xqkv[:, :, (self.num_heads * self.head_dim) :]
+        key_states, value_states = xkv.chunk(2, -1)
+
+        #query_states = self.q_proj(hidden_states)
+        #key_states = self.k_proj(hidden_states)
+        #value_states = self.v_proj(hidden_states)
 
         query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim)
         key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim)
@@ -266,6 +283,10 @@ class Qwen2DecoderLayer(nn.Module):
         self.input_layernorm = Qwen2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = Qwen2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
+    def fuse_weights(self):
+        self.mlp.fuse_weights()
+        self.self_attn.fuse_weights()
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -292,10 +313,11 @@ class Qwen2DecoderLayer(nn.Module):
 
         residual = hidden_states
 
-        hidden_states = self.input_layernorm(hidden_states)
+        #hidden_states = self.input_layernorm(hidden_states)
 
         # Self Attention
         hidden_states = self.self_attn(
+            input_layernorm = self.input_layernorm,
             hidden_states=hidden_states,
             attention_mask=attention_mask,
             position_ids=position_ids,
@@ -344,6 +366,7 @@ class Qwen2PreTrainedModel(PreTrainedModel):
 
     def _init_weights(self, module):
         std = self.config.initializer_range
+        assert False
         if isinstance(module, nn.Linear):
             module.weight.data.normal_(mean=0.0, std=std)
             if module.bias is not None:
@@ -423,6 +446,10 @@ class Qwen2Model(Qwen2PreTrainedModel):
         # Initialize weights and apply final processing
         self.post_init()
 
+    def fuse_weights(self):
+        for decoder_layer in self.layers:
+            decoder_layer.fuse_weights()
+
     def get_input_embeddings(self):
         return self.embed_tokens
 
@@ -501,6 +528,9 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
 
     def get_decoder(self):
         return self.model
+
+    def fuse_weights(self):
+        self.model.fuse_weights()
 
     @torch.inference_mode()
     def forward(
