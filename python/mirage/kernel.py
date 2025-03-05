@@ -477,6 +477,7 @@ class KNGraph:
                             input_tensors = list()
                             for t in dtensors:
                                 dims = [t.dim(i) for i in range(t.num_dims)]
+                                dtype = convert_dtype_to_torch_type(t.dtype)
                                 input_tensors.append(
                                     torch.randn(dims, dtype=t.dtype, device="cuda:{}".format(global_config.gpu_device_id))
                                 )

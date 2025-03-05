@@ -544,11 +544,14 @@ CustomOPTranspileResult
       assert(num_threads % mma_atom_num_threads == 0);
       int max_num_tgs = num_threads / mma_atom_num_threads; // tg = thread group
       float best_score = -1.0f;
-      int best_num_tg_m = -1, best_num_tg_n = -1;
+      int best_num_tg_m = 1, best_num_tg_n = 1;
       for (int num_tg_m = 1; num_tg_m <= max_num_tgs; ++num_tg_m) {
         for (int num_tg_n = 1; num_tg_m * num_tg_n <= max_num_tgs; ++num_tg_n) {
           int tiled_mma_m = mma_atom_m * num_tg_m;
           int tiled_mma_n = mma_atom_n * num_tg_n;
+          if (tiled_mma_m > m || tiled_mma_n > n) {
+            continue;
+          }
           int num_tiles_m = ceil_div(m, tiled_mma_m);
           int num_tiles_n = ceil_div(n, tiled_mma_n);
           int64_t data_moved_A =
