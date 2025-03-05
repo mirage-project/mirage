@@ -193,11 +193,11 @@ class Qwen2MLP(nn.Module):
         # use the original for prefilling
         hidden_state = input_layernorm(hidden_state)
         output = torch.matmul(hidden_state, self.fused_weight)
-        if hidden_state.shape[-2] == 1:
+        #if hidden_state.shape[-2] == 1:
             # use mirage kernels for decoding
-            output2 = self.kernel(inputs=(hidden_state, input_layernorm.weight, self.fused_weight))[0]
-            print("output", output)
-            print("output2", output2)
+            # output2 = self.kernel(inputs=(hidden_state, input_layernorm.weight, self.fused_weight))[0]
+            # print("output", output)
+            # print("output2", output2)
         
         gate_output, up_output = torch.chunk(output, 2, -1)
         return self.down_proj(self.act_fn(gate_output) * up_output)
@@ -496,6 +496,7 @@ class Qwen2Model(Qwen2PreTrainedModel):
         cache_position: Optional[torch.LongTensor] = None,
     ) -> Union[Tuple, BaseModelOutputWithPast]:
         inputs_embeds = self.embed_tokens(input_ids)
+        
 
         if cache_position is None:
             past_seen_tokens = 0
@@ -573,18 +574,12 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
-        labels: Optional[torch.LongTensor] = None,
         cache_position: Optional[torch.LongTensor] = None,
         num_logits_to_keep: int = 0,
         **loss_kwargs,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         r"""
         Args:
-            labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
-                Labels for computing the masked language modeling loss. Indices should either be in `[0, ...,
-                config.vocab_size]` or -100 (see `input_ids` docstring). Tokens with indices set to `-100` are ignored
-                (masked), the loss is only computed for the tokens with labels in `[0, ..., config.vocab_size]`.
-
             num_logits_to_keep (`int`, *optional*):
                 Calculate logits for the last `num_logits_to_keep` tokens. If `0`, calculate logits for all
                 `input_ids` (special case). Only last token logits are needed for generation, and calculating them only for that
@@ -609,11 +604,11 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         "Hey, are you conscious? Can you talk to me?\nI'm not conscious, but I can talk to you."
         ```"""
 
-        print("input_ids", input_ids)
-        print("attention_mask", attention_mask)
-        print("position_ids", position_ids)
-        print("inputs_embeds", inputs_embeds)
-        print("cache_position", cache_position)
+        #print("input_ids", input_ids)
+        #print("attention_mask", attention_mask)
+        #print("position_ids", position_ids)
+        #print("inputs_embeds", inputs_embeds)
+        #print("cache_position", cache_position)
 
         # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
         outputs = self.model(

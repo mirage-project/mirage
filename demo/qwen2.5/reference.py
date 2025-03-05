@@ -8,7 +8,7 @@ torch.cuda.set_device(0)
 with torch.device("cuda"):
     model = Qwen2ForCausalLM.from_pretrained(model_name)
     model.fuse_weights()
-    model.superoptimize_kernels()
+    # model.superoptimize_kernels()
 tokenizer = AutoTokenizer.from_pretrained(model_name)
 
 prompt = "Give me a short introduction to large language model."
@@ -22,13 +22,17 @@ text = tokenizer.apply_chat_template(
     add_generation_prompt=True
 )
 model_inputs = tokenizer([text], return_tensors="pt").to(model.device)
-tokens = torch.full((1, 1024), -1, dtype=torch.long, device="cuda")
+tokens = torch.full((1, 1024), 0, dtype=torch.long, device="cuda")
 for i in range(model_inputs.input_ids.shape[-1]):
     tokens[0, i] = model_inputs.input_ids[0, i]
 prompt_len = model_inputs.input_ids.shape[-1]
 positions = torch.arange(1024).unsqueeze(0).to(model.device)
 prev_pos = 0
-print("model.config", model.config)
+
+torch.cuda.synchronize()
+starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+starter.record()
+
 
 for cur_pos in range(prompt_len, prompt_len + 512):
     logits = model.forward(input_ids = tokens[:,prev_pos:cur_pos], position_ids = positions[:,prev_pos:cur_pos], use_cache = True)
@@ -36,10 +40,16 @@ for cur_pos in range(prompt_len, prompt_len + 512):
     next_token = next_token[0, -1]
     tokens[0, cur_pos] = next_token
     prev_pos = cur_pos
-    if (next_token == model.config.eos_token_id):
-        break
+    #if (next_token == model.config.eos_token_id):
+    #    break
+
+ender.record()
+torch.cuda.synchronize()
+run_time = starter.elapsed_time(ender)
 
 generated_ids=tokens[:, :prev_pos]
 
 response = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
 print(response)
+
+print("Prompt length {}, Generate length {}, Run time {} ms".format(prompt_len, prev_pos-prompt_len, run_time))
