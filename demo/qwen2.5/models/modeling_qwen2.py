@@ -180,10 +180,25 @@ class Qwen2MLP(nn.Module):
 
     def superoptimize_kernels(self):
         graph = mi.new_kernel_graph()
+        X = graph.new_input(dims=(1, self.hidden_size), dtype=mi.bfloat16)
+        G = graph.new_input(dims=(1, self.hidden_size), dtype=mi.bfloat16)
+        W = graph.new_input(dims=(self.hidden_size, 2*self.intermediate_size), dtype=mi.bfloat16)
+        D = graph.rms_norm(X, normalized_shape=(self.hidden_size,))
+        D = graph.mul(D, G)
+        O = graph.matmul(D, W)
+        graph.mark_output(O)
+        self.kernel = graph.superoptimize(config="mlp")
 
     def forward(self, input_layernorm, hidden_state):
+        # use the original for prefilling
         hidden_state = input_layernorm(hidden_state)
         output = torch.matmul(hidden_state, self.fused_weight)
+        if hidden_state.shape[-2] == 1:
+            # use mirage kernels for decoding
+            output2 = self.kernel(inputs=(hidden_state, input_layernorm.weight, self.fused_weight))[0]
+            print("output", output)
+            print("output2", output2)
+        
         gate_output, up_output = torch.chunk(output, 2, -1)
         return self.down_proj(self.act_fn(gate_output) * up_output)
         #return self.down_proj(self.act_fn(self.gate_proj(hidden_state)) * self.up_proj(hidden_state))
