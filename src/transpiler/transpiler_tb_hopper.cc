@@ -1252,7 +1252,7 @@ CustomOPTranspileResult
     uint32_t mma_reg = config.num_consumer_wgs == 1
                            ? 256
                            : (config.num_consumer_wgs == 2 ? 232 : 160);
-    code.e("tb::wg_increase_regs<$>();", mma_reg);
+    // code.e("tb::wg_increase_regs<$>();", mma_reg);
     code.e("// Consumer main loop");
   }
 
