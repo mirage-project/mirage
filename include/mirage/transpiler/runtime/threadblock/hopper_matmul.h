@@ -61,13 +61,13 @@ public:
   using TileALayout =
       decltype(cutlass::gemm::collective::detail::ss_smem_selector<
                GmmaMajorA,
-               half_t,
+               T,
                decltype(get<0>(SmemLayoutA{})),
                decltype(get<1>(SmemLayoutA{}))>());
   using TileBLayout =
       decltype(cutlass::gemm::collective::detail::ss_smem_selector<
                GmmaMajorB,
-               half_t,
+               T,
                decltype(get<0>(SmemLayoutB{})),
                decltype(get<1>(SmemLayoutB{}))>());
   // Shape checking
@@ -95,7 +95,7 @@ public:
       cute::GMMA::ss_op_selector<
           T,
           T,
-          T,
+          std::conditional_t<std::is_same_v<T, cutlass::half_t>, T, float>,
           decltype(make_shape(
               cute::Int<(M::value < 64 ? 64 : M::value)>{}, N{}, K{})),
           GmmaMajorA,
@@ -118,7 +118,7 @@ public:
     // Make a fake tensor
 
     Tensor sC_fake =
-        make_tensor(make_smem_ptr((half_t *)nullptr), SmemLayoutC{});
+        make_tensor(make_smem_ptr((T *)nullptr), SmemLayoutC{});
 
     TiledMMA tiled_mma;
     ThrMMA thr_mma = tiled_mma.get_slice(thread_idx % 128);
@@ -195,7 +195,6 @@ public:
     cute::warpgroup_commit_batch();
     // cute::warpgroup_wait<0>();
     warpgroup_fence_operand(mma_rC);
-    // wg_arrive<256>(1 + (1 - warpgroup_id()));
   }
 
   // no pipe version

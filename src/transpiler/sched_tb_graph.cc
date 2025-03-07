@@ -158,7 +158,7 @@ TBSched Transpiler::get_threadblock_schedule(tb::Graph const &tb_graph) {
         tb::TBInputOp const *input_op = dynamic_cast<tb::TBInputOp const *>(op);
         tb::STensor stensor = input_op->output_tensors.at(0);
         kn::DTensor dtensor = input_op->dtensor;
-        STensorMeta stensor_meta = stensor_metas.at(stensor.guid);
+        STensorMeta &stensor_meta = stensor_metas.at(stensor.guid);
         DTensorMeta dtensor_meta = dtensor_metas.at(dtensor.guid);
         int3 imap = input_op->input_map;
         size_t alignment = get_num_elems_in_16B(dtensor.data_type);

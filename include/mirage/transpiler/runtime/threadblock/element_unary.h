@@ -73,21 +73,13 @@ public:
     constexpr auto numel = Numel{}.value;
     auto dst_layout = DstLayout{};
     auto src_layout = SrcLayout{};
-    // wg_sync<256>(1 + warpgroup_id());
-
-    // if(block0() && (threadIdx.x == 0 || threadIdx.x == 128)){
-    //   printf("eleleele %d\n", threadIdx.x);
-    // }
-
     for (int elem_idx = thread_idx; elem_idx < numel; elem_idx += NUM_THREADS) {
       int64_t dst_phy_pos = dst_layout(elem_idx);
       int64_t src_phy_pos = src_layout(elem_idx);
       T res = perform_element_unary_op<T, OP>(src[src_phy_pos], scalar);
       Epilogue::run(res, dst, dst_phy_pos, epilogue_scalars);
     }
-    //     if(block0() && (threadIdx.x == 0 || threadIdx.x == 128)){
-    //   printf("eleleele finished %d\n", threadIdx.x);
-    // }
+
   }
 };
 
