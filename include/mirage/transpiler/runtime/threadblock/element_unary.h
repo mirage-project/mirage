@@ -79,7 +79,6 @@ public:
       T res = perform_element_unary_op<T, OP>(src[src_phy_pos], scalar);
       Epilogue::run(res, dst, dst_phy_pos, epilogue_scalars);
     }
-
   }
 };
 

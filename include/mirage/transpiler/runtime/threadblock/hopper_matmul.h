@@ -117,8 +117,7 @@ public:
   static __device__ __forceinline__ auto get_mma_rC(int thread_idx) {
     // Make a fake tensor
 
-    Tensor sC_fake =
-        make_tensor(make_smem_ptr((T *)nullptr), SmemLayoutC{});
+    Tensor sC_fake = make_tensor(make_smem_ptr((T *)nullptr), SmemLayoutC{});
 
     TiledMMA tiled_mma;
     ThrMMA thr_mma = tiled_mma.get_slice(thread_idx % 128);

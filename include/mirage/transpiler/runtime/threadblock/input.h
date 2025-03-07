@@ -188,26 +188,29 @@ public:
     cute::prefetch_tma_descriptor(tma.get_tma_descriptor());
   }
 
-
-template <int SrcLayoutSize>
-static __device__ auto make_coord_runtime(int imapx_a, int imapy_a, int imapz_a) {
+  template <int SrcLayoutSize>
+  static __device__ auto
+      make_coord_runtime(int imapx_a, int imapy_a, int imapz_a) {
     if constexpr (SrcLayoutSize == 6) {
-        return make_coord(_,
-                           _,
-                           imapx_a >= 0 ? blockIdx.x : 0,
-                           imapy_a >= 0 ? blockIdx.y : 0,
-                           imapz_a >= 0 ? blockIdx.z : 0,
-                           _);
+      return make_coord(_,
+                        _,
+                        imapx_a >= 0 ? blockIdx.x : 0,
+                        imapy_a >= 0 ? blockIdx.y : 0,
+                        imapz_a >= 0 ? blockIdx.z : 0,
+                        _);
     } else if constexpr (SrcLayoutSize == 7) {
-        return make_coord(_, _, _,
-                          imapx_a >= 0 ? blockIdx.x : 0,
-                          imapy_a >= 0 ? blockIdx.y : 0,
-                          imapz_a >= 0 ? blockIdx.z : 0,
-                          _);
+      return make_coord(_,
+                        _,
+                        _,
+                        imapx_a >= 0 ? blockIdx.x : 0,
+                        imapy_a >= 0 ? blockIdx.y : 0,
+                        imapz_a >= 0 ? blockIdx.z : 0,
+                        _);
     } else {
-        static_assert(SrcLayoutSize == 6 || SrcLayoutSize == 7, "Unsupported layout size");
+      static_assert(SrcLayoutSize == 6 || SrcLayoutSize == 7,
+                    "Unsupported layout size");
     }
-}
+  }
 
   static __device__ __forceinline__ void run(TMA const &tma_a,
                                              T *dst_a,
@@ -219,7 +222,8 @@ static __device__ auto make_coord_runtime(int imapx_a, int imapy_a, int imapz_a)
     if (lane_id() == 0) {
       Tensor mA = tma_a.get_tma_tensor(shape(SrcLayout{}));
       // （CTA_M, CTA_K, X, Y, Z, FORLOOP）
-      auto blkCoordA = make_coord_runtime<decltype(rank(SrcLayout{}))::value>(imapx_a, imapy_a, imapz_a);
+      auto blkCoordA = make_coord_runtime<decltype(rank(SrcLayout{}))::value>(
+          imapx_a, imapy_a, imapz_a);
       // auto blkCoordA = make_coord(_,
       //                             _,
       //                             imapx_a >= 0 ? blockIdx.x : 0,
@@ -238,10 +242,10 @@ static __device__ auto make_coord_runtime(int imapx_a, int imapy_a, int imapz_a)
       Tensor tAsAX = group_modes<0, rank(tAsA) - 1>(tAsA);
 
       auto [tma_barrier, write_stage] = pipeline.producer_acquire();
-    copy(tma_a.with(*tma_barrier),
-         tAgAX(_, k_tile_iter),
-         tAsAX(_, write_stage));
-    pipeline.producer_advance();
+      copy(tma_a.with(*tma_barrier),
+           tAgAX(_, k_tile_iter),
+           tAsAX(_, write_stage));
+      pipeline.producer_advance();
     }
   }
 };

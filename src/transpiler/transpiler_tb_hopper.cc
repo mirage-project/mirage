@@ -421,10 +421,10 @@ CustomOPTranspileResult
 
       if (!(use_chunked_copy) || (!use_async_copy)) {
         code.e("const $ *dtensor$_tile_ptr = dtensor$_ptr $;",
-             get_datatype_str(dtensor.data_type),
-             dtensor.guid,
-             dtensor.guid,
-             offset);
+               get_datatype_str(dtensor.data_type),
+               dtensor.guid,
+               dtensor.guid,
+               offset);
       }
 
       // assert(use_chunked_copy && use_async_copy);
@@ -577,12 +577,16 @@ CustomOPTranspileResult
         tma,
         map<kn::DTensor, string>(op->output_tensors,
                                  [](kn::DTensor const &dtensor) -> string {
-                                   return fmt("$* dtensor$_ptr", get_datatype_str(dtensor.data_type),
-                                              dtensor.guid);
+                                   return fmt(
+                                       "$* dtensor$_ptr",
+                                       get_datatype_str(dtensor.data_type),
+                                       dtensor.guid);
                                  }),
         map<kn::DTensor, string>(
             op->input_tensors, [](kn::DTensor const &dtensor) -> string {
-              return fmt("$ const* dtensor$_ptr", get_datatype_str(dtensor.data_type), dtensor.guid);
+              return fmt("$ const* dtensor$_ptr",
+                         get_datatype_str(dtensor.data_type),
+                         dtensor.guid);
             }));
     code.e_front(tmplt);
   }
@@ -663,7 +667,7 @@ CustomOPTranspileResult
         }
       }
       code.e("$ *dtensor$_tile_ptr = dtensor$_ptr $;",
-      get_datatype_str(dtensor.data_type),
+             get_datatype_str(dtensor.data_type),
              dtensor.guid,
              dtensor.guid,
              offset);
@@ -677,14 +681,13 @@ CustomOPTranspileResult
             dtensor, dtensor_meta, stensor, stensor_meta, d_innermost_dim);
         code.e(
             "using DTensor$TileLayout = $;", dtensor.guid, dtensor_tile_layout);
-        code.e(
-            "using STensor$OutputAtom = tb::OutputNonChunkedSyncCopy<$, "
-            "DTensor$TileLayout, $, NUM_THREADS>;",
-            stensor.guid,
-            get_datatype_str(dtensor.data_type),
-            dtensor.guid,
-            mov_last_get_stensor_layout(
-                stensor, stensor_meta, d_innermost_dim));
+        code.e("using STensor$OutputAtom = tb::OutputNonChunkedSyncCopy<$, "
+               "DTensor$TileLayout, $, NUM_THREADS>;",
+               stensor.guid,
+               get_datatype_str(dtensor.data_type),
+               dtensor.guid,
+               mov_last_get_stensor_layout(
+                   stensor, stensor_meta, d_innermost_dim));
       } else {
         string dtensor_tile_layout = get_dtensor_tile_layout(
             dtensor, dtensor_meta, stensor, stensor_meta, real_innermost_dim);
@@ -863,7 +866,8 @@ CustomOPTranspileResult
   // argument
   auto transpile_fusion_epilogue =
       [&](std::vector<std::pair<tb::TBOperator const *, TBSchedOpMeta>> const
-              &chain, string dtype) -> string {
+              &chain,
+          string dtype) -> string {
     size_t chain_size = chain.size();
     if (chain_size == 1) {
       // Not fused with anything
@@ -1045,7 +1049,8 @@ CustomOPTranspileResult
           code.e("using InLayout = $;", in_layout);
           code.e("using OutLayout = $;", final_out_layout);
           // Get the epilogue
-          string epilogue = transpile_fusion_epilogue(sched_node.ops, get_datatype_str(input.data_type));
+          string epilogue = transpile_fusion_epilogue(
+              sched_node.ops, get_datatype_str(input.data_type));
           // Define and run the kernel
           code.e("using Kernel = tb::ElementUnaryKernel<$, "
                  "tb::ElementUnaryOpType::$, OutLayout, InLayout, "
@@ -1104,7 +1109,8 @@ CustomOPTranspileResult
           code.e("using In1Layout = $;", in1_layout);
           code.e("using OutLayout = $;", final_out_layout);
           // Get the epilogue
-          string epilogue = transpile_fusion_epilogue(sched_node.ops, get_datatype_str(input0.data_type));
+          string epilogue = transpile_fusion_epilogue(
+              sched_node.ops, get_datatype_str(input0.data_type));
           // Define and run the kernel
           code.e("using Kernel = tb::ElementBinaryKernel<$, "
                  "tb::ElementBinaryOpType::$, OutLayout, In0Layout, In1Layout, "
@@ -1167,7 +1173,8 @@ CustomOPTranspileResult
           code.e("using InLayout = $;", in_layout);
           code.e("using OutLayout = $;", final_out_layout);
           // Get the epilogue
-          string epilogue = transpile_fusion_epilogue(sched_node.ops, get_datatype_str(input.data_type));
+          string epilogue = transpile_fusion_epilogue(
+              sched_node.ops, get_datatype_str(input.data_type));
           // Define and run the kernel
           code.e("using Kernel = tb::ReductionKernel<$, "
                  "OutLayout, InLayout, $, CONSUMER_NUM_THREADS, $>;",
