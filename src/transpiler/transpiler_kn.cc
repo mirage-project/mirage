@@ -116,6 +116,18 @@ std::pair<string, string>
   return {pointer_var_name, code};
 }
 
+std::pair<string, string>
+    Transpiler::get_profiling_ptr(int customized_idx) {
+  auto guid = dtensor.guid;
+  DTensorMeta const &meta = dtensor_metas.at(guid);
+  string pointer_var_name = fmt("dtensor profiler_buffer");
+  string code = "";
+  code = fmt("uint64_t *$ = (uint64_t*)profiler_buffer.at($);",
+               pointer_var_name,
+               customized_idx);
+  return {pointer_var_name, code};
+}
+
 static string get_kn_op_str(type::KNOperatorType type) {
   auto toString = [](type::KNOperatorType type) -> string {
     switch (type) {
@@ -429,14 +441,21 @@ TranspileResult Transpiler::transpile_ugraph() {
         vector<string> ptr_names;
         for (kn::DTensor const &dtensor :
              Combine(cur_op->output_tensors, cur_op->input_tensors)) {
-          auto [ptr_name, ptr_code] = get_dtensor_ptr(dtensor);
+          auto [ptr_name, ptr_code] = get_dtensor_ptr(dtensor, config.profling);
           exec.e(ptr_code);
           ptr_names.push_back(ptr_name);
         }
+
+        auto [ptr_name, ptr_code] = get_profiling_ptr(0);
+        ptr_names.push_back(ptr_name);
+        exec.e(ptr_code);
+        
         // Transpile
         CustomOPTranspileResult result;
         if (config.target_cc == GPU_CC::H100) {
           result = transpile_kn_custom_op_hopper(cur_op);
+          //only generate for first tb graph
+          config.profling = false;
         } else {
           result = transpile_kn_custom_op(cur_op);
         }

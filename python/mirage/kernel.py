@@ -13,6 +13,7 @@ from .threadblock import *
 from .visualizer import *
 from .utils import *
 from .triton_profiler import *
+from .profiler import export_to_perfetto_trace
 
 HARD_CODE = """
 #include <Python.h>
@@ -97,7 +98,7 @@ dtype_map = {
     'fp64':    torch.float64
 }
 
-def get_cc_cmd(target, cc, FILE_NAME, py_include_dir, MIRAGE_ROOT, so_path):
+def get_cc_cmd(target, cc, FILE_NAME, py_include_dir, MIRAGE_ROOT, so_path, profiling):
     common_cmd = [
         cc,
         FILE_NAME,
@@ -119,7 +120,7 @@ def get_cc_cmd(target, cc, FILE_NAME, py_include_dir, MIRAGE_ROOT, so_path):
         specific_cmd = [
             "-arch=sm_90a",
             "-gencode=arch=compute_90a,code=sm_90a",
-        ]
+        ]+ (["-DMIRAGE_ENABLE_PROFILER"] if profiling else []),
     else:
         specific_cmd = [
             "-arch=native",
@@ -289,17 +290,24 @@ class KNGraph:
             for meta in results["output_directives"]
         ]
 
+        prodiler_buffer_tensor = torch.empty(result['profiler_buf_size'], dtype=torch.uint64, device=input_tensors[0].device)
+
         buffer_tensor_ptr = buffer_tensor.data_ptr()
         input_tensors_ptr = [tensor.data_ptr() for tensor in input_tensors]
         output_tensors_ptr = [tensor.data_ptr() for tensor in output_tensors]
+        prodiler_buffer_tensor_ptr = prodiler_buffer_tensor.data_ptr()
 
-        self.run(input_tensors_ptr, output_tensors_ptr, buffer_tensor_ptr)
+        self.run(input_tensors_ptr, output_tensors_ptr, buffer_tensor_ptr, prodiler_buffer_tensor_ptr)
 
+        if result['profiler_buf_size'] > 0:
+            export_to_perfetto_trace(prodiler_buffer_tensor_ptr, 'mirage.perfetto-trace')
         return output_tensors
 
     def compile(self, async_=False, **kwargs):
         if self._is_compiled:
             return self._cached_results
+        parser.add_argument("--profiling")
+        args = parser.parse_args()
 
         input_tensors = kwargs.get("inputs", [])
         input_strides = []
@@ -319,7 +327,7 @@ class KNGraph:
         pipeline_stages = kwargs.get("pipeline_stages", 2)
 
         result = generate_cuda_program(
-            self.cygraph, target_cc=target_cc, input_strides=input_strides, num_warp_groups = num_warp_groups, pipeline_stages = pipeline_stages
+            self.cygraph, target_cc=target_cc, input_strides=input_strides, num_warp_groups = num_warp_groups, pipeline_stages = pipeline_stages, profiling=args.profiling
         )
         # print(result)
         if result["max_smem_size"] > get_shared_memory_capacity(target_cc):
@@ -383,7 +391,7 @@ class KNGraph:
                 f"Error: MIRAGE_ROOT ({MIRAGE_ROOT}) not found. Please set the MIRAGE_ROOT env variable correctly"
             )
             sys.exit(1)
-        cc_cmd = get_cc_cmd(target_cc, cc, FILE_NAME, py_include_dir, MIRAGE_ROOT, so_path)
+        cc_cmd = get_cc_cmd(target_cc, cc, FILE_NAME, py_include_dir, MIRAGE_ROOT, so_path, args.profiling)
 
 
         def remain_op():
