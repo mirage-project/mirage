@@ -200,6 +200,7 @@ public:
       // （CTA_M, CTA_K, X, Y, Z, FORLOOP）
       auto blkCoordA = make_coord(_,
                                   _,
+                                  _,
                                   imapx_a >= 0 ? blockIdx.x : 0,
                                   imapy_a >= 0 ? blockIdx.y : 0,
                                   imapz_a >= 0 ? blockIdx.z : 0,

@@ -198,6 +198,7 @@ TBSched Transpiler::get_threadblock_schedule(tb::Graph const &tb_graph) {
         op_meta.is_pipelined_input = op_meta.is_chunked_input &&
                                      input_op->forloop_dim != -1 &&
                                      config.target_cc >= GPU_CC::A100;
+        stensor_meta.is_pipelined_input = op_meta.is_pipelined_input;
       } else if (op->op_type == type::TB_OUTPUT_OP) {
         // Decide whether or not to use chunked copy
         assert(is_fused_with_prev[op] == false);

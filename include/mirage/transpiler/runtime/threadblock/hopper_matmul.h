@@ -37,7 +37,10 @@ template <typename T,
                                      // data, it does not use the standard
                                      // "epilogue" semantic
           bool IS_STORE_ACCUM,
-          bool IS_COORPERATIVE>
+          bool IS_COORPERATIVE,
+          bool IS_PIPELINE_A,
+          bool IS_PIPELINE_B,
+          int PIPELINE_STAGES>
 class Hopper_Matmul {
 public:
   CUTE_STATIC_ASSERT_V(rank(SmemLayoutA_{}) == _2{});
@@ -76,6 +79,9 @@ public:
   CUTE_STATIC_ASSERT_V(K{} == get<1>(shape(SmemLayoutB{})));
   CUTE_STATIC_ASSERT_V(M{} == get<0>(shape(SmemLayoutC{})));
   CUTE_STATIC_ASSERT_V(N{} == get<1>(shape(SmemLayoutC{})));
+
+  static constexpr int PIPELINE_STAGE_A = IS_PIPELINE_A ? PIPELINE_STAGES : 1;
+  static constexpr int PIPELINE_STAGE_B = IS_PIPELINE_B ? PIPELINE_STAGES : 1;
 
   //   using TiledMMA = decltype(make_tiled_mma(
   //       SM90_64x32x16_F16F16F16_SS<GMMA::Major::K, GMMA::Major::MN>{}));
@@ -155,15 +161,17 @@ public:
           int read_stage) {
     // cutlass::arch::warpgroup_reg_alloc<192>();
     TiledMMA tiled_mma;
-    auto sA_l = tile_to_shape(
-        TileALayout{},
-        make_shape(shape<0>(SmemLayoutA{}), shape<1>(SmemLayoutA{}), Int<2>{}),
-        Step<_1, _2, _3>{});
+   auto sA_l = tile_to_shape(TileALayout{},
+                              make_shape(shape<0>(SmemLayoutA{}),
+                                         shape<1>(SmemLayoutA{}),
+                                         Int<PIPELINE_STAGE_A>{}),
+                              Step<_1, _2, _3>{});
 
-    auto sB_l = tile_to_shape(
-        TileBLayout{},
-        make_shape(shape<0>(SmemLayoutB{}), shape<1>(SmemLayoutB{}), Int<2>{}),
-        Step<_1, _2, _3>{});
+    auto sB_l = tile_to_shape(TileBLayout{},
+                              make_shape(shape<0>(SmemLayoutB{}),
+                                         shape<1>(SmemLayoutB{}),
+                                         Int<PIPELINE_STAGE_B>{}),
+                              Step<_1, _2, _3>{});
 
     Tensor sA = make_tensor(make_smem_ptr(a_ptr), sA_l); // [M, K]
     Tensor sB = make_tensor(make_smem_ptr(b_ptr), sB_l); // [N, K]
@@ -176,15 +184,17 @@ public:
     Tensor tCrB = thr_mma.make_fragment_B(tCsB); // (MMA,MMA_N,MMA_K,PIPE)
     // int read_stage = smem_pipe_read.index();
 
+
     warpgroup_fence_operand(mma_rC);
     cute::warpgroup_arrive();
     gemm(tiled_mma,
-         tCrA(_, _, _, read_stage),
-         tCrB(_, _, _, read_stage),
+         tCrA(_, _, _, IS_PIPELINE_A ? read_stage : 0),
+         tCrB(_, _, _, IS_PIPELINE_B ? read_stage : 0),
          mma_rC);
     cute::warpgroup_commit_batch();
-    cute::warpgroup_wait<0>();
-    warpgroup_fence_operand(mma_rC);
+    // cute::warpgroup_wait<0>();
+    warpgroup_fence_operand(mma_rC); 
+// wg_arrive<256>(1 + (1 - warpgroup_id()));
   }
 
   // no pipe version

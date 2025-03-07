@@ -4,6 +4,7 @@
 #pragma once
 
 namespace tb {
+
 static __device__ __forceinline__ bool block0(){
   return (blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0);
 }
@@ -59,6 +60,16 @@ static __device__ __forceinline__ void wg_sync(uint32_t barrier_id) {
   asm volatile("brkpt;\n" ::);
 #endif
 }
+
+template<int GROUP_THREADS>
+static __device__ __forceinline__ void wg_arrive(uint32_t barrier_id) {
+#ifdef MIRAGE_GRACE_HOPPER
+    // cutlass::arch::synclog_emit_named_barrier_arrive(__LINE__, num_threads, barrier_id);
+    asm volatile("bar.arrive %0, %1;" : : "r"(barrier_id), "r"(GROUP_THREADS));
+#elif defined(__CUDA_ARCH__)
+    asm volatile ("brkpt;\n" ::);
+#endif
+  }
 
 
 

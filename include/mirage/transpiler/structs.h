@@ -185,6 +185,9 @@ struct STensorMeta {
   // Major K for M input
   bool m_input = false;
 
+  // if is associate with a tma/cp.async copy
+  bool is_pipelined_input = false;
+
   // XOR-based swizzling parameters
   int xor_swizzle_b, xor_swizzle_m, xor_swizzle_s;
 };

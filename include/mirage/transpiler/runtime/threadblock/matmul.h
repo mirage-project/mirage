@@ -194,7 +194,7 @@ CUTE_HOST_DEVICE void r2s_copy_with_oob_protection(
       if constexpr (NUM_EXPS_BEFORE_STORE > 0) {
         CUTE_UNROLL
         for (int i = 0; i < NUM_EXPS_BEFORE_STORE; ++i) {
-          x = perform_element_unary_op<T, ElementUnaryOpType::EXP>(x);
+          x = perform_element_unary_op<float, ElementUnaryOpType::EXP>(x);
         }
       }
       if constexpr (IS_STORE_ACCUM) {
@@ -234,7 +234,7 @@ CUTE_HOST_DEVICE void r2s_copy_with_oob_protection(
         if constexpr (NUM_EXPS_BEFORE_STORE > 0) {
           CUTE_UNROLL
           for (int i = 0; i < NUM_EXPS_BEFORE_STORE; ++i) {
-            x = perform_element_unary_op<T, ElementUnaryOpType::EXP>(x);
+            x = perform_element_unary_op<float, ElementUnaryOpType::EXP>(x);
           }
         }
         if constexpr (IS_STORE_ACCUM) {
