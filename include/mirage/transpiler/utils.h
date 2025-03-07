@@ -341,8 +341,8 @@ inline auto generate_partitioned_and_expanded_layout(
         gridZ_shape = grid_dim.z;
       }
 
-            //       new_shape_values[partition_grid_dim],
-            //  partition_grid_dim);
+      //       new_shape_values[partition_grid_dim],
+      //  partition_grid_dim);
 
     } else if (partition_grid_dim >= 0) {
       int partition_factor = (dim == 0)   ? grid_dim.x
@@ -351,8 +351,8 @@ inline auto generate_partitioned_and_expanded_layout(
       // Adjust shape by dividing it by the partition factor
       new_shape_values[partition_grid_dim] =
           original_shape.at(partition_grid_dim) / partition_factor;
-      // Stride remains the same because partitioning does not affect layout's
-      // memory strides
+      // Stride remains the same because partitioning does not
+      // affect layout's memory strides
       new_stride_values[partition_grid_dim] =
           original_stride.at(partition_grid_dim);
 
@@ -370,7 +370,6 @@ inline auto generate_partitioned_and_expanded_layout(
         gridZ_shape = grid_dim.z;
       }
 
-
     } else if (forloop_dim == dim) {
       // forloop dim does not equal to partition dim
       // assert(partition_grid_dim < 0);
@@ -386,7 +385,6 @@ inline auto generate_partitioned_and_expanded_layout(
     } else {
     }
   }
-
 
   // Add extra dimensions for gridDim.x, gridDim.y, and gridDim.z
   new_shape_values.push_back(gridX_shape); // Add gridDim.x as a new dimension

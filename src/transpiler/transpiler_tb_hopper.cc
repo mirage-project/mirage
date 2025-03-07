@@ -315,14 +315,14 @@ CustomOPTranspileResult
       (config::MAX_NUM_WARP_GROUPS <
        config.num_consumer_wgs + config.num_producer_wgs) ||
       (num_threads !=
-       (config.num_consumer_wgs + config.num_producer_wgs) * 128 &&
+           (config.num_consumer_wgs + config.num_producer_wgs) * 128 &&
        (g.forloop_range > 1))) {
     assert(false && "compiler assertion failure");
     return CustomOPTranspileResult{CUDA_T_CONFIG_ERROR, func_name, 0, ""};
   }
 
   // int barrier_size = 16 * config.pipeline_stages;
-   int tma_barrier_size = 16 * config.pipeline_stages;
+  int tma_barrier_size = 16 * config.pipeline_stages;
 
   // int 64
   int cluster_barrier_size = 8;
@@ -1029,8 +1029,10 @@ CustomOPTranspileResult
               input, stensor_metas.at(input.guid), iter_dim);
           string final_out_layout = mov_last_get_stensor_layout(
               output, stensor_metas.at(output.guid), iter_dim);
-          // code.e("using InLayout = decltype(composition(Swizzle<3, 4, 3>{}, Layout<Shape<Int<64>, Int<128>>, Stride<Int<64>, Int<1>>>{}));");
-          // code.e("using OutLayout = Layout<Shape<Int<64>, Int<128>>, Stride<Int<1>, Int<64>>>;");
+          // code.e("using InLayout = decltype(composition(Swizzle<3, 4, 3>{},
+          // Layout<Shape<Int<64>, Int<128>>, Stride<Int<64>, Int<1>>>{}));");
+          // code.e("using OutLayout = Layout<Shape<Int<64>, Int<128>>,
+          // Stride<Int<1>, Int<64>>>;");
           code.e("using InLayout = $;", in_layout);
           code.e("using OutLayout = $;", final_out_layout);
           // Get the epilogue
@@ -1055,7 +1057,8 @@ CustomOPTranspileResult
           //        input.guid,
           //        cur_op->scalar);
           // code.e("}else{");
-          //   code.e("Kernel::run(stensor$_ptr + 4096, stensor$_ptr + 4096, thread_idx, $, "
+          //   code.e("Kernel::run(stensor$_ptr + 4096, stensor$_ptr + 4096,
+          //   thread_idx, $, "
           //        "scalars);",
           //        output.guid,
           //        input.guid,
@@ -1252,12 +1255,12 @@ CustomOPTranspileResult
 
   if (pipe_tma) {
     code.e("else {");
-     // allocate register files for wgmma
-  uint32_t mma_reg = config.num_consumer_wgs == 1
-                         ? 256
-                         : (config.num_consumer_wgs == 2 ? 232 : 160);
-  code.e("tb::wg_increase_regs<$>();", mma_reg);
-  code.e("// Consumer main loop");
+    // allocate register files for wgmma
+    uint32_t mma_reg = config.num_consumer_wgs == 1
+                           ? 256
+                           : (config.num_consumer_wgs == 2 ? 232 : 160);
+    code.e("tb::wg_increase_regs<$>();", mma_reg);
+    code.e("// Consumer main loop");
   }
 
   std::map<int64_t, tb::TBInputOp const *> copy_of_inputs = pipeline_inputs;
@@ -1265,8 +1268,7 @@ CustomOPTranspileResult
 
   code.e("for (uint32_t for_idx = 0; for_idx < $; for_idx++) {",
          g.forloop_range);
- 
- 
+
   // warpgroup_id
   for (TBSchedNode const &sched_node : sched.loop_nodes) {
     if (sched_node.type == tb_sched_node_t::OPERATOR &&
@@ -1277,7 +1279,6 @@ CustomOPTranspileResult
     }
     CodeKeeper res;
 
-    
     TranspileErrorType err =
         transpile_tb_sched_node(sched_node, res, pipeline_inputs, true);
 
@@ -1287,11 +1288,11 @@ CustomOPTranspileResult
     }
   }
 
-if (!copy_of_inputs.empty()) {
-    for (auto const& [pipe_id, op] : copy_of_inputs) {
+  if (!copy_of_inputs.empty()) {
+    for (auto const &[pipe_id, op] : copy_of_inputs) {
       code.e("hopper_async_pipeline_$.consumer_release();", pipe_id);
     }
-}
+  }
 
   code.e("}"); // For loop
 

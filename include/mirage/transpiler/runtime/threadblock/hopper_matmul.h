@@ -92,12 +92,14 @@ public:
                                             Layout<Shape<_1, _1, _1>>>;
 
   using TiledMMA = decltype(cute::make_tiled_mma(
-      cute::GMMA::ss_op_selector<T,
-                                 T,
-                                 T,
-                                 decltype(make_shape(cute::Int<(M::value < 64 ? 64 : M::value)>{}, N{}, K{})),
-                                 GmmaMajorA,
-                                 GmmaMajorB>(),
+      cute::GMMA::ss_op_selector<
+          T,
+          T,
+          T,
+          decltype(make_shape(
+              cute::Int<(M::value < 64 ? 64 : M::value)>{}, N{}, K{})),
+          GmmaMajorA,
+          GmmaMajorB>(),
       AtomLayoutMNK{}));
 
   static constexpr int TILED_MMA_NUM_THREADS = thr_size(TiledMMA{});
@@ -161,7 +163,7 @@ public:
           int read_stage) {
     // cutlass::arch::warpgroup_reg_alloc<192>();
     TiledMMA tiled_mma;
-   auto sA_l = tile_to_shape(TileALayout{},
+    auto sA_l = tile_to_shape(TileALayout{},
                               make_shape(shape<0>(SmemLayoutA{}),
                                          shape<1>(SmemLayoutA{}),
                                          Int<PIPELINE_STAGE_A>{}),
@@ -184,7 +186,6 @@ public:
     Tensor tCrB = thr_mma.make_fragment_B(tCsB); // (MMA,MMA_N,MMA_K,PIPE)
     // int read_stage = smem_pipe_read.index();
 
-
     warpgroup_fence_operand(mma_rC);
     cute::warpgroup_arrive();
     gemm(tiled_mma,
@@ -193,8 +194,8 @@ public:
          mma_rC);
     cute::warpgroup_commit_batch();
     // cute::warpgroup_wait<0>();
-    warpgroup_fence_operand(mma_rC); 
-// wg_arrive<256>(1 + (1 - warpgroup_id()));
+    warpgroup_fence_operand(mma_rC);
+    // wg_arrive<256>(1 + (1 - warpgroup_id()));
   }
 
   // no pipe version
