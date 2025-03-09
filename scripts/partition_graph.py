@@ -46,31 +46,35 @@ def hook_fn(inputs, outputs):
         
         build_computational_graph(ids_to_nodes[id(next_fn[0])], unique_operators)
 
-def get_partitions(op_node, max_num_ops, visited_start_nodes, all_subgraphs, UNSUPPORTED_OPS):
+def get_partitions(op_node, min_num_ops, max_num_ops, visited_start_nodes, all_subgraphs, UNSUPPORTED_OPS):
     visited_start_nodes.add(id(op_node.fn))
     
     if op_node.name not in UNSUPPORTED_OPS:
-        get_partitions_helper(op_node, {op_node: None}, max_num_ops, set(), all_subgraphs, UNSUPPORTED_OPS)
+        get_partitions_helper(op_node, {op_node: None}, min_num_ops, max_num_ops, set(), all_subgraphs, UNSUPPORTED_OPS)
         
     for input_node in op_node.input_ops:
         if id(input_node.fn) not in visited_start_nodes:
-            get_partitions(input_node, max_num_ops, visited_start_nodes, all_subgraphs, UNSUPPORTED_OPS)
+            get_partitions(input_node, min_num_ops, max_num_ops, visited_start_nodes, all_subgraphs, UNSUPPORTED_OPS)
 
-def get_partitions_helper(op_node, curr_subgraph, max_num_ops, visited, all_subgraphs, UNSUPPORTED_OPS):
+def get_partitions_helper(op_node, curr_subgraph, min_num_ops, max_num_ops, visited, all_subgraphs, UNSUPPORTED_OPS):
     if id(op_node.fn) in visited:
         return
     if len(curr_subgraph) > max_num_ops:
         return
-    if op_node.name in UNSUPPORTED_OPS:
-        return
     
     # assume op_node already in curr_subgraph
     visited.add(id(op_node.fn))
-    all_subgraphs.append(curr_subgraph.copy())
+    if len(curr_subgraph) >= min_num_ops:
+        all_subgraphs.append(curr_subgraph.copy())
+
+    valid_input_ops = []
+    for input_op in op_node.input_ops:
+        if input_op.name not in UNSUPPORTED_OPS:
+            valid_input_ops.append(input_op)
     
-    for choose_k in range(1, len(op_node.input_ops)):
+    for choose_k in range(1, len(valid_input_ops)):
         curr_subgraph_copy = curr_subgraph.copy()
-        for comb_inputs in comb(op_node.input_ops, choose_k):
+        for comb_inputs in comb(valid_input_ops, choose_k):
             visited_copy = visited.copy()
             for input_node in comb_inputs:
                 if input_node not in curr_subgraph_copy:
@@ -78,10 +82,10 @@ def get_partitions_helper(op_node, curr_subgraph, max_num_ops, visited, all_subg
                 else:
                     curr_subgraph_copy[input_node].append(op_node)
 
-                get_partitions_helper(input_node, curr_subgraph_copy.copy(), max_num_ops, visited_copy, all_subgraphs, UNSUPPORTED_OPS)
+                get_partitions_helper(input_node, curr_subgraph_copy.copy(), min_num_ops, max_num_ops, visited_copy, all_subgraphs, UNSUPPORTED_OPS)
 
 
-def partition_graph(dummy_loss, max_num_ops=3, UNSUPPORTED_OPS=set(["torch::autograd::AccumulateGrad", 
+def partition_graph(dummy_loss, min_num_ops=2, max_num_ops=4, UNSUPPORTED_OPS=set(["torch::autograd::AccumulateGrad", 
                                                               "NllLossBackward0", 
                                                               "EmbeddingBackward0"])):
     loss_node = Operator(name=dummy_loss.grad_fn.name(), fn=dummy_loss.grad_fn)
@@ -93,7 +97,7 @@ def partition_graph(dummy_loss, max_num_ops=3, UNSUPPORTED_OPS=set(["torch::auto
 
     all_subgraphs = []
     visited_start_nodes = set()
-    get_partitions(loss_node, max_num_ops, visited_start_nodes, all_subgraphs, UNSUPPORTED_OPS)
+    get_partitions(loss_node, min_num_ops, max_num_ops, visited_start_nodes, all_subgraphs, UNSUPPORTED_OPS)
 
     return all_subgraphs, unique_operators
 
