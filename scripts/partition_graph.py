@@ -23,8 +23,8 @@ f"""
 def hook_fn(inputs, outputs):
     if {id(op_node.fn)} in ids_to_nodes:
         op_node = ids_to_nodes[{id(op_node.fn)}]
-        op_node.input_tensor_shapes = [input.shape if input != None else None for input in inputs]
-        op_node.output_tensor_shapes = [output.shape if output != None else None for output in outputs]
+        op_node.input_tensor_shapes = [(input.shape, id(input)) if input != None else None for input in inputs]
+        op_node.output_tensor_shapes = [(output.shape, id(output)) if output != None else None for output in outputs]
 """,
     globals(),
     local_scope
