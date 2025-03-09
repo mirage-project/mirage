@@ -99,8 +99,9 @@ def get_cc_cmd(target, cc, FILE_NAME, py_include_dir, MIRAGE_ROOT, NCCL_ROOT, MP
         f"-I/usr/include/nvshmem_12",
         # f"-I/usr/include/openmpi-x86_64",
         f"-L/usr/lib64/nvshmem/12",
-        "-lnvshmem",
-        # "-lnvshmem_device",
+        # "-lnvshmem",
+        "-lnvshmem_device",
+        "-lnvshmem_host",
         "-ccbin=mpic++",
         f"-I{NCCL_ROOT}/include",
         f"-L/{NCCL_ROOT}/lib",
@@ -174,6 +175,8 @@ class KNGraph:
         self._valid_cuda_kernels = False
         self._cached_results = None
         self.visualizer = None
+        self.use_nvshmem = False
+        self.nvshmem = None
 
         self.backend = "cuda"
 
@@ -223,6 +226,7 @@ class KNGraph:
         return self.cygraph.rms_norm(A, normalized_shape)
 
     def customized(self, inputs: list[DTensor], bgraph: TBGraph) -> list[DTensor]:
+        self.use_nvshmem = bgraph.use_nvshmem
         return self.cygraph.customized(inputs, bgraph.cygraph)
 
     # TODO (linsj20)
@@ -261,7 +265,14 @@ class KNGraph:
         return output_tensors
 
     def cuda_call(self, **kwargs):
+        print("Calling cuda_call")
         results = self.compile(**kwargs)
+        print("Return from compile")
+        if kwargs.get("save_codes", False):
+            print("Saving generated codes to generated_codes/generated_kernel.cu")
+            os.makedirs("generated_codes", exist_ok=True)
+            with open("generated_codes/generated_kernel.cu", "w") as f:
+                f.write(results["code"])
 
         # directly return if the Transpiler cannot generate valid CUDA kernels
         if not self._valid_cuda_kernels:
@@ -354,6 +365,14 @@ class KNGraph:
                 f"Warning: MPI_ROOT ({MPI_ROOT}) not found. Disable distributed kernel generation."
             )
             sys.exit(1)
+
+        #TODO: (NorthmanPKU)
+        # MVSHMEM_ROOT = os.environ.get("MVSHMEM_HOME")
+        # if not os.path.exists(MVSHMEM_ROOT):
+        #     print(
+        #         f"Warning: MVSHMEM_ROOT ({MVSHMEM_ROOT}) not found. Disable distributed kernel generation."
+        #     )
+        #     sys.exit(1)
 
         # if True:
         #     tempdir = './test/'

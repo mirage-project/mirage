@@ -40,6 +40,7 @@ static inline void finalize_mpi_nvshmem() {
 template <typename T>
 static inline T *to_nvshmem_ptr(std::size_t num_elements) {
 #if USE_NVSHMEM
+  //TODO: Northman
   void *ptr = nvshmem_malloc(num_elements * sizeof(T));
   return static_cast<T *>(nvshmem_ptr(ptr, nvshmem_my_pe()));
 #else

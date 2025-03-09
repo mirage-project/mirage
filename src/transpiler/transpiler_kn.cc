@@ -160,6 +160,8 @@ TranspileResult Transpiler::transpile_ugraph() {
       "std::vector<void*> output_tensors"
       ", void* buf, int rank) {");
 
+  //Assume that we don't use both nccl and nvshmem
+  assert(!(use_nccl && use_nvshmem));
   if (use_nccl) {
     //exec.e("// Initialize MPI");
     //exec.e("int argc = 1;");
@@ -183,6 +185,11 @@ TranspileResult Transpiler::transpile_ugraph() {
     exec.e("if (my_rank == 0) ncclGetUniqueId(&id);");
     exec.e("MPI_Bcast(&id, sizeof(id), MPI_BYTE, 0, MPI_COMM_WORLD);");
     exec.e("NCCLCHECK(ncclCommInitRank(&comm, world_size, id, my_rank));");
+  }        
+  else if (use_nvshmem) { // define nvshemem
+    exec.e("initialize_mpi_nvshmem(rank);");
+    exec.e("int mype = nvshmem_my_pe();");
+    exec.e("int npes = nvshmem_n_pes();");
   }
 
   for (kn::KNOperator *const op : g->operators) {
@@ -192,6 +199,12 @@ TranspileResult Transpiler::transpile_ugraph() {
     exec.e("// OP type: $", op_type_str);
     switch (op->op_type) {
       case type::KNOperatorType::KN_INPUT_OP:
+        //TODO: multiGPU division using NVSHMEM
+        exec.e("// Input: Shape<$, $, $, $>",
+               op->output_tensors[0].dim[0],
+               op->output_tensors[0].dim[1],
+               op->output_tensors[0].dim[2],
+               op->output_tensors[0].dim[3]);
       case type::KNOperatorType::KN_OUTPUT_OP: {
         // Input/Output op
         break;
@@ -450,18 +463,31 @@ TranspileResult Transpiler::transpile_ugraph() {
       }
       case type::KNOperatorType::KN_CUSTOMIZED_OP: {
 
-        // define nvshemem
-        if (use_nvshmem) {
-          exec.e("initialize_mpi_nvshmem(rank);");
-        }
         // Customized op
         kn::KNCustomizedOp const *cur_op =
             dynamic_cast<kn::KNCustomizedOp const *>(op);
         // tb::ExecutionPlan const &plan = cur_op->plan;
         tb::Graph const &bgraph = cur_op->bgraph;
+        vector<string> comm_buf_names;
+        // For epilogue nvshmem allocation
+        if (use_nvshmem) {
+          for (kn::DTensor const &dtensor : cur_op->output_tensors) {
+            DTensorMeta meta = dtensor_metas.at(dtensor.guid);
+            if (dtensor.epilogue == type::TBEpilogueType::TB_EPILOGUE_ALLTOALL) {
+              //TODO: TB alltoall
+              exec.e("half_t *alltoall_buf_$ = (half_t*)nvshmem_malloc(sizeof(half_t) * $);", \
+              dtensor.guid, meta.num_phy_elems);
+              comm_buf_names.push_back(fmt("alltoall_buf_$", dtensor.guid));
+            }
+            else if (dtensor.epilogue == type::TBEpilogueType::TB_EPILOGUE_ALLREDUCE) {
+              assert(false && "TB allreduce is not supported yet"); 
+              //TODO: TB allreduce
+            }
+          }
+        }
         // Get DTensor ptrs
         // We make the aggrement that, when calling a custom kernel, the
-        // arguments are in the order of "output_tensors, input_tensors"
+        // arguments are in the order of "output_tensors, input_tensors, comm_buf_names"
         vector<string> ptr_names;
         for (kn::DTensor const &dtensor :
              Combine(cur_op->output_tensors, cur_op->input_tensors)) {
@@ -611,26 +637,46 @@ TranspileResult Transpiler::transpile_ugraph() {
                    result.func_name,
                    result.smem_size);
           }
-
-          exec.e("$<<<grid_dim, block_dim, smem_size>>>($ $);",
+          if(!use_nvshmem) {
+            exec.e("$<<<grid_dim, block_dim, smem_size>>>($ $ $);",
                  result.func_name,
                  tmas,
-                 ptr_names);
+                 ptr_names,
+                 comm_buf_names);
+          }
+          else {
+            exec.e("$<<<grid_dim, block_dim, smem_size>>>($ $ $, mype, npes);",
+                 result.func_name,
+                 tmas,
+                 ptr_names,
+                 comm_buf_names);
+          }
         } else {
           exec.e("cudaFuncSetAttribute($, "
                  "cudaFuncAttributeMaxDynamicSharedMemorySize, $);",
                  result.func_name,
                  result.smem_size);
-          exec.e("$<<<grid_dim, block_dim, smem_size>>>( $);",
+          if(!use_nvshmem) {
+            exec.e("$<<<grid_dim, block_dim, smem_size>>>($ $);",
                  result.func_name,
-                 ptr_names);
-        }
-
-        if (use_nvshmem) {
-          exec.e("finalize_mpi_nvshmem();");
+                 ptr_names,
+                 comm_buf_names);
+          }
+          else {
+            exec.e("$<<<grid_dim, block_dim, smem_size>>>($, $, mype, npes);",
+                 result.func_name,
+                 ptr_names,
+                 comm_buf_names);
+          }
         }
 
         custom_kernels.e(result.code);
+        if (use_nvshmem) {
+          for (auto const &comm_buf_name : comm_buf_names) {
+            std::cout << "freeing " << comm_buf_name << std::endl;
+            exec.e("nvshmem_free($);", comm_buf_name);
+          }
+        }
 
         break;
       }
@@ -647,6 +693,9 @@ TranspileResult Transpiler::transpile_ugraph() {
     exec.e("ncclCommDestroy(comm);");
     exec.e("cudaStreamDestroy(s);");
     //exec.e("MPI_Finalize();");
+  }
+  else if (use_nvshmem) {
+    exec.e("finalize_mpi_nvshmem();");
   }
 
   init.e("}");
