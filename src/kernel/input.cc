@@ -93,6 +93,7 @@ KNInputOp::KNInputOp(Graph *_graph,
   }
 
   if(!dim_divided) { // The tensor has been divided during construction. Avoid redundant division.
+    // Divide dim
     for (int d = 0; d < 3; d++) {
       int dim_idx = -1;
       int dim_div = 1;
@@ -117,6 +118,15 @@ KNInputOp::KNInputOp(Graph *_graph,
         printf("After: tensor.dim[%d]: %d\n", dim_idx, tensor.dim[dim_idx]);
       }
     }
+    // Update strides, row-major default
+    int total_elements = 1;
+    std::vector<size_t> new_strides;
+    for (int i = tensor.num_dims - 1; i >= 0; i--) {
+      new_strides.push_back(total_elements);
+      total_elements *= tensor.dim[i];
+    }
+    std::reverse(new_strides.begin(), new_strides.end());
+    input_strides = new_strides;
   }
 
   tensor.data_type = data_type;
