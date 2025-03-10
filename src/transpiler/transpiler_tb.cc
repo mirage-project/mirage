@@ -198,10 +198,20 @@ CustomOPTranspileResult
   int cur_custom_kernel_idx = custom_kernel_idx_counter++;
   string func_name = fmt("custom_kernel_$", cur_custom_kernel_idx);
 
+  vector<string> comm_buf_names;
+  for(tb::TBOperator const *tb_op : g.operators) {
+    if (tb_op->op_type == type::TB_OUTPUT_OP) {
+      tb::TBOutputOp const *output_op = dynamic_cast<tb::TBOutputOp const *>(tb_op);
+      if (output_op->epilogue == type::TBEpilogueType::TB_EPILOGUE_ALLTOALL) {
+        comm_buf_names.push_back(fmt("half_t const* __restrict__ alltoall_buf_$", output_op->dtensor.guid));
+      }
+    }
+  }
+
   // Generate code prologue
   CodeKeeper code;
   code.e(
-      "__global__ void __launch_bounds__($) $($, $) {",
+      "__global__ void __launch_bounds__($) $($, $, $, int mype, int npes) {",
       num_threads,
       func_name,
       map<kn::DTensor, string>(op->output_tensors,
@@ -212,7 +222,9 @@ CustomOPTranspileResult
       map<kn::DTensor, string>(
           op->input_tensors, [](kn::DTensor const &dtensor) -> string {
             return fmt("half_t const* __restrict__ dtensor$_ptr", dtensor.guid);
-          }));
+          }),
+      comm_buf_names
+      );
 
   // Define thread idx
   string thread_idx;
@@ -280,7 +292,7 @@ CustomOPTranspileResult
         }
       }
 
-      code.e("const half_t *dtensor$_tile_ptr = dtensor$_ptr $;",
+      code.e("const half_t *dtensor$_tile_ptr = dtensor$_ptr$;",
              dtensor.guid,
              dtensor.guid,
              offset);
@@ -713,16 +725,80 @@ CustomOPTranspileResult
             // tb epilogue communication
             type::TBEpilogueType type = cur_op->epilogue;
 
-            if (type == type::TBEpilogueType::TB_EPILOGUE_ALLREDUCE) {
-            }
 
             tb::STensor const &stensor = cur_op->input_tensors.at(0);
             kn::DTensor const &dtensor = cur_op->dtensor;
+            DTensorMeta dtensor_meta = dtensor_metas.at(dtensor.guid);
+
             code.e("STensor$OutputAtom::run(dtensor$_tile_ptr, stensor$_ptr, "
                    "thread_idx);",
                    stensor.guid,
                    dtensor.guid,
                    stensor.guid);
+
+            int num_elements = 1;
+            for (int i = 0; i < dtensor.num_dims; i++) {
+                num_elements *= dtensor.dim[i];
+            }
+            if (type == type::TBEpilogueType::TB_EPILOGUE_ALLREDUCE) {
+              //TODO: TB allreduce
+              code.e("// dtensor.dim[0] = $, dtensor.dim[1] = $, dtensor.dim[2] = $, dtensor.dim[3] = $",
+                    dtensor.dim[0], dtensor.dim[1], dtensor.dim[2], dtensor.dim[3]);
+              code.e("// Perform NVSHMEM allreduce. num_elements = $", num_elements);
+              code.e("nvshmem_barrier_all();");
+              code.e("nvshmem_half_sum_reduce(NVSHMEM_TEAM_WORLD, reinterpret_cast<half*>(dtensor$_ptr), reinterpret_cast<const half*>(dtensor$_ptr), $);",
+                    dtensor.guid, dtensor.guid, num_elements);
+              code.e("nvshmem_barrier_all();");
+              // break;
+            }
+            else if (type == type::TBEpilogueType::TB_EPILOGUE_ALLTOALL) {
+              //TODO: TB alltoall
+              //TODO: For now we assume: 
+              // 1. only one node 
+              // 2. divide only on the y dim (easy to extend once division dim is accessible)
+              // 3. block size is a factor of dtensor size
+              int all2all_divide_dim = 1; // y dim
+              code.e("// Perform alltoall. num_elements = $", num_elements);
+              code.e("nvshmem_barrier_all();");
+              code.e("int block_per_p = (blockDim.y + npes - 1) / npes;");
+
+              code.e("int dst_rank = blockIdx.y / block_per_p;");
+              string dst_offset = "";
+              int3 omap = cur_op->output_map;
+              for (int dim = 0; dim < 3; ++dim) {
+                int div_dim = dim == 0 ? omap.x : dim == 1 ? omap.y : omap.z;
+                int num_tbs = dim == 0   ? g.grid_dim.x
+                              : dim == 1 ? g.grid_dim.y
+                                        : g.grid_dim.z;
+                if (num_tbs > 1) {
+                  assert(div_dim >= 0);
+                  if (dim != all2all_divide_dim) {
+                    dst_offset += fmt(" + blockIdx.$*$*$",
+                                  (char)"xyz"[dim],
+                                  dtensor.dim[div_dim] / num_tbs,
+                                  dtensor_meta.strides[div_dim]);
+                  }
+                  else {
+                    dst_offset += fmt(" + (blockIdx.$%block_per_p + mype*block_per_p)*$*$",
+                                  (char)"xyz"[dim],
+                                  dtensor.dim[div_dim] / num_tbs,
+                                  dtensor_meta.strides[div_dim]);
+                  }
+                }
+              }
+
+              code.e("half_t *recv_ptr = nvshmem_ptr(alltoall_buf_$, dst_rank);", 
+                     dtensor.guid);
+              code.e("recv_ptr = recv_ptr$; // dst_offset", dst_offset);
+
+              code.e("half_t *send_ptr = dtensor$_tile_ptr;", dtensor.guid);
+              
+              code.e("tb::CommExecutor<half_t, DTensor$TileLayout, false> comm_executor;", dtensor.guid);
+              code.e("comm_executor.send(recv_ptr, send_ptr, dst_rank, NULL, stream);");
+
+              code.e("nvshmem_barrier_all();");
+              // break;
+            }
           }
           break;
         }

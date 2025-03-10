@@ -99,6 +99,8 @@ TBOutputOp::TBOutputOp(Graph *_graph,
   if (forloop_dim >= 0) {
     dtensor.dim[forloop_dim] *= bgraph->forloop_range;
   }
+
+  dtensor.epilogue = epilogue;
 }
 
 TBOutputOp::~TBOutputOp() {

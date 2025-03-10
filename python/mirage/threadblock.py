@@ -3,11 +3,14 @@ from .core import *
 class TBGraph:
     def __init__(self, graph):
         self.cygraph = graph
+        self.use_nvshmem = False
 
     def new_input(self, dtensor: DTensor, input_map: tuple, forloop_dim: int):
         return self.cygraph.new_input(dtensor, input_map, forloop_dim)
 
     def new_output(self, stensor: STensor, output_map: tuple, forloop_dim: int = -1, epilogue: str = None):
+        if epilogue == "allreduce" or epilogue == "alltoall":
+            self.use_nvshmem = True
         return self.cygraph.new_output(stensor, output_map, forloop_dim, epilogue)
 
     def matmul(self, A: STensor, B: STensor):

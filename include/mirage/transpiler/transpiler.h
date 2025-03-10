@@ -54,10 +54,11 @@ private:
                     // distributed across nodes)
   void resolve_distributed_config() {
     num_gpus = g->gpu_dim.x * g->gpu_dim.y * g->gpu_dim.z;
-    // TODO (linsj20)
+    // TODO (linsj20) Logic to decide NCCL/NVSHMEM
     use_nccl = num_gpus > 1;
     use_nvshmem = num_gpus > 1;
-    use_nvshmem = false;
+    // use_nvshmem = false;
+    use_nccl = false;
   }
 
   // Tensor metadata
