@@ -18,6 +18,9 @@ bool is_unary(type::TBOperatorType op) {
   std::unordered_set<type::TBOperatorType> true_values{
       type::TBOperatorType::TB_EXP_OP,
       type::TBOperatorType::TB_SILU_OP,
+      type::TBOperatorType::TB_GELU_OP,
+      type::TBOperatorType::TB_RELU_OP,
+      type::TBOperatorType::TB_CLAMP_OP,
       type::TBOperatorType::TB_RMS_NORM_OP,
       type::TBOperatorType::TB_REDUCTION_0_OP,
       type::TBOperatorType::TB_REDUCTION_1_OP,
@@ -49,6 +52,9 @@ bool is_unary(type::KNOperatorType op) {
       type::KNOperatorType::KN_REDUCTION_2_OP,
       type::KNOperatorType::KN_EXP_OP,
       type::KNOperatorType::KN_SILU_OP,
+      type::KNOperatorType::KN_GELU_OP,
+      type::KNOperatorType::KN_RELU_OP,
+      type::KNOperatorType::KN_CLAMP_OP,
       type::KNOperatorType::KN_RMS_NORM_OP,
       type::KNOperatorType::KN_OUTPUT_OP,
   };
@@ -107,6 +113,13 @@ std::shared_ptr<AbstractExpr> get_pattern(type::KNOperatorType op,
       return std::make_shared<Exp>(opd);
     case type::KNOperatorType::KN_SILU_OP:
       return std::make_shared<Silu>(opd);
+    case type::KNOperatorType::KN_GELU_OP:
+      return std::make_shared<Gelu>(opd);
+    case type::KNOperatorType::KN_RELU_OP:
+      return std::make_shared<Relu>(opd);
+    case type::KNOperatorType::KN_CLAMP_OP:
+      return std::make_shared<Clamp>(
+          type::CLAMP_MIN_MAX["min_val"], type::CLAMP_MIN_MAX["max_val"], opd);
     case type::KNOperatorType::KN_OUTPUT_OP:
       return opd;
     default:
@@ -128,6 +141,12 @@ std::shared_ptr<AbstractExpr> get_pattern(type::TBOperatorType op,
       return std::make_shared<Exp>(opd);
     case type::TBOperatorType::TB_SILU_OP:
       return std::make_shared<Silu>(opd);
+    case type::TBOperatorType::TB_GELU_OP:
+      return std::make_shared<Gelu>(opd);
+    case type::TBOperatorType::TB_RELU_OP:
+      return std::make_shared<Relu>(opd);
+    case type::TBOperatorType::TB_CLAMP_OP:
+      return std::make_shared<Relu>(opd);
     case type::TBOperatorType::TB_RMS_NORM_OP: {
       return std::make_shared<Div>(
           opd, std::make_shared<RMS>(tensor.dim[tensor.num_dims - 1], opd));
@@ -294,7 +313,14 @@ KNOperator *create_op(kernel::Graph &g,
       return g.create_reduction_op(input, 2, 1);
     case type::KNOperatorType::KN_EXP_OP:
     case type::KNOperatorType::KN_SILU_OP:
+    case type::KNOperatorType::KN_GELU_OP:
+    case type::KNOperatorType::KN_RELU_OP:
       return g.create_elementunary_op(input, type);
+    case type::KNOperatorType::KN_CLAMP_OP:
+      assert((!type::CLAMP_MIN_MAX.empty()) && "CLAMP_MIN_MAX not assigned");
+      return g.create_elementunary_clamp_op(input,
+                                            type::CLAMP_MIN_MAX["min_val"],
+                                            type::CLAMP_MIN_MAX["max_val"]);
     default:
       assert(false && "Unsupported operator");
   }
@@ -334,7 +360,14 @@ TBOperator *create_op(threadblock::Graph &g,
   switch (type) {
     case type::TBOperatorType::TB_EXP_OP:
     case type::TBOperatorType::TB_SILU_OP:
+    case type::TBOperatorType::TB_GELU_OP:
+    case type::TBOperatorType::TB_RELU_OP:
       return g.create_elementunary_op(input, type);
+    case type::TBOperatorType::TB_CLAMP_OP:
+      assert((!type::CLAMP_MIN_MAX.empty()) && "CLAMP_MIN_MAX not assigned");
+      return g.create_elementunary_clamp_op(input,
+                                            type::CLAMP_MIN_MAX["min_val"],
+                                            type::CLAMP_MIN_MAX["max_val"]);
     case type::TBOperatorType::TB_RMS_NORM_OP:
       return g.create_rms_norm_op(input);
     case type::TBOperatorType::TB_REDUCTION_0_OP:

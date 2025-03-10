@@ -140,6 +140,7 @@ void KernelGraphGenerator::generate_next_operator(
           }
 
           KNOperator *new_op = create_op(*c.kn_graph, op_type, input_tensors);
+
           if (new_op) {
             c.kn_graph->operators.push_back(new_op);
             if (check_range(init_ranges, target_ranges, *c.kn_graph)) {
@@ -351,6 +352,7 @@ void KernelGraphGenerator::generate_next_operator(
 
         TBOperator *last_op = c.tb_graph->operators.back();
         TBOperator *new_op = create_op(*c.tb_graph, op_type, input_tensors);
+
         if (!new_op) {
           continue;
         }

@@ -190,17 +190,17 @@ CUTE_HOST_DEVICE void r2s_copy_with_oob_protection(
     CUTE_UNROLL
     for (int i = 0; i < size(src); ++i) {
       // TODO(intlsy) Modify this after supporting `stmatrix` on H100
-      T x = src(i);
+      float x = src(i);
       if constexpr (NUM_EXPS_BEFORE_STORE > 0) {
         CUTE_UNROLL
         for (int i = 0; i < NUM_EXPS_BEFORE_STORE; ++i) {
-          x = perform_element_unary_op<T, ElementUnaryOpType::EXP>(x);
+          x = perform_element_unary_op<float, ElementUnaryOpType::EXP>(x);
         }
       }
       if constexpr (IS_STORE_ACCUM) {
-        dst(i) += x;
+        dst(i) += T(x);
       } else {
-        dst(i) = x;
+        dst(i) = T(x);
       }
     }
   } else {
@@ -234,7 +234,7 @@ CUTE_HOST_DEVICE void r2s_copy_with_oob_protection(
         if constexpr (NUM_EXPS_BEFORE_STORE > 0) {
           CUTE_UNROLL
           for (int i = 0; i < NUM_EXPS_BEFORE_STORE; ++i) {
-            x = perform_element_unary_op<T, ElementUnaryOpType::EXP>(x);
+            x = perform_element_unary_op<float, ElementUnaryOpType::EXP>(x);
           }
         }
         if constexpr (IS_STORE_ACCUM) {
@@ -325,8 +325,7 @@ public:
 
   static __device__ __forceinline__ auto get_mma_rC(int thread_idx) {
     // Make a fake tensor
-    Tensor sC_fake =
-        make_tensor(make_smem_ptr((half_t *)nullptr), SmemLayoutC{});
+    Tensor sC_fake = make_tensor(make_smem_ptr((T *)nullptr), SmemLayoutC{});
     TiledMMA tiled_mma;
     ThrMMA thr_mma = tiled_mma.get_slice(thread_idx);
     Tensor mma_rC =

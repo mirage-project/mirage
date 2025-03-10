@@ -18,7 +18,8 @@ int main(int argc, char **argv) {
     kernel::DTensor D = ref_graph.matmul(X, A);
     kernel::DTensor E = ref_graph.matmul(D, B);
     kernel::DTensor C = ref_graph.matmul(X, W);
-    ref_graph.add(C, E);
+    kernel::DTensor O = ref_graph.add(C, E);
+    ref_graph.mark_output(O);
     for (auto const &op : ref_graph.operators) {
       op->fingerprint();
     }
@@ -31,7 +32,7 @@ int main(int argc, char **argv) {
     printf("[cudnn kernel graph] Total runtime = %.4lfms\n", total_runtime);
   }
   mirage::cpu::CTensor ref_fp = ref_graph.operators.back()
-                                    ->output_tensors[0]
+                                    ->input_tensors[0]
                                     .copy_fingerprint_to_ctensor();
 
   kernel::Graph graph;
@@ -65,6 +66,7 @@ int main(int argc, char **argv) {
     outputs = graph.customized({X, W, A, B}, bgraph);
     assert(outputs.size() == 1);
   }
+  graph.mark_output(outputs[0]);
   ProfileResult result;
   float total_ms = 0.0f;
   for (auto const &op : graph.operators) {
@@ -76,10 +78,11 @@ int main(int argc, char **argv) {
     op->fingerprint();
   }
   assert(
-      graph.operators.back()->output_tensors[0].has_same_fingerprint(ref_fp));
+      graph.operators.back()->input_tensors[0].has_same_fingerprint(ref_fp));
   auto st = std::chrono::steady_clock::now();
   search::GeneratorConfig config =
-      search::GeneratorConfig::get_lora_default_config();
+      search::GeneratorConfig::get_default_config();
+  config.enable_concat_matmul_transformation();
   search::KernelGraphGenerator gen(ref_graph, config, "checkpoint_lora.json");
   gen.generate_kernel_graphs();
 

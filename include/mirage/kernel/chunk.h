@@ -15,38 +15,25 @@
 
 #pragma once
 
-#include "mirage/threadblock/operator.h"
+#include "mirage/kernel/operator.h"
 
 namespace mirage {
-namespace threadblock {
+namespace kernel {
 
-using namespace cutlass;
-
-class TBElementUnaryOp : public TBOperator {
+class KNChunkOp : public mirage::kernel::KNOperator {
 public:
-  TBElementUnaryOp(Graph *_graph,
-                   STensor const &_input,
-                   mirage::type::TBOperatorType _type,
-                   float const &scalar);
-  ~TBElementUnaryOp();
+  KNChunkOp(Graph *_graph, DTensor const &input, int chunk_size, int dim);
+  ~KNChunkOp();
+  bool profile(ProfileResult &profile) override;
+  bool fingerprint(void) override;
 
   operator json() const override;
 
 public:
-  float const scalar;
+  int chunk_size, chunk_dim;
 };
 
-class TBClampUnaryOp : public TBElementUnaryOp {
-public:
-  TBClampUnaryOp(Graph *_graph,
-                 STensor const &_input,
-                 float const &min_val,
-                 float const &max_val);
+void from_json(json const &j, KNChunkOp &op);
 
-public:
-  float const min_val;
-  float const max_val;
-};
-
-} // namespace threadblock
+} // namespace kernel
 } // namespace mirage

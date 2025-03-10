@@ -158,7 +158,7 @@ TBSched Transpiler::get_threadblock_schedule(tb::Graph const &tb_graph) {
         tb::TBInputOp const *input_op = dynamic_cast<tb::TBInputOp const *>(op);
         tb::STensor stensor = input_op->output_tensors.at(0);
         kn::DTensor dtensor = input_op->dtensor;
-        STensorMeta stensor_meta = stensor_metas.at(stensor.guid);
+        STensorMeta &stensor_meta = stensor_metas.at(stensor.guid);
         DTensorMeta dtensor_meta = dtensor_metas.at(dtensor.guid);
         int3 imap = input_op->input_map;
         size_t alignment = get_num_elems_in_16B(dtensor.data_type);
@@ -198,6 +198,7 @@ TBSched Transpiler::get_threadblock_schedule(tb::Graph const &tb_graph) {
         op_meta.is_pipelined_input = op_meta.is_chunked_input &&
                                      input_op->forloop_dim != -1 &&
                                      config.target_cc >= GPU_CC::A100;
+        stensor_meta.is_pipelined_input = op_meta.is_pipelined_input;
       } else if (op->op_type == type::TB_OUTPUT_OP) {
         // Decide whether or not to use chunked copy
         assert(is_fused_with_prev[op] == false);

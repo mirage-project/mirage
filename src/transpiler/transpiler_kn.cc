@@ -19,6 +19,7 @@
 #include <unordered_set>
 
 #include "mirage/transpiler/utils.h"
+#include "mirage/type.h"
 
 namespace mirage {
 namespace transpiler {
@@ -94,20 +95,27 @@ std::pair<string, string>
   string pointer_var_name = fmt("dtensor$", guid);
   string code = "";
   if (meta.is_input) {
-    code = fmt("half_t *$ = (half_t*)input_tensors.at($);",
+    code = fmt("$ *$ = ($*)input_tensors.at($);",
+               get_datatype_str(dtensor.data_type),
                pointer_var_name,
+               get_datatype_str(dtensor.data_type),
                meta.input_idx);
   } else if (meta.is_output && dtensor.is_nvshmem_tensor) {
     code = fmt("half_t *$ = to_nvshmem_ptr<half_t>($);",
                pointer_var_name,
                meta.num_phy_elems);
   } else if (meta.is_output) {
-    code = fmt("half_t *$ = (half_t*)output_tensors.at($);",
+    code = fmt("$ *$ = ($*)output_tensors.at($);",
+               get_datatype_str(dtensor.data_type),
                pointer_var_name,
+               get_datatype_str(dtensor.data_type),
                meta.output_idx);
   } else {
-    code = fmt(
-        "half_t *$ = (half_t*)((char*)buf + $);", pointer_var_name, meta.addr);
+    code = fmt("$ *$ = ($*)((char*)buf + $);",
+               get_datatype_str(dtensor.data_type),
+               pointer_var_name,
+               get_datatype_str(dtensor.data_type),
+               meta.addr);
   }
   return {pointer_var_name, code};
 }
@@ -119,10 +127,16 @@ static string get_kn_op_str(type::KNOperatorType type) {
         return "EXP";
       case type::KN_SILU_OP:
         return "SILU";
+      case type::KN_GELU_OP:
+        return "GELU";
       case type::KN_SQUARE_OP:
         return "SQUARE";
       case type::KN_SQRT_OP:
         return "SQRT";
+      case type::KN_RELU_OP:
+        return "RELU";
+      case type::KN_CLAMP_OP:
+        return "CLAMP";
       default:
         assert(0);
     }
@@ -272,6 +286,9 @@ TranspileResult Transpiler::transpile_ugraph() {
       }
       case type::KNOperatorType::KN_EXP_OP:
       case type::KNOperatorType::KN_SILU_OP:
+      case type::KNOperatorType::KN_GELU_OP:
+      case type::KNOperatorType::KN_RELU_OP:
+      case type::KNOperatorType::KN_CLAMP_OP:
       case type::KNOperatorType::KN_SQUARE_OP:
       case type::KNOperatorType::KN_SQRT_OP: {
         // Elemwise unary op
@@ -307,8 +324,9 @@ TranspileResult Transpiler::transpile_ugraph() {
         exec.e(in0_ptr_code);
         exec.e(out0_ptr_code);
         // Create kernel instance
-        exec.e("using kernel = kn::ElementUnaryKernel<half_t, "
+        exec.e("using kernel = kn::ElementUnaryKernel<$, "
                "kn::ElementUnaryOpType::$, $, $>;",
+               get_datatype_str(in0.data_type),
                get_kn_op_str(op->op_type),
                in0_layout,
                out0_layout);
@@ -368,8 +386,9 @@ TranspileResult Transpiler::transpile_ugraph() {
                                                               : "";
         assert(op_type_str != "");
         // Create kernel instance
-        exec.e("using kernel = kn::ElementBinaryKernel<half_t, "
+        exec.e("using kernel = kn::ElementBinaryKernel<$, "
                "kn::ElementBinaryOpType::$, $, $, $>;",
+               get_datatype_str(in0.data_type),
                op_type_str,
                in0_layout,
                in1_layout,
@@ -435,7 +454,8 @@ TranspileResult Transpiler::transpile_ugraph() {
         exec.e(in0_ptr_code);
         exec.e(out0_ptr_code);
         // Create kernel instance
-        exec.e("using kernel = kn::ReductionKernel<half_t, $, $, $>;",
+        exec.e("using kernel = kn::ReductionKernel<$, $, $, $>;",
+               get_datatype_str(in0.data_type),
                layout_in0,
                layout_out0,
                new_reduction_dim);
@@ -593,10 +613,11 @@ TranspileResult Transpiler::transpile_ugraph() {
             exec.e(fmt(
                 "using SmemLayoutAtom_$ = "
                 "decltype(cutlass::gemm::collective::detail::ss_smem_selector<"
-                "GmmaMajor_$, half_t, decltype(get<0>(DstMNKLayout_${})), "
+                "GmmaMajor_$, $, decltype(get<0>(DstMNKLayout_${})), "
                 "decltype(get<1>(DstMNKLayout_${}))>());",
                 tmaParams.guid,
                 tmaParams.guid,
+                get_datatype_str(cur_op->input_tensors[0].data_type),
                 tmaParams.guid,
                 tmaParams.guid));
             exec.e(fmt("using DstPipeLayout_$ = "
@@ -610,9 +631,10 @@ TranspileResult Transpiler::transpile_ugraph() {
                        tmaParams.guid,
                        config.pipeline_stages));
             exec.e(fmt("auto g_tensor_$ = "
-                       "make_tensor(make_gmem_ptr<half_t>(dtensor$), "
+                       "make_tensor(make_gmem_ptr<$>(dtensor$), "
                        "SrcMNKLayout_${});",
                        tmaParams.guid,
+                       get_datatype_str(cur_op->input_tensors[0].data_type),
                        tmaParams.guid,
                        tmaParams.guid));
             exec.e(
