@@ -1,5 +1,5 @@
 import torch
-# from transformers import BertTokenizer, BertForSequenceClassification, AdamW
+from transformers import BertTokenizer, BertForSequenceClassification, AdamW
 from torch import nn
 
 import onnx
@@ -145,8 +145,41 @@ def parse_onnx_model(model):
     print("After adding outputs")
     print(operators)
 
-    print_computational_graph(operators['node_Transpose_0'])
+    # print([node.name for node in model.graph.node])
+    root_node = operators[model.graph.node[0].name]
+    # print_computational_graph(operators['node_Transpose_0'])
+    print_computational_graph(root_node)
 
+"""Trying using a smaller model"""
 model = onnx.load('scripts/onnx/my_model.onnx')
 
 parse_onnx_model(model)
+
+
+"""Trying using BERT"""
+
+# device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+
+# bert_model = BertForSequenceClassification.from_pretrained("bert-base-uncased", num_labels=2)
+# bert_model.to(device)
+# dummy_input_ids = torch.randint(0, 30522, (2, 128)).to(device)
+# dummy_attention_mask = torch.ones((2, 128), requires_grad=True).to(device)
+# dummy_labels = torch.tensor([0, 1], dtype=torch.long).to(device)
+
+# dummy_outputs = bert_model(input_ids=dummy_input_ids, attention_mask=dummy_attention_mask, labels=dummy_labels)
+# dummy_loss = dummy_outputs.loss
+
+
+# torch.onnx.export(
+#     bert_model,    
+#     (dummy_input_ids, dummy_attention_mask),              
+#     "scripts/onnx/bert_model.onnx", 
+#     input_names=["input_ids", "attention_mask"],
+#     output_names=["logits"],
+#     dynamo=True                  
+# )
+
+# bert_model = onnx.load('scripts/onnx/bert_model.onnx')
+
+# parse_onnx_model(bert_model)
+
