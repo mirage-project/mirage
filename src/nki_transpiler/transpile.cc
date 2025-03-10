@@ -73,8 +73,11 @@ NKITranspiler::NKITranspiler(kernel::Graph const *_graph,
         }
         // Assert that the input_strides of given tensors match the input_stride
         // defined in mugraph
-        kernel::DTensor dt = g->new_input(
-            dims, input_op->input_strides, dtensor.data_type, dtensor.layout);
+        kernel::DTensor dt = g->new_input(dims,
+                                          input_op->input_strides,
+                                          input_op->input_map,
+                                          dtensor.data_type,
+                                          dtensor.layout);
         dtensor_mapping[op->output_tensors[0].guid] = dt;
         break;
       }

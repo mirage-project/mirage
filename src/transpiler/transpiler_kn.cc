@@ -100,6 +100,10 @@ std::pair<string, string>
                pointer_var_name,
                get_datatype_str(dtensor.data_type),
                meta.input_idx);
+  } else if (meta.is_output && dtensor.is_nvshmem_tensor) {
+    code = fmt("half_t *$ = to_nvshmem_ptr<half_t>($);",
+               pointer_var_name,
+               meta.num_phy_elems);
   } else if (meta.is_output) {
     code = fmt("$ *$ = ($*)output_tensors.at($);",
                get_datatype_str(dtensor.data_type),
@@ -146,7 +150,9 @@ TranspileResult Transpiler::transpile_ugraph() {
 
   CodeKeeper header;
   header.e("#define NUM_GPUS $", num_gpus);
+  // TODO (linsj20)
   header.e("#define USE_NVSHMEM $", use_nvshmem);
+  header.e("#define USE_NCCL $", use_nccl);
   if (config.target_cc == GPU_CC::H100) {
     header.e("#define MIRAGE_GRACE_HOPPER");
   }
@@ -162,10 +168,44 @@ TranspileResult Transpiler::transpile_ugraph() {
   CodeKeeper hopper_tma;
 
   init.e("static void _init() {");
+
   exec.e(
       "static void _execute_mugraph(std::vector<void const *> input_tensors, "
       "std::vector<void*> output_tensors"
-      ", void* buf) {");
+      ", void* buf, int rank) {");
+
+  //Assume that we don't use both nccl and nvshmem
+  assert(!(use_nccl && use_nvshmem));
+  if (use_nccl) {
+    //exec.e("// Initialize MPI");
+    //exec.e("int argc = 1;");
+    //exec.e("const char* argv[] = {\"_execute_mugraph\"};");
+    //exec.e("char** argv_ptr = const_cast<char**>(argv);");
+    //exec.e("MPI_Init(&argc, &argv_ptr);");
+    exec.e("int my_rank, world_size;");
+    exec.e("MPI_Comm_rank(MPI_COMM_WORLD, &my_rank);");
+    exec.e("MPI_Comm_size(MPI_COMM_WORLD, &world_size);");
+    exec.e("");
+    exec.e("// Set device to local rank");
+    exec.e("cudaSetDevice(my_rank);");
+    exec.e("");
+    exec.e("// Initialize NCCL");
+    exec.e("cudaStream_t s;");
+    // TODO (linsj20) Why doesn't this work?
+    //exec.e("cudaStreamCreate(&s);");
+    exec.e("cudaStreamCreateWithFlags(&s, cudaStreamNonBlocking);");
+    exec.e("ncclComm_t comm;");
+    exec.e("ncclUniqueId id;");
+    exec.e("if (my_rank == 0) ncclGetUniqueId(&id);");
+    exec.e("MPI_Bcast(&id, sizeof(id), MPI_BYTE, 0, MPI_COMM_WORLD);");
+    exec.e("NCCLCHECK(ncclCommInitRank(&comm, world_size, id, my_rank));");
+  }        
+  else if (use_nvshmem) { // define nvshemem
+    exec.e("initialize_mpi_nvshmem(rank);");
+    exec.e("int mype = nvshmem_my_pe();");
+    exec.e("int npes = nvshmem_n_pes();");
+  }
+
   for (kn::KNOperator *const op : g->operators) {
     std::string op_type_str;
     to_json(op_type_str, op->op_type);
@@ -173,6 +213,12 @@ TranspileResult Transpiler::transpile_ugraph() {
     exec.e("// OP type: $", op_type_str);
     switch (op->op_type) {
       case type::KNOperatorType::KN_INPUT_OP:
+        //TODO: multiGPU division using NVSHMEM
+        exec.e("// Input: Shape<$, $, $, $>",
+               op->output_tensors[0].dim[0],
+               op->output_tensors[0].dim[1],
+               op->output_tensors[0].dim[2],
+               op->output_tensors[0].dim[3]);
       case type::KNOperatorType::KN_OUTPUT_OP: {
         // Input/Output op
         break;
@@ -417,15 +463,51 @@ TranspileResult Transpiler::transpile_ugraph() {
         exec.e("kernel::run($, $);", out0_ptr_name, in0_ptr_name);
         break;
       }
+      // TODO (linsj20)
+      case type::KNOperatorType::KN_ALLREDUCE_OP: {
+        // Allreduce op
+        kn::DTensor &in0 = op->input_tensors.at(0);
+        kn::DTensor &out0 = op->output_tensors.at(0);
+        DTensorMeta meta_in0 = dtensor_metas.at(in0.guid);
+        DTensorMeta meta_out0 = dtensor_metas.at(out0.guid);
+        // Input and output tensor should have the same amount of elements
+        assert(meta_in0.num_phy_elems == meta_out0.num_phy_elems);
+        auto [in0_ptr_name, in0_ptr_code] = get_dtensor_ptr(in0);
+        auto [out0_ptr_name, out0_ptr_code] = get_dtensor_ptr(out0);
+        exec.e(in0_ptr_code);
+        exec.e(out0_ptr_code);
+        exec.e("NCCLCHECK(ncclAllReduce((const void*)$, (void*)$, $, ncclFloat16, ncclSum, comm, s));", in0_ptr_name, out0_ptr_name, meta_in0.num_phy_elems);
+        // Synchronous Commnunication
+        exec.e("cudaStreamSynchronize(s);");
+        break;
+      }
       case type::KNOperatorType::KN_CUSTOMIZED_OP: {
+
         // Customized op
         kn::KNCustomizedOp const *cur_op =
             dynamic_cast<kn::KNCustomizedOp const *>(op);
         // tb::ExecutionPlan const &plan = cur_op->plan;
         tb::Graph const &bgraph = cur_op->bgraph;
+        vector<string> comm_buf_names;
+        // For epilogue nvshmem allocation
+        if (use_nvshmem) {
+          for (kn::DTensor const &dtensor : cur_op->output_tensors) {
+            DTensorMeta meta = dtensor_metas.at(dtensor.guid);
+            if (dtensor.epilogue == type::TBEpilogueType::TB_EPILOGUE_ALLTOALL) {
+              //TODO: TB alltoall
+              exec.e("half_t *alltoall_buf_$ = (half_t*)nvshmem_malloc(sizeof(half_t) * $);", \
+              dtensor.guid, meta.num_phy_elems);
+              comm_buf_names.push_back(fmt("alltoall_buf_$", dtensor.guid));
+            }
+            else if (dtensor.epilogue == type::TBEpilogueType::TB_EPILOGUE_ALLREDUCE) {
+              assert(false && "TB allreduce is not supported yet"); 
+              //TODO: TB allreduce
+            }
+          }
+        }
         // Get DTensor ptrs
         // We make the aggrement that, when calling a custom kernel, the
-        // arguments are in the order of "output_tensors, input_tensors"
+        // arguments are in the order of "output_tensors, input_tensors, comm_buf_names"
         vector<string> ptr_names;
         for (kn::DTensor const &dtensor :
              Combine(cur_op->output_tensors, cur_op->input_tensors)) {
@@ -485,15 +567,10 @@ TranspileResult Transpiler::transpile_ugraph() {
         // init
 
         exec.e("");
-        exec.e("// define tmas");
-        for (kn::DTensor const &dtensor : cur_op->input_tensors) {
-          auto guid = dtensor.guid;
-          DTensorMeta const &meta = dtensor_metas.at(guid);
-        }
 
         // get tma params;
         if (config.target_cc >= GPU_CC::H100) {
-          // get_hopper_tmas(hopper_tma, result.tmaParamsList);
+          exec.e("// define tmas");
 
           // for inputs that needs tma async copy, init the TMAs
           std::string tmas;
@@ -582,22 +659,46 @@ TranspileResult Transpiler::transpile_ugraph() {
                    result.func_name,
                    result.smem_size);
           }
-
-          exec.e("$<<<grid_dim, block_dim, smem_size>>>($ $);",
+          if(!use_nvshmem) {
+            exec.e("$<<<grid_dim, block_dim, smem_size>>>($ $ $);",
                  result.func_name,
                  tmas,
-                 ptr_names);
+                 ptr_names,
+                 comm_buf_names);
+          }
+          else {
+            exec.e("$<<<grid_dim, block_dim, smem_size>>>($ $ $, mype, npes);",
+                 result.func_name,
+                 tmas,
+                 ptr_names,
+                 comm_buf_names);
+          }
         } else {
           exec.e("cudaFuncSetAttribute($, "
                  "cudaFuncAttributeMaxDynamicSharedMemorySize, $);",
                  result.func_name,
                  result.smem_size);
-          exec.e("$<<<grid_dim, block_dim, smem_size>>>( $);",
+          if(!use_nvshmem) {
+            exec.e("$<<<grid_dim, block_dim, smem_size>>>($ $);",
                  result.func_name,
-                 ptr_names);
+                 ptr_names,
+                 comm_buf_names);
+          }
+          else {
+            exec.e("$<<<grid_dim, block_dim, smem_size>>>($, $, mype, npes);",
+                 result.func_name,
+                 ptr_names,
+                 comm_buf_names);
+          }
         }
 
         custom_kernels.e(result.code);
+        if (use_nvshmem) {
+          for (auto const &comm_buf_name : comm_buf_names) {
+            std::cout << "freeing " << comm_buf_name << std::endl;
+            exec.e("nvshmem_free($);", comm_buf_name);
+          }
+        }
 
         break;
       }
@@ -608,6 +709,17 @@ TranspileResult Transpiler::transpile_ugraph() {
     }
     exec.e("}");
   }
+
+  if (use_nccl) {
+    exec.e("// Finalize NCCL and MPI");
+    exec.e("ncclCommDestroy(comm);");
+    exec.e("cudaStreamDestroy(s);");
+    //exec.e("MPI_Finalize();");
+  }
+  else if (use_nvshmem) {
+    exec.e("finalize_mpi_nvshmem();");
+  }
+
   init.e("}");
   exec.e("}");
 
