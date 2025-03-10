@@ -127,6 +127,11 @@ public:
   STensor *reduction(STensor const *A, int dim);
   TBOperator *create_reduction_op(STensor const &A, int dim);
 
+  // chunk operator
+  std::vector<STensor> chunk(STensor const &A, int chunk_size, int dim);
+  std::vector<STensor> *chunk(STensor const *A, int chunk_size, int dim);
+  TBOperator *create_chunk_op(STensor const &A, int chunk_size, int dim);
+
   // reduction_to_dimx operator
   STensor reduction_to_dimx(STensor const &A, int dim);
   TBOperator *create_reduction_to_dimx_op(STensor const &A, int dim);

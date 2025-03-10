@@ -164,7 +164,7 @@ enum TBOperatorType {
   TB_REDUCTION_2_TO_DIMX_OP = 2306,
   TB_REDUCTION_LAST_OP_ID = 2349,
   TB_RMS_NORM_OP = 2350,
-  // Concat & Split
+  // Concat & Split & Chunk
   TB_CONCAT_FIRST_OP_ID = 2400,
   TB_CONCAT_0_OP = 2400,
   TB_CONCAT_1_OP = 2401,
@@ -176,6 +176,9 @@ enum TBOperatorType {
   TB_SPLIT_1_OP = 2421,
   TB_SPLIT_2_OP = 2422,
   TB_SPLIT_LAST_OP_ID = 2429,
+  TB_CHUNK_0_OP = 2430,
+  TB_CHUNK_1_OP = 2431,
+  TB_CHUNK_2_OP = 2432,
   // Forloop Accum
   // LD indicates last dimension
   TB_FORLOOP_ACCUM_FIRST_OP = 2500,

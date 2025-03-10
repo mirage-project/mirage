@@ -586,6 +586,11 @@ NewKernelParams Graph::get_new_kernel_params(bool fingerprint) const {
             output.smem_offset);
         break;
       }
+      case mirage::type::TB_CHUNK_0_OP:
+      case mirage::type::TB_CHUNK_1_OP:
+      case mirage::type::TB_CHUNK_2_OP: {
+        
+      }
       case mirage::type::TB_RMS_NORM_OP: {
         assert(operators[i]->input_tensors.size() == 1);
         assert(operators[i]->output_tensors.size() == 1);
