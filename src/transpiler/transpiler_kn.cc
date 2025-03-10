@@ -200,7 +200,7 @@ TranspileResult Transpiler::transpile_ugraph() {
     switch (op->op_type) {
       case type::KNOperatorType::KN_INPUT_OP:
         //TODO: multiGPU division using NVSHMEM
-        exec.e("// Input: Shape<$, $, $, $>",
+        exec.e("// Input Shape: <$, $, $, $>",
                op->output_tensors[0].dim[0],
                op->output_tensors[0].dim[1],
                op->output_tensors[0].dim[2],
