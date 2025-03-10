@@ -282,6 +282,35 @@ __global__ void customized_kernel_function(
             output_smem_offset);
         // Do nothing since we can avoid concat mem copy by
         // updating the input tensors smem_offset
+      } else if ((op_type >= mirage::type::TB_CHUNK_FIRST_OP_ID) && (op_type <= mirage::type::TB_CHUNK_LAST_OP_ID)) {
+        int3 input_shape;
+        int chunk_size, chunk_dim, input_smem_offset, output1_smem_offset, output2_smem_offset;
+        mirage::threadblock::deserialize_chunk_op_parameters(
+            new_params.parameters,
+            param_idx,
+            input_shape,
+            chunk_size,
+            chunk_dim,
+            input_smem_offset,
+            output1_smem_offset,
+            output2_smem_offset);
+        cutlass::half_t *input_ptr =
+            (cutlass::half_t *)(smem_buffer + input_smem_offset);
+        cutlass::half_t *output1_ptr =
+            (cutlass::half_t *)(smem_buffer + output1_smem_offset);
+        cutlass::half_t *output2_ptr =
+            (cutlass::half_t *)(smem_buffer + output2_smem_offset);
+        mirage::threadblock::ChunkExecutor<cutlass::half_t> executor(
+            input_ptr,
+            output1_ptr,
+            output2_ptr,
+            input_shape,
+            chunk_size,
+            chunk_dim,
+            threadIdx.x,
+            blockDim.x);
+        __syncthreads();
+      }
       } else {
         assert(false && "Unsupported threadblock operator");
       }
@@ -716,6 +745,39 @@ __global__ void compute_customizedop_fingerprint(
               reduction_degree,
               inner_range,
               threadIdx.x,
+              blockDim.x);
+          __syncthreads();
+          break;
+        }
+        case mirage::type::TB_CHUNK_0_OP:
+        case mirage::type::TB_CHUNK_1_OP:
+        case mirage::type::TB_CHUNK_2_OP: {
+          int3 input_shape;
+          int chunk_size, chunk_dim, input_smem_offset, output1_smem_offset, outpu2_smem_offset;
+          mirage::threadblock::deserialize_chunk_op_parameters(
+              new_params.parameters,
+              param_idx,
+              input_shape,
+              chunk_size,
+              chunk_dim,
+              input_smem_offset,
+              output1_smem_offset,
+              outpu2_smem_offset);
+          mirage::type::FPType *input_ptr =
+              (mirage::type::FPType *)(smem_buffer + input_smem_offset);
+          mirage::type::FPType *output1_ptr =
+              (mirage::type::FPType *)(smem_buffer + output1_smem_offset);
+          mirage::type::FPType *output2_ptr =
+              (mirage::type::FPType *)(smem_buffer + output2_smem_offset);
+          
+          mirage::threadblock::TBChunkFingerprinter fp(
+              input_ptr,
+              output1_ptr,
+              output2_ptr,
+              input_shape,
+              chunk_size,
+              chunk_dim,
+              thread_idx.x,
               blockDim.x);
           __syncthreads();
           break;

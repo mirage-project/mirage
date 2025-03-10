@@ -46,10 +46,11 @@ public:
                              chunk_dim == 1 ? input_shape.y / chunk_size : input_shape.y,
                              chunk_dim == 2 ? input_shape.z / chunk_size : input_shape.z};
         int output_num_elements = input_shape.x * input_shape.y * input_shape.z;
-        int input_i = i / (input_shape.y * input_shape.z);
-        int input_j = (i % (input_shape.y * input_shape.z)) / input_shape.z;
-        int input_k = i % input_shape.z;
+
         for (int i = 0; i < output_num_elements; i += num_threads) {
+            int input_i = i / (input_shape.y * input_shape.z);
+            int input_j = (i % (input_shape.y * input_shape.z)) / input_shape.z;
+            int input_k = i % input_shape.z;
             if (chunk_dim == 0) {
                 if (input_i < output_shape.x) {
                     output1_ptr[i] = input_ptr[i];
@@ -73,8 +74,55 @@ public:
                 }
             }
         }
-    } 
-}
+    };
+};
+
+class TBChunkFingerprinter {
+public:
+    CUTLASS_DEVICE
+    TBChunkFingerprinter(FPType *input_ptr,
+                         FPType *output1_ptr,
+                         FPType *output2_ptr,
+                         int3 input_shape,
+                         int chunk_size,
+                         int chunk_dim,
+                         int thread_id,
+                         int num_threads) {
+                            int3 output_shape = {chunk_dim == 0 ? input_shape.x / chunk_size : input_shape.x,
+                                chunk_dim == 1 ? input_shape.y / chunk_size : input_shape.y,
+                                chunk_dim == 2 ? input_shape.z / chunk_size : input_shape.z};
+        int output_num_elements = input_shape.x * input_shape.y * input_shape.z;
+        
+        FPType one = 1;
+        for (int i = 0; i < output_num_elements; i += num_threads) {
+            int input_i = i / (input_shape.y * input_shape.z);
+            int input_j = (i % (input_shape.y * input_shape.z)) / input_shape.z;
+            int input_k = i % input_shape.z;
+            if (chunk_dim == 0) {
+                if (input_i < output_shape.x) {
+                    output1_ptr[i] = compute_mul_fingerprint(input_ptr[i], one);
+                } else { 
+                    int i2 = ((input_i - output_shape.x) * (output_shape.y * output_shape.z)) + (input_j * output_shape.z) + input_k;
+                    output2_ptr[i2] = compute_mul_fingerprint(input_ptr[i], one);
+                }
+            } else if (chunk_dim == 1) {
+                if (input_j < output_shape.y) {
+                    output1_ptr[i] = compute_mul_fingerprint(input_ptr[i], one);
+                } else {
+                    int i2 = (input_i * (output_shape.y * output_shape.z)) + ((input_j - output_shape.y) * output_shape.z) + input_k;
+                    output2_ptr[i2] = compute_mul_fingerprint(input_ptr[i], one);
+                }
+            } else { // chunk_dim == 2
+                if (input_k < output_shape.z) {
+                    output1_ptr[i] = compute_mul_fingerprint(input_ptr[i], one);
+                } else {
+                    int i2 = (input_i * (output_shape.y * output_shape.z)) + (input_j * output_shape.z) + (input_k - output_shape.z);
+                    output2_ptr[i2] = compute_mul_fingerprint(input_ptr[i], one);
+                }
+            }
+        }
+    }
+};
 
 }
 }

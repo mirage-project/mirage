@@ -176,9 +176,11 @@ enum TBOperatorType {
   TB_SPLIT_1_OP = 2421,
   TB_SPLIT_2_OP = 2422,
   TB_SPLIT_LAST_OP_ID = 2429,
+  TB_CHUNK_FIRST_OP_ID = 2430,
   TB_CHUNK_0_OP = 2430,
   TB_CHUNK_1_OP = 2431,
   TB_CHUNK_2_OP = 2432,
+  TB_CHUNK_LAST_OP_ID = 2439,
   // Forloop Accum
   // LD indicates last dimension
   TB_FORLOOP_ACCUM_FIRST_OP = 2500,
