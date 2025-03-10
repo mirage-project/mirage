@@ -42,7 +42,9 @@ enum DataType {
   // 8-bit types
   // range(float types): 930-934
   // range(int types): 935-939
-  DT_FLOAT8 = 930,
+  // DT_FLOAT8 = 930,
+  DT_FLOAT8_E4M3 = 930,
+  DT_FLOAT8_E5M2 = 931,
   DT_INT8 = 935,
   // 16-bit types
   // range(float types): 940-944

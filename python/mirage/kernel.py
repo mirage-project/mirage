@@ -91,6 +91,8 @@ dtype_map = {
     'int32':   torch.int32,
     'int64':   torch.int64,
     'uint8':   torch.uint8, 
+    'e4m3':    torch.float8_e4m3fn,
+    'e5m2':    torch.float8_e5m2,
     'fp16':    torch.float16,
     'bf16':    torch.bfloat16,
     'fp32':    torch.float32,

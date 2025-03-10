@@ -21,7 +21,11 @@ namespace type {
 size_t get_datatype_size(DataType type) {
   switch (type) {
     case DT_INT8:
-    case DT_FLOAT8:
+    // case DT_FLOAT8:
+    //   return 1;
+    case DT_FLOAT8_E4M3:
+      return 1;
+    case DT_FLOAT8_E5M2: 
       return 1;
     case DT_BFLOAT16:
     case DT_FLOAT16:
@@ -40,8 +44,12 @@ std::string get_datatype_str(DataType dtype) {
   switch (dtype) {
     case DT_INT4:
       return "int4";
-    case DT_FLOAT8:
-      return "float8";
+    // case DT_FLOAT8:
+    //   return "float8";
+    case DT_FLOAT8_E4M3:
+      return "e4m3";
+    case DT_FLOAT8_E5M2:
+      return "e5m2";
     case DT_INT8:
       return "int8";
     case DT_BFLOAT16:
