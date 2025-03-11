@@ -142,7 +142,41 @@ __global__ void compute_chunk_fingerprint(char *dmem_fp_ptr,
     }
 }
 
-bool KNChunkOp::fingerprint()
+bool KNChunkOp::fingerprint(void) {
+    assert(kgraph->gpu_dim.y == 1);
+    assert(kgraph->gpu_dim.z == 1);
+    
+    assert(input_tensors[0].num_dims == output_tensors[0].num_dims);
+    assert(input_tensors[0].num_dims == output_tensors[1].num_dims);
+
+    int num_elements = input_tensors[0].num_elements();
+    int3 input_shape = {dim[0], dim[1], dim[2]};
+    int3 output_shape = {chunk_dim == 0 ? input_shape.x / chunk_size : input_shape.x,
+                         chunk_dim == 1 ? input_shape.y / chunk_size : input_shape.y,
+                         chunk_dim == 2 ? input_shape.z / chunk_size : input_shape.z};
+    int const num_threads_per_blk = 1024;
+    int num_blocks = (num_elements + num_threads_per_blk - 1) / num_threads_per_blk;
+
+    int num_blocks = (num_elements + num_threads_per_blk - 1) / num_threads_per_blk;
+    mirage::kernel::DeviceMemoryManager *dmm =
+      mirage::kernel::DeviceMemoryManager::get_instance();
+    // Use GPU 0 for computing fingerprint
+    checkCUDA(cudaSetDevice(0));
+    for (int gpu_id = 0; gpu_id < kgraph->gpu_dim.x; gpu_id++) {
+        compute_chunk_fingerprint<<<num_blocks, num_threads_per_blk>>>(
+            dmm->fp_base_ptr[gpu_id],
+            input_tensors[0],
+            output_tensors[0],
+            output_tensors[1],
+            input_shape,
+            output_shape,
+            chunk_size,
+            chunk_dim,
+            num_elements);
+        checkCUDA(cudaDeviceSynchronize());
+    }
+    return true;
+}
 
 }
 }

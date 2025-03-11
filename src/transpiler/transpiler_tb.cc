@@ -977,6 +977,16 @@ CustomOPTranspileResult
               input.guid);
           break;
         }
+        case type::TB_CHUNK_0_OP:
+        case type::TB_CHUNK_1_OP:
+        case type::TB_CHUNK_2_OP: {
+          tb::STensor const &input = op->input_tensors.at(0);
+          tb::STensor const &output1 = output_op->output_tensors.at(0);
+          tb::STensor const &output2 = output_op->output_tensors.at(1);
+          assert(input.num_dims == output1.num_dims &&
+                 input.num_dims == output2.num_dims);
+          
+        }
         case type::TB_FORLOOP_ACCUM_NO_RED_OP: {
           assert(sched_node.ops.size() == 1); // Should not be fused
           assert(is_in_loop);

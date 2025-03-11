@@ -130,5 +130,15 @@ public:
   std::shared_ptr<AbstractExpr> summand;
 };
 
+class Chunk : public AbstractExpr {
+public:
+  Chunk(int chunk_size, int chunk_dim, std::shared_ptr<AbstractExpr> elems);
+  z3::expr to_z3(z3::context &c, std::unordered_set<std::string> &all_variables) const override;
+  std::string to_string() const override;
+  int chunk_size;
+  int chunk_dim;
+  std::shared_ptr<AbstractExpr> elems;
+}
+
 } // namespace search
 } // namespace mirage

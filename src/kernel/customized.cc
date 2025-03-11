@@ -195,6 +195,14 @@ KNCustomizedOp::KNCustomizedOp(mirage::kernel::Graph *_kgraph,
         bgraph.reduction(my_inputs[0], reduce_dim);
         break;
       }
+      case mirage::type::TB_CHUNK_0_OP:
+      case mirage::type::TB_CHUNK_1_OP:
+      case mirage::type::TB_CHUNK_2_OP: {
+        assert(my_inputs.size() == 1);
+        int dim = op->op_type - mirage::type::TB_CHUNK_0_OP;
+        int chunk_size = static_cast<mirage::threadblock::TBChunkOp *>(op)->chunk_size;
+        bgraph.chunk(my_inputs[0], chunk_size, dim);
+      }
       case mirage::type::TB_REDUCTION_0_TO_DIMX_OP:
       case mirage::type::TB_REDUCTION_1_TO_DIMX_OP:
       case mirage::type::TB_REDUCTION_2_TO_DIMX_OP: {
