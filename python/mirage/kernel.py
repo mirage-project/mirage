@@ -336,7 +336,7 @@ class KNGraph:
                 return None
 
         MIRAGE_ROOT = os.environ.get(
-            "MIRAGE_ROOT", os.path.join(os.path.dirname(__file__), "../../include")
+            "MIRAGE_ROOT", os.path.join(os.path.dirname(__file__), "../..")
         )
 
         # if True:
