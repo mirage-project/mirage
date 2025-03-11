@@ -1,5 +1,7 @@
 import torch
 from itertools import combinations as comb
+import time
+import mirage as mi
 
 ids_to_nodes = {}
 
@@ -101,6 +103,77 @@ def partition_graph(dummy_loss, min_num_ops=2, max_num_ops=4, UNSUPPORTED_OPS=se
 
     return all_subgraphs, unique_operators
 
+# TODO: add support for reduction, clamp, rms_norm. These rely on additional
+# inputs that the Operator class doesn't currently support
+def function_map(graph, func, inputs):
+    match func.name:
+        case "matmul": return graph.matmul(*inputs)
+        #case "reduction": return graph.reduction(*inputs)
+        case "exp": return graph.exp(*inputs)
+        case "silu": return graph.silu(*inputs)
+        case "gelu": return graph.gelu(*inputs)
+        case "relu": return graph.relu(*inputs)
+        #case "clamp": return graph.clamp(*inputs)
+        case "add": return graph.add(*inputs)
+        case "mul": return graph.mul(*inputs)
+        case "div": return graph.div(*inputs)
+        #case "rms_norm": return graph.rms_norm(*inputs)
+        case _: raise NotImplementedError
+
+
+# Take in an adjacency list formatted subgraph and generate a mirage kernel graph
+def to_kernel_graph(subgraph):
+    graph = mi.new_kernel_graph()
+    dims = []
+    # stores output tensors of operations + their reference counts based on ID
+    intermediates = {}
+    for op, _ in subgraph.items():
+        inputs = []
+        for (shape, tensor_id) in op.input_tensor_shapes:
+            if tensor_id not in intermediates:
+                dims.append(shape)
+                inputs.append(graph.new_input(dims=shape, dtype=mi.float16))
+            else:
+                inputs.append(intermediates[tensor_id][0])
+                intermediates[tensor_id][1] += 1
+        res = function_map(graph, op.fn, inputs)
+        if type(res) == list:
+            for i, tensor in enumerate(res):
+                intermediates[op.output_tensor_shapes[i][1]] = (tensor, 0)
+        else:
+            intermediates[op.output_tensor_shapes[0][1]] = (res, 0)
+    for tensor, count in intermediates.items():
+        if count == 0: graph.mark_output(tensor)
+    return graph, dims
+        
+def generate_all_kernels(dummy_loss, min_num_ops=2, max_num_ops=3, UNSUPPORTED_OPS=set(["torch::autograd::AccumulateGrad", 
+                                                              "NllLossBackward0", 
+                                                              "EmbeddingBackward0"])):
+    subgraphs, unique_operators = partition_graph(dummy_loss, min_num_ops, max_num_ops, UNSUPPORTED_OPS)
+    kernel_input_dims = []
+    all_kernels = []
+    for subgraph in subgraphs:
+        kernel_graph, dims = to_kernel_graph(subgraph)
+        all_kernels.append(kernel_graph.superoptimize())
+        kernel_input_dims.append(dims)
+    return all_kernels, kernel_input_dims
+
+def time_kernels(kernels, device, iterations=1):
+    times = []
+    for kernel, dims in kernels:
+        total_time = 0
+        for _ in range(iterations):
+            inputs = []
+            for dim in dims:
+                inputs.append(torch.randn(dim, requires_grad=True).to(device))
+            start = time.time()
+            _ = kernel(*inputs)
+            total_time += time.time() - start
+        times.append(total_time / iterations)
+    return times
+
+
+
 """
 Example usage:
 
@@ -123,6 +196,8 @@ dummy_outputs = model(input_ids=dummy_input_ids, attention_mask=dummy_attention_
 dummy_loss = dummy_outputs.loss
 
 subgraphs, unique_operators = partition_graph(dummy_loss)
+all_kernels, kernel_input_dims = generate_all_kernels(subgraphs)
+times = time_kernels(all_kernels, device)
 """
 
 """
