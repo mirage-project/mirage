@@ -25,7 +25,7 @@ using namespace cute;
 
 namespace tb {
 
-template <typename T,
+template <typename T, // float_e4m3_t or float_e5m2_t
           bool IS_LDMATRIX_AVAIL,
           bool IS_STMATRIX_AVAIL,
           class SmemLayoutA_, // [K, M]
@@ -212,6 +212,37 @@ public:
     Tensor sA = make_tensor(make_smem_ptr(a_ptr), SmemLayoutA{}); // [M, K]
     Tensor sB = make_tensor(make_smem_ptr(b_ptr), SmemLayoutB{}); // [N, K]
 
+    ThrMMA thr_mma = tiled_mma.get_thread_slice(threadIdx.x);
+    Tensor tCsA = thr_mma.partition_A(sA); // (MMA,MMA_M,MMA_K,PIPE)
+    Tensor tCsB = thr_mma.partition_B(sB); // (MMA,MMA_N,MMA_K,PIPE)
+
+    Tensor tCrA = thr_mma.make_fragment_A(tCsA); // (MMA,MMA_M,MMA_K,PIPE)
+    Tensor tCrB = thr_mma.make_fragment_B(tCsB); // (MMA,MMA_N,MMA_K,PIPE)
+
+    cute::warpgroup_arrive();
+    gemm(tiled_mma, tCrA, tCrB, mma_rC);
+    cute::warpgroup_commit_batch();
+    cute::warpgroup_wait<0>();
+  }
+
+  // no pipe version + with scaling // TODO: add typename Tscale; for now assume scaling used float
+  template <typename MMARc>
+  static __device__ __forceinline__ void
+      run(MMARc &mma_rC,
+          T *__restrict__ a_ptr, // Do not define a_ptr and b_ptr as const here,
+                                 // since we may pad remaining part on the
+                                 // k-axis with 0
+          float *__restrict__ scale_A,
+          T *__restrict__ b_ptr,
+          float *__restrict__ scale_B,
+          char const *__restrict__ smem_allzero_ptr,
+          int thread_idx) {
+
+    TiledMMA tiled_mma;
+
+    Tensor sA = make_tensor(make_smem_ptr(a_ptr), SmemLayoutA{}); // [M, K]
+    Tensor sB = make_tensor(make_smem_ptr(b_ptr), SmemLayoutB{}); // [N, K]
+    Tensor gscaleA = make_tensor()
     ThrMMA thr_mma = tiled_mma.get_thread_slice(threadIdx.x);
     Tensor tCsA = thr_mma.partition_A(sA); // (MMA,MMA_M,MMA_K,PIPE)
     Tensor tCsB = thr_mma.partition_B(sB); // (MMA,MMA_N,MMA_K,PIPE)

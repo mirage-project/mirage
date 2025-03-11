@@ -47,9 +47,9 @@ std::string get_datatype_str(DataType dtype) {
     // case DT_FLOAT8:
     //   return "float8";
     case DT_FLOAT8_E4M3:
-      return "e4m3";
+      return "float_e4m3_t";
     case DT_FLOAT8_E5M2:
-      return "e5m2";
+      return "float_e5m2_t";
     case DT_INT8:
       return "int8";
     case DT_BFLOAT16:
