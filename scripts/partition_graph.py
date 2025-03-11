@@ -146,10 +146,10 @@ def to_kernel_graph(subgraph):
         if count == 0: graph.mark_output(tensor)
     return graph, dims
         
-def generate_all_kernels(dummy_loss, max_num_ops=3, UNSUPPORTED_OPS=set(["torch::autograd::AccumulateGrad", 
+def generate_all_kernels(dummy_loss, min_num_ops=2, max_num_ops=3, UNSUPPORTED_OPS=set(["torch::autograd::AccumulateGrad", 
                                                               "NllLossBackward0", 
                                                               "EmbeddingBackward0"])):
-    subgraphs, unique_operators = partition_graph(dummy_loss, max_num_ops, UNSUPPORTED_OPS)
+    subgraphs, unique_operators = partition_graph(dummy_loss, min_num_ops, max_num_ops, UNSUPPORTED_OPS)
     kernel_input_dims = []
     all_kernels = []
     for subgraph in subgraphs:
