@@ -1,7 +1,7 @@
 import torch
 from itertools import combinations as comb
-import mirage as mi
 import time
+import mirage as mi
 
 ids_to_nodes = {}
 
@@ -13,7 +13,6 @@ class Operator:
         self.output_ops = output_ops
         self.input_tensor_shapes = input_tensor_shapes
         self.output_tensor_shapes = output_tensor_shapes
-        self.inputs = []
 
 def build_computational_graph(op_node, unique_operators):
     unique_operators.add(op_node.name)
@@ -104,26 +103,47 @@ def partition_graph(dummy_loss, min_num_ops=2, max_num_ops=4, UNSUPPORTED_OPS=se
 
     return all_subgraphs, unique_operators
 
+# TODO: add support for reduction, clamp, rms_norm. These rely on additional
+# inputs that the Operator class doesn't currently support
 def function_map(graph, func, inputs):
-    # annoying casing goes here
-    pass
+    match func.name:
+        case "matmul": return graph.matmul(*inputs)
+        #case "reduction": return graph.reduction(*inputs)
+        case "exp": return graph.exp(*inputs)
+        case "silu": return graph.silu(*inputs)
+        case "gelu": return graph.gelu(*inputs)
+        case "relu": return graph.relu(*inputs)
+        #case "clamp": return graph.clamp(*inputs)
+        case "add": return graph.add(*inputs)
+        case "mul": return graph.mul(*inputs)
+        case "div": return graph.div(*inputs)
+        #case "rms_norm": return graph.rms_norm(*inputs)
+        case _: raise NotImplementedError
 
+
+# Take in an adjacency list formatted subgraph and generate a mirage kernel graph
 def to_kernel_graph(subgraph):
     graph = mi.new_kernel_graph()
     dims = []
-    for op, output_ops in subgraph.items():
-        if op.input_ops == []:
-            inputs = []
-            for input_tensor in op.input_tensor_shapes:
-                dims.append(input_tensor)
-                inputs.append(graph.new_input(dims=input_tensor, dtype=mi.float16))
-        # This def isn't the way to do it but need to figure out the reflection
-
+    # stores output tensors of operations + their reference counts based on ID
+    intermediates = {}
+    for op, _ in subgraph.items():
+        inputs = []
+        for (shape, tensor_id) in op.input_tensor_shapes:
+            if tensor_id not in intermediates:
+                dims.append(shape)
+                inputs.append(graph.new_input(dims=shape, dtype=mi.float16))
+            else:
+                inputs.append(intermediates[tensor_id][0])
+                intermediates[tensor_id][1] += 1
         res = function_map(graph, op.fn, inputs)
-        if op.output_ops == []:
-            graph.mark_output(res)
-        for output_op in output_ops:
-            output_op.inputs.append(res)
+        if type(res) == list:
+            for i, tensor in enumerate(res):
+                intermediates[op.output_tensor_shapes[i][1]] = (tensor, 0)
+        else:
+            intermediates[op.output_tensor_shapes[0][1]] = (res, 0)
+    for tensor, count in intermediates.items():
+        if count == 0: graph.mark_output(tensor)
     return graph, dims
         
 def generate_all_kernels(dummy_loss, max_num_ops=3, UNSUPPORTED_OPS=set(["torch::autograd::AccumulateGrad", 
@@ -176,6 +196,8 @@ dummy_outputs = model(input_ids=dummy_input_ids, attention_mask=dummy_attention_
 dummy_loss = dummy_outputs.loss
 
 subgraphs, unique_operators = partition_graph(dummy_loss)
+all_kernels, kernel_input_dims = generate_all_kernels(subgraphs)
+times = time_kernels(all_kernels, device)
 """
 
 """
