@@ -1,11 +1,11 @@
 import mirage as mi
 import numpy as np
 import torch
+from mpi4py import MPI
 
 
 if __name__ == "__main__":
     # TODO (linsj20)
-    print("should print twice")
 
     graph = mi.new_kernel_graph(gpu_dim=(2, 1, 1))
     X = graph.new_input(dims=(64, 4096), gpu_input_map=(1, -1 ,-1), dtype=mi.float16)
@@ -22,7 +22,6 @@ if __name__ == "__main__":
     OR = graph.allreduce(O[0])
     graph.mark_output(OR)
 
-    from mpi4py import MPI
     comm = MPI.COMM_WORLD
     rank = comm.Get_rank()
     input_tensors = [
@@ -31,8 +30,8 @@ if __name__ == "__main__":
     ]
 
     input_strides = [tensor.stride() for tensor in input_tensors]
-    p = mi.generate_cuda_program(graph.cygraph, target_cc=86, input_strides=input_strides)
-    print(p["code"])
+    #p = mi.generate_cuda_program(graph.cygraph, target_cc=90, input_strides=input_strides)
+    #print(p["code"])
 
     outputs = graph(inputs=input_tensors)
     print(outputs)
