@@ -235,6 +235,20 @@ CustomOPTranspileResult
   code.e("int thread_idx = $;", thread_idx);
   code.e("static constexpr int NUM_THREADS = $;", num_threads);
 
+  if (config.profile_mode) {
+    code.e("volatile ProfilerEntry entry;");
+    code.e("if (get_thread_idx() == 0) {");
+    code.e("  entry.nblocks = get_num_blocks();");
+    code.e("  profiler_buffer_ptr[0] = entry.raw;");
+    code.e("}");
+    code.e("profiler_write_ptr = profiler_buffer_ptr + 1 + get_block_idx();");
+    code.e("profiler_write_stride = get_num_blocks();");
+    code.e("profiler_entry_tag_base = encode_tag(get_block_idx(), 0, 0);");
+    code.e("profiler_write_thread_predicate = threadIdx.x == 0;");
+  }
+  
+  
+
   // Define STensor as cute::Tensor
   code.e("// STensors");
   code.e("extern __shared__ char buf[];");
@@ -696,6 +710,17 @@ CustomOPTranspileResult
       to_json(op_type_str, op->op_type);
       code.e("{");
       code.e("// OP type: $", op_type_str);
+
+      if(!is_in_loop && config.profile_mode){
+        code.e("__threadfence_block();");
+        code.e("if (profiler_write_thread_predicate) {");
+        code.e("  entry.tag = profiler_entry_tag_base | ((uint32_t)$ << EVENT_IDX_SHIFT) | EVENT_END;", op->op_type);
+        code.e("  entry.delta_time = get_timestamp();");
+        code.e("  *profiler_write_ptr = entry.raw;");
+        code.e("  profiler_write_ptr += profiler_write_stride;");
+        code.e("}");
+      }
+
       switch (op->op_type) {
         case type::TB_INPUT_OP: {
           // In this lambda function we only accept input ops within the for
@@ -1029,6 +1054,16 @@ CustomOPTranspileResult
         default: {
           assert(fmt("Unknown TB op: $", op->op_type).c_str());
         }
+      }
+      
+      if(!is_in_loop && config.profile_mode){
+        code.e("__threadfence_block();");
+        code.e("if (profiler_write_thread_predicate) {");
+        code.e("  entry.tag = profiler_entry_tag_base | ((uint32_t)$ << EVENT_IDX_SHIFT) | EVENT_END;", op->op_type);
+        code.e("  entry.delta_time = get_timestamp();");
+        code.e("  *profiler_write_ptr = entry.raw;");
+        code.e("  profiler_write_ptr += profiler_write_stride;");
+        code.e("}");
       }
       code.e("}");
     }

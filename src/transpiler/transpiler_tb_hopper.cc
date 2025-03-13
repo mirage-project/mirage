@@ -793,6 +793,20 @@ CustomOPTranspileResult
   //  code.e("__syncthreads();");
 
   code.e("int warpgroup_id = tb::warpgroup_id();");
+
+  if (config.profile_mode) {
+    code.e("volatile ProfilerEntry entry;");
+    code.e("if (get_block_idx() == 0 && get_thread_idx() == 0) {");
+    code.e("  entry.nblocks = get_num_blocks();");
+    code.e("  entry.ngroups = $;", config.num_consumer_wgs);
+    code.e("  profiler_buffer[0] = entry.raw;");
+    code.e("}");
+    code.e("profiler_write_ptr = profiler_buffer + 1 + get_block_idx() * $ + warpgroup_id;", config.num_consumer_wgs);
+    code.e("profiler_write_stride = get_num_blocks() * $;", config.num_consumer_wgs);
+    code.e("profiler_entry_tag_base = encode_tag(get_block_idx() * $ + warpgroup_id, 0, 0);", config.num_consumer_wgs);
+    code.e("profiler_write_thread_predicate = (threadIdx.x % 128 == 0);");
+  }
+  
   // run producers
   code.e("if (warpgroup_id == $) {", config.num_consumer_wgs);
   // allocate tma register files
@@ -882,6 +896,18 @@ CustomOPTranspileResult
       auto [need_advance_pipeline, pipe_ids] =
           add_loop_node_consumer_wait_if_need(
               op, code, is_in_loop, pipeline_inputs);
+
+
+      if(!is_in_loop && config.profile_mode){
+        code.e("if (profiler_write_thread_predicate) {");
+        code.e("  entry.tag = profiler_entry_tag_base | ((uint32_t)$ << EVENT_IDX_SHIFT) | EVENT_BEGIN;", op->op_type);
+        code.e("  entry.delta_time = get_timestamp();");
+        code.e("  *profiler_write_ptr = entry.raw;");
+        code.e("  profiler_write_ptr += profiler_write_stride;");
+        code.e("}");
+        code.e("__threadfence_block();");
+      }
+      
 
       switch (op->op_type) {
         case type::TB_OUTPUT_OP: {
@@ -1199,8 +1225,19 @@ CustomOPTranspileResult
           code.e("hopper_async_pipeline_$.consumer_release();", pipe_id);
         }
       }
+      if(!is_in_loop && config.profile_mode){
+        code.e("__threadfence_block();");
+        code.e("if (profiler_write_thread_predicate) {");
+        code.e("  entry.tag = profiler_entry_tag_base | ((uint32_t)$ << EVENT_IDX_SHIFT) | EVENT_END;", op->op_type);
+        code.e("  entry.delta_time = get_timestamp();");
+        code.e("  *profiler_write_ptr = entry.raw;");
+        code.e("  profiler_write_ptr += profiler_write_stride;");
+        code.e("}");
+      }
       code.e("}");
     }
+
+
     return CUDA_T_SUCCESS;
   };
 

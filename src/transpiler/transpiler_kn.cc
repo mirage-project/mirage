@@ -151,7 +151,60 @@ TranspileResult Transpiler::transpile_ugraph() {
     header.e("#define MIRAGE_GRACE_HOPPER");
   }
   header.e("#include \"runtime.h\"");
+
   header.e("using namespace cute;");
+
+  if (config.profile_mode) {
+    header.e("// Profiler definitions");
+    header.e("constexpr uint32_t EVENT_IDX_SHIFT = 2;");
+    header.e("constexpr uint32_t BLOCK_IDX_SHIFT = 14;");
+    header.e("constexpr uint32_t EVENT_BEGIN = 0x0;");
+    header.e("constexpr uint32_t EVENT_END = 0x1;");
+    header.e("constexpr uint32_t EVENT_INSTANT = 0x2;");
+    
+    header.e("__device__ __forceinline__ uint32_t get_block_idx() {");
+    header.e("  return (blockIdx.z * gridDim.y + blockIdx.y) * gridDim.x + blockIdx.x;");
+    header.e("}");
+    
+    header.e("__device__ __forceinline__ uint32_t get_num_blocks() {");
+    header.e("  return gridDim.x * gridDim.y * gridDim.z;");
+    header.e("}");
+    
+    header.e("__device__ __forceinline__ uint32_t get_thread_idx() {");
+    header.e("  return (threadIdx.z * blockDim.y + threadIdx.y) * blockDim.x + threadIdx.x;");
+    header.e("}");
+    
+    header.e("__device__ __forceinline__ uint32_t encode_tag(uint32_t block_idx, uint32_t event_idx, uint32_t event_type) {");
+    header.e("  return (block_idx << BLOCK_IDX_SHIFT) | (event_idx << EVENT_IDX_SHIFT) | event_type;");
+    header.e("}");
+    
+    header.e("__device__ __forceinline__ uint32_t get_timestamp() {");
+    header.e("  volatile uint32_t ret;");
+    header.e("  asm volatile(\"mov.u32 %0, %globaltimer_lo;\" : \"=r\"(ret));");
+    header.e("  return ret;");
+    header.e("}");
+    
+    header.e("struct ProfilerEntry {");
+    header.e("  union {");
+    header.e("    struct {");
+    header.e("      uint32_t nblocks;");
+    header.e("      uint32_t ngroups;");
+    header.e("    };");
+    header.e("    struct {");
+    header.e("      uint32_t tag;");
+    header.e("      uint32_t delta_time;");
+    header.e("    };");
+    header.e("    uint64_t raw;");
+    header.e("  };");
+    header.e("};");
+
+    // declare global variables
+    header.e("static uint64_t* profiler_buffer_ptr;");
+    header.e("static uint64_t* profiler_write_ptr;");
+    header.e("static uint32_t profiler_write_stride;");
+    header.e("static uint32_t profiler_entry_tag_base;");
+    header.e("static bool profiler_write_thread_predicate;");
+  }
 
   CodeKeeper custom_kernels; // This keeps all code for custom kernels
                              // (KNCustomizedOp)
@@ -165,7 +218,13 @@ TranspileResult Transpiler::transpile_ugraph() {
   exec.e(
       "static void _execute_mugraph(std::vector<void const *> input_tensors, "
       "std::vector<void*> output_tensors"
-      ", void* buf) {");
+      ", void* buf, void* profiler_buffer) {");
+
+  if (config.profile_mode) {
+    exec.e("profiler_buffer_ptr = static_cast<uint64_t*>(profiler_buffer);");
+    exec.e("volatile ProfilerEntry entry;");
+  }
+  
   for (kn::KNOperator *const op : g->operators) {
     std::string op_type_str;
     to_json(op_type_str, op->op_type);
