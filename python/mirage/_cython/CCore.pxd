@@ -300,6 +300,7 @@ cdef extern from "mirage/transpiler/transpile.h" namespace "mirage::transpiler":
         int num_consumer_wgs
         int num_producer_wgs;
         int pipeline_stages;
+        bool profile_mode
     ctypedef struct OutputTensorDirective:
         size_t alloc_size
         vector[int] shape
