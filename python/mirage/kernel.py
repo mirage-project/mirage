@@ -68,7 +68,7 @@ static PyObject *launch(PyObject *self, PyObject *args) {
   void *profiler_buffer = PyLong_AsVoidPtr(py_profiler_buffer);
   execute_mugraph(input_tensors, output_tensors, buffer, profiler_buffer);
 #else
-  execute_mugraph(input_tensors, output_tensors, buffer);
+  execute_mugraph(input_tensors, output_tensors, buffer, NULL);
 #endif
 
   Py_RETURN_NONE;
@@ -103,7 +103,6 @@ def get_cc_cmd(target, cc, FILE_NAME, py_include_dir, MIRAGE_ROOT, so_path, prof
         FILE_NAME,
         "-O3",
         f"-I{py_include_dir}",
-        f"-I{MIRAGE_ROOT}/include/",
         f"-I{MIRAGE_ROOT}/include/mirage/transpiler/runtime/",
         f"-I{MIRAGE_ROOT}/deps/cutlass/include",
         "-shared",
@@ -273,7 +272,6 @@ class KNGraph:
         assert self.run is not None, "The graph is not compiled yet."
         
         input_tensors = kwargs.get("inputs", [])
-        profile_mode = kwargs.get("profile_mode", False)
         profiler_buffer = kwargs.get("profiler_buffer", None)
 
         # TODO: dtype and device
@@ -297,16 +295,11 @@ class KNGraph:
         input_tensors_ptr = [tensor.data_ptr() for tensor in input_tensors]
         output_tensors_ptr = [tensor.data_ptr() for tensor in output_tensors]
 
-        profiler_buffer_ptr = 0
+        profiler_buffer_ptr = -1
         if profiler_buffer is not None:
             profiler_buffer_ptr = profiler_buffer.data_ptr()
 
-
-        if profile_mode:
-            self.run(input_tensors_ptr, output_tensors_ptr, buffer_tensor_ptr, profiler_buffer_ptr)
-        else:
-            self.run(input_tensors_ptr, output_tensors_ptr, buffer_tensor_ptr)
-
+        self.run(input_tensors_ptr, output_tensors_ptr, buffer_tensor_ptr, profiler_buffer_ptr)
 
         return output_tensors
 
@@ -361,6 +354,8 @@ class KNGraph:
 
         # if True:
         #     tempdir = './test/'
+        # import pdb
+        # pdb.set_trace()
 
         tempdir_obj = tempfile.TemporaryDirectory()
         tempdir = tempdir_obj.name
@@ -494,15 +489,14 @@ class KNGraph:
                     input_tensors = list()
                     for t in dtensors:
                         dims = [t.dim(i) for i in range(t.num_dims)]
-                        # zy: change to tuple
-                        # dims = tuple(t.dim(i) for i in range(t.num_dims))
+
                         # zy: temporarily set to torch.float16
                         input_tensors.append(
                             torch.randn(dims, dtype=torch.float16, device="cuda:0")
                         )
                     starter = torch.cuda.Event(enable_timing=True)
                     ender = torch.cuda.Event(enable_timing=True)
-                    handle = g.compile(async_=True, inputs=input_tensors, file_id=file_id)
+                    handle = g.compile(async_=True, inputs=input_tensors, profile_mode=profile_mode, file_id=file_id)
                     handles.append(handle)
             for handle in handles:
                 handle.wait()
@@ -523,8 +517,6 @@ class KNGraph:
                 for _ in range(warmup_iters):
                     g(inputs=input_tensors)
                 torch.cuda.synchronize()
-
-                
 
                 starter.record()
 

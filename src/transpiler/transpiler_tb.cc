@@ -712,13 +712,13 @@ CustomOPTranspileResult
       code.e("// OP type: $", op_type_str);
 
       if(!is_in_loop && config.profile_mode){
-        code.e("__threadfence_block();");
         code.e("if (profiler_write_thread_predicate) {");
-        code.e("  entry.tag = profiler_entry_tag_base | ((uint32_t)$ << EVENT_IDX_SHIFT) | EVENT_END;", op->op_type);
+        code.e("  entry.tag = profiler_entry_tag_base | ((uint32_t)$ << EVENT_IDX_SHIFT) | EVENT_BEGIN;", op->op_type);
         code.e("  entry.delta_time = get_timestamp();");
         code.e("  *profiler_write_ptr = entry.raw;");
         code.e("  profiler_write_ptr += profiler_write_stride;");
         code.e("}");
+        code.e("__threadfence_block();");
       }
 
       switch (op->op_type) {

@@ -156,11 +156,11 @@ TranspileResult Transpiler::transpile_ugraph() {
 
   if (config.profile_mode) {
     header.e("// Profiler definitions");
-    header.e("constexpr uint32_t EVENT_IDX_SHIFT = 2;");
-    header.e("constexpr uint32_t BLOCK_IDX_SHIFT = 14;");
-    header.e("constexpr uint32_t EVENT_BEGIN = 0x0;");
-    header.e("constexpr uint32_t EVENT_END = 0x1;");
-    header.e("constexpr uint32_t EVENT_INSTANT = 0x2;");
+    header.e("__device__ constexpr uint32_t EVENT_IDX_SHIFT = 2;");
+    header.e("__device__ constexpr uint32_t BLOCK_IDX_SHIFT = 14;");
+    header.e("__device__ constexpr uint32_t EVENT_BEGIN = 0x0;");
+    header.e("__device__ constexpr uint32_t EVENT_END = 0x1;");
+    // header.e("__device__ constexpr uint32_t EVENT_INSTANT = 0x2;");
     
     header.e("__device__ __forceinline__ uint32_t get_block_idx() {");
     header.e("  return (blockIdx.z * gridDim.y + blockIdx.y) * gridDim.x + blockIdx.x;");
@@ -184,7 +184,7 @@ TranspileResult Transpiler::transpile_ugraph() {
     header.e("  return ret;");
     header.e("}");
     
-    header.e("struct ProfilerEntry {");
+    header.e("struct __align__(8) ProfilerEntry {");
     header.e("  union {");
     header.e("    struct {");
     header.e("      uint32_t nblocks;");
@@ -199,11 +199,11 @@ TranspileResult Transpiler::transpile_ugraph() {
     header.e("};");
 
     // declare global variables
-    header.e("static uint64_t* profiler_buffer_ptr;");
-    header.e("static uint64_t* profiler_write_ptr;");
-    header.e("static uint32_t profiler_write_stride;");
-    header.e("static uint32_t profiler_entry_tag_base;");
-    header.e("static bool profiler_write_thread_predicate;");
+    header.e("__device__ uint64_t* profiler_buffer_ptr;");
+    header.e("__device__ uint64_t* profiler_write_ptr;");
+    header.e("__device__ uint32_t profiler_write_stride;");
+    header.e("__device__ uint32_t profiler_entry_tag_base;");
+    header.e("__device__ bool profiler_write_thread_predicate;");
   }
 
   CodeKeeper custom_kernels; // This keeps all code for custom kernels
@@ -221,7 +221,8 @@ TranspileResult Transpiler::transpile_ugraph() {
       ", void* buf, void* profiler_buffer) {");
 
   if (config.profile_mode) {
-    exec.e("profiler_buffer_ptr = static_cast<uint64_t*>(profiler_buffer);");
+    exec.e("uint64_t* host_profiler_buffer_ptr = static_cast<uint64_t*>(profiler_buffer);");
+    exec.e("cudaMemcpyToSymbol(profiler_buffer_ptr, &host_profiler_buffer_ptr, sizeof(uint64_t*));");
     exec.e("volatile ProfilerEntry entry;");
   }
   

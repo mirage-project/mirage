@@ -46,7 +46,8 @@ if __name__ == "__main__":
                             warmup_iters=warmup_iters, 
                             profile_iters=profile_iters,
                             profile_mode=True,
-                            profiler_buffer=profiler_buffer
+                            profiler_buffer=profiler_buffer,
+                            file_id=2
                         )
 
     input_tensors = [
@@ -57,24 +58,24 @@ if __name__ == "__main__":
 
 
 
-    print("Warming up...")
-    for _ in range(16):
-        optimized_graph(inputs=input_tensors)
+    # print("Warming up...")
+    # for _ in range(16):
+    #     optimized_graph(inputs=input_tensors)
 
-    # profiler_buffer.zero_()
+    # # profiler_buffer.zero_()
 
-    # 性能测试
-    print("Running performance test with profiling...")
-    torch.cuda.synchronize()
-    starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
-    starter.record()
-    for _ in range(1000):
-        optimized_graph(inputs=input_tensors)
-    ender.record()
-    torch.cuda.synchronize()
-    curr_time = starter.elapsed_time(ender)
-    mean_syn = curr_time / 1000
+    # # 性能测试
+    # print("Running performance test with profiling...")
+    # torch.cuda.synchronize()
+    # starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+    # starter.record()
+    # for _ in range(1000):
+    #     optimized_graph(inputs=input_tensors)
+    # ender.record()
+    # torch.cuda.synchronize()
+    # curr_time = starter.elapsed_time(ender)
+    # mean_syn = curr_time / 1000
 
-    print("Best muGraph run time (ms): ", mean_syn)
+    # print("Best muGraph run time (ms): ", mean_syn)
 
 
