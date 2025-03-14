@@ -18,8 +18,8 @@ if __name__ == "__main__":
     
     torch.cuda.set_device(RANK)
     graph = mi.new_kernel_graph(gpu_dim=(4, 1, 1))
-    X = graph.new_input(dims=(512, 256), gpu_input_map=(1, -1 ,-1), dtype=mi.float16)
-    W = graph.new_input(dims=(256, 256), gpu_input_map=(0, -1 ,-1), dtype=mi.float16)
+    X = graph.new_input(dims=(512, 128), gpu_input_map=(1, -1 ,-1), dtype=mi.float16)
+    W = graph.new_input(dims=(128, 256), gpu_input_map=(0, -1 ,-1), dtype=mi.float16)
     tb_graph = mi.new_threadblock_graph(grid_dim=(4,8,1), block_dim=(128,1,1), forloop_range=4, reduction_dimx=4)
     tX = tb_graph.new_input(dtensor=X, input_map=(-1, 0, -1), forloop_dim=1)
     tW = tb_graph.new_input(dtensor=W, input_map=(1, -1, -1), forloop_dim=0)
@@ -27,7 +27,7 @@ if __name__ == "__main__":
     tAccM = tb_graph.forloop_accum(tM)
 
     #TB_ALLTOALL_EPILOGUE
-    tb_graph.new_output(stensor=tAccM, output_map=(0, 1, -1), epilogue="alltoall") # (0, 1, -1) right?
+    tb_graph.new_output(stensor=tAccM, output_map=(1, 0, -1), epilogue="alltoall") # (0, 1, -1) right?
     O = graph.customized([X, W], tb_graph)
     graph.mark_output(O[0])
 
