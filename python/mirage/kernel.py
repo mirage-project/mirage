@@ -22,8 +22,9 @@ static PyObject *launch(PyObject *self, PyObject *args) {
   void *buffer;
   std::vector<void const *> input_tensors;
   std::vector<void*> output_tensors;
+  int rank;
 
-  if (!PyArg_ParseTuple(args, "OOO", &input_list, &output_list, &py_buffer)) {
+  if (!PyArg_ParseTuple(args, "OOOi", &input_list, &output_list, &py_buffer, &rank)) {
     PyErr_SetString(PyExc_TypeError, "Invalid parameters");
     return NULL;
   }
@@ -40,7 +41,7 @@ static PyObject *launch(PyObject *self, PyObject *args) {
     PyObject *item = PyList_GetItem(input_list, i);
     void* tensor = PyLong_AsVoidPtr(item);
     if(!tensor) {
-      PyErr_Format(PyExc_TypeError, "Failed to convert item %d (input) to void pointer", i);
+      PyErr_Format(PyExc_TypeError, "Failed to convert item %d (input) to void pointer", (int)i);
       return NULL;
     }
     input_tensors.push_back(PyLong_AsVoidPtr(item));
@@ -50,17 +51,19 @@ static PyObject *launch(PyObject *self, PyObject *args) {
     PyObject *item = PyList_GetItem(output_list, i);
     void* tensor = PyLong_AsVoidPtr(item);
     if(!tensor) {
-      PyErr_Format(PyExc_TypeError, "Failed to convert item %d (output) to void pointer", i);
+      PyErr_Format(PyExc_TypeError, "Failed to convert item %d (output) to void pointer", (int)i);
       return NULL;
     }
     output_tensors.push_back(PyLong_AsVoidPtr(item));
   }
 
   buffer = PyLong_AsVoidPtr(py_buffer);
-  execute_mugraph(input_tensors, output_tensors, buffer);
+
+  execute_mugraph(input_tensors, output_tensors, buffer, rank);
 
   Py_RETURN_NONE;
 }
+
 
 static PyMethodDef ModuleMethods[] = {
   {"launch", launch, METH_VARARGS, "Entry point for all kernels with this signature"},
@@ -97,7 +100,7 @@ dtype_map = {
     'fp64':    torch.float64
 }
 
-def get_cc_cmd(target, cc, FILE_NAME, py_include_dir, MIRAGE_ROOT, so_path):
+def get_cc_cmd(target, cc, FILE_NAME, py_include_dir, MIRAGE_ROOT, NCCL_ROOT, MPI_ROOT, so_path):
     common_cmd = [
         cc,
         FILE_NAME,
@@ -105,10 +108,24 @@ def get_cc_cmd(target, cc, FILE_NAME, py_include_dir, MIRAGE_ROOT, so_path):
         f"-I{py_include_dir}",
         f"-I{MIRAGE_ROOT}/include/mirage/transpiler/runtime/",
         f"-I{MIRAGE_ROOT}/deps/cutlass/include",
+        f"-I/usr/include/nvshmem_12",
+        # f"-I/usr/include/openmpi-x86_64",
+        f"-L/usr/lib64/nvshmem/12",
+        # "-lnvshmem",
+        "-lnvshmem_device",
+        "-lnvshmem_host",
+        "-ccbin=mpic++",
+        f"-I{NCCL_ROOT}/include",
+        f"-L/{NCCL_ROOT}/lib",
+        f"-I{MPI_ROOT}/include",
+        f"-L/{MPI_ROOT}/lib",
         "-shared",
         "-std=c++17",
+        "-rdc=true",
         "-use_fast_math",
         "-lcublas",
+        "-lnccl",
+        "-lmpi",
         "-Xcompiler=-fPIC",
         "--expt-relaxed-constexpr",
         "-o",
@@ -170,11 +187,13 @@ class KNGraph:
         self._valid_cuda_kernels = False
         self._cached_results = None
         self.visualizer = None
+        self.use_nvshmem = False
+        self.nvshmem = None
 
         self.backend = "cuda"
 
     def new_input(
-        self, dims: tuple, strides: tuple = None, dtype: dtype = float16
+        self, dims: tuple, strides: tuple = None, gpu_input_map: tuple = None, dtype: dtype = float16
     ) -> DTensor:
         # use the default strided layout if strides = None
         if strides is None:
@@ -189,7 +208,7 @@ class KNGraph:
             assert check_stride(dims, strides, "row-major") | check_stride(
                 dims, strides, "column-major"
             )
-        return self.cygraph.new_input(dims, tuple(strides), dtype)
+        return self.cygraph.new_input(dims, tuple(strides), gpu_input_map, dtype)
 
     def mark_output(self, A: DTensor, strides: tuple = None):
         return self.cygraph.mark_output(A, strides)
@@ -228,7 +247,12 @@ class KNGraph:
         return self.cygraph.rms_norm(A, normalized_shape)
 
     def customized(self, inputs: list[DTensor], bgraph: TBGraph) -> list[DTensor]:
+        self.use_nvshmem = bgraph.use_nvshmem
         return self.cygraph.customized(inputs, bgraph.cygraph)
+
+    # TODO (linsj20)
+    def allreduce(self, A: DTensor, reduce_op="sum", inplace=False):
+        return self.cygraph.all_reduce(A, reduce_op, inplace)
 
     def valid_kernels(self):
         assert self._is_compiled, "Should check kernel validness after compilation"
@@ -263,7 +287,14 @@ class KNGraph:
         return output_tensors
 
     def cuda_call(self, **kwargs):
+        print("Calling cuda_call")
         results = self.compile(**kwargs)
+        print("Return from compile")
+        if kwargs.get("save_codes", False):
+            print("Saving generated codes to generated_codes/generated_kernel.cu")
+            os.makedirs("generated_codes", exist_ok=True)
+            with open("generated_codes/generated_kernel.cu", "w") as f:
+                f.write(results["code"])
 
         # directly return if the Transpiler cannot generate valid CUDA kernels
         if not self._valid_cuda_kernels:
@@ -272,6 +303,7 @@ class KNGraph:
         assert self.run is not None, "The graph is not compiled yet."
 
         input_tensors = kwargs.get("inputs", [])
+        rank = kwargs.get("rank", 0)
 
         # TODO: dtype and device
         buffer_tensor = torch.empty(
@@ -293,7 +325,7 @@ class KNGraph:
         input_tensors_ptr = [tensor.data_ptr() for tensor in input_tensors]
         output_tensors_ptr = [tensor.data_ptr() for tensor in output_tensors]
 
-        self.run(input_tensors_ptr, output_tensors_ptr, buffer_tensor_ptr)
+        self.run(input_tensors_ptr, output_tensors_ptr, buffer_tensor_ptr, rank)
 
         return output_tensors
 
@@ -321,7 +353,8 @@ class KNGraph:
         result = generate_cuda_program(
             self.cygraph, target_cc=target_cc, input_strides=input_strides, num_warp_groups = num_warp_groups, pipeline_stages = pipeline_stages
         )
-        # print(result)
+
+        print(result['code'])
         if result["max_smem_size"] > get_shared_memory_capacity(target_cc):
             # the transpiled kernel exceeds shared memory limit
             print(
@@ -338,6 +371,30 @@ class KNGraph:
         MIRAGE_ROOT = os.environ.get(
             "MIRAGE_ROOT", os.path.join(os.path.dirname(__file__), "../..")
         )
+
+        # TODO (linsj20)
+        NCCL_ROOT = os.environ.get("NCCL_HOME")
+        if not os.path.exists(NCCL_ROOT):
+            print(
+                f"Warning: NCCL_ROOT ({NCCL_ROOT}) not found. Disable distributed kernel generation."
+            )
+            sys.exit(1)
+
+        # TODO (linsj20)
+        MPI_ROOT = os.environ.get("MPI_HOME")
+        if not os.path.exists(MPI_ROOT):
+            print(
+                f"Warning: MPI_ROOT ({MPI_ROOT}) not found. Disable distributed kernel generation."
+            )
+            sys.exit(1)
+
+        #TODO: (NorthmanPKU)
+        # MVSHMEM_ROOT = os.environ.get("MVSHMEM_HOME")
+        # if not os.path.exists(MVSHMEM_ROOT):
+        #     print(
+        #         f"Warning: MVSHMEM_ROOT ({MVSHMEM_ROOT}) not found. Disable distributed kernel generation."
+        #     )
+        #     sys.exit(1)
 
         # if True:
         #     tempdir = './test/'
@@ -360,6 +417,9 @@ class KNGraph:
                 with open(saved_addr + "test" + str(file_id) + ".cu", "w") as f:
                     f.write(result["code"] + HARD_CODE)
 
+        # TMP
+        with open("./test.cu", "w") as f:
+            f.write(result["code"] + HARD_CODE)
 
         cc = shutil.which("nvcc")
         if cc is None:
@@ -383,7 +443,7 @@ class KNGraph:
                 f"Error: MIRAGE_ROOT ({MIRAGE_ROOT}) not found. Please set the MIRAGE_ROOT env variable correctly"
             )
             sys.exit(1)
-        cc_cmd = get_cc_cmd(target_cc, cc, FILE_NAME, py_include_dir, MIRAGE_ROOT, so_path)
+        cc_cmd = get_cc_cmd(target_cc, cc, FILE_NAME, py_include_dir, MIRAGE_ROOT, NCCL_ROOT, MPI_ROOT, so_path)
 
 
         def remain_op():
@@ -509,6 +569,7 @@ class KNGraph:
         elif backend == "nki":
             return all_graphs
         elif backend == "triton":
+
             MIRAGE_ROOT = os.environ.get(
                 "MIRAGE_ROOT", os.path.join(os.path.dirname(__file__), "../..")
             )

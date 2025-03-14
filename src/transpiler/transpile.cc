@@ -15,6 +15,7 @@
 
 #include "mirage/transpiler/transpile.h"
 #include "mirage/kernel/graph.h"
+#include "mirage/kernel/all_reduce.h"
 #include "mirage/threadblock/graph.h"
 #include "mirage/transpiler/transpiler.h"
 #include <cassert>
@@ -44,6 +45,7 @@ Transpiler::Transpiler(kernel::Graph const *_graph,
   // We need to construct a new kernel graph by decomposing forloop accumulators
   // into the non-reduction accumulator type to enable transpiler optimizations
   g = std::make_shared<kernel::Graph>();
+  g->gpu_dim = _graph->gpu_dim;
   std::unordered_map<size_t, kernel::DTensor> dtensor_mapping;
 
   int input_dtensor_idx = 0;
@@ -67,8 +69,11 @@ Transpiler::Transpiler(kernel::Graph const *_graph,
         // defined in mugraph
         assert(input_dtensor_idx < (int)input_strides.size());
         assert(input_op->input_strides == input_strides[input_dtensor_idx++]);
-        kernel::DTensor dt = g->new_input(
-            dims, input_op->input_strides, dtensor.data_type, dtensor.layout);
+        kernel::DTensor dt = g->new_input_from_constructed(dims,
+                                          input_op->input_strides,
+                                          input_op->input_map,
+                                          dtensor.data_type,
+                                          dtensor.layout);
         dtensor_mapping[op->output_tensors[0].guid] = dt;
         break;
       }
@@ -126,6 +131,15 @@ Transpiler::Transpiler(kernel::Graph const *_graph,
       }
       case KN_RMS_NORM_OP: {
         assert(false && "To be implemented");
+        break;
+      }
+      case KN_ALLREDUCE_OP: {
+        kernel::KNAllReduceOp *allreduce_op = static_cast<kernel::KNAllReduceOp *>(op);
+        assert(dtensor_inputs.size() == 1);
+        assert(allreduce_op->output_tensors.size() == 1);
+        kernel::DTensor dt =
+            g->all_reduce(dtensor_inputs[0], allreduce_op->inplace);
+        dtensor_mapping[allreduce_op->output_tensors[0].guid] = dt;
         break;
       }
       case KN_CUSTOMIZED_OP: {
