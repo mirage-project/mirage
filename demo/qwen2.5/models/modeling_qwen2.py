@@ -189,13 +189,13 @@ class Qwen2MLP(nn.Module):
         graph.mark_output(O)
         self.kernel = graph.superoptimize(config="mlp")
 
-    def forward(self, input_layernorm, hidden_state):
+    def forward(self, input_layernorm, hidden_state0):
         # use the original for prefilling
-        hidden_state = input_layernorm(hidden_state)
+        hidden_state = input_layernorm(hidden_state0)
         output = torch.matmul(hidden_state, self.fused_weight)
         if hidden_state.shape[-2] == 1 and self.enable_mirage:
             # use mirage kernels for decoding
-            output2 = self.kernel(inputs=(hidden_state, input_layernorm.weight, self.fused_weight))[0]
+            output2 = self.kernel(inputs=(hidden_state0, input_layernorm.weight, self.fused_weight))[0]
             print("output", output)
             print("output2", output2)
         
