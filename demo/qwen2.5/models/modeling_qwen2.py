@@ -152,7 +152,7 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
             that cos[position_ids] and sin[position_ids] have the shape [batch_size, seq_len, head_dim]. Then, if q and
             k have the shape [batch_size, heads, seq_len, head_dim], then setting unsqueeze_dim=1 makes
             cos[position_ids] and sin[position_ids] broadcastable to the shapes of q and k. Similarly, if q and k have
-            the shape [batch_size, seq_len, heads, head_dim], then set unsqueeze_dim=2.
+            the shape [batch_size, seq_len, heads, head_dim], then set utensornsqueeze_dim=2.
     Returns:
         `tuple(torch.Tensor)` comprising of the query and key tensors rotated using the Rotary Position Embedding.
     """
@@ -172,11 +172,13 @@ class Qwen2MLP(nn.Module):
         self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
         self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=False)
         self.act_fn = ACT2FN[config.hidden_act]
+        self.enable_mirage = False
 
     def fuse_weights(self):
         self.fused_weight = torch.transpose(torch.cat((self.gate_proj.weight, self.up_proj.weight), 0), 0, 1)
 
     def superoptimize_kernels(self):
+        self.enable_mirage = True
         graph = mi.new_kernel_graph()
         X = graph.new_input(dims=(1, self.hidden_size), dtype=mi.bfloat16)
         G = graph.new_input(dims=(1, self.hidden_size), dtype=mi.bfloat16)
@@ -191,11 +193,11 @@ class Qwen2MLP(nn.Module):
         # use the original for prefilling
         hidden_state = input_layernorm(hidden_state)
         output = torch.matmul(hidden_state, self.fused_weight)
-        #if hidden_state.shape[-2] == 1:
+        if hidden_state.shape[-2] == 1 and self.enable_mirage:
             # use mirage kernels for decoding
-            # output2 = self.kernel(inputs=(hidden_state, input_layernorm.weight, self.fused_weight))[0]
-            # print("output", output)
-            # print("output2", output2)
+            output2 = self.kernel(inputs=(hidden_state, input_layernorm.weight, self.fused_weight))[0]
+            print("output", output)
+            print("output2", output2)
         
         gate_output, up_output = torch.chunk(output, 2, -1)
         return self.down_proj(self.act_fn(gate_output) * up_output)
@@ -220,6 +222,9 @@ class Qwen2Attention(nn.Module):
         assert self.head_dim * self.num_heads == self.hidden_size
         self.num_key_value_heads = config.num_key_value_heads
         self.num_key_value_groups = self.num_heads // self.num_key_value_heads
+        max_seq_len = 1024
+        self.paged_key_cache = torch.empty((1, max_seq_len, self.num_key_value_heads, self.head_dim))
+        self.paged_value_cache = torch.empty((1, max_seq_len, self.num_key_value_heads, self.head_dim))
         self.max_position_embeddings = config.max_position_embeddings
         self.rope_theta = config.rope_theta
         self.is_causal = True
@@ -244,6 +249,7 @@ class Qwen2Attention(nn.Module):
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # will become mandatory in v4.46
+        decode_wrapper = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         bsz, q_len, _ = hidden_states.size()
 
@@ -267,14 +273,19 @@ class Qwen2Attention(nn.Module):
         if self.key_cache is None:
             self.key_cache = key_states
             self.value_cache = value_states
+            self.paged_key_cache[0,:q_len,:,:]=key_states[0]
+            self.paged_value_cache[0,:q_len,:,:]=value_states[0]
         else:
             self.key_cache = torch.cat([self.key_cache, key_states], dim=-3)
             self.value_cache = torch.cat([self.value_cache, value_states], dim=-3)
+            self.paged_key_cache[0,self.key_cache.shape[-3]-1:self.key_cache.shape[-3],:,:]=key_states[0]
+            self.paged_value_cache[0,self.key_cache.shape[-3]-1:self.key_cache.shape[-3],:,:]=value_states[0]
 
         if q_len > 1:
             fl_attn_output = flashinfer.single_prefill_with_kv_cache(query_states[0], self.key_cache[0], self.value_cache[0], causal=True, kv_layout="NHD")
         else:
-            fl_attn_output = flashinfer.single_decode_with_kv_cache(query_states[0,0], self.key_cache[0], self.value_cache[0], use_tensor_cores=True, kv_layout="NHD")
+            #fl_attn_output = flashinfer.single_decode_with_kv_cache(query_states[0,0], self.key_cache[0], self.value_cache[0], use_tensor_cores=True, kv_layout="NHD")
+            fl_attn_output = decode_wrapper.run(query_states[0], (self.paged_key_cache, self.paged_value_cache))
 
         attn_output = fl_attn_output.view(bsz, q_len, self.hidden_size)
 
@@ -306,6 +317,7 @@ class Qwen2DecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # will become mandatory in v4.46
+        decode_wrapper = None,
         **kwargs,
     ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
         """
@@ -331,6 +343,7 @@ class Qwen2DecoderLayer(nn.Module):
             hidden_states=hidden_states,
             attention_mask=attention_mask,
             position_embeddings=position_embeddings,
+            decode_wrapper=decode_wrapper,
         )
         hidden_states = residual + hidden_states
 
@@ -469,6 +482,7 @@ class Qwen2Model(Qwen2PreTrainedModel):
         input_ids: torch.LongTensor = None,
         attention_mask: Optional[torch.Tensor] = None,
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        decode_wrapper = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
     ) -> Union[Tuple, BaseModelOutputWithPast]:
         inputs_embeds = self.embed_tokens(input_ids)
@@ -489,6 +503,7 @@ class Qwen2Model(Qwen2PreTrainedModel):
                 hidden_states,
                 attention_mask=causal_mask,
                 position_embeddings=position_embeddings,
+                decode_wrapper=decode_wrapper,
             )
 
             hidden_states = layer_outputs[0]
@@ -539,6 +554,7 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         input_ids: torch.LongTensor = None,
         attention_mask: Optional[torch.Tensor] = None,
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        decode_wrapper = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
         num_logits_to_keep: int = 0,
         **loss_kwargs,
@@ -578,6 +594,7 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
             input_ids=input_ids,
             attention_mask=attention_mask,
             position_embeddings=position_embeddings,
+            decode_wrapper=decode_wrapper,
             inputs_embeds=inputs_embeds,
         )
 
