@@ -151,7 +151,7 @@ public:
   int get_num_input_dtensors() const;
   int get_num_output_dtensors() const;
   int get_input_dtensors(DTensor **inputs) const;
-  int get_input_dtensor_layout(DTensor const *input, int *strides) const;
+  int get_input_dtensor_shape_and_stride(DTensor const *input, int *strides, int *dims) const;
   void generate_triton_program(char const *filepath);
 
   bool can_allocate(DTensor const &tensor,

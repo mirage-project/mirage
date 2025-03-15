@@ -77,8 +77,7 @@ int main(int argc, char **argv) {
   for (auto const &op : graph.operators) {
     op->fingerprint();
   }
-  assert(
-      graph.operators.back()->input_tensors[0].has_same_fingerprint(ref_fp));
+  assert(graph.operators.back()->input_tensors[0].has_same_fingerprint(ref_fp));
   auto st = std::chrono::steady_clock::now();
   search::GeneratorConfig config =
       search::GeneratorConfig::get_default_config();

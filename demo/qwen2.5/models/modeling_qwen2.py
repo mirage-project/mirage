@@ -182,22 +182,21 @@ class Qwen2MLP(nn.Module):
         graph = mi.new_kernel_graph()
         X = graph.new_input(dims=(1, self.hidden_size), dtype=mi.bfloat16)
         G = graph.new_input(dims=(1, self.hidden_size), dtype=mi.bfloat16)
-        W = graph.new_input(dims=(self.hidden_size, 2*self.intermediate_size), dtype=mi.bfloat16)
+        W = graph.new_input(dims=(self.hidden_size, 2*self.intermediate_size), strides=(1, self.hidden_size), dtype=mi.bfloat16)
         D = graph.rms_norm(X, normalized_shape=(self.hidden_size,))
         D = graph.mul(D, G)
         O = graph.matmul(D, W)
         graph.mark_output(O)
         self.kernel = graph.superoptimize(config="mlp")
 
-    def forward(self, input_layernorm, hidden_state0):
+    def forward(self, input_layernorm, hidden_state):
         # use the original for prefilling
-        hidden_state = input_layernorm(hidden_state0)
-        output = torch.matmul(hidden_state, self.fused_weight)
         if hidden_state.shape[-2] == 1 and self.enable_mirage:
             # use mirage kernels for decoding
-            output2 = self.kernel(inputs=(hidden_state0, input_layernorm.weight, self.fused_weight))[0]
-            print("output", output)
-            print("output2", output2)
+            output = self.kernel(inputs=(hidden_state, input_layernorm.weight, self.fused_weight))[0]
+        else:
+            hidden_state = input_layernorm(hidden_state)
+            output = torch.matmul(hidden_state, self.fused_weight)
         
         gate_output, up_output = torch.chunk(output, 2, -1)
         return self.down_proj(self.act_fn(gate_output) * up_output)

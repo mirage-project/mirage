@@ -74,7 +74,10 @@ int Graph::get_num_output_dtensors() const {
   return num_outputs;
 }
 
-int Graph::get_input_dtensor_layout(DTensor const *input, int *strides) const {
+int Graph::get_input_dtensor_shape_and_stride(
+    DTensor const *input,
+    int *strides,
+    int *dims) const {
   for (auto const &op : this->operators) {
     if (op == input->owner_op) {
       assert(op->op_type == mirage::type::KN_INPUT_OP &&
@@ -83,6 +86,7 @@ int Graph::get_input_dtensor_layout(DTensor const *input, int *strides) const {
       int num_dims = (int)input_op->input_strides.size();
       for (int i = 0; i < num_dims; i++) {
         strides[i] = input_op->input_strides[i];
+        dims[i] = input->dim[i];
       }
       return num_dims;
     }

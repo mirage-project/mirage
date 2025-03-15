@@ -823,13 +823,16 @@ cdef class CyKNGraph:
     def get_num_outputs(self):
         return self.p_kgraph.get_num_output_dtensors()
 
-    def get_input_dtensor_layout(self, DTensor A):
+    def get_input_dtensor_shape_and_stride(self, DTensor A):
         cdef int cstrides[128]
-        num = self.p_kgraph.get_input_dtensor_layout(A.c_ptr, cstrides)
+        cdef int cdims[128]
+        num = self.p_kgraph.get_input_dtensor_shape_and_stride(A.c_ptr, cstrides, cdims)
         strides = list()
+        dims = list()
         for i in range(num):
             strides.append(cstrides[i])
-        return tuple(strides)
+            dims.append(cdims[i])
+        return tuple(dims), tuple(strides)
 
 cdef class CyTBGraph:
     cdef CppTBGraph *p_bgraph #Hold a CppTBGraph instance
