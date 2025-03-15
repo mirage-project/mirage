@@ -149,7 +149,7 @@ public:
                                    mirage::threadblock::Graph const &_graph);
   // helper functions
   int get_input_dtensors(DTensor **inputs);
-  int get_input_dtensor_layout(DTensor const *input, int *strides);
+  int get_input_dtensor_layout(DTensor const *input, int *strides, int *dims);
   void generate_triton_program(char const *filepath);
 
   bool can_allocate(DTensor const &tensor,
