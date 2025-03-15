@@ -536,10 +536,11 @@ TranspileResult Transpiler::transpile_ugraph() {
             exec.e(fmt(
                 "using SmemLayoutAtom_$ = "
                 "decltype(cutlass::gemm::collective::detail::ss_smem_selector<"
-                "GmmaMajor_$, half_t, decltype(get<0>(DstMNKLayout_${})), "
+                "GmmaMajor_$, $, decltype(get<0>(DstMNKLayout_${})), "
                 "decltype(get<1>(DstMNKLayout_${}))>());",
                 tmaParams.guid,
                 tmaParams.guid,
+                get_datatype_str(cur_op->input_tensors[0].data_type),
                 tmaParams.guid,
                 tmaParams.guid));
             exec.e(fmt("using DstPipeLayout_$ = "
@@ -553,9 +554,10 @@ TranspileResult Transpiler::transpile_ugraph() {
                        tmaParams.guid,
                        config.pipeline_stages));
             exec.e(fmt("auto g_tensor_$ = "
-                       "make_tensor(make_gmem_ptr<half_t>(dtensor$), "
+                       "make_tensor(make_gmem_ptr<$>(dtensor$), "
                        "SrcMNKLayout_${});",
                        tmaParams.guid,
+                       get_datatype_str(cur_op->input_tensors[0].data_type),
                        tmaParams.guid,
                        tmaParams.guid));
             exec.e(

@@ -117,12 +117,14 @@ def get_kn_operator_type_string(int op_type):
         return "kn_square_op"
     elif op_type == KN_SQRT_OP:
         return "kn_sqrt_op"
+    elif op_type == KN_MUL_SCALAR_OP:
+        return "kn_mul_scalar_op"
     elif op_type == KN_SILU_OP:
         return "kn_silu_op"
-    elif op_type == KN_GELU_OP:
-        return "kn_gelu_op"
     elif op_type == KN_SIGMOID_OP:
         return "kn_sigmoid_op"
+    elif op_type == KN_GELU_OP:
+        return "kn_gelu_op"
     elif op_type == KN_RELU_OP:
         return "kn_relu_op"
     elif op_type == KN_CLAMP_OP:
@@ -143,6 +145,32 @@ def get_kn_operator_type_string(int op_type):
         return "kn_reduction_2_op"
     elif op_type == KN_RMS_NORM_OP:
         return "kn_rms_norm_op"
+    elif op_type == KN_CONCAT_FIRST_OP_ID:
+        return "kn_concat_first_op_id"
+    elif op_type == KN_CONCAT_0_OP:
+        return "kn_concat_0_op"
+    elif op_type == KN_CONCAT_1_OP:
+        return "kn_concat_1_op"
+    elif op_type == KN_CONCAT_2_OP:
+        return "kn_concat_2_op"
+    elif op_type == KN_CONCAT_LAST_OP_ID:
+        return "kn_concat_last_op_id"
+    elif op_type == KN_SPLIT_FIRST_OP_ID:
+        return "kn_split_first_op_id"
+    elif op_type == KN_SPLIT_0_OP:
+        return "kn_split_0_op"
+    elif op_type == KN_SPLIT_1_OP:
+        return "kn_split_1_op"
+    elif op_type == KN_SPLIT_2_OP:
+        return "kn_split_2_op"
+    elif op_type == KN_CHUNK_0_OP:
+        return "kn_chunk_0_op"
+    elif op_type == KN_CHUNK_1_OP:
+        return "kn_chunk_1_op"
+    elif op_type == KN_CHUNK_2_OP:
+        return "kn_chunk_2_op"
+    elif op_type == KN_SPLIT_LAST_OP_ID:
+        return "kn_split_last_op_id"
     elif op_type == KN_ALLREDUCE_OP:
         return "kn_allreduce_op"
     elif op_type == KN_CUSTOMIZED_OP:
@@ -166,16 +194,20 @@ def get_tb_operator_type_string(int op_type):
         return "tb_square_op"
     elif op_type == TB_SQRT_OP:
         return "tb_sqrt_op"
+    elif op_type == TB_MUL_SCALAR_OP:
+        return "tb_mul_scalar_op"
     elif op_type == TB_SILU_OP:
         return "tb_silu_op"
+    elif op_type == TB_SIGMOID_OP:
+        return "tb_sigmoid_op"
     elif op_type == TB_GELU_OP:
         return "tb_gelu_op"
     elif op_type == TB_RELU_OP:
         return "tb_relu_op"
     elif op_type == TB_CLAMP_OP:
         return "tb_clamp_op"
-    elif op_type == TB_MUL_SCALAR_OP:
-        return "tb_mul_scalar_op"
+    elif op_type == TB_LOG_OP:
+        return "tb_log_op"
     elif op_type == TB_ADD_OP:
         return "tb_add_op"
     elif op_type == TB_MUL_OP:
@@ -212,6 +244,16 @@ def get_tb_operator_type_string(int op_type):
         return "tb_concat_last_op_id"
     elif op_type == TB_CONCAT_THEN_MATMUL_OP:
         return "tb_concat_then_matmul_op"
+    elif op_type == TB_SPLIT_FIRST_OP_ID:
+        return "tb_split_first_op_id"
+    elif op_type == TB_SPLIT_0_OP:
+        return "tb_split_0_op"
+    elif op_type == TB_SPLIT_1_OP:
+        return "tb_split_1_op"
+    elif op_type == TB_SPLIT_2_OP:
+        return "tb_split_2_op"
+    elif op_type == TB_SPLIT_LAST_OP_ID:
+        return "tb_split_last_op_id"
     elif op_type == TB_FORLOOP_ACCUM_NO_RED_OP:
         return "tb_forloop_accum_no_red_op"
     elif op_type == TB_FORLOOP_ACCUM_RED_LD_SUM_OP:
@@ -222,6 +264,8 @@ def get_tb_operator_type_string(int op_type):
         return "tb_forloop_accum_red_ld_rms_op"
     elif op_type == TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP:
         return "tb_forloop_accum_redtox_ld_sum_op"
+    elif op_type == TB_FORLOOP_ACCUM_LAST_OP:
+        return "tb_forloop_accum_last_op"
     elif op_type == TB_CUSTOMIZED_OP:
         return "tb_customized_op"
     else:
