@@ -54,14 +54,14 @@ public:
       int src_elem_idx =
           dst_coord2src_coord(dst_elem_idx); // The logical index of the first
                                              // element in the reduction group
-      T result = (T)0;
+      float result = 0;
       CUTE_UNROLL
       for (int i = 0; i < REDUCTION_FACTOR; ++i) {
-        result +=
+        result += (float)
             src[src_layout(src_elem_idx + i * SRC_REDUCTION_DIM_COORD_STRIDE)];
       }
       auto dst_phy_pos = dst_layout(dst_elem_idx);
-      Epilogue::run(result, dst, dst_phy_pos, epilogue_scalars);
+      Epilogue::run((T)result, dst, dst_phy_pos, epilogue_scalars);
     }
   }
 };

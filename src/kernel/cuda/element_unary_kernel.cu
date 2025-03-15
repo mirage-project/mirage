@@ -79,7 +79,7 @@ __global__ void execute_elementunary(mirage::type::KNOperatorType type,
 
 bool KNElementUnaryOp::profile(ProfileResult &result) {
   // Only launch kernel on a single GPU for profiling
-  checkCUDA(cudaSetDevice(0));
+  // checkCUDA(cudaSetDevice(0));
   assert(input_tensors[0].num_elements() == output_tensors[0].num_elements());
   assert(input_tensors[0].data_type == DT_FLOAT16);
   assert(output_tensors[0].data_type == DT_FLOAT16);
@@ -156,8 +156,9 @@ bool KNElementUnaryOp::fingerprint(void) {
       (num_elements + num_threads_per_blk - 1) / num_threads_per_blk;
   mirage::kernel::DeviceMemoryManager *dmm =
       mirage::kernel::DeviceMemoryManager::get_instance();
-  // Use GPU 0 for computing fingerprint
-  checkCUDA(cudaSetDevice(0));
+  // Use GPU dmm->gpu_id for computing fingerprint
+  checkCUDA(cudaSetDevice(dmm->gpu_id));
+
   for (int gpu_id = 0; gpu_id < kgraph->gpu_dim.x; gpu_id++) {
     mirage::type::FPType *input_fp_ptr =
         reinterpret_cast<mirage::type::FPType *>(dmm->fp_base_ptr[gpu_id] +

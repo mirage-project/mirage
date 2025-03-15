@@ -13,6 +13,8 @@ from .threadblock import *
 from .visualizer import *
 from .utils import *
 from .triton_profiler import *
+from .global_config import global_config
+from .graph_dataset import graph_dataset
 
 HARD_CODE = """
 #include <Python.h>
@@ -84,18 +86,6 @@ PyMODINIT_FUNC PyInit___mirage_launcher(void) {
   return m;
 }
 """
-
-dtype_map = {
-    'int8':    torch.int8,
-    'int16':   torch.int16,
-    'int32':   torch.int32,
-    'int64':   torch.int64,
-    'uint8':   torch.uint8, 
-    'fp16':    torch.float16,
-    'bf16':    torch.bfloat16,
-    'fp32':    torch.float32,
-    'fp64':    torch.float64
-}
 
 def get_cc_cmd(target, cc, FILE_NAME, py_include_dir, MIRAGE_ROOT, so_path):
     common_cmd = [
@@ -230,9 +220,16 @@ class KNGraph:
     def customized(self, inputs: list[DTensor], bgraph: TBGraph) -> list[DTensor]:
         return self.cygraph.customized(inputs, bgraph.cygraph)
 
+    def get_owner_independent_hash(self):
+        return self.cygraph.get_owner_independent_hash()
+
     def valid_kernels(self):
         assert self._is_compiled, "Should check kernel validness after compilation"
         return self._valid_cuda_kernels
+
+    def get_error_message(self):
+        assert self._is_compiled, "Should check error message after compilation"
+        return self._error_message
 
     def __call__(self, **kwargs):
         if self.backend == "cuda":
@@ -272,6 +269,8 @@ class KNGraph:
         assert self.run is not None, "The graph is not compiled yet."
 
         input_tensors = kwargs.get("inputs", [])
+
+        assert self.cygraph.get_num_inputs() == len(input_tensors), "Expected {} input tensors, got {}".format(self.cygraph.get_num_inputs(), len(input_tensors))
 
         # TODO: dtype and device
         buffer_tensor = torch.empty(
@@ -329,6 +328,7 @@ class KNGraph:
             )
             self._is_compiled = True
             self._valid_cuda_kernels = False
+            self._error_message = "shared memory usage exceed limit"
 
             if async_:
                 return Handle([], None)
@@ -388,20 +388,29 @@ class KNGraph:
 
         def remain_op():
             import importlib.util
+            try:
+                spec = importlib.util.spec_from_file_location("__mirage_launcher", so_path)
+                mod = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+                self.run = getattr(mod, "launch")
 
-            spec = importlib.util.spec_from_file_location("__mirage_launcher", so_path)
-            mod = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(mod)
-            self.run = getattr(mod, "launch")
-
-            self._is_compiled = True
-            self._valid_cuda_kernels = True
-            self._cached_results = result
-            tempdir_obj.cleanup()
-            return self._cached_results
+                self._is_compiled = True
+                self._valid_cuda_kernels = True
+                self._cached_results = result
+                self._error_message = "No error"
+                tempdir_obj.cleanup()
+                return self._cached_results
+            except ImportError:
+                # cannot import the built shared library likely due to 
+                # compilation errors
+                self._is_compiled = True
+                self._valid_cuda_kernels = False
+                self._cached_results = None
+                self._error_message = "CUDA compilation error"
+                return None
 
         if async_:
-            ret = subprocess.Popen(cc_cmd)
+            ret = subprocess.Popen(cc_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
             return Handle([ret], remain_op)
         else:
             ret = subprocess.check_call(cc_cmd)
@@ -418,6 +427,7 @@ class KNGraph:
         fmaps: list = None,
         franges: list = None,
         verbose: bool = False,
+        disable_graph_dataset: bool = False,
         config: str = None,
         backend: str = "cuda",
         warmup_iters: int = 16,
@@ -425,6 +435,18 @@ class KNGraph:
         previous_checkpoint: str = None,
         save_codes: bool = False,
     ):
+        if not disable_graph_dataset:
+            cached_graph = graph_dataset.find(
+                self.cygraph,
+                imaps=imaps,
+                omaps=omaps,
+                griddims=griddims,
+                blockdims=blockdims,
+                fmaps=fmaps,
+                franges=franges,
+                backend=backend)
+            if cached_graph is not None:
+                return cached_graph
         cygraphs = search(
             self.cygraph,
             imaps=imaps,
@@ -455,8 +477,9 @@ class KNGraph:
                             input_tensors = list()
                             for t in dtensors:
                                 dims = [t.dim(i) for i in range(t.num_dims)]
+                                dtype = convert_dtype_to_torch_type(t.dtype)
                                 input_tensors.append(
-                                    torch.randn(dims, dtype=dtype_map[str(t.dtype)], device="cuda:0")
+                                    torch.randn(dims, dtype=t.dtype, device="cuda:{}".format(global_config.gpu_device_id))
                                 )
                             starter = torch.cuda.Event(enable_timing=True)
                             ender = torch.cuda.Event(enable_timing=True)
@@ -469,8 +492,9 @@ class KNGraph:
                     input_tensors = list()
                     for t in dtensors:
                         dims = [t.dim(i) for i in range(t.num_dims)]
+                        dtype = convert_dtype_to_torch_type(t.dtype)
                         input_tensors.append(
-                            torch.randn(dims, dtype=dtype_map[str(t.dtype)], device="cuda:0")
+                            torch.randn(dims, dtype=dtype, device="cuda:{}".format(global_config.gpu_device_id))
                         )
                     starter = torch.cuda.Event(enable_timing=True)
                     ender = torch.cuda.Event(enable_timing=True)
@@ -483,13 +507,14 @@ class KNGraph:
                 input_tensors = list()
                 for t in dtensors:
                     dims = [t.dim(i) for i in range(t.num_dims)]
+                    dtype = convert_dtype_to_torch_type(t.dtype)
                     input_tensors.append(
-                        torch.randn(dims, dtype=dtype_map[str(t.dtype)], device="cuda:0")
+                        torch.randn(dims, dtype=dtype, device="cuda:{}".format(global_config.gpu_device_id))
                     )
                 starter = torch.cuda.Event(enable_timing=True)
                 ender = torch.cuda.Event(enable_timing=True)
                 if not g.valid_kernels():
-                    print("muGraph {}: skipping since its shared memory usage exceed limit".format(idx))
+                    print("muGraph {}: {}".format(idx, g.get_error_message()))
                     continue
                 # Warmup runs
                 for _ in range(warmup_iters):
@@ -505,6 +530,17 @@ class KNGraph:
                 if perf < best_perf:
                     best_graph, best_perf = g, perf
             best_graph.backend = "cuda"
+            if not disable_graph_dataset:
+                graph_dataset.store(
+                    input_graph=self.cygraph,
+                    optimized_graph=best_graph,
+                    imaps=imaps,
+                    omaps=omaps,
+                    griddims=griddims,
+                    blockdims=blockdims,
+                    fmaps=fmaps,
+                    franges=franges,
+                    backend=backend)
             return best_graph
         elif backend == "nki":
             return all_graphs
@@ -532,6 +568,18 @@ class KNGraph:
                 raise AttributeError("The module does not contain an 'execute_mugraph' function.")
             best_graph._cached_results = {"output_shapes": best_output_shapes}
             best_graph.backend = "triton"
+            if not disable_graph_dataset:
+                graph_dataset.store(
+                    input_graph=self.cygraph,
+                    optimized_graph=best_graph,
+                    imaps=imaps,
+                    omaps=omaps,
+                    griddims=griddims,
+                    blockdims=blockdims,
+                    fmaps=fmaps,
+                    franges=franges,
+                    backend=backend)
+
             return best_graph
         else:
             assert False, "Unsupported backend"
