@@ -309,7 +309,10 @@ class KNGraph:
             input_tensors
         ), "Given number of inputs do not match the uGraph's inputs"
         for i in range(len(dtensors)):
-            input_strides.append(self.cygraph.get_input_dtensor_layout(dtensors[i]))
+            dims, strides = self.cygraph.get_input_dtensor_layout(dtensors[i])
+            assert dims == input_tensors[i].shape
+            assert strides == input_tensors[i].stride()
+            input_strides.append(strides)
         target_cc = kwargs.get(
             "target_cc",
             torch.cuda.get_device_properties(0).major * 10
