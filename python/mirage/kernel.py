@@ -309,8 +309,8 @@ class KNGraph:
         ), "Given number of inputs do not match the uGraph's inputs"
         for i in range(len(dtensors)):
             dims, strides = self.cygraph.get_input_dtensor_shape_and_stride(dtensors[i])
-            assert dims == input_tensors[i].shape
-            assert strides == input_tensors[i].stride()
+            assert dims == input_tensors[i].shape, "Expected input dims {}, got input dims {}".format(dims, input_tensors[i].shape)
+            assert strides == input_tensors[i].stride(), "Expected input strides {}, got input strides {}".format(strides, input_tensors[i].stride())
             input_strides.append(strides)
         target_cc = kwargs.get(
             "target_cc",
@@ -479,11 +479,11 @@ class KNGraph:
                             dtensors = g.cygraph.get_input_dtensors()
                             input_tensors = list()
                             for t in dtensors:
-                                dims = [t.dim(i) for i in range(t.num_dims)]
+                                dims, strides = g.cygraph.get_input_dtensor_shape_and_stride(t)
                                 dtype = convert_dtype_to_torch_type(t.dtype)
-                                input_tensors.append(
-                                    torch.randn(dims, dtype=t.dtype, device="cuda:{}".format(global_config.gpu_device_id))
-                                )
+                                x = torch.randn(dims, dtype=dtype, device="cuda:{}".format(global_config.gpu_device_id))
+                                x = torch.as_strided(x, size=dims, stride=strides)
+                                input_tensors.append(x)
                             starter = torch.cuda.Event(enable_timing=True)
                             ender = torch.cuda.Event(enable_timing=True)
                             new_g = g
@@ -494,11 +494,12 @@ class KNGraph:
                     dtensors = g.cygraph.get_input_dtensors()
                     input_tensors = list()
                     for t in dtensors:
-                        dims = [t.dim(i) for i in range(t.num_dims)]
+                        dims, strides = g.cygraph.get_input_dtensor_shape_and_stride(t)
+                        #dims = [t.dim(i) for i in range(t.num_dims)]
                         dtype = convert_dtype_to_torch_type(t.dtype)
-                        input_tensors.append(
-                            torch.randn(dims, dtype=dtype, device="cuda:{}".format(global_config.gpu_device_id))
-                        )
+                        x = torch.randn(dims, dtype=dtype, device="cuda:{}".format(global_config.gpu_device_id))
+                        x = torch.as_strided(x, size=dims, stride=strides)
+                        input_tensors.append(x)
                     starter = torch.cuda.Event(enable_timing=True)
                     ender = torch.cuda.Event(enable_timing=True)
                     handle = g.compile(async_=True, inputs=input_tensors)
@@ -509,11 +510,11 @@ class KNGraph:
                 dtensors = g.cygraph.get_input_dtensors()
                 input_tensors = list()
                 for t in dtensors:
-                    dims = [t.dim(i) for i in range(t.num_dims)]
+                    dims, strides = g.cygraph.get_input_dtensor_shape_and_stride(t)
                     dtype = convert_dtype_to_torch_type(t.dtype)
-                    input_tensors.append(
-                        torch.randn(dims, dtype=dtype, device="cuda:{}".format(global_config.gpu_device_id))
-                    )
+                    x = torch.randn(dims, dtype=dtype, device="cuda:{}".format(global_config.gpu_device_id))
+                    x = torch.as_strided(x, size=dims, stride=strides)
+                    input_tensors.append(x)
                 starter = torch.cuda.Event(enable_timing=True)
                 ender = torch.cuda.Event(enable_timing=True)
                 if not g.valid_kernels():
