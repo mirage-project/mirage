@@ -24,9 +24,12 @@ using namespace mirage::config;
 
 DeviceMemoryManager *DeviceMemoryManager::singleton = nullptr;
 
-DeviceMemoryManager::DeviceMemoryManager(int _num_gpus) : num_gpus(_num_gpus) {
+DeviceMemoryManager::DeviceMemoryManager(int _num_gpus, int _gpu_id)
+    : num_gpus(_num_gpus), gpu_id(_gpu_id) {
   // fingerprint related fields
-  checkCUDA(cudaSetDevice(0));
+  checkCUDA(cudaSetDevice(gpu_id));
+  printf(
+      "Mirage::DeviceMemoryManager: gpu_id(%d) num_gpus(%d)", gpu_id, num_gpus);
   // Part 1: exponential lookup table
   // make future tensors 16 bytes aligned
   checkCUDA(
@@ -122,12 +125,14 @@ DeviceMemoryManager::DeviceMemoryManager(int _num_gpus) : num_gpus(_num_gpus) {
                        cudaMemcpyHostToDevice));
   // data and fingerprints
   for (int i = 0; i < num_gpus; i++) {
+#ifdef DEADCODE
     checkCUDA(cudaSetDevice(i));
     checkCUDA(cudaStreamCreate(&stream[i]));
     checkCUDA(
         cudaMalloc(&data_base_ptr[i], mirage::config::MAX_DMEM_DATA_SIZE));
     checkCUDA(cublasCreate(&blas[i]));
     checkCUDA(cublasSetMathMode(blas[i], CUBLAS_TENSOR_OP_MATH));
+#endif
     // Note that we allocate all fingerprint buffers
     // on the 0-th GPU to avoid inter-GPU communication
     // for computing fingerprints
@@ -148,10 +153,12 @@ DeviceMemoryManager::DeviceMemoryManager(int _num_gpus) : num_gpus(_num_gpus) {
 
 DeviceMemoryManager::~DeviceMemoryManager() {
   for (int i = 0; i < num_gpus; i++) {
+#ifdef DEADCODE
     cudaSetDevice(i);
     checkCUDA(cudaFree(data_base_ptr[i]));
     checkCUDA(cudaStreamDestroy(stream[i]));
     checkCUDA(cublasDestroy(blas[i]));
+#endif
     if (i == 0) {
       checkCUDA(cudaFree(exp_lookup_table));
       checkCUDA(cudaFree(div_p_lookup_table));
@@ -214,9 +221,22 @@ DeviceMemoryManager *DeviceMemoryManager::get_instance() {
   if (singleton == nullptr) {
     int num_gpus;
     checkCUDA(cudaGetDeviceCount(&num_gpus));
-    singleton = new DeviceMemoryManager(num_gpus /*num_gpus*/);
+    singleton = new DeviceMemoryManager(1 /*num_gpus*/, 0 /*device_id*/);
   }
   return singleton;
+}
+
+/*static*/
+void DeviceMemoryManager::set_gpu_device_id(int gpu_id) {
+  // set_gpu_device_id must be called before creating DeviceMemoryManager
+  assert(singleton == nullptr);
+  int num_gpus;
+  checkCUDA(cudaGetDeviceCount(&num_gpus));
+  singleton = new DeviceMemoryManager(1 /*num_gpus*/, gpu_id /*gpu_id*/);
+}
+
+void cython_set_gpu_device_id(int gpu_id) {
+  DeviceMemoryManager::set_gpu_device_id(gpu_id);
 }
 
 } // namespace kernel

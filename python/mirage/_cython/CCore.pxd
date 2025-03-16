@@ -82,6 +82,9 @@ cdef extern from "mirage/type.h" namespace "mirage::type":
         KN_SPLIT_0_OP = 1420,
         KN_SPLIT_1_OP = 1421,
         KN_SPLIT_2_OP = 1422,
+        KN_CHUNK_0_OP = 1423,
+        KN_CHUNK_1_OP = 1424,
+        KN_CHUNK_2_OP = 1425,
         KN_SPLIT_LAST_OP_ID = 1429,
         # Communication
         KN_ALLREDUCE_OP = 1900,
@@ -197,10 +200,13 @@ cdef extern from "mirage/kernel/graph.h" namespace "mirage::kernel":
         int customized(vector[const CppDTensor*] inputs,
                        CppDTensor** outputs,
                        CppTBGraph* bgraph)
+        int get_num_input_dtensors()
+        int get_num_output_dtensors()
         int get_input_dtensors(CppDTensor** cinputs)
-        int get_input_dtensor_layout(const CppDTensor *input, int *strides)
+        int get_input_dtensor_shape_and_stride(const CppDTensor *input, int *strides, int *dims)
         void generate_triton_program(const char *filepath)
         void generate_cuda_program(const char *filepath)
+        size_t get_owner_independent_hash() const
         vector[CppKNOperator*] operators
 
 cdef extern from "mirage/threadblock/graph.h" namespace "mirage::threadblock":
@@ -332,3 +338,6 @@ cdef extern from "mirage/triton_transpiler/transpile.h" namespace "mirage::trito
         vector[vector[int]] output_shapes
     cdef TritonTranspileResult transpile(const CppKNGraph *graph,
                                          const TritonTranspilerConfig config)
+
+cdef extern from "mirage/kernel/device_memory_manager.h" namespace "mirage::kernel":
+    cdef int cython_set_gpu_device_id(int gpu_id)

@@ -92,8 +92,8 @@ bool KNInputOp::fingerprint(void) {
   int num_blocks =
       (output_tensors[0].num_elements() + num_threads_per_blk - 1) /
       num_threads_per_blk;
-  // Use GPU 0 for computing fingerprint
-  checkCUDA(cudaSetDevice(0));
+  // Use GPU dmm->gpu_id for computing fingerprint
+  checkCUDA(cudaSetDevice(dmm->gpu_id));
   for (int gpu_id = 0; gpu_id < kgraph->gpu_dim.x; gpu_id++) {
     init_input_fingerprint<<<num_blocks, num_threads_per_blk>>>(
         dmm->fp_base_ptr[gpu_id],
