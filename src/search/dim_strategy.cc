@@ -32,7 +32,7 @@ std::vector<dim3>
 
   auto generate_1d_grids = [&](std::vector<int> const &dims) {
     std::vector<dim3> cands;
-    for (size_t x = 8; x <= 64; x *= 2) {
+    for (size_t x = 8; x <= 256; x *= 2) {
       for (int dim : dims) {
         if (dim % x == 0) {
           cands.push_back({dim / x, 1, 1});
@@ -109,6 +109,9 @@ std::vector<dim3>
 
   if (config.randomized_branches) {
     std::random_shuffle(cands.begin(), cands.end());
+  }
+  for (auto const &cand : cands) {
+    printf("cand:%d,%d,%d\n", cand.x, cand.y, cand.z);
   }
   return cands;
 }

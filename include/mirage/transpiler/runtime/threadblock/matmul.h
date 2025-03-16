@@ -230,7 +230,7 @@ CUTE_HOST_DEVICE void r2s_copy_with_oob_protection(
       // printf("Thread %d, (%d) -> (%d, %d), %d\n", thread_idx, i,
       // (int)coord_m, (int)coord_n, valid);
       if (valid) {
-        T x = src(i);
+        float x = src(i);
         if constexpr (NUM_EXPS_BEFORE_STORE > 0) {
           CUTE_UNROLL
           for (int i = 0; i < NUM_EXPS_BEFORE_STORE; ++i) {
@@ -238,9 +238,9 @@ CUTE_HOST_DEVICE void r2s_copy_with_oob_protection(
           }
         }
         if constexpr (IS_STORE_ACCUM) {
-          dst(i) += x;
+          dst(i) += T(x);
         } else {
-          dst(i) = x;
+          dst(i) = T(x);
         }
       }
     }
@@ -255,6 +255,8 @@ template <typename T,
           class SmemLayoutA_, // [K, M]
           class SmemLayoutB_, // [N, K]
           class SmemLayoutC_, // [N, M]
+          class SmemLayoutAAligned_,
+          class SmemLayoutBAligned_,
           int NUM_THREADS,
           int NUM_EXPS_BEFORE_STORE, // Since matmul may use some advanced
                                      // instructions (like stmatrix) to store
@@ -271,6 +273,8 @@ public:
   using SmemLayoutB = SmemLayoutB_;                                // [N, K]
   using SmemLayoutC = typename Dim01Swapper<SmemLayoutC_>::Result; // [M, N]
 
+  using SmemLayoutAAligned = typename Dim01Swapper<SmemLayoutAAligned_>::Result;
+  using SmemLayoutBAligned = SmemLayoutBAligned_;
   // Shape checking
   // Expect A have a shape of [M, K], B have a shape of [N, K], and
   // C have a shape of [M, N]
@@ -363,58 +367,64 @@ public:
           T *__restrict__ b_ptr,
           char const *__restrict__ smem_allzero_ptr,
           int thread_idx) {
-    if (thread_idx >= TILED_MMA_NUM_THREADS) {
-      return;
-    }
 
-    Tensor sA = make_tensor(make_smem_ptr(a_ptr), SmemLayoutA{}); // [M, K]
-    Tensor sB = make_tensor(make_smem_ptr(b_ptr), SmemLayoutB{}); // [N, K]
+    if (thread_idx < TILED_MMA_NUM_THREADS) {
 
-    if constexpr (K{} % _8{} != _0{}) {
-      // Need to pad with zero
-      static constexpr int K_LEFTOVER = int(_8{} - K{} % _8{});
-      if constexpr (S2R_TILED_COPY_A_TYPE == S2RTiledCopyType::LDMATRIX_N) {
-        CUTE_UNROLL
-        for (int i = thread_idx; i < int(M{}) * K_LEFTOVER; i += NUM_THREADS) {
-          sA(i / K_LEFTOVER, K{} + i % K_LEFTOVER) = (T)0;
+      Tensor sA = make_tensor(make_smem_ptr(a_ptr), SmemLayoutA{}); // [M, K]
+      Tensor sB = make_tensor(make_smem_ptr(b_ptr), SmemLayoutB{}); // [N, K]
+
+      Tensor sA_r = make_tensor(make_smem_ptr(a_ptr), SmemLayoutAAligned{});
+      Tensor sB_r = make_tensor(make_smem_ptr(b_ptr), SmemLayoutBAligned{});
+
+      if constexpr (K{} % _8{} != _0{}) {
+        // Need to pad with zero
+        static constexpr int K_LEFTOVER = int(_8{} - K{} % _8{});
+        if constexpr (S2R_TILED_COPY_A_TYPE == S2RTiledCopyType::LDMATRIX_N) {
+          CUTE_UNROLL
+          for (int i = thread_idx; i < int(M{}) * K_LEFTOVER;
+               i += NUM_THREADS) {
+            sA(i / K_LEFTOVER, K{} + i % K_LEFTOVER) = (T)0;
+          }
+        }
+        if constexpr (S2R_TILED_COPY_B_TYPE == S2RTiledCopyType::LDMATRIX_N) {
+          CUTE_UNROLL
+          for (int i = thread_idx; i < int(N{}) * K_LEFTOVER;
+               i += NUM_THREADS) {
+            sB(i / K_LEFTOVER, K{} + i % K_LEFTOVER) = (T)0;
+          }
         }
       }
-      if constexpr (S2R_TILED_COPY_B_TYPE == S2RTiledCopyType::LDMATRIX_N) {
-        CUTE_UNROLL
-        for (int i = thread_idx; i < int(N{}) * K_LEFTOVER; i += NUM_THREADS) {
-          sB(i / K_LEFTOVER, K{} + i % K_LEFTOVER) = (T)0;
-        }
-      }
-    }
-    TiledMMA tiled_mma;
-    ThrMMA thr_mma = tiled_mma.get_slice(thread_idx);
+      TiledMMA tiled_mma;
+      ThrMMA thr_mma = tiled_mma.get_slice(thread_idx);
 
-    Tensor mma_rA = thr_mma.partition_fragment_A(sA); // (MMA, MMA_M, MMA_K)
-    Tensor mma_rB = thr_mma.partition_fragment_B(sB); // (MMA, MMA_N, MMA_K)
+      Tensor mma_rA = thr_mma.partition_fragment_A(sA_r); // (MMA, MMA_M, MMA_K)
+      Tensor mma_rB = thr_mma.partition_fragment_B(sB_r); // (MMA, MMA_N, MMA_K)
 
-    // NOTE. If you encountered the issue
-    //
-    // static_assert(decltype(size(rB) == Int<RegNumB>{})::value);
-    //
-    // Please upgrade your Cutlass version to at least 3.5.1 (commit
-    // e1976daacc7b030ba672217eb5d96f5a663df4ab) Refer to this link for more
-    // information: https://github.com/NVIDIA/cutlass/issues/1766
+      // NOTE. If you encountered the issue
+      //
+      // static_assert(decltype(size(rB) == Int<RegNumB>{})::value);
+      //
+      // Please upgrade your Cutlass version to at least 3.5.1 (commit
+      // e1976daacc7b030ba672217eb5d96f5a663df4ab) Refer to this link for more
+      // information: https://github.com/NVIDIA/cutlass/issues/1766
 
-    S2RTiledCopyA s2r_tiled_copy_A;
-    ThrCopy s2r_tiled_copy_A_thr = s2r_tiled_copy_A.get_slice(thread_idx);
-    Tensor s2r_sA = s2r_tiled_copy_A_thr.partition_S(sA); // (S2R, S2R_M, S2R_K)
-    Tensor s2r_rA =
-        s2r_tiled_copy_A_thr.retile_D(mma_rA); // (S2R, S2R_M, S2R_K)
+      S2RTiledCopyA s2r_tiled_copy_A;
+      ThrCopy s2r_tiled_copy_A_thr = s2r_tiled_copy_A.get_slice(thread_idx);
+      Tensor s2r_sA =
+          s2r_tiled_copy_A_thr.partition_S(sA); // (S2R, S2R_M, S2R_K)
+      Tensor s2r_rA =
+          s2r_tiled_copy_A_thr.retile_D(mma_rA); // (S2R, S2R_M, S2R_K)
 
-    S2RTiledCopyB s2r_tiled_copy_B;
-    ThrCopy s2r_tiled_copy_B_thr = s2r_tiled_copy_B.get_slice(thread_idx);
-    Tensor s2r_sB = s2r_tiled_copy_B_thr.partition_S(sB); // (S2R, S2R_N, S2R_K)
-    Tensor s2r_rB =
-        s2r_tiled_copy_B_thr.retile_D(mma_rB); // (S2R, S2R_N, S2R_K)
+      S2RTiledCopyB s2r_tiled_copy_B;
+      ThrCopy s2r_tiled_copy_B_thr = s2r_tiled_copy_B.get_slice(thread_idx);
+      Tensor s2r_sB =
+          s2r_tiled_copy_B_thr.partition_S(sB); // (S2R, S2R_N, S2R_K)
+      Tensor s2r_rB =
+          s2r_tiled_copy_B_thr.retile_D(mma_rB); // (S2R, S2R_N, S2R_K)
 
-    CUTE_STATIC_ASSERT_V(size(shape<2>(s2r_rA)) == size(shape<2>(mma_rA)));
-    CUTE_STATIC_ASSERT_V(size(shape<2>(s2r_rA)) == size(shape<2>(s2r_rB)));
-    static constexpr int NUM_MMA_K_STAGES = size(shape<2>(s2r_sA));
+      CUTE_STATIC_ASSERT_V(size(shape<2>(s2r_rA)) == size(shape<2>(mma_rA)));
+      CUTE_STATIC_ASSERT_V(size(shape<2>(s2r_rA)) == size(shape<2>(s2r_rB)));
+      static constexpr int NUM_MMA_K_STAGES = size(shape<2>(s2r_sA));
 
 #define S2RCOPY(k_idx)                                                         \
   s2r_copy_with_oob_protection<T, M, K>(s2r_tiled_copy_A,                      \
@@ -430,16 +440,18 @@ public:
                                         k_idx,                                 \
                                         thread_idx);
 
-    // Pipeline S->R copy and MMA
-    S2RCOPY(_0{});
+      // Pipeline S->R copy and MMA
+      S2RCOPY(_0{});
 
-    CUTE_UNROLL
-    for (int i_k = 0; i_k < NUM_MMA_K_STAGES; ++i_k) {
-      if (i_k + 1 != NUM_MMA_K_STAGES) {
-        S2RCOPY(i_k + 1);
+      CUTE_UNROLL
+      for (int i_k = 0; i_k < NUM_MMA_K_STAGES; ++i_k) {
+        if (i_k + 1 != NUM_MMA_K_STAGES) {
+          S2RCOPY(i_k + 1);
+        }
+        gemm(tiled_mma, mma_rC, mma_rA(_, _, i_k), mma_rB(_, _, i_k), mma_rC);
       }
-      gemm(tiled_mma, mma_rC, mma_rA(_, _, i_k), mma_rB(_, _, i_k), mma_rC);
     }
+    __syncthreads();
   }
 };
 

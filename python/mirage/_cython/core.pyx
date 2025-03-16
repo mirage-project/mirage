@@ -18,6 +18,7 @@ from cpython cimport array
 import ctypes
 import array
 import numpy as np
+import torch
 from libcpp.string cimport string
 
 # Code snippet from OpenAI Triton
@@ -286,6 +287,22 @@ def convert_dtype_to_ctype(type : dtype):
         return DT_DOUBLE
     else:
         return DT_UNKNOWN
+
+def convert_dtype_to_torch_type(type : dtype):
+    if type.is_int8():
+        return torch.int8
+    elif type.is_uint16():
+        return torch.uint16
+    elif type.is_fp16():
+        return torch.float16
+    elif type.is_bf16():
+        return torch.bfloat16
+    elif type.is_fp32():
+        return torch.float32
+    elif type.is_fp64():
+        return torch.float64
+    else:
+        assert False, "Unsupported dtype: {}".format(type)
 
 def convert_ctype_to_dtype(type):
     if type == DT_INT8:
@@ -726,6 +743,9 @@ cdef class CyKNGraph:
             inputs.append(DTensor(ptr))
         return inputs
     
+    def get_owner_independent_hash(self):
+        return self.p_kgraph.get_owner_independent_hash()
+
     # visualizer utils
 
     def _kn_tensor_to_dict(self, DTensor t):
@@ -797,10 +817,16 @@ cdef class CyKNGraph:
             operators.append(self._get_kn_operator_info(op))
         return operators
 
-    def get_input_dtensor_layout(self, DTensor A):
+    def get_num_inputs(self):
+        return self.p_kgraph.get_num_input_dtensors()
+
+    def get_num_outputs(self):
+        return self.p_kgraph.get_num_output_dtensors()
+
+    def get_input_dtensor_shape_and_stride(self, DTensor A):
         cdef int cstrides[128]
         cdef int cdims[128]
-        num = self.p_kgraph.get_input_dtensor_layout(A.c_ptr, cstrides, cdims)
+        num = self.p_kgraph.get_input_dtensor_shape_and_stride(A.c_ptr, cstrides, cdims)
         strides = list()
         dims = list()
         for i in range(num):
@@ -1100,3 +1126,6 @@ def generate_triton_program(CyKNGraph input_graph, *, int target_cc) -> dict:
         "code": result.code.decode("UTF-8"),
         "output_shapes": result.output_shapes
     }
+
+def set_gpu_device_id(gpu_id: int):
+    cython_set_gpu_device_id(gpu_id)

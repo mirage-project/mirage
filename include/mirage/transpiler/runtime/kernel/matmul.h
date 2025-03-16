@@ -9,6 +9,9 @@ template <typename T>
 static inline cudaDataType_t data_t2cuda_data_type_t() {
   if (std::is_same_v<T, half> || std::is_same_v<T, cute::half_t>) {
     return CUDA_R_16F;
+  } else if (std::is_same_v<T, nv_bfloat16> ||
+             std::is_same_v<T, cute::bfloat16_t>) {
+    return CUDA_R_16BF;
   } else {
     assert(false);
   }

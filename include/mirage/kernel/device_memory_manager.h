@@ -28,14 +28,15 @@ namespace kernel {
 class DeviceMemoryManager {
 public:
   static DeviceMemoryManager *singleton;
-  DeviceMemoryManager(int num_gpus);
+  DeviceMemoryManager(int device_id, int num_gpus);
   ~DeviceMemoryManager(void);
 
 public:
   static DeviceMemoryManager *get_instance();
+  static void set_gpu_device_id(int gpu_id);
 
 public:
-  int num_gpus;
+  int num_gpus, gpu_id;
   // fingerprint related fields
   mirage::type::FPType *exp_lookup_table;
   mirage::type::FPType *div_p_lookup_table;
@@ -58,6 +59,8 @@ public:
   cublasHandle_t blas[mirage::config::MAX_NUM_GPUS];
   // cudnnHandle_t cudnn;
 };
+
+void cython_set_gpu_device_id(int gpu_id);
 
 } // namespace kernel
 } // namespace mirage

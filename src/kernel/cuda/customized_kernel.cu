@@ -818,6 +818,7 @@ void KNCustomizedOp::run() {
 }
 
 bool KNCustomizedOp::profile(ProfileResult &result) {
+  assert(false);
   // Launch kernel on a single GPU
   // assert(kgraph->gpu_dim.x == 1);
   int gpu_id = 0;
