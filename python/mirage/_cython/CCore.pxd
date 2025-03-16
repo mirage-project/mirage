@@ -180,9 +180,10 @@ cdef extern from "mirage/kernel/graph.h" namespace "mirage::kernel":
         void get_bgraph(CppTBGraph** bgraph)
 
     cdef cppclass CppKNGraph "mirage::kernel::Graph":
-        CppKNGraph()
+        CppKNGraph(dim3 gpu_dim)
         CppDTensor* new_input_ptr(vector[int] dims,
                                   vector[size_t] strides,
+                                  int3 input_map,
                                   DataType data_type,
                                   DmemLayout layout)
         void mark_output(const CppDTensor* A, vector[size_t] strides)
@@ -197,6 +198,7 @@ cdef extern from "mirage/kernel/graph.h" namespace "mirage::kernel":
         CppDTensor* add(const CppDTensor* op1, const CppDTensor* op2)
         CppDTensor* mul(const CppDTensor* op1, const CppDTensor* op2)
         CppDTensor* div(const CppDTensor* op1, const CppDTensor* op2)
+        CppDTensor* all_reduce(const CppDTensor* input, bool inplace)
         int customized(vector[const CppDTensor*] inputs,
                        CppDTensor** outputs,
                        CppTBGraph* bgraph)
@@ -205,6 +207,7 @@ cdef extern from "mirage/kernel/graph.h" namespace "mirage::kernel":
         void generate_triton_program(const char *filepath)
         void generate_cuda_program(const char *filepath)
         vector[CppKNOperator*] operators
+        dim3 gpu_dim
 
 cdef extern from "mirage/threadblock/graph.h" namespace "mirage::threadblock":
     ctypedef struct CppSTensor "mirage::threadblock::STensor":

@@ -40,6 +40,7 @@ public:
 public:
   mirage::threadblock::Graph bgraph;
   void get_bgraph(mirage::threadblock::Graph **bgraph);
+  std::vector<std::string> comm_buf_names; // buffer names for communication
 };
 
 } // namespace kernel
