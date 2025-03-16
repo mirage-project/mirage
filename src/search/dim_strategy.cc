@@ -110,9 +110,7 @@ std::vector<dim3>
   if (config.randomized_branches) {
     std::random_shuffle(cands.begin(), cands.end());
   }
-  for (auto const &cand : cands) {
-    printf("cand:%d,%d,%d\n", cand.x, cand.y, cand.z);
-  }
+
   return cands;
 }
 
