@@ -208,12 +208,10 @@ class Qwen2Attention(nn.Module):
     and "Generating Long Sequences with Sparse Transformers".
     """
 
-    def __init__(self, config: Qwen2Config, layer_idx: Optional[int] = None):
+    def __init__(self, config: Qwen2Config, kv_cache: Tuple[torch.Tensor, torch.Tensor], layer_idx: Optional[int] = None):
         super().__init__()
         self.config = config
         self.layer_idx = layer_idx
-        self.key_cache = None
-        self.value_cache = None
         assert self.layer_idx is not None
         self.hidden_size = config.hidden_size
         self.num_heads = config.num_attention_heads
@@ -221,9 +219,11 @@ class Qwen2Attention(nn.Module):
         assert self.head_dim * self.num_heads == self.hidden_size
         self.num_key_value_heads = config.num_key_value_heads
         self.num_key_value_groups = self.num_heads // self.num_key_value_heads
-        max_seq_len = 1024
-        self.paged_key_cache = torch.empty((1, max_seq_len, self.num_key_value_heads, self.head_dim))
-        self.paged_value_cache = torch.empty((1, max_seq_len, self.num_key_value_heads, self.head_dim))
+        self.key_cache, self.value_cache = kv_cache
+        assert kv_cache[0].shape == (config.num_hidden_layers, 1, config.max_position_embeddings, self.num_key_value_heads, self.head_dim)
+        assert kv_cache[1].shape == (config.num_hidden_layers, 1, config.max_position_embeddings, self.num_key_value_heads, self.head_dim)
+        #self.paged_key_cache = torch.empty((1, max_seq_len, self.num_key_value_heads, self.head_dim))
+        #self.paged_value_cache = torch.empty((1, max_seq_len, self.num_key_value_heads, self.head_dim))
         self.max_position_embeddings = config.max_position_embeddings
         self.rope_theta = config.rope_theta
         self.is_causal = True
@@ -249,6 +249,7 @@ class Qwen2Attention(nn.Module):
         attention_mask: Optional[torch.Tensor] = None,
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # will become mandatory in v4.46
         decode_wrapper = None,
+        step: torch.Tensor = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         bsz, q_len, _ = hidden_states.size()
 
@@ -269,22 +270,27 @@ class Qwen2Attention(nn.Module):
         cos, sin = position_embeddings
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, unsqueeze_dim=2)
 
-        if self.key_cache is None:
-            self.key_cache = key_states
-            self.value_cache = value_states
-            self.paged_key_cache[0,:q_len,:,:]=key_states[0]
-            self.paged_value_cache[0,:q_len,:,:]=value_states[0]
+        if q_len > 1:
+            self.kv_cache_len = q_len
+            #self.paged_key_cache[0,:q_len,:,:]=key_states[0]
+            #self.paged_value_cache[0,:q_len,:,:]=value_states[0]
+            self.key_cache[self.layer_idx,0,:q_len,:,:]=key_states[0]
+            self.value_cache[self.layer_idx,0,:q_len,:,:]=value_states[0]
         else:
-            self.key_cache = torch.cat([self.key_cache, key_states], dim=-3)
-            self.value_cache = torch.cat([self.value_cache, value_states], dim=-3)
-            self.paged_key_cache[0,self.key_cache.shape[-3]-1:self.key_cache.shape[-3],:,:]=key_states[0]
-            self.paged_value_cache[0,self.key_cache.shape[-3]-1:self.key_cache.shape[-3],:,:]=value_states[0]
+            self.kv_cache_len += 1
+            #self.paged_key_cache[0, self.kv_cache_len-1:self.kv_cache_len,:,:]=key_states[0]
+            #self.paged_value_cache[0,self.kv_cache_len-1:self.kv_cache_len,:,:]=value_states[0]
+            #self.key_cache[self.layer_idx, 0, self.kv_cache_len-1:self.kv_cache_len,:,:]=key_states[0]
+            #self.value_cache[self.layer_idx, 0, self.kv_cache_len-1:self.kv_cache_len,:,:]=value_states[0]
+            self.key_cache[self.layer_idx, 0, step]=key_states[0]
+            self.value_cache[self.layer_idx, 0, step]=value_states[0]
 
         if q_len > 1:
-            fl_attn_output = flashinfer.single_prefill_with_kv_cache(query_states[0], self.key_cache[0], self.value_cache[0], causal=True, kv_layout="NHD")
+            #fl_attn_output = flashinfer.single_prefill_with_kv_cache(query_states[0], self.paged_key_cache[0,:q_len,:,:], self.paged_value_cache[0,:q_len,:,:] , causal=True, kv_layout="NHD")
+            fl_attn_output = flashinfer.single_prefill_with_kv_cache(query_states[0], self.key_cache[self.layer_idx,0,:q_len,:,:], self.value_cache[self.layer_idx,0,:q_len,:,:], causal=True, kv_layout="NHD")
         else:
-            #fl_attn_output = flashinfer.single_decode_with_kv_cache(query_states[0,0], self.key_cache[0], self.value_cache[0], use_tensor_cores=True, kv_layout="NHD")
-            fl_attn_output = decode_wrapper.run(query_states[0], (self.paged_key_cache, self.paged_value_cache))
+            #fl_attn_output = decode_wrapper.run(query_states[0], (self.paged_key_cache, self.paged_value_cache))
+            fl_attn_output = decode_wrapper.run(query_states[0], (self.key_cache[self.layer_idx], self.value_cache[self.layer_idx]))
 
         attn_output = fl_attn_output.view(bsz, q_len, self.hidden_size)
 
@@ -293,11 +299,11 @@ class Qwen2Attention(nn.Module):
         return attn_output
 
 class Qwen2DecoderLayer(nn.Module):
-    def __init__(self, config: Qwen2Config, layer_idx: int):
+    def __init__(self, config: Qwen2Config, kv_cache: Tuple[torch.Tensor, torch.Tensor], layer_idx: int):
         super().__init__()
         self.hidden_size = config.hidden_size
 
-        self.self_attn = Qwen2Attention(config, layer_idx)
+        self.self_attn = Qwen2Attention(config, kv_cache, layer_idx)
 
         self.mlp = Qwen2MLP(config)
         self.input_layernorm = Qwen2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -317,6 +323,7 @@ class Qwen2DecoderLayer(nn.Module):
         attention_mask: Optional[torch.Tensor] = None,
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # will become mandatory in v4.46
         decode_wrapper = None,
+        step: torch.Tensor = None,
         **kwargs,
     ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
         """
@@ -343,6 +350,7 @@ class Qwen2DecoderLayer(nn.Module):
             attention_mask=attention_mask,
             position_embeddings=position_embeddings,
             decode_wrapper=decode_wrapper,
+            step=step,
         )
         hidden_states = residual + hidden_states
 
@@ -450,10 +458,13 @@ class Qwen2Model(Qwen2PreTrainedModel):
         super().__init__(config)
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
-
+        # KV cache layout is (L, N, P, H, D) where L is the number of layers, N is the max number of pages (i.e., 1), P is the page size (i.e., config.max_embedding_positions), H is the number of key-value heads, and D is the hidden dim size
+        key_cache = torch.empty((config.num_hidden_layers, 1, config.max_position_embeddings, config.num_key_value_heads, config.hidden_size // config.num_attention_heads)) 
+        value_cache = torch.empty((config.num_hidden_layers, 1, config.max_position_embeddings, config.num_key_value_heads, config.hidden_size // config.num_attention_heads))
+        self.kv_cache = (key_cache, value_cache)
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
         self.layers = nn.ModuleList(
-            [Qwen2DecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
+            [Qwen2DecoderLayer(config, self.kv_cache, layer_idx) for layer_idx in range(config.num_hidden_layers)]
         )
         self._attn_implementation = config._attn_implementation
         self.norm = Qwen2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -482,6 +493,7 @@ class Qwen2Model(Qwen2PreTrainedModel):
         attention_mask: Optional[torch.Tensor] = None,
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         decode_wrapper = None,
+        step: torch.Tensor = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
     ) -> Union[Tuple, BaseModelOutputWithPast]:
         inputs_embeds = self.embed_tokens(input_ids)
@@ -503,6 +515,7 @@ class Qwen2Model(Qwen2PreTrainedModel):
                 attention_mask=causal_mask,
                 position_embeddings=position_embeddings,
                 decode_wrapper=decode_wrapper,
+                step=step,
             )
 
             hidden_states = layer_outputs[0]
@@ -554,6 +567,7 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         attention_mask: Optional[torch.Tensor] = None,
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         decode_wrapper = None,
+        step: torch.Tensor = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
         num_logits_to_keep: int = 0,
         **loss_kwargs,
@@ -594,6 +608,7 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
             attention_mask=attention_mask,
             position_embeddings=position_embeddings,
             decode_wrapper=decode_wrapper,
+            step=step,
             inputs_embeds=inputs_embeds,
         )
 
