@@ -271,25 +271,15 @@ class Qwen2Attention(nn.Module):
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, unsqueeze_dim=2)
 
         if q_len > 1:
-            self.kv_cache_len = q_len
-            #self.paged_key_cache[0,:q_len,:,:]=key_states[0]
-            #self.paged_value_cache[0,:q_len,:,:]=value_states[0]
-            self.key_cache[self.layer_idx,0,:q_len,:,:]=key_states[0]
-            self.value_cache[self.layer_idx,0,:q_len,:,:]=value_states[0]
+            self.key_cache[self.layer_idx,0,:q_len]=key_states[0]
+            self.value_cache[self.layer_idx,0,:q_len]=value_states[0]
         else:
-            self.kv_cache_len += 1
-            #self.paged_key_cache[0, self.kv_cache_len-1:self.kv_cache_len,:,:]=key_states[0]
-            #self.paged_value_cache[0,self.kv_cache_len-1:self.kv_cache_len,:,:]=value_states[0]
-            #self.key_cache[self.layer_idx, 0, self.kv_cache_len-1:self.kv_cache_len,:,:]=key_states[0]
-            #self.value_cache[self.layer_idx, 0, self.kv_cache_len-1:self.kv_cache_len,:,:]=value_states[0]
             self.key_cache[self.layer_idx, 0, step]=key_states[0]
             self.value_cache[self.layer_idx, 0, step]=value_states[0]
 
         if q_len > 1:
-            #fl_attn_output = flashinfer.single_prefill_with_kv_cache(query_states[0], self.paged_key_cache[0,:q_len,:,:], self.paged_value_cache[0,:q_len,:,:] , causal=True, kv_layout="NHD")
             fl_attn_output = flashinfer.single_prefill_with_kv_cache(query_states[0], self.key_cache[self.layer_idx,0,:q_len,:,:], self.value_cache[self.layer_idx,0,:q_len,:,:], causal=True, kv_layout="NHD")
         else:
-            #fl_attn_output = decode_wrapper.run(query_states[0], (self.paged_key_cache, self.paged_value_cache))
             fl_attn_output = decode_wrapper.run(query_states[0], (self.key_cache[self.layer_idx], self.value_cache[self.layer_idx]))
 
         attn_output = fl_attn_output.view(bsz, q_len, self.hidden_size)
