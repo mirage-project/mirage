@@ -60,7 +60,7 @@ static PyObject *launch(PyObject *self, PyObject *args) {
   }
 
   buffer = PyLong_AsVoidPtr(py_buffer);
-  execute_mugraph(input_tensors, output_tensors, buffer);
+  execute_mugraph(input_tensors, output_tensors, buffer, profiler_buffer);
 
   Py_RETURN_NONE;
 }
@@ -290,7 +290,7 @@ class KNGraph:
             for meta in results["output_directives"]
         ]
 
-        prodiler_buffer_tensor = torch.empty(result['profiler_buf_size'], dtype=torch.uint64, device=input_tensors[0].device)
+        prodiler_buffer_tensor = torch.empty(results['profiler_buf_size'], dtype=torch.uint64, device=input_tensors[0].device)
 
         buffer_tensor_ptr = buffer_tensor.data_ptr()
         input_tensors_ptr = [tensor.data_ptr() for tensor in input_tensors]
@@ -299,15 +299,13 @@ class KNGraph:
 
         self.run(input_tensors_ptr, output_tensors_ptr, buffer_tensor_ptr, prodiler_buffer_tensor_ptr)
 
-        if result['profiler_buf_size'] > 0:
+        if results['profiler_buf_size'] > 0:
             export_to_perfetto_trace(prodiler_buffer_tensor_ptr, 'mirage.perfetto-trace')
         return output_tensors
 
     def compile(self, async_=False, **kwargs):
         if self._is_compiled:
             return self._cached_results
-        parser.add_argument("--profiling")
-        args = parser.parse_args()
 
         input_tensors = kwargs.get("inputs", [])
         input_strides = []
@@ -328,9 +326,10 @@ class KNGraph:
         )
         num_warp_groups = kwargs.get("num_warp_groups", 2)
         pipeline_stages = kwargs.get("pipeline_stages", 2)
+        profiling = kwargs.get("profiling", False)
 
         result = generate_cuda_program(
-            self.cygraph, target_cc=target_cc, input_strides=input_strides, num_warp_groups = num_warp_groups, pipeline_stages = pipeline_stages, profiling=args.profiling
+            self.cygraph, target_cc=target_cc, input_strides=input_strides, num_warp_groups = num_warp_groups, pipeline_stages = pipeline_stages, profiling
         )
         # print(result)
         if result["max_smem_size"] > get_shared_memory_capacity(target_cc):

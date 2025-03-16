@@ -117,12 +117,12 @@ std::pair<string, string>
 }
 
 std::pair<string, string>
-    Transpiler::get_profiling_ptr(const int customized_idx) {
+    Transpiler::get_profiling_ptr(int const customized_idx) {
   string pointer_var_name = fmt("dtensor profiler_buffer_$", customized_idx);
   string code = "";
   code = fmt("uint64_t *$ = (uint64_t*)profiler_buffer.at($);",
-               pointer_var_name,
-               customized_idx);
+             pointer_var_name,
+             customized_idx);
   return {pointer_var_name, code};
 }
 
@@ -152,6 +152,7 @@ static string get_kn_op_str(type::KNOperatorType type) {
 
 TranspileResult Transpiler::transpile_ugraph() {
   size_t max_smem_size = 0;
+  size_t profiler_buf_size = 0;
   // Generate header
 
   CodeKeeper header;
@@ -175,7 +176,7 @@ TranspileResult Transpiler::transpile_ugraph() {
   exec.e(
       "static void _execute_mugraph(std::vector<void const *> input_tensors, "
       "std::vector<void*> output_tensors"
-      ", void* buf) {");
+      ", void* buf, uint64_t const * profiler_buffer) {");
   for (kn::KNOperator *const op : g->operators) {
     std::string op_type_str;
     to_json(op_type_str, op->op_type);
@@ -447,12 +448,12 @@ TranspileResult Transpiler::transpile_ugraph() {
         auto [ptr_name, ptr_code] = get_profiling_ptr(0);
         ptr_names.push_back(ptr_name);
         exec.e(ptr_code);
-        
+
         // Transpile
         CustomOPTranspileResult result;
         if (config.target_cc == GPU_CC::H100) {
           result = transpile_kn_custom_op_hopper(cur_op);
-          //only generate for first tb graph
+          // only generate for first tb graph
           config.profiling = false;
         } else {
           result = transpile_kn_custom_op(cur_op);
@@ -466,6 +467,7 @@ TranspileResult Transpiler::transpile_ugraph() {
         if (result.smem_size > max_smem_size) {
           max_smem_size = result.smem_size;
         }
+        profiler_buf_size += result.profiler_buf_size;
 
         // Checkings against grid dim and block dim
         if (config.target_cc <= GPU_CC::H100) {
@@ -644,8 +646,13 @@ TranspileResult Transpiler::transpile_ugraph() {
         vector<int>(dtensor.dim, dtensor.dim + dtensor.num_dims),
         vector<size_t>(meta.strides, meta.strides + dtensor.num_dims)});
   }
-  return TranspileResult{
-      CUDA_T_SUCCESS, code, this->d_buf_size, max_smem_size, output_directives};
+
+  return TranspileResult{CUDA_T_SUCCESS,
+                         code,
+                         this->d_buf_size,
+                         max_smem_size,
+                         profiler_buf_size,
+                         output_directives};
 }
 
 } // namespace transpiler

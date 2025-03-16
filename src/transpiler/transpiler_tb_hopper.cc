@@ -304,8 +304,14 @@ static std::pair<bool, std::vector<int64_t>>
 CustomOPTranspileResult
     Transpiler::transpile_kn_custom_op_hopper(kn::KNCustomizedOp const *op) {
   bool profiling = config.profiling;
+
   tb::Graph const &g = op->bgraph;
   int num_threads = g.block_dim.x * g.block_dim.y * g.block_dim.z;
+
+  size_t profiler_buf_size =
+      profiling ? (g.grid_dim.x * g.grid_dim.y * g.grid_dim.z *
+                   (config.num_consumer_wgs + config.num_producer_wgs))
+                : 0;
 
   // Allocate a kernel name
   static int custom_kernel_idx_counter = 0;
@@ -422,10 +428,10 @@ CustomOPTranspileResult
 
       if (!(use_chunked_copy) || (!use_async_copy)) {
         code.e("const $ *dtensor$_tile_ptr = dtensor$_ptr $;",
-             get_datatype_str(dtensor.data_type),
-             dtensor.guid,
-             dtensor.guid,
-             offset);
+               get_datatype_str(dtensor.data_type),
+               dtensor.guid,
+               dtensor.guid,
+               offset);
       }
 
       // assert(use_chunked_copy && use_async_copy);
@@ -578,12 +584,16 @@ CustomOPTranspileResult
         tma,
         map<kn::DTensor, string>(op->output_tensors,
                                  [](kn::DTensor const &dtensor) -> string {
-                                   return fmt("$* dtensor$_ptr", get_datatype_str(dtensor.data_type),
-                                              dtensor.guid);
+                                   return fmt(
+                                       "$* dtensor$_ptr",
+                                       get_datatype_str(dtensor.data_type),
+                                       dtensor.guid);
                                  }),
         map<kn::DTensor, string>(
             op->input_tensors, [](kn::DTensor const &dtensor) -> string {
-              return fmt("$ const* dtensor$_ptr", get_datatype_str(dtensor.data_type), dtensor.guid);
+              return fmt("$ const* dtensor$_ptr",
+                         get_datatype_str(dtensor.data_type),
+                         dtensor.guid);
             }));
     code.e_front(tmplt);
   }
@@ -664,7 +674,7 @@ CustomOPTranspileResult
         }
       }
       code.e("$ *dtensor$_tile_ptr = dtensor$_ptr $;",
-      get_datatype_str(dtensor.data_type),
+             get_datatype_str(dtensor.data_type),
              dtensor.guid,
              dtensor.guid,
              offset);
@@ -678,14 +688,13 @@ CustomOPTranspileResult
             dtensor, dtensor_meta, stensor, stensor_meta, d_innermost_dim);
         code.e(
             "using DTensor$TileLayout = $;", dtensor.guid, dtensor_tile_layout);
-        code.e(
-            "using STensor$OutputAtom = tb::OutputNonChunkedSyncCopy<$, "
-            "DTensor$TileLayout, $, NUM_THREADS>;",
-            stensor.guid,
-            get_datatype_str(dtensor.data_type),
-            dtensor.guid,
-            mov_last_get_stensor_layout(
-                stensor, stensor_meta, d_innermost_dim));
+        code.e("using STensor$OutputAtom = tb::OutputNonChunkedSyncCopy<$, "
+               "DTensor$TileLayout, $, NUM_THREADS>;",
+               stensor.guid,
+               get_datatype_str(dtensor.data_type),
+               dtensor.guid,
+               mov_last_get_stensor_layout(
+                   stensor, stensor_meta, d_innermost_dim));
       } else {
         string dtensor_tile_layout = get_dtensor_tile_layout(
             dtensor, dtensor_meta, stensor, stensor_meta, real_innermost_dim);
@@ -829,9 +838,11 @@ CustomOPTranspileResult
   // if there is asyc copy defined
   if (pipe_tma) {
     code.e("int warpgroup_id = tb::warpgroup_id();");
-    if(config.profiling){
-    code.e("PROFILER_INIT(profiler_buffer, warpgroup_id, $, (threadIdx.x % 128 == 0))", config.num_consumer_wgs);
-  }
+    if (config.profiling) {
+      code.e("PROFILER_INIT(profiler_buffer, warpgroup_id, $, (threadIdx.x % "
+             "128 == 0))",
+             config.num_consumer_wgs);
+    }
     // run producers
     code.e("if (warpgroup_id == $) {", config.num_consumer_wgs);
     // allocate tma register files
@@ -866,7 +877,8 @@ CustomOPTranspileResult
   // argument
   auto transpile_fusion_epilogue =
       [&](std::vector<std::pair<tb::TBOperator const *, TBSchedOpMeta>> const
-              &chain, string dtype) -> string {
+              &chain,
+          string dtype) -> string {
     size_t chain_size = chain.size();
     if (chain_size == 1) {
       // Not fused with anything
@@ -925,11 +937,10 @@ CustomOPTranspileResult
       auto [need_advance_pipeline, pipe_ids] =
           add_loop_node_consumer_wait_if_need(
               op, code, is_in_loop, pipeline_inputs);
-      
 
-      //define 
-      if(!is_in_loop && pipe_tma && config.profiling){
-        //2000 - 2999
+      // define
+      if (!is_in_loop && pipe_tma && config.profiling) {
+        // 2000 - 2999
         code.e("PROFILER_EVENT_START($)", op->op_type);
       }
 
@@ -1055,7 +1066,8 @@ CustomOPTranspileResult
           code.e("using InLayout = $;", in_layout);
           code.e("using OutLayout = $;", final_out_layout);
           // Get the epilogue
-          string epilogue = transpile_fusion_epilogue(sched_node.ops, get_datatype_str(input.data_type));
+          string epilogue = transpile_fusion_epilogue(
+              sched_node.ops, get_datatype_str(input.data_type));
           // Define and run the kernel
           code.e("using Kernel = tb::ElementUnaryKernel<$, "
                  "tb::ElementUnaryOpType::$, OutLayout, InLayout, "
@@ -1114,7 +1126,8 @@ CustomOPTranspileResult
           code.e("using In1Layout = $;", in1_layout);
           code.e("using OutLayout = $;", final_out_layout);
           // Get the epilogue
-          string epilogue = transpile_fusion_epilogue(sched_node.ops, get_datatype_str(input0.data_type));
+          string epilogue = transpile_fusion_epilogue(
+              sched_node.ops, get_datatype_str(input0.data_type));
           // Define and run the kernel
           code.e("using Kernel = tb::ElementBinaryKernel<$, "
                  "tb::ElementBinaryOpType::$, OutLayout, In0Layout, In1Layout, "
@@ -1177,7 +1190,8 @@ CustomOPTranspileResult
           code.e("using InLayout = $;", in_layout);
           code.e("using OutLayout = $;", final_out_layout);
           // Get the epilogue
-          string epilogue = transpile_fusion_epilogue(sched_node.ops, get_datatype_str(input.data_type));
+          string epilogue = transpile_fusion_epilogue(
+              sched_node.ops, get_datatype_str(input.data_type));
           // Define and run the kernel
           code.e("using Kernel = tb::ReductionKernel<$, "
                  "OutLayout, InLayout, $, CONSUMER_NUM_THREADS, $>;",
@@ -1250,8 +1264,8 @@ CustomOPTranspileResult
       code.e("}");
     }
 
-    if(!is_in_loop && pipe_tma && config.profiling){
-        code.e("PROFILER_EVENT_END($)", op->op_type);
+    if (!is_in_loop && pipe_tma && config.profiling) {
+      code.e("PROFILER_EVENT_END($)", op->op_type);
     }
     return CUDA_T_SUCCESS;
   };
@@ -1354,10 +1368,10 @@ CustomOPTranspileResult
   code.e("}"); // kernel
 
   // mem_plan.smem_size += tmaParamsList.size() * config.pipeline_stages * 16;
-
   return CustomOPTranspileResult{CUDA_T_SUCCESS,
                                  func_name,
                                  mem_plan.smem_size,
+                                 profiler_buf_size,
                                  code.to_string(),
                                  tmaParamsList};
 }

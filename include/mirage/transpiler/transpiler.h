@@ -82,9 +82,9 @@ private:
   // Get the pointer to a DTensor. Return {pointer_name, code}
   std::pair<std::string, std::string>
       get_dtensor_ptr(kn::DTensor const &dtensor);
- 
+
   std::pair<std::string, std::string>
-  get_profiling_ptr(const int customized_idx);
+      get_profiling_ptr(int const customized_idx);
 
   // Get the "optimal" schedule for a threadblock graph
   TBSched get_threadblock_schedule(tb::Graph const &tb_graph);

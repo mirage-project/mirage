@@ -27,12 +27,13 @@ static void _execute_mugraph(std::vector<void const *> input_tensors,
 // Entrypoint for C/C++
 extern "C" void execute_mugraph(std::vector<void const *> input_tensors,
                                 std::vector<void *> output_tensors,
-                                void *buf) {
+                                void *buf,
+                                uint64_t const *profiler_buffer) {
   static bool inited = false;
   if (!inited) {
     _init();
   }
-  _execute_mugraph(input_tensors, output_tensors, buf);
+  _execute_mugraph(input_tensors, output_tensors, buf, profiler_buffer);
 }
 
 // A wrappr around `execute_mugraph` which uses C arrays instead of vectors

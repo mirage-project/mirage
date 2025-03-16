@@ -315,6 +315,7 @@ cdef extern from "mirage/transpiler/transpile.h" namespace "mirage::transpiler":
         string code
         size_t buf_size
         size_t max_smem_size
+        size_t profiler_buf_size
         vector[OutputTensorDirective] output_directives
     cdef TranspileResult transpile(const CppKNGraph *graph,
                        const TranspilerConfig config,
