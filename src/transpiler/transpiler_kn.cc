@@ -117,10 +117,8 @@ std::pair<string, string>
 }
 
 std::pair<string, string>
-    Transpiler::get_profiling_ptr(int customized_idx) {
-  auto guid = dtensor.guid;
-  DTensorMeta const &meta = dtensor_metas.at(guid);
-  string pointer_var_name = fmt("dtensor profiler_buffer");
+    Transpiler::get_profiling_ptr(const int customized_idx) {
+  string pointer_var_name = fmt("dtensor profiler_buffer_$", customized_idx);
   string code = "";
   code = fmt("uint64_t *$ = (uint64_t*)profiler_buffer.at($);",
                pointer_var_name,
@@ -441,7 +439,7 @@ TranspileResult Transpiler::transpile_ugraph() {
         vector<string> ptr_names;
         for (kn::DTensor const &dtensor :
              Combine(cur_op->output_tensors, cur_op->input_tensors)) {
-          auto [ptr_name, ptr_code] = get_dtensor_ptr(dtensor, config.profling);
+          auto [ptr_name, ptr_code] = get_dtensor_ptr(dtensor);
           exec.e(ptr_code);
           ptr_names.push_back(ptr_name);
         }
@@ -455,7 +453,7 @@ TranspileResult Transpiler::transpile_ugraph() {
         if (config.target_cc == GPU_CC::H100) {
           result = transpile_kn_custom_op_hopper(cur_op);
           //only generate for first tb graph
-          config.profling = false;
+          config.profiling = false;
         } else {
           result = transpile_kn_custom_op(cur_op);
         }

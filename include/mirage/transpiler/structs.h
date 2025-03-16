@@ -33,7 +33,7 @@ struct TranspilerConfig {
   // and H100 is 90
   int target_cc;
 
-  bool profling;
+  bool profiling;
 
   // features for GPUs >= Grace Hopper
   int num_consumer_wgs;

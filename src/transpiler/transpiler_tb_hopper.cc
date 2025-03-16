@@ -829,7 +829,7 @@ CustomOPTranspileResult
   // if there is asyc copy defined
   if (pipe_tma) {
     code.e("int warpgroup_id = tb::warpgroup_id();");
-    if(config.profling){
+    if(config.profiling){
     code.e("PROFILER_INIT(profiler_buffer, warpgroup_id, $, (threadIdx.x % 128 == 0))", config.num_consumer_wgs);
   }
     // run producers
@@ -928,9 +928,9 @@ CustomOPTranspileResult
       
 
       //define 
-      if(!is_in_loop && pipe_tma && config.profling){
+      if(!is_in_loop && pipe_tma && config.profiling){
         //2000 - 2999
-        code.e("PROFILER_EVENT_START($)", op->type);
+        code.e("PROFILER_EVENT_START($)", op->op_type);
       }
 
       switch (op->op_type) {
@@ -1250,8 +1250,8 @@ CustomOPTranspileResult
       code.e("}");
     }
 
-    if(!is_in_loop && pipe_tma && config.profling){
-        code.e("PROFILER_EVENT_END($)", op->type);
+    if(!is_in_loop && pipe_tma && config.profiling){
+        code.e("PROFILER_EVENT_END($)", op->op_type);
     }
     return CUDA_T_SUCCESS;
   };
