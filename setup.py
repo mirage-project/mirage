@@ -110,9 +110,19 @@ INCLUDE_BASE = "python/mirage/include"
 @contextmanager
 def copy_include():
     if not path.exists(INCLUDE_BASE):
-        src_dirs = ["deps/cutlass/include", "deps/json/include", "include/mirage/transpiler/runtime"]
+        src_dirs = ["deps/cutlass/include", "deps/json/include"]
         for src_dir in src_dirs:
             shutil.copytree(src_dir, path.join(INCLUDE_BASE, src_dir))
+        # copy mirage/transpiler/runtime/* 
+        # to python/mirage/include/mirage/transpiler/runtime/*
+        # instead of python/mirage/include/include/mirage/transpiler/runtime/*
+        include_mirage_dir = "include/mirage/transpiler/runtime"
+        include_mirage_dst = path.join(INCLUDE_BASE, "mirage/transpiler/runtime")
+        shutil.copytree(include_mirage_dir, include_mirage_dst)
+
+        config_h_src = path.join(mirage_path, "include/mirage/config.h") # Needed by transpiler/runtime/threadblock/utils.h
+        config_h_dst = path.join(INCLUDE_BASE, "mirage/config.h")
+        shutil.copy(config_h_src, config_h_dst)
         yield True
     else:
         yield False

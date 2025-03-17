@@ -87,14 +87,40 @@ PyMODINIT_FUNC PyInit___mirage_launcher(void) {
 }
 """
 
-def get_cc_cmd(target, cc, FILE_NAME, py_include_dir, MIRAGE_ROOT, so_path):
+# Because pip install -e . and pip install . have different directory structure,
+# we need to check the directory structure to find the correct MIRAGE_ROOT.
+def get_key_paths():
+    root_dir = os.path.join(os.path.dirname(__file__), "../..") # Using pip install -e . 
+    if not os.path.exists(os.path.join(root_dir, "deps")): # Using pip install . 
+        root_dir = os.path.dirname(__file__)
+
+    # If MIRAGE_ROOT is not set, use the root_dir as MIRAGE_ROOT
+    MIRAGE_ROOT = os.environ.get("MIRAGE_ROOT", root_dir)
+    
+    INCLUDE_PATH = ""
+    DEPS_PATH = ""
+    if os.path.exists(os.path.join(MIRAGE_ROOT, "deps")):
+        INCLUDE_PATH = os.path.join(MIRAGE_ROOT, "include")
+        DEPS_PATH = os.path.join(MIRAGE_ROOT, "deps")
+    else:
+        INCLUDE_PATH = os.path.join(MIRAGE_ROOT, "include")
+        DEPS_PATH = os.path.join(MIRAGE_ROOT, "include/deps")
+
+    assert os.path.exists(MIRAGE_ROOT), "No MIRAGE_ROOT directory found. Likely using the wrong MIRAGE_ROOT."
+    assert os.path.exists(INCLUDE_PATH), "No /include directory found. Likely using the wrong MIRAGE_ROOT."
+    assert os.path.exists(DEPS_PATH), "No /deps directory found. Likely using the wrong MIRAGE_ROOT."
+
+    return MIRAGE_ROOT, INCLUDE_PATH, DEPS_PATH
+
+
+def get_cc_cmd(target, cc, FILE_NAME, py_include_dir, INCLUDE_PATH, DEPS_PATH, so_path):
     common_cmd = [
         cc,
         FILE_NAME,
         "-O3",
         f"-I{py_include_dir}",
-        f"-I{MIRAGE_ROOT}/include/mirage/transpiler/runtime/",
-        f"-I{MIRAGE_ROOT}/deps/cutlass/include",
+        f"-I{os.path.join(INCLUDE_PATH, 'mirage/transpiler/runtime')}",
+        f"-I{os.path.join(DEPS_PATH, 'cutlass/include')}",
         "-shared",
         "-std=c++17",
         "-use_fast_math",
@@ -323,7 +349,6 @@ class KNGraph:
         result = generate_cuda_program(
             self.cygraph, target_cc=target_cc, input_strides=input_strides, num_warp_groups = num_warp_groups, pipeline_stages = pipeline_stages
         )
-        # print(result)
         if result["max_smem_size"] > get_shared_memory_capacity(target_cc):
             # the transpiled kernel exceeds shared memory limit
             print(
@@ -338,10 +363,7 @@ class KNGraph:
             else:
                 return None
 
-        MIRAGE_ROOT = os.environ.get(
-            "MIRAGE_ROOT", os.path.join(os.path.dirname(__file__), "../..")
-        )
-
+        MIRAGE_ROOT, INCLUDE_PATH, DEPS_PATH = get_key_paths()
         # if True:
         #     tempdir = './test/'
 
@@ -381,13 +403,7 @@ class KNGraph:
             scheme = "posix_prefix"
         py_include_dir = sysconfig.get_paths(scheme=scheme)["include"]
 
-        if not os.path.exists(MIRAGE_ROOT):
-            print(
-                f"Error: MIRAGE_ROOT ({MIRAGE_ROOT}) not found. Please set the MIRAGE_ROOT env variable correctly"
-            )
-            sys.exit(1)
-        cc_cmd = get_cc_cmd(target_cc, cc, FILE_NAME, py_include_dir, MIRAGE_ROOT, so_path)
-
+        cc_cmd = get_cc_cmd(target_cc, cc, FILE_NAME, py_include_dir, INCLUDE_PATH, DEPS_PATH, so_path)
 
         def remain_op():
             import importlib.util
@@ -549,10 +565,8 @@ class KNGraph:
         elif backend == "nki":
             return all_graphs
         elif backend == "triton":
-            MIRAGE_ROOT = os.environ.get(
-                "MIRAGE_ROOT", os.path.join(os.path.dirname(__file__), "../..")
-            )
-            os.environ["KERNELS_PATH"] = os.path.join(MIRAGE_ROOT, "include/mirage/transpiler/runtime") # for triton
+            MIRAGE_ROOT, INCLUDE_PATH, _ = get_key_paths()
+            os.environ["KERNELS_PATH"] = os.path.join(INCLUDE_PATH, "mirage/transpiler/runtime") # for triton
             best_graph, best_file_path, best_output_shapes = profile_and_select_best_graph(all_graphs, 
                                                  target_cc=torch.cuda.get_device_properties(0).major * 10 
                                                  + torch.cuda.get_device_properties(0).minor,
