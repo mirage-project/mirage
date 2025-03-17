@@ -56,7 +56,7 @@ __global__ void execute_elementbinary(mirage::type::KNOperatorType type,
 
 bool KNElementBinaryOp::profile(ProfileResult &result) {
   // Only launch kernel on a single GPU for profiling
-  checkCUDA(cudaSetDevice(0));
+  // checkCUDA(cudaSetDevice(0));
   assert(input_tensors[0].data_type == DT_FLOAT16);
   assert(input_tensors[1].data_type == DT_FLOAT16);
   assert(output_tensors[0].data_type == DT_FLOAT16);
@@ -205,8 +205,8 @@ bool KNElementBinaryOp::fingerprint(void) {
       (num_elements + num_threads_per_blk - 1) / num_threads_per_blk;
   mirage::kernel::DeviceMemoryManager *dmm =
       mirage::kernel::DeviceMemoryManager::get_instance();
-  // Use GPU 0 for computing fingerprint
-  checkCUDA(cudaSetDevice(0));
+  // Use GPU dmm->gpu_id for computing fingerprint
+  checkCUDA(cudaSetDevice(dmm->gpu_id));
   for (int gpu_id = 0; gpu_id < kgraph->gpu_dim.x; gpu_id++) {
     compute_elementbinary_fingerprint<<<num_blocks, num_threads_per_blk>>>(
         op_type,

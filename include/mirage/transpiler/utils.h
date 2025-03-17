@@ -302,52 +302,87 @@ inline auto generate_partitioned_and_expanded_layout(
   int gridX_stride = 1, gridY_stride = 1, gridZ_stride = 1, forloop_stride = 1;
   int gridX_shape = 1, gridY_shape = 1, gridZ_shape = 1, forloop_shape = 1;
 
+  auto exists = [&partition_logic](int val) {
+    return std::find(partition_logic.begin(), partition_logic.end(), val) !=
+           partition_logic.end();
+  };
   // Loop over each dimension in the original layout
   for (int dim = 0; dim < num_dims; ++dim) {
-    int partition_grid_dim =
-        partition_logic[dim]; // Which grid dimension (x=0, y=1, z=2) partitions
-                              // this dimension
-
-    if (partition_grid_dim >= 0 ||
-        forloop_dim == dim) { // If this dimension is partitioned
-      if (partition_grid_dim >= 0) {
-        int partition_factor = (dim == 0)   ? grid_dim.x
-                               : (dim == 1) ? grid_dim.y
-                                            : grid_dim.z;
-        // Adjust shape by dividing it by the partition factor
-        new_shape_values[partition_grid_dim] =
-            original_shape.at(dim) / partition_factor;
-        // Stride remains the same because partitioning does not affect layout's
-        // memory strides
-        new_stride_values[partition_grid_dim] = original_stride.at(dim);
-
-        if (dim == 0) {
-          gridX_stride =
-              original_stride.at(dim) * new_shape_values[partition_grid_dim];
-          gridX_shape = grid_dim.x;
-        } else if (dim == 1) {
-          gridY_stride =
-              original_stride.at(dim) * new_shape_values[partition_grid_dim];
-          gridY_shape = grid_dim.y;
-        } else if (dim == 2) {
-          gridZ_stride =
-              original_stride.at(dim) * new_shape_values[partition_grid_dim];
-          gridZ_shape = grid_dim.z;
-        }
-      }
-      if (forloop_dim == dim) {
-        // forloop dim does not equal to partition dim
-        assert(partition_grid_dim < 0);
-        // partition by forloop dim
-        new_shape_values[dim] = original_shape.at(dim) / forloop_range;
-        new_stride_values[dim] = original_stride.at(dim);
-        forloop_stride = original_stride.at(dim) * new_shape_values[dim];
-        forloop_shape = forloop_range;
-      }
-    } else { // If this dimension is not partitioned
-      // Keep the original shape and stride
+    if (dim != forloop_dim && (!exists(dim))) {
       new_shape_values[dim] = original_shape.at(dim);
       new_stride_values[dim] = original_stride.at(dim);
+    }
+    int partition_grid_dim = partition_logic[dim];
+
+    if (partition_grid_dim >= 0 && forloop_dim == partition_grid_dim) {
+      // partition by forloop and grid
+      int partition_factor = (dim == 0)   ? grid_dim.x
+                             : (dim == 1) ? grid_dim.y
+                                          : grid_dim.z;
+      partition_factor *= forloop_range;
+
+      new_shape_values[partition_grid_dim] =
+          original_shape.at(partition_grid_dim) / partition_factor;
+      new_stride_values[partition_grid_dim] =
+          original_stride.at(partition_grid_dim);
+
+      forloop_stride = original_stride.at(partition_grid_dim) *
+                       new_shape_values[partition_grid_dim];
+      forloop_shape = forloop_range;
+
+      if (dim == 0) {
+        gridX_stride = forloop_stride * forloop_shape;
+        gridX_shape = grid_dim.x;
+      } else if (dim == 1) {
+        gridY_stride = forloop_stride * forloop_shape;
+        gridY_shape = grid_dim.y;
+      } else if (dim == 2) {
+        gridZ_stride = forloop_stride * forloop_shape;
+        gridZ_shape = grid_dim.z;
+      }
+
+      //       new_shape_values[partition_grid_dim],
+      //  partition_grid_dim);
+
+    } else if (partition_grid_dim >= 0) {
+      int partition_factor = (dim == 0)   ? grid_dim.x
+                             : (dim == 1) ? grid_dim.y
+                                          : grid_dim.z;
+      // Adjust shape by dividing it by the partition factor
+      new_shape_values[partition_grid_dim] =
+          original_shape.at(partition_grid_dim) / partition_factor;
+      // Stride remains the same because partitioning does not
+      // affect layout's memory strides
+      new_stride_values[partition_grid_dim] =
+          original_stride.at(partition_grid_dim);
+
+      if (dim == 0) {
+        gridX_stride = original_stride.at(partition_grid_dim) *
+                       new_shape_values[partition_grid_dim];
+        gridX_shape = grid_dim.x;
+      } else if (dim == 1) {
+        gridY_stride = original_stride.at(partition_grid_dim) *
+                       new_shape_values[partition_grid_dim];
+        gridY_shape = grid_dim.y;
+      } else if (dim == 2) {
+        gridZ_stride = original_stride.at(partition_grid_dim) *
+                       new_shape_values[partition_grid_dim];
+        gridZ_shape = grid_dim.z;
+      }
+
+    } else if (forloop_dim == dim) {
+      // forloop dim does not equal to partition dim
+      // assert(partition_grid_dim < 0);
+      // partition only by forloop dim
+      if (forloop_shape > 1) {
+        continue;
+      }
+      new_shape_values[dim] = original_shape.at(dim) / forloop_range;
+      new_stride_values[dim] = original_stride.at(dim);
+      forloop_stride = original_stride.at(dim) * new_shape_values[dim];
+      forloop_shape = forloop_range;
+
+    } else {
     }
   }
 

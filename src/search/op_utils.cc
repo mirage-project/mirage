@@ -118,7 +118,8 @@ std::shared_ptr<AbstractExpr> get_pattern(type::KNOperatorType op,
     case type::KNOperatorType::KN_RELU_OP:
       return std::make_shared<Relu>(opd);
     case type::KNOperatorType::KN_CLAMP_OP:
-      return std::make_shared<Clamp>(type::CLAMP_MIN_MAX["min_val"], type::CLAMP_MIN_MAX["max_val"], opd);
+      return std::make_shared<Clamp>(
+          type::CLAMP_MIN_MAX["min_val"], type::CLAMP_MIN_MAX["max_val"], opd);
     case type::KNOperatorType::KN_OUTPUT_OP:
       return opd;
     default:
@@ -317,7 +318,9 @@ KNOperator *create_op(kernel::Graph &g,
       return g.create_elementunary_op(input, type);
     case type::KNOperatorType::KN_CLAMP_OP:
       assert((!type::CLAMP_MIN_MAX.empty()) && "CLAMP_MIN_MAX not assigned");
-      return g.create_elementunary_clamp_op(input, type::CLAMP_MIN_MAX["min_val"], type::CLAMP_MIN_MAX["max_val"]);
+      return g.create_elementunary_clamp_op(input,
+                                            type::CLAMP_MIN_MAX["min_val"],
+                                            type::CLAMP_MIN_MAX["max_val"]);
     default:
       assert(false && "Unsupported operator");
   }
@@ -362,7 +365,9 @@ TBOperator *create_op(threadblock::Graph &g,
       return g.create_elementunary_op(input, type);
     case type::TBOperatorType::TB_CLAMP_OP:
       assert((!type::CLAMP_MIN_MAX.empty()) && "CLAMP_MIN_MAX not assigned");
-      return g.create_elementunary_clamp_op(input, type::CLAMP_MIN_MAX["min_val"], type::CLAMP_MIN_MAX["max_val"]);
+      return g.create_elementunary_clamp_op(input,
+                                            type::CLAMP_MIN_MAX["min_val"],
+                                            type::CLAMP_MIN_MAX["max_val"]);
     case type::TBOperatorType::TB_RMS_NORM_OP:
       return g.create_rms_norm_op(input);
     case type::TBOperatorType::TB_REDUCTION_0_OP:

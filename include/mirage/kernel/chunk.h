@@ -15,33 +15,25 @@
 
 #pragma once
 
-#include "mirage/kernel/device_tensor.h"
 #include "mirage/kernel/operator.h"
-#include "mirage/threadblock/graph.h"
-#include "mirage/threadblock/operator.h"
-#include <tuple>
-#include <vector_types.h>
 
 namespace mirage {
 namespace kernel {
 
-class KNCustomizedOp : public mirage::kernel::KNOperator {
+class KNChunkOp : public mirage::kernel::KNOperator {
 public:
-  KNCustomizedOp(Graph *_kgraph,
-                 std::vector<DTensor> const &inputs,
-                 mirage::threadblock::Graph const &_graph);
-  virtual ~KNCustomizedOp();
-  bool profile(ProfileResult &profile);
-  void run(void);
-  bool fingerprint(void);
-  size_t get_owner_independent_hash() const override;
+  KNChunkOp(Graph *_graph, DTensor const &input, int chunk_size, int dim);
+  ~KNChunkOp();
+  bool profile(ProfileResult &profile) override;
+  bool fingerprint(void) override;
 
   operator json() const override;
 
 public:
-  mirage::threadblock::Graph bgraph;
-  void get_bgraph(mirage::threadblock::Graph **bgraph);
+  int chunk_size, chunk_dim;
 };
+
+void from_json(json const &j, KNChunkOp &op);
 
 } // namespace kernel
 } // namespace mirage
