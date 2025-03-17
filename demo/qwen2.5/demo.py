@@ -6,7 +6,7 @@ import argparse
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--cuda-graph", action='store_true', help="Enable CUDA Graph")
-    parser.add_argument("--disable-mirage", action='store_false', help="Disable Mirage kernels")
+    parser.add_argument("--use-mirage", action='store_true', help="Enable Mirage kernels")
     args = parser.parse_args()
     print("Input arguments:", args)
 
@@ -16,7 +16,7 @@ if __name__ == "__main__":
     with torch.device("cuda"):
         model = Qwen2ForCausalLM.from_pretrained(model_name)
         model.fuse_weights()
-        if not args.disable_mirage:
+        if args.use_mirage:
             model.superoptimize_kernels()
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     
@@ -40,10 +40,10 @@ if __name__ == "__main__":
     position_embeddings = model.model.rotary_emb(positions)
     prev_pos = 0
     
-    torch.cuda.synchronize()
     starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+    torch.cuda.synchronize()
     starter.record()
-    
+
     g = torch.cuda.CUDAGraph()
     step = torch.tensor([0], dtype=torch.int32, device="cuda")
     for cur_pos in range(prompt_len, prompt_len + 512):
