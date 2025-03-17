@@ -218,8 +218,12 @@ TranspileResult Transpiler::transpile_ugraph() {
         size_t batch_stride_C =
             out0.num_dims == 2 ? 0 : meta_out0.strides[out0.num_dims - 3];
         // Run GEMM
-        exec.e("kn::gemm<CUBLAS_COMPUTE_16F>($,$,$, $,$,$, $,$, $,$, $,$, $, "
+        string compute_type =
+            (in0.data_type == type::DT_FLOAT16 ? "CUBLAS_COMPUTE_16F"
+                                               : "CUBLAS_COMPUTE_32F");
+        exec.e("kn::gemm<$>($,$,$, $,$,$, $,$, $,$, $,$, $, "
                "$,$,$);",
+               compute_type,
                out0_ptr_name,
                in0_ptr_name,
                in1_ptr_name,
