@@ -44,6 +44,21 @@ __device__ __forceinline__ uint32_t encode_tag(uint32_t block_group_idx,
          (event_idx << EVENT_IDX_SHIFT) | event_type;
 }
 
+__device__ __forceinline__ uint32_t make_event_tag_start(uint32_t base_tag,
+                                                         uint32_t event_id) {
+  return base_tag | (event_id << EVENT_IDX_SHIFT) | EVENT_BEGIN;
+}
+
+__device__ __forceinline__ uint32_t make_event_tag_end(uint32_t base_tag,
+                                                       uint32_t event_id) {
+  return base_tag | (event_id << EVENT_IDX_SHIFT) | EVENT_INSTANT;
+}
+
+__device__ __forceinline__ uint32_t make_event_tag_instant(uint32_t base_tag,
+                                                           uint32_t event_id) {
+  return base_tag | (event_id << EVENT_IDX_SHIFT) | EVENT_BEGIN;
+}
+
 __device__ __forceinline__ uint32_t get_timestamp() {
   volatile uint32_t ret;
   asm volatile("mov.u32 %0, %globaltimer_lo;" : "=r"(ret));
@@ -71,28 +86,27 @@ struct ProfilerEntry {
   uint32_t profiler_entry_tag_base;                                            \
   bool profiler_write_thread_predicate;
 
-#define PROFILER_PARAMS_DECL uint64_t *profiler_buffer;
+// #define PROFILER_PARAMS_DECL uint64_t *profiler_buffer;
 
 #define PROFILER_INIT(                                                         \
     profiler_buffer, group_idx, num_groups, write_thread_predicate)            \
-  volatile ProfilerEntry entry;                                                \
-  if (get_block_idx() == 0 && get_thread_idx() == 0) {                         \
-    entry.nblocks = get_num_blocks();                                          \
+  volatile tb::ProfilerEntry entry;                                            \
+  if (tb::get_block_idx() == 0 && tb::get_thread_idx() == 0) {                 \
+    entry.nblocks = tb::get_num_blocks();                                      \
     entry.ngroups = num_groups;                                                \
     profiler_buffer[0] = entry.raw;                                            \
   }                                                                            \
   profiler_write_ptr =                                                         \
-      profiler_buffer + 1 + get_block_idx() * num_groups + group_idx;          \
-  profiler_write_stride = get_num_blocks() * num_groups;                       \
+      profiler_buffer + 1 + tb::get_block_idx() * num_groups + group_idx;      \
+  profiler_write_stride = tb::get_num_blocks() * num_groups;                   \
   profiler_entry_tag_base =                                                    \
-      encode_tag(get_block_idx() * num_groups + group_idx, 0, 0);              \
+      tb::encode_tag(tb::get_block_idx() * num_groups + group_idx, 0, 0);      \
   profiler_write_thread_predicate = write_thread_predicate;
 
 #define PROFILER_EVENT_START(event)                                            \
   if (profiler_write_thread_predicate) {                                       \
-    entry.tag = profiler_entry_tag_base |                                      \
-                ((uint32_t)event << EVENT_IDX_SHIFT) | EVENT_BEGIN;            \
-    entry.delta_time = get_timestamp();                                        \
+    entry.tag = tb::make_event_tag_start(profiler_entry_tag_base, event);      \
+    entry.delta_time = tb::get_timestamp();                                    \
     *profiler_write_ptr = entry.raw;                                           \
     profiler_write_ptr += profiler_write_stride;                               \
   }                                                                            \
@@ -101,9 +115,8 @@ struct ProfilerEntry {
 #define PROFILER_EVENT_END(event)                                              \
   __threadfence_block();                                                       \
   if (profiler_write_thread_predicate) {                                       \
-    entry.tag = profiler_entry_tag_base |                                      \
-                ((uint32_t)event << EVENT_IDX_SHIFT) | EVENT_END;              \
-    entry.delta_time = get_timestamp();                                        \
+    entry.tag = tb::make_event_tag_end(profiler_entry_tag_base, event);        \
+    entry.delta_time = tb::get_timestamp();                                    \
     *profiler_write_ptr = entry.raw;                                           \
     profiler_write_ptr += profiler_write_stride;                               \
   }
@@ -111,9 +124,8 @@ struct ProfilerEntry {
 #define PROFILER_EVENT_INSTANT(event)                                          \
   __threadfence_block();                                                       \
   if (profiler_write_thread_predicate) {                                       \
-    entry.tag = profiler_entry_tag_base |                                      \
-                ((uint32_t)event << EVENT_IDX_SHIFT) | EVENT_INSTANT;          \
-    entry.delta_time = get_timestamp();                                        \
+    entry.tag = tb::make_event_tag_instant(profiler_entry_tag_base, event);    \
+    entry.delta_time = tb::get_timestamp();                                    \
     *profiler_write_ptr = entry.raw;                                           \
   }                                                                            \
   __threadfence_block();

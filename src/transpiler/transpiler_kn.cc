@@ -118,11 +118,9 @@ std::pair<string, string>
 
 std::pair<string, string>
     Transpiler::get_profiling_ptr(int const customized_idx) {
-  string pointer_var_name = fmt("dtensor profiler_buffer_$", customized_idx);
+  string pointer_var_name = fmt("profiler_buffer_$", customized_idx);
   string code = "";
-  code = fmt("uint64_t *$ = (uint64_t*)profiler_buffer.at($);",
-             pointer_var_name,
-             customized_idx);
+  code = fmt("uint64_t *$ = (uint64_t*)profiler_buffer;", pointer_var_name);
   return {pointer_var_name, code};
 }
 
@@ -176,7 +174,7 @@ TranspileResult Transpiler::transpile_ugraph() {
   exec.e(
       "static void _execute_mugraph(std::vector<void const *> input_tensors, "
       "std::vector<void*> output_tensors"
-      ", void* buf, uint64_t const * profiler_buffer) {");
+      ", void* buf, void * profiler_buffer) {");
   for (kn::KNOperator *const op : g->operators) {
     std::string op_type_str;
     to_json(op_type_str, op->op_type);
@@ -462,7 +460,7 @@ TranspileResult Transpiler::transpile_ugraph() {
         if (result.error_type != CUDA_T_SUCCESS) {
           vector<OutputTensorDirective> output_directives;
           return TranspileResult{
-              result.error_type, "", 0, 0, output_directives};
+              result.error_type, "", 0, 0, 0, output_directives};
         }
         if (result.smem_size > max_smem_size) {
           max_smem_size = result.smem_size;

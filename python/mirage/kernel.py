@@ -21,13 +21,14 @@ HARD_CODE = """
 #include <Python.h>
 
 static PyObject *launch(PyObject *self, PyObject *args) {
-  PyObject *input_list, *output_list, *py_buffer;
+  PyObject *input_list, *output_list, *py_buffer, *py_profiler_buffer;
   void *buffer;
   std::vector<void const *> input_tensors;
   std::vector<void*> output_tensors;
+  void *profiler_buffer;
 
-  if (!PyArg_ParseTuple(args, "OOO", &input_list, &output_list, &py_buffer)) {
-    PyErr_SetString(PyExc_TypeError, "Invalid parameters");
+  if (!PyArg_ParseTuple(args, "OOOO", &input_list, &output_list, &py_buffer, &py_profiler_buffer)) {
+    PyErr_SetString(PyExc_TypeError, "XXXInvalid parameters");
     return NULL;
   }
 
@@ -60,6 +61,7 @@ static PyObject *launch(PyObject *self, PyObject *args) {
   }
 
   buffer = PyLong_AsVoidPtr(py_buffer);
+  profiler_buffer = PyLong_AsVoidPtr(py_profiler_buffer);
   execute_mugraph(input_tensors, output_tensors, buffer, profiler_buffer);
 
   Py_RETURN_NONE;
@@ -111,7 +113,7 @@ def get_cc_cmd(target, cc, FILE_NAME, py_include_dir, MIRAGE_ROOT, so_path, prof
         specific_cmd = [
             "-arch=sm_90a",
             "-gencode=arch=compute_90a,code=sm_90a",
-        ]+ (["-DMIRAGE_ENABLE_PROFILER"] if profiling else []),
+        ]+ (["-DMIRAGE_ENABLE_PROFILER"] if profiling else [])
     else:
         specific_cmd = [
             "-arch=native",
@@ -290,8 +292,9 @@ class KNGraph:
             for meta in results["output_directives"]
         ]
 
-        prodiler_buffer_tensor = torch.empty(results['profiler_buf_size'], dtype=torch.uint64, device=input_tensors[0].device)
+        prodiler_buffer_tensor = torch.empty(results["profiler_buf_size"], dtype=torch.uint64, device=input_tensors[0].device).contiguous()
 
+        print("results['profiler_buf_size']", results['profiler_buf_size'])
         buffer_tensor_ptr = buffer_tensor.data_ptr()
         input_tensors_ptr = [tensor.data_ptr() for tensor in input_tensors]
         output_tensors_ptr = [tensor.data_ptr() for tensor in output_tensors]
@@ -300,7 +303,7 @@ class KNGraph:
         self.run(input_tensors_ptr, output_tensors_ptr, buffer_tensor_ptr, prodiler_buffer_tensor_ptr)
 
         if results['profiler_buf_size'] > 0:
-            export_to_perfetto_trace(prodiler_buffer_tensor_ptr, 'mirage.perfetto-trace')
+            export_to_perfetto_trace(prodiler_buffer_tensor, 'mirage.perfetto-trace')
         return output_tensors
 
     def compile(self, async_=False, **kwargs):
@@ -329,9 +332,9 @@ class KNGraph:
         profiling = kwargs.get("profiling", False)
 
         result = generate_cuda_program(
-            self.cygraph, target_cc=target_cc, input_strides=input_strides, num_warp_groups = num_warp_groups, pipeline_stages = pipeline_stages, profiling
+            self.cygraph, target_cc=target_cc, input_strides=input_strides, num_warp_groups = num_warp_groups, pipeline_stages = pipeline_stages, profiling = profiling
         )
-        # print(result)
+        print(result['code'])
         if result["max_smem_size"] > get_shared_memory_capacity(target_cc):
             # the transpiled kernel exceeds shared memory limit
             print(
@@ -394,7 +397,7 @@ class KNGraph:
                 f"Error: MIRAGE_ROOT ({MIRAGE_ROOT}) not found. Please set the MIRAGE_ROOT env variable correctly"
             )
             sys.exit(1)
-        cc_cmd = get_cc_cmd(target_cc, cc, FILE_NAME, py_include_dir, MIRAGE_ROOT, so_path, args.profiling)
+        cc_cmd = get_cc_cmd(target_cc, cc, FILE_NAME, py_include_dir, MIRAGE_ROOT, so_path, profiling)
 
 
         def remain_op():

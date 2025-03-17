@@ -325,7 +325,7 @@ CustomOPTranspileResult
            (config.num_consumer_wgs + config.num_producer_wgs) * 128 &&
        (g.forloop_range > 1))) {
     assert(false && "compiler assertion failure");
-    return CustomOPTranspileResult{CUDA_T_CONFIG_ERROR, func_name, 0, ""};
+    return CustomOPTranspileResult{CUDA_T_CONFIG_ERROR, func_name, 0, 0, ""};
   }
 
   // int barrier_size = 16 * config.pipeline_stages;
@@ -578,7 +578,7 @@ CustomOPTranspileResult
 
     code.e_front(
         "__global__ void  __launch_bounds__($) "
-        "$($ $, $) {",
+        "$($ $, $, uint64_t *profiler_buffer) {",
         num_threads,
         func_name,
         tma,
@@ -838,9 +838,10 @@ CustomOPTranspileResult
   // if there is asyc copy defined
   if (pipe_tma) {
     code.e("int warpgroup_id = tb::warpgroup_id();");
-    if (config.profiling) {
+    if (profiling) {
+      code.e("PROFILER_CLOSURE_PARAMS_DECL");
       code.e("PROFILER_INIT(profiler_buffer, warpgroup_id, $, (threadIdx.x % "
-             "128 == 0))",
+             "128 == 0));",
              config.num_consumer_wgs);
     }
     // run producers
@@ -854,6 +855,9 @@ CustomOPTranspileResult
     code.e("for (uint32_t for_idx = 0; for_idx < $; for_idx++) {",
            g.forloop_range);
     for (auto const &[stensor_id, op] : pipeline_inputs) {
+      if (profiling) {
+        code.e("PROFILER_EVENT_START($);", (op->op_type - type::TB_UNKOWN));
+      }
       code.e(fmt("STensor$InputAtom::run(tma_$, stensor$_ptr, "
                  " $, $, $, for_idx, hopper_async_pipeline_$);",
                  stensor_id,
@@ -863,6 +867,9 @@ CustomOPTranspileResult
                  op->input_map.y,
                  op->input_map.z,
                  stensor_id));
+      if (profiling) {
+        code.e("PROFILER_EVENT_END($);", (op->op_type - type::TB_UNKOWN));
+      }
     }
     code.e("}");
     code.e("}");
@@ -939,9 +946,9 @@ CustomOPTranspileResult
               op, code, is_in_loop, pipeline_inputs);
 
       // define
-      if (!is_in_loop && pipe_tma && config.profiling) {
+      if (pipe_tma && profiling) {
         // 2000 - 2999
-        code.e("PROFILER_EVENT_START($)", op->op_type);
+        code.e("PROFILER_EVENT_START($);", (op->op_type - type::TB_UNKOWN));
       }
 
       switch (op->op_type) {
@@ -1261,12 +1268,12 @@ CustomOPTranspileResult
           assert(fmt("Unknown TB op: $", op->op_type).c_str());
         }
       }
+      if (pipe_tma && profiling) {
+        code.e("PROFILER_EVENT_END($);", (op->op_type - type::TB_UNKOWN));
+      }
       code.e("}");
     }
 
-    if (!is_in_loop && pipe_tma && config.profiling) {
-      code.e("PROFILER_EVENT_END($)", op->op_type);
-    }
     return CUDA_T_SUCCESS;
   };
 
@@ -1305,7 +1312,7 @@ CustomOPTranspileResult
 
     code << res;
     if (err != CUDA_T_SUCCESS) {
-      return CustomOPTranspileResult{err, func_name, 0, ""};
+      return CustomOPTranspileResult{err, func_name, 0, 0, ""};
     }
   }
 
@@ -1357,7 +1364,7 @@ CustomOPTranspileResult
           transpile_tb_sched_node(sched_node, res, pipeline_inputs, false);
       code << res;
       if (err != CUDA_T_SUCCESS) {
-        return CustomOPTranspileResult{err, func_name, 0, "", tmaParamsList};
+        return CustomOPTranspileResult{err, func_name, 0, 0, "", tmaParamsList};
       }
     }
   }

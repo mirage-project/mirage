@@ -101,7 +101,7 @@ def export_to_perfetto_trace(
         block_idx, group_idx, event_idx, event_type = decode_tag(
             tag, num_blocks, num_groups
         )
-        event = event_name_list[event_idx]
+        event = event_name_list[event_idx + 2000]
         tid = tid_map[(block_idx, group_idx)]
 
         if (block_idx, group_idx, event_idx) in track_map:
