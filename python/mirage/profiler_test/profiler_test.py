@@ -1,81 +1,69 @@
 import mirage as mi
 import numpy as np
 import torch
-import argparse
+
+rms_norm = torch.nn.RMSNorm(4096, device='cuda:0', dtype=torch.float16)
+#@torch.compile
+def torch_rms_norm(X, W):
+    D = rms_norm(X)
+    E = torch.matmul(D, W)
+    return E
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--bs', type=int, default=1)
-    parser.add_argument('--file', type=str, default='norm_transformer.json')
-    parser.add_argument('--backend', type=str, default='cuda')
-    parser.add_argument('--warmup', type=int, default=16)
-    parser.add_argument('--profile', type=int, default=1000)
-    parser.add_argument('--save_codes', type=bool, default=False)
-    parser.add_argument('--trace_file', type=str, default='mirage.perfetto-trace')
-    parser.add_argument("--profiler-buffer-size", type=int, default=1024 * 1024)
-
-    args = parser.parse_args()
-    batch_size = args.bs
-    filename = args.file
-    backend = args.backend
-    warmup_iters = args.warmup
-    profile_iters = args.profile
-    save_codes = args.save_codes
-    trace_file = args.trace_file
-    profiler_buffer_size = args.profiler_buffer_size
-
     graph = mi.new_kernel_graph()
-    H = graph.new_input(dims=(8 * batch_size, 4096), dtype=mi.float16)
-    X = graph.new_input(dims=(8 * batch_size, 4096), dtype=mi.float16)
-    alpha = graph.new_input(dims=(8 * batch_size, 4096), dtype=mi.float16)
-    H_norm = graph.rms_norm(H, normalized_shape=(4096,)) # TODO: replace with standard L2 norm
-    A = graph.add(H_norm, X) # TODO: replace with subtract
-    B = graph.mul(alpha, A)
-    C = graph.add(X, B)
-    O = graph.rms_norm(C, normalized_shape=(4096,)) # TODO: replace with standard L2 norm
-    graph.mark_output(O)
+    X = graph.new_input(dims=(16, 4096), dtype=mi.float16)
+    W = graph.new_input(dims=(4096, 4096), dtype=mi.float16)
+    tb_graph = mi.new_threadblock_graph(grid_dim=(64,1,1), block_dim=(128,1,1), forloop_range=64, reduction_dimx=64)
+    tX = tb_graph.new_input(dtensor=X, input_map=(-1, -1, -1), forloop_dim=1)
+    tW = tb_graph.new_input(dtensor=W, input_map=(1, -1, -1), forloop_dim=0)
+    tM = tb_graph.matmul(tX, tW)
+    tAccX = tb_graph.forloop_accum(tX, "rms")
+    tAccM = tb_graph.forloop_accum(tM)
+    tO = tb_graph.div(tAccM, tAccX)
+    tb_graph.new_output(stensor=tO, output_map=(1, -1, -1))
+    O = graph.customized([X, W], tb_graph)
+    graph.mark_output(O[0])
+    
+    input_tensors = [
+        torch.randn(16, 4096, dtype=torch.float16, device='cuda:0'),
+        torch.randn(4096, 4096, dtype=torch.float16, device='cuda:0'),
+    ]
+
+    input_strides = [tensor.stride() for tensor in input_tensors]
+    p = mi.generate_cuda_program(graph.cygraph, target_cc=80, input_strides=input_strides)
+    print(p["code"])
+    # warm up runs
+    for _ in range(16):
+        outputs = graph(inputs=input_tensors)
+        #torch_rms_norm(input_tensors[0], input_tensors[1])
 
 
     profiler_buffer = torch.zeros(
-        (profiler_buffer_size,), dtype=torch.uint64, device="cuda"
+        (4096,), dtype=torch.uint64, device="cuda"
     )
-    
-    optimized_graph = graph.superoptimize(previous_checkpoint=filename,
-                            backend=backend, 
-                            save_codes=save_codes, 
-                            warmup_iters=warmup_iters, 
-                            profile_iters=profile_iters,
-                            profile_mode=True,
-                            profiler_buffer=profiler_buffer,
-                            file_id=2
-                        )
 
-    input_tensors = [
-        torch.randn(8 * batch_size, 4096, dtype=torch.float16, device='cuda:0'),
-        torch.randn(8 * batch_size, 4096, dtype=torch.float16, device='cuda:0'),
-        torch.randn(8 * batch_size, 4096, dtype=torch.float16, device='cuda:0')
-    ]
+    torch.cuda.synchronize()
 
+    starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+    repetitions = 1000
+    timings=np.zeros((repetitions,1))
+    starter.record()
+    for rep in range(repetitions):
+        outputs = graph(inputs=input_tensors)
+        #torch_rms_norm(input_tensors[0], input_tensors[1])
 
+    ender.record()
+    torch.cuda.synchronize()
+    curr_time = starter.elapsed_time(ender)
 
-    # print("Warming up...")
-    # for _ in range(16):
-    #     optimized_graph(inputs=input_tensors)
+    mean_syn = curr_time / 1000
+    #print(timings)
+    print(mean_syn)
 
-    # # profiler_buffer.zero_()
-
-    # # 性能测试
-    # print("Running performance test with profiling...")
-    # torch.cuda.synchronize()
-    # starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
-    # starter.record()
-    # for _ in range(1000):
-    #     optimized_graph(inputs=input_tensors)
-    # ender.record()
-    # torch.cuda.synchronize()
-    # curr_time = starter.elapsed_time(ender)
-    # mean_syn = curr_time / 1000
-
-    # print("Best muGraph run time (ms): ", mean_syn)
+    profiler_buffer = torch.zeros(
+        (4096,), dtype=torch.uint64, device="cuda"
+    )
 
 
+    outputs = graph(inputs=input_tensors, profile_mode=True, profiler_buffer=profiler_buffer)
+    print("profiler buffer: ", profiler_buffer)

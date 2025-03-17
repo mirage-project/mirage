@@ -75,7 +75,6 @@ def export_to_perfetto_trace(
     profiler_buffer: torch.Tensor,
     file_name: str,
 ) -> None:
-    import pdb; pdb.set_trace()
 
     profiler_buffer_host = profiler_buffer.cpu()
     num_blocks, _ = profiler_buffer_host[:1].view(dtype=torch.int32)
@@ -84,15 +83,15 @@ def export_to_perfetto_trace(
     tgen = TraceGenerator(file_name)
     
     track_map = {}
+    pid_map = {}
     for block_idx in range(num_blocks):
         pid = tgen.create_group(f"block_{block_idx}")
+        pid_map[block_idx] = pid
 
 
     for i in range(1, len(profiler_buffer_host)):
         if profiler_buffer_host[i] == 0:
             continue
-
-        pdb.set_trace()
 
         tag, timestamp = profiler_buffer_host[i : i + 1].view(dtype=torch.uint32)
         tag = int(tag)
@@ -105,7 +104,8 @@ def export_to_perfetto_trace(
         if (block_idx, event_idx) in track_map:
             track = track_map[(block_idx, event_idx)]
         else:
-            track = pid.create_track()
+            pid = pid_map[block_idx]
+            track = pid.create_track(f"{block_idx}_{event}")
             track_map[(block_idx, event_idx)] = track
 
         if event_type == EventType.kBegin.value:

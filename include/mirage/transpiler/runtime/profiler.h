@@ -20,13 +20,6 @@
 #include <string>
 #include <utility>
 
-#ifdef MIRAGE_ENABLE_PROFILER
-#define MIRAGE_ENABLE_PROFILER_ADDITIONAL_FUNC_PARAMS , void* profiler_buffer
-#define MIRAGE_ENABLE_PROFILER_ADDITIONAL_FUNC_PARAMS_ARGS , profiler_buffer
-#else
-#define MIRAGE_ENABLE_PROFILER_ADDITIONAL_FUNC_PARAMS
-#define MIRAGE_ENABLE_PROFILER_ADDITIONAL_FUNC_PARAMS_ARGS
-#endif
 
 namespace mirage {
 namespace transpiler {
@@ -38,12 +31,10 @@ public:
 
 // constants
 #define PROFILER_CONSTANTS_DECL \
-  constexpr uint32_t EVENT_IDX_SHIFT = 2; \
-  constexpr uint32_t BLOCK_IDX_SHIFT = 14; \
-  \
-  constexpr uint32_t EVENT_BEGIN = 0x0; \
-  constexpr uint32_t EVENT_END = 0x1; \
-  constexpr uint32_t EVENT_INSTANT = 0x2;
+  static constexpr uint32_t EVENT_IDX_SHIFT = 2; \
+  static constexpr uint32_t BLOCK_IDX_SHIFT = 14; \
+  static constexpr uint32_t EVENT_BEGIN = 0x0; \
+  static constexpr uint32_t EVENT_END = 0x1;
 
 
 // helper functions 
@@ -88,35 +79,49 @@ public:
   };
 
 #ifdef MIRAGE_ENABLE_PROFILER
-#define PROFILER_ADDITIONAL_FUNC_PARAMS , void* profiler_buffer
-#define PROFILER_ADDITIONAL_PARAMS_SETTER profiler_buffer_ptr = static_cast<uint64_t*>(profiler_buffer);
+
+#define PROFILER_ADDITIONAL_FUNC_PARAMS , uint64_t* profiler_buffer_ptr
+#define PROFILER_ADDITIONAL_FUNC_PARAMS_ARGS , profiler_buffer_ptr
+
+#define PROFILER_DEVICE_BUFFER_PTR_SETTER \
+  { \
+    uint64_t* host_ptr = static_cast<uint64_t*>(profiler_buffer); \
+    cudaMemcpyToSymbol(profiler_buffer_ptr, &host_ptr, sizeof(uint64_t*)); \
+    cudaError_t error = cudaGetLastError(); \
+    if (error != cudaSuccess) { \
+      printf("CUDA error in cudaMemcpyToSymbol: %s\n", cudaGetErrorString(error)); \
+    } \
+  }
 
 #define PROFILER_INCLUDE_ALL_DECL \
   PROFILER_CONSTANTS_DECL \
   PROFILER_HELPER_FUNCTIONS_DECL \
-  PROFILER_ENTRY_DECL
+  PROFILER_ENTRY_DECL \
+  PROFILER_DEVICE_BUFFER_PTR_DECL
 
 
-#define PROFILER_CLOSURE_PARAMS_DECL \
+#define PROFILER_WRITE_PARAMS_DECL \
   uint64_t* profiler_write_ptr;      \
   uint32_t profiler_write_stride;    \
   uint32_t profiler_entry_tag_base;  \
   bool profiler_write_thread_predicate;
 
-#define PROFILER_PARAMS_DECL uint64_t* profiler_buffer_ptr;
+#define PROFILER_DEVICE_BUFFER_PTR_DECL __device__ uint64_t* profiler_buffer_ptr;
 
-#define PROFILER_INIT(profiler_buffer,                     \
+#define PROFILER_INIT(profiler_buffer_ptr,                     \
                       write_thread_predicate)                                                   \
   volatile ProfilerEntry entry;                                                                 \
   if (get_thread_idx() == 0) {                                          \
     entry.nblocks = get_num_blocks();                                                           \
-    profiler_buffer[0] = entry.raw;                                                      \
+    profiler_buffer_ptr[0] = entry.raw;                                                      \
   }                                                                                             \
   profiler_write_ptr =                                                                  \
-      profiler_buffer + 1 + get_block_idx();                    \
+      profiler_buffer_ptr + 1 + get_block_idx();                    \
   profiler_write_stride = get_num_blocks();                                \
   profiler_entry_tag_base = encode_tag(get_block_idx(), 0, 0); \
-  profiler_write_thread_predicate = write_thread_predicate;
+  profiler_write_thread_predicate = write_thread_predicate; \
+
+
 
 #define PROFILER_EVENT_START(event)                                                  \
   if (profiler_write_thread_predicate) {                                              \
@@ -138,28 +143,19 @@ public:
     profiler_write_ptr += profiler_write_stride;                            \
   }
 
-#define PROFILER_EVENT_INSTANT(event)                                                  \
-  __threadfence_block();                                                                        \
-  if (profiler_write_thread_predicate) {                                                \
-    entry.tag =                                                                                 \
-        profiler_entry_tag_base | ((uint32_t)event << EVENT_IDX_SHIFT) | EVENT_INSTANT; \
-    entry.delta_time = get_timestamp();                                                         \
-    *profiler_write_ptr = entry.raw;                                                    \
-  }                                                                                             \
-  __threadfence_block();
-
 #else
 
 #define PROFILER_ADDITIONAL_FUNC_PARAMS
+#define PROFILER_ADDITIONAL_FUNC_PARAMS_ARGS
+
 #define PROFILER_ADDITIONAL_PARAMS_SETTER
 
 #define PROFILER_INCLUDE_ALL_DECL
-#define PROFILER_CLOSURE_PARAMS_DECL
-#define PROFILER_PARAMS_DECL
-#define PROFILER_INIT(profiler_buffer, write_thread_predicate)
+#define PROFILER_WRITE_PARAMS_DECL
+#define PROFILER_INIT(profiler_buffer_ptr, write_thread_predicate)
 #define PROFILER_EVENT_START(event)
 #define PROFILER_EVENT_END(event)
-#define PROFILER_EVENT_INSTANT(event)
+#define PROFILER_DEVICE_BUFFER_PTR_SETTER
 
 #endif
 

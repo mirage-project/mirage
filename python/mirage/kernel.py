@@ -263,6 +263,9 @@ class KNGraph:
         return output_tensors
 
     def cuda_call(self, **kwargs):
+        profile_mode = kwargs.get("profile_mode", False)
+        if profile_mode:
+            self._is_compiled = False
         results = self.compile(**kwargs)
 
         # directly return if the Transpiler cannot generate valid CUDA kernels
@@ -301,6 +304,14 @@ class KNGraph:
 
         self.run(input_tensors_ptr, output_tensors_ptr, buffer_tensor_ptr, profiler_buffer_ptr)
 
+        # save the trace file for the best graph
+        if profile_mode and profiler_buffer is not None:
+            self.run(input_tensors_ptr, output_tensors_ptr, buffer_tensor_ptr, profiler_buffer_ptr)
+            trace_file = f"mirage.perfetto-trace_best_graph"
+            export_to_perfetto_trace(profiler_buffer, trace_file)
+            print(f"Profiling data has been saved to {trace_file}")
+            print("You can view the trace file using Perfetto UI: https://ui.perfetto.dev/")
+
         return output_tensors
 
     def compile(self, async_=False, **kwargs):
@@ -334,6 +345,7 @@ class KNGraph:
             num_warp_groups = num_warp_groups, pipeline_stages = pipeline_stages,
             profile_mode = profile_mode
         )
+        
         # print(result)
         if result["max_smem_size"] > get_shared_memory_capacity(target_cc):
             # the transpiled kernel exceeds shared memory limit
@@ -367,13 +379,15 @@ class KNGraph:
         FILE_NAME = os.path.join(tempdir, "test.cu")
         so_path = os.path.join(tempdir, "test.cpython-38-x86_64-linux-gnu.so")
 
+        graph_id = 0
         with open(FILE_NAME, "w") as f:
             f.write(result["code"] + HARD_CODE)
             if saved_addr != "":
                 print(f"saved_addr: {saved_addr}")
                 os.makedirs(saved_addr, exist_ok=True)
-                with open(saved_addr + "test" + str(file_id) + ".cu", "w") as f:
+                with open(saved_addr + "test-" + str(graph_id) + ".cu", "w") as f:
                     f.write(result["code"] + HARD_CODE)
+                graph_id += 1
 
 
         cc = shutil.which("nvcc")
@@ -439,8 +453,6 @@ class KNGraph:
         profile_iters: int = 1000,
         previous_checkpoint: str = None,
         save_codes: bool = False,
-        profile_mode: bool = False,
-        profiler_buffer: torch.Tensor = None,
         file_id: int = -1,
     ):
         cygraphs = search(
@@ -490,13 +502,13 @@ class KNGraph:
                     for t in dtensors:
                         dims = [t.dim(i) for i in range(t.num_dims)]
 
-                        # zy: temporarily set to torch.float16
+                        # Temporarily set to torch.float16
                         input_tensors.append(
                             torch.randn(dims, dtype=torch.float16, device="cuda:0")
                         )
                     starter = torch.cuda.Event(enable_timing=True)
                     ender = torch.cuda.Event(enable_timing=True)
-                    handle = g.compile(async_=True, inputs=input_tensors, profile_mode=profile_mode, file_id=file_id)
+                    handle = g.compile(async_=True, inputs=input_tensors, file_id=file_id)
                     handles.append(handle)
             for handle in handles:
                 handle.wait()
@@ -530,13 +542,6 @@ class KNGraph:
                 if perf < best_perf:
                     best_graph, best_perf = g, perf
 
-            # save the trace file for the best graph
-            if profile_mode and profiler_buffer is not None:
-                best_graph(inputs=input_tensors, profile_mode=True, profiler_buffer=profiler_buffer)
-                trace_file = f"mirage.perfetto-trace_best_graph"
-                export_to_perfetto_trace(profiler_buffer, trace_file)
-                print(f"Profiling data has been saved to {trace_file}")
-                print("You can view the trace file using Perfetto UI: https://ui.perfetto.dev/")
 
             best_graph.backend = "cuda"
             return best_graph

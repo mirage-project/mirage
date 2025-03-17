@@ -97,13 +97,13 @@ public:
   PROFILER_ENTRY_DECL
 
 
-#define PROFILER_CLOSURE_PARAMS_DECL \
+#define PROFILER_WRITE_PARAMS_DECL \
   uint64_t* profiler_write_ptr;      \
   uint32_t profiler_write_stride;    \
   uint32_t profiler_entry_tag_base;  \
   bool profiler_write_thread_predicate;
 
-#define PROFILER_PARAMS_DECL uint64_t* profiler_buffer_ptr;
+#define PROFILER_BUFFER_PARAMS_DECL __device__ uint64_t* profiler_buffer_ptr;
 
 #define PROFILER_INIT(profiler_buffer, group_idx, num_groups,                     \
                       write_thread_predicate)                                                   \
@@ -155,8 +155,8 @@ public:
 #define PROFILER_ADDITIONAL_PARAMS_SETTER
 
 #define PROFILER_INCLUDE_ALL_DECL
-#define PROFILER_CLOSURE_PARAMS_DECL
-#define PROFILER_PARAMS_DECL
+#define PROFILER_WRITE_PARAMS_DECL
+#define PROFILER_BUFFER_PARAMS_DECL
 #define PROFILER_INIT(profiler_buffer, group_idx, num_groups, write_thread_predicate)
 #define PROFILER_EVENT_START(event)
 #define PROFILER_EVENT_END(event)
