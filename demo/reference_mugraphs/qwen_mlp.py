@@ -29,16 +29,6 @@ if __name__ == "__main__":
         torch.randn(3584, 2*18944,  dtype=torch.bfloat16, device='cuda:0'),
     ]
     input_tensors[2] = torch.as_strided(input_tensors[2], (3584, 37888), (1, 3584))
-    # input_tensors = [
-    #     torch.full((1, 3584), 0.001, dtype=torch.bfloat16, device='cuda:0'),
-    #     torch.full((1, 3584), 0.001, dtype=torch.bfloat16, device='cuda:0'),
-    #     torch.full((3584, 2*18944), 0.001, dtype=torch.bfloat16, device='cuda:0'),
-    # ]
-    # input_tensors = [
-    #     torch.load("/home/ubuntu/mirage/demo/hidden_state0.pth"),
-    #     torch.load("/home/ubuntu/mirage/demo/input_layernorm.pth"),
-    #     torch.load("/home/ubuntu/mirage/demo/fused_weight.pth"),
-    # ]
     
     input_strides = []
     dtensors = optimized_graph.cygraph.get_input_dtensors()

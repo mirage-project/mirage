@@ -540,6 +540,7 @@ std::optional<NKIErrorInfo> NKITranspiler::resolve_tensor_layout() {
 NKITranspileResult NKITranspiler::transpile_ugraph() {
   // Generate header
   CodeKeeper header;
+  header.e("import neuronxcc.nki as nki");
   header.e("import neuronxcc.nki.language as nl");
   header.e("import neuronxcc.nki.isa as nisa");
   header.e("from torch_neuronx import nki_jit");

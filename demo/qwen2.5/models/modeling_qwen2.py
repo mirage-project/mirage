@@ -154,7 +154,6 @@ class Qwen2MLP(nn.Module):
         graph.mark_output(O)
         self.kernel2 = graph.superoptimize(config="mlp")
 
-
     def forward(self, input_layernorm, hidden_state):
         if hidden_state.shape[-2] == 1 and self.enable_mirage:
             # use mirage kernels for decoding

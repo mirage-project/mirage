@@ -38,8 +38,8 @@ using mirage::transpiler::fmt;
 using mirage::transpiler::map;
 using std::string;
 
-template <typename T>
-static string ugraph_operator_type_to_nki(const T type) {
+// Todo: Remove the code duplication.
+static string ugraph_tboperator_type_to_nki(const ty::TBOperatorType type) {
   switch (type) {
     case ty::TB_EXP_OP:
       return "nl.exp";
@@ -56,12 +56,35 @@ static string ugraph_operator_type_to_nki(const T type) {
     case ty::TB_MUL_SCALAR_OP:
       return "nl.multiply";
     case ty::TB_ADD_OP:
-    case ty::KN_ADD_OP:
       return "nl.add";
     case ty::TB_MUL_OP:
-    case ty::KN_MUL_OP:
       return "nl.multiply";
     case ty::TB_DIV_OP:
+      return "nl.divide";
+    default:
+      assert(false);
+  }
+}
+static string ugraph_knoperator_type_to_nki(const ty::KNOperatorType type) {
+  switch (type) {
+    case ty::KN_EXP_OP:
+      return "nl.exp";
+    case ty::KN_SILU_OP:
+      return "nl.silu";
+    case ty::KN_SQUARE_OP:
+      return "nl.square";
+    case ty::KN_SQRT_OP:
+      return "nl.sqrt";
+    case ty::KN_RELU_OP:
+      return "nl.relu";
+    case ty::KN_CLAMP_OP:
+      return "nl.clamp";
+    case ty::KN_MUL_SCALAR_OP:
+      return "nl.multiply";
+    case ty::KN_ADD_OP:
+      return "nl.add";
+    case ty::KN_MUL_OP:
+      return "nl.multiply";
     case ty::KN_DIV_OP:
       return "nl.divide";
     default:
@@ -250,34 +273,107 @@ NKICustomOPTranspileResult
         tb::STensor const &output = tb_op->output_tensors.at(0);
         STensorMeta meta0 = stensor_metas.at(input0.guid);
         STensorMeta meta1 = stensor_metas.at(input1.guid);
+        STensorMeta meta2 = stensor_metas.at(output.guid);
         std::string operand0 = fmt("stensor$", input0.guid);
         std::string operand1 = fmt("stensor$", input1.guid);
-        // Add a nl.transpose if input0's partition dim is not
-        // output.num_dims - 1
-        if (meta0.partition_dim != output.num_dims - 1) {
-          operand0 = fmt("nl.transpose(stensor$)", input0.guid);
-        }
-        // Add a nl.transpose if input1's partition dim is not
-        // output.num_dims - 2
-        if (meta1.partition_dim != output.num_dims - 2) {
-          operand1 = fmt("nl.transpose(stensor$)", input1.guid);
-        }
-        STensorMeta meta2 = stensor_metas.at(output.guid);
-        if (meta2.partition_dim == output.num_dims - 2) {
-          // First oprand: input0
-          // Second operand: input1
-          code.e("$ = nisa.nc_matmul($, $)",
-                 fmt("stensor$", output.guid),
-                 operand0,
-                 operand1);
+        int input0_par = 0, input0_contr = 1;
+        int input1_par = 1, input1_contr = 0;
+
+        // transpiler should be able to split bigger matmul in the forloop
+        // accumulator, this assertion possibly mean a bug in nki transpiler.
+        assert(
+            !(input0.dim[input0_par] > 512 || input1.dim[input1_par] > 512) &&
+            "attempting to compute matmul output shape bigger than "
+            "largest possible legal shape(128,512) in nki");
+
+        /* Special case:
+           When both input0 and input1 have parallel axis mapped
+           to partition dimension, but nki requires contraction
+           axis mappend to partition dimension. Since contraction
+           axis of both stensor is mapped to free dim, it may be
+           possible that sizes are greater than 128, which is
+           illegal in nki and we need to split the matmul op into
+           (128, n) & (128, m) shapes.
+        */
+        auto splitMatmulAlongContractionAxis = [&]() {
+          // split matmul into (128, n) & (128, m)
+          std::string i0_paxis =
+              fmt("nl.arange($)[:, None]", input0.dim[input0_par]);
+          std::string contr_axis =
+              fmt("accidx * 128 + nl.arange(128)[None, :]");
+          std::string i1_paxis =
+              fmt("nl.arange($)[:, None]", input1.dim[input1_par]);
+          std::string op0 =
+              fmt("stensor$[$, $]", input0.guid, i0_paxis, contr_axis);
+          std::string op1 =
+              fmt("stensor$[$, $]", input1.guid, i1_paxis, contr_axis);
+
+          // emit a psum buffer for accum.
+          int accum_psize = meta2.partition_dim == 0 ? input0.dim[input0_par]
+                                                     : input1.dim[input1_par];
+          int accum_fsize = meta2.partition_dim == 0 ? input1.dim[input1_par]
+                                                     : input0.dim[input0_par];
+
+          code.e("accum$ = nl.zeros(($, $), dtype=nl.float32, buffer=nl.psum)",
+                 output.guid,
+                 accum_psize,
+                 accum_fsize);
+
+          code.e("for accidx in range(($ + $ - 1) // $):",
+                 input0.dim[input0_contr],
+                 NeuronArch::pmax,
+                 NeuronArch::pmax);
+          code.inc_indent();
+
+          if (meta2.partition_dim == 0) {
+            code.e("accum$ += nisa.nc_matmul(nl.transpose($), nl.transpose($))",
+                   output.guid,
+                   op0,
+                   op1);
+          } else {
+            code.e("accum$ += nisa.nc_matmul(nl.transpose($), nl.transpose($))",
+                   output.guid,
+                   op1,
+                   op0);
+          }
+          code.dec_indent();
+          // emit to copy from psum to sbuf, type cast to fp16
+          code.e("stensor$ = nl.copy(accum$, dtype=nl.float16)",
+                 output.guid,
+                 output.guid);
+        };
+
+        if (meta0.partition_dim == input0_par &&
+            meta1.partition_dim == input1_par &&
+            input0.dim[input0_contr] > 128) { // todo : change to arch value
+          splitMatmulAlongContractionAxis();
         } else {
-          // First oprand: input1
-          // Second operand: input0
-          assert(meta2.partition_dim == output.num_dims - 1);
-          code.e("$ = nisa.nc_matmul($, $)",
-                 fmt("stensor$", output.guid),
-                 operand1,
-                 operand0);
+          // Add a nl.transpose if input0's partition dim is not
+          // output.num_dims - 1
+          if (meta0.partition_dim != output.num_dims - 1) {
+            operand0 = fmt("nl.transpose($)", operand0);
+          }
+          // Add a nl.transpose if input1's partition dim is not
+          // output.num_dims - 2
+          if (meta1.partition_dim != output.num_dims - 2) {
+            operand1 = fmt("nl.transpose($)", operand1);
+          }
+          if (meta2.partition_dim == output.num_dims - 2) {
+            // First oprand: input0
+            // Second operand: input1
+            code.e("$ = nisa.nc_matmul($, $)",
+                   fmt("stensor$", output.guid),
+                   operand0,
+                   operand1);
+          } else {
+            // First oprand: input1
+            // Second operand: input0
+            assert(meta2.partition_dim == output.num_dims - 1);
+            code.e("$ = nisa.nc_matmul($, $)",
+                   fmt("stensor$", output.guid),
+                   operand1,
+                   operand0);
+          }
         }
         break;
       }
@@ -316,19 +412,17 @@ NKICustomOPTranspileResult
         }
         if (meta0.partition_dim != meta1.partition_dim) {
           // Need a transpose before elementwise
-          code.e(
-              "$ = $(nl.transpose($)$)",
-              fmt("stensor$", output.guid),
-              ugraph_operator_type_to_nki<ty::TBOperatorType>(tb_op->op_type),
-              fmt("stensor$", input.guid),
-              optional_second_operand);
+          code.e("$ = $(nl.transpose($)$)",
+                 fmt("stensor$", output.guid),
+                 ugraph_tboperator_type_to_nki(tb_op->op_type),
+                 fmt("stensor$", input.guid),
+                 optional_second_operand);
         } else {
-          code.e(
-              "$ = $($$)",
-              fmt("stensor$", output.guid),
-              ugraph_operator_type_to_nki<ty::TBOperatorType>(tb_op->op_type),
-              fmt("stensor$", input.guid),
-              optional_second_operand);
+          code.e("$ = $($$)",
+                 fmt("stensor$", output.guid),
+                 ugraph_tboperator_type_to_nki(tb_op->op_type),
+                 fmt("stensor$", input.guid),
+                 optional_second_operand);
         }
         break;
       }
@@ -352,7 +446,7 @@ NKICustomOPTranspileResult
         }
         code.e("$ = $($, $)",
                fmt("stensor$", output.guid),
-               ugraph_operator_type_to_nki<ty::TBOperatorType>(tb_op->op_type),
+               ugraph_tboperator_type_to_nki(tb_op->op_type),
                transpose0 ? fmt("nl.transpose(stensor$)", input0.guid)
                           : fmt("stensor$", input0.guid),
                transpose1 ? fmt("nl.transpose(stensor$)", input1.guid)
@@ -500,19 +594,17 @@ NKICustomOPTranspileResult
         }
         if (meta0.partition_dim != meta1.partition_dim) {
           // Need a transpose before elementwise
-          code.e(
-              "$ = $(nl.transpose($)$)",
-              fmt("stensor$", output.guid),
-              ugraph_operator_type_to_nki<ty::TBOperatorType>(tb_op->op_type),
-              fmt("stensor$", input.guid),
-              optional_second_operand);
+          code.e("$ = $(nl.transpose($)$)",
+                 fmt("stensor$", output.guid),
+                 ugraph_tboperator_type_to_nki(tb_op->op_type),
+                 fmt("stensor$", input.guid),
+                 optional_second_operand);
         } else {
-          code.e(
-              "$ = $($$)",
-              fmt("stensor$", output.guid),
-              ugraph_operator_type_to_nki<ty::TBOperatorType>(tb_op->op_type),
-              fmt("stensor$", input.guid),
-              optional_second_operand);
+          code.e("$ = $($$)",
+                 fmt("stensor$", output.guid),
+                 ugraph_tboperator_type_to_nki(tb_op->op_type),
+                 fmt("stensor$", input.guid),
+                 optional_second_operand);
         }
         break;
       }
@@ -536,7 +628,7 @@ NKICustomOPTranspileResult
         }
         code.e("$ = $($, $)",
                fmt("stensor$", output.guid),
-               ugraph_operator_type_to_nki<ty::TBOperatorType>(tb_op->op_type),
+               ugraph_tboperator_type_to_nki(tb_op->op_type),
                transpose0 ? fmt("nl.transpose(stensor$)", input0.guid)
                           : fmt("stensor$", input0.guid),
                transpose1 ? fmt("nl.transpose(stensor$)", input1.guid)
@@ -701,7 +793,7 @@ std::optional<NKICustomOPTranspileResult>
 
   // compute
   code.e("result_tile = $($, $)",
-         ugraph_operator_type_to_nki<ty::KNOperatorType>(binary_op->op_type),
+         ugraph_knoperator_type_to_nki(binary_op->op_type),
          fmt("dtensor$_tile", inputs[0].guid),
          fmt("dtensor$_tile", inputs[1].guid));
 
