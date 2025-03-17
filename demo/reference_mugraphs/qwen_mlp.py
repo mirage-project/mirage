@@ -61,3 +61,4 @@ if __name__ == "__main__":
     print("input", input_tensors[0])
     print(outputs[0])
     print(torch_qwen_mlp(input_tensors[0], input_tensors[1], input_tensors[2]))
+
