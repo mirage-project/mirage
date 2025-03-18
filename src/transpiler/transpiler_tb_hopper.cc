@@ -310,7 +310,8 @@ CustomOPTranspileResult
 
   size_t profiler_buf_size =
       profiling ? (g.grid_dim.x * g.grid_dim.y * g.grid_dim.z *
-                   (config.num_consumer_wgs + config.num_producer_wgs))
+                   (config.num_consumer_wgs + config.num_producer_wgs)) *
+                      1000
                 : 0;
 
   // Allocate a kernel name
@@ -842,7 +843,7 @@ CustomOPTranspileResult
       code.e("PROFILER_CLOSURE_PARAMS_DECL");
       code.e("PROFILER_INIT(profiler_buffer, warpgroup_id, $, (threadIdx.x % "
              "128 == 0));",
-             config.num_consumer_wgs);
+             config.num_consumer_wgs + config.num_producer_wgs);
     }
     // run producers
     code.e("if (warpgroup_id == $) {", config.num_consumer_wgs);

@@ -51,7 +51,7 @@ __device__ __forceinline__ uint32_t make_event_tag_start(uint32_t base_tag,
 
 __device__ __forceinline__ uint32_t make_event_tag_end(uint32_t base_tag,
                                                        uint32_t event_id) {
-  return base_tag | (event_id << EVENT_IDX_SHIFT) | EVENT_INSTANT;
+  return base_tag | (event_id << EVENT_IDX_SHIFT) | EVENT_END;
 }
 
 __device__ __forceinline__ uint32_t make_event_tag_instant(uint32_t base_tag,
