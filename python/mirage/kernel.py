@@ -446,15 +446,15 @@ class KNGraph:
         fmaps: list = None,
         franges: list = None,
         verbose: bool = False,
-        disable_graph_dataset: bool = False,
         config: str = None,
         backend: str = "cuda",
         warmup_iters: int = 16,
         profile_iters: int = 1000,
-        previous_checkpoint: str = None,
+        use_graph_dataset: bool = True,
+        use_cached_graphs: bool = True,
         save_codes: bool = False,
     ):
-        if not disable_graph_dataset:
+        if use_graph_dataset:
             cached_graph = graph_dataset.find(
                 self.cygraph,
                 imaps=imaps,
@@ -466,6 +466,10 @@ class KNGraph:
                 backend=backend)
             if cached_graph is not None:
                 return cached_graph
+        if use_cached_graphs:
+            previous_checkpoint = "mirage_cached_mugraphs_{:x}.json".format(self.cygraph.get_owner_independent_hash())
+        else:
+            previous_checkpoint = None
         cygraphs = search(
             self.cygraph,
             imaps=imaps,
@@ -550,7 +554,7 @@ class KNGraph:
                 if perf < best_perf:
                     best_graph, best_perf = g, perf
             best_graph.backend = "cuda"
-            if not disable_graph_dataset:
+            if use_graph_dataset:
                 graph_dataset.store(
                     input_graph=self.cygraph,
                     optimized_graph=best_graph,
@@ -586,7 +590,7 @@ class KNGraph:
                 raise AttributeError("The module does not contain an 'execute_mugraph' function.")
             best_graph._cached_results = {"output_shapes": best_output_shapes}
             best_graph.backend = "triton"
-            if not disable_graph_dataset:
+            if use_graph_dataset:
                 graph_dataset.store(
                     input_graph=self.cygraph,
                     optimized_graph=best_graph,
