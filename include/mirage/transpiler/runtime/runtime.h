@@ -21,6 +21,7 @@ static void _execute_mugraph(std::vector<void const *> input_tensors,
 #include "kernel/element_unary.h"
 #include "kernel/matmul.h"
 #include "kernel/reduction.h"
+#include "kernel/chunk.h"
 #include "threadblock/threadblock.h"
 #include "utils.h"
 

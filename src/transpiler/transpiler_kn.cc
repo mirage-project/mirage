@@ -352,6 +352,41 @@ TranspileResult Transpiler::transpile_ugraph() {
             "kernel::run($, $, $);", out0_ptr_name, in0_ptr_name, in1_ptr_name);
         break;
       }
+      case type::KNOperatorType::KN_CHUNK_0_OP:
+      case type::KNOperatorType::KN_CHUNK_1_OP:
+      case type::KNOperatorType::KN_CHUNK_2_OP: {
+        kn::DTensor &in0 = op->input_tensors.at(0);
+        kn::DTensor &out0 = op->output_tensors.at(0);
+        kn::DTensor &out1 = op->output_tensors.at(1);
+        DTensorMeta meta_in0 = dtensor_metas.at(in0.guid);
+        DTensorMeta meta_out0 = dtensor_metas.at(out0.guid);
+        DTensorMeta meta_out1 = dtensor_metas.at(out1.guid);
+        assert(in0.num_dims == out0.num_dims && out0.num_dims == out1.num_dims);
+        
+        int innermost_dim = meta_in0.innermost_dim;
+        string in0_layout = mov_last_and_get_layout(in0, meta_in0, innermost_dim);
+        string out0_layout = mov_last_and_get_layout(out0, meta_out0, innermost_dim);
+        string out1_layout = mov_last_and_get_layout(out1, meta_out1, innermost_dim);
+
+        auto [in0_ptr_name, in0_ptr_code] = get_dtensor_ptr(in0);
+        auto [out0_ptr_name, out0_ptr_code] = get_dtensor_ptr(out0);
+        auto [out1_ptr_name, out1_ptr_code] = get_dtensor_ptr(out1);
+        exec.e(in0_ptr_code);
+        exec.e(out0_ptr_code);
+        exec.e(out1_ptr_code);
+
+        exec.e("using kernel = kn::ChunkKernel<$, "
+               "$, $, $, $, $>",
+               get_datatype_str(in0.data_type),
+               in0_layout,
+               out0_layout,
+               out1_layout,
+               static_cast<kn::KNChunkOp *>(op)->chunk_size,
+               static_cast<kn::KNChunkOp *>(op)->chunk_dim);
+        
+        exec.e("kernel::run($, $, $);", out0_ptr_name, out1_ptr_name, in0_ptr_name);
+        break;
+      }
       case type::KNOperatorType::KN_REDUCTION_0_OP:
       case type::KNOperatorType::KN_REDUCTION_1_OP:
       case type::KNOperatorType::KN_REDUCTION_2_OP: {

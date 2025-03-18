@@ -1188,6 +1188,54 @@ CustomOPTranspileResult
               input.guid);
           break;
         }
+        case type::TB_CHUNK_0_OP:
+        case type::TB_CHUNK_1_OP:
+        case type::TB_CHUNK_2_OP: {
+          tb::STensor const &input = op->input_tensors.at(0);
+          tb::STensor const &output0 = output_op->output_tensors.at(0);
+          tb::STensor const &output1 = output_op->output_tensors.at(1);
+          assert(input.num_dims == output0.num_dims && output0.num_dims == output1.num_dims);
+          int num_dims = input.num_dims;
+          int iter_dim = -1;
+          for (int i = 0; i < num_dims; ++i) {
+            bool failed = false;
+            for (tb::STensor const &stensor : {input0, input1, output}) {
+              STensorMeta meta = stensor_metas.at(stensor.guid);
+              if (i != meta.innermost_dim && meta.swizzled_dim != i) {
+                failed = true;
+                break;
+              }
+            }
+            if (!failed) {
+              iter_dim = i;
+              break;
+            }
+          }
+          assert(iter_dim != -1);
+
+          string in_layout = mov_last_get_stensor_layout(input, stensor_metas.at(input.guid), iter_dim);
+          string out0_layout = mov_last_get_stensor_layout(output0, stensor_metas.at(output0.guid), iter_dim);
+          string out1_layout = mov_last_get_stensor_layout(output1, stensor_metas.at(output1.guid), iter_dim);
+          code.e("using InLayout = $", in_layout);
+          code.e("using Out0Layout = $", out0_layout);
+          code.e("using Out1Layout = $", out1_layout);
+          // Get the epilogue
+          string epilogue = transpile_fusion_epilogue(sched_node.ops, get_datatype_str(input.data_type));
+          // Define and run the kernel
+          code.e("using Kernel = tb::ChunkKernel<$, "
+                 "Out0Layout, Out1Layout, InLayout, "
+                 "$, $, CONSUMER_NUM_THREADS, $>;",
+                 get_datatype_str(input.data_type),
+                 static_cast<tb::TBChunkOp *>(op)->chunk_size,
+                 static_cast<tb::TBChunkOp *>(op)->chunk_dim,
+                 epilogue);
+          code.e(append_epilogue_scalars(sched_node.ops));
+          code.e("Kernel::run(stensor$_ptr, stensor$_ptr, stensor$_ptr, thread_idx, scalars);",
+                 output0.guid,
+                 output1.guid,
+                 input.guid);
+          break;
+        }
         case type::TB_FORLOOP_ACCUM_NO_RED_OP: {
           assert(sched_node.ops.size() == 1); // Should not be fused
           assert(is_in_loop);

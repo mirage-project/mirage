@@ -83,6 +83,12 @@ cdef extern from "mirage/type.h" namespace "mirage::type":
         KN_SPLIT_1_OP = 1421,
         KN_SPLIT_2_OP = 1422,
         KN_SPLIT_LAST_OP_ID = 1429,
+        // Chunk
+        KN_CHUNK_FIRST_OP_ID = 1430,
+        KN_CHUNK_0_OP = 1430,
+        KN_CHUNK_1_OP = 1431,
+        KN_CHUNK_2_OP = 1432,
+        KN_CHUNK_LAST_OP_ID = 1439,
         # Communication
         KN_ALLREDUCE_OP = 1900,
         KN_CUSTOMIZED_OP = 1999,
@@ -128,6 +134,11 @@ cdef extern from "mirage/type.h" namespace "mirage::type":
         TB_SPLIT_1_OP = 2421,
         TB_SPLIT_2_OP = 2422,
         TB_SPLIT_LAST_OP_ID = 2429,
+        TB_CHUNK_FIRST_OP_ID = 2430,
+        TB_CHUNK_0_OP = 2430,
+        TB_CHUNK_1_OP = 2431,
+        TB_CHUNK_2_OP = 2432,
+        TB_CHUNK_LAST_OP_ID = 2439,
         # Forloop Accum
         # LD indicates last dimension
         TB_FORLOOP_ACCUM_FIRST_OP = 2500,
@@ -194,6 +205,7 @@ cdef extern from "mirage/kernel/graph.h" namespace "mirage::kernel":
         CppDTensor* add(const CppDTensor* op1, const CppDTensor* op2)
         CppDTensor* mul(const CppDTensor* op1, const CppDTensor* op2)
         CppDTensor* div(const CppDTensor* op1, const CppDTensor* op2)
+        (CppDTensor*, CppDTensor*) chunk(const CppDTensor* op1, int chunk_size, int chunk_dim)
         int customized(vector[const CppDTensor*] inputs,
                        CppDTensor** outputs,
                        CppTBGraph* bgraph)
@@ -258,6 +270,7 @@ cdef extern from "mirage/threadblock/graph.h" namespace "mirage::threadblock":
                      const CppSTensor *B)
         CppSTensor* div(const CppSTensor *A,
                      const CppSTensor *B)
+        (CppSTensor*, CppSTensor*) chunk(const CppSTensor *A, int chunk_size, int chunk_dim)
         CppSTensor* reduction(const CppSTensor *A, int dim)
         CppSTensor* rms_norm(const CppSTensor *A)
         CppSTensor* concat(const CppSTensor *A,

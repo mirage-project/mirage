@@ -140,6 +140,12 @@ def get_kn_operator_type_string(int op_type):
         return "kn_reduction_1_op"
     elif op_type == KN_REDUCTION_2_OP:
         return "kn_reduction_2_op"
+    elif op_type == KN_CHUNK_0_OP:
+        return "kn_chunk_0_op"
+    elif op_type == KN_CHUNK_1_OP:
+        return "kn_chunk_1_op"
+    elif op_type == KN_CHUNK_2_OP:
+        return "kn_chunk_2_op"
     elif op_type == KN_RMS_NORM_OP:
         return "kn_rms_norm_op"
     elif op_type == KN_ALLREDUCE_OP:
@@ -189,6 +195,12 @@ def get_tb_operator_type_string(int op_type):
         return "tb_reduction_1_op"
     elif op_type == TB_REDUCTION_2_OP:
         return "tb_reduction_2_op"
+    elif op_type == TB_CHUNK_0_OP:
+        return "tb_chunk_0_op"
+    elif op_type == TB_CHUNK_1_OP:
+        return "tb_chunk_1_op"
+    elif op_type == TB_CHUNK_2_OP:
+        return "tb_chunk_2_op"
     elif op_type == TB_REDUCTION_0_TO_DIMX_OP:
         return "tb_reduction_0_to_dimx_op"
     elif op_type == TB_REDUCTION_1_TO_DIMX_OP:
@@ -600,6 +612,14 @@ cdef class CyKNGraph:
         cdef CppDTensor* ptr = self.p_kgraph.reduction(input.c_ptr, dim, 1)
         t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
         return DTensor(t)
+    
+    def chunk(self, DTensor input, int chunk_size, int chunk_dim):
+        cdef CppDTensor* ptr1
+        cdef CppDTensor* ptr2
+        ptr1, ptr2 = self.p_kgraph.chunk(input.c_ptr, chunk_size, chunk_dim)
+        t1 = ctypes.cast(<unsigned long long>ptr1, ctypes.c_void_p)
+        t2 = ctypes.cast(<unsigned long long>pt2, ctypes.c_void_p)
+        return DTensor(t1), DTensor(t2)
 
     def rms_norm(self, DTensor input, tuple normalized_shape):
         cdef vector[int] cshape
@@ -862,6 +882,14 @@ cdef class CyTBGraph:
         cdef CppSTensor* ptr = self.p_bgraph.div(A.c_ptr, B.c_ptr)
         t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
         return STensor(t)
+    
+    def chunk(self, STensor A, int chunk_size, chunk_dim):
+        cdef CppSTensor* ptr1
+        cdef CppSTensor* ptr2
+        ptr1, ptr2 = self.p_bgraph.chunk(A.c_ptr, chunk_size, chunk_dim)
+        t1 = ctypes.cast(<unsigned long long>ptr1, ctypes.c_void_p)
+        t2 - ctypes.cast(<unsigned long long>ptr2, ctypes.c_void_p)
+        return STensor(t1), STensor(t2)
 
     def reduction(self, STensor A, int dim):
         cdef CppSTensor* ptr = self.p_bgraph.reduction(A.c_ptr, dim)

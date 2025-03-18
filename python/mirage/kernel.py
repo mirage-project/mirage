@@ -223,6 +223,9 @@ class KNGraph:
 
     def div(self, A: DTensor, B: DTensor):
         return self.cygraph.div(A, B)
+    
+    def chunk(self, A: DTensor, chunk_size: int, chunk_dim: int):
+        return self.cygraph.chunk(A, chunk_size, chunk_dim)
 
     def rms_norm(self, A: DTensor, normalized_shape: tuple):
         return self.cygraph.rms_norm(A, normalized_shape)

@@ -10,4 +10,5 @@
 #include "threadblock/output.h"
 #include "threadblock/pipeline.h"
 #include "threadblock/reduction.h"
+#include "threadblock/chunk.h"
 #include "threadblock/utils.h"
