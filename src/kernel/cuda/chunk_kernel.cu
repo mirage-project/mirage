@@ -1,7 +1,7 @@
 #include "cutlass/fast_math.h"
 #include "mirage/config.h"
 #include "mirage/kernel/device_memory_manager.h"
-#include "mirage/kernel/element_binary.h"
+#include "mirage/kernel/chunk.h"
 #include "mirage/kernel/graph.h"
 #include "mirage/utils/cuda_helper.h"
 #include "mirage/utils/fingerprint_functions.h"
@@ -65,10 +65,13 @@ bool KNChunkOp::profile(ProfileResult &result) {
     cutlass::half_t *output2_ptr = reinterpret_cast<cutlass::half_t *>(dmm->data_base_ptr[0] + output_tensors[1].data_offset);
 
     int num_elements = input_tensors[0].num_elements();
-    int3 input_shape = {dim[0], dim[1], dim[2]};
+    int3 input_shape = {input_tensors[0].dim[0], input_tensors[0].dim[1], input_tensors[0].dim[2]};
     int3 output_shape = {chunk_dim == 0 ? input_shape.x / chunk_size : input_shape.x,
                          chunk_dim == 1 ? input_shape.y / chunk_size : input_shape.y,
                          chunk_dim == 2 ? input_shape.z / chunk_size : input_shape.z};
+    int const num_threads_per_blk = 1024;
+    int num_blocks =
+        (num_elements + num_threads_per_blk - 1) / num_threads_per_blk;
     checkCUDA(cudaDeviceSynchronize());
     cudaEvent_t events[2];
     checkCUDA(cudaEventCreate(&events[0]));
@@ -119,24 +122,24 @@ __global__ void compute_chunk_fingerprint(char *dmem_fp_ptr,
         int input_k = i % input_shape.z;
         if (chunk_dim == 0) {
             if (input_i < output_shape.x) {
-                output1_ptr[i] = compute_mul_fingerprint(input_ptr[i], one);
+                output1_fp_ptr[i] = compute_mul_fingerprint(input_fp_ptr[i], one);
             } else { 
                 int i2 = ((input_i - output_shape.x) * (output_shape.y * output_shape.z)) + (input_j * output_shape.z) + input_k;
-                output2_ptr[i2] = compute_mul_fingerprint(input_ptr[i], one);
+                output2_fp_ptr[i2] = compute_mul_fingerprint(input_fp_ptr[i], one);
             }
         } else if (chunk_dim == 1) {
             if (input_j < output_shape.y) {
-                output1_ptr[i] = compute_mul_fingerprint(input_ptr[i], one);
+                output1_fp_ptr[i] = compute_mul_fingerprint(input_fp_ptr[i], one);
             } else {
                 int i2 = (input_i * (output_shape.y * output_shape.z)) + ((input_j - output_shape.y) * output_shape.z) + input_k;
-                output2_ptr[i2] = compute_mul_fingerprint(input_ptr[i], one);
+                output2_fp_ptr[i2] = compute_mul_fingerprint(input_fp_ptr[i], one);
             }
         } else { // chunk_dim == 2
             if (input_k < output_shape.z) {
-                output1_ptr[i] = compute_mul_fingerprint(input_ptr[i], one);
+                output1_fp_ptr[i] = compute_mul_fingerprint(input_fp_ptr[i], one);
             } else {
                 int i2 = (input_i * (output_shape.y * output_shape.z)) + (input_j * output_shape.z) + (input_k - output_shape.z);
-                output2_ptr[i2] = compute_mul_fingerprint(input_ptr[i], one);
+                output2_fp_ptr[i2] = compute_mul_fingerprint(input_fp_ptr[i], one);
             }
         }
     }
@@ -150,14 +153,13 @@ bool KNChunkOp::fingerprint(void) {
     assert(input_tensors[0].num_dims == output_tensors[1].num_dims);
 
     int num_elements = input_tensors[0].num_elements();
-    int3 input_shape = {dim[0], dim[1], dim[2]};
+    int3 input_shape = {input_tensors[0].dim[0], input_tensors[0].dim[1], input_tensors[0].dim[2]};
     int3 output_shape = {chunk_dim == 0 ? input_shape.x / chunk_size : input_shape.x,
                          chunk_dim == 1 ? input_shape.y / chunk_size : input_shape.y,
                          chunk_dim == 2 ? input_shape.z / chunk_size : input_shape.z};
     int const num_threads_per_blk = 1024;
     int num_blocks = (num_elements + num_threads_per_blk - 1) / num_threads_per_blk;
 
-    int num_blocks = (num_elements + num_threads_per_blk - 1) / num_threads_per_blk;
     mirage::kernel::DeviceMemoryManager *dmm =
       mirage::kernel::DeviceMemoryManager::get_instance();
     // Use GPU 0 for computing fingerprint

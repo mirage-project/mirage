@@ -24,6 +24,8 @@
 #include "mirage/threadblock/serializer/reduction_serializer.h"
 #include "mirage/threadblock/serializer/rms_norm_serializer.h"
 #include "mirage/utils/hash_utils.h"
+#include "mirage/threadblock/chunk.h"
+#include "mirage/threadblock/serializer/chunk_serializer.h"
 
 namespace mirage {
 namespace threadblock {
@@ -599,7 +601,7 @@ NewKernelParams Graph::get_new_kernel_params(bool fingerprint) const {
         mirage::threadblock::STensor output1 = operators[i]->output_tensors[0];
         mirage::threadblock::STensor output2 = operators[i]->output_tensors[1];
         int dim = operators[i]->op_type - mirage::type::TB_CHUNK_0_OP;
-        int chunk_size = static_cast<mirage::threadblock::TBChunkOp>(operators[i])->chunk_size;
+        int chunk_size = static_cast<mirage::threadblock::TBChunkOp *>(operators[i])->chunk_size;
         int3 input_shape = {dim == 0 ? input.dim[0] / 2 : input.dim[0],
                             dim == 1 ? input.dim[1] / 2 : input.dim[1],
                             dim == 2 ? input.dim[2] / 2 : input.dim[2]};

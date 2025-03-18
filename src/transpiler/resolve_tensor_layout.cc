@@ -345,7 +345,7 @@ void Transpiler::resolve_tensor_layout() {
         kn::DTensor const &output0 = op->output_tensors.at(0);
         kn::DTensor const &output1 = op->output_tensors.at(1);
         assert(input.num_dims == output0.num_dims && output0.num_dims == output1.num_dims);
-        for (int i = 0; i < lhs.num_dims; ++i) {
+        for (int i = 0; i < input.num_dims; ++i) {
           opt.add(d_is_innermost[input.guid][i] == d_is_innermost[output0.guid][i]);
           opt.add(d_is_innermost[input.guid][i] == d_is_innermost[output1.guid][i]);
         }

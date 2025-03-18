@@ -25,6 +25,7 @@
 #include "mirage/threadblock/cuda/output_saver.h"
 #include "mirage/threadblock/cuda/reduction.h"
 #include "mirage/threadblock/cuda/rms_norm.h"
+#include "mirage/threadblock/cuda/chunk.h"
 #include "mirage/threadblock/graph.h"
 #include "mirage/threadblock/serializer/concat_serializer.h"
 #include "mirage/threadblock/serializer/element_binary_serializer.h"
@@ -35,6 +36,7 @@
 #include "mirage/threadblock/serializer/output_saver_serializer.h"
 #include "mirage/threadblock/serializer/reduction_serializer.h"
 #include "mirage/threadblock/serializer/rms_norm_serializer.h"
+#include "mirage/threadblock/serializer/chunk_serializer.h"
 #include "mirage/utils/cuda_helper.h"
 #include "mirage/utils/fingerprint_functions.h"
 #include "mirage/warp/cuda/matmul.h"
@@ -310,7 +312,6 @@ __global__ void customized_kernel_function(
             threadIdx.x,
             blockDim.x);
         __syncthreads();
-      }
       } else {
         assert(false && "Unsupported threadblock operator");
       }
@@ -753,7 +754,7 @@ __global__ void compute_customizedop_fingerprint(
         case mirage::type::TB_CHUNK_1_OP:
         case mirage::type::TB_CHUNK_2_OP: {
           int3 input_shape;
-          int chunk_size, chunk_dim, input_smem_offset, output1_smem_offset, outpu2_smem_offset;
+          int chunk_size, chunk_dim, input_smem_offset, output1_smem_offset, output2_smem_offset;
           mirage::threadblock::deserialize_chunk_op_parameters(
               new_params.parameters,
               param_idx,
@@ -762,7 +763,7 @@ __global__ void compute_customizedop_fingerprint(
               chunk_dim,
               input_smem_offset,
               output1_smem_offset,
-              outpu2_smem_offset);
+              output2_smem_offset);
           mirage::type::FPType *input_ptr =
               (mirage::type::FPType *)(smem_buffer + input_smem_offset);
           mirage::type::FPType *output1_ptr =
@@ -777,7 +778,7 @@ __global__ void compute_customizedop_fingerprint(
               input_shape,
               chunk_size,
               chunk_dim,
-              thread_idx.x,
+              threadIdx.x,
               blockDim.x);
           __syncthreads();
           break;

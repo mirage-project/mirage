@@ -17,6 +17,8 @@
 #include "mirage/config.h"
 #include "mirage/kernel/device_memory_manager.h"
 #include "mirage/utils/hash_utils.h"
+#include "mirage/threadblock/chunk.h"
+#include "mirage/threadblock/serializer/chunk_serializer.h"
 
 #include <algorithm>
 #include <iostream>

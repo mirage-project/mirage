@@ -99,7 +99,6 @@ std::vector<z3::expr>
   z3::func_decl combine = ctx.function("combine", T, D, D, T);
   z3::func_decl replicate = ctx.function("replicate", T, D, I, T);
   z3::func_decl reduce = ctx.function("reduce", T, D, T);
-  z3::func_decl chunk = ctx.function("chunk", T, I, D, Tup);
 
   int custom_kernel_id = 0;
   int redtox_id = 0;

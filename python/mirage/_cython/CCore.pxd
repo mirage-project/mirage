@@ -122,7 +122,7 @@ cdef extern from "mirage/type.h" namespace "mirage::type":
         TB_REDUCTION_2_TO_DIMX_OP = 2306,
         TB_REDUCTION_LAST_OP_ID = 2349,
         TB_RMS_NORM_OP = 2350,
-        # Concat
+        # Concat & Split & Chunk
         TB_CONCAT_FIRST_OP_ID = 2400,
         TB_CONCAT_0_OP = 2400,
         TB_CONCAT_1_OP = 2401,

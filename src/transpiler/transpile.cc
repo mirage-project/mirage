@@ -17,6 +17,8 @@
 #include "mirage/kernel/graph.h"
 #include "mirage/threadblock/graph.h"
 #include "mirage/transpiler/transpiler.h"
+#include "mirage/threadblock/chunk.h"
+#include "mirage/kernel/chunk.h"
 #include <cassert>
 
 namespace mirage {
@@ -134,7 +136,7 @@ Transpiler::Transpiler(kernel::Graph const *_graph,
         assert(dtensor_inputs.size() == 1);
         assert(op->output_tensors.size() == 2);
   
-        int dim = op->type - KN_CHUNK_0_OP;
+        int dim = op->op_type - KN_CHUNK_0_OP;
         int chunk_size = static_cast<kernel::KNChunkOp *>(op)->chunk_size;
         std::vector<kernel::DTensor> dts = g->chunk(dtensor_inputs[0], chunk_size, dim);
         dtensor_mapping[op->output_tensors[0].guid] = dts[0];
@@ -218,8 +220,8 @@ Transpiler::Transpiler(kernel::Graph const *_graph,
             case TB_CHUNK_1_OP:
             case TB_CHUNK_2_OP: {
               assert(stensor_inputs.size() == 1);
-              int dim = bop->optype - TB_CHUNK_0_OP;
-              int chunk_size = static_cast<threadblock::TBChunkOp *>(bop);
+              int dim = bop->op_type - TB_CHUNK_0_OP;
+              int chunk_size = static_cast<threadblock::TBChunkOp *>(bop)->chunk_size;
               std::vector<threadblock::STensor> sts = tbg->chunk(stensor_inputs[0], chunk_size, dim);
               assert(bop->output_tensors.size() == 2);
               stensor_mapping[bop->output_tensors[0].guid] = sts[0];

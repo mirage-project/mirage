@@ -20,6 +20,7 @@
 
 #include "mirage/transpiler/utils.h"
 #include "mirage/type.h"
+#include "mirage/kernel/chunk.h"
 
 namespace mirage {
 namespace transpiler {

@@ -28,6 +28,7 @@
 #include "mirage/transpiler/sched_tb_graph.h"
 #include "mirage/transpiler/utils.h"
 #include "mirage/type.h"
+#include "mirage/threadblock/chunk.h"
 
 namespace mirage {
 namespace transpiler {
@@ -981,16 +982,16 @@ CustomOPTranspileResult
         case type::TB_CHUNK_1_OP:
         case type::TB_CHUNK_2_OP: {
           tb::STensor const &input = op->input_tensors.at(0);
-          tb::STensor const &output1 = output_op->output_tensors.at(0);
-          tb::STensor const &output2 = output_op->output_tensors.at(1);
-          assert(input.num_dims == output1.num_dims &&
-                 input.num_dims == output2.num_dims);
-          int num_dims = input0.num_dims;
+          tb::STensor const &output0 = output_op->output_tensors.at(0);
+          tb::STensor const &output1 = output_op->output_tensors.at(1);
+          assert(input.num_dims == output0.num_dims &&
+                 input.num_dims == output1.num_dims);
+          int num_dims = input.num_dims;
           // Find the iteration dim
           int iter_dim = -1;
           for (int i = 0; i < num_dims; ++i) {
             bool failed = false;
-            for (tb::STensor const &stensor : {input0, input1, output}) {
+            for (tb::STensor const &stensor : {input, output0, output1}) {
               STensorMeta meta = stensor_metas.at(stensor.guid);
               if (i != meta.innermost_dim && meta.swizzled_dim != i) {
                 failed = true;
@@ -1014,8 +1015,8 @@ CustomOPTranspileResult
                  "Out0Layout, Out1Layout, InLayout, "
                  "$, $, NUM_THREADS, $>;",
                  get_datatype_str(input.data_type),
-                 static_cast<tb::TBChunkOp *>(op)->chunk_size,
-                 static_cast<tb::TBChunkOp *>(op)->chunk_dim,
+                 static_cast<const tb::TBChunkOp *>(op)->chunk_size,
+                 static_cast<const tb::TBChunkOp *>(op)->chunk_dim,
                  epilogue);
           code.e(append_epilogue_scalars(sched_node.ops));
           code.e("Kernel::run(stensor$_ptr, stensor$_ptr, stensor$_ptr, thread_idx, scalars);",
