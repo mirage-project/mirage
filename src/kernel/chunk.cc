@@ -30,8 +30,16 @@ std::vector<DTensor> Graph::chunk(DTensor const &input, int chunk_size, int dim)
   return op->output_tensors;
 }
 
-int Graph::chunk(DTensor const *input, int chunk_size, int dim) {
-  return (int)chunk(*input, chunk_size, dim).size();
+std::vector<DTensor *> Graph::chunk(DTensor const *input, int chunk_size, int dim) {
+  KNOperator *op = create_chunk_op(*input, chunk_size, dim);
+  assert(op != nullptr);
+  operators.push_back(op);
+  assert(op->output_tensors.size() > 0);
+  std::vector<DTensor *> res;
+  for (auto t : op->output_tensors) {
+    res.push_back(&t);
+  }
+  return res;
 }
 
 KNOperator *Graph::create_chunk_op(DTensor const &input, int chunk_size,

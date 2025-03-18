@@ -27,11 +27,16 @@ std::vector<STensor> Graph::chunk(STensor const &input, int chunk_size, int dim)
     return op->output_tensors;
 }
 
-std::vector<STensor> *Graph::chunk(STensor const *input, int chunk_size, int dim) {
+std::vector<STensor *> Graph::chunk(STensor const *input, int chunk_size, int dim) {
     TBOperator *op = create_chunk_op(*input, chunk_size, dim);
     assert(op != nullptr);
     operators.push_back(op);
-    return &(op->output_tensors);
+    assert(op->output_tensors.size() > 0);
+    std::vector<STensor *> res;
+    for (auto t : op->output_tensors) {
+        res.push_back(&t);
+    }
+    return res;
 }
 
 TBOperator *Graph::create_chunk_op(STensor const &input, int chunk_size, int dim) {

@@ -129,7 +129,7 @@ public:
 
   // chunk operator
   std::vector<STensor> chunk(STensor const &A, int chunk_size, int dim);
-  std::vector<STensor> *chunk(STensor const *A, int chunk_size, int dim);
+  std::vector<STensor *> chunk(STensor const *A, int chunk_size, int dim);
   TBOperator *create_chunk_op(STensor const &A, int chunk_size, int dim);
 
   // reduction_to_dimx operator
