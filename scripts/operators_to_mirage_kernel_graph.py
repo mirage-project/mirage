@@ -280,9 +280,10 @@ class GraphSplitter:
         
         Strategy:
         1. Find a cycle in the dependency graph
-        2. Split one of the subgraphs in the cycle into two parts
-        3. Rebuild I/O relationships and dependencies
-        4. Repeat until no cycles remain
+        2. Select the largest splittable subgraph in the cycle (with >1 operator)
+        3. Split the selected subgraph into two parts
+        4. Rebuild I/O relationships and dependencies
+        5. Repeat until no cycles remain
         """
         topo_indices = {op: idx for idx, op in enumerate(sorted_ops)}
         
@@ -297,8 +298,25 @@ class GraphSplitter:
             if not cycle:
                 break
             
-            # Split the first subgraph in the cycle
-            subgraph_to_split = cycle[0]
+            # Find the largest splittable subgraph in the cycle
+            subgraph_to_split = None
+            max_size = 0
+            
+            for sg_id in cycle:
+                if subgraphs[sg_id] is not None:
+                    sg_dict, _ = subgraphs[sg_id]
+                    size = len(sg_dict)
+                    if size > 1 and size > max_size:  # Only consider subgraphs with >1 operator
+                        max_size = size
+                        subgraph_to_split = sg_id
+            
+            # If no splittable subgraph found, print warning and break out
+            if subgraph_to_split is None:
+                print(f"Warning: Cannot break cycle {cycle} - all subgraphs have only one operator")
+                break
+                
+            print(f"Breaking cycle by splitting subgraph {subgraph_to_split} with {max_size} operators")
+            
             sg_dict, sg_type = subgraphs[subgraph_to_split]
             
             # Split based on topological order
