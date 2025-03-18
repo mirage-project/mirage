@@ -110,7 +110,6 @@ std::vector<dim3>
   if (config.randomized_branches) {
     std::random_shuffle(cands.begin(), cands.end());
   }
-
   return cands;
 }
 
