@@ -11,12 +11,14 @@ using namespace cute;
 
 namespace tb {
 
-enum class ElementBinaryOpType { ADD, MUL, DIV };
+enum class ElementBinaryOpType { ADD, SUB, MUL, DIV };
 
 template <typename T, ElementBinaryOpType OP>
 static __device__ __forceinline__ T perform_element_binary_op(T a, T b) {
   if constexpr (OP == ElementBinaryOpType::ADD) {
     return a + b;
+  } else if constexpr (OP == ElementBinaryOpType::SUB) {
+    return a - b;
   } else if constexpr (OP == ElementBinaryOpType::MUL) {
     return a * b;
   } else if constexpr (OP == ElementBinaryOpType::DIV) {

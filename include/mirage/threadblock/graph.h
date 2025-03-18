@@ -109,6 +109,8 @@ public:
   // element binary operators
   STensor add(STensor const &A, STensor const &B);
   STensor *add(STensor const *A, STensor const *B);
+  STensor sub(STensor const &A, STensor const &B);
+  STensor *sub(STensor const *A, STensor const *B);
   STensor mul(STensor const &A, STensor const &B);
   STensor *mul(STensor const *A, STensor const *B);
   STensor div(STensor const &A, STensor const &B);
@@ -131,6 +133,11 @@ public:
   STensor reduction_to_dimx(STensor const &A, int dim);
   TBOperator *create_reduction_to_dimx_op(STensor const &A, int dim);
 
+  // reduction_max operator
+  STensor reduction_max(STensor const &A, int dim);
+  STensor *reduction_max(STensor const *A, int dim);
+  TBOperator *create_reduction_max_op(STensor const &A, int dim);
+
   // rms_norm operator
   STensor rms_norm(STensor const &A);
   STensor *rms_norm(STensor const *A);
@@ -147,6 +154,18 @@ public:
   STensor *forloop_accum(STensor const *input,
                          mirage::type::TBOperatorType type);
   TBOperator *create_forloop_accum_op(STensor const &input,
+                                      mirage::type::TBOperatorType type);
+
+  // forloop accum rescale operator
+  STensor forloop_accum_rescale(STensor const &input,
+                                STensor const &rescale,
+                                mirage::type::TBOperatorType type);
+  STensor *forloop_accum_rescale(STensor const *input,
+                                 STensor const *rescale,
+                                 mirage::type::TBOperatorType type);
+  TBOperator *
+      create_forloop_accum_rescale_op(STensor const &input,
+                                      STensor const &rescale,
                                       mirage::type::TBOperatorType type);
 
   // fingerprint related memory management
