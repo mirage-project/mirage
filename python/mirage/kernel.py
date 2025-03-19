@@ -361,8 +361,6 @@ class KNGraph:
 
         # if True:
         #     tempdir = './test/'
-        # import pdb
-        # pdb.set_trace()
 
         tempdir_obj = tempfile.TemporaryDirectory()
         tempdir = tempdir_obj.name

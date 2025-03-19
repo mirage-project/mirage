@@ -856,9 +856,9 @@ CustomOPTranspileResult
     code.e("for (uint32_t for_idx = 0; for_idx < $; for_idx++) {",
            g.forloop_range);
     for (auto const &[stensor_id, op] : pipeline_inputs) {
-      if (profiling) {
-        code.e("PROFILER_EVENT_START($);", (op->op_type - type::TB_UNKOWN));
-      }
+
+      code.e("PROFILER_EVENT_START($);", (op->op_type - type::TB_UNKOWN));
+
       code.e(fmt("STensor$InputAtom::run(tma_$, stensor$_ptr, "
                  " $, $, $, for_idx, hopper_async_pipeline_$);",
                  stensor_id,
@@ -868,8 +868,8 @@ CustomOPTranspileResult
                  op->input_map.y,
                  op->input_map.z,
                  stensor_id));
-      if (profiling) {
-        code.e("PROFILER_EVENT_END($);", (op->op_type - type::TB_UNKOWN));
+      if(!is_in_loop){
+        code.e("PROFILER_EVENT_END($)", op->op_type);
       }
     }
     code.e("}");
@@ -947,9 +947,9 @@ CustomOPTranspileResult
               op, code, is_in_loop, pipeline_inputs);
 
       // define
-      if (pipe_tma && profiling) {
+      if (pipe_tma) {
         // 2000 - 2999
-        code.e("PROFILER_EVENT_START($);", (op->op_type - type::TB_UNKOWN));
+        code.e("PROFILER_EVENT_START($)", op->op_type);
       }
 
       switch (op->op_type) {
