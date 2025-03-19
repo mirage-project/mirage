@@ -143,19 +143,31 @@ class Qwen2MLP(nn.Module):
         D = graph.mul(D, G)
         O = graph.matmul(D, W)
         graph.mark_output(O)
-        self.kernel = graph.superoptimize(config="mlp")
+        self.kernel1 = graph.superoptimize(config="mlp")
 
-    def forward(self, input_layernorm, hidden_state):
+        graph = mi.new_kernel_graph()
+        X = graph.new_input(dims=(1, self.intermediate_size), dtype=mi.bfloat16)
+        Y = graph.new_input(dims=(1, self.intermediate_size), dtype=mi.bfloat16)
+        W = graph.new_input(dims=(self.intermediate_size, self.hidden_size), strides=(1, self.intermediate_size), dtype=mi.bfloat16)
+        D = graph.mul(graph.silu(X), Y)
+        O = graph.matmul(D, W)
+        graph.mark_output(O)
+        self.kernel2 = graph.superoptimize(config="mlp")
+
+    def forward(self, input_layernorm, hidden_state, stream: torch.cuda.Stream = None):
         if hidden_state.shape[-2] == 1 and self.enable_mirage:
             # use mirage kernels for decoding
-            output = self.kernel(inputs=(hidden_state, input_layernorm.weight, self.fused_weight))[0]
+            output = self.kernel1(inputs=(hidden_state, input_layernorm.weight, self.fused_weight), stream=stream)[0]
+            gate_output, up_output = torch.chunk(output, 2, -1)
+            output = self.kernel2(inputs=(gate_output, up_output, self.down_proj.weight), stream=stream)[0]
         else:
             # use the original for prefilling
             hidden_state = input_layernorm(hidden_state)
             output = torch.matmul(hidden_state, self.fused_weight)
-        
-        gate_output, up_output = torch.chunk(output, 2, -1)
-        return self.down_proj(self.act_fn(gate_output) * up_output)
+            gate_output, up_output = torch.chunk(output, 2, -1)
+            output = self.down_proj(self.act_fn(gate_output) * up_output)
+
+        return output
 
 class Qwen2Attention(nn.Module):
     def __init__(self, config: Qwen2Config, kv_cache: Tuple[torch.Tensor, torch.Tensor], layer_idx: Optional[int] = None):
@@ -182,13 +194,24 @@ class Qwen2Attention(nn.Module):
         self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=False)
 
         self.rotary_emb = Qwen2RotaryEmbedding(config=self.config)
+        self.enable_mirage = False
 
     def fuse_weights(self):
         self.fused_weight = torch.transpose(torch.cat((self.q_proj.weight, self.k_proj.weight, self.v_proj.weight), 0), 0, 1)
         self.fused_bias = torch.cat((self.q_proj.bias, self.k_proj.bias, self.v_proj.bias), 0)
 
     def superoptimize_kernels(self):
-        pass
+        self.enable_mirage = True
+        graph = mi.new_kernel_graph()
+        self.fused_outdim = (self.num_heads + 2 * self.num_key_value_heads) * self.head_dim
+        X = graph.new_input(dims=(1, self.hidden_size), dtype=mi.bfloat16)
+        G = graph.new_input(dims=(1, self.hidden_size), dtype=mi.bfloat16)
+        W = graph.new_input(dims=(self.hidden_size, self.fused_outdim), strides=(1, self.hidden_size), dtype=mi.bfloat16)
+        D = graph.rms_norm(X, normalized_shape=(self.hidden_size,))
+        D = graph.mul(D, G)
+        O = graph.matmul(D, W)
+        graph.mark_output(O)
+        self.kernel = graph.superoptimize(config="mlp")
 
     def forward(
         self,
@@ -198,11 +221,19 @@ class Qwen2Attention(nn.Module):
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         decode_wrapper = None,
         step: torch.Tensor = None,
+        stream: torch.cuda.Stream = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         bsz, q_len, _ = hidden_states.size()
 
-        hidden_states = input_layernorm(hidden_states)
-        xqkv = torch.matmul(hidden_states, self.fused_weight) + self.fused_bias
+        if q_len == 1 and self.enable_mirage:
+            # use mirage kernels for decoding
+            xqkv = self.kernel(inputs=(hidden_states, input_layernorm.weight, self.fused_weight), stream=stream)[0]
+            xqkv = xqkv.view(bsz, q_len, self.fused_outdim)
+        else:
+            # use the original for prefilling
+            hidden_states = input_layernorm(hidden_states)
+            xqkv = torch.matmul(hidden_states, self.fused_weight)
+        xqkv = xqkv + self.fused_bias
         query_states = xqkv[:, :, : (self.num_heads * self.head_dim)]
         xkv = xqkv[:, :, (self.num_heads * self.head_dim) :]
         key_states, value_states = xkv.chunk(2, -1)
@@ -258,6 +289,7 @@ class Qwen2DecoderLayer(nn.Module):
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # will become mandatory in v4.46
         decode_wrapper = None,
         step: torch.Tensor = None,
+        stream: torch.cuda.Stream = None,
         **kwargs,
     ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
 
@@ -273,13 +305,14 @@ class Qwen2DecoderLayer(nn.Module):
             position_embeddings=position_embeddings,
             decode_wrapper=decode_wrapper,
             step=step,
+            stream=stream,
         )
         hidden_states = residual + hidden_states
 
         # Fully Connected
         residual = hidden_states
         #hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states = self.mlp(self.post_attention_layernorm, hidden_states)
+        hidden_states = self.mlp(self.post_attention_layernorm, hidden_states, stream=stream)
         hidden_states = residual + hidden_states
 
         outputs = (hidden_states,)
@@ -291,7 +324,6 @@ class Qwen2PreTrainedModel(PreTrainedModel):
 
     def _init_weights(self, module):
         std = self.config.initializer_range
-        assert False
         if isinstance(module, nn.Linear):
             module.weight.data.normal_(mean=0.0, std=std)
             if module.bias is not None:
@@ -367,6 +399,7 @@ class Qwen2Model(Qwen2PreTrainedModel):
         attention_mask: Optional[torch.Tensor] = None,
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         step: torch.Tensor = None,
+        stream: torch.cuda.Stream = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,):
         inputs_embeds = self.embed_tokens(input_ids)
         
@@ -385,6 +418,7 @@ class Qwen2Model(Qwen2PreTrainedModel):
                 position_embeddings=position_embeddings,
                 decode_wrapper=self.decode_wrapper,
                 step=step,
+                stream=stream,
             )
 
             hidden_states = layer_outputs[0]
@@ -436,6 +470,7 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         attention_mask: Optional[torch.Tensor] = None,
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         step: torch.Tensor = None,
+        stream: torch.cuda.Stream = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
         num_logits_to_keep: int = 0,
         **loss_kwargs,):
@@ -445,6 +480,7 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
             attention_mask=attention_mask,
             position_embeddings=position_embeddings,
             step=step,
+            stream=stream,
             inputs_embeds=inputs_embeds,
         )
 

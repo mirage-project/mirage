@@ -173,8 +173,8 @@ TranspileResult Transpiler::transpile_ugraph() {
   init.e("static void _init() {");
   exec.e(
       "static void _execute_mugraph(std::vector<void const *> input_tensors, "
-      "std::vector<void*> output_tensors"
-      ", void* buf, void * profiler_buffer) {");
+      "std::vector<void*> output_tensors, "
+      "void* buf, cudaStream_t stream, void * profiler_buffer){");
   for (kn::KNOperator *const op : g->operators) {
     std::string op_type_str;
     to_json(op_type_str, op->op_type);
@@ -227,8 +227,12 @@ TranspileResult Transpiler::transpile_ugraph() {
         size_t batch_stride_C =
             out0.num_dims == 2 ? 0 : meta_out0.strides[out0.num_dims - 3];
         // Run GEMM
-        exec.e("kn::gemm<CUBLAS_COMPUTE_16F>($,$,$, $,$,$, $,$, $,$, $,$, $, "
+        string compute_type =
+            (in0.data_type == type::DT_FLOAT16 ? "CUBLAS_COMPUTE_16F"
+                                               : "CUBLAS_COMPUTE_32F");
+        exec.e("kn::gemm<$>($,$,$, $,$,$, $,$, $,$, $,$, $, "
                "$,$,$);",
+               compute_type,
                out0_ptr_name,
                in0_ptr_name,
                in1_ptr_name,
@@ -600,7 +604,7 @@ TranspileResult Transpiler::transpile_ugraph() {
                    result.smem_size);
           }
 
-          exec.e("$<<<grid_dim, block_dim, smem_size>>>($ $);",
+          exec.e("$<<<grid_dim, block_dim, smem_size, stream>>>($ $);",
                  result.func_name,
                  tmas,
                  ptr_names);
@@ -609,7 +613,7 @@ TranspileResult Transpiler::transpile_ugraph() {
                  "cudaFuncAttributeMaxDynamicSharedMemorySize, $);",
                  result.func_name,
                  result.smem_size);
-          exec.e("$<<<grid_dim, block_dim, smem_size>>>( $);",
+          exec.e("$<<<grid_dim, block_dim, smem_size, stream>>>( $);",
                  result.func_name,
                  ptr_names);
         }
