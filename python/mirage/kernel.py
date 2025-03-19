@@ -60,8 +60,7 @@ static PyObject *launch(PyObject *self, PyObject *args) {
   }
 
   buffer = PyLong_AsVoidPtr(py_buffer);
-  cudaStream_t stream = (cudaStream_t)PyCapsule_GetPointer(py_stream, NULL);
-  printf("stream = %x\\n", stream);
+  cudaStream_t stream = (cudaStream_t)PyLong_AsVoidPtr(py_stream);
   execute_mugraph(input_tensors, output_tensors, buffer, stream);
 
   Py_RETURN_NONE;
