@@ -9,7 +9,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     print("Input arguments:", args)
 
-    model_name = "Qwen/Qwen2.5-3B-Instruct"
+    model_name = "Qwen/Qwen2.5-7B-Instruct"
     torch.set_default_dtype(torch.bfloat16)
     torch.cuda.set_device(0)
     with torch.device("cuda"):
