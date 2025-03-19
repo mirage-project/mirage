@@ -1,4 +1,3 @@
-import time
 import torch
 
 import os
@@ -108,7 +107,7 @@ def get_cc_cmd(target, cc, FILE_NAME, py_include_dir, MIRAGE_ROOT, so_path, prof
         "--expt-relaxed-constexpr",
         "-o",
         so_path,
-    ] + (["-DMIRAGE_ENABLE_PROFILER"] if profiling else [])
+    ]
 
     if target == 90:
         specific_cmd = [
@@ -256,10 +255,10 @@ class KNGraph:
         if(verbose):
             print("Input tensors:")
             for t in input_tensors:
-                print(f"Shape: {t.shape}, dtype: {torch.float16}, device: {t.device}")
+                print(f"Shape: {t.shape}, dtype: {t.dtype}, device: {t.device}")
             print("Output tensors:")
             for t in output_tensors:
-                print(f"Shape: {t.shape}, dtype: {torch.float16}, device: {t.device}")
+                print(f"Shape: {t.shape}, dtype: {t.dtype}, device: {t.device}")
 
         self.run(*input_tensors, *output_tensors)
         return output_tensors
@@ -272,7 +271,7 @@ class KNGraph:
             return None
 
         assert self.run is not None, "The graph is not compiled yet."
-        
+
         input_tensors = kwargs.get("inputs", [])
 
         assert self.cygraph.get_num_inputs() == len(input_tensors), "Expected {} input tensors, got {}".format(self.cygraph.get_num_inputs(), len(input_tensors))
@@ -293,28 +292,23 @@ class KNGraph:
             for meta in results["output_directives"]
         ]
 
-
-        profiler_buffer_tensor = torch.empty(results["profiler_buf_size"], dtype=torch.uint64, device=input_tensors[0].device).contiguous()
+        prodiler_buffer_tensor = torch.empty(results["profiler_buf_size"], dtype=torch.uint64, device=input_tensors[0].device).contiguous()
 
         print("results['profiler_buf_size']", results['profiler_buf_size'])
         buffer_tensor_ptr = buffer_tensor.data_ptr()
         input_tensors_ptr = [tensor.data_ptr() for tensor in input_tensors]
         output_tensors_ptr = [tensor.data_ptr() for tensor in output_tensors]
-        profiler_buffer_tensor_ptr = profiler_buffer_tensor.data_ptr()
+        prodiler_buffer_tensor_ptr = prodiler_buffer_tensor.data_ptr()
 
-        self.run(input_tensors_ptr, output_tensors_ptr, buffer_tensor_ptr, profiler_buffer_tensor_ptr)
+        self.run(input_tensors_ptr, output_tensors_ptr, buffer_tensor_ptr, prodiler_buffer_tensor_ptr)
 
         if results['profiler_buf_size'] > 0:
-            export_to_perfetto_trace(profiler_buffer_tensor, 'mirage.perfetto-trace')
+            export_to_perfetto_trace(prodiler_buffer_tensor, 'mirage.perfetto-trace')
         return output_tensors
 
     def compile(self, async_=False, **kwargs):
         if self._is_compiled:
             return self._cached_results
-        
-        # parser = argparse.ArgumentParser()
-        # parser.add_argument("--profiler_mode")
-        # args = parser.parse_args()
 
         input_tensors = kwargs.get("inputs", [])
         input_strides = []
@@ -372,15 +366,13 @@ class KNGraph:
         FILE_NAME = os.path.join(tempdir, "test.cu")
         so_path = os.path.join(tempdir, "test.cpython-38-x86_64-linux-gnu.so")
 
-        graph_id = 0
         with open(FILE_NAME, "w") as f:
             f.write(result["code"] + HARD_CODE)
             if saved_addr != "":
                 print(f"saved_addr: {saved_addr}")
                 os.makedirs(saved_addr, exist_ok=True)
-                with open(saved_addr + "test-" + str(graph_id) + ".cu", "w") as f:
+                with open(saved_addr + "test" + str(file_id) + ".cu", "w") as f:
                     f.write(result["code"] + HARD_CODE)
-                graph_id += 1
 
 
         cc = shutil.which("nvcc")
@@ -456,7 +448,6 @@ class KNGraph:
         profile_iters: int = 1000,
         previous_checkpoint: str = None,
         save_codes: bool = False,
-        file_id: int = -1,
     ):
         if not disable_graph_dataset:
             cached_graph = graph_dataset.find(
@@ -507,9 +498,7 @@ class KNGraph:
                             starter = torch.cuda.Event(enable_timing=True)
                             ender = torch.cuda.Event(enable_timing=True)
                             new_g = g
-                            handle = new_g.compile(async_=True, inputs=input_tensors,
-                                                   pipeline_stages=pipeline_stages,
-                                                   num_warp_groups=num_warp_groups)
+                            handle = new_g.compile(async_=True, inputs=input_tensors, pipeline_stages=pipeline_stages, num_warp_groups=num_warp_groups)
                             handles.append(handle)
             else:
                 for idx, g in enumerate(all_graphs):
@@ -524,7 +513,7 @@ class KNGraph:
                         input_tensors.append(x)
                     starter = torch.cuda.Event(enable_timing=True)
                     ender = torch.cuda.Event(enable_timing=True)
-                    handle = g.compile(async_=True, inputs=input_tensors, file_id=file_id)
+                    handle = g.compile(async_=True, inputs=input_tensors)
                     handles.append(handle)
             for handle in handles:
                 handle.wait()
@@ -546,20 +535,15 @@ class KNGraph:
                 for _ in range(warmup_iters):
                     g(inputs=input_tensors)
                 torch.cuda.synchronize()
-
                 starter.record()
-
                 for _ in range(profile_iters):
                     g(inputs=input_tensors)
-
                 ender.record()
                 torch.cuda.synchronize()
                 perf = starter.elapsed_time(ender) / profile_iters
                 print("muGraph {}: profiled performance (ms) = {}".format(idx, perf))
                 if perf < best_perf:
                     best_graph, best_perf = g, perf
-
-
             best_graph.backend = "cuda"
             if not disable_graph_dataset:
                 graph_dataset.store(

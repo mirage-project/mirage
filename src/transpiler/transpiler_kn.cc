@@ -160,10 +160,7 @@ TranspileResult Transpiler::transpile_ugraph() {
     header.e("#define MIRAGE_GRACE_HOPPER");
   }
   header.e("#include \"runtime.h\"");
-
   header.e("using namespace cute;");
-
-
 
   CodeKeeper custom_kernels; // This keeps all code for custom kernels
                              // (KNCustomizedOp)
