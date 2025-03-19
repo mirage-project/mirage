@@ -5,18 +5,17 @@ import argparse
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--cuda-graph", action='store_true', help="Enable CUDA Graph")
-    parser.add_argument("--use-mirage", action='store_true', help="Enable Mirage kernels")
+    parser.add_argument("--disable-mirage", action='store_true', help="Disable Mirage kernels")
     args = parser.parse_args()
     print("Input arguments:", args)
 
-    model_name = "Qwen/Qwen2.5-7B-Instruct"
+    model_name = "Qwen/Qwen2.5-3B-Instruct"
     torch.set_default_dtype(torch.bfloat16)
     torch.cuda.set_device(0)
     with torch.device("cuda"):
         model = Qwen2ForCausalLM.from_pretrained(model_name)
         model.fuse_weights()
-        if args.use_mirage:
+        if not args.disable_mirage:
             model.superoptimize_kernels()
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     
@@ -50,7 +49,7 @@ if __name__ == "__main__":
     for cur_pos in range(prompt_len, prompt_len + output_len):
         step.fill_(cur_pos-1)
         # prefilling phase
-        if cur_pos < prompt_len + 1 or not args.cuda_graph:
+        if cur_pos < prompt_len + 1:
             input_ids = tokens[:,prev_pos:cur_pos]
             cos_embeddings = position_embeddings[0][:,prev_pos:cur_pos]
             sin_embeddings = position_embeddings[1][:,prev_pos:cur_pos]
