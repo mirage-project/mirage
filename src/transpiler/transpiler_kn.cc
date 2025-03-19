@@ -164,8 +164,8 @@ TranspileResult Transpiler::transpile_ugraph() {
   init.e("static void _init() {");
   exec.e(
       "static void _execute_mugraph(std::vector<void const *> input_tensors, "
-      "std::vector<void*> output_tensors"
-      ", void* buf) {");
+      "std::vector<void*> output_tensors, "
+      "void* buf, cudaStream_t stream){");
   for (kn::KNOperator *const op : g->operators) {
     std::string op_type_str;
     to_json(op_type_str, op->op_type);
@@ -587,7 +587,7 @@ TranspileResult Transpiler::transpile_ugraph() {
                    result.smem_size);
           }
 
-          exec.e("$<<<grid_dim, block_dim, smem_size>>>($ $);",
+          exec.e("$<<<grid_dim, block_dim, smem_size, stream>>>($ $);",
                  result.func_name,
                  tmas,
                  ptr_names);
@@ -596,7 +596,7 @@ TranspileResult Transpiler::transpile_ugraph() {
                  "cudaFuncAttributeMaxDynamicSharedMemorySize, $);",
                  result.func_name,
                  result.smem_size);
-          exec.e("$<<<grid_dim, block_dim, smem_size>>>( $);",
+          exec.e("$<<<grid_dim, block_dim, smem_size, stream>>>( $);",
                  result.func_name,
                  ptr_names);
         }
