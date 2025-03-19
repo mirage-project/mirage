@@ -18,14 +18,15 @@ from .graph_dataset import graph_dataset
 
 HARD_CODE = """
 #include <Python.h>
+#include <cuda_runtime.h>
 
 static PyObject *launch(PyObject *self, PyObject *args) {
-  PyObject *input_list, *output_list, *py_buffer;
+  PyObject *input_list, *output_list, *py_buffer, *py_stream;
   void *buffer;
   std::vector<void const *> input_tensors;
   std::vector<void*> output_tensors;
 
-  if (!PyArg_ParseTuple(args, "OOO", &input_list, &output_list, &py_buffer)) {
+  if (!PyArg_ParseTuple(args, "OOOO", &input_list, &output_list, &py_buffer, &py_stream)) {
     PyErr_SetString(PyExc_TypeError, "Invalid parameters");
     return NULL;
   }
@@ -59,7 +60,9 @@ static PyObject *launch(PyObject *self, PyObject *args) {
   }
 
   buffer = PyLong_AsVoidPtr(py_buffer);
-  execute_mugraph(input_tensors, output_tensors, buffer);
+  cudaStream_t stream = (cudaStream_t)PyCapsule_GetPointer(py_stream, NULL);
+  printf("stream = %x\\n", stream);
+  execute_mugraph(input_tensors, output_tensors, buffer, stream);
 
   Py_RETURN_NONE;
 }
@@ -295,6 +298,9 @@ class KNGraph:
         assert self.run is not None, "The graph is not compiled yet."
 
         input_tensors = kwargs.get("inputs", [])
+        stream = kwargs.get("stream", None)
+        if stream is None:
+            stream = torch.cuda.default_stream()
 
         assert self.cygraph.get_num_inputs() == len(input_tensors), "Expected {} input tensors, got {}".format(self.cygraph.get_num_inputs(), len(input_tensors))
 
@@ -318,7 +324,7 @@ class KNGraph:
         input_tensors_ptr = [tensor.data_ptr() for tensor in input_tensors]
         output_tensors_ptr = [tensor.data_ptr() for tensor in output_tensors]
 
-        self.run(input_tensors_ptr, output_tensors_ptr, buffer_tensor_ptr)
+        self.run(input_tensors_ptr, output_tensors_ptr, buffer_tensor_ptr, stream.cuda_stream)
 
         return output_tensors
 
@@ -429,7 +435,10 @@ class KNGraph:
                 return None
 
         if async_:
-            ret = subprocess.Popen(cc_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
+            if global_config.bypass_compile_errors:
+                ret = subprocess.Popen(cc_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
+            else:
+                ret = subprocess.Popen(cc_cmd)
             return Handle([ret], remain_op)
         else:
             ret = subprocess.check_call(cc_cmd)
