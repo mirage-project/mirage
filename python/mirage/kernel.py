@@ -491,10 +491,11 @@ class KNGraph:
             default_config=config,
         )
         all_graphs = [KNGraph(g) for g in cygraphs]
+        print("Finished search, discovering {} mugraphs ...".format(len(all_graphs)))
         if backend == "cuda":
             # profile and use the best graph
             best_graph, best_perf = None, float("inf")
-            print("Transpiling discovered {} muGraphs ...".format(len(all_graphs)))
+            print("Transpiling {} muGraphs ...".format(len(all_graphs)))
             handles = []
 
             target_cc = torch.cuda.get_device_properties(0).major * 10 + torch.cuda.get_device_properties(0).minor
