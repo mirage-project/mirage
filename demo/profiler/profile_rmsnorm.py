@@ -1,4 +1,5 @@
 import mirage as mi
+import torch
 if __name__ == "__main__":
     graph = mi.new_kernel_graph()
     X = graph.new_input(dims=(16, 4096), dtype=mi.float16)

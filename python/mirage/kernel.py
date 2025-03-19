@@ -108,7 +108,7 @@ def get_cc_cmd(target, cc, FILE_NAME, py_include_dir, MIRAGE_ROOT, so_path, prof
         "--expt-relaxed-constexpr",
         "-o",
         so_path,
-    ] + (["-DMIRAGE_ENABLE_PROFILER"] if profile_mode else [])
+    ] + (["-DMIRAGE_ENABLE_PROFILER"] if profiling else [])
 
     if target == 90:
         specific_cmd = [
@@ -265,9 +265,6 @@ class KNGraph:
         return output_tensors
 
     def cuda_call(self, **kwargs):
-        profile_mode = kwargs.get("profile_mode", False)
-        if profile_mode:
-            self._is_compiled = False
         results = self.compile(**kwargs)
 
         # directly return if the Transpiler cannot generate valid CUDA kernels

@@ -160,12 +160,9 @@ TranspileResult Transpiler::transpile_ugraph() {
     header.e("#define MIRAGE_GRACE_HOPPER");
   }
   header.e("#include \"runtime.h\"");
-  header.e("#include \"profiler.h\"");
 
   header.e("using namespace cute;");
 
-  // Profiler declarations
-  header.e("PROFILER_INCLUDE_ALL_DECL");
 
 
   CodeKeeper custom_kernels; // This keeps all code for custom kernels
