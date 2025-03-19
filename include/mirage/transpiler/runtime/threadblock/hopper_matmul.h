@@ -37,7 +37,10 @@ template <typename T,
                                      // data, it does not use the standard
                                      // "epilogue" semantic
           bool IS_STORE_ACCUM,
-          bool IS_COORPERATIVE>
+          bool IS_COORPERATIVE,
+          bool IS_PIPELINE_A,
+          bool IS_PIPELINE_B,
+          int PIPELINE_STAGES>
 class Hopper_Matmul {
 public:
   CUTE_STATIC_ASSERT_V(rank(SmemLayoutA_{}) == _2{});
@@ -58,13 +61,13 @@ public:
   using TileALayout =
       decltype(cutlass::gemm::collective::detail::ss_smem_selector<
                GmmaMajorA,
-               half_t,
+               T,
                decltype(get<0>(SmemLayoutA{})),
                decltype(get<1>(SmemLayoutA{}))>());
   using TileBLayout =
       decltype(cutlass::gemm::collective::detail::ss_smem_selector<
                GmmaMajorB,
-               half_t,
+               T,
                decltype(get<0>(SmemLayoutB{})),
                decltype(get<1>(SmemLayoutB{}))>());
   // Shape checking
@@ -77,6 +80,9 @@ public:
   CUTE_STATIC_ASSERT_V(M{} == get<0>(shape(SmemLayoutC{})));
   CUTE_STATIC_ASSERT_V(N{} == get<1>(shape(SmemLayoutC{})));
 
+  static constexpr int PIPELINE_STAGE_A = IS_PIPELINE_A ? PIPELINE_STAGES : 1;
+  static constexpr int PIPELINE_STAGE_B = IS_PIPELINE_B ? PIPELINE_STAGES : 1;
+
   //   using TiledMMA = decltype(make_tiled_mma(
   //       SM90_64x32x16_F16F16F16_SS<GMMA::Major::K, GMMA::Major::MN>{}));
 
@@ -86,16 +92,15 @@ public:
                                             Layout<Shape<_1, _1, _1>>>;
 
   using TiledMMA = decltype(cute::make_tiled_mma(
-      cute::GMMA::ss_op_selector<T,
-                                 T,
-                                 T,
-                                 decltype(make_shape(M{}, N{}, K{})),
-                                 GmmaMajorA,
-                                 GmmaMajorB>(),
+      cute::GMMA::ss_op_selector<
+          T,
+          T,
+          std::conditional_t<std::is_same_v<T, cutlass::half_t>, T, float>,
+          decltype(make_shape(
+              cute::Int<(M::value < 64 ? 64 : M::value)>{}, N{}, K{})),
+          GmmaMajorA,
+          GmmaMajorB>(),
       AtomLayoutMNK{}));
-
-  //   using TiledMMA = decltype(make_tiled_mma(
-  //       SM90_64x64x16_F16F16F16_SS<GmmaMajorA, GmmaMajorB>{}));
 
   static constexpr int TILED_MMA_NUM_THREADS = thr_size(TiledMMA{});
   static_assert(TILED_MMA_NUM_THREADS ==
@@ -112,8 +117,7 @@ public:
   static __device__ __forceinline__ auto get_mma_rC(int thread_idx) {
     // Make a fake tensor
 
-    Tensor sC_fake =
-        make_tensor(make_smem_ptr((half_t *)nullptr), SmemLayoutC{});
+    Tensor sC_fake = make_tensor(make_smem_ptr((T *)nullptr), SmemLayoutC{});
 
     TiledMMA tiled_mma;
     ThrMMA thr_mma = tiled_mma.get_slice(thread_idx % 128);
@@ -158,15 +162,17 @@ public:
           int read_stage) {
     // cutlass::arch::warpgroup_reg_alloc<192>();
     TiledMMA tiled_mma;
-    auto sA_l = tile_to_shape(
-        TileALayout{},
-        make_shape(shape<0>(SmemLayoutA{}), shape<1>(SmemLayoutA{}), Int<2>{}),
-        Step<_1, _2, _3>{});
+    auto sA_l = tile_to_shape(TileALayout{},
+                              make_shape(shape<0>(SmemLayoutA{}),
+                                         shape<1>(SmemLayoutA{}),
+                                         Int<PIPELINE_STAGE_A>{}),
+                              Step<_1, _2, _3>{});
 
-    auto sB_l = tile_to_shape(
-        TileBLayout{},
-        make_shape(shape<0>(SmemLayoutB{}), shape<1>(SmemLayoutB{}), Int<2>{}),
-        Step<_1, _2, _3>{});
+    auto sB_l = tile_to_shape(TileBLayout{},
+                              make_shape(shape<0>(SmemLayoutB{}),
+                                         shape<1>(SmemLayoutB{}),
+                                         Int<PIPELINE_STAGE_B>{}),
+                              Step<_1, _2, _3>{});
 
     Tensor sA = make_tensor(make_smem_ptr(a_ptr), sA_l); // [M, K]
     Tensor sB = make_tensor(make_smem_ptr(b_ptr), sB_l); // [N, K]
@@ -182,11 +188,11 @@ public:
     warpgroup_fence_operand(mma_rC);
     cute::warpgroup_arrive();
     gemm(tiled_mma,
-         tCrA(_, _, _, read_stage),
-         tCrB(_, _, _, read_stage),
+         tCrA(_, _, _, IS_PIPELINE_A ? read_stage : 0),
+         tCrB(_, _, _, IS_PIPELINE_B ? read_stage : 0),
          mma_rC);
     cute::warpgroup_commit_batch();
-    cute::warpgroup_wait<0>();
+    // cute::warpgroup_wait<0>();
     warpgroup_fence_operand(mma_rC);
   }
 

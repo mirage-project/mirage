@@ -254,5 +254,9 @@ KNCustomizedOp::operator json() const {
               {"bgraph", bgraph}};
 }
 
+size_t KNCustomizedOp::get_owner_independent_hash() const {
+  assert(false && "To be implemented");
+}
+
 } // namespace kernel
 } // namespace mirage

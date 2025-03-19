@@ -96,17 +96,17 @@ STensor Graph::elementunary_clamp(STensor const &input,
 STensor *Graph::elementunary_clamp(STensor const *input,
                                    float const &min_val,
                                    float const &max_val) {
-TBOperator *op = create_elementunary_clamp_op(*input, min_val, max_val);
-assert(op != nullptr);
-operators.push_back(op);
-return &op->output_tensors[0];
+  TBOperator *op = create_elementunary_clamp_op(*input, min_val, max_val);
+  assert(op != nullptr);
+  operators.push_back(op);
+  return &op->output_tensors[0];
 }
 
 TBOperator *Graph::create_elementunary_clamp_op(STensor const &input,
                                                 float const &min_val,
                                                 float const &max_val) {
-TBElementUnaryOp *op = new TBClampUnaryOp(this, input, min_val, max_val);
-return op;
+  TBElementUnaryOp *op = new TBClampUnaryOp(this, input, min_val, max_val);
+  return op;
 }
 
 STensor Graph::mul_scalar(STensor const &input, float const &scalar) {
@@ -145,7 +145,7 @@ TBOperator *Graph::create_elementunary_op(STensor const &input,
 TBClampUnaryOp::TBClampUnaryOp(Graph *_graph,
                                STensor const &input,
                                float const &min_val,
-                               float const &max_val) 
+                               float const &max_val)
     : TBElementUnaryOp(_graph, input, mirage::type::TB_CLAMP_OP, 0.0f),
       min_val(min_val), max_val(max_val) {}
 

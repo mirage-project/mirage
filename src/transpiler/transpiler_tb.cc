@@ -94,6 +94,58 @@ static string get_stensor_layout(tb::STensor const &stensor,
   }
 }
 
+// Get the aligned layout for MMA stensor
+static string get_mma_stensor_aligned_layout(
+    tb::STensor const &stensor,
+    STensorMeta const &meta,
+    std::tuple<int, int, int> const &mma_atom_mnk,
+    bool m,
+    bool output,
+    int start_dim = 0) {
+
+  tb::STensor new_stensor = stensor;
+  STensorMeta new_meta = meta;
+  bool n = (!m) && (!output);
+
+  assert(stensor.num_dims - start_dim == 2);
+  int aligned_shape = -1;
+
+  for (int i = start_dim; i < stensor.num_dims; i++) {
+    // m/n
+    if (i == start_dim && m) {
+      // K
+      aligned_shape = std::max(stensor.dim[i], std::get<2>(mma_atom_mnk));
+    } else if (i == start_dim && n) {
+      // N
+      aligned_shape = std::max(stensor.dim[i], std::get<1>(mma_atom_mnk));
+    } else if (i == stensor.num_dims - 1 && m) {
+      // M
+      aligned_shape = std::max(stensor.dim[i], std::get<0>(mma_atom_mnk));
+    } else if (i == stensor.num_dims - 1 && n) {
+      // K
+      aligned_shape = std::max(stensor.dim[i], std::get<2>(mma_atom_mnk));
+    } else if (i == start_dim && output) {
+      // N
+      aligned_shape = std::max(stensor.dim[i], std::get<1>(mma_atom_mnk));
+    } else if (i == stensor.num_dims - 1 && output) {
+      // M
+      aligned_shape = std::max(stensor.dim[i], std::get<0>(mma_atom_mnk));
+    } else {
+      assert(false);
+    }
+    new_stensor.dim[i] = aligned_shape;
+  }
+
+  // update strides
+  int innermost_dim = new_meta.innermost_dim;
+  for (int i = start_dim; i < stensor.num_dims; i++) {
+    if (i != innermost_dim) {
+      new_meta.strides[i] = new_stensor.dim[innermost_dim];
+    }
+  }
+  return get_stensor_layout(new_stensor, new_meta);
+}
+
 // Move the innermost dim to the last dim, and format it as a CuTe layout
 // string.
 //
@@ -552,11 +604,15 @@ CustomOPTranspileResult
       assert(num_threads % mma_atom_num_threads == 0);
       int max_num_tgs = num_threads / mma_atom_num_threads; // tg = thread group
       float best_score = -1.0f;
-      int best_num_tg_m = -1, best_num_tg_n = -1;
+      int best_num_tg_m = 1, best_num_tg_n = 1;
       for (int num_tg_m = 1; num_tg_m <= max_num_tgs; ++num_tg_m) {
         for (int num_tg_n = 1; num_tg_m * num_tg_n <= max_num_tgs; ++num_tg_n) {
           int tiled_mma_m = mma_atom_m * num_tg_m;
           int tiled_mma_n = mma_atom_n * num_tg_n;
+          if (((m > mma_atom_m) && (m % tiled_mma_m != 0)) ||
+              ((n > mma_atom_n) && (n % tiled_mma_n != 0))) {
+            continue;
+          }
           int num_tiles_m = ceil_div(m, tiled_mma_m);
           int num_tiles_n = ceil_div(n, tiled_mma_n);
           int64_t data_moved_A =
@@ -598,9 +654,28 @@ CustomOPTranspileResult
              output.guid,
              get_stensor_layout(output, meta2, num_dims - 2 /*start_dim*/));
 
+      code.e("using Matmul$LayoutAAligned = $;",
+             output.guid,
+             get_mma_stensor_aligned_layout(input0,
+                                            meta0,
+                                            mma_atom_mnk,
+                                            true,
+                                            false,
+                                            num_dims - 2 /*start_dim*/));
+
+      code.e("using Matmul$LayoutBAligned = $;",
+             output.guid,
+             get_mma_stensor_aligned_layout(input1,
+                                            meta1,
+                                            mma_atom_mnk,
+                                            false,
+                                            false,
+                                            num_dims - 2 /*start_dim*/));
+
       code.e("using Matmul$Kernel = tb::Matmul<$, $, Layout<Shape<Int<$>, "
              "Int<$>, _1>>, $, $, Matmul$LayoutA, Matmul$LayoutB, "
-             "Matmul$LayoutC, NUM_THREADS, "
+             "Matmul$LayoutC, Matmul$LayoutAAligned, Matmul$LayoutBAligned,"
+             "NUM_THREADS, "
              "$, $>;",
              output.guid,
              get_datatype_str(input0.data_type),
@@ -609,6 +684,8 @@ CustomOPTranspileResult
              best_num_tg_n,
              is_ldmatrix_avail,
              is_stmatrix_avail,
+             output.guid,
+             output.guid,
              output.guid,
              output.guid,
              output.guid,
@@ -1104,7 +1181,7 @@ CustomOPTranspileResult
     TranspileErrorType err = transpile_tb_sched_node(sched_node, res, true);
     code << res;
     if (err != CUDA_T_SUCCESS) {
-      return CustomOPTranspileResult{err, func_name, 0, ""};
+      return CustomOPTranspileResult{err, func_name, 0, 0, ""};
     }
   }
 
@@ -1148,7 +1225,7 @@ CustomOPTranspileResult
       TranspileErrorType err = transpile_tb_sched_node(sched_node, res, false);
       code << res;
       if (err != CUDA_T_SUCCESS) {
-        return CustomOPTranspileResult{err, func_name, 0, ""};
+        return CustomOPTranspileResult{err, func_name, 0, 0, ""};
       }
     }
   }
@@ -1156,7 +1233,7 @@ CustomOPTranspileResult
   code.e("}"); // kernel
 
   return CustomOPTranspileResult{
-      CUDA_T_SUCCESS, func_name, mem_plan.smem_size, code.to_string()};
+      CUDA_T_SUCCESS, func_name, mem_plan.smem_size, 0, code.to_string()};
 }
 
 } // namespace transpiler

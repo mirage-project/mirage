@@ -39,9 +39,9 @@ public:
 class TBClampUnaryOp : public TBElementUnaryOp {
 public:
   TBClampUnaryOp(Graph *_graph,
-                    STensor const &_input,
-                    float const &min_val,
-                    float const &max_val);
+                 STensor const &_input,
+                 float const &min_val,
+                 float const &max_val);
 
 public:
   float const min_val;

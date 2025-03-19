@@ -60,12 +60,13 @@ class EventType(Enum):
     kInstant = 2
 
 
-def decode_tag(tag):
-    block_tag = tag >> 14 # upper 18 bits
-    event_idx = (tag >> 2) & 0xFFF # middle 12 bits
-    event_type = tag & 0x3 # lower 2 bits
+def decode_tag(tag, num_blocks, num_groups):
+    block_group_tag = tag >> 12
+    event_idx = (tag >> 2) & 0x3FF
+    event_type = tag & 0x3
     return (
-        block_tag,
+        block_group_tag // num_groups,
+        block_group_tag % num_groups,
         event_idx,
         event_type,
     )
@@ -77,36 +78,37 @@ def export_to_perfetto_trace(
 ) -> None:
 
     profiler_buffer_host = profiler_buffer.cpu()
-    num_blocks, _ = profiler_buffer_host[:1].view(dtype=torch.int32)
+    num_blocks, num_groups = profiler_buffer_host[:1].view(dtype=torch.int32)
     num_blocks = int(num_blocks)
+    num_groups = int(num_groups)
 
     tgen = TraceGenerator(file_name)
-    
+
+    tid_map = {}
     track_map = {}
-    pid_map = {}
     for block_idx in range(num_blocks):
         pid = tgen.create_group(f"block_{block_idx}")
-        pid_map[block_idx] = pid
-
+        for group_idx in range(num_groups):
+            tid = pid.create_group(f"group_{group_idx}")
+            tid_map[(block_idx, group_idx)] = tid
 
     for i in range(1, len(profiler_buffer_host)):
         if profiler_buffer_host[i] == 0:
             continue
-
         tag, timestamp = profiler_buffer_host[i : i + 1].view(dtype=torch.uint32)
         tag = int(tag)
         timestamp = int(timestamp)
-        block_idx, event_idx, event_type = decode_tag(
-            tag
+        block_idx, group_idx, event_idx, event_type = decode_tag(
+            tag, num_blocks, num_groups
         )
-        event = event_name_list[event_idx]
+        event = event_name_list[event_idx + 2000]
+        tid = tid_map[(block_idx, group_idx)]
 
-        if (block_idx, event_idx) in track_map:
-            track = track_map[(block_idx, event_idx)]
+        if (block_idx, group_idx, event_idx) in track_map:
+            track = track_map[(block_idx, group_idx, event_idx)]
         else:
-            pid = pid_map[block_idx]
-            track = pid.create_track(f"{block_idx}_{event}")
-            track_map[(block_idx, event_idx)] = track
+            track = tid.create_track()
+            track_map[(block_idx, group_idx, event_idx)] = track
 
         if event_type == EventType.kBegin.value:
             track.open(timestamp, event)
@@ -116,9 +118,3 @@ def export_to_perfetto_trace(
             track.instant(timestamp, event)
 
     tgen.flush()
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--file_name", type=str, required=True)
-    args = parser.parse_args()
-    export_to_perfetto_trace(args.file_name)

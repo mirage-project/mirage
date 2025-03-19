@@ -188,6 +188,30 @@ public:
     cute::prefetch_tma_descriptor(tma.get_tma_descriptor());
   }
 
+  template <int SrcLayoutSize>
+  static __device__ auto
+      make_coord_runtime(int imapx_a, int imapy_a, int imapz_a) {
+    if constexpr (SrcLayoutSize == 6) {
+      return make_coord(_,
+                        _,
+                        imapx_a >= 0 ? blockIdx.x : 0,
+                        imapy_a >= 0 ? blockIdx.y : 0,
+                        imapz_a >= 0 ? blockIdx.z : 0,
+                        _);
+    } else if constexpr (SrcLayoutSize == 7) {
+      return make_coord(_,
+                        _,
+                        _,
+                        imapx_a >= 0 ? blockIdx.x : 0,
+                        imapy_a >= 0 ? blockIdx.y : 0,
+                        imapz_a >= 0 ? blockIdx.z : 0,
+                        _);
+    } else {
+      static_assert(SrcLayoutSize == 6 || SrcLayoutSize == 7,
+                    "Unsupported layout size");
+    }
+  }
+
   static __device__ __forceinline__ void run(TMA const &tma_a,
                                              T *dst_a,
                                              int imapx_a,
@@ -198,15 +222,18 @@ public:
     if (lane_id() == 0) {
       Tensor mA = tma_a.get_tma_tensor(shape(SrcLayout{}));
       // （CTA_M, CTA_K, X, Y, Z, FORLOOP）
-      auto blkCoordA = make_coord(_,
-                                  _,
-                                  imapx_a >= 0 ? blockIdx.x : 0,
-                                  imapy_a >= 0 ? blockIdx.y : 0,
-                                  imapz_a >= 0 ? blockIdx.z : 0,
-                                  _);
-      Tensor gA = mA(blkCoordA);
-      Tensor sA = make_tensor(make_smem_ptr(dst_a), DstPipeLayout{});
+      auto blkCoordA = make_coord_runtime<decltype(rank(SrcLayout{}))::value>(
+          imapx_a, imapy_a, imapz_a);
+      // auto blkCoordA = make_coord(_,
+      //                             _,
+      //                             imapx_a >= 0 ? blockIdx.x : 0,
+      //                             imapy_a >= 0 ? blockIdx.y : 0,
+      //                             imapz_a >= 0 ? blockIdx.z : 0,
+      //                             _);
 
+      Tensor gA = mA(blkCoordA);
+
+      Tensor sA = make_tensor(make_smem_ptr(dst_a), DstPipeLayout{});
       auto cta_tma_a = tma_a.get_slice(Int<0>{}); // CTA slice
 
       Tensor tAgA = cta_tma_a.partition_S(gA);
