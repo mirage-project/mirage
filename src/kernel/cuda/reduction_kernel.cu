@@ -45,10 +45,11 @@ __global__ void execute_reduction(DT *input_ptr,
 }
 
 bool KNReductionOp::profile(ProfileResult &result) {
+  assert(false);
   // assert a single GPU
   // assert(kgraph->gpu_dim.x == 1);
   int gpu_id = 0;
-  checkCUDA(cudaSetDevice(0));
+  // checkCUDA(cudaSetDevice(0));
 
   assert(input_tensors[0].data_type == DT_FLOAT16);
   assert(output_tensors[0].data_type == DT_FLOAT16);
@@ -134,8 +135,9 @@ bool KNReductionOp::fingerprint(void) {
   assert(output_stride * reduction_factor == input_stride);
   mirage::kernel::DeviceMemoryManager *dmm =
       mirage::kernel::DeviceMemoryManager::get_instance();
-  // Use GPU 0 for computing fingerprint
-  checkCUDA(cudaSetDevice(0));
+  // Use GPU dmm->gpu_id for computing fingerprint
+  checkCUDA(cudaSetDevice(dmm->gpu_id));
+
   for (int gpu_id = 0; gpu_id < kgraph->gpu_dim.x; gpu_id++) {
     mirage::type::FPType *input_fp_ptr =
         reinterpret_cast<mirage::type::FPType *>(dmm->fp_base_ptr[gpu_id] +

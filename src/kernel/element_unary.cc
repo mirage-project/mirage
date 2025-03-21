@@ -88,7 +88,7 @@ DTensor *Graph::clamp(DTensor const *input,
 }
 
 DTensor Graph::elementunary_clamp(DTensor const &input,
-                                  float const &min_val, 
+                                  float const &min_val,
                                   float const &max_val) {
   KNOperator *op = create_elementunary_clamp_op(input, min_val, max_val);
   assert(op != nullptr);
@@ -99,7 +99,7 @@ DTensor Graph::elementunary_clamp(DTensor const &input,
 }
 
 DTensor *Graph::elementunary_clamp(DTensor const *input,
-                                   float const &min_val, 
+                                   float const &min_val,
                                    float const &max_val) {
   KNOperator *op = create_elementunary_clamp_op(*input, min_val, max_val);
   assert(op != nullptr);
@@ -108,9 +108,8 @@ DTensor *Graph::elementunary_clamp(DTensor const *input,
   return &op->output_tensors[0];
 }
 
-
 KNOperator *Graph::create_elementunary_clamp_op(DTensor const &input,
-                                                float const &min_val, 
+                                                float const &min_val,
                                                 float const &max_val) {
   if (!can_allocate(input)) {
     return nullptr;
@@ -152,9 +151,9 @@ KNOperator *Graph::create_elementunary_op(DTensor const &input,
 }
 
 KNClampUnaryOp::KNClampUnaryOp(Graph *_kgraph,
-               DTensor const &input,
-               float min_val,
-               float max_val)
+                               DTensor const &input,
+                               float min_val,
+                               float max_val)
     : KNElementUnaryOp(_kgraph, input, mirage::type::KN_CLAMP_OP),
       min_val(min_val), max_val(max_val) {}
 
