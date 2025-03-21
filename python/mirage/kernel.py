@@ -13,6 +13,7 @@ from .threadblock import *
 from .visualizer import *
 from .utils import *
 from .triton_profiler import *
+from .profiler import export_to_perfetto_trace
 from .global_config import global_config
 from .graph_dataset import graph_dataset
 
@@ -21,12 +22,13 @@ HARD_CODE = """
 #include <cuda_runtime.h>
 
 static PyObject *launch(PyObject *self, PyObject *args) {
-  PyObject *input_list, *output_list, *py_buffer, *py_stream;
+  PyObject *input_list, *output_list, *py_buffer, *py_stream, *py_profiler_buffer;
   void *buffer;
   std::vector<void const *> input_tensors;
   std::vector<void*> output_tensors;
+  void *profiler_buffer;
 
-  if (!PyArg_ParseTuple(args, "OOOO", &input_list, &output_list, &py_buffer, &py_stream)) {
+  if (!PyArg_ParseTuple(args, "OOOOO", &input_list, &output_list, &py_buffer, &py_stream, &py_profiler_buffer)) {
     PyErr_SetString(PyExc_TypeError, "Invalid parameters");
     return NULL;
   }
@@ -60,8 +62,9 @@ static PyObject *launch(PyObject *self, PyObject *args) {
   }
 
   buffer = PyLong_AsVoidPtr(py_buffer);
+  profiler_buffer = PyLong_AsVoidPtr(py_profiler_buffer);
   cudaStream_t stream = (cudaStream_t)PyLong_AsVoidPtr(py_stream);
-  execute_mugraph(input_tensors, output_tensors, buffer, stream);
+  execute_mugraph(input_tensors, output_tensors, buffer, stream, profiler_buffer);
 
   Py_RETURN_NONE;
 }
@@ -89,6 +92,7 @@ PyMODINIT_FUNC PyInit___mirage_launcher(void) {
 }
 """
 
+
 # Because pip install -e . and pip install . have different directory structure,
 # we need to check the directory structure to find the correct MIRAGE_ROOT.
 def get_key_paths():
@@ -115,7 +119,7 @@ def get_key_paths():
     return MIRAGE_ROOT, INCLUDE_PATH, DEPS_PATH
 
 
-def get_cc_cmd(target, cc, FILE_NAME, py_include_dir, INCLUDE_PATH, DEPS_PATH, so_path):
+def get_cc_cmd(target, cc, FILE_NAME, py_include_dir, INCLUDE_PATH, DEPS_PATH, so_path, profiling):
     common_cmd = [
         cc,
         FILE_NAME,
@@ -137,7 +141,7 @@ def get_cc_cmd(target, cc, FILE_NAME, py_include_dir, INCLUDE_PATH, DEPS_PATH, s
         specific_cmd = [
             "-arch=sm_90a",
             "-gencode=arch=compute_90a,code=sm_90a",
-        ]
+        ]+ (["-DMIRAGE_ENABLE_PROFILER"] if profiling else [])
     else:
         specific_cmd = [
             "-arch=native",
@@ -319,12 +323,17 @@ class KNGraph:
             for meta in results["output_directives"]
         ]
 
+        prodiler_buffer_tensor = torch.empty(results["profiler_buf_size"], dtype=torch.uint64, device=input_tensors[0].device).contiguous()
+
+        print("results['profiler_buf_size']", results['profiler_buf_size'])
         buffer_tensor_ptr = buffer_tensor.data_ptr()
         input_tensors_ptr = [tensor.data_ptr() for tensor in input_tensors]
         output_tensors_ptr = [tensor.data_ptr() for tensor in output_tensors]
+        prodiler_buffer_tensor_ptr = prodiler_buffer_tensor.data_ptr()
+        self.run(input_tensors_ptr, output_tensors_ptr, buffer_tensor_ptr, stream.cuda_stream, prodiler_buffer_tensor_ptr)
 
-        self.run(input_tensors_ptr, output_tensors_ptr, buffer_tensor_ptr, stream.cuda_stream)
-
+        if results['profiler_buf_size'] > 0:
+            export_to_perfetto_trace(prodiler_buffer_tensor, 'mirage.perfetto-trace')
         return output_tensors
 
     def compile(self, async_=False, **kwargs):
@@ -350,9 +359,10 @@ class KNGraph:
         )
         num_warp_groups = kwargs.get("num_warp_groups", 2)
         pipeline_stages = kwargs.get("pipeline_stages", 2)
+        profiling = kwargs.get("profiling", False)
 
         result = generate_cuda_program(
-            self.cygraph, target_cc=target_cc, input_strides=input_strides, num_warp_groups = num_warp_groups, pipeline_stages = pipeline_stages
+            self.cygraph, target_cc=target_cc, input_strides=input_strides, num_warp_groups = num_warp_groups, pipeline_stages = pipeline_stages, profiling = profiling
         )
         if result["max_smem_size"] > get_shared_memory_capacity(target_cc):
             # the transpiled kernel exceeds shared memory limit
@@ -407,8 +417,7 @@ class KNGraph:
         if scheme == "posix_local":
             scheme = "posix_prefix"
         py_include_dir = sysconfig.get_paths(scheme=scheme)["include"]
-
-        cc_cmd = get_cc_cmd(target_cc, cc, FILE_NAME, py_include_dir, INCLUDE_PATH, DEPS_PATH, so_path)
+        cc_cmd = get_cc_cmd(target_cc, cc, FILE_NAME, py_include_dir, INCLUDE_PATH, DEPS_PATH, so_path, profiling)
 
         def remain_op():
             import importlib.util
