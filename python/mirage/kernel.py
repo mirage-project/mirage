@@ -108,8 +108,6 @@ def get_cc_cmd(target, cc, FILE_NAME, py_include_dir, MIRAGE_ROOT, NCCL_ROOT, MP
         f"-I{py_include_dir}",
         f"-I{MIRAGE_ROOT}/include/mirage/transpiler/runtime/",
         f"-I{MIRAGE_ROOT}/deps/cutlass/include",
-        "-lnvshmem_device",
-        "-lnvshmem_host",
         "-ccbin=mpic++",
         f"-I{NCCL_ROOT}/include",
         f"-L{NCCL_ROOT}/lib",
@@ -414,6 +412,8 @@ class KNGraph:
         FILE_NAME = os.path.join(tempdir, "test.cu")
         so_path = os.path.join(tempdir, "test.cpython-38-x86_64-linux-gnu.so")
 
+
+        FILE_NAME = "./test.cu"
         with open(FILE_NAME, "w") as f:
             f.write(result["code"] + HARD_CODE)
             if saved_addr != "":

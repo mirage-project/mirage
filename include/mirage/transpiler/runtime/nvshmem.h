@@ -11,7 +11,7 @@
 
 static inline void initialize_mpi_nvshmem(int rank) {
   // Initialize MPI
-  MPI_Init(NULL, NULL);
+  //MPI_Init(NULL, NULL);
   MPI_Comm mpi_comm;
   cudaSetDevice(rank);
 
@@ -33,7 +33,7 @@ static inline void finalize_mpi_nvshmem() {
   nvshmem_barrier_all();
   nvshmem_finalize();
 #endif
-  MPI_Finalize();
+  //MPI_Finalize();
 }
 
 // todo remove this function to allocate pointer only once

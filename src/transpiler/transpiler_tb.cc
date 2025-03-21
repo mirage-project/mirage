@@ -209,7 +209,9 @@ CustomOPTranspileResult
     if (tb_op->op_type == type::TB_OUTPUT_OP) {
       tb::TBOutputOp const *output_op = dynamic_cast<tb::TBOutputOp const *>(tb_op);
       if (output_op->epilogue == type::TBEpilogueType::TB_EPILOGUE_ALLTOALL) {
-        comm_buf_names.push_back(fmt("half_t const* __restrict__ alltoall_buf_$", output_op->dtensor.guid));
+        comm_buf_names.push_back(fmt("$ const* __restrict__ alltoall_buf_$", 
+                                     get_datatype_str(output_op->dtensor.data_type), 
+                                     output_op->dtensor.guid));
       }
     }
   }
@@ -217,22 +219,42 @@ CustomOPTranspileResult
   // Generate code prologue
   CodeKeeper code;
 
-  code.e("__global__ void __launch_bounds__($) $($, $) {",
-         num_threads,
-         func_name,
-         map<kn::DTensor, string>(op->output_tensors,
-                                  [](kn::DTensor const &dtensor) -> string {
-                                    return fmt(
-                                        "$* __restrict__ dtensor$_ptr",
-                                        get_datatype_str(dtensor.data_type),
-                                        dtensor.guid);
-                                  }),
-         map<kn::DTensor, string>(
-             op->input_tensors, [](kn::DTensor const &dtensor) -> string {
-               return fmt("$ const* __restrict__ dtensor$_ptr",
-                          get_datatype_str(dtensor.data_type),
-                          dtensor.guid);
-             }));
+  if (use_nvshmem) {
+    code.e("__global__ void __launch_bounds__($) $($, $, $, int mype, int npes) {",
+           num_threads,
+           func_name,
+           map<kn::DTensor, string>(op->output_tensors,
+                                    [](kn::DTensor const &dtensor) -> string {
+                                      return fmt(
+                                          "$* __restrict__ dtensor$_ptr",
+                                          get_datatype_str(dtensor.data_type),
+                                          dtensor.guid);
+                                    }),
+           map<kn::DTensor, string>(
+               op->input_tensors, [](kn::DTensor const &dtensor) -> string {
+                 return fmt("$ const* __restrict__ dtensor$_ptr",
+                            get_datatype_str(dtensor.data_type),
+                            dtensor.guid);
+               }),
+           comm_buf_names);
+  } else {
+    code.e("__global__ void __launch_bounds__($) $($, $) {" ,
+           num_threads,
+           func_name,
+           map<kn::DTensor, string>(op->output_tensors,
+                                    [](kn::DTensor const &dtensor) -> string {
+                                      return fmt(
+                                          "$* __restrict__ dtensor$_ptr",
+                                          get_datatype_str(dtensor.data_type),
+                                          dtensor.guid);
+                                    }),
+           map<kn::DTensor, string>(
+               op->input_tensors, [](kn::DTensor const &dtensor) -> string {
+                 return fmt("$ const* __restrict__ dtensor$_ptr",
+                            get_datatype_str(dtensor.data_type),
+                            dtensor.guid);
+               }));
+  }
 
   // Define thread idx
   string thread_idx;
@@ -778,10 +800,10 @@ CustomOPTranspileResult
               code.e("// dtensor.dim[0] = $, dtensor.dim[1] = $, dtensor.dim[2] = $, dtensor.dim[3] = $",
                     dtensor.dim[0], dtensor.dim[1], dtensor.dim[2], dtensor.dim[3]);
               code.e("// Perform NVSHMEM allreduce. num_elements = $", num_elements);
-              code.e("nvshmem_barrier_all();");
+              //code.e("nvshmem_barrier_all();");
               code.e("nvshmem_half_sum_reduce(NVSHMEM_TEAM_WORLD, reinterpret_cast<half*>(dtensor$_ptr), reinterpret_cast<const half*>(dtensor$_ptr), $);",
                     dtensor.guid, dtensor.guid, num_elements);
-              code.e("nvshmem_barrier_all();");
+              //code.e("nvshmem_barrier_all();");
               // break;
             }
             else if (type == type::TBEpilogueType::TB_EPILOGUE_ALLTOALL) {
@@ -792,8 +814,8 @@ CustomOPTranspileResult
               // 3. block size is a factor of dtensor size
               int all2all_divide_dim = 1; // y dim
               code.e("// Perform alltoall. num_elements = $", num_elements);
-              code.e("nvshmem_barrier_all();");
-              code.e("int block_per_p = (blockDim.y + npes - 1) / npes;");
+              //code.e("nvshmem_barrier_all();");
+              code.e("int block_per_p = (gridDim.y + npes - 1) / npes;");
 
               code.e("int dst_rank = blockIdx.y / block_per_p;");
               string dst_offset = "";
@@ -820,16 +842,24 @@ CustomOPTranspileResult
                 }
               }
 
-              code.e("half_t *recv_ptr = nvshmem_ptr(alltoall_buf_$, dst_rank);", 
+              //code.e("half_t *recv_ptr = nvshmem_ptr(alltoall_buf_$, dst_rank);", 
+              //       dtensor.guid);
+              code.e("$ *recv_ptr = ($ *)alltoall_buf_$;", 
+                     get_datatype_str(dtensor.data_type),
+                     get_datatype_str(dtensor.data_type),
                      dtensor.guid);
               code.e("recv_ptr = recv_ptr$; // dst_offset", dst_offset);
 
-              code.e("half_t *send_ptr = dtensor$_tile_ptr;", dtensor.guid);
+              code.e("$ *send_ptr = dtensor$_tile_ptr;", 
+                     get_datatype_str(dtensor.data_type),
+                     dtensor.guid);
               
-              code.e("tb::CommExecutor<half_t, DTensor$TileLayout, false> comm_executor;", dtensor.guid);
-              code.e("comm_executor.send(recv_ptr, send_ptr, dst_rank, NULL, stream);");
+              code.e("tb::CommExecutor<$, DTensor$TileLayout, false> comm_executor;", 
+                     get_datatype_str(dtensor.data_type),
+                     dtensor.guid);
+              code.e("comm_executor.send(recv_ptr, send_ptr, dst_rank, NULL);");
 
-              code.e("nvshmem_barrier_all();");
+              //code.e("nvshmem_barrier_all();");
               // break;
             }
           }
