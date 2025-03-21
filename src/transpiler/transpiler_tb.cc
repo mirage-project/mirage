@@ -143,7 +143,7 @@ static string get_mma_stensor_aligned_layout(
       new_meta.strides[i] = new_stensor.dim[innermost_dim];
     }
   }
-  return get_stensor_layout(new_stensor, new_meta);
+  return get_stensor_layout(new_stensor, new_meta, new_stensor.num_dims - 2);
 }
 
 // Move the innermost dim to the last dim, and format it as a CuTe layout

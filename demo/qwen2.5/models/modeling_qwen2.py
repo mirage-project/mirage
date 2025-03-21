@@ -154,12 +154,12 @@ class Qwen2MLP(nn.Module):
         graph.mark_output(O)
         self.kernel2 = graph.superoptimize(config="mlp")
 
-    def forward(self, input_layernorm, hidden_state):
+    def forward(self, input_layernorm, hidden_state, stream: torch.cuda.Stream = None):
         if hidden_state.shape[-2] == 1 and self.enable_mirage:
             # use mirage kernels for decoding
-            output = self.kernel1(inputs=(hidden_state, input_layernorm.weight, self.fused_weight))[0]
+            output = self.kernel1(inputs=(hidden_state, input_layernorm.weight, self.fused_weight), stream=stream)[0]
             gate_output, up_output = torch.chunk(output, 2, -1)
-            output = self.kernel2(inputs=(gate_output, up_output, self.down_proj.weight))[0]
+            output = self.kernel2(inputs=(gate_output, up_output, self.down_proj.weight), stream=stream)[0]
         else:
             # use the original for prefilling
             hidden_state = input_layernorm(hidden_state)
@@ -221,12 +221,13 @@ class Qwen2Attention(nn.Module):
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         decode_wrapper = None,
         step: torch.Tensor = None,
+        stream: torch.cuda.Stream = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         bsz, q_len, _ = hidden_states.size()
 
         if q_len == 1 and self.enable_mirage:
             # use mirage kernels for decoding
-            xqkv = self.kernel(inputs=(hidden_states, input_layernorm.weight, self.fused_weight))[0]
+            xqkv = self.kernel(inputs=(hidden_states, input_layernorm.weight, self.fused_weight), stream=stream)[0]
             xqkv = xqkv.view(bsz, q_len, self.fused_outdim)
         else:
             # use the original for prefilling
@@ -288,6 +289,7 @@ class Qwen2DecoderLayer(nn.Module):
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # will become mandatory in v4.46
         decode_wrapper = None,
         step: torch.Tensor = None,
+        stream: torch.cuda.Stream = None,
         **kwargs,
     ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
 
@@ -303,13 +305,14 @@ class Qwen2DecoderLayer(nn.Module):
             position_embeddings=position_embeddings,
             decode_wrapper=decode_wrapper,
             step=step,
+            stream=stream,
         )
         hidden_states = residual + hidden_states
 
         # Fully Connected
         residual = hidden_states
         #hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states = self.mlp(self.post_attention_layernorm, hidden_states)
+        hidden_states = self.mlp(self.post_attention_layernorm, hidden_states, stream=stream)
         hidden_states = residual + hidden_states
 
         outputs = (hidden_states,)
@@ -396,6 +399,7 @@ class Qwen2Model(Qwen2PreTrainedModel):
         attention_mask: Optional[torch.Tensor] = None,
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         step: torch.Tensor = None,
+        stream: torch.cuda.Stream = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,):
         inputs_embeds = self.embed_tokens(input_ids)
         
@@ -414,6 +418,7 @@ class Qwen2Model(Qwen2PreTrainedModel):
                 position_embeddings=position_embeddings,
                 decode_wrapper=self.decode_wrapper,
                 step=step,
+                stream=stream,
             )
 
             hidden_states = layer_outputs[0]
@@ -465,6 +470,7 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         attention_mask: Optional[torch.Tensor] = None,
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         step: torch.Tensor = None,
+        stream: torch.cuda.Stream = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
         num_logits_to_keep: int = 0,
         **loss_kwargs,):
@@ -474,6 +480,7 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
             attention_mask=attention_mask,
             position_embeddings=position_embeddings,
             step=step,
+            stream=stream,
             inputs_embeds=inputs_embeds,
         )
 

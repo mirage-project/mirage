@@ -20,6 +20,9 @@ def set_gpu_device_id(device_id: int):
     global_config.gpu_device_id = device_id
     core.set_gpu_device_id(device_id)
 
+def bypass_compile_errors(value: bool=True):
+    global_config.bypass_compile_errors = value
+
 def new_kernel_graph():
     kgraph = core.CyKNGraph()
     return KNGraph(kgraph)
