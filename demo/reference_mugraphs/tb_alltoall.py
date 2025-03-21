@@ -14,9 +14,6 @@ if __name__ == "__main__":
     args = parser.parse_args()
     save_codes = args.save_codes
 
-    RANK = int(os.environ.get("RANK", 0))
-    
-    torch.cuda.set_device(RANK)
     graph = mi.new_kernel_graph(gpu_dim=(4, 1, 1))
     X = graph.new_input(dims=(512, 128), gpu_input_map=(1, -1 ,-1), dtype=mi.float16)
     W = graph.new_input(dims=(128, 256), gpu_input_map=(0, -1 ,-1), dtype=mi.float16)
@@ -31,13 +28,22 @@ if __name__ == "__main__":
     O = graph.customized([X, W], tb_graph)
     graph.mark_output(O[0])
 
+    from mpi4py import MPI
+    comm = MPI.COMM_WORLD
+    rank = comm.Get_rank()
 
-    print("Current rank: ", RANK)
+    torch.cuda.set_device(rank)
+    print("Current rank: ", rank)
     print("Current device: ", torch.cuda.current_device())
     input_tensors = [
-        torch.randn(512, 256, dtype=torch.float16, device=torch.cuda.current_device()),
-        torch.randn(256, 256, dtype=torch.float16, device=torch.cuda.current_device()),
+        torch.randn(512, 256, dtype=torch.float16, device=f'cuda:{rank}'),
+        torch.randn(256, 256, dtype=torch.float16, device=f'cuda:{rank}'),
     ]
 
-    outputs = graph(inputs=input_tensors, rank=RANK, save_codes=save_codes)
-    print(outputs[0])
+    outputs = graph(inputs=input_tensors, rank=rank, save_codes=save_codes)
+
+    chunks = outputs[0].chunk(4)
+    for chunk in chunks[1:]:
+        assert torch.allclose(chunks[0], chunk)
+
+    print(f"[{rank}] alltoall demo pass!")

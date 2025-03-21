@@ -101,8 +101,10 @@ std::pair<string, string>
                get_datatype_str(dtensor.data_type),
                meta.input_idx);
   } else if (meta.is_output && dtensor.is_nvshmem_tensor) {
-    code = fmt("half_t *$ = to_nvshmem_ptr<half_t>($);",
+    code = fmt("$ *$ = to_nvshmem_ptr<$>($);",
+               get_datatype_str(dtensor.data_type),
                pointer_var_name,
+               get_datatype_str(dtensor.data_type),
                meta.num_phy_elems);
   } else if (meta.is_output) {
     code = fmt("$ *$ = ($*)output_tensors.at($);",
@@ -150,7 +152,6 @@ TranspileResult Transpiler::transpile_ugraph() {
 
   CodeKeeper header;
   header.e("#define NUM_GPUS $", num_gpus);
-  // TODO (linsj20)
   header.e("#define USE_NVSHMEM $", use_nvshmem);
   header.e("#define USE_NCCL $", use_nccl);
   if (config.target_cc == GPU_CC::H100) {
@@ -463,7 +464,6 @@ TranspileResult Transpiler::transpile_ugraph() {
         exec.e("kernel::run($, $);", out0_ptr_name, in0_ptr_name);
         break;
       }
-      // TODO (linsj20)
       case type::KNOperatorType::KN_ALLREDUCE_OP: {
         // Allreduce op
         kn::DTensor &in0 = op->input_tensors.at(0);
@@ -495,8 +495,12 @@ TranspileResult Transpiler::transpile_ugraph() {
             DTensorMeta meta = dtensor_metas.at(dtensor.guid);
             if (dtensor.epilogue == type::TBEpilogueType::TB_EPILOGUE_ALLTOALL) {
               //TODO: TB alltoall
-              exec.e("half_t *alltoall_buf_$ = (half_t*)nvshmem_malloc(sizeof(half_t) * $);", \
-              dtensor.guid, meta.num_phy_elems);
+              exec.e("$ *alltoall_buf_$ = ($ *)nvshmem_malloc(sizeof($) * $);", \
+              get_datatype_str(dtensor.data_type),
+              dtensor.guid,
+              get_datatype_str(dtensor.data_type),
+              get_datatype_str(dtensor.data_type),
+              meta.num_phy_elems);
               comm_buf_names.push_back(fmt("alltoall_buf_$", dtensor.guid));
             }
             else if (dtensor.epilogue == type::TBEpilogueType::TB_EPILOGUE_ALLREDUCE) {
@@ -694,6 +698,31 @@ TranspileResult Transpiler::transpile_ugraph() {
 
         custom_kernels.e(result.code);
         if (use_nvshmem) {
+          // copy result from comm_buf to dtensor
+          // TODO assuming only one output tensor and one comm_buf
+          kn::DTensor const &output_dtensor = cur_op->output_tensors[0];
+          auto output_guid = output_dtensor.guid;
+          DTensorMeta const &output_meta = dtensor_metas.at(output_guid);
+          
+          exec.e("nvshmem_barrier_all();");
+          exec.e("cudaMemcpy((void *)output_tensors.at(0), "
+                 "(const void *)nvshmem_ptr($, mype), "
+                 "$ * sizeof($), "
+                 "cudaMemcpyDeviceToDevice);", 
+                 comm_buf_names[0], 
+                 output_meta.num_phy_elems, 
+                 get_datatype_str(output_dtensor.data_type));
+
+          // Free nvshmem allocated memory
+          for (kn::DTensor const &dtensor :
+               Combine(cur_op->output_tensors, cur_op->input_tensors)) {
+            auto guid = dtensor.guid;
+            DTensorMeta const &meta = dtensor_metas.at(guid);
+            if (meta.is_output && dtensor.is_nvshmem_tensor) {
+              string ptr_name = fmt("dtensor$", guid);
+              exec.e("nvshmem_free($);", ptr_name);
+            }
+          }
           for (auto const &comm_buf_name : comm_buf_names) {
             std::cout << "freeing " << comm_buf_name << std::endl;
             exec.e("nvshmem_free($);", comm_buf_name);

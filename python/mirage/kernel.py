@@ -93,14 +93,14 @@ dtype_map = {
     'int16':   torch.int16,
     'int32':   torch.int32,
     'int64':   torch.int64,
-    'uint8':   torch.uint8, 
+    'uint8':   torch.uint8,
     'fp16':    torch.float16,
     'bf16':    torch.bfloat16,
     'fp32':    torch.float32,
     'fp64':    torch.float64
 }
 
-def get_cc_cmd(target, cc, FILE_NAME, py_include_dir, MIRAGE_ROOT, NCCL_ROOT, MPI_ROOT, so_path):
+def get_cc_cmd(target, cc, FILE_NAME, py_include_dir, MIRAGE_ROOT, NCCL_ROOT, MPI_ROOT, NVSHMEM_ROOT, so_path):
     common_cmd = [
         cc,
         FILE_NAME,
@@ -108,21 +108,22 @@ def get_cc_cmd(target, cc, FILE_NAME, py_include_dir, MIRAGE_ROOT, NCCL_ROOT, MP
         f"-I{py_include_dir}",
         f"-I{MIRAGE_ROOT}/include/mirage/transpiler/runtime/",
         f"-I{MIRAGE_ROOT}/deps/cutlass/include",
-        f"-I/usr/include/nvshmem_12",
-        # f"-I/usr/include/openmpi-x86_64",
-        f"-L/usr/lib64/nvshmem/12",
-        # "-lnvshmem",
-        "-lnvshmem_device",
-        "-lnvshmem_host",
         "-ccbin=mpic++",
         f"-I{NCCL_ROOT}/include",
-        f"-L/{NCCL_ROOT}/lib",
+        f"-L{NCCL_ROOT}/lib",
         f"-I{MPI_ROOT}/include",
-        f"-L/{MPI_ROOT}/lib",
+        f"-L{MPI_ROOT}/lib",
+        f"-I{NVSHMEM_ROOT}/include",
+        f"-L{NVSHMEM_ROOT}/lib",
+        #f"-I{CUDA_ROOT}/include",
+        #f"-L{CUDA_ROOT}/lib64",
+        #f"-I/home/hice1/slin468/scratch/nvhpc/Linux_x86_64/25.1/comm_libs/nvshmem/include",
+        #f"-L/home/hice1/slin468/scratch/nvhpc/Linux_x86_64/25.1/comm_libs/nvshmem/lib",
         "-shared",
         "-std=c++17",
         "-rdc=true",
         "-use_fast_math",
+        "-lnvshmem",
         "-lcublas",
         "-lnccl",
         "-lmpi",
@@ -230,7 +231,7 @@ class KNGraph:
 
     def relu(self, A: DTensor):
         return self.cygraph.relu(A)
-    
+
     def clamp(self, A: DTensor, min_val: float, max_val: float):
         return self.cygraph.clamp(A, min_val, max_val)
 
@@ -321,6 +322,12 @@ class KNGraph:
             for meta in results["output_directives"]
         ]
 
+        for tensor in input_tensors:
+            print(tensor.shape)
+        print('00')
+        for tensor in output_tensors:
+            print(tensor.shape)
+
         buffer_tensor_ptr = buffer_tensor.data_ptr()
         input_tensors_ptr = [tensor.data_ptr() for tensor in input_tensors]
         output_tensors_ptr = [tensor.data_ptr() for tensor in output_tensors]
@@ -347,8 +354,8 @@ class KNGraph:
             torch.cuda.get_device_properties(0).major * 10
             + torch.cuda.get_device_properties(0).minor,
         )
-        num_warp_groups = kwargs.get("num_warp_groups", 2)
-        pipeline_stages = kwargs.get("pipeline_stages", 2)
+        num_warp_groups = kwargs.get("num_warp_groups", -1)
+        pipeline_stages = kwargs.get("pipeline_stages", -1)
 
         result = generate_cuda_program(
             self.cygraph, target_cc=target_cc, input_strides=input_strides, num_warp_groups = num_warp_groups, pipeline_stages = pipeline_stages
@@ -372,15 +379,13 @@ class KNGraph:
             "MIRAGE_ROOT", os.path.join(os.path.dirname(__file__), "../..")
         )
 
-        # TODO (linsj20)
         NCCL_ROOT = os.environ.get("NCCL_HOME")
         if not os.path.exists(NCCL_ROOT):
             print(
                 f"Warning: NCCL_ROOT ({NCCL_ROOT}) not found. Disable distributed kernel generation."
             )
-            sys.exit(1)
+            #sys.exit(1)
 
-        # TODO (linsj20)
         MPI_ROOT = os.environ.get("MPI_HOME")
         if not os.path.exists(MPI_ROOT):
             print(
@@ -388,14 +393,12 @@ class KNGraph:
             )
             sys.exit(1)
 
-        #TODO: (NorthmanPKU)
-        # MVSHMEM_ROOT = os.environ.get("MVSHMEM_HOME")
-        # if not os.path.exists(MVSHMEM_ROOT):
-        #     print(
-        #         f"Warning: MVSHMEM_ROOT ({MVSHMEM_ROOT}) not found. Disable distributed kernel generation."
-        #     )
-        #     sys.exit(1)
-
+        NVSHMEM_ROOT = os.environ.get("NVSHMEM_HOME")
+        if not os.path.exists(NVSHMEM_ROOT):
+            print(
+                f"Warning: NVSHMEM_ROOT ({NVSHMEM_ROOT}) not found. Disable distributed kernel generation."
+            )
+            sys.exit(1)
         # if True:
         #     tempdir = './test/'
 
@@ -409,6 +412,8 @@ class KNGraph:
         FILE_NAME = os.path.join(tempdir, "test.cu")
         so_path = os.path.join(tempdir, "test.cpython-38-x86_64-linux-gnu.so")
 
+
+        FILE_NAME = "./test.cu"
         with open(FILE_NAME, "w") as f:
             f.write(result["code"] + HARD_CODE)
             if saved_addr != "":
@@ -418,8 +423,8 @@ class KNGraph:
                     f.write(result["code"] + HARD_CODE)
 
         # TMP
-        with open("./test.cu", "w") as f:
-            f.write(result["code"] + HARD_CODE)
+        #with open("./test.cu", "w") as f:
+        #    f.write(result["code"] + HARD_CODE)
 
         cc = shutil.which("nvcc")
         if cc is None:
@@ -443,7 +448,7 @@ class KNGraph:
                 f"Error: MIRAGE_ROOT ({MIRAGE_ROOT}) not found. Please set the MIRAGE_ROOT env variable correctly"
             )
             sys.exit(1)
-        cc_cmd = get_cc_cmd(target_cc, cc, FILE_NAME, py_include_dir, MIRAGE_ROOT, NCCL_ROOT, MPI_ROOT, so_path)
+        cc_cmd = get_cc_cmd(target_cc, cc, FILE_NAME, py_include_dir, MIRAGE_ROOT, NCCL_ROOT, MPI_ROOT, NVSHMEM_ROOT, so_path)
 
 
         def remain_op():
@@ -574,8 +579,8 @@ class KNGraph:
                 "MIRAGE_ROOT", os.path.join(os.path.dirname(__file__), "../../include")
             )
             os.environ["KERNELS_PATH"] = os.path.join(MIRAGE_ROOT, "mirage/transpiler/runtime") # for triton
-            best_graph, best_file_path, best_output_shapes = profile_and_select_best_graph(all_graphs, 
-                                                 target_cc=torch.cuda.get_device_properties(0).major * 10 
+            best_graph, best_file_path, best_output_shapes = profile_and_select_best_graph(all_graphs,
+                                                 target_cc=torch.cuda.get_device_properties(0).major * 10
                                                  + torch.cuda.get_device_properties(0).minor,
                                                  warmup_iters=warmup_iters, profile_iters=profile_iters, debug_mode=verbose,
                                                  save_codes=save_codes)

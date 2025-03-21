@@ -23,8 +23,11 @@ static void _execute_mugraph(std::vector<void const *> input_tensors,
 #include "kernel/matmul.h"
 #include "kernel/reduction.h"
 #include "kernel/communication.h"
-#include "nvshmem.h"
 #include "threadblock/threadblock.h"
+#ifdef USE_NVSHMEM
+#include "nvshmem.h"
+#include "threadblock/comm_executor.h"
+#endif
 #include "utils.h"
 
 // Entrypoint for C/C++
