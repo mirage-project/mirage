@@ -29,6 +29,8 @@ DT get_tensor_in_new_graph(std::unordered_map<size_t, DT> mapping,
   return mapping[tensor_in_old_graph.guid];
 }
 
+// TODO: rewrite the graph to support online softmax
+
 Transpiler::Transpiler(kernel::Graph const *_graph,
                        TranspilerConfig const &_config,
                        vector<vector<size_t>> const &_input_strides)
@@ -202,6 +204,18 @@ Transpiler::Transpiler(kernel::Graph const *_graph,
               stensor_mapping[bop->output_tensors[0].guid] = st;
               break;
             }
+            case TB_REDUCTION_0_MAX_OP:
+            case TB_REDUCTION_1_MAX_OP:
+            case TB_REDUCTION_2_MAX_OP: {
+              assert(stensor_inputs.size() == 1);
+              std::vector<threadblock::STensor> stensors = tbg->reduction_max(
+                  stensor_inputs[0], bop->op_type - TB_REDUCTION_0_MAX_OP);
+              assert(bop->output_tensors.size() == 2);
+              for (size_t i = 0; i < stensors.size(); i++) {
+                stensor_mapping[bop->output_tensors[i].guid] = stensors[i];
+              }
+              break;
+            }
             case TB_FORLOOP_ACCUM_NO_RED_OP: {
               assert(stensor_inputs.size() == 1);
               threadblock::STensor st = tbg->forloop_accum(
@@ -256,7 +270,7 @@ Transpiler::Transpiler(kernel::Graph const *_graph,
               stensor_mapping[bop->output_tensors[0].guid] = st;
               break;
             }
-            case TB_FORLOOP_ACCUM_RED_LD_RESCALE_OP: {
+            case TB_FORLOOP_ACCUM_RED_LD_SUM_RESCALE_OP: {
               assert(stensor_inputs.size() == 2);
               assert(bop->output_tensors.size() == 1);
               threadblock::STensor st = tbg->forloop_accum_rescale(

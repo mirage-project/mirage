@@ -74,18 +74,18 @@ TBOperator *Graph::create_reduction_to_dimx_op(STensor const &input, int dim) {
   }
 }
 
-STensor Graph::reduction_max(STensor const &input, int dim) {
+std::vector<STensor> Graph::reduction_max(STensor const &input, int dim) {
   TBOperator *op = create_reduction_max_op(input, dim);
   assert(op != nullptr);
   operators.push_back(op);
-  return op->output_tensors[0];
+  return op->output_tensors;
 }
 
-STensor *Graph::reduction_max(STensor const *input, int dim) {
+std::vector<STensor> *Graph::reduction_max(STensor const *input, int dim) {
   TBOperator *op = create_reduction_max_op(*input, dim);
   assert(op != nullptr);
   operators.push_back(op);
-  return &op->output_tensors[0];
+  return &op->output_tensors;
 }
 
 TBOperator *Graph::create_reduction_max_op(STensor const &input, int dim) {
@@ -122,17 +122,27 @@ TBReductionOp::TBReductionOp(Graph *bgraph,
   STensor output = input;
   assert(output.num_dims > reduce_dim);
   assert(output.layout == mirage::layout::SmemRowMajor);
-  output.dim[reduce_dim] = reduce_size;
+  output.dim[reduce_dim] = reduce_size == -1 ? 1 : reduce_size;
   output.owner_op = this;
   output.owner_ts_idx = 0;
   output.guid = STensor::next_guid++;
   output.after_accum = input.after_accum;
   output.smem_offset = bgraph->allocate_fingerprint(output);
   output_tensors.push_back(output);
+  if (reduce_size == -1) {
+    // For max reduction, we need to allocate another tensor for difference
+    STensor diff = output;
+    diff.guid = STensor::next_guid++;
+    diff.smem_offset = bgraph->allocate_fingerprint(diff);
+    output_tensors.push_back(diff);
+  }
 }
 
 TBReductionOp::~TBReductionOp() {
-  bgraph->free_fingerprint(output_tensors[0]);
+  // bgraph->free_fingerprint(output_tensors[0]);
+  for (STensor const &output : output_tensors) {
+    bgraph->free_fingerprint(output);
+  }
 }
 
 TBReductionOp::operator json() const {

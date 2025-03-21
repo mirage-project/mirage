@@ -16,6 +16,7 @@
 #include "mirage/threadblock/element_unary.h"
 #include "mirage/threadblock/forloop_accum.h"
 #include "mirage/threadblock/operator.h"
+#include "mirage/threadblock/reduction.h"
 #include "mirage/threadblock/smem_tensor.h"
 #include "mirage/transpiler/common.h"
 #include "mirage/transpiler/structs.h"
@@ -540,6 +541,35 @@ CustomOPTranspileResult
   }
   code.e("");
 
+  // Initialize all reduction max
+  int num_init_reductions = 0;
+  for (TBSchedNode const &node : sched.loop_nodes) {
+    if (node.type != tb_sched_node_t::OPERATOR) {
+      continue;
+    }
+    auto [last_op, last_op_meta] = node.ops.back();
+    if (last_op->op_type >= type::TB_REDUCTION_0_MAX_OP &&
+        last_op->op_type <= type::TB_REDUCTION_2_MAX_OP) {
+      assert(node.ops.size() == 1); // Should not be fused
+      tb::TBReductionOp const *updated_max_op =
+          dynamic_cast<tb::TBReductionOp const *>(last_op);
+      tb::STensor const &updated_max = updated_max_op->output_tensors.at(0);
+      STensorMeta const &updated_max_meta = stensor_metas.at(updated_max.guid);
+      size_t num_elems = 0;
+      for (int i = 0; i < updated_max.num_dims; ++i) {
+        num_elems = std::max(num_elems,
+                             updated_max.dim[i] * updated_max_meta.strides[i]);
+      }
+      code.e("tb::InitReductionMaxKernel<$, $, "
+             "NUM_THREADS>::run(stensor$_ptr, thread_idx);",
+             get_datatype_str(updated_max.data_type),
+             num_elems,
+             updated_max.guid);
+      num_init_reductions += 1;
+    }
+  }
+  code.e("");
+
   // Pre-define all matmul ops and allocate accumulators (if needed)
   // Since we may want to place the accumulator of a matmul op in register
   // files, we may need to allocate the accumulator in advance, and that
@@ -1054,6 +1084,67 @@ CustomOPTranspileResult
               "Kernel::run(stensor$_ptr, stensor$_ptr, thread_idx, scalars);",
               output.guid,
               input.guid);
+          break;
+        }
+        case type::TB_REDUCTION_0_MAX_OP:
+        case type::TB_REDUCTION_1_MAX_OP:
+        case type::TB_REDUCTION_2_MAX_OP: {
+          assert(sched_node.ops.size() == 1); // Should not be fused
+          tb::STensor const &input = op->input_tensors.at(0);
+          tb::STensor const &updated_max = output_op->output_tensors.at(0);
+          tb::STensor const &diff = output_op->output_tensors.at(1);
+          STensorMeta input_meta = stensor_metas.at(input.guid);
+          STensorMeta updated_max_meta = stensor_metas.at(updated_max.guid);
+          STensorMeta diff_meta = stensor_metas.at(diff.guid);
+          assert(input.num_dims == updated_max.num_dims &&
+                 input.num_dims == diff.num_dims);
+          int num_dims = input.num_dims;
+          int reduc_dim = op->op_type - type::TB_REDUCTION_0_MAX_OP;
+          assert(0 <= reduc_dim && reduc_dim < num_dims);
+          // Find the iteration dim
+          int iter_dim = -1;
+          for (int i = 0; i < num_dims; ++i) {
+            if (i == reduc_dim) {
+              continue;
+            }
+            bool failed = false;
+            for (tb::STensor const &stensor : {input, updated_max, diff}) {
+              STensorMeta meta = stensor_metas.at(stensor.guid);
+              if (i != meta.innermost_dim && meta.swizzled_dim != i) {
+                failed = true;
+                break;
+              }
+            }
+            if (!failed) {
+              iter_dim = i;
+              break;
+            }
+          }
+          assert(iter_dim != -1);
+          assert(iter_dim != reduc_dim);
+          // Define layouts
+          string in_layout =
+              mov_last_get_stensor_layout(input, input_meta, iter_dim);
+          string updated_max_layout = mov_last_get_stensor_layout(
+              updated_max, updated_max_meta, iter_dim);
+          string diff_layout =
+              mov_last_get_stensor_layout(diff, diff_meta, iter_dim);
+          int cute_reduc_dim = reduc_dim < iter_dim ? num_dims - 1 - reduc_dim
+                                                    : num_dims - reduc_dim;
+          code.e("using InLayout = $;", in_layout);
+          code.e("using UpdatedMaxLayout = $;", updated_max_layout);
+          code.e("using DiffLayout = $;", diff_layout);
+          // Should not have epilogue
+          // Define and run the kernel
+          code.e("using Kernel = tb::ReductionMaxKernel<$, "
+                 "UpdatedMaxLayout, DiffLayout, InLayout, $, NUM_THREADS>;",
+                 get_datatype_str(input.data_type),
+                 cute_reduc_dim);
+          code.e("Kernel::run(stensor$_ptr, stensor$_ptr, stensor$_ptr, "
+                 "thread_idx);",
+                 updated_max.guid,
+                 diff.guid,
+                 input.guid);
           break;
         }
         case type::TB_FORLOOP_ACCUM_NO_RED_OP: {

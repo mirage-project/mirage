@@ -111,6 +111,9 @@ size_t Graph::calculate_shared_memory_usage(TBOperator *new_op) {
       case mirage::type::TB_REDUCTION_0_TO_DIMX_OP:
       case mirage::type::TB_REDUCTION_1_TO_DIMX_OP:
       case mirage::type::TB_REDUCTION_2_TO_DIMX_OP:
+      case mirage::type::TB_REDUCTION_0_MAX_OP:
+      case mirage::type::TB_REDUCTION_1_MAX_OP:
+      case mirage::type::TB_REDUCTION_2_MAX_OP:
       // Normalization
       case mirage::type::TB_RMS_NORM_OP:
       // Concat
@@ -180,7 +183,7 @@ size_t Graph::calculate_shared_memory_usage(TBOperator *new_op) {
         usage += op->output_tensors[0].size();
         break;
       }
-      case mirage::type::TB_FORLOOP_ACCUM_RED_LD_RESCALE_OP: {
+      case mirage::type::TB_FORLOOP_ACCUM_RED_LD_SUM_RESCALE_OP: {
         // we will inline accumulation but need to perform
         // a rescale
         assert(op->output_tensors.size() == 1);

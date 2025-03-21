@@ -134,8 +134,8 @@ public:
   TBOperator *create_reduction_to_dimx_op(STensor const &A, int dim);
 
   // reduction_max operator
-  STensor reduction_max(STensor const &A, int dim);
-  STensor *reduction_max(STensor const *A, int dim);
+  std::vector<STensor> reduction_max(STensor const &A, int dim);
+  std::vector<STensor> *reduction_max(STensor const *A, int dim);
   TBOperator *create_reduction_max_op(STensor const &A, int dim);
 
   // rms_norm operator

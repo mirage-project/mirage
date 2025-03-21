@@ -79,6 +79,6 @@ public:
           src[src_layout(elem_idx)];
     }
   }
-}
+};
 
 } // namespace tb
