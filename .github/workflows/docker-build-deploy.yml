@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - "main"
+      - "ci"
   workflow_dispatch:
 
 concurrency:
@@ -44,15 +45,3 @@ jobs:
           DOCKER_TOKEN: ${{ secrets.DOCKER_TOKEN }}
         run: |
           ./docker/publish.sh mirage
-
-  # notify-slack:
-  #   name: Notify Slack when build fails
-  #   runs-on: ubuntu-22.04
-  #   needs: [docker-build-cuda]
-  #   if: ${{ failure() && github.repository_owner == 'mirage-project' && ( github.event_name == 'push' || github.event_name == 'workflow_dispatch' ) && github.ref_name == 'main' }} 
-  #   steps:
-  #     - name: Send Slack message
-  #       env:
-  #         SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
-  #       run: |
-  #         curl -X POST -H 'Content-type: application/json' --data "{\"text\":\"Mirage Docker Build Failed! <https://github.com/mirage-project/mirage/actions/runs/$GITHUB_RUN_ID|(See details)> :x: \"}" $SLACK_WEBHOOK 

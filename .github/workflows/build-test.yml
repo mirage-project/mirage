@@ -5,7 +5,6 @@ on:
   push:
     branches:
       - main
-      - ci
 
 concurrency:
   group: build-${{ github.head_ref || github.run_id }}
@@ -38,7 +37,11 @@ jobs:
           sudo apt install -y software-properties-common lsb-release wget python3-pip g++ make libboost-all-dev
 
           # Install Z3
-          sudo apt-get install -y libz3-dev
+          sudo apt-get install -y libz3-4 libz3-dev
+          
+          # Make sure Z3 lib is found (enforces Z3 version 4.14)
+          sudo ln -s /usr/lib/x86_64-linux-gnu/libz3.so /usr/lib/libz3.so.4.14 || true
+          sudo ldconfig
 
           # Install CMake
           CMAKE_VERSION=3.27.0
@@ -46,9 +49,16 @@ jobs:
           sudo mkdir -p /opt/cmake && sudo sh cmake.sh --skip-license --prefix=/opt/cmake
           sudo ln -sf /opt/cmake/bin/cmake /usr/local/bin/cmake
 
-          # Install Python dependencies
+          # Install Python dependencies (including torch)
           pip3 install --upgrade pip setuptools wheel cython
-          pip3 install -r requirements.txt
+          
+          # Install PyTorch temporarily since it is not included in requirements.txt so far
+          pip3 install torch==2.1.2
+          
+          # Install project requirements
+          if [ -f requirements.txt ]; then
+            pip3 install -r requirements.txt
+          fi
 
           # Install cuDNN
           UBUNTU_VERSION=$(lsb_release -rs | tr -d '.')
@@ -59,6 +69,14 @@ jobs:
           sudo apt-get install -y libcudnn9-cuda-12 libcudnn9-dev-cuda-12 libcudnn9-samples
           sudo ldconfig
 
+      - name: List Installed Python Packages
+        run: pip list
+
+      - name: Check Z3 Library Path
+        run: |
+          find /usr -name "libz3.so*" || true
+          ldd $(find /usr/lib -name "*z3*.so*" | head -1) || true
+          
       - name: Build Mirage from Source
         run: |
           export MIRAGE_ROOT=${{ github.workspace }}
@@ -66,16 +84,19 @@ jobs:
           export CC=$(which gcc)
           export CXX=$(which g++)
           
-          # Get Z3 paths
-          python3 -c "import z3; import os; print(f'Z3_PATH={os.path.dirname(z3.__file__)}', flush=True)" >> $GITHUB_ENV
+          # Get Z3 paths - use absolute paths from find command
+          export Z3_LIB_PATH=$(find /usr/lib -name "libz3.so" | head -1)
+          export Z3_INCLUDE_PATH="/usr/include"
+          echo "Z3_LIB_PATH=${Z3_LIB_PATH}" >> $GITHUB_ENV
+          echo "Z3_INCLUDE_PATH=${Z3_INCLUDE_PATH}" >> $GITHUB_ENV
           
           cd $MIRAGE_ROOT
           mkdir -p build && cd build
           
           # Configure with CMake using Z3 location
           cmake .. \
-            -DZ3_CXX_INCLUDE_DIRS=${{ env.Z3_PATH }}/include/ \
-            -DZ3_LIBRARIES=${{ env.Z3_PATH }}/lib/libz3.so \
+            -DZ3_CXX_INCLUDE_DIRS=${Z3_INCLUDE_PATH} \
+            -DZ3_LIBRARIES=${Z3_LIB_PATH} \
             -DCMAKE_C_COMPILER=$CC \
             -DCMAKE_CXX_COMPILER=$CXX
           
@@ -84,8 +105,12 @@ jobs:
           
           # Install Mirage
           cd $MIRAGE_ROOT
+          # Add LD_LIBRARY_PATH for Z3
+          export LD_LIBRARY_PATH="/usr/lib:/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH}"
           pip install -e .
       
       - name: Test Mirage Import
         run: |
+          # Set LD_LIBRARY_PATH for Z3
+          export LD_LIBRARY_PATH="/usr/lib:/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH}"
           python -c "import mirage; print('Mirage import successful!')"

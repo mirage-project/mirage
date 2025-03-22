@@ -1,6 +1,9 @@
 name: "PyPI Deploy"
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - ci
 
 concurrency:
   group: pip-deploy-${{ github.head_ref || github.run_id }}

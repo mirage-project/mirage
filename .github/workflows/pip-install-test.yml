@@ -1,16 +1,23 @@
 name: "PIP Install Test"
 on:
+  workflow_run:
+    workflows: ["PyPI Deploy"]
+    types:
+      - completed
   pull_request:
   push:
     branches:
       - "main"
   workflow_dispatch:
+
 concurrency:
   group: pip-install-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 jobs:
   pip-install-mirage:
+    # only run if the PyPI Deploy workflow has completed successfully
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
     name: Install Mirage with pip
     runs-on: ubuntu-22.04
     defaults:
@@ -47,12 +54,22 @@ jobs:
         run: |
           # Set appropriate CUDA architecture
           export MIRAGE_CUDA_ARCH=80
-          pip install . --verbose
+          
+          # If this job was triggered by PyPI Deploy workflow, install from PyPI
+          if [[ "${{ github.event_name }}" == "workflow_run" ]]; then
+            echo "Installing Mirage from PyPI (after PyPI Deploy workflow)"
+            pip install mirage-project
+          else
+            echo "Installing Mirage from local source"
+            pip install . --verbose
+          fi
+          
           # Remove build folder to check if installed version can run independently
           rm -rf build
 
       - name: Check Mirage module availability in Python
         run: |
+          export LD_LIBRARY_PATH="/usr/lib:/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH}"
           export LD_LIBRARY_PATH="$CUDA_PATH/lib64/stubs:$LD_LIBRARY_PATH"
           sudo ln -s "$CUDA_PATH/lib64/stubs/libcuda.so" "$CUDA_PATH/lib64/stubs/libcuda.so.1"
           python -c 'import mirage; print("Mirage imported successfully")' 
