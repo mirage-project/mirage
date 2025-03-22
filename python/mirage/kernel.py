@@ -566,7 +566,7 @@ class KNGraph:
             return all_graphs
         elif backend == "triton":
             MIRAGE_ROOT, INCLUDE_PATH, _ = get_key_paths()
-            os.environ["KERNELS_PATH"] = os.path.join(INCLUDE_PATH, "mirage/transpiler/runtime") # for triton
+            os.environ["KERNELS_PATH"] = os.path.join(INCLUDE_PATH, "mirage/triton_transpiler/runtime") # for triton
             best_graph, best_file_path, best_output_shapes = profile_and_select_best_graph(all_graphs, 
                                                  target_cc=torch.cuda.get_device_properties(0).major * 10 
                                                  + torch.cuda.get_device_properties(0).minor,

@@ -116,9 +116,12 @@ def copy_include():
         # copy mirage/transpiler/runtime/* 
         # to python/mirage/include/mirage/transpiler/runtime/*
         # instead of python/mirage/include/include/mirage/transpiler/runtime/*
-        include_mirage_dir = "include/mirage/transpiler/runtime"
-        include_mirage_dst = path.join(INCLUDE_BASE, "mirage/transpiler/runtime")
-        shutil.copytree(include_mirage_dir, include_mirage_dst)
+        include_mirage_dirs = ["include/mirage/transpiler/runtime", 
+                               "include/mirage/triton_transpiler/runtime"]
+        include_mirage_dsts = [path.join(INCLUDE_BASE, "mirage/transpiler/runtime"), 
+                               path.join(INCLUDE_BASE, "mirage/triton_transpiler/runtime")]
+        for include_mirage_dir, include_mirage_dst in zip(include_mirage_dirs, include_mirage_dsts):
+            shutil.copytree(include_mirage_dir, include_mirage_dst)
 
         config_h_src = path.join(mirage_path, "include/mirage/config.h") # Needed by transpiler/runtime/threadblock/utils.h
         config_h_dst = path.join(INCLUDE_BASE, "mirage/config.h")
