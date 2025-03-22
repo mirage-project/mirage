@@ -37,14 +37,20 @@ jobs:
           sudo apt update
           sudo apt install -y software-properties-common lsb-release wget python3-pip g++ make libboost-all-dev
 
+          # Install Z3
+          sudo apt-get install -y libz3-dev
+
+          # Install CMake
           CMAKE_VERSION=3.27.0
           wget -O cmake.sh https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/cmake-${CMAKE_VERSION}-linux-x86_64.sh
           sudo mkdir -p /opt/cmake && sudo sh cmake.sh --skip-license --prefix=/opt/cmake
           sudo ln -sf /opt/cmake/bin/cmake /usr/local/bin/cmake
 
-          pip3 install --upgrade cython
+          # Install Python dependencies
+          pip3 install --upgrade pip setuptools wheel cython
+          pip3 install -r requirements.txt
 
-          # Install cuDNN 9
+          # Install cuDNN
           UBUNTU_VERSION=$(lsb_release -rs | tr -d '.')
           wget -c -q "https://developer.download.nvidia.com/compute/cuda/repos/ubuntu${UBUNTU_VERSION}/x86_64/cuda-keyring_1.1-1_all.deb"
           sudo dpkg -i cuda-keyring_1.1-1_all.deb
@@ -56,8 +62,30 @@ jobs:
       - name: Build Mirage from Source
         run: |
           export MIRAGE_ROOT=${{ github.workspace }}
+          export CUDACXX=$(which nvcc)
+          export CC=$(which gcc)
+          export CXX=$(which g++)
+          
+          # Get Z3 paths
+          python3 -c "import z3; import os; print(f'Z3_PATH={os.path.dirname(z3.__file__)}', flush=True)" >> $GITHUB_ENV
+          
           cd $MIRAGE_ROOT
           mkdir -p build && cd build
-          cmake ..
+          
+          # Configure with CMake using Z3 location
+          cmake .. \
+            -DZ3_CXX_INCLUDE_DIRS=${{ env.Z3_PATH }}/include/ \
+            -DZ3_LIBRARIES=${{ env.Z3_PATH }}/lib/libz3.so \
+            -DCMAKE_C_COMPILER=$CC \
+            -DCMAKE_CXX_COMPILER=$CXX
+          
+          # Build with multiple cores
           make -j$(nproc)
-          sudo make install
+          
+          # Install Mirage
+          cd $MIRAGE_ROOT
+          pip install -e .
+      
+      - name: Test Mirage Import
+        run: |
+          python -c "import mirage; print('Mirage import successful!')"

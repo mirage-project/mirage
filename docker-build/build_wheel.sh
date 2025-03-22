@@ -9,16 +9,16 @@ PYTHON_VERSION_LIST=(cp38 cp39 cp310 cp311 cp312)
 for CUDA_VERSION in "${CUDA_VERSION_LIST[@]}"
 do
     # remove `.` from CUDA_VERSION
-    CUDA_VERSION_TAG=cu$(echo $CUDA_VERSION | tr -d .)
+    CUDA_VERSION_TAG=cu$(echo "${CUDA_VERSION}" | tr -d .)
     
     # reset symbolic link to the current CUDA version
     rm /usr/local/cuda
-    ln -s /usr/local/cuda-${CUDA_VERSION} /usr/local/cuda
+    ln -s "/usr/local/cuda-${CUDA_VERSION}" /usr/local/cuda
 
     for PYTHON_VERSION in "${PYTHON_VERSION_LIST[@]}"
     do
         echo "Building wheel for CUDA ${CUDA_VERSION} and Python ${PYTHON_VERSION}"
-        /opt/python/${PYTHON_VERSION}-${PYTHON_VERSION}/bin/python setup.py bdist_wheel
+        "/opt/python/${PYTHON_VERSION}-${PYTHON_VERSION}/bin/python" setup.py bdist_wheel
 
         # If success, get the latest wheel file in dist/
         if [ $? -eq 0 ]; then
