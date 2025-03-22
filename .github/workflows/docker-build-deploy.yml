@@ -1,0 +1,58 @@
+name: "Docker Build & Deploy"
+on:
+  pull_request:
+  push:
+    branches:
+      - "main"
+  workflow_dispatch:
+
+concurrency:
+  group: docker-build-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  docker-build-cuda:
+    name: Build Docker container (CUDA backend)
+    runs-on: ubuntu-22.04
+    strategy:
+      matrix:
+        cuda_version: ["11.8", "12.1"]
+      fail-fast: false
+    env:
+      cuda_version: ${{ matrix.cuda_version }}
+    steps:
+      - name: Checkout code repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Free space on runner
+        run: .github/workflows/helpers/free_space_on_runner.sh
+
+      - name: Build Docker container
+        run: |
+          export CUDA_VERSION=${{ matrix.cuda_version }}
+          ./docker/build.sh mirage
+
+      - name: Mirage check
+        run: |
+          docker run --entrypoint /bin/bash mirage-cuda-${cuda_version}:latest -c "python -c 'import mirage; print(\"Mirage import successfully\")'"
+
+      - name: Publish Docker image
+        if: ${{ github.repository_owner == 'mirage-project' && ( github.event_name == 'push' || github.event_name == 'workflow_dispatch' ) && github.ref_name == 'main' }}
+        env:
+          DOCKER_TOKEN: ${{ secrets.DOCKER_TOKEN }}
+        run: |
+          ./docker/publish.sh mirage
+
+  notify-slack:
+    name: Notify Slack when build fails
+    runs-on: ubuntu-22.04
+    needs: [docker-build-cuda]
+    if: ${{ failure() && github.repository_owner == 'mirage-project' && ( github.event_name == 'push' || github.event_name == 'workflow_dispatch' ) && github.ref_name == 'main' }} 
+    steps:
+      - name: Send Slack message
+        env:
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
+        run: |
+          curl -X POST -H 'Content-type: application/json' --data "{\"text\":\"Mirage Docker Build Failed! <https://github.com/mirage-project/mirage/actions/runs/$GITHUB_RUN_ID|(See details)> :x: \"}" $SLACK_WEBHOOK 

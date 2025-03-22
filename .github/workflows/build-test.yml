@@ -53,15 +53,6 @@ jobs:
           sudo apt-get install -y libcudnn9-cuda-12 libcudnn9-dev-cuda-12 libcudnn9-samples
           sudo ldconfig
 
-      - name: Build Z3 from Source
-        run: |
-          export MIRAGE_ROOT=${{ github.workspace }}
-          cd $MIRAGE_ROOT/deps/z3
-          mkdir -p build && cd build
-          cmake ..
-          make -j$(nproc)
-          echo "Z3_DIR=$MIRAGE_ROOT/deps/z3/build" >> $GITHUB_ENV
-
       - name: Build Mirage from Source
         run: |
           export MIRAGE_ROOT=${{ github.workspace }}

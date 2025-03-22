@@ -1,0 +1,10 @@
+images:
+  dlami-x64:
+    platform: "linux"
+    arch: "x64"
+    ami: "ami-04a2add47e78915e6"  # AMI suitable for CUDA development
+
+runners:
+  gpu-nvidia:
+    family: ["g5.12xlarge"]  # Instance with NVIDIA GPU
+    image: dlami-x64 
