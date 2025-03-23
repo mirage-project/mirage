@@ -31,6 +31,14 @@ jobs:
         with:
           python-version: "3.x"
 
+      - name: Setup CUDA
+        uses: Jimver/cuda-toolkit@v0.2.14
+        id: cuda-toolkit
+        with:
+          cuda: '12.0.0'
+          method: 'network'
+          sub-packages: '["nvcc", "cudart", "cublas", "cudnn"]'
+
       - name: Install pypa/build
         run: >-
           python3 -m
@@ -41,6 +49,10 @@ jobs:
       - name: Build source package
         env:
           DEPLOY_TO_TEST_PYPI: ${{ vars.DEPLOY_TO_TEST_PYPI }}
+          CUDACXX: ${{ steps.cuda-toolkit.outputs.CUDA_PATH }}/bin/nvcc
+          CUDA_HOME: ${{ steps.cuda-toolkit.outputs.CUDA_PATH }}
+          CUDNN_LIBRARY: ${{ steps.cuda-toolkit.outputs.CUDA_PATH }}/lib64
+          CUDNN_INCLUDE_DIR: ${{ steps.cuda-toolkit.outputs.CUDA_PATH }}/include
         run: >-
           python3 -m
           build

@@ -4,7 +4,7 @@ on:
   push:
     branches:
       - "main"
-      - "ci"
+      # - "ci"
   workflow_dispatch:
 
 concurrency:
