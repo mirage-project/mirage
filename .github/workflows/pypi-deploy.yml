@@ -1,86 +1,69 @@
-name: "PyPI Deploy"
+name: PyPI Deploy
+
 on:
   workflow_dispatch:
   push:
     branches:
       - ci
 
-concurrency:
-  group: pip-deploy-${{ github.head_ref || github.run_id }}
-  cancel-in-progress: true
+permissions:
+  contents: read
 
 jobs:
   build-n-publish:
     name: Build and publish Python distributions to PyPI
-    runs-on: ubuntu-22.04
-    permissions:
-      # IMPORTANT: this permission is mandatory for trusted publishing
-      id-token: write
+    runs-on: ubuntu-20.04
 
     steps:
-      - name: Checkout code repository
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
+    - uses: actions/checkout@v3
+      with:
+        submodules: 'recursive'
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install build setuptools wheel
+    
+    - name: Set up CUDA
+      id: cuda-toolkit
+      uses: Jimver/cuda-toolkit@v0.2.16
+      with:
+        cuda: '12.1.1'
+        use-github-cache: "false"
+    
+    - name: Setup environment variables
+      run: .github/workflows/helpers/set_env.sh
+    
+    - name: Build source package
+      run: |
+        python -m build --sdist --outdir dist/ .
 
-      - name: Free space on runner
-        run: .github/workflows/helpers/free_space_on_runner.sh
+    - name: Publish to Test PyPI
+      if: ${{ vars.DEPLOY_TO_TEST_PYPI == 'true' }}
+      uses: pypa/gh-action-pypi-publish@release/v1
+      with:
+        repository-url: https://test.pypi.org/legacy/
 
-      - name: Set up Python environment
-        uses: actions/setup-python@v4
-        with:
-          python-version: "3.x"
+    - name: Publish to PyPI
+      if: ${{ vars.DEPLOY_TO_TEST_PYPI == 'false' }}
+      uses: pypa/gh-action-pypi-publish@release/v1
 
-      - name: Setup CUDA
-        uses: Jimver/cuda-toolkit@v0.2.14
-        id: cuda-toolkit
-        with:
-          cuda: '12.0.0'
-          method: 'network'
-          sub-packages: '["nvcc", "cudart", "cublas", "cudnn"]'
-
-      - name: Install pypa/build
-        run: >-
-          python3 -m
-          pip install
-          build
-          --user
-
-      - name: Build source package
-        env:
-          DEPLOY_TO_TEST_PYPI: ${{ vars.DEPLOY_TO_TEST_PYPI }}
-          CUDACXX: ${{ steps.cuda-toolkit.outputs.CUDA_PATH }}/bin/nvcc
-          CUDA_HOME: ${{ steps.cuda-toolkit.outputs.CUDA_PATH }}
-          CUDNN_LIBRARY: ${{ steps.cuda-toolkit.outputs.CUDA_PATH }}/lib64
-          CUDNN_INCLUDE_DIR: ${{ steps.cuda-toolkit.outputs.CUDA_PATH }}/include
-        run: >-
-          python3 -m
-          build
-          --sdist
-          --outdir dist/
-          .
-
-      - name: Publish to Test PyPI
-        if: ${{ vars.DEPLOY_TO_TEST_PYPI == 'true' }}
-        uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          repository-url: https://test.pypi.org/legacy/
-
-      - name: Publish to PyPI
-        if: ${{ vars.DEPLOY_TO_TEST_PYPI == 'false' }}
-        uses: pypa/gh-action-pypi-publish@release/v1
-
-      - name: Get package version
-        if: ${{ vars.DEPLOY_TO_TEST_PYPI == 'false' }}
-        run: |
-          # When running setup.py outside of pip install, we need to manually install imported modules
-          pip install setuptools requests cmake-build-extension
-          version=$(python setup.py --version)
-          echo "PY_VERSION=${version}" >> $GITHUB_ENV
-            
-      - name: Create Git tag
-        if: ${{ vars.DEPLOY_TO_TEST_PYPI == 'false' }}
-        uses: mathieudutour/github-tag-action@v6.1
-        with:
-          github_token: ${{ secrets.MIRAGE_TOKEN }}
-          custom_tag: ${{ env.PY_VERSION }} 
+    - name: Get package version
+      if: ${{ vars.DEPLOY_TO_TEST_PYPI == 'false' }}
+      run: |
+        # When running setup.py outside of pip install, we need to manually install imported modules
+        pip install setuptools requests cmake-build-extension
+        version=$(python setup.py --version)
+        echo "PY_VERSION=${version}" >> $GITHUB_ENV
+          
+    - name: Create Git tag
+      if: ${{ vars.DEPLOY_TO_TEST_PYPI == 'false' }}
+      uses: mathieudutour/github-tag-action@v6.1
+      with:
+        github_token: ${{ secrets.MIRAGE_TOKEN }}
+        custom_tag: ${{ env.PY_VERSION }} 
