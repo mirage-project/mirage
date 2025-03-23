@@ -17,7 +17,7 @@ sudo mkdir -p /opt/cmake && sudo sh cmake.sh --skip-license --prefix=/opt/cmake
 sudo ln -sf /opt/cmake/bin/cmake /usr/local/bin/cmake
 
 # Install Python dependencies (including torch)
-pip3 install --upgrade pip setuptools wheel cython
+pip3 install --upgrade pip build setuptools wheel cython
 
 # Install PyTorch temporarily since it is not included in requirements.txt so far
 pip3 install torch==2.1.2
