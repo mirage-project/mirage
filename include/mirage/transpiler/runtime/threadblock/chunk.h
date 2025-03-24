@@ -19,7 +19,7 @@ template <typename T,
           typename Epilogue>
 class ChunkKernel {
 public:
-    using Numel = decltype(cute::size(DstLayout{}));
+    using Numel = decltype(cute::size(SrcLayout{}));
 
     static constexpr int SRC_SIZE = get<CHUNK_DIM>(shape(SrcLayout{}));
     static constexpr int DST0_SIZE = get<CHUNK_DIM>(shape(Dst0Layout{}));
@@ -44,7 +44,7 @@ public:
                 auto dst0_phy_pos = dst0_layout(src_coord);
                 Epilogue::run(src[src_phy_pos], dst0, dst0_phy_pos, epilogue_scalars);
             } else {
-                set<CHUNK_DIM>(src_coord, get<CHUNK_DIM>(src_coord) - DST0_size);
+                replace<CHUNK_DIM>(src_coord, get<CHUNK_DIM>(src_coord) - DST0_SIZE);
                 auto dst1_phy_pos = dst1_layout(src_coord);
                 Epilogue::run(src[src_phy_pos], dst1, dst1_phy_pos, epilogue_scalars);
             }
