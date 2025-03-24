@@ -301,6 +301,9 @@ IKNRange forward_propagate(IKNRange const &range,
       ret = EXP_AS_IDENTITY ? range : IKNRange();
       break;
     }
+    // case type::KNOperatorType::KN_CHUNK_0_OP:
+    // case type::KNOperatorType::KN_CHUNK_1_OP:
+    // case type::KNOperatorType::KN_CHUNK_2_OP:
     case type::KNOperatorType::KN_ADD_OP:
     case type::KNOperatorType::KN_MUL_OP: {
       ret = range;
@@ -370,6 +373,9 @@ IKNRange backward_propagate(IKNRange const &knrange,
       ret = EXP_AS_IDENTITY ? knrange : IKNRange();
       break;
     }
+    // case type::KNOperatorType::KN_CHUNK_0_OP:
+    // case type::KNOperatorType::KN_CHUNK_1_OP:
+    // case type::KNOperatorType::KN_CHUNK_2_OP:
     case type::KNOperatorType::KN_ADD_OP:
     case type::KNOperatorType::KN_MUL_OP: {
       ret = knrange;
@@ -486,6 +492,7 @@ std::vector<IKNRange>
       IKNRange output_range_i = forward_propagate(input_ranges[i], op, i);
       output_range.combine(forward_propagate(input_ranges[i], op, i));
     }
+
     return {output_range};
   }
 }
@@ -600,6 +607,9 @@ ITBRange forward_propagate(ITBRange const &tbrange,
       ret = EXP_AS_IDENTITY ? tbrange : ITBRange();
       break;
     }
+    // case type::TBOperatorType::TB_CHUNK_0_OP:
+    // case type::TBOperatorType::TB_CHUNK_1_OP:
+    // case type::TBOperatorType::TB_CHUNK_2_OP:
     case type::TBOperatorType::TB_ADD_OP:
     case type::TBOperatorType::TB_MUL_OP: {
       ret = tbrange;
@@ -698,6 +708,9 @@ ITBRange backward_propagate(ITBRange const &tbrange,
               .truncate(op.input_tensors[opd_idx]));
       break;
     }
+    // case type::TBOperatorType::TB_CHUNK_0_OP:
+    // case type::TBOperatorType::TB_CHUNK_1_OP:
+    // case type::TBOperatorType::TB_CHUNK_2_OP:
     case type::TBOperatorType::TB_ADD_OP:
     case type::TBOperatorType::TB_MUL_OP: {
       ret = tbrange;
@@ -844,6 +857,12 @@ void range_propagate_forward(
     if (op->op_type == type::KNOperatorType::KN_INPUT_OP) {
       continue;
     }
+    if (op->op_type == type::KNOperatorType::KN_CHUNK_0_OP ||
+        op->op_type == type::KNOperatorType::KN_CHUNK_1_OP ||
+        op->op_type == type::KNOperatorType::KN_CHUNK_2_OP) {
+      continue;
+    }
+
     std::vector<IKNRange> input_ranges;
     for (auto const &input_tensor : op->input_tensors) {
       input_ranges.push_back(forward_ranges[input_tensor.guid]);
@@ -861,6 +880,11 @@ void range_propagate_backward(
     kernel::Graph const &graph) {
   for (auto const &op : reversed(graph.operators)) {
     if (op->op_type == type::KNOperatorType::KN_OUTPUT_OP) {
+      continue;
+    }
+    if (op->op_type == type::KNOperatorType::KN_CHUNK_0_OP ||
+        op->op_type == type::KNOperatorType::KN_CHUNK_1_OP ||
+        op->op_type == type::KNOperatorType::KN_CHUNK_2_OP) {
       continue;
     }
     std::vector<IKNRange> output_ranges;
@@ -903,6 +927,11 @@ void range_propagate_forward(
     if (op->op_type == type::TBOperatorType::TB_OUTPUT_OP) {
       continue;
     }
+    if (op->op_type == type::TBOperatorType::TB_CHUNK_0_OP ||
+        op->op_type == type::TBOperatorType::TB_CHUNK_1_OP ||
+        op->op_type == type::TBOperatorType::TB_CHUNK_2_OP) {
+      continue;
+    }
     std::vector<ITBRange> input_ranges;
     for (auto const &input_tensor : op->input_tensors) {
       input_ranges.push_back(forward_ranges[input_tensor.guid]);
@@ -923,6 +952,11 @@ void range_propagate_backward(
       continue;
     }
     if (op->op_type == type::TBOperatorType::TB_OUTPUT_OP) {
+      continue;
+    }
+    if (op->op_type == type::TBOperatorType::TB_CHUNK_0_OP ||
+        op->op_type == type::TBOperatorType::TB_CHUNK_1_OP ||
+        op->op_type == type::TBOperatorType::TB_CHUNK_2_OP) {
       continue;
     }
     std::vector<ITBRange> output_ranges;

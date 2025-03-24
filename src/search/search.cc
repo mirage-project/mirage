@@ -130,15 +130,24 @@ void KernelGraphGenerator::generate_next_operator(
               get_tensors_from_idx(*c.kn_graph, input_idx);
           std::vector<std::shared_ptr<AbstractExpr>> input_patterns;
           for (auto const &t : input_tensors) {
-            assert(contains_key(algebraic_pattern, t.guid));
-            input_patterns.push_back(algebraic_pattern.at(t.guid));
+            // if (t.owner_op->op_type != type::KNOperatorType::KN_CHUNK_0_OP &&
+            //     t.owner_op->op_type != type::KNOperatorType::KN_CHUNK_1_OP &&
+            //     t.owner_op->op_type != type::KNOperatorType::KN_CHUNK_2_OP) {
+              assert(contains_key(algebraic_pattern, t.guid));
+              input_patterns.push_back(algebraic_pattern.at(t.guid));
+            // }
           }
-          std::shared_ptr<AbstractExpr> pattern =
+          
+          // if (op_type != type::KNOperatorType::KN_CHUNK_0_OP &&
+          //     op_type != type::KNOperatorType::KN_CHUNK_1_OP &&
+          //     op_type != type::KNOperatorType::KN_CHUNK_2_OP) {
+            std::shared_ptr<AbstractExpr> pattern =
               get_pattern(op_type, input_tensors, input_patterns);
-          if (!check_pattern(pattern)) {
-            continue;
-          }
-
+            if (!check_pattern(pattern)) {
+              continue;
+            }
+          // }
+          
           KNOperator *new_op = create_op(*c.kn_graph, op_type, input_tensors);
 
           if (new_op) {
@@ -341,15 +350,24 @@ void KernelGraphGenerator::generate_next_operator(
             get_tensors_from_idx(*c.tb_graph, input_idx);
         std::vector<std::shared_ptr<AbstractExpr>> input_patterns;
         for (auto const &t : input_tensors) {
-          assert(contains_key(algebraic_pattern, t.guid));
-          input_patterns.push_back(algebraic_pattern.at(t.guid));
-        }
-        std::shared_ptr<AbstractExpr> pattern =
-            get_pattern(op_type, input_tensors, input_patterns);
-        if (!check_pattern(pattern)) {
-          continue;
+          // if (t.owner_op->op_type != type::TBOperatorType::TB_CHUNK_0_OP &&
+          //     t.owner_op->op_type != type::TBOperatorType::TB_CHUNK_1_OP &&
+          //     t.owner_op->op_type != type::TBOperatorType::TB_CHUNK_2_OP) {
+            assert(contains_key(algebraic_pattern, t.guid));
+            input_patterns.push_back(algebraic_pattern.at(t.guid));
+          // }
         }
 
+        // if (op_type != type::TBOperatorType::TB_CHUNK_0_OP &&
+        //     op_type != type::TBOperatorType::TB_CHUNK_1_OP &&
+        //     op_type != type::TBOperatorType::TB_CHUNK_2_OP) {
+          std::shared_ptr<AbstractExpr> pattern =
+              get_pattern(op_type, input_tensors, input_patterns);
+          if (!check_pattern(pattern)) {
+            continue;
+          }
+        // }
+        
         TBOperator *last_op = c.tb_graph->operators.back();
         TBOperator *new_op = create_op(*c.tb_graph, op_type, input_tensors);
 

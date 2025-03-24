@@ -51,7 +51,7 @@ TBOperator *Graph::create_chunk_op(STensor const &input, int chunk_size, int dim
 }
 
 TBChunkOp::TBChunkOp(Graph *bgraph, STensor const &input, int chunk_size, int dim)
- : TBOperator(bgraph, (type::TBOperatorType)( mirage::type::TB_CHUNK_0_OP + chunk_dim), input), chunk_size(chunk_size), chunk_dim(dim) {
+ : TBOperator(bgraph, (type::TBOperatorType)( mirage::type::TB_CHUNK_0_OP + dim), input), chunk_size(chunk_size), chunk_dim(dim) {
     assert(input.dim[dim] % chunk_size == 0);
     
     for (size_t i = 0; i < chunk_size; i++) {
@@ -66,7 +66,7 @@ TBChunkOp::TBChunkOp(Graph *bgraph, STensor const &input, int chunk_size, int di
 }
 
 TBChunkOp::~TBChunkOp() {
-    for (size_t i = 0; i < chunk_size; i++) {
+    for (int i = chunk_size - 1; i >= 0; i--) {
         bgraph->free_fingerprint(output_tensors[i]);
     }
 }

@@ -76,8 +76,8 @@ KNChunkOp::KNChunkOp(Graph *_graph, DTensor const &input, int chunk_size,
 }
 
 KNChunkOp::~KNChunkOp() {
-  for (auto &output : output_tensors) {
-    kgraph->free(output);
+  for (int i = chunk_size - 1; i >= 0; i--) {
+    kgraph->free(output_tensors[i]);
   }
 }
 
