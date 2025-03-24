@@ -15,8 +15,7 @@ jobs:
     name: Build and publish Python distributions to PyPI
     runs-on: ubuntu-22.04
     timeout-minutes: 60
-    environment: DEPLOY_TO_TEST_PYPI # use environment variable to configure, repository variable dont need this
-
+    
     steps:
     - name: Checkout Repository
       uses: actions/checkout@v3
