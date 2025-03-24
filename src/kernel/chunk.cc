@@ -36,8 +36,8 @@ std::vector<DTensor *> Graph::chunk(DTensor const *input, int chunk_size, int di
   operators.push_back(op);
   assert(op->output_tensors.size() > 0);
   std::vector<DTensor *> res;
-  for (auto t : op->output_tensors) {
-    res.push_back(&t);
+  for (auto i = 0; i < op->output_tensors.size(); i++) {
+    res.push_back(&(op->output_tensors[i]));
   }
   return res;
 }

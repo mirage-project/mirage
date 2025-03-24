@@ -861,6 +861,7 @@ void from_json(json const &j, Graph &graph) {
         std::vector<STensor> outputs = graph.chunk(get_tensor_from_guid(op.at("input_tensors")[0].at("guid").get<int>()), chunk_size, dim);
         guid_mapping[outputs[0].guid] = op.at("output_tensors")[0].at("guid").get<int>();
         guid_mapping[outputs[1].guid] = op.at("output_tensors")[1].at("guid").get<int>();
+        break;
       }
       case type::TBOperatorType::TB_REDUCTION_0_TO_DIMX_OP:
       case type::TBOperatorType::TB_REDUCTION_1_TO_DIMX_OP:

@@ -326,7 +326,6 @@ CustomOPTranspileResult
   int tma_barrier_size = 16 * config.pipeline_stages;
 
   // int 64
-  int cluster_barrier_size = 8;
 
   // Get the schedule
   TBSched sched = get_threadblock_schedule(g);

@@ -615,8 +615,10 @@ cdef class CyKNGraph:
 
     def chunk(self, DTensor input, int chunk_size, int chunk_dim):
         cdef vector[CppDTensor*] ptrs = self.p_kgraph.chunk(input.c_ptr, chunk_size, chunk_dim)
-        t1 = ctypes.cast(<unsigned long long>ptrs[0], ctypes.c_void_p)
-        t2 = ctypes.cast(<unsigned long long>ptrs[1], ctypes.c_void_p)
+        cdef CppDTensor* ptr1 = ptrs[0]
+        cdef CppDTensor* ptr2 = ptrs[1]
+        t1 = ctypes.cast(<unsigned long long>ptr1, ctypes.c_void_p)
+        t2 = ctypes.cast(<unsigned long long>ptr2, ctypes.c_void_p)
         return DTensor(t1), DTensor(t2)
 
     def rms_norm(self, DTensor input, tuple normalized_shape):
@@ -883,8 +885,10 @@ cdef class CyTBGraph:
     
     def chunk(self, STensor A, int chunk_size, int chunk_dim):
         cdef vector[CppSTensor*] ptrs = self.p_bgraph.chunk(A.c_ptr, chunk_size, chunk_dim)
-        t1 = ctypes.cast(<unsigned long long>ptrs[0], ctypes.c_void_p)
-        t2 = ctypes.cast(<unsigned long long>ptrs[1], ctypes.c_void_p)
+        cdef CppSTensor* ptr1 = ptrs[0]
+        cdef CppSTensor* ptr2 = ptrs[1]
+        t1 = ctypes.cast(<unsigned long long>ptr1, ctypes.c_void_p)
+        t2 = ctypes.cast(<unsigned long long>ptr2, ctypes.c_void_p)
         return STensor(t1), STensor(t2)
 
     def reduction(self, STensor A, int dim):

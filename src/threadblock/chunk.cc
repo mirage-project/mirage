@@ -33,13 +33,19 @@ std::vector<STensor *> Graph::chunk(STensor const *input, int chunk_size, int di
     operators.push_back(op);
     assert(op->output_tensors.size() > 0);
     std::vector<STensor *> res;
-    for (auto t : op->output_tensors) {
-        res.push_back(&t);
-    }
+    for (auto i = 0; i < op->output_tensors.size(); i++) {
+        res.push_back(&(op->output_tensors[i]));
+      }
     return res;
 }
 
 TBOperator *Graph::create_chunk_op(STensor const &input, int chunk_size, int dim) {
+    if (dim < 0 || dim >= input.num_dims || chunk_size <= 0) {
+        return nullptr;
+      }
+    if (input.dim[dim] % chunk_size != 0) {
+        return nullptr;
+    }
     TBOperator *op = new TBChunkOp(this, input, chunk_size, dim);
     size_t smem_usage = calculate_shared_memory_usage(op);
     if (smem_usage > mirage::config::MAX_SMEM_SIZE) {
