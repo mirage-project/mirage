@@ -2,12 +2,13 @@ name: PyPI Deploy
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - ci
+  # push:
+  #   branches:
+  #     - ci
 
 permissions:
   contents: read
+  id-token: write
 
 jobs:
   build-n-publish:

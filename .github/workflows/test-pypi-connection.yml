@@ -2,6 +2,9 @@ name: Test PyPI Connection
 
 on:
   workflow_dispatch: 
+  push:
+    branches:
+      - ci
 
 permissions:
   id-token: write  
