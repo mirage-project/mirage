@@ -2,10 +2,14 @@ import torch
 from transformers import BertTokenizer, BertForSequenceClassification, AdamW
 from torch import nn
 import pickle
+import os
 import onnx
 from onnx import shape_inference
 from partition_graph import Operator
 import torch.nn.functional as F
+
+device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+
 
 class SimpleClassifier(nn.Module):
     def __init__(self, input_size=784, hidden_size=128, num_classes=2):
@@ -18,7 +22,6 @@ class SimpleClassifier(nn.Module):
         
     def forward(self, x):
         return self.layers(x)
-device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 
 class SimpleClassifierMix(nn.Module):
     def __init__(self, input_size=784, hidden_size=128, num_classes=2):
@@ -42,35 +45,6 @@ class SimpleClassifierMix(nn.Module):
         return x
     
 
-# model = SimpleClassifier()
-# model.to(device)
-# batch_size = 2
-# input_size = 784  
-# dummy_input = torch.randn(batch_size, input_size, device=device)
-
-# torch.onnx.export(
-#     model,    
-#     dummy_input,              
-#     "scripts/onnx/my_model.onnx", 
-#     input_names=["input"], 
-#     dynamo=True                  
-# )
-
-
-
-model = SimpleClassifierMix()
-model.to(device)
-batch_size = 2
-input_size = 784  
-dummy_input = torch.randn(batch_size, input_size, device=device)
-
-torch.onnx.export(
-    model,    
-    dummy_input,              
-    "scripts/onnx/my_model.onnx", 
-    input_names=["input"], 
-    dynamo=True                  
-)
 
 class SplitModel(nn.Module):
     def __init__(self, input_dim, hidden_dim, output_dim):
@@ -90,30 +64,6 @@ class SplitModel(nn.Module):
         # x = self.fc_out(x)
         return x
 
-model = SplitModel(input_dim=8, hidden_dim=16, output_dim=4)
-x = torch.randn(5, 8)  # Batch of 5 samples with 8 features each
-output = model(x)
-print(output.shape)  # Expected output shape: (5, 4)
-
-input_dim = 8
-hidden_dim = 16
-output_dim = 4
-model = SplitModel(input_dim, hidden_dim, output_dim)
-
-model.eval()
-
-dummy_input = torch.randn(1, input_dim)  # Batch size 1, feature size 8
-
-# onnx_path = "scripts/onnx/split_model.onnx"
-# torch.onnx.export(
-#     model, 
-#     dummy_input, 
-#     onnx_path,
-#     input_names=["input"],
-#     output_names=["output"],
-#     dynamic_axes={"input": {0: "batch_size"}, "output": {0: "batch_size"}},  # Allows dynamic batch size
-#     dynamo = True
-# )
 
 
 """
@@ -241,39 +191,119 @@ def parse_onnx_model(model):
     print_computational_graph(root_node)
     return operators
 
+def test_cfg():
+    # model = SimpleClassifier()
+    # model.to(device)
+    # batch_size = 2
+    # input_size = 784  
+    # dummy_input = torch.randn(batch_size, input_size, device=device)
 
-"""Trying using a smaller model"""
-model = onnx.load('scripts/onnx/my_model.onnx')
-# model = onnx.load('scripts/onnx/split_model.onnx')
-
-parse_onnx_model(model)
-
-
-"""Trying using BERT"""
-
-# device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
-
-# bert_model = BertForSequenceClassification.from_pretrained("bert-base-uncased", num_labels=2)
-# bert_model.to(device)
-# dummy_input_ids = torch.randint(0, 30522, (2, 128)).to(device)
-# dummy_attention_mask = torch.ones((2, 128), requires_grad=True).to(device)
-# dummy_labels = torch.tensor([0, 1], dtype=torch.long).to(device)
-
-# dummy_outputs = bert_model(input_ids=dummy_input_ids, attention_mask=dummy_attention_mask, labels=dummy_labels)
-# dummy_loss = dummy_outputs.loss
+    # torch.onnx.export(
+    #     model,    
+    #     dummy_input,              
+    #     "scripts/onnx/my_model.onnx", 
+    #     input_names=["input"], 
+    #     dynamo=True                  
+    # )
 
 
-# torch.onnx.export(
-#     bert_model,    
-#     (dummy_input_ids, dummy_attention_mask),              
-#     "scripts/onnx/bert_model.onnx", 
-#     input_names=["input_ids", "attention_mask"],
-#     output_names=["logits"],
-#     dynamo=True                  
-# )
+
+    model = SimpleClassifierMix()
+    model.to(device)
+    batch_size = 2
+    input_size = 784  
+    dummy_input = torch.randn(batch_size, input_size, device=device)
+
+    torch.onnx.export(
+        model,    
+        dummy_input,              
+        "scripts/onnx/my_model.onnx", 
+        input_names=["input"], 
+        dynamo=True                  
+    )
+
+    model = SplitModel(input_dim=8, hidden_dim=16, output_dim=4)
+    x = torch.randn(5, 8)  # Batch of 5 samples with 8 features each
+    output = model(x)
+    print(output.shape)  # Expected output shape: (5, 4)
+
+    input_dim = 8
+    hidden_dim = 16
+    output_dim = 4
+    model = SplitModel(input_dim, hidden_dim, output_dim)
+
+    model.eval()
+
+    dummy_input = torch.randn(1, input_dim)  # Batch size 1, feature size 8
+
+    # onnx_path = "scripts/onnx/split_model.onnx"
+    # torch.onnx.export(
+    #     model, 
+    #     dummy_input, 
+    #     onnx_path,
+    #     input_names=["input"],
+    #     output_names=["output"],
+    #     dynamic_axes={"input": {0: "batch_size"}, "output": {0: "batch_size"}},  # Allows dynamic batch size
+    #     dynamo = True
+    # )
+
+    """Trying using a smaller model"""
+    model = onnx.load('scripts/onnx/my_model.onnx')
+    # model = onnx.load('scripts/onnx/split_model.onnx')
+
+    parse_onnx_model(model)
+
+
+    """Trying using BERT"""
+
+    # device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+
+    # bert_model = BertForSequenceClassification.from_pretrained("bert-base-uncased", num_labels=2)
+    # bert_model.to(device)
+    # dummy_input_ids = torch.randint(0, 30522, (2, 128)).to(device)
+    # dummy_attention_mask = torch.ones((2, 128), requires_grad=True).to(device)
+    # dummy_labels = torch.tensor([0, 1], dtype=torch.long).to(device)
+
+    # dummy_outputs = bert_model(input_ids=dummy_input_ids, attention_mask=dummy_attention_mask, labels=dummy_labels)
+    # dummy_loss = dummy_outputs.loss
+
+
+    # torch.onnx.export(
+    #     bert_model,    
+    #     (dummy_input_ids, dummy_attention_mask),              
+    #     "scripts/onnx/bert_model.onnx", 
+    #     input_names=["input_ids", "attention_mask"],
+    #     output_names=["logits"],
+    #     dynamo=True                  
+    # )
 
 # bert_model = onnx.load('scripts/onnx/bert_model.onnx')
 
 # parse_onnx_model(bert_model)
 
 
+def get_computation_graph(model, dummy_input, method):
+    match method:
+        case "onnx":
+            # Generate the ONNX file
+            onnx_path = "scripts/onnx/integrate_test.onnx"
+            os.makedirs(os.path.dirname(onnx_path), exist_ok=True)
+            
+            torch.onnx.export(
+                model,
+                dummy_input,
+                onnx_path,
+                input_names=["input"],
+                output_names=["output"],
+                dynamic_axes={"input": {0: "batch_size"}, "output": {0: "batch_size"}},
+                dynamo=True
+            )
+            
+
+            onnx_model = onnx.load(onnx_path)
+            operators = parse_onnx_model(onnx_model)
+            return operators
+        case _:
+            print("Unsupported method for build_graph")
+            return None
+    
