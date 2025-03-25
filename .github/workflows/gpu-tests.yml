@@ -38,8 +38,8 @@ jobs:
           auto-activate-base: false
           auto-update-conda: false
 
-      - name: Build Mirage
-        run: .github/workflows/helpers/build_mirage.sh
+      - name: Build Mirage from Source
+        run: .github/workflows/helpers/build_mirage_from_source.sh
       
       - name: Run performance test
         run: |

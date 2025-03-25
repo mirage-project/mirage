@@ -5,9 +5,9 @@ on:
     types:
       - completed
   pull_request:
-  push:
-    branches:
-      - "main"
+  # push:
+  #   branches:
+  #     - "main"
   workflow_dispatch:
 
 concurrency:
