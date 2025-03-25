@@ -138,14 +138,14 @@ with copy_include() as copied:
         print("WARNING: include directory already exists. Not copying again. "
               f"This may cause issues. Please remove {INCLUDE_BASE} and rerun setup.py", flush=True)
     
-    setup(name='mirage-project',
+    setup(name='mirage-project-test',
           version=__version__,
           description="Mirage: A Multi-Level Superoptimizer for Tensor Algebra",
           zip_safe=False,
           install_requires=requirements,
           packages=find_packages(where='python'),
           package_dir={'': 'python'},
-          url='https://github.com/mirage-project/mirage',
+          url='https://github.com/yzhou442/mirage',
           ext_modules=config_cython(),
           include_package_data=True,
           #**setup_args,
