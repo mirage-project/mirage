@@ -77,10 +77,10 @@ public:
 
   static __device__ __forceinline__ void run(T *__restrict__ updated_max,
                                              int thread_idx) {
-    tfloat32_t *updated_max_half = reinterpret_cast<tfloat32_t *>(updated_max);
+    tfloat32_t *updated_max_32 = reinterpret_cast<tfloat32_t *>(updated_max);
     for (int elem_idx = thread_idx; elem_idx < NUM_ELEMS / GROUP_SIZE;
          elem_idx += NUM_THREADS) {
-      updated_max_half[elem_idx] = (tfloat32_t)std::numeric_limits<T>::lowest();
+      updated_max_32[elem_idx] = (tfloat32_t)std::numeric_limits<T>::lowest();
     }
   }
 };
