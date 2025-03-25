@@ -27,7 +27,7 @@ class GraphSplitter:
         # Mirage supported operations
         self.mirage_supported_ops = {
             "matmul", "reduction", "exp", "silu", "gelu", "relu", 
-            "clamp", "add", "mul", "div", "rms_norm"
+            "clamp", "add", "mul", "div", "rms_norm", "gemm",
         }
     
     def is_supported_op(self, op) -> bool:
@@ -517,6 +517,19 @@ class GraphSplitter:
         """
         import mirage as mi
         
+        # Define operation mapping
+        OP_MAP = {
+            'matmul': lambda g, *args: g.matmul(*args),
+            'gemm': lambda g, *args: g.matmul(*args),  # Map Gemm to matmul
+            'exp': lambda g, *args: g.exp(*args),
+            'silu': lambda g, *args: g.silu(*args),
+            'gelu': lambda g, *args: g.gelu(*args),
+            'relu': lambda g, *args: g.relu(*args),
+            'add': lambda g, *args: g.add(*args),
+            'mul': lambda g, *args: g.mul(*args),
+            'div': lambda g, *args: g.div(*args),
+        }
+        
         graph = mi.new_kernel_graph()
         dims = []
         # Store the output tensors and reference counts (based on ID)
@@ -535,7 +548,6 @@ class GraphSplitter:
                 shape, tensor_id = shape_info
                 
                 if tensor_id not in intermediates:
-                    # External input or intermediate result首次使用
                     if shape is not None:
                         dims.append(shape)
                         inputs.append(graph.new_input(dims=shape, dtype=mi.float16))
@@ -547,29 +559,19 @@ class GraphSplitter:
                     inputs.append(tensor)
                     intermediates[tensor_id] = (tensor, ref_count + 1)
             
-            # Apply operation, determine operation type based on fn field
-            fn_name = op.fn.lower() if hasattr(op, 'fn') else op.name.lower()
+            # Get operation type and convert to lowercase for case-insensitive matching
+            fn_name = (op.fn if hasattr(op, 'fn') else op.name).lower()
             
             try:
-                if "matmul" in fn_name:
-                    res = graph.matmul(*inputs)
-                elif "exp" in fn_name:
-                    res = graph.exp(*inputs)
-                elif "silu" in fn_name:
-                    res = graph.silu(*inputs)
-                elif "gelu" in fn_name:
-                    res = graph.gelu(*inputs)
-                elif "relu" in fn_name:
-                    res = graph.relu(*inputs)
-                elif "add" in fn_name:
-                    res = graph.add(*inputs)
-                elif "mul" in fn_name:
-                    res = graph.mul(*inputs)
-                elif "div" in fn_name:
-                    res = graph.div(*inputs)
+                # Find the operation in the mapping
+                for op_type, op_func in OP_MAP.items():
+                    if op_type in fn_name:
+                        res = op_func(graph, *inputs)
+                        break
                 else:
                     print(f"Unsupported operation: {fn_name}")
                     continue
+                    
             except Exception as e:
                 print(f"Error executing {fn_name}: {e}")
                 continue
@@ -666,33 +668,33 @@ def process_operator_graph(operators_graph: Dict) -> Tuple[List[Tuple[Dict, str]
             
             print()
 
+    # convert subgraphs to kernel graphs
+    # kernel_graphs = []
+    # input_dims = []
 
-    kernel_graphs = []
-    input_dims = []
-
-    try:
-        print("\nGenerating Mirage kernel graphs...")
-        for i, (sg, sg_type) in enumerate(subgraphs):
-            if sg_type == "mirage":
-                print(f"Processing subgraph {i}...")
-                try:
-                    kernel_graph, dims = splitter.to_kernel_graph(sg) 
-                    kernel_graphs.append(kernel_graph)
-                    input_dims.append(dims)
-                    print(f"Successfully processed subgraph {i}")
-                except Exception as e:
-                    print(f"Error processing subgraph {i}: {e}")
-                    import traceback
-                    traceback.print_exc()
-            else:
-                print(f"Skipping subgraph {i}: not supported by Mirage")
+    # try:
+    #     print("\nGenerating Mirage kernel graphs...")
+    #     for i, (sg, sg_type) in enumerate(subgraphs):
+    #         if sg_type == "mirage":
+    #             print(f"Processing subgraph {i}...")
+    #             try:
+    #                 kernel_graph, dims = splitter.to_kernel_graph(sg) 
+    #                 kernel_graphs.append(kernel_graph)
+    #                 input_dims.append(dims)
+    #                 print(f"Successfully processed subgraph {i}")
+    #             except Exception as e:
+    #                 print(f"Error processing subgraph {i}: {e}")
+    #                 import traceback
+    #                 traceback.print_exc()
+    #         else:
+    #             print(f"Skipping subgraph {i}: not supported by Mirage")
         
-        print(f"Generated {len(kernel_graphs)} Mirage kernel graphs")
+    #     print(f"Generated {len(kernel_graphs)} Mirage kernel graphs")
         
-    except Exception as e:
-        print(f"Error in kernel graph generation: {e}")
-        import traceback
-        traceback.print_exc()
+    # except Exception as e:
+    #     print(f"Error in kernel graph generation: {e}")
+    #     import traceback
+    #     traceback.print_exc()
     
     
     

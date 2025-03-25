@@ -235,6 +235,7 @@ def parse_onnx_model(model):
     root_node = operators[model.graph.node[0].name]
     # print_computational_graph(operators['node_Transpose_0'])
     print_computational_graph(root_node)
+    return operators
 
 
 """Trying using a smaller model"""
