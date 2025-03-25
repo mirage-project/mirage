@@ -28,7 +28,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           submodules: recursive
-      
+          
       - name: Install conda and Mirage dependencies
         uses: conda-incubator/setup-miniconda@v3
         with:
@@ -37,15 +37,18 @@ jobs:
           environment-file: conda/mirage.yml
           auto-activate-base: false
           auto-update-conda: false
+          
+      - name: Install Dependencies
+        run: .github/workflows/helpers/install_dependencies.sh
 
       - name: Build Mirage from Source
         run: .github/workflows/helpers/build_mirage_from_source.sh
-      
+
       - name: Run performance test
         run: |
           tests/ci-tests/run_python_tests.sh before-installation
           tests/ci-tests/run_python_tests.sh after-installation
-      
+        
       # Clear cache to prevent affecting subsequent tests
       - name: Clear cache
         if: always()
