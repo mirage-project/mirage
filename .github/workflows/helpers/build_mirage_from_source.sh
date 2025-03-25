@@ -19,6 +19,7 @@ elif [ -d "/usr/local/cuda" ]; then
 fi
 
 # Import environment variables setup script
+# shellcheck source=.github/workflows/helpers/set_env.sh
 source "$(dirname "$0")/set_env.sh"
 
 cd "$MIRAGE_ROOT" || { echo "Error: Could not change directory to $MIRAGE_ROOT"; exit 1; }
