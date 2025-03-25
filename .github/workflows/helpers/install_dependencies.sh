@@ -20,7 +20,7 @@ sudo ln -sf /opt/cmake/bin/cmake /usr/local/bin/cmake
 pip3 install --upgrade pip build setuptools wheel cython
 
 # Install PyTorch temporarily since it is not included in requirements.txt so far
-pip3 install torch==2.1.2
+pip3 install torch==2.6.0+cu118 torchvision==0.21.0+cu118 torchaudio==2.6.0+cu118 --extra-index-url https://download.pytorch.org/whl/cu118
 
 # Install project requirements
 if [ -f requirements.txt ]; then
