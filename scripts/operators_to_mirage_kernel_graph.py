@@ -604,6 +604,9 @@ def process_operator_graph(operators_graph: Dict) -> Tuple[List[Tuple[Dict, str]
     Returns:
         Tuple[List, Dict]: List of subgraphs and their dependencies
     """
+    # Preprocess the graph to handle special operators
+    operators_graph = preprocess_special_operators(operators_graph)
+    
     splitter = GraphSplitter()
     
     print("Splitting operator graph into subgraphs...")
@@ -699,3 +702,60 @@ def process_operator_graph(operators_graph: Dict) -> Tuple[List[Tuple[Dict, str]
     
     
     return subgraphs, subgraph_deps
+
+def preprocess_special_operators(operators_graph: Dict) -> Dict:
+    """
+    Preprocess the graph to handle special operators that need custom treatment.
+    
+    Currently handles:
+    - Identity operators: removed and connections bypassed
+    
+    Args:
+        operators_graph: Dict mapping operators to boolean values
+        
+    Returns:
+        Dict: Processed operator graph
+    """
+    # List of preprocessing functions to apply
+    preprocessors = [
+        remove_identity_operators,
+    ]
+    
+    # Apply each preprocessor in sequence
+    processed_graph = operators_graph
+    for preprocess_fn in preprocessors:
+        processed_graph = preprocess_fn(processed_graph)
+    
+    return processed_graph
+
+def remove_identity_operators(operators_graph: Dict) -> Dict:
+    """
+    Remove Identity operators from the graph and fix connections.
+    
+    Args:
+        operators_graph: Dict mapping operators to boolean values
+        
+    Returns:
+        Dict: Cleaned operator graph without Identity operators
+    """
+    identity_ops = [op for op in operators_graph if hasattr(op, 'fn') and op.fn.lower() == 'identity']
+    
+    if not identity_ops:
+        return operators_graph
+    
+    print(f"Removing {len(identity_ops)} Identity operators")
+    
+    for id_op in identity_ops:
+        # For each input->identity->output connection, create input->output connection
+        for in_op in id_op.input_ops:
+            if id_op in in_op.output_ops:
+                in_op.output_ops.remove(id_op)
+            
+            in_op.output_ops.extend([out for out in id_op.output_ops if out not in in_op.output_ops])
+            
+        for out_op in id_op.output_ops:
+            if id_op in out_op.input_ops:
+                out_op.input_ops.remove(id_op)
+            
+            out_op.input_ops.extend([in_op for in_op in id_op.input_ops if in_op not in out_op.input_ops])
+    return {op: True for op in operators_graph if op not in identity_ops}
