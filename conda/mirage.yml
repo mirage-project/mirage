@@ -1,0 +1,21 @@
+name: mirage
+channels:
+  - conda-forge
+  - pytorch
+  - nvidia
+dependencies:
+  - python=3.10
+  - pip
+  - cmake>=3.24
+  - cython>=0.28
+  - numpy
+  - tqdm
+  - graphviz
+  - pytorch
+  - cudatoolkit=12.1
+  - pip:
+    - z3-solver==4.14
+    - setuptools
+    - requests
+    - cmake-build-extension 
+    - flashinfer-python
