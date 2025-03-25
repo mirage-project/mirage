@@ -2,30 +2,46 @@
 # Script to set up environment variables for Mirage
 # This script can be sourced by other scripts or called directly
 
+# Function to set environment variables in GitHub Actions or locally
+set_env() {
+  local name="$1"
+  local value="$2"
+  export "$name"="$value"
+  
+  # If in GitHub Actions, append to GITHUB_ENV
+  if [ -n "$GITHUB_ENV" ]; then
+    echo "$name=$value" >> $GITHUB_ENV
+  fi
+}
+
 # Set CUDA related environment variables
 export CUDACXX=$(which nvcc)
-echo "CUDACXX=${CUDACXX}" >> $GITHUB_ENV
+set_env "CUDACXX" "${CUDACXX}"
 
 # Use CUDA_PATH if provided, otherwise try auto-detection
 if [ -n "$CUDA_PATH" ]; then
-  echo "CUDA_HOME=${CUDA_PATH}" >> $GITHUB_ENV
+  set_env "CUDA_HOME" "${CUDA_PATH}"
 else
   # If CUDA_PATH is not provided, try auto-detection
   export CUDA_HOME="/usr/local/cuda"
-  echo "CUDA_HOME=${CUDA_HOME}" >> $GITHUB_ENV
+  set_env "CUDA_HOME" "${CUDA_HOME}"
 fi
 
 # Set C and C++ compilers
 export CC=$(which gcc)
 export CXX=$(which g++)
-echo "CC=${CC}" >> $GITHUB_ENV
-echo "CXX=${CXX}" >> $GITHUB_ENV
+set_env "CC" "${CC}"
+set_env "CXX" "${CXX}"
 
 # Get Z3 paths - use absolute paths from find command
-export Z3_LIB_PATH=$(find /usr/lib -name "libz3.so" | head -1)
+export Z3_LIB_PATH=$(find /usr/lib /usr/lib/x86_64-linux-gnu -name "libz3.so" 2>/dev/null | head -1)
+if [ -z "$Z3_LIB_PATH" ]; then
+  echo "Error: Could not find libz3.so. Please install Z3 library."
+  exit 1
+fi
 export Z3_INCLUDE_PATH="/usr/include"
-echo "Z3_LIB_PATH=${Z3_LIB_PATH}" >> $GITHUB_ENV
-echo "Z3_INCLUDE_PATH=${Z3_INCLUDE_PATH}" >> $GITHUB_ENV
+set_env "Z3_LIB_PATH" "${Z3_LIB_PATH}"
+set_env "Z3_INCLUDE_PATH" "${Z3_INCLUDE_PATH}"
 
 # Set LD_LIBRARY_PATH
 if [ -n "$CUDA_PATH" ]; then
@@ -33,7 +49,7 @@ if [ -n "$CUDA_PATH" ]; then
 else
   export LD_LIBRARY_PATH="/usr/lib:/usr/lib/x86_64-linux-gnu:/usr/local/cuda/lib64:${LD_LIBRARY_PATH}"
 fi
-echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH}" >> $GITHUB_ENV
+set_env "LD_LIBRARY_PATH" "${LD_LIBRARY_PATH}"
 
 # Print environment variables for debugging
 echo "Environment variables set:"

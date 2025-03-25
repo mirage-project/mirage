@@ -1,9 +1,9 @@
 name: "Docker Build & Deploy"
 on:
   pull_request:
-  push:
-    branches:
-      - "main"
+  # push:
+    # branches:
+      # - "main"
       # - "ci"
   workflow_dispatch:
 

@@ -40,6 +40,9 @@ jobs:
           ldd $(find /usr/lib -name "*z3*.so*" | head -1) || true
           
       - name: Build Mirage from Source
+        env:
+          CUDA_TOOLKIT_PATH: ${{ steps.cuda-toolkit.outputs.CUDA_PATH }}
+          GITHUB_WORKSPACE: ${{ github.workspace }}
         run: .github/workflows/helpers/build_mirage_from_source.sh
       
       - name: Test Mirage Import
