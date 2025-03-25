@@ -21,4 +21,4 @@ dependencies:
     - graphviz
     - cmake
     - cython
-    - numpy=2.1.2
+    - numpy==2.1.2
