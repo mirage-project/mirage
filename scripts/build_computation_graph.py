@@ -117,7 +117,7 @@ dummy_input = torch.randn(1, input_dim)  # Batch size 1, feature size 8
 
 
 """
-Prints a representzation of the computational graph
+Prints a representation of the computational graph
 """
 def print_computational_graph(root_node, indent=0, visited=None):
     if visited is None:
@@ -181,28 +181,32 @@ def parse_onnx_model(model):
 
     tensor_producer = {}
     tensor_consumer = {}
-
-    # store the tensor producers in a dict
+    tensor_id = {}
+    # store the tensor producers and consumers in a dict
     for node in model.graph.node:
-        for output in node.output:
-            tensor_producer[output] = node.name if node.name else f"{node.op_type}_{id(node)}"
-
-        for input in node.input:
-            tensor_consumer[input] = node.name if node.name else f"{node.op_type}_{id(node)}"
-
+        for output_name in node.output:
+            tensor_producer[output_name] = node.name if node.name else f"{node.op_type}_{id(node)}"
+            if output_name not in tensor_id:
+                tensor_id[output_name] = len(tensor_id)+1
+        for input_name in node.input:
+            tensor_consumer[input_name] = node.name if node.name else f"{node.op_type}_{id(node)}"
+            if input_name not in tensor_id:
+                tensor_id[input_name] = len(tensor_id)+1
+    print("TensorID: ", tensor_id)
     operators = {}
+
     # store the operators in a dict
+
     for node in model.graph.node:
         op_type = node.op_type
         node_name = node.name or f"{node.op_type}_{id(node)}"
-        input_tensor_shapes = [(shape_value_dict[input_name], id(node)) for input_name in node.input]
-        output_tensor_shapes = [(shape_value_dict[output_name], id(node)) for output_name in node.output]
-        print(node_name)
-        print("inputs : ", [input_name for input_name in node.input])
+        input_tensor_shapes = [(shape_value_dict[input_name], tensor_id[input_name]) for input_name in node.input]
+        output_tensor_shapes = [(shape_value_dict[output_name], tensor_id[output_name]) for output_name in node.output]
 
         operator = Operator(name=node_name, fn=op_type, input_ops=[], output_ops=[], input_tensor_shapes=input_tensor_shapes, output_tensor_shapes=output_tensor_shapes)
         # operator = {"name":node_name, "fn":op_type, "input_ops":[], "output_ops":[], "input_tensor_shapes":input_tensor_shapes, "output_tensor_shapes":output_tensor_shapes}
         operators[node_name] = operator
+        
     # print("Tensor producers: ", tensor_producer)
     # print("Tensor consumers: ", tensor_consumer)
 
