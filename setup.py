@@ -34,6 +34,11 @@ import z3
 z3_path = path.dirname(z3.__file__)
 print(f"Z3 path: {z3_path}", flush=True)
 
+# Use version.py to get package version
+version_file = os.path.join(os.path.dirname(__file__), "python/mirage/version.py")
+with open(version_file, "r") as f:
+    exec(f.read())  # This will define __version__
+
 def config_cython():
     sys_cflags = sysconfig.get_config_var("CFLAGS")
     try:
@@ -134,7 +139,7 @@ with copy_include() as copied:
               f"This may cause issues. Please remove {INCLUDE_BASE} and rerun setup.py", flush=True)
     
     setup(name='mirage-project',
-          version="0.2.3",
+          version=__version__,
           description="Mirage: A Multi-Level Superoptimizer for Tensor Algebra",
           zip_safe=False,
           install_requires=requirements,

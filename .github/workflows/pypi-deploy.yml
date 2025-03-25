@@ -57,11 +57,10 @@ jobs:
     - name: Get package version
       if: ${{ vars.DEPLOY_TO_TEST_PYPI == 'false' }}
       run: |
-        # When running setup.py outside of pip install, we need to manually install imported modules
-        pip install setuptools requests cmake-build-extension
-        version=$(python setup.py --version)
+        version=$(python -c "import os; exec(open('python/mirage/version.py').read()); print(__version__)")
         echo "PY_VERSION=${version}" >> $GITHUB_ENV
-          
+        echo "Package version: ${version}"
+
     - name: Create Git tag
       if: ${{ vars.DEPLOY_TO_TEST_PYPI == 'false' }}
       uses: mathieudutour/github-tag-action@v6.1
