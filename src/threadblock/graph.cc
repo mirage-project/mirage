@@ -104,6 +104,7 @@ size_t Graph::calculate_shared_memory_usage(TBOperator *new_op) {
       case mirage::type::TB_DIV_OP:
       case mirage::type::TB_ADD_OP:
       case mirage::type::TB_MUL_OP:
+      case mirage::type::TB_SUB_OP:
       // Reduction
       case mirage::type::TB_REDUCTION_0_OP:
       case mirage::type::TB_REDUCTION_1_OP:

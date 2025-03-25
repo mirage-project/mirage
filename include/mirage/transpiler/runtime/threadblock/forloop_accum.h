@@ -56,7 +56,6 @@ public:
   using AccumNumel = decltype(size(AccumLayout{}));
   using RescaleNumel = decltype(size(RescaleLayout{}));
 
-  CUTE_STATIC_ASSERT_V(rank(AccumLayout{}) == 2);
   CUTE_STATIC_ASSERT_V(AccumNumel{} == size(SrcLayout{}));
   CUTE_STATIC_ASSERT_V(RescaleNumel{} == size<0>(shape(AccumLayout{})));
 

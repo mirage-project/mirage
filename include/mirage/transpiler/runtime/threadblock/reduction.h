@@ -77,10 +77,10 @@ public:
 
   static __device__ __forceinline__ void run(T *__restrict__ updated_max,
                                              int thread_idx) {
-    uint128_t *updated_max_128 = reinterpret_cast<uint128_t *>(updated_max);
+    tfloat32_t *updated_max_half = reinterpret_cast<tfloat32_t *>(updated_max);
     for (int elem_idx = thread_idx; elem_idx < NUM_ELEMS / GROUP_SIZE;
          elem_idx += NUM_THREADS) {
-      updated_max_128[elem_idx] = std::numeric_limits<T>::lowest();
+      updated_max_half[elem_idx] = (tfloat32_t)std::numeric_limits<T>::lowest();
     }
   }
 };
@@ -138,9 +138,11 @@ public:
       // diff = unupdated_max - updated_max
       CUTE_UNROLL
       for (int i = 0; i < REDUCTION_FACTOR; ++i) {
-        max_val = max(
-            max_val,
-            src[src_layout(src_elem_idx + i * SRC_REDUCTION_DIM_COORD_STRIDE)]);
+        max_val = max_val > src[src_layout(src_elem_idx +
+                                           i * SRC_REDUCTION_DIM_COORD_STRIDE)]
+                      ? max_val
+                      : src[src_layout(src_elem_idx +
+                                       i * SRC_REDUCTION_DIM_COORD_STRIDE)];
       }
       updated_max[updated_max_layout(dst_elem_idx)] = max_val;
       diff[diff_layout(dst_elem_idx)] =

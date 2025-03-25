@@ -105,15 +105,18 @@ TBReductionOp::TBReductionOp(Graph *bgraph,
                              STensor const &input,
                              int dim,
                              int size)
-    : TBOperator(bgraph,
-                 size == 1 ? (mirage::type::TBOperatorType)(
-                                 mirage::type::TB_REDUCTION_0_OP + dim)
-                 : size == -1
-                     ? (mirage::type::TBOperatorType)(
-                           mirage::type::TB_REDUCTION_0_MAX_OP + dim)
-                     : (mirage::type::TBOperatorType)(
-                           mirage::type::TB_REDUCTION_0_TO_DIMX_OP + dim),
-                 input),
+    : TBOperator(
+          bgraph,
+          size == 1
+              ? (mirage::type::TBOperatorType)(mirage::type::TB_REDUCTION_0_OP +
+                                               dim)
+          : size == -1
+              ? (mirage::type::
+                     TBOperatorType)(mirage::type::TB_REDUCTION_0_MAX_OP + dim)
+              : (mirage::type::TBOperatorType)(mirage::type::
+                                                   TB_REDUCTION_0_TO_DIMX_OP +
+                                               dim),
+          input),
       reduce_dim(dim), reduce_size(size) {
   // mirage::type::TBOperatorType type =
   // static_cast<mirage::type::TBOperatorType>(
@@ -132,6 +135,7 @@ TBReductionOp::TBReductionOp(Graph *bgraph,
   if (reduce_size == -1) {
     // For max reduction, we need to allocate another tensor for difference
     STensor diff = output;
+    diff.owner_ts_idx = 1;
     diff.guid = STensor::next_guid++;
     diff.smem_offset = bgraph->allocate_fingerprint(diff);
     output_tensors.push_back(diff);
@@ -139,10 +143,7 @@ TBReductionOp::TBReductionOp(Graph *bgraph,
 }
 
 TBReductionOp::~TBReductionOp() {
-  // bgraph->free_fingerprint(output_tensors[0]);
-  for (STensor const &output : output_tensors) {
-    bgraph->free_fingerprint(output);
-  }
+  bgraph->free_fingerprint(output_tensors);
 }
 
 TBReductionOp::operator json() const {
