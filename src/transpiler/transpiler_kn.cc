@@ -455,7 +455,7 @@ TranspileResult Transpiler::transpile_ugraph() {
         CustomOPTranspileResult result;
         if (config.target_cc == GPU_CC::H100) {
           result = transpile_kn_custom_op_hopper(cur_op);
-          // only generate for first tb graph
+          // only generate for first tb graph now
           config.profiling = false;
         } else {
           result = transpile_kn_custom_op(cur_op);

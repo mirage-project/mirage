@@ -325,7 +325,6 @@ class KNGraph:
 
         prodiler_buffer_tensor = torch.empty(results["profiler_buf_size"], dtype=torch.uint64, device=input_tensors[0].device).contiguous()
 
-        print("results['profiler_buf_size']", results['profiler_buf_size'])
         buffer_tensor_ptr = buffer_tensor.data_ptr()
         input_tensors_ptr = [tensor.data_ptr() for tensor in input_tensors]
         output_tensors_ptr = [tensor.data_ptr() for tensor in output_tensors]
