@@ -2,9 +2,10 @@ name: "Build Test"
 
 on:
   pull_request:
-  # push:
-  #   branches:
-  #     - main
+  push:
+    branches:
+      - main
+  workflow_dispatch:
 
 concurrency:
   group: build-${{ github.head_ref || github.run_id }}
