@@ -8,16 +8,17 @@ dependencies:
   - python=3.11
   - pip
   - setuptools
-  - cmake
-  - cython
-  - numpy=2.1.2
-  - graphviz
-  - tqdm
-  - pytorch=2.6.0
-  - pytorch-cuda=11.8
   - pip:
     - z3-solver==4.14.0.0
     - transformers
     - cmake-build-extension
     - requests
     - flashinfer-python
+    - torch==2.6.0+cu118
+    - torchaudio==2.6.0+cu118
+    - torchvision==0.21.0+cu118
+    - tqdm
+    - graphviz
+    - cmake
+    - cython
+    - numpy=2.1.2

@@ -19,6 +19,7 @@ jobs:
         shell: bash -l {0}
     env:
       CUDA_PATH: /usr/local/cuda
+      CUDACXX: /usr/local/cuda/bin/nvcc
       CONDA: "3"
     steps:
       - name: Set path
