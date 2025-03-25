@@ -2,9 +2,12 @@
 set -euo pipefail
 
 # Setup project paths and environment variables
-export MIRAGE_HOME="$(realpath "${BASH_SOURCE[0]%/*}/../..")"
-export BUILD_FOLDER="${MIRAGE_HOME}/build"
-export CUDA_HOME=${CUDA_HOME:-"/usr/local/cuda"}
+MIRAGE_HOME=$(realpath "${BASH_SOURCE[0]%/*}/../..")
+export MIRAGE_HOME
+BUILD_FOLDER="${MIRAGE_HOME}/build"
+export BUILD_FOLDER
+CUDA_HOME=${CUDA_HOME:-"/usr/local/cuda"}
+export CUDA_HOME
 export PATH="${CUDA_HOME}/bin:${PATH}"
 export LD_LIBRARY_PATH="${CUDA_HOME}/lib64:${LD_LIBRARY_PATH}"
 
@@ -21,20 +24,19 @@ installation_status=${1:-"before-installation"}
 echo "Running Python interface tests (installation status: ${installation_status})"
 
 # Ensure we're in the correct directory
-cd "${MIRAGE_HOME}/tests/ci-tests/qwen2.5"
+cd "${MIRAGE_HOME}/tests/ci-tests/qwen2.5" || exit 1
 
 run_test() {
-  local disable_flag=$1
-  local mode=$2
-  local status_msg=$3
+  local disable_flag="$1"
+  local mode="$2"
+  local status_msg="$3"
 
   echo "Running ${status_msg}..."
-  python demo.py $disable_flag --output-dir "$OUTPUT_DIR" --prefix "$PREFIX"
+  python demo.py "$disable_flag" --output-dir "$OUTPUT_DIR" --prefix "$PREFIX"
   
-  local response_file="${OUTPUT_DIR}/${PREFIX}_${mode}_response.txt"
   local latency_file="${OUTPUT_DIR}/${PREFIX}_${mode}_latency.txt"
   
-  echo "${status_msg} completed, latency: $(cat $latency_file) ms"
+  echo "${status_msg} completed, latency: $(cat "$latency_file") ms"
 }
 
 if [[ "$installation_status" == "before-installation" ]]; then

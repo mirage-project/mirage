@@ -1,13 +1,15 @@
 #!/bin/bash
 # Script to build Mirage from source
+set -euo pipefail
 
 # Setup environment variables
 # Use current directory if not in GitHub Actions
 if [ -n "$GITHUB_WORKSPACE" ]; then
-  export MIRAGE_ROOT="$GITHUB_WORKSPACE"
+  MIRAGE_ROOT="$GITHUB_WORKSPACE"
 else
-  export MIRAGE_ROOT="$(pwd)"
+  MIRAGE_ROOT="$(pwd)"
 fi
+export MIRAGE_ROOT
 
 # Detect CUDA path from environment or use default
 if [ -n "$CUDA_TOOLKIT_PATH" ]; then
@@ -17,10 +19,11 @@ elif [ -d "/usr/local/cuda" ]; then
 fi
 
 # Import environment variables setup script
-source $(dirname "$0")/set_env.sh
+source "$(dirname "$0")/set_env.sh"
 
-cd "$MIRAGE_ROOT"
-mkdir -p build && cd build
+cd "$MIRAGE_ROOT" || { echo "Error: Could not change directory to $MIRAGE_ROOT"; exit 1; }
+mkdir -p build 
+cd build || { echo "Error: Could not change directory to build"; exit 1; }
 
 # Configure with CMake using Z3 location
 cmake .. \
@@ -30,10 +33,10 @@ cmake .. \
 -DCMAKE_CXX_COMPILER="$CXX"
 
 # Build with multiple cores
-make -j$(nproc)
+make -j"$(nproc)"
 
 # Install Mirage
-cd "$MIRAGE_ROOT"
+cd "$MIRAGE_ROOT" || { echo "Error: Could not change directory to $MIRAGE_ROOT"; exit 1; }
 # Add LD_LIBRARY_PATH for Z3
 export LD_LIBRARY_PATH="/usr/lib:/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH}"
 pip install -e .
