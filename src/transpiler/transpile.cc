@@ -31,62 +31,65 @@ DT get_tensor_in_new_graph(std::unordered_map<size_t, DT> mapping,
 
 // return the guid of the output tensors whose owner should be substituted
 std::vector<size_t>
-    get_tensors_replace_for_online_softmax(kernel::Graph const *g) {
+    get_tensors_replace_for_online_softmax(kernel::Graph const *g,
+                                           bool flag = false) {
   using namespace mirage::type;
   std::vector<size_t> ret;
-  for (auto const &op : g->operators) {
-    if (op->op_type != KN_CUSTOMIZED_OP) {
-      continue;
-    }
-    kernel::KNCustomizedOp *customized_op =
-        static_cast<kernel::KNCustomizedOp *>(op);
-    for (auto const &bop : customized_op->bgraph.operators) {
-      if (bop->op_type == TB_EXP_OP) {
-        assert(bop->input_tensors.size() == 1);
-        assert(bop->output_tensors.size() == 1);
-        if (bop->input_tensors[0].owner_op->op_type != TB_MATMUL_OP) {
-          continue;
-        }
-        auto output_tensor = bop->output_tensors[0];
-        std::vector<mirage::threadblock::TBOperator *> consumers;
-        for (auto const &bop2 : customized_op->bgraph.operators) {
-          for (auto const &input_tensor : bop2->input_tensors) {
-            if (input_tensor.guid == output_tensor.guid) {
-              consumers.push_back(bop2);
-            }
-          }
-        }
-        if (consumers.size() != 2) {
-          continue;
-        }
-        int matmul_consumer_idx = -1;
-        if (consumers[0]->op_type == TB_FORLOOP_ACCUM_RED_LD_SUM_OP) {
-          if (consumers[1]->op_type == TB_MATMUL_OP) {
-            matmul_consumer_idx = 1;
-          }
-        } else if (consumers[1]->op_type == TB_FORLOOP_ACCUM_RED_LD_SUM_OP) {
-          if (consumers[0]->op_type == TB_MATMUL_OP) {
-            matmul_consumer_idx = 0;
-          }
-        } else {
-          continue;
-        }
-        assert(matmul_consumer_idx != -1);
-        auto matmul_consumer = consumers[matmul_consumer_idx];
-        assert(matmul_consumer->input_tensors.size() == 2);
-        assert(matmul_consumer->output_tensors.size() == 1);
-        auto matmul_consumer_output = matmul_consumer->output_tensors[0];
-        for (auto const &bop3 : customized_op->bgraph.operators) {
-          if (bop3->op_type != TB_FORLOOP_ACCUM_NO_RED_OP) {
+  if (flag) {
+    for (auto const &op : g->operators) {
+      if (op->op_type != KN_CUSTOMIZED_OP) {
+        continue;
+      }
+      kernel::KNCustomizedOp *customized_op =
+          static_cast<kernel::KNCustomizedOp *>(op);
+      for (auto const &bop : customized_op->bgraph.operators) {
+        if (bop->op_type == TB_EXP_OP) {
+          assert(bop->input_tensors.size() == 1);
+          assert(bop->output_tensors.size() == 1);
+          if (bop->input_tensors[0].owner_op->op_type != TB_MATMUL_OP) {
             continue;
           }
-          assert(bop3->input_tensors.size() == 1);
-          if (bop3->input_tensors[0].guid == matmul_consumer_output.guid) {
-            ret.push_back(bop->output_tensors[0].guid);
-            ret.push_back(consumers[0]->output_tensors[0].guid);
-            ret.push_back(consumers[1]->output_tensors[0].guid);
-            ret.push_back(bop3->output_tensors[0].guid);
-            return ret;
+          auto output_tensor = bop->output_tensors[0];
+          std::vector<mirage::threadblock::TBOperator *> consumers;
+          for (auto const &bop2 : customized_op->bgraph.operators) {
+            for (auto const &input_tensor : bop2->input_tensors) {
+              if (input_tensor.guid == output_tensor.guid) {
+                consumers.push_back(bop2);
+              }
+            }
+          }
+          if (consumers.size() != 2) {
+            continue;
+          }
+          int matmul_consumer_idx = -1;
+          if (consumers[0]->op_type == TB_FORLOOP_ACCUM_RED_LD_SUM_OP) {
+            if (consumers[1]->op_type == TB_MATMUL_OP) {
+              matmul_consumer_idx = 1;
+            }
+          } else if (consumers[1]->op_type == TB_FORLOOP_ACCUM_RED_LD_SUM_OP) {
+            if (consumers[0]->op_type == TB_MATMUL_OP) {
+              matmul_consumer_idx = 0;
+            }
+          } else {
+            continue;
+          }
+          assert(matmul_consumer_idx != -1);
+          auto matmul_consumer = consumers[matmul_consumer_idx];
+          assert(matmul_consumer->input_tensors.size() == 2);
+          assert(matmul_consumer->output_tensors.size() == 1);
+          auto matmul_consumer_output = matmul_consumer->output_tensors[0];
+          for (auto const &bop3 : customized_op->bgraph.operators) {
+            if (bop3->op_type != TB_FORLOOP_ACCUM_NO_RED_OP) {
+              continue;
+            }
+            assert(bop3->input_tensors.size() == 1);
+            if (bop3->input_tensors[0].guid == matmul_consumer_output.guid) {
+              ret.push_back(bop->output_tensors[0].guid);
+              ret.push_back(consumers[0]->output_tensors[0].guid);
+              ret.push_back(consumers[1]->output_tensors[0].guid);
+              ret.push_back(bop3->output_tensors[0].guid);
+              return ret;
+            }
           }
         }
       }
@@ -113,7 +116,7 @@ Transpiler::Transpiler(kernel::Graph const *_graph,
   std::unordered_map<size_t, kernel::DTensor> dtensor_mapping;
   // Rewrite the graph for online softmax
   std::vector<size_t> tensors_replace =
-      get_tensors_replace_for_online_softmax(_graph);
+      get_tensors_replace_for_online_softmax(_graph, true);
   assert(tensors_replace.size() == 4 || tensors_replace.size() == 0);
 
   int input_dtensor_idx = 0;
@@ -453,17 +456,6 @@ Transpiler::Transpiler(kernel::Graph const *_graph,
             }
           }
         }
-        // std::cout << "tbg->operators.size(): " << tbg->operators.size()
-        //           << std::endl;
-        // for (auto const $oop : tbg->operators) {
-        //   std::cout << "op_type: " << $oop->op_type << std::endl;
-        //   for (auto const &input : $oop->input_tensors) {
-        //     std::cout << "input: " << input.guid << std::endl;
-        //   }
-        //   for (auto const &output : $oop->output_tensors) {
-        //     std::cout << "output: " << output.guid << std::endl;
-        //   }
-        // }
         std::vector<kernel::DTensor> dts = g->customized(dtensor_inputs, *tbg);
         assert(dts.size() == op->output_tensors.size());
         for (size_t i = 0; i < dts.size(); i++) {

@@ -70,17 +70,11 @@ public:
 template <typename T, int NUM_ELEMS, int NUM_THREADS>
 class InitReductionMaxKernel {
 public:
-  static constexpr int GROUP_SIZE = 16 / sizeof(T);
-  static_assert(NUM_ELEMS % GROUP_SIZE ==
-                0); // NUM_ELEMS should always be multiple of GROUP_SIZE
-                    // (guaranteed by layout resolution)
-
   static __device__ __forceinline__ void run(T *__restrict__ updated_max,
                                              int thread_idx) {
-    tfloat32_t *updated_max_32 = reinterpret_cast<tfloat32_t *>(updated_max);
-    for (int elem_idx = thread_idx; elem_idx < NUM_ELEMS / GROUP_SIZE;
+    for (int elem_idx = thread_idx; elem_idx < NUM_ELEMS;
          elem_idx += NUM_THREADS) {
-      updated_max_32[elem_idx] = (tfloat32_t)std::numeric_limits<T>::lowest();
+      updated_max[elem_idx] = std::numeric_limits<T>::lowest();
     }
   }
 };
@@ -132,23 +126,25 @@ public:
       int src_elem_idx =
           dst_coord2src_coord(dst_elem_idx); // The logical index of the first
                                              // element in the reduction group
-      T max_val = updated_max[updated_max_layout(dst_elem_idx)];
-      T diff_val = updated_max[diff_layout(dst_elem_idx)];
+      float max_val = (float)updated_max[updated_max_layout(dst_elem_idx)];
+      float diff_val = max_val;
       // updated_max = max(updated_max, src)
       // diff = unupdated_max - updated_max
       CUTE_UNROLL
       for (int i = 0; i < REDUCTION_FACTOR; ++i) {
-        max_val = max_val > src[src_layout(src_elem_idx +
-                                           i * SRC_REDUCTION_DIM_COORD_STRIDE)]
-                      ? max_val
-                      : src[src_layout(src_elem_idx +
-                                       i * SRC_REDUCTION_DIM_COORD_STRIDE)];
+        max_val =
+            max_val > (float)src[src_layout(src_elem_idx +
+                                            i * SRC_REDUCTION_DIM_COORD_STRIDE)]
+                ? max_val
+                : (float)src[src_layout(src_elem_idx +
+                                        i * SRC_REDUCTION_DIM_COORD_STRIDE)];
       }
-      updated_max[updated_max_layout(dst_elem_idx)] = max_val;
+      updated_max[updated_max_layout(dst_elem_idx)] = (T)max_val;
       diff[diff_layout(dst_elem_idx)] =
-          diff_val == std::numeric_limits<T>::lowest()
-              ? std::numeric_limits<T>::lowest()
-              : diff_val - max_val;
+          diff_val - max_val >= (float)std::numeric_limits<T>::lowest() &&
+                  (T)diff_val - (T)max_val <= 0
+              ? (T)diff_val - (T)max_val
+              : 0;
     }
   }
 };
