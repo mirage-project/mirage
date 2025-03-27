@@ -148,6 +148,7 @@ Transpiler::Transpiler(kernel::Graph const *_graph,
             static_cast<kernel::KNCustomizedOp *>(op);
         std::shared_ptr<threadblock::Graph> tbg =
             std::make_shared<threadblock::Graph>(
+                customized_op->bgraph.gpu_dim,
                 customized_op->bgraph.grid_dim,
                 customized_op->bgraph.block_dim,
                 customized_op->bgraph.forloop_range,

@@ -266,6 +266,8 @@ def string_to_tbepilogue(epilogue):
         return TB_EPILOGUE_ALLREDUCE
     elif epilogue == "alltoall":
         return TB_EPILOGUE_ALLTOALL
+    elif epilogue == "reduce_scatter":
+        return TB_EPILOGUE_REDUCESCATTER
     else:
         assert False, "Unsupported threadblock epilogue"
         return None
@@ -791,8 +793,9 @@ cdef class CyKNGraph:
 cdef class CyTBGraph:
     cdef CppTBGraph *p_bgraph #Hold a CppTBGraph instance
 
-    def __cinit__(self, tuple grid_dim = (), tuple block_dim = (), int forloop_range = -1, int dimx = -1, bgraph = None):
+    def __cinit__(self, tuple gpu_dim = (1, 1, 1), tuple grid_dim = (), tuple block_dim = (), int forloop_range = -1, int dimx = -1, bgraph = None):
         cdef unsigned long long ptr
+        cdef dim3 c_gpu_dim
         cdef dim3 c_grid_dim
         cdef dim3 c_block_dim
         if bgraph is None:
@@ -800,13 +803,16 @@ cdef class CyTBGraph:
                 assert False, "grid_dim, block_dim, forloop_range, dimx must be provided"
             assert len(grid_dim) == 3, "grid_dim must include 3 dimensions"
             assert len(block_dim) == 3, "block_dim must include 3 dimensions"
+            c_gpu_dim.x = gpu_dim[0]
+            c_gpu_dim.y = gpu_dim[1]
+            c_gpu_dim.z = gpu_dim[2]
             c_grid_dim.x = grid_dim[0]
             c_grid_dim.y = grid_dim[1]
             c_grid_dim.z = grid_dim[2]
             c_block_dim.x = block_dim[0]
             c_block_dim.y = block_dim[1]
             c_block_dim.z = block_dim[2]
-            self.p_bgraph = new CppTBGraph(c_grid_dim, c_block_dim, forloop_range, dimx)
+            self.p_bgraph = new CppTBGraph(c_gpu_dim, c_grid_dim, c_block_dim, forloop_range, dimx)
         else:
             ptr = ctypes.cast(bgraph, ctypes.c_void_p).value
             if isinstance(bgraph, int):

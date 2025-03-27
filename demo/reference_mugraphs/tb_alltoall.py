@@ -36,8 +36,8 @@ if __name__ == "__main__":
     print("Current rank: ", rank)
     print("Current device: ", torch.cuda.current_device())
     input_tensors = [
-        torch.randn(512, 256, dtype=torch.float16, device=f'cuda:{rank}'),
-        torch.randn(256, 256, dtype=torch.float16, device=f'cuda:{rank}'),
+        torch.randn(512, 128, dtype=torch.float16, device=f'cuda:{rank}'),
+        torch.randn(128, 256, dtype=torch.float16, device=f'cuda:{rank}'),
     ]
 
     outputs = graph(inputs=input_tensors, rank=rank, save_codes=save_codes)

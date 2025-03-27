@@ -6,7 +6,7 @@ except ImportError:
     import z3
     _z3_lib = os.path.join(os.path.dirname(z3.__file__), 'lib')
     os.environ['LD_LIBRARY_PATH'] = f"{_z3_lib}:{os.environ.get('LD_LIBRARY_PATH','LD_LIBRARY_PATH')}"
-    
+
     from .core import *
 
 from .kernel import *
@@ -20,8 +20,8 @@ def new_kernel_graph(gpu_dim: tuple):
     kgraph = core.CyKNGraph(gpu_dim)
     return KNGraph(kgraph)
 
-def new_threadblock_graph(grid_dim: tuple, block_dim: tuple, forloop_range: int, reduction_dimx: int):
-    bgraph = core.CyTBGraph(grid_dim, block_dim, forloop_range, reduction_dimx)
+def new_threadblock_graph(grid_dim: tuple, block_dim: tuple, forloop_range: int, reduction_dimx: int, gpu_dim=(1, 1, 1)):
+    bgraph = core.CyTBGraph(gpu_dim, grid_dim, block_dim, forloop_range, reduction_dimx)
     return TBGraph(bgraph)
 
 # Current Version
