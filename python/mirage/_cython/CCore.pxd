@@ -46,6 +46,7 @@ cdef extern from "mirage/type.h" namespace "mirage::type":
         TB_EPILOGUE_NONE = 3100,
         TB_EPILOGUE_ALLREDUCE = 3101,
         TB_EPILOGUE_ALLTOALL = 3102,
+        TB_EPILOGUE_REDUCESCATTER = 3103,
         TB_EPILOGUE_INVALID = 3199,
     cdef enum KNOperatorType:
         KN_UNKOWN = 1000,
@@ -233,7 +234,8 @@ cdef extern from "mirage/threadblock/graph.h" namespace "mirage::threadblock":
         size_t get_dtensor_guid()
 
     cdef cppclass CppTBGraph "mirage::threadblock::Graph":
-        CppTBGraph(dim3 grid_dim,
+        CppTBGraph(dim3 gpu_dim,
+                   dim3 grid_dim,
                    dim3 block_dim,
                    int forloop_range,
                    int reduction_dimx)

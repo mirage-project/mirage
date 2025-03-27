@@ -110,7 +110,7 @@ KNInputOp::KNInputOp(Graph *_graph,
         dim_div = kgraph->gpu_dim.z;
       }
 
-      if (dim_idx >= 0) {
+      if (false && dim_idx >= 0) {
         printf("d=%d:    dim_idx: %d, dim_div: %d, tensor.dim[%d]: %d\n", d, dim_idx, dim_div, dim_idx, tensor.dim[dim_idx]);
         assert(tensor.dim[dim_idx] > 0);
         assert(tensor.dim[dim_idx] % dim_div == 0);

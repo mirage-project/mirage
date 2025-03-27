@@ -35,6 +35,7 @@ private:
 public:
   Graph();
   Graph(dim3 grid_dim, dim3 block_dim, int forloop_range, int reduction_dimx);
+  Graph(dim3 gpu_dim, dim3 grid_dim, dim3 block_dim, int forloop_range, int reduction_dimx);
   ~Graph();
   Graph(Graph const &) = delete;
   Graph &operator=(Graph const &) = delete;
@@ -163,7 +164,7 @@ public:
   operator json() const;
 
 public:
-  dim3 grid_dim, block_dim, cluster_dim;
+  dim3 gpu_dim, grid_dim, block_dim, cluster_dim;
   int forloop_range;
   int reduction_dimx;
   std::vector<mirage::threadblock::TBOperator *> operators;

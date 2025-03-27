@@ -23,6 +23,7 @@
 #include "mirage/threadblock/smem_tensor.h"
 #include "mirage/utils/hash_utils.h"
 #include <cassert>
+#include <mirage/type.h>
 
 namespace mirage {
 namespace kernel {
@@ -91,7 +92,8 @@ KNCustomizedOp::KNCustomizedOp(mirage::kernel::Graph *_kgraph,
                                std::vector<DTensor> const &_inputs,
                                mirage::threadblock::Graph const &_graph)
     : KNOperator(_kgraph, mirage::type::KN_CUSTOMIZED_OP, _inputs),
-      bgraph(_graph.grid_dim,
+      bgraph(_graph.gpu_dim,
+             _graph.grid_dim,
              _graph.block_dim,
              _graph.forloop_range,
              _graph.reduction_dimx) {
@@ -148,7 +150,8 @@ KNCustomizedOp::KNCustomizedOp(mirage::kernel::Graph *_kgraph,
         dtensor.epilogue = output_op->epilogue;
         dtensor.is_nvshmem_tensor =
             (output_op->epilogue == mirage::type::TB_EPILOGUE_ALLREDUCE ||
-             output_op->epilogue == mirage::type::TB_EPILOGUE_ALLTOALL);
+             output_op->epilogue == mirage::type::TB_EPILOGUE_ALLTOALL ||
+             output_op->epilogue == mirage::type::TB_EPILOGUE_REDUCESCATTER);
         // DeviceMemoryManager *dmm = DeviceMemoryManager::get_instance();
         // dmm->allocate(dtensor);
         kgraph->allocate(dtensor);
