@@ -577,25 +577,48 @@ CustomOPTranspileResult
       tma.append(", ");
     }
 
-    code.e_front(
-        "__global__ void  __launch_bounds__($) "
-        "$($ $, $, uint64_t *profiler_buffer) {",
-        num_threads,
-        func_name,
-        tma,
-        map<kn::DTensor, string>(op->output_tensors,
-                                 [](kn::DTensor const &dtensor) -> string {
-                                   return fmt(
-                                       "$* dtensor$_ptr",
-                                       get_datatype_str(dtensor.data_type),
-                                       dtensor.guid);
-                                 }),
-        map<kn::DTensor, string>(
-            op->input_tensors, [](kn::DTensor const &dtensor) -> string {
-              return fmt("$ const* dtensor$_ptr",
-                         get_datatype_str(dtensor.data_type),
-                         dtensor.guid);
-            }));
+    if (profiling) {
+      code.e_front(
+          "__global__ void  __launch_bounds__($) "
+          "$($ $, $, uint64_t *profiler_buffer) {",
+          num_threads,
+          func_name,
+          tma,
+          map<kn::DTensor, string>(op->output_tensors,
+                                   [](kn::DTensor const &dtensor) -> string {
+                                     return fmt(
+                                         "$* dtensor$_ptr",
+                                         get_datatype_str(dtensor.data_type),
+                                         dtensor.guid);
+                                   }),
+          map<kn::DTensor, string>(
+              op->input_tensors, [](kn::DTensor const &dtensor) -> string {
+                return fmt("$ const* dtensor$_ptr",
+                           get_datatype_str(dtensor.data_type),
+                           dtensor.guid);
+              }));
+    } else {
+      code.e_front(
+          "__global__ void  __launch_bounds__($) "
+          "$($ $, $) {",
+          num_threads,
+          func_name,
+          tma,
+          map<kn::DTensor, string>(op->output_tensors,
+                                   [](kn::DTensor const &dtensor) -> string {
+                                     return fmt(
+                                         "$* dtensor$_ptr",
+                                         get_datatype_str(dtensor.data_type),
+                                         dtensor.guid);
+                                   }),
+          map<kn::DTensor, string>(
+              op->input_tensors, [](kn::DTensor const &dtensor) -> string {
+                return fmt("$ const* dtensor$_ptr",
+                           get_datatype_str(dtensor.data_type),
+                           dtensor.guid);
+              }));
+    }
+
     code.e_front(tmplt);
   }
 

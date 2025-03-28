@@ -447,15 +447,17 @@ TranspileResult Transpiler::transpile_ugraph() {
           ptr_names.push_back(ptr_name);
         }
 
-        auto [ptr_name, ptr_code] = get_profiling_ptr(0);
-        ptr_names.push_back(ptr_name);
-        exec.e(ptr_code);
+        if (config.profiling) {
+          auto [ptr_name, ptr_code] = get_profiling_ptr(0);
+          ptr_names.push_back(ptr_name);
+          exec.e(ptr_code);
+        }
 
         // Transpile
         CustomOPTranspileResult result;
         if (config.target_cc == GPU_CC::H100) {
           result = transpile_kn_custom_op_hopper(cur_op);
-          // only generate for first tb graph
+          // only generate for first tb graph now
           config.profiling = false;
         } else {
           result = transpile_kn_custom_op(cur_op);

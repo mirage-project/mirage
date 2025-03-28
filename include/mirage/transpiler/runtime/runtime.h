@@ -17,8 +17,7 @@ static void _execute_mugraph(std::vector<void const *> input_tensors,
                              std::vector<void *> output_tensors,
                              void *buf,
                              cudaStream_t stream,
-                             void *profiler_buffer
-                             );
+                             void *profiler_buffer);
 
 // Runtime libraries
 #include "config.h"
@@ -33,7 +32,8 @@ static void _execute_mugraph(std::vector<void const *> input_tensors,
 extern "C" void execute_mugraph(std::vector<void const *> input_tensors,
                                 std::vector<void *> output_tensors,
                                 void *buf,
-                                cudaStream_t stream, void *profiler_buffer) {
+                                cudaStream_t stream,
+                                void *profiler_buffer) {
 
   static bool inited = false;
   if (!inited) {
@@ -50,10 +50,12 @@ void execute_mugraph_wrapper(void const *input_tensors[],
                              void *output_tensors[],
                              size_t num_output_tensors,
                              void *buf,
-                             cudaStream_t stream, void *profiler_buffer) {
+                             cudaStream_t stream,
+                             void *profiler_buffer) {
   std::vector<void const *> input_tensors_vec(
       input_tensors, input_tensors + num_input_tensors);
   std::vector<void *> output_tensors_vec(output_tensors,
                                          output_tensors + num_output_tensors);
-  execute_mugraph(input_tensors_vec, output_tensors_vec, buf, profiler_buffer, stream);
+  execute_mugraph(
+      input_tensors_vec, output_tensors_vec, buf, stream, profiler_buffer);
 }

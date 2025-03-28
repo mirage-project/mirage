@@ -13,7 +13,6 @@ from .threadblock import *
 from .visualizer import *
 from .utils import *
 from .triton_profiler import *
-from .profiler import export_to_perfetto_trace
 from .global_config import global_config
 from .graph_dataset import graph_dataset
 
@@ -325,7 +324,6 @@ class KNGraph:
 
         prodiler_buffer_tensor = torch.empty(results["profiler_buf_size"], dtype=torch.uint64, device=input_tensors[0].device).contiguous()
 
-        print("results['profiler_buf_size']", results['profiler_buf_size'])
         buffer_tensor_ptr = buffer_tensor.data_ptr()
         input_tensors_ptr = [tensor.data_ptr() for tensor in input_tensors]
         output_tensors_ptr = [tensor.data_ptr() for tensor in output_tensors]
@@ -333,6 +331,7 @@ class KNGraph:
         self.run(input_tensors_ptr, output_tensors_ptr, buffer_tensor_ptr, stream.cuda_stream, prodiler_buffer_tensor_ptr)
 
         if results['profiler_buf_size'] > 0:
+            from .profiler import export_to_perfetto_trace
             export_to_perfetto_trace(prodiler_buffer_tensor, 'mirage.perfetto-trace')
         return output_tensors
 
