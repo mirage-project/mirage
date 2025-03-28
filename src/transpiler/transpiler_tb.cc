@@ -193,10 +193,17 @@ static string append_epilogue_scalars(
   if (chain.size() == 1) {
     return res.append("0.0f};");
   }
+
+  bool store_last = true;
   for (size_t i = 1; i < chain.size(); i++) {
-    if (i == chain.size() - 1) {
-      // last one is EpilogueStore
+
+    // last one is epilogue accum/store, when it's accum, apply 0.0
+    // else append a 0.0 at last since store is not part of chain
+    if (i == chain.size() - 1 &&
+        chain.at(i).first->op_type == type::TB_FORLOOP_ACCUM_NO_RED_OP) {
+      // last one is EpilogueStoreAccum
       res.append("0.0f};");
+      store_last = false;
     } else if (is_threadblock_element_unary(chain.at(i).first->op_type)) {
       tb::TBElementUnaryOp const *tb_unary_op =
           dynamic_cast<tb::TBElementUnaryOp const *>(chain.at(i).first);
@@ -204,6 +211,9 @@ static string append_epilogue_scalars(
     } else {
       res.append("0.0f, ");
     }
+  }
+  if (store_last) {
+    res.append("0.0f};");
   }
   return res;
 }
