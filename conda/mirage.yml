@@ -1,0 +1,25 @@
+name: mirage
+channels:
+  - conda-forge
+  - pytorch
+  - nvidia
+  - defaults
+dependencies:
+  - python=3.11
+  - pip
+  - setuptools
+  - pip:
+    - z3-solver==4.14.0.0
+    - transformers
+    - cmake-build-extension
+    - requests
+    - flashinfer-python
+    - tqdm
+    - graphviz
+    - cmake
+    - cython
+    - numpy==2.1.2
+    - torch==2.6.0+cu118
+    - torchvision==0.21.0+cu118
+    - torchaudio==2.6.0+cu118
+    - --extra-index-url https://download.pytorch.org/whl/cu118
