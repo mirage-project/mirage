@@ -71,7 +71,7 @@ A paper describing Mirage's techniques is available [on arxiv](https://arxiv.org
 
 ``` bibtex
 @inproceedings {wu2024mirage,
-title={A Multi-Level Superoptimizer for Tensor Programs}, 
+title={Mirage: A Multi-Level Superoptimizer for Tensor Programs}, 
 author={Mengdi Wu and Xinhao Cheng and Shengyu Liu and Chunan Shi and Jianan Ji and Kit Ao and Praveen Velliengiri and Xupeng Miao and Oded Padon and Zhihao Jia},
 booktitle = {19th USENIX Symposium on Operating Systems Design and Implementation (OSDI 25)},
 year = {2025},
