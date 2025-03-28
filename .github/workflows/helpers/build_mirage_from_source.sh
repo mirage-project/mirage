@@ -1,6 +1,6 @@
 #!/bin/bash
 # Script to build Mirage from source
-set -euo pipefail
+set -xeuo pipefail
 
 # Setup environment variables
 # Use current directory if not in GitHub Actions
