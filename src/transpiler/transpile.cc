@@ -250,7 +250,7 @@ Transpiler::Transpiler(kernel::Graph const *_graph,
               threadblock::STensor st = stensor_inputs[0];
               st = tbg->square(st);
               st = tbg->mul_scalar(st, (1.0f / st.dim[st.num_dims - 1]));
-              // st = tbg->reduction(st, st.num_dims - 1);
+              st = tbg->reduction(st, st.num_dims - 1);
               st = tbg->sqrt(st);
               st = tbg->div(stensor_inputs[0], st);
               stensor_mapping[bop->output_tensors[0].guid] = st;
