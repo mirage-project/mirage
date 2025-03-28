@@ -1174,7 +1174,7 @@ CustomOPTranspileResult
     TranspileErrorType err = transpile_tb_sched_node(sched_node, res, true);
     code << res;
     if (err != CUDA_T_SUCCESS) {
-      return CustomOPTranspileResult{err, func_name, 0, ""};
+      return CustomOPTranspileResult{err, func_name, 0, 0, ""};
     }
   }
 
@@ -1218,7 +1218,7 @@ CustomOPTranspileResult
       TranspileErrorType err = transpile_tb_sched_node(sched_node, res, false);
       code << res;
       if (err != CUDA_T_SUCCESS) {
-        return CustomOPTranspileResult{err, func_name, 0, ""};
+        return CustomOPTranspileResult{err, func_name, 0, 0, ""};
       }
     }
   }
@@ -1226,7 +1226,7 @@ CustomOPTranspileResult
   code.e("}"); // kernel
 
   return CustomOPTranspileResult{
-      CUDA_T_SUCCESS, func_name, mem_plan.smem_size, code.to_string()};
+      CUDA_T_SUCCESS, func_name, mem_plan.smem_size, 0, code.to_string()};
 }
 
 } // namespace transpiler
