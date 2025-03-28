@@ -4,12 +4,10 @@ import torch
 torch.set_printoptions(sci_mode=False)
 
 
-def torch_qwen_mlp_3(X, G, W):
+def torch_qwen_prenorm(X, G, W):
     variance = X.pow(2).mean(-1, keepdim=True)
     X = X * torch.rsqrt(variance)
-    print("X tensor111", X)
     X = torch.mul(X, G)
-    print("X tensor", X)
     O = torch.matmul(X, W)
 
     return O
@@ -35,6 +33,6 @@ if __name__ == "__main__":
     input_tensors[2] = torch.as_strided(input_tensors[2], (2048, 2560), (1, 2048))
     outputs = opt_kernel(inputs=input_tensors)
     print(outputs[0])
-    print(torch_qwen_mlp_3(input_tensors[0], input_tensors[1], input_tensors[2]))
+    print(torch_qwen_prenorm(input_tensors[0], input_tensors[1], input_tensors[2]))
 
 
