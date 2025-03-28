@@ -27,12 +27,12 @@ echo "Running Python interface tests (installation status: ${installation_status
 cd "${MIRAGE_HOME}/tests/ci-tests/qwen2.5" || exit 1
 
 run_test() {
-  local disable_flag="$1"
-  local mode="$2"
-  local status_msg="$3"
+  local disable_flag=$1
+  local mode=$2
+  local status_msg=$3
 
   echo "Running ${status_msg}..."
-  python demo.py "$disable_flag" --output-dir "$OUTPUT_DIR" --prefix "$PREFIX"
+  python demo.py $disable_flag --output-dir "$OUTPUT_DIR" --prefix "$PREFIX"
   
   local latency_file="${OUTPUT_DIR}/${PREFIX}_${mode}_latency.txt"
   

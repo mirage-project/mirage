@@ -9,18 +9,18 @@ set_env() {
   export "$name"="$value"
   
   # If in GitHub Actions, append to GITHUB_ENV
-  if [ -n "$GITHUB_ENV" ]; then
+  if [ -n "${GITHUB_ENV:-}" ]; then
     echo "$name=$value" >> "$GITHUB_ENV"
   fi
 }
 
 # Set CUDA related environment variables
-CUDACXX=$(which nvcc)
+CUDACXX=$(which nvcc 2>/dev/null || echo "/usr/local/cuda/bin/nvcc")
 export CUDACXX
 set_env "CUDACXX" "${CUDACXX}"
 
 # Use CUDA_PATH if provided, otherwise try auto-detection
-if [ -n "$CUDA_PATH" ]; then
+if [ -n "${CUDA_PATH:-}" ]; then
   set_env "CUDA_HOME" "${CUDA_PATH}"
 else
   # If CUDA_PATH is not provided, try auto-detection
