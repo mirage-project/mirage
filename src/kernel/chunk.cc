@@ -66,7 +66,7 @@ KNChunkOp::KNChunkOp(Graph *_graph, DTensor const &input, int chunk_size,
 
   for (size_t i = 0; i < chunk_size; ++i) {
     DTensor output_i = input;
-    output_i.dim[dim] /= chunk_size;
+    output_i.dim[chunk_dim] /= chunk_size;
     output_i.owner_op = this;
     output_i.owner_ts_idx = i;
     output_i.guid = DTensor::next_guid++;

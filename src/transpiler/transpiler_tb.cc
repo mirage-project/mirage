@@ -981,6 +981,8 @@ CustomOPTranspileResult
         case type::TB_CHUNK_0_OP:
         case type::TB_CHUNK_1_OP:
         case type::TB_CHUNK_2_OP: {
+          int chunk_size = static_cast<const tb::TBChunkOp *>(op)->chunk_size;
+          int chunk_dim = static_cast<const tb::TBChunkOp *>(op)->chunk_dim;
           tb::STensor const &input = op->input_tensors.at(0);
           tb::STensor const &output0 = output_op->output_tensors.at(0);
           tb::STensor const &output1 = output_op->output_tensors.at(1);
@@ -1007,16 +1009,24 @@ CustomOPTranspileResult
           string in_layout = mov_last_get_stensor_layout(input, stensor_metas.at(input.guid), iter_dim);
           string out0_layout = mov_last_get_stensor_layout(output0, stensor_metas.at(output0.guid), iter_dim);
           string out1_layout = mov_last_get_stensor_layout(output1, stensor_metas.at(output1.guid), iter_dim);
-          code.e("using InLayout = $", in_layout);
-          code.e("using Out0Layout = $", out0_layout);
-          code.e("using Out1Layout = $", out1_layout);
+          
+          // modify chunk_dim if it is the first or last dim
+          if ((chunk_dim == 0) && (input.num_dims != 1)) {
+            chunk_dim = 1;
+          } else if (chunk_dim == (input.num_dims - 1)) {
+            chunk_dim = 0;
+          }
+
+          code.e("using InLayout = $;", in_layout);
+          code.e("using Out0Layout = $;", out0_layout);
+          code.e("using Out1Layout = $;", out1_layout);
           string epilogue = transpile_fusion_epilogue(sched_node.ops, get_datatype_str(input.data_type));
           code.e("using Kernel = tb::ChunkKernel<$, "
                  "Out0Layout, Out1Layout, InLayout, "
                  "$, $, NUM_THREADS, $>;",
                  get_datatype_str(input.data_type),
-                 static_cast<const tb::TBChunkOp *>(op)->chunk_size,
-                 static_cast<const tb::TBChunkOp *>(op)->chunk_dim,
+                 chunk_size,
+                 chunk_dim,
                  epilogue);
           code.e(append_epilogue_scalars(sched_node.ops));
           code.e("Kernel::run(stensor$_ptr, stensor$_ptr, stensor$_ptr, thread_idx, scalars);",
