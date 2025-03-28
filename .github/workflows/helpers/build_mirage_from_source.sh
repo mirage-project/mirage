@@ -12,7 +12,7 @@ fi
 export MIRAGE_ROOT
 
 # Detect CUDA path from environment or use default
-if [ -n "$CUDA_TOOLKIT_PATH" ]; then
+if [ -v CUDA_TOOLKIT_PATH && -n "$CUDA_TOOLKIT_PATH" ]; then
   export CUDA_PATH="$CUDA_TOOLKIT_PATH"
 elif [ -d "/usr/local/cuda" ]; then
   export CUDA_PATH="/usr/local/cuda"
