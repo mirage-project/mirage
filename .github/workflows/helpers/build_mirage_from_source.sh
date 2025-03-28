@@ -4,7 +4,7 @@ set -euo pipefail
 
 # Setup environment variables
 # Use current directory if not in GitHub Actions
-if [ -n "$GITHUB_WORKSPACE" ]; then
+if [ -n "${GITHUB_WORKSPACE:-}" ]; then
   MIRAGE_ROOT="$GITHUB_WORKSPACE"
 else
   MIRAGE_ROOT="$(pwd)"
