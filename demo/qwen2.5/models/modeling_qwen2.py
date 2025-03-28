@@ -35,27 +35,6 @@ import time
 import flashinfer
 import mirage as mi
 from .rope import apply_rotary_pos_emb_triton
-class Timing:
-    def __init__(self):
-        self.start_time = None
-        self.end_time = None
-        self.count = 0
-        self.durations = []
-
-    def start(self):
-        self.start_time = time.time()
-
-    def end(self):
-        self.end_time = time.time()
-        self.count += 1
-        self.durations.append(self.end_time - self.start_time)
-        return self.end_time - self.start_time
-    
-    def print_total_time(self):
-        print(f"Time taken: {self.end_time - self.start_time} seconds")
-        for i, duration in enumerate(self.durations):
-            print(f"Time taken for {i+1}th call: {duration*1000} ms")
-
 
 # Copied from transformers.models.llama.modeling_llama.LlamaRMSNorm with Llama->Qwen2
 class Qwen2RMSNorm(nn.Module):
@@ -193,7 +172,7 @@ class Qwen2MLP(nn.Module):
         return output
 
 class Qwen2Attention(nn.Module):
-    def __init__(self, config: Qwen2Config, kv_cache: Tuple[torch.Tensor, torch.Tensor], layer_idx: Optional[int] = None, rope_timing: Timing = None):
+    def __init__(self, config: Qwen2Config, kv_cache: Tuple[torch.Tensor, torch.Tensor], layer_idx: Optional[int] = None):
         super().__init__()
         self.config = config
         self.layer_idx = layer_idx
@@ -215,7 +194,6 @@ class Qwen2Attention(nn.Module):
         self.k_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=True)
         self.v_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=True)
         self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=False)
-        self.rope_timing = rope_timing
 
         self.rotary_emb = Qwen2RotaryEmbedding(config=self.config)
         self.enable_mirage = False
@@ -268,10 +246,8 @@ class Qwen2Attention(nn.Module):
 
         cos, sin = position_embeddings
 
-        self.rope_timing.start()
         # query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, unsqueeze_dim=2)
         query_states, key_states = apply_rotary_pos_emb_triton(query_states, key_states, cos, sin, unsqueeze_dim=2)
-        self.rope_timing.end()
 
         if q_len > 1:
             self.key_cache[self.layer_idx,0,:q_len]=key_states[0]
@@ -292,11 +268,11 @@ class Qwen2Attention(nn.Module):
         return attn_output
 
 class Qwen2DecoderLayer(nn.Module):
-    def __init__(self, config: Qwen2Config, kv_cache: Tuple[torch.Tensor, torch.Tensor], layer_idx: int, rope_timing: Timing):
+    def __init__(self, config: Qwen2Config, kv_cache: Tuple[torch.Tensor, torch.Tensor], layer_idx: int):
         super().__init__()
         self.hidden_size = config.hidden_size
 
-        self.self_attn = Qwen2Attention(config, kv_cache, layer_idx, rope_timing)
+        self.self_attn = Qwen2Attention(config, kv_cache, layer_idx)
 
         self.mlp = Qwen2MLP(config)
         self.input_layernorm = Qwen2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -362,7 +338,7 @@ class Qwen2PreTrainedModel(PreTrainedModel):
                 module.weight.data[module.padding_idx].zero_()
 
 class Qwen2Model(Qwen2PreTrainedModel):
-    def __init__(self, config: Qwen2Config, rope_timing: Timing):
+    def __init__(self, config: Qwen2Config):
         super().__init__(config)
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
@@ -372,7 +348,7 @@ class Qwen2Model(Qwen2PreTrainedModel):
         self.kv_cache = (key_cache, value_cache)
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
         self.layers = nn.ModuleList(
-            [Qwen2DecoderLayer(config, self.kv_cache, layer_idx, rope_timing) for layer_idx in range(config.num_hidden_layers)]
+            [Qwen2DecoderLayer(config, self.kv_cache, layer_idx) for layer_idx in range(config.num_hidden_layers)]
         )
         self._attn_implementation = config._attn_implementation
         self.norm = Qwen2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -460,8 +436,7 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
 
     def __init__(self, config):
         super().__init__(config)
-        self.rope_timing = Timing()
-        self.model = Qwen2Model(config, self.rope_timing)
+        self.model = Qwen2Model(config)
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         # Initialize weights and apply final processing
@@ -516,5 +491,4 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
         logits = self.lm_head(hidden_states[:, -num_logits_to_keep:, :])
 
-        self.rope_timing.print_total_time()
         return logits
