@@ -273,7 +273,6 @@ tg4perfetto=0.0.4
 ```
 
 **Example**
-
 ```python
 python demo/profiler/profile_rmsnorm.py --profling
 ```
