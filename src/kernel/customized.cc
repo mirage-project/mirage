@@ -181,6 +181,7 @@ KNCustomizedOp::KNCustomizedOp(mirage::kernel::Graph *_kgraph,
         break;
       }
       case mirage::type::TB_ADD_OP:
+      case mirage::type::TB_SUB_OP:
       case mirage::type::TB_MUL_OP:
       case mirage::type::TB_DIV_OP: {
         assert(my_inputs.size() == 2);
@@ -203,6 +204,14 @@ KNCustomizedOp::KNCustomizedOp(mirage::kernel::Graph *_kgraph,
         bgraph.reduction_to_dimx(my_inputs[0], reduce_dim);
         break;
       }
+      case mirage::type::TB_REDUCTION_0_MAX_OP:
+      case mirage::type::TB_REDUCTION_1_MAX_OP:
+      case mirage::type::TB_REDUCTION_2_MAX_OP: {
+        assert(my_inputs.size() == 1);
+        int reduce_dim = op->op_type - mirage::type::TB_REDUCTION_0_MAX_OP;
+        bgraph.reduction_max(my_inputs[0], reduce_dim);
+        break;
+      }
       case mirage::type::TB_RMS_NORM_OP: {
         assert(my_inputs.size() == 1);
         bgraph.rms_norm(my_inputs[0]);
@@ -223,6 +232,11 @@ KNCustomizedOp::KNCustomizedOp(mirage::kernel::Graph *_kgraph,
       case mirage::type::TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP: {
         assert(my_inputs.size() == 1);
         bgraph.forloop_accum(my_inputs[0], op->op_type);
+        break;
+      }
+      case mirage::type::TB_FORLOOP_ACCUM_NO_RED_RESCALE_OP: {
+        assert(my_inputs.size() == 2);
+        bgraph.forloop_accum_rescale(my_inputs[0], my_inputs[1], op->op_type);
         break;
       }
       default: {

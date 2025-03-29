@@ -29,6 +29,75 @@ DT get_tensor_in_new_graph(std::unordered_map<size_t, DT> mapping,
   return mapping[tensor_in_old_graph.guid];
 }
 
+// return the guid of the output tensors whose owner should be substituted
+std::vector<size_t>
+    get_tensors_replace_for_online_softmax(kernel::Graph const *g,
+                                           bool flag = false) {
+  using namespace mirage::type;
+  std::vector<size_t> ret;
+  if (flag) {
+    for (auto const &op : g->operators) {
+      if (op->op_type != KN_CUSTOMIZED_OP) {
+        continue;
+      }
+      kernel::KNCustomizedOp *customized_op =
+          static_cast<kernel::KNCustomizedOp *>(op);
+      for (auto const &bop : customized_op->bgraph.operators) {
+        if (bop->op_type == TB_EXP_OP) {
+          assert(bop->input_tensors.size() == 1);
+          assert(bop->output_tensors.size() == 1);
+          if (bop->input_tensors[0].owner_op->op_type != TB_MATMUL_OP) {
+            continue;
+          }
+          auto output_tensor = bop->output_tensors[0];
+          std::vector<mirage::threadblock::TBOperator *> consumers;
+          for (auto const &bop2 : customized_op->bgraph.operators) {
+            for (auto const &input_tensor : bop2->input_tensors) {
+              if (input_tensor.guid == output_tensor.guid) {
+                consumers.push_back(bop2);
+              }
+            }
+          }
+          if (consumers.size() != 2) {
+            continue;
+          }
+          int matmul_consumer_idx = -1;
+          if (consumers[0]->op_type == TB_FORLOOP_ACCUM_RED_LD_SUM_OP) {
+            if (consumers[1]->op_type == TB_MATMUL_OP) {
+              matmul_consumer_idx = 1;
+            }
+          } else if (consumers[1]->op_type == TB_FORLOOP_ACCUM_RED_LD_SUM_OP) {
+            if (consumers[0]->op_type == TB_MATMUL_OP) {
+              matmul_consumer_idx = 0;
+            }
+          } else {
+            continue;
+          }
+          assert(matmul_consumer_idx != -1);
+          auto matmul_consumer = consumers[matmul_consumer_idx];
+          assert(matmul_consumer->input_tensors.size() == 2);
+          assert(matmul_consumer->output_tensors.size() == 1);
+          auto matmul_consumer_output = matmul_consumer->output_tensors[0];
+          for (auto const &bop3 : customized_op->bgraph.operators) {
+            if (bop3->op_type != TB_FORLOOP_ACCUM_NO_RED_OP) {
+              continue;
+            }
+            assert(bop3->input_tensors.size() == 1);
+            if (bop3->input_tensors[0].guid == matmul_consumer_output.guid) {
+              ret.push_back(bop->output_tensors[0].guid);
+              ret.push_back(consumers[0]->output_tensors[0].guid);
+              ret.push_back(consumers[1]->output_tensors[0].guid);
+              ret.push_back(bop3->output_tensors[0].guid);
+              return ret;
+            }
+          }
+        }
+      }
+    }
+  }
+  return ret;
+}
+
 Transpiler::Transpiler(kernel::Graph const *_graph,
                        TranspilerConfig const &_config,
                        vector<vector<size_t>> const &_input_strides)
@@ -45,6 +114,10 @@ Transpiler::Transpiler(kernel::Graph const *_graph,
   // into the non-reduction accumulator type to enable transpiler optimizations
   g = std::make_shared<kernel::Graph>();
   std::unordered_map<size_t, kernel::DTensor> dtensor_mapping;
+  // Rewrite the graph for online softmax
+  std::vector<size_t> tensors_replace =
+      get_tensors_replace_for_online_softmax(_graph, true);
+  assert(tensors_replace.size() == 4 || tensors_replace.size() == 0);
 
   int input_dtensor_idx = 0;
   for (auto const &op : _graph->operators) {
@@ -142,9 +215,15 @@ Transpiler::Transpiler(kernel::Graph const *_graph,
         for (auto const &bop : customized_op->bgraph.operators) {
           // Preparing dtensors in the new graph
           std::vector<threadblock::STensor> stensor_inputs;
-          for (auto const &t : bop->input_tensors) {
-            stensor_inputs.push_back(
-                get_tensor_in_new_graph(stensor_mapping, t));
+          // If this operator is going to be replaced and is not exp, skip it
+          if (bop->op_type == TB_EXP_OP || !bop->output_tensors.size() ||
+              std::find(tensors_replace.begin(),
+                        tensors_replace.end(),
+                        bop->output_tensors[0].guid) == tensors_replace.end()) {
+            for (auto const &t : bop->input_tensors) {
+              stensor_inputs.push_back(
+                  get_tensor_in_new_graph(stensor_mapping, t));
+            }
           }
           switch (bop->op_type) {
             case TB_INPUT_OP: {
@@ -170,6 +249,12 @@ Transpiler::Transpiler(kernel::Graph const *_graph,
               break;
             }
             case TB_MATMUL_OP: {
+              if (std::find(tensors_replace.begin(),
+                            tensors_replace.end(),
+                            bop->output_tensors[0].guid) !=
+                  tensors_replace.end()) {
+                break;
+              }
               threadblock::STensor st =
                   tbg->matmul(stensor_inputs[0], stensor_inputs[1]);
               stensor_mapping[bop->output_tensors[0].guid] = st;
@@ -184,6 +269,70 @@ Transpiler::Transpiler(kernel::Graph const *_graph,
             case TB_RELU_OP:
             case TB_CLAMP_OP:
             case TB_MUL_SCALAR_OP: {
+              if (bop->op_type == TB_EXP_OP &&
+                  std::find(tensors_replace.begin(),
+                            tensors_replace.end(),
+                            bop->output_tensors[0].guid) !=
+                      tensors_replace.end()) {
+                // Find the operators that need to be replaced
+                auto *exp_op = bop;
+                mirage::threadblock::TBOperator *forloop_accum_op,
+                    *forloop_accum_sum_op, *mat_mul_op = nullptr;
+                for (auto const &bop2 : customized_op->bgraph.operators) {
+                  if (bop2->output_tensors.size() == 1 &&
+                      std::find(tensors_replace.begin(),
+                                tensors_replace.end(),
+                                bop2->output_tensors[0].guid) !=
+                          tensors_replace.end()) {
+                    switch (bop2->op_type) {
+                      case TB_EXP_OP:
+                        break;
+                      case TB_FORLOOP_ACCUM_NO_RED_OP:
+                        forloop_accum_op = bop2;
+                        break;
+                      case TB_FORLOOP_ACCUM_RED_LD_SUM_OP:
+                        forloop_accum_sum_op = bop2;
+                        break;
+                      case TB_MATMUL_OP:
+                        mat_mul_op = bop2;
+                        break;
+                      default:
+                        assert(false);
+                    }
+                  }
+                }
+                // rewrite the graph
+                assert(forloop_accum_op != nullptr &&
+                       forloop_accum_sum_op != nullptr &&
+                       mat_mul_op != nullptr);
+                auto x = stensor_inputs[0];
+                auto d = forloop_accum_sum_op->output_tensors[0];
+                auto o = forloop_accum_op->output_tensors[0];
+                auto v = get_tensor_in_new_graph(stensor_mapping,
+                                                 mat_mul_op->input_tensors[1]);
+                auto max_x_and_diff = tbg->reduction_max(x, x.num_dims - 1);
+                auto x_minus_max_x = tbg->sub(x, max_x_and_diff[0]);
+                auto exp_diff = tbg->exp(max_x_and_diff[1]);
+                auto exp_x_minus_max_x = tbg->exp(x_minus_max_x);
+                auto accum_exp_x_minus_max_x = tbg->forloop_accum_rescale(
+                    exp_x_minus_max_x,
+                    exp_diff,
+                    TB_FORLOOP_ACCUM_NO_RED_RESCALE_OP);
+                auto accum_exp_x_minus_max_x_sum =
+                    tbg->reduction(accum_exp_x_minus_max_x, x.num_dims - 1);
+                auto exp_x_minus_max_x_times_v =
+                    tbg->matmul(exp_x_minus_max_x, v);
+                auto accum_exp_x_minus_max_x_times_v =
+                    tbg->forloop_accum_rescale(
+                        exp_x_minus_max_x_times_v,
+                        exp_diff,
+                        TB_FORLOOP_ACCUM_NO_RED_RESCALE_OP);
+
+                stensor_mapping[o.guid] = accum_exp_x_minus_max_x_times_v;
+                stensor_mapping[d.guid] = accum_exp_x_minus_max_x_sum;
+                stensor_metas[mat_mul_op->input_tensors[0].guid].m_input = true;
+                break;
+              }
               assert(stensor_inputs.size() == 1);
               threadblock::STensor st =
                   tbg->elementunary(stensor_inputs[0], bop->op_type);
@@ -192,6 +341,7 @@ Transpiler::Transpiler(kernel::Graph const *_graph,
               break;
             }
             case TB_ADD_OP:
+            case TB_SUB_OP:
             case TB_MUL_OP:
             case TB_DIV_OP: {
               assert(stensor_inputs.size() == 2);
@@ -201,7 +351,25 @@ Transpiler::Transpiler(kernel::Graph const *_graph,
               stensor_mapping[bop->output_tensors[0].guid] = st;
               break;
             }
+            case TB_REDUCTION_0_MAX_OP:
+            case TB_REDUCTION_1_MAX_OP:
+            case TB_REDUCTION_2_MAX_OP: {
+              assert(stensor_inputs.size() == 1);
+              std::vector<threadblock::STensor> stensors = tbg->reduction_max(
+                  stensor_inputs[0], bop->op_type - TB_REDUCTION_0_MAX_OP);
+              assert(bop->output_tensors.size() == 2);
+              for (size_t i = 0; i < stensors.size(); i++) {
+                stensor_mapping[bop->output_tensors[i].guid] = stensors[i];
+              }
+              break;
+            }
             case TB_FORLOOP_ACCUM_NO_RED_OP: {
+              if (std::find(tensors_replace.begin(),
+                            tensors_replace.end(),
+                            bop->output_tensors[0].guid) !=
+                  tensors_replace.end()) {
+                break;
+              }
               assert(stensor_inputs.size() == 1);
               threadblock::STensor st = tbg->forloop_accum(
                   stensor_inputs[0], TB_FORLOOP_ACCUM_NO_RED_OP);
@@ -210,6 +378,12 @@ Transpiler::Transpiler(kernel::Graph const *_graph,
               break;
             }
             case TB_FORLOOP_ACCUM_RED_LD_SUM_OP: {
+              if (std::find(tensors_replace.begin(),
+                            tensors_replace.end(),
+                            bop->output_tensors[0].guid) !=
+                  tensors_replace.end()) {
+                break;
+              }
               assert(stensor_inputs.size() == 1);
               assert(bop->output_tensors.size() == 1);
               threadblock::STensor st = tbg->forloop_accum(
@@ -242,6 +416,27 @@ Transpiler::Transpiler(kernel::Graph const *_graph,
               threadblock::STensor st = tbg->forloop_accum(
                   stensor_inputs[0], TB_FORLOOP_ACCUM_NO_RED_OP);
               st = tbg->reduction_to_dimx(st, st.num_dims - 1);
+              stensor_mapping[bop->output_tensors[0].guid] = st;
+              break;
+            }
+            case TB_FORLOOP_ACCUM_NO_RED_RESCALE_OP: {
+              assert(stensor_inputs.size() == 2);
+              assert(bop->output_tensors.size() == 1);
+              threadblock::STensor st = tbg->forloop_accum_rescale(
+                  stensor_inputs[0],
+                  stensor_inputs[1],
+                  TB_FORLOOP_ACCUM_NO_RED_RESCALE_OP);
+              stensor_mapping[bop->output_tensors[0].guid] = st;
+              break;
+            }
+            case TB_FORLOOP_ACCUM_RED_LD_SUM_RESCALE_OP: {
+              assert(stensor_inputs.size() == 2);
+              assert(bop->output_tensors.size() == 1);
+              threadblock::STensor st = tbg->forloop_accum_rescale(
+                  stensor_inputs[0],
+                  stensor_inputs[1],
+                  TB_FORLOOP_ACCUM_RED_LD_SUM_RESCALE_OP);
+              st = tbg->reduction(st, st.num_dims - 1);
               stensor_mapping[bop->output_tensors[0].guid] = st;
               break;
             }
@@ -284,7 +479,8 @@ Transpiler::Transpiler(kernel::Graph const *_graph,
       for (auto const &bop : customized_op->bgraph.operators) {
         if (bop->op_type >= TB_FORLOOP_ACCUM_FIRST_OP &&
             bop->op_type <= TB_FORLOOP_ACCUM_LAST_OP) {
-          assert(bop->op_type == TB_FORLOOP_ACCUM_NO_RED_OP);
+          assert(bop->op_type == TB_FORLOOP_ACCUM_NO_RED_OP ||
+                 bop->op_type == TB_FORLOOP_ACCUM_NO_RED_RESCALE_OP);
         }
         if (bop->op_type == TB_RMS_NORM_OP) {
           assert(false);
