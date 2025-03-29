@@ -79,8 +79,8 @@ if __name__ == "__main__":
         next_token = next_token[0, -1]
         tokens[0, cur_pos] = next_token
         prev_pos = cur_pos
-        #if (next_token == model.config.eos_token_id):
-        #    break
+        if (next_token == model.config.eos_token_id):
+            break
         if cur_pos == prompt_len + warmup:
             torch.cuda.synchronize()
             starter.record()
@@ -94,4 +94,4 @@ if __name__ == "__main__":
     response = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
     print(response)
     
-    print("Prompt length {}, generate length {}, per-token latency {} ms".format(prompt_len, output_len, run_time / (output_len - warmup)))
+    print("Prompt length {}, generate length {}, per-token latency {} ms".format(prompt_len, cur_pos + 1, run_time / (cur_pos + 1 - warmup)))
