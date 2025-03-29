@@ -1,6 +1,12 @@
 import torch
 import mirage as mi
+import argparse
+
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--profiling", action="store_true", help="Enable mirage profiling mode")
+    args = parser.parse_args()
+    
     graph = mi.new_kernel_graph()
     X = graph.new_input(dims=(64, 4096), dtype=mi.float16)
     W = graph.new_input(dims=(4096, 4096), dtype=mi.float16)
@@ -19,6 +25,6 @@ if __name__ == "__main__":
         torch.randn(64, 4096, dtype=torch.float16, device='cuda:0'),
         torch.randn(4096, 4096, dtype=torch.float16, device='cuda:0'),
     ]
-
-    outputs = graph(inputs=input_tensors, num_warp_groups = 3, pipeline_stages = 4, profiling = True)
+    
+    outputs = graph(inputs=input_tensors, num_warp_groups = 3, pipeline_stages = 4, profiling = args.profiling)
     
