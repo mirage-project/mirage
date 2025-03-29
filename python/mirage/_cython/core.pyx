@@ -270,6 +270,15 @@ def string_to_tbepilogue(epilogue):
         assert False, "Unsupported threadblock epilogue"
         return None
 
+def string_to_tbprologue(prologue):
+    if prologue is None:
+        return TB_PROLOGUE_NONE
+    elif prologue == "allgather":
+        return TB_PROLOGUE_ALLGATHER
+    else:
+        assert False, "Unsupported threadblock prologue"
+        return None
+
 def string_to_accum_optype(acc):
     if acc is None:
         return TB_FORLOOP_ACCUM_NO_RED_OP
@@ -816,13 +825,14 @@ cdef class CyTBGraph:
             else:
                 assert False, "bgraph must be an integer or ctypes.c_void_p, but got " + str(type(bgraph))
     
-    def new_input(self, DTensor dtensor, tuple input_map, int forloop_dim):
+    def new_input(self, DTensor dtensor, tuple input_map, int forloop_dim, str prologue = None):
         assert len(input_map) == 3, "input_map must be of length 3"
         cdef int3 c_input_map
         c_input_map.x = input_map[0]
         c_input_map.y = input_map[1]
         c_input_map.z = input_map[2]
-        cdef CppSTensor* ptr = self.p_bgraph.new_input(dtensor.c_ptr, c_input_map, forloop_dim, SmemRowMajor)
+        prologue_type = string_to_tbprologue(prologue)
+        cdef CppSTensor* ptr = self.p_bgraph.new_input(dtensor.c_ptr, c_input_map, forloop_dim, SmemRowMajor, prologue_type)
         t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
         return STensor(t)
 

@@ -35,7 +35,7 @@ public:
 
     auto tile_layout_standalone = cute::make_layout(_shape);
 
-    const int mode = 1;
+    const int mode = 1; // 0: warp, 1: block
 
     // Assuming 32 threads per warp
     const int executor_num = mode == 0 ? blockDim.x / 32 : 1;

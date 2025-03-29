@@ -741,6 +741,7 @@ CustomOPTranspileResult
           assert(cur_op->forloop_dim >= 0);
           kn::DTensor const &dtensor = cur_op->dtensor;
           tb::STensor const &output = cur_op->output_tensors.at(0);
+          type::TBPrologueType type = cur_op->prologue;
           int tile_side_len = output.dim[cur_op->forloop_dim];
           size_t forloop_dim_stride =
               dtensor_metas.at(dtensor.guid).strides[cur_op->forloop_dim];

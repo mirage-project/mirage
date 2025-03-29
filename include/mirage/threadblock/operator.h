@@ -56,7 +56,8 @@ public:
             mirage::kernel::DTensor const &dtensor,
             int3 input_map,
             int forloop_dim,
-            mirage::layout::SmemLayout layout);
+            mirage::layout::SmemLayout layout,
+            mirage::type::TBPrologueType prologue);
   ~TBInputOp();
 
   operator json() const override;
@@ -66,6 +67,7 @@ public:
   mirage::kernel::DTensor dtensor;
   int3 input_map;
   int forloop_dim;
+  mirage::type::TBPrologueType prologue;
 };
 
 class TBOutputOp : public TBOperator {

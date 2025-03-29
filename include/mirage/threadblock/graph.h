@@ -43,15 +43,18 @@ public:
   STensor new_input(mirage::kernel::DTensor const &dtensor,
                     int3 input_map,
                     int forloop_dim,
-                    mirage::layout::SmemLayout layout);
+                    mirage::layout::SmemLayout layout,
+                    mirage::type::TBPrologueType prologue=mirage::type::TB_PROLOGUE_NONE);
   STensor *new_input(mirage::kernel::DTensor const *dtensor,
                      int3 input_map,
                      int forloop_dim,
-                     mirage::layout::SmemLayout layout);
+                     mirage::layout::SmemLayout layout,
+                     mirage::type::TBPrologueType prologue=mirage::type::TB_PROLOGUE_NONE);
   TBOperator *create_input_op(mirage::kernel::DTensor const &dtensor,
                               int3 input_map,
                               int forloop_dim,
-                              mirage::layout::SmemLayout layout);
+                              mirage::layout::SmemLayout layout,
+                              mirage::type::TBPrologueType prologue=mirage::type::TB_PROLOGUE_NONE);
   // output operator
   mirage::kernel::DTensor mark_output(STensor const &stensor,
                                       int3 output_map,
