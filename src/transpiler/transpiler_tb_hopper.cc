@@ -620,6 +620,7 @@ CustomOPTranspileResult
     }
 
     code.e_front(tmplt);
+    code.inc_indent();
   }
 
   // add mem_size based on tma copies
