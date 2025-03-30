@@ -141,10 +141,19 @@ public:
       }
       updated_max[updated_max_layout(dst_elem_idx)] = (T)max_val;
       diff[diff_layout(dst_elem_idx)] =
-          diff_val - max_val >= (float)std::numeric_limits<T>::lowest() &&
+          diff_val - max_val > (float)std::numeric_limits<T>::lowest() &&
                   (T)diff_val - (T)max_val <= 0
               ? (T)diff_val - (T)max_val
-              : 0;
+              : (T)0.0f;
+      // Print debug info
+      // if (thread_idx == 0) {
+      //   printf("**********ReductionMaxKernel**********\n"
+      //          "updated_max[0]: %f, diff[0]: %f, src[0]: %f\n"
+      //          "--------------------------------------\n",
+      //          (float)updated_max[updated_max_layout(0)],
+      //          (float)diff[diff_layout(0)],
+      //          (float)src[src_layout(0)]);
+      // }
     }
   }
 };

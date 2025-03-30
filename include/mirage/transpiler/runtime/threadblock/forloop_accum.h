@@ -76,6 +76,15 @@ public:
               rescale[rescale_layout(elem_idx / (numel / rescale_numel))] +
           src[src_layout(elem_idx)];
     }
+    // Print debug info
+    // if (thread_idx == 0) {
+    //   printf("**********ForloopAccumRescaleKernel**********\n"
+    //          "accum[0]: %f, rescale[0]: %f, src[0]: %f\n"
+    //          "---------------------------------------------\n",
+    //          (float)accum[accum_layout(0)],
+    //          (float)rescale[rescale_layout(0)],
+    //          (float)src[src_layout(0)]);
+    // }
   }
 };
 

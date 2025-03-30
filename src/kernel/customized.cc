@@ -234,7 +234,8 @@ KNCustomizedOp::KNCustomizedOp(mirage::kernel::Graph *_kgraph,
         bgraph.forloop_accum(my_inputs[0], op->op_type);
         break;
       }
-      case mirage::type::TB_FORLOOP_ACCUM_NO_RED_RESCALE_OP: {
+      case mirage::type::TB_FORLOOP_ACCUM_NO_RED_RESCALE_OP:
+      case mirage::type::TB_FORLOOP_ACCUM_RED_LD_SUM_RESCALE_OP: {
         assert(my_inputs.size() == 2);
         bgraph.forloop_accum_rescale(my_inputs[0], my_inputs[1], op->op_type);
         break;
