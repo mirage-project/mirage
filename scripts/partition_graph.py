@@ -2,61 +2,55 @@ import torch
 from itertools import combinations as comb
 import time
 import mirage as mi
+from op import Operator
+from build_computation_graph import get_computation_graph
 
-ids_to_nodes = {}
+# ids_to_nodes = {}
 
-class Operator:
-    def __init__(self, name=None, fn=None, input_ops=[], output_ops=[], input_tensor_shapes=[], output_tensor_shapes=[]):
-        self.name = name
-        self.fn = fn
-        self.input_ops = input_ops
-        self.output_ops = output_ops
-        self.input_tensor_shapes = input_tensor_shapes
-        self.output_tensor_shapes = output_tensor_shapes
-
-def build_computational_graph(op_node, unique_operators):
-    unique_operators.add(op_node.name)
-    if op_node.input_ops != []:
-        return
+# def build_computational_graph(op_node, unique_operators):
+#     unique_operators.add(op_node.name)
+#     if op_node.input_ops != []:
+#         return
     
-    local_scope = {}
-    exec(
-f"""
-def hook_fn(inputs, outputs):
-    if {id(op_node.fn)} in ids_to_nodes:
-        op_node = ids_to_nodes[{id(op_node.fn)}]
-        op_node.input_tensor_shapes = [(input.shape, id(input)) if input != None else None for input in inputs]
-        op_node.output_tensor_shapes = [(output.shape, id(output)) if output != None else None for output in outputs]
-""",
-    globals(),
-    local_scope
-    )
+#     local_scope = {}
+#     exec(
+# f"""
+# def hook_fn(inputs, outputs):
+#     if {id(op_node.fn)} in ids_to_nodes:
+#         op_node = ids_to_nodes[{id(op_node.fn)}]
+#         op_node.input_tensor_shapes = [(input.shape, id(input)) if input != None else None for input in inputs]
+#         op_node.output_tensor_shapes = [(output.shape, id(output)) if output != None else None for output in outputs]
+# """,
+#     globals(),
+#     local_scope
+#     )
 
-    op_node.fn.register_hook(local_scope["hook_fn"])
+#     op_node.fn.register_hook(local_scope["hook_fn"])
 
-    if id(op_node.fn) not in ids_to_nodes:
-        ids_to_nodes[id(op_node.fn)] = op_node
+#     if id(op_node.fn) not in ids_to_nodes:
+#         ids_to_nodes[id(op_node.fn)] = op_node
 
-    for next_fn in op_node.fn.next_functions:
-        if id(next_fn[0]) in ids_to_nodes:
-            ids_to_nodes[id(next_fn[0])].output_ops.append(op_node)
-        else:
-            if next_fn[0] == None:
-                continue
-            ids_to_nodes[id(next_fn[0])] = Operator(name=next_fn[0].name(), fn=next_fn[0], input_ops=[], output_ops=[op_node])
-        op_node.input_ops.append(ids_to_nodes[id(next_fn[0])])
+#     for next_fn in op_node.fn.next_functions:
+#         if id(next_fn[0]) in ids_to_nodes:
+#             ids_to_nodes[id(next_fn[0])].output_ops.append(op_node)
+#         else:
+#             if next_fn[0] == None:
+#                 continue
+#             ids_to_nodes[id(next_fn[0])] = Operator(name=next_fn[0].name(), fn=next_fn[0], input_ops=[], output_ops=[op_node])
+#         op_node.input_ops.append(ids_to_nodes[id(next_fn[0])])
         
-        build_computational_graph(ids_to_nodes[id(next_fn[0])], unique_operators)
+#         build_computational_graph(ids_to_nodes[id(next_fn[0])], unique_operators)
+
 
 def get_partitions(op_node, min_num_ops, max_num_ops, visited_start_nodes, all_subgraphs, UNSUPPORTED_OPS):
     visited_start_nodes.add(id(op_node.fn))
     
     if op_node.name not in UNSUPPORTED_OPS:
-        get_partitions_helper(op_node, {op_node: None}, min_num_ops, max_num_ops, set(), all_subgraphs, UNSUPPORTED_OPS)
+        get_partitions_helper(op_node, {op_node: []}, min_num_ops, max_num_ops, set(), all_subgraphs, UNSUPPORTED_OPS)
         
-    for input_node in op_node.input_ops:
-        if id(input_node.fn) not in visited_start_nodes:
-            get_partitions(input_node, min_num_ops, max_num_ops, visited_start_nodes, all_subgraphs, UNSUPPORTED_OPS)
+    for output_node in op_node.output_ops:
+        if id(output_node.fn) not in visited_start_nodes:
+            get_partitions(output_node, min_num_ops, max_num_ops, visited_start_nodes, all_subgraphs, UNSUPPORTED_OPS)
 
 def get_partitions_helper(op_node, curr_subgraph, min_num_ops, max_num_ops, visited, all_subgraphs, UNSUPPORTED_OPS):
     if id(op_node.fn) in visited:
@@ -69,37 +63,31 @@ def get_partitions_helper(op_node, curr_subgraph, min_num_ops, max_num_ops, visi
     if len(curr_subgraph) >= min_num_ops:
         all_subgraphs.append(curr_subgraph.copy())
 
-    valid_input_ops = []
-    for input_op in op_node.input_ops:
-        if input_op.name not in UNSUPPORTED_OPS:
-            valid_input_ops.append(input_op)
+    valid_output_ops = []
+    for output_op in op_node.output_ops:
+        if output_op.name not in UNSUPPORTED_OPS:
+            valid_output_ops.append(output_op)
     
-    for choose_k in range(1, len(valid_input_ops)):
+    for choose_k in range(1, len(valid_output_ops)):
         curr_subgraph_copy = curr_subgraph.copy()
-        for comb_inputs in comb(valid_input_ops, choose_k):
+        for comb_outputs in comb(valid_output_ops, choose_k):
             visited_copy = visited.copy()
-            for input_node in comb_inputs:
-                if input_node not in curr_subgraph_copy:
-                    curr_subgraph_copy[input_node] = [op_node]
-                else:
-                    curr_subgraph_copy[input_node].append(op_node)
-
-                get_partitions_helper(input_node, curr_subgraph_copy.copy(), min_num_ops, max_num_ops, visited_copy, all_subgraphs, UNSUPPORTED_OPS)
+            for output_node in comb_outputs:
+                if output_node not in curr_subgraph_copy:
+                    curr_subgraph_copy[output_node] = []
+                curr_subgraph_copy[op_node].append(output_node)
+                get_partitions_helper(output_node, curr_subgraph_copy.copy(), min_num_ops, max_num_ops, visited_copy, all_subgraphs, UNSUPPORTED_OPS)
 
 
-def partition_graph(dummy_loss, min_num_ops=2, max_num_ops=4, UNSUPPORTED_OPS=set(["torch::autograd::AccumulateGrad", 
+def partition_graph(model, dummy_input, min_num_ops=2, max_num_ops=4, UNSUPPORTED_OPS=set(["torch::autograd::AccumulateGrad", 
                                                               "NllLossBackward0", 
-                                                              "EmbeddingBackward0"])):
-    loss_node = Operator(name=dummy_loss.grad_fn.name(), fn=dummy_loss.grad_fn)
-    
+                                                              "EmbeddingBackward0"])):    
     unique_operators = set()
-    build_computational_graph(loss_node, unique_operators)
-
-    dummy_loss.backward()
+    root_node, operators = get_computation_graph(model, dummy_input, unique_operators, "onnx")
 
     all_subgraphs = []
     visited_start_nodes = set()
-    get_partitions(loss_node, min_num_ops, max_num_ops, visited_start_nodes, all_subgraphs, UNSUPPORTED_OPS)
+    get_partitions(root_node, min_num_ops, max_num_ops, visited_start_nodes, all_subgraphs, UNSUPPORTED_OPS)
 
     return all_subgraphs, unique_operators
 
@@ -119,7 +107,6 @@ def function_map(graph, func, inputs):
         case "div": return graph.div(*inputs)
         #case "rms_norm": return graph.rms_norm(*inputs)
         case _: raise NotImplementedError
-
 
 # Take in an adjacency list formatted subgraph and generate a mirage kernel graph
 def to_kernel_graph(subgraph):

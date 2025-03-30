@@ -5,11 +5,10 @@ import pickle
 import os
 import onnx
 from onnx import shape_inference
-from partition_graph import Operator
+from op import Operator
 import torch.nn.functional as F
 
 device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
-
 
 class SimpleClassifier(nn.Module):
     def __init__(self, input_size=784, hidden_size=128, num_classes=2):
@@ -113,7 +112,7 @@ def print_computational_graph(root_node, indent=0, visited=None):
 """
 Parse ONNX representation of model and build operator graph
 """
-def parse_onnx_model(model):
+def parse_onnx_model(model, unique_operators):
     inferred_model = shape_inference.infer_shapes(model) # for shape inference of inputs and outputs
     shape_value_dict = {}
 
@@ -149,7 +148,8 @@ def parse_onnx_model(model):
 
     for node in model.graph.node:
         op_type = node.op_type
-        node_name = node.name or f"{node.op_type}_{id(node)}"
+        unique_operators.add(op_type)
+        node_name = node.name or f"{op_type}_{id(node)}"
         input_tensor_shapes = [(shape_value_dict[input_name], tensor_id[input_name]) for input_name in node.input]
         output_tensor_shapes = [(shape_value_dict[output_name], tensor_id[output_name]) for output_name in node.output]
 
@@ -189,7 +189,7 @@ def parse_onnx_model(model):
     root_node = operators[model.graph.node[0].name]
     # print_computational_graph(operators['node_Transpose_0'])
     print_computational_graph(root_node)
-    return operators
+    return root_node, operators
 
 def test_cfg():
     # model = SimpleClassifier()
@@ -282,7 +282,7 @@ def test_cfg():
 # parse_onnx_model(bert_model)
 
 
-def get_computation_graph(model, dummy_input, method):
+def get_computation_graph(model, dummy_input, unique_operators, method):
     match method:
         case "onnx":
             # Generate the ONNX file
@@ -299,10 +299,9 @@ def get_computation_graph(model, dummy_input, method):
                 dynamo=True
             )
             
-
             onnx_model = onnx.load(onnx_path)
-            operators = parse_onnx_model(onnx_model)
-            return operators
+            root_node, operators = parse_onnx_model(onnx_model, unique_operators)
+            return root_node, operators
         case _:
             print("Unsupported method for build_graph")
             return None
