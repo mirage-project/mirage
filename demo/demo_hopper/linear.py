@@ -53,8 +53,6 @@ def mirage_hopper_matmul(M, N, K):
   kn_graph.mark_output(O)
   return kn_graph
 
-
-
 class MugraphInjector(fx.Transformer):
   """
   torch.fx transformer that replace all builtin torch.linear with 

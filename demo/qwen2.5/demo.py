@@ -5,8 +5,7 @@ import argparse
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--cuda-graph", action='store_true', help="Enable CUDA Graph")
-    parser.add_argument("--disable-mirage", action='store_false', help="Disable Mirage kernels")
+    parser.add_argument("--disable-mirage", action='store_true', help="Disable Mirage kernels")
     args = parser.parse_args()
     print("Input arguments:", args)
 
@@ -40,34 +39,37 @@ if __name__ == "__main__":
     position_embeddings = model.model.rotary_emb(positions)
     prev_pos = 0
     
-    torch.cuda.synchronize()
     starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
-    starter.record()
-    
+
     g = torch.cuda.CUDAGraph()
+    stream = torch.cuda.Stream()
     step = torch.tensor([0], dtype=torch.int32, device="cuda")
-    for cur_pos in range(prompt_len, prompt_len + 512):
+    warmup = 16
+    output_len = 512
+    for cur_pos in range(prompt_len, prompt_len + output_len):
         step.fill_(cur_pos-1)
         # prefilling phase
-        if cur_pos < prompt_len + 1 or not args.cuda_graph:
+        if cur_pos < prompt_len + 1:
             input_ids = tokens[:,prev_pos:cur_pos]
             cos_embeddings = position_embeddings[0][:,prev_pos:cur_pos]
             sin_embeddings = position_embeddings[1][:,prev_pos:cur_pos]
             logits = model.forward(
                         input_ids=input_ids,
                         position_embeddings=(cos_embeddings, sin_embeddings),
-                        step=step)
+                        step=step,
+                        stream=stream)
         # decoding phase
         elif cur_pos == prompt_len + 1:
             input_ids = tokens[:,prev_pos:cur_pos]
             cos_embeddings = position_embeddings[0][:,prev_pos:cur_pos]
             sin_embeddings = position_embeddings[1][:,prev_pos:cur_pos]
             assert prev_pos + 1 == cur_pos
-            with torch.cuda.graph(g):
+            with torch.cuda.graph(g, stream=stream):
                 logits = model.forward(
                             input_ids=input_ids,
                             position_embeddings=(cos_embeddings, sin_embeddings),
-                            step=step)
+                            step=step,
+                            stream=stream)
         else:
             input_ids.copy_(tokens[:,prev_pos:cur_pos])
             cos_embeddings.copy_(position_embeddings[0][:,prev_pos:cur_pos])
@@ -77,8 +79,11 @@ if __name__ == "__main__":
         next_token = next_token[0, -1]
         tokens[0, cur_pos] = next_token
         prev_pos = cur_pos
-        #if (next_token == model.config.eos_token_id):
-        #    break
+        if (next_token == model.config.eos_token_id):
+            break
+        if cur_pos == prompt_len + warmup:
+            torch.cuda.synchronize()
+            starter.record()
     
     ender.record()
     torch.cuda.synchronize()
@@ -89,4 +94,4 @@ if __name__ == "__main__":
     response = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
     print(response)
     
-    print("Prompt length {}, Generate length {}, Run time {} ms".format(prompt_len, prev_pos-prompt_len, run_time))
+    print("Prompt length {}, generate length {}, per-token latency {} ms".format(prompt_len, cur_pos + 1, run_time / (cur_pos + 1 - warmup)))
