@@ -73,7 +73,7 @@ if __name__ == "__main__":
 
   # quantize: weight in float8_e4m3fn
   sys.settrace(trace_calls) 
-  quantize_(model, float8_weight_only()) 
+  quantize_(model, float8_dynamic_activation_float8_weight()) 
   sys.settrace(None)
 
   print("== verify quantize_:")
