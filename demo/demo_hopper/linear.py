@@ -16,7 +16,6 @@ class MatmulBase(nn.Module):
 
 class LinearMirageFP8(nn.Linear):
   """
-  TODO:
   Code injection scheme: 
     override nn.Linear module with this to invoke mirage hopper matmul
   """
@@ -53,6 +52,7 @@ def mirage_hopper_matmul(M, N, K):
 
   kn_graph.mark_output(O)
   return kn_graph
+
 
 
 class MugraphInjector(fx.Transformer):
