@@ -10,4 +10,7 @@ class GlobalConfig:
         # default gpu device id
         self.gpu_device_id = 0
 
+        # bypass compile errors
+        self.bypass_compile_errors = False
+
 global_config = GlobalConfig()

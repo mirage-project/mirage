@@ -396,23 +396,9 @@ TBMemoryPlan Transpiler::get_threadblock_memory_plan(tb::Graph const &tb_graph,
         assert(earlist_free_time != -1 &&
                "An intermediate tensor produced in the for loop is never used");
         // in hopper the doubule buffer needs to be continously allocated
-        if (last_op->op_type == type::TB_INPUT_OP &&
-            last_op_meta.is_pipelined_input && hopper_arch) {
-          if (stensor_metas[output_tensor.guid].m_input &&
-              output_tensor.dim[0] <= 64) {
-            tensor_decls.push_back({output_tensor.guid,
-                                    phy_size * config.pipeline_stages *
-                                        (64 / output_tensor.dim[0]),
-                                    i + T,
-                                    earlist_free_time});
-          } else {
-            tensor_decls.push_back({output_tensor.guid,
-                                    phy_size * config.pipeline_stages,
-                                    i + T,
-                                    earlist_free_time});
-          }
-
-        } else {
+        if (!(last_op->op_type == type::TB_INPUT_OP &&
+              last_op_meta.is_pipelined_input)) {
+          // the pipelined input tensor should occupy all ranges in the forloop
           tensor_decls.push_back(
               {output_tensor.guid, phy_size, i + T, earlist_free_time});
         }
@@ -440,16 +426,29 @@ TBMemoryPlan Transpiler::get_threadblock_memory_plan(tb::Graph const &tb_graph,
   }
 
   // Buffers for software-pipelined inputs
-  if (!hopper_arch) {
-    for (int i = 0; i < (int)tb_sched.loop_nodes.size(); ++i) {
-      TBSchedNode const &node = tb_sched.loop_nodes[i];
-      if (node.type != tb_sched_node_t::OPERATOR) {
-        continue;
-      }
-      auto [op, op_meta] = node.ops.front();
-      if (op->op_type == type::TB_INPUT_OP && op_meta.is_pipelined_input) {
-        tb::STensor const &stensor = op->output_tensors.at(0);
-        size_t phy_size = get_phy_size(stensor);
+  for (int i = 0; i < (int)tb_sched.loop_nodes.size(); ++i) {
+    TBSchedNode const &node = tb_sched.loop_nodes[i];
+    if (node.type != tb_sched_node_t::OPERATOR) {
+      continue;
+    }
+    auto [op, op_meta] = node.ops.front();
+    if (op->op_type == type::TB_INPUT_OP && op_meta.is_pipelined_input) {
+      tb::STensor const &stensor = op->output_tensors.at(0);
+      size_t phy_size = get_phy_size(stensor);
+      if (hopper_arch) {
+        if (stensor_metas[stensor.guid].m_input && stensor.dim[0] <= 64) {
+          tensor_decls.push_back(
+              {stensor.guid,
+               phy_size * config.pipeline_stages * (64 / stensor.dim[0]),
+               T - 1,
+               2 * T});
+        } else {
+          tensor_decls.push_back(
+              {stensor.guid, phy_size * config.pipeline_stages, T - 1, 2 * T});
+        }
+      } else {
+        // double buffer
+        tensor_decls.push_back({stensor.guid, phy_size, T - 1, 2 * T});
         tensor_decls.push_back({stensor.guid + PIPELINED_INPUT_BUF_GUID_OFFSET,
                                 phy_size,
                                 T - 1,

@@ -27,6 +27,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from linear import MatmulBase, LinearMirageFP8, MugraphInjector
 from utils import model_viz
 
+
 class FullTracer(fx.Tracer):
   def is_leaf_module(self, m, module_qualified_name):
     return False

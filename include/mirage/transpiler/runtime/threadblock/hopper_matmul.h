@@ -192,7 +192,7 @@ public:
          tCrB(_, _, _, IS_PIPELINE_B ? read_stage : 0),
          mma_rC);
     cute::warpgroup_commit_batch();
-    // cute::warpgroup_wait<0>();
+    cute::warpgroup_wait<0>();
     warpgroup_fence_operand(mma_rC);
   }
 
