@@ -288,14 +288,13 @@ def get_computation_graph(model, dummy_input, unique_operators, method):
             # Generate the ONNX file
             onnx_path = "scripts/onnx/integrate_test.onnx"
             os.makedirs(os.path.dirname(onnx_path), exist_ok=True)
-            
+
+            # dynamic_axes = {name: {0: "batch_size"} for name in model.get_input_names() + model.get_output_names()}
+
             torch.onnx.export(
                 model,
                 dummy_input,
                 onnx_path,
-                input_names=["input"],
-                output_names=["output"],
-                dynamic_axes={"input": {0: "batch_size"}, "output": {0: "batch_size"}},
                 dynamo=True
             )
             
