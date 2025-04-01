@@ -57,7 +57,10 @@ public:
             int3 input_map,
             int forloop_dim,
             mirage::layout::SmemLayout layout,
-            mirage::type::TBPrologueType prologue);
+            mirage::type::TBPrologueType prologue=mirage::type::TB_PROLOGUE_NONE,
+            dim3 gpu_dim=dim3(1, 1, 1),
+            bool from_constructed=false,
+            int64_t allgather_t_guid=0);
   ~TBInputOp();
 
   operator json() const override;
@@ -68,6 +71,7 @@ public:
   int3 input_map;
   int forloop_dim;
   mirage::type::TBPrologueType prologue;
+  int allgather_dim = 0;
 };
 
 class TBOutputOp : public TBOperator {

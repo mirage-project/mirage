@@ -23,8 +23,9 @@ STensor Graph::new_input(mirage::kernel::DTensor const &dtensor,
                          int3 input_map,
                          int forloop_dim,
                          mirage::layout::SmemLayout layout,
-                         mirage::type::TBPrologueType prologue) {
-  TBOperator *op = create_input_op(dtensor, input_map, forloop_dim, layout, prologue);
+                         mirage::type::TBPrologueType prologue,
+                         int64_t allgather_t_guid) { // Only not 0 from customized op in the transpiler
+  TBOperator *op = create_input_op(dtensor, input_map, forloop_dim, layout, prologue, allgather_t_guid);
   assert(op != nullptr);
   operators.push_back(op);
   return op->output_tensors[0];
@@ -34,8 +35,9 @@ STensor *Graph::new_input(mirage::kernel::DTensor const *dtensor,
                           int3 input_map,
                           int forloop_dim,
                           mirage::layout::SmemLayout layout,
-                          mirage::type::TBPrologueType prologue) {
-  TBOperator *op = create_input_op(*dtensor, input_map, forloop_dim, layout, prologue);
+                          mirage::type::TBPrologueType prologue,
+                          int64_t allgather_t_guid) { // Only not 0 from customized op in the transpiler
+  TBOperator *op = create_input_op(*dtensor, input_map, forloop_dim, layout, prologue, allgather_t_guid);
   assert(op != nullptr);
   operators.push_back(op);
   return &op->output_tensors[0];
@@ -45,8 +47,9 @@ TBOperator *Graph::create_input_op(mirage::kernel::DTensor const &dtensor,
                                    int3 input_map,
                                    int forloop_dim,
                                    mirage::layout::SmemLayout layout,
-                                   mirage::type::TBPrologueType prologue) {
-  TBInputOp *op = new TBInputOp(this, dtensor, input_map, forloop_dim, layout, prologue);
+                                   mirage::type::TBPrologueType prologue,
+                                   int64_t allgather_t_guid) {
+  TBInputOp *op = new TBInputOp(this, dtensor, input_map, forloop_dim, layout, prologue, gpu_dim, from_constructed, allgather_t_guid);
 
   // Check shmem usage
   size_t smem_usage = calculate_shared_memory_usage(op);
@@ -63,9 +66,35 @@ TBInputOp::TBInputOp(Graph *_graph,
                      int3 _input_map,
                      int _forloop_dim,
                      mirage::layout::SmemLayout _layout,
-                     mirage::type::TBPrologueType _prologue)
+                     mirage::type::TBPrologueType _prologue,
+                     dim3 gpu_dim,
+                     bool from_constructed,
+                     int64_t allgather_t_guid) // Only not 0 from customized op in the transpiler
     : TBOperator(_graph, mirage::type::TB_INPUT_OP), dtensor(_dtensor),
       input_map(_input_map), forloop_dim(_forloop_dim), prologue(_prologue) {
+  
+  //Modify dtensor for allgather if it's the first time to load the input
+  printf("gpu_dim: %d, %d, %d\n", gpu_dim.x, gpu_dim.y, gpu_dim.z);
+  printf("Is from constructed: %d\n", from_constructed);
+  printf("Is allgather: %d\n", prologue == mirage::type::TB_PROLOGUE_ALLGATHER);
+  printf("dtensor.guid from TBInputOp: %zu, original_guid: %zu, shape: %d, %d, %d\n", dtensor.guid, dtensor.original_guid, dtensor.dim[0], dtensor.dim[1], dtensor.dim[2]);
+  if (from_constructed && prologue == mirage::type::TB_PROLOGUE_ALLGATHER) {
+    if (allgather_t_guid > 0) {
+      // This is the input in customized op in the transpiler.
+      // An allgathered dtensor has already been created in the transpiler.
+      dtensor.original_guid = dtensor.guid;
+      dtensor.guid = allgather_t_guid;
+    } else {
+      // This is the input in the bgraph building phase in the transpiler.
+      // An new allgathered dtensor will be created and added to all_dtensors.
+      dtensor.original_guid = dtensor.guid;
+      dtensor.guid = mirage::kernel::DTensor::next_guid++;
+    }
+    dtensor.dim[allgather_dim] *= (allgather_dim == 0 ? gpu_dim.x : (allgather_dim == 1 ? gpu_dim.y : gpu_dim.z));
+    dtensor.prologue = mirage::type::TBPrologueType::TB_PROLOGUE_ALLGATHER;
+  }
+  printf("Really saved dtensor.guid from TBInputOp: %zu, original_guid: %zu, shape: %d, %d, %d\n\n", dtensor.guid, dtensor.original_guid, dtensor.dim[0], dtensor.dim[1], dtensor.dim[2]);
+  
   STensor tensor;
   tensor.layout = _layout;
   tensor.num_dims = dtensor.num_dims;

@@ -34,7 +34,7 @@ private:
 
 public:
   Graph();
-  Graph(dim3 grid_dim, dim3 block_dim, int forloop_range, int reduction_dimx);
+  Graph(dim3 grid_dim, dim3 block_dim, int forloop_range, int reduction_dimx, dim3 gpu_dim=dim3(1, 1, 1), bool from_constructed=false);
   ~Graph();
   Graph(Graph const &) = delete;
   Graph &operator=(Graph const &) = delete;
@@ -44,17 +44,20 @@ public:
                     int3 input_map,
                     int forloop_dim,
                     mirage::layout::SmemLayout layout,
-                    mirage::type::TBPrologueType prologue=mirage::type::TB_PROLOGUE_NONE);
+                    mirage::type::TBPrologueType prologue=mirage::type::TB_PROLOGUE_NONE,
+                    int64_t allgather_t_guid=0);
   STensor *new_input(mirage::kernel::DTensor const *dtensor,
                      int3 input_map,
                      int forloop_dim,
                      mirage::layout::SmemLayout layout,
-                     mirage::type::TBPrologueType prologue=mirage::type::TB_PROLOGUE_NONE);
+                     mirage::type::TBPrologueType prologue=mirage::type::TB_PROLOGUE_NONE,
+                     int64_t allgather_t_guid=0);
   TBOperator *create_input_op(mirage::kernel::DTensor const &dtensor,
                               int3 input_map,
                               int forloop_dim,
                               mirage::layout::SmemLayout layout,
-                              mirage::type::TBPrologueType prologue=mirage::type::TB_PROLOGUE_NONE);
+                              mirage::type::TBPrologueType prologue=mirage::type::TB_PROLOGUE_NONE,
+                              int64_t allgather_t_guid=0);
   // output operator
   mirage::kernel::DTensor mark_output(STensor const &stensor,
                                       int3 output_map,
@@ -170,6 +173,8 @@ public:
   int forloop_range;
   int reduction_dimx;
   std::vector<mirage::threadblock::TBOperator *> operators;
+  dim3 gpu_dim;
+  bool from_constructed;
   // memory allocator
   off_t smem_offset;
   std::vector<std::pair<off_t, size_t>> allocated_tensors;

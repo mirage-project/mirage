@@ -24,7 +24,7 @@ if __name__ == "__main__":
     tAccM = tb_graph.forloop_accum(tM)
 
     #TB_ALLTOALL_EPILOGUE
-    tb_graph.new_output(stensor=tAccM, output_map=(1, 0, -1), epilogue="alltoall") # (0, 1, -1) right?
+    tb_graph.new_output(stensor=tAccM, output_map=(1, 0, -1)) # (0, 1, -1) right?
     O = graph.customized([X, W], tb_graph)
     graph.mark_output(O[0])
 
