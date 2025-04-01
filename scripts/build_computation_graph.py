@@ -1,5 +1,4 @@
 import torch
-from transformers import BertTokenizer, BertForSequenceClassification, AdamW
 from torch import nn
 import pickle
 import os
@@ -188,7 +187,7 @@ def parse_onnx_model(model, unique_operators):
     # print([node.name for node in model.graph.node])
     root_node = operators[model.graph.node[0].name]
     # print_computational_graph(operators['node_Transpose_0'])
-    print_computational_graph(root_node)
+    # print_computational_graph(root_node)
     return root_node, operators
 
 def test_cfg():

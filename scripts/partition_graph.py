@@ -68,7 +68,7 @@ def get_partitions_helper(op_node, curr_subgraph, min_num_ops, max_num_ops, visi
         if output_op.name not in UNSUPPORTED_OPS:
             valid_output_ops.append(output_op)
     
-    for choose_k in range(1, len(valid_output_ops)):
+    for choose_k in range(1, len(valid_output_ops) + 1):
         curr_subgraph_copy = curr_subgraph.copy()
         for comb_outputs in comb(valid_output_ops, choose_k):
             visited_copy = visited.copy()
