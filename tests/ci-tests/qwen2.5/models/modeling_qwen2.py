@@ -30,11 +30,9 @@ from transformers.generation import GenerationMixin
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 from transformers.modeling_utils import PreTrainedModel
 from .configuration_qwen2 import Qwen2Config
-import time
 
 import flashinfer
 import mirage as mi
-from .rope import apply_rotary_pos_emb_triton
 
 # Copied from transformers.models.llama.modeling_llama.LlamaRMSNorm with Llama->Qwen2
 class Qwen2RMSNorm(nn.Module):
@@ -86,7 +84,7 @@ class Qwen2RotaryEmbedding(nn.Module):
         self.original_inv_freq = self.inv_freq
 
     @torch.no_grad()
-    def forward(self, position_ids): # positions = torch.arange(32768).unsqueeze(0).to(model.device)
+    def forward(self, position_ids):
 
         # Core RoPE block
         inv_freq_expanded = self.inv_freq[None, :, None].float().expand(position_ids.shape[0], -1, 1)
@@ -145,7 +143,7 @@ class Qwen2MLP(nn.Module):
         D = graph.mul(D, G)
         O = graph.matmul(D, W)
         graph.mark_output(O)
-        self.kernel1 = graph.superoptimize(config="mlp")
+        self.kernel1 = graph.superoptimize(config="mlp", warmup_iters=100, profile_iters=5000)
 
         graph = mi.new_kernel_graph()
         X = graph.new_input(dims=(1, self.intermediate_size), dtype=mi.bfloat16)
@@ -154,7 +152,7 @@ class Qwen2MLP(nn.Module):
         D = graph.mul(graph.silu(X), Y)
         O = graph.matmul(D, W)
         graph.mark_output(O)
-        self.kernel2 = graph.superoptimize(config="mlp")
+        self.kernel2 = graph.superoptimize(config="mlp", warmup_iters=100, profile_iters=5000)
 
     def forward(self, input_layernorm, hidden_state, stream: torch.cuda.Stream = None):
         if hidden_state.shape[-2] == 1 and self.enable_mirage:
@@ -213,7 +211,7 @@ class Qwen2Attention(nn.Module):
         D = graph.mul(D, G)
         O = graph.matmul(D, W)
         graph.mark_output(O)
-        self.kernel = graph.superoptimize(config="mlp")
+        self.kernel = graph.superoptimize(config="mlp", warmup_iters=100, profile_iters=5000)
 
     def forward(
         self,
@@ -245,9 +243,7 @@ class Qwen2Attention(nn.Module):
         value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim)
 
         cos, sin = position_embeddings
-
-        # query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, unsqueeze_dim=2)
-        query_states, key_states = apply_rotary_pos_emb_triton(query_states, key_states, cos, sin, unsqueeze_dim=2)
+        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, unsqueeze_dim=2)
 
         if q_len > 1:
             self.key_cache[self.layer_idx,0,:q_len]=key_states[0]
@@ -439,6 +435,7 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         self.model = Qwen2Model(config)
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+
         # Initialize weights and apply final processing
         self.post_init()
 

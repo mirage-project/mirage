@@ -2,14 +2,23 @@ from models.modeling_qwen2 import Qwen2ForCausalLM
 from transformers import AutoTokenizer
 import torch
 import argparse
+import os
+import json
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--disable-mirage", action='store_true', help="Disable Mirage kernels")
+    parser.add_argument("--output-dir", type=str, default="/tmp", help="Directory to save response and latency")
+    parser.add_argument("--prefix", type=str, default="mirage", help="Prefix for output files")
     args = parser.parse_args()
     print("Input arguments:", args)
 
-    model_name = "Qwen/Qwen2.5-7B-Instruct"
+    # Set file paths based on arguments
+    mode = "before" if args.disable_mirage else "after"
+    response_file = os.path.join(args.output_dir, f"{args.prefix}_{mode}_response.txt")
+    latency_file = os.path.join(args.output_dir, f"{args.prefix}_{mode}_latency.txt")
+
+    model_name = "Qwen/Qwen2.5-3B-Instruct"
     torch.set_default_dtype(torch.bfloat16)
     torch.cuda.set_device(0)
     with torch.device("cuda"):
@@ -44,8 +53,8 @@ if __name__ == "__main__":
     g = torch.cuda.CUDAGraph()
     stream = torch.cuda.Stream()
     step = torch.tensor([0], dtype=torch.int32, device="cuda")
-    warmup = 16
-    output_len = 512
+    warmup = 128
+    output_len = 2048
     for cur_pos in range(prompt_len, prompt_len + output_len):
         step.fill_(cur_pos-1)
         # prefilling phase
@@ -79,8 +88,8 @@ if __name__ == "__main__":
         next_token = next_token[0, -1]
         tokens[0, cur_pos] = next_token
         prev_pos = cur_pos
-        if (next_token == model.config.eos_token_id):
-            break
+        #if (next_token == model.config.eos_token_id):
+        #    break
         if cur_pos == prompt_len + warmup:
             torch.cuda.synchronize()
             starter.record()
@@ -88,10 +97,24 @@ if __name__ == "__main__":
     ender.record()
     torch.cuda.synchronize()
     run_time = starter.elapsed_time(ender)
+    latency = run_time / (output_len - warmup)
     
     generated_ids=tokens[:, :prev_pos]
     
-    response = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
-    print(response)
+    # Decode the model output
+    full_response = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
     
-    print("Prompt length {}, generate length {}, per-token latency {} ms".format(prompt_len, cur_pos + 1, run_time / (cur_pos + 1 - warmup)))
+    # Extract just the assistant's response
+    response_parts = full_response.split("assistant")
+    if len(response_parts) > 1:
+        model_response = response_parts[1].strip()
+        if "user" in model_response:
+            model_response = model_response.split("user")[0].strip()
+    else:
+        model_response = full_response
+    
+    with open(response_file, "w") as f:
+        f.write(model_response)
+    
+    with open(latency_file, "w") as f:
+        f.write(str(latency))

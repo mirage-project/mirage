@@ -1,0 +1,14 @@
+name: Shell Check
+on: [push, pull_request, workflow_dispatch]
+
+jobs:
+  shellcheck:
+    name: Shell Script Check
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run ShellCheck
+        uses: ludeeus/action-shellcheck@master
+        with:
+          ignore_paths: ./deps/** 
+          severity: 'error'
