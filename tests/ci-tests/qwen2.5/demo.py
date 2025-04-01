@@ -53,8 +53,8 @@ if __name__ == "__main__":
     g = torch.cuda.CUDAGraph()
     stream = torch.cuda.Stream()
     step = torch.tensor([0], dtype=torch.int32, device="cuda")
-    warmup = 16
-    output_len = 512
+    warmup = 128
+    output_len = 2048
     for cur_pos in range(prompt_len, prompt_len + output_len):
         step.fill_(cur_pos-1)
         # prefilling phase

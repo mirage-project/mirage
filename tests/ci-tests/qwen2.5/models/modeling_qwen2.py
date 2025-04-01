@@ -143,7 +143,7 @@ class Qwen2MLP(nn.Module):
         D = graph.mul(D, G)
         O = graph.matmul(D, W)
         graph.mark_output(O)
-        self.kernel1 = graph.superoptimize(config="mlp")
+        self.kernel1 = graph.superoptimize(config="mlp", warmup_iters=100, profile_iters=5000)
 
         graph = mi.new_kernel_graph()
         X = graph.new_input(dims=(1, self.intermediate_size), dtype=mi.bfloat16)
@@ -152,7 +152,7 @@ class Qwen2MLP(nn.Module):
         D = graph.mul(graph.silu(X), Y)
         O = graph.matmul(D, W)
         graph.mark_output(O)
-        self.kernel2 = graph.superoptimize(config="mlp")
+        self.kernel2 = graph.superoptimize(config="mlp", warmup_iters=100, profile_iters=5000)
 
     def forward(self, input_layernorm, hidden_state, stream: torch.cuda.Stream = None):
         if hidden_state.shape[-2] == 1 and self.enable_mirage:
@@ -211,7 +211,7 @@ class Qwen2Attention(nn.Module):
         D = graph.mul(D, G)
         O = graph.matmul(D, W)
         graph.mark_output(O)
-        self.kernel = graph.superoptimize(config="mlp")
+        self.kernel = graph.superoptimize(config="mlp", warmup_iters=100, profile_iters=5000)
 
     def forward(
         self,
