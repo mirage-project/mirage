@@ -16,9 +16,9 @@ static __global__ void chunk_kernel_fwd(typename Config::T *__restrict__ out0,
     using T = typename Config::T;
     using Numel = typename Config::Numel;
 
-    auto src_layout = (typename Config::SrcLayout){};
-    auto dst0_layout = (typename Config::Dst0Layout){};
-    auto dst1_layout = (typename Config::Dst1Layout){};
+    auto src_layout = typename Config::SrcLayout{};
+    auto dst0_layout = typename Config::Dst0Layout{};
+    auto dst1_layout = typename Config::Dst1Layout{};
 
     static constexpr int SRC_SIZE = get<Config::CHUNK_DIM>(shape(src_layout));
     static constexpr int DST0_SIZE = get<Config::CHUNK_DIM>(shape(dst0_layout));
