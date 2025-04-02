@@ -41,6 +41,11 @@ from build_computation_graph import get_computation_graph
         
 #         build_computational_graph(ids_to_nodes[id(next_fn[0])], unique_operators)
 
+def copy_subgraph(subgraph):
+    new_subgraph = {}
+    for from_op, to_ops in subgraph.items():
+        new_subgraph[from_op] = to_ops.copy()
+    return new_subgraph
 
 def get_partitions(op_node, min_num_ops, max_num_ops, visited_start_nodes, all_subgraphs, UNSUPPORTED_OPS):
     visited_start_nodes.add(id(op_node.fn))
@@ -61,7 +66,7 @@ def get_partitions_helper(op_node, curr_subgraph, min_num_ops, max_num_ops, visi
     # assume op_node already in curr_subgraph
     visited.add(id(op_node.fn))
     if len(curr_subgraph) >= min_num_ops:
-        all_subgraphs.append(curr_subgraph.copy())
+        all_subgraphs.append(copy_subgraph(curr_subgraph))
 
     valid_output_ops = []
     for output_op in op_node.output_ops:
@@ -69,15 +74,14 @@ def get_partitions_helper(op_node, curr_subgraph, min_num_ops, max_num_ops, visi
             valid_output_ops.append(output_op)
     
     for choose_k in range(1, len(valid_output_ops) + 1):
-        curr_subgraph_copy = curr_subgraph.copy()
+        curr_subgraph_copy = copy_subgraph(curr_subgraph)
         for comb_outputs in comb(valid_output_ops, choose_k):
             visited_copy = visited.copy()
             for output_node in comb_outputs:
                 if output_node not in curr_subgraph_copy:
                     curr_subgraph_copy[output_node] = []
                 curr_subgraph_copy[op_node].append(output_node)
-                get_partitions_helper(output_node, curr_subgraph_copy.copy(), min_num_ops, max_num_ops, visited_copy, all_subgraphs, UNSUPPORTED_OPS)
-
+                get_partitions_helper(output_node, copy_subgraph(curr_subgraph_copy), min_num_ops, max_num_ops, visited_copy, all_subgraphs, UNSUPPORTED_OPS)
 
 def partition_graph(model, dummy_input, min_num_ops=2, max_num_ops=4, UNSUPPORTED_OPS=set(["torch::autograd::AccumulateGrad", 
                                                               "NllLossBackward0", 
