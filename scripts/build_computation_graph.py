@@ -106,26 +106,23 @@ def print_computational_graph(root_node, indent=0, visited=None):
         # for op in root_node.input_ops:
         #     print_computational_graph(op, indent + 2, visited)
 
-
-
 """
 Parse ONNX representation of model and build operator graph
 """
 def parse_onnx_model(model, unique_operators):
-    inferred_model = shape_inference.infer_shapes(model) # for shape inference of inputs and outputs
     shape_value_dict = {}
-
-    for initializer in inferred_model.graph.initializer:
+    for initializer in model.graph.initializer:
         shape_value_dict[initializer.name] = initializer.dims
-
-    for value in inferred_model.graph.value_info:
+    
+    for value in model.graph.value_info:
         shape_value_dict[value.name] = [d_i.dim_value for d_i in value.type.tensor_type.shape.dim]
 
-    for input_info in inferred_model.graph.input:
+    for input_info in model.graph.input:
         shape_value_dict[input_info.name] = [d_i.dim_value for d_i in input_info.type.tensor_type.shape.dim]
     
-    for output_info in inferred_model.graph.output:
+    for output_info in model.graph.output:
         shape_value_dict[output_info.name] = [d_i.dim_value for d_i in output_info.type.tensor_type.shape.dim]
+    print(shape_value_dict)
 
     tensor_producer = {}
     tensor_consumer = {}
@@ -144,11 +141,12 @@ def parse_onnx_model(model, unique_operators):
     operators = {}
 
     # store the operators in a dict
-
     for node in model.graph.node:
         op_type = node.op_type
         unique_operators.add(op_type)
         node_name = node.name or f"{op_type}_{id(node)}"
+        [shape_value_dict[input_name] for input_name in node.input]
+        [tensor_id[input_name] for input_name in node.input]
         input_tensor_shapes = [(shape_value_dict[input_name], tensor_id[input_name]) for input_name in node.input]
         output_tensor_shapes = [(shape_value_dict[output_name], tensor_id[output_name]) for output_name in node.output]
 
@@ -297,8 +295,10 @@ def get_computation_graph(model, dummy_input, unique_operators, method):
                 dynamo=True
             )
             
-            onnx_model = onnx.load(onnx_path)
-            root_node, operators = parse_onnx_model(onnx_model, unique_operators)
+            shape_inference.infer_shapes_path(model_path="scripts/onnx/integrate_test.onnx",
+                                              output_path="scripts/onnx/inferred_model.onnx") # for shape inference of inputs and outputs
+            inferred_model = onnx.load("scripts/onnx/inferred_model.onnx")
+            root_node, operators = parse_onnx_model(inferred_model, unique_operators)
             return root_node, operators
         case _:
             print("Unsupported method for build_graph")
