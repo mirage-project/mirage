@@ -68,6 +68,7 @@ public:
   Runtime();
   void register_mugraph(mirage::kernel::Graph const &graph,
                         std::vector<TaskType> const &task_types);
+  void launch_persistent_kernel(int num_workers, int num_schedulers);
 
 public:
   std::vector<TaskDesc> all_tasks;

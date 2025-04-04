@@ -157,5 +157,39 @@ __global__ void persistent_kernel(RuntimeConfig config) {
   }
 }
 
+void Runtime::launch_persistent_kernel(int num_workers, int num_schedulers) {
+  RuntimeConfig config;
+  config.num_workers = num_workers;
+  config.num_schedulers = num_schedulers;
+  config.num_graphs = num_graphs;
+  config.total_num_tasks = all_tasks.size();
+  config.total_num_events = all_events.size();
+  config.per_worker_queue_len = 1024;
+  config.per_sched_queue_len = 1024;
+  cudaMalloc(&config.worker_queue_last_task_id,
+             config.num_workers * sizeof(unsigned long long int));
+  cudaMalloc(&config.sched_queue_last_event_id,
+             config.num_schedulers * sizeof(unsigned long long int));
+  cudaMalloc(&config.all_event_counters, config.total_num_events * sizeof(int));
+  // Initialize all tasks
+  cudaMalloc(&config.all_tasks, config.total_num_tasks * sizeof(TaskDesc));
+  cudaMemcpy(config.all_tasks,
+             all_tasks.data(),
+             config.total_num_tasks * sizeof(TaskDesc),
+             cudaMemcpyHostToDevice);
+  // Initialize all events
+  cudaMalloc(&config.all_events, config.total_num_events * sizeof(EventDesc));
+  cudaMemcpy(config.all_events,
+             all_events.data(),
+             config.total_num_events * sizeof(EventDesc),
+             cudaMemcpyHostToDevice);
+
+  // Launch init kernel
+  init_kernel<<<dim3(1, 1, 1), dim3(128, 1, 1)>>>(config);
+
+  // Launcher persistent kernel
+  persistent_kernel<<<dim3(108, 1, 1), dim3(128, 1, 1)>>>(config);
+}
+
 }; // namespace runtime
 }; // namespace mirage
