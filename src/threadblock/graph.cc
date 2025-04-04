@@ -104,6 +104,7 @@ size_t Graph::calculate_shared_memory_usage(TBOperator *new_op) {
       case mirage::type::TB_DIV_OP:
       case mirage::type::TB_ADD_OP:
       case mirage::type::TB_MUL_OP:
+      case mirage::type::TB_SUB_OP:
       // Reduction
       case mirage::type::TB_REDUCTION_0_OP:
       case mirage::type::TB_REDUCTION_1_OP:
@@ -111,6 +112,9 @@ size_t Graph::calculate_shared_memory_usage(TBOperator *new_op) {
       case mirage::type::TB_REDUCTION_0_TO_DIMX_OP:
       case mirage::type::TB_REDUCTION_1_TO_DIMX_OP:
       case mirage::type::TB_REDUCTION_2_TO_DIMX_OP:
+      case mirage::type::TB_REDUCTION_0_MAX_OP:
+      case mirage::type::TB_REDUCTION_1_MAX_OP:
+      case mirage::type::TB_REDUCTION_2_MAX_OP:
       // Normalization
       case mirage::type::TB_RMS_NORM_OP:
       // Concat
@@ -169,6 +173,20 @@ size_t Graph::calculate_shared_memory_usage(TBOperator *new_op) {
       case mirage::type::TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP: {
         // we will inline accumulation but need to perform
         // a reduuction_to_dimx
+        assert(op->output_tensors.size() == 1);
+        usage += op->output_tensors[0].size();
+        break;
+      }
+      case mirage::type::TB_FORLOOP_ACCUM_NO_RED_RESCALE_OP: {
+        // we will inline accumulation but need to perform
+        // a rescale
+        assert(op->output_tensors.size() == 1);
+        usage += op->output_tensors[0].size();
+        break;
+      }
+      case mirage::type::TB_FORLOOP_ACCUM_RED_LD_SUM_RESCALE_OP: {
+        // we will inline accumulation but need to perform
+        // a rescale
         assert(op->output_tensors.size() == 1);
         usage += op->output_tensors[0].size();
         break;
@@ -643,7 +661,7 @@ NewKernelParams Graph::get_new_kernel_params(bool fingerprint) const {
         assert(false && "Unsupported TB operator");
       }
     } // switch
-  }   // for-loop
+  } // for-loop
   // Our serializer assumes that input loaders are the first operators
   // and that output savers are the last operators
   for (int i = 0; i < params.num_dmem_inputs; i++) {

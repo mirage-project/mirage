@@ -515,6 +515,7 @@ void Transpiler::resolve_tensor_layout() {
             break;
           }
           case type::TB_ADD_OP:
+          case type::TB_SUB_OP:
           case type::TB_MUL_OP:
           case type::TB_DIV_OP: {
             tb::STensor const &input0 = tb_op->input_tensors.at(0);
@@ -571,6 +572,33 @@ void Transpiler::resolve_tensor_layout() {
             }
             break;
           }
+          case type::TB_FORLOOP_ACCUM_NO_RED_RESCALE_OP: {
+            assert(tb_op == output_op);
+            tb::STensor const &input = tb_op->input_tensors.at(0);
+            tb::STensor const &rescale = tb_op->input_tensors.at(1);
+            tb::STensor const &output = tb_op->output_tensors.at(0);
+            assert(input.num_dims == output.num_dims);
+            int num_dims = input.num_dims;
+            z3::expr_vector is_op_iter_dim(ctx);
+            for (int i = 0; i < input.num_dims; ++i) {
+              std::string var_name = fmt("op_iter_dim_$_$", output.guid, i);
+              is_op_iter_dim.push_back(ctx.bool_const(var_name.c_str()));
+            }
+            opt.add(z3::atmost(is_op_iter_dim, 1));
+            opt.add(z3::atleast(is_op_iter_dim, 1));
+            for (int i = 0; i < num_dims; ++i) {
+              opt.add(z3::implies(is_op_iter_dim[i] &&
+                                      !s_is_innermost[input.guid][i],
+                                  s_is_swizzled[input.guid][i]));
+              opt.add(z3::implies(is_op_iter_dim[i] &&
+                                      !s_is_innermost[output.guid][i],
+                                  s_is_swizzled[output.guid][i]));
+              opt.add(z3::implies(is_op_iter_dim[i] &&
+                                      !s_is_innermost[rescale.guid][i],
+                                  s_is_swizzled[rescale.guid][i]));
+            }
+            break;
+          }
           case type::TB_REDUCTION_0_OP:
           case type::TB_REDUCTION_1_OP:
           case type::TB_REDUCTION_2_OP:
@@ -604,6 +632,41 @@ void Transpiler::resolve_tensor_layout() {
               opt.add(z3::implies(is_op_iter_dim[i] &&
                                       !s_is_innermost[output.guid][i],
                                   s_is_swizzled[output.guid][i]));
+            }
+            break;
+          }
+          case type::TB_REDUCTION_0_MAX_OP:
+          case type::TB_REDUCTION_1_MAX_OP:
+          case type::TB_REDUCTION_2_MAX_OP: {
+            int reduc_dim = tb_op->op_type - type::TB_REDUCTION_0_MAX_OP;
+            tb::STensor const &input = tb_op->input_tensors.at(0);
+            tb::STensor const &output = output_op->output_tensors.at(0);
+            tb::STensor const &diff = tb_op->output_tensors.at(1);
+            int num_dims = input.num_dims;
+            assert(input.num_dims == output.num_dims);
+            assert(input.num_dims == diff.num_dims);
+            assert(0 <= reduc_dim && reduc_dim < num_dims);
+            // Enumerate the iteration dim
+            z3::expr_vector is_op_iter_dim(ctx);
+            for (int i = 0; i < num_dims; ++i) {
+              std::string var_name = fmt("op_iter_dim_$_$", output.guid, i);
+              is_op_iter_dim.push_back(ctx.bool_const(var_name.c_str()));
+            }
+            opt.add(z3::atmost(is_op_iter_dim, 1));
+            opt.add(z3::atleast(is_op_iter_dim, 1));
+            // Currently, don't support the reduction dim as the iteration dim
+            opt.add(!is_op_iter_dim[reduc_dim]);
+            // Need to swizzle one dimension if it is not the innermost dim
+            for (int i = 0; i < num_dims; ++i) {
+              opt.add(z3::implies(is_op_iter_dim[i] &&
+                                      !s_is_innermost[input.guid][i],
+                                  s_is_swizzled[input.guid][i]));
+              opt.add(z3::implies(is_op_iter_dim[i] &&
+                                      !s_is_innermost[output.guid][i],
+                                  s_is_swizzled[output.guid][i]));
+              opt.add(z3::implies(is_op_iter_dim[i] &&
+                                      !s_is_innermost[diff.guid][i],
+                                  s_is_swizzled[diff.guid][i]));
             }
             break;
           }
