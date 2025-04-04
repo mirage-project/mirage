@@ -612,15 +612,41 @@ CustomOPTranspileResult
       int mma_atom_num_threads;
       if (GPU_CC::A100 <= config.target_cc && config.target_cc < GPU_CC::H100) {
         if (k <= 8) {
-          mma_atom_str = input0.data_type == type::DT_FLOAT16
-                             ? "SM80_16x8x8_F16F16F16F16_TN"
-                             : "SM80_16x8x8_F32BF16BF16F32_TN";
+          // mma_atom_str = input0.data_type == type::DT_FLOAT16
+          //                    ? "SM80_16x8x8_F16F16F16F16_TN"
+          //                    : "SM80_16x8x8_F32BF16BF16F32_TN";
+          switch (input0.data_type) {
+            case type::DT_FLOAT16:
+              mma_atom_str = "SM80_16x8x8_F16F16F16F16_TN";
+              break;
+            case type::DT_BFLOAT16:
+              mma_atom_str = "SM80_16x8x8_F32BF16BF16F32_TN";
+              break;
+            case type::DT_FLOAT32:
+              mma_atom_str = "SM80_16x8x8_F32TF32TF32F32_TN";
+              break;
+            default:
+              assert(0 && "Unsupported data type");
+          }
           mma_atom_mnk = {16, 8, 8};
           mma_atom_num_threads = 32;
         } else {
-          mma_atom_str = input0.data_type == type::DT_FLOAT16
-                             ? "SM80_16x8x16_F16F16F16F16_TN"
-                             : "SM80_16x8x16_F32BF16BF16F32_TN";
+          // mma_atom_str = input0.data_type == type::DT_FLOAT16
+          //                    ? "SM80_16x8x16_F16F16F16F16_TN"
+          //                    : "SM80_16x8x16_F32BF16BF16F32_TN";
+          switch (input0.data_type) {
+            case type::DT_FLOAT16:
+              mma_atom_str = "SM80_16x8x16_F16F16F16F16_TN";
+              break;
+            case type::DT_BFLOAT16:
+              mma_atom_str = "SM80_16x8x16_F32BF16BF16F32_TN";
+              break;
+            case type::DT_FLOAT32:
+              mma_atom_str = "SM80_16x8x8_F32TF32TF32F32_TN";
+              break;
+            default:
+              assert(0 && "Unsupported data type");
+          }
           mma_atom_mnk = {16, 8, 16};
           mma_atom_num_threads = 32;
         }
