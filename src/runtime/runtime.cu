@@ -39,11 +39,12 @@ __device__ int prepare_next_batch(RuntimeConfig config) {
 
 __device__ void terminate_workers_and_schedulers(RuntimeConfig config) {
   // Send event 0 to all workers
+  // Task ID 0 is the termination task
   for (int i = 0; i < config.num_workers; i++) {
     size_t last_task_id = atomicAdd(&config.worker_queue_last_task_id[i], 1);
     config.worker_queues[i][last_task_id % config.per_worker_queue_len] = 0;
   }
-
+  // Event ID 0 is the termination event
   for (int i = 0; i < config.num_schedulers; i++) {
     size_t last_event_id = atomicAdd(&config.sched_queue_last_event_id[i], 1);
     config.sched_queues[i][last_event_id % config.per_sched_queue_len] = 0;

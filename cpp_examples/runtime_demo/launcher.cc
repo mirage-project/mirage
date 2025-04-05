@@ -8,6 +8,7 @@ using namespace mirage;
 int main(int argc, char **argv) {
   namespace tb = mirage::threadblock;
   namespace kn = mirage::kernel;
+  std::unordered_map<const kn::KNCustomizedOp*, mirage::runtime::TaskType> task_types;
 
   kn::Graph kgraph;
   kn::DTensor X = kgraph.new_input(
@@ -15,10 +16,10 @@ int main(int argc, char **argv) {
   for (int layer = 0; layer < 1; layer++) {
     // Add RMSLinear
     {
-      dim3 grid_dim = {64, 1, 1}, block_dim = {128, 1, 1};
+      dim3 grid_dim = {1, 1, 1}, block_dim = {128, 1, 1};
       tb::Graph bgraph(grid_dim, block_dim, 64, 64);
       kn::DTensor W = kgraph.new_input(
-          {4096, 4096}, {4096, 1}, type::DT_BFLOAT16, layout::DmemRowMajor);
+          {4096, 64}, {4096, 1}, type::DT_BFLOAT16, layout::DmemRowMajor);
       tb::STensor bX =
           bgraph.new_input(X, {-1, -1, -1}, 1, layout::SmemRowMajor);
       tb::STensor bW =
@@ -32,7 +33,9 @@ int main(int argc, char **argv) {
       bgraph.mark_output(bO, {1, -1, -1}, -1, type::TB_EPILOGUE_NONE);
       std::vector<kernel::DTensor> outputs = kgraph.customized({X, W}, bgraph);
       X = outputs[0];
+      task_types[static_cast<kn::KNCustomizedOp*>(X.owner_op)] = mirage::runtime::TASK_RMS_NORM_LINEAR;
     }
+#ifdef DEADCODE
     // Add elementwise
     {
       dim3 grid_dim = {64, 1, 1}, block_dim = {128, 1, 1};
@@ -50,12 +53,12 @@ int main(int argc, char **argv) {
       std::vector<kernel::DTensor> outputs = kgraph.customized({X, Y}, bgraph);
       X = outputs[0];
     }
+#endif
   }
 
   // Start runtime
   using namespace mirage::runtime;
   Runtime runtime;
-  std::vector<TaskType> task_types(2, mirage::runtime::TASK_RMS_NORM_LINEAR);
   runtime.register_mugraph(kgraph, task_types);
   runtime.launch_persistent_kernel(106 /*num_workers*/, 8 /*num_schedulers*/);
 }

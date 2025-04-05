@@ -141,12 +141,13 @@ void dfs_create_events_add_tasks(
 }
 
 void Runtime::register_mugraph(mirage::kernel::Graph const &graph,
-                               std::vector<TaskType> const &task_types) {
-  assert(graph.operators.size() == task_types.size());
+                               std::unordered_map<const kn::KNCustomizedOp*, TaskType> const &task_types) {
   std::vector<tb::TBOutputOp *> pre_output_ops;
   kn::KNCustomizedOp const *pre_op = nullptr;
   std::map<dim3, TaskId, Dim3Comparator> pre_task_map;
   for (size_t i = 0; i < graph.operators.size(); i++) {
+    if (graph.operators[i]->op_type == type::KNOperatorType::KN_INPUT_OP)
+      continue;
     std::map<dim3, TaskId, Dim3Comparator> cur_task_map;
     assert(graph.operators[i]->op_type ==
            type::KNOperatorType::KN_CUSTOMIZED_OP);
@@ -171,7 +172,8 @@ void Runtime::register_mugraph(mirage::kernel::Graph const &graph,
     for (bid.x = 0; bid.x < bgraph.grid_dim.x; bid.x++) {
       for (bid.y = 0; bid.y < bgraph.grid_dim.y; bid.y++) {
         for (bid.z = 0; bid.z < bgraph.grid_dim.z; bid.z++) {
-          TaskDesc task(task_types[i]);
+          TaskDesc task(task_types.find(cur_op)->second);
+	  // Initialize input tensors to the task
           for (auto const &input : input_ops) {
             TensorDesc desc;
             assert(input->output_tensors.size() == 1);
@@ -187,6 +189,7 @@ void Runtime::register_mugraph(mirage::kernel::Graph const &graph,
             }
             task.inputs[task.num_inputs++] = desc;
           }
+	  // Initialize output tensors to the task
           for (auto const &output : output_ops) {
             TensorDesc desc;
             assert(output->input_tensors.size() == 1);
@@ -207,7 +210,7 @@ void Runtime::register_mugraph(mirage::kernel::Graph const &graph,
       }
     }
     // Step 2: create events between operators
-    if (i == 0) {
+    if (pre_op == nullptr) {
       // Assert that the first op launches a single task
       assert(tasks.size() == 1);
       first_tasks.push_back(all_tasks.size());
@@ -219,7 +222,7 @@ void Runtime::register_mugraph(mirage::kernel::Graph const &graph,
       int num_shared_tensors = 0;
       int3 input_map, output_map;
       for (auto const &input : input_ops) {
-        if (input->dtensor.owner_op == graph.operators[i - 1]) {
+        if (input->dtensor.owner_op == pre_op) {
           input_map = input->input_map;
           output_map = pre_output_ops[input->dtensor.owner_ts_idx]->output_map;
           num_shared_tensors++;
@@ -229,13 +232,13 @@ void Runtime::register_mugraph(mirage::kernel::Graph const &graph,
       assert(num_shared_tensors == 1);
       for (int d = 0; d < mirage::config::MAX_TENSOR_DIMS; d++) {
         if (d == input_map.x) {
-          producer_partition[d] = bgraph.grid_dim.x;
+          consumer_partition[d] = bgraph.grid_dim.x;
         }
         if (d == input_map.y) {
-          producer_partition[d] = bgraph.grid_dim.y;
+          consumer_partition[d] = bgraph.grid_dim.y;
         }
         if (d == input_map.z) {
-          producer_partition[d] = bgraph.grid_dim.z;
+          consumer_partition[d] = bgraph.grid_dim.z;
         }
         if (d == output_map.x) {
           producer_partition[d] = pre_op->bgraph.grid_dim.x;
@@ -253,7 +256,7 @@ void Runtime::register_mugraph(mirage::kernel::Graph const &graph,
       for (int d = 0; d < mirage::config::MAX_TENSOR_DIMS; d++) {
         event_dims[d] = std::gcd(producer_partition[d], consumer_partition[d]);
       }
-      dfs_create_events_add_tasks(0 /*depth*/,
+      dfs_create_events_add_tasks(0,                       /*depth*/
                                   event_dims,              /*event_dims*/
                                   input_map,               /*input_map*/
                                   output_map,              /*output_map*/
@@ -265,8 +268,8 @@ void Runtime::register_mugraph(mirage::kernel::Graph const &graph,
                                   pre_op->bgraph.grid_dim, /*producer_hi_bid*/
                                   all_events,
                                   all_tasks,
-                                  tasks,        /*cur_op_tasks*/
-                                  pre_task_map, /*pre_task_map*/
+                                  tasks,                   /*cur_op_tasks*/
+                                  pre_task_map,            /*pre_task_map*/
                                   cur_task_map /*cur_task_map)*/);
     }
     pre_output_ops = output_ops;
