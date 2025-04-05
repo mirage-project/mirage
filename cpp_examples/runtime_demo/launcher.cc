@@ -42,7 +42,7 @@ int main(int argc, char **argv) {
       tb::STensor bX =
           bgraph.new_input(X, {1, -1, -1}, 1, layout::SmemRowMajor);
       tb::STensor bY =
-          bgraph.new_input(Y, {1, -1, -1}, 0, layout::SmemRowMajor);
+          bgraph.new_input(Y, {1, -1, -1}, 1, layout::SmemRowMajor);
       tb::STensor bM = bgraph.add(bX, bY);
       tb::STensor bAccM =
           bgraph.forloop_accum(bM, type::TB_FORLOOP_ACCUM_NO_RED_OP);

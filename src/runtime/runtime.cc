@@ -142,17 +142,20 @@ void dfs_create_events_add_tasks(
 
 void Runtime::register_mugraph(mirage::kernel::Graph const &graph,
                                std::vector<TaskType> const &task_types) {
-  assert(graph.operators.size() == task_types.size());
+  assert(graph.customized_operators == task_types.size());
   std::vector<tb::TBOutputOp *> pre_output_ops;
   kn::KNCustomizedOp const *pre_op = nullptr;
   std::map<dim3, TaskId, Dim3Comparator> pre_task_map;
-  for (size_t i = 0; i < graph.operators.size(); i++) {
+  int i = 0;
+  for (auto &op : graph.operators) {
+    if (op->op_type == type::KNOperatorType::KN_INPUT_OP) {
+      continue;
+    }
     std::map<dim3, TaskId, Dim3Comparator> cur_task_map;
-    assert(graph.operators[i]->op_type ==
-           type::KNOperatorType::KN_CUSTOMIZED_OP);
+    assert(op->op_type == type::KNOperatorType::KN_CUSTOMIZED_OP);
     // Customized op
     kn::KNCustomizedOp const *cur_op =
-        dynamic_cast<kn::KNCustomizedOp const *>(graph.operators[i]);
+        dynamic_cast<kn::KNCustomizedOp const *>(op);
     tb::Graph const &bgraph = cur_op->bgraph;
     dim3 bid;
     std::vector<TaskDesc> tasks;
@@ -272,6 +275,7 @@ void Runtime::register_mugraph(mirage::kernel::Graph const &graph,
     pre_output_ops = output_ops;
     pre_op = cur_op;
     pre_task_map = cur_task_map;
+    i++;
   }
   num_graphs++;
 }

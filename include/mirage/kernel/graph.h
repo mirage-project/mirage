@@ -173,6 +173,7 @@ public:
   off_t dmem_data_offset, dmem_fp_offset;
   std::vector<std::pair<off_t, size_t>> allocated_data_tensors,
       allocated_fp_tensors;
+  int customized_operators = 0;
   // std::unordered_map<std::pair<int, int>, DTensor, pair_hash> tensors;
   // std::unordered_map<std::pair<int, int>, std::pair<int, int>, pair_hash>
   // edges; std::vector<std::vector<SrcEdge>> edges;
