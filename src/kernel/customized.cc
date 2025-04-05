@@ -84,6 +84,8 @@ KNOperator *Graph::create_customized_op(std::vector<DTensor> const &inputs,
   }
 
   KNCustomizedOp *op = new KNCustomizedOp(this, inputs, _graph);
+
+  this->customized_operators++;
   return op;
 }
 
