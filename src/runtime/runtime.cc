@@ -141,19 +141,20 @@ void dfs_create_events_add_tasks(
 }
 
 void Runtime::register_mugraph(mirage::kernel::Graph const &graph,
-                               std::unordered_map<const kn::KNCustomizedOp*, TaskType> const &task_types) {
+                               std::unordered_map<kn::KNCustomizedOp const *,
+                                                  TaskType> const &task_types) {
   std::vector<tb::TBOutputOp *> pre_output_ops;
   kn::KNCustomizedOp const *pre_op = nullptr;
   std::map<dim3, TaskId, Dim3Comparator> pre_task_map;
-  for (size_t i = 0; i < graph.operators.size(); i++) {
-    if (graph.operators[i]->op_type == type::KNOperatorType::KN_INPUT_OP)
+  for (auto const &op : graph.operators) {
+    if (op->op_type == type::KNOperatorType::KN_INPUT_OP) {
       continue;
+    }
     std::map<dim3, TaskId, Dim3Comparator> cur_task_map;
-    assert(graph.operators[i]->op_type ==
-           type::KNOperatorType::KN_CUSTOMIZED_OP);
+    assert(op->op_type == type::KNOperatorType::KN_CUSTOMIZED_OP);
     // Customized op
     kn::KNCustomizedOp const *cur_op =
-        dynamic_cast<kn::KNCustomizedOp const *>(graph.operators[i]);
+        dynamic_cast<kn::KNCustomizedOp const *>(op);
     tb::Graph const &bgraph = cur_op->bgraph;
     dim3 bid;
     std::vector<TaskDesc> tasks;
@@ -173,7 +174,7 @@ void Runtime::register_mugraph(mirage::kernel::Graph const &graph,
       for (bid.y = 0; bid.y < bgraph.grid_dim.y; bid.y++) {
         for (bid.z = 0; bid.z < bgraph.grid_dim.z; bid.z++) {
           TaskDesc task(task_types.find(cur_op)->second);
-	  // Initialize input tensors to the task
+          // Initialize input tensors to the task
           for (auto const &input : input_ops) {
             TensorDesc desc;
             assert(input->output_tensors.size() == 1);
@@ -189,7 +190,7 @@ void Runtime::register_mugraph(mirage::kernel::Graph const &graph,
             }
             task.inputs[task.num_inputs++] = desc;
           }
-	  // Initialize output tensors to the task
+          // Initialize output tensors to the task
           for (auto const &output : output_ops) {
             TensorDesc desc;
             assert(output->input_tensors.size() == 1);
@@ -268,8 +269,8 @@ void Runtime::register_mugraph(mirage::kernel::Graph const &graph,
                                   pre_op->bgraph.grid_dim, /*producer_hi_bid*/
                                   all_events,
                                   all_tasks,
-                                  tasks,                   /*cur_op_tasks*/
-                                  pre_task_map,            /*pre_task_map*/
+                                  tasks,        /*cur_op_tasks*/
+                                  pre_task_map, /*pre_task_map*/
                                   cur_task_map /*cur_task_map)*/);
     }
     pre_output_ops = output_ops;

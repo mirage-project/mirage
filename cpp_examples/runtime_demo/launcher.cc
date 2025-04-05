@@ -8,7 +8,8 @@ using namespace mirage;
 int main(int argc, char **argv) {
   namespace tb = mirage::threadblock;
   namespace kn = mirage::kernel;
-  std::unordered_map<const kn::KNCustomizedOp*, mirage::runtime::TaskType> task_types;
+  std::unordered_map<kn::KNCustomizedOp const *, mirage::runtime::TaskType>
+      task_types;
 
   kn::Graph kgraph;
   kn::DTensor X = kgraph.new_input(
@@ -33,7 +34,8 @@ int main(int argc, char **argv) {
       bgraph.mark_output(bO, {1, -1, -1}, -1, type::TB_EPILOGUE_NONE);
       std::vector<kernel::DTensor> outputs = kgraph.customized({X, W}, bgraph);
       X = outputs[0];
-      task_types[static_cast<kn::KNCustomizedOp*>(X.owner_op)] = mirage::runtime::TASK_RMS_NORM_LINEAR;
+      task_types[static_cast<kn::KNCustomizedOp *>(X.owner_op)] =
+          mirage::runtime::TASK_RMS_NORM_LINEAR;
     }
 #ifdef DEADCODE
     // Add elementwise
@@ -45,7 +47,7 @@ int main(int argc, char **argv) {
       tb::STensor bX =
           bgraph.new_input(X, {1, -1, -1}, 1, layout::SmemRowMajor);
       tb::STensor bY =
-          bgraph.new_input(Y, {1, -1, -1}, 0, layout::SmemRowMajor);
+          bgraph.new_input(Y, {1, -1, -1}, 1, layout::SmemRowMajor);
       tb::STensor bM = bgraph.add(bX, bY);
       tb::STensor bAccM =
           bgraph.forloop_accum(bM, type::TB_FORLOOP_ACCUM_NO_RED_OP);
