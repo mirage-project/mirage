@@ -112,17 +112,16 @@ Parse ONNX representation of model and build operator graph
 def parse_onnx_model(model, unique_operators):
     shape_value_dict = {}
     for initializer in model.graph.initializer:
-        shape_value_dict[initializer.name] = initializer.dims
+        shape_value_dict[initializer.name] = tuple(initializer.dims)
     
     for value in model.graph.value_info:
-        shape_value_dict[value.name] = [d_i.dim_value for d_i in value.type.tensor_type.shape.dim]
+        shape_value_dict[value.name] = tuple([d_i.dim_value for d_i in value.type.tensor_type.shape.dim])
 
     for input_info in model.graph.input:
-        shape_value_dict[input_info.name] = [d_i.dim_value for d_i in input_info.type.tensor_type.shape.dim]
+        shape_value_dict[input_info.name] = tuple([d_i.dim_value for d_i in input_info.type.tensor_type.shape.dim])
     
     for output_info in model.graph.output:
-        shape_value_dict[output_info.name] = [d_i.dim_value for d_i in output_info.type.tensor_type.shape.dim]
-    print(shape_value_dict)
+        shape_value_dict[output_info.name] = tuple([d_i.dim_value for d_i in output_info.type.tensor_type.shape.dim])
 
     tensor_producer = {}
     tensor_consumer = {}
@@ -137,7 +136,7 @@ def parse_onnx_model(model, unique_operators):
             tensor_consumer[input_name] = node.name if node.name else f"{node.op_type}_{id(node)}"
             if input_name not in tensor_id:
                 tensor_id[input_name] = len(tensor_id)+1
-    print("TensorID: ", tensor_id)
+    # print("TensorID: ", tensor_id)
     operators = {}
 
     # store the operators in a dict

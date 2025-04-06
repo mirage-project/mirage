@@ -47,30 +47,60 @@ def copy_subgraph(subgraph):
         new_subgraph[from_op] = to_ops.copy()
     return new_subgraph
 
-def get_partitions(op_node, min_num_ops, max_num_ops, visited_start_nodes, all_subgraphs, UNSUPPORTED_OPS):
-    visited_start_nodes.add(id(op_node.fn))
+def get_partitions(op_node, min_num_ops, max_num_ops, visited_start_nodes, all_subgraphs, UNSUPPORTED_OPS, IGNORE_OPS):
+    visited_start_nodes.add(id(op_node.name))
     
-    if op_node.name not in UNSUPPORTED_OPS:
-        get_partitions_helper(op_node, {op_node: []}, min_num_ops, max_num_ops, set(), all_subgraphs, UNSUPPORTED_OPS)
+    if op_node.fn not in UNSUPPORTED_OPS.union(IGNORE_OPS):
+         # handle non-matching shapes
+        op_needs_broadcast = False
+        input_dims = len(op_node.input_tensor_shapes[0][0])
+        for s in op_node.input_tensor_shapes:
+            if len(s[0]) != input_dims:
+                op_needs_broadcast = True
+                break
+        if not op_needs_broadcast:
+            get_partitions_helper(op_node, {op_node: []}, min_num_ops, max_num_ops, set(), all_subgraphs, UNSUPPORTED_OPS, IGNORE_OPS)
         
     for output_node in op_node.output_ops:
-        if id(output_node.fn) not in visited_start_nodes:
-            get_partitions(output_node, min_num_ops, max_num_ops, visited_start_nodes, all_subgraphs, UNSUPPORTED_OPS)
+        if id(output_node.name) not in visited_start_nodes:
+            get_partitions(output_node, min_num_ops, max_num_ops, visited_start_nodes, all_subgraphs, UNSUPPORTED_OPS, IGNORE_OPS)
 
-def get_partitions_helper(op_node, curr_subgraph, min_num_ops, max_num_ops, visited, all_subgraphs, UNSUPPORTED_OPS):
-    if id(op_node.fn) in visited:
+def get_partitions_helper(op_node, curr_subgraph, min_num_ops, max_num_ops, visited, all_subgraphs, UNSUPPORTED_OPS, IGNORE_OPS):
+    if id(op_node.name) in visited:
         return
     if len(curr_subgraph) > max_num_ops:
         return
     
     # assume op_node already in curr_subgraph
-    visited.add(id(op_node.fn))
+    visited.add(id(op_node.name))
     if len(curr_subgraph) >= min_num_ops:
         all_subgraphs.append(copy_subgraph(curr_subgraph))
 
     valid_output_ops = []
     for output_op in op_node.output_ops:
-        if output_op.name not in UNSUPPORTED_OPS:
+        # handle non-matching shapes
+        output_op_needs_broadcast = False
+        input_dims = len(output_op.input_tensor_shapes[0][0])
+        for s in output_op.input_tensor_shapes:
+            if len(s[0]) != input_dims:
+                output_op_needs_broadcast = True
+                break
+        if output_op_needs_broadcast:
+            continue
+
+        # handle IGNORE_OPS
+        ignore_op_is_last_op = False
+        while output_op.fn in IGNORE_OPS:
+            if len(output_op.output_ops) == 0:
+                ignore_op_is_last_op = True
+                break
+            assert len(output_op.output_ops) == 1
+            output_op = output_op.output_ops[0]
+        if ignore_op_is_last_op:
+            continue
+        
+        # handle UNSUPPORTED_OPS
+        if output_op.fn not in UNSUPPORTED_OPS:
             valid_output_ops.append(output_op)
     
     for choose_k in range(1, len(valid_output_ops) + 1):
@@ -81,35 +111,38 @@ def get_partitions_helper(op_node, curr_subgraph, min_num_ops, max_num_ops, visi
                 if output_node not in curr_subgraph_copy:
                     curr_subgraph_copy[output_node] = []
                 curr_subgraph_copy[op_node].append(output_node)
-                get_partitions_helper(output_node, copy_subgraph(curr_subgraph_copy), min_num_ops, max_num_ops, visited_copy, all_subgraphs, UNSUPPORTED_OPS)
+                get_partitions_helper(output_node, copy_subgraph(curr_subgraph_copy), min_num_ops, max_num_ops, visited_copy, all_subgraphs, UNSUPPORTED_OPS, IGNORE_OPS)
 
-def partition_graph(model, dummy_input, min_num_ops=2, max_num_ops=4, UNSUPPORTED_OPS=set(["torch::autograd::AccumulateGrad", 
-                                                              "NllLossBackward0", 
-                                                              "EmbeddingBackward0"])):    
+def partition_graph(model, 
+                    dummy_input, 
+                    min_num_ops=2, 
+                    max_num_ops=4, 
+                    UNSUPPORTED_OPS=set(), # these are operators not supported by Mirage
+                    IGNORE_OPS=set()): # these are operators that performs no operations on the tensors
     unique_operators = set()
     root_node, operators = get_computation_graph(model, dummy_input, unique_operators, "onnx")
 
     all_subgraphs = []
     visited_start_nodes = set()
-    get_partitions(root_node, min_num_ops, max_num_ops, visited_start_nodes, all_subgraphs, UNSUPPORTED_OPS)
+    get_partitions(root_node, min_num_ops, max_num_ops, visited_start_nodes, all_subgraphs, UNSUPPORTED_OPS, IGNORE_OPS)
 
     return all_subgraphs, unique_operators
 
 # TODO: add support for reduction, clamp, rms_norm. These rely on additional
 # inputs that the Operator class doesn't currently support
 def function_map(graph, func, inputs):
-    match func.name:
-        case "matmul": return graph.matmul(*inputs)
-        #case "reduction": return graph.reduction(*inputs)
-        case "exp": return graph.exp(*inputs)
-        case "silu": return graph.silu(*inputs)
-        case "gelu": return graph.gelu(*inputs)
-        case "relu": return graph.relu(*inputs)
-        #case "clamp": return graph.clamp(*inputs)
-        case "add": return graph.add(*inputs)
-        case "mul": return graph.mul(*inputs)
-        case "div": return graph.div(*inputs)
-        #case "rms_norm": return graph.rms_norm(*inputs)
+    match func.fn:
+        case "MatMul": return graph.matmul(*inputs)
+        # case "reduction": return graph.reduction(*inputs)
+        case "Exp": return graph.exp(*inputs)
+        # case "silu": return graph.silu(*inputs) # no ONNX equivalent
+        case "Gelu": return graph.gelu(*inputs)
+        case "Relu": return graph.relu(*inputs)
+        # case "clamp": return graph.clamp(*inputs)
+        case "Add": return graph.add(*inputs)
+        case "Mul": return graph.mul(*inputs)
+        case "Div": return graph.div(*inputs)
+        # case "rms_norm": return graph.rms_norm(*inputs)
         case _: raise NotImplementedError
 
 # Take in an adjacency list formatted subgraph and generate a mirage kernel graph
@@ -127,20 +160,18 @@ def to_kernel_graph(subgraph):
             else:
                 inputs.append(intermediates[tensor_id][0])
                 intermediates[tensor_id][1] += 1
-        res = function_map(graph, op.fn, inputs)
+        res = function_map(graph, op, inputs)
         if type(res) == list:
             for i, tensor in enumerate(res):
-                intermediates[op.output_tensor_shapes[i][1]] = (tensor, 0)
+                intermediates[op.output_tensor_shapes[i][1]] = [tensor, 0]
         else:
-            intermediates[op.output_tensor_shapes[0][1]] = (res, 0)
+            intermediates[op.output_tensor_shapes[0][1]] = [res, 0]
     for tensor, count in intermediates.items():
         if count == 0: graph.mark_output(tensor)
     return graph, dims
         
-def generate_all_kernels(dummy_loss, min_num_ops=2, max_num_ops=3, UNSUPPORTED_OPS=set(["torch::autograd::AccumulateGrad", 
-                                                              "NllLossBackward0", 
-                                                              "EmbeddingBackward0"])):
-    subgraphs, unique_operators = partition_graph(dummy_loss, min_num_ops, max_num_ops, UNSUPPORTED_OPS)
+def generate_all_kernels(model, dummy_inputs, min_num_ops=2, max_num_ops=4, UNSUPPORTED_OPS=set()):
+    subgraphs, unique_operators = partition_graph(model, dummy_inputs, min_num_ops, max_num_ops, UNSUPPORTED_OPS)
     kernel_input_dims = []
     all_kernels = []
     for subgraph in subgraphs:
