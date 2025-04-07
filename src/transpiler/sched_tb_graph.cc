@@ -273,8 +273,8 @@ TBSched Transpiler::get_threadblock_schedule(tb::Graph const &tb_graph) {
         pieces.push_back({op, {0, next_chain_idx++, 0}, op2op_meta.at(op)});
       }
     }
-    sched.pre_loop_nodes =
-        ops2sched(pieces, [](tb::TBOperator const *op) { return true; }, false);
+    sched.pre_loop_nodes = ops2sched(
+        pieces, [](tb::TBOperator const *op) { return true; }, false);
   }
 
   // Generate `loop_nodes`

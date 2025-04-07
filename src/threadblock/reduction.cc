@@ -105,18 +105,15 @@ TBReductionOp::TBReductionOp(Graph *bgraph,
                              STensor const &input,
                              int dim,
                              int size)
-    : TBOperator(
-          bgraph,
-          size == 1
-              ? (mirage::type::TBOperatorType)(mirage::type::TB_REDUCTION_0_OP +
-                                               dim)
-          : size == -1
-              ? (mirage::type::
-                     TBOperatorType)(mirage::type::TB_REDUCTION_0_MAX_OP + dim)
-              : (mirage::type::TBOperatorType)(mirage::type::
-                                                   TB_REDUCTION_0_TO_DIMX_OP +
-                                               dim),
-          input),
+    : TBOperator(bgraph,
+                 size == 1 ? (mirage::type::TBOperatorType)(
+                                 mirage::type::TB_REDUCTION_0_OP + dim)
+                 : size == -1
+                     ? (mirage::type::TBOperatorType)(
+                           mirage::type::TB_REDUCTION_0_MAX_OP + dim)
+                     : (mirage::type::TBOperatorType)(
+                           mirage::type::TB_REDUCTION_0_TO_DIMX_OP + dim),
+                 input),
       reduce_dim(dim), reduce_size(size) {
   // mirage::type::TBOperatorType type =
   // static_cast<mirage::type::TBOperatorType>(
