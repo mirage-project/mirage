@@ -1,11 +1,5 @@
 import os
 import sys
-
-# Add the path to mirage module
-sys.path.append(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "python"))
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-from partition_graph import to_kernel_graph, generate_all_kernels
-
 # import mirage as mi
 from collections import defaultdict, deque
 from typing import Dict, List, Set, Tuple, Any, Optional, NamedTuple
@@ -24,10 +18,11 @@ class GraphSplitter:
     """Splits a mixed operator graph into Mirage-supported and unsupported subgraphs."""
     
     def __init__(self):
-        # Mirage supported operations
-        self.mirage_supported_ops = {
-            "matmul", "reduction", "exp", "silu", "gelu", "relu", 
-            "clamp", "add", "mul", "div", "rms_norm", "gemm",
+        # Operations that are NOT supported by Mirage
+        self.mirage_unsupported_ops = {
+            "abs", "concat", "equal", "expand", "gather", "pow", 
+            "reshape", "shape", "slice", "sqrt", "transpose", 
+            "trilu", "unsqueeze", "where", "layernorm", "layernormalization"
         }
     
     def is_supported_op(self, op) -> bool:
@@ -38,7 +33,8 @@ class GraphSplitter:
         op_type = op.fn
         if isinstance(op_type, str):
             op_type_lower = op_type.lower()
-            return any(supported_op in op_type_lower for supported_op in self.mirage_supported_ops)
+            # If operation is in the unsupported list, it's not supported
+            return not any(unsupported_op in op_type_lower for unsupported_op in self.mirage_unsupported_ops)
         
         return False
     
@@ -422,15 +418,15 @@ class GraphSplitter:
             print(f"\nSubgraph {sg_id} ({sg_type}):")
             print(f"  Operators: {[op.name for op in sg]}")
             
-            print("  Inputs:")
-            for op, inputs in subgraph_io[sg_id]["inputs"].items():
-                for src_sg_id, src_op in inputs:
-                    print(f"    {op.name} takes input from Subgraph {src_sg_id}'s {src_op.name}")
+            # print("  Inputs:")
+            # for op, inputs in subgraph_io[sg_id]["inputs"].items():
+            #     for src_sg_id, src_op in inputs:
+            #         print(f"    {op.name} takes input from Subgraph {src_sg_id}'s {src_op.name}")
             
-            print("  Outputs:")
-            for op, outputs in subgraph_io[sg_id]["outputs"].items():
-                for tgt_sg_id, tgt_op in outputs:
-                    print(f"    {op.name} sends output to Subgraph {tgt_sg_id}'s {tgt_op.name}")
+            # print("  Outputs:")
+            # for op, outputs in subgraph_io[sg_id]["outputs"].items():
+            #     for tgt_sg_id, tgt_op in outputs:
+            #         print(f"    {op.name} sends output to Subgraph {tgt_sg_id}'s {tgt_op.name}")
     
     def create_mirage_graph(self, subgraphs, subgraph_io):
         """Create a Mirage execution graph from the subgraphs."""
@@ -594,31 +590,49 @@ class GraphSplitter:
             
         return graph, dims
 
-def process_operator_graph(operators_graph: Dict) -> Tuple[List[Tuple[Dict, str]], Dict[int, Set[int]]]:
+def process_operator_graph(operators: Dict, IGNORE_OPS: Set[str] = None, UNSUPPORTED_OPS: Set[str] = None) -> Tuple[List[Tuple[Dict, str]], Dict[int, Set[int]]]:
     """
     Process an operator graph and split it into Mirage and PyTorch subgraphs.
     
     Args:
-        operators_graph: Dict mapping operators to boolean values
+        operators: Operators
+        IGNORE_OPS: Set of operator names to ignore/remove
+        UNSUPPORTED_OPS: Set of operator names that are not supported by Mirage
         
     Returns:
         Tuple[List, Dict]: List of subgraphs and their dependencies
     """
+    operators_graph = {op: True for op in operators.values()}
     # Preprocess the graph to handle special operators
-    operators_graph = preprocess_special_operators(operators_graph)
+    operators_graph = preprocess_special_operators(operators_graph, IGNORE_OPS)
     
     splitter = GraphSplitter()
+    
+    # Update unsupported ops based on UNSUPPORTED_OPS
+    if UNSUPPORTED_OPS:
+        # Convert all names to lowercase for case-insensitive matching
+        unsupported_ops_lower = {op.lower() for op in UNSUPPORTED_OPS}
+        # Add user-specified unsupported ops to the existing list
+        splitter.mirage_unsupported_ops.update(unsupported_ops_lower)
+        print(f"Total unsupported ops: {', '.join(splitter.mirage_unsupported_ops)}")
     
     print("Splitting operator graph into subgraphs...")
     subgraphs, subgraph_deps, subgraph_io = splitter.split_graph(operators_graph)
     
     adjacency_list_subgraphs = splitter.convert_to_adjacency_list(subgraphs)
     
-    print(f"Total subgraphs: {len(subgraphs)}")
+    mirage_subgraphs_count = sum(1 for _, sg_type in subgraphs if sg_type == "mirage")
+    pytorch_subgraphs_count = sum(1 for _, sg_type in subgraphs if sg_type == "pytorch")
+    
+    print(f"Subgraph Statistics:")
+    print(f"  - Mirage subgraphs: {mirage_subgraphs_count}")
+    print(f"  - PyTorch subgraphs: {pytorch_subgraphs_count}")
+    print(f"  - Total subgraphs: {len(subgraphs)}")
+
     
     for sg_id, (sg, sg_type) in enumerate(subgraphs):
-        op_type = "Supported" if sg_type == "mirage" else "Unsupported"
-        print(f"Subgraph {sg_id}: {op_type} operations, {len(sg)} operators")
+        op_type = "mirage" if sg_type == "mirage" else "pytorch"
+        print(f"Subgraph {sg_id} ({op_type}) : {len(sg)} operators")
         
         tensor_inputs = subgraph_io[sg_id].get("tensor_inputs", {})
         if tensor_inputs:
@@ -703,59 +717,78 @@ def process_operator_graph(operators_graph: Dict) -> Tuple[List[Tuple[Dict, str]
     
     return subgraphs, subgraph_deps
 
-def preprocess_special_operators(operators_graph: Dict) -> Dict:
+def preprocess_special_operators(operators_graph: Dict, IGNORE_OPS: Set[str] = None) -> Dict:
     """
     Preprocess the graph to handle special operators that need custom treatment.
     
     Currently handles:
-    - Identity operators: removed and connections bypassed
+    - Ignored operators: removed and connections bypassed
     
     Args:
         operators_graph: Dict mapping operators to boolean values
+        IGNORE_OPS: Set of operator names to ignore/remove
         
     Returns:
         Dict: Processed operator graph
     """
-    # List of preprocessing functions to apply
-    preprocessors = [
-        remove_identity_operators,
-    ]
+    # If no IGNORE_OPS provided, use default set
+    if IGNORE_OPS is None:
+        IGNORE_OPS = {"Identity", "Cast", "Constant", "Dropout"}
     
-    # Apply each preprocessor in sequence
-    processed_graph = operators_graph
-    for preprocess_fn in preprocessors:
-        processed_graph = preprocess_fn(processed_graph)
+    # Apply preprocessing to remove ignored operators
+    processed_graph = remove_ignored_operators(operators_graph, IGNORE_OPS)
     
     return processed_graph
 
-def remove_identity_operators(operators_graph: Dict) -> Dict:
+def remove_ignored_operators(operators_graph: Dict, IGNORE_OPS: Set[str]) -> Dict:
     """
-    Remove Identity operators from the graph and fix connections.
+    Remove ignored operators from the graph and fix connections.
     
     Args:
         operators_graph: Dict mapping operators to boolean values
+        IGNORE_OPS: Set of operator names to ignore/remove
         
     Returns:
-        Dict: Cleaned operator graph without Identity operators
+        Dict: Cleaned operator graph without ignored operators
     """
-    identity_ops = [op for op in operators_graph if hasattr(op, 'fn') and op.fn.lower() == 'identity']
+    # Convert all ignore ops to lowercase for case-insensitive matching
+    ignore_ops_lower = {op.lower() for op in IGNORE_OPS}
     
-    if not identity_ops:
+    # Find operators to ignore
+    ignored_ops = [
+        op for op in operators_graph 
+        if hasattr(op, 'fn') and 
+        (isinstance(op.fn, str) and op.fn.lower() in ignore_ops_lower or
+         hasattr(op.fn, 'lower') and op.fn.lower() in ignore_ops_lower)
+    ]
+    
+    if not ignored_ops:
         return operators_graph
     
-    print(f"Removing {len(identity_ops)} Identity operators")
+    # Group operators by type for better logging
+    op_types = {}
+    for op in ignored_ops:
+        op_type = op.fn.lower() if isinstance(op.fn, str) else op.fn.lower()
+        if op_type not in op_types:
+            op_types[op_type] = 0
+        op_types[op_type] += 1
     
-    for id_op in identity_ops:
-        # For each input->identity->output connection, create input->output connection
-        for in_op in id_op.input_ops:
-            if id_op in in_op.output_ops:
-                in_op.output_ops.remove(id_op)
+    print(f"Removing {len(ignored_ops)} ignored operators:")
+    for op_type, count in op_types.items():
+        print(f"  - {op_type}: {count} operators")
+    
+    for ig_op in ignored_ops:
+        # For each input->ignored->output connection, create input->output connection
+        for in_op in ig_op.input_ops:
+            if ig_op in in_op.output_ops:
+                in_op.output_ops.remove(ig_op)
             
-            in_op.output_ops.extend([out for out in id_op.output_ops if out not in in_op.output_ops])
+            in_op.output_ops.extend([out for out in ig_op.output_ops if out not in in_op.output_ops])
             
-        for out_op in id_op.output_ops:
-            if id_op in out_op.input_ops:
-                out_op.input_ops.remove(id_op)
+        for out_op in ig_op.output_ops:
+            if ig_op in out_op.input_ops:
+                out_op.input_ops.remove(ig_op)
             
-            out_op.input_ops.extend([in_op for in_op in id_op.input_ops if in_op not in out_op.input_ops])
-    return {op: True for op in operators_graph if op not in identity_ops}
+            out_op.input_ops.extend([in_op for in_op in ig_op.input_ops if in_op not in out_op.input_ops])
+    
+    return {op: True for op in operators_graph if op not in ignored_ops}
