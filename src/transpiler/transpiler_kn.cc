@@ -498,9 +498,9 @@ TranspileResult Transpiler::transpile_ugraph() {
             dynamic_cast<kn::KNCustomizedOp const *>(op);
         // tb::ExecutionPlan const &plan = cur_op->plan;
         tb::Graph const &bgraph = cur_op->bgraph;
-        vector<string> comm_buf_names;
+        vector<string> nvshmem_to_free;
         //TODO: Change this to vector for all communications with the same behavior
-        vector<string> alltoall_buf_names;
+        vector<string> nvshmem_as_param;
         // For epilogue nvshmem allocation
         if (use_nvshmem) {
           for (kn::DTensor const &dtensor : cur_op->output_tensors) {
@@ -513,8 +513,8 @@ TranspileResult Transpiler::transpile_ugraph() {
                       get_datatype_str(dtensor.data_type),
                       get_datatype_str(dtensor.data_type),
                       meta.num_phy_elems);
-              comm_buf_names.push_back(fmt("alltoall_buf_$", dtensor.guid));
-              alltoall_buf_names.push_back(fmt("alltoall_buf_$", dtensor.guid));
+              nvshmem_to_free.push_back(fmt("alltoall_buf_$", dtensor.guid));
+              nvshmem_as_param.push_back(fmt("alltoall_buf_$", dtensor.guid));
             }
             else if (dtensor.epilogue == type::TBEpilogueType::TB_EPILOGUE_ALLREDUCE) {
               assert(false && "TB allreduce is not supported yet"); 
@@ -524,7 +524,7 @@ TranspileResult Transpiler::transpile_ugraph() {
         }
         // Get DTensor ptrs
         // We make the agreement that, when calling a custom kernel, the
-        // arguments are in the order of "output_tensors, input_tensors, comm_buf_names"
+        // arguments are in the order of "output_tensors, input_tensors, nvshmem_to_free"
         vector<string> ptr_names;
         for (kn::DTensor const &dtensor :
              Combine(cur_op->output_tensors, cur_op->input_tensors)) {
@@ -563,7 +563,9 @@ TranspileResult Transpiler::transpile_ugraph() {
               exec.e("dtensor$ = allgather_buf_$;",
                      original_guid,
                      guid);
-              comm_buf_names.push_back(fmt("allgather_buf_$", guid));
+              nvshmem_to_free.push_back(fmt("allgather_buf_$", guid));
+              nvshmem_to_free.push_back(fmt("allgather_signal_$", guid));
+              nvshmem_as_param.push_back(fmt("allgather_signal_$", guid));
             }
           }
         }
@@ -716,14 +718,14 @@ TranspileResult Transpiler::transpile_ugraph() {
                  result.func_name,
                  tmas,
                  ptr_names,
-                 alltoall_buf_names);
+                 nvshmem_as_param);
           }
           else {
             exec.e("$<<<grid_dim, block_dim, smem_size>>>($ $ $, mype, npes);",
                  result.func_name,
                  tmas,
                  ptr_names,
-                 alltoall_buf_names);
+                 nvshmem_as_param);
           }
         } else {
           exec.e("cudaFuncSetAttribute($, "
@@ -734,13 +736,13 @@ TranspileResult Transpiler::transpile_ugraph() {
             exec.e("$<<<grid_dim, block_dim, smem_size>>>($ $);",
                  result.func_name,
                  ptr_names,
-                 alltoall_buf_names);
+                 nvshmem_as_param);
           }
           else {
-            exec.e("$<<<grid_dim, block_dim, smem_size>>>($ $, mype, npes);",
+            exec.e("$<<<grid_dim, block_dim, smem_size>>>($, $, mype, npes);",
                  result.func_name,
                  ptr_names,
-                 alltoall_buf_names);
+                 nvshmem_as_param);
           }
         }
 
@@ -749,7 +751,7 @@ TranspileResult Transpiler::transpile_ugraph() {
           // copy result from comm_buf to dtensor
           // TODO: assuming only one output tensor and one comm_buf
           // TODO: handle commbufs including prologue and epilogue
-          if (!alltoall_buf_names.empty() && alltoall_buf_names[0].find("alltoall") != string::npos) {
+          if (!nvshmem_as_param.empty() && nvshmem_as_param[0].find("alltoall") != string::npos) {
             kn::DTensor const &output_dtensor = cur_op->output_tensors[0];
             auto output_guid = output_dtensor.guid;
             DTensorMeta const &output_meta = dtensor_metas.at(output_guid);
@@ -759,7 +761,7 @@ TranspileResult Transpiler::transpile_ugraph() {
                   "(const void *)nvshmem_ptr($, mype), "
                   "$ * sizeof($), "
                   "cudaMemcpyDeviceToDevice);", 
-                  alltoall_buf_names[0], 
+                  nvshmem_as_param[0], 
                   output_meta.num_phy_elems, 
                   get_datatype_str(output_dtensor.data_type));
           }
@@ -774,7 +776,7 @@ TranspileResult Transpiler::transpile_ugraph() {
               exec.e("nvshmem_free($);", ptr_name);
             }
           }
-          for (auto const &comm_buf_name : comm_buf_names) {
+          for (auto const &comm_buf_name : nvshmem_to_free) {
             std::cout << "freeing " << comm_buf_name << std::endl;
             exec.e("nvshmem_free($);", comm_buf_name);
           }

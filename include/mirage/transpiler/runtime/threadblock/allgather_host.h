@@ -10,6 +10,7 @@ void allgather_host(T* dst_tensor, T* src_tensor,
                         uint64_t* signals, size_t tensor_size, 
                         int mype, int npes, int div_dim = 0, bool use_pull = false) {
   
+  printf("PE %d, entered allgather_host\n", mype);
   CommExecutor<T, TileLayout, false> comm_executor;
   if (use_pull) {
     printf("Pull mode not supported yet\n");
@@ -17,8 +18,9 @@ void allgather_host(T* dst_tensor, T* src_tensor,
   } else {
     for (int dst_pe = 0; dst_pe < npes; dst_pe++) {
         if (dst_pe == mype) continue;
-        
+        printf("PE %d, sending to PE %d\n", mype, dst_pe);
         comm_executor.send(dst_tensor, src_tensor, dst_pe, signals);
+        printf("PE %d, sent to PE %d\n", mype, dst_pe);
     }
   }
 }

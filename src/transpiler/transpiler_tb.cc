@@ -204,12 +204,19 @@ CustomOPTranspileResult
   int cur_custom_kernel_idx = custom_kernel_idx_counter++;
   string func_name = fmt("custom_kernel_$", cur_custom_kernel_idx);
 
-  vector<string> comm_buf_names;
+  vector<string> nvshmem_as_param;
   for(tb::TBOperator const *tb_op : g.operators) {
-    if (tb_op->op_type == type::TB_OUTPUT_OP) {
+    if (tb_op->op_type == type::TB_INPUT_OP) {
+      tb::TBInputOp const *input_op = dynamic_cast<tb::TBInputOp const *>(tb_op);
+      if (input_op->prologue == type::TBPrologueType::TB_PROLOGUE_ALLGATHER) {
+        nvshmem_as_param.push_back(fmt("uint64_t* __restrict__ allgather_signal_$", 
+                                     input_op->dtensor.guid));
+      }
+    }
+    else if (tb_op->op_type == type::TB_OUTPUT_OP) {
       tb::TBOutputOp const *output_op = dynamic_cast<tb::TBOutputOp const *>(tb_op);
       if (output_op->epilogue == type::TBEpilogueType::TB_EPILOGUE_ALLTOALL) {
-        comm_buf_names.push_back(fmt("$ const* __restrict__ alltoall_buf_$", 
+        nvshmem_as_param.push_back(fmt("$ const* __restrict__ alltoall_buf_$", 
                                      get_datatype_str(output_op->dtensor.data_type), 
                                      output_op->dtensor.guid));
       }
@@ -219,7 +226,7 @@ CustomOPTranspileResult
   // Generate code prologue
   CodeKeeper code;
   if (use_nvshmem) {
-    if (!comm_buf_names.empty()) {
+    if (!nvshmem_as_param.empty()) {
       code.e("__global__ void __launch_bounds__($) $($, $, $, int mype, int npes) {",
             num_threads,
             func_name,
@@ -236,7 +243,7 @@ CustomOPTranspileResult
                               get_datatype_str(dtensor.data_type),
                               dtensor.guid);
                 }),
-            comm_buf_names);
+            nvshmem_as_param);
     } else {
         code.e("__global__ void __launch_bounds__($) $($, $, int mype, int npes) {",
             num_threads,
@@ -677,6 +684,27 @@ CustomOPTranspileResult
     code.e("");
   }
 
+  code.e("// Prologue");
+  code.e("{");
+  for (TBSchedNode const &node :
+        Combine(Combine(sched.pre_loop_nodes, sched.loop_nodes),
+                sched.post_loop_nodes)) {
+    if (node.type == tb_sched_node_t::OPERATOR &&
+        node.ops.front().first->op_type == type::TB_INPUT_OP) {
+      tb::TBInputOp const *cur_op = dynamic_cast<tb::TBInputOp const *>(node.ops.front().first);
+      type::TBPrologueType prologue_type = cur_op->prologue;
+      if (prologue_type == type::TBPrologueType::TB_PROLOGUE_ALLGATHER) {
+        code.e("// Allgather prologue waiting");
+          code.e("// Currently sending tile is the whole tensor on each GPU");
+          code.e("int signal_idx = (blockIdx.y * blockDim.y + threadIdx.y) / (gridDim.y / npes);");
+          //TODO: allgather (Jianan)
+          code.e("nvshmem_int64_wait(allgather_signal_$ + signal_idx, 0);",
+                 cur_op->dtensor.guid);
+          code.e("");
+        }
+    }
+  }
+  code.e("}");
   // Launch async input operations for all async inputs
   if (!pipelined_input_ops.empty()) {
     code.e("{");
@@ -763,14 +791,6 @@ CustomOPTranspileResult
           assert(cur_op->forloop_dim >= 0);
           kn::DTensor const &dtensor = cur_op->dtensor;
           tb::STensor const &output = cur_op->output_tensors.at(0);
-          
-          // prologue
-          type::TBPrologueType prologue_type = cur_op->prologue;
-          if (prologue_type == type::TBPrologueType::TB_PROLOGUE_ALLGATHER) {
-            code.e("int signal_idx = blockIdx.y * blockDim.y + threadIdx.y;");
-            //TODO: allgather (Jianan)
-            code.e("nvshmem_int64_wait(signal + signal_idx, 0);");
-          }
 
           int tile_side_len = output.dim[cur_op->forloop_dim];
           size_t forloop_dim_stride =
@@ -880,7 +900,7 @@ CustomOPTranspileResult
                      get_datatype_str(dtensor.data_type),
                      get_datatype_str(dtensor.data_type),
                      dtensor.guid);
-              code.e("recv_ptr = recv_ptr$; // dst_offset", dst_offset);
+              code.e("recv_ptr = recv_ptr $; // dst_offset", dst_offset);
 
               code.e("$ *send_ptr = dtensor$_tile_ptr;", 
                      get_datatype_str(dtensor.data_type),
