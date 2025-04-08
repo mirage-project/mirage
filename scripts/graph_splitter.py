@@ -22,7 +22,7 @@ class GraphSplitter:
         self.mirage_unsupported_ops = {
             "abs", "concat", "equal", "expand", "gather", "pow", 
             "reshape", "shape", "slice", "sqrt", "transpose", 
-            "trilu", "unsqueeze", "where", "layernorm", "layernormalization"
+            "trilu", "unsqueeze", "where", "layernorm", "layernormalization", "tanh"
         }
     
     def is_supported_op(self, op) -> bool:
@@ -639,7 +639,7 @@ def process_operator_graph(operators: Dict, IGNORE_OPS: Set[str] = None, UNSUPPO
             total_tensors = sum(len(indices) for indices in tensor_inputs.values())
             print(f"  - Has {total_tensors} tensor inputs")
     
-    print("\nAdjacency List Representation (with Tensor Shapes):")
+    print("\nAdjacency List Representation (with Tensor Shapes and Connections):")
     for sg_id, adj_list in enumerate(adjacency_list_subgraphs):
         sg_type = subgraphs[sg_id][1]
         op_type = "Supported" if sg_type == "mirage" else "Unsupported"
@@ -651,6 +651,11 @@ def process_operator_graph(operators: Dict, IGNORE_OPS: Set[str] = None, UNSUPPO
             output_shapes = op_info["output_tensor_shapes"]
             
             print(f"  {op.name} (fn={op.fn}):")
+            
+            # Print input operations
+            print("    Input Operations:")
+            for i, in_op in enumerate(op.input_ops):
+                print(f"      [{i}] {in_op.name}")
             
             print("    Input Tensor Shapes:")
             for i, shape_info in enumerate(input_shapes):
@@ -670,7 +675,7 @@ def process_operator_graph(operators: Dict, IGNORE_OPS: Set[str] = None, UNSUPPO
                 else:
                     print(f"      [{i}] None")
             
-            print("    Output Connections:")
+            print("    Output Operations:")
             for i, out_op in enumerate(outputs):
                 target_sg = "?"
                 for other_sg_id, (other_sg, _) in enumerate(subgraphs):
@@ -777,18 +782,54 @@ def remove_ignored_operators(operators_graph: Dict, IGNORE_OPS: Set[str]) -> Dic
     for op_type, count in op_types.items():
         print(f"  - {op_type}: {count} operators")
     
-    for ig_op in ignored_ops:
-        # For each input->ignored->output connection, create input->output connection
-        for in_op in ig_op.input_ops:
-            if ig_op in in_op.output_ops:
-                in_op.output_ops.remove(ig_op)
-            
-            in_op.output_ops.extend([out for out in ig_op.output_ops if out not in in_op.output_ops])
-            
-        for out_op in ig_op.output_ops:
-            if ig_op in out_op.input_ops:
-                out_op.input_ops.remove(ig_op)
-            
-            out_op.input_ops.extend([in_op for in_op in ig_op.input_ops if in_op not in out_op.input_ops])
+    # CRITICAL PART: Find all connections that need bypass 
+    # For each output operator that takes input from an ignored operator,
+    # we need to find the original source operator and its output tensor
     
-    return {op: True for op in operators_graph if op not in ignored_ops}
+    # First, create a mapping for each output operator's inputs that come from ignored ops
+    replacements = {}  # {(out_op, input_idx): (source_op, tensor_id)}
+    
+    for ig_op in ignored_ops:
+        # Only handle operators with valid inputs/outputs
+        if not hasattr(ig_op, 'output_ops') or not hasattr(ig_op, 'input_ops'):
+            continue
+            
+        # Find the source of this ignored operator's input tensors
+        source_tensors = []
+        if hasattr(ig_op, 'input_tensor_shapes') and ig_op.input_ops:
+            for i, shape in enumerate(ig_op.input_tensor_shapes):
+                if i < len(ig_op.input_ops) and shape:
+                    source_tensors.append((ig_op.input_ops[i], shape[1]))
+        
+        # If no valid source found, skip this ignored op
+        if not source_tensors:
+            continue
+            
+        # For all output operators, track which inputs need replacement
+        for out_op in ig_op.output_ops:
+            for j, in_op in enumerate(out_op.input_ops):
+                if in_op == ig_op and j < len(out_op.input_tensor_shapes) and source_tensors:
+                    # Map this input to its original source (use first source as default)
+                    replacements[(out_op, j)] = source_tensors[0]
+    
+    # Now apply all replacements
+    for (out_op, input_idx), (source_op, tensor_id) in replacements.items():
+        # Replace the input operator reference
+        out_op.input_ops[input_idx] = source_op
+        
+        # Find the corresponding tensor shape from the source
+        if hasattr(source_op, 'output_tensor_shapes'):
+            for shape in source_op.output_tensor_shapes:
+                if shape and shape[1] == tensor_id:
+                    out_op.input_tensor_shapes[input_idx] = shape
+                    break
+    
+    # Finally remove ignored ops from the graph
+    result = {op: True for op in operators_graph if op not in ignored_ops}
+    
+    # Fix direct connections
+    for op in result:
+        op.output_ops = [next_op for next_op in op.output_ops if next_op in result]
+        op.input_ops = [prev_op for prev_op in op.input_ops if prev_op in result]
+        
+    return result

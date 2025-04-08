@@ -11,7 +11,7 @@ sys.path.append(root_dir)
 
 from scripts.build_computation_graph import SimpleClassifierMix, parse_onnx_model, SplitModel
 from scripts.partition_graph import Operator
-from scripts.operators_to_mirage_kernel_graph import GraphSplitter, process_operator_graph
+from scripts.graph_splitter import process_operator_graph
 
 def load_model_and_create_graph():
     """
@@ -23,12 +23,10 @@ def load_model_and_create_graph():
     input_size = 784
     dummy_input = torch.randn(batch_size, input_size)
     
-    operators = get_computation_graph(model, dummy_input, "onnx")
+    unique_operators = set()
+    root_node, operators = get_computation_graph(model, dummy_input, unique_operators, "onnx")
     
-    # Convert to the format expected by process_operator_graph
-    operators_graph = {op: True for op in operators.values()}
-    
-    return operators_graph
+    return operators
 
 def print_graph_info(subgraphs, dependencies):
     """Print detailed information about subgraphs and their dependencies"""
@@ -48,10 +46,10 @@ def print_graph_info(subgraphs, dependencies):
 def main():
     try:
         print("Loading model and creating operator graph...")
-        operators_graph = load_model_and_create_graph()
+        operators = load_model_and_create_graph()
     
         print("\nRunning process_operator_graph:")
-        subgraphs, dependencies = process_operator_graph(operators_graph)
+        subgraphs, dependencies = process_operator_graph(operators)
         
         print_graph_info(subgraphs, dependencies)
     except Exception as e:
