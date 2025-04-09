@@ -637,17 +637,19 @@ CustomOPTranspileResult
           switch (input0.data_type) {
             case type::DT_FLOAT16:
               mma_atom_str = "SM80_16x8x16_F16F16F16F16_TN";
+              mma_atom_mnk = {16, 8, 16};
               break;
             case type::DT_BFLOAT16:
               mma_atom_str = "SM80_16x8x16_F32BF16BF16F32_TN";
+              mma_atom_mnk = {16, 8, 16};
               break;
             case type::DT_FLOAT32:
               mma_atom_str = "SM80_16x8x8_F32TF32TF32F32_TN";
+              mma_atom_mnk = {16, 8, 8};
               break;
             default:
               assert(0 && "Unsupported data type");
           }
-          mma_atom_mnk = {16, 8, 16};
           mma_atom_num_threads = 32;
         }
       } else {
