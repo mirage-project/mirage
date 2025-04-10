@@ -23,7 +23,7 @@ namespace tb = mirage::threadblock;
 
 Runtime::Runtime() : num_graphs(0) {
   // add the termination event to the event lists
-  EventDesc e(0, 0, 0);
+  EventDesc e(1, 0, 0);
   all_events.push_back(e);
   TaskDesc t(TASK_TERMINATE);
   all_tasks.push_back(t);
