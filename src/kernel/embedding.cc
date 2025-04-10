@@ -13,7 +13,6 @@
  * limitations under the License.
  */
 
-
 #include "mirage/kernel/embedding.h"
 #include "mirage/kernel/device_memory_manager.h"
 #include "mirage/kernel/graph.h"
@@ -24,8 +23,7 @@
 namespace mirage {
 namespace kernel {
 
-DTensor Graph::embedding(DTensor const &input,
-                         DTensor const &weight) {
+DTensor Graph::embedding(DTensor const &input, DTensor const &weight) {
   KNOperator *op = create_embedding_op(input, weight);
   assert(op != nullptr);
   operators.push_back(op);
@@ -34,19 +32,21 @@ DTensor Graph::embedding(DTensor const &input,
   return output;
 }
 
-DTensor *Graph::embedding(DTensor const *input,
-                          DTensor const *weight) {
+DTensor *Graph::embedding(DTensor const *input, DTensor const *weight) {
   DTensor output = embedding(*input, *weight);
   return &(output.owner_op->output_tensors[0]);
 }
 
-KNOperator *create_embedding_op(DTensor const &input,
-                                DTensor const &weight) {
+KNOperator *Graph::create_embedding_op(DTensor const &input,
+                                       DTensor const &weight) {
   if (weight.num_dims != 2) {
     return nullptr;
   }
 
-  if (input.data_type != DT_INT4 && input.data_type != DT_INT8 && input.data_type!= DT_UINT16 && input.data_type != DT_INT16) {
+  if (input.data_type != mirage::type::DT_INT4 &&
+      input.data_type != mirage::type::DT_INT8 &&
+      input.data_type != mirage::type::DT_UINT16 &&
+      input.data_type != mirage::type::DT_INT16) {
     return nullptr;
   }
 
@@ -64,17 +64,18 @@ KNOperator *create_embedding_op(DTensor const &input,
 
 KNEmbeddingOp::KNEmbeddingOp(Graph *_kgraph,
                              DTensor const &input,
-                             DTensor const &weight) {
-    : mirage::kernel::KNOperator(_kgraph, input, weight) {
+                             DTensor const &weight)
+    : mirage::kernel::KNOperator(
+          _kgraph, mirage::type::KN_EMBEDDING_OP, input, weight) {
   assert(weight.num_dims == 2);
   DTensor output = input;
   output.data_type = weight.data_type;
   output.dim[output.num_dims - 1] = weight.dim[1];
   output.owner_op = this;
   output.owner_ts_idx = 0;
-  output.guid = DTensor::next_guid ++;
+  output.guid = DTensor::next_guid++;
   kgraph->allocate(output);
-  assert(output_tensors.size() == );
+  assert(output_tensors.size() == 0);
   output_tensors.push_back(output);
 }
 
@@ -84,9 +85,17 @@ KNEmbeddingOp::~KNEmbeddingOp() {
   }
 }
 
-KNEmbeddingOp::operator json const {
+KNEmbeddingOp::operator json() const {
   return json{{"input_tensors", input_tensors},
               {"output_tensors", output_tensors}};
+}
+
+bool KNEmbeddingOp::profile(ProfileResult &result) {
+  return false;
+}
+
+bool KNEmbeddingOp::fingerprint(void) {
+  return false;
 }
 
 } // namespace kernel

@@ -22,9 +22,7 @@ namespace kernel {
 
 class KNEmbeddingOp : public mirage::kernel::KNOperator {
 public:
-  KNEmbeddingOp(Graph *_graph,
-                DTensor const &input,
-                DTensor const &weight);
+  KNEmbeddingOp(Graph *_graph, DTensor const &input, DTensor const &weight);
   ~KNEmbeddingOp();
   bool profile(ProfileResult &profile) override;
   bool fingerprint(void) override;

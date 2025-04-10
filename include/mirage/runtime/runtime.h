@@ -66,10 +66,9 @@ struct RuntimeConfig {
 class Runtime {
 public:
   Runtime();
-  void register_mugraph(
-      mirage::kernel::Graph const &graph,
-      std::unordered_map<mirage::kernel::KNCustomizedOp const *, TaskType> const
-          &task_types);
+  void register_mugraph(mirage::kernel::Graph const &graph,
+                        std::unordered_map<mirage::kernel::KNOperator const *,
+                                           TaskType> const &task_types);
   void launch_persistent_kernel(int num_workers, int num_schedulers);
 
 public:

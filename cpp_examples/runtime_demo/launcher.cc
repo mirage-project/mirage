@@ -12,11 +12,11 @@ int main(int argc, char **argv) {
       task_types;
 
   kn::Graph kgraph;
-  kn::DTensor X = kgraph.new_input(
-      {1, 1}, {1, 1}, type::DT_UINT16, layout::DmemRowMajor);
+  kn::DTensor X =
+      kgraph.new_input({1, 1}, {1, 1}, type::DT_UINT16, layout::DmemRowMajor);
   kn::DTensor W = kgraph.new_input(
-      {32*1024, 4096}, {4096, 1}, type::DT_BFLOAT16, layout::DmemRowMajor);
-  Kn::DTensor X = kgraph.embedding(X, W);
+      {32 * 1024, 4096}, {4096, 1}, type::DT_BFLOAT16, layout::DmemRowMajor);
+  X = kgraph.embedding(X, W);
   task_types[X.owner_op] = mirage::runtime::TASK_EMBEDDING;
   for (int layer = 0; layer < 1; layer++) {
     // Add RMSLinear
