@@ -15,6 +15,7 @@
 
 #include "mirage/runtime/runtime.h"
 #include "mirage/utils/cuda_helper.h"
+#include "kernel_wrapper.h"
 
 namespace mirage {
 namespace runtime {
@@ -86,6 +87,9 @@ __global__ void persistent_kernel(RuntimeConfig config) {
           break;
         }
         case TASK_RMS_NORM_LINEAR: {
+          assert(task_desc.num_inputs==2);
+          assert(task_desc.num_outputs==1);
+          generic_wrapper_kernel<RmsNormKernel>(task_desc.inputs[0], task_desc.inputs[1], task_desc.outputs[0]);
           break;
         }
         default: {
