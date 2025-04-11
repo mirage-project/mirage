@@ -175,15 +175,18 @@ void add_tensor_offset(int3 const inout_map,
   }
   tensor_offsets.push_back(offset);
 }
-
-void Runtime::register_mugraph(mirage::kernel::Graph const &graph,
-                               std::unordered_map<kn::KNCustomizedOp const *,
-                                                  TaskType> const &task_types) {
+  
+void Runtime::register_mugraph(
+    mirage::kernel::Graph const &graph,
+    std::unordered_map<kn::KNOperator const *, TaskType> const &task_types) {
   std::vector<tb::TBOutputOp *> pre_output_ops;
   kn::KNCustomizedOp const *pre_op = nullptr;
   std::map<dim3, TaskId, Dim3Comparator> pre_task_map;
   for (auto const &op : graph.operators) {
     if (op->op_type == type::KNOperatorType::KN_INPUT_OP) {
+      continue;
+    }
+    if (op->op_type == type::KNOperatorType::KN_EMBEDDING_OP) {
       continue;
     }
     std::map<dim3, TaskId, Dim3Comparator> cur_task_map;

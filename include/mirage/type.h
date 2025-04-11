@@ -38,7 +38,7 @@ enum DataType {
   // range: 910-919
   // 4-bit types
   // range: 920-929
-  DT_INT4 = 920,
+  DT_INT4 = 925,
   // 8-bit types
   // range(float types): 930-934
   // range(int types): 935-939
@@ -49,7 +49,8 @@ enum DataType {
   // range(int types): 945-949
   DT_BFLOAT16 = 940,
   DT_FLOAT16 = 941,
-  DT_UINT16 = 945,
+  DT_INT16 = 945,
+  DT_UINT16 = 946,
   // 32-bit types
   // range(float type): 950-954
   // range(int type): 955-959
@@ -103,6 +104,7 @@ enum KNOperatorType {
   KN_CHUNK_1_OP = 1424,
   KN_CHUNK_2_OP = 1425,
   KN_SPLIT_LAST_OP_ID = 1429,
+  KN_EMBEDDING_OP = 1430,
   // Communication
   KN_ALLREDUCE_OP = 1900,
   KN_CUSTOMIZED_OP = 1999,

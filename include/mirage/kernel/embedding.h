@@ -1,4 +1,4 @@
-/* Copyright 2023-2024 CMU
+/* Copyright 2023-2025 CMU
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,19 +15,20 @@
 
 #pragma once
 
+#include "mirage/kernel/operator.h"
+
 namespace mirage {
-namespace runtime {
+namespace kernel {
 
-typedef unsigned long long int TaskId;
-typedef unsigned long long int EventId;
+class KNEmbeddingOp : public mirage::kernel::KNOperator {
+public:
+  KNEmbeddingOp(Graph *_graph, DTensor const &input, DTensor const &weight);
+  ~KNEmbeddingOp();
+  bool profile(ProfileResult &profile) override;
+  bool fingerprint(void) override;
 
-enum TaskType {
-  TASK_TERMINATE = 0,
-  TASK_END_OF_ITERATION = 1,
-  // compute task starts from 100
-  TASK_RMS_NORM_LINEAR = 100,
-  TASK_EMBEDDING = 101,
+  operator json() const override;
 };
 
-} // namespace runtime
+} // namespace kernel
 } // namespace mirage

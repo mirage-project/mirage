@@ -139,6 +139,10 @@ public:
   std::vector<DTensor> chunk(DTensor const &input, int chunk_size, int dim);
   int chunk(DTensor const *input, int chunk_size, int dim);
   KNOperator *create_chunk_op(DTensor const &input, int chunk_size, int dim);
+  // embedding operator
+  DTensor embedding(DTensor const &input, DTensor const &weight);
+  DTensor *embedding(DTensor const *input, DTensor const *weight);
+  KNOperator *create_embedding_op(DTensor const &input, DTensor const &weight);
   // customized operator
   std::vector<DTensor> customized(std::vector<DTensor> const &inputs,
                                   mirage::threadblock::Graph const &_graph);
