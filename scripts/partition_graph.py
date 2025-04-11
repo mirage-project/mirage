@@ -130,19 +130,36 @@ def partition_graph(model,
 
 # TODO: add support for reduction, clamp, rms_norm. These rely on additional
 # inputs that the Operator class doesn't currently support
-def function_map(graph, func, inputs):
+def function_map(graph, func, inputs, kwargs={}):
     match func.fn:
         case "MatMul": return graph.matmul(*inputs)
-        # case "reduction": return graph.reduction(*inputs)
+        case "ReduceSum": return graph.reduction(*inputs)
         case "Exp": return graph.exp(*inputs)
-        # case "silu": return graph.silu(*inputs) # no ONNX equivalent
         case "Gelu": return graph.gelu(*inputs)
         case "Relu": return graph.relu(*inputs)
-        # case "clamp": return graph.clamp(*inputs)
+        case "Clip": return graph.clamp(*inputs, **kwargs)
         case "Add": return graph.add(*inputs)
         case "Mul": return graph.mul(*inputs)
         case "Div": return graph.div(*inputs)
-        # case "rms_norm": return graph.rms_norm(*inputs)
+        case "Rec": return graph.div(*inputs)
+        case "Softmax": # In case of softmax, inputs must be of form (mat, axis)
+            exp = graph.exp(inputs[0])
+            summed = graph.reduction(exp, inputs[1])
+            return graph.div(exp, summed)
+        case "Sigmoid":
+            matrix = inputs[0]
+            ones = inputs[1]
+            neg_ones = inputs[2]
+            neg_mat = graph.mul(neg_ones, matrix)
+            neg_exp = graph.exp(neg_mat)
+            summed = graph.add(neg_exp, ones)
+            return graph.div(ones, summed)
+        case "Square":
+            matrix = inputs[0]
+            return graph.mul(matrix, matrix)
+        case "Neg": 
+            return graph.mul(*inputs)
+        case "RMSNormalization": return graph.rms_norm(*inputs, **kwargs)
         case _: raise NotImplementedError
 
 # Take in an adjacency list formatted subgraph and generate a mirage kernel graph
@@ -155,12 +172,28 @@ def to_kernel_graph(subgraph):
         inputs = []
         for (shape, tensor_id) in op.input_tensor_shapes:
             if tensor_id not in intermediates:
-                dims.append(shape)
+                dims.append((shape, "V"))
                 inputs.append(graph.new_input(dims=shape, dtype=mi.float16))
             else:
                 inputs.append(intermediates[tensor_id][0])
                 intermediates[tensor_id][1] += 1
-        res = function_map(graph, op, inputs)
+        if (op.fn == "Sigmoid"):
+            shape = op.output_tensor_shapes[0][0]
+            dims.append((shape, "C", 1.0))
+            inputs.append(graph.new_input(dims=shape, dtype=mi.float16))
+            dims.append((shape, "C", -1.0))
+            inputs.append(graph.new_input(dims=shape, dtype=mi.float16))
+        elif (op.fn == "Neg"):
+            shape = op.output_tensor_shapes[0][0]
+            dims.append((shape, "C", -1.0))
+            inputs.append(graph.new_input(dims=shape, dtype=mi.float16))
+        elif (op.fn == "Rec"):
+            shape = op.output_tensor_shapes[0][0]
+            dims.append((shape, "C", 1.0))
+            inputs.append(graph.new_input(dims=shape, dtype=mi.float16))
+        inputs += op.additional_params
+        kwargs = op.kwargs
+        res = function_map(graph, op, inputs, kwargs)
         if type(res) == list:
             for i, tensor in enumerate(res):
                 intermediates[op.output_tensor_shapes[i][1]] = [tensor, 0]
@@ -187,7 +220,10 @@ def time_kernels(kernels, device, iterations=1):
         for _ in range(iterations):
             inputs = []
             for dim in dims:
-                inputs.append(torch.randn(dim, requires_grad=True).to(device))
+                if (dim[1] == "V"):
+                    inputs.append(torch.randn(dim[0], requires_grad=True).to(device))
+                elif (dim[1] == "C"):
+                    inputs.append(torch.full(dim[0], dim[2]).to(device))
             start = time.time()
             _ = kernel(*inputs)
             total_time += time.time() - start
