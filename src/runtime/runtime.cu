@@ -13,9 +13,9 @@
  * limitations under the License.
  */
 
+#include "kernel_wrapper.h"
 #include "mirage/runtime/runtime.h"
 #include "mirage/utils/cuda_helper.h"
-#include "kernel_wrapper.h"
 
 namespace mirage {
 namespace runtime {
@@ -73,7 +73,7 @@ __global__ void persistent_kernel(RuntimeConfig config) {
         size_t last_task_id = cur_task_id;
         while (cur_task_id == last_task_id) {
           __threadfence();
-        last_task_id = config.worker_queue_last_task_id[worker_id];
+          last_task_id = config.worker_queue_last_task_id[worker_id];
         }
         assert(cur_task_id + config.per_worker_queue_len > last_task_id);
         cur_task_loc = task_queue[cur_task_id % config.per_worker_queue_len];
@@ -87,9 +87,12 @@ __global__ void persistent_kernel(RuntimeConfig config) {
           break;
         }
         case TASK_RMS_NORM_LINEAR: {
-          assert(task_desc.num_inputs==2);
-          assert(task_desc.num_outputs==1);
-          generic_wrapper_kernel<RmsNormKernel>(task_desc.inputs[0], task_desc.inputs[1], task_desc.outputs[0]);
+          assert(task_desc.num_inputs == 2);
+          assert(task_desc.num_outputs == 1);
+          generic_wrapper_kernel<RmsNormKernel>(task_desc.inputs,
+                                                task_desc.outputs,
+                                                config.tensor_offsets[0],
+                                                task_desc.forloop_range);
           break;
         }
         default: {
@@ -173,49 +176,52 @@ void Runtime::launch_persistent_kernel(int num_workers, int num_schedulers) {
   config.per_sched_queue_len = 1024;
   // Initialize worker queue last task id
   checkCUDA(cudaMalloc(&config.worker_queue_last_task_id,
-             config.num_workers * sizeof(unsigned long long int)));
+                       config.num_workers * sizeof(unsigned long long int)));
   std::vector<unsigned long long int> host_worker_queue_last_task_id;
   for (int i = 0; i < config.num_workers; i++) {
     host_worker_queue_last_task_id.push_back(0);
   }
   checkCUDA(cudaMemcpy(config.worker_queue_last_task_id,
-             host_worker_queue_last_task_id.data(),
-             config.num_workers * sizeof(unsigned long long int),
-             cudaMemcpyHostToDevice));
+                       host_worker_queue_last_task_id.data(),
+                       config.num_workers * sizeof(unsigned long long int),
+                       cudaMemcpyHostToDevice));
   // Initialize scheduler queue last event id
   checkCUDA(cudaMalloc(&config.sched_queue_last_event_id,
-             config.num_schedulers * sizeof(unsigned long long int)));
+                       config.num_schedulers * sizeof(unsigned long long int)));
   std::vector<unsigned long long int> host_sched_queue_last_event_id;
   for (int i = 0; i < config.num_schedulers; i++) {
     host_sched_queue_last_event_id.push_back(0);
   }
   checkCUDA(cudaMemcpy(config.sched_queue_last_event_id,
-             host_sched_queue_last_event_id.data(),
-             config.num_schedulers * sizeof(unsigned long long int),
-             cudaMemcpyHostToDevice));
+                       host_sched_queue_last_event_id.data(),
+                       config.num_schedulers * sizeof(unsigned long long int),
+                       cudaMemcpyHostToDevice));
   // Initialize all event counters
-  checkCUDA(cudaMalloc(&config.all_event_counters, config.total_num_events * sizeof(int)));
+  checkCUDA(cudaMalloc(&config.all_event_counters,
+                       config.total_num_events * sizeof(int)));
   std::vector<int> host_all_event_counters;
   for (int i = 0; i < config.total_num_events; i++) {
     host_all_event_counters.push_back(all_events.at(i).num_triggers);
   }
   checkCUDA(cudaMemcpy(config.all_event_counters,
-             host_all_event_counters.data(),
-             config.total_num_events * sizeof(int),
-             cudaMemcpyHostToDevice));
+                       host_all_event_counters.data(),
+                       config.total_num_events * sizeof(int),
+                       cudaMemcpyHostToDevice));
   // Initialize all tasks
-  checkCUDA(cudaMalloc(&config.all_tasks, config.total_num_tasks * sizeof(TaskDesc)));
+  checkCUDA(
+      cudaMalloc(&config.all_tasks, config.total_num_tasks * sizeof(TaskDesc)));
   checkCUDA(cudaMemcpy(config.all_tasks,
-             all_tasks.data(),
-             config.total_num_tasks * sizeof(TaskDesc),
-             cudaMemcpyHostToDevice));
- 
+                       all_tasks.data(),
+                       config.total_num_tasks * sizeof(TaskDesc),
+                       cudaMemcpyHostToDevice));
+
   // Initialize all events
-  checkCUDA(cudaMalloc(&config.all_events, config.total_num_events * sizeof(EventDesc)));
+  checkCUDA(cudaMalloc(&config.all_events,
+                       config.total_num_events * sizeof(EventDesc)));
   checkCUDA(cudaMemcpy(config.all_events,
-             all_events.data(),
-             config.total_num_events * sizeof(EventDesc),
-             cudaMemcpyHostToDevice));
+                       all_events.data(),
+                       config.total_num_events * sizeof(EventDesc),
+                       cudaMemcpyHostToDevice));
 
   // Initialize worker queues
   {
@@ -258,6 +264,17 @@ void Runtime::launch_persistent_kernel(int num_workers, int num_schedulers) {
     checkCUDA(cudaMemcpy(config.first_tasks,
                          first_tasks.data(),
                          first_tasks.size() * sizeof(TaskId),
+                         cudaMemcpyHostToDevice));
+  }
+
+  {
+
+    // Initialize all events
+    checkCUDA(
+        cudaMalloc(&config.tensor_offsets, config.num_dtensors * sizeof(int3)));
+    checkCUDA(cudaMemcpy(config.tensor_offsets,
+                         tensor_offsets.data(),
+                         config.num_dtensors * sizeof(int3),
                          cudaMemcpyHostToDevice));
   }
 

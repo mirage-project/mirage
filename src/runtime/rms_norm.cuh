@@ -10,6 +10,16 @@ struct RmsNormKernel {
   static constexpr int input_nums = 2;
   static constexpr int output_nums = 1;
 
+  static Params {
+    half_t* input0;
+    const half_t* input1;
+    const half_t* output0;
+    int4  offset_in0;
+    int4 offset_in1;
+    int4 offset_out0;
+    int forloop_range;
+};
+
   static void* pack_parameters(TensorDesc* inputs, TensorDesc* outputs);
   static auto create_layouts(TensorDesc* inputs, TensorDesc* outputs);
 
@@ -18,54 +28,88 @@ struct RmsNormKernel {
                                char* shared_buf, int tid);
 };
 
-void* RmsNormKernel::pack_parameters(TensorDesc* inputs, TensorDesc* outputs) {
-  static struct {
-      half_t* input0;
-      const half_t* input1;
-      const half_t* output0;
-  } params;
+void* RmsNormKernel::pack_parameters(TensorDesc* inputs, TensorDesc* outputs, int4 *tensor_offsets) {
+
+  static Params params;
   
-  params = {
-      static_cast<half_t*>(inputs[0].base_ptr),
-      static_cast<const half_t*>(inputs[1].base_ptr),
-      static_cast<const half_t*>(outputs[0].base_ptr)
-  };
+  params.input0 = static_cast<half_t*>(inputs[0].base_ptr);
+  params.input1 = static_cast<const half_t*>(inputs[1].base_ptr);
+  params.output0 = static_cast<const half_t*>(outputs[0].base_ptr);
+
+  params.offset_in0 = *tensor_offsets;
+  params.offset_in1 = *(tensor_offsets + 1);
+  params.offset_out0 = *(tensor_offsets + 2);
+  params.forloop_range = forloop_range;
+
   return &params;
 }
 
 auto RmsNormKernel::create_layouts(TensorDesc* inputs, TensorDesc* outputs) {
 
+  auto make_dtensor_layout = [](const TensorDesc& desc) {
+    return make_layout(
+      make_shape(desc.dim[1], desc.dim[0]),
+      make_stride(desc.dtensor_stride[1], desc.dtensor_stride[0])
+    );
+  };
+
+  auto make_stensor_layout = [](const TensorDesc& desc) {
+    int d0 = desc.dim[0];
+    int d1 = desc.dim[1];
+    int s0 = desc.stride[0];
+    int s1 = desc.stride[1];
+
+    int innermost_dim_size = desc.dim[desc.innermost_dim];
+    int base = innermost_dim_size / 8;
+    auto layout = make_layout(make_shape(d1, d0), make_stride(s1, s0));
+    if (base > 0 && (base & (base - 1)) == 0) {
+      int log2_base = __builtin_ctz(base);
+      return composition(Swizzle<3, 3, log2_base>{}, layout);
+    } else {
+      return layout;
+    }
+  };
+
+  // Input layouts
+  auto input0_smem_layout = make_stensor_layout(inputs[0]);
+  auto input0_dtensor_layout = make_dtensor_layout(inputs[0]);
+
+
+
+  auto input1_dtensor_layout  = make_dtensor_layout(inputs[1]);
+  auto input1_smem_layout = make_stensor_layout(inputs[1]);
+
+  auto output0_dtensor_layout  = make_dtensor_layout(outputs[0]);
+  auto output0_smem_layout = make_stensor_layout(outputs[0]);
+
+  
 
   return make_tuple(
-      // make_swizzled_layout(inputs[1].shape_0, inputs[1].shape_1,
-      //                     inputs[1].stride_0, inputs[1].stride_1),
-      // make_swizzled_layout(outputs[0].shape_0, outputs[0].shape_1,
-      //                     outputs[0].stride_0, outputs[0].stride_1),
-      // make_swizzled_layout(inputs[0].shape_0, inputs[0].shape_1,
-      //                     inputs[0].stride_0, inputs[0].stride_1)
+    input0_smem_layout,
+    input0_dtensor_layout,
+    input1_smem_layout,
+    input1_dtensor_layout,
+    output0_smem_layout,
+    output0_dtensor_layout
   );
 }
 
 
 
 template <typename Layouts>
-__device__ void RmsNormKernel::execute(void* params, Layouts layouts,
-                                      char* shared_buf, int tid) 
+__device__ void RmsNormKernel::execute(void* params, Layouts layouts) 
 {
-    auto& p = *static_cast<decltype(pack_parameters(nullptr,nullptr))*>(params);
-    rms_norm_kernl_impl(
-        p.input0, p.input1, p.output0,
-        get<0>(layouts),
-        get<1>(layouts),
-        get<2>(layouts),
-        shared_buf, tid
-    );
+  auto& p = *static_cast<Params*>(params);
+  rms_norm_kernl_impl(p);
 }
 
-template <typename Input0Layout, typename Input1Layout, typename Output0Layout>
-__global__ void __launch_bounds__(128) rms_norm_kernl_impl(half_t* __restrict__ input_0, half_t const* __restrict__ input_1, half_t const* __restrict__ output_0) {
+template <typename Input0Layout, typename Input0LayoutDevice, typename Input1Layout, typename Input1LayoutDevice, typename Output0Layout,  typename Output0LayoutDevice>
+__global__ void __launch_bounds__(128) rms_norm_kernl_impl(RmsNormKernel::Params const &params) {
   int thread_idx = threadIdx.x;
   static constexpr int NUM_THREADS = 128;
+  half_t* __restrict__ input_0 = params.input0;
+  half_t const* __restrict__ input_1 = params.input1;
+  half_t const* __restrict__ output_0 = params.output0;
   // STensors
   extern __shared__ char buf[];
   half_t *stensor20000031_ptr = (half_t*)(buf + 128);
@@ -80,21 +124,21 @@ __global__ void __launch_bounds__(128) rms_norm_kernl_impl(half_t* __restrict__ 
   
   // G->S copy atoms
   // Copy for G->S: dtensor 10000003 -> stensor 20000022
-  const half_t *dtensor10000003_tile_ptr = input_1 ;
-  using DTensor10000003TileLayout = Layout<Shape<Int<64>, Int<16>>, Stride<Int<1>, Int<4096>>>;
+  const half_t *dtensor10000003_tile_ptr = input_1 + blockIdx.x * params.offset_in0.x + blockIdx.y * params.offset_in0.y + blockIdx.z * params.offset_in0.z;
+  using DTensor10000003TileLayout = Input0LayoutDevice;
   using STensor20000022InputAtom = tb::InputChunkedAsyncCopy<half_t, Input0Layout, DTensor10000003TileLayout, NUM_THREADS>;
   half_t *stensor20000022_async_copy_buf = stensor30000022_ptr;
   // Copy for G->S: dtensor 10000004 -> stensor 20000023
-  const half_t *dtensor10000004_tile_ptr = output_0  + blockIdx.x*64*1;
-  using DTensor10000004TileLayout = Layout<Shape<Int<64>, Int<64>>, Stride<Int<1>, Int<4096>>>;
+  const half_t *dtensor10000004_tile_ptr = output_0  + blockIdx.x * params.offset_in1.x + blockIdx.y * params.offset_in1.y + blockIdx.z * params.offset_in1.z;
+  using DTensor10000004TileLayout = Input1LayoutDevice;
   using STensor20000023InputAtom = tb::InputChunkedAsyncCopy<half_t, Input1Layout, DTensor10000004TileLayout, NUM_THREADS>;
   half_t *stensor20000023_async_copy_buf = stensor30000023_ptr;
   
   
   // S->G copy atoms
   // Copy for S->G: stensor 20000031 -> dtensor 10000005
-  half_t *dtensor10000005_tile_ptr = input_0  + blockIdx.x*64*16;
-  using DTensor10000005TileLayout = Layout<Shape<Int<16>, Int<64>>, Stride<Int<1>, Int<16>>>;
+  half_t *dtensor10000005_tile_ptr = input_0 + blockIdx.x * params.offset_out0.x + blockIdx.y * params.offset_out0.y + blockIdx.z * params.offset_out0.z;
+  using DTensor10000005TileLayout = Output0LayoutDevice;
   using STensor20000031OutputAtom = tb::OutputChunkedSyncCopy<half_t, DTensor10000005TileLayout, Output0Layout, NUM_THREADS>;
   
   tb::ClearAccumlatorKernel<half_t, 1024, NUM_THREADS>::run(stensor20000027_ptr, thread_idx);
@@ -116,12 +160,12 @@ __global__ void __launch_bounds__(128) rms_norm_kernl_impl(half_t* __restrict__ 
   }
   
   // The main loop
-  for (int for_idx = 0; for_idx < 64; for_idx++) {
+  for (int for_idx = 0; for_idx < params.forloop_range; for_idx++) {
     {
       // Issue async copies for the next round
-      if (for_idx+1 != 64) {
-        STensor20000023InputAtom::run(stensor20000023_ptr, dtensor10000004_tile_ptr + 262144*(for_idx+1), thread_idx);
-        STensor20000022InputAtom::run(stensor20000022_ptr, dtensor10000003_tile_ptr + 64*(for_idx+1), thread_idx);
+      if (for_idx+1 != params.forloop_range) {
+        STensor20000023InputAtom::run(stensor20000023_ptr, dtensor10000004_tile_ptr + offset_in0.w*(for_idx+1), thread_idx);
+        STensor20000022InputAtom::run(stensor20000022_ptr, dtensor10000003_tile_ptr + offset_in1.w*(for_idx+1), thread_idx);
       }
       cute::cp_async_fence();
       // Wait for the async copies in the last round to finish

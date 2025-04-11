@@ -24,7 +24,7 @@ int main(int argc, char **argv) {
       tb::STensor bX =
           bgraph.new_input(X, {-1, -1, -1}, 1, layout::SmemRowMajor);
       tb::STensor bW =
-          bgraph.new_input(W, {1, -1, -1}, 0, layout::SmemRowMajor);
+          bgraph.new_input(W, {-1, -1, -1}, 0, layout::SmemRowMajor);
       tb::STensor bM = bgraph.matmul(bX, bW);
       tb::STensor bAccX =
           bgraph.forloop_accum(bX, type::TB_FORLOOP_ACCUM_RED_LD_RMS_OP);

@@ -140,6 +140,42 @@ void dfs_create_events_add_tasks(
   }
 }
 
+void add_tensor_offset(int3 const inout_map,
+                       kernel::DTensor const &dtensor,
+                       DTensorMeta const &dtensor_meta,
+                       tb::Graph const &bgraph) {
+  int4 offset;
+
+  for (int dim = 0; dim < 3; ++dim) {
+    int div_dim = dim == 0 ? inout_map.x : dim == 1 ? inout_map.y : inout_map.z;
+    int num_tbs = dim == 0   ? bgraph.grid_dim.x
+                  : dim == 1 ? bgraph.grid_dim.y
+                             : bgraph.grid_dim.z;
+    if (num_tbs > 1) {
+      assert(div_dim >= 0);
+      if (dim == 0) {
+        offset.x =
+            dtensor.dim[div_dim] / num_tbs * dtensor_meta.strides[div_dim];
+      } else if (dim == 1) {
+        offset.y =
+            dtensor.dim[div_dim] / num_tbs * dtensor_meta.strides[div_dim];
+      } else {
+        offset.z =
+            dtensor.dim[div_dim] / num_tbs * dtensor_meta.strides[div_dim];
+      }
+    } else {
+      if (dim == 0) {
+        offset.x = 0;
+      } else if (dim == 1) {
+        offset.y = 0;
+      } else {
+        offset.z = 0;
+      }
+    }
+  }
+  tensor_offsets.push_back(offset);
+}
+
 void Runtime::register_mugraph(mirage::kernel::Graph const &graph,
                                std::unordered_map<kn::KNCustomizedOp const *,
                                                   TaskType> const &task_types) {
@@ -168,6 +204,25 @@ void Runtime::register_mugraph(mirage::kernel::Graph const &graph,
         output_ops.push_back(static_cast<tb::TBOutputOp *>(op));
       }
     }
+
+    // Step0: add
+    for (auto const &input : input_ops) {
+      input_map = input->input_map;
+      add_tensor_offset(input_map,
+                        input->dtensor,
+                        dtensor_metas.at(input->dtensor.guid),
+                        bgraph);
+      num_dtensors++;
+    }
+    for (auto const &output : output_ops) {
+      output_map = output->output_map;
+      add_tensor_offset(output_map,
+                        output->dtensor,
+                        dtensor_metas.at(output->dtensor.guid),
+                        bgraph);
+      num_dtensors++;
+    }
+
     // Step 1: add all tasks based on their blockIdx
     // (bid.x, bid.y, bid.z) ordering
     for (bid.x = 0; bid.x < bgraph.grid_dim.x; bid.x++) {
@@ -179,6 +234,8 @@ void Runtime::register_mugraph(mirage::kernel::Graph const &graph,
             TensorDesc desc;
             assert(input->output_tensors.size() == 1);
             tb::STensor stensor = input->output_tensors[0];
+            DTensorMeta const &dtensor_meta =
+                dtensor_metas.at(input->dtensor.guid);
             desc.num_dims = stensor.num_dims;
             desc.data_type = stensor.data_type;
             for (int d = stensor.num_dims - 1; d >= 0; d--) {
@@ -187,6 +244,7 @@ void Runtime::register_mugraph(mirage::kernel::Graph const &graph,
                   (d == stensor.num_dims - 1)
                       ? 1
                       : desc.stride[d + 1] * input->dtensor.dim[d + 1];
+              desc.dtensor_stride[d] = dtensor_meta.stride[d];
             }
             task.inputs[task.num_inputs++] = desc;
           }
@@ -206,6 +264,7 @@ void Runtime::register_mugraph(mirage::kernel::Graph const &graph,
             }
             task.outputs[task.num_outputs++] = desc;
           }
+          task.forloop_range = bgraph.forloop_range;
           tasks.push_back(task);
         }
       }
