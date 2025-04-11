@@ -140,10 +140,10 @@ void dfs_create_events_add_tasks(
   }
 }
 
-void add_tensor_offset(int3 const inout_map,
-                       kernel::DTensor const &dtensor,
-                       DTensorMeta const &dtensor_meta,
-                       tb::Graph const &bgraph) {
+void Runtime::add_tensor_offset(int3 const inout_map,
+                                kernel::DTensor const &dtensor,
+                                std::vector<size_t> const &strides,
+                                tb::Graph const &bgraph) {
   int4 offset;
 
   for (int dim = 0; dim < 3; ++dim) {
@@ -154,14 +154,11 @@ void add_tensor_offset(int3 const inout_map,
     if (num_tbs > 1) {
       assert(div_dim >= 0);
       if (dim == 0) {
-        offset.x =
-            dtensor.dim[div_dim] / num_tbs * dtensor_meta.strides[div_dim];
+        offset.x = dtensor.dim[div_dim] / num_tbs * strides.at(div_dim);
       } else if (dim == 1) {
-        offset.y =
-            dtensor.dim[div_dim] / num_tbs * dtensor_meta.strides[div_dim];
+        offset.y = dtensor.dim[div_dim] / num_tbs * strides.at(div_dim);
       } else {
-        offset.z =
-            dtensor.dim[div_dim] / num_tbs * dtensor_meta.strides[div_dim];
+        offset.z = dtensor.dim[div_dim] / num_tbs * strides.at(div_dim);
       }
     } else {
       if (dim == 0) {
@@ -210,18 +207,18 @@ void Runtime::register_mugraph(
 
     // Step0: add
     for (auto const &input : input_ops) {
-      input_map = input->input_map;
-      add_tensor_offset(input_map,
-                        input->dtensor,
-                        dtensor_metas.at(input->dtensor.guid),
-                        bgraph);
+      add_tensor_offset(
+          input->input_map,
+          input->dtensor,
+          static_cast<kn::KNInputOp *>(input->dtensor.owner_op)->input_strides,
+          bgraph);
       num_dtensors++;
     }
     for (auto const &output : output_ops) {
-      output_map = output->output_map;
-      add_tensor_offset(output_map,
+      add_tensor_offset(output->output_map,
                         output->dtensor,
-                        dtensor_metas.at(output->dtensor.guid),
+                        static_cast<kn::KNOutputOp *>(output->dtensor.owner_op)
+                            ->output_strides,
                         bgraph);
       num_dtensors++;
     }
@@ -237,8 +234,9 @@ void Runtime::register_mugraph(
             TensorDesc desc;
             assert(input->output_tensors.size() == 1);
             tb::STensor stensor = input->output_tensors[0];
-            DTensorMeta const &dtensor_meta =
-                dtensor_metas.at(input->dtensor.guid);
+            std::vector<size_t> input_strides =
+                static_cast<kn::KNInputOp *>(input->dtensor.owner_op)
+                    ->input_strides;
             desc.num_dims = stensor.num_dims;
             desc.data_type = stensor.data_type;
             for (int d = stensor.num_dims - 1; d >= 0; d--) {
@@ -247,7 +245,7 @@ void Runtime::register_mugraph(
                   (d == stensor.num_dims - 1)
                       ? 1
                       : desc.stride[d + 1] * input->dtensor.dim[d + 1];
-              desc.dtensor_stride[d] = dtensor_meta.stride[d];
+              desc.dtensor_stride[d] = input_strides.at(d);
             }
             task.inputs[task.num_inputs++] = desc;
           }
@@ -256,6 +254,9 @@ void Runtime::register_mugraph(
             TensorDesc desc;
             assert(output->input_tensors.size() == 1);
             tb::STensor stensor = output->input_tensors[0];
+            std::vector<size_t> output_strides =
+                static_cast<kn::KNOutputOp *>(output->dtensor.owner_op)
+                    ->output_strides;
             desc.num_dims = stensor.num_dims;
             desc.data_type = stensor.data_type;
             for (int d = stensor.num_dims - 1; d >= 0; d--) {
@@ -264,6 +265,7 @@ void Runtime::register_mugraph(
                   (d == stensor.num_dims - 1)
                       ? 1
                       : desc.stride[d + 1] * output->dtensor.dim[d + 1];
+              desc.dtensor_stride[d] = output_strides.at(d);
             }
             task.outputs[task.num_outputs++] = desc;
           }

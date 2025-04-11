@@ -1,16 +1,20 @@
 #define NUM_GPUS 1
 #define USE_NVSHMEM false
 #include "mirage/transpiler/runtime/runtime.h"
+#include "mirage/runtime/runtime.h"
 #include "layout_infer.h"
+
 using namespace cute;
 
+namespace mirage {
+namespace runtime {
 
 struct RmsNormKernel {
 
   static constexpr int input_nums = 2;
   static constexpr int output_nums = 1;
 
-  static Params {
+  struct Params {
     half_t* input0;
     const half_t* input1;
     const half_t* output0;
@@ -20,12 +24,11 @@ struct RmsNormKernel {
     int forloop_range;
 };
 
-  static void* pack_parameters(TensorDesc* inputs, TensorDesc* outputs);
+  static void* pack_parameters(TensorDesc* inputs, TensorDesc* outputs, int4 *tensor_offsets);
   static auto create_layouts(TensorDesc* inputs, TensorDesc* outputs);
 
   template <typename Layouts>
-  static __device__ void execute(void* params, Layouts layouts, 
-                               char* shared_buf, int tid);
+  static __device__ void execute(void* params, Layouts layouts);
 };
 
 void* RmsNormKernel::pack_parameters(TensorDesc* inputs, TensorDesc* outputs, int4 *tensor_offsets) {
@@ -39,7 +42,7 @@ void* RmsNormKernel::pack_parameters(TensorDesc* inputs, TensorDesc* outputs, in
   params.offset_in0 = *tensor_offsets;
   params.offset_in1 = *(tensor_offsets + 1);
   params.offset_out0 = *(tensor_offsets + 2);
-  params.forloop_range = forloop_range;
+  // params.forloop_range = forloop_range;
 
   return &params;
 }
@@ -63,8 +66,12 @@ auto RmsNormKernel::create_layouts(TensorDesc* inputs, TensorDesc* outputs) {
     int base = innermost_dim_size / 8;
     auto layout = make_layout(make_shape(d1, d0), make_stride(s1, s0));
     if (base > 0 && (base & (base - 1)) == 0) {
-      int log2_base = __builtin_ctz(base);
-      return composition(Swizzle<3, 3, log2_base>{}, layout);
+      int log2_base = __builtin_ctz(innermost_dim_size);
+      switch (log2_base) {
+        case 3: return composition(Swizzle<3, 3, 3>{}, layout);
+        case 4: return composition(Swizzle<3, 3, 4>{}, layout);
+        default: assert(false);
+    }
     } else {
       return layout;
     }
@@ -82,8 +89,6 @@ auto RmsNormKernel::create_layouts(TensorDesc* inputs, TensorDesc* outputs) {
   auto output0_dtensor_layout  = make_dtensor_layout(outputs[0]);
   auto output0_smem_layout = make_stensor_layout(outputs[0]);
 
-  
-
   return make_tuple(
     input0_smem_layout,
     input0_dtensor_layout,
@@ -94,17 +99,29 @@ auto RmsNormKernel::create_layouts(TensorDesc* inputs, TensorDesc* outputs) {
   );
 }
 
-
+template <typename Input0Layout, typename Input0LayoutDevice,
+          typename Input1Layout, typename Input1LayoutDevice,
+          typename Output0Layout, typename Output0LayoutDevice>
+__device__ void rms_norm_kernel_impl(RmsNormKernel::Params const &params);
 
 template <typename Layouts>
 __device__ void RmsNormKernel::execute(void* params, Layouts layouts) 
 {
   auto& p = *static_cast<Params*>(params);
-  rms_norm_kernl_impl(p);
+
+  using Input0Layout        = typename std::tuple_element<0, Layouts>::type;
+  using Input0LayoutDevice  = typename std::tuple_element<1, Layouts>::type;
+  using Input1Layout        = typename std::tuple_element<2, Layouts>::type;
+  using Input1LayoutDevice  = typename std::tuple_element<3, Layouts>::type;
+  using Output0Layout       = typename std::tuple_element<4, Layouts>::type;
+  using Output0LayoutDevice = typename std::tuple_element<5, Layouts>::type;
+  rms_norm_kernel_impl<Input0Layout, Input0LayoutDevice,
+                      Input1Layout, Input1LayoutDevice,
+                      Output0Layout, Output0LayoutDevice>(p);
 }
 
 template <typename Input0Layout, typename Input0LayoutDevice, typename Input1Layout, typename Input1LayoutDevice, typename Output0Layout,  typename Output0LayoutDevice>
-__global__ void __launch_bounds__(128) rms_norm_kernl_impl(RmsNormKernel::Params const &params) {
+__device__ void rms_norm_kernel_impl(RmsNormKernel::Params const &params) {
   int thread_idx = threadIdx.x;
   static constexpr int NUM_THREADS = 128;
   half_t* __restrict__ input_0 = params.input0;
@@ -145,7 +162,7 @@ __global__ void __launch_bounds__(128) rms_norm_kernl_impl(RmsNormKernel::Params
   
   using Matmul20000030LayoutA = Input0Layout;
   using Matmul20000030LayoutB = Input1Layout;
-  using Matmul20000030LayoutC = layout::LayoutInfer<type::TB_MATMUL_OP, Input0Layout, Input1Layout>::LayoutOut;
+  using Matmul20000030LayoutC = typename LayoutInfer<type::TB_MATMUL_OP, Input0Layout, Input1Layout>::LayoutOut;
   using Matmul20000030LayoutAAligned = Matmul20000030LayoutA;
   using Matmul20000030LayoutBAligned = Matmul20000030LayoutB;
   using Matmul20000030Kernel = tb::Matmul<half_t, SM80_16x8x16_F16F16F16F16_TN, Layout<Shape<Int<1>, Int<4>, _1>>, true, false, Matmul20000030LayoutA, Matmul20000030LayoutB, Matmul20000030LayoutC, Matmul20000030LayoutAAligned, Matmul20000030LayoutBAligned,NUM_THREADS, 0, false>;
@@ -164,8 +181,8 @@ __global__ void __launch_bounds__(128) rms_norm_kernl_impl(RmsNormKernel::Params
     {
       // Issue async copies for the next round
       if (for_idx+1 != params.forloop_range) {
-        STensor20000023InputAtom::run(stensor20000023_ptr, dtensor10000004_tile_ptr + offset_in0.w*(for_idx+1), thread_idx);
-        STensor20000022InputAtom::run(stensor20000022_ptr, dtensor10000003_tile_ptr + offset_in1.w*(for_idx+1), thread_idx);
+        STensor20000023InputAtom::run(stensor20000023_ptr, dtensor10000004_tile_ptr + params.offset_in0.w*(for_idx+1), thread_idx);
+        STensor20000022InputAtom::run(stensor20000022_ptr, dtensor10000003_tile_ptr + params.offset_in1.w*(for_idx+1), thread_idx);
       }
       cute::cp_async_fence();
       // Wait for the async copies in the last round to finish
@@ -182,7 +199,7 @@ __global__ void __launch_bounds__(128) rms_norm_kernl_impl(RmsNormKernel::Params
     {
       // OP type: tb_square_op
       using InLayout = Input1Layout;
-      using ElementUnaryOutLayput = layout::LayoutInfer<type::TB_SQUARE_OP, InLayout>::LayoutOut;
+      using ElementUnaryOutLayput = typename LayoutInfer<type::TB_SQUARE_OP, InLayout>::LayoutOut;
       using Kernel = tb::ElementUnaryKernel<half_t, tb::ElementUnaryOpType::SQUARE, ElementUnaryOutLayput, InLayout, NUM_THREADS, tb::EpilogueMulScalar<half_t, tb::EpilogueStoreAccum<half_t>>>;
       const float scalars[] = {0.000244f, 0.0f};
       Kernel::run(stensor20000027_ptr, stensor20000022_ptr, thread_idx, 0.000000, scalars);
@@ -196,24 +213,27 @@ __global__ void __launch_bounds__(128) rms_norm_kernl_impl(RmsNormKernel::Params
   __syncthreads();
 
     // OP type: tb_reduction_1_op
-    using ReductionInLayout = ElementUnaryOutLayput;
-    using ReductionOutLayout = layout::LayoutInfer<type::TB_REDUCTION_1_OP, ReductionInLayout>::LayoutOut;
+    using ReductionInLayout = Input0Layout;
+    using ReductionOutLayout = typename LayoutInfer<type::TB_REDUCTION_1_OP, ReductionInLayout>::LayoutOut;
     using Kernel = tb::ReductionKernel<half_t, ReductionOutLayout, ReductionInLayout, 1, NUM_THREADS, tb::EpilogueSqrt<half_t, tb::EpilogueStore<half_t>>>;
-    const float scalars[] = {0.000000f, 0.0f};
-    Kernel::run(stensor20000029_ptr, stensor20000027_ptr, thread_idx, scalars);
+    const float scalars_red[] = {0.000000f, 0.0f};
+    Kernel::run(stensor20000029_ptr, stensor20000027_ptr, thread_idx, scalars_red);
 
   __syncthreads();
 
     // OP type: tb_div_op
     using ElementBinaryIn0Layout = Matmul20000030LayoutC;
     using ElementBinaryIn1Layout = ReductionOutLayout;
-    using EleBinaryOutLayout = layout::LayoutInfer<type::TB_DIV_OP, ElementBinaryIn0Layout, ElementBinaryIn1Layout>::LayoutOut;
+    using EleBinaryOutLayout = typename LayoutInfer<type::TB_DIV_OP, ElementBinaryIn0Layout, ElementBinaryIn1Layout>::LayoutOut;
     using Kernel = tb::ElementBinaryKernel<half_t, tb::ElementBinaryOpType::DIV, EleBinaryOutLayout, ElementBinaryIn0Layout, ElementBinaryIn1Layout, NUM_THREADS, tb::EpilogueStore<half_t>>;
-    const float scalars[] = {0.0f};
-    Kernel::run(stensor20000031_ptr, stensor20000030_ptr, stensor20000029_ptr, thread_idx, scalars);
+    const float scalars_div[] = {0.0f};
+    Kernel::run(stensor20000031_ptr, stensor20000030_ptr, stensor20000029_ptr, thread_idx, scalars_div);
 
   __syncthreads();
 
     // OP type: tb_output_op
     STensor20000031OutputAtom::run(dtensor10000005_tile_ptr, stensor20000031_ptr, thread_idx);
 }
+
+} // namespace runtime
+} // namespace mirage

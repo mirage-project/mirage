@@ -5,7 +5,7 @@
 
 #include <cute/layout.hpp>
 
-#include "utils.h"
+#include "mirage/transpiler/runtime/utils.h"
 
 namespace kn {
 

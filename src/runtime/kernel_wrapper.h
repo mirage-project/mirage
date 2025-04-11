@@ -1,8 +1,11 @@
 #include "mirage/runtime/runtime.h"
-#include "mirage/runtime/rms_norm.cuh"
+#include "rms_norm.cuh"
 
+
+namespace mirage {
+namespace runtime {
  template <typename Kernel>
- __global__ void generic_wrapper_kernel(
+ __device__ void generic_wrapper_kernel(
     TensorDesc* inputs,
     TensorDesc* outputs,
     int4 *tensor_offsets,
@@ -13,3 +16,5 @@
     auto layouts = Kernel::create_layouts(inputs, outputs, tensor_offsets, forloop_range);
     Kernel::execute(params, layouts);
 }
+}; // namespace runtime
+}; // namespace mirage
