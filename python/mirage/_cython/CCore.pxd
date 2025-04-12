@@ -194,6 +194,8 @@ cdef extern from "mirage/kernel/graph.h" namespace "mirage::kernel":
         CppDTensor* gelu(const CppDTensor* input)
         CppDTensor* relu(const CppDTensor* input)
         CppDTensor* clamp(const CppDTensor* input, float min_val, float max_val)
+        CppDTensor* sqrt(const CppDTensor* input)
+        CppDTensor* square(const CppDTensor* input)
         CppDTensor* add(const CppDTensor* op1, const CppDTensor* op2)
         CppDTensor* mul(const CppDTensor* op1, const CppDTensor* op2)
         CppDTensor* div(const CppDTensor* op1, const CppDTensor* op2)

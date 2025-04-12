@@ -696,6 +696,16 @@ cdef class CyKNGraph:
         t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
         return DTensor(t)
 
+    def sqrt(self, DTensor input):
+        cdef CppDTensor* ptr = self.p_kgraph.sqrt(input.c_ptr)
+        t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
+        return DTensor(t)
+
+    def square(self, DTensor input):
+        cdef CppDTensor* ptr = self.p_kgraph.square(input.c_ptr)
+        t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
+        return DTensor(t)
+
     def add(self, DTensor A, DTensor B):
         cdef CppDTensor* ptr = self.p_kgraph.add(A.c_ptr, B.c_ptr)
         t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
