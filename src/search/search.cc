@@ -147,6 +147,7 @@ void KernelGraphGenerator::generate_next_operator(
             if (c.ctx_num_chunk_ops[chunk_type] == num_chunk_ops[chunk_type]) {
               continue;
             }
+            c.ctx_num_chunk_ops[chunk_type]++;
           }
           
           KNOperator *new_op = create_op(*c.kn_graph, op_type, input_tensors);
@@ -368,6 +369,7 @@ void KernelGraphGenerator::generate_next_operator(
           if (c.ctx_num_chunk_ops[chunk_type] == num_chunk_ops[chunk_type]) {
             continue;
           }
+          c.ctx_num_chunk_ops[chunk_type]++;
         }
         
         TBOperator *last_op = c.tb_graph->operators.back();
