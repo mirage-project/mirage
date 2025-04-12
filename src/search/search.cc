@@ -139,6 +139,15 @@ void KernelGraphGenerator::generate_next_operator(
           if (!check_pattern(pattern)) {
             continue;
           }
+
+          if (op_type == type::KNOperatorType::KN_CHUNK_0_OP ||
+              op_type == type::KNOperatorType::KN_CHUNK_1_OP ||
+              op_type == type::KNOperatorType::KN_CHUNK_2_OP) {
+            int chunk_type = op_type - type::KNOperatorType::KN_CHUNK_0_OP;
+            if (c.ctx_num_chunk_ops[chunk_type] == num_chunk_ops[chunk_type]) {
+              continue;
+            }
+          }
           
           KNOperator *new_op = create_op(*c.kn_graph, op_type, input_tensors);
 
@@ -351,6 +360,15 @@ void KernelGraphGenerator::generate_next_operator(
         if (!check_pattern(pattern)) {
           continue;
         }
+
+        if (op_type == type::TBOperatorType::TB_CHUNK_0_OP ||
+          op_type == type::TBOperatorType::TB_CHUNK_1_OP ||
+          op_type == type::TBOperatorType::TB_CHUNK_2_OP) {
+          int chunk_type = op_type - type::TBOperatorType::TB_CHUNK_0_OP;
+          if (c.ctx_num_chunk_ops[chunk_type] == num_chunk_ops[chunk_type]) {
+            continue;
+          }
+        }
         
         TBOperator *last_op = c.tb_graph->operators.back();
         TBOperator *new_op = create_op(*c.tb_graph, op_type, input_tensors);
@@ -431,6 +449,13 @@ void KernelGraphGenerator::preprocess(kernel::Graph const &computation_graph) {
            op->output_tensors[0].data_type,
            op->output_tensors[0].layout,
            static_cast<kernel::KNInputOp *>(op)->input_strides});
+    }
+
+    // get number of chunk operators
+    if (op->op_type == type::KNOperatorType::KN_CHUNK_0_OP ||
+        op->op_type == type::KNOperatorType::KN_CHUNK_1_OP ||
+        op->op_type == type::KNOperatorType::KN_CHUNK_2_OP) {
+      num_chunk_ops[op->op_type - type::KNOperatorType::KN_CHUNK_0_OP]++;
     }
   }
 

@@ -55,6 +55,9 @@ private:
   std::atomic<int> num_tasks;
   size_t max_depth;
 
+  // count number of chunk ops
+  std::vector<int> num_chunk_ops = std::vector<int>(3);
+
   //
   std::unordered_map<std::string, bool> seen_patterns;
 
