@@ -182,10 +182,10 @@ def parse_onnx_model(model, unique_operators):
     # print(operators)
 
     # print([node.name for node in model.graph.node])
-    root_node = operators[model.graph.node[0].name]
+    # root_node = operators[model.graph.node[0].name]
     # print_computational_graph(operators['node_Transpose_0'])
     # print_computational_graph(root_node)
-    return root_node, operators
+    return operators
 
 def test_cfg():
     # model = SimpleClassifier()
@@ -297,8 +297,8 @@ def get_computation_graph(model, dummy_input, unique_operators, method):
             shape_inference.infer_shapes_path(model_path="scripts/onnx/integrate_test.onnx",
                                               output_path="scripts/onnx/inferred_model.onnx") # for shape inference of inputs and outputs
             inferred_model = onnx.load("scripts/onnx/inferred_model.onnx")
-            root_node, operators = parse_onnx_model(inferred_model, unique_operators)
-            return root_node, operators
+            operators = parse_onnx_model(inferred_model, unique_operators)
+            return operators
         case _:
             print("Unsupported method for build_graph")
             return None

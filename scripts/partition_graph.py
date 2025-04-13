@@ -48,22 +48,22 @@ def copy_subgraph(subgraph):
     return new_subgraph
 
 def get_partitions(op_node, min_num_ops, max_num_ops, visited_start_nodes, all_subgraphs, UNSUPPORTED_OPS, IGNORE_OPS):
-    visited_start_nodes.add(id(op_node.name))
-    
-    if op_node.fn not in UNSUPPORTED_OPS.union(IGNORE_OPS):
-         # handle non-matching shapes
-        op_needs_broadcast = False
-        input_dims = len(op_node.input_tensor_shapes[0][0])
-        for s in op_node.input_tensor_shapes:
-            if len(s[0]) != input_dims:
-                op_needs_broadcast = True
-                break
-        if not op_needs_broadcast:
-            get_partitions_helper(op_node, {op_node: []}, min_num_ops, max_num_ops, set(), all_subgraphs, UNSUPPORTED_OPS, IGNORE_OPS)
-        
-    for output_node in op_node.output_ops:
-        if id(output_node.name) not in visited_start_nodes:
-            get_partitions(output_node, min_num_ops, max_num_ops, visited_start_nodes, all_subgraphs, UNSUPPORTED_OPS, IGNORE_OPS)
+    if id(op_node.name) not in visited_start_nodes:
+        visited_start_nodes.add(id(op_node.name))
+        if op_node.fn not in UNSUPPORTED_OPS.union(IGNORE_OPS):
+            # handle non-matching shapes
+            op_needs_broadcast = False
+            input_dims = len(op_node.input_tensor_shapes[0][0])
+            for s in op_node.input_tensor_shapes:
+                if len(s[0]) != input_dims:
+                    op_needs_broadcast = True
+                    break
+            if not op_needs_broadcast:
+                get_partitions_helper(op_node, {op_node: []}, min_num_ops, max_num_ops, set(), all_subgraphs, UNSUPPORTED_OPS, IGNORE_OPS)
+            
+        for output_node in op_node.output_ops:
+            if id(output_node.name) not in visited_start_nodes:
+                get_partitions(output_node, min_num_ops, max_num_ops, visited_start_nodes, all_subgraphs, UNSUPPORTED_OPS, IGNORE_OPS)
 
 def get_partitions_helper(op_node, curr_subgraph, min_num_ops, max_num_ops, visited, all_subgraphs, UNSUPPORTED_OPS, IGNORE_OPS):
     if id(op_node.name) in visited:
@@ -120,11 +120,12 @@ def partition_graph(model,
                     UNSUPPORTED_OPS=set(), # these are operators not supported by Mirage
                     IGNORE_OPS=set()): # these are operators that performs no operations on the tensors
     unique_operators = set()
-    root_node, operators = get_computation_graph(model, dummy_input, unique_operators, "onnx")
+    operators = get_computation_graph(model, dummy_input, unique_operators, "onnx")
 
     all_subgraphs = []
     visited_start_nodes = set()
-    get_partitions(root_node, min_num_ops, max_num_ops, visited_start_nodes, all_subgraphs, UNSUPPORTED_OPS, IGNORE_OPS)
+    for _, op_node in operators.items():
+        get_partitions(op_node, min_num_ops, max_num_ops, visited_start_nodes, all_subgraphs, UNSUPPORTED_OPS, IGNORE_OPS)
 
     return all_subgraphs, unique_operators
 
