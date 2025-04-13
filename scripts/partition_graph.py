@@ -142,7 +142,7 @@ def function_map(graph, func, inputs, kwargs={}):
         case "Add": return graph.add(*inputs)
         case "Mul": return graph.mul(*inputs)
         case "Div": return graph.div(*inputs)
-        case "Rec": return graph.div(*inputs)
+        case "Reciprocal": return graph.div(*inputs)
         case "Softmax": # In case of softmax, inputs must be of form (mat, axis)
             exp = graph.exp(inputs[0])
             summed = graph.reduction(exp, inputs[1])
@@ -161,7 +161,9 @@ def function_map(graph, func, inputs, kwargs={}):
         case "Neg": 
             return graph.mul(*inputs)
         case "RMSNormalization": return graph.rms_norm(*inputs, **kwargs)
-        case _: raise NotImplementedError
+        case _: 
+            print(func.fn)
+            raise NotImplementedError
 
 # Take in an adjacency list formatted subgraph and generate a mirage kernel graph
 def to_kernel_graph(subgraph):
@@ -188,10 +190,10 @@ def to_kernel_graph(subgraph):
             shape = op.output_tensor_shapes[0][0]
             dims.append((shape, "C", -1.0))
             inputs.append(graph.new_input(dims=shape, dtype=mi.float16))
-        elif (op.fn == "Rec"):
+        elif (op.fn == "Reciprocal"):
             shape = op.output_tensor_shapes[0][0]
             dims.append((shape, "C", 1.0))
-            inputs.append(graph.new_input(dims=shape, dtype=mi.float16))
+            inputs.insert(0, graph.new_input(dims=shape, dtype=mi.float16))
         inputs += op.additional_params
         kwargs = op.kwargs
         res = function_map(graph, op, inputs, kwargs)
@@ -204,8 +206,8 @@ def to_kernel_graph(subgraph):
         if count == 0: graph.mark_output(tensor)
     return graph, dims
         
-def generate_all_kernels(model, dummy_inputs, min_num_ops=2, max_num_ops=4, UNSUPPORTED_OPS=set()):
-    subgraphs, unique_operators = partition_graph(model, dummy_inputs, min_num_ops, max_num_ops, UNSUPPORTED_OPS)
+def generate_all_kernels(model, dummy_inputs, min_num_ops=2, max_num_ops=4, UNSUPPORTED_OPS=set(), IGNORE_OPS=set()):
+    subgraphs, _ = partition_graph(model, dummy_inputs, min_num_ops, max_num_ops, UNSUPPORTED_OPS, IGNORE_OPS)
     kernel_input_dims = []
     all_kernels = []
     for subgraph in subgraphs:
