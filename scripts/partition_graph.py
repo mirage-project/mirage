@@ -142,6 +142,7 @@ def function_map(graph, func, inputs, kwargs={}):
         case "Add": return graph.add(*inputs)
         case "Mul": return graph.mul(*inputs)
         case "Div": return graph.div(*inputs)
+        # case "Sqrt": return graph.sqrt(*inputs)
         case "Reciprocal": return graph.div(*inputs)
         case "Softmax": # In case of softmax, inputs must be of form (mat, axis)
             exp = graph.exp(inputs[0])
@@ -162,7 +163,6 @@ def function_map(graph, func, inputs, kwargs={}):
             return graph.mul(*inputs)
         case "RMSNormalization": return graph.rms_norm(*inputs, **kwargs)
         case _: 
-            print(func.fn)
             raise NotImplementedError
 
 # Take in an adjacency list formatted subgraph and generate a mirage kernel graph
