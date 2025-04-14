@@ -119,7 +119,7 @@ def partition_graph(model,
                     max_num_ops=4, 
                     UNSUPPORTED_OPS=set(), # these are operators not supported by Mirage
                     IGNORE_OPS=set()): # these are operators that performs no operations on the tensors
-    unique_operators = set()
+    unique_operators = {}
     operators = get_computation_graph(model, dummy_input, unique_operators, "onnx")
 
     all_subgraphs = []

@@ -142,7 +142,10 @@ def parse_onnx_model(model, unique_operators):
     # store the operators in a dict
     for node in model.graph.node:
         op_type = node.op_type
-        unique_operators.add(op_type)
+        if op_type not in unique_operators:
+            unique_operators[op_type] = 1
+        else:
+            unique_operators[op_type] += 1
         node_name = node.name or f"{op_type}_{id(node)}"
         [shape_value_dict[input_name] for input_name in node.input]
         [tensor_id[input_name] for input_name in node.input]
