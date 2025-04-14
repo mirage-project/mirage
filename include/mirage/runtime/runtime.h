@@ -27,8 +27,10 @@ struct TensorDesc {
   int num_dims;
   void *base_ptr;
   mirage::type::DataType data_type;
+  int innermost_dim;
   int dim[mirage::config::MAX_TENSOR_DIMS];
   int stride[mirage::config::MAX_TENSOR_DIMS];
+  int dtensor_stride[mirage::config::MAX_TENSOR_DIMS];
 };
 
 struct EventDesc {
@@ -44,6 +46,7 @@ struct TaskDesc {
       : task_type(t), num_inputs(0), num_outputs(0), trigger_event(0) {}
   TaskType task_type;
   int num_inputs, num_outputs;
+  int forloop_range;
   EventId trigger_event;
   TensorDesc inputs[mirage::config::MAX_NUM_INPUTS_PER_OPERATOR];
   TensorDesc outputs[mirage::config::MAX_NUM_OUTPUTS_PER_OPERATOR];
@@ -52,6 +55,7 @@ struct TaskDesc {
 struct RuntimeConfig {
   int num_workers, num_schedulers, num_graphs;
   int total_num_tasks, total_num_events;
+  ;
   unsigned long long int per_worker_queue_len, per_sched_queue_len;
   unsigned long long int *worker_queue_last_task_id;
   unsigned long long int *sched_queue_last_event_id;
@@ -61,6 +65,8 @@ struct RuntimeConfig {
   TaskId **worker_queues;
   EventId **sched_queues;
   TaskId *first_tasks;
+
+  int4 *tensor_offsets;
 };
 
 class Runtime {
@@ -70,12 +76,18 @@ public:
                         std::unordered_map<mirage::kernel::KNOperator const *,
                                            TaskType> const &task_types);
   void launch_persistent_kernel(int num_workers, int num_schedulers);
+  void add_tensor_offset(int3 const inout_map,
+                         kernel::DTensor const &dtensor,
+                         std::vector<size_t> const &strides,
+                         threadblock::Graph const &bgraph);
 
 public:
   std::vector<TaskDesc> all_tasks;
   std::vector<EventDesc> all_events;
   std::vector<TaskId> first_tasks;
+  std::vector<int4> tensor_offsets;
   int num_graphs;
+  int num_dtensors;
 };
 
 } // namespace runtime

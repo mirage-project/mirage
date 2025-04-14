@@ -13,6 +13,7 @@
  * limitations under the License.
  */
 
+#include "kernel_wrapper.h"
 #include "mirage/runtime/runtime.h"
 #include "mirage/utils/cuda_helper.h"
 
@@ -86,6 +87,12 @@ __global__ void persistent_kernel(RuntimeConfig config) {
           break;
         }
         case TASK_RMS_NORM_LINEAR: {
+          assert(task_desc.num_inputs == 2);
+          assert(task_desc.num_outputs == 1);
+          generic_wrapper_kernel<RmsNormKernel>(task_desc.inputs,
+                                                task_desc.outputs,
+                                                config.tensor_offsets,
+                                                task_desc.forloop_range);
           break;
         }
         default: {
@@ -257,6 +264,16 @@ void Runtime::launch_persistent_kernel(int num_workers, int num_schedulers) {
     checkCUDA(cudaMemcpy(config.first_tasks,
                          first_tasks.data(),
                          first_tasks.size() * sizeof(TaskId),
+                         cudaMemcpyHostToDevice));
+  }
+
+  {
+
+    // Initialize all events
+    checkCUDA(cudaMalloc(&config.tensor_offsets, num_dtensors * sizeof(int4)));
+    checkCUDA(cudaMemcpy(config.tensor_offsets,
+                         tensor_offsets.data(),
+                         num_dtensors * sizeof(int4),
                          cudaMemcpyHostToDevice));
   }
 
