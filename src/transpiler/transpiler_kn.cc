@@ -303,7 +303,7 @@ TranspileResult Transpiler::transpile_ugraph() {
       }
       case type::KNOperatorType::KN_ADD_OP:
       case type::KNOperatorType::KN_MUL_OP:
-      case type::KNOperatorType::KN_DIV_OP: 
+      case type::KNOperatorType::KN_DIV_OP:
       case type::KNOperatorType::KN_POW_OP: {
         // Elemwise binary op
         kn::DTensor &in0 = op->input_tensors.at(0);

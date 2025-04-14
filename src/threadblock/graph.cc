@@ -803,7 +803,7 @@ void from_json(json const &j, Graph &graph) {
       }
       case type::TBOperatorType::TB_ADD_OP:
       case type::TBOperatorType::TB_MUL_OP:
-      case type::TBOperatorType::TB_DIV_OP: 
+      case type::TBOperatorType::TB_DIV_OP:
       case type::TBOperatorType::TB_POW_OP: {
         STensor const &output = graph.elementbinary(
             get_tensor_from_guid(

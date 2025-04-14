@@ -215,7 +215,8 @@ std::vector<z3::expr>
         case type::TBOperatorType::TB_POW_OP: {
           z3::expr base = tensor_exprs.at(op->input_tensors[0].guid);
           z3::expr exponent = tensor_exprs.at(op->input_tensors[1].guid);
-          tensor_exprs.emplace(op->output_tensors[0].guid, bc_pow(base, exponent));
+          tensor_exprs.emplace(op->output_tensors[0].guid,
+                               bc_pow(base, exponent));
           break;
         }
         case type::TBOperatorType::TB_EXP_OP: {
@@ -355,7 +356,8 @@ std::vector<z3::expr>
         case type::KNOperatorType::KN_POW_OP: {
           z3::expr base = tensor_exprs.at(op->input_tensors[0].guid);
           z3::expr exponent = tensor_exprs.at(op->input_tensors[1].guid);
-          tensor_exprs.emplace(op->output_tensors[0].guid, bc_pow(base, exponent));
+          tensor_exprs.emplace(op->output_tensors[0].guid,
+                               bc_pow(base, exponent));
           break;
         }
         case type::KNOperatorType::KN_EXP_OP: {
@@ -543,10 +545,18 @@ bool is_equivalent(z3::expr const &lhs,
                      ew_add(matmul(t0, t1), matmul(t0, t2))));
   slv.add(forall(
       t0, t1, t2, matmul(bc_div(t0, t1), t2) == bc_div(matmul(t0, t2), t1)));
-  
-  slv.add(forall(t0, t1, t2, bc_pow(ew_mul(t0, t1), t2) == ew_mul(bc_pow(t0, t2), bc_pow(t1, t2))));
-  slv.add(forall(t0, t1, t2, bc_pow(t0, ew_add(t1, t2)) == ew_mul(bc_pow(t0, t1), bc_pow(t0, t2))));
-  
+
+  slv.add(forall(t0,
+                 t1,
+                 t2,
+                 bc_pow(ew_mul(t0, t1), t2) ==
+                     ew_mul(bc_pow(t0, t2), bc_pow(t1, t2))));
+  slv.add(forall(t0,
+                 t1,
+                 t2,
+                 bc_pow(t0, ew_add(t1, t2)) ==
+                     ew_mul(bc_pow(t0, t1), bc_pow(t0, t2))));
+
   slv.add(forall(t0, d0, reduce(sum(t0, d0), d0) == reduce(t0, d0)));
 
   slv.add(forall(to_expr_vector({t0, d0, d1, i0}),

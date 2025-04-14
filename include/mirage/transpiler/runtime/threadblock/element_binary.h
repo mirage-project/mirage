@@ -79,7 +79,8 @@ public:
       int64_t src0_phy_pos = src0_layout_dst_coord(elem_idx);
       int64_t src1_phy_pos = src1_layout_dst_coord(elem_idx);
       int64_t dst_phy_pos = dst_layout(elem_idx);
-      T res = perform_element_binary_op<T>(OP, src0[src0_phy_pos], src1[src1_phy_pos]);
+      T res = perform_element_binary_op<T>(
+          OP, src0[src0_phy_pos], src1[src1_phy_pos]);
       Epilogue::run(res, dst, dst_phy_pos, epilogue_scalars);
     }
   }

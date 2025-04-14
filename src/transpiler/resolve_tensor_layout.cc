@@ -322,7 +322,7 @@ void Transpiler::resolve_tensor_layout() {
       }
       case type::KN_ADD_OP:
       case type::KN_MUL_OP:
-      case type::KN_DIV_OP: 
+      case type::KN_DIV_OP:
       case type::KN_POW_OP: {
         // Elementwise Binary OP
         kn::DTensor const &lhs = op->input_tensors.at(0);
@@ -517,7 +517,7 @@ void Transpiler::resolve_tensor_layout() {
           }
           case type::TB_ADD_OP:
           case type::TB_MUL_OP:
-          case type::TB_DIV_OP: 
+          case type::TB_DIV_OP:
           case type::TB_POW_OP: {
             tb::STensor const &input0 = tb_op->input_tensors.at(0);
             tb::STensor const &input1 = tb_op->input_tensors.at(1);
