@@ -236,6 +236,12 @@ class KNGraph:
     def clamp(self, A: DTensor, min_val: float, max_val: float):
         return self.cygraph.clamp(A, min_val, max_val)
 
+    def sqrt(self, A: DTensor):
+        return self.cygraph.sqrt(A)
+
+    def square(self, A: DTensor):
+        return self.cygraph.square(A)
+
     def add(self, A: DTensor, B: DTensor):
         return self.cygraph.add(A, B)
 
