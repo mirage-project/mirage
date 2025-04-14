@@ -187,6 +187,23 @@ std::string Div::to_string() const {
   return "(" + lhs->to_string() + "/" + rhs->to_string() + ")";
 }
 
+Pow::Pow(std::shared_ptr<AbstractExpr> lhs, std::shared_ptr<AbstractExpr> rhs)
+    : lhs(lhs), rhs(rhs) {
+  assert(lhs);
+  assert(rhs);
+}
+
+z3::expr Pow::to_z3(z3::context &c,
+                    std::unordered_set<std::string> &all_variables) const {
+  z3::sort P = c.uninterpreted_sort("P");
+  z3::func_decl pow = c.function("pow", P, P, P);
+  return pow(lhs->to_z3(c, all_variables), rhs->to_z3(c, all_variables));
+} 
+
+std::string Pow::to_string() const {
+  return "(" + lhs->to_string() + "^" + rhs->to_string() + ")";
+} 
+
 Exp::Exp(std::shared_ptr<AbstractExpr> exponent) : exponent(exponent) {
   assert(exponent);
 }

@@ -44,6 +44,14 @@ STensor *Graph::div(STensor const *input1, STensor const *input2) {
   return elementbinary(input1, input2, mirage::type::TB_DIV_OP);
 }
 
+STensor Graph::pow(STensor const &input1, STensor const &input2) {
+  return elementbinary(input1, input2, mirage::type::TB_POW_OP);
+}
+
+STensor *Graph::pow(STensor const *input1, STensor const *input2) {
+  return elementbinary(input1, input2, mirage::type::TB_POW_OP);
+} 
+
 STensor Graph::elementbinary(STensor const &input1,
                              STensor const &input2,
                              mirage::type::TBOperatorType type) {

@@ -114,7 +114,8 @@ NKITranspiler::NKITranspiler(kernel::Graph const *_graph,
       }
       case KN_ADD_OP:
       case KN_MUL_OP:
-      case KN_DIV_OP: {
+      case KN_DIV_OP:
+      case KN_POW_OP: {
         assert(dtensor_inputs.size() == 2);
         assert(op->output_tensors.size() == 1);
         kernel::DTensor dt =
@@ -195,7 +196,8 @@ NKITranspiler::NKITranspiler(kernel::Graph const *_graph,
             }
             case TB_ADD_OP:
             case TB_MUL_OP:
-            case TB_DIV_OP: {
+            case TB_DIV_OP: 
+            case TB_POW_OP: {
               assert(stensor_inputs.size() == 2);
               threadblock::STensor st = tbg->elementbinary(
                   stensor_inputs[0], stensor_inputs[1], bop->op_type);
@@ -436,7 +438,8 @@ std::optional<NKIErrorInfo> NKITranspiler::resolve_tensor_layout() {
           }
           case type::TB_ADD_OP:
           case type::TB_MUL_OP:
-          case type::TB_DIV_OP: {
+          case type::TB_DIV_OP: 
+          case type::TB_POW_OP: {
             tb::STensor const &input0 = tb_op->input_tensors.at(0);
             tb::STensor const &input1 = tb_op->input_tensors.at(1);
             tb::STensor const &output = tb_op->output_tensors.at(0);
@@ -618,7 +621,8 @@ NKITranspileResult NKITranspiler::transpile_ugraph() {
       }
       case type::KN_ADD_OP:
       case type::KN_MUL_OP:
-      case type::KN_DIV_OP: {
+      case type::KN_DIV_OP: 
+      case type::KN_POW_OP: {
         kn::KNElementBinaryOp const *cur_op =
             dynamic_cast<kn::KNElementBinaryOp const *>(op);
         std::vector<std::string> dtensor_names;

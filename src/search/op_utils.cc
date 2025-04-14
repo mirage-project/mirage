@@ -10,6 +10,7 @@ bool is_binary(type::TBOperatorType op) {
       type::TBOperatorType::TB_MUL_OP,
       type::TBOperatorType::TB_MATMUL_OP,
       type::TBOperatorType::TB_DIV_OP,
+      type::TBOperatorType::TB_POW_OP,
       type::TBOperatorType::TB_MUL_OP};
   return contains(true_values, op);
 }
@@ -40,6 +41,7 @@ bool is_binary(type::KNOperatorType op) {
       type::KNOperatorType::KN_MUL_OP,
       type::KNOperatorType::KN_MATMUL_OP,
       type::KNOperatorType::KN_DIV_OP,
+      type::KNOperatorType::KN_POW_OP,
       type::KNOperatorType::KN_MUL_OP,
   };
   return contains(true_values, op);
@@ -221,6 +223,8 @@ std::shared_ptr<AbstractExpr> get_pattern(type::KNOperatorType op,
       return std::make_shared<Div>(lhs, rhs);
     case type::KNOperatorType::KN_MUL_OP:
       return std::make_shared<Mul>(lhs, rhs);
+    case type::KNOperatorType::KN_POW_OP:
+      return std::make_shared<Pow>(lhs, rhs);
     default:
       assert(false);
   }
@@ -243,6 +247,8 @@ std::shared_ptr<AbstractExpr> get_pattern(type::TBOperatorType op,
       return std::make_shared<Div>(lhs, rhs);
     case type::TBOperatorType::TB_MUL_OP:
       return std::make_shared<Mul>(lhs, rhs);
+    case type::TBOperatorType::TB_POW_OP:
+      return std::make_shared<Pow>(lhs, rhs);
     default:
       assert(false);
   }
@@ -336,6 +342,7 @@ KNOperator *create_op(kernel::Graph &g,
     case type::KNOperatorType::KN_DIV_OP:
     case type::KNOperatorType::KN_ADD_OP:
     case type::KNOperatorType::KN_MUL_OP:
+    case type::KNOperatorType::KN_POW_OP:
       return g.create_elementbinary_op(input1, input2, type);
     default:
       assert(false && "Unsupported operator");
@@ -416,6 +423,7 @@ TBOperator *create_op(threadblock::Graph &g,
     case type::TBOperatorType::TB_DIV_OP:
     case type::TBOperatorType::TB_ADD_OP:
     case type::TBOperatorType::TB_MUL_OP:
+    case type::TBOperatorType::TB_POW_OP:
       return g.create_elementbinary_op(input1, input2, type);
     default:
       assert(false && "Unsupported operator");

@@ -103,7 +103,8 @@ TritonTranspiler::TritonTranspiler(kernel::Graph const *_graph,
       }
       case KN_ADD_OP:
       case KN_MUL_OP:
-      case KN_DIV_OP: {
+      case KN_DIV_OP: 
+      case KN_POW_OP: {
         assert(dtensor_inputs.size() == 2);
         assert(op->output_tensors.size() == 1);
         kernel::DTensor dt =
@@ -183,7 +184,8 @@ TritonTranspiler::TritonTranspiler(kernel::Graph const *_graph,
             }
             case TB_ADD_OP:
             case TB_MUL_OP:
-            case TB_DIV_OP: {
+            case TB_DIV_OP: 
+            case TB_POW_OP: {
               assert(stensor_inputs.size() == 2);
               threadblock::STensor st = tbg->elementbinary(
                   stensor_inputs[0], stensor_inputs[1], bop->op_type);
@@ -438,7 +440,8 @@ TritonTranspileResult TritonTranspiler::transpile_ugraph() {
 
       case KN_ADD_OP:
       case KN_MUL_OP:
-      case KN_DIV_OP: {
+      case KN_DIV_OP: 
+      case KN_POW_OP: {
         kn::DTensor &input0 = op->input_tensors[0];
         kn::DTensor &input1 = op->input_tensors[1];
         kn::DTensor &output = op->output_tensors[0];
