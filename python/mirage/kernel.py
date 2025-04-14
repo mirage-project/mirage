@@ -12,7 +12,6 @@ from .core import *
 from .threadblock import *
 from .visualizer import *
 from .utils import *
-from .triton_profiler import *
 from .global_config import global_config
 from .graph_dataset import graph_dataset
 
@@ -593,6 +592,8 @@ class KNGraph:
         elif backend == "nki":
             return all_graphs
         elif backend == "triton":
+            from .triton_profiler import profile_and_select_best_graph
+
             MIRAGE_ROOT, INCLUDE_PATH, _ = get_key_paths()
             os.environ["KERNELS_PATH"] = os.path.join(INCLUDE_PATH, "mirage/triton_transpiler/runtime") # for triton
             best_graph, best_file_path, best_output_shapes = profile_and_select_best_graph(all_graphs, 
