@@ -24,8 +24,8 @@ struct RmsNormKernel {
     int forloop_range;
 };
 
-  static void* pack_parameters(TensorDesc* inputs, TensorDesc* outputs, int4 *tensor_offsets);
-  static auto create_layouts(TensorDesc* inputs, TensorDesc* outputs);
+  static __device__ void* pack_parameters(TensorDesc* inputs, TensorDesc* outputs, int4 *tensor_offsets);
+  static __device__ auto create_layouts(TensorDesc* inputs, TensorDesc* outputs);
 
   template <typename Layouts>
   static __device__ void execute(void* params, Layouts layouts);
@@ -33,8 +33,8 @@ struct RmsNormKernel {
 
 void* RmsNormKernel::pack_parameters(TensorDesc* inputs, TensorDesc* outputs, int4 *tensor_offsets) {
 
-  static Params params;
-  
+  Params params;
+
   params.input0 = static_cast<half_t*>(inputs[0].base_ptr);
   params.input1 = static_cast<const half_t*>(inputs[1].base_ptr);
   params.output0 = static_cast<const half_t*>(outputs[0].base_ptr);
@@ -65,16 +65,17 @@ auto RmsNormKernel::create_layouts(TensorDesc* inputs, TensorDesc* outputs) {
     int innermost_dim_size = desc.dim[desc.innermost_dim];
     int base = innermost_dim_size / 8;
     auto layout = make_layout(make_shape(d1, d0), make_stride(s1, s0));
-    if (base > 0 && (base & (base - 1)) == 0) {
-      int log2_base = __builtin_ctz(innermost_dim_size);
-      switch (log2_base) {
-        case 3: return composition(Swizzle<3, 3, 3>{}, layout);
-        case 4: return composition(Swizzle<3, 3, 4>{}, layout);
-        default: assert(false);
-    }
-    } else {
-      return layout;
-    }
+    return layout;
+    // if (base > 0 && (base & (base - 1)) == 0) {
+    //   int log2_base = __builtin_ctz(innermost_dim_size);
+    //   switch (log2_base) {
+    //     case 3: return composition(Swizzle<3, 3, 3>{}, layout);
+    //     case 4: return composition(Swizzle<3, 3, 4>{}, layout);
+    //     default: assert(false);
+    // }
+    // } else {
+    //   return layout;
+    // }
   };
 
   // Input layouts
@@ -109,12 +110,12 @@ __device__ void RmsNormKernel::execute(void* params, Layouts layouts)
 {
   auto& p = *static_cast<Params*>(params);
 
-  using Input0Layout        = typename std::tuple_element<0, Layouts>::type;
-  using Input0LayoutDevice  = typename std::tuple_element<1, Layouts>::type;
-  using Input1Layout        = typename std::tuple_element<2, Layouts>::type;
-  using Input1LayoutDevice  = typename std::tuple_element<3, Layouts>::type;
-  using Output0Layout       = typename std::tuple_element<4, Layouts>::type;
-  using Output0LayoutDevice = typename std::tuple_element<5, Layouts>::type;
+  using Input0Layout        = Layout<Shape<Int<64>, Int<1>>, Stride<Int<1>, Int<64>>>;
+  using Input0LayoutDevice  = Layout<Shape<Int<64>, Int<1>>, Stride<Int<1>, Int<4096>>>;
+  using Input1Layout        = decltype(composition(Swizzle<3, 3, 3>{}, Layout<Shape<Int<64>, Int<64>>, Stride<Int<1>, Int<64>>>{}));
+  using Input1LayoutDevice  = Layout<Shape<Int<64>, Int<64>>, Stride<Int<1>, Int<64>>>;
+  using Output0Layout       = Layout<Shape<Int<64>, Int<1>>, Stride<Int<1>, Int<1>>>;
+  using Output0LayoutDevice = Layout<Shape<Int<64>, Int<1>>, Stride<Int<1>, Int<1>>>;
   rms_norm_kernel_impl<Input0Layout, Input0LayoutDevice,
                       Input1Layout, Input1LayoutDevice,
                       Output0Layout, Output0LayoutDevice>(p);
@@ -162,7 +163,7 @@ __device__ void rms_norm_kernel_impl(RmsNormKernel::Params const &params) {
   
   using Matmul20000030LayoutA = Input0Layout;
   using Matmul20000030LayoutB = Input1Layout;
-  using Matmul20000030LayoutC = typename LayoutInfer<type::TB_MATMUL_OP, Input0Layout, Input1Layout>::LayoutOut;
+  using Matmul20000030LayoutC = Layout<Shape<Int<64>, Int<1>>, Stride<Int<1>, Int<64>>>;
   using Matmul20000030LayoutAAligned = Matmul20000030LayoutA;
   using Matmul20000030LayoutBAligned = Matmul20000030LayoutB;
   using Matmul20000030Kernel = tb::Matmul<half_t, SM80_16x8x16_F16F16F16F16_TN, Layout<Shape<Int<1>, Int<4>, _1>>, true, false, Matmul20000030LayoutA, Matmul20000030LayoutB, Matmul20000030LayoutC, Matmul20000030LayoutAAligned, Matmul20000030LayoutBAligned,NUM_THREADS, 0, false>;
@@ -225,9 +226,9 @@ __device__ void rms_norm_kernel_impl(RmsNormKernel::Params const &params) {
     using ElementBinaryIn0Layout = Matmul20000030LayoutC;
     using ElementBinaryIn1Layout = ReductionOutLayout;
     using EleBinaryOutLayout = typename LayoutInfer<type::TB_DIV_OP, ElementBinaryIn0Layout, ElementBinaryIn1Layout>::LayoutOut;
-    using Kernel = tb::ElementBinaryKernel<half_t, tb::ElementBinaryOpType::DIV, EleBinaryOutLayout, ElementBinaryIn0Layout, ElementBinaryIn1Layout, NUM_THREADS, tb::EpilogueStore<half_t>>;
+    using EKernel = tb::ElementBinaryKernel<half_t, tb::ElementBinaryOpType::DIV, EleBinaryOutLayout, ElementBinaryIn0Layout, ElementBinaryIn1Layout, NUM_THREADS, tb::EpilogueStore<half_t>>;
     const float scalars_div[] = {0.0f};
-    Kernel::run(stensor20000031_ptr, stensor20000030_ptr, stensor20000029_ptr, thread_idx, scalars_div);
+    EKernel::run(stensor20000031_ptr, stensor20000030_ptr, stensor20000029_ptr, thread_idx, scalars_div);
 
   __syncthreads();
 

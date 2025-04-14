@@ -270,10 +270,10 @@ void Runtime::launch_persistent_kernel(int num_workers, int num_schedulers) {
   {
 
     // Initialize all events
-    checkCUDA(cudaMalloc(&config.tensor_offsets, num_dtensors * sizeof(int3)));
+    checkCUDA(cudaMalloc(&config.tensor_offsets, num_dtensors * sizeof(int4)));
     checkCUDA(cudaMemcpy(config.tensor_offsets,
                          tensor_offsets.data(),
-                         num_dtensors * sizeof(int3),
+                         num_dtensors * sizeof(int4),
                          cudaMemcpyHostToDevice));
   }
 
