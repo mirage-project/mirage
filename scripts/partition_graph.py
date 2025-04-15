@@ -76,7 +76,25 @@ def get_partitions_helper(op_node, curr_subgraph, min_num_ops, max_num_ops, visi
     if len(curr_subgraph) >= min_num_ops:
         all_subgraphs.append(copy_subgraph(curr_subgraph))
 
+    def find_valid_output_ops(output_op, valid_output_ops):
+        if output_op.fn in UNSUPPORTED_OPS:
+            return
+        
+        input_dims = len(output_op.input_tensor_shapes[0][0])
+        for s in output_op.input_tensor_shapes:
+            if len(s[0]) != input_dims:
+                return
+        
+        if output_op.fn in IGNORE_OPS:
+            for out_op in output_op.output_ops:
+                find_valid_output_ops(out_op, valid_output_ops)
+        else:
+            valid_output_ops.append(output_op)
+        
     valid_output_ops = []
+    for output_op in op_node.output_ops:
+        find_valid_output_ops(output_op, valid_output_ops)
+
     for output_op in op_node.output_ops:
         # handle non-matching shapes
         output_op_needs_broadcast = False
@@ -94,7 +112,6 @@ def get_partitions_helper(op_node, curr_subgraph, min_num_ops, max_num_ops, visi
             if len(output_op.output_ops) == 0:
                 ignore_op_is_last_op = True
                 break
-            assert len(output_op.output_ops) == 1
             output_op = output_op.output_ops[0]
         if ignore_op_is_last_op:
             continue
