@@ -4,15 +4,15 @@ import torch
 
 if __name__ == "__main__":
     graph = mi.new_kernel_graph()
-    Q = graph.new_input(dims=(2, 256, 64), dtype=mi.float16)
-    K = graph.new_input(dims=(2, 64, 4096), dtype=mi.float16)
-    V = graph.new_input(dims=(2, 4096, 64), dtype=mi.float16)
+    Q = graph.new_input(dims=(2, 64, 64), dtype=mi.float32)
+    K = graph.new_input(dims=(2, 64, 64), dtype=mi.float32)
+    V = graph.new_input(dims=(2, 64, 64), dtype=mi.float32)
     tbgraph1 = mi.new_threadblock_graph(
-        grid_dim=(2, 16, 4), block_dim=(128, 1, 1), forloop_range=4, reduction_dimx=64
+        grid_dim=(2, 1, 4), block_dim=(128, 1, 1), forloop_range=1, reduction_dimx=64
     )
     bQ = tbgraph1.new_input(dtensor=Q, input_map=(0, -1, 1), forloop_dim=-1)
-    bK = tbgraph1.new_input(dtensor=K, input_map=(0, 2, -1), forloop_dim=2)
-    bV = tbgraph1.new_input(dtensor=V, input_map=(0, 1, -1), forloop_dim=1)
+    bK = tbgraph1.new_input(dtensor=K, input_map=(0, 2, -1), forloop_dim=-1)
+    bV = tbgraph1.new_input(dtensor=V, input_map=(0, 1, -1), forloop_dim=-1)
     bA = tbgraph1.matmul(bQ, bK)
     bE = tbgraph1.exp(bA)
     bS = tbgraph1.matmul(bE, bV)
@@ -23,7 +23,7 @@ if __name__ == "__main__":
     O = graph.customized([Q, K, V], tbgraph1)
 
     tbgraph2 = mi.new_threadblock_graph(
-        grid_dim=(2, 16, 1), block_dim=(128, 1, 1), forloop_range=1, reduction_dimx=64
+        grid_dim=(2, 1, 1), block_dim=(128, 1, 1), forloop_range=1, reduction_dimx=64
     )
     bA = tbgraph2.new_input(dtensor=O[0], input_map=(0, 1, -1), forloop_dim=-1)
     bB = tbgraph2.new_input(dtensor=O[1], input_map=(0, 1, -1), forloop_dim=-1)
@@ -35,10 +35,23 @@ if __name__ == "__main__":
 
     graph.mark_output(O[0])
     input_tensors = [
-        torch.randn(2, 256, 64, dtype=torch.float16, device="cuda:0"),
-        torch.randn(2, 64, 4096, dtype=torch.float16, device="cuda:0"),
-        torch.randn(2, 4096, 64, dtype=torch.float16, device="cuda:0"),
+        torch.randn(2, 64, 64, dtype=torch.float32, device="cuda:0"),
+        torch.randn(2, 64, 64, dtype=torch.float32, device="cuda:0"),
+        torch.randn(2, 64, 64, dtype=torch.float32, device="cuda:0"),
     ]
+
+    tQ, tK, tV = input_tensors
+    input_tensors = [tQ, tK, tV]
+    tQ = tQ.float()
+    tK = tK.float()
+    tV = tV.float()
+    tA = torch.matmul(tQ, tK)
+    row_max = torch.max(tA, dim=-1, keepdim=True)[0]
+    tA = tA - row_max
+    tE = torch.exp(tA)
+    tO1 = torch.matmul(tE, tV)
+    tO2 = torch.sum(tE, dim=-1, keepdim=True)
+    tS = tO1 / tO2
 
     input_strides = [tensor.stride() for tensor in input_tensors]
     p = mi.generate_cuda_program(
@@ -64,3 +77,4 @@ if __name__ == "__main__":
 
     mean_syn = curr_time / 1000
     print(mean_syn)
+    print(outputs[0] / tS)

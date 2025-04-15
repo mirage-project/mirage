@@ -41,7 +41,7 @@ struct TranspilerConfig {
   int pipeline_stages;
 
   // Whether to enable graph rewriting
-  bool enable_online_softmax = true;
+  bool enable_online_softmax = false;
 };
 
 // Directive for an output tensor
