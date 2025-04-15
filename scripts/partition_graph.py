@@ -73,10 +73,10 @@ def get_partitions_helper(op_node, curr_subgraph, min_num_ops, max_num_ops, visi
     
     # assume op_node already in curr_subgraph
     visited.add(id(op_node.name))
-    if len(curr_subgraph) >= min_num_ops:
+    if len(curr_subgraph) == min_num_ops:
         all_subgraphs.append(copy_subgraph(curr_subgraph))
 
-    def find_valid_output_ops(output_op, valid_output_ops):
+    def find_valid_output_ops(output_op, orig_out_id, prev_out_id, valid_output_ops):
         if output_op.fn in UNSUPPORTED_OPS:
             return
         
@@ -85,40 +85,24 @@ def get_partitions_helper(op_node, curr_subgraph, min_num_ops, max_num_ops, visi
             if len(s[0]) != input_dims:
                 return
         
+        # WARNING: this messes up the node structure and causes input/output_ops and tensor_ids to not correspond to each other anymore
+        # could work because partition_graph does not use tensor_ids and to_kernel_graph does not use input/output_ops
         if output_op.fn in IGNORE_OPS:
             for out_op in output_op.output_ops:
-                find_valid_output_ops(out_op, valid_output_ops)
+                if out_op.output_tensor_shapes:
+                    assert len(out_op.output_tensor_shapes) == 1
+                    find_valid_output_ops(out_op, orig_out_id, out_op.output_tensor_shapes[0][1], valid_output_ops)
         else:
+            # find in the inputs of output_op the tensor whose id is prev_out_id, replace with orig_out_id
+            for i in range(len(output_op.input_tensor_shapes)):
+                if output_op.input_tensor_shapes[i][1] == prev_out_id:
+                    output_op.input_tensor_shapes[i] = (output_op.input_tensor_shapes[i][0], orig_out_id)
+                    break
             valid_output_ops.append(output_op)
         
     valid_output_ops = []
     for output_op in op_node.output_ops:
-        find_valid_output_ops(output_op, valid_output_ops)
-
-    for output_op in op_node.output_ops:
-        # handle non-matching shapes
-        output_op_needs_broadcast = False
-        input_dims = len(output_op.input_tensor_shapes[0][0])
-        for s in output_op.input_tensor_shapes:
-            if len(s[0]) != input_dims:
-                output_op_needs_broadcast = True
-                break
-        if output_op_needs_broadcast:
-            continue
-
-        # handle IGNORE_OPS
-        ignore_op_is_last_op = False
-        while output_op.fn in IGNORE_OPS:
-            if len(output_op.output_ops) == 0:
-                ignore_op_is_last_op = True
-                break
-            output_op = output_op.output_ops[0]
-        if ignore_op_is_last_op:
-            continue
-        
-        # handle UNSUPPORTED_OPS
-        if output_op.fn not in UNSUPPORTED_OPS:
-            valid_output_ops.append(output_op)
+        find_valid_output_ops(output_op, op_node.output_tensor_shapes[0][1], op_node.output_tensor_shapes[0][1], valid_output_ops)
     
     for choose_k in range(1, len(valid_output_ops) + 1):
         curr_subgraph_copy = copy_subgraph(curr_subgraph)
@@ -159,8 +143,11 @@ def function_map(graph, func, inputs, kwargs={}):
         case "Add": return graph.add(*inputs)
         case "Mul": return graph.mul(*inputs)
         case "Div": return graph.div(*inputs)
-        # case "Sqrt": return graph.sqrt(*inputs)
         case "Reciprocal": return graph.div(*inputs)
+        # case "Sqrt": return graph.sqrt(*inputs)
+        # case "Pow" | "Square": 
+        #     return graph.square(inputs[0])
+        # case "Pow": return graph.pow(*inputs)
         case "Softmax": # In case of softmax, inputs must be of form (mat, axis)
             exp = graph.exp(inputs[0])
             summed = graph.reduction(exp, inputs[1])
@@ -173,12 +160,15 @@ def function_map(graph, func, inputs, kwargs={}):
             neg_exp = graph.exp(neg_mat)
             summed = graph.add(neg_exp, ones)
             return graph.div(ones, summed)
-        case "Square":
-            matrix = inputs[0]
-            return graph.mul(matrix, matrix)
         case "Neg": 
             return graph.mul(*inputs)
         case "RMSNormalization": return graph.rms_norm(*inputs, **kwargs)
+        case "ReduceMean":
+            matrix = inputs[0]
+            dim = inputs[1]
+            num_els = input[2]
+            reduced = graph.reduction(matrix, dim)
+            return graph.div(reduced, num_els)
         case _: 
             raise NotImplementedError
 
@@ -211,6 +201,10 @@ def to_kernel_graph(subgraph):
             shape = op.output_tensor_shapes[0][0]
             dims.append((shape, "C", 1.0))
             inputs.insert(0, graph.new_input(dims=shape, dtype=mi.float16))
+        elif (op.fn == "ReduceMean"):
+            shape = op.output_tensor_shapes[0][0]
+            num_els = op.output_tensor_shapes[0][0][-1]
+            dims.append((shape, "C", num_els))
         inputs += op.additional_params
         kwargs = op.kwargs
         res = function_map(graph, op, inputs, kwargs)

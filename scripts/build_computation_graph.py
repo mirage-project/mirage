@@ -153,15 +153,23 @@ def parse_onnx_model(model, unique_operators):
         node_name = node.name or f"{op_type}_{id(node)}"
 
         input_tensor_shapes = []
-        for input_name in node.input:
+        for i, input_name in enumerate(node.input):
             if input_name in shape_value_dict and input_name in tensor_id:
-                input_tensor_shapes.append((shape_value_dict[input_name], tensor_id[input_name]))
+                shape = shape_value_dict[input_name]
+                if i == 1:
+                    if op_type in ["Mul", "Div", "Add", "Pow"]:
+                        shape = input_tensor_shapes[0][0]
+                    if op_type == "MatMul":
+                        if (len(input_tensor_shapes[0][0]) - len(shape)) == 1:
+                            shape = (1,) + shape
+                
+                input_tensor_shapes.append((shape, tensor_id[input_name]))
         
         output_tensor_shapes = []
         for output_name in node.output:
             if output_name in shape_value_dict and output_name in tensor_id:
                 output_tensor_shapes.append((shape_value_dict[output_name], tensor_id[output_name]))
-
+        
         operator = Operator(name=node_name, fn=op_type, input_ops=[], output_ops=[], input_tensor_shapes=input_tensor_shapes, output_tensor_shapes=output_tensor_shapes)
         # operator = {"name":node_name, "fn":op_type, "input_ops":[], "output_ops":[], "input_tensor_shapes":input_tensor_shapes, "output_tensor_shapes":output_tensor_shapes}
         operators[node_name] = operator
@@ -316,9 +324,9 @@ def get_computation_graph(model, dummy_input, unique_operators, method):
             inferred_model = onnx.load("scripts/onnx/inferred_model.onnx")
             operators = parse_onnx_model(inferred_model, unique_operators)
 
-            for k, v in operators.items():
-                print(k, " input ops: ", [(inp.name, inp.fn) for inp in v.input_ops])
-                print(k, " output ops: ", [(out.name, out.fn) for out in v.output_ops])
+            # for k, v in operators.items():
+            #     print(k, " input ops: ", [(inp.name, inp.fn) for inp in v.input_ops])
+            #     print(k, " output ops: ", [(out.name, out.fn) for out in v.output_ops])
 
             return operators
         case _:
