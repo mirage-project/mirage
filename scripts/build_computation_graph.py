@@ -180,7 +180,7 @@ def parse_onnx_model(model, unique_operators):
                 operators[node.name].output_ops.append(operators[tensor_consumer[output_name]])
             else:
                 dummy_const_operator = Operator(name=output_name, fn="Constant")
-                operators[node.name].input_ops.append(dummy_const_operator)
+                operators[node.name].output_ops.append(dummy_const_operator)
     # print("After adding outputs")
     # print(operators)
 
