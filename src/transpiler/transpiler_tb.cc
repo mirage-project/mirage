@@ -698,7 +698,7 @@ CustomOPTranspileResult
           code.e("// Currently sending tile is the whole tensor on each GPU");
           code.e("int signal_idx = (blockIdx.y * blockDim.y + threadIdx.y) / (gridDim.y / npes);");
           //TODO: allgather (Jianan)
-          code.e("nvshmem_int64_wait(allgather_signal_$ + signal_idx, 0);",
+          code.e("tb::allgather_signal_wait_until_ne(allgather_signal_$, signal_idx);",
                  cur_op->dtensor.guid);
           code.e("");
         }

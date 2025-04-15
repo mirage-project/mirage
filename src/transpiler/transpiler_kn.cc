@@ -499,8 +499,8 @@ TranspileResult Transpiler::transpile_ugraph() {
         // tb::ExecutionPlan const &plan = cur_op->plan;
         tb::Graph const &bgraph = cur_op->bgraph;
         vector<string> nvshmem_to_free;
-        //TODO: Change this to vector for all communications with the same behavior
         vector<string> nvshmem_as_param;
+        vector<string> streams;
         // For epilogue nvshmem allocation
         if (use_nvshmem) {
           for (kn::DTensor const &dtensor : cur_op->output_tensors) {
@@ -553,13 +553,17 @@ TranspileResult Transpiler::transpile_ugraph() {
               // TODO: Use tiles instead of whole tensor
               exec.e("uint64_t *allgather_signal_$ = (uint64_t*)nvshmem_malloc(sizeof(uint64_t) * npes);",
                       guid);
-              exec.e("tb::allgather_host<$, $>(allgather_buf_$, dtensor$, allgather_signal_$, $, mype, npes);", \
+              exec.e(fmt("cudaStream_t allgather_stream_$;", guid));
+              exec.e(fmt("cudaStreamCreate(&allgather_stream_$);", guid));
+              streams.push_back(fmt("allgather_stream_$", guid));
+              exec.e(fmt("tb::allgather_host<$, $>(allgather_buf_$, dtensor$, allgather_signal_$, $, mype, npes, 0, false, allgather_stream_$);", \
                       get_datatype_str(dtensor->data_type),
                       get_cute_layout(*dtensor, dtensor_metas.at(guid)),
                       guid,
                       original_guid,
                       guid,
-                      meta.num_phy_elems);
+                      meta.num_phy_elems,
+                      guid));
               exec.e("dtensor$ = allgather_buf_$;",
                      original_guid,
                      guid);
@@ -779,6 +783,11 @@ TranspileResult Transpiler::transpile_ugraph() {
           for (auto const &comm_buf_name : nvshmem_to_free) {
             std::cout << "freeing " << comm_buf_name << std::endl;
             exec.e("nvshmem_free($);", comm_buf_name);
+          }
+
+          // Free streams
+          for (auto const &stream_name : streams) {
+            exec.e("cudaStreamDestroy($);", stream_name);
           }
         }
 

@@ -73,21 +73,20 @@ TBInputOp::TBInputOp(Graph *_graph,
     : TBOperator(_graph, mirage::type::TB_INPUT_OP), dtensor(_dtensor),
       input_map(_input_map), forloop_dim(_forloop_dim), prologue(_prologue) {
   
-  //Modify dtensor for allgather if it's the first time to load the input
+  // Modify dtensor for allgather if it's the first time to load the input
   printf("gpu_dim: %d, %d, %d\n", gpu_dim.x, gpu_dim.y, gpu_dim.z);
   printf("Is from constructed: %d\n", from_constructed);
   printf("Is allgather: %d\n", prologue == mirage::type::TB_PROLOGUE_ALLGATHER);
   printf("dtensor.guid from TBInputOp: %zu, original_guid: %zu, shape: %d, %d, %d\n", dtensor.guid, dtensor.original_guid, dtensor.dim[0], dtensor.dim[1], dtensor.dim[2]);
   if (from_constructed && prologue == mirage::type::TB_PROLOGUE_ALLGATHER) {
+    dtensor.original_guid = dtensor.guid;
     if (allgather_t_guid > 0) {
-      // This is the input in customized op in the transpiler.
+      // allgather_t_guid > 0 means this is the input in customized op in the transpiler.
       // An allgathered dtensor has already been created in the transpiler.
-      dtensor.original_guid = dtensor.guid;
       dtensor.guid = allgather_t_guid;
     } else {
-      // This is the input in the bgraph building phase in the transpiler.
+      // allgather_t_guid == 0 means this is the input in the bgraph building phase in the transpiler.
       // An new allgathered dtensor will be created and added to all_dtensors.
-      dtensor.original_guid = dtensor.guid;
       dtensor.guid = mirage::kernel::DTensor::next_guid++;
     }
     dtensor.dim[allgather_dim] *= (allgather_dim == 0 ? gpu_dim.x : (allgather_dim == 1 ? gpu_dim.y : gpu_dim.z));
