@@ -22,9 +22,19 @@ KernelGraphGenerator::KernelGraphGenerator(
     char const *filename,
     bool verbose)
     : config(config), dim_strategy(DimStrategy(config)), filename(filename),
-      num_thread(config.search_thread), verbose(verbose),
-      num_total_random_tests(0), num_valid_kernel_graphs(0),
+      verbose(verbose), num_total_random_tests(0), num_valid_kernel_graphs(0),
       num_total_states(0), num_tasks(0), max_depth(5) {
+  // setting num_thread
+  unsigned int max_num_threads = std::thread::hardware_concurrency();
+  if (config.search_thread > max_num_threads) {
+    printf("Config number of threads (%d) too high, setting num_thread to %d",
+           config.search_thread,
+           max_num_threads);
+    num_thread = max_num_threads;
+  } else {
+    num_thread = config.search_thread;
+  }
+
   preprocess(computation_graph);
 }
 

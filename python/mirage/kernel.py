@@ -15,6 +15,10 @@ from .utils import *
 from .global_config import global_config
 from .graph_dataset import graph_dataset
 
+from collections import deque
+
+MAX_THREADS = os.cpu_count()
+
 HARD_CODE = """
 #include <Python.h>
 #include <cuda_runtime.h>
@@ -510,7 +514,7 @@ class KNGraph:
             # profile and use the best graph
             best_graph, best_perf = None, float("inf")
             print("Transpiling {} muGraphs ...".format(len(all_graphs)))
-            handles = []
+            handles = deque()
 
             target_cc = torch.cuda.get_device_properties(0).major * 10 + torch.cuda.get_device_properties(0).minor
             if target_cc >= 90:
@@ -530,6 +534,8 @@ class KNGraph:
                             starter = torch.cuda.Event(enable_timing=True)
                             ender = torch.cuda.Event(enable_timing=True)
                             new_g = g
+                            if len(handles) == MAX_THREADS:
+                                handles.popleft().wait()
                             handle = new_g.compile(async_=True, inputs=input_tensors, pipeline_stages=pipeline_stages, num_warp_groups=num_warp_groups)
                             handles.append(handle)
             else:
@@ -545,10 +551,12 @@ class KNGraph:
                         input_tensors.append(x)
                     starter = torch.cuda.Event(enable_timing=True)
                     ender = torch.cuda.Event(enable_timing=True)
+                    if len(handles) == MAX_THREADS:
+                        handles.popleft().wait()
                     handle = g.compile(async_=True, inputs=input_tensors)
                     handles.append(handle)
-            for handle in handles:
-                handle.wait()
+            while handles:
+                handles.popleft().wait()
             for idx, g in enumerate(all_graphs):
                 dtensors = g.cygraph.get_input_dtensors()
                 input_tensors = list()
