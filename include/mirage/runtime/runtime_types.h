@@ -25,8 +25,11 @@ enum TaskType {
   TASK_TERMINATE = 0,
   TASK_END_OF_ITERATION = 1,
   // compute task starts from 100
-  TASK_RMS_NORM_LINEAR = 100,
   TASK_EMBEDDING = 101,
+  TASK_RMS_NORM_LINEAR = 102,
+  TASK_ATTENTION_1 = 103,
+  TASK_ATTENTION_2 = 104,
+  TASK_SILU_MUL_LINEAR = 105,
 };
 
 } // namespace runtime

@@ -56,7 +56,8 @@ public:
             mirage::kernel::DTensor const &dtensor,
             int3 input_map,
             int forloop_dim,
-            mirage::layout::SmemLayout layout);
+            mirage::layout::SmemLayout layout,
+            bool store_in_dmem);
   ~TBInputOp();
 
   operator json() const override;

@@ -53,8 +53,10 @@ struct RuntimeConfig {
   int num_workers, num_schedulers, num_graphs;
   int total_num_tasks, total_num_events;
   unsigned long long int per_worker_queue_len, per_sched_queue_len;
-  unsigned long long int *worker_queue_last_task_id;
-  unsigned long long int *sched_queue_last_event_id;
+  unsigned long long int *worker_queue_last_ready_task_id;
+  unsigned long long int *worker_queue_next_free_task_id;
+  unsigned long long int *sched_queue_last_ready_event_id;
+  unsigned long long int *sched_queue_next_free_event_id;
   int *all_event_counters;
   TaskDesc *all_tasks;
   EventDesc *all_events;
@@ -66,9 +68,10 @@ struct RuntimeConfig {
 class Runtime {
 public:
   Runtime();
-  void register_mugraph(mirage::kernel::Graph const &graph,
-                        std::unordered_map<mirage::kernel::KNOperator const *,
-                                           TaskType> const &task_types);
+  void register_mugraph(
+      mirage::kernel::Graph const &graph,
+      std::unordered_map<mirage::kernel::KNOperator const *,
+                         std::tuple<int, int, TaskType>> const &task_config);
   void launch_persistent_kernel(int num_workers, int num_schedulers);
 
 public:

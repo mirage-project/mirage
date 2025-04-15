@@ -43,11 +43,14 @@ struct alignas(16) STensor {
     owner_ts_idx = -1000;
     smem_offset = 128;
     after_accum = false;
+    store_in_dmem = false;
   }
 
   CUTLASS_HOST_DEVICE
   bool operator==(STensor const &b) const {
     // Note that we don't check after_accum
+    // when comparing two stensors
+    // Note that we don't check store_in_dmem
     // when comparing two stensors
     if (data_type != b.data_type) {
       return false;
@@ -82,6 +85,9 @@ struct alignas(16) STensor {
   bool operator!=(STensor const &b) const {
     // Note that we don't check after_accum
     // when comparing two stensors
+    // Note that we don't check store_in_dmem
+    // when comparing two stensors
+
     if (data_type != b.data_type) {
       return true;
     }
@@ -121,7 +127,8 @@ struct alignas(16) STensor {
         break;
       }
       case DT_BFLOAT16:
-      case DT_FLOAT16: {
+      case DT_FLOAT16:
+      case DT_UINT16: {
         data_type_size = 2;
         break;
       }
@@ -169,6 +176,10 @@ struct alignas(16) STensor {
   // This flag is false by default and should only be
   // changed to true by a forloop accumulator
   bool after_accum;
+
+  // a flag indicating if the stensor is actually saved
+  // in device memory
+  bool store_in_dmem;
 
   static std::atomic<int64_t> next_guid;
 };
