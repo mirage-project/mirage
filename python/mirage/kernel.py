@@ -12,9 +12,12 @@ from .core import *
 from .threadblock import *
 from .visualizer import *
 from .utils import *
-from .triton_profiler import *
 from .global_config import global_config
 from .graph_dataset import graph_dataset
+
+from collections import deque
+
+MAX_THREADS = os.cpu_count()
 
 HARD_CODE = """
 #include <Python.h>
@@ -235,6 +238,12 @@ class KNGraph:
     
     def clamp(self, A: DTensor, min_val: float, max_val: float):
         return self.cygraph.clamp(A, min_val, max_val)
+
+    def sqrt(self, A: DTensor):
+        return self.cygraph.sqrt(A)
+
+    def square(self, A: DTensor):
+        return self.cygraph.square(A)
 
     def add(self, A: DTensor, B: DTensor):
         return self.cygraph.add(A, B)
@@ -505,7 +514,7 @@ class KNGraph:
             # profile and use the best graph
             best_graph, best_perf = None, float("inf")
             print("Transpiling {} muGraphs ...".format(len(all_graphs)))
-            handles = []
+            handles = deque()
 
             target_cc = torch.cuda.get_device_properties(0).major * 10 + torch.cuda.get_device_properties(0).minor
             if target_cc >= 90:
@@ -525,6 +534,8 @@ class KNGraph:
                             starter = torch.cuda.Event(enable_timing=True)
                             ender = torch.cuda.Event(enable_timing=True)
                             new_g = g
+                            if len(handles) == MAX_THREADS:
+                                handles.popleft().wait()
                             handle = new_g.compile(async_=True, inputs=input_tensors, pipeline_stages=pipeline_stages, num_warp_groups=num_warp_groups)
                             handles.append(handle)
             else:
@@ -540,10 +551,12 @@ class KNGraph:
                         input_tensors.append(x)
                     starter = torch.cuda.Event(enable_timing=True)
                     ender = torch.cuda.Event(enable_timing=True)
+                    if len(handles) == MAX_THREADS:
+                        handles.popleft().wait()
                     handle = g.compile(async_=True, inputs=input_tensors)
                     handles.append(handle)
-            for handle in handles:
-                handle.wait()
+            while handles:
+                handles.popleft().wait()
             for idx, g in enumerate(all_graphs):
                 dtensors = g.cygraph.get_input_dtensors()
                 input_tensors = list()
@@ -587,6 +600,8 @@ class KNGraph:
         elif backend == "nki":
             return all_graphs
         elif backend == "triton":
+            from .triton_profiler import profile_and_select_best_graph
+
             MIRAGE_ROOT, INCLUDE_PATH, _ = get_key_paths()
             os.environ["KERNELS_PATH"] = os.path.join(INCLUDE_PATH, "mirage/triton_transpiler/runtime") # for triton
             best_graph, best_file_path, best_output_shapes = profile_and_select_best_graph(all_graphs, 
