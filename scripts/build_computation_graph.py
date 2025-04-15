@@ -160,11 +160,13 @@ def parse_onnx_model(model, unique_operators):
                     if op_type in ["Mul", "Div", "Add", "Pow"]:
                         shape = input_tensor_shapes[0][0]
                     if op_type == "MatMul":
-                        if (len(input_tensor_shapes[0][0]) - len(shape)) == 1:
-                            shape = (1,) + shape
+                        if 0 in shape:
+                            shape = tuple()
+                        elif (len(input_tensor_shapes[0][0]) - len(shape)) == 1:
+                            # batch dimension must be the same
+                            shape = (input_tensor_shapes[0][0][0],) + shape
                 
                 input_tensor_shapes.append((shape, tensor_id[input_name]))
-        
         output_tensor_shapes = []
         for output_name in node.output:
             if output_name in shape_value_dict and output_name in tensor_id:

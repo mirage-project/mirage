@@ -47,23 +47,17 @@ def copy_subgraph(subgraph):
         new_subgraph[from_op] = to_ops.copy()
     return new_subgraph
 
-def get_partitions(op_node, min_num_ops, max_num_ops, visited_start_nodes, all_subgraphs, UNSUPPORTED_OPS, IGNORE_OPS):
-    if id(op_node.name) not in visited_start_nodes:
-        visited_start_nodes.add(id(op_node.name))
-        if op_node.fn not in UNSUPPORTED_OPS.union(IGNORE_OPS):
-            # handle non-matching shapes
-            op_needs_broadcast = False
-            input_dims = len(op_node.input_tensor_shapes[0][0])
-            for s in op_node.input_tensor_shapes:
-                if len(s[0]) != input_dims:
-                    op_needs_broadcast = True
-                    break
-            if not op_needs_broadcast:
-                get_partitions_helper(op_node, {op_node: []}, min_num_ops, max_num_ops, set(), all_subgraphs, UNSUPPORTED_OPS, IGNORE_OPS)
-            
-        for output_node in op_node.output_ops:
-            if id(output_node.name) not in visited_start_nodes:
-                get_partitions(output_node, min_num_ops, max_num_ops, visited_start_nodes, all_subgraphs, UNSUPPORTED_OPS, IGNORE_OPS)
+def get_partitions(op_node, min_num_ops, max_num_ops, all_subgraphs, UNSUPPORTED_OPS, IGNORE_OPS):
+    if op_node.fn not in UNSUPPORTED_OPS.union(IGNORE_OPS):
+        # handle non-matching shapes
+        op_needs_broadcast = False
+        input_dims = len(op_node.input_tensor_shapes[0][0])
+        for s in op_node.input_tensor_shapes:
+            if len(s[0]) != input_dims:
+                op_needs_broadcast = True
+                break
+        if not op_needs_broadcast:
+            get_partitions_helper(op_node, {op_node: []}, min_num_ops, max_num_ops, set(), all_subgraphs, UNSUPPORTED_OPS, IGNORE_OPS)
 
 def get_partitions_helper(op_node, curr_subgraph, min_num_ops, max_num_ops, visited, all_subgraphs, UNSUPPORTED_OPS, IGNORE_OPS):
     if id(op_node.name) in visited:
@@ -76,7 +70,11 @@ def get_partitions_helper(op_node, curr_subgraph, min_num_ops, max_num_ops, visi
     if len(curr_subgraph) == min_num_ops:
         all_subgraphs.append(copy_subgraph(curr_subgraph))
 
-    def find_valid_output_ops(output_op, orig_out_id, prev_out_id, valid_output_ops):
+    def find_valid_output_ops(output_op, orig_out_id, prev_out_id, valid_output_ops, visited):
+        if id(output_op.name) in visited:
+            return
+        visited.add(id(output_op.name))
+
         if output_op.fn in UNSUPPORTED_OPS:
             return
         
@@ -91,8 +89,8 @@ def get_partitions_helper(op_node, curr_subgraph, min_num_ops, max_num_ops, visi
             for out_op in output_op.output_ops:
                 if out_op.output_tensor_shapes:
                     assert len(out_op.output_tensor_shapes) == 1
-                    find_valid_output_ops(out_op, orig_out_id, out_op.output_tensor_shapes[0][1], valid_output_ops)
-        else:
+                    find_valid_output_ops(out_op, orig_out_id, out_op.output_tensor_shapes[0][1], valid_output_ops, visited)
+        elif output_op.fn not in UNSUPPORTED_OPS:
             # find in the inputs of output_op the tensor whose id is prev_out_id, replace with orig_out_id
             for i in range(len(output_op.input_tensor_shapes)):
                 if output_op.input_tensor_shapes[i][1] == prev_out_id:
@@ -102,7 +100,7 @@ def get_partitions_helper(op_node, curr_subgraph, min_num_ops, max_num_ops, visi
         
     valid_output_ops = []
     for output_op in op_node.output_ops:
-        find_valid_output_ops(output_op, op_node.output_tensor_shapes[0][1], op_node.output_tensor_shapes[0][1], valid_output_ops)
+        find_valid_output_ops(output_op, op_node.output_tensor_shapes[0][1], op_node.output_tensor_shapes[0][1], valid_output_ops, set())
     
     for choose_k in range(1, len(valid_output_ops) + 1):
         curr_subgraph_copy = copy_subgraph(curr_subgraph)
@@ -124,9 +122,8 @@ def partition_graph(model,
     operators = get_computation_graph(model, dummy_input, unique_operators, "onnx")
 
     all_subgraphs = []
-    visited_start_nodes = set()
     for _, op_node in operators.items():
-        get_partitions(op_node, min_num_ops, max_num_ops, visited_start_nodes, all_subgraphs, UNSUPPORTED_OPS, IGNORE_OPS)
+        get_partitions(op_node, min_num_ops, max_num_ops, all_subgraphs, UNSUPPORTED_OPS, IGNORE_OPS)
 
     return all_subgraphs, unique_operators
 
@@ -223,6 +220,8 @@ def generate_all_kernels(model, dummy_inputs, min_num_ops=2, max_num_ops=4, UNSU
     all_kernels = []
     for subgraph in subgraphs:
         kernel_graph, dims = to_kernel_graph(subgraph)
+        # TODO check for duplicate subgraphs
+        # TODO save optimized mugraphs
         all_kernels.append(kernel_graph.superoptimize())
         kernel_input_dims.append(dims)
     return all_kernels, kernel_input_dims
