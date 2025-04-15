@@ -26,7 +26,8 @@ int cython_search(mirage::kernel::Graph const *input_graph,
                   bool verbose,
                   char const *default_config);
 
-void cython_to_json(mirage::kernel::Graph const *input_graph, char const *filename);
+void cython_to_json(mirage::kernel::Graph const *input_graph,
+                    char const *filename);
 mirage::kernel::Graph *cython_from_json(char const *filename);
 } // namespace search_c
 } // namespace mirage
