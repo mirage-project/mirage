@@ -55,11 +55,11 @@ class SplitModel(nn.Module):
         x1, x2 = torch.split(x, x.shape[1] // 2, dim=1)
         x = torch.cat((x1, x2), dim=1)
 
-        # x1 = torch.relu(self.fc1(x1))
-        # x2 = torch.relu(self.fc2(x2))
+        x1 = torch.relu(self.fc1(x1))
+        x2 = torch.relu(self.fc2(x2))
         
-        # x = torch.cat((x1, x2), dim=1)
-        # x = self.fc_out(x)
+        x = torch.cat((x1, x2), dim=1)
+        x = self.fc_out(x)
         return x
 
 
@@ -123,20 +123,24 @@ def parse_onnx_model(model, unique_operators):
     for output_info in model.graph.output:
         shape_value_dict[output_info.name] = tuple([d_i.dim_value for d_i in output_info.type.tensor_type.shape.dim])
 
-    tensor_producer = {}
-    tensor_consumer = {}
+    tensor_producers = {}
+    tensor_consumers = {}
     tensor_id = {}
     # store the tensor producers and consumers in a dict
     for node in model.graph.node:
+        node_name = node.name if node.name else f"{node.op_type}_{id(node)}"
+
         for output_name in node.output:
-            tensor_producer[output_name] = node.name if node.name else f"{node.op_type}_{id(node)}"
+            tensor_producers[output_name] = node_name
             if output_name not in tensor_id:
                 tensor_id[output_name] = len(tensor_id)+1
         for input_name in node.input:
-            tensor_consumer[input_name] = node.name if node.name else f"{node.op_type}_{id(node)}"
+            if input_name not in tensor_consumers:
+                tensor_consumers[input_name] = []
+            tensor_consumers[input_name].append(node_name)
             if input_name not in tensor_id:
                 tensor_id[input_name] = len(tensor_id)+1
-    # print("TensorID: ", tensor_id)
+
     operators = {}
 
     # store the operators in a dict
@@ -147,25 +151,32 @@ def parse_onnx_model(model, unique_operators):
         else:
             unique_operators[op_type] += 1
         node_name = node.name or f"{op_type}_{id(node)}"
-        [shape_value_dict[input_name] for input_name in node.input]
-        [tensor_id[input_name] for input_name in node.input]
-        input_tensor_shapes = [(shape_value_dict[input_name], tensor_id[input_name]) for input_name in node.input]
-        output_tensor_shapes = [(shape_value_dict[output_name], tensor_id[output_name]) for output_name in node.output]
+
+        input_tensor_shapes = []
+        for input_name in node.input:
+            if input_name in shape_value_dict and input_name in tensor_id:
+                input_tensor_shapes.append((shape_value_dict[input_name], tensor_id[input_name]))
+        
+        output_tensor_shapes = []
+        for output_name in node.output:
+            if output_name in shape_value_dict and output_name in tensor_id:
+                output_tensor_shapes.append((shape_value_dict[output_name], tensor_id[output_name]))
 
         operator = Operator(name=node_name, fn=op_type, input_ops=[], output_ops=[], input_tensor_shapes=input_tensor_shapes, output_tensor_shapes=output_tensor_shapes)
         # operator = {"name":node_name, "fn":op_type, "input_ops":[], "output_ops":[], "input_tensor_shapes":input_tensor_shapes, "output_tensor_shapes":output_tensor_shapes}
         operators[node_name] = operator
         
-    # print("Tensor producers: ", tensor_producer)
-    # print("Tensor consumers: ", tensor_consumer)
 
-    # print(operators)
-
-    # Filling in input ops
+    # Connect the input ops
     for node in model.graph.node:
+        node_name = node.name or f"{node.op_type}_{id(node)}"
+
         for input_name in node.input:
-            if input_name in tensor_producer:
-                operators[node.name].input_ops.append(operators[tensor_producer[input_name]])
+            if input_name in tensor_producers:
+                tensor_producer_name = tensor_producers[input_name]
+                if tensor_producer_name in operators:
+                    operators[node_name].input_ops.append(operators[tensor_producer_name])
+
             else:
                 dummy_const_operator = Operator(name=input_name, fn="Constant")
                 operators[node.name].input_ops.append(dummy_const_operator)
@@ -175,9 +186,12 @@ def parse_onnx_model(model, unique_operators):
     
     # Filling in output ops
     for node in model.graph.node:
+        node_name = node.name or f"{node.op_type}_{id(node)}"
         for output_name in node.output:
-            if output_name in tensor_consumer:
-                operators[node.name].output_ops.append(operators[tensor_consumer[output_name]])
+            if output_name in tensor_consumers:
+                for consumer_name in tensor_consumers[output_name]: # consider all the consumers of a tensor
+                    operators[node_name].output_ops.append(operators[consumer_name])
+
             else:
                 dummy_const_operator = Operator(name=output_name, fn="Constant")
                 operators[node.name].output_ops.append(dummy_const_operator)
@@ -301,6 +315,11 @@ def get_computation_graph(model, dummy_input, unique_operators, method):
                                               output_path="scripts/onnx/inferred_model.onnx") # for shape inference of inputs and outputs
             inferred_model = onnx.load("scripts/onnx/inferred_model.onnx")
             operators = parse_onnx_model(inferred_model, unique_operators)
+
+            for k, v in operators.items():
+                print(k, " input ops: ", [(inp.name, inp.fn) for inp in v.input_ops])
+                print(k, " output ops: ", [(out.name, out.fn) for out in v.output_ops])
+
             return operators
         case _:
             print("Unsupported method for build_graph")
