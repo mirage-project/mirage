@@ -118,10 +118,10 @@ inline __device__ FPType compute_pow_fingerprint(FPType base, FPType exponent) {
   uint32_t base_p = base % FP_P;
   uint32_t base_q = base % FP_Q;
   uint32_t exp = (uint32_t)exponent;
-  
+
   uint32_t result_p = 1;
   uint32_t result_q = 1;
-  
+
   while (exp > 0) {
     if (exp & 1) {
       result_p = (result_p * base_p) % FP_P;
@@ -131,8 +131,9 @@ inline __device__ FPType compute_pow_fingerprint(FPType base, FPType exponent) {
     base_q = (base_q * base_q) % FP_Q;
     exp >>= 1;
   }
-  
-  uint32_t z = (result_p * FP_Q_MUL_P_MOD_1 + result_q * FP_P_MUL_Q_MOD_1) % FP_PQ;
+
+  uint32_t z =
+      (result_p * FP_Q_MUL_P_MOD_1 + result_q * FP_P_MUL_Q_MOD_1) % FP_PQ;
   return z;
 }
 
