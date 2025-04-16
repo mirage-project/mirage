@@ -26,7 +26,6 @@ static __device__ __forceinline__ T perform_element_binary_op(T a, T b) {
   } else {
     assert(0);
   }
-    
 }
 
 // Get a layout that converts a logical coordinate in DstLayout to a logical
