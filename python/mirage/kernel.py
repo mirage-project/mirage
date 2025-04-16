@@ -636,3 +636,9 @@ class KNGraph:
         operators = self.cygraph.get_graph_structure()
         self.visualizer = visualizer(file_name)
         self.visualizer.draw_graphs(operators)
+    
+    def to_json(self, filename):
+        cy_to_json(self.cygraph, filename)
+    
+    def from_json(self, filename):
+        self.cygraph = cy_from_json(filename)

@@ -301,6 +301,10 @@ cdef extern from "mirage/search/search_c.h" namespace "mirage::search_c":
                            const char * filename,
                            bool verbose,
                            const char * default_config)
+    
+    cdef void cython_to_json(const CppKNGraph *input_graph,
+                             const char *filename)
+    cdef CppKNGraph *cython_from_json(const char *filename)
 
 cdef extern from "mirage/transpiler/transpile.h" namespace "mirage::transpiler":
     ctypedef struct TranspilerConfig:
