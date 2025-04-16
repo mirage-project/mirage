@@ -115,37 +115,25 @@ inline __device__ FPType compute_relu_fingerprint(FPType input) {
 }
 
 inline __device__ FPType compute_pow_fingerprint(FPType base, FPType exponent) {
-  // Compute fingerprint for power operation (base^exponent)
-  // Special cases are handled first for efficiency:
-  // - For exponent = 0: return 1 (mathematical identity)
-  // - For exponent = 1: return base (no computation needed)
-  // - For exponent = 2: use multiply fingerprint optimization
-  // For general cases: combine linear and quadratic terms using CRT
-
-  if (exponent == 0) {
-    return 1; // Identity: x^0 = 1
-  }
-  if (exponent == 1) {
-    return base; // Identity: x^1 = x
-  }
-  if (exponent == 2) {
-    // Optimize square case using multiply fingerprint
-    return compute_mul_fingerprint(base, base);
-  }
-
-  // Apply CRT with both P and Q
   uint32_t base_p = base % FP_P;
   uint32_t base_q = base % FP_Q;
-  uint32_t exp_p = exponent % FP_P;
-  uint32_t exp_q = exponent % FP_Q;
-
-  // Combine linear (base * exp) and quadratic (base * base) terms
-  uint32_t p_residual = (base_p * exp_p + base_p * base_p % FP_P) % FP_P;
-  uint32_t q_residual = (base_q * exp_q + base_q * base_q % FP_Q) % FP_Q;
-
-  // Combine results using CRT coefficients
-  uint32_t z = p_residual * FP_Q_MUL_P_MOD_1 + q_residual * FP_P_MUL_Q_MOD_1;
-  return z % FP_PQ;
+  uint32_t exp = (uint32_t)exponent;
+  
+  uint32_t result_p = 1;
+  uint32_t result_q = 1;
+  
+  while (exp > 0) {
+    if (exp & 1) {
+      result_p = (result_p * base_p) % FP_P;
+      result_q = (result_q * base_q) % FP_Q;
+    }
+    base_p = (base_p * base_p) % FP_P;
+    base_q = (base_q * base_q) % FP_Q;
+    exp >>= 1;
+  }
+  
+  uint32_t z = (result_p * FP_Q_MUL_P_MOD_1 + result_q * FP_P_MUL_Q_MOD_1) % FP_PQ;
+  return z;
 }
 
 } // namespace utils
