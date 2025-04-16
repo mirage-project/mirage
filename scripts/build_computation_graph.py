@@ -157,7 +157,7 @@ def parse_onnx_model(model, unique_operators):
             if input_name in shape_value_dict and input_name in tensor_id:
                 shape = shape_value_dict[input_name]
                 if i == 1:
-                    if op_type in ["Mul", "Div", "Add", "Pow"]:
+                    if op_type in ["Div", "Add", "Pow"]:
                         shape = input_tensor_shapes[0][0]
                     if op_type == "MatMul":
                         if 0 in shape:

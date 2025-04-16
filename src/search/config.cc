@@ -23,6 +23,7 @@ GeneratorConfig GeneratorConfig::get_default_config() {
           type::KN_MUL_OP,
           type::KN_DIV_OP,
           // type::KN_REDUCTION_2_OP,
+          type::KN_RMS_NORM_OP,
           type::KN_CUSTOMIZED_OP,
       } /* knop_to_explore */,
       {
