@@ -83,12 +83,18 @@ public:
   // If `ldmatrix` is available and the innermost dim is among the first two
   // dims, use `ldmatrix` or `ldmatrix.trans`. Otherwise, use the universal copy
   // atom
-  using Result = std::conditional_t<CONSECUTIVE_DIM == K_DIM,
-                                    Copy_Atom<CandidateLdMatrixN, T>,
-                                    Copy_Atom<CandidateLdMatrixT, T>>;
-  static constexpr S2RTiledCopyType TYPE = CONSECUTIVE_DIM == K_DIM
-                                               ? S2RTiledCopyType::LDMATRIX_N
-                                               : S2RTiledCopyType::LDMATRIX_T;
+  using Result = std::conditional_t<
+      CONSECUTIVE_DIM == K_DIM && !std::is_same_v<T, float>,
+      Copy_Atom<CandidateLdMatrixN, T>,
+      std::conditional_t<CONSECUTIVE_DIM != K_DIM && !std::is_same_v<T, float>,
+                         Copy_Atom<CandidateLdMatrixT, T>,
+                         Copy_Atom<UniversalCopy<uint32_t>, T>>>;
+  static constexpr S2RTiledCopyType TYPE =
+      CONSECUTIVE_DIM == K_DIM && !std::is_same_v<T, float>
+          ? S2RTiledCopyType::LDMATRIX_N
+      : CONSECUTIVE_DIM != K_DIM && !std::is_same_v<T, float>
+          ? S2RTiledCopyType::LDMATRIX_T
+          : S2RTiledCopyType::UNIVERSAL;
 };
 
 enum class R2STiledCopyType { UNIVERSAL, STMATRIX_N, STMATRIX_T };

@@ -39,6 +39,9 @@ struct TranspilerConfig {
   int num_consumer_wgs;
   int num_producer_wgs;
   int pipeline_stages;
+
+  // Whether to enable graph rewriting
+  bool enable_online_softmax = false;
 };
 
 // Directive for an output tensor
