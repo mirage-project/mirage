@@ -82,6 +82,9 @@ cdef extern from "mirage/type.h" namespace "mirage::type":
         KN_SPLIT_0_OP = 1420,
         KN_SPLIT_1_OP = 1421,
         KN_SPLIT_2_OP = 1422,
+        KN_CHUNK_0_OP = 1423,
+        KN_CHUNK_1_OP = 1424,
+        KN_CHUNK_2_OP = 1425,
         KN_SPLIT_LAST_OP_ID = 1429,
         # Communication
         KN_ALLREDUCE_OP = 1900,
@@ -191,16 +194,21 @@ cdef extern from "mirage/kernel/graph.h" namespace "mirage::kernel":
         CppDTensor* gelu(const CppDTensor* input)
         CppDTensor* relu(const CppDTensor* input)
         CppDTensor* clamp(const CppDTensor* input, float min_val, float max_val)
+        CppDTensor* sqrt(const CppDTensor* input)
+        CppDTensor* square(const CppDTensor* input)
         CppDTensor* add(const CppDTensor* op1, const CppDTensor* op2)
         CppDTensor* mul(const CppDTensor* op1, const CppDTensor* op2)
         CppDTensor* div(const CppDTensor* op1, const CppDTensor* op2)
         int customized(vector[const CppDTensor*] inputs,
                        CppDTensor** outputs,
                        CppTBGraph* bgraph)
+        int get_num_input_dtensors()
+        int get_num_output_dtensors()
         int get_input_dtensors(CppDTensor** cinputs)
-        int get_input_dtensor_layout(const CppDTensor *input, int *strides)
+        int get_input_dtensor_shape_and_stride(const CppDTensor *input, int *strides, int *dims)
         void generate_triton_program(const char *filepath)
         void generate_cuda_program(const char *filepath)
+        size_t get_owner_independent_hash() const
         vector[CppKNOperator*] operators
 
 cdef extern from "mirage/threadblock/graph.h" namespace "mirage::threadblock":
@@ -300,6 +308,7 @@ cdef extern from "mirage/transpiler/transpile.h" namespace "mirage::transpiler":
         int num_consumer_wgs
         int num_producer_wgs;
         int pipeline_stages;
+        bool profiling;
     ctypedef struct OutputTensorDirective:
         size_t alloc_size
         vector[int] shape
@@ -308,6 +317,7 @@ cdef extern from "mirage/transpiler/transpile.h" namespace "mirage::transpiler":
         string code
         size_t buf_size
         size_t max_smem_size
+        size_t profiler_buf_size
         vector[OutputTensorDirective] output_directives
     cdef TranspileResult transpile(const CppKNGraph *graph,
                        const TranspilerConfig config,
@@ -332,3 +342,6 @@ cdef extern from "mirage/triton_transpiler/transpile.h" namespace "mirage::trito
         vector[vector[int]] output_shapes
     cdef TritonTranspileResult transpile(const CppKNGraph *graph,
                                          const TritonTranspilerConfig config)
+
+cdef extern from "mirage/kernel/device_memory_manager.h" namespace "mirage::kernel":
+    cdef int cython_set_gpu_device_id(int gpu_id)
