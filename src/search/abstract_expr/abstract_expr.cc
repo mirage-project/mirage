@@ -40,7 +40,7 @@ bool AbstractExpr::subpattern_to(AbstractExpr const &other) const {
 
   z3::params p(c);
   p.set("mbqi", true);
-  p.set("rlimit", 80000u);
+  p.set("rlimit", 100000u);
   // p.set("timeout", 10u);
   s.set(p);
 

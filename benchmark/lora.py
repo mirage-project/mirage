@@ -6,7 +6,7 @@ import argparse
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--bs', type=int, default=1)
-    parser.add_argument('--file', type=str, default='group_query_attention.json')
+    parser.add_argument('--file', type=str, default='lora.json')
     args = parser.parse_args()
     batch_size = args.bs
     filename = args.file

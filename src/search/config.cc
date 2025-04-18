@@ -44,7 +44,7 @@ GeneratorConfig GeneratorConfig::get_default_config() {
       {} /* fmap_to_explore */,
       {
           4,
-          16,
+          32,
           64,
       } /* frange_to_explore */,
       64 /* reduction_dimx */,

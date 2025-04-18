@@ -1,6 +1,7 @@
 import mirage as mi
 import torch
 import flashinfer
+import argparse
 
 n_local_heads = 32
 n_local_kv_heads = 32
@@ -69,6 +70,11 @@ def mirage_chameleon(X, Wqkv, Wo, W13, W2, Kcache, Vcache, kernels):
     return output
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--bs', type=int, default=1)
+    args = parser.parse_args()
+    batch_size = args.bs
+    
     X = torch.randn(batch_size * num_tokens, 4096, dtype=torch.float16, device='cuda:0')
     Wqkv = torch.randn(4096, n_local_heads * head_dim + 2 * n_local_kv_heads * head_dim, dtype=torch.float16, device='cuda:0')
     Wo = torch.randn(n_local_heads * head_dim, 4096, dtype=torch.float16, device='cuda:0')
