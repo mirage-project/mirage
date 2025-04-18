@@ -46,6 +46,7 @@ cdef extern from "mirage/type.h" namespace "mirage::type":
         TB_EPILOGUE_NONE = 3100,
         TB_EPILOGUE_ALLREDUCE = 3101,
         TB_EPILOGUE_ALLTOALL = 3102,
+        TB_EPILOGUE_REDUCESCATTER = 3103,
         TB_EPILOGUE_INVALID = 3199,
     cdef enum TBPrologueType:
         TB_PROLOGUE_NONE = 3200,

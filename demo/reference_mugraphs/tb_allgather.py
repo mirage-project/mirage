@@ -3,7 +3,7 @@ import numpy as np
 import torch
 import os
 import argparse
-
+import sys
 
 seed = 42  # Use a fixed seed
 torch.manual_seed(seed)
@@ -31,7 +31,10 @@ if __name__ == "__main__":
     print("Graph created")
 
     from mpi4py import MPI, get_config
-    print(get_config())
+    # print(get_config())
+    print("Imported mpi4py")
+    # flush
+    sys.stdout.flush()
     comm = MPI.COMM_WORLD
     rank = comm.Get_rank()
     npes = comm.Get_size()
@@ -53,10 +56,13 @@ if __name__ == "__main__":
     ]
 
     outputs = graph(inputs=input_tensors, rank=rank, save_codes=save_codes)
+    np.savetxt(f"outputs_{rank}.txt", outputs[0].cpu().numpy().astype(np.int16), fmt="%d")
 
 
     # divide input_tensors[1] into 4 chunks along dim 1
     chunks = input_tensors[1].chunk(4, dim=1)
+    print("output.shape: ", outputs[0].shape)
+    print("output: ", outputs[0])
     print("input_tensors[0].shape: ", input_tensors[0].shape)
     print("chunks[", rank, "].shape: ", chunks[rank].shape)
     print("input_tensors[0] * chunks[", rank, "]: ", input_tensors[0] @ chunks[rank])

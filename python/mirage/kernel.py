@@ -184,7 +184,7 @@ class Handle:
 
 
 class KNGraph:
-    def __init__(self, graph):
+    def __init__(self, graph, gpu_dim: tuple = (1, 1, 1)):
         self.cygraph = graph
 
         self._is_compiled = False
@@ -194,6 +194,8 @@ class KNGraph:
         self.visualizer = None
         self.use_nvshmem = False
         self.nvshmem = None
+        self.gpu_dim = gpu_dim
+        self.input_maps = []
 
         self.backend = "cuda"
 
@@ -213,6 +215,7 @@ class KNGraph:
             assert check_stride(dims, strides, "row-major") | check_stride(
                 dims, strides, "column-major"
             )
+        self.input_maps.append(gpu_input_map)
         return self.cygraph.new_input(dims, tuple(strides), gpu_input_map, dtype)
 
     def mark_output(self, A: DTensor, strides: tuple = None):
@@ -262,6 +265,46 @@ class KNGraph:
     def valid_kernels(self):
         assert self._is_compiled, "Should check kernel validness after compilation"
         return self._valid_cuda_kernels
+    
+    def get_tensor_slice(self, tensor, input_map, rank):
+        if rank == 2:
+            print("[", rank, "] input_map: ", input_map)
+        remaining_rank = rank
+        gpu_indices = [0, 0, 0]
+        for i in range(len(self.gpu_dim) - 1, -1, -1):
+            if self.gpu_dim[i] > 1:
+                gpu_indices[i] = remaining_rank % self.gpu_dim[i]
+                remaining_rank //= self.gpu_dim[i]
+        
+        slices = [slice(None) for _ in range(len(tensor.shape))]
+        
+        for gpu_dim, tensor_dim in enumerate(input_map):
+            if rank == 2:
+                print("[", rank, "] tensor_dim: ", tensor_dim, "gpu_dim: ", gpu_dim)
+            if self.gpu_dim[gpu_dim] > 1:
+                dim_size = tensor.shape[tensor_dim]
+                chunk_size = (dim_size + self.gpu_dim[gpu_dim] - 1) // self.gpu_dim[gpu_dim]  # 向上取整
+                
+                start_idx = gpu_indices[gpu_dim] * chunk_size
+                end_idx = min(start_idx + chunk_size, dim_size)
+                
+                slices[tensor_dim] = slice(start_idx, end_idx)
+
+        if rank == 2:
+            print("[", rank, "] slices: ", slices)
+        
+        result = tensor[tuple(slices)].to(dtype=tensor.dtype, device=tensor.device, memory_format=torch.contiguous_format)
+        
+        return result
+
+    def get_divided_inputs(self, inputs):
+        from mpi4py import MPI
+        comm = MPI.COMM_WORLD
+        rank = comm.Get_rank()
+        results = []
+        for input_tensor, input_map in zip(inputs, self.input_maps):
+            results.append(self.get_tensor_slice(input_tensor, input_map, rank))
+        return results
 
     def __call__(self, **kwargs):
         if self.backend == "cuda":
@@ -292,9 +335,7 @@ class KNGraph:
         return output_tensors
 
     def cuda_call(self, **kwargs):
-        print("Calling cuda_call")
         results = self.compile(**kwargs)
-        print("Return from compile")
         if kwargs.get("save_codes", False):
             print("Saving generated codes to generated_codes/generated_kernel.cu")
             os.makedirs("generated_codes", exist_ok=True)
@@ -307,8 +348,18 @@ class KNGraph:
 
         assert self.run is not None, "The graph is not compiled yet."
 
-        input_tensors = kwargs.get("inputs", [])
+        _input_tensors = kwargs.get("inputs", [])
+        input_tensors = []
         rank = kwargs.get("rank", 0)
+
+        if len(self.input_maps) > 0:
+            # Multi GPU using
+            input_tensors = self.get_divided_inputs(_input_tensors)
+            # if rank == 2:
+                # print("[", rank, "] input_tensors: ", input_tensors[0].shape, input_tensors[0], "\n", input_tensors[1].shape, input_tensors[1])
+        else:
+            input_tensors = _input_tensors
+
 
         # TODO: dtype and device
         buffer_tensor = torch.empty(
@@ -325,12 +376,6 @@ class KNGraph:
             )
             for meta in results["output_directives"]
         ]
-
-        for tensor in input_tensors:
-            print(tensor.shape)
-        print('00')
-        for tensor in output_tensors:
-            print(tensor.shape)
 
         buffer_tensor_ptr = buffer_tensor.data_ptr()
         input_tensors_ptr = [tensor.data_ptr() for tensor in input_tensors]
@@ -416,8 +461,8 @@ class KNGraph:
         FILE_NAME = os.path.join(tempdir, "test.cu")
         so_path = os.path.join(tempdir, "test.cpython-38-x86_64-linux-gnu.so")
 
-
         FILE_NAME = "./test.cu"
+
         with open(FILE_NAME, "w") as f:
             f.write(result["code"] + HARD_CODE)
             if saved_addr != "":
@@ -453,7 +498,7 @@ class KNGraph:
             )
             sys.exit(1)
         cc_cmd = get_cc_cmd(target_cc, cc, FILE_NAME, py_include_dir, MIRAGE_ROOT, NCCL_ROOT, MPI_ROOT, NVSHMEM_ROOT, so_path)
-
+        # print(cc_cmd)
 
         def remain_op():
             import importlib.util

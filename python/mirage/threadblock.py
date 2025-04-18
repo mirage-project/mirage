@@ -11,7 +11,7 @@ class TBGraph:
         return self.cygraph.new_input(dtensor, input_map, forloop_dim, prologue)
 
     def new_output(self, stensor: STensor, output_map: tuple, forloop_dim: int = -1, epilogue: str = None):
-        if epilogue == "allreduce" or epilogue == "alltoall":
+        if epilogue == "allreduce" or epilogue == "alltoall" or epilogue == "reduce_scatter":
             self.use_nvshmem = True
         return self.cygraph.new_output(stensor, output_map, forloop_dim, epilogue)
 
@@ -26,10 +26,10 @@ class TBGraph:
 
     def gelu(self, A: STensor):
         return self.cygraph.gelu(A)
-    
+
     def relu(self, A: STensor):
         return self.cygraph.relu(A)
-    
+
     def clamp(self, A: STensor, min_val: float, max_val: float):
         return self.cygraph.clamp(A, min_val, max_val)
 

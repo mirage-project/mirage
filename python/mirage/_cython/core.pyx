@@ -266,6 +266,8 @@ def string_to_tbepilogue(epilogue):
         return TB_EPILOGUE_ALLREDUCE
     elif epilogue == "alltoall":
         return TB_EPILOGUE_ALLTOALL
+    elif epilogue == "reduce_scatter":
+        return TB_EPILOGUE_REDUCESCATTER
     else:
         assert False, "Unsupported threadblock epilogue"
         return None

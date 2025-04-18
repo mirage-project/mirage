@@ -15,6 +15,7 @@
 
 #include "mirage/threadblock/graph.h"
 #include "mirage/threadblock/operator.h"
+#include <cstdio>
 
 namespace mirage {
 namespace threadblock {
@@ -98,6 +99,13 @@ TBOutputOp::TBOutputOp(Graph *_graph,
 
   if (forloop_dim >= 0) {
     dtensor.dim[forloop_dim] *= bgraph->forloop_range;
+  }
+
+  // TODO currently only support reducescatter on dim 0
+  if (epilogue == mirage::type::TBEpilogueType::TB_EPILOGUE_REDUCESCATTER) {
+    printf("Before tensor dims: %d %d\n", dtensor.dim[0], dtensor.dim[1]);
+    dtensor.dim[0] /= _graph->gpu_dim.x;
+    printf("After tensor dims: %d %d\n", dtensor.dim[0], dtensor.dim[1]);
   }
 
   dtensor.epilogue = epilogue;

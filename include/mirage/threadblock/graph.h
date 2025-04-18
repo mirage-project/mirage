@@ -34,7 +34,9 @@ private:
 
 public:
   Graph();
-  Graph(dim3 grid_dim, dim3 block_dim, int forloop_range, int reduction_dimx, dim3 gpu_dim=dim3(1, 1, 1), bool from_constructed=false);
+  Graph(dim3 grid_dim, dim3 block_dim, int forloop_range, int reduction_dimx);
+  // For graph with communication prologue/epilogue 
+  Graph(dim3 grid_dim, dim3 block_dim, int forloop_range, int reduction_dimx, dim3 gpu_dim, bool from_constructed);
   ~Graph();
   Graph(Graph const &) = delete;
   Graph &operator=(Graph const &) = delete;
@@ -169,11 +171,10 @@ public:
   operator json() const;
 
 public:
-  dim3 grid_dim, block_dim, cluster_dim;
+  dim3 gpu_dim, grid_dim, block_dim, cluster_dim;
   int forloop_range;
   int reduction_dimx;
   std::vector<mirage::threadblock::TBOperator *> operators;
-  dim3 gpu_dim;
   bool from_constructed;
   // memory allocator
   off_t smem_offset;

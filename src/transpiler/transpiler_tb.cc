@@ -219,6 +219,10 @@ CustomOPTranspileResult
         nvshmem_as_param.push_back(fmt("$ const* __restrict__ alltoall_buf_$", 
                                      get_datatype_str(output_op->dtensor.data_type), 
                                      output_op->dtensor.guid));
+      } else if (output_op->epilogue == type::TBEpilogueType::TB_EPILOGUE_REDUCESCATTER) {
+        nvshmem_as_param.push_back(fmt("$ * __restrict__ reduce_scatter_buf_$", 
+                                     get_datatype_str(output_op->dtensor.data_type), 
+                                     output_op->dtensor.guid));
       }
     }
   }
@@ -470,15 +474,30 @@ CustomOPTranspileResult
         int num_tbs = dim == 0   ? g.grid_dim.x
                       : dim == 1 ? g.grid_dim.y
                                  : g.grid_dim.z;
+        type::TBEpilogueType type = cur_op->epilogue;
+        // TODO
+        int reduce_scatter_divide_dim = 1; // y dim
         if (num_tbs > 1) {
-          // The output tensor MUST be divided along this dimension, as stated
-          // in the paper
           assert(div_dim >= 0);
-          offset += fmt(" + blockIdx.$*$*$",
-                        (char)"xyz"[dim],
-                        dtensor.dim[div_dim] / num_tbs,
-                        dtensor_meta.strides[div_dim]);
+          if (dim == reduce_scatter_divide_dim && 
+              type == type::TBEpilogueType::TB_EPILOGUE_REDUCESCATTER) {
+            // The output tensor MUST be divided along this dimension, as stated
+            // in the paper
+            int num_gpus = g.gpu_dim.x;
+            offset += fmt(" + blockIdx.$*$*$",
+                          (char)"xyz"[dim],
+                          dtensor.dim[div_dim] / num_tbs * num_gpus,
+                          dtensor_meta.strides[div_dim]);
+          } else {
+            // The output tensor MUST be divided along this dimension, as stated
+            // in the paper
+            offset += fmt(" + blockIdx.$*$*$",
+                          (char)"xyz"[dim],
+                          dtensor.dim[div_dim] / num_tbs,
+                          dtensor_meta.strides[div_dim]);
+          }
         }
+
       }
       code.e("$ *dtensor$_tile_ptr = dtensor$_ptr $;",
              get_datatype_str(dtensor.data_type),
@@ -906,14 +925,62 @@ CustomOPTranspileResult
                      get_datatype_str(dtensor.data_type),
                      dtensor.guid);
               
-              code.e("tb::CommExecutor<$, DTensor$TileLayout, false> comm_executor;", 
+              code.e("using comm_executor = tb::CommExecutor<$, DTensor$TileLayout, false>;", 
                      get_datatype_str(dtensor.data_type),
                      dtensor.guid);
-              code.e("comm_executor.send(recv_ptr, send_ptr, dst_rank, NULL);");
+              code.e("comm_executor::send(recv_ptr, send_ptr, dst_rank, NULL);");
 
               //code.e("nvshmem_barrier_all();");
               // break;
             }
+            else if (epilogue_type == type::TBEpilogueType::TB_EPILOGUE_REDUCESCATTER) {
+              // Copy of alltoall
+              int reduce_scatter_divide_dim = 1; // y dim
+              code.e("// Perform reduce_scatter. num_elements = $", num_elements);
+              code.e("int block_per_p = (gridDim.y + npes - 1) / npes;");
+
+              code.e("int dst_rank = blockIdx.y / block_per_p;");
+              string dst_offset = "";
+              int3 omap = cur_op->output_map;
+              for (int dim = 0; dim < 3; ++dim) {
+                int div_dim = dim == 0 ? omap.x : dim == 1 ? omap.y : omap.z;
+                int num_tbs = dim == 0   ? g.grid_dim.x
+                              : dim == 1 ? g.grid_dim.y
+                                        : g.grid_dim.z;
+                if (num_tbs > 1) {
+                  assert(div_dim >= 0);
+                  if (dim != reduce_scatter_divide_dim) {
+                    dst_offset += fmt(" + blockIdx.$*$*$",
+                                  (char)"xyz"[dim],
+                                  dtensor.dim[div_dim] / num_tbs,
+                                  dtensor_meta.strides[div_dim]);
+                  }
+                  else {
+                    int num_gpus = g.gpu_dim.x;
+                    dst_offset += fmt(" + (blockIdx.$%block_per_p + mype*block_per_p)*$*$",
+                                  (char)"xyz"[dim],
+                                  dtensor.dim[div_dim] / num_tbs * num_gpus,
+                                  dtensor_meta.strides[div_dim]);
+                  }
+                }
+              }
+
+              code.e("$ *recv_ptr = ($ *)reduce_scatter_buf_$;", 
+                     get_datatype_str(dtensor.data_type),
+                     get_datatype_str(dtensor.data_type),
+                     dtensor.guid);
+              code.e("recv_ptr = recv_ptr$; // dst_offset", dst_offset);
+
+              code.e("$ *send_ptr = dtensor$_tile_ptr;", 
+                     get_datatype_str(dtensor.data_type),
+                     dtensor.guid);
+              
+              code.e("tb::CommExecutor<$, DTensor$TileLayout, false> comm_executor;", 
+                     get_datatype_str(dtensor.data_type),
+                     dtensor.guid);
+              code.e("comm_executor.send(recv_ptr, send_ptr, dst_rank, NULL);");
+            }
+            //TODO (linsj20)
           }
           break;
         }

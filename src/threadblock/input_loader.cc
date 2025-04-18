@@ -74,10 +74,6 @@ TBInputOp::TBInputOp(Graph *_graph,
       input_map(_input_map), forloop_dim(_forloop_dim), prologue(_prologue) {
   
   // Modify dtensor for allgather if it's the first time to load the input
-  printf("gpu_dim: %d, %d, %d\n", gpu_dim.x, gpu_dim.y, gpu_dim.z);
-  printf("Is from constructed: %d\n", from_constructed);
-  printf("Is allgather: %d\n", prologue == mirage::type::TB_PROLOGUE_ALLGATHER);
-  printf("dtensor.guid from TBInputOp: %zu, original_guid: %zu, shape: %d, %d, %d\n", dtensor.guid, dtensor.original_guid, dtensor.dim[0], dtensor.dim[1], dtensor.dim[2]);
   if (from_constructed && prologue == mirage::type::TB_PROLOGUE_ALLGATHER) {
     dtensor.original_guid = dtensor.guid;
     if (allgather_t_guid > 0) {
@@ -92,7 +88,6 @@ TBInputOp::TBInputOp(Graph *_graph,
     dtensor.dim[allgather_dim] *= (allgather_dim == 0 ? gpu_dim.x : (allgather_dim == 1 ? gpu_dim.y : gpu_dim.z));
     dtensor.prologue = mirage::type::TBPrologueType::TB_PROLOGUE_ALLGATHER;
   }
-  printf("Really saved dtensor.guid from TBInputOp: %zu, original_guid: %zu, shape: %d, %d, %d\n\n", dtensor.guid, dtensor.original_guid, dtensor.dim[0], dtensor.dim[1], dtensor.dim[2]);
   
   STensor tensor;
   tensor.layout = _layout;
