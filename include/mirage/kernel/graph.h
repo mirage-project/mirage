@@ -99,9 +99,12 @@ public:
   DTensor add(DTensor const &input1, DTensor const &input2);
   DTensor mul(DTensor const &input1, DTensor const &input2);
   DTensor div(DTensor const &input1, DTensor const &input2);
+  DTensor pow(DTensor const &input1, DTensor const &input2);
   DTensor *add(DTensor const *input1, DTensor const *input2);
   DTensor *mul(DTensor const *input1, DTensor const *input2);
   DTensor *div(DTensor const *input1, DTensor const *input2);
+  DTensor *pow(DTensor const *input1, DTensor const *input2);
+
   DTensor elementbinary(DTensor const &input1,
                         DTensor const &input2,
                         mirage::type::KNOperatorType _type);
