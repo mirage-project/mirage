@@ -151,6 +151,24 @@ def parse_onnx_model(model, unique_operators):
         else:
             unique_operators[op_type] += 1
         node_name = node.name or f"{op_type}_{id(node)}"
+        additional_params = []
+        kwargs = {}
+        if node.op_type == "Clip":
+            # Using .item() here pulls out the value from the rank-0 tensor
+            if node.min != None:
+                additional_params.append(node.min.item()) 
+            else: # Defaults are to do nothing but could be changed
+                additional_params.append(float('-inf'))
+            if node.max!= None:
+                additional_params.append(node.max.item()) 
+            else:
+                additional_params.append(float('inf'))
+        if node.op_type == "ReduceSum":
+            if node.axis != None:
+                axis = node.axis[0]
+                additional_params.append(axis)
+            else:
+                additional_params.append(0)
 
         input_tensor_shapes = []
         for i, input_name in enumerate(node.input):
@@ -172,7 +190,7 @@ def parse_onnx_model(model, unique_operators):
             if output_name in shape_value_dict and output_name in tensor_id:
                 output_tensor_shapes.append((shape_value_dict[output_name], tensor_id[output_name]))
         
-        operator = Operator(name=node_name, fn=op_type, input_ops=[], output_ops=[], input_tensor_shapes=input_tensor_shapes, output_tensor_shapes=output_tensor_shapes)
+        operator = Operator(name=node_name, fn=op_type, input_ops=[], output_ops=[], input_tensor_shapes=input_tensor_shapes, output_tensor_shapes=output_tensor_shapes, additional_params=additional_params, kwargs=kwargs)
         # operator = {"name":node_name, "fn":op_type, "input_ops":[], "output_ops":[], "input_tensor_shapes":input_tensor_shapes, "output_tensor_shapes":output_tensor_shapes}
         operators[node_name] = operator
         
