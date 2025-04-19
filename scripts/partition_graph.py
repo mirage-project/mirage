@@ -129,12 +129,10 @@ def partition_graph(model,
 
     return all_subgraphs, unique_operators
 
-# TODO: add support for reduction, clamp, rms_norm. These rely on additional
-# inputs that the Operator class doesn't currently support
 def function_map(graph, func, inputs, kwargs={}):
     match func.fn:
         case "MatMul": return graph.matmul(*inputs)
-        # case "ReduceSum": return graph.reduction(*inputs)
+        case "ReduceSum": return graph.reduction(*inputs)
         case "Exp": return graph.exp(*inputs)
         case "Gelu": return graph.gelu(*inputs)
         case "Relu": return graph.relu(*inputs)
@@ -161,7 +159,7 @@ def function_map(graph, func, inputs, kwargs={}):
             return graph.div(ones, summed)
         case "Neg": 
             return graph.mul(*inputs)
-        case "RMSNormalization": return graph.rms_norm(*inputs, **kwargs)
+        case "RMSNormalization": return graph.rms_norm(*inputs) # Onnx doesn't support different normalized shape
         # case "ReduceMean":
         #     matrix = inputs[0]
         #     dim = inputs[1]
@@ -242,9 +240,9 @@ def generate_all_kernels(model, dummy_inputs, min_num_ops=2, max_num_ops=4, UNSU
         kernel_input_dims.append(dims)
     return all_kernels, kernel_input_dims
 
-def time_kernels(kernels, device, iterations=1):
+def time_kernels(kernels, input_dims, device, iterations=1):
     times = []
-    for kernel, dims in kernels:
+    for kernel, dims in zip(kernels, input_dims):
         total_time = 0
         for _ in range(iterations):
             inputs = []
@@ -254,7 +252,7 @@ def time_kernels(kernels, device, iterations=1):
                 elif (dim[1] == "C"):
                     inputs.append(torch.full(dim[0], dim[2]).to(device))
             start = time.time()
-            _ = kernel(*inputs)
+            _ = kernel(inputs=inputs)
             total_time += time.time() - start
         times.append(total_time / iterations)
     return times
@@ -284,7 +282,7 @@ dummy_loss = dummy_outputs.loss
 
 subgraphs, unique_operators = partition_graph(dummy_loss)
 all_kernels, kernel_input_dims = generate_all_kernels(subgraphs)
-times = time_kernels(all_kernels, device)
+times = time_kernels(all_kernels, kernel_input_dims, device)
 """
 
 """
