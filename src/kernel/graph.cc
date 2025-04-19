@@ -258,7 +258,8 @@ void from_json(json const &j, Graph &g) {
       }
       case type::KNOperatorType::KN_DIV_OP:
       case type::KNOperatorType::KN_ADD_OP:
-      case type::KNOperatorType::KN_MUL_OP: {
+      case type::KNOperatorType::KN_MUL_OP:
+      case type::KNOperatorType::KN_POW_OP: {
         size_t guidA, guidB, guidO;
         jop.at("input_tensors")[0].at("guid").get_to(guidA);
         jop.at("input_tensors")[1].at("guid").get_to(guidB);

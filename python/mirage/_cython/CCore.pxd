@@ -67,6 +67,7 @@ cdef extern from "mirage/type.h" namespace "mirage::type":
         KN_ADD_OP = 1200,
         KN_MUL_OP = 1201,
         KN_DIV_OP = 1202,
+        KN_POW_OP = 1203,
         # Reduction & Normalization
         KN_REDUCTION_0_OP = 1300,
         KN_REDUCTION_1_OP = 1301,
@@ -109,6 +110,7 @@ cdef extern from "mirage/type.h" namespace "mirage::type":
         TB_ADD_OP = 2200,
         TB_MUL_OP = 2201,
         TB_DIV_OP = 2202,
+        TB_POW_OP = 2203,
         # Reduction and Normalization
         TB_REDUCTION_FIRST_OP_ID = 2300,
         TB_REDUCTION_0_OP = 2301,
@@ -199,6 +201,7 @@ cdef extern from "mirage/kernel/graph.h" namespace "mirage::kernel":
         CppDTensor* add(const CppDTensor* op1, const CppDTensor* op2)
         CppDTensor* mul(const CppDTensor* op1, const CppDTensor* op2)
         CppDTensor* div(const CppDTensor* op1, const CppDTensor* op2)
+        CppDTensor* pow(const CppDTensor* op1, const CppDTensor* op2)
         int customized(vector[const CppDTensor*] inputs,
                        CppDTensor** outputs,
                        CppTBGraph* bgraph)

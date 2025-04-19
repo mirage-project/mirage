@@ -113,6 +113,9 @@ public:
   STensor *mul(STensor const *A, STensor const *B);
   STensor div(STensor const &A, STensor const &B);
   STensor *div(STensor const *A, STensor const *B);
+  STensor pow(STensor const &A, STensor const &B);
+  STensor *pow(STensor const *A, STensor const *B);
+
   STensor elementbinary(STensor const &A,
                         STensor const &B,
                         mirage::type::TBOperatorType type);

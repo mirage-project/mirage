@@ -306,7 +306,8 @@ IKNRange forward_propagate(IKNRange const &range,
       ret = range;
       break;
     }
-    case type::KNOperatorType::KN_DIV_OP: {
+    case type::KNOperatorType::KN_DIV_OP:
+    case type::KNOperatorType::KN_POW_OP: {
       if (opd_idx == 0) {
         ret = range;
       } else {
@@ -377,7 +378,8 @@ IKNRange backward_propagate(IKNRange const &knrange,
     }
     case type::KNOperatorType::KN_ALLREDUCE_OP:
       assert(false && "TBD");
-    case type::KNOperatorType::KN_DIV_OP: {
+    case type::KNOperatorType::KN_DIV_OP:
+    case type::KNOperatorType::KN_POW_OP: {
       ret = IKNRange(
           knrange.range_set.extend_dim(op.input_tensors[opd_idx].num_dims - 1)
               .truncate(op.input_tensors[opd_idx]));
@@ -619,7 +621,8 @@ ITBRange forward_propagate(ITBRange const &tbrange,
       }
       break;
     }
-    case type::TBOperatorType::TB_DIV_OP: {
+    case type::TBOperatorType::TB_DIV_OP:
+    case type::TBOperatorType::TB_POW_OP: {
       if (opd_idx == 0) {
         ret = tbrange;
       } else {
@@ -717,7 +720,8 @@ ITBRange backward_propagate(ITBRange const &tbrange,
       }
       break;
     }
-    case type::TBOperatorType::TB_DIV_OP: {
+    case type::TBOperatorType::TB_DIV_OP:
+    case type::TBOperatorType::TB_POW_OP: {
       ret = ITBRange(
           tbrange.range_set.extend_dim(op.input_tensors[opd_idx].num_dims - 1)
               .truncate(op.input_tensors[opd_idx]));

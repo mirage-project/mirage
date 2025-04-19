@@ -201,7 +201,8 @@ __global__ void customized_kernel_function(
         __syncthreads();
       } else if (op_type == mirage::type::TB_DIV_OP ||
                  op_type == mirage::type::TB_ADD_OP ||
-                 op_type == mirage::type::TB_MUL_OP) {
+                 op_type == mirage::type::TB_MUL_OP ||
+                 op_type == mirage::type::TB_POW_OP) {
         int3 input1_shape, input2_shape;
         int input1_smem_offset, input2_smem_offset, output_smem_offset;
         mirage::threadblock::deserialize_elementbinary_op_parameters(
@@ -645,7 +646,8 @@ __global__ void compute_customizedop_fingerprint(
         }
         case mirage::type::TB_ADD_OP:
         case mirage::type::TB_MUL_OP:
-        case mirage::type::TB_DIV_OP: {
+        case mirage::type::TB_DIV_OP:
+        case mirage::type::TB_POW_OP: {
           int3 input1_shape, input2_shape;
           int input1_smem_offset, input2_smem_offset, output_smem_offset;
           mirage::threadblock::deserialize_elementbinary_op_parameters(
