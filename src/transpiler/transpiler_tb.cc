@@ -1003,7 +1003,8 @@ CustomOPTranspileResult
         case type::TB_ADD_OP:
         case type::TB_SUB_OP:
         case type::TB_MUL_OP:
-        case type::TB_DIV_OP: {
+        case type::TB_DIV_OP:
+        case type::TB_POW_OP: {
           tb::STensor const &input0 = op->input_tensors.at(0);
           tb::STensor const &input1 = op->input_tensors.at(1);
           tb::STensor const &output = output_op->output_tensors.at(0);
@@ -1032,6 +1033,7 @@ CustomOPTranspileResult
                                : op->op_type == type::TB_SUB_OP ? "SUB"
                                : op->op_type == type::TB_MUL_OP ? "MUL"
                                : op->op_type == type::TB_DIV_OP ? "DIV"
+                               : op->op_type == type::TB_POW_OP ? "POW"
                                                                 : "";
           assert(op_type_str != "");
           // Define layouts

@@ -273,6 +273,21 @@ std::string generate_kernel_code(
            << stensor_name(input1_smem_offset) << ".to(tl.float32)"
            << ", " << stensor_name(input2_smem_offset)
            << ".to(tl.float32)).to(tl.float16)\n";
+    } else if (op_type == mirage::type::TB_POW_OP) {
+      int3 input1_shape, input2_shape;
+      int input1_smem_offset, input2_smem_offset, output_smem_offset;
+      mirage::threadblock::deserialize_elementbinary_op_parameters(
+          params.parameters,
+          param_idx,
+          input1_shape,
+          input2_shape,
+          input1_smem_offset,
+          input2_smem_offset,
+          output_smem_offset);
+      main << "\t\t" << stensor_name(output_smem_offset) << " = tl.power("
+           << stensor_name(input1_smem_offset) << ".to(tl.float32)"
+           << ", " << stensor_name(input2_smem_offset)
+           << ".to(tl.float32)).to(tl.float16)\n";
     } else if ((op_type >= mirage::type::TB_REDUCTION_FIRST_OP_ID) &&
                (op_type <= mirage::type::TB_REDUCTION_LAST_OP_ID)) {
       int output_num_elements, reduction_degree, inner_range;

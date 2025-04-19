@@ -525,7 +525,8 @@ Transpiler::Transpiler(kernel::Graph const *_graph,
       }
       case KN_ADD_OP:
       case KN_MUL_OP:
-      case KN_DIV_OP: {
+      case KN_DIV_OP:
+      case KN_POW_OP: {
         assert(dtensor_inputs.size() == 2);
         assert(op->output_tensors.size() == 1);
         kernel::DTensor dt =
@@ -609,7 +610,8 @@ Transpiler::Transpiler(kernel::Graph const *_graph,
             case TB_ADD_OP:
             case TB_SUB_OP:
             case TB_MUL_OP:
-            case TB_DIV_OP: {
+            case TB_DIV_OP:
+            case TB_POW_OP: {
               assert(stensor_inputs.size() == 2);
               threadblock::STensor st = tbg->elementbinary(
                   stensor_inputs[0], stensor_inputs[1], bop->op_type);

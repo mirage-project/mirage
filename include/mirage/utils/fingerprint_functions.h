@@ -114,5 +114,28 @@ inline __device__ FPType compute_relu_fingerprint(FPType input) {
   return z % FP_PQ;
 }
 
+inline __device__ FPType compute_pow_fingerprint(FPType base, FPType exponent) {
+  uint32_t base_p = base % FP_P;
+  uint32_t base_q = base % FP_Q;
+  uint32_t exp = (uint32_t)exponent;
+
+  uint32_t result_p = 1;
+  uint32_t result_q = 1;
+
+  while (exp > 0) {
+    if (exp & 1) {
+      result_p = (result_p * base_p) % FP_P;
+      result_q = (result_q * base_q) % FP_Q;
+    }
+    base_p = (base_p * base_p) % FP_P;
+    base_q = (base_q * base_q) % FP_Q;
+    exp >>= 1;
+  }
+
+  uint32_t z =
+      (result_p * FP_Q_MUL_P_MOD_1 + result_q * FP_P_MUL_Q_MOD_1) % FP_PQ;
+  return z;
+}
+
 } // namespace utils
 } // namespace mirage
