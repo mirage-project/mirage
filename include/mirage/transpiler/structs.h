@@ -146,7 +146,7 @@ struct DTensorMeta {
   // We may pad the strides to multiple of 8 to leverage `cp.async` instruction
   // Refer to the document for more information about the layout of
   // DTensor/STensor
-  size_t strides[kernel::MAX_TENSOR_DIMS];
+  size_t strides[mirage::config::MAX_TENSOR_DIMS];
 
   // Innermost dimension (dimension with stride=1)
   int innermost_dim;

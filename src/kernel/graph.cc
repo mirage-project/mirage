@@ -196,7 +196,7 @@ void from_json(json const &j, Graph &g) {
     jop.at("op_type").get_to(op_type);
     switch (op_type) {
       case type::KNOperatorType::KN_INPUT_OP: {
-        int num_dim, dim[MAX_TENSOR_DIMS];
+        int num_dim, dim[mirage::config::MAX_TENSOR_DIMS];
         type::DataType data_type;
         layout::DmemLayout layout;
         std::vector<size_t> input_strides;

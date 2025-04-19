@@ -84,6 +84,8 @@ KNOperator *Graph::create_customized_op(std::vector<DTensor> const &inputs,
   }
 
   KNCustomizedOp *op = new KNCustomizedOp(this, inputs, _graph);
+
+  this->customized_operators++;
   return op;
 }
 
@@ -128,7 +130,8 @@ KNCustomizedOp::KNCustomizedOp(mirage::kernel::Graph *_kgraph,
         bgraph.new_input(dtensor,
                          input_op->input_map,
                          input_op->forloop_dim,
-                         input_op->output_tensors[0].layout);
+                         input_op->output_tensors[0].layout,
+                         input_op->output_tensors[0].store_in_dmem);
         // plan.input_map.push_back(input_op->input_map);
         // plan.input_forloop_dim.push_back(input_op->forloop_dim);
         // plan.input_smem_layouts.push_back(input_op->output_tensors[0].layout);

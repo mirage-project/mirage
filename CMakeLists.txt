@@ -126,6 +126,15 @@ install(TARGETS mirage_runtime
 install(DIRECTORY ${PROJECT_SOURCE_DIR}/include
     DESTINATION .)
 
+# build runtime demo
+set(CPP_EXAMPLES_DIR cpp_examples/runtime_demo)
+set(CPP_EXAMPLES_BIN runtime_demo)
+file(GLOB CPP_EXAMPLES_SRCS ${CPP_EXAMPLES_DIR}/launcher.cc)
+add_executable(${CPP_EXAMPLES_BIN} ${CPP_EXAMPLES_SRCS})
+set_target_properties(${CPP_EXAMPLES_BIN}
+  PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CPP_EXAMPLES_DIR})
+target_link_libraries(${CPP_EXAMPLES_BIN} mirage_runtime)
+
 if ("${BUILD_CPP_EXAMPLES}" STREQUAL "ON")
   set(CPP_EXAMPLES_DIR cpp_examples)
   set(CPP_EXAMPLES_BIN dnn)
