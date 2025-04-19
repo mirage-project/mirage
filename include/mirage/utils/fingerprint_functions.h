@@ -69,6 +69,10 @@ inline __device__ FPType compute_sqrt_fingerprint(FPType input,
   return x % FP_PQ;
 }
 
+inline __device__ FPType compute_square_fingerprint(FPType input) {
+  return compute_mul_fingerprint(input, input);
+}
+
 inline __device__ FPType compute_silu_fingerprint(FPType input,
                                                   FPType *exp_lookup_table) {
   // Note that we use $x * e^x$ as the fingerprint for SILU

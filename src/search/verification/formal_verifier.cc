@@ -75,6 +75,8 @@ std::vector<z3::expr>
   z3::func_decl bc_pow = ctx.function("bc_pow", T, T, T);
   z3::func_decl concat = ctx.function("concat", T, T, D, T);
   z3::func_decl ew_exp = ctx.function("ew_exp", T, T);
+  z3::func_decl square = ctx.function("square", T, T);
+  z3::func_decl sqrt = ctx.function("sqrt", T, T);
   z3::func_decl matmul = ctx.function("matmul", T, T, T);
   z3::func_decl sum = ctx.function("sum", T, D, T);
   z3::func_decl mean = ctx.function("mean", T, T);
@@ -302,6 +304,16 @@ std::vector<z3::expr>
           tensor_exprs.emplace(op->output_tensors[0].guid, rms_norm(a));
           break;
         }
+        case type::KNOperatorType::KN_SQUARE_OP: {
+          z3::expr a = tensor_exprs.at(op->input_tensors[0].guid);
+          tensor_exprs.emplace(op->output_tensors[0].guid, square(a));
+          break;
+        }
+        case type::KNOperatorType::KN_SQRT_OP: {
+          z3::expr a = tensor_exprs.at(op->input_tensors[0].guid);
+          tensor_exprs.emplace(op->output_tensors[0].guid, sqrt(a));
+          break;
+        }
         case type::TBOperatorType::TB_SILU_OP: {
           z3::expr a = tensor_exprs.at(op->input_tensors[0].guid);
           tensor_exprs.emplace(op->output_tensors[0].guid, silu(a));
@@ -363,6 +375,16 @@ std::vector<z3::expr>
         case type::KNOperatorType::KN_EXP_OP: {
           z3::expr a = tensor_exprs.at(op->input_tensors[0].guid);
           tensor_exprs.emplace(op->output_tensors[0].guid, ew_exp(a));
+          break;
+        }
+        case type::KNOperatorType::KN_SQUARE_OP: {
+          z3::expr a = tensor_exprs.at(op->input_tensors[0].guid);
+          tensor_exprs.emplace(op->output_tensors[0].guid, square(a));
+          break;
+        }
+        case type::KNOperatorType::KN_SQRT_OP: {
+          z3::expr a = tensor_exprs.at(op->input_tensors[0].guid);
+          tensor_exprs.emplace(op->output_tensors[0].guid, sqrt(a));
           break;
         }
         case type::KNOperatorType::KN_MATMUL_OP: {
@@ -481,6 +503,8 @@ bool is_equivalent(z3::expr const &lhs,
   z3::func_decl bc_pow = ctx.function("bc_pow", T, T, T);
   z3::func_decl concat = ctx.function("concat", T, T, D, T);
   z3::func_decl ew_exp = ctx.function("ew_exp", T, T);
+  z3::func_decl square = ctx.function("square", T, T);
+  z3::func_decl sqrt = ctx.function("sqrt", T, T);
   z3::func_decl matmul = ctx.function("matmul", T, T, T);
   z3::func_decl sum = ctx.function("sum", T, D, T);
   z3::func_decl mean = ctx.function("mean", T, T);
@@ -712,7 +736,8 @@ bool is_equivalent(z3::expr const &lhs,
 
   {
     // element-wise unary
-    std::vector<z3::func_decl> ops = {ew_exp, silu, gelu, relu, clamp};
+    std::vector<z3::func_decl> ops = {
+        ew_exp, square, sqrt, silu, gelu, relu, clamp};
     for (z3::func_decl op : ops) {
       z3::expr partitioned = partition(t0, d0, d1, i0);
       z3::expr op_partitioned = op(partitioned);

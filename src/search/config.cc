@@ -15,6 +15,8 @@ GeneratorConfig GeneratorConfig::get_default_config() {
       {
           type::KN_MATMUL_OP,
           type::KN_EXP_OP,
+          type::KN_SQUARE_OP,
+          type::KN_SQRT_OP,
           type::KN_SILU_OP,
           type::KN_GELU_OP,
           type::KN_RELU_OP,
@@ -29,6 +31,8 @@ GeneratorConfig GeneratorConfig::get_default_config() {
       {
           type::TB_MATMUL_OP,
           type::TB_EXP_OP,
+          type::TB_SQUARE_OP,
+          type::TB_SQRT_OP,
           type::TB_SILU_OP,
           type::TB_GELU_OP,
           type::TB_RELU_OP,

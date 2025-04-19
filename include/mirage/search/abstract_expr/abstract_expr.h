@@ -79,6 +79,24 @@ public:
   std::shared_ptr<AbstractExpr> exponent;
 };
 
+class Square : public AbstractExpr {
+public:
+  Square(std::shared_ptr<AbstractExpr> a);
+  z3::expr to_z3(z3::context &c,
+                 std::unordered_set<std::string> &all_variables) const override;
+  std::string to_string() const override;
+  std::shared_ptr<AbstractExpr> a;
+};
+
+class Sqrt : public AbstractExpr {
+public:
+  Sqrt(std::shared_ptr<AbstractExpr> a);
+  z3::expr to_z3(z3::context &c,
+                 std::unordered_set<std::string> &all_variables) const override;
+  std::string to_string() const override;
+  std::shared_ptr<AbstractExpr> a;
+};
+
 class Silu : public AbstractExpr {
 public:
   Silu(std::shared_ptr<AbstractExpr> a);

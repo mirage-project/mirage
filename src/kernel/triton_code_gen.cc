@@ -258,6 +258,19 @@ std::string generate_kernel_code(
           params.parameters, param_idx, smem_offset, num_elements);
       main << "\t\t" << stensor_name(smem_offset) << " = tl.math.exp("
            << stensor_name(smem_offset) << ".to(tl.float32)).to(tl.float16)\n";
+    } else if (op_type == mirage::type::TB_SQUARE_OP) {
+      int smem_offset, num_elements;
+      mirage::threadblock::deserialize_elementunary_op_parameters(
+          params.parameters, param_idx, smem_offset, num_elements);
+      main << "\t\t" << stensor_name(smem_offset) << " = ("
+           << stensor_name(smem_offset) << ".to(tl.float32) * "
+           << stensor_name(smem_offset) << ".to(tl.float32)).to(tl.float16)\n";
+    } else if (op_type == mirage::type::TB_SQRT_OP) {
+      int smem_offset, num_elements;
+      mirage::threadblock::deserialize_elementunary_op_parameters(
+          params.parameters, param_idx, smem_offset, num_elements);
+      main << "\t\t" << stensor_name(smem_offset) << " = tl.sqrt("
+           << stensor_name(smem_offset) << ".to(tl.float32)).to(tl.float16)\n";
     } else if (op_type == mirage::type::TB_DIV_OP) {
       int3 input1_shape, input2_shape;
       int input1_smem_offset, input2_smem_offset, output_smem_offset;
