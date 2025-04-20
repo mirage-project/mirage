@@ -76,6 +76,18 @@ set(CUTLASS_DIR ${PROJECT_SOURCE_DIR}/deps/cutlass)
 include_directories(deps/cutlass/include)
 include_directories(deps/cutlass/tools/util/include)
 
+#set NVSHMEM
+if (NOT "${USE_NVSHMEM}" STREQUAL "OFF")
+  message(STATUS "NVSHMEM_HOME=" ${NVSHMEM_HOME})
+  find_package(NVSHMEM REQUIRED HINTS $ENV{NVSHMEM_HOME}/lib/cmake/nvshmem)
+  add_library(nvshmem ALIAS nvshmem::nvshmem) 
+  add_library(nvshmem_host ALIAS nvshmem::nvshmem_host) 
+  add_library(nvshmem_device ALIAS nvshmem::nvshmem_device)
+  list(APPEND MIRAGE_LINK_LIBS nvshmem_host nvshmem_device)
+  find_package(CUDAToolkit REQUIRED)
+  find_package(MPI REQUIRED)
+endif()
+
 #include_directories(${MIRAGE_INCLUDE_DIRS})
 
 #set Z3
@@ -108,8 +120,8 @@ add_library(mirage_runtime ${MIRAGE_SRCS})
 # cmake_device_link.o, and cython's installation cannot
 # automatically link to that file, resulting in:
 # undefined symbol: __cudaRegisterLinkedBinary_...
-#set_target_properties(mirage_runtime
-#  PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+set_target_properties(mirage_runtime
+  PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 
 set_target_properties(mirage_runtime PROPERTIES CUDA_ARCHITECTURES "70;75;80;86;89;90")
 
@@ -133,7 +145,8 @@ file(GLOB CPP_EXAMPLES_SRCS ${CPP_EXAMPLES_DIR}/launcher.cc)
 add_executable(${CPP_EXAMPLES_BIN} ${CPP_EXAMPLES_SRCS})
 set_target_properties(${CPP_EXAMPLES_BIN}
   PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CPP_EXAMPLES_DIR})
-target_link_libraries(${CPP_EXAMPLES_BIN} mirage_runtime)
+target_include_directories(${CPP_EXAMPLES_BIN} PUBLIC ${MPI_CXX_INCLUDE_PATH})
+target_link_libraries(${CPP_EXAMPLES_BIN} ${MPI_CXX_LIBRARIES} mirage_runtime)
 
 if ("${BUILD_CPP_EXAMPLES}" STREQUAL "ON")
   set(CPP_EXAMPLES_DIR cpp_examples)

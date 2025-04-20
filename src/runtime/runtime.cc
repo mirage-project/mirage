@@ -21,7 +21,8 @@ namespace runtime {
 namespace kn = mirage::kernel;
 namespace tb = mirage::threadblock;
 
-Runtime::Runtime() : num_graphs(0) {
+Runtime::Runtime(int _num_gpus, int _my_gpu_id)
+  : num_graphs(0), num_gpus(_num_gpus), my_gpu_id(_my_gpu_id) {
   // add the termination event to the event lists
   EventDesc e(1, 0, 0);
   all_events.push_back(e);

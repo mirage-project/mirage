@@ -67,7 +67,7 @@ struct RuntimeConfig {
 
 class Runtime {
 public:
-  Runtime();
+  Runtime(int num_gpus, int my_gpu_id);
   void register_mugraph(
       mirage::kernel::Graph const &graph,
       std::unordered_map<mirage::kernel::KNOperator const *,
@@ -78,7 +78,7 @@ public:
   std::vector<TaskDesc> all_tasks;
   std::vector<EventDesc> all_events;
   std::vector<TaskId> first_tasks;
-  int num_graphs;
+  int num_graphs, num_gpus, my_gpu_id;
 };
 
 } // namespace runtime

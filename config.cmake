@@ -1,3 +1,5 @@
 set(USE_CUDA ON)
 set(USE_CUDNN ON)
+set(USE_NVSHMEM ON)
+set(NVSHMEM_HOME /usr/local/nvshmem)
 set(BUILD_CPP_EXAMPLES OFF)

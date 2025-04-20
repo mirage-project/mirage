@@ -15,6 +15,8 @@
 
 #include "mirage/runtime/runtime.h"
 #include "mirage/utils/cuda_helper.h"
+#include "nvshmem.h"
+#include "nvshmemx.h"
 
 namespace mirage {
 namespace runtime {
@@ -236,6 +238,11 @@ void Runtime::launch_persistent_kernel(int num_workers, int num_schedulers) {
   config.total_num_events = all_events.size();
   config.per_worker_queue_len = 1024;
   config.per_sched_queue_len = 1024;
+  // Initialize nvshmem
+  int mype_node = nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE);
+  printf("nvshmem_my_pe: %d nvshmem_n_pes: %d mype_node %d\n", nvshmem_my_pe(), nvshmem_n_pes(), mype_node);
+  assert(nvshmem_my_pe() == my_gpu_id);
+  assert(nvshmem_n_pes() == num_gpus);
   // Initialize worker queue last task id
   checkCUDA(cudaMalloc(&config.worker_queue_last_ready_task_id,
                        config.num_workers * sizeof(unsigned long long int)));
@@ -345,6 +352,8 @@ void Runtime::launch_persistent_kernel(int num_workers, int num_schedulers) {
   // launch init kernel
   init_kernel<<<dim3(1, 1, 1), dim3(128, 1, 1)>>>(config);
   cudaDeviceSynchronize();
+  // Add a global barrier for all init_kernel to complete
+  nvshmem_barrier_all();
   // Launcher persistent kernel
   persistent_kernel<<<dim3(108, 1, 1), dim3(128, 1, 1)>>>(config);
   cudaDeviceSynchronize();
