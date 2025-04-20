@@ -273,7 +273,7 @@ TranspileResult Transpiler::transpile_ugraph() {
                  "unary kernel, global memory access won't be coalesced when "
                  "input tensor's innermost_dim (%d) != output tensor's "
                  "innermost_dim (%d)"
-                 "This may cause performance degration\n",
+                 "This may cause performance degradation\n",
                  meta_in0.innermost_dim,
                  meta_out0.innermost_dim);
         }
@@ -284,7 +284,7 @@ TranspileResult Transpiler::transpile_ugraph() {
         string in0_layout =
             mov_last_and_get_layout(in0, meta_in0, innermost_dim);
         string out0_layout =
-            mov_last_and_get_layout(in0, meta_in0, innermost_dim);
+            mov_last_and_get_layout(out0, meta_out0, innermost_dim);
         // Get tensor ptrs
         auto [in0_ptr_name, in0_ptr_code] = get_dtensor_ptr(in0);
         auto [out0_ptr_name, out0_ptr_code] = get_dtensor_ptr(out0);
@@ -303,7 +303,8 @@ TranspileResult Transpiler::transpile_ugraph() {
       }
       case type::KNOperatorType::KN_ADD_OP:
       case type::KNOperatorType::KN_MUL_OP:
-      case type::KNOperatorType::KN_DIV_OP: {
+      case type::KNOperatorType::KN_DIV_OP:
+      case type::KNOperatorType::KN_POW_OP: {
         // Elemwise binary op
         kn::DTensor &in0 = op->input_tensors.at(0);
         kn::DTensor &in1 = op->input_tensors.at(1);
@@ -350,6 +351,7 @@ TranspileResult Transpiler::transpile_ugraph() {
         string op_type_str = op->op_type == type::KN_ADD_OP   ? "ADD"
                              : op->op_type == type::KN_MUL_OP ? "MUL"
                              : op->op_type == type::KN_DIV_OP ? "DIV"
+                             : op->op_type == type::KN_POW_OP ? "POW"
                                                               : "";
         assert(op_type_str != "");
         // Create kernel instance

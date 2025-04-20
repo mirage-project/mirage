@@ -143,7 +143,7 @@ static string get_mma_stensor_aligned_layout(
       new_meta.strides[i] = new_stensor.dim[innermost_dim];
     }
   }
-  return get_stensor_layout(new_stensor, new_meta);
+  return get_stensor_layout(new_stensor, new_meta, new_stensor.num_dims - 2);
 }
 
 // Move the innermost dim to the last dim, and format it as a CuTe layout
@@ -193,10 +193,17 @@ static string append_epilogue_scalars(
   if (chain.size() == 1) {
     return res.append("0.0f};");
   }
+
+  bool store_last = true;
   for (size_t i = 1; i < chain.size(); i++) {
-    if (i == chain.size() - 1) {
-      // last one is EpilogueStore
+
+    // last one is epilogue accum/store, when it's accum, apply 0.0
+    // else append a 0.0 at last since store is not part of chain
+    if (i == chain.size() - 1 &&
+        chain.at(i).first->op_type == type::TB_FORLOOP_ACCUM_NO_RED_OP) {
+      // last one is EpilogueStoreAccum
       res.append("0.0f};");
+      store_last = false;
     } else if (is_threadblock_element_unary(chain.at(i).first->op_type)) {
       tb::TBElementUnaryOp const *tb_unary_op =
           dynamic_cast<tb::TBElementUnaryOp const *>(chain.at(i).first);
@@ -204,6 +211,9 @@ static string append_epilogue_scalars(
     } else {
       res.append("0.0f, ");
     }
+  }
+  if (store_last) {
+    res.append("0.0f};");
   }
   return res;
 }
@@ -961,7 +971,8 @@ CustomOPTranspileResult
         }
         case type::TB_ADD_OP:
         case type::TB_MUL_OP:
-        case type::TB_DIV_OP: {
+        case type::TB_DIV_OP:
+        case type::TB_POW_OP: {
           tb::STensor const &input0 = op->input_tensors.at(0);
           tb::STensor const &input1 = op->input_tensors.at(1);
           tb::STensor const &output = output_op->output_tensors.at(0);
@@ -989,6 +1000,7 @@ CustomOPTranspileResult
           string op_type_str = op->op_type == type::TB_ADD_OP   ? "ADD"
                                : op->op_type == type::TB_MUL_OP ? "MUL"
                                : op->op_type == type::TB_DIV_OP ? "DIV"
+                               : op->op_type == type::TB_POW_OP ? "POW"
                                                                 : "";
           assert(op_type_str != "");
           // Define layouts
@@ -1250,7 +1262,7 @@ CustomOPTranspileResult
   code.e("}"); // kernel
 
   return CustomOPTranspileResult{
-      CUDA_T_SUCCESS, func_name, mem_plan.smem_size, profiler_buf_size, code.to_string()};
+      CUDA_T_SUCCESS, func_name, mem_plan.smem_size, 0, code.to_string()};
 }
 
 } // namespace transpiler

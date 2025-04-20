@@ -14,7 +14,7 @@
 # limitations under the License.
 #
 
-IMAGE_NAME=("$1")
+IMAGE_NAME="$1"
 COMMAND="bash"
 
 WORKSPACE="/usr/mirage"
@@ -25,5 +25,5 @@ echo "DOCKER BINARY: nvidia-docker"
 
 nvidia-docker run --rm --pid=host \
     -it --net=host \
-    ${IMAGE_NAME} \
-    ${COMMAND[@]}
+    "${IMAGE_NAME}" \
+    "${COMMAND}"
