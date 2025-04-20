@@ -18,15 +18,14 @@
 namespace mirage {
 namespace runtime {
 template <typename Kernel>
-__device__ void generic_wrapper_kernel(TensorDesc *inputs,
-                                       TensorDesc *outputs,
-                                       int4 *tensor_offsets,
-                                       int forloop_range) {
+__device__ __forceinline__ void generic_wrapper_kernel(TensorDesc *inputs,
+                                                       TensorDesc *outputs,
+                                                       int4 *tensor_offsets,
+                                                       int forloop_range) {
 
-  auto params = Kernel::pack_parameters(inputs, outputs, tensor_offsets);
-  auto layouts =
-      Kernel::create_layouts(inputs, outputs);
-  Kernel::execute(params, layouts);
+  // auto params = Kernel::pack_parameters(inputs, outputs, tensor_offsets,
+  // forloop_range);
+  Kernel::execute(inputs, outputs, tensor_offsets, forloop_range);
 }
 }; // namespace runtime
 }; // namespace mirage

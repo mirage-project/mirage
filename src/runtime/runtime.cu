@@ -55,7 +55,7 @@ __device__ __forceinline__ bool is_termination_event(size_t event_loc,
   return (event_loc == 0);
 }
 
-__global__ void persistent_kernel(RuntimeConfig config) {
+__global__ void __launch_bounds__(128) persistent_kernel(RuntimeConfig config) {
   __shared__ TaskId cur_task_loc;
   assert(gridDim.y == 1);
   assert(gridDim.z == 1);
@@ -96,6 +96,8 @@ __global__ void persistent_kernel(RuntimeConfig config) {
           break;
         }
         default: {
+          // printf("task type %d , %d, %d\n", task_desc.task_type,
+          // config.all_tasks[cur_task_loc].task_type, cur_task_loc);
           assert(false && "Unimplemented task");
         }
       }
@@ -207,13 +209,35 @@ void Runtime::launch_persistent_kernel(int num_workers, int num_schedulers) {
                        host_all_event_counters.data(),
                        config.total_num_events * sizeof(int),
                        cudaMemcpyHostToDevice));
-  // Initialize all tasks
+
+  for (int i = 0; i < config.total_num_tasks; i++) {
+    TaskDesc &task = all_tasks.at(i);
+
+    for (int j = 0; j < task.num_inputs; ++j) {
+      TensorDesc &desc = task.inputs[j];
+      if (j == 0) {
+        checkCUDA(cudaMalloc(&desc.base_ptr, 4096 * 2));
+      } else {
+        checkCUDA(cudaMalloc(&desc.base_ptr, 4096 * 64 * 2));
+      }
+    }
+    for (int j = 0; j < task.num_outputs; ++j) {
+      TensorDesc &desc = task.outputs[j];
+      size_t num_elements = 1;
+      for (int d = 0; d < desc.num_dims; ++d) {
+        num_elements *= desc.dim[d];
+      }
+      checkCUDA(cudaMalloc(&desc.base_ptr, 64 * 2));
+    }
+  }
+
   checkCUDA(
       cudaMalloc(&config.all_tasks, config.total_num_tasks * sizeof(TaskDesc)));
   checkCUDA(cudaMemcpy(config.all_tasks,
                        all_tasks.data(),
                        config.total_num_tasks * sizeof(TaskDesc),
                        cudaMemcpyHostToDevice));
+  printf("12381893\n");
 
   // Initialize all events
   checkCUDA(cudaMalloc(&config.all_events,
@@ -222,7 +246,7 @@ void Runtime::launch_persistent_kernel(int num_workers, int num_schedulers) {
                        all_events.data(),
                        config.total_num_events * sizeof(EventDesc),
                        cudaMemcpyHostToDevice));
-
+  printf("a3171\n");
   // Initialize worker queues
   {
     std::vector<TaskId *> host_worker_queues;
@@ -239,6 +263,7 @@ void Runtime::launch_persistent_kernel(int num_workers, int num_schedulers) {
                          config.num_workers * sizeof(TaskId *),
                          cudaMemcpyHostToDevice));
   }
+  printf("dasdsd\n");
 
   // Initialize scheduler queues
   {
@@ -256,6 +281,7 @@ void Runtime::launch_persistent_kernel(int num_workers, int num_schedulers) {
                          config.num_schedulers * sizeof(EventId *),
                          cudaMemcpyHostToDevice));
   }
+  printf("371723\n");
 
   // Initialize first tasks
   {
@@ -266,6 +292,7 @@ void Runtime::launch_persistent_kernel(int num_workers, int num_schedulers) {
                          first_tasks.size() * sizeof(TaskId),
                          cudaMemcpyHostToDevice));
   }
+  printf("xxxxx1233 %d\n", num_dtensors);
 
   {
 
@@ -277,12 +304,39 @@ void Runtime::launch_persistent_kernel(int num_workers, int num_schedulers) {
                          cudaMemcpyHostToDevice));
   }
 
+  cudaDeviceSynchronize();
+
   // launch init kernel
+  printf("init\n");
   init_kernel<<<dim3(1, 1, 1), dim3(128, 1, 1)>>>(config);
   cudaDeviceSynchronize();
   // Launcher persistent kernel
-  persistent_kernel<<<dim3(108, 1, 1), dim3(128, 1, 1)>>>(config);
+
+  int max_smem = 0;
+
+  size_t smem_size = 25000;
+  cudaFuncSetAttribute(persistent_kernel,
+                       cudaFuncAttributeMaxDynamicSharedMemorySize,
+                       smem_size);
+  cudaError_t err = cudaGetLastError();
   cudaDeviceSynchronize();
+  if (err != cudaSuccess) {
+    printf("SetAttr error: %s\n", cudaGetErrorString(err));
+  }
+
+  persistent_kernel<<<dim3(108, 1, 1), dim3(128, 1, 1), smem_size>>>(config);
+  err = cudaGetLastError();
+  if (err != cudaSuccess) {
+    printf("xxLaunch error: %s\n", cudaGetErrorString(err));
+  }
+
+  cudaDeviceSynchronize();
+  printf("persist end\n");
+  cudaDeviceSynchronize();
+  err = cudaGetLastError();
+  if (err != cudaSuccess) {
+    printf("CUDA error: %s\n", cudaGetErrorString(err));
+  }
 }
 
 }; // namespace runtime

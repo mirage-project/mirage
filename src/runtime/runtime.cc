@@ -140,8 +140,8 @@ void dfs_create_events_add_tasks(
   }
 }
 
-void Runtime::add_tensor_offset(int3 const inout_map,
-                                kernel::DTensor const &dtensor,
+void Runtime::add_tensor_offset(int3 const &inout_map,
+                                kn::DTensor const &dtensor,
                                 std::vector<size_t> const &strides,
                                 tb::Graph const &bgraph) {
   int4 offset;
@@ -172,7 +172,6 @@ void Runtime::add_tensor_offset(int3 const inout_map,
   }
   tensor_offsets.push_back(offset);
 }
-  
 void Runtime::register_mugraph(
     mirage::kernel::Graph const &graph,
     std::unordered_map<kn::KNOperator const *, TaskType> const &task_types) {
@@ -205,24 +204,6 @@ void Runtime::register_mugraph(
       }
     }
 
-    // Step0: add
-    for (auto const &input : input_ops) {
-      add_tensor_offset(
-          input->input_map,
-          input->dtensor,
-          static_cast<kn::KNInputOp *>(input->dtensor.owner_op)->input_strides,
-          bgraph);
-      num_dtensors++;
-    }
-    for (auto const &output : output_ops) {
-      add_tensor_offset(output->output_map,
-                        output->dtensor,
-                        static_cast<kn::KNOutputOp *>(output->dtensor.owner_op)
-                            ->output_strides,
-                        bgraph);
-      num_dtensors++;
-    }
-
     // Step 1: add all tasks based on their blockIdx
     // (bid.x, bid.y, bid.z) ordering
     for (bid.x = 0; bid.x < bgraph.grid_dim.x; bid.x++) {
@@ -234,7 +215,7 @@ void Runtime::register_mugraph(
             TensorDesc desc;
             assert(input->output_tensors.size() == 1);
             tb::STensor stensor = input->output_tensors[0];
-            std::vector<size_t> input_strides =
+            std::vector<size_t> const &input_strides =
                 static_cast<kn::KNInputOp *>(input->dtensor.owner_op)
                     ->input_strides;
             desc.num_dims = stensor.num_dims;
@@ -248,15 +229,33 @@ void Runtime::register_mugraph(
               desc.dtensor_stride[d] = input_strides.at(d);
             }
             task.inputs[task.num_inputs++] = desc;
+
+            add_tensor_offset(
+                input->input_map, input->dtensor, input_strides, bgraph);
+            num_dtensors++;
+            printf("num_dtensors1 %d\n", num_dtensors);
           }
           // Initialize output tensors to the task
           for (auto const &output : output_ops) {
             TensorDesc desc;
             assert(output->input_tensors.size() == 1);
             tb::STensor stensor = output->input_tensors[0];
-            std::vector<size_t> output_strides =
-                static_cast<kn::KNOutputOp *>(output->dtensor.owner_op)
-                    ->output_strides;
+            // get default strides
+            std::vector<size_t> output_strides = [](kn::DTensor const &A) {
+              std::vector<size_t> strides(A.num_dims);
+              size_t stride = 1;
+              for (int i = A.num_dims - 1; i >= 0; --i) {
+                strides[i] = stride;
+                stride *= A.dim[i];
+              }
+              return strides;
+            }(output->dtensor);
+
+            add_tensor_offset(
+                output->output_map, output->dtensor, output_strides, bgraph);
+            num_dtensors++;
+            printf("num_dtensors2 %d\n", num_dtensors);
+
             desc.num_dims = stensor.num_dims;
             desc.data_type = stensor.data_type;
             for (int d = stensor.num_dims - 1; d >= 0; d--) {
