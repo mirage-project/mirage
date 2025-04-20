@@ -78,8 +78,9 @@ void dfs_create_events_add_tasks(
     for (bid.x = producer_lo_bid.x; bid.x < producer_hi_bid.x; bid.x++) {
       for (bid.y = producer_lo_bid.y; bid.y < producer_hi_bid.y; bid.y++) {
         for (bid.z = producer_lo_bid.z; bid.z < producer_hi_bid.z; bid.z++) {
-          all_tasks[pre_task_map.find(bid)->second].trigger_event =
-              all_events.size();
+          assert(pre_task_map.find(bid) != pre_task_map.end());
+          int task_id = pre_task_map.find(bid)->second;
+          all_tasks[task_id].trigger_event = all_events.size();
           event_desc.num_triggers++;
         }
       }
@@ -174,17 +175,16 @@ void Runtime::add_tensor_offset(int3 const &inout_map,
 }
 void Runtime::register_mugraph(
     mirage::kernel::Graph const &graph,
-    std::unordered_map<kn::KNOperator const *, TaskType> const &task_types) {
-  std::vector<tb::TBOutputOp *> pre_output_ops;
+    std::unordered_map<kn::KNOperator const *,
+                       std::tuple<int, int, TaskType>> const &task_configs) {
+  std::vector<tb::TBInputOp *> pre_output_ops;
   kn::KNCustomizedOp const *pre_op = nullptr;
   std::map<dim3, TaskId, Dim3Comparator> pre_task_map;
   for (auto const &op : graph.operators) {
     if (op->op_type == type::KNOperatorType::KN_INPUT_OP) {
       continue;
     }
-    if (op->op_type == type::KNOperatorType::KN_EMBEDDING_OP) {
-      continue;
-    }
+    std::tuple<int, int, TaskType> task_config = task_configs.find(op)->second;
     std::map<dim3, TaskId, Dim3Comparator> cur_task_map;
     assert(op->op_type == type::KNOperatorType::KN_CUSTOMIZED_OP);
     // Customized op
@@ -194,13 +194,17 @@ void Runtime::register_mugraph(
     dim3 bid;
     std::vector<TaskDesc> tasks;
     std::vector<tb::TBInputOp *> input_ops;
-    std::vector<tb::TBOutputOp *> output_ops;
+    std::vector<tb::TBInputOp *> output_ops;
+    int num_inputs = std::get<0>(task_config);
+    int num_outputs = std::get<1>(task_config);
+    TaskType task_type = std::get<2>(task_config);
+    assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
     for (auto const &op : bgraph.operators) {
-      if (op->op_type == mirage::type::TB_INPUT_OP) {
+      assert(op->op_type == mirage::type::TB_INPUT_OP);
+      if (input_ops.size() < (size_t)num_inputs) {
         input_ops.push_back(static_cast<tb::TBInputOp *>(op));
-      }
-      if (op->op_type == mirage::type::TB_OUTPUT_OP) {
-        output_ops.push_back(static_cast<tb::TBOutputOp *>(op));
+      } else {
+        output_ops.push_back(static_cast<tb::TBInputOp *>(op));
       }
     }
 
@@ -209,7 +213,7 @@ void Runtime::register_mugraph(
     for (bid.x = 0; bid.x < bgraph.grid_dim.x; bid.x++) {
       for (bid.y = 0; bid.y < bgraph.grid_dim.y; bid.y++) {
         for (bid.z = 0; bid.z < bgraph.grid_dim.z; bid.z++) {
-          TaskDesc task(task_types.find(cur_op)->second);
+          TaskDesc task(task_type);
           // Initialize input tensors to the task
           for (auto const &input : input_ops) {
             TensorDesc desc;
@@ -238,8 +242,8 @@ void Runtime::register_mugraph(
           // Initialize output tensors to the task
           for (auto const &output : output_ops) {
             TensorDesc desc;
-            assert(output->input_tensors.size() == 1);
-            tb::STensor stensor = output->input_tensors[0];
+            assert(output->output_tensors.size() == 1);
+            tb::STensor stensor = output->output_tensors[0];
             // get default strides
             std::vector<size_t> output_strides = [](kn::DTensor const &A) {
               std::vector<size_t> strides(A.num_dims);
@@ -278,6 +282,7 @@ void Runtime::register_mugraph(
       // Assert that the first op launches a single task
       assert(tasks.size() == 1);
       first_tasks.push_back(all_tasks.size());
+      cur_task_map[dim3(0, 0, 0)] = all_tasks.size();
       all_tasks.push_back(tasks[0]);
     } else {
       // Step 2.1: analyze dependencies between thread blocks of the two ops
@@ -286,10 +291,12 @@ void Runtime::register_mugraph(
       int num_shared_tensors = 0;
       int3 input_map, output_map;
       for (auto const &input : input_ops) {
-        if (input->dtensor.owner_op == pre_op) {
-          input_map = input->input_map;
-          output_map = pre_output_ops[input->dtensor.owner_ts_idx]->output_map;
-          num_shared_tensors++;
+        for (auto const &output : pre_output_ops) {
+          if (input->dtensor.guid == output->dtensor.guid) {
+            input_map = input->input_map;
+            output_map = output->input_map;
+            num_shared_tensors++;
+          }
         }
       }
       // assert that their is a single tensor shared between ops

@@ -27,7 +27,8 @@ __global__ void init_kernel(RuntimeConfig config) {
   // Only a single thread that initializes everything
   if (threadIdx.x == 0) {
     // Send first_task[0] to worker[0]
-    config.worker_queue_last_task_id[0] = 1;
+    config.worker_queue_last_ready_task_id[0] = 1;
+    config.worker_queue_next_free_task_id[0] = 1;
     config.worker_queues[0][0] = config.first_tasks[0];
   }
 }
@@ -40,13 +41,29 @@ __device__ void terminate_workers_and_schedulers(RuntimeConfig config) {
   // Send event 0 to all workers
   // Task ID 0 is the termination task
   for (int i = 0; i < config.num_workers; i++) {
-    size_t last_task_id = atomicAdd(&config.worker_queue_last_task_id[i], 1);
+    size_t last_task_id =
+        atomicAdd(&config.worker_queue_next_free_task_id[i], 1);
     config.worker_queues[i][last_task_id % config.per_worker_queue_len] = 0;
+    size_t old = config.worker_queue_last_ready_task_id[i];
+    do {
+      // TODO: need __threadfence() ???
+      old = atomicCAS(&config.worker_queue_last_ready_task_id[i],
+                      last_task_id,
+                      last_task_id + 1);
+    } while (old != last_task_id);
   }
   // Event ID 0 is the termination event
   for (int i = 0; i < config.num_schedulers; i++) {
-    size_t last_event_id = atomicAdd(&config.sched_queue_last_event_id[i], 1);
+    size_t last_event_id =
+        atomicAdd(&config.sched_queue_next_free_event_id[i], 1);
     config.sched_queues[i][last_event_id % config.per_sched_queue_len] = 0;
+    size_t old = config.sched_queue_last_ready_event_id[i];
+    do {
+      // TODO: need __threadfence() ???
+      old = atomicCAS(&config.sched_queue_last_ready_event_id[i],
+                      last_event_id,
+                      last_event_id + 1);
+    } while (old != last_event_id);
   }
 }
 
@@ -73,10 +90,16 @@ __global__ void __launch_bounds__(128) persistent_kernel(RuntimeConfig config) {
         size_t last_task_id = cur_task_id;
         while (cur_task_id == last_task_id) {
           __threadfence();
-          last_task_id = config.worker_queue_last_task_id[worker_id];
+          last_task_id = config.worker_queue_last_ready_task_id[worker_id];
         }
         assert(cur_task_id + config.per_worker_queue_len > last_task_id);
         cur_task_loc = task_queue[cur_task_id % config.per_worker_queue_len];
+        printf("[FTCH] worker_id(%d) task_pos(%llu) last_task_pos(%llu) "
+               "task_id(%llu)\n",
+               worker_id,
+               cur_task_id,
+               last_task_id,
+               cur_task_loc);
       }
       __syncthreads();
       TaskDesc task_desc = config.all_tasks[cur_task_loc];
@@ -93,6 +116,33 @@ __global__ void __launch_bounds__(128) persistent_kernel(RuntimeConfig config) {
                                                 task_desc.outputs,
                                                 config.tensor_offsets,
                                                 task_desc.forloop_range);
+          if (threadIdx.x == 0) {
+            printf("[EXEC] worker_id(%d) task_type(RMS)\n", worker_id);
+          }
+          break;
+        }
+        case TASK_EMBEDDING: {
+          if (threadIdx.x == 0) {
+            printf("worker_id(%d) task_type(EMB)\n", worker_id);
+          }
+          break;
+        }
+        case TASK_ATTENTION_1: {
+          if (threadIdx.x == 0) {
+            printf("worker_id(%d) task_type(Attn1)\n", worker_id);
+          }
+          break;
+        }
+        case TASK_ATTENTION_2: {
+          if (threadIdx.x == 0) {
+            printf("worker_id(%d) task_type(Attn2)\n", worker_id);
+          }
+          break;
+        }
+        case TASK_SILU_MUL_LINEAR: {
+          if (threadIdx.x == 0) {
+            printf("worker_id(%d) task_type(SiluMulLinear)\n", worker_id);
+          }
           break;
         }
         default: {
@@ -106,6 +156,10 @@ __global__ void __launch_bounds__(128) persistent_kernel(RuntimeConfig config) {
       if (threadIdx.x == 0) {
         EventId event_id = task_desc.trigger_event;
         int count = atomicSub(&config.all_event_counters[event_id], 1);
+        printf("[DONE] worker_id(%d) task_id(%llu) count(%d)\n",
+               worker_id,
+               cur_task_loc,
+               count);
         if (count == 1) {
           // The event has been triggered enough times
           // Refresh the event counter
@@ -115,9 +169,16 @@ __global__ void __launch_bounds__(128) persistent_kernel(RuntimeConfig config) {
           // Add the event to the schedule_queue
           int sched_id = event_id % config.num_schedulers;
           size_t last_event_id =
-              atomicAdd(&config.sched_queue_last_event_id[sched_id], 1);
+              atomicAdd(&config.sched_queue_next_free_event_id[sched_id], 1);
           config.sched_queues[sched_id][last_event_id %
                                         config.per_sched_queue_len] = event_id;
+          size_t old = config.sched_queue_last_ready_event_id[sched_id];
+          do {
+            // TODO: need __threadfence() ???
+            old = atomicCAS(&config.sched_queue_last_ready_event_id[sched_id],
+                            last_event_id,
+                            last_event_id + 1);
+          } while (old != last_event_id);
         }
       }
       cur_task_id += 1;
@@ -136,7 +197,7 @@ __global__ void __launch_bounds__(128) persistent_kernel(RuntimeConfig config) {
       while (true) {
         while (cur_event_id == last_event_id) {
           __threadfence();
-          last_event_id = config.sched_queue_last_event_id[sched_id];
+          last_event_id = config.sched_queue_last_ready_event_id[sched_id];
         }
         // Make sure the schedule queue is not overflow
         assert(cur_event_id + config.per_sched_queue_len > last_event_id);
@@ -148,10 +209,18 @@ __global__ void __launch_bounds__(128) persistent_kernel(RuntimeConfig config) {
           // return;
         }
         for (TaskId i = e.first_task_id; i < e.last_task_id; i++) {
-          size_t last_task_id =
-              atomicAdd(&(config.worker_queue_last_task_id[next_worker]), 1);
+          size_t last_task_id = atomicAdd(
+              &(config.worker_queue_next_free_task_id[next_worker]), 1);
           config.worker_queues[next_worker]
                               [last_task_id % config.per_worker_queue_len] = i;
+          size_t old = config.worker_queue_last_ready_task_id[next_worker];
+          do {
+            // TODO: need __threadfence() ???
+            old =
+                atomicCAS(&config.worker_queue_last_ready_task_id[next_worker],
+                          last_task_id,
+                          last_task_id + 1);
+          } while (old != last_task_id);
           next_worker = (next_worker + 1) % config.num_workers;
         }
         if (e.first_task_id == e.last_task_id) {
@@ -177,24 +246,37 @@ void Runtime::launch_persistent_kernel(int num_workers, int num_schedulers) {
   config.per_worker_queue_len = 1024;
   config.per_sched_queue_len = 1024;
   // Initialize worker queue last task id
-  checkCUDA(cudaMalloc(&config.worker_queue_last_task_id,
+  checkCUDA(cudaMalloc(&config.worker_queue_last_ready_task_id,
+                       config.num_workers * sizeof(unsigned long long int)));
+  checkCUDA(cudaMalloc(&config.worker_queue_next_free_task_id,
                        config.num_workers * sizeof(unsigned long long int)));
   std::vector<unsigned long long int> host_worker_queue_last_task_id;
   for (int i = 0; i < config.num_workers; i++) {
     host_worker_queue_last_task_id.push_back(0);
   }
-  checkCUDA(cudaMemcpy(config.worker_queue_last_task_id,
+  checkCUDA(cudaMemcpy(config.worker_queue_last_ready_task_id,
+                       host_worker_queue_last_task_id.data(),
+                       config.num_workers * sizeof(unsigned long long int),
+                       cudaMemcpyHostToDevice));
+  checkCUDA(cudaMemcpy(config.worker_queue_next_free_task_id,
                        host_worker_queue_last_task_id.data(),
                        config.num_workers * sizeof(unsigned long long int),
                        cudaMemcpyHostToDevice));
   // Initialize scheduler queue last event id
-  checkCUDA(cudaMalloc(&config.sched_queue_last_event_id,
+  checkCUDA(cudaMalloc(&config.sched_queue_last_ready_event_id,
                        config.num_schedulers * sizeof(unsigned long long int)));
+  checkCUDA(cudaMalloc(&config.sched_queue_next_free_event_id,
+                       config.num_schedulers * sizeof(unsigned long long int)));
+
   std::vector<unsigned long long int> host_sched_queue_last_event_id;
   for (int i = 0; i < config.num_schedulers; i++) {
     host_sched_queue_last_event_id.push_back(0);
   }
-  checkCUDA(cudaMemcpy(config.sched_queue_last_event_id,
+  checkCUDA(cudaMemcpy(config.sched_queue_last_ready_event_id,
+                       host_sched_queue_last_event_id.data(),
+                       config.num_schedulers * sizeof(unsigned long long int),
+                       cudaMemcpyHostToDevice));
+  checkCUDA(cudaMemcpy(config.sched_queue_next_free_event_id,
                        host_sched_queue_last_event_id.data(),
                        config.num_schedulers * sizeof(unsigned long long int),
                        cudaMemcpyHostToDevice));

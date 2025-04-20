@@ -211,7 +211,8 @@ void KernelGraphGenerator::generate_next_operator(
                           c.tb_graph->create_input_op(dtensor,
                                                       input_map[i],
                                                       forloop_dim[i],
-                                                      layout::SmemRowMajor);
+                                                      layout::SmemRowMajor,
+                                                      false /*store_in_dmem*/);
                       if (input_op == nullptr) {
                         input_created = false;
                         break;

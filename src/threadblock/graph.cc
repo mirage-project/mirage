@@ -118,6 +118,10 @@ size_t Graph::calculate_shared_memory_usage(TBOperator *new_op) {
       case mirage::type::TB_CONCAT_1_OP:
       case mirage::type::TB_CONCAT_2_OP: {
         for (size_t i = 0; i < op->output_tensors.size(); i++) {
+          // Do not store in smem when store_in_demm is set
+          if (op->output_tensors[i].store_in_dmem) {
+            continue;
+          }
           usage += op->output_tensors[i].size();
         }
         break;
@@ -143,6 +147,8 @@ size_t Graph::calculate_shared_memory_usage(TBOperator *new_op) {
         // we will inline accumulation but need to perform
         // a redue_sum
         assert(op->output_tensors.size() == 1);
+        // don't allow offloading for accumulators
+        assert(!op->output_tensors[0].store_in_dmem);
         usage += op->output_tensors[0].size();
         break;
       }
@@ -150,6 +156,8 @@ size_t Graph::calculate_shared_memory_usage(TBOperator *new_op) {
         // we will inline accumulation but need to perform
         // a reduction
         assert(op->output_tensors.size() == 1);
+        // don't allow offloading for accumulators
+        assert(!op->output_tensors[0].store_in_dmem);
         usage += op->output_tensors[0].size();
         break;
       }
@@ -163,6 +171,8 @@ size_t Graph::calculate_shared_memory_usage(TBOperator *new_op) {
         // So we only need to allocate shared memory for reduction, whose
         // size is the same as output_tensors[0]
         assert(op->output_tensors.size() == 1);
+        // don't allow offloading for accumulators
+        assert(!op->output_tensors[0].store_in_dmem);
         usage += op->output_tensors[0].size();
         break;
       }
@@ -170,6 +180,8 @@ size_t Graph::calculate_shared_memory_usage(TBOperator *new_op) {
         // we will inline accumulation but need to perform
         // a reduuction_to_dimx
         assert(op->output_tensors.size() == 1);
+        // don't allow offloading for accumulators
+        assert(!op->output_tensors[0].store_in_dmem);
         usage += op->output_tensors[0].size();
         break;
       }
