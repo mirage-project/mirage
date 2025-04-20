@@ -240,7 +240,10 @@ void Runtime::launch_persistent_kernel(int num_workers, int num_schedulers) {
   config.per_sched_queue_len = 1024;
   // Initialize nvshmem
   int mype_node = nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE);
-  printf("nvshmem_my_pe: %d nvshmem_n_pes: %d mype_node %d\n", nvshmem_my_pe(), nvshmem_n_pes(), mype_node);
+  printf("nvshmem_my_pe: %d nvshmem_n_pes: %d mype_node %d\n",
+         nvshmem_my_pe(),
+         nvshmem_n_pes(),
+         mype_node);
   assert(nvshmem_my_pe() == my_gpu_id);
   assert(nvshmem_n_pes() == num_gpus);
   // Initialize worker queue last task id
