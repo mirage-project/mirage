@@ -76,7 +76,7 @@ public:
                         std::unordered_map<mirage::kernel::KNOperator const *,
                                            TaskType> const &task_types);
   void launch_persistent_kernel(int num_workers, int num_schedulers);
-  void add_tensor_offset(int3 const inout_map,
+  void add_tensor_offset(int3 const &inout_map,
                          kernel::DTensor const &dtensor,
                          std::vector<size_t> const &strides,
                          threadblock::Graph const &bgraph);
@@ -87,7 +87,7 @@ public:
   std::vector<TaskId> first_tasks;
   std::vector<int4> tensor_offsets;
   int num_graphs;
-  int num_dtensors;
+  int num_dtensors = 0;
 };
 
 } // namespace runtime
