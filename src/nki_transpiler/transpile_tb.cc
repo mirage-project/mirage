@@ -62,6 +62,8 @@ string ugraph_tboperator_type_to_nki(const ty::TBOperatorType type) {
       return "nl.multiply";
     case ty::TB_DIV_OP:
       return "nl.divide";
+    case ty::TB_POW_OP:
+      return "nl.power";
     default:
       assert(false);
   }
@@ -88,6 +90,8 @@ string ugraph_knoperator_type_to_nki(const ty::KNOperatorType type) {
       return "nl.multiply";
     case ty::KN_DIV_OP:
       return "nl.divide";
+    case ty::KN_POW_OP:
+      return "nl.power";
     default:
       assert(false);
   }
@@ -466,7 +470,8 @@ NKICustomOPTranspileResult
       }
       case type::TB_ADD_OP:
       case type::TB_MUL_OP:
-      case type::TB_DIV_OP: {
+      case type::TB_DIV_OP:
+      case type::TB_POW_OP: {
         tb::STensor const &input0 = tb_op->input_tensors.at(0);
         tb::STensor const &input1 = tb_op->input_tensors.at(1);
         tb::STensor const &output = tb_op->output_tensors.at(0);
@@ -648,7 +653,8 @@ NKICustomOPTranspileResult
       }
       case type::TB_ADD_OP:
       case type::TB_MUL_OP:
-      case type::TB_DIV_OP: {
+      case type::TB_DIV_OP:
+      case type::TB_POW_OP: {
         tb::STensor const &input0 = tb_op->input_tensors.at(0);
         tb::STensor const &input1 = tb_op->input_tensors.at(1);
         tb::STensor const &output = tb_op->output_tensors.at(0);

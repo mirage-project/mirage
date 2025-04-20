@@ -182,7 +182,8 @@ KNCustomizedOp::KNCustomizedOp(mirage::kernel::Graph *_kgraph,
       }
       case mirage::type::TB_ADD_OP:
       case mirage::type::TB_MUL_OP:
-      case mirage::type::TB_DIV_OP: {
+      case mirage::type::TB_DIV_OP:
+      case mirage::type::TB_POW_OP: {
         assert(my_inputs.size() == 2);
         bgraph.elementbinary(my_inputs[0], my_inputs[1], op->op_type);
         break;
