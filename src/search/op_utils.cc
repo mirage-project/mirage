@@ -160,7 +160,7 @@ std::shared_ptr<AbstractExpr> get_pattern(type::TBOperatorType op,
     case type::TBOperatorType::TB_RELU_OP:
       return std::make_shared<Relu>(opd);
     case type::TBOperatorType::TB_CLAMP_OP:
-      return std::make_shared<Relu>(opd);
+      return std::make_shared<Clamp>(type::CLAMP_MIN_MAX["min_val"], type::CLAMP_MIN_MAX["max_val"], opd);
     case type::TBOperatorType::TB_RMS_NORM_OP: {
       return std::make_shared<Div>(
           opd, std::make_shared<RMS>(tensor.dim[tensor.num_dims - 1], opd));
