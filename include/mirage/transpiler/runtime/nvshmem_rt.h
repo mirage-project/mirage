@@ -20,7 +20,7 @@ static inline void initialize_mpi_nvshmem(int rank) {
   nvshmemx_init_attr_t attr;
   mpi_comm = MPI_COMM_WORLD;
   attr.mpi_comm = &mpi_comm;
-  MPI_Barrier(MPI_COMM_WORLD);
+  // MPI_Barrier(MPI_COMM_WORLD);
   nvshmemx_init_attr(NVSHMEMX_INIT_WITH_MPI_COMM, &attr);
   nvshmem_barrier_all();
 

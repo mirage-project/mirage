@@ -95,7 +95,17 @@ std::pair<string, string>
   DTensorMeta const &meta = dtensor_metas.at(guid);
   string pointer_var_name = fmt("dtensor$", guid);
   string code = "";
-  if (meta.is_input) {
+  // string signal_code = "";
+  // string malloc_code = "";
+  if (dtensor.prologue == mirage::type::TBPrologueType::TB_PROLOGUE_ALLGATHER) {
+    code = fmt("$ *$ = ($*)nvshmem_malloc(sizeof($) * $);",
+                      get_datatype_str(dtensor.data_type),
+                      pointer_var_name,
+                      get_datatype_str(dtensor.data_type),
+                      get_datatype_str(dtensor.data_type),
+                      meta.num_phy_elems);
+  }
+  else if (meta.is_input) {
     code = fmt("$ *$ = ($*)input_tensors.at($);",
                get_datatype_str(dtensor.data_type),
                pointer_var_name,
@@ -501,7 +511,9 @@ TranspileResult Transpiler::transpile_ugraph() {
             dynamic_cast<kn::KNCustomizedOp const *>(op);
         // tb::ExecutionPlan const &plan = cur_op->plan;
         tb::Graph const &bgraph = cur_op->bgraph;
-        vector<string> comm_buf_names;
+        vector<string> nvshmem_to_free;
+        vector<string> nvshmem_as_param;
+        vector<string> streams;
         // For epilogue nvshmem allocation
         if (use_nvshmem) {
           for (kn::DTensor const &dtensor : cur_op->output_tensors) {
@@ -509,22 +521,24 @@ TranspileResult Transpiler::transpile_ugraph() {
             if (dtensor.epilogue == type::TBEpilogueType::TB_EPILOGUE_ALLTOALL) {
               //TODO: TB alltoall
               exec.e("$ *alltoall_buf_$ = ($ *)nvshmem_malloc(sizeof($) * $);", \
-              get_datatype_str(dtensor.data_type),
-              dtensor.guid,
-              get_datatype_str(dtensor.data_type),
-              get_datatype_str(dtensor.data_type),
-              meta.num_phy_elems);
-              comm_buf_names.push_back(fmt("alltoall_buf_$", dtensor.guid));
+                      get_datatype_str(dtensor.data_type),
+                      dtensor.guid,
+                      get_datatype_str(dtensor.data_type),
+                      get_datatype_str(dtensor.data_type),
+                      meta.num_phy_elems);
+              nvshmem_to_free.push_back(fmt("alltoall_buf_$", dtensor.guid));
+              nvshmem_as_param.push_back(fmt("alltoall_buf_$", dtensor.guid));
             } else if (dtensor.epilogue == type::TBEpilogueType::TB_EPILOGUE_REDUCESCATTER) {
               //TODO: TB reduce_scatter
               //TODO: support multi-dim gpu mesh
               exec.e("$ *reduce_scatter_buf_$ = ($ *)nvshmem_malloc(sizeof($) * $);", \
-              get_datatype_str(dtensor.data_type),
-              dtensor.guid,
-              get_datatype_str(dtensor.data_type),
-              get_datatype_str(dtensor.data_type),
-              meta.num_phy_elems * cur_op->bgraph.gpu_dim.x);
-              comm_buf_names.push_back(fmt("reduce_scatter_buf_$", dtensor.guid));
+                      get_datatype_str(dtensor.data_type),
+                      dtensor.guid,
+                      get_datatype_str(dtensor.data_type),
+                      get_datatype_str(dtensor.data_type),
+                      meta.num_phy_elems * cur_op->bgraph.gpu_dim.x);
+              nvshmem_to_free.push_back(fmt("reduce_scatter_buf_$", dtensor.guid));
+              nvshmem_as_param.push_back(fmt("reduce_scatter_buf_$", dtensor.guid));
             } else if (dtensor.epilogue == type::TBEpilogueType::TB_EPILOGUE_ALLREDUCE) {
               assert(false && "TB allreduce is not supported yet"); 
               //TODO: TB allreduce
@@ -532,14 +546,55 @@ TranspileResult Transpiler::transpile_ugraph() {
           }
         }
         // Get DTensor ptrs
-        // We make the aggrement that, when calling a custom kernel, the
-        // arguments are in the order of "output_tensors, input_tensors, comm_buf_names"
+        // We make the agreement that, when calling a custom kernel, the
+        // arguments are in the order of "output_tensors, input_tensors, nvshmem_to_free"
         vector<string> ptr_names;
         for (kn::DTensor const &dtensor :
              Combine(cur_op->output_tensors, cur_op->input_tensors)) {
           auto [ptr_name, ptr_code] = get_dtensor_ptr(dtensor);
           exec.e(ptr_code);
           ptr_names.push_back(ptr_name);
+        }
+        // For prologue
+        for (tb::TBOperator const *tb_op : bgraph.operators) {
+          if (tb_op->op_type == mirage::type::TB_INPUT_OP) {
+            tb::TBInputOp const *input_op =
+                dynamic_cast<tb::TBInputOp const *>(tb_op);
+            mirage::kernel::DTensor const *dtensor = &(input_op->dtensor);
+            int64_t original_guid = dtensor->original_guid;
+            int64_t guid = dtensor->guid;
+            DTensorMeta const &meta = dtensor_metas.at(dtensor->guid);
+            if (input_op->prologue == mirage::type::TBPrologueType::TB_PROLOGUE_ALLGATHER) {
+              //TODO: TB allgather (Jianan)
+              exec.e("$ *allgather_buf_$ = ($ *)nvshmem_malloc(sizeof($) * $);", \
+                      get_datatype_str(dtensor->data_type),
+                      guid,
+                      get_datatype_str(dtensor->data_type),
+                      get_datatype_str(dtensor->data_type),
+                      meta.num_phy_elems);
+              // repoint input ptr to allgather_buf
+              // TODO: Use tiles instead of whole tensor
+              exec.e("uint64_t *allgather_signal_$ = (uint64_t*)nvshmem_malloc(sizeof(uint64_t) * npes);",
+                      guid);
+              exec.e(fmt("cudaStream_t allgather_stream_$;", guid));
+              exec.e(fmt("cudaStreamCreate(&allgather_stream_$);", guid));
+              streams.push_back(fmt("allgather_stream_$", guid));
+              exec.e(fmt("tb::allgather_host<$, $>(allgather_buf_$, dtensor$, allgather_signal_$, $, mype, npes, 0, false, allgather_stream_$);", \
+                      get_datatype_str(dtensor->data_type),
+                      get_cute_layout(*dtensor, dtensor_metas.at(guid)),
+                      guid,
+                      original_guid,
+                      guid,
+                      meta.num_phy_elems,
+                      guid));
+              exec.e("dtensor$ = allgather_buf_$;",
+                     original_guid,
+                     guid);
+              nvshmem_to_free.push_back(fmt("allgather_buf_$", guid));
+              nvshmem_to_free.push_back(fmt("allgather_signal_$", guid));
+              nvshmem_as_param.push_back(fmt("allgather_signal_$", guid));
+            }
+          }
         }
         // Transpile
         CustomOPTranspileResult result;
@@ -690,14 +745,14 @@ TranspileResult Transpiler::transpile_ugraph() {
                  result.func_name,
                  tmas,
                  ptr_names,
-                 comm_buf_names);
+                 nvshmem_as_param);
           }
           else {
             exec.e("$<<<grid_dim, block_dim, smem_size>>>($ $ $, mype, npes);",
                  result.func_name,
                  tmas,
                  ptr_names,
-                 comm_buf_names);
+                 nvshmem_as_param);
           }
         } else {
           exec.e("cudaFuncSetAttribute($, "
@@ -708,35 +763,37 @@ TranspileResult Transpiler::transpile_ugraph() {
             exec.e("$<<<grid_dim, block_dim, smem_size>>>($ $);",
                  result.func_name,
                  ptr_names,
-                 comm_buf_names);
+                 nvshmem_as_param);
           }
           else {
             exec.e("$<<<grid_dim, block_dim, smem_size>>>($, $, mype, npes);",
                  result.func_name,
                  ptr_names,
-                 comm_buf_names);
+                 nvshmem_as_param);
           }
         }
 
         custom_kernels.e(result.code);
         if (use_nvshmem) {
           // copy result from comm_buf to dtensor
-          // TODO assuming only one output tensor and one comm_buf
+          // TODO: assuming only one output tensor and one comm_buf
+          // TODO: handle commbufs including prologue and epilogue
           kn::DTensor const &output_dtensor = cur_op->output_tensors[0];
           auto output_guid = output_dtensor.guid;
           DTensorMeta const &output_meta = dtensor_metas.at(output_guid);
+          if (!nvshmem_as_param.empty() && nvshmem_as_param[0].find("alltoall") != string::npos) {
           
-          // TODO (linsj20)
-          if (output_dtensor.epilogue == type::TBEpilogueType::TB_EPILOGUE_ALLTOALL) {
             exec.e("nvshmem_barrier_all();");
             exec.e("cudaMemcpy((void *)output_tensors.at(0), "
-                   "(const void *)nvshmem_ptr($, mype), "
-                   "$ * sizeof($), "
-                   "cudaMemcpyDeviceToDevice);", 
-                   comm_buf_names[0], 
-                   output_meta.num_phy_elems, 
-                   get_datatype_str(output_dtensor.data_type));
-          }
+                  "(const void *)nvshmem_ptr($, mype), "
+                  "$ * sizeof($), "
+                  "cudaMemcpyDeviceToDevice);", 
+                  nvshmem_as_param[0], 
+                  output_meta.num_phy_elems, 
+                  get_datatype_str(output_dtensor.data_type));
+           }
+           // TODO: Inconsistency between nvshmem_as_param and comm_buf_names may still need to check
+           // TODO (linsj20) 
           else if (output_dtensor.epilogue == type::TBEpilogueType::TB_EPILOGUE_REDUCESCATTER) {
             /*
             for (kn::KNOperator *_op : g->operators) {
@@ -767,7 +824,7 @@ TranspileResult Transpiler::transpile_ugraph() {
             exec.e("nvshmem_barrier_all();");
             exec.e("reduction_kernel::run(($*)output_tensors.at(0), $);", 
                    get_datatype_str(output_dtensor.data_type),
-                   comm_buf_names[0]);
+                   nvshmem_as_param[0]);
           }
 
           // Free nvshmem allocated memory
@@ -780,9 +837,14 @@ TranspileResult Transpiler::transpile_ugraph() {
               exec.e("nvshmem_free($);", ptr_name);
             }
           }
-          for (auto const &comm_buf_name : comm_buf_names) {
+          for (auto const &comm_buf_name : nvshmem_to_free) {
             std::cout << "freeing " << comm_buf_name << std::endl;
             exec.e("nvshmem_free($);", comm_buf_name);
+          }
+
+          // Free streams
+          for (auto const &stream_name : streams) {
+            exec.e("cudaStreamDestroy($);", stream_name);
           }
         }
 

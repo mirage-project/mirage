@@ -29,24 +29,33 @@ namespace mirage {
 namespace threadblock {
 
 Graph::Graph()
-    : gpu_dim(1, 1, 1), grid_dim(1, 1, 1), block_dim(1, 1, 1), forloop_range(1),
-      reduction_dimx(1), smem_offset(0) {}
+    : grid_dim(1, 1, 1), block_dim(1, 1, 1), forloop_range(1),
+      reduction_dimx(1), smem_offset(0), gpu_dim(1, 1, 1) {}
+
+Graph::Graph(dim3 _grid_dim,
+             dim3 _block_dim,
+             int _forloop_range,
+             int _reduction_dimx,
+             dim3 _gpu_dim,
+             bool _from_constructed)
+    : grid_dim(_grid_dim), block_dim(_block_dim), forloop_range(_forloop_range),
+      reduction_dimx(_reduction_dimx), smem_offset(0), gpu_dim(_gpu_dim),
+      from_constructed(_from_constructed) {
+  // A bgraph cannot have more than MAX_NUM_THREADBLOCKS_PER_KERNEL threadblocks
+  // otherwise we don't have enough buffers in device memory for saving
+  // fingerprints
+  assert(grid_dim.x * grid_dim.y * grid_dim.z <=
+         mirage::config::MAX_NUM_THREADBLOCKS_PER_KERNEL);
+  assert(reduction_dimx > 0);
+}
 
 Graph::Graph(dim3 _grid_dim,
              dim3 _block_dim,
              int _forloop_range,
              int _reduction_dimx)
-    : Graph(dim3(1, 1, 1), _grid_dim, _block_dim, 
-            _forloop_range, _reduction_dimx) {}
-
-Graph::Graph(dim3 _gpu_dim,
-             dim3 _grid_dim,
-             dim3 _block_dim,
-             int _forloop_range,
-             int _reduction_dimx)
-    : gpu_dim(_gpu_dim), grid_dim(_grid_dim), block_dim(_block_dim),
-      forloop_range(_forloop_range), reduction_dimx(_reduction_dimx), 
-      smem_offset(0) {
+    : grid_dim(_grid_dim), block_dim(_block_dim), forloop_range(_forloop_range),
+      reduction_dimx(_reduction_dimx), smem_offset(0), gpu_dim(1, 1, 1),
+      from_constructed(false) {
   // A bgraph cannot have more than MAX_NUM_THREADBLOCKS_PER_KERNEL threadblocks
   // otherwise we don't have enough buffers in device memory for saving
   // fingerprints

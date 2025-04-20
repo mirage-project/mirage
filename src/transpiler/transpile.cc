@@ -148,11 +148,12 @@ Transpiler::Transpiler(kernel::Graph const *_graph,
             static_cast<kernel::KNCustomizedOp *>(op);
         std::shared_ptr<threadblock::Graph> tbg =
             std::make_shared<threadblock::Graph>(
-                customized_op->bgraph.gpu_dim,
                 customized_op->bgraph.grid_dim,
                 customized_op->bgraph.block_dim,
                 customized_op->bgraph.forloop_range,
-                customized_op->bgraph.reduction_dimx);
+                customized_op->bgraph.reduction_dimx,
+                customized_op->bgraph.gpu_dim,
+                true);
         std::unordered_map<size_t, threadblock::STensor> stensor_mapping;
         for (auto const &bop : customized_op->bgraph.operators) {
           // Preparing dtensors in the new graph
@@ -170,7 +171,19 @@ Transpiler::Transpiler(kernel::Graph const *_graph,
                   get_tensor_in_new_graph(dtensor_mapping, input_op->dtensor),
                   input_op->input_map,
                   input_op->forloop_dim,
-                  input_op->output_tensors[0].layout);
+                  input_op->output_tensors[0].layout,
+                  input_op->prologue);
+              
+              // New dtensor for allgather
+              // TODO: Delete this
+              if(input_op->prologue == TB_PROLOGUE_ALLGATHER) {
+                threadblock::TBInputOp *latest_op = 
+                  static_cast<threadblock::TBInputOp *>(tbg->operators.back());
+                kernel::DTensor new_dtensor = latest_op->dtensor;
+                dtensor_mapping[new_dtensor.guid] = new_dtensor;
+                // Later used in resolve_dtensor_meta
+                all_dtensors.push_back(new_dtensor);
+              }
               stensor_mapping[bop->output_tensors[0].guid] = st;
               break;
             }

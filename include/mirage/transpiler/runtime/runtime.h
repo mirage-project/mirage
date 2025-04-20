@@ -25,8 +25,9 @@ static void _execute_mugraph(std::vector<void const *> input_tensors,
 #include "kernel/communication.h"
 #include "threadblock/threadblock.h"
 #ifdef USE_NVSHMEM
-#include "nvshmem.h"
+#include "nvshmem_rt.h"
 #include "threadblock/comm_executor.h"
+#include "threadblock/allgather_host.h"
 #endif
 #include "utils.h"
 

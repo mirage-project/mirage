@@ -5,8 +5,10 @@ class TBGraph:
         self.cygraph = graph
         self.use_nvshmem = False
 
-    def new_input(self, dtensor: DTensor, input_map: tuple, forloop_dim: int):
-        return self.cygraph.new_input(dtensor, input_map, forloop_dim)
+    def new_input(self, dtensor: DTensor, input_map: tuple, forloop_dim: int, prologue: str = None):
+        if prologue == "allgather":
+            self.use_nvshmem = True
+        return self.cygraph.new_input(dtensor, input_map, forloop_dim, prologue)
 
     def new_output(self, stensor: STensor, output_map: tuple, forloop_dim: int = -1, epilogue: str = None):
         if epilogue == "allreduce" or epilogue == "alltoall" or epilogue == "reduce_scatter":

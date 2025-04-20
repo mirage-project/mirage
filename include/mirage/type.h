@@ -248,5 +248,11 @@ enum TBEpilogueType {
   TB_EPILOGUE_INVALID = 3199,
 };
 
+enum TBPrologueType {
+  TB_PROLOGUE_NONE = 3200,
+  TB_PROLOGUE_ALLGATHER = 3201,
+  TB_PROLOGUE_INVALID = 3299,
+};
+
 } // namespace type
 } // namespace mirage

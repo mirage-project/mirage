@@ -25,22 +25,26 @@ public:
     // Call in with a thread block
     // Sending a tile to a peer and set the corresponding signal
     // Tile may not be consecutive in physical memory
-
+    // printf("ntered send, sending to PE %d\n", peer);
     auto tile_layout = TileLayout{};
     auto _shape = cute::shape(tile_layout);
 
     // Find contiguous block decomposition
     const int contiguous_chunk_size = find_contiguous_chunk();
+    // printf("contiguous_chunk_size: %d\n", contiguous_chunk_size);
     const int num_chunks = cute::size(tile_layout) / contiguous_chunk_size;
 
     auto tile_layout_standalone = cute::make_layout(_shape);
+    // cute::print_layout(tile_layout);
+    // cute::print_layout(tile_layout_standalone);
 
-    const int mode = 1;
+    const int mode = 1; // 0: warp, 1: block
 
     // Assuming 32 threads per warp
     const int executor_num = mode == 0 ? blockDim.x / 32 : 1;
     const int chunks_per_executor = mode == 0 ? (num_chunks + executor_num - 1) / executor_num : num_chunks;
     const int executor_id = mode == 0 ? threadIdx.x / 32 : 0;
+    // printf("executor_num: %d, chunks_per_executor: %d, executor_id: %d\n", executor_num, chunks_per_executor, executor_id);
     //using comm_executor = typename CommWarpExecutor<T, sync> ? mode == 0 : typename CommBlockExecutor<T, sync>;
 
     for (int chunk_idx = executor_id * chunks_per_executor;

@@ -272,6 +272,15 @@ def string_to_tbepilogue(epilogue):
         assert False, "Unsupported threadblock epilogue"
         return None
 
+def string_to_tbprologue(prologue):
+    if prologue is None:
+        return TB_PROLOGUE_NONE
+    elif prologue == "allgather":
+        return TB_PROLOGUE_ALLGATHER
+    else:
+        assert False, "Unsupported threadblock prologue"
+        return None
+
 def string_to_accum_optype(acc):
     if acc is None:
         return TB_FORLOOP_ACCUM_NO_RED_OP
@@ -793,9 +802,8 @@ cdef class CyKNGraph:
 cdef class CyTBGraph:
     cdef CppTBGraph *p_bgraph #Hold a CppTBGraph instance
 
-    def __cinit__(self, tuple gpu_dim = (1, 1, 1), tuple grid_dim = (), tuple block_dim = (), int forloop_range = -1, int dimx = -1, bgraph = None):
+    def __cinit__(self, tuple grid_dim = (), tuple block_dim = (), int forloop_range = -1, int dimx = -1, bgraph = None):
         cdef unsigned long long ptr
-        cdef dim3 c_gpu_dim
         cdef dim3 c_grid_dim
         cdef dim3 c_block_dim
         if bgraph is None:
@@ -803,16 +811,13 @@ cdef class CyTBGraph:
                 assert False, "grid_dim, block_dim, forloop_range, dimx must be provided"
             assert len(grid_dim) == 3, "grid_dim must include 3 dimensions"
             assert len(block_dim) == 3, "block_dim must include 3 dimensions"
-            c_gpu_dim.x = gpu_dim[0]
-            c_gpu_dim.y = gpu_dim[1]
-            c_gpu_dim.z = gpu_dim[2]
             c_grid_dim.x = grid_dim[0]
             c_grid_dim.y = grid_dim[1]
             c_grid_dim.z = grid_dim[2]
             c_block_dim.x = block_dim[0]
             c_block_dim.y = block_dim[1]
             c_block_dim.z = block_dim[2]
-            self.p_bgraph = new CppTBGraph(c_gpu_dim, c_grid_dim, c_block_dim, forloop_range, dimx)
+            self.p_bgraph = new CppTBGraph(c_grid_dim, c_block_dim, forloop_range, dimx)
         else:
             ptr = ctypes.cast(bgraph, ctypes.c_void_p).value
             if isinstance(bgraph, int):
@@ -822,13 +827,14 @@ cdef class CyTBGraph:
             else:
                 assert False, "bgraph must be an integer or ctypes.c_void_p, but got " + str(type(bgraph))
     
-    def new_input(self, DTensor dtensor, tuple input_map, int forloop_dim):
+    def new_input(self, DTensor dtensor, tuple input_map, int forloop_dim, str prologue = None):
         assert len(input_map) == 3, "input_map must be of length 3"
         cdef int3 c_input_map
         c_input_map.x = input_map[0]
         c_input_map.y = input_map[1]
         c_input_map.z = input_map[2]
-        cdef CppSTensor* ptr = self.p_bgraph.new_input(dtensor.c_ptr, c_input_map, forloop_dim, SmemRowMajor)
+        prologue_type = string_to_tbprologue(prologue)
+        cdef CppSTensor* ptr = self.p_bgraph.new_input(dtensor.c_ptr, c_input_map, forloop_dim, SmemRowMajor, prologue_type)
         t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
         return STensor(t)
 

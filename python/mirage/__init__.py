@@ -18,10 +18,10 @@ class InputNotFoundError(Exception):
 
 def new_kernel_graph(gpu_dim: tuple):
     kgraph = core.CyKNGraph(gpu_dim)
-    return KNGraph(kgraph)
+    return KNGraph(kgraph, gpu_dim)
 
-def new_threadblock_graph(grid_dim: tuple, block_dim: tuple, forloop_range: int, reduction_dimx: int, gpu_dim=(1, 1, 1)):
-    bgraph = core.CyTBGraph(gpu_dim, grid_dim, block_dim, forloop_range, reduction_dimx)
+def new_threadblock_graph(grid_dim: tuple, block_dim: tuple, forloop_range: int, reduction_dimx: int):
+    bgraph = core.CyTBGraph(grid_dim, block_dim, forloop_range, reduction_dimx)
     return TBGraph(bgraph)
 
 # Current Version
