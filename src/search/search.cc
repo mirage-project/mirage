@@ -22,9 +22,19 @@ KernelGraphGenerator::KernelGraphGenerator(
     char const *filename,
     bool verbose)
     : config(config), dim_strategy(DimStrategy(config)), filename(filename),
-      num_thread(config.search_thread), verbose(verbose),
-      num_total_random_tests(0), num_valid_kernel_graphs(0),
+      verbose(verbose), num_total_random_tests(0), num_valid_kernel_graphs(0),
       num_total_states(0), num_tasks(0), max_depth(5) {
+  // setting num_thread
+  unsigned int max_num_threads = std::thread::hardware_concurrency();
+  if (config.search_thread > max_num_threads) {
+    printf("Config number of threads (%d) too high, setting num_thread to %d",
+           config.search_thread,
+           max_num_threads);
+    num_thread = max_num_threads;
+  } else {
+    num_thread = config.search_thread;
+  }
+
   preprocess(computation_graph);
 }
 
@@ -143,7 +153,7 @@ void KernelGraphGenerator::generate_next_operator(
 
           if (new_op) {
             c.kn_graph->operators.push_back(new_op);
-            if (check_range(init_ranges, target_ranges, *c.kn_graph)) {
+            // if (check_range(init_ranges, target_ranges, *c.kn_graph)) {
               if (depth < max_depth) {
                 num_tasks++;
                 SearchContext c_tmp = SerializedSearchContext(c).deserialize();
@@ -152,7 +162,7 @@ void KernelGraphGenerator::generate_next_operator(
               } else {
                 generate_next_operator(c, verify, verified, depth + 1);
               }
-            }
+            // }
             delete c.kn_graph->operators.back();
             c.kn_graph->operators.pop_back();
           }
@@ -298,7 +308,7 @@ void KernelGraphGenerator::generate_next_operator(
         c.level = SearchLevel::LV_KERNEL;
         std::shared_ptr<threadblock::Graph> tb_graph = c.tb_graph;
         c.tb_graph = nullptr;
-        if (check_range(init_ranges, target_ranges, *c.kn_graph)) {
+        // if (check_range(init_ranges, target_ranges, *c.kn_graph)) {
           if (depth < max_depth) {
             num_tasks++;
             SearchContext c_tmp = SerializedSearchContext(c).deserialize();
@@ -307,7 +317,7 @@ void KernelGraphGenerator::generate_next_operator(
           } else {
             generate_next_operator(c, verify, verified, depth + 1);
           }
-        }
+        // }
         c.tb_graph = tb_graph;
         c.level = SearchLevel::LV_THREADBLOCK;
         delete c.kn_graph->operators.back();

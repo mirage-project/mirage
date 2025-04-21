@@ -47,6 +47,15 @@ def copy_subgraph(subgraph):
         new_subgraph[from_op] = to_ops.copy()
     return new_subgraph
 
+def contains_4D_tensors(op_node):
+    for shape, _ in op_node.input_tensor_shapes:
+        if len(shape) > 3:
+            return True
+    for shape, _ in op_node.output_tensor_shapes:
+        if len(shape) > 3:
+            return True
+    return False
+
 def get_partitions(op_node, min_num_ops, max_num_ops, all_subgraphs, UNSUPPORTED_OPS, IGNORE_OPS):
     if op_node.fn not in UNSUPPORTED_OPS.union(IGNORE_OPS):
         # handle non-matching shapes
@@ -64,6 +73,8 @@ def get_partitions_helper(op_node, curr_subgraph, min_num_ops, max_num_ops, visi
         return
     if len(curr_subgraph) > max_num_ops:
         return
+    if contains_4D_tensors(op_node):
+        return
     
     # assume op_node already in curr_subgraph
     visited.add(id(op_node.name))
@@ -71,6 +82,8 @@ def get_partitions_helper(op_node, curr_subgraph, min_num_ops, max_num_ops, visi
         all_subgraphs.append(copy_subgraph(curr_subgraph))
 
     def find_valid_output_ops(output_op, orig_out_id, prev_out_id, valid_output_ops, visited):
+        if contains_4D_tensors(output_op):
+            return
         if id(output_op.name) in visited:
             return
         visited.add(id(output_op.name))
@@ -88,17 +101,19 @@ def get_partitions_helper(op_node, curr_subgraph, min_num_ops, max_num_ops, visi
         # WARNING: this messes up the node structure and causes input/output_ops and tensor_ids to not correspond to each other anymore
         # could work because partition_graph does not use tensor_ids and to_kernel_graph does not use input/output_ops
         if output_op.fn in IGNORE_OPS:
-            for out_op in output_op.output_ops:
-                if out_op.output_tensor_shapes:
-                    assert len(out_op.output_tensor_shapes) == 1
-                    find_valid_output_ops(out_op, orig_out_id, out_op.output_tensor_shapes[0][1], valid_output_ops, visited)
-        elif output_op.fn not in UNSUPPORTED_OPS:
-            # find in the inputs of output_op the tensor whose id is prev_out_id, replace with orig_out_id
-            for i in range(len(output_op.input_tensor_shapes)):
-                if output_op.input_tensor_shapes[i][1] == prev_out_id:
-                    output_op.input_tensor_shapes[i] = (output_op.input_tensor_shapes[i][0], orig_out_id)
-                    break
-            valid_output_ops.append(output_op)
+            return
+        #     for out_op in output_op.output_ops:
+        #         if out_op.output_tensor_shapes:
+        #             assert len(out_op.output_tensor_shapes) == 1
+        #             find_valid_output_ops(out_op, orig_out_id, out_op.output_tensor_shapes[0][1], valid_output_ops, visited)
+        # elif output_op.fn not in UNSUPPORTED_OPS:
+        #     # find in the inputs of output_op the tensor whose id is prev_out_id, replace with orig_out_id
+        #     for i in range(len(output_op.input_tensor_shapes)):
+        #         if output_op.input_tensor_shapes[i][1] == prev_out_id:
+        #             output_op.input_tensor_shapes[i] = (output_op.input_tensor_shapes[i][0], orig_out_id)
+        #             break
+        #     valid_output_ops.append(output_op)
+        valid_output_ops.append(output_op)
         
     valid_output_ops = []
     for output_op in op_node.output_ops:
@@ -210,8 +225,8 @@ def to_kernel_graph(subgraph):
                 intermediates[op.output_tensor_shapes[i][1]] = [tensor, 0]
         else:
             intermediates[op.output_tensor_shapes[0][1]] = [res, 0]
-    for tensor, count in intermediates.items():
-        if count == 0: graph.mark_output(tensor)
+    for _, tsr_cnt in intermediates.items():
+        if tsr_cnt[1] == 0: graph.mark_output(tsr_cnt[0])
     return graph, dims
         
 def generate_all_kernels(model, dummy_inputs, min_num_ops=2, max_num_ops=4, UNSUPPORTED_OPS=set(), IGNORE_OPS=set()):

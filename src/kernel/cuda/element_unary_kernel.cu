@@ -42,6 +42,14 @@ __global__ void execute_elementunary(mirage::type::KNOperatorType type,
     if (i < num_elements) {
       output_ptr[i] = cutlass::fast_exp(input_ptr[i]);
     }
+  } else if (type == mirage::type::KN_SQUARE_OP) {
+    if (i < num_elements) {
+      output_ptr[i] = input_ptr[i] * input_ptr[i];
+    }
+  } else if (type == mirage::type::KN_SQRT_OP) {
+    if (i < num_elements) {
+      output_ptr[i] = cutlass::fast_sqrt(input_ptr[i]);
+    }
   } else if (type == mirage::type::KN_SILU_OP) {
     if (i < num_elements) {
       DT x = input_ptr[i];
@@ -124,6 +132,8 @@ bool KNElementUnaryOp::profile(ProfileResult &result) {
 __global__ void
     compute_elementunary_fingerprint(mirage::type::KNOperatorType type,
                                      FPType *exp_lookup_table,
+                                     FPType *sqrt_p_lookup_table,
+                                     FPType *sqrt_q_lookup_table,
                                      mirage::type::FPType *input_ptr,
                                      mirage::type::FPType *output_ptr,
                                      int num_elements) {
@@ -131,6 +141,11 @@ __global__ void
   if (i < num_elements) {
     if (type == mirage::type::KN_EXP_OP) {
       output_ptr[i] = compute_exp_fingerprint(input_ptr[i], exp_lookup_table);
+    } else if (type == mirage::type::KN_SQUARE_OP) {
+      output_ptr[i] = compute_square_fingerprint(input_ptr[i]);
+    } else if (type == mirage::type::KN_SQRT_OP) {
+      output_ptr[i] = compute_sqrt_fingerprint(
+          input_ptr[i], sqrt_p_lookup_table, sqrt_q_lookup_table);
     } else if (type == mirage::type::KN_SILU_OP) {
       output_ptr[i] = compute_silu_fingerprint(input_ptr[i], exp_lookup_table);
     } else if (type == mirage::type::KN_GELU_OP) {
@@ -169,6 +184,8 @@ bool KNElementUnaryOp::fingerprint(void) {
     compute_elementunary_fingerprint<<<num_blocks, num_threads_per_blk>>>(
         op_type,
         dmm->exp_lookup_table,
+        dmm->sqrt_p_lookup_table,
+        dmm->sqrt_q_lookup_table,
         input_fp_ptr,
         output_fp_ptr,
         num_elements);

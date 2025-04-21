@@ -174,6 +174,9 @@ def parse_onnx_model(model, unique_operators):
         for i, input_name in enumerate(node.input):
             if input_name in shape_value_dict and input_name in tensor_id:
                 shape = shape_value_dict[input_name]
+
+                # TODO we should leave modifying the graph structure to partition_graph.py
+                # since build_computational graph should faithfully construct the model
                 if i == 1:
                     if op_type in ["Div", "Add", "Pow"]:
                         shape = input_tensor_shapes[0][0]

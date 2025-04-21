@@ -110,7 +110,8 @@ int cython_search(mirage::kernel::Graph const *input_graph,
   }
 }
 
-void cython_to_json(mirage::kernel::Graph const *input_graph, char const *filename) {
+void cython_to_json(mirage::kernel::Graph const *input_graph,
+                    char const *filename) {
   json j;
   to_json(j, *input_graph);
   std::ofstream ofs(filename);
