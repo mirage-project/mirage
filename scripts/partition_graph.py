@@ -47,6 +47,15 @@ def copy_subgraph(subgraph):
         new_subgraph[from_op] = to_ops.copy()
     return new_subgraph
 
+def contains_4D_tensors(op_node):
+    for shape, _ in op_node.input_tensor_shapes:
+        if len(shape) > 3:
+            return True
+    for shape, _ in op_node.output_tensor_shapes:
+        if len(shape) > 3:
+            return True
+    return False
+
 def get_partitions(op_node, min_num_ops, max_num_ops, all_subgraphs, UNSUPPORTED_OPS, IGNORE_OPS):
     if op_node.fn not in UNSUPPORTED_OPS.union(IGNORE_OPS):
         # handle non-matching shapes
@@ -64,6 +73,8 @@ def get_partitions_helper(op_node, curr_subgraph, min_num_ops, max_num_ops, visi
         return
     if len(curr_subgraph) > max_num_ops:
         return
+    if contains_4D_tensors(op_node):
+        return
     
     # assume op_node already in curr_subgraph
     visited.add(id(op_node.name))
@@ -71,6 +82,8 @@ def get_partitions_helper(op_node, curr_subgraph, min_num_ops, max_num_ops, visi
         all_subgraphs.append(copy_subgraph(curr_subgraph))
 
     def find_valid_output_ops(output_op, orig_out_id, prev_out_id, valid_output_ops, visited):
+        if contains_4D_tensors(output_op):
+            return
         if id(output_op.name) in visited:
             return
         visited.add(id(output_op.name))
