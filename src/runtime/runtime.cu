@@ -46,9 +46,11 @@ __device__ void terminate_workers_and_schedulers(RuntimeConfig config) {
     size_t last_task_id =
         atomicAdd(&config.worker_queue_next_free_task_id[i], 1);
     config.worker_queues[i][last_task_id % config.per_worker_queue_len] = 0;
+    // Add threadfence to make sure worker_queue updates are visible to worker
+    // CTAs before incrementing its last_ready_task_id
+    __threadfence();
     size_t old = config.worker_queue_last_ready_task_id[i];
     do {
-      // TODO: need __threadfence() ???
       old = atomicCAS(&config.worker_queue_last_ready_task_id[i],
                       last_task_id,
                       last_task_id + 1);
@@ -59,9 +61,11 @@ __device__ void terminate_workers_and_schedulers(RuntimeConfig config) {
     size_t last_event_id =
         atomicAdd(&config.sched_queue_next_free_event_id[i], 1);
     config.sched_queues[i][last_event_id % config.per_sched_queue_len] = 0;
+    // Add threadfence to make sure sched_queue updates are visible to scheduler
+    // CTAs before incrementing its last_ready_event_id
+    __threadfence();
     size_t old = config.sched_queue_last_ready_event_id[i];
     do {
-      // TODO: need __threadfence() ???
       old = atomicCAS(&config.sched_queue_last_ready_event_id[i],
                       last_event_id,
                       last_event_id + 1);
@@ -227,6 +231,7 @@ __global__ void persistent_kernel(RuntimeConfig config) {
 	  __threadfence();
           size_t old = config.worker_queue_last_ready_task_id[next_worker];
           do {
+            __threadfence();
             old =
                 atomicCAS(&config.worker_queue_last_ready_task_id[next_worker],
                           last_task_id,

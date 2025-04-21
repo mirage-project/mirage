@@ -44,6 +44,7 @@ struct Dim3Comparator {
 
 void dfs_create_events_add_tasks(
     int depth,
+    int const my_gpu_id,
     std::vector<int> const &event_dims,
     int3 const input_map,
     int3 const output_map,
@@ -82,7 +83,7 @@ void dfs_create_events_add_tasks(
           assert(pre_task_map.find(bid) != pre_task_map.end());
           int task_id = pre_task_map.find(bid)->second;
           // encode gpu_id
-          all_tasks[task_id].trigger_event = all_events.size();
+          all_tasks[task_id].trigger_event = my_gpu_id << 16 | all_events.size();
           event_desc.num_triggers++;
         }
       }
@@ -176,6 +177,44 @@ void Runtime::register_mugraph(
       } else {
         output_ops.push_back(static_cast<tb::TBInputOp *>(op));
       }
+    }
+    // Specical handling for ALLREDUCE
+    if (task_type == rt::TASK_ALLREDUCE) {
+      assert(input_ops.size() == 2);
+      assert(output_ops.size() == 1);
+      // To simplify the implementation, asserting that 
+      // produce/consumer must have the same partition
+      int num_shared_tensors = 0;
+      int3 input_map, output_map;
+      for (auto const &input : input_ops) {
+        for (auto const &output : pre_output_ops) {
+          if (input->dtensor.guid == output->dtensor.guid) {
+            input_map = input->input_map;
+            output_map = output->input_map;
+            num_shared_tensors++;
+          }
+        }
+      }
+      assert(num_shared_tensors == 1);
+      assert(input_map == output_map);
+      assert(bgraph.grid_dim == pre_op->bgraph.grid_dim);
+      // Step 1: add allgather tasks
+      for (bid.x = 0; bid.x < bgraph.grid_dim.x; bid.x++) {
+        for (bid.y = 0; bid.y < bgraph.grid_dim.y; bid.y++) {
+          for (bid.z = 0; bid.z < bgraph.grid_dim.z; bid.z++) {
+            EventDesc
+            for (int tgt_gpu_id = 0; tgt_gpu_id < num_gpus; tgt_gpu_id ++) {
+              TaskDesc(rt::TASK_NVSHMEM_COPY);
+              // Initialize input tensors to the task
+              TensorDesc 
+            }
+          }
+        }
+      }
+      pre_output_ops = output_ops;
+      pre_op = cur_op;
+      pre_task_map = cur_task_map;
+      continue;
     }
     // Step 1: add all tasks based on their blockIdx
     // (bid.x, bid.y, bid.z) ordering
