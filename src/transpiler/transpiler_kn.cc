@@ -463,6 +463,7 @@ TranspileResult Transpiler::transpile_ugraph() {
           config.profiling = false;
         } else {
           result = transpile_kn_custom_op(cur_op);
+          config.profiling = false;
         }
 
         if (result.error_type != CUDA_T_SUCCESS) {

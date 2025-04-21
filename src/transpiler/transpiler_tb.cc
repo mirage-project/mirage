@@ -276,22 +276,43 @@ CustomOPTranspileResult
 
   // Generate code prologue
   CodeKeeper code;
-  code.e("__global__ void __launch_bounds__($) $($, $, uint64_t *profiler_buffer) {",
-         num_threads,
-         func_name,
-         map<kn::DTensor, string>(op->output_tensors,
+  if (profiling) {
+    code.e_front(
+        "__global__ void  __launch_bounds__($) "
+        "$($, $, uint64_t *profiler_buffer) {",
+        num_threads,
+        func_name,
+        map<kn::DTensor, string>(op->output_tensors,
                                   [](kn::DTensor const &dtensor) -> string {
                                     return fmt(
-                                        "$* __restrict__ dtensor$_ptr",
+                                        "$* dtensor$_ptr",
                                         get_datatype_str(dtensor.data_type),
                                         dtensor.guid);
                                   }),
-         map<kn::DTensor, string>(
-             op->input_tensors, [](kn::DTensor const &dtensor) -> string {
-               return fmt("$ const* __restrict__ dtensor$_ptr",
+        map<kn::DTensor, string>(
+            op->input_tensors, [](kn::DTensor const &dtensor) -> string {
+              return fmt("$ const* dtensor$_ptr",
                           get_datatype_str(dtensor.data_type),
                           dtensor.guid);
-             }));
+            }));
+  } else {
+    code.e("__global__ void __launch_bounds__($) $($, $) {",
+          num_threads,
+          func_name,
+          map<kn::DTensor, string>(op->output_tensors,
+                                    [](kn::DTensor const &dtensor) -> string {
+                                      return fmt(
+                                          "$* __restrict__ dtensor$_ptr",
+                                          get_datatype_str(dtensor.data_type),
+                                          dtensor.guid);
+                                    }),
+          map<kn::DTensor, string>(
+              op->input_tensors, [](kn::DTensor const &dtensor) -> string {
+                return fmt("$ const* __restrict__ dtensor$_ptr",
+                            get_datatype_str(dtensor.data_type),
+                            dtensor.guid);
+              }));
+  }
 
   // Define thread idx
   string thread_idx;
@@ -742,9 +763,6 @@ CustomOPTranspileResult
              output.guid,
              output.guid,
              dtensor.guid);
-      if(profiling){
-        code.e("PROFILER_EVENT_END($);", (input_op->op_type - type::TB_UNKOWN));
-      }
     }
     code.e("cute::cp_async_fence();");
     code.e("}");
@@ -1188,6 +1206,13 @@ CustomOPTranspileResult
 
     code.e("// Wait for the async copies in the last round to finish");
     code.e("cute::cp_async_wait<1>();");
+    
+    // Event end of async cp
+    if(profiling && !pipelined_input_ops.empty()){
+      for (tb::TBInputOp const *input_op : pipelined_input_ops) {
+        code.e("PROFILER_EVENT_END($);", (input_op->op_type - type::TB_UNKOWN));
+      }
+    }
 
     code.e("// Switch buffers");
     for (tb::TBInputOp const *input_op : pipelined_input_ops) {
@@ -1262,7 +1287,7 @@ CustomOPTranspileResult
   code.e("}"); // kernel
 
   return CustomOPTranspileResult{
-      CUDA_T_SUCCESS, func_name, mem_plan.smem_size, 0, code.to_string()};
+      CUDA_T_SUCCESS, func_name, mem_plan.smem_size, profiler_buf_size, code.to_string()};
 }
 
 } // namespace transpiler

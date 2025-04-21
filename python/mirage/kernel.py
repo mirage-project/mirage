@@ -147,7 +147,7 @@ def get_cc_cmd(target, cc, FILE_NAME, py_include_dir, INCLUDE_PATH, DEPS_PATH, s
     else:
         specific_cmd = [
             "-arch=native",
-        ]
+        ]+ (["-DMIRAGE_ENABLE_PROFILER"] if profiling else [])
 
     return common_cmd[:6] + specific_cmd + common_cmd[6:]
 
@@ -371,7 +371,7 @@ class KNGraph:
         num_warp_groups = kwargs.get("num_warp_groups", 2)
         pipeline_stages = kwargs.get("pipeline_stages", 2)
         # TODO, add profling for Ampere later to show gpu wave
-        profiling = kwargs.get("profiling", False) and target_cc >= 90
+        profiling = kwargs.get("profiling", False)
 
         result = generate_cuda_program(
             self.cygraph, target_cc=target_cc, input_strides=input_strides, num_warp_groups = num_warp_groups, pipeline_stages = pipeline_stages, profiling = profiling

@@ -10,7 +10,7 @@ using namespace cute;
 
 namespace kn {
 
-enum class ElementBinaryOpType { ADD, MUL, DIV, POW };
+enum class ElementBinaryOpType { ADD, MUL, DIV };
 
 template <typename T, ElementBinaryOpType OP>
 static __device__ __forceinline__ T perform_element_binary_op(T a, T b) {
@@ -20,8 +20,6 @@ static __device__ __forceinline__ T perform_element_binary_op(T a, T b) {
     return a * b;
   } else if constexpr (OP == ElementBinaryOpType::DIV) {
     return a / b;
-  } else if constexpr (OP == ElementBinaryOpType::POW) {
-    return (T)powf((float)a, (float)b);
   } else {
     assert(0);
   }
