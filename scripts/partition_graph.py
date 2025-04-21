@@ -2,6 +2,7 @@ import torch
 from itertools import combinations as comb
 import time
 import mirage as mi
+import json
 from op import Operator
 from build_computation_graph import get_computation_graph
 
@@ -229,11 +230,12 @@ def to_kernel_graph(subgraph):
         if tsr_cnt[1] == 0: graph.mark_output(tsr_cnt[0])
     return graph, dims
         
-def generate_all_kernels(model, dummy_inputs, min_num_ops=2, max_num_ops=4, UNSUPPORTED_OPS=set(), IGNORE_OPS=set()):
+def generate_all_kernels(model, dummy_inputs, min_num_ops=2, max_num_ops=4, UNSUPPORTED_OPS=set(), IGNORE_OPS=set(), dataset_name=None):
     subgraphs, _ = partition_graph(model, dummy_inputs, min_num_ops, max_num_ops, UNSUPPORTED_OPS, IGNORE_OPS)
     kernel_input_dims = []
     all_kernels = []
     hashes = set()
+    performance = {}
     for subgraph in subgraphs:
         kernel_graph, dims = to_kernel_graph(subgraph)
         
@@ -246,13 +248,15 @@ def generate_all_kernels(model, dummy_inputs, min_num_ops=2, max_num_ops=4, UNSU
         # save original mugraph
         kernel_graph.to_json(f"original_{graph_hash}.json")
         
-        optimized_graph = kernel_graph.superoptimize()
-        
-        # save optimized mugraph
+        optimized_graph, best_perf = kernel_graph.superoptimize()
+        performance[graph_hash] = best_perf
         optimized_graph.to_json(f"optimized_{graph_hash}.json")
-
         all_kernels.append(optimized_graph)
         kernel_input_dims.append(dims)
+    if dataset_name is not None:
+        json.dump(performance, open(f"{dataset_name}_performance.json", "w"))
+    else:
+        json.dump(performance, open("performance.json", "w"))
     return all_kernels, kernel_input_dims
 
 def time_kernels(kernels, input_dims, device, iterations=1):

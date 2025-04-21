@@ -214,7 +214,7 @@ if __name__ == "__main__":
                 
         print(f"\nBest performance: {best_perf:.3f} ms")
         print(f"Successes: {self.success_num}, Failures: {self.fail_num}")
-        return best_graph, best_file_path, best_output_shapes
+        return best_graph, best_file_path, best_output_shapes, best_perf
 
 def profile_and_select_best_graph(graphs: List, 
                                 target_cc: int = 10,
@@ -225,5 +225,5 @@ def profile_and_select_best_graph(graphs: List,
                                 ) -> object:
     """Helper function to profile graphs and select the best one"""
     profiler = TritonProfiler(warmup_iters, profile_iters, debug_mode, save_codes)
-    best_graph, best_file_path, best_output_shapes = profiler.profile_graphs(graphs, target_cc)
-    return best_graph, best_file_path, best_output_shapes
+    best_graph, best_file_path, best_output_shapes, best_perf = profiler.profile_graphs(graphs, target_cc)
+    return best_graph, best_file_path, best_output_shapes, best_perf
