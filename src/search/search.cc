@@ -154,14 +154,14 @@ void KernelGraphGenerator::generate_next_operator(
           if (new_op) {
             c.kn_graph->operators.push_back(new_op);
             // if (check_range(init_ranges, target_ranges, *c.kn_graph)) {
-              if (depth < max_depth) {
-                num_tasks++;
-                SearchContext c_tmp = SerializedSearchContext(c).deserialize();
+            if (depth < max_depth) {
+              num_tasks++;
+              SearchContext c_tmp = SerializedSearchContext(c).deserialize();
 #pragma omp task
-                { generate_next_operator(c_tmp, verify, verified, depth + 1); }
-              } else {
-                generate_next_operator(c, verify, verified, depth + 1);
-              }
+              { generate_next_operator(c_tmp, verify, verified, depth + 1); }
+            } else {
+              generate_next_operator(c, verify, verified, depth + 1);
+            }
             // }
             delete c.kn_graph->operators.back();
             c.kn_graph->operators.pop_back();
@@ -309,14 +309,14 @@ void KernelGraphGenerator::generate_next_operator(
         std::shared_ptr<threadblock::Graph> tb_graph = c.tb_graph;
         c.tb_graph = nullptr;
         // if (check_range(init_ranges, target_ranges, *c.kn_graph)) {
-          if (depth < max_depth) {
-            num_tasks++;
-            SearchContext c_tmp = SerializedSearchContext(c).deserialize();
+        if (depth < max_depth) {
+          num_tasks++;
+          SearchContext c_tmp = SerializedSearchContext(c).deserialize();
 #pragma omp task
-            { generate_next_operator(c_tmp, verify, verified, depth + 1); }
-          } else {
-            generate_next_operator(c, verify, verified, depth + 1);
-          }
+          { generate_next_operator(c_tmp, verify, verified, depth + 1); }
+        } else {
+          generate_next_operator(c, verify, verified, depth + 1);
+        }
         // }
         c.tb_graph = tb_graph;
         c.level = SearchLevel::LV_THREADBLOCK;

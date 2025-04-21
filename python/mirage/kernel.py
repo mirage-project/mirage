@@ -599,7 +599,7 @@ class KNGraph:
                     fmaps=fmaps,
                     franges=franges,
                     backend=backend)
-            return best_graph
+            return best_graph, best_perf
         elif backend == "nki":
             return all_graphs
         elif backend == "triton":
@@ -607,7 +607,7 @@ class KNGraph:
 
             MIRAGE_ROOT, INCLUDE_PATH, _ = get_key_paths()
             os.environ["KERNELS_PATH"] = os.path.join(INCLUDE_PATH, "mirage/triton_transpiler/runtime") # for triton
-            best_graph, best_file_path, best_output_shapes = profile_and_select_best_graph(all_graphs, 
+            best_graph, best_file_path, best_output_shapes, best_perf = profile_and_select_best_graph(all_graphs, 
                                                  target_cc=torch.cuda.get_device_properties(0).major * 10 
                                                  + torch.cuda.get_device_properties(0).minor,
                                                  warmup_iters=warmup_iters, profile_iters=profile_iters, debug_mode=verbose,
@@ -638,7 +638,7 @@ class KNGraph:
                     franges=franges,
                     backend=backend)
 
-            return best_graph
+            return best_graph, best_perf
         else:
             assert False, "Unsupported backend"
             return None
