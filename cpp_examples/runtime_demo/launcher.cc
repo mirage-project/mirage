@@ -10,6 +10,12 @@
 using namespace mirage;
 
 int main(int argc, char **argv) {
+  MPI_Init(&argc, &argv);
+  int world_size;
+  MPI_Comm_size(MPI_COMM_WORLD, &world_size);
+  int rank;
+  MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+
   namespace tb = mirage::threadblock;
   namespace kn = mirage::kernel;
   namespace rt = mirage::runtime;
@@ -29,6 +35,9 @@ int main(int argc, char **argv) {
   kn::Graph kgraph;
   kn::DTensor X = kgraph.new_input(
       {batch_size, 1}, {1, 1}, type::DT_UINT16, layout::DmemRowMajor);
+  kn::DTensor AllReduceBuf = kgraph.new_input(
+      {batch_size, world_size, hidden_size}, {hidden_size * world_size, hidden_size, 1}, type::DT_BFLOAT16, layout::DmemRowMajor);
+
   kn::DTensor Y = kgraph.new_input({batch_size, hidden_size},
                                    {(size_t)hidden_size, 1},
                                    type::DT_BFLOAT16,
@@ -56,7 +65,10 @@ int main(int argc, char **argv) {
                                              {(size_t)hidden_size, 1},
                                              type::DT_BFLOAT16,
                                              layout::DmemRowMajor);
-
+  kn::DTensor AttnAROut = kgraph.new_input({batch_size, hidden_size},
+                                           {(size_t)hidden_size, 1},
+                                           type::DT_BFLOAT16,
+                                           layout::DmemRowMajor);
   // Add Embed
   {
     dim3 grid_dim = {1, 1, 1}, block_dim = {128, 1, 1};
@@ -129,6 +141,18 @@ int main(int argc, char **argv) {
       task_configs[kgraph.operators.back()] =
           std::make_tuple(1, 1, rt::TASK_ATTENTION_2);
     }
+    // Add out_projection 
+    // Add AllReduce
+    {
+      dim3 grid_dim = {batch_size, hidden_size / 64, 1}, block_dim = {128, 1, 1};
+      tb::Graph bgraph(grid_dim, block_dim, 1, 64);
+      bgraph.new_input(AttnProjOut, {0, 1, -1}, -1, layout::SmemRowMajor);
+      bgraph.new_input(AllReduceBuf, {0, 2, -1}, -1, layout::SmemRowMajor);
+      bgraph.new_input(AttnAROut, {0, 1, -1}, -1, layout::SmemRowMajor);
+      kgraph.customized({AttnProjOut, AllReduceBuf, AttnAROut}, bgraph);
+      task_configs[kgraph.operators.back()] =
+          std::make_tuple(2, 1, rt::TASK_ALLREDUCE);
+    }
     // Add RMS + Matmul
     {
       dim3 grid_dim = {fused_outdim_2 / 64, 1, 1}, block_dim = {128, 1, 1};
@@ -138,12 +162,12 @@ int main(int argc, char **argv) {
                                        type::DT_BFLOAT16,
                                        layout::DmemRowMajor);
       tb::STensor bX =
-          bgraph.new_input(AttnProjOut, {-1, -1, -1}, 1, layout::SmemRowMajor);
+          bgraph.new_input(AttnAROut, {-1, -1, -1}, 1, layout::SmemRowMajor);
       tb::STensor bW =
           bgraph.new_input(W, {1, -1, -1}, 0, layout::SmemRowMajor);
       tb::STensor bY =
           bgraph.new_input(MLPMid, {1, -1, -1}, -1, layout::SmemRowMajor);
-      kgraph.customized({AttnProjOut, W, MLPMid}, bgraph);
+      kgraph.customized({AttnAROut, W, MLPMid}, bgraph);
       task_configs[kgraph.operators.back()] =
           std::make_tuple(2, 1, rt::TASK_RMS_NORM_LINEAR);
     }
@@ -170,32 +194,9 @@ int main(int argc, char **argv) {
 
   // Start runtime
   using namespace mirage::runtime;
-  MPI_Init(&argc, &argv); // nvshmem_init();
-  int world_size;
-  MPI_Comm_size(MPI_COMM_WORLD,
-                &world_size); // int world_size = nvshmem_n_pes();
-  int rank;
-  MPI_Comm_rank(MPI_COMM_WORLD, &rank); // int rank =nvshmem_my_pe();
-  MPI_Comm mpi_comm = MPI_COMM_WORLD;
-  nvshmemx_init_attr_t attr = NVSHMEMX_INIT_ATTR_INITIALIZER;
-  attr.mpi_comm = &mpi_comm;
-  nvshmemx_init_attr(NVSHMEMX_INIT_WITH_MPI_COMM, &attr);
-  int mype = nvshmem_my_pe();
-  int npes = nvshmem_n_pes();
-  int mype_node = nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE);
-  printf("mype(%d) npes(%d) mype_node(%d) rand(%d) world_size(%d)\n",
-         mype,
-         npes,
-         mype_node,
-         rank,
-         world_size);
-  cudaSetDevice(mype_node);
-
   Runtime runtime(world_size /*num_gpus*/, rank /*my_gpu_id*/);
   runtime.register_mugraph(kgraph, task_configs);
   runtime.launch_persistent_kernel(106 /*num_workers*/, 8 /*num_schedulers*/);
 
-  cudaDeviceSynchronize();
-  nvshmem_finalize();
   MPI_Finalize();
 }

@@ -81,6 +81,7 @@ void dfs_create_events_add_tasks(
         for (bid.z = producer_lo_bid.z; bid.z < producer_hi_bid.z; bid.z++) {
           assert(pre_task_map.find(bid) != pre_task_map.end());
           int task_id = pre_task_map.find(bid)->second;
+          // encode gpu_id
           all_tasks[task_id].trigger_event = all_events.size();
           event_desc.num_triggers++;
         }

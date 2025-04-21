@@ -17,6 +17,7 @@
 #include "mirage/utils/cuda_helper.h"
 #include "nvshmem.h"
 #include "nvshmemx.h"
+#include <mpi.h>
 
 namespace mirage {
 namespace runtime {
@@ -95,12 +96,16 @@ __global__ void persistent_kernel(RuntimeConfig config) {
         }
         assert(cur_task_id + config.per_worker_queue_len > last_task_id);
         cur_task_loc = task_queue[cur_task_id % config.per_worker_queue_len];
-        printf("[FTCH] worker_id(%d) task_pos(%llu) last_task_pos(%llu) "
-               "task_id(%llu)\n",
-               worker_id,
-               cur_task_id,
-               last_task_id,
-               cur_task_loc);
+	if (config.verbose) {
+          printf("[FTCH] worker_id(%d) cur_task_pos(%llu) last_task_pos(%llu) "
+                 "task_id(%llu) task_type(%d) event_id(%llu) \n",
+                 worker_id,
+                 cur_task_id,
+                 last_task_id,
+                 cur_task_loc,
+	         config.all_tasks[cur_task_loc].task_type,
+	         config.all_tasks[cur_task_loc].trigger_event);
+	}
       }
       __syncthreads();
       TaskDesc task_desc = config.all_tasks[cur_task_loc];
@@ -112,31 +117,37 @@ __global__ void persistent_kernel(RuntimeConfig config) {
         }
         case TASK_RMS_NORM_LINEAR: {
           if (threadIdx.x == 0) {
-            printf("[EXEC] worker_id(%d) task_type(RMS)\n", worker_id);
+            //printf("[EXEC] worker_id(%d) task_type(RMS)\n", worker_id);
           }
           break;
         }
         case TASK_EMBEDDING: {
           if (threadIdx.x == 0) {
-            printf("worker_id(%d) task_type(EMB)\n", worker_id);
+            //printf("[EXEC] worker_id(%d) task_type(EMB)\n", worker_id);
           }
           break;
         }
         case TASK_ATTENTION_1: {
           if (threadIdx.x == 0) {
-            printf("worker_id(%d) task_type(Attn1)\n", worker_id);
+            //printf("worker_id(%d) task_type(Attn1)\n", worker_id);
           }
           break;
         }
         case TASK_ATTENTION_2: {
           if (threadIdx.x == 0) {
-            printf("worker_id(%d) task_type(Attn2)\n", worker_id);
+            //printf("worker_id(%d) task_type(Attn2)\n", worker_id);
           }
           break;
         }
         case TASK_SILU_MUL_LINEAR: {
           if (threadIdx.x == 0) {
-            printf("worker_id(%d) task_type(SiluMulLinear)\n", worker_id);
+            //printf("worker_id(%d) task_type(SiluMulLinear)\n", worker_id);
+          }
+          break;
+        }
+        case TASK_ALLREDUCE: {
+          if (threadIdx.x == 0) {
+            //printf("worker_id(%d) task_type(AllReduce)\n", worker_id);
           }
           break;
         }
@@ -149,10 +160,13 @@ __global__ void persistent_kernel(RuntimeConfig config) {
       if (threadIdx.x == 0) {
         EventId event_id = task_desc.trigger_event;
         int count = atomicSub(&config.all_event_counters[event_id], 1);
-        printf("[DONE] worker_id(%d) task_id(%llu) count(%d)\n",
-               worker_id,
-               cur_task_loc,
-               count);
+	if (config.verbose) {
+          printf("[DONE] worker_id(%d) task_id(%llu) event_id(%llu) count(%d)\n",
+                 worker_id,
+                 cur_task_loc,
+                 event_id,
+                 count);
+	}
         if (count == 1) {
           // The event has been triggered enough times
           // Refresh the event counter
@@ -165,9 +179,11 @@ __global__ void persistent_kernel(RuntimeConfig config) {
               atomicAdd(&config.sched_queue_next_free_event_id[sched_id], 1);
           config.sched_queues[sched_id][last_event_id %
                                         config.per_sched_queue_len] = event_id;
+          // Make sure that the updated event_id is visible to the scheduler CTA
+	  // before updating its last_ready_event_id
+	  __threadfence();
           size_t old = config.sched_queue_last_ready_event_id[sched_id];
           do {
-            // TODO: need __threadfence() ???
             old = atomicCAS(&config.sched_queue_last_ready_event_id[sched_id],
                             last_event_id,
                             last_event_id + 1);
@@ -206,14 +222,20 @@ __global__ void persistent_kernel(RuntimeConfig config) {
               &(config.worker_queue_next_free_task_id[next_worker]), 1);
           config.worker_queues[next_worker]
                               [last_task_id % config.per_worker_queue_len] = i;
+	  // Make sure writes to worker_queues is visible to worker CTAs before
+	  // we increase its last_ready_task_id
+	  __threadfence();
           size_t old = config.worker_queue_last_ready_task_id[next_worker];
           do {
-            // TODO: need __threadfence() ???
             old =
                 atomicCAS(&config.worker_queue_last_ready_task_id[next_worker],
                           last_task_id,
                           last_task_id + 1);
           } while (old != last_task_id);
+          if (config.verbose) {
+            printf("[SCHD] schd_id(%d) task_id(%llu) worker_id(%d) worker_last_ready_pos(%llu)\n",
+                   sched_id, i, next_worker, last_task_id + 1);
+          }
           next_worker = (next_worker + 1) % config.num_workers;
         }
         if (e.first_task_id == e.last_task_id) {
@@ -238,12 +260,21 @@ void Runtime::launch_persistent_kernel(int num_workers, int num_schedulers) {
   config.total_num_events = all_events.size();
   config.per_worker_queue_len = 1024;
   config.per_sched_queue_len = 1024;
+  config.verbose = false;
   // Initialize nvshmem
+  auto mpi_comm = MPI_COMM_WORLD;
+  nvshmemx_init_attr_t attr = NVSHMEMX_INIT_ATTR_INITIALIZER;
+  attr.mpi_comm = &mpi_comm;
+  nvshmemx_init_attr(NVSHMEMX_INIT_WITH_MPI_COMM, &attr);
+  int mype = nvshmem_my_pe();
+  int npes = nvshmem_n_pes();
   int mype_node = nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE);
-  printf("nvshmem_my_pe: %d nvshmem_n_pes: %d mype_node %d\n",
-         nvshmem_my_pe(),
-         nvshmem_n_pes(),
+  printf("mype(%d) npes(%d) mype_node(%d)\n",
+         mype,
+         npes,
          mype_node);
+  cudaSetDevice(mype_node);
+
   assert(nvshmem_my_pe() == my_gpu_id);
   assert(nvshmem_n_pes() == num_gpus);
   // Initialize worker queue last task id
@@ -360,6 +391,7 @@ void Runtime::launch_persistent_kernel(int num_workers, int num_schedulers) {
   // Launcher persistent kernel
   persistent_kernel<<<dim3(108, 1, 1), dim3(128, 1, 1)>>>(config);
   cudaDeviceSynchronize();
+  nvshmem_finalize();
 }
 
 }; // namespace runtime

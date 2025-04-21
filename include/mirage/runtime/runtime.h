@@ -63,6 +63,7 @@ struct RuntimeConfig {
   TaskId **worker_queues;
   EventId **sched_queues;
   TaskId *first_tasks;
+  bool verbose;
 };
 
 class Runtime {

@@ -20,6 +20,9 @@ namespace runtime {
 
 typedef unsigned long long int TaskId;
 typedef unsigned long long int EventId;
+// Event IDs are 64-bit values encoding both the owner of the event and its index
+// EVENT: unused: 16, owner_node: 16, event_idx: 32
+unsigned long long int const EVENT_INDEX_MASK = 0xffffffff;
 
 enum TaskType {
   TASK_TERMINATE = 0,
@@ -30,6 +33,9 @@ enum TaskType {
   TASK_ATTENTION_1 = 103,
   TASK_ATTENTION_2 = 104,
   TASK_SILU_MUL_LINEAR = 105,
+  TASK_ALLREDUCE = 106,
+  TASK_REDUCE = 107,
+  TASK_NVSHMEM_COPY = 110,
 };
 
 } // namespace runtime
