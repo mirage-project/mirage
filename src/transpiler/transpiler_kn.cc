@@ -783,6 +783,7 @@ TranspileResult Transpiler::transpile_ugraph() {
           DTensorMeta const &output_meta = dtensor_metas.at(output_guid);
           if (!nvshmem_as_param.empty() && nvshmem_as_param[0].find("alltoall") != string::npos) {
           
+            exec.e("cudaDeviceSynchronize();");
             exec.e("nvshmem_barrier_all();");
             exec.e("cudaMemcpy((void *)output_tensors.at(0), "
                   "(const void *)nvshmem_ptr($, mype), "
