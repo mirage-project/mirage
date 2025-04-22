@@ -14,7 +14,9 @@ import numpy as np
 
 from utils import analyze_differences
 
+
 if __name__ == "__main__":
+
     parser = argparse.ArgumentParser(description="Process some arguments.")
     parser.add_argument("--save_codes", action="store_true", help="Save the generated codes")
     args = parser.parse_args()
@@ -53,6 +55,14 @@ if __name__ == "__main__":
     logger = logging.getLogger(__name__)
 
     torch.cuda.set_device(rank)
+    # torch.backends.cuda.matmul.allow_tf32 = False
+    # torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = False
+    # torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False
+    # torch.set_float32_matmul_precision('highest')
+    # print("torch.backends.cuda.matmul.allow_tf32 ", torch.backends.cuda.matmul.allow_tf32)
+    # print("torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction ", torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction)
+    # print("torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction ", torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction)
+
     # print("Current rank: ", rank)
     # print("Current device: ", torch.cuda.current_device())
     # matrix0 = torch.zeros(256, 128, dtype=torch.float16, device=f'cuda:{rank}')

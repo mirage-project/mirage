@@ -293,7 +293,8 @@ class KNGraph:
         if rank == 2:
             print("[", rank, "] slices: ", slices)
         
-        result = tensor[tuple(slices)].to(dtype=tensor.dtype, device=tensor.device, memory_format=torch.contiguous_format)
+        result_slice = tensor[tuple(slices)]
+        result = result_slice.contiguous().to(dtype=tensor.dtype, device=tensor.device)
         
         return result
 
@@ -359,6 +360,11 @@ class KNGraph:
                 # print("[", rank, "] input_tensors: ", input_tensors[0].shape, input_tensors[0], "\n", input_tensors[1].shape, input_tensors[1])
         else:
             input_tensors = _input_tensors
+
+        
+        # print input_tensors info
+        for i, tensor in enumerate(input_tensors):
+            print(f"input_tensors[{i}].shape: {tensor.shape}, dtype: {tensor.dtype}, device: {tensor.device}, strides: {tensor.stride()}")
 
 
         # TODO: dtype and device
