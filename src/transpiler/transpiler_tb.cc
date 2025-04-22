@@ -251,8 +251,16 @@ static string get_tb_op_str(type::TBOperatorType type) {
 // for more details
 CustomOPTranspileResult
     Transpiler::transpile_kn_custom_op(kn::KNCustomizedOp const *op) {
+  bool profiling = config.profiling;
+
   tb::Graph const &g = op->bgraph;
   int num_threads = g.block_dim.x * g.block_dim.y * g.block_dim.z;
+
+  size_t profiler_buf_size =
+      profiling ? (g.grid_dim.x * g.grid_dim.y * g.grid_dim.z *
+                   (config.num_consumer_wgs + config.num_producer_wgs)) *
+                      1000
+                : 0;
 
   // Get the schedule
   TBSched sched = get_threadblock_schedule(g);
@@ -269,22 +277,43 @@ CustomOPTranspileResult
 
   // Generate code prologue
   CodeKeeper code;
-  code.e("__global__ void __launch_bounds__($) $($, $) {",
-         num_threads,
-         func_name,
-         map<kn::DTensor, string>(op->output_tensors,
-                                  [](kn::DTensor const &dtensor) -> string {
-                                    return fmt(
-                                        "$* __restrict__ dtensor$_ptr",
-                                        get_datatype_str(dtensor.data_type),
-                                        dtensor.guid);
-                                  }),
-         map<kn::DTensor, string>(
-             op->input_tensors, [](kn::DTensor const &dtensor) -> string {
-               return fmt("$ const* __restrict__ dtensor$_ptr",
-                          get_datatype_str(dtensor.data_type),
-                          dtensor.guid);
-             }));
+  if (profiling) {
+    code.e_front(
+        "__global__ void  __launch_bounds__($) "
+        "$($, $, uint64_t *profiler_buffer) {",
+        num_threads,
+        func_name,
+        map<kn::DTensor, string>(op->output_tensors,
+                                 [](kn::DTensor const &dtensor) -> string {
+                                   return fmt(
+                                       "$* __restrict__ dtensor$_ptr",
+                                       get_datatype_str(dtensor.data_type),
+                                       dtensor.guid);
+                                 }),
+        map<kn::DTensor, string>(
+            op->input_tensors, [](kn::DTensor const &dtensor) -> string {
+              return fmt("$ const* __restrict__ dtensor$_ptr",
+                         get_datatype_str(dtensor.data_type),
+                         dtensor.guid);
+            }));
+  } else {
+    code.e("__global__ void __launch_bounds__($) $($, $) {",
+           num_threads,
+           func_name,
+           map<kn::DTensor, string>(op->output_tensors,
+                                    [](kn::DTensor const &dtensor) -> string {
+                                      return fmt(
+                                          "$* __restrict__ dtensor$_ptr",
+                                          get_datatype_str(dtensor.data_type),
+                                          dtensor.guid);
+                                    }),
+           map<kn::DTensor, string>(
+               op->input_tensors, [](kn::DTensor const &dtensor) -> string {
+                 return fmt("$ const* __restrict__ dtensor$_ptr",
+                            get_datatype_str(dtensor.data_type),
+                            dtensor.guid);
+               }));
+  }
 
   // Define thread idx
   string thread_idx;
@@ -769,6 +798,13 @@ CustomOPTranspileResult
     code.e("");
   }
 
+  if (profiling) {
+    code.e("PROFILER_CLOSURE_PARAMS_DECL");
+    code.e("PROFILER_INIT(profiler_buffer, 0, $, (threadIdx.x % "
+           "128 == 0));",
+           config.num_consumer_wgs + config.num_producer_wgs);
+  }
+
   // Launch async input operations for all async inputs
   if (!pipelined_input_ops.empty()) {
     code.e("{");
@@ -776,6 +812,10 @@ CustomOPTranspileResult
       kn::DTensor const &dtensor = input_op->dtensor;
       tb::STensor const &output = input_op->output_tensors.at(0);
       assert(input_op->forloop_dim >= 0);
+      if (profiling) {
+        code.e("PROFILER_EVENT_START($, static_cast<uint32_t>(0));",
+               (input_op->op_type - type::TB_UNKOWN));
+      }
       code.e("STensor$InputAtom::run(stensor$_async_copy_buf, "
              "dtensor$_tile_ptr, thread_idx);",
              output.guid,
@@ -844,6 +884,14 @@ CustomOPTranspileResult
       to_json(op_type_str, op->op_type);
       code.e("{");
       code.e("// OP type: $", op_type_str);
+
+      if (profiling) {
+        code.e("PROFILER_EVENT_START($, $);",
+               (op->op_type - type::TB_UNKOWN),
+               is_in_loop ? "static_cast<uint32_t>(for_idx)"
+                          : "static_cast<uint32_t>(0)");
+      }
+
       switch (op->op_type) {
         case type::TB_INPUT_OP: {
           // In this lambda function we only accept input ops within the for
@@ -1287,6 +1335,13 @@ CustomOPTranspileResult
           assert(fmt("Unknown TB op: $", op->op_type).c_str());
         }
       }
+      // Profiler
+      if (profiling) {
+        code.e("PROFILER_EVENT_END($, $);",
+               (op->op_type - type::TB_UNKOWN),
+               is_in_loop ? "static_cast<uint32_t>(for_idx)"
+                          : "static_cast<uint32_t>(0)");
+      }
       code.e("}");
     }
     return CUDA_T_SUCCESS;
@@ -1322,6 +1377,21 @@ CustomOPTranspileResult
 
     code.e("// Wait for the async copies in the last round to finish");
     code.e("cute::cp_async_wait<1>();");
+
+    // Event end of async cp
+    if (profiling && !pipelined_input_ops.empty()) {
+      for (tb::TBInputOp const *input_op : pipelined_input_ops) {
+        code.e("PROFILER_EVENT_END($, static_cast<uint32_t>(for_idx));",
+               (input_op->op_type - type::TB_UNKOWN));
+      }
+      // start the next round of async cp profiling
+      code.e("if (for_idx+1 != $){", g.forloop_range);
+      for (tb::TBInputOp const *input_op : pipelined_input_ops) {
+        code.e("PROFILER_EVENT_START($, static_cast<uint32_t>(for_idx)+1);",
+               (input_op->op_type - type::TB_UNKOWN));
+      }
+      code.e("}");
+    }
 
     code.e("// Switch buffers");
     for (tb::TBInputOp const *input_op : pipelined_input_ops) {
@@ -1396,8 +1466,11 @@ CustomOPTranspileResult
 
   code.e("}"); // kernel
 
-  return CustomOPTranspileResult{
-      CUDA_T_SUCCESS, func_name, mem_plan.smem_size, 0, code.to_string()};
+  return CustomOPTranspileResult{CUDA_T_SUCCESS,
+                                 func_name,
+                                 mem_plan.smem_size,
+                                 profiler_buf_size,
+                                 code.to_string()};
 }
 
 } // namespace transpiler

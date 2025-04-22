@@ -62,10 +62,12 @@ class EventType(Enum):
 
 
 def decode_tag(tag, num_blocks, num_groups):
-    block_group_tag = tag >> 12
+    event_no = tag >> 24
+    block_group_tag = (tag >> 12) & 0xFFF
     event_idx = (tag >> 2) & 0x3FF
     event_type = tag & 0x3
     return (
+        event_no,
         block_group_tag // num_groups,
         block_group_tag % num_groups,
         event_idx,
@@ -77,6 +79,7 @@ def export_to_perfetto_trace(
     profiler_buffer: torch.Tensor,
     file_name: str,
 ) -> None:
+    
 
     profiler_buffer_host = profiler_buffer.cpu()
     num_blocks, num_groups = profiler_buffer_host[:1].view(dtype=torch.int32)
@@ -99,10 +102,10 @@ def export_to_perfetto_trace(
         tag, timestamp = profiler_buffer_host[i : i + 1].view(dtype=torch.uint32)
         tag = int(tag)
         timestamp = int(timestamp)
-        block_idx, group_idx, event_idx, event_type = decode_tag(
+        event_no, block_idx, group_idx, event_idx, event_type = decode_tag(
             tag, num_blocks, num_groups
         )
-        event = event_name_list[event_idx + 2000]
+        event = event_name_list[event_idx + 2000] + f"_{event_no}"
         tid = tid_map[(block_idx, group_idx)]
 
         if (block_idx, group_idx, event_idx) in track_map:
