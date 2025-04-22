@@ -1,21 +1,63 @@
 #include <iostream>
+#include <vector>
+#include <string>
+#include <unordered_map>
 
 using namespace std;
 
 extern "C" {
-    bool egg_equiv(const char* expr1, const char* expr2);
+  
+  struct KVPair {
+        int key;
+        bool value;
+  };
+
+  KVPair* egg_equiv(const char** inputs, int len, const char* expr);
 }
 
 int main() {
-    std::string expr1 = "(sum 12 v_0)";
-    std::string expr2 = "(sum 48 v_0)";
+    std::vector<std::string> sub_exprs = {
+        "(sum 4096 (* v_0 v_1))",
+        "(* (sum 32 v_0) (sum 128 v_2))",
+        "(sum 4 (* (sum 4 v_0) (sum 4 v_2)))",
+        "(sum 2 (* (sum 16 v_1) (sum 16 v_0)))",
+        "(sum 4 (* (sum 4 v_1) (sum 4 v_0)))",
+        "(sum 2 (* (sum 64 v_2) (sum 64 v_0)))",
+        "null",
+        "(sum 4096 (* (sum 16 (silu (sum 4096 (* v_0 v_1)))) (sum 16 v_2)))",
+        "(sum 8 (* (sum 16 (silu (sum 4096 (* v_0 v_1)))) (sum 16 v_2)))",
+    };
 
-    std::string expr3 = "(sum 4 (sum 12 (* v_0 v_2)))";
-    std::string expr4 = "(+ (sum 12 (* v_0 v_1)) (sum 4 (* (sum 12 (* v_0 v_2)) v_3)))";
-    bool result1 = egg_equiv(expr1.c_str(), expr4.c_str());
-    bool result2 = egg_equiv(expr2.c_str(), expr4.c_str());
-    bool result3 = egg_equiv(expr3.c_str(), expr4.c_str());
-    std::cout << "Result: " << result1 << result2 << result3 << std::endl;
+    std::vector<bool> is_valid;
+    for (auto& s : sub_exprs) {
+        if (s == "null") {
+            is_valid.push_back(false);
+        } else {
+            is_valid.push_back(true);
+        }
+
+    }
+
+    std::vector<const char*> c_subexpr;
+    c_subexpr.reserve(sub_exprs.size());
+    for (const auto& s : sub_exprs) {
+        c_subexpr.push_back(s.c_str());
+    }
+
+    std::string expr = "(* (silu (sum 4096 (* v_0 v_1))) (sum 4096 (* v_0 v_2)))";
+    KVPair* datas = egg_equiv(c_subexpr.data(), static_cast<int>(c_subexpr.size()), expr.c_str());
+
+    std::unordered_map<int, bool> result;
+    size_t len = c_subexpr.size();
+    for (size_t i = 0; i < len; ++i) {
+        if(is_valid[i]){
+        result[datas[i].key] = datas[i].value;
+        }    
+    }
+
+    for (const auto& pair : result) {
+        std::cout <<  "Key: " << pair.first << ", Value: " << pair.second << std::endl;
+    }
 
     return 0;
 

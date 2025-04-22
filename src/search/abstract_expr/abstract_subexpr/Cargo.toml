@@ -1,5 +1,5 @@
 [package]
-name = "rust_part"
+name = "abstract_subexpr"
 version = "0.1.0"
 edition = "2021"
 
@@ -10,5 +10,5 @@ pyo3 = { version = "0.20", features = ["extension-module"] }
 regex = "1"
 
 [lib]
-name = "rust_part"
+name = "abstract_subexpr"
 crate-type = ["cdylib"]

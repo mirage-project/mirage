@@ -11,25 +11,40 @@
 namespace mirage {
 namespace search {
 
-z3::expr_vector to_expr_vector(z3::context &c,
-  std::vector<z3::expr> const &_vec) {
-z3::expr_vector vec(c);
-for (auto const &e : _vec) {
-vec.push_back(e);
-}
-return vec;
-}
+std::unordered_map<int, bool> AbstractExpr::subpattern_to(
+    const std::vector<std::shared_ptr<AbstractExpr>>& input_patterns) const {  
+  std::vector<std::string> subexpr;
+  std::vector<bool> is_valid; 
+  int is_diff = 0;
+  for (auto const &input : input_patterns) {
+    if (input == nullptr) {
+      subexpr.push_back("null");
+      is_valid.push_back(false);
+    } else {
+      is_diff++;
+      subexpr.push_back(input->to_egg().c_str());
+      is_valid.push_back(true);
+    }
+  }
 
-bool AbstractExpr::subpattern_to(AbstractExpr const &other) const {
-  std::string string1 = to_egg();
-  std::string string2 = other.to_egg();
-  bool result = egg_equiv(string1.c_str(), string2.c_str());
+  std::vector<const char*> c_subexpr;
+  c_subexpr.reserve(subexpr.size());
+  for (const auto& s : subexpr) {
+      c_subexpr.push_back(s.c_str());
+  }
 
+
+  std::string expr = this->to_egg();
+  KVPair* datas = egg_equiv(c_subexpr.data(), static_cast<int>(c_subexpr.size()), expr.c_str());
+
+  std::unordered_map<int, bool> result;
+  size_t len = c_subexpr.size();
+  for (size_t i = 0; i < len; ++i) {
+    if(is_valid[i]){
+      result[datas[i].key] = datas[i].value;
+    }    
+  }
   return result;
-}
-
-bool AbstractExpr::operator==(AbstractExpr const &other) const {
-return subpattern_to(other) && other.subpattern_to(*this);
 }
 
 Var::Var(std::string const &name) : name(name) {}

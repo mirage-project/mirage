@@ -3,6 +3,16 @@
 version = 4
 
 [[package]]
+name = "abstract_subexpr"
+version = "0.1.0"
+dependencies = [
+ "egg",
+ "ordered-float",
+ "pyo3",
+ "regex",
+]
+
+[[package]]
 name = "aho-corasick"
 version = "1.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -383,16 +393,6 @@ name = "regex-syntax"
 version = "0.8.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2b15c43186be67a4fd63bee50d0303afffcef381492ebe2c5d87f324e1b8815c"
-
-[[package]]
-name = "rust_part"
-version = "0.1.0"
-dependencies = [
- "egg",
- "ordered-float",
- "pyo3",
- "regex",
-]
 
 [[package]]
 name = "rustc-hash"

@@ -1,0 +1,68 @@
+   Compiling autocfg v1.4.0
+   Compiling target-lexicon v0.12.16
+   Compiling proc-macro2 v1.0.95
+   Compiling unicode-ident v1.0.18
+   Compiling once_cell v1.21.3
+   Compiling libc v0.2.172
+   Compiling crossbeam-utils v0.8.21
+   Compiling smallvec v1.15.0
+   Compiling allocator-api2 v0.2.21
+   Compiling equivalent v1.0.2
+   Compiling foldhash v0.1.5
+   Compiling parking_lot_core v0.9.10
+   Compiling cfg-if v1.0.0
+   Compiling thiserror v1.0.69
+   Compiling scopeguard v1.2.0
+   Compiling bitflags v2.9.0
+   Compiling memchr v2.7.4
+   Compiling portable-atomic v1.11.0
+   Compiling heck v0.4.1
+   Compiling regex-syntax v0.8.5
+   Compiling log v0.4.27
+   Compiling indoc v2.0.6
+   Compiling symbolic_expressions v5.0.3
+   Compiling unindent v0.2.4
+   Compiling rustc-hash v2.1.1
+   Compiling saturating v0.1.0
+   Compiling env_logger v0.9.3
+   Compiling raw-cpuid v11.5.0
+   Compiling num-traits v0.2.19
+   Compiling lock_api v0.4.12
+   Compiling memoffset v0.9.1
+   Compiling hashbrown v0.15.2
+   Compiling aho-corasick v1.1.3
+   Compiling pyo3-build-config v0.20.3
+   Compiling quote v1.0.40
+   Compiling syn v2.0.100
+   Compiling parking_lot v0.12.3
+   Compiling symbol_table v0.4.0
+   Compiling indexmap v2.9.0
+   Compiling num-integer v0.1.46
+   Compiling ordered-float v3.9.2
+   Compiling quanta v0.12.5
+   Compiling num-bigint v0.4.6
+   Compiling regex-automata v0.4.9
+   Compiling pyo3-ffi v0.20.3
+   Compiling pyo3 v0.20.3
+   Compiling pyo3-macros-backend v0.20.3
+   Compiling regex v1.11.1
+   Compiling thiserror-impl v1.0.69
+   Compiling egg v0.10.0
+   Compiling pyo3-macros v0.20.3
+   Compiling abstract_subexpr v0.1.0 (/home/xiaoyuj2/mirage/src/search/abstract_expr/abstract_subexpr)
+warning: unused variable: `start`
+   --> src/lib.rs:143:9
+    |
+143 |     let start = std::time::Instant::now();
+    |         ^^^^^ help: if this is intentional, prefix it with an underscore: `_start`
+    |
+    = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `length`
+   --> src/lib.rs:167:9
+    |
+167 |     let length = data.len();
+    |         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_length`
+
+warning: `abstract_subexpr` (lib) generated 2 warnings
+    Finished `release` profile [optimized] target(s) in 7.67s

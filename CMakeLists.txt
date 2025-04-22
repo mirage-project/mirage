@@ -113,23 +113,27 @@ add_library(mirage_runtime ${MIRAGE_SRCS})
 
 #set RUST
 include(ExternalProject)
+
+set(RUST_CRATE_DIR "${PROJECT_SOURCE_DIR}/src/search/abstract_expr/abstract_subexpr")
+set(RUST_LIB_DEBUG "${RUST_CRATE_DIR}/target/debug/libabstract_subexpr.so")
+set(RUST_LIB_RELEASE "${RUST_CRATE_DIR}/target/release/libabstract_subexpr.so")
+
 set_directory_properties(PROPERTIES EP_PREFIX ${PROJECT_SOURCE_DIR}/deps/Rust)
 ExternalProject_Add(
-  rust_part
+  abstract_subexpr
   DOWNLOAD_COMMAND ""
   CONFIGURE_COMMAND ""
   BUILD_COMMAND cargo build --release
-  BINARY_DIR "${PROJECT_SOURCE_DIR}/rust_part"
+  BINARY_DIR "${RUST_CRATE_DIR}"
   INSTALL_COMMAND ""
   LOG_BUILD ON)
 
-add_dependencies(mirage_runtime rust_part)
+add_dependencies(mirage_runtime abstract_subexpr)
 
 target_link_libraries(mirage_runtime
-  debug "${PROJECT_SOURCE_DIR}/rust_part/target/debug/librust_part.so"
-  optimized "${PROJECT_SOURCE_DIR}/rust_part/target/release/librust_part.so")
+  optimized ${RUST_LIB_RELEASE})
 
-set_target_properties(mirage_runtime PROPERTIES CXX_STANDARD 11 CXX_STANDARD_REQUIRED ON)
+set_target_properties(mirage_runtime PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
 
 set_target_properties(mirage_runtime PROPERTIES CUDA_ARCHITECTURES "70;75;80;86;89;90")
 

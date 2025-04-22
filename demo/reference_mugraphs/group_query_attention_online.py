@@ -1,4 +1,5 @@
 import mirage as mi
+import numpy as np
 import torch
 
 if __name__ == "__main__":

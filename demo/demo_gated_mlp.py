@@ -12,7 +12,7 @@ if __name__ == "__main__":
     O1 = graph.silu(O1)
     O = graph.mul(O1, O2)
     graph.mark_output(O)
-    optimized_graph = graph.superoptimize(config="mlp", is_formal_verified=True)
+    optimized_graph = graph.superoptimize(config="mlp")
 
     input_tensors = [
         torch.randn(8, 4096, dtype=torch.float16, device='cuda:0'),

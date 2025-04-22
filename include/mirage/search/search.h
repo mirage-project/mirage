@@ -72,9 +72,8 @@ private:
       size_t depth);
 
   void preprocess(kernel::Graph const &computation_graph);
-  bool check_pattern(std::shared_ptr<AbstractExpr> pattern);
+  std::unordered_map<int, bool> check_pattern(std::vector<std::shared_ptr<AbstractExpr>>& inputs);
   bool verify(kernel::Graph &g);
-  // std::vector<std::string> wrong_results(std::shared_ptr<AbstractExpr> pattern);
 
   void save_results() const;
   double get_elapsed_time_in_sec() const;

@@ -10,7 +10,13 @@
 #include <unordered_set>
 
 extern "C" {
-  bool egg_equiv(const char* expr1, const char* expr2);
+
+  struct KVPair {
+        int key;
+        bool value;
+  };
+
+  KVPair* egg_equiv(const char** inputs, int len, const char* expr);
 }
 
 
@@ -25,8 +31,7 @@ public:
   virtual z3::expr
       to_z3(z3::context &c,
             std::unordered_set<std::string> &all_variables) const = 0;
-  bool subpattern_to(AbstractExpr const &other) const;
-  bool operator==(AbstractExpr const &other) const;
+  std::unordered_map<int, bool> subpattern_to(const std::vector<std::shared_ptr<AbstractExpr>>& input_patterns) const;
   virtual std::string to_string() const = 0;
   virtual std::string to_egg() const = 0;
 };
