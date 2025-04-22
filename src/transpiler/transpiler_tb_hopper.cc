@@ -881,7 +881,9 @@ CustomOPTranspileResult
            g.forloop_range);
     for (auto const &[stensor_id, op] : pipeline_inputs) {
       if (profiling) {
-        code.e("PROFILER_EVENT_START($, $);", (op->op_type - type::TB_UNKOWN), "static_cast<uint32_t>(for_idx)");
+        code.e("PROFILER_EVENT_START($, $);",
+               (op->op_type - type::TB_UNKOWN),
+               "static_cast<uint32_t>(for_idx)");
       }
       code.e(fmt("STensor$InputAtom::run(tma_$, stensor$_ptr, "
                  " $, $, $, for_idx, hopper_async_pipeline_$);",
@@ -893,7 +895,9 @@ CustomOPTranspileResult
                  op->input_map.z,
                  stensor_id));
       if (profiling) {
-        code.e("PROFILER_EVENT_END($, $);", (op->op_type - type::TB_UNKOWN), "static_cast<uint32_t>(for_idx)");
+        code.e("PROFILER_EVENT_END($, $);",
+               (op->op_type - type::TB_UNKOWN),
+               "static_cast<uint32_t>(for_idx)");
       }
     }
     code.e("}");
@@ -973,7 +977,10 @@ CustomOPTranspileResult
       // define
       if (pipe_tma && profiling) {
         // 2000 - 2999
-        code.e("PROFILER_EVENT_START($, $);", (op->op_type - type::TB_UNKOWN), is_in_loop ? "static_cast<uint32_t>(for_idx)" : "static_cast<uint32_t>(0)");
+        code.e("PROFILER_EVENT_START($, $);",
+               (op->op_type - type::TB_UNKOWN),
+               is_in_loop ? "static_cast<uint32_t>(for_idx)"
+                          : "static_cast<uint32_t>(0)");
       }
 
       switch (op->op_type) {
@@ -1296,7 +1303,10 @@ CustomOPTranspileResult
         }
       }
       if (pipe_tma && profiling) {
-        code.e("PROFILER_EVENT_END($, $);", (op->op_type - type::TB_UNKOWN), is_in_loop ? "static_cast<uint32_t>(for_idx)" : "static_cast<uint32_t>(0)");
+        code.e("PROFILER_EVENT_END($, $);",
+               (op->op_type - type::TB_UNKOWN),
+               is_in_loop ? "static_cast<uint32_t>(for_idx)"
+                          : "static_cast<uint32_t>(0)");
       }
       code.e("}");
     }
