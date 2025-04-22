@@ -3,15 +3,15 @@ import torch
 
 if __name__ == "__main__":
     graph = mi.new_kernel_graph()
-    Q = graph.new_input(dims=(2, 64, 64), dtype=mi.float16)
-    K = graph.new_input(dims=(2, 64, 64), dtype=mi.float16)
-    V = graph.new_input(dims=(2, 64, 64), dtype=mi.float16)
+    Q = graph.new_input(dims=(2, 256, 64), dtype=mi.float16)
+    K = graph.new_input(dims=(2, 64, 1024), dtype=mi.float16)
+    V = graph.new_input(dims=(2, 1024, 64), dtype=mi.float16)
     tbgraph1 = mi.new_threadblock_graph(
-        grid_dim=(2, 1, 4), block_dim=(128, 1, 1), forloop_range=1, reduction_dimx=64
+        grid_dim=(2, 1, 16), block_dim=(128, 1, 1), forloop_range=16, reduction_dimx=64
     )
     bQ = tbgraph1.new_input(dtensor=Q, input_map=(0, -1, 1), forloop_dim=-1)
-    bK = tbgraph1.new_input(dtensor=K, input_map=(0, 2, -1), forloop_dim=-1)
-    bV = tbgraph1.new_input(dtensor=V, input_map=(0, 1, -1), forloop_dim=-1)
+    bK = tbgraph1.new_input(dtensor=K, input_map=(0, -1, -1), forloop_dim=2)
+    bV = tbgraph1.new_input(dtensor=V, input_map=(0, -1, -1), forloop_dim=1)
     bA = tbgraph1.matmul(bQ, bK)
     bE = tbgraph1.exp(bA)
     bS = tbgraph1.matmul(bE, bV)
@@ -36,9 +36,9 @@ if __name__ == "__main__":
     graph.mark_output(O[1])
 
     input_tensors = [
-        torch.randn(2, 64, 64, dtype=torch.float16, device="cuda:0"),
-        torch.randn(2, 64, 64, dtype=torch.float16, device="cuda:0"),
-        torch.randn(2, 64, 64, dtype=torch.float16, device="cuda:0"),
+        torch.randn(2, 256, 64, dtype=torch.float16, device="cuda:0"),
+        torch.randn(2, 64, 1024, dtype=torch.float16, device="cuda:0"),
+        torch.randn(2, 1024, 64, dtype=torch.float16, device="cuda:0"),
     ]
 
     # t means torch

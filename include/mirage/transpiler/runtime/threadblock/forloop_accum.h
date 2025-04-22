@@ -73,7 +73,7 @@ public:
     for (int elem_idx = thread_idx; elem_idx < numel; elem_idx += NUM_THREADS) {
       accum[accum_layout(elem_idx)] =
           accum[accum_layout(elem_idx)] *
-              rescale[rescale_layout(elem_idx / (numel / rescale_numel))] +
+              rescale[rescale_layout(elem_idx % rescale_numel)] +
           src[src_layout(elem_idx)];
     }
     // Print debug info
