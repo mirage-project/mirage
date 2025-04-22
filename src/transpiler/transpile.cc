@@ -239,19 +239,11 @@ std::shared_ptr<kernel::Graph const>
                 stensor_mapping[bop->output_tensors[0].guid] = st;
                 break;
               }
-              case TB_EXP_OP:
-              case TB_SQUARE_OP:
-              case TB_SQRT_OP:
-              case TB_SILU_OP:
-              case TB_GELU_OP:
-              case TB_RELU_OP:
-              case TB_CLAMP_OP:
-              case TB_MUL_SCALAR_OP: {
-                if (bop->op_type == TB_EXP_OP &&
-                    std::find(tensors_replace.begin(),
+              case TB_EXP_OP: {
+                if (std::find(tensors_replace.begin(),
                               tensors_replace.end(),
                               bop->output_tensors[0].guid) !=
-                        tensors_replace.end()) {
+                    tensors_replace.end()) {
                   // Find the operators that need to be replaced
                   mirage::threadblock::TBOperator *forloop_accum_op,
                       *forloop_accum_sum_op, *mat_mul_op;
@@ -308,6 +300,20 @@ std::shared_ptr<kernel::Graph const>
                   stensor_mapping[d.guid] = accum_exp_x_minus_max_sum;
                   break;
                 }
+                assert(stensor_inputs.size() == 1);
+                threadblock::STensor st =
+                    tbg->elementunary(stensor_inputs[0], bop->op_type);
+                assert(bop->output_tensors.size() == 1);
+                stensor_mapping[bop->output_tensors[0].guid] = st;
+                break;
+              }
+              case TB_SQUARE_OP:
+              case TB_SQRT_OP:
+              case TB_SILU_OP:
+              case TB_GELU_OP:
+              case TB_RELU_OP:
+              case TB_CLAMP_OP:
+              case TB_MUL_SCALAR_OP: {
                 assert(stensor_inputs.size() == 1);
                 threadblock::STensor st =
                     tbg->elementunary(stensor_inputs[0], bop->op_type);
