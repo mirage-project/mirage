@@ -85,6 +85,10 @@ class Qwen2RotaryEmbedding(nn.Module):
 
     @torch.no_grad()
     def forward(self, position_ids):
+        # Ensure inv_freq and position_ids are on the same device
+        if self.inv_freq.device != position_ids.device:
+            self.inv_freq = self.inv_freq.to_device("cuda")
+            position_ids = position_ids.to_device("cuda")
 
         # Core RoPE block
         inv_freq_expanded = self.inv_freq[None, :, None].float().expand(position_ids.shape[0], -1, 1)

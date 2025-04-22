@@ -303,7 +303,8 @@ TranspileResult Transpiler::transpile_ugraph() {
       }
       case type::KNOperatorType::KN_ADD_OP:
       case type::KNOperatorType::KN_MUL_OP:
-      case type::KNOperatorType::KN_DIV_OP: {
+      case type::KNOperatorType::KN_DIV_OP:
+      case type::KNOperatorType::KN_POW_OP: {
         // Elemwise binary op
         kn::DTensor &in0 = op->input_tensors.at(0);
         kn::DTensor &in1 = op->input_tensors.at(1);
@@ -350,6 +351,7 @@ TranspileResult Transpiler::transpile_ugraph() {
         string op_type_str = op->op_type == type::KN_ADD_OP   ? "ADD"
                              : op->op_type == type::KN_MUL_OP ? "MUL"
                              : op->op_type == type::KN_DIV_OP ? "DIV"
+                             : op->op_type == type::KN_POW_OP ? "POW"
                                                               : "";
         assert(op_type_str != "");
         // Create kernel instance
@@ -461,6 +463,7 @@ TranspileResult Transpiler::transpile_ugraph() {
           config.profiling = false;
         } else {
           result = transpile_kn_custom_op(cur_op);
+          config.profiling = false;
         }
 
         if (result.error_type != CUDA_T_SUCCESS) {

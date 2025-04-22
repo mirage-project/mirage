@@ -137,6 +137,8 @@ def get_kn_operator_type_string(int op_type):
         return "kn_mul_op"
     elif op_type == KN_DIV_OP:
         return "kn_div_op"
+    elif op_type == KN_POW_OP:
+        return "kn_pow_op"
     elif op_type == KN_REDUCTION_0_OP:
         return "kn_reduction_0_op"
     elif op_type == KN_REDUCTION_1_OP:
@@ -214,6 +216,8 @@ def get_tb_operator_type_string(int op_type):
         return "tb_mul_op"
     elif op_type == TB_DIV_OP:
         return "tb_div_op"
+    elif op_type == TB_POW_OP:
+        return "tb_pow_op"
     elif op_type == TB_REDUCTION_FIRST_OP_ID:
         return "tb_reduction_first_op_id"
     elif op_type == TB_REDUCTION_0_OP:
@@ -721,6 +725,11 @@ cdef class CyKNGraph:
         t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
         return DTensor(t)
 
+    def pow(self, DTensor A, DTensor B):
+        cdef CppDTensor* ptr = self.p_kgraph.pow(A.c_ptr, B.c_ptr)
+        t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
+        return DTensor(t)
+
     def customized(self, list inputs, CyTBGraph bgraph):
         cdef vector[const CppDTensor*] cinputs
         cinputs.resize(len(inputs))
@@ -1141,3 +1150,13 @@ def generate_triton_program(CyKNGraph input_graph, *, int target_cc) -> dict:
 
 def set_gpu_device_id(gpu_id: int):
     cython_set_gpu_device_id(gpu_id)
+
+def cy_to_json(CyKNGraph input_graph, str filename):
+    cfilename = filename.encode('UTF-8')
+    cython_to_json(input_graph.p_kgraph, cfilename)
+
+def cy_from_json(str filename):
+    cfilename = filename.encode('UTF-8')
+    ptr = cython_from_json(cfilename)
+    graph = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
+    return CyKNGraph(graph)
