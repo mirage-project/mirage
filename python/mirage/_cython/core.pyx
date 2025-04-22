@@ -1150,3 +1150,13 @@ def generate_triton_program(CyKNGraph input_graph, *, int target_cc) -> dict:
 
 def set_gpu_device_id(gpu_id: int):
     cython_set_gpu_device_id(gpu_id)
+
+def cy_to_json(CyKNGraph input_graph, str filename):
+    cfilename = filename.encode('UTF-8')
+    cython_to_json(input_graph.p_kgraph, cfilename)
+
+def cy_from_json(str filename):
+    cfilename = filename.encode('UTF-8')
+    ptr = cython_from_json(cfilename)
+    graph = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
+    return CyKNGraph(graph)
