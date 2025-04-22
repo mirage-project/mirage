@@ -349,10 +349,11 @@ void Runtime::launch_persistent_kernel(int num_workers,
   config.per_sched_queue_len = 1024;
   config.verbose = false;
   // Initialize nvshmem
-  auto mpi_comm = MPI_COMM_WORLD;
+  MPI_Comm mpi_comm = MPI_COMM_WORLD;
   nvshmemx_init_attr_t attr = NVSHMEMX_INIT_ATTR_INITIALIZER;
   attr.mpi_comm = &mpi_comm;
   nvshmemx_init_attr(NVSHMEMX_INIT_WITH_MPI_COMM, &attr);
+  nvshmem_barrier_all();
   int mype = nvshmem_my_pe();
   int npes = nvshmem_n_pes();
   int mype_node = nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE);
@@ -363,9 +364,11 @@ void Runtime::launch_persistent_kernel(int num_workers,
 
   assert(nvshmem_my_pe() == my_gpu_id);
   assert(nvshmem_n_pes() == num_gpus);
+  printf("CP#1\n");
   // Initialize worker queue last task id
   config.worker_queue_last_ready_task_id =
       gpu_malloc<unsigned long long int>(config.num_workers * sizeof(unsigned long long int));
+  printf("CP#2\n");
   config.worker_queue_next_free_task_id =
       gpu_malloc<unsigned long long int>(config.num_workers * sizeof(unsigned long long int));
   std::vector<unsigned long long int> host_worker_queue_last_task_id;
@@ -461,6 +464,7 @@ void Runtime::launch_persistent_kernel(int num_workers,
                          cudaMemcpyHostToDevice));
   }
 
+  printf("CP#3\n");
   // launch init kernel
   init_kernel<<<dim3(1, 1, 1), dim3(128, 1, 1)>>>(config);
   cudaDeviceSynchronize();

@@ -64,6 +64,10 @@ int main(int argc, char **argv) {
                         1},
                        type::DT_BFLOAT16,
                        layout::DmemRowMajor);
+  kn::DTensor AttnProjIn = kgraph.new_input({batch_size, hidden_size},
+                                            {(size_t)hidden_size, 1},
+                                            type::DT_BFLOAT16,
+                                            layout::DmemRowMajor);
   kn::DTensor AttnProjOut = kgraph.new_input({batch_size, hidden_size},
                                              {(size_t)hidden_size, 1},
                                              type::DT_BFLOAT16,
@@ -139,20 +143,37 @@ int main(int argc, char **argv) {
       dim3 grid_dim = {batch_size, num_q_heads, 1}, block_dim = {128, 1, 1};
       tb::Graph bgraph(grid_dim, block_dim, 1, 64);
       bgraph.new_input(AttnOut, {0, 2, -1}, -1, layout::SmemRowMajor);
-      bgraph.new_input(AttnProjOut, {0, 1, -1}, -1, layout::SmemRowMajor);
-      kgraph.customized({AttnOut, AttnProjOut}, bgraph);
+      bgraph.new_input(AttnProjIn, {0, 1, -1}, -1, layout::SmemRowMajor);
+      kgraph.customized({AttnOut, AttnProjIn}, bgraph);
       task_configs[kgraph.operators.back()] =
           std::make_tuple(1, 1, rt::TASK_ATTENTION_2);
     }
     // Add out_projection
+    {
+      dim3 grid_dim = {hidden_size / 64, 1, 1}, block_dim = {128, 1, 1};
+      tb::Graph bgraph(grid_dim, block_dim, hidden_size / 64, 64);
+      kn::DTensor W = kgraph.new_input({hidden_size, hidden_size},
+                                       {(size_t)hidden_size, 1},
+                                       type::DT_BFLOAT16,
+                                       layout::DmemRowMajor);
+      tb::STensor bX =
+          bgraph.new_input(AttnProjIn, {-1, -1, -1}, 1, layout::SmemRowMajor);
+      tb::STensor bW =
+          bgraph.new_input(W, {1, -1, -1}, 0, layout::SmemRowMajor);
+      tb::STensor bY =
+          bgraph.new_input(AttnProjOut, {1, -1, -1}, -1, layout::SmemRowMajor);
+      kgraph.customized({AttnProjIn, W, AttnProjOut}, bgraph);
+      task_configs[kgraph.operators.back()] =
+          std::make_tuple(2, 1, rt::TASK_MATMUL);
+    }
     // Add AllReduce
     {
-      dim3 grid_dim = {batch_size, hidden_size / 64, 1},
+      dim3 grid_dim = {hidden_size / 64, 1, 1},
            block_dim = {128, 1, 1};
       tb::Graph bgraph(grid_dim, block_dim, 1, 64);
-      bgraph.new_input(AttnProjOut, {0, 1, -1}, -1, layout::SmemRowMajor);
-      bgraph.new_input(AllReduceBuf, {0, 2, -1}, -1, layout::SmemRowMajor);
-      bgraph.new_input(AttnAROut, {0, 1, -1}, -1, layout::SmemRowMajor);
+      bgraph.new_input(AttnProjOut, {1, -1, -1}, -1, layout::SmemRowMajor);
+      bgraph.new_input(AllReduceBuf, {2, -1, -1}, -1, layout::SmemRowMajor);
+      bgraph.new_input(AttnAROut, {1, -1, -1}, -1, layout::SmemRowMajor);
       kgraph.customized({AttnProjOut, AllReduceBuf, AttnAROut}, bgraph);
       task_configs[kgraph.operators.back()] =
           std::make_tuple(2, 1, rt::TASK_ALLREDUCE);

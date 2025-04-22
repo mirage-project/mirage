@@ -37,7 +37,8 @@ enum TaskType {
   TASK_SILU_MUL_LINEAR = 105,
   TASK_ALLREDUCE = 106,
   TASK_REDUCE = 107,
-  TASK_NVSHMEM_COPY = 110,
+  TASK_MATMUL = 108,
+  TASK_NVSHMEM_COPY = 199,
 };
 
 } // namespace runtime
