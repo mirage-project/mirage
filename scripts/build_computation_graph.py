@@ -6,6 +6,7 @@ import onnx
 from onnx import shape_inference
 from op import Operator
 import torch.nn.functional as F
+import custom_onnx_operators
 
 device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 
@@ -330,6 +331,8 @@ def get_computation_graph(model, dummy_input, unique_operators, method):
     match method:
         case "onnx":
             # Generate the ONNX file
+            custom_onnx_operators.register_custom_operators() # Register any custom operators we have defined. eg: RMSNorm, etc.
+            
             onnx_path = "scripts/onnx/integrate_test.onnx"
             os.makedirs(os.path.dirname(onnx_path), exist_ok=True)
 
@@ -339,7 +342,7 @@ def get_computation_graph(model, dummy_input, unique_operators, method):
                 model,
                 dummy_input,
                 onnx_path,
-                dynamo=True
+                # dynamo=True
             )
             
             shape_inference.infer_shapes_path(model_path="scripts/onnx/integrate_test.onnx",
