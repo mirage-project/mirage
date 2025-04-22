@@ -35,8 +35,11 @@ int main(int argc, char **argv) {
   kn::Graph kgraph;
   kn::DTensor X = kgraph.new_input(
       {batch_size, 1}, {1, 1}, type::DT_UINT16, layout::DmemRowMajor);
-  kn::DTensor AllReduceBuf = kgraph.new_input(
-      {batch_size, world_size, hidden_size}, {hidden_size * world_size, hidden_size, 1}, type::DT_BFLOAT16, layout::DmemRowMajor);
+  kn::DTensor AllReduceBuf =
+      kgraph.new_input({batch_size, world_size, hidden_size},
+                       {hidden_size * world_size, hidden_size, 1},
+                       type::DT_BFLOAT16,
+                       layout::DmemRowMajor);
 
   kn::DTensor Y = kgraph.new_input({batch_size, hidden_size},
                                    {(size_t)hidden_size, 1},
@@ -141,10 +144,11 @@ int main(int argc, char **argv) {
       task_configs[kgraph.operators.back()] =
           std::make_tuple(1, 1, rt::TASK_ATTENTION_2);
     }
-    // Add out_projection 
+    // Add out_projection
     // Add AllReduce
     {
-      dim3 grid_dim = {batch_size, hidden_size / 64, 1}, block_dim = {128, 1, 1};
+      dim3 grid_dim = {batch_size, hidden_size / 64, 1},
+           block_dim = {128, 1, 1};
       tb::Graph bgraph(grid_dim, block_dim, 1, 64);
       bgraph.new_input(AttnProjOut, {0, 1, -1}, -1, layout::SmemRowMajor);
       bgraph.new_input(AllReduceBuf, {0, 2, -1}, -1, layout::SmemRowMajor);
@@ -196,7 +200,7 @@ int main(int argc, char **argv) {
   using namespace mirage::runtime;
   Runtime runtime(world_size /*num_gpus*/, rank /*my_gpu_id*/);
   runtime.register_mugraph(kgraph, task_configs);
-  runtime.launch_persistent_kernel(106 /*num_workers*/, 8 /*num_schedulers*/);
+  runtime.launch_persistent_kernel(106 /*num_workers*/, 7 /*num_local_schedulers*/, 1 /*num_remote_schedulers*/);
 
   MPI_Finalize();
 }

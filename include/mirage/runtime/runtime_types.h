@@ -19,10 +19,12 @@ namespace mirage {
 namespace runtime {
 
 typedef unsigned long long int TaskId;
+unsigned long long int const TASK_INVALID_ID = 0x7fffffffffffffff;
 typedef unsigned long long int EventId;
-// Event IDs are 64-bit values encoding both the owner of the event and its index
-// EVENT: unused: 16, owner_node: 16, event_idx: 32
-unsigned long long int const EVENT_INDEX_MASK = 0xffffffff;
+// Event IDs are 64-bit values encoding both the owner of the event and its
+// index EVENT: nvshmem_tag: 16, owner_node: 16, event_idx: 32
+unsigned long long int const EVENT_NVSHMEM_TAG = 0x1e00000000000000;
+unsigned long long int const EVENT_INVALID_ID = 0x7ffffffffffffffe;
 
 enum TaskType {
   TASK_TERMINATE = 0,

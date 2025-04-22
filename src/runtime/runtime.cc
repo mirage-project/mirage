@@ -30,6 +30,14 @@ Runtime::Runtime(int _num_gpus, int _my_gpu_id)
   all_tasks.push_back(t);
 }
 
+size_t get_event_id(int my_gpu_id, size_t event_pos, bool nvshmem_event) {
+  size_t event_id = ((static_cast<size_t>(my_gpu_id) << 32) | event_pos);
+  if (nvshmem_event) {
+    event_id = event_id | EVENT_NVSHMEM_TAG;
+  }
+  return event_id;
+}
+
 struct Dim3Comparator {
   bool operator()(dim3 const &a, dim3 const &b) const {
     if (a.x != b.x) {
@@ -83,7 +91,8 @@ void dfs_create_events_add_tasks(
           assert(pre_task_map.find(bid) != pre_task_map.end());
           int task_id = pre_task_map.find(bid)->second;
           // encode gpu_id
-          all_tasks[task_id].trigger_event = my_gpu_id << 16 | all_events.size();
+          all_tasks[task_id].trigger_event = get_event_id(
+              my_gpu_id, all_events.size(), false /*nvshmem_event*/);
           event_desc.num_triggers++;
         }
       }
@@ -126,6 +135,7 @@ void dfs_create_events_add_tasks(
         new_producer_hi_bid.z = (i + 1) * factor;
       }
       dfs_create_events_add_tasks(depth + 1,
+                                  my_gpu_id,
                                   event_dims,
                                   input_map,
                                   output_map,
@@ -179,10 +189,12 @@ void Runtime::register_mugraph(
       }
     }
     // Specical handling for ALLREDUCE
-    if (task_type == rt::TASK_ALLREDUCE) {
+    if (task_type == TASK_ALLREDUCE) {
+      // Shouldn't have AllReduce when num_gpus == 1
+      assert(num_gpus > 1);
       assert(input_ops.size() == 2);
       assert(output_ops.size() == 1);
-      // To simplify the implementation, asserting that 
+      // To simplify the implementation, asserting that
       // produce/consumer must have the same partition
       int num_shared_tensors = 0;
       int3 input_map, output_map;
@@ -198,15 +210,87 @@ void Runtime::register_mugraph(
       assert(num_shared_tensors == 1);
       assert(input_map == output_map);
       assert(bgraph.grid_dim == pre_op->bgraph.grid_dim);
-      // Step 1: add allgather tasks
+      dim3 bid;
       for (bid.x = 0; bid.x < bgraph.grid_dim.x; bid.x++) {
         for (bid.y = 0; bid.y < bgraph.grid_dim.y; bid.y++) {
           for (bid.z = 0; bid.z < bgraph.grid_dim.z; bid.z++) {
-            EventDesc
-            for (int tgt_gpu_id = 0; tgt_gpu_id < num_gpus; tgt_gpu_id ++) {
-              TaskDesc(rt::TASK_NVSHMEM_COPY);
-              // Initialize input tensors to the task
-              TensorDesc 
+            // event_desc_0 is the trigger_event of previous_task
+            // event_desc_1 is the trigger_event of allgather
+            EventDesc event_desc_0, event_desc_1;
+            event_desc_0.num_triggers = 1;
+            event_desc_0.first_task_id = all_tasks.size();
+            event_desc_0.last_task_id = all_tasks.size() + num_gpus - 1;
+            assert(pre_task_map.find(bid) != pre_task_map.end());
+            int task_id = pre_task_map.find(bid)->second;
+            all_tasks[task_id].trigger_event =
+                get_event_id(my_gpu_id, all_events.size(), false);
+            all_events.push_back(event_desc_0);
+            // Step 1: create (num_gpus - 1) tasks for allgather
+            for (int tgt_gpu_id = 0; tgt_gpu_id < num_gpus; tgt_gpu_id++) {
+              if (tgt_gpu_id == my_gpu_id) {
+                continue;
+              }
+              TaskDesc task(TASK_NVSHMEM_COPY);
+              task.trigger_event = get_event_id(
+                  tgt_gpu_id, all_events.size(), true /*nvshmem_event*/);
+              // Initialize input/output tensors to the task
+              {
+                TensorDesc desc;
+                assert(input_ops[0]->output_tensors.size() == 1);
+                tb::STensor stensor = input_ops[0]->output_tensors[0];
+                desc.num_dims = stensor.num_dims;
+                desc.data_type = stensor.data_type;
+                for (int d = stensor.num_dims - 1; d >= 0; d--) {
+                  desc.dim[d] = stensor.dim[d];
+                  desc.stride[d] = (d == stensor.num_dims - 1)
+                                       ? 1
+                                       : desc.stride[d + 1] *
+                                             input_ops[0]->dtensor.dim[d + 1];
+                }
+                // Input and output have the same shape
+                task.inputs[task.num_inputs++] = desc;
+                task.outputs[task.num_outputs++] = desc;
+              }
+              all_tasks.push_back(task);
+            }
+            event_desc_1.first_task_id = all_tasks.size();
+            event_desc_1.last_task_id = all_tasks.size() + 1;
+            event_desc_1.num_triggers = 1;
+            all_events.push_back(event_desc_1);
+            // Step 2: create a task for reduce
+            TaskDesc task(TASK_REDUCE);
+            // Create input tensor
+            {
+              TensorDesc desc;
+              tb::STensor stensor = input_ops[1]->output_tensors[0];
+              desc.num_dims = stensor.num_dims;
+              desc.data_type = stensor.data_type;
+              for (int d = stensor.num_dims - 1; d >= 0; d--) {
+                desc.dim[d] = stensor.dim[d];
+                desc.stride[d] =
+                    (d == stensor.num_dims - 1)
+                        ? 1
+                        : desc.stride[d + 1] * input_ops[1]->dtensor.dim[d + 1];
+                task.inputs[task.num_inputs++] = desc;
+              }
+            }
+            // Create output tensor
+            {
+              TensorDesc desc;
+              tb::STensor stensor = output_ops[0]->output_tensors[0];
+              desc.num_dims = stensor.num_dims;
+              desc.data_type = stensor.data_type;
+              for (int d = stensor.num_dims - 1; d >= 0; d--) {
+                desc.dim[d] = stensor.dim[d];
+                desc.stride[d] = (d == stensor.num_dims - 1)
+                                     ? 1
+                                     : desc.stride[d + 1] *
+                                           output_ops[0]->dtensor.dim[d + 1];
+                task.inputs[task.num_outputs++] = desc;
+              }
+              all_tasks.push_back(task);
+              // Update current task map
+              cur_task_map[bid] = all_tasks.size() - 1;
             }
           }
         }
@@ -309,6 +393,7 @@ void Runtime::register_mugraph(
         event_dims[d] = std::gcd(producer_partition[d], consumer_partition[d]);
       }
       dfs_create_events_add_tasks(0,                       /*depth*/
+                                  my_gpu_id,               /*my_gpu_id*/
                                   event_dims,              /*event_dims*/
                                   input_map,               /*input_map*/
                                   output_map,              /*output_map*/
