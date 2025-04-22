@@ -61,9 +61,9 @@ def mirage_ngpt(X, Wqkv, Wo, W13, W2, Kcache, Vcache, alpha, kernels):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--bs', type=int, default=1)
+    parser.add_argument('-b', '--batch', type=int, default=1)
     args = parser.parse_args()
-    batch_size = args.bs
+    batch_size = args.batch
     
     X = torch.randn(batch_size * num_tokens, 4096, dtype=torch.float16, device='cuda:0')
     Wqkv = torch.randn(4096, n_local_heads * head_dim + 2 * n_local_kv_heads * head_dim, dtype=torch.float16, device='cuda:0')

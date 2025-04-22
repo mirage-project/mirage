@@ -4,12 +4,22 @@
 ```
 conda activate mirage
 export MIRAGE_ROOT=/path/to/mirage
+cd $MIRAGE_ROOT
+pip install .
 ```
 
 ## Detailed Instructions
 
+You can run
+```
+python3 $MIRAGE_ROOT/ae_scripts/run_all.py
+```
+to generate all the results in Figure 7 and Figure 11.
+
+You can also generate each data point separately. Followings are the detailed instructions.
+
 ### Micro-benchmark Evaluation
-For baseline implementation, refer to https://github.com/jiazhihao/mirage_baselines.
+Baseline implementations are in `$MIRAGE_ROOT/mirage_baselines`.
 
 To reproduce the benchmark results shown in the paper, run the python scripts under `$MIRAGE_ROOT/benchmark`. The optimization time may take up to 4 hours. In order to save time, you can use our cached results in `$MIRAGE_ROOT/benchmark/saved_mugraphs` to avoid running from scratch.
 
@@ -25,72 +35,72 @@ Specifically, followings are how to reproduce each benchmark result:
 #### GQA
 Use cached data:
 ```
-python $MIRAGE_ROOT/benchmark/group_query_attention.py --file $MIRAGE_ROOT/benchmark/saved_mugraphs/gqa_bs{batch_size}.json
+python3 $MIRAGE_ROOT/benchmark/group_query_attention.py --file $MIRAGE_ROOT/benchmark/saved_mugraphs/gqa_bs{batch_size}.json
 ```
 From scratch:
 ```
-python $MIRAGE_ROOT/benchmark/group_query_attention.py --bs {batch_size}
+python3 $MIRAGE_ROOT/benchmark/group_query_attention.py -b {batch_size}
 ```
 
 
 #### QKNorm:
 Use cached data:
 ```
-python $MIRAGE_ROOT/benchmark/qknorm_gqa.py --file $MIRAGE_ROOT/benchmark/saved_mugraphs/qknorm_gqa_bs{batch_size}.json
+python3 $MIRAGE_ROOT/benchmark/qknorm_gqa.py --file $MIRAGE_ROOT/benchmark/saved_mugraphs/qknorm_gqa_bs{batch_size}.json
 ```
 From scratch:
 ```
-python $MIRAGE_ROOT/benchmark/qknorm_gqa.py --bs {batch_size}
+python3 $MIRAGE_ROOT/benchmark/qknorm_gqa.py -b {batch_size}
 ```
 
 #### RMSNorm:
 Use cached data:
 ```
-python $MIRAGE_ROOT/benchmark/rmsnorm.py --file $MIRAGE_ROOT/benchmark/saved_mugraphs/rmsnorm_bs{batch_size}.json
+python3 $MIRAGE_ROOT/benchmark/rmsnorm.py --file $MIRAGE_ROOT/benchmark/saved_mugraphs/rmsnorm_bs{batch_size}.json
 ```
 From scratch:
 ```
-python $MIRAGE_ROOT/benchmark/rmsnorm.py --bs {batch_size}
+python3 $MIRAGE_ROOT/benchmark/rmsnorm.py -b {batch_size}
 ```
 
 #### RMSNorm:
 Use cached data:
 ```
-python $MIRAGE_ROOT/benchmark/rmsnorm.py --file $MIRAGE_ROOT/benchmark/saved_mugraphs/rmsnorm_bs{batch_size}.json
+python3 $MIRAGE_ROOT/benchmark/rmsnorm.py --file $MIRAGE_ROOT/benchmark/saved_mugraphs/rmsnorm_bs{batch_size}.json
 ```
 From scratch:
 ```
-python $MIRAGE_ROOT/benchmark/rmsnorm.py --bs {batch_size}
+python3 $MIRAGE_ROOT/benchmark/rmsnorm.py -b {batch_size}
 ```
 
 #### LoRA:
 Use cached data:
 ```
-python $MIRAGE_ROOT/benchmark/lora.py --file $MIRAGE_ROOT/benchmark/saved_mugraphs/lora_bs{batch_size}.json
+python3 $MIRAGE_ROOT/benchmark/lora.py --file $MIRAGE_ROOT/benchmark/saved_mugraphs/lora_bs{batch_size}.json
 ```
 From scratch:
 ```
-python $MIRAGE_ROOT/benchmark/lora.py --bs {batch_size}
+python3 $MIRAGE_ROOT/benchmark/lora.py -b {batch_size}
 ```
 
 #### GatedMLP
 Use cached data:
 ```
-python $MIRAGE_ROOT/benchmark/gated_mlp.py --file $MIRAGE_ROOT/benchmark/saved_mugraphs/gated_mlp_bs{batch_size}.json
+python3 $MIRAGE_ROOT/benchmark/gated_mlp.py --file $MIRAGE_ROOT/benchmark/saved_mugraphs/gated_mlp_bs{batch_size}.json
 ```
 From scratch:
 ```
-python $MIRAGE_ROOT/benchmark/gated_mlp.py --bs {batch_size}
+python3 $MIRAGE_ROOT/benchmark/gated_mlp.py -b {batch_size}
 ```
 
 #### nTrans
 Use cached data:
 ```
-python $MIRAGE_ROOT/benchmark/norm_transformer.py --file $MIRAGE_ROOT/benchmark/saved_mugraphs/ntrans_bs{batch_size}.py
+python3 $MIRAGE_ROOT/benchmark/norm_transformer.py --file $MIRAGE_ROOT/benchmark/saved_mugraphs/ntrans_bs{batch_size}.py
 ```
 From scratch:
 ```
-python $MIRAGE_ROOT/benchmark/norm_transformer.py --bs {batch_size}
+python3 $MIRAGE_ROOT/benchmark/norm_transformer.py -b {batch_size}
 ```
 
 ### End-to-end Evaluation
@@ -100,20 +110,20 @@ To reproduce the end-to-end evaluation results shown in the paper, run the pytho
 
 #### Chameleon-7B
 ```
-python $MIRAGE_ROOT/benchmark/end-to-end/chameleon.py --bs {batch_size}
+python3 $MIRAGE_ROOT/benchmark/end-to-end/chameleon.py -b {batch_size}
 ```
 
 #### LLaMA-3-8B
 ```
-python $MIRAGE_ROOT/benchmark/end-to-end/llama.py --bs {batch_size}
+python3 $MIRAGE_ROOT/benchmark/end-to-end/llama.py -b {batch_size}
 ```
 
 #### GPT-3-7B-LoRA
 ```
-python $MIRAGE_ROOT/benchmark/end-to-end/lora.py --bs {batch_size}
+python3 $MIRAGE_ROOT/benchmark/end-to-end/lora.py -b {batch_size}
 ```
 
 #### nGPT-1B
 ```
-python $MIRAGE_ROOT/benchmark/end-to-end/ngpt.py --bs {batch_size}
+python3 $MIRAGE_ROOT/benchmark/end-to-end/ngpt.py -b {batch_size}
 ```

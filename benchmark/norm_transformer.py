@@ -5,10 +5,10 @@ import argparse
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--bs', type=int, default=1)
+    parser.add_argument('-b', '--batch', type=int, default=1)
     parser.add_argument('--file', type=str, default='norm_transformer.json')
     args = parser.parse_args()
-    batch_size = args.bs
+    batch_size = args.batch
     filename = args.file
 
     graph = mi.new_kernel_graph()
