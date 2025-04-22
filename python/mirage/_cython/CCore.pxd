@@ -82,6 +82,9 @@ cdef extern from "mirage/type.h" namespace "mirage::type":
         KN_SPLIT_0_OP = 1420,
         KN_SPLIT_1_OP = 1421,
         KN_SPLIT_2_OP = 1422,
+        KN_CHUNK_0_OP = 1423,
+        KN_CHUNK_1_OP = 1424,
+        KN_CHUNK_2_OP = 1425,
         KN_SPLIT_LAST_OP_ID = 1429,
         # Communication
         KN_ALLREDUCE_OP = 1900,
@@ -292,7 +295,8 @@ cdef extern from "mirage/search/search_c.h" namespace "mirage::search_c":
                            vector[int] franges,
                            const char * filename,
                            bool verbose,
-                           const char * default_config)
+                           const char * default_config,
+                           bool is_formal_verified)
 
 cdef extern from "mirage/transpiler/transpile.h" namespace "mirage::transpiler":
     ctypedef struct TranspilerConfig:

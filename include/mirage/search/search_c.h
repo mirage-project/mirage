@@ -24,6 +24,7 @@ int cython_search(mirage::kernel::Graph const *input_graph,
                   std::vector<int> frange_to_explore,
                   char const *filename,
                   bool verbose,
-                  char const *default_config);
+                  char const *default_config,
+                  bool is_formal_verified);
 } // namespace search_c
 } // namespace mirage
