@@ -57,7 +57,7 @@ def contains_4D_tensors(op_node):
             return True
     return False
 
-def get_partitions(op_node, min_num_ops, max_num_ops, all_subgraphs, UNSUPPORTED_OPS, IGNORE_OPS):
+def get_partitions(op_node, min_num_ops, max_num_ops, all_subgraphs, UNSUPPORTED_OPS, COMPOSITE_OPS, IGNORE_OPS):
     if op_node.fn not in UNSUPPORTED_OPS.union(IGNORE_OPS):
         # handle non-matching shapes
         op_needs_broadcast = False
@@ -67,9 +67,13 @@ def get_partitions(op_node, min_num_ops, max_num_ops, all_subgraphs, UNSUPPORTED
                 op_needs_broadcast = True
                 break
         if not op_needs_broadcast:
-            get_partitions_helper(op_node, {op_node: []}, min_num_ops, max_num_ops, set(), all_subgraphs, UNSUPPORTED_OPS, IGNORE_OPS)
+            get_partitions_helper(op_node, {op_node: []}, min_num_ops, max_num_ops, set(), all_subgraphs, UNSUPPORTED_OPS, COMPOSITE_OPS, IGNORE_OPS)
 
-def get_partitions_helper(op_node, curr_subgraph, min_num_ops, max_num_ops, visited, all_subgraphs, UNSUPPORTED_OPS, IGNORE_OPS):
+def get_partitions_helper(op_node, curr_subgraph, min_num_ops, max_num_ops, visited, all_subgraphs, UNSUPPORTED_OPS, COMPOSITE_OPS, IGNORE_OPS):
+    # if it is a composite operator, return a subgraph with only that one operator
+    if op_node.fn in COMPOSITE_OPS:
+        all_subgraphs.append(copy_subgraph(curr_subgraph))
+        return
     if id(op_node.name) in visited:
         return
     if len(curr_subgraph) > max_num_ops:
@@ -88,8 +92,9 @@ def get_partitions_helper(op_node, curr_subgraph, min_num_ops, max_num_ops, visi
         if id(output_op.name) in visited:
             return
         visited.add(id(output_op.name))
-
-        if output_op.fn in UNSUPPORTED_OPS:
+        
+        # .union(COMPOSITE_OPS) ensures that no second operator of a subgraph is composite op
+        if output_op.fn in UNSUPPORTED_OPS.union(COMPOSITE_OPS):
             return
         
         input_dims = len(output_op.input_tensor_shapes[0][0])
@@ -128,20 +133,21 @@ def get_partitions_helper(op_node, curr_subgraph, min_num_ops, max_num_ops, visi
                 if output_node not in curr_subgraph_copy:
                     curr_subgraph_copy[output_node] = []
                 curr_subgraph_copy[op_node].append(output_node)
-                get_partitions_helper(output_node, copy_subgraph(curr_subgraph_copy), min_num_ops, max_num_ops, visited_copy, all_subgraphs, UNSUPPORTED_OPS, IGNORE_OPS)
+                get_partitions_helper(output_node, copy_subgraph(curr_subgraph_copy), min_num_ops, max_num_ops, visited_copy, all_subgraphs, UNSUPPORTED_OPS, COMPOSITE_OPS, IGNORE_OPS)
 
 def partition_graph(model, 
                     dummy_input, 
                     min_num_ops=2, 
                     max_num_ops=4, 
                     UNSUPPORTED_OPS=set(), # these are operators not supported by Mirage
+                    COMPOSITE_OPS=set(),
                     IGNORE_OPS=set()): # these are operators that performs no operations on the tensors
     unique_operators = {}
     operators = get_computation_graph(model, dummy_input, unique_operators, "onnx")
 
     all_subgraphs = []
     for _, op_node in operators.items():
-        get_partitions(op_node, min_num_ops, max_num_ops, all_subgraphs, UNSUPPORTED_OPS, IGNORE_OPS)
+        get_partitions(op_node, min_num_ops, max_num_ops, all_subgraphs, UNSUPPORTED_OPS, COMPOSITE_OPS, IGNORE_OPS)
 
     return all_subgraphs, unique_operators
 
@@ -230,8 +236,8 @@ def to_kernel_graph(subgraph):
         if tsr_cnt[1] == 0: graph.mark_output(tsr_cnt[0])
     return graph, dims
         
-def generate_all_kernels(model, dummy_inputs, min_num_ops=2, max_num_ops=4, UNSUPPORTED_OPS=set(), IGNORE_OPS=set(), dataset_name=None):
-    subgraphs, _ = partition_graph(model, dummy_inputs, min_num_ops, max_num_ops, UNSUPPORTED_OPS, IGNORE_OPS)
+def generate_all_kernels(model, dummy_inputs, min_num_ops=2, max_num_ops=4, UNSUPPORTED_OPS=set(), COMPOSITE_OPS=set(), IGNORE_OPS=set(), dataset_name=None):
+    subgraphs, _ = partition_graph(model, dummy_inputs, min_num_ops, max_num_ops, UNSUPPORTED_OPS, COMPOSITE_OPS, IGNORE_OPS)
     kernel_input_dims = []
     all_kernels = []
     hashes = set()
@@ -248,7 +254,12 @@ def generate_all_kernels(model, dummy_inputs, min_num_ops=2, max_num_ops=4, UNSU
         # save original mugraph
         kernel_graph.to_json(f"original_{graph_hash}.json")
         
-        optimized_graph, best_perf = kernel_graph.superoptimize()
+        try:
+            optimized_graph, best_perf = kernel_graph.superoptimize()
+        except Exception as e:
+            print(f"Subgraph {graph_hash} superoptimize failed with error: {e}")
+            continue
+
         performance[graph_hash] = best_perf
         optimized_graph.to_json(f"optimized_{graph_hash}.json")
         all_kernels.append(optimized_graph)
