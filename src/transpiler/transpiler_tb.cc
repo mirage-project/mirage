@@ -285,13 +285,13 @@ CustomOPTranspileResult
         map<kn::DTensor, string>(op->output_tensors,
                                   [](kn::DTensor const &dtensor) -> string {
                                     return fmt(
-                                        "$* dtensor$_ptr",
+                                        "$* __restrict__ dtensor$_ptr",
                                         get_datatype_str(dtensor.data_type),
                                         dtensor.guid);
                                   }),
         map<kn::DTensor, string>(
             op->input_tensors, [](kn::DTensor const &dtensor) -> string {
-              return fmt("$ const* dtensor$_ptr",
+              return fmt("$ const* __restrict__ dtensor$_ptr",
                           get_datatype_str(dtensor.data_type),
                           dtensor.guid);
             }));

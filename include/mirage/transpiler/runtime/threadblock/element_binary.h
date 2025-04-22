@@ -11,7 +11,7 @@ using namespace cute;
 
 namespace tb {
 
-enum class ElementBinaryOpType { ADD, MUL, DIV };
+enum class ElementBinaryOpType { ADD, MUL, DIV, POW };
 
 template <typename T, ElementBinaryOpType OP>
 static __device__ __forceinline__ T perform_element_binary_op(T a, T b) {
@@ -21,6 +21,8 @@ static __device__ __forceinline__ T perform_element_binary_op(T a, T b) {
     return a * b;
   } else if constexpr (OP == ElementBinaryOpType::DIV) {
     return a / b;
+  } else if constexpr (OP == ElementBinaryOpType::POW) {
+    return (T)powf((float)a, (float)b);
   } else {
     assert(0);
   }
@@ -79,8 +81,8 @@ public:
       int64_t src0_phy_pos = src0_layout_dst_coord(elem_idx);
       int64_t src1_phy_pos = src1_layout_dst_coord(elem_idx);
       int64_t dst_phy_pos = dst_layout(elem_idx);
-      T res = perform_element_binary_op<T, OP>(src0[src0_phy_pos],
-                                               src1[src1_phy_pos]);
+      T res = perform_element_binary_op<T>(
+          OP, src0[src0_phy_pos], src1[src1_phy_pos]);
       Epilogue::run(res, dst, dst_phy_pos, epilogue_scalars);
     }
   }
