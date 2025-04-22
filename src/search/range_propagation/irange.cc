@@ -294,6 +294,8 @@ IKNRange forward_propagate(IKNRange const &range,
   IKNRange ret;
   switch (op.op_type) {
     case type::KNOperatorType::KN_EXP_OP:
+    case type::KNOperatorType::KN_SQUARE_OP:
+    case type::KNOperatorType::KN_SQRT_OP:
     case type::KNOperatorType::KN_SILU_OP:
     case type::KNOperatorType::KN_GELU_OP:
     case type::KNOperatorType::KN_RELU_OP:
@@ -364,6 +366,8 @@ IKNRange backward_propagate(IKNRange const &knrange,
   IKNRange ret;
   switch (op.op_type) {
     case type::KNOperatorType::KN_EXP_OP:
+    case type::KNOperatorType::KN_SQUARE_OP:
+    case type::KNOperatorType::KN_SQRT_OP:
     case type::KNOperatorType::KN_SILU_OP:
     case type::KNOperatorType::KN_GELU_OP:
     case type::KNOperatorType::KN_RELU_OP:
@@ -595,6 +599,8 @@ ITBRange forward_propagate(ITBRange const &tbrange,
   ITBRange ret;
   switch (op.op_type) {
     case type::TBOperatorType::TB_EXP_OP:
+    case type::TBOperatorType::TB_SQUARE_OP:
+    case type::TBOperatorType::TB_SQRT_OP:
     case type::TBOperatorType::TB_SILU_OP:
     case type::TBOperatorType::TB_GELU_OP:
     case type::TBOperatorType::TB_RELU_OP:
@@ -688,6 +694,8 @@ ITBRange backward_propagate(ITBRange const &tbrange,
   ITBRange ret;
   switch (op.op_type) {
     case type::TBOperatorType::TB_EXP_OP:
+    case type::TBOperatorType::TB_SQUARE_OP:
+    case type::TBOperatorType::TB_SQRT_OP:
     case type::TBOperatorType::TB_SILU_OP:
     case type::TBOperatorType::TB_GELU_OP:
     case type::TBOperatorType::TB_RELU_OP:
