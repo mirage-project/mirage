@@ -619,6 +619,8 @@ __global__ void compute_customizedop_fingerprint(
           break;
         }
         case mirage::type::TB_EXP_OP:
+        case mirage::type::TB_SQUARE_OP:
+        case mirage::type::TB_SQRT_OP:
         case mirage::type::TB_SILU_OP:
         case mirage::type::TB_GELU_OP:
         case mirage::type::TB_RELU_OP:
@@ -637,6 +639,8 @@ __global__ void compute_customizedop_fingerprint(
           mirage::threadblock::TBElementUnaryFingerPrinter fp(
               new_params.operator_types[op],
               exp_lookup_table /*lookup_table*/,
+              sqrt_p_lookup_table,
+              sqrt_q_lookup_table,
               base_ptr,
               num_elements,
               threadIdx.x,

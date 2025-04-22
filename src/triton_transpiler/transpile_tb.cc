@@ -74,6 +74,8 @@ string operator_type_to_triton(type::TBOperatorType type) {
       return "tl.sigmoid";
     case type::TB_SQRT_OP:
       return "tl.sqrt";
+    case type::TB_SQUARE_OP:
+      return "tl.square";
     case type::TB_DIV_OP:
       return "tl.fdiv"; // TODO: AttributeError: module 'triton.language' has no
                         // attribute 'div_rn'
