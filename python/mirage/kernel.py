@@ -12,9 +12,12 @@ from .core import *
 from .threadblock import *
 from .visualizer import *
 from .utils import *
-from .triton_profiler import *
 from .global_config import global_config
 from .graph_dataset import graph_dataset
+
+from collections import deque
+
+MAX_THREADS = os.cpu_count()
 
 HARD_CODE = """
 #include <Python.h>
@@ -144,7 +147,7 @@ def get_cc_cmd(target, cc, FILE_NAME, py_include_dir, INCLUDE_PATH, DEPS_PATH, s
     else:
         specific_cmd = [
             "-arch=native",
-        ]
+        ]+ (["-DMIRAGE_ENABLE_PROFILER"] if profiling else [])
 
     return common_cmd[:6] + specific_cmd + common_cmd[6:]
 
@@ -236,6 +239,12 @@ class KNGraph:
     def clamp(self, A: DTensor, min_val: float, max_val: float):
         return self.cygraph.clamp(A, min_val, max_val)
 
+    def sqrt(self, A: DTensor):
+        return self.cygraph.sqrt(A)
+
+    def square(self, A: DTensor):
+        return self.cygraph.square(A)
+
     def add(self, A: DTensor, B: DTensor):
         return self.cygraph.add(A, B)
 
@@ -244,6 +253,9 @@ class KNGraph:
 
     def div(self, A: DTensor, B: DTensor):
         return self.cygraph.div(A, B)
+
+    def pow(self, A: DTensor, B: DTensor):
+        return self.cygraph.pow(A, B)
 
     def rms_norm(self, A: DTensor, normalized_shape: tuple):
         return self.cygraph.rms_norm(A, normalized_shape)
@@ -332,7 +344,11 @@ class KNGraph:
 
         if results['profiler_buf_size'] > 0:
             from .profiler import export_to_perfetto_trace
-            export_to_perfetto_trace(prodiler_buffer_tensor, 'mirage.perfetto-trace')
+            profiler_result_dir = "./profiling_results"
+            profiler_result_file = os.path.join(profiler_result_dir, 'mirage.perfetto-trace')
+            os.makedirs(profiler_result_dir, exist_ok=True)
+            export_to_perfetto_trace(prodiler_buffer_tensor, profiler_result_file)
+            print(f"Exported profiling results to {profiler_result_file}, please view it with perfetto: https://ui.perfetto.dev/")
         return output_tensors
 
     def compile(self, async_=False, **kwargs):
@@ -359,7 +375,7 @@ class KNGraph:
         num_warp_groups = kwargs.get("num_warp_groups", 2)
         pipeline_stages = kwargs.get("pipeline_stages", 2)
         # TODO, add profling for Ampere later to show gpu wave
-        profiling = kwargs.get("profiling", False) and target_cc >= 90
+        profiling = kwargs.get("profiling", False)
 
         result = generate_cuda_program(
             self.cygraph, target_cc=target_cc, input_strides=input_strides, num_warp_groups = num_warp_groups, pipeline_stages = pipeline_stages, profiling = profiling
@@ -505,7 +521,7 @@ class KNGraph:
             # profile and use the best graph
             best_graph, best_perf = None, float("inf")
             print("Transpiling {} muGraphs ...".format(len(all_graphs)))
-            handles = []
+            handles = deque()
 
             target_cc = torch.cuda.get_device_properties(0).major * 10 + torch.cuda.get_device_properties(0).minor
             if target_cc >= 90:
@@ -525,6 +541,8 @@ class KNGraph:
                             starter = torch.cuda.Event(enable_timing=True)
                             ender = torch.cuda.Event(enable_timing=True)
                             new_g = g
+                            if len(handles) == MAX_THREADS:
+                                handles.popleft().wait()
                             handle = new_g.compile(async_=True, inputs=input_tensors, pipeline_stages=pipeline_stages, num_warp_groups=num_warp_groups)
                             handles.append(handle)
             else:
@@ -540,10 +558,12 @@ class KNGraph:
                         input_tensors.append(x)
                     starter = torch.cuda.Event(enable_timing=True)
                     ender = torch.cuda.Event(enable_timing=True)
+                    if len(handles) == MAX_THREADS:
+                        handles.popleft().wait()
                     handle = g.compile(async_=True, inputs=input_tensors)
                     handles.append(handle)
-            for handle in handles:
-                handle.wait()
+            while handles:
+                handles.popleft().wait()
             for idx, g in enumerate(all_graphs):
                 dtensors = g.cygraph.get_input_dtensors()
                 input_tensors = list()
@@ -587,6 +607,8 @@ class KNGraph:
         elif backend == "nki":
             return all_graphs
         elif backend == "triton":
+            from .triton_profiler import profile_and_select_best_graph
+
             MIRAGE_ROOT, INCLUDE_PATH, _ = get_key_paths()
             os.environ["KERNELS_PATH"] = os.path.join(INCLUDE_PATH, "mirage/triton_transpiler/runtime") # for triton
             best_graph, best_file_path, best_output_shapes = profile_and_select_best_graph(all_graphs, 
@@ -629,3 +651,9 @@ class KNGraph:
         operators = self.cygraph.get_graph_structure()
         self.visualizer = visualizer(file_name)
         self.visualizer.draw_graphs(operators)
+    
+    def to_json(self, filename):
+        cy_to_json(self.cygraph, filename)
+    
+    def from_json(self, filename):
+        self.cygraph = cy_from_json(filename)

@@ -38,8 +38,9 @@ using mirage::transpiler::fmt;
 using mirage::transpiler::map;
 using std::string;
 
+namespace {
 // Todo: Remove the code duplication.
-static string ugraph_tboperator_type_to_nki(const ty::TBOperatorType type) {
+string ugraph_tboperator_type_to_nki(const ty::TBOperatorType type) {
   switch (type) {
     case ty::TB_EXP_OP:
       return "nl.exp";
@@ -61,11 +62,13 @@ static string ugraph_tboperator_type_to_nki(const ty::TBOperatorType type) {
       return "nl.multiply";
     case ty::TB_DIV_OP:
       return "nl.divide";
+    case ty::TB_POW_OP:
+      return "nl.power";
     default:
       assert(false);
   }
 }
-static string ugraph_knoperator_type_to_nki(const ty::KNOperatorType type) {
+string ugraph_knoperator_type_to_nki(const ty::KNOperatorType type) {
   switch (type) {
     case ty::KN_EXP_OP:
       return "nl.exp";
@@ -87,11 +90,45 @@ static string ugraph_knoperator_type_to_nki(const ty::KNOperatorType type) {
       return "nl.multiply";
     case ty::KN_DIV_OP:
       return "nl.divide";
+    case ty::KN_POW_OP:
+      return "nl.power";
     default:
       assert(false);
   }
 }
 
+string mirage_dtype_to_nki(const ty::DataType dt) {
+  string nki_type;
+  switch (dt) {
+    case ty::DataType::DT_INT4:
+      assert(false && "4-bit integer not supported in nki");
+      break;
+    case ty::DataType::DT_INT8:
+      nki_type = "nl.int8";
+      break;
+    case ty::DataType::DT_UINT16:
+      nki_type = "nl.uint16";
+      break;
+    case ty::DataType::DT_FLOAT8:
+      // todo: when we should use e5m2?
+      nki_type = "nl.float8_e4m3";
+      break;
+    case ty::DataType::DT_FLOAT16:
+      nki_type = "nl.float16";
+      break;
+    case ty::DataType::DT_BFLOAT16:
+      nki_type = "nl.bfloat16";
+      break;
+    case ty::DataType::DT_FLOAT32:
+      nki_type = "nl.float32";
+      break;
+    default:
+      assert(false && "unsupported nki type in mirage");
+      break;
+  }
+  return nki_type;
+}
+} // namespace
 NKICustomOPTranspileResult
     NKITranspiler::transpile_kn_custom_op(kn::KNCustomizedOp const *op) {
   tb::Graph const &g = op->bgraph;
@@ -115,6 +152,7 @@ NKICustomOPTranspileResult
   code.inc_indent();
   // Initialize all accum stensors
   for (tb::TBOperator *tb_op : g.operators) {
+    // For numerical accuracies always prefer float32.
     if (tb_op->op_type == type::TB_FORLOOP_ACCUM_NO_RED_OP) {
       // We determine whether we want to transpose the accum based on
       // tb_op's input. This is because, in the case tb_op's input
@@ -137,20 +175,20 @@ NKICustomOPTranspileResult
       }
       if (stensor.num_dims == 1) {
         // Create a 1D tile
-        code.e("$ = nl.zeros(($), dtype=nl.float16, buffer=nl.sbuf)",
+        code.e("$ = nl.zeros(($), dtype=nl.float32, buffer=nl.sbuf)",
                fmt("stensor$", stensor.guid),
                stensor.dim[0]);
       } else {
         // Create a 2D tile
         if (meta.partition_dim == stensor.num_dims - 2) {
-          code.e("$ = nl.zeros(($, $), dtype=nl.float16, buffer=nl.sbuf)",
+          code.e("$ = nl.zeros(($, $), dtype=nl.float32, buffer=nl.sbuf)",
                  fmt("stensor$", stensor.guid),
                  stensor.dim[stensor.num_dims - 2],
                  stensor.dim[stensor.num_dims - 1]);
         } else {
           assert(meta.partition_dim == stensor.num_dims - 1);
           // num_dims - 1 is the partition_dim
-          code.e("$ = nl.zeros(($, $), dtype=nl.float16, buffer=nl.sbuf)",
+          code.e("$ = nl.zeros(($, $), dtype=nl.float32, buffer=nl.sbuf)",
                  fmt("stensor$", stensor.guid),
                  stensor.dim[stensor.num_dims - 1],
                  stensor.dim[stensor.num_dims - 2]);
@@ -186,22 +224,25 @@ NKICustomOPTranspileResult
         }
         bool transposed = false;
         std::string range = "";
+        std::string nki_dtype = mirage_dtype_to_nki(stensor.data_type);
         if (meta.partition_dim == stensor.num_dims - 2) {
           // Normal case
-          code.e("$ = nl.ndarray(($, $), dtype=nl.float16, buffer=nl.sbuf)",
+          code.e("$ = nl.ndarray(($, $), dtype=$, buffer=nl.sbuf)",
                  fmt("stensor$", stensor.guid),
                  stensor.dim[stensor.num_dims - 2],
-                 stensor.dim[stensor.num_dims - 1]);
+                 stensor.dim[stensor.num_dims - 1],
+                 nki_dtype);
         } else {
           // Tranposed case
           assert(meta.partition_dim == stensor.num_dims - 1);
           // partition dim is the innermost dimension so we need
           // to use load_transposed2d
           transposed = true;
-          code.e("$ = nl.ndarray(($, $), dtype=nl.float16, buffer=nl.sbuf)",
+          code.e("$ = nl.ndarray(($, $), dtype=$, buffer=nl.sbuf)",
                  fmt("stensor$", stensor.guid),
                  stensor.dim[stensor.num_dims - 1],
-                 stensor.dim[stensor.num_dims - 2]);
+                 stensor.dim[stensor.num_dims - 2],
+                 nki_dtype);
         }
 
         int3 imap = input_op->input_map;
@@ -338,6 +379,7 @@ NKICustomOPTranspileResult
           }
           code.dec_indent();
           // emit to copy from psum to sbuf, type cast to fp16
+          // todo: we need to check whether output tensor is of fp16 or not.
           code.e("stensor$ = nl.copy(accum$, dtype=nl.float16)",
                  output.guid,
                  output.guid);
@@ -428,7 +470,8 @@ NKICustomOPTranspileResult
       }
       case type::TB_ADD_OP:
       case type::TB_MUL_OP:
-      case type::TB_DIV_OP: {
+      case type::TB_DIV_OP:
+      case type::TB_POW_OP: {
         tb::STensor const &input0 = tb_op->input_tensors.at(0);
         tb::STensor const &input1 = tb_op->input_tensors.at(1);
         tb::STensor const &output = tb_op->output_tensors.at(0);
@@ -610,7 +653,8 @@ NKICustomOPTranspileResult
       }
       case type::TB_ADD_OP:
       case type::TB_MUL_OP:
-      case type::TB_DIV_OP: {
+      case type::TB_DIV_OP:
+      case type::TB_POW_OP: {
         tb::STensor const &input0 = tb_op->input_tensors.at(0);
         tb::STensor const &input1 = tb_op->input_tensors.at(1);
         tb::STensor const &output = tb_op->output_tensors.at(0);
