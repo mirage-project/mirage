@@ -256,7 +256,7 @@ void Runtime::register_mugraph(
             }(output->dtensor);
 
             add_tensor_offset(
-                output->output_map, output->dtensor, output_strides, bgraph);
+                output->input_map, output->dtensor, output_strides, bgraph);
             num_dtensors++;
             printf("num_dtensors2 %d\n", num_dtensors);
 

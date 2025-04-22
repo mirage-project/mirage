@@ -1,6 +1,7 @@
 cmake_minimum_required(VERSION 3.24 FATAL_ERROR)
 project(MIRAGE LANGUAGES C CXX CUDA)
 
+
 message(STATUS "CMake Version: ${CMAKE_VERSION}")
 
 if (EXISTS ${CMAKE_CURRENT_BINARY_DIR}/config.cmake)
@@ -21,7 +22,7 @@ set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} ${CMAKE_CURRENT_LIST_DIR}/cmake)
 #add_subdirectory(deps/cutlass)
 
 set(CMAKE_CUDA_ARCHITECTURES "70;75;80;86;89;90")
-#set(CUTLASS_NVCC_ARCHS "80;86")
+# set(CUTLASS_NVCC_ARCHS "80;86")
 
 file(GLOB_RECURSE MIRAGE_SRCS
   src/*.cc
@@ -43,14 +44,14 @@ list(APPEND CMAKE_CUDA_FLAGS "-D__CUDACC_VER_MAJOR__=${CUDA_VERSION_MAJOR} -D__C
 
 # TODO: Currently disable CUTLASS_ARCH_MMA_SM80_ENABLED flag
 # since we target Triton to perform codegen
-#list(APPEND CMAKE_CUDA_FLAGS "-DCUTLASS_ARCH_MMA_SM80_ENABLED")
+# list(APPEND CMAKE_CUDA_FLAGS "-DCUTLASS_ARCH_MMA_SM80_ENABLED")
 
 if ("${CMAKE_BUILD_TYPE}" STREQUAL "Debug")
   message("Build in Debug mode")
   set(CMAKE_CUDA_FLAGS "-O0 -g -Xcompiler=-fPIC ${CMAKE_CUDA_FLAGS}")
   set(CMAKE_CXX_FLAGS "-fopenmp -O0 -g -Wall -fPIC ${CMAKE_CXX_FLAGS}")
 else()
-  set(CMAKE_CUDA_FLAGS "-O2 -Xcompiler=-fPIC ${CMAKE_CUDA_FLAGS}")
+  set(CMAKE_CUDA_FLAGS "-O2 -Xcompiler=-fPIC ${CMAKE_CUDA_FLAGS} --expt-relaxed-constexpr -arch=sm_80")
   set(CMAKE_CXX_FLAGS "-fopenmp -O2 -Wall -fPIC ${CMAKE_CXX_FLAGS}")
 endif()
 

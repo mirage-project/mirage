@@ -125,24 +125,49 @@ __global__ void __launch_bounds__(128) persistent_kernel(RuntimeConfig config) {
           if (threadIdx.x == 0) {
             printf("worker_id(%d) task_type(EMB)\n", worker_id);
           }
+          assert(task_desc.num_inputs == 1);
+          assert(task_desc.num_outputs == 1);
+          generic_wrapper_kernel<EmbeddingKernel>(task_desc.inputs,
+                                                  task_desc.outputs,
+                                                  config.tensor_offsets,
+                                                  task_desc.forloop_range);
           break;
         }
         case TASK_ATTENTION_1: {
           if (threadIdx.x == 0) {
             printf("worker_id(%d) task_type(Attn1)\n", worker_id);
           }
+          assert(task_desc.num_inputs == 1);
+          assert(task_desc.num_outputs == 1);
+          generic_wrapper_kernel<AttentionPart2Kernel>(task_desc.inputs,
+                                                       task_desc.outputs,
+                                                       config.tensor_offsets,
+                                                       task_desc.forloop_range);
           break;
         }
         case TASK_ATTENTION_2: {
           if (threadIdx.x == 0) {
             printf("worker_id(%d) task_type(Attn2)\n", worker_id);
           }
+
+          assert(task_desc.num_inputs == 1);
+          assert(task_desc.num_outputs == 1);
+          generic_wrapper_kernel<AttentionPart2Kernel>(task_desc.inputs,
+                                                       task_desc.outputs,
+                                                       config.tensor_offsets,
+                                                       task_desc.forloop_range);
           break;
         }
         case TASK_SILU_MUL_LINEAR: {
           if (threadIdx.x == 0) {
             printf("worker_id(%d) task_type(SiluMulLinear)\n", worker_id);
           }
+          assert(task_desc.num_inputs == 2);
+          assert(task_desc.num_outputs == 1);
+          generic_wrapper_kernel<SiluMulMatmulKernel>(task_desc.inputs,
+                                                      task_desc.outputs,
+                                                      config.tensor_offsets,
+                                                      task_desc.forloop_range);
           break;
         }
         default: {

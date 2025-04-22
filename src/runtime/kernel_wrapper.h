@@ -14,6 +14,7 @@
  */
 #include "mirage/runtime/runtime.h"
 #include "rms_norm.cuh"
+#include "silu_mul_linear.cuh"
 
 namespace mirage {
 namespace runtime {
@@ -22,9 +23,6 @@ __device__ __forceinline__ void generic_wrapper_kernel(TensorDesc *inputs,
                                                        TensorDesc *outputs,
                                                        int4 *tensor_offsets,
                                                        int forloop_range) {
-
-  // auto params = Kernel::pack_parameters(inputs, outputs, tensor_offsets,
-  // forloop_range);
   Kernel::execute(inputs, outputs, tensor_offsets, forloop_range);
 }
 }; // namespace runtime
