@@ -756,7 +756,7 @@ CustomOPTranspileResult
       tb::STensor const &output = input_op->output_tensors.at(0);
       assert(input_op->forloop_dim >= 0);
       if(profiling){
-        code.e("PROFILER_EVENT_START($);", (input_op->op_type - type::TB_UNKOWN));
+        code.e("PROFILER_EVENT_START($, static_cast<uint32_t>(0));", (input_op->op_type - type::TB_UNKOWN));
       }
       code.e("STensor$InputAtom::run(stensor$_async_copy_buf, "
              "dtensor$_tile_ptr, thread_idx);",
@@ -828,7 +828,8 @@ CustomOPTranspileResult
       code.e("// OP type: $", op_type_str);
 
       if(profiling){
-        code.e("PROFILER_EVENT_START($);", (op->op_type - type::TB_UNKOWN));
+        code.e("PROFILER_EVENT_START($, $);",
+        (op->op_type - type::TB_UNKOWN), is_in_loop ? "static_cast<uint32_t>(for_idx)" : "static_cast<uint32_t>(0)");
       }
 
       switch (op->op_type) {
@@ -1169,7 +1170,8 @@ CustomOPTranspileResult
       }
       // Profiler
       if(profiling){
-        code.e("PROFILER_EVENT_END($);", (op->op_type - type::TB_UNKOWN));
+        code.e("PROFILER_EVENT_END($, $);",
+        (op->op_type - type::TB_UNKOWN), is_in_loop ? "static_cast<uint32_t>(for_idx)" : "static_cast<uint32_t>(0)");
       }
       code.e("}");
     }
@@ -1210,8 +1212,14 @@ CustomOPTranspileResult
     // Event end of async cp
     if(profiling && !pipelined_input_ops.empty()){
       for (tb::TBInputOp const *input_op : pipelined_input_ops) {
-        code.e("PROFILER_EVENT_END($);", (input_op->op_type - type::TB_UNKOWN));
+        code.e("PROFILER_EVENT_END($, static_cast<uint32_t>(for_idx));", (input_op->op_type - type::TB_UNKOWN));
       }
+      // start the next round of async cp profiling
+      code.e("if (for_idx+1 != $){", g.forloop_range);
+      for (tb::TBInputOp const *input_op : pipelined_input_ops) {
+        code.e("PROFILER_EVENT_START($, static_cast<uint32_t>(for_idx)+1);", (input_op->op_type - type::TB_UNKOWN));
+      }
+      code.e("}");
     }
 
     code.e("// Switch buffers");

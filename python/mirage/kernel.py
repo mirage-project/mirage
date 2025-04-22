@@ -344,7 +344,11 @@ class KNGraph:
 
         if results['profiler_buf_size'] > 0:
             from .profiler import export_to_perfetto_trace
-            export_to_perfetto_trace(prodiler_buffer_tensor, 'mirage.perfetto-trace')
+            profiler_result_dir = "./profiling_results"
+            profiler_result_file = os.path.join(profiler_result_dir, 'mirage.perfetto-trace')
+            os.makedirs(profiler_result_dir, exist_ok=True)
+            export_to_perfetto_trace(prodiler_buffer_tensor, profiler_result_file)
+            print(f"Exported profiling results to {profiler_result_file}, please view it with perfetto: https://ui.perfetto.dev/")
         return output_tensors
 
     def compile(self, async_=False, **kwargs):
