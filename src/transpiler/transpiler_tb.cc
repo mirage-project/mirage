@@ -793,7 +793,8 @@ CustomOPTranspileResult
     }
   }
 
-  if (num_pre_loop_copies > 0 || num_clear_accums > 0) {
+  if (num_pre_loop_copies > 0 || num_clear_accums > 0 ||
+      num_init_reductions > 0) {
     code.e("__syncthreads();");
     code.e("");
   }
