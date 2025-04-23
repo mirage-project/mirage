@@ -115,8 +115,9 @@ __global__ void persistent_kernel(RuntimeConfig config) {
         assert(cur_task_id + config.per_worker_queue_len > last_task_id);
         cur_task_loc = task_queue[cur_task_id % config.per_worker_queue_len];
         if (config.verbose) {
-          printf("[FTCH] worker_id(%d) cur_task_pos(%llu) last_task_pos(%llu) "
-                 "task_id(%llu) task_type(%d) event_id(%llu) \n",
+          printf("[%d][FTCH] worker_id(%d) cur_task_pos(%llu) last_task_pos(%llu) "
+                 "task_id(%llu) task_type(%d) event_id(%llx) \n",
+                 config.my_gpu_id,
                  worker_id,
                  cur_task_id,
                  last_task_id,
@@ -163,7 +164,19 @@ __global__ void persistent_kernel(RuntimeConfig config) {
           }
           break;
         }
-        case TASK_ALLREDUCE: {
+        case TASK_NVSHMEM_COPY: {
+          if (threadIdx.x == 0) {
+            // printf("worker_id(%d) task_type(AllReduce)\n", worker_id);
+          }
+          break;
+        }
+        case TASK_REDUCE: {
+          if (threadIdx.x == 0) {
+            // printf("worker_id(%d) task_type(AllReduce)\n", worker_id);
+          }
+          break;
+        }
+        case TASK_MATMUL: {
           if (threadIdx.x == 0) {
             // printf("worker_id(%d) task_type(AllReduce)\n", worker_id);
           }
@@ -185,7 +198,8 @@ __global__ void persistent_kernel(RuntimeConfig config) {
           int count = atomicSub(&config.all_event_counters[event_index], 1);
           if (config.verbose) {
             printf(
-                "[DONE] worker_id(%d) task_id(%llu) event_id(%llu) count(%d)\n",
+                "[%d][DONE] worker_id(%d) task_id(%llu) event_id(%llx) event_type(local) count(%d)\n",
+                config.my_gpu_id,
                 worker_id,
                 cur_task_loc,
                 event_id,
@@ -217,11 +231,18 @@ __global__ void persistent_kernel(RuntimeConfig config) {
         } else {
           // Case 2: trigger a nvshmem event
           size_t gpu_id = get_event_gpu_id(event_id);
+          assert(gpu_id < config.num_gpus);
+          assert(gpu_id != config.my_gpu_id);
+          if (config.verbose) {
+            printf("[%d][PreDONE] worker_id(%d) task_id(%llu) event_id(%llx) event_index(%llu) ptr(%p)\n",
+                   config.my_gpu_id, worker_id, cur_task_loc, event_id, event_index, &config.all_event_counters[event_index]);
+          }
           int count = nvshmem_int_atomic_fetch_add(
               &config.all_event_counters[event_index], -1, gpu_id);
           if (config.verbose) {
             printf(
-                "[DONE] worker_id(%d) task_id(%llu) event_id(%llu) count(%d)\n",
+                "[%d][DONE] worker_id(%d) task_id(%llu) event_id(%llx) event_type(remote) count(%d)\n",
+                config.my_gpu_id,
                 worker_id,
                 cur_task_loc,
                 event_id,
@@ -299,8 +320,9 @@ __global__ void persistent_kernel(RuntimeConfig config) {
                           last_task_id + 1);
           } while (old != last_task_id);
           if (config.verbose) {
-            printf("[SCHD] schd_id(%d) task_id(%llu) worker_id(%d) "
+            printf("[%d][SCHD] schd_id(%d) task_id(%llu) worker_id(%d) "
                    "worker_last_ready_pos(%llu)\n",
+                   config.my_gpu_id,
                    sched_id,
                    i,
                    next_worker,
@@ -347,7 +369,8 @@ void Runtime::launch_persistent_kernel(int num_workers,
   config.total_num_events = all_events.size();
   config.per_worker_queue_len = 1024;
   config.per_sched_queue_len = 1024;
-  config.verbose = false;
+  config.verbose = true;
+  cudaSetDevice(my_gpu_id);
   // Initialize nvshmem
   MPI_Comm mpi_comm = MPI_COMM_WORLD;
   nvshmemx_init_attr_t attr = NVSHMEMX_INIT_ATTR_INITIALIZER;
@@ -358,7 +381,6 @@ void Runtime::launch_persistent_kernel(int num_workers,
   int npes = nvshmem_n_pes();
   int mype_node = nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE);
   printf("mype(%d) npes(%d) mype_node(%d)\n", mype, npes, mype_node);
-  cudaSetDevice(mype_node);
   int num_schedulers =
       config.num_local_schedulers + config.num_remote_schedulers;
 
@@ -403,6 +425,7 @@ void Runtime::launch_persistent_kernel(int num_workers,
                        cudaMemcpyHostToDevice));
   // Initialize all event counters
   config.all_event_counters = gpu_malloc<int>(config.total_num_events * sizeof(int));
+  printf("[%d] all_event_counters(%p)\n", config.my_gpu_id, config.all_event_counters);
   std::vector<int> host_all_event_counters;
   for (int i = 0; i < config.total_num_events; i++) {
     host_all_event_counters.push_back(all_events.at(i).num_triggers);
@@ -464,15 +487,19 @@ void Runtime::launch_persistent_kernel(int num_workers,
                          cudaMemcpyHostToDevice));
   }
 
-  printf("CP#3\n");
   // launch init kernel
   init_kernel<<<dim3(1, 1, 1), dim3(128, 1, 1)>>>(config);
   cudaDeviceSynchronize();
   // Add a global barrier for all init_kernel to complete
   nvshmem_barrier_all();
+  void *args[] = {&config};
   // Launcher persistent kernel
-  persistent_kernel<<<dim3(108, 1, 1), dim3(128, 1, 1)>>>(config);
+  nvshmemx_collective_launch((const void*) persistent_kernel,
+                             dim3(108, 1, 1),
+                             dim3(128, 1, 1),
+                             args, 96 * 1024/*sharedmem*/, 0/*stream*/);
   cudaDeviceSynchronize();
+  nvshmem_barrier_all();
   nvshmem_finalize();
 }
 
