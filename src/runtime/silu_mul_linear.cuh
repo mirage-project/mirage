@@ -64,6 +64,12 @@ __device__ __forceinline__ void SiluMulMatmulKernel::execute(TensorDesc* inputs,
   bfloat16_t* __restrict__ dtensor10000005_ptr = static_cast<bfloat16_t*>(outputs[0].base_ptr);
   bfloat16_t const* __restrict__ dtensor10000003_ptr = static_cast<const bfloat16_t*>(inputs[0].base_ptr);
   bfloat16_t const* __restrict__ dtensor10000004_ptr= static_cast<bfloat16_t*>(inputs[1].base_ptr);
+  using Input0Layout        = Layout<Shape<Int<64>, Int<1>>, Stride<Int<1>, Int<64>>>;
+  using Input0LayoutDevice  = Layout<Shape<Int<64>, Int<1>>, Stride<Int<1>, Int<4096>>>;
+  using Input1Layout        = decltype(composition(Swizzle<3, 3, 3>{}, Layout<Shape<Int<64>, Int<64>>, Stride<Int<1>, Int<64>>>{}));
+  using Input1LayoutDevice  = Layout<Shape<Int<64>, Int<64>>, Stride<Int<1>, Int<64>>>;
+  using Output0Layout       = Layout<Shape<Int<64>, Int<1>>, Stride<Int<1>, Int<1>>>;
+  using Output0LayoutDevice = Layout<Shape<Int<64>, Int<1>>, Stride<Int<1>, Int<1>>>;
 
   if(dim0[0]==1 && dim0[1]==128 && dim1[0]==64 && dim1[1]==64 && dim_out[0]==64 && dim_out[1]==1
   && stride0[0] == 128 && stride0[1] == 1 && stride1[0] == 64 && stride1[1] == 1 && stride_out[0] == 1 && stride_out[1] == 3584){

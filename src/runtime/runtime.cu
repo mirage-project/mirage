@@ -139,7 +139,7 @@ __global__ void __launch_bounds__(128) persistent_kernel(RuntimeConfig config) {
           }
           assert(task_desc.num_inputs == 1);
           assert(task_desc.num_outputs == 1);
-          generic_wrapper_kernel<AttentionPart2Kernel>(task_desc.inputs,
+          generic_wrapper_kernel<AttentionPart1Kernel>(task_desc.inputs,
                                                        task_desc.outputs,
                                                        config.tensor_offsets,
                                                        task_desc.forloop_range);

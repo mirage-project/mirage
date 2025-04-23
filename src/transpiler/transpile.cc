@@ -255,6 +255,26 @@ Transpiler::Transpiler(kernel::Graph const *_graph,
               st = tbg->div(stensor_inputs[0], st);
               stensor_mapping[bop->output_tensors[0].guid] = st;
               break;
+            }case TB_REDUCTION_0_OP:{
+              assert(stensor_inputs.size() == 1);
+              threadblock::STensor st = stensor_inputs[0];
+              st = tbg->reduction(st, 0);
+              stensor_mapping[bop->output_tensors[0].guid] = st;
+              break;
+            }
+            case TB_REDUCTION_1_OP:{
+              assert(stensor_inputs.size() == 1);
+              threadblock::STensor st = stensor_inputs[0];
+              st = tbg->reduction(st, 1);
+              stensor_mapping[bop->output_tensors[0].guid] = st;
+              break;
+            }
+            case TB_REDUCTION_2_OP:{
+              assert(stensor_inputs.size() == 1);
+              threadblock::STensor st = stensor_inputs[0];
+              st = tbg->reduction(st, 2);
+              stensor_mapping[bop->output_tensors[0].guid] = st;
+              break;
             }
             default: {
               assert(false && "Unsupported tb operator");

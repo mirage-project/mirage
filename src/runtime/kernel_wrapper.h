@@ -14,6 +14,9 @@
  */
 #include "mirage/runtime/runtime.h"
 #include "rms_norm.cuh"
+#include "embedding.cuh"
+#include "attention_part1.cuh"
+#include "attention_part2.cuh"
 #include "silu_mul_linear.cuh"
 
 namespace mirage {
