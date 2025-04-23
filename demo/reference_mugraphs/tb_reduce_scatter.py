@@ -7,6 +7,7 @@ import argparse
 
 seed = 42  # Use a fixed seed
 torch.manual_seed(seed)
+#torch.set_printoptions(profile="full")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Process some arguments.")
@@ -42,10 +43,24 @@ if __name__ == "__main__":
 
     outputs = graph(inputs=input_tensors, rank=rank, save_codes=save_codes)
 
-    print(outputs[0])
-    exit(0)
-    chunks = outputs[0].chunk(4)
-    for chunk in chunks[1:]:
-        assert torch.allclose(chunks[0], chunk)
+    import torch.distributed as dist
+    os.environ['MASTER_ADDR'] = 'localhost'
+    os.environ['MASTER_PORT'] = '12355'
+    dist.init_process_group(
+        backend='nccl',
+        init_method='env://',
+        world_size=4,
+        rank=rank
+    )
 
-    print(f"[{rank}] alltoall demo pass!")
+    x_pt = input_tensors[0].chunk(4, dim=1)[rank]
+    w_pt = input_tensors[1].chunk(4, dim=0)[rank]
+    result = x_pt @ w_pt
+    print(f'torch[{rank}]: {result[1][0]}')
+    final_result = torch.empty_like(outputs[0])
+    dist.reduce_scatter_tensor(final_result, result)
+    print(outputs[0])
+    print(final_result)
+    assert torch.allclose(outputs[0], final_result, rtol=5e-2, atol=1e-1)
+    print(f"[{rank}] reduce scatter demo pass!")
+    dist.barrier()

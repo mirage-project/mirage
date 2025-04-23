@@ -816,7 +816,7 @@ TranspileResult Transpiler::transpile_ugraph() {
             auto dims = vector<int>(output_dtensor.dim, output_dtensor.dim + output_dtensor.num_dims);
             //TODO support reduce_scatter on other dims
             dims[0] *= cur_op->bgraph.gpu_dim.x;
-            exec.e("using reduction_kernel = kn::ReductionKernel<$, $, $, 1>;",
+            exec.e("using reduction_kernel = kn::ReductionKernel<$, $, $, 1, true>;",
                    get_datatype_str(output_dtensor.data_type),
                    get_cute_layout(dims, 
                                    vector<size_t>(output_meta.strides, 
