@@ -44,6 +44,14 @@ public:
       for (int i = thread_id; i < num_elements; i += num_threads) {
         base_ptr[i] = cutlass::fast_exp(base_ptr[i]);
       }
+    } else if (op_type == mirage::type::TB_SQUARE_OP) {
+      for (int i = thread_id; i < num_elements; i += num_threads) {
+        base_ptr[i] = base_ptr[i] * base_ptr[i];
+      }
+    } else if (op_type == mirage::type::TB_SQRT_OP) {
+      for (int i = thread_id; i < num_elements; i += num_threads) {
+        base_ptr[i] = cutlass::fast_sqrt(base_ptr[i]);
+      }
     } else if (op_type == mirage::type::TB_SILU_OP) {
       for (int i = thread_id; i < num_elements; i += num_threads) {
         ElementType x = base_ptr[i];
@@ -82,6 +90,8 @@ public:
   CUTLASS_DEVICE
   TBElementUnaryFingerPrinter(mirage::type::TBOperatorType type,
                               FPType *exp_lookup_table,
+                              FPType *sqrt_p_lookup_table,
+                              FPType *sqrt_q_lookup_table,
                               FPType *base_ptr,
                               int num_elements,
                               int thread_id,
@@ -93,6 +103,15 @@ public:
     if (type == mirage::type::TB_EXP_OP) {
       for (int i = thread_id; i < num_elements; i += num_threads) {
         base_ptr[i] = compute_exp_fingerprint(base_ptr[i], exp_lookup_table);
+      }
+    } else if (type == mirage::type::TB_SQUARE_OP) {
+      for (int i = thread_id; i < num_elements; i += num_threads) {
+        base_ptr[i] = compute_square_fingerprint(base_ptr[i]);
+      }
+    } else if (type == mirage::type::TB_SQRT_OP) {
+      for (int i = thread_id; i < num_elements; i += num_threads) {
+        base_ptr[i] = compute_sqrt_fingerprint(
+            base_ptr[i], sqrt_p_lookup_table, sqrt_q_lookup_table);
       }
     } else if (type == mirage::type::TB_SILU_OP) {
       for (int i = thread_id; i < num_elements; i += num_threads) {

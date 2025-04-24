@@ -303,8 +303,16 @@ static std::pair<bool, std::vector<int64_t>>
 // for more details
 CustomOPTranspileResult
     Transpiler::transpile_kn_custom_op_hopper(kn::KNCustomizedOp const *op) {
+  bool profiling = config.profiling;
+
   tb::Graph const &g = op->bgraph;
   int num_threads = g.block_dim.x * g.block_dim.y * g.block_dim.z;
+
+  size_t profiler_buf_size =
+      profiling ? (g.grid_dim.x * g.grid_dim.y * g.grid_dim.z *
+                   (config.num_consumer_wgs + config.num_producer_wgs)) *
+                      1000
+                : 0;
 
   // Allocate a kernel name
   static int custom_kernel_idx_counter = 0;
@@ -318,7 +326,7 @@ CustomOPTranspileResult
            (config.num_consumer_wgs + config.num_producer_wgs) * 128 &&
        (g.forloop_range > 1))) {
     assert(false && "compiler assertion failure");
-    return CustomOPTranspileResult{CUDA_T_CONFIG_ERROR, func_name, 0, ""};
+    return CustomOPTranspileResult{CUDA_T_CONFIG_ERROR, func_name, 0, 0, ""};
   }
 
   // int barrier_size = 16 * config.pipeline_stages;
@@ -569,26 +577,50 @@ CustomOPTranspileResult
       tma.append(", ");
     }
 
-    code.e_front(
-        "__global__ void  __launch_bounds__($) "
-        "$($ $, $) {",
-        num_threads,
-        func_name,
-        tma,
-        map<kn::DTensor, string>(op->output_tensors,
-                                 [](kn::DTensor const &dtensor) -> string {
-                                   return fmt(
-                                       "$* dtensor$_ptr",
-                                       get_datatype_str(dtensor.data_type),
-                                       dtensor.guid);
-                                 }),
-        map<kn::DTensor, string>(
-            op->input_tensors, [](kn::DTensor const &dtensor) -> string {
-              return fmt("$ const* dtensor$_ptr",
-                         get_datatype_str(dtensor.data_type),
-                         dtensor.guid);
-            }));
+    if (profiling) {
+      code.e_front(
+          "__global__ void  __launch_bounds__($) "
+          "$($ $, $, uint64_t *profiler_buffer) {",
+          num_threads,
+          func_name,
+          tma,
+          map<kn::DTensor, string>(op->output_tensors,
+                                   [](kn::DTensor const &dtensor) -> string {
+                                     return fmt(
+                                         "$* dtensor$_ptr",
+                                         get_datatype_str(dtensor.data_type),
+                                         dtensor.guid);
+                                   }),
+          map<kn::DTensor, string>(
+              op->input_tensors, [](kn::DTensor const &dtensor) -> string {
+                return fmt("$ const* dtensor$_ptr",
+                           get_datatype_str(dtensor.data_type),
+                           dtensor.guid);
+              }));
+    } else {
+      code.e_front(
+          "__global__ void  __launch_bounds__($) "
+          "$($ $, $) {",
+          num_threads,
+          func_name,
+          tma,
+          map<kn::DTensor, string>(op->output_tensors,
+                                   [](kn::DTensor const &dtensor) -> string {
+                                     return fmt(
+                                         "$* dtensor$_ptr",
+                                         get_datatype_str(dtensor.data_type),
+                                         dtensor.guid);
+                                   }),
+          map<kn::DTensor, string>(
+              op->input_tensors, [](kn::DTensor const &dtensor) -> string {
+                return fmt("$ const* dtensor$_ptr",
+                           get_datatype_str(dtensor.data_type),
+                           dtensor.guid);
+              }));
+    }
+
     code.e_front(tmplt);
+    code.inc_indent();
   }
 
   // add mem_size based on tma copies
@@ -830,8 +862,13 @@ CustomOPTranspileResult
 
   // if there is asyc copy defined
   if (pipe_tma) {
-
     code.e("int warpgroup_id = tb::warpgroup_id();");
+    if (profiling) {
+      code.e("PROFILER_CLOSURE_PARAMS_DECL");
+      code.e("PROFILER_INIT(profiler_buffer, warpgroup_id, $, (threadIdx.x % "
+             "128 == 0));",
+             config.num_consumer_wgs + config.num_producer_wgs);
+    }
     // run producers
     code.e("if (warpgroup_id == $) {", config.num_consumer_wgs);
     // allocate tma register files
@@ -843,6 +880,11 @@ CustomOPTranspileResult
     code.e("for (uint32_t for_idx = 0; for_idx < $; for_idx++) {",
            g.forloop_range);
     for (auto const &[stensor_id, op] : pipeline_inputs) {
+      if (profiling) {
+        code.e("PROFILER_EVENT_START($, $);",
+               (op->op_type - type::TB_UNKOWN),
+               "static_cast<uint32_t>(for_idx)");
+      }
       code.e(fmt("STensor$InputAtom::run(tma_$, stensor$_ptr, "
                  " $, $, $, for_idx, hopper_async_pipeline_$);",
                  stensor_id,
@@ -852,6 +894,11 @@ CustomOPTranspileResult
                  op->input_map.y,
                  op->input_map.z,
                  stensor_id));
+      if (profiling) {
+        code.e("PROFILER_EVENT_END($, $);",
+               (op->op_type - type::TB_UNKOWN),
+               "static_cast<uint32_t>(for_idx)");
+      }
     }
     code.e("}");
     code.e("}");
@@ -926,6 +973,15 @@ CustomOPTranspileResult
       auto [need_advance_pipeline, pipe_ids] =
           add_loop_node_consumer_wait_if_need(
               op, code, is_in_loop, pipeline_inputs);
+
+      // define
+      if (pipe_tma && profiling) {
+        // 2000 - 2999
+        code.e("PROFILER_EVENT_START($, $);",
+               (op->op_type - type::TB_UNKOWN),
+               is_in_loop ? "static_cast<uint32_t>(for_idx)"
+                          : "static_cast<uint32_t>(0)");
+      }
 
       switch (op->op_type) {
         case type::TB_OUTPUT_OP: {
@@ -1068,7 +1124,8 @@ CustomOPTranspileResult
         }
         case type::TB_ADD_OP:
         case type::TB_MUL_OP:
-        case type::TB_DIV_OP: {
+        case type::TB_DIV_OP:
+        case type::TB_POW_OP: {
           tb::STensor const &input0 = op->input_tensors.at(0);
           tb::STensor const &input1 = op->input_tensors.at(1);
           tb::STensor const &output = output_op->output_tensors.at(0);
@@ -1096,6 +1153,7 @@ CustomOPTranspileResult
           string op_type_str = op->op_type == type::TB_ADD_OP   ? "ADD"
                                : op->op_type == type::TB_MUL_OP ? "MUL"
                                : op->op_type == type::TB_DIV_OP ? "DIV"
+                               : op->op_type == type::TB_POW_OP ? "POW"
                                                                 : "";
           assert(op_type_str != "");
           // Define layouts
@@ -1244,8 +1302,15 @@ CustomOPTranspileResult
           assert(fmt("Unknown TB op: $", op->op_type).c_str());
         }
       }
+      if (pipe_tma && profiling) {
+        code.e("PROFILER_EVENT_END($, $);",
+               (op->op_type - type::TB_UNKOWN),
+               is_in_loop ? "static_cast<uint32_t>(for_idx)"
+                          : "static_cast<uint32_t>(0)");
+      }
       code.e("}");
     }
+
     return CUDA_T_SUCCESS;
   };
 
@@ -1284,7 +1349,7 @@ CustomOPTranspileResult
 
     code << res;
     if (err != CUDA_T_SUCCESS) {
-      return CustomOPTranspileResult{err, func_name, 0, ""};
+      return CustomOPTranspileResult{err, func_name, 0, 0, ""};
     }
   }
 
@@ -1336,7 +1401,7 @@ CustomOPTranspileResult
           transpile_tb_sched_node(sched_node, res, pipeline_inputs, false);
       code << res;
       if (err != CUDA_T_SUCCESS) {
-        return CustomOPTranspileResult{err, func_name, 0, "", tmaParamsList};
+        return CustomOPTranspileResult{err, func_name, 0, 0, "", tmaParamsList};
       }
     }
   }
@@ -1347,10 +1412,10 @@ CustomOPTranspileResult
   code.e("}"); // kernel
 
   // mem_plan.smem_size += tmaParamsList.size() * config.pipeline_stages * 16;
-
   return CustomOPTranspileResult{CUDA_T_SUCCESS,
                                  func_name,
                                  mem_plan.smem_size,
+                                 profiler_buf_size,
                                  code.to_string(),
                                  tmaParamsList};
 }

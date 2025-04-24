@@ -234,7 +234,11 @@ z3::expr Pow::to_z3(z3::context &c,
 }
 
 std::string Pow::to_string() const {
-  return "(" + lhs->to_egg() + "^" + rhs->to_egg() + ")";
+  return "(" + lhs->to_string() + "^" + rhs->to_string() + ")";
+}
+
+std::string Pow::to_egg() const {
+  return "(pow " + lhs->to_egg() + " " + rhs->to_egg() + ")";
 }
 
 Exp::Exp(std::shared_ptr<AbstractExpr> exponent) : exponent(exponent) {

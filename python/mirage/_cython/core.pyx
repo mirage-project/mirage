@@ -18,6 +18,7 @@ from cpython cimport array
 import ctypes
 import array
 import numpy as np
+import torch
 from libcpp.string cimport string
 
 # Code snippet from OpenAI Triton
@@ -136,6 +137,8 @@ def get_kn_operator_type_string(int op_type):
         return "kn_mul_op"
     elif op_type == KN_DIV_OP:
         return "kn_div_op"
+    elif op_type == KN_POW_OP:
+        return "kn_pow_op"
     elif op_type == KN_REDUCTION_0_OP:
         return "kn_reduction_0_op"
     elif op_type == KN_REDUCTION_1_OP:
@@ -213,6 +216,8 @@ def get_tb_operator_type_string(int op_type):
         return "tb_mul_op"
     elif op_type == TB_DIV_OP:
         return "tb_div_op"
+    elif op_type == TB_POW_OP:
+        return "tb_pow_op"
     elif op_type == TB_REDUCTION_FIRST_OP_ID:
         return "tb_reduction_first_op_id"
     elif op_type == TB_REDUCTION_0_OP:
@@ -286,6 +291,22 @@ def convert_dtype_to_ctype(type : dtype):
         return DT_DOUBLE
     else:
         return DT_UNKNOWN
+
+def convert_dtype_to_torch_type(type : dtype):
+    if type.is_int8():
+        return torch.int8
+    elif type.is_uint16():
+        return torch.uint16
+    elif type.is_fp16():
+        return torch.float16
+    elif type.is_bf16():
+        return torch.bfloat16
+    elif type.is_fp32():
+        return torch.float32
+    elif type.is_fp64():
+        return torch.float64
+    else:
+        assert False, "Unsupported dtype: {}".format(type)
 
 def convert_ctype_to_dtype(type):
     if type == DT_INT8:
@@ -679,6 +700,16 @@ cdef class CyKNGraph:
         t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
         return DTensor(t)
 
+    def sqrt(self, DTensor input):
+        cdef CppDTensor* ptr = self.p_kgraph.sqrt(input.c_ptr)
+        t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
+        return DTensor(t)
+
+    def square(self, DTensor input):
+        cdef CppDTensor* ptr = self.p_kgraph.square(input.c_ptr)
+        t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
+        return DTensor(t)
+
     def add(self, DTensor A, DTensor B):
         cdef CppDTensor* ptr = self.p_kgraph.add(A.c_ptr, B.c_ptr)
         t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
@@ -691,6 +722,11 @@ cdef class CyKNGraph:
 
     def div(self, DTensor A, DTensor B):
         cdef CppDTensor* ptr = self.p_kgraph.div(A.c_ptr, B.c_ptr)
+        t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
+        return DTensor(t)
+
+    def pow(self, DTensor A, DTensor B):
+        cdef CppDTensor* ptr = self.p_kgraph.pow(A.c_ptr, B.c_ptr)
         t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
         return DTensor(t)
 
@@ -726,6 +762,9 @@ cdef class CyKNGraph:
             inputs.append(DTensor(ptr))
         return inputs
     
+    def get_owner_independent_hash(self):
+        return self.p_kgraph.get_owner_independent_hash()
+
     # visualizer utils
 
     def _kn_tensor_to_dict(self, DTensor t):
@@ -797,13 +836,22 @@ cdef class CyKNGraph:
             operators.append(self._get_kn_operator_info(op))
         return operators
 
-    def get_input_dtensor_layout(self, DTensor A):
+    def get_num_inputs(self):
+        return self.p_kgraph.get_num_input_dtensors()
+
+    def get_num_outputs(self):
+        return self.p_kgraph.get_num_output_dtensors()
+
+    def get_input_dtensor_shape_and_stride(self, DTensor A):
         cdef int cstrides[128]
-        num = self.p_kgraph.get_input_dtensor_layout(A.c_ptr, cstrides)
+        cdef int cdims[128]
+        num = self.p_kgraph.get_input_dtensor_shape_and_stride(A.c_ptr, cstrides, cdims)
         strides = list()
+        dims = list()
         for i in range(num):
             strides.append(cstrides[i])
-        return tuple(strides)
+            dims.append(cdims[i])
+        return tuple(dims), tuple(strides)
 
 cdef class CyTBGraph:
     cdef CppTBGraph *p_bgraph #Hold a CppTBGraph instance
@@ -1030,10 +1078,11 @@ def search(CyKNGraph input_graph, *, int max_num_new_graphs = 1024, list imaps =
 
 # Generate CUDA program for a uGraph
 # Return (CUDA code, buffer size in bytes)
-def generate_cuda_program(CyKNGraph input_graph, *, int target_cc, list input_strides, int num_warp_groups = -1, int pipeline_stages = -1) -> dict:
+def generate_cuda_program(CyKNGraph input_graph, *, int target_cc, list input_strides, int num_warp_groups = -1, int pipeline_stages = -1, bool profiling = False) -> dict:
     # Set transpiler_config
     cdef TranspilerConfig transpiler_config
     transpiler_config.target_cc = target_cc
+    transpiler_config.profiling = profiling
 
     if num_warp_groups != -1 and pipeline_stages != -1:
         transpiler_config.num_producer_wgs = 1;
@@ -1072,6 +1121,7 @@ def generate_cuda_program(CyKNGraph input_graph, *, int target_cc, list input_st
         "code": result.code.decode("UTF-8"),
         "buf_size": result.buf_size,
         "max_smem_size": result.max_smem_size,
+        "profiler_buf_size": result.profiler_buf_size,
         "output_directives": output_directives
     }
 
@@ -1099,3 +1149,16 @@ def generate_triton_program(CyKNGraph input_graph, *, int target_cc) -> dict:
         "code": result.code.decode("UTF-8"),
         "output_shapes": result.output_shapes
     }
+
+def set_gpu_device_id(gpu_id: int):
+    cython_set_gpu_device_id(gpu_id)
+
+def cy_to_json(CyKNGraph input_graph, str filename):
+    cfilename = filename.encode('UTF-8')
+    cython_to_json(input_graph.p_kgraph, cfilename)
+
+def cy_from_json(str filename):
+    cfilename = filename.encode('UTF-8')
+    ptr = cython_from_json(cfilename)
+    graph = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
+    return CyKNGraph(graph)

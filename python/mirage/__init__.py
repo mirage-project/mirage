@@ -16,6 +16,13 @@ class InputNotFoundError(Exception):
     """Raised when cannot find input tensors """
     pass
 
+def set_gpu_device_id(device_id: int):
+    global_config.gpu_device_id = device_id
+    core.set_gpu_device_id(device_id)
+
+def bypass_compile_errors(value: bool=True):
+    global_config.bypass_compile_errors = value
+
 def new_kernel_graph():
     kgraph = core.CyKNGraph()
     return KNGraph(kgraph)
@@ -24,5 +31,8 @@ def new_threadblock_graph(grid_dim: tuple, block_dim: tuple, forloop_range: int,
     bgraph = core.CyTBGraph(grid_dim, block_dim, forloop_range, reduction_dimx)
     return TBGraph(bgraph)
 
-# Current Version
-__version__ = "0.2.2"
+# Other Configurations
+from .global_config import global_config
+# Graph Datasets
+from .graph_dataset import graph_dataset
+from .version import __version__

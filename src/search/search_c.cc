@@ -1,5 +1,6 @@
 #include "mirage/search/search_c.h"
 #include "mirage/kernel/customized.h"
+#include "mirage/kernel/graph.h"
 #include "mirage/search/dim_strategy.h"
 #include "mirage/search/op_utils.h"
 #include "mirage/search/search.h"
@@ -111,6 +112,23 @@ int cython_search(mirage::kernel::Graph const *input_graph,
     }
     return num;
   }
+}
+
+void cython_to_json(mirage::kernel::Graph const *input_graph,
+                    char const *filename) {
+  json j;
+  to_json(j, *input_graph);
+  std::ofstream ofs(filename);
+  ofs << j;
+}
+
+mirage::kernel::Graph *cython_from_json(char const *filename) {
+  std::ifstream graph_file(filename, std::ifstream::binary);
+  json j;
+  graph_file >> j;
+  mirage::kernel::Graph *new_graph = new mirage::kernel::Graph();
+  from_json(j, *new_graph);
+  return new_graph;
 }
 
 } // namespace search_c
