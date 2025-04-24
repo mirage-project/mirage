@@ -14,6 +14,7 @@
  */
 
 #include "mirage/runtime/runtime.h"
+#include <queue>
 
 namespace mirage {
 namespace runtime {
@@ -255,7 +256,7 @@ void Runtime::register_mugraph(
             }
             event_desc_1.first_task_id = all_tasks.size();
             event_desc_1.last_task_id = all_tasks.size() + 1;
-            event_desc_1.num_triggers = 1;
+            event_desc_1.num_triggers = num_gpus - 1;
             all_events.push_back(event_desc_1);
             // Step 2: create a task for reduce
             TaskDesc task(TASK_REDUCE);
@@ -413,7 +414,63 @@ void Runtime::register_mugraph(
     pre_op = cur_op;
     pre_task_map = cur_task_map;
   }
+
+  // Update the trigger event for all tasks in pre_task_map
+  for (auto const &it : pre_task_map) {
+    all_tasks[it.second].trigger_event =
+        get_event_id(my_gpu_id, 0, false /*nvshmem_event*/);
+  }
   num_graphs++;
+}
+
+bool Runtime::sanity_check() {
+  std::unordered_set<EventId> triggered_events;
+  std::unordered_set<TaskId> executed_tasks;
+  std::vector<int> event_counts(all_events.size(), 0);
+  for (size_t i = 0; i < all_events.size(); i++) {
+    event_counts[i] = all_events[i].num_triggers;
+  }
+  std::queue<TaskId> task_queue;
+  std::queue<EventId> event_queue;
+  assert(first_tasks.size() == 1);
+  task_queue.push(first_tasks[0]);
+  while (!(task_queue.empty() && event_queue.empty())) {
+    // Execute tasks
+    while (!task_queue.empty()) {
+      TaskId task = task_queue.front();
+      task_queue.pop();
+      assert(executed_tasks.count(task) == 0);
+      executed_tasks.insert(task);
+      TaskDesc desc = all_tasks[task];
+      if (desc.trigger_event != EVENT_INVALID_ID) {
+        EventId event_id = desc.trigger_event;
+        size_t event_pos = event_id & 0xffffffff;
+        // event_pos 0 is the end of task graph event
+        if (event_pos == 0) {
+          continue;
+        }
+        assert(event_counts[event_pos] > 0);
+        event_counts[event_pos]--;
+        if (event_counts[event_pos] == 0) {
+          event_queue.push(event_id);
+        }
+      }
+    }
+    while (!event_queue.empty()) {
+      EventId event_id = event_queue.front();
+      event_queue.pop();
+      assert(triggered_events.count(event_id) == 0);
+      triggered_events.insert(event_id);
+      size_t event_pos = event_id & 0xffffffff;
+      EventDesc desc = all_events[event_pos];
+      for (TaskId tid = desc.first_task_id; tid < desc.last_task_id; tid++) {
+        task_queue.push(tid);
+      }
+    }
+  }
+  printf("Triggered events: %zu\n", triggered_events.size());
+  printf("Executed tasks: %zu\n", executed_tasks.size());
+  return true;
 }
 
 } // namespace runtime

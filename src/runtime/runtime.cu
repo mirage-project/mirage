@@ -57,7 +57,8 @@ __device__ void terminate_workers_and_schedulers(RuntimeConfig config) {
     } while (old != last_task_id);
   }
   // Event ID 0 is the termination event
-  int num_schedulers = config.num_local_schedulers + config.num_remote_schedulers;
+  int num_schedulers =
+      config.num_local_schedulers + config.num_remote_schedulers;
   for (int i = 0; i < num_schedulers; i++) {
     size_t last_event_id =
         atomicAdd(&config.sched_queue_next_free_event_id[i], 1);
@@ -115,15 +116,16 @@ __global__ void persistent_kernel(RuntimeConfig config) {
         assert(cur_task_id + config.per_worker_queue_len > last_task_id);
         cur_task_loc = task_queue[cur_task_id % config.per_worker_queue_len];
         if (config.verbose) {
-          printf("[%d][FTCH] worker_id(%d) cur_task_pos(%llu) last_task_pos(%llu) "
-                 "task_id(%llu) task_type(%d) event_id(%llx) \n",
-                 config.my_gpu_id,
-                 worker_id,
-                 cur_task_id,
-                 last_task_id,
-                 cur_task_loc,
-                 config.all_tasks[cur_task_loc].task_type,
-                 config.all_tasks[cur_task_loc].trigger_event);
+          printf(
+              "[%d][FTCH] worker_id(%d) cur_task_pos(%llu) last_task_pos(%llu) "
+              "task_id(%llu) task_type(%d) event_id(%llx) \n",
+              config.my_gpu_id,
+              worker_id,
+              cur_task_id,
+              last_task_id,
+              cur_task_loc,
+              config.all_tasks[cur_task_loc].task_type,
+              config.all_tasks[cur_task_loc].trigger_event);
         }
       }
       __syncthreads();
@@ -197,13 +199,13 @@ __global__ void persistent_kernel(RuntimeConfig config) {
           // Case 1: Trigger a local non-nvshmem event
           int count = atomicSub(&config.all_event_counters[event_index], 1);
           if (config.verbose) {
-            printf(
-                "[%d][DONE] worker_id(%d) task_id(%llu) event_id(%llx) event_type(local) count(%d)\n",
-                config.my_gpu_id,
-                worker_id,
-                cur_task_loc,
-                event_id,
-                count);
+            printf("[%d][DONE] worker_id(%d) task_id(%llu) event_id(%llx) "
+                   "event_type(local) count(%d)\n",
+                   config.my_gpu_id,
+                   worker_id,
+                   cur_task_loc,
+                   event_id,
+                   count);
           }
           if (count == 1) {
             // The event has been triggered enough times
@@ -233,20 +235,16 @@ __global__ void persistent_kernel(RuntimeConfig config) {
           size_t gpu_id = get_event_gpu_id(event_id);
           assert(gpu_id < config.num_gpus);
           assert(gpu_id != config.my_gpu_id);
-          if (config.verbose) {
-            printf("[%d][PreDONE] worker_id(%d) task_id(%llu) event_id(%llx) event_index(%llu) ptr(%p)\n",
-                   config.my_gpu_id, worker_id, cur_task_loc, event_id, event_index, &config.all_event_counters[event_index]);
-          }
           int count = nvshmem_int_atomic_fetch_add(
               &config.all_event_counters[event_index], -1, gpu_id);
           if (config.verbose) {
-            printf(
-                "[%d][DONE] worker_id(%d) task_id(%llu) event_id(%llx) event_type(remote) count(%d)\n",
-                config.my_gpu_id,
-                worker_id,
-                cur_task_loc,
-                event_id,
-                count);
+            printf("[%d][DONE] worker_id(%d) task_id(%llu) event_id(%llx) "
+                   "event_type(remote) count(%d)\n",
+                   config.my_gpu_id,
+                   worker_id,
+                   cur_task_loc,
+                   event_id,
+                   count);
           }
           if (count == 1) {
             // The event has been triggered enough times
@@ -265,12 +263,13 @@ __global__ void persistent_kernel(RuntimeConfig config) {
             size_t last_event_id = nvshmem_ulonglong_atomic_fetch_add(
                 &config.sched_queue_next_free_event_id[sched_id], 1, gpu_id);
             nvshmem_ulonglong_p(
-                &config.sched_queues[sched_id]
-                                   [last_event_id % config.per_sched_queue_len],
-                event_index, gpu_id);
+                &config.sched_queues[sched_id][last_event_id %
+                                               config.per_sched_queue_len],
+                event_index,
+                gpu_id);
             // use nvshmem_quiet to force completion of remote transfer
             // before updating the last_ready_event_id
-            nvshmem_quiet();
+            nvshmem_fence();
             nvshmem_ulonglong_atomic_add(
                 &config.sched_queue_last_ready_event_id[sched_id], 1, gpu_id);
           }
@@ -343,7 +342,7 @@ __global__ void persistent_kernel(RuntimeConfig config) {
   }
 }
 
-template<typename DT>
+template <typename DT>
 DT *Runtime::gpu_malloc(size_t size) {
   void *dst_ptr;
   if (num_gpus > 1) {
@@ -352,7 +351,7 @@ DT *Runtime::gpu_malloc(size_t size) {
   } else {
     checkCUDA(cudaMalloc(&dst_ptr, size));
   }
-  return static_cast<DT*>(dst_ptr);
+  return static_cast<DT *>(dst_ptr);
 }
 
 void Runtime::launch_persistent_kernel(int num_workers,
@@ -381,6 +380,8 @@ void Runtime::launch_persistent_kernel(int num_workers,
   int npes = nvshmem_n_pes();
   int mype_node = nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE);
   printf("mype(%d) npes(%d) mype_node(%d)\n", mype, npes, mype_node);
+  printf(
+      "num_tasks(%zu) num_events(%zu)\n", all_tasks.size(), all_events.size());
   int num_schedulers =
       config.num_local_schedulers + config.num_remote_schedulers;
 
@@ -388,11 +389,11 @@ void Runtime::launch_persistent_kernel(int num_workers,
   assert(nvshmem_n_pes() == num_gpus);
   printf("CP#1\n");
   // Initialize worker queue last task id
-  config.worker_queue_last_ready_task_id =
-      gpu_malloc<unsigned long long int>(config.num_workers * sizeof(unsigned long long int));
+  config.worker_queue_last_ready_task_id = gpu_malloc<unsigned long long int>(
+      config.num_workers * sizeof(unsigned long long int));
   printf("CP#2\n");
-  config.worker_queue_next_free_task_id =
-      gpu_malloc<unsigned long long int>(config.num_workers * sizeof(unsigned long long int));
+  config.worker_queue_next_free_task_id = gpu_malloc<unsigned long long int>(
+      config.num_workers * sizeof(unsigned long long int));
   std::vector<unsigned long long int> host_worker_queue_last_task_id;
   for (int i = 0; i < config.num_workers; i++) {
     host_worker_queue_last_task_id.push_back(0);
@@ -406,10 +407,10 @@ void Runtime::launch_persistent_kernel(int num_workers,
                        config.num_workers * sizeof(unsigned long long int),
                        cudaMemcpyHostToDevice));
   // Initialize scheduler queue last event id
-  config.sched_queue_last_ready_event_id =
-      gpu_malloc<unsigned long long int>(num_schedulers * sizeof(unsigned long long int));
-  config.sched_queue_next_free_event_id =
-      gpu_malloc<unsigned long long int>(num_schedulers * sizeof(unsigned long long int));
+  config.sched_queue_last_ready_event_id = gpu_malloc<unsigned long long int>(
+      num_schedulers * sizeof(unsigned long long int));
+  config.sched_queue_next_free_event_id = gpu_malloc<unsigned long long int>(
+      num_schedulers * sizeof(unsigned long long int));
 
   std::vector<unsigned long long int> host_sched_queue_last_event_id;
   for (int i = 0; i < num_schedulers; i++) {
@@ -424,8 +425,11 @@ void Runtime::launch_persistent_kernel(int num_workers,
                        num_schedulers * sizeof(unsigned long long int),
                        cudaMemcpyHostToDevice));
   // Initialize all event counters
-  config.all_event_counters = gpu_malloc<int>(config.total_num_events * sizeof(int));
-  printf("[%d] all_event_counters(%p)\n", config.my_gpu_id, config.all_event_counters);
+  config.all_event_counters =
+      gpu_malloc<int>(config.total_num_events * sizeof(int));
+  printf("[%d] all_event_counters(%p)\n",
+         config.my_gpu_id,
+         config.all_event_counters);
   std::vector<int> host_all_event_counters;
   for (int i = 0; i < config.total_num_events; i++) {
     host_all_event_counters.push_back(all_events.at(i).num_triggers);
@@ -435,14 +439,16 @@ void Runtime::launch_persistent_kernel(int num_workers,
                        config.total_num_events * sizeof(int),
                        cudaMemcpyHostToDevice));
   // Initialize all tasks
-  config.all_tasks = gpu_malloc<TaskDesc>(config.total_num_tasks * sizeof(TaskDesc));
+  config.all_tasks =
+      gpu_malloc<TaskDesc>(config.total_num_tasks * sizeof(TaskDesc));
   checkCUDA(cudaMemcpy(config.all_tasks,
                        all_tasks.data(),
                        config.total_num_tasks * sizeof(TaskDesc),
                        cudaMemcpyHostToDevice));
 
   // Initialize all events
-  config.all_events = gpu_malloc<EventDesc>(config.total_num_events * sizeof(EventDesc));
+  config.all_events =
+      gpu_malloc<EventDesc>(config.total_num_events * sizeof(EventDesc));
   checkCUDA(cudaMemcpy(config.all_events,
                        all_events.data(),
                        config.total_num_events * sizeof(EventDesc),
@@ -456,7 +462,8 @@ void Runtime::launch_persistent_kernel(int num_workers,
           gpu_malloc<TaskId>(config.per_worker_queue_len * sizeof(TaskId));
       host_worker_queues.push_back(worker_queue);
     }
-    config.worker_queues = gpu_malloc<TaskId*>(config.num_workers * sizeof(TaskId *));
+    config.worker_queues =
+        gpu_malloc<TaskId *>(config.num_workers * sizeof(TaskId *));
     checkCUDA(cudaMemcpy(config.worker_queues,
                          host_worker_queues.data(),
                          config.num_workers * sizeof(TaskId *),
@@ -471,7 +478,8 @@ void Runtime::launch_persistent_kernel(int num_workers,
           gpu_malloc<EventId>(config.per_sched_queue_len * sizeof(EventId));
       host_sched_queues.push_back(sched_queue);
     }
-    config.sched_queues = gpu_malloc<EventId*>(num_schedulers * sizeof(EventId *));
+    config.sched_queues =
+        gpu_malloc<EventId *>(num_schedulers * sizeof(EventId *));
     checkCUDA(cudaMemcpy(config.sched_queues,
                          host_sched_queues.data(),
                          num_schedulers * sizeof(EventId *),
@@ -480,7 +488,8 @@ void Runtime::launch_persistent_kernel(int num_workers,
 
   // Initialize first tasks
   {
-    config.first_tasks = gpu_malloc<TaskId>(first_tasks.size() * sizeof(TaskId));
+    config.first_tasks =
+        gpu_malloc<TaskId>(first_tasks.size() * sizeof(TaskId));
     checkCUDA(cudaMemcpy(config.first_tasks,
                          first_tasks.data(),
                          first_tasks.size() * sizeof(TaskId),
@@ -494,10 +503,12 @@ void Runtime::launch_persistent_kernel(int num_workers,
   nvshmem_barrier_all();
   void *args[] = {&config};
   // Launcher persistent kernel
-  nvshmemx_collective_launch((const void*) persistent_kernel,
+  nvshmemx_collective_launch((void const *)persistent_kernel,
                              dim3(108, 1, 1),
                              dim3(128, 1, 1),
-                             args, 96 * 1024/*sharedmem*/, 0/*stream*/);
+                             args,
+                             1024 /*sharedmem*/,
+                             0 /*stream*/);
   cudaDeviceSynchronize();
   nvshmem_barrier_all();
   nvshmem_finalize();

@@ -73,13 +73,16 @@ struct RuntimeConfig {
 class Runtime {
 public:
   Runtime(int num_gpus, int my_gpu_id);
-  template<typename DT>
-  DT* gpu_malloc(size_t);
+  template <typename DT>
+  DT *gpu_malloc(size_t);
   void register_mugraph(
       mirage::kernel::Graph const &graph,
       std::unordered_map<mirage::kernel::KNOperator const *,
                          std::tuple<int, int, TaskType>> const &task_config);
-  void launch_persistent_kernel(int num_workers, int num_local_schedulers, int num_remote_schedulers);
+  void launch_persistent_kernel(int num_workers,
+                                int num_local_schedulers,
+                                int num_remote_schedulers);
+  bool sanity_check();
 
 public:
   std::vector<TaskDesc> all_tasks;

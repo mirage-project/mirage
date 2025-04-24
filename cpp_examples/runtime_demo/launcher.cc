@@ -32,7 +32,7 @@ int main(int argc, char **argv) {
   std::unordered_map<kn::KNOperator const *, std::tuple<int, int, rt::TaskType>>
       task_configs;
 
-  kn::Graph kgraph;
+  kn::Graph kgraph(dim3{1, 1, 1}, true /*disable_fingerprint*/);
   kn::DTensor X = kgraph.new_input(
       {batch_size, 1}, {1, 1}, type::DT_UINT16, layout::DmemRowMajor);
   kn::DTensor AllReduceBuf =
@@ -93,7 +93,7 @@ int main(int argc, char **argv) {
         std::make_tuple(2, 1, rt::TASK_EMBEDDING);
   }
   X = Y;
-  for (int layer = 0; layer < 1; layer++) {
+  for (int layer = 0; layer < 28; layer++) {
     // Add RMS + MatMul
     {
       dim3 grid_dim = {(size_t)fused_outdim_1 / 64, 1, 1},
@@ -103,12 +103,9 @@ int main(int argc, char **argv) {
                                        {(size_t)fused_outdim_2, 1},
                                        type::DT_BFLOAT16,
                                        layout::DmemRowMajor);
-      tb::STensor bX =
-          bgraph.new_input(X, {-1, -1, -1}, 1, layout::SmemRowMajor);
-      tb::STensor bW =
-          bgraph.new_input(W, {1, -1, -1}, 0, layout::SmemRowMajor);
-      tb::STensor bAttnIn =
-          bgraph.new_input(AttnIn, {1, -1, -1}, -1, layout::SmemRowMajor);
+      bgraph.new_input(X, {-1, -1, -1}, 1, layout::SmemRowMajor);
+      bgraph.new_input(W, {1, -1, -1}, 0, layout::SmemRowMajor);
+      bgraph.new_input(AttnIn, {1, -1, -1}, -1, layout::SmemRowMajor);
       kgraph.customized({X, W, AttnIn}, bgraph);
       task_configs[kgraph.operators.back()] =
           std::make_tuple(2, 1, rt::TASK_RMS_NORM_LINEAR);
@@ -156,20 +153,16 @@ int main(int argc, char **argv) {
                                        {(size_t)hidden_size, 1},
                                        type::DT_BFLOAT16,
                                        layout::DmemRowMajor);
-      tb::STensor bX =
-          bgraph.new_input(AttnProjIn, {-1, -1, -1}, 1, layout::SmemRowMajor);
-      tb::STensor bW =
-          bgraph.new_input(W, {1, -1, -1}, 0, layout::SmemRowMajor);
-      tb::STensor bY =
-          bgraph.new_input(AttnProjOut, {1, -1, -1}, -1, layout::SmemRowMajor);
+      bgraph.new_input(AttnProjIn, {-1, -1, -1}, 1, layout::SmemRowMajor);
+      bgraph.new_input(W, {1, -1, -1}, 0, layout::SmemRowMajor);
+      bgraph.new_input(AttnProjOut, {1, -1, -1}, -1, layout::SmemRowMajor);
       kgraph.customized({AttnProjIn, W, AttnProjOut}, bgraph);
       task_configs[kgraph.operators.back()] =
           std::make_tuple(2, 1, rt::TASK_MATMUL);
     }
     // Add AllReduce
-    {
-      dim3 grid_dim = {hidden_size / 64, 1, 1},
-           block_dim = {128, 1, 1};
+    if (world_size > 1) {
+      dim3 grid_dim = {hidden_size / 64, 1, 1}, block_dim = {128, 1, 1};
       tb::Graph bgraph(grid_dim, block_dim, 1, 64);
       bgraph.new_input(AttnProjOut, {1, -1, -1}, -1, layout::SmemRowMajor);
       bgraph.new_input(AllReduceBuf, {2, -1, -1}, -1, layout::SmemRowMajor);
@@ -177,6 +170,8 @@ int main(int argc, char **argv) {
       kgraph.customized({AttnProjOut, AllReduceBuf, AttnAROut}, bgraph);
       task_configs[kgraph.operators.back()] =
           std::make_tuple(2, 1, rt::TASK_ALLREDUCE);
+    } else {
+      AttnAROut = AttnProjOut;
     }
     // Add RMS + Matmul
     {
@@ -186,12 +181,9 @@ int main(int argc, char **argv) {
                                        {(size_t)fused_outdim_2, 1},
                                        type::DT_BFLOAT16,
                                        layout::DmemRowMajor);
-      tb::STensor bX =
-          bgraph.new_input(AttnAROut, {-1, -1, -1}, 1, layout::SmemRowMajor);
-      tb::STensor bW =
-          bgraph.new_input(W, {1, -1, -1}, 0, layout::SmemRowMajor);
-      tb::STensor bY =
-          bgraph.new_input(MLPMid, {1, -1, -1}, -1, layout::SmemRowMajor);
+      bgraph.new_input(AttnAROut, {-1, -1, -1}, 1, layout::SmemRowMajor);
+      bgraph.new_input(W, {1, -1, -1}, 0, layout::SmemRowMajor);
+      bgraph.new_input(MLPMid, {1, -1, -1}, -1, layout::SmemRowMajor);
       kgraph.customized({AttnAROut, W, MLPMid}, bgraph);
       task_configs[kgraph.operators.back()] =
           std::make_tuple(2, 1, rt::TASK_RMS_NORM_LINEAR);
@@ -204,12 +196,9 @@ int main(int argc, char **argv) {
                                        {(size_t)hidden_size, 1},
                                        type::DT_BFLOAT16,
                                        layout::DmemRowMajor);
-      tb::STensor bY =
-          bgraph.new_input(MLPMid, {-1, -1, -1}, 1, layout::SmemRowMajor);
-      tb::STensor bW =
-          bgraph.new_input(W, {1, -1, -1}, 0, layout::SmemRowMajor);
-      tb::STensor bO =
-          bgraph.new_input(MLPOut, {1, -1, -1}, -1, layout::SmemRowMajor);
+      bgraph.new_input(MLPMid, {-1, -1, -1}, 1, layout::SmemRowMajor);
+      bgraph.new_input(W, {1, -1, -1}, 0, layout::SmemRowMajor);
+      bgraph.new_input(MLPOut, {1, -1, -1}, -1, layout::SmemRowMajor);
       kgraph.customized({MLPMid, W, MLPOut}, bgraph);
       task_configs[kgraph.operators.back()] =
           std::make_tuple(2, 1, rt::TASK_SILU_MUL_LINEAR);
@@ -221,7 +210,10 @@ int main(int argc, char **argv) {
   using namespace mirage::runtime;
   Runtime runtime(world_size /*num_gpus*/, rank /*my_gpu_id*/);
   runtime.register_mugraph(kgraph, task_configs);
-  runtime.launch_persistent_kernel(106 /*num_workers*/, 7 /*num_local_schedulers*/, 1 /*num_remote_schedulers*/);
+  runtime.sanity_check();
+  runtime.launch_persistent_kernel(106 /*num_workers*/,
+                                   6 /*num_local_schedulers*/,
+                                   2 /*num_remote_schedulers*/);
 
   MPI_Finalize();
 }
