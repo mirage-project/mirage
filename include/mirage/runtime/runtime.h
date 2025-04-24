@@ -32,7 +32,9 @@ struct TensorDesc {
 };
 
 struct EventDesc {
-  EventDesc(void) : num_triggers(0), first_task_id(0), last_task_id(0) {}
+  EventDesc(void)
+      : num_triggers(0), first_task_id(TASK_INVALID_ID),
+        last_task_id(TASK_INVALID_ID) {}
   EventDesc(int nt, TaskId f, TaskId l)
       : num_triggers(nt), first_task_id(f), last_task_id(l) {}
   int num_triggers;
@@ -41,7 +43,8 @@ struct EventDesc {
 
 struct TaskDesc {
   TaskDesc(TaskType t)
-      : task_type(t), num_inputs(0), num_outputs(0), trigger_event(0) {}
+      : task_type(t), num_inputs(0), num_outputs(0),
+        trigger_event(EVENT_INVALID_ID) {}
   TaskType task_type;
   int num_inputs, num_outputs;
   EventId trigger_event;
@@ -50,7 +53,8 @@ struct TaskDesc {
 };
 
 struct RuntimeConfig {
-  int num_workers, num_schedulers, num_graphs;
+  int num_workers, num_local_schedulers, num_remote_schedulers, num_graphs;
+  int num_gpus, my_gpu_id;
   int total_num_tasks, total_num_events;
   unsigned long long int per_worker_queue_len, per_sched_queue_len;
   unsigned long long int *worker_queue_last_ready_task_id;
@@ -69,11 +73,16 @@ struct RuntimeConfig {
 class Runtime {
 public:
   Runtime(int num_gpus, int my_gpu_id);
+  template <typename DT>
+  DT *gpu_malloc(size_t);
   void register_mugraph(
       mirage::kernel::Graph const &graph,
       std::unordered_map<mirage::kernel::KNOperator const *,
                          std::tuple<int, int, TaskType>> const &task_config);
-  void launch_persistent_kernel(int num_workers, int num_schedulers);
+  void launch_persistent_kernel(int num_workers,
+                                int num_local_schedulers,
+                                int num_remote_schedulers);
+  bool sanity_check();
 
 public:
   std::vector<TaskDesc> all_tasks;
