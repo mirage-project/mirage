@@ -45,6 +45,14 @@ list(APPEND CMAKE_CUDA_FLAGS "-D__CUDACC_VER_MAJOR__=${CUDA_VERSION_MAJOR} -D__C
 # since we target Triton to perform codegen
 #list(APPEND CMAKE_CUDA_FLAGS "-DCUTLASS_ARCH_MMA_SM80_ENABLED")
 
+if ("${CMAKE_BUILD_TYPE}" STREQUAL "Debug")
+  message("Build in Debug mode")
+  set(CMAKE_CUDA_FLAGS "-fopenmp -O0 -g -Xcompiler=-fPIC ${CMAKE_CUDA_FLAGS}")
+  set(CMAKE_CXX_FLAGS "-fopenmp -O0 -g -Wall -fPIC ${CMAKE_CXX_FLAGS}")
+else()
+  set(CMAKE_CUDA_FLAGS "-fopenmp -O2 -Xcompiler=-fPIC ${CMAKE_CUDA_FLAGS}")
+  set(CMAKE_CXX_FLAGS "-fopenmp -O2 -Wall -fPIC ${CMAKE_CXX_FLAGS}")
+endif()
 
 #set CUDA
 if (NOT "${USE_CUDA}" STREQUAL "OFF")
@@ -83,16 +91,7 @@ if (NOT "${USE_NVSHMEM}" STREQUAL "OFF")
   add_library(nvshmem_host ALIAS nvshmem::nvshmem_host) 
   add_library(nvshmem_device ALIAS nvshmem::nvshmem_device)
   list(APPEND MIRAGE_LINK_LIBS nvshmem_host nvshmem_device ${MPI_CXX_LIBRARIES})
-  list(APPEND CMAKE_CUDA_FLAGS "-rdc=true -ccbin=mpic++")
-endif()
-
-if ("${CMAKE_BUILD_TYPE}" STREQUAL "Debug")
-  message("Build in Debug mode")
-  set(CMAKE_CUDA_FLAGS "-fopenmp -O0 -g -Xcompiler=-fPIC ${CMAKE_CUDA_FLAGS}")
-  set(CMAKE_CXX_FLAGS "-fopenmp -O0 -g -Wall -fPIC ${CMAKE_CXX_FLAGS}")
-else()
-  set(CMAKE_CUDA_FLAGS "-fopenmp -O2 -Xcompiler=-fPIC ${CMAKE_CUDA_FLAGS}")
-  set(CMAKE_CXX_FLAGS "-fopenmp -O2 -Wall -fPIC ${CMAKE_CXX_FLAGS}")
+  set(CMAKE_CUDA_FLAGS "-rdc=true -ccbin=mpic++ ${CMAKE_CUDA_FLAGS}")
 endif()
 
 #include_directories(${MIRAGE_INCLUDE_DIRS})
