@@ -8,6 +8,7 @@
 #include "mirage/search/verification/probabilistic_verifier.h"
 #include "mirage/utils/containers.h"
 #include "mirage/utils/json_utils.h"
+#include "mirage/utils/hash_utils.h"
 
 #include <fstream>
 #include <iostream>
@@ -110,6 +111,24 @@ void KernelGraphGenerator::generate_next_operator(
   if (num_total_states % 100 == 1) {
     show_statistics();
   }
+
+  size_t graph_hash = c.kn_graph->get_owner_independent_hash();
+  hash_combine(graph_hash, std::hash<int>()(static_cast<int>(c.level)));
+  if (c.tb_graph != nullptr) {
+    hash_combine(graph_hash, c.tb_graph->get_owner_independent_hash());
+  }
+
+  bool has_seen_before;
+  #pragma omp critical
+  {
+    has_seen_before = generated_graph_hashes.find(graph_hash) != generated_graph_hashes.end();
+  }
+  if (has_seen_before) {
+    std::cout << "depth: " << depth << std::endl;
+    return;
+  }
+  generated_graph_hashes.insert(graph_hash);
+
   if (verify(c)) {
     verified.push_back(SerializedSearchContext(c));
     return;
