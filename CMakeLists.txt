@@ -21,7 +21,7 @@ set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} ${CMAKE_CURRENT_LIST_DIR}/cmake)
 
 #add_subdirectory(deps/cutlass)
 
-set(CMAKE_CUDA_ARCHITECTURES "70;75;80;86;89;90")
+set(CMAKE_CUDA_ARCHITECTURES "80;86;89;90")
 # set(CUTLASS_NVCC_ARCHS "80;86")
 
 file(GLOB_RECURSE MIRAGE_SRCS
@@ -130,7 +130,7 @@ add_library(mirage_runtime ${MIRAGE_SRCS})
 set_target_properties(mirage_runtime
   PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 
-set_target_properties(mirage_runtime PROPERTIES CUDA_ARCHITECTURES "70;75;80;86;89;90")
+set_target_properties(mirage_runtime PROPERTIES CUDA_ARCHITECTURES "80;86;89;90")
 
 target_compile_features(mirage_runtime PUBLIC cxx_std_17)
 

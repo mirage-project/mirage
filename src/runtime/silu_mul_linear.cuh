@@ -15,7 +15,7 @@
  
 #define NUM_GPUS 1
 #define USE_NVSHMEM false
-#include "mirage/transpiler/runtime/runtime.h"
+#include "mirage/transpiler/runtime/transpiler_runtime.h"
 #include "mirage/runtime/runtime.h"
 #include "layout_infer.h"
 

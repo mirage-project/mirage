@@ -574,7 +574,6 @@ void Runtime::launch_persistent_kernel(int num_workers,
   cudaDeviceSynchronize();
 
   // launch init kernel
-  printf("init\n");
   init_kernel<<<dim3(1, 1, 1), dim3(128, 1, 1)>>>(config);
   cudaDeviceSynchronize();
   // Add a global barrier for all init_kernel to complete

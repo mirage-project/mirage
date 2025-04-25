@@ -15,7 +15,7 @@
  
  #define NUM_GPUS 1
  #define USE_NVSHMEM false
- #include "mirage/transpiler/runtime/runtime.h"
+ #include "mirage/transpiler/runtime/transpiler_runtime.h"
  #include "mirage/runtime/runtime.h"
  #include "layout_infer.h"
  
@@ -94,7 +94,6 @@
    int4 offset_in1,
    int4 offset_out0,
    int forloop_range) {
-    return;
    
     int thread_idx = threadIdx.x;
     static constexpr int NUM_THREADS = 128;
