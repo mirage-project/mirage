@@ -81,7 +81,6 @@ __device__ __forceinline__ bool is_termination_event(size_t event_loc,
   return (event_loc == 0);
 }
 
-
 __device__ __forceinline__ bool is_nvshmem_event(EventId event_id) {
   return (event_id & EVENT_NVSHMEM_TAG) > 0;
 }
@@ -156,7 +155,6 @@ __global__ void __launch_bounds__(128) persistent_kernel(RuntimeConfig config) {
                    worker_id,
                    TASK_EMBEDDING,
                    blockIdx.x);
-
           }
 
           assert(task_desc.num_inputs == 2);
@@ -585,7 +583,6 @@ void Runtime::launch_persistent_kernel(int num_workers,
   cudaFuncSetAttribute(persistent_kernel,
                        cudaFuncAttributeMaxDynamicSharedMemorySize,
                        smem_size);
-
 
   nvshmemx_collective_launch((void const *)persistent_kernel,
                              dim3(108, 1, 1),

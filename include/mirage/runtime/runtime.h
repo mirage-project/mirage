@@ -80,7 +80,6 @@ struct RuntimeConfig {
   uint64_t *profiler_buffer;
   int4 *tensor_offsets;
   bool verbose;
-
 };
 
 class Runtime {

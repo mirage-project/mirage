@@ -372,7 +372,8 @@ void Runtime::register_mugraph(
             task.inputs[task.num_inputs++] = desc;
 
             // add_tensor_offset(
-            //     input->input_map, input->dtensor, input_strides, bgraph, true);
+            //     input->input_map, input->dtensor, input_strides, bgraph,
+            //     true);
             num_dtensors++;
           }
           // Initialize output tensors to the task
