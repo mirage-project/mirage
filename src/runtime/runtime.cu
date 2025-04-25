@@ -73,13 +73,14 @@ __device__ __forceinline__ bool is_termination_event(size_t event_loc,
 }
 
 __global__ void __launch_bounds__(128) persistent_kernel(RuntimeConfig config) {
-  __shared__ TaskId cur_task_loc;
+  extern __shared__ TaskId cur_task_loc;
   assert(gridDim.y == 1);
   assert(gridDim.z == 1);
   // Each worker SM serves a single worker
   // Each scheduelr SM serves four schedulers
   assert(config.num_schedulers % 4 == 0);
   assert(gridDim.x == config.num_workers + config.num_schedulers / 4);
+
   if (blockIdx.x < config.num_workers) {
     int worker_id = blockIdx.x;
     size_t cur_task_id = 0;
@@ -110,52 +111,50 @@ __global__ void __launch_bounds__(128) persistent_kernel(RuntimeConfig config) {
           break;
         }
         case TASK_RMS_NORM_LINEAR: {
+          if (threadIdx.x == 0) {
+            printf("worker_id(%d) task_type(RMS)\n", worker_id);
+          }
           assert(task_desc.num_inputs == 2);
           assert(task_desc.num_outputs == 1);
-          generic_wrapper_kernel<RmsNormKernel>(task_desc.inputs,
-                                                task_desc.outputs,
-                                                config.tensor_offsets,
-                                                task_desc.forloop_range);
-          if (threadIdx.x == 0) {
-            printf("[EXEC] worker_id(%d) task_type(RMS)\n", worker_id);
-          }
+          generic_wrapper_kernel<RmsNormKernel>(
+              task_desc, config.tensor_offsets, task_desc.forloop_range);
+
           break;
         }
         case TASK_EMBEDDING: {
           if (threadIdx.x == 0) {
-            printf("worker_id(%d) task_type(EMB)\n", worker_id);
+            printf("worker_id(%d) task_type(EMB), %d, %d\n",
+                   worker_id,
+                   TASK_EMBEDDING,
+                   blockIdx.x);
           }
-          assert(task_desc.num_inputs == 1);
+
+          assert(task_desc.num_inputs == 2);
           assert(task_desc.num_outputs == 1);
-          generic_wrapper_kernel<EmbeddingKernel>(task_desc.inputs,
-                                                  task_desc.outputs,
-                                                  config.tensor_offsets,
-                                                  task_desc.forloop_range);
+
+          generic_wrapper_kernel<EmbeddingKernel>(
+              task_desc, config.tensor_offsets, task_desc.forloop_range);
+
           break;
         }
         case TASK_ATTENTION_1: {
           if (threadIdx.x == 0) {
             printf("worker_id(%d) task_type(Attn1)\n", worker_id);
           }
-          assert(task_desc.num_inputs == 1);
+          assert(task_desc.num_inputs == 3);
           assert(task_desc.num_outputs == 1);
-          generic_wrapper_kernel<AttentionPart1Kernel>(task_desc.inputs,
-                                                       task_desc.outputs,
-                                                       config.tensor_offsets,
-                                                       task_desc.forloop_range);
+          generic_wrapper_kernel<AttentionPart1Kernel>(
+              task_desc, config.tensor_offsets, task_desc.forloop_range);
           break;
         }
         case TASK_ATTENTION_2: {
           if (threadIdx.x == 0) {
             printf("worker_id(%d) task_type(Attn2)\n", worker_id);
           }
-
           assert(task_desc.num_inputs == 1);
           assert(task_desc.num_outputs == 1);
-          generic_wrapper_kernel<AttentionPart2Kernel>(task_desc.inputs,
-                                                       task_desc.outputs,
-                                                       config.tensor_offsets,
-                                                       task_desc.forloop_range);
+          generic_wrapper_kernel<AttentionPart2Kernel>(
+              task_desc, config.tensor_offsets, task_desc.forloop_range);
           break;
         }
         case TASK_SILU_MUL_LINEAR: {
@@ -164,15 +163,11 @@ __global__ void __launch_bounds__(128) persistent_kernel(RuntimeConfig config) {
           }
           assert(task_desc.num_inputs == 2);
           assert(task_desc.num_outputs == 1);
-          generic_wrapper_kernel<SiluMulMatmulKernel>(task_desc.inputs,
-                                                      task_desc.outputs,
-                                                      config.tensor_offsets,
-                                                      task_desc.forloop_range);
+          generic_wrapper_kernel<SiluMulMatmulKernel>(
+              task_desc, config.tensor_offsets, task_desc.forloop_range);
           break;
         }
         default: {
-          // printf("task type %d , %d, %d\n", task_desc.task_type,
-          // config.all_tasks[cur_task_loc].task_type, cur_task_loc);
           assert(false && "Unimplemented task");
         }
       }
@@ -317,24 +312,37 @@ void Runtime::launch_persistent_kernel(int num_workers, int num_schedulers) {
                        config.total_num_events * sizeof(int),
                        cudaMemcpyHostToDevice));
 
-  for (int i = 0; i < config.total_num_tasks; i++) {
-    TaskDesc &task = all_tasks.at(i);
+  for (size_t r = 0; r + 1 < task_range_begins.size(); ++r) {
+    int range_begin = task_range_begins[r];
+    int range_end = task_range_begins[r + 1];
 
-    for (int j = 0; j < task.num_inputs; ++j) {
-      TensorDesc &desc = task.inputs[j];
-      if (j == 0) {
-        checkCUDA(cudaMalloc(&desc.base_ptr, 4096 * 2));
-      } else {
-        checkCUDA(cudaMalloc(&desc.base_ptr, 4096 * 64 * 2));
+    TaskDesc &first_task = all_tasks.at(range_begin);
+
+    for (int k = 0; k < first_task.num_inputs; ++k) {
+      TensorDesc &desc = first_task.inputs[k];
+      size_t num_ele = 1;
+      for (int d = 0; d < desc.num_dims; d++) {
+        num_ele *= desc.dtensor_dim[d];
       }
+      checkCUDA(cudaMalloc(&desc.base_ptr, num_ele * 2));
     }
-    for (int j = 0; j < task.num_outputs; ++j) {
-      TensorDesc &desc = task.outputs[j];
-      size_t num_elements = 1;
-      for (int d = 0; d < desc.num_dims; ++d) {
-        num_elements *= desc.dim[d];
+    for (int k = 0; k < first_task.num_outputs; ++k) {
+      TensorDesc &desc = first_task.outputs[k];
+      size_t num_ele = 1;
+      for (int d = 0; d < desc.num_dims; d++) {
+        num_ele *= desc.dtensor_dim[d];
       }
-      checkCUDA(cudaMalloc(&desc.base_ptr, 64 * 2));
+      checkCUDA(cudaMalloc(&desc.base_ptr, num_ele * 2));
+    }
+
+    for (int j = range_begin + 1; j < range_end; ++j) {
+      TaskDesc &task = all_tasks.at(j);
+      for (int k = 0; k < task.num_inputs; ++k) {
+        task.inputs[k].base_ptr = first_task.inputs[k].base_ptr;
+      }
+      for (int k = 0; k < task.num_outputs; ++k) {
+        task.outputs[k].base_ptr = first_task.outputs[k].base_ptr;
+      }
     }
   }
 
@@ -344,7 +352,6 @@ void Runtime::launch_persistent_kernel(int num_workers, int num_schedulers) {
                        all_tasks.data(),
                        config.total_num_tasks * sizeof(TaskDesc),
                        cudaMemcpyHostToDevice));
-  printf("12381893\n");
 
   // Initialize all events
   checkCUDA(cudaMalloc(&config.all_events,
@@ -353,7 +360,6 @@ void Runtime::launch_persistent_kernel(int num_workers, int num_schedulers) {
                        all_events.data(),
                        config.total_num_events * sizeof(EventDesc),
                        cudaMemcpyHostToDevice));
-  printf("a3171\n");
   // Initialize worker queues
   {
     std::vector<TaskId *> host_worker_queues;
@@ -404,11 +410,11 @@ void Runtime::launch_persistent_kernel(int num_workers, int num_schedulers) {
   {
 
     // Initialize all events
-    checkCUDA(cudaMalloc(&config.tensor_offsets, num_dtensors * sizeof(int4)));
-    checkCUDA(cudaMemcpy(config.tensor_offsets,
-                         tensor_offsets.data(),
-                         num_dtensors * sizeof(int4),
-                         cudaMemcpyHostToDevice));
+    checkCUDA(cudaMalloc(&config.tensor_offsets, 4 * sizeof(int4)));
+    // checkCUDA(cudaMemcpy(config.tensor_offsets,
+    //                      tensor_offsets.data(),
+    //                      num_dtensors * sizeof(int4),
+    //                      cudaMemcpyHostToDevice));
   }
 
   cudaDeviceSynchronize();
@@ -421,7 +427,7 @@ void Runtime::launch_persistent_kernel(int num_workers, int num_schedulers) {
 
   int max_smem = 0;
 
-  size_t smem_size = 25000;
+  size_t smem_size = 96 * 1024;
   cudaFuncSetAttribute(persistent_kernel,
                        cudaFuncAttributeMaxDynamicSharedMemorySize,
                        smem_size);

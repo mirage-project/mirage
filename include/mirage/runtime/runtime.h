@@ -31,6 +31,7 @@ struct TensorDesc {
   int dim[mirage::config::MAX_TENSOR_DIMS];
   int stride[mirage::config::MAX_TENSOR_DIMS];
   int dtensor_stride[mirage::config::MAX_TENSOR_DIMS];
+  int dtensor_dim[mirage::config::MAX_TENSOR_DIMS];
 };
 
 struct EventDesc {
@@ -48,6 +49,9 @@ struct TaskDesc {
   int num_inputs, num_outputs;
   int forloop_range;
   EventId trigger_event;
+
+  int task_id;
+  int3 task_partition;
   TensorDesc inputs[mirage::config::MAX_NUM_INPUTS_PER_OPERATOR];
   TensorDesc outputs[mirage::config::MAX_NUM_OUTPUTS_PER_OPERATOR];
 };
@@ -55,6 +59,7 @@ struct TaskDesc {
 struct RuntimeConfig {
   int num_workers, num_schedulers, num_graphs;
   int total_num_tasks, total_num_events;
+  bool profiling = true;
   ;
   unsigned long long int per_worker_queue_len, per_sched_queue_len;
   unsigned long long int *worker_queue_last_ready_task_id;
@@ -67,6 +72,8 @@ struct RuntimeConfig {
   TaskId **worker_queues;
   EventId **sched_queues;
   TaskId *first_tasks;
+
+  uint64_t *profiler_buffer;
 
   int4 *tensor_offsets;
 };
@@ -82,10 +89,12 @@ public:
   void add_tensor_offset(int3 const &inout_map,
                          kernel::DTensor const &dtensor,
                          std::vector<size_t> const &strides,
-                         threadblock::Graph const &bgraph);
+                         threadblock::Graph const &bgraph,
+                         bool is_input);
 
 public:
   std::vector<TaskDesc> all_tasks;
+  std::vector<size_t> task_range_begins;
   std::vector<EventDesc> all_events;
   std::vector<TaskId> first_tasks;
   std::vector<int4> tensor_offsets;

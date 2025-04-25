@@ -12,21 +12,20 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-#include "mirage/runtime/runtime.h"
-#include "rms_norm.cuh"
-#include "embedding.cuh"
 #include "attention_part1.cuh"
 #include "attention_part2.cuh"
+#include "embedding.cuh"
+#include "mirage/runtime/runtime.h"
+#include "rms_norm.cuh"
 #include "silu_mul_linear.cuh"
 
 namespace mirage {
 namespace runtime {
 template <typename Kernel>
-__device__ __forceinline__ void generic_wrapper_kernel(TensorDesc *inputs,
-                                                       TensorDesc *outputs,
+__device__ __forceinline__ void generic_wrapper_kernel(TaskDesc &task_desc,
                                                        int4 *tensor_offsets,
                                                        int forloop_range) {
-  Kernel::execute(inputs, outputs, tensor_offsets, forloop_range);
+  Kernel::execute(task_desc, tensor_offsets, forloop_range);
 }
 }; // namespace runtime
 }; // namespace mirage

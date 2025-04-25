@@ -27,6 +27,7 @@ Runtime::Runtime() : num_graphs(0) {
   all_events.push_back(e);
   TaskDesc t(TASK_TERMINATE);
   all_tasks.push_back(t);
+  task_range_begins.push_back(0);
 }
 
 struct Dim3Comparator {
@@ -144,7 +145,8 @@ void dfs_create_events_add_tasks(
 void Runtime::add_tensor_offset(int3 const &inout_map,
                                 kn::DTensor const &dtensor,
                                 std::vector<size_t> const &strides,
-                                tb::Graph const &bgraph) {
+                                tb::Graph const &bgraph,
+                                bool is_input) {
   int4 offset;
 
   for (int dim = 0; dim < 3; ++dim) {
@@ -153,7 +155,9 @@ void Runtime::add_tensor_offset(int3 const &inout_map,
                   : dim == 1 ? bgraph.grid_dim.y
                              : bgraph.grid_dim.z;
     if (num_tbs > 1) {
-      assert(div_dim >= 0);
+      if (!is_input) {
+        assert(div_dim >= 0);
+      }
       if (dim == 0) {
         offset.x = dtensor.dim[div_dim] / num_tbs * strides.at(div_dim);
       } else if (dim == 1) {
@@ -214,6 +218,11 @@ void Runtime::register_mugraph(
       for (bid.y = 0; bid.y < bgraph.grid_dim.y; bid.y++) {
         for (bid.z = 0; bid.z < bgraph.grid_dim.z; bid.z++) {
           TaskDesc task(task_type);
+          int offset = bid.x * bgraph.grid_dim.y * bgraph.grid_dim.z +
+                       bid.y * bgraph.grid_dim.z + bid.z;
+          task.task_id = offset;
+          task.task_partition = {
+              bgraph.grid_dim.x, bgraph.grid_dim.y, bgraph.grid_dim.z};
           // Initialize input tensors to the task
           for (auto const &input : input_ops) {
             TensorDesc desc;
@@ -231,13 +240,13 @@ void Runtime::register_mugraph(
                       ? 1
                       : desc.stride[d + 1] * input->dtensor.dim[d + 1];
               desc.dtensor_stride[d] = input_strides.at(d);
+              desc.dtensor_dim[d] = input->dtensor.dim[d];
             }
             task.inputs[task.num_inputs++] = desc;
 
             add_tensor_offset(
-                input->input_map, input->dtensor, input_strides, bgraph);
+                input->input_map, input->dtensor, input_strides, bgraph, true);
             num_dtensors++;
-            printf("num_dtensors1 %d\n", num_dtensors);
           }
           // Initialize output tensors to the task
           for (auto const &output : output_ops) {
@@ -255,10 +264,12 @@ void Runtime::register_mugraph(
               return strides;
             }(output->dtensor);
 
-            add_tensor_offset(
-                output->input_map, output->dtensor, output_strides, bgraph);
+            add_tensor_offset(output->input_map,
+                              output->dtensor,
+                              output_strides,
+                              bgraph,
+                              false);
             num_dtensors++;
-            printf("num_dtensors2 %d\n", num_dtensors);
 
             desc.num_dims = stensor.num_dims;
             desc.data_type = stensor.data_type;
@@ -269,6 +280,7 @@ void Runtime::register_mugraph(
                       ? 1
                       : desc.stride[d + 1] * output->dtensor.dim[d + 1];
               desc.dtensor_stride[d] = output_strides.at(d);
+              desc.dtensor_dim[d] = output->dtensor.dim[d];
             }
             task.outputs[task.num_outputs++] = desc;
           }
@@ -284,6 +296,7 @@ void Runtime::register_mugraph(
       first_tasks.push_back(all_tasks.size());
       cur_task_map[dim3(0, 0, 0)] = all_tasks.size();
       all_tasks.push_back(tasks[0]);
+      task_range_begins.push_back(1);
     } else {
       // Step 2.1: analyze dependencies between thread blocks of the two ops
       std::vector<int> producer_partition(mirage::config::MAX_TENSOR_DIMS, 1);
@@ -346,6 +359,7 @@ void Runtime::register_mugraph(
     pre_output_ops = output_ops;
     pre_op = cur_op;
     pre_task_map = cur_task_map;
+    task_range_begins.push_back(all_tasks.size());
   }
   num_graphs++;
 }

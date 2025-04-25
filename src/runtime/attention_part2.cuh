@@ -30,38 +30,39 @@
    static constexpr int input_nums = 2;
    static constexpr int output_nums = 1;
 
-   static __device__ __forceinline__ void execute(TensorDesc* inputs, TensorDesc* outputs, int4 *tensor_offsets, int forloop_range);
+   static __device__ __forceinline__ void execute(TaskDesc &task_desc, int4 *tensor_offsets, int forloop_range);
  };
  
  
  template <typename Input0Layout, typename Input0LayoutDevice,
            typename Input1Layout, typename Input1LayoutDevice,
            typename Output0Layout, typename Output0LayoutDevice>
- __device__ __forceinline__ void attention_reduction_kernel_impl(bfloat16_t* __restrict__ dtensor10000003_ptr, bfloat16_t const* __restrict__ dtensor10000002_ptr, int4 offset_in0,
-   int4 offset_in1,
-   int4 offset_out0,
-   int forloop_range);
+ __device__ __forceinline__ void attention_reduction_kernel_impl(bfloat16_t* __restrict__ dtensor10000003_ptr, bfloat16_t const* __restrict__ dtensor10000002_ptr, int tile_x, int tile_y);
  
  #define ATTENTIONPART2_KERNEL(I0, I0D, I1, I1D, O0, O0D) \
-   attention_reduction_kernel_impl<I0, I0D, I1, I1D, O0, O0D>(dtensor10000003_ptr, dtensor10000002_ptr, tensor_offsets[0], tensor_offsets[1], tensor_offsets[2], forloop_range)
+   attention_reduction_kernel_impl<I0, I0D, I1, I1D, O0, O0D>(dtensor10000003_ptr, dtensor10000002_ptr, tile_x, tile_y)
  
- __device__ __forceinline__ void AttentionPart2Kernel::execute(TensorDesc* inputs, TensorDesc* outputs, int4 *tensor_offsets, int forloop_range) 
+ __device__ __forceinline__ void AttentionPart2Kernel::execute(TaskDesc &task_desc, int4 *tensor_offsets, int forloop_range) 
  { 
    // Convenience aliases for readability
+   TensorDesc* inputs = task_desc.inputs;
+
+   TensorDesc* outputs = task_desc.outputs;
    const int *dim0 = inputs[0].dim;
    const int *stride0 = inputs[0].stride;
- 
-   const int *dim1 = inputs[1].dim;
-   const int *stride1 = inputs[1].stride;
- 
-   const int *dim_out = outputs[0].dim;
-   const int *stride_out = outputs[0].stride;
- 
+
+   int tile_x = task_desc.task_id /(task_desc.task_partition.y * task_desc.task_partition.z);
+   int tile_y = (task_desc.task_id / task_desc.task_partition.z) % task_desc.task_partition.y;
+  
+   if(threadIdx.x == 0){
+    printf("tilex tiley%d, %d, %d, %d, %d\n", tile_x, tile_y,  task_desc.task_id, task_desc.task_partition.y, task_desc.task_partition.z);
+   }
+   
  
    bfloat16_t* __restrict__ dtensor10000003_ptr = static_cast<bfloat16_t*>(outputs[0].base_ptr);
    bfloat16_t const* __restrict__ dtensor10000002_ptr = static_cast<const bfloat16_t*>(inputs[0].base_ptr);
  
-   if(dim0[0]==1 && dim0[1]==4 && dim0[2]==128){
+   if(dim0[0]==1 && dim0[1]==16 && dim0[2]==128){
     using Input0Layout        = Layout<Shape<Int<64>, Int<1>>, Stride<Int<1>, Int<64>>>;
     using Input0LayoutDevice  = Layout<Shape<Int<64>, Int<1>>, Stride<Int<1>, Int<4096>>>;
     using Input1Layout        = decltype(composition(Swizzle<3, 3, 3>{}, Layout<Shape<Int<64>, Int<64>>, Stride<Int<1>, Int<64>>>{}));
@@ -77,10 +78,7 @@
  }
  
  template <typename Input0Layout, typename Input0LayoutDevice, typename Input1Layout, typename Input1LayoutDevice, typename Output0Layout,  typename Output0LayoutDevice>
- __device__ __forceinline__ void attention_reduction_kernel_impl(bfloat16_t* __restrict__ dtensor10000003_ptr, bfloat16_t const* __restrict__ dtensor10000002_ptr, int4 offset_in0,
-   int4 offset_in1,
-   int4 offset_out0,
-   int forloop_range) {
+ __device__ __forceinline__ void attention_reduction_kernel_impl(bfloat16_t* __restrict__ dtensor10000003_ptr, bfloat16_t const* __restrict__ dtensor10000002_ptr, int tile_x, int tile_y) {
    
     int thread_idx = threadIdx.x;
   static constexpr int NUM_THREADS = 128;
@@ -92,9 +90,10 @@
   bfloat16_t *stensor20000010_ptr = (bfloat16_t*)(buf + 128);
   *((uint128_t*)buf) = 0ul;
   
+  
   // G->S copy atoms
   // Copy for G->S: dtensor 10000002 -> stensor 20000009
-  const bfloat16_t *dtensor10000002_tile_ptr = dtensor10000002_ptr  + blockIdx.x*1*14336 + blockIdx.y*128*1;
+  const bfloat16_t *dtensor10000002_tile_ptr = dtensor10000002_ptr  + tile_x*1*14336 + tile_y*128*1;
   using DTensor10000002TileLayout = Layout<Shape<Int<128>, Int<4>, Int<1>>, Stride<Int<1>, Int<3584>, Int<14336>>>;
   using STensor20000009InputAtom = tb::InputChunkedAsyncCopy<bfloat16_t, Layout<Shape<Int<128>, Int<4>, Int<1>>, Stride<Int<1>, Int<128>, Int<512>>>, DTensor10000002TileLayout, NUM_THREADS>;
   bfloat16_t *stensor20000009_async_copy_buf = stensor30000009_ptr;
@@ -102,7 +101,7 @@
   
   // S->G copy atoms
   // Copy for S->G: stensor 20000011 -> dtensor 10000003
-  bfloat16_t *dtensor10000003_tile_ptr = dtensor10000003_ptr  + blockIdx.y*128*1;
+  bfloat16_t *dtensor10000003_tile_ptr = dtensor10000003_ptr  + tile_y*128*1;
   using DTensor10000003TileLayout = Layout<Shape<Int<128>, Int<1>, Int<1>>, Stride<Int<1>, Int<3584>, Int<3584>>>;
   using STensor20000011OutputAtom = tb::OutputChunkedSyncCopy<bfloat16_t, DTensor10000003TileLayout, Layout<Shape<Int<128>, Int<1>, Int<1>>, Stride<Int<1>, Int<128>, Int<128>>>, NUM_THREADS>;
   

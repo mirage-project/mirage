@@ -74,7 +74,7 @@ int main(int argc, char **argv) {
       dim3 grid_dim = {fused_outdim_1 / 64, 1, 1}, block_dim = {128, 1, 1};
       tb::Graph bgraph(grid_dim, block_dim, hidden_size / 64, 64);
       kn::DTensor W = kgraph.new_input({hidden_size, fused_outdim_1},
-                                       {fused_outdim_2, 1},
+                                       {fused_outdim_1, 1},
                                        type::DT_BFLOAT16,
                                        layout::DmemRowMajor);
       tb::STensor bX =
@@ -91,12 +91,18 @@ int main(int argc, char **argv) {
     {
       kn::DTensor K =
           kgraph.new_input({batch_size, max_kv_length, num_kv_heads, head_dim},
-                           {num_kv_heads * head_dim, head_dim, 1},
+                           {num_kv_heads * head_dim * max_kv_length,
+                            num_kv_heads * head_dim,
+                            head_dim,
+                            1},
                            type::DT_BFLOAT16,
                            layout::DmemRowMajor);
       kn::DTensor V =
           kgraph.new_input({batch_size, max_kv_length, num_kv_heads, head_dim},
-                           {num_kv_heads * head_dim, head_dim, 1},
+                           {num_kv_heads * head_dim * max_kv_length,
+                            num_kv_heads * head_dim,
+                            head_dim,
+                            1},
                            type::DT_BFLOAT16,
                            layout::DmemRowMajor);
       dim3 grid_dim = {batch_size, num_kv_heads, num_kv_splits},

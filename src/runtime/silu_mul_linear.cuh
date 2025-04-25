@@ -30,25 +30,25 @@ struct SiluMulMatmulKernel {
   static constexpr int input_nums = 2;
   static constexpr int output_nums = 1;
 
-  static __device__ __forceinline__ void execute(TensorDesc* inputs, TensorDesc* outputs, int4 *tensor_offsets, int forloop_range);
+  static __device__ __forceinline__ void execute(TaskDesc &task_desc, int4 *tensor_offsets, int forloop_range);
 };
 
 
 template <typename Input0Layout, typename Input0LayoutDevice,
           typename Input1Layout, typename Input1LayoutDevice,
           typename Output0Layout, typename Output0LayoutDevice>
-__device__ __forceinline__ void silu_mul_matmul_kernel_impl(bfloat16_t* __restrict__ dtensor10000007_ptr, bfloat16_t const* __restrict__ dtensor10000004_ptr, bfloat16_t const* __restrict__ dtensor10000006_ptr, int4 offset_in0,
-  int4 offset_in1,
-  int4 offset_out0,
-  int forloop_range);
+__device__ __forceinline__ void silu_mul_matmul_kernel_impl(bfloat16_t* __restrict__ dtensor10000007_ptr, bfloat16_t const* __restrict__ dtensor10000004_ptr, bfloat16_t const* __restrict__ dtensor10000006_ptr, int tile_x);
 
 #define SILUMATMUL_KERNEL(I0, I0D, I1, I1D, O0, O0D) \
-  silu_mul_matmul_kernel_impl<I0, I0D, I1, I1D, O0, O0D>(dtensor10000005_ptr, dtensor10000003_ptr, dtensor10000004_ptr, tensor_offsets[0], tensor_offsets[1], tensor_offsets[2], forloop_range)
+  silu_mul_matmul_kernel_impl<I0, I0D, I1, I1D, O0, O0D>(dtensor10000005_ptr, dtensor10000003_ptr, dtensor10000004_ptr, tile_x)
 
 // template <typename Layouts>
-__device__ __forceinline__ void SiluMulMatmulKernel::execute(TensorDesc* inputs, TensorDesc* outputs, int4 *tensor_offsets, int forloop_range) 
+__device__ __forceinline__ void SiluMulMatmulKernel::execute(TaskDesc &task_desc, int4 *tensor_offsets, int forloop_range) 
 {
   // auto& p = *static_cast<Params*>(params);
+  TensorDesc* inputs = task_desc.inputs;
+
+  TensorDesc* outputs = task_desc.outputs;
 
   // Convenience aliases for readability
   const int *dim0 = inputs[0].dim;
@@ -59,6 +59,8 @@ __device__ __forceinline__ void SiluMulMatmulKernel::execute(TensorDesc* inputs,
 
   const int *dim_out = outputs[0].dim;
   const int *stride_out = outputs[0].stride;
+
+  int tile_x = task_desc.task_id /(task_desc.task_partition.y * task_desc.task_partition.z);
 
 
   bfloat16_t* __restrict__ dtensor10000005_ptr = static_cast<bfloat16_t*>(outputs[0].base_ptr);
@@ -71,9 +73,7 @@ __device__ __forceinline__ void SiluMulMatmulKernel::execute(TensorDesc* inputs,
   using Output0Layout       = Layout<Shape<Int<64>, Int<1>>, Stride<Int<1>, Int<1>>>;
   using Output0LayoutDevice = Layout<Shape<Int<64>, Int<1>>, Stride<Int<1>, Int<1>>>;
 
-  if(dim0[0]==1 && dim0[1]==128 && dim1[0]==64 && dim1[1]==64 && dim_out[0]==64 && dim_out[1]==1
-  && stride0[0] == 128 && stride0[1] == 1 && stride1[0] == 64 && stride1[1] == 1 && stride_out[0] == 1 && stride_out[1] == 3584){
-
+  if(dim0[0]==1 && dim0[1]==128){
   SILUMATMUL_KERNEL(Input0Layout, Input0LayoutDevice, Input1Layout, Input1LayoutDevice, Output0Layout, Output0LayoutDevice);
   }else{
     assert(false && "unsupported layout");
@@ -82,10 +82,7 @@ __device__ __forceinline__ void SiluMulMatmulKernel::execute(TensorDesc* inputs,
 }
 
 template <typename Input0Layout, typename Input0LayoutDevice, typename Input1Layout, typename Input1LayoutDevice, typename Output0Layout,  typename Output0LayoutDevice>
-__device__ __forceinline__ void silu_mul_matmul_kernel_impl(bfloat16_t* __restrict__ dtensor10000007_ptr, bfloat16_t const* __restrict__ dtensor10000004_ptr, bfloat16_t const* __restrict__ dtensor10000006_ptr, int4 offset_in0,
-  int4 offset_in1,
-  int4 offset_out0,
-  int forloop_range) {
+__device__ __forceinline__ void silu_mul_matmul_kernel_impl(bfloat16_t* __restrict__ dtensor10000007_ptr, bfloat16_t const* __restrict__ dtensor10000004_ptr, bfloat16_t const* __restrict__ dtensor10000006_ptr, int tile_x) {
   
     int thread_idx = threadIdx.x;
     static constexpr int NUM_THREADS = 128;
@@ -114,7 +111,7 @@ __device__ __forceinline__ void silu_mul_matmul_kernel_impl(bfloat16_t* __restri
     using STensor20000022InputAtom = tb::InputChunkedAsyncCopy<bfloat16_t, Layout<Shape<Int<64>, Int<1>>, Stride<Int<1>, Int<64>>>, DTensor10000005TileLayout, NUM_THREADS>;
     bfloat16_t *stensor20000022_async_copy_buf = stensor30000022_ptr;
     // Copy for G->S: dtensor 10000006 -> stensor 20000023
-    const bfloat16_t *dtensor10000006_tile_ptr = dtensor10000006_ptr  + blockIdx.x*64*1;
+    const bfloat16_t *dtensor10000006_tile_ptr = dtensor10000006_ptr  + tile_x*64*1;
     using DTensor10000006TileLayout = Layout<Shape<Int<64>, Int<64>>, Stride<Int<1>, Int<3584>>>;
     using STensor20000023InputAtom = tb::InputChunkedAsyncCopy<bfloat16_t, decltype(composition(Swizzle<3, 3, 3>{}, Layout<Shape<Int<64>, Int<64>>, Stride<Int<1>, Int<64>>>{})), DTensor10000006TileLayout, NUM_THREADS>;
     bfloat16_t *stensor20000023_async_copy_buf = stensor30000023_ptr;
@@ -122,7 +119,7 @@ __device__ __forceinline__ void silu_mul_matmul_kernel_impl(bfloat16_t* __restri
     
     // S->G copy atoms
     // Copy for S->G: stensor 20000027 -> dtensor 10000007
-    bfloat16_t *dtensor10000007_tile_ptr = dtensor10000007_ptr  + blockIdx.x*64*1;
+    bfloat16_t *dtensor10000007_tile_ptr = dtensor10000007_ptr  + tile_x*64*1;
     using DTensor10000007TileLayout = Layout<Shape<Int<64>, Int<1>>, Stride<Int<1>, Int<3584>>>;
     using STensor20000027OutputAtom = tb::OutputChunkedSyncCopy<bfloat16_t, DTensor10000007TileLayout, Layout<Shape<Int<64>, Int<1>>, Stride<Int<1>, Int<64>>>, NUM_THREADS>;
     
