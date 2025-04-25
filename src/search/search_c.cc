@@ -20,6 +20,9 @@ int cython_search(mirage::kernel::Graph const *input_graph,
                   std::vector<MDim3> block_dim_to_explore,
                   std::vector<int> fmap_to_explore,
                   std::vector<int> frange_to_explore,
+                  int max_num_threadblock_graph_op,
+                  int max_num_kernel_graph_op,
+                  int num_search_thread,
                   char const *filename,
                   bool verbose,
                   char const *default_config) {
@@ -91,6 +94,15 @@ int cython_search(mirage::kernel::Graph const *input_graph,
       for (auto const &frange : frange_to_explore) {
         config.frange_to_explore.push_back(frange);
       }
+    }
+    if (max_num_threadblock_graph_op != -1) {
+      config.max_num_threadblock_graph_op = max_num_threadblock_graph_op;
+    }
+    if (max_num_kernel_graph_op != -1) {
+      config.max_num_kernel_graph_op = max_num_kernel_graph_op;
+    }
+    if (num_search_thread != -1) {
+      config.search_thread = num_search_thread;
     }
     const char *result_filename = filename ? filename : "mirage_search_checkpoint.json";
     search::KernelGraphGenerator gen(

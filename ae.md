@@ -127,3 +127,5 @@ python3 $MIRAGE_ROOT/benchmark/end-to-end/lora.py -b {batch_size}
 ```
 python3 $MIRAGE_ROOT/benchmark/end-to-end/ngpt.py -b {batch_size}
 ```
+
+### Search Time

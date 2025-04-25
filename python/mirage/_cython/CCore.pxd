@@ -254,6 +254,9 @@ cdef extern from "mirage/search/search_c.h" namespace "mirage::search_c":
                            vector[MDim3] blockdims,
                            vector[int] fmaps,
                            vector[int] franges,
+                           int max_num_threadblock_graph_op,
+                           int max_num_kernel_graph_op,
+                           int num_search_thread,
                            const char * filename,
                            bool verbose,
                            const char * default_config)

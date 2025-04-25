@@ -28,16 +28,13 @@ def run_impl(impl_name, case_name, batch_size):
       if impl_name == 'mirage':
         subprocess.run(
           ['python3', script, '-b', str(batch_size), '--file', checkpoint],
-          stdout=stdout,
-          stderr=subprocess.STDOUT
+          stdout=stdout
         )
       else:
         subprocess.run(
           ['python3', script, '-b', str(batch_size)],
-          stdout=stdout,
-          stderr=subprocess.STDOUT
+          stdout=stdout
         )
-      
       
   except Exception as e:
     print(f"Error running baseline {impl_name} for {case_name} with batch size {batch_size}: {e}")
@@ -54,7 +51,11 @@ def parse_results(impl_name, case_name, batch_size):
   with open(stdout_file, 'r') as f:
     lines = f.readlines()
     if impl_name in {'pytorch', 'flashattn', 'mirage_end2end'}:
-      return float(lines[-1])
+      for line in lines:
+        try:
+          return float(line)
+        except ValueError:
+          pass
     elif impl_name == 'tensorrt':
       # Check for the line containing "Runtime = "
       for line in lines:
@@ -84,12 +85,27 @@ def parse_results(impl_name, case_name, batch_size):
           parts = line.split(":")
           if len(parts) > 1:
             return float(parts[1].strip())
+    elif impl_name == 'taso':
+      best = float('inf')
+      for line in lines:
+        if "Cost metrics: " in line:
+          # parse from format like Cost metrics: exe_time(1.7097) flops(0.2500) memory_access(0.5000) kernel_launches(4)
+          parts = line.split(" ")
+          for part in parts:
+            if part.startswith("exe_time("):
+              # Extract the runtime value
+              time_part = part.split("(")[1].split(")")[0]
+              time = float(time_part)
+              if time < best:
+                best = time
+      return best
     
   return float('inf')
 
 
 def benchmark_evaluation():
-  models = ['gated_mlp', 'gqa', 'lora', 'norm_transformer', 'qknorm_gqa', 'rmsnorm']
+  # models = ['gated_mlp', 'gqa', 'lora', 'norm_transformer', 'qknorm_gqa', 'rmsnorm']
+  models = ['gated_mlp']
   batch_sizes = [1, 8]
   results = dict()
   for model in models:
@@ -107,6 +123,7 @@ def benchmark_evaluation():
       speedup = best_time / mirage_time
       print(f"Model: {model}, Batch Size: {batch_size}, Best Impl: {best_impl}, Best Time: {best_time:.4f}, Mirage Time: {mirage_time:.4f}, Speedup: {speedup:.2f}")
 
+
 def end2end_evaluation():
   models = ['chameleon-7b', 'llama-8b', 'lora', 'ngpt']
   batch_sizes = [1, 8]
@@ -120,5 +137,5 @@ def end2end_evaluation():
 
 
 if __name__ == "__main__":
-  # benchmark_evaluation()
+  benchmark_evaluation()
   end2end_evaluation()
