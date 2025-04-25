@@ -407,6 +407,12 @@ class Qwen2Model(Qwen2PreTrainedModel):
         step: torch.Tensor = None,
         stream: torch.cuda.Stream = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,):
+        if input_ids is not None:
+            input_ids = input_ids.to("cuda")
+
+        if inputs_embeds is not None:
+            inputs_embeds = inputs_embeds.to("cuda")
+
         inputs_embeds = self.embed_tokens(input_ids)
         
         causal_mask = None
@@ -480,6 +486,12 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         inputs_embeds: Optional[torch.FloatTensor] = None,
         num_logits_to_keep: int = 0,
         **loss_kwargs,):
+        if input_ids is not None:
+            input_ids = input_ids.to("cuda")
+            
+        if inputs_embeds is not None:
+            inputs_embeds = inputs_embeds.to("cuda")
+
 
         outputs = self.model(
             input_ids=input_ids,
