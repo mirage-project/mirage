@@ -413,7 +413,11 @@ class Qwen2Model(Qwen2PreTrainedModel):
         if inputs_embeds is not None:
             inputs_embeds = inputs_embeds.to("cuda")
 
+        print("[DEBUG] input_ids.device", input_ids.device)
+
         inputs_embeds = self.embed_tokens(input_ids)
+        
+        print("[DEBUG] inputs_embeds.device", inputs_embeds.device)
         
         causal_mask = None
 
