@@ -578,7 +578,6 @@ void Runtime::launch_persistent_kernel(int num_workers,
   nvshmem_barrier_all();
   void *args[] = {&config};
   // Launcher persistent kernel
-  int max_smem = 0;
   size_t max_smem = 96 * 1024;
   cudaFuncSetAttribute(persistent_kernel,
                        cudaFuncAttributeMaxDynamicSharedMemorySize,
