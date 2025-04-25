@@ -20,6 +20,12 @@ define_language! {
 
         "sum" = Sum([Id; 2]),
         "exp" = Exp(Id),
+        "pow" = Pow([Id; 2]),
+        "silu" = Silu(Id),
+        "gelu" = Gelu(Id),
+        "relu" = Relu(Id),
+        "clamp" = Clamp([Id; 3]),
+        "rms" = Rms([Id; 2]),
 
         Constant(Constant),
         Symbol(Symbol),

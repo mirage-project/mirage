@@ -339,7 +339,7 @@ std::string Clamp::to_string() const {
 
 std::string Clamp::to_egg() const {
   return "(clamp " + std::to_string(min_val) +
-         " <= x <= " + std::to_string(max_val) + " " + elems->to_string() +
+         " " + std::to_string(max_val) + " " + elems->to_string() +
          ")";
 }
 

@@ -303,7 +303,8 @@ cdef extern from "mirage/search/search_c.h" namespace "mirage::search_c":
                            vector[int] franges,
                            const char * filename,
                            bool verbose,
-                           const char * default_config)
+                           const char * default_config,
+                           bool is_formal_verified)
     
     cdef void cython_to_json(const CppKNGraph *input_graph,
                              const char *filename)

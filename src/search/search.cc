@@ -475,6 +475,9 @@ bool KernelGraphGenerator::check_pattern(
   }
 
   for (auto const &final_pattern : computation_graph_output_patterns) {
+    if(pattern->subpattern_to(*final_pattern)!=pattern->egg_subpattern_to(*final_pattern))
+      //log the pattern string in debug.txt
+      printf("egg_subpattern_to failed in %s/n", final_pattern->to_string().c_str());
     if (pattern->subpattern_to(*final_pattern)) {
 
 #pragma omp critical
@@ -486,6 +489,8 @@ bool KernelGraphGenerator::check_pattern(
   { seen_patterns[pattern->to_string()] = false; }
   return false;
 }
+
+// std::vector<std::string> KernelGraphGenerator::wrong_results(std::shared_ptr<AbstractExpr> pattern){}
 
 bool KernelGraphGenerator::verify(kernel::Graph &g) {
   std::vector<DTensor> outputs = get_output_tensors(g);

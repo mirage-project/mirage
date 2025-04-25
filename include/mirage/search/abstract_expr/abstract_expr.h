@@ -93,6 +93,7 @@ public:
   z3::expr to_z3(z3::context &c,
                  std::unordered_set<std::string> &all_variables) const override;
   std::string to_string() const override;
+  std::string to_egg() const override;
   std::shared_ptr<AbstractExpr> a;
 };
 
@@ -102,6 +103,7 @@ public:
   z3::expr to_z3(z3::context &c,
                  std::unordered_set<std::string> &all_variables) const override;
   std::string to_string() const override;
+  std::string to_egg() const override;
   std::shared_ptr<AbstractExpr> a;
 };
 
