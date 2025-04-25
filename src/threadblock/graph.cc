@@ -727,6 +727,20 @@ Graph::operator json() const {
   return j;
 }
 
+size_t Graph::get_owner_independent_hash() const {
+  size_t ret = 0;
+  hash_combine(ret, grid_dim);
+  hash_combine(ret, block_dim);
+  hash_combine(ret, forloop_range);
+  hash_combine(ret, reduction_dimx);
+  hash_combine(ret, smem_offset);
+  for (auto const &op : operators) {
+    size_t h = op->get_owner_independent_hash();
+    hash_combine(ret, h);
+  }
+  return ret;
+}
+
 void from_json(json const &j, Graph &graph) {
   graph.grid_dim = j.at("grid_dim").get<dim3>();
   graph.block_dim = j.at("block_dim").get<dim3>();

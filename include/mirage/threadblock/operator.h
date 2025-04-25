@@ -16,6 +16,7 @@
 #pragma once
 #include "mirage/kernel/device_tensor.h"
 #include "mirage/threadblock/smem_tensor.h"
+#include "mirage/utils/hash_utils.h"
 #include "mirage/type.h"
 #include <vector>
 #include <vector_types.h>
@@ -38,6 +39,7 @@ public:
              std::vector<STensor> const &inputs);
   int get_input_stensors(STensor **inputs);
   int get_output_stensors(STensor **inputs);
+  size_t get_owner_independent_hash();
 
   virtual ~TBOperator();
 

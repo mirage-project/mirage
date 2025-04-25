@@ -153,7 +153,7 @@ void KernelGraphGenerator::generate_next_operator(
 
           if (new_op) {
             c.kn_graph->operators.push_back(new_op);
-            if (check_range(init_ranges, target_ranges, *c.kn_graph)) {
+            // if (check_range(init_ranges, target_ranges, *c.kn_graph)) {
               if (depth < max_depth) {
                 num_tasks++;
                 SearchContext c_tmp = SerializedSearchContext(c).deserialize();
@@ -162,7 +162,7 @@ void KernelGraphGenerator::generate_next_operator(
               } else {
                 generate_next_operator(c, verify, verified, depth + 1);
               }
-            }
+            // }
             delete c.kn_graph->operators.back();
             c.kn_graph->operators.pop_back();
           }
@@ -308,7 +308,7 @@ void KernelGraphGenerator::generate_next_operator(
         c.level = SearchLevel::LV_KERNEL;
         std::shared_ptr<threadblock::Graph> tb_graph = c.tb_graph;
         c.tb_graph = nullptr;
-        if (check_range(init_ranges, target_ranges, *c.kn_graph)) {
+        // if (check_range(init_ranges, target_ranges, *c.kn_graph)) {
           if (depth < max_depth) {
             num_tasks++;
             SearchContext c_tmp = SerializedSearchContext(c).deserialize();
@@ -317,7 +317,7 @@ void KernelGraphGenerator::generate_next_operator(
           } else {
             generate_next_operator(c, verify, verified, depth + 1);
           }
-        }
+        // }
         c.tb_graph = tb_graph;
         c.level = SearchLevel::LV_THREADBLOCK;
         delete c.kn_graph->operators.back();
@@ -446,9 +446,9 @@ void KernelGraphGenerator::preprocess(kernel::Graph const &computation_graph) {
       computation_graph_patterns;
   abstract_expr_eval(computation_graph, computation_graph_patterns);
 
-  init_ranges = get_init_ranges(computation_graph);
-  target_ranges = get_interact_ranges(init_ranges, computation_graph);
-  assert(init_ranges.size() == target_ranges.size());
+  // init_ranges = get_init_ranges(computation_graph);
+  // target_ranges = get_interact_ranges(init_ranges, computation_graph);
+  // assert(init_ranges.size() == target_ranges.size());
 
   for (kernel::KNOperator *op : computation_graph.operators) {
     if (op->op_type == type::KNOperatorType::KN_OUTPUT_OP) {
@@ -511,16 +511,22 @@ bool KernelGraphGenerator::verify(kernel::Graph &g) {
     };
 
     auto save_graph = [&]() {
-#pragma omp critical
-      { generated_graphs.push_back(json(g)); }
+      generated_graphs.push_back(json(g)); 
     };
 
     OutputMatch match = verifier->verify(g);
-    if (match.is_valid()) {
-      ++num_valid_kernel_graphs;
-      mark_outputs(match);
-      save_graph();
-      unmark_outputs();
+    if ((match.is_valid())) {
+      #pragma omp critical
+      {
+        if (generated_graph_hashes.find(g.get_owner_independent_hash()) == generated_graph_hashes.end()) {
+          std::cout << g.get_owner_independent_hash() << std::endl;
+          generated_graph_hashes.insert(g.get_owner_independent_hash());
+          ++num_valid_kernel_graphs;
+          mark_outputs(match);
+          save_graph();
+          unmark_outputs();
+        }
+      }
       return true;
     }
   }

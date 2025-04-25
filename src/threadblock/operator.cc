@@ -52,6 +52,19 @@ int TBOperator::get_output_stensors(STensor **outputs) {
   return output_tensors.size();
 }
 
+size_t TBOperator::get_owner_independent_hash() {
+  size_t ret = std::hash<int>()(op_type);
+  for (auto const &t : input_tensors) {
+    size_t h = t.get_owner_independent_hash();
+    hash_combine(ret, h);
+  }
+  for (auto const &t : output_tensors) {
+    size_t h = t.get_owner_independent_hash();
+    hash_combine(ret, h);
+  }
+  return ret;
+}
+
 TBOperator::~TBOperator() {}
 
 } // namespace threadblock

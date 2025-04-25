@@ -20,6 +20,7 @@
 #include "mirage/threadblock/operator.h"
 #include "mirage/threadblock/serializer/kernel_params.h"
 #include "mirage/threadblock/smem_tensor.h"
+#include "mirage/utils/hash_utils.h"
 #include <vector>
 #include <vector_types.h>
 
@@ -164,6 +165,7 @@ public:
   int get_smem_size_with_pipeline() const;
 
   operator json() const;
+  size_t get_owner_independent_hash() const;
 
 public:
   dim3 grid_dim, block_dim, cluster_dim;

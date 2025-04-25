@@ -31,6 +31,7 @@ public:
 
   char const *filename;
   std::vector<json> generated_graphs;
+  std::unordered_set<size_t> generated_graph_hashes;
   int num_thread;
   bool verbose;
 

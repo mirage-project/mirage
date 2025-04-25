@@ -256,7 +256,19 @@ KNCustomizedOp::operator json() const {
 }
 
 size_t KNCustomizedOp::get_owner_independent_hash() const {
-  assert(false && "To be implemented");
+  size_t ret = std::hash<int>()(op_type);
+  for (auto const &t : input_tensors) {
+    size_t h = t.get_owner_independent_hash();
+    hash_combine(ret, h);
+  }
+  for (auto const &t : output_tensors) {
+    size_t h = t.get_owner_independent_hash();
+    hash_combine(ret, h);
+  }
+
+  hash_combine(ret, bgraph.get_owner_independent_hash());
+
+  return ret;
 }
 
 } // namespace kernel
