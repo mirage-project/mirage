@@ -349,6 +349,7 @@ class Qwen2Model(Qwen2PreTrainedModel):
         value_cache = torch.empty((config.num_hidden_layers, 1, config.max_position_embeddings, config.num_key_value_heads, config.hidden_size // config.num_attention_heads))
         self.kv_cache = (key_cache, value_cache)
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
+        print("[DEBUG] embed_tokens.device", self.embed_tokens.weight.device)
         self.layers = nn.ModuleList(
             [Qwen2DecoderLayer(config, self.kv_cache, layer_idx) for layer_idx in range(config.num_hidden_layers)]
         )
