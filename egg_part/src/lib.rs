@@ -21,6 +21,8 @@ define_language! {
         "sum" = Sum([Id; 2]),
         "exp" = Exp(Id),
         "pow" = Pow([Id; 2]),
+        "square" = Square(Id),
+        "sqrt" = Sqrt(Id),
         "silu" = Silu(Id),
         "gelu" = Gelu(Id),
         "relu" = Relu(Id),

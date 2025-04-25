@@ -8,11 +8,6 @@
 
 #include "mirage/utils/containers.h"
 
-extern "C" {
-    bool egg_equiv(const char* expr1, const char* expr2);
-}
-
-
 namespace mirage {
 namespace search {
 
@@ -258,6 +253,44 @@ std::string Exp::to_string() const {
 
 std::string Exp::to_egg() const {
   return "(exp " + exponent->to_egg() + ")";
+}
+
+Square::Square(std::shared_ptr<AbstractExpr> a) : a(a) {
+  assert(a);
+}
+
+z3::expr Square::to_z3(z3::context &c,
+                       std::unordered_set<std::string> &all_variables) const {
+  z3::sort P = c.uninterpreted_sort("P");
+  z3::func_decl square = c.function("square", P, P);
+  return square(a->to_z3(c, all_variables));
+}
+
+std::string Square::to_string() const {
+  return "square(" + a->to_string() + ")";
+}
+
+std::string Square::to_egg() const {
+  return "(square " + a->to_egg() + ")";
+}
+
+Sqrt::Sqrt(std::shared_ptr<AbstractExpr> a) : a(a) {
+  assert(a);
+}
+
+z3::expr Sqrt::to_z3(z3::context &c,
+                     std::unordered_set<std::string> &all_variables) const {
+  z3::sort P = c.uninterpreted_sort("P");
+  z3::func_decl sqrt = c.function("sqrt", P, P);
+  return sqrt(a->to_z3(c, all_variables));
+}
+
+std::string Sqrt::to_string() const {
+  return "sqrt(" + a->to_string() + ")";
+}
+
+std::string Sqrt::to_egg() const {
+  return "(sqrt " + a->to_egg() + ")";
 }
 
 Silu::Silu(std::shared_ptr<AbstractExpr> a) : a(a) {

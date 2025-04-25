@@ -9,6 +9,11 @@
 #include <unordered_map>
 #include <unordered_set>
 
+extern "C" {
+  bool egg_equiv(const char* expr1, const char* expr2);
+}
+
+
 namespace mirage {
 namespace search {
 
