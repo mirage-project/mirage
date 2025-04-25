@@ -24,7 +24,8 @@
 namespace mirage {
 namespace kernel {
 
-Graph::Graph(dim3 _gpu_dim) : gpu_dim(_gpu_dim) {
+Graph::Graph(dim3 _gpu_dim, bool _disable_fingerprint)
+    : gpu_dim(_gpu_dim), disable_fingerprint(_disable_fingerprint) {
   dmem_data_offset = 0;
   dmem_fp_offset = 0;
 }
@@ -96,6 +97,12 @@ int Graph::get_input_dtensor_shape_and_stride(DTensor const *input,
 
 bool Graph::can_allocate(DTensor const &tensor,
                          bool allocate_fingerprint) const {
+  // We don't need to actually allocate device memory
+  // when fingerprint is disabled (e.g., for very large muGraphs)
+  if (disable_fingerprint) {
+    return true;
+  }
+
   size_t data_size = ((tensor.data_size() + 15) & ~15);
   if (dmem_data_offset + data_size > mirage::config::MAX_DMEM_DATA_SIZE) {
     return false;
@@ -111,6 +118,12 @@ bool Graph::can_allocate(DTensor const &tensor,
 
 bool Graph::can_allocate(size_t data_size_in_bytes,
                          size_t fp_size_in_bytes) const {
+  // We don't need to actually allocate device memory
+  // when fingerprint is disabled (e.g., for very large muGraphs)
+  if (disable_fingerprint) {
+    return true;
+  }
+
   if (dmem_data_offset + data_size_in_bytes >
       mirage::config::MAX_DMEM_DATA_SIZE) {
     return false;
@@ -258,7 +271,8 @@ void from_json(json const &j, Graph &g) {
       }
       case type::KNOperatorType::KN_DIV_OP:
       case type::KNOperatorType::KN_ADD_OP:
-      case type::KNOperatorType::KN_MUL_OP: {
+      case type::KNOperatorType::KN_MUL_OP:
+      case type::KNOperatorType::KN_POW_OP: {
         size_t guidA, guidB, guidO;
         jop.at("input_tensors")[0].at("guid").get_to(guidA);
         jop.at("input_tensors")[1].at("guid").get_to(guidB);

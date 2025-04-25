@@ -77,6 +77,8 @@ string operator_type_to_triton(type::TBOperatorType type) {
     case type::TB_DIV_OP:
       return "tl.fdiv"; // TODO: AttributeError: module 'triton.language' has no
                         // attribute 'div_rn'
+    case type::TB_POW_OP:
+      return "tl.power";
     case type::TB_ADD_OP:
       return "+";
     case type::TB_MUL_OP:
@@ -394,6 +396,18 @@ TritonCustomOPTranspileResult
                fmt("stensor$", input1.guid));
         break;
       }
+      case type::TB_POW_OP: {
+        tb::STensor const &input0 = tb_op->input_tensors.at(0);
+        tb::STensor const &input1 = tb_op->input_tensors.at(1);
+        tb::STensor const &output = tb_op->output_tensors.at(0);
+        assert(input0.num_dims == input1.num_dims);
+        assert(input1.num_dims == output.num_dims);
+        code.e("$ = tl.power($, $)",
+               fmt("stensor$", output.guid),
+               fmt("stensor$", input0.guid),
+               fmt("stensor$", input1.guid));
+        break;
+      }
 
       case type::TB_REDUCTION_0_OP:
       case type::TB_REDUCTION_1_OP:
@@ -551,6 +565,18 @@ TritonCustomOPTranspileResult
             fmt("stensor$", output.guid),
             fmt("stensor$", input0.guid),
             fmt("stensor$", input1.guid));
+        break;
+      }
+      case type::TB_POW_OP: {
+        tb::STensor const &input0 = tb_op->input_tensors.at(0);
+        tb::STensor const &input1 = tb_op->input_tensors.at(1);
+        tb::STensor const &output = tb_op->output_tensors.at(0);
+        assert(input0.num_dims == input1.num_dims);
+        assert(input1.num_dims == output.num_dims);
+        code.e("$ = tl.power($, $)",
+               fmt("stensor$", output.guid),
+               fmt("stensor$", input0.guid),
+               fmt("stensor$", input1.guid));
         break;
       }
 

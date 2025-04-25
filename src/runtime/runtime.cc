@@ -14,6 +14,7 @@
  */
 
 #include "mirage/runtime/runtime.h"
+#include <queue>
 
 namespace mirage {
 namespace runtime {
@@ -21,13 +22,22 @@ namespace runtime {
 namespace kn = mirage::kernel;
 namespace tb = mirage::threadblock;
 
-Runtime::Runtime() : num_graphs(0) {
+Runtime::Runtime(int _num_gpus, int _my_gpu_id)
+    : num_graphs(0), num_gpus(_num_gpus), my_gpu_id(_my_gpu_id) {
   // add the termination event to the event lists
   EventDesc e(1, 0, 0);
   all_events.push_back(e);
   TaskDesc t(TASK_TERMINATE);
   all_tasks.push_back(t);
   task_range_begins.push_back(0);
+}
+
+size_t get_event_id(int my_gpu_id, size_t event_pos, bool nvshmem_event) {
+  size_t event_id = ((static_cast<size_t>(my_gpu_id) << 32) | event_pos);
+  if (nvshmem_event) {
+    event_id = event_id | EVENT_NVSHMEM_TAG;
+  }
+  return event_id;
 }
 
 struct Dim3Comparator {
@@ -44,6 +54,7 @@ struct Dim3Comparator {
 
 void dfs_create_events_add_tasks(
     int depth,
+    int const my_gpu_id,
     std::vector<int> const &event_dims,
     int3 const input_map,
     int3 const output_map,
@@ -81,7 +92,9 @@ void dfs_create_events_add_tasks(
         for (bid.z = producer_lo_bid.z; bid.z < producer_hi_bid.z; bid.z++) {
           assert(pre_task_map.find(bid) != pre_task_map.end());
           int task_id = pre_task_map.find(bid)->second;
-          all_tasks[task_id].trigger_event = all_events.size();
+          // encode gpu_id
+          all_tasks[task_id].trigger_event = get_event_id(
+              my_gpu_id, all_events.size(), false /*nvshmem_event*/);
           event_desc.num_triggers++;
         }
       }
@@ -124,6 +137,7 @@ void dfs_create_events_add_tasks(
         new_producer_hi_bid.z = (i + 1) * factor;
       }
       dfs_create_events_add_tasks(depth + 1,
+                                  my_gpu_id,
                                   event_dims,
                                   input_map,
                                   output_map,
@@ -210,6 +224,119 @@ void Runtime::register_mugraph(
       } else {
         output_ops.push_back(static_cast<tb::TBInputOp *>(op));
       }
+    }
+
+    // Specical handling for ALLREDUCE
+    if (task_type == TASK_ALLREDUCE) {
+      // Shouldn't have AllReduce when num_gpus == 1
+      assert(num_gpus > 1);
+      assert(input_ops.size() == 2);
+      assert(output_ops.size() == 1);
+      // To simplify the implementation, asserting that
+      // produce/consumer must have the same partition
+      int num_shared_tensors = 0;
+      int3 input_map, output_map;
+      for (auto const &input : input_ops) {
+        for (auto const &output : pre_output_ops) {
+          if (input->dtensor.guid == output->dtensor.guid) {
+            input_map = input->input_map;
+            output_map = output->input_map;
+            num_shared_tensors++;
+          }
+        }
+      }
+      assert(num_shared_tensors == 1);
+      assert(input_map == output_map);
+      assert(bgraph.grid_dim == pre_op->bgraph.grid_dim);
+      dim3 bid;
+      for (bid.x = 0; bid.x < bgraph.grid_dim.x; bid.x++) {
+        for (bid.y = 0; bid.y < bgraph.grid_dim.y; bid.y++) {
+          for (bid.z = 0; bid.z < bgraph.grid_dim.z; bid.z++) {
+            // event_desc_0 is the trigger_event of previous_task
+            // event_desc_1 is the trigger_event of allgather
+            EventDesc event_desc_0, event_desc_1;
+            event_desc_0.num_triggers = 1;
+            event_desc_0.first_task_id = all_tasks.size();
+            event_desc_0.last_task_id = all_tasks.size() + num_gpus - 1;
+            assert(pre_task_map.find(bid) != pre_task_map.end());
+            int task_id = pre_task_map.find(bid)->second;
+            all_tasks[task_id].trigger_event =
+                get_event_id(my_gpu_id, all_events.size(), false);
+            all_events.push_back(event_desc_0);
+            // Step 1: create (num_gpus - 1) tasks for allgather
+            for (int tgt_gpu_id = 0; tgt_gpu_id < num_gpus; tgt_gpu_id++) {
+              if (tgt_gpu_id == my_gpu_id) {
+                continue;
+              }
+              TaskDesc task(TASK_NVSHMEM_COPY);
+              task.trigger_event = get_event_id(
+                  tgt_gpu_id, all_events.size(), true /*nvshmem_event*/);
+              // Initialize input/output tensors to the task
+              {
+                TensorDesc desc;
+                assert(input_ops[0]->output_tensors.size() == 1);
+                tb::STensor stensor = input_ops[0]->output_tensors[0];
+                desc.num_dims = stensor.num_dims;
+                desc.data_type = stensor.data_type;
+                for (int d = stensor.num_dims - 1; d >= 0; d--) {
+                  desc.dim[d] = stensor.dim[d];
+                  desc.stride[d] = (d == stensor.num_dims - 1)
+                                       ? 1
+                                       : desc.stride[d + 1] *
+                                             input_ops[0]->dtensor.dim[d + 1];
+                }
+                // Input and output have the same shape
+                task.inputs[task.num_inputs++] = desc;
+                task.outputs[task.num_outputs++] = desc;
+              }
+              all_tasks.push_back(task);
+            }
+            event_desc_1.first_task_id = all_tasks.size();
+            event_desc_1.last_task_id = all_tasks.size() + 1;
+            event_desc_1.num_triggers = num_gpus - 1;
+            all_events.push_back(event_desc_1);
+            // Step 2: create a task for reduce
+            TaskDesc task(TASK_REDUCE);
+            // Create input tensor
+            {
+              TensorDesc desc;
+              tb::STensor stensor = input_ops[1]->output_tensors[0];
+              desc.num_dims = stensor.num_dims;
+              desc.data_type = stensor.data_type;
+              for (int d = stensor.num_dims - 1; d >= 0; d--) {
+                desc.dim[d] = stensor.dim[d];
+                desc.stride[d] =
+                    (d == stensor.num_dims - 1)
+                        ? 1
+                        : desc.stride[d + 1] * input_ops[1]->dtensor.dim[d + 1];
+                task.inputs[task.num_inputs++] = desc;
+              }
+            }
+            // Create output tensor
+            {
+              TensorDesc desc;
+              tb::STensor stensor = output_ops[0]->output_tensors[0];
+              desc.num_dims = stensor.num_dims;
+              desc.data_type = stensor.data_type;
+              for (int d = stensor.num_dims - 1; d >= 0; d--) {
+                desc.dim[d] = stensor.dim[d];
+                desc.stride[d] = (d == stensor.num_dims - 1)
+                                     ? 1
+                                     : desc.stride[d + 1] *
+                                           output_ops[0]->dtensor.dim[d + 1];
+                task.inputs[task.num_outputs++] = desc;
+              }
+              all_tasks.push_back(task);
+              // Update current task map
+              cur_task_map[bid] = all_tasks.size() - 1;
+            }
+          }
+        }
+      }
+      pre_output_ops = output_ops;
+      pre_op = cur_op;
+      pre_task_map = cur_task_map;
+      continue;
     }
 
     // Step 1: add all tasks based on their blockIdx
@@ -341,6 +468,7 @@ void Runtime::register_mugraph(
         event_dims[d] = std::gcd(producer_partition[d], consumer_partition[d]);
       }
       dfs_create_events_add_tasks(0,                       /*depth*/
+                                  my_gpu_id,               /*my_gpu_id*/
                                   event_dims,              /*event_dims*/
                                   input_map,               /*input_map*/
                                   output_map,              /*output_map*/
@@ -361,7 +489,63 @@ void Runtime::register_mugraph(
     pre_task_map = cur_task_map;
     task_range_begins.push_back(all_tasks.size());
   }
+
+  // Update the trigger event for all tasks in pre_task_map
+  for (auto const &it : pre_task_map) {
+    all_tasks[it.second].trigger_event =
+        get_event_id(my_gpu_id, 0, false /*nvshmem_event*/);
+  }
   num_graphs++;
+}
+
+bool Runtime::sanity_check() {
+  std::unordered_set<EventId> triggered_events;
+  std::unordered_set<TaskId> executed_tasks;
+  std::vector<int> event_counts(all_events.size(), 0);
+  for (size_t i = 0; i < all_events.size(); i++) {
+    event_counts[i] = all_events[i].num_triggers;
+  }
+  std::queue<TaskId> task_queue;
+  std::queue<EventId> event_queue;
+  assert(first_tasks.size() == 1);
+  task_queue.push(first_tasks[0]);
+  while (!(task_queue.empty() && event_queue.empty())) {
+    // Execute tasks
+    while (!task_queue.empty()) {
+      TaskId task = task_queue.front();
+      task_queue.pop();
+      assert(executed_tasks.count(task) == 0);
+      executed_tasks.insert(task);
+      TaskDesc desc = all_tasks[task];
+      if (desc.trigger_event != EVENT_INVALID_ID) {
+        EventId event_id = desc.trigger_event;
+        size_t event_pos = event_id & 0xffffffff;
+        // event_pos 0 is the end of task graph event
+        if (event_pos == 0) {
+          continue;
+        }
+        assert(event_counts[event_pos] > 0);
+        event_counts[event_pos]--;
+        if (event_counts[event_pos] == 0) {
+          event_queue.push(event_id);
+        }
+      }
+    }
+    while (!event_queue.empty()) {
+      EventId event_id = event_queue.front();
+      event_queue.pop();
+      assert(triggered_events.count(event_id) == 0);
+      triggered_events.insert(event_id);
+      size_t event_pos = event_id & 0xffffffff;
+      EventDesc desc = all_events[event_pos];
+      for (TaskId tid = desc.first_task_id; tid < desc.last_task_id; tid++) {
+        task_queue.push(tid);
+      }
+    }
+  }
+  printf("Triggered events: %zu\n", triggered_events.size());
+  printf("Executed tasks: %zu\n", executed_tasks.size());
+  return true;
 }
 
 } // namespace runtime

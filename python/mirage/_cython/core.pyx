@@ -137,6 +137,8 @@ def get_kn_operator_type_string(int op_type):
         return "kn_mul_op"
     elif op_type == KN_DIV_OP:
         return "kn_div_op"
+    elif op_type == KN_POW_OP:
+        return "kn_pow_op"
     elif op_type == KN_REDUCTION_0_OP:
         return "kn_reduction_0_op"
     elif op_type == KN_REDUCTION_1_OP:
@@ -214,6 +216,8 @@ def get_tb_operator_type_string(int op_type):
         return "tb_mul_op"
     elif op_type == TB_DIV_OP:
         return "tb_div_op"
+    elif op_type == TB_POW_OP:
+        return "tb_pow_op"
     elif op_type == TB_REDUCTION_FIRST_OP_ID:
         return "tb_reduction_first_op_id"
     elif op_type == TB_REDUCTION_0_OP:
@@ -696,6 +700,16 @@ cdef class CyKNGraph:
         t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
         return DTensor(t)
 
+    def sqrt(self, DTensor input):
+        cdef CppDTensor* ptr = self.p_kgraph.sqrt(input.c_ptr)
+        t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
+        return DTensor(t)
+
+    def square(self, DTensor input):
+        cdef CppDTensor* ptr = self.p_kgraph.square(input.c_ptr)
+        t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
+        return DTensor(t)
+
     def add(self, DTensor A, DTensor B):
         cdef CppDTensor* ptr = self.p_kgraph.add(A.c_ptr, B.c_ptr)
         t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
@@ -708,6 +722,11 @@ cdef class CyKNGraph:
 
     def div(self, DTensor A, DTensor B):
         cdef CppDTensor* ptr = self.p_kgraph.div(A.c_ptr, B.c_ptr)
+        t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
+        return DTensor(t)
+
+    def pow(self, DTensor A, DTensor B):
+        cdef CppDTensor* ptr = self.p_kgraph.pow(A.c_ptr, B.c_ptr)
         t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
         return DTensor(t)
 

@@ -35,7 +35,9 @@ struct TensorDesc {
 };
 
 struct EventDesc {
-  EventDesc(void) : num_triggers(0), first_task_id(0), last_task_id(0) {}
+  EventDesc(void)
+      : num_triggers(0), first_task_id(TASK_INVALID_ID),
+        last_task_id(TASK_INVALID_ID) {}
   EventDesc(int nt, TaskId f, TaskId l)
       : num_triggers(nt), first_task_id(f), last_task_id(l) {}
   int num_triggers;
@@ -44,7 +46,8 @@ struct EventDesc {
 
 struct TaskDesc {
   TaskDesc(TaskType t)
-      : task_type(t), num_inputs(0), num_outputs(0), trigger_event(0) {}
+      : task_type(t), num_inputs(0), num_outputs(0),
+        trigger_event(EVENT_INVALID_ID) {}
   TaskType task_type;
   int num_inputs, num_outputs;
   int forloop_range;
@@ -57,7 +60,8 @@ struct TaskDesc {
 };
 
 struct RuntimeConfig {
-  int num_workers, num_schedulers, num_graphs;
+  int num_workers, num_local_schedulers, num_remote_schedulers, num_graphs;
+  int num_gpus, my_gpu_id;
   int total_num_tasks, total_num_events;
   bool profiling = true;
   ;
@@ -74,23 +78,29 @@ struct RuntimeConfig {
   TaskId *first_tasks;
 
   uint64_t *profiler_buffer;
-
   int4 *tensor_offsets;
+  bool verbose;
+
 };
 
 class Runtime {
 public:
-  Runtime();
+  Runtime(int num_gpus, int my_gpu_id);
+  template <typename DT>
+  DT *gpu_malloc(size_t);
   void register_mugraph(
       mirage::kernel::Graph const &graph,
       std::unordered_map<mirage::kernel::KNOperator const *,
                          std::tuple<int, int, TaskType>> const &task_config);
-  void launch_persistent_kernel(int num_workers, int num_schedulers);
   void add_tensor_offset(int3 const &inout_map,
                          kernel::DTensor const &dtensor,
                          std::vector<size_t> const &strides,
                          threadblock::Graph const &bgraph,
                          bool is_input);
+  void launch_persistent_kernel(int num_workers,
+                                int num_local_schedulers,
+                                int num_remote_schedulers);
+  bool sanity_check();
 
 public:
   std::vector<TaskDesc> all_tasks;
@@ -100,6 +110,7 @@ public:
   std::vector<int4> tensor_offsets;
   int num_graphs;
   int num_dtensors = 0;
+  int num_graphs, num_gpus, my_gpu_id;
 };
 
 } // namespace runtime
