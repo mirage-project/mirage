@@ -164,6 +164,7 @@ def parse_onnx_model(model, unique_operators):
             else:
                 additional_params.append(float('inf'))
         if node.op_type == "ReduceSum":
+            # TODO add ReduceMean here as well?
             if node.axis != None:
                 axis = node.axis[0]
                 additional_params.append(axis)
@@ -177,9 +178,16 @@ def parse_onnx_model(model, unique_operators):
 
                 # TODO we should leave modifying the graph structure to partition_graph.py
                 # since build_computational graph should faithfully construct the model
+                if i == 0:
+                    if op_type == "Softmax":
+                        shape = shape[:3]
                 if i == 1:
                     if op_type in ["Div", "Add", "Pow"]:
                         shape = input_tensor_shapes[0][0]
+                    if op_type == "ReduceMean":
+                        # the second tensor of ReduceMean is a 1x1 tensor with the reduction dimension
+                        # TODO for now, we assume the last dimension is the reduction dimension always
+                        continue
                     if op_type == "MatMul":
                         if 0 in shape:
                             shape = tuple()
@@ -191,7 +199,11 @@ def parse_onnx_model(model, unique_operators):
         output_tensor_shapes = []
         for output_name in node.output:
             if output_name in shape_value_dict and output_name in tensor_id:
-                output_tensor_shapes.append((shape_value_dict[output_name], tensor_id[output_name]))
+                shape = shape_value_dict[output_name]
+                if i == 0:
+                    if op_type == "Softmax":
+                        shape = shape[:3]
+                output_tensor_shapes.append((shape, tensor_id[output_name]))
         
         operator = Operator(name=node_name, fn=op_type, input_ops=[], output_ops=[], input_tensor_shapes=input_tensor_shapes, output_tensor_shapes=output_tensor_shapes, additional_params=additional_params, kwargs=kwargs)
         # operator = {"name":node_name, "fn":op_type, "input_ops":[], "output_ops":[], "input_tensor_shapes":input_tensor_shapes, "output_tensor_shapes":output_tensor_shapes}

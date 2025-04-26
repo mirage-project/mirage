@@ -71,14 +71,14 @@ def get_partitions(op_node, min_num_ops, max_num_ops, all_subgraphs, UNSUPPORTED
 
 def get_partitions_helper(op_node, curr_subgraph, min_num_ops, max_num_ops, visited, all_subgraphs, UNSUPPORTED_OPS, COMPOSITE_OPS, IGNORE_OPS):
     # if it is a composite operator, return a subgraph with only that one operator
-    if op_node.fn in COMPOSITE_OPS:
-        all_subgraphs.append(copy_subgraph(curr_subgraph))
-        return
     if id(op_node.name) in visited:
         return
     if len(curr_subgraph) > max_num_ops:
         return
     if contains_4D_tensors(op_node):
+        return
+    if op_node.fn in COMPOSITE_OPS:
+        all_subgraphs.append(copy_subgraph(curr_subgraph))
         return
     
     # assume op_node already in curr_subgraph
@@ -148,7 +148,6 @@ def partition_graph(model,
     all_subgraphs = []
     for _, op_node in operators.items():
         get_partitions(op_node, min_num_ops, max_num_ops, all_subgraphs, UNSUPPORTED_OPS, COMPOSITE_OPS, IGNORE_OPS)
-
     return all_subgraphs, unique_operators
 
 def function_map(graph, func, inputs, kwargs={}):
@@ -167,10 +166,10 @@ def function_map(graph, func, inputs, kwargs={}):
         case "Pow" | "Square": 
             return graph.square(inputs[0])
         # case "Pow": return graph.pow(*inputs)
-        # case "Softmax": # In case of softmax, inputs must be of form (mat, axis)
-        #     exp = graph.exp(inputs[0])
-        #     summed = graph.reduction(exp, inputs[1])
-        #     return graph.div(exp, summed)
+        case "Softmax": # In case of softmax, inputs must be of form (mat, axis)
+            exp = graph.exp(inputs[0])
+            summed = graph.reduction(exp, inputs[1])
+            return graph.div(exp, summed)
         case "Sigmoid":
             matrix = inputs[0]
             ones = inputs[1]
@@ -182,12 +181,12 @@ def function_map(graph, func, inputs, kwargs={}):
         case "Neg": 
             return graph.mul(*inputs)
         case "RMSNormalization": return graph.rms_norm(*inputs) # Onnx doesn't support different normalized shape
-        # case "ReduceMean":
-        #     matrix = inputs[0]
-        #     dim = inputs[1]
-        #     num_els = input[2]
-        #     reduced = graph.reduction(matrix, dim)
-        #     return graph.div(reduced, num_els)
+        case "ReduceMean":
+            matrix = inputs[0]
+            dim = inputs[1]
+            num_els = inputs[2]
+            reduced = graph.reduction(matrix, dim)
+            return graph.div(reduced, num_els)
         case _: 
             raise NotImplementedError
 
@@ -207,23 +206,39 @@ def to_kernel_graph(subgraph):
                 inputs.append(intermediates[tensor_id][0])
                 intermediates[tensor_id][1] += 1
         if (op.fn == "Sigmoid"):
+            assert len(op.input_tensor_shapes) == 1
+            assert len(inputs) == 1
             shape = op.output_tensor_shapes[0][0]
             dims.append((shape, "C", 1.0))
             inputs.append(graph.new_input(dims=shape, dtype=mi.float16))
             dims.append((shape, "C", -1.0))
             inputs.append(graph.new_input(dims=shape, dtype=mi.float16))
         elif (op.fn == "Neg"):
+            assert len(op.input_tensor_shapes) == 1
+            assert len(inputs) == 1
             shape = op.output_tensor_shapes[0][0]
             dims.append((shape, "C", -1.0))
             inputs.append(graph.new_input(dims=shape, dtype=mi.float16))
         elif (op.fn == "Reciprocal"):
+            assert len(op.input_tensor_shapes) == 1
+            assert len(inputs) == 1
             shape = op.output_tensor_shapes[0][0]
             dims.append((shape, "C", 1.0))
             inputs.insert(0, graph.new_input(dims=shape, dtype=mi.float16))
-        # elif (op.fn == "ReduceMean"):
-        #     shape = op.output_tensor_shapes[0][0]
-        #     num_els = op.output_tensor_shapes[0][0][-1]
-        #     dims.append((shape, "C", num_els))
+        elif (op.fn == "ReduceMean"):
+            assert len(op.input_tensor_shapes) == 1
+            assert len(inputs) == 1
+            shape = op.output_tensor_shapes[0][0]
+            num_els = op.output_tensor_shapes[0][0][-1]
+            dims.append((shape, "C", num_els))
+            dim = len(shape) - 1
+            inputs.append(dim)
+            inputs.append(graph.new_input(dims=shape, dtype=mi.float16))
+        elif (op.fn == "Softmax"):
+            assert len(op.input_tensor_shapes) == 1
+            assert len(inputs) == 1
+            last_dim = len(op.input_tensor_shapes[0][0]) - 1
+            inputs.append(last_dim)
         inputs += op.additional_params
         kwargs = op.kwargs
         res = function_map(graph, op, inputs, kwargs)
@@ -255,6 +270,7 @@ def generate_all_kernels(model, dummy_inputs, min_num_ops=2, max_num_ops=4, UNSU
         kernel_graph.to_json(f"original_{graph_hash}.json")
         
         try:
+            print(f"Superoptimizing {graph_hash}")
             optimized_graph, best_perf = kernel_graph.superoptimize()
         except Exception as e:
             print(f"Subgraph {graph_hash} superoptimize failed with error: {e}")
