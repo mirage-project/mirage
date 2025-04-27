@@ -92,5 +92,7 @@ public:
   mirage::type::TBEpilogueType epilogue;
 };
 
+size_t get_stensor_hash(STensor t);
+
 } // namespace threadblock
 } // namespace mirage

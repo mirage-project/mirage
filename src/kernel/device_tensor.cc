@@ -16,6 +16,7 @@
 #include "mirage/kernel/device_tensor.h"
 #include "mirage/kernel/device_memory_manager.h"
 #include "mirage/utils/hash_utils.h"
+#include "mirage/threadblock/operator.h"
 #include <functional>
 
 namespace mirage {
@@ -39,6 +40,7 @@ size_t DTensor::get_owner_independent_hash() const {
   size_t ret = std::hash<int>()((data_type));
   hash_combine(ret, layout);
   hash_combine(ret, num_dims);
+  hash_combine(ret, static_cast<int>(owner_op->op_type));
   for (int i = 0; i < num_dims; i++) {
     hash_combine(ret, dim[i]);
   }

@@ -154,16 +154,6 @@ struct alignas(16) STensor {
     }
   }
 
-  size_t get_owner_independent_hash() const {
-    size_t ret = std::hash<int>()((data_type));
-    hash_combine(ret, layout);
-    hash_combine(ret, num_dims);
-    for (int i = 0; i < num_dims; i++) {
-      hash_combine(ret, dim[i]);
-    }
-    return ret;
-  }
-
   mirage::type::DataType data_type;
   mirage::layout::SmemLayout layout;
   int num_dims;

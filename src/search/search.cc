@@ -124,7 +124,6 @@ void KernelGraphGenerator::generate_next_operator(
     has_seen_before = generated_graph_hashes.find(graph_hash) != generated_graph_hashes.end();
   }
   if (has_seen_before) {
-    std::cout << "depth: " << depth << std::endl;
     return;
   }
   generated_graph_hashes.insert(graph_hash);

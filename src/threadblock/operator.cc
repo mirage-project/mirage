@@ -55,17 +55,29 @@ int TBOperator::get_output_stensors(STensor **outputs) {
 size_t TBOperator::get_owner_independent_hash() {
   size_t ret = std::hash<int>()(op_type);
   for (auto const &t : input_tensors) {
-    size_t h = t.get_owner_independent_hash();
+    size_t h = get_stensor_hash(t);
     hash_combine(ret, h);
   }
   for (auto const &t : output_tensors) {
-    size_t h = t.get_owner_independent_hash();
+    size_t h = get_stensor_hash(t);
     hash_combine(ret, h);
   }
   return ret;
 }
 
 TBOperator::~TBOperator() {}
+
+size_t get_stensor_hash(STensor t) {
+  size_t ret = std::hash<int>()(t.data_type);
+  hash_combine(ret, t.layout);
+  hash_combine(ret, t.num_dims);
+  hash_combine(ret, t.after_accum);
+  hash_combine(ret, static_cast<int>(t.owner_op->op_type));
+  for (int i = 0; i < t.num_dims; i++) {
+    hash_combine(ret, t.dim[i]);
+  }
+  return ret;
+}
 
 } // namespace threadblock
 } // namespace mirage
