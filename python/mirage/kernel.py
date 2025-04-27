@@ -16,6 +16,7 @@ from .global_config import global_config
 from .graph_dataset import graph_dataset
 
 from collections import deque
+from sidebyside import combine
 
 MAX_THREADS = os.cpu_count()
 
@@ -512,6 +513,7 @@ class KNGraph:
             default_config=config,
         )
         all_graphs = [KNGraph(g) for g in cygraphs]
+        all_graphs = all_graphs[:5]
         print("Finished search, discovering {} mugraphs ...".format(len(all_graphs)))
         if backend == "cuda":
             # profile and use the best graph
@@ -599,6 +601,9 @@ class KNGraph:
                     fmaps=fmaps,
                     franges=franges,
                     backend=backend)
+            self.visualize(f"/home/kitao/projects/mirage/dataset/demo/vis/original/{self.cygraph.get_owner_independent_hash()}")
+            best_graph.visualize(f"/home/kitao/projects/mirage/dataset/demo/vis/optimized/{self.cygraph.get_owner_independent_hash()}")
+            combine(self.cygraph.get_owner_independent_hash())
             return best_graph, best_perf
         elif backend == "nki":
             return all_graphs

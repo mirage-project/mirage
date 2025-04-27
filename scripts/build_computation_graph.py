@@ -354,8 +354,8 @@ def get_computation_graph(model, dummy_input, unique_operators, method):
                 dynamo=True
             )
             
-            shape_inference.infer_shapes_path(model_path="scripts/onnx/integrate_test.onnx",
-                                              output_path="scripts/onnx/inferred_model.onnx") # for shape inference of inputs and outputs
+            # shape_inference.infer_shapes_path(model_path="scripts/onnx/integrate_test.onnx",
+            #                                   output_path="scripts/onnx/inferred_model.onnx") # for shape inference of inputs and outputs
             inferred_model = onnx.load("scripts/onnx/inferred_model.onnx")
             operators = parse_onnx_model(inferred_model, unique_operators)
 

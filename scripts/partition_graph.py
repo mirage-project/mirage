@@ -262,6 +262,7 @@ def generate_all_kernels(model, dummy_inputs, min_num_ops=2, max_num_ops=4, UNSU
     all_kernels = []
     hashes = set()
     performance = {}
+    subgraphs = subgraphs[0:5]
     for subgraph in subgraphs:
         kernel_graph, dims = to_kernel_graph(subgraph)
         
