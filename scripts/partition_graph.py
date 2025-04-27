@@ -67,23 +67,24 @@ def get_partitions(op_node, min_num_ops, max_num_ops, all_subgraphs, UNSUPPORTED
                 op_needs_broadcast = True
                 break
         if not op_needs_broadcast:
-            get_partitions_helper(op_node, {op_node: []}, min_num_ops, max_num_ops, set(), all_subgraphs, UNSUPPORTED_OPS, COMPOSITE_OPS, IGNORE_OPS)
+            if op_node.fn in COMPOSITE_OPS:
+                num_ops = COMPOSITE_OPS[op_node.fn]
+            else:
+                num_ops = 1
+            get_partitions_helper(op_node, {op_node: []}, num_ops, min_num_ops, max_num_ops, set(), all_subgraphs, UNSUPPORTED_OPS, COMPOSITE_OPS, IGNORE_OPS)
 
-def get_partitions_helper(op_node, curr_subgraph, min_num_ops, max_num_ops, visited, all_subgraphs, UNSUPPORTED_OPS, COMPOSITE_OPS, IGNORE_OPS):
+def get_partitions_helper(op_node, curr_subgraph, num_ops, min_num_ops, max_num_ops, visited, all_subgraphs, UNSUPPORTED_OPS, COMPOSITE_OPS, IGNORE_OPS):
     # if it is a composite operator, return a subgraph with only that one operator
     if id(op_node.name) in visited:
         return
-    if len(curr_subgraph) > max_num_ops:
+    if num_ops > max_num_ops:
         return
     if contains_4D_tensors(op_node):
-        return
-    if op_node.fn in COMPOSITE_OPS:
-        all_subgraphs.append(copy_subgraph(curr_subgraph))
         return
     
     # assume op_node already in curr_subgraph
     visited.add(id(op_node.name))
-    if len(curr_subgraph) >= min_num_ops:
+    if num_ops >= min_num_ops:
         all_subgraphs.append(copy_subgraph(curr_subgraph))
 
     def find_valid_output_ops(output_op, orig_out_id, prev_out_id, valid_output_ops, visited):
@@ -94,7 +95,7 @@ def get_partitions_helper(op_node, curr_subgraph, min_num_ops, max_num_ops, visi
         visited.add(id(output_op.name))
         
         # .union(COMPOSITE_OPS) ensures that no second operator of a subgraph is composite op
-        if output_op.fn in UNSUPPORTED_OPS.union(COMPOSITE_OPS):
+        if output_op.fn in UNSUPPORTED_OPS:
             return
         
         input_dims = len(output_op.input_tensor_shapes[0][0])
@@ -133,14 +134,18 @@ def get_partitions_helper(op_node, curr_subgraph, min_num_ops, max_num_ops, visi
                 if output_node not in curr_subgraph_copy:
                     curr_subgraph_copy[output_node] = []
                 curr_subgraph_copy[op_node].append(output_node)
-                get_partitions_helper(output_node, copy_subgraph(curr_subgraph_copy), min_num_ops, max_num_ops, visited_copy, all_subgraphs, UNSUPPORTED_OPS, COMPOSITE_OPS, IGNORE_OPS)
+                if output_node.fn in COMPOSITE_OPS:
+                    num_ops += COMPOSITE_OPS[output_node.fn]
+                else:
+                    num_ops += 1
+                get_partitions_helper(output_node, copy_subgraph(curr_subgraph_copy), num_ops, min_num_ops, max_num_ops, visited_copy, all_subgraphs, UNSUPPORTED_OPS, COMPOSITE_OPS, IGNORE_OPS)
 
 def partition_graph(model, 
                     dummy_input, 
                     min_num_ops=2, 
                     max_num_ops=4, 
                     UNSUPPORTED_OPS=set(), # these are operators not supported by Mirage
-                    COMPOSITE_OPS=set(),
+                    COMPOSITE_OPS=dict(),
                     IGNORE_OPS=set()): # these are operators that performs no operations on the tensors
     unique_operators = {}
     operators = get_computation_graph(model, dummy_input, unique_operators, "onnx")
