@@ -126,8 +126,10 @@ add_library(mirage_runtime ${MIRAGE_SRCS})
 # cmake_device_link.o, and cython's installation cannot
 # automatically link to that file, resulting in:
 # undefined symbol: __cudaRegisterLinkedBinary_...
+#set_target_properties(mirage_runtime
+#  PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 set_target_properties(mirage_runtime
-  PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+  PROPERTIES CUDA_RESOLVE_DEVICE_SYMBOLS ON)
 
 set_target_properties(mirage_runtime PROPERTIES CUDA_ARCHITECTURES "70;75;80;86;89;90")
 

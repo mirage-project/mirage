@@ -503,11 +503,12 @@ void Runtime::launch_persistent_kernel(int num_workers,
   nvshmem_barrier_all();
   void *args[] = {&config};
   // Launcher persistent kernel
+  cudaFuncSetAttribute(persistent_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, 96 * 1024);
   nvshmemx_collective_launch((void const *)persistent_kernel,
                              dim3(108, 1, 1),
                              dim3(128, 1, 1),
                              args,
-                             1024 /*sharedmem*/,
+                             96 * 1024 /*sharedmem*/,
                              0 /*stream*/);
   cudaDeviceSynchronize();
   nvshmem_barrier_all();
