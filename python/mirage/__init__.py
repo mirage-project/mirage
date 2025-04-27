@@ -10,6 +10,7 @@ except ImportError:
     from .core import *
 
 from .kernel import *
+from .persistent_kernel import PersistentKernel
 from .threadblock import *
 
 class InputNotFoundError(Exception):

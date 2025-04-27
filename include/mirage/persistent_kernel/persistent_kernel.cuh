@@ -17,6 +17,8 @@
 #include <nvshmemx.h>
 #include <mpi.h>
 #include <vector>
+#include <unistd.h>
+#include <thread>
 
 typedef unsigned long long int TaskId;
 unsigned long long int const TASK_INVALID_ID = 0x7fffffffffffffff;
@@ -429,7 +431,7 @@ static void _init_persistent_kernel(std::vector<TaskDesc> &all_tasks,
 
 extern "C" void init_persistent_kernel(std::vector<void const *> input_tensors,
                                        std::vector<void *> output_tensors,
-                                       void *buf,
+				       int my_rank,
                                        int num_workers,
                                        int num_local_schedulers,
                                        int num_remote_schedulers) {
@@ -438,20 +440,23 @@ extern "C" void init_persistent_kernel(std::vector<void const *> input_tensors,
   global_runtime_config.num_local_schedulers = num_local_schedulers;
   global_runtime_config.num_remote_schedulers = num_remote_schedulers;
   int num_schedulers = num_local_schedulers + num_remote_schedulers;
+
   // Initialize nvshmem
+  cudaSetDevice(my_rank);
   MPI_Comm mpi_comm = MPI_COMM_WORLD;
   nvshmemx_init_attr_t attr = NVSHMEMX_INIT_ATTR_INITIALIZER;
   attr.mpi_comm = &mpi_comm;
   int mype = nvshmem_my_pe();
   int npes = nvshmem_n_pes();
   int mype_node = nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE);
+  printf("mype(%d) npes(%d) mype_node(%d)\n", mype, npes, mype_node);
+  printf("process_id(%zu) thread_id(%zu)\n", getpid(), std::this_thread::get_id());
   global_runtime_config.per_worker_queue_len = 1024;
   global_runtime_config.per_sched_queue_len = 1024;
   global_runtime_config.num_gpus = npes;
   global_runtime_config.my_gpu_id = mype;
   global_runtime_config.num_graphs = 1;
   global_runtime_config.verbose = true;
-  cudaSetDevice(mype);
   nvshmemx_init_attr(NVSHMEMX_INIT_WITH_MPI_COMM, &attr);
   nvshmem_barrier_all();
 

@@ -13,13 +13,12 @@ HARD_CODE = """
 #include <cuda_runtime.h>
 
 static PyObject *init_func(PyObject *self, PyObject *args) {
-  PyObject *input_list, *output_list, *py_buffer, *py_stream, *py_profiler_buffer;
-  void *buffer;
+  PyObject *input_list, *output_list;
   std::vector<void const *> input_tensors;
   std::vector<void*> output_tensors;
-  void *profiler_buffer;
+  int my_mpi_rank, num_workers, num_local_schedulers, num_remote_schedulers;
 
-  if (!PyArg_ParseTuple(args, "OOOOO", &input_list, &output_list, &py_buffer, &py_stream, &py_profiler_buffer)) {
+  if (!PyArg_ParseTuple(args, "OOiiii", &input_list, &output_list, &my_mpi_rank, &num_workers, &num_local_schedulers, &num_remote_schedulers)) {
     PyErr_SetString(PyExc_TypeError, "Invalid parameters");
     return NULL;
   }
@@ -52,16 +51,13 @@ static PyObject *init_func(PyObject *self, PyObject *args) {
     output_tensors.push_back(PyLong_AsVoidPtr(item));
   }
 
-  buffer = PyLong_AsVoidPtr(py_buffer);
-  profiler_buffer = PyLong_AsVoidPtr(py_profiler_buffer);
-  cudaStream_t stream = (cudaStream_t)PyLong_AsVoidPtr(py_stream);
-  execute_mugraph(input_tensors, output_tensors, buffer, stream, profiler_buffer);
+  init_persistent_kernel(input_tensors, output_tensors, my_mpi_rank, num_workers, num_local_schedulers, num_remote_schedulers);
 
   Py_RETURN_NONE;
 }
 
 static PyMethodDef ModuleMethods[] = {
-  {"launch", launch, METH_VARARGS, "Entry point for all kernels with this signature"},
+  {"init_func", init_func, METH_VARARGS, "Entry point for all kernels with this signature"},
   {NULL, NULL, 0, NULL} // sentinel
 };
 
@@ -83,19 +79,19 @@ PyMODINIT_FUNC PyInit___mirage_launcher(void) {
 }
 """
 
-def get_compile_command(target_cc=target,
-                        cc=cc,
-                        file_name=file_name,
-                        py_include_dir=py_include_dir,
-                        mirage_inc_path=mirage_inc_path,
-                        mirage_deps_path=mirage_deps_path,
-                        nvshmem_inc_path=nvshmem_inc_path,
-                        nvshmem_lib_path=nvshmem_lib_path,
-                        mpi_inc_path=mpi_inc_path,
-                        mpi_lib_path=mpi_lib_path,
-                        py_so_path=py_so_path,
-                        profiling=profiling,
-                        use_nvshmem=use_nvshmem):
+def get_compile_command(target_cc,
+                        cc,
+                        file_name,
+                        py_include_dir,
+                        mirage_inc_path,
+                        mirage_deps_path,
+                        nvshmem_inc_path,
+                        nvshmem_lib_path,
+                        mpi_inc_path,
+                        mpi_lib_path,
+                        py_so_path,
+                        profiling,
+                        use_nvshmem):
     common_cmd = [
         cc,
         file_name,
@@ -114,7 +110,7 @@ def get_compile_command(target_cc=target,
         "-Xcompiler=-fPIC",
         "--expt-relaxed-constexpr",
         "-o",
-        so_path
+        py_so_path
     ]
 
     if use_nvshmem:
@@ -132,7 +128,7 @@ def get_compile_command(target_cc=target,
         common_cmd = common_cmd + nvshmem_cmd
         flags = flags + nvshmem_flags
 
-    if target == 90:
+    if target_cc == 90:
         specific_cmd = [
             "-arch=sm_90a",
             "-gencode=arch=compute_90a,code=sm_90a",
@@ -145,11 +141,18 @@ def get_compile_command(target_cc=target,
     return common_cmd + specific_cmd + flags
 
 class PersistentKernel:
-    def __init__(self, filepath : str, use_nvshmem : bool):
+    def __init__(self, file_path : str, mpi_rank : int, num_workers : int, num_local_schedulers : int, num_remote_schedulers : int, **kwargs):
+
         MIRAGE_ROOT, INCLUDE_PATH, DEPS_PATH = get_key_paths()
         tempdir_obj = tempfile.TemporaryDirectory()
         tempdir = tempdir_obj.name
+        full_src_file = os.path.join(tempdir, "test.cu")
         so_path = os.path.join(tempdir, "test.cpython-38-x86_64-linux-gnu.so")
+        with open(file_path, "r") as f:
+            task_graph_impl = f.read()
+        with open(full_src_file, "w") as f:
+            f.write(task_graph_impl + HARD_CODE)
+
         cc = shutil.which("nvcc")
         if cc is None:
             raise RuntimeError(
@@ -175,7 +178,7 @@ class PersistentKernel:
                     "Environment variable NVSHMEM_INC_PATH is set but cannot find nvshmem.h at {header_file_path}")
         else:
             NVSHMEM_INC_PATH = "/usr/include/nvshmem_12/"
-            header_file_path = os.path.join(NVSHMEM_ROOT, "nvshmem.h")
+            header_file_path = os.path.join(NVSHMEM_INC_PATH, "nvshmem.h")
             if not os.path.exists(header_file_path):
                 raise RuntimeError(
                     "Cannot find nvshmem.h, please set environment variable NVSHMEM_INC_PATH")
@@ -204,7 +207,7 @@ class PersistentKernel:
             header_file_path = os.path.join(MPI_INC_PATH, "mpi.h")
             if not os.path.exists(header_file_path):
                 raise RuntimeError(
-                    "Cannot find nvshmem.h, please set environment variable MPI_INC_PATH")
+                    "Cannot find mpi.h, please set environment variable MPI_INC_PATH")
         #find mpi shared library
         if "MPI_LIB_PATH" in os.environ:
             MPI_LIB_PATH = os.environ.get("MPI_LIB_PATH")
@@ -217,11 +220,14 @@ class PersistentKernel:
             lib_file_path = os.path.join(NVSHMEM_LIB_PATH, "libmpi.so")
             if not os.path.exists(lib_file_path):
                 raise RuntimeError(
-                    "Cannot find libnvshmem.a, please set environment variable MPI_LIB_PATH")
-        
-        cc_cmd = get_compile_command(targe_cc=target_cc,
+                    "Cannot find libmpi.so, please set environment variable MPI_LIB_PATH")
+        target_cc = torch.cuda.get_device_properties(0).major * 10 + torch.cuda.get_device_properties(0).minor
+        profiling = kwargs.get("profiling", False)
+        use_nvshmem = kwargs.get("use_nvshmem", True)
+
+        cc_cmd = get_compile_command(target_cc=target_cc,
                                      cc=cc,
-                                     file_name=file_path,
+                                     file_name=full_src_file,
                                      py_include_dir=py_include_dir,
                                      mirage_inc_path=INCLUDE_PATH,
                                      mirage_deps_path=DEPS_PATH,
@@ -232,6 +238,7 @@ class PersistentKernel:
                                      py_so_path=so_path,
                                      profiling=profiling,
                                      use_nvshmem=use_nvshmem)
+        print(cc_cmd)
         subprocess.check_call(cc_cmd)
 
         import importlib.util
@@ -239,6 +246,15 @@ class PersistentKernel:
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
         self.init_func = getattr(mod, "init_func")
+
+        # initialize persistent kernel
+        input_tensors = kwargs.get("inputs", [])
+        output_tensors = kwargs.get("inputs", [])
+        input_tensors_ptr = [tensor.data_ptr() for tensor in input_tensors]
+        output_tensors_ptr = [tensor.data_ptr() for tensor in output_tensors]
+        self.init_func(input_tensors_ptr, output_tensors_ptr, mpi_rank, num_workers, num_local_schedulers, num_remote_schedulers)
+
+        #self.call_func = getattr(mod, "call_func")
 
     def __call__(self, **kwargs):
         input_tensors = kwargs.get("inputs", [])
