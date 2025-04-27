@@ -446,6 +446,8 @@ extern "C" void init_persistent_kernel(std::vector<void const *> input_tensors,
   MPI_Comm mpi_comm = MPI_COMM_WORLD;
   nvshmemx_init_attr_t attr = NVSHMEMX_INIT_ATTR_INITIALIZER;
   attr.mpi_comm = &mpi_comm;
+  nvshmemx_init_attr(NVSHMEMX_INIT_WITH_MPI_COMM, &attr);
+  nvshmem_barrier_all();
   int mype = nvshmem_my_pe();
   int npes = nvshmem_n_pes();
   int mype_node = nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE);
@@ -457,8 +459,6 @@ extern "C" void init_persistent_kernel(std::vector<void const *> input_tensors,
   global_runtime_config.my_gpu_id = mype;
   global_runtime_config.num_graphs = 1;
   global_runtime_config.verbose = true;
-  nvshmemx_init_attr(NVSHMEMX_INIT_WITH_MPI_COMM, &attr);
-  nvshmem_barrier_all();
 
   std::vector<TaskDesc> all_tasks;
   std::vector<EventDesc> all_events;

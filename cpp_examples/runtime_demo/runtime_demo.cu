@@ -5,6 +5,7 @@ static void _init_persistent_kernel(std::vector<TaskDesc> &all_tasks,
                                     std::vector<TaskId> &first_tasks,
                                     int num_gpus,
                                     int my_gpu_id) {
+  first_tasks.push_back(1);
 }
 
 int main(int argc, char **argv) {
@@ -16,7 +17,7 @@ int main(int argc, char **argv) {
   std::vector<void const *> input_tensors;
   std::vector<void *> output_tensors;
   void *buf;
-  init_persistent_kernel(input_tensors, output_tensors, 106, 6, 2);
+  init_persistent_kernel(input_tensors, output_tensors, rank, 106, 6, 2);
   MPI_Finalize();
 }
 

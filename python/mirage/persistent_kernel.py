@@ -56,8 +56,29 @@ static PyObject *init_func(PyObject *self, PyObject *args) {
   Py_RETURN_NONE;
 }
 
+static PyObject *launch_func(PyObject *self, PyObject *args) {
+  PyObject *py_stream;
+  if (!PyArg_ParseTuple(args, "O", &py_stream)) {
+    PyErr_SetString(PyExc_TypeError, "Invalid parameters");
+    return NULL;
+  }
+  cudaStream_t stream = (cudaStream_t)PyLong_AsVoidPtr(py_stream);
+
+  launch_persistent_kernel(stream);
+
+  Py_RETURN_NONE;
+}
+
+static PyObject *finalize_func(PyObject *self, PyObject *args) {
+  finalize_persistent_kernel();
+
+  Py_RETURN_NONE;
+}
+
 static PyMethodDef ModuleMethods[] = {
-  {"init_func", init_func, METH_VARARGS, "Entry point for all kernels with this signature"},
+  {"init_func", init_func, METH_VARARGS, "initialize persistent kernel"},
+  {"launch_func", launch_func, METH_VARARGS, "launch persistent kernel"},
+  {"finalize_func", finalize_func, METH_VARARGS, "finalize persistent kernel"},
   {NULL, NULL, 0, NULL} // sentinel
 };
 
@@ -142,7 +163,7 @@ def get_compile_command(target_cc,
 
 class PersistentKernel:
     def __init__(self, file_path : str, mpi_rank : int, num_workers : int, num_local_schedulers : int, num_remote_schedulers : int, **kwargs):
-
+        self.__finalized__ = False
         MIRAGE_ROOT, INCLUDE_PATH, DEPS_PATH = get_key_paths()
         tempdir_obj = tempfile.TemporaryDirectory()
         tempdir = tempdir_obj.name
@@ -246,6 +267,8 @@ class PersistentKernel:
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
         self.init_func = getattr(mod, "init_func")
+        self.launch_func = getattr(mod, "launch_func")
+        self.finalize_func = getattr(mod, "finalize_func")
 
         # initialize persistent kernel
         input_tensors = kwargs.get("inputs", [])
@@ -261,3 +284,13 @@ class PersistentKernel:
         stream = kwargs.get("stream", None)
         if stream is None:
             stream = torch.cuda.default_stream()
+        self.launch_func(stream)
+
+    def __del__(self):
+        if not self.__finalized__:
+            self.finalize()
+
+    def finalize(self):
+        assert not self.__finalized__
+        self.finalize_func()
+        self.__finalized__ = True
