@@ -168,9 +168,9 @@ def function_map(graph, func, inputs, kwargs={}):
         case "Div": return graph.div(*inputs)
         case "Reciprocal": return graph.div(*inputs)
         case "Sqrt": return graph.sqrt(*inputs)
-        case "Pow" | "Square": 
+        case "Pow": return graph.pow(*inputs)
+        case "Square": 
             return graph.square(inputs[0])
-        # case "Pow": return graph.pow(*inputs)
         case "Softmax": # In case of softmax, inputs must be of form (mat, axis)
             exp = graph.exp(inputs[0])
             summed = graph.reduction(exp, inputs[1])
