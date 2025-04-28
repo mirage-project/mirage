@@ -59,17 +59,17 @@ __device__ __forceinline__ T perform_element_unary_chain(T a, float scalar_first
     return perform_element_unary_chain<T, RemainingOps...>(first_result, scalar_remaining);
 }
 
-template <typename T, int NUM_THREADS, ElementUnaryOpType FirstOp, ElementUnaryOpType... RemainingOps>
+// now assume input output using the same layout 
+template <typename SMEM, int NUM_THREADS, ElementUnaryOpType FirstOp, ElementUnaryOpType... RemainingOps>
 __device__ __forceinline__ void perform_element_unary_chain_kernel(
-    T* __restrict__ dst,
-    const T* __restrict__ src,
+    SMEM dst,
+    const SMEM src,
     int size,
-    int thread_idx,
     float scalar_first,
     float... scalar_remaining) {
-  for (int elem_idx = thread_idx; elem_idx < size; elem_idx += NUM_THREADS) {
-    T value = src[elem_idx];
-    T result = perform_element_unary_chain<T, FirstOp, RemainingOps...>(value, scalar_first, scalar_remaining...);
+  for (int elem_idx = threadIdx.x; elem_idx < SMEM::size(); elem_idx += NUM_THREADS) {
+    auto value = src[elem_idx];
+    auto result = perform_element_unary_chain<typename SmemRow::value_type, FirstOp, RemainingOps...>(value, scalar_first, scalar_remaining...);
     dst[elem_idx] = result;
   }
 }

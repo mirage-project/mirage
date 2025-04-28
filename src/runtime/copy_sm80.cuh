@@ -21,6 +21,8 @@ namespace runtime {
  #  define MIRAGE_CP_ASYNC_SM80_ENABLED
  #endif
 
+ //cp async
+
  template <int N>
  __device__ __forceinline__void cp_async_wait()
  {
@@ -50,5 +52,26 @@ template <typename T>
  #endif
  }
 
-    }
+ //ldmatrix
+ __device__ __forceinline__ void ldsm(uint32_t offset, uint32_t* R) {
+  #ifdef MIRAGE_CP_ASYNC_SM80_ENABLED
+
+  b128_t* smem_ptr = base + offset;
+  asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0, %1, %2, %3}, [%4];\n"
+    : "=r"(R[0]), "=r"(R[1]), "=r"(R[2]), "=r"(R[3])
+    : "r"(smem_int_ptr));
+    #endif
+}
+
+__device__ __forceinline__ void ldsm_t(uint32_t offset, uint32_t* R) {
+  #ifdef MIRAGE_CP_ASYNC_SM80_ENABLED
+  b128_t* smem_ptr = base + offset;
+  asm volatile("ldmatrix.sync.aligned.trans.m8n8.x4.shared.b16 {%0, %1, %2, %3}, [%4];\n"
+    : "=r"(R[0]), "=r"(R[1]), "=r"(R[2]), "=r"(R[3])
+    : "r"(smem_int_ptr));
+    #endif
+}
+
+
+}
 }
