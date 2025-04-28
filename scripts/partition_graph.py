@@ -67,23 +67,24 @@ def get_partitions(op_node, min_num_ops, max_num_ops, all_subgraphs, UNSUPPORTED
                 op_needs_broadcast = True
                 break
         if not op_needs_broadcast:
-            get_partitions_helper(op_node, {op_node: []}, min_num_ops, max_num_ops, set(), all_subgraphs, UNSUPPORTED_OPS, COMPOSITE_OPS, IGNORE_OPS)
+            if op_node.fn in COMPOSITE_OPS:
+                num_ops = COMPOSITE_OPS[op_node.fn]
+            else:
+                num_ops = 1
+            get_partitions_helper(op_node, {op_node: []}, num_ops, min_num_ops, max_num_ops, set(), all_subgraphs, UNSUPPORTED_OPS, COMPOSITE_OPS, IGNORE_OPS)
 
-def get_partitions_helper(op_node, curr_subgraph, min_num_ops, max_num_ops, visited, all_subgraphs, UNSUPPORTED_OPS, COMPOSITE_OPS, IGNORE_OPS):
+def get_partitions_helper(op_node, curr_subgraph, num_ops, min_num_ops, max_num_ops, visited, all_subgraphs, UNSUPPORTED_OPS, COMPOSITE_OPS, IGNORE_OPS):
     # if it is a composite operator, return a subgraph with only that one operator
-    if op_node.fn in COMPOSITE_OPS:
-        all_subgraphs.append(copy_subgraph(curr_subgraph))
-        return
     if id(op_node.name) in visited:
         return
-    if len(curr_subgraph) > max_num_ops:
+    if num_ops > max_num_ops:
         return
     if contains_4D_tensors(op_node):
         return
     
     # assume op_node already in curr_subgraph
     visited.add(id(op_node.name))
-    if len(curr_subgraph) >= min_num_ops:
+    if num_ops >= min_num_ops:
         all_subgraphs.append(copy_subgraph(curr_subgraph))
 
     def find_valid_output_ops(output_op, orig_out_id, prev_out_id, valid_output_ops, visited):
@@ -94,7 +95,7 @@ def get_partitions_helper(op_node, curr_subgraph, min_num_ops, max_num_ops, visi
         visited.add(id(output_op.name))
         
         # .union(COMPOSITE_OPS) ensures that no second operator of a subgraph is composite op
-        if output_op.fn in UNSUPPORTED_OPS.union(COMPOSITE_OPS):
+        if output_op.fn in UNSUPPORTED_OPS:
             return
         
         input_dims = len(output_op.input_tensor_shapes[0][0])
@@ -133,14 +134,18 @@ def get_partitions_helper(op_node, curr_subgraph, min_num_ops, max_num_ops, visi
                 if output_node not in curr_subgraph_copy:
                     curr_subgraph_copy[output_node] = []
                 curr_subgraph_copy[op_node].append(output_node)
-                get_partitions_helper(output_node, copy_subgraph(curr_subgraph_copy), min_num_ops, max_num_ops, visited_copy, all_subgraphs, UNSUPPORTED_OPS, COMPOSITE_OPS, IGNORE_OPS)
+                if output_node.fn in COMPOSITE_OPS:
+                    num_ops += COMPOSITE_OPS[output_node.fn]
+                else:
+                    num_ops += 1
+                get_partitions_helper(output_node, copy_subgraph(curr_subgraph_copy), num_ops, min_num_ops, max_num_ops, visited_copy, all_subgraphs, UNSUPPORTED_OPS, COMPOSITE_OPS, IGNORE_OPS)
 
 def partition_graph(model, 
                     dummy_input, 
                     min_num_ops=2, 
                     max_num_ops=4, 
                     UNSUPPORTED_OPS=set(), # these are operators not supported by Mirage
-                    COMPOSITE_OPS=set(),
+                    COMPOSITE_OPS=dict(),
                     IGNORE_OPS=set()): # these are operators that performs no operations on the tensors
     unique_operators = {}
     operators = get_computation_graph(model, dummy_input, unique_operators, "onnx")
@@ -148,7 +153,6 @@ def partition_graph(model,
     all_subgraphs = []
     for _, op_node in operators.items():
         get_partitions(op_node, min_num_ops, max_num_ops, all_subgraphs, UNSUPPORTED_OPS, COMPOSITE_OPS, IGNORE_OPS)
-
     return all_subgraphs, unique_operators
 
 def function_map(graph, func, inputs, kwargs={}):
@@ -164,13 +168,13 @@ def function_map(graph, func, inputs, kwargs={}):
         case "Div": return graph.div(*inputs)
         case "Reciprocal": return graph.div(*inputs)
         case "Sqrt": return graph.sqrt(*inputs)
-        case "Pow" | "Square": 
+        case "Pow": return graph.pow(*inputs)
+        case "Square": 
             return graph.square(inputs[0])
-        # case "Pow": return graph.pow(*inputs)
-        # case "Softmax": # In case of softmax, inputs must be of form (mat, axis)
-        #     exp = graph.exp(inputs[0])
-        #     summed = graph.reduction(exp, inputs[1])
-        #     return graph.div(exp, summed)
+        case "Softmax": # In case of softmax, inputs must be of form (mat, axis)
+            exp = graph.exp(inputs[0])
+            summed = graph.reduction(exp, inputs[1])
+            return graph.div(exp, summed)
         case "Sigmoid":
             matrix = inputs[0]
             ones = inputs[1]
@@ -182,12 +186,12 @@ def function_map(graph, func, inputs, kwargs={}):
         case "Neg": 
             return graph.mul(*inputs)
         case "RMSNormalization": return graph.rms_norm(*inputs) # Onnx doesn't support different normalized shape
-        # case "ReduceMean":
-        #     matrix = inputs[0]
-        #     dim = inputs[1]
-        #     num_els = input[2]
-        #     reduced = graph.reduction(matrix, dim)
-        #     return graph.div(reduced, num_els)
+        case "ReduceMean":
+            matrix = inputs[0]
+            dim = inputs[1]
+            num_els = inputs[2]
+            reduced = graph.reduction(matrix, dim)
+            return graph.div(reduced, num_els)
         case _: 
             raise NotImplementedError
 
@@ -207,23 +211,39 @@ def to_kernel_graph(subgraph):
                 inputs.append(intermediates[tensor_id][0])
                 intermediates[tensor_id][1] += 1
         if (op.fn == "Sigmoid"):
+            assert len(op.input_tensor_shapes) == 1
+            assert len(inputs) == 1
             shape = op.output_tensor_shapes[0][0]
             dims.append((shape, "C", 1.0))
             inputs.append(graph.new_input(dims=shape, dtype=mi.float16))
             dims.append((shape, "C", -1.0))
             inputs.append(graph.new_input(dims=shape, dtype=mi.float16))
         elif (op.fn == "Neg"):
+            assert len(op.input_tensor_shapes) == 1
+            assert len(inputs) == 1
             shape = op.output_tensor_shapes[0][0]
             dims.append((shape, "C", -1.0))
             inputs.append(graph.new_input(dims=shape, dtype=mi.float16))
         elif (op.fn == "Reciprocal"):
+            assert len(op.input_tensor_shapes) == 1
+            assert len(inputs) == 1
             shape = op.output_tensor_shapes[0][0]
             dims.append((shape, "C", 1.0))
             inputs.insert(0, graph.new_input(dims=shape, dtype=mi.float16))
-        # elif (op.fn == "ReduceMean"):
-        #     shape = op.output_tensor_shapes[0][0]
-        #     num_els = op.output_tensor_shapes[0][0][-1]
-        #     dims.append((shape, "C", num_els))
+        elif (op.fn == "ReduceMean"):
+            assert len(op.input_tensor_shapes) == 1
+            assert len(inputs) == 1
+            shape = op.output_tensor_shapes[0][0]
+            num_els = op.output_tensor_shapes[0][0][-1]
+            dims.append((shape, "C", num_els))
+            dim = len(shape) - 1
+            inputs.append(dim)
+            inputs.append(graph.new_input(dims=shape, dtype=mi.float16))
+        elif (op.fn == "Softmax"):
+            assert len(op.input_tensor_shapes) == 1
+            assert len(inputs) == 1
+            last_dim = len(op.input_tensor_shapes[0][0]) - 1
+            inputs.append(last_dim)
         inputs += op.additional_params
         kwargs = op.kwargs
         res = function_map(graph, op, inputs, kwargs)
@@ -255,6 +275,7 @@ def generate_all_kernels(model, dummy_inputs, min_num_ops=2, max_num_ops=4, UNSU
         kernel_graph.to_json(f"original_{graph_hash}.json")
         
         try:
+            print(f"Superoptimizing {graph_hash}")
             optimized_graph, best_perf = kernel_graph.superoptimize()
         except Exception as e:
             print(f"Subgraph {graph_hash} superoptimize failed with error: {e}")
