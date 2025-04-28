@@ -1,4 +1,3 @@
-# import mirage as mi
 import numpy as np
 import torch
 import os
@@ -22,18 +21,24 @@ def run_impl(impl_name, case_name, batch_size):
     print(f"Script {script} does not exist.")
     return
   stdout_file = os.path.join(mirage_root, 'ae_scripts', f'{case_name}_{impl_name}_bs{batch_size}.out')
+  stderr_file = os.path.join(mirage_root, 'ae_scripts', f'{case_name}_{impl_name}_bs{batch_size}.err')
+
+  if os.path.exists(stdout_file):
+    return
 
   try:
-    with open(stdout_file, 'w') as stdout:
+    with open(stdout_file, 'w') as stdout, open(stderr_file, 'w') as stderr:
       if impl_name == 'mirage':
         subprocess.run(
           ['python3', script, '-b', str(batch_size), '--file', checkpoint],
-          stdout=stdout
+          stdout=stdout,
+          stderr=stderr,
         )
       else:
         subprocess.run(
           ['python3', script, '-b', str(batch_size)],
-          stdout=stdout
+          stdout=stdout,
+          stderr=stderr,
         )
       
   except Exception as e:
@@ -104,8 +109,7 @@ def parse_results(impl_name, case_name, batch_size):
 
 
 def benchmark_evaluation():
-  # models = ['gated_mlp', 'gqa', 'lora', 'norm_transformer', 'qknorm_gqa', 'rmsnorm']
-  models = ['gated_mlp']
+  models = ['gated_mlp', 'gqa', 'lora', 'norm_transformer', 'qknorm_gqa', 'rmsnorm']
   batch_sizes = [1, 8]
   results = dict()
   for model in models:
@@ -125,7 +129,7 @@ def benchmark_evaluation():
 
 
 def end2end_evaluation():
-  models = ['chameleon-7b', 'llama-8b', 'lora', 'ngpt']
+  models = ['chameleon-7b', 'llama3-8b', 'lora', 'ngpt']
   batch_sizes = [1, 8]
   for model in models:
     for batch_size in batch_sizes:
