@@ -21,7 +21,7 @@ def get_rms_linear():
     D = graph.rms_norm(X, normalized_shape=(4096,))
     O = graph.matmul(D, W)
     graph.mark_output(O)
-    return graph.superoptimize(config="mlp", previous_checkpoint="llama_rms_linear_bs{batch_size}.json")
+    return graph.superoptimize(config="mlp", previous_checkpoint=f"llama_rms_linear_bs{batch_size}.json")
 
 def get_lora():
     graph = mi.new_kernel_graph()
@@ -50,12 +50,13 @@ def get_lora():
     graph.mark_output(O[0])
     return graph
 
-def get_lora2():
+def get_lora2(input_strides):
+    X_strides, W_strides, A_strides, B_strides = input_strides
     graph = mi.new_kernel_graph()
-    X = graph.new_input(dims=(batch_size * num_tokens, 14336), dtype=mi.float16)
-    W = graph.new_input(dims=(14336, 4096), dtype=mi.float16)
-    A = graph.new_input(dims=(14336, 16), dtype=mi.float16)
-    B = graph.new_input(dims=(16, 4096), dtype=mi.float16)
+    X = graph.new_input(dims=(batch_size * num_tokens, 14336), dtype=mi.float16, strides=X_strides)
+    W = graph.new_input(dims=(14336, 4096), dtype=mi.float16, strides=W_strides)
+    A = graph.new_input(dims=(14336, 16), dtype=mi.float16, strides=A_strides)
+    B = graph.new_input(dims=(16, 4096), dtype=mi.float16, strides=B_strides)
     tb_graph = mi.new_threadblock_graph(grid_dim=(128,1,1), block_dim=(128,1,1), forloop_range=224, reduction_dimx=64)
     tX = tb_graph.new_input(dtensor=X, input_map=(-1, -1, -1), forloop_dim=1)
     tW = tb_graph.new_input(dtensor=W, input_map=(1, -1, -1), forloop_dim=0)
@@ -97,6 +98,10 @@ def mirage_llama(X, Wqkv, Wo, W13, W2, Kcache, Vcache, A1, B1, A2, B2, kernels):
     X13 = outputs[0]
     X1, X3 = X13.chunk(2, -1)
     # LoRA2
+    if not kernels[3]:
+        input_strides = [X1.stride(), W2.stride(), A2.stride(), B2.stride()]
+        func = get_lora2(input_strides)
+        kernels[3] = func
     func = kernels[3]
     outputs = func(inputs=[X1, W2, A2, B2])
     output = outputs[0]
@@ -123,7 +128,8 @@ if __name__ == "__main__":
     k1 = get_rms_linear()
     k2 = None
     k3 = get_lora()
-    k4 = get_lora2()
+    # k4 = get_lora2()
+    k4 = None
     kernels = [k1, k2, k3, k4]
 
     for _ in range(16):

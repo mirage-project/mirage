@@ -5,7 +5,7 @@ import argparse
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--bs', type=int, default=1)
+    parser.add_argument('-b', '--batch_size', type=int, default=1)
     parser.add_argument('--file', type=str, default='group_query_attention.json')
     parser.add_argument('--backend', type=str, default='cuda')
     parser.add_argument('--warmup', type=int, default=16)
@@ -13,7 +13,7 @@ if __name__ == "__main__":
     parser.add_argument('--save_codes', type=bool, default=False)
     
     args = parser.parse_args()
-    batch_size = args.bs
+    batch_size = args.batch_size
     filename = args.file
     backend = args.backend
     warmup_iters = args.warmup

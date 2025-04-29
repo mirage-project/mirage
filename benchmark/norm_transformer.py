@@ -5,7 +5,7 @@ import argparse
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--bs', type=int, default=1)
+    parser.add_argument('-b', '--batch_size', type=int, default=1)
     parser.add_argument('--file', type=str, default='norm_transformer.json')
     parser.add_argument('--backend', type=str, default='cuda')
     parser.add_argument('--warmup', type=int, default=16)
@@ -13,7 +13,7 @@ if __name__ == "__main__":
     parser.add_argument('--save_codes', type=bool, default=False)
 
     args = parser.parse_args()
-    batch_size = args.bs
+    batch_size = args.batch_size
     filename = args.file
     backend = args.backend
     warmup_iters = args.warmup
@@ -21,9 +21,9 @@ if __name__ == "__main__":
     save_codes = args.save_codes
 
     graph = mi.new_kernel_graph()
-    H = graph.new_input(dims=(8 * batch_size, 4096), dtype=mi.float16)
-    X = graph.new_input(dims=(8 * batch_size, 4096), dtype=mi.float16)
-    alpha = graph.new_input(dims=(8 * batch_size, 4096), dtype=mi.float16)
+    H = graph.new_input(dims=(batch_size, 4096), dtype=mi.float16)
+    X = graph.new_input(dims=(batch_size, 4096), dtype=mi.float16)
+    alpha = graph.new_input(dims=(batch_size, 4096), dtype=mi.float16)
     H_norm = graph.rms_norm(H, normalized_shape=(4096,)) # TODO: replace with standard L2 norm
     A = graph.add(H_norm, X) # TODO: replace with subtract
     B = graph.mul(alpha, A)
@@ -34,9 +34,9 @@ if __name__ == "__main__":
     optimized_graph = graph.superoptimize(previous_checkpoint=filename, backend=backend, save_codes=save_codes, warmup_iters=warmup_iters, profile_iters=profile_iters)
 
     input_tensors = [
-        torch.randn(8 * batch_size, 4096, dtype=torch.float16, device='cuda:0'),
-        torch.randn(8 * batch_size, 4096, dtype=torch.float16, device='cuda:0'),
-        torch.randn(8 * batch_size, 4096, dtype=torch.float16, device='cuda:0')
+        torch.randn(batch_size, 4096, dtype=torch.float16, device='cuda:0'),
+        torch.randn(batch_size, 4096, dtype=torch.float16, device='cuda:0'),
+        torch.randn(batch_size, 4096, dtype=torch.float16, device='cuda:0')
     ]
 
     for _ in range(16):

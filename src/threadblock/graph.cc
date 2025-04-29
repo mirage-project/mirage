@@ -25,6 +25,8 @@
 #include "mirage/threadblock/serializer/rms_norm_serializer.h"
 #include "mirage/utils/hash_utils.h"
 
+#include <iostream>
+
 namespace mirage {
 namespace threadblock {
 
@@ -885,6 +887,8 @@ void from_json(json const &j, Graph &graph) {
         break;
       }
       default:
+        std::cerr << op_type << std::endl;
+        std::cerr << json(op_type) << std::endl;
         assert(false && "Unsupported operator");
     }
   }
