@@ -11,6 +11,8 @@ if __name__ == "__main__":
     parser.add_argument('--warmup', type=int, default=16)
     parser.add_argument('--profile', type=int, default=1000)
     parser.add_argument('--save_codes', type=bool, default=False)
+    parser.add_argument('-t', '--thread', type=int, default=-1)
+    parser.add_argument('--max_num_threadblock_graph_op', type=int, default=-1)
 
     args = parser.parse_args()
     batch_size = args.bs

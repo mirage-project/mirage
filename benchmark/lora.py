@@ -39,7 +39,7 @@ if __name__ == "__main__":
         torch.randn(16, 4096, dtype=torch.float16, device='cuda:0')
     ]
 
-    for _ in range(1):
+    for _ in range(16):
         optimized_graph(inputs=input_tensors)
 
     torch.cuda.synchronize()
@@ -52,5 +52,4 @@ if __name__ == "__main__":
     curr_time = starter.elapsed_time(ender)
     mean_syn = curr_time / 1000
 
-    print(mean_syn)
-
+    print("Best muGraph run time (ms): ", mean_syn)
