@@ -184,6 +184,12 @@ __global__ void persistent_kernel(RuntimeConfig config) {
           }
           break;
         }
+        case TASK_ARGMAX: {
+          if (threadIdx.x == 0) {
+            // printf("worker_id(%d) task_type(AllReduce)\n", worker_id);
+          }
+          break;
+        }
         default: {
           assert(false && "Unimplemented task");
         }

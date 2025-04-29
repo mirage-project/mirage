@@ -52,6 +52,31 @@ struct TaskDesc {
   TensorDesc outputs[mirage::config::MAX_NUM_OUTPUTS_PER_OPERATOR];
 };
 
+struct IODesc {
+  enum IOType {
+    TorchTensor,
+    FusedTorchTensor,
+    CUDAMallocTensor,
+    NVSHMEMMallocTensor
+  };
+  IODesc(IOType _type, std::string _name, mirage::kernel::DTensor const &_tensor)
+      : type(_type), name(_name) {
+    tensor.num_dims = _tensor.num_dims;
+    tensor.data_type = _tensor.data_type;
+    assert(_tensor.owner_op->op_type == mirage::type::KN_INPUT_OP);
+    mirage::kernel::KNInputOp const* op = static_cast<mirage::kernel::KNInputOp const*>(_tensor.owner_op);
+    for (int i = 0; i < tensor.num_dims; i++) {
+      tensor.dim[i] = _tensor.dim[i];
+      tensor.stride[i] = op->input_strides[i];
+    }
+  }
+  IOType type;
+  std::string name;
+  TensorDesc tensor;
+  // Only used for fused tensors
+  std::vector<IODesc> sub_descs;
+};
+
 struct RuntimeConfig {
   int num_workers, num_local_schedulers, num_remote_schedulers, num_graphs;
   int num_gpus, my_gpu_id;
@@ -70,6 +95,18 @@ struct RuntimeConfig {
   bool verbose;
 };
 
+struct Dim3Comparator {
+  bool operator()(dim3 const &a, dim3 const &b) const {
+    if (a.x != b.x) {
+      return a.x < b.x;
+    }
+    if (a.y != b.y) {
+      return a.y < b.y;
+    }
+    return a.z < b.z;
+  }
+};
+
 class Runtime {
 public:
   Runtime(int num_gpus, int my_gpu_id);
@@ -83,12 +120,18 @@ public:
                                 int num_local_schedulers,
                                 int num_remote_schedulers);
   bool sanity_check();
+  std::string print_task_graph(
+      mirage::kernel::Graph const &graph,
+      std::unordered_map<mirage::kernel::KNOperator const *,
+                         std::tuple<int, int, TaskType>> const &task_config,
+      std::map<mirage::type::GuidType, IODesc> const &io_configs);
 
 public:
   std::vector<TaskDesc> all_tasks;
   std::vector<EventDesc> all_events;
   std::vector<TaskId> first_tasks;
   int num_graphs, num_gpus, my_gpu_id;
+  std::map<kernel::KNOperator*, std::map<dim3, TaskId, Dim3Comparator> > all_task_maps;
 };
 
 } // namespace runtime
