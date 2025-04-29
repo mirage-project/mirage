@@ -15,21 +15,19 @@ HARD_CODE = """
 static PyObject *init_func(PyObject *self, PyObject *args) {
   PyObject *input_list, *output_list;
   std::vector<void const *> input_tensors;
-  std::vector<void*> output_tensors;
   int my_mpi_rank, num_workers, num_local_schedulers, num_remote_schedulers;
 
-  if (!PyArg_ParseTuple(args, "OOiiii", &input_list, &output_list, &my_mpi_rank, &num_workers, &num_local_schedulers, &num_remote_schedulers)) {
+  if (!PyArg_ParseTuple(args, "Oiiii", &input_list, &my_mpi_rank, &num_workers, &num_local_schedulers, &num_remote_schedulers)) {
     PyErr_SetString(PyExc_TypeError, "Invalid parameters");
     return NULL;
   }
 
-  if(!PyList_Check(input_list) || !PyList_Check(output_list)) {
+  if(!PyList_Check(input_list)) {
     PyErr_SetString(PyExc_TypeError, "Both arg1 and arg2 must be lists.");
     return NULL;
   }
 
   Py_ssize_t input_size = PyList_Size(input_list);
-  Py_ssize_t output_size = PyList_Size(output_list);
 
   for(Py_ssize_t i = 0; i < input_size; i++) {
     PyObject *item = PyList_GetItem(input_list, i);
@@ -41,17 +39,7 @@ static PyObject *init_func(PyObject *self, PyObject *args) {
     input_tensors.push_back(PyLong_AsVoidPtr(item));
   }
 
-  for(Py_ssize_t i = 0; i < output_size; i++) {
-    PyObject *item = PyList_GetItem(output_list, i);
-    void* tensor = PyLong_AsVoidPtr(item);
-    if(!tensor) {
-      PyErr_Format(PyExc_TypeError, "Failed to convert item %d (output) to void pointer", i);
-      return NULL;
-    }
-    output_tensors.push_back(PyLong_AsVoidPtr(item));
-  }
-
-  init_persistent_kernel(input_tensors, output_tensors, my_mpi_rank, num_workers, num_local_schedulers, num_remote_schedulers);
+  init_persistent_kernel(input_tensors, my_mpi_rank, num_workers, num_local_schedulers, num_remote_schedulers);
 
   Py_RETURN_NONE;
 }

@@ -49,6 +49,7 @@ enum TaskType {
 struct TensorDesc {
   int num_dims;
   void *base_ptr;
+  int data_type;
   int dim[MAX_TENSOR_DIMS];
   int stride[MAX_TENSOR_DIMS];
 };
@@ -426,11 +427,11 @@ void gpu_free(void *ptr) {
 static void _init_persistent_kernel(std::vector<TaskDesc> &all_tasks,
                                     std::vector<EventDesc> &all_events,
                                     std::vector<TaskId> &first_tasks,
+				    std::vector<void const *> const &torch_tensors,
                                     int num_gpus,
                                     int my_gpu_id);
 
-extern "C" void init_persistent_kernel(std::vector<void const *> input_tensors,
-                                       std::vector<void *> output_tensors,
+extern "C" void init_persistent_kernel(std::vector<void const *> torch_tensors,
 				       int my_rank,
                                        int num_workers,
                                        int num_local_schedulers,
@@ -463,7 +464,7 @@ extern "C" void init_persistent_kernel(std::vector<void const *> input_tensors,
   std::vector<TaskDesc> all_tasks;
   std::vector<EventDesc> all_events;
   std::vector<TaskId> first_tasks;
-  _init_persistent_kernel(all_tasks, all_events, first_tasks, npes, mype);
+  _init_persistent_kernel(all_tasks, all_events, first_tasks, torch_tensors, npes, mype);
 
   // Initialize worker queue last task id
   global_runtime_config.worker_queue_last_ready_task_id =
