@@ -43,6 +43,7 @@ enum TaskType {
   TASK_ALLREDUCE = 106,
   TASK_REDUCE = 107,
   TASK_MATMUL = 108,
+  TASK_ARGMAX = 109,
   TASK_NVSHMEM_COPY = 199,
 };
 
@@ -255,6 +256,12 @@ __global__ void persistent_kernel(RuntimeConfig config) {
           }
           break;
         }
+        case TASK_ARGMAX: {
+          if (threadIdx.x == 0) {
+            // printf("worker_id(%d) task_type(AllReduce)\n", worker_id);
+          }
+          break;
+        }
         default: {
           assert(false && "Unimplemented task");
         }
@@ -431,12 +438,14 @@ static void _init_persistent_kernel(std::vector<TaskDesc> &all_tasks,
                                     int num_gpus,
                                     int my_gpu_id);
 
+
+static RuntimeConfig global_runtime_config;
+
 extern "C" void init_persistent_kernel(std::vector<void const *> torch_tensors,
 				       int my_rank,
                                        int num_workers,
                                        int num_local_schedulers,
                                        int num_remote_schedulers) {
-  static RuntimeConfig global_runtime_config;
   global_runtime_config.num_workers = num_workers;
   global_runtime_config.num_local_schedulers = num_local_schedulers;
   global_runtime_config.num_remote_schedulers = num_remote_schedulers;
@@ -464,6 +473,9 @@ extern "C" void init_persistent_kernel(std::vector<void const *> torch_tensors,
   std::vector<TaskDesc> all_tasks;
   std::vector<EventDesc> all_events;
   std::vector<TaskId> first_tasks;
+  for (int i = 0; i < 1024; i++) {
+    torch_tensors.push_back((void*)0);
+  }
   _init_persistent_kernel(all_tasks, all_events, first_tasks, torch_tensors, npes, mype);
 
   // Initialize worker queue last task id
@@ -579,7 +591,6 @@ extern "C" void init_persistent_kernel(std::vector<void const *> torch_tensors,
 
 // Entry point for C/C++
 extern "C" void launch_persistent_kernel(cudaStream_t stream) {
-  static RuntimeConfig global_runtime_config;
   void *args[] = {&global_runtime_config};
   // Launcher persistent kernel
   cudaFuncSetAttribute(persistent_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, 22656);
@@ -587,12 +598,11 @@ extern "C" void launch_persistent_kernel(cudaStream_t stream) {
                              dim3(108, 1, 1),
                              dim3(128, 1, 1),
                              args,
-                             1024 /*sharedmem*/,
+                             22656 /*sharedmem*/,
                              stream /*stream*/);
 }
 
 extern "C" void finalize_persistent_kernel() {
-  static RuntimeConfig global_runtime_config;
   gpu_free(global_runtime_config.worker_queue_last_ready_task_id);
   gpu_free(global_runtime_config.worker_queue_next_free_task_id);
   gpu_free(global_runtime_config.sched_queue_last_ready_event_id);

@@ -13,7 +13,7 @@ HARD_CODE = """
 #include <cuda_runtime.h>
 
 static PyObject *init_func(PyObject *self, PyObject *args) {
-  PyObject *input_list, *output_list;
+  PyObject *input_list;
   std::vector<void const *> input_tensors;
   int my_mpi_rank, num_workers, num_local_schedulers, num_remote_schedulers;
 
@@ -260,10 +260,8 @@ class PersistentKernel:
 
         # initialize persistent kernel
         input_tensors = kwargs.get("inputs", [])
-        output_tensors = kwargs.get("inputs", [])
         input_tensors_ptr = [tensor.data_ptr() for tensor in input_tensors]
-        output_tensors_ptr = [tensor.data_ptr() for tensor in output_tensors]
-        self.init_func(input_tensors_ptr, output_tensors_ptr, mpi_rank, num_workers, num_local_schedulers, num_remote_schedulers)
+        self.init_func(input_tensors_ptr, mpi_rank, num_workers, num_local_schedulers, num_remote_schedulers)
 
         #self.call_func = getattr(mod, "call_func")
 
