@@ -347,12 +347,12 @@ def get_computation_graph(model, dummy_input, unique_operators, method):
 
             # dynamic_axes = {name: {0: "batch_size"} for name in model.get_input_names() + model.get_output_names()}
 
-            torch.onnx.export(
-                model,
-                dummy_input,
-                onnx_path,
-                dynamo=True
-            )
+            # torch.onnx.export(
+            #     model,
+            #     dummy_input,
+            #     onnx_path,
+            #     dynamo=True
+            # )
             
             # shape_inference.infer_shapes_path(model_path="scripts/onnx/integrate_test.onnx",
             #                                   output_path="scripts/onnx/inferred_model.onnx") # for shape inference of inputs and outputs
