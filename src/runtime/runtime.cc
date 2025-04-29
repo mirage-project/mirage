@@ -472,25 +472,32 @@ std::string Runtime::print_task_graph(
   using mirage::runtime::IODesc;
   mirage::transpiler::CodeKeeper code;
   code.e("#include \"persistent_kernel.cuh\"");
-  code.e("static void _init_persistent_kernel(std::vector<TaskDesc> &all_tasks,");
-  code.e("                                  std::vector<EventDesc> &all_events,");
+  code.e(
+      "static void _init_persistent_kernel(std::vector<TaskDesc> &all_tasks,");
+  code.e(
+      "                                  std::vector<EventDesc> &all_events,");
   code.e("                                  std::vector<TaskId> &first_tasks,");
-  code.e("                                  std::vector<void const*> const &torch_tensors,");
+  code.e("                                  std::vector<void const*> const "
+         "&torch_tensors,");
   code.e("                                  int num_gpus,");
   code.e("                                  int my_gpu_id) {");
 
   int num_torch_tensors = 0;
-  for (const auto & iter : io_configs) {
+  for (auto const &iter : io_configs) {
     IODesc desc = iter.second;
-    switch(desc.type) {
+    switch (desc.type) {
       case IODesc::TorchTensor: {
-        code.e("char *$ = (char*) torch_tensors[$];", desc.name, num_torch_tensors);
+        code.e("char *$ = (char*) torch_tensors[$];",
+               desc.name,
+               num_torch_tensors);
         num_torch_tensors++;
         break;
       }
       case IODesc::FusedTorchTensor: {
-        for (const auto & desc : desc.sub_descs) {
-          code.e("char *$ = (char*)torch_tensors[$];", desc.name, num_torch_tensors);
+        for (auto const &desc : desc.sub_descs) {
+          code.e("char *$ = (char*)torch_tensors[$];",
+                 desc.name,
+                 num_torch_tensors);
           num_torch_tensors++;
         }
         break;
@@ -518,12 +525,10 @@ std::string Runtime::print_task_graph(
     }
   }
   // generate task[0]
-  {
-    code.e("all_tasks.push_back(TaskDesc(TASK_TERMINATE));");
-  }
+  { code.e("all_tasks.push_back(TaskDesc(TASK_TERMINATE));"); }
   // generate all other tasks
   size_t task_pos = 1;
-  for (const auto & op : graph.operators) {
+  for (auto const &op : graph.operators) {
     if (op->op_type == type::KNOperatorType::KN_INPUT_OP) {
       continue;
     }
@@ -540,7 +545,7 @@ std::string Runtime::print_task_graph(
     std::vector<tb::TBInputOp *> input_ops;
     std::vector<tb::TBInputOp *> output_ops;
     int num_inputs = std::get<0>(task_config);
-    //int num_outputs = std::get<1>(task_config);
+    // int num_outputs = std::get<1>(task_config);
     TaskType task_type = std::get<2>(task_config);
     for (auto const &op : bgraph.operators) {
       assert(op->op_type == mirage::type::TB_INPUT_OP);
@@ -560,37 +565,45 @@ std::string Runtime::print_task_graph(
           assert(task_pos == (task_id & 0xffffffff));
           code.e("// task[$]", task_pos);
           code.e("{");
-          code.e("TaskDesc task_desc(static_cast<TaskType>($));", task_desc.task_type);
+          code.e("TaskDesc task_desc(static_cast<TaskType>($));",
+                 task_desc.task_type);
           code.e("task_desc.trigger_event = $;", task_desc.trigger_event);
           for (int i = 0; i < task_desc.num_inputs; i++) {
             off_t offset = 0;
             int num_dims = input_ops[i]->dtensor.num_dims;
             int3 input_map = input_ops[i]->input_map;
-            IODesc io_desc = io_configs.find(input_ops[i]->dtensor.guid)->second;
-            assert(input_ops[i]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
+            IODesc io_desc =
+                io_configs.find(input_ops[i]->dtensor.guid)->second;
+            assert(input_ops[i]->dtensor.owner_op->op_type ==
+                   type::KN_INPUT_OP);
             if (io_desc.type == IODesc::FusedTorchTensor) {
               // Currently assert that we fuse the last dim (i.e.,num_dims - 1)
               int fused_dim = 0;
-              for (const auto & sub_desc : io_desc.sub_descs) {
-                fused_dim += sub_desc.tensor.dim[num_dims-1];
+              for (auto const &sub_desc : io_desc.sub_descs) {
+                fused_dim += sub_desc.tensor.dim[num_dims - 1];
                 assert(sub_desc.tensor.num_dims == num_dims);
               }
-              assert(io_desc.tensor.dim[num_dims-1] == fused_dim);
+              assert(io_desc.tensor.dim[num_dims - 1] == fused_dim);
               assert(io_desc.tensor.num_dims == num_dims);
               int fused_dim_off = 0;
               if (input_map.x == num_dims - 1) {
-                fused_dim_off = io_desc.tensor.dim[num_dims-1] / bgraph.grid_dim.x * bid.x;
+                fused_dim_off = io_desc.tensor.dim[num_dims - 1] /
+                                bgraph.grid_dim.x * bid.x;
               }
               if (input_map.y == num_dims - 1) {
-                fused_dim_off = io_desc.tensor.dim[num_dims-1] / bgraph.grid_dim.y * bid.y;
+                fused_dim_off = io_desc.tensor.dim[num_dims - 1] /
+                                bgraph.grid_dim.y * bid.y;
               }
               if (input_map.z == num_dims - 1) {
-                fused_dim_off = io_desc.tensor.dim[num_dims-1] / bgraph.grid_dim.z * bid.z;
+                fused_dim_off = io_desc.tensor.dim[num_dims - 1] /
+                                bgraph.grid_dim.z * bid.z;
               }
               size_t index = 0;
               while (index < io_desc.sub_descs.size()) {
-                if (fused_dim_off >= io_desc.sub_descs[index].tensor.dim[num_dims-1]) {
-                  fused_dim_off -= io_desc.sub_descs[index].tensor.dim[num_dims-1];
+                if (fused_dim_off >=
+                    io_desc.sub_descs[index].tensor.dim[num_dims - 1]) {
+                  fused_dim_off -=
+                      io_desc.sub_descs[index].tensor.dim[num_dims - 1];
                   index++;
                 } else {
                   break;
@@ -598,53 +611,79 @@ std::string Runtime::print_task_graph(
               }
               IODesc sub_desc = io_desc.sub_descs[index];
               if (input_map.x >= 0 && input_map.x != num_dims - 1) {
-                size_t block_size = sub_desc.tensor.dim[input_map.x] / bgraph.grid_dim.x;
-                offset += block_size * bid.x * sub_desc.tensor.stride[input_map.x];
+                size_t block_size =
+                    sub_desc.tensor.dim[input_map.x] / bgraph.grid_dim.x;
+                offset +=
+                    block_size * bid.x * sub_desc.tensor.stride[input_map.x];
               } else if (input_map.x == num_dims - 1) {
                 offset += fused_dim_off * sub_desc.tensor.stride[input_map.x];
               }
               if (input_map.y >= 0 && input_map.y != num_dims - 1) {
-                size_t block_size = sub_desc.tensor.dim[input_map.y] / bgraph.grid_dim.y;
-                offset += block_size * bid.y * sub_desc.tensor.stride[input_map.y];
+                size_t block_size =
+                    sub_desc.tensor.dim[input_map.y] / bgraph.grid_dim.y;
+                offset +=
+                    block_size * bid.y * sub_desc.tensor.stride[input_map.y];
               } else if (input_map.y == num_dims - 1) {
                 offset += fused_dim_off * sub_desc.tensor.stride[input_map.y];
               }
               if (input_map.z >= 0 && input_map.z != num_dims - 1) {
-                size_t block_size = sub_desc.tensor.dim[input_map.z] / bgraph.grid_dim.z;
-                offset += block_size * bid.z * sub_desc.tensor.stride[input_map.z];
+                size_t block_size =
+                    sub_desc.tensor.dim[input_map.z] / bgraph.grid_dim.z;
+                offset +=
+                    block_size * bid.z * sub_desc.tensor.stride[input_map.z];
               } else if (input_map.z == num_dims - 1) {
                 offset += fused_dim_off * sub_desc.tensor.stride[input_map.z];
               }
               code.e("TensorDesc input$;", i);
-              code.e("input$.base_ptr = static_cast<char*>($) + $;", i, sub_desc.name, offset * type::get_datatype_size(sub_desc.tensor.data_type));
+              code.e("input$.base_ptr = static_cast<char*>($) + $;",
+                     i,
+                     sub_desc.name,
+                     offset *
+                         type::get_datatype_size(sub_desc.tensor.data_type));
               code.e("input$.num_dims = $;", i, task_desc.inputs[i].num_dims);
               code.e("input$.data_type = $;", i, task_desc.inputs[i].data_type);
               for (int d = 0; d < task_desc.inputs[i].num_dims; d++) {
                 code.e("input$.dim[$] = $;", i, d, task_desc.inputs[i].dim[d]);
-                code.e("input$.stride[$] = $;", i, d, task_desc.inputs[i].stride[d]);
+                code.e("input$.stride[$] = $;",
+                       i,
+                       d,
+                       task_desc.inputs[i].stride[d]);
               }
               code.e("task_desc.inputs[$] = input$;", i, i);
             } else {
               // Non-fused case, use io_desc
               if (input_map.x >= 0) {
-                size_t block_size = io_desc.tensor.dim[input_map.x] / bgraph.grid_dim.x;
-                offset += block_size * bid.x * io_desc.tensor.stride[input_map.x];
+                size_t block_size =
+                    io_desc.tensor.dim[input_map.x] / bgraph.grid_dim.x;
+                offset +=
+                    block_size * bid.x * io_desc.tensor.stride[input_map.x];
               }
               if (input_map.y >= 0) {
-                size_t block_size = io_desc.tensor.dim[input_map.y] / bgraph.grid_dim.y;
-                offset += block_size * bid.y * io_desc.tensor.stride[input_map.y];
+                size_t block_size =
+                    io_desc.tensor.dim[input_map.y] / bgraph.grid_dim.y;
+                offset +=
+                    block_size * bid.y * io_desc.tensor.stride[input_map.y];
               }
               if (input_map.z >= 0) {
-                size_t block_size = io_desc.tensor.dim[input_map.z] / bgraph.grid_dim.z;
-                offset += block_size * bid.z * io_desc.tensor.stride[input_map.z];
+                size_t block_size =
+                    io_desc.tensor.dim[input_map.z] / bgraph.grid_dim.z;
+                offset +=
+                    block_size * bid.z * io_desc.tensor.stride[input_map.z];
               }
               code.e("TensorDesc input$;", i);
-              code.e("input$.base_ptr = static_cast<char*>($) + $;", i, io_desc.name, offset * type::get_datatype_size(io_desc.tensor.data_type));
+              code.e("input$.base_ptr = static_cast<char*>($) + $;",
+                     i,
+                     io_desc.name,
+                     offset *
+                         type::get_datatype_size(io_desc.tensor.data_type));
               code.e("input$.num_dims = $;", i, task_desc.inputs[i].num_dims);
               code.e("input$.data_type = $;", i, task_desc.inputs[i].data_type);
               for (int d = 0; d < task_desc.inputs[i].num_dims; d++) {
                 code.e("input$.dim[$] = $;", i, d, task_desc.inputs[i].dim[d]);
-                code.e("input$.stride[$] = $;", i, d, task_desc.inputs[i].stride[d]);
+                code.e("input$.stride[$] = $;",
+                       i,
+                       d,
+                       task_desc.inputs[i].stride[d]);
               }
               code.e("task_desc.inputs[$] = input$;", i, i);
             }
@@ -652,48 +691,61 @@ std::string Runtime::print_task_graph(
           for (int i = 0; i < task_desc.num_outputs; i++) {
             off_t offset = 0;
             int3 output_map = output_ops[i]->input_map;
-            IODesc io_desc = io_configs.find(output_ops[i]->dtensor.guid)->second;
+            IODesc io_desc =
+                io_configs.find(output_ops[i]->dtensor.guid)->second;
             assert(io_desc.type != IODesc::FusedTorchTensor);
             if (output_map.x >= 0) {
-              size_t block_size = io_desc.tensor.dim[output_map.x] / bgraph.grid_dim.x;
-              offset += block_size * bid.x * io_desc.tensor.stride[output_map.x];
+              size_t block_size =
+                  io_desc.tensor.dim[output_map.x] / bgraph.grid_dim.x;
+              offset +=
+                  block_size * bid.x * io_desc.tensor.stride[output_map.x];
             }
             if (output_map.y >= 0) {
-              size_t block_size = io_desc.tensor.dim[output_map.y] / bgraph.grid_dim.y;
-              offset += block_size * bid.y * io_desc.tensor.stride[output_map.y];
+              size_t block_size =
+                  io_desc.tensor.dim[output_map.y] / bgraph.grid_dim.y;
+              offset +=
+                  block_size * bid.y * io_desc.tensor.stride[output_map.y];
             }
             if (output_map.z >= 0) {
-              size_t block_size = io_desc.tensor.dim[output_map.z] / bgraph.grid_dim.z;
-              offset += block_size * bid.z * io_desc.tensor.stride[output_map.z];
+              size_t block_size =
+                  io_desc.tensor.dim[output_map.z] / bgraph.grid_dim.z;
+              offset +=
+                  block_size * bid.z * io_desc.tensor.stride[output_map.z];
             }
 
             code.e("TensorDesc output$;", i);
-            code.e("output$.base_ptr = static_cast<char*>($) + $;", i, io_desc.name, offset * type::get_datatype_size(io_desc.tensor.data_type));
+            code.e("output$.base_ptr = static_cast<char*>($) + $;",
+                   i,
+                   io_desc.name,
+                   offset * type::get_datatype_size(io_desc.tensor.data_type));
             code.e("output$.num_dims = $;", i, task_desc.outputs[i].num_dims);
             code.e("output$.data_type = $;", i, task_desc.outputs[i].data_type);
             for (int d = 0; d < task_desc.outputs[i].num_dims; d++) {
               code.e("output$.dim[$] = $;", i, d, task_desc.outputs[i].dim[d]);
-              code.e("output$.stride[$] = $;", i, d, task_desc.outputs[i].stride[d]);
+              code.e("output$.stride[$] = $;",
+                     i,
+                     d,
+                     task_desc.outputs[i].stride[d]);
             }
             code.e("task_desc.outputs[$] = output$;", i, i);
           }
-	  code.e("all_tasks.push_back(task_desc);");
+          code.e("all_tasks.push_back(task_desc);");
           code.e("}");
-          task_pos ++;
+          task_pos++;
         }
       }
     }
   }
   assert(task_pos == all_tasks.size());
   // Add all events
-  for (const auto & event : all_events) {
+  for (auto const &event : all_events) {
     code.e("all_events.push_back(EventDesc($, $, $));",
            event.num_triggers,
            event.first_task_id,
            event.last_task_id);
   }
   // Add first task
-  for (const auto & task : first_tasks) {
+  for (auto const &task : first_tasks) {
     code.e("first_tasks.push_back($);", task);
   }
   code.e("}");

@@ -59,12 +59,15 @@ struct IODesc {
     CUDAMallocTensor,
     NVSHMEMMallocTensor
   };
-  IODesc(IOType _type, std::string _name, mirage::kernel::DTensor const &_tensor)
+  IODesc(IOType _type,
+         std::string _name,
+         mirage::kernel::DTensor const &_tensor)
       : type(_type), name(_name) {
     tensor.num_dims = _tensor.num_dims;
     tensor.data_type = _tensor.data_type;
     assert(_tensor.owner_op->op_type == mirage::type::KN_INPUT_OP);
-    mirage::kernel::KNInputOp const* op = static_cast<mirage::kernel::KNInputOp const*>(_tensor.owner_op);
+    mirage::kernel::KNInputOp const *op =
+        static_cast<mirage::kernel::KNInputOp const *>(_tensor.owner_op);
     for (int i = 0; i < tensor.num_dims; i++) {
       tensor.dim[i] = _tensor.dim[i];
       tensor.stride[i] = op->input_strides[i];
@@ -131,7 +134,8 @@ public:
   std::vector<EventDesc> all_events;
   std::vector<TaskId> first_tasks;
   int num_graphs, num_gpus, my_gpu_id;
-  std::map<kernel::KNOperator*, std::map<dim3, TaskId, Dim3Comparator> > all_task_maps;
+  std::map<kernel::KNOperator *, std::map<dim3, TaskId, Dim3Comparator>>
+      all_task_maps;
 };
 
 } // namespace runtime
