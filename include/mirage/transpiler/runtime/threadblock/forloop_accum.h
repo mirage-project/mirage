@@ -45,4 +45,47 @@ public:
   }
 };
 
+// Only support matrix/vector
+template <typename T,
+          class AccumLayout,
+          class SrcLayout,
+          class RescaleLayout,
+          int NUM_THREADS>
+class ForloopAccumRescaleKernel {
+public:
+  using AccumNumel = decltype(size(AccumLayout{}));
+  using RescaleNumel = decltype(size(RescaleLayout{}));
+
+  CUTE_STATIC_ASSERT_V(AccumNumel{} == size(SrcLayout{}));
+  CUTE_STATIC_ASSERT_V(RescaleNumel{} == size<0>(shape(AccumLayout{})));
+
+  static __device__ __forceinline__ void run(T *__restrict__ accum,
+                                             T const *__restrict__ src,
+                                             T const *__restrict__ rescale,
+                                             int thread_idx) {
+    constexpr auto accum_layout = AccumLayout{};
+    constexpr auto src_layout = SrcLayout{};
+    constexpr auto rescale_layout = RescaleLayout{};
+
+    constexpr auto numel = AccumNumel{};
+    constexpr auto rescale_numel = RescaleNumel{};
+
+    for (int elem_idx = thread_idx; elem_idx < numel; elem_idx += NUM_THREADS) {
+      accum[accum_layout(elem_idx)] =
+          accum[accum_layout(elem_idx)] *
+              rescale[rescale_layout(elem_idx % rescale_numel)] +
+          src[src_layout(elem_idx)];
+    }
+    // Print debug info
+    // if (thread_idx == 0) {
+    //   printf("**********ForloopAccumRescaleKernel**********\n"
+    //          "accum[0]: %f, rescale[0]: %f, src[0]: %f\n"
+    //          "---------------------------------------------\n",
+    //          (float)accum[accum_layout(0)],
+    //          (float)rescale[rescale_layout(0)],
+    //          (float)src[src_layout(0)]);
+    // }
+  }
+};
+
 } // namespace tb
