@@ -97,16 +97,15 @@ std::vector<size_t>
 }
 
 // Rewrite the graph for online softmax, return the original graph if no needed
-std::shared_ptr<kernel::Graph const>
-    rewrite_graph_for_online_softmax(kernel::Graph const *g) {
+kernel::Graph const *rewrite_graph_for_online_softmax(kernel::Graph const *g) {
   using namespace mirage::type;
   auto tensors_replace = get_tensors_replace_for_online_softmax(g);
   if (tensors_replace.size() == 0) {
     // No need to rewrite the graph
-    return std::shared_ptr<kernel::Graph const>(g);
+    return g;
   } else {
     assert(tensors_replace.size() == 4);
-    auto new_g = std::make_shared<kernel::Graph>();
+    kernel::Graph *new_g = new kernel::Graph();
     std::unordered_map<size_t, kernel::DTensor> dtensor_mapping;
 
     for (auto const &op : g->operators) {
@@ -453,22 +452,16 @@ Transpiler::Transpiler(kernel::Graph const *_graph,
   // using mirage::type namespace to simplify code
   using namespace mirage::type;
   // Rewrite the graph for online softmax
-  kernel::Graph const **rewritten_graph = &_graph;
-  std::shared_ptr<kernel::Graph const> tmp = nullptr;
-  if (config.enable_online_softmax) {
-    tmp = rewrite_graph_for_online_softmax(_graph);
-  }
-  auto rewritten_graph_raw_ptr = tmp.get();
-  if (rewritten_graph_raw_ptr != nullptr) {
-    rewritten_graph = &rewritten_graph_raw_ptr;
-  }
+  kernel::Graph const *rewritten_graph =
+      config.enable_online_softmax ? rewrite_graph_for_online_softmax(_graph)
+                                   : _graph;
   // We need to construct a new kernel graph by decomposing forloop accumulators
   // into the non-reduction accumulator type to enable transpiler optimizations
   g = std::make_shared<kernel::Graph>();
   std::unordered_map<size_t, kernel::DTensor> dtensor_mapping;
 
   int input_dtensor_idx = 0;
-  for (auto const &op : (*rewritten_graph)->operators) {
+  for (auto const &op : rewritten_graph->operators) {
     // Preparing dtensors in the new graph
     std::vector<kernel::DTensor> dtensor_inputs;
     for (auto const &t : op->input_tensors) {
@@ -729,6 +722,12 @@ Transpiler::Transpiler(kernel::Graph const *_graph,
         assert(false && "Unsupported operator");
       }
     }
+  }
+
+  // If the graph is rewritten, we need to delete it manually
+  if (rewritten_graph != _graph) {
+    delete rewritten_graph;
+    rewritten_graph = nullptr;
   }
 
   // Check the following:
