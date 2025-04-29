@@ -544,26 +544,28 @@ class KNGraph:
         use_graph_dataset: bool = True,
         use_cached_graphs: bool = True,
         save_codes: bool = False,
+        previous_checkpoint : str = None,
     ):
-        if use_graph_dataset:
-            cached_graph = graph_dataset.find(
-                self.cygraph,
-                imaps=imaps,
-                omaps=omaps,
-                griddims=griddims,
-                blockdims=blockdims,
-                fmaps=fmaps,
-                franges=franges,
-                backend=backend,
-            )
-            if cached_graph is not None:
-                return cached_graph
-        if use_cached_graphs:
-            previous_checkpoint = "mirage_cached_mugraphs_{:x}.json".format(
-                self.cygraph.get_owner_independent_hash()
-            )
-        else:
-            previous_checkpoint = None
+        if previous_checkpoint is None:
+            if use_graph_dataset:
+                cached_graph = graph_dataset.find(
+                    self.cygraph,
+                    imaps=imaps,
+                    omaps=omaps,
+                    griddims=griddims,
+                    blockdims=blockdims,
+                    fmaps=fmaps,
+                    franges=franges,
+                    backend=backend,
+                )
+                if cached_graph is not None:
+                    return cached_graph
+            if use_cached_graphs:
+                previous_checkpoint = "mirage_cached_mugraphs_{:x}.json".format(
+                    self.cygraph.get_owner_independent_hash()
+                )
+            else:
+                previous_checkpoint = None
         cygraphs = search(
             self.cygraph,
             imaps=imaps,
