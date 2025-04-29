@@ -87,7 +87,7 @@ for mode in ["fwd"]:
        configs.append(
            triton.testing.Benchmark(
                x_names=["BATCH"],
-               x_vals=[1, 8],
+               x_vals=[args.batch],
                line_arg="provider",
                line_vals=["triton"],
                line_names=["Triton"],
