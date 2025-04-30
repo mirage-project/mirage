@@ -437,17 +437,9 @@ TBMemoryPlan Transpiler::get_threadblock_memory_plan(tb::Graph const &tb_graph,
     if (op->op_type == type::TB_INPUT_OP && op_meta.is_pipelined_input) {
       tb::STensor const &stensor = op->output_tensors.at(0);
       size_t phy_size = get_phy_size(stensor);
-      if (hopper_arch) {
-        if (stensor_metas[stensor.guid].m_input && stensor.dim[0] <= 64) {
-          tensor_decls.push_back(
-              {stensor.guid,
-               phy_size * config.pipeline_stages * (64 / stensor.dim[0]),
-               T - 1,
-               2 * T});
-        } else {
-          tensor_decls.push_back(
-              {stensor.guid, phy_size * config.pipeline_stages, T - 1, 2 * T});
-        }
+      if (tb_graph.use_hopper_feature) {
+        tensor_decls.push_back(
+            {stensor.guid, phy_size * config.pipeline_stages, T - 1, 2 * T});
       } else {
         // double buffer
         tensor_decls.push_back({stensor.guid, phy_size, T - 1, 2 * T});

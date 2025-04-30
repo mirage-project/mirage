@@ -103,9 +103,11 @@ private:
                                            bool hopper_arch = false);
 
   // Transpile a custom KN operator (a custom block graph)
-  CustomOPTranspileResult transpile_kn_custom_op(kn::KNCustomizedOp const *op);
+  CustomOPTranspileResult transpile_kn_custom_op(kn::KNCustomizedOp const *op,
+                                                 int customized_idx);
   CustomOPTranspileResult
-      transpile_kn_custom_op_hopper(kn::KNCustomizedOp const *op);
+      transpile_kn_custom_op_hopper(kn::KNCustomizedOp const *op,
+                                    int customized_idx);
 
   void get_hopper_tmas(CodeKeeper &code, std::vector<TMAParams> tmaParamsList);
 

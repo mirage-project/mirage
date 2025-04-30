@@ -544,6 +544,7 @@ Transpiler::Transpiler(kernel::Graph const *_graph,
         break;
       }
       case KN_CUSTOMIZED_OP: {
+        bool use_mm = false;
         // Create a new threadblock graph
         kernel::KNCustomizedOp *customized_op =
             static_cast<kernel::KNCustomizedOp *>(op);
@@ -585,10 +586,20 @@ Transpiler::Transpiler(kernel::Graph const *_graph,
               break;
             }
             case TB_MATMUL_OP: {
+              use_mm = true;
               threadblock::STensor st =
                   tbg->matmul(stensor_inputs[0], stensor_inputs[1]);
               stensor_mapping[bop->output_tensors[0].guid] = st;
               stensor_metas[bop->input_tensors[0].guid].m_input = true;
+              int num_dims = bop->input_tensors[0].num_dims;
+              int m = bop->output_tensors[0].dim[num_dims - 2];
+              int n = bop->output_tensors[0].dim[num_dims - 1];
+              int k = bop->input_tensors[0].dim[num_dims - 1];
+              // whether use TMA/WGMMA/WGSPEC
+              if (!((m >= 64 && m % 64 == 0) && (n >= 8 && n % 8 == 0) &&
+                    (k >= 16 && k % 16 == 0))) {
+                tbg->use_hopper_feature = false;
+              }
               break;
             }
             case TB_EXP_OP:
@@ -711,6 +722,11 @@ Transpiler::Transpiler(kernel::Graph const *_graph,
             }
           }
         }
+        if (!use_mm) {
+          tbg->use_hopper_feature = false;
+        }
+        tbg->use_hopper_feature &= (config.target_cc == GPU_CC::H100);
+
         std::vector<kernel::DTensor> dts = g->customized(dtensor_inputs, *tbg);
         assert(dts.size() == op->output_tensors.size());
         for (size_t i = 0; i < dts.size(); i++) {

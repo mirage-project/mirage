@@ -149,7 +149,8 @@ public:
                  DTensor **outputs,
                  mirage::threadblock::Graph const *bgraph);
   KNOperator *create_customized_op(std::vector<DTensor> const &inputs,
-                                   mirage::threadblock::Graph const &_graph);
+                                   mirage::threadblock::Graph const &_graph,
+                                   bool use_hopper_feature = true);
   // helper functions
   int get_num_input_dtensors() const;
   int get_num_output_dtensors() const;

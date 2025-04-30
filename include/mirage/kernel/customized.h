@@ -29,7 +29,8 @@ class KNCustomizedOp : public mirage::kernel::KNOperator {
 public:
   KNCustomizedOp(Graph *_kgraph,
                  std::vector<DTensor> const &inputs,
-                 mirage::threadblock::Graph const &_graph);
+                 mirage::threadblock::Graph const &_graph,
+                 bool use_hopper_feature);
   virtual ~KNCustomizedOp();
   bool profile(ProfileResult &profile);
   void run(void);

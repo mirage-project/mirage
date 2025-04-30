@@ -31,7 +31,8 @@ using mirage::threadblock::STensor;
 
 std::vector<DTensor> Graph::customized(std::vector<DTensor> const &inputs,
                                        threadblock::Graph const &bgraph) {
-  KNOperator *op = create_customized_op(inputs, bgraph);
+  KNOperator *op =
+      create_customized_op(inputs, bgraph, bgraph.use_hopper_feature);
   assert(op != nullptr);
   operators.push_back(op);
   return op->output_tensors;
@@ -54,7 +55,8 @@ int Graph::customized(std::vector<DTensor const *> _inputs,
 }
 
 KNOperator *Graph::create_customized_op(std::vector<DTensor> const &inputs,
-                                        threadblock::Graph const &_graph) {
+                                        threadblock::Graph const &_graph,
+                                        bool use_hopper_feature) {
   // Assert that _graph's dtensor inputs align with inputs
   {
     int num_inputs = 0;
@@ -83,13 +85,15 @@ KNOperator *Graph::create_customized_op(std::vector<DTensor> const &inputs,
     return nullptr;
   }
 
-  KNCustomizedOp *op = new KNCustomizedOp(this, inputs, _graph);
+  KNCustomizedOp *op =
+      new KNCustomizedOp(this, inputs, _graph, use_hopper_feature);
   return op;
 }
 
 KNCustomizedOp::KNCustomizedOp(mirage::kernel::Graph *_kgraph,
                                std::vector<DTensor> const &_inputs,
-                               mirage::threadblock::Graph const &_graph)
+                               mirage::threadblock::Graph const &_graph,
+                               bool use_hopper_feature)
     : KNOperator(_kgraph, mirage::type::KN_CUSTOMIZED_OP, _inputs),
       bgraph(_graph.grid_dim,
              _graph.block_dim,
@@ -99,6 +103,7 @@ KNCustomizedOp::KNCustomizedOp(mirage::kernel::Graph *_kgraph,
   // plan.block_dim = _graph.block_dim;
   // plan.forloop_range = _graph.forloop_range;
   // plan.reduction_dimx = _graph.reduction_dimx;
+  bgraph.use_hopper_feature = use_hopper_feature;
   size_t input_idx = 0;
   for (auto const &op : _graph.operators) {
     std::vector<STensor> my_inputs;

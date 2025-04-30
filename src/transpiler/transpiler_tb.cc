@@ -250,11 +250,12 @@ static string get_tb_op_str(type::TBOperatorType type) {
 // Will return a CustomOPTranspileResult object. See comments in transpiler.h
 // for more details
 CustomOPTranspileResult
-    Transpiler::transpile_kn_custom_op(kn::KNCustomizedOp const *op) {
+    Transpiler::transpile_kn_custom_op(kn::KNCustomizedOp const *op,
+                                       int customized_idx) {
   bool profiling = config.profiling;
 
   tb::Graph const &g = op->bgraph;
-  int num_threads = g.block_dim.x * g.block_dim.y * g.block_dim.z;
+  int num_threads = 128;
 
   size_t profiler_buf_size =
       profiling ? (g.grid_dim.x * g.grid_dim.y * g.grid_dim.z *
@@ -273,7 +274,7 @@ CustomOPTranspileResult
   // Allocate a kernel name
   static int custom_kernel_idx_counter = 0;
   int cur_custom_kernel_idx = custom_kernel_idx_counter++;
-  string func_name = fmt("custom_kernel_$", cur_custom_kernel_idx);
+  string func_name = fmt("custom_kernel_$", customized_idx);
 
   // Generate code prologue
   CodeKeeper code;
@@ -639,7 +640,7 @@ CustomOPTranspileResult
       string mma_atom_str;
       std::tuple<int, int, int> mma_atom_mnk;
       int mma_atom_num_threads;
-      if (GPU_CC::A100 <= config.target_cc && config.target_cc < GPU_CC::H100) {
+      if (GPU_CC::A100 <= config.target_cc) {
         if (k <= 8) {
           // mma_atom_str = input0.data_type == type::DT_FLOAT16
           //                    ? "SM80_16x8x8_F16F16F16F16_TN"
@@ -721,7 +722,7 @@ CustomOPTranspileResult
       }
 
       bool is_ldmatrix_avail = config.target_cc >= GPU_CC::T4;
-      bool is_stmatrix_avail = config.target_cc >= GPU_CC::H100;
+      bool is_stmatrix_avail = false;
 
       int num_exps_before_store = std::count_if(
           node.ops.begin(), node.ops.end(), [](auto &op_and_meta) {

@@ -24,11 +24,19 @@ You can run
 ```
 python3 $MIRAGE_ROOT/ae_scripts/run_all.py
 ```
-to generate all the results in Figure 7 and Figure 11, and
+to generate all the results in Figure 7 and Figure 11.
+
+For the results on Grace Hopper GPU(H100), you can run
+
+```
+python3 $MIRAGE_ROOT/ae_scripts/run_all_hopper.py
+```
+To generate the search time study results in Table 5, run
+
 ```
 python3 $MIRAGE_ROOT/ae_scripts/search_time.py
 ```
-to generate the search time study results in Table 5.
+
 
 You can also generate each data point separately. Followings are the detailed instructions.
 

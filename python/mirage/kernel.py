@@ -594,8 +594,8 @@ class KNGraph:
                 + torch.cuda.get_device_properties(0).minor
             )
             if target_cc >= 90:
-                pipeline_stages_list = [2, 3, 4]
-                num_warp_groups_list = [2, 3, 4]
+                pipeline_stages_list = [2]
+                num_warp_groups_list = [2]
                 for idx, g in enumerate(all_graphs):
                     for pipeline_stages in pipeline_stages_list:
                         for num_warp_groups in num_warp_groups_list:
