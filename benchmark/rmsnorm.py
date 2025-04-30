@@ -5,13 +5,22 @@ import argparse
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('-b', '--batch', type=int, default=1)
+    parser.add_argument('-b', '--batch_size', type=int, default=1)
     parser.add_argument('--file', type=str, default='rmsnorm.json')
+    parser.add_argument('--backend', type=str, default='cuda')
+    parser.add_argument('--warmup', type=int, default=16)
+    parser.add_argument('--profile', type=int, default=1000)
+    parser.add_argument('--save_codes', type=bool, default=False)
     parser.add_argument('-t', '--thread', type=int, default=-1)
     parser.add_argument('--max_num_threadblock_graph_op', type=int, default=-1)
+
     args = parser.parse_args()
-    batch_size = args.batch
+    batch_size = args.batch_size
     filename = args.file
+    backend = args.backend
+    warmup_iters = args.warmup
+    profile_iters = args.profile
+    save_codes = args.save_codes
 
     graph = mi.new_kernel_graph()
     X = graph.new_input(dims=(2 * batch_size, 4096), dtype=mi.float16)
@@ -19,7 +28,15 @@ if __name__ == "__main__":
     D = graph.rms_norm(X, normalized_shape=(4096,))
     O = graph.matmul(D, W)
     graph.mark_output(O)
-    optimized_graph = graph.superoptimize(config="mlp", previous_checkpoint=filename, max_num_threadblock_graph_op=args.max_num_threadblock_graph_op, num_search_thread=args.thread)
+    optimized_graph = graph.superoptimize(
+        config="mlp",
+        previous_checkpoint=filename,
+        backend=backend,
+        save_codes=save_codes,
+        warmup_iters=warmup_iters,
+        profile_iters=profile_iters,
+        num_search_thread=args.thread,
+        max_num_threadblock_graph_op=args.max_num_threadblock_graph_op)
 
     input_tensors = [
         torch.randn(2 * batch_size, 4096, dtype=torch.float16, device='cuda:0'),

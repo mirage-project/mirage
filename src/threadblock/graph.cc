@@ -25,6 +25,8 @@
 #include "mirage/threadblock/serializer/rms_norm_serializer.h"
 #include "mirage/utils/hash_utils.h"
 
+#include <iostream>
+
 namespace mirage {
 namespace threadblock {
 
@@ -104,6 +106,8 @@ size_t Graph::calculate_shared_memory_usage(TBOperator *new_op) {
       case mirage::type::TB_DIV_OP:
       case mirage::type::TB_ADD_OP:
       case mirage::type::TB_MUL_OP:
+      case mirage::type::TB_SUB_OP:
+      case mirage::type::TB_POW_OP:
       // Reduction
       case mirage::type::TB_REDUCTION_0_OP:
       case mirage::type::TB_REDUCTION_1_OP:
@@ -111,6 +115,9 @@ size_t Graph::calculate_shared_memory_usage(TBOperator *new_op) {
       case mirage::type::TB_REDUCTION_0_TO_DIMX_OP:
       case mirage::type::TB_REDUCTION_1_TO_DIMX_OP:
       case mirage::type::TB_REDUCTION_2_TO_DIMX_OP:
+      case mirage::type::TB_REDUCTION_0_MAX_OP:
+      case mirage::type::TB_REDUCTION_1_MAX_OP:
+      case mirage::type::TB_REDUCTION_2_MAX_OP:
       // Normalization
       case mirage::type::TB_RMS_NORM_OP:
       // Concat
@@ -127,6 +134,9 @@ size_t Graph::calculate_shared_memory_usage(TBOperator *new_op) {
       case mirage::type::TB_SQUARE_OP:
       case mirage::type::TB_SQRT_OP:
       case mirage::type::TB_SILU_OP:
+      case mirage::type::TB_GELU_OP:
+      case mirage::type::TB_RELU_OP:
+      case mirage::type::TB_CLAMP_OP:
       case mirage::type::TB_MUL_SCALAR_OP: {
         // inplace optimization for element-wise unary
         break;
@@ -166,6 +176,20 @@ size_t Graph::calculate_shared_memory_usage(TBOperator *new_op) {
       case mirage::type::TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP: {
         // we will inline accumulation but need to perform
         // a reduuction_to_dimx
+        assert(op->output_tensors.size() == 1);
+        usage += op->output_tensors[0].size();
+        break;
+      }
+      case mirage::type::TB_FORLOOP_ACCUM_NO_RED_RESCALE_OP: {
+        // we will inline accumulation but need to perform
+        // a rescale
+        assert(op->output_tensors.size() == 1);
+        usage += op->output_tensors[0].size();
+        break;
+      }
+      case mirage::type::TB_FORLOOP_ACCUM_RED_LD_SUM_RESCALE_OP: {
+        // we will inline accumulation but need to perform
+        // a rescale
         assert(op->output_tensors.size() == 1);
         usage += op->output_tensors[0].size();
         break;
@@ -479,9 +503,12 @@ NewKernelParams Graph::get_new_kernel_params(bool fingerprint) const {
         break;
       }
       case mirage::type::TB_EXP_OP:
-      case mirage::type::TB_SILU_OP:
       case mirage::type::TB_SQUARE_OP:
       case mirage::type::TB_SQRT_OP:
+      case mirage::type::TB_SILU_OP:
+      case mirage::type::TB_GELU_OP:
+      case mirage::type::TB_RELU_OP:
+      case mirage::type::TB_CLAMP_OP:
       case mirage::type::TB_MUL_SCALAR_OP: {
         assert(operators[i]->input_tensors.size() == 1);
         assert(operators[i]->output_tensors.size() == 1);
@@ -499,7 +526,8 @@ NewKernelParams Graph::get_new_kernel_params(bool fingerprint) const {
       }
       case mirage::type::TB_DIV_OP:
       case mirage::type::TB_MUL_OP:
-      case mirage::type::TB_ADD_OP: {
+      case mirage::type::TB_ADD_OP:
+      case mirage::type::TB_POW_OP: {
         assert(operators[i]->input_tensors.size() == 2);
         assert(operators[i]->output_tensors.size() == 1);
         mirage::threadblock::STensor input1 = operators[i]->input_tensors[0];
@@ -771,9 +799,12 @@ void from_json(json const &j, Graph &graph) {
         break;
       }
       case type::TBOperatorType::TB_EXP_OP:
-      case type::TBOperatorType::TB_SILU_OP:
       case type::TBOperatorType::TB_SQUARE_OP:
       case type::TBOperatorType::TB_SQRT_OP:
+      case type::TBOperatorType::TB_SILU_OP:
+      case type::TBOperatorType::TB_GELU_OP:
+      case type::TBOperatorType::TB_RELU_OP:
+      case type::TBOperatorType::TB_CLAMP_OP:
       case type::TBOperatorType::TB_MUL_SCALAR_OP: {
         STensor const &output = graph.elementunary(
             get_tensor_from_guid(
@@ -792,7 +823,8 @@ void from_json(json const &j, Graph &graph) {
       }
       case type::TBOperatorType::TB_ADD_OP:
       case type::TBOperatorType::TB_MUL_OP:
-      case type::TBOperatorType::TB_DIV_OP: {
+      case type::TBOperatorType::TB_DIV_OP:
+      case type::TBOperatorType::TB_POW_OP: {
         STensor const &output = graph.elementbinary(
             get_tensor_from_guid(
                 op.at("input_tensors")[0].at("guid").get<int>()),
@@ -855,6 +887,8 @@ void from_json(json const &j, Graph &graph) {
         break;
       }
       default:
+        std::cerr << op_type << std::endl;
+        std::cerr << json(op_type) << std::endl;
         assert(false && "Unsupported operator");
     }
   }

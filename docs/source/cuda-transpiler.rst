@@ -1,10 +1,10 @@
-The Transpiler
-==============
+The CUDA Transpiler
+===================
 
-Introduction to Mirage’s Transpiler
+Introduction to Mirage’s CUDA Transpiler
 -----------------------------------
 
-The transpiler is a key component of Mirage. It is responsible for
+The CUDA transpiler is a key component of Mirage. It is responsible for
 translating the (optimized) computation graph produced by Mirage into
 efficient CUDA code.
 

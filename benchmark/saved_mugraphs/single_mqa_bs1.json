@@ -1,0 +1,885 @@
+[
+    [
+        {
+            "input_map": {
+                "x": -1,
+                "y": -1,
+                "z": -1
+            },
+            "input_strides": [
+                65536,
+                64,
+                1
+            ],
+            "input_tensors": [],
+            "op_type": "kn_input_op",
+            "output_tensors": [
+                {
+                    "data_type": 921,
+                    "dim": [
+                        1,
+                        1024,
+                        64,
+                        0
+                    ],
+                    "guid": 10239644,
+                    "layout": "DmemRowMajor",
+                    "num_dims": 3
+                }
+            ]
+        },
+        {
+            "input_map": {
+                "x": -1,
+                "y": -1,
+                "z": -1
+            },
+            "input_strides": [
+                262144,
+                4096,
+                1
+            ],
+            "input_tensors": [],
+            "op_type": "kn_input_op",
+            "output_tensors": [
+                {
+                    "data_type": 921,
+                    "dim": [
+                        1,
+                        64,
+                        4096,
+                        0
+                    ],
+                    "guid": 10239645,
+                    "layout": "DmemRowMajor",
+                    "num_dims": 3
+                }
+            ]
+        },
+        {
+            "input_map": {
+                "x": -1,
+                "y": -1,
+                "z": -1
+            },
+            "input_strides": [
+                262144,
+                64,
+                1
+            ],
+            "input_tensors": [],
+            "op_type": "kn_input_op",
+            "output_tensors": [
+                {
+                    "data_type": 921,
+                    "dim": [
+                        1,
+                        4096,
+                        64,
+                        0
+                    ],
+                    "guid": 10239646,
+                    "layout": "DmemRowMajor",
+                    "num_dims": 3
+                }
+            ]
+        },
+        {
+            "bgraph": {
+                "block_dim": {
+                    "x": 128,
+                    "y": 1,
+                    "z": 1
+                },
+                "forloop_range": 4,
+                "graph_level": "thread_block_graph",
+                "grid_dim": {
+                    "x": 1,
+                    "y": 8,
+                    "z": 16
+                },
+                "operators": [
+                    {
+                        "dtensor": {
+                            "data_type": 921,
+                            "dim": [
+                                1,
+                                1024,
+                                64,
+                                0
+                            ],
+                            "guid": 10239644,
+                            "layout": "DmemRowMajor",
+                            "num_dims": 3
+                        },
+                        "forloop_dim": -1,
+                        "input_map": {
+                            "x": -1,
+                            "y": -1,
+                            "z": 1
+                        },
+                        "input_tensors": [],
+                        "op_type": "tb_input_op",
+                        "output_tensors": [
+                            {
+                                "after_accum": false,
+                                "data_type": 921,
+                                "dim": [
+                                    1,
+                                    64,
+                                    64,
+                                    0
+                                ],
+                                "guid": 20961959,
+                                "layout": "SmemRowMajor",
+                                "num_dims": 3,
+                                "smem_offset": 0
+                            }
+                        ]
+                    },
+                    {
+                        "dtensor": {
+                            "data_type": 921,
+                            "dim": [
+                                1,
+                                64,
+                                4096,
+                                0
+                            ],
+                            "guid": 10239645,
+                            "layout": "DmemRowMajor",
+                            "num_dims": 3
+                        },
+                        "forloop_dim": 2,
+                        "input_map": {
+                            "x": -1,
+                            "y": 2,
+                            "z": -1
+                        },
+                        "input_tensors": [],
+                        "op_type": "tb_input_op",
+                        "output_tensors": [
+                            {
+                                "after_accum": false,
+                                "data_type": 921,
+                                "dim": [
+                                    1,
+                                    64,
+                                    128,
+                                    0
+                                ],
+                                "guid": 20961960,
+                                "layout": "SmemRowMajor",
+                                "num_dims": 3,
+                                "smem_offset": 8192
+                            }
+                        ]
+                    },
+                    {
+                        "dtensor": {
+                            "data_type": 921,
+                            "dim": [
+                                1,
+                                4096,
+                                64,
+                                0
+                            ],
+                            "guid": 10239646,
+                            "layout": "DmemRowMajor",
+                            "num_dims": 3
+                        },
+                        "forloop_dim": 1,
+                        "input_map": {
+                            "x": -1,
+                            "y": 1,
+                            "z": -1
+                        },
+                        "input_tensors": [],
+                        "op_type": "tb_input_op",
+                        "output_tensors": [
+                            {
+                                "after_accum": false,
+                                "data_type": 921,
+                                "dim": [
+                                    1,
+                                    128,
+                                    64,
+                                    0
+                                ],
+                                "guid": 20961961,
+                                "layout": "SmemRowMajor",
+                                "num_dims": 3,
+                                "smem_offset": 24576
+                            }
+                        ]
+                    },
+                    {
+                        "input_tensors": [
+                            {
+                                "after_accum": false,
+                                "data_type": 921,
+                                "dim": [
+                                    1,
+                                    64,
+                                    64,
+                                    0
+                                ],
+                                "guid": 20961959,
+                                "layout": "SmemRowMajor",
+                                "num_dims": 3,
+                                "smem_offset": 0
+                            },
+                            {
+                                "after_accum": false,
+                                "data_type": 921,
+                                "dim": [
+                                    1,
+                                    64,
+                                    128,
+                                    0
+                                ],
+                                "guid": 20961960,
+                                "layout": "SmemRowMajor",
+                                "num_dims": 3,
+                                "smem_offset": 8192
+                            }
+                        ],
+                        "op_type": "tb_matmul_op",
+                        "output_tensors": [
+                            {
+                                "after_accum": false,
+                                "data_type": 921,
+                                "dim": [
+                                    1,
+                                    64,
+                                    128,
+                                    0
+                                ],
+                                "guid": 20961962,
+                                "layout": "SmemRowMajor",
+                                "num_dims": 3,
+                                "smem_offset": 40960
+                            }
+                        ]
+                    },
+                    {
+                        "input_tensors": [
+                            {
+                                "after_accum": false,
+                                "data_type": 921,
+                                "dim": [
+                                    1,
+                                    64,
+                                    128,
+                                    0
+                                ],
+                                "guid": 20961962,
+                                "layout": "SmemRowMajor",
+                                "num_dims": 3,
+                                "smem_offset": 40960
+                            }
+                        ],
+                        "op_type": "tb_exp_op",
+                        "output_tensors": [
+                            {
+                                "after_accum": false,
+                                "data_type": 921,
+                                "dim": [
+                                    1,
+                                    64,
+                                    128,
+                                    0
+                                ],
+                                "guid": 20961963,
+                                "layout": "SmemRowMajor",
+                                "num_dims": 3,
+                                "smem_offset": 40960
+                            }
+                        ]
+                    },
+                    {
+                        "input_tensors": [
+                            {
+                                "after_accum": false,
+                                "data_type": 921,
+                                "dim": [
+                                    1,
+                                    64,
+                                    128,
+                                    0
+                                ],
+                                "guid": 20961963,
+                                "layout": "SmemRowMajor",
+                                "num_dims": 3,
+                                "smem_offset": 40960
+                            }
+                        ],
+                        "op_type": "tb_accum_red_ld_sum_op",
+                        "output_tensors": [
+                            {
+                                "after_accum": true,
+                                "data_type": 921,
+                                "dim": [
+                                    1,
+                                    64,
+                                    1,
+                                    0
+                                ],
+                                "guid": 20961964,
+                                "layout": "SmemRowMajor",
+                                "num_dims": 3,
+                                "smem_offset": 57344
+                            }
+                        ]
+                    },
+                    {
+                        "input_tensors": [
+                            {
+                                "after_accum": false,
+                                "data_type": 921,
+                                "dim": [
+                                    1,
+                                    64,
+                                    128,
+                                    0
+                                ],
+                                "guid": 20961963,
+                                "layout": "SmemRowMajor",
+                                "num_dims": 3,
+                                "smem_offset": 40960
+                            },
+                            {
+                                "after_accum": false,
+                                "data_type": 921,
+                                "dim": [
+                                    1,
+                                    128,
+                                    64,
+                                    0
+                                ],
+                                "guid": 20961961,
+                                "layout": "SmemRowMajor",
+                                "num_dims": 3,
+                                "smem_offset": 24576
+                            }
+                        ],
+                        "op_type": "tb_matmul_op",
+                        "output_tensors": [
+                            {
+                                "after_accum": false,
+                                "data_type": 921,
+                                "dim": [
+                                    1,
+                                    64,
+                                    64,
+                                    0
+                                ],
+                                "guid": 20961965,
+                                "layout": "SmemRowMajor",
+                                "num_dims": 3,
+                                "smem_offset": 57472
+                            }
+                        ]
+                    },
+                    {
+                        "input_tensors": [
+                            {
+                                "after_accum": false,
+                                "data_type": 921,
+                                "dim": [
+                                    1,
+                                    64,
+                                    64,
+                                    0
+                                ],
+                                "guid": 20961965,
+                                "layout": "SmemRowMajor",
+                                "num_dims": 3,
+                                "smem_offset": 57472
+                            }
+                        ],
+                        "op_type": "tb_accum_nored_op",
+                        "output_tensors": [
+                            {
+                                "after_accum": true,
+                                "data_type": 921,
+                                "dim": [
+                                    1,
+                                    64,
+                                    64,
+                                    0
+                                ],
+                                "guid": 20961966,
+                                "layout": "SmemRowMajor",
+                                "num_dims": 3,
+                                "smem_offset": 65664
+                            }
+                        ]
+                    },
+                    {
+                        "dtensor": {
+                            "data_type": 921,
+                            "dim": [
+                                1,
+                                1024,
+                                8,
+                                0
+                            ],
+                            "guid": 10240596,
+                            "layout": "DmemRowMajor",
+                            "num_dims": 3
+                        },
+                        "input_tensors": [
+                            {
+                                "after_accum": true,
+                                "data_type": 921,
+                                "dim": [
+                                    1,
+                                    64,
+                                    1,
+                                    0
+                                ],
+                                "guid": 20961964,
+                                "layout": "SmemRowMajor",
+                                "num_dims": 3,
+                                "smem_offset": 57344
+                            }
+                        ],
+                        "op_type": "tb_output_op",
+                        "output_map": {
+                            "x": -1,
+                            "y": 2,
+                            "z": 1
+                        },
+                        "output_tensors": []
+                    },
+                    {
+                        "dtensor": {
+                            "data_type": 921,
+                            "dim": [
+                                1,
+                                1024,
+                                512,
+                                0
+                            ],
+                            "guid": 10240597,
+                            "layout": "DmemRowMajor",
+                            "num_dims": 3
+                        },
+                        "input_tensors": [
+                            {
+                                "after_accum": true,
+                                "data_type": 921,
+                                "dim": [
+                                    1,
+                                    64,
+                                    64,
+                                    0
+                                ],
+                                "guid": 20961966,
+                                "layout": "SmemRowMajor",
+                                "num_dims": 3,
+                                "smem_offset": 65664
+                            }
+                        ],
+                        "op_type": "tb_output_op",
+                        "output_map": {
+                            "x": -1,
+                            "y": 2,
+                            "z": 1
+                        },
+                        "output_tensors": []
+                    }
+                ],
+                "reduction_dimx": 64,
+                "smem_offset": 73856
+            },
+            "input_tensors": [
+                {
+                    "data_type": 921,
+                    "dim": [
+                        1,
+                        1024,
+                        64,
+                        0
+                    ],
+                    "guid": 10239644,
+                    "layout": "DmemRowMajor",
+                    "num_dims": 3
+                },
+                {
+                    "data_type": 921,
+                    "dim": [
+                        1,
+                        64,
+                        4096,
+                        0
+                    ],
+                    "guid": 10239645,
+                    "layout": "DmemRowMajor",
+                    "num_dims": 3
+                },
+                {
+                    "data_type": 921,
+                    "dim": [
+                        1,
+                        4096,
+                        64,
+                        0
+                    ],
+                    "guid": 10239646,
+                    "layout": "DmemRowMajor",
+                    "num_dims": 3
+                }
+            ],
+            "op_type": "kn_customized_op",
+            "output_tensors": [
+                {
+                    "data_type": 921,
+                    "dim": [
+                        1,
+                        1024,
+                        8,
+                        0
+                    ],
+                    "guid": 10240596,
+                    "layout": "DmemRowMajor",
+                    "num_dims": 3
+                },
+                {
+                    "data_type": 921,
+                    "dim": [
+                        1,
+                        1024,
+                        512,
+                        0
+                    ],
+                    "guid": 10240597,
+                    "layout": "DmemRowMajor",
+                    "num_dims": 3
+                }
+            ]
+        },
+        {
+            "bgraph": {
+                "block_dim": {
+                    "x": 128,
+                    "y": 1,
+                    "z": 1
+                },
+                "forloop_range": 1,
+                "graph_level": "thread_block_graph",
+                "grid_dim": {
+                    "x": 1,
+                    "y": 64,
+                    "z": 1
+                },
+                "operators": [
+                    {
+                        "dtensor": {
+                            "data_type": 921,
+                            "dim": [
+                                1,
+                                1024,
+                                8,
+                                0
+                            ],
+                            "guid": 10240596,
+                            "layout": "DmemRowMajor",
+                            "num_dims": 3
+                        },
+                        "forloop_dim": -1,
+                        "input_map": {
+                            "x": -1,
+                            "y": 1,
+                            "z": -1
+                        },
+                        "input_tensors": [],
+                        "op_type": "tb_input_op",
+                        "output_tensors": [
+                            {
+                                "after_accum": false,
+                                "data_type": 921,
+                                "dim": [
+                                    1,
+                                    16,
+                                    8,
+                                    0
+                                ],
+                                "guid": 20987740,
+                                "layout": "SmemRowMajor",
+                                "num_dims": 3,
+                                "smem_offset": 0
+                            }
+                        ]
+                    },
+                    {
+                        "dtensor": {
+                            "data_type": 921,
+                            "dim": [
+                                1,
+                                1024,
+                                512,
+                                0
+                            ],
+                            "guid": 10240597,
+                            "layout": "DmemRowMajor",
+                            "num_dims": 3
+                        },
+                        "forloop_dim": -1,
+                        "input_map": {
+                            "x": -1,
+                            "y": 1,
+                            "z": -1
+                        },
+                        "input_tensors": [],
+                        "op_type": "tb_input_op",
+                        "output_tensors": [
+                            {
+                                "after_accum": false,
+                                "data_type": 921,
+                                "dim": [
+                                    1,
+                                    16,
+                                    512,
+                                    0
+                                ],
+                                "guid": 20987741,
+                                "layout": "SmemRowMajor",
+                                "num_dims": 3,
+                                "smem_offset": 256
+                            }
+                        ]
+                    },
+                    {
+                        "input_tensors": [
+                            {
+                                "after_accum": false,
+                                "data_type": 921,
+                                "dim": [
+                                    1,
+                                    16,
+                                    8,
+                                    0
+                                ],
+                                "guid": 20987740,
+                                "layout": "SmemRowMajor",
+                                "num_dims": 3,
+                                "smem_offset": 0
+                            }
+                        ],
+                        "op_type": "tb_accum_red_ld_sum_op",
+                        "output_tensors": [
+                            {
+                                "after_accum": true,
+                                "data_type": 921,
+                                "dim": [
+                                    1,
+                                    16,
+                                    1,
+                                    0
+                                ],
+                                "guid": 20987742,
+                                "layout": "SmemRowMajor",
+                                "num_dims": 3,
+                                "smem_offset": 16640
+                            }
+                        ]
+                    },
+                    {
+                        "input_tensors": [
+                            {
+                                "after_accum": false,
+                                "data_type": 921,
+                                "dim": [
+                                    1,
+                                    16,
+                                    512,
+                                    0
+                                ],
+                                "guid": 20987741,
+                                "layout": "SmemRowMajor",
+                                "num_dims": 3,
+                                "smem_offset": 256
+                            }
+                        ],
+                        "op_type": "tb_accum_redtox_ld_sum_op",
+                        "output_tensors": [
+                            {
+                                "after_accum": true,
+                                "data_type": 921,
+                                "dim": [
+                                    1,
+                                    16,
+                                    64,
+                                    0
+                                ],
+                                "guid": 20987743,
+                                "layout": "SmemRowMajor",
+                                "num_dims": 3,
+                                "smem_offset": 16672
+                            }
+                        ]
+                    },
+                    {
+                        "input_tensors": [
+                            {
+                                "after_accum": true,
+                                "data_type": 921,
+                                "dim": [
+                                    1,
+                                    16,
+                                    64,
+                                    0
+                                ],
+                                "guid": 20987743,
+                                "layout": "SmemRowMajor",
+                                "num_dims": 3,
+                                "smem_offset": 16672
+                            },
+                            {
+                                "after_accum": true,
+                                "data_type": 921,
+                                "dim": [
+                                    1,
+                                    16,
+                                    1,
+                                    0
+                                ],
+                                "guid": 20987742,
+                                "layout": "SmemRowMajor",
+                                "num_dims": 3,
+                                "smem_offset": 16640
+                            }
+                        ],
+                        "op_type": "tb_div_op",
+                        "output_tensors": [
+                            {
+                                "after_accum": true,
+                                "data_type": 921,
+                                "dim": [
+                                    1,
+                                    16,
+                                    64,
+                                    0
+                                ],
+                                "guid": 20987744,
+                                "layout": "SmemRowMajor",
+                                "num_dims": 3,
+                                "smem_offset": 18720
+                            }
+                        ]
+                    },
+                    {
+                        "dtensor": {
+                            "data_type": 921,
+                            "dim": [
+                                1,
+                                1024,
+                                64,
+                                0
+                            ],
+                            "guid": 10246269,
+                            "layout": "DmemRowMajor",
+                            "num_dims": 3
+                        },
+                        "input_tensors": [
+                            {
+                                "after_accum": true,
+                                "data_type": 921,
+                                "dim": [
+                                    1,
+                                    16,
+                                    64,
+                                    0
+                                ],
+                                "guid": 20987744,
+                                "layout": "SmemRowMajor",
+                                "num_dims": 3,
+                                "smem_offset": 18720
+                            }
+                        ],
+                        "op_type": "tb_output_op",
+                        "output_map": {
+                            "x": -1,
+                            "y": 1,
+                            "z": -1
+                        },
+                        "output_tensors": []
+                    }
+                ],
+                "reduction_dimx": 64,
+                "smem_offset": 20768
+            },
+            "input_tensors": [
+                {
+                    "data_type": 921,
+                    "dim": [
+                        1,
+                        1024,
+                        8,
+                        0
+                    ],
+                    "guid": 10240596,
+                    "layout": "DmemRowMajor",
+                    "num_dims": 3
+                },
+                {
+                    "data_type": 921,
+                    "dim": [
+                        1,
+                        1024,
+                        512,
+                        0
+                    ],
+                    "guid": 10240597,
+                    "layout": "DmemRowMajor",
+                    "num_dims": 3
+                }
+            ],
+            "op_type": "kn_customized_op",
+            "output_tensors": [
+                {
+                    "data_type": 921,
+                    "dim": [
+                        1,
+                        1024,
+                        64,
+                        0
+                    ],
+                    "guid": 10246269,
+                    "layout": "DmemRowMajor",
+                    "num_dims": 3
+                }
+            ]
+        },
+        {
+            "input_tensors": [
+                {
+                    "data_type": 921,
+                    "dim": [
+                        1,
+                        1024,
+                        64,
+                        0
+                    ],
+                    "guid": 10246269,
+                    "layout": "DmemRowMajor",
+                    "num_dims": 3
+                }
+            ],
+            "op_type": "kn_output_op",
+            "output_map": {
+                "x": -1,
+                "y": -1,
+                "z": -1
+            },
+            "output_strides": [
+                65536,
+                64,
+                1
+            ],
+            "output_tensors": []
+        }
+    ]
+]

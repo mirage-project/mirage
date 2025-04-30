@@ -3,6 +3,13 @@ import torch
 
 import triton
 import triton.language as tl
+import argparse
+
+parser = argparse.ArgumentParser()
+parser.add_argument('-b', '--batch', type=int, required=True)
+args = parser.parse_args()
+print("Batch size", args.batch)
+
 
 @triton.jit
 def _rms_norm_fwd_fused(

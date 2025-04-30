@@ -25,12 +25,18 @@ bool AbstractExpr::subpattern_to(AbstractExpr const &other) const {
 
   z3::sort P = c.uninterpreted_sort("P");
   z3::sort I = c.int_sort();
+  z3::sort F = c.fpa_sort(8, 24);
 
   z3::func_decl add = c.function("add", P, P, P);
   z3::func_decl mul = c.function("mul", P, P, P);
   z3::func_decl div = c.function("div", P, P, P);
   z3::func_decl exp = c.function("exp", P, P);
+  z3::func_decl square = c.function("square", P, P);
+  z3::func_decl sqrt = c.function("sqrt", P, P);
   z3::func_decl silu = c.function("silu", P, P);
+  z3::func_decl gelu = c.function("gelu", P, P);
+  z3::func_decl relu = c.function("relu", P, P);
+  z3::func_decl clamp = c.function("clamp", F, F, P, P);
   z3::func_decl rms = c.function("rms", I, P, P);
   z3::func_decl red = c.function("red", I, P, P);
 
@@ -50,6 +56,8 @@ bool AbstractExpr::subpattern_to(AbstractExpr const &other) const {
   z3::expr i = c.int_const("i");
   z3::expr i1 = c.int_const("i1");
   z3::expr i2 = c.int_const("i2");
+  z3::expr f = c.fpa_const("f", 8, 24);
+  z3::expr f1 = c.fpa_const("f", 8, 24);
 
   std::unordered_set<std::string> all_variables;
   z3::expr pattern1 = to_z3(c, all_variables),
@@ -87,7 +95,12 @@ bool AbstractExpr::subpattern_to(AbstractExpr const &other) const {
   s.add(forall(x, y, subpattern(x, div(x, y))));
   s.add(forall(x, y, subpattern(y, div(x, y))));
   s.add(forall(x, subpattern(x, exp(x))));
+  s.add(forall(x, subpattern(x, square(x))));
+  s.add(forall(x, subpattern(x, sqrt(x))));
   s.add(forall(x, subpattern(x, silu(x))));
+  s.add(forall(x, subpattern(x, gelu(x))));
+  s.add(forall(x, subpattern(x, relu(x))));
+  s.add(forall(x, f, f1, subpattern(x, clamp(f, f1, x))));
   s.add(forall(x, i, subpattern(x, rms(i, x))));
   s.add(forall(x, i, subpattern(x, red(i, x))));
 
@@ -178,6 +191,23 @@ std::string Div::to_string() const {
   return "(" + lhs->to_string() + "/" + rhs->to_string() + ")";
 }
 
+Pow::Pow(std::shared_ptr<AbstractExpr> lhs, std::shared_ptr<AbstractExpr> rhs)
+    : lhs(lhs), rhs(rhs) {
+  assert(lhs);
+  assert(rhs);
+}
+
+z3::expr Pow::to_z3(z3::context &c,
+                    std::unordered_set<std::string> &all_variables) const {
+  z3::sort P = c.uninterpreted_sort("P");
+  z3::func_decl pow = c.function("pow", P, P, P);
+  return pow(lhs->to_z3(c, all_variables), rhs->to_z3(c, all_variables));
+}
+
+std::string Pow::to_string() const {
+  return "(" + lhs->to_string() + "^" + rhs->to_string() + ")";
+}
+
 Exp::Exp(std::shared_ptr<AbstractExpr> exponent) : exponent(exponent) {
   assert(exponent);
 }
@@ -193,6 +223,36 @@ std::string Exp::to_string() const {
   return "e^" + exponent->to_string();
 }
 
+Square::Square(std::shared_ptr<AbstractExpr> a) : a(a) {
+  assert(a);
+}
+
+z3::expr Square::to_z3(z3::context &c,
+                       std::unordered_set<std::string> &all_variables) const {
+  z3::sort P = c.uninterpreted_sort("P");
+  z3::func_decl square = c.function("square", P, P);
+  return square(a->to_z3(c, all_variables));
+}
+
+std::string Square::to_string() const {
+  return "square(" + a->to_string() + ")";
+}
+
+Sqrt::Sqrt(std::shared_ptr<AbstractExpr> a) : a(a) {
+  assert(a);
+}
+
+z3::expr Sqrt::to_z3(z3::context &c,
+                     std::unordered_set<std::string> &all_variables) const {
+  z3::sort P = c.uninterpreted_sort("P");
+  z3::func_decl sqrt = c.function("sqrt", P, P);
+  return sqrt(a->to_z3(c, all_variables));
+}
+
+std::string Sqrt::to_string() const {
+  return "sqrt(" + a->to_string() + ")";
+}
+
 Silu::Silu(std::shared_ptr<AbstractExpr> a) : a(a) {
   assert(a);
 }
@@ -206,6 +266,56 @@ z3::expr Silu::to_z3(z3::context &c,
 
 std::string Silu::to_string() const {
   return "silu(" + a->to_string() + ")";
+}
+
+Gelu::Gelu(std::shared_ptr<AbstractExpr> a) : a(a) {
+  assert(a);
+}
+
+z3::expr Gelu::to_z3(z3::context &c,
+                     std::unordered_set<std::string> &all_variables) const {
+  z3::sort P = c.uninterpreted_sort("P");
+  z3::func_decl gelu = c.function("gelu", P, P);
+  return gelu(a->to_z3(c, all_variables));
+}
+
+std::string Gelu::to_string() const {
+  return "gelu(" + a->to_string() + ")";
+}
+
+Relu::Relu(std::shared_ptr<AbstractExpr> a) : a(a) {
+  assert(a);
+}
+
+z3::expr Relu::to_z3(z3::context &c,
+                     std::unordered_set<std::string> &all_variables) const {
+  z3::sort P = c.uninterpreted_sort("P");
+  z3::func_decl relu = c.function("relu", P, P);
+  return relu(a->to_z3(c, all_variables));
+}
+
+std::string Relu::to_string() const {
+  return "relu(" + a->to_string() + ")";
+}
+
+Clamp::Clamp(float min_val, float max_val, std::shared_ptr<AbstractExpr> elems)
+    : min_val(min_val), max_val(max_val), elems(elems) {
+  assert(elems);
+}
+
+z3::expr Clamp::to_z3(z3::context &c,
+                      std::unordered_set<std::string> &all_variables) const {
+  z3::sort P = c.uninterpreted_sort("P");
+  z3::func_decl clamp =
+      c.function("clamp", c.fpa_sort(8, 24), c.fpa_sort(8, 24), P, P);
+  return clamp(
+      c.fpa_val(min_val), c.fpa_val(max_val), elems->to_z3(c, all_variables));
+}
+
+std::string Clamp::to_string() const {
+  return "clamp(" + std::to_string(min_val) +
+         " <= x <= " + std::to_string(max_val) + ", " + elems->to_string() +
+         ")";
 }
 
 RMS::RMS(int red_deg, std::shared_ptr<AbstractExpr> elems)

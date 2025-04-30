@@ -25,6 +25,10 @@ public:
   TBForloopAccumOp(Graph *_graph,
                    STensor const &input,
                    mirage::type::TBOperatorType type);
+  TBForloopAccumOp(Graph *_graph,
+                   STensor const &input,
+                   STensor const &rescale,
+                   mirage::type::TBOperatorType type);
   ~TBForloopAccumOp();
 
   operator json() const override;

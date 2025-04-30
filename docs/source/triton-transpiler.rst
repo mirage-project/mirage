@@ -1,5 +1,5 @@
-Triton Transpiler Documentation
-===============================
+The Triton Transpiler
+=====================
 
 Introduction
 ------------

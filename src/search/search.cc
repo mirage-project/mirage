@@ -22,9 +22,19 @@ KernelGraphGenerator::KernelGraphGenerator(
     char const *filename,
     bool verbose)
     : config(config), dim_strategy(DimStrategy(config)), filename(filename),
-      num_thread(config.search_thread), verbose(verbose),
-      num_total_random_tests(0), num_valid_kernel_graphs(0),
+      verbose(verbose), num_total_random_tests(0), num_valid_kernel_graphs(0),
       num_total_states(0), num_tasks(0), max_depth(5) {
+  // setting num_thread
+  unsigned int max_num_threads = std::thread::hardware_concurrency();
+  if (config.search_thread > max_num_threads) {
+    printf("Config number of threads (%d) too high, setting num_thread to %d",
+           config.search_thread,
+           max_num_threads);
+    num_thread = max_num_threads;
+  } else {
+    num_thread = config.search_thread;
+  }
+
   preprocess(computation_graph);
 }
 
@@ -140,6 +150,7 @@ void KernelGraphGenerator::generate_next_operator(
           }
 
           KNOperator *new_op = create_op(*c.kn_graph, op_type, input_tensors);
+
           if (new_op) {
             c.kn_graph->operators.push_back(new_op);
             if (check_range(init_ranges, target_ranges, *c.kn_graph)) {
@@ -351,6 +362,7 @@ void KernelGraphGenerator::generate_next_operator(
 
         TBOperator *last_op = c.tb_graph->operators.back();
         TBOperator *new_op = create_op(*c.tb_graph, op_type, input_tensors);
+
         if (!new_op) {
           continue;
         }

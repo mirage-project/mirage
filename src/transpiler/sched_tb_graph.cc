@@ -36,7 +36,7 @@ static pair<bool, int>
 
   // Check whether the "real innermost dim" is the same
   auto find_real_innermost_dim =
-      [&](int num_dims, int const shape[], const size_t strides[]) -> int {
+      [&](int num_dims, int const shape[], size_t const strides[]) -> int {
     for (int i = 0; i < num_dims; ++i) {
       if (strides[i] == 1 && shape[i] != 1) {
         return i;
@@ -94,8 +94,8 @@ static vector<TBSchedNode>
               bool is_in_loop) {
   std::sort(
       ops.begin(), ops.end(), [&](ChainPiece const &a, ChainPiece const &b) {
-        const OpChainingMeta &meta_a = a.chaining_meta;
-        const OpChainingMeta &meta_b = b.chaining_meta;
+        OpChainingMeta const &meta_a = a.chaining_meta;
+        OpChainingMeta const &meta_b = b.chaining_meta;
         return meta_a.level != meta_b.level ? meta_a.level < meta_b.level
                : meta_a.fuse_chain_idx != meta_b.fuse_chain_idx
                    ? meta_a.fuse_chain_idx < meta_b.fuse_chain_idx
@@ -158,7 +158,7 @@ TBSched Transpiler::get_threadblock_schedule(tb::Graph const &tb_graph) {
         tb::TBInputOp const *input_op = dynamic_cast<tb::TBInputOp const *>(op);
         tb::STensor stensor = input_op->output_tensors.at(0);
         kn::DTensor dtensor = input_op->dtensor;
-        STensorMeta stensor_meta = stensor_metas.at(stensor.guid);
+        STensorMeta &stensor_meta = stensor_metas.at(stensor.guid);
         DTensorMeta dtensor_meta = dtensor_metas.at(dtensor.guid);
         int3 imap = input_op->input_map;
         size_t alignment = get_num_elems_in_16B(dtensor.data_type);
@@ -198,6 +198,7 @@ TBSched Transpiler::get_threadblock_schedule(tb::Graph const &tb_graph) {
         op_meta.is_pipelined_input = op_meta.is_chunked_input &&
                                      input_op->forloop_dim != -1 &&
                                      config.target_cc >= GPU_CC::A100;
+        stensor_meta.is_pipelined_input = op_meta.is_pipelined_input;
       } else if (op->op_type == type::TB_OUTPUT_OP) {
         // Decide whether or not to use chunked copy
         assert(is_fused_with_prev[op] == false);
@@ -250,6 +251,8 @@ TBSched Transpiler::get_threadblock_schedule(tb::Graph const &tb_graph) {
         } else {
           op_meta.is_accum_in_reg = false;
         }
+      } else if (op->op_type == type::TB_FORLOOP_ACCUM_NO_RED_RESCALE_OP) {
+        op_meta.is_accum_in_reg = false;
       }
       op2op_meta[op] = op_meta;
     }
@@ -328,7 +331,8 @@ TBSched Transpiler::get_threadblock_schedule(tb::Graph const &tb_graph) {
     // Calculate the level of each operator
     for (tb::TBOperator *const op : tb_graph.operators) {
       if (op->op_type == type::TB_INPUT_OP ||
-          op->op_type == type::TB_FORLOOP_ACCUM_NO_RED_OP) {
+          op->op_type == type::TB_FORLOOP_ACCUM_NO_RED_OP ||
+          op->op_type == type::TB_FORLOOP_ACCUM_NO_RED_RESCALE_OP) {
         op2chaining_meta[op] = {0, next_chain_idx++, 0};
       }
     }
@@ -363,7 +367,8 @@ TBSched Transpiler::get_threadblock_schedule(tb::Graph const &tb_graph) {
         chain_pieces,
         [&](tb::TBOperator const *op) {
           if (op->op_type == type::TB_INPUT_OP ||
-              op->op_type == type::TB_FORLOOP_ACCUM_NO_RED_OP) {
+              op->op_type == type::TB_FORLOOP_ACCUM_NO_RED_OP ||
+              op->op_type == type::TB_FORLOOP_ACCUM_NO_RED_RESCALE_OP) {
             return false;
           } else {
             return true;
@@ -375,7 +380,7 @@ TBSched Transpiler::get_threadblock_schedule(tb::Graph const &tb_graph) {
   // Some sanity checks
   auto count_num_operators = [](std::vector<TBSchedNode> const &nodes) {
     size_t res = 0;
-    for (const TBSchedNode &node : nodes) {
+    for (TBSchedNode const &node : nodes) {
       if (node.type == tb_sched_node_t::OPERATOR) {
         res += node.ops.size();
       }

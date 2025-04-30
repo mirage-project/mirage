@@ -11,6 +11,7 @@ The follow code snippet shows how to use Mirage to automatically generate highly
 First, we define the computation graph for GQA, which takes three input tensors `Q`, `K`, and `V`, and produces a single output tensor `O` that contains the attention result:
 
 .. code-block:: Python
+
     import mirage as mi
     graph = mi.new_kernel_graph()
     Q = graph.new_input(dims=(2, 256, 64), dtype=mi.float16)
@@ -28,6 +29,7 @@ Second, we will use `mi.superoptimize` to superoptimize GQA. Mirage will automat
 The `superoptimize` function returns the best uGraph discovered by Mirage. The object `optimized_graph` can directly run as a function, and doing so will let Mirage transpile the uGraph into CUDA code, compile the code for execution, and launch the compiled kernel. This allows users to directly run Mirage-generated kernels in their Python programs.
 
 .. code-block:: Python
+
     import torch
     input_tensors = [
         torch.randn(64, 1, 128, dtype=torch.float16, device='cuda:0'),

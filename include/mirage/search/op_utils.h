@@ -81,7 +81,6 @@ KNOperator *create_op(kernel::Graph &g,
 KNOperator *create_op(kernel::Graph &g,
                       type::KNOperatorType type,
                       std::vector<DTensor> const &inputs);
-
 TBOperator *create_op(threadblock::Graph &g,
                       type::TBOperatorType type,
                       STensor const &input);
@@ -92,7 +91,6 @@ TBOperator *create_op(threadblock::Graph &g,
 TBOperator *create_op(threadblock::Graph &g,
                       type::TBOperatorType type,
                       std::vector<STensor> const &inputs);
-
 size_t count_op_of_type(type::KNOperatorType op_type, kernel::Graph const &g);
 size_t count_op_of_type(type::TBOperatorType op_type,
                         threadblock::Graph const &g);

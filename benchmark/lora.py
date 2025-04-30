@@ -5,11 +5,20 @@ import argparse
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('-b', '--batch', type=int, default=1)
-    parser.add_argument('--file', type=str, default='lora.json')
+    parser.add_argument('-b', '--batch_size', type=int, default=1)
+    parser.add_argument('--file', type=str, default='group_query_attention.json')
+    parser.add_argument('--backend', type=str, default='cuda')
+    parser.add_argument('--warmup', type=int, default=16)
+    parser.add_argument('--profile', type=int, default=1000)
+    parser.add_argument('--save_codes', type=bool, default=False)
+    
     args = parser.parse_args()
-    batch_size = args.batch
+    batch_size = args.batch_size
     filename = args.file
+    backend = args.backend
+    warmup_iters = args.warmup
+    profile_iters = args.profile
+    save_codes = args.save_codes
 
     graph = mi.new_kernel_graph()
     X = graph.new_input(dims=(16, 256), dtype=mi.float16)
@@ -21,7 +30,7 @@ if __name__ == "__main__":
     C = graph.matmul(X, W)
     O = graph.add(C, E)
     graph.mark_output(O)
-    optimized_graph = graph.superoptimize(config="lora", previous_checkpoint=filename)
+    optimized_graph = graph.superoptimize(config="lora", previous_checkpoint=filename, backend=backend, save_codes=save_codes, warmup_iters=warmup_iters, profile_iters=profile_iters)
 
     input_tensors = [
         torch.randn(16, 256, dtype=torch.float16, device='cuda:0'),

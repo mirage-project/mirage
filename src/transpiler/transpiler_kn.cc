@@ -19,6 +19,7 @@
 #include <unordered_set>
 
 #include "mirage/transpiler/utils.h"
+#include "mirage/type.h"
 
 namespace mirage {
 namespace transpiler {
@@ -94,17 +95,32 @@ std::pair<string, string>
   string pointer_var_name = fmt("dtensor$", guid);
   string code = "";
   if (meta.is_input) {
-    code = fmt("half_t *$ = (half_t*)input_tensors.at($);",
+    code = fmt("$ *$ = ($*)input_tensors.at($);",
+               get_datatype_str(dtensor.data_type),
                pointer_var_name,
+               get_datatype_str(dtensor.data_type),
                meta.input_idx);
   } else if (meta.is_output) {
-    code = fmt("half_t *$ = (half_t*)output_tensors.at($);",
+    code = fmt("$ *$ = ($*)output_tensors.at($);",
+               get_datatype_str(dtensor.data_type),
                pointer_var_name,
+               get_datatype_str(dtensor.data_type),
                meta.output_idx);
   } else {
-    code = fmt(
-        "half_t *$ = (half_t*)((char*)buf + $);", pointer_var_name, meta.addr);
+    code = fmt("$ *$ = ($*)((char*)buf + $);",
+               get_datatype_str(dtensor.data_type),
+               pointer_var_name,
+               get_datatype_str(dtensor.data_type),
+               meta.addr);
   }
+  return {pointer_var_name, code};
+}
+
+std::pair<string, string>
+    Transpiler::get_profiling_ptr(int const customized_idx) {
+  string pointer_var_name = fmt("profiler_buffer_$", customized_idx);
+  string code = "";
+  code = fmt("uint64_t *$ = (uint64_t*)profiler_buffer;", pointer_var_name);
   return {pointer_var_name, code};
 }
 
@@ -115,10 +131,16 @@ static string get_kn_op_str(type::KNOperatorType type) {
         return "EXP";
       case type::KN_SILU_OP:
         return "SILU";
+      case type::KN_GELU_OP:
+        return "GELU";
       case type::KN_SQUARE_OP:
         return "SQUARE";
       case type::KN_SQRT_OP:
         return "SQRT";
+      case type::KN_RELU_OP:
+        return "RELU";
+      case type::KN_CLAMP_OP:
+        return "CLAMP";
       default:
         assert(0);
     }
@@ -128,10 +150,15 @@ static string get_kn_op_str(type::KNOperatorType type) {
 
 TranspileResult Transpiler::transpile_ugraph() {
   size_t max_smem_size = 0;
+  size_t profiler_buf_size = 0;
   // Generate header
+
   CodeKeeper header;
   header.e("#define NUM_GPUS $", num_gpus);
   header.e("#define USE_NVSHMEM $", use_nvshmem);
+  if (config.target_cc == GPU_CC::H100) {
+    header.e("#define MIRAGE_GRACE_HOPPER");
+  }
   header.e("#include \"runtime.h\"");
   header.e("using namespace cute;");
 
@@ -141,11 +168,13 @@ TranspileResult Transpiler::transpile_ugraph() {
                    // cudaFuncSetAttribute)
   CodeKeeper exec; // This keeps all code in the `_execute_mugraph` function
 
+  CodeKeeper hopper_tma;
+
   init.e("static void _init() {");
   exec.e(
       "static void _execute_mugraph(std::vector<void const *> input_tensors, "
-      "std::vector<void*> output_tensors"
-      ", void* buf) {");
+      "std::vector<void*> output_tensors, "
+      "void* buf, cudaStream_t stream, void * profiler_buffer){");
   for (kn::KNOperator *const op : g->operators) {
     std::string op_type_str;
     to_json(op_type_str, op->op_type);
@@ -198,8 +227,12 @@ TranspileResult Transpiler::transpile_ugraph() {
         size_t batch_stride_C =
             out0.num_dims == 2 ? 0 : meta_out0.strides[out0.num_dims - 3];
         // Run GEMM
-        exec.e("kn::gemm<CUBLAS_COMPUTE_16F>($,$,$, $,$,$, $,$, $,$, $,$, $, "
+        string compute_type =
+            (in0.data_type == type::DT_FLOAT16 ? "CUBLAS_COMPUTE_16F"
+                                               : "CUBLAS_COMPUTE_32F");
+        exec.e("kn::gemm<$>($,$,$, $,$,$, $,$, $,$, $,$, $, "
                "$,$,$);",
+               compute_type,
                out0_ptr_name,
                in0_ptr_name,
                in1_ptr_name,
@@ -220,6 +253,9 @@ TranspileResult Transpiler::transpile_ugraph() {
       }
       case type::KNOperatorType::KN_EXP_OP:
       case type::KNOperatorType::KN_SILU_OP:
+      case type::KNOperatorType::KN_GELU_OP:
+      case type::KNOperatorType::KN_RELU_OP:
+      case type::KNOperatorType::KN_CLAMP_OP:
       case type::KNOperatorType::KN_SQUARE_OP:
       case type::KNOperatorType::KN_SQRT_OP: {
         // Elemwise unary op
@@ -237,7 +273,7 @@ TranspileResult Transpiler::transpile_ugraph() {
                  "unary kernel, global memory access won't be coalesced when "
                  "input tensor's innermost_dim (%d) != output tensor's "
                  "innermost_dim (%d)"
-                 "This may cause performance degration\n",
+                 "This may cause performance degradation\n",
                  meta_in0.innermost_dim,
                  meta_out0.innermost_dim);
         }
@@ -248,15 +284,16 @@ TranspileResult Transpiler::transpile_ugraph() {
         string in0_layout =
             mov_last_and_get_layout(in0, meta_in0, innermost_dim);
         string out0_layout =
-            mov_last_and_get_layout(in0, meta_in0, innermost_dim);
+            mov_last_and_get_layout(out0, meta_out0, innermost_dim);
         // Get tensor ptrs
         auto [in0_ptr_name, in0_ptr_code] = get_dtensor_ptr(in0);
         auto [out0_ptr_name, out0_ptr_code] = get_dtensor_ptr(out0);
         exec.e(in0_ptr_code);
         exec.e(out0_ptr_code);
         // Create kernel instance
-        exec.e("using kernel = kn::ElementUnaryKernel<half_t, "
+        exec.e("using kernel = kn::ElementUnaryKernel<$, "
                "kn::ElementUnaryOpType::$, $, $>;",
+               get_datatype_str(in0.data_type),
                get_kn_op_str(op->op_type),
                in0_layout,
                out0_layout);
@@ -266,7 +303,8 @@ TranspileResult Transpiler::transpile_ugraph() {
       }
       case type::KNOperatorType::KN_ADD_OP:
       case type::KNOperatorType::KN_MUL_OP:
-      case type::KNOperatorType::KN_DIV_OP: {
+      case type::KNOperatorType::KN_DIV_OP:
+      case type::KNOperatorType::KN_POW_OP: {
         // Elemwise binary op
         kn::DTensor &in0 = op->input_tensors.at(0);
         kn::DTensor &in1 = op->input_tensors.at(1);
@@ -313,11 +351,13 @@ TranspileResult Transpiler::transpile_ugraph() {
         string op_type_str = op->op_type == type::KN_ADD_OP   ? "ADD"
                              : op->op_type == type::KN_MUL_OP ? "MUL"
                              : op->op_type == type::KN_DIV_OP ? "DIV"
+                             : op->op_type == type::KN_POW_OP ? "POW"
                                                               : "";
         assert(op_type_str != "");
         // Create kernel instance
-        exec.e("using kernel = kn::ElementBinaryKernel<half_t, "
+        exec.e("using kernel = kn::ElementBinaryKernel<$, "
                "kn::ElementBinaryOpType::$, $, $, $>;",
+               get_datatype_str(in0.data_type),
                op_type_str,
                in0_layout,
                in1_layout,
@@ -383,7 +423,8 @@ TranspileResult Transpiler::transpile_ugraph() {
         exec.e(in0_ptr_code);
         exec.e(out0_ptr_code);
         // Create kernel instance
-        exec.e("using kernel = kn::ReductionKernel<half_t, $, $, $>;",
+        exec.e("using kernel = kn::ReductionKernel<$, $, $, $>;",
+               get_datatype_str(in0.data_type),
                layout_in0,
                layout_out0,
                new_reduction_dim);
@@ -407,16 +448,34 @@ TranspileResult Transpiler::transpile_ugraph() {
           exec.e(ptr_code);
           ptr_names.push_back(ptr_name);
         }
+
+        if (config.profiling) {
+          auto [ptr_name, ptr_code] = get_profiling_ptr(0);
+          ptr_names.push_back(ptr_name);
+          exec.e(ptr_code);
+        }
+
         // Transpile
-        CustomOPTranspileResult result = transpile_kn_custom_op(cur_op);
+        CustomOPTranspileResult result;
+        if (config.target_cc == GPU_CC::H100) {
+          result = transpile_kn_custom_op_hopper(cur_op);
+          // only generate for first tb graph now
+          config.profiling = false;
+        } else {
+          result = transpile_kn_custom_op(cur_op);
+          config.profiling = false;
+        }
+
         if (result.error_type != CUDA_T_SUCCESS) {
           vector<OutputTensorDirective> output_directives;
           return TranspileResult{
-              result.error_type, "", 0, 0, output_directives};
+              result.error_type, "", 0, 0, 0, output_directives};
         }
         if (result.smem_size > max_smem_size) {
           max_smem_size = result.smem_size;
         }
+        profiler_buf_size += result.profiler_buf_size;
+
         // Checkings against grid dim and block dim
         if (config.target_cc <= GPU_CC::H100) {
           // According to
@@ -449,14 +508,123 @@ TranspileResult Transpiler::transpile_ugraph() {
                bgraph.block_dim.y,
                bgraph.block_dim.z);
         exec.e("size_t smem_size = $;", result.smem_size);
-        exec.e("$<<<grid_dim, block_dim, smem_size>>>($);",
-               result.func_name,
-               ptr_names);
+        // init
+
+        exec.e("");
+        exec.e("// define tmas");
+        for (kn::DTensor const &dtensor : cur_op->input_tensors) {
+          auto guid = dtensor.guid;
+          DTensorMeta const &meta = dtensor_metas.at(guid);
+        }
+
+        // get tma params;
+        if (config.target_cc >= GPU_CC::H100) {
+          // get_hopper_tmas(hopper_tma, result.tmaParamsList);
+
+          // for inputs that needs tma async copy, init the TMAs
+          std::string tmas;
+          std::string tma_tmps;
+          std::string m_inputs;
+          for (int i = 0; i < result.tmaParamsList.size(); i++) {
+            auto const &tmaParams = result.tmaParamsList.at(i);
+            m_inputs.append(tmaParams.m_input ? "true" : "false");
+
+            tmas.append(fmt("tma_$, ", tmaParams.guid));
+            tma_tmps.append(fmt("decltype(tma_$)", tmaParams.guid));
+
+            if (i != result.tmaParamsList.size() - 1) {
+              tma_tmps.append(", ");
+              m_inputs.append(", ");
+            }
+          }
+
+          exec.e(fmt("std::vector<bool> minputs = {$};", m_inputs));
+          for (int i = 0; i < result.tmaParamsList.size(); i++) {
+            auto const &tmaParams = result.tmaParamsList.at(i);
+
+            if (tmaParams.m_input) {
+              exec.e(fmt("static constexpr cute::GMMA::Major GmmaMajor_$ = "
+                         "GMMA::Major::K;",
+                         tmaParams.guid));
+            } else {
+              exec.e(fmt("static constexpr cute::GMMA::Major GmmaMajor_$ = "
+                         "GMMA::Major::MN;",
+                         tmaParams.guid));
+            }
+            exec.e(fmt("using DstMNKLayout_$ = $;",
+                       tmaParams.guid,
+                       tmaParams.dstLayout));
+
+            exec.e(fmt("using SrcMNKLayout_$ = $;",
+                       tmaParams.guid,
+                       tmaParams.srcLayout));
+
+            exec.e(fmt(
+                "using SmemLayoutAtom_$ = "
+                "decltype(cutlass::gemm::collective::detail::ss_smem_selector<"
+                "GmmaMajor_$, $, decltype(get<0>(DstMNKLayout_${})), "
+                "decltype(get<1>(DstMNKLayout_${}))>());",
+                tmaParams.guid,
+                tmaParams.guid,
+                get_datatype_str(cur_op->input_tensors[0].data_type),
+                tmaParams.guid,
+                tmaParams.guid));
+            exec.e(fmt("using DstPipeLayout_$ = "
+                       "decltype(tile_to_shape(SmemLayoutAtom_${}, "
+                       "make_shape(shape<0>(DstMNKLayout_${}), "
+                       "shape<1>(DstMNKLayout_${}), Int<$>{}), "
+                       "Step<_1, _2, _3>{}));",
+                       tmaParams.guid,
+                       tmaParams.guid,
+                       tmaParams.guid,
+                       tmaParams.guid,
+                       config.pipeline_stages));
+            exec.e(fmt("auto g_tensor_$ = "
+                       "make_tensor(make_gmem_ptr<$>(dtensor$), "
+                       "SrcMNKLayout_${});",
+                       tmaParams.guid,
+                       get_datatype_str(cur_op->input_tensors[0].data_type),
+                       tmaParams.guid,
+                       tmaParams.guid));
+            exec.e(
+                fmt("auto tma_$ = make_tma_copy(SM90_TMA_LOAD{}, g_tensor_$, "
+                    "DstPipeLayout_${}(_, _, Int<0>{}));",
+                    tmaParams.guid,
+                    tmaParams.guid,
+                    tmaParams.guid));
+
+            exec.e("");
+          }
+
+          if (result.tmaParamsList.size() > 0) {
+            exec.e("cudaFuncSetAttribute($<$>, "
+                   "cudaFuncAttributeMaxDynamicSharedMemorySize, $);",
+                   result.func_name,
+                   tma_tmps,
+                   result.smem_size);
+          } else {
+            exec.e("cudaFuncSetAttribute($, "
+                   "cudaFuncAttributeMaxDynamicSharedMemorySize, $);",
+                   result.func_name,
+                   result.smem_size);
+          }
+
+          exec.e("$<<<grid_dim, block_dim, smem_size, stream>>>($ $);",
+                 result.func_name,
+                 tmas,
+                 ptr_names);
+        } else {
+          exec.e("cudaFuncSetAttribute($, "
+                 "cudaFuncAttributeMaxDynamicSharedMemorySize, $);",
+                 result.func_name,
+                 result.smem_size);
+          exec.e("$<<<grid_dim, block_dim, smem_size, stream>>>( $);",
+                 result.func_name,
+                 ptr_names);
+        }
+
         custom_kernels.e(result.code);
-        init.e("cudaFuncSetAttribute($, "
-               "cudaFuncAttributeMaxDynamicSharedMemorySize, $);",
-               result.func_name,
-               result.smem_size);
+
         break;
       }
       default:
@@ -469,10 +637,11 @@ TranspileResult Transpiler::transpile_ugraph() {
   init.e("}");
   exec.e("}");
 
-  string code = fmt("$\n$\n$\n$\n",
+  string code = fmt("$\n$\n$\n$\n$\n",
                     header.to_string(),
                     custom_kernels.to_string(),
                     init.to_string(),
+                    hopper_tma.to_string(),
                     exec.to_string());
   vector<OutputTensorDirective> output_directives;
   for (kn::DTensor const &dtensor : this->mugraph_output_tensors) {
@@ -484,8 +653,13 @@ TranspileResult Transpiler::transpile_ugraph() {
         vector<int>(dtensor.dim, dtensor.dim + dtensor.num_dims),
         vector<size_t>(meta.strides, meta.strides + dtensor.num_dims)});
   }
-  return TranspileResult{
-      CUDA_T_SUCCESS, code, this->d_buf_size, max_smem_size, output_directives};
+
+  return TranspileResult{CUDA_T_SUCCESS,
+                         code,
+                         this->d_buf_size,
+                         max_smem_size,
+                         profiler_buf_size,
+                         output_directives};
 }
 
 } // namespace transpiler
