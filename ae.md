@@ -2,7 +2,7 @@
 
 ## Get Started
 ```
-conda activate mirage
+conda activate mirage_ae
 export MIRAGE_ROOT=/path/to/mirage
 cd $MIRAGE_ROOT
 pip install .
@@ -14,7 +14,11 @@ You can run
 ```
 python3 $MIRAGE_ROOT/ae_scripts/run_all.py
 ```
-to generate all the results in Figure 7 and Figure 11.
+to generate all the results in Figure 7 and Figure 11, and
+```
+python3 $MIRAGE_ROOT/ae_scripts/search_time.py
+```
+to generate the search time study results in Table 5.
 
 You can also generate each data point separately. Followings are the detailed instructions.
 
@@ -127,5 +131,3 @@ python3 $MIRAGE_ROOT/benchmark/end-to-end/lora.py -b {batch_size}
 ```
 python3 $MIRAGE_ROOT/benchmark/end-to-end/ngpt.py -b {batch_size}
 ```
-
-### Search Time
