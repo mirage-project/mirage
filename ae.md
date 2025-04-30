@@ -1,14 +1,24 @@
 # Artifact Evaluation of Mirage
 
-## Get Started
+## Getting Started Instructions
+You may install the baseline methods manually by following their respective official tutorials. Alternatively, if you are using the machine we provide, you can directly use the pre-configured Conda environment, which includes all dependencies required for Mirage and the baseline implementations.
 ```
 conda activate mirage_ae
+```
+Clone the Mirage source code from github and go to the branch for artifact evaluation.
+```
+git clone https://github.com/mirage-project/mirage.git --recursive
+cd mirage
+git checkout evaluation
+```
+Install Mirage from source
+```
 export MIRAGE_ROOT=/path/to/mirage
 cd $MIRAGE_ROOT
 pip install .
 ```
 
-## Detailed Instructions
+## Experiment Instructions
 
 You can run
 ```
