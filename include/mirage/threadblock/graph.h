@@ -195,6 +195,7 @@ public:
 
   using OpType = TBOperator;
   using TensorType = STensor;
+  bool use_hopper_feature = true;
 };
 
 void from_json(json const &j, Graph &g);

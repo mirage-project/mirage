@@ -175,6 +175,7 @@ TranspileResult Transpiler::transpile_ugraph() {
       "static void _execute_mugraph(std::vector<void const *> input_tensors, "
       "std::vector<void*> output_tensors, "
       "void* buf, cudaStream_t stream, void * profiler_buffer){");
+  int customized_idx = 0;
   for (kn::KNOperator *const op : g->operators) {
     std::string op_type_str;
     to_json(op_type_str, op->op_type);
@@ -457,12 +458,12 @@ TranspileResult Transpiler::transpile_ugraph() {
 
         // Transpile
         CustomOPTranspileResult result;
-        if (config.target_cc == GPU_CC::H100) {
-          result = transpile_kn_custom_op_hopper(cur_op);
+        if (config.target_cc == GPU_CC::H100 && bgraph.use_hopper_feature) {
+          result = transpile_kn_custom_op_hopper(cur_op, customized_idx);
           // only generate for first tb graph now
           config.profiling = false;
         } else {
-          result = transpile_kn_custom_op(cur_op);
+          result = transpile_kn_custom_op(cur_op, customized_idx);
           config.profiling = false;
         }
 
@@ -624,6 +625,7 @@ TranspileResult Transpiler::transpile_ugraph() {
         }
 
         custom_kernels.e(result.code);
+        customized_idx++;
 
         break;
       }

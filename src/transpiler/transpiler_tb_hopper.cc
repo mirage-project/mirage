@@ -145,6 +145,109 @@ static string get_stensor_layout(tb::STensor const &stensor,
   }
 }
 
+// // Get the aligned layout for MMA stensor
+// static string get_mma_stensor_aligned_layout_hopper(tb::STensor const
+// &stensor,
+//                                                     STensorMeta const &meta,
+//                                                     bool m,
+//                                                     bool output,
+//                                                     int start_dim = 0) {
+
+//   tb::STensor new_stensor = stensor;
+//   STensorMeta new_meta = meta;
+//   bool n = (!m) && (!output);
+
+//   assert(stensor.num_dims - start_dim == 2);
+//   int aligned_shape = -1;
+
+//   for (int i = start_dim; i < stensor.num_dims; i++) {
+//     // m/n
+//     if (i == start_dim && m) {
+//       // K
+//       aligned_shape = std::max(stensor.dim[i], 8);
+//     } else if (i == start_dim && n) {
+//       // N
+//       aligned_shape = std::max(stensor.dim[i], 8);
+//     } else if (i == stensor.num_dims - 1 && m) {
+//       // M
+//       aligned_shape = std::max(stensor.dim[i], 64);
+//     } else if (i == stensor.num_dims - 1 && n) {
+//       // K
+//       aligned_shape = std::max(stensor.dim[i], 8);
+//     } else if (i == start_dim && output) {
+//       // N
+//       aligned_shape = std::max(stensor.dim[i], 8);
+//     } else if (i == stensor.num_dims - 1 && output) {
+//       // M
+//       aligned_shape = std::max(stensor.dim[i], 64);
+//     } else {
+//       assert(false);
+//     }
+//     new_stensor.dim[i] = aligned_shape;
+//   }
+
+//   // update strides
+//   int innermost_dim = new_meta.innermost_dim;
+//   for (int i = start_dim; i < stensor.num_dims; i++) {
+//     if (i != innermost_dim) {
+//       new_meta.strides[i] = new_stensor.dim[innermost_dim];
+//     }
+//   }
+//   return get_stensor_layout(new_stensor, new_meta, new_stensor.num_dims - 2);
+// }
+
+// Get the aligned layout for MMA stensor
+static string get_mma_stensor_aligned_layout(
+    tb::STensor const &stensor,
+    STensorMeta const &meta,
+    std::tuple<int, int, int> const &mma_atom_mnk,
+    bool m,
+    bool output,
+    int start_dim = 0) {
+
+  tb::STensor new_stensor = stensor;
+  STensorMeta new_meta = meta;
+  bool n = (!m) && (!output);
+
+  assert(stensor.num_dims - start_dim == 2);
+  int aligned_shape = -1;
+
+  for (int i = start_dim; i < stensor.num_dims; i++) {
+    // m/n
+    if (i == start_dim && m) {
+      // K
+      aligned_shape = std::max(stensor.dim[i], std::get<2>(mma_atom_mnk));
+    } else if (i == start_dim && n) {
+      // N
+      aligned_shape = std::max(stensor.dim[i], std::get<1>(mma_atom_mnk));
+    } else if (i == stensor.num_dims - 1 && m) {
+      // M
+      aligned_shape = std::max(stensor.dim[i], std::get<0>(mma_atom_mnk));
+    } else if (i == stensor.num_dims - 1 && n) {
+      // K
+      aligned_shape = std::max(stensor.dim[i], std::get<2>(mma_atom_mnk));
+    } else if (i == start_dim && output) {
+      // N
+      aligned_shape = std::max(stensor.dim[i], std::get<1>(mma_atom_mnk));
+    } else if (i == stensor.num_dims - 1 && output) {
+      // M
+      aligned_shape = std::max(stensor.dim[i], std::get<0>(mma_atom_mnk));
+    } else {
+      assert(false);
+    }
+    new_stensor.dim[i] = aligned_shape;
+  }
+
+  // update strides
+  int innermost_dim = new_meta.innermost_dim;
+  for (int i = start_dim; i < stensor.num_dims; i++) {
+    if (i != innermost_dim) {
+      new_meta.strides[i] = new_stensor.dim[innermost_dim];
+    }
+  }
+  return get_stensor_layout(new_stensor, new_meta, new_stensor.num_dims - 2);
+}
+
 // Move the innermost dim to the last dim, and format it as a CuTe layout
 // string.
 //
@@ -273,7 +376,7 @@ static std::pair<bool, std::vector<int64_t>>
         tb::TBOperator const *op,
         CodeKeeper &code,
         bool is_in_loop,
-        std::map<int64_t, tb::TBInputOp const *> &pipeline_inputs) {
+        std::map<int64_t, tb::TBInputOp const *> &pipeline_inputs_tma) {
   if (!is_in_loop) {
     return {false, {}};
   }
@@ -281,12 +384,12 @@ static std::pair<bool, std::vector<int64_t>>
   std::vector<int64_t> input_ids_waited;
   for (int i = 0; i < op->input_tensors.size(); i++) {
     int64_t input_id = op->input_tensors.at(i).guid;
-    if (pipeline_inputs.find(input_id) != pipeline_inputs.end()) {
+    if (pipeline_inputs_tma.find(input_id) != pipeline_inputs_tma.end()) {
       code.e("int read_idx_$ = hopper_async_pipeline_$.consumer_wait();",
              input_id,
              input_id);
       // only wait once
-      pipeline_inputs.erase(input_id);
+      pipeline_inputs_tma.erase(input_id);
       input_ids_waited.push_back(input_id);
     }
   }
@@ -302,7 +405,8 @@ static std::pair<bool, std::vector<int64_t>>
 // Will return a CustomOPTranspileResult object. See comments in transpiler.h
 // for more details
 CustomOPTranspileResult
-    Transpiler::transpile_kn_custom_op_hopper(kn::KNCustomizedOp const *op) {
+    Transpiler::transpile_kn_custom_op_hopper(kn::KNCustomizedOp const *op,
+                                              int customized_idx) {
   bool profiling = config.profiling;
 
   tb::Graph const &g = op->bgraph;
@@ -317,7 +421,7 @@ CustomOPTranspileResult
   // Allocate a kernel name
   static int custom_kernel_idx_counter = 0;
   int cur_custom_kernel_idx = custom_kernel_idx_counter++;
-  string func_name = fmt("custom_kernel_$", cur_custom_kernel_idx);
+  string func_name = fmt("custom_kernel_$", customized_idx);
 
   if (GPU_CC::H100 != config.target_cc ||
       (config::MAX_NUM_WARP_GROUPS <
@@ -379,7 +483,8 @@ CustomOPTranspileResult
       pipelined_input_ops; // A list of input ops that are software pipelined
                            // (asynchronously G->S copied)
 
-  std::map<int64_t, tb::TBInputOp const *> pipeline_inputs;
+  std::map<int64_t, tb::TBInputOp const *> pipeline_inputs_tma;
+  std::unordered_set<tb::TBInputOp const *> pipeline_inputs_cpasync;
 
   // for release smem_read;
   std::vector<sguid_t> smem_read_output_guids;
@@ -470,83 +575,117 @@ CustomOPTranspileResult
                  dtensor.guid);
         } else {
           pipelined_input_ops.insert(cur_op);
-          assert(cur_op->output_tensors.size() == 1);
-          // make tma
+          //  bool use_tma = stensor.dim[stensor.num_dims - 1] >= 8 &&
+          //                 stensor.dim[stensor.num_dims - 2] >= 8 &&
+          //                 stensor.dim[stensor.num_dims - 1] % 8 == 0 &&
+          //                 stensor.dim[stensor.num_dims - 1] % 8 == 0;
 
-          // gmem tensor
-          string gmem_layout = get_layout_detail::get_cute_layout(
-              vector<int>(dtensor.dim, dtensor.dim + dtensor.num_dims),
-              vector<size_t>(dtensor_meta.strides,
-                             dtensor_meta.strides + dtensor.num_dims));
+          if (!g.use_hopper_feature) {
+            code.e("const $ *dtensor$_tile_ptr = dtensor$_ptr $;",
+                   get_datatype_str(dtensor.data_type),
+                   dtensor.guid,
+                   dtensor.guid,
+                   offset);
+            code.e("using STensor$InputAtom = tb::InputChunkedAsyncCopy<$, "
+                   "$, DTensor$TileLayout, NUM_THREADS>;",
+                   stensor.guid,
+                   get_datatype_str(stensor.data_type),
+                   mov_last_get_stensor_layout(
+                       stensor, stensor_meta, real_innermost_dim),
+                   dtensor.guid);
+            pipeline_inputs_cpasync.insert(cur_op);
+            code.e("$ *stensor$_async_copy_buf = stensor$_ptr;",
+                   get_datatype_str(stensor.data_type),
+                   stensor.guid,
+                   stensor.guid + mem_plan.pipelined_input_buf_guid_offset);
+          } else {
 
-          // imap;
-          int forloop_dim = cur_op->forloop_dim;
-          bool m_input = stensor_meta.m_input;
-          string smem_layout = mov_last_get_stensor_layout(
-              stensor, stensor_meta, real_innermost_dim, !m_input);
+            assert(cur_op->output_tensors.size() == 1);
+            // make tma
+            // gmem tensor
+            string gmem_layout = get_layout_detail::get_cute_layout(
+                vector<int>(dtensor.dim, dtensor.dim + dtensor.num_dims),
+                vector<size_t>(dtensor_meta.strides,
+                               dtensor_meta.strides + dtensor.num_dims));
 
-          auto [dims, strides] = get_layout_detail::get_cute_layout_array(
-              vector<int>(dtensor.dim, dtensor.dim + dtensor.num_dims),
-              vector<size_t>(dtensor_meta.strides,
-                             dtensor_meta.strides + dtensor.num_dims),
-              !m_input);
+            // imap;
+            int forloop_dim = cur_op->forloop_dim;
+            bool m_input = stensor_meta.m_input;
+            string smem_layout = mov_last_get_stensor_layout(
+                stensor, stensor_meta, real_innermost_dim, !m_input);
 
-          std::vector<int> partition_logic = {
-              imap.x >= 0 ? (dtensor.num_dims - 1 - imap.x) : -1,
-              imap.y >= 0 ? (dtensor.num_dims - 1 - imap.y) : -1,
-              imap.z >= 0 ? (dtensor.num_dims - 1 - imap.z) : -1};
+            // if()
+            // string smem_layout_aligned =
+            // get_mma_stensor_aligned_layout_hopper(stensor,
+            //   stensor_meta,
+            //   m_input,
+            //   false,
+            //   stensor.num_dims - 2);
 
-          string SrcMNKLayout = generate_partitioned_and_expanded_layout(
-              dim3(g.grid_dim.x, g.grid_dim.y, g.grid_dim.z),
-              dims,
-              strides,
-              partition_logic,
-              g.forloop_range,
-              m_input ? forloop_dim : (dtensor.num_dims - 1 - forloop_dim));
-          code.e(
-              "tb::HopperAsyncPipeline<$> "
-              "hopper_async_pipeline_$((void *) (buf + $), (tb::warpgroup_id() "
-              "== $ && tb::warp_id() % mirage::config::NUM_WARPS_PER_GROUP == "
-              "0), tb::warpgroup_id() < $, $, $);",
-              config.pipeline_stages,
-              stensor.guid,
-              barrier_addr,
-              config.num_consumer_wgs,
-              config.num_consumer_wgs,
-              stensor_meta.num_phy_elems *
-                  type::get_datatype_size(stensor.data_type),
-              config.num_consumer_wgs);
+            auto [dims, strides] = get_layout_detail::get_cute_layout_array(
+                vector<int>(dtensor.dim, dtensor.dim + dtensor.num_dims),
+                vector<size_t>(dtensor_meta.strides,
+                               dtensor_meta.strides + dtensor.num_dims),
+                !m_input);
 
-          code.e(
-              "using STensor$InputAtom = tb::InputTMAAsyncCopy<$, $, "
-              "$, decltype(tma_$), decltype(hopper_async_pipeline_$), $, $>;",
-              stensor.guid,
-              get_datatype_str(stensor.data_type),
-              smem_layout,
-              SrcMNKLayout,
-              dtensor.guid,
-              stensor.guid,
-              stensor_meta.m_input,
-              g.forloop_range);
-          pipe_index++;
-          barrier_addr += tma_barrier_size;
+            std::vector<int> partition_logic = {
+                imap.x >= 0 ? (dtensor.num_dims - 1 - imap.x) : -1,
+                imap.y >= 0 ? (dtensor.num_dims - 1 - imap.y) : -1,
+                imap.z >= 0 ? (dtensor.num_dims - 1 - imap.z) : -1};
 
-          pipeline_inputs[stensor.guid] = cur_op;
+            string SrcMNKLayout = generate_partitioned_and_expanded_layout(
+                dim3(g.grid_dim.x, g.grid_dim.y, g.grid_dim.z),
+                dims,
+                strides,
+                partition_logic,
+                g.forloop_range,
+                m_input ? forloop_dim : (dtensor.num_dims - 1 - forloop_dim));
+            code.e("tb::HopperAsyncPipeline<$> "
+                   "hopper_async_pipeline_$((void *) (buf + $), "
+                   "(tb::warpgroup_id() "
+                   "== $ && tb::warp_id() % "
+                   "mirage::config::NUM_WARPS_PER_GROUP == "
+                   "0), tb::warpgroup_id() < $, $, $);",
+                   config.pipeline_stages,
+                   stensor.guid,
+                   barrier_addr,
+                   config.num_consumer_wgs,
+                   config.num_consumer_wgs,
+                   stensor_meta.num_phy_elems *
+                       type::get_datatype_size(stensor.data_type),
+                   config.num_consumer_wgs);
 
-          tmaParamsList.push_back((TMAParams(
-              dtensor_meta.input_idx,
-              dtensor.guid,
-              stensor.guid,
-              SrcMNKLayout,
-              smem_layout,
-              stensor_meta.m_input,
-              fmt("shape(${})", smem_layout),
-              {1, 1, 1},
-              dims,
-              strides,
-              partition_logic,
-              g.forloop_range,
-              m_input ? forloop_dim : (dtensor.num_dims - 1 - forloop_dim))));
+            code.e("using STensor$InputAtom = tb::InputTMAAsyncCopy<$, $, "
+                   " $, decltype(tma_$), decltype(hopper_async_pipeline_$), $, "
+                   "$>;",
+                   stensor.guid,
+                   get_datatype_str(stensor.data_type),
+                   smem_layout,
+                   SrcMNKLayout,
+                   dtensor.guid,
+                   stensor.guid,
+                   stensor_meta.m_input,
+                   g.forloop_range);
+            pipe_index++;
+            barrier_addr += tma_barrier_size;
+
+            pipeline_inputs_tma[stensor.guid] = cur_op;
+
+            tmaParamsList.push_back((TMAParams(
+                dtensor_meta.input_idx,
+                dtensor.guid,
+                stensor.guid,
+                SrcMNKLayout,
+                smem_layout,
+                stensor_meta.m_input,
+                fmt("shape(${})", smem_layout),
+                {1, 1, 1},
+                dims,
+                strides,
+                partition_logic,
+                g.forloop_range,
+                m_input ? forloop_dim : (dtensor.num_dims - 1 - forloop_dim))));
+          }
         }
       }
     }
@@ -826,23 +965,126 @@ CustomOPTranspileResult
              output.guid,
              get_stensor_layout(output, meta2, num_dims - 2 /*start_dim*/));
 
-      code.e("using Matmul$Kernel = tb::Hopper_Matmul<$, "
-             "$, $, Matmul$LayoutA, Matmul$LayoutB, "
-             "Matmul$LayoutC, NUM_THREADS, "
-             "$, $, $, $, $, $>;",
-             output.guid,
-             get_datatype_str(input0.data_type),
-             is_ldmatrix_avail,
-             is_stmatrix_avail,
-             output.guid,
-             output.guid,
-             output.guid,
-             num_exps_before_store,
-             is_accum_in_reg ? false : is_store_accum,
-             config.num_consumer_wgs > 1 ? true : false,
-             meta0.is_pipelined_input,
-             meta1.is_pipelined_input,
-             config.pipeline_stages);
+      //  if ((m >= 64 && m % 64 == 0) && (n >= 8 && n % 8 == 0) &&
+      //      (k >= 16 && k % 16 == 0)) {
+      if (g.use_hopper_feature) {
+        // MNK >= 64, 8, 8
+        // using SM90 WGMMA
+        code.e("using Matmul$Kernel = tb::Hopper_Matmul<$, "
+               "$, $, Matmul$LayoutA, Matmul$LayoutB, "
+               "Matmul$LayoutC, NUM_THREADS, "
+               "$, $, $, $, $, $>;",
+               output.guid,
+               get_datatype_str(input0.data_type),
+               is_ldmatrix_avail,
+               is_stmatrix_avail,
+               output.guid,
+               output.guid,
+               output.guid,
+               num_exps_before_store,
+               is_accum_in_reg ? false : is_store_accum,
+               config.num_consumer_wgs > 1 ? true : false,
+               meta0.is_pipelined_input,
+               meta1.is_pipelined_input,
+               config.pipeline_stages);
+
+      } else {
+
+        string mma_atom_str;
+        std::tuple<int, int, int> mma_atom_mnk;
+        int mma_atom_num_threads;
+        if (k <= 8) {
+          mma_atom_str = input0.data_type == type::DT_FLOAT16
+                             ? "SM80_16x8x8_F16F16F16F16_TN"
+                             : "SM80_16x8x8_F32BF16BF16F32_TN";
+          mma_atom_mnk = {16, 8, 8};
+          mma_atom_num_threads = 32;
+        } else {
+          mma_atom_str = input0.data_type == type::DT_FLOAT16
+                             ? "SM80_16x8x16_F16F16F16F16_TN"
+                             : "SM80_16x8x16_F32BF16BF16F32_TN";
+          mma_atom_mnk = {16, 8, 16};
+          mma_atom_num_threads = 32;
+        }
+
+        auto [mma_atom_m, mma_atom_n, mma_atom_k] = mma_atom_mnk;
+
+        // Pick up TiledMMAThrLayout
+        // The algorithm is documented in `docs/transpiler/transpiler.md`
+        // TODO(intlsy) Update this algo to be more friendly to small matrix
+        // by dropping some threads
+        int num_threads_sm80 = 128;
+        assert(num_threads_sm80 % mma_atom_num_threads == 0);
+        int max_num_tgs =
+            num_threads_sm80 / mma_atom_num_threads; // tg = thread group
+        float best_score = -1.0f;
+        int best_num_tg_m = 1, best_num_tg_n = 1;
+        for (int num_tg_m = 1; num_tg_m <= max_num_tgs; ++num_tg_m) {
+          for (int num_tg_n = 1; num_tg_m * num_tg_n <= max_num_tgs;
+               ++num_tg_n) {
+            int tiled_mma_m = mma_atom_m * num_tg_m;
+            int tiled_mma_n = mma_atom_n * num_tg_n;
+            if (((m > mma_atom_m) && (m % tiled_mma_m != 0)) ||
+                ((n > mma_atom_n) && (n % tiled_mma_n != 0))) {
+              continue;
+            }
+            int num_tiles_m = ceil_div(m, tiled_mma_m);
+            int num_tiles_n = ceil_div(n, tiled_mma_n);
+            int64_t data_moved_A =
+                ((int64_t)num_tiles_m * tiled_mma_m) * k * num_tg_n;
+            int64_t data_moved_B =
+                ((int64_t)num_tiles_n * tiled_mma_n) * k * num_tg_m;
+            int64_t data_moved = data_moved_A + data_moved_B;
+            float score = (1.0f / data_moved) *
+                          (num_tg_m * num_tg_n / (float)max_num_tgs);
+            if (score > best_score) {
+              best_score = score;
+              best_num_tg_m = num_tg_m;
+              best_num_tg_n = num_tg_n;
+            }
+          }
+        }
+
+        // using SM80 Matmul
+        code.e("using Matmul$LayoutAAligned = $;",
+               output.guid,
+               get_mma_stensor_aligned_layout(input0,
+                                              meta0,
+                                              mma_atom_mnk,
+                                              true,
+                                              false,
+                                              num_dims - 2 /*start_dim*/));
+
+        code.e("using Matmul$LayoutBAligned = $;",
+               output.guid,
+               get_mma_stensor_aligned_layout(input1,
+                                              meta1,
+                                              mma_atom_mnk,
+                                              false,
+                                              false,
+                                              num_dims - 2 /*start_dim*/));
+
+        code.e("using Matmul$Kernel = tb::Matmul<$, $, Layout<Shape<Int<$>, "
+               "Int<$>, _1>>, $, $, Matmul$LayoutA, Matmul$LayoutB, "
+               "Matmul$LayoutC, Matmul$LayoutAAligned, Matmul$LayoutBAligned,"
+               "NUM_THREADS, "
+               "$, $>;",
+               output.guid,
+               get_datatype_str(input0.data_type),
+               mma_atom_str,
+               best_num_tg_m,
+               best_num_tg_n,
+               is_ldmatrix_avail,
+               is_stmatrix_avail,
+               output.guid,
+               output.guid,
+               output.guid,
+               output.guid,
+               output.guid,
+               num_exps_before_store,
+               is_accum_in_reg ? false : is_store_accum);
+      }
+
       if (is_accum_in_reg) {
         code.e("auto matmul_$_accum = Matmul$Kernel::get_mma_rC(thread_idx);",
                output.guid,
@@ -858,7 +1100,25 @@ CustomOPTranspileResult
     code.e("");
   }
 
-  bool pipe_tma = !pipeline_inputs.empty();
+  bool pipe_tma = !pipeline_inputs_tma.empty();
+  bool pipe_async = !pipeline_inputs_cpasync.empty();
+
+  if (pipe_async) {
+    code.e("{");
+    for (tb::TBInputOp const *input_op : pipelined_input_ops) {
+      kn::DTensor const &dtensor = input_op->dtensor;
+      tb::STensor const &output = input_op->output_tensors.at(0);
+      assert(input_op->forloop_dim >= 0);
+      code.e("STensor$InputAtom::run(stensor$_async_copy_buf, "
+             "dtensor$_tile_ptr, thread_idx);",
+             output.guid,
+             output.guid,
+             dtensor.guid);
+    }
+    code.e("cute::cp_async_fence();");
+    code.e("}");
+    code.e("");
+  }
 
   // if there is asyc copy defined
   if (pipe_tma) {
@@ -879,11 +1139,9 @@ CustomOPTranspileResult
 
     code.e("for (uint32_t for_idx = 0; for_idx < $; for_idx++) {",
            g.forloop_range);
-    for (auto const &[stensor_id, op] : pipeline_inputs) {
+    for (auto const &[stensor_id, op] : pipeline_inputs_tma) {
       if (profiling) {
-        code.e("PROFILER_EVENT_START($, $);",
-               (op->op_type - type::TB_UNKOWN),
-               "static_cast<uint32_t>(for_idx)");
+        code.e("PROFILER_EVENT_START($);", (op->op_type - type::TB_UNKOWN));
       }
       code.e(fmt("STensor$InputAtom::run(tma_$, stensor$_ptr, "
                  " $, $, $, for_idx, hopper_async_pipeline_$);",
@@ -895,9 +1153,7 @@ CustomOPTranspileResult
                  op->input_map.z,
                  stensor_id));
       if (profiling) {
-        code.e("PROFILER_EVENT_END($, $);",
-               (op->op_type - type::TB_UNKOWN),
-               "static_cast<uint32_t>(for_idx)");
+        code.e("PROFILER_EVENT_END($);", (op->op_type - type::TB_UNKOWN));
       }
     }
     code.e("}");
@@ -955,7 +1211,7 @@ CustomOPTranspileResult
   auto transpile_tb_sched_node = [&](TBSchedNode const &sched_node,
                                      CodeKeeper &code,
                                      std::map<int64_t, tb::TBInputOp const *>
-                                         &pipeline_inputs,
+                                         &pipeline_inputs_tma,
                                      bool is_in_loop) {
     if (sched_node.type == tb_sched_node_t::SYNCTHREADS && is_in_loop) {
       // code.e("tb::wg_sync<128>(9 + warpgroup_id);");
@@ -972,15 +1228,12 @@ CustomOPTranspileResult
 
       auto [need_advance_pipeline, pipe_ids] =
           add_loop_node_consumer_wait_if_need(
-              op, code, is_in_loop, pipeline_inputs);
+              op, code, is_in_loop, pipeline_inputs_tma);
 
       // define
       if (pipe_tma && profiling) {
         // 2000 - 2999
-        code.e("PROFILER_EVENT_START($, $);",
-               (op->op_type - type::TB_UNKOWN),
-               is_in_loop ? "static_cast<uint32_t>(for_idx)"
-                          : "static_cast<uint32_t>(0)");
+        code.e("PROFILER_EVENT_START($);", (op->op_type - type::TB_UNKOWN));
       }
 
       switch (op->op_type) {
@@ -1124,8 +1377,7 @@ CustomOPTranspileResult
         }
         case type::TB_ADD_OP:
         case type::TB_MUL_OP:
-        case type::TB_DIV_OP:
-        case type::TB_POW_OP: {
+        case type::TB_DIV_OP: {
           tb::STensor const &input0 = op->input_tensors.at(0);
           tb::STensor const &input1 = op->input_tensors.at(1);
           tb::STensor const &output = output_op->output_tensors.at(0);
@@ -1153,7 +1405,6 @@ CustomOPTranspileResult
           string op_type_str = op->op_type == type::TB_ADD_OP   ? "ADD"
                                : op->op_type == type::TB_MUL_OP ? "MUL"
                                : op->op_type == type::TB_DIV_OP ? "DIV"
-                               : op->op_type == type::TB_POW_OP ? "POW"
                                                                 : "";
           assert(op_type_str != "");
           // Define layouts
@@ -1303,10 +1554,7 @@ CustomOPTranspileResult
         }
       }
       if (pipe_tma && profiling) {
-        code.e("PROFILER_EVENT_END($, $);",
-               (op->op_type - type::TB_UNKOWN),
-               is_in_loop ? "static_cast<uint32_t>(for_idx)"
-                          : "static_cast<uint32_t>(0)");
+        code.e("PROFILER_EVENT_END($);", (op->op_type - type::TB_UNKOWN));
       }
       code.e("}");
     }
@@ -1328,11 +1576,46 @@ CustomOPTranspileResult
     code.e("// Consumer main loop");
   }
 
-  std::map<int64_t, tb::TBInputOp const *> copy_of_inputs = pipeline_inputs;
+  std::map<int64_t, tb::TBInputOp const *> copy_of_inputs = pipeline_inputs_tma;
   assert(g.forloop_range >= 1);
 
   code.e("for (uint32_t for_idx = 0; for_idx < $; for_idx++) {",
          g.forloop_range);
+
+  // sm80 cp
+  if (pipe_async) {
+    code.e("{");
+    code.e("// Issue async copies for the next round");
+    code.e("if (for_idx+1 != $) {", g.forloop_range);
+    for (tb::TBInputOp const *input_op : pipeline_inputs_cpasync) {
+      assert(input_op->forloop_dim >= 0);
+      kn::DTensor const &dtensor = input_op->dtensor;
+      tb::STensor const &output = input_op->output_tensors.at(0);
+      int tile_side_len = output.dim[input_op->forloop_dim];
+      size_t forloop_dim_stride =
+          dtensor_metas.at(dtensor.guid).strides[input_op->forloop_dim];
+      code.e("STensor$InputAtom::run(stensor$_ptr, dtensor$_tile_ptr + "
+             "$*(for_idx+1), thread_idx);",
+             output.guid,
+             output.guid,
+             dtensor.guid,
+             tile_side_len * forloop_dim_stride);
+    }
+    code.e("}");
+    code.e("cute::cp_async_fence();");
+
+    code.e("// Wait for the async copies in the last round to finish");
+    code.e("cute::cp_async_wait<1>();");
+
+    code.e("// Switch buffers");
+    for (tb::TBInputOp const *input_op : pipelined_input_ops) {
+      tb::STensor const &output = input_op->output_tensors.at(0);
+      sguid_t guid = output.guid;
+      code.e("SWAP(stensor$_ptr, stensor$_async_copy_buf);", guid, guid);
+    }
+
+    code.e("}");
+  }
 
   // warpgroup_id
   for (TBSchedNode const &sched_node : sched.loop_nodes) {
@@ -1345,7 +1628,7 @@ CustomOPTranspileResult
     CodeKeeper res;
 
     TranspileErrorType err =
-        transpile_tb_sched_node(sched_node, res, pipeline_inputs, true);
+        transpile_tb_sched_node(sched_node, res, pipeline_inputs_tma, true);
 
     code << res;
     if (err != CUDA_T_SUCCESS) {
@@ -1398,7 +1681,7 @@ CustomOPTranspileResult
     for (TBSchedNode const &sched_node : sched.post_loop_nodes) {
       CodeKeeper res;
       TranspileErrorType err =
-          transpile_tb_sched_node(sched_node, res, pipeline_inputs, false);
+          transpile_tb_sched_node(sched_node, res, pipeline_inputs_tma, false);
       code << res;
       if (err != CUDA_T_SUCCESS) {
         return CustomOPTranspileResult{err, func_name, 0, 0, "", tmaParamsList};
