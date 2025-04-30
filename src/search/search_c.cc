@@ -105,7 +105,8 @@ int cython_search(mirage::kernel::Graph const *input_graph,
     if (num_search_thread != -1) {
       config.search_thread = num_search_thread;
     }
-    const char *result_filename = filename ? filename : "mirage_search_checkpoint.json";
+    char const *result_filename =
+        filename ? filename : "mirage_search_checkpoint.json";
     search::KernelGraphGenerator gen(
         *input_graph, config, result_filename, verbose);
     gen.config.show();
