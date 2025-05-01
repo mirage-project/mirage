@@ -19,7 +19,7 @@
 
 #define BLOCK_SIZE_X 128
 #define BLOCK_SIZE_Y 1
-#define CEIL_DIV(a, b) (((a) + (b) - 1) / (b))
+#define CEIL_DIV(a, b) (((a) + (b)-1) / (b))
 
 namespace mirage {
 namespace triton_transpiler {

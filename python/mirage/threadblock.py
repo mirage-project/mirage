@@ -36,15 +36,15 @@ class TBGraph:
 
     def add(self, A: STensor, B: STensor):
         return self.cygraph.add(A, B)
-    
-    def sub(self, A: STensor, B: STensor):
-        return self.cygraph.sub(A, B)
 
     def mul(self, A: STensor, B: STensor):
         return self.cygraph.mul(A, B)
 
     def div(self, A: STensor, B: STensor):
         return self.cygraph.div(A, B)
+
+    def sub(self, A: STensor, B: STensor):
+        return self.cygraph.sub(A, B)
 
     def reduction(self, A: STensor, dim: int):
         return self.cygraph.reduction(A, dim)

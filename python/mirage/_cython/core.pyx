@@ -214,10 +214,10 @@ def get_tb_operator_type_string(int op_type):
         return "tb_add_op"
     elif op_type == TB_MUL_OP:
         return "tb_mul_op"
-    elif op_type == TB_SUB_OP:
-        return "tb_sub_op"
     elif op_type == TB_DIV_OP:
         return "tb_div_op"
+    elif op_type == TB_SUB_OP:
+        return "tb_sub_op"
     elif op_type == TB_POW_OP:
         return "tb_pow_op"
     elif op_type == TB_REDUCTION_FIRST_OP_ID:
@@ -947,11 +947,6 @@ cdef class CyTBGraph:
         t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
         return STensor(t)
 
-    def sub(self, STensor A, STensor B):
-        cdef CppSTensor* ptr = self.p_bgraph.sub(A.c_ptr, B.c_ptr)
-        t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
-        return STensor(t)
-
     def mul(self, STensor A, STensor B):
         cdef CppSTensor* ptr = self.p_bgraph.mul(A.c_ptr, B.c_ptr)
         t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
@@ -959,6 +954,11 @@ cdef class CyTBGraph:
 
     def div(self, STensor A, STensor B):
         cdef CppSTensor* ptr = self.p_bgraph.div(A.c_ptr, B.c_ptr)
+        t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
+        return STensor(t)
+
+    def sub(self, STensor A, STensor B):
+        cdef CppSTensor* ptr = self.p_bgraph.sub(A.c_ptr, B.c_ptr)
         t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
         return STensor(t)
 
