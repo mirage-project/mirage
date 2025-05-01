@@ -84,6 +84,7 @@ op_nodelabel_mapping = {
     "tb_add_op": "Add",
     "tb_mul_op": "Multiply",
     "tb_div_op": "Div",
+    "tb_sub_op": "Sub",
     "tb_pow_op": "Pow",
     "tb_reduction_first_op_id": "Reduction First",
     "tb_reduction_0_op": "Reduction 0",

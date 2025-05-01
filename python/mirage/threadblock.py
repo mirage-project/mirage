@@ -36,6 +36,9 @@ class TBGraph:
 
     def add(self, A: STensor, B: STensor):
         return self.cygraph.add(A, B)
+    
+    def sub(self, A: STensor, B: STensor):
+        return self.cygraph.sub(A, B)
 
     def mul(self, A: STensor, B: STensor):
         return self.cygraph.mul(A, B)

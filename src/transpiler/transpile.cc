@@ -321,9 +321,10 @@ kernel::Graph const *rewrite_graph_for_online_softmax(kernel::Graph const *g) {
                 break;
               }
               case TB_ADD_OP:
-              case TB_SUB_OP:
               case TB_MUL_OP:
-              case TB_DIV_OP: {
+              case TB_DIV_OP:
+              case TB_SUB_OP:
+              case TB_POW_OP: {
                 assert(stensor_inputs.size() == 2);
                 threadblock::STensor st = tbg->elementbinary(
                     stensor_inputs[0], stensor_inputs[1], bop->op_type);
@@ -607,9 +608,9 @@ Transpiler::Transpiler(kernel::Graph const *_graph,
               break;
             }
             case TB_ADD_OP:
-            case TB_SUB_OP:
             case TB_MUL_OP:
             case TB_DIV_OP:
+            case TB_SUB_OP:
             case TB_POW_OP: {
               assert(stensor_inputs.size() == 2);
               threadblock::STensor st = tbg->elementbinary(

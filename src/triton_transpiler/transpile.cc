@@ -19,7 +19,7 @@
 
 #define BLOCK_SIZE_X 128
 #define BLOCK_SIZE_Y 1
-#define CEIL_DIV(a, b) (((a) + (b)-1) / (b))
+#define CEIL_DIV(a, b) (((a) + (b) - 1) / (b))
 
 namespace mirage {
 namespace triton_transpiler {
@@ -185,6 +185,7 @@ TritonTranspiler::TritonTranspiler(kernel::Graph const *_graph,
             case TB_ADD_OP:
             case TB_MUL_OP:
             case TB_DIV_OP:
+            case TB_SUB_OP:
             case TB_POW_OP: {
               assert(stensor_inputs.size() == 2);
               threadblock::STensor st = tbg->elementbinary(

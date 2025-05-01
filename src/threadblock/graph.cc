@@ -525,6 +525,7 @@ NewKernelParams Graph::get_new_kernel_params(bool fingerprint) const {
       case mirage::type::TB_DIV_OP:
       case mirage::type::TB_MUL_OP:
       case mirage::type::TB_ADD_OP:
+      case mirage::type::TB_SUB_OP:
       case mirage::type::TB_POW_OP: {
         assert(operators[i]->input_tensors.size() == 2);
         assert(operators[i]->output_tensors.size() == 1);
@@ -663,7 +664,7 @@ NewKernelParams Graph::get_new_kernel_params(bool fingerprint) const {
         assert(false && "Unsupported TB operator");
       }
     } // switch
-  }   // for-loop
+  } // for-loop
   // Our serializer assumes that input loaders are the first operators
   // and that output savers are the last operators
   for (int i = 0; i < params.num_dmem_inputs; i++) {
@@ -822,6 +823,7 @@ void from_json(json const &j, Graph &graph) {
       case type::TBOperatorType::TB_ADD_OP:
       case type::TBOperatorType::TB_MUL_OP:
       case type::TBOperatorType::TB_DIV_OP:
+      case type::TBOperatorType::TB_SUB_OP:
       case type::TBOperatorType::TB_POW_OP: {
         STensor const &output = graph.elementbinary(
             get_tensor_from_guid(

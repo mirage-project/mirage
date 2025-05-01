@@ -266,6 +266,8 @@ cdef extern from "mirage/threadblock/graph.h" namespace "mirage::threadblock":
         CppSTensor* sqrt(const CppSTensor *A)
         CppSTensor* add(const CppSTensor *A,
                      const CppSTensor *B)
+        CppSTensor* sub(const CppSTensor *A,
+                     const CppSTensor *B)
         CppSTensor* mul(const CppSTensor *A,
                      const CppSTensor *B)
         CppSTensor* div(const CppSTensor *A,
