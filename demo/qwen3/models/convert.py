@@ -45,9 +45,7 @@ def main(hf_ckpt_path, save_path, mp):
     for file_path in tqdm(glob(os.path.join(hf_ckpt_path, "*.safetensors"))):
         with safe_open(file_path, framework="pt", device="cpu") as f:
             for name in f.keys():
-                if name == "lm_head.weight":
-                    continue
-                assert name.startswith("model.")
+                assert name.startswith("model.") or name == "lm_head.weight"
                 param: torch.Tensor = f.get_tensor(name)
                 key = name.split(".")[-2]
                 assert key in mapping, f"Key {key} not found in mapping"

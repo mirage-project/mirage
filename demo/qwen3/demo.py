@@ -1,24 +1,37 @@
 from models.modeling_qwen3 import Qwen3ForCausalLM
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, AutoConfig
+from safetensors.torch import load_model
 import torch
+import torch.distributed as dist
 import argparse
+import os
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--disable-mirage", action='store_true', help="Disable Mirage kernels")
     args = parser.parse_args()
-    print("Input arguments:", args)
+    world_size = int(os.getenv("WORLD_SIZE", "1"))
+    rank = int(os.getenv("RANK", "0"))
+    local_rank = int(os.getenv("LOCAL_RANK", "0"))
+    if world_size > 1:
+        dist.init_process_group("nccl")
+    global print
+    if rank != 0:
+        print = lambda *_, **__: None
 
+    print("Input arguments:", args)
+    print(f"world_size({world_size}) rank({rank})")
     #model_name = "Qwen/Qwen2.5-7B-Instruct"
     model_name = "Qwen/Qwen3-8B"
     torch.set_default_dtype(torch.bfloat16)
     torch.cuda.set_device(0)
     with torch.device("cuda"):
-        model = Qwen3ForCausalLM.from_pretrained(model_name).to("cuda")
-        model.fuse_weights()
-        if not args.disable_mirage:
-            model.superoptimize_kernels()
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
+        #model = Qwen3ForCausalLM.from_pretrained(model_name).to("cuda")
+        config = AutoConfig.from_pretrained("/opt/dlami/nvme/models/Qwen3-8B/")
+        model = Qwen3ForCausalLM(config, world_size)
+    load_model(model, f"/opt/dlami/nvme/models/Qwen3-8B/model{rank}-mp{world_size}.safetensors")
+
+    #tokenizer = AutoTokenizer.from_pretrained(model_name)
+    tokenizer = AutoTokenizer.from_pretrained("/opt/dlami/nvme/models/Qwen3-8B/")
     
     prompt = "Give me a short introduction to large language model."
     messages = [
@@ -96,3 +109,5 @@ if __name__ == "__main__":
     print(response)
     
     print("Prompt length {}, generate length {}, per-token latency {} ms".format(prompt_len, cur_pos + 1, run_time / (cur_pos + 1 - warmup)))
+    if world_size > 1:
+        dist.destroy_process_group()

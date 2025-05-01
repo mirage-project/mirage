@@ -130,44 +130,16 @@ class Qwen3MLP(nn.Module):
         self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
         self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=False)
         self.act_fn = ACT2FN[config.hidden_act]
-        self.enable_mirage = False
 
     def fuse_weights(self):
         self.fused_weight = torch.transpose(torch.cat((self.gate_proj.weight, self.up_proj.weight), 0), 0, 1)
 
-    def superoptimize_kernels(self):
-        self.enable_mirage = True
-        graph = mi.new_kernel_graph()
-        X = graph.new_input(dims=(1, self.hidden_size), dtype=mi.bfloat16)
-        G = graph.new_input(dims=(1, self.hidden_size), dtype=mi.bfloat16)
-        W = graph.new_input(dims=(self.hidden_size, 2*self.intermediate_size), strides=(1, self.hidden_size), dtype=mi.bfloat16)
-        D = graph.rms_norm(X, normalized_shape=(self.hidden_size,))
-        D = graph.mul(D, G)
-        O = graph.matmul(D, W)
-        graph.mark_output(O)
-        self.kernel1 = graph.superoptimize(config="mlp")
-
-        graph = mi.new_kernel_graph()
-        X = graph.new_input(dims=(1, self.intermediate_size), dtype=mi.bfloat16)
-        Y = graph.new_input(dims=(1, self.intermediate_size), dtype=mi.bfloat16)
-        W = graph.new_input(dims=(self.intermediate_size, self.hidden_size), strides=(1, self.intermediate_size), dtype=mi.bfloat16)
-        D = graph.mul(graph.silu(X), Y)
-        O = graph.matmul(D, W)
-        graph.mark_output(O)
-        self.kernel2 = graph.superoptimize(config="mlp")
-
     def forward(self, input_layernorm, hidden_state, stream: torch.cuda.Stream = None):
-        if hidden_state.shape[-2] == 1 and self.enable_mirage:
-            # use mirage kernels for decoding
-            output = self.kernel1(inputs=(hidden_state, input_layernorm.weight, self.fused_weight), stream=stream)[0]
-            gate_output, up_output = torch.chunk(output, 2, -1)
-            output = self.kernel2(inputs=(gate_output, up_output, self.down_proj.weight), stream=stream)[0]
-        else:
-            # use the original for prefilling
-            hidden_state = input_layernorm(hidden_state)
-            output = torch.matmul(hidden_state, self.fused_weight)
-            gate_output, up_output = torch.chunk(output, 2, -1)
-            output = self.down_proj(self.act_fn(gate_output) * up_output)
+        hidden_state = input_layernorm(hidden_state)
+        #output = torch.matmul(hidden_state, self.fused_weight)
+        #gate_output, up_output = torch.chunk(output, 2, -1)
+        #output = self.down_proj(self.act_fn(gate_output) * up_output)
+        output = self.down_proj(self.act_fn(self.gate_proj(hidden_state)) * self.up_proj(hidden_state))
 
         return output
 
@@ -200,24 +172,6 @@ class Qwen3Attention(nn.Module):
         self.rotary_emb = Qwen3RotaryEmbedding(config=self.config)
         self.enable_mirage = False
 
-    def fuse_weights(self):
-        #self.fused_weight = torch.transpose(torch.cat((self.q_proj.weight, self.k_proj.weight, self.v_proj.weight), 0), 0, 1)
-        #self.fused_bias = torch.cat((self.q_proj.bias, self.k_proj.bias, self.v_proj.bias), 0)
-        pass
-
-    def superoptimize_kernels(self):
-        self.enable_mirage = True
-        graph = mi.new_kernel_graph()
-        self.fused_outdim = (self.num_heads + 2 * self.num_key_value_heads) * self.head_dim
-        X = graph.new_input(dims=(1, self.hidden_size), dtype=mi.bfloat16)
-        G = graph.new_input(dims=(1, self.hidden_size), dtype=mi.bfloat16)
-        W = graph.new_input(dims=(self.hidden_size, self.fused_outdim), strides=(1, self.hidden_size), dtype=mi.bfloat16)
-        D = graph.rms_norm(X, normalized_shape=(self.hidden_size,))
-        D = graph.mul(D, G)
-        O = graph.matmul(D, W)
-        graph.mark_output(O)
-        self.kernel = graph.superoptimize(config="mlp")
-
     def forward(
         self,
         input_layernorm,
@@ -231,11 +185,6 @@ class Qwen3Attention(nn.Module):
         bsz, q_len, _ = hidden_states.size()
 
         hidden_states = input_layernorm(hidden_states)
-        #xqkv = torch.matmul(hidden_states, self.fused_weight)
-        #xqkv = xqkv + self.fused_bias
-        #query_states = xqkv[:, :, : (self.num_heads * self.head_dim)]
-        #xkv = xqkv[:, :, (self.num_heads * self.head_dim) :]
-        #key_states, value_states = xkv.chunk(2, -1)
         query_states = self.q_proj(hidden_states)
         key_states = self.k_proj(hidden_states)
         value_states = self.v_proj(hidden_states)
@@ -434,7 +383,7 @@ class Qwen3Model(Qwen3PreTrainedModel):
 class Qwen3ForCausalLM(Qwen3PreTrainedModel, GenerationMixin):
     _tied_weights_keys = ["lm_head.weight"]
 
-    def __init__(self, config):
+    def __init__(self, config, world_size):
         super().__init__(config)
         self.model = Qwen3Model(config)
         self.vocab_size = config.vocab_size
