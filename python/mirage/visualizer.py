@@ -93,6 +93,9 @@ op_nodelabel_mapping = {
     "tb_reduction_0_to_dimx_op": "Reduction 0\nto DimX",
     "tb_reduction_1_to_dimx_op": "Reduction 1\nto DimX",
     "tb_reduction_2_to_dimx_op": "Reduction 2\nto DimX",
+    "tb_reduction_0_max_op": "Reduction 0 Max",
+    "tb_reduction_1_max_op": "Reduction 1 Max",
+    "tb_reduction_2_max_op": "Reduction 2 Max",
     "tb_reduction_last_op_id": "Reduction Last",
     "tb_rms_norm_op": "RMS Norm",
     "tb_concat_first_op_id": "Concat First",
@@ -111,6 +114,8 @@ op_nodelabel_mapping = {
     "tb_forloop_accum_red_ld_mean_op": "ForloopAccum\n(Reduction=Mean)",
     "tb_forloop_accum_red_ld_rms_op": "ForloopAccum\n(Reduction=RMS)",
     "tb_forloop_accum_redtox_ld_sum_op": "ForloopAccum\n(ReduceToDimx=Sum)",
+    "tb_forloop_accum_no_red_rescale_op": "ForloopAccumRescale\n(No Reduction)",
+    "tb_forloop_accum_red_ld_sum_rescale_op": "ForloopAccumRescale\n(Reduction=Sum)",
     "tb_forloop_accum_last_op": "ForloopAccum\nLast",
     "tb_customized_op": "Customized\nOp",
 }

@@ -81,11 +81,11 @@ std::vector<STensor> Graph::reduction_max(STensor const &input, int dim) {
   return op->output_tensors;
 }
 
-std::vector<STensor> *Graph::reduction_max(STensor const *input, int dim) {
+std::vector<STensor *> Graph::reduction_max(STensor const *input, int dim) {
   TBOperator *op = create_reduction_max_op(*input, dim);
   assert(op != nullptr);
   operators.push_back(op);
-  return &op->output_tensors;
+  return std::vector<STensor *>{&op->output_tensors[0], &op->output_tensors[1]};
 }
 
 TBOperator *Graph::create_reduction_max_op(STensor const &input, int dim) {
@@ -105,15 +105,18 @@ TBReductionOp::TBReductionOp(Graph *bgraph,
                              STensor const &input,
                              int dim,
                              int size)
-    : TBOperator(bgraph,
-                 size == 1 ? (mirage::type::TBOperatorType)(
-                                 mirage::type::TB_REDUCTION_0_OP + dim)
-                 : size == -1
-                     ? (mirage::type::TBOperatorType)(
-                           mirage::type::TB_REDUCTION_0_MAX_OP + dim)
-                     : (mirage::type::TBOperatorType)(
-                           mirage::type::TB_REDUCTION_0_TO_DIMX_OP + dim),
-                 input),
+    : TBOperator(
+          bgraph,
+          size == 1
+              ? (mirage::type::TBOperatorType)(mirage::type::TB_REDUCTION_0_OP +
+                                               dim)
+          : size == -1
+              ? (mirage::type::
+                     TBOperatorType)(mirage::type::TB_REDUCTION_0_MAX_OP + dim)
+              : (mirage::type::TBOperatorType)(mirage::type::
+                                                   TB_REDUCTION_0_TO_DIMX_OP +
+                                               dim),
+          input),
       reduce_dim(dim), reduce_size(size) {
   // mirage::type::TBOperatorType type =
   // static_cast<mirage::type::TBOperatorType>(
