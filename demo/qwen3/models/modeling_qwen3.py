@@ -23,6 +23,7 @@ import math
 from typing import List, Optional, Tuple, Union
 
 import torch
+import torch.distributed as dist
 from torch import nn
 
 from transformers.activations import ACT2FN
@@ -122,13 +123,15 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
 
 # Copied from transformers.models.mistral.modeling_mistral.MistralMLP with Mistral->Qwen2
 class Qwen3MLP(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, world_size):
         super().__init__()
+        self.world_size = world_size
         self.hidden_size = config.hidden_size
         self.intermediate_size = config.intermediate_size
-        self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
-        self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
-        self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=False)
+        self.part_inter_size = self.intermediate_size // world_size
+        self.gate_proj = nn.Linear(self.hidden_size, self.part_inter_size, bias=False)
+        self.up_proj = nn.Linear(self.hidden_size, self.part_inter_size, bias=False)
+        self.down_proj = nn.Linear(self.part_inter_size, self.hidden_size, bias=False)
         self.act_fn = ACT2FN[config.hidden_act]
 
     def fuse_weights(self):
@@ -140,37 +143,40 @@ class Qwen3MLP(nn.Module):
         #gate_output, up_output = torch.chunk(output, 2, -1)
         #output = self.down_proj(self.act_fn(gate_output) * up_output)
         output = self.down_proj(self.act_fn(self.gate_proj(hidden_state)) * self.up_proj(hidden_state))
+        if self.world_size > 1:
+            dist.all_reduce(output)
 
         return output
 
 class Qwen3Attention(nn.Module):
-    def __init__(self, config: Qwen3Config, kv_cache: Tuple[torch.Tensor, torch.Tensor], layer_idx: Optional[int] = None):
+    def __init__(self, config: Qwen3Config, kv_cache: Tuple[torch.Tensor, torch.Tensor], layer_idx: int, world_size: int):
         super().__init__()
+        self.world_size = world_size
         self.config = config
         self.layer_idx = layer_idx
         assert self.layer_idx is not None
         self.hidden_size = config.hidden_size
         self.num_heads = config.num_attention_heads
+        self.num_local_heads = self.num_heads
         self.head_dim = self.hidden_size // self.num_heads
         assert self.head_dim * self.num_heads == self.hidden_size
         self.num_key_value_heads = config.num_key_value_heads
         self.num_key_value_groups = self.num_heads // self.num_key_value_heads
         self.key_cache, self.value_cache = kv_cache
-        assert kv_cache[0].shape == (config.num_hidden_layers, 1, config.max_position_embeddings, self.num_key_value_heads, self.head_dim)
-        assert kv_cache[1].shape == (config.num_hidden_layers, 1, config.max_position_embeddings, self.num_key_value_heads, self.head_dim)
+        assert kv_cache[0].shape == (config.num_hidden_layers, 1, config.max_position_embeddings, self.num_key_value_heads // world_size, self.head_dim)
+        assert kv_cache[1].shape == (config.num_hidden_layers, 1, config.max_position_embeddings, self.num_key_value_heads // world_size, self.head_dim)
         self.max_position_embeddings = config.max_position_embeddings
         self.rope_theta = config.rope_theta
         self.is_causal = True
         self.attention_dropout = config.attention_dropout
-        self.q_proj = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=config.attention_bias)
-        self.k_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=config.attention_bias)
-        self.v_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=config.attention_bias)
-        self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=config.attention_bias)
+        self.q_proj = nn.Linear(self.hidden_size, (self.num_heads // world_size) * self.head_dim, bias=config.attention_bias)
+        self.k_proj = nn.Linear(self.hidden_size, (self.num_key_value_heads // world_size) * self.head_dim, bias=config.attention_bias)
+        self.v_proj = nn.Linear(self.hidden_size, (self.num_key_value_heads // world_size) * self.head_dim, bias=config.attention_bias)
+        self.o_proj = nn.Linear((self.num_heads // world_size) * self.head_dim, self.hidden_size, bias=config.attention_bias)
         self.q_norm = Qwen3RMSNorm(self.head_dim, eps=config.rms_norm_eps)  # unlike olmo, only on the head dim!
         self.k_norm = Qwen3RMSNorm(self.head_dim, eps=config.rms_norm_eps)  # thus post q_norm does not need reshape
 
         self.rotary_emb = Qwen3RotaryEmbedding(config=self.config)
-        self.enable_mirage = False
 
     def forward(
         self,
@@ -189,9 +195,9 @@ class Qwen3Attention(nn.Module):
         key_states = self.k_proj(hidden_states)
         value_states = self.v_proj(hidden_states)
 
-        query_states = self.q_norm(query_states.view(bsz, q_len, self.num_heads, self.head_dim))
-        key_states = self.k_norm(key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim))
-        value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim)
+        query_states = self.q_norm(query_states.view(bsz, q_len, self.num_heads // self.world_size, self.head_dim))
+        key_states = self.k_norm(key_states.view(bsz, q_len, self.num_key_value_heads // self.world_size, self.head_dim))
+        value_states = value_states.view(bsz, q_len, self.num_key_value_heads // self.world_size, self.head_dim)
 
         cos, sin = position_embeddings
 
@@ -210,30 +216,24 @@ class Qwen3Attention(nn.Module):
         else:
             fl_attn_output = decode_wrapper.run(query_states[0], (self.key_cache[self.layer_idx], self.value_cache[self.layer_idx]))
 
-        attn_output = fl_attn_output.view(bsz, q_len, self.hidden_size)
+        attn_output = fl_attn_output.view(bsz, q_len, self.hidden_size // self.world_size)
 
         attn_output = self.o_proj(attn_output)
+        if self.world_size > 1:
+            dist.all_reduce(attn_output)
 
         return attn_output
 
 class Qwen3DecoderLayer(nn.Module):
-    def __init__(self, config: Qwen3Config, kv_cache: Tuple[torch.Tensor, torch.Tensor], layer_idx: int):
+    def __init__(self, config: Qwen3Config, kv_cache: Tuple[torch.Tensor, torch.Tensor], layer_idx: int, world_size: int):
         super().__init__()
         self.hidden_size = config.hidden_size
 
-        self.self_attn = Qwen3Attention(config, kv_cache, layer_idx)
+        self.self_attn = Qwen3Attention(config, kv_cache, layer_idx, world_size)
 
-        self.mlp = Qwen3MLP(config)
+        self.mlp = Qwen3MLP(config, world_size)
         self.input_layernorm = Qwen3RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = Qwen3RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-
-    def fuse_weights(self):
-        self.mlp.fuse_weights()
-        self.self_attn.fuse_weights()
-
-    def superoptimize_kernels(self):
-        self.mlp.superoptimize_kernels()
-        self.self_attn.superoptimize_kernels()
 
     def forward(
         self,
@@ -287,17 +287,17 @@ class Qwen3PreTrainedModel(PreTrainedModel):
                 module.weight.data[module.padding_idx].zero_()
 
 class Qwen3Model(Qwen3PreTrainedModel):
-    def __init__(self, config: Qwen3Config):
+    def __init__(self, config: Qwen3Config, world_size: int):
         super().__init__(config)
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
         # KV cache layout is (L, N, P, H, D) where L is the number of layers, N is the max number of pages (i.e., 1), P is the page size (i.e., config.max_embedding_positions), H is the number of key-value heads, and D is the hidden dim size
-        key_cache = torch.empty((config.num_hidden_layers, 1, config.max_position_embeddings, config.num_key_value_heads, config.hidden_size // config.num_attention_heads)) 
-        value_cache = torch.empty((config.num_hidden_layers, 1, config.max_position_embeddings, config.num_key_value_heads, config.hidden_size // config.num_attention_heads))
+        key_cache = torch.empty((config.num_hidden_layers, 1, config.max_position_embeddings, config.num_key_value_heads // world_size, config.hidden_size // config.num_attention_heads)) 
+        value_cache = torch.empty((config.num_hidden_layers, 1, config.max_position_embeddings, config.num_key_value_heads // world_size, config.hidden_size // config.num_attention_heads))
         self.kv_cache = (key_cache, value_cache)
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
         self.layers = nn.ModuleList(
-            [Qwen3DecoderLayer(config, self.kv_cache, layer_idx) for layer_idx in range(config.num_hidden_layers)]
+            [Qwen3DecoderLayer(config, self.kv_cache, layer_idx, world_size) for layer_idx in range(config.num_hidden_layers)]
         )
         self._attn_implementation = config._attn_implementation
         self.norm = Qwen3RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -324,21 +324,13 @@ class Qwen3Model(Qwen3PreTrainedModel):
             kv_page_indptr,
             kv_page_indices,
             self.kv_last_page_len,
-            28, # num_qo_heads,
-            4, # num_kv_heads,
+            config.num_attention_heads, # num_qo_heads,
+            config.num_key_value_heads, # num_kv_heads,
             128, # head_dimension
             32768, # page_size
             pos_encoding_mode="NONE",
             q_data_type=torch.bfloat16,
             kv_data_type=torch.bfloat16)
-
-    def fuse_weights(self):
-        for decoder_layer in self.layers:
-            decoder_layer.fuse_weights()
-
-    def superoptimize_kernels(self):
-        for decoder_layer in self.layers:
-            decoder_layer.superoptimize_kernels()
 
     def get_input_embeddings(self):
         return self.embed_tokens
@@ -381,11 +373,11 @@ class Qwen3Model(Qwen3PreTrainedModel):
         return (hidden_states,)
 
 class Qwen3ForCausalLM(Qwen3PreTrainedModel, GenerationMixin):
-    _tied_weights_keys = ["lm_head.weight"]
 
     def __init__(self, config, world_size):
         super().__init__(config)
-        self.model = Qwen3Model(config)
+        assert world_size == dist.get_world_size()
+        self.model = Qwen3Model(config, world_size)
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         # Initialize weights and apply final processing

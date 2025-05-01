@@ -23,7 +23,7 @@ if __name__ == "__main__":
     #model_name = "Qwen/Qwen2.5-7B-Instruct"
     model_name = "Qwen/Qwen3-8B"
     torch.set_default_dtype(torch.bfloat16)
-    torch.cuda.set_device(0)
+    torch.cuda.set_device(rank)
     with torch.device("cuda"):
         #model = Qwen3ForCausalLM.from_pretrained(model_name).to("cuda")
         config = AutoConfig.from_pretrained("/opt/dlami/nvme/models/Qwen3-8B/")
