@@ -53,8 +53,8 @@ class Qwen3RMSNorm(nn.Module):
         hidden_states = hidden_states * torch.rsqrt(variance)
         return self.weight * hidden_states
 
-    def extra_repr(self):
-        return f"{tuple(self.weight.shape)}, eps={self.variance_epsilon}"
+    #def extra_repr(self):
+    #    return f"{tuple(self.weight.shape)}, eps={self.variance_epsilon}"
 
 # Copied from transformers.models.llama.modeling_llama.LlamaRotaryEmbedding with Llama->Qwen2
 class Qwen3RotaryEmbedding(nn.Module):
@@ -376,7 +376,6 @@ class Qwen3ForCausalLM(Qwen3PreTrainedModel, GenerationMixin):
 
     def __init__(self, config, world_size):
         super().__init__(config)
-        assert world_size == dist.get_world_size()
         self.model = Qwen3Model(config, world_size)
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
