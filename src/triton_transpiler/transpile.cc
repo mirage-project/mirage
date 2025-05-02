@@ -173,12 +173,21 @@ TritonTranspiler::TritonTranspiler(kernel::Graph const *_graph,
             case TB_EXP_OP:
             case TB_SQUARE_OP:
             case TB_SQRT_OP:
-            case TB_SILU_OP:
-            case TB_MUL_SCALAR_OP: {
+            case TB_SILU_OP: {
               assert(stensor_inputs.size() == 1);
               threadblock::STensor st =
                   tbg->elementunary(stensor_inputs[0], bop->op_type);
               assert(bop->output_tensors.size() == 1);
+              stensor_mapping[bop->output_tensors[0].guid] = st;
+              break;
+            }
+            case TB_MUL_SCALAR_OP: {
+              assert(stensor_inputs.size() == 1);
+              assert(bop->output_tensors.size() == 1);
+              threadblock::TBElementUnaryOp *mul_scalar_op =
+                  static_cast<threadblock::TBElementUnaryOp *>(bop);
+              threadblock::STensor st = tbg->elementunary(
+                  stensor_inputs[0], bop->op_type, mul_scalar_op->scalar);
               stensor_mapping[bop->output_tensors[0].guid] = st;
               break;
             }

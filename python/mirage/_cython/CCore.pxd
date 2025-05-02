@@ -269,6 +269,7 @@ cdef extern from "mirage/threadblock/graph.h" namespace "mirage::threadblock":
         CppSTensor* clamp(const CppSTensor *A, float min_val, float max_val)
         CppSTensor* square(const CppSTensor *A)
         CppSTensor* sqrt(const CppSTensor *A)
+        CppSTensor* mul_scalar(const CppSTensor *A, float scalar)
         CppSTensor* add(const CppSTensor *A,
                      const CppSTensor *B)
         CppSTensor* mul(const CppSTensor *A,

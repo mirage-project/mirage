@@ -961,6 +961,11 @@ cdef class CyTBGraph:
         t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
         return STensor(t)
 
+    def mul_scalar(self, STensor A, float scalar):
+        cdef CppSTensor* ptr = self.p_bgraph.mul_scalar(A.c_ptr, scalar)
+        t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
+        return STensor(t)
+
     def add(self, STensor A, STensor B):
         cdef CppSTensor* ptr = self.p_bgraph.add(A.c_ptr, B.c_ptr)
         t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)

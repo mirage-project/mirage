@@ -75,6 +75,7 @@ op_nodelabel_mapping = {
     "tb_exp_op": "Exp",
     "tb_square_op": "Square",
     "tb_sqrt_op": "Sqrt",
+    "tb_mul_scalar_op": "MulScalar",
     "tb_silu_op": "SiLU",
     "tb_sigmoid_op": "Sigmoid",
     "tb_gelu_op": "GeLU",

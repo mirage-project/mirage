@@ -34,6 +34,9 @@ class TBGraph:
     def sqrt(self, A: STensor):
         return self.cygraph.sqrt(A)
 
+    def mul_scalar(self, A: STensor, scalar: float):
+        return self.cygraph.mul_scalar(A, scalar)
+
     def add(self, A: STensor, B: STensor):
         return self.cygraph.add(A, B)
 
