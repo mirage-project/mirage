@@ -20,4 +20,3 @@ int main(int argc, char **argv) {
   init_persistent_kernel(input_tensors, output_tensors, rank, 106, 6, 2);
   MPI_Finalize();
 }
-

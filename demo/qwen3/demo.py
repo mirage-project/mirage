@@ -10,6 +10,7 @@ from mpi4py import MPI
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--use-mirage", action='store_true', help="Use Mirage kernels")
+    parser.add_argument("--profiling", action='store_true', help="Use Profiler to generate trace")
     args = parser.parse_args()
     comm = MPI.COMM_WORLD
     world_size = comm.Get_size()
@@ -30,6 +31,7 @@ if __name__ == "__main__":
     #model_name = "Qwen/Qwen2.5-7B-Instruct"
     model_name = "Qwen/Qwen3-8B"
     torch.set_default_dtype(torch.bfloat16)
+
     torch.cuda.set_device(rank)
     with torch.device("cuda"):
         #model = Qwen3ForCausalLM.from_pretrained(model_name).to("cuda")
@@ -72,7 +74,6 @@ if __name__ == "__main__":
         tokenize=False,
         add_generation_prompt=True
     )
-    
     model_inputs = tokenizer([text], return_tensors="pt").to(model.device)
     tokens = torch.full((1, 32768), 0, dtype=torch.long, device="cuda")
     for i in range(model_inputs.input_ids.shape[-1]):
@@ -84,10 +85,14 @@ if __name__ == "__main__":
     
     starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
     step = torch.tensor([0], dtype=torch.int32, device="cuda")
-
     if args.use_mirage:
         import mirage
-        kernel = mirage.PersistentKernel(file_path="/home/ubuntu/mirage_cpp/debug_build/test.cu", mpi_rank=rank, num_workers=100, num_local_schedulers=8, num_remote_schedulers=0, use_nvshmem=True, input_tensors=[item[1] for item in input_tensors], meta_tensors=[step])
+        if args.profiling:
+            profiler_tensor = torch.empty(3000 * 128, dtype=torch.uint64, device="cuda").contiguous()
+            kernel = mirage.PersistentKernel(file_path="/home/ubuntu/mirage_cpp/debug_build/test.cu", mpi_rank=rank, num_workers=100, num_local_schedulers=8, num_remote_schedulers=0, use_nvshmem=True, input_tensors=[item[1] for item in input_tensors], meta_tensors=[step], profiler_tensor=profiler_tensor)
+        else:
+            kernel = mirage.PersistentKernel(file_path="/home/ubuntu/mirage_cpp/debug_build/test.cu", mpi_rank=rank, num_workers=100, num_local_schedulers=8, num_remote_schedulers=0, use_nvshmem=True, input_tensors=[item[1] for item in input_tensors], meta_tensors=[step], profiler_tensor=None)
+
     #g = torch.cuda.CUDAGraph()
     stream = torch.cuda.Stream()
     warmup = 0

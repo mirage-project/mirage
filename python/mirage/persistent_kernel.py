@@ -13,12 +13,13 @@ HARD_CODE = """
 #include <cuda_runtime.h>
 
 static PyObject *init_func(PyObject *self, PyObject *args) {
-  PyObject *input_list, *meta_list;
+  PyObject *input_list, *meta_list, *py_profiler_buffer;
   std::vector<void const *> input_tensors;
   std::vector<void*> meta_tensors;
   int my_mpi_rank, num_workers, num_local_schedulers, num_remote_schedulers;
+  void *profiler_buffer;
 
-  if (!PyArg_ParseTuple(args, "OOiiii", &input_list, &meta_list, &my_mpi_rank, &num_workers, &num_local_schedulers, &num_remote_schedulers)) {
+  if (!PyArg_ParseTuple(args, "OOOiiii", &input_list, &meta_list, &py_profiler_buffer, &my_mpi_rank, &num_workers, &num_local_schedulers, &num_remote_schedulers)) {
     PyErr_SetString(PyExc_TypeError, "Invalid parameters");
     return NULL;
   }
@@ -50,8 +51,9 @@ static PyObject *init_func(PyObject *self, PyObject *args) {
     }
     meta_tensors.push_back(PyLong_AsVoidPtr(item));
   }
+  profiler_buffer = PyLong_AsVoidPtr(py_profiler_buffer);
 
-  init_persistent_kernel(input_tensors, meta_tensors, my_mpi_rank, num_workers, num_local_schedulers, num_remote_schedulers);
+  init_persistent_kernel(input_tensors, meta_tensors, profiler_buffer, my_mpi_rank, num_workers, num_local_schedulers, num_remote_schedulers);
 
   Py_RETURN_NONE;
 }
@@ -266,9 +268,12 @@ class PersistentKernel:
         # initialize persistent kernel
         input_tensors = kwargs.get("input_tensors", [])
         meta_tensors = kwargs.get("meta_tensors", [])
+        self.profiler_tensor=kwargs.get("profiler_tensor")
+
         input_tensors_ptr = [tensor.data_ptr() for tensor in input_tensors]
         meta_tensors_ptr = [tensor.data_ptr() for tensor in meta_tensors]
-        self.init_func(input_tensors_ptr, meta_tensors_ptr, mpi_rank, num_workers, num_local_schedulers, num_remote_schedulers)
+        profiler_buffer_ptr = self.profiler_tensor.data_ptr() if self.profiler_tensor is not None else 0
+        self.init_func(input_tensors_ptr, meta_tensors_ptr, profiler_buffer_ptr, mpi_rank, num_workers, num_local_schedulers, num_remote_schedulers)
 
         #self.call_func = getattr(mod, "call_func")
 
@@ -277,6 +282,9 @@ class PersistentKernel:
         #if stream is None:
         #    stream = torch.cuda.default_stream()
         self.launch_func()
+        if self.profiler_tensor is not None:
+            from .profiler_persistent import export_to_perfetto_trace
+            export_to_perfetto_trace(self.profiler_tensor, 'mirage.perfetto-trace')
 
     def __del__(self):
         if not self.__finalized__:
