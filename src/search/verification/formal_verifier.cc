@@ -304,12 +304,12 @@ std::vector<z3::expr>
           tensor_exprs.emplace(op->output_tensors[0].guid, rms_norm(a));
           break;
         }
-        case type::KNOperatorType::KN_SQUARE_OP: {
+        case type::TBOperatorType::TB_SQUARE_OP: {
           z3::expr a = tensor_exprs.at(op->input_tensors[0].guid);
           tensor_exprs.emplace(op->output_tensors[0].guid, square(a));
           break;
         }
-        case type::KNOperatorType::KN_SQRT_OP: {
+        case type::TBOperatorType::TB_SQRT_OP: {
           z3::expr a = tensor_exprs.at(op->input_tensors[0].guid);
           tensor_exprs.emplace(op->output_tensors[0].guid, sqrt(a));
           break;
