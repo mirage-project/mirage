@@ -177,7 +177,7 @@ __global__ void persistent_kernel(RuntimeConfig config) {
   int num_schedulers =
       config.num_local_schedulers + config.num_remote_schedulers;
   assert(num_schedulers % 4 == 0);
-  assert(gridDim.x == config.num_workers + num_schedulers / 4);
+  assert(gridDim.x == config.num_workers + num_schedulers);
   if (blockIdx.x < config.num_workers) {
     int worker_id = blockIdx.x;
     size_t cur_task_id = 0, last_task_id = 0;
@@ -367,8 +367,10 @@ __global__ void persistent_kernel(RuntimeConfig config) {
     int warp_thread_id = threadIdx.x % 32;
     // assert that we have at least four warps per thread block
     assert(blockDim.x >= 128);
-    if (warp_id < 4 && warp_thread_id == 0) {
-      int sched_id = (blockIdx.x - config.num_workers) * 4 + warp_id;
+    //if (warp_id < 4 && warp_thread_id == 0) {
+      //int sched_id = (blockIdx.x - config.num_workers) * 4 + warp_id;
+    if (threadIdx.x == 0) {
+      int sched_id = (blockIdx.x - config.num_workers);
       EventId *sched_queue = config.sched_queues[sched_id];
       size_t cur_event_id = 0, last_event_id = 0;
       int next_worker = sched_id * (config.num_workers / num_schedulers);

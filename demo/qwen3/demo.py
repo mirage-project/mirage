@@ -87,7 +87,7 @@ if __name__ == "__main__":
 
     if args.use_mirage:
         import mirage
-        kernel = mirage.PersistentKernel(file_path="/home/ubuntu/mirage_cpp/debug_build/test.cu", mpi_rank=rank, num_workers=100, num_local_schedulers=30, num_remote_schedulers=2, use_nvshmem=True, input_tensors=[item[1] for item in input_tensors], meta_tensors=[step])
+        kernel = mirage.PersistentKernel(file_path="/home/ubuntu/mirage_cpp/debug_build/test.cu", mpi_rank=rank, num_workers=100, num_local_schedulers=8, num_remote_schedulers=0, use_nvshmem=True, input_tensors=[item[1] for item in input_tensors], meta_tensors=[step])
     #g = torch.cuda.CUDAGraph()
     stream = torch.cuda.Stream()
     warmup = 0
