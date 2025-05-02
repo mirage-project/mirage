@@ -13,21 +13,23 @@ HARD_CODE = """
 #include <cuda_runtime.h>
 
 static PyObject *init_func(PyObject *self, PyObject *args) {
-  PyObject *input_list;
+  PyObject *input_list, *meta_list;
   std::vector<void const *> input_tensors;
+  std::vector<void*> meta_tensors;
   int my_mpi_rank, num_workers, num_local_schedulers, num_remote_schedulers;
 
-  if (!PyArg_ParseTuple(args, "Oiiii", &input_list, &my_mpi_rank, &num_workers, &num_local_schedulers, &num_remote_schedulers)) {
+  if (!PyArg_ParseTuple(args, "OOiiii", &input_list, &meta_list, &my_mpi_rank, &num_workers, &num_local_schedulers, &num_remote_schedulers)) {
     PyErr_SetString(PyExc_TypeError, "Invalid parameters");
     return NULL;
   }
 
-  if(!PyList_Check(input_list)) {
+  if(!PyList_Check(input_list) || !PyList_Check(meta_list)) {
     PyErr_SetString(PyExc_TypeError, "Both arg1 and arg2 must be lists.");
     return NULL;
   }
 
   Py_ssize_t input_size = PyList_Size(input_list);
+  Py_ssize_t meta_size = PyList_Size(meta_list);
 
   for(Py_ssize_t i = 0; i < input_size; i++) {
     PyObject *item = PyList_GetItem(input_list, i);
@@ -39,20 +41,23 @@ static PyObject *init_func(PyObject *self, PyObject *args) {
     input_tensors.push_back(PyLong_AsVoidPtr(item));
   }
 
-  init_persistent_kernel(input_tensors, my_mpi_rank, num_workers, num_local_schedulers, num_remote_schedulers);
+  for(Py_ssize_t i = 0; i < meta_size; i++) {
+    PyObject *item = PyList_GetItem(meta_list, i);
+    void* tensor = PyLong_AsVoidPtr(item);
+    if(!tensor) {
+      PyErr_Format(PyExc_TypeError, "Failed to convert item %d (meta) to void pointer", i);
+      return NULL;
+    }
+    meta_tensors.push_back(PyLong_AsVoidPtr(item));
+  }
+
+  init_persistent_kernel(input_tensors, meta_tensors, my_mpi_rank, num_workers, num_local_schedulers, num_remote_schedulers);
 
   Py_RETURN_NONE;
 }
 
 static PyObject *launch_func(PyObject *self, PyObject *args) {
-  PyObject *py_stream;
-  if (!PyArg_ParseTuple(args, "O", &py_stream)) {
-    PyErr_SetString(PyExc_TypeError, "Invalid parameters");
-    return NULL;
-  }
-  cudaStream_t stream = (cudaStream_t)PyLong_AsVoidPtr(py_stream);
-
-  launch_persistent_kernel(stream);
+  launch_persistent_kernel();
 
   Py_RETURN_NONE;
 }
@@ -259,18 +264,19 @@ class PersistentKernel:
         self.finalize_func = getattr(mod, "finalize_func")
 
         # initialize persistent kernel
-        input_tensors = kwargs.get("inputs", [])
+        input_tensors = kwargs.get("input_tensors", [])
+        meta_tensors = kwargs.get("meta_tensors", [])
         input_tensors_ptr = [tensor.data_ptr() for tensor in input_tensors]
-        self.init_func(input_tensors_ptr, mpi_rank, num_workers, num_local_schedulers, num_remote_schedulers)
+        meta_tensors_ptr = [tensor.data_ptr() for tensor in meta_tensors]
+        self.init_func(input_tensors_ptr, meta_tensors_ptr, mpi_rank, num_workers, num_local_schedulers, num_remote_schedulers)
 
         #self.call_func = getattr(mod, "call_func")
 
     def __call__(self, **kwargs):
-        input_tensors = kwargs.get("inputs", [])
-        stream = kwargs.get("stream", None)
-        if stream is None:
-            stream = torch.cuda.default_stream()
-        self.launch_func(stream)
+        #stream = kwargs.get("stream", None)
+        #if stream is None:
+        #    stream = torch.cuda.default_stream()
+        self.launch_func()
 
     def __del__(self):
         if not self.__finalized__:

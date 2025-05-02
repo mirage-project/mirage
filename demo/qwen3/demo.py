@@ -9,10 +9,8 @@ from mpi4py import MPI
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
+    parser.add_argument("--use-mirage", action='store_true', help="Use Mirage kernels")
     args = parser.parse_args()
-    #world_size = int(os.getenv("WORLD_SIZE", "1"))
-    #rank = int(os.getenv("RANK", "0"))
-    #local_rank = int(os.getenv("LOCAL_RANK", "0"))
     comm = MPI.COMM_WORLD
     world_size = comm.Get_size()
     rank = comm.Get_rank()
@@ -40,24 +38,26 @@ if __name__ == "__main__":
     load_model(model, f"/opt/dlami/nvme/models/Qwen3-8B/model{rank}-mp{world_size}.safetensors")
 
     # get all model weight tensors
-    weight_tensors = []
-    weight_tensors.append(("model.embed_tokens.weight", model.model.embed_tokens.weight))
+    input_tensors = []
+    input_tensors.append(("model.embed_tokens.weight", model.model.embed_tokens.weight))
     for i, layer in enumerate(model.model.layers):
-        weight_tensors.append((f"model.layers.{i}.input_layernorm.weight", layer.input_layernorm.weight))
-        weight_tensors.append((f"model.layers.{i}.self_attn.q_proj.weight", layer.self_attn.q_proj.weight))
-        weight_tensors.append((f"model.layers.{i}.self_attn.k_proj.weight", layer.self_attn.k_proj.weight))
-        weight_tensors.append((f"model.layers.{i}.self_attn.v_proj.weight", layer.self_attn.v_proj.weight))
-        weight_tensors.append((f"model.layers.{i}.self_attn.q_norm.weight", layer.self_attn.q_norm.weight))
-        weight_tensors.append((f"model.layers.{i}.self_attn.k_norm.weight", layer.self_attn.k_norm.weight))
-        weight_tensors.append((f"model.layers.{i}.self_attn.o_proj.weight", layer.self_attn.o_proj.weight))
-        weight_tensors.append((f"model.layers.{i}.post_attention_layernorm.weight", layer.post_attention_layernorm.weight))
-        weight_tensors.append((f"model.layers.{i}.mlp.up_proj.weight", layer.mlp.up_proj.weight))
-        weight_tensors.append((f"model.layers.{i}.mlp.gate_proj.weight", layer.mlp.gate_proj.weight))
-        weight_tensors.append((f"model.layers.{i}.mlp.down_proj.weight", layer.mlp.down_proj.weight))
-    weight_tensors.append(("model.norm.weight", model.model.norm.weight))
-    weight_tensors.append(("lm_head.weight", model.lm_head.weight))
+        input_tensors.append((f"model.layers.{i}.input_layernorm.weight", layer.input_layernorm.weight))
+        input_tensors.append((f"model.layers.{i}.self_attn.q_proj.weight", layer.self_attn.q_proj.weight))
+        input_tensors.append((f"model.layers.{i}.self_attn.k_proj.weight", layer.self_attn.k_proj.weight))
+        input_tensors.append((f"model.layers.{i}.self_attn.v_proj.weight", layer.self_attn.v_proj.weight))
+        input_tensors.append((f"model.layers.{i}.self_attn.q_norm.weight", layer.self_attn.q_norm.weight))
+        input_tensors.append((f"model.layers.{i}.self_attn.k_norm.weight", layer.self_attn.k_norm.weight))
+        input_tensors.append((f"model.layers.{i}.self_attn.key_cache.tensor", model.model.kv_cache[0][i]))
+        input_tensors.append((f"model.layers.{i}.self_attn.value_cache.tensor", model.model.kv_cache[1][i]))
+        input_tensors.append((f"model.layers.{i}.self_attn.o_proj.weight", layer.self_attn.o_proj.weight))
+        input_tensors.append((f"model.layers.{i}.post_attention_layernorm.weight", layer.post_attention_layernorm.weight))
+        input_tensors.append((f"model.layers.{i}.mlp.up_proj.weight", layer.mlp.up_proj.weight))
+        input_tensors.append((f"model.layers.{i}.mlp.gate_proj.weight", layer.mlp.gate_proj.weight))
+        input_tensors.append((f"model.layers.{i}.mlp.down_proj.weight", layer.mlp.down_proj.weight))
+    input_tensors.append(("model.norm.weight", model.model.norm.weight))
+    input_tensors.append(("lm_head.weight", model.lm_head.weight))
 
-    print(weight_tensors)
+    #print(input_tensors)
 
     #tokenizer = AutoTokenizer.from_pretrained(model_name)
     tokenizer = AutoTokenizer.from_pretrained("/opt/dlami/nvme/models/Qwen3-8B/")
@@ -83,16 +83,18 @@ if __name__ == "__main__":
     prev_pos = 0
     
     starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+    step = torch.tensor([0], dtype=torch.int32, device="cuda")
 
+    if args.use_mirage:
+        import mirage
+        kernel = mirage.PersistentKernel(file_path="/home/ubuntu/mirage_cpp/debug_build/test.cu", mpi_rank=rank, num_workers=100, num_local_schedulers=30, num_remote_schedulers=2, use_nvshmem=True, input_tensors=[item[1] for item in input_tensors], meta_tensors=[step])
     #g = torch.cuda.CUDAGraph()
     stream = torch.cuda.Stream()
-    step = torch.tensor([0], dtype=torch.int32, device="cuda")
-    warmup = 16
+    warmup = 0
     output_len = 512
-    for cur_pos in range(prompt_len, prompt_len + output_len):
-        step.fill_(cur_pos-1)
-        # prefilling phase
-        if cur_pos < prompt_len + 1:
+    if not args.use_mirage:
+        for cur_pos in range(prompt_len, prompt_len + output_len):
+            step.fill_(cur_pos-1)
             input_ids = tokens[:,prev_pos:cur_pos]
             cos_embeddings = position_embeddings[0][:,prev_pos:cur_pos]
             sin_embeddings = position_embeddings[1][:,prev_pos:cur_pos]
@@ -101,26 +103,32 @@ if __name__ == "__main__":
                         position_embeddings=(cos_embeddings, sin_embeddings),
                         step=step,
                         stream=stream)
-        # decoding phase
-        else:
-            input_ids = tokens[:,prev_pos:cur_pos]
-            cos_embeddings = position_embeddings[0][:,prev_pos:cur_pos]
-            sin_embeddings = position_embeddings[1][:,prev_pos:cur_pos]
-            logits = model.forward(
-                       input_ids=input_ids,
-                        position_embeddings=(cos_embeddings, sin_embeddings),
-                        step=step,
-                        stream=stream)
-        next_token = logits.argmax(dim=-1)
-        next_token = next_token[0, -1]
-        tokens[0, cur_pos] = next_token
-        prev_pos = cur_pos
-        if (next_token == model.config.eos_token_id):
-            break
-        if cur_pos == prompt_len + warmup:
-            torch.cuda.synchronize()
-            starter.record()
-    
+            next_token = logits.argmax(dim=-1)
+            next_token = next_token[0, -1]
+            tokens[0, cur_pos] = next_token
+            prev_pos = cur_pos
+            if (next_token == model.config.eos_token_id):
+                break
+            if cur_pos == prompt_len + warmup:
+                torch.cuda.synchronize()
+                starter.record()
+    else:
+        # prefill phase
+        step.fill_(prompt_len-1)
+        input_ids = tokens[:,0:prompt_len]
+        cos_embeddings = position_embeddings[0][:,0:prompt_len]
+        sin_embeddings = position_embeddings[1][:,0:prompt_len]
+        logits = model.forward(
+                    input_ids=input_ids,
+                    position_embeddings=(cos_embeddings, sin_embeddings),
+                    step=step,
+                    stream=stream)
+        torch.cuda.synchronize()
+        starter.record()
+
+        step.fill_(prompt_len)
+        kernel()
+
     ender.record()
     torch.cuda.synchronize()
     run_time = starter.elapsed_time(ender)
@@ -130,6 +138,6 @@ if __name__ == "__main__":
     response = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
     print(response)
     
-    print("Prompt length {}, generate length {}, per-token latency {} ms".format(prompt_len, cur_pos + 1, run_time / (cur_pos + 1 - warmup)))
+    print("Prompt length {}, generate length {}, per-token latency {} ms".format(prompt_len, 5120, run_time / (5120 - warmup)))
     if world_size > 1:
         dist.destroy_process_group()

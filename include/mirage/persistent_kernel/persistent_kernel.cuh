@@ -91,6 +91,7 @@ struct RuntimeConfig {
   TaskId **worker_queues;
   EventId **sched_queues;
   TaskId *first_tasks;
+  int *step; // Metadata for LLM serving
   bool verbose;
 };
 
@@ -107,8 +108,11 @@ __global__ void init_kernel(RuntimeConfig config) {
   }
 }
 
-__device__ int prepare_next_batch(RuntimeConfig config) {
-  return 0;
+__device__ __forceinline__ bool prepare_next_batch(RuntimeConfig config) {
+  int step = config.step[0];
+  //printf("step = %d\n", step);
+  config.step[0] = step + 1;
+  return step + 1 <= 5120;
 }
 
 __device__ void terminate_workers_and_schedulers(RuntimeConfig config) {
@@ -182,10 +186,12 @@ __global__ void persistent_kernel(RuntimeConfig config) {
       // fetch next task from task queue
       if (threadIdx.x == 0) {
         while (cur_task_id == last_task_id) {
-          __threadfence();
-          last_task_id = config.worker_queue_last_ready_task_id[worker_id];
+          //__threadfence();
+          //last_task_id = config.worker_queue_last_ready_task_id[worker_id];
+          last_task_id = atomicAdd(&config.worker_queue_last_ready_task_id[worker_id], 0);
         }
         assert(cur_task_id + config.per_worker_queue_len > last_task_id);
+	__threadfence();
         cur_task_loc = task_queue[cur_task_id % config.per_worker_queue_len];
         if (config.verbose) {
           printf(
@@ -368,17 +374,19 @@ __global__ void persistent_kernel(RuntimeConfig config) {
       int next_worker = sched_id * (config.num_workers / num_schedulers);
       while (true) {
         while (cur_event_id == last_event_id) {
-          __threadfence();
-          last_event_id = config.sched_queue_last_ready_event_id[sched_id];
+          //__threadfence();
+          // last_event_id = config.sched_queue_last_ready_event_id[sched_id];
+	  last_event_id = atomicAdd(&config.sched_queue_last_ready_event_id[sched_id], 0);
         }
         // Make sure the schedule queue is not overflow
         assert(cur_event_id + config.per_sched_queue_len > last_event_id);
+	__threadfence();
         // Launch new tasks
         EventId event_id =
             sched_queue[cur_event_id % config.per_sched_queue_len];
         EventDesc e = config.all_events[event_id];
         if (is_termination_event(event_id, e)) {
-          // return;
+          //return;
         }
         for (TaskId i = e.first_task_id; i < e.last_task_id; i++) {
           size_t last_task_id = atomicAdd(
@@ -388,9 +396,9 @@ __global__ void persistent_kernel(RuntimeConfig config) {
           // Make sure writes to worker_queues is visible to worker CTAs before
           // we increase its last_ready_task_id
           __threadfence();
-          size_t old = config.worker_queue_last_ready_task_id[next_worker];
+          size_t old;
           do {
-            __threadfence();
+            //__threadfence();
             old =
                 atomicCAS(&config.worker_queue_last_ready_task_id[next_worker],
                           last_task_id,
@@ -411,8 +419,37 @@ __global__ void persistent_kernel(RuntimeConfig config) {
           // Terminate all schedulers & workers
           // config.all_tasks[0] and config.all_events[0]
           // are reserved to
-          terminate_workers_and_schedulers(config);
-          return;
+          if (!prepare_next_batch(config)) {
+            terminate_workers_and_schedulers(config);
+            return;
+          } else {
+            // Launch first_tasks[0]
+            size_t last_task_id = atomicAdd(
+                &(config.worker_queue_next_free_task_id[next_worker]), 1);
+            config.worker_queues[next_worker]
+                                [last_task_id % config.per_worker_queue_len] = config.first_tasks[0];
+            // Make sure writes to worker_queues is visible to worker CTAs before
+            // we increase its last_ready_task_id
+            __threadfence();
+            size_t old = config.worker_queue_last_ready_task_id[next_worker];
+            do {
+              //__threadfence();
+              old =
+                  atomicCAS(&config.worker_queue_last_ready_task_id[next_worker],
+                            last_task_id,
+                            last_task_id + 1);
+            } while (old != last_task_id);
+            if (config.verbose) {
+              printf("[%d][SCHD] schd_id(%d) task_id(%llu) worker_id(%d) "
+                     "worker_last_ready_pos(%llu)\n",
+                     config.my_gpu_id,
+                     sched_id,
+                     config.first_tasks[0],
+                     next_worker,
+                     last_task_id + 1);
+            }
+            next_worker = (next_worker + 1) % config.num_workers;
+	  }
         }
         cur_event_id += 1;
       }
@@ -438,14 +475,16 @@ static void _init_persistent_kernel(std::vector<TaskDesc> &all_tasks,
                                     int num_gpus,
                                     int my_gpu_id);
 
-
 static RuntimeConfig global_runtime_config;
 
 extern "C" void init_persistent_kernel(std::vector<void const *> torch_tensors,
-				       int my_rank,
+                                       std::vector<void *> meta_tensors,
+                                       int my_rank,
                                        int num_workers,
                                        int num_local_schedulers,
                                        int num_remote_schedulers) {
+  assert(meta_tensors.size() == 1);
+  global_runtime_config.step = static_cast<int*>(meta_tensors[0]);
   global_runtime_config.num_workers = num_workers;
   global_runtime_config.num_local_schedulers = num_local_schedulers;
   global_runtime_config.num_remote_schedulers = num_remote_schedulers;
@@ -463,20 +502,24 @@ extern "C" void init_persistent_kernel(std::vector<void const *> torch_tensors,
   int mype_node = nvshmem_team_my_pe(NVSHMEMX_TEAM_NODE);
   printf("mype(%d) npes(%d) mype_node(%d)\n", mype, npes, mype_node);
   printf("process_id(%zu) thread_id(%zu)\n", getpid(), std::this_thread::get_id());
+  printf("torch_tensors.size(%zu)\n", torch_tensors.size());
   global_runtime_config.per_worker_queue_len = 1024;
   global_runtime_config.per_sched_queue_len = 1024;
   global_runtime_config.num_gpus = npes;
   global_runtime_config.my_gpu_id = mype;
   global_runtime_config.num_graphs = 1;
-  global_runtime_config.verbose = true;
+  global_runtime_config.verbose = false;
 
   std::vector<TaskDesc> all_tasks;
   std::vector<EventDesc> all_events;
   std::vector<TaskId> first_tasks;
-  for (int i = 0; i < 1024; i++) {
+  for (int i = 0; i < 100; i++) {
     torch_tensors.push_back((void*)0);
   }
   _init_persistent_kernel(all_tasks, all_events, first_tasks, torch_tensors, npes, mype);
+  for (size_t i = 0; i < all_tasks.size(); i++) {
+    printf("task[%zu]: task_type(%d) trigger_event(%llx)\n", i, all_tasks[i].task_type, all_tasks[i].trigger_event);
+  }
 
   // Initialize worker queue last task id
   global_runtime_config.worker_queue_last_ready_task_id =
@@ -590,7 +633,7 @@ extern "C" void init_persistent_kernel(std::vector<void const *> torch_tensors,
 }
 
 // Entry point for C/C++
-extern "C" void launch_persistent_kernel(cudaStream_t stream) {
+extern "C" void launch_persistent_kernel() {
   void *args[] = {&global_runtime_config};
   // Launcher persistent kernel
   cudaFuncSetAttribute(persistent_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, 22656);
@@ -599,7 +642,9 @@ extern "C" void launch_persistent_kernel(cudaStream_t stream) {
                              dim3(128, 1, 1),
                              args,
                              22656 /*sharedmem*/,
-                             stream /*stream*/);
+                             0 /*stream*/);
+  cudaDeviceSynchronize();
+  printf("Finished Launch Persistent Kernel\n");
 }
 
 extern "C" void finalize_persistent_kernel() {
