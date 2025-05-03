@@ -325,9 +325,6 @@ int main(int argc, char **argv) {
     outfile << code;
     outfile.close();
   }
-  runtime.launch_persistent_kernel(106 /*num_workers*/,
-                                   6 /*num_local_schedulers*/,
-                                   2 /*num_remote_schedulers*/);
 
   MPI_Finalize();
 }

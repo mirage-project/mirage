@@ -26,7 +26,7 @@ namespace tb = mirage::threadblock;
 Runtime::Runtime(int _num_gpus, int _my_gpu_id)
     : num_graphs(0), num_gpus(_num_gpus), my_gpu_id(_my_gpu_id) {
   // add the termination event to the event lists
-  EventDesc e(1, 0, 0);
+  EventDesc e(EVENT_TERMINATION, 1, 0, 0);
   all_events.push_back(e);
   TaskDesc t(TASK_TERMINATE);
   all_tasks.push_back(t);
@@ -43,6 +43,7 @@ size_t get_event_id(int my_gpu_id, size_t event_pos, bool nvshmem_event) {
 void dfs_create_events_add_tasks(
     int depth,
     int const my_gpu_id,
+    int num_sub_events,
     std::vector<int> const &event_dims,
     int3 const input_map,
     int3 const output_map,
@@ -87,7 +88,27 @@ void dfs_create_events_add_tasks(
         }
       }
     }
-    all_events.push_back(event_desc);
+    // Add subevents if last_task_id >= first_task_id + num_sub_events
+    if (event_desc.last_task_id >= event_desc.first_task_id + num_sub_events) {
+      // Create an event that will launch all subevents
+      all_events.push_back(EventDesc(EVENT_LAUNCH_EVENTS, event_desc.num_triggers, all_events.size() + 1, all_events.size() + 1 + num_sub_events));
+      // Launch subevents
+      size_t tasks_per_event = (event_desc.last_task_id - event_desc.first_task_id + num_sub_events - 1) / num_sub_events;
+      TaskId cur_task_id = event_desc.first_task_id;
+      for (int i = 0; i < num_sub_events; i++) {
+        EventDesc sub_event;
+        sub_event.event_type = EVENT_LAUNCH_TASKS;
+	sub_event.num_triggers = 1;
+        sub_event.first_task_id = cur_task_id;
+        sub_event.last_task_id = std::min(event_desc.last_task_id, cur_task_id + tasks_per_event);
+        assert(sub_event.first_task_id < sub_event.last_task_id);
+        cur_task_id = sub_event.last_task_id;
+        all_events.push_back(sub_event);
+      }
+    } else {
+      event_desc.event_type = EVENT_LAUNCH_TASKS;
+      all_events.push_back(event_desc);
+    }
   } else {
     for (int i = 0; i < event_dims[depth]; i++) {
       dim3 new_consumer_lo_bid = consumer_lo_bid;
@@ -126,6 +147,7 @@ void dfs_create_events_add_tasks(
       }
       dfs_create_events_add_tasks(depth + 1,
                                   my_gpu_id,
+                                  num_sub_events,
                                   event_dims,
                                   input_map,
                                   output_map,
@@ -207,6 +229,7 @@ void Runtime::register_mugraph(
             // event_desc_0 is the trigger_event of previous_task
             // event_desc_1 is the trigger_event of allgather
             EventDesc event_desc_0, event_desc_1;
+            event_desc_0.event_type = EVENT_LAUNCH_TASKS;
             event_desc_0.num_triggers = 1;
             event_desc_0.first_task_id = all_tasks.size();
             event_desc_0.last_task_id = all_tasks.size() + num_gpus - 1;
@@ -243,6 +266,7 @@ void Runtime::register_mugraph(
               }
               all_tasks.push_back(task);
             }
+            event_desc_1.event_type = EVENT_LAUNCH_TASKS;
             event_desc_1.first_task_id = all_tasks.size();
             event_desc_1.last_task_id = all_tasks.size() + 1;
             event_desc_1.num_triggers = num_gpus - 1;
@@ -385,6 +409,7 @@ void Runtime::register_mugraph(
       }
       dfs_create_events_add_tasks(0,                       /*depth*/
                                   my_gpu_id,               /*my_gpu_id*/
+                                  8,                       /*num_sub_events*/
                                   event_dims,              /*event_dims*/
                                   input_map,               /*input_map*/
                                   output_map,              /*output_map*/
@@ -409,8 +434,9 @@ void Runtime::register_mugraph(
   // Update the trigger event for all tasks in pre_task_map
   for (auto const &it : pre_task_map) {
     all_tasks[it.second].trigger_event =
-        get_event_id(my_gpu_id, 0, false /*nvshmem_event*/);
+        get_event_id(my_gpu_id, all_events.size(), false /*nvshmem_event*/);
   }
+  all_events.push_back(EventDesc(EVENT_END_OF_TASK_GRAPH, pre_task_map.size(), 0, 0));
   num_graphs++;
 }
 
@@ -454,8 +480,14 @@ bool Runtime::sanity_check() {
       triggered_events.insert(event_id);
       size_t event_pos = event_id & 0xffffffff;
       EventDesc desc = all_events[event_pos];
-      for (TaskId tid = desc.first_task_id; tid < desc.last_task_id; tid++) {
-        task_queue.push(tid);
+      if (desc.event_type == EVENT_LAUNCH_TASKS) {
+        for (TaskId tid = desc.first_task_id; tid < desc.last_task_id; tid++) {
+          task_queue.push(tid);
+        }
+      } else if (desc.event_type == EVENT_LAUNCH_EVENTS) {
+        for (EventId eid = desc.first_task_id; eid < desc.last_task_id; eid++) {
+          event_queue.push(eid);
+        }
       }
     }
   }
@@ -568,6 +600,8 @@ std::string Runtime::print_task_graph(
           code.e("TaskDesc task_desc(static_cast<TaskType>($));",
                  task_desc.task_type);
           code.e("task_desc.trigger_event = $;", task_desc.trigger_event);
+	  code.e("task_desc.num_inputs = $;", task_desc.num_inputs);
+	  code.e("task_desc.num_outputs = $;", task_desc.num_outputs);
           for (int i = 0; i < task_desc.num_inputs; i++) {
             off_t offset = 0;
             int num_dims = input_ops[i]->dtensor.num_dims;
@@ -739,7 +773,8 @@ std::string Runtime::print_task_graph(
   assert(task_pos == all_tasks.size());
   // Add all events
   for (auto const &event : all_events) {
-    code.e("all_events.push_back(EventDesc($, $, $));",
+    code.e("all_events.push_back(EventDesc(static_cast<EventType>($), $, $, $));",
+           event.event_type,
            event.num_triggers,
            event.first_task_id,
            event.last_task_id);

@@ -42,5 +42,13 @@ enum TaskType {
   TASK_NVSHMEM_COPY = 199,
 };
 
+enum EventType {
+  EVENT_LAUNCH_TASKS = 900,
+  EVENT_LAUNCH_EVENTS = 901,
+  EVENT_END_OF_TASK_GRAPH = 902,
+  EVENT_TERMINATION = 903,
+  EVENT_INVALID = 999,
+};
+
 } // namespace runtime
 } // namespace mirage
