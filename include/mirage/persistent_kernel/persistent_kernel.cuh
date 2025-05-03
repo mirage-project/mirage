@@ -47,7 +47,16 @@ enum TaskType {
   TASK_ARGMAX = 109,
   TASK_NVSHMEM_COPY = 199,
   TASK_SCHD_TASKS = 200,
-  TASK_GET_EVENT = 201,
+  TASK_SCHD_EVENTS = 201,
+  TASK_GET_EVENT = 202,
+};
+
+enum EventType {
+  EVENT_LAUNCH_TASKS = 900,
+  EVENT_LAUNCH_EVENTS = 901,
+  EVENT_END_OF_TASK_GRAPH = 902,
+  EVENT_TERMINATION = 903,
+  EVENT_INVALID = 999,
 };
 
 struct TensorDesc {
@@ -60,10 +69,11 @@ struct TensorDesc {
 
 struct EventDesc {
   EventDesc(void)
-      : num_triggers(0), first_task_id(TASK_INVALID_ID),
-        last_task_id(TASK_INVALID_ID) {}
-  EventDesc(int nt, TaskId f, TaskId l)
-      : num_triggers(nt), first_task_id(f), last_task_id(l) {}
+      : event_type(EVENT_INVALID), num_triggers(0),
+        first_task_id(TASK_INVALID_ID), last_task_id(TASK_INVALID_ID) {}
+  EventDesc(EventType type, int nt, TaskId f, TaskId l)
+      : event_type(type), num_triggers(nt), first_task_id(f), last_task_id(l) {}
+  EventType event_type;
   int num_triggers;
   TaskId first_task_id, last_task_id;
 };
@@ -427,7 +437,7 @@ __global__ void persistent_kernel(RuntimeConfig config) {
             // Make sure that the updated event_index is visible to the
             // scheduler CTA before updating its last_ready_event_id
             __threadfence();
-            size_t old = config.sched_queue_last_ready_event_id[sched_id];
+            size_t old;
             do {
               // old =
               // atomicCAS(&config.sched_queue_last_ready_event_id[sched_id],
@@ -539,39 +549,80 @@ __global__ void persistent_kernel(RuntimeConfig config) {
             e.last_task_id = config.first_tasks[0] + 1;
           }
         }
-        for (TaskId i = e.first_task_id; i < e.last_task_id; i++) {
-          if (config.profiling) {
-            PROFILER_EVENT_START(TASK_SCHD_TASKS, event_counter++);
+        // Case 1: launch tasks
+        if (e.event_type == EVENT_LAUNCH_EVENTS) {
+          for (EventId i = e.first_task_id; i < e.last_task_id; i++) {
+            if (config.profiling) {
+              PROFILER_EVENT_START(TASK_SCHD_EVENTS, event_counter++);
+            }
+            int next_sched = i % config.num_local_schedulers;
+            // size_t last_task_id = atomicAdd(
+            //     &(config.worker_queue_next_free_task_id[next_worker]), 1);
+            size_t last_event_id = custom_atomic_add_u64(
+                &(config.sched_queue_next_free_event_id[next_sched]), 1);
+            config.sched_queues[next_sched]
+                               [last_event_id % config.per_sched_queue_len] = i;
+            // Make sure writes to worker_queues is visible to worker CTAs
+            // before we increase its last_ready_task_id
+            __threadfence();
+            size_t old;
+            do {
+              //__threadfence();
+              old = custom_atomic_cas_u64(
+                  &config.sched_queue_last_ready_event_id[next_sched],
+                  last_event_id,
+                  last_event_id + 1);
+            } while (old != last_event_id);
+            if (config.verbose) {
+              printf("[%d][SCHD] schd_id(%d) event_id(%llu) next_sched(%d) "
+                     "sched_ready_pos(%llu)\n",
+                     config.my_gpu_id,
+                     sched_id,
+                     i,
+                     next_sched,
+                     last_event_id + 1);
+            }
+            if (config.profiling) {
+              PROFILER_EVENT_END(TASK_SCHD_EVENTS, event_counter);
+            }
           }
-          // size_t last_task_id = atomicAdd(
-          //     &(config.worker_queue_next_free_task_id[next_worker]), 1);
-          size_t last_task_id = custom_atomic_add_u64(
-              &(config.worker_queue_next_free_task_id[next_worker]), 1);
-          config.worker_queues[next_worker]
-                              [last_task_id % config.per_worker_queue_len] = i;
-          // Make sure writes to worker_queues is visible to worker CTAs before
-          // we increase its last_ready_task_id
-          __threadfence();
-          size_t old;
-          do {
-            //__threadfence();
-            old = custom_atomic_cas_u64(
-                &config.worker_queue_last_ready_task_id[next_worker],
-                last_task_id,
-                last_task_id + 1);
-          } while (old != last_task_id);
-          if (config.verbose) {
-            printf("[%d][SCHD] schd_id(%d) task_id(%llu) worker_id(%d) "
-                   "worker_last_ready_pos(%llu)\n",
-                   config.my_gpu_id,
-                   sched_id,
-                   i,
-                   next_worker,
-                   last_task_id + 1);
-          }
-          next_worker = (next_worker + 1) % config.num_workers;
-          if (config.profiling) {
-            PROFILER_EVENT_END(TASK_SCHD_TASKS, event_counter);
+        } else {
+          assert(e.event_type == EVENT_LAUNCH_TASKS ||
+                 e.event_type == EVENT_END_OF_TASK_GRAPH);
+          for (TaskId i = e.first_task_id; i < e.last_task_id; i++) {
+            if (config.profiling) {
+              PROFILER_EVENT_START(TASK_SCHD_TASKS, event_counter++);
+            }
+            // size_t last_task_id = atomicAdd(
+            //     &(config.worker_queue_next_free_task_id[next_worker]), 1);
+            size_t last_task_id = custom_atomic_add_u64(
+                &(config.worker_queue_next_free_task_id[next_worker]), 1);
+            config.worker_queues[next_worker][last_task_id %
+                                              config.per_worker_queue_len] = i;
+            // Make sure writes to worker_queues is visible to worker CTAs
+            // before we increase its last_ready_task_id
+            __threadfence();
+            size_t old;
+            do {
+              //__threadfence();
+              old = custom_atomic_cas_u64(
+                  &config.worker_queue_last_ready_task_id[next_worker],
+                  last_task_id,
+                  last_task_id + 1);
+            } while (old != last_task_id);
+            if (config.verbose) {
+              printf("[%d][SCHD] schd_id(%d) task_id(%llu) worker_id(%d) "
+                     "worker_last_ready_pos(%llu)\n",
+                     config.my_gpu_id,
+                     sched_id,
+                     i,
+                     next_worker,
+                     last_task_id + 1);
+            }
+            next_worker = (next_worker + 1) % config.num_workers;
+            if (config.profiling) {
+              PROFILER_EVENT_END(TASK_SCHD_TASKS, event_counter);
+            }
           }
         }
         cur_event_id += 1;
