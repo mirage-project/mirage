@@ -64,9 +64,82 @@ static PyObject *launch(PyObject *self, PyObject *args) {
   Py_RETURN_NONE;
 }
 
+#if USE_NVSHMEM
+static std::vector<size_t> get_comm_sizes() {
+    // These values will be generated during codegen
+    return {
+        4096,   // Buffer 0
+        8192,   // Buffer 1
+        16384   // Buffer 2
+    };
+}
+static PyObject* allocate_comm_buffers(PyObject* self, PyObject* Py_UNUSED(ignored)) {
+    const std::vector<size_t> sizes = get_comm_sizes();
+    
+    PyObject* buffer_list = PyList_New(sizes.size());
+    if (!buffer_list) return NULL;
+    
+    for (size_t i = 0; i < sizes.size(); i++) {
+        void* ptr = nvshmem_malloc(sizes[i]);
+        if (!ptr) {
+            // Cleanup previously allocated buffers
+            for (size_t j = 0; j < i; j++) {
+                void* prev_ptr = PyLong_AsVoidPtr(PyList_GET_ITEM(buffer_list, j));
+                nvshmem_free(prev_ptr);
+            }
+            Py_DECREF(buffer_list);
+            PyErr_SetString(PyExc_RuntimeError, "nvshmem_malloc failed");
+            return NULL;
+        }
+        
+        PyObject* py_ptr = PyLong_FromVoidPtr(ptr);
+        if (!py_ptr) {
+            nvshmem_free(ptr);
+            Py_DECREF(buffer_list);
+            return NULL;
+        }
+        PyList_SET_ITEM(buffer_list, i, py_ptr);
+    }
+    
+    return buffer_list;
+}
+
+static PyObject* free_comm_buffers(PyObject* self, PyObject* args) {
+    PyObject* buffer_list;
+    
+    // Parse the input argument as a list
+    if (!PyArg_ParseTuple(args, "O!", &PyList_Type, &buffer_list)) {
+        PyErr_SetString(PyExc_TypeError, "Expected a list of buffer pointers");
+        return NULL;
+    }
+
+    Py_ssize_t num_buffers = PyList_Size(buffer_list);
+    
+    // Free each buffer in the list
+    for (Py_ssize_t i = 0; i < num_buffers; i++) {
+        PyObject* item = PyList_GetItem(buffer_list, i);
+        void* ptr = PyLong_AsVoidPtr(item);
+        
+        if (!ptr) {
+            PyErr_Format(PyExc_ValueError, 
+                        "Invalid pointer at index %zd (might already be freed)", i);
+            return NULL;
+        }
+        
+        nvshmem_free(ptr);
+    }
+
+    Py_RETURN_NONE;
+}
+#endif
 
 static PyMethodDef ModuleMethods[] = {
   {"launch", launch, METH_VARARGS, "Entry point for all kernels with this signature"},
+  #if USE_NVSHMEM
+  {"allocate_comm_buffers", allocate_comm_buffers, METH_NOARGS, 
+     "Allocate nvshmem buffers"},
+  {"free_comm_buffers", free_comm_buffers, METH_VARARGS, "Free nvshmem buffers"},
+  #endif
   {NULL, NULL, 0, NULL} // sentinel
 };
 
@@ -107,16 +180,18 @@ def get_cc_cmd(target, cc, FILE_NAME, py_include_dir, MIRAGE_ROOT, NCCL_ROOT, MP
         "-O3",
         f"-I{py_include_dir}",
         f"-I{MIRAGE_ROOT}/include/mirage/transpiler/runtime/",
-        f"-I{MIRAGE_ROOT}/deps/cutlass/include",
+        f"-I{MIRAGE_ROOT}/deps/cutlass/include/",
         "-ccbin=mpic++",
-        f"-I{NCCL_ROOT}/include",
-        f"-L{NCCL_ROOT}/lib",
-        f"-I{MPI_ROOT}/include",
-        f"-L{MPI_ROOT}/lib",
-        # f"-I{NVSHMEM_ROOT}/include",
-        # f"-L{NVSHMEM_ROOT}/lib",
+        f"-I{NCCL_ROOT}/include/",
+        f"-L{NCCL_ROOT}/lib/",
+        #f"-I{MPI_ROOT}/include",
+        #f"-L{MPI_ROOT}/lib",
+        f"-I/home/ubuntu/miniconda3/envs/mirage_sj/include/",
+        f"-L/home/ubuntu/miniconda3/envs/mirage_sj/lib/python3.10/site-packages/mpi4py/",
+        #f"-I{NVSHMEM_ROOT}/include",
+        #f"-L{NVSHMEM_ROOT}/lib",
         f"-I/usr/include/nvshmem_12/",
-        f"-L/usr/lib64/nvshmem/12",
+        f"-L/usr/lib/x86_64-linux-gnu/",
         #f"-I{CUDA_ROOT}/include",
         #f"-L{CUDA_ROOT}/lib64",
         #f"-I/home/hice1/slin468/scratch/nvhpc/Linux_x86_64/25.1/comm_libs/nvshmem/include",
@@ -125,7 +200,7 @@ def get_cc_cmd(target, cc, FILE_NAME, py_include_dir, MIRAGE_ROOT, NCCL_ROOT, MP
         "-std=c++17",
         "-rdc=true",
         "-use_fast_math",
-        # "-lnvshmem",
+        #"-lnvshmem",
         "-lnvshmem_host",
         "-lnvshmem_device", # Two include more than only nvshmem
         "-lcublas",
