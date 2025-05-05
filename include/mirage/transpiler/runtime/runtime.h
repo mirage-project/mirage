@@ -27,6 +27,9 @@ static void _execute_mugraph(std::vector<void const *> input_tensors,
 #include "threadblock/threadblock.h"
 #include "utils.h"
 
+#include "threadblock/amax.h"
+#include "threadblock/type_cast.h"
+
 // Entrypoint for C/C++
 extern "C" void execute_mugraph(std::vector<void const *> input_tensors,
                                 std::vector<void *> output_tensors,

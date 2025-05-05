@@ -17,6 +17,7 @@
 #include "mirage/threadblock/forloop_accum.h"
 #include "mirage/threadblock/operator.h"
 #include "mirage/threadblock/smem_tensor.h"
+#include "mirage/threadblock/type_cast.h"
 #include "mirage/transpiler/common.h"
 #include "mirage/transpiler/structs.h"
 #include "mirage/transpiler/transpiler.h"
@@ -831,7 +832,8 @@ CustomOPTranspileResult
              "Matmul$LayoutC, NUM_THREADS, "
              "$, $, $, $, $, $>;",
              output.guid,
-             get_datatype_str(input0.data_type),
+             get_datatype_str(input0.data_type), // e4m3
+             get_datatype_str(output.data_type), // fp16 or fp32
              is_ldmatrix_avail,
              is_stmatrix_avail,
              output.guid,
@@ -1060,6 +1062,101 @@ CustomOPTranspileResult
             }
           }
 
+          break;
+        }
+        case type::TB_E4M3_CAST_OP: {
+          tb::TBTypeCastOp const *cur_op =
+              dynamic_cast<tb::TBTypeCastOp const *>(op);
+          tb::STensor const &input = cur_op->input_tensors.at(0);
+          tb::STensor const &output = output_op->output_tensors.at(0);
+          assert(input.num_dims == output.num_dims);
+          int num_dims = input.num_dims;
+          // Find the iteration dim
+          int iter_dim = -1;
+
+          // at least one dim exists that fullfill the requirement:
+          // dim i in input&output tensor == meta.innermost_dim or
+          // meta.swizzled_dim
+          for (int i = 0; i < num_dims; ++i) {
+            bool failed = false;
+            for (tb::STensor const &stensor : {input, output}) {
+              STensorMeta meta = stensor_metas.at(stensor.guid);
+              if (i != meta.innermost_dim && meta.swizzled_dim != i) {
+                failed = true;
+                break;
+              }
+            }
+            if (!failed) {
+              iter_dim = i;
+              break;
+            }
+          }
+          assert(iter_dim != -1);
+          // Define layouts
+          string in_layout = mov_last_get_stensor_layout(
+              input, stensor_metas.at(input.guid), iter_dim);
+          string final_out_layout = mov_last_get_stensor_layout(
+              output, stensor_metas.at(output.guid), iter_dim);
+          code.e("using InLayout = $;", in_layout);
+          code.e("using OutLayout = $;", final_out_layout);
+          // Define and run the kernel
+          code.e("using Kernel = tb::TypeCastKernel<$, $,"
+                 "OutLayout, InLayout, "
+                 "NUM_THREADS>;",
+                 get_datatype_str(output.data_type), // e4m3
+                 get_datatype_str(input.data_type)
+                 );
+          code.e("Kernel::run(stensor$_ptr, stensor$_ptr, thread_idx);",
+                 output.guid,
+                 input.guid
+                 );
+          break;
+        }
+        case type::TB_AMAX_OP: {
+          tb::TBTypeCastOp const *cur_op =
+              dynamic_cast<tb::TBTypeCastOp const *>(op);
+          tb::STensor const &input = cur_op->input_tensors.at(0);
+          tb::STensor const &output = output_op->output_tensors.at(0);
+          assert(input.num_dims == output.num_dims);
+          int num_dims = input.num_dims;
+          // Find the iteration dim
+          int iter_dim = -1;
+
+          // at least one dim exists that fullfill the requirement:
+          // dim i in input&output tensor == meta.innermost_dim or
+          // meta.swizzled_dim
+          for (int i = 0; i < num_dims; ++i) {
+            bool failed = false;
+            for (tb::STensor const &stensor : {input, output}) {
+              STensorMeta meta = stensor_metas.at(stensor.guid);
+              if (i != meta.innermost_dim && meta.swizzled_dim != i) {
+                failed = true;
+                break;
+              }
+            }
+            if (!failed) {
+              iter_dim = i;
+              break;
+            }
+          }
+          assert(iter_dim != -1);
+          // Define layouts
+          string in_layout = mov_last_get_stensor_layout(
+              input, stensor_metas.at(input.guid), iter_dim);
+          string final_out_layout = mov_last_get_stensor_layout(
+              output, stensor_metas.at(output.guid), iter_dim);
+          code.e("using InLayout = $;", in_layout);
+          code.e("using OutLayout = $;", final_out_layout);
+          // Define and run the kernel
+          code.e("using Kernel = tb::AmaxKernel<$,"
+                 "OutLayout, InLayout, "
+                 "NUM_THREADS>;",
+                 get_datatype_str(input.data_type)
+                 );
+          code.e("Kernel::run(stensor$_ptr, stensor$_ptr, thread_idx);",
+                 output.guid,
+                 input.guid
+                 );
           break;
         }
         case type::TB_EXP_OP:

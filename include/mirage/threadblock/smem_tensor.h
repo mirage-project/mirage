@@ -120,6 +120,10 @@ struct alignas(16) STensor {
         data_type_size = 1;
         break;
       }
+      case DT_FLOAT8: {
+        data_type_size = 1;
+        break;
+      }
       case DT_BFLOAT16:
       case DT_FLOAT16: {
         data_type_size = 2;

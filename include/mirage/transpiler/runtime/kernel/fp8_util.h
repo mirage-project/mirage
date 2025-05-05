@@ -17,32 +17,6 @@ using namespace cute;
 
 namespace kn {
 
-// template <typename Tout, typename Tin>
-// static __device__ __forceinline__ Tout fp8_cast(Tin a) {
-//   if constexpr (!(std::is_same_v<Tin, cutlass::half_t> ||
-//                   std::is_same_v<Tin, cutlass::bfloat16_t> ||
-//                   std::is_same_v<Tin, float> || std::is_same_v<Tin, __half>)) {
-//     assert(0 && "unsupport input type in kn fp8_rowwise_scaling");
-//   }
-//   if constexpr (!(std::is_same_v<Tout, cutlass::float_e4m3_t> ||
-//                   std::is_same_v<Tout, cutlass::float_e5m2_t>)) {
-//     assert(0 && "unsupport output type in kn fp8_rowwise_scaling");
-//   }
-//   if constexpr (Tout == cutlass::float_e4m3_t) {
-//     if constexpr (std::is_same_v<Tin, cutlass::half_t> || std::is_same_v<Tin, __half>) {
-//       return cutlass::float_e4m3_t::from_half(a);
-//     } else if constexpr (std::is_same_v<Tin, cutlass::bfloat16_t> || std::is_same_v<Tin, float>) {
-//       float fv = float(v);
-//       return cutlass::float_e4m3_t::from_float(a);
-//     } else {
-//       assert(0 && "unsupport datatype in kn fp8_rowwise_scaling");
-//     }
-//   } else if constexpr (Tout == cutlass::float_e5m2_t) {
-//     assert(0 && "e5m2 output type current not implemented!")
-//   }
-
-// }
-
 template <typename Tout, typename Tin>
 static __device__ __forceinline__ Tout fp8_cvt(Tin a, Tin scale) {
   float f = float(a) / float(scale);
@@ -58,9 +32,9 @@ static __device__ __forceinline__ Tout fp8_cvt(Tin a, Tin scale) {
 // 
 template <typename Config> 
 static __global__ void 
-    fp8_rowwise_scale_and_cvt(typename Config::Tout *__restrict__ out, // [B, X, Y]
-                          typename Config::Tin const *__restrict__ in,  // [B, X, Y]
-                          typename Config::Tin const *__restrict__ scale) { // [B, X]
+    fp8_rowwise_scale_and_cvt(typename Config::Tout *__restrict__ out, 
+                          typename Config::Tin const *__restrict__ in,  
+                          typename Config::Tin const *__restrict__ scale) { 
     using T = typename Config::T;
     using Numel = typename Config::Numel;
     auto src_layout = (typename Config::SrcLayout){};

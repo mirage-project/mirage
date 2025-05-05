@@ -41,7 +41,7 @@ std::string get_datatype_str(DataType dtype) {
     case DT_INT4:
       return "int4";
     case DT_FLOAT8:
-      return "float8";
+      return "cutlass::float_e4m3_t"; // "float8";
     case DT_INT8:
       return "int8";
     case DT_BFLOAT16:

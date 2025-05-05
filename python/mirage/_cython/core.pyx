@@ -190,6 +190,10 @@ def get_tb_operator_type_string(int op_type):
         return "tb_output_op"
     elif op_type == TB_MATMUL_OP:
         return "tb_matmul_op"
+    elif op_type == TB_E4M3_CAST_OP:
+        return "tb_e4m3_cast_op"
+    elif op_type == TB_AMAX_OP:
+        return "tb_amax_op"
     elif op_type == TB_EXP_OP:
         return "tb_exp_op"
     elif op_type == TB_SQUARE_OP:
@@ -433,6 +437,13 @@ cdef class STensor:
                 return None
             else:
                 return self.c_ptr.num_dims
+                
+    property shape:
+        def __get__(self):
+            if self.c_ptr == NULL:
+                return None
+            cdef int i, nd = self.c_ptr.num_dims
+            return tuple(self.c_ptr.dim[i] for i in range(nd))
 
     property dtype:
         def __get__(self):
@@ -905,6 +916,16 @@ cdef class CyTBGraph:
         t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
         return STensor(t)
 
+    def tofp8(self, STensor A):
+        cdef CppSTensor* ptr = self.p_bgraph.tofp8(A.c_ptr)
+        t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p) 
+        return STensor(t)
+    
+    def amax(self, STensor A): 
+        cdef CppSTensor* ptr = self.p_bgraph.amax(A.c_ptr)
+        t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
+        return STensor(t)
+
     def exp(self, STensor A):
         cdef CppSTensor* ptr = self.p_bgraph.exp(A.c_ptr)
         t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
@@ -947,6 +968,11 @@ cdef class CyTBGraph:
 
     def mul(self, STensor A, STensor B):
         cdef CppSTensor* ptr = self.p_bgraph.mul(A.c_ptr, B.c_ptr)
+        t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
+        return STensor(t)
+    
+    def mul_scalar(self, STensor A, float scalar):
+        cdef CppSTensor* ptr = self.p_bgraph.mul_scalar(A.c_ptr, scalar)
         t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
         return STensor(t)
 

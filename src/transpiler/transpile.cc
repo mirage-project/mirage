@@ -19,6 +19,8 @@
 #include "mirage/transpiler/transpiler.h"
 #include <cassert>
 
+#include <iostream>
+
 namespace mirage {
 namespace transpiler {
 
@@ -177,6 +179,22 @@ Transpiler::Transpiler(kernel::Graph const *_graph,
               stensor_metas[bop->input_tensors[0].guid].m_input = true;
               break;
             }
+            case type::TB_E4M3_CAST_OP: {
+              assert(stensor_inputs.size() == 1);
+              threadblock::STensor st =
+                  tbg->tofp8(stensor_inputs[0]);
+              assert(bop->output_tensors.size() == 1);
+              stensor_mapping[bop->output_tensors[0].guid] = st;
+              break;
+            }
+            case type::TB_AMAX_OP: {
+              assert(stensor_inputs.size() == 1);
+              threadblock::STensor st =
+                  tbg->amax(stensor_inputs[0]);
+              assert(bop->output_tensors.size() == 1);
+              stensor_mapping[bop->output_tensors[0].guid] = st;
+              break;
+            }
             case TB_EXP_OP:
             case TB_SQUARE_OP:
             case TB_SQRT_OP:
@@ -259,6 +277,7 @@ Transpiler::Transpiler(kernel::Graph const *_graph,
               break;
             }
             default: {
+              std::cout << "What is this tb op?! " << bop->op_type << std::endl;
               assert(false && "Unsupported tb operator");
             }
           }

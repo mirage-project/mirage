@@ -26,6 +26,7 @@ using namespace cute;
 namespace tb {
 
 template <typename T,
+          typename Taccum,
           bool IS_LDMATRIX_AVAIL,
           bool IS_STMATRIX_AVAIL,
           class SmemLayoutA_, // [K, M]
@@ -95,7 +96,8 @@ public:
       cute::GMMA::ss_op_selector<
           T,
           T,
-          std::conditional_t<std::is_same_v<T, cutlass::half_t>, T, float>,
+          // std::conditional_t<std::is_same_v<T, cutlass::half_t>, T, float>,
+          Taccum,
           decltype(make_shape(
               cute::Int<(M::value < 64 ? 64 : M::value)>{}, N{}, K{})),
           GmmaMajorA,
@@ -107,7 +109,7 @@ public:
                 NUM_THREADS * (IS_COORPERATIVE ? 2 : 1));
 
   using R2STiledCopyCSelector =
-      R2STiledCopySelector<T, IS_STMATRIX_AVAIL, SmemLayoutC>;
+      R2STiledCopySelector<Taccum, IS_STMATRIX_AVAIL, SmemLayoutC>;
   using R2STiledCopyCAtom = typename R2STiledCopyCSelector::Result;
   static constexpr R2STiledCopyType R2S_TILED_COPY_C_TYPE =
       R2STiledCopyCSelector::TYPE;
@@ -117,7 +119,7 @@ public:
   static __device__ __forceinline__ auto get_mma_rC(int thread_idx) {
     // Make a fake tensor
 
-    Tensor sC_fake = make_tensor(make_smem_ptr((T *)nullptr), SmemLayoutC{});
+    Tensor sC_fake = make_tensor(make_smem_ptr((Taccum *)nullptr), SmemLayoutC{});
 
     TiledMMA tiled_mma;
     ThrMMA thr_mma = tiled_mma.get_slice(thread_idx % 128);
@@ -130,7 +132,7 @@ public:
 
   template <class AccumRegFrag>
   static __device__ __forceinline__ void write_back_mma_rC(
-      T *__restrict__ c_ptr, AccumRegFrag const &mma_rC, int thread_idx) {
+      Taccum *__restrict__ c_ptr, AccumRegFrag const &mma_rC, int thread_idx) {
     if (thread_idx >= TILED_MMA_NUM_THREADS) {
       return;
     }
@@ -142,7 +144,7 @@ public:
         r2s_tiled_copy_C_thr.retile_S(mma_rC);            // (R2S, R2S_M, R2S_N)
     Tensor r2s_sC = r2s_tiled_copy_C_thr.partition_D(sC); // (R2S, R2S_M, R2S_N)
 
-    r2s_copy_with_oob_protection<T,
+    r2s_copy_with_oob_protection<Taccum,
                                  M,
                                  N,
                                  NUM_EXPS_BEFORE_STORE,
@@ -176,7 +178,7 @@ public:
 
     Tensor sA = make_tensor(make_smem_ptr(a_ptr), sA_l); // [M, K]
     Tensor sB = make_tensor(make_smem_ptr(b_ptr), sB_l); // [N, K]
-
+    
     ThrMMA thr_mma = tiled_mma.get_thread_slice(threadIdx.x);
     Tensor tCsA = thr_mma.partition_A(sA); // (MMA,MMA_M,MMA_K,PIPE)
     Tensor tCsB = thr_mma.partition_B(sB); // (MMA,MMA_N,MMA_K,PIPE)

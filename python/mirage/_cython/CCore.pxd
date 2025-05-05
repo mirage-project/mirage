@@ -95,6 +95,10 @@ cdef extern from "mirage/type.h" namespace "mirage::type":
         TB_INPUT_OP = 2001,
         TB_OUTPUT_OP = 2002,
         TB_MATMUL_OP = 2003,
+        # Type Cast
+        TB_E4M3_CAST_OP = 2004,
+        # Absolute maximum
+        TB_AMAX_OP = 2005,
         # ElementUnary
         TB_EXP_OP = 2100,
         TB_SQUARE_OP = 2101,
@@ -256,6 +260,8 @@ cdef extern from "mirage/threadblock/graph.h" namespace "mirage::threadblock":
                             TBEpilogueType epilogue)
         CppSTensor* matmul(const CppSTensor *A,
                         const CppSTensor *B)
+        CppSTensor* amax(const CppSTensor *A)
+        CppSTensor* tofp8(const CppSTensor *A)
         CppSTensor* exp(const CppSTensor *A)
         CppSTensor* silu(const CppSTensor *A)
         CppSTensor* gelu(const CppSTensor *A)
@@ -267,6 +273,7 @@ cdef extern from "mirage/threadblock/graph.h" namespace "mirage::threadblock":
                      const CppSTensor *B)
         CppSTensor* mul(const CppSTensor *A,
                      const CppSTensor *B)
+        CppSTensor* mul_scalar(const CppSTensor *A, float scalar)
         CppSTensor* div(const CppSTensor *A,
                      const CppSTensor *B)
         CppSTensor* reduction(const CppSTensor *A, int dim)

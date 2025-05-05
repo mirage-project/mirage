@@ -69,6 +69,16 @@ public:
   STensor matmul(STensor const &A, STensor const &B);
   STensor *matmul(STensor const *A, STensor const *B);
   TBOperator *create_matmul_op(STensor const &A, STensor const &B);
+  // type cast operator (for E4M3 quantization)
+  STensor tofp8(STensor const &A);
+  STensor *tofp8(STensor const *A);
+  TBOperator* create_type_cast_op(STensor const &A,
+                               mirage::type::TBOperatorType _type);
+  // absolute maximum operator (for E4M3 quantization)
+  STensor amax(STensor const &A);
+  STensor *amax(STensor const *A);
+  TBOperator *create_amax_op(STensor const &A,
+                               mirage::type::TBOperatorType _type);
   // element unary operator
   STensor exp(STensor const &A);
   STensor *exp(STensor const *A);

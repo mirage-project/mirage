@@ -202,6 +202,9 @@ struct TBMemoryPlan {
   // The start address of each STensor
   std::unordered_map<sguid_t, size_t> addrs;
 
+  // The datatype of each STensor
+  std::unordered_map<sguid_t, mirage::type::DataType> dtypes;
+
   // The size of the shared memory buffer, in bytes
   size_t smem_size;
 

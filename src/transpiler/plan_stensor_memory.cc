@@ -29,6 +29,7 @@ static constexpr size_t ALIGNMENT = 128;
 struct TensorDecl {
   sguid_t sguid;
   size_t phy_size;
+  mirage::type::DataType;
   int alloc_time;
   int free_time;
 };

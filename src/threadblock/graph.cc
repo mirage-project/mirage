@@ -25,6 +25,8 @@
 #include "mirage/threadblock/serializer/rms_norm_serializer.h"
 #include "mirage/utils/hash_utils.h"
 
+// #include <iostream> // delete
+
 namespace mirage {
 namespace threadblock {
 
@@ -100,6 +102,8 @@ size_t Graph::calculate_shared_memory_usage(TBOperator *new_op) {
       case mirage::type::TB_INPUT_OP:
       case mirage::type::TB_OUTPUT_OP:
       case mirage::type::TB_MATMUL_OP:
+      // Amax 
+      case mirage::type::TB_AMAX_OP:
       // Element-wise binary
       case mirage::type::TB_DIV_OP:
       case mirage::type::TB_ADD_OP:
@@ -119,10 +123,13 @@ size_t Graph::calculate_shared_memory_usage(TBOperator *new_op) {
       case mirage::type::TB_CONCAT_1_OP:
       case mirage::type::TB_CONCAT_2_OP: {
         for (size_t i = 0; i < op->output_tensors.size(); i++) {
+          // std::cout << (op->op_type) << " has size: " << op->output_tensors[i].size() << std::endl;
           usage += op->output_tensors[i].size();
         }
         break;
       }
+      // FP8 Type Cast
+      case mirage::type::TB_E4M3_CAST_OP:
       // Element-wise unary
       case mirage::type::TB_EXP_OP:
       case mirage::type::TB_SQUARE_OP:
@@ -145,6 +152,7 @@ size_t Graph::calculate_shared_memory_usage(TBOperator *new_op) {
         // a redue_sum
         assert(op->output_tensors.size() == 1);
         usage += op->output_tensors[0].size();
+        // std::cout << (op->op_type) << " has size: " << op->output_tensors[0].size() << std::endl;
         break;
       }
       case mirage::type::TB_FORLOOP_ACCUM_RED_LD_MEAN_OP: {
@@ -152,6 +160,7 @@ size_t Graph::calculate_shared_memory_usage(TBOperator *new_op) {
         // a reduction
         assert(op->output_tensors.size() == 1);
         usage += op->output_tensors[0].size();
+        // std::cout << (op->op_type) << " has size: " << op->output_tensors[0].size() << std::endl;
         break;
       }
       case mirage::type::TB_FORLOOP_ACCUM_RED_LD_RMS_OP: {
@@ -165,6 +174,7 @@ size_t Graph::calculate_shared_memory_usage(TBOperator *new_op) {
         // size is the same as output_tensors[0]
         assert(op->output_tensors.size() == 1);
         usage += op->output_tensors[0].size();
+        // std::cout << (op->op_type) << " has size: " << op->output_tensors[0].size() << std::endl;
         break;
       }
       case mirage::type::TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP: {
@@ -172,6 +182,7 @@ size_t Graph::calculate_shared_memory_usage(TBOperator *new_op) {
         // a reduuction_to_dimx
         assert(op->output_tensors.size() == 1);
         usage += op->output_tensors[0].size();
+        // std::cout << (op->op_type) << " has size: " << op->output_tensors[0].size() << std::endl;
         break;
       }
       default: {

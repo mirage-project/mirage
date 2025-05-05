@@ -166,6 +166,16 @@ KNCustomizedOp::KNCustomizedOp(mirage::kernel::Graph *_kgraph,
         bgraph.matmul(my_inputs[0], my_inputs[1]);
         break;
       }
+      case mirage::type::TB_E4M3_CAST_OP: {
+        assert(my_inputs.size() == 1);
+        bgraph.tofp8(my_inputs[0]);
+        break;
+      }
+      case mirage::type::TB_AMAX_OP: {
+        assert(my_inputs.size() == 1);
+        bgraph.amax(my_inputs[0]);
+        break;
+      }
       case mirage::type::TB_EXP_OP:
       case mirage::type::TB_SQUARE_OP:
       case mirage::type::TB_SQRT_OP:

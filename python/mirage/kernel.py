@@ -238,7 +238,7 @@ class KNGraph:
     
     def clamp(self, A: DTensor, min_val: float, max_val: float):
         return self.cygraph.clamp(A, min_val, max_val)
-
+    
     def sqrt(self, A: DTensor):
         return self.cygraph.sqrt(A)
 

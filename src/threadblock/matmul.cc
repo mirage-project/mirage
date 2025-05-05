@@ -17,6 +17,8 @@
 #include "mirage/threadblock/graph.h"
 #include "mirage/threadblock/operator.h"
 
+#include <iostream>
+
 namespace mirage {
 namespace threadblock {
 
@@ -66,6 +68,7 @@ TBOperator *Graph::create_matmul_op(STensor const &A, STensor const &B) {
   size_t smem_usage = calculate_shared_memory_usage(op);
   if (smem_usage > mirage::config::MAX_SMEM_SIZE) {
     delete op;
+    std::cout << "matmul op shared memory usage " << smem_usage << " exceeds limits: " << mirage::config::MAX_SMEM_SIZE << std::endl;
     return nullptr;
   } else {
     return op;
@@ -89,7 +92,18 @@ TBMatmulOp::TBMatmulOp(Graph *_graph, STensor const &A, STensor const &B)
     C.dim[i] = A.dim[i];
   }
   C.dim[C.num_dims - 1] = B.dim[C.num_dims - 1];
-  C.data_type = A.data_type;
+  // C.data_type = A.data_type; /// DEBUG: not true for Hopper_Matmul
+  switch(A.data_type) {
+    case mirage::type::DataType::DT_FLOAT8: {
+      C.data_type = mirage::type::DataType::DT_FLOAT16;
+      break;
+    }
+    default: {
+      C.data_type = A.data_type;
+      break;
+    }
+  }
+
   C.owner_op = this;
   C.owner_ts_idx = 0;
   C.guid = STensor::next_guid++;

@@ -43,6 +43,8 @@ enum DataType {
   // range(float types): 930-934
   // range(int types): 935-939
   DT_FLOAT8 = 930,
+  // DT_E4M3 = 930,
+  // DT_E5M2 = 931,
   DT_INT8 = 935,
   // 16-bit types
   // range(float types): 940-944
@@ -156,6 +158,10 @@ enum TBOperatorType {
   TB_INPUT_OP = 2001,
   TB_OUTPUT_OP = 2002,
   TB_MATMUL_OP = 2003,
+  // FP8 type cast
+  TB_E4M3_CAST_OP = 2004,
+  // Amax 
+  TB_AMAX_OP = 2005,
   // ElementUnary
   TB_EXP_OP = 2100,
   TB_SQUARE_OP = 2101,
@@ -214,6 +220,8 @@ NLOHMANN_JSON_SERIALIZE_ENUM(
         {TB_INPUT_OP, "tb_input_op"},
         {TB_OUTPUT_OP, "tb_output_op"},
         {TB_MATMUL_OP, "tb_matmul_op"},
+        {TB_E4M3_CAST_OP, "tb_e4m3_cast_op"},
+        {TB_AMAX_OP, "tb_amax_op"},
         {TB_EXP_OP, "tb_exp_op"},
         {TB_SQUARE_OP, "tb_square_op"},
         {TB_SQRT_OP, "tb_sqrt_op"},

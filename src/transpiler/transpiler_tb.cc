@@ -17,6 +17,8 @@
 #include "mirage/threadblock/forloop_accum.h"
 #include "mirage/threadblock/operator.h"
 #include "mirage/threadblock/smem_tensor.h"
+#include "mirage/threadblock/type_cast.h"
+#include "mirage/threadblock/amax.h"
 #include "mirage/transpiler/common.h"
 #include "mirage/transpiler/structs.h"
 #include "mirage/transpiler/transpiler.h"
@@ -28,6 +30,8 @@
 #include "mirage/transpiler/sched_tb_graph.h"
 #include "mirage/transpiler/utils.h"
 #include "mirage/type.h"
+
+#include <iostream> 
 
 namespace mirage {
 namespace transpiler {
@@ -266,14 +270,18 @@ CustomOPTranspileResult
 
   get_threadblock_swizzle_plan(g, sched);
 
+  // std::cout << "get_threadblock_swizzle_plan no problem!" << std::endl;
   // Get the memory allocation plan
   TBMemoryPlan mem_plan = get_threadblock_memory_plan(g, sched);
 
+  // std::cout << "get_threadblock_memory_plan no problem!" << std::endl;
   // Allocate a kernel name
   static int custom_kernel_idx_counter = 0;
   int cur_custom_kernel_idx = custom_kernel_idx_counter++;
   string func_name = fmt("custom_kernel_$", cur_custom_kernel_idx);
-
+  
+  // std::cout << "custom kernel name no problem!" << std::endl;
+  
   // Generate code prologue
   CodeKeeper code;
   if (profiling) {
@@ -313,7 +321,8 @@ CustomOPTranspileResult
                             dtensor.guid);
                }));
   }
-
+  // std::cout << "Generate code prologue!" << std::endl;
+  
   // Define thread idx
   string thread_idx;
   if (g.block_dim.y > 1 || g.block_dim.z > 1) {
@@ -325,7 +334,9 @@ CustomOPTranspileResult
   }
   code.e("int thread_idx = $;", thread_idx);
   code.e("static constexpr int NUM_THREADS = $;", num_threads);
-
+  
+  // std::cout << "Define thread idx!" << std::endl;
+  
   // Define STensor as cute::Tensor
   code.e("// STensors");
   code.e("extern __shared__ char buf[];");
@@ -339,6 +350,8 @@ CustomOPTranspileResult
   // Erase the lowest 16 bytes to 0 for GEMM
   code.e("*((uint128_t*)buf) = 0ul;");
   code.e("");
+
+  // std::cout << "Erase the lowest 16 bytes to 0 for GEMM!" << std::endl;
 
   // Define G2SCopy for all input STensors
   code.e("// G->S copy atoms");
@@ -444,6 +457,8 @@ CustomOPTranspileResult
     }
   }
   code.e("");
+  
+  // std::cout << "Define G2SCopy for all input STensors!" << std::endl;
 
   // Launch G->S copy atoms for all pre-loop-ops
   int num_pre_loop_copies = 0;
@@ -469,6 +484,8 @@ CustomOPTranspileResult
            cur_op->dtensor.guid);
   }
   code.e("");
+
+  // std::cout << "Launch G->S copy atoms for all pre-loop-ops!" << std::endl;
 
   // Define S2GCopy for all output STensors
   code.e("// S->G copy atoms");
@@ -551,6 +568,8 @@ CustomOPTranspileResult
   }
   code.e("");
 
+  // std::cout << "Define S2GCopy for all output STensors" << std::endl;
+
   // Clear all accumulators
   int num_clear_accums = 0;
   for (TBSchedNode const &node : sched.loop_nodes) {
@@ -577,6 +596,8 @@ CustomOPTranspileResult
     }
   }
   code.e("");
+
+  // std::cout << "Clear all accumulators" << std::endl;
 
   // Pre-define all matmul ops and allocate accumulators (if needed)
   // Since we may want to place the accumulator of a matmul op in register
@@ -729,6 +750,8 @@ CustomOPTranspileResult
                output.guid);
       }
       code.e("");
+
+      // std::cout << "Pre-define all matmul ops and allocate accumulators" << std::endl;
     }
   }
 
@@ -766,6 +789,8 @@ CustomOPTranspileResult
     code.e("");
   }
 
+  // std::cout << "Launch async input operations for all async inputs" << std::endl;
+
   // A lambda function that transpiles a chain of (fusable) operators to an
   // epilogue Will automatically ignore the first operator in the `chain`
   // argument
@@ -779,9 +804,11 @@ CustomOPTranspileResult
       return fmt("tb::EpilogueStore<$>", dtype);
     }
     // Deal with the last operator
+    // std::cout << "transpile_fusion_epilogue begin:" << std::endl;
     string res = fmt("tb::EpilogueStore<$>", dtype);
     for (size_t i = chain_size - 1; i >= 1; --i) {
       tb::TBOperator const *cur_op = chain[i].first;
+      // std::cout << "  " << cur_op->op_type << std::endl;
       if (cur_op->op_type == type::TB_FORLOOP_ACCUM_NO_RED_OP) {
         // Can only occur as the last operator in the chain
         assert(i == chain_size - 1);
@@ -806,6 +833,7 @@ CustomOPTranspileResult
         assert(0 && "Unknown operator type");
       }
     }
+    // std::cout << "transpile_fusion_epilogue done!" << std::endl;
     return res;
   };
 
@@ -830,7 +858,7 @@ CustomOPTranspileResult
                is_in_loop ? "static_cast<uint32_t>(for_idx)"
                           : "static_cast<uint32_t>(0)");
       }
-
+      // std::cout << "transpile_tb_sched_node begin:" << op->op_type << std::endl;
       switch (op->op_type) {
         case type::TB_INPUT_OP: {
           // In this lambda function we only accept input ops within the for
@@ -914,6 +942,105 @@ CustomOPTranspileResult
                    output_guid,
                    output_guid);
           }
+          break;
+        }
+        case type::TB_E4M3_CAST_OP: {
+          tb::TBTypeCastOp const *cur_op =
+              dynamic_cast<tb::TBTypeCastOp const *>(op);
+          tb::STensor const &input = cur_op->input_tensors.at(0);
+          tb::STensor const &output = output_op->output_tensors.at(0);
+          assert(input.num_dims == output.num_dims);
+          int num_dims = input.num_dims;
+          // Find the iteration dim
+          int iter_dim = -1;
+
+          // at least one dim exists that fullfill the requirement:
+          // dim i in input&output tensor == meta.innermost_dim or
+          // meta.swizzled_dim
+          for (int i = 0; i < num_dims; ++i) {
+            bool failed = false;
+            for (tb::STensor const &stensor : {input, output}) {
+              STensorMeta meta = stensor_metas.at(stensor.guid);
+              if (i != meta.innermost_dim && meta.swizzled_dim != i) {
+                failed = true;
+                break;
+              }
+            }
+            if (!failed) {
+              iter_dim = i;
+              break;
+            }
+          }
+          assert(iter_dim != -1);
+          // Define layouts
+          string in_layout = mov_last_get_stensor_layout(
+              input, stensor_metas.at(input.guid), iter_dim);
+          string final_out_layout = mov_last_get_stensor_layout(
+              output, stensor_metas.at(output.guid), iter_dim);
+          code.e("using InLayout = $;", in_layout);
+          code.e("using OutLayout = $;", final_out_layout);
+          // Define and run the kernel
+          code.e("using Kernel = tb::TypeCastKernel<$, $,"
+                 "OutLayout, InLayout, "
+                 "NUM_THREADS>;",
+                 get_datatype_str(output.data_type), // e4m3
+                 get_datatype_str(input.data_type)
+                 );
+          code.e("Kernel::run(stensor$_ptr, stensor$_ptr, thread_idx);",
+                 output.guid,
+                 input.guid
+                 );
+          break;
+        }
+        case type::TB_AMAX_OP: {
+          tb::TBAmaxOp const *cur_op =
+              dynamic_cast<tb::TBAmaxOp const *>(op);
+          assert(cur_op && "cur_op is null");
+          tb::STensor const &input = cur_op->input_tensors.at(0);
+          tb::STensor const &output = output_op->output_tensors.at(0);
+          assert(input.num_dims == output.num_dims);
+          int num_dims = input.num_dims;
+          // Find the iteration dim
+          int iter_dim = -1;
+
+          // at least one dim exists that fullfill the requirement:
+          // dim i in input&output tensor == meta.innermost_dim or
+          // meta.swizzled_dim
+          for (int i = 0; i < num_dims; ++i) {
+            bool failed = false;
+            for (tb::STensor const &stensor : {input, output}) {
+              STensorMeta meta = stensor_metas.at(stensor.guid);
+              // std::cout << "  tb_amax_op code gen: stensor guid (" << stensor.guid << ") in stensor_metas"<< std::endl;
+              if (i != meta.innermost_dim && meta.swizzled_dim != i) {
+                failed = true;
+                break;
+              }
+            }
+            if (!failed) {
+              iter_dim = i;
+              break;
+            }
+          }
+          assert(iter_dim != -1);
+          // std::cout << "  tb_amax_op code gen: iter_dim = " << iter_dim << std::endl;
+          // Define layouts
+          string in_layout = mov_last_get_stensor_layout(
+              input, stensor_metas.at(input.guid), iter_dim);
+          string final_out_layout = mov_last_get_stensor_layout(
+              output, stensor_metas.at(output.guid), iter_dim);
+          code.e("using InLayout = $;", in_layout);
+          code.e("using OutLayout = $;", final_out_layout);
+          // Define and run the kernel
+          code.e("using Kernel = tb::AmaxKernel<$,"
+                 "OutLayout, InLayout, "
+                 "NUM_THREADS>;",
+                 get_datatype_str(input.data_type)
+                 );
+          code.e("Kernel::run(stensor$_ptr, stensor$_ptr, thread_idx);",
+                 output.guid,
+                 input.guid
+                 );
+          // std::cout << "  tb_amax code gen finished!" << std::endl;
           break;
         }
         case type::TB_EXP_OP:
@@ -1175,6 +1302,7 @@ CustomOPTranspileResult
                           : "static_cast<uint32_t>(0)");
       }
       code.e("}");
+      // std::cout << "transpile_tb_sched_node done!" << std::endl;
     }
     return CUDA_T_SUCCESS;
   };
@@ -1253,6 +1381,9 @@ CustomOPTranspileResult
   code.e("}"); // For loop
   code.e("");
 
+  // std::cout << "Declare the main for loop" << std::endl;
+
+
   // Write back in-register accumulators
   int num_in_reg_accums = 0;
   CodeKeeper in_reg_writeback;
@@ -1281,6 +1412,8 @@ CustomOPTranspileResult
     code << in_reg_writeback;
   }
 
+  // std::cout << "Write back in-register accumulators" << std::endl;
+
   // Transpile the epilogue of the kernel
   if (!sched.post_loop_nodes.empty()) {
     code.e("// The epilogue (kernels outside the loop)");
@@ -1296,6 +1429,8 @@ CustomOPTranspileResult
   }
 
   code.e("}"); // kernel
+
+  // std::cout << "Transpile the epilogue of the kernel" << std::endl;
 
   return CustomOPTranspileResult{CUDA_T_SUCCESS,
                                  func_name,
