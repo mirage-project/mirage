@@ -155,6 +155,8 @@ if __name__ == '__main__':
     print(f"Mirage MHA: {mi_throughput:.1f} tokens/s")
 
 
+# RESULTS FROM G6E.XLARGE
+
 # Config: B=1, S=128, H=8, D=64, TotalTok=128
 
 # == TE Multi-Head Attention ==
@@ -193,4 +195,46 @@ if __name__ == '__main__':
 # == Summary ==
 # TE MHA:     803135.4 tokens/s
 # Mirage MHA: 4288164.6 tokens/s
+
+
+
+# FP8 RUN
+# Config: B=1, S=128, H=8, D=64, TotalTok=128
+
+# == TE Multi-Head Attention ==
+# TE MHA Avg latency: 0.167 ms | Throughput: 767814.7 tokens/s
+
+# == Mirage Multi-Head Attention ==
+# ========== Search Configuration ==========
+#   max num threadblock graph op: 9
+#   max num kernel_graph op: 7
+#   max num threadblock graphs: 1
+#   max num threadblock graph inputs: 3
+#   max num threadblock graph outputs: 2
+#   search_thread: 8
+#   imaps to explore:
+#   imap combs to explore:
+#   omaps to explore:
+#   grid dims to explore:
+#   block dims to explore:
+#   fmaps to explore:
+#   franges to explore:4 16 64
+# [Search] States: 1001, Random tests: 4, Valid mugraphs: 0, Time: 4.822042
+# [Search] First step finished. Time elapsed: 4.822338sec
+# [Search] States: 494301, Random tests: 1732, Valid mugraphs: 5, Time: 372.858656
+# [Search] Second step finished. Time elapsed: 372.866003sec
+# [Search] Total states explored: 494321
+# [Search] Random tests performed: 1732
+# [Serach] Valid kernel graphs explored: 5
+# Transpiling discovered 5 muGraphs ...
+# muGraph 0: profiled performance (ms) = 0.03126681518554687
+# muGraph 1: profiled performance (ms) = 0.031094783782958983
+# muGraph 2: profiled performance (ms) = 0.03166720008850098
+# muGraph 3: profiled performance (ms) = 0.031059072494506835
+# muGraph 4: profiled performance (ms) = 0.028919807434082033
+# Mirage MHA Avg latency: 0.030 ms | Throughput: 4273367.3 tokens/s
+
+# == Summary ==
+# TE MHA:     767814.7 tokens/s
+# Mirage MHA: 4273367.3 tokens/s
 
