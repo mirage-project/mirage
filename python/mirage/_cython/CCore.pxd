@@ -110,7 +110,8 @@ cdef extern from "mirage/type.h" namespace "mirage::type":
         TB_ADD_OP = 2200,
         TB_MUL_OP = 2201,
         TB_DIV_OP = 2202,
-        TB_POW_OP = 2203,
+        TB_SUB_OP = 2203,
+        TB_POW_OP = 2204,
         # Reduction and Normalization
         TB_REDUCTION_FIRST_OP_ID = 2300,
         TB_REDUCTION_0_OP = 2301,
@@ -317,6 +318,7 @@ cdef extern from "mirage/transpiler/transpile.h" namespace "mirage::transpiler":
         int num_producer_wgs;
         int pipeline_stages;
         bool profiling;
+        bool enable_online_softmax;
     ctypedef struct OutputTensorDirective:
         size_t alloc_size
         vector[int] shape

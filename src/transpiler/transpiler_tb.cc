@@ -16,6 +16,7 @@
 #include "mirage/threadblock/element_unary.h"
 #include "mirage/threadblock/forloop_accum.h"
 #include "mirage/threadblock/operator.h"
+#include "mirage/threadblock/reduction.h"
 #include "mirage/threadblock/smem_tensor.h"
 #include "mirage/transpiler/common.h"
 #include "mirage/transpiler/structs.h"
@@ -558,7 +559,8 @@ CustomOPTranspileResult
       continue;
     }
     auto [last_op, last_op_meta] = node.ops.back();
-    if (last_op->op_type == type::TB_FORLOOP_ACCUM_NO_RED_OP &&
+    if ((last_op->op_type == type::TB_FORLOOP_ACCUM_NO_RED_OP ||
+         last_op->op_type == type::TB_FORLOOP_ACCUM_NO_RED_RESCALE_OP) &&
         !last_op_meta.is_accum_in_reg) {
       tb::TBForloopAccumOp const *accum_op =
           dynamic_cast<tb::TBForloopAccumOp const *>(last_op);
@@ -574,6 +576,35 @@ CustomOPTranspileResult
              num_elems,
              accum.guid);
       num_clear_accums += 1;
+    }
+  }
+  code.e("");
+
+  // Initialize all reduction max
+  int num_init_reductions = 0;
+  for (TBSchedNode const &node : sched.loop_nodes) {
+    if (node.type != tb_sched_node_t::OPERATOR) {
+      continue;
+    }
+    auto [last_op, last_op_meta] = node.ops.back();
+    if (last_op->op_type >= type::TB_REDUCTION_0_MAX_OP &&
+        last_op->op_type <= type::TB_REDUCTION_2_MAX_OP) {
+      assert(node.ops.size() == 1); // Should not be fused
+      tb::TBReductionOp const *updated_max_op =
+          dynamic_cast<tb::TBReductionOp const *>(last_op);
+      tb::STensor const &updated_max = updated_max_op->output_tensors.at(0);
+      STensorMeta const &updated_max_meta = stensor_metas.at(updated_max.guid);
+      size_t num_elems = 0;
+      for (int i = 0; i < updated_max.num_dims; ++i) {
+        num_elems = std::max(num_elems,
+                             updated_max.dim[i] * updated_max_meta.strides[i]);
+      }
+      code.e("tb::InitReductionMaxKernel<$, $, "
+             "NUM_THREADS>::run(stensor$_ptr, thread_idx);",
+             get_datatype_str(updated_max.data_type),
+             num_elems,
+             updated_max.guid);
+      num_init_reductions += 1;
     }
   }
   code.e("");
@@ -610,16 +641,44 @@ CustomOPTranspileResult
       int mma_atom_num_threads;
       if (GPU_CC::A100 <= config.target_cc && config.target_cc < GPU_CC::H100) {
         if (k <= 8) {
-          mma_atom_str = input0.data_type == type::DT_FLOAT16
-                             ? "SM80_16x8x8_F16F16F16F16_TN"
-                             : "SM80_16x8x8_F32BF16BF16F32_TN";
+          // mma_atom_str = input0.data_type == type::DT_FLOAT16
+          //                    ? "SM80_16x8x8_F16F16F16F16_TN"
+          //                    : "SM80_16x8x8_F32BF16BF16F32_TN";
+          switch (input0.data_type) {
+            case type::DT_FLOAT16:
+              mma_atom_str = "SM80_16x8x8_F16F16F16F16_TN";
+              break;
+            case type::DT_BFLOAT16:
+              mma_atom_str = "SM80_16x8x8_F32BF16BF16F32_TN";
+              break;
+            case type::DT_FLOAT32:
+              mma_atom_str = "SM80_16x8x8_F32TF32TF32F32_TN";
+              break;
+            default:
+              assert(0 && "Unsupported data type");
+          }
           mma_atom_mnk = {16, 8, 8};
           mma_atom_num_threads = 32;
         } else {
-          mma_atom_str = input0.data_type == type::DT_FLOAT16
-                             ? "SM80_16x8x16_F16F16F16F16_TN"
-                             : "SM80_16x8x16_F32BF16BF16F32_TN";
-          mma_atom_mnk = {16, 8, 16};
+          // mma_atom_str = input0.data_type == type::DT_FLOAT16
+          //                    ? "SM80_16x8x16_F16F16F16F16_TN"
+          //                    : "SM80_16x8x16_F32BF16BF16F32_TN";
+          switch (input0.data_type) {
+            case type::DT_FLOAT16:
+              mma_atom_str = "SM80_16x8x16_F16F16F16F16_TN";
+              mma_atom_mnk = {16, 8, 16};
+              break;
+            case type::DT_BFLOAT16:
+              mma_atom_str = "SM80_16x8x16_F32BF16BF16F32_TN";
+              mma_atom_mnk = {16, 8, 16};
+              break;
+            case type::DT_FLOAT32:
+              mma_atom_str = "SM80_16x8x8_F32TF32TF32F32_TN";
+              mma_atom_mnk = {16, 8, 8};
+              break;
+            default:
+              assert(0 && "Unsupported data type");
+          }
           mma_atom_num_threads = 32;
         }
       } else {
@@ -669,7 +728,9 @@ CustomOPTranspileResult
             return op_and_meta.first->op_type == type::TB_EXP_OP;
           });
       bool is_store_accum =
-          node.ops.back().first->op_type == type::TB_FORLOOP_ACCUM_NO_RED_OP;
+          node.ops.back().first->op_type == type::TB_FORLOOP_ACCUM_NO_RED_OP ||
+          node.ops.back().first->op_type ==
+              type::TB_FORLOOP_ACCUM_NO_RED_RESCALE_OP;
       bool is_accum_in_reg = node.ops.back().second.is_accum_in_reg;
 
       // For threadblock matmul, cute requires 2-d matrices as inputs / outputs,
@@ -732,7 +793,8 @@ CustomOPTranspileResult
     }
   }
 
-  if (num_pre_loop_copies > 0 || num_clear_accums > 0) {
+  if (num_pre_loop_copies > 0 || num_clear_accums > 0 ||
+      num_init_reductions > 0) {
     code.e("__syncthreads();");
     code.e("");
   }
@@ -988,6 +1050,7 @@ CustomOPTranspileResult
           break;
         }
         case type::TB_ADD_OP:
+        case type::TB_SUB_OP:
         case type::TB_MUL_OP:
         case type::TB_DIV_OP:
         case type::TB_POW_OP: {
@@ -1016,6 +1079,7 @@ CustomOPTranspileResult
           assert(iter_dim != -1);
           // Define op type
           string op_type_str = op->op_type == type::TB_ADD_OP   ? "ADD"
+                               : op->op_type == type::TB_SUB_OP ? "SUB"
                                : op->op_type == type::TB_MUL_OP ? "MUL"
                                : op->op_type == type::TB_DIV_OP ? "DIV"
                                : op->op_type == type::TB_POW_OP ? "POW"
@@ -1111,6 +1175,67 @@ CustomOPTranspileResult
               input.guid);
           break;
         }
+        case type::TB_REDUCTION_0_MAX_OP:
+        case type::TB_REDUCTION_1_MAX_OP:
+        case type::TB_REDUCTION_2_MAX_OP: {
+          assert(sched_node.ops.size() == 1); // Should not be fused
+          tb::STensor const &input = op->input_tensors.at(0);
+          tb::STensor const &updated_max = output_op->output_tensors.at(0);
+          tb::STensor const &diff = output_op->output_tensors.at(1);
+          STensorMeta input_meta = stensor_metas.at(input.guid);
+          STensorMeta updated_max_meta = stensor_metas.at(updated_max.guid);
+          STensorMeta diff_meta = stensor_metas.at(diff.guid);
+          assert(input.num_dims == updated_max.num_dims &&
+                 input.num_dims == diff.num_dims);
+          int num_dims = input.num_dims;
+          int reduc_dim = op->op_type - type::TB_REDUCTION_0_MAX_OP;
+          assert(0 <= reduc_dim && reduc_dim < num_dims);
+          // Find the iteration dim
+          int iter_dim = -1;
+          for (int i = 0; i < num_dims; ++i) {
+            if (i == reduc_dim) {
+              continue;
+            }
+            bool failed = false;
+            for (tb::STensor const &stensor : {input, updated_max, diff}) {
+              STensorMeta meta = stensor_metas.at(stensor.guid);
+              if (i != meta.innermost_dim && meta.swizzled_dim != i) {
+                failed = true;
+                break;
+              }
+            }
+            if (!failed) {
+              iter_dim = i;
+              break;
+            }
+          }
+          assert(iter_dim != -1);
+          assert(iter_dim != reduc_dim);
+          // Define layouts
+          string in_layout =
+              mov_last_get_stensor_layout(input, input_meta, iter_dim);
+          string updated_max_layout = mov_last_get_stensor_layout(
+              updated_max, updated_max_meta, iter_dim);
+          string diff_layout =
+              mov_last_get_stensor_layout(diff, diff_meta, iter_dim);
+          int cute_reduc_dim = reduc_dim < iter_dim ? num_dims - 1 - reduc_dim
+                                                    : num_dims - reduc_dim;
+          code.e("using InLayout = $;", in_layout);
+          code.e("using UpdatedMaxLayout = $;", updated_max_layout);
+          code.e("using DiffLayout = $;", diff_layout);
+          // Should not have epilogue
+          // Define and run the kernel
+          code.e("using Kernel = tb::ReductionMaxKernel<$, "
+                 "UpdatedMaxLayout, DiffLayout, InLayout, $, NUM_THREADS>;",
+                 get_datatype_str(input.data_type),
+                 cute_reduc_dim);
+          code.e("Kernel::run(stensor$_ptr, stensor$_ptr, stensor$_ptr, "
+                 "thread_idx);",
+                 updated_max.guid,
+                 diff.guid,
+                 input.guid);
+          break;
+        }
         case type::TB_FORLOOP_ACCUM_NO_RED_OP: {
           assert(sched_node.ops.size() == 1); // Should not be fused
           assert(is_in_loop);
@@ -1147,6 +1272,50 @@ CustomOPTranspileResult
           code.e("Kernel::run(stensor$_ptr, stensor$_ptr, thread_idx);",
                  accum.guid,
                  input.guid);
+          break;
+        }
+        case type::TB_FORLOOP_ACCUM_NO_RED_RESCALE_OP: {
+          assert(sched_node.ops.size() == 1); // Should not be fused
+          assert(is_in_loop);
+          tb::STensor const &input = op->input_tensors.at(0);
+          tb::STensor const &rescale = op->input_tensors.at(1);
+          tb::STensor const &accum = op->output_tensors.at(0);
+          int num_dims = input.num_dims;
+          // Find the iteration dim
+          int iter_dim = -1;
+          for (int i = 0; i < num_dims; ++i) {
+            bool failed = false;
+            for (tb::STensor const &stensor : {input, rescale, accum}) {
+              STensorMeta meta = stensor_metas.at(stensor.guid);
+              if (i != meta.innermost_dim && meta.swizzled_dim != i) {
+                failed = true;
+                break;
+              }
+            }
+            if (!failed) {
+              iter_dim = i;
+              break;
+            }
+          }
+          assert(iter_dim != -1);
+          // Define layouts
+          string in_layout = mov_last_get_stensor_layout(
+              input, stensor_metas.at(input.guid), iter_dim);
+          string rescale_layout = mov_last_get_stensor_layout(
+              rescale, stensor_metas.at(rescale.guid), iter_dim);
+          string accum_layout = mov_last_get_stensor_layout(
+              accum, stensor_metas.at(accum.guid), iter_dim);
+          code.e("using Kernel = tb::ForloopAccumRescaleKernel<$, $, $, $, "
+                 "NUM_THREADS>;",
+                 get_datatype_str(input.data_type),
+                 accum_layout,
+                 in_layout,
+                 rescale_layout);
+          code.e("Kernel::run(stensor$_ptr, stensor$_ptr, stensor$_ptr, "
+                 "thread_idx);",
+                 accum.guid,
+                 input.guid,
+                 rescale.guid);
           break;
         }
         case type::TB_CONCAT_0_OP:
@@ -1261,7 +1430,8 @@ CustomOPTranspileResult
       continue;
     }
     auto [last_op, last_op_meta] = node.ops.back();
-    if (last_op->op_type == type::TB_FORLOOP_ACCUM_NO_RED_OP &&
+    if ((last_op->op_type == type::TB_FORLOOP_ACCUM_NO_RED_OP ||
+         last_op->op_type == type::TB_FORLOOP_ACCUM_NO_RED_RESCALE_OP) &&
         last_op_meta.is_accum_in_reg) {
       tb::TBForloopAccumOp const *accum_op =
           dynamic_cast<tb::TBForloopAccumOp const *>(last_op);
