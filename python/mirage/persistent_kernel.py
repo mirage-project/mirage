@@ -159,6 +159,7 @@ def get_compile_command(target_cc,
 class PersistentKernel:
     def __init__(self, file_path : str, mpi_rank : int, num_workers : int, num_local_schedulers : int, num_remote_schedulers : int, **kwargs):
         self.__finalized__ = False
+        self.mpi_rank = mpi_rank
         MIRAGE_ROOT, INCLUDE_PATH, DEPS_PATH = get_key_paths()
         tempdir_obj = tempfile.TemporaryDirectory()
         tempdir = tempdir_obj.name
@@ -284,7 +285,7 @@ class PersistentKernel:
         self.launch_func()
         if self.profiler_tensor is not None:
             from .profiler_persistent import export_to_perfetto_trace
-            export_to_perfetto_trace(self.profiler_tensor, 'mirage.perfetto-trace')
+            export_to_perfetto_trace(self.profiler_tensor, f'mirage_{self.mpi_rank}.perfetto-trace')
 
     def __del__(self):
         if not self.__finalized__:
