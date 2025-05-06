@@ -74,6 +74,7 @@ private:
   void preprocess(kernel::Graph const &computation_graph);
   bool check_pattern(std::shared_ptr<AbstractExpr> pattern);
   bool verify(kernel::Graph &g);
+  // std::vector<std::string> wrong_results(std::shared_ptr<AbstractExpr> pattern);
 
   void save_results() const;
   double get_elapsed_time_in_sec() const;

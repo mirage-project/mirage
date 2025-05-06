@@ -15,7 +15,7 @@ if __name__ == "__main__":
         #D = graph.mul(D, G)
         O = graph.matmul(D, W)
         graph.mark_output(O)
-        optimized_graph = graph.superoptimize(config="mlp")
+        optimized_graph = graph.superoptimize(config="mlp", is_formal_verified=False)
 
     input_tensors = [
         torch.randn(1, 1, 7168, dtype=torch_dtype, device='cuda:7'),
