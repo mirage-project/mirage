@@ -273,11 +273,11 @@ class InputTMAAsyncCopy_Blackwell {
   using DstMNLayout = DstLayout;
 
   using SmemLayoutAtom =
-      decltype(cutlass::gemm::collective::detail::sm100_smem_selector<   // NEW
+      decltype(cutlass::gemm::collective::detail::sm100_smem_selector<  
                UMajor,
-               T,                                                    // element type
-               decltype(get<0>(DstMNLayout{})),                      // M dim
-               decltype(get<1>(DstMNLayout{}))>());                  // N dim
+               T,                                                   
+               decltype(get<0>(DstMNLayout{})),              
+               decltype(get<1>(DstMNLayout{}))>());     
 
 
   //------------------------------------------------------------------

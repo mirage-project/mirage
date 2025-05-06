@@ -110,36 +110,30 @@ auto get_mma_tC(int thread_idx)
 {
 
 constexpr auto accum_shape = cute::make_shape(
-    cute::make_shape(Int<128>{}, Int<256>{}),  // 👈 [M, N]
-    Int<1>{}                                   //    [Stage]
+    cute::make_shape(Int<128>{}, Int<256>{}), 
+    Int<1>{}                                
 );
   
   using FrgTypeC = UMMA::tmem_frg_1sm<float>;
 
   auto tCtC = FrgTypeC::make(accum_shape);
   
-  // ③ 可选清零（如果你的 TMEM 是 output 累加器，通常要 zero init）
-  // clear(tCtC);
-
   return tCtC;
   
 }
 
 
-/////////////////////////////////////////////////////////////////////////////////
-// ❷ Blackwell: 先用 tcgen05.ld 把累加器从 TMEM 拉到寄存器，再写回全局
-/////////////////////////////////////////////////////////////////////////////////
 template<class TmemAccTensor>
 static __device__ __forceinline__
-void write_back_mma_tC(T * __restrict__ c_ptr,       // 目标 GMEM
-                       TmemAccTensor const& tCtC,        // TMEM 里的累加器
+void write_back_mma_tC(T * __restrict__ c_ptr,      
+                       TmemAccTensor const& tCtC,   
                        int thread_idx)
 {
   TiledMMA tiled_mma;
   ThrMMA   thr_mma = tiled_mma.get_thread_slice(thread_idx % 128);
 
   Tensor dummy_sC = make_tensor(make_smem_ptr((T*)nullptr), SmemLayoutC{});
-  Tensor rC       = thr_mma.partition_fragment_C(dummy_sC);   // Reg tensor
+  Tensor rC       = thr_mma.partition_fragment_C(dummy_sC);  
   clear(rC);
   
   using LdAtom   = SM100_TMEM_LOAD_32dp32b1x;               
@@ -167,11 +161,11 @@ void write_back_mma_tC(T * __restrict__ c_ptr,       // 目标 GMEM
 // a_ptr, b_ptr are from smem, tCtC is from tmem
 template<class TmemAccTensor>
 static __device__ __forceinline__
-void run(TmemAccTensor                 &tCtC,        // ← 现在是 TMEM 句柄
+void run(TmemAccTensor                 &tCtC,      
          T *__restrict__              a_ptr,
          T *__restrict__              b_ptr,
          int                            thread_idx,
-         int                            read_stage)  // 由 pipeline.consumer_wait() 得到
+         int                            read_stage)  
 {
 
   TiledMMA tiled_mma;
@@ -193,27 +187,19 @@ void run(TmemAccTensor                 &tCtC,        // ← 现在是 TMEM 句�
 
   // slice based on cta peer id
   ThrMMA cta_mma      = tiled_mma.get_slice(_0{});
-//   Tensor tCsA         = cta_mma.partition_A(sA);               // (MMA,M,K,stage)
+//   Tensor tCsA         = cta_mma.partition_A(sA);            
 //   Tensor tCsB         = cta_mma.partition_B(sB);
 
   Tensor tCrA         = cta_mma.make_fragment_A(tCsA);
   Tensor tCrB         = cta_mma.make_fragment_B(tCsB);
   
-  //------------------------------------------------------------------
-  // 2. 仅 slice‑leader 线程发射一次 UMMA 指令
-  //------------------------------------------------------------------
-  /* 128‑thread slice 的第 0 号线程觉得自己是 leader */
 
-    // suppose this is selected warp
     gemm(tiled_mma,
-        tCrA(_,_,_, IS_PIPELINE_A ? read_stage : 0),        // 选中当前 SMEM stage
+        tCrA(_,_,_, IS_PIPELINE_A ? read_stage : 0),      
         tCrB(_,_,_, IS_PIPELINE_B ? read_stage : 0),
-        tCtC);                          // 累加进 TMEM
+        tCtC); 
   
 
-  //------------------------------------------------------------------
-  // 3. 所有线程等待本 slice 完结（WG 级 fence）
-  //------------------------------------------------------------------
   cute::warpgroup_commit_batch();
   cute::warpgroup_wait<0>();
 
