@@ -475,9 +475,6 @@ bool KernelGraphGenerator::check_pattern(
   }
 
   for (auto const &final_pattern : computation_graph_output_patterns) {
-    if(pattern->subpattern_to(*final_pattern)!=pattern->egg_subpattern_to(*final_pattern))
-      //log the pattern string in debug.txt
-      printf("egg_subpattern_to failed in %s/n", final_pattern->to_string().c_str());
     if (pattern->subpattern_to(*final_pattern)) {
 
 #pragma omp critical

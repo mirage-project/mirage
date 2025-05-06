@@ -29,7 +29,6 @@ public:
   bool operator==(AbstractExpr const &other) const;
   virtual std::string to_string() const = 0;
   virtual std::string to_egg() const = 0;
-  bool egg_subpattern_to(AbstractExpr const &other) const;
 };
 
 class Var : public AbstractExpr {
@@ -174,7 +173,7 @@ public:
                  std::unordered_set<std::string> &all_variables) const override;
   std::string to_string() const override;
   std::string to_egg() const override;
-  int red_deg_log;
+  int red_deg;
   std::shared_ptr<AbstractExpr> summand;
 };
 

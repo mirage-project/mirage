@@ -6,6 +6,11 @@ except ImportError:
     import z3
     _z3_lib = os.path.join(os.path.dirname(z3.__file__), 'lib')
     os.environ['LD_LIBRARY_PATH'] = f"{_z3_lib}:{os.environ.get('LD_LIBRARY_PATH','LD_LIBRARY_PATH')}"
+
+    rust_path = os.path.join('/'.join(os.path.dirname(__file__).split('/')[:-2]), 'rust_part', 'target', 'release')
+    if not rust_path in os.environ['LD_LIBRARY_PATH']:
+        os.environ['LD_LIBRARY_PATH'] += ':'+rust_path
+
     
     from .core import *
 
