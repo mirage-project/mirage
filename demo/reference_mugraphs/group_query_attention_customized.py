@@ -1,4 +1,5 @@
 import mirage as mi
+import numpy as np
 import torch
 
 if __name__ == "__main__":
@@ -52,8 +53,7 @@ if __name__ == "__main__":
         torch.randn(2, 1024, 64, dtype=torch.float16, device="cuda:0"),
     ]
 
-    # t means torch
-    tQ, tK, tV = [tensor.float() for tensor in input_tensors]
+    tQ, tK, tV = input_tensors
     tA = torch.matmul(tQ, tK)
     row_max = torch.max(tA, dim=-1, keepdim=True)[0]
     tA = tA - row_max
@@ -71,6 +71,24 @@ if __name__ == "__main__":
     )
     print(p["code"])
 
-    outputs = graph(inputs=input_tensors, enable_online_softmax=True)
+    # warm up runs
+    for _ in range(16):
+        outputs = graph(inputs=input_tensors)
+    torch.cuda.synchronize()
+
+    starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(
+        enable_timing=True
+    )
+    repetitions = 1000
+    timings = np.zeros((repetitions, 1))
+    starter.record()
+    for rep in range(repetitions):
+        outputs = graph(inputs=input_tensors)
+    ender.record()
+    torch.cuda.synchronize()
+    curr_time = starter.elapsed_time(ender)
+
+    mean_syn = curr_time / repetitions
+    print(mean_syn)
     print(outputs[0] / tR)
     graph.visualize("group_query_attention_customized")
