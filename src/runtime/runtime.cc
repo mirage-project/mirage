@@ -273,10 +273,9 @@ void Runtime::register_mugraph(
             all_events.push_back(event_desc_1);
             // Step 2: create a task for reduce
             TaskDesc task(TASK_REDUCE);
-            // Create input tensor
-            {
+            for (int i = 0; i < 2; i++) {
               TensorDesc desc;
-              tb::STensor stensor = input_ops[1]->output_tensors[0];
+              tb::STensor stensor = input_ops[i]->output_tensors[0];
               desc.num_dims = stensor.num_dims;
               desc.data_type = stensor.data_type;
               for (int d = stensor.num_dims - 1; d >= 0; d--) {
@@ -285,8 +284,8 @@ void Runtime::register_mugraph(
                     (d == stensor.num_dims - 1)
                         ? 1
                         : desc.stride[d + 1] * input_ops[1]->dtensor.dim[d + 1];
-                task.inputs[task.num_inputs++] = desc;
               }
+              task.inputs[task.num_inputs++] = desc;
             }
             // Create output tensor
             {
@@ -300,8 +299,8 @@ void Runtime::register_mugraph(
                                      ? 1
                                      : desc.stride[d + 1] *
                                            output_ops[0]->dtensor.dim[d + 1];
-                task.inputs[task.num_outputs++] = desc;
               }
+              task.inputs[task.num_outputs++] = desc;
               all_tasks.push_back(task);
               // Update current task map
               cur_task_map[bid] = all_tasks.size() - 1;
@@ -504,6 +503,15 @@ std::string Runtime::print_task_graph(
   using mirage::runtime::IODesc;
   mirage::transpiler::CodeKeeper code;
   code.e("#include \"persistent_kernel.cuh\"");
+  code.e("size_t get_event_id(int my_gpu_id, size_t event_pos, bool nvshmem_event) {");
+  code.e("size_t event_id = ((static_cast<size_t>(my_gpu_id) << 32) | event_pos);");
+  code.e("if (nvshmem_event) {");
+  code.e("event_id = event_id | EVENT_NVSHMEM_TAG;");
+  code.e("}");
+  code.e("return event_id;");
+  code.e("}");
+  code.e("");
+
   code.e(
       "static void _init_persistent_kernel(std::vector<TaskDesc> &all_tasks,");
   code.e(
@@ -591,15 +599,125 @@ std::string Runtime::print_task_graph(
     for (bid.x = 0; bid.x < bgraph.grid_dim.x; bid.x++) {
       for (bid.y = 0; bid.y < bgraph.grid_dim.y; bid.y++) {
         for (bid.z = 0; bid.z < bgraph.grid_dim.z; bid.z++) {
+          // To perform allreduce, we first launch (num_gpus-1) tasks for allgather
+          if (task_type == TASK_ALLREDUCE) {
+            for (int tgt_gpu_id = 0; tgt_gpu_id < num_gpus; tgt_gpu_id++) {
+              if (tgt_gpu_id == my_gpu_id) {
+                continue;
+              }
+              TaskDesc task_desc = all_tasks[task_pos];
+              assert(task_desc.task_type == TASK_NVSHMEM_COPY);
+              code.e("// task[$]", task_pos);
+              code.e("{");
+              code.e("TaskDesc task_desc(static_cast<TaskType>($));",
+                     task_desc.task_type);
+              size_t gpu_offset = ((task_desc.trigger_event >> 32) & 0xffff);
+              size_t event_pos = (task_desc.trigger_event & 0xffffffff);
+              bool is_nvshmem_event = ((task_desc.trigger_event & EVENT_NVSHMEM_TAG) > 0);
+              assert(is_nvshmem_event);
+              code.e("task_desc.trigger_event = get_event_id((my_gpu_id + $) \% num_gpus, $, $);",
+                     gpu_offset, event_pos, is_nvshmem_event);
+              assert(task_desc.num_inputs == 1);
+              assert(task_desc.num_outputs == 1);
+	      code.e("task_desc.num_inputs = $;", task_desc.num_inputs);
+              code.e("task_desc.num_outputs = $;", task_desc.num_outputs);
+              off_t offset = 0;
+              // Add input
+              int3 input_map = input_ops[0]->input_map;
+              IODesc io_desc =
+                  io_configs.find(input_ops[0]->dtensor.guid)->second;
+              if (input_map.x >= 0) {
+                size_t block_size =
+                    io_desc.tensor.dim[input_map.x] / bgraph.grid_dim.x;
+                offset +=
+                    block_size * bid.x * io_desc.tensor.stride[input_map.x];
+              }
+              if (input_map.y >= 0) {
+                size_t block_size =
+                    io_desc.tensor.dim[input_map.y] / bgraph.grid_dim.y;
+                offset +=
+                    block_size * bid.y * io_desc.tensor.stride[input_map.y];
+              }
+              if (input_map.z >= 0) {
+                size_t block_size =
+                    io_desc.tensor.dim[input_map.z] / bgraph.grid_dim.z;
+                offset +=
+                    block_size * bid.z * io_desc.tensor.stride[input_map.z];
+              }
+              code.e("TensorDesc input$;", 0);
+              code.e("input$.base_ptr = static_cast<char*>($) + $;",
+                     0,
+                     io_desc.name,
+                     offset *
+                         type::get_datatype_size(io_desc.tensor.data_type));
+              code.e("input$.num_dims = $;", 0, task_desc.inputs[0].num_dims);
+              code.e("input$.data_type = $;", 0, task_desc.inputs[0].data_type);
+              for (int d = 0; d < task_desc.inputs[0].num_dims; d++) {
+                code.e("input$.dim[$] = $;", 0, d, task_desc.inputs[0].dim[d]);
+                code.e("input$.stride[$] = $;",
+                       0,
+                       d,
+                       task_desc.inputs[0].stride[d]);
+              }
+              code.e("task_desc.inputs[$] = input$;", 0, 0);
+              // Add nvshmem_copy output
+              // Note that nvshmem_copy's output is stored in input_ops[1]
+              offset = tgt_gpu_id * input_ops[0]->dtensor.data_size();
+              int3 output_map = input_ops[1]->input_map;
+              io_desc = io_configs.find(input_ops[1]->dtensor.guid)->second;
+              if (output_map.x >= 0) {
+                size_t block_size =
+                    io_desc.tensor.dim[output_map.x] / bgraph.grid_dim.x;
+                offset +=
+                    block_size * bid.x * io_desc.tensor.stride[output_map.x];
+              }
+              if (output_map.y >= 0) {
+                size_t block_size =
+                    io_desc.tensor.dim[output_map.y] / bgraph.grid_dim.y;
+                offset +=
+                    block_size * bid.y * io_desc.tensor.stride[output_map.y];
+              }
+              if (output_map.z >= 0) {
+                size_t block_size =
+                    io_desc.tensor.dim[output_map.z] / bgraph.grid_dim.z;
+                offset +=
+                    block_size * bid.z * io_desc.tensor.stride[output_map.z];
+              }
+              code.e("TensorDesc output$;", 0);
+              code.e("output$.base_ptr = static_cast<char*>($) + $;",
+                     0,
+                     io_desc.name,
+                     offset * type::get_datatype_size(io_desc.tensor.data_type));
+              code.e("output$.num_dims = $;", 0, task_desc.outputs[0].num_dims);
+              code.e("output$.data_type = $;", 0, task_desc.outputs[0].data_type);
+              for (int d = 0; d < task_desc.outputs[0].num_dims; d++) {
+                code.e("output$.dim[$] = $;", 0, d, task_desc.outputs[0].dim[d]);
+                code.e("output$.stride[$] = $;",
+                       0,
+                       d,
+                       task_desc.outputs[0].stride[d]);
+              }
+              code.e("task_desc.outputs[$] = output$;", 0, 0);
+              code.e("all_tasks.push_back(task_desc);");
+              code.e("}");
+              task_pos ++;
+            }
+          }
           TaskId task_id = task_map.at(bid);
           TaskDesc task_desc = all_tasks[task_pos];
-          assert(task_desc.task_type == task_type);
+          assert(task_desc.task_type == task_type || task_type == TASK_ALLREDUCE);
           assert(task_pos == (task_id & 0xffffffff));
           code.e("// task[$]", task_pos);
           code.e("{");
           code.e("TaskDesc task_desc(static_cast<TaskType>($));",
                  task_desc.task_type);
-          code.e("task_desc.trigger_event = $;", task_desc.trigger_event);
+          size_t gpu_offset = ((task_desc.trigger_event >> 32) & 0xffff);
+          size_t event_pos = (task_desc.trigger_event & 0xffffffff);
+          bool is_nvshmem_event = ((task_desc.trigger_event & EVENT_NVSHMEM_TAG) > 0);
+          assert(gpu_offset == 0);
+          assert(!is_nvshmem_event);
+          code.e("task_desc.trigger_event = get_event_id(my_gpu_id, $, $);",
+                 event_pos, is_nvshmem_event);
 	  code.e("task_desc.num_inputs = $;", task_desc.num_inputs);
 	  code.e("task_desc.num_outputs = $;", task_desc.num_outputs);
           for (int i = 0; i < task_desc.num_inputs; i++) {

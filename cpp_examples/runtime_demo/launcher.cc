@@ -17,6 +17,7 @@ int main(int argc, char **argv) {
   MPI_Comm_size(MPI_COMM_WORLD, &world_size);
   int rank;
   MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+  world_size = 4;
 
   namespace tb = mirage::threadblock;
   namespace kn = mirage::kernel;
@@ -44,8 +45,8 @@ int main(int argc, char **argv) {
   io_configs.emplace(X.guid, IODesc(rt::IODesc::TorchTensor, "input_token", X));
 
   kn::DTensor AllReduceBuf =
-      kgraph.new_input({batch_size, world_size, hidden_size},
-                       {hidden_size * world_size, hidden_size, 1},
+      kgraph.new_input({world_size, batch_size, hidden_size},
+                       {hidden_size * batch_size, hidden_size, 1},
                        type::DT_BFLOAT16,
                        layout::DmemRowMajor);
   io_configs.emplace(

@@ -38,9 +38,9 @@ struct EventDesc {
         last_task_id(TASK_INVALID_ID) {}
   EventDesc(EventType type, int nt, TaskId f, TaskId l)
       : event_type(type), num_triggers(nt), first_task_id(f), last_task_id(l) {}
-  TaskId first_task_id, last_task_id;
-  int num_triggers;
   EventType event_type;
+  int num_triggers;
+  TaskId first_task_id, last_task_id;
 };
 
 struct TaskDesc {
