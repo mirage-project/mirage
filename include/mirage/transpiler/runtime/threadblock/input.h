@@ -16,6 +16,8 @@
 
 #include "cute/arch/cluster_sm90.hpp"
 #include "cutlass/gemm/collective/builders/sm90_common.inl"
+#include "cute/arch/cluster_sm100.hpp"                        
+#include "cutlass/gemm/collective/builders/sm100_common.inl"
 #include "cutlass/gemm/gemm.h"
 #include "cutlass/pipeline/pipeline.hpp"
 #include <cstdint>
@@ -219,7 +221,7 @@ public:
                                              int imapz_a,
                                              int k_tile_iter,
                                              HopperAsyncPipeline &pipeline) {
-    if (lane_id() == 0) {
+    // if (lane_id() == 0) {
       Tensor mA = tma_a.get_tma_tensor(shape(SrcLayout{}));
       // （CTA_M, CTA_K, X, Y, Z, FORLOOP）
       auto blkCoordA = make_coord_runtime<decltype(rank(SrcLayout{}))::value>(
@@ -246,7 +248,131 @@ public:
            tAgAX(_, k_tile_iter),
            tAsAX(_, write_stage));
       pipeline.producer_advance();
+    // }
+  }
+};
+
+// Blackwell
+ template <typename  T,
+          class     DstLayout,
+          class     SrcLayout,
+          class     TMA,                     // Created by cutlass::MakeTmaCopy(...)
+          class     BlackwellAsyncPipeline,  // Your own pipeline (see note ❸)
+          bool      MInput,
+          int       K_ITER>
+class InputTMAAsyncCopy_Blackwell {
+
+  //------------------------------------------------------------------
+  // ① Thread block tile shape (MN direction) - same logic as SM90
+  //------------------------------------------------------------------
+  using CTA_TILER = decltype(make_shape(shape<0>(DstLayout{}),
+                                        shape<1>(DstLayout{})));
+
+  static constexpr cute::UMMA::Major UMajor = UMMA::Major::MN;
+
+  using DstMNLayout = DstLayout;
+
+  using SmemLayoutAtom =
+      decltype(cutlass::gemm::collective::detail::sm100_smem_selector<   // NEW
+               UMajor,
+               T,                                                    // element type
+               decltype(get<0>(DstMNLayout{})),                      // M dim
+               decltype(get<1>(DstMNLayout{}))>());                  // N dim
+
+
+  //------------------------------------------------------------------
+  // ③ Shared-Memory Pipeline layout: (A,B,X,Y,Z,Stage)
+  //------------------------------------------------------------------
+  using DstPipeLayout =
+      decltype(tile_to_shape(
+          SmemLayoutAtom{},
+          make_shape(shape<0>(DstMNLayout{}),    // tile-M
+                     shape<1>(DstMNLayout{}),    // tile-N
+                     Int<BlackwellAsyncPipeline::Stage>{})));
+
+  //------------------------------------------------------------------
+  // ④ Single TMA transaction bytes (for set_barrier_transaction_bytes)
+  //------------------------------------------------------------------
+  static constexpr int kTmaBytes =
+      sizeof(T) * size(DstPipeLayout{}) / BlackwellAsyncPipeline::Stage;
+
+public:
+  //------------------------------------------------------------------
+  // ⑤ Prefetch Descriptor - interface same as Hopper
+  //------------------------------------------------------------------
+  static __device__ __forceinline__
+  void prefetch(TMA const &tma) {
+    cute::prefetch_tma_descriptor(tma.get_tma_descriptor());
+  }
+
+  //------------------------------------------------------------------
+  // ⑥ Runtime GMEM block coordinate construction (keeping original logic)
+  //------------------------------------------------------------------
+  template <int Rank>
+  static __device__ auto make_coord_runtime(int imapx, int imapy, int imapz) {
+    if constexpr (Rank == 6) {
+      return make_coord(_,
+                        _,
+                        imapx >= 0 ? blockIdx.x : 0,
+                        imapy >= 0 ? blockIdx.y : 0,
+                        imapz >= 0 ? blockIdx.z : 0,
+                        _);
+    } else if constexpr (Rank == 7) {
+      return make_coord(_,
+                        _,
+                        _,
+                        imapx >= 0 ? blockIdx.x : 0,
+                        imapy >= 0 ? blockIdx.y : 0,
+                        imapz >= 0 ? blockIdx.z : 0,
+                        _);
+    } else {
+      static_assert(Rank == 6 || Rank == 7, "Unsupported SrcLayout rank");
     }
+  }
+
+  //------------------------------------------------------------------
+  // ⑦ Main entry: Initiate a TMA read in Lane-0 thread
+  //------------------------------------------------------------------
+  static __device__ __forceinline__
+  void run(TMA              const &tma_a,
+           T*                      dst_smem,     // SMEM destination address
+           int                     imapx,
+           int                     imapy,
+           int                     imapz,
+           int                     k_iter,
+           BlackwellAsyncPipeline &pipeline) {   // NEW pipeline
+
+    // if (lane_id() == 0) {
+      // --- (a) Get GMEM tensor view ----------------------------
+      Tensor gA_all = tma_a.get_tma_tensor(shape(SrcLayout{}));
+
+      // --- (b) Current CTA/Cluster block coordinates -----------
+      auto blkCoordA = make_coord_runtime<rank(SrcLayout{})>(imapx, imapy, imapz);
+      Tensor gA      = gA_all(blkCoordA);
+
+      // --- (c) Build SMEM tensor view (with pipeline stage dimension) ---
+      Tensor sA = make_tensor(make_smem_ptr(dst_smem), DstPipeLayout{});
+
+      // --- (d) partition_S/partition_D same as Hopper ----------
+      auto cta_tma_a = tma_a.get_slice(Int<0>{});   // CTA slice
+      Tensor tAgA = cta_tma_a.partition_S(gA);      // Src per-stage
+      Tensor tAsA = cta_tma_a.partition_D(sA);      // Dst per-stage
+      Tensor tAgAX = group_modes<0, rank(tAgA)-1>(tAgA);
+      Tensor tAsAX = group_modes<0, rank(tAsA)-1>(tAsA);
+
+      // --- (e) Get barrier + stage through pipeline ------------
+      auto [tma_barrier, write_stage] = pipeline.producer_acquire();
+      // Set transaction bytes (helper provided by Blackwell CUTLASS)
+      cute::set_barrier_transaction_bytes(*tma_barrier, kTmaBytes);
+
+      // --- (f) Initiate TMA copy ------------------------------
+      copy(tma_a.with(*tma_barrier),            // Descriptor with barrier
+           tAgAX(_, k_iter),                    // Source: k_iter K-tile
+           tAsAX(_, write_stage));              // Destination: current write stage
+
+      // --- (g) Advance pipeline for next copy -----------------
+      pipeline.producer_advance();
+    // }
   }
 };
 

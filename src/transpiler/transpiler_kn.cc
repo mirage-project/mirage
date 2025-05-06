@@ -158,6 +158,9 @@ TranspileResult Transpiler::transpile_ugraph() {
   header.e("#define USE_NVSHMEM $", use_nvshmem);
   if (config.target_cc == GPU_CC::H100) {
     header.e("#define MIRAGE_GRACE_HOPPER");
+  } 
+  else if (config.target_cc == GPU_CC::B200) {
+    header.e("#define MIRAGE_BLACKWELL");
   }
   header.e("#include \"runtime.h\"");
   header.e("using namespace cute;");
@@ -169,6 +172,7 @@ TranspileResult Transpiler::transpile_ugraph() {
   CodeKeeper exec; // This keeps all code in the `_execute_mugraph` function
 
   CodeKeeper hopper_tma;
+  CodeKeeper blackwell_tma;
 
   init.e("static void _init() {");
   exec.e(
@@ -461,6 +465,9 @@ TranspileResult Transpiler::transpile_ugraph() {
           result = transpile_kn_custom_op_hopper(cur_op);
           // only generate for first tb graph now
           config.profiling = false;
+        } else if (config.target_cc == GPU_CC::B200) {
+          result = transpile_kn_custom_op_blackwell(cur_op);
+          config.profiling = false;
         } else {
           result = transpile_kn_custom_op(cur_op);
           config.profiling = false;
@@ -477,7 +484,7 @@ TranspileResult Transpiler::transpile_ugraph() {
         profiler_buf_size += result.profiler_buf_size;
 
         // Checkings against grid dim and block dim
-        if (config.target_cc <= GPU_CC::H100) {
+        if (config.target_cc <= GPU_CC::B200) {
           // According to
           // https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#features-and-technical-specifications,
           // all GPUs up to H100 have the same restriction
@@ -543,13 +550,29 @@ TranspileResult Transpiler::transpile_ugraph() {
             auto const &tmaParams = result.tmaParamsList.at(i);
 
             if (tmaParams.m_input) {
-              exec.e(fmt("static constexpr cute::GMMA::Major GmmaMajor_$ = "
-                         "GMMA::Major::K;",
-                         tmaParams.guid));
+              if (config.target_cc == GPU_CC::H100) {
+                exec.e(fmt("static constexpr cute::GMMA::Major GmmaMajor_$ = "
+                          "GMMA::Major::K;",
+                          tmaParams.guid));
+              } else if (config.target_cc == GPU_CC::B200) {
+                exec.e(fmt("static constexpr cute::GMMA::Major GMMAMajor_$ = "
+                           "GMMA::Major::K;",
+                           tmaParams.guid));
+              } else {
+                assert(false && "Unsupported GPU architecture");
+              }
             } else {
-              exec.e(fmt("static constexpr cute::GMMA::Major GmmaMajor_$ = "
-                         "GMMA::Major::MN;",
-                         tmaParams.guid));
+              if (config.target_cc == GPU_CC::H100) {
+                exec.e(fmt("static constexpr cute::GMMA::Major GmmaMajor_$ = "
+                           "GMMA::Major::MN;",
+                           tmaParams.guid));
+              } else if (config.target_cc == GPU_CC::B200) {
+                exec.e(fmt("static constexpr cute::GMMA::Major GMMAMajor_$ = "
+                           "GMMA::Major::MN;",
+                           tmaParams.guid));
+              } else {
+                assert(false && "Unsupported GPU architecture");
+              }
             }
             exec.e(fmt("using DstMNKLayout_$ = $;",
                        tmaParams.guid,
@@ -559,6 +582,7 @@ TranspileResult Transpiler::transpile_ugraph() {
                        tmaParams.guid,
                        tmaParams.srcLayout));
 
+            if (config.target_cc == GPU_CC::H100){
             exec.e(fmt(
                 "using SmemLayoutAtom_$ = "
                 "decltype(cutlass::gemm::collective::detail::ss_smem_selector<"
@@ -569,6 +593,18 @@ TranspileResult Transpiler::transpile_ugraph() {
                 get_datatype_str(cur_op->input_tensors[0].data_type),
                 tmaParams.guid,
                 tmaParams.guid));
+            } else if (config.target_cc == GPU_CC::B200) {
+              exec.e(fmt(
+                  "using SmemLayoutAtom_$ = "
+                  "decltype(cutlass::gemm::collective::detail::ss_smem_selector<"
+                  "GMMAMajor_$, $, decltype(get<0>(DstMNKLayout_${})), "
+                  "decltype(get<1>(DstMNKLayout_${}))>());",
+                  tmaParams.guid,
+                  tmaParams.guid,
+                  get_datatype_str(cur_op->input_tensors[0].data_type),
+                  tmaParams.guid,
+                  tmaParams.guid));
+            } 
             exec.e(fmt("using DstPipeLayout_$ = "
                        "decltype(tile_to_shape(SmemLayoutAtom_${}, "
                        "make_shape(shape<0>(DstMNKLayout_${}), "
@@ -586,12 +622,23 @@ TranspileResult Transpiler::transpile_ugraph() {
                        get_datatype_str(cur_op->input_tensors[0].data_type),
                        tmaParams.guid,
                        tmaParams.guid));
-            exec.e(
-                fmt("auto tma_$ = make_tma_copy(SM90_TMA_LOAD{}, g_tensor_$, "
-                    "DstPipeLayout_${}(_, _, Int<0>{}));",
-                    tmaParams.guid,
-                    tmaParams.guid,
-                    tmaParams.guid));
+            if (config.target_cc == GPU_CC::H100) {
+              exec.e(
+                  fmt("auto tma_$ = make_tma_copy(SM90_TMA_LOAD{}, g_tensor_$, "
+                      "DstPipeLayout_${}(_, _, Int<0>{}));",
+                      tmaParams.guid,
+                      tmaParams.guid,
+                      tmaParams.guid));
+            } else if (config.target_cc == GPU_CC::B200) {
+              exec.e(
+                  fmt("auto tma_$ = make_tma_copy(SM90_TMA_LOAD{}, g_tensor_$, "
+                      "DstPipeLayout_${}(_, _, Int<0>{}));",
+                      tmaParams.guid,
+                      tmaParams.guid,
+                      tmaParams.guid));
+            } else {
+              assert(false && "Unsupported GPU architecture");
+            }
 
             exec.e("");
           }
@@ -641,7 +688,8 @@ TranspileResult Transpiler::transpile_ugraph() {
                     header.to_string(),
                     custom_kernels.to_string(),
                     init.to_string(),
-                    hopper_tma.to_string(),
+                    config.target_cc == GPU_CC::H100 ? hopper_tma.to_string() : 
+                    (config.target_cc == GPU_CC::B200 ? blackwell_tma.to_string() : ""),
                     exec.to_string());
   vector<OutputTensorDirective> output_directives;
   for (kn::DTensor const &dtensor : this->mugraph_output_tensors) {

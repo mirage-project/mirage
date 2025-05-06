@@ -29,6 +29,7 @@
 #include "mirage/transpiler/utils.h"
 #include "mirage/type.h"
 
+// #include "cutlass/gemm/collective/builders/sm100_common.inl" // 修改为 b200
 
 namespace mirage {
 namespace transpiler {
@@ -37,6 +38,7 @@ using std::string;
 namespace kn = mirage::kernel;
 namespace tb = mirage::threadblock;
 
+// 复用 get_layout_detail 命名空间
 namespace get_layout_detail {
 
 // Get a CuTe layout from dims and strides
@@ -123,9 +125,12 @@ static string get_stensor_layout(tb::STensor const &stensor,
       // XOR-based swizzling
       return fmt(
           "decltype(composition(Swizzle<$, $, $>{}, ${}))",
-          meta.xor_swizzle_b,
-          meta.xor_swizzle_m,
-          meta.xor_swizzle_s,
+          // meta.xor_swizzle_b,
+          // meta.xor_swizzle_m,
+          // meta.xor_swizzle_s,
+          3,
+          3,
+          4,
           get_layout_detail::get_swap_01_layout(stensor, meta, start_dim));
     }
   }
@@ -137,9 +142,12 @@ static string get_stensor_layout(tb::STensor const &stensor,
     return get_layout_detail::get_cute_layout(stensor, meta, start_dim);
   } else {
     return fmt("decltype(composition(Swizzle<$, $, $>{}, ${}))",
-               meta.xor_swizzle_b,
-               meta.xor_swizzle_m,
-               meta.xor_swizzle_s,
+              //  meta.xor_swizzle_b,
+              //  meta.xor_swizzle_m,
+              //  meta.xor_swizzle_s,
+              3,
+              3,
+              4,
                get_layout_detail::get_cute_layout(stensor, meta, start_dim));
   }
 }
@@ -201,7 +209,6 @@ static auto mov_last_get_stensor_shape_stride(tb::STensor const &stensor,
   return {vector<int>(new_stensor.dim, new_stensor.dim + new_stensor.num_dims),
           vector<size_t>(new_meta.strides,
                          new_meta.strides + new_stensor.num_dims)};
-  // return get_stensor_layout(new_stensor, new_meta, swap01);
 }
 
 // Get the layout of a DTensor tile for input/output operators
@@ -281,7 +288,7 @@ static std::pair<bool, std::vector<int64_t>>
   for (int i = 0; i < op->input_tensors.size(); i++) {
     int64_t input_id = op->input_tensors.at(i).guid;
     if (pipeline_inputs.find(input_id) != pipeline_inputs.end()) {
-      code.e("int read_idx_$ = hopper_async_pipeline_$.consumer_wait();",
+      code.e("int read_idx_$ = blackwell_async_pipeline_$.consumer_wait();", // 修改为 blackwell
              input_id,
              input_id);
       // only wait once
@@ -301,7 +308,7 @@ static std::pair<bool, std::vector<int64_t>>
 // Will return a CustomOPTranspileResult object. See comments in transpiler.h
 // for more details
 CustomOPTranspileResult
-    Transpiler::transpile_kn_custom_op_hopper(kn::KNCustomizedOp const *op) {
+    Transpiler::transpile_kn_custom_op_blackwell(kn::KNCustomizedOp const *op) {
   bool profiling = config.profiling;
 
   tb::Graph const &g = op->bgraph;
@@ -318,7 +325,8 @@ CustomOPTranspileResult
   int cur_custom_kernel_idx = custom_kernel_idx_counter++;
   string func_name = fmt("custom_kernel_$", cur_custom_kernel_idx);
 
-  if (GPU_CC::H100 > config.target_cc ||
+  // 修改为 B200
+  if (GPU_CC::B200 != config.target_cc ||
       (config::MAX_NUM_WARP_GROUPS <
        config.num_consumer_wgs + config.num_producer_wgs) ||
       (num_threads !=
@@ -337,7 +345,8 @@ CustomOPTranspileResult
   // Get the schedule
   TBSched sched = get_threadblock_schedule(g);
 
-  get_threadblock_swizzle_plan_hopper(g, sched);
+  // 修改为 blackwell 的 swizzle plan 函数
+  get_threadblock_swizzle_plan_blackwell(g, sched);
 
   // Get the memory allocation plan
   TBMemoryPlan mem_plan = get_threadblock_memory_plan(g, sched, true);
@@ -360,9 +369,25 @@ CustomOPTranspileResult
   code.e("static constexpr int CONSUMER_NUM_THREADS = $;",
          config::NUM_THREADS_PER_GROUP * config.num_consumer_wgs);
 
+  // Define elect_one_thr and elect_one_warp
+  code.e("uint32_t elect_one_thr  = cute::elect_one_sync();");
+  code.e("uint32_t elect_one_warp = (threadIdx.x / 32 == 0); ");
+
   // Define STensor as cute::Tensor
   code.e("// STensors");
   code.e("extern __shared__ char buf[];");
+
+  // Define Tmem
+  code.e("__shared__ uint32_t tmem_base;");
+  code.e("");
+  // Only one thread initialize Tmem
+  code.e("if (elect_one_warp) { ");
+  code.e("  cute::TMEM::Allocator1Sm alloc{}; ");
+  code.e("  alloc.allocate(512, &tmem_base);");
+  code.e("}");
+  code.e("__syncthreads();");
+  code.e("");
+
   size_t barrier_addr = mem_plan.smem_size;
   for (auto [guid, addr] : mem_plan.addrs) {
     code.e("$ *stensor$_ptr = ($*)(buf + $);",
@@ -383,6 +408,7 @@ CustomOPTranspileResult
   // for release smem_read;
   std::vector<sguid_t> smem_read_output_guids;
   int pipe_index = 0;
+
   for (TBSchedNode const &node :
        Combine(Combine(sched.pre_loop_nodes, sched.loop_nodes),
                sched.post_loop_nodes)) {
@@ -436,8 +462,7 @@ CustomOPTranspileResult
 
       // assert(use_chunked_copy && use_async_copy);
 
-      // TODO(intlsy) Support swizzled layout
-      // TODO(intlsy) Support TMA
+      // 这里需要修改为基于 Blackwell 的 TMA 实现
       if (!use_chunked_copy) {
         int d_innermost_dim = dtensor_meta.innermost_dim;
         assert(!use_async_copy);
@@ -502,9 +527,11 @@ CustomOPTranspileResult
               partition_logic,
               g.forloop_range,
               m_input ? forloop_dim : (dtensor.num_dims - 1 - forloop_dim));
+          
+          // 修改为 BlackwellAsyncPipeline
           code.e(
-              "tb::HopperAsyncPipeline<$> "
-              "hopper_async_pipeline_$((void *) (buf + $), (tb::warpgroup_id() "
+              "tb::BlackwellAsyncPipeline<$> "
+              "blackwell_async_pipeline_$((void *) (buf + $), (tb::warpgroup_id() "
               "== $ && tb::warp_id() % mirage::config::NUM_WARPS_PER_GROUP == "
               "0), tb::warpgroup_id() < $, $, $);",
               config.pipeline_stages,
@@ -516,9 +543,10 @@ CustomOPTranspileResult
                   type::get_datatype_size(stensor.data_type),
               config.num_consumer_wgs);
 
+          // 修改为 Blackwell 的 InputTMAAsyncCopy
           code.e(
-              "using STensor$InputAtom = tb::InputTMAAsyncCopy<$, $, "
-              "$, decltype(tma_$), decltype(hopper_async_pipeline_$), $, $>;",
+              "using STensor$InputAtom = tb::InputTMAAsyncCopy_Blackwell<$, $, "
+              "$, decltype(tma_$), decltype(blackwell_async_pipeline_$), $, $>;",
               stensor.guid,
               get_datatype_str(stensor.data_type),
               smem_layout,
@@ -553,9 +581,8 @@ CustomOPTranspileResult
   code.e("");
   code.e("__syncthreads();");
 
-  // add tma templates for H100 and later GPUs
-  if (GPU_CC::H100 <= config.target_cc) {
-
+  // 修改为 B200
+  if (GPU_CC::B200 == config.target_cc) {
     assert(g.cluster_dim.x > 0 && g.cluster_dim.y > 0 && g.cluster_dim.z > 0);
     string tma;
     string tmplt;
@@ -732,14 +759,13 @@ CustomOPTranspileResult
                mov_last_get_stensor_layout(
                    stensor, stensor_meta, real_innermost_dim));
       }
-      // TODO(intlsy) Support TMA
+      // TODO(intlsy) Support TMA for Blackwell
     }
   }
   code.e("");
 
   // Clear all accumulators
   // get all pipeline stensors
-
   int num_clear_accums = 0;
   for (TBSchedNode const &node : sched.loop_nodes) {
     if (node.type != tb_sched_node_t::OPERATOR) {
@@ -790,14 +816,12 @@ CustomOPTranspileResult
       assert(input0.dim[num_dims - 2] == m && input0.dim[num_dims - 1] == k);
       assert(input1.dim[num_dims - 2] == k && input1.dim[num_dims - 1] == n);
 
-      // Pick up MMA atom
-      // TODO(intlsy) May calculate AB via (B^T A^T)^T when M is relatively
-      // small
-      if (GPU_CC::H100 <= config.target_cc) {
-        // Hopper wgmma
+      // 对于 Blackwell，我们使用 B200 架构
+      if (GPU_CC::B200 == config.target_cc) {
+        // Blackwell wgmma
         assert(num_threads >= 128);
       } else {
-        // TODO(intlsy): Support more architectures
+        // 不支持其他架构
         assert(0 && "Unsupported GPU Architecture");
       }
 
@@ -825,7 +849,8 @@ CustomOPTranspileResult
              output.guid,
              get_stensor_layout(output, meta2, num_dims - 2 /*start_dim*/));
 
-      code.e("using Matmul$Kernel = tb::Hopper_Matmul<$, "
+      // 使用 Blackwell 的 Matmul 内核
+      code.e("using Matmul$Kernel = tb::Blackwell_Matmul<$, "
              "$, $, Matmul$LayoutA, Matmul$LayoutB, "
              "Matmul$LayoutC, NUM_THREADS, "
              "$, $, $, $, $, $>;",
@@ -843,7 +868,7 @@ CustomOPTranspileResult
              meta1.is_pipelined_input,
              config.pipeline_stages);
       if (is_accum_in_reg) {
-        code.e("auto matmul_$_accum = Matmul$Kernel::get_mma_rC(thread_idx);",
+        code.e("auto matmul_$_accum = Matmul$Kernel::get_mma_tC(thread_idx);",
                output.guid,
                output.guid);
       }
@@ -885,7 +910,7 @@ CustomOPTranspileResult
                "static_cast<uint32_t>(for_idx)");
       }
       code.e(fmt("STensor$InputAtom::run(tma_$, stensor$_ptr, "
-                 " $, $, $, for_idx, hopper_async_pipeline_$);",
+                 " $, $, $, for_idx, blackwell_async_pipeline_$);", // 修改为 blackwell
                  stensor_id,
                  op->dtensor.guid,
                  stensor_id,
@@ -903,9 +928,6 @@ CustomOPTranspileResult
     code.e("}");
     code.e("}");
   }
-  // code.e("}");
-  // code.e("}");
-  // code.e("}");
 
   // A lambda function that transpiles a chain of (fusable) operators to an
   // epilogue Will automatically ignore the first operator in the `chain`
@@ -1016,46 +1038,48 @@ CustomOPTranspileResult
             if (output_op_meta.is_accum_in_reg) {
               // Accumulator is in register
               code.e("Matmul$Kernel::run(matmul_$_accum, stensor$_ptr, "
-                     "stensor$_ptr, (char*)(buf+0), thread_idx, read_idx_$);",
+                     "stensor$_ptr, thread_idx, read_idx_$);",
                      output_guid,
                      output_guid,
                      input0.guid,
                      input1.guid,
                      pipe_ids.at(0));
             } else {
-              code.e("auto mma_rC = Matmul$Kernel::get_mma_rC(thread_idx);",
+              code.e("auto mma_tC = Matmul$Kernel::get_mma_tC(thread_idx);",
                      output_guid);
-              code.e("Matmul$Kernel::run(mma_rC, stensor$_ptr, stensor$_ptr, "
-                     "(char*)(buf+0), thread_idx, read_idx_$);",
+              code.e("Matmul$Kernel::run(mma_tC, stensor$_ptr, stensor$_ptr, "
+                     "thread_idx, read_idx_$);",
                      output_guid,
                      input0.guid,
                      input1.guid,
                      pipe_ids.at(0));
-              code.e("Matmul$Kernel::write_back_mma_rC(stensor$_ptr, mma_rC, "
+              code.e("Matmul$Kernel::write_back_mma_tC(stensor$_ptr, mma_tC, "
                      "thread_idx);",
                      output_guid,
-                     output_guid);
+                     output_guid
+                     );
             }
           } else {
             if (output_op_meta.is_accum_in_reg) {
               code.e("Matmul$Kernel::run(matmul_$_accum, stensor$_ptr, "
-                     "stensor$_ptr, (char*)(buf+0), thread_idx);",
+                     "stensor$_ptr, thread_idx);",
                      output_guid,
                      output_guid,
                      input0.guid,
                      input1.guid);
             } else {
-              code.e("auto mma_rC = Matmul$Kernel::get_mma_rC(thread_idx);",
+              code.e("auto mma_tC = Matmul$Kernel::get_mma_tC(thread_idx);",
                      output_guid);
-              code.e("Matmul$Kernel::run(mma_rC, stensor$_ptr, stensor$_ptr, "
-                     "(char*)(buf+0), thread_idx);",
+              code.e("Matmul$Kernel::run(mma_tC, stensor$_ptr, stensor$_ptr, "
+                     "thread_idx);",
                      output_guid,
                      input0.guid,
                      input1.guid);
-              code.e("Matmul$Kernel::write_back_mma_rC(stensor$_ptr, mma_rC, "
+              code.e("Matmul$Kernel::write_back_mma_tC(stensor$_ptr, mma_tC, "
                      "thread_idx);",
                      output_guid,
-                     output_guid);
+                     output_guid
+                     );
             }
           }
 
@@ -1314,9 +1338,6 @@ CustomOPTranspileResult
   };
 
   // Declare the for loop
-  // TODO(intlsy) Remove the loop when `g.forloop_range` is 1
-  // TODO(intlsy) Loop unrolling
-
   if (pipe_tma) {
     code.e("else {");
     // allocate register files for wgmma
@@ -1348,13 +1369,13 @@ CustomOPTranspileResult
 
     code << res;
     if (err != CUDA_T_SUCCESS) {
-      return CustomOPTranspileResult{err, func_name, 0, 0, ""};
+      return CustomOPTranspileResult{err, func_name, 0, 0, "", {}};
     }
   }
 
   if (!copy_of_inputs.empty()) {
     for (auto const &[pipe_id, op] : copy_of_inputs) {
-      code.e("hopper_async_pipeline_$.consumer_release();", pipe_id);
+      code.e("blackwell_async_pipeline_$.consumer_release();", pipe_id); // 修改为 blackwell
     }
   }
 
@@ -1373,7 +1394,7 @@ CustomOPTranspileResult
       tb::TBForloopAccumOp const *accum_op =
           dynamic_cast<tb::TBForloopAccumOp const *>(last_op);
       tb::STensor const &accum = accum_op->output_tensors.at(0);
-      in_reg_writeback.e("Matmul$Kernel::write_back_mma_rC(stensor$_ptr, "
+      in_reg_writeback.e("Matmul$Kernel::write_back_mma_tC(stensor$_ptr, "
                          "matmul_$_accum, thread_idx);",
                          accum.guid,
                          accum.guid,
@@ -1400,7 +1421,7 @@ CustomOPTranspileResult
           transpile_tb_sched_node(sched_node, res, pipeline_inputs, false);
       code << res;
       if (err != CUDA_T_SUCCESS) {
-        return CustomOPTranspileResult{err, func_name, 0, 0, "", tmaParamsList};
+        return CustomOPTranspileResult{err, func_name, 0, 0, "", {}};
       }
     }
   }
@@ -1418,6 +1439,5 @@ CustomOPTranspileResult
                                  code.to_string(),
                                  tmaParamsList};
 }
-
 } // namespace transpiler
-} // namespace mirage
+} // namespace mirage 
