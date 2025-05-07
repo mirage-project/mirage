@@ -147,7 +147,8 @@ __device__ __forceinline__ size_t get_event_position_index(EventId event_id) {
   return (event_id & 0xffffffff);
 }
 
-__device__ __forceinline__ int get_rand_sched_id(size_t event_index, int num_schedulers) {
+__device__ __forceinline__ int get_rand_sched_id(size_t event_index,
+                                                 int num_schedulers) {
   const size_t seed = 0xac4c1b51;
   size_t x = event_index ^ seed;
   x ^= x >> 17;
@@ -434,7 +435,8 @@ __global__ void persistent_kernel(RuntimeConfig config) {
             // atomicAdd(&config.all_event_counters[event_index],
             //           event_desc.num_triggers);
             //  Add the event to the schedule_queue
-            int sched_id = get_rand_sched_id(event_index, config.num_local_schedulers);
+            int sched_id =
+                get_rand_sched_id(event_index, config.num_local_schedulers);
             // size_t last_event_id =
             //     atomicAdd(&config.sched_queue_next_free_event_id[sched_id],
             //     1);
@@ -486,8 +488,9 @@ __global__ void persistent_kernel(RuntimeConfig config) {
                                    event_desc.num_triggers,
                                    gpu_id);
             // Add the event to the schedule queue
-            int sched_id = config.num_local_schedulers
-                         + get_rand_sched_id(event_index, config.num_remote_schedulers);
+            int sched_id =
+                config.num_local_schedulers +
+                get_rand_sched_id(event_index, config.num_remote_schedulers);
             size_t last_event_id = nvshmem_ulonglong_atomic_fetch_add(
                 &config.sched_queue_next_free_event_id[sched_id], 1, gpu_id);
             nvshmem_ulonglong_p(
@@ -653,7 +656,7 @@ __global__ void persistent_kernel_partitioned_workers(RuntimeConfig config) {
   // Each scheduelr SM serves four schedulers
   int num_schedulers =
       config.num_local_schedulers + config.num_remote_schedulers;
-  //assert(num_schedulers % 4 == 0);
+  // assert(num_schedulers % 4 == 0);
   assert(gridDim.x == config.num_workers + num_schedulers);
   PROFILER_CLOSURE_PARAMS_DECL;
   if (config.profiling) {
@@ -848,7 +851,8 @@ __global__ void persistent_kernel_partitioned_workers(RuntimeConfig config) {
             // atomicAdd(&config.all_event_counters[event_index],
             //           event_desc.num_triggers);
             //  Add the event to the schedule_queue
-            int sched_id = get_rand_sched_id(event_index, config.num_local_schedulers);
+            int sched_id =
+                get_rand_sched_id(event_index, config.num_local_schedulers);
             // size_t last_event_id =
             //     atomicAdd(&config.sched_queue_next_free_event_id[sched_id],
             //     1);
@@ -900,8 +904,9 @@ __global__ void persistent_kernel_partitioned_workers(RuntimeConfig config) {
                                    event_desc.num_triggers,
                                    gpu_id);
             // Add the event to the schedule queue
-            int sched_id = config.num_local_schedulers
-                         + get_rand_sched_id(event_index, config.num_remote_schedulers);
+            int sched_id =
+                config.num_local_schedulers +
+                get_rand_sched_id(event_index, config.num_remote_schedulers);
             size_t last_event_id = nvshmem_ulonglong_atomic_fetch_add(
                 &config.sched_queue_next_free_event_id[sched_id], 1, gpu_id);
             nvshmem_ulonglong_p(
@@ -1033,13 +1038,15 @@ __global__ void persistent_kernel_partitioned_workers(RuntimeConfig config) {
               PROFILER_EVENT_START(TASK_SCHD_TASKS, event_counter++);
             }
 
-            size_t last_task_id = worker_queue_next_free_task_pos[next_worker] ++;
+            size_t last_task_id =
+                worker_queue_next_free_task_pos[next_worker]++;
             config.worker_queues[next_worker][last_task_id %
                                               config.per_worker_queue_len] = i;
             // Make sure writes to worker_queues is visible to worker CTAs
             // before we increase its last_ready_task_id
             __threadfence();
-            custom_atomic_add_u64(&config.worker_queue_last_read_task_id[next_worker], 1);
+            custom_atomic_add_u64(
+                &config.worker_queue_last_read_task_id[next_worker], 1);
             if (config.verbose) {
               printf("[%d][SCHD] schd_id(%d) task_id(%llu) worker_id(%d) "
                      "worker_last_ready_pos(%llu)\n",
@@ -1255,15 +1262,17 @@ extern "C" void launch_persistent_kernel() {
   // Launcher persistent kernel
   cudaFuncSetAttribute(
       persistent_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, 22656);
-  cudaFuncSetAttribute(
-      persistent_kernel_partitioned_workers, cudaFuncAttributeMaxDynamicSharedMemorySize, 22656);
+  cudaFuncSetAttribute(persistent_kernel_partitioned_workers,
+                       cudaFuncAttributeMaxDynamicSharedMemorySize,
+                       22656);
 
-  nvshmemx_collective_launch((void const *)persistent_kernel_partitioned_workers,
-                             dim3(108, 1, 1),
-                             dim3(128, 1, 1),
-                             args,
-                             22656 /*sharedmem*/,
-                             0 /*stream*/);
+  nvshmemx_collective_launch(
+      (void const *)persistent_kernel_partitioned_workers,
+      dim3(108, 1, 1),
+      dim3(128, 1, 1),
+      args,
+      22656 /*sharedmem*/,
+      0 /*stream*/);
   cudaDeviceSynchronize();
   printf("Finished Launch Persistent Kernel\n");
 }
