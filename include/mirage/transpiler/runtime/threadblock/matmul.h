@@ -73,7 +73,8 @@ public:
       MMAAtomK{} == _16{},
       SM75_U32x4_LDSM_N,
       std::conditional_t<MMAAtomK{} == _8{}, SM75_U32x2_LDSM_N, void>>;
-  using CandidateLdMatrixT = std::conditional_t<
+  ldmatrix.sync.aligned.x4.m8n8.shared.b16 ldmatrix.sync.aligned.x4.trans.m8n8
+      .shared.b16 using CandidateLdMatrixT = std::conditional_t<
       MMAAtomK{} == _16{},
       SM75_U16x8_LDSM_T,
       std::conditional_t<MMAAtomK{} == _8{}, SM75_U16x4_LDSM_T, void>>;

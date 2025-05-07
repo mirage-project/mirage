@@ -45,11 +45,12 @@ if __name__ == "__main__":
         graph.cygraph, target_cc=86, input_strides=input_strides
     )
     print(p["code"])
-    # warm up runs
-    for _ in range(16):
-        outputs = graph(inputs=input_tensors)
-    torch.cuda.synchronize()
+    # # warm up runs
+    # for _ in range(16):
+    #     outputs = graph(inputs=input_tensors)
+    # torch.cuda.synchronize()
 
+<<<<<<< Updated upstream
     starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(
         enable_timing=True
     )
@@ -64,3 +65,17 @@ if __name__ == "__main__":
 
     mean_syn = curr_time / 1000
     print(mean_syn)
+=======
+    # starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+    # repetitions = 1000
+    # timings=np.zeros((repetitions,1))
+    # starter.record()
+    # for rep in range(repetitions):
+    #     outputs = graph(inputs=input_tensors)
+    # ender.record()
+    # torch.cuda.synchronize()
+    # curr_time = starter.elapsed_time(ender)
+
+    # mean_syn = curr_time / 1000
+    # print(mean_syn)
+>>>>>>> Stashed changes
