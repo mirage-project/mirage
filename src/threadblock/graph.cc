@@ -192,6 +192,11 @@ size_t Graph::calculate_shared_memory_usage(TBOperator *new_op) {
         usage += op->output_tensors[0].size();
         break;
       }
+      case mirage::type::TB_FORLOOP_ACCUM_MAX_OP: {
+        assert(op->output_tensors.size() == 1);
+        usage += op->output_tensors[0].size();
+        break;
+      }
       default: {
         assert(false && "Unsupported operator");
       }
@@ -882,6 +887,25 @@ void from_json(json const &j, Graph &graph) {
             get_tensor_from_guid(
                 op.at("input_tensors")[0].at("guid").get<int>()),
             op_type);
+        guid_mapping[output.guid] =
+            op.at("output_tensors")[0].at("guid").get<int>();
+        break;
+      }
+      case type::TBOperatorType::TB_FORLOOP_ACCUM_NO_RED_RESCALE_OP:
+      case type::TBOperatorType::TB_FORLOOP_ACCUM_RED_LD_SUM_RESCALE_OP: {
+        STensor const &output = graph.forloop_accum_rescale(
+            get_tensor_from_guid(
+                op.at("input_tensors")[0].at("guid").get<int>()),
+            get_tensor_from_guid(
+                op.at("input_tensors")[1].at("guid").get<int>()),
+            op_type);
+        guid_mapping[output.guid] =
+            op.at("output_tensors")[0].at("guid").get<int>();
+        break;
+      }
+      case type::TBOperatorType::TB_FORLOOP_ACCUM_MAX_OP: {
+        STensor const &output = graph.forloop_accum_max(get_tensor_from_guid(
+            op.at("input_tensors")[0].at("guid").get<int>()));
         guid_mapping[output.guid] =
             op.at("output_tensors")[0].at("guid").get<int>();
         break;

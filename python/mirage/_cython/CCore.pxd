@@ -147,6 +147,7 @@ cdef extern from "mirage/type.h" namespace "mirage::type":
         TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP = 2504,
         TB_FORLOOP_ACCUM_NO_RED_RESCALE_OP = 2505,
         TB_FORLOOP_ACCUM_RED_LD_SUM_RESCALE_OP = 2506,
+        TB_FORLOOP_ACCUM_MAX_OP = 2507,
         TB_FORLOOP_ACCUM_LAST_OP = 2599,
         TB_CUSTOMIZED_OP = 2999
 
@@ -289,6 +290,7 @@ cdef extern from "mirage/threadblock/graph.h" namespace "mirage::threadblock":
         CppSTensor* forloop_accum_rescale(const CppSTensor *A,
                                const CppSTensor *B,
                                TBOperatorType optype)
+        CppSTensor* forloop_accum_max(const CppSTensor *A)
         dim3 grid_dim
         dim3 block_dim
         int forloop_range

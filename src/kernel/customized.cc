@@ -241,6 +241,11 @@ KNCustomizedOp::KNCustomizedOp(mirage::kernel::Graph *_kgraph,
         bgraph.forloop_accum_rescale(my_inputs[0], my_inputs[1], op->op_type);
         break;
       }
+      case mirage::type::TB_FORLOOP_ACCUM_MAX_OP: {
+        assert(my_inputs.size() == 1);
+        bgraph.forloop_accum_max(my_inputs[0]);
+        break;
+      }
       default: {
         assert(false && "Unsupported threadblock operator");
       }

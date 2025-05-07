@@ -280,6 +280,8 @@ def get_tb_operator_type_string(int op_type):
         return "tb_forloop_accum_no_red_rescale_op"
     elif op_type == TB_FORLOOP_ACCUM_RED_LD_SUM_RESCALE_OP:
         return "tb_forloop_accum_red_ld_sum_rescale_op"
+    elif op_type == TB_FORLOOP_ACCUM_MAX_OP:
+        return "tb_forloop_accum_max_op"
     elif op_type == TB_FORLOOP_ACCUM_LAST_OP:
         return "tb_forloop_accum_last_op"
     elif op_type == TB_CUSTOMIZED_OP:
@@ -1016,6 +1018,11 @@ cdef class CyTBGraph:
     def forloop_accum_rescale(self, STensor A, STensor B, str acc):
         optype = string_to_accum_rescale_optype(acc)
         cdef CppSTensor* ptr = self.p_bgraph.forloop_accum_rescale(A.c_ptr, B.c_ptr, optype)
+        t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
+        return STensor(t)
+
+    def forloop_accum_max(self, STensor A):
+        cdef CppSTensor* ptr = self.p_bgraph.forloop_accum_max(A.c_ptr)
         t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
         return STensor(t)
 

@@ -8,11 +8,11 @@ if __name__ == "__main__":
     K = graph.new_input(dims=(2, 64, 1024), dtype=mi.float16)
     V = graph.new_input(dims=(2, 1024, 64), dtype=mi.float16)
     tbgraph1 = mi.new_threadblock_graph(
-        grid_dim=(2, 16, 4), block_dim=(128, 1, 1), forloop_range=1, reduction_dimx=64
+        grid_dim=(2, 16, 4), block_dim=(128, 1, 1), forloop_range=4, reduction_dimx=64
     )
     bQ = tbgraph1.new_input(dtensor=Q, input_map=(0, -1, 1), forloop_dim=-1)
-    bK = tbgraph1.new_input(dtensor=K, input_map=(0, 2, -1), forloop_dim=-1)
-    bV = tbgraph1.new_input(dtensor=V, input_map=(0, 1, -1), forloop_dim=-1)
+    bK = tbgraph1.new_input(dtensor=K, input_map=(0, 2, -1), forloop_dim=2)
+    bV = tbgraph1.new_input(dtensor=V, input_map=(0, 1, -1), forloop_dim=1)
     bA = tbgraph1.matmul(bQ, bK)
     bAmax, bDiff = tbgraph1.reduction_max(bA, dim=2)
     bAs = tbgraph1.sub(bA, bAmax)
@@ -21,7 +21,7 @@ if __name__ == "__main__":
     bS = tbgraph1.matmul(bEAs, bV)
     bO1 = tbgraph1.forloop_accum_rescale(bS, bEDiff)
     bO2 = tbgraph1.forloop_accum_rescale(bEAs, bEDiff, "sum")
-    bO3 = tbgraph1.forloop_accum(bAmax)
+    bO3 = tbgraph1.forloop_accum_max(bAmax)
     tbgraph1.new_output(stensor=bO1, output_map=(0, 2, 1))
     tbgraph1.new_output(stensor=bO2, output_map=(0, 2, 1))
     tbgraph1.new_output(stensor=bO3, output_map=(0, 2, 1))
@@ -67,7 +67,6 @@ if __name__ == "__main__":
         graph.cygraph,
         target_cc=86,
         input_strides=input_strides,
-        enable_online_softmax=True,
     )
     print(p["code"])
 

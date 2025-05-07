@@ -117,6 +117,7 @@ op_nodelabel_mapping = {
     "tb_forloop_accum_redtox_ld_sum_op": "ForloopAccum\n(ReduceToDimx=Sum)",
     "tb_forloop_accum_no_red_rescale_op": "ForloopAccumRescale\n(No Reduction)",
     "tb_forloop_accum_red_ld_sum_rescale_op": "ForloopAccumRescale\n(Reduction=Sum)",
+    "tb_forloop_accum_max_op": "ForloopAccum\nMax",
     "tb_forloop_accum_last_op": "ForloopAccum\nLast",
     "tb_customized_op": "Customized\nOp",
 }

@@ -422,6 +422,14 @@ kernel::Graph const *rewrite_graph_for_online_softmax(kernel::Graph const *g) {
                 stensor_mapping[bop->output_tensors[0].guid] = st;
                 break;
               }
+              case TB_FORLOOP_ACCUM_MAX_OP: {
+                assert(stensor_inputs.size() == 1);
+                assert(bop->output_tensors.size() == 1);
+                threadblock::STensor st =
+                    tbg->forloop_accum_max(stensor_inputs[0]);
+                stensor_mapping[bop->output_tensors[0].guid] = st;
+                break;
+              }
               case TB_RMS_NORM_OP: {
                 assert(stensor_inputs.size() == 1);
                 threadblock::STensor st = tbg->rms_norm(stensor_inputs[0]);
@@ -715,6 +723,14 @@ Transpiler::Transpiler(kernel::Graph const *_graph,
               stensor_mapping[bop->output_tensors[0].guid] = st;
               break;
             }
+            case TB_FORLOOP_ACCUM_MAX_OP: {
+              assert(stensor_inputs.size() == 1);
+              assert(bop->output_tensors.size() == 1);
+              threadblock::STensor st =
+                  tbg->forloop_accum_max(stensor_inputs[0]);
+              stensor_mapping[bop->output_tensors[0].guid] = st;
+              break;
+            }
             case TB_RMS_NORM_OP: {
               assert(stensor_inputs.size() == 1);
               threadblock::STensor st = stensor_inputs[0];
@@ -761,7 +777,8 @@ Transpiler::Transpiler(kernel::Graph const *_graph,
         if (bop->op_type >= TB_FORLOOP_ACCUM_FIRST_OP &&
             bop->op_type <= TB_FORLOOP_ACCUM_LAST_OP) {
           assert(bop->op_type == TB_FORLOOP_ACCUM_NO_RED_OP ||
-                 bop->op_type == TB_FORLOOP_ACCUM_NO_RED_RESCALE_OP);
+                 bop->op_type == TB_FORLOOP_ACCUM_NO_RED_RESCALE_OP ||
+                 bop->op_type == TB_FORLOOP_ACCUM_MAX_OP);
         }
         if (bop->op_type == TB_RMS_NORM_OP) {
           assert(false);

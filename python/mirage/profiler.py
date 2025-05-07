@@ -40,12 +40,12 @@ event_name_list = {
     2309: "TB_REDUCTION_2_MAX_OP",
     2349: "TB_REDUCTION_LAST_OP_ID",
     2350: "TB_RMS_NORM_OP",
-    2400: "TB_CONCAT_FIRST_OP_ID",  
+    2400: "TB_CONCAT_FIRST_OP_ID",
     2401: "TB_CONCAT_1_OP",
     2402: "TB_CONCAT_2_OP",
     2409: "TB_CONCAT_LAST_OP_ID",
     2411: "TB_CONCAT_THEN_MATMUL_OP",
-    2420: "TB_SPLIT_FIRST_OP_ID",   
+    2420: "TB_SPLIT_FIRST_OP_ID",
     2421: "TB_SPLIT_1_OP",
     2422: "TB_SPLIT_2_OP",
     2429: "TB_SPLIT_LAST_OP_ID",
@@ -56,6 +56,7 @@ event_name_list = {
     2504: "TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP",
     2505: "TB_FORLOOP_ACCUM_NO_RED_RESCALE_OP",
     2506: "TB_FORLOOP_ACCUM_RED_LD_SUM_RESCALE_OP",
+    2507: "TB_FORLOOP_ACCUM_MAX_OP",
     2599: "TB_FORLOOP_ACCUM_LAST_OP",
     2999: "TB_CUSTOMIZED_OP",
 }
@@ -85,7 +86,6 @@ def export_to_perfetto_trace(
     profiler_buffer: torch.Tensor,
     file_name: str,
 ) -> None:
-    
 
     profiler_buffer_host = profiler_buffer.cpu()
     num_blocks, num_groups = profiler_buffer_host[:1].view(dtype=torch.int32)

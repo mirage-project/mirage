@@ -171,6 +171,13 @@ public:
                                       STensor const &rescale,
                                       mirage::type::TBOperatorType type);
 
+  // forloop accum max operator
+  STensor forloop_accum_max(STensor const &input);
+
+  STensor *forloop_accum_max(STensor const *input);
+
+  TBOperator *create_forloop_accum_max_op(STensor const &input);
+
   // fingerprint related memory management
   off_t allocate_fingerprint(STensor const &tensor);
   void free_fingerprint(STensor const &tensor);

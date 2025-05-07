@@ -209,6 +209,7 @@ enum TBOperatorType {
   TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP = 2504,
   TB_FORLOOP_ACCUM_NO_RED_RESCALE_OP = 2505,
   TB_FORLOOP_ACCUM_RED_LD_SUM_RESCALE_OP = 2506,
+  TB_FORLOOP_ACCUM_MAX_OP = 2507,
   TB_FORLOOP_ACCUM_LAST_OP = 2599,
   TB_CUSTOMIZED_OP = 2999
 };
@@ -268,6 +269,7 @@ NLOHMANN_JSON_SERIALIZE_ENUM(
          "tb_forloop_accum_nored_rescale_op"},
         {TB_FORLOOP_ACCUM_RED_LD_SUM_RESCALE_OP,
          "tb_forloop_accum_red_ld_sum_rescale_op"},
+        {TB_FORLOOP_ACCUM_MAX_OP, "tb_forloop_accum_max_op"},
         {TB_FORLOOP_ACCUM_LAST_OP, "tb_forloop_accum_last_op"},
         {TB_CUSTOMIZED_OP, "tb_customized_op"},
     })
