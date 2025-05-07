@@ -46,13 +46,11 @@ static __device__ __forceinline__ T
   return (T)0.0;
 }
 
-// Base case: no more ops
 template <typename T>
 __device__ __forceinline__ T perform_element_unary_chain(T a, float scalar = 0.0f) {
   return a;
 }
 
-// Recursive case: apply first OP, then remaining OPs
 template <typename T, ElementUnaryOpType FirstOp, ElementUnaryOpType... RemainingOps>
 __device__ __forceinline__ T perform_element_unary_chain(T a, float scalar_first, float scalar_remaining...) {
     T first_result = perform_element_unary_op<T, FirstOp>(src[elem_idx], scalar_first);
@@ -60,7 +58,7 @@ __device__ __forceinline__ T perform_element_unary_chain(T a, float scalar_first
 }
 
 // now assume input output using the same layout 
-template <typename SMEM, int NUM_THREADS, ElementUnaryOpType FirstOp, ElementUnaryOpType... RemainingOps>
+template <bool ACCUM, typename SMEM, ElementUnaryOpType FirstOp, ElementUnaryOpType... RemainingOps>
 __device__ __forceinline__ void perform_element_unary_chain_kernel(
     SMEM dst,
     const SMEM src,
@@ -70,6 +68,11 @@ __device__ __forceinline__ void perform_element_unary_chain_kernel(
   for (int elem_idx = threadIdx.x; elem_idx < SMEM::size(); elem_idx += NUM_THREADS) {
     auto value = src[elem_idx];
     auto result = perform_element_unary_chain<typename SmemRow::value_type, FirstOp, RemainingOps...>(value, scalar_first, scalar_remaining...);
-    dst[elem_idx] = result;
+    if(!ACCUM){
+      dst[elem_idx] = result;
+    }else{
+      dst[elem_idx] += result;
+    }
+    
   }
 }

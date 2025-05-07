@@ -53,19 +53,17 @@ template <typename T>
  }
 
  //ldmatrix
- __device__ __forceinline__ void ldsm(uint32_t offset, uint32_t* R) {
-  #ifdef MIRAGE_CP_ASYNC_SM80_ENABLED
-
-  b128_t* smem_ptr = base + offset;
+ template <typename T>
+ __device__ __forceinline__ void ldsm(T* __restrict__ base_ptr, uint32_t* R) {
+  uint32_t smem_int_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr));
   asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0, %1, %2, %3}, [%4];\n"
     : "=r"(R[0]), "=r"(R[1]), "=r"(R[2]), "=r"(R[3])
     : "r"(smem_int_ptr));
     #endif
 }
-
-__device__ __forceinline__ void ldsm_t(uint32_t offset, uint32_t* R) {
-  #ifdef MIRAGE_CP_ASYNC_SM80_ENABLED
-  b128_t* smem_ptr = base + offset;
+template <typename T>
+__device__ __forceinline__ void ldsm_t(T* __restrict__ base_ptr, uint32_t* R) {
+  uint32_t smem_int_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr));
   asm volatile("ldmatrix.sync.aligned.trans.m8n8.x4.shared.b16 {%0, %1, %2, %3}, [%4];\n"
     : "=r"(R[0]), "=r"(R[1]), "=r"(R[2]), "=r"(R[3])
     : "r"(smem_int_ptr));

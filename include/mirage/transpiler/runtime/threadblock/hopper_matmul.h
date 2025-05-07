@@ -17,8 +17,8 @@
 #include <cute/layout.hpp>
 #include <cute/tensor.hpp>
 #include <cutlass/arch/reg_reconfig.h>
-#include <mirage/transpiler/runtime/threadblock/input.h>
-#include <mirage/transpiler/runtime/threadblock/matmul.h>
+#include <threadblock/input.h>
+#include <threadblock/matmul.h>
 using namespace cute;
 
 #include "element_unary.h"

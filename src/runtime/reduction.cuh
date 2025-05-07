@@ -17,26 +17,39 @@
  namespace mirage {
      namespace runtime {
 
- template <typename SMEM_DST, typename SMEM_SRC, int REDUCTION_DIM, int NUM_THREADS>
-static __device__ __forceinline__ void reduction(SMEM_DST dst,
+constexpr int NUM_THREADS = 128;
+        //reduction on dim 0
+ template <typename SMEM_DST, typename SMEM_SRC>
+static __device__ __forceinline__ void reduction_sum_row(SMEM_DST dst,
     const SMEM_SRC src) {
 
-static constexpr int REDUCTION_FACTOR = (REDUCTION_DIM == 0) ? SMEM_SRC::ROW : SMEM_SRC::COL;
-
+static constexpr int REDUCTION_FACTOR =  SMEM_SRC::ROW
 for (int dst_elem_idx = threadIdx.x; dst_elem_idx < SMEM_DST::size();
             dst_elem_idx += NUM_THREADS) {
     float result = 0;
-
-    int dst_row = dst_elem_idx / SMEM_DST::COL;
     int dst_col = dst_elem_idx % SMEM_DST::COL;
 
     #pragma unroll
     for (int i = 0; i < REDUCTION_FACTOR; ++i) {
-        if constexpr (REDUCTION_DIM == 0) {
-            result += static_cast<float>(src[i, dst_col]);
-        } else { 
+        result += static_cast<float>(src[i, dst_col]);
+    }
+    dst[dst_elem_idx] = result;
+}
+}
+
+//reduction on dim 1
+template <typename SMEM_DST, typename SMEM_SRC>
+static __device__ __forceinline__ void reduction_sum_col(SMEM_DST dst,
+    const SMEM_SRC src) {
+static constexpr int REDUCTION_FACTOR = SMEM_SRC::COL;
+for (int dst_elem_idx = threadIdx.x; dst_elem_idx < SMEM_DST::size();
+            dst_elem_idx += NUM_THREADS) {
+    float result = 0;
+    int dst_row = dst_elem_idx / SMEM_DST::COL;
+    #pragma unroll
+    for (int i = 0; i < REDUCTION_FACTOR; ++i) {
             result += static_cast<float>(src[dst_row, i]);
-        }
+
     }
     dst[dst_elem_idx] = result;
 }

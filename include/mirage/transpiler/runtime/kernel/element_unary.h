@@ -5,8 +5,7 @@
 
 #include <cute/layout.hpp>
 
-#include "mirage/transpiler/runtime/utils.h"
-
+#include "utils.h"
 namespace kn {
 
 enum class ElementUnaryOpType { EXP, SILU, GELU, RELU, CLAMP, SQUARE, SQRT };

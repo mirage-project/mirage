@@ -3,8 +3,7 @@
 #include <cute/layout.hpp>
 using namespace cute;
 
-#include "mirage/transpiler/runtime/utils.h"
-
+#include "utils.h"
 namespace kn {
 
 // The First Reduction Kernel
