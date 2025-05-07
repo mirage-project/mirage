@@ -32,39 +32,26 @@ if __name__ == "__main__":
     input_strides = [tensor.stride() for tensor in input_tensors]
     p = mi.generate_cuda_program(graph.cygraph, target_cc=80, input_strides=input_strides)
     print(p["code"])
-    outputs = graph(inputs=input_tensors)
-    print(outputs[0])
-    
-    # # warm up runs
-    # for _ in range(16):
-    #     outputs = graph(inputs=input_tensors)
-    #     #torch_rms_norm(input_tensors[0], input_tensors[1])
+    # warm up runs
+    for _ in range(16):
+        outputs = graph(inputs=input_tensors)
+        #torch_rms_norm(input_tensors[0], input_tensors[1])
 
-<<<<<<< Updated upstream
+
     torch.cuda.synchronize()
-=======
 
-    # torch.cuda.synchronize()
->>>>>>> Stashed changes
+    starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+    repetitions = 1000
+    timings=np.zeros((repetitions,1))
+    starter.record()
+    for rep in range(repetitions):
+        outputs = graph(inputs=input_tensors)
+        #torch_rms_norm(input_tensors[0], input_tensors[1])
 
-    # starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
-    # repetitions = 1000
-    # timings=np.zeros((repetitions,1))
-    # starter.record()
-    # for rep in range(repetitions):
-    #     outputs = graph(inputs=input_tensors)
-    #     #torch_rms_norm(input_tensors[0], input_tensors[1])
+    ender.record()
+    torch.cuda.synchronize()
+    curr_time = starter.elapsed_time(ender)
 
-    # ender.record()
-    # torch.cuda.synchronize()
-    # curr_time = starter.elapsed_time(ender)
-
-<<<<<<< Updated upstream
     mean_syn = curr_time / 1000
     #print(timings)
     print(mean_syn)
-=======
-    # mean_syn = curr_time / 1000
-    # #print(timings)
-    # print(mean_syn)
->>>>>>> Stashed changes

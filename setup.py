@@ -58,10 +58,6 @@ def config_cython():
                               path.join(z3_path, "include"),
                               "/usr/local/cuda/include"],
                 libraries=["mirage_runtime", "cudadevrt", "cudart_static", "cudnn", "cublas", "cudart", "cuda", "z3", "gomp", "rt"],
-<<<<<<< Updated upstream
-=======
- 
->>>>>>> Stashed changes
                 library_dirs=[path.join(mirage_path, "build"),
                               path.join(z3_path, "lib"),
                               "/usr/local/cuda/lib",
