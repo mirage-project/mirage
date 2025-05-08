@@ -24,7 +24,7 @@ namespace runtime {
  //cp async
 
  template <int N>
- __device__ __forceinline__void cp_async_wait()
+ __device__ __forceinline__ void cp_async_wait()
  {
  #if defined(MIRAGE_CP_ASYNC_SM80_ENABLED)
    if constexpr (N == 0) {
@@ -35,7 +35,7 @@ namespace runtime {
  #endif
  }
 
-__device__ __forceinline__void cp_async_fence()
+__device__ __forceinline__ void cp_async_fence()
 {
 #if defined(MIRAGE_CP_ASYNC_SM80_ENABLED)
   asm volatile("cp.async.commit_group;\n" ::);
@@ -54,20 +54,18 @@ template <typename T>
 
  //ldmatrix
  template <typename T>
- __device__ __forceinline__ void ldsm(T* __restrict__ base_ptr, uint32_t* R) {
+ __device__ __forceinline__ void ldsm(T* __restrict__ smem_ptr, uint32_t* R) {
   uint32_t smem_int_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr));
   asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0, %1, %2, %3}, [%4];\n"
     : "=r"(R[0]), "=r"(R[1]), "=r"(R[2]), "=r"(R[3])
     : "r"(smem_int_ptr));
-    #endif
 }
 template <typename T>
-__device__ __forceinline__ void ldsm_t(T* __restrict__ base_ptr, uint32_t* R) {
+__device__ __forceinline__ void ldsm_t(T* __restrict__ smem_ptr, uint32_t* R) {
   uint32_t smem_int_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr));
   asm volatile("ldmatrix.sync.aligned.trans.m8n8.x4.shared.b16 {%0, %1, %2, %3}, [%4];\n"
     : "=r"(R[0]), "=r"(R[1]), "=r"(R[2]), "=r"(R[3])
     : "r"(smem_int_ptr));
-    #endif
 }
 
 

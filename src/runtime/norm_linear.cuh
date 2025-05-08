@@ -16,29 +16,39 @@
 
  #pragma once
 
+#include <cuda_bf16.h>
+#include "utils.cuh"
+#include "dmem_layout.cuh"
+#include "smem_layout.cuh"
+#include "copy_sm80.cuh"
+#include "element_unary.cuh"
+#include "element_binary.cuh"
+#include "mma.cuh"
+
 namespace mirage {
     namespace runtime {
 
- template<typename T, uint16_t BATCH_SIZE, uint16_t HIDDEN_SIZE, NUM_THREADS>
- __device__ __forceinline__ void norm_linear_kernel(){
+  //kernel for [16, 64] and any BATCH_SIZE < 16 [x, 64]
+ template<typename T, int BATCH_SIZE, int HIDDEN_SIZE, int NUM_THREADS>
+ __device__ __forceinline__ void norm_linear_kernel(void const * input_ptr, void const * weight_ptr, void * output_ptr){
     constexpr int chunk_size = 128 / sizeof(T);
     constexpr int num_chunks = HIDDEN_SIZE / chunk_size;
 
-    //using SM80_16x8x16_F16F16F16F16_TN
+    //using SM80_16x8x16_F16F16F16F16_TNX2 = 16X16X16
     constexpr int num_n = HIDDEN_SIZE/16;
     constexpr int num_m = BATCH_SIZE/16;
-    constexpr int num_k = HIDDEN_SIZE/8;
+    constexpr int num_k = HIDDEN_SIZE/16;
 
     int warp_idx = warp_id();
     int lane_idx = lane_id();
     int idx_in_warp = lane_id() % 32;
 
-    assert(num_m > 0 && num_n > 0 && num_K > 0);
+    assert(num_m > 0 && num_n > 0 && num_k > 0);
   //input_tile [BATCH_SIZE, HIDDEN_SIZE] 
   //weight_tile [HIDDEN_SIZE, HIDDEN_SIZE]
-  const __restrict__ T* d_input = ;
-  const __restrict__ T *d_weight = ;
-  T __restrict__ *d_output =;
+  const __restrict__ T* d_input = input_ptr;
+  const __restrict__ T *d_weight = weight_ptr +  blockIdx.x*64*1;
+  T __restrict__ *d_output = output_ptr + blockIdx.x*64*1;
 
   dmem_row<T, 1, 64, 3584> input_dmem(d_input);
   dmem_row<T, 64, 64, 7168> weight_dmem(d_weight);
@@ -47,17 +57,17 @@ namespace mirage {
   extern __shared__ T smem[];
 
   //copy input
-  T *shared_input = (T*)(buf + 256);
-  T *shared_input_buffer = (T*)(buf + 384);
+  T *shared_input = (T*)(smem + 256);
+  T *shared_input_buffer = (T*)(smem + 384);
   //copy weight
-  T *shared_weight = (T*)(buf + 8704);
-  T *shared_weight_buffer = (T*)(buf + 512);
+  T *shared_weight = (T*)(smem + 8704);
+  T *shared_weight_buffer = (T*)(smem + 512);
   //intermidiate
-  T *mm_output = (T*)(buf + 256);
-  T *element_unary_output = (T*)(buf + 128);
-  T *reduction_output = (T*)(buf + 384);
+  T *mm_output = (T*)(smem + 256);
+  T *element_unary_output = (T*)(smem + 128);
+  T *reduction_output = (T*)(smem + 384);
   //out
-  T *shared_output = (T*)(buf + 128);
+  T *shared_output = (T*)(smem + 128);
   
   //define the swizzle mode
   smem_row<T, 1, 1, 1, 1, 16, 64> input_smem(shared_input);
@@ -79,7 +89,7 @@ namespace mirage {
     //offset
     size_t row = i / num_chunks;
     size_t col = i % num_chunks;
-    load_smem(input_smem[row, col], input_dmem[row, col]);
+    load_smem(input_smem(row, col), input_dmem(row, col));
   }
   
   //load weight
@@ -87,36 +97,36 @@ namespace mirage {
   for(int i = threadIdx.x; i < (HIDDEN_SIZE * HIDDEN_SIZE / chunk_size); i+=NUM_THREADS){
     size_t row = i / num_chunks;
     size_t col = i % num_chunks;
-    load_smem(input_smem[row, col], input_dmem[row, col]);
+    load_smem(input_weight_smem(row, col), weight_dmem(row, col));
   }
   cp_async_fence();
 
   //accumulator
   float s_frag[num_m][num_n][8];
 
-  for(int for_idx = 0; for_idx < params.forloop_range; for_idx++){
+  for(int for_idx = 0; for_idx < 64; for_idx++){
     //copy
-    if(for_idx + 1 != params.forloop_range){
-        dmem_row<T, 1, 64, 3584> input_dmem_buffer(d_input + for_idx * params.forloop_stride);
-        dmem_row<T, 64, 64, 7168> weight_dmem_buffer(d_weight + for_idx * params.forloop_stride);
+    if(for_idx + 1 != 64){
+        dmem_row<T, 1, 64, 3584> input_dmem_buffer(d_input + 458752*(for_idx+1));
+        dmem_row<T, 64, 64, 7168> weight_dmem_buffer(d_weight + 64*(for_idx+1));
         #pragma unroll
         for(int i = threadIdx.x; i < (BATCH_SIZE * HIDDEN_SIZE / chunk_size); i+=NUM_THREADS){
           //offset
           size_t row = i / num_chunks;
           size_t col = i % num_chunks;
-          load_smem(input_smem_buffer[row, col], input_dmem_buffer[row, col]);
+          load_smem(input_smem_buffer(row, col), input_dmem_buffer(row, col));
         }
         //load weight
         #pragma unroll
         for(int i = threadIdx.x; i < (HIDDEN_SIZE * HIDDEN_SIZE / chunk_size); i+=NUM_THREADS){
           size_t row = i / num_chunks;
           size_t col = i % num_chunks;
-          load_smem(input_weight_smem_buffer[row, col], weight_dmem_buffer[row, col]);
+          load_smem(input_weight_smem_buffer(row, col), weight_dmem_buffer(row, col));
         }
         cp_async_fence();
         cp_async_wait<1>();
         //SWAP the double buffer
-        if((i & 1) == 0){
+        if((for_idx & 1) == 0){
           input_smem(shared_input_buffer);
           input_smem_buffer(shared_input);
           input_weight_smem(shared_weight_buffer);
@@ -147,9 +157,9 @@ namespace mirage {
            //load A matrix
            //https://docs.nvidia.com/cuda/parallel-thread-execution/#warp-level-matrix-fragment-mma-16816-float:~:
            // text=%2C..%2C3%7D-,9.7.14.5.8.%20Matrix%20Fragments%20for%20mma.m16n8k16%20with%20floating%20point%20type,-%EF%83%81
-           uint32_t m_offset = k * (16 * 16)+ (idx_in_warp % 32) * 8;
+           uint32_t m_offset = k * (16 * 16) + (idx_in_warp % 16 * 16 + idx_in_warp / 16 * 8);
            //load B matrix, 
-           uint32_t n_offset = warp_id * (64*8) + k * (16*8) + (idx_in_warp % 32) * 8;
+           uint32_t n_offset = warp_idx * (64*8) + k * (16*8) + (idx_in_warp % 32) * 8;
            ldsm(input_smem(m_offset), a_frag);
            ldsm(input_weight_smem(n_offset), b_frag);
            mma_m16n16k16_bf16bf16bf32(s_frag[m][n], a_frag, b_frag, s_frag[m][n]);
@@ -161,8 +171,7 @@ namespace mirage {
     //sqrt, mulscalar
     perform_element_unary_chain_kernel<true,
                 ElementUnaryOpType::SQRT,
-                ElementUnaryOpType::MULSCALAR,
-              >(input_smem, element_unary_smem, 0.0f, 1.0f);
+                ElementUnaryOpType::MULSCALAR>(input_smem, element_unary_smem, {0.0f, 1.0f});
   }
 
   //write back to smem

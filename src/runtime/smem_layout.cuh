@@ -13,7 +13,7 @@
  * limitations under the License.
  */
 
-template <typename T, int B, int M=3, int S, size_t ROW, size_t COL, size_t STRIDE>
+template <typename T, int B, int M, int S, size_t ROW, size_t COL, size_t STRIDE>
 struct smem_row {
     T* __restrict__ base_ptr;
 
@@ -30,7 +30,7 @@ struct smem_row {
     
     // 2D access
     __device__ __forceinline__
-    T& operator[] (size_t logical_idx_row, size_t logical_idx_col) const {
+    T& operator() (size_t logical_idx_row, size_t logical_idx_col) const {
         size_t logical_idx = logical_idx_row * STRIDE + logical_idx_col;
         //coordinate must be start of a bank
         assert(logical_idx % Pow2_M == 0);
@@ -38,7 +38,7 @@ struct smem_row {
         size_t row = logical_idx >> (S + S);
         size_t irow = row % Pow2_B;
         size_t icol = irow ^ (logical_idx >> M) % (S);
-        size_t phy_offset = row << (M + S) + icol << M;
+        size_t phy_offset = (row << (M + S)) + icol << M;
         return base_ptr[phy_offset];
     }
 
@@ -56,7 +56,7 @@ struct smem_row {
     }
 };
 
-template <typename T, int B, int M = 3, int S, size_t ROW, size_t COL, size_t STRIDE>
+template <typename T, int B, int M, int S, size_t ROW, size_t COL, size_t STRIDE>
 struct smem_col {
     T* base_ptr;
 
@@ -77,7 +77,7 @@ struct smem_col {
         size_t row = logical_idx >> (Pow2_S + Pow2_S);
         size_t irow = row % Pow2_B;
         size_t icol = irow ^ (logical_idx >> Pow2_M) % (Pow2_S);
-        size_t phy_offset = row << (Pow2_M + Pow2_S) + icol << Pow2_M;
+        size_t phy_offset = (row << (Pow2_M + Pow2_S)) + icol << Pow2_M;
         return base_ptr[phy_offset];
     }
 };

@@ -18,10 +18,10 @@ struct dmem_row {
     T* base_ptr;
 
     __device__ __forceinline__
-    smem_row(T* ptr) : base_ptr(ptr) {}
+    dmem_row(T* ptr) : base_ptr(ptr) {}
 
     __device__ __forceinline__
-    T& operator[] (size_t logical_idx_row, size_t logical_idx_col) const {
+    T& operator() (size_t logical_idx_row, size_t logical_idx_col) const {
         size_t logical_idx = logical_idx_row * STRIDE + logical_idx_col;
         return base_ptr[logical_idx];
     }

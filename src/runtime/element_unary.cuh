@@ -12,14 +12,15 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+  #include "common.h"
 
- enum class ElementUnaryOpType { EXP, SILU, GELU, RELU, CLAMP, SQUARE, SQRT };
+ enum class ElementUnaryOpType { EXP, SILU, GELU, RELU, CLAMP, SQUARE, SQRT, MULSCALAR};
 
  template <typename T, ElementUnaryOpType OP>
 static __device__ __forceinline__ T
     perform_element_unary_op(T a, float scalar = 0.0f) {
-  if constexpr (!(std::is_same_v<T, cutlass::half_t> ||
-                  std::is_same_v<T, cutlass::bfloat16_t> ||
+  if constexpr (!(std::is_same_v<T, half> ||
+                  std::is_same_v<T, nv_bfloat16> ||
                   std::is_same_v<T, float> || std::is_same_v<T, __half>)) {
     assert(0 && "unsupport datatype in tb elementunary");
   }
@@ -52,9 +53,9 @@ __device__ __forceinline__ T perform_element_unary_chain(T a, float scalar = 0.0
 }
 
 template <typename T, ElementUnaryOpType FirstOp, ElementUnaryOpType... RemainingOps>
-__device__ __forceinline__ T perform_element_unary_chain(T a, float scalar_first, float scalar_remaining...) {
-    T first_result = perform_element_unary_op<T, FirstOp>(src[elem_idx], scalar_first);
-    return perform_element_unary_chain<T, RemainingOps...>(first_result, scalar_remaining);
+__device__ __forceinline__ T perform_element_unary_chain(T a, const float* scalars, int idx) {
+    T res = perform_element_unary_op<T, FirstOp>(a, scalars[idx]);
+    return perform_element_unary_chain<T, RemainingOps...>(res, scalars, idx + 1);
 }
 
 // now assume input output using the same layout 
@@ -63,11 +64,10 @@ __device__ __forceinline__ void perform_element_unary_chain_kernel(
     SMEM dst,
     const SMEM src,
     int size,
-    float scalar_first,
-    float... scalar_remaining) {
+    const float* scalars) {
   for (int elem_idx = threadIdx.x; elem_idx < SMEM::size(); elem_idx += NUM_THREADS) {
     auto value = src[elem_idx];
-    auto result = perform_element_unary_chain<typename SmemRow::value_type, FirstOp, RemainingOps...>(value, scalar_first, scalar_remaining...);
+    auto result = perform_element_unary_chain<typename SMEM::value_type, FirstOp, RemainingOps...>(value, scalars, 0);
     if(!ACCUM){
       dst[elem_idx] = result;
     }else{

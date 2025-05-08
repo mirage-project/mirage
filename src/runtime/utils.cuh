@@ -14,6 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+ #include "common.h"
 namespace mirage {
     namespace runtime {
 
@@ -24,7 +25,7 @@ namespace mirage {
           
           static __device__ __forceinline__ int warp_id() {
             return __shfl_sync(
-                0xffffffff, threadIdx.x / mirage::config::NUM_THREADS_PER_WARP, 0);
+                0xffffffff, threadIdx.x / NUM_THREADS_PER_WARP, 0);
           }
 
 }}
