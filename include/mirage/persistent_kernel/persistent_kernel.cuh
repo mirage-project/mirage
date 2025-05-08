@@ -125,7 +125,8 @@ __device__ __forceinline__ bool prepare_next_batch(RuntimeConfig config) {
   int step = config.step[0];
   // printf("step = %d\n", step);
   config.step[0] = step + 1;
-  return step + 1 <= 5124;
+  return step + 1 <= 50;
+  // return false;
 }
 
 __device__ __forceinline__ bool is_termination_event(size_t event_loc,
@@ -593,13 +594,17 @@ __global__ void persistent_kernel(RuntimeConfig config) {
         my_first_worker += config.num_workers;
         my_last_worker += config.num_workers;
       }
+      printf("[SCHD] sched_id(%d) first_worker(%llu) last_worker(%llu)\n",
+             sched_id,
+             my_first_worker,
+             my_last_worker);
       size_t cur_event_pos[2], last_event_pos[2];
       for (int i = 0; i < 2; i++) {
         cur_event_pos[i] = 0;
         last_event_pos[i] = 0;
       }
-      size_t worker_queue_next_free_task_pos[MAX_NUM_WORKERS];
-      for (int i = 0; i < MAX_NUM_WORKERS; i++) {
+      size_t worker_queue_next_free_task_pos[2 * MAX_NUM_WORKERS];
+      for (int i = 0; i < 2 * MAX_NUM_WORKERS; i++) {
         worker_queue_next_free_task_pos[i] = 0;
       }
       worker_queue_next_free_task_pos[0] = 1;
@@ -791,12 +796,12 @@ extern "C" void init_persistent_kernel(std::vector<void const *> torch_tensors,
       gpu_malloc<unsigned long long int>((num_workers * 2) *
                                          sizeof(unsigned long long int));
   std::vector<unsigned long long int> host_worker_queue_last_task_id;
-  for (int i = 0; i < num_workers; i++) {
+  for (int i = 0; i < 2 * num_workers; i++) {
     host_worker_queue_last_task_id.push_back(0);
   }
   cudaMemcpy(global_runtime_config.worker_queue_last_ready_task_id,
              host_worker_queue_last_task_id.data(),
-             num_workers * sizeof(unsigned long long int),
+             (num_workers * 2) * sizeof(unsigned long long int),
              cudaMemcpyHostToDevice);
   // Initialize scheduler queue last event id
   // We maintain one extra scheduler queue for the global scheduler
@@ -915,23 +920,23 @@ extern "C" void finalize_persistent_kernel() {
   gpu_free(global_runtime_config.all_tasks);
   gpu_free(global_runtime_config.all_events);
   int num_workers = global_runtime_config.num_workers;
-  std::vector<TaskId *> host_worker_queues(num_workers);
+  std::vector<TaskId *> host_worker_queues(num_workers * 2);
   cudaMemcpy(host_worker_queues.data(),
              global_runtime_config.worker_queues,
-             num_workers * sizeof(TaskId *),
+             (num_workers * 2) * sizeof(TaskId *),
              cudaMemcpyDeviceToHost);
-  for (int i = 0; i < num_workers; i++) {
+  for (int i = 0; i < 2 * num_workers; i++) {
     gpu_free(host_worker_queues[i]);
   }
   gpu_free(global_runtime_config.worker_queues);
   int num_schedulers = global_runtime_config.num_local_schedulers +
                        global_runtime_config.num_remote_schedulers;
-  std::vector<EventId *> host_sched_queues(num_schedulers);
+  std::vector<EventId *> host_sched_queues(num_schedulers + 1);
   cudaMemcpy(host_sched_queues.data(),
              global_runtime_config.sched_queues,
-             num_schedulers * sizeof(EventId *),
+             (num_schedulers + 1) * sizeof(EventId *),
              cudaMemcpyDeviceToHost);
-  for (int i = 0; i < num_schedulers; i++) {
+  for (int i = 0; i < num_schedulers + 1; i++) {
     gpu_free(host_sched_queues[i]);
   }
   gpu_free(global_runtime_config.sched_queues);
