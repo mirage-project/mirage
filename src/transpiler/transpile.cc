@@ -676,6 +676,8 @@ Transpiler::Transpiler(kernel::Graph const *_graph,
               assert(bop->output_tensors.size() == 2);
               stensor_mapping[bop->output_tensors[0].guid] = sts[0];
               stensor_mapping[bop->output_tensors[1].guid] = sts[1];
+              break;
+            }
             case TB_REDUCTION_0_MAX_OP:
             case TB_REDUCTION_1_MAX_OP:
             case TB_REDUCTION_2_MAX_OP: {
