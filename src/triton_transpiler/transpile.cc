@@ -14,6 +14,7 @@
  */
 #include "mirage/triton_transpiler/transpile.h"
 #include "mirage/kernel/graph.h"
+#include "mirage/threadblock/element_unary.h"
 #include "mirage/threadblock/graph.h"
 #include "mirage/transpiler/utils.h"
 
@@ -103,7 +104,8 @@ TritonTranspiler::TritonTranspiler(kernel::Graph const *_graph,
       }
       case KN_ADD_OP:
       case KN_MUL_OP:
-      case KN_DIV_OP: {
+      case KN_DIV_OP:
+      case KN_POW_OP: {
         assert(dtensor_inputs.size() == 2);
         assert(op->output_tensors.size() == 1);
         kernel::DTensor dt =
@@ -172,8 +174,7 @@ TritonTranspiler::TritonTranspiler(kernel::Graph const *_graph,
             case TB_EXP_OP:
             case TB_SQUARE_OP:
             case TB_SQRT_OP:
-            case TB_SILU_OP:
-            case TB_MUL_SCALAR_OP: {
+            case TB_SILU_OP: {
               assert(stensor_inputs.size() == 1);
               threadblock::STensor st =
                   tbg->elementunary(stensor_inputs[0], bop->op_type);
@@ -181,9 +182,21 @@ TritonTranspiler::TritonTranspiler(kernel::Graph const *_graph,
               stensor_mapping[bop->output_tensors[0].guid] = st;
               break;
             }
+            case TB_MUL_SCALAR_OP: {
+              assert(stensor_inputs.size() == 1);
+              assert(bop->output_tensors.size() == 1);
+              threadblock::TBElementUnaryOp *mul_scalar_op =
+                  static_cast<threadblock::TBElementUnaryOp *>(bop);
+              threadblock::STensor st = tbg->elementunary(
+                  stensor_inputs[0], bop->op_type, mul_scalar_op->scalar);
+              stensor_mapping[bop->output_tensors[0].guid] = st;
+              break;
+            }
             case TB_ADD_OP:
             case TB_MUL_OP:
-            case TB_DIV_OP: {
+            case TB_DIV_OP:
+            case TB_SUB_OP:
+            case TB_POW_OP: {
               assert(stensor_inputs.size() == 2);
               threadblock::STensor st = tbg->elementbinary(
                   stensor_inputs[0], stensor_inputs[1], bop->op_type);
@@ -438,7 +451,8 @@ TritonTranspileResult TritonTranspiler::transpile_ugraph() {
 
       case KN_ADD_OP:
       case KN_MUL_OP:
-      case KN_DIV_OP: {
+      case KN_DIV_OP:
+      case KN_POW_OP: {
         kn::DTensor &input0 = op->input_tensors[0];
         kn::DTensor &input1 = op->input_tensors[1];
         kn::DTensor &output = op->output_tensors[0];

@@ -15,6 +15,8 @@ GeneratorConfig GeneratorConfig::get_default_config() {
       {
           type::KN_MATMUL_OP,
           type::KN_EXP_OP,
+          type::KN_SQUARE_OP,
+          type::KN_SQRT_OP,
           type::KN_SILU_OP,
           type::KN_GELU_OP,
           type::KN_RELU_OP,
@@ -22,6 +24,7 @@ GeneratorConfig GeneratorConfig::get_default_config() {
           type::KN_ADD_OP,
           type::KN_MUL_OP,
           type::KN_DIV_OP,
+          type::KN_POW_OP,
           // type::KN_REDUCTION_2_OP,
           type::KN_CHUNK_0_OP,
           type::KN_CHUNK_1_OP,
@@ -32,6 +35,8 @@ GeneratorConfig GeneratorConfig::get_default_config() {
       {
           type::TB_MATMUL_OP,
           type::TB_EXP_OP,
+          type::TB_SQUARE_OP,
+          type::TB_SQRT_OP,
           type::TB_SILU_OP,
           type::TB_GELU_OP,
           type::TB_RELU_OP,
@@ -39,6 +44,7 @@ GeneratorConfig GeneratorConfig::get_default_config() {
           type::TB_ADD_OP,
           type::TB_MUL_OP,
           type::TB_DIV_OP,
+          type::TB_POW_OP,
           type::TB_RMS_NORM_OP,
           type::TB_FORLOOP_ACCUM_NO_RED_OP,
           type::TB_FORLOOP_ACCUM_RED_LD_SUM_OP,

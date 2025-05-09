@@ -11,6 +11,7 @@ bool is_binary(type::TBOperatorType op) {
       type::TBOperatorType::TB_MUL_OP,
       type::TBOperatorType::TB_MATMUL_OP,
       type::TBOperatorType::TB_DIV_OP,
+      type::TBOperatorType::TB_POW_OP,
       type::TBOperatorType::TB_MUL_OP};
   return contains(true_values, op);
 }
@@ -18,6 +19,8 @@ bool is_binary(type::TBOperatorType op) {
 bool is_unary(type::TBOperatorType op) {
   std::unordered_set<type::TBOperatorType> true_values{
       type::TBOperatorType::TB_EXP_OP,
+      type::TBOperatorType::TB_SQUARE_OP,
+      type::TBOperatorType::TB_SQRT_OP,
       type::TBOperatorType::TB_SILU_OP,
       type::TBOperatorType::TB_GELU_OP,
       type::TBOperatorType::TB_RELU_OP,
@@ -45,6 +48,7 @@ bool is_binary(type::KNOperatorType op) {
       type::KNOperatorType::KN_MUL_OP,
       type::KNOperatorType::KN_MATMUL_OP,
       type::KNOperatorType::KN_DIV_OP,
+      type::KNOperatorType::KN_POW_OP,
       type::KNOperatorType::KN_MUL_OP,
   };
   return contains(true_values, op);
@@ -60,6 +64,8 @@ bool is_unary(type::KNOperatorType op) {
       type::KNOperatorType::KN_CHUNK_2_OP,
       type::KNOperatorType::KN_CHUNK_3_OP,
       type::KNOperatorType::KN_EXP_OP,
+      type::KNOperatorType::KN_SQUARE_OP,
+      type::KNOperatorType::KN_SQRT_OP,
       type::KNOperatorType::KN_SILU_OP,
       type::KNOperatorType::KN_GELU_OP,
       type::KNOperatorType::KN_RELU_OP,
@@ -122,6 +128,10 @@ std::shared_ptr<AbstractExpr> get_pattern(type::KNOperatorType op,
       return std::make_shared<Exp>(opd);
     case type::KNOperatorType::KN_SILU_OP:
       return std::make_shared<Silu>(opd);
+    case type::KNOperatorType::KN_SQUARE_OP:
+      return std::make_shared<Square>(opd);
+    case type::KNOperatorType::KN_SQRT_OP:
+      return std::make_shared<Sqrt>(opd);
     case type::KNOperatorType::KN_GELU_OP:
       return std::make_shared<Gelu>(opd);
     case type::KNOperatorType::KN_RELU_OP:
@@ -148,6 +158,10 @@ std::shared_ptr<AbstractExpr> get_pattern(type::TBOperatorType op,
   switch (op) {
     case type::TBOperatorType::TB_EXP_OP:
       return std::make_shared<Exp>(opd);
+    case type::TBOperatorType::TB_SQUARE_OP:
+      return std::make_shared<Square>(opd);
+    case type::TBOperatorType::TB_SQRT_OP:
+      return std::make_shared<Sqrt>(opd);
     case type::TBOperatorType::TB_SILU_OP:
       return std::make_shared<Silu>(opd);
     case type::TBOperatorType::TB_GELU_OP:
@@ -155,7 +169,8 @@ std::shared_ptr<AbstractExpr> get_pattern(type::TBOperatorType op,
     case type::TBOperatorType::TB_RELU_OP:
       return std::make_shared<Relu>(opd);
     case type::TBOperatorType::TB_CLAMP_OP:
-      return std::make_shared<Relu>(opd);
+      return std::make_shared<Clamp>(
+          type::CLAMP_MIN_MAX["min_val"], type::CLAMP_MIN_MAX["max_val"], opd);
     case type::TBOperatorType::TB_RMS_NORM_OP: {
       return std::make_shared<Div>(
           opd, std::make_shared<RMS>(tensor.dim[tensor.num_dims - 1], opd));
@@ -229,6 +244,8 @@ std::shared_ptr<AbstractExpr> get_pattern(type::KNOperatorType op,
       return std::make_shared<Div>(lhs, rhs);
     case type::KNOperatorType::KN_MUL_OP:
       return std::make_shared<Mul>(lhs, rhs);
+    case type::KNOperatorType::KN_POW_OP:
+      return std::make_shared<Pow>(lhs, rhs);
     default:
       assert(false);
   }
@@ -251,6 +268,8 @@ std::shared_ptr<AbstractExpr> get_pattern(type::TBOperatorType op,
       return std::make_shared<Div>(lhs, rhs);
     case type::TBOperatorType::TB_MUL_OP:
       return std::make_shared<Mul>(lhs, rhs);
+    case type::TBOperatorType::TB_POW_OP:
+      return std::make_shared<Pow>(lhs, rhs);
     default:
       assert(false);
   }
@@ -333,6 +352,8 @@ KNOperator *create_op(kernel::Graph &g,
     case type::KNOperatorType::KN_REDUCTION_2_OP:
       return g.create_reduction_op(input, 2, 1);
     case type::KNOperatorType::KN_EXP_OP:
+    case type::KNOperatorType::KN_SQUARE_OP:
+    case type::KNOperatorType::KN_SQRT_OP:
     case type::KNOperatorType::KN_SILU_OP:
     case type::KNOperatorType::KN_GELU_OP:
     case type::KNOperatorType::KN_RELU_OP:
@@ -365,6 +386,7 @@ KNOperator *create_op(kernel::Graph &g,
     case type::KNOperatorType::KN_DIV_OP:
     case type::KNOperatorType::KN_ADD_OP:
     case type::KNOperatorType::KN_MUL_OP:
+    case type::KNOperatorType::KN_POW_OP:
       return g.create_elementbinary_op(input1, input2, type);
     default:
       assert(false && "Unsupported operator");
@@ -388,6 +410,8 @@ TBOperator *create_op(threadblock::Graph &g,
                       STensor const &input) {
   switch (type) {
     case type::TBOperatorType::TB_EXP_OP:
+    case type::TBOperatorType::TB_SQUARE_OP:
+    case type::TBOperatorType::TB_SQRT_OP:
     case type::TBOperatorType::TB_SILU_OP:
     case type::TBOperatorType::TB_GELU_OP:
     case type::TBOperatorType::TB_RELU_OP:
@@ -452,6 +476,7 @@ TBOperator *create_op(threadblock::Graph &g,
     case type::TBOperatorType::TB_DIV_OP:
     case type::TBOperatorType::TB_ADD_OP:
     case type::TBOperatorType::TB_MUL_OP:
+    case type::TBOperatorType::TB_POW_OP:
       return g.create_elementbinary_op(input1, input2, type);
     default:
       assert(false && "Unsupported operator");

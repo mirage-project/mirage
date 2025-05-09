@@ -46,6 +46,9 @@ public:
   virtual bool fingerprint(void) = 0;
   virtual operator json() const = 0;
 
+  // hash related functions
+  virtual size_t get_owner_independent_hash() const;
+
 public:
   Graph *kgraph;
   mirage::type::KNOperatorType op_type;

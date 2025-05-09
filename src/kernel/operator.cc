@@ -16,6 +16,7 @@
 #include "mirage/kernel/operator.h"
 #include "mirage/kernel/device_memory_manager.h"
 #include "mirage/kernel/graph.h"
+#include "mirage/utils/hash_utils.h"
 
 namespace mirage {
 namespace kernel {
@@ -63,5 +64,20 @@ int KNOperator::get_output_dtensors(DTensor **outputs) {
   }
   return output_tensors.size();
 }
+
+/*virtual*/
+size_t KNOperator::get_owner_independent_hash() const {
+  size_t ret = std::hash<int>()(op_type);
+  for (auto const &t : input_tensors) {
+    size_t h = t.get_owner_independent_hash();
+    hash_combine(ret, h);
+  }
+  for (auto const &t : output_tensors) {
+    size_t h = t.get_owner_independent_hash();
+    hash_combine(ret, h);
+  }
+  return ret;
+}
+
 } // namespace kernel
 } // namespace mirage
