@@ -24,11 +24,11 @@
 #include <algorithm>
 #include <unordered_set>
 
+#include "mirage/threadblock/chunk.h"
 #include "mirage/threadblock/graph.h"
 #include "mirage/transpiler/sched_tb_graph.h"
 #include "mirage/transpiler/utils.h"
 #include "mirage/type.h"
-#include "mirage/threadblock/chunk.h"
 
 namespace mirage {
 namespace transpiler {
@@ -980,7 +980,8 @@ CustomOPTranspileResult
         }
         case type::TB_CHUNK_0_OP:
         case type::TB_CHUNK_1_OP:
-        case type::TB_CHUNK_2_OP: {
+        case type::TB_CHUNK_2_OP:
+        case type::TB_CHUNK_3_OP: {
           int chunk_size = static_cast<const tb::TBChunkOp *>(op)->chunk_size;
           int chunk_dim = static_cast<const tb::TBChunkOp *>(op)->chunk_dim;
           tb::STensor const &input = op->input_tensors.at(0);
@@ -1006,10 +1007,13 @@ CustomOPTranspileResult
             }
           }
           assert(iter_dim != -1);
-          string in_layout = mov_last_get_stensor_layout(input, stensor_metas.at(input.guid), iter_dim);
-          string out0_layout = mov_last_get_stensor_layout(output0, stensor_metas.at(output0.guid), iter_dim);
-          string out1_layout = mov_last_get_stensor_layout(output1, stensor_metas.at(output1.guid), iter_dim);
-          
+          string in_layout = mov_last_get_stensor_layout(
+              input, stensor_metas.at(input.guid), iter_dim);
+          string out0_layout = mov_last_get_stensor_layout(
+              output0, stensor_metas.at(output0.guid), iter_dim);
+          string out1_layout = mov_last_get_stensor_layout(
+              output1, stensor_metas.at(output1.guid), iter_dim);
+
           // modify chunk_dim if it is the first or last dim
           if ((chunk_dim == 0) && (input.num_dims != 1)) {
             chunk_dim = 1;
@@ -1020,7 +1024,8 @@ CustomOPTranspileResult
           code.e("using InLayout = $;", in_layout);
           code.e("using Out0Layout = $;", out0_layout);
           code.e("using Out1Layout = $;", out1_layout);
-          string epilogue = transpile_fusion_epilogue(sched_node.ops, get_datatype_str(input.data_type));
+          string epilogue = transpile_fusion_epilogue(
+              sched_node.ops, get_datatype_str(input.data_type));
           code.e("using Kernel = tb::ChunkKernel<$, "
                  "Out0Layout, Out1Layout, InLayout, "
                  "$, $, NUM_THREADS, $>;",
@@ -1029,7 +1034,8 @@ CustomOPTranspileResult
                  chunk_dim,
                  epilogue);
           code.e(append_epilogue_scalars(sched_node.ops));
-          code.e("Kernel::run(stensor$_ptr, stensor$_ptr, stensor$_ptr, thread_idx, scalars);",
+          code.e("Kernel::run(stensor$_ptr, stensor$_ptr, stensor$_ptr, "
+                 "thread_idx, scalars);",
                  output0.guid,
                  output1.guid,
                  input.guid);

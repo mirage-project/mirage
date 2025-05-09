@@ -135,21 +135,21 @@ void KernelGraphGenerator::generate_next_operator(
           }
 
           std::shared_ptr<AbstractExpr> pattern =
-            get_pattern(op_type, input_tensors, input_patterns);
+              get_pattern(op_type, input_tensors, input_patterns);
           if (!check_pattern(pattern)) {
             continue;
           }
 
-          if (op_type == type::KNOperatorType::KN_CHUNK_0_OP ||
-              op_type == type::KNOperatorType::KN_CHUNK_1_OP ||
-              op_type == type::KNOperatorType::KN_CHUNK_2_OP) {
+          // pruning based on the number of chunk operators
+          if (op_type >= type::KNOperatorType::KN_CHUNK_FIRST_OP_ID &&
+              op_type <= type::KNOperatorType::KN_CHUNK_LAST_OP_ID) {
             int chunk_type = op_type - type::KNOperatorType::KN_CHUNK_0_OP;
             if (c.ctx_num_chunk_ops[chunk_type] == num_chunk_ops[chunk_type]) {
               continue;
             }
             c.ctx_num_chunk_ops[chunk_type]++;
           }
-          
+
           KNOperator *new_op = create_op(*c.kn_graph, op_type, input_tensors);
 
           if (new_op) {
@@ -362,16 +362,16 @@ void KernelGraphGenerator::generate_next_operator(
           continue;
         }
 
-        if (op_type == type::TBOperatorType::TB_CHUNK_0_OP ||
-          op_type == type::TBOperatorType::TB_CHUNK_1_OP ||
-          op_type == type::TBOperatorType::TB_CHUNK_2_OP) {
+        // pruning based on number of chunk operators
+        if (op_type >= type::TBOperatorType::TB_CHUNK_FIRST_OP_ID &&
+            op_type <= type::TBOperatorType::TB_CHUNK_LAST_OP_ID) {
           int chunk_type = op_type - type::TBOperatorType::TB_CHUNK_0_OP;
           if (c.ctx_num_chunk_ops[chunk_type] == num_chunk_ops[chunk_type]) {
             continue;
           }
           c.ctx_num_chunk_ops[chunk_type]++;
         }
-        
+
         TBOperator *last_op = c.tb_graph->operators.back();
         TBOperator *new_op = create_op(*c.tb_graph, op_type, input_tensors);
 
@@ -454,9 +454,8 @@ void KernelGraphGenerator::preprocess(kernel::Graph const &computation_graph) {
     }
 
     // get number of chunk operators
-    if (op->op_type == type::KNOperatorType::KN_CHUNK_0_OP ||
-        op->op_type == type::KNOperatorType::KN_CHUNK_1_OP ||
-        op->op_type == type::KNOperatorType::KN_CHUNK_2_OP) {
+    if (op->op_type >= type::KNOperatorType::KN_CHUNK_FIRST_OP_ID &&
+        op->op_type <= type::KNOperatorType::KN_CHUNK_LAST_OP_ID) {
       num_chunk_ops[op->op_type - type::KNOperatorType::KN_CHUNK_0_OP]++;
     }
   }

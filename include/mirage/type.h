@@ -105,6 +105,7 @@ enum KNOperatorType {
   KN_CHUNK_0_OP = 1430,
   KN_CHUNK_1_OP = 1431,
   KN_CHUNK_2_OP = 1432,
+  KN_CHUNK_3_OP = 1433,
   KN_CHUNK_LAST_OP_ID = 1439,
   // Communication
   KN_ALLREDUCE_OP = 1900,
@@ -123,6 +124,7 @@ NLOHMANN_JSON_SERIALIZE_ENUM(KNOperatorType,
                                  {KN_CHUNK_0_OP, "kn_chunk_0_op"},
                                  {KN_CHUNK_1_OP, "kn_chunk_1_op"},
                                  {KN_CHUNK_2_OP, "kn_chunk_2_op"},
+                                 {KN_CHUNK_3_OP, "kn_chunk_3_op"},
                                  {KN_RMS_NORM_OP, "kn_rms_norm_op"},
                                  {KN_EXP_OP, "kn_exp_op"},
                                  {KN_SQUARE_OP, "kn_square_op"},
@@ -186,6 +188,7 @@ enum TBOperatorType {
   TB_CHUNK_0_OP = 2430,
   TB_CHUNK_1_OP = 2431,
   TB_CHUNK_2_OP = 2432,
+  TB_CHUNK_3_OP = 2433,
   TB_CHUNK_LAST_OP_ID = 2439,
   // Forloop Accum
   // LD indicates last dimension
@@ -212,6 +215,7 @@ NLOHMANN_JSON_SERIALIZE_ENUM(
         {TB_CHUNK_0_OP, "tb_chunk_0_op"},
         {TB_CHUNK_1_OP, "tb_chunk_1_op"},
         {TB_CHUNK_2_OP, "tb_chunk_2_op"},
+        {TB_CHUNK_3_OP, "tb_chunk_3_op"},
         {TB_EXP_OP, "tb_exp_op"},
         {TB_SQUARE_OP, "tb_square_op"},
         {TB_SQRT_OP, "tb_sqrt_op"},

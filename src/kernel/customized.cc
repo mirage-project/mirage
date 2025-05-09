@@ -16,11 +16,11 @@
 #include "mirage/kernel/customized.h"
 #include "mirage/kernel/device_memory_manager.h"
 #include "mirage/kernel/graph.h"
+#include "mirage/threadblock/chunk.h"
 #include "mirage/threadblock/element_unary.h"
 #include "mirage/threadblock/graph.h"
 #include "mirage/threadblock/operator.h"
 #include "mirage/threadblock/reduction.h"
-#include "mirage/threadblock/chunk.h"
 #include "mirage/threadblock/smem_tensor.h"
 #include "mirage/utils/hash_utils.h"
 #include <cassert>
@@ -198,10 +198,12 @@ KNCustomizedOp::KNCustomizedOp(mirage::kernel::Graph *_kgraph,
       }
       case mirage::type::TB_CHUNK_0_OP:
       case mirage::type::TB_CHUNK_1_OP:
-      case mirage::type::TB_CHUNK_2_OP: {
+      case mirage::type::TB_CHUNK_2_OP:
+      case mirage::type::TB_CHUNK_3_OP: {
         assert(my_inputs.size() == 1);
         int dim = op->op_type - mirage::type::TB_CHUNK_0_OP;
-        int chunk_size = static_cast<mirage::threadblock::TBChunkOp const *>(op)->chunk_size;
+        int chunk_size =
+            static_cast<mirage::threadblock::TBChunkOp const *>(op)->chunk_size;
         bgraph.chunk(my_inputs[0], chunk_size, dim);
         break;
       }

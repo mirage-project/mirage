@@ -22,7 +22,8 @@
 namespace mirage {
 namespace kernel {
 
-std::vector<DTensor> Graph::chunk(DTensor const &input, int chunk_size, int dim) {
+std::vector<DTensor>
+    Graph::chunk(DTensor const &input, int chunk_size, int dim) {
   KNOperator *op = create_chunk_op(input, chunk_size, dim);
   assert(op != nullptr);
   operators.push_back(op);
@@ -30,7 +31,8 @@ std::vector<DTensor> Graph::chunk(DTensor const &input, int chunk_size, int dim)
   return op->output_tensors;
 }
 
-std::vector<DTensor *> Graph::chunk(DTensor const *input, int chunk_size, int dim) {
+std::vector<DTensor *>
+    Graph::chunk(DTensor const *input, int chunk_size, int dim) {
   KNOperator *op = create_chunk_op(*input, chunk_size, dim);
   assert(op != nullptr);
   operators.push_back(op);
@@ -42,8 +44,8 @@ std::vector<DTensor *> Graph::chunk(DTensor const *input, int chunk_size, int di
   return res;
 }
 
-KNOperator *Graph::create_chunk_op(DTensor const &input, int chunk_size,
-                                    int dim) {
+KNOperator *
+    Graph::create_chunk_op(DTensor const &input, int chunk_size, int dim) {
   if (dim < 0 || dim >= input.num_dims || chunk_size <= 0) {
     return nullptr;
   }
@@ -58,10 +60,13 @@ KNOperator *Graph::create_chunk_op(DTensor const &input, int chunk_size,
   return op;
 }
 
-KNChunkOp::KNChunkOp(Graph *_graph, DTensor const &input, int chunk_size,
+KNChunkOp::KNChunkOp(Graph *_graph,
+                     DTensor const &input,
+                     int chunk_size,
                      int dim)
-    : KNOperator(_graph, (type::KNOperatorType)(type::KN_CHUNK_0_OP + dim), input), chunk_size(chunk_size),
-      chunk_dim(dim) {
+    : KNOperator(
+          _graph, (type::KNOperatorType)(type::KN_CHUNK_0_OP + dim), input),
+      chunk_size(chunk_size), chunk_dim(dim) {
   assert(input.dim[dim] % chunk_size == 0);
 
   for (size_t i = 0; i < chunk_size; ++i) {

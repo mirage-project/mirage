@@ -58,7 +58,7 @@ std::vector<z3::expr>
   z3::sort T = ctx.uninterpreted_sort("Tensor");
   z3::sort D = ctx.uninterpreted_sort("Dim");
   z3::sort I = ctx.int_sort();
-  
+
   // construct a tuple to return the two chunked tensors
   // z3::symbol tup_name = ctx.str_symbol("Tuple");
   // z3::array<Z3_symbol> names(2);
@@ -69,8 +69,9 @@ std::vector<z3::expr>
   // sorts[0] = T;
   // sorts[1] = T;
   // Z3_func_decl tuple;
-  // z3::sort Tup = z3::to_sort(ctx, Z3_mk_tuple_sort(ctx, tup_name, 2, names.ptr(), sorts.ptr(), &tuple, projs.ptr()));
-  
+  // z3::sort Tup = z3::to_sort(ctx, Z3_mk_tuple_sort(ctx, tup_name, 2,
+  // names.ptr(), sorts.ptr(), &tuple, projs.ptr()));
+
   z3::expr data_dim0 = ctx.constant("data_dim0", D);
   z3::expr data_dim1 = ctx.constant("data_dim1", D);
   z3::expr data_dim2 = ctx.constant("data_dim2", D);
@@ -303,15 +304,19 @@ std::vector<z3::expr>
         }
         case type::TBOperatorType::TB_CHUNK_0_OP:
         case type::TBOperatorType::TB_CHUNK_1_OP:
-        case type::TBOperatorType::TB_CHUNK_2_OP: {
+        case type::TBOperatorType::TB_CHUNK_2_OP:
+        case type::TBOperatorType::TB_CHUNK_3_OP: {
           assert(false && "formal verifier for chunk not implemented");
           break;
           // size_t dim = op->op_type - type::TBOperatorType::TB_CHUNK_0_OP;
-          // int chunk_size = static_cast<threadblock::TBChunkOp *>(op)->chunk_size;
-          // z3::expr a = tensor_exprs.at(op->input_tensors[0].guid);
-          // z3::expr chunk_result = chunk(a, chunk_size, data_dim[dim]);
-          // tensor_exprs.emplace(op->output_tensors[0].guid, z3::func_decl(ctx, projs[0])(chunk_result));
-          // tensor_exprs.emplace(op->output_tensors[1].guid, z3::func_decl(ctx, projs[1])(a));
+          // int chunk_size = static_cast<threadblock::TBChunkOp
+          // *>(op)->chunk_size; z3::expr a =
+          // tensor_exprs.at(op->input_tensors[0].guid); z3::expr chunk_result =
+          // chunk(a, chunk_size, data_dim[dim]);
+          // tensor_exprs.emplace(op->output_tensors[0].guid, z3::func_decl(ctx,
+          // projs[0])(chunk_result));
+          // tensor_exprs.emplace(op->output_tensors[1].guid, z3::func_decl(ctx,
+          // projs[1])(a));
         }
         case type::TBOperatorType::TB_RMS_NORM_OP: {
           z3::expr a = tensor_exprs.at(op->input_tensors[0].guid);
@@ -398,7 +403,8 @@ std::vector<z3::expr>
         }
         case type::KNOperatorType::KN_CHUNK_0_OP:
         case type::KNOperatorType::KN_CHUNK_1_OP:
-        case type::KNOperatorType::KN_CHUNK_2_OP: {
+        case type::KNOperatorType::KN_CHUNK_2_OP:
+        case type::KNOperatorType::KN_CHUNK_3_OP: {
           assert(false && "formal verifier for chunk not implemented");
           break;
         }

@@ -21,24 +21,24 @@ namespace mirage {
 namespace threadblock {
 
 CUTLASS_HOST_DEVICE
-void deserialize_chunk_op_parameters(int const *params, 
-                                     int &param_idx, 
-                                     int3 &input_shape, 
-                                     int &chunk_size, 
+void deserialize_chunk_op_parameters(int const *params,
+                                     int &param_idx,
+                                     int3 &input_shape,
+                                     int &chunk_size,
                                      int &chunk_dim,
                                      int &input_smem_offset,
                                      int &output1_smem_offset,
                                      int &output2_smem_offset) {
-    input_shape.x = params[param_idx++];
-    input_shape.y = params[param_idx++];
-    input_shape.z = params[param_idx++];
+  input_shape.x = params[param_idx++];
+  input_shape.y = params[param_idx++];
+  input_shape.z = params[param_idx++];
 
-    chunk_size = params[param_idx++];
-    chunk_dim = params[param_idx++];
+  chunk_size = params[param_idx++];
+  chunk_dim = params[param_idx++];
 
-    input_smem_offset = params[param_idx++];
-    output1_smem_offset = params[param_idx++];
-    output2_smem_offset = params[param_idx++];
+  input_smem_offset = params[param_idx++];
+  output1_smem_offset = params[param_idx++];
+  output2_smem_offset = params[param_idx++];
 }
 
 inline void serialize_chunk_op_parameters(int *params,
@@ -49,19 +49,19 @@ inline void serialize_chunk_op_parameters(int *params,
                                           int input_smem_offset,
                                           int output1_smem_offset,
                                           int output2_smem_offset) {
-    params[param_idx++] = input_shape.x;
-    params[param_idx++] = input_shape.y;
-    params[param_idx++] = input_shape.z;
+  params[param_idx++] = input_shape.x;
+  params[param_idx++] = input_shape.y;
+  params[param_idx++] = input_shape.z;
 
-    params[param_idx++] = chunk_size;
-    params[param_idx++] = chunk_dim;
+  params[param_idx++] = chunk_size;
+  params[param_idx++] = chunk_dim;
 
-    params[param_idx++] = input_smem_offset;
-    params[param_idx++] = output1_smem_offset;
-    params[param_idx++] = output2_smem_offset;
+  params[param_idx++] = input_smem_offset;
+  params[param_idx++] = output1_smem_offset;
+  params[param_idx++] = output2_smem_offset;
 
-    assert(param_idx <= NewKernelParams::MAX_NUM_PARAMETERS);
+  assert(param_idx <= NewKernelParams::MAX_NUM_PARAMETERS);
 }
 
-}
-}
+} // namespace threadblock
+} // namespace mirage

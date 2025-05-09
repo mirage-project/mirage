@@ -26,6 +26,7 @@ GeneratorConfig GeneratorConfig::get_default_config() {
           type::KN_CHUNK_0_OP,
           type::KN_CHUNK_1_OP,
           type::KN_CHUNK_2_OP,
+          type::KN_CHUNK_3_OP,
           type::KN_CUSTOMIZED_OP,
       } /* knop_to_explore */,
       {
@@ -47,6 +48,7 @@ GeneratorConfig GeneratorConfig::get_default_config() {
           type::TB_CHUNK_0_OP,
           type::TB_CHUNK_1_OP,
           type::TB_CHUNK_2_OP,
+          type::TB_CHUNK_3_OP,
       } /* tbop_to_explore */,
       {} /* imap_to_explore*/,
       {} /* imap_comb_to_explore */,

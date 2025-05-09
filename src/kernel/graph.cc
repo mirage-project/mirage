@@ -16,9 +16,9 @@
 #include "mirage/kernel/graph.h"
 #include "mirage/config.h"
 #include "mirage/kernel/device_memory_manager.h"
-#include "mirage/utils/hash_utils.h"
 #include "mirage/threadblock/chunk.h"
 #include "mirage/threadblock/serializer/chunk_serializer.h"
+#include "mirage/utils/hash_utils.h"
 
 #include <algorithm>
 #include <iostream>
@@ -261,13 +261,17 @@ void from_json(json const &j, Graph &g) {
       }
       case type::KNOperatorType::KN_CHUNK_0_OP:
       case type::KNOperatorType::KN_CHUNK_1_OP:
-      case type::KNOperatorType::KN_CHUNK_2_OP: {
+      case type::KNOperatorType::KN_CHUNK_2_OP:
+      case type::KNOperatorType::KN_CHUNK_3_OP: {
         // assume the chunk size is always 2
         size_t guid, guidO1, guidO2;
         jop.at("input_tensors")[0].at("guid").get_to(guid);
         jop.at("output_tensors")[0].at("guid").get_to(guidO1);
         jop.at("output_tensors")[1].at("guid").get_to(guidO2);
-        std::vector<DTensor> outputs = g.chunk(get_tensor_from_guid(guid), 2, op_type - type::KNOperatorType::KN_CHUNK_0_OP);
+        std::vector<DTensor> outputs =
+            g.chunk(get_tensor_from_guid(guid),
+                    2,
+                    op_type - type::KNOperatorType::KN_CHUNK_0_OP);
         guid_mapping[outputs[0].guid] = guidO1;
         guid_mapping[outputs[1].guid] = guidO2;
         break;

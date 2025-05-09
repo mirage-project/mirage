@@ -20,6 +20,16 @@ def get_rms_linear_kernel(num_tokens, output_dim):
     O = graph.matmul(D, W)
     graph.mark_output(O)
     return graph.superoptimize(config="mlp")
+
+def get_chunk_linear_kernel(num_tokens, intermediate_size, output_dim):
+    graph = mi.new_kernel_graph()
+    X13 = graph.new_input(dims=(num_tokens, intermediate_size * 2))
+    W2 = graph.new_input(dims=(intermediate_size, 4096))
+    X1, X3 = graph.chunk(X13, 2, 1)
+    output = graph.matmul(X1, W2)
+    graph.mark_output(output)
+    graph.mark_output(X3)
+    return graph.superoptimize(config="mlp")
    
 def mirage_llama(X, Wqkv, Wo, W13, W2, Kcache, Vcache, kernels):
     func = kernels[0]
@@ -33,13 +43,13 @@ def mirage_llama(X, Wqkv, Wo, W13, W2, Kcache, Vcache, kernels):
     Xk = Xk.view(Xk.shape[0], n_local_kv_heads, head_dim)
     Xv = Xv.view(Xv.shape[0], n_local_kv_heads, head_dim)
     output = flashinfer.single_prefill_with_kv_cache(Xq, Kcache, Vcache, causal=True)
-    X = torch.matmul(output.reshape(output_shape), Wo)
+    output_reshaped = output.reshape(output_shape)
+    X = torch.matmul(output_reshaped, Wo)
     func = kernels[1]
     outputs = func(inputs=[X, W13])
     X13 = outputs[0]
-    X1, X3 = X13.chunk(2, -1)
-    output = torch.matmul(X1, W2)
-    return output
+    func = kernels[2]
+    return func(inputs=[X13, W2])[0]
 
 if __name__ == "__main__":
     X = torch.randn(num_tokens, 4096, dtype=torch.float16, device='cuda:0')
@@ -52,7 +62,8 @@ if __name__ == "__main__":
 
     k1 = get_rms_linear_kernel(num_tokens, Wqkv.shape[-1])
     k2 = get_rms_linear_kernel(num_tokens, W13.shape[-1])
-    kernels = [k1, k2]
+    k3 = get_chunk_linear_kernel(num_tokens, intermediate_size, W2.shape[-1])
+    kernels = [k1, k2, k3]
 
     for _ in range(16):
         mirage_llama(X, Wqkv, Wo, W13, W2, Kcache, Vcache, kernels)

@@ -52,12 +52,14 @@ void abstract_expr_eval(
       patterns.insert(
           {op->output_tensors[0].guid,
            get_pattern(op->op_type, op->input_tensors, input_patterns)});
-      if (op->op_type == type::TBOperatorType::TB_CHUNK_0_OP ||
-          op->op_type == type::TBOperatorType::TB_CHUNK_1_OP ||
-          op->op_type == type::TBOperatorType::TB_CHUNK_2_OP) {
+
+      // if expression is a chunk op, add pattern corresponding to the other
+      // output
+      if (op->op_type >= type::TBOperatorType::TB_CHUNK_FIRST_OP_ID &&
+          op->op_type <= type::TBOperatorType::TB_CHUNK_LAST_OP_ID) {
         patterns.insert(
-          {op->output_tensors[1].guid,
-            get_pattern(op->op_type, op->input_tensors, input_patterns)});
+            {op->output_tensors[1].guid,
+             get_pattern(op->op_type, op->input_tensors, input_patterns)});
       }
     }
   }
@@ -92,13 +94,14 @@ void abstract_expr_eval(
       patterns.insert(
           {op->output_tensors[0].guid,
            get_pattern(op->op_type, op->input_tensors, input_patterns)});
-      if (op->op_type == type::KNOperatorType::KN_CHUNK_0_OP ||
-          op->op_type == type::KNOperatorType::KN_CHUNK_1_OP ||
-          op->op_type == type::KNOperatorType::KN_CHUNK_2_OP) {
+
+      // if op is chunk op, add pattern corresponding to additional output
+      if (op->op_type >= type::KNOperatorType::KN_CHUNK_FIRST_OP_ID &&
+          op->op_type <= type::KNOperatorType::KN_CHUNK_LAST_OP_ID) {
         patterns.insert(
-          {op->output_tensors[1].guid,
-            get_pattern(op->op_type, op->input_tensors, input_patterns)});
-          }
+            {op->output_tensors[1].guid,
+             get_pattern(op->op_type, op->input_tensors, input_patterns)});
+      }
     } else {
       assert(op->op_type == type::KNOperatorType::KN_CUSTOMIZED_OP);
       abstract_expr_eval(static_cast<kernel::KNCustomizedOp *>(op)->bgraph,

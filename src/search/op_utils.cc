@@ -29,6 +29,7 @@ bool is_unary(type::TBOperatorType op) {
       type::TBOperatorType::TB_CHUNK_0_OP,
       type::TBOperatorType::TB_CHUNK_1_OP,
       type::TBOperatorType::TB_CHUNK_2_OP,
+      type::TBOperatorType::TB_CHUNK_3_OP,
       type::TBOperatorType::TB_FORLOOP_ACCUM_NO_RED_OP,
       type::TBOperatorType::TB_FORLOOP_ACCUM_RED_LD_MEAN_OP,
       type::TBOperatorType::TB_FORLOOP_ACCUM_RED_LD_SUM_OP,
@@ -57,6 +58,7 @@ bool is_unary(type::KNOperatorType op) {
       type::KNOperatorType::KN_CHUNK_0_OP,
       type::KNOperatorType::KN_CHUNK_1_OP,
       type::KNOperatorType::KN_CHUNK_2_OP,
+      type::KNOperatorType::KN_CHUNK_3_OP,
       type::KNOperatorType::KN_EXP_OP,
       type::KNOperatorType::KN_SILU_OP,
       type::KNOperatorType::KN_GELU_OP,
@@ -127,14 +129,9 @@ std::shared_ptr<AbstractExpr> get_pattern(type::KNOperatorType op,
     case type::KNOperatorType::KN_CLAMP_OP:
       return std::make_shared<Clamp>(
           type::CLAMP_MIN_MAX["min_val"], type::CLAMP_MIN_MAX["max_val"], opd);
-    // case type::KNOperatorType::KN_CHUNK_0_OP:
-    // case type::KNOperatorType::KN_CHUNK_1_OP:
-    // case type::KNOperatorType::KN_CHUNK_2_OP:
-    //   return opd;
     case type::KNOperatorType::KN_OUTPUT_OP:
       return opd;
     default:
-        std::cout << op << std::endl;
       assert(false);
   }
 }
@@ -159,10 +156,6 @@ std::shared_ptr<AbstractExpr> get_pattern(type::TBOperatorType op,
       return std::make_shared<Relu>(opd);
     case type::TBOperatorType::TB_CLAMP_OP:
       return std::make_shared<Relu>(opd);
-    // case type::TBOperatorType::TB_CHUNK_0_OP:
-    // case type::TBOperatorType::TB_CHUNK_1_OP:
-    // case type::TBOperatorType::TB_CHUNK_2_OP:
-    //   return opd;
     case type::TBOperatorType::TB_RMS_NORM_OP: {
       return std::make_shared<Div>(
           opd, std::make_shared<RMS>(tensor.dim[tensor.num_dims - 1], opd));
@@ -269,7 +262,8 @@ std::shared_ptr<AbstractExpr>
                 std::vector<std::shared_ptr<AbstractExpr>> const &opds) {
   if (op == type::KNOperatorType::KN_CHUNK_0_OP ||
       op == type::KNOperatorType::KN_CHUNK_1_OP ||
-      op == type::KNOperatorType::KN_CHUNK_2_OP) {
+      op == type::KNOperatorType::KN_CHUNK_2_OP ||
+      op == type::KNOperatorType::KN_CHUNK_3_OP) {
     return opds[0];
   }
   for (auto const &expr : opds) {
@@ -292,7 +286,8 @@ std::shared_ptr<AbstractExpr>
                 std::vector<std::shared_ptr<AbstractExpr>> const &opds) {
   if (op == type::TBOperatorType::TB_CHUNK_0_OP ||
       op == type::TBOperatorType::TB_CHUNK_1_OP ||
-      op == type::TBOperatorType::TB_CHUNK_2_OP) {
+      op == type::TBOperatorType::TB_CHUNK_2_OP ||
+      op == type::TBOperatorType::TB_CHUNK_3_OP) {
     return opds[0];
   }
   for (auto const &expr : opds) {
@@ -353,6 +348,8 @@ KNOperator *create_op(kernel::Graph &g,
       return g.create_chunk_op(input, 2, 1);
     case type::KNOperatorType::KN_CHUNK_2_OP:
       return g.create_chunk_op(input, 2, 2);
+    case type::KNOperatorType::KN_CHUNK_3_OP:
+      return g.create_chunk_op(input, 2, 3);
     default:
       assert(false && "Unsupported operator");
   }
@@ -402,7 +399,8 @@ TBOperator *create_op(threadblock::Graph &g,
                                             type::CLAMP_MIN_MAX["max_val"]);
     case type::TBOperatorType::TB_CHUNK_0_OP:
     case type::TBOperatorType::TB_CHUNK_1_OP:
-    case type::TBOperatorType::TB_CHUNK_2_OP: {
+    case type::TBOperatorType::TB_CHUNK_2_OP:
+    case type::TBOperatorType::TB_CHUNK_3_OP: {
       int dim = (int)type - (int)type::TBOperatorType::TB_CHUNK_0_OP;
       return g.create_chunk_op(input, 2, dim);
     }

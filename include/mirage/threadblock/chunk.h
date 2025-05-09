@@ -24,16 +24,13 @@ using namespace cutlass;
 
 class TBChunkOp : public TBOperator {
 public:
-TBChunkOp(Graph *bgraph,
-                STensor const &input,
-                int chunk_size,
-                int dim);
-~TBChunkOp();
+  TBChunkOp(Graph *bgraph, STensor const &input, int chunk_size, int dim);
+  ~TBChunkOp();
 
-operator json() const override;
+  operator json() const override;
 
 public:
-int chunk_size, chunk_dim;
+  int chunk_size, chunk_dim;
 };
 
 } // namespace threadblock

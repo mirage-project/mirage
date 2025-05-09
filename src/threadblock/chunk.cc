@@ -20,72 +20,81 @@
 namespace mirage {
 namespace threadblock {
 
-std::vector<STensor> Graph::chunk(STensor const &input, int chunk_size, int dim) {
-    TBOperator *op = create_chunk_op(input, chunk_size, dim);
-    assert(op != nullptr);
-    operators.push_back(op);
-    return op->output_tensors;
+std::vector<STensor>
+    Graph::chunk(STensor const &input, int chunk_size, int dim) {
+  TBOperator *op = create_chunk_op(input, chunk_size, dim);
+  assert(op != nullptr);
+  operators.push_back(op);
+  return op->output_tensors;
 }
 
-std::vector<STensor *> Graph::chunk(STensor const *input, int chunk_size, int dim) {
-    TBOperator *op = create_chunk_op(*input, chunk_size, dim);
-    assert(op != nullptr);
-    operators.push_back(op);
-    assert(op->output_tensors.size() > 0);
-    std::vector<STensor *> res;
-    for (auto i = 0; i < op->output_tensors.size(); i++) {
-        res.push_back(&(op->output_tensors[i]));
-      }
-    return res;
+std::vector<STensor *>
+    Graph::chunk(STensor const *input, int chunk_size, int dim) {
+  TBOperator *op = create_chunk_op(*input, chunk_size, dim);
+  assert(op != nullptr);
+  operators.push_back(op);
+  assert(op->output_tensors.size() > 0);
+  std::vector<STensor *> res;
+  for (auto i = 0; i < op->output_tensors.size(); i++) {
+    res.push_back(&(op->output_tensors[i]));
+  }
+  return res;
 }
 
-TBOperator *Graph::create_chunk_op(STensor const &input, int chunk_size, int dim) {
-    if (dim < 0 || dim >= input.num_dims || chunk_size <= 0) {
-        return nullptr;
-      }
-    if (input.dim[dim] % chunk_size != 0) {
-        return nullptr;
-    }
-    TBOperator *op = new TBChunkOp(this, input, chunk_size, dim);
-    size_t smem_usage = calculate_shared_memory_usage(op);
-    if (smem_usage > mirage::config::MAX_SMEM_SIZE) {
-        delete op;
-        return nullptr;
-    } else {
-        return op;
-    }
+TBOperator *
+    Graph::create_chunk_op(STensor const &input, int chunk_size, int dim) {
+  if (dim < 0 || dim >= input.num_dims || chunk_size <= 0) {
+    return nullptr;
+  }
+  if (input.dim[dim] % chunk_size != 0) {
+    return nullptr;
+  }
+  TBOperator *op = new TBChunkOp(this, input, chunk_size, dim);
+  size_t smem_usage = calculate_shared_memory_usage(op);
+  if (smem_usage > mirage::config::MAX_SMEM_SIZE) {
+    delete op;
+    return nullptr;
+  } else {
+    return op;
+  }
 }
 
-TBChunkOp::TBChunkOp(Graph *bgraph, STensor const &input, int chunk_size, int dim)
- : TBOperator(bgraph, (type::TBOperatorType)( mirage::type::TB_CHUNK_0_OP + dim), input), chunk_size(chunk_size), chunk_dim(dim) {
-    assert(input.dim[dim] % chunk_size == 0);
-    
-    for (size_t i = 0; i < chunk_size; i++) {
-        STensor output_i = input;
-        output_i.dim[dim] /= chunk_size;
-        output_i.owner_op = this;
-        output_i.owner_ts_idx = i;
-        output_i.guid = STensor::next_guid++;
-        output_i.smem_offset = bgraph->allocate_fingerprint(output_i);
-        output_tensors.push_back(output_i);
-    }
+TBChunkOp::TBChunkOp(Graph *bgraph,
+                     STensor const &input,
+                     int chunk_size,
+                     int dim)
+    : TBOperator(bgraph,
+                 (type::TBOperatorType)(mirage::type::TB_CHUNK_0_OP + dim),
+                 input),
+      chunk_size(chunk_size), chunk_dim(dim) {
+  assert(input.dim[dim] % chunk_size == 0);
+
+  for (size_t i = 0; i < chunk_size; i++) {
+    STensor output_i = input;
+    output_i.dim[dim] /= chunk_size;
+    output_i.owner_op = this;
+    output_i.owner_ts_idx = i;
+    output_i.guid = STensor::next_guid++;
+    output_i.smem_offset = bgraph->allocate_fingerprint(output_i);
+    output_tensors.push_back(output_i);
+  }
 }
 
 TBChunkOp::~TBChunkOp() {
-    for (int i = chunk_size - 1; i >= 0; i--) {
-        bgraph->free_fingerprint(output_tensors[i]);
-    }
+  for (int i = chunk_size - 1; i >= 0; i--) {
+    bgraph->free_fingerprint(output_tensors[i]);
+  }
 }
 
 TBChunkOp::operator json() const {
-    return {
-        {"op_type", op_type},
-        {"input_tensors", input_tensors},
-        {"output_tensors", output_tensors},
-        {"chunk_size", chunk_size},
-        {"chunk_dim", chunk_dim},
-    };
+  return {
+      {"op_type", op_type},
+      {"input_tensors", input_tensors},
+      {"output_tensors", output_tensors},
+      {"chunk_size", chunk_size},
+      {"chunk_dim", chunk_dim},
+  };
 }
 
-}
-}
+} // namespace threadblock
+} // namespace mirage
