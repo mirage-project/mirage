@@ -47,10 +47,12 @@ list(APPEND CMAKE_CUDA_FLAGS "-D__CUDACC_VER_MAJOR__=${CUDA_VERSION_MAJOR} -D__C
 
 if ("${CMAKE_BUILD_TYPE}" STREQUAL "Debug")
   message("Build in Debug mode")
-  set(CMAKE_CUDA_FLAGS "-O0 -g -Xcompiler=-fPIC ${CMAKE_CUDA_FLAGS}")
-  set(CMAKE_CXX_FLAGS "-fopenmp -O0 -g -Wall -fPIC ${CMAKE_CXX_FLAGS}")
+  message(STATUS ${CMAKE_CXX_FLAGS})
+  set(CMAKE_CUDA_FLAGS "-fopenmp -O0 -g -Xcompiler=-fPIC ${CMAKE_CUDA_FLAGS}")
+  #set(CMAKE_CXX_FLAGS "-fopenmp -O0 -g -Wall -fPIC ${CMAKE_CXX_FLAGS}")
+  set(CMAKE_CXX_FLAGS "-fopenmp -O0 -g -Wall -fPIC")
 else()
-  set(CMAKE_CUDA_FLAGS "-O2 -Xcompiler=-fPIC ${CMAKE_CUDA_FLAGS}")
+  set(CMAKE_CUDA_FLAGS "-fopenmp -O2 -Xcompiler=-fPIC ${CMAKE_CUDA_FLAGS}")
   set(CMAKE_CXX_FLAGS "-fopenmp -O2 -Wall -fPIC ${CMAKE_CXX_FLAGS}")
 endif()
 
@@ -75,6 +77,24 @@ endif()
 set(CUTLASS_DIR ${PROJECT_SOURCE_DIR}/deps/cutlass)
 include_directories(deps/cutlass/include)
 include_directories(deps/cutlass/tools/util/include)
+
+#set NVSHMEM
+if (NOT "${USE_NVSHMEM}" STREQUAL "OFF")
+  if ("${USE_MPI}" STREQUAL "OFF")
+    message(FATAL_ERROR "Must enable MPI when USE_NVSHMEM is ON")
+  endif()	  
+  message(STATUS "NVSHMEM_HOME=" ${NVSHMEM_HOME})
+  find_package(NVSHMEM REQUIRED)
+  find_package(MPI REQUIRED)
+  find_package(CUDAToolkit REQUIRED)
+  include_directories(${MPI_CXX_INCLUDE_PATH})
+  include_directories(${NVSHMEM_HOME}/include)
+  add_library(nvshmem ALIAS nvshmem::nvshmem) 
+  add_library(nvshmem_host ALIAS nvshmem::nvshmem_host) 
+  add_library(nvshmem_device ALIAS nvshmem::nvshmem_device)
+  list(APPEND MIRAGE_LINK_LIBS nvshmem_host nvshmem_device ${MPI_CXX_LIBRARIES})
+  set(CMAKE_CUDA_FLAGS "-rdc=true -ccbin=mpic++ ${CMAKE_CUDA_FLAGS}")
+endif()
 
 #include_directories(${MIRAGE_INCLUDE_DIRS})
 
@@ -110,6 +130,8 @@ add_library(mirage_runtime ${MIRAGE_SRCS})
 # undefined symbol: __cudaRegisterLinkedBinary_...
 #set_target_properties(mirage_runtime
 #  PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+set_target_properties(mirage_runtime
+  PROPERTIES CUDA_RESOLVE_DEVICE_SYMBOLS ON)
 
 set_target_properties(mirage_runtime PROPERTIES CUDA_ARCHITECTURES "70;75;80;86;89;90")
 
@@ -125,6 +147,15 @@ install(TARGETS mirage_runtime
 
 install(DIRECTORY ${PROJECT_SOURCE_DIR}/include
     DESTINATION .)
+
+# build runtime demo
+set(CPP_EXAMPLES_DIR cpp_examples/runtime_demo)
+set(CPP_EXAMPLES_BIN runtime_demo)
+file(GLOB CPP_EXAMPLES_SRCS ${CPP_EXAMPLES_DIR}/launcher.cc)
+add_executable(${CPP_EXAMPLES_BIN} ${CPP_EXAMPLES_SRCS})
+set_target_properties(${CPP_EXAMPLES_BIN}
+  PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CPP_EXAMPLES_DIR})
+target_link_libraries(${CPP_EXAMPLES_BIN} mirage_runtime)
 
 if ("${BUILD_CPP_EXAMPLES}" STREQUAL "ON")
   set(CPP_EXAMPLES_DIR cpp_examples)
