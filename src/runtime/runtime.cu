@@ -160,7 +160,7 @@ __global__ void persistent_kernel(RuntimeConfig config) {
           }
           break;
         }
-        case TASK_SILU_MUL_LINEAR: {
+        case TASK_SILU_MUL_LINEAR_WITH_RESIDUAL: {
           if (threadIdx.x == 0) {
             // printf("worker_id(%d) task_type(SiluMulLinear)\n", worker_id);
           }
@@ -178,7 +178,7 @@ __global__ void persistent_kernel(RuntimeConfig config) {
           }
           break;
         }
-        case TASK_MATMUL: {
+        case TASK_MATMUL_WITH_RESIDUAL: {
           if (threadIdx.x == 0) {
             // printf("worker_id(%d) task_type(AllReduce)\n", worker_id);
           }

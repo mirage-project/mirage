@@ -43,7 +43,6 @@ size_t get_event_id(int my_gpu_id, size_t event_pos, bool nvshmem_event) {
 void dfs_create_events_add_tasks(
     int depth,
     int const my_gpu_id,
-    int num_sub_events,
     std::vector<int> const &event_dims,
     int3 const input_map,
     int3 const output_map,
@@ -88,27 +87,8 @@ void dfs_create_events_add_tasks(
         }
       }
     }
-    // Add subevents if last_task_id >= first_task_id + num_sub_events
-    if (event_desc.last_task_id >= event_desc.first_task_id + num_sub_events) {
-      // Create an event that will launch all subevents
-      all_events.push_back(EventDesc(EVENT_LAUNCH_EVENTS, event_desc.num_triggers, all_events.size() + 1, all_events.size() + 1 + num_sub_events));
-      // Launch subevents
-      size_t tasks_per_event = (event_desc.last_task_id - event_desc.first_task_id + num_sub_events - 1) / num_sub_events;
-      TaskId cur_task_id = event_desc.first_task_id;
-      for (int i = 0; i < num_sub_events; i++) {
-        EventDesc sub_event;
-        sub_event.event_type = EVENT_LAUNCH_TASKS;
-	sub_event.num_triggers = 1;
-        sub_event.first_task_id = cur_task_id;
-        sub_event.last_task_id = std::min(event_desc.last_task_id, cur_task_id + tasks_per_event);
-        assert(sub_event.first_task_id < sub_event.last_task_id);
-        cur_task_id = sub_event.last_task_id;
-        all_events.push_back(sub_event);
-      }
-    } else {
-      event_desc.event_type = EVENT_LAUNCH_TASKS;
-      all_events.push_back(event_desc);
-    }
+    event_desc.event_type = event_desc.last_task_id >= event_desc.first_task_id + 8 ? EVENT_LAUNCH_MASSIVE_TASKS : EVENT_LAUNCH_TASKS;
+    all_events.push_back(event_desc);
   } else {
     for (int i = 0; i < event_dims[depth]; i++) {
       dim3 new_consumer_lo_bid = consumer_lo_bid;
@@ -147,7 +127,6 @@ void dfs_create_events_add_tasks(
       }
       dfs_create_events_add_tasks(depth + 1,
                                   my_gpu_id,
-                                  num_sub_events,
                                   event_dims,
                                   input_map,
                                   output_map,
@@ -408,7 +387,6 @@ void Runtime::register_mugraph(
       }
       dfs_create_events_add_tasks(0,                       /*depth*/
                                   my_gpu_id,               /*my_gpu_id*/
-                                  8,                       /*num_sub_events*/
                                   event_dims,              /*event_dims*/
                                   input_map,               /*input_map*/
                                   output_map,              /*output_map*/
@@ -479,14 +457,8 @@ bool Runtime::sanity_check() {
       triggered_events.insert(event_id);
       size_t event_pos = event_id & 0xffffffff;
       EventDesc desc = all_events[event_pos];
-      if (desc.event_type == EVENT_LAUNCH_TASKS) {
-        for (TaskId tid = desc.first_task_id; tid < desc.last_task_id; tid++) {
-          task_queue.push(tid);
-        }
-      } else if (desc.event_type == EVENT_LAUNCH_EVENTS) {
-        for (EventId eid = desc.first_task_id; eid < desc.last_task_id; eid++) {
-          event_queue.push(eid);
-        }
+      for (TaskId tid = desc.first_task_id; tid < desc.last_task_id; tid++) {
+        task_queue.push(tid);
       }
     }
   }
@@ -730,12 +702,16 @@ std::string Runtime::print_task_graph(
                    type::KN_INPUT_OP);
             if (io_desc.type == IODesc::FusedTorchTensor) {
               // Currently assert that we fuse the last dim (i.e.,num_dims - 1)
-              int fused_dim = 0;
+              int fused_group_size = 0;
+	      std::vector<int> group_sizes;
               for (auto const &sub_desc : io_desc.sub_descs) {
-                fused_dim += sub_desc.tensor.dim[num_dims - 1];
                 assert(sub_desc.tensor.num_dims == num_dims);
+                assert(sub_desc.tensor.dim[num_dims - 1] % io_desc.num_groups == 0);
+                int my_group_size = sub_desc.tensor.dim[num_dims - 1] / io_desc.num_groups;
+                fused_group_size += my_group_size;
+                group_sizes.push_back(my_group_size);
               }
-              assert(io_desc.tensor.dim[num_dims - 1] == fused_dim);
+              assert(io_desc.tensor.dim[num_dims - 1] == fused_group_size * io_desc.num_groups);
               assert(io_desc.tensor.num_dims == num_dims);
               int fused_dim_off = 0;
               if (input_map.x == num_dims - 1) {
@@ -750,25 +726,27 @@ std::string Runtime::print_task_graph(
                 fused_dim_off = io_desc.tensor.dim[num_dims - 1] /
                                 bgraph.grid_dim.z * bid.z;
               }
+              int fused_dim_off_in_group = fused_dim_off % fused_group_size;
               size_t index = 0;
-              while (index < io_desc.sub_descs.size()) {
-                if (fused_dim_off >=
-                    io_desc.sub_descs[index].tensor.dim[num_dims - 1]) {
-                  fused_dim_off -=
-                      io_desc.sub_descs[index].tensor.dim[num_dims - 1];
+              while (index < group_sizes.size()) {
+                if (fused_dim_off_in_group >= group_sizes[index]) {
+                  fused_dim_off_in_group -= group_sizes[index];
                   index++;
                 } else {
                   break;
                 }
               }
               IODesc sub_desc = io_desc.sub_descs[index];
+              int fused_dim_off_subtensor = fused_dim_off / fused_group_size * group_sizes[index] + fused_dim_off_in_group;
+              // Assert that it is within range
+              assert(fused_dim_off_subtensor < sub_desc.tensor.dim[num_dims - 1]);
               if (input_map.x >= 0 && input_map.x != num_dims - 1) {
                 size_t block_size =
                     sub_desc.tensor.dim[input_map.x] / bgraph.grid_dim.x;
                 offset +=
                     block_size * bid.x * sub_desc.tensor.stride[input_map.x];
               } else if (input_map.x == num_dims - 1) {
-                offset += fused_dim_off * sub_desc.tensor.stride[input_map.x];
+                offset += fused_dim_off_subtensor * sub_desc.tensor.stride[input_map.x];
               }
               if (input_map.y >= 0 && input_map.y != num_dims - 1) {
                 size_t block_size =
@@ -776,7 +754,7 @@ std::string Runtime::print_task_graph(
                 offset +=
                     block_size * bid.y * sub_desc.tensor.stride[input_map.y];
               } else if (input_map.y == num_dims - 1) {
-                offset += fused_dim_off * sub_desc.tensor.stride[input_map.y];
+                offset += fused_dim_off_subtensor * sub_desc.tensor.stride[input_map.y];
               }
               if (input_map.z >= 0 && input_map.z != num_dims - 1) {
                 size_t block_size =
@@ -784,7 +762,7 @@ std::string Runtime::print_task_graph(
                 offset +=
                     block_size * bid.z * sub_desc.tensor.stride[input_map.z];
               } else if (input_map.z == num_dims - 1) {
-                offset += fused_dim_off * sub_desc.tensor.stride[input_map.z];
+                offset += fused_dim_off_subtensor * sub_desc.tensor.stride[input_map.z];
               }
               code.e("TensorDesc input$;", i);
               code.e("input$.base_ptr = static_cast<char*>($) + $;",

@@ -79,6 +79,7 @@ struct IODesc {
   std::string name;
   TensorDesc tensor;
   // Only used for fused tensors
+  int num_groups;
   std::vector<IODesc> sub_descs;
 };
 

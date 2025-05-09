@@ -47,8 +47,10 @@ list(APPEND CMAKE_CUDA_FLAGS "-D__CUDACC_VER_MAJOR__=${CUDA_VERSION_MAJOR} -D__C
 
 if ("${CMAKE_BUILD_TYPE}" STREQUAL "Debug")
   message("Build in Debug mode")
+  message(STATUS ${CMAKE_CXX_FLAGS})
   set(CMAKE_CUDA_FLAGS "-fopenmp -O0 -g -Xcompiler=-fPIC ${CMAKE_CUDA_FLAGS}")
-  set(CMAKE_CXX_FLAGS "-fopenmp -O0 -g -Wall -fPIC ${CMAKE_CXX_FLAGS}")
+  #set(CMAKE_CXX_FLAGS "-fopenmp -O0 -g -Wall -fPIC ${CMAKE_CXX_FLAGS}")
+  set(CMAKE_CXX_FLAGS "-fopenmp -O0 -g -Wall -fPIC")
 else()
   set(CMAKE_CUDA_FLAGS "-fopenmp -O2 -Xcompiler=-fPIC ${CMAKE_CUDA_FLAGS}")
   set(CMAKE_CXX_FLAGS "-fopenmp -O2 -Wall -fPIC ${CMAKE_CXX_FLAGS}")
