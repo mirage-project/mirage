@@ -37,7 +37,6 @@ if __name__ == "__main__":
         outputs = graph(inputs=input_tensors)
         #torch_rms_norm(input_tensors[0], input_tensors[1])
 
-
     torch.cuda.synchronize()
 
     starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)

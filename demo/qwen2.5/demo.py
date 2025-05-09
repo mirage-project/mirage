@@ -9,11 +9,12 @@ if __name__ == "__main__":
     args = parser.parse_args()
     print("Input arguments:", args)
 
-    model_name = "Qwen/Qwen2.5-7B-Instruct"
+    #model_name = "Qwen/Qwen2.5-7B-Instruct"
+    model_name = "Qwen/Qwen3-8B"
     torch.set_default_dtype(torch.bfloat16)
     torch.cuda.set_device(0)
     with torch.device("cuda"):
-        model = Qwen2ForCausalLM.from_pretrained(model_name)
+        model = Qwen2ForCausalLM.from_pretrained(model_name).to("cuda")
         model.fuse_weights()
         if not args.disable_mirage:
             model.superoptimize_kernels()
