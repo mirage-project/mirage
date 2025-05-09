@@ -144,7 +144,8 @@ __global__ void
     } else if (type == mirage::type::KN_SQUARE_OP) {
       output_ptr[i] = compute_square_fingerprint(input_ptr[i]);
     } else if (type == mirage::type::KN_SQRT_OP) {
-      output_ptr[i] = compute_sqrt_fingerprint(input_ptr[i], sqrt_p_lookup_table, sqrt_q_lookup_table);
+      output_ptr[i] = compute_sqrt_fingerprint(
+          input_ptr[i], sqrt_p_lookup_table, sqrt_q_lookup_table);
     } else if (type == mirage::type::KN_SILU_OP) {
       output_ptr[i] = compute_silu_fingerprint(input_ptr[i], exp_lookup_table);
     } else if (type == mirage::type::KN_GELU_OP) {

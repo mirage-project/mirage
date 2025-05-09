@@ -197,6 +197,7 @@ NKITranspiler::NKITranspiler(kernel::Graph const *_graph,
             case TB_ADD_OP:
             case TB_MUL_OP:
             case TB_DIV_OP:
+            case TB_SUB_OP:
             case TB_POW_OP: {
               assert(stensor_inputs.size() == 2);
               threadblock::STensor st = tbg->elementbinary(
@@ -439,6 +440,7 @@ std::optional<NKIErrorInfo> NKITranspiler::resolve_tensor_layout() {
           case type::TB_ADD_OP:
           case type::TB_MUL_OP:
           case type::TB_DIV_OP:
+          case type::TB_SUB_OP:
           case type::TB_POW_OP: {
             tb::STensor const &input0 = tb_op->input_tensors.at(0);
             tb::STensor const &input1 = tb_op->input_tensors.at(1);
