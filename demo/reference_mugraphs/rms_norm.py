@@ -55,3 +55,5 @@ if __name__ == "__main__":
     mean_syn = curr_time / 1000
     #print(timings)
     print(mean_syn)
+
+    graph.visualize("rms_norm")

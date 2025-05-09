@@ -487,6 +487,8 @@ bool KernelGraphGenerator::check_pattern(
   return false;
 }
 
+// std::vector<std::string> KernelGraphGenerator::wrong_results(std::shared_ptr<AbstractExpr> pattern){}
+
 bool KernelGraphGenerator::verify(kernel::Graph &g) {
   std::vector<DTensor> outputs = get_output_tensors(g);
 

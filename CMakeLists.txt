@@ -111,6 +111,26 @@ add_library(mirage_runtime ${MIRAGE_SRCS})
 #set_target_properties(mirage_runtime
 #  PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 
+#set RUST
+include(ExternalProject)
+set_directory_properties(PROPERTIES EP_PREFIX ${PROJECT_SOURCE_DIR}/deps/Rust)
+ExternalProject_Add(
+  rust_part
+  DOWNLOAD_COMMAND ""
+  CONFIGURE_COMMAND ""
+  BUILD_COMMAND cargo build --release
+  BINARY_DIR "${PROJECT_SOURCE_DIR}/rust_part"
+  INSTALL_COMMAND ""
+  LOG_BUILD ON)
+
+add_dependencies(mirage_runtime rust_part)
+
+target_link_libraries(mirage_runtime
+  debug "${PROJECT_SOURCE_DIR}/rust_part/target/debug/librust_part.so"
+  optimized "${PROJECT_SOURCE_DIR}/rust_part/target/release/librust_part.so")
+
+set_target_properties(mirage_runtime PROPERTIES CXX_STANDARD 11 CXX_STANDARD_REQUIRED ON)
+
 set_target_properties(mirage_runtime PROPERTIES CUDA_ARCHITECTURES "70;75;80;86;89;90")
 
 target_compile_features(mirage_runtime PUBLIC cxx_std_17)
@@ -294,6 +314,17 @@ endif()
 if ("${BUILD_CPP_EXAMPLES}" STREQUAL "ON")
   set(CPP_EXAMPLES_DIR cpp_examples)
   set(CPP_EXAMPLES_BIN chameleon)
+  file(GLOB CPP_EXAMPLES_SRCS ${CPP_EXAMPLES_DIR}/${CPP_EXAMPLES_BIN}.cc)
+  add_executable(${CPP_EXAMPLES_BIN} ${CPP_EXAMPLES_SRCS})
+  set_target_properties(${CPP_EXAMPLES_BIN}
+    PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CPP_EXAMPLES_DIR})
+  target_link_libraries(${CPP_EXAMPLES_BIN} mirage_runtime)
+endif()
+
+# egg_tests
+if("${BUILD_CPP_EXAMPLES}" STREQUAL "ON")
+  set(CPP_EXAMPLES_DIR cpp_examples)
+  set(CPP_EXAMPLES_BIN egg_tests)
   file(GLOB CPP_EXAMPLES_SRCS ${CPP_EXAMPLES_DIR}/${CPP_EXAMPLES_BIN}.cc)
   add_executable(${CPP_EXAMPLES_BIN} ${CPP_EXAMPLES_SRCS})
   set_target_properties(${CPP_EXAMPLES_BIN}

@@ -23,7 +23,8 @@ int cython_search(mirage::kernel::Graph const *input_graph,
                   std::vector<int> frange_to_explore,
                   char const *filename,
                   bool verbose,
-                  char const *default_config) {
+                  char const *default_config,
+                  bool is_formal_verified) {
   if (filename) {
     std::ifstream generated_graphs_file(filename, std::ifstream::binary);
     if (generated_graphs_file) {
@@ -49,6 +50,9 @@ int cython_search(mirage::kernel::Graph const *input_graph,
         config.enable_concat_matmul_transformation();
       } else if (!strcmp(default_config, "mlp")) {
       }
+    }
+    if (is_formal_verified) {
+      config.verifier_type = search::VerifierType::FORMAL_VERIFIER;
     }
     // Customized imaps
     if (imap_to_explore.size() > 0) {

@@ -2,7 +2,7 @@ import mirage as mi
 import argparse
 import os
 import torch
-import flashinfer
+# import flashinfer
 
 n_local_heads = 32
 n_local_kv_heads = 32
@@ -25,6 +25,7 @@ def get_rms_linear():
     tO = tb_graph.div(tAccM, tAccX)
     tb_graph.new_output(stensor=tO, output_map=(1, -1, -1))
     O = graph.customized([X, W], tb_graph)
+    graph.mark_output(O[0])
     return graph, O
 
 def get_rms_linear2():
@@ -40,6 +41,7 @@ def get_rms_linear2():
     tO = tb_graph.div(tAccM, tAccX)
     tb_graph.new_output(stensor=tO, output_map=(1, -1, -1))
     O = graph.customized([X, W], tb_graph)
+    graph.mark_output(O[0])
     return graph, O
 
 def get_chameleon_attention():
@@ -69,6 +71,7 @@ def get_chameleon_attention():
     bO = tbgraph2.div(bA, bB)
     tbgraph2.new_output(stensor=bO, output_map=(0, 1, -1))
     O = graph.customized(O, tbgraph2)
+    graph.mark_output(O[0])
     return graph, O
 
 def mirage_chameleon(X, Wqkv, Wo, W13, W2, Kcache, Vcache, kernels):
