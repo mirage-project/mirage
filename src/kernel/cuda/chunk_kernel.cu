@@ -7,6 +7,7 @@
 #include "mirage/utils/fingerprint_functions.h"
 #include "mirage/utils/hash_utils.h"
 #include <cassert>
+#include <iostream>
 
 namespace mirage {
 namespace kernel {
@@ -129,34 +130,35 @@ __global__ void compute_chunk_fingerprint(char *dmem_fp_ptr,
 
   int i = threadIdx.x + blockIdx.x * blockDim.x;
   if (i < num_elements) {
-    FPType one = 1;
     int input_i = i / (input_shape.y * input_shape.z);
     int input_j = (i % (input_shape.y * input_shape.z)) / input_shape.z;
     int input_k = i % input_shape.z;
     if (chunk_dim == 0) {
       if (input_i < output_shape.x) {
-        output1_fp_ptr[i] = compute_mul_fingerprint(input_fp_ptr[i], one);
+        output1_fp_ptr[i] = input_fp_ptr[i];
       } else {
         int i2 =
             ((input_i - output_shape.x) * (output_shape.y * output_shape.z)) +
             (input_j * output_shape.z) + input_k;
-        output2_fp_ptr[i2] = compute_mul_fingerprint(input_fp_ptr[i], one);
+        output2_fp_ptr[i2] = input_fp_ptr[i];
       }
     } else if (chunk_dim == 1) {
       if (input_j < output_shape.y) {
-        output1_fp_ptr[i] = compute_mul_fingerprint(input_fp_ptr[i], one);
+        output1_fp_ptr[i] = input_fp_ptr[i];
       } else {
         int i2 = (input_i * (output_shape.y * output_shape.z)) +
                  ((input_j - output_shape.y) * output_shape.z) + input_k;
-        output2_fp_ptr[i2] = compute_mul_fingerprint(input_fp_ptr[i], one);
+        output2_fp_ptr[i2] = input_fp_ptr[i];
       }
     } else if (chunk_dim == 2) {
       if (input_k < output_shape.z) {
-        output1_fp_ptr[i] = compute_mul_fingerprint(input_fp_ptr[i], one);
+        // printf("0: i=%d, coords=(%d, %d, %d)\n", i, input_i, input_j, input_k);
+        output1_fp_ptr[i] = input_fp_ptr[i];
       } else {
         int i2 = (input_i * (output_shape.y * output_shape.z)) +
                  (input_j * output_shape.z) + (input_k - output_shape.z);
-        output2_fp_ptr[i2] = compute_mul_fingerprint(input_fp_ptr[i], one);
+        // printf("1: i=%d, i2=%d, coords=(%d, %d, %d)\n", i, i2, input_i, input_j, input_k);
+        output2_fp_ptr[i2] = input_fp_ptr[i];
       }
     } else { // chunk_dim == 3
       assert(false && "unimplemented");
@@ -172,13 +174,27 @@ bool KNChunkOp::fingerprint(void) {
   assert(input_tensors[0].num_dims == output_tensors[1].num_dims);
 
   int num_elements = input_tensors[0].num_elements();
-  int3 input_shape = {input_tensors[0].dim[0],
-                      input_tensors[0].dim[1],
-                      input_tensors[0].dim[2]};
-  int3 output_shape = {
-      chunk_dim == 0 ? input_shape.x / chunk_size : input_shape.x,
-      chunk_dim == 1 ? input_shape.y / chunk_size : input_shape.y,
-      chunk_dim == 2 ? input_shape.z / chunk_size : input_shape.z};
+  int3 input_shape;
+  if (input_tensors[0].num_dims == 1) {
+    input_shape.x = 1;
+    input_shape.y = 1;
+    input_shape.z = input_tensors[0].dim[0];
+  } else if (input_tensors[0].num_dims == 2) {
+    input_shape.x = 1;
+    input_shape.y = input_tensors[0].dim[0];
+    input_shape.z = input_tensors[0].dim[1];
+  } else { // num_dims = 3
+    input_shape.x = input_tensors[0].dim[0];
+    input_shape.y = input_tensors[0].dim[1];
+    input_shape.z = input_tensors[0].dim[2];
+  }
+
+  int adjusted_chunk_dim = chunk_dim + (3 - input_tensors[0].num_dims);
+  int3 output_shape;
+  output_shape.x = adjusted_chunk_dim == 0 ? input_shape.x / chunk_size : input_shape.x;
+  output_shape.y = adjusted_chunk_dim == 1 ? input_shape.y / chunk_size : input_shape.y;
+  output_shape.z = adjusted_chunk_dim == 2 ? input_shape.z / chunk_size : input_shape.z;
+
   int const num_threads_per_blk = 1024;
   int num_blocks =
       (num_elements + num_threads_per_blk - 1) / num_threads_per_blk;
@@ -196,7 +212,7 @@ bool KNChunkOp::fingerprint(void) {
         input_shape,
         output_shape,
         chunk_size,
-        chunk_dim,
+        adjusted_chunk_dim,
         num_elements);
     checkCUDA(cudaDeviceSynchronize());
   }

@@ -21,6 +21,7 @@
 #include "mirage/kernel/chunk.h"
 #include "mirage/transpiler/utils.h"
 #include "mirage/type.h"
+#include <iostream>
 
 namespace mirage {
 namespace transpiler {
@@ -394,7 +395,7 @@ TranspileResult Transpiler::transpile_ugraph() {
 
         // modify chunk_dim if it is the first or last dim
         if ((chunk_dim == 0) && (in0.num_dims != 1)) {
-          chunk_dim = 1;
+          chunk_dim = in0.num_dims - 1;
         } else if (chunk_dim == (in0.num_dims - 1)) {
           chunk_dim = 0;
         }
