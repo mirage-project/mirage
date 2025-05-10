@@ -138,3 +138,4 @@ if __name__ == "__main__":
     print(final_result)
     assert torch.allclose(outputs[0], final_result, rtol=5e-2, atol=1e-2)
     print(f"[{rank}] alltoall demo pass!")
+    dist.destroy_process_group()

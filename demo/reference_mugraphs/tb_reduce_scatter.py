@@ -63,4 +63,4 @@ if __name__ == "__main__":
     print(final_result)
     assert torch.allclose(outputs[0], final_result, rtol=5e-2, atol=1e-1)
     print(f"[{rank}] reduce scatter demo pass!")
-    dist.barrier()
+    dist.destroy_process_group()
