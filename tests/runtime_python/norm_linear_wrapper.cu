@@ -14,10 +14,19 @@ void launch_norm_linear(torch::Tensor input, torch::Tensor weight, torch::Tensor
     void const * input_ptr = input.data_ptr();
     void const * weight_ptr = weight.data_ptr();
     void * output_ptr = output.data_ptr();
-    norm_linear_kernel_wrapper<nv_bfloat16><<<(1, 1, 1), (128, 1, 1)>>>(
+
+    dim3 grid_dim(1, 1, 1);
+    dim3 block_dim(128, 1, 1); 
+    cudaFuncSetAttribute(norm_linear_kernel_wrapper<__nv_bfloat16>, cudaFuncAttributeMaxDynamicSharedMemorySize, 36666);
+    norm_linear_kernel_wrapper<__nv_bfloat16><<<grid_dim, block_dim, 36666>>>(
         input_ptr, weight_ptr, output_ptr,
         input.size(0), input.size(1)
     );
+    cudaDeviceSynchronize();
+    cudaError_t err = cudaDeviceSynchronize();
+if (err != cudaSuccess) {
+    printf("CUDA kernel launch error: %s\n", cudaGetErrorString(err));
+}
 }
 
 // pybind11 bindings

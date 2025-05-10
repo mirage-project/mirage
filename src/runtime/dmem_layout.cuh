@@ -15,14 +15,48 @@
 
 template <typename T, size_t ROW, size_t COL, size_t STRIDE>
 struct dmem_row {
-    T* base_ptr;
+    T * base_ptr;
 
     __device__ __forceinline__
     dmem_row(T* ptr) : base_ptr(ptr) {}
 
     __device__ __forceinline__
-    T& operator() (size_t logical_idx_row, size_t logical_idx_col) const {
+    T * operator()(size_t logical_idx_row, size_t logical_idx_col) {
         size_t logical_idx = logical_idx_row * STRIDE + logical_idx_col;
-        return base_ptr[logical_idx];
+        return &base_ptr[logical_idx]; 
+    }
+
+    __device__ __forceinline__
+    T& at(size_t logical_idx) {
+        return base_ptr[logical_idx]; 
+    }
+    __device__ __forceinline__
+    T& at(size_t logical_idx_row, size_t logical_idx_col) {
+        size_t logical_idx = logical_idx_row * STRIDE + logical_idx_col;
+        return base_ptr[logical_idx]; 
+    }
+};
+
+template <typename T, size_t ROW, size_t COL, size_t STRIDE>
+struct dmem_row_const {
+    const T* base_ptr;
+
+    __device__ __forceinline__
+    dmem_row_const(const T* ptr) : base_ptr(ptr) {}
+
+    __device__ __forceinline__
+    const T * operator()(size_t logical_idx_row, size_t logical_idx_col) const {
+        size_t logical_idx = logical_idx_row * STRIDE + logical_idx_col;
+        return &base_ptr[logical_idx]; 
+    }
+
+    __device__ __forceinline__
+    const T& at(size_t logical_idx) const {
+        return base_ptr[logical_idx]; 
+    }
+    __device__ __forceinline__
+    const T& at(size_t logical_idx_row, size_t logical_idx_col) const {
+        size_t logical_idx = logical_idx_row * STRIDE + logical_idx_col;
+        return base_ptr[logical_idx]; 
     }
 };
