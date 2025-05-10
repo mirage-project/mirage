@@ -492,6 +492,7 @@ std::vector<IKNRange>
       IKNRange output_range_i = forward_propagate(input_ranges[i], op, i);
       output_range.combine(forward_propagate(input_ranges[i], op, i));
     }
+
     return {output_range};
   }
 }
@@ -856,6 +857,13 @@ void range_propagate_forward(
     if (op->op_type == type::KNOperatorType::KN_INPUT_OP) {
       continue;
     }
+    if (op->op_type == type::KNOperatorType::KN_CHUNK_0_OP ||
+        op->op_type == type::KNOperatorType::KN_CHUNK_1_OP ||
+        op->op_type == type::KNOperatorType::KN_CHUNK_2_OP ||
+        op->op_type == type::KNOperatorType::KN_CHUNK_3_OP) {
+      continue;
+    }
+
     std::vector<IKNRange> input_ranges;
     for (auto const &input_tensor : op->input_tensors) {
       input_ranges.push_back(forward_ranges[input_tensor.guid]);
@@ -873,6 +881,12 @@ void range_propagate_backward(
     kernel::Graph const &graph) {
   for (auto const &op : reversed(graph.operators)) {
     if (op->op_type == type::KNOperatorType::KN_OUTPUT_OP) {
+      continue;
+    }
+    if (op->op_type == type::KNOperatorType::KN_CHUNK_0_OP ||
+        op->op_type == type::KNOperatorType::KN_CHUNK_1_OP ||
+        op->op_type == type::KNOperatorType::KN_CHUNK_2_OP ||
+        op->op_type == type::KNOperatorType::KN_CHUNK_3_OP) {
       continue;
     }
     std::vector<IKNRange> output_ranges;
@@ -915,6 +929,12 @@ void range_propagate_forward(
     if (op->op_type == type::TBOperatorType::TB_OUTPUT_OP) {
       continue;
     }
+    if (op->op_type == type::TBOperatorType::TB_CHUNK_0_OP ||
+        op->op_type == type::TBOperatorType::TB_CHUNK_1_OP ||
+        op->op_type == type::TBOperatorType::TB_CHUNK_2_OP ||
+        op->op_type == type::TBOperatorType::TB_CHUNK_3_OP) {
+      continue;
+    }
     std::vector<ITBRange> input_ranges;
     for (auto const &input_tensor : op->input_tensors) {
       input_ranges.push_back(forward_ranges[input_tensor.guid]);
@@ -935,6 +955,12 @@ void range_propagate_backward(
       continue;
     }
     if (op->op_type == type::TBOperatorType::TB_OUTPUT_OP) {
+      continue;
+    }
+    if (op->op_type == type::TBOperatorType::TB_CHUNK_0_OP ||
+        op->op_type == type::TBOperatorType::TB_CHUNK_1_OP ||
+        op->op_type == type::TBOperatorType::TB_CHUNK_2_OP ||
+        op->op_type == type::TBOperatorType::TB_CHUNK_3_OP) {
       continue;
     }
     std::vector<ITBRange> output_ranges;

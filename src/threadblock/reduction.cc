@@ -16,6 +16,7 @@
 #include "mirage/threadblock/reduction.h"
 #include "mirage/threadblock/graph.h"
 #include <cassert>
+#include <iostream>
 
 namespace mirage {
 namespace threadblock {

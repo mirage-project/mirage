@@ -339,6 +339,23 @@ void Transpiler::resolve_tensor_layout() {
         }
         break;
       }
+      case type::KN_CHUNK_0_OP:
+      case type::KN_CHUNK_1_OP:
+      case type::KN_CHUNK_2_OP:
+      case type::KN_CHUNK_3_OP: {
+        kn::DTensor const &input = op->input_tensors.at(0);
+        kn::DTensor const &output0 = op->output_tensors.at(0);
+        kn::DTensor const &output1 = op->output_tensors.at(1);
+        assert(input.num_dims == output0.num_dims &&
+               output0.num_dims == output1.num_dims);
+        for (int i = 0; i < input.num_dims; ++i) {
+          opt.add(d_is_innermost[input.guid][i] ==
+                  d_is_innermost[output0.guid][i]);
+          opt.add(d_is_innermost[input.guid][i] ==
+                  d_is_innermost[output1.guid][i]);
+        }
+        break;
+      }
       case type::KN_CUSTOMIZED_OP: {
         // Will be proceeded later, in the next loop
         break;

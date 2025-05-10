@@ -1,6 +1,7 @@
 #include "mirage/search/abstract_expr/abstract_expr_eval.h"
 #include "mirage/kernel/rms_norm.h"
 #include "mirage/search/op_utils.h"
+#include <iostream>
 
 namespace mirage {
 namespace search {
@@ -51,6 +52,15 @@ void abstract_expr_eval(
       patterns.insert(
           {op->output_tensors[0].guid,
            get_pattern(op->op_type, op->input_tensors, input_patterns)});
+
+      // if expression is a chunk op, add pattern corresponding to the other
+      // output
+      if (op->op_type >= type::TBOperatorType::TB_CHUNK_FIRST_OP_ID &&
+          op->op_type <= type::TBOperatorType::TB_CHUNK_LAST_OP_ID) {
+        patterns.insert(
+            {op->output_tensors[1].guid,
+             get_pattern(op->op_type, op->input_tensors, input_patterns)});
+      }
     }
   }
 }
@@ -84,6 +94,14 @@ void abstract_expr_eval(
       patterns.insert(
           {op->output_tensors[0].guid,
            get_pattern(op->op_type, op->input_tensors, input_patterns)});
+
+      // if op is chunk op, add pattern corresponding to additional output
+      if (op->op_type >= type::KNOperatorType::KN_CHUNK_FIRST_OP_ID &&
+          op->op_type <= type::KNOperatorType::KN_CHUNK_LAST_OP_ID) {
+        patterns.insert(
+            {op->output_tensors[1].guid,
+             get_pattern(op->op_type, op->input_tensors, input_patterns)});
+      }
     } else {
       assert(op->op_type == type::KNOperatorType::KN_CUSTOMIZED_OP);
       abstract_expr_eval(static_cast<kernel::KNCustomizedOp *>(op)->bgraph,

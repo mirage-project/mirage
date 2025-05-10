@@ -20,6 +20,7 @@ static void _execute_mugraph(std::vector<void const *> input_tensors,
 
 // Runtime libraries
 #include "config.h"
+#include "kernel/chunk.h"
 #include "kernel/element_binary.h"
 #include "kernel/element_unary.h"
 #include "kernel/matmul.h"
