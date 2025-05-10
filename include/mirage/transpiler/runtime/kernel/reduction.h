@@ -25,16 +25,8 @@ static __global__ void
     int64_t dst_phy_pos = dst_layout(idx);
     int64_t src_phy_pos = dst_in_src_layout(idx);
     T result = (T)0;
-    if (threadIdx.x == 0 && blockIdx.x == 0 && blockIdx.y == 0) {
-      printf("src pos: %d\n", src_phy_pos);
-      printf("dst pos: %d\n", dst_phy_pos);
-    }
     CUTE_UNROLL
     for (int i = 0; i < Config::REDUCTION_FACTOR; ++i) {
-      if (threadIdx.x == 0 && blockIdx.x == 0 && blockIdx.y == 0) {
-        printf("idx: %d\n", i * Config::REDUCTION_DIM_STRIDE
-                                   * Config::SECTION_STRIDE);
-      }
       result += in[src_phy_pos + i * Config::REDUCTION_DIM_STRIDE
                                    * Config::SECTION_STRIDE];
     }

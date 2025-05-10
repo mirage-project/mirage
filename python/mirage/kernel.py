@@ -18,24 +18,25 @@ HARD_CODE = """
 #include <Python.h>
 
 static PyObject *launch(PyObject *self, PyObject *args) {
-  PyObject *input_list, *output_list, *py_buffer;
+  PyObject *input_list, *output_list, *comm_list, *py_buffer;
   void *buffer;
   std::vector<void const *> input_tensors;
   std::vector<void*> output_tensors;
-  int rank;
+  std::vector<void*> comm_buffers;
 
-  if (!PyArg_ParseTuple(args, "OOOi", &input_list, &output_list, &py_buffer, &rank)) {
+  if (!PyArg_ParseTuple(args, "OOOO", &input_list, &output_list, &comm_list, &py_buffer)) {
     PyErr_SetString(PyExc_TypeError, "Invalid parameters");
     return NULL;
   }
 
-  if(!PyList_Check(input_list) || !PyList_Check(output_list)) {
+  if(!PyList_Check(input_list) || !PyList_Check(output_list) || !PyList_Check(comm_list)) {
     PyErr_SetString(PyExc_TypeError, "Both arg1 and arg2 must be lists.");
     return NULL;
   }
 
   Py_ssize_t input_size = PyList_Size(input_list);
   Py_ssize_t output_size = PyList_Size(output_list);
+  Py_ssize_t comm_size = PyList_Size(comm_list);
 
   for(Py_ssize_t i = 0; i < input_size; i++) {
     PyObject *item = PyList_GetItem(input_list, i);
@@ -57,16 +58,110 @@ static PyObject *launch(PyObject *self, PyObject *args) {
     output_tensors.push_back(PyLong_AsVoidPtr(item));
   }
 
+  for(Py_ssize_t i = 0; i < comm_size; i++) {
+    PyObject *item = PyList_GetItem(comm_list, i);
+    void* comm_buffer = PyLong_AsVoidPtr(item);
+    if(!comm_buffer) {
+      PyErr_Format(PyExc_TypeError, "Invalid comm buffer at index %d", (int)i);
+      return NULL;
+    }
+    comm_buffers.push_back(comm_buffer);
+  }
+
   buffer = PyLong_AsVoidPtr(py_buffer);
 
-  execute_mugraph(input_tensors, output_tensors, buffer, rank);
+  execute_mugraph(input_tensors, output_tensors, comm_buffers, buffer);
 
   Py_RETURN_NONE;
 }
 
+#if USE_NVSHMEM
+static PyObject* allocate_comm_buffers(PyObject* self, PyObject* Py_UNUSED(ignored)) {
+    const std::vector<size_t> sizes = get_comm_sizes();
+    
+    PyObject* buffer_list = PyList_New(sizes.size());
+    if (!buffer_list) return NULL;
+    
+    for (size_t i = 0; i < sizes.size(); i++) {
+        void* ptr = nvshmem_malloc(sizes[i]);
+        if (!ptr) {
+            // Cleanup previously allocated buffers
+            for (size_t j = 0; j < i; j++) {
+                void* prev_ptr = PyLong_AsVoidPtr(PyList_GET_ITEM(buffer_list, j));
+                nvshmem_free(prev_ptr);
+            }
+            Py_DECREF(buffer_list);
+            PyErr_SetString(PyExc_RuntimeError, "nvshmem_malloc failed");
+            return NULL;
+        }
+        
+        PyObject* py_ptr = PyLong_FromVoidPtr(ptr);
+        if (!py_ptr) {
+            nvshmem_free(ptr);
+            Py_DECREF(buffer_list);
+            return NULL;
+        }
+        PyList_SET_ITEM(buffer_list, i, py_ptr);
+    }
+    
+    return buffer_list;
+}
+
+static PyObject* free_comm_buffers(PyObject* self, PyObject* args) {
+    PyObject* buffer_list;
+    
+    // Parse the input argument as a list
+    if (!PyArg_ParseTuple(args, "O!", &PyList_Type, &buffer_list)) {
+        PyErr_SetString(PyExc_TypeError, "Expected a list of buffer pointers");
+        return NULL;
+    }
+
+    Py_ssize_t num_buffers = PyList_Size(buffer_list);
+    
+    // Free each buffer in the list
+    for (Py_ssize_t i = 0; i < num_buffers; i++) {
+        PyObject* item = PyList_GetItem(buffer_list, i);
+        void* ptr = PyLong_AsVoidPtr(item);
+        
+        if (!ptr) {
+            PyErr_Format(PyExc_ValueError, 
+                        "Invalid pointer at index %zd (might already be freed)", i);
+            return NULL;
+        }
+        
+        nvshmem_free(ptr);
+    }
+
+    Py_RETURN_NONE;
+}
+
+static PyObject* initialize_mpi_nvshmem(PyObject* self, PyObject* args) {
+    int rank;
+    if (!PyArg_ParseTuple(args, "i", &rank)) {
+        PyErr_SetString(PyExc_TypeError, "Invalid parameter - expected integer rank");
+        return NULL;
+    }
+    initialize_mpi_nvshmem(rank);
+    Py_RETURN_NONE;
+}
+
+static PyObject* finalize_mpi_nvshmem(PyObject* self, PyObject* Py_UNUSED(ignored)) {
+    finalize_mpi_nvshmem();
+    Py_RETURN_NONE;
+}
+#endif
 
 static PyMethodDef ModuleMethods[] = {
   {"launch", launch, METH_VARARGS, "Entry point for all kernels with this signature"},
+  #if USE_NVSHMEM
+  {"allocate_comm_buffers", allocate_comm_buffers, METH_NOARGS, 
+     "Allocate nvshmem buffers"},
+  {"free_comm_buffers", free_comm_buffers, METH_VARARGS, "Free nvshmem buffers"},
+  {"initialize_mpi_nvshmem", initialize_mpi_nvshmem, METH_VARARGS,
+     "Initialize MPI and NVSHMEM with given rank"},
+  {"finalize_mpi_nvshmem", finalize_mpi_nvshmem, METH_NOARGS,
+     "Finalize MPI and NVSHMEM"},
+  #endif
   {NULL, NULL, 0, NULL} // sentinel
 };
 
@@ -107,16 +202,18 @@ def get_cc_cmd(target, cc, FILE_NAME, py_include_dir, MIRAGE_ROOT, NCCL_ROOT, MP
         "-O3",
         f"-I{py_include_dir}",
         f"-I{MIRAGE_ROOT}/include/mirage/transpiler/runtime/",
-        f"-I{MIRAGE_ROOT}/deps/cutlass/include",
+        f"-I{MIRAGE_ROOT}/deps/cutlass/include/",
         "-ccbin=mpic++",
-        f"-I{NCCL_ROOT}/include",
-        f"-L{NCCL_ROOT}/lib",
-        f"-I{MPI_ROOT}/include",
-        f"-L{MPI_ROOT}/lib",
-        # f"-I{NVSHMEM_ROOT}/include",
-        # f"-L{NVSHMEM_ROOT}/lib",
+        f"-I{NCCL_ROOT}/include/",
+        f"-L{NCCL_ROOT}/lib/",
+        #f"-I{MPI_ROOT}/include",
+        #f"-L{MPI_ROOT}/lib",
+        f"-I/home/ubuntu/miniconda3/envs/mirage_sj/include/",
+        f"-L/home/ubuntu/miniconda3/envs/mirage_sj/lib/python3.10/site-packages/mpi4py/",
+        #f"-I{NVSHMEM_ROOT}/include",
+        #f"-L{NVSHMEM_ROOT}/lib",
         f"-I/usr/include/nvshmem_12/",
-        f"-L/usr/lib64/nvshmem/12",
+        f"-L/usr/lib/x86_64-linux-gnu/",
         #f"-I{CUDA_ROOT}/include",
         #f"-L{CUDA_ROOT}/lib64",
         #f"-I/home/hice1/slin468/scratch/nvhpc/Linux_x86_64/25.1/comm_libs/nvshmem/include",
@@ -125,7 +222,7 @@ def get_cc_cmd(target, cc, FILE_NAME, py_include_dir, MIRAGE_ROOT, NCCL_ROOT, MP
         "-std=c++17",
         "-rdc=true",
         "-use_fast_math",
-        # "-lnvshmem",
+        #"-lnvshmem",
         "-lnvshmem_host",
         "-lnvshmem_device", # Two include more than only nvshmem
         "-lcublas",
@@ -189,6 +286,10 @@ class KNGraph:
 
         self._is_compiled = False
         self.run = None
+        self.initialize_mpi_nvshmem = None
+        self.finalize_mpi_nvshmem = None
+        self.allocate_comm_buffers = None
+        self.free_comm_buffers = None
         self._valid_cuda_kernels = False
         self._cached_results = None
         self.visualizer = None
@@ -383,11 +484,14 @@ class KNGraph:
             for meta in results["output_directives"]
         ]
 
+        self.initialize_mpi_nvshmem(rank)
+        comm_buffers_ptr = self.allocate_comm_buffers()
         buffer_tensor_ptr = buffer_tensor.data_ptr()
         input_tensors_ptr = [tensor.data_ptr() for tensor in input_tensors]
         output_tensors_ptr = [tensor.data_ptr() for tensor in output_tensors]
-
-        self.run(input_tensors_ptr, output_tensors_ptr, buffer_tensor_ptr, rank)
+        self.run(input_tensors_ptr, output_tensors_ptr, comm_buffers_ptr, buffer_tensor_ptr)
+        self.free_comm_buffers(comm_buffers_ptr)
+        self.finalize_mpi_nvshmem()
 
         return output_tensors
 
@@ -476,7 +580,6 @@ class KNGraph:
                 os.makedirs(saved_addr, exist_ok=True)
                 with open(saved_addr + "test" + str(file_id) + ".cu", "w") as f:
                     f.write(result["code"] + HARD_CODE)
-
         # TMP
         #with open("./test.cu", "w") as f:
         #    f.write(result["code"] + HARD_CODE)
@@ -513,6 +616,10 @@ class KNGraph:
             mod = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(mod)
             self.run = getattr(mod, "launch")
+            self.initialize_mpi_nvshmem = getattr(mod, "initialize_mpi_nvshmem")
+            self.finalize_mpi_nvshmem = getattr(mod, "finalize_mpi_nvshmem")
+            self.allocate_comm_buffers = getattr(mod, "allocate_comm_buffers")
+            self.free_comm_buffers = getattr(mod, "free_comm_buffers")
 
             self._is_compiled = True
             self._valid_cuda_kernels = True

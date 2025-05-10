@@ -88,7 +88,9 @@ private:
   // Utility functions for transpiling
   // Get the pointer to a DTensor. Return {pointer_name, code}
   std::pair<std::string, std::string>
-      get_dtensor_ptr(kn::DTensor const &dtensor);
+      get_dtensor_ptr(kn::DTensor const &dtensor, 
+                      CodeKeeper *comm_buffers=NULL, 
+                      size_t *next_comm_buffer_idx=NULL);
 
   // Get the "optimal" schedule for a threadblock graph
   TBSched get_threadblock_schedule(tb::Graph const &tb_graph);
