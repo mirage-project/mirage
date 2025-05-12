@@ -33,24 +33,25 @@ if __name__ == "__main__":
     p = mi.generate_cuda_program(graph.cygraph, target_cc=80, input_strides=input_strides)
     print(p["code"])
     # warm up runs
-    # for _ in range(16):
-    #     outputs = graph(inputs=input_tensors)
-    #     #torch_rms_norm(input_tensors[0], input_tensors[1])
+    for _ in range(16):
+        outputs = graph(inputs=input_tensors)
+        #torch_rms_norm(input_tensors[0], input_tensors[1])
 
-    # torch.cuda.synchronize()
 
-    # starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
-    # repetitions = 1000
-    # timings=np.zeros((repetitions,1))
-    # starter.record()
-    # for rep in range(repetitions):
-    #     outputs = graph(inputs=input_tensors)
-    #     #torch_rms_norm(input_tensors[0], input_tensors[1])
+    torch.cuda.synchronize()
 
-    # ender.record()
-    # torch.cuda.synchronize()
-    # curr_time = starter.elapsed_time(ender)
+    starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+    repetitions = 1000
+    timings=np.zeros((repetitions,1))
+    starter.record()
+    for rep in range(repetitions):
+        outputs = graph(inputs=input_tensors)
+        #torch_rms_norm(input_tensors[0], input_tensors[1])
 
-    # mean_syn = curr_time / 1000
-    # #print(timings)
-    # print(mean_syn)
+    ender.record()
+    torch.cuda.synchronize()
+    curr_time = starter.elapsed_time(ender)
+
+    mean_syn = curr_time / 1000
+    #print(timings)
+    print(mean_syn)
