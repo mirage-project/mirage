@@ -32,11 +32,11 @@ static __device__ __forceinline__ void
   }
 }
 
-template <typename SMEM_D, typename SMEM_A, typename SMEM_B>
-__device__ __forceinline__ void mul(SMEM_D dst, SMEM_A srcA, SMEM_B srcB) {
-  for (int elem_idx = threadIdx.x; elem_idx < SMEM_D::size();
+template <typename SMEM_DST, typename SMEM_SRC0, typename SMEM_SRC1>
+__device__ __forceinline__ void mul(SMEM_DST dst, SMEM_SRC0 src0, SMEM_SRC1 src1) {
+  for (int elem_idx = threadIdx.x; elem_idx < SMEM_DST::size();
        elem_idx += NUM_THREADS) {
-    dst.at(elem_idx) = srcA.at(elem_idx) * srcB.at(elem_idx);
+    dst.at(elem_idx) = src0.at(elem_idx) * src1.at(elem_idx);
   }
 }
 } // namespace kernel

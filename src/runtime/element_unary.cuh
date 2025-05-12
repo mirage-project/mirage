@@ -76,23 +76,19 @@ __device__ __forceinline__ T perform_element_unary_chain(T a,
   return perform_element_unary_chain<T, RemainingOps...>(res, scalars, idx + 1);
 }
 
-// __device__ __forceinline__ void perform_element_unary_chain_kernel(){
-//   return;
-// }
-
 // now assume input output using the same layout
 template <bool ACCUM,
-          typename SMEM_D,
-          typename SMEM_S,
+          typename SMEM_DST,
+          typename SMEM_SRC,
           ElementUnaryOpType FirstOp,
           ElementUnaryOpType... RemainingOps>
 __device__ __forceinline__ void perform_element_unary_chain_kernel(
-    SMEM_D dst, SMEM_S src, float const *scalars) {
-  for (int elem_idx = threadIdx.x; elem_idx < SMEM_D::size();
+    SMEM_DST dst, SMEM_SRC src, float const *scalars) {
+  for (int elem_idx = threadIdx.x; elem_idx < SMEM_DST::size();
        elem_idx += NUM_THREADS) {
     auto value = src.at(elem_idx);
     auto result =
-        perform_element_unary_chain<typename SMEM_D::value_type,
+        perform_element_unary_chain<typename SMEM_DST::value_type,
                                     FirstOp,
                                     RemainingOps...>(value, scalars, 0);
     if (!ACCUM) {
