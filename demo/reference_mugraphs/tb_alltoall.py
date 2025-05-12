@@ -125,17 +125,11 @@ if __name__ == "__main__":
 
     x_pt = input_tensors[0].chunk(4, dim=1)[rank]
     w_pt = input_tensors[1].chunk(4, dim=0)[rank]
-    print(x_pt)
-    print(w_pt)
     result = x_pt @ w_pt
-    print(f'torch[{rank}]: {result[1][0]}')
     chunks_pt = [chunk.contiguous() for chunk in torch.chunk(result, 4, dim=0)]
     output_list = [torch.empty_like(chunks_pt[0]) for _ in range(4)]
     dist.all_to_all(output_list, chunks_pt)
     final_result = torch.cat(output_list, dim=0)
-    print(outputs[0])
-    #print(result)
-    print(final_result)
     assert torch.allclose(outputs[0], final_result, rtol=5e-2, atol=1e-2)
     print(f"[{rank}] alltoall demo pass!")
     dist.destroy_process_group()

@@ -7,6 +7,7 @@ import argparse
 
 seed = 42  # Use a fixed seed
 torch.manual_seed(seed)
+#torch.set_printoptions(profile="full")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Process some arguments.")
@@ -14,30 +15,68 @@ if __name__ == "__main__":
     args = parser.parse_args()
     save_codes = args.save_codes
 
-    RANK = int(os.environ.get("RANK", 0))
-    
-    torch.cuda.set_device(RANK)
-    graph = mi.new_kernel_graph(gpu_dim=(2, 1, 1))
-    X = graph.new_input(dims=(64, 4096), gpu_input_map=(1, -1 ,-1), dtype=mi.float16)
-    W = graph.new_input(dims=(4096, 4096), gpu_input_map=(0, -1 ,-1), dtype=mi.float16)
-    tb_graph = mi.new_threadblock_graph(grid_dim=(64,1,1), block_dim=(128,1,1), forloop_range=64, reduction_dimx=64)
-    tX = tb_graph.new_input(dtensor=X, input_map=(-1, -1, -1), forloop_dim=1)
-    tW = tb_graph.new_input(dtensor=W, input_map=(1, -1, -1), forloop_dim=0)
-    tM = tb_graph.matmul(tX, tW)
-    tAccM = tb_graph.forloop_accum(tM)
+    graph = mi.new_kernel_graph(gpu_dim=(4, 1, 1))
+    X = graph.new_input(dims=(512, 128), gpu_input_map=(1, -1 ,-1), dtype=mi.float16)
+    W1 = graph.new_input(dims=(128, 256), gpu_input_map=(0, -1 ,-1), dtype=mi.float16)
+    tb_graph = mi.new_threadblock_graph(grid_dim=(4,8,1), block_dim=(128,1,1), forloop_range=4, reduction_dimx=4)
+    tX1 = tb_graph.new_input(dtensor=X, input_map=(-1, 0, -1), forloop_dim=1)
+    tW1 = tb_graph.new_input(dtensor=W1, input_map=(1, -1, -1), forloop_dim=0)
+    tM1 = tb_graph.matmul(tX1, tW1)
+    tAccM1 = tb_graph.forloop_accum(tM1)
 
-    #TB_ALLREDUCE_EPILOGUE
-    tb_graph.new_output(stensor=tAccM, output_map=(1, -1, -1), epilogue="allreduce")
-    O = graph.customized([X, W], tb_graph)
-    graph.mark_output(O[0])
+    #TB_REDUCESCATTER_EPILOGUE
+    tb_graph.new_output(stensor=tAccM1, output_map=(1, 0, -1), epilogue="reduce_scatter") # (0, 1, -1) right?
+    O1 = graph.customized([X, W1], tb_graph)
 
+    W2 = graph.new_input(dims=(256, 512), gpu_input_map=(1, -1 ,-1), dtype=mi.float16)
+    tb_graph = mi.new_threadblock_graph(grid_dim=(2,8,1), block_dim=(128,1,1), forloop_range=4, reduction_dimx=4)
+    #TB_ALLGATHER_PROLOGUE
+    tX2 = tb_graph.new_input(dtensor=O1[0], input_map=(-1, 0, -1), forloop_dim=1, prologue="allgather")
+    tW2 = tb_graph.new_input(dtensor=W2, input_map=(1, -1, -1), forloop_dim=0)
+    tM2 = tb_graph.matmul(tX2, tW2)
+    tAccM2 = tb_graph.forloop_accum(tM2)
 
-    print("Current rank: ", RANK)
+    tb_graph.new_output(stensor=tAccM2, output_map=(1, 0, -1)) # (0, 1, -1) right?
+    O2 = graph.customized([O1[0], W2], tb_graph)
+    graph.mark_output(O2[0])
+
+    from mpi4py import MPI
+    comm = MPI.COMM_WORLD
+    rank = comm.Get_rank()
+
+    torch.cuda.set_device(rank)
+    print("Current rank: ", rank)
     print("Current device: ", torch.cuda.current_device())
     input_tensors = [
-        torch.randn(64, 4096, dtype=torch.float16, device=torch.cuda.current_device()),
-        torch.randn(4096, 4096, dtype=torch.float16, device=torch.cuda.current_device()),
+        torch.randn(512, 128, dtype=torch.float16, device=f'cuda:{rank}'),
+        torch.randn(128, 256, dtype=torch.float16, device=f'cuda:{rank}'),
+        torch.randn(256, 512, dtype=torch.float16, device=f'cuda:{rank}'),
     ]
 
-    outputs = graph(inputs=input_tensors, rank=RANK, save_codes=save_codes)
+    outputs = graph(inputs=input_tensors, rank=rank, save_codes=save_codes)
+
+    import torch.distributed as dist
+    os.environ['MASTER_ADDR'] = 'localhost'
+    os.environ['MASTER_PORT'] = '12355'
+    dist.init_process_group(
+        backend='nccl',
+        init_method='env://',
+        world_size=4,
+        rank=rank
+    )
+
+    x1_pt = input_tensors[0].chunk(4, dim=1)[rank]
+    w1_pt = input_tensors[1].chunk(4, dim=0)[rank]
+    result1 = x1_pt @ w1_pt
+    mid_result = torch.empty((128, 256), dtype=result1.dtype, device=f'cuda:{rank}')
+    dist.reduce_scatter_tensor(mid_result, result1)
+    w2_pt = input_tensors[2].chunk(4, dim=1)[rank]
+    result_list = [torch.empty_like(mid_result) for _ in range(4)]
+    dist.all_gather(result_list, mid_result)
+    x2 = torch.cat(result_list, dim=0)
+    result2 = x2 @ w2_pt
+    print(result2)
     print(outputs[0])
+    assert torch.allclose(outputs[0], result2, rtol=5e-2, atol=1e-1)
+    print(f"[{rank}] allreduce demo pass!")
+    dist.destroy_process_group()
