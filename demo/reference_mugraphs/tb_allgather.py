@@ -48,11 +48,11 @@ if __name__ == "__main__":
     matrix[:, 128:192] = 3
     matrix[:, 192:256] = 4
     input_tensors = [
-        torch.ones(256, 128, dtype=torch.float16, device=f'cuda:{rank}'),
-        matrix,
+        #torch.ones(256, 128, dtype=torch.float16, device=f'cuda:{rank}'),
+        #matrix,
         # torch.ones(128, 256, dtype=torch.float16, device=f'cuda:{rank}'),
-        # torch.randn(256, 128, dtype=torch.float16, device=f'cuda:{rank}'),
-        # torch.randn(128, 256, dtype=torch.float16, device=f'cuda:{rank}'),
+        torch.randn(256, 128, dtype=torch.float16, device=f'cuda:{rank}'),
+        torch.randn(128, 256, dtype=torch.float16, device=f'cuda:{rank}'),
     ]
 
     outputs = graph(inputs=input_tensors, rank=rank, save_codes=save_codes)
@@ -73,3 +73,23 @@ if __name__ == "__main__":
     #     assert torch.allclose(chunks[0], chunk)
 
     # print(f"[{rank}] alltoall demo pass!")
+
+    import torch.distributed as dist
+    os.environ['MASTER_ADDR'] = 'localhost'
+    os.environ['MASTER_PORT'] = '12355'
+    dist.init_process_group(
+        backend='nccl',
+        init_method='env://',
+        world_size=4,
+        rank=rank
+    )
+
+    x_pt = input_tensors[0].chunk(4, dim=0)[rank]
+    w_pt = input_tensors[1].chunk(4, dim=1)[rank]
+    chunk_list = [torch.empty_like(x_pt) for _ in range(4)]
+    dist.all_gather(chunk_list, x_pt)
+    x = torch.cat(chunk_list, dim=0)
+    final_result = x @ w_pt
+    assert torch.allclose(outputs[0], final_result, rtol=5e-2, atol=1e-2)
+    print(f"[{rank}] allgather demo pass!")
+    dist.destroy_process_group()
