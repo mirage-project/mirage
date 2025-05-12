@@ -320,11 +320,10 @@ __global__ void persistent_kernel(RuntimeConfig config) {
         }
         case TASK_RMS_NORM_LINEAR: {
           if (config.profiling) {
-            PROFILER_EVENT_START(TASK_RMS_NORM_LINEAR,
-                                 cur_task_pos[0] + cur_task_pos[1]);
-            TB_SLEEP_US(1);
-            PROFILER_EVENT_END(TASK_RMS_NORM_LINEAR,
-                               cur_task_pos[0] + cur_task_pos[1]);
+            PROFILER_EVENT_START(TASK_RMS_NORM_LINEAR, cur_task_id);
+            kernel::norm_linear_kernel<__nv_bfloat16>(
+                task_desc.inputs[0], task_desc.inputs[1], task_desc.outputs[0]);
+            PROFILER_EVENT_END(TASK_RMS_NORM_LINEAR, cur_task_id);
           }
 
           if (threadIdx.x == 0) {
@@ -335,11 +334,10 @@ __global__ void persistent_kernel(RuntimeConfig config) {
         }
         case TASK_EMBEDDING: {
           if (config.profiling) {
-            PROFILER_EVENT_START(TASK_EMBEDDING,
-                                 cur_task_pos[0] + cur_task_pos[1]);
-            TB_SLEEP_US(1);
-            PROFILER_EVENT_END(TASK_EMBEDDING,
-                               cur_task_pos[0] + cur_task_pos[1]);
+            PROFILER_EVENT_START(TASK_EMBEDDING, cur_task_id);
+            kernel::embedding_kernel<__nv_bfloat16>(
+                task_desc.inputs[0], task_desc.inputs[1], task_desc.outputs[0]);
+            PROFILER_EVENT_END(TASK_EMBEDDING, cur_task_id);
           }
 
           if (threadIdx.x == 0) {
@@ -379,11 +377,12 @@ __global__ void persistent_kernel(RuntimeConfig config) {
         }
         case TASK_SILU_MUL_LINEAR: {
           if (config.profiling) {
-            PROFILER_EVENT_START(TASK_SILU_MUL_LINEAR,
-                                 cur_task_pos[0] + cur_task_pos[1]);
-            TB_SLEEP_US(1);
-            PROFILER_EVENT_END(TASK_SILU_MUL_LINEAR,
-                               cur_task_pos[0] + cur_task_pos[1]);
+            PROFILER_EVENT_START(TASK_SILU_MUL_LINEAR, cur_task_id);
+            kernel::silu_mul_linear_kernel<__nv_bfloat16>(task_desc.inputs[0],
+                                                          task_desc.inputs[1],
+                                                          task_desc.inputs[2],
+                                                          task_desc.outputs[0]);
+            PROFILER_EVENT_END(TASK_SILU_MUL_LINEAR, cur_task_id);
           }
 
           if (threadIdx.x == 0) {
