@@ -36,7 +36,7 @@ static __device__ __forceinline__ T
   if constexpr (OP == ElementUnaryOpType::EXP) {
     return __float2bfloat16(expf(__bfloat162float(a)));
   } else if constexpr (OP == ElementUnaryOpType::SILU) {
-    return __float2bfloat16(((float)a) *
+    return __float2bfloat16((__bfloat162float(a)) *
                             (1.0f / (1.0f + expf(__bfloat162float(-a)))));
   } else if constexpr (OP == ElementUnaryOpType::GELU) {
     return __float2bfloat16((((float)a) / 2.0f) *

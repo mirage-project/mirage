@@ -5,12 +5,12 @@ import os
 this_dir = os.path.dirname(os.path.abspath(__file__))
 
 setup(
-    name='norm_linear_cuda',
+    name='runtime_kernel',
     ext_modules=[
         CUDAExtension(
-            name='norm_linear_cuda',
+            name='runtime_kernel',
             sources=[
-                os.path.join(this_dir, 'norm_linear_wrapper.cu'),
+                os.path.join(this_dir, 'runtime_kernel_wrapper.cu'),
             ],
             include_dirs=[
                 os.path.join(this_dir, '../../src/runtime'),

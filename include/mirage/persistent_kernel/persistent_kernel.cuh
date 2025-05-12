@@ -347,7 +347,10 @@ __global__ void persistent_kernel(RuntimeConfig config) {
         case TASK_SILU_MUL_LINEAR: {
           if (config.profiling) {
             PROFILER_EVENT_START(TASK_SILU_MUL_LINEAR, cur_task_id);
-            TB_SLEEP_US(1);
+            kernel::silu_mul_linear_kernel<__nv_bfloat16>(task_desc.inputs[0],
+                                                          task_desc.inputs[1],
+                                                          task_desc.inputs[2],
+                                                          task_desc.outputs[0]);
             PROFILER_EVENT_END(TASK_SILU_MUL_LINEAR, cur_task_id);
           }
 
@@ -765,7 +768,10 @@ __global__ void persistent_kernel_partitioned_workers(RuntimeConfig config) {
         case TASK_SILU_MUL_LINEAR: {
           if (config.profiling) {
             PROFILER_EVENT_START(TASK_SILU_MUL_LINEAR, cur_task_id);
-            TB_SLEEP_US(1);
+            kernel::silu_mul_linear_kernel<__nv_bfloat16>(task_desc.inputs[0],
+                                                          task_desc.inputs[1],
+                                                          task_desc.inputs[2],
+                                                          task_desc.outputs[0]);
             PROFILER_EVENT_END(TASK_SILU_MUL_LINEAR, cur_task_id);
           }
 

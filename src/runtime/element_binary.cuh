@@ -12,7 +12,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
+#pragma once
 namespace kernel {
 
 template <typename SMEM_DST, typename SMEM_SRC0, typename SMEM_SRC1>
@@ -29,6 +29,14 @@ static __device__ __forceinline__ void
     int col = elem_idx % SMEM_DST::COL;
     int row = elem_idx / SMEM_DST::COL;
     dst.at(row, col) = (src0.at(row, col)) / (src1.at(row, 0));
+  }
+}
+
+template <typename SMEM_D, typename SMEM_A, typename SMEM_B>
+__device__ __forceinline__ void mul(SMEM_D dst, SMEM_A srcA, SMEM_B srcB) {
+  for (int elem_idx = threadIdx.x; elem_idx < SMEM_D::size();
+       elem_idx += NUM_THREADS) {
+    dst.at(elem_idx) = srcA.at(elem_idx) * srcB.at(elem_idx);
   }
 }
 } // namespace kernel

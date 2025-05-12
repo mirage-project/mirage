@@ -12,7 +12,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
+#pragma once
 namespace kernel {
 
 #if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800))

@@ -12,47 +12,46 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
- #pragma once
+#pragma once
 
- namespace kernel {
+namespace kernel {
 
 constexpr int NUM_THREADS = 128;
-        //reduction on dim 0
- template <typename SMEM_DST, typename SMEM_SRC>
+// reduction on dim 0
+template <typename SMEM_DST, typename SMEM_SRC>
 static __device__ __forceinline__ void reduction_sum_row(SMEM_DST dst,
-    const SMEM_SRC src) {
+                                                         const SMEM_SRC src) {
 
-static constexpr int REDUCTION_FACTOR =  SMEM_SRC::ROW;
-for (int dst_elem_idx = threadIdx.x; dst_elem_idx < SMEM_DST::size();
-            dst_elem_idx += NUM_THREADS) {
+  static constexpr int REDUCTION_FACTOR = SMEM_SRC::ROW;
+  for (int dst_elem_idx = threadIdx.x; dst_elem_idx < SMEM_DST::size();
+       dst_elem_idx += NUM_THREADS) {
     float result = 0;
     int dst_col = dst_elem_idx % SMEM_DST::COL;
 
-    #pragma unroll
+#pragma unroll
     for (int i = 0; i < REDUCTION_FACTOR; ++i) {
-        result += static_cast<float>(src[i, dst_col]);
+      result += static_cast<float>(src[i, dst_col]);
     }
     dst[dst_elem_idx] = result;
-}
+  }
 }
 
-//reduction on dim 1
+// reduction on dim 1
 template <typename T, typename SMEM_DST, typename SMEM_SRC>
-static __device__ __forceinline__ void reduction_sum_col(SMEM_DST dst, SMEM_SRC src) {
-static constexpr int REDUCTION_FACTOR = SMEM_SRC::COL;
-for (int dst_elem_idx = threadIdx.x; dst_elem_idx < SMEM_DST::size();
-            dst_elem_idx += NUM_THREADS) {
-    //TODO xinhaoc make this result float32
+static __device__ __forceinline__ void reduction_sum_col(SMEM_DST dst,
+                                                         SMEM_SRC src) {
+  static constexpr int REDUCTION_FACTOR = SMEM_SRC::COL;
+  for (int dst_elem_idx = threadIdx.x; dst_elem_idx < SMEM_DST::size();
+       dst_elem_idx += NUM_THREADS) {
+    // TODO xinhaoc make this result float32
     float result = 0.0f;
     int dst_row = dst_elem_idx / SMEM_DST::COL;
-    #pragma unroll
+#pragma unroll
     for (int i = 0; i < REDUCTION_FACTOR; ++i) {
-            result += __bfloat162float(src.at(dst_row, i));
-
+      result += __bfloat162float(src.at(dst_row, i));
     }
     dst.at(dst_elem_idx) = __float2bfloat16(result);
+  }
+}
 
-}
-}
-
-}
+} // namespace kernel

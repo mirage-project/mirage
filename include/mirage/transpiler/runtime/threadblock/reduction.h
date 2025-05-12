@@ -55,9 +55,6 @@ public:
           dst_coord2src_coord(dst_elem_idx); // The logical index of the first
                                              // element in the reduction group
       float result = 0;
-      if(thread0()){
-        printf("src %f\n", (float)src[0]);
-      }
       CUTE_UNROLL
       for (int i = 0; i < REDUCTION_FACTOR; ++i) {
         result += (float)
