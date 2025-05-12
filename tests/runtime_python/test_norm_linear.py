@@ -1,21 +1,20 @@
 import torch
 import norm_linear_cuda
+import numpy as np
 
 
-rms_norm = torch.nn.RMSNorm(4096, device='cuda:0', dtype=torch.float16)
+torch.set_printoptions(sci_mode=False)
+
+rms_norm = torch.nn.RMSNorm(3584, device='cuda:0', dtype=torch.bfloat16)
 
 def torch_rms_norm(X, W):
     D = rms_norm(X)
     E = torch.matmul(D, W)
     return E
 
-x = torch.randn(16, 64, device='cuda', dtype=torch.bfloat16)
-w = torch.randn(64, 64, device='cuda', dtype=torch.bfloat16)
-output = torch.empty(16, 64, device='cuda', dtype=torch.bfloat16)
-
+x = torch.randn((1, 3584), device='cuda', dtype=torch.bfloat16)
+w = torch.randn((3584, 64), device='cuda', dtype=torch.bfloat16)
+output = torch.empty(1, 64, device='cuda', dtype=torch.bfloat16)
 norm_linear_cuda.norm_linear(x, w, output)
-
-
-torch_rms = torch_rms_norm(x, w)
 print(output)
-print(torch_rms)
+print(torch_rms_norm(x,w))

@@ -13,25 +13,22 @@
  * limitations under the License.
  */
 
+namespace kernel {
+
 template <typename SMEM_DST, typename SMEM_SRC0, typename SMEM_SRC1>
-static __device__ __forceinline__ void div_col(
-    SMEM_DST dst,
-    SMEM_SRC0 src0,
-    SMEM_SRC1 src1) {
+static __device__ __forceinline__ void
+    div_col(SMEM_DST dst, SMEM_SRC0 src0, SMEM_SRC1 src1) {
 
   static_assert(SMEM_SRC0::ROW == SMEM_SRC1::ROW);
   static_assert(SMEM_SRC0::COL % SMEM_SRC1::COL == 0);
   static_assert(SMEM_SRC1::COL == 1);
   constexpr int BLOCK_SIZE = SMEM_SRC0::COL / SMEM_SRC1::COL;
 
-  for (int elem_idx = threadIdx.x; elem_idx < SMEM_DST::size(); elem_idx += NUM_THREADS) {
+  for (int elem_idx = threadIdx.x; elem_idx < SMEM_DST::size();
+       elem_idx += NUM_THREADS) {
     int col = elem_idx % SMEM_DST::COL;
     int row = elem_idx / SMEM_DST::COL;
-
-   
     dst.at(row, col) = (src0.at(row, col)) / (src1.at(row, 0));
-    // printf("value %f, src1 %f, src2 %f, row %d, col %d\n", 
-    //   __bfloat162float(dst.at(row, col)), __bfloat162float(src0.at(row, col)), 
-    //   __bfloat162float(src1.at(row, 0)), row, col);
   }
 }
+} // namespace kernel

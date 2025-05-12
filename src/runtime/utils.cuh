@@ -14,18 +14,16 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
- #include "common.h"
-namespace mirage {
-    namespace runtime {
+#pragma once
+#include "common.h"
+namespace kernel {
 
-        static __device__ __forceinline__ int lane_id() {
-            return threadIdx.x & 0x1f;
-          }
-        
-          
-          static __device__ __forceinline__ int warp_id() {
-            return __shfl_sync(
-                0xffffffff, threadIdx.x / NUM_THREADS_PER_WARP, 0);
-          }
+static __device__ __forceinline__ int lane_id() {
+  return threadIdx.x & 0x1f;
+}
 
-}}
+static __device__ __forceinline__ int warp_id() {
+  return __shfl_sync(0xffffffff, threadIdx.x / NUM_THREADS_PER_WARP, 0);
+}
+
+} // namespace kernel

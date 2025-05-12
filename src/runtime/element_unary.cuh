@@ -12,22 +12,35 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-  #include "common.h"
 
- enum class ElementUnaryOpType { EXP, SILU, GELU, RELU, CLAMP, SQUARE, SQRT, MULSCALAR};
+#pragma once
+#include "common.h"
+namespace kernel {
+enum class ElementUnaryOpType {
+  EXP,
+  SILU,
+  GELU,
+  RELU,
+  CLAMP,
+  SQUARE,
+  SQRT,
+  MULSCALAR
+};
 
- template <typename T, ElementUnaryOpType OP>
+template <typename T, ElementUnaryOpType OP>
 static __device__ __forceinline__ T
     perform_element_unary_op(T a, float scalar = 0.0f) {
-  if constexpr (!std::is_same_v<T, __nv_bfloat16> ) {
+  if constexpr (!std::is_same_v<T, __nv_bfloat16>) {
     assert(0 && "unsupport datatype in tb elementunary");
   }
   if constexpr (OP == ElementUnaryOpType::EXP) {
     return __float2bfloat16(expf(__bfloat162float(a)));
   } else if constexpr (OP == ElementUnaryOpType::SILU) {
-    return __float2bfloat16(((float)a) * (1.0f / (1.0f + expf(__bfloat162float(-a)))));
+    return __float2bfloat16(((float)a) *
+                            (1.0f / (1.0f + expf(__bfloat162float(-a)))));
   } else if constexpr (OP == ElementUnaryOpType::GELU) {
-    return __float2bfloat16((((float)a) / 2.0f) * (1.0f + erff((__bfloat162float(a)) / sqrtf(2.0f))));
+    return __float2bfloat16((((float)a) / 2.0f) *
+                            (1.0f + erff((__bfloat162float(a)) / sqrtf(2.0f))));
   } else if constexpr (OP == ElementUnaryOpType::RELU) {
     return __float2bfloat16(fmaxf(0.f, __bfloat162float(a)));
   } else if constexpr (OP == ElementUnaryOpType::CLAMP) {
@@ -38,7 +51,7 @@ static __device__ __forceinline__ T
     return __float2bfloat16(sqrtf(__bfloat162float(a)));
   } else if constexpr (OP == ElementUnaryOpType::MULSCALAR) {
     return __float2bfloat16(scalar * __bfloat162float(a));
-    
+
   } else {
     assert(0 && "unsupport optype in tb elementunary");
   }
@@ -47,34 +60,46 @@ static __device__ __forceinline__ T
 }
 
 template <typename T>
-__device__ __forceinline__ T perform_element_unary_chain(T a,  const float* scalars, int idx) {
+__device__ __forceinline__ T perform_element_unary_chain(T a,
+                                                         float const *scalars,
+                                                         int idx) {
   return a;
 }
 
-template <typename T, ElementUnaryOpType FirstOp, ElementUnaryOpType... RemainingOps>
-__device__ __forceinline__ T perform_element_unary_chain(T a, const float* scalars, int idx) {
-    T res = perform_element_unary_op<T, FirstOp>(a, scalars[idx]);
-    return perform_element_unary_chain<T, RemainingOps...>(res, scalars, idx + 1);
+template <typename T,
+          ElementUnaryOpType FirstOp,
+          ElementUnaryOpType... RemainingOps>
+__device__ __forceinline__ T perform_element_unary_chain(T a,
+                                                         float const *scalars,
+                                                         int idx) {
+  T res = perform_element_unary_op<T, FirstOp>(a, scalars[idx]);
+  return perform_element_unary_chain<T, RemainingOps...>(res, scalars, idx + 1);
 }
 
 // __device__ __forceinline__ void perform_element_unary_chain_kernel(){
 //   return;
 // }
 
-// now assume input output using the same layout 
-template <bool ACCUM, typename SMEM_D, typename SMEM_S, ElementUnaryOpType FirstOp, ElementUnaryOpType... RemainingOps>
+// now assume input output using the same layout
+template <bool ACCUM,
+          typename SMEM_D,
+          typename SMEM_S,
+          ElementUnaryOpType FirstOp,
+          ElementUnaryOpType... RemainingOps>
 __device__ __forceinline__ void perform_element_unary_chain_kernel(
-    SMEM_D dst,
-    SMEM_S src,
-    const float* scalars) {
-  for (int elem_idx = threadIdx.x; elem_idx < SMEM_D::size(); elem_idx += NUM_THREADS) {
+    SMEM_D dst, SMEM_S src, float const *scalars) {
+  for (int elem_idx = threadIdx.x; elem_idx < SMEM_D::size();
+       elem_idx += NUM_THREADS) {
     auto value = src.at(elem_idx);
-    auto result = perform_element_unary_chain<typename SMEM_D::value_type, FirstOp, RemainingOps...>(value, scalars, 0);
-    if(!ACCUM){
+    auto result =
+        perform_element_unary_chain<typename SMEM_D::value_type,
+                                    FirstOp,
+                                    RemainingOps...>(value, scalars, 0);
+    if (!ACCUM) {
       dst.at(elem_idx) = result;
-    }else{
+    } else {
       dst.at(elem_idx) += result;
     }
-    
   }
 }
+} // namespace kernel
