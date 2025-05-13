@@ -15,7 +15,7 @@
  */
 
 #pragma once
-
+#include "common.h"
 #include "copy_sm80.cuh"
 #include "dmem_layout.cuh"
 #include "element_binary.cuh"
@@ -24,7 +24,6 @@
 #include "reduction.cuh"
 #include "smem_layout.cuh"
 #include "utils.cuh"
-#include <cuda_bf16.h>
 #pragma once
 namespace kernel {
 
@@ -47,9 +46,9 @@ __device__ __forceinline__ void norm_linear_kernel(void const *input_ptr,
   assert(num_m > 0 && num_n > 0 && num_k > 0);
   // input_tile [BATCH_SIZE, HIDDEN_SIZE]
   // weight_tile [HIDDEN_SIZE, HIDDEN_SIZE]
-  const __restrict__ T *d_input = static_cast<T const *>(input_ptr);
+  __restrict__ T const *d_input = static_cast<T const *>(input_ptr);
 
-  const __restrict__ T *d_weight =
+  __restrict__ T const *d_weight =
       static_cast<T const *>(weight_ptr) + blockIdx.x * 64 * 1;
   T __restrict__ *d_output = static_cast<T *>(output_ptr) + blockIdx.x * 64 * 1;
 
@@ -209,15 +208,15 @@ __device__ __forceinline__ void norm_linear_kernel(void const *input_ptr,
       for (uint32_t i = 0; i < 4; i++) {
         int row = idx_in_warp / 4 + 8 * (i % 2);
         int col = (idx_in_warp % 4) * 2 + 16 * warp_idx + 8 * (i / 2);
-        mm_output_smem.at(row, col) = __float2bfloat16(s_frag[m][n][i * 2]);
+        mm_output_smem.at(row, col) = float2bfloat16(s_frag[m][n][i * 2]);
         mm_output_smem.at(row, col + 1) =
-            __float2bfloat16(s_frag[m][n][i * 2 + 1]);
-        // mm_output_smem.at(row, col) = __float2bfloat16(40.7500f);
-        // mm_output_smem.at(row, col+1) = __float2bfloat16(40.7500f);
+            float2bfloat16(s_frag[m][n][i * 2 + 1]);
+        // mm_output_smem.at(row, col) = float2bfloat16(40.7500f);
+        // mm_output_smem.at(row, col+1) = float2bfloat16(40.7500f);
         // printf("mm output A%f, B%f, rol%d, col %d, value %f, %f\n",
         //   s_frag[m][n][i*2], s_frag[m][n][i*2+1], row, col,
-        //   __bfloat162float(mm_output_smem.at(row, col)),
-        //   __bfloat162float(mm_output_smem.at(row, col+1)));
+        //   bfloat162float(mm_output_smem.at(row, col)),
+        //   bfloat162float(mm_output_smem.at(row, col+1)));
       }
     }
   }

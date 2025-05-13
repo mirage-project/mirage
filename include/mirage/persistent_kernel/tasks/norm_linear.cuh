@@ -47,9 +47,9 @@ __device__ __forceinline__ void norm_linear_kernel(void const *input_ptr,
   int idx_in_warp = threadIdx.x % 32;
 
   assert(num_m > 0 && num_n > 0 && num_k > 0);
-  const __restrict__ T *d_input = static_cast<T const *>(input_ptr);
+  __restrict__ T const *d_input = static_cast<T const *>(input_ptr);
 
-  const __restrict__ T *d_weight = static_cast<T const *>(weight_ptr);
+  __restrict__ T const *d_weight = static_cast<T const *>(weight_ptr);
   T __restrict__ *d_output = static_cast<T *>(output_ptr);
 
   dmem_row_const<T, 1, 64, 3584> input_dmem(d_input);
@@ -116,7 +116,7 @@ __device__ __forceinline__ void norm_linear_kernel(void const *input_ptr,
 #pragma unroll
   for (int i = 0; i < 8; ++i) {
     s_frag[0][0][i] = 0.0f;
-    zero_buffer.at(0, i) = __float2bfloat16(0.0f);
+    zero_buffer.at(0, i) = float2bfloat16(0.0f);
   }
 
   for (int for_idx = 0; for_idx < 56; for_idx++) {
@@ -202,33 +202,51 @@ __device__ __forceinline__ void norm_linear_kernel(void const *input_ptr,
         if (row >= BATCH_SIZE) {
           continue;
         }
-        mm_output_smem.at(row, col) = __float2bfloat16(s_frag[m][n][i * 2]);
+        mm_output_smem.at(row, col) = float2bfloat16(s_frag[m][n][i * 2]);
         mm_output_smem.at(row, col + 1) =
-            __float2bfloat16(s_frag[m][n][i * 2 + 1]);
+            float2bfloat16(s_frag[m][n][i * 2 + 1]);
       }
     }
   }
   __syncthreads();
 
-  reduction_sum_col<T>(reduction_output_smem, element_unary_smem);
-  __syncthreads();
+  // reduction_sum_col<T>(reduction_output_smem, element_unary_smem);
+  // __syncthreads();
   float const scalars[] = {0.0f};
-  perform_element_unary_chain_kernel<false,
-                                     decltype(reduction_output_smem),
-                                     decltype(reduction_output_smem),
-                                     ElementUnaryOpType::SQRT>(
-      reduction_output_smem, reduction_output_smem, scalars);
+  // perform_element_unary_chain_kernel<false,
+  //                                    decltype(reduction_output_smem),
+  //                                    decltype(reduction_output_smem),
+  //                                    ElementUnaryOpType::SQRT>(
+  //     reduction_output_smem, reduction_output_smem, scalars);
+  reduction_sum_col<T,
+                    decltype(reduction_output_smem),
+                    decltype(element_unary_smem),
+                    ElementUnaryOpType::SQRT>(
+      reduction_output_smem, element_unary_smem, scalars);
   __syncthreads();
 
   div_col(output_smem, mm_output_smem, reduction_output_smem);
   __syncthreads();
 
+  // Non-chunked
+  // #pragma unroll
+  //   for (int i = threadIdx.x; i < (BATCH_SIZE * HIDDEN_SIZE); i +=
+  //   NUM_THREADS) {
+  //     // offset
+  //     int row = i / HIDDEN_SIZE;
+  //     int col = (i % HIDDEN_SIZE);
+  //     output_dmem.at(row, col) = mm_output_smem.at(row, col);
+  //   }
+
+  // Chunked
+  dmem_row<__uint128_t, 1, num_chunks, num_chunks> output_dmem_chunked(
+      static_cast<__uint128_t *>(d_output));
+  smem_row<__uint128_t, 1, 1, 1, 1, num_chunks, num_chunks>
+      mm_output_smem_chunked(static_cast<__uint128_t *>(mm_output));
 #pragma unroll
-  for (int i = threadIdx.x; i < (BATCH_SIZE * HIDDEN_SIZE); i += NUM_THREADS) {
-    // offset
-    int row = i / HIDDEN_SIZE;
-    int col = (i % HIDDEN_SIZE);
-    output_dmem.at(row, col) = mm_output_smem.at(row, col);
+  for (int chunk_idx = threadIdx.x; chunk_idx < num_chunks;
+       chunk_idx += NUM_THREADS) {
+    output_dmem_chunked.at(chunk_idx) = mm_output_smem_chunked.at(chunk_idx);
   }
 }
 

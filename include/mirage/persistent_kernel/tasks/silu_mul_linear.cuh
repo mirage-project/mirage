@@ -45,10 +45,10 @@ __device__ __forceinline__ void silu_mul_linear_kernel(void const *input_ptr,
   int idx_in_warp = threadIdx.x % 32;
 
   assert(num_m > 0 && num_n > 0 && num_k > 0);
-  const __restrict__ T *d_input = static_cast<T const *>(input_ptr);
-  const __restrict__ T *d_mul = static_cast<T const *>(mul_ptr);
+  __restrict__ T const *d_input = static_cast<T const *>(input_ptr);
+  __restrict__ T const *d_mul = static_cast<T const *>(mul_ptr);
 
-  const __restrict__ T *d_weight = static_cast<T const *>(weight_ptr);
+  __restrict__ T const *d_weight = static_cast<T const *>(weight_ptr);
   T __restrict__ *d_output = static_cast<T *>(output_ptr);
 
   dmem_row_const<T, 1, 64, 3584> input_dmem(d_input);
@@ -130,7 +130,7 @@ __device__ __forceinline__ void silu_mul_linear_kernel(void const *input_ptr,
 #pragma unroll
   for (int i = 0; i < 8; ++i) {
     s_frag[0][0][i] = 0.0f;
-    zero_buffer.at(0, i) = __float2bfloat16(0.0f);
+    zero_buffer.at(0, i) = float2bfloat16(0.0f);
   }
 
   for (int for_idx = 0; for_idx < 56; for_idx++) {
@@ -239,9 +239,8 @@ __device__ __forceinline__ void silu_mul_linear_kernel(void const *input_ptr,
         if (row >= BATCH_SIZE) {
           continue;
         }
-        output_smem.at(row, col) = __float2bfloat16(s_frag[m][n][i * 2]);
-        output_smem.at(row, col + 1) =
-            __float2bfloat16(s_frag[m][n][i * 2 + 1]);
+        output_smem.at(row, col) = float2bfloat16(s_frag[m][n][i * 2]);
+        output_smem.at(row, col + 1) = float2bfloat16(s_frag[m][n][i * 2 + 1]);
       }
     }
   }

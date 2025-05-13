@@ -34,29 +34,29 @@ static __device__ __forceinline__ T
     assert(0 && "unsupport datatype in tb elementunary");
   }
   if constexpr (OP == ElementUnaryOpType::EXP) {
-    return __float2bfloat16(expf(__bfloat162float(a)));
+    return float2bfloat16(expf(bfloat162float(a)));
   } else if constexpr (OP == ElementUnaryOpType::SILU) {
-    return __float2bfloat16((__bfloat162float(a)) *
-                            (1.0f / (1.0f + expf(__bfloat162float(-a)))));
+    return float2bfloat16((bfloat162float(a)) *
+                          (1.0f / (1.0f + expf(bfloat162float(-a)))));
   } else if constexpr (OP == ElementUnaryOpType::GELU) {
-    return __float2bfloat16((((float)a) / 2.0f) *
-                            (1.0f + erff((__bfloat162float(a)) / sqrtf(2.0f))));
+    return float2bfloat16((((float)a) / 2.0f) *
+                          (1.0f + erff((bfloat162float(a)) / sqrtf(2.0f))));
   } else if constexpr (OP == ElementUnaryOpType::RELU) {
-    return __float2bfloat16(fmaxf(0.f, __bfloat162float(a)));
+    return float2bfloat16(fmaxf(0.f, bfloat162float(a)));
   } else if constexpr (OP == ElementUnaryOpType::CLAMP) {
-    return __float2bfloat16(fmaxf(0.f, fminf(__bfloat162float(a), 1.f)));
+    return float2bfloat16(fmaxf(0.f, fminf(bfloat162float(a), 1.f)));
   } else if constexpr (OP == ElementUnaryOpType::SQUARE) {
-    return __float2bfloat16(__bfloat162float(a) * __bfloat162float(a));
+    return float2bfloat16(bfloat162float(a) * bfloat162float(a));
   } else if constexpr (OP == ElementUnaryOpType::SQRT) {
-    return __float2bfloat16(sqrtf(__bfloat162float(a)));
+    return float2bfloat16(sqrtf(bfloat162float(a)));
   } else if constexpr (OP == ElementUnaryOpType::MULSCALAR) {
-    return __float2bfloat16(scalar * __bfloat162float(a));
+    return float2bfloat16(scalar * bfloat162float(a));
 
   } else {
     assert(0 && "unsupport optype in tb elementunary");
   }
 
-  return __float2bfloat16(0.0f);
+  return float2bfloat16(0.0f);
 }
 
 template <typename T>
