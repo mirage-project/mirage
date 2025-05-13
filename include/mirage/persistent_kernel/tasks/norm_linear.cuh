@@ -26,6 +26,8 @@
 #include "utils.cuh"
 namespace kernel {
 
+using bfloat16 = type::bfloat16_t;
+
 // kernel for [16, 64] and any BATCH_SIZE < 16 [x, 64]
 template <typename T>
 __device__ __forceinline__ void norm_linear_kernel(void const *input_ptr,
@@ -44,7 +46,7 @@ __device__ __forceinline__ void norm_linear_kernel(void const *input_ptr,
   constexpr int num_m = 1;
   constexpr int num_k = HIDDEN_SIZE >> 4;
   int warp_idx = warp_id();
-  int idx_in_warp = threadIdx.x % 32;
+  int idx_in_warp = threadIdx.x & 0b11111;
 
   assert(num_m > 0 && num_n > 0 && num_k > 0);
   __restrict__ T const *d_input = static_cast<T const *>(input_ptr);
@@ -116,7 +118,7 @@ __device__ __forceinline__ void norm_linear_kernel(void const *input_ptr,
 #pragma unroll
   for (int i = 0; i < 8; ++i) {
     s_frag[0][0][i] = 0.0f;
-    zero_buffer.at(0, i) = float2bfloat16(0.0f);
+    zero_buffer.at(0, i) = bfloat16(0.0f);
   }
 
   for (int for_idx = 0; for_idx < 56; for_idx++) {
@@ -161,15 +163,15 @@ __device__ __forceinline__ void norm_linear_kernel(void const *input_ptr,
     __syncthreads();
     uint32_t a_frag[4], b_frag[4];
 
-    for (uint32_t n = 0; n < num_n / 4; n++) {
+    for (uint32_t n = 0; n < (num_n >> 2); n++) {
       for (uint32_t m = 0; m < num_m; m++) {
 #pragma unroll
         for (uint32_t k = 0; k < num_k; k++) {
-          int m_row = idx_in_warp % 16;
-          int m_col = k * 16 + idx_in_warp / 16 * 8;
+          int m_row = idx_in_warp & 0b1111;
+          int m_col = (k << 4) + ((idx_in_warp >> 4) << 3);
           // load B matrix,
-          int n_row = idx_in_warp % 16 + k * 16;
-          int n_col = warp_idx * 16 + idx_in_warp / 16 * 8;
+          int n_row = (idx_in_warp & 0b1111) + (k << 4);
+          int n_col = (warp_idx << 4) + ((idx_in_warp >> 4) << 3);
           // load from a all zero mem
           bool is_valid = (m_row < BATCH_SIZE);
           T *src_ptr = is_valid ? input_smem(m_row, m_col) : zero_buffer(0, 0);
@@ -193,61 +195,61 @@ __device__ __forceinline__ void norm_linear_kernel(void const *input_ptr,
   }
   // reg write back to smem
 
-  for (uint32_t n = 0; n < num_n / 4; n++) {
+  for (uint32_t n = 0; n < (num_n >> 2); n++) {
     for (uint32_t m = 0; m < num_m; m++) {
 #pragma unroll
       for (uint32_t i = 0; i < 4; i++) {
-        int row = idx_in_warp / 4 + 8 * (i % 2);
-        int col = (idx_in_warp % 4) * 2 + 16 * warp_idx + 8 * (i / 2);
+        int row = (idx_in_warp >> 2) + ((i & 0b1) << 3);
+        int col =
+            ((idx_in_warp & 0b11) << 1) + (warp_idx << 4) + ((i >> 1) << 3);
         if (row >= BATCH_SIZE) {
           continue;
         }
-        mm_output_smem.at(row, col) = float2bfloat16(s_frag[m][n][i * 2]);
-        mm_output_smem.at(row, col + 1) =
-            float2bfloat16(s_frag[m][n][i * 2 + 1]);
+        mm_output_smem.at(row, col) = bfloat16(s_frag[m][n][i * 2]);
+        mm_output_smem.at(row, col + 1) = bfloat16(s_frag[m][n][i * 2 + 1]);
       }
     }
   }
   __syncthreads();
 
-  // reduction_sum_col<T>(reduction_output_smem, element_unary_smem);
-  // __syncthreads();
+  reduction_sum_col<T>(reduction_output_smem, element_unary_smem);
+  __syncthreads();
   float const scalars[] = {0.0f};
-  // perform_element_unary_chain_kernel<false,
-  //                                    decltype(reduction_output_smem),
-  //                                    decltype(reduction_output_smem),
-  //                                    ElementUnaryOpType::SQRT>(
-  //     reduction_output_smem, reduction_output_smem, scalars);
-  reduction_sum_col<T,
-                    decltype(reduction_output_smem),
-                    decltype(element_unary_smem),
-                    ElementUnaryOpType::SQRT>(
-      reduction_output_smem, element_unary_smem, scalars);
+  perform_element_unary_chain_kernel<false,
+                                     decltype(reduction_output_smem),
+                                     decltype(reduction_output_smem),
+                                     ElementUnaryOpType::SQRT>(
+      reduction_output_smem, reduction_output_smem, scalars);
+  // reduction_sum_col<T,
+  //                   decltype(reduction_output_smem),
+  //                   decltype(element_unary_smem),
+  //                   ElementUnaryOpType::SQRT>(
+  //     reduction_output_smem, element_unary_smem, scalars);
   __syncthreads();
 
   div_col(output_smem, mm_output_smem, reduction_output_smem);
   __syncthreads();
 
-  // Non-chunked
-  // #pragma unroll
-  //   for (int i = threadIdx.x; i < (BATCH_SIZE * HIDDEN_SIZE); i +=
-  //   NUM_THREADS) {
-  //     // offset
-  //     int row = i / HIDDEN_SIZE;
-  //     int col = (i % HIDDEN_SIZE);
-  //     output_dmem.at(row, col) = mm_output_smem.at(row, col);
-  //   }
+// Non-chunked
+#pragma unroll
+  for (int i = threadIdx.x; i < (BATCH_SIZE * HIDDEN_SIZE); i += NUM_THREADS) {
+    // offset
+    int row = i / HIDDEN_SIZE;
+    int col = (i % HIDDEN_SIZE);
+    output_dmem.at(row, col) = mm_output_smem.at(row, col);
+  }
 
   // Chunked
-  dmem_row<__uint128_t, 1, num_chunks, num_chunks> output_dmem_chunked(
-      static_cast<__uint128_t *>(d_output));
-  smem_row<__uint128_t, 1, 1, 1, 1, num_chunks, num_chunks>
-      mm_output_smem_chunked(static_cast<__uint128_t *>(mm_output));
-#pragma unroll
-  for (int chunk_idx = threadIdx.x; chunk_idx < num_chunks;
-       chunk_idx += NUM_THREADS) {
-    output_dmem_chunked.at(chunk_idx) = mm_output_smem_chunked.at(chunk_idx);
-  }
+  //   dmem_row<__uint128_t, 1, num_chunks, num_chunks> output_dmem_chunked(
+  //       reinterpret_cast<__uint128_t *>(d_output));
+  //   smem_row<__uint128_t, 0, 0, 0, 1, num_chunks, num_chunks>
+  //       mm_output_smem_chunked(reinterpret_cast<__uint128_t *>(mm_output));
+  // #pragma unroll
+  //   for (int chunk_idx = threadIdx.x; chunk_idx < num_chunks;
+  //        chunk_idx += NUM_THREADS) {
+  //     output_dmem_chunked.at(chunk_idx) =
+  //     mm_output_smem_chunked.at(chunk_idx);
+  //   }
 }
 
 } // namespace kernel

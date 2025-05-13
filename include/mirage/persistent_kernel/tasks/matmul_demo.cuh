@@ -27,6 +27,8 @@
 #pragma once
 namespace kernel {
 
+using bfloat16 = type::bfloat16;
+
 // a 16X64X4K kernel for reference
 template <typename T, int BATCH_SIZE, int HIDDEN_SIZE, int NUM_THREADS>
 __device__ __forceinline__ void norm_linear_kernel(void const *input_ptr,
@@ -208,15 +210,14 @@ __device__ __forceinline__ void norm_linear_kernel(void const *input_ptr,
       for (uint32_t i = 0; i < 4; i++) {
         int row = idx_in_warp / 4 + 8 * (i % 2);
         int col = (idx_in_warp % 4) * 2 + 16 * warp_idx + 8 * (i / 2);
-        mm_output_smem.at(row, col) = float2bfloat16(s_frag[m][n][i * 2]);
-        mm_output_smem.at(row, col + 1) =
-            float2bfloat16(s_frag[m][n][i * 2 + 1]);
-        // mm_output_smem.at(row, col) = float2bfloat16(40.7500f);
-        // mm_output_smem.at(row, col+1) = float2bfloat16(40.7500f);
+        mm_output_smem.at(row, col) = bfloat16(s_frag[m][n][i * 2]);
+        mm_output_smem.at(row, col + 1) = bfloat16(s_frag[m][n][i * 2 + 1]);
+        // mm_output_smem.at(row, col) = bfloat16(40.7500f);
+        // mm_output_smem.at(row, col+1) = bfloat16(40.7500f);
         // printf("mm output A%f, B%f, rol%d, col %d, value %f, %f\n",
         //   s_frag[m][n][i*2], s_frag[m][n][i*2+1], row, col,
-        //   bfloat162float(mm_output_smem.at(row, col)),
-        //   bfloat162float(mm_output_smem.at(row, col+1)));
+        //   float(mm_output_smem.at(row, col)),
+        //   float(mm_output_smem.at(row, col+1)));
       }
     }
   }

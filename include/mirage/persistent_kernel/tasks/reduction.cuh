@@ -18,6 +18,8 @@
 
 namespace kernel {
 
+using bfloat16 = type::bfloat16_t;
+
 constexpr int NUM_THREADS = 128;
 // reduction on dim 0
 template <typename SMEM_DST, typename SMEM_SRC>
@@ -73,9 +75,9 @@ static __device__ __forceinline__ void reduction_sum_col(SMEM_DST dst,
     int dst_row = dst_elem_idx / SMEM_DST::COL;
 #pragma unroll
     for (int i = 0; i < REDUCTION_FACTOR; ++i) {
-      result += bfloat162float(src.at(dst_row, i));
+      result += float(src.at(dst_row, i));
     }
-    dst.at(dst_elem_idx) = float2bfloat16(result);
+    dst.at(dst_elem_idx) = bfloat16(result);
   }
 }
 
@@ -95,11 +97,11 @@ static __device__ __forceinline__ void
     int dst_row = dst_elem_idx / SMEM_DST::COL;
 #pragma unroll
     for (int i = 0; i < REDUCTION_FACTOR; ++i) {
-      result += bfloat162float(src.at(dst_row, i));
+      result += float(src.at(dst_row, i));
     }
     result = perform_element_unary_chain<float, FirstOp, RemainingOps...>(
         result, scalars, 0);
-    dst.at(dst_elem_idx) = float2bfloat16(result);
+    dst.at(dst_elem_idx) = bfloat16(result);
   }
 }
 

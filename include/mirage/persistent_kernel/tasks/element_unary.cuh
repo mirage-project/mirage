@@ -27,36 +27,37 @@ enum class ElementUnaryOpType {
   MULSCALAR
 };
 
+using bfloat16 = type::bfloat16_t;
+
 template <typename T, ElementUnaryOpType OP>
 static __device__ __forceinline__ T
     perform_element_unary_op(T a, float scalar = 0.0f) {
-  if constexpr (!std::is_same_v<T, __nv_bfloat16>) {
+  if constexpr (!(std::is_same_v<T, bfloat16> || std::is_same_v<T, float>)) {
     assert(0 && "unsupport datatype in tb elementunary");
   }
   if constexpr (OP == ElementUnaryOpType::EXP) {
-    return float2bfloat16(expf(bfloat162float(a)));
+    return bfloat16(expf(float(a)));
   } else if constexpr (OP == ElementUnaryOpType::SILU) {
-    return float2bfloat16((bfloat162float(a)) *
-                          (1.0f / (1.0f + expf(bfloat162float(-a)))));
+    return bfloat16((float(a)) * (1.0f / (1.0f + expf(float(-a)))));
   } else if constexpr (OP == ElementUnaryOpType::GELU) {
-    return float2bfloat16((((float)a) / 2.0f) *
-                          (1.0f + erff((bfloat162float(a)) / sqrtf(2.0f))));
+    return bfloat16((((float)a) / 2.0f) *
+                    (1.0f + erff((float(a)) / sqrtf(2.0f))));
   } else if constexpr (OP == ElementUnaryOpType::RELU) {
-    return float2bfloat16(fmaxf(0.f, bfloat162float(a)));
+    return bfloat16(fmaxf(0.f, float(a)));
   } else if constexpr (OP == ElementUnaryOpType::CLAMP) {
-    return float2bfloat16(fmaxf(0.f, fminf(bfloat162float(a), 1.f)));
+    return bfloat16(fmaxf(0.f, fminf(float(a), 1.f)));
   } else if constexpr (OP == ElementUnaryOpType::SQUARE) {
-    return float2bfloat16(bfloat162float(a) * bfloat162float(a));
+    return bfloat16(float(a) * float(a));
   } else if constexpr (OP == ElementUnaryOpType::SQRT) {
-    return float2bfloat16(sqrtf(bfloat162float(a)));
+    return bfloat16(sqrtf(float(a)));
   } else if constexpr (OP == ElementUnaryOpType::MULSCALAR) {
-    return float2bfloat16(scalar * bfloat162float(a));
+    return bfloat16(scalar * float(a));
 
   } else {
     assert(0 && "unsupport optype in tb elementunary");
   }
 
-  return float2bfloat16(0.0f);
+  return bfloat16(0.0f);
 }
 
 template <typename T>
