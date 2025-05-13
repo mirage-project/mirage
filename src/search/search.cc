@@ -143,10 +143,21 @@ void KernelGraphGenerator::generate_next_operator(
             assert(contains_key(algebraic_pattern, t.guid));
             input_patterns.push_back(algebraic_pattern.at(t.guid));
           }
+
           std::shared_ptr<AbstractExpr> pattern =
               get_pattern(op_type, input_tensors, input_patterns);
           if (!check_pattern(pattern)) {
             continue;
+          }
+
+          // pruning based on the number of chunk operators
+          if (op_type >= type::KNOperatorType::KN_CHUNK_FIRST_OP_ID &&
+              op_type <= type::KNOperatorType::KN_CHUNK_LAST_OP_ID) {
+            int chunk_type = op_type - type::KNOperatorType::KN_CHUNK_0_OP;
+            if (c.ctx_num_chunk_ops[chunk_type] == num_chunk_ops[chunk_type]) {
+              continue;
+            }
+            c.ctx_num_chunk_ops[chunk_type]++;
           }
 
           KNOperator *new_op = create_op(*c.kn_graph, op_type, input_tensors);
@@ -354,10 +365,21 @@ void KernelGraphGenerator::generate_next_operator(
           assert(contains_key(algebraic_pattern, t.guid));
           input_patterns.push_back(algebraic_pattern.at(t.guid));
         }
+
         std::shared_ptr<AbstractExpr> pattern =
             get_pattern(op_type, input_tensors, input_patterns);
         if (!check_pattern(pattern)) {
           continue;
+        }
+
+        // pruning based on number of chunk operators
+        if (op_type >= type::TBOperatorType::TB_CHUNK_FIRST_OP_ID &&
+            op_type <= type::TBOperatorType::TB_CHUNK_LAST_OP_ID) {
+          int chunk_type = op_type - type::TBOperatorType::TB_CHUNK_0_OP;
+          if (c.ctx_num_chunk_ops[chunk_type] == num_chunk_ops[chunk_type]) {
+            continue;
+          }
+          c.ctx_num_chunk_ops[chunk_type]++;
         }
 
         TBOperator *last_op = c.tb_graph->operators.back();
@@ -439,6 +461,12 @@ void KernelGraphGenerator::preprocess(kernel::Graph const &computation_graph) {
            op->output_tensors[0].data_type,
            op->output_tensors[0].layout,
            static_cast<kernel::KNInputOp *>(op)->input_strides});
+    }
+
+    // get number of chunk operators
+    if (op->op_type >= type::KNOperatorType::KN_CHUNK_FIRST_OP_ID &&
+        op->op_type <= type::KNOperatorType::KN_CHUNK_LAST_OP_ID) {
+      num_chunk_ops[op->op_type - type::KNOperatorType::KN_CHUNK_0_OP]++;
     }
   }
 

@@ -19,6 +19,7 @@ struct SearchContext {
   std::shared_ptr<kernel::Graph> kn_graph;
   std::shared_ptr<threadblock::Graph> tb_graph;
   SearchLevel level;
+  std::vector<int> ctx_num_chunk_ops = std::vector<int>(3);
 };
 
 void from_json(json const &j, SearchContext &c);

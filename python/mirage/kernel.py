@@ -263,6 +263,11 @@ class KNGraph:
 
     def div(self, A: DTensor, B: DTensor):
         return self.cygraph.div(A, B)
+    
+    def chunk(self, A: DTensor, chunk_size: int, chunk_dim: int):
+        if chunk_size != 2:
+            raise NotImplementedError("chunk not implemented for chunk size of more than 2")
+        return self.cygraph.chunk(A, chunk_size, chunk_dim)
 
     def pow(self, A: DTensor, B: DTensor):
         return self.cygraph.pow(A, B)

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "threadblock/chunk.h"
 #include "threadblock/element_binary.h"
 #include "threadblock/element_unary.h"
 #include "threadblock/epilogues.h"

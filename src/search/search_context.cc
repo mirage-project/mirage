@@ -32,6 +32,7 @@ void from_json(json const &j, SearchContext &c) {
     }
   }
   from_json(j.at("level"), c.level);
+  from_json(j.at("num_chunk_ops"), c.ctx_num_chunk_ops);
 }
 
 void to_json(json &j, SearchContext const &c) {
@@ -40,6 +41,7 @@ void to_json(json &j, SearchContext const &c) {
     j["tb_graph"] = *c.tb_graph;
   }
   j["level"] = c.level;
+  j["num_chunk_ops"] = c.ctx_num_chunk_ops;
 }
 
 SerializedSearchContext::SerializedSearchContext(SearchContext const &c) {

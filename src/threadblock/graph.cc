@@ -14,6 +14,8 @@
  */
 
 #include "mirage/threadblock/graph.h"
+#include "mirage/threadblock/chunk.h"
+#include "mirage/threadblock/serializer/chunk_serializer.h"
 #include "mirage/threadblock/serializer/concat_serializer.h"
 #include "mirage/threadblock/serializer/element_binary_serializer.h"
 #include "mirage/threadblock/serializer/element_unary_serializer.h"
@@ -116,6 +118,11 @@ size_t Graph::calculate_shared_memory_usage(TBOperator *new_op) {
       case mirage::type::TB_REDUCTION_0_MAX_OP:
       case mirage::type::TB_REDUCTION_1_MAX_OP:
       case mirage::type::TB_REDUCTION_2_MAX_OP:
+      // Chunk
+      case mirage::type::TB_CHUNK_0_OP:
+      case mirage::type::TB_CHUNK_1_OP:
+      case mirage::type::TB_CHUNK_2_OP:
+      case mirage::type::TB_CHUNK_3_OP:
       // Normalization
       case mirage::type::TB_RMS_NORM_OP:
       // Concat
@@ -612,6 +619,33 @@ NewKernelParams Graph::get_new_kernel_params(bool fingerprint) const {
             output.smem_offset);
         break;
       }
+      case mirage::type::TB_CHUNK_0_OP:
+      case mirage::type::TB_CHUNK_1_OP:
+      case mirage::type::TB_CHUNK_2_OP:
+      case mirage::type::TB_CHUNK_3_OP: {
+        assert(operators[i]->input_tensors.size() == 1);
+        assert(operators[i]->output_tensors.size() == 2);
+        mirage::threadblock::STensor input = operators[i]->input_tensors[0];
+        mirage::threadblock::STensor output1 = operators[i]->output_tensors[0];
+        mirage::threadblock::STensor output2 = operators[i]->output_tensors[1];
+        int dim = operators[i]->op_type - mirage::type::TB_CHUNK_0_OP;
+        int chunk_size =
+            static_cast<mirage::threadblock::TBChunkOp *>(operators[i])
+                ->chunk_size;
+        int3 input_shape = {dim == 0 ? input.dim[0] / 2 : input.dim[0],
+                            dim == 1 ? input.dim[1] / 2 : input.dim[1],
+                            dim == 2 ? input.dim[2] / 2 : input.dim[2]};
+        mirage::threadblock::serialize_chunk_op_parameters(
+            params.parameters,
+            params.num_parameters,
+            input_shape,
+            chunk_size,
+            dim,
+            input.smem_offset,
+            output1.smem_offset,
+            output2.smem_offset);
+        break;
+      }
       case mirage::type::TB_RMS_NORM_OP: {
         assert(operators[i]->input_tensors.size() == 1);
         assert(operators[i]->output_tensors.size() == 1);
@@ -850,6 +884,23 @@ void from_json(json const &j, Graph &graph) {
             dim);
         guid_mapping[output.guid] =
             op.at("output_tensors")[0].at("guid").get<int>();
+        break;
+      }
+      case type::TBOperatorType::TB_CHUNK_0_OP:
+      case type::TBOperatorType::TB_CHUNK_1_OP:
+      case type::TBOperatorType::TB_CHUNK_2_OP:
+      case type::TBOperatorType::TB_CHUNK_3_OP: {
+        int dim = op_type - type::TBOperatorType::TB_CHUNK_0_OP;
+        int chunk_size = op.at("chunk_size").get<int>();
+        std::vector<STensor> outputs =
+            graph.chunk(get_tensor_from_guid(
+                            op.at("input_tensors")[0].at("guid").get<int>()),
+                        chunk_size,
+                        dim);
+        guid_mapping[outputs[0].guid] =
+            op.at("output_tensors")[0].at("guid").get<int>();
+        guid_mapping[outputs[1].guid] =
+            op.at("output_tensors")[1].at("guid").get<int>();
         break;
       }
       case type::TBOperatorType::TB_REDUCTION_0_TO_DIMX_OP:

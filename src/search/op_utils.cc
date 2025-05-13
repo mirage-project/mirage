@@ -1,5 +1,6 @@
 #include "mirage/search/op_utils.h"
 #include "mirage/utils/containers.h"
+#include <iostream>
 
 namespace mirage {
 namespace search {
@@ -28,6 +29,10 @@ bool is_unary(type::TBOperatorType op) {
       type::TBOperatorType::TB_REDUCTION_0_OP,
       type::TBOperatorType::TB_REDUCTION_1_OP,
       type::TBOperatorType::TB_REDUCTION_2_OP,
+      type::TBOperatorType::TB_CHUNK_0_OP,
+      type::TBOperatorType::TB_CHUNK_1_OP,
+      type::TBOperatorType::TB_CHUNK_2_OP,
+      type::TBOperatorType::TB_CHUNK_3_OP,
       type::TBOperatorType::TB_FORLOOP_ACCUM_NO_RED_OP,
       type::TBOperatorType::TB_FORLOOP_ACCUM_RED_LD_MEAN_OP,
       type::TBOperatorType::TB_FORLOOP_ACCUM_RED_LD_SUM_OP,
@@ -54,6 +59,10 @@ bool is_unary(type::KNOperatorType op) {
       type::KNOperatorType::KN_REDUCTION_0_OP,
       type::KNOperatorType::KN_REDUCTION_1_OP,
       type::KNOperatorType::KN_REDUCTION_2_OP,
+      type::KNOperatorType::KN_CHUNK_0_OP,
+      type::KNOperatorType::KN_CHUNK_1_OP,
+      type::KNOperatorType::KN_CHUNK_2_OP,
+      type::KNOperatorType::KN_CHUNK_3_OP,
       type::KNOperatorType::KN_EXP_OP,
       type::KNOperatorType::KN_SQUARE_OP,
       type::KNOperatorType::KN_SQRT_OP,
@@ -223,7 +232,6 @@ std::shared_ptr<AbstractExpr> get_pattern(type::KNOperatorType op,
                                           DTensor const &tensor_r,
                                           std::shared_ptr<AbstractExpr> lhs,
                                           std::shared_ptr<AbstractExpr> rhs) {
-
   assert(lhs != nullptr);
   assert(rhs != nullptr);
   switch (op) {
@@ -271,6 +279,12 @@ std::shared_ptr<AbstractExpr>
     get_pattern(type::KNOperatorType op,
                 std::vector<DTensor> const &tensors,
                 std::vector<std::shared_ptr<AbstractExpr>> const &opds) {
+  if (op == type::KNOperatorType::KN_CHUNK_0_OP ||
+      op == type::KNOperatorType::KN_CHUNK_1_OP ||
+      op == type::KNOperatorType::KN_CHUNK_2_OP ||
+      op == type::KNOperatorType::KN_CHUNK_3_OP) {
+    return opds[0];
+  }
   for (auto const &expr : opds) {
     if (!expr) {
       return nullptr;
@@ -289,6 +303,12 @@ std::shared_ptr<AbstractExpr>
     get_pattern(type::TBOperatorType op,
                 std::vector<STensor> const &tensors,
                 std::vector<std::shared_ptr<AbstractExpr>> const &opds) {
+  if (op == type::TBOperatorType::TB_CHUNK_0_OP ||
+      op == type::TBOperatorType::TB_CHUNK_1_OP ||
+      op == type::TBOperatorType::TB_CHUNK_2_OP ||
+      op == type::TBOperatorType::TB_CHUNK_3_OP) {
+    return opds[0];
+  }
   for (auto const &expr : opds) {
     if (!expr) {
       return nullptr;
@@ -298,6 +318,7 @@ std::shared_ptr<AbstractExpr>
     return get_pattern(op, tensors[0], opds[0]);
   }
   if (opds.size() == 2) {
+    tensors[0];
     return get_pattern(op, tensors[0], tensors[1], opds[0], opds[1]);
   }
 
@@ -342,6 +363,14 @@ KNOperator *create_op(kernel::Graph &g,
       return g.create_elementunary_clamp_op(input,
                                             type::CLAMP_MIN_MAX["min_val"],
                                             type::CLAMP_MIN_MAX["max_val"]);
+    case type::KNOperatorType::KN_CHUNK_0_OP:
+      return g.create_chunk_op(input, 2, 0);
+    case type::KNOperatorType::KN_CHUNK_1_OP:
+      return g.create_chunk_op(input, 2, 1);
+    case type::KNOperatorType::KN_CHUNK_2_OP:
+      return g.create_chunk_op(input, 2, 2);
+    case type::KNOperatorType::KN_CHUNK_3_OP:
+      return g.create_chunk_op(input, 2, 3);
     default:
       assert(false && "Unsupported operator");
   }
@@ -392,6 +421,13 @@ TBOperator *create_op(threadblock::Graph &g,
       return g.create_elementunary_clamp_op(input,
                                             type::CLAMP_MIN_MAX["min_val"],
                                             type::CLAMP_MIN_MAX["max_val"]);
+    case type::TBOperatorType::TB_CHUNK_0_OP:
+    case type::TBOperatorType::TB_CHUNK_1_OP:
+    case type::TBOperatorType::TB_CHUNK_2_OP:
+    case type::TBOperatorType::TB_CHUNK_3_OP: {
+      int dim = (int)type - (int)type::TBOperatorType::TB_CHUNK_0_OP;
+      return g.create_chunk_op(input, 2, dim);
+    }
     case type::TBOperatorType::TB_RMS_NORM_OP:
       return g.create_rms_norm_op(input);
     case type::TBOperatorType::TB_REDUCTION_0_OP:

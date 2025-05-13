@@ -15,6 +15,7 @@
 
 #include "mirage/threadblock/graph.h"
 #include "mirage/threadblock/operator.h"
+#include <iostream>
 
 namespace mirage {
 namespace threadblock {

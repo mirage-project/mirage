@@ -13,80 +13,80 @@
  * limitations under the License.
  */
 
-#include "mirage/kernel/chunk.h"
-#include "mirage/kernel/device_memory_manager.h"
-#include "mirage/kernel/graph.h"
-#include "mirage/utils/hash_utils.h"
+#include "mirage/threadblock/chunk.h"
+#include "mirage/threadblock/graph.h"
 #include <cassert>
 
 namespace mirage {
-namespace kernel {
+namespace threadblock {
 
-std::vector<DTensor>
-    Graph::chunk(DTensor const &input, int chunk_size, int dim) {
-  KNOperator *op = create_chunk_op(input, chunk_size, dim);
+std::vector<STensor>
+    Graph::chunk(STensor const &input, int chunk_size, int dim) {
+  TBOperator *op = create_chunk_op(input, chunk_size, dim);
   assert(op != nullptr);
   operators.push_back(op);
-  assert(op->output_tensors.size() > 0);
   return op->output_tensors;
 }
 
-std::vector<DTensor *>
-    Graph::chunk(DTensor const *input, int chunk_size, int dim) {
-  KNOperator *op = create_chunk_op(*input, chunk_size, dim);
+std::vector<STensor *>
+    Graph::chunk(STensor const *input, int chunk_size, int dim) {
+  TBOperator *op = create_chunk_op(*input, chunk_size, dim);
   assert(op != nullptr);
   operators.push_back(op);
   assert(op->output_tensors.size() > 0);
-  std::vector<DTensor *> res;
+  std::vector<STensor *> res;
   for (auto i = 0; i < op->output_tensors.size(); i++) {
     res.push_back(&(op->output_tensors[i]));
   }
   return res;
 }
 
-KNOperator *
-    Graph::create_chunk_op(DTensor const &input, int chunk_size, int dim) {
+TBOperator *
+    Graph::create_chunk_op(STensor const &input, int chunk_size, int dim) {
   if (dim < 0 || dim >= input.num_dims || chunk_size <= 0) {
     return nullptr;
   }
   if (input.dim[dim] % chunk_size != 0) {
     return nullptr;
   }
-  if (!this->can_allocate(input)) {
+  TBOperator *op = new TBChunkOp(this, input, chunk_size, dim);
+  size_t smem_usage = calculate_shared_memory_usage(op);
+  if (smem_usage > mirage::config::MAX_SMEM_SIZE) {
+    delete op;
     return nullptr;
+  } else {
+    return op;
   }
-
-  KNChunkOp *op = new KNChunkOp(this, input, chunk_size, dim);
-  return op;
 }
 
-KNChunkOp::KNChunkOp(Graph *_graph,
-                     DTensor const &input,
+TBChunkOp::TBChunkOp(Graph *bgraph,
+                     STensor const &input,
                      int chunk_size,
                      int dim)
-    : KNOperator(
-          _graph, (type::KNOperatorType)(type::KN_CHUNK_0_OP + dim), input),
+    : TBOperator(bgraph,
+                 (type::TBOperatorType)(mirage::type::TB_CHUNK_0_OP + dim),
+                 input),
       chunk_size(chunk_size), chunk_dim(dim) {
   assert(input.dim[dim] % chunk_size == 0);
 
-  for (size_t i = 0; i < chunk_size; ++i) {
-    DTensor output_i = input;
-    output_i.dim[chunk_dim] /= chunk_size;
+  for (size_t i = 0; i < chunk_size; i++) {
+    STensor output_i = input;
+    output_i.dim[dim] /= chunk_size;
     output_i.owner_op = this;
     output_i.owner_ts_idx = i;
-    output_i.guid = DTensor::next_guid++;
-    kgraph->allocate(output_i);
+    output_i.guid = STensor::next_guid++;
+    output_i.smem_offset = bgraph->allocate_fingerprint(output_i);
     output_tensors.push_back(output_i);
   }
 }
 
-KNChunkOp::~KNChunkOp() {
+TBChunkOp::~TBChunkOp() {
   for (int i = chunk_size - 1; i >= 0; i--) {
-    kgraph->free(output_tensors[i]);
+    bgraph->free_fingerprint(output_tensors[i]);
   }
 }
 
-KNChunkOp::operator json() const {
+TBChunkOp::operator json() const {
   return {
       {"op_type", op_type},
       {"input_tensors", input_tensors},
@@ -96,13 +96,5 @@ KNChunkOp::operator json() const {
   };
 }
 
-void from_json(json const &j, KNChunkOp &op) {
-  j.at("op_type").get_to(op.op_type);
-  j.at("input_tensors").get_to(op.input_tensors);
-  j.at("output_tensors").get_to(op.output_tensors);
-  j.at("chunk_size").get_to(op.chunk_size);
-  j.at("chunk_dim").get_to(op.chunk_dim);
-}
-
-} // namespace kernel
+} // namespace threadblock
 } // namespace mirage

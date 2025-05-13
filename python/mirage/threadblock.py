@@ -46,6 +46,9 @@ class TBGraph:
 
     def div(self, A: STensor, B: STensor):
         return self.cygraph.div(A, B)
+    
+    def chunk(self, A: STensor, chunk_size: int, chunk_dim: int):
+        return self.cygraph.chunk(A, chunk_size, chunk_dim)
 
     def sub(self, A: STensor, B: STensor):
         return self.cygraph.sub(A, B)

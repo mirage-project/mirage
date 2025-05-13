@@ -14,7 +14,9 @@
  */
 
 #include "mirage/transpiler/transpile.h"
+#include "mirage/kernel/chunk.h"
 #include "mirage/kernel/graph.h"
+#include "mirage/threadblock/chunk.h"
 #include "mirage/threadblock/element_unary.h"
 #include "mirage/threadblock/graph.h"
 #include "mirage/transpiler/transpiler.h"
@@ -562,6 +564,21 @@ Transpiler::Transpiler(kernel::Graph const *_graph,
         assert(false && "To be implemented");
         break;
       }
+      case KN_CHUNK_0_OP:
+      case KN_CHUNK_1_OP:
+      case KN_CHUNK_2_OP:
+      case KN_CHUNK_3_OP: {
+        assert(dtensor_inputs.size() == 1);
+        assert(op->output_tensors.size() == 2);
+
+        int dim = op->op_type - KN_CHUNK_0_OP;
+        int chunk_size = static_cast<kernel::KNChunkOp *>(op)->chunk_size;
+        std::vector<kernel::DTensor> dts =
+            g->chunk(dtensor_inputs[0], chunk_size, dim);
+        dtensor_mapping[op->output_tensors[0].guid] = dts[0];
+        dtensor_mapping[op->output_tensors[1].guid] = dts[1];
+        break;
+      }
       case KN_CUSTOMIZED_OP: {
         // Create a new threadblock graph
         kernel::KNCustomizedOp *customized_op =
@@ -644,6 +661,21 @@ Transpiler::Transpiler(kernel::Graph const *_graph,
                   stensor_inputs[0], stensor_inputs[1], bop->op_type);
               assert(bop->output_tensors.size() == 1);
               stensor_mapping[bop->output_tensors[0].guid] = st;
+              break;
+            }
+            case TB_CHUNK_0_OP:
+            case TB_CHUNK_1_OP:
+            case TB_CHUNK_2_OP:
+            case TB_CHUNK_3_OP: {
+              assert(stensor_inputs.size() == 1);
+              int dim = bop->op_type - TB_CHUNK_0_OP;
+              int chunk_size =
+                  static_cast<threadblock::TBChunkOp *>(bop)->chunk_size;
+              std::vector<threadblock::STensor> sts =
+                  tbg->chunk(stensor_inputs[0], chunk_size, dim);
+              assert(bop->output_tensors.size() == 2);
+              stensor_mapping[bop->output_tensors[0].guid] = sts[0];
+              stensor_mapping[bop->output_tensors[1].guid] = sts[1];
               break;
             }
             case TB_REDUCTION_0_MAX_OP:
