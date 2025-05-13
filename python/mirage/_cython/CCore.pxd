@@ -83,9 +83,6 @@ cdef extern from "mirage/type.h" namespace "mirage::type":
         KN_SPLIT_0_OP = 1420,
         KN_SPLIT_1_OP = 1421,
         KN_SPLIT_2_OP = 1422,
-        KN_CHUNK_0_OP = 1423,
-        KN_CHUNK_1_OP = 1424,
-        KN_CHUNK_2_OP = 1425,
         KN_SPLIT_LAST_OP_ID = 1429,
         # Chunk
         KN_CHUNK_FIRST_OP_ID = 1430,

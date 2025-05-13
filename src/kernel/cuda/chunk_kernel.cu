@@ -135,7 +135,8 @@ __global__ void compute_chunk_fingerprint(char *dmem_fp_ptr,
     int input_k = i % input_shape.z;
     if (chunk_dim == 0) {
       if (input_i < output_shape.x) {
-        output1_fp_ptr[i] = input_fp_ptr[i];
+        int i1 = (input_i * (output_shape.y * output_shape.z)) + (input_j * output_shape.z) + input_k;
+        output1_fp_ptr[i1] = input_fp_ptr[i];
       } else {
         int i2 =
             ((input_i - output_shape.x) * (output_shape.y * output_shape.z)) +
@@ -144,7 +145,8 @@ __global__ void compute_chunk_fingerprint(char *dmem_fp_ptr,
       }
     } else if (chunk_dim == 1) {
       if (input_j < output_shape.y) {
-        output1_fp_ptr[i] = input_fp_ptr[i];
+        int i1 = (input_i * (output_shape.y * output_shape.z)) + (input_j * output_shape.z) + input_k;
+        output1_fp_ptr[i1] = input_fp_ptr[i];
       } else {
         int i2 = (input_i * (output_shape.y * output_shape.z)) +
                  ((input_j - output_shape.y) * output_shape.z) + input_k;
@@ -152,12 +154,11 @@ __global__ void compute_chunk_fingerprint(char *dmem_fp_ptr,
       }
     } else if (chunk_dim == 2) {
       if (input_k < output_shape.z) {
-        // printf("0: i=%d, coords=(%d, %d, %d)\n", i, input_i, input_j, input_k);
-        output1_fp_ptr[i] = input_fp_ptr[i];
+        int i1 = (input_i * (output_shape.y * output_shape.z)) + (input_j * output_shape.z) + input_k;
+        output1_fp_ptr[i1] = input_fp_ptr[i];
       } else {
         int i2 = (input_i * (output_shape.y * output_shape.z)) +
                  (input_j * output_shape.z) + (input_k - output_shape.z);
-        // printf("1: i=%d, i2=%d, coords=(%d, %d, %d)\n", i, i2, input_i, input_j, input_k);
         output2_fp_ptr[i2] = input_fp_ptr[i];
       }
     } else { // chunk_dim == 3
