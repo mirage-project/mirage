@@ -33,11 +33,11 @@ template <typename T>
 __device__ __forceinline__ void norm_linear_kernel(void const *input_ptr,
                                                    void const *weight_ptr,
                                                    void *output_ptr) {
-  constexpr int chunk_size = 16 / sizeof(T);
+  // constexpr int chunk_size = 16 / sizeof(T);
 
   constexpr int BATCH_SIZE = 1;
   constexpr int OUTPUT_SIZE = 64;
-  constexpr int num_chunks = 8;
+  // constexpr int num_chunks = 8;
   constexpr int NUM_CHUNKS_A = 8;
   constexpr int NUM_CHUNKS_B = 512;
 
@@ -163,9 +163,9 @@ __device__ __forceinline__ void norm_linear_kernel(void const *input_ptr,
 
     for (uint32_t n = 0; n < (num_n >> 2); n++) {
       for (uint32_t m = 0; m < num_m; m++) {
-#pragma unroll
         int m_row = idx_in_warp & 0xF;
         int n_col = (warp_idx << 4) + ((idx_in_warp >> 4) << 3);
+#pragma unroll
         for (uint32_t k = 0; k < num_k; k++) {
           // int m_row = idx_in_warp % 16;
           // int m_col = k * 16 + idx_in_warp / 16 * 8;

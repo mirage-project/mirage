@@ -34,7 +34,7 @@ static __device__ __forceinline__ void reduction_sum_row(SMEM_DST dst,
 
 #pragma unroll
     for (int i = 0; i < REDUCTION_FACTOR; ++i) {
-      result += static_cast<float>(src[i, dst_col]);
+      result += static_cast<float>(src.at(i, dst_col));
     }
     dst[dst_elem_idx] = result;
   }
@@ -55,7 +55,7 @@ static __device__ __forceinline__ void
 
 #pragma unroll
     for (int i = 0; i < REDUCTION_FACTOR; ++i) {
-      result += static_cast<float>(src[i, dst_col]);
+      result += static_cast<float>(src.at(i, dst_col));
     }
     result = perform_element_unary_chain<float, FirstOp, RemainingOps...>(
         result, scalars, 0);

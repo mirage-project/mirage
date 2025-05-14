@@ -34,6 +34,8 @@ int const MAX_INPUTS_PER_TASK = 4;
 int const MAX_OUTPUTS_PER_TASK = 4;
 int const MAX_NUM_WORKERS = 128;
 
+using bfloat16 = type::bfloat16_t;
+
 enum TaskType {
   TASK_TERMINATE = 0,
   TASK_END_OF_ITERATION = 1,
@@ -323,7 +325,7 @@ __global__ void persistent_kernel(RuntimeConfig config) {
           if (config.profiling) {
             PROFILER_EVENT_START(TASK_RMS_NORM_LINEAR,
                                  cur_task_pos[0] + cur_task_pos[1]);
-            kernel::norm_linear_kernel<__nv_bfloat16>(
+            kernel::norm_linear_kernel<bfloat16>(
                 task_desc.inputs[0].base_ptr,
                 task_desc.inputs[1].base_ptr,
                 task_desc.outputs[0].base_ptr);
@@ -341,7 +343,7 @@ __global__ void persistent_kernel(RuntimeConfig config) {
           if (config.profiling) {
             PROFILER_EVENT_START(TASK_EMBEDDING,
                                  cur_task_pos[0] + cur_task_pos[1]);
-            kernel::embedding_kernel<__nv_bfloat16>(
+            kernel::embedding_kernel<bfloat16>(
                 task_desc.inputs[0].base_ptr,
                 task_desc.inputs[1].base_ptr,
                 task_desc.outputs[0].base_ptr);
@@ -388,7 +390,7 @@ __global__ void persistent_kernel(RuntimeConfig config) {
           if (config.profiling) {
             PROFILER_EVENT_START(TASK_SILU_MUL_LINEAR,
                                  cur_task_pos[0] + cur_task_pos[1]);
-            kernel::silu_mul_linear_kernel<__nv_bfloat16>(
+            kernel::silu_mul_linear_kernel<bfloat16>(
                 task_desc.inputs[0].base_ptr,
                 task_desc.inputs[1].base_ptr,
                 task_desc.inputs[2].base_ptr,
