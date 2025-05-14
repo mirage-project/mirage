@@ -13,7 +13,7 @@ setup(
                 os.path.join(this_dir, 'runtime_kernel_wrapper.cu'),
             ],
             include_dirs=[
-                os.path.join(this_dir, '../../src/runtime'),
+                os.path.join(this_dir, '../../include/mirage/persistent_kernel/tasks'),
             ],
             extra_compile_args={
                 'cxx': [],

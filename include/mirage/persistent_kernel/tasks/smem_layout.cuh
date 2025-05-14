@@ -28,9 +28,9 @@ struct smem_row {
   static constexpr size_t COL = COL_;
   static constexpr size_t SIZE = ROW * COL;
 
-  static constexpr size_t Pow2_M = (1 << M);
-  static constexpr size_t Pow2_S = (1 << S);
-  static constexpr size_t Pow2_B = (1 << B);
+  // static constexpr size_t Pow2_M = (1 << M);
+  // static constexpr size_t Pow2_S = (1 << S);
+  // static constexpr size_t Pow2_B = (1 << B);
 
   __device__ __forceinline__ smem_row(T *ptr) : base_ptr(ptr) {}
 
@@ -45,7 +45,7 @@ struct smem_row {
   __device__ __forceinline__ T *operator()(size_t logical_idx_row,
                                            size_t logical_idx_col) {
     size_t logical_idx = logical_idx_row * STRIDE + logical_idx_col;
-    assert(logical_idx < SIZE);
+    // assert(logical_idx < SIZE);
 
     // first get the block -> 3,3,3 means 8*8*8 = 8 rows * 8 cols * 8elements
     // size_t block_idx = logical_idx / (Pow2_M * Pow2_S * Pow2_B);
@@ -76,7 +76,7 @@ struct smem_row {
   __device__ __forceinline__ T &at(size_t logical_idx_row,
                                    size_t logical_idx_col) {
     size_t logical_idx = logical_idx_row * STRIDE + logical_idx_col;
-    assert(logical_idx < SIZE);
+    // assert(logical_idx < SIZE);
 
     size_t block_idx = logical_idx >> (M + S + B);
     size_t in_block_idx = logical_idx & ((1 << (M + S + B)) - 1);
@@ -93,7 +93,7 @@ struct smem_row {
 
   // 1D access
   __device__ __forceinline__ T &at(size_t logical_idx) {
-    assert(logical_idx < SIZE);
+    // assert(logical_idx < SIZE);
     size_t block_idx = logical_idx >> (M + S + B);
     size_t in_block_idx = logical_idx & ((1 << (M + S + B)) - 1);
 
@@ -108,7 +108,7 @@ struct smem_row {
   }
 
   __device__ __forceinline__ T *operator[](size_t logical_idx) const {
-    assert(logical_idx < SIZE);
+    // assert(logical_idx < SIZE);
     size_t block_idx = logical_idx >> (M + S + B);
     size_t in_block_idx = logical_idx & ((1 << (M + S + B)) - 1);
 

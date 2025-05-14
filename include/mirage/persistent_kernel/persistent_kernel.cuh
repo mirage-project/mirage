@@ -13,6 +13,7 @@
  * limitations under the License.
  */
 
+#include "../persistent_kernel/tasks/kernel.h"
 #include "profiler.h"
 #include <mpi.h>
 #include <nvshmem.h>
@@ -320,10 +321,14 @@ __global__ void persistent_kernel(RuntimeConfig config) {
         }
         case TASK_RMS_NORM_LINEAR: {
           if (config.profiling) {
-            PROFILER_EVENT_START(TASK_RMS_NORM_LINEAR, cur_task_id);
+            PROFILER_EVENT_START(TASK_RMS_NORM_LINEAR,
+                                 cur_task_pos[0] + cur_task_pos[1]);
             kernel::norm_linear_kernel<__nv_bfloat16>(
-                task_desc.inputs[0], task_desc.inputs[1], task_desc.outputs[0]);
-            PROFILER_EVENT_END(TASK_RMS_NORM_LINEAR, cur_task_id);
+                task_desc.inputs[0].base_ptr,
+                task_desc.inputs[1].base_ptr,
+                task_desc.outputs[0].base_ptr);
+            PROFILER_EVENT_END(TASK_RMS_NORM_LINEAR,
+                               cur_task_pos[0] + cur_task_pos[1]);
           }
 
           if (threadIdx.x == 0) {
@@ -334,10 +339,14 @@ __global__ void persistent_kernel(RuntimeConfig config) {
         }
         case TASK_EMBEDDING: {
           if (config.profiling) {
-            PROFILER_EVENT_START(TASK_EMBEDDING, cur_task_id);
+            PROFILER_EVENT_START(TASK_EMBEDDING,
+                                 cur_task_pos[0] + cur_task_pos[1]);
             kernel::embedding_kernel<__nv_bfloat16>(
-                task_desc.inputs[0], task_desc.inputs[1], task_desc.outputs[0]);
-            PROFILER_EVENT_END(TASK_EMBEDDING, cur_task_id);
+                task_desc.inputs[0].base_ptr,
+                task_desc.inputs[1].base_ptr,
+                task_desc.outputs[0].base_ptr);
+            PROFILER_EVENT_END(TASK_EMBEDDING,
+                               cur_task_pos[0] + cur_task_pos[1]);
           }
 
           if (threadIdx.x == 0) {
@@ -377,12 +386,15 @@ __global__ void persistent_kernel(RuntimeConfig config) {
         }
         case TASK_SILU_MUL_LINEAR: {
           if (config.profiling) {
-            PROFILER_EVENT_START(TASK_SILU_MUL_LINEAR, cur_task_id);
-            kernel::silu_mul_linear_kernel<__nv_bfloat16>(task_desc.inputs[0],
-                                                          task_desc.inputs[1],
-                                                          task_desc.inputs[2],
-                                                          task_desc.outputs[0]);
-            PROFILER_EVENT_END(TASK_SILU_MUL_LINEAR, cur_task_id);
+            PROFILER_EVENT_START(TASK_SILU_MUL_LINEAR,
+                                 cur_task_pos[0] + cur_task_pos[1]);
+            kernel::silu_mul_linear_kernel<__nv_bfloat16>(
+                task_desc.inputs[0].base_ptr,
+                task_desc.inputs[1].base_ptr,
+                task_desc.inputs[2].base_ptr,
+                task_desc.outputs[0].base_ptr);
+            PROFILER_EVENT_END(TASK_SILU_MUL_LINEAR,
+                               cur_task_pos[0] + cur_task_pos[1]);
           }
 
           if (threadIdx.x == 0) {
@@ -900,14 +912,17 @@ extern "C" void launch_persistent_kernel() {
   void *args[] = {&global_runtime_config};
   // Launcher persistent kernel
   cudaFuncSetAttribute(
-      persistent_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, 22656);
+      persistent_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, 36666);
   nvshmemx_collective_launch((void const *)persistent_kernel,
                              dim3(108, 1, 1),
                              dim3(128, 1, 1),
                              args,
-                             22656 /*sharedmem*/,
+                             36666 /*sharedmem*/,
                              0 /*stream*/);
-  cudaDeviceSynchronize();
+  cudaError_t err = cudaDeviceSynchronize();
+  if (err != cudaSuccess) {
+    printf("CUDA kernel launch error: %s\n", cudaGetErrorString(err));
+  }
   printf("Finished Launch Persistent Kernel\n");
 }
 
