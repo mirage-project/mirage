@@ -85,6 +85,7 @@ template <bool ACCUM,
           ElementUnaryOpType... RemainingOps>
 __device__ __forceinline__ void perform_element_unary_chain_kernel(
     SMEM_DST dst, SMEM_SRC src, float const *scalars) {
+#pragma unroll
   for (int elem_idx = threadIdx.x; elem_idx < SMEM_DST::size();
        elem_idx += NUM_THREADS) {
     auto value = src.at(elem_idx);

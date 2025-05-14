@@ -1,6 +1,7 @@
 import numpy as np
 import torch
 import runtime_kernel
+import numpy as np
 
 
 torch.set_printoptions(sci_mode=False)
@@ -12,8 +13,6 @@ def torch_rms_norm(X, W):
     D = rms_norm(X)
     E = torch.matmul(D, W)
     return E
-
-
 x = torch.randn((1, 3584), device="cuda", dtype=torch.bfloat16)
 w = torch.randn((3584, 64), device="cuda", dtype=torch.bfloat16)
 output = torch.empty(1, 64, device="cuda", dtype=torch.bfloat16)

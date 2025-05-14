@@ -13,6 +13,7 @@
  * limitations under the License.
  */
 
+#include "../persistent_kernel/tasks/kernel.h"
 #include "profiler.h"
 #include <mpi.h>
 #include <nvshmem.h>
@@ -20,7 +21,6 @@
 #include <thread>
 #include <unistd.h>
 #include <vector>
-#include "../persistent_kernel/tasks/kernel.h"
 
 typedef unsigned long long int TaskId;
 unsigned long long int const TASK_INVALID_ID = 0x7fffffffffffffff;
@@ -321,10 +321,14 @@ __global__ void persistent_kernel(RuntimeConfig config) {
         }
         case TASK_RMS_NORM_LINEAR: {
           if (config.profiling) {
-            PROFILER_EVENT_START(TASK_RMS_NORM_LINEAR, cur_task_pos[0] + cur_task_pos[1]);
+            PROFILER_EVENT_START(TASK_RMS_NORM_LINEAR,
+                                 cur_task_pos[0] + cur_task_pos[1]);
             kernel::norm_linear_kernel<__nv_bfloat16>(
-                task_desc.inputs[0].base_ptr, task_desc.inputs[1].base_ptr, task_desc.outputs[0].base_ptr);
-            PROFILER_EVENT_END(TASK_RMS_NORM_LINEAR, cur_task_pos[0] + cur_task_pos[1]);
+                task_desc.inputs[0].base_ptr,
+                task_desc.inputs[1].base_ptr,
+                task_desc.outputs[0].base_ptr);
+            PROFILER_EVENT_END(TASK_RMS_NORM_LINEAR,
+                               cur_task_pos[0] + cur_task_pos[1]);
           }
 
           if (threadIdx.x == 0) {
@@ -335,10 +339,14 @@ __global__ void persistent_kernel(RuntimeConfig config) {
         }
         case TASK_EMBEDDING: {
           if (config.profiling) {
-            PROFILER_EVENT_START(TASK_EMBEDDING, cur_task_pos[0] + cur_task_pos[1]);
+            PROFILER_EVENT_START(TASK_EMBEDDING,
+                                 cur_task_pos[0] + cur_task_pos[1]);
             kernel::embedding_kernel<__nv_bfloat16>(
-                task_desc.inputs[0].base_ptr, task_desc.inputs[1].base_ptr, task_desc.outputs[0].base_ptr);
-            PROFILER_EVENT_END(TASK_EMBEDDING, cur_task_pos[0] + cur_task_pos[1]);
+                task_desc.inputs[0].base_ptr,
+                task_desc.inputs[1].base_ptr,
+                task_desc.outputs[0].base_ptr);
+            PROFILER_EVENT_END(TASK_EMBEDDING,
+                               cur_task_pos[0] + cur_task_pos[1]);
           }
 
           if (threadIdx.x == 0) {
@@ -378,12 +386,15 @@ __global__ void persistent_kernel(RuntimeConfig config) {
         }
         case TASK_SILU_MUL_LINEAR: {
           if (config.profiling) {
-            PROFILER_EVENT_START(TASK_SILU_MUL_LINEAR, cur_task_pos[0] + cur_task_pos[1]);
-            kernel::silu_mul_linear_kernel<__nv_bfloat16>(task_desc.inputs[0].base_ptr,
-                                                          task_desc.inputs[1].base_ptr,
-                                                          task_desc.inputs[2].base_ptr,
-                                                          task_desc.outputs[0].base_ptr);
-            PROFILER_EVENT_END(TASK_SILU_MUL_LINEAR, cur_task_pos[0] + cur_task_pos[1]);
+            PROFILER_EVENT_START(TASK_SILU_MUL_LINEAR,
+                                 cur_task_pos[0] + cur_task_pos[1]);
+            kernel::silu_mul_linear_kernel<__nv_bfloat16>(
+                task_desc.inputs[0].base_ptr,
+                task_desc.inputs[1].base_ptr,
+                task_desc.inputs[2].base_ptr,
+                task_desc.outputs[0].base_ptr);
+            PROFILER_EVENT_END(TASK_SILU_MUL_LINEAR,
+                               cur_task_pos[0] + cur_task_pos[1]);
           }
 
           if (threadIdx.x == 0) {

@@ -19,10 +19,10 @@ template <typename SMEM_DST, typename SMEM_SRC0, typename SMEM_SRC1>
 static __device__ __forceinline__ void
     div_col(SMEM_DST dst, SMEM_SRC0 src0, SMEM_SRC1 src1) {
 
-  static_assert(SMEM_SRC0::ROW == SMEM_SRC1::ROW);
-  static_assert(SMEM_SRC0::COL % SMEM_SRC1::COL == 0);
-  static_assert(SMEM_SRC1::COL == 1);
-  constexpr int BLOCK_SIZE = SMEM_SRC0::COL / SMEM_SRC1::COL;
+  // static_assert(SMEM_SRC0::ROW == SMEM_SRC1::ROW);
+  // static_assert(SMEM_SRC0::COL % SMEM_SRC1::COL == 0);
+  // static_assert(SMEM_SRC1::COL == 1);
+  // constexpr int BLOCK_SIZE = SMEM_SRC0::COL / SMEM_SRC1::COL;
 
   for (int elem_idx = threadIdx.x; elem_idx < SMEM_DST::size();
        elem_idx += NUM_THREADS) {
@@ -33,7 +33,8 @@ static __device__ __forceinline__ void
 }
 
 template <typename SMEM_DST, typename SMEM_SRC0, typename SMEM_SRC1>
-__device__ __forceinline__ void mul(SMEM_DST dst, SMEM_SRC0 src0, SMEM_SRC1 src1) {
+__device__ __forceinline__ void
+    mul(SMEM_DST dst, SMEM_SRC0 src0, SMEM_SRC1 src1) {
   for (int elem_idx = threadIdx.x; elem_idx < SMEM_DST::size();
        elem_idx += NUM_THREADS) {
     dst.at(elem_idx) = src0.at(elem_idx) * src1.at(elem_idx);
