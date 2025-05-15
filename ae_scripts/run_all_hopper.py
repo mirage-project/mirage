@@ -110,7 +110,7 @@ def parse_results(impl_name, case_name, batch_size):
 
 def benchmark_evaluation():
   models = ['gated_mlp', 'gqa', 'lora', 'norm_transformer', 'qknorm_gqa', 'rmsnorm']
-  batch_sizes = [1, 8]
+  batch_sizes = [1, 8, 16]
   results = dict()
   for model in models:
     for batch_size in batch_sizes:
