@@ -64,17 +64,6 @@ private:
   // Tensor metadata
   // A list of all distinct (by guid) DTensors
   std::vector<kn::DTensor> all_dtensors;
-
-  // In allgather, we need a new tensor instance to act as the allgathered tensor, which
-  // has different shape and, therefore, different strides from the original one. Meanwhile, 
-  // if the original tensor is an input tensor, we need to maintain the innermost dimension in
-  // resolve_tensor_layout function. However, in this function, we iterate over operators
-  // to determine whether or not to add input constraints to the optimizer. Therefore, we need to
-  // map the allgathered tensor to the original tensor to add the constraint.
-  // For now, we only considered the case where the original tensor is an input tensor. Others might 
-  // need further check.
-  std::unordered_map<decltype(kn::DTensor::guid), decltype(kn::DTensor::guid)>
-      comm_dtensor_to_original;
   std::unordered_map<decltype(kn::DTensor::guid), DTensorMeta>
       dtensor_metas; // DTensor guid -> metadata
   std::unordered_map<decltype(tb::STensor::guid), STensorMeta>

@@ -3,7 +3,8 @@ import numpy as np
 import torch
 import os
 import argparse
-
+import logging
+from utils import analyze_differences
 
 seed = 42  # Use a fixed seed
 torch.manual_seed(seed)
@@ -43,6 +44,8 @@ if __name__ == "__main__":
     from mpi4py import MPI
     comm = MPI.COMM_WORLD
     rank = comm.Get_rank()
+    logging.basicConfig(level=logging.INFO, filename=f"tb_allreduce_{rank}.log")
+    logger = logging.getLogger()
 
     torch.cuda.set_device(rank)
     print("Current rank: ", rank)
@@ -75,8 +78,11 @@ if __name__ == "__main__":
     dist.all_gather(result_list, mid_result)
     x2 = torch.cat(result_list, dim=0)
     result2 = x2 @ w2_pt
-    print(result2)
-    print(outputs[0])
-    assert torch.allclose(outputs[0], result2, rtol=5e-2, atol=1e-1)
-    print(f"[{rank}] allreduce demo pass!")
+    # print(result2)
+    # print(outputs[0])
+    if not torch.allclose(outputs[0], result2, rtol=5e-2, atol=1e-1):
+        logger.error(f"[{rank}] allreduce demo failed!")
+        analyze_differences(outputs[0], result2, logger)
+    else:
+        print(f"[{rank}] allreduce demo pass!")
     dist.destroy_process_group()

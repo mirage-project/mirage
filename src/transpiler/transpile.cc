@@ -184,8 +184,6 @@ Transpiler::Transpiler(kernel::Graph const *_graph,
                 // dtensor_mapping[new_dtensor.guid] = new_dtensor;
                 // Later used in resolve_dtensor_meta
                 all_dtensors.push_back(new_comm_dtensor);
-                printf("Adding mapping: %d -> %d\n", current_dtensor.guid, new_comm_dtensor.guid);
-                comm_dtensor_to_original[current_dtensor.guid] = new_comm_dtensor.guid;
               }
               stensor_mapping[bop->output_tensors[0].guid] = st;
               break;
