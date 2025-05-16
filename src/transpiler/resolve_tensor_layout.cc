@@ -237,6 +237,16 @@ void Transpiler::resolve_tensor_layout() {
               fmt("No innermost dim found for input tensor $", cur_input_idx));
         }
         opt.add(d_is_innermost[tensor.guid][innermost_dim]);
+        if(this->comm_dtensor_to_original.find(tensor.guid) != this->comm_dtensor_to_original.end()) {
+          auto comm_guid = this->comm_dtensor_to_original[tensor.guid];
+          opt.add(d_is_innermost[comm_guid][innermost_dim]);
+          if(comm_guid == 10000005 || comm_guid == 10000003) {
+            printf("Input dtensor.guid: %d, innermost_dim: %d\n", comm_guid, innermost_dim);
+          }
+        }
+        if(tensor.guid == 10000005 || tensor.guid == 10000003) {
+          printf("Input dtensor.guid: %d, innermost_dim: %d\n", tensor.guid, innermost_dim);
+        }
         cur_input_idx += 1;
         break;
       }
@@ -672,6 +682,9 @@ void Transpiler::resolve_tensor_layout() {
     }
     assert(innermost_dim != -1);
     this->dtensor_metas[dtensor.guid].innermost_dim = innermost_dim;
+    if(dtensor.guid == 10000005 || dtensor.guid == 10000003) {
+      printf("dtensor.guid: %d, innermost_dim: %d\n", dtensor.guid, innermost_dim);
+    }
   }
   for (tb::STensor const &stensor : all_stensors) {
     int num_dims = stensor.num_dims;
@@ -710,6 +723,13 @@ void Transpiler::resolve_tensor_layout() {
         meta.strides[i] = this->input_strides[meta.input_idx][i];
       }
       assert(meta.strides[innermost_dim] == 1);
+      if(dtensor.guid == 10000005 || dtensor.guid == 10000003) {
+        printf("dtensor.guid: %d, strides: ", dtensor.guid);
+        for (int i = 0; i < num_dims; ++i) {
+          printf("%d ", meta.strides[i]);
+        }
+        printf("\n");
+      }
     } else if (meta.is_output && (meta.output_idx < output_strides.size())) {
       // with user provided output stride
       size_t total_ele = 1;

@@ -287,6 +287,8 @@ TranspileResult Transpiler::transpile_ugraph() {
                op->output_tensors[0].dim[1],
                op->output_tensors[0].dim[2],
                op->output_tensors[0].dim[3]);
+        exec.e("// Layout: $",
+               get_cute_layout(op->output_tensors[0], dtensor_metas.at(op->output_tensors[0].guid)));
       case type::KNOperatorType::KN_OUTPUT_OP: {
         // Input/Output op
         break;
