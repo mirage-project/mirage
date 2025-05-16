@@ -12,3 +12,5 @@
 #include "threadblock/profiler.h"
 #include "threadblock/reduction.h"
 #include "threadblock/utils.h"
+#include "threadblock/blackwell_pipeline.h"
+#include "threadblock/blackwell_matmul.h"

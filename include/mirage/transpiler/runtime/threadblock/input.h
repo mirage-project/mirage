@@ -16,6 +16,8 @@
 
 #include "cute/arch/cluster_sm90.hpp"
 #include "cutlass/gemm/collective/builders/sm90_common.inl"
+#include "cute/arch/cluster_sm100.hpp"                        
+#include "cutlass/gemm/collective/builders/sm100_common.inl"
 #include "cutlass/gemm/gemm.h"
 #include "cutlass/pipeline/pipeline.hpp"
 #include <cstdint>
@@ -245,6 +247,110 @@ public:
       copy(tma_a.with(*tma_barrier),
            tAgAX(_, k_tile_iter),
            tAsAX(_, write_stage));
+      pipeline.producer_advance();
+    }
+  }
+};
+
+// Blackwell
+ template <typename  T,
+          class     DstLayout,
+          class     SrcLayout,
+          class     TMA,                     
+          class     BlackwellAsyncPipeline,  
+          bool      MInput,
+          int       K_ITER>
+class InputTMAAsyncCopy_Blackwell {
+  using CTA_TILER = decltype(make_shape(shape<0>(DstLayout{}),
+                                        shape<1>(DstLayout{})));
+
+  static constexpr cute::UMMA::Major UMajor = UMMA::Major::MN;
+
+  using DstMNLayout = DstLayout;
+
+  using SmemLayoutAtom =
+      decltype(cutlass::gemm::collective::detail::sm100_smem_selector<  
+               UMajor,
+               T,                                                   
+               decltype(get<0>(DstMNLayout{})),              
+               decltype(get<1>(DstMNLayout{}))>());     
+
+  using DstPipeLayout =
+      decltype(tile_to_shape(
+          SmemLayoutAtom{},
+          make_shape(shape<0>(DstMNLayout{}),    // tile-M
+                     shape<1>(DstMNLayout{}),    // tile-N
+                     Int<BlackwellAsyncPipeline::Stage>{})));
+
+  static constexpr int tmaTransactionBytes =
+      sizeof(T) * size(DstPipeLayout{}) / BlackwellAsyncPipeline::Stage;
+
+public:
+  static __device__ __forceinline__
+  void prefetch(TMA const &tma) {
+    cute::prefetch_tma_descriptor(tma.get_tma_descriptor());
+  }
+
+  template <int Rank>
+  static __device__ auto make_coord_runtime(int imapx, int imapy, int imapz) {
+    if constexpr (Rank == 6) {
+      return make_coord(_,
+                        _,
+                        imapx >= 0 ? blockIdx.x : 0,
+                        imapy >= 0 ? blockIdx.y : 0,
+                        imapz >= 0 ? blockIdx.z : 0,
+                        _);
+    } else if constexpr (Rank == 7) {
+      return make_coord(_,
+                        _,
+                        _,
+                        imapx >= 0 ? blockIdx.x : 0,
+                        imapy >= 0 ? blockIdx.y : 0,
+                        imapz >= 0 ? blockIdx.z : 0,
+                        _);
+    } else {
+      static_assert(Rank == 6 || Rank == 7, "Unsupported SrcLayout rank");
+    }
+  }
+
+  static __device__ __forceinline__
+  void run(TMA              const &tma_a,
+           T*                      dst_smem,     // SMEM destination address
+           int                     imapx,
+           int                     imapy,
+           int                     imapz,
+           int                     k_iter,
+           BlackwellAsyncPipeline &pipeline) {   // NEW pipeline
+
+    if (lane_id() == 0) {
+      // --- (a) Get GMEM tensor view ----------------------------
+      Tensor gA_all = tma_a.get_tma_tensor(shape(SrcLayout{}));
+
+      // --- (b) Current CTA/Cluster block coordinates -----------
+      auto blkCoordA = make_coord_runtime<rank(SrcLayout{})>(imapx, imapy, imapz);
+      Tensor gA      = gA_all(blkCoordA);
+
+      // --- (c) Build SMEM tensor view (with pipeline stage dimension) ---
+      Tensor sA = make_tensor(make_smem_ptr(dst_smem), DstPipeLayout{});
+
+      // --- (d) partition_S/partition_D same as Hopper ----------
+      auto cta_tma_a = tma_a.get_slice(Int<0>{});   // CTA slice
+      Tensor tAgA = cta_tma_a.partition_S(gA);      // Src per-stage
+      Tensor tAsA = cta_tma_a.partition_D(sA);      // Dst per-stage
+      Tensor tAgAX = group_modes<0, rank(tAgA)-1>(tAgA);
+      Tensor tAsAX = group_modes<0, rank(tAsA)-1>(tAsA);
+
+      // --- (e) Get barrier + stage through pipeline ------------
+      auto [tma_barrier, write_stage] = pipeline.producer_acquire();
+      // Set transaction bytes (helper provided by Blackwell CUTLASS)
+      cute::set_barrier_transaction_bytes(*tma_barrier, tmaTransactionBytes);
+
+      // --- (f) Initiate TMA copy ------------------------------
+      copy(tma_a.with(*tma_barrier),            // Descriptor with barrier
+           tAgAX(_, k_iter),                    // Source: k_iter K-tile
+           tAsAX(_, write_stage));              // Destination: current write stage
+
+      // --- (g) Advance pipeline for next copy -----------------
       pipeline.producer_advance();
     }
   }

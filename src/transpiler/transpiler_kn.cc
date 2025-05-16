@@ -158,6 +158,9 @@ TranspileResult Transpiler::transpile_ugraph() {
   header.e("#define USE_NVSHMEM $", use_nvshmem);
   if (config.target_cc == GPU_CC::H100) {
     header.e("#define MIRAGE_GRACE_HOPPER");
+  } 
+  else if (config.target_cc == GPU_CC::B200) {
+    header.e("#define MIRAGE_BLACKWELL");
   }
   header.e("#include \"runtime.h\"");
   header.e("using namespace cute;");
@@ -169,6 +172,7 @@ TranspileResult Transpiler::transpile_ugraph() {
   CodeKeeper exec; // This keeps all code in the `_execute_mugraph` function
 
   CodeKeeper hopper_tma;
+  CodeKeeper blackwell_tma;
 
   init.e("static void _init() {");
   exec.e(
@@ -461,6 +465,9 @@ TranspileResult Transpiler::transpile_ugraph() {
           result = transpile_kn_custom_op_hopper(cur_op);
           // only generate for first tb graph now
           config.profiling = false;
+        } else if (config.target_cc == GPU_CC::B200) {
+          result = transpile_kn_custom_op_blackwell(cur_op);
+          config.profiling = false;
         } else {
           result = transpile_kn_custom_op(cur_op);
           config.profiling = false;
@@ -477,7 +484,7 @@ TranspileResult Transpiler::transpile_ugraph() {
         profiler_buf_size += result.profiler_buf_size;
 
         // Checkings against grid dim and block dim
-        if (config.target_cc <= GPU_CC::H100) {
+        if (config.target_cc <= GPU_CC::B200) {
           // According to
           // https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#features-and-technical-specifications,
           // all GPUs up to H100 have the same restriction
@@ -537,28 +544,83 @@ TranspileResult Transpiler::transpile_ugraph() {
               m_inputs.append(", ");
             }
           }
-
+          if (config.target_cc == GPU_CC::B200){
+            // declare tiled_mma outside of the matmul kernel, since tma requires it
+            exec.e("TiledMMA tiled_mma = make_tiled_mma(SM100_MMA_F16BF16_2x1SM_SS<half_t, half_t, half_t, 128, 128, UMMA::Major::K, UMMA::Major::K>{});");
+            exec.e("auto cluster_shape = make_shape(Int<2>{}, Int<2>{}, Int<1>{});");
+            exec.e("Layout cluster_layout_vmnk = tiled_divide(make_layout(cluster_shape), make_tile(typename decltype(tiled_mma)::AtomThrID{}));");
+            exec.e("auto mma_tiler = make_shape(tile_size<0>(tiled_mma), tile_size<1>(tiled_mma), tile_size<2>(tiled_mma)*_4{});");
+            exec.e("static_assert(size<2>(mma_tiler) == _64{}, \"mma_tiler's third dimension must be 64\");");
+          }
           exec.e(fmt("std::vector<bool> minputs = {$};", m_inputs));
           for (int i = 0; i < result.tmaParamsList.size(); i++) {
             auto const &tmaParams = result.tmaParamsList.at(i);
 
             if (tmaParams.m_input) {
-              exec.e(fmt("static constexpr cute::GMMA::Major GmmaMajor_$ = "
-                         "GMMA::Major::K;",
-                         tmaParams.guid));
+              if (config.target_cc == GPU_CC::H100) {
+                exec.e(fmt("static constexpr cute::GMMA::Major GmmaMajor_$ = "
+                          "GMMA::Major::K;",
+                          tmaParams.guid));
+              } else if (config.target_cc == GPU_CC::B200) {
+                exec.e(fmt("static constexpr cute::UMMA::Major UMMAMajor_$ = "
+                           "UMMA::Major::K;",
+                           tmaParams.guid));
+              } else {
+                assert(false && "Unsupported GPU architecture");
+              }
             } else {
-              exec.e(fmt("static constexpr cute::GMMA::Major GmmaMajor_$ = "
-                         "GMMA::Major::MN;",
-                         tmaParams.guid));
+              if (config.target_cc == GPU_CC::H100) {
+                exec.e(fmt("static constexpr cute::GMMA::Major GmmaMajor_$ = "
+                           "GMMA::Major::MN;",
+                           tmaParams.guid));
+              } else if (config.target_cc == GPU_CC::B200) {
+                exec.e(fmt("static constexpr cute::UMMA::Major UMMAMajor_$ = "
+                           "UMMA::Major::MN;",
+                           tmaParams.guid));
+              } else {
+                assert(false && "Unsupported GPU architecture");
+              }
             }
-            exec.e(fmt("using DstMNKLayout_$ = $;",
-                       tmaParams.guid,
-                       tmaParams.dstLayout));
+            if (config.target_cc == GPU_CC::H100){
+              exec.e(fmt("using DstMNKLayout_$ = $;",
+                        tmaParams.guid,
+                        tmaParams.dstLayout));
+            } else if (config.target_cc == GPU_CC::B200){
+              if (i == 0){
+                exec.e("using DstMNKLayout_$ = decltype(partition_shape_A(tiled_mma, make_shape(size<0>(mma_tiler), size<2>(mma_tiler))));",
+                        tmaParams.guid);
+              } else {
+                exec.e("using DstMNKLayout_$ = decltype(partition_shape_B(tiled_mma, make_shape(size<1>(mma_tiler), size<2>(mma_tiler))));",
+                        tmaParams.guid);
+              }
+              // debug
+              exec.e("static_assert("
+                  "decltype(get<0>(get<0>(DstMNKLayout_${})))::value == 64,"
+                  "\"DstMNKLayout_10000003 first dim must be 64\""
+                ");"
+                "static_assert("
+                  "decltype(get<1>(get<0>(DstMNKLayout_${})))::value == 16,"
+                  "\"DstMNKLayout_10000003 second dim must be 16\""
+                ");"
+                "static_assert("
+                  "decltype(get<1>(DstMNKLayout_${}))::value == 1,"
+                  "\"DstMNKLayout_10000003 NumMma_M must be 1\""
+                ");"
+                "static_assert("
+                  "decltype(get<2>(DstMNKLayout_${}))::value == 4,"
+                  "\"DstMNKLayout_10000003 NumMma_K must be 4\""
+                ");",
+                tmaParams.guid,
+                tmaParams.guid,
+                tmaParams.guid,
+                tmaParams.guid);
+            }
 
             exec.e(fmt("using SrcMNKLayout_$ = $;",
                        tmaParams.guid,
                        tmaParams.srcLayout));
 
+            if (config.target_cc == GPU_CC::H100){
             exec.e(fmt(
                 "using SmemLayoutAtom_$ = "
                 "decltype(cutlass::gemm::collective::detail::ss_smem_selector<"
@@ -569,16 +631,76 @@ TranspileResult Transpiler::transpile_ugraph() {
                 get_datatype_str(cur_op->input_tensors[0].data_type),
                 tmaParams.guid,
                 tmaParams.guid));
-            exec.e(fmt("using DstPipeLayout_$ = "
-                       "decltype(tile_to_shape(SmemLayoutAtom_${}, "
-                       "make_shape(shape<0>(DstMNKLayout_${}), "
-                       "shape<1>(DstMNKLayout_${}), Int<$>{}), "
-                       "Step<_1, _2, _3>{}));",
-                       tmaParams.guid,
-                       tmaParams.guid,
-                       tmaParams.guid,
-                       tmaParams.guid,
-                       config.pipeline_stages));
+            } else if (config.target_cc == GPU_CC::B200) {
+              exec.e(fmt(
+                    "using SmemLayoutAtom_$ = "
+                    "UMMA::Layout_K_SW128_Atom<$>;",
+                    tmaParams.guid,
+                    get_datatype_str(cur_op->input_tensors[0].data_type)));
+              
+              // exec.e(fmt(
+              //     "using SmemLayoutAtom_$ = "
+              //     "decltype(cutlass::gemm::collective::detail::sm100_smem_selector<"
+              //     "UMMAMajor_$, $, decltype(get<0>(DstMNKLayout_${})), "
+              //     "decltype(get<1>(DstMNKLayout_${}))>());",
+              //     tmaParams.guid,
+              //     tmaParams.guid,
+              //     get_datatype_str(cur_op->input_tensors[0].data_type),
+              //     tmaParams.guid,
+              //     tmaParams.guid));
+
+
+            } 
+
+            if (config.target_cc == GPU_CC::B200){
+              // // debug
+              // exec.e("print(UMMA::tile_to_mma_shape(SmemLayoutAtom_${}, "
+              //           "make_shape(shape<0>(DstMNKLayout_${}), "
+              //           "shape<1>(DstMNKLayout_${}), Int<$>{}), "
+              //           "Step<_1, _2, _3>{}));",
+              //           tmaParams.guid,
+              //           tmaParams.guid,
+              //           tmaParams.guid,
+              //           config.pipeline_stages);
+              exec.e(fmt("using DstPipeLayout_$ = "
+                        "decltype(UMMA::tile_to_mma_shape(SmemLayoutAtom_${}, "
+                        "DstMNKLayout_${}));",
+                        tmaParams.guid,
+                        tmaParams.guid,
+                        tmaParams.guid));
+              exec.e("static_assert("
+                  "decltype(shape<0,0>(DstPipeLayout_${}))::value == 64,"
+                  "\"DstPipeLayout_10000003 first dim must be 64\""
+                ");"
+                "static_assert("
+                  "decltype(shape<0,1>(DstPipeLayout_${}))::value == 16,"
+                  "\"DstPipeLayout_10000003 second dim must be 16\""
+                ");"
+                "static_assert("
+                  "decltype(shape<1>(DstPipeLayout_${}))::value == 1,"
+                  "\"DstPipeLayout_10000003 NumMma_M must be 1\""
+                ");"
+                "static_assert("
+                  "decltype(shape<2>(DstPipeLayout_${}))::value == 4,"
+                  "\"DstPipeLayout_10000003 NumMma_K must be 4\""
+                ");",
+                tmaParams.guid,
+                tmaParams.guid,
+                tmaParams.guid,
+                tmaParams.guid);
+            } 
+            else if (config.target_cc == GPU_CC::H100){
+              exec.e(fmt("using DstPipeLayout_$ = "
+                        "decltype(tile_to_shape(SmemLayoutAtom_${}, "
+                        "make_shape(shape<0>(DstMNKLayout_${}), "
+                        "shape<1>(DstMNKLayout_${}), Int<$>{}), "
+                        "Step<_1, _2, _3>{}));",
+                        tmaParams.guid,
+                        tmaParams.guid,
+                        tmaParams.guid,
+                        tmaParams.guid,
+                        config.pipeline_stages));
+            }
             exec.e(fmt("auto g_tensor_$ = "
                        "make_tensor(make_gmem_ptr<$>(dtensor$), "
                        "SrcMNKLayout_${});",
@@ -586,33 +708,75 @@ TranspileResult Transpiler::transpile_ugraph() {
                        get_datatype_str(cur_op->input_tensors[0].data_type),
                        tmaParams.guid,
                        tmaParams.guid));
-            exec.e(
-                fmt("auto tma_$ = make_tma_copy(SM90_TMA_LOAD{}, g_tensor_$, "
-                    "DstPipeLayout_${}(_, _, Int<0>{}));",
-                    tmaParams.guid,
-                    tmaParams.guid,
-                    tmaParams.guid));
+            if (config.target_cc == GPU_CC::H100) {
+              exec.e(
+                  fmt("auto tma_$ = make_tma_copy(SM90_TMA_LOAD{}, g_tensor_$, "
+                      "DstPipeLayout_${}(_, _, Int<0>{}));",
+                      tmaParams.guid,
+                      tmaParams.guid,
+                      tmaParams.guid));
+            } 
+            else if (config.target_cc == GPU_CC::B200) {
+                
+                if (i == 0){
+                  exec.e(
+                    fmt("auto tma_$ = make_tma_atom_A_sm100(SM100_TMA_2SM_LOAD_MULTICAST{}, g_tensor_$, "
+                        "DstPipeLayout_${}, mma_tiler, tiled_mma, cluster_layout_vmnk);",
+                        tmaParams.guid,
+                        tmaParams.guid,
+                        tmaParams.guid));
+                } else {
+                  exec.e(
+                    fmt("auto tma_$ = make_tma_atom_B_sm100(SM100_TMA_2SM_LOAD_MULTICAST{}, g_tensor_$, "
+                        "DstPipeLayout_${}, mma_tiler, tiled_mma, cluster_layout_vmnk);",
+                        tmaParams.guid,
+                        tmaParams.guid,
+                        tmaParams.guid));
+                }
+            } else {
+              assert(false && "Unsupported GPU architecture");
+            }
 
             exec.e("");
           }
+          if (config.target_cc == GPU_CC::B200){
+              exec.e("auto kernel_ptr = &$<decltype(cluster_shape), decltype(tiled_mma), $>;",
+                  result.func_name,
+                  tma_tmps);
+          }
 
           if (result.tmaParamsList.size() > 0) {
-            exec.e("cudaFuncSetAttribute($<$>, "
-                   "cudaFuncAttributeMaxDynamicSharedMemorySize, $);",
-                   result.func_name,
-                   tma_tmps,
-                   result.smem_size);
+            if (config.target_cc == GPU_CC::B200){
+              exec.e("cudaFuncSetAttribute(kernel_ptr, "
+                    "cudaFuncAttributeMaxDynamicSharedMemorySize, $);",
+                    result.smem_size);
+            } else {
+              exec.e("cudaFuncSetAttribute($<$>, "
+                    "cudaFuncAttributeMaxDynamicSharedMemorySize, $);",
+                    result.func_name,
+                    tma_tmps,
+                    result.smem_size);
+            }
           } else {
             exec.e("cudaFuncSetAttribute($, "
                    "cudaFuncAttributeMaxDynamicSharedMemorySize, $);",
                    result.func_name,
                    result.smem_size);
           }
+          if (config.target_cc == GPU_CC::H100){
+            exec.e("$<<<grid_dim, block_dim, smem_size, stream>>>($ $);",
+                  result.func_name,
+                  tmas,
+                  ptr_names);
+          } else if (config.target_cc == GPU_CC::B200){
+            exec.e("dim3 cluster_dim(size<0>(cluster_shape), size<1>(cluster_shape), size<2>(cluster_shape));");
+            exec.e("cutlass::ClusterLaunchParams params = {grid_dim, block_dim, cluster_dim, $};",
+                  result.smem_size);
+            exec.e("cutlass::launch_kernel_on_cluster(params, (void const*) kernel_ptr, $ $, tiled_mma, cluster_shape);",
+                  tmas,
+                  ptr_names);
+          }
 
-          exec.e("$<<<grid_dim, block_dim, smem_size, stream>>>($ $);",
-                 result.func_name,
-                 tmas,
-                 ptr_names);
         } else {
           exec.e("cudaFuncSetAttribute($, "
                  "cudaFuncAttributeMaxDynamicSharedMemorySize, $);",
@@ -641,7 +805,8 @@ TranspileResult Transpiler::transpile_ugraph() {
                     header.to_string(),
                     custom_kernels.to_string(),
                     init.to_string(),
-                    hopper_tma.to_string(),
+                    config.target_cc == GPU_CC::H100 ? hopper_tma.to_string() : 
+                    (config.target_cc == GPU_CC::B200 ? blackwell_tma.to_string() : ""),
                     exec.to_string());
   vector<OutputTensorDirective> output_directives;
   for (kn::DTensor const &dtensor : this->mugraph_output_tensors) {
