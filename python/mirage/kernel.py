@@ -483,7 +483,11 @@ class KNGraph:
         ]
 
         self.initialize_mpi_nvshmem(rank)
-        comm_buffers_ptr = self.allocate_comm_buffers()
+        try:
+            comm_buffers_ptr = self.allocate_comm_buffers()
+        except Exception as e:
+            print(f"Error when allocating comm buffers: {e}")
+            sys.exit(1)
         buffer_tensor_ptr = buffer_tensor.data_ptr()
         input_tensors_ptr = [tensor.data_ptr() for tensor in input_tensors]
         output_tensors_ptr = [tensor.data_ptr() for tensor in output_tensors]

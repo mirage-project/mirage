@@ -911,13 +911,14 @@ TranspileResult Transpiler::transpile_ugraph() {
             dims[0] *= cur_op->bgraph.gpu_dim.x;
             exec.e("using reduction_kernel = kn::ReductionKernel<$, $, $, 1, true>;",
                    get_datatype_str(output_dtensor.data_type),
-                   get_cute_layout(dims, 
-                                   vector<size_t>(output_meta.strides, 
+                   get_cute_layout(dims,
+                                   vector<size_t>(output_meta.strides,
                                                   output_meta.strides + output_dtensor.num_dims)),
                    get_cute_layout(output_dtensor, output_meta));
             exec.e("nvshmem_barrier_all();");
-            exec.e("reduction_kernel::run(($*)output_tensors.at(0), $);", 
+            exec.e("reduction_kernel::run(($*)dtensor$, $);", 
                    get_datatype_str(output_dtensor.data_type),
+                   output_dtensor.guid,
                    nvshmem_as_param[0]);
           }
 

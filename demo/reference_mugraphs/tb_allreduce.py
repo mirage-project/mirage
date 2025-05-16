@@ -8,7 +8,7 @@ from utils import analyze_differences
 
 seed = 42  # Use a fixed seed
 torch.manual_seed(seed)
-#torch.set_printoptions(profile="full")
+torch.set_printoptions(profile="full")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Process some arguments.")
@@ -29,6 +29,8 @@ if __name__ == "__main__":
     tb_graph.new_output(stensor=tAccM1, output_map=(1, 0, -1), epilogue="reduce_scatter") # (0, 1, -1) right?
     O1 = graph.customized([X, W1], tb_graph)
 
+    # graph.mark_output(O1[0])
+
     W2 = graph.new_input(dims=(256, 512), gpu_input_map=(1, -1 ,-1), dtype=mi.float16)
     tb_graph = mi.new_threadblock_graph(grid_dim=(2,8,1), block_dim=(128,1,1), forloop_range=4, reduction_dimx=4)
     #TB_ALLGATHER_PROLOGUE
@@ -44,8 +46,17 @@ if __name__ == "__main__":
     from mpi4py import MPI
     comm = MPI.COMM_WORLD
     rank = comm.Get_rank()
-    logging.basicConfig(level=logging.INFO, filename=f"tb_allreduce_{rank}.log")
+    if os.path.exists(f"tb_allreduce_{rank}.log"):
+        os.remove(f"tb_allreduce_{rank}.log")
+    # logging.basicConfig(level=logging.INFO)
+    file_handler = logging.FileHandler(f"tb_allreduce_{rank}.log")
+    file_handler.setLevel(logging.INFO)
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    file_handler.setFormatter(formatter)
     logger = logging.getLogger()
+    logger.addHandler(file_handler)
+    logger.setLevel(logging.INFO)
+    logger.info(f"[{rank}] start")
 
     torch.cuda.set_device(rank)
     print("Current rank: ", rank)
@@ -57,6 +68,17 @@ if __name__ == "__main__":
     ]
 
     outputs = graph(inputs=input_tensors, rank=rank, save_codes=save_codes)
+    print(f"[{rank}] outputs.size(): {len(outputs)}")
+    logger.info(f"[{rank}] outputs.size(): {len(outputs)}")
+    if len(outputs) == 2:
+        for output in outputs:
+            logger.info(f"[{rank}] output shape: {output.shape}")
+            print(f"[{rank}] output shape: {output.shape}")
+        logger.info(f"[{rank}] output: {output}")
+        mid_output = outputs[0]
+        allgather_output = outputs[1]
+    else:
+        allgather_output = outputs[0]
 
     import torch.distributed as dist
     os.environ['MASTER_ADDR'] = 'localhost'
@@ -73,6 +95,13 @@ if __name__ == "__main__":
     result1 = x1_pt @ w1_pt
     mid_result = torch.empty((128, 256), dtype=result1.dtype, device=f'cuda:{rank}')
     dist.reduce_scatter_tensor(mid_result, result1)
+    if len(outputs) == 2:
+        if not torch.allclose(mid_result, mid_output, rtol=5e-2, atol=1e-1):
+            logger.info(f"[{rank}] reduce_scatter demo failed!")
+            analyze_differences(mid_result, mid_output, logger)
+        else:
+            logger.info(f"[{rank}] reduce_scatter demo pass!")
+
     w2_pt = input_tensors[2].chunk(4, dim=1)[rank]
     result_list = [torch.empty_like(mid_result) for _ in range(4)]
     dist.all_gather(result_list, mid_result)
@@ -80,9 +109,9 @@ if __name__ == "__main__":
     result2 = x2 @ w2_pt
     # print(result2)
     # print(outputs[0])
-    if not torch.allclose(outputs[0], result2, rtol=5e-2, atol=1e-1):
-        logger.error(f"[{rank}] allreduce demo failed!")
-        analyze_differences(outputs[0], result2, logger)
+    if not torch.allclose(allgather_output, result2, rtol=5e-2, atol=1e-1):
+        logger.info(f"[{rank}] allreduce demo failed!")
+        analyze_differences(allgather_output, result2, logger)
     else:
         print(f"[{rank}] allreduce demo pass!")
     dist.destroy_process_group()
