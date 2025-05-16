@@ -4,48 +4,69 @@
 
 namespace tb {
 
-template<int _Stage>
+template <int _Stage, class AtomThrShape_MNK_ = Shape<_1,_1,_1>>
 struct BlackwellAsyncPipeline {
-
   static constexpr int Stage = _Stage;
-  using Mainloop      = cutlass::PipelineTmaAsync<Stage>;
-  using Barrier       = typename Mainloop::ProducerBarrierType;
-  using PState        = cutlass::PipelineState<Stage>;
-  using Params        = typename Mainloop::Params;
+  using MainloopPipeline = typename cutlass::PipelineTmaUmmaAsync<Stage>;
+  using PipelineState = typename cutlass::PipelineState<Stage>;
+  // using SharedStorage = tb::SharedStorage<MainloopPipeline, Stage>;
+  using PipelineParams = typename MainloopPipeline::Params;
+  using BarrierType = typename MainloopPipeline::ProducerBarrierType;
 
-  PState smem_read;
-  PState smem_write{ cutlass::make_producer_start_state<Mainloop>() };
-  Params p;
-  cute::aligned_struct<16,_1>               pipe_smem;
-  typename Mainloop::SharedStorage &storage =
-      *reinterpret_cast<typename Mainloop::SharedStorage*>(&pipe_smem);
-  Mainloop pipe;
+public:
+  PipelineState smem_pipe_read;
+  PipelineParams pipeline_params;
+  MainloopPipeline pipeline;
+  PipelineState smem_pipe_write;
 
-  __device__
-  BlackwellAsyncPipeline(void* base, bool prod, bool cons,
-              uint32_t bytes, uint32_t n_consumer_wgs)
-  : p{ bytes,
-       prod ? Mainloop::ThreadCategory::Producer
-            : cons ? Mainloop::ThreadCategory::Consumer
-                   : Mainloop::ThreadCategory::NonParticipant,
-       (threadIdx.x % cutlass::NumThreadsPerWarpGroup)==0,
-       uint32_t(cutlass::NumThreadsPerWarpGroup*n_consumer_wgs) },
-    storage(*reinterpret_cast<typename Mainloop::SharedStorage*>(base)),
-    pipe(storage, p, cute::Shape<_1,_1,_1>{}) {}
+  PipelineStorage<MainloopPipeline> pipeline_storage;
+__device__ __forceinline__
+      BlackwellAsyncPipeline(void *__restrict__ shared_memory_offset,
+                          bool producer,
+                          bool consumer,
+                          uint32_t transactionBytes,
+                          uint32_t num_consumer_wgs)
+      : smem_pipe_read(),
+        smem_pipe_write(cutlass::make_producer_start_state<MainloopPipeline>()),
+        pipeline_params{
+            transactionBytes,
+            producer
+                ? MainloopPipeline::ThreadCategory::Producer
+                : (consumer ? MainloopPipeline::ThreadCategory::Consumer
+                            : MainloopPipeline::ThreadCategory::NonParticipant),
+            (threadIdx.x % cutlass::NumThreadsPerWarpGroup) == 0,
+            cutlass::NumThreadsPerWarpGroup * num_consumer_wgs},
+        pipeline_storage(shared_memory_offset),
+        pipeline(*(pipeline_storage.mainloop),
+                 pipeline_params,
+                 make_shape(1, 1, _1{})) {}
 
-  __device__ __forceinline__ auto producer_acquire() {
-      pipe.producer_acquire(smem_write);
-      return std::make_pair(pipe.producer_get_barrier(smem_write),
-                            smem_write.index());
+  __device__ __forceinline__ std::pair<BarrierType *, int> producer_acquire() {
+    pipeline.producer_acquire(smem_pipe_write);
+    BarrierType *tma_barrier = pipeline.producer_get_barrier(smem_pipe_write);
+    int write_stage = smem_pipe_write.index();
+    return {tma_barrier, write_stage};
   }
-  __device__ __forceinline__ void producer_advance() { ++smem_write; }
 
-  __device__ __forceinline__ int consumer_wait()  {
-      auto tok = pipe.consumer_try_wait(smem_read);
-      pipe.consumer_wait(smem_read, tok);
-      return smem_read.index();
+  __device__ __forceinline__ void producer_advance() {
+    ++smem_pipe_write;
   }
-  __device__ __forceinline__ void consumer_release() { pipe.consumer_release(smem_read); ++smem_read;}
+
+  __device__ __forceinline__ int consumer_wait() {
+    auto barrier_token = pipeline.consumer_try_wait(smem_pipe_read);
+    pipeline.consumer_wait(smem_pipe_read, barrier_token);
+    return smem_pipe_read.index();
+  }
+
+  // debug only
+  __device__ __forceinline__ void producer_commit() {
+    pipeline.producer_commit(smem_pipe_write, (8192));
+  }
+
+  __device__ __forceinline__ void consumer_release() {
+    pipeline.consumer_release(smem_pipe_read);
+    ++smem_pipe_read;
+  }
 };
 
 } // namespace tb

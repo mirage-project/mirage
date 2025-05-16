@@ -221,7 +221,7 @@ public:
                                              int imapz_a,
                                              int k_tile_iter,
                                              HopperAsyncPipeline &pipeline) {
-    // if (lane_id() == 0) {
+    if (lane_id() == 0) {
       Tensor mA = tma_a.get_tma_tensor(shape(SrcLayout{}));
       // （CTA_M, CTA_K, X, Y, Z, FORLOOP）
       auto blkCoordA = make_coord_runtime<decltype(rank(SrcLayout{}))::value>(
@@ -248,7 +248,7 @@ public:
            tAgAX(_, k_tile_iter),
            tAsAX(_, write_stage));
       pipeline.producer_advance();
-    // }
+    }
   }
 };
 
@@ -256,15 +256,11 @@ public:
  template <typename  T,
           class     DstLayout,
           class     SrcLayout,
-          class     TMA,                     // Created by cutlass::MakeTmaCopy(...)
-          class     BlackwellAsyncPipeline,  // Your own pipeline (see note ❸)
+          class     TMA,                     
+          class     BlackwellAsyncPipeline,  
           bool      MInput,
           int       K_ITER>
 class InputTMAAsyncCopy_Blackwell {
-
-  //------------------------------------------------------------------
-  // ① Thread block tile shape (MN direction) - same logic as SM90
-  //------------------------------------------------------------------
   using CTA_TILER = decltype(make_shape(shape<0>(DstLayout{}),
                                         shape<1>(DstLayout{})));
 
@@ -279,10 +275,6 @@ class InputTMAAsyncCopy_Blackwell {
                decltype(get<0>(DstMNLayout{})),              
                decltype(get<1>(DstMNLayout{}))>());     
 
-
-  //------------------------------------------------------------------
-  // ③ Shared-Memory Pipeline layout: (A,B,X,Y,Z,Stage)
-  //------------------------------------------------------------------
   using DstPipeLayout =
       decltype(tile_to_shape(
           SmemLayoutAtom{},
@@ -290,24 +282,15 @@ class InputTMAAsyncCopy_Blackwell {
                      shape<1>(DstMNLayout{}),    // tile-N
                      Int<BlackwellAsyncPipeline::Stage>{})));
 
-  //------------------------------------------------------------------
-  // ④ Single TMA transaction bytes (for set_barrier_transaction_bytes)
-  //------------------------------------------------------------------
-  static constexpr int kTmaBytes =
+  static constexpr int tmaTransactionBytes =
       sizeof(T) * size(DstPipeLayout{}) / BlackwellAsyncPipeline::Stage;
 
 public:
-  //------------------------------------------------------------------
-  // ⑤ Prefetch Descriptor - interface same as Hopper
-  //------------------------------------------------------------------
   static __device__ __forceinline__
   void prefetch(TMA const &tma) {
     cute::prefetch_tma_descriptor(tma.get_tma_descriptor());
   }
 
-  //------------------------------------------------------------------
-  // ⑥ Runtime GMEM block coordinate construction (keeping original logic)
-  //------------------------------------------------------------------
   template <int Rank>
   static __device__ auto make_coord_runtime(int imapx, int imapy, int imapz) {
     if constexpr (Rank == 6) {
@@ -330,9 +313,6 @@ public:
     }
   }
 
-  //------------------------------------------------------------------
-  // ⑦ Main entry: Initiate a TMA read in Lane-0 thread
-  //------------------------------------------------------------------
   static __device__ __forceinline__
   void run(TMA              const &tma_a,
            T*                      dst_smem,     // SMEM destination address
@@ -342,7 +322,7 @@ public:
            int                     k_iter,
            BlackwellAsyncPipeline &pipeline) {   // NEW pipeline
 
-    // if (lane_id() == 0) {
+    if (lane_id() == 0) {
       // --- (a) Get GMEM tensor view ----------------------------
       Tensor gA_all = tma_a.get_tma_tensor(shape(SrcLayout{}));
 
@@ -363,7 +343,7 @@ public:
       // --- (e) Get barrier + stage through pipeline ------------
       auto [tma_barrier, write_stage] = pipeline.producer_acquire();
       // Set transaction bytes (helper provided by Blackwell CUTLASS)
-      cute::set_barrier_transaction_bytes(*tma_barrier, kTmaBytes);
+      cute::set_barrier_transaction_bytes(*tma_barrier, tmaTransactionBytes);
 
       // --- (f) Initiate TMA copy ------------------------------
       copy(tma_a.with(*tma_barrier),            // Descriptor with barrier
@@ -372,7 +352,7 @@ public:
 
       // --- (g) Advance pipeline for next copy -----------------
       pipeline.producer_advance();
-    // }
+    }
   }
 };
 

@@ -370,9 +370,23 @@ CustomOPTranspileResult
          config::NUM_THREADS_PER_GROUP * config.num_consumer_wgs);
 
   // Define elect_one_thr and elect_one_warp
+  code.e("// UMMA part");
   code.e("uint32_t elect_one_thr  = cute::elect_one_sync();");
   code.e("uint32_t elect_one_warp = (threadIdx.x / 32 == 0); ");
+  
+  // get cta rank
+  code.e("Layout cluster_layout_vmnk = tiled_divide(make_layout(cluster_shape), make_tile(typename TiledMMA::AtomThrID{}));");
+  code.e("int cta_rank = cute::block_rank_in_cluster();");
+  code.e("auto cta_in_cluster_coord_vmnk = cluster_layout_vmnk.get_flat_coord(cta_rank);");
+  code.e("auto elect_one_cta = get<0>(cta_in_cluster_coord_vmnk) == Int<0>{};");
 
+
+  // define tma multicast
+  code.e("uint16_t tma_mcast_mask_a = create_tma_multicast_mask<2>(cluster_layout_vmnk, cta_in_cluster_coord_vmnk);");
+  code.e("uint16_t tma_mcast_mask_b = create_tma_multicast_mask<1>(cluster_layout_vmnk, cta_in_cluster_coord_vmnk);");
+
+
+  // 修改为 Blackwell 的 TMA 实现
   // Define STensor as cute::Tensor
   code.e("// STensors");
   code.e("extern __shared__ char buf[];");
@@ -382,7 +396,7 @@ CustomOPTranspileResult
   code.e("");
   // Only one thread initialize Tmem
   code.e("if (elect_one_warp) { ");
-  code.e("  cute::TMEM::Allocator1Sm alloc{}; ");
+  code.e("  cute::TMEM::Allocator2Sm alloc{}; ");
   code.e("  alloc.allocate(512, &tmem_base);");
   code.e("}");
   code.e("__syncthreads();");
@@ -555,6 +569,8 @@ CustomOPTranspileResult
               stensor.guid,
               stensor_meta.m_input,
               g.forloop_range);
+          // debug
+          code.e("printf(\"finish define STensorInputAtom\");");
           pipe_index++;
           barrier_addr += tma_barrier_size;
 
@@ -581,14 +597,13 @@ CustomOPTranspileResult
   code.e("");
   code.e("__syncthreads();");
 
-  // 修改为 B200
   if (GPU_CC::B200 == config.target_cc) {
     assert(g.cluster_dim.x > 0 && g.cluster_dim.y > 0 && g.cluster_dim.z > 0);
     string tma;
     string tmplt;
     for (size_t i = 0; i < tmaParamsList.size(); ++i) {
       if (i == 0) {
-        tmplt.append("template <");
+        tmplt.append("template <class ClusterShape_MNK, class TiledMMA, ");
       }
       TMAParams &params = tmaParamsList.at(i);
       tmplt.append("class TMA_" + std::to_string(params.guid));
@@ -606,7 +621,7 @@ CustomOPTranspileResult
     if (profiling) {
       code.e_front(
           "__global__ void  __launch_bounds__($) "
-          "$($ $, $, uint64_t *profiler_buffer) {",
+          "$($ $, $, $, uint64_t *profiler_buffer) {",
           num_threads,
           func_name,
           tma,
@@ -622,11 +637,12 @@ CustomOPTranspileResult
                 return fmt("$ const* dtensor$_ptr",
                            get_datatype_str(dtensor.data_type),
                            dtensor.guid);
-              }));
+              }),
+          "TiledMMA tiled_mma, ClusterShape_MNK cluster_shape");
     } else {
       code.e_front(
           "__global__ void  __launch_bounds__($) "
-          "$($ $, $) {",
+          "$($ $, $, $) {",
           num_threads,
           func_name,
           tma,
@@ -642,7 +658,8 @@ CustomOPTranspileResult
                 return fmt("$ const* dtensor$_ptr",
                            get_datatype_str(dtensor.data_type),
                            dtensor.guid);
-              }));
+              }),
+          "TiledMMA tiled_mma, ClusterShape_MNK cluster_shape");
     }
 
     code.e_front(tmplt);
@@ -849,11 +866,10 @@ CustomOPTranspileResult
              output.guid,
              get_stensor_layout(output, meta2, num_dims - 2 /*start_dim*/));
 
-      // 使用 Blackwell 的 Matmul 内核
       code.e("using Matmul$Kernel = tb::Blackwell_Matmul<$, "
              "$, $, Matmul$LayoutA, Matmul$LayoutB, "
              "Matmul$LayoutC, NUM_THREADS, "
-             "$, $, $, $, $, $>;",
+             "$, $, $, $, $, $, ClusterShape_MNK, TiledMMA>;",
              output.guid,
              get_datatype_str(input0.data_type),
              is_ldmatrix_avail,
@@ -868,7 +884,7 @@ CustomOPTranspileResult
              meta1.is_pipelined_input,
              config.pipeline_stages);
       if (is_accum_in_reg) {
-        code.e("auto matmul_$_accum = Matmul$Kernel::get_mma_tC(thread_idx);",
+        code.e("auto matmul_$_accum = Matmul$Kernel::get_mma_tC(blockIdx.x, blockIdx.y);",
                output.guid,
                output.guid);
       }
