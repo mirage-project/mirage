@@ -167,8 +167,9 @@ Transpiler::Transpiler(kernel::Graph const *_graph,
               threadblock::TBInputOp *input_op =
                   static_cast<threadblock::TBInputOp *>(bop);
               assert(bop->input_tensors.size() == 0);
+              auto current_dtensor = get_tensor_in_new_graph(dtensor_mapping, input_op->dtensor);
               threadblock::STensor st = tbg->new_input(
-                  get_tensor_in_new_graph(dtensor_mapping, input_op->dtensor),
+                  current_dtensor,
                   input_op->input_map,
                   input_op->forloop_dim,
                   input_op->output_tensors[0].layout,
@@ -179,10 +180,10 @@ Transpiler::Transpiler(kernel::Graph const *_graph,
               if(input_op->prologue == TB_PROLOGUE_ALLGATHER) {
                 threadblock::TBInputOp *latest_op = 
                   static_cast<threadblock::TBInputOp *>(tbg->operators.back());
-                kernel::DTensor new_dtensor = latest_op->dtensor;
-                dtensor_mapping[new_dtensor.guid] = new_dtensor;
+                kernel::DTensor new_comm_dtensor = latest_op->dtensor;
+                // dtensor_mapping[new_dtensor.guid] = new_dtensor;
                 // Later used in resolve_dtensor_meta
-                all_dtensors.push_back(new_dtensor);
+                all_dtensors.push_back(new_comm_dtensor);
               }
               stensor_mapping[bop->output_tensors[0].guid] = st;
               break;

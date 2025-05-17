@@ -216,6 +216,7 @@ void Transpiler::resolve_tensor_layout() {
 
   // Constraits & costs for every kernel-level operator
   int cur_input_idx = 0, cur_output_idx = 0;
+  std::unordered_map<dguid_t, int> input_guid_to_idx;
   for (kn::KNOperator *const op : this->g->operators) {
     switch (op->op_type) {
       case type::KN_INPUT_OP: {
@@ -223,6 +224,7 @@ void Transpiler::resolve_tensor_layout() {
         // The innermost dim of the input tensor must match the provided layout
         vector<size_t> const &cur_stride = this->input_strides[cur_input_idx];
         kn::DTensor const &tensor = op->output_tensors.at(0);
+        input_guid_to_idx[tensor.guid] = cur_input_idx;
         if (tensor.num_dims != (int)cur_stride.size()) {
           throw std::runtime_error(
               fmt("The number of dimensions of the stride of the $th tensor "
@@ -237,6 +239,9 @@ void Transpiler::resolve_tensor_layout() {
               fmt("No innermost dim found for input tensor $", cur_input_idx));
         }
         opt.add(d_is_innermost[tensor.guid][innermost_dim]);
+        if(tensor.guid == 10000005 || tensor.guid == 10000003 || tensor.guid == 10000007 || tensor.guid == 10000009) {
+          printf("Input dtensor.guid: %d, innermost_dim: %d\n", tensor.guid, innermost_dim);
+        }
         cur_input_idx += 1;
         break;
       }
@@ -387,6 +392,22 @@ void Transpiler::resolve_tensor_layout() {
                                         ctx.int_val(cost::TB_INPUT_NO_CP_ASYNC),
                                         ctx.int_val(0)));
               }
+            }
+
+            // Allgather situation
+            if(tb_input_op->prologue == mirage::type::TB_PROLOGUE_ALLGATHER) {
+              // printf("resolve_tensor_layout: Allgather input dtensor.guid: %d\n", input.guid);
+              auto new_guid = tb_input_op->dtensor.guid;
+              auto old_guid = tb_input_op->dtensor.original_guid;
+              printf("Dealing with allgather situation: new_guid: %d, old_guid: %d\n", new_guid, old_guid);
+              int input_idx = input_guid_to_idx[old_guid];
+              vector<size_t> const &cur_stride = this->input_strides[input_idx];
+              int innermost_dim = find_innermost_dim(cur_stride);
+              if(innermost_dim == -1) {
+                throw std::runtime_error(fmt("No innermost dim found for input tensor $", input_idx));
+              }
+              printf("Adding constraint: d_is_innermost[%d][%d]\n", new_guid, innermost_dim);
+              opt.add(d_is_innermost[new_guid][innermost_dim]);
             }
             break;
           }
@@ -672,6 +693,9 @@ void Transpiler::resolve_tensor_layout() {
     }
     assert(innermost_dim != -1);
     this->dtensor_metas[dtensor.guid].innermost_dim = innermost_dim;
+    if(dtensor.guid == 10000005 || dtensor.guid == 10000003 || dtensor.guid == 10000007 || dtensor.guid == 10000009) {
+      printf("dtensor.guid: %d, innermost_dim: %d\n", dtensor.guid, innermost_dim);
+    }
   }
   for (tb::STensor const &stensor : all_stensors) {
     int num_dims = stensor.num_dims;
@@ -710,6 +734,13 @@ void Transpiler::resolve_tensor_layout() {
         meta.strides[i] = this->input_strides[meta.input_idx][i];
       }
       assert(meta.strides[innermost_dim] == 1);
+      if(dtensor.guid == 10000005 || dtensor.guid == 10000003 || dtensor.guid == 10000007 || dtensor.guid == 10000009) {
+        printf("dtensor.guid: %d, strides: ", dtensor.guid);
+        for (int i = 0; i < num_dims; ++i) {
+          printf("%d ", meta.strides[i]);
+        }
+        printf("\n");
+      }
     } else if (meta.is_output && (meta.output_idx < output_strides.size())) {
       // with user provided output stride
       size_t total_ele = 1;

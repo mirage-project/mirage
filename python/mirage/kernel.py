@@ -208,8 +208,6 @@ def get_cc_cmd(target, cc, FILE_NAME, py_include_dir, MIRAGE_ROOT, NCCL_ROOT, MP
         f"-L{NCCL_ROOT}/lib/",
         #f"-I{MPI_ROOT}/include",
         #f"-L{MPI_ROOT}/lib",
-        f"-I/home/ubuntu/miniconda3/envs/mirage_sj/include/",
-        f"-L/home/ubuntu/miniconda3/envs/mirage_sj/lib/python3.10/site-packages/mpi4py/",
         #f"-I{NVSHMEM_ROOT}/include",
         #f"-L{NVSHMEM_ROOT}/lib",
         f"-I/usr/include/nvshmem_12/",
@@ -384,7 +382,7 @@ class KNGraph:
                 print("[", rank, "] tensor_dim: ", tensor_dim, "gpu_dim: ", gpu_dim)
             if self.gpu_dim[gpu_dim] > 1:
                 dim_size = tensor.shape[tensor_dim]
-                chunk_size = (dim_size + self.gpu_dim[gpu_dim] - 1) // self.gpu_dim[gpu_dim]  # 向上取整
+                chunk_size = (dim_size + self.gpu_dim[gpu_dim] - 1) // self.gpu_dim[gpu_dim]
                 
                 start_idx = gpu_indices[gpu_dim] * chunk_size
                 end_idx = min(start_idx + chunk_size, dim_size)
@@ -485,7 +483,11 @@ class KNGraph:
         ]
 
         self.initialize_mpi_nvshmem(rank)
-        comm_buffers_ptr = self.allocate_comm_buffers()
+        try:
+            comm_buffers_ptr = self.allocate_comm_buffers()
+        except Exception as e:
+            print(f"Error when allocating comm buffers: {e}")
+            sys.exit(1)
         buffer_tensor_ptr = buffer_tensor.data_ptr()
         input_tensors_ptr = [tensor.data_ptr() for tensor in input_tensors]
         output_tensors_ptr = [tensor.data_ptr() for tensor in output_tensors]
@@ -520,7 +522,7 @@ class KNGraph:
             self.cygraph, target_cc=target_cc, input_strides=input_strides, num_warp_groups = num_warp_groups, pipeline_stages = pipeline_stages
         )
 
-        print(result['code'])
+        # print(result['code'])
         if result["max_smem_size"] > get_shared_memory_capacity(target_cc):
             # the transpiled kernel exceeds shared memory limit
             print(
