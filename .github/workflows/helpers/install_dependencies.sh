@@ -6,8 +6,8 @@ sudo apt install -y software-properties-common lsb-release wget python3-pip g++ 
 # Install Z3
 sudo apt-get install -y libz3-4 libz3-dev
 
-# Make sure Z3 lib is found (enforces Z3 version 4.14)
-sudo ln -s /usr/lib/x86_64-linux-gnu/libz3.so /usr/lib/libz3.so.4.14 || true
+# Make sure Z3 lib is found (enforces Z3 version 4.15)
+sudo ln -s /usr/lib/x86_64-linux-gnu/libz3.so /usr/lib/libz3.so.4.15 || true
 sudo ldconfig
 
 # Install CMake
