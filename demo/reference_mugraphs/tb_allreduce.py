@@ -8,7 +8,7 @@ from utils import analyze_differences
 
 seed = 42  # Use a fixed seed
 torch.manual_seed(seed)
-torch.set_printoptions(profile="full")
+#torch.set_printoptions(profile="full")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Process some arguments.")
@@ -29,7 +29,7 @@ if __name__ == "__main__":
     tb_graph.new_output(stensor=tAccM1, output_map=(1, 0, -1), epilogue="reduce_scatter") # (0, 1, -1) right?
     O1 = graph.customized([X, W1], tb_graph)
 
-    # graph.mark_output(O1[0])
+    graph.mark_output(O1[0])
 
     W2 = graph.new_input(dims=(256, 512), gpu_input_map=(1, -1 ,-1), dtype=mi.float16)
     tb_graph = mi.new_threadblock_graph(grid_dim=(2,8,1), block_dim=(128,1,1), forloop_range=4, reduction_dimx=4)
@@ -97,10 +97,10 @@ if __name__ == "__main__":
     dist.reduce_scatter_tensor(mid_result, result1)
     if len(outputs) == 2:
         if not torch.allclose(mid_result, mid_output, rtol=5e-2, atol=1e-1):
-            logger.info(f"[{rank}] reduce_scatter demo failed!")
+            logger.info(f"[{rank}] reduce scatter part failed!")
             analyze_differences(mid_result, mid_output, logger)
         else:
-            logger.info(f"[{rank}] reduce_scatter demo pass!")
+            print(f"[{rank}] reduce_scatter part pass!")
 
     w2_pt = input_tensors[2].chunk(4, dim=1)[rank]
     result_list = [torch.empty_like(mid_result) for _ in range(4)]
@@ -110,8 +110,8 @@ if __name__ == "__main__":
     # print(result2)
     # print(outputs[0])
     if not torch.allclose(allgather_output, result2, rtol=5e-2, atol=1e-1):
-        logger.info(f"[{rank}] allreduce demo failed!")
+        logger.info(f"[{rank}] allgather part failed!")
         analyze_differences(allgather_output, result2, logger)
     else:
-        print(f"[{rank}] allreduce demo pass!")
+        print(f"[{rank}] allgather part pass!")
     dist.destroy_process_group()

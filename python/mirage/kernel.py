@@ -214,8 +214,6 @@ def get_cc_cmd(target, cc, FILE_NAME, py_include_dir, MIRAGE_ROOT, NCCL_ROOT, MP
         f"-L/usr/lib/x86_64-linux-gnu/",
         #f"-I{CUDA_ROOT}/include",
         #f"-L{CUDA_ROOT}/lib64",
-        #f"-I/home/hice1/slin468/scratch/nvhpc/Linux_x86_64/25.1/comm_libs/nvshmem/include",
-        #f"-L/home/hice1/slin468/scratch/nvhpc/Linux_x86_64/25.1/comm_libs/nvshmem/lib",
         "-shared",
         "-std=c++17",
         "-rdc=true",
