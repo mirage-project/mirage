@@ -85,6 +85,10 @@ private:
   size_t d_buf_size; // Size of the buffer for intermediate DTensors
   void plan_dtensor_memory();
 
+  // Communication buffer allocation metadata
+  std::unordered_map<decltype(kn::DTensor::guid), size_t>
+      comm_buffer_metas; // DTensor guid -> buffer id
+
   // Utility functions for transpiling
   // Get the pointer to a DTensor. Return {pointer_name, code}
   std::pair<std::string, std::string>

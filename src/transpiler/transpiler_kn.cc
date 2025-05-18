@@ -101,7 +101,7 @@ std::pair<string, string>
   // string malloc_code = "";
   if (dtensor.prologue == mirage::type::TBPrologueType::TB_PROLOGUE_ALLGATHER) {
     assert(comm_buffers && next_comm_buffer_idx);
-    size_t comm_buffer_idx = *next_comm_buffer_idx++;
+    size_t comm_buffer_idx = (*next_comm_buffer_idx)++;
     comm_buffers->e("sizeof($) * $,\t// Buffer $", \
             get_datatype_str(dtensor.data_type),
             meta.num_phy_elems,
@@ -126,19 +126,22 @@ std::pair<string, string>
                pointer_var_name,
                get_datatype_str(dtensor.data_type),
                meta.input_idx);
-  } else if (meta.is_output && dtensor.is_nvshmem_tensor) {
+  } else if (dtensor.is_nvshmem_tensor) {
     assert(comm_buffers && next_comm_buffer_idx);
     if (dtensor.epilogue == type::TBEpilogueType::TB_EPILOGUE_REDUCESCATTER) {
-      size_t comm_buffer_idx = *next_comm_buffer_idx++;
-      comm_buffers->e("sizeof($) * $,\t// Buffer $", \
-              get_datatype_str(dtensor.data_type),
-              meta.num_phy_elems * g->gpu_dim.x,
-              comm_buffer_idx);
+      if (comm_buffer_metas.find(guid) == comm_buffer_metas.end()) {
+        size_t comm_buffer_idx = (*next_comm_buffer_idx)++;
+        comm_buffers->e("sizeof($) * $,\t// Buffer $", \
+                get_datatype_str(dtensor.data_type),
+                meta.num_phy_elems * g->gpu_dim.x,
+                comm_buffer_idx);
+        comm_buffer_metas[guid] = comm_buffer_idx;
+      }
       code = fmt("$ *$ = ($*)comm_buffers.at($);", \
               get_datatype_str(dtensor.data_type),
               pointer_var_name,
               get_datatype_str(dtensor.data_type),
-              comm_buffer_idx);
+              comm_buffer_metas[guid]);
       /*
       code = fmt("$ *$ = to_nvshmem_ptr<$>($);",
                  get_datatype_str(dtensor.data_type),
@@ -147,16 +150,19 @@ std::pair<string, string>
                  meta.num_phy_elems * g->gpu_dim.x);
       */
     } else {
-      size_t comm_buffer_idx = *next_comm_buffer_idx++;
-      comm_buffers->e("sizeof($) * $,\t// Buffer $", \
-              get_datatype_str(dtensor.data_type),
-              meta.num_phy_elems,
-              comm_buffer_idx);
+      if (comm_buffer_metas.find(guid) == comm_buffer_metas.end()) {
+        size_t comm_buffer_idx = (*next_comm_buffer_idx)++;
+        comm_buffers->e("sizeof($) * $,\t// Buffer $", \
+                get_datatype_str(dtensor.data_type),
+                meta.num_phy_elems,
+                comm_buffer_idx);
+        comm_buffer_metas[guid] = comm_buffer_idx;
+      }
       code = fmt("$ *$ = ($*)comm_buffers.at($);", \
               get_datatype_str(dtensor.data_type),
               pointer_var_name,
               get_datatype_str(dtensor.data_type),
-              comm_buffer_idx);
+              comm_buffer_metas[guid]);
       /*
       code = fmt("$ *$ = to_nvshmem_ptr<$>($);",
                  get_datatype_str(dtensor.data_type),
