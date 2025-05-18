@@ -8,7 +8,7 @@ from utils import analyze_differences
 
 seed = 42  # Use a fixed seed
 torch.manual_seed(seed)
-torch.set_printoptions(profile="full")
+#torch.set_printoptions(profile="full")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Process some arguments.")

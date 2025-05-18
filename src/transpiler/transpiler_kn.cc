@@ -916,10 +916,17 @@ TranspileResult Transpiler::transpile_ugraph() {
                                                   output_meta.strides + output_dtensor.num_dims)),
                    get_cute_layout(output_dtensor, output_meta));
             exec.e("nvshmem_barrier_all();");
-            exec.e("reduction_kernel::run(($*)dtensor$, $);", 
-                   get_datatype_str(output_dtensor.data_type),
-                   output_dtensor.guid,
-                   nvshmem_as_param[0]);
+            if (output_meta.is_output) {
+              exec.e("reduction_kernel::run(($*)output_tensors.at($), $);",
+                    get_datatype_str(output_dtensor.data_type),
+                    output_meta.output_idx,
+                    nvshmem_as_param[0]);
+            } else {
+              exec.e("reduction_kernel::run(($*)dtensor$, $);",
+                    get_datatype_str(output_dtensor.data_type),
+                    output_dtensor.guid,
+                    nvshmem_as_param[0]);
+            }
           }
 
           // Free nvshmem allocated memory
