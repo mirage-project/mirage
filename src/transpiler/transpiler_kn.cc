@@ -136,12 +136,24 @@ std::pair<string, string>
                 meta.num_phy_elems * g->gpu_dim.x,
                 comm_buffer_idx);
         comm_buffer_metas[guid] = comm_buffer_idx;
+        code = fmt("$ *$ = ($*)comm_buffers.at($);", \
+                get_datatype_str(dtensor.data_type),
+                pointer_var_name,
+                get_datatype_str(dtensor.data_type),
+                comm_buffer_metas[guid]);
+      } else if (meta.is_output) {
+        code = fmt("$ *$ = ($*)output_tensors.at($);", \
+                get_datatype_str(dtensor.data_type),
+                pointer_var_name,
+                get_datatype_str(dtensor.data_type),
+                meta.output_idx);
+      } else {
+        code = fmt("$ *$ = ($*)comm_buffers.at($);", \
+                get_datatype_str(dtensor.data_type),
+                pointer_var_name,
+                get_datatype_str(dtensor.data_type),
+                comm_buffer_metas[guid]);
       }
-      code = fmt("$ *$ = ($*)comm_buffers.at($);", \
-              get_datatype_str(dtensor.data_type),
-              pointer_var_name,
-              get_datatype_str(dtensor.data_type),
-              comm_buffer_metas[guid]);
       /*
       code = fmt("$ *$ = to_nvshmem_ptr<$>($);",
                  get_datatype_str(dtensor.data_type),
@@ -685,7 +697,7 @@ TranspileResult Transpiler::transpile_ugraph() {
                       guid,
                       original_guid,
                       guid,
-                      meta.num_phy_elems,
+                      dtensor_metas.at(original_guid).num_phy_elems,
                       guid));
               exec.e("dtensor$ = allgather_buf_$;",
                      original_guid,
