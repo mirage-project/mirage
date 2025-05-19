@@ -32,9 +32,9 @@ class EventType(Enum):
 
 
 def decode_tag(tag, num_blocks, num_groups):
-    event_no = tag >> 24
-    block_group_tag = (tag >> 12) & 0xFFF
-    event_idx = (tag >> 2) & 0x3FF
+    event_no = tag >> 17
+    block_group_tag = (tag >> 10) & 0x7F
+    event_idx = (tag >> 2) & 0xFF
     event_type = tag & 0x3
     return (
         event_no,

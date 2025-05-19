@@ -32,9 +32,9 @@ __device__ __forceinline__ uint32_t get_thread_idx() {
 }
 
 constexpr uint32_t EVENT_IDX_SHIFT = 2;
-constexpr uint32_t BLOCK_GROUP_IDX_SHIFT = 12;
+constexpr uint32_t BLOCK_GROUP_IDX_SHIFT = 10;
 // top 8 bits of the tag represents the nth event of the same type
-constexpr uint32_t EVENT_NO_SHIFT = 24;
+constexpr uint32_t EVENT_NO_SHIFT = 17;
 
 constexpr uint32_t EVENT_BEGIN = 0x0;
 constexpr uint32_t EVENT_END = 0x1;
