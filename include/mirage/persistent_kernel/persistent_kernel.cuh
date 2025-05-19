@@ -325,10 +325,12 @@ __global__ void persistent_kernel(RuntimeConfig config) {
           if (config.profiling) {
             PROFILER_EVENT_START(TASK_RMS_NORM_LINEAR,
                                  cur_task_pos[0] + cur_task_pos[1]);
-            kernel::norm_linear_kernel<bfloat16>(
-                task_desc.inputs[0].base_ptr,
-                task_desc.inputs[1].base_ptr,
-                task_desc.outputs[0].base_ptr);
+          }
+          kernel::norm_linear_kernel<bfloat16>(
+              task_desc.inputs[0].base_ptr,
+              task_desc.inputs[1].base_ptr,
+              task_desc.outputs[0].base_ptr);
+          if (config.profiling) {
             PROFILER_EVENT_END(TASK_RMS_NORM_LINEAR,
                                cur_task_pos[0] + cur_task_pos[1]);
           }
@@ -343,14 +345,15 @@ __global__ void persistent_kernel(RuntimeConfig config) {
           if (config.profiling) {
             PROFILER_EVENT_START(TASK_EMBEDDING,
                                  cur_task_pos[0] + cur_task_pos[1]);
-            kernel::embedding_kernel<bfloat16>(
-                task_desc.inputs[0].base_ptr,
-                task_desc.inputs[1].base_ptr,
-                task_desc.outputs[0].base_ptr);
+          }
+          kernel::embedding_kernel<bfloat16>(
+              task_desc.inputs[0].base_ptr,
+              task_desc.inputs[1].base_ptr,
+              task_desc.outputs[0].base_ptr);
+          if (config.profiling) {
             PROFILER_EVENT_END(TASK_EMBEDDING,
                                cur_task_pos[0] + cur_task_pos[1]);
           }
-
           if (threadIdx.x == 0) {
             // printf("[EXEC] worker_id(%d) task_type(EMB)\n", worker_id);
           }
@@ -361,18 +364,18 @@ __global__ void persistent_kernel(RuntimeConfig config) {
           if (config.profiling) {
             PROFILER_EVENT_START(TASK_ATTENTION_1,
                                  cur_task_pos[0] + cur_task_pos[1]);
-            TB_SLEEP_US(1);
+          }
+          TB_SLEEP_US(1);
+          if (config.profiling) {
             PROFILER_EVENT_END(TASK_ATTENTION_1,
                                cur_task_pos[0] + cur_task_pos[1]);
           }
-
           if (threadIdx.x == 0) {
             // printf("worker_id(%d) task_type(Attn1)\n", worker_id);
           }
           break;
         }
         case TASK_ATTENTION_2: {
-
           if (config.profiling) {
             PROFILER_EVENT_START(TASK_ATTENTION_2,
                                  cur_task_pos[0] + cur_task_pos[1]);
@@ -380,7 +383,6 @@ __global__ void persistent_kernel(RuntimeConfig config) {
             PROFILER_EVENT_END(TASK_ATTENTION_2,
                                cur_task_pos[0] + cur_task_pos[1]);
           }
-
           if (threadIdx.x == 0) {
             // printf("worker_id(%d) task_type(Attn2)\n", worker_id);
           }
@@ -390,11 +392,13 @@ __global__ void persistent_kernel(RuntimeConfig config) {
           if (config.profiling) {
             PROFILER_EVENT_START(TASK_SILU_MUL_LINEAR,
                                  cur_task_pos[0] + cur_task_pos[1]);
-            kernel::silu_mul_linear_kernel<bfloat16>(
-                task_desc.inputs[0].base_ptr,
-                task_desc.inputs[1].base_ptr,
-                task_desc.inputs[2].base_ptr,
-                task_desc.outputs[0].base_ptr);
+          }
+          //kernel::silu_mul_linear_kernel<bfloat16>(
+          //    task_desc.inputs[0].base_ptr,
+          //    task_desc.inputs[1].base_ptr,
+          //    task_desc.inputs[2].base_ptr,
+          //    task_desc.outputs[0].base_ptr);
+          if (config.profiling) {
             PROFILER_EVENT_END(TASK_SILU_MUL_LINEAR,
                                cur_task_pos[0] + cur_task_pos[1]);
           }
@@ -408,7 +412,18 @@ __global__ void persistent_kernel(RuntimeConfig config) {
           if (config.profiling) {
             PROFILER_EVENT_START(TASK_NVSHMEM_COPY,
                                  cur_task_pos[0] + cur_task_pos[1]);
-            TB_SLEEP_US(1);
+          }
+          size_t size_in_bytes = 2;
+          for (int i = 0; i < task_desc.inputs[0].num_dims; i++) {
+            size_in_bytes *= task_desc.inputs[0].dim[i];
+          }
+          nvshmemx_putmem_block(
+              task_desc.outputs[0].base_ptr,
+              task_desc.inputs[0].base_ptr,
+              size_in_bytes,
+              get_event_gpu_id(task_desc.trigger_event));
+          nvshmem_fence();
+          if (config.profiling) {
             PROFILER_EVENT_END(TASK_NVSHMEM_COPY,
                                cur_task_pos[0] + cur_task_pos[1]);
           }
