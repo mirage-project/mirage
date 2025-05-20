@@ -13,7 +13,7 @@
  * limitations under the License.
  */
 
- #pragma once
+#pragma once
 
 #include "mirage/utils/json_utils.h"
 #include <cassert>
