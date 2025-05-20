@@ -39,9 +39,6 @@ if __name__ == "__main__":
     bO = tbgraph2.div(bA, bB)
     tbgraph2.new_output(stensor=bO, output_map=(0, 1, -1))
     O = graph.customized(O, tbgraph2)
-
-    graph.mark_output(O[0])
-    graph.visualize("chameleon")
     
     input_tensors = [
         torch.randn(8, 128, 64, dtype=torch.float16, device='cuda:0'),
