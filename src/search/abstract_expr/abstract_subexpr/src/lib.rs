@@ -116,8 +116,10 @@ pub struct KVPair {
     value: bool,
 }
 
+static mut Graphs: Vec<EGraph> = Vec::new();
+
 #[no_mangle]
-pub extern "C" fn egg_equiv(subexprs: *const *const c_char, len: c_int, expr: *const c_char) -> *mut KVPair {
+pub extern "C" fn get_egraph(expr: *const c_char) -> () {
     let expr_str: &str = unsafe {
             CStr::from_ptr(expr)
         }.to_str().unwrap_or("");
@@ -127,6 +129,25 @@ pub extern "C" fn egg_equiv(subexprs: *const *const c_char, len: c_int, expr: *c
     let nums: Vec<u32> = re.captures_iter(expr_str)
         .filter_map(|cap| cap.get(1).unwrap().as_str().parse::<u32>().ok())
         .collect();
+
+    let start = std::time::Instant::now();
+    let duration = Duration::from_secs(10);
+
+    let runner: Runner<Expr, ()> = Runner::default()
+        .with_iter_limit(100_000)
+        .with_node_limit(100_000)
+        .with_time_limit(duration)
+        .with_expr(&expr_str.parse().unwrap())
+        .run(&rules(nums));
+
+    unsafe{
+        Graphs.push(runner.egraph);   
+    }
+
+}
+
+#[no_mangle]
+pub extern "C" fn egg_equiv(subexprs: *const *const c_char, len: c_int) -> *mut KVPair {
     
     let subexpr_vec: Vec<String> = unsafe {
         (0..len)
@@ -140,27 +161,20 @@ pub extern "C" fn egg_equiv(subexprs: *const *const c_char, len: c_int, expr: *c
             })
             .collect()
     };    
-    let start = std::time::Instant::now();
-    let duration = Duration::from_secs(10);
-
-    let runner: Runner<Expr, ()> = Runner::default()
-        .with_iter_limit(100_000)
-        .with_node_limit(100_000)
-        .with_time_limit(duration)
-        .with_expr(&expr_str.parse().unwrap())
-        .run(&rules(nums));
     
     let mut data: Vec<KVPair> = Vec::new();
     for i in 0..len {
         let subexpr_str = &subexpr_vec[i as usize];
-        let result: Box<KVPair>;
-        if subexpr_str == "null" {
-            result = Box::new(KVPair { key: i, value: false });
-        } else {
+        let mut result: Box<KVPair> = Box::new(KVPair { key: i, value: false });
+        if subexpr_str != "null" {
             let subexpr: RecExpr<Expr> = subexpr_str.parse().unwrap();
-            let sub_id = runner.egraph.lookup_expr(&subexpr);
-            let is_sub = sub_id.is_some();
-            result = Box::new(KVPair { key: i, value: is_sub });
+            for graph in unsafe { &Graphs } {
+                let sub_id = graph.lookup_expr(&subexpr);
+                if sub_id.is_some() {
+                    result = Box::new(KVPair { key: i, value: true });
+                    break;
+                }
+            }
         }
         data.push(*result);
     }

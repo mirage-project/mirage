@@ -483,6 +483,11 @@ void KernelGraphGenerator::preprocess(kernel::Graph const &computation_graph) {
     }
   }
 
+  for (auto const &final_pattern : computation_graph_output_patterns) {
+    std::string expr = final_pattern->to_egg();
+    get_egraph(expr.c_str());
+  }
+
   if (config.verifier_type == VerifierType::PROBABILISTIC_VERIFIER) {
     this->verifier = std::make_shared<ProbabilisticVerifier>(computation_graph);
   } else {

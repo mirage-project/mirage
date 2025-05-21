@@ -12,7 +12,8 @@ extern "C" {
         bool value;
   };
 
-  KVPair* egg_equiv(const char** inputs, int len, const char* expr);
+  KVPair* egg_equiv(const char** inputs, int len);
+  void get_egraph(const char* expr);
 }
 
 int main() {
@@ -45,7 +46,8 @@ int main() {
     }
 
     std::string expr = "(* (silu (sum 4096 (* v_0 v_1))) (sum 4096 (* v_0 v_2)))";
-    KVPair* datas = egg_equiv(c_subexpr.data(), static_cast<int>(c_subexpr.size()), expr.c_str());
+    get_egraph(expr.c_str());
+    KVPair* datas = egg_equiv(c_subexpr.data(), static_cast<int>(c_subexpr.size()));
 
     std::unordered_map<int, bool> result;
     size_t len = c_subexpr.size();

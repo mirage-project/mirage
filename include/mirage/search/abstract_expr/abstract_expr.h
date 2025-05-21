@@ -16,7 +16,7 @@ extern "C" {
         bool value;
   };
 
-  KVPair* egg_equiv(const char** inputs, int len, const char* expr);
+  KVPair* egg_equiv(const char** inputs, int len);
 }
 
 

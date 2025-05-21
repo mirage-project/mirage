@@ -15,13 +15,11 @@ std::unordered_map<int, bool> AbstractExpr::subpattern_to(
     const std::vector<std::shared_ptr<AbstractExpr>>& input_patterns) const {  
   std::vector<std::string> subexpr;
   std::vector<bool> is_valid; 
-  int is_diff = 0;
   for (auto const &input : input_patterns) {
     if (input == nullptr) {
       subexpr.push_back("null");
       is_valid.push_back(false);
     } else {
-      is_diff++;
       subexpr.push_back(input->to_egg().c_str());
       is_valid.push_back(true);
     }
@@ -34,8 +32,7 @@ std::unordered_map<int, bool> AbstractExpr::subpattern_to(
   }
 
 
-  std::string expr = this->to_egg();
-  KVPair* datas = egg_equiv(c_subexpr.data(), static_cast<int>(c_subexpr.size()), expr.c_str());
+  KVPair* datas = egg_equiv(c_subexpr.data(), static_cast<int>(c_subexpr.size()));
 
   std::unordered_map<int, bool> result;
   size_t len = c_subexpr.size();
