@@ -22,6 +22,7 @@ event_name_list = {
     200: "TASK_SCHD_TASKS",
     201: "TASK_SCHD_EVENTS",
     202: "TASK_GET_EVENT",
+    203: "TASK_GET_NEXT_TASK",
 }
 
 

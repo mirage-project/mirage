@@ -53,6 +53,7 @@ enum TaskType {
   TASK_SCHD_TASKS = 200,
   TASK_SCHD_EVENTS = 201,
   TASK_GET_EVENT = 202,
+  TASK_GET_NEXT_TASK = 203,
 };
 
 enum EventType {
@@ -86,6 +87,7 @@ struct TaskDesc {
   TaskDesc(TaskType t)
       : task_type(t), num_inputs(0), num_outputs(0),
         trigger_event(EVENT_INVALID_ID) {}
+  TaskDesc() {}
   TaskType task_type;
   int num_inputs, num_outputs;
   EventId trigger_event;
@@ -129,7 +131,7 @@ __device__ __forceinline__ bool prepare_next_batch(RuntimeConfig config) {
   // printf("step = %d\n", step);
   config.step[0] = step + 1;
   return step + 1 <= 50;
-  // return false;
+  //return false;
 }
 
 __device__ __forceinline__ bool is_termination_event(size_t event_loc,
@@ -150,13 +152,17 @@ __device__ __forceinline__ size_t get_event_position_index(EventId event_id) {
 }
 
 __device__ __forceinline__ int get_rand_sched_id(size_t event_index,
+                                                 int worker_id,
+						 int num_workers,
                                                  int num_schedulers) {
-  const size_t seed = 0xac4c1b51;
-  size_t x = event_index ^ seed;
-  x ^= x >> 17;
-  x *= 0xed5ad4bb;
-  x ^= x >> 11;
-  return x % num_schedulers;
+  //const size_t seed = 0xac4c1b51;
+  //size_t x = event_index * seed;
+  //x ^= x >> 17;
+  //x *= worker_id;
+  // x *= 0xed5ad4bb;
+  //x ^= x >> 11;
+  size_t x = worker_id;
+  return x / ((num_workers + num_schedulers - 1) / num_schedulers);
 }
 
 __device__ __forceinline__ int custom_atomic_add_s32(int *addr, int val) {
@@ -235,15 +241,19 @@ __device__ void terminate_schedulers(RuntimeConfig config) {
 
 __global__ void persistent_kernel(RuntimeConfig config) {
   __shared__ TaskId cur_task_loc;
+  __shared__ TaskDesc task_desc;
   assert(gridDim.y == 1);
   assert(gridDim.z == 1);
   // Each worker SM serves a single worker
   // Each scheduelr SM serves four schedulers
   int num_schedulers =
       config.num_local_schedulers + config.num_remote_schedulers;
-  assert(num_schedulers % 4 == 0);
+  //assert(num_schedulers % 4 == 0);
   assert(gridDim.x == config.num_workers + num_schedulers);
   assert(config.num_workers <= MAX_NUM_WORKERS);
+  // We will reinterpret TaskDesc as an array of integers to
+  // collectively load it from device to shared memory
+  assert(sizeof(TaskDesc) % sizeof(int) == 0);
   PROFILER_CLOSURE_PARAMS_DECL;
   if (config.profiling) {
     PROFILER_INIT(static_cast<uint64_t *>(config.profiler_buffer),
@@ -272,8 +282,12 @@ __global__ void persistent_kernel(RuntimeConfig config) {
       last_task_pos[i] = 0;
     }
     int queue_idx = 0;
+    size_t task_counter = 0;
     while (true) {
       // fetch next task from a task queue
+      if (config.profiling) {
+        PROFILER_EVENT_START(TASK_GET_NEXT_TASK, task_counter);
+      }
       if (threadIdx.x == 0) {
         while (cur_task_pos[queue_idx] == last_task_pos[queue_idx]) {
           //__threadfence();
@@ -314,7 +328,20 @@ __global__ void persistent_kernel(RuntimeConfig config) {
         }
       }
       __syncthreads();
-      TaskDesc task_desc = config.all_tasks[cur_task_loc];
+      if (config.profiling) {
+        PROFILER_EVENT_END(TASK_GET_NEXT_TASK, task_counter++);
+      }
+      // TaskDesc task_desc = config.all_tasks[cur_task_loc];
+      int* smem_as_int = reinterpret_cast<int*>(&task_desc);
+      const int* dmem_as_int = reinterpret_cast<int*>(config.all_tasks + cur_task_loc);
+      for (int i = threadIdx.x; i * sizeof(int) < sizeof(TaskDesc); i += blockDim.x) {
+        smem_as_int[i] = dmem_as_int[i];
+      }
+      __syncthreads();
+
+      if (config.profiling && task_desc.task_type != TASK_TERMINATE) {
+        PROFILER_EVENT_START(task_desc.task_type, task_counter);
+      }
       // Successfully fetched a new task
       switch (task_desc.task_type) {
         case TASK_TERMINATE: {
@@ -322,97 +349,36 @@ __global__ void persistent_kernel(RuntimeConfig config) {
           break;
         }
         case TASK_RMS_NORM_LINEAR: {
-          if (config.profiling) {
-            PROFILER_EVENT_START(TASK_RMS_NORM_LINEAR,
-                                 cur_task_pos[0] + cur_task_pos[1]);
-          }
           kernel::norm_linear_kernel<bfloat16>(
               task_desc.inputs[0].base_ptr,
               task_desc.inputs[1].base_ptr,
               task_desc.outputs[0].base_ptr);
-          if (config.profiling) {
-            PROFILER_EVENT_END(TASK_RMS_NORM_LINEAR,
-                               cur_task_pos[0] + cur_task_pos[1]);
-          }
-
-          if (threadIdx.x == 0) {
-            // printf("[EXEC] worker_id(%d) task_type(RMS)\n", worker_id);
-          }
-
           break;
         }
         case TASK_EMBEDDING: {
-          if (config.profiling) {
-            PROFILER_EVENT_START(TASK_EMBEDDING,
-                                 cur_task_pos[0] + cur_task_pos[1]);
-          }
           kernel::embedding_kernel<bfloat16>(
               task_desc.inputs[0].base_ptr,
               task_desc.inputs[1].base_ptr,
               task_desc.outputs[0].base_ptr);
-          if (config.profiling) {
-            PROFILER_EVENT_END(TASK_EMBEDDING,
-                               cur_task_pos[0] + cur_task_pos[1]);
-          }
-          if (threadIdx.x == 0) {
-            // printf("[EXEC] worker_id(%d) task_type(EMB)\n", worker_id);
-          }
-
           break;
         }
         case TASK_ATTENTION_1: {
-          if (config.profiling) {
-            PROFILER_EVENT_START(TASK_ATTENTION_1,
-                                 cur_task_pos[0] + cur_task_pos[1]);
-          }
           TB_SLEEP_US(1);
-          if (config.profiling) {
-            PROFILER_EVENT_END(TASK_ATTENTION_1,
-                               cur_task_pos[0] + cur_task_pos[1]);
-          }
-          if (threadIdx.x == 0) {
-            // printf("worker_id(%d) task_type(Attn1)\n", worker_id);
-          }
           break;
         }
         case TASK_ATTENTION_2: {
-          if (config.profiling) {
-            PROFILER_EVENT_START(TASK_ATTENTION_2,
-                                 cur_task_pos[0] + cur_task_pos[1]);
-            TB_SLEEP_US(1);
-            PROFILER_EVENT_END(TASK_ATTENTION_2,
-                               cur_task_pos[0] + cur_task_pos[1]);
-          }
-          if (threadIdx.x == 0) {
-            // printf("worker_id(%d) task_type(Attn2)\n", worker_id);
-          }
+          TB_SLEEP_US(1);
           break;
         }
         case TASK_SILU_MUL_LINEAR: {
-          if (config.profiling) {
-            PROFILER_EVENT_START(TASK_SILU_MUL_LINEAR,
-                                 cur_task_pos[0] + cur_task_pos[1]);
-          }
-          //kernel::silu_mul_linear_kernel<bfloat16>(
-          //    task_desc.inputs[0].base_ptr,
-          //    task_desc.inputs[1].base_ptr,
-          //    task_desc.inputs[2].base_ptr,
-          //    task_desc.outputs[0].base_ptr);
-          if (config.profiling) {
-            PROFILER_EVENT_END(TASK_SILU_MUL_LINEAR,
-                               cur_task_pos[0] + cur_task_pos[1]);
-          }
-
-          if (threadIdx.x == 0) {
-            // printf("worker_id(%d) task_type(SiluMulLinear)\n", worker_id);
-          }
+          kernel::silu_mul_linear_kernel<bfloat16>(
+              task_desc.inputs[0].base_ptr,
+              task_desc.inputs[1].base_ptr,
+              task_desc.inputs[2].base_ptr,
+              task_desc.outputs[0].base_ptr);
           break;
         }
         case TASK_NVSHMEM_COPY: {
-          if (config.profiling) {
-            PROFILER_EVENT_START(TASK_NVSHMEM_COPY,
-                                 cur_task_pos[0] + cur_task_pos[1]);
-          }
           size_t size_in_bytes = 2;
           for (int i = 0; i < task_desc.inputs[0].num_dims; i++) {
             size_in_bytes *= task_desc.inputs[0].dim[i];
@@ -423,52 +389,18 @@ __global__ void persistent_kernel(RuntimeConfig config) {
               size_in_bytes,
               get_event_gpu_id(task_desc.trigger_event));
           nvshmem_fence();
-          if (config.profiling) {
-            PROFILER_EVENT_END(TASK_NVSHMEM_COPY,
-                               cur_task_pos[0] + cur_task_pos[1]);
-          }
-
-          if (threadIdx.x == 0) {
-            // printf("worker_id(%d) task_type(AllReduce)\n", worker_id);
-          }
           break;
         }
         case TASK_REDUCE: {
-          if (config.profiling) {
-            PROFILER_EVENT_START(TASK_REDUCE,
-                                 cur_task_pos[0] + cur_task_pos[1]);
-            TB_SLEEP_US(1);
-            PROFILER_EVENT_END(TASK_REDUCE, cur_task_pos[0] + cur_task_pos[1]);
-          }
-
-          if (threadIdx.x == 0) {
-            // printf("worker_id(%d) task_type(AllReduce)\n", worker_id);
-          }
+          TB_SLEEP_US(1);
           break;
         }
         case TASK_MATMUL: {
-          if (config.profiling) {
-            PROFILER_EVENT_START(TASK_MATMUL,
-                                 cur_task_pos[0] + cur_task_pos[1]);
-            TB_SLEEP_US(1);
-            PROFILER_EVENT_END(TASK_MATMUL, cur_task_pos[0] + cur_task_pos[1]);
-          }
-
-          if (threadIdx.x == 0) {
-            // printf("worker_id(%d) task_type(AllReduce)\n", worker_id);
-          }
+          TB_SLEEP_US(1);
           break;
         }
         case TASK_ARGMAX: {
-          if (config.profiling) {
-            PROFILER_EVENT_START(TASK_ARGMAX,
-                                 cur_task_pos[0] + cur_task_pos[1]);
-            TB_SLEEP_US(1);
-            PROFILER_EVENT_END(TASK_ARGMAX, cur_task_pos[0] + cur_task_pos[1]);
-          }
-          if (threadIdx.x == 0) {
-            // printf("worker_id(%d) task_type(AllReduce)\n", worker_id);
-          }
+          TB_SLEEP_US(1);
           break;
         }
         default: {
@@ -508,7 +440,8 @@ __global__ void persistent_kernel(RuntimeConfig config) {
             int sched_id =
                 event_desc.event_type == EVENT_LAUNCH_MASSIVE_TASKS
                     ? config.num_local_schedulers + config.num_remote_schedulers
-                    : get_rand_sched_id(event_index,
+                    : get_rand_sched_id(event_index, worker_id,
+                                        config.num_workers,
                                         config.num_local_schedulers);
             size_t last_event_pos = custom_atomic_add_u64(
                 &config.sched_queue_next_free_event_id[sched_id], 1);
@@ -560,7 +493,7 @@ __global__ void persistent_kernel(RuntimeConfig config) {
             // Add the event to the schedule queue
             int sched_id =
                 config.num_local_schedulers +
-                get_rand_sched_id(event_index, config.num_remote_schedulers);
+                get_rand_sched_id(event_index, worker_id, config.num_workers, config.num_remote_schedulers);
             size_t last_event_pos = nvshmem_ulonglong_atomic_fetch_add(
                 &config.sched_queue_next_free_event_id[sched_id], 1, gpu_id);
             nvshmem_ulonglong_p(
@@ -581,6 +514,9 @@ __global__ void persistent_kernel(RuntimeConfig config) {
             } while (old != last_event_pos);
           }
         }
+      }
+      if (config.profiling && task_desc.task_type != TASK_TERMINATE) {
+        PROFILER_EVENT_END(task_desc.task_type, task_counter++);
       }
       cur_task_pos[queue_idx] += 1;
     }
@@ -688,7 +624,6 @@ __global__ void persistent_kernel(RuntimeConfig config) {
           // Check if we want to continue
           if (!prepare_next_batch(config)) {
             terminate_schedulers(config);
-            continue;
           } else {
             // Launch first_task[0] for the next iteration
             e.first_task_id = config.first_tasks[0];
