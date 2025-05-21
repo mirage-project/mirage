@@ -32,7 +32,7 @@ unsigned long long int const EVENT_INVALID_ID = 0x7ffffffffffffffe;
 int const MAX_TENSOR_DIMS = 4;
 int const MAX_INPUTS_PER_TASK = 4;
 int const MAX_OUTPUTS_PER_TASK = 4;
-int const MAX_NUM_WORKERS = 128;
+int const MAX_NUM_WORKERS = 216;
 
 using bfloat16 = type::bfloat16_t;
 
@@ -285,9 +285,6 @@ __global__ void persistent_kernel(RuntimeConfig config) {
     size_t task_counter = 0;
     while (true) {
       // fetch next task from a task queue
-      if (config.profiling) {
-        PROFILER_EVENT_START(TASK_GET_NEXT_TASK, task_counter);
-      }
       if (threadIdx.x == 0) {
         while (cur_task_pos[queue_idx] == last_task_pos[queue_idx]) {
           //__threadfence();
@@ -328,9 +325,6 @@ __global__ void persistent_kernel(RuntimeConfig config) {
         }
       }
       __syncthreads();
-      if (config.profiling) {
-        PROFILER_EVENT_END(TASK_GET_NEXT_TASK, task_counter++);
-      }
       // TaskDesc task_desc = config.all_tasks[cur_task_loc];
       int* smem_as_int = reinterpret_cast<int*>(&task_desc);
       const int* dmem_as_int = reinterpret_cast<int*>(config.all_tasks + cur_task_loc);
@@ -349,10 +343,11 @@ __global__ void persistent_kernel(RuntimeConfig config) {
           break;
         }
         case TASK_RMS_NORM_LINEAR: {
-          kernel::norm_linear_kernel<bfloat16>(
-              task_desc.inputs[0].base_ptr,
-              task_desc.inputs[1].base_ptr,
-              task_desc.outputs[0].base_ptr);
+          TB_SLEEP_US(15);
+          //kernel::norm_linear_kernel<bfloat16>(
+          //    task_desc.inputs[0].base_ptr,
+          //    task_desc.inputs[1].base_ptr,
+          //    task_desc.outputs[0].base_ptr);
           break;
         }
         case TASK_EMBEDDING: {
@@ -363,7 +358,7 @@ __global__ void persistent_kernel(RuntimeConfig config) {
           break;
         }
         case TASK_ATTENTION_1: {
-          TB_SLEEP_US(1);
+          TB_SLEEP_US(30);
           break;
         }
         case TASK_ATTENTION_2: {
@@ -371,11 +366,12 @@ __global__ void persistent_kernel(RuntimeConfig config) {
           break;
         }
         case TASK_SILU_MUL_LINEAR: {
-          kernel::silu_mul_linear_kernel<bfloat16>(
-              task_desc.inputs[0].base_ptr,
-              task_desc.inputs[1].base_ptr,
-              task_desc.inputs[2].base_ptr,
-              task_desc.outputs[0].base_ptr);
+          TB_SLEEP_US(20);
+          //kernel::silu_mul_linear_kernel<bfloat16>(
+          //    task_desc.inputs[0].base_ptr,
+          //    task_desc.inputs[1].base_ptr,
+          //    task_desc.inputs[2].base_ptr,
+          //    task_desc.outputs[0].base_ptr);
           break;
         }
         case TASK_NVSHMEM_COPY: {
@@ -392,11 +388,11 @@ __global__ void persistent_kernel(RuntimeConfig config) {
           break;
         }
         case TASK_REDUCE: {
-          TB_SLEEP_US(1);
+          TB_SLEEP_US(10);
           break;
         }
         case TASK_MATMUL: {
-          TB_SLEEP_US(1);
+          TB_SLEEP_US(20);
           break;
         }
         case TASK_ARGMAX: {
@@ -558,10 +554,12 @@ __global__ void persistent_kernel(RuntimeConfig config) {
         my_first_worker += config.num_workers;
         my_last_worker += config.num_workers;
       }
-      printf("[SCHD] sched_id(%d) first_worker(%llu) last_worker(%llu)\n",
-             sched_id,
-             my_first_worker,
-             my_last_worker);
+      if (config.profiling) {
+        printf("[SCHD] sched_id(%d) first_worker(%llu) last_worker(%llu)\n",
+               sched_id,
+               my_first_worker,
+               my_last_worker);
+      }
       size_t cur_event_pos[2], last_event_pos[2];
       for (int i = 0; i < 2; i++) {
         cur_event_pos[i] = 0;
