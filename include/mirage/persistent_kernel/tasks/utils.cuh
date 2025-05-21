@@ -18,6 +18,16 @@
 #include "common.h"
 namespace kernel {
 
+/*!
+ * \brief Wrapper of PTX ex2.approx instruction, which computes 2^x
+ * \param x input
+ */
+__forceinline__ __device__ float ptx_exp2(float x) {
+  float y;
+  asm volatile("ex2.approx.ftz.f32 %0, %1;" : "=f"(y) : "f"(x));
+  return y;
+}
+
 static __device__ __forceinline__ int lane_id() {
   return threadIdx.x & 0x1f;
 }

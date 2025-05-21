@@ -96,7 +96,6 @@ __device__ __forceinline__ void norm_linear_kernel(void const *input_ptr,
     int col = (i % num_chunks) * chunk_size;
     load_smem(input_smem_buffer(row, col), input_dmem(row, col));
   }
-
 // load weight
 #pragma unroll
   for (int i = threadIdx.x; i < (HIDDEN_SIZE * HIDDEN_SIZE / chunk_size);
@@ -121,7 +120,6 @@ __device__ __forceinline__ void norm_linear_kernel(void const *input_ptr,
                                                         64 * (for_idx + 1));
       dmem_row_const<T, 64, 64, 64> weight_dmem_buffer(d_weight +
                                                        4096 * (for_idx + 1));
-
 #pragma unroll
       for (int i = threadIdx.x; i < (BATCH_SIZE * num_chunks);
            i += NUM_THREADS) {
@@ -208,6 +206,7 @@ __device__ __forceinline__ void norm_linear_kernel(void const *input_ptr,
     for (uint32_t m = 0; m < num_m; m++) {
 #pragma unroll
       for (uint32_t i = 0; i < 4; i++) {
+        // https://docs.nvidia.com/cuda/parallel-thread-execution/#warp-level-matrix-fragment-mma-16816-float:~:text=The%20layout%20of%20the%20fragments%20held%20by%20different%20threads%20is%20shown%20in%20Figure%2083.
         int row = idx_in_warp / 4 + 8 * (i % 2);
         int col = (idx_in_warp % 4) * 2 + 16 * warp_idx + 8 * (i / 2);
         mm_output_smem.at(row, col) = bfloat16(s_frag[m][n][i * 2]);
