@@ -26,7 +26,8 @@ event_name_list = {
     2200: "TB_ADD_OP",
     2201: "TB_MUL_OP",
     2202: "TB_DIV_OP",
-    2203: "TB_POW_OP",
+    2203: "TB_SUB_OP",
+    2204: "TB_POW_OP",
     2300: "TB_REDUCTION_FIRST_OP_ID",
     2301: "TB_REDUCTION_0_OP",
     2302: "TB_REDUCTION_1_OP",
@@ -34,14 +35,17 @@ event_name_list = {
     2304: "TB_REDUCTION_0_TO_DIMX_OP",
     2305: "TB_REDUCTION_1_TO_DIMX_OP",
     2306: "TB_REDUCTION_2_TO_DIMX_OP",
+    2307: "TB_REDUCTION_0_MAX_OP",
+    2308: "TB_REDUCTION_1_MAX_OP",
+    2309: "TB_REDUCTION_2_MAX_OP",
     2349: "TB_REDUCTION_LAST_OP_ID",
     2350: "TB_RMS_NORM_OP",
-    2400: "TB_CONCAT_FIRST_OP_ID",  
+    2400: "TB_CONCAT_FIRST_OP_ID",
     2401: "TB_CONCAT_1_OP",
     2402: "TB_CONCAT_2_OP",
     2409: "TB_CONCAT_LAST_OP_ID",
     2411: "TB_CONCAT_THEN_MATMUL_OP",
-    2420: "TB_SPLIT_FIRST_OP_ID",   
+    2420: "TB_SPLIT_FIRST_OP_ID",
     2421: "TB_SPLIT_1_OP",
     2422: "TB_SPLIT_2_OP",
     2429: "TB_SPLIT_LAST_OP_ID",
@@ -50,6 +54,9 @@ event_name_list = {
     2502: "TB_FORLOOP_ACCUM_RED_LD_MEAN_OP",
     2503: "TB_FORLOOP_ACCUM_RED_LD_RMS_OP",
     2504: "TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP",
+    2505: "TB_FORLOOP_ACCUM_NO_RED_RESCALE_OP",
+    2506: "TB_FORLOOP_ACCUM_RED_LD_SUM_RESCALE_OP",
+    2507: "TB_FORLOOP_ACCUM_MAX_OP",
     2599: "TB_FORLOOP_ACCUM_LAST_OP",
     2999: "TB_CUSTOMIZED_OP",
 }
@@ -79,7 +86,6 @@ def export_to_perfetto_trace(
     profiler_buffer: torch.Tensor,
     file_name: str,
 ) -> None:
-    
 
     profiler_buffer_host = profiler_buffer.cpu()
     num_blocks, num_groups = profiler_buffer_host[:1].view(dtype=torch.int32)
