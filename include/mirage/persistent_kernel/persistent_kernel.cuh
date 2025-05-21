@@ -32,7 +32,7 @@ unsigned long long int const EVENT_INVALID_ID = 0x7ffffffffffffffe;
 int const MAX_TENSOR_DIMS = 4;
 int const MAX_INPUTS_PER_TASK = 4;
 int const MAX_OUTPUTS_PER_TASK = 4;
-int const MAX_NUM_WORKERS = 216;
+int const MAX_NUM_WORKERS = 128;
 
 using bfloat16 = type::bfloat16_t;
 
