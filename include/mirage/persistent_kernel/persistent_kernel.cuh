@@ -130,7 +130,7 @@ __device__ __forceinline__ bool prepare_next_batch(RuntimeConfig config) {
   int step = config.step[0];
   // printf("step = %d\n", step);
   config.step[0] = step + 1;
-  return step + 1 <= 50;
+  return step + 1 <= 5012;
   //return false;
 }
 
@@ -248,8 +248,8 @@ __global__ void persistent_kernel(RuntimeConfig config) {
   // Each scheduelr SM serves four schedulers
   int num_schedulers =
       config.num_local_schedulers + config.num_remote_schedulers;
-  //assert(num_schedulers % 4 == 0);
-  assert(gridDim.x == config.num_workers + num_schedulers);
+  assert(num_schedulers % 4 == 0);
+  assert(gridDim.x == config.num_workers + num_schedulers / 4);
   assert(config.num_workers <= MAX_NUM_WORKERS);
   // We will reinterpret TaskDesc as an array of integers to
   // collectively load it from device to shared memory
@@ -522,10 +522,10 @@ __global__ void persistent_kernel(RuntimeConfig config) {
     int warp_thread_id = threadIdx.x % 32;
     // assert that we have at least four warps per thread block
     assert(blockDim.x >= 128);
-    // if (warp_id < 4 && warp_thread_id == 0) {
-    // int sched_id = (blockIdx.x - config.num_workers) * 4 + warp_id;
-    if (threadIdx.x == 0) {
-      int sched_id = (blockIdx.x - config.num_workers);
+    if (warp_id < 4 && warp_thread_id == 0) {
+      int sched_id = (blockIdx.x - config.num_workers) * 4 + warp_id;
+    //if (threadIdx.x == 0) {
+    //  int sched_id = (blockIdx.x - config.num_workers);
       int num_sched_queues = 1;
       EventId *sched_queues[2];
       int sched_queue_ids[2];
@@ -574,9 +574,9 @@ __global__ void persistent_kernel(RuntimeConfig config) {
       int queue_idx = 0;
       size_t event_counter = 0;
       while (true) {
-        if (config.profiling) {
-          PROFILER_EVENT_START(TASK_GET_EVENT, event_counter);
-        }
+        //if (config.profiling) {
+        //  PROFILER_EVENT_START(TASK_GET_EVENT, event_counter);
+        //}
         while (cur_event_pos[queue_idx] == last_event_pos[queue_idx]) {
           //__threadfence();
           // last_event_id = config.sched_queue_last_ready_event_id[sched_id];
@@ -600,9 +600,9 @@ __global__ void persistent_kernel(RuntimeConfig config) {
         EventId event_id = sched_queues[queue_idx][cur_event_pos[queue_idx] %
                                                    config.per_sched_queue_len];
         EventDesc e = config.all_events[event_id];
-        if (config.profiling) {
-          PROFILER_EVENT_END(TASK_GET_EVENT, event_counter++);
-        }
+        //if (config.profiling) {
+        //  PROFILER_EVENT_END(TASK_GET_EVENT, event_counter++);
+        //}
         if (is_termination_event(event_id, e)) {
           // terminate all workers
           if (sched_id < config.num_local_schedulers) {
@@ -641,9 +641,9 @@ __global__ void persistent_kernel(RuntimeConfig config) {
           my_last_task += e.first_task_id;
         }
         for (TaskId i = my_first_task; i < my_last_task; i++) {
-          if (config.profiling) {
-            PROFILER_EVENT_START(TASK_SCHD_TASKS, event_counter);
-          }
+          //if (config.profiling) {
+          //  PROFILER_EVENT_START(TASK_SCHD_TASKS, event_counter);
+          //}
           // size_t last_task_id = atomicAdd(
           //     &(config.worker_queue_next_free_task_id[next_worker]), 1);
           // size_t last_task_id = custom_atomic_add_u64(
@@ -667,9 +667,9 @@ __global__ void persistent_kernel(RuntimeConfig config) {
           }
           next_worker = (next_worker == my_last_worker - 1) ? my_first_worker
                                                             : next_worker + 1;
-          if (config.profiling) {
-            PROFILER_EVENT_END(TASK_SCHD_TASKS, event_counter++);
-          }
+          //if (config.profiling) {
+          //  PROFILER_EVENT_END(TASK_SCHD_TASKS, event_counter++);
+          //}
         }
         cur_event_pos[queue_idx] += 1;
       }
