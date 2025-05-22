@@ -17,6 +17,7 @@
 #include "bfloat16.h"
 #include <cassert>
 #include <cstdint>
+#include <cstdio>
 
 constexpr int NUM_THREADS = 128;
 constexpr int NUM_THREADS_PER_WARP = 32;
