@@ -11,7 +11,7 @@ template <typename T>
 __global__ void norm_linear_kernel_wrapper(void const *input_ptr,
                                            void const *weight_ptr,
                                            void *output_ptr) {
-  norm_linear_kernel<T>(input_ptr, weight_ptr, output_ptr);
+  norm_linear_kernel<T, 1, 32, 3584>(input_ptr, weight_ptr, output_ptr);
 }
 
 template <typename T>
