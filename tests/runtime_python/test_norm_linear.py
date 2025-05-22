@@ -1,7 +1,6 @@
 import numpy as np
 import torch
 import runtime_kernel
-import numpy as np
 
 
 torch.set_printoptions(sci_mode=False)

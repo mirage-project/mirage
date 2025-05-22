@@ -19,7 +19,8 @@ __global__ void silu_mul_linear_kernel_wrapper(void const *input_ptr,
                                                void const *mul_ptr,
                                                void const *weight_ptr,
                                                void *output_ptr) {
-  silu_mul_linear_kernel<T>(input_ptr, mul_ptr, weight_ptr, output_ptr);
+  silu_mul_linear_kernel<T, 1, 32, 3584>(
+      input_ptr, mul_ptr, weight_ptr, output_ptr);
 }
 
 void launch_norm_linear(torch::Tensor input,
