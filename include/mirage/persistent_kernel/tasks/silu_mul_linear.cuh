@@ -41,6 +41,18 @@ __device__ __forceinline__ void silu_mul_linear_kernel(void const *input_ptr,
   constexpr int NUM_CHUNKS_A = BATCH_SIZE * TILE_SIZE / CHUNK_SIZE;
   constexpr int NUM_CHUNKS_B = TILE_SIZE * OUTPUT_SIZE / CHUNK_SIZE;
 
+  constexpr int CHUNKS_PER_ROW_A = TILE_SIZE / CHUNK_SIZE;
+  constexpr int CHUNKS_PER_ROW_B = OUTPUT_SIZE / CHUNK_SIZE;
+
+  constexpr int CHUNKS_PER_ROW_A_MASK = CHUNKS_PER_ROW_A - 1;
+  constexpr int CHUNKS_PER_ROW_B_MASK = CHUNKS_PER_ROW_B - 1;
+
+  constexpr int log2_CHUNK_SIZE = 3;
+  constexpr int log2_CHUNKS_PER_ROW_A = 3;
+  constexpr int log2_CHUNKS_PER_ROW_B = CHUNKS_PER_ROW_B == 2   ? 1
+                                        : CHUNKS_PER_ROW_B == 4 ? 2
+                                                                : 3;
+
   constexpr int num_m = 1;
   constexpr int num_n = OUTPUT_SIZE / 16;
   constexpr int num_k = TILE_SIZE / 16;
@@ -139,8 +151,8 @@ __device__ __forceinline__ void silu_mul_linear_kernel(void const *input_ptr,
 #pragma unroll
   for (int i = threadIdx.x; i < NUM_CHUNKS_A; i += NUM_THREADS) {
     // offset
-    int row = i * CHUNK_SIZE / TILE_SIZE;
-    int col = i * CHUNK_SIZE % TILE_SIZE;
+    int row = i >> log2_CHUNKS_PER_ROW_A;
+    int col = (i & CHUNKS_PER_ROW_A_MASK) << log2_CHUNK_SIZE;
     load_smem(input_smem_buffer(row, col), input_dmem(row, col));
   }
 
@@ -148,16 +160,16 @@ __device__ __forceinline__ void silu_mul_linear_kernel(void const *input_ptr,
 #pragma unroll
   for (int i = threadIdx.x; i < NUM_CHUNKS_A; i += NUM_THREADS) {
     // offset
-    int row = i * CHUNK_SIZE / TILE_SIZE;
-    int col = i * CHUNK_SIZE % TILE_SIZE;
+    int row = i >> log2_CHUNKS_PER_ROW_A;
+    int col = (i & CHUNKS_PER_ROW_A_MASK) << log2_CHUNK_SIZE;
     load_smem(mul_smem_buffer(row, col), mul_dmem(row, col));
   }
 
 // load weight
 #pragma unroll
   for (int i = threadIdx.x; i < NUM_CHUNKS_B; i += NUM_THREADS) {
-    int row = i * CHUNK_SIZE / OUTPUT_SIZE;
-    int col = i * CHUNK_SIZE % OUTPUT_SIZE;
+    int row = i >> log2_CHUNKS_PER_ROW_B;
+    int col = (i & CHUNKS_PER_ROW_B_MASK) << log2_CHUNK_SIZE;
     load_smem(input_weight_smem_buffer(row, col), weight_dmem(row, col));
   }
   cp_async_fence();
@@ -180,23 +192,23 @@ __device__ __forceinline__ void silu_mul_linear_kernel(void const *input_ptr,
 #pragma unroll
       for (int i = threadIdx.x; i < NUM_CHUNKS_A; i += NUM_THREADS) {
         // offset
-        int row = i * CHUNK_SIZE / TILE_SIZE;
-        int col = i * CHUNK_SIZE % TILE_SIZE;
+        int row = i >> log2_CHUNKS_PER_ROW_A;
+        int col = (i & CHUNKS_PER_ROW_A_MASK) << log2_CHUNK_SIZE;
         load_smem(input_smem(row, col), input_dmem_buffer(row, col));
       }
 
 #pragma unroll
       for (int i = threadIdx.x; i < NUM_CHUNKS_A; i += NUM_THREADS) {
         // offset
-        int row = i * CHUNK_SIZE / TILE_SIZE;
-        int col = i * CHUNK_SIZE % TILE_SIZE;
+        int row = i >> log2_CHUNKS_PER_ROW_A;
+        int col = (i & CHUNKS_PER_ROW_A_MASK) << log2_CHUNK_SIZE;
         load_smem(mul_smem(row, col), mul_dmem_buffer(row, col));
       }
 // load weight
 #pragma unroll
       for (int i = threadIdx.x; i < NUM_CHUNKS_B; i += NUM_THREADS) {
-        int row = i * CHUNK_SIZE / OUTPUT_SIZE;
-        int col = i * CHUNK_SIZE % OUTPUT_SIZE;
+        int row = i >> log2_CHUNKS_PER_ROW_B;
+        int col = (i & CHUNKS_PER_ROW_B_MASK) << log2_CHUNK_SIZE;
         load_smem(input_weight_smem(row, col), weight_dmem_buffer(row, col));
       }
       cp_async_fence();
@@ -248,8 +260,8 @@ __device__ __forceinline__ void silu_mul_linear_kernel(void const *input_ptr,
             bool is_valid = (m_row < BATCH_SIZE);
             T *src_ptr =
                 is_valid ? mul_output_smem(m_row, m_col) : zero_buffer(0, 0);
-            ldsm(src_ptr, &a_frag[0]);
-            ldsm_t(input_weight_smem(n_row, n_col), &b_frag[0]);
+            ldsm(src_ptr, a_frag);
+            ldsm_t(input_weight_smem(n_row, n_col), b_frag);
             mma_m16n16k16_bf16bf16bf32(
                 s_frag[m][n], a_frag, b_frag, s_frag[m][n]);
           }
@@ -271,7 +283,8 @@ __device__ __forceinline__ void silu_mul_linear_kernel(void const *input_ptr,
             int col = (n << 6) + (warp_idx << 4) + ((idx_in_warp & 0x3) << 1) +
                       ((i >> 1) << 3);
             output_smem.at(row, col) = bfloat16(s_frag[m][n][(i << 1)]);
-            output_smem.at(row, col + 1) = bfloat16(s_frag[m][n][(i << 1) + 1]);
+            output_smem.at(row, col + 1) =
+                bfloat16(s_frag[m][n][(i << 1) | 0x1]);
           }
         }
       }

@@ -42,6 +42,18 @@ __device__ __forceinline__ void norm_linear_kernel(void const *input_ptr,
   constexpr int NUM_CHUNKS_A = BATCH_SIZE * TILE_SIZE / CHUNK_SIZE;
   constexpr int NUM_CHUNKS_B = TILE_SIZE * OUTPUT_SIZE / CHUNK_SIZE;
 
+  constexpr int CHUNKS_PER_ROW_A = TILE_SIZE / CHUNK_SIZE;
+  constexpr int CHUNKS_PER_ROW_B = OUTPUT_SIZE / CHUNK_SIZE;
+
+  constexpr int CHUNKS_PER_ROW_A_MASK = CHUNKS_PER_ROW_A - 1;
+  constexpr int CHUNKS_PER_ROW_B_MASK = CHUNKS_PER_ROW_B - 1;
+
+  constexpr int log2_CHUNK_SIZE = 3;
+  constexpr int log2_CHUNKS_PER_ROW_A = 3;
+  constexpr int log2_CHUNKS_PER_ROW_B = CHUNKS_PER_ROW_B == 2   ? 1
+                                        : CHUNKS_PER_ROW_B == 4 ? 2
+                                                                : 3;
+
   // using SM80_16x8x16_F16F16F16F16_TNX2 = 16X16X16, threadLayout = 1,4,1
   // ->16X64X16
   constexpr int num_m = 1;
@@ -136,16 +148,16 @@ __device__ __forceinline__ void norm_linear_kernel(void const *input_ptr,
 #pragma unroll
   for (int i = threadIdx.x; i < NUM_CHUNKS_A; i += NUM_THREADS) {
     // offset
-    int row = i * CHUNK_SIZE / TILE_SIZE;
-    int col = i * CHUNK_SIZE % TILE_SIZE;
+    int row = i >> log2_CHUNKS_PER_ROW_A;
+    int col = (i & CHUNKS_PER_ROW_A_MASK) << log2_CHUNK_SIZE;
     load_smem(input_smem_buffer(row, col), input_dmem(row, col));
   }
 
 // load weight
 #pragma unroll
   for (int i = threadIdx.x; i < NUM_CHUNKS_B; i += NUM_THREADS) {
-    int row = i * CHUNK_SIZE / OUTPUT_SIZE;
-    int col = i * CHUNK_SIZE % OUTPUT_SIZE;
+    int row = i >> log2_CHUNKS_PER_ROW_B;
+    int col = (i & CHUNKS_PER_ROW_B_MASK) << log2_CHUNK_SIZE;
     load_smem(input_weight_smem_buffer(row, col), weight_dmem(row, col));
   }
   cp_async_fence();
@@ -166,16 +178,15 @@ __device__ __forceinline__ void norm_linear_kernel(void const *input_ptr,
 
 #pragma unroll
       for (int i = threadIdx.x; i < NUM_CHUNKS_A; i += NUM_THREADS) {
-        // offset
-        int row = i * CHUNK_SIZE / TILE_SIZE;
-        int col = i * CHUNK_SIZE % TILE_SIZE;
+        int row = i >> log2_CHUNKS_PER_ROW_A;
+        int col = (i & CHUNKS_PER_ROW_A_MASK) << log2_CHUNK_SIZE;
         load_smem(input_smem(row, col), input_dmem_buffer(row, col));
       }
 // load weight
 #pragma unroll
       for (int i = threadIdx.x; i < NUM_CHUNKS_B; i += NUM_THREADS) {
-        int row = i * CHUNK_SIZE / OUTPUT_SIZE;
-        int col = i * CHUNK_SIZE % OUTPUT_SIZE;
+        int row = i >> log2_CHUNKS_PER_ROW_B;
+        int col = (i & CHUNKS_PER_ROW_B_MASK) << log2_CHUNK_SIZE;
         load_smem(input_weight_smem(row, col), weight_dmem_buffer(row, col));
       }
       cp_async_fence();
@@ -198,9 +209,9 @@ __device__ __forceinline__ void norm_linear_kernel(void const *input_ptr,
     if (warp_idx < num_n) {
       uint32_t a_frag[4], b_frag[4];
       for (uint32_t n = 0; n < num_iters_n; n++) {
-        int n_col = (n << 6) + (warp_idx << 4) + ((idx_in_warp >> 4) << 3);
+        int n_col = (warp_idx << 4) + ((idx_in_warp >> 4) << 3);
         for (uint32_t m = 0; m < num_m; m++) {
-          int m_row = (m << 4) + (idx_in_warp & 0xF);
+          int m_row = (idx_in_warp & 0xF);
 #pragma unroll
           for (uint32_t k = 0; k < num_k; k++) {
             int m_col = (k << 4) + ((idx_in_warp >> 4) << 3);
@@ -208,8 +219,8 @@ __device__ __forceinline__ void norm_linear_kernel(void const *input_ptr,
             bool is_valid = (m_row < BATCH_SIZE);
             T *src_ptr =
                 is_valid ? input_smem(m_row, m_col) : zero_buffer(0, 0);
-            ldsm(src_ptr, &a_frag[0]);
-            ldsm_t(input_weight_smem(n_row, n_col), &b_frag[0]);
+            ldsm(src_ptr, a_frag);
+            ldsm_t(input_weight_smem(n_row, n_col), b_frag);
             mma_m16n16k16_bf16bf16bf32(
                 s_frag[m][n], a_frag, b_frag, s_frag[m][n]);
           }
@@ -218,7 +229,6 @@ __device__ __forceinline__ void norm_linear_kernel(void const *input_ptr,
     }
 
     float const scalars[] = {0.0f, 0.000279f};
-    // perform_element_unary_chain_kernel();
     perform_element_unary_chain_kernel<true,
                                        decltype(element_unary_smem),
                                        decltype(input_smem),
@@ -233,14 +243,14 @@ __device__ __forceinline__ void norm_linear_kernel(void const *input_ptr,
       for (uint32_t m = 0; m < num_m; m++) {
 #pragma unroll
         for (uint32_t i = 0; i < 4; i++) {
-          int row = (m << 4) + (idx_in_warp >> 2) + ((i & 0x1) << 3);
+          int row = (idx_in_warp >> 2) + ((i & 0x1) << 3);
           if (row < BATCH_SIZE) {
             // continue;
-            int col = (n << 6) + (warp_idx << 4) + ((idx_in_warp & 0x3) << 1) +
-                      ((i >> 1) << 3);
+            int col =
+                (warp_idx << 4) + ((idx_in_warp & 0x3) << 1) + ((i >> 1) << 3);
             mm_output_smem.at(row, col) = bfloat16(s_frag[m][n][(i << 1)]);
             mm_output_smem.at(row, col + 1) =
-                bfloat16(s_frag[m][n][(i << 1) + 1]);
+                bfloat16(s_frag[m][n][(i << 1) | 0x1]);
           }
         }
       }
@@ -263,11 +273,6 @@ __device__ __forceinline__ void norm_linear_kernel(void const *input_ptr,
     // offset
     int row = 0;
     output_dmem.at(row, i) = output_smem.at(row, i);
-    // output_dmem.at(row, col) = mm_output_smem.at(row, col);
-    //      __uint128_t v =
-    //      *((__uint128_t const *)(mm_output_smem(row, col)));
-    //  *((__uint128_t *)(output_dmem(row, col))) =
-    //      v;
   }
 }
 
