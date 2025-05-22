@@ -155,7 +155,6 @@ void KernelGraphGenerator::generate_next_operator(
           }
         }
         std::unordered_map<int, bool> results = check_pattern(inputs);
-        // elapsed += std::chrono::steady_clock::now() - begin_time;
         //filter input_tensors of 'true'
         for (auto const &result : results) {
           if (result.second) {
