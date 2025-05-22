@@ -12,9 +12,9 @@ namespace mirage {
 namespace search {
 
 std::unordered_map<int, bool> AbstractExpr::subpattern_to(
-    const std::vector<std::shared_ptr<AbstractExpr>>& input_patterns) const {  
+    std::vector<std::shared_ptr<AbstractExpr>> const &input_patterns) const {
   std::vector<std::string> subexpr;
-  std::vector<bool> is_valid; 
+  std::vector<bool> is_valid;
   for (auto const &input : input_patterns) {
     if (input == nullptr) {
       subexpr.push_back("null");
@@ -25,21 +25,21 @@ std::unordered_map<int, bool> AbstractExpr::subpattern_to(
     }
   }
 
-  std::vector<const char*> c_subexpr;
+  std::vector<char const *> c_subexpr;
   c_subexpr.reserve(subexpr.size());
-  for (const auto& s : subexpr) {
-      c_subexpr.push_back(s.c_str());
+  for (auto const &s : subexpr) {
+    c_subexpr.push_back(s.c_str());
   }
 
-
-  KVPair* datas = egg_equiv(c_subexpr.data(), static_cast<int>(c_subexpr.size()));
+  KVPair *datas =
+      egg_equiv(c_subexpr.data(), static_cast<int>(c_subexpr.size()));
 
   std::unordered_map<int, bool> result;
   size_t len = c_subexpr.size();
   for (size_t i = 0; i < len; ++i) {
-    if(is_valid[i]){
+    if (is_valid[i]) {
       result[datas[i].key] = datas[i].value;
-    }    
+    }
   }
   return result;
 }
@@ -280,9 +280,8 @@ std::string Clamp::to_string() const {
 }
 
 std::string Clamp::to_egg() const {
-  return "(clamp " + std::to_string(min_val) +
-         " " + std::to_string(max_val) + " " + elems->to_egg() +
-         ")";
+  return "(clamp " + std::to_string(min_val) + " " + std::to_string(max_val) +
+         " " + elems->to_egg() + ")";
 }
 
 RMS::RMS(int red_deg, std::shared_ptr<AbstractExpr> elems)
@@ -315,11 +314,13 @@ z3::expr Red::to_z3(z3::context &c,
                     std::unordered_set<std::string> &all_variables) const {
   z3::sort P = c.uninterpreted_sort("P");
   z3::func_decl red = c.function("red", c.int_sort(), P, P);
-  return red(c.int_val(static_cast<int>(std::ceil(std::log2(red_deg)))), summand->to_z3(c, all_variables));
+  return red(c.int_val(static_cast<int>(std::ceil(std::log2(red_deg)))),
+             summand->to_z3(c, all_variables));
 }
 
 std::string Red::to_string() const {
-  return "r(" + std::to_string(std::ceil(std::log2(red_deg))) + ", " + summand->to_string() + ")";
+  return "r(" + std::to_string(std::ceil(std::log2(red_deg))) + ", " +
+         summand->to_string() + ")";
 }
 
 std::string Red::to_egg() const {

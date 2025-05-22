@@ -76,7 +76,8 @@ private:
       size_t depth);
 
   void preprocess(kernel::Graph const &computation_graph);
-  std::unordered_map<int, bool> check_pattern(std::vector<std::shared_ptr<AbstractExpr>>& inputs);
+  std::unordered_map<int, bool>
+      check_pattern(std::vector<std::shared_ptr<AbstractExpr>> &inputs);
   bool verify(kernel::Graph &g);
 
   void save_results() const;

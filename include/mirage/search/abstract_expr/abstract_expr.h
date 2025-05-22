@@ -11,12 +11,12 @@
 
 extern "C" {
 
-  struct KVPair {
-        int key;
-        bool value;
-  };
+struct KVPair {
+  int key;
+  bool value;
+};
 
-  KVPair* egg_equiv(const char** inputs, int len);
+KVPair *egg_equiv(char const **inputs, int len);
 }
 
 
@@ -31,7 +31,8 @@ public:
   virtual z3::expr
       to_z3(z3::context &c,
             std::unordered_set<std::string> &all_variables) const = 0;
-  std::unordered_map<int, bool> subpattern_to(const std::vector<std::shared_ptr<AbstractExpr>>& input_patterns) const;
+  std::unordered_map<int, bool> subpattern_to(
+      std::vector<std::shared_ptr<AbstractExpr>> const &input_patterns) const;
   virtual std::string to_string() const = 0;
   virtual std::string to_egg() const = 0;
 };

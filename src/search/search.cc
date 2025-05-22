@@ -155,18 +155,22 @@ void KernelGraphGenerator::generate_next_operator(
           }
         }
         std::unordered_map<int, bool> results = check_pattern(inputs);
-        //filter input_tensors of 'true'
+        // filter input_tensors of 'true'
         for (auto const &result : results) {
           if (result.second) {
-            KNOperator *new_op = create_op(*c.kn_graph, op_type, tensors[result.first]);
+            KNOperator *new_op =
+                create_op(*c.kn_graph, op_type, tensors[result.first]);
             if (new_op) {
               c.kn_graph->operators.push_back(new_op);
               if (check_range(init_ranges, target_ranges, *c.kn_graph)) {
                 if (depth < max_depth) {
                   num_tasks++;
-                  SearchContext c_tmp = SerializedSearchContext(c).deserialize();
+                  SearchContext c_tmp =
+                      SerializedSearchContext(c).deserialize();
 #pragma omp task
-                  { generate_next_operator(c_tmp, verify, verified, depth + 1); }
+                  {
+                    generate_next_operator(c_tmp, verify, verified, depth + 1);
+                  }
                 } else {
                   generate_next_operator(c, verify, verified, depth + 1);
                 }
@@ -356,7 +360,7 @@ void KernelGraphGenerator::generate_next_operator(
       std::vector<std::shared_ptr<AbstractExpr>> inputs;
       std::vector<std::vector<STensor>> tensors;
       for (auto const &input_idx :
-            dim_strategy.get_input_cand_idx(op_type, all_tensors)) {
+           dim_strategy.get_input_cand_idx(op_type, all_tensors)) {
         Order order(input_idx, static_cast<int>(op_type));
         if (order <= get_max_op_order(*c.tb_graph)) {
           continue;
@@ -378,7 +382,7 @@ void KernelGraphGenerator::generate_next_operator(
         }
       }
       std::unordered_map<int, bool> results = check_pattern(inputs);
-      //filter input_tensors of 'true'
+      // filter input_tensors of 'true'
       for (auto const &result : results) {
         if (result.second) {
           std::vector<STensor> input_tensors = tensors[result.first];
@@ -388,16 +392,16 @@ void KernelGraphGenerator::generate_next_operator(
           if (new_op) {
             c.tb_graph->operators.push_back(new_op);
             if (depth < max_depth) {
-                num_tasks++;
-                SearchContext c_tmp = SerializedSearchContext(c).deserialize();
+              num_tasks++;
+              SearchContext c_tmp = SerializedSearchContext(c).deserialize();
 #pragma omp task
-                { generate_next_operator(c_tmp, verify, verified, depth + 1); }
+              { generate_next_operator(c_tmp, verify, verified, depth + 1); }
             } else {
-                generate_next_operator(c, verify, verified, depth + 1);
+              generate_next_operator(c, verify, verified, depth + 1);
             }
             while (c.tb_graph->operators.back() != last_op) {
-                delete c.tb_graph->operators.back();
-                c.tb_graph->operators.pop_back();
+              delete c.tb_graph->operators.back();
+              c.tb_graph->operators.pop_back();
             }
           }
         }
@@ -406,7 +410,7 @@ void KernelGraphGenerator::generate_next_operator(
       inputs.clear();
       tensors.clear();
     }
-  }  
+  }
 }
 
 void KernelGraphGenerator::generate_kernel_graphs() {
@@ -495,9 +499,9 @@ void KernelGraphGenerator::preprocess(kernel::Graph const &computation_graph) {
 }
 
 std::unordered_map<int, bool> KernelGraphGenerator::check_pattern(
-     std::vector<std::shared_ptr<AbstractExpr>>& inputs) {
+    std::vector<std::shared_ptr<AbstractExpr>> &inputs) {
   std::unordered_map<int, bool> results;
-  for(int i = 0; i < inputs.size(); i++) {
+  for (int i = 0; i < inputs.size(); i++) {
     auto input = inputs[i];
     if (seen_patterns.find(input->to_string()) != seen_patterns.end()) {
       results[i] = seen_patterns[input->to_string()];
@@ -505,10 +509,10 @@ std::unordered_map<int, bool> KernelGraphGenerator::check_pattern(
     }
   }
 
-  bool all_null = std::all_of(inputs.begin(), inputs.end(),
-                              [](const std::shared_ptr<AbstractExpr>& ptr) {
-                                  return ptr == nullptr;
-                              });
+  bool all_null = std::all_of(
+      inputs.begin(),
+      inputs.end(),
+      [](std::shared_ptr<AbstractExpr> const &ptr) { return ptr == nullptr; });
   if (all_null) {
     return results;
   }
@@ -520,7 +524,7 @@ std::unordered_map<int, bool> KernelGraphGenerator::check_pattern(
         results[i] = true;
         auto input = inputs[i];
 #pragma omp critical
-      { seen_patterns[input->to_string()] = true; }
+        { seen_patterns[input->to_string()] = true; }
 
         inputs[i] = nullptr;
       }

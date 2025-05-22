@@ -26,7 +26,7 @@ int cython_search(mirage::kernel::Graph const *input_graph,
                   bool verbose,
                   char const *default_config,
                   bool is_formal_verified);
-                  
+
 void cython_to_json(mirage::kernel::Graph const *input_graph,
                     char const *filename);
 mirage::kernel::Graph *cython_from_json(char const *filename);

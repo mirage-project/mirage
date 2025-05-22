@@ -126,7 +126,7 @@ pub extern "C" fn get_egraph(expr: *const c_char) -> () {
 
     let re = Regex::new(r"\(sum (\d+)\b").unwrap();
 
-    let nums: Vec<u32> = re.captures_iter(expr_str)
+    let n++ums: Vec<u32> = re.captures_iter(expr_str)
         .filter_map(|cap| cap.get(1).unwrap().as_str().parse::<u32>().ok())
         .collect();
 
