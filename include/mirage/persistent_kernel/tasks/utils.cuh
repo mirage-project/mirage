@@ -17,14 +17,15 @@
 #pragma once
 #include "common.h"
 namespace kernel {
+using bfloat16 = type::bfloat16_t;
 
 __device__ __forceinline__ void
     convert_f32_to_bf16_uint32(float const (&s_frag)[8],
                                uint32_t (&a_frag)[4]) {
 #pragma unroll
   for (int i = 0; i < 4; ++i) {
-    type::bfloat16_t low = bfloat16(s_frag[2 * i]);
-    type::bfloat16_t high = bfloat16(s_frag[2 * i + 1]);
+    bfloat16 low = bfloat16(s_frag[2 * i]);
+    bfloat16 high = bfloat16(s_frag[2 * i + 1]);
     a_frag[i] = (static_cast<uint32_t>(high.storage) << 16) | low.storage;
   }
 }
