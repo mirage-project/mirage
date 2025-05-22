@@ -388,7 +388,7 @@ __global__ void persistent_kernel(RuntimeConfig config) {
           if (config.profiling) {
             PROFILER_EVENT_START(TASK_ATTENTION_1,
                                  cur_task_pos[0] + cur_task_pos[1]);
-            //TODO add a seq_len param                                       
+            // TODO add a seq_len param
             kernel::single_batch_decoding_kernel<bfloat16, 64>(
                 task_desc.inputs[0].base_ptr,
                 task_desc.inputs[1].base_ptr,
