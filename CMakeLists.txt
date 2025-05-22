@@ -111,6 +111,31 @@ add_library(mirage_runtime ${MIRAGE_SRCS})
 #set_target_properties(mirage_runtime
 #  PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 
+# Ensure Rust is installed
+execute_process(COMMAND rustc --version
+  RESULT_VARIABLE RUST_COMMAND_RESULT
+  OUTPUT_VARIABLE RUSTC_OUTPUT
+  ERROR_QUIET)
+
+if(NOT RUST_COMMAND_RESULT EQUAL 0)
+  message(FATAL_ERROR
+    "Rust is not installed on the system. Please install it by running: \n"
+    "'curl https://sh.rustup.rs -sSf | sh -s -- -y' \n"
+    "and follow the instructions on the screen.")
+endif()
+
+# Ensure Cargo is installed
+execute_process(COMMAND cargo --version
+  RESULT_VARIABLE CARGO_RESULT
+  OUTPUT_QUIET ERROR_QUIET)
+
+if(NOT CARGO_RESULT EQUAL 0)
+  message(FATAL_ERROR
+    "Rust is installed, but cargo is not. Please install it by running: \n"
+    "'curl https://sh.rustup.rs -sSf | sh -s -- -y' \n"
+    "and follow the instructions on the screen.")
+endif()
+
 #set RUST
 include(ExternalProject)
 
