@@ -131,7 +131,7 @@ __device__ __forceinline__ bool prepare_next_batch(RuntimeConfig config) {
   // printf("step = %d\n", step);
   config.step[0] = step + 1;
   return step + 1 <= 50;
-  //return false;
+  // return false;
 }
 
 __device__ __forceinline__ bool is_termination_event(size_t event_loc,
@@ -153,14 +153,14 @@ __device__ __forceinline__ size_t get_event_position_index(EventId event_id) {
 
 __device__ __forceinline__ int get_rand_sched_id(size_t event_index,
                                                  int worker_id,
-						 int num_workers,
+                                                 int num_workers,
                                                  int num_schedulers) {
-  //const size_t seed = 0xac4c1b51;
-  //size_t x = event_index * seed;
-  //x ^= x >> 17;
-  //x *= worker_id;
-  // x *= 0xed5ad4bb;
-  //x ^= x >> 11;
+  // const size_t seed = 0xac4c1b51;
+  // size_t x = event_index * seed;
+  // x ^= x >> 17;
+  // x *= worker_id;
+  //  x *= 0xed5ad4bb;
+  // x ^= x >> 11;
   size_t x = worker_id;
   return x / ((num_workers + num_schedulers - 1) / num_schedulers);
 }
@@ -248,7 +248,7 @@ __global__ void persistent_kernel(RuntimeConfig config) {
   // Each scheduelr SM serves four schedulers
   int num_schedulers =
       config.num_local_schedulers + config.num_remote_schedulers;
-  //assert(num_schedulers % 4 == 0);
+  // assert(num_schedulers % 4 == 0);
   assert(gridDim.x == config.num_workers + num_schedulers);
   assert(config.num_workers <= MAX_NUM_WORKERS);
   // We will reinterpret TaskDesc as an array of integers to
@@ -332,9 +332,11 @@ __global__ void persistent_kernel(RuntimeConfig config) {
         PROFILER_EVENT_END(TASK_GET_NEXT_TASK, task_counter++);
       }
       // TaskDesc task_desc = config.all_tasks[cur_task_loc];
-      int* smem_as_int = reinterpret_cast<int*>(&task_desc);
-      const int* dmem_as_int = reinterpret_cast<int*>(config.all_tasks + cur_task_loc);
-      for (int i = threadIdx.x; i * sizeof(int) < sizeof(TaskDesc); i += blockDim.x) {
+      int *smem_as_int = reinterpret_cast<int *>(&task_desc);
+      int const *dmem_as_int =
+          reinterpret_cast<int *>(config.all_tasks + cur_task_loc);
+      for (int i = threadIdx.x; i * sizeof(int) < sizeof(TaskDesc);
+           i += blockDim.x) {
         smem_as_int[i] = dmem_as_int[i];
       }
       __syncthreads();
@@ -349,17 +351,16 @@ __global__ void persistent_kernel(RuntimeConfig config) {
           break;
         }
         case TASK_RMS_NORM_LINEAR: {
-          kernel::norm_linear_kernel<bfloat16>(
+          kernel::norm_linear_kernel<bfloat16, 1, 32, 3584>(
               task_desc.inputs[0].base_ptr,
               task_desc.inputs[1].base_ptr,
               task_desc.outputs[0].base_ptr);
           break;
         }
         case TASK_EMBEDDING: {
-          kernel::embedding_kernel<bfloat16>(
-              task_desc.inputs[0].base_ptr,
-              task_desc.inputs[1].base_ptr,
-              task_desc.outputs[0].base_ptr);
+          kernel::embedding_kernel<bfloat16>(task_desc.inputs[0].base_ptr,
+                                             task_desc.inputs[1].base_ptr,
+                                             task_desc.outputs[0].base_ptr);
           break;
         }
         case TASK_ATTENTION_1: {
@@ -371,7 +372,7 @@ __global__ void persistent_kernel(RuntimeConfig config) {
           break;
         }
         case TASK_SILU_MUL_LINEAR: {
-          kernel::silu_mul_linear_kernel<bfloat16>(
+          kernel::silu_mul_linear_kernel<bfloat16, 1, 32, 3584>(
               task_desc.inputs[0].base_ptr,
               task_desc.inputs[1].base_ptr,
               task_desc.inputs[2].base_ptr,
@@ -383,11 +384,10 @@ __global__ void persistent_kernel(RuntimeConfig config) {
           for (int i = 0; i < task_desc.inputs[0].num_dims; i++) {
             size_in_bytes *= task_desc.inputs[0].dim[i];
           }
-          nvshmemx_putmem_block(
-              task_desc.outputs[0].base_ptr,
-              task_desc.inputs[0].base_ptr,
-              size_in_bytes,
-              get_event_gpu_id(task_desc.trigger_event));
+          nvshmemx_putmem_block(task_desc.outputs[0].base_ptr,
+                                task_desc.inputs[0].base_ptr,
+                                size_in_bytes,
+                                get_event_gpu_id(task_desc.trigger_event));
           nvshmem_fence();
           break;
         }
@@ -440,7 +440,8 @@ __global__ void persistent_kernel(RuntimeConfig config) {
             int sched_id =
                 event_desc.event_type == EVENT_LAUNCH_MASSIVE_TASKS
                     ? config.num_local_schedulers + config.num_remote_schedulers
-                    : get_rand_sched_id(event_index, worker_id,
+                    : get_rand_sched_id(event_index,
+                                        worker_id,
                                         config.num_workers,
                                         config.num_local_schedulers);
             size_t last_event_pos = custom_atomic_add_u64(
@@ -491,9 +492,11 @@ __global__ void persistent_kernel(RuntimeConfig config) {
                                    event_desc.num_triggers,
                                    gpu_id);
             // Add the event to the schedule queue
-            int sched_id =
-                config.num_local_schedulers +
-                get_rand_sched_id(event_index, worker_id, config.num_workers, config.num_remote_schedulers);
+            int sched_id = config.num_local_schedulers +
+                           get_rand_sched_id(event_index,
+                                             worker_id,
+                                             config.num_workers,
+                                             config.num_remote_schedulers);
             size_t last_event_pos = nvshmem_ulonglong_atomic_fetch_add(
                 &config.sched_queue_next_free_event_id[sched_id], 1, gpu_id);
             nvshmem_ulonglong_p(

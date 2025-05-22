@@ -7,19 +7,20 @@ using kernel::norm_linear_kernel;
 using kernel::silu_mul_linear_kernel;
 using bfloat16 = type::bfloat16_t;
 
-template <typename T>
+template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int SEQUENCE_SIZE>
 __global__ void norm_linear_kernel_wrapper(void const *input_ptr,
                                            void const *weight_ptr,
                                            void *output_ptr) {
-  norm_linear_kernel<T, 1, 32, 3584>(input_ptr, weight_ptr, output_ptr);
+  norm_linear_kernel<T, BATCH_SIZE, OUTPUT_SIZE, SEQUENCE_SIZE>(
+      input_ptr, weight_ptr, output_ptr);
 }
 
-template <typename T>
+template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int SEQUENCE_SIZE>
 __global__ void silu_mul_linear_kernel_wrapper(void const *input_ptr,
                                                void const *mul_ptr,
                                                void const *weight_ptr,
                                                void *output_ptr) {
-  silu_mul_linear_kernel<T, 1, 32, 3584>(
+  silu_mul_linear_kernel<T, BATCH_SIZE, OUTPUT_SIZE, SEQUENCE_SIZE>(
       input_ptr, mul_ptr, weight_ptr, output_ptr);
 }
 
@@ -33,11 +34,33 @@ void launch_norm_linear(torch::Tensor input,
 
   dim3 grid_dim(1, 1, 1);
   dim3 block_dim(128, 1, 1);
-  cudaFuncSetAttribute(norm_linear_kernel_wrapper<bfloat16>,
-                       cudaFuncAttributeMaxDynamicSharedMemorySize,
-                       36666);
-  norm_linear_kernel_wrapper<bfloat16>
-      <<<grid_dim, block_dim, 36666>>>(input_ptr, weight_ptr, output_ptr);
+  int output_size = output.size(1);
+  switch (output_size) {
+    case 16:
+      cudaFuncSetAttribute(norm_linear_kernel_wrapper<bfloat16, 1, 16, 3584>,
+                           cudaFuncAttributeMaxDynamicSharedMemorySize,
+                           36666);
+      norm_linear_kernel_wrapper<bfloat16, 1, 16, 3584>
+          <<<grid_dim, block_dim, 36666>>>(input_ptr, weight_ptr, output_ptr);
+      break;
+    case 32:
+      cudaFuncSetAttribute(norm_linear_kernel_wrapper<bfloat16, 1, 32, 3584>,
+                           cudaFuncAttributeMaxDynamicSharedMemorySize,
+                           36666);
+      norm_linear_kernel_wrapper<bfloat16, 1, 32, 3584>
+          <<<grid_dim, block_dim, 36666>>>(input_ptr, weight_ptr, output_ptr);
+      break;
+    case 64:
+      cudaFuncSetAttribute(norm_linear_kernel_wrapper<bfloat16, 1, 64, 3584>,
+                           cudaFuncAttributeMaxDynamicSharedMemorySize,
+                           36666);
+      norm_linear_kernel_wrapper<bfloat16, 1, 64, 3584>
+          <<<grid_dim, block_dim, 36666>>>(input_ptr, weight_ptr, output_ptr);
+      break;
+    default:
+      printf("Unsupported output size: %d\n", output_size);
+      return;
+  }
   cudaDeviceSynchronize();
   cudaError_t err = cudaDeviceSynchronize();
   if (err != cudaSuccess) {
@@ -57,11 +80,39 @@ void silu_mul_linear(torch::Tensor input,
 
   dim3 grid_dim(1, 1, 1);
   dim3 block_dim(128, 1, 1);
-  cudaFuncSetAttribute(silu_mul_linear_kernel_wrapper<bfloat16>,
-                       cudaFuncAttributeMaxDynamicSharedMemorySize,
-                       36666);
-  silu_mul_linear_kernel_wrapper<bfloat16><<<grid_dim, block_dim, 36666>>>(
-      input_ptr, mul_ptr, weight_ptr, output_ptr);
+  int output_size = output.size(1);
+  switch (output_size) {
+    case 16:
+      cudaFuncSetAttribute(
+          silu_mul_linear_kernel_wrapper<bfloat16, 1, 16, 3584>,
+          cudaFuncAttributeMaxDynamicSharedMemorySize,
+          36666);
+      silu_mul_linear_kernel_wrapper<bfloat16, 1, 16, 3584>
+          <<<grid_dim, block_dim, 36666>>>(
+              input_ptr, mul_ptr, weight_ptr, output_ptr);
+      break;
+    case 32:
+      cudaFuncSetAttribute(
+          silu_mul_linear_kernel_wrapper<bfloat16, 1, 32, 3584>,
+          cudaFuncAttributeMaxDynamicSharedMemorySize,
+          36666);
+      silu_mul_linear_kernel_wrapper<bfloat16, 1, 32, 3584>
+          <<<grid_dim, block_dim, 36666>>>(
+              input_ptr, mul_ptr, weight_ptr, output_ptr);
+      break;
+    case 64:
+      cudaFuncSetAttribute(
+          silu_mul_linear_kernel_wrapper<bfloat16, 1, 64, 3584>,
+          cudaFuncAttributeMaxDynamicSharedMemorySize,
+          36666);
+      silu_mul_linear_kernel_wrapper<bfloat16, 1, 64, 3584>
+          <<<grid_dim, block_dim, 36666>>>(
+              input_ptr, mul_ptr, weight_ptr, output_ptr);
+      break;
+    default:
+      printf("Unsupported output size: %d\n", output_size);
+      return;
+  }
   cudaDeviceSynchronize();
   cudaError_t err = cudaDeviceSynchronize();
   if (err != cudaSuccess) {
