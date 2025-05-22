@@ -89,9 +89,9 @@ if __name__ == "__main__":
         import mirage
         if args.profiling:
             profiler_tensor = torch.empty(3000 * 128, dtype=torch.uint64, device="cuda").contiguous()
-            kernel = mirage.PersistentKernel(file_path="/home/ubuntu/mirage_cpp/debug_build/test.cu", mpi_rank=rank, num_workers=84, num_local_schedulers=16, num_remote_schedulers=8, use_nvshmem=True, input_tensors=[item[1] for item in input_tensors], meta_tensors=[step], profiler_tensor=profiler_tensor)
+            kernel = mirage.PersistentKernel(file_path="/home/ubuntu/mirage_cpp/debug_build/test.cu", mpi_rank=rank, num_workers=96, num_local_schedulers=24, num_remote_schedulers=24, use_nvshmem=True, input_tensors=[item[1] for item in input_tensors], meta_tensors=[step], profiler_tensor=profiler_tensor)
         else:
-            kernel = mirage.PersistentKernel(file_path="/home/ubuntu/mirage_cpp/debug_build/test.cu", mpi_rank=rank, num_workers=84, num_local_schedulers=16, num_remote_schedulers=8, use_nvshmem=True, input_tensors=[item[1] for item in input_tensors], meta_tensors=[step], profiler_tensor=None)
+            kernel = mirage.PersistentKernel(file_path="/home/ubuntu/mirage_cpp/debug_build/test.cu", mpi_rank=rank, num_workers=96, num_local_schedulers=24, num_remote_schedulers=24, use_nvshmem=True, input_tensors=[item[1] for item in input_tensors], meta_tensors=[step], profiler_tensor=None)
 
     #g = torch.cuda.CUDAGraph()
     stream = torch.cuda.Stream()
@@ -117,6 +117,16 @@ if __name__ == "__main__":
             if cur_pos == prompt_len + warmup:
                 torch.cuda.synchronize()
                 starter.record()
+
+        ender.record()
+        torch.cuda.synchronize()
+        run_time = starter.elapsed_time(ender)
+    
+        generated_ids=tokens[:, :prev_pos]
+    
+        response = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
+        print(response)
+        print("Prompt length {}, generate length {}, per-token latency {} ms".format(prompt_len, cur_pos - prompt_len, run_time / (cur_pos - prompt_len)))
     else:
         # prefill phase
         step.fill_(prompt_len-1)
@@ -134,15 +144,15 @@ if __name__ == "__main__":
         step.fill_(prompt_len)
         kernel()
 
-    ender.record()
-    torch.cuda.synchronize()
-    run_time = starter.elapsed_time(ender)
+        ender.record()
+        torch.cuda.synchronize()
+        run_time = starter.elapsed_time(ender)
     
-    generated_ids=tokens[:, :prev_pos]
+        generated_ids=tokens[:, :prev_pos]
     
-    response = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
-    print(response)
+        response = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
+        print(response)
     
-    print("Prompt length {}, generate length {}, per-token latency {} ms".format(prompt_len, 5120, run_time / (5120 - warmup)))
+        print("Prompt length {}, generate length {}, per-token latency {} ms".format(prompt_len, 5120, run_time / (5120 - warmup)))
     if world_size > 1:
         dist.destroy_process_group()
