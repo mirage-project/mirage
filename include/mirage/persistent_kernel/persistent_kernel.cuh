@@ -345,11 +345,11 @@ __global__ void persistent_kernel(RuntimeConfig config) {
           break;
         }
         case TASK_RMS_NORM_LINEAR: {
-          TB_SLEEP_US(15);
-          //kernel::norm_linear_kernel<bfloat16>(
-          //    task_desc.inputs[0].base_ptr,
-          //    task_desc.inputs[1].base_ptr,
-          //    task_desc.outputs[0].base_ptr);
+          //TB_SLEEP_US(15);
+          kernel::norm_linear_kernel<bfloat16>(
+              task_desc.inputs[0].base_ptr,
+              task_desc.inputs[1].base_ptr,
+              task_desc.outputs[0].base_ptr);
           break;
         }
         case TASK_EMBEDDING: {
@@ -370,7 +370,6 @@ __global__ void persistent_kernel(RuntimeConfig config) {
           break;
         }
         case TASK_ATTENTION_1: {
-          //TB_SLEEP_US(30);
           kernel::single_batch_decoding_kernel<bfloat16, 64>(
               task_desc.inputs[0].base_ptr,
               task_desc.inputs[1].base_ptr,
@@ -383,12 +382,12 @@ __global__ void persistent_kernel(RuntimeConfig config) {
           break;
         }
         case TASK_SILU_MUL_LINEAR: {
-          TB_SLEEP_US(20);
-          //kernel::silu_mul_linear_kernel<bfloat16>(
-          //    task_desc.inputs[0].base_ptr,
-          //    task_desc.inputs[1].base_ptr,
-          //    task_desc.inputs[2].base_ptr,
-          //    task_desc.outputs[0].base_ptr);
+          //TB_SLEEP_US(20);
+          kernel::silu_mul_linear_kernel<bfloat16>(
+              task_desc.inputs[0].base_ptr,
+              task_desc.inputs[1].base_ptr,
+              task_desc.inputs[2].base_ptr,
+              task_desc.outputs[0].base_ptr);
           break;
         }
         case TASK_NVSHMEM_COPY: {
