@@ -351,20 +351,53 @@ __global__ void persistent_kernel(RuntimeConfig config) {
           break;
         }
         case TASK_RMS_NORM_LINEAR: {
-          kernel::norm_linear_kernel<bfloat16, 1, 32, 3584>(
-              task_desc.inputs[0].base_ptr,
-              task_desc.inputs[1].base_ptr,
-              task_desc.outputs[0].base_ptr);
+          if (config.profiling) {
+            PROFILER_EVENT_START(TASK_RMS_NORM_LINEAR,
+                                 cur_task_pos[0] + cur_task_pos[1]);
+            kernel::norm_linear_kernel<bfloat16, 1, 32, 3584>(
+                task_desc.inputs[0].base_ptr,
+                task_desc.inputs[1].base_ptr,
+                task_desc.outputs[0].base_ptr);
+            PROFILER_EVENT_END(TASK_RMS_NORM_LINEAR,
+                               cur_task_pos[0] + cur_task_pos[1]);
+          }
+
+          if (threadIdx.x == 0) {
+            // printf("[EXEC] worker_id(%d) task_type(RMS)\n", worker_id);
+          }
+
           break;
         }
         case TASK_EMBEDDING: {
-          kernel::embedding_kernel<bfloat16>(task_desc.inputs[0].base_ptr,
-                                             task_desc.inputs[1].base_ptr,
-                                             task_desc.outputs[0].base_ptr);
+          if (config.profiling) {
+            PROFILER_EVENT_START(TASK_EMBEDDING,
+                                 cur_task_pos[0] + cur_task_pos[1]);
+            kernel::embedding_kernel<bfloat16>(task_desc.inputs[0].base_ptr,
+                                               task_desc.inputs[1].base_ptr,
+                                               task_desc.outputs[0].base_ptr);
+            PROFILER_EVENT_END(TASK_EMBEDDING,
+                               cur_task_pos[0] + cur_task_pos[1]);
+          }
+
+          if (threadIdx.x == 0) {
+            // printf("[EXEC] worker_id(%d) task_type(EMB)\n", worker_id);
+          }
+
           break;
         }
         case TASK_ATTENTION_1: {
-          TB_SLEEP_US(1);
+          if (config.profiling) {
+            PROFILER_EVENT_START(TASK_ATTENTION_1,
+                                 cur_task_pos[0] + cur_task_pos[1]);
+            //TODO add a seq_len param                                       
+            kernel::single_batch_decoding_kernel<bfloat16, 64>(
+                task_desc.inputs[0].base_ptr,
+                task_desc.inputs[1].base_ptr,
+                task_desc.inputs[2].base_ptr,
+                task_desc.outputs[0].base_ptr);
+            PROFILER_EVENT_END(TASK_ATTENTION_1,
+                               cur_task_pos[0] + cur_task_pos[1]);
+          }
           break;
         }
         case TASK_ATTENTION_2: {
@@ -867,12 +900,12 @@ extern "C" void launch_persistent_kernel() {
   void *args[] = {&global_runtime_config};
   // Launcher persistent kernel
   cudaFuncSetAttribute(
-      persistent_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, 36666);
+      persistent_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, 98304);
   nvshmemx_collective_launch((void const *)persistent_kernel,
                              dim3(108, 1, 1),
                              dim3(128, 1, 1),
                              args,
-                             36666 /*sharedmem*/,
+                             98304 /*sharedmem*/,
                              0 /*stream*/);
   cudaError_t err = cudaDeviceSynchronize();
   if (err != cudaSuccess) {
