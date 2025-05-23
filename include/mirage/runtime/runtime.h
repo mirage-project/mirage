@@ -34,8 +34,7 @@ struct TensorDesc {
 struct EventDesc {
   EventDesc(void)
       : event_type(EVENT_INVALID), num_triggers(0),
-        first_task_id(TASK_INVALID_ID),
-        last_task_id(TASK_INVALID_ID) {}
+        first_task_id(TASK_INVALID_ID), last_task_id(TASK_INVALID_ID) {}
   EventDesc(EventType type, int nt, TaskId f, TaskId l)
       : event_type(type), num_triggers(nt), first_task_id(f), last_task_id(l) {}
   EventType event_type;
