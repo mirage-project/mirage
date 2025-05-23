@@ -4,17 +4,17 @@ import runtime_kernel
 
 torch.set_printoptions(sci_mode=False)
 
-sequence_size = 3584
+input_size = 4096
 output_sizes = [16, 32, 64]
 
 silu = torch.nn.SiLU()
 
 for output_size in output_sizes:
-    print(f"\n=== Testing output_dim = {output_size} ===")
+    print(f"\n=== Testing output_size = {output_size} ===")
 
-    x = torch.randn((1, sequence_size), device="cuda", dtype=torch.bfloat16)
-    m = torch.randn((1, sequence_size), device="cuda", dtype=torch.bfloat16)
-    w = torch.randn((sequence_size, output_size), device="cuda", dtype=torch.bfloat16)
+    x = torch.randn((1, input_size), device="cuda", dtype=torch.bfloat16)
+    m = torch.randn((1, input_size), device="cuda", dtype=torch.bfloat16)
+    w = torch.randn((input_size, output_size), device="cuda", dtype=torch.bfloat16)
     output = torch.empty(1, output_size, device="cuda", dtype=torch.bfloat16)
 
     runtime_kernel.silu_mul_linear(x, m, w, output)
@@ -44,9 +44,9 @@ for output_size in output_sizes:
     # Compare with Mirage
 
     graph = mi.new_kernel_graph()
-    X = graph.new_input(dims=(1, sequence_size), dtype=mi.bfloat16)
-    M = graph.new_input(dims=(1, sequence_size), dtype=mi.bfloat16)
-    W = graph.new_input(dims=(sequence_size, output_size), dtype=mi.bfloat16)
+    X = graph.new_input(dims=(1, input_size), dtype=mi.bfloat16)
+    M = graph.new_input(dims=(1, input_size), dtype=mi.bfloat16)
+    W = graph.new_input(dims=(input_size, output_size), dtype=mi.bfloat16)
     tb_graph = mi.new_threadblock_graph(
         grid_dim=(1, 1, 1), block_dim=(128, 1, 1), forloop_range=56, reduction_dimx=64
     )
@@ -71,9 +71,7 @@ for output_size in output_sizes:
         outputs = graph(inputs=input_tensors)
 
     torch.cuda.synchronize()
-    starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(
-        enable_timing=True
-    )
+    starter, ender = (torch.cuda.Event(enable_timing=True) for _ in range(2))
     starter.record()
     for rep in range(repetitions):
         outputs = graph(inputs=input_tensors)

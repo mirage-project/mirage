@@ -4,10 +4,10 @@ import runtime_kernel
 
 torch.set_printoptions(sci_mode=False)
 
-sequence_size = 3584
+input_size = 4096
 output_sizes = [16, 32, 64]
 
-rms_norm = torch.nn.RMSNorm(sequence_size, device="cuda:0", dtype=torch.bfloat16)
+rms_norm = torch.nn.RMSNorm(input_size, device="cuda:0", dtype=torch.bfloat16)
 
 
 def torch_rms_norm(X, W):
@@ -17,10 +17,10 @@ def torch_rms_norm(X, W):
 
 
 for output_size in output_sizes:
-    print(f"\n=== Testing output_dim = {output_size} ===")
+    print(f"\n=== Testing output_size = {output_size} ===")
 
-    x = torch.randn((1, sequence_size), device="cuda", dtype=torch.bfloat16)
-    w = torch.randn((sequence_size, output_size), device="cuda", dtype=torch.bfloat16)
+    x = torch.randn((1, input_size), device="cuda", dtype=torch.bfloat16)
+    w = torch.randn((input_size, output_size), device="cuda", dtype=torch.bfloat16)
     output = torch.empty(1, output_size, device="cuda", dtype=torch.bfloat16)
 
     runtime_kernel.norm_linear(x, w, output)
@@ -52,8 +52,8 @@ for output_size in output_sizes:
     # Compare with Mirage
 
     graph = mi.new_kernel_graph()
-    X = graph.new_input(dims=(1, sequence_size), dtype=mi.bfloat16)
-    W = graph.new_input(dims=(sequence_size, output_size), dtype=mi.bfloat16)
+    X = graph.new_input(dims=(1, input_size), dtype=mi.bfloat16)
+    W = graph.new_input(dims=(input_size, output_size), dtype=mi.bfloat16)
     tb_graph = mi.new_threadblock_graph(
         grid_dim=(1, 1, 1), block_dim=(128, 1, 1), forloop_range=56, reduction_dimx=64
     )
