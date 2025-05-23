@@ -17,6 +17,7 @@ int main(int argc, char **argv) {
   MPI_Comm_size(MPI_COMM_WORLD, &world_size);
   int rank;
   MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+  world_size = 1;
 
   namespace tb = mirage::threadblock;
   namespace kn = mirage::kernel;
@@ -30,11 +31,14 @@ int main(int argc, char **argv) {
   int intermediate_size = 12288;
   int num_kv_heads = 8;
   int num_q_heads = 32;
+  int num_local_kv_heads = num_kv_heads / world_size;
+  int num_local_q_heads = num_q_heads / world_size;
   int num_kv_splits = 1;
   int head_dim = hidden_size / num_q_heads;
   int fused_outdim_1 = head_dim * (num_q_heads + 2 * num_kv_heads);
   int fused_outdim_2 = 2 * intermediate_size;
   int fused_group_size_1, fused_group_size_2;
+  int per_task_dim = 32;
 
   std::unordered_map<kn::KNOperator const *, std::tuple<int, int, rt::TaskType>>
       task_configs;
@@ -60,14 +64,14 @@ int main(int argc, char **argv) {
                                    layout::DmemRowMajor);
   io_configs.emplace(Y.guid,
                      IODesc(rt::IODesc::CUDAMallocTensor, "embed_out", Y));
-  kn::DTensor AttnIn = kgraph.new_input({batch_size, fused_outdim_1},
-                                        {(size_t)fused_outdim_1, 1},
+  kn::DTensor AttnIn = kgraph.new_input({batch_size, fused_outdim_1 / world_size},
+                                        {(size_t)fused_outdim_1 / world_size, 1},
                                         type::DT_BFLOAT16,
                                         layout::DmemRowMajor);
   io_configs.emplace(AttnIn.guid,
                      IODesc(rt::IODesc::CUDAMallocTensor, "attn_in", AttnIn));
-  kn::DTensor MLPMid = kgraph.new_input({batch_size, fused_outdim_2},
-                                        {(size_t)fused_outdim_2, 1},
+  kn::DTensor MLPMid = kgraph.new_input({batch_size, fused_outdim_2 / world_size},
+                                        {(size_t)fused_outdim_2 / world_size, 1},
                                         type::DT_BFLOAT16,
                                         layout::DmemRowMajor);
   io_configs.emplace(MLPMid.guid,
@@ -86,8 +90,8 @@ int main(int argc, char **argv) {
                      IODesc(rt::IODesc::CUDAMallocTensor, "mlp_final", MLPFinal));
 
   kn::DTensor AttnOut =
-      kgraph.new_input({batch_size, num_q_heads * head_dim},
-                       {(size_t)num_q_heads * head_dim, (size_t)head_dim, 1},
+      kgraph.new_input({batch_size, num_local_q_heads * head_dim},
+                       {(size_t)num_local_q_heads * head_dim, (size_t)head_dim, 1},
                        type::DT_BFLOAT16,
                        layout::DmemRowMajor);
   io_configs.emplace(AttnOut.guid,
@@ -140,7 +144,7 @@ int main(int argc, char **argv) {
   for (int layer = 0; layer < 1; layer++) {
     // Add RMS + MatMul
     {
-      dim3 grid_dim = {(size_t)fused_outdim_1 / 64, 1, 1},
+      dim3 grid_dim = {(size_t)fused_outdim_1 / world_size / per_task_dim, 1, 1},
            block_dim = {128, 1, 1};
       tb::Graph bgraph(grid_dim, block_dim, hidden_size / 64, 64);
       kn::DTensor Wnorm = kgraph.new_input({hidden_size},
@@ -151,31 +155,31 @@ int main(int argc, char **argv) {
                        "layer_" + std::to_string(layer) + "_input_layernorm",
                        Wnorm);
       io_configs.emplace(Wnorm.guid, desc_norm);
-      kn::DTensor Wqkv = kgraph.new_input({hidden_size, fused_outdim_1},
-                                          {(size_t)fused_outdim_1, 1},
+      kn::DTensor Wqkv = kgraph.new_input({hidden_size, fused_outdim_1 / world_size},
+                                          {(size_t)fused_outdim_1 / world_size, 1},
                                           type::DT_BFLOAT16,
                                           layout::DmemRowMajor);
       IODesc desc_qkv(rt::IODesc::FusedTorchTensor,
                       "layer_" + std::to_string(layer) + "_qkv_proj",
                       Wqkv);
-      desc_qkv.num_groups = num_kv_heads;
+      desc_qkv.num_groups = num_local_kv_heads;
       fused_group_size_1 = fused_outdim_1 / num_kv_heads;
       IODesc q_proj(rt::IODesc::TorchTensor,
                     "layer_" + std::to_string(layer) + "_q_proj",
                     Wqkv);
-      q_proj.tensor.dim[1] = num_q_heads * head_dim;
+      q_proj.tensor.dim[1] = num_local_q_heads * head_dim;
       q_proj.tensor.stride[0] = q_proj.tensor.dim[1];
       desc_qkv.sub_descs.push_back(q_proj);
       IODesc k_proj(rt::IODesc::TorchTensor,
                     "layer_" + std::to_string(layer) + "_k_proj",
                     Wqkv);
-      k_proj.tensor.dim[1] = num_kv_heads * head_dim;
+      k_proj.tensor.dim[1] = num_local_kv_heads * head_dim;
       k_proj.tensor.stride[0] = k_proj.tensor.dim[1];
       desc_qkv.sub_descs.push_back(k_proj);
       IODesc v_proj(rt::IODesc::TorchTensor,
                     "layer_" + std::to_string(layer) + "_v_proj",
                     Wqkv);
-      v_proj.tensor.dim[1] = num_kv_heads * head_dim;
+      v_proj.tensor.dim[1] = num_local_kv_heads * head_dim;
       v_proj.tensor.stride[0] = v_proj.tensor.dim[1];
       desc_qkv.sub_descs.push_back(v_proj);
       assert(q_proj.tensor.dim[1] + k_proj.tensor.dim[1] +
@@ -193,8 +197,8 @@ int main(int argc, char **argv) {
     // Add attention
     {
       kn::DTensor K = kgraph.new_input(
-          {batch_size, max_kv_length, num_kv_heads, head_dim},
-          {(size_t)num_kv_heads * head_dim, (size_t)head_dim, 1},
+          {batch_size, max_kv_length, num_local_kv_heads, head_dim},
+          {(size_t)num_local_kv_heads * head_dim, (size_t)head_dim, 1},
           type::DT_BFLOAT16,
           layout::DmemRowMajor);
       io_configs.emplace(K.guid,
@@ -202,17 +206,17 @@ int main(int argc, char **argv) {
                                 "layer_" + std::to_string(layer) + "_k_cache",
                                 K));
       kn::DTensor V = kgraph.new_input(
-          {batch_size, max_kv_length, num_kv_heads, head_dim},
-          {(size_t)num_kv_heads * head_dim, (size_t)head_dim, 1},
+          {batch_size, max_kv_length, num_local_kv_heads, head_dim},
+          {(size_t)num_local_kv_heads * head_dim, (size_t)head_dim, 1},
           type::DT_BFLOAT16,
           layout::DmemRowMajor);
       io_configs.emplace(V.guid,
                          IODesc(rt::IODesc::TorchTensor,
                                 "layer_" + std::to_string(layer) + "_v_cache",
                                 V));
-      dim3 grid_dim = {batch_size, num_kv_heads, 1}, block_dim = {128, 1, 1};
+      dim3 grid_dim = {batch_size, num_local_kv_heads, 1}, block_dim = {128, 1, 1};
       tb::Graph bgraph(grid_dim, block_dim, max_kv_length / 64, 64);
-      assert(AttnIn.dim[1] / num_kv_heads == fused_group_size_1);
+      assert(AttnIn.dim[1] / num_local_kv_heads == fused_group_size_1);
       // Note that QKV is concatenated together
       bgraph.new_input(AttnIn, {0, 1, -1}, -1, layout::SmemRowMajor);
       bgraph.new_input(K, {0, 2, -1}, 1, layout::SmemRowMajor);
@@ -225,7 +229,7 @@ int main(int argc, char **argv) {
     // Add out_projection
     {
       dim3 grid_dim = {hidden_size / 64, 1, 1}, block_dim = {128, 1, 1};
-      tb::Graph bgraph(grid_dim, block_dim, hidden_size / 64, 64);
+      tb::Graph bgraph(grid_dim, block_dim, hidden_size / world_size / 64, 64);
       kn::DTensor W = kgraph.new_input({hidden_size, hidden_size},
                                        {(size_t)hidden_size, 1},
                                        type::DT_BFLOAT16,
@@ -261,7 +265,7 @@ int main(int argc, char **argv) {
     }
     // Add RMS + Matmul
     {
-      dim3 grid_dim = {fused_outdim_2 / 64, 1, 1}, block_dim = {128, 1, 1};
+      dim3 grid_dim = {fused_outdim_2 / world_size / per_task_dim, 1, 1}, block_dim = {128, 1, 1};
       tb::Graph bgraph(grid_dim, block_dim, hidden_size / 64, 64);
       kn::DTensor Wnorm = kgraph.new_input({hidden_size},
                                            {1},
@@ -279,8 +283,8 @@ int main(int argc, char **argv) {
       IODesc desc_proj(rt::IODesc::FusedTorchTensor,
                       "layer_" + std::to_string(layer) + "_gatedup_proj",
                       Wproj);
-      desc_proj.num_groups = fused_outdim_2 / 128;
-      fused_group_size_2 = 128;
+      desc_proj.num_groups = fused_outdim_2 / world_size / 64;
+      fused_group_size_2 = 64;
       IODesc gate_proj(rt::IODesc::TorchTensor,
                        "layer_" + std::to_string(layer) + "_gate_proj",
                        Wproj);
@@ -306,7 +310,7 @@ int main(int argc, char **argv) {
     // silu + Matmul
     {
       dim3 grid_dim = {hidden_size / 64, 1, 1}, block_dim = {128, 1, 1};
-      tb::Graph bgraph(grid_dim, block_dim, fused_outdim_2 / 128, 64);
+      tb::Graph bgraph(grid_dim, block_dim, fused_outdim_2 / world_size / (per_task_dim * 2), 64);
       kn::DTensor W = kgraph.new_input({intermediate_size, hidden_size},
                                        {(size_t)hidden_size, 1},
                                        type::DT_BFLOAT16,
@@ -343,9 +347,10 @@ int main(int argc, char **argv) {
       X = MLPFinal;
     }
   }
+#ifdef DEADCODE
   // Add RMS + Matmul
   {
-    dim3 grid_dim = {vocab_size / 64, 1, 1}, block_dim = {128, 1, 1};
+    dim3 grid_dim = {vocab_size / 32, 1, 1}, block_dim = {128, 1, 1};
     tb::Graph bgraph(grid_dim, block_dim, hidden_size / 64, 64);
     kn::DTensor W = kgraph.new_input({hidden_size, vocab_size},
                                      {(size_t)vocab_size, 1},
@@ -369,6 +374,17 @@ int main(int argc, char **argv) {
     task_configs[kgraph.operators.back()] =
         std::make_tuple(1, 1, rt::TASK_ARGMAX);
   }
+#else
+  {
+    dim3 grid_dim = {1, 1, 1}, block_dim = {128, 1, 1};
+    tb::Graph bgraph(grid_dim, block_dim, hidden_size / 64, 64);
+    bgraph.new_input(X, {-1, -1, -1}, -1, layout::SmemRowMajor);
+    bgraph.new_input(ArgmaxOut, {-1, -1, -1}, -1, layout::SmemRowMajor);
+    kgraph.customized({X, ArgmaxOut}, bgraph);
+    task_configs[kgraph.operators.back()] =
+        std::make_tuple(1, 1, rt::TASK_ARGMAX);
+  }
+#endif
 
   // Start runtime
   using namespace mirage::runtime;

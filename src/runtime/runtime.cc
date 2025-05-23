@@ -634,7 +634,7 @@ std::string Runtime::print_task_graph(
               code.e("task_desc.inputs[$] = input$;", 0, 0);
               // Add nvshmem_copy output
               // Note that nvshmem_copy's output is stored in input_ops[1]
-              offset = tgt_gpu_id * input_ops[0]->dtensor.data_size();
+              offset = tgt_gpu_id * input_ops[0]->dtensor.num_elements();
               int3 output_map = input_ops[1]->input_map;
               io_desc = io_configs.find(input_ops[1]->dtensor.guid)->second;
               if (output_map.x >= 0) {
