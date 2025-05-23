@@ -33,12 +33,13 @@ cdef extern from "vector_types.h":
 cdef extern from "mirage/type.h" namespace "mirage::type":
     # This must be consistent with mirage/type.h
     cdef enum DataType:
-        DT_INT4 = 920,
+        DT_INT4 = 925,
         DT_FLOAT8 = 930,
         DT_INT8 = 935,
         DT_BFLOAT16 = 940,
         DT_FLOAT16 = 941,
-        DT_UINT16 = 945,
+        DT_INT16 = 945,
+        DT_UINT16 = 946,
         DT_FLOAT32 = 950,
         DT_DOUBLE = 960,
         DT_UNKNOWN = 999,
