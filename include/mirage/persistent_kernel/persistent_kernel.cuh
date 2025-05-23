@@ -345,8 +345,22 @@ __global__ void persistent_kernel(RuntimeConfig config) {
           break;
         }
         case TASK_RMS_NORM_LINEAR: {
-          //TB_SLEEP_US(15);
-          kernel::norm_linear_kernel<bfloat16>(
+          if (config.profiling) {
+            PROFILER_EVENT_START(TASK_RMS_NORM_LINEAR,
+                                 cur_task_pos[0] + cur_task_pos[1]);
+            kernel::norm_linear_kernel<bfloat16, 1, 32, 4096>(
+                task_desc.inputs[0].base_ptr,
+                task_desc.inputs[1].base_ptr,
+                task_desc.outputs[0].base_ptr);
+            PROFILER_EVENT_END(TASK_RMS_NORM_LINEAR,
+                               cur_task_pos[0] + cur_task_pos[1]);
+          }
+
+          if (threadIdx.x == 0) {
+            // printf("[EXEC] worker_id(%d) task_type(RMS)\n", worker_id);
+          }
+
+          kernel::norm_linear_kernel<bfloat16, 1, 32, 4096>(
               task_desc.inputs[0].base_ptr,
               task_desc.inputs[1].base_ptr,
               task_desc.outputs[0].base_ptr);
@@ -382,8 +396,7 @@ __global__ void persistent_kernel(RuntimeConfig config) {
           break;
         }
         case TASK_SILU_MUL_LINEAR: {
-          //TB_SLEEP_US(20);
-          kernel::silu_mul_linear_kernel<bfloat16>(
+          kernel::silu_mul_linear_kernel<bfloat16, 1, 32, 4096>(
               task_desc.inputs[0].base_ptr,
               task_desc.inputs[1].base_ptr,
               task_desc.inputs[2].base_ptr,
@@ -542,8 +555,8 @@ __global__ void persistent_kernel(RuntimeConfig config) {
     assert(blockDim.x >= 128);
     if (warp_id < 4 && warp_thread_id == 0) {
       int sched_id = (blockIdx.x - config.num_workers) * 4 + warp_id;
-    //if (threadIdx.x == 0) {
-    //  int sched_id = (blockIdx.x - config.num_workers);
+      // if (threadIdx.x == 0) {
+      //   int sched_id = (blockIdx.x - config.num_workers);
       int num_sched_queues = 1;
       EventId *sched_queues[2];
       int sched_queue_ids[2];
@@ -592,9 +605,9 @@ __global__ void persistent_kernel(RuntimeConfig config) {
       int queue_idx = 0;
       size_t event_counter = 0;
       while (true) {
-        //if (config.profiling) {
-        //  PROFILER_EVENT_START(TASK_GET_EVENT, event_counter);
-        //}
+        // if (config.profiling) {
+        //   PROFILER_EVENT_START(TASK_GET_EVENT, event_counter);
+        // }
         while (cur_event_pos[queue_idx] == last_event_pos[queue_idx]) {
           //__threadfence();
           // last_event_id = config.sched_queue_last_ready_event_id[sched_id];
@@ -618,9 +631,9 @@ __global__ void persistent_kernel(RuntimeConfig config) {
         EventId event_id = sched_queues[queue_idx][cur_event_pos[queue_idx] %
                                                    config.per_sched_queue_len];
         EventDesc e = config.all_events[event_id];
-        //if (config.profiling) {
-        //  PROFILER_EVENT_END(TASK_GET_EVENT, event_counter++);
-        //}
+        // if (config.profiling) {
+        //   PROFILER_EVENT_END(TASK_GET_EVENT, event_counter++);
+        // }
         if (is_termination_event(event_id, e)) {
           // terminate all workers
           if (sched_id < config.num_local_schedulers) {
@@ -659,13 +672,13 @@ __global__ void persistent_kernel(RuntimeConfig config) {
           my_last_task += e.first_task_id;
         }
         for (TaskId i = my_first_task; i < my_last_task; i++) {
-          //if (config.profiling) {
-          //  PROFILER_EVENT_START(TASK_SCHD_TASKS, event_counter);
-          //}
-          // size_t last_task_id = atomicAdd(
+          // if (config.profiling) {
+          //   PROFILER_EVENT_START(TASK_SCHD_TASKS, event_counter);
+          // }
+          //  size_t last_task_id = atomicAdd(
+          //      &(config.worker_queue_next_free_task_id[next_worker]), 1);
+          //  size_t last_task_id = custom_atomic_add_u64(
           //     &(config.worker_queue_next_free_task_id[next_worker]), 1);
-          // size_t last_task_id = custom_atomic_add_u64(
-          //    &(config.worker_queue_next_free_task_id[next_worker]), 1);
           size_t last_task_id = worker_queue_next_free_task_pos[next_worker]++;
           config.worker_queues[next_worker]
                               [last_task_id % config.per_worker_queue_len] = i;
@@ -685,9 +698,9 @@ __global__ void persistent_kernel(RuntimeConfig config) {
           }
           next_worker = (next_worker == my_last_worker - 1) ? my_first_worker
                                                             : next_worker + 1;
-          //if (config.profiling) {
-          //  PROFILER_EVENT_END(TASK_SCHD_TASKS, event_counter++);
-          //}
+          // if (config.profiling) {
+          //   PROFILER_EVENT_END(TASK_SCHD_TASKS, event_counter++);
+          // }
         }
         cur_event_pos[queue_idx] += 1;
       }

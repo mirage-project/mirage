@@ -50,6 +50,19 @@ using bfloat16 = type::bfloat16_t;
     printf("Unsupported seq_len: %zu\n", SEQ_LEN);                             \
   }
 
+#define DISPATCH_OUTPUT_SIZE(OUTPUT_SIZE, FUNC, T, ...)                        \
+  if ((OUTPUT_SIZE) == 16) {                                                   \
+    FUNC<T, 1, 16, 4096>(__VA_ARGS__);                                         \
+  } else if ((OUTPUT_SIZE) == 32) {                                            \
+    FUNC<T, 1, 32, 4096>(__VA_ARGS__);                                         \
+  } else if ((OUTPUT_SIZE) == 64) {                                            \
+    FUNC<T, 1, 64, 4096>(__VA_ARGS__);                                         \
+  } else {                                                                     \
+    printf("Unsupported output size: %d\n", OUTPUT_SIZE);                      \
+  }
+
+// Single Batch Decoding
+
 template <typename T, size_t SEQ_LEN>
 __global__ void single_batch_decoding_kernel_wrapper(void const *qkv_ptr,
                                                      void *k_cache_ptr,
@@ -102,31 +115,31 @@ void single_batch_decoding(torch::Tensor qkv,
   }
 }
 
-template <typename T>
+// RMSNorm Linear
+
+template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int REDUCTION_SIZE>
 __global__ void norm_linear_kernel_wrapper(void const *input_ptr,
                                            void const *weight_ptr,
                                            void *output_ptr) {
-  norm_linear_kernel<T>(input_ptr, weight_ptr, output_ptr);
+  norm_linear_kernel<T, BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE>(
+      input_ptr, weight_ptr, output_ptr);
 }
 
-template <typename T>
-__global__ void silu_mul_linear_kernel_wrapper(void const *input_ptr,
-                                               void const *mul_ptr,
-                                               void const *weight_ptr,
-                                               void *output_ptr) {
-  silu_mul_linear_kernel<T>(input_ptr, mul_ptr, weight_ptr, output_ptr);
-}
+template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int REDUCTION_SIZE>
+void launch_norm_linear(void const *input_ptr,
+                        void const *weight_ptr,
+                        void *output_ptr) {
+  dim3 grid_dim(1, 1, 1);
+  dim3 block_dim(128, 1, 1);
+  size_t smem_size = 36666;
 
-template <typename T>
-__global__ void linear_kernel_wrapper(void const *input_ptr,
-                                      void const *weight_ptr,
-                                      void *output_ptr) {
-  linear_kernel<T>(input_ptr, weight_ptr, output_ptr);
-}
+  cudaFuncSetAttribute(
+      norm_linear_kernel_wrapper<T, BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE>,
+      cudaFuncAttributeMaxDynamicSharedMemorySize,
+      smem_size);
 
-template <typename T>
-__global__ void argmax_kernel_wrapper(void const *input_ptr, void *output_ptr) {
-  argmax_kernel<T, 1, 32768>(input_ptr, output_ptr);
+  norm_linear_kernel_wrapper<T, BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE>
+      <<<grid_dim, block_dim, smem_size>>>(input_ptr, weight_ptr, output_ptr);
 }
 
 void norm_linear(torch::Tensor input,
@@ -137,18 +150,49 @@ void norm_linear(torch::Tensor input,
   void const *weight_ptr = weight.data_ptr();
   void *output_ptr = output.data_ptr();
 
-  dim3 grid_dim(1, 1, 1);
-  dim3 block_dim(128, 1, 1);
-  cudaFuncSetAttribute(norm_linear_kernel_wrapper<bfloat16>,
-                       cudaFuncAttributeMaxDynamicSharedMemorySize,
-                       36666);
-  norm_linear_kernel_wrapper<bfloat16>
-      <<<grid_dim, block_dim, 36666>>>(input_ptr, weight_ptr, output_ptr);
-  cudaDeviceSynchronize();
+  DISPATCH_OUTPUT_SIZE(output.size(1),
+                       launch_norm_linear,
+                       bfloat16,
+                       input_ptr,
+                       weight_ptr,
+                       output_ptr);
+
   cudaError_t err = cudaDeviceSynchronize();
   if (err != cudaSuccess) {
     printf("CUDA kernel launch error: %s\n", cudaGetErrorString(err));
   }
+}
+
+// SiLU MUL Linear
+
+template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int REDUCTION_SIZE>
+__global__ void silu_mul_linear_kernel_wrapper(void const *input_ptr,
+                                               void const *mul_ptr,
+                                               void const *weight_ptr,
+                                               void *output_ptr) {
+  silu_mul_linear_kernel<T, BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE>(
+      input_ptr, mul_ptr, weight_ptr, output_ptr);
+}
+
+template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int REDUCTION_SIZE>
+void launch_silu_mul_linear(void const *input_ptr,
+                            void const *mul_ptr,
+                            void const *weight_ptr,
+                            void *output_ptr) {
+  dim3 grid_dim(1, 1, 1);
+  dim3 block_dim(128, 1, 1);
+  size_t smem_size = 36666;
+
+  cudaFuncSetAttribute(silu_mul_linear_kernel_wrapper<T,
+                                                      BATCH_SIZE,
+                                                      OUTPUT_SIZE,
+                                                      REDUCTION_SIZE>,
+                       cudaFuncAttributeMaxDynamicSharedMemorySize,
+                       smem_size);
+
+  silu_mul_linear_kernel_wrapper<T, BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE>
+      <<<grid_dim, block_dim, smem_size>>>(
+          input_ptr, mul_ptr, weight_ptr, output_ptr);
 }
 
 void silu_mul_linear(torch::Tensor input,
@@ -161,18 +205,45 @@ void silu_mul_linear(torch::Tensor input,
   void const *weight_ptr = weight.data_ptr();
   void *output_ptr = output.data_ptr();
 
-  dim3 grid_dim(1, 1, 1);
-  dim3 block_dim(128, 1, 1);
-  cudaFuncSetAttribute(silu_mul_linear_kernel_wrapper<bfloat16>,
-                       cudaFuncAttributeMaxDynamicSharedMemorySize,
-                       36666);
-  silu_mul_linear_kernel_wrapper<bfloat16><<<grid_dim, block_dim, 36666>>>(
-      input_ptr, mul_ptr, weight_ptr, output_ptr);
-  cudaDeviceSynchronize();
+  DISPATCH_OUTPUT_SIZE(output.size(1),
+                       launch_silu_mul_linear,
+                       bfloat16,
+                       input_ptr,
+                       mul_ptr,
+                       weight_ptr,
+                       output_ptr);
+
   cudaError_t err = cudaDeviceSynchronize();
   if (err != cudaSuccess) {
     printf("CUDA kernel launch error: %s\n", cudaGetErrorString(err));
   }
+}
+
+// Linear
+
+template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int REDUCTION_SIZE>
+__global__ void linear_kernel_wrapper(void const *input_ptr,
+                                      void const *weight_ptr,
+                                      void *output_ptr) {
+  linear_kernel<T, BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE>(
+      input_ptr, weight_ptr, output_ptr);
+}
+
+template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int REDUCTION_SIZE>
+void launch_linear(void const *input_ptr,
+                   void const *weight_ptr,
+                   void *output_ptr) {
+  dim3 grid_dim(1, 1, 1);
+  dim3 block_dim(128, 1, 1);
+  size_t smem_size = 36666;
+
+  cudaFuncSetAttribute(
+      linear_kernel_wrapper<T, BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE>,
+      cudaFuncAttributeMaxDynamicSharedMemorySize,
+      smem_size);
+
+  linear_kernel_wrapper<T, BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE>
+      <<<grid_dim, block_dim, smem_size>>>(input_ptr, weight_ptr, output_ptr);
 }
 
 void linear(torch::Tensor input, torch::Tensor weight, torch::Tensor output) {
@@ -181,18 +252,38 @@ void linear(torch::Tensor input, torch::Tensor weight, torch::Tensor output) {
   void const *weight_ptr = weight.data_ptr();
   void *output_ptr = output.data_ptr();
 
-  dim3 grid_dim(1, 1, 1);
-  dim3 block_dim(128, 1, 1);
-  cudaFuncSetAttribute(linear_kernel_wrapper<bfloat16>,
-                       cudaFuncAttributeMaxDynamicSharedMemorySize,
-                       36666);
-  linear_kernel_wrapper<bfloat16>
-      <<<grid_dim, block_dim, 36666>>>(input_ptr, weight_ptr, output_ptr);
-  cudaDeviceSynchronize();
+  DISPATCH_OUTPUT_SIZE(output.size(1),
+                       launch_linear,
+                       bfloat16,
+                       input_ptr,
+                       weight_ptr,
+                       output_ptr);
+
   cudaError_t err = cudaDeviceSynchronize();
   if (err != cudaSuccess) {
     printf("CUDA kernel launch error: %s\n", cudaGetErrorString(err));
   }
+}
+
+// Argmax
+
+template <typename T>
+__global__ void argmax_kernel_wrapper(void const *input_ptr, void *output_ptr) {
+  argmax_kernel<T, 1, 32768>(input_ptr, output_ptr);
+}
+
+template <typename T>
+void launch_argmax(void const *input_ptr, void *output_ptr) {
+  dim3 grid_dim(1, 1, 1);
+  dim3 block_dim(128, 1, 1);
+  size_t smem_size = 36666;
+
+  cudaFuncSetAttribute(argmax_kernel_wrapper<T>,
+                       cudaFuncAttributeMaxDynamicSharedMemorySize,
+                       smem_size);
+
+  argmax_kernel_wrapper<T>
+      <<<grid_dim, block_dim, smem_size>>>(input_ptr, output_ptr);
 }
 
 void argmax(torch::Tensor input, torch::Tensor output) {
@@ -200,14 +291,8 @@ void argmax(torch::Tensor input, torch::Tensor output) {
   void const *input_ptr = input.data_ptr();
   void *output_ptr = output.data_ptr();
 
-  dim3 grid_dim(1, 1, 1);
-  dim3 block_dim(128, 1, 1);
-  cudaFuncSetAttribute(argmax_kernel_wrapper<bfloat16>,
-                       cudaFuncAttributeMaxDynamicSharedMemorySize,
-                       36666);
-  argmax_kernel_wrapper<bfloat16>
-      <<<grid_dim, block_dim, 36666>>>(input_ptr, output_ptr);
-  cudaDeviceSynchronize();
+  launch_argmax<bfloat16>(input_ptr, output_ptr);
+
   cudaError_t err = cudaDeviceSynchronize();
   if (err != cudaSuccess) {
     printf("CUDA kernel launch error: %s\n", cudaGetErrorString(err));
@@ -215,6 +300,7 @@ void argmax(torch::Tensor input, torch::Tensor output) {
 }
 
 // pybind11 bindings
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("linear", &linear, "Linear kernel");
   m.def("argmax", &argmax, "argmax kernel");
