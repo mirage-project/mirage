@@ -29,15 +29,15 @@ namespace kernel {
 using bfloat16 = type::bfloat16_t;
 
 // kernel for [16, 64] and any BATCH_SIZE < 16 [x, 64]
-// OUTPUT_SIZE = 16, 32, 64, INPUT_SIZE = multiple of 64
-template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int INPUT_SIZE>
+// OUTPUT_SIZE = 16, 32, 64, REDUCTION_SIZE = multiple of 64
+template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int REDUCTION_SIZE>
 __device__ __forceinline__ void norm_linear_kernel(void const *input_ptr,
                                                    void const *weight_ptr,
                                                    void *output_ptr) {
   // Here we assume the type of T is bfloat16, so the sizeof(T) is 2
   constexpr int CHUNK_SIZE = 16 / sizeof(T);
   constexpr int TILE_SIZE = 64;
-  constexpr int FORLOOP_RANGE = INPUT_SIZE / TILE_SIZE;
+  constexpr int FORLOOP_RANGE = REDUCTION_SIZE / TILE_SIZE;
 
   constexpr int NUM_CHUNKS_A = BATCH_SIZE * TILE_SIZE / CHUNK_SIZE;
   constexpr int NUM_CHUNKS_B = TILE_SIZE * OUTPUT_SIZE / CHUNK_SIZE;
@@ -67,7 +67,7 @@ __device__ __forceinline__ void norm_linear_kernel(void const *input_ptr,
   T const *__restrict__ d_weight = static_cast<T const *>(weight_ptr);
   T *__restrict__ d_output = static_cast<T *>(output_ptr);
 
-  using InputDmem = dmem_row_const<T, BATCH_SIZE, TILE_SIZE, INPUT_SIZE>;
+  using InputDmem = dmem_row_const<T, BATCH_SIZE, TILE_SIZE, REDUCTION_SIZE>;
   using WeightDmem = dmem_row_const<T, TILE_SIZE, OUTPUT_SIZE, OUTPUT_SIZE>;
   using OutputDmem = dmem_row<T, BATCH_SIZE, OUTPUT_SIZE, OUTPUT_SIZE>;
 

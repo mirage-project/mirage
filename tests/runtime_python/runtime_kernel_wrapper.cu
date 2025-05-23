@@ -117,15 +117,15 @@ void single_batch_decoding(torch::Tensor qkv,
 
 // RMSNorm Linear
 
-template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int INPUT_SIZE>
+template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int REDUCTION_SIZE>
 __global__ void norm_linear_kernel_wrapper(void const *input_ptr,
                                            void const *weight_ptr,
                                            void *output_ptr) {
-  norm_linear_kernel<T, BATCH_SIZE, OUTPUT_SIZE, INPUT_SIZE>(
+  norm_linear_kernel<T, BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE>(
       input_ptr, weight_ptr, output_ptr);
 }
 
-template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int INPUT_SIZE>
+template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int REDUCTION_SIZE>
 void launch_norm_linear(void const *input_ptr,
                         void const *weight_ptr,
                         void *output_ptr) {
@@ -134,11 +134,11 @@ void launch_norm_linear(void const *input_ptr,
   size_t smem_size = 36666;
 
   cudaFuncSetAttribute(
-      norm_linear_kernel_wrapper<T, BATCH_SIZE, OUTPUT_SIZE, INPUT_SIZE>,
+      norm_linear_kernel_wrapper<T, BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE>,
       cudaFuncAttributeMaxDynamicSharedMemorySize,
       smem_size);
 
-  norm_linear_kernel_wrapper<T, BATCH_SIZE, OUTPUT_SIZE, INPUT_SIZE>
+  norm_linear_kernel_wrapper<T, BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE>
       <<<grid_dim, block_dim, smem_size>>>(input_ptr, weight_ptr, output_ptr);
 }
 
@@ -165,16 +165,16 @@ void norm_linear(torch::Tensor input,
 
 // SiLU MUL Linear
 
-template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int INPUT_SIZE>
+template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int REDUCTION_SIZE>
 __global__ void silu_mul_linear_kernel_wrapper(void const *input_ptr,
                                                void const *mul_ptr,
                                                void const *weight_ptr,
                                                void *output_ptr) {
-  silu_mul_linear_kernel<T, BATCH_SIZE, OUTPUT_SIZE, INPUT_SIZE>(
+  silu_mul_linear_kernel<T, BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE>(
       input_ptr, mul_ptr, weight_ptr, output_ptr);
 }
 
-template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int INPUT_SIZE>
+template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int REDUCTION_SIZE>
 void launch_silu_mul_linear(void const *input_ptr,
                             void const *mul_ptr,
                             void const *weight_ptr,
@@ -183,12 +183,14 @@ void launch_silu_mul_linear(void const *input_ptr,
   dim3 block_dim(128, 1, 1);
   size_t smem_size = 36666;
 
-  cudaFuncSetAttribute(
-      silu_mul_linear_kernel_wrapper<T, BATCH_SIZE, OUTPUT_SIZE, INPUT_SIZE>,
-      cudaFuncAttributeMaxDynamicSharedMemorySize,
-      smem_size);
+  cudaFuncSetAttribute(silu_mul_linear_kernel_wrapper<T,
+                                                      BATCH_SIZE,
+                                                      OUTPUT_SIZE,
+                                                      REDUCTION_SIZE>,
+                       cudaFuncAttributeMaxDynamicSharedMemorySize,
+                       smem_size);
 
-  silu_mul_linear_kernel_wrapper<T, BATCH_SIZE, OUTPUT_SIZE, INPUT_SIZE>
+  silu_mul_linear_kernel_wrapper<T, BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE>
       <<<grid_dim, block_dim, smem_size>>>(
           input_ptr, mul_ptr, weight_ptr, output_ptr);
 }
@@ -219,15 +221,15 @@ void silu_mul_linear(torch::Tensor input,
 
 // Linear
 
-template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int INPUT_SIZE>
+template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int REDUCTION_SIZE>
 __global__ void linear_kernel_wrapper(void const *input_ptr,
                                       void const *weight_ptr,
                                       void *output_ptr) {
-  linear_kernel<T, BATCH_SIZE, OUTPUT_SIZE, INPUT_SIZE>(
+  linear_kernel<T, BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE>(
       input_ptr, weight_ptr, output_ptr);
 }
 
-template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int INPUT_SIZE>
+template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int REDUCTION_SIZE>
 void launch_linear(void const *input_ptr,
                    void const *weight_ptr,
                    void *output_ptr) {
@@ -236,11 +238,11 @@ void launch_linear(void const *input_ptr,
   size_t smem_size = 36666;
 
   cudaFuncSetAttribute(
-      linear_kernel_wrapper<T, BATCH_SIZE, OUTPUT_SIZE, INPUT_SIZE>,
+      linear_kernel_wrapper<T, BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE>,
       cudaFuncAttributeMaxDynamicSharedMemorySize,
       smem_size);
 
-  linear_kernel_wrapper<T, BATCH_SIZE, OUTPUT_SIZE, INPUT_SIZE>
+  linear_kernel_wrapper<T, BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE>
       <<<grid_dim, block_dim, smem_size>>>(input_ptr, weight_ptr, output_ptr);
 }
 

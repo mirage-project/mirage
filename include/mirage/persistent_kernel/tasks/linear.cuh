@@ -28,14 +28,14 @@ namespace kernel {
 
 using bfloat16 = type::bfloat16_t;
 
-template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int INPUT_SIZE>
+template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int REDUCTION_SIZE>
 __device__ __forceinline__ void linear_kernel(void const *input_ptr,
                                               void const *weight_ptr,
                                               void *output_ptr) {
 
   constexpr int CHUNK_SIZE = 16 / sizeof(T);
   constexpr int TILE_SIZE = 64;
-  constexpr int FORLOOP_RANGE = INPUT_SIZE / TILE_SIZE;
+  constexpr int FORLOOP_RANGE = REDUCTION_SIZE / TILE_SIZE;
 
   constexpr int NUM_CHUNKS_A = BATCH_SIZE * TILE_SIZE / CHUNK_SIZE;
   constexpr int NUM_CHUNKS_B = TILE_SIZE * OUTPUT_SIZE / CHUNK_SIZE;
@@ -65,7 +65,7 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
   T const *__restrict__ d_weight = static_cast<T const *>(weight_ptr);
   T *__restrict__ d_output = static_cast<T *>(output_ptr);
 
-  using InputDmem = dmem_row_const<T, BATCH_SIZE, TILE_SIZE, INPUT_SIZE>;
+  using InputDmem = dmem_row_const<T, BATCH_SIZE, TILE_SIZE, REDUCTION_SIZE>;
   using WeightDmem = dmem_row_const<T, TILE_SIZE, OUTPUT_SIZE, OUTPUT_SIZE>;
   using OutputDmem = dmem_row<T, BATCH_SIZE, OUTPUT_SIZE, OUTPUT_SIZE>;
 
