@@ -14,6 +14,10 @@
 #include "mirage/search/verification/verifier.h"
 #include "mirage/utils/json_utils.h"
 
+extern "C" {
+void get_egraph(char const *expr);
+}
+
 namespace mirage {
 namespace search {
 
@@ -72,7 +76,8 @@ private:
       size_t depth);
 
   void preprocess(kernel::Graph const &computation_graph);
-  bool check_pattern(std::shared_ptr<AbstractExpr> pattern);
+  std::vector<bool>
+      check_pattern(std::vector<std::shared_ptr<AbstractExpr>> &inputs);
   bool verify(kernel::Graph &g);
 
   void save_results() const;

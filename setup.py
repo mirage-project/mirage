@@ -32,7 +32,6 @@ else:
 
 import z3
 z3_path = path.dirname(z3.__file__)
-print(f"Z3 path: {z3_path}", flush=True)
 
 # Use version.py to get package version
 version_file = os.path.join(os.path.dirname(__file__), "python/mirage/version.py")
@@ -57,9 +56,10 @@ def config_cython():
                               path.join(mirage_path, "deps", "cutlass", "include"),
                               path.join(z3_path, "include"),
                               "/usr/local/cuda/include"],
-                libraries=["mirage_runtime", "cudadevrt", "cudart_static", "cudnn", "cublas", "cudart", "cuda", "z3", "gomp", "rt"],
+                libraries=["mirage_runtime", "cudadevrt", "cudart_static", "cudnn", "cublas", "cudart", "cuda", "z3", "gomp", "abstract_subexpr"],
                 library_dirs=[path.join(mirage_path, "build"),
                               path.join(z3_path, "lib"),
+                              path.join(mirage_path, "src", "search", "abstract_expr", "abstract_subexpr", "target", "release"),
                               "/usr/local/cuda/lib",
                               "/usr/local/cuda/lib64",
                               "/usr/local/cuda/lib64/stubs"],
