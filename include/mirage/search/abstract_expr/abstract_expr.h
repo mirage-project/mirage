@@ -19,7 +19,6 @@ struct KVPair {
 KVPair *egg_equiv(char const **inputs, int len);
 }
 
-
 namespace mirage {
 namespace search {
 

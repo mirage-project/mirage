@@ -154,12 +154,11 @@ void KernelGraphGenerator::generate_next_operator(
             inputs.push_back(pattern);
           }
         }
-        std::unordered_map<int, bool> results = check_pattern(inputs);
+        std::vector<bool> results = check_pattern(inputs);
         // filter input_tensors of 'true'
-        for (auto const &result : results) {
-          if (result.second) {
-            KNOperator *new_op =
-                create_op(*c.kn_graph, op_type, tensors[result.first]);
+        for (int i = 0; i < results.size(); i++) {
+          if (results[i]) {
+            KNOperator *new_op = create_op(*c.kn_graph, op_type, tensors[i]);
             if (new_op) {
               c.kn_graph->operators.push_back(new_op);
               if (check_range(init_ranges, target_ranges, *c.kn_graph)) {
@@ -381,11 +380,11 @@ void KernelGraphGenerator::generate_next_operator(
           inputs.push_back(pattern);
         }
       }
-      std::unordered_map<int, bool> results = check_pattern(inputs);
+      std::vector<bool> results = check_pattern(inputs);
       // filter input_tensors of 'true'
-      for (auto const &result : results) {
-        if (result.second) {
-          std::vector<STensor> input_tensors = tensors[result.first];
+      for (int i = 0; i < results.size(); i++) {
+        if (results[i]) {
+          std::vector<STensor> input_tensors = tensors[i];
           TBOperator *last_op = c.tb_graph->operators.back();
           TBOperator *new_op = create_op(*c.tb_graph, op_type, input_tensors);
 
@@ -498,7 +497,7 @@ void KernelGraphGenerator::preprocess(kernel::Graph const &computation_graph) {
   }
 }
 
-std::unordered_map<int, bool> KernelGraphGenerator::check_pattern(
+std::vector<bool> KernelGraphGenerator::check_pattern(
     std::vector<std::shared_ptr<AbstractExpr>> &inputs) {
   std::unordered_map<int, bool> results;
   for (int i = 0; i < inputs.size(); i++) {
@@ -514,7 +513,17 @@ std::unordered_map<int, bool> KernelGraphGenerator::check_pattern(
       inputs.end(),
       [](std::shared_ptr<AbstractExpr> const &ptr) { return ptr == nullptr; });
   if (all_null) {
-    return results;
+    std::vector<int> keys;
+    for (auto const &kv : results) {
+      keys.push_back(kv.first);
+    }
+
+    std::sort(keys.begin(), keys.end());
+    std::vector<bool> ordered_results;
+    for (int key : keys) {
+      ordered_results.push_back(results[key]);
+    }
+    return ordered_results;
   }
 
   for (auto const &final_pattern : computation_graph_output_patterns) {
@@ -538,7 +547,17 @@ std::unordered_map<int, bool> KernelGraphGenerator::check_pattern(
       { seen_patterns[input->to_string()] = false; }
     }
   }
-  return results;
+  std::vector<int> keys;
+  for (auto const &kv : results) {
+    keys.push_back(kv.first);
+  }
+
+  std::sort(keys.begin(), keys.end());
+  std::vector<bool> ordered_results;
+  for (int key : keys) {
+    ordered_results.push_back(results[key]);
+  }
+  return ordered_results;
 }
 
 bool KernelGraphGenerator::verify(kernel::Graph &g) {

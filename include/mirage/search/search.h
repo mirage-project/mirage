@@ -15,7 +15,7 @@
 #include "mirage/utils/json_utils.h"
 
 extern "C" {
-  void get_egraph(const char* expr);
+void get_egraph(char const *expr);
 }
 
 namespace mirage {
@@ -76,7 +76,7 @@ private:
       size_t depth);
 
   void preprocess(kernel::Graph const &computation_graph);
-  std::unordered_map<int, bool>
+  std::vector<bool>
       check_pattern(std::vector<std::shared_ptr<AbstractExpr>> &inputs);
   bool verify(kernel::Graph &g);
 
