@@ -33,10 +33,15 @@ struct TranspilerConfig {
   // and H100 is 90
   int target_cc;
 
+  bool profiling;
+
   // features for GPUs >= Grace Hopper
   int num_consumer_wgs;
   int num_producer_wgs;
   int pipeline_stages;
+
+  // Whether to enable graph rewriting
+  bool enable_online_softmax = false;
 };
 
 // Directive for an output tensor
@@ -68,6 +73,8 @@ struct TranspileResult {
 
   // The maximum smem size used by a kernel, in bytes
   size_t max_smem_size;
+
+  size_t profiler_buf_size;
 
   // Directives for output tensors
   std::vector<OutputTensorDirective> output_directives;
@@ -119,6 +126,8 @@ struct CustomOPTranspileResult {
   std::string func_name;
   // The size of the shared memory, in bytes
   size_t smem_size;
+
+  size_t profiler_buf_size;
   // The kernel function code. Should be something like:
   // __global__ void <func_name>(InputDTensor0, ..., InputDTensorN) {
   //  [kernel code]

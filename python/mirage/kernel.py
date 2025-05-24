@@ -12,19 +12,26 @@ from .core import *
 from .threadblock import *
 from .visualizer import *
 from .utils import *
-from .triton_profiler import *
+from .global_config import global_config
+from .graph_dataset import graph_dataset
+
+from collections import deque
+
+MAX_THREADS = os.cpu_count()
 
 HARD_CODE = """
 #include <Python.h>
+#include <cuda_runtime.h>
 
 static PyObject *launch(PyObject *self, PyObject *args) {
-  PyObject *input_list, *output_list, *comm_list, *py_buffer;
+  PyObject *input_list, *output_list, *comm_list, *py_buffer, *py_stream, *py_profiler_buffer;
   void *buffer;
   std::vector<void const *> input_tensors;
   std::vector<void*> output_tensors;
   std::vector<void*> comm_buffers;
+  void *profiler_buffer;
 
-  if (!PyArg_ParseTuple(args, "OOOO", &input_list, &output_list, &comm_list, &py_buffer)) {
+  if (!PyArg_ParseTuple(args, "OOOOOO", &input_list, &output_list, &comm_list, &py_buffer, &py_stream, &py_profiler_buffer)) {
     PyErr_SetString(PyExc_TypeError, "Invalid parameters");
     return NULL;
   }
@@ -69,8 +76,9 @@ static PyObject *launch(PyObject *self, PyObject *args) {
   }
 
   buffer = PyLong_AsVoidPtr(py_buffer);
-
-  execute_mugraph(input_tensors, output_tensors, comm_buffers, buffer);
+  profiler_buffer = PyLong_AsVoidPtr(py_profiler_buffer);
+  cudaStream_t stream = (cudaStream_t)PyLong_AsVoidPtr(py_stream);
+  execute_mugraph(input_tensors, output_tensors, comm_buffers, buffer, stream, profiler_buffer);
 
   Py_RETURN_NONE;
 }
@@ -195,25 +203,58 @@ dtype_map = {
     'fp64':    torch.float64
 }
 
-def get_cc_cmd(target, cc, FILE_NAME, py_include_dir, MIRAGE_ROOT, NCCL_ROOT, MPI_ROOT, NVSHMEM_ROOT, so_path):
+# Because pip install -e . and pip install . have different directory structure,
+# we need to check the directory structure to find the correct MIRAGE_ROOT.
+def get_key_paths():
+    root_dir = os.path.join(
+        os.path.dirname(__file__), "../.."
+    )  # Using pip install -e .
+    if not os.path.exists(os.path.join(root_dir, "deps")):  # Using pip install .
+        root_dir = os.path.dirname(__file__)
+
+    # If MIRAGE_ROOT is not set, use the root_dir as MIRAGE_ROOT
+    MIRAGE_ROOT = os.environ.get("MIRAGE_ROOT", root_dir)
+
+    INCLUDE_PATH = ""
+    DEPS_PATH = ""
+    if os.path.exists(os.path.join(MIRAGE_ROOT, "deps")):
+        INCLUDE_PATH = os.path.join(MIRAGE_ROOT, "include")
+        DEPS_PATH = os.path.join(MIRAGE_ROOT, "deps")
+    else:
+        INCLUDE_PATH = os.path.join(MIRAGE_ROOT, "include")
+        DEPS_PATH = os.path.join(MIRAGE_ROOT, "include/deps")
+
+    assert os.path.exists(
+        MIRAGE_ROOT
+    ), "No MIRAGE_ROOT directory found. Likely using the wrong MIRAGE_ROOT."
+    assert os.path.exists(
+        INCLUDE_PATH
+    ), "No /include directory found. Likely using the wrong MIRAGE_ROOT."
+    assert os.path.exists(
+        DEPS_PATH
+    ), "No /deps directory found. Likely using the wrong MIRAGE_ROOT."
+
+    return MIRAGE_ROOT, INCLUDE_PATH, DEPS_PATH
+
+def get_cc_cmd(
+    target, cc, FILE_NAME, py_include_dir, INCLUDE_PATH, DEPS_PATH, so_path, profiling
+):
     common_cmd = [
         cc,
         FILE_NAME,
         "-O3",
         f"-I{py_include_dir}",
-        f"-I{MIRAGE_ROOT}/include/mirage/transpiler/runtime/",
-        f"-I{MIRAGE_ROOT}/deps/cutlass/include/",
+        f"-I{os.path.join(INCLUDE_PATH, 'mirage/transpiler/runtime')}",
+        f"-I{os.path.join(DEPS_PATH, 'cutlass/include')}",
         "-ccbin=mpic++",
-        f"-I{NCCL_ROOT}/include/",
-        f"-L{NCCL_ROOT}/lib/",
+        # f"-I{NCCL_ROOT}/include/",
+        # f"-L{NCCL_ROOT}/lib/",
         #f"-I{MPI_ROOT}/include",
         #f"-L{MPI_ROOT}/lib",
         #f"-I{NVSHMEM_ROOT}/include",
         #f"-L{NVSHMEM_ROOT}/lib",
         f"-I/usr/include/nvshmem_12/",
         f"-L/usr/lib/x86_64-linux-gnu/",
-        #f"-I{CUDA_ROOT}/include",
-        #f"-L{CUDA_ROOT}/lib64",
         "-shared",
         "-std=c++17",
         "-rdc=true",
@@ -234,11 +275,11 @@ def get_cc_cmd(target, cc, FILE_NAME, py_include_dir, MIRAGE_ROOT, NCCL_ROOT, MP
         specific_cmd = [
             "-arch=sm_90a",
             "-gencode=arch=compute_90a,code=sm_90a",
-        ]
+        ] + (["-DMIRAGE_ENABLE_PROFILER"] if profiling else [])
     else:
         specific_cmd = [
             "-arch=native",
-        ]
+        ]+ (["-DMIRAGE_ENABLE_PROFILER"] if profiling else [])
 
     return common_cmd[:6] + specific_cmd + common_cmd[6:]
 
@@ -339,6 +380,12 @@ class KNGraph:
     def clamp(self, A: DTensor, min_val: float, max_val: float):
         return self.cygraph.clamp(A, min_val, max_val)
 
+    def sqrt(self, A: DTensor):
+        return self.cygraph.sqrt(A)
+
+    def square(self, A: DTensor):
+        return self.cygraph.square(A)
+
     def add(self, A: DTensor, B: DTensor):
         return self.cygraph.add(A, B)
 
@@ -347,6 +394,9 @@ class KNGraph:
 
     def div(self, A: DTensor, B: DTensor):
         return self.cygraph.div(A, B)
+
+    def pow(self, A: DTensor, B: DTensor):
+        return self.cygraph.pow(A, B)
 
     def rms_norm(self, A: DTensor, normalized_shape: tuple):
         return self.cygraph.rms_norm(A, normalized_shape)
@@ -358,6 +408,9 @@ class KNGraph:
     # TODO (linsj20)
     def allreduce(self, A: DTensor, reduce_op="sum", inplace=False):
         return self.cygraph.all_reduce(A, reduce_op, inplace)
+    
+    def get_owner_independent_hash(self):
+        return self.cygraph.get_owner_independent_hash()
 
     def valid_kernels(self):
         assert self._is_compiled, "Should check kernel validness after compilation"
@@ -404,6 +457,10 @@ class KNGraph:
             results.append(self.get_tensor_slice(input_tensor, input_map, rank))
         return results
 
+    def get_error_message(self):
+        assert self._is_compiled, "Should check error message after compilation"
+        return self._error_message
+
     def __call__(self, **kwargs):
         if self.backend == "cuda":
             return self.cuda_call(**kwargs)
@@ -419,9 +476,12 @@ class KNGraph:
 
         output_shapes = self._cached_results["output_shapes"]
         output_tensors = [
-            torch.zeros(shape, dtype=input_tensors[0].dtype, device=input_tensors[0].device) for shape in output_shapes
+            torch.zeros(
+                shape, dtype=input_tensors[0].dtype, device=input_tensors[0].device
+            )
+            for shape in output_shapes
         ]
-        if(verbose):
+        if verbose:
             print("Input tensors:")
             for t in input_tensors:
                 print(f"Shape: {t.shape}, dtype: {t.dtype}, device: {t.device}")
@@ -463,6 +523,15 @@ class KNGraph:
         for i, tensor in enumerate(input_tensors):
             print(f"input_tensors[{i}].shape: {tensor.shape}, dtype: {tensor.dtype}, device: {tensor.device}, strides: {tensor.stride()}")
 
+        stream = kwargs.get("stream", None)
+        if stream is None:
+            stream = torch.cuda.default_stream()
+
+        assert self.cygraph.get_num_inputs() == len(
+            input_tensors
+        ), "Expected {} input tensors, got {}".format(
+            self.cygraph.get_num_inputs(), len(input_tensors)
+        )
 
         # TODO: dtype and device
         buffer_tensor = torch.empty(
@@ -480,19 +549,44 @@ class KNGraph:
             for meta in results["output_directives"]
         ]
 
-        self.initialize_mpi_nvshmem(rank)
-        try:
-            comm_buffers_ptr = self.allocate_comm_buffers()
-        except Exception as e:
-            print(f"Error when allocating comm buffers: {e}")
-            sys.exit(1)
+        prodiler_buffer_tensor = torch.empty(
+            results["profiler_buf_size"],
+            dtype=torch.uint64,
+            device=input_tensors[0].device,
+        ).contiguous()
+
         buffer_tensor_ptr = buffer_tensor.data_ptr()
         input_tensors_ptr = [tensor.data_ptr() for tensor in input_tensors]
         output_tensors_ptr = [tensor.data_ptr() for tensor in output_tensors]
-        self.run(input_tensors_ptr, output_tensors_ptr, comm_buffers_ptr, buffer_tensor_ptr)
-        self.free_comm_buffers(comm_buffers_ptr)
-        self.finalize_mpi_nvshmem()
+        prodiler_buffer_tensor_ptr = prodiler_buffer_tensor.data_ptr()
+        
+        comm_buffers_ptr = []
+        if self.use_nvshmem:
+            self.initialize_mpi_nvshmem(rank)
+            try:
+                comm_buffers_ptr = self.allocate_comm_buffers()
+            except Exception as e:
+                print(f"Error when allocating comm buffers: {e}")
+                sys.exit(1)
+        self.run(
+            input_tensors_ptr,
+            output_tensors_ptr,
+            comm_buffers_ptr,
+            buffer_tensor_ptr,
+            stream.cuda_stream,
+            prodiler_buffer_tensor_ptr,
+        )
+        if self.use_nvshmem:
+            self.free_comm_buffers(comm_buffers_ptr)
+            self.finalize_mpi_nvshmem()
 
+        if results["profiler_buf_size"] > 0:
+            from .profiler import export_to_perfetto_trace
+            profiler_result_dir = "./profiling_results"
+            profiler_result_file = os.path.join(profiler_result_dir, 'mirage.perfetto-trace')
+            os.makedirs(profiler_result_dir, exist_ok=True)
+            export_to_perfetto_trace(prodiler_buffer_tensor, profiler_result_file)
+            print(f"Exported profiling results to {profiler_result_file}, please view it with perfetto: https://ui.perfetto.dev/")
         return output_tensors
 
     def compile(self, async_=False, **kwargs):
@@ -507,17 +601,37 @@ class KNGraph:
             input_tensors
         ), "Given number of inputs do not match the uGraph's inputs"
         for i in range(len(dtensors)):
-            input_strides.append(self.cygraph.get_input_dtensor_layout(dtensors[i]))
+            dims, strides = self.cygraph.get_input_dtensor_shape_and_stride(dtensors[i])
+            assert (
+                dims == input_tensors[i].shape
+            ), "Expected input dims {}, got input dims {}".format(
+                dims, input_tensors[i].shape
+            )
+            assert (
+                strides == input_tensors[i].stride()
+            ), "Expected input strides {}, got input strides {}".format(
+                strides, input_tensors[i].stride()
+            )
+            input_strides.append(strides)
         target_cc = kwargs.get(
             "target_cc",
             torch.cuda.get_device_properties(0).major * 10
             + torch.cuda.get_device_properties(0).minor,
         )
-        num_warp_groups = kwargs.get("num_warp_groups", -1)
-        pipeline_stages = kwargs.get("pipeline_stages", -1)
+        num_warp_groups = kwargs.get("num_warp_groups", 2)
+        pipeline_stages = kwargs.get("pipeline_stages", 2)
+        # TODO, add profling for Ampere later to show gpu wave
+        profiling = kwargs.get("profiling", False)
+        enable_online_softmax = kwargs.get("enable_online_softmax", False)
 
         result = generate_cuda_program(
-            self.cygraph, target_cc=target_cc, input_strides=input_strides, num_warp_groups = num_warp_groups, pipeline_stages = pipeline_stages
+            self.cygraph,
+            target_cc=target_cc,
+            input_strides=input_strides,
+            num_warp_groups=num_warp_groups,
+            pipeline_stages=pipeline_stages,
+            profiling=profiling,
+            enable_online_softmax=enable_online_softmax,
         )
 
         # print(result['code'])
@@ -528,36 +642,14 @@ class KNGraph:
             )
             self._is_compiled = True
             self._valid_cuda_kernels = False
+            self._error_message = "shared memory usage exceed limit"
 
             if async_:
                 return Handle([], None)
             else:
                 return None
 
-        MIRAGE_ROOT = os.environ.get(
-            "MIRAGE_ROOT", os.path.join(os.path.dirname(__file__), "../..")
-        )
-
-        NCCL_ROOT = os.environ.get("NCCL_HOME")
-        if not os.path.exists(NCCL_ROOT):
-            print(
-                f"Warning: NCCL_ROOT ({NCCL_ROOT}) not found. Disable distributed kernel generation."
-            )
-            #sys.exit(1)
-
-        MPI_ROOT = os.environ.get("MPI_HOME")
-        if not os.path.exists(MPI_ROOT):
-            print(
-                f"Warning: MPI_ROOT ({MPI_ROOT}) not found. Disable distributed kernel generation."
-            )
-            sys.exit(1)
-
-        NVSHMEM_ROOT = os.environ.get("NVSHMEM_HOME")
-        if not os.path.exists(NVSHMEM_ROOT):
-            print(
-                f"Warning: NVSHMEM_ROOT ({NVSHMEM_ROOT}) not found. Disable distributed kernel generation."
-            )
-            sys.exit(1)
+        MIRAGE_ROOT, INCLUDE_PATH, DEPS_PATH = get_key_paths()
         # if True:
         #     tempdir = './test/'
 
@@ -580,9 +672,6 @@ class KNGraph:
                 os.makedirs(saved_addr, exist_ok=True)
                 with open(saved_addr + "test" + str(file_id) + ".cu", "w") as f:
                     f.write(result["code"] + HARD_CODE)
-        # TMP
-        #with open("./test.cu", "w") as f:
-        #    f.write(result["code"] + HARD_CODE)
 
         cc = shutil.which("nvcc")
         if cc is None:
@@ -600,14 +689,16 @@ class KNGraph:
         if scheme == "posix_local":
             scheme = "posix_prefix"
         py_include_dir = sysconfig.get_paths(scheme=scheme)["include"]
-
-        if not os.path.exists(MIRAGE_ROOT):
-            print(
-                f"Error: MIRAGE_ROOT ({MIRAGE_ROOT}) not found. Please set the MIRAGE_ROOT env variable correctly"
-            )
-            sys.exit(1)
-        cc_cmd = get_cc_cmd(target_cc, cc, FILE_NAME, py_include_dir, MIRAGE_ROOT, NCCL_ROOT, MPI_ROOT, NVSHMEM_ROOT, so_path)
-        # print(cc_cmd)
+        cc_cmd = get_cc_cmd(
+            target_cc,
+            cc,
+            FILE_NAME,
+            py_include_dir,
+            INCLUDE_PATH,
+            DEPS_PATH,
+            so_path,
+            profiling,
+        )
 
         def remain_op():
             import importlib.util
@@ -616,19 +707,41 @@ class KNGraph:
             mod = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(mod)
             self.run = getattr(mod, "launch")
-            self.initialize_mpi_nvshmem = getattr(mod, "initialize_mpi_nvshmem")
-            self.finalize_mpi_nvshmem = getattr(mod, "finalize_mpi_nvshmem")
-            self.allocate_comm_buffers = getattr(mod, "allocate_comm_buffers")
-            self.free_comm_buffers = getattr(mod, "free_comm_buffers")
+            if self.use_nvshmem:
+                self.initialize_mpi_nvshmem = getattr(mod, "initialize_mpi_nvshmem")
+                self.finalize_mpi_nvshmem = getattr(mod, "finalize_mpi_nvshmem")
+                self.allocate_comm_buffers = getattr(mod, "allocate_comm_buffers")
+                self.free_comm_buffers = getattr(mod, "free_comm_buffers")
+            try:
+                spec = importlib.util.spec_from_file_location(
+                    "__mirage_launcher", so_path
+                )
+                mod = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+                self.run = getattr(mod, "launch")
 
-            self._is_compiled = True
-            self._valid_cuda_kernels = True
-            self._cached_results = result
-            tempdir_obj.cleanup()
-            return self._cached_results
+                self._is_compiled = True
+                self._valid_cuda_kernels = True
+                self._cached_results = result
+                self._error_message = "No error"
+                tempdir_obj.cleanup()
+                return self._cached_results
+            except ImportError:
+                # cannot import the built shared library likely due to
+                # compilation errors
+                self._is_compiled = True
+                self._valid_cuda_kernels = False
+                self._cached_results = None
+                self._error_message = "CUDA compilation error"
+                return None
 
         if async_:
-            ret = subprocess.Popen(cc_cmd)
+            if global_config.bypass_compile_errors:
+                ret = subprocess.Popen(
+                    cc_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT
+                )
+            else:
+                ret = subprocess.Popen(cc_cmd)
             return Handle([ret], remain_op)
         else:
             ret = subprocess.check_call(cc_cmd)
@@ -649,9 +762,29 @@ class KNGraph:
         backend: str = "cuda",
         warmup_iters: int = 16,
         profile_iters: int = 1000,
-        previous_checkpoint: str = None,
+        use_graph_dataset: bool = True,
+        use_cached_graphs: bool = True,
         save_codes: bool = False,
     ):
+        if use_graph_dataset:
+            cached_graph = graph_dataset.find(
+                self.cygraph,
+                imaps=imaps,
+                omaps=omaps,
+                griddims=griddims,
+                blockdims=blockdims,
+                fmaps=fmaps,
+                franges=franges,
+                backend=backend,
+            )
+            if cached_graph is not None:
+                return cached_graph
+        if use_cached_graphs:
+            previous_checkpoint = "mirage_cached_mugraphs_{:x}.json".format(
+                self.cygraph.get_owner_independent_hash()
+            )
+        else:
+            previous_checkpoint = None
         cygraphs = search(
             self.cygraph,
             imaps=imaps,
@@ -665,13 +798,17 @@ class KNGraph:
             default_config=config,
         )
         all_graphs = [KNGraph(g) for g in cygraphs]
+        print("Finished search, discovering {} mugraphs ...".format(len(all_graphs)))
         if backend == "cuda":
             # profile and use the best graph
             best_graph, best_perf = None, float("inf")
-            print("Transpiling discovered {} muGraphs ...".format(len(all_graphs)))
-            handles = []
+            print("Transpiling {} muGraphs ...".format(len(all_graphs)))
+            handles = deque()
 
-            target_cc = torch.cuda.get_device_properties(0).major * 10 + torch.cuda.get_device_properties(0).minor
+            target_cc = (
+                torch.cuda.get_device_properties(0).major * 10
+                + torch.cuda.get_device_properties(0).minor
+            )
             if target_cc >= 90:
                 pipeline_stages_list = [2, 3, 4]
                 num_warp_groups_list = [2, 3, 4]
@@ -681,42 +818,71 @@ class KNGraph:
                             dtensors = g.cygraph.get_input_dtensors()
                             input_tensors = list()
                             for t in dtensors:
-                                dims = [t.dim(i) for i in range(t.num_dims)]
-                                input_tensors.append(
-                                    torch.randn(dims, dtype=dtype_map[str(t.dtype)], device="cuda:0")
+                                dims, strides = (
+                                    g.cygraph.get_input_dtensor_shape_and_stride(t)
                                 )
+                                dtype = convert_dtype_to_torch_type(t.dtype)
+                                x = torch.randn(
+                                    dims,
+                                    dtype=dtype,
+                                    device="cuda:{}".format(
+                                        global_config.gpu_device_id
+                                    ),
+                                )
+                                x = torch.as_strided(x, size=dims, stride=strides)
+                                input_tensors.append(x)
                             starter = torch.cuda.Event(enable_timing=True)
                             ender = torch.cuda.Event(enable_timing=True)
                             new_g = g
-                            handle = new_g.compile(async_=True, inputs=input_tensors, pipeline_stages=pipeline_stages, num_warp_groups=num_warp_groups)
+                            if len(handles) == MAX_THREADS:
+                                handles.popleft().wait()
+                            handle = new_g.compile(
+                                async_=True,
+                                inputs=input_tensors,
+                                pipeline_stages=pipeline_stages,
+                                num_warp_groups=num_warp_groups,
+                            )
                             handles.append(handle)
             else:
                 for idx, g in enumerate(all_graphs):
                     dtensors = g.cygraph.get_input_dtensors()
                     input_tensors = list()
                     for t in dtensors:
-                        dims = [t.dim(i) for i in range(t.num_dims)]
-                        input_tensors.append(
-                            torch.randn(dims, dtype=dtype_map[str(t.dtype)], device="cuda:0")
+                        dims, strides = g.cygraph.get_input_dtensor_shape_and_stride(t)
+                        # dims = [t.dim(i) for i in range(t.num_dims)]
+                        dtype = convert_dtype_to_torch_type(t.dtype)
+                        x = torch.randn(
+                            dims,
+                            dtype=dtype,
+                            device="cuda:{}".format(global_config.gpu_device_id),
                         )
+                        x = torch.as_strided(x, size=dims, stride=strides)
+                        input_tensors.append(x)
                     starter = torch.cuda.Event(enable_timing=True)
                     ender = torch.cuda.Event(enable_timing=True)
+                    if len(handles) == MAX_THREADS:
+                        handles.popleft().wait()
                     handle = g.compile(async_=True, inputs=input_tensors)
                     handles.append(handle)
-            for handle in handles:
-                handle.wait()
+            while handles:
+                handles.popleft().wait()
             for idx, g in enumerate(all_graphs):
                 dtensors = g.cygraph.get_input_dtensors()
                 input_tensors = list()
                 for t in dtensors:
-                    dims = [t.dim(i) for i in range(t.num_dims)]
-                    input_tensors.append(
-                        torch.randn(dims, dtype=dtype_map[str(t.dtype)], device="cuda:0")
+                    dims, strides = g.cygraph.get_input_dtensor_shape_and_stride(t)
+                    dtype = convert_dtype_to_torch_type(t.dtype)
+                    x = torch.randn(
+                        dims,
+                        dtype=dtype,
+                        device="cuda:{}".format(global_config.gpu_device_id),
                     )
+                    x = torch.as_strided(x, size=dims, stride=strides)
+                    input_tensors.append(x)
                 starter = torch.cuda.Event(enable_timing=True)
                 ender = torch.cuda.Event(enable_timing=True)
                 if not g.valid_kernels():
-                    print("muGraph {}: skipping since its shared memory usage exceed limit".format(idx))
+                    print("muGraph {}: {}".format(idx, g.get_error_message()))
                     continue
                 # Warmup runs
                 for _ in range(warmup_iters):
@@ -732,34 +898,71 @@ class KNGraph:
                 if perf < best_perf:
                     best_graph, best_perf = g, perf
             best_graph.backend = "cuda"
+            if use_graph_dataset:
+                graph_dataset.store(
+                    input_graph=self.cygraph,
+                    optimized_graph=best_graph,
+                    imaps=imaps,
+                    omaps=omaps,
+                    griddims=griddims,
+                    blockdims=blockdims,
+                    fmaps=fmaps,
+                    franges=franges,
+                    backend=backend,
+                )
             return best_graph
         elif backend == "nki":
             return all_graphs
         elif backend == "triton":
+            from .triton_profiler import profile_and_select_best_graph
 
-            MIRAGE_ROOT = os.environ.get(
-                "MIRAGE_ROOT", os.path.join(os.path.dirname(__file__), "../../include")
+            MIRAGE_ROOT, INCLUDE_PATH, _ = get_key_paths()
+            os.environ["KERNELS_PATH"] = os.path.join(
+                INCLUDE_PATH, "mirage/triton_transpiler/runtime"
+            )  # for triton
+            best_graph, best_file_path, best_output_shapes = (
+                profile_and_select_best_graph(
+                    all_graphs,
+                    target_cc=torch.cuda.get_device_properties(0).major * 10
+                    + torch.cuda.get_device_properties(0).minor,
+                    warmup_iters=warmup_iters,
+                    profile_iters=profile_iters,
+                    debug_mode=verbose,
+                    save_codes=save_codes,
+                )
             )
-            os.environ["KERNELS_PATH"] = os.path.join(MIRAGE_ROOT, "mirage/transpiler/runtime") # for triton
-            best_graph, best_file_path, best_output_shapes = profile_and_select_best_graph(all_graphs,
-                                                 target_cc=torch.cuda.get_device_properties(0).major * 10
-                                                 + torch.cuda.get_device_properties(0).minor,
-                                                 warmup_iters=warmup_iters, profile_iters=profile_iters, debug_mode=verbose,
-                                                 save_codes=save_codes)
             # load execute_mugraph func from the generated file
             print(f"Loading the best muGraph from {best_file_path}")
             if not os.path.exists(best_file_path):
                 raise FileNotFoundError(f"File not found: {best_file_path}")
             import importlib.util
-            spec = importlib.util.spec_from_file_location("__mirage_launcher", best_file_path)
+
+            spec = importlib.util.spec_from_file_location(
+                "__mirage_launcher", best_file_path
+            )
             mod = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(mod)
             if hasattr(mod, "execute_mugraph"):
                 best_graph.run = getattr(mod, "execute_mugraph")
             else:
-                raise AttributeError("The module does not contain an 'execute_mugraph' function.")
+                raise AttributeError(
+                    "The module does not contain an 'execute_mugraph' function."
+                )
             best_graph._cached_results = {"output_shapes": best_output_shapes}
             best_graph.backend = "triton"
+            if use_graph_dataset:
+                graph_dataset.store(
+                    input_graph=self.cygraph,
+                    optimized_graph=best_graph,
+                    imaps=imaps,
+                    omaps=omaps,
+                    griddims=griddims,
+                    blockdims=blockdims,
+                    fmaps=fmaps,
+                    franges=franges,
+                    backend=backend,
+                )
+
             return best_graph
         else:
             assert False, "Unsupported backend"
@@ -769,3 +972,9 @@ class KNGraph:
         operators = self.cygraph.get_graph_structure()
         self.visualizer = visualizer(file_name)
         self.visualizer.draw_graphs(operators)
+    
+    def to_json(self, filename):
+        cy_to_json(self.cygraph, filename)
+    
+    def from_json(self, filename):
+        self.cygraph = cy_from_json(filename)

@@ -1,0 +1,53 @@
+name: "Build Test"
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Free space on runner
+        run: .github/workflows/helpers/free_space_on_runner.sh
+
+      - name: Install CUDA
+        uses: Jimver/cuda-toolkit@v0.2.16
+        id: cuda-toolkit
+        with:
+          cuda: "12.1.1"
+          use-github-cache: "false"
+
+      - name: Install Dependencies
+        run: .github/workflows/helpers/install_dependencies.sh
+
+      - name: Check Z3 Library Path
+        run: |
+          find /usr -name "libz3.so*" || true
+          ldd $(find /usr/lib -name "*z3*.so*" | head -1) || true
+          
+      - name: Build Mirage from Source
+        env:
+          CUDA_TOOLKIT_PATH: ${{ steps.cuda-toolkit.outputs.CUDA_PATH }}
+          GITHUB_WORKSPACE: ${{ github.workspace }}
+        run: .github/workflows/helpers/build_mirage_from_source.sh
+      
+      - name: Test Mirage Import
+        run: |
+          # Set LD_LIBRARY_PATH for Z3
+          export LD_LIBRARY_PATH="/usr/lib:/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH}"
+          python -c "import mirage; print('Mirage import successful!')"

@@ -72,8 +72,11 @@ std::vector<z3::expr>
   z3::func_decl ew_add = ctx.function("ew_add", T, T, T);
   z3::func_decl ew_mul = ctx.function("ew_mul", T, T, T);
   z3::func_decl bc_div = ctx.function("bc_div", T, T, T);
+  z3::func_decl bc_pow = ctx.function("bc_pow", T, T, T);
   z3::func_decl concat = ctx.function("concat", T, T, D, T);
   z3::func_decl ew_exp = ctx.function("ew_exp", T, T);
+  z3::func_decl square = ctx.function("square", T, T);
+  z3::func_decl sqrt = ctx.function("sqrt", T, T);
   z3::func_decl matmul = ctx.function("matmul", T, T, T);
   z3::func_decl sum = ctx.function("sum", T, D, T);
   z3::func_decl mean = ctx.function("mean", T, T);
@@ -211,6 +214,13 @@ std::vector<z3::expr>
           tensor_exprs.emplace(op->output_tensors[0].guid, bc_div(lhs, rhs));
           break;
         }
+        case type::TBOperatorType::TB_POW_OP: {
+          z3::expr base = tensor_exprs.at(op->input_tensors[0].guid);
+          z3::expr exponent = tensor_exprs.at(op->input_tensors[1].guid);
+          tensor_exprs.emplace(op->output_tensors[0].guid,
+                               bc_pow(base, exponent));
+          break;
+        }
         case type::TBOperatorType::TB_EXP_OP: {
           z3::expr a = tensor_exprs.at(op->input_tensors[0].guid);
           tensor_exprs.emplace(op->output_tensors[0].guid, ew_exp(a));
@@ -294,6 +304,16 @@ std::vector<z3::expr>
           tensor_exprs.emplace(op->output_tensors[0].guid, rms_norm(a));
           break;
         }
+        case type::TBOperatorType::TB_SQUARE_OP: {
+          z3::expr a = tensor_exprs.at(op->input_tensors[0].guid);
+          tensor_exprs.emplace(op->output_tensors[0].guid, square(a));
+          break;
+        }
+        case type::TBOperatorType::TB_SQRT_OP: {
+          z3::expr a = tensor_exprs.at(op->input_tensors[0].guid);
+          tensor_exprs.emplace(op->output_tensors[0].guid, sqrt(a));
+          break;
+        }
         case type::TBOperatorType::TB_SILU_OP: {
           z3::expr a = tensor_exprs.at(op->input_tensors[0].guid);
           tensor_exprs.emplace(op->output_tensors[0].guid, silu(a));
@@ -345,9 +365,26 @@ std::vector<z3::expr>
           tensor_exprs.emplace(op->output_tensors[0].guid, bc_div(lhs, rhs));
           break;
         }
+        case type::KNOperatorType::KN_POW_OP: {
+          z3::expr base = tensor_exprs.at(op->input_tensors[0].guid);
+          z3::expr exponent = tensor_exprs.at(op->input_tensors[1].guid);
+          tensor_exprs.emplace(op->output_tensors[0].guid,
+                               bc_pow(base, exponent));
+          break;
+        }
         case type::KNOperatorType::KN_EXP_OP: {
           z3::expr a = tensor_exprs.at(op->input_tensors[0].guid);
           tensor_exprs.emplace(op->output_tensors[0].guid, ew_exp(a));
+          break;
+        }
+        case type::KNOperatorType::KN_SQUARE_OP: {
+          z3::expr a = tensor_exprs.at(op->input_tensors[0].guid);
+          tensor_exprs.emplace(op->output_tensors[0].guid, square(a));
+          break;
+        }
+        case type::KNOperatorType::KN_SQRT_OP: {
+          z3::expr a = tensor_exprs.at(op->input_tensors[0].guid);
+          tensor_exprs.emplace(op->output_tensors[0].guid, sqrt(a));
           break;
         }
         case type::KNOperatorType::KN_MATMUL_OP: {
@@ -463,8 +500,11 @@ bool is_equivalent(z3::expr const &lhs,
   z3::func_decl ew_add = ctx.function("ew_add", T, T, T);
   z3::func_decl ew_mul = ctx.function("ew_mul", T, T, T);
   z3::func_decl bc_div = ctx.function("bc_div", T, T, T);
+  z3::func_decl bc_pow = ctx.function("bc_pow", T, T, T);
   z3::func_decl concat = ctx.function("concat", T, T, D, T);
   z3::func_decl ew_exp = ctx.function("ew_exp", T, T);
+  z3::func_decl square = ctx.function("square", T, T);
+  z3::func_decl sqrt = ctx.function("sqrt", T, T);
   z3::func_decl matmul = ctx.function("matmul", T, T, T);
   z3::func_decl sum = ctx.function("sum", T, D, T);
   z3::func_decl mean = ctx.function("mean", T, T);
@@ -529,6 +569,17 @@ bool is_equivalent(z3::expr const &lhs,
                      ew_add(matmul(t0, t1), matmul(t0, t2))));
   slv.add(forall(
       t0, t1, t2, matmul(bc_div(t0, t1), t2) == bc_div(matmul(t0, t2), t1)));
+
+  slv.add(forall(t0,
+                 t1,
+                 t2,
+                 bc_pow(ew_mul(t0, t1), t2) ==
+                     ew_mul(bc_pow(t0, t2), bc_pow(t1, t2))));
+  slv.add(forall(t0,
+                 t1,
+                 t2,
+                 bc_pow(t0, ew_add(t1, t2)) ==
+                     ew_mul(bc_pow(t0, t1), bc_pow(t0, t2))));
 
   slv.add(forall(t0, d0, reduce(sum(t0, d0), d0) == reduce(t0, d0)));
 
@@ -655,7 +706,7 @@ bool is_equivalent(z3::expr const &lhs,
 
   {
     // element-wise binary & bc_div
-    std::vector<z3::func_decl> ops = {ew_add, ew_mul, bc_div};
+    std::vector<z3::func_decl> ops = {ew_add, ew_mul, bc_div, bc_pow};
     for (z3::func_decl op : ops) {
       for (z3::expr part_dim : {data_dim2, data_dim1}) {
         z3::expr partitioned_lhs = partition(t0, part_dim, d0, i0);
@@ -685,7 +736,8 @@ bool is_equivalent(z3::expr const &lhs,
 
   {
     // element-wise unary
-    std::vector<z3::func_decl> ops = {ew_exp, silu, gelu, relu, clamp};
+    std::vector<z3::func_decl> ops = {
+        ew_exp, square, sqrt, silu, gelu, relu, clamp};
     for (z3::func_decl op : ops) {
       z3::expr partitioned = partition(t0, d0, d1, i0);
       z3::expr op_partitioned = op(partitioned);

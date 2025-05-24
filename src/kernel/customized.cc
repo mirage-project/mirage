@@ -198,7 +198,9 @@ KNCustomizedOp::KNCustomizedOp(mirage::kernel::Graph *_kgraph,
       }
       case mirage::type::TB_ADD_OP:
       case mirage::type::TB_MUL_OP:
-      case mirage::type::TB_DIV_OP: {
+      case mirage::type::TB_DIV_OP:
+      case mirage::type::TB_SUB_OP:
+      case mirage::type::TB_POW_OP: {
         assert(my_inputs.size() == 2);
         bgraph.elementbinary(my_inputs[0], my_inputs[1], op->op_type);
         break;
@@ -217,6 +219,14 @@ KNCustomizedOp::KNCustomizedOp(mirage::kernel::Graph *_kgraph,
         assert(my_inputs.size() == 1);
         int reduce_dim = op->op_type - mirage::type::TB_REDUCTION_0_TO_DIMX_OP;
         bgraph.reduction_to_dimx(my_inputs[0], reduce_dim);
+        break;
+      }
+      case mirage::type::TB_REDUCTION_0_MAX_OP:
+      case mirage::type::TB_REDUCTION_1_MAX_OP:
+      case mirage::type::TB_REDUCTION_2_MAX_OP: {
+        assert(my_inputs.size() == 1);
+        int reduce_dim = op->op_type - mirage::type::TB_REDUCTION_0_MAX_OP;
+        bgraph.reduction_max(my_inputs[0], reduce_dim);
         break;
       }
       case mirage::type::TB_RMS_NORM_OP: {
@@ -239,6 +249,17 @@ KNCustomizedOp::KNCustomizedOp(mirage::kernel::Graph *_kgraph,
       case mirage::type::TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP: {
         assert(my_inputs.size() == 1);
         bgraph.forloop_accum(my_inputs[0], op->op_type);
+        break;
+      }
+      case mirage::type::TB_FORLOOP_ACCUM_NO_RED_RESCALE_OP:
+      case mirage::type::TB_FORLOOP_ACCUM_RED_LD_SUM_RESCALE_OP: {
+        assert(my_inputs.size() == 2);
+        bgraph.forloop_accum_rescale(my_inputs[0], my_inputs[1], op->op_type);
+        break;
+      }
+      case mirage::type::TB_FORLOOP_ACCUM_MAX_OP: {
+        assert(my_inputs.size() == 1);
+        bgraph.forloop_accum_max(my_inputs[0]);
         break;
       }
       default: {
@@ -268,6 +289,10 @@ KNCustomizedOp::operator json() const {
               {"input_tensors", input_tensors},
               {"output_tensors", output_tensors},
               {"bgraph", bgraph}};
+}
+
+size_t KNCustomizedOp::get_owner_independent_hash() const {
+  assert(false && "To be implemented");
 }
 
 } // namespace kernel

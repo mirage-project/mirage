@@ -74,6 +74,33 @@ TBOperator *Graph::create_reduction_to_dimx_op(STensor const &input, int dim) {
   }
 }
 
+std::vector<STensor> Graph::reduction_max(STensor const &input, int dim) {
+  TBOperator *op = create_reduction_max_op(input, dim);
+  assert(op != nullptr);
+  operators.push_back(op);
+  return op->output_tensors;
+}
+
+std::vector<STensor *> Graph::reduction_max(STensor const *input, int dim) {
+  TBOperator *op = create_reduction_max_op(*input, dim);
+  assert(op != nullptr);
+  operators.push_back(op);
+  return std::vector<STensor *>{&op->output_tensors[0], &op->output_tensors[1]};
+}
+
+TBOperator *Graph::create_reduction_max_op(STensor const &input, int dim) {
+  TBOperator *op =
+      new TBReductionOp(this, input, dim, -1 /*size = -1 for max*/);
+  // Check shmem usage
+  size_t smem_usage = calculate_shared_memory_usage(op);
+  if (smem_usage > mirage::config::MAX_SMEM_SIZE) {
+    delete op;
+    return nullptr;
+  } else {
+    return op;
+  }
+}
+
 TBReductionOp::TBReductionOp(Graph *bgraph,
                              STensor const &input,
                              int dim,
@@ -81,8 +108,11 @@ TBReductionOp::TBReductionOp(Graph *bgraph,
     : TBOperator(bgraph,
                  size == 1 ? (mirage::type::TBOperatorType)(
                                  mirage::type::TB_REDUCTION_0_OP + dim)
-                           : (mirage::type::TBOperatorType)(
-                                 mirage::type::TB_REDUCTION_0_TO_DIMX_OP + dim),
+                 : size == -1
+                     ? (mirage::type::TBOperatorType)(
+                           mirage::type::TB_REDUCTION_0_MAX_OP + dim)
+                     : (mirage::type::TBOperatorType)(
+                           mirage::type::TB_REDUCTION_0_TO_DIMX_OP + dim),
                  input),
       reduce_dim(dim), reduce_size(size) {
   // mirage::type::TBOperatorType type =
@@ -92,17 +122,25 @@ TBReductionOp::TBReductionOp(Graph *bgraph,
   STensor output = input;
   assert(output.num_dims > reduce_dim);
   assert(output.layout == mirage::layout::SmemRowMajor);
-  output.dim[reduce_dim] = reduce_size;
+  output.dim[reduce_dim] = reduce_size == -1 ? 1 : reduce_size;
   output.owner_op = this;
   output.owner_ts_idx = 0;
   output.guid = STensor::next_guid++;
   output.after_accum = input.after_accum;
   output.smem_offset = bgraph->allocate_fingerprint(output);
   output_tensors.push_back(output);
+  if (reduce_size == -1) {
+    // For max reduction, we need to allocate another tensor for difference
+    STensor diff = output;
+    diff.owner_ts_idx = 1;
+    diff.guid = STensor::next_guid++;
+    diff.smem_offset = bgraph->allocate_fingerprint(diff);
+    output_tensors.push_back(diff);
+  }
 }
 
 TBReductionOp::~TBReductionOp() {
-  bgraph->free_fingerprint(output_tensors[0]);
+  bgraph->free_fingerprint(output_tensors);
 }
 
 TBReductionOp::operator json() const {
