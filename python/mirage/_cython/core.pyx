@@ -18,6 +18,7 @@ from cpython cimport array
 import ctypes
 import array
 import numpy as np
+import torch
 from libcpp.string cimport string
 
 # Code snippet from OpenAI Triton
@@ -116,12 +117,14 @@ def get_kn_operator_type_string(int op_type):
         return "kn_square_op"
     elif op_type == KN_SQRT_OP:
         return "kn_sqrt_op"
+    elif op_type == KN_MUL_SCALAR_OP:
+        return "kn_mul_scalar_op"
     elif op_type == KN_SILU_OP:
         return "kn_silu_op"
-    elif op_type == KN_GELU_OP:
-        return "kn_gelu_op"
     elif op_type == KN_SIGMOID_OP:
         return "kn_sigmoid_op"
+    elif op_type == KN_GELU_OP:
+        return "kn_gelu_op"
     elif op_type == KN_RELU_OP:
         return "kn_relu_op"
     elif op_type == KN_CLAMP_OP:
@@ -134,6 +137,8 @@ def get_kn_operator_type_string(int op_type):
         return "kn_mul_op"
     elif op_type == KN_DIV_OP:
         return "kn_div_op"
+    elif op_type == KN_POW_OP:
+        return "kn_pow_op"
     elif op_type == KN_REDUCTION_0_OP:
         return "kn_reduction_0_op"
     elif op_type == KN_REDUCTION_1_OP:
@@ -142,6 +147,32 @@ def get_kn_operator_type_string(int op_type):
         return "kn_reduction_2_op"
     elif op_type == KN_RMS_NORM_OP:
         return "kn_rms_norm_op"
+    elif op_type == KN_CONCAT_FIRST_OP_ID:
+        return "kn_concat_first_op_id"
+    elif op_type == KN_CONCAT_0_OP:
+        return "kn_concat_0_op"
+    elif op_type == KN_CONCAT_1_OP:
+        return "kn_concat_1_op"
+    elif op_type == KN_CONCAT_2_OP:
+        return "kn_concat_2_op"
+    elif op_type == KN_CONCAT_LAST_OP_ID:
+        return "kn_concat_last_op_id"
+    elif op_type == KN_SPLIT_FIRST_OP_ID:
+        return "kn_split_first_op_id"
+    elif op_type == KN_SPLIT_0_OP:
+        return "kn_split_0_op"
+    elif op_type == KN_SPLIT_1_OP:
+        return "kn_split_1_op"
+    elif op_type == KN_SPLIT_2_OP:
+        return "kn_split_2_op"
+    elif op_type == KN_CHUNK_0_OP:
+        return "kn_chunk_0_op"
+    elif op_type == KN_CHUNK_1_OP:
+        return "kn_chunk_1_op"
+    elif op_type == KN_CHUNK_2_OP:
+        return "kn_chunk_2_op"
+    elif op_type == KN_SPLIT_LAST_OP_ID:
+        return "kn_split_last_op_id"
     elif op_type == KN_ALLREDUCE_OP:
         return "kn_allreduce_op"
     elif op_type == KN_CUSTOMIZED_OP:
@@ -165,22 +196,30 @@ def get_tb_operator_type_string(int op_type):
         return "tb_square_op"
     elif op_type == TB_SQRT_OP:
         return "tb_sqrt_op"
+    elif op_type == TB_MUL_SCALAR_OP:
+        return "tb_mul_scalar_op"
     elif op_type == TB_SILU_OP:
         return "tb_silu_op"
+    elif op_type == TB_SIGMOID_OP:
+        return "tb_sigmoid_op"
     elif op_type == TB_GELU_OP:
         return "tb_gelu_op"
     elif op_type == TB_RELU_OP:
         return "tb_relu_op"
     elif op_type == TB_CLAMP_OP:
         return "tb_clamp_op"
-    elif op_type == TB_MUL_SCALAR_OP:
-        return "tb_mul_scalar_op"
+    elif op_type == TB_LOG_OP:
+        return "tb_log_op"
     elif op_type == TB_ADD_OP:
         return "tb_add_op"
     elif op_type == TB_MUL_OP:
         return "tb_mul_op"
     elif op_type == TB_DIV_OP:
         return "tb_div_op"
+    elif op_type == TB_SUB_OP:
+        return "tb_sub_op"
+    elif op_type == TB_POW_OP:
+        return "tb_pow_op"
     elif op_type == TB_REDUCTION_FIRST_OP_ID:
         return "tb_reduction_first_op_id"
     elif op_type == TB_REDUCTION_0_OP:
@@ -195,6 +234,12 @@ def get_tb_operator_type_string(int op_type):
         return "tb_reduction_1_to_dimx_op"
     elif op_type == TB_REDUCTION_2_TO_DIMX_OP:
         return "tb_reduction_2_to_dimx_op"
+    elif op_type == TB_REDUCTION_0_MAX_OP:
+        return "tb_reduction_0_max_op"
+    elif op_type == TB_REDUCTION_1_MAX_OP:
+        return "tb_reduction_1_max_op"
+    elif op_type == TB_REDUCTION_2_MAX_OP:
+        return "tb_reduction_2_max_op"
     elif op_type == TB_REDUCTION_LAST_OP_ID:
         return "tb_reduction_last_op_id"
     elif op_type == TB_RMS_NORM_OP:
@@ -211,6 +256,16 @@ def get_tb_operator_type_string(int op_type):
         return "tb_concat_last_op_id"
     elif op_type == TB_CONCAT_THEN_MATMUL_OP:
         return "tb_concat_then_matmul_op"
+    elif op_type == TB_SPLIT_FIRST_OP_ID:
+        return "tb_split_first_op_id"
+    elif op_type == TB_SPLIT_0_OP:
+        return "tb_split_0_op"
+    elif op_type == TB_SPLIT_1_OP:
+        return "tb_split_1_op"
+    elif op_type == TB_SPLIT_2_OP:
+        return "tb_split_2_op"
+    elif op_type == TB_SPLIT_LAST_OP_ID:
+        return "tb_split_last_op_id"
     elif op_type == TB_FORLOOP_ACCUM_NO_RED_OP:
         return "tb_forloop_accum_no_red_op"
     elif op_type == TB_FORLOOP_ACCUM_RED_LD_SUM_OP:
@@ -221,6 +276,14 @@ def get_tb_operator_type_string(int op_type):
         return "tb_forloop_accum_red_ld_rms_op"
     elif op_type == TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP:
         return "tb_forloop_accum_redtox_ld_sum_op"
+    elif op_type == TB_FORLOOP_ACCUM_NO_RED_RESCALE_OP:
+        return "tb_forloop_accum_no_red_rescale_op"
+    elif op_type == TB_FORLOOP_ACCUM_RED_LD_SUM_RESCALE_OP:
+        return "tb_forloop_accum_red_ld_sum_rescale_op"
+    elif op_type == TB_FORLOOP_ACCUM_MAX_OP:
+        return "tb_forloop_accum_max_op"
+    elif op_type == TB_FORLOOP_ACCUM_LAST_OP:
+        return "tb_forloop_accum_last_op"
     elif op_type == TB_CUSTOMIZED_OP:
         return "tb_customized_op"
     else:
@@ -242,6 +305,22 @@ def convert_dtype_to_ctype(type : dtype):
         return DT_DOUBLE
     else:
         return DT_UNKNOWN
+
+def convert_dtype_to_torch_type(type : dtype):
+    if type.is_int8():
+        return torch.int8
+    elif type.is_uint16():
+        return torch.uint16
+    elif type.is_fp16():
+        return torch.float16
+    elif type.is_bf16():
+        return torch.bfloat16
+    elif type.is_fp32():
+        return torch.float32
+    elif type.is_fp64():
+        return torch.float64
+    else:
+        assert False, "Unsupported dtype: {}".format(type)
 
 def convert_ctype_to_dtype(type):
     if type == DT_INT8:
@@ -295,6 +374,15 @@ def string_to_accum_optype(acc):
     else:
         assert False, "Unsupported accum optype"
         return None
+
+def string_to_accum_rescale_optype(acc):
+     if acc is None:
+         return TB_FORLOOP_ACCUM_NO_RED_RESCALE_OP
+     elif acc == "sum":
+         return TB_FORLOOP_ACCUM_RED_LD_SUM_RESCALE_OP
+     else:
+         assert False, "Unsupported accum rescale optype"
+         return None
 
 cdef class DTensor:
     cdef CppDTensor* c_ptr # Hold a Tensor instance
@@ -657,6 +745,16 @@ cdef class CyKNGraph:
         t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
         return DTensor(t)
 
+    def sqrt(self, DTensor input):
+        cdef CppDTensor* ptr = self.p_kgraph.sqrt(input.c_ptr)
+        t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
+        return DTensor(t)
+
+    def square(self, DTensor input):
+        cdef CppDTensor* ptr = self.p_kgraph.square(input.c_ptr)
+        t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
+        return DTensor(t)
+
     def add(self, DTensor A, DTensor B):
         cdef CppDTensor* ptr = self.p_kgraph.add(A.c_ptr, B.c_ptr)
         t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
@@ -669,6 +767,11 @@ cdef class CyKNGraph:
 
     def div(self, DTensor A, DTensor B):
         cdef CppDTensor* ptr = self.p_kgraph.div(A.c_ptr, B.c_ptr)
+        t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
+        return DTensor(t)
+
+    def pow(self, DTensor A, DTensor B):
+        cdef CppDTensor* ptr = self.p_kgraph.pow(A.c_ptr, B.c_ptr)
         t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
         return DTensor(t)
 
@@ -720,6 +823,9 @@ cdef class CyKNGraph:
                 "z": self.p_kgraph.gpu_dim.z
             }
     
+    def get_owner_independent_hash(self):
+        return self.p_kgraph.get_owner_independent_hash()
+
     # visualizer utils
 
     def _kn_tensor_to_dict(self, DTensor t):
@@ -791,13 +897,22 @@ cdef class CyKNGraph:
             operators.append(self._get_kn_operator_info(op))
         return operators
 
-    def get_input_dtensor_layout(self, DTensor A):
+    def get_num_inputs(self):
+        return self.p_kgraph.get_num_input_dtensors()
+
+    def get_num_outputs(self):
+        return self.p_kgraph.get_num_output_dtensors()
+
+    def get_input_dtensor_shape_and_stride(self, DTensor A):
         cdef int cstrides[128]
-        num = self.p_kgraph.get_input_dtensor_layout(A.c_ptr, cstrides)
+        cdef int cdims[128]
+        num = self.p_kgraph.get_input_dtensor_shape_and_stride(A.c_ptr, cstrides, cdims)
         strides = list()
+        dims = list()
         for i in range(num):
             strides.append(cstrides[i])
-        return tuple(strides)
+            dims.append(cdims[i])
+        return tuple(dims), tuple(strides)
 
 cdef class CyTBGraph:
     cdef CppTBGraph *p_bgraph #Hold a CppTBGraph instance
@@ -887,6 +1002,11 @@ cdef class CyTBGraph:
         t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
         return STensor(t)
 
+    def mul_scalar(self, STensor A, float scalar):
+        cdef CppSTensor* ptr = self.p_bgraph.mul_scalar(A.c_ptr, scalar)
+        t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
+        return STensor(t)
+
     def add(self, STensor A, STensor B):
         cdef CppSTensor* ptr = self.p_bgraph.add(A.c_ptr, B.c_ptr)
         t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
@@ -902,10 +1022,21 @@ cdef class CyTBGraph:
         t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
         return STensor(t)
 
+    def sub(self, STensor A, STensor B):
+        cdef CppSTensor* ptr = self.p_bgraph.sub(A.c_ptr, B.c_ptr)
+        t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
+        return STensor(t)
+
     def reduction(self, STensor A, int dim):
         cdef CppSTensor* ptr = self.p_bgraph.reduction(A.c_ptr, dim)
         t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
         return STensor(t)
+
+    def reduction_max(self, STensor A, int dim):
+        cdef vector[CppSTensor*] ptr = self.p_bgraph.reduction_max(A.c_ptr, dim)
+        t0 = ctypes.cast(<unsigned long long>ptr[0], ctypes.c_void_p)
+        t1 = ctypes.cast(<unsigned long long>ptr[1], ctypes.c_void_p)
+        return STensor(t0), STensor(t1)
 
     def rms_norm(self, STensor A):
         cdef CppSTensor* ptr = self.p_bgraph.rms_norm(A.c_ptr)
@@ -920,6 +1051,17 @@ cdef class CyTBGraph:
     def forloop_accum(self, STensor A, str acc):
         optype = string_to_accum_optype(acc)
         cdef CppSTensor* ptr = self.p_bgraph.forloop_accum(A.c_ptr, optype)
+        t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
+        return STensor(t)
+
+    def forloop_accum_rescale(self, STensor A, STensor B, str acc):
+        optype = string_to_accum_rescale_optype(acc)
+        cdef CppSTensor* ptr = self.p_bgraph.forloop_accum_rescale(A.c_ptr, B.c_ptr, optype)
+        t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
+        return STensor(t)
+
+    def forloop_accum_max(self, STensor A):
+        cdef CppSTensor* ptr = self.p_bgraph.forloop_accum_max(A.c_ptr)
         t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
         return STensor(t)
 
@@ -1023,7 +1165,7 @@ def search(CyKNGraph input_graph, *, int max_num_new_graphs = 1024, list imaps =
 
 # Generate CUDA program for a uGraph
 # Return (CUDA code, buffer size in bytes)
-def generate_cuda_program(CyKNGraph input_graph, *, int target_cc, list input_strides, int num_warp_groups = -1, int pipeline_stages = -1) -> dict:
+def generate_cuda_program(CyKNGraph input_graph, *, int target_cc, list input_strides, int num_warp_groups = -1, int pipeline_stages = -1, bool profiling = False, bool enable_online_softmax = False) -> dict:
     # Only rank 0 gets to transpile
     gpu_dim = input_graph.gpu_dim
     if gpu_dim['x'] * gpu_dim['y'] * gpu_dim['z'] > 1:
@@ -1038,6 +1180,8 @@ def generate_cuda_program(CyKNGraph input_graph, *, int target_cc, list input_st
     # Set transpiler_config
     cdef TranspilerConfig transpiler_config
     transpiler_config.target_cc = target_cc
+    transpiler_config.profiling = profiling
+    transpiler_config.enable_online_softmax = enable_online_softmax
 
     if num_warp_groups != -1 and pipeline_stages != -1:
         transpiler_config.num_producer_wgs = 1;
@@ -1076,6 +1220,7 @@ def generate_cuda_program(CyKNGraph input_graph, *, int target_cc, list input_st
         "code": result.code.decode("UTF-8"),
         "buf_size": result.buf_size,
         "max_smem_size": result.max_smem_size,
+        "profiler_buf_size": result.profiler_buf_size,
         "output_directives": output_directives
     }
 
@@ -1107,3 +1252,16 @@ def generate_triton_program(CyKNGraph input_graph, *, int target_cc) -> dict:
         "code": result.code.decode("UTF-8"),
         "output_shapes": result.output_shapes
     }
+
+def set_gpu_device_id(gpu_id: int):
+    cython_set_gpu_device_id(gpu_id)
+
+def cy_to_json(CyKNGraph input_graph, str filename):
+    cfilename = filename.encode('UTF-8')
+    cython_to_json(input_graph.p_kgraph, cfilename)
+
+def cy_from_json(str filename):
+    cfilename = filename.encode('UTF-8')
+    ptr = cython_from_json(cfilename)
+    graph = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
+    return CyKNGraph(graph)

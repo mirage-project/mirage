@@ -96,6 +96,9 @@ private:
                       CodeKeeper *comm_buffers=NULL, 
                       size_t *next_comm_buffer_idx=NULL);
 
+  std::pair<std::string, std::string>
+      get_profiling_ptr(int const customized_idx);
+
   // Get the "optimal" schedule for a threadblock graph
   TBSched get_threadblock_schedule(tb::Graph const &tb_graph);
 

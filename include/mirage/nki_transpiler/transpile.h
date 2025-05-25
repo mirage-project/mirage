@@ -47,6 +47,18 @@ struct NKITranspilerConfig {
   int target_cc;
 };
 
+struct NeuronArch {
+  NeuronArch() = delete;
+  NeuronArch(NeuronArch const &) = delete;
+  NeuronArch(NeuronArch &&) = delete;
+  static constexpr char const *pmax = "nki.language.tile_size.pmax";
+  static constexpr char const *psum_fmax = "nki.language.tile_size.psum_fmax";
+  static constexpr char const *gemm_mov_fmax =
+      "nki.language.tile_size.gemm_moving_fmax";
+  static constexpr char const *gemm_sta_fmax =
+      "nki.language.tile_size.gemm_stationary_fmax";
+};
+
 // Descriptive transpiler errors.
 // Currently, only layout errors are reported, further descriptive
 // errors can be added to provide info to users.

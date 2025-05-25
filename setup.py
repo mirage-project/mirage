@@ -35,6 +35,11 @@ import z3
 z3_path = path.dirname(z3.__file__)
 print(f"Z3 path: {z3_path}", flush=True)
 
+# Use version.py to get package version
+version_file = os.path.join(os.path.dirname(__file__), "python/mirage/version.py")
+with open(version_file, "r") as f:
+    exec(f.read())  # This will define __version__
+
 def config_cython():
     sys_cflags = sysconfig.get_config_var("CFLAGS")
     try:
@@ -53,7 +58,7 @@ def config_cython():
                               path.join(mirage_path, "deps", "cutlass", "include"),
                               path.join(z3_path, "include"),
                               "/usr/local/cuda/include"],
-                libraries=["mirage_runtime", "cudadevrt", "cudart_static", "cudnn", "cublas", "cudart", "cuda", "z3", "gomp"],
+                libraries=["mirage_runtime", "cudadevrt", "cudart_static", "cudnn", "cublas", "cudart", "cuda", "z3", "gomp", "rt"],
                 library_dirs=[path.join(mirage_path, "build"),
                               path.join(z3_path, "lib"),
                               "/usr/local/cuda/lib",
@@ -67,14 +72,14 @@ def config_cython():
         print("WARNING: cython is not installed!!!")
         raise SystemExit(1)
 
+# Build Mirage runtime library using CMake
+mirage_path = path.dirname(__file__)
+if not mirage_path:
+    mirage_path = '.'
+build_dir = path.join(mirage_path, 'build')
+
 class CMakeBuildExt(_build_ext):
     def run(self):
-        # Build Mirage runtime library using CMake
-        mirage_path = path.dirname(__file__)
-        if not mirage_path:
-            mirage_path = '.'
-        build_dir = path.join(mirage_path, 'build')
-
         # Set compiler environment variables
         nvcc_path = shutil.which('nvcc')
         os.environ['CUDACXX'] = nvcc_path if nvcc_path else '/usr/local/cuda/bin/nvcc'
@@ -107,9 +112,22 @@ INCLUDE_BASE = "python/mirage/include"
 @contextmanager
 def copy_include():
     if not path.exists(INCLUDE_BASE):
-        src_dirs = ["deps/cutlass/include", "deps/json/include", "include/mirage/transpiler/runtime"]
+        src_dirs = ["deps/cutlass/include", "deps/json/include"]
         for src_dir in src_dirs:
             shutil.copytree(src_dir, path.join(INCLUDE_BASE, src_dir))
+        # copy mirage/transpiler/runtime/* 
+        # to python/mirage/include/mirage/transpiler/runtime/*
+        # instead of python/mirage/include/include/mirage/transpiler/runtime/*
+        include_mirage_dirs = ["include/mirage/transpiler/runtime", 
+                               "include/mirage/triton_transpiler/runtime"]
+        include_mirage_dsts = [path.join(INCLUDE_BASE, "mirage/transpiler/runtime"), 
+                               path.join(INCLUDE_BASE, "mirage/triton_transpiler/runtime")]
+        for include_mirage_dir, include_mirage_dst in zip(include_mirage_dirs, include_mirage_dsts):
+            shutil.copytree(include_mirage_dir, include_mirage_dst)
+
+        config_h_src = path.join(mirage_path, "include/mirage/config.h") # Needed by transpiler/runtime/threadblock/utils.h
+        config_h_dst = path.join(INCLUDE_BASE, "mirage/config.h")
+        shutil.copy(config_h_src, config_h_dst)
         yield True
     else:
         yield False
@@ -121,7 +139,7 @@ with copy_include() as copied:
               f"This may cause issues. Please remove {INCLUDE_BASE} and rerun setup.py", flush=True)
 
     setup(name='mirage-project',
-          version="0.2.3",
+          version=__version__,
           description="Mirage: A Multi-Level Superoptimizer for Tensor Algebra",
           zip_safe=False,
           install_requires=requirements,

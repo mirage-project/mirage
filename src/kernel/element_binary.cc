@@ -47,6 +47,14 @@ DTensor *Graph::div(DTensor const *input1, DTensor const *input2) {
   return elementbinary(input1, input2, mirage::type::KN_DIV_OP);
 }
 
+DTensor Graph::pow(DTensor const &input1, DTensor const &input2) {
+  return elementbinary(input1, input2, mirage::type::KN_POW_OP);
+}
+
+DTensor *Graph::pow(DTensor const *input1, DTensor const *input2) {
+  return elementbinary(input1, input2, mirage::type::KN_POW_OP);
+}
+
 DTensor Graph::elementbinary(DTensor const &input1,
                              DTensor const &input2,
                              mirage::type::KNOperatorType type) {

@@ -43,7 +43,7 @@ def config_cython():
                               path.join(mirage_path, "deps", "json", "include"),
                               path.join(mirage_path, "deps", "cutlass", "include"),
                               "/usr/local/cuda/include"],
-                libraries=["mirage_runtime", "cudadevrt", "cudart_static", "cudnn", "cublas", "cudart", "cuda", "z3", "gomp"],
+                libraries=["mirage_runtime", "cudadevrt", "cudart_static", "cudnn", "cublas", "cudart", "cuda", "z3", "gomp", "rt"],
                 library_dirs=[path.join(mirage_path, "build"),
                               path.join(mirage_path, "deps", "z3", "build"),
                               "/usr/local/cuda/lib",
@@ -70,7 +70,7 @@ setup_args = {}
 #    }
 
 setup(name='mirage',
-      version="0.2.3",
+      version="0.2.4",
       description="Mirage: A Multi-Level Superoptimizer for Tensor Algebra",
       zip_safe=False,
       install_requires=[],
