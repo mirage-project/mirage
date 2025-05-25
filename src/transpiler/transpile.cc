@@ -126,7 +126,7 @@ kernel::Graph const *rewrite_graph_for_online_softmax(kernel::Graph const *g) {
             dims.push_back(dtensor.dim[i]);
           }
           kernel::DTensor dt = new_g->new_input(
-              dims, input_op->input_strides, dtensor.data_type, dtensor.layout);
+              dims, input_op->input_strides, input_op->input_map, dtensor.data_type, dtensor.layout);
           dtensor_mapping[op->output_tensors[0].guid] = dt;
           break;
         }

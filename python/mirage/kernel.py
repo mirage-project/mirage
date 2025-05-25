@@ -338,7 +338,7 @@ class KNGraph:
         self.backend = "cuda"
 
     def new_input(
-        self, dims: tuple, strides: tuple = None, gpu_input_map: tuple = None, dtype: dtype = float16
+        self, dims: tuple, strides: tuple = None, gpu_input_map: tuple = (-1, -1, -1), dtype: dtype = float16
     ) -> DTensor:
         # use the default strided layout if strides = None
         if strides is None:
@@ -602,16 +602,17 @@ class KNGraph:
         ), "Given number of inputs do not match the uGraph's inputs"
         for i in range(len(dtensors)):
             dims, strides = self.cygraph.get_input_dtensor_shape_and_stride(dtensors[i])
-            assert (
-                dims == input_tensors[i].shape
-            ), "Expected input dims {}, got input dims {}".format(
-                dims, input_tensors[i].shape
-            )
-            assert (
-                strides == input_tensors[i].stride()
-            ), "Expected input strides {}, got input strides {}".format(
-                strides, input_tensors[i].stride()
-            )
+            # These are noted because the input tensors may need to be divided when multi-GPU is used
+            # assert (
+            #     dims == input_tensors[i].shape
+            # ), "Expected input dims {}, got input dims {}".format(
+            #     dims, input_tensors[i].shape
+            # )
+            # assert (
+            #     strides == input_tensors[i].stride()
+            # ), "Expected input strides {}, got input strides {}".format(
+            #     strides, input_tensors[i].stride()
+            # )
             input_strides.append(strides)
         target_cc = kwargs.get(
             "target_cc",

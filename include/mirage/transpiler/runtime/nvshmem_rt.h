@@ -12,10 +12,10 @@
 static inline void initialize_mpi_nvshmem(int rank) {
   // Initialize MPI
   //MPI_Init(NULL, NULL);
+#if USE_NVSHMEM
   MPI_Comm mpi_comm;
   cudaSetDevice(rank);
 
-#if USE_NVSHMEM
   // Initialize NVSHMEM after MPI
   nvshmemx_init_attr_t attr;
   mpi_comm = MPI_COMM_WORLD;
