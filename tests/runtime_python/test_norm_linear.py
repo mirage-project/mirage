@@ -55,7 +55,10 @@ for output_size in output_sizes:
     X = graph.new_input(dims=(1, reduction_size), dtype=mi.bfloat16)
     W = graph.new_input(dims=(reduction_size, output_size), dtype=mi.bfloat16)
     tb_graph = mi.new_threadblock_graph(
-        grid_dim=(1, 1, 1), block_dim=(128, 1, 1), forloop_range=56, reduction_dimx=64
+        grid_dim=(1, 1, 1),
+        block_dim=(128, 1, 1),
+        forloop_range=reduction_size / 64,
+        reduction_dimx=64,
     )
     tX = tb_graph.new_input(dtensor=X, input_map=(-1, -1, -1), forloop_dim=1)
     tW = tb_graph.new_input(dtensor=W, input_map=(-1, -1, -1), forloop_dim=0)
