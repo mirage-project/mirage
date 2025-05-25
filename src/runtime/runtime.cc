@@ -476,10 +476,19 @@ std::string Runtime::print_task_graph(
     mirage::kernel::Graph const &graph,
     std::unordered_map<kn::KNOperator const *,
                        std::tuple<int, int, TaskType>> const &task_configs,
-    std::map<mirage::type::GuidType, IODesc> const &io_configs) {
+    std::map<mirage::type::GuidType, IODesc> const &io_configs,
+    bool use_json_format) {
   using mirage::runtime::IODesc;
   mirage::transpiler::CodeKeeper code;
+  mirage::transpiler::CodeKeeper tgbody;
+  tgbody.inc_indent();
   code.e("#include \"persistent_kernel.cuh\"");
+  if (use_json_format) {
+    code.e("#include <nlohmann/json.hpp>");
+    code.e("#include <fstream>");
+    code.e("#include <filesystem>");
+    code.e("using json = nlohmann::json;");
+  }
   code.e("size_t get_event_id(int my_gpu_id, size_t event_pos, bool "
          "nvshmem_event) {");
   code.e("size_t event_id = ((static_cast<size_t>(my_gpu_id) << 32) | "
@@ -490,6 +499,80 @@ std::string Runtime::print_task_graph(
   code.e("return event_id;");
   code.e("}");
   code.e("");
+
+  // function that loads json file and generates task graph
+  if (use_json_format) {
+    code.e("void construct_task_graph(int my_gpu_id,");
+    code.e("                          std::vector<TaskDesc> &all_tasks,");
+    code.e("                          std::vector<EventDesc> &all_events,");
+    code.e("                          std::vector<TaskId> &first_tasks,");
+    code.e("                          std::map<std::string, void*> const &all_tensors) {");
+    code.e("std::filesystem::path file_path(__FILE__);");
+    code.e("std::ifstream json_file(file_path.parent_path().string()+\"task_graph.json\");");
+    code.e("nlohmann::json json_task_graph;");
+    code.e("json_file >> json_task_graph;");
+    // load tasks
+    code.e("for (json const &task : json_task_graph[\"all_tasks\"]) {");
+    code.e("TaskDesc task_desc(static_cast<TaskType>(task.at(\"task_type\")));");
+    code.e("if (task.at(\"trigger_event\").is_number_integer()) {");
+    code.e("task_desc.trigger_event = task.at(\"trigger_event\").get<int>();");
+    code.e("}");
+    code.e("else {");
+    code.e("json j = task.at(\"trigger_event\");");
+    code.e("int gpu_offset = j.at(\"gpu_offset\").get<int>();");
+    code.e("size_t event_pos = j.at(\"event_pos\").get<size_t>();");
+    code.e("bool is_nvshmem = j.at(\"is_nvshmem\").get<bool>();");
+    code.e("task_desc.trigger_event = get_event_id(my_gpu_id + gpu_offset, event_pos, is_nvshmem);");
+    code.e("}");
+    // load inputs
+    code.e("task_desc.num_inputs = task.at(\"inputs\").size();");
+    code.e("for (json const &tensor : task[\"inputs\"]) {");
+    code.e("TensorDesc input;");
+    code.e("std::string name = tensor.at(\"base_ptr\").get<std::string>();");
+    code.e("assert(all_tensors.find(name) != all_tensors.end());");
+    code.e("off_t offset = tensor.at(\"offset\").get<off_t>();");
+    code.e("input.base_ptr = static_cast<char*>(all_tensors.at(name))+offset;");
+    code.e("assert(tensor.at(\"dims\").size() == tensor.at(\"strides\").size());");
+    code.e("input.num_dims = tensor.at(\"dims\").size();");
+    code.e("input.data_type = tensor.at(\"data_type\").get<int>();");
+    code.e("for (int i = 0; i < input.num_dims; i++) {");
+    code.e("input.dim[i] = tensor[\"dims\"][i];");
+    code.e("input.stride[i] = tensor[\"strides\"][i];");
+    code.e("}");
+    code.e("}");
+    // load outputs
+    code.e("task_desc.num_outputs = task.at(\"outputs\").size();");
+    code.e("for (json const &tensor : task[\"outputs\"]) {");
+    code.e("TensorDesc output;");
+    code.e("std::string name = tensor.at(\"base_ptr\").get<std::string>();");
+    code.e("assert(all_tensors.find(name) != all_tensors.end());");
+    code.e("off_t offset = tensor.at(\"offset\").get<off_t>();");
+    code.e("output.base_ptr = static_cast<char*>(all_tensors.at(name))+offset;");
+    code.e("assert(tensor.at(\"dims\").size() == tensor.at(\"strides\").size());");
+    code.e("output.num_dims = tensor.at(\"dims\").size();");
+    code.e("output.data_type = tensor.at(\"data_type\").get<int>();");
+    code.e("for (int i = 0; i < output.num_dims; i++) {");
+    code.e("output.dim[i] = tensor[\"dims\"][i];");
+    code.e("output.stride[i] = tensor[\"strides\"][i];");
+    code.e("}");
+    code.e("}");
+    code.e("all_tasks.push_back(task_desc);");
+    code.e("}");
+    // load events
+    code.e("for (json const &e : json_task_graph[\"all_events\"]) {");
+    code.e("EventType event_type = static_cast<EventType>(e.at(\"event_type\").get<int>());");
+    code.e("int num_triggers = e.at(\"num_triggers\").get<int>();");
+    code.e("int first_task_id = e.at(\"first_task_id\").get<int>();");
+    code.e("int last_task_id = e.at(\"last_task_id\").get<int>();");
+    code.e("all_events.push_back(EventDesc(event_type, num_triggers, first_task_id, last_task_id));");
+    code.e("}");
+    // load first tasks
+    code.e("for (json const &t : json_task_graph[\"first_tasks\"]) {");
+    code.e("first_tasks.push_back(t.get<int>());");
+    code.e("}");
+    code.e("}");
+    code.e("");
+  }
 
   code.e(
       "static void _init_persistent_kernel(std::vector<TaskDesc> &all_tasks,");
@@ -502,6 +585,9 @@ std::string Runtime::print_task_graph(
   code.e("                                  int my_gpu_id) {");
 
   int num_torch_tensors = 0;
+  if (use_json_format) {
+    code.e("std::map<std::string, void*> all_tensors;");
+  }
   for (auto const &iter : io_configs) {
     IODesc desc = iter.second;
     switch (desc.type) {
@@ -509,6 +595,9 @@ std::string Runtime::print_task_graph(
         code.e("char *$ = (char*) torch_tensors[$];",
                desc.name,
                num_torch_tensors);
+        if (use_json_format) {
+          code.e("all_tensors[\"$\"] = $;", desc.name, desc.name);
+        }
         num_torch_tensors++;
         break;
       }
@@ -517,6 +606,9 @@ std::string Runtime::print_task_graph(
           code.e("char *$ = (char*)torch_tensors[$];",
                  desc.name,
                  num_torch_tensors);
+          if (use_json_format) {
+            code.e("all_tensors[\"$\"] = $;", desc.name, desc.name);
+          }
           num_torch_tensors++;
         }
         break;
@@ -528,7 +620,9 @@ std::string Runtime::print_task_graph(
           size *= desc.tensor.dim[i];
         }
         code.e("cudaMalloc(&$, $);", desc.name, size);
-        num_torch_tensors++;
+        if (use_json_format) {
+          code.e("all_tensors[\"$\"] = $;", desc.name, desc.name);
+        }
         break;
       }
       case IODesc::NVSHMEMMallocTensor: {
@@ -537,6 +631,9 @@ std::string Runtime::print_task_graph(
           size *= desc.tensor.dim[i];
         }
         code.e("void *$ = nvshmem_malloc($);", desc.name, size);
+        if (use_json_format) {
+          code.e("all_tensors[\"$\"] = $;", desc.name, desc.name);
+        }
         break;
       }
       default:
@@ -547,14 +644,12 @@ std::string Runtime::print_task_graph(
       {"all_tasks", {}}, {"all_events", {}}, {"first_tasks", {}}};
   // generate task[0]
   {
-    code.e("all_tasks.push_back(TaskDesc(TASK_TERMINATE));");
+    tgbody.e("all_tasks.push_back(TaskDesc(TASK_TERMINATE));");
     json_task_graph["all_tasks"].push_back(json{
         {"task_type", TASK_TERMINATE},
         {"inputs", {}},
         {"outputs", {}},
-        {"trigger_event",
-         json{
-             {"gpu_offset", -1}, {"event_pos", -1}, {"is_nvshmem_event", 0}}}});
+        {"trigger_event", EVENT_INVALID_ID}});
   }
   // generate all other tasks
   size_t task_pos = 1;
@@ -598,24 +693,28 @@ std::string Runtime::print_task_graph(
               }
               TaskDesc task_desc = all_tasks[task_pos];
               assert(task_desc.task_type == TASK_NVSHMEM_COPY);
-              code.e("// task[$]", task_pos);
-              code.e("{");
-              code.e("TaskDesc task_desc(static_cast<TaskType>($));",
+              tgbody.e("// task[$]", task_pos);
+              tgbody.e("{");
+              tgbody.e("TaskDesc task_desc(static_cast<TaskType>($));",
                      task_desc.task_type);
               size_t gpu_offset = ((task_desc.trigger_event >> 32) & 0xffff);
               size_t event_pos = (task_desc.trigger_event & 0xffffffff);
               bool is_nvshmem_event =
                   ((task_desc.trigger_event & EVENT_NVSHMEM_TAG) > 0);
               assert(is_nvshmem_event);
-              code.e("task_desc.trigger_event = get_event_id((my_gpu_id + $) "
-                     "\% num_gpus, $, $);",
-                     gpu_offset,
-                     event_pos,
-                     is_nvshmem_event);
+              tgbody.e("task_desc.trigger_event = get_event_id((my_gpu_id + $) "
+                       "\% num_gpus, $, $);",
+                       gpu_offset,
+                       event_pos,
+                       is_nvshmem_event);
               assert(task_desc.num_inputs == 1);
               assert(task_desc.num_outputs == 1);
-              code.e("task_desc.num_inputs = $;", task_desc.num_inputs);
-              code.e("task_desc.num_outputs = $;", task_desc.num_outputs);
+              json json_task = {{"task_type", task_desc.task_type},
+                                {"inputs", {}},
+                                {"outputs", {}},
+                                {"trigger_event", json{{"gpu_offset", gpu_offset}, {"event_pos", event_pos}, {"is_nvshmem", is_nvshmem_event}}}};
+              tgbody.e("task_desc.num_inputs = $;", task_desc.num_inputs);
+              tgbody.e("task_desc.num_outputs = $;", task_desc.num_outputs);
               off_t offset = 0;
               // Add input
               int3 input_map = input_ops[0]->input_map;
@@ -639,22 +738,30 @@ std::string Runtime::print_task_graph(
                 offset +=
                     block_size * bid.z * io_desc.tensor.stride[input_map.z];
               }
-              code.e("TensorDesc input$;", 0);
-              code.e("input$.base_ptr = static_cast<char*>($) + $;",
-                     0,
-                     io_desc.name,
-                     offset *
-                         type::get_datatype_size(io_desc.tensor.data_type));
-              code.e("input$.num_dims = $;", 0, task_desc.inputs[0].num_dims);
-              code.e("input$.data_type = $;", 0, task_desc.inputs[0].data_type);
-              for (int d = 0; d < task_desc.inputs[0].num_dims; d++) {
-                code.e("input$.dim[$] = $;", 0, d, task_desc.inputs[0].dim[d]);
-                code.e("input$.stride[$] = $;",
+              tgbody.e("TensorDesc input$;", 0);
+              tgbody.e("input$.base_ptr = static_cast<char*>($) + $;",
                        0,
-                       d,
-                       task_desc.inputs[0].stride[d]);
+                       io_desc.name,
+                       offset *
+                           type::get_datatype_size(io_desc.tensor.data_type));
+              tgbody.e("input$.num_dims = $;", 0, task_desc.inputs[0].num_dims);
+              tgbody.e("input$.data_type = $;", 0, task_desc.inputs[0].data_type);
+              json json_dims = json::array(), json_strides = json::array();
+              for (int d = 0; d < task_desc.inputs[0].num_dims; d++) {
+                tgbody.e("input$.dim[$] = $;", 0, d, task_desc.inputs[0].dim[d]);
+                tgbody.e("input$.stride[$] = $;",
+                         0,
+                         d,
+                         task_desc.inputs[0].stride[d]);
+                json_dims.push_back(task_desc.inputs[0].dim[d]);
+                json_strides.push_back(task_desc.inputs[0].stride[d]);
               }
-              code.e("task_desc.inputs[$] = input$;", 0, 0);
+              tgbody.e("task_desc.inputs[$] = input$;", 0, 0);
+              json_task["inputs"].push_back(json{{"base_ptr", io_desc.name},
+                                                 {"offset", offset * type::get_datatype_size(io_desc.tensor.data_type)},
+                                                 {"data_type", task_desc.inputs[0].data_type},
+                                                 {"dims", json_dims},
+                                                 {"strides", json_strides}});
               // Add nvshmem_copy output
               // Note that nvshmem_copy's output is stored in input_ops[1]
               offset = tgt_gpu_id * input_ops[0]->dtensor.num_elements();
@@ -678,26 +785,36 @@ std::string Runtime::print_task_graph(
                 offset +=
                     block_size * bid.z * io_desc.tensor.stride[output_map.z];
               }
-              code.e("TensorDesc output$;", 0);
-              code.e("output$.base_ptr = static_cast<char*>($) + $;",
-                     0,
-                     io_desc.name,
-                     offset *
-                         type::get_datatype_size(io_desc.tensor.data_type));
-              code.e("output$.num_dims = $;", 0, task_desc.outputs[0].num_dims);
-              code.e(
-                  "output$.data_type = $;", 0, task_desc.outputs[0].data_type);
-              for (int d = 0; d < task_desc.outputs[0].num_dims; d++) {
-                code.e(
-                    "output$.dim[$] = $;", 0, d, task_desc.outputs[0].dim[d]);
-                code.e("output$.stride[$] = $;",
+              tgbody.e("TensorDesc output$;", 0);
+              tgbody.e("output$.base_ptr = static_cast<char*>($) + $;",
                        0,
-                       d,
-                       task_desc.outputs[0].stride[d]);
+                       io_desc.name,
+                       offset *
+                           type::get_datatype_size(io_desc.tensor.data_type));
+              tgbody.e("output$.num_dims = $;", 0, task_desc.outputs[0].num_dims);
+              tgbody.e(
+                  "output$.data_type = $;", 0, task_desc.outputs[0].data_type);
+              json_dims = json::array();
+              json_strides = json::array();
+              for (int d = 0; d < task_desc.outputs[0].num_dims; d++) {
+                tgbody.e(
+                    "output$.dim[$] = $;", 0, d, task_desc.outputs[0].dim[d]);
+                tgbody.e("output$.stride[$] = $;",
+                         0,
+                         d,
+                         task_desc.outputs[0].stride[d]);
+                json_dims.push_back(task_desc.outputs[0].dim[d]);
+                json_strides.push_back(task_desc.outputs[0].stride[d]);
               }
-              code.e("task_desc.outputs[$] = output$;", 0, 0);
-              code.e("all_tasks.push_back(task_desc);");
-              code.e("}");
+              tgbody.e("task_desc.outputs[$] = output$;", 0, 0);
+              json_task["outputs"].push_back(json{{"base_ptr", io_desc.name},
+                                                  {"offset", offset * type::get_datatype_size(io_desc.tensor.data_type)},
+                                                  {"data_type", task_desc.outputs[0].data_type},
+                                                  {"dims", json_dims},
+                                                  {"strides", json_strides}});
+              tgbody.e("all_tasks.push_back(task_desc);");
+              json_task_graph["all_tasks"].push_back(json_task);
+              tgbody.e("}");
               task_pos++;
             }
           }
@@ -706,9 +823,9 @@ std::string Runtime::print_task_graph(
           assert(task_desc.task_type == task_type ||
                  task_type == TASK_ALLREDUCE);
           assert(task_pos == (task_id & 0xffffffff));
-          code.e("// task[$]", task_pos);
-          code.e("{");
-          code.e("TaskDesc task_desc(static_cast<TaskType>($));",
+          tgbody.e("// task[$]", task_pos);
+          tgbody.e("{");
+          tgbody.e("TaskDesc task_desc(static_cast<TaskType>($));",
                  task_desc.task_type);
           size_t gpu_offset = ((task_desc.trigger_event >> 32) & 0xffff);
           size_t event_pos = (task_desc.trigger_event & 0xffffffff);
@@ -716,11 +833,15 @@ std::string Runtime::print_task_graph(
               ((task_desc.trigger_event & EVENT_NVSHMEM_TAG) > 0);
           assert(gpu_offset == 0);
           assert(!is_nvshmem_event);
-          code.e("task_desc.trigger_event = get_event_id(my_gpu_id, $, $);",
+          tgbody.e("task_desc.trigger_event = get_event_id(my_gpu_id, $, $);",
                  event_pos,
                  is_nvshmem_event);
-          code.e("task_desc.num_inputs = $;", task_desc.num_inputs);
-          code.e("task_desc.num_outputs = $;", task_desc.num_outputs);
+          json json_task = {{"task_type", task_desc.task_type},
+                            {"inputs", {}},
+                            {"outputs", {}},
+                            {"trigger_event", json{{"gpu_offset", gpu_offset}, {"event_pos", event_pos}, {"is_nvshmem", is_nvshmem_event}}}};
+          tgbody.e("task_desc.num_inputs = $;", task_desc.num_inputs);
+          tgbody.e("task_desc.num_outputs = $;", task_desc.num_outputs);
           for (int i = 0; i < task_desc.num_inputs; i++) {
             off_t offset = 0;
             int num_dims = input_ops[i]->dtensor.num_dims;
@@ -802,22 +923,32 @@ std::string Runtime::print_task_graph(
                 offset += fused_dim_off_subtensor *
                           sub_desc.tensor.stride[input_map.z];
               }
-              code.e("TensorDesc input$;", i);
-              code.e("input$.base_ptr = static_cast<char*>($) + $;",
+              tgbody.e("TensorDesc input$;", i);
+              tgbody.e("input$.base_ptr = static_cast<char*>($) + $;",
                      i,
                      sub_desc.name,
                      offset *
                          type::get_datatype_size(sub_desc.tensor.data_type));
-              code.e("input$.num_dims = $;", i, task_desc.inputs[i].num_dims);
-              code.e("input$.data_type = $;", i, task_desc.inputs[i].data_type);
+              tgbody.e("input$.num_dims = $;", i, task_desc.inputs[i].num_dims);
+              tgbody.e("input$.data_type = $;", i, task_desc.inputs[i].data_type);
+              json json_dims = json::array();
+              json json_strides = json::array();
               for (int d = 0; d < task_desc.inputs[i].num_dims; d++) {
-                code.e("input$.dim[$] = $;", i, d, task_desc.inputs[i].dim[d]);
-                code.e("input$.stride[$] = $;",
-                       i,
-                       d,
-                       task_desc.inputs[i].stride[d]);
+                tgbody.e("input$.dim[$] = $;", i, d, task_desc.inputs[i].dim[d]);
+                tgbody.e("input$.stride[$] = $;",
+                         i,
+                         d,
+                         sub_desc.tensor.stride[d]);
+                json_dims.push_back(task_desc.inputs[i].dim[d]);
+                json_strides.push_back(sub_desc.tensor.stride[d]);
               }
-              code.e("task_desc.inputs[$] = input$;", i, i);
+              tgbody.e("task_desc.inputs[$] = input$;", i, i);
+              json_task["inputs"].push_back(
+                  json{{"base_ptr", sub_desc.name},
+                       {"offset", offset * type::get_datatype_size(sub_desc.tensor.data_type)},
+                       {"data_type", task_desc.inputs[i].data_type},
+                       {"dims", json_dims},
+                       {"strides", json_strides}});
             } else {
               // Non-fused case, use io_desc
               if (input_map.x >= 0) {
@@ -838,22 +969,32 @@ std::string Runtime::print_task_graph(
                 offset +=
                     block_size * bid.z * io_desc.tensor.stride[input_map.z];
               }
-              code.e("TensorDesc input$;", i);
-              code.e("input$.base_ptr = static_cast<char*>($) + $;",
+              tgbody.e("TensorDesc input$;", i);
+              tgbody.e("input$.base_ptr = static_cast<char*>($) + $;",
                      i,
                      io_desc.name,
                      offset *
                          type::get_datatype_size(io_desc.tensor.data_type));
-              code.e("input$.num_dims = $;", i, task_desc.inputs[i].num_dims);
-              code.e("input$.data_type = $;", i, task_desc.inputs[i].data_type);
+              tgbody.e("input$.num_dims = $;", i, task_desc.inputs[i].num_dims);
+              tgbody.e("input$.data_type = $;", i, task_desc.inputs[i].data_type);
+              json json_dims = json::array();
+              json json_strides = json::array();
               for (int d = 0; d < task_desc.inputs[i].num_dims; d++) {
-                code.e("input$.dim[$] = $;", i, d, task_desc.inputs[i].dim[d]);
-                code.e("input$.stride[$] = $;",
+                tgbody.e("input$.dim[$] = $;", i, d, task_desc.inputs[i].dim[d]);
+                tgbody.e("input$.stride[$] = $;",
                        i,
                        d,
                        task_desc.inputs[i].stride[d]);
+                json_dims.push_back(task_desc.inputs[i].dim[d]);
+                json_strides.push_back(task_desc.inputs[i].stride[d]);
               }
-              code.e("task_desc.inputs[$] = input$;", i, i);
+              tgbody.e("task_desc.inputs[$] = input$;", i, i);
+              json_task["inputs"].push_back(
+                  json{{"base_ptr", io_desc.name},
+                       {"offset", offset * type::get_datatype_size(io_desc.tensor.data_type)},
+                       {"data_type", task_desc.inputs[i].data_type},
+                       {"dims", json_dims},
+                       {"strides", json_strides}});
             }
           }
           for (int i = 0; i < task_desc.num_outputs; i++) {
@@ -881,24 +1022,35 @@ std::string Runtime::print_task_graph(
                   block_size * bid.z * io_desc.tensor.stride[output_map.z];
             }
 
-            code.e("TensorDesc output$;", i);
-            code.e("output$.base_ptr = static_cast<char*>($) + $;",
+            tgbody.e("TensorDesc output$;", i);
+            tgbody.e("output$.base_ptr = static_cast<char*>($) + $;",
                    i,
                    io_desc.name,
                    offset * type::get_datatype_size(io_desc.tensor.data_type));
-            code.e("output$.num_dims = $;", i, task_desc.outputs[i].num_dims);
-            code.e("output$.data_type = $;", i, task_desc.outputs[i].data_type);
+            tgbody.e("output$.num_dims = $;", i, task_desc.outputs[i].num_dims);
+            tgbody.e("output$.data_type = $;", i, task_desc.outputs[i].data_type);
+            json json_dims = json::array();
+            json json_strides = json::array();
             for (int d = 0; d < task_desc.outputs[i].num_dims; d++) {
-              code.e("output$.dim[$] = $;", i, d, task_desc.outputs[i].dim[d]);
-              code.e("output$.stride[$] = $;",
+              tgbody.e("output$.dim[$] = $;", i, d, task_desc.outputs[i].dim[d]);
+              tgbody.e("output$.stride[$] = $;",
                      i,
                      d,
                      task_desc.outputs[i].stride[d]);
+              json_dims.push_back(task_desc.outputs[i].dim[d]);
+              json_strides.push_back(task_desc.outputs[i].stride[d]);
             }
-            code.e("task_desc.outputs[$] = output$;", i, i);
+            tgbody.e("task_desc.outputs[$] = output$;", i, i);
+              json_task["outputs"].push_back(
+                  json{{"base_ptr", io_desc.name},
+                       {"offset", offset * type::get_datatype_size(io_desc.tensor.data_type)},
+                       {"data_type", task_desc.outputs[i].data_type},
+                       {"dims", json_dims},
+                       {"strides", json_strides}});
           }
-          code.e("all_tasks.push_back(task_desc);");
-          code.e("}");
+          tgbody.e("all_tasks.push_back(task_desc);");
+          tgbody.e("}");
+          json_task_graph["all_tasks"].push_back(json_task);
           task_pos++;
         }
       }
@@ -907,18 +1059,29 @@ std::string Runtime::print_task_graph(
   assert(task_pos == all_tasks.size());
   // Add all events
   for (auto const &event : all_events) {
-    code.e(
+    tgbody.e(
         "all_events.push_back(EventDesc(static_cast<EventType>($), $, $, $));",
         event.event_type,
         event.num_triggers,
         event.first_task_id,
         event.last_task_id);
+    json_task_graph["all_events"].push_back(json{{"event_type", event.event_type}, {"num_triggers", event.num_triggers}, {"first_task_id", event.first_task_id}, {"last_task_id", event.last_task_id}});
   }
   // Add first task
   for (auto const &task : first_tasks) {
-    code.e("first_tasks.push_back($);", task);
+    tgbody.e("first_tasks.push_back($);", task);
+    json_task_graph["first_tasks"].push_back(task);
+  }
+  if (use_json_format) {
+    code.e("construct_task_graph(my_gpu_id, all_tasks, all_events, first_tasks, all_tensors);");
+  } else {
+    code.e(tgbody.to_string());
   }
   code.e("}");
+  // Write json to output file
+  std::ofstream out("task_graph.json");
+  out << json_task_graph.dump(2);
+  out.close();
   return code.to_string();
 }
 

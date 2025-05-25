@@ -129,7 +129,8 @@ public:
       mirage::kernel::Graph const &graph,
       std::unordered_map<mirage::kernel::KNOperator const *,
                          std::tuple<int, int, TaskType>> const &task_config,
-      std::map<mirage::type::GuidType, IODesc> const &io_configs);
+      std::map<mirage::type::GuidType, IODesc> const &io_configs,
+      bool use_json_format);
 
 public:
   std::vector<TaskDesc> all_tasks;
