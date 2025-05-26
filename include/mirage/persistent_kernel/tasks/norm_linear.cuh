@@ -228,7 +228,7 @@ __device__ __forceinline__ void norm_linear_kernel(void const *input_ptr,
       }
     }
 
-    float const scalars[] = {0.0f, 0.000279f};
+    float const scalars[] = {0.0f, 1.0f / float(REDUCTION_SIZE)};
     perform_element_unary_chain_kernel<true,
                                        decltype(element_unary_smem),
                                        decltype(input_smem),
