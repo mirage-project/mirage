@@ -114,23 +114,23 @@ static string get_mma_stensor_aligned_layout(
   for (int i = start_dim; i < stensor.num_dims; i++) {
     // m/n
     if (i == start_dim && m) {
-      // K
-      aligned_shape = std::max(stensor.dim[i], std::get<2>(mma_atom_mnk));
+      // M
+      aligned_shape = std::max(stensor.dim[i], std::get<0>(mma_atom_mnk));
     } else if (i == start_dim && n) {
-      // N
-      aligned_shape = std::max(stensor.dim[i], std::get<1>(mma_atom_mnk));
-    } else if (i == stensor.num_dims - 1 && m) {
-      // M
-      aligned_shape = std::max(stensor.dim[i], std::get<0>(mma_atom_mnk));
-    } else if (i == stensor.num_dims - 1 && n) {
       // K
       aligned_shape = std::max(stensor.dim[i], std::get<2>(mma_atom_mnk));
-    } else if (i == start_dim && output) {
+    } else if (i == stensor.num_dims - 1 && m) {
+      // K
+      aligned_shape = std::max(stensor.dim[i], std::get<2>(mma_atom_mnk));
+    } else if (i == stensor.num_dims - 1 && n) {
       // N
       aligned_shape = std::max(stensor.dim[i], std::get<1>(mma_atom_mnk));
-    } else if (i == stensor.num_dims - 1 && output) {
+    } else if (i == start_dim && output) {
       // M
       aligned_shape = std::max(stensor.dim[i], std::get<0>(mma_atom_mnk));
+    } else if (i == stensor.num_dims - 1 && output) {
+      // N
+      aligned_shape = std::max(stensor.dim[i], std::get<1>(mma_atom_mnk));
     } else {
       assert(false);
     }
@@ -302,7 +302,46 @@ CustomOPTranspileResult
   CodeKeeper code;
   if (use_nvshmem) {
     if (!nvshmem_as_param.empty()) {
-      code.e("__global__ void __launch_bounds__($) $($, $, $, int mype, int npes) {",
+      if (profiling) {
+        code.e("__global__ void __launch_bounds__($) $($, $, uint64_t *profiler_buffer, $, int mype, int npes) {",
+              num_threads,
+              func_name,
+              map<kn::DTensor, string>(op->output_tensors,
+                                        [](kn::DTensor const &dtensor) -> string {
+                                          return fmt(
+                                              "$* __restrict__ dtensor$_ptr",
+                                              get_datatype_str(dtensor.data_type),
+                                              dtensor.guid);
+                                        }),
+              map<kn::DTensor, string>(
+                  op->input_tensors, [](kn::DTensor const &dtensor) -> string {
+                    return fmt("$ const* __restrict__ dtensor$_ptr",
+                                get_datatype_str(dtensor.data_type),
+                                dtensor.guid);
+                  }),
+              nvshmem_as_param);
+      } else {
+        code.e("__global__ void __launch_bounds__($) $($, $, $, int mype, int npes) {",
+              num_threads,
+              func_name,
+              map<kn::DTensor, string>(op->output_tensors,
+                                        [](kn::DTensor const &dtensor) -> string {
+                                          return fmt(
+                                              "$* __restrict__ dtensor$_ptr",
+                                              get_datatype_str(dtensor.data_type),
+                                              dtensor.guid);
+                                        }),
+              map<kn::DTensor, string>(
+                  op->input_tensors, [](kn::DTensor const &dtensor) -> string {
+                    return fmt("$ const* __restrict__ dtensor$_ptr",
+                                get_datatype_str(dtensor.data_type),
+                                dtensor.guid);
+                  }),
+              nvshmem_as_param);
+      }
+    } else {
+      if (profiling) {
+        code.e("__global__ void __launch_bounds__($) $($, $, uint64_t *profiler_buffer, int mype, int npes) {",
             num_threads,
             func_name,
             map<kn::DTensor, string>(op->output_tensors,
@@ -317,9 +356,8 @@ CustomOPTranspileResult
                   return fmt("$ const* __restrict__ dtensor$_ptr",
                               get_datatype_str(dtensor.data_type),
                               dtensor.guid);
-                }),
-            nvshmem_as_param);
-    } else {
+                }));
+      } else {
         code.e("__global__ void __launch_bounds__($) $($, $, int mype, int npes) {",
             num_threads,
             func_name,
@@ -336,6 +374,7 @@ CustomOPTranspileResult
                               get_datatype_str(dtensor.data_type),
                               dtensor.guid);
                 }));
+      }
     }
   } else if (profiling) {
     code.e(
