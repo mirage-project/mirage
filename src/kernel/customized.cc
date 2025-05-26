@@ -23,6 +23,7 @@
 #include "mirage/threadblock/smem_tensor.h"
 #include "mirage/utils/hash_utils.h"
 #include <cassert>
+#include <mirage/type.h>
 
 namespace mirage {
 namespace kernel {
@@ -62,7 +63,9 @@ KNOperator *Graph::create_customized_op(std::vector<DTensor> const &inputs,
       if (op->op_type == mirage::type::TB_INPUT_OP) {
         mirage::threadblock::TBInputOp const *input_op =
             static_cast<mirage::threadblock::TBInputOp const *>(op);
-        assert(inputs[num_inputs] == input_op->dtensor);
+        if (input_op->prologue != mirage::type::TB_PROLOGUE_ALLGATHER) {
+          assert(inputs[num_inputs] == input_op->dtensor);
+        }
         num_inputs++;
       }
     }
@@ -94,7 +97,9 @@ KNCustomizedOp::KNCustomizedOp(mirage::kernel::Graph *_kgraph,
       bgraph(_graph.grid_dim,
              _graph.block_dim,
              _graph.forloop_range,
-             _graph.reduction_dimx) {
+             _graph.reduction_dimx,
+             _kgraph->gpu_dim,
+             _graph.from_constructed) {
   // plan.grid_dim = _graph.grid_dim;
   // plan.block_dim = _graph.block_dim;
   // plan.forloop_range = _graph.forloop_range;
@@ -125,10 +130,16 @@ KNCustomizedOp::KNCustomizedOp(mirage::kernel::Graph *_kgraph,
         mirage::threadblock::TBInputOp *input_op =
             static_cast<mirage::threadblock::TBInputOp *>(op);
         DTensor const &dtensor = _inputs[input_idx++];
+        int64_t allgather_t_guid = 0;
+        if (_graph.from_constructed && input_op->prologue == mirage::type::TB_PROLOGUE_ALLGATHER) {
+          allgather_t_guid = input_op->dtensor.guid;
+        }
         bgraph.new_input(dtensor,
                          input_op->input_map,
                          input_op->forloop_dim,
-                         input_op->output_tensors[0].layout);
+                         input_op->output_tensors[0].layout,
+                         input_op->prologue,
+                         allgather_t_guid); // Keep the guid of the allgathered input dtensor
         // plan.input_map.push_back(input_op->input_map);
         // plan.input_forloop_dim.push_back(input_op->forloop_dim);
         // plan.input_smem_layouts.push_back(input_op->output_tensors[0].layout);
@@ -145,6 +156,11 @@ KNCustomizedOp::KNCustomizedOp(mirage::kernel::Graph *_kgraph,
         dtensor.owner_op = this;
         dtensor.owner_ts_idx = static_cast<int>(output_tensors.size());
         dtensor.guid = DTensor::next_guid++;
+        dtensor.epilogue = output_op->epilogue;
+        dtensor.is_nvshmem_tensor =
+            (output_op->epilogue == mirage::type::TB_EPILOGUE_ALLREDUCE ||
+             output_op->epilogue == mirage::type::TB_EPILOGUE_ALLTOALL ||
+             output_op->epilogue == mirage::type::TB_EPILOGUE_REDUCESCATTER);
         // DeviceMemoryManager *dmm = DeviceMemoryManager::get_instance();
         // dmm->allocate(dtensor);
         kgraph->allocate(dtensor);

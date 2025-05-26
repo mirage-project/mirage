@@ -14,6 +14,7 @@
 static void _init();
 static void _execute_mugraph(std::vector<void const *> input_tensors,
                              std::vector<void *> output_tensors,
+                             std::vector<void *> comm_buffers,
                              void *buf,
                              cudaStream_t stream,
                              void *profiler_buffer);
@@ -24,12 +25,19 @@ static void _execute_mugraph(std::vector<void const *> input_tensors,
 #include "kernel/element_unary.h"
 #include "kernel/matmul.h"
 #include "kernel/reduction.h"
+#include "kernel/communication.h"
 #include "threadblock/threadblock.h"
+#ifdef USE_NVSHMEM
+#include "nvshmem_rt.h"
+#include "threadblock/comm_executor.h"
+#include "threadblock/allgather_host.h"
+#endif
 #include "utils.h"
 
 // Entrypoint for C/C++
 extern "C" void execute_mugraph(std::vector<void const *> input_tensors,
                                 std::vector<void *> output_tensors,
+                                std::vector<void *> comm_buffers,
                                 void *buf,
                                 cudaStream_t stream,
                                 void *profiler_buffer) {
@@ -39,7 +47,7 @@ extern "C" void execute_mugraph(std::vector<void const *> input_tensors,
     _init();
     inited = true;
   }
-  _execute_mugraph(input_tensors, output_tensors, buf, stream, profiler_buffer);
+  _execute_mugraph(input_tensors, output_tensors, comm_buffers, buf, stream, profiler_buffer);
 }
 
 // A wrappr around `execute_mugraph` which uses C arrays instead of vectors
@@ -55,6 +63,25 @@ void execute_mugraph_wrapper(void const *input_tensors[],
       input_tensors, input_tensors + num_input_tensors);
   std::vector<void *> output_tensors_vec(output_tensors,
                                          output_tensors + num_output_tensors);
+  std::vector<void *> comm_buffers;
   execute_mugraph(
-      input_tensors_vec, output_tensors_vec, buf, stream, profiler_buffer);
+      input_tensors_vec, output_tensors_vec, comm_buffers, buf, stream, profiler_buffer);
+}
+
+void execute_mugraph_wrapper(void const *input_tensors[],
+                             size_t num_input_tensors,
+                             void *output_tensors[],
+                             size_t num_output_tensors,
+                             void *comm_buffers[],
+                             size_t num_comm_buffers,
+                             void *buf) {
+  std::vector<void const *> input_tensors_vec(
+      input_tensors, input_tensors + num_input_tensors);
+  std::vector<void *> output_tensors_vec(output_tensors,
+                                         output_tensors + num_output_tensors);
+  std::vector<void *> comm_buffers_vec(comm_buffers,
+                                         comm_buffers + num_comm_buffers);
+  cudaStream_t stream = 0;
+  void *profiler_buffer = nullptr;
+  execute_mugraph(input_tensors_vec, output_tensors_vec, comm_buffers_vec, buf, stream, profiler_buffer);
 }

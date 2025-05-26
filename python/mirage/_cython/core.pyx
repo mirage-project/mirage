@@ -343,8 +343,21 @@ def string_to_tbepilogue(epilogue):
         return TB_EPILOGUE_NONE
     elif epilogue == "allreduce":
         return TB_EPILOGUE_ALLREDUCE
+    elif epilogue == "alltoall":
+        return TB_EPILOGUE_ALLTOALL
+    elif epilogue == "reduce_scatter":
+        return TB_EPILOGUE_REDUCESCATTER
     else:
         assert False, "Unsupported threadblock epilogue"
+        return None
+
+def string_to_tbprologue(prologue):
+    if prologue is None:
+        return TB_PROLOGUE_NONE
+    elif prologue == "allgather":
+        return TB_PROLOGUE_ALLGATHER
+    else:
+        assert False, "Unsupported threadblock prologue"
         return None
 
 def string_to_accum_optype(acc):
@@ -646,26 +659,35 @@ cdef class CyTBOutputOp(CyTBOperator):
 cdef class CyKNGraph:
     cdef CppKNGraph *p_kgraph #Hold a CppKNGraph instance
 
-    def __cinit__(self, graph = None):
+    def __cinit__(self, tuple gpu_dim = (), graph = None):
         cdef unsigned long long ptr
+        cdef dim3 c_gpu_dim
         if graph is None:
-            self.p_kgraph = new CppKNGraph()
+            c_gpu_dim.x = gpu_dim[0]
+            c_gpu_dim.y = gpu_dim[1]
+            c_gpu_dim.z = gpu_dim[2]
+            self.p_kgraph = new CppKNGraph(c_gpu_dim)
         else:
             ptr = ctypes.cast(graph, ctypes.c_void_p).value
             self.p_kgraph = <CppKNGraph*>(ptr)
 
-    def new_input(self, tuple dims, tuple strides, dtype : dtype = float16):
+    def new_input(self, tuple dims, tuple strides, tuple gpu_input_map, dtype : dtype = float16):
         cdef vector[int] cdims
         cdef vector[size_t] cstrides
+        cdef int3 input_map
         cdims.resize(len(dims))
         for i in range(len(dims)):
             cdims[i] = dims[i]
         cstrides.resize(len(strides))
         for i in range(len(strides)):
             cstrides[i] = strides[i]
+        
+        input_map.x = gpu_input_map[0]
+        input_map.y = gpu_input_map[1]
+        input_map.z = gpu_input_map[2]
 
         c_type = convert_dtype_to_ctype(dtype)
-        cdef CppDTensor* ptr = self.p_kgraph.new_input_ptr(cdims, cstrides, c_type, DmemRowMajor)
+        cdef CppDTensor* ptr = self.p_kgraph.new_input_ptr(cdims, cstrides, input_map, c_type, DmemRowMajor)
         t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
         return DTensor(t)
 
@@ -769,6 +791,14 @@ cdef class CyKNGraph:
             outputs.append(DTensor(ptr))
         return outputs
 
+    # TODO (linsj20)
+    def all_reduce(self, DTensor input, reduce_op="sum", inplace=False):
+        if reduce_op != "sum":
+            raise RuntimeError(f"Unrecognized Reduction: {reduce_op}")
+        cdef CppDTensor* ptr = self.p_kgraph.all_reduce(input.c_ptr, inplace)
+        t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
+        return DTensor(t)
+
     def generate_triton_program(self, str filepath):
         assert filepath is not None, "filepath cannot be empty"
         py_byte_string = filepath.encode('UTF-8')
@@ -784,6 +814,14 @@ cdef class CyKNGraph:
             ptr = ctypes.cast(<unsigned long long>cinputs[i], ctypes.c_void_p)
             inputs.append(DTensor(ptr))
         return inputs
+
+    property gpu_dim:
+        def __get__(self):
+            return {
+                "x": self.p_kgraph.gpu_dim.x,
+                "y": self.p_kgraph.gpu_dim.y,
+                "z": self.p_kgraph.gpu_dim.z
+            }
     
     def get_owner_independent_hash(self):
         return self.p_kgraph.get_owner_independent_hash()
@@ -904,13 +942,14 @@ cdef class CyTBGraph:
             else:
                 assert False, "bgraph must be an integer or ctypes.c_void_p, but got " + str(type(bgraph))
     
-    def new_input(self, DTensor dtensor, tuple input_map, int forloop_dim):
+    def new_input(self, DTensor dtensor, tuple input_map, int forloop_dim, str prologue = None):
         assert len(input_map) == 3, "input_map must be of length 3"
         cdef int3 c_input_map
         c_input_map.x = input_map[0]
         c_input_map.y = input_map[1]
         c_input_map.z = input_map[2]
-        cdef CppSTensor* ptr = self.p_bgraph.new_input(dtensor.c_ptr, c_input_map, forloop_dim, SmemRowMajor)
+        prologue_type = string_to_tbprologue(prologue)
+        cdef CppSTensor* ptr = self.p_bgraph.new_input(dtensor.c_ptr, c_input_map, forloop_dim, SmemRowMajor, prologue_type)
         t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
         return STensor(t)
 
@@ -1127,6 +1166,17 @@ def search(CyKNGraph input_graph, *, int max_num_new_graphs = 1024, list imaps =
 # Generate CUDA program for a uGraph
 # Return (CUDA code, buffer size in bytes)
 def generate_cuda_program(CyKNGraph input_graph, *, int target_cc, list input_strides, int num_warp_groups = -1, int pipeline_stages = -1, bool profiling = False, bool enable_online_softmax = False) -> dict:
+    # Only rank 0 gets to transpile
+    gpu_dim = input_graph.gpu_dim
+    if gpu_dim['x'] * gpu_dim['y'] * gpu_dim['z'] > 1:
+        from mpi4py import MPI
+        comm = MPI.COMM_WORLD
+        rank = comm.Get_rank()
+        if rank != 0:
+            results = None
+            results = comm.bcast(results, root=0)
+            return results
+
     # Set transpiler_config
     cdef TranspilerConfig transpiler_config
     transpiler_config.target_cc = target_cc
@@ -1166,13 +1216,17 @@ def generate_cuda_program(CyKNGraph input_graph, *, int target_cc, list input_st
             "strides": cur_output_strides
         })
 
-    return {
+    results = {
         "code": result.code.decode("UTF-8"),
         "buf_size": result.buf_size,
         "max_smem_size": result.max_smem_size,
         "profiler_buf_size": result.profiler_buf_size,
         "output_directives": output_directives
     }
+
+    if gpu_dim['x'] * gpu_dim['y'] * gpu_dim['z'] > 1:
+        results = comm.bcast(results, root=0)
+    return results
 
 def generate_nki_program(CyKNGraph input_graph, *, int target_cc) -> dict:
     # Set transpiler_config

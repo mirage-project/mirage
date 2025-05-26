@@ -120,6 +120,10 @@ public:
   int num_dims;
   int dim[MAX_TENSOR_DIMS];
   type::GuidType guid;
+  // If this tensor is created by allgather, guid will be used to get correct 
+  // tensor metadata owned by the new tensor. Original_guid will be used for 
+  // consistency of the pointer names.
+  type::GuidType original_guid = 0;
   // int stride[MAX_TENSOR_DIMS];
   //  DTensor fields
   KNOperator *owner_op;
@@ -134,6 +138,10 @@ public:
   int64_t fp_offset;
 
   static std::atomic<int64_t> next_guid;
+
+  bool is_nvshmem_tensor = false;
+  type::TBEpilogueType epilogue = type::TBEpilogueType::TB_EPILOGUE_NONE;
+  type::TBPrologueType prologue = type::TBPrologueType::TB_PROLOGUE_NONE;
 };
 
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(

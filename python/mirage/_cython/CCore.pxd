@@ -46,7 +46,12 @@ cdef extern from "mirage/type.h" namespace "mirage::type":
         TB_EPILOGUE_NONE = 3100,
         TB_EPILOGUE_ALLREDUCE = 3101,
         TB_EPILOGUE_ALLTOALL = 3102,
+        TB_EPILOGUE_REDUCESCATTER = 3103,
         TB_EPILOGUE_INVALID = 3199,
+    cdef enum TBPrologueType:
+        TB_PROLOGUE_NONE = 3200,
+        TB_PROLOGUE_ALLGATHER = 3201,
+        TB_PROLOGUE_INVALID = 3299,
     cdef enum KNOperatorType:
         KN_UNKOWN = 1000,
         KN_INPUT_OP = 1001,
@@ -189,9 +194,10 @@ cdef extern from "mirage/kernel/graph.h" namespace "mirage::kernel":
         void get_bgraph(CppTBGraph** bgraph)
 
     cdef cppclass CppKNGraph "mirage::kernel::Graph":
-        CppKNGraph()
+        CppKNGraph(dim3 gpu_dim)
         CppDTensor* new_input_ptr(vector[int] dims,
                                   vector[size_t] strides,
+                                  int3 input_map,
                                   DataType data_type,
                                   DmemLayout layout)
         void mark_output(const CppDTensor* A, vector[size_t] strides)
@@ -208,6 +214,7 @@ cdef extern from "mirage/kernel/graph.h" namespace "mirage::kernel":
         CppDTensor* add(const CppDTensor* op1, const CppDTensor* op2)
         CppDTensor* mul(const CppDTensor* op1, const CppDTensor* op2)
         CppDTensor* div(const CppDTensor* op1, const CppDTensor* op2)
+        CppDTensor* all_reduce(const CppDTensor* input, bool inplace)
         CppDTensor* pow(const CppDTensor* op1, const CppDTensor* op2)
         int customized(vector[const CppDTensor*] inputs,
                        CppDTensor** outputs,
@@ -220,6 +227,7 @@ cdef extern from "mirage/kernel/graph.h" namespace "mirage::kernel":
         void generate_cuda_program(const char *filepath)
         size_t get_owner_independent_hash() const
         vector[CppKNOperator*] operators
+        dim3 gpu_dim
 
 cdef extern from "mirage/threadblock/graph.h" namespace "mirage::threadblock":
     ctypedef struct CppSTensor "mirage::threadblock::STensor":
@@ -256,7 +264,8 @@ cdef extern from "mirage/threadblock/graph.h" namespace "mirage::threadblock":
         CppSTensor* new_input(const CppDTensor* dtensor,
                            int3 input_map,
                            int forloop_dim,
-                           SmemLayout layout)
+                           SmemLayout layout,
+                           TBPrologueType prologue)
         CppDTensor* new_output(const CppSTensor* stensor,
                             int3 output_map,
                             int forloop_dim,

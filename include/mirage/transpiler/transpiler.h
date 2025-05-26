@@ -25,6 +25,7 @@
 #include "mirage/transpiler/structs.h"
 #include "mirage/transpiler/utils.h"
 #include "mirage/type.h"
+#include <stdio.h>
 
 namespace mirage {
 namespace transpiler {
@@ -47,11 +48,17 @@ private:
 
   // Distributed configuration
   int num_gpus;
+  bool use_nccl; // Whether to use NCCL (<=> whether the kernel is
+                    // distributed within one node)
   bool use_nvshmem; // Whether to use NVSHMEM (<=> whether the kernel is
-                    // distributed)
+                    // distributed across nodes)
   void resolve_distributed_config() {
     num_gpus = g->gpu_dim.x * g->gpu_dim.y * g->gpu_dim.z;
+    // TODO (linsj20) Logic to decide NCCL/NVSHMEM
+    use_nccl = num_gpus > 1;
     use_nvshmem = num_gpus > 1;
+    // use_nvshmem = false;
+    use_nccl = false;
   }
 
   // Tensor metadata
@@ -78,10 +85,16 @@ private:
   size_t d_buf_size; // Size of the buffer for intermediate DTensors
   void plan_dtensor_memory();
 
+  // Communication buffer allocation metadata
+  std::unordered_map<decltype(kn::DTensor::guid), size_t>
+      comm_buffer_metas; // DTensor guid -> buffer id
+
   // Utility functions for transpiling
   // Get the pointer to a DTensor. Return {pointer_name, code}
   std::pair<std::string, std::string>
-      get_dtensor_ptr(kn::DTensor const &dtensor);
+      get_dtensor_ptr(kn::DTensor const &dtensor, 
+                      CodeKeeper *comm_buffers=NULL, 
+                      size_t *next_comm_buffer_idx=NULL);
 
   std::pair<std::string, std::string>
       get_profiling_ptr(int const customized_idx);

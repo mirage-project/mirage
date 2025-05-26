@@ -40,7 +40,8 @@ private:
   std::vector<std::tuple<std::vector<int>,
                          type::DataType,
                          layout::DmemLayout,
-                         std::vector<size_t>>>
+                         std::vector<size_t>,
+                         int3>>
       computation_graph_input_attrs;
 
   // Statistics-related fields

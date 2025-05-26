@@ -38,16 +38,25 @@ public:
   // input operator
   DTensor new_input(std::vector<int> const &dims,
                     std::vector<size_t> const &strides,
+                    int3 input_map,
                     mirage::type::DataType data_type,
                     mirage::layout::DmemLayout layout);
   DTensor *new_input_ptr(std::vector<int> const &dims,
                          std::vector<size_t> const &strides,
+                         int3 input_map,
                          mirage::type::DataType data_type,
                          mirage::layout::DmemLayout layout);
+  DTensor new_input_from_constructed(std::vector<int> const &dims,
+                    std::vector<size_t> const &strides,
+                    int3 input_map,
+                    mirage::type::DataType data_type,
+                    mirage::layout::DmemLayout layout);                      
   KNOperator *create_input_op(std::vector<int> const &dims,
                               std::vector<size_t> const &strides,
+                              int3 input_map,
                               mirage::type::DataType data_type,
-                              mirage::layout::DmemLayout layout);
+                              mirage::layout::DmemLayout layout,
+                              bool dim_divided = false);
   // output operator
   void mark_output(DTensor const &A);
   void mark_output(DTensor const *A);

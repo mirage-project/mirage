@@ -63,7 +63,8 @@ public:
             std::vector<size_t> const &strides,
             mirage::type::DataType data_type,
             mirage::layout::DmemLayout layout,
-            int3 input_map = {-1, -1, -1});
+            int3 input_map = {-1, -1, -1},
+            bool dim_divided = false);
   ~KNInputOp();
   bool profile(ProfileResult &profile);
   bool fingerprint(void);

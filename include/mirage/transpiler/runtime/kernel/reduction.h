@@ -27,7 +27,8 @@ static __global__ void
     T result = (T)0;
     CUTE_UNROLL
     for (int i = 0; i < Config::REDUCTION_FACTOR; ++i) {
-      result += in[src_phy_pos + i * Config::REDUCTION_DIM_STRIDE];
+      result += in[src_phy_pos + i * Config::REDUCTION_DIM_STRIDE
+                                   * Config::SECTION_STRIDE];
     }
     out[dst_phy_pos] = result;
   }
@@ -36,13 +37,15 @@ static __global__ void
 template <typename T_,
           typename SrcLayout_,
           typename DstLayout_,
-          int REDUCTION_DIM_>
+          int REDUCTION_DIM_,
+          bool STRIDED_SECTION_ = false>
 class ReductionKernel {
 public:
   using T = T_;
   using SrcLayout = SrcLayout_;
   using DstLayout = DstLayout_;
   static constexpr int REDUCTION_DIM = REDUCTION_DIM_;
+  static constexpr bool STRIDED_SECTION = STRIDED_SECTION_;
 
   static constexpr int NUM_DIMS = rank(SrcLayout{});
   CUTE_STATIC_ASSERT_V(rank(SrcLayout{}) == rank(DstLayout{}));
@@ -57,16 +60,20 @@ public:
   static constexpr int REDUCTION_DIM_STRIDE =
       get<REDUCTION_DIM>(stride(SrcLayout{}));
 
+  static constexpr int SECTION_STRIDE = 
+      STRIDED_SECTION ? get<REDUCTION_DIM>(shape(DstLayout{})) : 1;
+
   // When we feed a CuTe layout with an interger, it first translates the int
   // into a (logical) coordinate, and then takes the dot product with the
   // strides to get the physical index.
   // Using the following layout, we can get the physical index of the starting
   // element in a reduction segment by a logical index (i.e. the thread index)
   // in the output tensor.
+  static constexpr int SECTION_START = STRIDED_SECTION ? 1 : REDUCTION_FACTOR;
   using DstInSrcLayout = decltype(make_layout(
       shape(DstLayout{}),
       replace<REDUCTION_DIM>(stride(SrcLayout{}),
-                             Int<REDUCTION_DIM_STRIDE * REDUCTION_FACTOR>{})));
+                             Int<REDUCTION_DIM_STRIDE * SECTION_START>{})));
   static_assert(is_static_v<DstInSrcLayout>);
 
   static constexpr int BLOCK_SIZE = 512;
@@ -83,7 +90,7 @@ public:
       }
     });
     reduction_kernel_fwd<
-        ReductionKernel<T, SrcLayout, DstLayout, REDUCTION_DIM>>
+        ReductionKernel<T, SrcLayout, DstLayout, REDUCTION_DIM, STRIDED_SECTION>>
         <<<grid_shape, block_shape>>>(out, in);
   }
 };
