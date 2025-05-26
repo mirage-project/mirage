@@ -78,8 +78,8 @@ __device__ __forceinline__ void norm_linear_kernel(void const *input_ptr,
   extern __shared__ char smem[];
 
   // zero buffer
-  *((__uint128_t *)smem) = 0ul;
   T *zero_buf = (T *)(smem + 0); // 128 bytes
+  *((__uint128_t *)smem) = 0ul;
 
   // copy input
   T *shared_input = (T *)(smem + 128); // sizeof(T) * BATCH_SIZE * TILE_SIZE
@@ -106,18 +106,33 @@ __device__ __forceinline__ void norm_linear_kernel(void const *input_ptr,
             sizeof(T) * TILE_SIZE * OUTPUT_SIZE +
             sizeof(T) * TILE_SIZE *
                 OUTPUT_SIZE); // sizeof(T) * BATCH_SIZE * TILE_SIZE
+  for (int i = threadIdx.x; i < BATCH_SIZE * TILE_SIZE; i += NUM_THREADS) {
+    element_unary_output[i] = T(0.0f);
+  }
 
-  /*******************************************************
-   * total size = 128
-   *             + 3 * sizeof(T) * BATCH_SIZE * TILE_SIZE
-   *             + 2 * sizeof(T) * TILE_SIZE * OUTPUT_SIZE
-   *******************************************************/
-
-  T *mm_output = shared_input;               // reuse shared_input
-  T *reduction_output = shared_input_buffer; // reuse shared_input_buffer
+  T *mm_output = (T *)(smem + 128 + sizeof(T) * BATCH_SIZE * TILE_SIZE +
+                       sizeof(T) * BATCH_SIZE * TILE_SIZE +
+                       sizeof(T) * TILE_SIZE * OUTPUT_SIZE +
+                       sizeof(T) * TILE_SIZE * OUTPUT_SIZE +
+                       sizeof(T) * BATCH_SIZE *
+                           TILE_SIZE); // sizeof(T) * BATCH_SIZE * OUTPUT_SIZE
+  T *reduction_output =
+      (T *)(smem + 128 + sizeof(T) * BATCH_SIZE * TILE_SIZE +
+            sizeof(T) * BATCH_SIZE * TILE_SIZE +
+            sizeof(T) * TILE_SIZE * OUTPUT_SIZE +
+            sizeof(T) * TILE_SIZE * OUTPUT_SIZE +
+            sizeof(T) * BATCH_SIZE * TILE_SIZE +
+            sizeof(T) * BATCH_SIZE * OUTPUT_SIZE); // sizeof(T) * BATCH_SIZE * 1
 
   // out
-  T *shared_output = element_unary_output; // reuse element_unary_output
+  T *shared_output =
+      (T *)(smem + 128 + sizeof(T) * BATCH_SIZE * TILE_SIZE +
+            sizeof(T) * BATCH_SIZE * TILE_SIZE +
+            sizeof(T) * TILE_SIZE * OUTPUT_SIZE +
+            sizeof(T) * TILE_SIZE * OUTPUT_SIZE +
+            sizeof(T) * BATCH_SIZE * TILE_SIZE +
+            sizeof(T) * BATCH_SIZE * OUTPUT_SIZE +
+            sizeof(T) * BATCH_SIZE * 1); // sizeof(T) * BATCH_SIZE * OUTPUT_SIZE
 
   // define the swizzle mode
 

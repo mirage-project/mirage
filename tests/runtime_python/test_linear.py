@@ -66,8 +66,9 @@ for output_size in output_sizes:
         outputs = graph(inputs=input_tensors)
 
     torch.cuda.synchronize()
-    starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(
-        enable_timing=True
+    starter, ender = (
+        torch.cuda.Event(enable_timing=True),
+        torch.cuda.Event(enable_timing=True),
     )
     starter.record()
     for rep in range(repetitions):
