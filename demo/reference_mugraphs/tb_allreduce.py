@@ -16,6 +16,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     save_codes = args.save_codes
 
+    graph = mi.new_kernel_graph()
     graph = mi.new_kernel_graph(gpu_dim=(4, 1, 1))
     X = graph.new_input(dims=(512, 128), gpu_input_map=(1, -1 ,-1), dtype=mi.float16)
     W1 = graph.new_input(dims=(128, 256), gpu_input_map=(0, -1 ,-1), dtype=mi.float16)
