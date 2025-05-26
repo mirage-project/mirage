@@ -99,6 +99,7 @@ def get_compile_command(target_cc,
                         cc,
                         file_name,
                         py_include_dir,
+                        mirage_home_path,
                         mirage_inc_path,
                         mirage_deps_path,
                         nvshmem_inc_path,
@@ -115,6 +116,7 @@ def get_compile_command(target_cc,
         f"-I{py_include_dir}",
         f"-I{os.path.join(mirage_inc_path, 'mirage/persistent_kernel')}",
         f"-I{os.path.join(mirage_deps_path, 'cutlass/include')}",
+        f"-I{os.path.join(mirage_home_path, 'deps/json/include')}",
     ]
 
     flags = [
@@ -165,6 +167,15 @@ class PersistentKernel:
         tempdir = tempdir_obj.name
         full_src_file = os.path.join(tempdir, "test.cu")
         so_path = os.path.join(tempdir, "test.cpython-38-x86_64-linux-gnu.so")
+        # check json file
+        json_file_path = os.path.join(os.path.dirname(file_path), "task_graph.json")
+        new_json_path = os.path.join(tempdir, "task_graph.json")
+        if not os.path.exists(json_file_path):
+            raise RuntimeError(f"Cannot find json file in directory {json_file_path}")
+        with open(json_file_path, "r") as f:
+            task_graph_json = f.read()
+        with open(new_json_path, "w") as f:
+            f.write(task_graph_json)
         with open(file_path, "r") as f:
             task_graph_impl = f.read()
         with open(full_src_file, "w") as f:
@@ -185,6 +196,12 @@ class PersistentKernel:
         if scheme == "posix_local":
             scheme = "posix_prefix"
         py_include_dir = sysconfig.get_paths(scheme=scheme)["include"]
+
+        #find mirage home
+        if "MIRAGE_HOME" in os.environ:
+            MIRAGE_HOME_PATH = os.environ.get("MIRAGE_HOME")
+        else:
+            raise RuntimeError("MIRAGE_HOME unspecified")
 
         # find nvshmem include folder and library foldera
         if "NVSHMEM_INC_PATH" in os.environ:
@@ -246,6 +263,7 @@ class PersistentKernel:
                                      cc=cc,
                                      file_name=full_src_file,
                                      py_include_dir=py_include_dir,
+                                     mirage_home_path=MIRAGE_HOME_PATH,
                                      mirage_inc_path=INCLUDE_PATH,
                                      mirage_deps_path=DEPS_PATH,
                                      nvshmem_inc_path=NVSHMEM_INC_PATH,
