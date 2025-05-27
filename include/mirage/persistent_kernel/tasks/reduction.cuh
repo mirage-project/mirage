@@ -24,7 +24,7 @@ constexpr int NUM_THREADS = 128;
 // reduction on dim 0
 template <typename SMEM_DST, typename SMEM_SRC>
 static __device__ __forceinline__ void reduction_sum_row(SMEM_DST dst,
-                                                         const SMEM_SRC src) {
+                                                         SMEM_SRC src) {
 
   static constexpr int REDUCTION_FACTOR = SMEM_SRC::ROW;
   for (int dst_elem_idx = threadIdx.x; dst_elem_idx < SMEM_DST::size();
@@ -34,9 +34,9 @@ static __device__ __forceinline__ void reduction_sum_row(SMEM_DST dst,
 
 #pragma unroll
     for (int i = 0; i < REDUCTION_FACTOR; ++i) {
-      result += static_cast<float>(src.at(i, dst_col));
+      result += float(src.at(i, dst_col));
     }
-    dst[dst_elem_idx] = result;
+    dst.at(dst_elem_idx) = bfloat16(result);
   }
 }
 
@@ -46,7 +46,7 @@ template <typename SMEM_DST,
           ElementUnaryOpType FirstOp,
           ElementUnaryOpType... RemainingOps>
 static __device__ __forceinline__ void
-    reduction_sum_row(SMEM_DST dst, const SMEM_SRC src, float const *scalars) {
+    reduction_sum_row(SMEM_DST dst, SMEM_SRC src, float const *scalars) {
   static constexpr int REDUCTION_FACTOR = SMEM_SRC::ROW;
   for (int dst_elem_idx = threadIdx.x; dst_elem_idx < SMEM_DST::size();
        dst_elem_idx += NUM_THREADS) {
@@ -55,11 +55,11 @@ static __device__ __forceinline__ void
 
 #pragma unroll
     for (int i = 0; i < REDUCTION_FACTOR; ++i) {
-      result += static_cast<float>(src.at(i, dst_col));
+      result += float(src.at(i, dst_col));
     }
     result = perform_element_unary_chain<float, FirstOp, RemainingOps...>(
         result, scalars, 0);
-    dst[dst_elem_idx] = result;
+    dst.at(dst_elem_idx) = bfloat16(result);
   }
 }
 
