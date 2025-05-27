@@ -30,7 +30,7 @@ public:
   virtual z3::expr
       to_z3(z3::context &c,
             std::unordered_set<std::string> &all_variables) const = 0;
-  std::unordered_map<int, bool> subpattern_to(
+  std::vector<bool> subpattern_to(
       std::vector<std::shared_ptr<AbstractExpr>> const &input_patterns) const;
   virtual std::string to_string() const = 0;
   virtual std::string to_egg() const = 0;
