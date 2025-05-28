@@ -20,6 +20,7 @@ def attention_decode(q, k_cache, v_cache, valid_len):
     scores = torch.matmul(q, k.transpose(-2, -1))
     mask = torch.arange(valid_len, device=scores.device)[None, :] <= (valid_len - 1)
     scores = scores.masked_fill(~mask[None, None, :], float("-inf"))
+    
     out = torch.matmul(scores, v)
     return out
 
