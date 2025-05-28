@@ -44,23 +44,29 @@ __device__ __forceinline__ void silu_mul_linear_kernel(void const *input_ptr,
   constexpr int CHUNKS_PER_ROW_A = TILE_SIZE / CHUNK_SIZE;
   constexpr int CHUNKS_PER_ROW_B = OUTPUT_SIZE / CHUNK_SIZE;
 
-  constexpr int CHUNKS_PER_ROW_A_MASK = CHUNKS_PER_ROW_A - 1;
-  constexpr int CHUNKS_PER_ROW_B_MASK = CHUNKS_PER_ROW_B - 1;
-
   constexpr int log2_CHUNK_SIZE = 3;
   constexpr int log2_CHUNKS_PER_ROW_A = 3;
   constexpr int log2_CHUNKS_PER_ROW_B = CHUNKS_PER_ROW_B == 2   ? 1
                                         : CHUNKS_PER_ROW_B == 4 ? 2
                                                                 : 3;
 
-  constexpr int num_m = 1;
-  constexpr int num_n = OUTPUT_SIZE / 16;
-  constexpr int num_k = TILE_SIZE / 16;
-  constexpr int num_iters_n = (num_n + 3) >> 2;
+  // using SM80_16x8x16_F16F16F16F16_TNX2 = 16X16X16
+  constexpr int NUM_WARP_N = OUTPUT_SIZE / 16; // 1, 2, 4
+  constexpr int NUM_WARP_K = 4 / NUM_WARP_N;   // 4, 2, 1
+
+  constexpr int NUM_ITERS_M = 1;
+  constexpr int NUM_ITERS_N = 1;
+  constexpr int NUM_ITERS_K = 4 / NUM_WARP_K; // 1, 2, 4
+
+  constexpr int log2_NUM_WARP_N = NUM_WARP_N == 1   ? 0
+                                  : NUM_WARP_N == 2 ? 1
+                                                    : 2; // 0, 1, 2
+
   int warp_idx = warp_id();
+  int warp_row = warp_idx >> log2_NUM_WARP_N;
+  int warp_col = warp_idx & (NUM_WARP_N - 1);
   int idx_in_warp = threadIdx.x & 0x1F;
 
-  assert(num_m > 0 && num_n > 0 && num_k > 0);
   T const *__restrict__ d_input = static_cast<T const *>(input_ptr);
   T const *__restrict__ d_mul = static_cast<T const *>(mul_ptr);
   T const *__restrict__ d_weight = static_cast<T const *>(weight_ptr);
@@ -119,6 +125,15 @@ __device__ __forceinline__ void silu_mul_linear_kernel(void const *input_ptr,
                         sizeof(T) * TILE_SIZE * OUTPUT_SIZE +
                         sizeof(T) * BATCH_SIZE * TILE_SIZE);
 
+  T *mm_intermediate = (T *)(smem + 128 + sizeof(T) * BATCH_SIZE * TILE_SIZE +
+                             sizeof(T) * BATCH_SIZE * TILE_SIZE +
+                             sizeof(T) * BATCH_SIZE * TILE_SIZE +
+                             sizeof(T) * BATCH_SIZE * TILE_SIZE +
+                             sizeof(T) * TILE_SIZE * OUTPUT_SIZE +
+                             sizeof(T) * TILE_SIZE * OUTPUT_SIZE +
+                             sizeof(T) * BATCH_SIZE * TILE_SIZE +
+                             sizeof(T) * BATCH_SIZE * TILE_SIZE);
+
   // out
   T *shared_output = shared_input; // reuse shared_input
 
@@ -128,6 +143,8 @@ __device__ __forceinline__ void silu_mul_linear_kernel(void const *input_ptr,
   using InputSmem = smem_row<T, 0, 0, 0, BATCH_SIZE, TILE_SIZE, TILE_SIZE>;
   using WeightSmem = smem_row<T, 3, 3, 3, TILE_SIZE, OUTPUT_SIZE, OUTPUT_SIZE>;
   using OutputSmem = smem_row<T, 0, 0, 0, BATCH_SIZE, OUTPUT_SIZE, OUTPUT_SIZE>;
+  using MatMulIntermediateSmem =
+      smem_row<T, 0, 0, 0, BATCH_SIZE * NUM_WARP_K, OUTPUT_SIZE, OUTPUT_SIZE>;
 
   // zero buffer
   ZeroBufferSmem zero_buffer(zero_buf);
@@ -145,6 +162,8 @@ __device__ __forceinline__ void silu_mul_linear_kernel(void const *input_ptr,
 
   InputSmem mul_output_smem(mul_output);
 
+  MatMulIntermediateSmem mm_intermediate_smem(mm_intermediate);
+
   OutputSmem output_smem(shared_output);
 
 // load input
@@ -152,7 +171,7 @@ __device__ __forceinline__ void silu_mul_linear_kernel(void const *input_ptr,
   for (int i = threadIdx.x; i < NUM_CHUNKS_A; i += NUM_THREADS) {
     // offset
     int row = i >> log2_CHUNKS_PER_ROW_A;
-    int col = (i & CHUNKS_PER_ROW_A_MASK) << log2_CHUNK_SIZE;
+    int col = (i & (CHUNKS_PER_ROW_A - 1)) << log2_CHUNK_SIZE;
     load_smem(input_smem_buffer(row, col), input_dmem(row, col));
   }
 
@@ -161,7 +180,7 @@ __device__ __forceinline__ void silu_mul_linear_kernel(void const *input_ptr,
   for (int i = threadIdx.x; i < NUM_CHUNKS_A; i += NUM_THREADS) {
     // offset
     int row = i >> log2_CHUNKS_PER_ROW_A;
-    int col = (i & CHUNKS_PER_ROW_A_MASK) << log2_CHUNK_SIZE;
+    int col = (i & (CHUNKS_PER_ROW_A - 1)) << log2_CHUNK_SIZE;
     load_smem(mul_smem_buffer(row, col), mul_dmem(row, col));
   }
 
@@ -169,13 +188,13 @@ __device__ __forceinline__ void silu_mul_linear_kernel(void const *input_ptr,
 #pragma unroll
   for (int i = threadIdx.x; i < NUM_CHUNKS_B; i += NUM_THREADS) {
     int row = i >> log2_CHUNKS_PER_ROW_B;
-    int col = (i & CHUNKS_PER_ROW_B_MASK) << log2_CHUNK_SIZE;
+    int col = (i & (CHUNKS_PER_ROW_B - 1)) << log2_CHUNK_SIZE;
     load_smem(input_weight_smem_buffer(row, col), weight_dmem(row, col));
   }
   cp_async_fence();
 
   //  accumulator
-  float s_frag[num_m][num_n][8];
+  float s_frag[NUM_ITERS_M][NUM_ITERS_N][8];
 #pragma unroll
   for (int i = 0; i < 8; ++i) {
     s_frag[0][0][i] = 0.0f;
@@ -193,7 +212,7 @@ __device__ __forceinline__ void silu_mul_linear_kernel(void const *input_ptr,
       for (int i = threadIdx.x; i < NUM_CHUNKS_A; i += NUM_THREADS) {
         // offset
         int row = i >> log2_CHUNKS_PER_ROW_A;
-        int col = (i & CHUNKS_PER_ROW_A_MASK) << log2_CHUNK_SIZE;
+        int col = (i & (CHUNKS_PER_ROW_A - 1)) << log2_CHUNK_SIZE;
         load_smem(input_smem(row, col), input_dmem_buffer(row, col));
       }
 
@@ -201,14 +220,14 @@ __device__ __forceinline__ void silu_mul_linear_kernel(void const *input_ptr,
       for (int i = threadIdx.x; i < NUM_CHUNKS_A; i += NUM_THREADS) {
         // offset
         int row = i >> log2_CHUNKS_PER_ROW_A;
-        int col = (i & CHUNKS_PER_ROW_A_MASK) << log2_CHUNK_SIZE;
+        int col = (i & (CHUNKS_PER_ROW_A - 1)) << log2_CHUNK_SIZE;
         load_smem(mul_smem(row, col), mul_dmem_buffer(row, col));
       }
 // load weight
 #pragma unroll
       for (int i = threadIdx.x; i < NUM_CHUNKS_B; i += NUM_THREADS) {
         int row = i >> log2_CHUNKS_PER_ROW_B;
-        int col = (i & CHUNKS_PER_ROW_B_MASK) << log2_CHUNK_SIZE;
+        int col = (i & (CHUNKS_PER_ROW_B - 1)) << log2_CHUNK_SIZE;
         load_smem(input_weight_smem(row, col), weight_dmem_buffer(row, col));
       }
       cp_async_fence();
@@ -247,49 +266,52 @@ __device__ __forceinline__ void silu_mul_linear_kernel(void const *input_ptr,
 
     __syncthreads();
 
-    if (warp_idx < num_n) {
-      uint32_t a_frag[4], b_frag[4];
-      for (uint32_t n = 0; n < num_iters_n; n++) {
-        int n_col = (n << 6) + (warp_idx << 4) + ((idx_in_warp >> 4) << 3);
-        for (uint32_t m = 0; m < num_m; m++) {
-          int m_row = (m << 4) + (idx_in_warp & 0xF);
+    uint32_t a_frag[4], b_frag[4];
+    for (uint32_t m = 0; m < NUM_ITERS_M; m++) {
+      int m_row = (idx_in_warp & 0xF);
+      bool is_valid = (m_row < BATCH_SIZE);
+      for (uint32_t n = 0; n < NUM_ITERS_N; n++) {
+        int n_col = (warp_col << 4) + ((idx_in_warp >> 4) << 3);
 #pragma unroll
-          for (uint32_t k = 0; k < num_k; k++) {
-            int m_col = (k << 4) + ((idx_in_warp >> 4) << 3);
-            int n_row = (k << 4) + (idx_in_warp & 0xF);
-            bool is_valid = (m_row < BATCH_SIZE);
-            T *src_ptr =
-                is_valid ? mul_output_smem(m_row, m_col) : zero_buffer(0, 0);
-            ldsm(src_ptr, a_frag);
-            ldsm_t(input_weight_smem(n_row, n_col), b_frag);
-            mma_m16n16k16_bf16bf16bf32(
-                s_frag[m][n], a_frag, b_frag, s_frag[m][n]);
-          }
+        for (uint32_t k = 0; k < NUM_ITERS_K; k++) {
+          int n_row = (warp_row << (4 + log2_NUM_WARP_N)) + (k << 4) +
+                      (idx_in_warp & 0xF);
+          int m_col = (warp_row << (4 + log2_NUM_WARP_N)) + (k << 4) +
+                      ((idx_in_warp >> 4) << 3);
+          T *src_ptr =
+              is_valid ? mul_output_smem(m_row, m_col) : zero_buffer(0, 0);
+          ldsm(src_ptr, a_frag);
+          ldsm_t(input_weight_smem(n_row, n_col), b_frag);
+          mma_m16n16k16_bf16bf16bf32(
+              s_frag[m][n], a_frag, b_frag, s_frag[m][n]);
         }
       }
     }
-
     __syncthreads();
   }
+
   // reg write back to smem
-  if (warp_idx < num_n) {
-    for (uint32_t n = 0; n < num_iters_n; n++) {
-      for (uint32_t m = 0; m < num_m; m++) {
+  for (uint32_t m = 0; m < NUM_ITERS_M; m++) {
+    for (uint32_t n = 0; n < NUM_ITERS_N; n++) {
 #pragma unroll
-        for (uint32_t i = 0; i < 4; i++) {
-          int row = (m << 4) + (idx_in_warp >> 2) + ((i & 0x1) << 3);
-          if (row < BATCH_SIZE) {
-            // continue;
-            int col = (n << 6) + (warp_idx << 4) + ((idx_in_warp & 0x3) << 1) +
-                      ((i >> 1) << 3);
-            output_smem.at(row, col) = bfloat16(s_frag[m][n][(i << 1)]);
-            output_smem.at(row, col + 1) =
-                bfloat16(s_frag[m][n][(i << 1) | 0x1]);
-          }
+      for (uint32_t i = 0; i < 4; i++) {
+        int row_in_warp = (idx_in_warp >> 2) + ((i & 0x1) << 3);
+        if (row_in_warp < BATCH_SIZE) {
+          // continue;
+          int col =
+              (warp_col << 4) + ((idx_in_warp & 0x3) << 1) + ((i >> 1) << 3);
+          mm_intermediate_smem.at(warp_row + row_in_warp, col) =
+              bfloat16(s_frag[m][n][(i << 1)]);
+          mm_intermediate_smem.at(warp_row + row_in_warp, col + 1) =
+              bfloat16(s_frag[m][n][(i << 1) | 0x1]);
         }
       }
     }
   }
+  __syncthreads();
+
+  reduction_sum_row<decltype(output_smem), decltype(mm_intermediate_smem)>(
+      output_smem, mm_intermediate_smem);
   __syncthreads();
 
 #pragma unroll

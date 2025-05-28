@@ -28,8 +28,9 @@ for output_size in output_sizes:
         runtime_kernel.silu_mul_linear(x, m, w, output)
 
     torch.cuda.synchronize()
-    starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(
-        enable_timing=True
+    starter, ender = (
+        torch.cuda.Event(enable_timing=True),
+        torch.cuda.Event(enable_timing=True),
     )
     repetitions = 100000
     starter.record()
