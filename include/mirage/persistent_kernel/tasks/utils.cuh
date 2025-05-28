@@ -30,6 +30,14 @@ __device__ __forceinline__ void
   }
 }
 
+__forceinline__ __device__ float shfl_xor_sync(float x, int lane_mask) {
+  float y;
+  asm volatile("shfl.sync.bfly.b32 %0, %1, %2, 0x1f, 0xffffffff;"
+               : "=f"(y)
+               : "f"(x), "r"(lane_mask));
+  return y;
+}
+
 /*!
  * \brief Wrapper of PTX ex2.approx instruction, which computes 2^x
  * \param x input
