@@ -345,21 +345,6 @@ __global__ void persistent_kernel(RuntimeConfig config) {
           break;
         }
         case TASK_RMS_NORM_LINEAR: {
-          if (config.profiling) {
-            PROFILER_EVENT_START(TASK_RMS_NORM_LINEAR,
-                                 cur_task_pos[0] + cur_task_pos[1]);
-            kernel::norm_linear_kernel<bfloat16, 1, 32, 4096>(
-                task_desc.inputs[0].base_ptr,
-                task_desc.inputs[1].base_ptr,
-                task_desc.outputs[0].base_ptr);
-            PROFILER_EVENT_END(TASK_RMS_NORM_LINEAR,
-                               cur_task_pos[0] + cur_task_pos[1]);
-          }
-
-          if (threadIdx.x == 0) {
-            // printf("[EXEC] worker_id(%d) task_type(RMS)\n", worker_id);
-          }
-
           kernel::norm_linear_kernel<bfloat16, 1, 32, 4096>(
               task_desc.inputs[0].base_ptr,
               task_desc.inputs[1].base_ptr,
@@ -367,20 +352,9 @@ __global__ void persistent_kernel(RuntimeConfig config) {
           break;
         }
         case TASK_EMBEDDING: {
-          if (config.profiling) {
-            PROFILER_EVENT_START(TASK_EMBEDDING,
-                                 cur_task_pos[0] + cur_task_pos[1]);
-            kernel::embedding_kernel<bfloat16>(task_desc.inputs[0].base_ptr,
-                                               task_desc.inputs[1].base_ptr,
-                                               task_desc.outputs[0].base_ptr);
-            PROFILER_EVENT_END(TASK_EMBEDDING,
-                               cur_task_pos[0] + cur_task_pos[1]);
-          }
-
-          if (threadIdx.x == 0) {
-            // printf("[EXEC] worker_id(%d) task_type(EMB)\n", worker_id);
-          }
-
+          kernel::embedding_kernel<bfloat16>(task_desc.inputs[0].base_ptr,
+                                             task_desc.inputs[1].base_ptr,
+                                             task_desc.outputs[0].base_ptr);
           break;
         }
         case TASK_ATTENTION_1: {
