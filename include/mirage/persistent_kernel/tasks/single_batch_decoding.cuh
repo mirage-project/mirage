@@ -42,6 +42,7 @@ __device__ __forceinline__ void
   constexpr int NUM_K_HEADS = 1;
   constexpr int NUM_V_HEADS = 1;
   constexpr int HEAD_DIM = 128;
+  const float sm_scale = (1.f / sqrt(128.f)) * 1.44269504088896340736f;
 
   int warp_idx = warp_id();
   int idx_in_warp = threadIdx.x % 32;
@@ -246,6 +247,17 @@ __device__ __forceinline__ void
 
     __syncthreads();
 
+    // printf("frag.x %d, %f, %f, %f, %f, %f, %f, %f, %f\n",
+    //        threadIdx.x,
+    //        s_frag[0],
+    //        s_frag[1],
+    //        s_frag[2],
+    //        s_frag[3],
+    //        s_frag[4],
+    //        s_frag[5],
+    //        s_frag[6],
+    //        s_frag[7]);
+
     // update flashattention
 
     float m_prev = m;
@@ -257,17 +269,19 @@ __device__ __forceinline__ void
       for (int j = 0; j < 2; ++j) {
         // update M, apply mask when length doesn't match the padding length 16
         int idx = i * 4 + j;
-        // s_frag[idx] = (n_col < curr_iter_len) ? s_frag[idx] : -inf;
+        int col = (idx_in_warp % 4) * 2 + i * 8 + j + warp_idx * 16;
+        s_frag[idx] = (col < curr_iter_len) ? s_frag[idx] : -inf;
         m = max(s_frag[idx], m);
       }
     }
 
-    //get global max across 4 threads
-    m = max(m, shfl_xor_sync(m, 0x2));
-    m = max(m, shfl_xor_sync(m, 0x1));
+     //get global max across 4 threads
+     m = max(m, shfl_xor_sync(m, 0x2));
+     m = max(m, shfl_xor_sync(m, 0x1));
 
     // update m, d, o
-    float o_scale = ptx_exp2(m_prev - m);
+    // float o_scale = ptx_exp2(m_prev * sm_scale - m * sm_scale);
+    float o_scale = ptx_exp2(m_prev - m );
     // __syncthreads();
     d_local *= o_scale;
 #pragma unroll
@@ -275,12 +289,29 @@ __device__ __forceinline__ void
 #pragma unroll
       for (int j = 0; j < 2; ++j) {
         int idx = i * 4 + j;
-        // s_frag[idx] *= 
-        // ((1.f / std::sqrt(float(128))) * 1.44269504088896340736f);
+        // s_frag[idx] = ptx_exp2(s_frag[idx] * sm_scale - m * sm_scale);
         s_frag[idx] = ptx_exp2(s_frag[idx] - m);
         d_local += s_frag[idx];
       }
     }
+
+    
+
+    // printf("after frag.x %d, d_local %d, %f, %f, %f, %f, %f, %f, %f, %f\n",
+    //   threadIdx.x,
+    //   d_local,
+    //   s_frag[0],
+    //   s_frag[1],
+    //   s_frag[2],
+    //   s_frag[3],
+    //   s_frag[4],
+    //   s_frag[5],
+    //   s_frag[6],
+    //   s_frag[7]);
+
+    // d_sum = d_prev * ptx_exp2(m_prev - m) + other_d * ptx_exp2(other_m - m);
+    
+    // d_local = d_local + ptx_exp2(m_local - m) + other_d * ptx_exp2(other_m - m);
   
 // update o
 #pragma unroll
@@ -294,8 +325,9 @@ __device__ __forceinline__ void
     // printf("tid %d, dlocal is %f\n",threadIdx.x,  d_local);
     //sum the d across 4threads
     d_sum = d_local;
-d_sum += __shfl_xor_sync(0xffffffff, d_sum, 0X1);
-d_sum += __shfl_xor_sync(0xffffffff, d_sum, 0X2);
+d_sum += shfl_xor_sync(d_sum, 0X1);
+d_sum += shfl_xor_sync(d_sum, 0X2);
+// m *= sm_scale;
 
 
     // //QK^T * V
@@ -318,6 +350,8 @@ d_sum += __shfl_xor_sync(0xffffffff, d_sum, 0X2);
         o_smem[threadIdx.x * 32 + n * 4 + i * 2 + 1] = o[n][i * 4 + 1];
       }
     }
+
+     
       // printf("tid %d o frag value %f, %f, %f, %f, %f, %f, %f, %f\n", threadIdx.x,
       //   o[0][0],o[0][1],o[0][2],o[0][3],o[0][4],o[0][5],o[0][6],o[0][7]
       // );
@@ -343,10 +377,10 @@ d_sum += __shfl_xor_sync(0xffffffff, d_sum, 0X2);
       float m_prev = m, d_prev = d_sum;
       m = max(m_prev, other_m);
       d_sum = d_prev * ptx_exp2(m_prev - m) + other_d * ptx_exp2(other_m - m);
-      if(threadIdx.x == 4){
-        printf("tidx %d, shmemidx %d, dsum %f, m_prev %f, m %f, other_m %f, exp %f\n", 
-          tidx, shmem_idx, d_sum, m_prev, m, other_m, ptx_exp2(m_prev - m));
-      }
+      // if(threadIdx.x == 4){
+      //   printf("tidx %d, shmemidx %d, dsum %f, m_prev %f, m %f, other_m %f, exp %f\n", 
+      //     tidx, shmem_idx, d_sum, m_prev, m, other_m, ptx_exp2(m_prev - m));
+      // }
 #pragma unroll
       for (uint32_t n = 0; n < 8; n++) {
 #pragma unroll
@@ -366,7 +400,6 @@ d_sum += __shfl_xor_sync(0xffffffff, d_sum, 0X2);
     }
     }
       
-    // printf("tid %d, dsum is %f\n",threadIdx.x,  d_sum);
     __syncthreads();
 
     if (kv_idx != num_iterations) {
@@ -374,16 +407,11 @@ d_sum += __shfl_xor_sync(0xffffffff, d_sum, 0X2);
       cp_finished_seq_len += next_iter_len;
       curr_iter_len = next_iter_len;
     }
-    // printf("tidsdasds %d, dsum is %f\n",threadIdx.x,  d_sum);
   }
 
+  //print each head
+  
 
-  // for(int n = 0; n < 8; n++){
-  //   printf("threadIdx.x %d, n is %d, value is %f, %f, %f, %f, %f\n", 
-  //     threadIdx.x, n, o[n][0], o[n][1], o[n][4], o[n][5], d_sum);
-  // }
-
-  // printf("tid %d, dsum afer %f\n", threadIdx.x, d_sum);
 #pragma unroll
 for(int n = 0; n < 8; n++){
   #pragma unroll
