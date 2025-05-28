@@ -3,6 +3,7 @@
 #include "norm_linear.cuh"
 #include "silu_mul_linear.cuh"
 #include "single_batch_decoding.cuh"
+#include "single_batch_gqa.cuh"
 #include <cuda_runtime.h>
 #include <torch/extension.h>
 
@@ -11,6 +12,7 @@ using kernel::linear_kernel;
 using kernel::norm_linear_kernel;
 using kernel::silu_mul_linear_kernel;
 using kernel::single_batch_decoding_kernel;
+using kernel::single_batch_gqa_kernel;
 using bfloat16 = type::bfloat16_t;
 
 #define DISPATCH_SEQ_LEN(SEQ_LEN, FUNC, T, ...)                                \
@@ -113,6 +115,45 @@ void single_batch_decoding(torch::Tensor qkv,
   if (err != cudaSuccess) {
     printf("CUDA kernel launch error: %s\n", cudaGetErrorString(err));
   }
+}
+
+template <typename T>
+__global__ void single_batch_gqa_kernel_wrapper(void const *qkv_ptr,
+                                                     void *k_cache_ptr,
+                                                     void *v_cache_ptr,
+                                                     void *output_ptr,
+                                                    size_t seq_len) {
+  single_batch_gqa_kernel<T>(
+      qkv_ptr, k_cache_ptr, v_cache_ptr, output_ptr, seq_len);
+}
+
+void single_batch_gqa(torch::Tensor qkv,
+  torch::Tensor k_cache,
+  torch::Tensor v_cache,
+  torch::Tensor output,
+  size_t seq_len) {
+
+void const *qkv_ptr = qkv.data_ptr();
+void *k_cache_ptr = k_cache.data_ptr();
+void *v_cache_ptr = v_cache.data_ptr();
+void *output_ptr = output.data_ptr();
+
+dim3 grid_dim(1, 1, 1);
+dim3 block_dim(128, 1, 1);
+size_t smem_size = 88888;
+
+cudaFuncSetAttribute(single_batch_gqa_kernel_wrapper<bfloat16>,
+                     cudaFuncAttributeMaxDynamicSharedMemorySize,
+                     smem_size);
+
+     single_batch_gqa_kernel_wrapper<bfloat16>
+    <<<grid_dim, block_dim, smem_size>>>(
+        qkv_ptr, k_cache_ptr, v_cache_ptr, output_ptr, seq_len);
+
+cudaError_t err = cudaDeviceSynchronize();
+if (err != cudaSuccess) {
+printf("CUDA kernel launch error: %s\n", cudaGetErrorString(err));
+}
 }
 
 // RMSNorm Linear
@@ -306,6 +347,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("argmax", &argmax, "argmax kernel");
   m.def("norm_linear", &norm_linear, "RMSNorm Linear kernel");
   m.def("silu_mul_linear", &silu_mul_linear, "SILU MUL Linear kernel");
+  m.def("single_batch_gqa",
+    &single_batch_gqa,
+    "Decoding kernel");
   m.def("single_batch_decoding",
         &single_batch_decoding,
         "FlashAttention Decoding kernel");
