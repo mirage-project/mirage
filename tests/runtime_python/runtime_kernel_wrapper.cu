@@ -123,7 +123,7 @@ __global__ void single_batch_gqa_kernel_wrapper(void const *qkv_ptr,
                                                      void *v_cache_ptr,
                                                      void *output_ptr,
                                                     size_t seq_len) {
-  single_batch_gqa_kernel<T>(
+  single_batch_gqa_kernel<T, 4>(
       qkv_ptr, k_cache_ptr, v_cache_ptr, output_ptr, seq_len);
 }
 
@@ -132,7 +132,6 @@ void single_batch_gqa(torch::Tensor qkv,
   torch::Tensor v_cache,
   torch::Tensor output,
   size_t seq_len) {
-
 void const *qkv_ptr = qkv.data_ptr();
 void *k_cache_ptr = k_cache.data_ptr();
 void *v_cache_ptr = v_cache.data_ptr();
@@ -154,6 +153,7 @@ cudaError_t err = cudaDeviceSynchronize();
 if (err != cudaSuccess) {
 printf("CUDA kernel launch error: %s\n", cudaGetErrorString(err));
 }
+
 }
 
 // RMSNorm Linear

@@ -29,7 +29,7 @@
  // kernel Input: 9X128, K_Cache: 4KX128, V_Cache:4KX128
  // Load Q = 8 X 128, K = 1 X 128, V = 1 X 128
  // load K into K_Cache, V into V_cache
- template <typename T>
+ template <typename T, int NUM_Q_HEADS>
  __device__ __forceinline__ void
      single_batch_gqa_kernel(void const *qkv_ptr,
                                   void *k_cache_ptr,
@@ -39,7 +39,6 @@
    constexpr int chunk_size = 16 / sizeof(T);
    constexpr size_t MAX_SEQ_LEN = 512;
    constexpr size_t KV_CHUNK_SIZE = 64;
-   constexpr int NUM_Q_HEADS = 7;
    constexpr int NUM_K_HEADS = 1;
    constexpr int NUM_V_HEADS = 1;
    constexpr int HEAD_DIM = 128;
@@ -50,6 +49,7 @@
    size_t num_iterations = (seq_len + KV_CHUNK_SIZE - 1) / KV_CHUNK_SIZE;
    int curr_iter_len = std::min(seq_len, KV_CHUNK_SIZE);
    int cp_finished_seq_len = curr_iter_len;
+   int last_seq_len = curr_iter_len;
  
    const __restrict__ T *d_q = static_cast<T const *>(qkv_ptr);
    const __restrict__ T *d_k =
@@ -60,12 +60,12 @@
    T __restrict__ *d_v_cache = static_cast<T *>(v_cache_ptr);
    T __restrict__ *d_output = static_cast<T *>(output_ptr);
  
-   dmem_row_const<T, 7, 128, 128> q_dmem(d_q);
+   dmem_row_const<T, NUM_Q_HEADS, 128, 128> q_dmem(d_q);
    dmem_row_const<T, 128, 1, 128> k_dmem(d_k);
    dmem_row_const<T, 128, 1, 128> v_dmem(d_v);
    dmem_row<T, MAX_SEQ_LEN, 128, 128> k_cache_dmem(d_k_cache);
    dmem_row<T, MAX_SEQ_LEN, 128, 128> v_cache_dmem(d_v_cache);
-   dmem_row<T, 7, 128, 128> output_dmem(d_output);
+   dmem_row<T, NUM_Q_HEADS, 128, 128> output_dmem(d_output);
  
    extern __shared__ char smem[];
  
@@ -91,7 +91,7 @@
  
    // zero buffer
    smem_row<T, 1, 1, 1, 1, 8, 8> zero_buffer(zero_buf);
-   smem_row<T, 3, 3, 3, 7, 128, 128> q_smem(shared_q); 
+   smem_row<T, 3, 3, 3, NUM_Q_HEADS, 128, 128> q_smem(shared_q); 
    //(16, 128) per stage
    smem_row<T, 3, 3, 3, KV_CHUNK_SIZE, 128, 128> k_cache_smem(
        shared_k);
@@ -102,7 +102,7 @@
    smem_row<T, 3, 3, 3, KV_CHUNK_SIZE, 128, 128> v_cache_smem_buffer(
        shared_v_buffer);
  
-   smem_row<T, 3, 3, 3, 7, 128, 128> output_smem(shared_output);
+   smem_row<T, 3, 3, 3, NUM_Q_HEADS, 128, 128> output_smem(shared_output);
 
    //todo, add a chunk assigned function
    for(int i = 0; i < 8; i++){
@@ -229,27 +229,17 @@
        T *src_ptr_A = is_valid_A ? q_smem(m_row, m_col) : zero_buffer(0, 0);
        ldsm(src_ptr_A, &a_frag[0]);
        bool is_valid_B = (n_row < curr_iter_len);
+      //  if(is_valid_B){
+      //   printf("thread %d, n_row %d, n_col %d\n", threadIdx.x, n_row, n_col, );
+      //  }
        T *src_ptr_B = is_valid_B ? k_cache_smem(n_row, n_col) : zero_buffer(0, 0);
        ldsm(src_ptr_B, &b_frag[0]);
-      //  ldsm_t(k_cache_smem(n_row, n_col), &b_frag[0]);
        mma_m16n16k16_bf16bf16bf32(s_frag, a_frag, b_frag, s_frag);
      }
 
      __syncthreads();
 
-        // printf("k is %d, frag.x %d, %f, %f, %f, %f, %f, %f, %f, %f\n",
-        // 0,
-        // threadIdx.x,
-        // s_frag[0],
-        // s_frag[1],
-        // s_frag[2],
-        // s_frag[3],
-        // s_frag[4],
-        // s_frag[5],
-        // s_frag[6],
-        // s_frag[7]);
-    
- 
+  
      // o is 16 * 64, v is 64 X 128 -> 16 * 128
      uint32_t o_frag[4];
      convert_f32_to_bf16_uint32(s_frag, o_frag);
@@ -266,11 +256,10 @@
      __syncthreads();
 
      if(kv_idx != num_iterations){
+      last_seq_len = curr_iter_len;
       cp_finished_seq_len += next_iter_len;
       curr_iter_len = next_iter_len;
      }
-
-     
    }
  
    // sotre o back to smem and divide by d, 16X16X8X4 -> 16X128 -> 7X128
@@ -297,7 +286,6 @@ for (int i = 0; i < 4; ++i) {
   __syncthreads();
   }
 }
-
  
  // update KV cache
  #pragma unroll
@@ -305,14 +293,15 @@ for (int i = 0; i < 4; ++i) {
      // offset
      int row = seq_len - 1;
      int col = i;
-     k_cache_dmem.at(row, col) = k_cache_smem.at(curr_iter_len - 1, col);
+     k_cache_dmem.at(row, col) = k_cache_smem.at(last_seq_len - 1, col);
    }
+
  #pragma unroll
    for (int i = threadIdx.x; i < 128; i += NUM_THREADS) {
      // offset
      int row = seq_len - 1;
      int col = i;
-     v_cache_dmem.at(row, col) = v_cache_smem.at(curr_iter_len - 1, col);
+     v_cache_dmem.at(row, col) = v_cache_smem.at(last_seq_len - 1, col);
    }
 
  // write output to device memory
