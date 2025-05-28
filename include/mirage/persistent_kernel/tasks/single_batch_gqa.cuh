@@ -49,7 +49,7 @@
  
    size_t num_iterations = (seq_len + KV_CHUNK_SIZE - 1) / KV_CHUNK_SIZE;
    int curr_iter_len = std::min(seq_len, KV_CHUNK_SIZE);
-   int finished_seq_len = 0;
+   int cp_finished_seq_len = curr_iter_len;
  
    const __restrict__ T *d_q = static_cast<T const *>(qkv_ptr);
    const __restrict__ T *d_k =
@@ -91,7 +91,6 @@
  
    // zero buffer
    smem_row<T, 1, 1, 1, 1, 8, 8> zero_buffer(zero_buf);
- 
    smem_row<T, 3, 3, 3, 7, 128, 128> q_smem(shared_q); 
    //(16, 128) per stage
    smem_row<T, 3, 3, 3, KV_CHUNK_SIZE, 128, 128> k_cache_smem(
@@ -104,6 +103,11 @@
        shared_v_buffer);
  
    smem_row<T, 3, 3, 3, 7, 128, 128> output_smem(shared_output);
+
+   //todo, add a chunk assigned function
+   for(int i = 0; i < 8; i++){
+    zero_buffer.at(i) = (bfloat16)0.0f;
+   }
  
  // load first Q, K, V
  #pragma unroll
@@ -123,6 +127,7 @@
        o[n][frag_idx] = 0.0f;
      }
    }
+
  
    // 16 * 128
  #pragma unroll
@@ -130,7 +135,7 @@
      // offset
      int row = i / 16;
      int col = (i % 16) * 8;
-     if (row == curr_iter_len - 1) {
+     if (row == seq_len - 1) {
        // from qkv
        load_smem(k_cache_smem_buffer(row, col), k_dmem(0, col));
      } else {
@@ -144,7 +149,7 @@
      // offset
      int row = i / 16;
      int col = (i % 16) * 8;
-     if (row == curr_iter_len - 1) {
+     if (row == seq_len - 1) {
        // from qkv
        load_smem(v_cache_smem_buffer(row, col), v_dmem(0, col));
      } else {
@@ -153,12 +158,7 @@
      }
    }
    cp_async_fence();
- 
-   float s_frag[8];
- #pragma unroll
-   for (int frag_idx = 0; frag_idx < 8; frag_idx++) {
-     s_frag[frag_idx] = 0.0f;
-   }
+
  
    // KV iteration
    //  N = 64 per iter
@@ -168,18 +168,17 @@
                              ? std::min(seq_len, (kv_idx + 2) * KV_CHUNK_SIZE) -
                                    (kv_idx + 1) * KV_CHUNK_SIZE
                              : -1;
- 
+
      if (kv_idx + 1 != num_iterations) {
  #pragma unroll
-       for (int i = threadIdx.x; i < i < (next_iter_len * 16);
-            i += NUM_THREADS) {
+       for (int i = threadIdx.x;  i < (next_iter_len * 16); i += NUM_THREADS) {
          // offset
-         int row = 1 / 16;
+         int row = i / 16;
          int col = (i % 16) * 8;
-         if (row == next_iter_len - 1) {
+         if (row + cp_finished_seq_len == seq_len - 1) {
            load_smem(k_cache_smem(row, col), k_dmem(0, col));
          } else {
-           load_smem(k_cache_smem(row, col), k_cache_dmem(row, col));
+           load_smem(k_cache_smem(row, col), k_cache_dmem(cp_finished_seq_len + row, col));
          }
        }
  #pragma unroll
@@ -187,10 +186,10 @@
          // offset
          int row = i / 16;
          int col = (i % 16) * 8;
-         if (row == next_iter_len - 1) {
+         if (row + cp_finished_seq_len == seq_len - 1) {
            load_smem(v_cache_smem(row, col), v_dmem(0, col));
          } else {
-           load_smem(v_cache_smem(row, col), v_cache_dmem(row, col));
+           load_smem(v_cache_smem(row, col), v_cache_dmem(cp_finished_seq_len + row, col));
          }
        }
      }
@@ -207,61 +206,49 @@
        v_cache_smem.set_ptr(shared_v);
        v_cache_smem_buffer.set_ptr(shared_v_buffer);
      }
+
+     float s_frag[8];
+     #pragma unroll
+       for (int frag_idx = 0; frag_idx < 8; frag_idx++) {
+         s_frag[frag_idx] = 0.0f;
+       }
  
      __syncthreads();
      uint32_t a_frag[4], b_frag[4], v_frag[4];
      // MNK = 7, 64, 128, tiledMMA 7, 64, 16, thread layout 1,4,1
      int m_row = idx_in_warp % 16;
-
      int n_row = (idx_in_warp / 16) * 8 + (idx_in_warp % 8) + warp_idx * 16;
     //  int n_col = warp_idx * 16 + idx_in_warp / 16 * 8;
  #pragma unroll
      for (uint32_t k = 0; k < 8; k++) {
        int m_col = k * 16 + idx_in_warp / 16 * 8;
       //  int n_col = idx_in_warp / 16 * 8 + k * 16;
-
       int n_col = ((idx_in_warp % 16) / 8) * 8 + k * 16;
       //  int n_row = idx_in_warp % 16 + k * 16;
        bool is_valid_A = (m_row < NUM_Q_HEADS);
        T *src_ptr_A = is_valid_A ? q_smem(m_row, m_col) : zero_buffer(0, 0);
        ldsm(src_ptr_A, &a_frag[0]);
-
        bool is_valid_B = (n_row < curr_iter_len);
        T *src_ptr_B = is_valid_B ? k_cache_smem(n_row, n_col) : zero_buffer(0, 0);
        ldsm(src_ptr_B, &b_frag[0]);
-
       //  ldsm_t(k_cache_smem(n_row, n_col), &b_frag[0]);
        mma_m16n16k16_bf16bf16bf32(s_frag, a_frag, b_frag, s_frag);
-      //  printf("k is %d, frag.x %d, %f, %f, %f, %f, %f, %f, %f, %f\n",
-      //   k,
-      //   threadIdx.x,
-      //   s_frag[0],
-      //   s_frag[1],
-      //   s_frag[2],
-      //   s_frag[3],
-      //   s_frag[4],
-      //   s_frag[5],
-      //   s_frag[6],
-      //   s_frag[7]);
      }
 
      __syncthreads();
 
-        printf("k is %d, frag.x %d, %f, %f, %f, %f, %f, %f, %f, %f\n",
-        0,
-        threadIdx.x,
-        s_frag[0],
-        s_frag[1],
-        s_frag[2],
-        s_frag[3],
-        s_frag[4],
-        s_frag[5],
-        s_frag[6],
-        s_frag[7]);
-     
- 
-     // update m, d, o
-     __syncthreads();
+        // printf("k is %d, frag.x %d, %f, %f, %f, %f, %f, %f, %f, %f\n",
+        // 0,
+        // threadIdx.x,
+        // s_frag[0],
+        // s_frag[1],
+        // s_frag[2],
+        // s_frag[3],
+        // s_frag[4],
+        // s_frag[5],
+        // s_frag[6],
+        // s_frag[7]);
+    
  
      // o is 16 * 64, v is 64 X 128 -> 16 * 128
      uint32_t o_frag[4];
@@ -277,8 +264,13 @@
         mma_m16n16k16_bf16bf16bf32(o[n], o_frag, v_frag, o[n]);
      }
      __syncthreads();
-     curr_iter_len = next_iter_len;
-     finished_seq_len += curr_iter_len;
+
+     if(kv_idx != num_iterations){
+      cp_finished_seq_len += next_iter_len;
+      curr_iter_len = next_iter_len;
+     }
+
+     
    }
  
    // sotre o back to smem and divide by d, 16X16X8X4 -> 16X128 -> 7X128
@@ -305,22 +297,24 @@ for (int i = 0; i < 4; ++i) {
   __syncthreads();
   }
 }
+
  
  // update KV cache
  #pragma unroll
    for (int i = threadIdx.x; i < 128; i += NUM_THREADS) {
      // offset
-     int col = seq_len - 1;
-     int row = i;
-     k_cache_dmem.at(row, col) = k_cache_smem.at(row, col);
+     int row = seq_len - 1;
+     int col = i;
+     k_cache_dmem.at(row, col) = k_cache_smem.at(curr_iter_len - 1, col);
    }
  #pragma unroll
    for (int i = threadIdx.x; i < 128; i += NUM_THREADS) {
      // offset
      int row = seq_len - 1;
      int col = i;
-     v_cache_dmem.at(row, col) = v_cache_smem.at(row, col);
+     v_cache_dmem.at(row, col) = v_cache_smem.at(curr_iter_len - 1, col);
    }
+
  // write output to device memory
  #pragma unroll
    for (int i = threadIdx.x; i < (NUM_Q_HEADS * 128); i += NUM_THREADS) {
