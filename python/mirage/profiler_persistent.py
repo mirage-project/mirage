@@ -22,8 +22,9 @@ event_name_list = {
     200: "TASK_SCHD_TASKS",
     201: "TASK_SCHD_EVENTS",
     202: "TASK_GET_EVENT",
-    203: "TASK_GET_NEXT_TASK"
+    203: "TASK_GET_NEXT_TASK",
 }
+
 
 class EventType(Enum):
     kBegin = 0
@@ -49,7 +50,6 @@ def export_to_perfetto_trace(
     profiler_buffer: torch.Tensor,
     file_name: str,
 ) -> None:
-    
 
     profiler_buffer_host = profiler_buffer.cpu()
     num_blocks, num_groups = profiler_buffer_host[:1].view(dtype=torch.int32)
@@ -65,11 +65,11 @@ def export_to_perfetto_trace(
         for group_idx in range(num_groups):
             tid = pid.create_group(f"group_{group_idx}")
             tid_map[(block_idx, group_idx)] = tid
- 
+
     for i in range(1, len(profiler_buffer_host)):
         if profiler_buffer_host[i] == 0:
             continue
-        
+
         tag, timestamp = profiler_buffer_host[i : i + 1].view(dtype=torch.uint32)
         tag = int(tag)
         timestamp = int(timestamp)
@@ -77,8 +77,6 @@ def export_to_perfetto_trace(
             tag, num_blocks, num_groups
         )
 
-        
-        
         event = event_name_list[event_idx] + f"_{event_no}"
         tid = tid_map[(block_idx, group_idx)]
 

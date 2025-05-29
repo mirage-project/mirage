@@ -130,8 +130,8 @@ __device__ __forceinline__ bool prepare_next_batch(RuntimeConfig config) {
   int step = config.step[0];
   // printf("step = %d\n", step);
   config.step[0] = step + 1;
-  return step + 1 <= 50;
-  // return false;
+  //return step + 1 <= 500;
+  return false;
 }
 
 __device__ __forceinline__ bool is_termination_event(size_t event_loc,
@@ -395,11 +395,16 @@ __global__ void persistent_kernel(RuntimeConfig config) {
           break;
         }
         case TASK_MATMUL: {
-          TB_SLEEP_US(20);
+          kernel::linear_kernel<bfloat16, 1, 64, 4096>(
+              task_desc.inputs[0].base_ptr,
+              task_desc.inputs[1].base_ptr,
+              task_desc.outputs[0].base_ptr);
           break;
         }
         case TASK_ARGMAX: {
-          TB_SLEEP_US(1);
+          kernel::argmax_kernel<bfloat16, 1, 153600>(
+             task_desc.inputs[0].base_ptr,
+             task_desc.outputs[0].base_ptr);
           break;
         }
         default: {

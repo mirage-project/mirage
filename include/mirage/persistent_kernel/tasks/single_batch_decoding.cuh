@@ -61,12 +61,11 @@ __device__ __forceinline__ void
   T __restrict__ *d_output = static_cast<T *>(output_ptr);
 
   dmem_row_const<T, NUM_Q_HEADS, 128, 128> q_dmem(d_q);
-  dmem_row_const<T, 128, 1, 128> k_dmem(d_k);
-  dmem_row_const<T, 128, 1, 128> v_dmem(d_v);
-  dmem_row<T, MAX_SEQ_LEN, 128, 128> k_cache_dmem(d_k_cache);
-  dmem_row<T, MAX_SEQ_LEN, 128, 128> v_cache_dmem(d_v_cache);
+  dmem_row_const<T, 1, 128, 128> k_dmem(d_k);
+  dmem_row_const<T, 1, 128, 128> v_dmem(d_v);
+  dmem_row<T, MAX_SEQ_LEN, 128, 1024> k_cache_dmem(d_k_cache);
+  dmem_row<T, MAX_SEQ_LEN, 128, 1024> v_cache_dmem(d_v_cache);
   dmem_row<T, NUM_Q_HEADS, 128, 128> output_dmem(d_output);
-
   extern __shared__ char smem[];
 
   // copy input
