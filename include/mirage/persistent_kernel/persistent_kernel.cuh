@@ -345,7 +345,8 @@ __global__ void persistent_kernel(RuntimeConfig config) {
           break;
         }
         case TASK_RMS_NORM_LINEAR: {
-          kernel::norm_linear_kernel<bfloat16, 1, 32, 4096>(
+          kernel::norm_linear_task<bfloat16>(
+              task_desc.outputs[0].dim[task_desc.outputs[0].num_dims-1],
               task_desc.inputs[0].base_ptr,
               task_desc.inputs[1].base_ptr,
               task_desc.outputs[0].base_ptr);
