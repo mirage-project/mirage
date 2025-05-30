@@ -111,6 +111,55 @@ add_library(mirage_runtime ${MIRAGE_SRCS})
 #set_target_properties(mirage_runtime
 #  PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 
+# Ensure Rust is installed
+execute_process(COMMAND rustc --version
+  RESULT_VARIABLE RUST_COMMAND_RESULT
+  OUTPUT_VARIABLE RUSTC_OUTPUT
+  ERROR_QUIET)
+
+if(NOT RUST_COMMAND_RESULT EQUAL 0)
+  message(FATAL_ERROR
+    "Rust is not installed on the system. Please install it by running: \n"
+    "'curl https://sh.rustup.rs -sSf | sh -s -- -y' \n"
+    "and follow the instructions on the screen.")
+endif()
+
+# Ensure Cargo is installed
+execute_process(COMMAND cargo --version
+  RESULT_VARIABLE CARGO_RESULT
+  OUTPUT_QUIET ERROR_QUIET)
+
+if(NOT CARGO_RESULT EQUAL 0)
+  message(FATAL_ERROR
+    "Rust is installed, but cargo is not. Please install it by running: \n"
+    "'curl https://sh.rustup.rs -sSf | sh -s -- -y' \n"
+    "and follow the instructions on the screen.")
+endif()
+
+#set RUST
+include(ExternalProject)
+
+set(RUST_CRATE_DIR "${PROJECT_SOURCE_DIR}/src/search/abstract_expr/abstract_subexpr")
+set(RUST_LIB_DEBUG "${RUST_CRATE_DIR}/target/debug/libabstract_subexpr.so")
+set(RUST_LIB_RELEASE "${RUST_CRATE_DIR}/target/release/libabstract_subexpr.so")
+
+set_directory_properties(PROPERTIES EP_PREFIX ${PROJECT_SOURCE_DIR}/deps/Rust)
+ExternalProject_Add(
+  abstract_subexpr
+  DOWNLOAD_COMMAND ""
+  CONFIGURE_COMMAND ""
+  BUILD_COMMAND cargo build --release
+  BINARY_DIR "${RUST_CRATE_DIR}"
+  INSTALL_COMMAND ""
+  LOG_BUILD ON)
+
+add_dependencies(mirage_runtime abstract_subexpr)
+
+target_link_libraries(mirage_runtime
+  optimized ${RUST_LIB_RELEASE})
+
+set_target_properties(mirage_runtime PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
+
 set_target_properties(mirage_runtime PROPERTIES CUDA_ARCHITECTURES "70;75;80;86;89;90")
 
 target_compile_features(mirage_runtime PUBLIC cxx_std_17)
@@ -294,6 +343,17 @@ endif()
 if ("${BUILD_CPP_EXAMPLES}" STREQUAL "ON")
   set(CPP_EXAMPLES_DIR cpp_examples)
   set(CPP_EXAMPLES_BIN chameleon)
+  file(GLOB CPP_EXAMPLES_SRCS ${CPP_EXAMPLES_DIR}/${CPP_EXAMPLES_BIN}.cc)
+  add_executable(${CPP_EXAMPLES_BIN} ${CPP_EXAMPLES_SRCS})
+  set_target_properties(${CPP_EXAMPLES_BIN}
+    PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CPP_EXAMPLES_DIR})
+  target_link_libraries(${CPP_EXAMPLES_BIN} mirage_runtime)
+endif()
+
+# egg_tests
+if("${BUILD_CPP_EXAMPLES}" STREQUAL "ON")
+  set(CPP_EXAMPLES_DIR cpp_examples)
+  set(CPP_EXAMPLES_BIN egg_tests)
   file(GLOB CPP_EXAMPLES_SRCS ${CPP_EXAMPLES_DIR}/${CPP_EXAMPLES_BIN}.cc)
   add_executable(${CPP_EXAMPLES_BIN} ${CPP_EXAMPLES_SRCS})
   set_target_properties(${CPP_EXAMPLES_BIN}

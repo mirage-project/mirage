@@ -1,0 +1,14 @@
+[package]
+name = "abstract_subexpr"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+egg = "0.10.0"
+ordered-float = "3.0.0"
+pyo3 = { version = "0.20", features = ["extension-module"] }
+regex = "1"
+
+[lib]
+name = "abstract_subexpr"
+crate-type = ["cdylib"]

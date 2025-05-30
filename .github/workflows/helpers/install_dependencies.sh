@@ -35,3 +35,10 @@ sudo apt update -y
 rm -f cuda-keyring_1.1-1_all.deb
 sudo apt-get install -y libcudnn9-cuda-12 libcudnn9-dev-cuda-12 libcudnn9-samples
 sudo ldconfig
+
+# Install Rust and Cargo
+sudo rm -rf /var/lib/apt/lists/*
+# Install Rust
+curl https://sh.rustup.rs -sSf | sh -s -- -y
+# shellcheck source=/dev/null
+. "$HOME/.cargo/env"
