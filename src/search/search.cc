@@ -500,11 +500,14 @@ void KernelGraphGenerator::preprocess(kernel::Graph const &computation_graph) {
 std::vector<bool> KernelGraphGenerator::check_pattern(
     std::vector<std::shared_ptr<AbstractExpr>> &inputs) {
   std::unordered_map<int, bool> results;
+  std::vector<int> keys;
   for (int i = 0; i < inputs.size(); i++) {
     auto input = inputs[i];
     if (seen_patterns.find(input->to_string()) != seen_patterns.end()) {
       results[i] = seen_patterns[input->to_string()];
       inputs[i] = nullptr;
+    } else {
+      keys.push_back(i);
     }
   }
 
@@ -513,29 +516,23 @@ std::vector<bool> KernelGraphGenerator::check_pattern(
       inputs.end(),
       [](std::shared_ptr<AbstractExpr> const &ptr) { return ptr == nullptr; });
   if (all_null) {
-    std::vector<int> keys;
-    for (auto const &kv : results) {
-      keys.push_back(kv.first);
-    }
-
-    std::sort(keys.begin(), keys.end());
     std::vector<bool> ordered_results;
-    for (int key : keys) {
-      ordered_results.push_back(results[key]);
+    for (int i = 0; i < results.size(); i++) {
+      ordered_results.push_back(results[i]);
     }
     return ordered_results;
   }
 
   for (auto const &final_pattern : computation_graph_output_patterns) {
-    std::unordered_map<int, bool> tmp = final_pattern->subpattern_to(inputs);
-    for (int i = 0; i < inputs.size(); i++) {
+    std::vector<bool> tmp = final_pattern->subpattern_to(inputs);
+    for (int i = 0; i < keys.size(); i++) {
       if (tmp[i] == true) {
-        results[i] = true;
-        auto input = inputs[i];
+        results[keys[i]] = true;
+        auto input = inputs[keys[i]];
 #pragma omp critical
         { seen_patterns[input->to_string()] = true; }
 
-        inputs[i] = nullptr;
+        inputs[keys[i]] = nullptr;
       }
     }
   }
@@ -547,15 +544,9 @@ std::vector<bool> KernelGraphGenerator::check_pattern(
       { seen_patterns[input->to_string()] = false; }
     }
   }
-  std::vector<int> keys;
-  for (auto const &kv : results) {
-    keys.push_back(kv.first);
-  }
-
-  std::sort(keys.begin(), keys.end());
   std::vector<bool> ordered_results;
-  for (int key : keys) {
-    ordered_results.push_back(results[key]);
+  for (int i = 0; i < results.size(); i++) {
+    ordered_results.push_back(results[i]);
   }
   return ordered_results;
 }

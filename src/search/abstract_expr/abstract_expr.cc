@@ -11,7 +11,7 @@
 namespace mirage {
 namespace search {
 
-std::unordered_map<int, bool> AbstractExpr::subpattern_to(
+std::vector<bool> AbstractExpr::subpattern_to(
     std::vector<std::shared_ptr<AbstractExpr>> const &input_patterns) const {
   std::vector<std::string> subexpr;
   std::vector<bool> is_valid;
@@ -41,7 +41,17 @@ std::unordered_map<int, bool> AbstractExpr::subpattern_to(
       result[datas[i].key] = datas[i].value;
     }
   }
-  return result;
+  std::vector<int> keys;
+  for (auto const &kv : result) {
+    keys.push_back(kv.first);
+  }
+
+  std::sort(keys.begin(), keys.end());
+  std::vector<bool> ordered_results;
+  for (int key : keys) {
+    ordered_results.push_back(result[key]);
+  }
+  return ordered_results;
 }
 
 Var::Var(std::string const &name) : name(name) {}
