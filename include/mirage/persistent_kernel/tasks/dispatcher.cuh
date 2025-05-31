@@ -25,10 +25,6 @@ namespace kernel {
     FUNC<T, 1, 32, 4096>(__VA_ARGS__);                                         \
   } else if ((OUTPUT_SIZE) == 64) {                                            \
     FUNC<T, 1, 64, 4096>(__VA_ARGS__);                                         \
-  } else if ((OUTPUT_SIZE) == 256) {                                           \
-    FUNC<T, 1, 256, 4096>(__VA_ARGS__);                                        \
-  } else if ((OUTPUT_SIZE) == 1600) {                                          \
-    FUNC<T, 1, 1600, 4096>(__VA_ARGS__);                                       \
   } else {                                                                     \
     printf("Unsupported output size: %d\n", OUTPUT_SIZE);                      \
   }
