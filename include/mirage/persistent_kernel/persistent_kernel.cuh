@@ -412,6 +412,9 @@ __global__ void persistent_kernel(RuntimeConfig config) {
         }
       }
       __syncthreads();
+      if (config.profiling && task_desc.task_type != TASK_TERMINATE) {
+        PROFILER_EVENT_END(task_desc.task_type, task_counter++);
+      }
       // Trigger event
       if (threadIdx.x == 0) {
         EventId event_id = task_desc.trigger_event;
@@ -433,6 +436,9 @@ __global__ void persistent_kernel(RuntimeConfig config) {
                    count);
           }
           if (count == 1) {
+            if (config.profiling) {
+              PROFILER_EVENT_START(TASK_SCHD_EVENTS, task_counter);
+            }
             // The event has been triggered enough times
             // Refresh the event counter
             EventDesc event_desc = config.all_events[event_index];
@@ -467,6 +473,9 @@ __global__ void persistent_kernel(RuntimeConfig config) {
                   last_event_pos,
                   last_event_pos + 1);
             } while (old != last_event_pos);
+            if (config.profiling) {
+              PROFILER_EVENT_END(TASK_SCHD_EVENTS, task_counter++);
+            }
           }
         } else {
           // Case 2: trigger a nvshmem event
@@ -521,9 +530,6 @@ __global__ void persistent_kernel(RuntimeConfig config) {
             } while (old != last_event_pos);
           }
         }
-      }
-      if (config.profiling && task_desc.task_type != TASK_TERMINATE) {
-        PROFILER_EVENT_END(task_desc.task_type, task_counter++);
       }
       cur_task_pos[queue_idx] += 1;
     }
