@@ -437,7 +437,9 @@ __global__ void persistent_kernel(RuntimeConfig config) {
                    count);
           }
           if (count == 1) {
-            PROFILER_EVENT_START(TASK_SCHD_EVENTS, task_counter);
+            if (config.profiling) {
+              PROFILER_EVENT_START(TASK_SCHD_EVENTS, task_counter);
+            }
             // The event has been triggered enough times
             // Refresh the event counter
             EventDesc event_desc = config.all_events[event_index];
@@ -472,7 +474,9 @@ __global__ void persistent_kernel(RuntimeConfig config) {
                   last_event_pos,
                   last_event_pos + 1);
             } while (old != last_event_pos);
-            PROFILER_EVENT_END(TASK_SCHD_EVENTS, task_counter++);
+            if (config.profiling) {
+              PROFILER_EVENT_END(TASK_SCHD_EVENTS, task_counter++);
+            }
           }
         } else {
           // Case 2: trigger a nvshmem event
