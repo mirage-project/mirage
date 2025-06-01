@@ -21,6 +21,7 @@
 #include "element_binary.cuh"
 #include "element_unary.cuh"
 #include "mma.cuh"
+#include "norm.cuh"
 #include "reduction.cuh"
 #include "smem_layout.cuh"
 #include "utils.cuh"
@@ -30,11 +31,17 @@ namespace kernel {
 // Load Q = 8 X 128, K = 1 X 128, V = 1 X 128
 // load K into K_Cache, V into V_cache
 template <typename T, int NUM_Q_HEADS>
-__device__ __forceinline__ void single_batch_gqa_kernel(void const *qkv_ptr,
-                                                        void *k_cache_ptr,
-                                                        void *v_cache_ptr,
-                                                        void *output_ptr,
-                                                        size_t seq_len) {
+__device__ __forceinline__ void
+    single_batch_gqa_kernel(void const *qkv_ptr,
+                            void *k_cache_ptr,
+                            void *v_cache_ptr,
+                            void *output_ptr,
+                            size_t seq_len,
+                            bool qk_norm,
+                            void const *qnorm_weight_ptr,
+                            void const *knorm_weight_ptr,
+                            float q_eps,
+                            float k_eps) {
   constexpr int chunk_size = 16 / sizeof(T);
   constexpr size_t MAX_SEQ_LEN = 512;
   constexpr size_t KV_CHUNK_SIZE = 64;
@@ -79,28 +86,43 @@ __device__ __forceinline__ void single_batch_gqa_kernel(void const *qkv_ptr,
   // intermidiate
   T *shared_output = (T *)(smem + 128);
   T *zero_buf = (T *)(smem);
+  float *qnorm_sum = (float *)(smem + 68480);
+  float *knorm_sum = (float *)(smem + 68496);
 
   // flashattn metadata
-  float *d_smem = (float *)(smem + 67456);
-  float *max_smem = (float *)(smem + 67968);
-  float *o_smem = (float *)(smem + 68480);
+  // float *d_smem = (float *)(smem + 67456);
+  // float *max_smem = (float *)(smem + 67968);
+  // float *o_smem = (float *)(smem + 68480);
+
   // define the swizzle mode
 
   extern __shared__ float warp_reduce_smem[4][32][2];
 
   // zero buffer
   smem_row<T, 1, 1, 1, 1, 8, 8> zero_buffer(zero_buf);
-  smem_row<T, 3, 3, 3, NUM_Q_HEADS, 128, 128> q_smem(shared_q);
-  //(16, 128) per stage
-  smem_row<T, 3, 3, 3, KV_CHUNK_SIZE, 128, 128> k_cache_smem(shared_k);
-  smem_row<T, 3, 3, 3, KV_CHUNK_SIZE, 128, 128> k_cache_smem_buffer(
-      shared_k_buffer);
 
-  smem_row<T, 3, 3, 3, KV_CHUNK_SIZE, 128, 128> v_cache_smem(shared_v);
-  smem_row<T, 3, 3, 3, KV_CHUNK_SIZE, 128, 128> v_cache_smem_buffer(
-      shared_v_buffer);
+  using QSmem = smem_row<T, 3, 3, 3, NUM_Q_HEADS, 128, 128>;
+  using KSmem = smem_row<T, 3, 3, 3, KV_CHUNK_SIZE, 128, 128>;
+  using VSmem = smem_row<T, 3, 3, 3, KV_CHUNK_SIZE, 128, 128>;
+  using OSmem = smem_row<T, 3, 3, 3, NUM_Q_HEADS, 128, 128>;
+  QSmem q_smem(shared_q);
 
-  smem_row<T, 3, 3, 3, NUM_Q_HEADS, 128, 128> output_smem(shared_output);
+  KSmem k_cache_smem(shared_k);
+  KSmem k_cache_smem_buffer(shared_k_buffer);
+  VSmem v_cache_smem(shared_v);
+  VSmem v_cache_smem_buffer(shared_v_buffer);
+  OSmem output_smem(shared_output);
+
+  // //(16, 128) per stage
+  // smem_row<T, 3, 3, 3, KV_CHUNK_SIZE, 128, 128> k_cache_smem(shared_k);
+  // smem_row<T, 3, 3, 3, KV_CHUNK_SIZE, 128, 128> k_cache_smem_buffer(
+  //     shared_k_buffer);
+
+  // smem_row<T, 3, 3, 3, KV_CHUNK_SIZE, 128, 128> v_cache_smem(shared_v);
+  // smem_row<T, 3, 3, 3, KV_CHUNK_SIZE, 128, 128> v_cache_smem_buffer(
+  //     shared_v_buffer);
+
+  // smem_row<T, 3, 3, 3, NUM_Q_HEADS, 128, 128> output_smem(shared_output);
 
   // todo, add a chunk assigned function
   for (int i = 0; i < 8; i++) {
@@ -205,6 +227,22 @@ __device__ __forceinline__ void single_batch_gqa_kernel(void const *qkv_ptr,
       v_cache_smem.set_ptr(shared_v);
       v_cache_smem_buffer.set_ptr(shared_v_buffer);
     }
+    __syncthreads();
+
+    // q_norm
+    if (qk_norm && kv_idx == 0) {
+      rms_norm<T, QSmem, NUM_Q_HEADS, HEAD_DIM>(
+          q_smem, static_cast<T const *>(qnorm_weight_ptr), qnorm_sum, q_eps);
+    }
+
+    // knorm
+    if (qk_norm && kv_idx == num_iterations - 1) {
+      rms_norm<T, KSmem, NUM_K_HEADS, HEAD_DIM>(
+          k_cache_smem,
+          static_cast<T const *>(knorm_weight_ptr),
+          knorm_sum,
+          k_eps);
+    }
 
     float s_frag[8];
 #pragma unroll
@@ -212,7 +250,6 @@ __device__ __forceinline__ void single_batch_gqa_kernel(void const *qkv_ptr,
       s_frag[frag_idx] = 0.0f;
     }
 
-    __syncthreads();
     uint32_t a_frag[4], b_frag[4], v_frag[4];
     // MNK = 7, 64, 128, tiledMMA 7, 64, 16, thread layout 1,4,1
     int m_row = idx_in_warp % 16;

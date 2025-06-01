@@ -130,7 +130,7 @@ __device__ __forceinline__ bool prepare_next_batch(RuntimeConfig config) {
   int step = config.step[0];
   // printf("step = %d\n", step);
   config.step[0] = step + 1;
-  //return step + 1 <= 500;
+  // return step + 1 <= 500;
   return false;
 }
 
@@ -346,7 +346,7 @@ __global__ void persistent_kernel(RuntimeConfig config) {
         }
         case TASK_RMS_NORM_LINEAR: {
           kernel::norm_linear_task<bfloat16>(
-              task_desc.outputs[0].dim[task_desc.outputs[0].num_dims-1],
+              task_desc.outputs[0].dim[task_desc.outputs[0].num_dims - 1],
               task_desc.inputs[0].base_ptr,
               task_desc.inputs[1].base_ptr,
               task_desc.outputs[0].base_ptr);
@@ -364,7 +364,7 @@ __global__ void persistent_kernel(RuntimeConfig config) {
               task_desc.inputs[1].base_ptr,
               task_desc.inputs[2].base_ptr,
               task_desc.outputs[0].base_ptr,
-	      config.step[0]/*seq_len*/);
+              config.step[0] /*seq_len*/);
           break;
         }
         case TASK_ATTENTION_2: {
@@ -404,8 +404,7 @@ __global__ void persistent_kernel(RuntimeConfig config) {
         }
         case TASK_ARGMAX: {
           kernel::argmax_kernel<bfloat16, 1, 153600>(
-             task_desc.inputs[0].base_ptr,
-             task_desc.outputs[0].base_ptr);
+              task_desc.inputs[0].base_ptr, task_desc.outputs[0].base_ptr);
           break;
         }
         default: {

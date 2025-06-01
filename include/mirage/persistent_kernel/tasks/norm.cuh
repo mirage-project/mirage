@@ -13,55 +13,53 @@
  * limitations under the License.
  */
 
- #pragma once
- #include "common.h"
- #include "copy_sm80.cuh"
- #include "dmem_layout.cuh"
- #include "element_binary.cuh"
- #include "element_unary.cuh"
- #include "mma.cuh"
- #include "reduction.cuh"
- #include "smem_layout.cuh"
- #include "utils.cuh"
-
-template<typename T, typename InputSmem, int NUM_HEAD, int HEAD_DIM=128>
-__device__ __forceinline__ void rms_norm(InputSmem smem_input,  InputSmem weight, float * smem_sum, float eps){
-//smem_input: NUM_HEADS, HEAD_DIM
+#pragma once
+#include "common.h"
+#include "utils.cuh"
+namespace kernel {
+template <typename T, typename InputSmem, int NUM_HEAD, int HEAD_DIM = 128>
+__device__ __forceinline__ void rms_norm(InputSmem smem_input,
+                                         T const *weight_ptr,
+                                         float *smem_sum,
+                                         float eps) {
+  // smem_input: NUM_HEADS, HEAD_DIM
+  int warp_idx = warp_id();
 #pragma unroll
-for (int head_idx = 0; head_idx < num_head; ++head_idx) {
-float sum = 0.0f;
+  for (int head_idx = 0; head_idx < NUM_HEAD; ++head_idx) {
+    float sum = 0.0f;
 
 #pragma unroll
-for(uint32_t i = 0; i < (HEAD_DIM / 128); i ++){
-    sum = smem_input.at(head_idx, threadIdx+ i * 128) * smem_input.at(head_idx, threadIdx+ i * 128);
-}
+    for (uint32_t i = 0; i < (HEAD_DIM / 128); i++) {
+      sum = smem_input.at(head_idx, threadIdx.x + i * 128) *
+            smem_input.at(head_idx, threadIdx.x + i * 128);
+    }
 
 #pragma unroll
-  for (uint32_t offset = warp_size / 2; offset > 0; offset /= 2) {
-    sum += math::shfl_xor_sync(sum_sq, offset);
+    for (uint32_t offset = NUM_THREADS_PER_WARP / 2; offset > 0; offset /= 2) {
+      sum += shfl_xor_sync(sum, offset);
+    }
+
+    if (threadIdx.x % 32 == 0) {
+      smem_sum[warp_idx] = sum;
+    }
+    sum = threadIdx.x < NUM_WARPS ? smem_sum[threadIdx.x] : 0.0f;
+
+#pragma unroll
+    for (uint32_t offset = NUM_THREADS_PER_WARP / 2; offset > 0; offset /= 2) {
+      sum += shfl_xor_sync(sum, offset);
+    }
+    smem_sum[0] = sum;
+
+    float rms_rcp = rsqrt(smem_sum[0] / float(HEAD_DIM) + eps);
+
+    // multiply with weight
+#pragma unroll
+    for (uint32_t i = threadIdx.x; i < HEAD_DIM; i += 128) {
+      float val = smem_input.at(head_idx, i);
+      float w = (float)weight_ptr[i];
+      val *= sum * w;
+      smem_input.at(head_idx, i) = (T)val;
+    }
   }
-  
-  if(threadIdx.x % 32 == 0){
-    smem_sum[warp_idx] = sum;
-  }
-  sum = threadIdx.x < num_warps ? warp_sums[tid] : 0.0f;
-
-#pragma unroll
-  for (uint32_t offset = warp_size / 2; offset > 0; offset /= 2) {
-    sum += math::shfl_xor_sync(sum_sq, offset);
-  }
-  smem_sum[0] = sum;
-  
-  float rms_rcp = rsqrt(smem_sum[0] / float(HEAD_DIM) + eps);
-  
-  //multiply with weight
-#pragma unroll
-for (uint32_t i = 0; i < HEAD_DIM; i += 128) {
-    float val = smem_input.at(head_idx, i);
-    float w = weight.at(0, i);
-    val *= sum * w;
-    smem_input.at(head_idx, i) = val;
 }
-}
-
-}
+} // namespace kernel
