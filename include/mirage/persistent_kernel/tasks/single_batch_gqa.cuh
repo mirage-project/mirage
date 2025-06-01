@@ -229,11 +229,13 @@ __device__ __forceinline__ void
     }
     __syncthreads();
 
+    
     // q_norm
     if (qk_norm && kv_idx == 0) {
       rms_norm<T, QSmem, NUM_Q_HEADS, HEAD_DIM>(
           q_smem, static_cast<T const *>(qnorm_weight_ptr), qnorm_sum, q_eps);
     }
+
 
     // knorm
     if (qk_norm && kv_idx == num_iterations - 1) {
@@ -241,8 +243,11 @@ __device__ __forceinline__ void
           k_cache_smem,
           static_cast<T const *>(knorm_weight_ptr),
           knorm_sum,
-          k_eps);
+          k_eps,
+          curr_iter_len - 1);
     }
+    __syncthreads();
+    
 
     float s_frag[8];
 #pragma unroll

@@ -21,7 +21,8 @@ template <typename T, typename InputSmem, int NUM_HEAD, int HEAD_DIM = 128>
 __device__ __forceinline__ void rms_norm(InputSmem smem_input,
                                          T const *weight_ptr,
                                          float *smem_sum,
-                                         float eps) {
+                                         float eps,
+                                        int row_offset=0) {
   // smem_input: NUM_HEADS, HEAD_DIM
   int warp_idx = warp_id();
 #pragma unroll
@@ -30,8 +31,8 @@ __device__ __forceinline__ void rms_norm(InputSmem smem_input,
 
 #pragma unroll
     for (uint32_t i = 0; i < (HEAD_DIM / 128); i++) {
-      sum = smem_input.at(head_idx, threadIdx.x + i * 128) *
-            smem_input.at(head_idx, threadIdx.x + i * 128);
+      sum += (float)smem_input.at(head_idx + row_offset, threadIdx.x + i * 128) *
+            (float)smem_input.at(head_idx + row_offset, threadIdx.x + i * 128);
     }
 
 #pragma unroll
@@ -42,24 +43,32 @@ __device__ __forceinline__ void rms_norm(InputSmem smem_input,
     if (threadIdx.x % 32 == 0) {
       smem_sum[warp_idx] = sum;
     }
+    __syncthreads();
     sum = threadIdx.x < NUM_WARPS ? smem_sum[threadIdx.x] : 0.0f;
 
 #pragma unroll
     for (uint32_t offset = NUM_THREADS_PER_WARP / 2; offset > 0; offset /= 2) {
       sum += shfl_xor_sync(sum, offset);
     }
-    smem_sum[0] = sum;
+
+    if(threadIdx.x == 0){
+      smem_sum[0] = sum;
+    }
+    
+    __syncthreads();
 
     float rms_rcp = rsqrt(smem_sum[0] / float(HEAD_DIM) + eps);
 
     // multiply with weight
 #pragma unroll
     for (uint32_t i = threadIdx.x; i < HEAD_DIM; i += 128) {
-      float val = smem_input.at(head_idx, i);
+      float val = smem_input.at(head_idx + row_offset, i);
       float w = (float)weight_ptr[i];
-      val *= sum * w;
-      smem_input.at(head_idx, i) = (T)val;
+      
+      val *= rms_rcp * w;
+      smem_input.at(head_idx + row_offset, i) = (T)val;
     }
+  
   }
 }
 } // namespace kernel
