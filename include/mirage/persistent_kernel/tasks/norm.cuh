@@ -22,7 +22,10 @@ __device__ __forceinline__ void rms_norm(InputSmem smem_input,
                                          T const *weight_ptr,
                                          float *smem_sum,
                                          float eps,
-                                        int row_offset=0) {
+                                         int row_offset = 0,
+                                         bool rotary_emd = false,
+                                         T const *cos_ptr = nullptr,
+                                         T const *sin_ptr = nullptr) {
   // smem_input: NUM_HEADS, HEAD_DIM
   int warp_idx = warp_id();
 #pragma unroll
@@ -31,8 +34,9 @@ __device__ __forceinline__ void rms_norm(InputSmem smem_input,
 
 #pragma unroll
     for (uint32_t i = 0; i < (HEAD_DIM / 128); i++) {
-      sum += (float)smem_input.at(head_idx + row_offset, threadIdx.x + i * 128) *
-            (float)smem_input.at(head_idx + row_offset, threadIdx.x + i * 128);
+      sum +=
+          (float)smem_input.at(head_idx + row_offset, threadIdx.x + i * 128) *
+          (float)smem_input.at(head_idx + row_offset, threadIdx.x + i * 128);
     }
 
 #pragma unroll
@@ -51,10 +55,10 @@ __device__ __forceinline__ void rms_norm(InputSmem smem_input,
       sum += shfl_xor_sync(sum, offset);
     }
 
-    if(threadIdx.x == 0){
+    if (threadIdx.x == 0) {
       smem_sum[0] = sum;
     }
-    
+
     __syncthreads();
 
     float rms_rcp = rsqrt(smem_sum[0] / float(HEAD_DIM) + eps);
@@ -64,11 +68,29 @@ __device__ __forceinline__ void rms_norm(InputSmem smem_input,
     for (uint32_t i = threadIdx.x; i < HEAD_DIM; i += 128) {
       float val = smem_input.at(head_idx + row_offset, i);
       float w = (float)weight_ptr[i];
-      
       val *= rms_rcp * w;
       smem_input.at(head_idx + row_offset, i) = (T)val;
+
+      if (rotary_emd) {
+        __syncthreads();
+        int offset = (i / HEAD_DIM) * HEAD_DIM + i;
+        float cos = (float)cos_ptr[offset];
+        float sin = (float)sin_ptr[offset];
+        if (i < HEAD_DIM / 2) {
+          float v1 = (float)smem_input.at(head_idx + row_offset, i);
+          float v2 =
+              (float)smem_input.at(head_idx + row_offset, i + HEAD_DIM / 2);
+          float v_rot = v1 * cos - v2 * sin;
+          smem_input.at(head_idx + row_offset, i) = (T)v_rot;
+        } else {
+          float v1 = (float)smem_input.at(head_idx + row_offset, i);
+          float v2 =
+              (float)smem_input.at(head_idx + row_offset, i - HEAD_DIM / 2);
+          float v_rot = v1 * cos + v2 * sin;
+          smem_input.at(head_idx + row_offset, i) = (T)v_rot;
+        }
+      }
     }
-  
   }
 }
 } // namespace kernel

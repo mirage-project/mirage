@@ -38,8 +38,11 @@ __device__ __forceinline__ void
                             void *output_ptr,
                             size_t seq_len,
                             bool qk_norm,
+                            bool rotary_emd,
                             void const *qnorm_weight_ptr,
                             void const *knorm_weight_ptr,
+                            void const *cos_ptr,
+                            void const *sin_ptr,
                             float q_eps,
                             float k_eps) {
   constexpr int chunk_size = 16 / sizeof(T);
@@ -229,13 +232,11 @@ __device__ __forceinline__ void
     }
     __syncthreads();
 
-    
     // q_norm
     if (qk_norm && kv_idx == 0) {
       rms_norm<T, QSmem, NUM_Q_HEADS, HEAD_DIM>(
-          q_smem, static_cast<T const *>(qnorm_weight_ptr), qnorm_sum, q_eps);
+          q_smem, static_cast<T const *>(qnorm_weight_ptr), qnorm_sum, q_eps, 0, rotary_emd, static_cast<T const *>(cos_ptr), static_cast<T const *>(sin_ptr));
     }
-
 
     // knorm
     if (qk_norm && kv_idx == num_iterations - 1) {
@@ -244,10 +245,10 @@ __device__ __forceinline__ void
           static_cast<T const *>(knorm_weight_ptr),
           knorm_sum,
           k_eps,
-          curr_iter_len - 1);
+          curr_iter_len - 1,
+          rotary_emd, static_cast<T const *>(cos_ptr), static_cast<T const *>(sin_ptr));
     }
     __syncthreads();
-    
 
     float s_frag[8];
 #pragma unroll
