@@ -364,7 +364,9 @@ __global__ void persistent_kernel(RuntimeConfig config) {
               task_desc.inputs[1].base_ptr,
               task_desc.inputs[2].base_ptr,
               task_desc.outputs[0].base_ptr,
-              config.step[0] /*seq_len*/);
+              config.step[0] /*seq_len*/,
+              false,
+              false);
           break;
         }
         case TASK_ATTENTION_2: {

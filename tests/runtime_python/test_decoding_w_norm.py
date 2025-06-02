@@ -72,7 +72,7 @@ v_cache_mirage =torch.empty((max_seq_len, head_dim), device=device, dtype=dtype)
 for i in range(512):
     seq_len = i + 1
 
-    qkv = torch.randn(num_total_heads, head_dim, device=device, dtype=dtype) * 10
+    qkv = torch.randn(num_total_heads, head_dim, device=device, dtype=dtype)
     # qkv = torch.full((num_total_heads, head_dim), 0.1, device=device, dtype=dtype)
 
     q = qkv[:q_heads].unsqueeze(1)
@@ -102,6 +102,6 @@ for i in range(512):
 
     mirage_output = torch.empty((q_heads, head_dim), device=device, dtype=dtype)
     # runtime_kernel.single_batch_gqa(qkv_mirage, k_cache_mirage, v_cache_mirage, mirage_output, seq_len, False)
-    runtime_kernel.single_batch_gqa(qkv_mirage, k_cache_mirage, v_cache_mirage, mirage_output, seq_len, True, True, qnorm_weight, knorm_weight, cos, sin, eps)
+    runtime_kernel.single_batch_gqa(qkv_mirage, k_cache_mirage, v_cache_mirage, mirage_output, seq_len, True, True, qnorm_weight, knorm_weight, cos, sin, eps, eps)
     diff = mirage_output - torch_output
     print("seq_len res:", seq_len, "min:", diff.min().item(), "max:", diff.max().item())

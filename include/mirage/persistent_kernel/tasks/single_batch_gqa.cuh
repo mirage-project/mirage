@@ -235,7 +235,14 @@ __device__ __forceinline__ void
     // q_norm
     if (qk_norm && kv_idx == 0) {
       rms_norm<T, QSmem, NUM_Q_HEADS, HEAD_DIM>(
-          q_smem, static_cast<T const *>(qnorm_weight_ptr), qnorm_sum, q_eps, 0, rotary_emd, static_cast<T const *>(cos_ptr), static_cast<T const *>(sin_ptr));
+          q_smem,
+          static_cast<T const *>(qnorm_weight_ptr),
+          qnorm_sum,
+          q_eps,
+          0,
+          rotary_emd,
+          static_cast<T const *>(cos_ptr),
+          static_cast<T const *>(sin_ptr));
     }
 
     // knorm
@@ -246,7 +253,9 @@ __device__ __forceinline__ void
           knorm_sum,
           k_eps,
           curr_iter_len - 1,
-          rotary_emd, static_cast<T const *>(cos_ptr), static_cast<T const *>(sin_ptr));
+          rotary_emd,
+          static_cast<T const *>(cos_ptr),
+          static_cast<T const *>(sin_ptr));
     }
     __syncthreads();
 
