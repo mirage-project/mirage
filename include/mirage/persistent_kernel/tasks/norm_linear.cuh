@@ -32,10 +32,9 @@ using bfloat16 = type::bfloat16_t;
 // kernel for [16, 64] and any BATCH_SIZE < 16 [x, 64]
 // OUTPUT_SIZE = 16, 32, 64, REDUCTION_SIZE = multiple of 64
 template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int REDUCTION_SIZE>
-__device__ __forceinline__ void norm_linear_task_impl(
-    void const *input_ptr,
-    void const *weight_ptr,
-    void *output_ptr) {
+__device__ __forceinline__ void norm_linear_task_impl(void const *input_ptr,
+                                                      void const *weight_ptr,
+                                                      void *output_ptr) {
   // Here we assume the type of T is bfloat16, so the sizeof(T) is 2
   constexpr int CHUNK_SIZE = 16 / sizeof(T);
   constexpr int TILE_SIZE = 64;
@@ -308,13 +307,13 @@ __device__ __forceinline__ void norm_linear_task_impl(
   }
 }
 
-template<typename T>
-__device__ __forceinline__ void norm_linear_task(
-    int output_size,
-    void const *input_ptr,
-    void const *weight_ptr,
-    void *output_ptr) {
-  DISPATCH_OUTPUT_SIZE(64, norm_linear_task_impl, T, input_ptr, weight_ptr, output_ptr);
+template <typename T>
+__device__ __forceinline__ void norm_linear_task(int output_size,
+                                                 void const *input_ptr,
+                                                 void const *weight_ptr,
+                                                 void *output_ptr) {
+  DISPATCH_OUTPUT_SIZE(
+      64, norm_linear_task_impl, T, input_ptr, weight_ptr, output_ptr);
 }
 
 } // namespace kernel
