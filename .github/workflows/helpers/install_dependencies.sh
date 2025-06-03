@@ -42,3 +42,8 @@ sudo rm -rf /var/lib/apt/lists/*
 curl https://sh.rustup.rs -sSf | sh -s -- -y
 # shellcheck source=/dev/null
 . "$HOME/.cargo/env"
+
+# Make sure abstract_subexpr lib is found
+sudo cp /home/yourname/mirage/src/search/abstract_expr/abstract_subexpr/target/release/libabstract_subexpr.so /usr/lib/
+sudo ln -sf /usr/lib/libabstract_subexpr.so /usr/lib/libabstract_subexpr.so.1.0 || true
+sudo ldconfig

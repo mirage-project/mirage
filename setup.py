@@ -55,6 +55,7 @@ def config_cython():
                               path.join(mirage_path, "deps", "json", "include"),
                               path.join(mirage_path, "deps", "cutlass", "include"),
                               path.join(z3_path, "include"),
+                              path.join(mirage_path, "src", "search", "abstract_expr", "abstract_subexpr", "target", "release"),
                               "/usr/local/cuda/include"],
                 libraries=["mirage_runtime", "cudadevrt", "cudart_static", "cudnn", "cublas", "cudart", "cuda", "z3", "gomp", "abstract_subexpr"],
                 library_dirs=[path.join(mirage_path, "build"),
