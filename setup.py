@@ -65,7 +65,11 @@ def config_cython():
                               "/usr/local/cuda/lib64",
                               "/usr/local/cuda/lib64/stubs"],
                 extra_compile_args=["-std=c++17", "-fopenmp"],
-                extra_link_args=["-fPIC", "-fopenmp"],
+                extra_link_args=[
+                    "-fPIC",
+                    "-fopenmp",
+                    f"-Wl,-rpath,{path.join(mirage_path, 'src', 'search', 'abstract_expr', 'abstract_subexpr', 'target', 'release')}"
+                ],
                 language="c++"))
         return cythonize(ret, compiler_directives={"language_level" : 3})
     except ImportError:
@@ -87,6 +91,12 @@ except FileNotFoundError:
     # Add the cargo binary directory to the PATH
     os.environ["PATH"] = f"{os.path.join(os.environ.get('HOME', '/root'), '.cargo', 'bin')}:{os.environ.get('PATH', '')}"
 
+mirage_path = path.dirname(__file__)
+# z3_path = os.path.join(mirage_path, 'deps', 'z3', 'build')
+# os.environ['Z3_DIR'] = z3_path
+if mirage_path == '':
+    mirage_path = '.'
+
 try:
     subprocess.check_output(['cargo', 'build', '--release'], cwd='src/search/abstract_expr/abstract_subexpr')
 except subprocess.CalledProcessError as e:
@@ -96,17 +106,12 @@ except subprocess.CalledProcessError as e:
         print("Abstract_subexpr Rust library built successfully.")
     except subprocess.CalledProcessError as e:
         print("Failed to build abstract_subexpr Rust library.")
-    os.environ['ABSTRACT_SUBEXPR_LIB'] = path.join('src', 'search', 'abstract_expr', 'abstract_subexpr', 'target', 'release', 'libabstract_subexpr.so')
+    os.environ['ABSTRACT_SUBEXPR_LIB'] = os.path.join(mirage_path,'src', 'search', 'abstract_expr', 'abstract_subexpr', 'target', 'release', 'libabstract_subexpr.so')
 
 # build Mirage runtime library
 try:
     nvcc_path = shutil.which('nvcc')
     os.environ['CUDACXX'] = nvcc_path if nvcc_path else '/usr/local/cuda/bin/nvcc'
-    mirage_path = path.dirname(__file__)
-    # z3_path = os.path.join(mirage_path, 'deps', 'z3', 'build')
-    # os.environ['Z3_DIR'] = z3_path
-    if mirage_path == '':
-        mirage_path = '.'
     os.makedirs(mirage_path, exist_ok=True)
     os.chdir(mirage_path)
     build_dir = os.path.join(mirage_path, 'build')
