@@ -86,21 +86,6 @@ except FileNotFoundError:
     # Add the cargo binary directory to the PATH
     os.environ["PATH"] = f"{os.path.join(os.environ.get('HOME', '/root'), '.cargo', 'bin')}:{os.environ.get('PATH', '')}"
 
-# Install Rust if not yet available
-try:
-    # Attempt to run a Rust command to check if Rust is installed
-    subprocess.check_output(['cargo', '--version'])
-except FileNotFoundError:
-    print("Rust/Cargo not found, installing it...")
-    # Rust is not installed, so install it using rustup
-    try:
-        subprocess.run("curl https://sh.rustup.rs -sSf | sh -s -- -y", shell=True, check=True)
-        print("Rust and Cargo installed successfully.")
-    except subprocess.CalledProcessError as e:
-        print(f"Error: {e}")
-    # Add the cargo binary directory to the PATH
-    os.environ["PATH"] = f"{os.path.join(os.environ.get('HOME', '/root'), '.cargo', 'bin')}:{os.environ.get('PATH', '')}"
-
 try:
     subprocess.check_output(['cargo', 'build', '--release'], cwd='src/search/abstract_expr/abstract_subexpr')
 except subprocess.CalledProcessError as e:
