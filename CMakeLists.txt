@@ -137,26 +137,17 @@ if(NOT CARGO_RESULT EQUAL 0)
 endif()
 
 #set RUST
-include(ExternalProject)
-
-set(RUST_CRATE_DIR "${PROJECT_SOURCE_DIR}/src/search/abstract_expr/abstract_subexpr")
-set(RUST_LIB_DEBUG "${RUST_CRATE_DIR}/target/debug/libabstract_subexpr.so")
-set(RUST_LIB_RELEASE "${RUST_CRATE_DIR}/target/release/libabstract_subexpr.so")
-
-set_directory_properties(PROPERTIES EP_PREFIX ${PROJECT_SOURCE_DIR}/deps/Rust)
-ExternalProject_Add(
-  abstract_subexpr
-  DOWNLOAD_COMMAND ""
-  CONFIGURE_COMMAND ""
-  BUILD_COMMAND cargo build --release
-  BINARY_DIR "${RUST_CRATE_DIR}"
-  INSTALL_COMMAND ""
-  LOG_BUILD ON)
-
-add_dependencies(mirage_runtime abstract_subexpr)
-
-target_link_libraries(mirage_runtime
-  optimized ${RUST_LIB_RELEASE})
+if(ABSTRACT_SUBEXPR_LIB AND ABSTRACT_SUBEXPR_LIBRARIES)
+  message(STATUS "ABSTRACT_SUBEXPR_LIB: ${ABSTRACT_SUBEXPR_LIB}")
+  message(STATUS "ABSTRACT_SUBEXPR_LIBRARIES: ${ABSTRACT_SUBEXPR_LIBRARIES}")
+else()
+  find_package(ABSTRACT_SUBEXPR REQUIRED)
+  message(STATUS "ABSTRACT_SUBEXPR_FOUND: ${ABSTRACT_SUBEXPR_FOUND}")
+  message(STATUS "Found ABSTRACT_SUBEXPR ${ABSTRACT_SUBEXPR_VERSION_STRING}")
+  message(STATUS "ABSTRACT_SUBEXPR_DIR: ${ABSTRACT_SUBEXPR_DIR}")
+endif()
+include_directories(${ABSTRACT_SUBEXPR_LIB})
+list(APPEND MIRAGE_LINK_LIBS ${ABSTRACT_SUBEXPR_LIBRARIES})
 
 set_target_properties(mirage_runtime PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
 

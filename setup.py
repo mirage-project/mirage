@@ -102,11 +102,11 @@ except FileNotFoundError:
     os.environ["PATH"] = f"{os.path.join(os.environ.get('HOME', '/root'), '.cargo', 'bin')}:{os.environ.get('PATH', '')}"
 
 try:
-    subprocess.check_output(['cargo', 'build', '--release'], cwd='src/search/abstract_expr/abstract_subexpr/target')
+    subprocess.check_output(['cargo', 'build', '--release'], cwd='src/search/abstract_expr/abstract_subexpr')
 except subprocess.CalledProcessError as e:
     print("Failed to build abstract_subexpr Rust library, building it ...")
     try:
-        subprocess.run(['cargo', 'build', '--release'], cwd='src/search/abstract_expr/abstract_subexpr/target', check=True)
+        subprocess.run(['cargo', 'build', '--release'], cwd='src/search/abstract_expr/abstract_subexpr', check=True)
         print("Abstract_subexpr Rust library built successfully.")
     except subprocess.CalledProcessError as e:
         print("Failed to build abstract_subexpr Rust library.")
@@ -136,6 +136,8 @@ try:
     subprocess.check_call(['cmake', '..',
                            '-DZ3_CXX_INCLUDE_DIRS=' + z3_path + '/include/',
                            '-DZ3_LIBRARIES=' + path.join(z3_path, 'lib', 'libz3.so'),
+                           '-DABSTRACT_SUBEXPR_LIB=' + path.join(mirage_path, 'src', 'search', 'abstract_expr', 'abstract_subexpr', 'target', 'release'),
+                           '-DABSTRACT_SUBEXPR_LIBRARIES=' + path.join(mirage_path, 'src', 'search', 'abstract_expr', 'abstract_subexpr', 'target', 'release', 'libabstract_subexpr.so'),
                            '-DCMAKE_C_COMPILER=' + os.environ['CC'],
                            '-DCMAKE_CXX_COMPILER=' + os.environ['CXX'],
                           ], cwd=build_dir, env=os.environ.copy())
