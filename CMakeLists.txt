@@ -161,6 +161,9 @@ install(TARGETS mirage_runtime
 install(DIRECTORY ${PROJECT_SOURCE_DIR}/include
     DESTINATION .)
 
+install(FILES ${ABSTRACT_SUBEXPR_LIBRARIES} 
+    DESTINATION lib)
+
 if ("${BUILD_CPP_EXAMPLES}" STREQUAL "ON")
   set(CPP_EXAMPLES_DIR cpp_examples)
   set(CPP_EXAMPLES_BIN dnn)
