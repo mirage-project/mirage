@@ -44,7 +44,8 @@ def cuda_call(call):
 class HostDeviceMem:
     """Pair of host and device memory, where the host memory is wrapped in a numpy array"""
     def __init__(self, size: int, dtype: Optional[np.dtype] = None):
-        dtype = np.dtype(np.uint16)
+        if dtype is None:
+            dtype = np.dtype(np.uint16)
         nbytes = size * dtype.itemsize
         host_mem = cuda_call(cudart.cudaMallocHost(nbytes))
         pointer_type = ctypes.POINTER(np.ctypeslib.as_ctypes_type(dtype))
@@ -152,17 +153,19 @@ def _do_inference_base(inputs, outputs, stream, execute_async_func):
 
     starter = time.time()
     # Run inference.
-    for _ in range(1000):
+    scale = 1
+    for _ in range(1000 * scale):
         execute_async_func()
-    # Transfer predictions back from the GPU.
-    # kind = cudart.cudaMemcpyKind.cudaMemcpyDeviceToHost
-    # [cuda_call(cudart.cudaMemcpyAsync(out.host, out.device, out.nbytes, kind, stream)) for out in outputs]
     # Synchronize the stream
     cuda_call(cudart.cudaStreamSynchronize(stream))
     ender = time.time()
-    print("Runtime = ", ender - starter)
+    print("Runtime = ", (ender - starter) / scale)
+    # Transfer predictions back from the GPU.
+    kind = cudart.cudaMemcpyKind.cudaMemcpyDeviceToHost
+    [cuda_call(cudart.cudaMemcpyAsync(out.host, out.device, out.nbytes, kind, stream)) for out in outputs]
+    cuda_call(cudart.cudaStreamSynchronize(stream))
     # Return only the host outputs.
-    # return [out.host for out in outputs]
+    return [out.host for out in outputs]
 
 
 # This function is generalized for multiple inputs/outputs.
