@@ -5,7 +5,7 @@
 #include "mirage/search/symbolic_graph/symbolic_map.h"
 #include "mirage/search/symbolic_graph/symbolic_op.h"
 #include "mirage/search/symbolic_graph/symbolic_tensor.h"
-#include "mirage/search/symbolic_graph/tensor_dim_constraint.h"
+#include "mirage/search/symbolic_graph/tensor_dim_constraints.h"
 #include "mirage/threadblock/graph.h"
 
 #include <unordered_map>
@@ -50,7 +50,7 @@ public:
   std::vector<std::vector<int>> input_indices;
   std::vector<std::vector<int>> output_indices;
 
-  std::unordered_set<TensorDimConstraint> conds;
+  TensorDimConstraints conds;
 
   operator json() const;
 };
@@ -80,9 +80,14 @@ public:
   std::vector<std::vector<int>> input_indices;
   std::vector<std::vector<int>> output_indices;
 
+  std::vector<std::unordered_set<TensorDimConstraint>> conds_from_op;
   std::unordered_set<TensorDimConstraint> conds;
 
   operator json() const;
+
+private:
+  bool add_conds_for_new_op(
+      std::unordered_set<TensorDimConstraint> const &new_conds);
 };
 
 } // namespace search

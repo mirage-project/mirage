@@ -11,16 +11,16 @@ namespace search {
 enum class ConstraintType {
   EQUAL,
   EQUAL_OR_ONE,
-  NON_NEGATIVE,
-  NON_POSITIVE,
+  GEQ,
+  LEQ,
 };
 
 NLOHMANN_JSON_SERIALIZE_ENUM(ConstraintType,
                              {
-                                 {ConstraintType::EQUAL, "EQUAL"},
-                                 {ConstraintType::EQUAL_OR_ONE, "EQUAL_OR_ONE"},
-                                 {ConstraintType::NON_NEGATIVE, "NON_NEGATIVE"},
-                                 {ConstraintType::NON_POSITIVE, "NON_POSITIVE"},
+                                {ConstraintType::EQUAL, "EQUAL"},
+                                {ConstraintType::EQUAL_OR_ONE, "EQUAL_OR_ONE"},
+                                {ConstraintType::GEQ, "GEQ"},
+                                {ConstraintType::LEQ, "LEQ"},
                              })
 
 class TensorDimConstraint {
@@ -36,6 +36,12 @@ public:
 
 TensorDimConstraint make_equal_constraint(SymbolicTensorDim lhs,
                                           SymbolicTensorDim rhs);
+
+TensorDimConstraint make_geq_constraint(SymbolicTensorDim lhs,
+                                        SymbolicTensorDim rhs);
+
+TensorDimConstraint make_leq_constraint(SymbolicTensorDim lhs,
+                                        SymbolicTensorDim rhs);
 
 TensorDimConstraint make_equal_or_one_constraint(SymbolicTensorDim lhs,
                                                  SymbolicTensorDim rhs);

@@ -384,7 +384,7 @@ z3::expr TensorDimPow::to_z3(z3::context &c,
 z3::expr TensorDimIte::to_z3(z3::context &c,
                              DimVarAssignments const &assign,
                              bool log_scaled) const {
-  return z3::ite(cond->to_z3(c, assign, log_scaled),
+  return z3::ite(cond->to_z3(c, assign, log_scaled) == 1,
                  true_case->to_z3(c, assign, log_scaled),
                  false_case->to_z3(c, assign, log_scaled));
 }

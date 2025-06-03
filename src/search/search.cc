@@ -488,7 +488,7 @@ void KernelGraphGenerator::preprocess(kernel::Graph const &computation_graph) {
 }
 
 bool KernelGraphGenerator::check_abstract_expr(
-    std::shared_ptr<AbstractExpr const> expr) {
+    std::shared_ptr<AbstractExpr const> expr, TensorDimConstraints const &constraints) {
   if (!expr) {
     return false;
   }
@@ -500,7 +500,7 @@ bool KernelGraphGenerator::check_abstract_expr(
   }
 
   for (auto const &final_expr : computation_graph_output_exprs) {
-    if (expr->subexpr_to(*final_expr)) {
+    if (expr->subexpr_to(*final_expr, constraints)) {
 
 #pragma omp critical
       { seen_exprs[expr->to_string()] = true; }
@@ -800,6 +800,7 @@ void KernelGraphGenerator::generate_next_symbolic_operator(
         // Obtain the abstract expression of the output tensor
         std::shared_ptr<AbstractExpr const> expr =
             get_abstract_expr(op_type, input_tensors, input_exprs, *tb_graph);
+        std::cerr << expr->to_string() << std::endl;
         // Check if the abstract expression is a subexpression of the final
         // output
         if (!check_abstract_expr(expr)) {

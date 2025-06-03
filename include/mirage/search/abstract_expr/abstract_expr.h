@@ -1,7 +1,7 @@
 #pragma once
 
 #include "mirage/search/symbolic_graph/dim_var_assignments.h"
-#include "mirage/search/symbolic_graph/tensor_dim_constraint.h"
+#include "mirage/search/symbolic_graph/tensor_dim_constraints.h"
 #include "mirage/utils/hash_utils.h"
 #include "mirage/utils/json_utils.h"
 #include "z3++.h"
@@ -19,12 +19,8 @@ public:
   AbstractExpr() = default;
   virtual ~AbstractExpr() = default;
 
-  virtual z3::expr to_z3(z3::context &c,
-                         DimVarAssignments const &assign) const = 0;
-  bool subexpr_to(
-      AbstractExpr const &other,
-      std::vector<DimVarAssignments> const &possible_assignments = {},
-      std::unordered_set<TensorDimConstraint> const &constraints = {}) const;
+  virtual z3::expr to_z3(z3::context &c, DimVarAssignments const &assign) const = 0;
+  bool subexpr_to(AbstractExpr const &other, TensorDimConstraints const &constraints) const;
   bool operator==(AbstractExpr const &other) const;
   virtual std::shared_ptr<AbstractExpr const> simplify() const = 0;
   virtual std::string to_string() const = 0;
@@ -33,8 +29,7 @@ public:
 class Var : public AbstractExpr {
 public:
   Var(std::string const &name);
-  z3::expr to_z3(z3::context &c,
-                 DimVarAssignments const &assign) const override;
+  z3::expr to_z3(z3::context &c, DimVarAssignments const &assign) const override;
   std::string to_string() const override;
   std::shared_ptr<AbstractExpr const> simplify() const override;
   std::string name;

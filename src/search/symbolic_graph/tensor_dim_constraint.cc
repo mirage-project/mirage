@@ -30,10 +30,16 @@ z3::expr TensorDimConstraint::to_z3(z3::context &c,
 
   switch (type) {
     case ConstraintType::EQUAL: {
+      return exprs[0] == exprs[1];
     }
     case ConstraintType::EQUAL_OR_ONE: {
+      return exprs[0] == exprs[1] || exprs[0] == 1 || exprs[1] == 1;
     }
-    case ConstraintType::NON_NEGATIVE: {
+    case ConstraintType::GEQ: {
+      return exprs[0] >= exprs[1];
+    }
+    case ConstraintType::LEQ: {
+      return exprs[0] <= exprs[1];
     }
     default:
       assert(false && "Unsupported constraint type");
@@ -51,20 +57,32 @@ TensorDimConstraint make_equal_or_one_constraint(SymbolicTensorDim lhs,
 }
 
 TensorDimConstraint make_non_negative_constraint(SymbolicTensorDim dim) {
-  return TensorDimConstraint(ConstraintType::NON_NEGATIVE, {dim});
+  SymbolicTensorDim zero(dim_expr_make_const(0));
+  return TensorDimConstraint(ConstraintType::GEQ, {dim, zero});
 }
 
 TensorDimConstraint
     make_sum_leq_one_constraint(std::vector<SymbolicTensorDim> dims) {
-  // sum(dims) - 1 is non-positive
   dims.push_back(SymbolicTensorDim(std::make_shared<TensorDimConst const>(-1)));
-  return TensorDimConstraint(ConstraintType::NON_POSITIVE, dims);
+  std::shared_ptr<TensorDimExpr const> sum_expr = dims[0].dim_expr;
+  for (size_t i = 1; i < dims.size(); ++i) {
+    sum_expr = std::make_shared<TensorDimAdd>(sum_expr, dims[i].dim_expr);
+  }
+  SymbolicTensorDim sum(sum_expr);
+  SymbolicTensorDim zero(dim_expr_make_const(0));
+  return TensorDimConstraint(ConstraintType::LEQ, {sum, zero});
 }
 
 TensorDimConstraint
     make_sum_geq_zero_constraint(std::vector<SymbolicTensorDim> dims) {
-  // sum(dims) is non-negative
-  return TensorDimConstraint(ConstraintType::NON_NEGATIVE, dims);
+  assert(!dims.empty());
+  std::shared_ptr<TensorDimExpr const> sum_expr = dims[0].dim_expr;
+  for (size_t i = 1; i < dims.size(); ++i) {
+    sum_expr = std::make_shared<TensorDimAdd>(sum_expr, dims[i].dim_expr);
+  }
+  SymbolicTensorDim sum(sum_expr);
+  SymbolicTensorDim zero(dim_expr_make_const(0));
+  return TensorDimConstraint(ConstraintType::GEQ, {sum, zero});
 }
 
 bool check_satisfiability(

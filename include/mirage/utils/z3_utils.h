@@ -35,6 +35,6 @@ void visit(std::vector<bool> &visited, z3::expr const &e, F const &func) {
 }
 
 z3::expr_vector get_free_vars(std::vector<z3::expr> const &e,
-                              z3::sort const &s);
+                              std::vector<z3::sort> const &s);
 
 } // namespace mirage

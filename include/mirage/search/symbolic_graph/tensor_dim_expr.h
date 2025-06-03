@@ -18,7 +18,7 @@ public:
   virtual int get_value(DimVarAssignments const &assignments) const = 0;
   virtual z3::expr to_z3(z3::context &c,
                          DimVarAssignments const &assign,
-                         bool log_scaled = true) const = 0;
+                         bool log_scaled = false) const = 0;
   virtual std::string to_string() const = 0;
   virtual bool is_var() const;
   virtual bool is_const() const;
@@ -37,6 +37,11 @@ enum class TensorDimVarType {
   INT,
   BOOL,
 };
+
+NLOHMANN_JSON_SERIALIZE_ENUM(TensorDimVarType, {
+  {TensorDimVarType::INT, "INT"},
+  {TensorDimVarType::BOOL, "BOOL"},
+})
 
 class TensorDimVar : public TensorDimExpr {
 public:

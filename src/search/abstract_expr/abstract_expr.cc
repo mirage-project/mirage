@@ -13,11 +13,7 @@
 namespace mirage {
 namespace search {
 
-bool AbstractExpr::subexpr_to(
-    AbstractExpr const &other,
-    std::vector<DimVarAssignments> const &possible_assignments,
-    std::unordered_set<TensorDimConstraint> const &constraints) const {
-
+bool AbstractExpr::subexpr_to(AbstractExpr const &other, TensorDimConstraints const &constraints) const {
   auto check_subexpr = [&](DimVarAssignments const &assign) {
     // Z3 context
     z3::context c;
@@ -27,7 +23,8 @@ bool AbstractExpr::subexpr_to(
 
     // Define the sorts
     z3::sort P = c.uninterpreted_sort("P");
-    z3::sort I = c.int_sort();
+    // z3::sort I = c.int_sort();
+    z3::sort B = c.bool_sort();
 
     // Define the functions
     z3::func_decl add = c.function("add", P, P, P);
@@ -35,8 +32,10 @@ bool AbstractExpr::subexpr_to(
     z3::func_decl div = c.function("div", P, P, P);
     z3::func_decl exp = c.function("exp", P, P);
     z3::func_decl silu = c.function("silu", P, P);
-    z3::func_decl rms = c.function("rms", I, P, P);
-    z3::func_decl red = c.function("red", I, P, P);
+    // z3::func_decl rms = c.function("rms", I, P, P);
+    // z3::func_decl red = c.function("red", I, P, P);
+    z3::func_decl rms = c.function("rms", P, P);
+    z3::func_decl red = c.function("red", P, P);
 
     // The subexpression relation
     z3::func_decl subexpr = c.function("subexpr", P, P, c.bool_sort());
@@ -55,13 +54,13 @@ bool AbstractExpr::subexpr_to(
     z3::expr x = c.constant("x", P);
     z3::expr y = c.constant("y", P);
     z3::expr z = c.constant("z", P);
-    z3::expr i = c.int_const("i");
-    z3::expr i1 = c.int_const("i1");
-    z3::expr i2 = c.int_const("i2");
+    // z3::expr i = c.int_const("i");
+    // z3::expr i1 = c.int_const("i1");
+    // z3::expr i2 = c.int_const("i2");
 
     // All inputs are different
     {
-      z3::expr_vector input_consts = get_free_vars({expr1, expr2}, P);
+      z3::expr_vector input_consts = get_free_vars({expr1, expr2}, {P});
       for (size_t i = 0; i < input_consts.size(); ++i) {
         for (size_t j = i + 1; j < input_consts.size(); ++j) {
           s.add(input_consts[i] != input_consts[j]);
@@ -82,8 +81,8 @@ bool AbstractExpr::subexpr_to(
     s.add(forall(x, y, subexpr(y, div(x, y))));
     s.add(forall(x, subexpr(x, exp(x))));
     s.add(forall(x, subexpr(x, silu(x))));
-    s.add(forall(x, i, subexpr(x, rms(i, x))));
-    s.add(forall(x, i, subexpr(x, red(i, x))));
+    s.add(forall(x, subexpr(x, rms(x))));
+    s.add(forall(x, subexpr(x, red(x))));
 
     // Equivalence axioms
     s.add(forall(x, y, add(x, y) == add(y, x)));
@@ -94,67 +93,38 @@ bool AbstractExpr::subexpr_to(
     s.add(forall(x, y, z, add(div(x, z), div(y, z)) == div(add(x, y), z)));
     s.add(forall(x, y, z, mul(x, div(y, z)) == div(mul(x, y), z)));
 
-    s.add(forall(x, x == red(c.int_val(0), x)));
-    s.add(forall(x, i1, i2, red(i1, red(i2, x)) == red(i1 + i2, x)));
-    s.add(forall(to_expr_vector({x, y, i, i1, i2}),
-                 red(i, add(red(i1, x), red(i2, y))) ==
-                     add(red(i + i1, x), red(i + i2, y))));
-    s.add(forall(x, y, i, red(i, mul(x, y)) == mul(red(i, x), y)));
-    s.add(forall(x, y, i, red(i, div(x, y)) == div(red(i, x), y)));
+    // s.add(forall(x, x == red(c.int_val(0), x)));
+    // s.add(forall(x, i1, i2, red(i1, red(i2, x)) == red(i1 + i2, x))); // red(1, red(1, x)) == red(1, x)
+    s.add(forall(x, red(x) == red(red(x))));
+    s.add(forall(x, y, red(add(x, y)) == add(red(x), red(y))));
+    s.add(forall(x, y, red(mul(x, y)) == mul(red(x), y)));
+    s.add(forall(x, y, red(div(x, y)) == div(red(x), y)));
 
     // Lemmas
-    s.add(
-        forall(x, i1, i2, implies(i1 <= i2, subexpr(red(i1, x), red(i2, x)))));
+    // s.add(
+    //     forall(x, i1, i2, implies(i1 <= i2, subexpr(red(i1, x), red(i2, x)))));
 
     // Theorem to prove
-    {
-      z3::expr dim_constraints = c.bool_val(true);
-
-      // Add the constraints from tensor dimensions
-      for (TensorDimConstraint const &constraint : constraints) {
-        dim_constraints = dim_constraints && constraint.to_z3(c, assign);
-      }
-
-      z3::expr_vector dim_vars =
-          get_free_vars({dim_constraints, expr1, expr2}, I);
-
-      for (z3::expr const &dim_var : dim_vars) {
-        // NOTE: assume log-scaled
-        s.add(dim_var >= 0);
-      }
-
-      if (dim_vars.size() > 0) {
-        s.add(!z3::exists(dim_vars, dim_constraints && subexpr(expr1, expr2)));
-      } else {
-        s.add(!(dim_constraints && subexpr(expr1, expr2)));
-      }
-      // s.add(!z3::exists(dim_vars, dim_constraints && subexpr(expr1, expr2)));
-      // s.add(z3::forall(dim_vars, !(dim_constraints && subexpr(expr1,
-      // expr2))));
-    }
+    s.add(!subexpr(expr1, expr2));
 
     // compute the time
     auto start = std::chrono::high_resolution_clock::now();
+    // std::cerr << s << std::endl;
     bool result = s.check() == z3::unsat;
     auto end = std::chrono::high_resolution_clock::now();
     std::chrono::duration<double> elapsed = end - start;
-    std::cout << s << std::endl;
-    std::cout << result << " Solving time: " << elapsed.count() << " seconds"
+    std::cerr << result << " Solving time: " << elapsed.count() << " seconds"
               << std::endl;
     return result;
   };
 
-  for (DimVarAssignments const &assignments : possible_assignments) {
-    if (check_subexpr(assignments)) {
-      return true;
-    }
-  }
-
-  return false;
+  DimVarAssignments empty_assignment;
+  return check_subexpr(empty_assignment);
 }
 
 bool AbstractExpr::operator==(AbstractExpr const &other) const {
-  return subexpr_to(other) && other.subexpr_to(*this);
+  TensorDimConstraints empty_constraints;
+  return subexpr_to(other, empty_constraints) && other.subexpr_to(*this, empty_constraints);
 }
 
 Var::Var(std::string const &name) : name(name) {}
@@ -255,8 +225,8 @@ RMS::RMS(std::shared_ptr<TensorDimExpr const> reduction_degree,
 
 z3::expr RMS::to_z3(z3::context &c, DimVarAssignments const &assign) const {
   z3::sort P = c.uninterpreted_sort("P");
-  z3::func_decl rms = c.function("rms", c.int_sort(), P, P);
-  return rms(reduction_degree->to_z3(c, assign), elems->to_z3(c, assign));
+  z3::func_decl rms = c.function("rms", P, P);
+  return rms(elems->to_z3(c, assign));
 }
 
 std::string RMS::to_string() const {
@@ -272,8 +242,8 @@ Red::Red(std::shared_ptr<TensorDimExpr const> reduction_degree,
 
 z3::expr Red::to_z3(z3::context &c, DimVarAssignments const &assign) const {
   z3::sort P = c.uninterpreted_sort("P");
-  z3::func_decl red = c.function("red", c.int_sort(), P, P);
-  return red(reduction_degree->to_z3(c, assign), summand->to_z3(c, assign));
+  z3::func_decl red = c.function("red", P, P);
+  return red(summand->to_z3(c, assign));
 }
 
 std::string Red::to_string() const {

@@ -10,7 +10,7 @@ SymbolicMap::SymbolicMap(std::vector<SymbolicTensorDim> const &device_dims,
   for (SymbolicTensorDim const &dim : device_dims) {
     for (size_t j = 0; j < num_tensor_dims; ++j) {
       map_mat[{dim, j}] =
-          dim_expr_make_var(index_counter++, TensorDimVarType::BOOL);
+          dim_expr_make_var(index_counter++, TensorDimVarType::INT);
     }
   }
 }

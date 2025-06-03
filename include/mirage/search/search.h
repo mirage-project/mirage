@@ -85,7 +85,7 @@ private:
   bool instantiate_symbolic_graph(SymbolicKNGraph const &symbolic_graph);
 
   void preprocess(kernel::Graph const &computation_graph);
-  bool check_abstract_expr(std::shared_ptr<AbstractExpr const> expr);
+  bool check_abstract_expr(std::shared_ptr<AbstractExpr const> expr, TensorDimConstraints const &constraints = {});
   bool verify(kernel::Graph &g);
 
   void save_results() const;
