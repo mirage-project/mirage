@@ -24,7 +24,8 @@ int main(int argc, char **argv) {
   namespace rt = mirage::runtime;
   namespace tp = mirage::type;
   using mirage::runtime::IODesc;
-  int vocab_size = 32 * 1024;
+  //int vocab_size = 151936;
+  int vocab_size = 153600;
   int batch_size = 1;
   int max_kv_length = 4096;
   int hidden_size = 4096;
@@ -46,7 +47,7 @@ int main(int argc, char **argv) {
 
   kn::Graph kgraph(dim3{1, 1, 1}, true /*disable_fingerprint*/);
   kn::DTensor X = kgraph.new_input(
-      {batch_size, 1}, {1, 1}, type::DT_UINT16, layout::DmemRowMajor);
+      {batch_size, 1}, {1, 1}, type::DT_INT64, layout::DmemRowMajor);
   io_configs.emplace(X.guid, IODesc(rt::IODesc::TorchTensor, "input_token", X));
 
   kn::DTensor AllReduceBuf =
@@ -94,7 +95,7 @@ int main(int argc, char **argv) {
 
   kn::DTensor AttnOut = kgraph.new_input(
       {batch_size, num_local_q_heads * head_dim},
-      {(size_t)num_local_q_heads * head_dim, (size_t)head_dim, 1},
+      {(size_t)num_local_q_heads * head_dim, 1},
       type::DT_BFLOAT16,
       layout::DmemRowMajor);
   io_configs.emplace(AttnOut.guid,
@@ -144,10 +145,12 @@ int main(int argc, char **argv) {
         std::make_tuple(2, 1, rt::TASK_EMBEDDING);
   }
   X = Y;
-  for (int layer = 0; layer < 1; layer++) {
+  for (int layer = 0; layer < 36; layer++) {
     // Add RMS + MatMul
     {
-      dim3 grid_dim = {(size_t)fused_outdim_1 / world_size / per_task_dim,
+      int num_tasks = 96;
+      assert(fused_outdim_1 % (world_size * num_tasks) == 0);
+      dim3 grid_dim = {(size_t) num_tasks,
                        1,
                        1},
            block_dim = {128, 1, 1};
@@ -198,12 +201,12 @@ int main(int argc, char **argv) {
       task_configs[kgraph.operators.back()] =
           std::make_tuple(3, 1, rt::TASK_RMS_NORM_LINEAR);
     }
-#ifdef DEADCODE
     // Add attention
     {
       kn::DTensor K = kgraph.new_input(
           {batch_size, max_kv_length, num_local_kv_heads, head_dim},
-          {(size_t)num_local_kv_heads * head_dim, (size_t)head_dim, 1},
+          {(size_t)max_kv_length * num_local_kv_heads * head_dim,
+	   (size_t)num_local_kv_heads * head_dim, (size_t)head_dim, 1},
           type::DT_BFLOAT16,
           layout::DmemRowMajor);
       io_configs.emplace(K.guid,
@@ -212,7 +215,8 @@ int main(int argc, char **argv) {
                                 K));
       kn::DTensor V = kgraph.new_input(
           {batch_size, max_kv_length, num_local_kv_heads, head_dim},
-          {(size_t)num_local_kv_heads * head_dim, (size_t)head_dim, 1},
+          {(size_t)max_kv_length * num_local_kv_heads * head_dim,
+	   (size_t)num_local_kv_heads * head_dim, (size_t)head_dim, 1},
           type::DT_BFLOAT16,
           layout::DmemRowMajor);
       io_configs.emplace(V.guid,
@@ -244,8 +248,8 @@ int main(int argc, char **argv) {
                          IODesc(rt::IODesc::TorchTensor,
                                 "layer_" + std::to_string(layer) + "_o_proj",
                                 W));
-      bgraph.new_input(AttnOut, {-1, -1, -1}, 1, layout::SmemRowMajor);
-      bgraph.new_input(W, {1, -1, -1}, 0, layout::SmemRowMajor);
+      bgraph.new_input(AttnOut, {-1, -1, -1}, 1, layout::SmemRowMajor, true /*store_in_dmem*/);
+      bgraph.new_input(W, {1, -1, -1}, 0, layout::SmemRowMajor, true /*store_in_dmem*/);
       // Residual input X
       // IMPORTANT: Note that we need to scale residual input X
       // by the tensor model parallel degree
@@ -271,7 +275,9 @@ int main(int argc, char **argv) {
     }
     // Add RMS + Matmul
     {
-      dim3 grid_dim = {fused_outdim_2 / world_size / per_task_dim, 1, 1},
+      int num_tasks = 96;
+      assert(fused_outdim_2 % (world_size * num_tasks) == 0);
+      dim3 grid_dim = {num_tasks, 1, 1},
            block_dim = {128, 1, 1};
       tb::Graph bgraph(grid_dim, block_dim, 1/*forloop_dim*/, 64);
       kn::DTensor Wnorm = kgraph.new_input(
@@ -332,7 +338,7 @@ int main(int argc, char **argv) {
                                 "layer_" + std::to_string(layer) + "_down_proj",
                                 W));
       // Each forloop iteration handles one group
-      assert(MLPMid.dim[1] / bgraph.forloop_range == fused_group_size_2);
+      // assert(MLPMid.dim[1] / bgraph.forloop_range == fused_group_size_2);
       bgraph.new_input(MLPMid, {-1, -1, -1}, 1, layout::SmemRowMajor, true /*store_in_dmem*/);
       bgraph.new_input(W, {1, -1, -1}, 0, layout::SmemRowMajor, true /*store_in_dmem*/);
       // Residual input X
@@ -358,12 +364,12 @@ int main(int argc, char **argv) {
           std::make_tuple(2, 1, rt::TASK_ALLREDUCE);
       X = MLPFinal;
     }
-#endif
   }
-#ifdef DEADCODE
   // Add RMS + Matmul
   {
-    dim3 grid_dim = {vocab_size / 32, 1, 1}, block_dim = {128, 1, 1};
+    int num_tasks = 96;
+    assert(vocab_size % num_tasks == 0);
+    dim3 grid_dim = {num_tasks, 1, 1}, block_dim = {128, 1, 1};
     tb::Graph bgraph(grid_dim, block_dim, 1/*forloop_range*/, 64);
     kn::DTensor W = kgraph.new_input({hidden_size, vocab_size},
                                      {(size_t)vocab_size, 1},
@@ -387,18 +393,17 @@ int main(int argc, char **argv) {
     task_configs[kgraph.operators.back()] =
         std::make_tuple(1, 1, rt::TASK_ARGMAX);
   }
-#else
+#ifdef DEADCODE
   {
     dim3 grid_dim = {1, 1, 1}, block_dim = {128, 1, 1};
     tb::Graph bgraph(grid_dim, block_dim, 1/*forloop_range*/, 64);
-    bgraph.new_input(AttnIn, {-1, -1, -1}, -1, layout::SmemRowMajor, true /*store_in_dmem*/);
+    bgraph.new_input(X, {-1, -1, -1}, -1, layout::SmemRowMajor, true /*store_in_dmem*/);
     bgraph.new_input(ArgmaxOut, {-1, -1, -1}, -1, layout::SmemRowMajor, true /*store_in_dmem*/);
-    kgraph.customized({AttnIn, ArgmaxOut}, bgraph);
+    kgraph.customized({X, ArgmaxOut}, bgraph);
     task_configs[kgraph.operators.back()] =
         std::make_tuple(1, 1, rt::TASK_ARGMAX);
   }
 #endif
-
   // Start runtime
   using namespace mirage::runtime;
   Runtime runtime(world_size /*num_gpus*/, rank /*my_gpu_id*/);

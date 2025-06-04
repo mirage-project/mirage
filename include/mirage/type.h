@@ -38,26 +38,34 @@ enum DataType {
   // range: 910-919
   // 4-bit types
   // range: 920-929
+  DT_FLOAT4 = 920,
   DT_INT4 = 925,
+  DT_UINT4 = 926,
   // 8-bit types
   // range(float types): 930-934
   // range(int types): 935-939
   DT_FLOAT8 = 930,
   DT_INT8 = 935,
+  DT_UINT8 = 936,
   // 16-bit types
   // range(float types): 940-944
   // range(int types): 945-949
-  DT_BFLOAT16 = 940,
-  DT_FLOAT16 = 941,
+  DT_FLOAT16 = 940,
+  DT_BFLOAT16 = 941,
   DT_INT16 = 945,
   DT_UINT16 = 946,
   // 32-bit types
   // range(float type): 950-954
   // range(int type): 955-959
   DT_FLOAT32 = 950,
+  DT_INT32 = 955,
+  DT_UINT32 = 956,
   // 64-bit types
   // range(float types): 960-964
+  // range(int type): 965-969
   DT_DOUBLE = 960,
+  DT_INT64 = 965,
+  DT_UINT64 = 966,
   DT_UNKNOWN = 999,
 };
 

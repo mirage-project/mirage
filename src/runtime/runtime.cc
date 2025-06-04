@@ -508,14 +508,14 @@ std::string Runtime::print_task_graph(
     code.e("                          std::vector<TaskId> &first_tasks,");
     code.e("                          std::map<std::string, void*> const &all_tensors) {");
     code.e("std::filesystem::path file_path(__FILE__);");
-    code.e("std::ifstream json_file(file_path.parent_path().string()+\"task_graph.json\");");
+    code.e("std::ifstream json_file(file_path.parent_path().string()+\"/task_graph.json\");");
     code.e("nlohmann::json json_task_graph;");
     code.e("json_file >> json_task_graph;");
     // load tasks
     code.e("for (json const &task : json_task_graph[\"all_tasks\"]) {");
     code.e("TaskDesc task_desc(static_cast<TaskType>(task.at(\"task_type\")));");
     code.e("if (task.at(\"trigger_event\").is_number_integer()) {");
-    code.e("task_desc.trigger_event = task.at(\"trigger_event\").get<int>();");
+    code.e("task_desc.trigger_event = task.at(\"trigger_event\").get<unsigned long long int>();");
     code.e("}");
     code.e("else {");
     code.e("json j = task.at(\"trigger_event\");");
@@ -525,7 +525,7 @@ std::string Runtime::print_task_graph(
     code.e("task_desc.trigger_event = get_event_id(my_gpu_id + gpu_offset, event_pos, is_nvshmem);");
     code.e("}");
     // load inputs
-    code.e("task_desc.num_inputs = task.at(\"inputs\").size();");
+    code.e("task_desc.num_inputs = 0;");
     code.e("for (json const &tensor : task[\"inputs\"]) {");
     code.e("TensorDesc input;");
     code.e("std::string name = tensor.at(\"base_ptr\").get<std::string>();");
@@ -536,12 +536,13 @@ std::string Runtime::print_task_graph(
     code.e("input.num_dims = tensor.at(\"dims\").size();");
     code.e("input.data_type = tensor.at(\"data_type\").get<int>();");
     code.e("for (int i = 0; i < input.num_dims; i++) {");
-    code.e("input.dim[i] = tensor[\"dims\"][i];");
-    code.e("input.stride[i] = tensor[\"strides\"][i];");
+    code.e("input.dim[i] = tensor[\"dims\"][i].get<int>();");
+    code.e("input.stride[i] = tensor[\"strides\"][i].get<int>();");
     code.e("}");
+    code.e("task_desc.inputs[task_desc.num_inputs++] = input;");
     code.e("}");
     // load outputs
-    code.e("task_desc.num_outputs = task.at(\"outputs\").size();");
+    code.e("task_desc.num_outputs = 0;");
     code.e("for (json const &tensor : task[\"outputs\"]) {");
     code.e("TensorDesc output;");
     code.e("std::string name = tensor.at(\"base_ptr\").get<std::string>();");
@@ -555,6 +556,7 @@ std::string Runtime::print_task_graph(
     code.e("output.dim[i] = tensor[\"dims\"][i];");
     code.e("output.stride[i] = tensor[\"strides\"][i];");
     code.e("}");
+    code.e("task_desc.outputs[task_desc.num_outputs++] = output;");
     code.e("}");
     code.e("all_tasks.push_back(task_desc);");
     code.e("}");
