@@ -21,15 +21,14 @@ __device__ __forceinline__ void
     embedding_kernel(void const *__restrict__ input_ptr,
                      void const *__restrict__ embedding_ptr,
                      void *__restrict__ output_ptr) {
-  const __restrict__ uint16_t *input_ids =
+  uint16_t const *__restrict__ input_ids =
       static_cast<uint16_t const *>(input_ptr);
-  const __restrict__ T *embedding = static_cast<T const *>(embedding_ptr);
-  T __restrict__ *output = static_cast<T *>(output_ptr);
+  T const *__restrict__ embedding = static_cast<T const *>(embedding_ptr);
+  T *__restrict__ output = static_cast<T *>(output_ptr);
   constexpr int BATCH_SIZE = 1;
-  constexpr int OUT_DIM = 3584;
+  constexpr int OUT_DIM = 4096;
 
-  for (int i = threadIdx.x; i < BATCH_SIZE * OUT_DIM;
-       i += blockDim.x * gridDim.x) {
+  for (int i = threadIdx.x; i < BATCH_SIZE * OUT_DIM; i += NUM_THREADS) {
     int idx = i / OUT_DIM;
     int off = i % OUT_DIM;
     uint16_t wordIdx = input_ids[idx];
