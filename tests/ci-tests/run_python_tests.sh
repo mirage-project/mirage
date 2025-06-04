@@ -10,7 +10,7 @@ CUDA_HOME=${CUDA_HOME:-"/usr/local/cuda"}
 export CUDA_HOME
 export PATH="${CUDA_HOME}/bin:${PATH}"
 export LD_LIBRARY_PATH="${CUDA_HOME}/lib64:${LD_LIBRARY_PATH}"
-
+export LD_LIBRARY_PATH+="${MIRAGE_HOME}/src/search/abstract_expr/abstract_subexpr/target/release:${LD_LIBRARY_PATH}"
 # Temporary file paths 
 OUTPUT_DIR="/tmp"
 PREFIX="mirage"
