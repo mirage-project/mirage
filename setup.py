@@ -68,6 +68,7 @@ def config_cython():
                 extra_link_args=[
                     "-fPIC",
                     "-fopenmp",
+                    "-lrt",
                     f"-Wl,-rpath,{path.join(mirage_path, 'src', 'search', 'abstract_expr', 'abstract_subexpr', 'target', 'release')}"
                 ],
                 language="c++"))
