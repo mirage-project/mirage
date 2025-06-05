@@ -371,8 +371,8 @@ __global__ void persistent_kernel(RuntimeConfig config) {
               task_desc.inputs[4].base_ptr,
               task_desc.inputs[5].base_ptr,
               task_desc.inputs[6].base_ptr,
-	      0.0f/*q_eps*/,
-	      0.0f/*k_eps*/);
+              0.0f /*q_eps*/,
+              0.0f /*k_eps*/);
           break;
         }
         case TASK_ATTENTION_2: {
@@ -380,7 +380,8 @@ __global__ void persistent_kernel(RuntimeConfig config) {
           break;
         }
         case TASK_SILU_MUL_LINEAR: {
-          kernel::silu_mul_linear_kernel<bfloat16, 1, 32, 4096>(
+          kernel::silu_mul_linear_task<bfloat16>(
+              task_desc.outputs[0].dim[task_desc.outputs[0].num_dims - 1],
               task_desc.inputs[0].base_ptr,
               task_desc.inputs[1].base_ptr,
               task_desc.inputs[2].base_ptr,

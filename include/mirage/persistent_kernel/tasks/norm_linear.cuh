@@ -46,11 +46,9 @@ __device__ __forceinline__ void norm_linear_task_impl(void const *input_ptr,
   constexpr int CHUNKS_PER_ROW_A = TILE_SIZE / CHUNK_SIZE;
   constexpr int CHUNKS_PER_ROW_B = OUTPUT_SIZE / CHUNK_SIZE;
 
-  constexpr int log2_CHUNK_SIZE = 3;
-  constexpr int log2_CHUNKS_PER_ROW_A = 3;
-  constexpr int log2_CHUNKS_PER_ROW_B = CHUNKS_PER_ROW_B == 2   ? 1
-                                        : CHUNKS_PER_ROW_B == 4 ? 2
-                                                                : 3;
+  constexpr int log2_CHUNK_SIZE = log2_constexpr(CHUNK_SIZE);
+  constexpr int log2_CHUNKS_PER_ROW_A = log2_constexpr(CHUNKS_PER_ROW_A);
+  constexpr int log2_CHUNKS_PER_ROW_B = log2_constexpr(CHUNKS_PER_ROW_B);
 
   // using SM80_16x8x16_F16F16F16F16_TNX2 = 16X16X16
   constexpr int NUM_WARP_N = OUTPUT_SIZE / 16; // 1, 2, 4
@@ -60,9 +58,7 @@ __device__ __forceinline__ void norm_linear_task_impl(void const *input_ptr,
   constexpr int NUM_ITERS_N = 1;
   constexpr int NUM_ITERS_K = 4 / NUM_WARP_K; // 1, 2, 4
 
-  constexpr int log2_NUM_WARP_N = NUM_WARP_N == 1   ? 0
-                                  : NUM_WARP_N == 2 ? 1
-                                                    : 2; // 0, 1, 2
+  constexpr int log2_NUM_WARP_N = log2_constexpr(NUM_WARP_N);
 
   int warp_idx = warp_id();
   int warp_row = warp_idx >> log2_NUM_WARP_N;
@@ -312,8 +308,8 @@ __device__ __forceinline__ void norm_linear_task(int output_size,
                                                  void const *input_ptr,
                                                  void const *weight_ptr,
                                                  void *output_ptr) {
-  DISPATCH_OUTPUT_SIZE(
-      64, norm_linear_task_impl, T, input_ptr, weight_ptr, output_ptr);
+  DISPATCH_OUTPUT_SIZE_FOR_RED_SIZE_4K(
+      output_size, norm_linear_task_impl, T, input_ptr, weight_ptr, output_ptr);
 }
 
 } // namespace kernel

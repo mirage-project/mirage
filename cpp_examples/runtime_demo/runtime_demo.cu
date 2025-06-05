@@ -17,6 +17,6 @@ int main(int argc, char **argv) {
   std::vector<void const *> input_tensors;
   std::vector<void *> output_tensors;
   void *buf;
-  init_persistent_kernel(input_tensors, output_tensors, rank, 106, 6, 2);
+  init_persistent_kernel(input_tensors, output_tensors, buf, rank, 106, 6, 2);
   MPI_Finalize();
 }
