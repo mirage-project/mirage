@@ -244,8 +244,8 @@ __device__ __forceinline__ void
           q_eps,
           0,
           rotary_emd,
-          static_cast<T const *>(cos_ptr),
-          static_cast<T const *>(sin_ptr));
+          static_cast<T const *>(cos_ptr) + seq_len * HEAD_DIM,
+          static_cast<T const *>(sin_ptr) + seq_len * HEAD_DIM);
     }
 
     // knorm
@@ -257,8 +257,8 @@ __device__ __forceinline__ void
           k_eps,
           curr_iter_len - 1,
           rotary_emd,
-          static_cast<T const *>(cos_ptr),
-          static_cast<T const *>(sin_ptr));
+          static_cast<T const *>(cos_ptr) + seq_len * HEAD_DIM,
+          static_cast<T const *>(sin_ptr) + seq_len * HEAD_DIM);
     }
     __syncthreads();
 

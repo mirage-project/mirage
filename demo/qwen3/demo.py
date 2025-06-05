@@ -45,8 +45,33 @@ if __name__ == "__main__":
 
     # get all model weight tensors
     tokens = torch.full((1, 32768), 0, dtype=torch.long, device="cuda")
+
+    # tokenizer = AutoTokenizer.from_pretrained(model_name)
+    tokenizer = AutoTokenizer.from_pretrained("/opt/dlami/nvme/models/Qwen3-8B/")
+
+    prompt = "Give me a short introduction to large language model."
+    messages = [
+        {
+            "role": "system",
+            "content": "You are Qwen, created by Alibaba Cloud. You are a helpful assistant.",
+        },
+        {"role": "user", "content": prompt},
+    ]
+    text = tokenizer.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
+    model_inputs = tokenizer([text], return_tensors="pt").to(model.device)
+    for i in range(model_inputs.input_ids.shape[-1]):
+        tokens[0, i] = model_inputs.input_ids[0, i]
+    prompt_len = model_inputs.input_ids.shape[-1]
+    positions = torch.arange(32768).unsqueeze(0).to(model.device)
+    position_embeddings = model.model.rotary_emb(positions)
+
+    # get all model weight tensors
     input_tensors = []
     input_tensors.append(("input_tokens", tokens))
+    input_tensors.append(("cos_position_embedding", position_embeddings[0]))
+    input_tensors.append(("sin_position_embedding", position_embeddings[1]))
     input_tensors.append(("model.embed_tokens.weight", model.model.embed_tokens.weight))
     for i, layer in enumerate(model.model.layers):
         input_tensors.append(
@@ -61,8 +86,9 @@ if __name__ == "__main__":
         input_tensors.append(
             (f"model.layers.{i}.self_attn.v_proj.weight", layer.self_attn.v_proj.weight)
         )
-        # input_tensors.append((f"model.layers.{i}.self_attn.q_norm.weight", layer.self_attn.q_norm.weight))
-        # input_tensors.append((f"model.layers.{i}.self_attn.k_norm.weight", layer.self_attn.k_norm.weight))
+        input_tensors.append((f"model.layers.{i}.self_attn.q_norm.weight", layer.self_attn.q_norm.weight))
+        input_tensors.append((f"model.layers.{i}.self_attn.k_norm.weight", layer.self_attn.k_norm.weight))
+        print(layer.self_attn.q_norm.weight.shape)
         input_tensors.append(
             (f"model.layers.{i}.self_attn.key_cache.tensor", model.model.kv_cache[0][i])
         )
@@ -93,28 +119,6 @@ if __name__ == "__main__":
     input_tensors.append(("model.norm.weight", model.model.norm.weight))
     input_tensors.append(("lm_head.weight", model.lm_head.weight))
 
-    # print(input_tensors)
-
-    # tokenizer = AutoTokenizer.from_pretrained(model_name)
-    tokenizer = AutoTokenizer.from_pretrained("/opt/dlami/nvme/models/Qwen3-8B/")
-
-    prompt = "Give me a short introduction to large language model."
-    messages = [
-        {
-            "role": "system",
-            "content": "You are Qwen, created by Alibaba Cloud. You are a helpful assistant.",
-        },
-        {"role": "user", "content": prompt},
-    ]
-    text = tokenizer.apply_chat_template(
-        messages, tokenize=False, add_generation_prompt=True
-    )
-    model_inputs = tokenizer([text], return_tensors="pt").to(model.device)
-    for i in range(model_inputs.input_ids.shape[-1]):
-        tokens[0, i] = model_inputs.input_ids[0, i]
-    prompt_len = model_inputs.input_ids.shape[-1]
-    positions = torch.arange(32768).unsqueeze(0).to(model.device)
-    position_embeddings = model.model.rotary_emb(positions)
     prev_pos = 0
 
     starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(

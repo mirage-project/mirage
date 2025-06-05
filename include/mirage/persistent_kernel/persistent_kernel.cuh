@@ -30,8 +30,8 @@ typedef unsigned long long int EventId;
 unsigned long long int const EVENT_NVSHMEM_TAG = 0x1e00000000000000;
 unsigned long long int const EVENT_INVALID_ID = 0x7ffffffffffffffe;
 int const MAX_TENSOR_DIMS = 4;
-int const MAX_INPUTS_PER_TASK = 4;
-int const MAX_OUTPUTS_PER_TASK = 4;
+int const MAX_INPUTS_PER_TASK = 7;
+int const MAX_OUTPUTS_PER_TASK = 1;
 int const MAX_NUM_WORKERS = 128;
 
 using bfloat16 = type::bfloat16_t;
@@ -366,7 +366,13 @@ __global__ void persistent_kernel(RuntimeConfig config) {
               task_desc.outputs[0].base_ptr,
               config.step[0] /*seq_len*/,
               false,
-              false);
+              false,
+              task_desc.inputs[3].base_ptr,
+              task_desc.inputs[4].base_ptr,
+              task_desc.inputs[5].base_ptr,
+              task_desc.inputs[6].base_ptr,
+	      0.0f/*q_eps*/,
+	      0.0f/*k_eps*/);
           break;
         }
         case TASK_ATTENTION_2: {
