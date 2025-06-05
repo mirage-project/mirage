@@ -103,8 +103,8 @@ pub fn rules(mut nums: Vec<u32>) -> Vec<Rewrite> {
             j = j + 1;
         }
     }
-    rules.append(sum_rules);
-    rules.append(extra_rules);
+    rules.extend(sum_rules);
+    rules.extend(extra_rules);
 
     rules
 }

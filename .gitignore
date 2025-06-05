@@ -55,5 +55,5 @@ benchmark/*generated*
 
 # Rust
 src/search/abstract_expr/abstract_subexpr/*
-!src/search/abstract_expr/abstract_subexpr/*.rs
+!src/search/abstract_expr/abstract_subexpr/src/*.rs
 !src/search/abstract_expr/abstract_subexpr/*.toml
