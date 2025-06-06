@@ -147,7 +147,7 @@ pub extern "C" fn get_egraph(expr: *const c_char) -> () {
 }
 
 #[no_mangle]
-pub extern "C" fn egg_equiv(subexprs: *const *const c_char, len: c_int) -> *mut KVPair {
+pub extern "C" fn egg_equiv(subexprs: *const *const c_char, len: c_int) -> *mut bool {
     
     let subexpr_vec: Vec<String> = unsafe {
         (0..len)
@@ -162,24 +162,23 @@ pub extern "C" fn egg_equiv(subexprs: *const *const c_char, len: c_int) -> *mut 
             .collect()
     };    
     
-    let mut data: Vec<KVPair> = Vec::new();
+    let mut data: Vec<bool> = Vec::new();
     for i in 0..len {
         let subexpr_str = &subexpr_vec[i as usize];
-        let mut result: Box<KVPair> = Box::new(KVPair { key: i, value: false });
+        let mut result: bool = false;
         if subexpr_str != "null" {
             let subexpr: RecExpr<Expr> = subexpr_str.parse().unwrap();
             for graph in unsafe { &Graphs } {
                 let sub_id = graph.lookup_expr(&subexpr);
                 if sub_id.is_some() {
-                    result = Box::new(KVPair { key: i, value: true });
+                    result = true;
                     break;
                 }
             }
         }
-        data.push(*result);
+        data.push(result);
     }
-    let length = data.len();
     let boxed = data.into_boxed_slice();
 
-    Box::into_raw(boxed) as *mut KVPair
+    Box::into_raw(boxed) as *mut bool
 }
