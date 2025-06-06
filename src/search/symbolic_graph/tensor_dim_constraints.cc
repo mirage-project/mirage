@@ -10,7 +10,8 @@ bool TensorDimConstraints::revert() {
   return constraints.revert();
 }
 
-bool TensorDimConstraints::add_constraint(TensorDimConstraint const &constraint) {
+bool TensorDimConstraints::add_constraint(
+    TensorDimConstraint const &constraint) {
   return this->add_constraints({constraint});
 }
 
@@ -24,7 +25,8 @@ bool TensorDimConstraints::add_constraints(Iter begin, Iter end) {
   return true;
 }
 
-bool TensorDimConstraints::add_constraints(std::initializer_list<TensorDimConstraint> const &constraints) {
+bool TensorDimConstraints::add_constraints(
+    std::initializer_list<TensorDimConstraint> const &constraints) {
   return this->add_constraints(constraints.begin(), constraints.end());
 }
 
@@ -45,7 +47,7 @@ bool TensorDimConstraints::satisfiable() const {
 }
 
 TensorDimConstraints::operator json() const {
-  return json {
+  return json{
       {"constraints", constraints},
   };
 }

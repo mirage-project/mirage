@@ -18,13 +18,14 @@ void initialize_final_expr(std::shared_ptr<AbstractExpr const> expr) {
 }
 
 bool subexpr_to_final_expr(std::shared_ptr<AbstractExpr const> expr) {
-  return subexpr_to_final_expr(std::vector<std::shared_ptr<AbstractExpr const>>{expr})[0];
+  return subexpr_to_final_expr(
+      std::vector<std::shared_ptr<AbstractExpr const>>{expr})[0];
 }
 
 std::vector<bool> subexpr_to_final_expr(
     std::vector<std::shared_ptr<AbstractExpr const>> const &exprs) {
-  std::vector<std::string> exprs_str = vector_map(
-      exprs, [](std::shared_ptr<AbstractExpr const> const &expr) {
+  std::vector<std::string> exprs_str =
+      vector_map(exprs, [](std::shared_ptr<AbstractExpr const> const &expr) {
         return expr->to_egg();
       });
 
@@ -57,7 +58,8 @@ std::string Var::to_egg() const {
   return name;
 }
 
-Add::Add(std::shared_ptr<AbstractExpr const> lhs, std::shared_ptr<AbstractExpr const> rhs)
+Add::Add(std::shared_ptr<AbstractExpr const> lhs,
+         std::shared_ptr<AbstractExpr const> rhs)
     : lhs(lhs), rhs(rhs) {
   assert(lhs);
   assert(rhs);
@@ -71,7 +73,8 @@ std::string Add::to_egg() const {
   return "(+ " + lhs->to_egg() + " " + rhs->to_egg() + ")";
 }
 
-Mul::Mul(std::shared_ptr<AbstractExpr const> lhs, std::shared_ptr<AbstractExpr const> rhs)
+Mul::Mul(std::shared_ptr<AbstractExpr const> lhs,
+         std::shared_ptr<AbstractExpr const> rhs)
     : lhs(lhs), rhs(rhs) {
   assert(lhs);
   assert(rhs);
@@ -85,7 +88,8 @@ std::string Mul::to_egg() const {
   return "(* " + lhs->to_egg() + " " + rhs->to_egg() + ")";
 }
 
-Div::Div(std::shared_ptr<AbstractExpr const> lhs, std::shared_ptr<AbstractExpr const> rhs)
+Div::Div(std::shared_ptr<AbstractExpr const> lhs,
+         std::shared_ptr<AbstractExpr const> rhs)
     : lhs(lhs), rhs(rhs) {
   assert(lhs);
   assert(rhs);
@@ -99,7 +103,8 @@ std::string Div::to_egg() const {
   return "(/ " + lhs->to_egg() + " " + rhs->to_egg() + ")";
 }
 
-Pow::Pow(std::shared_ptr<AbstractExpr const> lhs, std::shared_ptr<AbstractExpr const> rhs)
+Pow::Pow(std::shared_ptr<AbstractExpr const> lhs,
+         std::shared_ptr<AbstractExpr const> rhs)
     : lhs(lhs), rhs(rhs) {
   assert(lhs);
   assert(rhs);
@@ -185,7 +190,9 @@ std::string Relu::to_egg() const {
   return "(relu " + a->to_egg() + ")";
 }
 
-Clamp::Clamp(float min_val, float max_val, std::shared_ptr<AbstractExpr const> elems)
+Clamp::Clamp(float min_val,
+             float max_val,
+             std::shared_ptr<AbstractExpr const> elems)
     : min_val(min_val), max_val(max_val), elems(elems) {
   assert(elems);
 }
@@ -201,7 +208,8 @@ std::string Clamp::to_egg() const {
          " " + elems->to_egg() + ")";
 }
 
-RMS::RMS(std::shared_ptr<TensorDimExpr const> reduction_degree, std::shared_ptr<AbstractExpr const> elems)
+RMS::RMS(std::shared_ptr<TensorDimExpr const> reduction_degree,
+         std::shared_ptr<AbstractExpr const> elems)
     : reduction_degree(reduction_degree), elems(elems) {
   assert(elems);
 }
@@ -215,19 +223,21 @@ std::string RMS::to_egg() const {
   return "(rms " + reduction_degree->to_string() + " " + elems->to_egg() + ")";
 }
 
-Red::Red(std::shared_ptr<TensorDimExpr const> reduction_degree, std::shared_ptr<AbstractExpr const> summand)
+Red::Red(std::shared_ptr<TensorDimExpr const> reduction_degree,
+         std::shared_ptr<AbstractExpr const> summand)
     : reduction_degree(reduction_degree), summand(summand) {
   assert(reduction_degree);
   assert(summand);
 }
 
 std::string Red::to_string() const {
-  return "r(" + reduction_degree->to_string() + ", " +
-         summand->to_string() + ")";
+  return "r(" + reduction_degree->to_string() + ", " + summand->to_string() +
+         ")";
 }
 
 std::string Red::to_egg() const {
-  return "(sum " + reduction_degree->to_string() + " " + summand->to_egg() + ")";
+  return "(sum " + reduction_degree->to_string() + " " + summand->to_egg() +
+         ")";
 }
 
 std::shared_ptr<AbstractExpr const>
@@ -289,8 +299,8 @@ std::shared_ptr<AbstractExpr const>
   return std::make_shared<Relu>(a);
 }
 
-std::shared_ptr<AbstractExpr const>
-    abstract_expr_make_clamp(float min_val, float max_val, std::shared_ptr<AbstractExpr const> elems) {
+std::shared_ptr<AbstractExpr const> abstract_expr_make_clamp(
+    float min_val, float max_val, std::shared_ptr<AbstractExpr const> elems) {
   return std::make_shared<Clamp>(min_val, max_val, elems);
 }
 

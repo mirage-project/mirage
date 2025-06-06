@@ -17,10 +17,10 @@ enum class ConstraintType {
 
 NLOHMANN_JSON_SERIALIZE_ENUM(ConstraintType,
                              {
-                                {ConstraintType::EQUAL, "EQUAL"},
-                                {ConstraintType::EQUAL_OR_ONE, "EQUAL_OR_ONE"},
-                                {ConstraintType::GEQ, "GEQ"},
-                                {ConstraintType::LEQ, "LEQ"},
+                                 {ConstraintType::EQUAL, "EQUAL"},
+                                 {ConstraintType::EQUAL_OR_ONE, "EQUAL_OR_ONE"},
+                                 {ConstraintType::GEQ, "GEQ"},
+                                 {ConstraintType::LEQ, "LEQ"},
                              })
 
 class TensorDimConstraint {

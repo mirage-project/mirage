@@ -34,7 +34,9 @@ std::shared_ptr<AbstractExpr const> get_abstract_expr(
     case type::KNOperatorType::KN_RELU_OP:
       return abstract_expr_make_relu(opds[0]);
     case type::KNOperatorType::KN_CLAMP_OP:
-      return abstract_expr_make_clamp(type::CLAMP_MIN_MAX["min_val"], type::CLAMP_MIN_MAX["max_val"], opds[0]);
+      return abstract_expr_make_clamp(type::CLAMP_MIN_MAX["min_val"],
+                                      type::CLAMP_MIN_MAX["max_val"],
+                                      opds[0]);
     case type::KNOperatorType::KN_OUTPUT_OP:
       return opds[0];
     case type::KNOperatorType::KN_MATMUL_OP:
@@ -47,7 +49,8 @@ std::shared_ptr<AbstractExpr const> get_abstract_expr(
     case type::KNOperatorType::KN_MUL_OP:
       return abstract_expr_make_mul(opds[0], opds[1]);
     case type::KNOperatorType::KN_RMS_NORM_OP:
-      return abstract_expr_make_rms(tensors[0].dim[tensors[0].num_dims - 1], opds[0]);
+      return abstract_expr_make_rms(tensors[0].dim[tensors[0].num_dims - 1],
+                                    opds[0]);
     case type::KNOperatorType::KN_SQUARE_OP:
       return abstract_expr_make_square(opds[0]);
     case type::KNOperatorType::KN_SQRT_OP:
@@ -85,7 +88,9 @@ std::shared_ptr<AbstractExpr const> get_abstract_expr(
     case type::TBOperatorType::TB_RELU_OP:
       return abstract_expr_make_relu(opds[0]);
     case type::TBOperatorType::TB_CLAMP_OP:
-      return abstract_expr_make_clamp(type::CLAMP_MIN_MAX["min_val"], type::CLAMP_MIN_MAX["max_val"], opds[0]);
+      return abstract_expr_make_clamp(type::CLAMP_MIN_MAX["min_val"],
+                                      type::CLAMP_MIN_MAX["max_val"],
+                                      opds[0]);
     case type::TBOperatorType::TB_RMS_NORM_OP: {
       return abstract_expr_make_div(
           opds[0],

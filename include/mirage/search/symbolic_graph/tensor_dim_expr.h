@@ -38,10 +38,11 @@ enum class TensorDimVarType {
   BOOL,
 };
 
-NLOHMANN_JSON_SERIALIZE_ENUM(TensorDimVarType, {
-  {TensorDimVarType::INT, "INT"},
-  {TensorDimVarType::BOOL, "BOOL"},
-})
+NLOHMANN_JSON_SERIALIZE_ENUM(TensorDimVarType,
+                             {
+                                 {TensorDimVarType::INT, "INT"},
+                                 {TensorDimVarType::BOOL, "BOOL"},
+                             })
 
 class TensorDimVar : public TensorDimExpr {
 public:

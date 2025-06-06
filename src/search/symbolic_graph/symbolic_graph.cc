@@ -340,10 +340,10 @@ bool SymbolicTBGraph::add_input(SymbolicDTensor dtensor,
     for (size_t i = 0; i < dim_templates.size(); ++i) {
       for (SymbolicTensorDim const &device_dim : imap.device_dims) {
         dim_templates[i].dim_expr = dim_expr_make_div(
-          dim_templates[i].dim_expr,
-          dim_expr_make_ite(imap.map_mat.at({device_dim, i}),
-                            device_dim.dim_expr,
-                            dim_expr_make_const(1)));
+            dim_templates[i].dim_expr,
+            dim_expr_make_ite(imap.map_mat.at({device_dim, i}),
+                              device_dim.dim_expr,
+                              dim_expr_make_const(1)));
       }
     }
     return SymbolicSTensor(dim_templates, false);

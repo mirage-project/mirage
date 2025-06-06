@@ -36,7 +36,8 @@ public:
 
 void initialize_final_expr(std::shared_ptr<AbstractExpr const> expr);
 bool subexpr_to_final_expr(std::shared_ptr<AbstractExpr const> expr);
-std::vector<bool> subexpr_to_final_expr(std::vector<std::shared_ptr<AbstractExpr const>> const &exprs);
+std::vector<bool> subexpr_to_final_expr(
+    std::vector<std::shared_ptr<AbstractExpr const>> const &exprs);
 
 class Var : public AbstractExpr {
 public:
@@ -90,7 +91,8 @@ std::shared_ptr<AbstractExpr const>
 
 class Pow : public AbstractExpr {
 public:
-  Pow(std::shared_ptr<AbstractExpr const> lhs, std::shared_ptr<AbstractExpr const> rhs);
+  Pow(std::shared_ptr<AbstractExpr const> lhs,
+      std::shared_ptr<AbstractExpr const> rhs);
   std::string to_string() const override;
   std::string to_egg() const override;
   std::shared_ptr<AbstractExpr const> lhs, rhs;
@@ -168,7 +170,9 @@ std::shared_ptr<AbstractExpr const>
 
 class Clamp : public AbstractExpr {
 public:
-  Clamp(float min_val, float max_val, std::shared_ptr<AbstractExpr const> elems);
+  Clamp(float min_val,
+        float max_val,
+        std::shared_ptr<AbstractExpr const> elems);
   std::string to_string() const override;
   std::string to_egg() const override;
   float min_val;
@@ -176,8 +180,8 @@ public:
   std::shared_ptr<AbstractExpr const> elems;
 };
 
-std::shared_ptr<AbstractExpr const>
-    abstract_expr_make_clamp(float min_val, float max_val, std::shared_ptr<AbstractExpr const> elems);
+std::shared_ptr<AbstractExpr const> abstract_expr_make_clamp(
+    float min_val, float max_val, std::shared_ptr<AbstractExpr const> elems);
 
 // Note(@Mengdi): Replace it with Sqr and Sqrt once we have related algebraic
 // transformation

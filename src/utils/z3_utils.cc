@@ -29,7 +29,7 @@ z3::expr_vector get_free_vars(std::vector<z3::expr> const &e,
         }
       }
     });
-  }  
+  }
   return vars;
 }
 

@@ -44,8 +44,12 @@ public:
   }
 
   using const_iterator = typename std::unordered_set<T>::const_iterator;
-  const_iterator begin() const { return _set.begin(); }
-  const_iterator end() const { return _set.end(); }
+  const_iterator begin() const {
+    return _set.begin();
+  }
+  const_iterator end() const {
+    return _set.end();
+  }
 };
 
 class TensorDimConstraints {
@@ -55,7 +59,8 @@ public:
   bool add_constraint(TensorDimConstraint const &constraint);
   template <typename Iter>
   bool add_constraints(Iter begin, Iter end);
-  bool add_constraints(std::initializer_list<TensorDimConstraint> const &constraints);
+  bool add_constraints(
+      std::initializer_list<TensorDimConstraint> const &constraints);
   bool add_constraints(
       std::unordered_set<TensorDimConstraint> const &constraints);
   bool satisfiable() const;
