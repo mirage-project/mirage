@@ -49,6 +49,12 @@ int main(int argc, char **argv) {
   kn::DTensor X = kgraph.new_input(
       {batch_size, 1}, {1, 1}, type::DT_INT64, layout::DmemRowMajor);
   io_configs.emplace(X.guid, IODesc(rt::IODesc::TorchTensor, "input_token", X));
+  kn::DTensor cos_pos_embed = kgraph.new_input(
+      {max_kv_length, head_dim}, {head_dim, 1}, type::DT_BFLOAT16, layout::DmemRowMajor);
+  io_configs.emplace(cos_pos_embed.guid, IODesc(rt::IODesc::TorchTensor, "cos_position_embedding", cos_pos_embed));
+  kn::DTensor sin_pos_embed = kgraph.new_input(
+      {max_kv_length, head_dim}, {head_dim, 1}, type::DT_BFLOAT16, layout::DmemRowMajor);
+  io_configs.emplace(sin_pos_embed.guid, IODesc(rt::IODesc::TorchTensor, "sin_position_embedding", sin_pos_embed));
 
   kn::DTensor AllReduceBuf =
       kgraph.new_input({world_size, batch_size, hidden_size},
@@ -203,6 +209,19 @@ int main(int argc, char **argv) {
     }
     // Add attention
     {
+      kn::DTensor Qnorm = kgraph.new_input(
+          {head_dim}, {1}, type::DT_BFLOAT16, layout::DmemRowMajor);
+      IODesc desc_q_norm(rt::IODesc::TorchTensor,
+                         "layer_" + std::to_string(layer) + "_q_norm",
+                         Qnorm);
+      io_configs.emplace(Qnorm.guid, desc_q_norm);
+
+      kn::DTensor Knorm = kgraph.new_input(
+          {head_dim}, {1}, type::DT_BFLOAT16, layout::DmemRowMajor);
+      IODesc desc_k_norm(rt::IODesc::TorchTensor,
+                         "layer_" + std::to_string(layer) + "_k_norm",
+                         Knorm);
+      io_configs.emplace(Knorm.guid, desc_k_norm);
       kn::DTensor K = kgraph.new_input(
           {batch_size, max_kv_length, num_local_kv_heads, head_dim},
           {(size_t)max_kv_length * num_local_kv_heads * head_dim,
@@ -231,10 +250,14 @@ int main(int argc, char **argv) {
       bgraph.new_input(AttnIn, {0, 1, -1}, -1, layout::SmemRowMajor, true /*store_in_dmem*/);
       bgraph.new_input(K, {0, 2, -1}, 1, layout::SmemRowMajor, true /*store_in_dmem*/);
       bgraph.new_input(V, {0, 2, -1}, 1, layout::SmemRowMajor, true /*store_in_dmem*/);
+      bgraph.new_input(Qnorm, {-1, -1, -1}, -1, layout::SmemRowMajor, true/*store_in_dmem*/);
+      bgraph.new_input(Knorm, {-1, -1, -1}, -1, layout::SmemRowMajor, true/*store_in_dmem*/);
+      bgraph.new_input(cos_pos_embed, {-1, -1, -1}, -1, layout::SmemRowMajor, true/*store_in_dmem*/);
+      bgraph.new_input(sin_pos_embed, {-1, -1, -1}, -1, layout::SmemRowMajor, true/*store_in_dmem*/);
       bgraph.new_input(AttnOut, {0, 1, -1}, -1, layout::SmemRowMajor, true /*store_in_dmem*/);
-      kgraph.customized({AttnIn, K, V, AttnOut}, bgraph);
+      kgraph.customized({AttnIn, K, V, Qnorm, Knorm, cos_pos_embed, sin_pos_embed, AttnOut}, bgraph);
       task_configs[kgraph.operators.back()] =
-          std::make_tuple(3, 1, rt::TASK_ATTENTION_1);
+          std::make_tuple(7, 1, rt::TASK_ATTENTION_1);
     }
     // Add out_projection
     {

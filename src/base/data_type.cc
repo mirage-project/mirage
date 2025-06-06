@@ -20,16 +20,22 @@ namespace type {
 
 size_t get_datatype_size(DataType type) {
   switch (type) {
-    case DT_INT8:
     case DT_FLOAT8:
+    case DT_INT8:
+    case DT_UINT8:
       return 1;
     case DT_BFLOAT16:
     case DT_FLOAT16:
+    case DT_INT16:
     case DT_UINT16:
       return 2;
     case DT_FLOAT32:
+    case DT_INT32:
+    case DT_UINT32:
       return 4;
     case DT_DOUBLE:
+    case DT_INT64:
+    case DT_UINT64:
       return 8;
     case DT_UNKNOWN:
     default:
