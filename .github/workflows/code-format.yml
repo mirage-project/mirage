@@ -1,0 +1,23 @@
+name: Clang format
+on: [push, pull_request, workflow_dispatch]
+
+jobs:
+  formatting-check:
+    name: Clang format check
+    runs-on: ubuntu-22.04
+    strategy:
+      matrix:
+        path:
+          - check: "src"
+            exclude: '\.proto$'
+          - check: "include"
+          - check: "tests"
+          - check: "python"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run clang-format code style check
+        uses: jidicula/clang-format-action@v4.8.0
+        with:
+          clang-format-version: "15"
+          check-path: ${{ matrix.path['check'] }}
+          exclude-regex: ${{ matrix.path['exclude'] }} 

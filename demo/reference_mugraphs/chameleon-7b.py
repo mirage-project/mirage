@@ -2,7 +2,7 @@ import mirage as mi
 import argparse
 import os
 import torch
-import flashinfer
+
 
 n_local_heads = 32
 n_local_kv_heads = 32

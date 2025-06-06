@@ -27,6 +27,20 @@ public:
   }
 };
 
+// Initialize the max accumulator
+// (Just fill the accumulator with the minimum value of T)
+template <typename T, int NUM_ELEMS, int NUM_THREADS>
+class InitMaxAccumulatorKernel {
+public:
+  static __device__ __forceinline__ void run(T *__restrict__ accum,
+                                             int thread_idx) {
+    for (int elem_idx = thread_idx; elem_idx < NUM_ELEMS;
+         elem_idx += NUM_THREADS) {
+      accum[elem_idx] = std::numeric_limits<T>::lowest();
+    }
+  }
+};
+
 template <typename T, class AccumLayout, class SrcLayout, int NUM_THREADS>
 class ForloopAccumKernel {
 public:
@@ -41,6 +55,59 @@ public:
     auto src_layout = SrcLayout{};
     for (int elem_idx = thread_idx; elem_idx < numel; elem_idx += NUM_THREADS) {
       accum[accum_layout(elem_idx)] += src[src_layout(elem_idx)];
+    }
+  }
+};
+
+template <typename T,
+          class AccumLayout,
+          class SrcLayout,
+          class RescaleLayout,
+          int NUM_THREADS>
+class ForloopAccumRescaleKernel {
+public:
+  using AccumNumel = decltype(size(AccumLayout{}));
+  using RescaleNumel = decltype(size(RescaleLayout{}));
+
+  CUTE_STATIC_ASSERT_V(AccumNumel{} == size(SrcLayout{}));
+  CUTE_STATIC_ASSERT_V(RescaleNumel{} == size<0>(shape(AccumLayout{})));
+
+  static __device__ __forceinline__ void run(T *__restrict__ accum,
+                                             T const *__restrict__ src,
+                                             T const *__restrict__ rescale,
+                                             int thread_idx) {
+    constexpr auto accum_layout = AccumLayout{};
+    constexpr auto src_layout = SrcLayout{};
+    constexpr auto rescale_layout = RescaleLayout{};
+
+    constexpr auto numel = AccumNumel{};
+    constexpr auto rescale_numel = RescaleNumel{};
+
+    for (int elem_idx = thread_idx; elem_idx < numel; elem_idx += NUM_THREADS) {
+      accum[accum_layout(elem_idx)] =
+          accum[accum_layout(elem_idx)] *
+              rescale[rescale_layout(elem_idx % rescale_numel)] +
+          src[src_layout(elem_idx)];
+    }
+  }
+};
+
+template <typename T, class AccumLayout, class SrcLayout, int NUM_THREADS>
+class ForloopAccumMaxKernel {
+public:
+  using Numel = decltype(size(AccumLayout{}));
+  CUTE_STATIC_ASSERT_V(Numel{} == size(SrcLayout{}));
+
+  static __device__ __forceinline__ void
+      run(T *__restrict__ accum, T const *__restrict__ src, int thread_idx) {
+    constexpr auto numel = Numel{};
+    auto accum_layout = AccumLayout{};
+    auto src_layout = SrcLayout{};
+    for (int elem_idx = thread_idx; elem_idx < numel; elem_idx += NUM_THREADS) {
+      float max_val = (float)accum[accum_layout(elem_idx)];
+      float src_val = (float)src[src_layout(elem_idx)];
+      accum[accum_layout(elem_idx)] =
+          max_val > src_val ? (T)max_val : (T)src_val;
     }
   }
 };

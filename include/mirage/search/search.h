@@ -31,7 +31,7 @@ public:
   GeneratorConfig config;
   DimStrategy dim_strategy;
 
-  char const *filename;
+  char const *checkpoint_filename;
   std::vector<json> generated_graphs;
   int num_thread;
   bool verbose;
@@ -57,10 +57,9 @@ private:
 
   // count number of tasks
   std::atomic<int> num_tasks;
-  size_t max_depth;
 
-  //
-  std::unordered_map<std::string, bool> seen_exprs;
+  // Multithreading
+  size_t multithread_threshold_depth;
 
   // Ranges-related fields
   std::vector<std::pair<size_t, IKNRange>> init_ranges;
@@ -72,8 +71,9 @@ private:
   void generate_next_operator(
       SearchContext &c,
       std::function<bool(SearchContext const &)> const &verify,
-      std::vector<SerializedSearchContext> &verified,
-      size_t depth);
+      std::vector<SerializedSearchContext> &verified_graphs,
+      size_t search_depth,
+      bool is_a_new_thread_start = false);
 
   // symbolic method
   void generate_next_symbolic_operator(
@@ -85,8 +85,9 @@ private:
   bool instantiate_symbolic_graph(SymbolicKNGraph const &symbolic_graph);
 
   void preprocess(kernel::Graph const &computation_graph);
-  bool check_abstract_expr(std::shared_ptr<AbstractExpr const> expr, TensorDimConstraints const &constraints = {});
   bool verify(kernel::Graph &g);
+
+  bool check_abstract_expr(std::shared_ptr<AbstractExpr const> expr, TensorDimConstraints const &constraints = {});
 
   void save_results() const;
   double get_elapsed_time_in_sec() const;

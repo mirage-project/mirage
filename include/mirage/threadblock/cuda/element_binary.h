@@ -17,6 +17,8 @@
 
 #include "cutlass/cutlass.h"
 #include "cutlass/fast_math.h"
+#include "mirage/utils/fingerprint_functions.h"
+#include <cmath>
 
 namespace mirage {
 namespace threadblock {
@@ -24,6 +26,7 @@ namespace threadblock {
 using namespace cutlass;
 using namespace mirage::type;
 using namespace mirage::config;
+using namespace mirage::utils;
 
 template <typename ElementType>
 class ElementBinaryExecutor {
@@ -61,6 +64,10 @@ public:
     } else if (op_type == mirage::type::TB_ADD_OP) {
       for (int i = 0; i < output_num_elements; i += num_threads) {
         output_ptr[i] = input1_ptr[i / factor1] + input2_ptr[i / factor2];
+      }
+    } else if (op_type == mirage::type::TB_POW_OP) {
+      for (int i = 0; i < output_num_elements; i += num_threads) {
+        output_ptr[i] = powf(input1_ptr[i / factor1], input2_ptr[i / factor2]);
       }
     } else {
       assert(false && "Unsupported operator");
@@ -106,17 +113,17 @@ public:
         input2_stride *= input2_dims[d];
         idx /= output_dims[d];
       }
-      uint32_t x = input1_ptr[input1_idx];
-      uint32_t y = input2_ptr[input2_idx];
+      FPType x = input1_ptr[input1_idx];
+      FPType y = input2_ptr[input2_idx];
       if (type == mirage::type::TB_DIV_OP) {
-        uint32_t z =
-            (x % FP_P) * div_p_lookup_table[y % FP_P] * FP_Q_MUL_P_MOD_1 +
-            (x % FP_Q) * div_q_lookup_table[y % FP_Q] * FP_P_MUL_Q_MOD_1;
-        output_ptr[i] = z % FP_PQ;
+        output_ptr[i] = compute_div_fingerprint(
+            x, y, div_p_lookup_table, div_q_lookup_table);
       } else if (type == mirage::type::TB_ADD_OP) {
-        output_ptr[i] = (x + y) % FP_PQ;
+        output_ptr[i] = compute_add_fingerprint(x, y);
       } else if (type == mirage::type::TB_MUL_OP) {
-        output_ptr[i] = (x * y) % FP_PQ;
+        output_ptr[i] = compute_mul_fingerprint(x, y);
+      } else if (type == mirage::type::TB_POW_OP) {
+        output_ptr[i] = compute_pow_fingerprint(x, y);
       } else {
         assert(false && "Unimplemented op");
       }

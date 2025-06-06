@@ -68,9 +68,10 @@ void Transpiler::get_threadblock_swizzle_plan(tb::Graph const &tb_graph,
         tb::STensor const &input_stensor0 = op->input_tensors.at(0);
         tb::STensor const &input_stensor1 = op->input_tensors.at(1);
         tb::STensor const &output_stensor = last_op->output_tensors.at(0);
-        update_innermost_min_chunk_size(input_stensor0.guid, 8);
-        update_innermost_min_chunk_size(input_stensor1.guid, 8);
-        update_innermost_min_chunk_size(output_stensor.guid, 8);
+        int num_16B_elems = get_num_elems_in_16B(input_stensor0.data_type);
+        update_innermost_min_chunk_size(input_stensor0.guid, num_16B_elems);
+        update_innermost_min_chunk_size(input_stensor1.guid, num_16B_elems);
+        update_innermost_min_chunk_size(output_stensor.guid, num_16B_elems);
       }
     }
   }

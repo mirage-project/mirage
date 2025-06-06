@@ -29,6 +29,12 @@ std::shared_ptr<AbstractExpr const> get_abstract_expr(
       return abstract_expr_make_exp(opds[0]);
     case type::KNOperatorType::KN_SILU_OP:
       return abstract_expr_make_silu(opds[0]);
+    case type::KNOperatorType::KN_GELU_OP:
+      return abstract_expr_make_gelu(opds[0]);
+    case type::KNOperatorType::KN_RELU_OP:
+      return abstract_expr_make_relu(opds[0]);
+    case type::KNOperatorType::KN_CLAMP_OP:
+      return abstract_expr_make_clamp(type::CLAMP_MIN_MAX["min_val"], type::CLAMP_MIN_MAX["max_val"], opds[0]);
     case type::KNOperatorType::KN_OUTPUT_OP:
       return opds[0];
     case type::KNOperatorType::KN_MATMUL_OP:
@@ -40,7 +46,16 @@ std::shared_ptr<AbstractExpr const> get_abstract_expr(
       return abstract_expr_make_div(opds[0], opds[1]);
     case type::KNOperatorType::KN_MUL_OP:
       return abstract_expr_make_mul(opds[0], opds[1]);
+    case type::KNOperatorType::KN_RMS_NORM_OP:
+      return abstract_expr_make_rms(tensors[0].dim[tensors[0].num_dims - 1], opds[0]);
+    case type::KNOperatorType::KN_SQUARE_OP:
+      return abstract_expr_make_square(opds[0]);
+    case type::KNOperatorType::KN_SQRT_OP:
+      return abstract_expr_make_sqrt(opds[0]);
+    case type::KNOperatorType::KN_POW_OP:
+      return abstract_expr_make_pow(opds[0], opds[1]);
     default:
+      printf("Operator type: %d\n", (int)op);
       assert(false && "Unsupported operator");
   }
 }
@@ -59,8 +74,18 @@ std::shared_ptr<AbstractExpr const> get_abstract_expr(
   switch (op) {
     case type::TBOperatorType::TB_EXP_OP:
       return abstract_expr_make_exp(opds[0]);
+    case type::TBOperatorType::TB_SQUARE_OP:
+      return abstract_expr_make_square(opds[0]);
+    case type::TBOperatorType::TB_SQRT_OP:
+      return abstract_expr_make_sqrt(opds[0]);
     case type::TBOperatorType::TB_SILU_OP:
       return abstract_expr_make_silu(opds[0]);
+    case type::TBOperatorType::TB_GELU_OP:
+      return abstract_expr_make_gelu(opds[0]);
+    case type::TBOperatorType::TB_RELU_OP:
+      return abstract_expr_make_relu(opds[0]);
+    case type::TBOperatorType::TB_CLAMP_OP:
+      return abstract_expr_make_clamp(type::CLAMP_MIN_MAX["min_val"], type::CLAMP_MIN_MAX["max_val"], opds[0]);
     case type::TBOperatorType::TB_RMS_NORM_OP: {
       return abstract_expr_make_div(
           opds[0],
@@ -115,7 +140,7 @@ std::shared_ptr<AbstractExpr const> get_abstract_expr(
           opds[0]);
     }
     case type::TBOperatorType::TB_FORLOOP_ACCUM_RED_LD_RMS_OP: {
-      abstract_expr_make_rms(
+      return abstract_expr_make_rms(
           forloop_range * tensors[0].dim[tensors[0].num_dims - 1], opds[0]);
     }
     case type::TBOperatorType::TB_MATMUL_OP:
@@ -143,45 +168,12 @@ std::shared_ptr<AbstractExpr const> get_abstract_expr(
           abstract_expr_make_red(reduction_dim2,
                                  abstract_expr_make_mul(opds[1], opds[3])));
     }
+    case type::TBOperatorType::TB_POW_OP:
+      return abstract_expr_make_pow(opds[0], opds[1]);
     default:
       assert(false && "Unsupported operator");
   }
 }
-
-// int get_dimension_size_lower_bound(std::shared_ptr<TensorDimExpr> const
-// &expr) {
-//   if (expr->is_const()) {
-//     return std::static_pointer_cast<TensorDimConst>(expr)->value;
-//   }
-//   if (expr->is_var()) {
-//     return 1;
-//   }
-//   if (expr->is_add()) {
-//     auto add_expr = std::static_pointer_cast<TensorDimAdd>(expr);
-//     return get_dimension_size_lower_bound({add_expr->lhs}) +
-//            get_dimension_size_lower_bound({add_expr->rhs});
-//   }
-//   if (expr->is_mul()) {
-//     auto mul_expr = std::static_pointer_cast<TensorDimMul>(expr);
-//     return get_dimension_size_lower_bound({mul_expr->lhs}) *
-//            get_dimension_size_lower_bound({mul_expr->rhs});
-//   }
-//   if (expr->is_div()) {
-//     auto div_expr = std::static_pointer_cast<TensorDimDiv>(expr);
-//     if (div_expr->rhs->is_const()) {
-//       return std::max(
-//           get_dimension_size_lower_bound({div_expr->lhs}) /
-//               std::static_pointer_cast<TensorDimConst>(div_expr->rhs)->value,
-//           1);
-//     }
-//     return 1;
-//   }
-//   assert(false);
-// }
-
-// int get_dimension_size_lower_bound(SymbolicTensorDim const &dim) {
-//   return get_dimension_size_lower_bound(dim.dim_expr);
-// }
 
 std::shared_ptr<AbstractExpr const> get_abstract_expr(
     type::TBOperatorType op,

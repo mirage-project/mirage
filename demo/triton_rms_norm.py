@@ -10,7 +10,7 @@ if __name__ == "__main__":
     O = graph.matmul(D, W)
     graph.mark_output(O)
     optimized_graph = graph.superoptimize(config="mlp", backend="triton", 
-            warmup_iters=2, profile_iters=6, previous_checkpoint="../benchmark/saved_mugraphs/rmsnorm_bs1.json")
+            warmup_iters=2, profile_iters=6)
 
     with open("triton_rms_generated.py", "w") as f:
         f.write(mi.generate_triton_program(optimized_graph.cygraph, target_cc=10)["code"])

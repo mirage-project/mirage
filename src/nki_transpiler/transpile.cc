@@ -103,7 +103,9 @@ NKITranspiler::NKITranspiler(kernel::Graph const *_graph,
       case KN_EXP_OP:
       case KN_SQUARE_OP:
       case KN_SQRT_OP:
-      case KN_SILU_OP: {
+      case KN_SILU_OP:
+      case KN_RELU_OP:
+      case KN_CLAMP_OP: {
         assert(dtensor_inputs.size() == 1);
         assert(op->output_tensors.size() == 1);
         kernel::DTensor dt = g->elementunary(dtensor_inputs[0], op->op_type);
@@ -112,7 +114,8 @@ NKITranspiler::NKITranspiler(kernel::Graph const *_graph,
       }
       case KN_ADD_OP:
       case KN_MUL_OP:
-      case KN_DIV_OP: {
+      case KN_DIV_OP:
+      case KN_POW_OP: {
         assert(dtensor_inputs.size() == 2);
         assert(op->output_tensors.size() == 1);
         kernel::DTensor dt =
@@ -181,6 +184,8 @@ NKITranspiler::NKITranspiler(kernel::Graph const *_graph,
             case TB_SQUARE_OP:
             case TB_SQRT_OP:
             case TB_SILU_OP:
+            case TB_RELU_OP:
+            case TB_CLAMP_OP:
             case TB_MUL_SCALAR_OP: {
               assert(stensor_inputs.size() == 1);
               threadblock::STensor st =
@@ -191,7 +196,9 @@ NKITranspiler::NKITranspiler(kernel::Graph const *_graph,
             }
             case TB_ADD_OP:
             case TB_MUL_OP:
-            case TB_DIV_OP: {
+            case TB_DIV_OP:
+            case TB_SUB_OP:
+            case TB_POW_OP: {
               assert(stensor_inputs.size() == 2);
               threadblock::STensor st = tbg->elementbinary(
                   stensor_inputs[0], stensor_inputs[1], bop->op_type);
@@ -335,6 +342,10 @@ std::optional<NKIErrorInfo> NKITranspiler::resolve_tensor_layout() {
       if (stensor.dim[i] > 128) {
         opt.add(!s_is_partition[stensor.guid][i]);
       }
+      // A partition dimension must be the last two dims
+      if ((i != num_dims - 1) && (i != num_dims - 2)) {
+        opt.add(!s_is_partition[stensor.guid][i]);
+      }
     }
     opt.add(z3::atmost(partition_exprs, 1));
     opt.add(z3::atleast(partition_exprs, 1));
@@ -410,6 +421,8 @@ std::optional<NKIErrorInfo> NKITranspiler::resolve_tensor_layout() {
           case type::TB_SILU_OP:
           case type::TB_SQUARE_OP:
           case type::TB_SQRT_OP:
+          case type::TB_RELU_OP:
+          case type::TB_CLAMP_OP:
           case type::TB_MUL_SCALAR_OP: {
             tb::STensor const &input = tb_op->input_tensors.at(0);
             tb::STensor const &output = tb_op->output_tensors.at(0);
@@ -426,7 +439,9 @@ std::optional<NKIErrorInfo> NKITranspiler::resolve_tensor_layout() {
           }
           case type::TB_ADD_OP:
           case type::TB_MUL_OP:
-          case type::TB_DIV_OP: {
+          case type::TB_DIV_OP:
+          case type::TB_SUB_OP:
+          case type::TB_POW_OP: {
             tb::STensor const &input0 = tb_op->input_tensors.at(0);
             tb::STensor const &input1 = tb_op->input_tensors.at(1);
             tb::STensor const &output = tb_op->output_tensors.at(0);
@@ -530,6 +545,7 @@ std::optional<NKIErrorInfo> NKITranspiler::resolve_tensor_layout() {
 NKITranspileResult NKITranspiler::transpile_ugraph() {
   // Generate header
   CodeKeeper header;
+  header.e("import neuronxcc.nki as nki");
   header.e("import neuronxcc.nki.language as nl");
   header.e("import neuronxcc.nki.isa as nisa");
   header.e("from torch_neuronx import nki_jit");
@@ -540,6 +556,16 @@ NKITranspileResult NKITranspiler::transpile_ugraph() {
   exec.e("from torch_xla.core import xla_model as xm");
   exec.e("device = xm.xla_device()");
   for (kn::KNOperator *const op : g->operators) {
+    for (kn::DTensor const &dtensor : op->output_tensors) {
+      std::string shape;
+      for (int i = 0; i < dtensor.num_dims; i++) {
+        shape += fmt("$,", dtensor.dim[i]);
+      }
+      exec.e("$ = torch.randn(($), dtype=torch.float16).to(device=device)",
+             fmt("dtensor$", dtensor.guid),
+             shape);
+    }
+#ifdef DEADCODE
     if (op->op_type == type::KNOperatorType::KN_INPUT_OP) {
       std::string shape;
       kn::DTensor dtensor = op->output_tensors.at(0);
@@ -560,6 +586,7 @@ NKITranspileResult NKITranspiler::transpile_ugraph() {
              fmt("dtensor$", dtensor.guid),
              shape);
     }
+#endif
   }
   CodeKeeper custom_kernels;
   for (kn::KNOperator *const op : g->operators) {
@@ -594,6 +621,28 @@ NKITranspileResult NKITranspiler::transpile_ugraph() {
                dtensor_names);
         break;
       }
+      case type::KN_ADD_OP:
+      case type::KN_MUL_OP:
+      case type::KN_DIV_OP:
+      case type::KN_POW_OP: {
+        kn::KNElementBinaryOp const *cur_op =
+            dynamic_cast<kn::KNElementBinaryOp const *>(op);
+        std::vector<std::string> dtensor_names;
+        for (kn::DTensor const &dtensor :
+             Combine(cur_op->output_tensors, cur_op->input_tensors)) {
+          std::string dtensor_name = fmt("dtensor$", dtensor.guid);
+          dtensor_names.push_back(dtensor_name);
+        }
+        // Transpile
+        auto result = transpile_kn_op(cur_op);
+        if (result.has_value()) {
+          custom_kernels.e(result.value().code);
+          // launch a single SPMD kernel
+          exec.e("$($)", result.value().func_name, dtensor_names);
+        }
+        break;
+      }
+
       default: {
         // TODO: discuss with the NKI team on how to implement
         // operators at the kernel level
