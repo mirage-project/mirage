@@ -55,12 +55,12 @@ def config_cython():
                               path.join(mirage_path, "deps", "json", "include"),
                               path.join(mirage_path, "deps", "cutlass", "include"),
                               path.join(z3_path, "include"),
-                              path.join(mirage_path, "src", "search", "abstract_expr", "abstract_subexpr", "target", "release"),
+                              path.join(mirage_path, "build", "release"),
                               "/usr/local/cuda/include"],
                 libraries=["mirage_runtime", "cudadevrt", "cudart_static", "cudnn", "cublas", "cudart", "cuda", "z3", "gomp", "abstract_subexpr"],
                 library_dirs=[path.join(mirage_path, "build"),
                               path.join(z3_path, "lib"),
-                              path.join(mirage_path, "src", "search", "abstract_expr", "abstract_subexpr", "target", "release"),
+                              path.join(mirage_path, "build", "release"),
                               "/usr/local/cuda/lib",
                               "/usr/local/cuda/lib64",
                               "/usr/local/cuda/lib64/stubs"],
@@ -68,7 +68,8 @@ def config_cython():
                 extra_link_args=[
                     "-fPIC",
                     "-fopenmp",
-                    f"-Wl,-rpath,{path.join(mirage_path, 'src', 'search', 'abstract_expr', 'abstract_subexpr', 'target', 'release')}"
+                    "-lrt",
+                    f"-Wl,-rpath,{path.join(mirage_path, 'build', 'release')}"
                 ],
                 language="c++"))
         return cythonize(ret, compiler_directives={"language_level" : 3})
@@ -98,15 +99,15 @@ if mirage_path == '':
     mirage_path = '.'
 
 try:
-    subprocess.check_output(['cargo', 'build', '--release'], cwd='src/search/abstract_expr/abstract_subexpr')
+    subprocess.check_output(['cargo', 'build', '--release', '--target-dir', '../../../../build'], cwd='src/search/abstract_expr/abstract_subexpr')
 except subprocess.CalledProcessError as e:
     print("Failed to build abstract_subexpr Rust library, building it ...")
     try:
-        subprocess.run(['cargo', 'build', '--release'], cwd='src/search/abstract_expr/abstract_subexpr', check=True)
+        subprocess.run(['cargo', 'build', '--release', '--target-dir', '../../../../build'], cwd='src/search/abstract_expr/abstract_subexpr', check=True)
         print("Abstract_subexpr Rust library built successfully.")
     except subprocess.CalledProcessError as e:
         print("Failed to build abstract_subexpr Rust library.")
-    os.environ['ABSTRACT_SUBEXPR_LIB'] = os.path.join(mirage_path,'src', 'search', 'abstract_expr', 'abstract_subexpr', 'target', 'release', 'libabstract_subexpr.so')
+    os.environ['ABSTRACT_SUBEXPR_LIB'] = os.path.join(mirage_path,'build', 'release', 'libabstract_subexpr.so')
 
 # build Mirage runtime library
 try:
@@ -127,8 +128,8 @@ try:
     subprocess.check_call(['cmake', '..',
                            '-DZ3_CXX_INCLUDE_DIRS=' + z3_path + '/include/',
                            '-DZ3_LIBRARIES=' + path.join(z3_path, 'lib', 'libz3.so'),
-                           '-DABSTRACT_SUBEXPR_LIB=' + path.join(mirage_path, 'src', 'search', 'abstract_expr', 'abstract_subexpr', 'target', 'release'),
-                           '-DABSTRACT_SUBEXPR_LIBRARIES=' + path.join(mirage_path, 'src', 'search', 'abstract_expr', 'abstract_subexpr', 'target', 'release', 'libabstract_subexpr.so'),
+                           '-DABSTRACT_SUBEXPR_LIB=' + path.join(mirage_path, 'build', 'release'),
+                           '-DABSTRACT_SUBEXPR_LIBRARIES=' + path.join(mirage_path, 'build', 'release', 'libabstract_subexpr.so'),
                            '-DCMAKE_C_COMPILER=' + os.environ['CC'],
                            '-DCMAKE_CXX_COMPILER=' + os.environ['CXX'],
                           ], cwd=build_dir, env=os.environ.copy())

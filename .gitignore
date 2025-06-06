@@ -54,6 +54,4 @@ demo/*generated*
 benchmark/*generated*
 
 # Rust
-src/search/abstract_expr/abstract_subexpr/*
-!src/search/abstract_expr/abstract_subexpr/*.rs
-!src/search/abstract_expr/abstract_subexpr/*.toml
+src/search/abstract_expr/abstract_subexpr/*.lock

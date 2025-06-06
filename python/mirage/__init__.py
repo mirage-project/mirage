@@ -14,7 +14,7 @@ preload_so(_z3_so_path, "libz3.so")
 
 _this_dir = os.path.dirname(__file__)
 _mirage_root = os.path.abspath(os.path.join(_this_dir, "..", ".."))
-_rust_so_path = os.path.join(_mirage_root, "src", "search", "abstract_expr", "abstract_subexpr", "target", "release", "libabstract_subexpr.so")
+_rust_so_path = os.path.join(_mirage_root, "build", "release", "libabstract_subexpr.so")
 preload_so(_rust_so_path, "libabstract_subexpr.so")
 
 from .core import *
