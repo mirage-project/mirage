@@ -52,3 +52,6 @@ wheelhouse/
 demo/mirage_search_checkpoint.json
 demo/*generated*
 benchmark/*generated*
+
+# Rust
+src/search/abstract_expr/abstract_subexpr/*.lock

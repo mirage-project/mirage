@@ -55,31 +55,64 @@ def config_cython():
                               path.join(mirage_path, "deps", "json", "include"),
                               path.join(mirage_path, "deps", "cutlass", "include"),
                               path.join(z3_path, "include"),
+                              path.join(mirage_path, "build", "release"),
                               "/usr/local/cuda/include"],
                 libraries=["mirage_runtime", "cudadevrt", "cudart_static", "cudnn", "cublas", "cudart", "cuda", "z3", "gomp", "abstract_subexpr"],
                 library_dirs=[path.join(mirage_path, "build"),
                               path.join(z3_path, "lib"),
-                              path.join(mirage_path, "src", "search", "abstract_expr", "abstract_subexpr", "target", "release"),
+                              path.join(mirage_path, "build", "release"),
                               "/usr/local/cuda/lib",
                               "/usr/local/cuda/lib64",
                               "/usr/local/cuda/lib64/stubs"],
                 extra_compile_args=["-std=c++17", "-fopenmp"],
-                extra_link_args=["-fPIC", "-fopenmp"],
+                extra_link_args=[
+                    "-fPIC",
+                    "-fopenmp",
+                    "-lrt",
+                    f"-Wl,-rpath,{path.join(mirage_path, 'build', 'release')}"
+                ],
                 language="c++"))
         return cythonize(ret, compiler_directives={"language_level" : 3})
     except ImportError:
         print("WARNING: cython is not installed!!!")
         raise SystemExit(1)
+    
+# Install Rust if not yet available
+try:
+    # Attempt to run a Rust command to check if Rust is installed
+    subprocess.check_output(['cargo', '--version'])
+except FileNotFoundError:
+    print("Rust/Cargo not found, installing it...")
+    # Rust is not installed, so install it using rustup
+    try:
+        subprocess.run("curl https://sh.rustup.rs -sSf | sh -s -- -y", shell=True, check=True)
+        print("Rust and Cargo installed successfully.")
+    except subprocess.CalledProcessError as e:
+        print(f"Error: {e}")
+    # Add the cargo binary directory to the PATH
+    os.environ["PATH"] = f"{os.path.join(os.environ.get('HOME', '/root'), '.cargo', 'bin')}:{os.environ.get('PATH', '')}"
+
+mirage_path = path.dirname(__file__)
+# z3_path = os.path.join(mirage_path, 'deps', 'z3', 'build')
+# os.environ['Z3_DIR'] = z3_path
+if mirage_path == '':
+    mirage_path = '.'
+
+try:
+    subprocess.check_output(['cargo', 'build', '--release', '--target-dir', '../../../../build'], cwd='src/search/abstract_expr/abstract_subexpr')
+except subprocess.CalledProcessError as e:
+    print("Failed to build abstract_subexpr Rust library, building it ...")
+    try:
+        subprocess.run(['cargo', 'build', '--release', '--target-dir', '../../../../build'], cwd='src/search/abstract_expr/abstract_subexpr', check=True)
+        print("Abstract_subexpr Rust library built successfully.")
+    except subprocess.CalledProcessError as e:
+        print("Failed to build abstract_subexpr Rust library.")
+    os.environ['ABSTRACT_SUBEXPR_LIB'] = os.path.join(mirage_path,'build', 'release', 'libabstract_subexpr.so')
 
 # build Mirage runtime library
 try:
     nvcc_path = shutil.which('nvcc')
     os.environ['CUDACXX'] = nvcc_path if nvcc_path else '/usr/local/cuda/bin/nvcc'
-    mirage_path = path.dirname(__file__)
-    # z3_path = os.path.join(mirage_path, 'deps', 'z3', 'build')
-    # os.environ['Z3_DIR'] = z3_path
-    if mirage_path == '':
-        mirage_path = '.'
     os.makedirs(mirage_path, exist_ok=True)
     os.chdir(mirage_path)
     build_dir = os.path.join(mirage_path, 'build')
@@ -95,6 +128,8 @@ try:
     subprocess.check_call(['cmake', '..',
                            '-DZ3_CXX_INCLUDE_DIRS=' + z3_path + '/include/',
                            '-DZ3_LIBRARIES=' + path.join(z3_path, 'lib', 'libz3.so'),
+                           '-DABSTRACT_SUBEXPR_LIB=' + path.join(mirage_path, 'build', 'release'),
+                           '-DABSTRACT_SUBEXPR_LIBRARIES=' + path.join(mirage_path, 'build', 'release', 'libabstract_subexpr.so'),
                            '-DCMAKE_C_COMPILER=' + os.environ['CC'],
                            '-DCMAKE_CXX_COMPILER=' + os.environ['CXX'],
                           ], cwd=build_dir, env=os.environ.copy())

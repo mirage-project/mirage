@@ -1,18 +1,23 @@
 import os
+import ctypes
+import z3
 
-try:
-    from .core import *
-except ImportError:
-    import z3
-    _z3_lib = os.path.join(os.path.dirname(z3.__file__), 'lib')
-    os.environ['LD_LIBRARY_PATH'] = f"{_z3_lib}:{os.environ.get('LD_LIBRARY_PATH','LD_LIBRARY_PATH')}"
+def preload_so(lib_path, name_hint):
+    try:
+        ctypes.CDLL(lib_path)
+    except OSError as e:
+        raise ImportError(f"Could not preload {name_hint} ({lib_path}): {e}")
 
-    rust_path = os.path.join('/'.join(os.path.dirname(__file__).split('/')[:-2]), 'src', 'search', 'abstract_expr', 'abstract_subexpr', 'target', 'release')
-    if not rust_path in os.environ['LD_LIBRARY_PATH']:
-        os.environ['LD_LIBRARY_PATH'] += ':'+rust_path
+_z3_libdir = os.path.join(os.path.dirname(z3.__file__), "lib")
+_z3_so_path = os.path.join(_z3_libdir, "libz3.so")
+preload_so(_z3_so_path, "libz3.so")
 
-    
-    from .core import *
+_this_dir = os.path.dirname(__file__)
+_mirage_root = os.path.abspath(os.path.join(_this_dir, "..", ".."))
+_rust_so_path = os.path.join(_mirage_root, "build", "release", "libabstract_subexpr.so")
+preload_so(_rust_so_path, "libabstract_subexpr.so")
+
+from .core import *
 
 from .kernel import *
 from .threadblock import *
