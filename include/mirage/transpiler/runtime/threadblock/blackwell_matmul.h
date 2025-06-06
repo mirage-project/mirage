@@ -31,13 +31,22 @@ template<typename T,
           bool IS_PIPELINE_A,
           bool IS_PIPELINE_B,
           int PIPELINE_STAGES,
-          class ClusterShape_MNK,
-          class TiledMMA>
+          class ClusterShape_MNK_,
+          class TiledMMA_,
+          class MmaTiler_MNK_,
+          class DstPipeLayout_A_,
+          class DstPipeLayout_B_>
 struct Blackwell_Matmul {
 public:
   CUTE_STATIC_ASSERT_V(rank(SmemLayoutA_{}) == _2{});
   CUTE_STATIC_ASSERT_V(rank(SmemLayoutB_{}) == _2{});
   CUTE_STATIC_ASSERT_V(rank(SmemLayoutC_{}) == _2{});
+
+  using ClusterShape_MNK = ClusterShape_MNK_;
+  using TiledMMA = TiledMMA_;
+  using MmaTiler_MNK = MmaTiler_MNK_;
+  using DstPipeLayout_A = DstPipeLayout_A_;
+  using DstPipeLayout_B = DstPipeLayout_B_;
 
   using SmemLayoutA = typename Dim01Swapper<SmemLayoutA_>::Result; // [M, K]
   using SmemLayoutB = SmemLayoutB_;                                // [N, K]
@@ -66,37 +75,14 @@ public:
   using K = decltype(get<1>(shape(SmemLayoutA{})));
   using N = decltype(get<0>(shape(SmemLayoutB{})));
 
-  /*------------- UMMA atom for Blackwell -----------------*/
-  // using Atom = SM100_MMA_F16BF16_SS<T, T, T, 128, 256,
-  //                                UMMA::Major::K, UMMA::Major::K>;
-  
-  // using AtomLayoutMNK = cute::conditional_t<IS_COORPERATIVE || ENABLE_PAIR_UMMA,
-  //                                           Layout<Shape<_2, _1, _1>>,
-  //                                           Layout<Shape<_1, _1, _1>>>;
 
-  // CUTE_STATIC_ASSERT_V(rank(AtomLayoutMNK{}) == _3{});
-  // only support half_t for now
-  static_assert(std::is_same_v<T, half_t>, "Only half_t is supported");
-  
-  // using UmmaAtom = cute::conditional_t<
-  //     ENABLE_PAIR_UMMA,
-  //     SM100_MMA_F16BF16_2x1SM_SS<T, T, T, M{}, N{}, UmmaMajorA, UmmaMajorB>,
-  //     SM100_MMA_F16BF16_SS<T, T, T, M{}, N{}, UmmaMajorA, UmmaMajorB>
-  // >;
+  static constexpr int PIPELINE_STAGE_A = IS_PIPELINE_A ? PIPELINE_STAGES : 1;
+  static constexpr int PIPELINE_STAGE_B = IS_PIPELINE_B ? PIPELINE_STAGES : 1;
 
-  // using TiledMMA = decltype(cute::make_tiled_mma(UmmaAtom{}, AtomLayoutMNK{}));
-
-  /*------------- SMEM layout: extra stage dim ----------------------*/
-  using SAstage = decltype(tile_to_shape(SmemLayoutA{},
-                        cute::make_shape(shape<0>(SmemLayoutA{}),
-                                         shape<1>(SmemLayoutA{}),
-                                         cute::Int<PIPELINE_STAGES>{}),
-                        cute::Step<_1,_2,_3>{}));
-  using SBstage = decltype(tile_to_shape(SmemLayoutB{},
-                        cute::make_shape(shape<0>(SmemLayoutB{}),
-                                         shape<1>(SmemLayoutB{}),
-                                         cute::Int<PIPELINE_STAGES>{}),
-                        cute::Step<_1,_2,_3>{}));
+  // // Pre-partitioned Tile Shape (MmaTile_M, MmaTile_K) to post-partitioned (MmaA, NumMma_M, NumMma_K)
+  using MmaShape_A = decltype(partition_shape_A(TiledMMA{}, make_shape(size<0>(MmaTiler_MNK{}), size<2>(MmaTiler_MNK{}))));
+  using MmaShape_B = decltype(partition_shape_B(TiledMMA{}, make_shape(size<1>(MmaTiler_MNK{}), size<2>(MmaTiler_MNK{}))));
+  using MmaShape_C = decltype(partition_shape_C(TiledMMA{}, make_shape(size<0>(MmaTiler_MNK{}), size<1>(MmaTiler_MNK{}))));
 
   using R2STiledCopyCSelector =
       R2STiledCopySelector<T, IS_STMATRIX_AVAIL, SmemLayoutC>;
@@ -106,73 +92,102 @@ public:
   using R2STiledCopyC =
       decltype(make_tiled_copy_C(R2STiledCopyCAtom{}, TiledMMA{}));
 
-  // static UMMA::ScaleOut accumulate_ = UMMA::ScaleOut::Zero;
+  static __device__ __forceinline__
+  auto get_cluster_layout() {
+    return tiled_divide(make_layout(ClusterShape_MNK{}),
+                       make_tile(typename TiledMMA::AtomThrID{}));
+  }
 
   static __device__ __forceinline__
-  auto get_mma_tC(int blockIdx_x, int blockIdx_y)
+  auto get_mma_coord(int blockIdx_x, int blockIdx_y) {
+    auto cluster_layout = get_cluster_layout();
+    return make_coord(
+        blockIdx_x % size<0>(cluster_layout),
+        blockIdx_x / size<0>(cluster_layout),
+        blockIdx_y,
+        _);
+  }
+
+  static __device__ __forceinline__ auto get_cta_mma(int blockIdx_x, int blockIdx_y) {
+    TiledMMA tiled_mma;
+    auto mma_coord_vmnk = get_mma_coord(blockIdx_x, blockIdx_y);
+    auto mma_v = get<0>(mma_coord_vmnk);
+    return tiled_mma.get_slice(mma_v);
+  }
+
+  static __device__ __forceinline__
+  auto get_mma_tC(int blockIdx_x, int blockIdx_y, uint32_t &tmem_base_ptr)
   {
-    Layout cluster_layout_vmnk = tiled_divide(make_layout(ClusterShape_MNK{}),
-                                         make_tile(typename TiledMMA::AtomThrID{}));
-    auto mma_coord_vmnk = make_coord(
-                   blockIdx_x % size<0>(cluster_layout_vmnk), // Peer CTA coordinate
-                   blockIdx_x / size<0>(cluster_layout_vmnk), //    MMA-M coordinate
-                   blockIdx_y,                                //    MMA-N coordinate
-                   _);                                        //    MMA-K coordinate
- 
+    auto mma_coord_vmnk = get_mma_coord(blockIdx_x, blockIdx_y);
     auto mma_v = get<0>(mma_coord_vmnk);
     TiledMMA tiled_mma;
     ThrMMA cta_mma = tiled_mma.get_slice(mma_v);
-    
-    Tensor dummy_gC = make_tensor(make_gmem_ptr((T*)nullptr), SmemLayoutC{});
+
+    Tensor dummy_gC = make_tensor(make_gmem_ptr((float*)nullptr), SmemLayoutC{});
     auto tCgC = cta_mma.partition_C(dummy_gC);
 
     Tensor tCtAcc = cta_mma.make_fragment_C(tCgC);
+    tCtAcc.data() = tmem_base_ptr;
 
     return tCtAcc;
   }
 
-
   template<class TmemAccTensor>
   static __device__ __forceinline__
-  void write_back_mma_tC(T * __restrict__ c_ptr,      
-                         TmemAccTensor const& tCtAcc, 
+  void write_tC_to_sC(float *__restrict__ c_ptr,
+                      TmemAccTensor const& tCtAcc,
                          int thread_idx)
   {
-    TiledMMA tiled_mma;
-    auto mma_coord_vmnk = make_coord(
-                   blockIdx.x % size<0>(tiled_divide(make_layout(ClusterShape_MNK{}),
-                                         make_tile(typename TiledMMA::AtomThrID{}))),
-                   blockIdx.x / size<0>(tiled_divide(make_layout(ClusterShape_MNK{}),
-                                         make_tile(typename TiledMMA::AtomThrID{}))),
-                   blockIdx.y,
-                   _);
-    auto mma_v = get<0>(mma_coord_vmnk);
-    auto cta_mma = tiled_mma.get_slice(mma_v);
-
-    // tc -> rC
-    Tensor rC = cta_mma.partition_fragment_C(
-                  make_tensor(make_smem_ptr((T*)nullptr), SmemLayoutC{}));
+    auto cta_mma = get_cta_mma(blockIdx.x, blockIdx.y);
 
     using LdAtom = SM100_TMEM_LOAD_32dp32b1x;               
-    auto tiled_ld = make_tmem_copy(LdAtom{}, tCtAcc);
-    auto thr_ld = tiled_ld.get_slice(thread_idx);
+    // if (block(0) && thread_idx == 0) {
+    //   printf("\n tCtAcc:\n");
+    //   print(tCtAcc);
+    //   printf("\n c_ptr: %p\n", c_ptr);
+      // printf("\n tCtAcc tensor: \n");
+      // print_tensor(tCtAcc);
+    // }
+    
+    
+    auto tiled_t2r_copy = make_tmem_copy(LdAtom{}, tCtAcc);
+    auto thr_t2r_copy = tiled_t2r_copy.get_slice(thread_idx);
 
-    copy(tiled_ld,                        
-         thr_ld.partition_S(tCtAcc),         
-         thr_ld.partition_D(rC));          
+    auto tDtAcc = thr_t2r_copy.partition_S(tCtAcc);
+    Tensor sC = make_tensor(make_smem_ptr(c_ptr), SmemLayoutC{});
+    Tensor tCsC = cta_mma.partition_C(sC);
+    Tensor tDsC = thr_t2r_copy.partition_D(tCsC); 
+    auto tDrAcc = make_tensor<float>(shape(tDsC));
 
-    R2STiledCopyC r2s;                     
-    auto r2s_thr = r2s.get_slice(thread_idx);
+    copy(tiled_t2r_copy, tDtAcc, tDrAcc);
+    
+    // copy(tDrAcc, tDsC);
+    
+    if (block(0) && thread_idx == 0) {
+      printf("Completed TMEM->SMEM copy\n");
+    }
+  }
 
-    Tensor r2s_rC = r2s_thr.retile_S(rC); 
-    Tensor r2s_sC = r2s_thr.partition_D(
-                    make_tensor(make_smem_ptr(c_ptr), SmemLayoutC{}));
+  template <class AccumRegFrag>
+  static __device__ __forceinline__ void write_back_mma_rC(
+      T *__restrict__ c_ptr, AccumRegFrag const &mma_rC, int thread_idx) {
+    // if (thread_idx >= TILED_MMA_NUM_THREADS) {
+    //   return;
+    // }
+
+    Tensor sC = make_tensor(make_smem_ptr(c_ptr), SmemLayoutC{}); // [M, N]
+    R2STiledCopyC r2s_tiled_copy_C;
+    ThrCopy r2s_tiled_copy_C_thr = r2s_tiled_copy_C.get_slice(thread_idx);
+    Tensor r2s_rC =
+        r2s_tiled_copy_C_thr.retile_S(mma_rC);            // (R2S, R2S_M, R2S_N)
+    Tensor r2s_sC = r2s_tiled_copy_C_thr.partition_D(sC); // (R2S, R2S_M, R2S_N)
 
     r2s_copy_with_oob_protection<T,
-                               M, N,
-                               /*NumExp*/ 0,
-                               /*StoreAccum?*/ false>(
-        r2s, r2s_rC, r2s_sC, thread_idx);
+                                 M,
+                                 N,
+                                 NUM_EXPS_BEFORE_STORE,
+                                 IS_STORE_ACCUM>(
+        r2s_tiled_copy_C, r2s_rC, r2s_sC, thread_idx);
   }
 
   // a_ptr, b_ptr are from smem, mma_tC is from tmem
@@ -181,54 +196,55 @@ public:
   void run(TmemAccTensor &mma_tC,      
            T *__restrict__ a_ptr,
            T *__restrict__ b_ptr,
-           int thread_idx,
+           int k_iter,
+           TiledMMA &tiled_mma,
            int read_stage = 0)  
   {
-    TiledMMA tiled_mma;
-    // tiled_mma.accumulate_ = accumulate_;
 
-    auto sA_l = tile_to_shape(TileALayout{},
-                            make_shape(shape<0>(SmemLayoutA{}),
-                                       shape<1>(SmemLayoutA{}),
-                                       Int<PIPELINE_STAGES>{}),
-                            Step<_1,_2,_3>{});
-
-    auto sB_l = tile_to_shape(TileBLayout{},
-                            make_shape(shape<0>(SmemLayoutB{}),
-                                       shape<1>(SmemLayoutB{}),
-                                       Int<PIPELINE_STAGES>{}),
-                            Step<_1,_2,_3>{});
-
-    Tensor sA = make_tensor(make_smem_ptr(a_ptr), sA_l);
-    Tensor sB = make_tensor(make_smem_ptr(b_ptr), sB_l);
-
-    // 获取CTA在集群中的排名和坐标
-    auto cluster_layout_vmnk = tiled_divide(make_layout(ClusterShape_MNK{}),
-                                         make_tile(typename TiledMMA::AtomThrID{}));
-    auto mma_coord_vmnk = make_coord(
-                   blockIdx.x % size<0>(cluster_layout_vmnk), // Peer CTA coordinate
-                   blockIdx.x / size<0>(cluster_layout_vmnk), //    MMA-M coordinate
-                   blockIdx.y,                                //    MMA-N coordinate
-                   _);                                        //    MMA-K coordinate
+    if (k_iter == 0) {
+      tiled_mma.accumulate_ = UMMA::ScaleOut::Zero;
+    }
+    
+    auto mma_coord_vmnk = get_mma_coord(blockIdx.x, blockIdx.y);  
 
     auto mma_v = get<0>(mma_coord_vmnk);
     auto cta_mma = tiled_mma.get_slice(mma_v);
 
-    Tensor tCsA = cta_mma.partition_A(sA); // (MMA,MMA_M,MMA_K,PIPE)
-    Tensor tCsB = cta_mma.partition_B(sB); // (MMA,MMA_N,MMA_K,PIPE)
+    Tensor tCsA = make_tensor(make_smem_ptr(a_ptr), DstPipeLayout_A{});
+    Tensor tCsB = make_tensor(make_smem_ptr(b_ptr), DstPipeLayout_B{});
 
     Tensor tCrA = cta_mma.make_fragment_A(tCsA);
     Tensor tCrB = cta_mma.make_fragment_B(tCsB);
 
-    gemm(tiled_mma,
-        tCrA(_,_,_, IS_PIPELINE_A ? read_stage : 0),      
-        tCrB(_,_,_, IS_PIPELINE_B ? read_stage : 0),
-        mma_tC); 
+    // if (block(0) && threadIdx.x == 0) {
+    //   printf("In Matmul run: a_ptr=%p, b_ptr=%p, tCsA shape=", a_ptr, b_ptr);
+    //   print(shape(tCsA));
+    //   printf(", tCsB shape=");
+    //   print(shape(tCsB));
+    //   printf(", tCrA shape=");
+    //   print(shape(tCrA));
+    //   printf(", tCrB shape=");
+    //   print(shape(tCrB));
+    //   printf("\n");
+    //   printf("\n DstPipeLayout_A: \n");
+    //   print(DstPipeLayout_A{});
+    //   printf("\n DstPipeLayout_B: \n");
+    //   print(DstPipeLayout_B{});
+    //   printf("\n");
+      // printf("\n tCrA(_,_,0): \n");
+      // print(tCrA(_,_,0));
+      // printf("\n tCrB(_,_,0): \n");
+      // print(tCrB(_,_,0));
+      // printf("\n");
+    // }
 
-    cute::warpgroup_commit_batch();
-    cute::warpgroup_wait<0>();
-
-    // accumulate_ = UMMA::ScaleOut::One;
+    if (warp_id() == 0) {
+      // Execute a MmaTile_M x MmaTile_N x MmaTile_K GEMM
+      for (int k_block = 0; k_block < size<2>(tCrA); ++k_block) {
+          gemm(tiled_mma, tCrA(_,_,k_block,read_stage), tCrB(_,_,k_block,read_stage), mma_tC);
+          tiled_mma.accumulate_ = UMMA::ScaleOut::One;
+      }
+    }
   }
 };
 
