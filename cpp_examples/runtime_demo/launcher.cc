@@ -151,7 +151,7 @@ int main(int argc, char **argv) {
         std::make_tuple(2, 1, rt::TASK_EMBEDDING);
   }
   X = Y;
-  for (int layer = 0; layer < 36; layer++) {
+  for (int layer = 0; layer < 1; layer++) {
     // Add RMS + MatMul
     {
       int num_tasks = 96;

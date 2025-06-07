@@ -153,6 +153,14 @@ void Runtime::register_mugraph(
     mirage::kernel::Graph const &graph,
     std::unordered_map<kn::KNOperator const *,
                        std::tuple<int, int, TaskType>> const &task_configs) {
+  // push a begin-graph task and a event to launch dependent asks
+  {
+    EventDesc e(EVENT_LAUNCH_DEPENDENT_TASKS, 0, 0, 0);
+    TaskDesc t(TASK_BEGIN_TASK_GRAPH);
+    t.trigger_event = get_event_id(my_gpu_id, all_events.size(), false);
+    all_tasks.push_back(t);
+    all_events.push_back(e);
+  }
   std::vector<tb::TBInputOp *> pre_output_ops;
   kn::KNCustomizedOp const *pre_op = nullptr;
   std::map<dim3, TaskId, Dim3Comparator> pre_task_map;
@@ -419,6 +427,18 @@ void Runtime::register_mugraph(
   }
   all_events.push_back(
       EventDesc(EVENT_END_OF_TASK_GRAPH, pre_task_map.size(), 0, 0));
+
+  // Prelaunch all tasks at the begining of an iteration
+  all_events[1].first_task_id = 2;
+  all_events[1].last_task_id = all_tasks.size();
+  for (size_t e = 2; e < all_events.size(); e++) {
+    if (all_events[e].event_type == EVENT_LAUNCH_TASKS || all_events[e].event_type == EVENT_LAUNCH_MASSIVE_TASKS) {
+      all_events[e].event_type = EVENT_EMPTY;
+      for (size_t t = all_events[e].first_task_id; t < all_events[e].last_task_id; t++) {
+        all_tasks[t].dependent_event = get_event_id(my_gpu_id, e, false/*nvshmem_event*/);
+      }
+    }
+  }
   num_graphs++;
 }
 
@@ -524,6 +544,17 @@ std::string Runtime::print_task_graph(
     code.e("bool is_nvshmem = j.at(\"is_nvshmem\").get<bool>();");
     code.e("task_desc.trigger_event = get_event_id(my_gpu_id + gpu_offset, event_pos, is_nvshmem);");
     code.e("}");
+    code.e("if (task.at(\"dependent_event\").is_number_integer()) {");
+    code.e("task_desc.dependent_event = task.at(\"dependent_event\").get<unsigned long long int>();");
+    code.e("}");
+    code.e("else {");
+    code.e("json j = task.at(\"dependent_event\");");
+    code.e("int gpu_offset = j.at(\"gpu_offset\").get<int>();");
+    code.e("size_t event_pos = j.at(\"event_pos\").get<size_t>();");
+    code.e("bool is_nvshmem = j.at(\"is_nvshmem\").get<bool>();");
+    code.e("task_desc.dependent_event = get_event_id(my_gpu_id + gpu_offset, event_pos, is_nvshmem);");
+    code.e("}");
+
     // load inputs
     code.e("task_desc.num_inputs = 0;");
     code.e("for (json const &tensor : task[\"inputs\"]) {");
@@ -651,10 +682,21 @@ std::string Runtime::print_task_graph(
         {"task_type", TASK_TERMINATE},
         {"inputs", {}},
         {"outputs", {}},
-        {"trigger_event", EVENT_INVALID_ID}});
+        {"trigger_event", EVENT_INVALID_ID},
+	{"dependent_event", EVENT_INVALID_ID}});
+  }
+  // generate task[1]
+  {
+    tgbody.e("all_tasks.push_back(TaskDesc(TASK_BEGIN_TASK_GRAPH));");
+    json_task_graph["all_tasks"].push_back(json{
+        {"task_type", TASK_BEGIN_TASK_GRAPH},
+        {"inputs", {}},
+        {"outputs", {}},
+        {"trigger_event", json{{"gpu_offset", 0}, {"event_pos", 1}, {"is_nvshmem", false}}},
+	{"dependent_event", EVENT_INVALID_ID}});
   }
   // generate all other tasks
-  size_t task_pos = 1;
+  size_t task_pos = 2;
   for (auto const &op : graph.operators) {
     if (op->op_type == type::KNOperatorType::KN_INPUT_OP) {
       continue;
@@ -709,12 +751,16 @@ std::string Runtime::print_task_graph(
                        gpu_offset,
                        event_pos,
                        is_nvshmem_event);
+	      assert(task_desc.dependent_event != EVENT_INVALID_ID);
+              tgbody.e("task_desc.dependent_event = get_event_id(my_gpu_id, $, false);",
+                       (task_desc.dependent_event & 0xffffffff));
               assert(task_desc.num_inputs == 1);
               assert(task_desc.num_outputs == 1);
               json json_task = {{"task_type", task_desc.task_type},
                                 {"inputs", {}},
                                 {"outputs", {}},
-                                {"trigger_event", json{{"gpu_offset", gpu_offset}, {"event_pos", event_pos}, {"is_nvshmem", is_nvshmem_event}}}};
+                                {"trigger_event", json{{"gpu_offset", gpu_offset}, {"event_pos", event_pos}, {"is_nvshmem", is_nvshmem_event}}},
+                                {"dependent_event", json{{"gpu_offset", 0}, {"event_pos", (task_desc.dependent_event & 0xffffffff)}, {"is_nvshmem", false}}}};
               tgbody.e("task_desc.num_inputs = $;", task_desc.num_inputs);
               tgbody.e("task_desc.num_outputs = $;", task_desc.num_outputs);
               off_t offset = 0;
@@ -838,10 +884,23 @@ std::string Runtime::print_task_graph(
           tgbody.e("task_desc.trigger_event = get_event_id(my_gpu_id, $, $);",
                  event_pos,
                  is_nvshmem_event);
-          json json_task = {{"task_type", task_desc.task_type},
-                            {"inputs", {}},
-                            {"outputs", {}},
-                            {"trigger_event", json{{"gpu_offset", gpu_offset}, {"event_pos", event_pos}, {"is_nvshmem", is_nvshmem_event}}}};
+          json json_task;
+	  if (task_desc.dependent_event == EVENT_INVALID_ID) {
+            tgbody.e("task_desc.dependent_event = EVENT_INVALID_ID;");
+            json_task = {{"task_type", task_desc.task_type},
+                         {"inputs", {}},
+                         {"outputs", {}},
+                         {"trigger_event", json{{"gpu_offset", gpu_offset}, {"event_pos", event_pos}, {"is_nvshmem", is_nvshmem_event}}},
+                         {"dependent_event", EVENT_INVALID_ID}};
+          } else {
+            tgbody.e("task_desc.dependent_event = get_event_id(my_gpu_id, $, false);",
+                   (task_desc.dependent_event & 0xffffffff));
+            json_task = {{"task_type", task_desc.task_type},
+                         {"inputs", {}},
+                         {"outputs", {}},
+                         {"trigger_event", json{{"gpu_offset", gpu_offset}, {"event_pos", event_pos}, {"is_nvshmem", is_nvshmem_event}}},
+                         {"dependent_event", json{{"gpu_offset", 0}, {"event_pos", (task_desc.dependent_event & 0xffffffff)}, {"is_nvshmem", false}}}};
+          }
           tgbody.e("task_desc.num_inputs = $;", task_desc.num_inputs);
           tgbody.e("task_desc.num_outputs = $;", task_desc.num_outputs);
           for (int i = 0; i < task_desc.num_inputs; i++) {

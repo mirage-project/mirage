@@ -45,10 +45,10 @@ struct EventDesc {
 struct TaskDesc {
   TaskDesc(TaskType t)
       : task_type(t), num_inputs(0), num_outputs(0),
-        trigger_event(EVENT_INVALID_ID) {}
+        trigger_event(EVENT_INVALID_ID), dependent_event(EVENT_INVALID_ID) {}
   TaskType task_type;
   int num_inputs, num_outputs;
-  EventId trigger_event;
+  EventId trigger_event, dependent_event;
   TensorDesc inputs[mirage::config::MAX_NUM_INPUTS_PER_OPERATOR];
   TensorDesc outputs[mirage::config::MAX_NUM_OUTPUTS_PER_OPERATOR];
 };
