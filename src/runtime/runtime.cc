@@ -155,7 +155,7 @@ void Runtime::register_mugraph(
                        std::tuple<int, int, TaskType>> const &task_configs) {
   // push a begin-graph task and a event to launch dependent asks
   {
-    EventDesc e(EVENT_LAUNCH_DEPENDENT_TASKS, 0, 0, 0);
+    EventDesc e(EVENT_LAUNCH_DEPENDENT_TASKS, 1, 0, 0);
     TaskDesc t(TASK_BEGIN_TASK_GRAPH);
     t.trigger_event = get_event_id(my_gpu_id, all_events.size(), false);
     all_tasks.push_back(t);
