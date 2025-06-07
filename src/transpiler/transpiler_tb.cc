@@ -114,23 +114,23 @@ static string get_mma_stensor_aligned_layout(
   for (int i = start_dim; i < stensor.num_dims; i++) {
     // m/n
     if (i == start_dim && m) {
-      // K
-      aligned_shape = std::max(stensor.dim[i], std::get<2>(mma_atom_mnk));
+      // M
+      aligned_shape = std::max(stensor.dim[i], std::get<0>(mma_atom_mnk));
     } else if (i == start_dim && n) {
-      // N
-      aligned_shape = std::max(stensor.dim[i], std::get<1>(mma_atom_mnk));
-    } else if (i == stensor.num_dims - 1 && m) {
-      // M
-      aligned_shape = std::max(stensor.dim[i], std::get<0>(mma_atom_mnk));
-    } else if (i == stensor.num_dims - 1 && n) {
       // K
       aligned_shape = std::max(stensor.dim[i], std::get<2>(mma_atom_mnk));
-    } else if (i == start_dim && output) {
+    } else if (i == stensor.num_dims - 1 && m) {
+      // K
+      aligned_shape = std::max(stensor.dim[i], std::get<2>(mma_atom_mnk));
+    } else if (i == stensor.num_dims - 1 && n) {
       // N
       aligned_shape = std::max(stensor.dim[i], std::get<1>(mma_atom_mnk));
-    } else if (i == stensor.num_dims - 1 && output) {
+    } else if (i == start_dim && output) {
       // M
       aligned_shape = std::max(stensor.dim[i], std::get<0>(mma_atom_mnk));
+    } else if (i == stensor.num_dims - 1 && output) {
+      // N
+      aligned_shape = std::max(stensor.dim[i], std::get<1>(mma_atom_mnk));
     } else {
       assert(false);
     }
