@@ -153,7 +153,7 @@ __device__ __forceinline__ void
             sizeof(T) * TILE_SIZE * OUTPUT_SIZE +
             sizeof(T) * BATCH_SIZE * TILE_SIZE +
             sizeof(T) * BATCH_SIZE * OUTPUT_SIZE * NUM_WARP_K +
-            sizeof(T) * BATCH_SIZE * OUTPUT_SIZE + sizeof(T) * BATCH_SIZE * 16);
+            sizeof(T) * BATCH_SIZE * OUTPUT_SIZE + sizeof(T) * BATCH_SIZE * 8);
 
   T *shared_norm_weight_buffer =
       (T *)(smem + 128 + sizeof(T) * BATCH_SIZE * TILE_SIZE +
@@ -162,7 +162,7 @@ __device__ __forceinline__ void
             sizeof(T) * TILE_SIZE * OUTPUT_SIZE +
             sizeof(T) * BATCH_SIZE * TILE_SIZE +
             sizeof(T) * BATCH_SIZE * OUTPUT_SIZE * NUM_WARP_K +
-            sizeof(T) * BATCH_SIZE * OUTPUT_SIZE + sizeof(T) * BATCH_SIZE * 16 +
+            sizeof(T) * BATCH_SIZE * OUTPUT_SIZE + sizeof(T) * BATCH_SIZE * 8 +
             sizeof(T) * BATCH_SIZE * TILE_SIZE);
 
   T *mul_output =
@@ -172,7 +172,7 @@ __device__ __forceinline__ void
             sizeof(T) * TILE_SIZE * OUTPUT_SIZE +
             sizeof(T) * BATCH_SIZE * TILE_SIZE +
             sizeof(T) * BATCH_SIZE * OUTPUT_SIZE * NUM_WARP_K +
-            sizeof(T) * BATCH_SIZE * OUTPUT_SIZE + sizeof(T) * BATCH_SIZE * 16 +
+            sizeof(T) * BATCH_SIZE * OUTPUT_SIZE + sizeof(T) * BATCH_SIZE * 8 +
             sizeof(T) * BATCH_SIZE * TILE_SIZE +
             sizeof(T) * BATCH_SIZE * TILE_SIZE);
 
