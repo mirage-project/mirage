@@ -24,9 +24,8 @@
 
 typedef unsigned long long int TaskId;
 unsigned long long int const TASK_INVALID_ID = 0x7fffffffffffffff;
-// Task IDs are 64-bit values encoding both the current iteration of the task and its
-// index
-// TASK: iteration id: 32, task index: 32
+// Task IDs are 64-bit values encoding both the current iteration of the task
+// and its index TASK: iteration id: 32, task index: 32
 typedef unsigned long long int EventId;
 // Event IDs are 64-bit values encoding both the owner of the event and its
 // index EVENT: nvshmem_tag: 16, owner_node: 16, event_idx: 32
@@ -129,7 +128,7 @@ __global__ void init_kernel(RuntimeConfig config) {
   if (threadIdx.x == 0) {
     // Send task 1 to worker[0]
     config.worker_queue_last_ready_task_id[0] = 1;
-    config.worker_queues[0][0] = 1/*begin_graph_task*/;
+    config.worker_queues[0][0] = 1 /*begin_graph_task*/;
   }
 }
 
@@ -326,25 +325,27 @@ __global__ void persistent_kernel(RuntimeConfig config) {
         cur_task_id = worker_queues[queue_idx][cur_task_pos[queue_idx] %
                                                config.per_worker_queue_len];
         if (config.verbose) {
-          printf("[%d][FTCH] worker_id(%d) queue_idx(%d) cur_task_pos(%llu, "
-                 "%llu) last_task_pos(%llu, %llu) "
-                 "task_id(%llu) task_type(%d) event_id(%llx) \n",
-                 config.my_gpu_id,
-                 worker_id,
-                 queue_idx,
-                 cur_task_pos[0],
-                 cur_task_pos[1],
-                 last_task_pos[0],
-                 last_task_pos[1],
-                 get_task_position_index(cur_task_id),
-                 config.all_tasks[get_task_position_index(cur_task_id)].task_type,
-                 config.all_tasks[get_task_position_index(cur_task_id)].trigger_event);
+          printf(
+              "[%d][FTCH] worker_id(%d) queue_idx(%d) cur_task_pos(%llu, "
+              "%llu) last_task_pos(%llu, %llu) "
+              "task_id(%llu) task_type(%d) event_id(%llx) \n",
+              config.my_gpu_id,
+              worker_id,
+              queue_idx,
+              cur_task_pos[0],
+              cur_task_pos[1],
+              last_task_pos[0],
+              last_task_pos[1],
+              get_task_position_index(cur_task_id),
+              config.all_tasks[get_task_position_index(cur_task_id)].task_type,
+              config.all_tasks[get_task_position_index(cur_task_id)]
+                  .trigger_event);
         }
       }
       __syncthreads();
       int *smem_as_int = reinterpret_cast<int *>(&task_desc);
-      int const *dmem_as_int =
-          reinterpret_cast<int *>(config.all_tasks + get_task_position_index(cur_task_id));
+      int const *dmem_as_int = reinterpret_cast<int *>(
+          config.all_tasks + get_task_position_index(cur_task_id));
       for (int i = threadIdx.x; i * sizeof(int) < sizeof(TaskDesc);
            i += blockDim.x) {
         smem_as_int[i] = dmem_as_int[i];
@@ -358,7 +359,8 @@ __global__ void persistent_kernel(RuntimeConfig config) {
         assert(get_event_gpu_id(event_id) == config.my_gpu_id);
         size_t event_index = get_event_position_index(event_id);
         int num_triggers = config.all_event_num_triggers[event_index];
-        int needed_triggers = num_triggers * get_task_iteration_num(cur_task_id);
+        int needed_triggers =
+            num_triggers * get_task_iteration_num(cur_task_id);
         int actual_triggers = 0;
         while (actual_triggers < needed_triggers) {
           asm volatile("ld.acquire.gpu.s32 %0, [%1];"
@@ -384,6 +386,8 @@ __global__ void persistent_kernel(RuntimeConfig config) {
                 task_desc.outputs[0].dim[task_desc.outputs[0].num_dims - 1],
                 task_desc.inputs[0].base_ptr,
                 task_desc.inputs[1].base_ptr,
+                task_desc.inputs[2].base_ptr,
+                0.0f,
                 task_desc.outputs[0].base_ptr);
             break;
           }
@@ -406,8 +410,8 @@ __global__ void persistent_kernel(RuntimeConfig config) {
                 task_desc.inputs[4].base_ptr,
                 task_desc.inputs[5].base_ptr,
                 task_desc.inputs[6].base_ptr,
-                0.0f/*q_eps*/,
-                0.0f/*k_eps*/);
+                0.0f /*q_eps*/,
+                0.0f /*k_eps*/);
             break;
           }
           case TASK_ATTENTION_2: {
@@ -454,7 +458,7 @@ __global__ void persistent_kernel(RuntimeConfig config) {
             assert(false && "Unimplemented task");
           }
         } // case
-      } // else
+      }   // else
       __syncthreads();
       if (config.profiling && task_desc.task_type != TASK_TERMINATE) {
         PROFILER_EVENT_END(task_desc.task_type, task_counter++);
@@ -468,8 +472,8 @@ __global__ void persistent_kernel(RuntimeConfig config) {
           assert(gpu_id == config.my_gpu_id);
           // Case 1: Trigger a local non-nvshmem event
           // int count = atomicSub(&config.all_event_counters[event_index], 1);
-          int count = custom_atomic_add_s32(
-              &config.all_event_counters[event_index], 1);
+          int count =
+              custom_atomic_add_s32(&config.all_event_counters[event_index], 1);
           int num_triggers = config.all_event_num_triggers[event_index];
           if (config.verbose) {
             printf("[%d][DONE] worker_id(%d) task_id(%llu) event_id(%llx) "
@@ -500,8 +504,10 @@ __global__ void persistent_kernel(RuntimeConfig config) {
                   event_desc.event_type == EVENT_LAUNCH_DEPENDENT_TASKS) {
                 use_bcast_queue = true;
               }
-              int sched_id = use_bcast_queue
-                      ? config.num_local_schedulers + config.num_remote_schedulers
+              int sched_id =
+                  use_bcast_queue
+                      ? config.num_local_schedulers +
+                            config.num_remote_schedulers
                       : get_rand_sched_id(event_index,
                                           worker_id,
                                           config.num_workers,
@@ -704,13 +710,18 @@ __global__ void persistent_kernel(RuntimeConfig config) {
           // assign event in a round-robin fashion
           // Split event across local schedulers
           assert(sched_id < config.num_local_schedulers);
-          for (TaskId i = 0; i < (my_last_task - my_first_task + config.num_workers - 1) / config.num_workers; i++) {
+          for (TaskId i = 0;
+               i < (my_last_task - my_first_task + config.num_workers - 1) /
+                       config.num_workers;
+               i++) {
             for (TaskId j = my_first_worker; j < my_last_worker; j++) {
               TaskId tid = my_first_task + i * config.num_workers + j;
               if (tid < my_last_task) {
-                size_t last_task_id = worker_queue_next_free_task_pos[next_worker]++;
-                config.worker_queues[next_worker]
-                                    [last_task_id % config.per_worker_queue_len] = i;
+                size_t last_task_id =
+                    worker_queue_next_free_task_pos[next_worker]++;
+                config.worker_queues[next_worker][last_task_id %
+                                                  config.per_worker_queue_len] =
+                    i;
                 // Make sure writes to worker_queues is visible to worker CTAs
                 // before we increase its last_ready_task_id
                 __threadfence();
@@ -725,8 +736,9 @@ __global__ void persistent_kernel(RuntimeConfig config) {
                          next_worker,
                          last_task_id + 1);
                 }
-                next_worker = (next_worker == my_last_worker - 1) ? my_first_worker
-                                                                  : next_worker + 1;
+                next_worker = (next_worker == my_last_worker - 1)
+                                  ? my_first_worker
+                                  : next_worker + 1;
               }
             }
           }
@@ -750,9 +762,10 @@ __global__ void persistent_kernel(RuntimeConfig config) {
             //      &(config.worker_queue_next_free_task_id[next_worker]), 1);
             //  size_t last_task_id = custom_atomic_add_u64(
             //     &(config.worker_queue_next_free_task_id[next_worker]), 1);
-            size_t last_task_id = worker_queue_next_free_task_pos[next_worker]++;
-            config.worker_queues[next_worker]
-                                [last_task_id % config.per_worker_queue_len] = i;
+            size_t last_task_id =
+                worker_queue_next_free_task_pos[next_worker]++;
+            config.worker_queues[next_worker][last_task_id %
+                                              config.per_worker_queue_len] = i;
             // Make sure writes to worker_queues is visible to worker CTAs
             // before we increase its last_ready_task_id
             __threadfence();

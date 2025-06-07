@@ -10,28 +10,32 @@ output_sizes = [16, 32, 64]
 rms_norm = torch.nn.RMSNorm(reduction_size, device="cuda:0", dtype=torch.bfloat16)
 
 
-def torch_rms_norm(X, W):
-    D = rms_norm(X)
-    E = torch.matmul(D, W)
-    return E
+def torch_rms_norm(X, W, G, eps):
+    variance = X.pow(2).mean(-1, keepdim=True)
+    X = X * torch.rsqrt(variance + eps)
+    X = torch.mul(X, G)
+    O = torch.matmul(X, W)
+    return O
 
 
 for output_size in output_sizes:
     print(f"\n=== Testing output_size = {output_size} ===")
 
     x = torch.randn((1, reduction_size), device="cuda", dtype=torch.bfloat16)
+    norm_w = torch.randn((1, reduction_size), device="cuda", dtype=torch.bfloat16)
     w = torch.randn((reduction_size, output_size), device="cuda", dtype=torch.bfloat16)
+    eps = 0.8765
     output = torch.empty(1, output_size, device="cuda", dtype=torch.bfloat16)
 
-    runtime_kernel.norm_linear(x, w, output)
-    torch_out = torch_rms_norm(x, w)
+    runtime_kernel.norm_linear(x, w, norm_w, eps, output)
+    torch_out = torch_rms_norm(x, w, norm_w, eps)
 
     print("Ratio (kernel / torch):")
     print(output / torch_out)
 
     # Warm-up
     for _ in range(16):
-        runtime_kernel.norm_linear(x, w, output)
+        runtime_kernel.norm_linear(x, w,norm_w, eps,  output)
 
     torch.cuda.synchronize()
     starter, ender = (
@@ -41,7 +45,7 @@ for output_size in output_sizes:
     repetitions = 100000
     starter.record()
     for rep in range(repetitions):
-        runtime_kernel.norm_linear(x, w, output)
+        runtime_kernel.norm_linear(x, w, norm_w, eps, output)
     ender.record()
     torch.cuda.synchronize()
 
