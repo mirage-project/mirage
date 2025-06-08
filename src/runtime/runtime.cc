@@ -522,7 +522,8 @@ std::string Runtime::print_task_graph(
 
   // function that loads json file and generates task graph
   if (use_json_format) {
-    code.e("void construct_task_graph(int my_gpu_id,");
+    code.e("void construct_task_graph(int num_gpus,");
+    code.e("                          int my_gpu_id,");
     code.e("                          std::vector<TaskDesc> &all_tasks,");
     code.e("                          std::vector<EventDesc> &all_events,");
     code.e("                          std::vector<TaskId> &first_tasks,");
@@ -542,7 +543,7 @@ std::string Runtime::print_task_graph(
     code.e("int gpu_offset = j.at(\"gpu_offset\").get<int>();");
     code.e("size_t event_pos = j.at(\"event_pos\").get<size_t>();");
     code.e("bool is_nvshmem = j.at(\"is_nvshmem\").get<bool>();");
-    code.e("task_desc.trigger_event = get_event_id(my_gpu_id + gpu_offset, event_pos, is_nvshmem);");
+    code.e("task_desc.trigger_event = get_event_id((my_gpu_id + gpu_offset) \% num_gpus, event_pos, is_nvshmem);");
     code.e("}");
     code.e("if (task.at(\"dependent_event\").is_number_integer()) {");
     code.e("task_desc.dependent_event = task.at(\"dependent_event\").get<unsigned long long int>();");
@@ -552,7 +553,7 @@ std::string Runtime::print_task_graph(
     code.e("int gpu_offset = j.at(\"gpu_offset\").get<int>();");
     code.e("size_t event_pos = j.at(\"event_pos\").get<size_t>();");
     code.e("bool is_nvshmem = j.at(\"is_nvshmem\").get<bool>();");
-    code.e("task_desc.dependent_event = get_event_id(my_gpu_id + gpu_offset, event_pos, is_nvshmem);");
+    code.e("task_desc.dependent_event = get_event_id((my_gpu_id + gpu_offset) \% num_gpus, event_pos, is_nvshmem);");
     code.e("}");
 
     // load inputs
@@ -616,6 +617,7 @@ std::string Runtime::print_task_graph(
          "&torch_tensors,");
   code.e("                                  int num_gpus,");
   code.e("                                  int my_gpu_id) {");
+  code.e("assert(num_gpus = $);", num_gpus);
 
   int num_torch_tensors = 0;
   if (use_json_format) {
@@ -1134,7 +1136,7 @@ std::string Runtime::print_task_graph(
     json_task_graph["first_tasks"].push_back(task);
   }
   if (use_json_format) {
-    code.e("construct_task_graph(my_gpu_id, all_tasks, all_events, first_tasks, all_tensors);");
+    code.e("construct_task_graph(num_gpus, my_gpu_id, all_tasks, all_events, first_tasks, all_tensors);");
   } else {
     code.e(tgbody.to_string());
   }
