@@ -167,8 +167,8 @@ __device__ __forceinline__ bool prepare_next_batch(RuntimeConfig config) {
   int step = config.step[0];
   // printf("step = %d\n", step);
   config.step[0] = step + 1;
-  return step + 1 <= 50;
-  // return false;
+  // return step + 1 <= 50;
+  return false;
 }
 
 __device__ __forceinline__ int get_rand_sched_id(size_t event_index,
@@ -358,23 +358,26 @@ __global__ void persistent_kernel(RuntimeConfig config) {
       }
       __syncthreads();
       // Make sure task is ready before start execution
-      if (task_desc.dependent_event != EVENT_INVALID_ID) {
-        // Wait until the event has been triggered enough times
-        EventId event_id = task_desc.trigger_event;
-        assert(!is_nvshmem_event(event_id));
-        assert(get_event_gpu_id(event_id) == config.my_gpu_id);
-        size_t event_index = get_event_position_index(event_id);
-        int num_triggers = config.all_event_num_triggers[event_index];
-        int needed_triggers =
-            num_triggers * get_task_iteration_num(cur_task_id);
-        int actual_triggers = 0;
-        while (actual_triggers < needed_triggers) {
-          asm volatile("ld.acquire.gpu.s32 %0, [%1];"
-                       : "=r"(actual_triggers)
-                       : "l"(&config.all_event_counters[event_index]));
-          __nanosleep(10);
+      if (threadIdx.x == 0) {
+        if (task_desc.dependent_event != EVENT_INVALID_ID) {
+          // Wait until the event has been triggered enough times
+          EventId event_id = task_desc.dependent_event;
+          assert(!is_nvshmem_event(event_id));
+          assert(get_event_gpu_id(event_id) == config.my_gpu_id);
+          size_t event_index = get_event_position_index(event_id);
+          int num_triggers = config.all_event_num_triggers[event_index];
+          int needed_triggers =
+              num_triggers * get_task_iteration_num(cur_task_id);
+          int actual_triggers = 0;
+          while (actual_triggers < needed_triggers) {
+            asm volatile("ld.acquire.gpu.s32 %0, [%1];"
+                         : "=r"(actual_triggers)
+                         : "l"(&config.all_event_counters[event_index]));
+            __nanosleep(10);
+          }
         }
       }
+      __syncthreads();
 
       if (config.profiling && task_desc.task_type != TASK_TERMINATE) {
         PROFILER_EVENT_START(task_desc.task_type, task_counter);
@@ -883,7 +886,7 @@ extern "C" void init_persistent_kernel(std::vector<void const *> torch_tensors,
   global_runtime_config.num_gpus = npes;
   global_runtime_config.my_gpu_id = mype;
   global_runtime_config.num_graphs = 1;
-  global_runtime_config.verbose = true;
+  global_runtime_config.verbose = false;
   global_runtime_config.profiling = profiler_buffer != nullptr;
 
   std::vector<TaskDesc> all_tasks;

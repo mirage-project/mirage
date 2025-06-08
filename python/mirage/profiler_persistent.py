@@ -9,6 +9,7 @@ import torch
 from tg4perfetto import TraceGenerator
 
 event_name_list = {
+    10: "TASK_BEGIN_TASK_GRAPH",
     101: "TASK_EMBEDDING",
     102: "TASK_RMS_NORM_LINEAR",
     103: "TASK_ATTENTION_1",
