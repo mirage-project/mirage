@@ -394,6 +394,8 @@ __global__ void persistent_kernel(RuntimeConfig config) {
                 task_desc.outputs[0].dim[task_desc.outputs[0].num_dims - 1],
                 task_desc.inputs[0].base_ptr,
                 task_desc.inputs[1].base_ptr,
+                task_desc.inputs[2].base_ptr,
+                0.0f,
                 task_desc.outputs[0].base_ptr);
             break;
           }

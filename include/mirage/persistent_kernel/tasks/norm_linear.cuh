@@ -32,9 +32,12 @@ using bfloat16 = type::bfloat16_t;
 // kernel for [16, 64] and any BATCH_SIZE < 16 [x, 64]
 // OUTPUT_SIZE = 16, 32, 64, REDUCTION_SIZE = multiple of 64
 template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int REDUCTION_SIZE>
-__device__ __forceinline__ void norm_linear_task_impl(void const *input_ptr,
-                                                      void const *weight_ptr,
-                                                      void *output_ptr) {
+__device__ __forceinline__ void
+    norm_linear_task_impl(void const *input_ptr,
+                          void const *weight_ptr,
+                          void const *norm_weight_ptr,
+                          float eps,
+                          void *output_ptr) {
   // Here we assume the type of T is bfloat16, so the sizeof(T) is 2
   constexpr int CHUNK_SIZE = 16 / sizeof(T);
   constexpr int TILE_SIZE = 64;
@@ -67,6 +70,7 @@ __device__ __forceinline__ void norm_linear_task_impl(void const *input_ptr,
 
   T const *__restrict__ d_input = static_cast<T const *>(input_ptr);
   T const *__restrict__ d_weight = static_cast<T const *>(weight_ptr);
+  T const *__restrict__ d_norm_weight = static_cast<T const *>(norm_weight_ptr);
   T *__restrict__ d_output = static_cast<T *>(output_ptr);
 
   using InputDmem = dmem_row_const<T, BATCH_SIZE, TILE_SIZE, REDUCTION_SIZE>;
@@ -74,6 +78,7 @@ __device__ __forceinline__ void norm_linear_task_impl(void const *input_ptr,
   using OutputDmem = dmem_row<T, BATCH_SIZE, OUTPUT_SIZE, OUTPUT_SIZE>;
 
   InputDmem input_dmem(d_input);
+  InputDmem dnorm_weight_dmem(d_norm_weight);
   WeightDmem weight_dmem(d_weight);
   OutputDmem output_dmem(d_output);
 
@@ -137,6 +142,36 @@ __device__ __forceinline__ void norm_linear_task_impl(void const *input_ptr,
             sizeof(T) * BATCH_SIZE * OUTPUT_SIZE * NUM_WARP_K +
             sizeof(T) * BATCH_SIZE * OUTPUT_SIZE); // sizeof(T) * BATCH_SIZE * 1
 
+  T *shared_norm_weight =
+      (T *)(smem + 128 + sizeof(T) * BATCH_SIZE * TILE_SIZE +
+            sizeof(T) * BATCH_SIZE * TILE_SIZE +
+            sizeof(T) * TILE_SIZE * OUTPUT_SIZE +
+            sizeof(T) * TILE_SIZE * OUTPUT_SIZE +
+            sizeof(T) * BATCH_SIZE * TILE_SIZE +
+            sizeof(T) * BATCH_SIZE * OUTPUT_SIZE * NUM_WARP_K +
+            sizeof(T) * BATCH_SIZE * OUTPUT_SIZE + sizeof(T) * BATCH_SIZE * 8);
+
+  T *shared_norm_weight_buffer =
+      (T *)(smem + 128 + sizeof(T) * BATCH_SIZE * TILE_SIZE +
+            sizeof(T) * BATCH_SIZE * TILE_SIZE +
+            sizeof(T) * TILE_SIZE * OUTPUT_SIZE +
+            sizeof(T) * TILE_SIZE * OUTPUT_SIZE +
+            sizeof(T) * BATCH_SIZE * TILE_SIZE +
+            sizeof(T) * BATCH_SIZE * OUTPUT_SIZE * NUM_WARP_K +
+            sizeof(T) * BATCH_SIZE * OUTPUT_SIZE + sizeof(T) * BATCH_SIZE * 8 +
+            sizeof(T) * BATCH_SIZE * TILE_SIZE);
+
+  T *mul_output =
+      (T *)(smem + 128 + sizeof(T) * BATCH_SIZE * TILE_SIZE +
+            sizeof(T) * BATCH_SIZE * TILE_SIZE +
+            sizeof(T) * TILE_SIZE * OUTPUT_SIZE +
+            sizeof(T) * TILE_SIZE * OUTPUT_SIZE +
+            sizeof(T) * BATCH_SIZE * TILE_SIZE +
+            sizeof(T) * BATCH_SIZE * OUTPUT_SIZE * NUM_WARP_K +
+            sizeof(T) * BATCH_SIZE * OUTPUT_SIZE + sizeof(T) * BATCH_SIZE * 8 +
+            sizeof(T) * BATCH_SIZE * TILE_SIZE +
+            sizeof(T) * BATCH_SIZE * TILE_SIZE);
+
   // out
   T *shared_output = mm_intermediate; // reuse mm_intermediate
 
@@ -155,6 +190,10 @@ __device__ __forceinline__ void norm_linear_task_impl(void const *input_ptr,
 
   InputSmem input_smem(shared_input);
   InputSmem input_smem_buffer(shared_input_buffer);
+
+  InputSmem norm_weight_smem(shared_norm_weight);
+  InputSmem norm_weight_smem_buffer(shared_norm_weight_buffer);
+  InputSmem mul_output_smem(mul_output);
 
   WeightSmem input_weight_smem(shared_weight);
   WeightSmem input_weight_smem_buffer(shared_weight_buffer);
@@ -177,6 +216,15 @@ __device__ __forceinline__ void norm_linear_task_impl(void const *input_ptr,
     load_smem(input_smem_buffer(row, col), input_dmem(row, col));
   }
 
+// load norm weight
+#pragma unroll
+  for (int i = threadIdx.x; i < NUM_CHUNKS_A; i += NUM_THREADS) {
+    // offset
+    int row = i >> log2_CHUNKS_PER_ROW_A;
+    int col = (i & (CHUNKS_PER_ROW_A - 1)) << log2_CHUNK_SIZE;
+    load_smem(norm_weight_smem_buffer(row, col), dnorm_weight_dmem(row, col));
+  }
+
 // load weight
 #pragma unroll
   for (int i = threadIdx.x; i < NUM_CHUNKS_B; i += NUM_THREADS) {
@@ -197,6 +245,8 @@ __device__ __forceinline__ void norm_linear_task_impl(void const *input_ptr,
     // copy
     if (for_idx + 1 != FORLOOP_RANGE) {
       InputDmem input_dmem_buffer(d_input + TILE_SIZE * (for_idx + 1));
+      InputDmem dnorm_weight_dmem_nuffer(d_norm_weight +
+                                         TILE_SIZE * (for_idx + 1));
       WeightDmem weight_dmem_buffer(d_weight +
                                     TILE_SIZE * OUTPUT_SIZE * (for_idx + 1));
 
@@ -206,6 +256,15 @@ __device__ __forceinline__ void norm_linear_task_impl(void const *input_ptr,
         int col = (i & (CHUNKS_PER_ROW_A - 1)) << log2_CHUNK_SIZE;
         load_smem(input_smem(row, col), input_dmem_buffer(row, col));
       }
+
+#pragma unroll
+      for (int i = threadIdx.x; i < NUM_CHUNKS_A; i += NUM_THREADS) {
+        int row = i >> log2_CHUNKS_PER_ROW_A;
+        int col = (i & (CHUNKS_PER_ROW_A - 1)) << log2_CHUNK_SIZE;
+        load_smem(norm_weight_smem(row, col),
+                  dnorm_weight_dmem_nuffer(row, col));
+      }
+
 // load weight
 #pragma unroll
       for (int i = threadIdx.x; i < NUM_CHUNKS_B; i += NUM_THREADS) {
@@ -220,14 +279,26 @@ __device__ __forceinline__ void norm_linear_task_impl(void const *input_ptr,
     if ((for_idx & 1) == 0) {
       input_smem.set_ptr(shared_input_buffer);
       input_smem_buffer.set_ptr(shared_input);
+      norm_weight_smem.set_ptr(shared_norm_weight_buffer);
+      norm_weight_smem_buffer.set_ptr(shared_norm_weight);
       input_weight_smem.set_ptr(shared_weight_buffer);
       input_weight_smem_buffer.set_ptr(shared_weight);
     } else {
       input_smem.set_ptr(shared_input);
       input_smem_buffer.set_ptr(shared_input_buffer);
+      norm_weight_smem.set_ptr(shared_norm_weight);
+      norm_weight_smem_buffer.set_ptr(shared_norm_weight_buffer);
       input_weight_smem.set_ptr(shared_weight);
       input_weight_smem_buffer.set_ptr(shared_weight_buffer);
     }
+    __syncthreads();
+
+    // do mul with norm_weight
+    mul<decltype(mul_output_smem),
+        decltype(input_smem),
+        decltype(norm_weight_smem)>(
+        mul_output_smem, input_smem, norm_weight_smem);
+
     __syncthreads();
 
     uint32_t a_frag[4], b_frag[4];
@@ -242,7 +313,8 @@ __device__ __forceinline__ void norm_linear_task_impl(void const *input_ptr,
                       (idx_in_warp & 0xF);
           int m_col = (warp_row << (4 + log2_NUM_WARP_N)) + (k << 4) +
                       ((idx_in_warp >> 4) << 3);
-          T *src_ptr = is_valid ? input_smem(m_row, m_col) : zero_buffer(0, 0);
+          T *src_ptr =
+              is_valid ? mul_output_smem(m_row, m_col) : zero_buffer(0, 0);
           ldsm(src_ptr, a_frag);
           ldsm_t(input_weight_smem(n_row, n_col), b_frag);
           mma_m16n16k16_bf16bf16bf32(
@@ -285,10 +357,11 @@ __device__ __forceinline__ void norm_linear_task_impl(void const *input_ptr,
       mm_output_smem, mm_intermediate_smem);
   __syncthreads();
 
-  float const scalars[] = {0.0f};
+  float const scalars[] = {eps, 0.0f};
   reduction_sum_col<T,
                     decltype(reduction_output_smem),
                     decltype(element_unary_smem),
+                    ElementUnaryOpType::ADDSCALAR,
                     ElementUnaryOpType::SQRT>(
       reduction_output_smem, element_unary_smem, scalars);
   __syncthreads();
@@ -307,7 +380,10 @@ template <typename T>
 __device__ __forceinline__ void norm_linear_task(int output_size,
                                                  void const *input_ptr,
                                                  void const *weight_ptr,
+                                                 void const *norm_weight_ptr,
+                                                 float eps,
                                                  void *output_ptr) {
+
   DISPATCH_OUTPUT_SIZE_FOR_RED_SIZE_4K(
       output_size, norm_linear_task_impl, T, input_ptr, weight_ptr, output_ptr);
 }

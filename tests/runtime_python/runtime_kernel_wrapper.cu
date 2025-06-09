@@ -225,14 +225,18 @@ void single_batch_gqa(
 template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int REDUCTION_SIZE>
 __global__ void norm_linear_kernel_wrapper(void const *input_ptr,
                                            void const *weight_ptr,
+                                           void const *norm_weight_ptr,
+                                           float eps,
                                            void *output_ptr) {
   norm_linear_task_impl<T, BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE>(
-      input_ptr, weight_ptr, output_ptr);
+      input_ptr, weight_ptr, norm_weight_ptr, eps, output_ptr);
 }
 
 template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int REDUCTION_SIZE>
 void launch_norm_linear(void const *input_ptr,
                         void const *weight_ptr,
+                        void const *norm_weight_ptr,
+                        float eps,
                         void *output_ptr) {
   dim3 grid_dim(1, 1, 1);
   dim3 block_dim(128, 1, 1);
@@ -244,15 +248,19 @@ void launch_norm_linear(void const *input_ptr,
       smem_size);
 
   norm_linear_kernel_wrapper<T, BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE>
-      <<<grid_dim, block_dim, smem_size>>>(input_ptr, weight_ptr, output_ptr);
+      <<<grid_dim, block_dim, smem_size>>>(
+          input_ptr, weight_ptr, norm_weight_ptr, eps, output_ptr);
 }
 
 void norm_linear(torch::Tensor input,
                  torch::Tensor weight,
+                 torch::Tensor norm_weight,
+                 float eps,
                  torch::Tensor output) {
 
   void const *input_ptr = input.data_ptr();
   void const *weight_ptr = weight.data_ptr();
+  void const *norm_weight_ptr = norm_weight.data_ptr();
   void *output_ptr = output.data_ptr();
 
   DISPATCH_OUTPUT_SIZE(output.size(1),
@@ -260,6 +268,8 @@ void norm_linear(torch::Tensor input,
                        bfloat16,
                        input_ptr,
                        weight_ptr,
+                       norm_weight_ptr,
+                       eps,
                        output_ptr);
 
   cudaError_t err = cudaDeviceSynchronize();
