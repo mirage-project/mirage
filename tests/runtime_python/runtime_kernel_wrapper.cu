@@ -10,7 +10,7 @@
 using kernel::argmax_kernel;
 using kernel::linear_kernel;
 using kernel::norm_linear_task_impl;
-using kernel::silu_mul_linear_kernel;
+using kernel::silu_mul_linear_task_impl;
 using kernel::single_batch_decoding_kernel;
 using kernel::single_batch_gqa_kernel;
 using bfloat16 = type::bfloat16_t;
@@ -50,17 +50,6 @@ using bfloat16 = type::bfloat16_t;
     FUNC<T, 128>(__VA_ARGS__);                                                 \
   } else {                                                                     \
     printf("Unsupported seq_len: %zu\n", SEQ_LEN);                             \
-  }
-
-#define DISPATCH_OUTPUT_SIZE(OUTPUT_SIZE, FUNC, T, ...)                        \
-  if ((OUTPUT_SIZE) == 16) {                                                   \
-    FUNC<T, 1, 16, 4096>(__VA_ARGS__);                                         \
-  } else if ((OUTPUT_SIZE) == 32) {                                            \
-    FUNC<T, 1, 32, 4096>(__VA_ARGS__);                                         \
-  } else if ((OUTPUT_SIZE) == 64) {                                            \
-    FUNC<T, 1, 64, 4096>(__VA_ARGS__);                                         \
-  } else {                                                                     \
-    printf("Unsupported output size: %d\n", OUTPUT_SIZE);                      \
   }
 
 // Single Batch Decoding
@@ -296,7 +285,7 @@ __global__ void silu_mul_linear_kernel_wrapper(void const *input_ptr,
                                                void const *mul_ptr,
                                                void const *weight_ptr,
                                                void *output_ptr) {
-  silu_mul_linear_kernel<T, BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE>(
+  silu_mul_linear_task_impl<T, BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE>(
       input_ptr, mul_ptr, weight_ptr, output_ptr);
 }
 
@@ -331,13 +320,13 @@ void silu_mul_linear(torch::Tensor input,
   void const *weight_ptr = weight.data_ptr();
   void *output_ptr = output.data_ptr();
 
-  DISPATCH_OUTPUT_SIZE(output.size(1),
-                       launch_silu_mul_linear,
-                       bfloat16,
-                       input_ptr,
-                       mul_ptr,
-                       weight_ptr,
-                       output_ptr);
+  DISPATCH_OUTPUT_SIZE_FOR_RED_SIZE_12K(output.size(1),
+                                        launch_silu_mul_linear,
+                                        bfloat16,
+                                        input_ptr,
+                                        mul_ptr,
+                                        weight_ptr,
+                                        output_ptr);
 
   cudaError_t err = cudaDeviceSynchronize();
   if (err != cudaSuccess) {
