@@ -938,32 +938,29 @@ std::string Runtime::print_task_graph(
             assert(input_ops[i]->dtensor.owner_op->op_type ==
                    type::KN_INPUT_OP);
             if (io_desc.type == IODesc::FusedTorchTensor) {
-              // Currently assert that we fuse the last dim (i.e.,num_dims - 1)
+              // Currently assert that we fuse the 0-th dim (i.e., 0)
               int fused_group_size = 0;
               std::vector<int> group_sizes;
               for (auto const &sub_desc : io_desc.sub_descs) {
                 assert(sub_desc.tensor.num_dims == num_dims);
-                assert(sub_desc.tensor.dim[num_dims - 1] % io_desc.num_groups ==
-                       0);
-                int my_group_size =
-                    sub_desc.tensor.dim[num_dims - 1] / io_desc.num_groups;
+                assert(sub_desc.tensor.dim[0] % io_desc.num_groups == 0);
+                int my_group_size = sub_desc.tensor.dim[0] / io_desc.num_groups;
                 fused_group_size += my_group_size;
                 group_sizes.push_back(my_group_size);
               }
-              assert(io_desc.tensor.dim[num_dims - 1] ==
-                     fused_group_size * io_desc.num_groups);
+              assert(io_desc.tensor.dim[0] == fused_group_size * io_desc.num_groups);
               assert(io_desc.tensor.num_dims == num_dims);
               int fused_dim_off = 0;
-              if (input_map.x == num_dims - 1) {
-                fused_dim_off = io_desc.tensor.dim[num_dims - 1] /
+              if (input_map.x == 0) {
+                fused_dim_off = io_desc.tensor.dim[0] /
                                 bgraph.grid_dim.x * bid.x;
               }
-              if (input_map.y == num_dims - 1) {
-                fused_dim_off = io_desc.tensor.dim[num_dims - 1] /
+              if (input_map.y == 0) {
+                fused_dim_off = io_desc.tensor.dim[0] /
                                 bgraph.grid_dim.y * bid.y;
               }
-              if (input_map.z == num_dims - 1) {
-                fused_dim_off = io_desc.tensor.dim[num_dims - 1] /
+              if (input_map.z == 0) {
+                fused_dim_off = io_desc.tensor.dim[0] /
                                 bgraph.grid_dim.z * bid.z;
               }
               int fused_dim_off_in_group = fused_dim_off % fused_group_size;
@@ -982,31 +979,31 @@ std::string Runtime::print_task_graph(
                   fused_dim_off_in_group;
               // Assert that it is within range
               assert(fused_dim_off_subtensor <
-                     sub_desc.tensor.dim[num_dims - 1]);
-              if (input_map.x >= 0 && input_map.x != num_dims - 1) {
+                     sub_desc.tensor.dim[0]);
+              if (input_map.x > 0) {
                 size_t block_size =
                     sub_desc.tensor.dim[input_map.x] / bgraph.grid_dim.x;
                 offset +=
                     block_size * bid.x * sub_desc.tensor.stride[input_map.x];
-              } else if (input_map.x == num_dims - 1) {
+              } else if (input_map.x == 0) {
                 offset += fused_dim_off_subtensor *
                           sub_desc.tensor.stride[input_map.x];
               }
-              if (input_map.y >= 0 && input_map.y != num_dims - 1) {
+              if (input_map.y > 0) {
                 size_t block_size =
                     sub_desc.tensor.dim[input_map.y] / bgraph.grid_dim.y;
                 offset +=
                     block_size * bid.y * sub_desc.tensor.stride[input_map.y];
-              } else if (input_map.y == num_dims - 1) {
+              } else if (input_map.y == 0) {
                 offset += fused_dim_off_subtensor *
                           sub_desc.tensor.stride[input_map.y];
               }
-              if (input_map.z >= 0 && input_map.z != num_dims - 1) {
+              if (input_map.z > 0) {
                 size_t block_size =
                     sub_desc.tensor.dim[input_map.z] / bgraph.grid_dim.z;
                 offset +=
                     block_size * bid.z * sub_desc.tensor.stride[input_map.z];
-              } else if (input_map.z == num_dims - 1) {
+              } else if (input_map.z == 0) {
                 offset += fused_dim_off_subtensor *
                           sub_desc.tensor.stride[input_map.z];
               }

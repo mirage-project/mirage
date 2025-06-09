@@ -168,8 +168,8 @@ int main(int argc, char **argv) {
                        Wnorm);
       io_configs.emplace(Wnorm.guid, desc_norm);
       kn::DTensor Wqkv =
-          kgraph.new_input({hidden_size, fused_outdim_1 / world_size},
-                           {(size_t)fused_outdim_1 / world_size, 1},
+          kgraph.new_input({fused_outdim_1 / world_size, hidden_size},
+                           {hidden_size, 1},
                            type::DT_BFLOAT16,
                            layout::DmemRowMajor);
       IODesc desc_qkv(rt::IODesc::FusedTorchTensor,
@@ -180,28 +180,31 @@ int main(int argc, char **argv) {
       IODesc q_proj(rt::IODesc::TorchTensor,
                     "layer_" + std::to_string(layer) + "_q_proj",
                     Wqkv);
-      q_proj.tensor.dim[1] = num_local_q_heads * head_dim;
+      q_proj.tensor.dim[0] = num_local_q_heads * head_dim;
+      q_proj.tensor.dim[1] = hidden_size;
       q_proj.tensor.stride[0] = q_proj.tensor.dim[1];
       desc_qkv.sub_descs.push_back(q_proj);
       IODesc k_proj(rt::IODesc::TorchTensor,
                     "layer_" + std::to_string(layer) + "_k_proj",
                     Wqkv);
-      k_proj.tensor.dim[1] = num_local_kv_heads * head_dim;
+      k_proj.tensor.dim[0] = num_local_kv_heads * head_dim;
+      k_proj.tensor.dim[1] = hidden_size;
       k_proj.tensor.stride[0] = k_proj.tensor.dim[1];
       desc_qkv.sub_descs.push_back(k_proj);
       IODesc v_proj(rt::IODesc::TorchTensor,
                     "layer_" + std::to_string(layer) + "_v_proj",
                     Wqkv);
-      v_proj.tensor.dim[1] = num_local_kv_heads * head_dim;
+      v_proj.tensor.dim[0] = num_local_kv_heads * head_dim;
+      v_proj.tensor.dim[1] = hidden_size;
       v_proj.tensor.stride[0] = v_proj.tensor.dim[1];
       desc_qkv.sub_descs.push_back(v_proj);
-      assert(q_proj.tensor.dim[1] + k_proj.tensor.dim[1] +
-                 v_proj.tensor.dim[1] ==
-             desc_qkv.tensor.dim[1]);
+      assert(q_proj.tensor.dim[0] + k_proj.tensor.dim[0] +
+                 v_proj.tensor.dim[0] ==
+             desc_qkv.tensor.dim[0]);
       io_configs.emplace(Wqkv.guid, desc_qkv);
       bgraph.new_input(X, {-1, -1, -1}, 1, layout::SmemRowMajor, true /*store_in_dmem*/);
       bgraph.new_input(Wnorm, {-1, -1, -1}, 0, layout::SmemRowMajor, true /*store_in_dmem*/);
-      bgraph.new_input(Wqkv, {1, -1, -1}, 0, layout::SmemRowMajor, true /*store_in_dmem*/);
+      bgraph.new_input(Wqkv, {0, -1, -1}, 1, layout::SmemRowMajor, true /*store_in_dmem*/);
       bgraph.new_input(AttnIn, {1, -1, -1}, -1, layout::SmemRowMajor, true /*store_in_dmem*/);
       kgraph.customized({X, Wnorm, Wqkv, AttnIn}, bgraph);
       task_configs[kgraph.operators.back()] =
@@ -263,8 +266,8 @@ int main(int argc, char **argv) {
     {
       dim3 grid_dim = {hidden_size / 64, 1, 1}, block_dim = {128, 1, 1};
       tb::Graph bgraph(grid_dim, block_dim, 1/*forloop_dim*/, 64);
-      kn::DTensor W = kgraph.new_input({hidden_size, hidden_size},
-                                       {(size_t)hidden_size, 1},
+      kn::DTensor W = kgraph.new_input({hidden_size, num_local_q_heads * head_dim},
+                                       {num_local_q_heads * head_dim, 1},
                                        type::DT_BFLOAT16,
                                        layout::DmemRowMajor);
       io_configs.emplace(W.guid,
@@ -272,7 +275,7 @@ int main(int argc, char **argv) {
                                 "layer_" + std::to_string(layer) + "_o_proj",
                                 W));
       bgraph.new_input(AttnOut, {-1, -1, -1}, 1, layout::SmemRowMajor, true /*store_in_dmem*/);
-      bgraph.new_input(W, {1, -1, -1}, 0, layout::SmemRowMajor, true /*store_in_dmem*/);
+      bgraph.new_input(W, {0, -1, -1}, 1, layout::SmemRowMajor, true /*store_in_dmem*/);
       // Residual input X
       // IMPORTANT: Note that we need to scale residual input X
       // by the tensor model parallel degree
@@ -311,8 +314,8 @@ int main(int argc, char **argv) {
                        Wnorm);
       io_configs.emplace(Wnorm.guid, desc_norm);
 
-      kn::DTensor Wproj = kgraph.new_input({hidden_size, fused_outdim_2 / world_size},
-                                           {(size_t)fused_outdim_2 / world_size, 1},
+      kn::DTensor Wproj = kgraph.new_input({fused_outdim_2 / world_size, hidden_size},
+                                           {hidden_size, 1},
                                            type::DT_BFLOAT16,
                                            layout::DmemRowMajor);
       IODesc desc_proj(rt::IODesc::FusedTorchTensor,
@@ -323,16 +326,18 @@ int main(int argc, char **argv) {
       IODesc gate_proj(rt::IODesc::TorchTensor,
                        "layer_" + std::to_string(layer) + "_gate_proj",
                        Wproj);
-      gate_proj.tensor.dim[1] = intermediate_size / world_size;
+      gate_proj.tensor.dim[0] = intermediate_size / world_size;
+      gate_proj.tensor.dim[1] = hidden_size;
       gate_proj.tensor.stride[0] = gate_proj.tensor.dim[1];
       desc_proj.sub_descs.push_back(gate_proj);
       IODesc up_proj(rt::IODesc::TorchTensor,
                      "layer_" + std::to_string(layer) + "_up_proj",
                      Wproj);
-      up_proj.tensor.dim[1] = intermediate_size / world_size;
+      up_proj.tensor.dim[0] = intermediate_size / world_size;
+      up_proj.tensor.dim[1] = hidden_size;
       up_proj.tensor.stride[0] = up_proj.tensor.dim[1];
       desc_proj.sub_descs.push_back(up_proj);
-      assert(gate_proj.tensor.dim[1] + up_proj.tensor.dim[1] == desc_proj.tensor.dim[1]);
+      assert(gate_proj.tensor.dim[0] + up_proj.tensor.dim[0] == desc_proj.tensor.dim[0]);
       io_configs.emplace(Wproj.guid, desc_proj);
 
       bgraph.new_input(world_size > 1 ? AttnAROut : AttnProjOut,
@@ -341,7 +346,7 @@ int main(int argc, char **argv) {
                        layout::SmemRowMajor,
                        true /*store_in_dmem*/);
       bgraph.new_input(Wnorm, {-1, -1, -1}, 0, layout::SmemRowMajor, true /*store_in_dmem*/);
-      bgraph.new_input(Wproj, {1, -1, -1}, 0, layout::SmemRowMajor, true /*store_in_dmem*/);
+      bgraph.new_input(Wproj, {0, -1, -1}, 1, layout::SmemRowMajor, true /*store_in_dmem*/);
       bgraph.new_input(MLPMid, {1, -1, -1}, -1, layout::SmemRowMajor, true /*store_in_dmem*/);
       kgraph.customized(
           {world_size > 1 ? AttnAROut : AttnProjOut, Wnorm, Wproj, MLPMid},
@@ -353,8 +358,8 @@ int main(int argc, char **argv) {
     {
       dim3 grid_dim = {hidden_size / 64, 1, 1}, block_dim = {128, 1, 1};
       tb::Graph bgraph(grid_dim, block_dim, 1/*forloop_range*/, 64);
-      kn::DTensor W = kgraph.new_input({intermediate_size, hidden_size},
-                                       {(size_t)hidden_size, 1},
+      kn::DTensor W = kgraph.new_input({hidden_size, intermediate_size / world_size},
+                                       {intermediate_size / world_size, 1},
                                        type::DT_BFLOAT16,
                                        layout::DmemRowMajor);
       io_configs.emplace(W.guid,
@@ -363,7 +368,7 @@ int main(int argc, char **argv) {
                                 W));
       // Each forloop iteration handles one group
       bgraph.new_input(MLPMid, {-1, -1, -1}, 1, layout::SmemRowMajor, true /*store_in_dmem*/);
-      bgraph.new_input(W, {1, -1, -1}, 0, layout::SmemRowMajor, true /*store_in_dmem*/);
+      bgraph.new_input(W, {0, -1, -1}, 1, layout::SmemRowMajor, true /*store_in_dmem*/);
       // Residual input X
       // IMPORTANT: Note that we need to scale residual input X
       // by the tensor model parallel degree
@@ -401,14 +406,14 @@ int main(int argc, char **argv) {
                      Wnorm);
     io_configs.emplace(Wnorm.guid, desc_norm);
 
-    kn::DTensor W = kgraph.new_input({hidden_size, vocab_size},
-                                     {(size_t)vocab_size, 1},
+    kn::DTensor W = kgraph.new_input({vocab_size, hidden_size},
+                                     {hidden_size, 1},
                                      type::DT_BFLOAT16,
                                      layout::DmemRowMajor);
     io_configs.emplace(W.guid, IODesc(rt::IODesc::TorchTensor, "lm_head", W));
     bgraph.new_input(X, {-1, -1, -1}, 1, layout::SmemRowMajor, true /*store_in_dmem*/);
     bgraph.new_input(Wnorm, {-1, -1, -1}, 0, layout::SmemRowMajor, true/*store_in_dmem*/);
-    bgraph.new_input(W, {1, -1, -1}, 0, layout::SmemRowMajor, true /*store_in_dmem*/);
+    bgraph.new_input(W, {0, -1, -1}, 1, layout::SmemRowMajor, true /*store_in_dmem*/);
     bgraph.new_input(ArgmaxIn, {1, -1, -1}, -1, layout::SmemRowMajor, true /*store_in_dmem*/);
     kgraph.customized({X, Wnorm, W, ArgmaxIn}, bgraph);
     task_configs[kgraph.operators.back()] =
