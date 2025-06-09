@@ -113,6 +113,11 @@ public:
   STensor *mul(STensor const *A, STensor const *B);
   STensor div(STensor const &A, STensor const &B);
   STensor *div(STensor const *A, STensor const *B);
+  STensor sub(STensor const &A, STensor const &B);
+  STensor *sub(STensor const *A, STensor const *B);
+  STensor pow(STensor const &A, STensor const &B);
+  STensor *pow(STensor const *A, STensor const *B);
+
   STensor elementbinary(STensor const &A,
                         STensor const &B,
                         mirage::type::TBOperatorType type);
@@ -131,6 +136,11 @@ public:
   STensor reduction_to_dimx(STensor const &A, int dim);
   TBOperator *create_reduction_to_dimx_op(STensor const &A, int dim);
 
+  // reduction_max operator
+  std::vector<STensor> reduction_max(STensor const &A, int dim);
+  std::vector<STensor *> reduction_max(STensor const *A, int dim);
+  TBOperator *create_reduction_max_op(STensor const &A, int dim);
+
   // rms_norm operator
   STensor rms_norm(STensor const &A);
   STensor *rms_norm(STensor const *A);
@@ -148,6 +158,25 @@ public:
                          mirage::type::TBOperatorType type);
   TBOperator *create_forloop_accum_op(STensor const &input,
                                       mirage::type::TBOperatorType type);
+
+  // forloop accum rescale operator
+  STensor forloop_accum_rescale(STensor const &input,
+                                STensor const &rescale,
+                                mirage::type::TBOperatorType type);
+  STensor *forloop_accum_rescale(STensor const *input,
+                                 STensor const *rescale,
+                                 mirage::type::TBOperatorType type);
+  TBOperator *
+      create_forloop_accum_rescale_op(STensor const &input,
+                                      STensor const &rescale,
+                                      mirage::type::TBOperatorType type);
+
+  // forloop accum max operator
+  STensor forloop_accum_max(STensor const &input);
+
+  STensor *forloop_accum_max(STensor const *input);
+
+  TBOperator *create_forloop_accum_max_op(STensor const &input);
 
   // fingerprint related memory management
   off_t allocate_fingerprint(STensor const &tensor);

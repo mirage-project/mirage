@@ -22,6 +22,7 @@
 #include "mirage/utils/fingerprint_functions.h"
 #include "mirage/utils/hash_utils.h"
 #include <cassert>
+#include <cmath>
 
 namespace mirage {
 namespace kernel {
@@ -48,6 +49,8 @@ __global__ void execute_elementbinary(mirage::type::KNOperatorType type,
       output_ptr[i] = operand_A * operand_B;
     } else if (type == mirage::type::KN_DIV_OP) {
       output_ptr[i] = operand_A / operand_B;
+    } else if (type == mirage::type::KN_POW_OP) {
+      output_ptr[i] = powf(operand_A, operand_B);
     } else {
       assert(false && "Unimplemented");
     }
@@ -56,7 +59,7 @@ __global__ void execute_elementbinary(mirage::type::KNOperatorType type,
 
 bool KNElementBinaryOp::profile(ProfileResult &result) {
   // Only launch kernel on a single GPU for profiling
-  checkCUDA(cudaSetDevice(0));
+  // checkCUDA(cudaSetDevice(0));
   assert(input_tensors[0].data_type == DT_FLOAT16);
   assert(input_tensors[1].data_type == DT_FLOAT16);
   assert(output_tensors[0].data_type == DT_FLOAT16);
@@ -177,6 +180,22 @@ __global__ void
       //     threadIdx.x + blockIdx.x * blockDim.x, z % FP_PQ,
       //     input1_idx, x, input2_idx, y);
     }
+  } else if (type == mirage::type::KN_POW_OP) {
+    if (i < num_elements) {
+      int input1_stride = 1, input1_idx = 0;
+      int input2_stride = 1, input2_idx = 0;
+      for (int d = output.num_dims - 1; d >= 0; d--) {
+        input1_idx += (i % input1.dim[d]) * input1_stride;
+        input2_idx += (i % input2.dim[d]) * input2_stride;
+        input1_stride *= input1.dim[d];
+        input2_stride *= input2.dim[d];
+        i /= output.dim[d];
+      }
+      FPType x = input1_fp_ptr[input1_idx];
+      FPType y = input2_fp_ptr[input2_idx];
+      FPType z = compute_pow_fingerprint(x, y);
+      output_fp_ptr[threadIdx.x + blockIdx.x * blockDim.x] = z;
+    }
   } else {
     assert(false && "Unimplemented");
   }
@@ -205,8 +224,8 @@ bool KNElementBinaryOp::fingerprint(void) {
       (num_elements + num_threads_per_blk - 1) / num_threads_per_blk;
   mirage::kernel::DeviceMemoryManager *dmm =
       mirage::kernel::DeviceMemoryManager::get_instance();
-  // Use GPU 0 for computing fingerprint
-  checkCUDA(cudaSetDevice(0));
+  // Use GPU dmm->gpu_id for computing fingerprint
+  checkCUDA(cudaSetDevice(dmm->gpu_id));
   for (int gpu_id = 0; gpu_id < kgraph->gpu_dim.x; gpu_id++) {
     compute_elementbinary_fingerprint<<<num_blocks, num_threads_per_blk>>>(
         op_type,

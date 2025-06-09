@@ -1,5 +1,6 @@
 from .core import *
 
+
 class TBGraph:
     def __init__(self, graph):
         self.cygraph = graph
@@ -21,10 +22,10 @@ class TBGraph:
 
     def gelu(self, A: STensor):
         return self.cygraph.gelu(A)
-    
+
     def relu(self, A: STensor):
         return self.cygraph.relu(A)
-    
+
     def clamp(self, A: STensor, min_val: float, max_val: float):
         return self.cygraph.clamp(A, min_val, max_val)
 
@@ -33,6 +34,9 @@ class TBGraph:
 
     def sqrt(self, A: STensor):
         return self.cygraph.sqrt(A)
+
+    def mul_scalar(self, A: STensor, scalar: float):
+        return self.cygraph.mul_scalar(A, scalar)
 
     def add(self, A: STensor, B: STensor):
         return self.cygraph.add(A, B)
@@ -43,8 +47,14 @@ class TBGraph:
     def div(self, A: STensor, B: STensor):
         return self.cygraph.div(A, B)
 
+    def sub(self, A: STensor, B: STensor):
+        return self.cygraph.sub(A, B)
+
     def reduction(self, A: STensor, dim: int):
         return self.cygraph.reduction(A, dim)
+
+    def reduction_max(self, A: STensor, dim: int):
+        return self.cygraph.reduction_max(A, dim)
 
     def rms_norm(self, A: STensor):
         return self.cygraph.rms_norm(A)
@@ -54,3 +64,9 @@ class TBGraph:
 
     def forloop_accum(self, A: STensor, acc: str = None):
         return self.cygraph.forloop_accum(A, acc)
+
+    def forloop_accum_rescale(self, A: STensor, B: STensor, acc: str = None):
+        return self.cygraph.forloop_accum_rescale(A, B, acc)
+
+    def forloop_accum_max(self, A: STensor):
+        return self.cygraph.forloop_accum_max(A)

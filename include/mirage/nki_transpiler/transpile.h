@@ -20,6 +20,7 @@
 #include <string>
 #include <vector>
 
+#include "mirage/kernel/element_binary.h"
 #include "mirage/kernel/graph.h"
 #include "mirage/transpiler/structs.h"
 
@@ -44,6 +45,18 @@ struct STensorMeta {
 struct NKITranspilerConfig {
   // Target compute capability
   int target_cc;
+};
+
+struct NeuronArch {
+  NeuronArch() = delete;
+  NeuronArch(NeuronArch const &) = delete;
+  NeuronArch(NeuronArch &&) = delete;
+  static constexpr char const *pmax = "nki.language.tile_size.pmax";
+  static constexpr char const *psum_fmax = "nki.language.tile_size.psum_fmax";
+  static constexpr char const *gemm_mov_fmax =
+      "nki.language.tile_size.gemm_moving_fmax";
+  static constexpr char const *gemm_sta_fmax =
+      "nki.language.tile_size.gemm_stationary_fmax";
 };
 
 // Descriptive transpiler errors.
@@ -98,6 +111,8 @@ public:
   std::optional<NKIErrorInfo> resolve_tensor_layout();
   NKICustomOPTranspileResult
       transpile_kn_custom_op(kn::KNCustomizedOp const *op);
+  std::optional<NKICustomOPTranspileResult>
+      transpile_kn_op(kn::KNOperator const *op);
   NKITranspileResult transpile_ugraph();
 };
 

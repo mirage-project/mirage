@@ -69,6 +69,10 @@ inline __device__ FPType compute_sqrt_fingerprint(FPType input,
   return x % FP_PQ;
 }
 
+inline __device__ FPType compute_square_fingerprint(FPType input) {
+  return compute_mul_fingerprint(input, input);
+}
+
 inline __device__ FPType compute_silu_fingerprint(FPType input,
                                                   FPType *exp_lookup_table) {
   // Note that we use $x * e^x$ as the fingerprint for SILU
@@ -98,8 +102,8 @@ inline __device__ FPType compute_clamp_fingerprint(FPType input) {
   // https://pytorch.org/docs/main/generated/torch.clamp.html
   uint32_t q_residual = input % FP_Q;
   uint32_t p_residual = input % FP_P;
-  q_residual = min(2 * FP_Q / 3, max(FP_Q / 3, (int) q_residual));
-  p_residual = min(2 * FP_P / 3, max(FP_P / 3, (int) p_residual));
+  q_residual = min(2 * FP_Q / 3, max(FP_Q / 3, (int)q_residual));
+  p_residual = min(2 * FP_P / 3, max(FP_P / 3, (int)p_residual));
   uint32_t z = p_residual * FP_Q_MUL_P_MOD_1 + q_residual * FP_P_MUL_Q_MOD_1;
   return z % FP_PQ;
 }
@@ -108,10 +112,33 @@ inline __device__ FPType compute_relu_fingerprint(FPType input) {
   // We use max(FP_Q/2, input) to approximate relu
   uint32_t q_residual = input % FP_Q;
   uint32_t p_residual = input % FP_P;
-  q_residual = max(FP_Q / 2, (int) q_residual);
-  p_residual = max(FP_P / 2, (int) p_residual);
+  q_residual = max(FP_Q / 2, (int)q_residual);
+  p_residual = max(FP_P / 2, (int)p_residual);
   uint32_t z = p_residual * FP_Q_MUL_P_MOD_1 + q_residual * FP_P_MUL_Q_MOD_1;
   return z % FP_PQ;
+}
+
+inline __device__ FPType compute_pow_fingerprint(FPType base, FPType exponent) {
+  uint32_t base_p = base % FP_P;
+  uint32_t base_q = base % FP_Q;
+  uint32_t exp = (uint32_t)exponent;
+
+  uint32_t result_p = 1;
+  uint32_t result_q = 1;
+
+  while (exp > 0) {
+    if (exp & 1) {
+      result_p = (result_p * base_p) % FP_P;
+      result_q = (result_q * base_q) % FP_Q;
+    }
+    base_p = (base_p * base_p) % FP_P;
+    base_q = (base_q * base_q) % FP_Q;
+    exp >>= 1;
+  }
+
+  uint32_t z =
+      (result_p * FP_Q_MUL_P_MOD_1 + result_q * FP_P_MUL_Q_MOD_1) % FP_PQ;
+  return z;
 }
 
 } // namespace utils

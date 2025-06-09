@@ -104,6 +104,8 @@ size_t Graph::calculate_shared_memory_usage(TBOperator *new_op) {
       case mirage::type::TB_DIV_OP:
       case mirage::type::TB_ADD_OP:
       case mirage::type::TB_MUL_OP:
+      case mirage::type::TB_SUB_OP:
+      case mirage::type::TB_POW_OP:
       // Reduction
       case mirage::type::TB_REDUCTION_0_OP:
       case mirage::type::TB_REDUCTION_1_OP:
@@ -111,6 +113,9 @@ size_t Graph::calculate_shared_memory_usage(TBOperator *new_op) {
       case mirage::type::TB_REDUCTION_0_TO_DIMX_OP:
       case mirage::type::TB_REDUCTION_1_TO_DIMX_OP:
       case mirage::type::TB_REDUCTION_2_TO_DIMX_OP:
+      case mirage::type::TB_REDUCTION_0_MAX_OP:
+      case mirage::type::TB_REDUCTION_1_MAX_OP:
+      case mirage::type::TB_REDUCTION_2_MAX_OP:
       // Normalization
       case mirage::type::TB_RMS_NORM_OP:
       // Concat
@@ -169,6 +174,25 @@ size_t Graph::calculate_shared_memory_usage(TBOperator *new_op) {
       case mirage::type::TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP: {
         // we will inline accumulation but need to perform
         // a reduuction_to_dimx
+        assert(op->output_tensors.size() == 1);
+        usage += op->output_tensors[0].size();
+        break;
+      }
+      case mirage::type::TB_FORLOOP_ACCUM_NO_RED_RESCALE_OP: {
+        // we will inline accumulation but need to perform
+        // a rescale
+        assert(op->output_tensors.size() == 1);
+        usage += op->output_tensors[0].size();
+        break;
+      }
+      case mirage::type::TB_FORLOOP_ACCUM_RED_LD_SUM_RESCALE_OP: {
+        // we will inline accumulation but need to perform
+        // a rescale
+        assert(op->output_tensors.size() == 1);
+        usage += op->output_tensors[0].size();
+        break;
+      }
+      case mirage::type::TB_FORLOOP_ACCUM_MAX_OP: {
         assert(op->output_tensors.size() == 1);
         usage += op->output_tensors[0].size();
         break;
@@ -505,7 +529,9 @@ NewKernelParams Graph::get_new_kernel_params(bool fingerprint) const {
       }
       case mirage::type::TB_DIV_OP:
       case mirage::type::TB_MUL_OP:
-      case mirage::type::TB_ADD_OP: {
+      case mirage::type::TB_ADD_OP:
+      case mirage::type::TB_SUB_OP:
+      case mirage::type::TB_POW_OP: {
         assert(operators[i]->input_tensors.size() == 2);
         assert(operators[i]->output_tensors.size() == 1);
         mirage::threadblock::STensor input1 = operators[i]->input_tensors[0];
@@ -801,7 +827,9 @@ void from_json(json const &j, Graph &graph) {
       }
       case type::TBOperatorType::TB_ADD_OP:
       case type::TBOperatorType::TB_MUL_OP:
-      case type::TBOperatorType::TB_DIV_OP: {
+      case type::TBOperatorType::TB_DIV_OP:
+      case type::TBOperatorType::TB_SUB_OP:
+      case type::TBOperatorType::TB_POW_OP: {
         STensor const &output = graph.elementbinary(
             get_tensor_from_guid(
                 op.at("input_tensors")[0].at("guid").get<int>()),
@@ -859,6 +887,25 @@ void from_json(json const &j, Graph &graph) {
             get_tensor_from_guid(
                 op.at("input_tensors")[0].at("guid").get<int>()),
             op_type);
+        guid_mapping[output.guid] =
+            op.at("output_tensors")[0].at("guid").get<int>();
+        break;
+      }
+      case type::TBOperatorType::TB_FORLOOP_ACCUM_NO_RED_RESCALE_OP:
+      case type::TBOperatorType::TB_FORLOOP_ACCUM_RED_LD_SUM_RESCALE_OP: {
+        STensor const &output = graph.forloop_accum_rescale(
+            get_tensor_from_guid(
+                op.at("input_tensors")[0].at("guid").get<int>()),
+            get_tensor_from_guid(
+                op.at("input_tensors")[1].at("guid").get<int>()),
+            op_type);
+        guid_mapping[output.guid] =
+            op.at("output_tensors")[0].at("guid").get<int>();
+        break;
+      }
+      case type::TBOperatorType::TB_FORLOOP_ACCUM_MAX_OP: {
+        STensor const &output = graph.forloop_accum_max(get_tensor_from_guid(
+            op.at("input_tensors")[0].at("guid").get<int>()));
         guid_mapping[output.guid] =
             op.at("output_tensors")[0].at("guid").get<int>();
         break;

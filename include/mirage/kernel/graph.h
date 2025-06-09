@@ -83,7 +83,7 @@ public:
 
   KNOperator *create_elementunary_op(DTensor const &input,
                                      mirage::type::KNOperatorType _type);
-  
+
   DTensor elementunary_clamp(DTensor const &input,
                              float const &min_val,
                              float const &max_val);
@@ -94,14 +94,17 @@ public:
   KNOperator *create_elementunary_clamp_op(DTensor const &input,
                                            float const &min_val,
                                            float const &max_val);
-  
+
   // elementunary operator
   DTensor add(DTensor const &input1, DTensor const &input2);
   DTensor mul(DTensor const &input1, DTensor const &input2);
   DTensor div(DTensor const &input1, DTensor const &input2);
+  DTensor pow(DTensor const &input1, DTensor const &input2);
   DTensor *add(DTensor const *input1, DTensor const *input2);
   DTensor *mul(DTensor const *input1, DTensor const *input2);
   DTensor *div(DTensor const *input1, DTensor const *input2);
+  DTensor *pow(DTensor const *input1, DTensor const *input2);
+
   DTensor elementbinary(DTensor const &input1,
                         DTensor const &input2,
                         mirage::type::KNOperatorType _type);
@@ -135,6 +138,11 @@ public:
   DTensor all_reduce(DTensor const &input, bool inplace = true);
   DTensor *all_reduce(DTensor const *input, bool inplace = true);
   KNOperator *create_all_reduce_op(DTensor const &input, bool inplace);
+  // chunk operator
+  std::vector<DTensor> chunk(DTensor const &input, int chunk_size, int dim);
+  int chunk(DTensor const *input, int chunk_size, int dim);
+  KNOperator *create_chunk_op(DTensor const &input, int chunk_size, int dim);
+  // customized operator
   std::vector<DTensor> customized(std::vector<DTensor> const &inputs,
                                   mirage::threadblock::Graph const &_graph);
   int customized(std::vector<DTensor const *> inputs,
@@ -143,8 +151,12 @@ public:
   KNOperator *create_customized_op(std::vector<DTensor> const &inputs,
                                    mirage::threadblock::Graph const &_graph);
   // helper functions
-  int get_input_dtensors(DTensor **inputs);
-  int get_input_dtensor_layout(DTensor const *input, int *strides);
+  int get_num_input_dtensors() const;
+  int get_num_output_dtensors() const;
+  int get_input_dtensors(DTensor **inputs) const;
+  int get_input_dtensor_shape_and_stride(DTensor const *input,
+                                         int *strides,
+                                         int *dims) const;
   void generate_triton_program(char const *filepath);
 
   bool can_allocate(DTensor const &tensor,
@@ -152,6 +164,9 @@ public:
   bool can_allocate(size_t data_size_in_bytes, size_t fp_size_in_bytes) const;
   bool allocate(DTensor &tensor, bool allocate_fingerprint = true);
   void free(DTensor &tensor);
+
+  // hash related functions
+  size_t get_owner_independent_hash() const;
 
 public:
   std::vector<mirage::kernel::KNOperator *> operators;

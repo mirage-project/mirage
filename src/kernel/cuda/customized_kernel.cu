@@ -201,7 +201,8 @@ __global__ void customized_kernel_function(
         __syncthreads();
       } else if (op_type == mirage::type::TB_DIV_OP ||
                  op_type == mirage::type::TB_ADD_OP ||
-                 op_type == mirage::type::TB_MUL_OP) {
+                 op_type == mirage::type::TB_MUL_OP ||
+                 op_type == mirage::type::TB_POW_OP) {
         int3 input1_shape, input2_shape;
         int input1_smem_offset, input2_smem_offset, output_smem_offset;
         mirage::threadblock::deserialize_elementbinary_op_parameters(
@@ -618,6 +619,8 @@ __global__ void compute_customizedop_fingerprint(
           break;
         }
         case mirage::type::TB_EXP_OP:
+        case mirage::type::TB_SQUARE_OP:
+        case mirage::type::TB_SQRT_OP:
         case mirage::type::TB_SILU_OP:
         case mirage::type::TB_GELU_OP:
         case mirage::type::TB_RELU_OP:
@@ -636,6 +639,8 @@ __global__ void compute_customizedop_fingerprint(
           mirage::threadblock::TBElementUnaryFingerPrinter fp(
               new_params.operator_types[op],
               exp_lookup_table /*lookup_table*/,
+              sqrt_p_lookup_table,
+              sqrt_q_lookup_table,
               base_ptr,
               num_elements,
               threadIdx.x,
@@ -645,7 +650,8 @@ __global__ void compute_customizedop_fingerprint(
         }
         case mirage::type::TB_ADD_OP:
         case mirage::type::TB_MUL_OP:
-        case mirage::type::TB_DIV_OP: {
+        case mirage::type::TB_DIV_OP:
+        case mirage::type::TB_POW_OP: {
           int3 input1_shape, input2_shape;
           int input1_smem_offset, input2_smem_offset, output_smem_offset;
           mirage::threadblock::deserialize_elementbinary_op_parameters(
@@ -806,8 +812,10 @@ void KNCustomizedOp::run() {
   assert(kgraph->gpu_dim.x == 1);
   int gpu_id = 0;
   if (!mirage::type::CLAMP_MIN_MAX.empty()) {
-    float CLAMP_MIN_MAX_HOST[2] = {mirage::type::CLAMP_MIN_MAX["min_val"], mirage::type::CLAMP_MIN_MAX["max_val"]};
-    cudaMemcpyToSymbol(CLAMP_MIN_MAX_DEVICE, CLAMP_MIN_MAX_HOST, sizeof(float) * 2);
+    float CLAMP_MIN_MAX_HOST[2] = {mirage::type::CLAMP_MIN_MAX["min_val"],
+                                   mirage::type::CLAMP_MIN_MAX["max_val"]};
+    cudaMemcpyToSymbol(
+        CLAMP_MIN_MAX_DEVICE, CLAMP_MIN_MAX_HOST, sizeof(float) * 2);
   }
   customized_kernel_function<<<bgraph.grid_dim,
                                bgraph.block_dim,
@@ -816,14 +824,17 @@ void KNCustomizedOp::run() {
 }
 
 bool KNCustomizedOp::profile(ProfileResult &result) {
+  assert(false);
   // Launch kernel on a single GPU
   // assert(kgraph->gpu_dim.x == 1);
   int gpu_id = 0;
   checkCUDA(cudaSetDevice(0));
 
   if (!mirage::type::CLAMP_MIN_MAX.empty()) {
-    float CLAMP_MIN_MAX_HOST[2] = {mirage::type::CLAMP_MIN_MAX["min_val"], mirage::type::CLAMP_MIN_MAX["max_val"]};
-    cudaMemcpyToSymbol(CLAMP_MIN_MAX_DEVICE, CLAMP_MIN_MAX_HOST, sizeof(float) * 2);
+    float CLAMP_MIN_MAX_HOST[2] = {mirage::type::CLAMP_MIN_MAX["min_val"],
+                                   mirage::type::CLAMP_MIN_MAX["max_val"]};
+    cudaMemcpyToSymbol(
+        CLAMP_MIN_MAX_DEVICE, CLAMP_MIN_MAX_HOST, sizeof(float) * 2);
   }
 
   printf("smem_offset = %ld\n", bgraph.smem_offset);
