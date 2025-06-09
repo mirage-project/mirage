@@ -214,12 +214,13 @@ void Runtime::register_mugraph(
       assert(input_map == output_map);
       assert(bgraph.grid_dim == pre_op->bgraph.grid_dim);
       dim3 bid;
+      std::map<dim3, std::map<int, TaskId>, Dim3Comparator> ag_pre_task_map;
       for (bid.x = 0; bid.x < bgraph.grid_dim.x; bid.x++) {
         for (bid.y = 0; bid.y < bgraph.grid_dim.y; bid.y++) {
           for (bid.z = 0; bid.z < bgraph.grid_dim.z; bid.z++) {
             // event_desc_0 is the trigger_event of previous_task
             // event_desc_1 is the trigger_event of allgather
-            EventDesc event_desc_0, event_desc_1;
+            EventDesc event_desc_0;
             event_desc_0.event_type = EVENT_LAUNCH_TASKS;
             event_desc_0.num_triggers = 1;
             event_desc_0.first_task_id = all_tasks.size();
@@ -230,13 +231,14 @@ void Runtime::register_mugraph(
                 get_event_id(my_gpu_id, all_events.size(), false);
             all_events.push_back(event_desc_0);
             // Step 1: create (num_gpus - 1) tasks for allgather
+            std::map<int, TaskId> pre_tasks;
             for (int tgt_gpu_id = 0; tgt_gpu_id < num_gpus; tgt_gpu_id++) {
               if (tgt_gpu_id == my_gpu_id) {
                 continue;
               }
               TaskDesc task(TASK_NVSHMEM_COPY);
-              task.trigger_event = get_event_id(
-                  tgt_gpu_id, all_events.size(), true /*nvshmem_event*/);
+              //task.trigger_event = get_event_id(
+              //    tgt_gpu_id, all_events.size(), true /*nvshmem_event*/);
               // Initialize input/output tensors to the task
               {
                 TensorDesc desc;
@@ -256,11 +258,27 @@ void Runtime::register_mugraph(
                 task.outputs[task.num_outputs++] = desc;
               }
               all_tasks.push_back(task);
-            }
+              pre_tasks[tgt_gpu_id] = all_tasks.size() - 1;
+            } // for tgt_gpu_id
+            ag_pre_task_map[bid] = pre_tasks;
+          } // for bid.z
+        } // for bid.y
+      } // for bid.x
+      for (bid.x = 0; bid.x < bgraph.grid_dim.x; bid.x++) {
+        for (bid.y = 0; bid.y < bgraph.grid_dim.y; bid.y++) {
+          for (bid.z = 0; bid.z < bgraph.grid_dim.z; bid.z++) {
+            // event_desc_1 is the trigger_event of allgather
+            EventDesc event_desc_1;
             event_desc_1.event_type = EVENT_LAUNCH_TASKS;
             event_desc_1.first_task_id = all_tasks.size();
             event_desc_1.last_task_id = all_tasks.size() + 1;
             event_desc_1.num_triggers = num_gpus - 1;
+            assert(ag_pre_task_map.find(bid) != ag_pre_task_map.end());
+            std::map<int, TaskId> pre_tasks = ag_pre_task_map.find(bid)->second;
+            for (const auto& t : pre_tasks) {
+              all_tasks[t.second].trigger_event =
+                  get_event_id(t.first, all_events.size(), true);
+            }
             all_events.push_back(event_desc_1);
             // Step 2: create a task for reduce
             TaskDesc task(TASK_REDUCE);
@@ -726,13 +744,12 @@ std::string Runtime::print_task_graph(
         output_ops.push_back(static_cast<tb::TBInputOp *>(op));
       }
     }
-
-    for (bid.x = 0; bid.x < bgraph.grid_dim.x; bid.x++) {
-      for (bid.y = 0; bid.y < bgraph.grid_dim.y; bid.y++) {
-        for (bid.z = 0; bid.z < bgraph.grid_dim.z; bid.z++) {
-          // To perform allreduce, we first launch (num_gpus-1) tasks for
-          // allgather
-          if (task_type == TASK_ALLREDUCE) {
+    if (task_type == TASK_ALLREDUCE) {
+      for (bid.x = 0; bid.x < bgraph.grid_dim.x; bid.x++) {
+        for (bid.y = 0; bid.y < bgraph.grid_dim.y; bid.y++) {
+          for (bid.z = 0; bid.z < bgraph.grid_dim.z; bid.z++) {
+            // To perform allreduce, we first launch (num_gpus-1) tasks for
+            // allgather
             for (int tgt_gpu_id = 0; tgt_gpu_id < num_gpus; tgt_gpu_id++) {
               if (tgt_gpu_id == my_gpu_id) {
                 continue;
@@ -866,8 +883,15 @@ std::string Runtime::print_task_graph(
               json_task_graph["all_tasks"].push_back(json_task);
               tgbody.e("}");
               task_pos++;
-            }
-          }
+            } // for tgt_gpu_id
+          } // for bid.z
+        } // for bid.y
+      } // for bid.x
+    } // if task_type == TASK_ALLREDUCE
+
+    for (bid.x = 0; bid.x < bgraph.grid_dim.x; bid.x++) {
+      for (bid.y = 0; bid.y < bgraph.grid_dim.y; bid.y++) {
+        for (bid.z = 0; bid.z < bgraph.grid_dim.z; bid.z++) {
           TaskId task_id = task_map.at(bid);
           TaskDesc task_desc = all_tasks[task_pos];
           assert(task_desc.task_type == task_type ||
