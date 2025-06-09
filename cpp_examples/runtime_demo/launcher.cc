@@ -156,7 +156,7 @@ int main(int argc, char **argv) {
     {
       int num_tasks = 96;
       assert(fused_outdim_1 % (world_size * num_tasks) == 0);
-      dim3 grid_dim = {(size_t) num_tasks,
+      dim3 grid_dim = {num_tasks,
                        1,
                        1},
            block_dim = {128, 1, 1};
@@ -311,34 +311,35 @@ int main(int argc, char **argv) {
                        Wnorm);
       io_configs.emplace(Wnorm.guid, desc_norm);
 
-      kn::DTensor Wproj = kgraph.new_input({hidden_size, fused_outdim_2},
-                                           {(size_t)fused_outdim_2, 1},
+      kn::DTensor Wproj = kgraph.new_input({hidden_size, fused_outdim_2 / world_size},
+                                           {(size_t)fused_outdim_2 / world_size, 1},
                                            type::DT_BFLOAT16,
                                            layout::DmemRowMajor);
       IODesc desc_proj(rt::IODesc::FusedTorchTensor,
                        "layer_" + std::to_string(layer) + "_gatedup_proj",
                        Wproj);
-      desc_proj.num_groups = fused_outdim_2 / world_size / 64;
-      fused_group_size_2 = 64;
+      desc_proj.num_groups = 1;
+      fused_group_size_2 = fused_outdim_2 / (world_size);
       IODesc gate_proj(rt::IODesc::TorchTensor,
                        "layer_" + std::to_string(layer) + "_gate_proj",
                        Wproj);
-      gate_proj.tensor.dim[1] = intermediate_size;
+      gate_proj.tensor.dim[1] = intermediate_size / world_size;
       gate_proj.tensor.stride[0] = gate_proj.tensor.dim[1];
       desc_proj.sub_descs.push_back(gate_proj);
       IODesc up_proj(rt::IODesc::TorchTensor,
                      "layer_" + std::to_string(layer) + "_up_proj",
                      Wproj);
-      up_proj.tensor.dim[1] = intermediate_size;
+      up_proj.tensor.dim[1] = intermediate_size / world_size;
       up_proj.tensor.stride[0] = up_proj.tensor.dim[1];
       desc_proj.sub_descs.push_back(up_proj);
+      assert(gate_proj.tensor.dim[1] + up_proj.tensor.dim[1] == desc_proj.tensor.dim[1]);
       io_configs.emplace(Wproj.guid, desc_proj);
 
       bgraph.new_input(world_size > 1 ? AttnAROut : AttnProjOut,
                        {-1, -1, -1},
                        1,
                        layout::SmemRowMajor,
-		       true /*store_in_dmem*/);
+                       true /*store_in_dmem*/);
       bgraph.new_input(Wnorm, {-1, -1, -1}, 0, layout::SmemRowMajor, true /*store_in_dmem*/);
       bgraph.new_input(Wproj, {1, -1, -1}, 0, layout::SmemRowMajor, true /*store_in_dmem*/);
       bgraph.new_input(MLPMid, {1, -1, -1}, -1, layout::SmemRowMajor, true /*store_in_dmem*/);
@@ -361,7 +362,6 @@ int main(int argc, char **argv) {
                                 "layer_" + std::to_string(layer) + "_down_proj",
                                 W));
       // Each forloop iteration handles one group
-      // assert(MLPMid.dim[1] / bgraph.forloop_range == fused_group_size_2);
       bgraph.new_input(MLPMid, {-1, -1, -1}, 1, layout::SmemRowMajor, true /*store_in_dmem*/);
       bgraph.new_input(W, {1, -1, -1}, 0, layout::SmemRowMajor, true /*store_in_dmem*/);
       // Residual input X
