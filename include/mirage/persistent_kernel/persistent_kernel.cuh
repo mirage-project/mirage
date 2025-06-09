@@ -437,11 +437,18 @@ __global__ void persistent_kernel(RuntimeConfig config) {
             for (int i = 0; i < task_desc.inputs[0].num_dims; i++) {
               size_in_bytes *= task_desc.inputs[0].dim[i];
             }
-            nvshmemx_putmem_block(task_desc.outputs[0].base_ptr,
-                                  task_desc.inputs[0].base_ptr,
-                                  size_in_bytes,
-                                  get_event_gpu_id(task_desc.trigger_event));
-            nvshmem_fence();
+            size_t event_index = get_event_position_index(task_desc.trigger_event);
+            int gpu_id = static_cast<int>(get_event_gpu_id(task_desc.trigger_event));
+            assert(gpu_id < config.num_gpus);
+            assert(gpu_id != config.my_gpu_id);
+            nvshmemx_putmem_signal_block(task_desc.outputs[0].base_ptr,
+                                         task_desc.inputs[0].base_ptr,
+                                         size_in_bytes,
+                                         reinterpret_cast<uint64_t *>(&config.all_event_counters[event_index]),
+                                         1/*signal*/,
+                                         NVSHMEM_SIGNAL_ADD,
+                                         gpu_id);
+            //nvshmem_fence();
             break;
           }
           case TASK_REDUCE: {
@@ -543,19 +550,21 @@ __global__ void persistent_kernel(RuntimeConfig config) {
           }
         } else {
           // Case 2: trigger a nvshmem event
-          size_t gpu_id = get_event_gpu_id(event_id);
-          assert(gpu_id < config.num_gpus);
-          assert(gpu_id != config.my_gpu_id);
-          EventCounter count = nvshmem_ulonglong_atomic_fetch_add(
-              &config.all_event_counters[event_index], 1, gpu_id);
+          assert(task_desc.task_type == TASK_NVSHMEM_COPY);
+          // Note that nvshmem copy task signal counter during data copy
+          // we don't need to do anything here is the task type is NVSHMEM_COPY
+          //int gpu_id = static_cast<int>(get_event_gpu_id(event_id));
+          //assert(gpu_id < config.num_gpus);
+          //assert(gpu_id != config.my_gpu_id);
+          //EventCounter count = nvshmem_ulonglong_atomic_fetch_add(
+          //    &config.all_event_counters[event_index], 1, gpu_id);
           if (config.verbose) {
             printf("[%d][DONE] worker_id(%d) task_id(%llu) event_id(%llx) "
-                   "event_type(remote) count(%llu)\n",
+                   "event_type(remote)\n",
                    config.my_gpu_id,
                    worker_id,
                    get_task_position_index(cur_task_id),
-                   event_id,
-                   count);
+                   event_id);
           }
 #ifdef DEADCODE
           if (count == 1) {
