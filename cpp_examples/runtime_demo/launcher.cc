@@ -24,7 +24,7 @@ int main(int argc, char **argv) {
   namespace rt = mirage::runtime;
   namespace tp = mirage::type;
   using mirage::runtime::IODesc;
-  //int vocab_size = 151936;
+  // int vocab_size = 151936;
   int vocab_size = 153600;
   int batch_size = 1;
   int max_kv_length = 4096;
@@ -49,12 +49,20 @@ int main(int argc, char **argv) {
   kn::DTensor X = kgraph.new_input(
       {batch_size, 1}, {1, 1}, type::DT_INT64, layout::DmemRowMajor);
   io_configs.emplace(X.guid, IODesc(rt::IODesc::TorchTensor, "input_token", X));
-  kn::DTensor cos_pos_embed = kgraph.new_input(
-      {max_kv_length, head_dim}, {head_dim, 1}, type::DT_BFLOAT16, layout::DmemRowMajor);
-  io_configs.emplace(cos_pos_embed.guid, IODesc(rt::IODesc::TorchTensor, "cos_position_embedding", cos_pos_embed));
-  kn::DTensor sin_pos_embed = kgraph.new_input(
-      {max_kv_length, head_dim}, {head_dim, 1}, type::DT_BFLOAT16, layout::DmemRowMajor);
-  io_configs.emplace(sin_pos_embed.guid, IODesc(rt::IODesc::TorchTensor, "sin_position_embedding", sin_pos_embed));
+  kn::DTensor cos_pos_embed = kgraph.new_input({max_kv_length, head_dim},
+                                               {head_dim, 1},
+                                               type::DT_BFLOAT16,
+                                               layout::DmemRowMajor);
+  io_configs.emplace(
+      cos_pos_embed.guid,
+      IODesc(rt::IODesc::TorchTensor, "cos_position_embedding", cos_pos_embed));
+  kn::DTensor sin_pos_embed = kgraph.new_input({max_kv_length, head_dim},
+                                               {head_dim, 1},
+                                               type::DT_BFLOAT16,
+                                               layout::DmemRowMajor);
+  io_configs.emplace(
+      sin_pos_embed.guid,
+      IODesc(rt::IODesc::TorchTensor, "sin_position_embedding", sin_pos_embed));
 
   kn::DTensor AllReduceBuf =
       kgraph.new_input({world_size, batch_size, hidden_size},
@@ -99,11 +107,11 @@ int main(int argc, char **argv) {
       MLPFinal.guid,
       IODesc(rt::IODesc::CUDAMallocTensor, "mlp_final", MLPFinal));
 
-  kn::DTensor AttnOut = kgraph.new_input(
-      {batch_size, num_local_q_heads * head_dim},
-      {(size_t)num_local_q_heads * head_dim, 1},
-      type::DT_BFLOAT16,
-      layout::DmemRowMajor);
+  kn::DTensor AttnOut =
+      kgraph.new_input({batch_size, num_local_q_heads * head_dim},
+                       {(size_t)num_local_q_heads * head_dim, 1},
+                       type::DT_BFLOAT16,
+                       layout::DmemRowMajor);
   io_configs.emplace(AttnOut.guid,
                      IODesc(rt::IODesc::CUDAMallocTensor, "attn_out", AttnOut));
   kn::DTensor AttnProjOut = kgraph.new_input({batch_size, hidden_size},
@@ -156,10 +164,7 @@ int main(int argc, char **argv) {
     {
       int num_tasks = 96;
       assert(fused_outdim_1 % (world_size * num_tasks) == 0);
-      dim3 grid_dim = {num_tasks,
-                       1,
-                       1},
-           block_dim = {128, 1, 1};
+      dim3 grid_dim = {num_tasks, 1, 1}, block_dim = {128, 1, 1};
       tb::Graph bgraph(grid_dim, block_dim, 1, 64);
       kn::DTensor Wnorm = kgraph.new_input(
           {hidden_size}, {1}, type::DT_BFLOAT16, layout::DmemRowMajor);
@@ -202,10 +207,17 @@ int main(int argc, char **argv) {
                  v_proj.tensor.dim[0] ==
              desc_qkv.tensor.dim[0]);
       io_configs.emplace(Wqkv.guid, desc_qkv);
-      bgraph.new_input(X, {-1, -1, -1}, 1, layout::SmemRowMajor, true /*store_in_dmem*/);
-      bgraph.new_input(Wnorm, {-1, -1, -1}, 0, layout::SmemRowMajor, true /*store_in_dmem*/);
-      bgraph.new_input(Wqkv, {0, -1, -1}, 1, layout::SmemRowMajor, true /*store_in_dmem*/);
-      bgraph.new_input(AttnIn, {1, -1, -1}, -1, layout::SmemRowMajor, true /*store_in_dmem*/);
+      bgraph.new_input(
+          X, {-1, -1, -1}, 1, layout::SmemRowMajor, true /*store_in_dmem*/);
+      bgraph.new_input(
+          Wnorm, {-1, -1, -1}, 0, layout::SmemRowMajor, true /*store_in_dmem*/);
+      bgraph.new_input(
+          Wqkv, {0, -1, -1}, 1, layout::SmemRowMajor, true /*store_in_dmem*/);
+      bgraph.new_input(AttnIn,
+                       {1, -1, -1},
+                       -1,
+                       layout::SmemRowMajor,
+                       true /*store_in_dmem*/);
       kgraph.customized({X, Wnorm, Wqkv, AttnIn}, bgraph);
       task_configs[kgraph.operators.back()] =
           std::make_tuple(3, 1, rt::TASK_RMS_NORM_LINEAR);
@@ -228,7 +240,9 @@ int main(int argc, char **argv) {
       kn::DTensor K = kgraph.new_input(
           {batch_size, max_kv_length, num_local_kv_heads, head_dim},
           {(size_t)max_kv_length * num_local_kv_heads * head_dim,
-	   (size_t)num_local_kv_heads * head_dim, (size_t)head_dim, 1},
+           (size_t)num_local_kv_heads * head_dim,
+           (size_t)head_dim,
+           1},
           type::DT_BFLOAT16,
           layout::DmemRowMajor);
       io_configs.emplace(K.guid,
@@ -238,7 +252,9 @@ int main(int argc, char **argv) {
       kn::DTensor V = kgraph.new_input(
           {batch_size, max_kv_length, num_local_kv_heads, head_dim},
           {(size_t)max_kv_length * num_local_kv_heads * head_dim,
-	   (size_t)num_local_kv_heads * head_dim, (size_t)head_dim, 1},
+           (size_t)num_local_kv_heads * head_dim,
+           (size_t)head_dim,
+           1},
           type::DT_BFLOAT16,
           layout::DmemRowMajor);
       io_configs.emplace(V.guid,
@@ -250,37 +266,73 @@ int main(int argc, char **argv) {
       tb::Graph bgraph(grid_dim, block_dim, 1, 64);
       assert(AttnIn.dim[1] / num_local_kv_heads == fused_group_size_1);
       // Note that QKV is concatenated together
-      bgraph.new_input(AttnIn, {0, 1, -1}, -1, layout::SmemRowMajor, true /*store_in_dmem*/);
-      bgraph.new_input(K, {0, 2, -1}, 1, layout::SmemRowMajor, true /*store_in_dmem*/);
-      bgraph.new_input(V, {0, 2, -1}, 1, layout::SmemRowMajor, true /*store_in_dmem*/);
-      bgraph.new_input(Qnorm, {-1, -1, -1}, -1, layout::SmemRowMajor, true/*store_in_dmem*/);
-      bgraph.new_input(Knorm, {-1, -1, -1}, -1, layout::SmemRowMajor, true/*store_in_dmem*/);
-      bgraph.new_input(cos_pos_embed, {-1, -1, -1}, -1, layout::SmemRowMajor, true/*store_in_dmem*/);
-      bgraph.new_input(sin_pos_embed, {-1, -1, -1}, -1, layout::SmemRowMajor, true/*store_in_dmem*/);
-      bgraph.new_input(AttnOut, {0, 1, -1}, -1, layout::SmemRowMajor, true /*store_in_dmem*/);
-      kgraph.customized({AttnIn, K, V, Qnorm, Knorm, cos_pos_embed, sin_pos_embed, AttnOut}, bgraph);
+      bgraph.new_input(
+          AttnIn, {0, 1, -1}, -1, layout::SmemRowMajor, true /*store_in_dmem*/);
+      bgraph.new_input(
+          K, {0, 2, -1}, 1, layout::SmemRowMajor, true /*store_in_dmem*/);
+      bgraph.new_input(
+          V, {0, 2, -1}, 1, layout::SmemRowMajor, true /*store_in_dmem*/);
+      bgraph.new_input(Qnorm,
+                       {-1, -1, -1},
+                       -1,
+                       layout::SmemRowMajor,
+                       true /*store_in_dmem*/);
+      bgraph.new_input(Knorm,
+                       {-1, -1, -1},
+                       -1,
+                       layout::SmemRowMajor,
+                       true /*store_in_dmem*/);
+      bgraph.new_input(cos_pos_embed,
+                       {-1, -1, -1},
+                       -1,
+                       layout::SmemRowMajor,
+                       true /*store_in_dmem*/);
+      bgraph.new_input(sin_pos_embed,
+                       {-1, -1, -1},
+                       -1,
+                       layout::SmemRowMajor,
+                       true /*store_in_dmem*/);
+      bgraph.new_input(AttnOut,
+                       {0, 1, -1},
+                       -1,
+                       layout::SmemRowMajor,
+                       true /*store_in_dmem*/);
+      kgraph.customized(
+          {AttnIn, K, V, Qnorm, Knorm, cos_pos_embed, sin_pos_embed, AttnOut},
+          bgraph);
       task_configs[kgraph.operators.back()] =
           std::make_tuple(7, 1, rt::TASK_ATTENTION_1);
     }
     // Add out_projection
     {
       dim3 grid_dim = {hidden_size / 64, 1, 1}, block_dim = {128, 1, 1};
-      tb::Graph bgraph(grid_dim, block_dim, 1/*forloop_dim*/, 64);
-      kn::DTensor W = kgraph.new_input({hidden_size, num_local_q_heads * head_dim},
-                                       {num_local_q_heads * head_dim, 1},
-                                       type::DT_BFLOAT16,
-                                       layout::DmemRowMajor);
+      tb::Graph bgraph(grid_dim, block_dim, 1 /*forloop_dim*/, 64);
+      kn::DTensor W =
+          kgraph.new_input({hidden_size, num_local_q_heads * head_dim},
+                           {num_local_q_heads * head_dim, 1},
+                           type::DT_BFLOAT16,
+                           layout::DmemRowMajor);
       io_configs.emplace(W.guid,
                          IODesc(rt::IODesc::TorchTensor,
                                 "layer_" + std::to_string(layer) + "_o_proj",
                                 W));
-      bgraph.new_input(AttnOut, {-1, -1, -1}, 1, layout::SmemRowMajor, true /*store_in_dmem*/);
-      bgraph.new_input(W, {0, -1, -1}, 1, layout::SmemRowMajor, true /*store_in_dmem*/);
+      bgraph.new_input(AttnOut,
+                       {-1, -1, -1},
+                       1,
+                       layout::SmemRowMajor,
+                       true /*store_in_dmem*/);
+      bgraph.new_input(
+          W, {0, -1, -1}, 1, layout::SmemRowMajor, true /*store_in_dmem*/);
       // Residual input X
       // IMPORTANT: Note that we need to scale residual input X
       // by the tensor model parallel degree
-      bgraph.new_input(X, {1, -1, -1}, -1, layout::SmemRowMajor, true /*store_in_dmem*/);
-      bgraph.new_input(AttnProjOut, {1, -1, -1}, -1, layout::SmemRowMajor, true /*store_in_dmem*/);
+      bgraph.new_input(
+          X, {1, -1, -1}, -1, layout::SmemRowMajor, true /*store_in_dmem*/);
+      bgraph.new_input(AttnProjOut,
+                       {1, -1, -1},
+                       -1,
+                       layout::SmemRowMajor,
+                       true /*store_in_dmem*/);
       kgraph.customized({AttnOut, W, X, AttnProjOut}, bgraph);
       task_configs[kgraph.operators.back()] =
           std::make_tuple(3, 1, rt::TASK_MATMUL_WITH_RESIDUAL);
@@ -291,9 +343,21 @@ int main(int argc, char **argv) {
     if (world_size > 1) {
       dim3 grid_dim = {hidden_size / 64, 1, 1}, block_dim = {128, 1, 1};
       tb::Graph bgraph(grid_dim, block_dim, 1, 64);
-      bgraph.new_input(AttnProjOut, {1, -1, -1}, -1, layout::SmemRowMajor, true /*store_in_dmem*/);
-      bgraph.new_input(AllReduceBuf, {2, -1, -1}, -1, layout::SmemRowMajor, true /*store_in_dmem*/);
-      bgraph.new_input(AttnAROut, {1, -1, -1}, -1, layout::SmemRowMajor, true /*store_in_dmem*/);
+      bgraph.new_input(AttnProjOut,
+                       {1, -1, -1},
+                       -1,
+                       layout::SmemRowMajor,
+                       true /*store_in_dmem*/);
+      bgraph.new_input(AllReduceBuf,
+                       {2, -1, -1},
+                       -1,
+                       layout::SmemRowMajor,
+                       true /*store_in_dmem*/);
+      bgraph.new_input(AttnAROut,
+                       {1, -1, -1},
+                       -1,
+                       layout::SmemRowMajor,
+                       true /*store_in_dmem*/);
       kgraph.customized({AttnProjOut, AllReduceBuf, AttnAROut}, bgraph);
       task_configs[kgraph.operators.back()] =
           std::make_tuple(2, 1, rt::TASK_ALLREDUCE);
@@ -303,9 +367,8 @@ int main(int argc, char **argv) {
     {
       int num_tasks = 96;
       assert(fused_outdim_2 % (world_size * num_tasks) == 0);
-      dim3 grid_dim = {num_tasks, 1, 1},
-           block_dim = {128, 1, 1};
-      tb::Graph bgraph(grid_dim, block_dim, 1/*forloop_dim*/, 64);
+      dim3 grid_dim = {num_tasks, 1, 1}, block_dim = {128, 1, 1};
+      tb::Graph bgraph(grid_dim, block_dim, 1 /*forloop_dim*/, 64);
       kn::DTensor Wnorm = kgraph.new_input(
           {hidden_size}, {1}, type::DT_BFLOAT16, layout::DmemRowMajor);
       IODesc desc_norm(rt::IODesc::TorchTensor,
@@ -314,10 +377,11 @@ int main(int argc, char **argv) {
                        Wnorm);
       io_configs.emplace(Wnorm.guid, desc_norm);
 
-      kn::DTensor Wproj = kgraph.new_input({fused_outdim_2 / world_size, hidden_size},
-                                           {hidden_size, 1},
-                                           type::DT_BFLOAT16,
-                                           layout::DmemRowMajor);
+      kn::DTensor Wproj =
+          kgraph.new_input({fused_outdim_2 / world_size, hidden_size},
+                           {hidden_size, 1},
+                           type::DT_BFLOAT16,
+                           layout::DmemRowMajor);
       IODesc desc_proj(rt::IODesc::FusedTorchTensor,
                        "layer_" + std::to_string(layer) + "_gatedup_proj",
                        Wproj);
@@ -337,7 +401,8 @@ int main(int argc, char **argv) {
       up_proj.tensor.dim[1] = hidden_size;
       up_proj.tensor.stride[0] = up_proj.tensor.dim[1];
       desc_proj.sub_descs.push_back(up_proj);
-      assert(gate_proj.tensor.dim[0] + up_proj.tensor.dim[0] == desc_proj.tensor.dim[0]);
+      assert(gate_proj.tensor.dim[0] + up_proj.tensor.dim[0] ==
+             desc_proj.tensor.dim[0]);
       io_configs.emplace(Wproj.guid, desc_proj);
 
       bgraph.new_input(world_size > 1 ? AttnAROut : AttnProjOut,
@@ -345,9 +410,15 @@ int main(int argc, char **argv) {
                        1,
                        layout::SmemRowMajor,
                        true /*store_in_dmem*/);
-      bgraph.new_input(Wnorm, {-1, -1, -1}, 0, layout::SmemRowMajor, true /*store_in_dmem*/);
-      bgraph.new_input(Wproj, {0, -1, -1}, 1, layout::SmemRowMajor, true /*store_in_dmem*/);
-      bgraph.new_input(MLPMid, {1, -1, -1}, -1, layout::SmemRowMajor, true /*store_in_dmem*/);
+      bgraph.new_input(
+          Wnorm, {-1, -1, -1}, 0, layout::SmemRowMajor, true /*store_in_dmem*/);
+      bgraph.new_input(
+          Wproj, {0, -1, -1}, 1, layout::SmemRowMajor, true /*store_in_dmem*/);
+      bgraph.new_input(MLPMid,
+                       {1, -1, -1},
+                       -1,
+                       layout::SmemRowMajor,
+                       true /*store_in_dmem*/);
       kgraph.customized(
           {world_size > 1 ? AttnAROut : AttnProjOut, Wnorm, Wproj, MLPMid},
           bgraph);
@@ -357,23 +428,34 @@ int main(int argc, char **argv) {
     // silu + Matmul
     {
       dim3 grid_dim = {hidden_size / 64, 1, 1}, block_dim = {128, 1, 1};
-      tb::Graph bgraph(grid_dim, block_dim, 1/*forloop_range*/, 64);
-      kn::DTensor W = kgraph.new_input({hidden_size, intermediate_size / world_size},
-                                       {intermediate_size / world_size, 1},
-                                       type::DT_BFLOAT16,
-                                       layout::DmemRowMajor);
+      tb::Graph bgraph(grid_dim, block_dim, 1 /*forloop_range*/, 64);
+      kn::DTensor W =
+          kgraph.new_input({hidden_size, intermediate_size / world_size},
+                           {intermediate_size / world_size, 1},
+                           type::DT_BFLOAT16,
+                           layout::DmemRowMajor);
       io_configs.emplace(W.guid,
                          IODesc(rt::IODesc::TorchTensor,
                                 "layer_" + std::to_string(layer) + "_down_proj",
                                 W));
       // Each forloop iteration handles one group
-      bgraph.new_input(MLPMid, {-1, -1, -1}, 1, layout::SmemRowMajor, true /*store_in_dmem*/);
-      bgraph.new_input(W, {0, -1, -1}, 1, layout::SmemRowMajor, true /*store_in_dmem*/);
+      bgraph.new_input(MLPMid,
+                       {-1, -1, -1},
+                       1,
+                       layout::SmemRowMajor,
+                       true /*store_in_dmem*/);
+      bgraph.new_input(
+          W, {0, -1, -1}, 1, layout::SmemRowMajor, true /*store_in_dmem*/);
       // Residual input X
       // IMPORTANT: Note that we need to scale residual input X
       // by the tensor model parallel degree
-      bgraph.new_input(X, {1, -1, -1}, -1, layout::SmemRowMajor, true /*store_in_dmem*/);
-      bgraph.new_input(MLPOut, {1, -1, -1}, -1, layout::SmemRowMajor, true /*store_in_dmem*/);
+      bgraph.new_input(
+          X, {1, -1, -1}, -1, layout::SmemRowMajor, true /*store_in_dmem*/);
+      bgraph.new_input(MLPOut,
+                       {1, -1, -1},
+                       -1,
+                       layout::SmemRowMajor,
+                       true /*store_in_dmem*/);
       kgraph.customized({MLPMid, W, X, MLPOut}, bgraph);
       task_configs[kgraph.operators.back()] =
           std::make_tuple(3, 1, rt::TASK_SILU_MUL_LINEAR_WITH_RESIDUAL);
@@ -384,9 +466,21 @@ int main(int argc, char **argv) {
     if (world_size > 1) {
       dim3 grid_dim = {hidden_size / 64, 1, 1}, block_dim = {128, 1, 1};
       tb::Graph bgraph(grid_dim, block_dim, 1, 64);
-      bgraph.new_input(MLPOut, {1, -1, -1}, -1, layout::SmemRowMajor, true /*store_in_dmem*/);
-      bgraph.new_input(AllReduceBuf, {2, -1, -1}, -1, layout::SmemRowMajor, true /*store_in_dmem*/);
-      bgraph.new_input(MLPFinal, {1, -1, -1}, -1, layout::SmemRowMajor, true /*store_in_dmem*/);
+      bgraph.new_input(MLPOut,
+                       {1, -1, -1},
+                       -1,
+                       layout::SmemRowMajor,
+                       true /*store_in_dmem*/);
+      bgraph.new_input(AllReduceBuf,
+                       {2, -1, -1},
+                       -1,
+                       layout::SmemRowMajor,
+                       true /*store_in_dmem*/);
+      bgraph.new_input(MLPFinal,
+                       {1, -1, -1},
+                       -1,
+                       layout::SmemRowMajor,
+                       true /*store_in_dmem*/);
       kgraph.customized({MLPOut, AllReduceBuf, MLPFinal}, bgraph);
       task_configs[kgraph.operators.back()] =
           std::make_tuple(2, 1, rt::TASK_ALLREDUCE);
@@ -398,12 +492,10 @@ int main(int argc, char **argv) {
     int num_tasks = 96;
     assert(vocab_size % num_tasks == 0);
     dim3 grid_dim = {num_tasks, 1, 1}, block_dim = {128, 1, 1};
-    tb::Graph bgraph(grid_dim, block_dim, 1/*forloop_range*/, 64);
+    tb::Graph bgraph(grid_dim, block_dim, 1 /*forloop_range*/, 64);
     kn::DTensor Wnorm = kgraph.new_input(
         {hidden_size}, {1}, type::DT_BFLOAT16, layout::DmemRowMajor);
-    IODesc desc_norm(rt::IODesc::TorchTensor,
-                     "model_norm_weight",
-                     Wnorm);
+    IODesc desc_norm(rt::IODesc::TorchTensor, "model_norm_weight", Wnorm);
     io_configs.emplace(Wnorm.guid, desc_norm);
 
     kn::DTensor W = kgraph.new_input({vocab_size, hidden_size},
@@ -411,10 +503,17 @@ int main(int argc, char **argv) {
                                      type::DT_BFLOAT16,
                                      layout::DmemRowMajor);
     io_configs.emplace(W.guid, IODesc(rt::IODesc::TorchTensor, "lm_head", W));
-    bgraph.new_input(X, {-1, -1, -1}, 1, layout::SmemRowMajor, true /*store_in_dmem*/);
-    bgraph.new_input(Wnorm, {-1, -1, -1}, 0, layout::SmemRowMajor, true/*store_in_dmem*/);
-    bgraph.new_input(W, {0, -1, -1}, 1, layout::SmemRowMajor, true /*store_in_dmem*/);
-    bgraph.new_input(ArgmaxIn, {1, -1, -1}, -1, layout::SmemRowMajor, true /*store_in_dmem*/);
+    bgraph.new_input(
+        X, {-1, -1, -1}, 1, layout::SmemRowMajor, true /*store_in_dmem*/);
+    bgraph.new_input(
+        Wnorm, {-1, -1, -1}, 0, layout::SmemRowMajor, true /*store_in_dmem*/);
+    bgraph.new_input(
+        W, {0, -1, -1}, 1, layout::SmemRowMajor, true /*store_in_dmem*/);
+    bgraph.new_input(ArgmaxIn,
+                     {1, -1, -1},
+                     -1,
+                     layout::SmemRowMajor,
+                     true /*store_in_dmem*/);
     kgraph.customized({X, Wnorm, W, ArgmaxIn}, bgraph);
     task_configs[kgraph.operators.back()] =
         std::make_tuple(3, 1, rt::TASK_RMS_NORM_LINEAR);
@@ -422,9 +521,17 @@ int main(int argc, char **argv) {
   // Add argmax
   {
     dim3 grid_dim = {1, 1, 1}, block_dim = {128, 1, 1};
-    tb::Graph bgraph(grid_dim, block_dim, 1/*forloop_range*/, 64);
-    bgraph.new_input(ArgmaxIn, {-1, -1, -1}, -1, layout::SmemRowMajor, true /*store_in_dmem*/);
-    bgraph.new_input(ArgmaxOut, {-1, -1, -1}, -1, layout::SmemRowMajor, true /*store_in_dmem*/);
+    tb::Graph bgraph(grid_dim, block_dim, 1 /*forloop_range*/, 64);
+    bgraph.new_input(ArgmaxIn,
+                     {-1, -1, -1},
+                     -1,
+                     layout::SmemRowMajor,
+                     true /*store_in_dmem*/);
+    bgraph.new_input(ArgmaxOut,
+                     {-1, -1, -1},
+                     -1,
+                     layout::SmemRowMajor,
+                     true /*store_in_dmem*/);
     kgraph.customized({ArgmaxIn, ArgmaxOut}, bgraph);
     task_configs[kgraph.operators.back()] =
         std::make_tuple(1, 1, rt::TASK_ARGMAX);
@@ -432,9 +539,14 @@ int main(int argc, char **argv) {
 #ifdef DEADCODE
   {
     dim3 grid_dim = {1, 1, 1}, block_dim = {128, 1, 1};
-    tb::Graph bgraph(grid_dim, block_dim, 1/*forloop_range*/, 64);
-    bgraph.new_input(X, {-1, -1, -1}, -1, layout::SmemRowMajor, true /*store_in_dmem*/);
-    bgraph.new_input(ArgmaxOut, {-1, -1, -1}, -1, layout::SmemRowMajor, true /*store_in_dmem*/);
+    tb::Graph bgraph(grid_dim, block_dim, 1 /*forloop_range*/, 64);
+    bgraph.new_input(
+        X, {-1, -1, -1}, -1, layout::SmemRowMajor, true /*store_in_dmem*/);
+    bgraph.new_input(ArgmaxOut,
+                     {-1, -1, -1},
+                     -1,
+                     layout::SmemRowMajor,
+                     true /*store_in_dmem*/);
     kgraph.customized({X, ArgmaxOut}, bgraph);
     task_configs[kgraph.operators.back()] =
         std::make_tuple(1, 1, rt::TASK_ARGMAX);
@@ -446,8 +558,8 @@ int main(int argc, char **argv) {
   runtime.register_mugraph(kgraph, task_configs);
   runtime.sanity_check();
   if (rank == 0) {
-    std::string code =
-        runtime.print_task_graph(kgraph, task_configs, io_configs, true/*use_json_format*/);
+    std::string code = runtime.print_task_graph(
+        kgraph, task_configs, io_configs, true /*use_json_format*/);
     std::ofstream outfile("test.cu");
     outfile << code;
     outfile.close();
