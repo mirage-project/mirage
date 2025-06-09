@@ -394,17 +394,25 @@ int main(int argc, char **argv) {
     assert(vocab_size % num_tasks == 0);
     dim3 grid_dim = {num_tasks, 1, 1}, block_dim = {128, 1, 1};
     tb::Graph bgraph(grid_dim, block_dim, 1/*forloop_range*/, 64);
+    kn::DTensor Wnorm = kgraph.new_input(
+        {hidden_size}, {1}, type::DT_BFLOAT16, layout::DmemRowMajor);
+    IODesc desc_norm(rt::IODesc::TorchTensor,
+                     "model_norm_weight",
+                     Wnorm);
+    io_configs.emplace(Wnorm.guid, desc_norm);
+
     kn::DTensor W = kgraph.new_input({hidden_size, vocab_size},
                                      {(size_t)vocab_size, 1},
                                      type::DT_BFLOAT16,
                                      layout::DmemRowMajor);
     io_configs.emplace(W.guid, IODesc(rt::IODesc::TorchTensor, "lm_head", W));
     bgraph.new_input(X, {-1, -1, -1}, 1, layout::SmemRowMajor, true /*store_in_dmem*/);
+    bgraph.new_input(Wnorm, {-1, -1, -1}, 0, layout::SmemRowMajor, true/*store_in_dmem*/);
     bgraph.new_input(W, {1, -1, -1}, 0, layout::SmemRowMajor, true /*store_in_dmem*/);
     bgraph.new_input(ArgmaxIn, {1, -1, -1}, -1, layout::SmemRowMajor, true /*store_in_dmem*/);
-    kgraph.customized({X, W, ArgmaxIn}, bgraph);
+    kgraph.customized({X, Wnorm, W, ArgmaxIn}, bgraph);
     task_configs[kgraph.operators.back()] =
-        std::make_tuple(2, 1, rt::TASK_RMS_NORM_LINEAR);
+        std::make_tuple(3, 1, rt::TASK_RMS_NORM_LINEAR);
   }
   // Add argmax
   {
