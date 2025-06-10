@@ -25,7 +25,7 @@ enum class ElementUnaryOpType {
   SQUARE,
   SQRT,
   MULSCALAR,
-  ADDSCALAR,
+  ADDSCALAR
 };
 
 using bfloat16 = type::bfloat16_t;
