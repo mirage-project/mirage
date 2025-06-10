@@ -55,12 +55,14 @@ def config_cython():
                               path.join(mirage_path, "deps", "json", "include"),
                               path.join(mirage_path, "deps", "cutlass", "include"),
                               path.join(z3_path, "include"),
-                              path.join(mirage_path, "build", "release"),
+                              path.join(mirage_path, "build", "abstract_subexpr", "release"),
+                              path.join(mirage_path, "build", "formal_verifier", "release"),
                               "/usr/local/cuda/include"],
-                libraries=["mirage_runtime", "cudadevrt", "cudart_static", "cudnn", "cublas", "cudart", "cuda", "z3", "gomp", "abstract_subexpr"],
+                libraries=["mirage_runtime", "cudadevrt", "cudart_static", "cudnn", "cublas", "cudart", "cuda", "z3", "gomp", "abstract_subexpr", "formal_verifier"],
                 library_dirs=[path.join(mirage_path, "build"),
                               path.join(z3_path, "lib"),
-                              path.join(mirage_path, "build", "release"),
+                              path.join(mirage_path, "build", "abstract_subexpr", "release"),
+                              path.join(mirage_path, "build", "formal_verifier", "release"),
                               "/usr/local/cuda/lib",
                               "/usr/local/cuda/lib64",
                               "/usr/local/cuda/lib64/stubs"],
@@ -69,7 +71,8 @@ def config_cython():
                     "-fPIC",
                     "-fopenmp",
                     "-lrt",
-                    f"-Wl,-rpath,{path.join(mirage_path, 'build', 'release')}"
+                    f"-Wl,-rpath,{path.join(mirage_path, 'build', 'abstract_subexpr', 'release')}",
+                    f"-Wl,-rpath,{path.join(mirage_path, 'build', 'formal_verifier', 'release')}",
                 ],
                 language="c++"))
         return cythonize(ret, compiler_directives={"language_level" : 3})
@@ -99,15 +102,26 @@ if mirage_path == '':
     mirage_path = '.'
 
 try:
-    subprocess.check_output(['cargo', 'build', '--release', '--target-dir', '../../../../build'], cwd='src/search/abstract_expr/abstract_subexpr')
+    subprocess.check_output(['cargo', 'build', '--release', '--target-dir', '../../../../build/abstract_subexpr'], cwd='src/search/abstract_expr/abstract_subexpr')
 except subprocess.CalledProcessError as e:
     print("Failed to build abstract_subexpr Rust library, building it ...")
     try:
-        subprocess.run(['cargo', 'build', '--release', '--target-dir', '../../../../build'], cwd='src/search/abstract_expr/abstract_subexpr', check=True)
+        subprocess.run(['cargo', 'build', '--release', '--target-dir', '../../../../build/abstract_subexpr'], cwd='src/search/abstract_expr/abstract_subexpr', check=True)
         print("Abstract_subexpr Rust library built successfully.")
     except subprocess.CalledProcessError as e:
         print("Failed to build abstract_subexpr Rust library.")
-    os.environ['ABSTRACT_SUBEXPR_LIB'] = os.path.join(mirage_path,'build', 'release', 'libabstract_subexpr.so')
+    os.environ['ABSTRACT_SUBEXPR_LIB'] = os.path.join(mirage_path,'build', 'abstract_subexpr', 'release', 'libabstract_subexpr.so')
+
+try:
+    subprocess.check_output(['cargo', 'build', '--release', '--target-dir', '../../../../build/formal_verifier'], cwd='src/search/verification/formal_verifier_equiv')
+except subprocess.CalledProcessError as e:
+    print("Failed to build formal_verifier Rust library, building it ...")
+    try:
+        subprocess.run(['cargo', 'build', '--release', '--target-dir', '../../../../build/formal_verifier'], cwd='src/search/verification/formal_verifier_equiv', check=True)
+        print("formal_verifier Rust library built successfully.")
+    except subprocess.CalledProcessError as e:
+        print("Failed to build formal_verifier Rust library.")
+    os.environ['FORMAL_VERIFIER_LIB'] = os.path.join(mirage_path,'build', 'formal_verifier', 'release', 'libformal_verifier.so')
 
 # build Mirage runtime library
 try:
@@ -128,8 +142,10 @@ try:
     subprocess.check_call(['cmake', '..',
                            '-DZ3_CXX_INCLUDE_DIRS=' + z3_path + '/include/',
                            '-DZ3_LIBRARIES=' + path.join(z3_path, 'lib', 'libz3.so'),
-                           '-DABSTRACT_SUBEXPR_LIB=' + path.join(mirage_path, 'build', 'release'),
-                           '-DABSTRACT_SUBEXPR_LIBRARIES=' + path.join(mirage_path, 'build', 'release', 'libabstract_subexpr.so'),
+                           '-DABSTRACT_SUBEXPR_LIB=' + path.join(mirage_path, 'build', 'abstract_subexpr', 'release'),
+                           '-DABSTRACT_SUBEXPR_LIBRARIES=' + path.join(mirage_path, 'build', 'abstract_subexpr', 'release', 'libabstract_subexpr.so'),
+                           '-DFORMAL_VERIFIER_LIB=' + path.join(mirage_path, 'build', 'formal_verifier', 'release'),
+                           '-DFORMAL_VERIFIER_LIBRARIES=' + path.join(mirage_path, 'build', 'formal_verifier', 'release', 'libformal_verifier.so'),
                            '-DCMAKE_C_COMPILER=' + os.environ['CC'],
                            '-DCMAKE_CXX_COMPILER=' + os.environ['CXX'],
                           ], cwd=build_dir, env=os.environ.copy())
