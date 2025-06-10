@@ -261,33 +261,41 @@ public:
           bool      MInput,
           int       K_ITER,
           class     TiledMMA_,
-          class     Mma_Tiler_>
+          class     Mma_Tiler_,
+          class     ClusterShape_MNK_>
 class InputTMAAsyncCopy_Blackwell {
-  using MMA_TILER = decltype(make_shape(shape<0>(DstLayout{}),
-                                        shape<1>(DstLayout{})));
+  // using MMA_TILER = decltype(make_shape(shape<0>(DstLayout{}),
+  //                                       shape<1>(DstLayout{})));
 
-  static constexpr cute::UMMA::Major UMajor = UMMA::Major::MN;
+  static constexpr cute::UMMA::Major UMajor = UMMA::Major::K;
 
-  using DstPipeLayout = DstLayout;
-
-  // using SmemLayoutAtom =
-  //     decltype(cutlass::gemm::collective::detail::sm100_smem_selector<  
-  //              UMajor,
-  //              T,                                                   
-  //              decltype(get<0>(DstMNLayout{})),              
-  //              decltype(get<1>(DstMNLayout{}))>());     
-  // using DstPipeLayout =
-  //     decltype(tile_to_shape(
-  //         SmemLayoutAtom{},
-  //         make_shape(shape<0>(DstMNLayout{}),    // tile-M
-  //                    shape<1>(DstMNLayout{}),    // tile-N
-  //                    Int<BlackwellAsyncPipeline::Stage>{})));
-
-  // static constexpr int tmaTransactionBytes =
-  //     sizeof(T) * size(DstPipeLayout{}) / BlackwellAsyncPipeline::Stage;
-
+  // using DstMNKLayout = DstLayout;
   using TiledMMA = TiledMMA_;
   using Mma_Tiler = Mma_Tiler_;
+  using ClusterShape = ClusterShape_MNK_;
+
+  using SmemLayoutAtom =
+      decltype(cutlass::gemm::collective::detail::sm100_smem_selector<
+               UMajor,
+               T,                                                   
+               std::conditional_t<MInput, decltype(get<0>(Mma_Tiler{})), 
+                                  decltype(get<1>(Mma_Tiler{}))>,
+               decltype(get<2>(Mma_Tiler{}))>());
+
+  using DstMNKLayout = 
+      decltype(
+              partition_shape_A(TiledMMA{},
+              make_shape(std::conditional_t<MInput, decltype(shape<0>(Mma_Tiler{})), 
+                                                decltype(shape<1>(Mma_Tiler{}))>(),
+              shape<2>(Mma_Tiler{}))));
+
+  using DstPipeLayout =
+      decltype(UMMA::tile_to_mma_shape(
+          SmemLayoutAtom{},
+          append(DstMNKLayout{},
+                 Int<BlackwellAsyncPipeline::Stage>{}),
+          Step<_1,_2,_3>{}));
+
 
 public:
   static __device__ __forceinline__
@@ -327,36 +335,16 @@ public:
 
     if (lane_id() == 0) {
       Tensor mA = tma_a.get_tma_tensor(shape(SrcLayout{}));
-      // if (block0() && threadIdx.x == 256) {
-      //   printf("\nis minput: %d", MInput);
-      //   printf("\nDstPipeLayout: \n");
-      //   print(DstPipeLayout{});
-      //   printf("\nmA: \n");
-      //   print(mA);
-        // printf("\nmA tensor: \n");
-      //   print_tensor(mA);
-      // }
+
       Tensor tCsA = make_tensor(make_smem_ptr(dst_smem), DstPipeLayout{});
-      // if (blockIdx.x == 0 && blockIdx.y == 0 && threadIdx.x == 0) {
-      // for (int r = 0; r < 5; ++r) {
-      //   for (int c = 0; c < 5; ++c) {
-      //     printf("tCsA(%d,%d): %f\n", r, c, (float)tCsA[make_coord((r,c),0,0,0)]);
-      //   }
-      // }
-    // }
       
       TiledMMA tiled_mma;
-      auto cluster_shape = make_shape(Int<4>{}, Int<4>{}, Int<1>{});
-      Layout cluster_layout_vmnk = tiled_divide(make_layout(cluster_shape),
-                                          make_tile(typename TiledMMA::AtomThrID{}));
+      Layout cluster_layout_vmnk = get_cluster_layout<TiledMMA, ClusterShape>();
       auto cta_in_cluster_coord_vmnk = cluster_layout_vmnk.get_flat_coord(int(cute::block_rank_in_cluster()));
       auto elect_one_cta  = get<0>(cta_in_cluster_coord_vmnk) == Int<0>{};
 
 
-      auto mma_coord_vmnk = make_coord(blockIdx.x % size<0>(cluster_layout_vmnk), // Peer CTA coordinate
-                                   blockIdx.x / size<0>(cluster_layout_vmnk), //    MMA-M coordinate
-                                   blockIdx.y,                                //    MMA-N coordinate
-                                   _);                                        //    MMA-K coordinate
+      auto mma_coord_vmnk = get_mma_coord_vmnk<TiledMMA, ClusterShape>(blockIdx.x, blockIdx.y);
       auto mma_coord = select<1,2,3>(mma_coord_vmnk);
       decltype(auto) gA = [&]() {
         if constexpr (MInput) {
@@ -365,10 +353,11 @@ public:
           return local_tile(mA, mma_tiler, mma_coord, Step< X, _1,_1>{});  // (MmaTile_M, MmaTile_K, Tiles_K)
         }
       }();
+
       auto mma_v = get<0>(mma_coord_vmnk);
       ThrMMA cta_mma = tiled_mma.get_slice(mma_v);   // Use Peer CTA coordinate
       Tensor tCgA = cta_mma.partition_A(gA);         // (MmaA, NumMma_M, NumMma_K, Tiles_K)
-      
+
       // Project the cluster_layout for tma_A along the N-modes
       uint16_t tma_mcast_mask;
       if (MInput) {
@@ -376,28 +365,7 @@ public:
       } else {
         tma_mcast_mask = create_tma_multicast_mask<1>(cluster_layout_vmnk, cta_in_cluster_coord_vmnk);
       }
-      // if (block0()) {
-      //   printf("\n");
-      //   print(tiled_mma);
-      //   printf("\ndistpipe: \n");
-      //   print(DstPipeLayout{});
-      //   printf("\ngA: \n");
-      //   print(gA);
-      //   printf("\ntCgA: \n");
-      //   print(tCgA);
-      //   printf("\ntCsA: \n");
-      //   print(tCsA);
-      //   printf("\nmma coord: \n");
-      //   print(mma_coord);
-      //   printf("\ncluster_layout_vmnk: \n");
-      //   print(cluster_layout_vmnk);
-      //   printf("\n group_modes<0,rank(tCsA)-1>(tCsA): \n");
-      //   print(group_modes<0,3>(tCsA));
-      //   printf("\n group_modes<0,rank(tCgA)-1>(tCgA): \n");
-      //   print(group_modes<0,rank(tCgA)-1>(tCgA));
-      //   printf("\ncta_in_cluster_coord_vmnk: \n");
-      //   print(cta_in_cluster_coord_vmnk);
-      // }
+
 
       auto [tAgAX, tAsAX] = [&]() {
         if constexpr (MInput) {
@@ -413,7 +381,7 @@ public:
         }
       }();
 
-      // if (block0()) {
+      // if (block0() && threadIdx.x == 256) {
       //   printf("\ntAgAX: \n");
       //   print(tAgAX);
       //   printf("\ntAsAX: \n");
@@ -423,6 +391,15 @@ public:
       //   printf("\n tAsAX tensor: \n");
       //   print(tAsAX);
       //   printf("\n");
+      //   printf("\n group_modes<0,3>(tCsA): \n");
+      //   print(group_modes<0,3>(tCsA));
+      //   printf("\n group_modes<0,rank(tCsA)-1>(tCsA): \n");
+      //   print(group_modes<0,rank(tCsA)-1>(tCsA));
+      //   printf("\n group_modes<0,3>(tCgA): \n");
+      //   print(group_modes<0,3>(tCgA));
+      //   printf("\n group_modes<0,rank(tCgA)-1>(tCgA): \n");
+      //   print(group_modes<0,rank(tCgA)-1>(tCgA));
+
       // }
 
       auto [tma_barrier, write_stage] = pipeline.producer_acquire();
@@ -439,7 +416,16 @@ public:
       copy(tma_a.with(*tma_barrier, tma_mcast_mask),
            tAgAX(_, k_iter),
            tAsAX(_, write_stage));
-
+      // if (block0() && threadIdx.x == 256) {
+      //   printf("\n tAsAX: \n");
+      //   print(tAsAX);
+      //   printf("\n k_iter: \n");
+      //   printf("%d", k_iter);
+      //   printf("\n write_stage: \n");
+      //   printf("%d", write_stage);
+      //   printf("\n tAsAX tensor: \n");
+      //   print_tensor(tAsAX);
+      // }
       pipeline.producer_advance();
     }
   }

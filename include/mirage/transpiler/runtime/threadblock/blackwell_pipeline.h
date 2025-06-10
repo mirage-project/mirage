@@ -47,8 +47,8 @@ __device__ __forceinline__
                  pipeline_params,
                  ClusterShape_MNK_{},
                  cute::true_type{},  // InitBarriers
-                 cute::true_type{})
-                 { // InitMasks
+                 cute::true_type{})  // InitMasks
+                 { 
                   cutlass::pipeline_init_arrive_relaxed(size(ClusterShape{}));
                   cutlass::pipeline_init_wait(size(ClusterShape{}));
                  }
