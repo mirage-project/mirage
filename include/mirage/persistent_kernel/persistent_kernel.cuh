@@ -553,7 +553,7 @@ __global__ void persistent_kernel(RuntimeConfig config) {
             assert(false && "Unimplemented task");
           }
         } // case
-      } // else
+      }   // else
       __syncthreads();
       if (config.profiling && task_desc.task_type != TASK_TERMINATE) {
         PROFILER_EVENT_END(task_desc.task_type, task_counter++);
