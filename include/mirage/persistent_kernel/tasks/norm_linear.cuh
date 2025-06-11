@@ -31,7 +31,11 @@ using bfloat16 = type::bfloat16_t;
 
 // kernel for [16, 64] and any BATCH_SIZE < 16 [x, 64]
 // OUTPUT_SIZE = 16, 32, 64, REDUCTION_SIZE = multiple of 64
-template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int REDUCTION_SIZE>
+template <typename T,
+          int BATCH_SIZE,
+          int OUTPUT_SIZE,
+          int REDUCTION_SIZE,
+          int O_STRIDE>
 __device__ __forceinline__ void
     norm_linear_task_impl(void const *input_ptr,
                           void const *norm_weight_ptr,
@@ -78,7 +82,7 @@ __device__ __forceinline__ void
   using InputDmem = dmem_row_const<T, BATCH_SIZE, TILE_SIZE, REDUCTION_SIZE>;
   using WeightDmem =
       dmem_col_const<T, TILE_SIZE, OUTPUT_ATOM_SIZE, REDUCTION_SIZE>;
-  using OutputDmem = dmem_row<T, BATCH_SIZE, OUTPUT_ATOM_SIZE, OUTPUT_SIZE>;
+  using OutputDmem = dmem_row<T, BATCH_SIZE, OUTPUT_ATOM_SIZE, O_STRIDE>;
 
   InputDmem input_dmem(d_input);
   InputDmem norm_weight_dmem(d_norm_weight);
@@ -259,7 +263,6 @@ __device__ __forceinline__ void
                     norm_weight_dmem_nuffer(row, col));
         }
 
-// load weight
 #pragma unroll
         for (int i = threadIdx.x; i < NUM_CHUNKS_B; i += NUM_THREADS) {
           int row = (i & (CHUNKS_PER_COL_B - 1)) << log2_CHUNK_SIZE;

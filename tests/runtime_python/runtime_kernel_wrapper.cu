@@ -228,7 +228,11 @@ __global__ void norm_linear_kernel_wrapper(void const *input_ptr,
                                            void const *weight_ptr,
                                            float eps,
                                            void *output_ptr) {
-  norm_linear_task_impl<T, BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE>(
+  norm_linear_task_impl<T,
+                        BATCH_SIZE,
+                        OUTPUT_SIZE,
+                        REDUCTION_SIZE,
+                        OUTPUT_SIZE>(
       input_ptr, norm_weight_ptr, weight_ptr, eps, output_ptr);
 }
 

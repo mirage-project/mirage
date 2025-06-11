@@ -366,7 +366,10 @@ __global__ void persistent_kernel(RuntimeConfig config) {
           assert(!is_nvshmem_event(event_id));
           assert(get_event_gpu_id(event_id) == config.my_gpu_id);
           size_t event_index = get_event_position_index(event_id);
-          EventCounter needed_counts = static_cast<EventCounter>(config.all_event_num_triggers[event_index]) * get_task_iteration_num(cur_task_id);
+          EventCounter needed_counts =
+              static_cast<EventCounter>(
+                  config.all_event_num_triggers[event_index]) *
+              get_task_iteration_num(cur_task_id);
           EventCounter actual_counts = 0;
           while (actual_counts < needed_counts) {
             asm volatile("ld.acquire.gpu.u64 %0, [%1];"
@@ -390,13 +393,32 @@ __global__ void persistent_kernel(RuntimeConfig config) {
       } else {
         switch (task_desc.task_type) {
           case TASK_RMS_NORM_LINEAR: {
-            kernel::norm_linear_task<bfloat16>(
-                task_desc.outputs[0].dim[task_desc.outputs[0].num_dims - 1],
-                task_desc.inputs[0].base_ptr,
-                task_desc.inputs[1].base_ptr,
-                task_desc.inputs[2].base_ptr,
-                0.0f,
-                task_desc.outputs[0].base_ptr);
+            if (task_desc.outputs[0].stride[0] == 6144) {
+              kernel::norm_linear_task_impl<bfloat16, 1, 64, 4096, 6144>(
+                  task_desc.inputs[0].base_ptr,
+                  task_desc.inputs[1].base_ptr,
+                  task_desc.inputs[2].base_ptr,
+                  1e-6f, // eps
+                  task_desc.outputs[0].base_ptr);
+            } else if (task_desc.outputs[0].stride[0] == 24576) {
+              kernel::norm_linear_task_impl<bfloat16, 1, 256, 4096, 24576>(
+                  task_desc.inputs[0].base_ptr,
+                  task_desc.inputs[1].base_ptr,
+                  task_desc.inputs[2].base_ptr,
+                  1e-6f, // eps
+                  task_desc.outputs[0].base_ptr);
+            } else if (task_desc.outputs[0].stride[0] == 153600) {
+              kernel::norm_linear_task_impl<bfloat16, 1, 1600, 4096, 153600>(
+                  task_desc.inputs[0].base_ptr,
+                  task_desc.inputs[1].base_ptr,
+                  task_desc.inputs[2].base_ptr,
+                  1e-6f, // eps
+                  task_desc.outputs[0].base_ptr);
+            } else {
+              printf("Unsupported RMSNorm linear task stride: %d\n",
+                     task_desc.outputs[0].stride[0]);
+              assert(false && "Unsupported RMSNorm linear task");
+            }
             break;
           }
           case TASK_EMBEDDING: {
@@ -440,18 +462,22 @@ __global__ void persistent_kernel(RuntimeConfig config) {
             for (int i = 0; i < task_desc.inputs[0].num_dims; i++) {
               size_in_bytes *= task_desc.inputs[0].dim[i];
             }
-            size_t event_index = get_event_position_index(task_desc.trigger_event);
-            int gpu_id = static_cast<int>(get_event_gpu_id(task_desc.trigger_event));
+            size_t event_index =
+                get_event_position_index(task_desc.trigger_event);
+            int gpu_id =
+                static_cast<int>(get_event_gpu_id(task_desc.trigger_event));
             assert(gpu_id < config.num_gpus);
             assert(gpu_id != config.my_gpu_id);
-            nvshmemx_putmem_signal_block(task_desc.outputs[0].base_ptr,
-                                         task_desc.inputs[0].base_ptr,
-                                         size_in_bytes,
-                                         reinterpret_cast<uint64_t *>(&config.all_event_counters[event_index]),
-                                         1/*signal*/,
-                                         NVSHMEM_SIGNAL_ADD,
-                                         gpu_id);
-            //nvshmem_fence();
+            nvshmemx_putmem_signal_block(
+                task_desc.outputs[0].base_ptr,
+                task_desc.inputs[0].base_ptr,
+                size_in_bytes,
+                reinterpret_cast<uint64_t *>(
+                    &config.all_event_counters[event_index]),
+                1 /*signal*/,
+                NVSHMEM_SIGNAL_ADD,
+                gpu_id);
+            // nvshmem_fence();
             break;
           }
           case TASK_REDUCE: {
@@ -502,8 +528,8 @@ __global__ void persistent_kernel(RuntimeConfig config) {
                    event_id,
                    count);
           }
-          if ((count + 1) ==
-              static_cast<EventCounter>(num_triggers) * get_task_iteration_num(cur_task_id)) {
+          if ((count + 1) == static_cast<EventCounter>(num_triggers) *
+                                 get_task_iteration_num(cur_task_id)) {
             if (config.profiling) {
               PROFILER_EVENT_START(TASK_SCHD_EVENTS, task_counter);
             }
@@ -556,10 +582,10 @@ __global__ void persistent_kernel(RuntimeConfig config) {
           assert(task_desc.task_type == TASK_NVSHMEM_COPY);
           // Note that nvshmem copy task signal counter during data copy
           // we don't need to do anything here is the task type is NVSHMEM_COPY
-          //int gpu_id = static_cast<int>(get_event_gpu_id(event_id));
-          //assert(gpu_id < config.num_gpus);
-          //assert(gpu_id != config.my_gpu_id);
-          //EventCounter count = nvshmem_ulonglong_atomic_fetch_add(
+          // int gpu_id = static_cast<int>(get_event_gpu_id(event_id));
+          // assert(gpu_id < config.num_gpus);
+          // assert(gpu_id != config.my_gpu_id);
+          // EventCounter count = nvshmem_ulonglong_atomic_fetch_add(
           //    &config.all_event_counters[event_index], 1, gpu_id);
           if (config.verbose) {
             printf("[%d][DONE] worker_id(%d) task_id(%llu) event_id(%llx) "
@@ -578,9 +604,10 @@ __global__ void persistent_kernel(RuntimeConfig config) {
             // event metadata (i.e., config.all_events[i] should be the same
             // across GPUs)
             EventDesc event_desc = config.all_events[event_index];
-            nvshmem_ulonglong_atomic_add(&config.all_event_counters[event_index],
-                                   event_desc.num_triggers,
-                                   gpu_id);
+            nvshmem_ulonglong_atomic_add(
+                &config.all_event_counters[event_index],
+                event_desc.num_triggers,
+                gpu_id);
             // Add the event to the schedule queue
             int sched_id = config.num_local_schedulers +
                            get_rand_sched_id(event_index,
@@ -904,14 +931,13 @@ extern "C" void init_persistent_kernel(std::vector<void const *> torch_tensors,
   std::vector<TaskId> first_tasks;
   _init_persistent_kernel(
       all_tasks, all_events, first_tasks, torch_tensors, npes, mype);
-  for (size_t i = 0; i < all_tasks.size(); i++) {
-    printf(
-        "task[%zu]: task_type(%d) trigger_event(%llx) dependent_event(%llx)\n",
-        i,
-        all_tasks[i].task_type,
-        all_tasks[i].trigger_event,
-        all_tasks[i].dependent_event);
-  }
+  // for (size_t i = 0; i < all_tasks.size(); i++) {
+  //   printf(
+  //       "task[%zu]: task_type(%d) trigger_event(%llx)
+  //       dependent_event(%llx)\n", i, all_tasks[i].task_type,
+  //       all_tasks[i].trigger_event,
+  //       all_tasks[i].dependent_event);
+  // }
 
   // Initialize worker queue last task id
   // Each worker now maintains a local and a remote worker queue
@@ -960,7 +986,9 @@ extern "C" void init_persistent_kernel(std::vector<void const *> torch_tensors,
              host_all_event_counters.data(),
              all_events.size() * sizeof(int),
              cudaMemcpyHostToDevice);
-  cudaMemset(global_runtime_config.all_event_counters, 0, all_events.size() * sizeof(EventCounter));
+  cudaMemset(global_runtime_config.all_event_counters,
+             0,
+             all_events.size() * sizeof(EventCounter));
   // Initialize all tasks
   global_runtime_config.all_tasks =
       gpu_malloc<TaskDesc>(all_tasks.size() * sizeof(TaskDesc));
