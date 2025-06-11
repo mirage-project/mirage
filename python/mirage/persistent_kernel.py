@@ -6,7 +6,8 @@ import shutil
 import sys
 import sysconfig
 
-from .kernel import get_key_paths
+from .core import *
+from .kernel import get_key_paths, KNGraph, TBGraph
 
 HARD_CODE = """
 #include <Python.h>
@@ -159,9 +160,113 @@ def get_compile_command(target_cc,
     return common_cmd + specific_cmd + flags
 
 class PersistentKernel:
-    def __init__(self, file_path : str, mpi_rank : int, num_workers : int, num_local_schedulers : int, num_remote_schedulers : int, **kwargs):
+    def __init__(self, mpi_rank : int, num_workers : int, num_local_schedulers: int, num_remote_schedulers : int):
         self.__finalized__ = False
         self.mpi_rank = mpi_rank
+        self.num_workers = num_workers
+        self.num_local_schedulers = num_local_schedulers
+        self.num_remote_schedulers = num_remote_schedulers
+        self.kn_graph = KNGraph(core.CyKNGraph())
+        self.task_configs = []
+
+    def new_input(self, torch_tensor: torch.Tensor, name: str = None) -> DTensor:
+        # Currently only support bfloat16
+        assert torch_tensor.dtype == torch.bfloat16
+        dims = [d for d in torch_tensor.shape]
+        strides = [s for s in torch_tensor.stride()]
+        # Assert a row-major layout
+        total_elements = 1
+        default_strides = []
+        for d in reversed(dims):
+            default_strides.append(total_elements)
+            total_elements *= d
+        assert default_strides == strides
+        t = self.kn_graph.new_input(dims=dims, strides=strides, dtype=core.bfloat16)
+        # FIXME: currently assert that name is not None
+        assert name is not None
+        self.kn_graph.attach_torch_tensor(t, torch_tensor, name)
+        return t
+
+    def new_tensor(self, dims: tuple, strides: tuple = None, dtype: dtype = bfloat16, name: str = None, io_category: str = "cuda_tensor") -> DTensor:
+        # Currently only support bfloat16
+        assert dtype == bfloat16
+        # Assert a row-major layout
+        total_elements = 1
+        default_strides = []
+        for d in reversed(dims):
+            default_strides.append(total_elements)
+            total_elements *= d
+        assert default_strides == strides
+        t = self.kn_graph.new_input(dims=dims, strides=strides, dtype=dtype)
+        # FIXME: currently assert that name is not None
+        assert name is not None
+        if io_category == "cuda_tensor":
+            self.kn_graph.attach_cuda_tensor(t, name)
+        elif io_category == "nvshmem_tensor":
+            self.kn_graph.attach_nvshmem_tensor(t, name)
+        else:
+            raise RuntimeError(f"Invalid io_category: {io_category}")
+        return t
+
+    def fuse_tensors(self, inputs: List[DTensor], fused_dim: int, groups: int) -> DTensor:
+        # Currently only support fusing the 0-th dimension
+        assert fused_dim == 0
+        dims = None
+        dtype = None
+        for input in inputs:
+            if dims is None:
+                dims = [input.dim(i) for i in range(input.num_dims)]
+                dtype = input.dtype
+            else:
+                dims[0] += input.dim(0)
+                assert dtype == input.dtype
+        t = self.kn_graph.new_input(dims=dims, dtype=dtype)
+        self.kn_graph.fuse_tensors(inputs, t)
+        return t
+
+    def embed(self, input: DTensor, weight: DTensor, output: DTensor, grid_dim: tuple, block_dim: tuple):
+        tb_graph = TBGraph(core.CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(input, (-1, -1, -1), -1, True)
+        tb_graph.new_input(weight, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output, (-1, -1, -1), -1, True)
+        self.kn_graph.customized([input, weight, output], tb_graph)
+        self.kn_graph.register_task(tb_graph, "embedding")
+
+    def rmsnorm_linear(self, input: DTensor, weight_norm: DTensor, weight_linear: DTensor, output: DTensor, grid_dim: tuple, block_dim: tuple):
+        # Currently assume that the input/weight_linear/output are 2D tensors
+        assert input.num_dims == 2
+        assert weight_linear.num_dims == 2
+        assert output.num_dims == 2
+        tb_graph = TBGraph(core.CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(input, (-1, -1, -1), 1, True)
+        tb_graph.new_input(weight_norm, (-1, -1, -1), 0, True)
+        tb_graph.new_input(weight_linear, (0, -1, -1), 1, True)
+        tb_graph.new_input(output, (1, -1, -1), -1, True)
+        self.kn_graph.customized([input, weight_norm, weight_linear, output], tb_graph)
+        self.task_configs.append("rmsnorm_linear")
+
+    def attention(self, input: DTensor, q_norm: DTensor, k_norm: DTensor, k_cache: DTensor, v_cache: DTensor, cos_pos_embed: DTensor, sin_pos_embed: DTensor, output: DTensor):
+        # Currently assume that input/output
+        assert input.num_dims == 2 # (batch_size, fused_outdim / world_size)
+        assert output.num_dims == 2 # (batch_size, hidden_size / world_size)
+        assert q_norm.num_dims == 1 # (head_dim)
+        assert k_norm.num_dims == 1 # (head_dim)
+        assert k_cache.num_dims == 4 # (batch_size, seq_len, kv_heads, head_dim)
+        assert v_cache.num_dims == 4 # (batch_size, seq_len, kv_heads, head_dim)
+        assert cos_pos_embed.num_dims == 2 # (seq_len, head_dim)
+        tb_graph = TBGraph(core.CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(input, (0, 1, -1), -1, True)
+        tb_graph.new_input(k_cache, (0, 2 -1), 1, True)
+        tb_graph.new_input(v_cache, (0, 2 -1), 1, True)
+        tb_graph.new_input(q_norm, (-1, -1, -1), -1, True)
+        tb_graph.new_input(k_norm, (-1, -1, -1), -1, True)
+        tb_graph.new_input(cos_pos_embed, (-1, -1, -1), -1, True)
+        tb_graph.new_input(sin_pos_embed, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output, (0, 1, -1), -1, True)
+        self.kn_graph.customized([input, weight_norm, weight_linear, output], tb_graph)
+
+    def compile(self, file_path : str, mpi_rank : int, num_workers : int, num_local_schedulers : int, num_remote_schedulers : int, **kwargs):
+        self.__finalized__ = False
         MIRAGE_ROOT, INCLUDE_PATH, DEPS_PATH = get_key_paths()
         tempdir_obj = tempfile.TemporaryDirectory()
         tempdir = tempdir_obj.name

@@ -19,6 +19,7 @@
 #include "mirage/kernel/device_tensor.h"
 #include "mirage/kernel/operator.h"
 #include "mirage/threadblock/graph.h"
+#include "mirage/persistent_kernel/runtime_types.h"
 #include <vector>
 
 namespace mirage {
@@ -31,7 +32,7 @@ private:
   };
 
 public:
-  Graph(dim3 gpu_dim = {1, 1, 1});
+  Graph(dim3 gpu_dim = {1, 1, 1}, bool disable_fingerprint = false);
   ~Graph();
   Graph(Graph const &) = delete;
   Graph &operator=(Graph const &) = delete;
@@ -150,6 +151,10 @@ public:
                  mirage::threadblock::Graph const *bgraph);
   KNOperator *create_customized_op(std::vector<DTensor> const &inputs,
                                    mirage::threadblock::Graph const &_graph);
+  // persistent kernel functions
+  DTensor *fuse_tensors(int num_tensors, DTensor const **inputs);
+  void attach_torch_tensor(DTensor const *input, void* torch_ptr, char const *name);
+
   // helper functions
   int get_num_input_dtensors() const;
   int get_num_output_dtensors() const;
@@ -176,10 +181,19 @@ public:
   off_t dmem_data_offset, dmem_fp_offset;
   std::vector<std::pair<off_t, size_t>> allocated_data_tensors,
       allocated_fp_tensors;
+  // This flag indicates that Mirage will not compute fingerprint
+  // for this kernel_graph and therefore bypass all kernel-level
+  // memory check. This flag is mainly useful for the Mirage runtime
+  // to handle extremely large muGraphs
+  bool disable_fingerprint;
   // std::unordered_map<std::pair<int, int>, DTensor, pair_hash> tensors;
   // std::unordered_map<std::pair<int, int>, std::pair<int, int>, pair_hash>
   // edges; std::vector<std::vector<SrcEdge>> edges;
   // mirage::kernel::OperatorFactory *operator_factory;
+
+  // Fields for persistent kernels
+  std::unordered_map<mirage::type::GuidType, mirage::runtime::IODesc> io_config;
+  std::unordered_map<mirage::kernel::KNOperator *, runtime::TaskType> task_config;
 
   using OpType = KNOperator;
   using TensorType = DTensor;

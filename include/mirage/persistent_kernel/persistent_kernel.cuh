@@ -13,7 +13,8 @@
  * limitations under the License.
  */
 
-#include "../persistent_kernel/tasks/kernel.h"
+#include "tasks/kernel.h"
+#include "runtime_types.h"
 #include "profiler.h"
 #include <mpi.h>
 #include <nvshmem.h>
@@ -22,104 +23,8 @@
 #include <unistd.h>
 #include <vector>
 
-typedef unsigned long long int TaskId;
-unsigned long long int const TASK_INVALID_ID = 0x7fffffffffffffff;
-// Task IDs are 64-bit values encoding both the current iteration of the task
-// and its index TASK: iteration id: 32, task index: 32
-typedef unsigned long long int EventId;
-// Event IDs are 64-bit values encoding both the owner of the event and its
-// index EVENT: nvshmem_tag: 16, owner_node: 16, event_idx: 32
-unsigned long long int const EVENT_NVSHMEM_TAG = 0x1e00000000000000;
-unsigned long long int const EVENT_INVALID_ID = 0x7ffffffffffffffe;
-typedef unsigned long long int EventCounter;
-int const MAX_TENSOR_DIMS = 4;
-int const MAX_INPUTS_PER_TASK = 7;
-int const MAX_OUTPUTS_PER_TASK = 1;
-int const MAX_NUM_WORKERS = 128;
-
 using bfloat16 = type::bfloat16_t;
-
-enum TaskType {
-  TASK_TERMINATE = 0,
-  TASK_BEGIN_TASK_GRAPH = 10,
-  // compute task starts from 100
-  TASK_EMBEDDING = 101,
-  TASK_RMS_NORM_LINEAR = 102,
-  TASK_ATTENTION_1 = 103,
-  TASK_ATTENTION_2 = 104,
-  TASK_SILU_MUL_LINEAR = 105,
-  TASK_ALLREDUCE = 106,
-  TASK_REDUCE = 107,
-  TASK_MATMUL = 108,
-  TASK_ARGMAX = 109,
-  TASK_NVSHMEM_COPY = 199,
-  TASK_SCHD_TASKS = 200,
-  TASK_SCHD_EVENTS = 201,
-  TASK_GET_EVENT = 202,
-  TASK_GET_NEXT_TASK = 203,
-};
-
-enum EventType {
-  EVENT_EMPTY = 900,
-  EVENT_LAUNCH_TASKS = 901,
-  EVENT_LAUNCH_MASSIVE_TASKS = 902,
-  EVENT_LAUNCH_DEPENDENT_TASKS = 903,
-  EVENT_END_OF_TASK_GRAPH = 910,
-  EVENT_TERMINATION = 911,
-  EVENT_INVALID = 999,
-};
-
-struct TensorDesc {
-  int num_dims;
-  void *base_ptr;
-  int data_type;
-  int dim[MAX_TENSOR_DIMS];
-  int stride[MAX_TENSOR_DIMS];
-};
-
-struct EventDesc {
-  EventDesc(void)
-      : event_type(EVENT_INVALID), num_triggers(0),
-        first_task_id(TASK_INVALID_ID), last_task_id(TASK_INVALID_ID) {}
-  EventDesc(EventType type, int nt, TaskId f, TaskId l)
-      : event_type(type), num_triggers(nt), first_task_id(f), last_task_id(l) {}
-  EventType event_type;
-  int num_triggers;
-  TaskId first_task_id, last_task_id;
-};
-
-struct TaskDesc {
-  TaskDesc(TaskType t)
-      : task_type(t), num_inputs(0), num_outputs(0),
-        trigger_event(EVENT_INVALID_ID), dependent_event(EVENT_INVALID_ID) {}
-  TaskDesc() {}
-  TaskType task_type;
-  int num_inputs, num_outputs;
-  EventId trigger_event;
-  EventId dependent_event;
-  TensorDesc inputs[MAX_INPUTS_PER_TASK];
-  TensorDesc outputs[MAX_OUTPUTS_PER_TASK];
-};
-
-struct RuntimeConfig {
-  int num_workers, num_local_schedulers, num_remote_schedulers, num_graphs;
-  int num_gpus, my_gpu_id;
-  unsigned long long int per_worker_queue_len, per_sched_queue_len;
-  unsigned long long int *worker_queue_last_ready_task_id;
-  unsigned long long int *sched_queue_last_ready_event_id;
-  unsigned long long int *sched_queue_next_free_event_id;
-  EventCounter *all_event_counters;
-  int *all_event_num_triggers;
-  TaskDesc *all_tasks;
-  EventDesc *all_events;
-  TaskId **worker_queues;
-  EventId **sched_queues;
-  TaskId *first_tasks;
-  int *step; // Metadata for LLM serving
-  void *profiler_buffer;
-  bool verbose;
-  bool profiling;
-};
+using namespace mirage::runtime;
 
 __device__ __forceinline__ bool is_termination_event(size_t event_loc,
                                                      EventDesc e) {
@@ -168,8 +73,8 @@ __device__ __forceinline__ bool prepare_next_batch(RuntimeConfig config) {
   int step = config.step[0];
   // printf("step = %d\n", step);
   config.step[0] = step + 1;
-  return step + 1 <= 50;
-  // return false;
+  // return step + 1 <= 50;
+  return false;
 }
 
 __device__ __forceinline__ int get_rand_sched_id(size_t event_index,

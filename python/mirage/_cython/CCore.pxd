@@ -221,6 +221,11 @@ cdef extern from "mirage/kernel/graph.h" namespace "mirage::kernel":
         void generate_triton_program(const char *filepath)
         void generate_cuda_program(const char *filepath)
         size_t get_owner_independent_hash() const
+        # Persistent kernel functions
+        void attach_torch_tensor(const CppDTensor *input,
+                                 void *torch_data_ptr,
+                                 const char *name)
+
         vector[CppKNOperator*] operators
 
 cdef extern from "mirage/threadblock/graph.h" namespace "mirage::threadblock":

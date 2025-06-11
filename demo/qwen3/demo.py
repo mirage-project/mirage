@@ -127,34 +127,30 @@ if __name__ == "__main__":
     step = torch.tensor([0], dtype=torch.int32, device="cuda")
     if args.use_mirage:
         import mirage
-
         if args.profiling:
             profiler_tensor = torch.empty(
                 3000 * 128, dtype=torch.uint64, device="cuda"
             ).contiguous()
-            kernel = mirage.PersistentKernel(
-                file_path="/home/ubuntu/mirage_cpp/debug_build/test.cu",
-                mpi_rank=rank,
-                num_workers=96,
-                num_local_schedulers=48,
-                num_remote_schedulers=0,
-                use_nvshmem=True,
-                input_tensors=[item[1] for item in input_tensors],
-                meta_tensors=[step],
-                profiler_tensor=profiler_tensor,
-            )
         else:
-            kernel = mirage.PersistentKernel(
-                file_path="/home/ubuntu/mirage_cpp/debug_build/test.cu",
-                mpi_rank=rank,
-                num_workers=96,
-                num_local_schedulers=48,
-                num_remote_schedulers=0,
-                use_nvshmem=True,
-                input_tensors=[item[1] for item in input_tensors],
-                meta_tensors=[step],
-                profiler_tensor=None,
-            )
+            profiler_tensor = None
+        mpk = mirage.PersistentKernel(
+            mpi_rank=rank,
+            num_workers=96,
+            num_local_schedulers=48,
+            num_remote_schedulers=0)
+        mpk.new_input
+
+        # kernel = mirage.PersistentKernel(
+        #     file_path="/home/ubuntu/mirage_cpp/debug_build/test.cu",
+        #     mpi_rank=rank,
+        #     num_workers=96,
+        #     num_local_schedulers=48,
+        #     num_remote_schedulers=0,
+        #     use_nvshmem=True,
+        #     input_tensors=[item[1] for item in input_tensors],
+        #     meta_tensors=[step],
+        #     profiler_tensor=profiler_tensor,
+        # )
 
     # g = torch.cuda.CUDAGraph()
     stream = torch.cuda.Stream()
