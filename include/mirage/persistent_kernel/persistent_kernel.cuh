@@ -419,59 +419,6 @@ __global__ void persistent_kernel(RuntimeConfig config) {
                      task_desc.outputs[0].stride[0]);
               assert(false && "Unsupported RMSNorm linear task");
             }
-            // if (threadIdx.x == 0) {
-            //   if (get_task_position_index(cur_task_id) == 11) {
-            //     printf("Output:[\n");
-            //     for (int i = 0; i < 8; i++) {
-            //       printf("%.4f, ",
-            //              float(reinterpret_cast<bfloat16 const *>(
-            //                  task_desc.outputs[0].base_ptr)[i]));
-            //     }
-            //     printf("\n");
-            //     for (int i = 8; i < 16; i++) {
-            //       printf("%.4f, ",
-            //              float(reinterpret_cast<bfloat16 const *>(
-            //                  task_desc.outputs[0].base_ptr)[i]));
-            //     }
-            //     printf("\n");
-            //     for (int i = 16; i < 24; i++) {
-            //       printf("%.4f, ",
-            //              float(reinterpret_cast<bfloat16 const *>(
-            //                  task_desc.outputs[0].base_ptr)[i]));
-            //     }
-            //     printf("\n");
-            //     for (int i = 24; i < 32; i++) {
-            //       printf("%.4f, ",
-            //              float(reinterpret_cast<bfloat16 const *>(
-            //                  task_desc.outputs[0].base_ptr)[i]));
-            //     }
-            //     printf("\n");
-            //     for (int i = 32; i < 40; i++) {
-            //       printf("%.4f, ",
-            //              float(reinterpret_cast<bfloat16 const *>(
-            //                  task_desc.outputs[0].base_ptr)[i]));
-            //     }
-            //     printf("\n");
-            //     for (int i = 40; i < 48; i++) {
-            //       printf("%.4f, ",
-            //              float(reinterpret_cast<bfloat16 const *>(
-            //                  task_desc.outputs[0].base_ptr)[i]));
-            //     }
-            //     printf("\n");
-            //     for (int i = 48; i < 56; i++) {
-            //       printf("%.4f, ",
-            //              float(reinterpret_cast<bfloat16 const *>(
-            //                  task_desc.outputs[0].base_ptr)[i]));
-            //     }
-            //     printf("\n");
-            //     for (int i = 56; i < 64; i++) {
-            //       printf("%.4f, ",
-            //              float(reinterpret_cast<bfloat16 const *>(
-            //                  task_desc.outputs[0].base_ptr)[i]));
-            //     }
-            //     printf("\n]\n");
-            //   }
-            // }
             break;
           }
           case TASK_EMBEDDING: {
