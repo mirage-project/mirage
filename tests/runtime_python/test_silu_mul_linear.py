@@ -4,7 +4,7 @@ import runtime_kernel
 
 torch.set_printoptions(sci_mode=False)
 
-reduction_size = 4096
+reduction_size = 12288
 output_sizes = [16, 32, 64]
 
 silu = torch.nn.SiLU()
@@ -75,7 +75,10 @@ for output_size in output_sizes:
         outputs = graph(inputs=input_tensors)
 
     torch.cuda.synchronize()
-    starter, ender = (torch.cuda.Event(enable_timing=True) for _ in range(2))
+    starter, ender = (
+        torch.cuda.Event(enable_timing=True),
+        torch.cuda.Event(enable_timing=True),
+    )
     starter.record()
     for rep in range(repetitions):
         outputs = graph(inputs=input_tensors)

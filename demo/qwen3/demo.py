@@ -68,8 +68,9 @@ if __name__ == "__main__":
     position_embeddings = model.model.rotary_emb(positions)
 
     # get all model weight tensors
+    input_tokens = torch.full((1, 1), 0, dtype=torch.long, device="cuda")
     input_tensors = []
-    input_tensors.append(("input_tokens", tokens))
+    input_tensors.append(("input_tokens", input_tokens))
     input_tensors.append(("cos_position_embedding", position_embeddings[0]))
     input_tensors.append(("sin_position_embedding", position_embeddings[1]))
     input_tensors.append(("model.embed_tokens.weight", model.model.embed_tokens.weight))
@@ -86,9 +87,12 @@ if __name__ == "__main__":
         input_tensors.append(
             (f"model.layers.{i}.self_attn.v_proj.weight", layer.self_attn.v_proj.weight)
         )
-        input_tensors.append((f"model.layers.{i}.self_attn.q_norm.weight", layer.self_attn.q_norm.weight))
-        input_tensors.append((f"model.layers.{i}.self_attn.k_norm.weight", layer.self_attn.k_norm.weight))
-        print(layer.self_attn.q_norm.weight.shape)
+        input_tensors.append(
+            (f"model.layers.{i}.self_attn.q_norm.weight", layer.self_attn.q_norm.weight)
+        )
+        input_tensors.append(
+            (f"model.layers.{i}.self_attn.k_norm.weight", layer.self_attn.k_norm.weight)
+        )
         input_tensors.append(
             (f"model.layers.{i}.self_attn.key_cache.tensor", model.model.kv_cache[0][i])
         )
@@ -126,7 +130,15 @@ if __name__ == "__main__":
     )
     step = torch.tensor([0], dtype=torch.int32, device="cuda")
     if args.use_mirage:
+        import os
         import mirage
+
+        pwd = os.getcwd()
+        test_file = (
+            os.path.join(pwd, "build", "test.cu")
+            if os.path.exists(os.path.join(pwd, "build", "test.cu"))
+            else os.path.join(pwd, "debug_build", "test.cu")
+        )
         if args.profiling:
             profiler_tensor = torch.empty(
                 3000 * 128, dtype=torch.uint64, device="cuda"
@@ -203,6 +215,9 @@ if __name__ == "__main__":
             step=step,
             stream=stream,
         )
+        next_token = logits.argmax(dim=-1)
+        next_token = next_token[0, -1]
+        input_tokens[0] = next_token
         torch.cuda.synchronize()
         starter.record()
 

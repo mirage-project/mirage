@@ -20,6 +20,10 @@ struct dmem_row {
 
   __device__ __forceinline__ dmem_row(T *ptr) : base_ptr(ptr) {}
 
+  __device__ __forceinline__ void set_ptr(T *ptr) {
+    base_ptr = ptr;
+  }
+
   __device__ __forceinline__ T *operator()(size_t logical_idx_row,
                                            size_t logical_idx_col) {
     size_t logical_idx = logical_idx_row * STRIDE + logical_idx_col;
@@ -46,6 +50,10 @@ struct dmem_row_const {
 
   __device__ __forceinline__ dmem_row_const(T const *ptr) : base_ptr(ptr) {}
 
+  __device__ __forceinline__ void set_ptr(T const *ptr) {
+    base_ptr = ptr;
+  }
+
   __device__ __forceinline__ T const *operator()(size_t logical_idx_row,
                                                  size_t logical_idx_col) const {
     size_t logical_idx = logical_idx_row * STRIDE + logical_idx_col;
@@ -61,6 +69,32 @@ struct dmem_row_const {
                                          size_t logical_idx_col) const {
     size_t logical_idx = logical_idx_row * STRIDE + logical_idx_col;
     // assert(logical_idx < (ROW*COL));
+    return base_ptr[logical_idx];
+  }
+};
+
+template <typename T, size_t ROW, size_t COL, size_t STRIDE>
+struct dmem_col_const {
+  T const *base_ptr;
+
+  __device__ __forceinline__ dmem_col_const(T const *ptr) : base_ptr(ptr) {}
+
+  __device__ __forceinline__ void set_ptr(T const *ptr) {
+    base_ptr = ptr;
+  }
+
+  __device__ __forceinline__ T const *operator()(size_t logical_idx_row,
+                                                 size_t logical_idx_col) const {
+    size_t logical_idx = logical_idx_col * STRIDE + logical_idx_row;
+    return &base_ptr[logical_idx];
+  }
+
+  __device__ __forceinline__ T const &at(size_t logical_idx) const {
+    return base_ptr[logical_idx];
+  }
+  __device__ __forceinline__ T const &at(size_t logical_idx_row,
+                                         size_t logical_idx_col) const {
+    size_t logical_idx = logical_idx_col * STRIDE + logical_idx_row;
     return base_ptr[logical_idx];
   }
 };

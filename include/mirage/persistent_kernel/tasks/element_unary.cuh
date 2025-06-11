@@ -24,7 +24,8 @@ enum class ElementUnaryOpType {
   CLAMP,
   SQUARE,
   SQRT,
-  MULSCALAR
+  MULSCALAR,
+  ADDSCALAR
 };
 
 using bfloat16 = type::bfloat16_t;
@@ -52,7 +53,8 @@ static __device__ __forceinline__ T
     return bfloat16(sqrtf(float(a)));
   } else if constexpr (OP == ElementUnaryOpType::MULSCALAR) {
     return bfloat16(scalar * float(a));
-
+  } else if constexpr (OP == ElementUnaryOpType::ADDSCALAR) {
+    return bfloat16(scalar + float(a));
   } else {
     assert(0 && "unsupport optype in tb elementunary");
   }
