@@ -228,6 +228,7 @@ __global__ void norm_linear_kernel_wrapper(void const *input_ptr,
                                            void const *weight_ptr,
                                            float eps,
                                            void *output_ptr) {
+
   norm_linear_task_impl<T,
                         BATCH_SIZE,
                         OUTPUT_SIZE,
@@ -265,7 +266,6 @@ void norm_linear(torch::Tensor input,
   void const *input_ptr = input.data_ptr();
   void const *norm_weight_ptr = norm_weight.data_ptr();
   void const *weight_ptr = weight.data_ptr();
-  void const *norm_weight_ptr = norm_weight.data_ptr();
   void *output_ptr = output.data_ptr();
 
   DISPATCH_OUTPUT_SIZE_FOR_RED_SIZE_4K(output.size(1),
