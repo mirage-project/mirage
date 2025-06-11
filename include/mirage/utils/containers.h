@@ -95,3 +95,13 @@ template <typename T>
 _reversed<T> reversed(T &&iter) {
   return _reversed<T>{iter};
 }
+
+template <typename T>
+std::unordered_set<T> set_union(std::unordered_set<T> const &lhs,
+                                std::unordered_set<T> const &rhs) {
+  std::unordered_set<T> s = lhs;
+  for (auto const &x : rhs) {
+    s.insert(x);
+  }
+  return s;
+}

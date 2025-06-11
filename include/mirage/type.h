@@ -292,5 +292,14 @@ enum TBEpilogueType {
   TB_EPILOGUE_INVALID = 3199,
 };
 
+NLOHMANN_JSON_SERIALIZE_ENUM(TBEpilogueType,
+                             {
+                                 {TB_EPILOGUE_NONE, "tb_epilogue_none"},
+                                 {TB_EPILOGUE_ALLREDUCE,
+                                  "tb_epilogue_allreduce"},
+                                 {TB_EPILOGUE_ALLTOALL, "tb_epilogue_alltoall"},
+                                 {TB_EPILOGUE_INVALID, "tb_epilogue_invalid"},
+                             })
+
 } // namespace type
 } // namespace mirage
