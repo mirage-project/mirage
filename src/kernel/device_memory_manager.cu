@@ -158,7 +158,6 @@ DeviceMemoryManager::~DeviceMemoryManager() {
     }
   }
 }
-#endif // MIRAGE_FINGERPRINT_USE_CUDA
 
 #ifdef DEADCODE
 bool DeviceMemoryManager::allocate(DTensor &tensor, bool allocate_fingerprint) {
@@ -204,6 +203,7 @@ bool DeviceMemoryManager::free(DTensor &tensor) {
   allocated_tensors.pop_back();
   return true;
 }
+#endif // DEADCODE
 
 DeviceMemoryManager *DeviceMemoryManager::get_instance() {
   if (singleton == nullptr) {
@@ -226,7 +226,7 @@ void DeviceMemoryManager::set_gpu_device_id(int gpu_id) {
 void cython_set_gpu_device_id(int gpu_id) {
   DeviceMemoryManager::set_gpu_device_id(gpu_id);
 }
-#endif
+#endif // MIRAGE_FINGERPRINT_USE_CUDA
 
 } // namespace kernel
 } // namespace mirage

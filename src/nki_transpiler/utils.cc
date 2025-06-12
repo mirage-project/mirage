@@ -37,5 +37,5 @@ std::string mirage_dtype_to_nki(type::DataType dt) {
   return nki_type;
 }
 
-}
-}
+} // namespace nki_transpiler
+} // namespace mirage

@@ -20,8 +20,8 @@
 #include "mirage/threadblock/operator.h"
 #include "mirage/threadblock/serializer/kernel_params.h"
 #include "mirage/threadblock/smem_tensor.h"
+#include "mirage/vector_types.h"
 #include <vector>
-#include <vector_types.h>
 
 namespace mirage {
 namespace threadblock {

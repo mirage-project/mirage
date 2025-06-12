@@ -2,9 +2,9 @@
 
 #include "mirage/search/symbolic_graph/symbolic_tensor_dim.h"
 #include "mirage/utils/hash_utils.h"
+#include "mirage/vector_types.h"
 #include <unordered_map>
 #include <vector>
-#include <vector_types.h>
 
 namespace mirage {
 namespace search {

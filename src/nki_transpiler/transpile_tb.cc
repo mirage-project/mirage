@@ -120,13 +120,6 @@ NKICustomOPTranspileResult
                                     return fmt("dtensor$", dtensor.guid);
                                   }));
   code.inc_indent();
-  // Simulate SPMD by for-loops
-  int num_SPMD_forloops = 0;
-  for (uint d : to_vector(g.grid_dim)) {
-    code.e("for iter$ in nl.affine_range($):", iterator_idx_counter++, d);
-    code.inc_indent();
-    num_SPMD_forloops++;
-  }
   // Create output tensors
   std::vector<std::string> return_tensors;
   for (tb::TBOperator *tb_op : g.operators) {
@@ -141,6 +134,14 @@ NKICustomOPTranspileResult
                                  "nl.shared_hbm"));
       return_tensors.push_back(tensor_id);
     }
+  }
+  // Simulate SPMD by for-loops
+  std::vector<std::string> SPMD_iterators;
+  for (uint d : to_vector(g.grid_dim)) {
+    std::string iterator_name = fmt("iter$", iterator_idx_counter++);
+    code.e("for $ in nl.affine_range($):", iterator_name, d);
+    SPMD_iterators.push_back(iterator_name);
+    code.inc_indent();
   }
   // Initialize all accum stensors
   for (tb::TBOperator *tb_op : g.operators) {
@@ -251,19 +252,19 @@ NKICustomOPTranspileResult
             if (forloop_dim == i) {
               scale_factor *= g.forloop_range;
             }
-            index = fmt("nl.program_id(0) * $", scale_factor);
+            index = fmt("$ * $", SPMD_iterators[0], scale_factor);
           } else if (imap.y == i) {
             int scale_factor = stensor.dim[i];
             if (forloop_dim == i) {
               scale_factor *= g.forloop_range;
             }
-            index = fmt("nl.program_id(1) * $", scale_factor);
+            index = fmt("$ * $", SPMD_iterators[1], scale_factor);
           } else if (imap.z == i) {
             int scale_factor = stensor.dim[i];
             if (forloop_dim == i) {
               scale_factor *= g.forloop_range;
             }
-            index = fmt("nl.program_id(2) * $", scale_factor);
+            index = fmt("$ * $", SPMD_iterators[2], scale_factor);
           }
           if (forloop_dim == i) {
             if (index == "") {
@@ -581,11 +582,11 @@ NKICustomOPTranspileResult
         for (int i = 0; i < stensor.num_dims; i++) {
           std::string index;
           if (omap.x == i) {
-            index = fmt("nl.program_id(0) * $", stensor.dim[i]);
+            index = fmt("$ * $", SPMD_iterators[0], stensor.dim[i]);
           } else if (omap.y == i) {
-            index = fmt("nl.program_id(1) * $", stensor.dim[i]);
+            index = fmt("$ * $", SPMD_iterators[1], stensor.dim[i]);
           } else if (omap.z == i) {
-            index = fmt("nl.program_id(2) * $", stensor.dim[i]);
+            index = fmt("$ * $", SPMD_iterators[2], stensor.dim[i]);
           }
           if (i == stensor.num_dims - 2) {
             if (index == "") {
@@ -737,7 +738,7 @@ NKICustomOPTranspileResult
     }
   }
   // dec_indent for SPMD for-loops
-  for (int i = 0; i < num_SPMD_forloops; ++i) {
+  for (size_t i = 0; i < SPMD_iterators.size(); ++i) {
     code.dec_indent();
   }
   // Generate return statement

@@ -25,11 +25,9 @@ enum class NKITensorInitializer {
 };
 
 template <typename T>
-std::string allocate_nki_tensor(
-    T const &tensor,
-    NKITensorInitializer initializer,
-    std::string const &buffer
-)  {
+std::string allocate_nki_tensor(T const &tensor,
+                                NKITensorInitializer initializer,
+                                std::string const &buffer) {
   std::string api = "nl.";
   switch (initializer) {
     case NKITensorInitializer::NONE:
@@ -44,12 +42,8 @@ std::string allocate_nki_tensor(
   }
   std::string tensor_shape = get_tensor_shape_tuple(tensor);
   std::string nki_dtype = mirage_dtype_to_nki(tensor.data_type);
-  return fmt("$($, dtype=$, buffer=$)",
-             api,
-             tensor_shape,
-             nki_dtype,
-             buffer);
+  return fmt("$($, dtype=$, buffer=$)", api, tensor_shape, nki_dtype, buffer);
 }
 
-}
-}
+} // namespace nki_transpiler
+} // namespace mirage

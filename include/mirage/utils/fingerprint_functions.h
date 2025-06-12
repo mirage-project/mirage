@@ -24,6 +24,7 @@ namespace utils {
 
 using namespace mirage::type;
 using namespace mirage::config;
+using namespace std;
 
 #ifdef MIRAGE_FINGERPRINT_USE_CUDA
 #define __execution_space__ __device__
@@ -108,8 +109,8 @@ inline __execution_space__ FPType compute_clamp_fingerprint(FPType input) {
   // https://pytorch.org/docs/main/generated/torch.clamp.html
   uint32_t q_residual = input % FP_Q;
   uint32_t p_residual = input % FP_P;
-  q_residual = std::min(2 * FP_Q / 3, std::max(FP_Q / 3, (int)q_residual));
-  p_residual = std::min(2 * FP_P / 3, std::max(FP_P / 3, (int)p_residual));
+  q_residual = min(2 * FP_Q / 3, max(FP_Q / 3, (int)q_residual));
+  p_residual = min(2 * FP_P / 3, max(FP_P / 3, (int)p_residual));
   uint32_t z = p_residual * FP_Q_MUL_P_MOD_1 + q_residual * FP_P_MUL_Q_MOD_1;
   return z % FP_PQ;
 }
@@ -118,8 +119,8 @@ inline __execution_space__ FPType compute_relu_fingerprint(FPType input) {
   // We use max(FP_Q/2, input) to approximate relu
   uint32_t q_residual = input % FP_Q;
   uint32_t p_residual = input % FP_P;
-  q_residual = std::max(FP_Q / 2, (int)q_residual);
-  p_residual = std::max(FP_P / 2, (int)p_residual);
+  q_residual = max(FP_Q / 2, (int)q_residual);
+  p_residual = max(FP_P / 2, (int)p_residual);
   uint32_t z = p_residual * FP_Q_MUL_P_MOD_1 + q_residual * FP_P_MUL_Q_MOD_1;
   return z % FP_PQ;
 }
@@ -164,6 +165,43 @@ inline void compute_matmul_fingerprint(
                                       B_ptr[b * K * N + k * N + j]));
         }
       }
+    }
+  }
+}
+
+inline void compute_rms_norm_fingerprint(FPType *input_ptr,
+                                         FPType *output_ptr,
+                                         FPType *div_p_lookup_table,
+                                         FPType *div_q_lookup_table,
+                                         FPType *sqrt_p_lookup_table,
+                                         FPType *sqrt_q_lookup_table,
+                                         int num_samples,
+                                         int norm_size) {
+  for (int i = 0; i < num_samples; ++i) {
+    FPType square_sum = 0;
+    for (int k = 0; k < norm_size; k++) {
+      FPType x = input_ptr[i * norm_size + k];
+      x = compute_mul_fingerprint(x, x);
+      square_sum = compute_add_fingerprint(square_sum, x);
+    }
+    // Compute rooted mean square
+    FPType rms = 0;
+    {
+      FPType x = square_sum;
+      FPType n = norm_size % FP_PQ;
+      // Compute z = x / n
+      FPType z =
+          compute_div_fingerprint(x, n, div_p_lookup_table, div_q_lookup_table);
+      // Perform sqrt for root-mean-square
+      rms =
+          compute_sqrt_fingerprint(z, sqrt_p_lookup_table, sqrt_q_lookup_table);
+    }
+    for (int k = 0; k < norm_size; k++) {
+      FPType x = input_ptr[i * norm_size + k];
+      // Compute x / rms
+      FPType z = compute_div_fingerprint(
+          x, rms, div_p_lookup_table, div_q_lookup_table);
+      output_ptr[i * norm_size + k] = z;
     }
   }
 }

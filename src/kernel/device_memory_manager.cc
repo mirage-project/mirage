@@ -11,12 +11,14 @@ DeviceMemoryManager *DeviceMemoryManager::singleton = nullptr;
 
 #ifndef MIRAGE_FINGERPRINT_USE_CUDA
 DeviceMemoryManager::DeviceMemoryManager() {
-  auto initizalize_exp_lookup_table = [](FPType *table, int size, int base, int modulus) {
-    table[0] = 1;
-    for (int i = 1; i < size; ++i) {
-      table[i] = (table[i - 1] * base) % modulus;
-    }
-  };
+  num_devices = 1; // Default to 1 device for non-CUDA environments
+  auto initizalize_exp_lookup_table =
+      [](FPType *table, int size, int base, int modulus) {
+        table[0] = 1;
+        for (int i = 1; i < size; ++i) {
+          table[i] = (table[i - 1] * base) % modulus;
+        }
+      };
 
   auto initizalize_div_lookup_table = [](FPType *table, int size, int modulus) {
     table[0] = 1;
@@ -26,7 +28,8 @@ DeviceMemoryManager::DeviceMemoryManager() {
   };
 
   auto initialize_sqrt_lookup_table = [](FPType *table, int size, int modulus) {
-    assert(modulus % 4 == 1 && "Modulus must be of the form 4k + 1 for square roots to exist");
+    assert(modulus % 4 == 3 &&
+           "Modulus must be of the form 4k + 3 for square roots to exist");
     for (int i = 0; i < size; ++i) {
       table[i] = mod_power(i, (modulus + 1) / 4, modulus);
     }
@@ -47,7 +50,8 @@ DeviceMemoryManager::DeviceMemoryManager() {
   for (int i = 0; i < num_devices; ++i) {
     fp_base_ptr[i] = new char[MAX_DMEM_FP_SIZE];
   }
-  stensor_fp_base_ptr = new char[MAX_SMEM_FP_SIZE * MAX_NUM_THREADBLOCKS_PER_KERNEL];
+  stensor_fp_base_ptr =
+      new char[MAX_SMEM_FP_SIZE * MAX_NUM_THREADBLOCKS_PER_KERNEL];
 }
 
 DeviceMemoryManager::~DeviceMemoryManager() {
@@ -71,5 +75,5 @@ DeviceMemoryManager *DeviceMemoryManager::get_instance() {
 }
 #endif
 
-}
-}
+} // namespace kernel
+} // namespace mirage

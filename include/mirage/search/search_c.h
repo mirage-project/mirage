@@ -1,6 +1,6 @@
 #pragma once
 #include "mirage/kernel/graph.h"
-#include <vector_types.h>
+#include "mirage/vector_types.h"
 
 namespace mirage {
 namespace search_c {

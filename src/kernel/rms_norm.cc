@@ -125,7 +125,10 @@ KNRMSNormOp::operator json() const {
 
 #ifndef MIRAGE_FINGERPRINT_USE_CUDA
 bool KNRMSNormOp::fingerprint(void) {
-  assert(false && "To be implemented");
+  int num_samples = output_tensors[0].num_elements() / normalized_size;
+  kernel::DeviceMemoryManager *dmm =
+      kernel::DeviceMemoryManager::get_instance();
+
   return false;
 }
 #endif

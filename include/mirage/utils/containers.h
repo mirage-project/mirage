@@ -1,9 +1,9 @@
 #pragma once
 
+#include "mirage/vector_types.h"
 #include <algorithm>
 #include <unordered_set>
 #include <vector>
-#include <vector_types.h>
 
 template <typename Container>
 typename Container::const_iterator

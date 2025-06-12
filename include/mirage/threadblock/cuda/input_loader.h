@@ -16,6 +16,7 @@
 #pragma once
 
 #ifdef MIRAGE_FINGERPRINT_USE_CUDA
+#include "cutlass/matrix_coord.h"
 namespace mirage {
 namespace threadblock {
 
