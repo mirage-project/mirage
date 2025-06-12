@@ -500,11 +500,8 @@ __global__ void persistent_kernel(RuntimeConfig config) {
             break;
           }
           case TASK_ARGMAX_PARTIAL: {
-            // We need to determine the block index for this partial task.
-            // This should be encoded in the task graph. A simple way is
-            // to assume partial tasks are numbered consecutively.
-            // The logic to get the base_task_id depends on your graph generation.
-            // Here, we assume the triggering event's first_task_id is the base.
+            // TODO: We need to determine the block index for this partial task. 
+            // Make sure it's compatible with graph generation.
             EventId trigger_event_id = task_desc.trigger_event;
             size_t event_idx = get_event_position_index(trigger_event_id);
             EventDesc event_desc = config.all_events[event_idx];
