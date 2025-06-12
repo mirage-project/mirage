@@ -1298,21 +1298,25 @@ TaskGraphResult Graph::generate_task_graph(int _num_gpus) {
                           true /*use_json_format*/);
 }
 
+} // namespace kernel
+
+namespace runtime {
+
 IODesc::IODesc(IOType _type,
                std::string _name,
                mirage::kernel::DTensor const &_tensor,
-               void *_torch_data_ptr = nullptr);
+               void *_torch_data_ptr)
     : type(_type), name(_name), torch_data_ptr(_torch_data_ptr) {
-      tensor.num_dims = _tensor.num_dims;
-      tensor.data_type = _tensor.data_type;
-      assert(_tensor.owner_op->op_type == mirage::type::KN_INPUT_OP);
-      mirage::kernel::KNInputOp const *op =
-          static_cast<mirage::kernel::KNInputOp const *>(_tensor.owner_op);
-      for (int i = 0; i < tensor.num_dims; i++) {
-        tensor.dim[i] = _tensor.dim[i];
-        tensor.stride[i] = op->input_strides[i];
-      }
-    }
+  tensor.num_dims = _tensor.num_dims;
+  tensor.data_type = _tensor.data_type;
+  assert(_tensor.owner_op->op_type == mirage::type::KN_INPUT_OP);
+  mirage::kernel::KNInputOp const *op =
+      static_cast<mirage::kernel::KNInputOp const *>(_tensor.owner_op);
+  for (int i = 0; i < tensor.num_dims; i++) {
+    tensor.dim[i] = _tensor.dim[i];
+    tensor.stride[i] = op->input_strides[i];
+  }
+}
 
-    } // namespace kernel
-    } // namespace mirage
+} // namespace runtime
+} // namespace mirage

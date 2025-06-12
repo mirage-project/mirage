@@ -398,7 +398,7 @@ DTensor *Graph::fuse_tensors(std::vector<DTensor const *> inputs,
 void Graph::register_task(char const *task_type) {
   std::string name = std::string(task_type);
   if (name == "embedding") {
-    task_config[operators.back()] = std::make_tuple(1, 1, TASK_EMBEDDING);
+    task_config[operators.back()] = std::make_tuple(2, 1, TASK_EMBEDDING);
   } else if (name == "rmsnorm_linear") {
     task_config[operators.back()] = std::make_tuple(3, 1, TASK_RMS_NORM_LINEAR);
   } else if (name == "attention") {

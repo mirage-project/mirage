@@ -167,13 +167,13 @@ if __name__ == "__main__":
             num_local_schedulers=48,
             num_remote_schedulers=0,
         )
-        x = mpk.attach_input(torch_tensor=input_tokens, name="input_tokens")
+        x = mpk.attach_input(torch_tensor=input_tokens, name="input_token")
         cos_pos_embed = mpk.attach_input(
-            torch_tensor=position_embeddings[0][0, :, :],
+            torch_tensor=position_embeddings[0][0, :4096, :],
             name="cos_position_embedding",
         )
         sin_pos_embed = mpk.attach_input(
-            torch_tensor=position_embeddings[1][0, :, :],
+            torch_tensor=position_embeddings[1][0, :4096, :],
             name="sin_position_embedding",
         )
         y = mpk.new_tensor(
@@ -356,7 +356,7 @@ if __name__ == "__main__":
             )
             # add silu_mul_linear layer
             w = mpk.attach_input(
-                torch_tensor=layer.mlp.down_proj.weight, name="layer_{i}_down_proj"
+                torch_tensor=layer.mlp.down_proj.weight, name=f"layer_{i}_down_proj"
             )
             mpk.silu_mul_linear_with_residual_layer(
                 input=mlp_mid,
@@ -397,7 +397,10 @@ if __name__ == "__main__":
         )
 
         results = mpk.kn_graph.generate_task_graph(num_gpus=world_size)
-        print(results["json_file"])
+        with open("task_graph.json", "w") as f:
+            f.write(results["json_file"])
+        with open("test.cu", "w") as f:
+            f.write(results["cuda_code"])
 
         # kernel = mirage.PersistentKernel(
         #     file_path="/home/ubuntu/mirage_cpp/debug_build/test.cu",

@@ -928,6 +928,11 @@ cdef class CyKNGraph:
 
     def generate_task_graph(self, int num_gpus):
         cdef TaskGraphResult result = self.p_kgraph.generate_task_graph(num_gpus)
+        return {
+            "cuda_code": result.cuda_code.decode("UTF-8"),
+            "json_file": result.json_file.decode("UTF-8"),
+        }
+     
 
 cdef class CyTBGraph:
     cdef CppTBGraph *p_bgraph #Hold a CppTBGraph instance
