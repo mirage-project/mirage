@@ -761,3 +761,9 @@ class KNGraph:
 
     def attach_cuda_tensor(self, t: DTensor, name: str):
         return self.cygraph.attach_cuda_tensor(t, name)
+
+    def attach_nvshmem_tensor(self, t: DTensor, name: str):
+        return self.cygraph.attach_nvshmem_tensor(t, name)
+
+    def register_task(self, bgraph: TBGraph, task_type: str):
+        return self.cygraph.register_task(bgraph.cygraph, task_type)

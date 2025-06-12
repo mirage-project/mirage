@@ -876,7 +876,7 @@ cdef class CyKNGraph:
             dims.append(cdims[i])
         return tuple(dims), tuple(strides)
 
-    # Functions for persistent kernels
+    # Functions for ersistent kernels
     def attach_torch_tensor(self, DTensor tensor, torch_tensor, str name):
         torch_data_ptr = ctypes.cast(torch_tensor.data_ptr(), ctypes.c_void_p).value
         cdef char* cname = NULL
@@ -890,7 +890,14 @@ cdef class CyKNGraph:
         if name is not None:
             py_byte_string = name.encode('UTF-8')
             cname = py_byte_string
-        self.p_kgraph.attach_cuda_tensor(tensor.c_ptr, cname)     
+        self.p_kgraph.attach_cuda_tensor(tensor.c_ptr, cname)
+
+    def attach_nvshmem_tensor(self, DTensor tensor, str name):
+        cdef char* cname = NULL
+        if name is not None:
+            py_byte_string = name.encode('UTF-8')
+            cname = py_byte_string
+        self.p_kgraph.attach_nvshmem_tensor(tensor.c_ptr, cname)
 
     def fuse_tensors(self, inputs, int fused_dim, int num_groups, str name):
         cdef vector[const CppDTensor*] cinputs
@@ -906,6 +913,12 @@ cdef class CyKNGraph:
             cname = py_byte_string
         self.p_kgraph.fuse_tensors(cinputs, fused_dim, num_groups, cname)
 
+    def register_task(self, CyTBGraph bgraph, str task_type):
+        cdef char* cname = NULL
+        if task_type is not None:
+            py_byte_string = task_type.encode('UTF-8')
+            cname = py_byte_string
+        self.p_kgraph.register_task(cname)
 
 cdef class CyTBGraph:
     cdef CppTBGraph *p_bgraph #Hold a CppTBGraph instance

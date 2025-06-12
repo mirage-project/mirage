@@ -159,6 +159,7 @@ public:
                         int fused_dim,
 			int num_groups,
                         char const *name);
+  void register_task(char const *task_type);
 
   // helper functions
   int get_num_input_dtensors() const;
@@ -198,7 +199,7 @@ public:
 
   // Fields for persistent kernels
   std::unordered_map<mirage::type::GuidType, mirage::runtime::IODesc> io_config;
-  std::unordered_map<mirage::kernel::KNOperator *, runtime::TaskType> task_config;
+  std::unordered_map<mirage::kernel::KNOperator *, std::tuple<int, int, runtime::TaskType>> task_config;
 
   using OpType = KNOperator;
   using TensorType = DTensor;

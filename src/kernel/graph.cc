@@ -394,5 +394,24 @@ DTensor *Graph::fuse_tensors(std::vector<DTensor const *> inputs,
   return fused;
 }
 
+void Graph::register_task(char const *task_type) {
+  std::string name = std::string(task_type);
+  if (name == "embedding") {
+    task_config[operators.back()] = std::make_tuple(1, 1, TASK_EMBEDDING);
+  } else if (name == "rmsnorm_linear") {
+    task_config[operators.back()] = std::make_tuple(3, 1, TASK_RMS_NORM_LINEAR);
+  } else if (name == "attention") {
+    task_config[operators.back()] = std::make_tuple(7, 1, TASK_ATTENTION_1);
+  } else if (name == "linear_with_residual") {
+    task_config[operators.back()] = std::make_tuple(3, 1, TASK_LINEAR_WITH_RESIDUAL);
+  } else if (name == "silu_mul_linear_with_residual") {
+    task_config[operators.back()] = std::make_tuple(3, 1, TASK_SILU_MUL_LINEAR_WITH_RESIDUAL);
+  } else if (name == "argmax") {
+    task_config[operators.back()] = std::make_tuple(1, 1, TASK_ARGMAX);
+  } else {
+    assert(false && "Unsupported task type");
+  }
+}
+
 } // namespace kernel
 } // namespace mirage
