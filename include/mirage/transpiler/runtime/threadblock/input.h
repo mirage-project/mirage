@@ -329,7 +329,7 @@ public:
            TiledMMA               const &tiled_mma,
            Mma_Tiler              const &mma_tiler,
            int                     k_iter,
-           BlackwellAsyncPipeline &pipeline) {   // NEW pipeline
+           BlackwellAsyncPipeline &pipeline) {
 
     if (lane_id() == 0) {
       Tensor mA = tma_a.get_tma_tensor(shape(SrcLayout{}));

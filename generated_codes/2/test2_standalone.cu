@@ -148,7 +148,12 @@ __syncthreads();
   // S->G copy atoms
   // Copy for S->G: stensor 20000015 -> dtensor 10000005
   // float *dtensor10000005_tile_ptr = dtensor10000005_ptr  + blockIdx.x*128*1024 + blockIdx.y*256*1;
-  float *dtensor10000005_tile_ptr = dtensor10000005_ptr;
+  float *dtensor10000005_tile_ptr = dtensor10000005_ptr  + blockIdx.x*128*1024 + blockIdx.y*256*1;
+  auto cta_in_pair = get<0>(cta_in_cluster_coord_vmnk);
+  if (cta_in_pair == Int<1>{}) {
+    dtensor10000005_tile_ptr -= 128*1024;
+  }
+
   using DTensor10000005TileLayout = Layout<Shape<Int<256>, Int<128>>, Stride<Int<1>, Int<1024>>>;
   using STensor20000015OutputAtom = tb::OutputChunkedSyncCopy<float, DTensor10000005TileLayout, Layout<Shape<Int<256>, Int<128>>, Stride<Int<1>, Int<256>>>, NUM_THREADS>;
   
@@ -156,10 +161,8 @@ __syncthreads();
   using Matmul20000015LayoutA = decltype(composition(Swizzle<3, 3, 4>{}, Layout<Shape<Int<64>, Int<128>>, Stride<Int<1>, Int<64>>>{}));
   using Matmul20000015LayoutB = decltype(composition(Swizzle<3, 3, 4>{}, Layout<Shape<Int<256>, Int<64>>, Stride<Int<1>, Int<256>>>{}));
   // using Matmul20000015LayoutC = Layout<Shape<Int<256>, Int<128>>, Stride<Int<1>, Int<256>>>;
-  using Matmul20000015LayoutC = Layout<Shape<Int<256>, Int<256>>, Stride<Int<1024>, Int<1>>>;
+  using Matmul20000015LayoutC = Layout<Shape<Int<256>, Int<256>>, Stride<Int<1>, Int<1024>>>;
   
-  auto mC = make_tensor(make_gmem_ptr<float>(dtensor10000005_ptr), make_layout(make_shape(1024, 1024), make_stride(1024, Int<1>{})));
-
   // zy: add mc and gC to the kernel
   using Matmul20000015Kernel = tb::Blackwell_Matmul<half_t, true, false, Matmul20000015LayoutA, Matmul20000015LayoutB, Matmul20000015LayoutC, NUM_THREADS, 0, false, true, true, true, 4, decltype(cluster_shape), decltype(tiled_mma), decltype(mma_tiler)>;
   auto matmul_20000015_accum = Matmul20000015Kernel::get_mma_tC(blockIdx.x, blockIdx.y, *tmem_base_ptr);
@@ -205,7 +208,7 @@ __syncthreads();
   }
 
   cluster_sync();
-  Matmul20000015Kernel::write_tC_to_gC(stensor20000015_ptr, matmul_20000015_accum, thread_idx, mC);
+  Matmul20000015Kernel::write_tC_to_gC(dtensor10000005_tile_ptr, matmul_20000015_accum, thread_idx);
   
 
   __syncthreads();
@@ -458,7 +461,7 @@ int main() {
     
     printf("Starting warmup phase...\n");
     // Warmup: run 50 times
-    for(int i = 0; i < 50; i++) {
+    for(int i = 0; i < 0; i++) {
         
         _execute_mugraph(input_tensors, output_tensors, d_buffer, 0, d_profiler_buffer);
         cudaDeviceSynchronize();
@@ -470,7 +473,7 @@ int main() {
     float total_time = 0.0f;
     std::vector<float> times;
     
-    for(int i = 0; i < 2000; i++) {
+    for(int i = 0; i < 1; i++) {
         // Record start time
         cudaEventRecord(start);
         

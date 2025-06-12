@@ -95,13 +95,16 @@ public:
   using K = decltype(get<1>(shape(SmemLayoutA{})));
   using N = decltype(get<0>(shape(SmemLayoutB{})));
 
-    // Create a default FusionOp type for the template parameters
+  
+  static constexpr int global_N = size<1>(ClusterShape_MNK{}) * size<1>(SmemLayoutC{});
+  using GmemStrideTypeC = Stride<Int<global_N>, Int<1>>; 
+
   using FusionOp = cutlass::epilogue::fusion::FusionOperation;
 
   // Use the sm100_get_tmem_load_op function to automatically select the optimal tmem load operation
   using TMemLoadOp = 
       decltype(cutlass::epilogue::collective::detail::sm100_get_tmem_load_op<
-          Stride<Int<1024>, Int<1>>, 
+          GmemStrideTypeC,
           float, 
           float, 
           Shape<Int<32>, Int<128>>,
@@ -126,12 +129,11 @@ public:
 
 
   
-  template<class TmemAccTensor, class TensorC>
+  template<class TmemAccTensor>
   static __device__ __forceinline__
   void write_tC_to_gC(float *__restrict__ c_ptr,
                       TmemAccTensor const& tCtAcc,
-                         int thread_idx,
-                         TensorC &mC)
+                         int thread_idx)
   {
     // only one warp group is used for Tmem load
     if (thread_idx >= mirage::config::NUM_THREADS_PER_GROUP) {
@@ -143,11 +145,11 @@ public:
 
     auto mma_coord_vmnk = get_mma_coord_vmnk<TiledMMA, ClusterShape_MNK>(blockIdx.x, blockIdx.y);  
     auto mma_v = get<0>(mma_coord_vmnk);
-    auto mma_coord = select<1,2,3>(mma_coord_vmnk);
+
     TiledMMA tiled_mma;
     MmaTiler_MNK mma_tiler;
     auto cta_mma = tiled_mma.get_slice(mma_v);
-    auto gC = local_tile(mC, mma_tiler, mma_coord, Step<_1,_1, X>{});
+    auto gC = make_tensor(make_gmem_ptr(c_ptr), SmemLayoutC{});
 
     auto tCgC = cta_mma.partition_C(gC);         // (MmaC, NumMma_M, NumMma_N)
     auto tCgD = cta_mma.partition_C(gC);         // (MmaC, NumMma_M, NumMma_N)
