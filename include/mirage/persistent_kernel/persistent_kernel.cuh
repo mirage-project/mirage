@@ -52,6 +52,8 @@ enum TaskType {
   TASK_REDUCE = 107,
   TASK_MATMUL = 108,
   TASK_ARGMAX = 109,
+  TASK_ARGMAX_PARTIAL = 110,
+  TASK_ARGMAX_REDUCE = 111,
   TASK_NVSHMEM_COPY = 199,
   TASK_SCHD_TASKS = 200,
   TASK_SCHD_EVENTS = 201,
@@ -492,8 +494,37 @@ __global__ void persistent_kernel(RuntimeConfig config) {
             break;
           }
           case TASK_ARGMAX: {
+            // We may still need this for small vocab size.
             kernel::argmax_kernel<bfloat16, 1, 153600>(
                 task_desc.inputs[0].base_ptr, task_desc.outputs[0].base_ptr);
+            break;
+          }
+          case TASK_ARGMAX_PARTIAL: {
+            // We need to determine the block index for this partial task.
+            // This should be encoded in the task graph. A simple way is
+            // to assume partial tasks are numbered consecutively.
+            // The logic to get the base_task_id depends on your graph generation.
+            // Here, we assume the triggering event's first_task_id is the base.
+            EventId trigger_event_id = task_desc.trigger_event;
+            size_t event_idx = get_event_position_index(trigger_event_id);
+            EventDesc event_desc = config.all_events[event_idx];
+            size_t base_task_id = event_desc.first_task_id;
+            int partial_task_idx = get_task_position_index(cur_task_id) - base_task_id;
+            
+            // NOTE: The number of blocks (e.g., 64) is an example.
+            // This should match the number of partial tasks you create in the graph.
+            kernel::argmax_partial_kernel<bfloat16, 153600, 64>(
+                task_desc.inputs[0].base_ptr,   // full vocab tensor
+                task_desc.outputs[0].base_ptr,  // intermediate buffer
+                partial_task_idx);
+            break;
+          }
+          case TASK_ARGMAX_REDUCE: {
+            // NOTE: The number of blocks (e.g., 64) is an example.
+            // This should match the number of partial tasks you create in the graph.
+            kernel::argmax_reduce_kernel<bfloat16, 64>(
+                task_desc.inputs[0].base_ptr,   // intermediate buffer
+                task_desc.outputs[0].base_ptr); // final output tensor
             break;
           }
           default: {
