@@ -24,7 +24,6 @@ class KNChunkOp : public mirage::kernel::KNOperator {
 public:
   KNChunkOp(Graph *_graph, DTensor const &input, int chunk_size, int dim);
   ~KNChunkOp();
-  bool profile(ProfileResult &profile) override;
   bool fingerprint(void) override;
 
   operator json() const override;

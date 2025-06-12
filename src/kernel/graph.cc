@@ -97,7 +97,7 @@ int Graph::get_input_dtensor_shape_and_stride(DTensor const *input,
 bool Graph::can_allocate(DTensor const &tensor,
                          bool allocate_fingerprint) const {
   size_t data_size = ((tensor.data_size() + 15) & ~15);
-  if (dmem_data_offset + data_size > mirage::config::MAX_DMEM_DATA_SIZE) {
+  if (dmem_data_offset + data_size > mirage::config::MAX_DMEM_SIZE) {
     return false;
   }
   if (allocate_fingerprint) {
@@ -111,8 +111,7 @@ bool Graph::can_allocate(DTensor const &tensor,
 
 bool Graph::can_allocate(size_t data_size_in_bytes,
                          size_t fp_size_in_bytes) const {
-  if (dmem_data_offset + data_size_in_bytes >
-      mirage::config::MAX_DMEM_DATA_SIZE) {
+  if (dmem_data_offset + data_size_in_bytes > mirage::config::MAX_DMEM_SIZE) {
     return false;
   }
   if (dmem_fp_offset + fp_size_in_bytes > mirage::config::MAX_DMEM_FP_SIZE) {
@@ -141,8 +140,6 @@ bool Graph::allocate(DTensor &tensor, bool allocate_fingerprint) {
     allocated_fp_tensors.push_back(std::make_pair(ret, aligns_size));
   }
 
-  // Assert that we haven't used more than what we pre-allocated
-  // assert(dmem_offset <= dmm->total_size);
   return true;
 }
 

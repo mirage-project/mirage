@@ -75,5 +75,12 @@ KNOutputOp::operator json() const {
               {"output_tensors", output_tensors}};
 }
 
+#ifndef MIRAGE_FINGERPRINT_USE_CUDA
+bool KNOutputOp::fingerprint(void) {
+  // This operator does not have a fingerprint
+  return true;
+}
+#endif
+
 } // namespace kernel
 } // namespace mirage

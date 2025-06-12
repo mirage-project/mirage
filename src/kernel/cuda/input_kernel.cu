@@ -28,47 +28,7 @@ namespace kernel {
 using namespace mirage::type;
 using namespace mirage::config;
 
-template <typename DT>
-__global__ void
-    init_input(char *dmem_base_ptr, DTensor const A, size_t num_elements) {
-  int idx = (threadIdx.x + blockIdx.x * blockDim.x);
-  int kColumn = A.dim[A.num_dims - 1];
-  // int myRow = idx / kColumn;
-  int myColumn = idx % kColumn;
-  DT *data_ptr = (DT *)(dmem_base_ptr + A.data_offset);
-  if (idx < num_elements) {
-    data_ptr[idx] = ((float)myColumn);
-    // printf("idx(%d) v(%.f)\n", idx, (float)myRow);
-  }
-}
-
-bool KNInputOp::profile(ProfileResult &profile) {
-  // assert a 1-D GPU mesh
-  assert(kgraph->gpu_dim.y == 1);
-  assert(kgraph->gpu_dim.z == 1);
-
-  profile.run_time = 0.0f;
-  int const num_threads_per_blk = 1024;
-  mirage::kernel::DeviceMemoryManager *dmm =
-      mirage::kernel::DeviceMemoryManager::get_instance();
-  int num_blocks =
-      (output_tensors[0].num_elements() + num_threads_per_blk - 1) /
-      num_threads_per_blk;
-  for (int gpu_id = 0; gpu_id < kgraph->gpu_dim.x; gpu_id++) {
-    checkCUDA(cudaSetDevice(gpu_id));
-    if (output_tensors[0].data_type == mirage::type::DT_FLOAT16) {
-      init_input<cutlass::half_t><<<num_blocks, num_threads_per_blk>>>(
-          dmm->data_base_ptr[gpu_id],
-          output_tensors[0],
-          output_tensors[0].num_elements());
-    } else {
-      assert(false && "Unsupported type");
-    }
-  }
-  checkCUDA(cudaDeviceSynchronize());
-  return true;
-}
-
+#ifdef MIRAGE_FINGERPRINT_USE_CUDA
 __global__ void init_input_fingerprint(char *fp_base_ptr,
                                        DTensor const A,
                                        size_t num_elements,
@@ -104,6 +64,7 @@ bool KNInputOp::fingerprint(void) {
   }
   return true;
 }
+#endif // MIRAGE_FINGERPRINT_USE_CUDA
 
 } // namespace kernel
 } // namespace mirage

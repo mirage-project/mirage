@@ -13,6 +13,8 @@
  * limitations under the License.
  */
 
+#ifdef MIRAGE_USE_TRITON
+
 #include "mirage/kernel/customized.h"
 #include "mirage/kernel/graph.h"
 #include "mirage/threadblock/serializer/concat_serializer.h"
@@ -508,3 +510,5 @@ void Graph::generate_triton_program(char const *file_path) {
 
 } // namespace kernel
 } // namespace mirage
+
+#endif // MIRAGE_USE_TRITON

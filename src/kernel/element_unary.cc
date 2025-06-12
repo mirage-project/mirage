@@ -182,5 +182,11 @@ KNElementUnaryOp::operator json() const {
               {"output_tensors", output_tensors}};
 }
 
+#ifndef MIRAGE_FINGERPRINT_USE_CUDA
+bool KNElementUnaryOp::fingerprint(void) {
+  assert(false && "To be implemented");
+}
+#endif
+
 } // namespace kernel
 } // namespace mirage
