@@ -130,27 +130,41 @@ if __name__ == "__main__":
     )
     step = torch.tensor([0], dtype=torch.int32, device="cuda")
     if args.use_mirage:
-        import os
-        import mirage
+        import mirage as mi
+        batch_size = 1
+        hidden_size = model.config.hidden_size
+        num_q_heads = model.config.num_attention_heads
+        num_kv_heads = model.config.num_key_value_heads
+        head_dim = hidden_size // num_q_heads
+        fused_outdim_1 = (num_q_heads + 2 * num_kv_heads) * head_dim
 
-        pwd = os.getcwd()
-        test_file = (
-            os.path.join(pwd, "build", "test.cu")
-            if os.path.exists(os.path.join(pwd, "build", "test.cu"))
-            else os.path.join(pwd, "debug_build", "test.cu")
-        )
         if args.profiling:
             profiler_tensor = torch.empty(
                 3000 * 128, dtype=torch.uint64, device="cuda"
             ).contiguous()
         else:
             profiler_tensor = None
-        mpk = mirage.PersistentKernel(
+        mpk = mi.PersistentKernel(
             mpi_rank=rank,
             num_workers=96,
             num_local_schedulers=48,
             num_remote_schedulers=0)
-        mpk.new_input
+        x = mpk.attach_input(torch_tensor=input_tokens, name="input_tokens")
+        y = mpk.new_tensor(dims=(batch_size, hidden_size), dtype=mi.bfloat16, name="embed_out", io_category="cuda_tensor")
+        attn_in = mpk.new_tensor(dims=(batch_size, fused_outdim_1 // world_size), dtype=mi.bfloat16, name="attn_in", io_category="cuda_tensor")
+        # Add Embed
+        w = mpk.attach_input(torch_tensor=model.model.embed_tokens.weight, name="embed_tokens")
+        mpk.embed_layer(input=x, weight=w, output=y, grid_dim=(1,1,1), block_dim=(128,1,1))
+        x = y
+        for i, layer in enumerate(model.model.layers):
+            # add rmsnorm + linear
+            w_norm = mpk.attach_input(torch_tensor=layer.input_layernorm.weight, name=f"layer_{i}_input_layernorm")
+            w_q = mpk.attach_input(torch_tensor=layer.self_attn.q_proj.weight, name=f"layer_{i}_q_proj")
+            w_k = mpk.attach_input(torch_tensor=layer.self_attn.k_proj.weight, name=f"layer_{i}_k_proj")
+            w_v = mpk.attach_input(torch_tensor=layer.self_attn.v_proj.weight, name=f"layer_{i}_v_proj")
+            w_qkv = mpk.fuse_tensors(inputs=[w_q, w_k, w_v], fused_dim=0, num_groups=model.config.num_key_value_heads // world_size, name=f"layer_{i}_qkv_proj")
+            mpk.rmsnorm_linear_layer(input=x, weight_norm=w_norm, weight_linear=w_qkv, output=attn_in, grid_dim=(96,1,1), block_dim=(128,1,1))
+            # add attention
 
         # kernel = mirage.PersistentKernel(
         #     file_path="/home/ubuntu/mirage_cpp/debug_build/test.cu",

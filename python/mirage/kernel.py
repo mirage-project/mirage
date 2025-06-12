@@ -754,3 +754,10 @@ class KNGraph:
     
     def from_json(self, filename):
         self.cygraph = cy_from_json(filename)
+
+    # Persistent Kernel functions
+    def attach_torch_tensor(self, t: DTensor, torch_tensor: torch.Tensor, name: str):
+        return self.cygraph.attach_torch_tensor(t, torch_tensor, name)
+
+    def attach_cuda_tensor(self, t: DTensor, name: str):
+        return self.cygraph.attach_cuda_tensor(t, name)

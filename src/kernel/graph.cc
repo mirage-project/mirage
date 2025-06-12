@@ -335,11 +335,63 @@ size_t Graph::get_owner_independent_hash() const {
 }
 
 // Persistent kernel functions
+using namespace mirage::runtime;
 void Graph::attach_torch_tensor(DTensor const *input,
                                 void *torch_data_ptr,
                                 char const *name) {
   io_config.emplace(input->guid,
-      runtime::IODesc(runtime::IODesc::TorchTensor, std::string(name), *input, torch_data_ptr));
+      IODesc(IODesc::TorchTensor, std::string(name), *input, torch_data_ptr));
+}
+
+void Graph::attach_cuda_tensor(DTensor const *input,
+                                char const *name) {
+  io_config.emplace(input->guid,
+      IODesc(IODesc::CUDAMallocTensor, std::string(name), *input));
+}
+
+void Graph::attach_nvshmem_tensor(DTensor const *input,
+                                char const *name) {
+  io_config.emplace(input->guid,
+      IODesc(IODesc::NVSHMEMMallocTensor, std::string(name), *input));
+}
+
+DTensor *Graph::fuse_tensors(std::vector<DTensor const *> inputs,
+                             int fused_dim,
+                             int num_groups,
+                             char const *name) {
+  // Currently assert that we fuse along the 0-th dim (for weights)
+  assert(fused_dim == 0);
+  assert(inputs.size() > 0);
+  std::vector<int> dims;
+  for (int i = 0; i < inputs[0]->num_dims; i++) {
+    dims.push_back(inputs[0]->dim[i]);
+  }
+  for (size_t t = 1; t < inputs.size(); t++) {
+    dims[0] += inputs[t]->dim[0];
+    assert(inputs[0]->num_dims == inputs[t]->num_dims);
+    for (int i = 1; i < inputs[t]->num_dims; i++) {
+      assert(dims[i] == inputs[t]->dim[i]);
+    }
+    assert(inputs[0]->data_type == inputs[t]->data_type);
+  }
+  std::vector<size_t> strides(dims.size(), 1);
+  for (int i = inputs[0]->num_dims - 1; i >= 0; i--) {
+    if (i == inputs[0]->num_dims - 1) {
+      strides[i] = 1;
+    } else {
+      strides[i] = strides[i+1] * dims[i+1];
+    }
+  }
+  DTensor *fused = new_input_ptr(dims, strides, inputs[0]->data_type, layout::DmemRowMajor);
+  IODesc desc(IODesc::FusedTorchTensor, std::string(name), *fused);
+  desc.num_groups = num_groups;
+  for (size_t t = 0; t < inputs.size(); t++) {
+    assert(io_config.find(inputs[t]->guid) != io_config.end());
+    IODesc sub_desc = io_config.find(inputs[t]->guid)->second;
+    desc.sub_descs.push_back(sub_desc);
+  }
+  io_config.emplace(fused->guid, desc);
+  return fused;
 }
 
 } // namespace kernel

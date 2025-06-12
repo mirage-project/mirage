@@ -130,6 +130,11 @@ struct alignas(16) STensor {
         data_type_size = 4;
         break;
       }
+      case DT_INT64:
+      case DT_DOUBLE: {
+        data_type_size = 8;
+        break;
+      }
       case DT_UNKNOWN:
       default:
         assert(false);

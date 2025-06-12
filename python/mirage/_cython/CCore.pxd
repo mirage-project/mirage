@@ -225,6 +225,14 @@ cdef extern from "mirage/kernel/graph.h" namespace "mirage::kernel":
         void attach_torch_tensor(const CppDTensor *input,
                                  void *torch_data_ptr,
                                  const char *name)
+        void attach_cuda_tensor(const CppDTensor *input,
+                                const char *name)
+        void attach_nvshmem_tensor(const CppDTensor *input,
+                                   const char *name)
+        CppDTensor* fuse_tensors(vector[const CppDTensor*] inputs,
+                                 int fused_dim,
+                                 int num_groups,
+                                 const char *name)
 
         vector[CppKNOperator*] operators
 
@@ -261,9 +269,10 @@ cdef extern from "mirage/threadblock/graph.h" namespace "mirage::threadblock":
                    int reduction_dimx)
 
         CppSTensor* new_input(const CppDTensor* dtensor,
-                           int3 input_map,
-                           int forloop_dim,
-                           SmemLayout layout)
+                             int3 input_map,
+                             int forloop_dim,
+                             SmemLayout layout,
+                             bool store_in_dmem)
         CppDTensor* new_output(const CppSTensor* stensor,
                             int3 output_map,
                             int forloop_dim,

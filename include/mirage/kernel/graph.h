@@ -152,8 +152,13 @@ public:
   KNOperator *create_customized_op(std::vector<DTensor> const &inputs,
                                    mirage::threadblock::Graph const &_graph);
   // persistent kernel functions
-  DTensor *fuse_tensors(int num_tensors, DTensor const **inputs);
   void attach_torch_tensor(DTensor const *input, void* torch_ptr, char const *name);
+  void attach_cuda_tensor(DTensor const *input, char const *name);
+  void attach_nvshmem_tensor(DTensor const *input, char const *name);
+  DTensor *fuse_tensors(std::vector<DTensor const *> inputs,
+                        int fused_dim,
+			int num_groups,
+                        char const *name);
 
   // helper functions
   int get_num_input_dtensors() const;

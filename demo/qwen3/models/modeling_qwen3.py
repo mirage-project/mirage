@@ -191,14 +191,14 @@ class Qwen3Attention(nn.Module):
         assert kv_cache[0].shape == (
             config.num_hidden_layers,
             1,
-            config.max_position_embeddings,
+            4096,
             self.num_key_value_heads // world_size,
             self.head_dim,
         )
         assert kv_cache[1].shape == (
             config.num_hidden_layers,
             1,
-            config.max_position_embeddings,
+            4096,
             self.num_key_value_heads // world_size,
             self.head_dim,
         )
@@ -393,7 +393,7 @@ class Qwen3Model(Qwen3PreTrainedModel):
             (
                 config.num_hidden_layers,
                 1,
-                config.max_position_embeddings,
+                4096,
                 config.num_key_value_heads // world_size,
                 config.hidden_size // config.num_attention_heads,
             ),
@@ -404,7 +404,7 @@ class Qwen3Model(Qwen3PreTrainedModel):
             (
                 config.num_hidden_layers,
                 1,
-                config.max_position_embeddings,
+                4096,
                 config.num_key_value_heads // world_size,
                 config.hidden_size // config.num_attention_heads,
             ),

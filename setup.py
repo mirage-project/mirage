@@ -56,7 +56,7 @@ def config_cython():
                               path.join(mirage_path, "deps", "json", "include"),
                               path.join(mirage_path, "deps", "cutlass", "include"),
                               path.join(z3_path, "include"),
-                              sysconfig.get_path("include"),
+                              "/home/ubuntu/miniconda3/envs/mirage/include/python3.10/",
                               "/usr/local/cuda/include"],
                 libraries=["mirage_runtime", "cudadevrt", "cudart_static", "cudnn", "cublas", "cudart", "cuda", "z3", "gomp", "rt"],
                 library_dirs=[path.join(mirage_path, "build"),

@@ -287,10 +287,12 @@ def convert_dtype_to_ctype(type : dtype):
         return DT_BFLOAT16
     elif type.is_fp32():
         return DT_FLOAT32
+    elif type.is_int64():
+        return DT_INT64
     elif type.is_fp64():
         return DT_DOUBLE
     else:
-        return DT_UNKNOWN
+        raise RuntimeError(f"Unsupported dtype: {dtype}")
 
 def convert_dtype_to_torch_type(type : dtype):
     if type.is_int8():
@@ -303,6 +305,8 @@ def convert_dtype_to_torch_type(type : dtype):
         return torch.bfloat16
     elif type.is_fp32():
         return torch.float32
+    elif type.is_int64():
+        return torch.int64
     elif type.is_fp64():
         return torch.float64
     else:
@@ -323,6 +327,25 @@ def convert_ctype_to_dtype(type):
         return float64
     else:
         return None
+
+def convert_torch_type_to_dtype(type):
+    if type is torch.int8:
+        return int8
+    elif type is torch.uint16:
+        return uint16
+    elif type is torch.float16:
+        return float16
+    elif type is torch.bfloat16:
+        return bfloat16
+    elif type is torch.float32:
+        return float32
+    elif type is torch.int64:
+        return int64
+    elif type is torch.float64:
+        return float64
+    else:
+        raise RuntimeError(f"Unsupported dtype: {type}")
+
 
 def string_to_tbepilogue(epilogue):
     if epilogue is None:
@@ -862,6 +885,28 @@ cdef class CyKNGraph:
             cname = py_byte_string
         self.p_kgraph.attach_torch_tensor(tensor.c_ptr, <void *>torch_data_ptr, cname)
 
+    def attach_cuda_tensor(self, DTensor tensor, str name):
+        cdef char* cname = NULL
+        if name is not None:
+            py_byte_string = name.encode('UTF-8')
+            cname = py_byte_string
+        self.p_kgraph.attach_cuda_tensor(tensor.c_ptr, cname)     
+
+    def fuse_tensors(self, inputs, int fused_dim, int num_groups, str name):
+        cdef vector[const CppDTensor*] cinputs
+        cinputs.resize(len(inputs))
+        cdef DTensor t
+        for i in range(len(inputs)):
+            assert(type(inputs[i]) == DTensor)
+            t = inputs[i]
+            cinputs[i] = t.c_ptr
+        cdef char* cname = NULL
+        if name is not None:
+            py_byte_string = name.encode('UTF-8')
+            cname = py_byte_string
+        self.p_kgraph.fuse_tensors(cinputs, fused_dim, num_groups, cname)
+
+
 cdef class CyTBGraph:
     cdef CppTBGraph *p_bgraph #Hold a CppTBGraph instance
 
@@ -890,13 +935,13 @@ cdef class CyTBGraph:
             else:
                 assert False, "bgraph must be an integer or ctypes.c_void_p, but got " + str(type(bgraph))
     
-    def new_input(self, DTensor dtensor, tuple input_map, int forloop_dim):
+    def new_input(self, DTensor dtensor, tuple input_map, int forloop_dim, bool store_in_dmem = False):
         assert len(input_map) == 3, "input_map must be of length 3"
         cdef int3 c_input_map
         c_input_map.x = input_map[0]
         c_input_map.y = input_map[1]
         c_input_map.z = input_map[2]
-        cdef CppSTensor* ptr = self.p_bgraph.new_input(dtensor.c_ptr, c_input_map, forloop_dim, SmemRowMajor)
+        cdef CppSTensor* ptr = self.p_bgraph.new_input(dtensor.c_ptr, c_input_map, forloop_dim, SmemRowMajor, store_in_dmem)
         t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
         return STensor(t)
 
