@@ -160,7 +160,8 @@ void register_mugraph(
     std::vector<TaskDesc> &all_tasks,
     std::vector<EventDesc> &all_events,
     std::vector<TaskId> &first_tasks,
-    std::map<kernel::KNOperator *, std::map<dim3, TaskId, Dim3Comparator>> &all_task_maps,
+    std::map<kernel::KNOperator *, std::map<dim3, TaskId, Dim3Comparator>>
+        &all_task_maps,
     std::unordered_map<kn::KNOperator const *,
                        std::tuple<int, int, TaskType>> const &task_configs) {
   // push a begin-graph task and a event to launch dependent asks
@@ -473,11 +474,10 @@ void register_mugraph(
   }
 }
 
-bool sanity_check(
-    mirage::kernel::Graph const &graph,
-    std::vector<TaskDesc> const &all_tasks,
-    std::vector<EventDesc> const &all_events,
-    std::vector<TaskId> const &first_tasks) {
+bool sanity_check(mirage::kernel::Graph const &graph,
+                  std::vector<TaskDesc> const &all_tasks,
+                  std::vector<EventDesc> const &all_events,
+                  std::vector<TaskId> const &first_tasks) {
   std::unordered_set<EventId> triggered_events;
   std::unordered_set<TaskId> executed_tasks;
   std::vector<int> event_counts(all_events.size(), 0);
@@ -534,7 +534,8 @@ TaskGraphResult print_task_graph(
     std::vector<TaskDesc> const &all_tasks,
     std::vector<EventDesc> const &all_events,
     std::vector<TaskId> const &first_tasks,
-    std::map<kernel::KNOperator *, std::map<dim3, TaskId, Dim3Comparator>> const &all_task_maps,
+    std::map<kernel::KNOperator *, std::map<dim3, TaskId, Dim3Comparator>> const
+        &all_task_maps,
     std::unordered_map<kn::KNOperator const *,
                        std::tuple<int, int, TaskType>> const &task_configs,
     std::unordered_map<mirage::type::GuidType, IODesc> const &io_configs,
@@ -703,7 +704,8 @@ TaskGraphResult print_task_graph(
       }
       case IODesc::CUDAMallocTensor: {
         code.e("void *$;", desc.name);
-        size_t size = mirage::type::get_datatype_size(static_cast<type::DataType>(desc.tensor.data_type));
+        size_t size = mirage::type::get_datatype_size(
+            static_cast<type::DataType>(desc.tensor.data_type));
         for (int i = 0; i < desc.tensor.num_dims; i++) {
           size *= desc.tensor.dim[i];
         }
@@ -714,7 +716,8 @@ TaskGraphResult print_task_graph(
         break;
       }
       case IODesc::NVSHMEMMallocTensor: {
-        size_t size = mirage::type::get_datatype_size(static_cast<type::DataType>(desc.tensor.data_type));
+        size_t size = mirage::type::get_datatype_size(
+            static_cast<type::DataType>(desc.tensor.data_type));
         for (int i = 0; i < desc.tensor.num_dims; i++) {
           size *= desc.tensor.dim[i];
         }
@@ -761,7 +764,8 @@ TaskGraphResult print_task_graph(
     std::tuple<int, int, TaskType> task_config = task_configs.find(op)->second;
 
     assert(all_task_maps.find(op) != all_task_maps.end());
-    std::map<dim3, TaskId, Dim3Comparator> const &task_map = all_task_maps.find(op)->second;
+    std::map<dim3, TaskId, Dim3Comparator> const &task_map =
+        all_task_maps.find(op)->second;
     // Customized op
     kn::KNCustomizedOp const *cur_op =
         dynamic_cast<kn::KNCustomizedOp const *>(op);
@@ -854,7 +858,8 @@ TaskGraphResult print_task_graph(
                        0,
                        io_desc.name,
                        offset *
-                           type::get_datatype_size(static_cast<type::DataType>(io_desc.tensor.data_type)));
+                           type::get_datatype_size(static_cast<type::DataType>(
+                               io_desc.tensor.data_type)));
               tgbody.e("input$.num_dims = $;", 0, task_desc.inputs[0].num_dims);
               tgbody.e(
                   "input$.data_type = $;", 0, task_desc.inputs[0].data_type);
@@ -873,7 +878,8 @@ TaskGraphResult print_task_graph(
               json_task["inputs"].push_back(json{
                   {"base_ptr", io_desc.name},
                   {"offset",
-                   offset * type::get_datatype_size(static_cast<type::DataType>(io_desc.tensor.data_type))},
+                   offset * type::get_datatype_size(static_cast<type::DataType>(
+                                io_desc.tensor.data_type))},
                   {"data_type", task_desc.inputs[0].data_type},
                   {"dims", json_dims},
                   {"strides", json_strides}});
@@ -905,7 +911,8 @@ TaskGraphResult print_task_graph(
                        0,
                        io_desc.name,
                        offset *
-                           type::get_datatype_size(static_cast<type::DataType>(io_desc.tensor.data_type)));
+                           type::get_datatype_size(static_cast<type::DataType>(
+                               io_desc.tensor.data_type)));
               tgbody.e(
                   "output$.num_dims = $;", 0, task_desc.outputs[0].num_dims);
               tgbody.e(
@@ -926,7 +933,8 @@ TaskGraphResult print_task_graph(
               json_task["outputs"].push_back(json{
                   {"base_ptr", io_desc.name},
                   {"offset",
-                   offset * type::get_datatype_size(static_cast<type::DataType>(io_desc.tensor.data_type))},
+                   offset * type::get_datatype_size(static_cast<type::DataType>(
+                                io_desc.tensor.data_type))},
                   {"data_type", task_desc.outputs[0].data_type},
                   {"dims", json_dims},
                   {"strides", json_strides}});
@@ -1074,7 +1082,8 @@ TaskGraphResult print_task_graph(
                        i,
                        sub_desc.name,
                        offset *
-                           type::get_datatype_size(static_cast<type::DataType>(sub_desc.tensor.data_type)));
+                           type::get_datatype_size(static_cast<type::DataType>(
+                               sub_desc.tensor.data_type)));
               tgbody.e("input$.num_dims = $;", i, task_desc.inputs[i].num_dims);
               tgbody.e(
                   "input$.data_type = $;", i, task_desc.inputs[i].data_type);
@@ -1092,7 +1101,8 @@ TaskGraphResult print_task_graph(
               json_task["inputs"].push_back(json{
                   {"base_ptr", sub_desc.name},
                   {"offset",
-                   offset * type::get_datatype_size(static_cast<type::DataType>(sub_desc.tensor.data_type))},
+                   offset * type::get_datatype_size(static_cast<type::DataType>(
+                                sub_desc.tensor.data_type))},
                   {"data_type", task_desc.inputs[i].data_type},
                   {"dims", json_dims},
                   {"strides", json_strides}});
@@ -1121,7 +1131,8 @@ TaskGraphResult print_task_graph(
                        i,
                        io_desc.name,
                        offset *
-                           type::get_datatype_size(static_cast<type::DataType>(io_desc.tensor.data_type)));
+                           type::get_datatype_size(static_cast<type::DataType>(
+                               io_desc.tensor.data_type)));
               tgbody.e("input$.num_dims = $;", i, task_desc.inputs[i].num_dims);
               tgbody.e(
                   "input$.data_type = $;", i, task_desc.inputs[i].data_type);
@@ -1141,7 +1152,8 @@ TaskGraphResult print_task_graph(
               json_task["inputs"].push_back(json{
                   {"base_ptr", io_desc.name},
                   {"offset",
-                   offset * type::get_datatype_size(static_cast<type::DataType>(io_desc.tensor.data_type))},
+                   offset * type::get_datatype_size(static_cast<type::DataType>(
+                                io_desc.tensor.data_type))},
                   {"data_type", task_desc.inputs[i].data_type},
                   {"dims", json_dims},
                   {"strides", json_strides}});
@@ -1177,7 +1189,8 @@ TaskGraphResult print_task_graph(
                      i,
                      io_desc.name,
                      offset *
-                         type::get_datatype_size(static_cast<type::DataType>(io_desc.tensor.data_type)));
+                         type::get_datatype_size(static_cast<type::DataType>(
+                             io_desc.tensor.data_type)));
             tgbody.e("output$.num_dims = $;", i, task_desc.outputs[i].num_dims);
             tgbody.e(
                 "output$.data_type = $;", i, task_desc.outputs[i].data_type);
@@ -1197,7 +1210,8 @@ TaskGraphResult print_task_graph(
             json_task["outputs"].push_back(json{
                 {"base_ptr", io_desc.name},
                 {"offset",
-                 offset * type::get_datatype_size(static_cast<type::DataType>(io_desc.tensor.data_type))},
+                 offset * type::get_datatype_size(static_cast<type::DataType>(
+                              io_desc.tensor.data_type))},
                 {"data_type", task_desc.outputs[i].data_type},
                 {"dims", json_dims},
                 {"strides", json_strides}});
@@ -1238,9 +1252,9 @@ TaskGraphResult print_task_graph(
   }
   code.e("}");
   // Write json to output file
-  //std::ofstream out("task_graph.json");
-  //out << json_task_graph.dump(2);
-  //out.close();
+  // std::ofstream out("task_graph.json");
+  // out << json_task_graph.dump(2);
+  // out.close();
   TaskGraphResult result;
   result.cuda_code = code.to_string();
   result.json_file = json_task_graph.dump(2);
@@ -1263,9 +1277,25 @@ TaskGraphResult Graph::generate_task_graph(int _num_gpus) {
   all_events.push_back(e);
   TaskDesc t(TASK_TERMINATE);
   all_tasks.push_back(t);
-  register_mugraph(*this, num_gpus, my_gpu_id, all_tasks, all_events, first_tasks, all_task_maps, task_config);
+  register_mugraph(*this,
+                   num_gpus,
+                   my_gpu_id,
+                   all_tasks,
+                   all_events,
+                   first_tasks,
+                   all_task_maps,
+                   task_config);
   assert(sanity_check(*this, all_tasks, all_events, first_tasks));
-  return print_task_graph(*this, num_gpus, my_gpu_id, all_tasks, all_events, first_tasks, all_task_maps, task_config, io_config, true/*use_json_format*/);
+  return print_task_graph(*this,
+                          num_gpus,
+                          my_gpu_id,
+                          all_tasks,
+                          all_events,
+                          first_tasks,
+                          all_task_maps,
+                          task_config,
+                          io_config,
+                          true /*use_json_format*/);
 }
 
 IODesc::IODesc(IOType _type,
@@ -1273,17 +1303,16 @@ IODesc::IODesc(IOType _type,
                mirage::kernel::DTensor const &_tensor,
                void *_torch_data_ptr = nullptr);
     : type(_type), name(_name), torch_data_ptr(_torch_data_ptr) {
-  tensor.num_dims = _tensor.num_dims;
-  tensor.data_type = _tensor.data_type;
-  assert(_tensor.owner_op->op_type == mirage::type::KN_INPUT_OP);
-  mirage::kernel::KNInputOp const *op =
-      static_cast<mirage::kernel::KNInputOp const *>(_tensor.owner_op);
-  for (int i = 0; i < tensor.num_dims; i++) {
-    tensor.dim[i] = _tensor.dim[i];
-    tensor.stride[i] = op->input_strides[i];
-  }
-}
+      tensor.num_dims = _tensor.num_dims;
+      tensor.data_type = _tensor.data_type;
+      assert(_tensor.owner_op->op_type == mirage::type::KN_INPUT_OP);
+      mirage::kernel::KNInputOp const *op =
+          static_cast<mirage::kernel::KNInputOp const *>(_tensor.owner_op);
+      for (int i = 0; i < tensor.num_dims; i++) {
+        tensor.dim[i] = _tensor.dim[i];
+        tensor.stride[i] = op->input_strides[i];
+      }
+    }
 
-
-} // kernel
-} // mirage
+    } // namespace kernel
+    } // namespace mirage
