@@ -1,10 +1,17 @@
 from .core import *
 
+
 class TBGraph:
     def __init__(self, graph):
         self.cygraph = graph
 
-    def new_input(self, dtensor: DTensor, input_map: tuple, forloop_dim: int, store_in_dmem: bool = False):
+    def new_input(
+        self,
+        dtensor: DTensor,
+        input_map: tuple,
+        forloop_dim: int,
+        store_in_dmem: bool = False,
+    ):
         return self.cygraph.new_input(dtensor, input_map, forloop_dim, store_in_dmem)
 
     def new_output(self, stensor: STensor, output_map: tuple, forloop_dim: int = -1):
@@ -21,10 +28,10 @@ class TBGraph:
 
     def gelu(self, A: STensor):
         return self.cygraph.gelu(A)
-    
+
     def relu(self, A: STensor):
         return self.cygraph.relu(A)
-    
+
     def clamp(self, A: STensor, min_val: float, max_val: float):
         return self.cygraph.clamp(A, min_val, max_val)
 

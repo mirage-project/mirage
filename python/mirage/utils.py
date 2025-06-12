@@ -15,4 +15,3 @@ def get_shared_memory_capacity(target_cc):
         return 223 * 1024
     else:
         assert False, "Unsupported compute capacity: {}".format(target_cc)
-
