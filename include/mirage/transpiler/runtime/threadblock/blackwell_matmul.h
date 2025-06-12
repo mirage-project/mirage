@@ -129,13 +129,12 @@ public:
 
 
   
-  template<class TmemAccTensor, class TensorC, class TensorD>
+  template<class TmemAccTensor, class TensorC>
   static __device__ __forceinline__
   void write_tC_to_gC(float *__restrict__ c_ptr,
                       TmemAccTensor const& tCtAcc,
                          int thread_idx,
-                         TensorC &mC,
-                         TensorD &mD)
+                         TensorC &mC)
   {
     // only one warp group is used for Tmem load
     if (thread_idx >= mirage::config::NUM_THREADS_PER_GROUP) {
@@ -152,10 +151,9 @@ public:
     MmaTiler_MNK mma_tiler;
     auto cta_mma = tiled_mma.get_slice(mma_v);
     auto gC = local_tile(mC, mma_tiler, mma_coord, Step<_1,_1, X>{});
-    auto gD = local_tile(mD, mma_tiler, mma_coord, Step<_1,_1, X>{});
 
     auto tCgC = cta_mma.partition_C(gC);         // (MmaC, NumMma_M, NumMma_N)
-    auto tCgD = cta_mma.partition_C(gD);         // (MmaC, NumMma_M, NumMma_N)
+    auto tCgD = cta_mma.partition_C(gC);         // (MmaC, NumMma_M, NumMma_N)
 
     auto tDgC = thr_t2r_copy.partition_D(tCgC);                   // (CpyD, NumCpy_M, NumCpy_N)
     auto tDrC = make_fragment_like(tDgC);                         // (CpyD, NumCpy_M, NumCpy_N)
@@ -208,8 +206,6 @@ public:
           gemm(tiled_mma, tCrA(_,_,k_block,read_stage), tCrB(_,_,k_block,read_stage), mma_tC);
           tiled_mma.accumulate_ = UMMA::ScaleOut::One;
       }
-      blackwell_async_pipeline_20000012.consumer_release();
-      blackwell_async_pipeline_20000013.consumer_release();
     }
   }
 };

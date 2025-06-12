@@ -41,7 +41,6 @@ reference_gemm(TensorA const& tensor_A, TensorB const& tensor_B,
   }
 }
 
-// 添加tensor初始化函数
 template <class Tensor>
 void
 initialize_tensor(Tensor& tensor, cute::tuple<int, int> value_range = {-2, 2})
@@ -49,13 +48,13 @@ initialize_tensor(Tensor& tensor, cute::tuple<int, int> value_range = {-2, 2})
   using DataType = typename Tensor::element_type;
   auto [min, max] = value_range;
   for (int i = 0; i < cute::size(tensor); i++) {
-    // tensor(i) = DataType(int((max-min)*(rand() / double(RAND_MAX)) + min));
-    tensor(i) = DataType(1);
+    tensor(i) = DataType(int((max-min)*(rand() / double(RAND_MAX)) + min));
+    // tensor(i) = DataType(1);
   }
 }
 
-template <class DstPipeLayout_10000003, class DstPipeLayout_10000004, class TMA_10000003, class TMA_10000004, class TensorD>
-__global__ void  __launch_bounds__(384) custom_kernel_0(CUTE_GRID_CONSTANT TMA_10000003 const tma_10000003, CUTE_GRID_CONSTANT TMA_10000004 const tma_10000004,  float* dtensor10000005_ptr, half_t const* dtensor10000003_ptr, half_t const* dtensor10000004_ptr, TensorD mD) {
+template <class DstPipeLayout_10000003, class DstPipeLayout_10000004, class TMA_10000003, class TMA_10000004>
+__global__ void  __launch_bounds__(384) custom_kernel_0(CUTE_GRID_CONSTANT TMA_10000003 const tma_10000003, CUTE_GRID_CONSTANT TMA_10000004 const tma_10000004,  float* dtensor10000005_ptr, half_t const* dtensor10000003_ptr, half_t const* dtensor10000004_ptr) {
 // block x, y is executing here
 // if (threadIdx.x == 0) {
 //     printf("block x, y is executing here, blockIdx.x is %d, blockIdx.y is %d\n", blockIdx.x, blockIdx.y);
@@ -190,10 +189,11 @@ __syncthreads();
             Matmul20000015Kernel::run(matmul_20000015_accum, stensor20000012_ptr, stensor20000013_ptr, for_idx, tiled_mma, read_idx_20000012, blackwell_async_pipeline_20000012, blackwell_async_pipeline_20000013);
           }
         }
+        blackwell_async_pipeline_20000012.consumer_release();
+        blackwell_async_pipeline_20000013.consumer_release();
 
     }
     // Write back in-register accumulators
-    // tb::wg_sync<CONSUMER_NUM_THREADS>(8);
     // tb::wg_sync<CONSUMER_NUM_THREADS>(8);
     // Matmul20000015Kernel::write_back_mma_rC(stensor20000015_ptr, matmul_20000015_accum, thread_idx);
     // The epilogue (kernels outside the loop)
@@ -205,7 +205,7 @@ __syncthreads();
   }
 
   cluster_sync();
-  Matmul20000015Kernel::write_tC_to_gC(stensor20000015_ptr, matmul_20000015_accum, thread_idx, mC, mD);
+  Matmul20000015Kernel::write_tC_to_gC(stensor20000015_ptr, matmul_20000015_accum, thread_idx, mC);
   
 
   __syncthreads();
@@ -229,8 +229,6 @@ void _execute_mugraph(std::vector<void const *> input_tensors, std::vector<void*
   {
     // OP type: kn_customized_op
     float *dtensor10000005 = (float*)output_tensors.at(0);  // 更改为float*
-    float *d_ptr = (float*)output_tensors.at(1);
-    Tensor mD = make_tensor(make_gmem_ptr(d_ptr), make_layout(make_shape(1024, 1024), make_stride(1024, Int<1>{})));
 
     half_t *dtensor10000003 = (half_t*)input_tensors.at(0);
     half_t *dtensor10000004 = (half_t*)input_tensors.at(1);
@@ -288,11 +286,11 @@ void _execute_mugraph(std::vector<void const *> input_tensors, std::vector<void*
     auto tma_10000004 = make_tma_atom_B_sm100(SM100_TMA_2SM_LOAD_MULTICAST{}, g_tensor_10000004, DstPipeLayout_10000004{}(_,_,_,Int<0>{}), mma_tiler, tiled_mma, cluster_layout_vmnk);
     
     // zy: change to add the DstPipeLayout
-    auto kernel_ptr = &custom_kernel_0<DstPipeLayout_10000003, DstPipeLayout_10000004, decltype(tma_10000003), decltype(tma_10000004), decltype(mD)>;
+    auto kernel_ptr = &custom_kernel_0<DstPipeLayout_10000003, DstPipeLayout_10000004, decltype(tma_10000003), decltype(tma_10000004)>;
     cudaFuncSetAttribute(kernel_ptr, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
     dim3 cluster_dim(size<0>(cluster_shape), size<1>(cluster_shape), size<2>(cluster_shape));
     cutlass::ClusterLaunchParams params = {grid_dim, block_dim, cluster_dim, smem_size};
-    cutlass::launch_kernel_on_cluster(params, (void const*) kernel_ptr, tma_10000003, tma_10000004,  dtensor10000005, dtensor10000003, dtensor10000004, mD);
+    cutlass::launch_kernel_on_cluster(params, (void const*) kernel_ptr, tma_10000003, tma_10000004,  dtensor10000005, dtensor10000003, dtensor10000004);
     cudaDeviceSynchronize();
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
@@ -417,16 +415,14 @@ int main() {
     Tensor mA = make_tensor(make_gmem_ptr<half_t>(device_A.data().get()), layout_A);
     Tensor mB = make_tensor(make_gmem_ptr<half_t>(device_B.data().get()), layout_B);
     Tensor mC = make_tensor(make_gmem_ptr<float>(device_C.data().get()), layout_C);
-    Tensor mD = make_tensor(make_gmem_ptr<float>(device_D.data().get()), layout_D);
     printf("mA:\t"); print(mA); printf("\n");
     printf("mB:\t"); print(mB); printf("\n");
     printf("mC:\t"); print(mC); printf("\n");
-    printf("mD:\t"); print(mD); printf("\n");
+
   
     half_t *d_input1 = device_A.data().get();
     half_t *d_input2 = device_B.data().get();
     float *d_output = device_C.data().get(); 
-    float *d_ptr = device_D.data().get();
     printf("d_output:\t"); print(d_output); printf("\n");
     
     
@@ -447,7 +443,7 @@ int main() {
     
     // Prepare input/output vectors
     std::vector<void const *> input_tensors = {d_input1, d_input2};
-    std::vector<void*> output_tensors = {d_output, d_ptr};  // Now float* type
+    std::vector<void*> output_tensors = {d_output};  // Now float* type
     
     ////////////////////////////////////////////////////////////
     //
@@ -520,7 +516,7 @@ int main() {
     
     // Copy results back to host for verification
     thrust::host_vector<float> temp_output(Gemm_M * Gemm_N);  // Direct use of float
-    err = cudaMemcpy(temp_output.data(), d_ptr, Gemm_M * Gemm_N * sizeof(float), cudaMemcpyDeviceToHost);
+    err = cudaMemcpy(temp_output.data(), d_output, Gemm_M * Gemm_N * sizeof(float), cudaMemcpyDeviceToHost);
     if (err != cudaSuccess) {
         printf("cudaMemcpy failed for output: %s\n", cudaGetErrorString(err));
         exit(1);
