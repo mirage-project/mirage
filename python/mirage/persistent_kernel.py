@@ -166,7 +166,7 @@ class PersistentKernel:
         self.num_workers = num_workers
         self.num_local_schedulers = num_local_schedulers
         self.num_remote_schedulers = num_remote_schedulers
-        self.kn_graph = KNGraph(CyKNGraph())
+        self.kn_graph = KNGraph(CyKNGraph(disable_fingerprint=True))
         self.task_configs = []
 
     def attach_input(self, torch_tensor: torch.Tensor, name: str = None) -> DTensor:
@@ -200,10 +200,10 @@ class PersistentKernel:
             raise RuntimeError(f"Invalid io_category: {io_category}")
         return t
 
-    def fuse_tensors(self, inputs: list[DTensor], fused_dim: int, num_groups: int) -> DTensor:
+    def fuse_tensors(self, inputs: list[DTensor], fused_dim: int, num_groups: int, name: str = None) -> DTensor:
         # Currently only support fusing the 0-th dimension
         assert fused_dim == 0
-        t = self.kn_graph.fuse_tensors(inputs, fused_dim, num_groups)
+        t = self.kn_graph.fuse_tensors(inputs, fused_dim, num_groups, name)
         return t
 
     def embed_layer(self, input: DTensor, weight: DTensor, output: DTensor, grid_dim: tuple, block_dim: tuple):
@@ -219,7 +219,7 @@ class PersistentKernel:
         assert input.num_dims == 2
         assert weight_linear.num_dims == 2
         assert output.num_dims == 2
-        tb_graph = TBGraph(core.CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         tb_graph.new_input(input, (-1, -1, -1), 1, True)
         tb_graph.new_input(weight_norm, (-1, -1, -1), 0, True)
         tb_graph.new_input(weight_linear, (0, -1, -1), 1, True)
@@ -227,7 +227,7 @@ class PersistentKernel:
         self.kn_graph.customized([input, weight_norm, weight_linear, output], tb_graph)
         self.kn_graph.register_task(tb_graph, "rmsnorm_linear")
 
-    def attention_layer(self, input: DTensor, q_norm: DTensor, k_norm: DTensor, k_cache: DTensor, v_cache: DTensor, cos_pos_embed: DTensor, sin_pos_embed: DTensor, output: DTensor):
+    def attention_layer(self, input: DTensor, q_norm: DTensor, k_norm: DTensor, k_cache: DTensor, v_cache: DTensor, cos_pos_embed: DTensor, sin_pos_embed: DTensor, output: DTensor, grid_dim: tuple, block_dim: tuple):
         # Currently assume that input/output
         assert input.num_dims == 2 # (batch_size, fused_outdim / world_size)
         assert output.num_dims == 2 # (batch_size, hidden_size / world_size)
@@ -236,17 +236,67 @@ class PersistentKernel:
         assert k_cache.num_dims == 4 # (batch_size, seq_len, kv_heads, head_dim)
         assert v_cache.num_dims == 4 # (batch_size, seq_len, kv_heads, head_dim)
         assert cos_pos_embed.num_dims == 2 # (seq_len, head_dim)
-        tb_graph = TBGraph(core.CyTBGraph(grid_dim, block_dim, 1, 64))
+        assert sin_pos_embed.num_dims == 2 # (seq_len, head_dim)
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         tb_graph.new_input(input, (0, 1, -1), -1, True)
-        tb_graph.new_input(k_cache, (0, 2 -1), 1, True)
-        tb_graph.new_input(v_cache, (0, 2 -1), 1, True)
+        tb_graph.new_input(k_cache, (0, 2, -1), 1, True)
+        tb_graph.new_input(v_cache, (0, 2, -1), 1, True)
         tb_graph.new_input(q_norm, (-1, -1, -1), -1, True)
         tb_graph.new_input(k_norm, (-1, -1, -1), -1, True)
         tb_graph.new_input(cos_pos_embed, (-1, -1, -1), -1, True)
         tb_graph.new_input(sin_pos_embed, (-1, -1, -1), -1, True)
         tb_graph.new_input(output, (0, 1, -1), -1, True)
-        self.kn_graph.customized([input, q_norm, k_norm, k_cache, v_cache, cos_pos_embed, sin_pos_embed, output], tb_graph)
+        self.kn_graph.customized([input, k_cache, v_cache, q_norm, k_norm, cos_pos_embed, sin_pos_embed, output], tb_graph)
         self.kn_graph.register_task(tb_graph, "attention")
+
+    def linear_with_residual_layer(self, input: DTensor, weight: DTensor, residual: DTensor, output: DTensor, grid_dim: tuple, block_dim: tuple):
+        # Currently assume that input/output
+        assert input.num_dims == 2 # (batch_size, hidden_size / world_size)
+        assert weight.num_dims == 2 # (hidden_size, hidden_size / world_size)
+        assert residual.num_dims == 2 # (batch_size, hidden_size)
+        assert output.num_dims == 2 # (batch_size, hidden_size)
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(input, (-1, -1, -1), 1, True)
+        tb_graph.new_input(weight, (0, -1, -1), 1, True)
+        tb_graph.new_input(residual, (1, -1, -1), -1, True)
+        tb_graph.new_input(output, (1, -1, -1), -1, True)
+        self.kn_graph.customized([input, weight, residual, output], tb_graph)
+        self.kn_graph.register_task(tb_graph, "linear_with_residual")
+
+    def allreduce_layer(self, input: DTensor, buffer: DTensor, output: DTensor, grid_dim: tuple, block_dim: tuple):
+        # Currently assume that input/output
+        assert input.num_dims == 2 # (batch_size, hidden_size)
+        assert buffer.num_dims == 3 # (world_size, batch_size, hidden_size)
+        assert output.num_dims == 2 # (batch_size, hidden_size)
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(input, (1, -1, -1), -1, True)
+        tb_graph.new_input(buffer, (2, -1, -1), -1, True)
+        tb_graph.new_input(output, (1, -1, -1), -1, True)
+        self.kn_graph.customized([input, buffer, output], tb_graph)
+        self.kn_graph.register_task(tb_graph, "allreduce")
+
+    def silu_mul_linear_with_residual_layer(self, input: DTensor, weight: DTensor, residual: DTensor, output: DTensor, grid_dim: tuple, block_dim: tuple):
+        # Currently assume that input/output
+        assert input.num_dims == 2 # (batch_size, 2*intermediate_size)
+        assert weight.num_dims == 2 # (hidden_size, intermediate_size)
+        assert residual.num_dims == 2 # (batch_size, hidden_size)
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(input, (-1, -1, -1), 1, True)
+        tb_graph.new_input(weight, (0, -1, -1), 1, True)
+        tb_graph.new_input(residual, (1, -1, -1), 1, True)
+        tb_graph.new_input(output, (1, -1, -1), 1, True)
+        self.kn_graph.customized([input, weight, residual, output], tb_graph)
+        self.kn_graph.register_task(tb_graph, "silu_mul_linear_with_residual")
+
+    def argmax_layer(self, input: DTensor, output: DTensor, grid_dim: tuple, block_dim: tuple):
+        # Currently assume that input/output
+        assert input.num_dims == 2 # (batch_size, vocab_size)
+        assert output.num_dims == 2 # (batch_size, 1)
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(input, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output, (-1, -1, -1), -1, True)
+        self.kn_graph.customized([input, output], tb_graph)
+        self.kn_graph.register_task(tb_graph, "argmax")
 
     def compile(self, file_path : str, mpi_rank : int, num_workers : int, num_local_schedulers : int, num_remote_schedulers : int, **kwargs):
         self.__finalized__ = False

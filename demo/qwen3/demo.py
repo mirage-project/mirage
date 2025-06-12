@@ -133,10 +133,18 @@ if __name__ == "__main__":
         import mirage as mi
         batch_size = 1
         hidden_size = model.config.hidden_size
+        intermediate_size = model.config.intermediate_size
+        # pad vocab_size to facilitate task graph creation
+        lm_head_weight = torch.cat((model.lm_head.weight, torch.full((153600-model.config.vocab_size,hidden_size), 0, device="cuda")), 0)
+        assert lm_head_weight.stride()[0] == hidden_size
+        vocab_size = 153600
         num_q_heads = model.config.num_attention_heads
         num_kv_heads = model.config.num_key_value_heads
+        num_local_q_heads = num_q_heads // world_size
+        num_local_kv_heads = num_kv_heads // world_size
         head_dim = hidden_size // num_q_heads
         fused_outdim_1 = (num_q_heads + 2 * num_kv_heads) * head_dim
+        fused_outdim_2 = 2 * intermediate_size
 
         if args.profiling:
             profiler_tensor = torch.empty(
@@ -150,8 +158,20 @@ if __name__ == "__main__":
             num_local_schedulers=48,
             num_remote_schedulers=0)
         x = mpk.attach_input(torch_tensor=input_tokens, name="input_tokens")
+        cos_pos_embed = mpk.attach_input(torch_tensor=position_embeddings[0][0,:,:], name="cos_position_embedding")
+        sin_pos_embed = mpk.attach_input(torch_tensor=position_embeddings[1][0,:,:], name="sin_position_embedding")
         y = mpk.new_tensor(dims=(batch_size, hidden_size), dtype=mi.bfloat16, name="embed_out", io_category="cuda_tensor")
         attn_in = mpk.new_tensor(dims=(batch_size, fused_outdim_1 // world_size), dtype=mi.bfloat16, name="attn_in", io_category="cuda_tensor")
+        attn_out = mpk.new_tensor(dims=(batch_size, num_local_q_heads * head_dim), dtype=mi.bfloat16, name="attn_out", io_category="cuda_tensor")
+        attn_proj_out = mpk.new_tensor(dims=(batch_size, hidden_size), dtype=mi.bfloat16, name="attn_proj_out", io_category="nvshmem_tensor")
+        allreduce_buf = mpk.new_tensor(dims=(world_size, batch_size, hidden_size), dtype=mi.bfloat16, name="all_reduce_buf", io_category="nvshmem_tensor")
+        attn_allreduce_out = mpk.new_tensor(dims=(batch_size, hidden_size), dtype=mi.bfloat16, name="attn_allreduce_out", io_category="nvshmem_tensor")
+        mlp_mid = mpk.new_tensor(dims=(batch_size, fused_outdim_2 // world_size), dtype=mi.bfloat16, name="mlp_mid", io_category="cuda_tensor")
+        mlp_out = mpk.new_tensor(dims=(batch_size, hidden_size), dtype=mi.bfloat16, name="mlp_out", io_category="nvshmem_tensor")
+        mlp_final = mpk.new_tensor(dims=(batch_size, hidden_size), dtype=mi.bfloat16, name="mlp_final", io_category="nvshmem_tensor")
+        argmax_in = mpk.new_tensor(dims=(batch_size, vocab_size), dtype=mi.bfloat16, name="argmax_in", io_category="cuda_tensor")
+        argmax_out = mpk.new_tensor(dims=(batch_size, 1), dtype=mi.bfloat16, name="argmax_out", io_category="cuda_tensor")
+
         # Add Embed
         w = mpk.attach_input(torch_tensor=model.model.embed_tokens.weight, name="embed_tokens")
         mpk.embed_layer(input=x, weight=w, output=y, grid_dim=(1,1,1), block_dim=(128,1,1))
@@ -165,6 +185,41 @@ if __name__ == "__main__":
             w_qkv = mpk.fuse_tensors(inputs=[w_q, w_k, w_v], fused_dim=0, num_groups=model.config.num_key_value_heads // world_size, name=f"layer_{i}_qkv_proj")
             mpk.rmsnorm_linear_layer(input=x, weight_norm=w_norm, weight_linear=w_qkv, output=attn_in, grid_dim=(96,1,1), block_dim=(128,1,1))
             # add attention
+            w_q_norm = mpk.attach_input(torch_tensor=layer.self_attn.q_norm.weight, name=f"layer_{i}_q_norm")
+            w_k_norm = mpk.attach_input(torch_tensor=layer.self_attn.k_norm.weight, name=f"layer_{i}_k_norm")
+            k_cache = mpk.attach_input(torch_tensor=model.model.kv_cache[0][i], name=f"layer_{i}_k_cache")
+            v_cache = mpk.attach_input(torch_tensor=model.model.kv_cache[1][i], name=f"layer_{i}_v_cache")
+            mpk.attention_layer(input=attn_in, q_norm=w_q_norm, k_norm=w_k_norm, k_cache=k_cache, v_cache=v_cache, cos_pos_embed=cos_pos_embed, sin_pos_embed=sin_pos_embed, output=attn_out, grid_dim=(batch_size, num_local_kv_heads, 1), block_dim=(128,1,1))
+            # add linear w/ residual
+            w = mpk.attach_input(torch_tensor=layer.self_attn.o_proj.weight, name=f"layer_{i}_o_proj")
+            mpk.linear_with_residual_layer(input=attn_out, weight=w, residual=x, output=attn_proj_out, grid_dim=(hidden_size//64,1,1), block_dim=(128,1,1))
+            # reset residual input as x
+            x = attn_proj_out
+            # add allreduce if needed
+            if world_size > 1:
+                mpk.allreduce_layer(input=attn_proj_out, buffer=allreduce_buf, output=attn_allreduce_out, grid_dim=(hidden_size//64,1,1), block_dim=(128,1,1))
+                x = attn_allreduce_out
+            # add rmsnorm_linear layer
+            w_norm = mpk.attach_input(torch_tensor=layer.post_attention_layernorm.weight, name=f"layer_{i}_post_attn_layernorm")
+            w_gate_proj = mpk.attach_input(torch_tensor=layer.mlp.gate_proj.weight, name=f"layer_{i}_gate_proj")
+            w_up_proj = mpk.attach_input(torch_tensor=layer.mlp.up_proj.weight, name=f"layer_{i}_up_proj")
+            w_gatedup = mpk.fuse_tensors(inputs=[w_gate_proj, w_up_proj], fused_dim=0, num_groups=1, name=f"layer_{i}_gatedup_proj")
+            mpk.rmsnorm_linear_layer(input=x, weight_norm=w_norm, weight_linear=w_gatedup, output=mlp_mid, grid_dim=(96,1,1), block_dim=(128,1,1))
+            # add silu_mul_linear layer
+            w = mpk.attach_input(torch_tensor=layer.mlp.down_proj.weight, name="layer_{i}_down_proj")
+            mpk.silu_mul_linear_with_residual_layer(input=mlp_mid, weight=w, residual=x, output=mlp_out, grid_dim=(hidden_size//64, 1,1), block_dim=(128,1,1))
+            #reset residual input as x
+            x = mlp_out
+            if world_size > 1:
+                mpk.allreduce_layer(input=mlp_out, buffer=allreduce_buf, output=mlp_final, grid_dim=(hidden_size//64,1,1), block_dim=(128,1,1))
+                x=mlp_final
+
+        # add rmsnorm_linear layer
+        w_norm = mpk.attach_input(torch_tensor=model.model.norm.weight, name="model_norm_weight")
+        w_proj = mpk.attach_input(torch_tensor=lm_head_weight, name="lm_head")
+        mpk.rmsnorm_linear_layer(input=x, weight_norm=w_norm, weight_linear=w_proj, output=argmax_in, grid_dim=(96,1,1), block_dim=(128,1,1))
+        # add argmax layer
+        mpk.argmax_layer(input=argmax_in, output=argmax_out, grid_dim=(1,1,1), block_dim=(1,1,1))
 
         # kernel = mirage.PersistentKernel(
         #     file_path="/home/ubuntu/mirage_cpp/debug_build/test.cu",

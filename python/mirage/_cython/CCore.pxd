@@ -191,7 +191,7 @@ cdef extern from "mirage/kernel/graph.h" namespace "mirage::kernel":
         void get_bgraph(CppTBGraph** bgraph)
 
     cdef cppclass CppKNGraph "mirage::kernel::Graph":
-        CppKNGraph()
+        CppKNGraph(dim3 gpu_dim, bool disable_fingerprint)
         CppDTensor* new_input_ptr(vector[int] dims,
                                   vector[size_t] strides,
                                   DataType data_type,

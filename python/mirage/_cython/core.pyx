@@ -646,10 +646,14 @@ cdef class CyTBOutputOp(CyTBOperator):
 cdef class CyKNGraph:
     cdef CppKNGraph *p_kgraph #Hold a CppKNGraph instance
 
-    def __cinit__(self, graph = None):
+    def __cinit__(self, graph = None, bool disable_fingerprint = False):
         cdef unsigned long long ptr
+        cdef dim3 c_gpu_dim
         if graph is None:
-            self.p_kgraph = new CppKNGraph()
+            c_gpu_dim.x = 1
+            c_gpu_dim.y = 1
+            c_gpu_dim.z = 1
+            self.p_kgraph = new CppKNGraph(c_gpu_dim, disable_fingerprint)
         else:
             ptr = ctypes.cast(graph, ctypes.c_void_p).value
             self.p_kgraph = <CppKNGraph*>(ptr)
@@ -899,7 +903,7 @@ cdef class CyKNGraph:
             cname = py_byte_string
         self.p_kgraph.attach_nvshmem_tensor(tensor.c_ptr, cname)
 
-    def fuse_tensors(self, inputs, int fused_dim, int num_groups, str name):
+    def fuse_tensors(self, list[DTensor] inputs, int fused_dim, int num_groups, str name):
         cdef vector[const CppDTensor*] cinputs
         cinputs.resize(len(inputs))
         cdef DTensor t
@@ -911,7 +915,9 @@ cdef class CyKNGraph:
         if name is not None:
             py_byte_string = name.encode('UTF-8')
             cname = py_byte_string
-        self.p_kgraph.fuse_tensors(cinputs, fused_dim, num_groups, cname)
+        cdef CppDTensor* ptr = self.p_kgraph.fuse_tensors(cinputs, fused_dim, num_groups, cname)
+        output = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
+        return DTensor(output)
 
     def register_task(self, CyTBGraph bgraph, str task_type):
         cdef char* cname = NULL
