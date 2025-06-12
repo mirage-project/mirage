@@ -169,10 +169,12 @@ if __name__ == "__main__":
         )
         x = mpk.attach_input(torch_tensor=input_tokens, name="input_tokens")
         cos_pos_embed = mpk.attach_input(
-            torch_tensor=position_embeddings[0][0, :, :], name="cos_position_embedding"
+            torch_tensor=position_embeddings[0][0, :, :],
+            name="cos_position_embedding",
         )
         sin_pos_embed = mpk.attach_input(
-            torch_tensor=position_embeddings[1][0, :, :], name="sin_position_embedding"
+            torch_tensor=position_embeddings[1][0, :, :],
+            name="sin_position_embedding",
         )
         y = mpk.new_tensor(
             dims=(batch_size, hidden_size),
