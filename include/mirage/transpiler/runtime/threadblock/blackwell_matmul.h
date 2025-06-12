@@ -37,9 +37,7 @@ template<typename T,
           int PIPELINE_STAGES,
           class ClusterShape_MNK_,
           class TiledMMA_,
-          class MmaTiler_MNK_,
-          class DstPipeLayout_A_,
-          class DstPipeLayout_B_>
+          class MmaTiler_MNK_>
 struct Blackwell_Matmul {
 public:
   CUTE_STATIC_ASSERT_V(rank(SmemLayoutA_{}) == _2{});
@@ -49,56 +47,55 @@ public:
   using ClusterShape_MNK = ClusterShape_MNK_;
   using TiledMMA = TiledMMA_;
   using MmaTiler_MNK = MmaTiler_MNK_;
-  using DstPipeLayout_A = DstPipeLayout_A_;
-  using DstPipeLayout_B = DstPipeLayout_B_;
+
+  static constexpr UMMA::Major UmmaMajorA = UMMA::Major::K;
+  static constexpr UMMA::Major UmmaMajorB = UMMA::Major::K;
+
+  static constexpr int PIPELINE_STAGE_A = IS_PIPELINE_A ? PIPELINE_STAGES : 1;
+  static constexpr int PIPELINE_STAGE_B = IS_PIPELINE_B ? PIPELINE_STAGES : 1;
+
+
+  using SmemLayoutAtom_A =
+      decltype(cutlass::gemm::collective::detail::sm100_smem_selector<
+               UmmaMajorA,
+               T,                                                   
+               decltype(get<0>(MmaTiler_MNK{})),
+               decltype(get<2>(MmaTiler_MNK{}))>());     
+  using DstMNKLayout_A = decltype(
+    partition_shape_A(TiledMMA{},
+    make_shape(shape<0>(MmaTiler_MNK{}), shape<2>(MmaTiler_MNK{}))));
+
+  using DstPipeLayout_A = decltype(UMMA::tile_to_mma_shape(
+          SmemLayoutAtom_A{},
+          append(DstMNKLayout_A{},
+                 Int<PIPELINE_STAGE_A>{}),
+          Step<_1,_2,_3>{}));
+
+  using SmemLayoutAtom_B =
+      decltype(cutlass::gemm::collective::detail::sm100_smem_selector<
+               UmmaMajorB,
+               T,                                                   
+               decltype(get<1>(MmaTiler_MNK{})),
+               decltype(get<2>(MmaTiler_MNK{}))>());     
+  using DstMNKLayout_B = decltype(
+    partition_shape_B(TiledMMA{},
+    make_shape(shape<1>(MmaTiler_MNK{}), shape<2>(MmaTiler_MNK{}))));
+
+  using DstPipeLayout_B = decltype(UMMA::tile_to_mma_shape(
+          SmemLayoutAtom_B{},
+          append(DstMNKLayout_B{},
+                 Int<PIPELINE_STAGE_B>{}),
+          Step<_1,_2,_3>{}));
 
   using SmemLayoutA = typename Dim01Swapper<SmemLayoutA_>::Result; // [M, K]
   using SmemLayoutB = SmemLayoutB_;                                // [N, K]
   using SmemLayoutC = typename Dim01Swapper<SmemLayoutC_>::Result; // [M, N]
 
-  // NT	M-major	(M,K):(1,ldA)	N-major	(N,K):(1,ldB)
-  // TN	K-major	(M,K):(ldA,1)	K-major	(N,K):(ldB,1)
-  // NN	M-major	(M,K):(1,ldA)	K-major	(N,K):(ldB,1)
-  // TT	K-major	(M,K):(ldA,1)	N-major	(N,K):(1,ldB)
-  static constexpr UMMA::Major UmmaMajorA = UMMA::Major::K;
-  static constexpr UMMA::Major UmmaMajorB = UMMA::Major::MN;
-  using TileALayout =
-      decltype(cutlass::gemm::collective::detail::sm100_smem_selector<
-               UmmaMajorA,
-               T,
-               decltype(get<0>(SmemLayoutA{})),
-               decltype(get<1>(SmemLayoutA{}))>());
-  using TileBLayout =
-      decltype(cutlass::gemm::collective::detail::sm100_smem_selector<
-               UmmaMajorB,
-               T,
-               decltype(get<0>(SmemLayoutB{})),
-               decltype(get<1>(SmemLayoutB{}))>());
-  
-
   using M = decltype(get<0>(shape(SmemLayoutA{})));
   using K = decltype(get<1>(shape(SmemLayoutA{})));
   using N = decltype(get<0>(shape(SmemLayoutB{})));
 
-  // static constexpr int TILED_MMA_NUM_THREADS = thr_size(TiledMMA{});
-
-  static constexpr int PIPELINE_STAGE_A = IS_PIPELINE_A ? PIPELINE_STAGES : 1;
-  static constexpr int PIPELINE_STAGE_B = IS_PIPELINE_B ? PIPELINE_STAGES : 1;
-
-  // // Pre-partitioned Tile Shape (MmaTile_M, MmaTile_K) to post-partitioned (MmaA, NumMma_M, NumMma_K)
-  using MmaShape_A = decltype(partition_shape_A(TiledMMA{}, make_shape(size<0>(MmaTiler_MNK{}), size<2>(MmaTiler_MNK{}))));
-  using MmaShape_B = decltype(partition_shape_B(TiledMMA{}, make_shape(size<1>(MmaTiler_MNK{}), size<2>(MmaTiler_MNK{}))));
-  using MmaShape_C = decltype(partition_shape_C(TiledMMA{}, make_shape(size<0>(MmaTiler_MNK{}), size<1>(MmaTiler_MNK{}))));
-
-  using R2STiledCopyCSelector =
-      R2STiledCopySelector<T, IS_STMATRIX_AVAIL, SmemLayoutC>;
-  using R2STiledCopyCAtom = typename R2STiledCopyCSelector::Result;
-  static constexpr R2STiledCopyType R2S_TILED_COPY_C_TYPE =
-      R2STiledCopyCSelector::TYPE;
-  using R2STiledCopyC =
-      decltype(make_tiled_copy_C(R2STiledCopyCAtom{}, TiledMMA{}));
-
-  // Create a default FusionOp type for the template parameters
+    // Create a default FusionOp type for the template parameters
   using FusionOp = cutlass::epilogue::fusion::FusionOperation;
 
   // Use the sm100_get_tmem_load_op function to automatically select the optimal tmem load operation

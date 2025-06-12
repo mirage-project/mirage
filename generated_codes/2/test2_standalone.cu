@@ -53,7 +53,7 @@ initialize_tensor(Tensor& tensor, cute::tuple<int, int> value_range = {-2, 2})
   }
 }
 
-template <class DstPipeLayout_10000003, class DstPipeLayout_10000004, class TMA_10000003, class TMA_10000004>
+template <class TMA_10000003, class TMA_10000004>
 __global__ void  __launch_bounds__(384) custom_kernel_0(CUTE_GRID_CONSTANT TMA_10000003 const tma_10000003, CUTE_GRID_CONSTANT TMA_10000004 const tma_10000004,  float* dtensor10000005_ptr, half_t const* dtensor10000003_ptr, half_t const* dtensor10000004_ptr) {
 // block x, y is executing here
 // if (threadIdx.x == 0) {
@@ -134,11 +134,11 @@ tb::BlackwellAsyncPipeline<4, decltype(cluster_shape), AtomThrShapeMNK> blackwel
 // zy: add is leader check
 // using STensor20000012InputAtom = tb::InputTMAAsyncCopy_Blackwell<half_t, decltype(composition(Swizzle<3, 3, 4>{}, Layout<Shape<Int<128>, Int<64>>, Stride<Int<64>, Int<1>>>{})), Layout<Shape<Int<512>, Int<256>>, Stride<Int<256>, Int<1>>>, decltype(tma_10000003), decltype(blackwell_async_pipeline_20000012), true, 4, TiledMMA, MmaTiler_MNK>;
 // zy: src layout的stride似乎不重要 只用了shape？
-using STensor20000012InputAtom = tb::InputTMAAsyncCopy_Blackwell<half_t, DstPipeLayout_10000003, Layout<Shape<Int<512>, Int<256>>, Stride<Int<1>, Int<512>>>, decltype(tma_10000003), decltype(blackwell_async_pipeline_20000012), true, 4, decltype(tiled_mma), decltype(mma_tiler), decltype(cluster_shape)>;
+using STensor20000012InputAtom = tb::InputTMAAsyncCopy_Blackwell<half_t, decltype(composition(Swizzle<3, 4, 3>{}, Layout<Shape<Int<128>, Int<64>>, Stride<Int<1>, Int<128>>>{})), Layout<Shape<Int<512>, Int<256>>, Stride<Int<1>, Int<512>>>, decltype(tma_10000003), decltype(blackwell_async_pipeline_20000012), true, 4, decltype(tiled_mma), decltype(mma_tiler), decltype(cluster_shape)>;
 // // Copy for G->S: dtensor 10000004 -> stensor 20000013
 using DTensor10000004TileLayout = Layout<Shape<Int<256>, Int<64>>, Stride<Int<1>, Int<1024>>>;
 tb::BlackwellAsyncPipeline<4, decltype(cluster_shape)> blackwell_async_pipeline_20000013((void *) (buf + 196800), (tb::warpgroup_id() == 2 && tb::warp_id() % mirage::config::NUM_WARPS_PER_GROUP == 0), tb::warpgroup_id() < 2, 32768, 2, elect_one_cta);
-using STensor20000013InputAtom = tb::InputTMAAsyncCopy_Blackwell<half_t, DstPipeLayout_10000004, Layout<Shape<Int<1024>, Int<256>>, Stride<Int<1>, Int<1024>>>, decltype(tma_10000004), decltype(blackwell_async_pipeline_20000013), false, 4, decltype(tiled_mma), decltype(mma_tiler), decltype(cluster_shape)>;
+using STensor20000013InputAtom = tb::InputTMAAsyncCopy_Blackwell<half_t, decltype(composition(Swizzle<3, 4, 3>{}, Layout<Shape<Int<128>, Int<64>>, Stride<Int<1>, Int<128>>>{})), Layout<Shape<Int<1024>, Int<256>>, Stride<Int<1>, Int<1024>>>, decltype(tma_10000004), decltype(blackwell_async_pipeline_20000013), false, 4, decltype(tiled_mma), decltype(mma_tiler), decltype(cluster_shape)>;
 
 
 
@@ -161,7 +161,7 @@ __syncthreads();
   auto mC = make_tensor(make_gmem_ptr<float>(dtensor10000005_ptr), make_layout(make_shape(1024, 1024), make_stride(1024, Int<1>{})));
 
   // zy: add mc and gC to the kernel
-  using Matmul20000015Kernel = tb::Blackwell_Matmul<half_t, true, false, Matmul20000015LayoutA, Matmul20000015LayoutB, Matmul20000015LayoutC, NUM_THREADS, 0, false, true, true, true, 4, decltype(cluster_shape), decltype(tiled_mma), decltype(mma_tiler), DstPipeLayout_10000003, DstPipeLayout_10000004>;
+  using Matmul20000015Kernel = tb::Blackwell_Matmul<half_t, true, false, Matmul20000015LayoutA, Matmul20000015LayoutB, Matmul20000015LayoutC, NUM_THREADS, 0, false, true, true, true, 4, decltype(cluster_shape), decltype(tiled_mma), decltype(mma_tiler)>;
   auto matmul_20000015_accum = Matmul20000015Kernel::get_mma_tC(blockIdx.x, blockIdx.y, *tmem_base_ptr);
   
 
@@ -286,7 +286,7 @@ void _execute_mugraph(std::vector<void const *> input_tensors, std::vector<void*
     auto tma_10000004 = make_tma_atom_B_sm100(SM100_TMA_2SM_LOAD_MULTICAST{}, g_tensor_10000004, DstPipeLayout_10000004{}(_,_,_,Int<0>{}), mma_tiler, tiled_mma, cluster_layout_vmnk);
     
     // zy: change to add the DstPipeLayout
-    auto kernel_ptr = &custom_kernel_0<DstPipeLayout_10000003, DstPipeLayout_10000004, decltype(tma_10000003), decltype(tma_10000004)>;
+    auto kernel_ptr = &custom_kernel_0<decltype(tma_10000003), decltype(tma_10000004)>;
     cudaFuncSetAttribute(kernel_ptr, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
     dim3 cluster_dim(size<0>(cluster_shape), size<1>(cluster_shape), size<2>(cluster_shape));
     cutlass::ClusterLaunchParams params = {grid_dim, block_dim, cluster_dim, smem_size};

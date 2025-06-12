@@ -264,32 +264,36 @@ public:
           class     Mma_Tiler_,
           class     ClusterShape_MNK_>
 class InputTMAAsyncCopy_Blackwell {
-  using MMA_TILER = decltype(make_shape(shape<0>(DstLayout{}),
-                                        shape<1>(DstLayout{})));
+  static constexpr cute::UMMA::Major UMajor = UMMA::Major::K;
 
-  static constexpr cute::UMMA::Major UMajor = UMMA::Major::MN;
-
-  using DstPipeLayout = DstLayout;
-
-  // using SmemLayoutAtom =
-  //     decltype(cutlass::gemm::collective::detail::sm100_smem_selector<  
-  //              UMajor,
-  //              T,                                                   
-  //              decltype(get<0>(DstMNLayout{})),              
-  //              decltype(get<1>(DstMNLayout{}))>());     
-  // using DstPipeLayout =
-  //     decltype(tile_to_shape(
-  //         SmemLayoutAtom{},
-  //         make_shape(shape<0>(DstMNLayout{}),    // tile-M
-  //                    shape<1>(DstMNLayout{}),    // tile-N
-  //                    Int<BlackwellAsyncPipeline::Stage>{})));
-
-  // static constexpr int tmaTransactionBytes =
-  //     sizeof(T) * size(DstPipeLayout{}) / BlackwellAsyncPipeline::Stage;
-
+  // using DstMNKLayout = DstLayout;
   using TiledMMA = TiledMMA_;
   using Mma_Tiler = Mma_Tiler_;
   using ClusterShape = ClusterShape_MNK_;
+
+  using SmemLayoutAtom =
+      decltype(cutlass::gemm::collective::detail::sm100_smem_selector<
+               UMajor,
+               T,                                                   
+               std::conditional_t<MInput, decltype(get<0>(Mma_Tiler{})), 
+                                  decltype(get<1>(Mma_Tiler{}))>,
+               decltype(get<2>(Mma_Tiler{}))>());
+
+  using DstMNKLayout = 
+      decltype(
+              partition_shape_A(TiledMMA{},
+              make_shape(std::conditional_t<MInput, decltype(shape<0>(Mma_Tiler{})), 
+                                                decltype(shape<1>(Mma_Tiler{}))>(),
+              shape<2>(Mma_Tiler{}))));
+
+  using DstPipeLayout =
+      decltype(UMMA::tile_to_mma_shape(
+          SmemLayoutAtom{},
+          append(DstMNKLayout{},
+                 Int<BlackwellAsyncPipeline::Stage>{}),
+          Step<_1,_2,_3>{}));
+
+
 
 public:
   static __device__ __forceinline__
