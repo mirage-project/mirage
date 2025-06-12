@@ -18,8 +18,8 @@
 #include "mirage/kernel/customized.h"
 #include "mirage/kernel/device_tensor.h"
 #include "mirage/kernel/operator.h"
-#include "mirage/threadblock/graph.h"
 #include "mirage/persistent_kernel/runtime_types.h"
+#include "mirage/threadblock/graph.h"
 #include <vector>
 
 namespace mirage {
@@ -152,12 +152,14 @@ public:
   KNOperator *create_customized_op(std::vector<DTensor> const &inputs,
                                    mirage::threadblock::Graph const &_graph);
   // persistent kernel functions
-  void attach_torch_tensor(DTensor const *input, void* torch_ptr, char const *name);
+  void attach_torch_tensor(DTensor const *input,
+                           void *torch_ptr,
+                           char const *name);
   void attach_cuda_tensor(DTensor const *input, char const *name);
   void attach_nvshmem_tensor(DTensor const *input, char const *name);
   DTensor *fuse_tensors(std::vector<DTensor const *> inputs,
                         int fused_dim,
-			int num_groups,
+                        int num_groups,
                         char const *name);
   void register_task(char const *task_type);
 
@@ -199,7 +201,9 @@ public:
 
   // Fields for persistent kernels
   std::unordered_map<mirage::type::GuidType, mirage::runtime::IODesc> io_config;
-  std::unordered_map<mirage::kernel::KNOperator *, std::tuple<int, int, runtime::TaskType>> task_config;
+  std::unordered_map<mirage::kernel::KNOperator *,
+                     std::tuple<int, int, runtime::TaskType>>
+      task_config;
 
   using OpType = KNOperator;
   using TensorType = DTensor;

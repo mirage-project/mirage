@@ -222,7 +222,7 @@ void KernelGraphGenerator::generate_next_operator(
                                                       input_map[i],
                                                       forloop_dim[i],
                                                       layout::SmemRowMajor,
-                                                      false/*store_in_dmem*/);
+                                                      false /*store_in_dmem*/);
                       if (input_op == nullptr) {
                         input_created = false;
                         break;

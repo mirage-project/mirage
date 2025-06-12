@@ -13,9 +13,9 @@
  * limitations under the License.
  */
 
-#include "tasks/kernel.h"
-#include "runtime_types.h"
 #include "profiler.h"
+#include "runtime_types.h"
+#include "tasks/kernel.h"
 #include <mpi.h>
 #include <nvshmem.h>
 #include <nvshmemx.h>

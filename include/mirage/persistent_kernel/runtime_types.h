@@ -107,7 +107,7 @@ struct IODesc {
   IODesc(IOType _type,
          std::string _name,
          mirage::kernel::DTensor const &_tensor,
-	 void *_torch_data_ptr = nullptr)
+         void *_torch_data_ptr = nullptr)
       : type(_type), name(_name), torch_data_ptr(_torch_data_ptr) {
     tensor.num_dims = _tensor.num_dims;
     tensor.data_type = _tensor.data_type;
@@ -128,7 +128,6 @@ struct IODesc {
   int num_groups;
   std::vector<IODesc> sub_descs;
 };
-
 
 struct RuntimeConfig {
   int num_workers, num_local_schedulers, num_remote_schedulers, num_graphs;

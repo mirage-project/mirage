@@ -339,19 +339,19 @@ using namespace mirage::runtime;
 void Graph::attach_torch_tensor(DTensor const *input,
                                 void *torch_data_ptr,
                                 char const *name) {
-  io_config.emplace(input->guid,
+  io_config.emplace(
+      input->guid,
       IODesc(IODesc::TorchTensor, std::string(name), *input, torch_data_ptr));
 }
 
-void Graph::attach_cuda_tensor(DTensor const *input,
-                                char const *name) {
-  io_config.emplace(input->guid,
-      IODesc(IODesc::CUDAMallocTensor, std::string(name), *input));
+void Graph::attach_cuda_tensor(DTensor const *input, char const *name) {
+  io_config.emplace(
+      input->guid, IODesc(IODesc::CUDAMallocTensor, std::string(name), *input));
 }
 
-void Graph::attach_nvshmem_tensor(DTensor const *input,
-                                char const *name) {
-  io_config.emplace(input->guid,
+void Graph::attach_nvshmem_tensor(DTensor const *input, char const *name) {
+  io_config.emplace(
+      input->guid,
       IODesc(IODesc::NVSHMEMMallocTensor, std::string(name), *input));
 }
 
@@ -379,10 +379,11 @@ DTensor *Graph::fuse_tensors(std::vector<DTensor const *> inputs,
     if (i == inputs[0]->num_dims - 1) {
       strides[i] = 1;
     } else {
-      strides[i] = strides[i+1] * dims[i+1];
+      strides[i] = strides[i + 1] * dims[i + 1];
     }
   }
-  DTensor *fused = new_input_ptr(dims, strides, inputs[0]->data_type, layout::DmemRowMajor);
+  DTensor *fused =
+      new_input_ptr(dims, strides, inputs[0]->data_type, layout::DmemRowMajor);
   IODesc desc(IODesc::FusedTorchTensor, std::string(name), *fused);
   desc.num_groups = num_groups;
   for (size_t t = 0; t < inputs.size(); t++) {
@@ -403,9 +404,11 @@ void Graph::register_task(char const *task_type) {
   } else if (name == "attention") {
     task_config[operators.back()] = std::make_tuple(7, 1, TASK_ATTENTION_1);
   } else if (name == "linear_with_residual") {
-    task_config[operators.back()] = std::make_tuple(3, 1, TASK_LINEAR_WITH_RESIDUAL);
+    task_config[operators.back()] =
+        std::make_tuple(3, 1, TASK_LINEAR_WITH_RESIDUAL);
   } else if (name == "silu_mul_linear_with_residual") {
-    task_config[operators.back()] = std::make_tuple(3, 1, TASK_SILU_MUL_LINEAR_WITH_RESIDUAL);
+    task_config[operators.back()] =
+        std::make_tuple(3, 1, TASK_SILU_MUL_LINEAR_WITH_RESIDUAL);
   } else if (name == "argmax") {
     task_config[operators.back()] = std::make_tuple(1, 1, TASK_ARGMAX);
   } else {
