@@ -396,6 +396,9 @@ if __name__ == "__main__":
             input=argmax_in, output=argmax_out, grid_dim=(1, 1, 1), block_dim=(1, 1, 1)
         )
 
+        results = mpk.kn_graph.generate_task_graph(num_gpus=world_size)
+        print(results["json_file"])
+
         # kernel = mirage.PersistentKernel(
         #     file_path="/home/ubuntu/mirage_cpp/debug_build/test.cu",
         #     mpi_rank=rank,

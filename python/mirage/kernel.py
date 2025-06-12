@@ -777,3 +777,6 @@ class KNGraph:
 
     def register_task(self, bgraph: TBGraph, task_type: str):
         return self.cygraph.register_task(bgraph.cygraph, task_type)
+
+    def generate_task_graph(self, num_gpus: int):
+        return self.cygraph.generate_task_graph(num_gpus)

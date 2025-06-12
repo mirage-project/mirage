@@ -926,6 +926,9 @@ cdef class CyKNGraph:
             cname = py_byte_string
         self.p_kgraph.register_task(cname)
 
+    def generate_task_graph(self, int num_gpus):
+        cdef TaskGraphResult result = self.p_kgraph.generate_task_graph(num_gpus)
+
 cdef class CyTBGraph:
     cdef CppTBGraph *p_bgraph #Hold a CppTBGraph instance
 

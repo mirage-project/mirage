@@ -162,6 +162,7 @@ public:
                         int num_groups,
                         char const *name);
   void register_task(char const *task_type);
+  runtime::TaskGraphResult generate_task_graph(int num_gpus);
 
   // helper functions
   int get_num_input_dtensors() const;
@@ -201,7 +202,7 @@ public:
 
   // Fields for persistent kernels
   std::unordered_map<mirage::type::GuidType, mirage::runtime::IODesc> io_config;
-  std::unordered_map<mirage::kernel::KNOperator *,
+  std::unordered_map<mirage::kernel::KNOperator const *,
                      std::tuple<int, int, runtime::TaskType>>
       task_config;
 

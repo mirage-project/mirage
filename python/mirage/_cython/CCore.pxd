@@ -177,6 +177,11 @@ cdef extern from "mirage/kernel/device_tensor.h" namespace "mirage::kernel":
         #void *data_ptr
         int owner_ts_idx
 
+cdef extern from "mirage/persistent_kernel/runtime_types.h" namespace "mirage::runtime":
+    ctypedef struct TaskGraphResult:
+        string cuda_code
+        string json_file
+
 cdef extern from "mirage/kernel/graph.h" namespace "mirage::kernel":
 
     cdef cppclass CppKNOperator "mirage::kernel::KNOperator":
@@ -234,6 +239,7 @@ cdef extern from "mirage/kernel/graph.h" namespace "mirage::kernel":
                                  int num_groups,
                                  const char *name)
         void register_task(const char *task_type)
+        TaskGraphResult generate_task_graph(int num_gpus)
 
         vector[CppKNOperator*] operators
 
