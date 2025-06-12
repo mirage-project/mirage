@@ -92,10 +92,19 @@ __device__ __forceinline__ void argmax_partial_kernel(
   T local_max = T(-inf);
   int local_idx = -1;
 
-  int part_size = (VOCAB_SIZE + NUM_BLOCKS - 1) / NUM_BLOCKS;
-  int start_offset = block_idx * part_size;
-  int end_offset = min((block_idx + 1) * part_size, VOCAB_SIZE);
+  int bigger_part_size = (VOCAB_SIZE + NUM_BLOCKS - 1) / NUM_BLOCKS;
+  int bigger_part_num = VOCAB_SIZE % NUM_BLOCKS;
+  int start_offset = 0;
+  int end_offset = 0;
+  if (block_idx >= bigger_part_num){
+    start_offset = block_idx * (bigger_part_size - 1) + bigger_part_num;
+    end_offset = start_offset + bigger_part_size - 1;
+  } else {
+    start_offset = block_idx * bigger_part_size;
+    end_offset = (block_idx + 1) * bigger_part_size;
+  }
 
+  // TODO: try vectorize
   for (int i = start_offset + tidx; i < end_offset; i += blockDim.x) {
     T val = input[i];
     if (val > local_max) {

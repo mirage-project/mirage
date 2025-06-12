@@ -511,8 +511,7 @@ __global__ void persistent_kernel(RuntimeConfig config) {
             size_t base_task_id = event_desc.first_task_id;
             int partial_task_idx = get_task_position_index(cur_task_id) - base_task_id;
             
-            // NOTE: The number of blocks (e.g., 64) is an example.
-            // This should match the number of partial tasks you create in the graph.
+            // TODO: This should match the real number
             kernel::argmax_partial_kernel<bfloat16, 153600, 64>(
                 task_desc.inputs[0].base_ptr,   // full vocab tensor
                 task_desc.outputs[0].base_ptr,  // intermediate buffer
@@ -520,8 +519,7 @@ __global__ void persistent_kernel(RuntimeConfig config) {
             break;
           }
           case TASK_ARGMAX_REDUCE: {
-            // NOTE: The number of blocks (e.g., 64) is an example.
-            // This should match the number of partial tasks you create in the graph.
+            // TODO: This should match the real number
             kernel::argmax_reduce_kernel<bfloat16, 64>(
                 task_desc.inputs[0].base_ptr,   // intermediate buffer
                 task_desc.outputs[0].base_ptr); // final output tensor
