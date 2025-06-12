@@ -22,14 +22,14 @@ namespace kernel {
 using namespace mirage::type;
 using namespace mirage::config;
 
-DeviceMemoryManager *DeviceMemoryManager::singleton = nullptr;
-
+#ifdef MIRAGE_FINGERPRINT_USE_CUDA
 DeviceMemoryManager::DeviceMemoryManager(int _num_gpus, int _gpu_id)
-    : num_gpus(_num_gpus), gpu_id(_gpu_id) {
+    : num_devices(_num_gpus), gpu_id(_gpu_id) {
   // fingerprint related fields
   checkCUDA(cudaSetDevice(gpu_id));
-  printf(
-      "Mirage::DeviceMemoryManager: gpu_id(%d) num_gpus(%d)", gpu_id, num_gpus);
+  printf("Mirage::DeviceMemoryManager: gpu_id(%d) num_gpus(%d)",
+         gpu_id,
+         num_devices);
   // Part 1: exponential lookup table
   // make future tensors 16 bytes aligned
   checkCUDA(
@@ -124,22 +124,14 @@ DeviceMemoryManager::DeviceMemoryManager(int _num_gpus, int _gpu_id)
                        sizeof(FPType) * FP_Q,
                        cudaMemcpyHostToDevice));
   // data and fingerprints
-  for (int i = 0; i < num_gpus; i++) {
-#ifdef DEADCODE
-    checkCUDA(cudaSetDevice(i));
-    checkCUDA(cudaStreamCreate(&stream[i]));
-    checkCUDA(
-        cudaMalloc(&data_base_ptr[i], mirage::config::MAX_DMEM_DATA_SIZE));
-    checkCUDA(cublasCreate(&blas[i]));
-    checkCUDA(cublasSetMathMode(blas[i], CUBLAS_TENSOR_OP_MATH));
-#endif
+  for (int i = 0; i < num_devices; i++) {
     // Note that we allocate all fingerprint buffers
     // on the 0-th GPU to avoid inter-GPU communication
     // for computing fingerprints
     // In addition, we allocate an extra space for storing
     // stensors' fingerprints in the device memory
     if (i == 0) {
-      for (int k = 0; k < num_gpus; k++) {
+      for (int k = 0; k < num_devices; k++) {
         checkCUDA(
             cudaMalloc(&fp_base_ptr[k], mirage::config::MAX_DMEM_FP_SIZE));
       }
@@ -152,24 +144,21 @@ DeviceMemoryManager::DeviceMemoryManager(int _num_gpus, int _gpu_id)
 }
 
 DeviceMemoryManager::~DeviceMemoryManager() {
-  for (int i = 0; i < num_gpus; i++) {
-#ifdef DEADCODE
-    cudaSetDevice(i);
-    checkCUDA(cudaFree(data_base_ptr[i]));
-    checkCUDA(cudaStreamDestroy(stream[i]));
-    checkCUDA(cublasDestroy(blas[i]));
-#endif
+  for (int i = 0; i < num_devices; i++) {
     if (i == 0) {
       checkCUDA(cudaFree(exp_lookup_table));
       checkCUDA(cudaFree(div_p_lookup_table));
       checkCUDA(cudaFree(div_q_lookup_table));
-      for (int k = 0; k < num_gpus; k++) {
+      checkCUDA(cudaFree(sqrt_p_lookup_table));
+      checkCUDA(cudaFree(sqrt_q_lookup_table));
+      for (int k = 0; k < num_devices; k++) {
         checkCUDA(cudaFree(fp_base_ptr[i]));
       }
       checkCUDA(cudaFree(stensor_fp_base_ptr));
     }
   }
 }
+#endif // MIRAGE_FINGERPRINT_USE_CUDA
 
 #ifdef DEADCODE
 bool DeviceMemoryManager::allocate(DTensor &tensor, bool allocate_fingerprint) {
@@ -215,13 +204,12 @@ bool DeviceMemoryManager::free(DTensor &tensor) {
   allocated_tensors.pop_back();
   return true;
 }
-#endif
 
 DeviceMemoryManager *DeviceMemoryManager::get_instance() {
   if (singleton == nullptr) {
-    int num_gpus;
-    checkCUDA(cudaGetDeviceCount(&num_gpus));
-    singleton = new DeviceMemoryManager(1 /*num_gpus*/, 0 /*device_id*/);
+    int num_devices;
+    checkCUDA(cudaGetDeviceCount(&num_devices));
+    singleton = new DeviceMemoryManager(1 /*num_devices*/, 0 /*device_id*/);
   }
   return singleton;
 }
@@ -230,14 +218,15 @@ DeviceMemoryManager *DeviceMemoryManager::get_instance() {
 void DeviceMemoryManager::set_gpu_device_id(int gpu_id) {
   // set_gpu_device_id must be called before creating DeviceMemoryManager
   assert(singleton == nullptr);
-  int num_gpus;
-  checkCUDA(cudaGetDeviceCount(&num_gpus));
-  singleton = new DeviceMemoryManager(1 /*num_gpus*/, gpu_id /*gpu_id*/);
+  int num_devices;
+  checkCUDA(cudaGetDeviceCount(&num_devices));
+  singleton = new DeviceMemoryManager(1 /*num_devices*/, gpu_id /*gpu_id*/);
 }
 
 void cython_set_gpu_device_id(int gpu_id) {
   DeviceMemoryManager::set_gpu_device_id(gpu_id);
 }
+#endif
 
 } // namespace kernel
 } // namespace mirage

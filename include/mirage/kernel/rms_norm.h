@@ -26,7 +26,6 @@ public:
               DTensor const &input,
               std::vector<int> const &normalized_shape);
   ~KNRMSNormOp();
-  bool profile(ProfileResult &profile) override;
   bool fingerprint(void) override;
 
   operator json() const override;

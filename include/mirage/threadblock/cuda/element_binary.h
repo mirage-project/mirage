@@ -15,6 +15,8 @@
 
 #pragma once
 
+#ifdef MIRAGE_FINGERPRINT_USE_CUDA
+
 #include "cutlass/cutlass.h"
 #include "cutlass/fast_math.h"
 #include "mirage/utils/fingerprint_functions.h"
@@ -27,53 +29,6 @@ using namespace cutlass;
 using namespace mirage::type;
 using namespace mirage::config;
 using namespace mirage::utils;
-
-template <typename ElementType>
-class ElementBinaryExecutor {
-public:
-  CUTLASS_DEVICE
-  ElementBinaryExecutor(mirage::type::TBOperatorType op_type,
-                        ElementType *input1_ptr,
-                        ElementType *input2_ptr,
-                        ElementType *output_ptr,
-                        int3 input1_shape,
-                        int3 input2_shape,
-                        int thread_id,
-                        int num_threads) {
-    // FIXME: currently we assume broadcast the inner-most dim
-    // ElementType *input1_ptr = (ElementType *)(smem_buffer +
-    // input1.smem_offset); ElementType *input2_ptr = (ElementType
-    // *)(smem_buffer + input2.smem_offset); ElementType *output_ptr =
-    // (ElementType *)(smem_buffer + output.smem_offset);
-    int3 output_shape = {max(input1_shape.x, input2_shape.x),
-                         max(input1_shape.y, input2_shape.y),
-                         max(input1_shape.z, input2_shape.z)};
-    int output_num_elements = output_shape.x * output_shape.y * output_shape.z;
-    int input1_num_elements = input1_shape.x * input1_shape.y * input1_shape.z;
-    int input2_num_elements = input2_shape.x * input2_shape.y * input2_shape.z;
-    int factor1 = output_num_elements / input1_num_elements;
-    int factor2 = output_num_elements / input2_num_elements;
-    if (op_type == mirage::type::TB_DIV_OP) {
-      for (int i = 0; i < output_num_elements; i += num_threads) {
-        output_ptr[i] = input1_ptr[i / factor1] / input2_ptr[i / factor2];
-      }
-    } else if (op_type == mirage::type::TB_MUL_OP) {
-      for (int i = 0; i < output_num_elements; i += num_threads) {
-        output_ptr[i] = input1_ptr[i / factor1] * input2_ptr[i / factor2];
-      }
-    } else if (op_type == mirage::type::TB_ADD_OP) {
-      for (int i = 0; i < output_num_elements; i += num_threads) {
-        output_ptr[i] = input1_ptr[i / factor1] + input2_ptr[i / factor2];
-      }
-    } else if (op_type == mirage::type::TB_POW_OP) {
-      for (int i = 0; i < output_num_elements; i += num_threads) {
-        output_ptr[i] = powf(input1_ptr[i / factor1], input2_ptr[i / factor2]);
-      }
-    } else {
-      assert(false && "Unsupported operator");
-    }
-  };
-};
 
 class TBElementBinaryFingerPrinter {
 public:
@@ -133,3 +88,5 @@ public:
 
 } // namespace threadblock
 } // namespace mirage
+
+#endif // MIRAGE_FINGERPRINT_USE_CUDA

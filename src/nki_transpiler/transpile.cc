@@ -548,7 +548,6 @@ NKITranspileResult NKITranspiler::transpile_ugraph() {
   header.e("import neuronxcc.nki as nki");
   header.e("import neuronxcc.nki.language as nl");
   header.e("import neuronxcc.nki.isa as nisa");
-  header.e("from torch_neuronx import nki_jit");
   CodeKeeper exec;
   exec.e("if __name__ == \"__main__\":");
   exec.inc_indent();
@@ -604,8 +603,7 @@ NKITranspileResult NKITranspiler::transpile_ugraph() {
         // tb::ExecutionPlan const &plan = cur_op->plan;
         tb::Graph const &bgraph = cur_op->bgraph;
         std::vector<std::string> dtensor_names;
-        for (kn::DTensor const &dtensor :
-             Combine(cur_op->output_tensors, cur_op->input_tensors)) {
+        for (kn::DTensor const &dtensor : cur_op->input_tensors) {
           std::string dtensor_name = fmt("dtensor$", dtensor.guid);
           dtensor_names.push_back(dtensor_name);
         }

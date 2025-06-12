@@ -152,6 +152,8 @@ set_target_properties(mirage_runtime PROPERTIES CUDA_ARCHITECTURES "70;75;80;86;
 
 target_compile_features(mirage_runtime PUBLIC cxx_std_17)
 
+target_compile_definitions(mirage_runtime PUBLIC MIRAGE_USE_NKI)
+
 target_link_libraries(mirage_runtime ${MIRAGE_LINK_LIBS})
 
 target_include_directories(mirage_runtime

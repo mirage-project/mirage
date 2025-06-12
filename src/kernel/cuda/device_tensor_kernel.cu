@@ -21,6 +21,7 @@
 namespace mirage {
 namespace kernel {
 
+#ifdef MIRAGE_FINGERPRINT_USE_CUDA
 mirage::cpu::CTensor DTensor::copy_fingerprint_to_ctensor() const {
   // Assert a 1-D GPU mesh
   assert(owner_op->kgraph->gpu_dim.y == 1);
@@ -88,48 +89,7 @@ bool DTensor::has_same_fingerprint(mirage::cpu::CTensor const &ref) const {
   free(A);
   return true;
 }
-
-#ifdef DEADCODE
-bool DTensor::has_same_fingerprint(DTensor const &ref) const {
-  if (data_type != ref.data_type) {
-    return false;
-  }
-  if (layout != ref.layout) {
-    return false;
-  }
-  if (num_dims != ref.num_dims) {
-    return false;
-  }
-  for (int i = 0; i < num_dims; i++) {
-    if (dim[i] != ref.dim[i]) {
-      return false;
-    }
-  }
-  mirage::kernel::DeviceMemoryManager *dmm =
-      mirage::kernel::DeviceMemoryManager::get_instance();
-  mirage::type::FPType *A = (mirage::type::FPType *)malloc(fingerprint_size());
-  mirage::type::FPType *B = (mirage::type::FPType *)malloc(fingerprint_size());
-  checkCUDA(cudaMemcpy(A,
-                       dmm->fp_base_ptr[0] + fp_offset,
-                       fingerprint_size(),
-                       cudaMemcpyDeviceToHost));
-  checkCUDA(cudaMemcpy(B,
-                       dmm->fp_base_ptr[0] + ref.fp_offset,
-                       fingerprint_size(),
-                       cudaMemcpyDeviceToHost));
-  int num_elements = (int)this->num_elements();
-  for (int i = 0; i < num_elements; i++) {
-    if (A[i] != B[i]) {
-      free(A);
-      free(B);
-      return false;
-    }
-  }
-  free(A);
-  free(B);
-  return true;
-}
-#endif
+#endif // MIRAGE_FINGERPRINT_USE_CUDA
 
 } // namespace kernel
 } // namespace mirage

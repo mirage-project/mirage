@@ -123,5 +123,12 @@ KNRMSNormOp::operator json() const {
               {"output_tensors", output_tensors}};
 }
 
+#ifndef MIRAGE_FINGERPRINT_USE_CUDA
+bool KNRMSNormOp::fingerprint(void) {
+  assert(false && "To be implemented");
+  return false;
+}
+#endif
+
 } // namespace kernel
 } // namespace mirage

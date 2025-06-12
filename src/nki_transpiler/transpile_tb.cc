@@ -14,6 +14,7 @@
  */
 
 #include "mirage/nki_transpiler/transpile.h"
+#include "mirage/nki_transpiler/utils.h"
 #include "mirage/threadblock/element_unary.h"
 #include "mirage/threadblock/forloop_accum.h"
 #include "mirage/threadblock/graph.h"
@@ -99,37 +100,6 @@ string ugraph_knoperator_type_to_nki(ty::KNOperatorType const type) {
   }
 }
 
-string mirage_dtype_to_nki(ty::DataType const dt) {
-  string nki_type;
-  switch (dt) {
-    case ty::DataType::DT_INT4:
-      assert(false && "4-bit integer not supported in nki");
-      break;
-    case ty::DataType::DT_INT8:
-      nki_type = "nl.int8";
-      break;
-    case ty::DataType::DT_UINT16:
-      nki_type = "nl.uint16";
-      break;
-    case ty::DataType::DT_FLOAT8:
-      // todo: when we should use e5m2?
-      nki_type = "nl.float8_e4m3";
-      break;
-    case ty::DataType::DT_FLOAT16:
-      nki_type = "nl.float16";
-      break;
-    case ty::DataType::DT_BFLOAT16:
-      nki_type = "nl.bfloat16";
-      break;
-    case ty::DataType::DT_FLOAT32:
-      nki_type = "nl.float32";
-      break;
-    default:
-      assert(false && "unsupported nki type in mirage");
-      break;
-  }
-  return nki_type;
-}
 } // namespace
 NKICustomOPTranspileResult
     NKITranspiler::transpile_kn_custom_op(kn::KNCustomizedOp const *op) {
@@ -138,20 +108,40 @@ NKICustomOPTranspileResult
   int cur_custom_kernel_idx = nki_custom_kernel_idx_counter++;
   string func_name = fmt("custom_kernel_$", cur_custom_kernel_idx);
 
+  int iterator_idx_counter = 0;
+
   // Generate code prologue
   CodeKeeper code;
-  code.e("@nki_jit");
-  code.e("def $($, $):",
+  code.e("@nki.jit");
+  code.e("def $($):",
          func_name,
-         map<kn::DTensor, string>(op->output_tensors,
-                                  [](kn::DTensor const &dtensor) -> string {
-                                    return fmt("dtensor$", dtensor.guid);
-                                  }),
          map<kn::DTensor, string>(op->input_tensors,
                                   [](kn::DTensor const &dtensor) -> string {
                                     return fmt("dtensor$", dtensor.guid);
                                   }));
   code.inc_indent();
+  // Simulate SPMD by for-loops
+  int num_SPMD_forloops = 0;
+  for (uint d : to_vector(g.grid_dim)) {
+    code.e("for iter$ in nl.affine_range($):", iterator_idx_counter++, d);
+    code.inc_indent();
+    num_SPMD_forloops++;
+  }
+  // Create output tensors
+  std::vector<std::string> return_tensors;
+  for (tb::TBOperator *tb_op : g.operators) {
+    if (tb_op->op_type == type::TB_OUTPUT_OP) {
+      tb::TBOutputOp const *output_op =
+          static_cast<tb::TBOutputOp const *>(tb_op);
+      std::string tensor_id = fmt("dtensor$", output_op->dtensor.guid);
+      code.e("$ = $",
+             tensor_id,
+             allocate_nki_tensor(output_op->dtensor,
+                                 NKITensorInitializer::NONE,
+                                 "nl.shared_hbm"));
+      return_tensors.push_back(tensor_id);
+    }
+  }
   // Initialize all accum stensors
   for (tb::TBOperator *tb_op : g.operators) {
     // For numerical accuracies always prefer float32.
@@ -171,29 +161,34 @@ NKICustomOPTranspileResult
       // this can postpone necessary transpose to be perform after
       // for loop
       STensorMeta meta = stensor_metas.at(before_accum_stensor.guid);
+      std::string nki_dtype =
+          mirage_dtype_to_nki(before_accum_stensor.data_type);
       // Assert that only the last two dims can have size larger than 1
       for (int i = 0; i < stensor.num_dims - 2; i++) {
         assert(stensor.dim[i] == 1);
       }
       if (stensor.num_dims == 1) {
         // Create a 1D tile
-        code.e("$ = nl.zeros(($), dtype=nl.float32, buffer=nl.sbuf)",
+        code.e("$ = nl.zeros(($), dtype=$, buffer=nl.sbuf)",
                fmt("stensor$", stensor.guid),
-               stensor.dim[0]);
+               stensor.dim[0],
+               nki_dtype);
       } else {
         // Create a 2D tile
         if (meta.partition_dim == stensor.num_dims - 2) {
-          code.e("$ = nl.zeros(($, $), dtype=nl.float32, buffer=nl.sbuf)",
+          code.e("$ = nl.zeros(($, $), dtype=$, buffer=nl.sbuf)",
                  fmt("stensor$", stensor.guid),
                  stensor.dim[stensor.num_dims - 2],
-                 stensor.dim[stensor.num_dims - 1]);
+                 stensor.dim[stensor.num_dims - 1],
+                 nki_dtype);
         } else {
           assert(meta.partition_dim == stensor.num_dims - 1);
           // num_dims - 1 is the partition_dim
-          code.e("$ = nl.zeros(($, $), dtype=nl.float32, buffer=nl.sbuf)",
+          code.e("$ = nl.zeros(($, $), dtype=$, buffer=nl.sbuf)",
                  fmt("stensor$", stensor.guid),
                  stensor.dim[stensor.num_dims - 1],
-                 stensor.dim[stensor.num_dims - 2]);
+                 stensor.dim[stensor.num_dims - 2],
+                 nki_dtype);
         }
       }
     }
@@ -741,6 +736,12 @@ NKICustomOPTranspileResult
       }
     }
   }
+  // dec_indent for SPMD for-loops
+  for (int i = 0; i < num_SPMD_forloops; ++i) {
+    code.dec_indent();
+  }
+  // Generate return statement
+  code.e("return $", fmt("[$,]", transpiler::my_to_string(return_tensors)));
   return NKICustomOPTranspileResult{func_name, code.to_string()};
 }
 
@@ -768,12 +769,8 @@ std::optional<NKICustomOPTranspileResult>
   // generate function signature
   CodeKeeper code;
   code.e("@nki_jit");
-  code.e("def $($, $):",
+  code.e("def $($):",
          func_name,
-         map<kn::DTensor, string>(op->output_tensors,
-                                  [](kn::DTensor const &dtensor) -> string {
-                                    return fmt("dtensor$", dtensor.guid);
-                                  }),
          map<kn::DTensor, string>(op->input_tensors,
                                   [](kn::DTensor const &dtensor) -> string {
                                     return fmt("dtensor$", dtensor.guid);

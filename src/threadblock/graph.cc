@@ -209,6 +209,7 @@ size_t Graph::calculate_shared_memory_usage(TBOperator *new_op) {
   return usage;
 }
 
+#ifdef MIRAGE_USE_CUDA
 NewKernelParams Graph::get_new_kernel_params(bool fingerprint) const {
   NewKernelParams params;
   params.num_operators = operators.size();
@@ -724,6 +725,8 @@ KernelParams Graph::get_kernel_params() {
   }
   return params;
 }
+
+#endif
 
 int Graph::get_smem_size_with_pipeline() const {
   int ret = smem_offset;
