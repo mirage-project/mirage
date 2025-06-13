@@ -27,6 +27,7 @@ mapping = {
     "lm_head": ("head", None),
 }
 
+
 def main(hf_ckpt_path, save_path, mp):
     """
     Converts and saves model checkpoint files into a specified format.
@@ -35,7 +36,7 @@ def main(hf_ckpt_path, save_path, mp):
         hf_ckpt_path (str): Path to the directory containing the input checkpoint files.
         save_path (str): Path to the directory where the converted checkpoint files will be saved.
         mp (int): Model parallelism factor.
-        
+
     Returns:
         None
     """
@@ -53,15 +54,21 @@ def main(hf_ckpt_path, save_path, mp):
                 for i in range(mp):
                     new_param = param
                     if dim is not None:
-                        assert param.size(dim) % mp == 0, f"Dimension {dim} must be divisible by {mp}"
+                        assert (
+                            param.size(dim) % mp == 0
+                        ), f"Dimension {dim} must be divisible by {mp}"
                         shard_size = param.size(dim) // mp
-                        new_param = param.narrow(dim, i * shard_size, shard_size).contiguous()
+                        new_param = param.narrow(
+                            dim, i * shard_size, shard_size
+                        ).contiguous()
                     state_dicts[i][name] = new_param
 
     os.makedirs(save_path, exist_ok=True)
 
     for i in trange(mp):
-        save_file(state_dicts[i], os.path.join(save_path, f"model{i}-mp{mp}.safetensors"))
+        save_file(
+            state_dicts[i], os.path.join(save_path, f"model{i}-mp{mp}.safetensors")
+        )
 
     for file_path in glob(os.path.join(hf_ckpt_path, "*token*")):
         new_file_path = os.path.join(save_path, os.path.basename(file_path))
