@@ -882,7 +882,7 @@ cdef class CyKNGraph:
 
     # Functions for ersistent kernels
     def attach_torch_tensor(self, DTensor tensor, torch_tensor, str name):
-        torch_data_ptr = ctypes.cast(torch_tensor.data_ptr(), ctypes.c_void_p).value
+        cdef unsigned long long torch_data_ptr = ctypes.cast(torch_tensor.data_ptr(), ctypes.c_void_p).value
         cdef char* cname = NULL
         if name is not None:
             py_byte_string = name.encode('UTF-8')
