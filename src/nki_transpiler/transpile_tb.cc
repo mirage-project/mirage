@@ -132,7 +132,7 @@ string mirage_dtype_to_nki(ty::DataType const dt) {
 }
 } // namespace
 
-  NKICustomOPTranspileResult
+NKICustomOPTranspileResult
     NKITranspiler::transpile_kn_custom_op(kn::KNCustomizedOp const *op) {
   tb::Graph const &g = op->bgraph;
   static int nki_custom_kernel_idx_counter = 0;
