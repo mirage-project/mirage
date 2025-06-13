@@ -35,7 +35,7 @@ template <typename T,
           int BATCH_SIZE,
           int OUTPUT_SIZE,
           int REDUCTION_SIZE,
-          int O_STRIDE>
+          int O_STRIDE = OUTPUT_SIZE>
 __device__ __forceinline__ void
     norm_linear_task_impl(void const *input_ptr,
                           void const *norm_weight_ptr,
@@ -337,7 +337,6 @@ __device__ __forceinline__ void
         for (uint32_t i = 0; i < 4; i++) {
           int row_in_warp = (lane_idx >> 2) + ((i & 0x1) << 3);
           if (row_in_warp < BATCH_SIZE) {
-            // continue;
             int col =
                 (warp_col << 4) + ((lane_idx & 0x3) << 1) + ((i >> 1) << 3);
             mm_intermediate_smem.at(warp_row + row_in_warp, col) =
@@ -370,7 +369,6 @@ __device__ __forceinline__ void
 
 #pragma unroll
     for (int i = threadIdx.x; i < OUTPUT_ATOM_SIZE; i += NUM_THREADS) {
-      // offset
       int row = 0;
       output_dmem.at(row, i) = output_smem.at(row, i);
     }

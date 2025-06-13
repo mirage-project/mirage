@@ -343,15 +343,19 @@ void silu_mul_linear(torch::Tensor input,
 template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int REDUCTION_SIZE>
 __global__ void linear_kernel_wrapper(void const *input_ptr,
                                       void const *weight_ptr,
-                                      void *output_ptr) {
+                                      void *output_ptr,
+                                      bool bias,
+                                      void const *bias_ptr) {
   linear_kernel<T, BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE>(
-      input_ptr, weight_ptr, output_ptr);
+      input_ptr, weight_ptr, output_ptr, bias, bias_ptr);
 }
 
 template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int REDUCTION_SIZE>
 void launch_linear(void const *input_ptr,
                    void const *weight_ptr,
-                   void *output_ptr) {
+                   void *output_ptr,
+                   bool bias,
+                   void const *bias_ptr) {
   dim3 grid_dim(1, 1, 1);
   dim3 block_dim(128, 1, 1);
   size_t smem_size = 36666;
@@ -362,21 +366,30 @@ void launch_linear(void const *input_ptr,
       smem_size);
 
   linear_kernel_wrapper<T, BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE>
-      <<<grid_dim, block_dim, smem_size>>>(input_ptr, weight_ptr, output_ptr);
+      <<<grid_dim, block_dim, smem_size>>>(
+          input_ptr, weight_ptr, output_ptr, bias, bias_ptr);
 }
 
-void linear(torch::Tensor input, torch::Tensor weight, torch::Tensor output) {
+void linear(torch::Tensor input,
+            torch::Tensor weight,
+            torch::Tensor output,
+            bool bias,
+            torch::optional<torch::Tensor> bias_tensor = torch::nullopt) {
 
   void const *input_ptr = input.data_ptr();
   void const *weight_ptr = weight.data_ptr();
   void *output_ptr = output.data_ptr();
 
-  DISPATCH_OUTPUT_SIZE(output.size(1),
-                       launch_linear,
-                       bfloat16,
-                       input_ptr,
-                       weight_ptr,
-                       output_ptr);
+  void const *bias_ptr = bias ? bias_tensor->data_ptr() : nullptr;
+
+  DISPATCH_OUTPUT_SIZE_FOR_RED_SIZE_4K(output.size(1),
+                                       launch_linear,
+                                       bfloat16,
+                                       input_ptr,
+                                       weight_ptr,
+                                       output_ptr,
+                                       bias,
+                                       bias_ptr);
 
   cudaError_t err = cudaDeviceSynchronize();
   if (err != cudaSuccess) {
