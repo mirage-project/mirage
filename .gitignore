@@ -50,5 +50,8 @@ wheelhouse/
 
 # Triton transpiler
 demo/mirage_search_checkpoint.json
-demo/*generated*.*
 demo/*generated*
+benchmark/*generated*
+
+# Rust
+src/search/abstract_expr/abstract_subexpr/*.lock

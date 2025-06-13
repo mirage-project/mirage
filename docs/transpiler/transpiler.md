@@ -259,3 +259,24 @@ for (...) {
   write_back_mma_rc(t, ...);
 }
 ```
+
+## Mirage Profiler
+
+Warp group specialization in Grace Hopper architecture is very important to develop high performance kernels. Different warp groups can be assigned distinct tasks that utilize different hardware resource—such as Tensor Cores , CUDA Cores and TMA units. How to wisely choose the warp group scheduling is very important for optimizing a kernel. 
+
+Mirage provides a profiling tool to visualize your kernel, which traces the start and end of kernel events in each warp group and thread block. Users can very easily understand the operator execution time,  overlapping and gpu waves.
+
+**Prerequisites**
+```python
+protobuf=3.20.0
+tg4perfetto=0.0.4
+```
+
+**Example**
+```python
+python demo/profiler/profile_rmsnorm.py --profling
+```
+
+Upload the generated `.perfetto-trace` file to [Perfetto](ui.perfetto.dev) and visualize the result
+
+

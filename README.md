@@ -1,4 +1,4 @@
-# Mirage: Automatically Generating Fast GPU Kernels for PyTorch Programs
+# Mirage: Automatically Generating Fast GPU Kernels without Programming in CUDA/Triton
 
 Mirage is a tool that automatically generates fast GPU kernels for PyTorch programs through superoptimization techniques. For example, to get fast GPU kernels for attention, users only need to write a few lines of Python code to describe attention's computation. For a given PyTorch program, Mirage automatically searches the space of potential GPU kernels that are functionally equivalent to the input program and discovers highly-optimized kernel candidates. This approach allows Mirage to find new custom kernels that outperform existing expert-designed ones.
 
@@ -70,12 +70,14 @@ We welcome all contributions to Mirage from bug fixes to new features and extens
 A paper describing Mirage's techniques is available [on arxiv](https://arxiv.org/abs/2405.05751). Please cite Mirage as:
 
 ``` bibtex
-@misc{wu2024mirage,
-      title={A Multi-Level Superoptimizer for Tensor Programs}, 
-      author={Mengdi Wu and Xinhao Cheng and Oded Padon and Zhihao Jia},
-      eprint={2405.05751},
-      archivePrefix={arXiv},
-      year={2024},
+@inproceedings {wu2024mirage,
+title={Mirage: A Multi-Level Superoptimizer for Tensor Programs}, 
+author={Mengdi Wu and Xinhao Cheng and Shengyu Liu and Chunan Shi and Jianan Ji and Kit Ao and Praveen Velliengiri and Xupeng Miao and Oded Padon and Zhihao Jia},
+booktitle = {19th USENIX Symposium on Operating Systems Design and Implementation (OSDI 25)},
+year = {2025},
+address = {Boston, MA},
+publisher = {USENIX Association},
+month = jul
 }
 ```
 

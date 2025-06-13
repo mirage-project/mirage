@@ -1,5 +1,6 @@
 #include "mirage/search/search_c.h"
 #include "mirage/kernel/customized.h"
+#include "mirage/kernel/graph.h"
 #include "mirage/search/dim_strategy.h"
 #include "mirage/search/op_utils.h"
 #include "mirage/search/search.h"
@@ -20,26 +21,25 @@ int cython_search(mirage::kernel::Graph const *input_graph,
                   std::vector<MDim3> block_dim_to_explore,
                   std::vector<int> fmap_to_explore,
                   std::vector<int> frange_to_explore,
+                  char const *filename,
                   bool verbose,
-                  char const *default_config) {
-  // NOTE(@wmdi): Checkpointing is disabled for now
-  // Load from a checkpoint
-  // if (check_point_file_path != nullptr) {
-  //   search::KernelGraphGenerator gen(check_point_file_path);
-  //   gen.config.print_config();
-  //   // Only continue the search if we haven't discovered any graphs
-  //   if (gen.generated_graphs.size() == 0) {
-  //     gen.generate_kernel_graphs();
-  //   }
-  //   int num = 0;
-  //   for (json const &j : gen.generated_graphs) {
-  //     assert(num < max_num_graphs);
-  //     new_graphs[num] = new kernel::Graph();
-  //     from_json(j, *new_graphs[num]);
-  //     num++;
-  //   }
-  //   return num;
-  // } else
+                  char const *default_config,
+                  bool is_formal_verified) {
+  if (filename) {
+    std::ifstream generated_graphs_file(filename, std::ifstream::binary);
+    if (generated_graphs_file) {
+      json j;
+      generated_graphs_file >> j;
+      int num = 0;
+      for (json const &graph : j) {
+        assert(num < max_num_graphs);
+        new_graphs[num] = new kernel::Graph();
+        from_json(graph, *new_graphs[num]);
+        num++;
+      }
+      return num;
+    }
+  }
   {
     search::GeneratorConfig config =
         search::GeneratorConfig::get_default_config();
@@ -50,6 +50,9 @@ int cython_search(mirage::kernel::Graph const *input_graph,
         config.enable_concat_matmul_transformation();
       } else if (!strcmp(default_config, "mlp")) {
       }
+    }
+    if (is_formal_verified) {
+      config.verifier_type = search::VerifierType::FORMAL_VERIFIER;
     }
     // Customized imaps
     if (imap_to_explore.size() > 0) {
@@ -94,8 +97,10 @@ int cython_search(mirage::kernel::Graph const *input_graph,
         config.frange_to_explore.push_back(frange);
       }
     }
+    char const *result_filename =
+        filename ? filename : "mirage_search_checkpoint.json";
     search::KernelGraphGenerator gen(
-        *input_graph, config, "mirage_search_checkpoint.json", verbose);
+        *input_graph, config, result_filename, verbose);
     gen.config.show();
     gen.generate_kernel_graphs();
     int num = 0;
@@ -107,6 +112,23 @@ int cython_search(mirage::kernel::Graph const *input_graph,
     }
     return num;
   }
+}
+
+void cython_to_json(mirage::kernel::Graph const *input_graph,
+                    char const *filename) {
+  json j;
+  to_json(j, *input_graph);
+  std::ofstream ofs(filename);
+  ofs << j;
+}
+
+mirage::kernel::Graph *cython_from_json(char const *filename) {
+  std::ifstream graph_file(filename, std::ifstream::binary);
+  json j;
+  graph_file >> j;
+  mirage::kernel::Graph *new_graph = new mirage::kernel::Graph();
+  from_json(j, *new_graph);
+  return new_graph;
 }
 
 } // namespace search_c

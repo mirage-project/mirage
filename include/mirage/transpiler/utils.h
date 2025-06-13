@@ -14,13 +14,15 @@
  */
 #pragma once
 
+#include "mirage/type.h"
 #include <cassert>
+#include <cute/layout.hpp>
 #include <functional>
 #include <iostream>
 #include <string>
 #include <vector>
 
-#include "mirage/type.h"
+using namespace cute;
 
 namespace mirage {
 namespace transpiler {
@@ -119,6 +121,12 @@ public:
   // Here we support "smart indenting". If the last character is "{", we
   // increase the indent level. If it is "}", we decrease the indent level.
   template <typename... Args>
+  void e_front(std::string const &fmt_str, Args... args) {
+    std::string line = fmt(fmt_str, args...);
+    lines.emplace(lines.begin(), line);
+  }
+
+  template <typename... Args>
   void e(std::string const &fmt_str, Args... args) {
     std::string line = fmt(fmt_str, args...);
     char last_char = line.empty() ? EOF : line.back();
@@ -131,6 +139,7 @@ public:
     }
     line = std::string(cur_indent_level * NUM_INDENT_SPACES, ' ') + line;
     lines.push_back(line);
+
     if (last_char == '{') {
       cur_indent_level += 1;
     }
@@ -270,6 +279,130 @@ public:
 inline static size_t get_num_elems_in_16B(type::DataType datatype) {
   size_t elem_size = type::get_datatype_size(datatype);
   return std::max(16 / elem_size, 1ul);
+}
+
+// Generalized function to compute a new layout after partitioning and expanding
+// to grid dimensions
+inline auto generate_partitioned_and_expanded_layout(
+    // Layout<ShapeType, StrideType> original_layout, // Original layout (Shape
+    // + Stride)
+    dim3 grid_dim, // Grid dimensions (x, y, z)
+    std::vector<int> original_shape,
+    std::vector<size_t> original_stride,
+    std::vector<int>
+        partition_logic, // Partitioning logic: gridDim[i] maps to layout_dim[j]
+    int forloop_range,
+    int forloop_dim) {
+
+  int num_dims = original_shape.size();
+
+  std::vector<int> new_shape_values(num_dims);
+  std::vector<size_t> new_stride_values(num_dims);
+
+  int gridX_stride = 1, gridY_stride = 1, gridZ_stride = 1, forloop_stride = 1;
+  int gridX_shape = 1, gridY_shape = 1, gridZ_shape = 1, forloop_shape = 1;
+
+  auto exists = [&partition_logic](int val) {
+    return std::find(partition_logic.begin(), partition_logic.end(), val) !=
+           partition_logic.end();
+  };
+  // Loop over each dimension in the original layout
+  for (int dim = 0; dim < num_dims; ++dim) {
+    if (dim != forloop_dim && (!exists(dim))) {
+      new_shape_values[dim] = original_shape.at(dim);
+      new_stride_values[dim] = original_stride.at(dim);
+    }
+    int partition_grid_dim = partition_logic[dim];
+
+    if (partition_grid_dim >= 0 && forloop_dim == partition_grid_dim) {
+      // partition by forloop and grid
+      int partition_factor = (dim == 0)   ? grid_dim.x
+                             : (dim == 1) ? grid_dim.y
+                                          : grid_dim.z;
+      partition_factor *= forloop_range;
+
+      new_shape_values[partition_grid_dim] =
+          original_shape.at(partition_grid_dim) / partition_factor;
+      new_stride_values[partition_grid_dim] =
+          original_stride.at(partition_grid_dim);
+
+      forloop_stride = original_stride.at(partition_grid_dim) *
+                       new_shape_values[partition_grid_dim];
+      forloop_shape = forloop_range;
+
+      if (dim == 0) {
+        gridX_stride = forloop_stride * forloop_shape;
+        gridX_shape = grid_dim.x;
+      } else if (dim == 1) {
+        gridY_stride = forloop_stride * forloop_shape;
+        gridY_shape = grid_dim.y;
+      } else if (dim == 2) {
+        gridZ_stride = forloop_stride * forloop_shape;
+        gridZ_shape = grid_dim.z;
+      }
+
+      //       new_shape_values[partition_grid_dim],
+      //  partition_grid_dim);
+
+    } else if (partition_grid_dim >= 0) {
+      int partition_factor = (dim == 0)   ? grid_dim.x
+                             : (dim == 1) ? grid_dim.y
+                                          : grid_dim.z;
+      // Adjust shape by dividing it by the partition factor
+      new_shape_values[partition_grid_dim] =
+          original_shape.at(partition_grid_dim) / partition_factor;
+      // Stride remains the same because partitioning does not
+      // affect layout's memory strides
+      new_stride_values[partition_grid_dim] =
+          original_stride.at(partition_grid_dim);
+
+      if (dim == 0) {
+        gridX_stride = original_stride.at(partition_grid_dim) *
+                       new_shape_values[partition_grid_dim];
+        gridX_shape = grid_dim.x;
+      } else if (dim == 1) {
+        gridY_stride = original_stride.at(partition_grid_dim) *
+                       new_shape_values[partition_grid_dim];
+        gridY_shape = grid_dim.y;
+      } else if (dim == 2) {
+        gridZ_stride = original_stride.at(partition_grid_dim) *
+                       new_shape_values[partition_grid_dim];
+        gridZ_shape = grid_dim.z;
+      }
+
+    } else if (forloop_dim == dim) {
+      // forloop dim does not equal to partition dim
+      // assert(partition_grid_dim < 0);
+      // partition only by forloop dim
+      if (forloop_shape > 1) {
+        continue;
+      }
+      new_shape_values[dim] = original_shape.at(dim) / forloop_range;
+      new_stride_values[dim] = original_stride.at(dim);
+      forloop_stride = original_stride.at(dim) * new_shape_values[dim];
+      forloop_shape = forloop_range;
+
+    } else {
+    }
+  }
+
+  // Add extra dimensions for gridDim.x, gridDim.y, and gridDim.z
+  new_shape_values.push_back(gridX_shape); // Add gridDim.x as a new dimension
+  new_shape_values.push_back(gridY_shape); // Add gridDim.y as a new dimension
+  new_shape_values.push_back(gridZ_shape); // Add gridDim.z as a new dimension
+  new_shape_values.push_back(forloop_shape);
+
+  // Append the new strides
+  new_stride_values.push_back(gridX_stride);
+  new_stride_values.push_back(gridY_stride);
+  new_stride_values.push_back(gridZ_stride);
+  new_stride_values.push_back(forloop_stride);
+
+  assert(new_shape_values.size() == new_stride_values.size());
+
+  return fmt("Layout<Shape<$>, Stride<$>>",
+             map_to_cute_int(new_shape_values),
+             map_to_cute_int(new_stride_values));
 }
 
 } // namespace transpiler

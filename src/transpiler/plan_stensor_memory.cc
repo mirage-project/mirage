@@ -254,7 +254,8 @@ AllocResult plan_memory(vector<TensorDecl> const &tensor_decls) {
 } // namespace memory_planner
 
 TBMemoryPlan Transpiler::get_threadblock_memory_plan(tb::Graph const &tb_graph,
-                                                     TBSched const &tb_sched) {
+                                                     TBSched const &tb_sched,
+                                                     bool hopper_arch) {
   using memory_planner::Range, memory_planner::TensorDecl,
       memory_planner::AllocResult, memory_planner::ALIGNMENT;
   static constexpr sguid_t PIPELINED_INPUT_BUF_GUID_OFFSET =
@@ -357,7 +358,9 @@ TBMemoryPlan Transpiler::get_threadblock_memory_plan(tb::Graph const &tb_graph,
       continue;
     }
     auto [last_op, last_op_meta] = node.ops.back();
-    if (last_op->op_type == type::TB_FORLOOP_ACCUM_NO_RED_OP) {
+    if (last_op->op_type == type::TB_FORLOOP_ACCUM_NO_RED_OP ||
+        last_op->op_type == type::TB_FORLOOP_ACCUM_NO_RED_RESCALE_OP ||
+        last_op->op_type == type::TB_FORLOOP_ACCUM_MAX_OP) {
       tb::STensor const &accum = last_op->output_tensors.at(0);
       size_t phy_size = get_phy_size(accum);
       int earlist_free_time =
@@ -366,6 +369,8 @@ TBMemoryPlan Transpiler::get_threadblock_memory_plan(tb::Graph const &tb_graph,
         // find_first_used_time(accum.guid, tb_sched.post_loop_nodes, 2 * T);
         // assert(first_used_time != -1 &&
         //        "An accumulator is not used after the for loop");
+
+        // buffer X number of pipe_stage
         tensor_decls.push_back(
             {accum.guid, phy_size, 2 * T, earlist_free_time});
       } else {
@@ -385,15 +390,22 @@ TBMemoryPlan Transpiler::get_threadblock_memory_plan(tb::Graph const &tb_graph,
       continue;
     }
     auto [last_op, last_op_meta] = node.ops.back();
-    if (last_op->op_type != type::TB_FORLOOP_ACCUM_NO_RED_OP) {
+    if (last_op->op_type != type::TB_FORLOOP_ACCUM_NO_RED_OP &&
+        last_op->op_type != type::TB_FORLOOP_ACCUM_NO_RED_RESCALE_OP &&
+        last_op->op_type != type::TB_FORLOOP_ACCUM_MAX_OP) {
       for (tb::STensor const &output_tensor : last_op->output_tensors) {
         size_t phy_size = get_phy_size(output_tensor);
         int earlist_free_time =
             find_earlist_free_time(output_tensor.guid, tb_sched.loop_nodes, T);
         assert(earlist_free_time != -1 &&
                "An intermediate tensor produced in the for loop is never used");
-        tensor_decls.push_back(
-            {output_tensor.guid, phy_size, i + T, earlist_free_time});
+        // in hopper the doubule buffer needs to be continously allocated
+        if (!(last_op->op_type == type::TB_INPUT_OP &&
+              last_op_meta.is_pipelined_input)) {
+          // the pipelined input tensor should occupy all ranges in the forloop
+          tensor_decls.push_back(
+              {output_tensor.guid, phy_size, i + T, earlist_free_time});
+        }
       }
     }
   }
@@ -427,10 +439,25 @@ TBMemoryPlan Transpiler::get_threadblock_memory_plan(tb::Graph const &tb_graph,
     if (op->op_type == type::TB_INPUT_OP && op_meta.is_pipelined_input) {
       tb::STensor const &stensor = op->output_tensors.at(0);
       size_t phy_size = get_phy_size(stensor);
-      tensor_decls.push_back({stensor.guid + PIPELINED_INPUT_BUF_GUID_OFFSET,
-                              phy_size,
-                              T - 1,
-                              2 * T});
+      if (hopper_arch) {
+        if (stensor_metas[stensor.guid].m_input && stensor.dim[0] <= 64) {
+          tensor_decls.push_back(
+              {stensor.guid,
+               phy_size * config.pipeline_stages * (64 / stensor.dim[0]),
+               T - 1,
+               2 * T});
+        } else {
+          tensor_decls.push_back(
+              {stensor.guid, phy_size * config.pipeline_stages, T - 1, 2 * T});
+        }
+      } else {
+        // double buffer
+        tensor_decls.push_back({stensor.guid, phy_size, T - 1, 2 * T});
+        tensor_decls.push_back({stensor.guid + PIPELINED_INPUT_BUF_GUID_OFFSET,
+                                phy_size,
+                                T - 1,
+                                2 * T});
+      }
     }
   }
 
@@ -446,7 +473,7 @@ TBMemoryPlan Transpiler::get_threadblock_memory_plan(tb::Graph const &tb_graph,
                  tb_sched.post_loop_nodes)) {
       if (node.type == tb_sched_node_t::OPERATOR) {
         num_stensors += (int)node.ops.back().first->output_tensors.size();
-        if (node.ops.front().second.is_pipelined_input) {
+        if (node.ops.front().second.is_pipelined_input && (!hopper_arch)) {
           num_stensors += 1;
         }
       }

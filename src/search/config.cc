@@ -15,25 +15,37 @@ GeneratorConfig GeneratorConfig::get_default_config() {
       {
           type::KN_MATMUL_OP,
           type::KN_EXP_OP,
+          type::KN_SQUARE_OP,
+          type::KN_SQRT_OP,
           type::KN_SILU_OP,
+          type::KN_GELU_OP,
+          type::KN_RELU_OP,
+          type::KN_CLAMP_OP,
           type::KN_ADD_OP,
           type::KN_MUL_OP,
           type::KN_DIV_OP,
-          type::KN_REDUCTION_2_OP,
+          type::KN_POW_OP,
+          // type::KN_REDUCTION_2_OP,
           type::KN_CUSTOMIZED_OP,
       } /* knop_to_explore */,
       {
           type::TB_MATMUL_OP,
           type::TB_EXP_OP,
+          type::TB_SQUARE_OP,
+          type::TB_SQRT_OP,
           type::TB_SILU_OP,
+          type::TB_GELU_OP,
+          type::TB_RELU_OP,
+          type::TB_CLAMP_OP,
           type::TB_ADD_OP,
           type::TB_MUL_OP,
           type::TB_DIV_OP,
+          type::TB_POW_OP,
           type::TB_RMS_NORM_OP,
           type::TB_FORLOOP_ACCUM_NO_RED_OP,
           type::TB_FORLOOP_ACCUM_RED_LD_SUM_OP,
-          type::TB_FORLOOP_ACCUM_RED_LD_MEAN_OP,
-          type::TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP,
+          // type::TB_FORLOOP_ACCUM_RED_LD_MEAN_OP,
+          // type::TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP,
           type::TB_FORLOOP_ACCUM_RED_LD_RMS_OP,
       } /* tbop_to_explore */,
       {} /* imap_to_explore*/,
@@ -56,7 +68,9 @@ GeneratorConfig GeneratorConfig::get_default_config() {
 
 void GeneratorConfig::enable_attention_specific_optimization() {
   _enable_attention_specific_optimization = true;
-  max_num_kernel_graph_op = 7;
+  max_num_threadblock_graphs = 2;
+  tbop_to_explore.push_back(type::TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP);
+  deduplicate(tbop_to_explore);
 }
 
 void GeneratorConfig::enable_concat_matmul_transformation() {

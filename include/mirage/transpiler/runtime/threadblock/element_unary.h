@@ -11,19 +11,35 @@ using namespace cute;
 
 namespace tb {
 
-enum class ElementUnaryOpType { EXP, SILU, SQUARE, SQRT, MULSCALAR };
+enum class ElementUnaryOpType {
+  EXP,
+  SILU,
+  GELU,
+  RELU,
+  CLAMP,
+  SQUARE,
+  SQRT,
+  MULSCALAR
+};
 
 template <typename T, ElementUnaryOpType OP>
 static __device__ __forceinline__ T
     perform_element_unary_op(T a, float scalar = 0.0f) {
   if constexpr (!(std::is_same_v<T, cutlass::half_t> ||
-                  std::is_same_v<T, __half>)) {
+                  std::is_same_v<T, cutlass::bfloat16_t> ||
+                  std::is_same_v<T, float> || std::is_same_v<T, __half>)) {
     assert(0 && "unsupport datatype in tb elementunary");
   }
   if constexpr (OP == ElementUnaryOpType::EXP) {
     return (T)expf((float)a);
   } else if constexpr (OP == ElementUnaryOpType::SILU) {
     return (T)(((float)a) * (1.0f / (1.0f + expf((float)-a))));
+  } else if constexpr (OP == ElementUnaryOpType::GELU) {
+    return (T)((((float)a) / 2.0f) * (1.0f + erff(((float)a) / sqrtf(2.0f))));
+  } else if constexpr (OP == ElementUnaryOpType::RELU) {
+    return (T)(fmaxf(0.f, (float)a));
+  } else if constexpr (OP == ElementUnaryOpType::CLAMP) {
+    return (T)(fmaxf(0.f, fminf((float)a, 1.f)));
   } else if constexpr (OP == ElementUnaryOpType::SQUARE) {
     return (T)((float)a * (float)a);
   } else if constexpr (OP == ElementUnaryOpType::SQRT) {
