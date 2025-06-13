@@ -69,60 +69,6 @@ if __name__ == "__main__":
 
     # get all model weight tensors
     input_tokens = torch.full((1, 1), 0, dtype=torch.long, device="cuda")
-    input_tensors = []
-    input_tensors.append(("input_tokens", input_tokens))
-    input_tensors.append(("cos_position_embedding", position_embeddings[0]))
-    input_tensors.append(("sin_position_embedding", position_embeddings[1]))
-    input_tensors.append(("model.embed_tokens.weight", model.model.embed_tokens.weight))
-    for i, layer in enumerate(model.model.layers):
-        input_tensors.append(
-            (f"model.layers.{i}.input_layernorm.weight", layer.input_layernorm.weight)
-        )
-        input_tensors.append(
-            (f"model.layers.{i}.self_attn.q_proj.weight", layer.self_attn.q_proj.weight)
-        )
-        input_tensors.append(
-            (f"model.layers.{i}.self_attn.k_proj.weight", layer.self_attn.k_proj.weight)
-        )
-        input_tensors.append(
-            (f"model.layers.{i}.self_attn.v_proj.weight", layer.self_attn.v_proj.weight)
-        )
-        input_tensors.append(
-            (f"model.layers.{i}.self_attn.q_norm.weight", layer.self_attn.q_norm.weight)
-        )
-        input_tensors.append(
-            (f"model.layers.{i}.self_attn.k_norm.weight", layer.self_attn.k_norm.weight)
-        )
-        input_tensors.append(
-            (f"model.layers.{i}.self_attn.key_cache.tensor", model.model.kv_cache[0][i])
-        )
-        input_tensors.append(
-            (
-                f"model.layers.{i}.self_attn.value_cache.tensor",
-                model.model.kv_cache[1][i],
-            )
-        )
-        input_tensors.append(
-            (f"model.layers.{i}.self_attn.o_proj.weight", layer.self_attn.o_proj.weight)
-        )
-        input_tensors.append(
-            (
-                f"model.layers.{i}.post_attention_layernorm.weight",
-                layer.post_attention_layernorm.weight,
-            )
-        )
-        input_tensors.append(
-            (f"model.layers.{i}.mlp.gate_proj.weight", layer.mlp.gate_proj.weight)
-        )
-        input_tensors.append(
-            (f"model.layers.{i}.mlp.up_proj.weight", layer.mlp.up_proj.weight)
-        )
-        input_tensors.append(
-            (f"model.layers.{i}.mlp.down_proj.weight", layer.mlp.down_proj.weight)
-        )
-    input_tensors.append(("model.norm.weight", model.model.norm.weight))
-    input_tensors.append(("lm_head.weight", model.lm_head.weight))
-
     prev_pos = 0
 
     starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(
