@@ -664,8 +664,8 @@ TaskGraphResult print_task_graph(
 
   code.e(
       "static void _init_persistent_kernel(std::vector<TaskDesc> &all_tasks,");
-  code.e(
-      "                                    std::vector<EventDesc> &all_events,");
+  code.e("                                    std::vector<EventDesc> "
+         "&all_events,");
   code.e("                                  std::vector<TaskId> &first_tasks,");
   code.e("                                  int num_gpus,");
   code.e("                                  int my_gpu_id) {");
@@ -678,9 +678,7 @@ TaskGraphResult print_task_graph(
     IODesc desc = iter.second;
     switch (desc.type) {
       case IODesc::TorchTensor: {
-        code.e("char *$ = (char*)($);",
-               desc.name,
-               desc.torch_data_ptr);
+        code.e("char *$ = (char*)($);", desc.name, desc.torch_data_ptr);
         if (use_json_format) {
           code.e("all_tensors[\"$\"] = $;", desc.name, desc.name);
         }
@@ -688,9 +686,7 @@ TaskGraphResult print_task_graph(
       }
       case IODesc::FusedTorchTensor: {
         for (auto const &sdesc : desc.sub_descs) {
-          code.e("char *$ = (char*)($);",
-                 sdesc.name,
-                 sdesc.torch_data_ptr);
+          code.e("char *$ = (char*)($);", sdesc.name, sdesc.torch_data_ptr);
           if (use_json_format) {
             code.e("all_tensors[\"$\"] = $;", sdesc.name, sdesc.name);
           }
