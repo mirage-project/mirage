@@ -442,35 +442,6 @@ __global__ void persistent_kernel(RuntimeConfig config) {
                 task_desc.inputs[6].base_ptr,
                 1e-6f /*q_eps*/,
                 1e-6f /*k_eps*/);
-            // if (threadIdx.x == 0) {
-            //   if (get_task_position_index(cur_task_id) == 99) {
-            //     printf("Task ID: %llu\n",
-            //     get_task_position_index(cur_task_id)); for (auto it :
-            //     task_desc.inputs) {
-            //       printf("Input:[\n");
-            //       for (int i = 0; i < 8; i++) {
-            //         for (int j = 0; j < 8; j++) {
-            //           printf("%.4f, ",
-            //                  float(reinterpret_cast<bfloat16 const *>(
-            //                      it.base_ptr)[i * 8 + j]));
-            //         }
-            //         printf("\n");
-            //       }
-            //       printf("]\n");
-            //     }
-            //     auto it = task_desc.outputs[0];
-            //     printf("Output:[\n");
-            //     for (int i = 0; i < 8; i++) {
-            //       for (int j = 0; j < 8; j++) {
-            //         printf("%.4f, ",
-            //                float(reinterpret_cast<bfloat16 const *>(
-            //                    it.base_ptr)[i * 8 + j]));
-            //       }
-            //       printf("\n");
-            //     }
-            //     printf("]\n");
-            //   }
-            // }
             break;
           }
           case TASK_ATTENTION_2: {
