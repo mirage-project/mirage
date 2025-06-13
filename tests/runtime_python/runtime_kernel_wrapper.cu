@@ -286,17 +286,17 @@ void norm_linear(torch::Tensor input,
 
 template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int REDUCTION_SIZE>
 __global__ void silu_mul_linear_kernel_wrapper(void const *input_ptr,
-                                               void const *mul_ptr,
                                                void const *weight_ptr,
+                                               void const *bias_ptr,
                                                void *output_ptr) {
   silu_mul_linear_task_impl<T, BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE>(
-      input_ptr, mul_ptr, weight_ptr, output_ptr);
+      input_ptr, weight_ptr, bias_ptr, output_ptr);
 }
 
 template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int REDUCTION_SIZE>
 void launch_silu_mul_linear(void const *input_ptr,
-                            void const *mul_ptr,
                             void const *weight_ptr,
+                            void const *bias_ptr,
                             void *output_ptr) {
   dim3 grid_dim(1, 1, 1);
   dim3 block_dim(128, 1, 1);
@@ -311,25 +311,25 @@ void launch_silu_mul_linear(void const *input_ptr,
 
   silu_mul_linear_kernel_wrapper<T, BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE>
       <<<grid_dim, block_dim, smem_size>>>(
-          input_ptr, mul_ptr, weight_ptr, output_ptr);
+          input_ptr, weight_ptr, bias_ptr, output_ptr);
 }
 
 void silu_mul_linear(torch::Tensor input,
-                     torch::Tensor mul,
                      torch::Tensor weight,
+                     torch::Tensor bias,
                      torch::Tensor output) {
 
   void const *input_ptr = input.data_ptr();
-  void const *mul_ptr = mul.data_ptr();
   void const *weight_ptr = weight.data_ptr();
+  void const *bias_ptr = bias.data_ptr();
   void *output_ptr = output.data_ptr();
 
   DISPATCH_OUTPUT_SIZE_FOR_RED_SIZE_12K(output.size(1),
                                         launch_silu_mul_linear,
                                         bfloat16,
                                         input_ptr,
-                                        mul_ptr,
                                         weight_ptr,
+                                        bias_ptr,
                                         output_ptr);
 
   cudaError_t err = cudaDeviceSynchronize();
