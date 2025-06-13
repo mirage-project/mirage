@@ -538,7 +538,7 @@ TaskGraphResult print_task_graph(
         &all_task_maps,
     std::unordered_map<kn::KNOperator const *,
                        std::tuple<int, int, TaskType>> const &task_configs,
-    std::unordered_map<mirage::type::GuidType, IODesc> const &io_configs,
+    std::map<mirage::type::GuidType, IODesc> const &io_configs,
     bool use_json_format) {
   using mirage::runtime::IODesc;
   mirage::transpiler::CodeKeeper code;
@@ -665,15 +665,12 @@ TaskGraphResult print_task_graph(
   code.e(
       "static void _init_persistent_kernel(std::vector<TaskDesc> &all_tasks,");
   code.e(
-      "                                  std::vector<EventDesc> &all_events,");
+      "                                    std::vector<EventDesc> &all_events,");
   code.e("                                  std::vector<TaskId> &first_tasks,");
-  code.e("                                  std::vector<void const*> const "
-         "&torch_tensors,");
   code.e("                                  int num_gpus,");
   code.e("                                  int my_gpu_id) {");
   code.e("assert(num_gpus = $);", num_gpus);
 
-  int num_torch_tensors = 0;
   if (use_json_format) {
     code.e("std::map<std::string, void*> all_tensors;");
   }
@@ -681,24 +678,22 @@ TaskGraphResult print_task_graph(
     IODesc desc = iter.second;
     switch (desc.type) {
       case IODesc::TorchTensor: {
-        code.e("char *$ = (char*) torch_tensors[$];",
+        code.e("char *$ = (char*)($);",
                desc.name,
-               num_torch_tensors);
+               desc.torch_data_ptr);
         if (use_json_format) {
           code.e("all_tensors[\"$\"] = $;", desc.name, desc.name);
         }
-        num_torch_tensors++;
         break;
       }
       case IODesc::FusedTorchTensor: {
-        for (auto const &desc : desc.sub_descs) {
-          code.e("char *$ = (char*)torch_tensors[$];",
-                 desc.name,
-                 num_torch_tensors);
+        for (auto const &sdesc : desc.sub_descs) {
+          code.e("char *$ = (char*)($);",
+                 sdesc.name,
+                 sdesc.torch_data_ptr);
           if (use_json_format) {
-            code.e("all_tensors[\"$\"] = $;", desc.name, desc.name);
+            code.e("all_tensors[\"$\"] = $;", sdesc.name, sdesc.name);
           }
-          num_torch_tensors++;
         }
         break;
       }

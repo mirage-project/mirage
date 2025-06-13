@@ -14,34 +14,22 @@ HARD_CODE = """
 #include <cuda_runtime.h>
 
 static PyObject *init_func(PyObject *self, PyObject *args) {
-  PyObject *input_list, *meta_list, *py_profiler_buffer;
-  std::vector<void const *> input_tensors;
+  PyObject *meta_list, *py_profiler_buffer;
   std::vector<void*> meta_tensors;
   int my_mpi_rank, num_workers, num_local_schedulers, num_remote_schedulers;
   void *profiler_buffer;
 
-  if (!PyArg_ParseTuple(args, "OOOiiii", &input_list, &meta_list, &py_profiler_buffer, &my_mpi_rank, &num_workers, &num_local_schedulers, &num_remote_schedulers)) {
+  if (!PyArg_ParseTuple(args, "OOiiii", &meta_list, &py_profiler_buffer, &my_mpi_rank, &num_workers, &num_local_schedulers, &num_remote_schedulers)) {
     PyErr_SetString(PyExc_TypeError, "Invalid parameters");
     return NULL;
   }
 
-  if(!PyList_Check(input_list) || !PyList_Check(meta_list)) {
-    PyErr_SetString(PyExc_TypeError, "Both arg1 and arg2 must be lists.");
+  if(!PyList_Check(meta_list)) {
+    PyErr_SetString(PyExc_TypeError, "arg1 must be a list.");
     return NULL;
   }
 
-  Py_ssize_t input_size = PyList_Size(input_list);
   Py_ssize_t meta_size = PyList_Size(meta_list);
-
-  for(Py_ssize_t i = 0; i < input_size; i++) {
-    PyObject *item = PyList_GetItem(input_list, i);
-    void* tensor = PyLong_AsVoidPtr(item);
-    if(!tensor) {
-      PyErr_Format(PyExc_TypeError, "Failed to convert item %d (input) to void pointer", i);
-      return NULL;
-    }
-    input_tensors.push_back(PyLong_AsVoidPtr(item));
-  }
 
   for(Py_ssize_t i = 0; i < meta_size; i++) {
     PyObject *item = PyList_GetItem(meta_list, i);
@@ -54,7 +42,7 @@ static PyObject *init_func(PyObject *self, PyObject *args) {
   }
   profiler_buffer = PyLong_AsVoidPtr(py_profiler_buffer);
 
-  init_persistent_kernel(input_tensors, meta_tensors, profiler_buffer, my_mpi_rank, num_workers, num_local_schedulers, num_remote_schedulers);
+  init_persistent_kernel(meta_tensors, profiler_buffer, my_mpi_rank, num_workers, num_local_schedulers, num_remote_schedulers);
 
   Py_RETURN_NONE;
 }
@@ -118,6 +106,7 @@ def get_compile_command(
         file_name,
         "-O3",
         f"-I{py_include_dir}",
+        f"-I{mirage_inc_path}",
         f"-I{os.path.join(mirage_inc_path, 'mirage/persistent_kernel')}",
         f"-I{os.path.join(mirage_deps_path, 'cutlass/include')}",
         f"-I{os.path.join(mirage_home_path, 'deps/json/include')}",
@@ -162,18 +151,24 @@ def get_compile_command(
 class PersistentKernel:
     def __init__(
         self,
+        world_size: int,
         mpi_rank: int,
         num_workers: int,
         num_local_schedulers: int,
         num_remote_schedulers: int,
+        meta_tensors: list[torch.Tensor],
+        profiler_tensor: torch.Tensor,
     ):
         self.__finalized__ = False
+        self._is_compiled = False
+        self.world_size = world_size
         self.mpi_rank = mpi_rank
         self.num_workers = num_workers
         self.num_local_schedulers = num_local_schedulers
         self.num_remote_schedulers = num_remote_schedulers
         self.kn_graph = KNGraph(CyKNGraph(disable_fingerprint=True))
-        self.task_configs = []
+        self.meta_tensors = meta_tensors
+        self.profiler_tensor = profiler_tensor
 
     def attach_input(self, torch_tensor: torch.Tensor, name: str = None) -> DTensor:
         dims = tuple([d for d in torch_tensor.shape])
@@ -379,32 +374,24 @@ class PersistentKernel:
 
     def compile(
         self,
-        file_path: str,
-        mpi_rank: int,
-        num_workers: int,
-        num_local_schedulers: int,
-        num_remote_schedulers: int,
+        use_nvshmem: bool = True,
         **kwargs,
     ):
-        self.__finalized__ = False
+        assert not self._is_compiled
+
         MIRAGE_ROOT, INCLUDE_PATH, DEPS_PATH = get_key_paths()
         tempdir_obj = tempfile.TemporaryDirectory()
         tempdir = tempdir_obj.name
-        full_src_file = os.path.join(tempdir, "test.cu")
+        results = self.kn_graph.generate_task_graph(num_gpus=self.world_size)
+
+        cuda_code_path = os.path.join(tempdir, "test.cu")
         so_path = os.path.join(tempdir, "test.cpython-38-x86_64-linux-gnu.so")
         # check json file
-        json_file_path = os.path.join(os.path.dirname(file_path), "task_graph.json")
-        new_json_path = os.path.join(tempdir, "task_graph.json")
-        if not os.path.exists(json_file_path):
-            raise RuntimeError(f"Cannot find json file in directory {json_file_path}")
-        with open(json_file_path, "r") as f:
-            task_graph_json = f.read()
-        with open(new_json_path, "w") as f:
-            f.write(task_graph_json)
-        with open(file_path, "r") as f:
-            task_graph_impl = f.read()
-        with open(full_src_file, "w") as f:
-            f.write(task_graph_impl + HARD_CODE)
+        json_file_path = os.path.join(tempdir, "task_graph.json")
+        with open(json_file_path, "w") as f:
+            f.write(results["json_file"])
+        with open(cuda_code_path, "w") as f:
+            f.write(results["cuda_code"] + HARD_CODE)
 
         cc = shutil.which("nvcc")
         if cc is None:
@@ -492,13 +479,11 @@ class PersistentKernel:
             torch.cuda.get_device_properties(0).major * 10
             + torch.cuda.get_device_properties(0).minor
         )
-        profiling = kwargs.get("profiling", False)
-        use_nvshmem = kwargs.get("use_nvshmem", True)
 
         cc_cmd = get_compile_command(
             target_cc=target_cc,
             cc=cc,
-            file_name=full_src_file,
+            file_name=cuda_code_path,
             py_include_dir=py_include_dir,
             mirage_home_path=MIRAGE_HOME_PATH,
             mirage_inc_path=INCLUDE_PATH,
@@ -508,7 +493,7 @@ class PersistentKernel:
             mpi_inc_path=MPI_INC_PATH,
             mpi_lib_path=MPI_LIB_PATH,
             py_so_path=so_path,
-            profiling=profiling,
+            profiling= True if self.profiler_tensor is not None else False,
             use_nvshmem=use_nvshmem,
         )
         print(cc_cmd)
@@ -523,25 +508,20 @@ class PersistentKernel:
         self.launch_func = getattr(mod, "launch_func")
         self.finalize_func = getattr(mod, "finalize_func")
 
-        # initialize persistent kernel
-        input_tensors = kwargs.get("input_tensors", [])
-        meta_tensors = kwargs.get("meta_tensors", [])
-        self.profiler_tensor = kwargs.get("profiler_tensor")
-
-        input_tensors_ptr = [tensor.data_ptr() for tensor in input_tensors]
-        meta_tensors_ptr = [tensor.data_ptr() for tensor in meta_tensors]
+        meta_tensors_ptr = [tensor.data_ptr() for tensor in self.meta_tensors]
         profiler_buffer_ptr = (
             self.profiler_tensor.data_ptr() if self.profiler_tensor is not None else 0
         )
         self.init_func(
-            input_tensors_ptr,
             meta_tensors_ptr,
             profiler_buffer_ptr,
-            mpi_rank,
-            num_workers,
-            num_local_schedulers,
-            num_remote_schedulers,
+            self.mpi_rank,
+            self.num_workers,
+            self.num_local_schedulers,
+            self.num_remote_schedulers,
         )
+
+        self._is_compiled = True
 
         # self.call_func = getattr(mod, "call_func")
 
@@ -563,5 +543,6 @@ class PersistentKernel:
 
     def finalize(self):
         assert not self.__finalized__
-        self.finalize_func()
+        if self._is_compiled:
+            self.finalize_func()
         self.__finalized__ = True

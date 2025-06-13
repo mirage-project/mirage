@@ -14,7 +14,7 @@
  */
 
 #include "profiler.h"
-#include "runtime_types.h"
+#include "runtime_header.h"
 #include "tasks/kernel.h"
 #include <mpi.h>
 #include <nvshmem.h>
@@ -353,7 +353,7 @@ __global__ void persistent_kernel(RuntimeConfig config) {
             TB_SLEEP_US(1);
             break;
           }
-          case TASK_SILU_MUL_LINEAR: {
+          case TASK_SILU_MUL_LINEAR_WITH_RESIDUAL: {
             kernel::silu_mul_linear_task<bfloat16>(
                 task_desc.outputs[0].dim[task_desc.outputs[0].num_dims - 1],
                 task_desc.inputs[0].base_ptr,
@@ -389,7 +389,7 @@ __global__ void persistent_kernel(RuntimeConfig config) {
             TB_SLEEP_US(10);
             break;
           }
-          case TASK_MATMUL: {
+          case TASK_LINEAR_WITH_RESIDUAL: {
             kernel::linear_kernel<bfloat16, 1, 64, 4096>(
                 task_desc.inputs[0].base_ptr,
                 task_desc.inputs[1].base_ptr,
@@ -788,14 +788,12 @@ static void
     _init_persistent_kernel(std::vector<TaskDesc> &all_tasks,
                             std::vector<EventDesc> &all_events,
                             std::vector<TaskId> &first_tasks,
-                            std::vector<void const *> const &torch_tensors,
                             int num_gpus,
                             int my_gpu_id);
 
 static RuntimeConfig global_runtime_config;
 
-extern "C" void init_persistent_kernel(std::vector<void const *> torch_tensors,
-                                       std::vector<void *> meta_tensors,
+extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
                                        void *profiler_buffer,
                                        int my_rank,
                                        int num_workers,
@@ -822,7 +820,6 @@ extern "C" void init_persistent_kernel(std::vector<void const *> torch_tensors,
   printf("mype(%d) npes(%d) mype_node(%d)\n", mype, npes, mype_node);
   printf(
       "process_id(%zu) thread_id(%zu)\n", getpid(), std::this_thread::get_id());
-  printf("torch_tensors.size(%zu)\n", torch_tensors.size());
   global_runtime_config.per_worker_queue_len = 1024;
   global_runtime_config.per_sched_queue_len = 1024;
   global_runtime_config.num_gpus = npes;
@@ -835,7 +832,7 @@ extern "C" void init_persistent_kernel(std::vector<void const *> torch_tensors,
   std::vector<EventDesc> all_events;
   std::vector<TaskId> first_tasks;
   _init_persistent_kernel(
-      all_tasks, all_events, first_tasks, torch_tensors, npes, mype);
+      all_tasks, all_events, first_tasks, npes, mype);
   // for (size_t i = 0; i < all_tasks.size(); i++) {
   //   printf(
   //       "task[%zu]: task_type(%d) trigger_event(%llx)

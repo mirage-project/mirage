@@ -177,7 +177,7 @@ cdef extern from "mirage/kernel/device_tensor.h" namespace "mirage::kernel":
         #void *data_ptr
         int owner_ts_idx
 
-cdef extern from "mirage/persistent_kernel/runtime_types.h" namespace "mirage::runtime":
+cdef extern from "mirage/kernel/runtime.h" namespace "mirage::runtime":
     ctypedef struct TaskGraphResult:
         string cuda_code
         string json_file

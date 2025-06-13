@@ -390,6 +390,7 @@ DTensor *Graph::fuse_tensors(std::vector<DTensor const *> inputs,
     assert(io_config.find(inputs[t]->guid) != io_config.end());
     IODesc sub_desc = io_config.find(inputs[t]->guid)->second;
     desc.sub_descs.push_back(sub_desc);
+    io_config.erase(inputs[t]->guid);
   }
   io_config.emplace(fused->guid, desc);
   return fused;

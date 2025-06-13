@@ -18,7 +18,7 @@
 #include "mirage/kernel/customized.h"
 #include "mirage/kernel/device_tensor.h"
 #include "mirage/kernel/operator.h"
-#include "mirage/persistent_kernel/runtime_types.h"
+#include "mirage/kernel/runtime.h"
 #include "mirage/threadblock/graph.h"
 #include <vector>
 
@@ -201,7 +201,7 @@ public:
   // mirage::kernel::OperatorFactory *operator_factory;
 
   // Fields for persistent kernels
-  std::unordered_map<mirage::type::GuidType, mirage::runtime::IODesc> io_config;
+  std::map<mirage::type::GuidType, mirage::runtime::IODesc> io_config;
   std::unordered_map<mirage::kernel::KNOperator const *,
                      std::tuple<int, int, runtime::TaskType>>
       task_config;

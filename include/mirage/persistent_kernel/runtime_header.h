@@ -97,27 +97,6 @@ struct TaskDesc {
   TensorDesc outputs[MAX_OUTPUTS_PER_TASK];
 };
 
-struct IODesc {
-  enum IOType {
-    TorchTensor,
-    FusedTorchTensor,
-    CUDAMallocTensor,
-    NVSHMEMMallocTensor
-  };
-  IODesc(IOType _type,
-         std::string _name,
-         mirage::kernel::DTensor const &_tensor,
-         void *_torch_data_ptr = nullptr);
-  IOType type;
-  std::string name;
-  TensorDesc tensor;
-  // Only used for torch tensor
-  void *torch_data_ptr;
-  // Only used for fused tensors
-  int num_groups;
-  std::vector<IODesc> sub_descs;
-};
-
 struct RuntimeConfig {
   int num_workers, num_local_schedulers, num_remote_schedulers, num_graphs;
   int num_gpus, my_gpu_id;
@@ -136,11 +115,6 @@ struct RuntimeConfig {
   void *profiler_buffer;
   bool verbose;
   bool profiling;
-};
-
-struct TaskGraphResult {
-  std::string cuda_code;
-  std::string json_file;
 };
 
 } // namespace runtime

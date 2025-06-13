@@ -162,10 +162,13 @@ if __name__ == "__main__":
         else:
             profiler_tensor = None
         mpk = mi.PersistentKernel(
+            world_size=world_size,
             mpi_rank=rank,
             num_workers=96,
             num_local_schedulers=48,
             num_remote_schedulers=0,
+            meta_tensors=[step],
+            profiler_tensor=profiler_tensor,
         )
         x = mpk.attach_input(torch_tensor=input_tokens, name="input_token")
         cos_pos_embed = mpk.attach_input(
@@ -284,9 +287,11 @@ if __name__ == "__main__":
             w_q_norm = mpk.attach_input(
                 torch_tensor=layer.self_attn.q_norm.weight, name=f"layer_{i}_q_norm"
             )
+            print(f"layer_{i}_q_norm:", hex(layer.self_attn.q_norm.weight.data_ptr()))
             w_k_norm = mpk.attach_input(
                 torch_tensor=layer.self_attn.k_norm.weight, name=f"layer_{i}_k_norm"
             )
+            print(f"layer_{i}_k_norm:", hex(layer.self_attn.k_norm.weight.data_ptr()))
             k_cache = mpk.attach_input(
                 torch_tensor=model.model.kv_cache[0][i], name=f"layer_{i}_k_cache"
             )
@@ -402,6 +407,8 @@ if __name__ == "__main__":
         with open("test.cu", "w") as f:
             f.write(results["cuda_code"])
 
+        mpk.compile()
+
         # kernel = mirage.PersistentKernel(
         #     file_path="/home/ubuntu/mirage_cpp/debug_build/test.cu",
         #     mpi_rank=rank,
@@ -459,20 +466,20 @@ if __name__ == "__main__":
         input_ids = tokens[:, 0:prompt_len]
         cos_embeddings = position_embeddings[0][:, 0:prompt_len]
         sin_embeddings = position_embeddings[1][:, 0:prompt_len]
-        logits = model.forward(
-            input_ids=input_ids,
-            position_embeddings=(cos_embeddings, sin_embeddings),
-            step=step,
-            stream=stream,
-        )
-        next_token = logits.argmax(dim=-1)
-        next_token = next_token[0, -1]
-        input_tokens[0] = next_token
+        #logits = model.forward(
+        #    input_ids=input_ids,
+        #    position_embeddings=(cos_embeddings, sin_embeddings),
+        #    step=step,
+        #    stream=stream,
+        #)
+        #next_token = logits.argmax(dim=-1)
+        #next_token = next_token[0, -1]
+        #input_tokens[0] = next_token
         torch.cuda.synchronize()
         starter.record()
 
         step.fill_(prompt_len)
-        kernel()
+        mpk()
 
         ender.record()
         torch.cuda.synchronize()
