@@ -42,4 +42,3 @@ if __name__ == "__main__":
     mean_syn = curr_time / 6
 
     print("Best muGraph run time (ms): ", mean_syn)
-
