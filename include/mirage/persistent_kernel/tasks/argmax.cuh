@@ -18,94 +18,72 @@
 namespace kernel {
 
 template <typename T>
-__device__ __forceinline__ void warp_reduce_max_idx(T &val, int &idx) {
+__device__ __forceinline__ void warp_reduce_max_idx(T &val, long long &idx) {
 #pragma unroll
   for (int offset = 16; offset > 0; offset /= 2) {
-    float tmp = __shfl_down_sync(0xffffffff, (float)val, offset);
-    T other_val = T(tmp);
-    int other_idx = __shfl_down_sync(0xffffffff, idx, offset);
-    if (other_val > val) {
-      val = other_val;
+    T tmp = __shfl_down_sync(0xffffffff, val, offset);
+    long long other_idx = __shfl_down_sync(0xffffffff, idx, offset);
+    if (tmp > val) {
+      val = tmp;
       idx = other_idx;
     }
   }
 }
 
 template <typename T>
-__device__ __forceinline__ void block_reduce_max_idx(T &val, int &idx) {
+__device__ __forceinline__ void block_reduce_max_idx(T &val, long long &idx) {
   __shared__ T smem_vals[32]; // max 32 warps
-  __shared__ int smem_idxs[32];
+  __shared__ long long smem_idxs[32];
 
   warp_reduce_max_idx(val, idx);
 
-  int lane_id = threadIdx.x % 32;
-  int warp_id = threadIdx.x / 32;
+  int my_lane_id = lane_id();
+  int my_warp_id = warp_id();
 
-  if (lane_id == 0) {
-    smem_vals[warp_id] = val;
-    smem_idxs[warp_id] = idx;
+  if (my_lane_id == 0) {
+    smem_vals[my_warp_id] = val;
+    smem_idxs[my_warp_id] = idx;
   }
 
   __syncthreads();
 
-  T block_max_val = T(-inf);
-  int block_max_idx = -1;
+  // Only thread 0 holds the final result
+  if (my_warp_id == 0) {
+    T block_max_val = T(-inf);
+    long long block_max_idx = -1;
 
-  if (warp_id == 0) {
-    int num_warps = (blockDim.x + 31) / 32;
-    if (lane_id < num_warps) {
-      block_max_val = smem_vals[lane_id];
-      block_max_idx = smem_idxs[lane_id];
+    int num_warps = (blockDim.x + 31) >> log2_constexpr(NUM_THREADS_PER_WARP);
+    if (my_lane_id < num_warps) {
+      block_max_val = smem_vals[my_lane_id];
+      block_max_idx = smem_idxs[my_lane_id];
     }
     warp_reduce_max_idx(block_max_val, block_max_idx);
+
+    if (my_lane_id == 0) {
+      val = block_max_val;
+      idx = block_max_idx;
+    }
   }
-
-  __syncthreads();
-
-  if (warp_id == 0 && lane_id == 0) {
-    smem_vals[0] = block_max_val;
-    smem_idxs[0] = block_max_idx;
-  }
-
-  __syncthreads();
-
-  val = smem_vals[0];
-  idx = smem_idxs[0];
 }
 
 template <typename T>
-struct PartialMax {
-  T val;
-  int idx;
-};
-
-template <typename T, int VOCAB_SIZE, int NUM_BLOCKS>
 __device__ __forceinline__ void argmax_partial_kernel(
     void const *__restrict__ input_ptr,
-    void *__restrict__ partial_output_ptr,
-    int block_idx) {
+    void *__restrict__ output_val_ptr,
+    void *__restrict__ output_idx_ptr,
+    int partial_vocab_size,
+    long long index_offset) {
   T const *__restrict__ input = static_cast<T const *>(input_ptr);
-  PartialMax<T> *__restrict__ partial_output =
-      static_cast<PartialMax<T> *>(partial_output_ptr);
+  T *__restrict__ output_val = static_cast<T *>(output_val_ptr);
+  long long *__restrict__ output_idx =
+      static_cast<long long *>(output_idx_ptr);
 
   int tidx = threadIdx.x;
   T local_max = T(-inf);
-  int local_idx = -1;
-
-  int bigger_part_size = (VOCAB_SIZE + NUM_BLOCKS - 1) / NUM_BLOCKS;
-  int bigger_part_num = VOCAB_SIZE % NUM_BLOCKS;
-  int start_offset = 0;
-  int end_offset = 0;
-  if (block_idx >= bigger_part_num){
-    start_offset = block_idx * (bigger_part_size - 1) + bigger_part_num;
-    end_offset = start_offset + bigger_part_size - 1;
-  } else {
-    start_offset = block_idx * bigger_part_size;
-    end_offset = (block_idx + 1) * bigger_part_size;
-  }
+  long long local_idx = -1;
 
   // TODO: try vectorize
-  for (int i = start_offset + tidx; i < end_offset; i += blockDim.x) {
+  for (int i = tidx; i < partial_vocab_size; i += blockDim.x) {
     T val = input[i];
     if (val > local_max) {
       local_max = val;
@@ -116,27 +94,32 @@ __device__ __forceinline__ void argmax_partial_kernel(
   block_reduce_max_idx(local_max, local_idx);
 
   if (tidx == 0) {
-    partial_output[block_idx].val = local_max;
-    partial_output[block_idx].idx = local_idx;
+    output_val[0] = local_max;
+    output_idx[0] = local_idx + index_offset;
   }
 }
 
-template <typename T, int NUM_BLOCKS>
+template <typename T>
 __device__ __forceinline__ void
-argmax_reduce_kernel(void const *__restrict__ partial_input_ptr,
-                     void *__restrict__ final_output_ptr) {
-  PartialMax<T> const *__restrict__ partial_input =
-      static_cast<PartialMax<T> const *>(partial_input_ptr);
-  int *__restrict__ final_output = static_cast<int *>(final_output_ptr);
+argmax_reduce_kernel(void const *__restrict__ input_val_ptr,
+                     void const *__restrict__ input_idx_ptr,
+                     void *__restrict__ final_output_ptr,
+                     int num_partial_tasks) {
+  T const *__restrict__ partial_vals =
+      static_cast<T const *>(input_val_ptr);
+  long long const *__restrict__ partial_idxs =
+      static_cast<long long const *>(input_idx_ptr);
+  long long *__restrict__ final_output =
+      static_cast<long long *>(final_output_ptr);
 
   int tidx = threadIdx.x;
   T local_max = T(-inf);
-  int local_idx = -1;
+  long long local_idx = -1;
 
-  for (int i = tidx; i < NUM_BLOCKS; i += blockDim.x) {
-    if (partial_input[i].val > local_max) {
-      local_max = partial_input[i].val;
-      local_idx = partial_input[i].idx;
+  for (int i = tidx; i < num_partial_tasks; i += blockDim.x) {
+    if (partial_vals[i] > local_max) {
+      local_max = partial_vals[i];
+      local_idx = partial_idxs[i];
     }
   }
 

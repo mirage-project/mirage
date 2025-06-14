@@ -500,26 +500,31 @@ __global__ void persistent_kernel(RuntimeConfig config) {
             break;
           }
           case TASK_ARGMAX_PARTIAL: {
-            // TODO: We need to determine the block index for this partial task. 
-            // Make sure it's compatible with graph generation.
             EventId trigger_event_id = task_desc.trigger_event;
             size_t event_idx = get_event_position_index(trigger_event_id);
             EventDesc event_desc = config.all_events[event_idx];
-            size_t base_task_id = event_desc.first_task_id;
-            int partial_task_idx = get_task_position_index(cur_task_id) - base_task_id;
+            int partial_task_idx = event_desc.last_task_id - event_desc.first_task_id;
             
-            // TODO: This should match the real number
-            kernel::argmax_partial_kernel<bfloat16, 153600, 64>(
-                task_desc.inputs[0].base_ptr,   // full vocab tensor
-                task_desc.outputs[0].base_ptr,  // intermediate buffer
-                partial_task_idx);
+            assert(task_desc.inputs[0].num_dims > 0);
+            int partial_vocab_size = task_desc.inputs[0].dim[task_desc.inputs[0].num_dims - 1];
+            long long index_offset = (long long)partial_task_idx * partial_vocab_size;
+
+            kernel::argmax_partial_kernel<bfloat16>(
+                task_desc.inputs[0].base_ptr,   // partial vocab tensor
+                task_desc.outputs[0].base_ptr,  // partial max value
+                task_desc.outputs[1].base_ptr,  // partial global index
+                partial_vocab_size,
+                index_offset);
             break;
           }
           case TASK_ARGMAX_REDUCE: {
-            // TODO: This should match the real number
-            kernel::argmax_reduce_kernel<bfloat16, 64>(
-                task_desc.inputs[0].base_ptr,   // intermediate buffer
-                task_desc.outputs[0].base_ptr); // final output tensor
+            assert(task_desc.inputs[0].num_dims > 0);
+            int num_partial_tasks = task_desc.inputs[0].dim[task_desc.inputs[0].num_dims - 1];
+            kernel::argmax_reduce_kernel<bfloat16>(
+                task_desc.inputs[0].base_ptr,   // all partial max values
+                task_desc.inputs[1].base_ptr,   // all partial global indices
+                task_desc.outputs[0].base_ptr,  // final global index
+                num_partial_tasks);
             break;
           }
           default: {
