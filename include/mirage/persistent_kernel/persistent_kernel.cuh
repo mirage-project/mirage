@@ -52,6 +52,8 @@ enum TaskType {
   TASK_REDUCE = 107,
   TASK_MATMUL = 108,
   TASK_ARGMAX = 109,
+  TASK_ARGMAX_PARTIAL = 110,
+  TASK_ARGMAX_REDUCE = 111,
   TASK_NVSHMEM_COPY = 199,
   TASK_SCHD_TASKS = 200,
   TASK_SCHD_EVENTS = 201,
@@ -494,8 +496,37 @@ __global__ void persistent_kernel(RuntimeConfig config) {
             break;
           }
           case TASK_ARGMAX: {
+            // We may still need this for small vocab size.
             kernel::argmax_kernel<bfloat16, 1, 153600>(
                 task_desc.inputs[0].base_ptr, task_desc.outputs[0].base_ptr);
+            break;
+          }
+          case TASK_ARGMAX_PARTIAL: {
+            EventId trigger_event_id = task_desc.trigger_event;
+            size_t event_idx = get_event_position_index(trigger_event_id);
+            EventDesc event_desc = config.all_events[event_idx];
+            int partial_task_idx = event_desc.last_task_id - event_desc.first_task_id;
+            
+            assert(task_desc.inputs[0].num_dims > 0);
+            int partial_vocab_size = task_desc.inputs[0].dim[task_desc.inputs[0].num_dims - 1];
+            long long index_offset = (long long)partial_task_idx * partial_vocab_size;
+
+            kernel::argmax_partial_kernel<bfloat16>(
+                task_desc.inputs[0].base_ptr,   // partial vocab tensor
+                task_desc.outputs[0].base_ptr,  // partial max value
+                task_desc.outputs[1].base_ptr,  // partial global index
+                partial_vocab_size,
+                index_offset);
+            break;
+          }
+          case TASK_ARGMAX_REDUCE: {
+            assert(task_desc.inputs[0].num_dims > 0);
+            int num_partial_tasks = task_desc.inputs[0].dim[task_desc.inputs[0].num_dims - 1];
+            kernel::argmax_reduce_kernel<bfloat16>(
+                task_desc.inputs[0].base_ptr,   // all partial max values
+                task_desc.inputs[1].base_ptr,   // all partial global indices
+                task_desc.outputs[0].base_ptr,  // final global index
+                num_partial_tasks);
             break;
           }
           default: {
