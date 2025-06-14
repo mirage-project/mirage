@@ -10,27 +10,28 @@ output_sizes = [16, 32, 64]
 for output_size in output_sizes:
     print(f"\n=== Testing output_size = {output_size} ===")
     x = torch.randn((1, reduction_size), device="cuda", dtype=torch.bfloat16)
-    w = torch.randn((reduction_size, output_size), device="cuda", dtype=torch.bfloat16)
+    w = torch.randn((output_size, reduction_size), device="cuda", dtype=torch.bfloat16)
     output = torch.empty(1, output_size, device="cuda", dtype=torch.bfloat16)
+    bias = torch.randn((1, output_size), device="cuda", dtype=torch.bfloat16)
 
-    runtime_kernel.linear(x, w, output)
-    torch_out = torch.matmul(x, w)
+    runtime_kernel.linear(x, w, output, True, bias)
+    torch_out = torch.matmul(x, torch.transpose(w, 0, 1)) + bias
 
     print("Ratio (kernel / torch):")
     print(output / torch_out)
 
     # Warm-up
     for _ in range(16):
-        runtime_kernel.linear(x, w, output)
+        runtime_kernel.linear(x, w, output, True, bias)
 
     torch.cuda.synchronize()
     starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(
         enable_timing=True
     )
-    repetitions = 100000
+    repetitions = 1000
     starter.record()
     for rep in range(repetitions):
-        runtime_kernel.linear(x, w, output)
+        runtime_kernel.linear(x, w, output, True, bias)
     ender.record()
     torch.cuda.synchronize()
     total_time = starter.elapsed_time(ender)
@@ -42,6 +43,7 @@ for output_size in output_sizes:
     graph = mi.new_kernel_graph()
     X = graph.new_input(dims=(1, reduction_size), dtype=mi.bfloat16)
     W = graph.new_input(dims=(reduction_size, output_size), dtype=mi.bfloat16)
+    b = graph.new_input(dims=(1, output_size), dtype=mi.bfloat16)
     tb_graph = mi.new_threadblock_graph(
         grid_dim=(1, 1, 1),
         block_dim=(128, 1, 1),
@@ -54,13 +56,12 @@ for output_size in output_sizes:
     tAccMat = tb_graph.forloop_accum(tMat)
     tb_graph.new_output(stensor=tAccMat, output_map=(-1, -1, -1))
     O = graph.customized([X, W], tb_graph)
+    O[0] = graph.add(O[0], b)
     graph.mark_output(O[0])
 
-    input_tensors = [x, w]
-    input_strides = [tensor.stride() for tensor in input_tensors]
-    p = mi.generate_cuda_program(
-        graph.cygraph, target_cc=80, input_strides=input_strides
-    )
+    wt = torch.transpose(w, 0, 1).contiguous()
+
+    input_tensors = [x, wt, bias]
 
     for _ in range(16):
         outputs = graph(inputs=input_tensors)

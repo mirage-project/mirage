@@ -168,8 +168,8 @@ __device__ __forceinline__ bool prepare_next_batch(RuntimeConfig config) {
   int step = config.step[0];
   // printf("step = %d\n", step);
   config.step[0] = step + 1;
-  return step + 1 <= 50;
-  // return false;
+  // return step + 1 <= 50;
+  return false;
 }
 
 __device__ __forceinline__ int get_rand_sched_id(size_t event_index,
@@ -434,14 +434,14 @@ __global__ void persistent_kernel(RuntimeConfig config) {
                 task_desc.inputs[2].base_ptr,
                 task_desc.outputs[0].base_ptr,
                 config.step[0] /*seq_len*/,
-                false,
-                false,
+                true,
+                true,
                 task_desc.inputs[3].base_ptr,
                 task_desc.inputs[4].base_ptr,
                 task_desc.inputs[5].base_ptr,
                 task_desc.inputs[6].base_ptr,
-                0.0f /*q_eps*/,
-                0.0f /*k_eps*/);
+                1e-6f /*q_eps*/,
+                1e-6f /*k_eps*/);
             break;
           }
           case TASK_ATTENTION_2: {
@@ -485,10 +485,12 @@ __global__ void persistent_kernel(RuntimeConfig config) {
             break;
           }
           case TASK_MATMUL: {
-            kernel::linear_kernel<bfloat16, 1, 64, 4096>(
+            kernel::linear_kernel<bfloat16, 1, 64, 4096, 6144>(
                 task_desc.inputs[0].base_ptr,
                 task_desc.inputs[1].base_ptr,
-                task_desc.outputs[0].base_ptr);
+                task_desc.outputs[0].base_ptr,
+                true,
+                task_desc.inputs[2].base_ptr);
             break;
           }
           case TASK_ARGMAX: {
