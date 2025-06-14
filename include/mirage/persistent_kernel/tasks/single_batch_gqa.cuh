@@ -280,10 +280,6 @@ __device__ __forceinline__ void
       T *src_ptr_A = is_valid_A ? q_smem(m_row, m_col) : zero_buffer(0, 0);
       ldsm(src_ptr_A, &a_frag[0]);
       bool is_valid_B = (n_row < curr_iter_len);
-      //  if(is_valid_B){
-      //   printf("thread %d, n_row %d, n_col %d\n", threadIdx.x, n_row, n_col,
-      //   );
-      //  }
       T *src_ptr_B =
           is_valid_B ? k_cache_smem(n_row, n_col) : zero_buffer(0, 0);
       ldsm(src_ptr_B, &b_frag[0]);
