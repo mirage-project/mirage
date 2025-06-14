@@ -30,7 +30,7 @@ namespace kernel {
 // kernel Input: 9X128, K_Cache: 4KX128, V_Cache:4KX128
 // Load Q = 8 X 128, K = 1 X 128, V = 1 X 128
 // load K into K_Cache, V into V_cache
-template <typename T, int NUM_Q_HEADS>
+template <typename T, int NUM_Q_HEADS, int NUM_KV_HEADS, int HEAD_DIM>
 __device__ __forceinline__ void
     single_batch_decoding_kernel(void const *qkv_ptr,
                                  void *k_cache_ptr,
@@ -48,8 +48,6 @@ __device__ __forceinline__ void
   constexpr int chunk_size = 16 / sizeof(T);
   constexpr size_t MAX_SEQ_LEN = 512;
   constexpr size_t KV_CHUNK_SIZE = 64;
-  constexpr int NUM_KV_HEADS = 1;
-  constexpr int HEAD_DIM = 128;
   // const float sm_scale = (1.f / sqrt(128.f)) * 1.44269504088896340736f;
 
   int warp_idx = warp_id();
@@ -72,8 +70,8 @@ __device__ __forceinline__ void
   dmem_row_const<T, NUM_Q_HEADS, 128, 128> q_dmem(d_q);
   dmem_row_const<T, 1, 128, 128> k_dmem(d_k);
   dmem_row_const<T, 1, 128, 128> v_dmem(d_v);
-  dmem_row<T, MAX_SEQ_LEN, 128, 1024> k_cache_dmem(d_k_cache);
-  dmem_row<T, MAX_SEQ_LEN, 128, 1024> v_cache_dmem(d_v_cache);
+  dmem_row<T, MAX_SEQ_LEN, 128, 128> k_cache_dmem(d_k_cache);
+  dmem_row<T, MAX_SEQ_LEN, 128, 128> v_cache_dmem(d_v_cache);
   dmem_row<T, NUM_Q_HEADS, 128, 128> output_dmem(d_output);
   extern __shared__ char smem[];
 
@@ -97,8 +95,6 @@ __device__ __forceinline__ void
   float *qnorm_sum = (float *)(smem + 84864);
   float *knorm_sum = (float *)(smem + 84880);
   // define the swizzle mode
-
-  extern __shared__ float warp_reduce_smem[4][32][2];
 
   // zero buffer
   smem_row<T, 1, 1, 1, 1, 8, 8> zero_buffer(zero_buf);
@@ -150,7 +146,6 @@ __device__ __forceinline__ void
       o[n][frag_idx] = 0.0f;
     }
   }
-  float d_local = 1.f;
   float d_sum = 1.f;
   float m = -inf;
 
@@ -290,6 +285,7 @@ __device__ __forceinline__ void
       ldsm(src_ptr_B, &b_frag[0]);
       mma_m16n16k16_bf16bf16bf32(s_frag, a_frag, b_frag, s_frag);
     }
+    __syncthreads();
 
     // update flashattention
     float m_prev = m;
@@ -312,19 +308,22 @@ __device__ __forceinline__ void
     m = max(m, shfl_xor_sync(m, 0x1));
 
     // update m, d, o
-    // float o_scale = ptx_exp2(m_prev * sm_scale - m * sm_scale);
-    float o_scale = ptx_exp2(m_prev - m);
-    d_local *= o_scale;
+    // float o_scale = exp(m_prev * sm_scale - m * sm_scale);
+    float o_scale = exp(m_prev - m);
+    float d_local = 0.f;
+    d_sum *= o_scale;
+
 #pragma unroll
     for (int i = 0; i < 2; ++i) {
 #pragma unroll
       for (int j = 0; j < 2; ++j) {
         int idx = i * 4 + j;
-        // s_frag[idx] = ptx_exp2(s_frag[idx] * sm_scale - m * sm_scale);
-        s_frag[idx] = ptx_exp2(s_frag[idx] - m);
+        // s_frag[idx] = exp(s_frag[idx] * sm_scale - m * sm_scale);
+        s_frag[idx] = exp(s_frag[idx] - m);
         d_local += s_frag[idx];
       }
     }
+
 // update o
 #pragma unroll
     for (int n = 0; n < 8; ++n) {
@@ -335,9 +334,9 @@ __device__ __forceinline__ void
     }
 
     // sum the d across 4threads
-    d_sum = d_local;
-    d_sum += shfl_xor_sync(d_sum, 0X1);
-    d_sum += shfl_xor_sync(d_sum, 0X2);
+    d_local += shfl_xor_sync(d_local, 0X1);
+    d_local += shfl_xor_sync(d_local, 0X2);
+    d_sum += d_local;
     // m *= sm_scale;
 
     // //QK^T * V
@@ -352,48 +351,7 @@ __device__ __forceinline__ void
           is_valid_C ? v_cache_smem(v_row, v_col) : zero_buffer(0, 0);
       ldsm_t(src_ptr_C, v_frag);
       mma_m16n16k16_bf16bf16bf32(o[n], o_frag, v_frag, o[n]);
-
-      // write the result to osmem, index is 0, 1, 4, 5
-      for (int i = 0; i < 2; i++) {
-        o_smem[threadIdx.x * 32 + n * 4 + i * 2] = o[n][i * 4];
-        o_smem[threadIdx.x * 32 + n * 4 + i * 2 + 1] = o[n][i * 4 + 1];
-      }
     }
-
-    d_smem[threadIdx.x] = d_sum;
-    max_smem[threadIdx.x] = m;
-    __syncthreads();
-    m = -inf;
-    d_sum = 1.f;
-    // update flashattention metadata across threads
-    //  sotre o back to smem and divide by d, 16X16X8X4 -> 16X128 -> 7X128
-    if (warp_idx == 0) {
-#pragma unroll
-      for (uint32_t tidx = 0; tidx < 4; tidx++) {
-        // head idx is idx in warp / 4
-        int shmem_idx = (idx_in_warp / 4) * 4 + tidx * 32 + (idx_in_warp % 4);
-        float other_m = max_smem[shmem_idx];
-        float other_d = d_smem[shmem_idx];
-        // update o,m,d across threads
-        float m_prev = m, d_prev = d_sum;
-        m = max(m_prev, other_m);
-        d_sum = d_prev * ptx_exp2(m_prev - m) + other_d * ptx_exp2(other_m - m);
-#pragma unroll
-        for (uint32_t n = 0; n < 8; n++) {
-#pragma unroll
-          for (uint32_t frag_idx = 0; frag_idx < 2; frag_idx++) {
-            float o_new1 = o_smem[shmem_idx * 32 + n * 4 + frag_idx * 2];
-            float o_new2 = o_smem[shmem_idx * 32 + n * 4 + frag_idx * 2 + 1];
-            o[n][frag_idx * 4] = o[n][frag_idx * 4] * ptx_exp2(m_prev - m) +
-                                 o_new1 * ptx_exp2(other_m - m);
-            o[n][frag_idx * 4 + 1] =
-                o[n][frag_idx * 4 + 1] * ptx_exp2(m_prev - m) +
-                o_new2 * ptx_exp2(other_m - m);
-          }
-        }
-      }
-    }
-
     __syncthreads();
 
     if (kv_idx != num_iterations) {
@@ -403,8 +361,55 @@ __device__ __forceinline__ void
     }
   }
 
-  // print each head
+  
 
+  for (int n = 0; n < 8; n++) {
+    // write the result to osmem, index is 0, 1, 4, 5
+    for (int i = 0; i < 2; i++) {
+      o_smem[threadIdx.x * 32 + n * 4 + i * 2] = o[n][i * 4];
+      o_smem[threadIdx.x * 32 + n * 4 + i * 2 + 1] = o[n][i * 4 + 1];
+    }
+  }
+
+  d_smem[threadIdx.x] = d_sum;
+  max_smem[threadIdx.x] = m;
+  __syncthreads();
+  m = -inf;
+  d_sum = 1.f;
+  // update flashattention metadata across threads
+  //  sotre o back to smem and divide by d, 16X16X8X4 -> 16X128 -> 7X128
+  if (warp_idx == 0) {
+#pragma unroll
+    for (uint32_t tidx = 0; tidx < 4; tidx++) {
+      // head idx is idx in warp / 4
+      int shmem_idx = (idx_in_warp / 4) * 4 + tidx * 32 + (idx_in_warp % 4);
+      float other_m = max_smem[shmem_idx];
+      float other_d = d_smem[shmem_idx];
+      // update o,m,d across threads
+      float m_prev = m, d_prev = d_sum;
+      m = max(m_prev, other_m);
+      d_sum = d_prev * exp(m_prev - m) + other_d * exp(other_m - m);
+      if (warp_idx == 0) {
+        // reduction on K
+#pragma unroll
+        for (uint32_t n = 0; n < 8; n++) {
+#pragma unroll
+          for (uint32_t frag_idx = 0; frag_idx < 2; frag_idx++) {
+            float o_new1 = o_smem[shmem_idx * 32 + n * 4 + frag_idx * 2];
+            float o_new2 = o_smem[shmem_idx * 32 + n * 4 + frag_idx * 2 + 1];
+            o[n][frag_idx * 4] = o[n][frag_idx * 4] * exp(m_prev - m) +
+                                 o_new1 * exp(other_m - m);
+            o[n][frag_idx * 4 + 1] = o[n][frag_idx * 4 + 1] * exp(m_prev - m) +
+                                     o_new2 * exp(other_m - m);
+          }
+        }
+      }
+    }
+  }
+  __syncthreads();
+
+  // update the o and m and d on other warps
+  // print each head
 #pragma unroll
   for (int n = 0; n < 8; n++) {
 #pragma unroll
