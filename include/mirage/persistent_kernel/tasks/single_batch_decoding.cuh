@@ -30,7 +30,11 @@ namespace kernel {
 // kernel Input: 9X128, K_Cache: 4KX128, V_Cache:4KX128
 // Load Q = 8 X 128, K = 1 X 128, V = 1 X 128
 // load K into K_Cache, V into V_cache
-template <typename T, int NUM_Q_HEADS, int NUM_KV_HEADS, int HEAD_DIM>
+template <typename T,
+          int NUM_Q_HEADS,
+          int NUM_KV_HEADS,
+          int HEAD_DIM,
+          int WEIGHT_STRIDE>
 __device__ __forceinline__ void
     single_batch_decoding_kernel(void const *qkv_ptr,
                                  void *k_cache_ptr,
@@ -48,7 +52,9 @@ __device__ __forceinline__ void
   constexpr int chunk_size = 16 / sizeof(T);
   constexpr size_t MAX_SEQ_LEN = 512;
   constexpr size_t KV_CHUNK_SIZE = 64;
-  // const float sm_scale = (1.f / sqrt(128.f)) * 1.44269504088896340736f;
+  // const float sm_scale = (1.f / sqrt((float)HEAD_DIM))
+  // * 1.44269504088896340736f;
+  float const sm_scale = 1.f;
 
   int warp_idx = warp_id();
   int idx_in_warp = threadIdx.x % 32;
@@ -70,8 +76,8 @@ __device__ __forceinline__ void
   dmem_row_const<T, NUM_Q_HEADS, 128, 128> q_dmem(d_q);
   dmem_row_const<T, 1, 128, 128> k_dmem(d_k);
   dmem_row_const<T, 1, 128, 128> v_dmem(d_v);
-  dmem_row<T, MAX_SEQ_LEN, 128, 128> k_cache_dmem(d_k_cache);
-  dmem_row<T, MAX_SEQ_LEN, 128, 128> v_cache_dmem(d_v_cache);
+  dmem_row<T, MAX_SEQ_LEN, 128, WEIGHT_STRIDE> k_cache_dmem(d_k_cache);
+  dmem_row<T, MAX_SEQ_LEN, 128, WEIGHT_STRIDE> v_cache_dmem(d_v_cache);
   dmem_row<T, NUM_Q_HEADS, 128, 128> output_dmem(d_output);
   extern __shared__ char smem[];
 
@@ -239,8 +245,8 @@ __device__ __forceinline__ void
           q_eps,
           0,
           rotary_emd,
-          static_cast<T const *>(cos_ptr) + seq_len * HEAD_DIM,
-          static_cast<T const *>(sin_ptr) + seq_len * HEAD_DIM);
+          static_cast<T const *>(cos_ptr),
+          static_cast<T const *>(sin_ptr));
     }
 
     // knorm
@@ -252,8 +258,8 @@ __device__ __forceinline__ void
           k_eps,
           curr_iter_len - 1,
           rotary_emd,
-          static_cast<T const *>(cos_ptr) + seq_len * HEAD_DIM,
-          static_cast<T const *>(sin_ptr) + seq_len * HEAD_DIM);
+          static_cast<T const *>(cos_ptr),
+          static_cast<T const *>(sin_ptr));
     }
     __syncthreads();
 
@@ -297,6 +303,7 @@ __device__ __forceinline__ void
       for (int j = 0; j < 2; ++j) {
         // update M, apply mask when length doesn't match the padding length 16
         int idx = i * 4 + j;
+        // int row = idx_in_warp / 4;
         int col = (idx_in_warp % 4) * 2 + i * 8 + j + warp_idx * 16;
         s_frag[idx] = (col < curr_iter_len) ? s_frag[idx] : -inf;
         m = max(s_frag[idx], m);
@@ -308,8 +315,8 @@ __device__ __forceinline__ void
     m = max(m, shfl_xor_sync(m, 0x1));
 
     // update m, d, o
-    // float o_scale = exp(m_prev * sm_scale - m * sm_scale);
-    float o_scale = exp(m_prev - m);
+    // float o_scale = expf(m_prev * sm_scale - m * sm_scale);
+    float o_scale = expf(m_prev * sm_scale - m * sm_scale);
     float d_local = 0.f;
     d_sum *= o_scale;
 
@@ -318,8 +325,13 @@ __device__ __forceinline__ void
 #pragma unroll
       for (int j = 0; j < 2; ++j) {
         int idx = i * 4 + j;
-        // s_frag[idx] = exp(s_frag[idx] * sm_scale - m * sm_scale);
-        s_frag[idx] = exp(s_frag[idx] - m);
+        // s_frag[idx] = expf(s_frag[idx] * sm_scale - m * sm_scale);
+        int col = (idx_in_warp % 4) * 2 + i * 8 + j + warp_idx * 16;
+        int row = idx_in_warp / 4;
+        // 0 means exp(-inf)
+        s_frag[idx] = ((col < curr_iter_len) && (row < NUM_Q_HEADS))
+                          ? expf(s_frag[idx] * sm_scale - m * sm_scale)
+                          : 0;
         d_local += s_frag[idx];
       }
     }
@@ -361,8 +373,6 @@ __device__ __forceinline__ void
     }
   }
 
-  
-
   for (int n = 0; n < 8; n++) {
     // write the result to osmem, index is 0, 1, 4, 5
     for (int i = 0; i < 2; i++) {
@@ -371,6 +381,10 @@ __device__ __forceinline__ void
     }
   }
 
+  // norm m
+  if (m != -inf) {
+    m *= sm_scale;
+  }
   d_smem[threadIdx.x] = d_sum;
   max_smem[threadIdx.x] = m;
   __syncthreads();
@@ -388,7 +402,7 @@ __device__ __forceinline__ void
       // update o,m,d across threads
       float m_prev = m, d_prev = d_sum;
       m = max(m_prev, other_m);
-      d_sum = d_prev * exp(m_prev - m) + other_d * exp(other_m - m);
+      d_sum = d_prev * expf(m_prev - m) + other_d * expf(other_m - m);
       if (warp_idx == 0) {
         // reduction on K
 #pragma unroll
@@ -397,10 +411,10 @@ __device__ __forceinline__ void
           for (uint32_t frag_idx = 0; frag_idx < 2; frag_idx++) {
             float o_new1 = o_smem[shmem_idx * 32 + n * 4 + frag_idx * 2];
             float o_new2 = o_smem[shmem_idx * 32 + n * 4 + frag_idx * 2 + 1];
-            o[n][frag_idx * 4] = o[n][frag_idx * 4] * exp(m_prev - m) +
-                                 o_new1 * exp(other_m - m);
-            o[n][frag_idx * 4 + 1] = o[n][frag_idx * 4 + 1] * exp(m_prev - m) +
-                                     o_new2 * exp(other_m - m);
+            o[n][frag_idx * 4] = o[n][frag_idx * 4] * expf(m_prev - m) +
+                                 o_new1 * expf(other_m - m);
+            o[n][frag_idx * 4 + 1] = o[n][frag_idx * 4 + 1] * expf(m_prev - m) +
+                                     o_new2 * expf(other_m - m);
           }
         }
       }

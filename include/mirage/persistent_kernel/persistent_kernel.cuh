@@ -428,14 +428,14 @@ __global__ void persistent_kernel(RuntimeConfig config) {
             break;
           }
           case TASK_ATTENTION_1: {
-            kernel::single_batch_decoding_kernel<bfloat16, 4>(
+            kernel::single_batch_decoding_kernel<bfloat16, 4, 1, 128, 1024>(
                 task_desc.inputs[0].base_ptr,
                 task_desc.inputs[1].base_ptr,
                 task_desc.inputs[2].base_ptr,
                 task_desc.outputs[0].base_ptr,
                 config.step[0] /*seq_len*/,
-                false,
-                false,
+                true,
+                true,
                 task_desc.inputs[3].base_ptr,
                 task_desc.inputs[4].base_ptr,
                 task_desc.inputs[5].base_ptr,
