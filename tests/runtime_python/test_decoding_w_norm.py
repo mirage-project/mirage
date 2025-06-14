@@ -94,11 +94,6 @@ for i in range(512):
 
     cos = torch.randn((1, head_dim), device=device, dtype=dtype)
     sin = torch.randn((1, head_dim), device=device, dtype=dtype)
-    # qnorm_weight = torch.full((1, head_dim), 1,device=device, dtype=dtype)
-    # knorm_weight = torch.full((1, head_dim), 1,device=device, dtype=dtype)
-
-    # cos = torch.full((1, head_dim), 1,device=device, dtype=dtype)
-    # sin = torch.full((1, head_dim), 1, device=device, dtype=dtype)
 
 
 
@@ -113,7 +108,3 @@ for i in range(512):
     runtime_kernel.single_batch_decoding(qkv_mirage, k_cache_mirage, v_cache_mirage, mirage_output, seq_len, True, True, qnorm_weight, knorm_weight, cos, sin, eps, eps)
     diff = mirage_output - torch_output
     print("seq_len res:", seq_len, "min:", diff.min().item(), "max:", diff.max().item())
-
-    # if seq_len == 512:
-    #     print(torch_output)
-    #     print(mirage_output)
