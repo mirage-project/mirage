@@ -21,10 +21,11 @@ template <typename T>
 __device__ __forceinline__ void warp_reduce_max_idx(T &val, long long &idx) {
 #pragma unroll
   for (int offset = 16; offset > 0; offset /= 2) {
-    T tmp = __shfl_down_sync(0xffffffff, val, offset);
+    float tmp = __shfl_down_sync(0xffffffff, (float)val, offset);
+    T other_val = (T) tmp;
     long long other_idx = __shfl_down_sync(0xffffffff, idx, offset);
-    if (tmp > val) {
-      val = tmp;
+    if (other_val > val) {
+      val = other_val;
       idx = other_idx;
     }
   }
@@ -89,7 +90,7 @@ __device__ __forceinline__ void argmax_partial_kernel(
     }
   }
 
-  block_reduce_max_idx(local_max, local_idx);
+  block_reduce_max_idx<T>(local_max, local_idx);
 
   if (tidx == 0) {
     output_val[0] = local_max;
