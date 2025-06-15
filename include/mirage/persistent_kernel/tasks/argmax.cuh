@@ -66,13 +66,11 @@ __device__ __forceinline__ void block_reduce_max_idx(T &val, long long &idx) {
   }
 }
 
-template <typename T>
+template <typename T, int CHUNK_SIZE>
 __device__ __forceinline__ void argmax_partial_kernel(
     void const *__restrict__ input_ptr,
     void *__restrict__ output_val_ptr,
-    void *__restrict__ output_idx_ptr,
-    int partial_vocab_size,
-    long long index_offset) {
+    void *__restrict__ output_idx_ptr) {
   T const *__restrict__ input = static_cast<T const *>(input_ptr);
   T *__restrict__ output_val = static_cast<T *>(output_val_ptr);
   long long *__restrict__ output_idx =
@@ -83,7 +81,7 @@ __device__ __forceinline__ void argmax_partial_kernel(
   long long local_idx = -1;
 
   // TODO: try vectorize
-  for (int i = tidx; i < partial_vocab_size; i += blockDim.x) {
+  for (int i = tidx; i < CHUNK_SIZE; i += blockDim.x) {
     T val = input[i];
     if (val > local_max) {
       local_max = val;
@@ -95,16 +93,15 @@ __device__ __forceinline__ void argmax_partial_kernel(
 
   if (tidx == 0) {
     output_val[0] = local_max;
-    output_idx[0] = local_idx + index_offset;
+    output_idx[0] = local_idx;
   }
 }
 
-template <typename T>
+template <typename T, int CHUNK_SIZE, int NUM_PARTIAL_TASKS>
 __device__ __forceinline__ void
 argmax_reduce_kernel(void const *__restrict__ input_val_ptr,
                      void const *__restrict__ input_idx_ptr,
-                     void *__restrict__ final_output_ptr,
-                     int num_partial_tasks) {
+                     void *__restrict__ final_output_ptr) {
   T const *__restrict__ partial_vals =
       static_cast<T const *>(input_val_ptr);
   long long const *__restrict__ partial_idxs =
@@ -114,19 +111,28 @@ argmax_reduce_kernel(void const *__restrict__ input_val_ptr,
 
   int tidx = threadIdx.x;
   T local_max = T(-inf);
-  long long local_idx = -1;
+  // Pack (chunk_index, relative_index) into a single 64-bit integer
+  long long local_packed_idx = -1; 
 
-  for (int i = tidx; i < num_partial_tasks; i += blockDim.x) {
-    if (partial_vals[i] > local_max) {
-      local_max = partial_vals[i];
-      local_idx = partial_idxs[i];
+  for (int i = tidx; i < NUM_PARTIAL_TASKS; i += blockDim.x) {
+    T current_val = partial_vals[i];
+    if (current_val > local_max) {
+      local_max = current_val;
+      // Higher 32 bits for chunk_index (i), lower 32 for relative_index
+      local_packed_idx = ((long long)i << 32) | partial_idxs[i];
     }
   }
 
-  block_reduce_max_idx(local_max, local_idx);
+  block_reduce_max_idx(local_max, local_packed_idx);
 
   if (tidx == 0) {
-    final_output[0] = local_idx;
+    if (local_packed_idx != -1) {
+      long long winning_chunk_idx = local_packed_idx >> 32;
+      long long winning_relative_idx = local_packed_idx & 0xFFFFFFFF;
+      final_output[0] = winning_chunk_idx * CHUNK_SIZE + winning_relative_idx;
+    } else {
+      final_output[0] = -1;
+    }
   }
 }
 
