@@ -290,9 +290,13 @@ CustomOPTranspileResult
         nvshmem_as_param.push_back(fmt("$ const* __restrict__ alltoall_buf_$", 
                                      get_datatype_str(output_op->dtensor.data_type), 
                                      output_op->dtensor.guid));
+        nvshmem_as_param.push_back(fmt("uint64_t* __restrict__ alltoall_signal_$", 
+                                     output_op->dtensor.guid));
       } else if (output_op->epilogue == type::TBEpilogueType::TB_EPILOGUE_REDUCESCATTER) {
         nvshmem_as_param.push_back(fmt("$ * __restrict__ reduce_scatter_buf_$", 
                                      get_datatype_str(output_op->dtensor.data_type), 
+                                     output_op->dtensor.guid));
+        nvshmem_as_param.push_back(fmt("uint64_t* __restrict__ reduce_scatter_signal_$", 
                                      output_op->dtensor.guid));
       }
     }
@@ -1185,7 +1189,13 @@ CustomOPTranspileResult
               code.e("using comm_executor = tb::CommExecutor<$, DTensor$TileLayout, false>;", 
                      get_datatype_str(dtensor.data_type),
                      dtensor.guid);
-              code.e("comm_executor::send(recv_ptr, send_ptr, dst_rank, NULL);");
+              if (profiling) {
+                code.e("comm_executor::send(recv_ptr, send_ptr, alltoall_signal_$, dst_rank, npes, profiler_buffer);",
+                      dtensor.guid);
+              } else {
+                code.e("comm_executor::send(recv_ptr, send_ptr, alltoall_signal_$, dst_rank, npes);",
+                      dtensor.guid);
+              }
 
               //code.e("nvshmem_barrier_all();");
               // break;
@@ -1235,7 +1245,13 @@ CustomOPTranspileResult
               code.e("tb::CommExecutor<$, DTensor$TileLayout, false> comm_executor;", 
                      get_datatype_str(dtensor.data_type),
                      dtensor.guid);
-              code.e("comm_executor.send(recv_ptr, send_ptr, dst_rank, NULL);");
+              if (profiling) {
+                code.e("comm_executor.send(recv_ptr, send_ptr, reduce_scatter_signal_$, dst_rank, npes, profiler_buffer);",
+                      dtensor.guid);
+              } else {
+                code.e("comm_executor.send(recv_ptr, send_ptr, reduce_scatter_signal_$, dst_rank, npes);",
+                      dtensor.guid);
+              }
             }
             //TODO (linsj20)
           }

@@ -91,7 +91,13 @@ static PyObject* allocate_comm_buffers(PyObject* self, PyObject* Py_UNUSED(ignor
     if (!buffer_list) return NULL;
     
     for (size_t i = 0; i < sizes.size(); i++) {
-        void* ptr = nvshmem_malloc(sizes[i]);
+        void* ptr;
+        if (sizes[i] <= 1024) {
+            assert(sizes[i] % sizeof(uint64_t) == 0);
+            ptr = nvshmem_calloc(sizes[i] / sizeof(uint64_t), sizeof(uint64_t));
+        } else {
+            ptr = nvshmem_malloc(sizes[i]);
+        }
         if (!ptr) {
             // Cleanup previously allocated buffers
             for (size_t j = 0; j < i; j++) {

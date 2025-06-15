@@ -8,6 +8,9 @@
 using namespace cute;
 
 #include "utils.h"
+#include "profiler.h"
+#include "mpi.h"
+
 #include <nvshmem.h>
 #include <nvshmemx.h>
 #include <cstdio>
@@ -20,8 +23,12 @@ public:
   CUTE_DEVICE
   static void send(T *__restrict__ recv_ptr,
                   T *__restrict__ send_ptr,
+                  uint64_t * signal,
                   int peer,
-                  uint64_t * signal) {
+                  int npes,
+                  uint64_t *profiler_buffer=NULL) {
+    //PROFILER_CLOSURE_PARAMS_DECL
+    //PROFILER_INIT(profiler_buffer, 0, 2, (threadIdx.x % 128 == 0));
     // Call in with a thread block
     // Sending a tile to a peer and set the corresponding signal
     // Tile may not be consecutive in physical memory
@@ -47,40 +54,47 @@ public:
     // printf("executor_num: %d, chunks_per_executor: %d, executor_id: %d\n", executor_num, chunks_per_executor, executor_id);
     //using comm_executor = typename CommWarpExecutor<T, sync> ? mode == 0 : typename CommBlockExecutor<T, sync>;
 
-    for (int chunk_idx = executor_id * chunks_per_executor;
-       chunk_idx < min((executor_id+1) * chunks_per_executor, num_chunks);
-       ++chunk_idx) {
+    int end_chunk_idx = min((executor_id+1) * chunks_per_executor, num_chunks);
+    for (int chunk_idx = executor_id * chunks_per_executor; chunk_idx < end_chunk_idx; ++chunk_idx) {
+      //PROFILER_EVENT_START(2, static_cast<uint32_t>(0));
       int idx = chunk_idx * contiguous_chunk_size;
       auto chunk_coord = cute::idx2crd(idx, tile_layout_standalone);
 
       int offset = cute::crd2idx(chunk_coord, tile_layout);
+      //PROFILER_EVENT_END(2, static_cast<uint32_t>(0));
 
+      //PROFILER_EVENT_START(2, static_cast<uint32_t>(1));
       if (mode == 0) {
-        if (signal != NULL) {
-          nvshmemx_putmem_signal_nbi_warp(recv_ptr + offset, send_ptr + offset, contiguous_chunk_size * sizeof(T), signal, 1, NVSHMEM_SIGNAL_SET, peer); 
-        }
-        else {
+        if (signal != NULL && chunk_idx == end_chunk_idx - 1) {
+          nvshmem_fence();
+          nvshmemx_putmem_signal_nbi_warp(recv_ptr + offset, send_ptr + offset, contiguous_chunk_size * sizeof(T), signal, 1, NVSHMEM_SIGNAL_ADD, peer); 
+        } else {
           nvshmemx_putmem_warp(recv_ptr + offset, send_ptr + offset, contiguous_chunk_size * sizeof(T), peer); 
         }
       } else {
-        if (signal != NULL) {
-          nvshmemx_putmem_signal_nbi_block(recv_ptr + offset, send_ptr + offset, contiguous_chunk_size * sizeof(T), signal, 1, NVSHMEM_SIGNAL_SET, peer); 
-        }
-        else {
-          nvshmemx_putmem_block(recv_ptr + offset, send_ptr + offset, contiguous_chunk_size * sizeof(T), peer); 
+        if (signal != NULL && chunk_idx == end_chunk_idx - 1) {
+          nvshmem_fence();
+          nvshmemx_putmem_signal_nbi_block(recv_ptr + offset, send_ptr + offset, contiguous_chunk_size * sizeof(T), signal, 1, NVSHMEM_SIGNAL_ADD, peer); 
+        } else {
+          nvshmemx_putmem_nbi_block(recv_ptr + offset, send_ptr + offset, contiguous_chunk_size * sizeof(T), peer); 
         }
       }
-
-      // Add other type specializations as needed
-
-      if constexpr (sync) {
-        if (threadIdx.x == 0) {
-          nvshmem_signal_wait_until(signal, NVSHMEM_CMP_NE, 0);
-          *signal = 0;
-        }
-        __syncthreads();
-      }
+      //PROFILER_EVENT_END(2, static_cast<uint32_t>(1));
     }
+    if (false && threadIdx.x == 0 && threadIdx.y == 0 && threadIdx.z == 0 && signal != NULL) {
+      nvshmem_fence();
+      nvshmemx_signal_op(signal, 1, NVSHMEM_SIGNAL_ADD, peer);
+    }
+
+    //PROFILER_EVENT_START(2, static_cast<uint32_t>(2));
+    if constexpr (sync) {
+      if (threadIdx.x == 0) {
+        nvshmem_signal_wait_until(signal, NVSHMEM_CMP_EQ, npes * 8);
+        *signal = 0;
+      }
+      __syncthreads();
+    }
+    //PROFILER_EVENT_END(2, static_cast<uint32_t>(2));
   }
 
 private:

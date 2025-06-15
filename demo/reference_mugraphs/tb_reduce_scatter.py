@@ -40,8 +40,7 @@ if __name__ == "__main__":
         torch.randn(512, 128, dtype=torch.float16, device=f'cuda:{rank}'),
         torch.randn(128, 256, dtype=torch.float16, device=f'cuda:{rank}'),
     ]
-
-    outputs = graph(inputs=input_tensors, rank=rank, save_codes=save_codes, profiling=True)
+    outputs = graph(inputs=input_tensors, rank=rank, save_codes=save_codes, profiling=False)
 
     import torch.distributed as dist
     os.environ['MASTER_ADDR'] = 'localhost'

@@ -616,6 +616,11 @@ TranspileResult Transpiler::transpile_ugraph() {
                       get_datatype_str(dtensor.data_type),
                       comm_buffer_idx);
 
+              comm_buffer_idx = next_comm_buffer_idx++;
+              comm_buffers.e("sizeof(uint64_t),\t// Buffer $", \
+                      comm_buffer_idx);
+              exec.e("uint64_t *alltoall_signal_$ = (uint64_t *)comm_buffers.at($);", \
+                      dtensor.guid, comm_buffer_idx);
               /*
               exec.e("$ *alltoall_buf_$ = ($ *)nvshmem_malloc(sizeof($) * $);", \
                       get_datatype_str(dtensor.data_type),
@@ -626,6 +631,7 @@ TranspileResult Transpiler::transpile_ugraph() {
               */
               nvshmem_to_free.push_back(fmt("alltoall_buf_$", dtensor.guid));
               nvshmem_as_param.push_back(fmt("alltoall_buf_$", dtensor.guid));
+              nvshmem_as_param.push_back(fmt("alltoall_signal_$", dtensor.guid));
             } else if (dtensor.epilogue == type::TBEpilogueType::TB_EPILOGUE_REDUCESCATTER) {
               //TODO: TB reduce_scatter
               //TODO: support multi-dim gpu mesh
@@ -639,6 +645,12 @@ TranspileResult Transpiler::transpile_ugraph() {
                       dtensor.guid,
                       get_datatype_str(dtensor.data_type),
                       comm_buffer_idx);
+
+              comm_buffer_idx = next_comm_buffer_idx++;
+              comm_buffers.e("sizeof(uint64_t),\t// Buffer $", \
+                      comm_buffer_idx);
+              exec.e("uint64_t *reduce_scatter_signal_$ = (uint64_t *)comm_buffers.at($);", \
+                      dtensor.guid, comm_buffer_idx);
               /*
               exec.e("$ *reduce_scatter_buf_$ = ($ *)nvshmem_malloc(sizeof($) * $);", \
                       get_datatype_str(dtensor.data_type),
@@ -649,6 +661,7 @@ TranspileResult Transpiler::transpile_ugraph() {
               */
               nvshmem_to_free.push_back(fmt("reduce_scatter_buf_$", dtensor.guid));
               nvshmem_as_param.push_back(fmt("reduce_scatter_buf_$", dtensor.guid));
+              nvshmem_as_param.push_back(fmt("reduce_scatter_signal_$", dtensor.guid));
             } else if (dtensor.epilogue == type::TBEpilogueType::TB_EPILOGUE_ALLREDUCE) {
               assert(false && "TB allreduce is not supported yet"); 
               //TODO: TB allreduce
@@ -923,7 +936,15 @@ TranspileResult Transpiler::transpile_ugraph() {
           DTensorMeta const &output_meta = dtensor_metas.at(output_guid);
           if (!nvshmem_as_param.empty() && nvshmem_as_param[0].find("alltoall") != string::npos) {
           
-            exec.e("nvshmem_barrier_all();");
+            for (auto& nvshmem_param : nvshmem_as_param) {
+              if (nvshmem_param.find("signal") != std::string::npos) {
+                exec.e("nvshmemx_uint64_wait_until_on_stream($, NVSHMEM_CMP_EQ,  $ * $ * $, stream);",
+                       nvshmem_param,
+                       num_gpus,
+                       bgraph.grid_dim.y,
+                       bgraph.grid_dim.z);
+              }
+            }
             exec.e("cudaMemcpy((void *)output_tensors.at(0), "
                   "(const void *)nvshmem_ptr($, mype), "
                   "$ * sizeof($), "
@@ -955,13 +976,22 @@ TranspileResult Transpiler::transpile_ugraph() {
             auto dims = vector<int>(output_dtensor.dim, output_dtensor.dim + output_dtensor.num_dims);
             //TODO support reduce_scatter on other dims
             dims[0] *= cur_op->bgraph.gpu_dim.x;
+            for (auto& nvshmem_param : nvshmem_as_param) {
+              if (nvshmem_param.find("signal") != std::string::npos) {
+                exec.e("nvshmemx_uint64_wait_until_on_stream($, NVSHMEM_CMP_EQ,  $ * $ * $, stream);",
+                       nvshmem_param,
+                       num_gpus,
+                       bgraph.grid_dim.y,
+                       bgraph.grid_dim.z);
+              }
+            }
             exec.e("using reduction_kernel = kn::ReductionKernel<$, $, $, 1, true>;",
                    get_datatype_str(output_dtensor.data_type),
                    get_cute_layout(dims,
                                    vector<size_t>(output_meta.strides,
                                                   output_meta.strides + output_dtensor.num_dims)),
                    get_cute_layout(output_dtensor, output_meta));
-            exec.e("nvshmem_barrier_all();");
+            // Assuming the first param is the buffer
             if (output_meta.is_output) {
               exec.e("reduction_kernel::run(($*)output_tensors.at($), $);",
                     get_datatype_str(output_dtensor.data_type),
