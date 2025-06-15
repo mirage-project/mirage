@@ -405,21 +405,17 @@ __global__ void persistent_kernel(RuntimeConfig config) {
             break;
           }
           case TASK_ARGMAX_PARTIAL: {
-            kernel::argmax_partial_kernel<bfloat16>(
-                task_desc.inputs[0].base_ptr,   // partial vocab tensor
-                task_desc.outputs[0].base_ptr,  // partial max value
-                task_desc.outputs[1].base_ptr,  // partial global index
-                1600);
+            kernel::argmax_partial_kernel<bfloat16, 1600>(
+                task_desc.inputs[0].base_ptr,  
+                task_desc.outputs[0].base_ptr, 
+                task_desc.outputs[1].base_ptr);
             break;
           }
           case TASK_ARGMAX_REDUCE: {
-            assert(task_desc.inputs[0].num_dims > 0);
-            int num_partial_tasks = task_desc.inputs[0].dim[task_desc.inputs[0].num_dims - 1];
-            kernel::argmax_reduce_kernel<bfloat16>(
-                task_desc.inputs[0].base_ptr,   // all partial max values
-                task_desc.inputs[1].base_ptr,   // all partial global indices
-                task_desc.outputs[0].base_ptr,  // final global index
-                num_partial_tasks);
+            kernel::argmax_reduce_kernel<bfloat16, 1600, 96>(
+                task_desc.inputs[0].base_ptr,  
+                task_desc.inputs[1].base_ptr,  
+                task_desc.outputs[0].base_ptr);
             break;
           }
           default: {
@@ -442,8 +438,8 @@ __global__ void persistent_kernel(RuntimeConfig config) {
           // int count = atomicSub(&config.all_event_counters[event_index], 1);
           EventCounter count =
               custom_atomic_add_u64(&config.all_event_counters[event_index], 1);
-          int num_triggers = config.all_event_num_triggers[event_index];
           if (config.verbose) {
+            int num_triggers = config.all_event_num_triggers[event_index];
             printf("[%d][DONE] worker_id(%d) iter_num(%llu) task_idx(%llu) "
                    "event_id(%llx) "
                    "event_type(local) count(%llu)\n",
