@@ -105,8 +105,8 @@ public:
   using TMemLoadOp = 
       decltype(cutlass::epilogue::collective::detail::sm100_get_tmem_load_op<
           GmemStrideTypeC,
-          float, 
-          float, 
+          T, 
+          T, 
           Shape<Int<32>, Int<128>>,
           FusionOp>()
       );
@@ -118,7 +118,7 @@ public:
   {
     auto cta_mma = get_cta_mma<TiledMMA, ClusterShape_MNK>(blockIdx.x, blockIdx.y);
 
-    Tensor dummy_gC = make_tensor(make_gmem_ptr((float*)nullptr), SmemLayoutC{});
+    Tensor dummy_gC = make_tensor(make_gmem_ptr((T*)nullptr), SmemLayoutC{});
     auto tCgC = cta_mma.partition_C(dummy_gC);
 
     Tensor tCtAcc = cta_mma.make_fragment_C(tCgC);
@@ -128,10 +128,9 @@ public:
   }
 
 
-  
   template<class TmemAccTensor>
   static __device__ __forceinline__
-  void write_tC_to_gC(float *__restrict__ c_ptr,
+  void write_tC_to_gC(T *__restrict__ c_ptr,
                       TmemAccTensor const& tCtAcc,
                          int thread_idx)
   {
@@ -161,7 +160,7 @@ public:
 
     auto tDtAcc = thr_t2r_copy.partition_S(tCtAcc);               // (CpyS, NumCpy_M, NumCpy_N)
     auto tDgD   = thr_t2r_copy.partition_D(tCgD);                 // (CpyD, NumCpy_M, NumCpy_N)
-    auto tDrAcc = make_tensor<float>(shape(tDgD));              // (CpyD, NumCpy_M, NumCpy_N)
+    auto tDrAcc = make_tensor<T>(shape(tDgD));              // (CpyD, NumCpy_M, NumCpy_N)
     // Load TMEM -> RMEM
     copy(tiled_t2r_copy, tDtAcc, tDrAcc);
 

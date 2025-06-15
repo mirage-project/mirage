@@ -48,13 +48,13 @@ initialize_tensor(Tensor& tensor, cute::tuple<int, int> value_range = {-2, 2})
   using DataType = typename Tensor::element_type;
   auto [min, max] = value_range;
   for (int i = 0; i < cute::size(tensor); i++) {
-    tensor(i) = DataType(int((max-min)*(rand() / double(RAND_MAX)) + min));
-    // tensor(i) = DataType(1);
+    // tensor(i) = DataType(int((max-min)*(rand() / double(RAND_MAX)) + min));
+    tensor(i) = DataType(1);
   }
 }
-
+// 32 warp, 128 warp group
 template <class TMA_10000003, class TMA_10000004>
-__global__ void  __launch_bounds__(384) custom_kernel_0(CUTE_GRID_CONSTANT TMA_10000003 const tma_10000003, CUTE_GRID_CONSTANT TMA_10000004 const tma_10000004,  float* dtensor10000005_ptr, half_t const* dtensor10000003_ptr, half_t const* dtensor10000004_ptr) {
+__global__ void  __launch_bounds__(384) custom_kernel_0(CUTE_GRID_CONSTANT TMA_10000003 const tma_10000003, CUTE_GRID_CONSTANT TMA_10000004 const tma_10000004,  half_t* dtensor10000005_ptr, half_t const* dtensor10000003_ptr, half_t const* dtensor10000004_ptr) {
 // block x, y is executing here
 // if (threadIdx.x == 0) {
 //     printf("block x, y is executing here, blockIdx.x is %d, blockIdx.y is %d\n", blockIdx.x, blockIdx.y);
@@ -66,13 +66,8 @@ static constexpr int CONSUMER_NUM_THREADS = 256;
 // UMMA part
 // zy: put cluster shape, tiled_mma, mma_tiler here
 auto cluster_shape = make_shape(Int<4>{}, Int<4>{}, Int<1>{});
-auto tiled_mma = cutlass::gemm::collective::detail::sm100_make_2sm_trivial_tiled_mma<half_t, half_t, float, Shape<Int<256>, Int<256>>, decltype(cluster_shape), UMMA::Major::K, UMMA::Major::K>();
+auto tiled_mma = cutlass::gemm::collective::detail::sm100_make_2sm_trivial_tiled_mma<half_t, half_t, half_t, Shape<Int<256>, Int<256>>, decltype(cluster_shape), UMMA::Major::K, UMMA::Major::K>();
 auto mma_tiler = make_shape(tile_size<0>(tiled_mma), tile_size<1>(tiled_mma), tile_size<2>(tiled_mma)*_4{});
-// auto tiled_mma = make_tiled_mma(SM100_MMA_F16BF16_2x1SM_SS<half_t, half_t, float, 256, 256, UMMA::Major::K, UMMA::Major::K>{});
-
-
-// auto cluster_shape = make_shape(Int<4>{}, Int<4>{}, Int<1>{});
-uint32_t elect_one_thr  = cute::elect_one_sync();
 uint32_t elect_one_warp = (threadIdx.x / 32 == 0); 
 Layout cluster_layout_vmnk = tiled_divide(make_layout(cluster_shape), make_tile(typename decltype(tiled_mma)::AtomThrID{}));
 // if (threadIdx.x == 0 && blockIdx.x == 0 && blockIdx.y == 0) {
@@ -106,11 +101,15 @@ if (elect_one_warp) {
 }
 __syncthreads();
 
-float *stensor20000015_ptr = (float*)(buf + 128);
+half_t *stensor20000015_ptr = (half_t*)(buf + 128);
 half_t *stensor20000013_ptr = (half_t*)(buf + 65664);
 half_t *stensor20000012_ptr = (half_t*)(buf + 128);
 
+constexpr size_t MMA_BARRIER_ALIGNMENT = 16;
+constexpr size_t CURRENT_SMEM_USAGE_WITH_BARRIER = ALIGNED_TMEM_OFFSET + 4;
+constexpr size_t ALIGNED_TMEM_OFFSET_WITH_BARRIER = ((CURRENT_SMEM_USAGE_WITH_BARRIER + MMA_BARRIER_ALIGNMENT - 1) / MMA_BARRIER_ALIGNMENT) * MMA_BARRIER_ALIGNMENT;
 
+uint64_t *mma_barrier = (uint64_t*)(buf + ALIGNED_TMEM_OFFSET_WITH_BARRIER);
 
 // if (threadIdx.x == 0) {
 //     printf("block x, y is executing here, blockIdx.x is %d, blockIdx.y is %d\n", blockIdx.x, blockIdx.y);
@@ -121,7 +120,7 @@ using DTensor10000003TileLayout = Layout<Shape<Int<64>, Int<128>>, Stride<Int<1>
 // zy: add atom thr shape based on tiled mma
 using AtomThrShapeMNK = Shape<decltype(shape<0>(typename decltype(tiled_mma)::ThrLayoutVMNK{})), _1, _1>;
 
-tb::BlackwellAsyncPipeline<4, decltype(cluster_shape), AtomThrShapeMNK> blackwell_async_pipeline_20000012((void *) (buf + 196736), (tb::warpgroup_id() == 2 && tb::warp_id() % mirage::config::NUM_WARPS_PER_GROUP == 0), tb::warpgroup_id() < 2, 32768, 2, elect_one_cta);
+tb::BlackwellAsyncPipeline<4, decltype(cluster_shape), AtomThrShapeMNK> blackwell_async_pipeline_20000012((void *) (buf + 196736), (tb::warpgroup_id() == 2 && tb::warp_id() % mirage::config::NUM_WARPS_PER_GROUP == 0), tb::warpgroup_id() < 2, 32768, 2);
 // change zy: use the DstLayout
 // using STensor20000012InputAtom = tb::InputTMAAsyncCopy_Blackwell<half_t, decltype(composition(Swizzle<3, 3, 4>{}, Layout<Shape<Int<128>, Int<64>>, Stride<Int<64>, Int<1>>>{})), Layout<Shape<Int<512>, Int<256>>, Stride<Int<256>, Int<1>>>, decltype(tma_10000003), decltype(blackwell_async_pipeline_20000012), true, 4, TiledMMA, MmaTiler_MNK>;
 // if (block0() && threadIdx.x == 0 && threadIdx.y == 0 && threadIdx.z == 0) {
@@ -137,7 +136,7 @@ tb::BlackwellAsyncPipeline<4, decltype(cluster_shape), AtomThrShapeMNK> blackwel
 using STensor20000012InputAtom = tb::InputTMAAsyncCopy_Blackwell<half_t, decltype(composition(Swizzle<3, 4, 3>{}, Layout<Shape<Int<128>, Int<64>>, Stride<Int<1>, Int<128>>>{})), Layout<Shape<Int<512>, Int<256>>, Stride<Int<1>, Int<512>>>, decltype(tma_10000003), decltype(blackwell_async_pipeline_20000012), true, 4, decltype(tiled_mma), decltype(mma_tiler), decltype(cluster_shape)>;
 // // Copy for G->S: dtensor 10000004 -> stensor 20000013
 using DTensor10000004TileLayout = Layout<Shape<Int<256>, Int<64>>, Stride<Int<1>, Int<1024>>>;
-tb::BlackwellAsyncPipeline<4, decltype(cluster_shape)> blackwell_async_pipeline_20000013((void *) (buf + 196800), (tb::warpgroup_id() == 2 && tb::warp_id() % mirage::config::NUM_WARPS_PER_GROUP == 0), tb::warpgroup_id() < 2, 32768, 2, elect_one_cta);
+tb::BlackwellAsyncPipeline<4, decltype(cluster_shape)> blackwell_async_pipeline_20000013((void *) (buf + 196800), (tb::warpgroup_id() == 2 && tb::warp_id() % mirage::config::NUM_WARPS_PER_GROUP == 0), tb::warpgroup_id() < 2, 32768, 2);
 using STensor20000013InputAtom = tb::InputTMAAsyncCopy_Blackwell<half_t, decltype(composition(Swizzle<3, 4, 3>{}, Layout<Shape<Int<128>, Int<64>>, Stride<Int<1>, Int<128>>>{})), Layout<Shape<Int<1024>, Int<256>>, Stride<Int<1>, Int<1024>>>, decltype(tma_10000004), decltype(blackwell_async_pipeline_20000013), false, 4, decltype(tiled_mma), decltype(mma_tiler), decltype(cluster_shape)>;
 
 
@@ -147,15 +146,11 @@ __syncthreads();
   
   // S->G copy atoms
   // Copy for S->G: stensor 20000015 -> dtensor 10000005
-  // float *dtensor10000005_tile_ptr = dtensor10000005_ptr  + blockIdx.x*128*1024 + blockIdx.y*256*1;
-  float *dtensor10000005_tile_ptr = dtensor10000005_ptr  + blockIdx.x*128*1024 + blockIdx.y*256*1;
-  auto cta_in_pair = get<0>(cta_in_cluster_coord_vmnk);
-  if (cta_in_pair == Int<1>{}) {
-    dtensor10000005_tile_ptr -= 128*1024;
-  }
+  // half_t *dtensor10000005_tile_ptr = dtensor10000005_ptr  + blockIdx.x*128*1024 + blockIdx.y*256*1;
+  half_t *dtensor10000005_tile_ptr = dtensor10000005_ptr  + blockIdx.x*128*1024 + blockIdx.y*256*1 - (blockIdx.x % 2)*128*1024;
 
   using DTensor10000005TileLayout = Layout<Shape<Int<256>, Int<128>>, Stride<Int<1>, Int<1024>>>;
-  using STensor20000015OutputAtom = tb::OutputChunkedSyncCopy<float, DTensor10000005TileLayout, Layout<Shape<Int<256>, Int<128>>, Stride<Int<1>, Int<256>>>, NUM_THREADS>;
+  using STensor20000015OutputAtom = tb::OutputChunkedSyncCopy<half_t, DTensor10000005TileLayout, Layout<Shape<Int<256>, Int<128>>, Stride<Int<1>, Int<256>>>, NUM_THREADS>;
   
   
   using Matmul20000015LayoutA = decltype(composition(Swizzle<3, 3, 4>{}, Layout<Shape<Int<64>, Int<128>>, Stride<Int<1>, Int<64>>>{}));
@@ -171,6 +166,22 @@ __syncthreads();
   __syncthreads();
 
   int warpgroup_id = tb::warpgroup_id();
+
+  if (elect_one_warp && cute::elect_one_sync()) {
+    int cta_count = 4; // equals to mma k tiles
+    cute::initialize_barrier(*mma_barrier, cta_count);
+  }
+  cluster_sync();
+
+
+  int gridDimX = gridDim.x;
+  // zy: generate pair mask for mcast
+  int pair_start_x = (blockIdx.x / 2) * 2;
+  int pair_end_x = pair_start_x + 1;
+  int current_y = blockIdx.y;
+  int id0 = current_y * gridDimX + pair_start_x;  // (pair_start_x, current_y)
+  int id1 = current_y * gridDimX + pair_end_x;    // (pair_end_x, current_y)
+  uint16_t pair_mask = (1 << id0) | (1 << id1);
 
   if (warpgroup_id == 2) {
     if (tb::warp_id_in_wg() == 0) {
@@ -190,16 +201,19 @@ __syncthreads();
             int read_idx_20000012 = blackwell_async_pipeline_20000012.consumer_wait();
             int read_idx_20000013 = blackwell_async_pipeline_20000013.consumer_wait();
             Matmul20000015Kernel::run(matmul_20000015_accum, stensor20000012_ptr, stensor20000013_ptr, for_idx, tiled_mma, read_idx_20000012, blackwell_async_pipeline_20000012, blackwell_async_pipeline_20000013);
+            if (elect_one_warp) {
+              cutlass::arch::umma_arrive_multicast(mma_barrier, pair_mask);
+            }
           }
         }
         blackwell_async_pipeline_20000012.consumer_release();
         blackwell_async_pipeline_20000013.consumer_release();
-
     }
-    // Write back in-register accumulators
-    // tb::wg_sync<CONSUMER_NUM_THREADS>(8);
-    // Matmul20000015Kernel::write_back_mma_rC(stensor20000015_ptr, matmul_20000015_accum, thread_idx);
-    // The epilogue (kernels outside the loop)
+
+    cute::wait_barrier(*mma_barrier, 0);
+    Matmul20000015Kernel::write_tC_to_gC(dtensor10000005_tile_ptr, matmul_20000015_accum, thread_idx);
+
+
 
     // {
     //   // OP type: tb_output_op
@@ -207,8 +221,6 @@ __syncthreads();
     // }
   }
 
-  cluster_sync();
-  Matmul20000015Kernel::write_tC_to_gC(dtensor10000005_tile_ptr, matmul_20000015_accum, thread_idx);
   
 
   __syncthreads();
@@ -231,16 +243,16 @@ void _execute_mugraph(std::vector<void const *> input_tensors, std::vector<void*
   }
   {
     // OP type: kn_customized_op
-    float *dtensor10000005 = (float*)output_tensors.at(0);  // 更改为float*
+    half_t *dtensor10000005 = (half_t*)output_tensors.at(0);  // 更改为half_t*
 
     half_t *dtensor10000003 = (half_t*)input_tensors.at(0);
     half_t *dtensor10000004 = (half_t*)input_tensors.at(1);
     dim3 grid_dim(4, 4, 1);
     dim3 block_dim(384, 1, 1);
-    size_t smem_size = 196864 + 32;  // Add extra space for tmem_base_ptr with alignment padding
+    size_t smem_size = 196864 + 32 + 128;  // Add extra space for tmem_base_ptr with alignment padding
     
     // define tmas
-    TiledMMA tiled_mma = cutlass::gemm::collective::detail::sm100_make_2sm_trivial_tiled_mma<half_t, half_t, float, Shape<Int<256>, Int<256>>, decltype(cluster_shape), UMMA::Major::K, UMMA::Major::K>();
+    TiledMMA tiled_mma = cutlass::gemm::collective::detail::sm100_make_2sm_trivial_tiled_mma<half_t, half_t, half_t, Shape<Int<256>, Int<256>>, decltype(cluster_shape), UMMA::Major::K, UMMA::Major::K>();
 
     auto cluster_shape = make_shape(Int<4>{}, Int<4>{}, Int<1>{});
     Layout cluster_layout_vmnk = tiled_divide(make_layout(cluster_shape), make_tile(typename decltype(tiled_mma)::AtomThrID{}));
@@ -335,11 +347,11 @@ int main() {
     auto type_str_a = "half_t";
     using TypeB = cutlass::half_t; // MMA B data type
     auto type_str_b = "half_t";
-    using TypeC = float;           // MMA C data type
-    auto type_str_c = "float";
-    using TypeD = float;           // MMA D data type
-    auto type_str_d = "float";
-    using TypeAccumulator = float; // Accumulator type
+    using TypeC = half_t;           // MMA C data type
+    auto type_str_c = "half_t";
+    using TypeD = half_t;           // MMA D data type
+    auto type_str_d = "half_t";
+    using TypeAccumulator = half_t; // Accumulator type
     
     // A tensor MxK K-major (Layout T = Row-Major)
     Layout layout_A = make_layout(make_shape (Gemm_M,   Gemm_K),
@@ -417,7 +429,7 @@ int main() {
     
     Tensor mA = make_tensor(make_gmem_ptr<half_t>(device_A.data().get()), layout_A);
     Tensor mB = make_tensor(make_gmem_ptr<half_t>(device_B.data().get()), layout_B);
-    Tensor mC = make_tensor(make_gmem_ptr<float>(device_C.data().get()), layout_C);
+    Tensor mC = make_tensor(make_gmem_ptr<half_t>(device_C.data().get()), layout_C);
     printf("mA:\t"); print(mA); printf("\n");
     printf("mB:\t"); print(mB); printf("\n");
     printf("mC:\t"); print(mC); printf("\n");
@@ -425,7 +437,7 @@ int main() {
   
     half_t *d_input1 = device_A.data().get();
     half_t *d_input2 = device_B.data().get();
-    float *d_output = device_C.data().get(); 
+    half_t *d_output = device_C.data().get(); 
     printf("d_output:\t"); print(d_output); printf("\n");
     
     
@@ -446,7 +458,7 @@ int main() {
     
     // Prepare input/output vectors
     std::vector<void const *> input_tensors = {d_input1, d_input2};
-    std::vector<void*> output_tensors = {d_output};  // Now float* type
+    std::vector<void*> output_tensors = {d_output};  // Now half_t* type
     
     ////////////////////////////////////////////////////////////
     //
@@ -518,8 +530,8 @@ int main() {
     printf("=======================================\n\n");
     
     // Copy results back to host for verification
-    thrust::host_vector<float> temp_output(Gemm_M * Gemm_N);  // Direct use of float
-    err = cudaMemcpy(temp_output.data(), d_output, Gemm_M * Gemm_N * sizeof(float), cudaMemcpyDeviceToHost);
+    thrust::host_vector<half_t> temp_output(Gemm_M * Gemm_N);  // Direct use of half_t
+    err = cudaMemcpy(temp_output.data(), d_output, Gemm_M * Gemm_N * sizeof(half_t), cudaMemcpyDeviceToHost);
     if (err != cudaSuccess) {
         printf("cudaMemcpy failed for output: %s\n", cudaGetErrorString(err));
         exit(1);
@@ -568,14 +580,14 @@ int main() {
     printf("Actual output: ");
     for(int i = 0; i < Gemm_M*Gemm_N; i++) {
       if (host_D_result[i] != 256) {
-        printf("x = %d, y = %d, %.4f ", i%Gemm_M, i/Gemm_M, host_D_result[i]);
+        printf("x = %d, y = %d, %.4f ", i/Gemm_N, i%Gemm_N, (float)host_D_result[i]);
         break;
       }
     }
     printf("\n");
     printf("Reference output: ");
     for(int i = 0; i < 16; i++) {
-        printf("%.4f ", host_reference_D[i]);
+        printf("%.4f ", (float)host_reference_D[i]);
     }
     printf("\n");
     

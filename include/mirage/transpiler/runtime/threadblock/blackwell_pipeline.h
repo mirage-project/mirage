@@ -28,8 +28,7 @@ __device__ __forceinline__
                           bool producer,
                           bool consumer,
                           uint32_t transactionBytes,
-                          uint32_t num_consumer_wgs,
-                          bool elect_one_cta)
+                          uint32_t num_consumer_wgs)
       : smem_pipe_read(),
         smem_pipe_write(cutlass::make_producer_start_state<MainloopPipeline>()),
         pipeline_params{
@@ -38,7 +37,7 @@ __device__ __forceinline__
                 ? MainloopPipeline::ThreadCategory::Producer
                 : (consumer ? MainloopPipeline::ThreadCategory::Consumer
                             : MainloopPipeline::ThreadCategory::NonParticipant),
-            (threadIdx.x % cutlass::NumThreadsPerWarpGroup) == 0 && elect_one_cta,
+            (threadIdx.x % cutlass::NumThreadsPerWarpGroup) == 0,
             cutlass::NumThreadsPerWarpGroup * num_consumer_wgs,
             1,
             1},
@@ -58,6 +57,9 @@ __device__ __forceinline__
     pipeline.producer_acquire(smem_pipe_write);
     BarrierType *tma_barrier = pipeline.producer_get_barrier(smem_pipe_write);
     int write_stage = smem_pipe_write.index();
+    // if (blockIdx.x == 0 && blockIdx.y == 0 && threadIdx.x == 256 && threadIdx.y == 0) {
+    //   printf("producer_acquire: tma_barrier is %p, write_stage is %d\n", tma_barrier, write_stage);
+    // }
     return {tma_barrier, write_stage};
   }
 
