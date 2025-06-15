@@ -244,7 +244,7 @@ void launch_norm_linear(void const *input_ptr,
                         void *output_ptr) {
   dim3 grid_dim(1, 1, 1);
   dim3 block_dim(128, 1, 1);
-  size_t smem_size = 36666;
+  size_t smem_size = 96000;
 
   cudaFuncSetAttribute(
       norm_linear_kernel_wrapper<T, BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE>,
