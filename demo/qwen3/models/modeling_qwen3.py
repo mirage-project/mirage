@@ -202,7 +202,7 @@ class Qwen3Attention(nn.Module):
             self.num_key_value_heads // world_size,
             self.head_dim,
         )
-        self.max_position_embeddings = config.max_position_embeddings
+        self.max_position_embeddings = 4096
         self.rope_theta = config.rope_theta
         self.is_causal = True
         self.attention_dropout = config.attention_dropout

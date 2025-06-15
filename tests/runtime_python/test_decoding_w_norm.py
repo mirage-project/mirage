@@ -60,8 +60,9 @@ def attention_decode(q, k_cache, v_cache, valid_len, q_weight, k_weight, eps, co
     scores = torch.matmul(q, k.transpose(-2, -1))
     mask = torch.arange(valid_len, device=scores.device)[None, :] <= (valid_len - 1)
     scores = scores.masked_fill(~mask[None, None, :], float("-inf"))
-    
-    out = torch.matmul(scores, v)
+
+    attn = F.softmax(scores, dim=-1) 
+    out = torch.matmul(attn, v)
     return out
 
 k_cache_torch = torch.empty((1, max_seq_len, head_dim), device=device, dtype=dtype)
@@ -95,6 +96,8 @@ for i in range(512):
     sin = torch.randn((1, head_dim), device=device, dtype=dtype)
 
 
+
+
     torch_output = attention_decode(q, k_cache_torch, v_cache_torch, seq_len, q_weight=qnorm_weight, k_weight=knorm_weight, eps=eps, cos=cos, sin=sin)
     torch_output = torch_output.squeeze(0).squeeze(1)
 
@@ -102,6 +105,6 @@ for i in range(512):
 
     mirage_output = torch.empty((q_heads, head_dim), device=device, dtype=dtype)
     # runtime_kernel.single_batch_gqa(qkv_mirage, k_cache_mirage, v_cache_mirage, mirage_output, seq_len, False)
-    runtime_kernel.single_batch_gqa(qkv_mirage, k_cache_mirage, v_cache_mirage, mirage_output, seq_len, True, True, qnorm_weight, knorm_weight, cos, sin, eps, eps)
+    runtime_kernel.single_batch_decoding(qkv_mirage, k_cache_mirage, v_cache_mirage, mirage_output, seq_len, True, True, qnorm_weight, knorm_weight, cos, sin, eps, eps)
     diff = mirage_output - torch_output
     print("seq_len res:", seq_len, "min:", diff.min().item(), "max:", diff.max().item())
