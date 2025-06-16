@@ -7,7 +7,7 @@
 #include <cuda_runtime.h>
 #include <torch/extension.h>
 
-using kernel::argmax_kernel;
+// using kernel::argmax_kernel;
 using kernel::linear_kernel;
 using kernel::norm_linear_task_impl;
 using kernel::silu_mul_linear_task_impl;
@@ -54,89 +54,89 @@ using bfloat16 = type::bfloat16_t;
 
 // Single Batch Decoding
 
-template <typename T>
-__global__ void
-    single_batch_decoding_kernel_wrapper(void const *qkv_ptr,
-                                         void *k_cache_ptr,
-                                         void *v_cache_ptr,
-                                         void *output_ptr,
-                                         size_t seq_len,
-                                         bool qk_norm,
-                                         bool rotary_embed,
-                                         void const *qnorm_weight_ptr,
-                                         void const *knorm_weight_ptr,
-                                         void const *cos_ptr,
-                                         void const *sin_ptr,
-                                         float q_eps,
-                                         float k_eps) {
-  single_batch_decoding_kernel<T, 4>(qkv_ptr,
-                                     k_cache_ptr,
-                                     v_cache_ptr,
-                                     output_ptr,
-                                     seq_len,
-                                     qk_norm,
-                                     rotary_embed,
-                                     qnorm_weight_ptr,
-                                     knorm_weight_ptr,
-                                     cos_ptr,
-                                     sin_ptr,
-                                     q_eps,
-                                     k_eps);
-}
+// template <typename T>
+// __global__ void
+//     single_batch_decoding_kernel_wrapper(void const *qkv_ptr,
+//                                          void *k_cache_ptr,
+//                                          void *v_cache_ptr,
+//                                          void *output_ptr,
+//                                          size_t seq_len,
+//                                          bool qk_norm,
+//                                          bool rotary_embed,
+//                                          void const *qnorm_weight_ptr,
+//                                          void const *knorm_weight_ptr,
+//                                          void const *cos_ptr,
+//                                          void const *sin_ptr,
+//                                          float q_eps,
+//                                          float k_eps) {
+//   single_batch_decoding_kernel<T, 4>(qkv_ptr,
+//                                      k_cache_ptr,
+//                                      v_cache_ptr,
+//                                      output_ptr,
+//                                      seq_len,
+//                                      qk_norm,
+//                                      rotary_embed,
+//                                      qnorm_weight_ptr,
+//                                      knorm_weight_ptr,
+//                                      cos_ptr,
+//                                      sin_ptr,
+//                                      q_eps,
+//                                      k_eps);
+// }
 
-void single_batch_decoding(
-    torch::Tensor qkv,
-    torch::Tensor k_cache,
-    torch::Tensor v_cache,
-    torch::Tensor output,
-    size_t seq_len,
-    bool qk_norm,
-    bool rotary_embed,
-    torch::optional<torch::Tensor> qnorm_weight = torch::nullopt,
-    torch::optional<torch::Tensor> knorm_weight = torch::nullopt,
-    torch::optional<torch::Tensor> cos = torch::nullopt,
-    torch::optional<torch::Tensor> sin = torch::nullopt,
-    float q_eps = 0.0f,
-    float k_eps = 0.0f) {
+// void single_batch_decoding(
+//     torch::Tensor qkv,
+//     torch::Tensor k_cache,
+//     torch::Tensor v_cache,
+//     torch::Tensor output,
+//     size_t seq_len,
+//     bool qk_norm,
+//     bool rotary_embed,
+//     torch::optional<torch::Tensor> qnorm_weight = torch::nullopt,
+//     torch::optional<torch::Tensor> knorm_weight = torch::nullopt,
+//     torch::optional<torch::Tensor> cos = torch::nullopt,
+//     torch::optional<torch::Tensor> sin = torch::nullopt,
+//     float q_eps = 0.0f,
+//     float k_eps = 0.0f) {
 
-  void const *qkv_ptr = qkv.data_ptr();
-  void *k_cache_ptr = k_cache.data_ptr();
-  void *v_cache_ptr = v_cache.data_ptr();
-  void *output_ptr = output.data_ptr();
+//   void const *qkv_ptr = qkv.data_ptr();
+//   void *k_cache_ptr = k_cache.data_ptr();
+//   void *v_cache_ptr = v_cache.data_ptr();
+//   void *output_ptr = output.data_ptr();
 
-  void const *qnorm_weight_ptr = qk_norm ? qnorm_weight->data_ptr() : nullptr;
-  void const *knorm_weight_ptr = qk_norm ? knorm_weight->data_ptr() : nullptr;
-  void const *cos_ptr = rotary_embed ? cos->data_ptr() : nullptr;
-  void const *sin_ptr = rotary_embed ? sin->data_ptr() : nullptr;
+//   void const *qnorm_weight_ptr = qk_norm ? qnorm_weight->data_ptr() :
+//   nullptr; void const *knorm_weight_ptr = qk_norm ? knorm_weight->data_ptr()
+//   : nullptr; void const *cos_ptr = rotary_embed ? cos->data_ptr() : nullptr;
+//   void const *sin_ptr = rotary_embed ? sin->data_ptr() : nullptr;
 
-  dim3 grid_dim(1, 1, 1);
-  dim3 block_dim(128, 1, 1);
-  size_t smem_size = 88888;
+//   dim3 grid_dim(1, 1, 1);
+//   dim3 block_dim(128, 1, 1);
+//   size_t smem_size = 88888;
 
-  cudaFuncSetAttribute(single_batch_decoding_kernel_wrapper<bfloat16>,
-                       cudaFuncAttributeMaxDynamicSharedMemorySize,
-                       smem_size);
+//   cudaFuncSetAttribute(single_batch_decoding_kernel_wrapper<bfloat16>,
+//                        cudaFuncAttributeMaxDynamicSharedMemorySize,
+//                        smem_size);
 
-  single_batch_decoding_kernel_wrapper<bfloat16>
-      <<<grid_dim, block_dim, smem_size>>>(qkv_ptr,
-                                           k_cache_ptr,
-                                           v_cache_ptr,
-                                           output_ptr,
-                                           seq_len,
-                                           qk_norm,
-                                           rotary_embed,
-                                           qnorm_weight_ptr,
-                                           knorm_weight_ptr,
-                                           cos_ptr,
-                                           sin_ptr,
-                                           q_eps,
-                                           k_eps);
+//   single_batch_decoding_kernel_wrapper<bfloat16>
+//       <<<grid_dim, block_dim, smem_size>>>(qkv_ptr,
+//                                            k_cache_ptr,
+//                                            v_cache_ptr,
+//                                            output_ptr,
+//                                            seq_len,
+//                                            qk_norm,
+//                                            rotary_embed,
+//                                            qnorm_weight_ptr,
+//                                            knorm_weight_ptr,
+//                                            cos_ptr,
+//                                            sin_ptr,
+//                                            q_eps,
+//                                            k_eps);
 
-  cudaError_t err = cudaDeviceSynchronize();
-  if (err != cudaSuccess) {
-    printf("CUDA kernel launch error: %s\n", cudaGetErrorString(err));
-  }
-}
+//   cudaError_t err = cudaDeviceSynchronize();
+//   if (err != cudaSuccess) {
+//     printf("CUDA kernel launch error: %s\n", cudaGetErrorString(err));
+//   }
+// }
 
 template <typename T>
 __global__ void single_batch_gqa_kernel_wrapper(void const *qkv_ptr,
@@ -244,7 +244,7 @@ void launch_norm_linear(void const *input_ptr,
                         void *output_ptr) {
   dim3 grid_dim(1, 1, 1);
   dim3 block_dim(128, 1, 1);
-  size_t smem_size = 96000;
+  size_t smem_size = 110000;
 
   cudaFuncSetAttribute(
       norm_linear_kernel_wrapper<T, BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE>,
@@ -399,43 +399,44 @@ void linear(torch::Tensor input,
 
 // Argmax
 
-template <typename T>
-__global__ void argmax_kernel_wrapper(void const *input_ptr, void *output_ptr) {
-  argmax_kernel<T, 1, 32768>(input_ptr, output_ptr);
-}
+// template <typename T>
+// __global__ void argmax_kernel_wrapper(void const *input_ptr, void
+// *output_ptr) {
+//   argmax_kernel<T, 1, 32768>(input_ptr, output_ptr);
+// }
 
-template <typename T>
-void launch_argmax(void const *input_ptr, void *output_ptr) {
-  dim3 grid_dim(1, 1, 1);
-  dim3 block_dim(128, 1, 1);
-  size_t smem_size = 36666;
+// template <typename T>
+// void launch_argmax(void const *input_ptr, void *output_ptr) {
+//   dim3 grid_dim(1, 1, 1);
+//   dim3 block_dim(128, 1, 1);
+//   size_t smem_size = 36666;
 
-  cudaFuncSetAttribute(argmax_kernel_wrapper<T>,
-                       cudaFuncAttributeMaxDynamicSharedMemorySize,
-                       smem_size);
+//   cudaFuncSetAttribute(argmax_kernel_wrapper<T>,
+//                        cudaFuncAttributeMaxDynamicSharedMemorySize,
+//                        smem_size);
 
-  argmax_kernel_wrapper<T>
-      <<<grid_dim, block_dim, smem_size>>>(input_ptr, output_ptr);
-}
+//   argmax_kernel_wrapper<T>
+//       <<<grid_dim, block_dim, smem_size>>>(input_ptr, output_ptr);
+// }
 
-void argmax(torch::Tensor input, torch::Tensor output) {
+// void argmax(torch::Tensor input, torch::Tensor output) {
 
-  void const *input_ptr = input.data_ptr();
-  void *output_ptr = output.data_ptr();
+//   void const *input_ptr = input.data_ptr();
+//   void *output_ptr = output.data_ptr();
 
-  launch_argmax<bfloat16>(input_ptr, output_ptr);
+//   launch_argmax<bfloat16>(input_ptr, output_ptr);
 
-  cudaError_t err = cudaDeviceSynchronize();
-  if (err != cudaSuccess) {
-    printf("CUDA kernel launch error: %s\n", cudaGetErrorString(err));
-  }
-}
+//   cudaError_t err = cudaDeviceSynchronize();
+//   if (err != cudaSuccess) {
+//     printf("CUDA kernel launch error: %s\n", cudaGetErrorString(err));
+//   }
+// }
 
 // pybind11 bindings
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("linear", &linear, "Linear kernel");
-  m.def("argmax", &argmax, "argmax kernel");
+  // m.def("argmax", &argmax, "argmax kernel");
   m.def("norm_linear", &norm_linear, "RMSNorm Linear kernel");
   m.def("silu_mul_linear", &silu_mul_linear, "SILU MUL Linear kernel");
   // m.def("single_batch_gqa", &single_batch_gqa, "Decoding kernel");
@@ -454,21 +455,21 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("sin") = py::none(),
         py::arg("q_eps") = 0.0f,
         py::arg("k_eps") = 0.0f);
-  m.def("single_batch_decoding",
-        &single_batch_decoding,
-        py::arg("qkv"),
-        py::arg("k_cache"),
-        py::arg("v_cache"),
-        py::arg("output"),
-        py::arg("seq_len"),
-        py::arg("qk_norm"),
-        py::arg("rotary_embed"),
-        py::arg("qnorm_weight") = py::none(),
-        py::arg("knorm_weight") = py::none(),
-        py::arg("cos") = py::none(),
-        py::arg("sin") = py::none(),
-        py::arg("q_eps") = 0.0f,
-        py::arg("k_eps") = 0.0f);
+  // m.def("single_batch_decoding",
+  //       &single_batch_decoding,
+  //       py::arg("qkv"),
+  //       py::arg("k_cache"),
+  //       py::arg("v_cache"),
+  //       py::arg("output"),
+  //       py::arg("seq_len"),
+  //       py::arg("qk_norm"),
+  //       py::arg("rotary_embed"),
+  //       py::arg("qnorm_weight") = py::none(),
+  //       py::arg("knorm_weight") = py::none(),
+  //       py::arg("cos") = py::none(),
+  //       py::arg("sin") = py::none(),
+  //       py::arg("q_eps") = 0.0f,
+  //       py::arg("k_eps") = 0.0f);
   // m.def("single_batch_decoding",
   //       &single_batch_decoding,
   //       "FlashAttention Decoding kernel");
