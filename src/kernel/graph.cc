@@ -412,6 +412,8 @@ void Graph::register_task(char const *task_type) {
         std::make_tuple(3, 1, TASK_SILU_MUL_LINEAR_WITH_RESIDUAL);
   } else if (name == "argmax") {
     task_config[operators.back()] = std::make_tuple(1, 1, TASK_ARGMAX);
+  } else if (name == "allreduce") {
+    task_config[operators.back()] = std::make_tuple(2, 1, TASK_ALLREDUCE);
   } else {
     assert(false && "Unsupported task type");
   }

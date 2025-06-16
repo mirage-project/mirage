@@ -438,8 +438,8 @@ __global__ void persistent_kernel(RuntimeConfig config) {
           // int count = atomicSub(&config.all_event_counters[event_index], 1);
           EventCounter count =
               custom_atomic_add_u64(&config.all_event_counters[event_index], 1);
+          int num_triggers = config.all_event_num_triggers[event_index];
           if (config.verbose) {
-            int num_triggers = config.all_event_num_triggers[event_index];
             printf("[%d][DONE] worker_id(%d) iter_num(%llu) task_idx(%llu) "
                    "event_id(%llx) "
                    "event_type(local) count(%llu)\n",
