@@ -135,8 +135,22 @@ int main(int argc, char **argv) {
   io_configs.emplace(
       ArgmaxIn.guid,
       IODesc(rt::IODesc::CUDAMallocTensor, "argmax_in", ArgmaxIn));
+  kn::DTensor ArgmaxOutValue = kgraph.new_input({batch_size, vocab_size},
+                                          {batch_size, 96},
+                                          type::DT_BFLOAT16,
+                                          layout::DmemRowMajor);
+  io_configs.emplace(
+      ArgmaxOutValue.guid,
+      IODesc(rt::IODesc::CUDAMallocTensor, "argmax_out_value", ArgmaxOutValue));
+  kn::DTensor ArgmaxOutIndex = kgraph.new_input({batch_size, vocab_size},
+                                          {batch_size, 96},
+                                          type::DT_INT64,
+                                          layout::DmemRowMajor);
+  io_configs.emplace(
+      ArgmaxOutIndex.guid,
+      IODesc(rt::IODesc::CUDAMallocTensor, "argmax_out_index", ArgmaxOutIndex));
   kn::DTensor ArgmaxOut = kgraph.new_input(
-      {batch_size, 1}, {(size_t)1, 1}, type::DT_BFLOAT16, layout::DmemRowMajor);
+      {batch_size, 1}, {(size_t)1, 1}, type::DT_INT64, layout::DmemRowMajor);
   io_configs.emplace(
       ArgmaxOut.guid,
       IODesc(rt::IODesc::CUDAMallocTensor, "argmax_out", ArgmaxOut));
@@ -520,9 +534,36 @@ int main(int argc, char **argv) {
   }
   // Add argmax
   {
-    dim3 grid_dim = {1, 1, 1}, block_dim = {128, 1, 1};
+    dim3 grid_dim = {96, 1, 1}, block_dim = {128, 1, 1};
     tb::Graph bgraph(grid_dim, block_dim, 1 /*forloop_range*/, 64);
     bgraph.new_input(ArgmaxIn,
+                     {1, -1, -1},
+                     -1,
+                     layout::SmemRowMajor,
+                     true /*store_in_dmem*/);
+    bgraph.new_input(ArgmaxOutValue,
+                     {1, -1, -1},
+                     -1,
+                     layout::SmemRowMajor,
+                     true /*store_in_dmem*/);
+    bgraph.new_input(ArgmaxOutIndex,
+                     {1, -1, -1},
+                     -1,
+                     layout::SmemRowMajor,
+                     true /*store_in_dmem*/);
+    kgraph.customized({ArgmaxIn, ArgmaxOutValue, ArgmaxOutIndex}, bgraph);
+    task_configs[kgraph.operators.back()] =
+        std::make_tuple(1, 2, rt::TASK_ARGMAX_PARTIAL);
+  }
+  {
+    dim3 grid_dim = {1, 1, 1}, block_dim = {128, 1, 1};
+    tb::Graph bgraph(grid_dim, block_dim, 1 /*forloop_range*/, 64);
+    bgraph.new_input(ArgmaxOutValue,
+                     {-1, -1, -1},
+                     -1,
+                     layout::SmemRowMajor,
+                     true /*store_in_dmem*/);
+    bgraph.new_input(ArgmaxOutIndex,
                      {-1, -1, -1},
                      -1,
                      layout::SmemRowMajor,
@@ -532,9 +573,9 @@ int main(int argc, char **argv) {
                      -1,
                      layout::SmemRowMajor,
                      true /*store_in_dmem*/);
-    kgraph.customized({ArgmaxIn, ArgmaxOut}, bgraph);
+    kgraph.customized({ArgmaxOutValue, ArgmaxOutIndex, ArgmaxOut}, bgraph);
     task_configs[kgraph.operators.back()] =
-        std::make_tuple(1, 1, rt::TASK_ARGMAX);
+        std::make_tuple(2, 1, rt::TASK_ARGMAX_REDUCE);
   }
 #ifdef DEADCODE
   {

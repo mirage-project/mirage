@@ -388,7 +388,7 @@ void Runtime::register_mugraph(
         }
       }
       // assert that their is a single tensor shared between ops
-      assert(num_shared_tensors == 1);
+      assert(num_shared_tensors > 0);
       for (int d = 0; d < mirage::config::MAX_TENSOR_DIMS; d++) {
         if (d == input_map.x) {
           consumer_partition[d] = bgraph.grid_dim.x;
