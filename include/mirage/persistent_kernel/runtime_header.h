@@ -32,7 +32,7 @@ unsigned long long int const EVENT_INVALID_ID = 0x7ffffffffffffffe;
 typedef unsigned long long int EventCounter;
 
 int const MAX_INPUTS_PER_TASK = 7;
-int const MAX_OUTPUTS_PER_TASK = 1;
+int const MAX_OUTPUTS_PER_TASK = 2;
 int const MAX_NUM_WORKERS = 128;
 
 enum TaskType {

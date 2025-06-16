@@ -191,8 +191,6 @@ class PersistentKernel:
         name: str = None,
         io_category: str = "cuda_tensor",
     ) -> DTensor:
-        # Currently only support bfloat16
-        assert dtype == bfloat16
         # Assert a row-major layout
         if strides is not None:
             for d in range(len(dims) - 1):
@@ -371,6 +369,37 @@ class PersistentKernel:
         tb_graph.new_input(output, (-1, -1, -1), -1, True)
         self.kn_graph.customized([input, output], tb_graph)
         self.kn_graph.register_task(tb_graph, "argmax")
+
+    def argmax_partial_layer(
+        self, input: DTensor, output: tuple[DTensor, DTensor], grid_dim: tuple, block_dim: tuple):
+        # Currently assume that input/output
+        assert input.num_dims == 2  # (batch_size, vocab_size)
+        assert len(output) == 2
+        output_value, output_index = output
+        assert output_value.num_dims == 2  # (batch_size, num_tasks)
+        assert output_index.num_dims == 2  # (batch_size, num_tasks)
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(input, (1, -1, -1), -1, True)
+        tb_graph.new_input(output_value, (1, -1, -1), -1, True)
+        tb_graph.new_input(output_index, (1, -1, -1), -1, True)
+        self.kn_graph.customized([input, output_value, output_index], tb_graph)
+        self.kn_graph.register_task(tb_graph, "argmax_partial")
+
+    def argmax_reduce_layer(
+        self, input: tuple[DTensor, DTensor], output: DTensor, grid_dim: tuple, block_dim: tuple
+    ):
+        # Currently assume that input/output
+        assert len(input) == 2
+        input_value, input_index = input
+        assert input_value.num_dims == 2  # (batch_size, num_tasks)
+        assert input_index.num_dims == 2  # (batch_size, num_tasks)
+        assert output.num_dims == 2  # (batch_size, 1)
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(input_value, (-1, -1, -1), -1, True)
+        tb_graph.new_input(input_index, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output, (-1, -1, -1), -1, True)
+        self.kn_graph.customized([input_value, input_index, output], tb_graph)
+        self.kn_graph.register_task(tb_graph, "argmax_reduce")
 
     def compile(
         self,

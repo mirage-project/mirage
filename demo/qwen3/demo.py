@@ -185,9 +185,21 @@ if __name__ == "__main__":
             name="argmax_in",
             io_category="cuda_tensor",
         )
+        argmax_part_value = mpk.new_tensor(
+            dims=(batch_size, 96),
+            dtype=mi.bfloat16,
+            name="argmax_part_value",
+            io_category="cuda_tensor",
+        )
+        argmax_part_index = mpk.new_tensor(
+            dims=(batch_size, 96),
+            dtype=mi.int64,
+            name="argmax_part_index",
+            io_category="cuda_tensor",
+        )
         argmax_out = mpk.new_tensor(
             dims=(batch_size, 1),
-            dtype=mi.bfloat16,
+            dtype=mi.int64,
             name="argmax_out",
             io_category="cuda_tensor",
         )
@@ -343,8 +355,17 @@ if __name__ == "__main__":
             block_dim=(128, 1, 1),
         )
         # add argmax layer
-        mpk.argmax_layer(
-            input=argmax_in, output=argmax_out, grid_dim=(1, 1, 1), block_dim=(1, 1, 1)
+        mpk.argmax_partial_layer(
+            input=argmax_in,
+            output=(argmax_part_value, argmax_part_index),
+            grid_dim=(96, 1, 1),
+            block_dim=(1, 1, 1)
+        )
+        mpk.argmax_reduce_layer(
+            input=(argmax_part_value, argmax_part_index),
+            output=argmax_out,
+            grid_dim=(1,1,1),
+            block_dim=(1,1,1)
         )
 
         results = mpk.kn_graph.generate_task_graph(num_gpus=world_size)
