@@ -249,27 +249,29 @@ __device__ __forceinline__ void
     }
     cp_async_fence();
 
-    InputDmem input_dmem_buffer_1(d_input + TILE_SIZE);
-    InputDmem norm_weight_dmem_buffer_1(d_norm_weight + TILE_SIZE);
-    WeightDmem weight_dmem_buffer_1(d_weight + TILE_SIZE);
+    if (FORLOOP_RANGE > 1) {
+      InputDmem input_dmem_buffer_1(d_input + TILE_SIZE);
+      InputDmem norm_weight_dmem_buffer_1(d_norm_weight + TILE_SIZE);
+      WeightDmem weight_dmem_buffer_1(d_weight + TILE_SIZE);
 
 #pragma unroll
-    for (int i = threadIdx.x; i < NUM_CHUNKS_A; i += NUM_THREADS) {
-      int row = i >> log2_CHUNKS_PER_ROW_A;
-      int col = (i & (CHUNKS_PER_ROW_A - 1)) << log2_CHUNK_SIZE;
-      load_smem(input_smem_buffer_2(row, col), input_dmem_buffer_1(row, col));
-      load_smem(norm_weight_smem_buffer_2(row, col),
-                norm_weight_dmem_buffer_1(row, col));
-    }
+      for (int i = threadIdx.x; i < NUM_CHUNKS_A; i += NUM_THREADS) {
+        int row = i >> log2_CHUNKS_PER_ROW_A;
+        int col = (i & (CHUNKS_PER_ROW_A - 1)) << log2_CHUNK_SIZE;
+        load_smem(input_smem_buffer_2(row, col), input_dmem_buffer_1(row, col));
+        load_smem(norm_weight_smem_buffer_2(row, col),
+                  norm_weight_dmem_buffer_1(row, col));
+      }
 
 #pragma unroll
-    for (int i = threadIdx.x; i < NUM_CHUNKS_B; i += NUM_THREADS) {
-      int row = (i & (CHUNKS_PER_COL_B - 1)) << log2_CHUNK_SIZE;
-      int col = i >> log2_CHUNKS_PER_COL_B;
-      load_smem(input_weight_smem_buffer_2(row, col),
-                weight_dmem_buffer_1(row, col));
+      for (int i = threadIdx.x; i < NUM_CHUNKS_B; i += NUM_THREADS) {
+        int row = (i & (CHUNKS_PER_COL_B - 1)) << log2_CHUNK_SIZE;
+        int col = i >> log2_CHUNKS_PER_COL_B;
+        load_smem(input_weight_smem_buffer_2(row, col),
+                  weight_dmem_buffer_1(row, col));
+      }
+      cp_async_fence();
     }
-    cp_async_fence();
 
     // accumulator
     float s_frag[NUM_ITERS_M][NUM_ITERS_N][8];
@@ -285,7 +287,7 @@ __device__ __forceinline__ void
 
     for (int for_idx = 0; for_idx < FORLOOP_RANGE; for_idx++) {
       // copy
-      if (for_idx + 2 != FORLOOP_RANGE) {
+      if (for_idx + 2 < FORLOOP_RANGE) {
         InputDmem input_dmem_buffer_2(d_input + TILE_SIZE * (for_idx + 2));
         InputDmem norm_weight_dmem_buffer_2(d_norm_weight +
                                             TILE_SIZE * (for_idx + 2));
@@ -308,8 +310,8 @@ __device__ __forceinline__ void
                     weight_dmem_buffer_2(row, col));
         }
         cp_async_fence();
-        cp_async_wait<1>();
       }
+      cp_async_wait<1>();
 
       // permute the triple buffers
       if (for_idx % 3 == 0) {
