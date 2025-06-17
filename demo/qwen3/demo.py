@@ -433,15 +433,15 @@ if __name__ == "__main__":
         input_ids = tokens[:, 0:prompt_len]
         cos_embeddings = position_embeddings[0][:, 0:prompt_len]
         sin_embeddings = position_embeddings[1][:, 0:prompt_len]
-        #logits = model.forward(
-        #    input_ids=input_ids,
-        #    position_embeddings=(cos_embeddings, sin_embeddings),
-        #    step=step,
-        #    stream=stream,
-        #)
-        #next_token = logits.argmax(dim=-1)
-        #next_token = next_token[0, -1]
-        #input_tokens[0] = next_token
+        logits = model.forward(
+            input_ids=input_ids,
+            position_embeddings=(cos_embeddings, sin_embeddings),
+            step=step,
+            stream=stream,
+        )
+        next_token = logits.argmax(dim=-1)
+        next_token = next_token[0, -1]
+        input_tokens[0] = next_token
         torch.cuda.synchronize()
         starter.record()
 
