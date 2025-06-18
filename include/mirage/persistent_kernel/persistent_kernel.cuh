@@ -13,8 +13,9 @@
  * limitations under the License.
  */
 
-#include "../persistent_kernel/tasks/kernel.h"
 #include "profiler.h"
+#include "runtime_header.h"
+#include "tasks/kernel.h"
 #include <mpi.h>
 #include <nvshmem.h>
 #include <nvshmemx.h>
@@ -22,106 +23,8 @@
 #include <unistd.h>
 #include <vector>
 
-typedef unsigned long long int TaskId;
-unsigned long long int const TASK_INVALID_ID = 0x7fffffffffffffff;
-// Task IDs are 64-bit values encoding both the current iteration of the task
-// and its index TASK: iteration id: 32, task index: 32
-typedef unsigned long long int EventId;
-// Event IDs are 64-bit values encoding both the owner of the event and its
-// index EVENT: nvshmem_tag: 16, owner_node: 16, event_idx: 32
-unsigned long long int const EVENT_NVSHMEM_TAG = 0x1e00000000000000;
-unsigned long long int const EVENT_INVALID_ID = 0x7ffffffffffffffe;
-typedef unsigned long long int EventCounter;
-int const MAX_TENSOR_DIMS = 4;
-int const MAX_INPUTS_PER_TASK = 7;
-int const MAX_OUTPUTS_PER_TASK = 1;
-int const MAX_NUM_WORKERS = 128;
-
 using bfloat16 = type::bfloat16_t;
-
-enum TaskType {
-  TASK_TERMINATE = 0,
-  TASK_BEGIN_TASK_GRAPH = 10,
-  // compute task starts from 100
-  TASK_EMBEDDING = 101,
-  TASK_RMS_NORM_LINEAR = 102,
-  TASK_ATTENTION_1 = 103,
-  TASK_ATTENTION_2 = 104,
-  TASK_SILU_MUL_LINEAR = 105,
-  TASK_ALLREDUCE = 106,
-  TASK_REDUCE = 107,
-  TASK_MATMUL = 108,
-  TASK_ARGMAX = 109,
-  TASK_ARGMAX_PARTIAL = 110,
-  TASK_ARGMAX_REDUCE = 111,
-  TASK_NVSHMEM_COPY = 199,
-  TASK_SCHD_TASKS = 200,
-  TASK_SCHD_EVENTS = 201,
-  TASK_GET_EVENT = 202,
-  TASK_GET_NEXT_TASK = 203,
-};
-
-enum EventType {
-  EVENT_EMPTY = 900,
-  EVENT_LAUNCH_TASKS = 901,
-  EVENT_LAUNCH_MASSIVE_TASKS = 902,
-  EVENT_LAUNCH_DEPENDENT_TASKS = 903,
-  EVENT_END_OF_TASK_GRAPH = 910,
-  EVENT_TERMINATION = 911,
-  EVENT_INVALID = 999,
-};
-
-struct TensorDesc {
-  int num_dims;
-  void *base_ptr;
-  int data_type;
-  int dim[MAX_TENSOR_DIMS];
-  int stride[MAX_TENSOR_DIMS];
-};
-
-struct EventDesc {
-  EventDesc(void)
-      : event_type(EVENT_INVALID), num_triggers(0),
-        first_task_id(TASK_INVALID_ID), last_task_id(TASK_INVALID_ID) {}
-  EventDesc(EventType type, int nt, TaskId f, TaskId l)
-      : event_type(type), num_triggers(nt), first_task_id(f), last_task_id(l) {}
-  EventType event_type;
-  int num_triggers;
-  TaskId first_task_id, last_task_id;
-};
-
-struct TaskDesc {
-  TaskDesc(TaskType t)
-      : task_type(t), num_inputs(0), num_outputs(0),
-        trigger_event(EVENT_INVALID_ID), dependent_event(EVENT_INVALID_ID) {}
-  TaskDesc() {}
-  TaskType task_type;
-  int num_inputs, num_outputs;
-  EventId trigger_event;
-  EventId dependent_event;
-  TensorDesc inputs[MAX_INPUTS_PER_TASK];
-  TensorDesc outputs[MAX_OUTPUTS_PER_TASK];
-};
-
-struct RuntimeConfig {
-  int num_workers, num_local_schedulers, num_remote_schedulers, num_graphs;
-  int num_gpus, my_gpu_id;
-  unsigned long long int per_worker_queue_len, per_sched_queue_len;
-  unsigned long long int *worker_queue_last_ready_task_id;
-  unsigned long long int *sched_queue_last_ready_event_id;
-  unsigned long long int *sched_queue_next_free_event_id;
-  EventCounter *all_event_counters;
-  int *all_event_num_triggers;
-  TaskDesc *all_tasks;
-  EventDesc *all_events;
-  TaskId **worker_queues;
-  EventId **sched_queues;
-  TaskId *first_tasks;
-  int *step; // Metadata for LLM serving
-  void *profiler_buffer;
-  bool verbose;
-  bool profiling;
-};
+using namespace mirage::runtime;
 
 __device__ __forceinline__ bool is_termination_event(size_t event_loc,
                                                      EventDesc e) {
@@ -450,7 +353,7 @@ __global__ void persistent_kernel(RuntimeConfig config) {
             TB_SLEEP_US(1);
             break;
           }
-          case TASK_SILU_MUL_LINEAR: {
+          case TASK_SILU_MUL_LINEAR_WITH_RESIDUAL: {
             kernel::silu_mul_linear_task<bfloat16>(
                 task_desc.outputs[0].dim[task_desc.outputs[0].num_dims - 1],
                 task_desc.inputs[0].base_ptr,
@@ -486,7 +389,7 @@ __global__ void persistent_kernel(RuntimeConfig config) {
             TB_SLEEP_US(10);
             break;
           }
-          case TASK_MATMUL: {
+          case TASK_LINEAR_WITH_RESIDUAL: {
             kernel::linear_kernel<bfloat16, 1, 64, 4096, 6144>(
                 task_desc.inputs[0].base_ptr,
                 task_desc.inputs[1].base_ptr,
@@ -497,8 +400,8 @@ __global__ void persistent_kernel(RuntimeConfig config) {
           }
           case TASK_ARGMAX: {
             // We may still need this for small vocab size.
-            kernel::argmax_kernel<bfloat16, 1, 153600>(
-                task_desc.inputs[0].base_ptr, task_desc.outputs[0].base_ptr);
+            //kernel::argmax_kernel<bfloat16, 1, 153600>(
+            //    task_desc.inputs[0].base_ptr, task_desc.outputs[0].base_ptr);
             break;
           }
           case TASK_ARGMAX_PARTIAL: {
@@ -898,18 +801,15 @@ void gpu_free(void *ptr) {
 
 // The following function will be generated by the transpiler
 // The following function will be generated by the transpiler
-static void
-    _init_persistent_kernel(std::vector<TaskDesc> &all_tasks,
-                            std::vector<EventDesc> &all_events,
-                            std::vector<TaskId> &first_tasks,
-                            std::vector<void const *> const &torch_tensors,
-                            int num_gpus,
-                            int my_gpu_id);
+static void _init_persistent_kernel(std::vector<TaskDesc> &all_tasks,
+                                    std::vector<EventDesc> &all_events,
+                                    std::vector<TaskId> &first_tasks,
+                                    int num_gpus,
+                                    int my_gpu_id);
 
 static RuntimeConfig global_runtime_config;
 
-extern "C" void init_persistent_kernel(std::vector<void const *> torch_tensors,
-                                       std::vector<void *> meta_tensors,
+extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
                                        void *profiler_buffer,
                                        int my_rank,
                                        int num_workers,
@@ -936,7 +836,6 @@ extern "C" void init_persistent_kernel(std::vector<void const *> torch_tensors,
   printf("mype(%d) npes(%d) mype_node(%d)\n", mype, npes, mype_node);
   printf(
       "process_id(%zu) thread_id(%zu)\n", getpid(), std::this_thread::get_id());
-  printf("torch_tensors.size(%zu)\n", torch_tensors.size());
   global_runtime_config.per_worker_queue_len = 1024;
   global_runtime_config.per_sched_queue_len = 1024;
   global_runtime_config.num_gpus = npes;
@@ -948,8 +847,7 @@ extern "C" void init_persistent_kernel(std::vector<void const *> torch_tensors,
   std::vector<TaskDesc> all_tasks;
   std::vector<EventDesc> all_events;
   std::vector<TaskId> first_tasks;
-  _init_persistent_kernel(
-      all_tasks, all_events, first_tasks, torch_tensors, npes, mype);
+  _init_persistent_kernel(all_tasks, all_events, first_tasks, npes, mype);
   // for (size_t i = 0; i < all_tasks.size(); i++) {
   //   printf(
   //       "task[%zu]: task_type(%d) trigger_event(%llx)

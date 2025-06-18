@@ -52,9 +52,8 @@ __device__ __forceinline__ void
   constexpr int chunk_size = 16 / sizeof(T);
   constexpr size_t MAX_SEQ_LEN = 512;
   constexpr size_t KV_CHUNK_SIZE = 64;
-  // const float sm_scale = (1.f / sqrt((float)HEAD_DIM))
-  // * 1.44269504088896340736f;
-  float const sm_scale = 1.f;
+  const float sm_scale = (1.f / sqrt((float)HEAD_DIM));
+  // float const sm_scale = 1.f;
 
   int warp_idx = warp_id();
   int idx_in_warp = threadIdx.x % 32;
@@ -233,7 +232,6 @@ __device__ __forceinline__ void
       v_cache_smem.set_ptr(shared_v);
       v_cache_smem_buffer.set_ptr(shared_v_buffer);
     }
-
     __syncthreads();
 
     // q_norm

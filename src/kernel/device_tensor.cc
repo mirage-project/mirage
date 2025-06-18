@@ -25,7 +25,7 @@ DTensor::DTensor() {
   data_type = mirage::type::DT_UNKNOWN;
   layout = mirage::layout::DmemUnknownLayout;
   num_dims = 0;
-  for (int i = 0; i < MAX_TENSOR_DIMS; i++) {
+  for (int i = 0; i < mirage::config::MAX_TENSOR_DIMS; i++) {
     dim[i] = 0;
     // stride[i] = 0;
   }

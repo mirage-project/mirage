@@ -43,6 +43,7 @@ struct alignas(16) STensor {
     owner_ts_idx = -1000;
     smem_offset = 128;
     after_accum = false;
+    store_in_dmem = false;
   }
 
   CUTLASS_HOST_DEVICE
@@ -129,6 +130,11 @@ struct alignas(16) STensor {
         data_type_size = 4;
         break;
       }
+      case DT_INT64:
+      case DT_DOUBLE: {
+        data_type_size = 8;
+        break;
+      }
       case DT_UNKNOWN:
       default:
         assert(false);
@@ -169,6 +175,10 @@ struct alignas(16) STensor {
   // This flag is false by default and should only be
   // changed to true by a forloop accumulator
   bool after_accum;
+
+  // a flag indicating if the stensor is saved
+  // in device memory; false by default
+  bool store_in_dmem;
 
   static std::atomic<int64_t> next_guid;
 };
