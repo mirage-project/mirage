@@ -149,6 +149,16 @@ inline __execution_space__ FPType compute_pow_fingerprint(FPType base,
   return z;
 }
 
+inline __execution_space__ void accum_fingerprint(FPType &accum, FPType x) {
+  accum = compute_add_fingerprint(accum, x);
+}
+
+inline __execution_space__ void accum_square_fingerprint(FPType &accum,
+                                                         FPType x) {
+  FPType square = compute_square_fingerprint(x);
+  accum = compute_add_fingerprint(accum, square);
+}
+
 #undef __execution_space__
 
 #ifndef MIRAGE_FINGERPRINT_USE_CUDA
@@ -159,7 +169,7 @@ inline void compute_matmul_fingerprint(
     for (int i = 0; i < M; ++i) {
       for (int k = 0; k < K; ++k) {
         for (int j = 0; j < N; ++j) {
-          compute_add_fingerprint(
+          accum_fingerprint(
               C_ptr[b * M * N + i * N + j],
               compute_mul_fingerprint(A_ptr[b * M * K + i * K + k],
                                       B_ptr[b * K * N + k * N + j]));
@@ -181,8 +191,7 @@ inline void compute_rms_norm_fingerprint(FPType *input_ptr,
     FPType square_sum = 0;
     for (int k = 0; k < norm_size; k++) {
       FPType x = input_ptr[i * norm_size + k];
-      x = compute_mul_fingerprint(x, x);
-      square_sum = compute_add_fingerprint(square_sum, x);
+      accum_square_fingerprint(square_sum, x);
     }
     // Compute rooted mean square
     FPType rms = 0;

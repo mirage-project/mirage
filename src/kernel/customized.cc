@@ -23,6 +23,7 @@
 #include "mirage/threadblock/smem_tensor.h"
 #include "mirage/utils/fingerprint_functions.h"
 #include "mirage/utils/hash_utils.h"
+#include "omp.h"
 #include <cassert>
 
 namespace mirage {
@@ -294,6 +295,7 @@ bool KNCustomizedOp::fingerprint(void) {
 
   auto compute_operator = [&](TBOperator const *op,
                               char *smem_buffer,
+                              bool is_first_iteration,
                               bool is_last_iteration) {
     assert(op->op_type != mirage::type::TB_INPUT_OP &&
            op->op_type != mirage::type::TB_OUTPUT_OP);
@@ -319,6 +321,73 @@ bool KNCustomizedOp::fingerprint(void) {
         int K = op->input_tensors[0].dim[1];
         utils::compute_matmul_fingerprint(
             input_buffers[0], input_buffers[1], output_buffers[0], 1, M, N, K);
+        break;
+      }
+      case type::TB_DIV_OP: {
+        for (int i = 0; i < op->output_tensors[0].num_elements(); ++i) {
+          int input1_stride = 1, input1_idx = 0;
+          int input2_stride = 1, input2_idx = 0;
+          {
+            int idx = i;
+            for (int d = op->input_tensors[0].num_dims - 1; d >= 0; --d) {
+              input1_idx += (idx % op->input_tensors[0].dim[d]) * input1_stride;
+              input1_stride *= op->input_tensors[0].dim[d];
+              input2_idx += (idx % op->input_tensors[1].dim[d]) * input2_stride;
+              input2_stride *= op->input_tensors[1].dim[d];
+              idx /= op->input_tensors[0].dim[d];
+            }
+          }
+          output_buffers[0][i] =
+              utils::compute_div_fingerprint(input_buffers[0][input1_idx],
+                                             input_buffers[1][input2_idx],
+                                             dmm->div_p_lookup_table,
+                                             dmm->div_q_lookup_table);
+        }
+        break;
+      }
+      case type::TB_FORLOOP_ACCUM_NO_RED_OP: {
+        if (is_first_iteration) {
+          memset(output_buffers[0],
+                 0,
+                 sizeof(FPType) * op->output_tensors[0].num_elements());
+        }
+        for (size_t i = 0; i < op->output_tensors[0].num_elements(); ++i) {
+          output_buffers[0][i] = utils::compute_add_fingerprint(
+              output_buffers[0][i], input_buffers[0][i]);
+        }
+        break;
+      }
+      case type::TB_FORLOOP_ACCUM_RED_LD_RMS_OP: {
+        if (is_first_iteration) {
+          memset(output_buffers[0],
+                 0,
+                 sizeof(FPType) * op->output_tensors[0].num_elements());
+        }
+        size_t reduction_degree =
+            op->input_tensors[0].dim[op->input_tensors[0].num_dims - 1];
+        for (size_t i = 0; i < op->output_tensors[0].num_elements(); ++i) {
+          FPType partial_accum_result = 0;
+          for (size_t j = 0; j < reduction_degree; ++j) {
+            utils::accum_square_fingerprint(
+                partial_accum_result,
+                input_buffers[0][i * reduction_degree + j]);
+          }
+          utils::accum_fingerprint(output_buffers[0][i], partial_accum_result);
+        }
+        if (is_last_iteration) {
+          FPType n = reduction_degree * bgraph.forloop_range % config::FP_PQ;
+          for (size_t i = 0; i < op->output_tensors[0].num_elements(); ++i) {
+            output_buffers[0][i] =
+                utils::compute_div_fingerprint(output_buffers[0][i],
+                                               n,
+                                               dmm->div_p_lookup_table,
+                                               dmm->div_q_lookup_table);
+            output_buffers[0][i] =
+                utils::compute_sqrt_fingerprint(output_buffers[0][i],
+                                                dmm->sqrt_p_lookup_table,
+                                                dmm->sqrt_q_lookup_table);
+          }
+        }
         break;
       }
       default: {
@@ -409,41 +478,49 @@ bool KNCustomizedOp::fingerprint(void) {
     }
   };
 
-  for (int device_id = 0; device_id < kgraph->gpu_dim.x; ++device_id) {
-    char *dmem_buffer = dmm->fp_base_ptr[device_id];
-    int thread_block_idx = 0;
-    for (int block_idx_x = 0; block_idx_x < bgraph.grid_dim.x; ++block_idx_x) {
-      for (int block_idx_y = 0; block_idx_y < bgraph.grid_dim.y;
-           ++block_idx_y) {
-        for (int block_idx_z = 0; block_idx_z < bgraph.grid_dim.z;
-             ++block_idx_z) {
-          char *smem_buffer = dmm->stensor_fp_base_ptr +
-                              thread_block_idx * config::MAX_SMEM_FP_SIZE;
-          for (int forloop_iteration = 0;
-               forloop_iteration < bgraph.forloop_range;
-               ++forloop_iteration) {
-            for (TBOperator const *op : bgraph.operators) {
-              if (op->op_type == mirage::type::TB_INPUT_OP) {
-                compute_input_operator(
-                    static_cast<mirage::threadblock::TBInputOp const *>(op),
-                    smem_buffer,
-                    dmem_buffer,
-                    {block_idx_x, block_idx_y, block_idx_z},
-                    forloop_iteration);
-              } else if (op->op_type == mirage::type::TB_OUTPUT_OP) {
-                compute_output_operator(
-                    static_cast<mirage::threadblock::TBOutputOp const *>(op),
-                    smem_buffer,
-                    dmem_buffer,
-                    {block_idx_x, block_idx_y, block_idx_z});
-              } else {
-                compute_operator(op,
-                                 smem_buffer,
-                                 forloop_iteration == bgraph.forloop_range - 1);
+#pragma omp parallel
+  {
+    for (int device_id = 0; device_id < kgraph->gpu_dim.x; ++device_id) {
+      char *dmem_buffer = dmm->fp_base_ptr[device_id];
+#pragma omp for collapse(3)
+      for (int block_idx_x = 0; block_idx_x < bgraph.grid_dim.x;
+           ++block_idx_x) {
+        for (int block_idx_y = 0; block_idx_y < bgraph.grid_dim.y;
+             ++block_idx_y) {
+          for (int block_idx_z = 0; block_idx_z < bgraph.grid_dim.z;
+               ++block_idx_z) {
+            int thread_block_idx =
+                block_idx_x * bgraph.grid_dim.y * bgraph.grid_dim.z +
+                block_idx_y * bgraph.grid_dim.z + block_idx_z;
+            char *smem_buffer = dmm->stensor_fp_base_ptr +
+                                thread_block_idx * config::MAX_SMEM_FP_SIZE;
+            for (int forloop_iteration = 0;
+                 forloop_iteration < bgraph.forloop_range;
+                 ++forloop_iteration) {
+              for (TBOperator const *op : bgraph.operators) {
+                if (op->op_type == mirage::type::TB_INPUT_OP) {
+                  compute_input_operator(
+                      static_cast<mirage::threadblock::TBInputOp const *>(op),
+                      smem_buffer,
+                      dmem_buffer,
+                      {block_idx_x, block_idx_y, block_idx_z},
+                      forloop_iteration);
+                } else if (op->op_type == mirage::type::TB_OUTPUT_OP) {
+                  compute_output_operator(
+                      static_cast<mirage::threadblock::TBOutputOp const *>(op),
+                      smem_buffer,
+                      dmem_buffer,
+                      {block_idx_x, block_idx_y, block_idx_z});
+                } else {
+                  compute_operator(op,
+                                   smem_buffer,
+                                   forloop_iteration == 0,
+                                   forloop_iteration ==
+                                       bgraph.forloop_range - 1);
+                }
               }
             }
           }
-          ++thread_block_idx;
         }
       }
     }

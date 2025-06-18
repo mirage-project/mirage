@@ -343,14 +343,23 @@ std::vector<int> DimStrategy::get_forloop_range_cand(
       }
       int dim = input_tensors[i].dim[forloop_dim[i]];
       if (input_map[i].x == forloop_dim[i]) {
+#ifdef MIRAGE_USE_NKI
+        return {};
+#endif
         assert(dim % grid_dim.x == 0);
         dim /= grid_dim.x;
       }
       if (input_map[i].y == forloop_dim[i]) {
+#ifdef MIRAGE_USE_NKI
+        return {};
+#endif
         assert(dim % grid_dim.y == 0);
         dim /= grid_dim.y;
       }
       if (input_map[i].z == forloop_dim[i]) {
+#ifdef MIRAGE_USE_NKI
+        return {};
+#endif
         assert(dim % grid_dim.z == 0);
         dim /= grid_dim.z;
       }

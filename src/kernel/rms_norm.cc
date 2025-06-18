@@ -17,6 +17,7 @@
 #include "mirage/kernel/device_memory_manager.h"
 #include "mirage/kernel/graph.h"
 #include "mirage/layout.h"
+#include "mirage/utils/fingerprint_functions.h"
 #include "mirage/utils/hash_utils.h"
 #include <cassert>
 
@@ -129,7 +130,22 @@ bool KNRMSNormOp::fingerprint(void) {
   kernel::DeviceMemoryManager *dmm =
       kernel::DeviceMemoryManager::get_instance();
 
-  return false;
+  for (int device_id = 0; device_id < dmm->num_devices; ++device_id) {
+    FPType *input_ptr = reinterpret_cast<FPType *>(dmm->fp_base_ptr[device_id] +
+                                                   input_tensors[0].fp_offset);
+    FPType *output_ptr = reinterpret_cast<FPType *>(
+        dmm->fp_base_ptr[device_id] + output_tensors[0].fp_offset);
+    utils::compute_rms_norm_fingerprint(input_ptr,
+                                        output_ptr,
+                                        dmm->div_p_lookup_table,
+                                        dmm->div_q_lookup_table,
+                                        dmm->sqrt_p_lookup_table,
+                                        dmm->sqrt_q_lookup_table,
+                                        num_samples,
+                                        normalized_size);
+  }
+
+  return true;
 }
 #endif
 

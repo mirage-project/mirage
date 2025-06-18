@@ -59,8 +59,11 @@ cpu::CTensor DTensor::copy_fingerprint_to_ctensor() const {
       kernel::DeviceMemoryManager::get_instance();
   for (size_t device_id = 0; device_id < owner_op->kgraph->gpu_dim.x;
        ++device_id) {
-    ctensor.fp_ptr[device_id] = reinterpret_cast<type::FPType *>(
-        dmm->fp_base_ptr[device_id] + fp_offset);
+    ctensor.fp_ptr[device_id] = new type::FPType[ctensor.num_elements()];
+    size_t size_of_fp = ctensor.num_elements() * sizeof(type::FPType);
+    memcpy(ctensor.fp_ptr[device_id],
+           dmm->fp_base_ptr[device_id] + fp_offset,
+           size_of_fp);
   }
   return ctensor;
 }
