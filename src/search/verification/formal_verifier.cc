@@ -208,7 +208,7 @@ std::vector<std::string>
             a = "(reduce " + a + " " + df + ")";
           }
           tensor_exprs.emplace(op->output_tensors[0].guid,
-                               "(rms_norm " + a + ")");
+                               "(rms" + a + ")");
           break;
         }
         case type::TBOperatorType::TB_FORLOOP_ACCUM_RED_LD_SUM_OP: {
