@@ -775,8 +775,8 @@ class KNGraph:
     ):
         return self.cygraph.fuse_tensors(input, fuse_dim, num_groups, name)
 
-    def register_task(self, bgraph: TBGraph, task_type: str):
-        return self.cygraph.register_task(bgraph.cygraph, task_type)
+    def register_task(self, bgraph: TBGraph, task_type: str, params: list[int] = None):
+        return self.cygraph.register_task(bgraph.cygraph, task_type, params)
 
     def generate_task_graph(self, num_gpus: int):
         return self.cygraph.generate_task_graph(num_gpus)

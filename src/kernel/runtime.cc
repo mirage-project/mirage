@@ -14,6 +14,7 @@
  */
 
 #include "mirage/kernel/graph.h"
+#include "mirage/kernel/task_register.h"
 #include "mirage/transpiler/utils.h"
 #include "mirage/utils/json_utils.h"
 #include <queue>
@@ -163,11 +164,12 @@ void register_mugraph(
     std::map<kernel::KNOperator *, std::map<dim3, TaskId, Dim3Comparator>>
         &all_task_maps,
     std::unordered_map<kn::KNOperator const *,
-                       std::tuple<int, int, TaskType>> const &task_configs) {
+                       std::tuple<int, int, TaskType, int>> const
+        &task_configs) {
   // push a begin-graph task and a event to launch dependent asks
   {
     EventDesc e(EVENT_LAUNCH_DEPENDENT_TASKS, 1, 0, 0);
-    TaskDesc t(TASK_BEGIN_TASK_GRAPH);
+    TaskDesc t(TASK_BEGIN_TASK_GRAPH, 0 /*variant_id*/);
     t.trigger_event = get_event_id(my_gpu_id, all_events.size(), false);
     all_tasks.push_back(t);
     all_events.push_back(e);
@@ -179,7 +181,8 @@ void register_mugraph(
     if (op->op_type == type::KNOperatorType::KN_INPUT_OP) {
       continue;
     }
-    std::tuple<int, int, TaskType> task_config = task_configs.find(op)->second;
+    std::tuple<int, int, TaskType, int> task_config =
+        task_configs.find(op)->second;
     std::map<dim3, TaskId, Dim3Comparator> cur_task_map;
     assert(op->op_type == type::KNOperatorType::KN_CUSTOMIZED_OP);
     // Customized op
@@ -193,6 +196,7 @@ void register_mugraph(
     int num_inputs = std::get<0>(task_config);
     int num_outputs = std::get<1>(task_config);
     TaskType task_type = std::get<2>(task_config);
+    int variant_id = std::get<3>(task_config);
     assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
     for (auto const &op : bgraph.operators) {
       assert(op->op_type == mirage::type::TB_INPUT_OP);
@@ -247,7 +251,7 @@ void register_mugraph(
               if (tgt_gpu_id == my_gpu_id) {
                 continue;
               }
-              TaskDesc task(TASK_NVSHMEM_COPY);
+              TaskDesc task(TASK_NVSHMEM_COPY, 0 /*variant_id*/);
               // task.trigger_event = get_event_id(
               //     tgt_gpu_id, all_events.size(), true /*nvshmem_event*/);
               //  Initialize input/output tensors to the task
@@ -292,7 +296,7 @@ void register_mugraph(
             }
             all_events.push_back(event_desc_1);
             // Step 2: create a task for reduce
-            TaskDesc task(TASK_REDUCE);
+            TaskDesc task(TASK_REDUCE, 0 /*variant_id*/);
             for (int i = 0; i < 2; i++) {
               TensorDesc desc;
               tb::STensor stensor = input_ops[i]->output_tensors[0];
@@ -339,7 +343,7 @@ void register_mugraph(
     for (bid.x = 0; bid.x < bgraph.grid_dim.x; bid.x++) {
       for (bid.y = 0; bid.y < bgraph.grid_dim.y; bid.y++) {
         for (bid.z = 0; bid.z < bgraph.grid_dim.z; bid.z++) {
-          TaskDesc task(task_type);
+          TaskDesc task(task_type, variant_id);
           // Initialize input tensors to the task
           for (auto const &input : input_ops) {
             TensorDesc desc;
@@ -537,7 +541,7 @@ TaskGraphResult print_task_graph(
     std::map<kernel::KNOperator *, std::map<dim3, TaskId, Dim3Comparator>> const
         &all_task_maps,
     std::unordered_map<kn::KNOperator const *,
-                       std::tuple<int, int, TaskType>> const &task_configs,
+                       std::tuple<int, int, TaskType, int>> const &task_configs,
     std::map<mirage::type::GuidType, IODesc> const &io_configs,
     bool use_json_format) {
   using mirage::runtime::IODesc;
@@ -551,6 +555,7 @@ TaskGraphResult print_task_graph(
     code.e("#include <filesystem>");
     code.e("using json = nlohmann::json;");
   }
+  code.e("using namespace mirage::runtime;");
   code.e("size_t get_event_id(int my_gpu_id, size_t event_pos, bool "
          "nvshmem_event) {");
   code.e("size_t event_id = ((static_cast<size_t>(my_gpu_id) << 32) | "
@@ -578,8 +583,8 @@ TaskGraphResult print_task_graph(
     code.e("json_file >> json_task_graph;");
     // load tasks
     code.e("for (json const &task : json_task_graph[\"all_tasks\"]) {");
-    code.e(
-        "TaskDesc task_desc(static_cast<TaskType>(task.at(\"task_type\")));");
+    code.e("TaskDesc task_desc(static_cast<TaskType>(task.at(\"task_type\")),");
+    code.e("            task.at(\"variant_id\"));");
     code.e("if (task.at(\"trigger_event\").is_number_integer()) {");
     code.e("task_desc.trigger_event = task.at(\"trigger_event\").get<unsigned "
            "long long int>();");
@@ -729,6 +734,7 @@ TaskGraphResult print_task_graph(
     tgbody.e("all_tasks.push_back(TaskDesc(TASK_TERMINATE));");
     json_task_graph["all_tasks"].push_back(
         json{{"task_type", TASK_TERMINATE},
+             {"variant_id", 0},
              {"inputs", {}},
              {"outputs", {}},
              {"trigger_event", EVENT_INVALID_ID},
@@ -739,6 +745,7 @@ TaskGraphResult print_task_graph(
     tgbody.e("all_tasks.push_back(TaskDesc(TASK_BEGIN_TASK_GRAPH));");
     json_task_graph["all_tasks"].push_back(
         json{{"task_type", TASK_BEGIN_TASK_GRAPH},
+             {"variant_id", 0},
              {"inputs", {}},
              {"outputs", {}},
              {"trigger_event",
@@ -752,7 +759,8 @@ TaskGraphResult print_task_graph(
       continue;
     }
     assert(op->op_type == type::KNOperatorType::KN_CUSTOMIZED_OP);
-    std::tuple<int, int, TaskType> task_config = task_configs.find(op)->second;
+    std::tuple<int, int, TaskType, int> task_config =
+        task_configs.find(op)->second;
 
     assert(all_task_maps.find(op) != all_task_maps.end());
     std::map<dim3, TaskId, Dim3Comparator> const &task_map =
@@ -809,6 +817,7 @@ TaskGraphResult print_task_graph(
               assert(task_desc.num_outputs == 1);
               json json_task = {
                   {"task_type", task_desc.task_type},
+                  {"variant_id", task_desc.variant_id},
                   {"inputs", {}},
                   {"outputs", {}},
                   {"trigger_event",
@@ -964,6 +973,7 @@ TaskGraphResult print_task_graph(
           if (task_desc.dependent_event == EVENT_INVALID_ID) {
             tgbody.e("task_desc.dependent_event = EVENT_INVALID_ID;");
             json_task = {{"task_type", task_desc.task_type},
+                         {"variant_id", task_desc.variant_id},
                          {"inputs", {}},
                          {"outputs", {}},
                          {"trigger_event",
@@ -977,6 +987,7 @@ TaskGraphResult print_task_graph(
                      (task_desc.dependent_event & 0xffffffff));
             json_task = {
                 {"task_type", task_desc.task_type},
+                {"variant_id", task_desc.variant_id},
                 {"inputs", {}},
                 {"outputs", {}},
                 {"trigger_event",
@@ -1242,6 +1253,40 @@ TaskGraphResult print_task_graph(
     code.e(tgbody.to_string());
   }
   code.e("}");
+  code.e("");
+
+  // Generate task implementation
+  std::map<TaskType, std::string> task_type_to_name;
+  task_type_to_name[TASK_EMBEDDING] = "TASK_EMBEDDING";
+  task_type_to_name[TASK_RMS_NORM_LINEAR] = "TASK_RMS_NORM_LINEAR";
+  task_type_to_name[TASK_ATTENTION_1] = "TASK_ATTENTION_1";
+  task_type_to_name[TASK_SILU_MUL_LINEAR_WITH_RESIDUAL] =
+      "TASK_SILU_MUL_LINEAR_WITH_RESIDUAL";
+  task_type_to_name[TASK_LINEAR_WITH_RESIDUAL] = "TASK_LINEAR_WITH_RESIDUAL";
+  task_type_to_name[TASK_ARGMAX_PARTIAL] = "TASK_ARGMAX_PARTIAL";
+  task_type_to_name[TASK_ARGMAX_REDUCE] = "TASK_ARGMAX_REDUCE";
+
+  code.e("__device__ __forceinline__");
+  code.e("void _execute_task(TaskDesc const& task_desc,");
+  code.e("                   int *step,");
+  code.e("                   long long *tokens) {");
+  TaskRegister *task_register = TaskRegister::get_instance();
+  bool first_task = true;
+  for (auto const &task : task_register->all_task_variants) {
+    for (size_t variant_id = 0; variant_id < task.second.size(); variant_id++) {
+      std::string cond = first_task ? "if" : "else if";
+      assert(task_type_to_name.find(task.first) != task_type_to_name.end());
+      code.e("$ (task_desc.task_type == $ && task_desc.variant_id == $) {",
+             cond,
+             task_type_to_name[task.first],
+             variant_id);
+      code.e("$", task.second[variant_id]);
+      code.e("}");
+      first_task = false;
+    }
+  }
+  code.e("}");
+
   // Write json to output file
   // std::ofstream out("task_graph.json");
   // out << json_task_graph.dump(2);
@@ -1266,7 +1311,7 @@ TaskGraphResult Graph::generate_task_graph(int _num_gpus) {
   // add the termination event to the event lists
   EventDesc e(EVENT_TERMINATION, 1, 0, 0);
   all_events.push_back(e);
-  TaskDesc t(TASK_TERMINATE);
+  TaskDesc t(TASK_TERMINATE, 0 /*variant_id*/);
   all_tasks.push_back(t);
   register_mugraph(*this,
                    num_gpus,

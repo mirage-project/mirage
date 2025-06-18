@@ -22,7 +22,7 @@ __device__ __forceinline__ void warp_reduce_max_idx(T &val, long long &idx) {
 #pragma unroll
   for (int offset = 16; offset > 0; offset /= 2) {
     float tmp = __shfl_down_sync(0xffffffff, (float)val, offset);
-    T other_val = (T) tmp;
+    T other_val = (T)tmp;
     long long other_idx = __shfl_down_sync(0xffffffff, idx, offset);
     if (other_val > val) {
       val = other_val;
@@ -101,7 +101,9 @@ template <typename T, int CHUNK_SIZE, int NUM_PARTIAL_TASKS>
 __device__ __forceinline__ void
     argmax_reduce_kernel(void const *__restrict__ input_val_ptr,
                          void const *__restrict__ input_idx_ptr,
-                         void *__restrict__ final_output_ptr) {
+                         void *__restrict__ final_output_ptr,
+                         int step,
+                         long long *tokens) {
   T const *__restrict__ partial_vals = static_cast<T const *>(input_val_ptr);
   long long const *__restrict__ partial_idxs =
       static_cast<long long const *>(input_idx_ptr);
@@ -129,8 +131,10 @@ __device__ __forceinline__ void
       long long winning_chunk_idx = local_packed_idx >> 32;
       long long winning_relative_idx = local_packed_idx & 0xFFFFFFFF;
       final_output[0] = winning_chunk_idx * CHUNK_SIZE + winning_relative_idx;
+      tokens[step] = winning_chunk_idx * CHUNK_SIZE + winning_relative_idx;
     } else {
       final_output[0] = -1;
+      tokens[step] = -1;
     }
   }
 }

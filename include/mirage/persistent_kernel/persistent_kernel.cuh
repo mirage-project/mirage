@@ -26,6 +26,9 @@
 using bfloat16 = type::bfloat16_t;
 using namespace mirage::runtime;
 
+__device__ __forceinline__ void
+    _execute_task(TaskDesc const &task_desc, int *step, long long *tokens);
+
 __device__ __forceinline__ bool is_termination_event(size_t event_loc,
                                                      EventDesc e) {
   return (event_loc == 0);
@@ -69,12 +72,15 @@ __global__ void init_kernel(RuntimeConfig config) {
   }
 }
 
-__device__ __forceinline__ bool prepare_next_batch(RuntimeConfig config) {
+__device__ __forceinline__ bool
+    prepare_next_batch(RuntimeConfig const &config) {
   int step = config.step[0];
-  // printf("step = %d\n", step);
   config.step[0] = step + 1;
-  // return step + 1 <= 50;
-  return false;
+  if ((step >= 500) || (config.profiling)) {
+    return false;
+  } else {
+    return true;
+  }
 }
 
 __device__ __forceinline__ int get_rand_sched_id(size_t event_index,
@@ -295,133 +301,30 @@ __global__ void persistent_kernel(RuntimeConfig config) {
         return;
       } else if (task_desc.task_type == TASK_BEGIN_TASK_GRAPH) {
         // Do nothing
+      } else if (task_desc.task_type == TASK_NVSHMEM_COPY) {
+        size_t size_in_bytes = 2;
+        for (int i = 0; i < task_desc.inputs[0].num_dims; i++) {
+          size_in_bytes *= task_desc.inputs[0].dim[i];
+        }
+        size_t event_index = get_event_position_index(task_desc.trigger_event);
+        int gpu_id =
+            static_cast<int>(get_event_gpu_id(task_desc.trigger_event));
+        assert(gpu_id < config.num_gpus);
+        assert(gpu_id != config.my_gpu_id);
+        nvshmemx_putmem_signal_block(
+            task_desc.outputs[0].base_ptr,
+            task_desc.inputs[0].base_ptr,
+            size_in_bytes,
+            reinterpret_cast<uint64_t *>(
+                &config.all_event_counters[event_index]),
+            1 /*signal*/,
+            NVSHMEM_SIGNAL_ADD,
+            gpu_id);
+      } else if (task_desc.task_type == TASK_REDUCE) {
+        TB_SLEEP_US(1);
       } else {
-        switch (task_desc.task_type) {
-          case TASK_RMS_NORM_LINEAR: {
-            if (task_desc.outputs[0].stride[0] == 6144) {
-              kernel::norm_linear_task_impl<bfloat16, 1, 64, 4096, 6144>(
-                  task_desc.inputs[0].base_ptr,
-                  task_desc.inputs[1].base_ptr,
-                  task_desc.inputs[2].base_ptr,
-                  1e-6f, // eps
-                  task_desc.outputs[0].base_ptr);
-            } else if (task_desc.outputs[0].stride[0] == 24576) {
-              kernel::norm_linear_task_impl<bfloat16, 1, 256, 4096, 24576>(
-                  task_desc.inputs[0].base_ptr,
-                  task_desc.inputs[1].base_ptr,
-                  task_desc.inputs[2].base_ptr,
-                  1e-6f, // eps
-                  task_desc.outputs[0].base_ptr);
-            } else if (task_desc.outputs[0].stride[0] == 153600) {
-              kernel::norm_linear_task_impl<bfloat16, 1, 1600, 4096, 153600>(
-                  task_desc.inputs[0].base_ptr,
-                  task_desc.inputs[1].base_ptr,
-                  task_desc.inputs[2].base_ptr,
-                  1e-6f, // eps
-                  task_desc.outputs[0].base_ptr);
-            } else {
-              printf("Unsupported RMSNorm linear task stride: %d\n",
-                     task_desc.outputs[0].stride[0]);
-              assert(false && "Unsupported RMSNorm linear task");
-            }
-            break;
-          }
-          case TASK_EMBEDDING: {
-            kernel::embedding_kernel<bfloat16>(task_desc.inputs[0].base_ptr,
-                                               task_desc.inputs[1].base_ptr,
-                                               task_desc.outputs[0].base_ptr);
-            break;
-          }
-          case TASK_ATTENTION_1: {
-            kernel::single_batch_decoding_kernel<bfloat16, 4, 1, 128, 1024>(
-                task_desc.inputs[0].base_ptr,
-                task_desc.inputs[1].base_ptr,
-                task_desc.inputs[2].base_ptr,
-                task_desc.outputs[0].base_ptr,
-                config.step[0] /*seq_len*/,
-                true,
-                true,
-                task_desc.inputs[3].base_ptr,
-                task_desc.inputs[4].base_ptr,
-                task_desc.inputs[5].base_ptr,
-                task_desc.inputs[6].base_ptr,
-                1e-6f /*q_eps*/,
-                1e-6f /*k_eps*/);
-            break;
-          }
-          case TASK_ATTENTION_2: {
-            TB_SLEEP_US(1);
-            break;
-          }
-          case TASK_SILU_MUL_LINEAR_WITH_RESIDUAL: {
-            kernel::silu_mul_linear_task<bfloat16>(
-                task_desc.outputs[0].dim[task_desc.outputs[0].num_dims - 1],
-                task_desc.inputs[0].base_ptr,
-                task_desc.inputs[1].base_ptr,
-                task_desc.inputs[2].base_ptr,
-                task_desc.outputs[0].base_ptr);
-            break;
-          }
-          case TASK_NVSHMEM_COPY: {
-            size_t size_in_bytes = 2;
-            for (int i = 0; i < task_desc.inputs[0].num_dims; i++) {
-              size_in_bytes *= task_desc.inputs[0].dim[i];
-            }
-            size_t event_index =
-                get_event_position_index(task_desc.trigger_event);
-            int gpu_id =
-                static_cast<int>(get_event_gpu_id(task_desc.trigger_event));
-            assert(gpu_id < config.num_gpus);
-            assert(gpu_id != config.my_gpu_id);
-            nvshmemx_putmem_signal_block(
-                task_desc.outputs[0].base_ptr,
-                task_desc.inputs[0].base_ptr,
-                size_in_bytes,
-                reinterpret_cast<uint64_t *>(
-                    &config.all_event_counters[event_index]),
-                1 /*signal*/,
-                NVSHMEM_SIGNAL_ADD,
-                gpu_id);
-            // nvshmem_fence();
-            break;
-          }
-          case TASK_REDUCE: {
-            TB_SLEEP_US(10);
-            break;
-          }
-          case TASK_LINEAR_WITH_RESIDUAL: {
-            kernel::linear_kernel<bfloat16, 1, 64, 4096, 6144>(
-                task_desc.inputs[0].base_ptr,
-                task_desc.inputs[1].base_ptr,
-                task_desc.inputs[2].base_ptr,
-                task_desc.outputs[0].base_ptr);
-            break;
-          }
-          case TASK_ARGMAX: {
-            // We may still need this for small vocab size.
-            // kernel::argmax_kernel<bfloat16, 1, 153600>(
-            //    task_desc.inputs[0].base_ptr, task_desc.outputs[0].base_ptr);
-            break;
-          }
-          case TASK_ARGMAX_PARTIAL: {
-            kernel::argmax_partial_kernel<bfloat16, 1600>(
-                task_desc.inputs[0].base_ptr,
-                task_desc.outputs[0].base_ptr,
-                task_desc.outputs[1].base_ptr);
-            break;
-          }
-          case TASK_ARGMAX_REDUCE: {
-            kernel::argmax_reduce_kernel<bfloat16, 1600, 96>(
-                task_desc.inputs[0].base_ptr,
-                task_desc.inputs[1].base_ptr,
-                task_desc.outputs[0].base_ptr);
-            break;
-          }
-          default: {
-            assert(false && "Unimplemented task");
-          }
-        } // case
-      } // else
+        _execute_task(task_desc, config.step, config.tokens);
+      }
       __syncthreads();
       if (config.profiling && task_desc.task_type != TASK_TERMINATE) {
         PROFILER_EVENT_END(task_desc.task_type, task_counter++);
@@ -680,13 +583,12 @@ __global__ void persistent_kernel(RuntimeConfig config) {
             custom_atomic_add_u64(
                 &config.worker_queue_last_ready_task_id[next_worker], 1);
             if (config.verbose) {
-              printf("[%d][SCHD] schd_id(%d) iter_num(%llu) task_idx(%llu) "
+              printf("[%d][SCHD] schd_id(%d) iter_num(%llu) task_idx(1) "
                      "worker_id(%d) "
                      "worker_last_ready_pos(%llu)\n",
                      config.my_gpu_id,
                      sched_id,
                      iteration_num + 1,
-                     1,
                      next_worker,
                      last_task_id + 1);
             }
@@ -814,8 +716,9 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
                                        int num_workers,
                                        int num_local_schedulers,
                                        int num_remote_schedulers) {
-  assert(meta_tensors.size() == 1);
+  assert(meta_tensors.size() == 2);
   global_runtime_config.step = static_cast<int *>(meta_tensors[0]);
+  global_runtime_config.tokens = static_cast<long long *>(meta_tensors[1]);
   global_runtime_config.num_workers = num_workers;
   global_runtime_config.num_local_schedulers = num_local_schedulers;
   global_runtime_config.num_remote_schedulers = num_remote_schedulers;

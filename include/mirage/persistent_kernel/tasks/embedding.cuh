@@ -20,18 +20,21 @@ template <typename T>
 __device__ __forceinline__ void
     embedding_kernel(void const *__restrict__ input_ptr,
                      void const *__restrict__ embedding_ptr,
-                     void *__restrict__ output_ptr) {
-  int64_t const *__restrict__ input_ids =
-      static_cast<int64_t const *>(input_ptr);
+                     void *__restrict__ output_ptr,
+                     int step,
+                     long long *tokens) {
+  // int64_t const *__restrict__ input_ids =
+  //     static_cast<int64_t const *>(input_ptr);
   T const *__restrict__ embedding = static_cast<T const *>(embedding_ptr);
   T *__restrict__ output = static_cast<T *>(output_ptr);
   constexpr int BATCH_SIZE = 1;
   constexpr int OUT_DIM = 4096;
 
   for (int i = threadIdx.x; i < BATCH_SIZE * OUT_DIM; i += NUM_THREADS) {
-    int idx = i / OUT_DIM;
+    // int idx = i / OUT_DIM;
     int off = i % OUT_DIM;
-    int64_t wordIdx = input_ids[idx];
+    // int64_t wordIdx = input_ids[idx];
+    int64_t wordIdx = tokens[step - 1];
     output[i] = embedding[wordIdx * OUT_DIM + off];
   }
 }

@@ -113,7 +113,7 @@ if __name__ == "__main__":
             num_workers=96,
             num_local_schedulers=48,
             num_remote_schedulers=0,
-            meta_tensors=[step],
+            meta_tensors=[step, tokens],
             profiler_tensor=profiler_tensor,
         )
         x = mpk.attach_input(torch_tensor=input_tokens, name="input_token")
@@ -359,13 +359,13 @@ if __name__ == "__main__":
             input=argmax_in,
             output=(argmax_part_value, argmax_part_index),
             grid_dim=(96, 1, 1),
-            block_dim=(1, 1, 1)
+            block_dim=(128, 1, 1)
         )
         mpk.argmax_reduce_layer(
             input=(argmax_part_value, argmax_part_index),
             output=argmax_out,
             grid_dim=(1,1,1),
-            block_dim=(1,1,1)
+            block_dim=(128,1,1)
         )
 
         results = mpk.kn_graph.generate_task_graph(num_gpus=world_size)
@@ -375,18 +375,6 @@ if __name__ == "__main__":
             f.write(results["cuda_code"])
 
         mpk.compile()
-
-        # kernel = mirage.PersistentKernel(
-        #     file_path="/home/ubuntu/mirage_cpp/debug_build/test.cu",
-        #     mpi_rank=rank,
-        #     num_workers=96,
-        #     num_local_schedulers=48,
-        #     num_remote_schedulers=0,
-        #     use_nvshmem=True,
-        #     input_tensors=[item[1] for item in input_tensors],
-        #     meta_tensors=[step],
-        #     profiler_tensor=profiler_tensor,
-        # )
 
     # g = torch.cuda.CUDAGraph()
     stream = torch.cuda.Stream()
@@ -452,14 +440,14 @@ if __name__ == "__main__":
         torch.cuda.synchronize()
         run_time = starter.elapsed_time(ender)
 
-        generated_ids = tokens[:, :prev_pos]
+        generated_ids = tokens[:, :step[0]]
 
         response = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
         print(response)
 
         print(
             "Prompt length {}, generate length {}, per-token latency {} ms".format(
-                prompt_len, 5120, run_time / (5120 - warmup)
+                prompt_len, step[0], run_time / (step[0] - warmup)
             )
         )
     if world_size > 1:
