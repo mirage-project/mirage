@@ -27,6 +27,16 @@ file(GLOB_RECURSE MIRAGE_SRCS
   src/*.cc
 )
 
+if (${USE_CUDA} STREQUAL "OFF")
+  file(GLOB_RECURSE MIRAGE_EXCLUDE_SRCS
+    src/transpiler/*.cc
+  )
+
+  list(REMOVE_ITEM MIRAGE_SRCS ${MIRAGE_EXCLUDE_SRCS})
+  
+  message(STATUS "MIRAGE_SRCS: ${MIRAGE_SRCS}")
+endif()
+
 file(GLOB_RECURSE MIRAGE_CUDA_SRCS
   src/*.cu
 )
@@ -56,6 +66,8 @@ endif()
 
 #set CUDA
 if (NOT "${USE_CUDA}" STREQUAL "OFF")
+  target_compile_definitions(mirage_runtime PUBLIC MIRAGE_USE_CUDA)
+  target_compile_definitions(mirage_runtime PUBLIC MIRAGE_FINGERPRINT_USE_CUDA)
   include(cmake/cuda.cmake)
   find_cuda(${USE_CUDA})
   if (CUDA_FOUND)
@@ -94,6 +106,9 @@ list(APPEND MIRAGE_LINK_LIBS ${Z3_LIBRARIES})
 
 add_subdirectory(deps/json)
 list(APPEND MIRAGE_LINK_LIBS nlohmann_json::nlohmann_json)
+
+link_directories(${CMAKE_SOURCE_DIR}/build/release)
+list(APPEND MIRAGE_LINK_LIBS abstract_subexpr)
 
 #add_subdirectory(deps/z3 z3 EXCLUDE_FROM_ALL)
 #include_directories(deps/z3/src/api/c++)
@@ -152,7 +167,13 @@ set_target_properties(mirage_runtime PROPERTIES CUDA_ARCHITECTURES "70;75;80;86;
 
 target_compile_features(mirage_runtime PUBLIC cxx_std_17)
 
-target_compile_definitions(mirage_runtime PUBLIC MIRAGE_USE_NKI)
+if (NOT "${USE_TRITON}" STREQUAL "OFF")
+  target_compile_definitions(mirage_runtime PUBLIC MIRAGE_USE_TRITON)
+endif()
+
+if (NOT "${USE_NKI}" STREQUAL "OFF")
+  target_compile_definitions(mirage_runtime PUBLIC MIRAGE_USE_NKI)
+endif()
 
 target_link_libraries(mirage_runtime ${MIRAGE_LINK_LIBS})
 
