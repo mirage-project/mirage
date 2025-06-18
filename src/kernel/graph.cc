@@ -14,8 +14,8 @@
  */
 
 #include "mirage/kernel/graph.h"
-#include "mirage/kernel/customized.h"
 #include "mirage/config.h"
+#include "mirage/kernel/customized.h"
 #include "mirage/kernel/device_memory_manager.h"
 #include "mirage/kernel/task_register.h"
 #include "mirage/utils/hash_utils.h"
@@ -400,44 +400,44 @@ DTensor *Graph::fuse_tensors(std::vector<DTensor const *> inputs,
 
 void Graph::register_task(char const *task_type, std::vector<int> params) {
   std::string name = std::string(task_type);
-  KNOperator const * op = operators.back();
+  KNOperator const *op = operators.back();
   assert(op->op_type == type::KN_CUSTOMIZED_OP);
-  KNCustomizedOp const* customized = static_cast<KNCustomizedOp const *>(op);
-  TaskRegister * task_register = TaskRegister::get_instance();
+  KNCustomizedOp const *customized = static_cast<KNCustomizedOp const *>(op);
+  TaskRegister *task_register = TaskRegister::get_instance();
   if (name == "embedding") {
-    int variant_id = task_register->register_embedding_task(customized->bgraph, params);
-    task_config[op] =
-        std::make_tuple(2, 1, TASK_EMBEDDING, variant_id);
+    int variant_id =
+        task_register->register_embedding_task(customized->bgraph, params);
+    task_config[op] = std::make_tuple(2, 1, TASK_EMBEDDING, variant_id);
   } else if (name == "rmsnorm_linear") {
-    int variant_id = task_register->register_rmsnorm_linear_task(customized->bgraph, params);
-    task_config[op] =
-        std::make_tuple(3, 1, TASK_RMS_NORM_LINEAR, variant_id);
+    int variant_id =
+        task_register->register_rmsnorm_linear_task(customized->bgraph, params);
+    task_config[op] = std::make_tuple(3, 1, TASK_RMS_NORM_LINEAR, variant_id);
   } else if (name == "attention") {
-    int variant_id = task_register->register_attention_task(customized->bgraph, params);
-    task_config[op] =
-        std::make_tuple(7, 1, TASK_ATTENTION_1, variant_id);
+    int variant_id =
+        task_register->register_attention_task(customized->bgraph, params);
+    task_config[op] = std::make_tuple(7, 1, TASK_ATTENTION_1, variant_id);
   } else if (name == "linear_with_residual") {
-    int variant_id = task_register->register_linear_with_residual_task(customized->bgraph, params);
+    int variant_id = task_register->register_linear_with_residual_task(
+        customized->bgraph, params);
     task_config[op] =
         std::make_tuple(3, 1, TASK_LINEAR_WITH_RESIDUAL, variant_id);
   } else if (name == "silu_mul_linear_with_residual") {
-    int variant_id = task_register->register_silu_mul_linear_with_residual_task(customized->bgraph, params);
+    int variant_id = task_register->register_silu_mul_linear_with_residual_task(
+        customized->bgraph, params);
     task_config[op] =
         std::make_tuple(3, 1, TASK_SILU_MUL_LINEAR_WITH_RESIDUAL, variant_id);
   } else if (name == "argmax") {
-    task_config[op] =
-        std::make_tuple(1, 1, TASK_ARGMAX, 0);
+    task_config[op] = std::make_tuple(1, 1, TASK_ARGMAX, 0);
   } else if (name == "argmax_partial") {
-    int variant_id = task_register->register_argmax_partial_task(customized->bgraph, params);
-    task_config[op] =
-        std::make_tuple(1, 2, TASK_ARGMAX_PARTIAL, variant_id);
+    int variant_id =
+        task_register->register_argmax_partial_task(customized->bgraph, params);
+    task_config[op] = std::make_tuple(1, 2, TASK_ARGMAX_PARTIAL, variant_id);
   } else if (name == "argmax_reduce") {
-    int variant_id = task_register->register_argmax_reduce_task(customized->bgraph, params);
-    task_config[op] =
-        std::make_tuple(2, 1, TASK_ARGMAX_REDUCE, variant_id);
+    int variant_id =
+        task_register->register_argmax_reduce_task(customized->bgraph, params);
+    task_config[op] = std::make_tuple(2, 1, TASK_ARGMAX_REDUCE, variant_id);
   } else if (name == "allreduce") {
-    task_config[op] =
-        std::make_tuple(2, 1, TASK_ALLREDUCE, 0);
+    task_config[op] = std::make_tuple(2, 1, TASK_ALLREDUCE, 0);
   } else {
     assert(false && "Unsupported task type");
   }

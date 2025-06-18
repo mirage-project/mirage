@@ -13,8 +13,8 @@
  * limitations under the License.
  */
 
-#include "mirage/kernel/operator.h"
 #include "mirage/kernel/task_register.h"
+#include "mirage/kernel/operator.h"
 #include "mirage/transpiler/utils.h"
 
 namespace mirage {
@@ -34,7 +34,8 @@ TaskRegister *TaskRegister::get_instance() {
   return singleton;
 }
 
-int TaskRegister::register_task_variant(runtime::TaskType type, std::string const &code) {
+int TaskRegister::register_task_variant(runtime::TaskType type,
+                                        std::string const &code) {
   std::vector<std::string> &variants = all_task_variants[type];
   for (size_t i = 0; i < variants.size(); i++) {
     if (variants[i] == code) {
@@ -84,13 +85,17 @@ int TaskRegister::register_rmsnorm_linear_task(threadblock::Graph const &bgraph,
   reduction_size = input_ops[0]->dtensor.dim[1];
   // get output stride
   assert(output_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
-  kn::KNInputOp* kn_input_op = static_cast<kn::KNInputOp*>(output_ops[0]->dtensor.owner_op);
+  kn::KNInputOp *kn_input_op =
+      static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
   output_stride = static_cast<int>(kn_input_op->input_strides[0]);
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
   code.e("kernel::norm_linear_task_impl<bfloat16, $, $, $, $>(",
-      batch_size, output_size, reduction_size, output_stride);
+         batch_size,
+         output_size,
+         reduction_size,
+         output_stride);
   code.e("    task_desc.inputs[0].base_ptr,");
   code.e("    task_desc.inputs[1].base_ptr,");
   code.e("    task_desc.inputs[2].base_ptr,");
@@ -136,7 +141,10 @@ int TaskRegister::register_attention_task(threadblock::Graph const &bgraph,
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
   code.e("kernel::single_batch_decoding_kernel<bfloat16, $, $, $, $>(",
-      num_q_heads / num_kv_heads, 1, head_dim, kv_stride);
+         num_q_heads / num_kv_heads,
+         1,
+         head_dim,
+         kv_stride);
   code.e("    task_desc.inputs[0].base_ptr,");
   code.e("    task_desc.inputs[1].base_ptr,");
   code.e("    task_desc.inputs[2].base_ptr,");
@@ -155,8 +163,7 @@ int TaskRegister::register_attention_task(threadblock::Graph const &bgraph,
 }
 
 int TaskRegister::register_silu_mul_linear_with_residual_task(
-    threadblock::Graph const &bgraph,
-    std::vector<int> const &params) {
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
   assert(params.size() == 0);
   int batch_size = 0, output_size = 0, reduction_size = 0, output_stride = 0;
   std::vector<tb::TBInputOp *> input_ops;
@@ -180,24 +187,28 @@ int TaskRegister::register_silu_mul_linear_with_residual_task(
   reduction_size = input_ops[0]->dtensor.dim[1] / 2;
   // get output stride
   assert(output_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
-  kn::KNInputOp* kn_input_op = static_cast<kn::KNInputOp*>(output_ops[0]->dtensor.owner_op);
+  kn::KNInputOp *kn_input_op =
+      static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
   output_stride = static_cast<int>(kn_input_op->input_strides[0]);
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
   code.e("kernel::silu_mul_linear_task_impl<bfloat16, $, $, $, $>(",
-      batch_size, output_size, reduction_size, output_stride);
+         batch_size,
+         output_size,
+         reduction_size,
+         output_stride);
   code.e("    task_desc.inputs[0].base_ptr,");
   code.e("    task_desc.inputs[1].base_ptr,");
   code.e("    task_desc.inputs[2].base_ptr,");
   code.e("    task_desc.outputs[0].base_ptr);");
   printf("%s\n", code.to_string().c_str());
-  return register_task_variant(TASK_SILU_MUL_LINEAR_WITH_RESIDUAL, code.to_string());
+  return register_task_variant(TASK_SILU_MUL_LINEAR_WITH_RESIDUAL,
+                               code.to_string());
 }
 
 int TaskRegister::register_linear_with_residual_task(
-    threadblock::Graph const &bgraph,
-    std::vector<int> const &params) {
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
   assert(params.size() == 0);
   int batch_size = 0, output_size = 0, reduction_size = 0, output_stride = 0;
   std::vector<tb::TBInputOp *> input_ops;
@@ -221,13 +232,17 @@ int TaskRegister::register_linear_with_residual_task(
   reduction_size = input_ops[0]->dtensor.dim[1];
   // get output stride
   assert(output_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
-  kn::KNInputOp* kn_input_op = static_cast<kn::KNInputOp*>(output_ops[0]->dtensor.owner_op);
+  kn::KNInputOp *kn_input_op =
+      static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
   output_stride = static_cast<int>(kn_input_op->input_strides[0]);
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
   code.e("kernel::linear_kernel<bfloat16, $, $, $, $>(",
-      batch_size, output_size, reduction_size, output_stride);
+         batch_size,
+         output_size,
+         reduction_size,
+         output_stride);
   code.e("    task_desc.inputs[0].base_ptr,");
   code.e("    task_desc.inputs[1].base_ptr,");
   code.e("    task_desc.inputs[2].base_ptr,");
@@ -237,9 +252,8 @@ int TaskRegister::register_linear_with_residual_task(
   return register_task_variant(TASK_LINEAR_WITH_RESIDUAL, code.to_string());
 }
 
-int TaskRegister::register_argmax_partial_task(
-    threadblock::Graph const &bgraph,
-    std::vector<int> const &params) {
+int TaskRegister::register_argmax_partial_task(threadblock::Graph const &bgraph,
+                                               std::vector<int> const &params) {
   assert(params.size() == 0);
   std::vector<tb::TBInputOp *> input_ops;
   std::vector<tb::TBInputOp *> output_ops;
@@ -260,8 +274,7 @@ int TaskRegister::register_argmax_partial_task(
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
-  code.e("kernel::argmax_partial_kernel<bfloat16, $>(",
-      num_elements);
+  code.e("kernel::argmax_partial_kernel<bfloat16, $>(", num_elements);
   code.e("    task_desc.inputs[0].base_ptr,");
   code.e("    task_desc.outputs[0].base_ptr,");
   code.e("    task_desc.outputs[1].base_ptr);");
@@ -269,9 +282,8 @@ int TaskRegister::register_argmax_partial_task(
   return register_task_variant(TASK_ARGMAX_PARTIAL, code.to_string());
 }
 
-int TaskRegister::register_argmax_reduce_task(
-    threadblock::Graph const &bgraph,
-    std::vector<int> const &params) {
+int TaskRegister::register_argmax_reduce_task(threadblock::Graph const &bgraph,
+                                              std::vector<int> const &params) {
   // params[0]: output size
   assert(params.size() == 1);
   std::vector<tb::TBInputOp *> input_ops;
@@ -293,8 +305,7 @@ int TaskRegister::register_argmax_reduce_task(
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
-  code.e("kernel::argmax_reduce_kernel<bfloat16, $, $>(",
-      params[0], num_parts);
+  code.e("kernel::argmax_reduce_kernel<bfloat16, $, $>(", params[0], num_parts);
   code.e("    task_desc.inputs[0].base_ptr,");
   code.e("    task_desc.inputs[1].base_ptr,");
   code.e("    task_desc.outputs[0].base_ptr);");

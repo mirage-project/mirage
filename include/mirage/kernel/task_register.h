@@ -15,8 +15,8 @@
 
 #pragma once
 
-#include "mirage/threadblock/graph.h"
 #include "mirage/persistent_kernel/runtime_header.h"
+#include "mirage/threadblock/graph.h"
 
 namespace mirage {
 namespace runtime {
@@ -28,18 +28,24 @@ public:
 
 public:
   static TaskRegister *get_instance();
-  int register_embedding_task(threadblock::Graph const &bgraph, std::vector<int> const &params);
-  int register_rmsnorm_linear_task(threadblock::Graph const &bgraph, std::vector<int> const &params);
-  int register_attention_task(threadblock::Graph const &bgraph, std::vector<int> const &params);
-  int register_linear_with_residual_task(threadblock::Graph const &bgraph, std::vector<int> const &params);
-  int register_silu_mul_linear_with_residual_task(threadblock::Graph const &bgraph, std::vector<int> const &params);
-  int register_argmax_partial_task(threadblock::Graph const &bgraph, std::vector<int> const &params);
-  int register_argmax_reduce_task(threadblock::Graph const &bgraph, std::vector<int> const &params);
-  int register_task_variant(TaskType type, std::string const& code);
+  int register_embedding_task(threadblock::Graph const &bgraph,
+                              std::vector<int> const &params);
+  int register_rmsnorm_linear_task(threadblock::Graph const &bgraph,
+                                   std::vector<int> const &params);
+  int register_attention_task(threadblock::Graph const &bgraph,
+                              std::vector<int> const &params);
+  int register_linear_with_residual_task(threadblock::Graph const &bgraph,
+                                         std::vector<int> const &params);
+  int register_silu_mul_linear_with_residual_task(
+      threadblock::Graph const &bgraph, std::vector<int> const &params);
+  int register_argmax_partial_task(threadblock::Graph const &bgraph,
+                                   std::vector<int> const &params);
+  int register_argmax_reduce_task(threadblock::Graph const &bgraph,
+                                  std::vector<int> const &params);
+  int register_task_variant(TaskType type, std::string const &code);
 
 public:
-
-  std::map<TaskType, std::vector<std::string> > all_task_variants;
+  std::map<TaskType, std::vector<std::string>> all_task_variants;
 };
 
 } // namespace runtime

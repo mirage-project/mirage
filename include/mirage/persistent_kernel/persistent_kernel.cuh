@@ -26,7 +26,8 @@
 using bfloat16 = type::bfloat16_t;
 using namespace mirage::runtime;
 
-__device__ __forceinline__ void _execute_task(TaskDesc const& task_desc, int *step);
+__device__ __forceinline__ void _execute_task(TaskDesc const &task_desc,
+                                              int *step);
 
 __device__ __forceinline__ bool is_termination_event(size_t event_loc,
                                                      EventDesc e) {
@@ -75,7 +76,7 @@ __device__ __forceinline__ bool prepare_next_batch(RuntimeConfig config) {
   int step = config.step[0];
   // printf("step = %d\n", step);
   config.step[0] = step + 1;
-  //return step + 1 <= 500;
+  // return step + 1 <= 500;
   return false;
 }
 
@@ -302,8 +303,7 @@ __global__ void persistent_kernel(RuntimeConfig config) {
         for (int i = 0; i < task_desc.inputs[0].num_dims; i++) {
           size_in_bytes *= task_desc.inputs[0].dim[i];
         }
-        size_t event_index =
-            get_event_position_index(task_desc.trigger_event);
+        size_t event_index = get_event_position_index(task_desc.trigger_event);
         int gpu_id =
             static_cast<int>(get_event_gpu_id(task_desc.trigger_event));
         assert(gpu_id < config.num_gpus);
