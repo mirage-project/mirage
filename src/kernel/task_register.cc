@@ -89,7 +89,7 @@ int TaskRegister::register_rmsnorm_linear_task(threadblock::Graph const &bgraph,
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
-  code.e("kernel::norm_linear_task_imple<bfloat16, $, $, $, $>(",
+  code.e("kernel::norm_linear_task_impl<bfloat16, $, $, $, $>(",
       batch_size, output_size, reduction_size, output_stride);
   code.e("    task_desc.inputs[0].base_ptr,");
   code.e("    task_desc.inputs[1].base_ptr,");
@@ -231,7 +231,8 @@ int TaskRegister::register_linear_with_residual_task(
   code.e("    task_desc.inputs[0].base_ptr,");
   code.e("    task_desc.inputs[1].base_ptr,");
   code.e("    task_desc.inputs[2].base_ptr,");
-  code.e("    task_desc.outputs[0].base_ptr);");
+  code.e("    task_desc.outputs[0].base_ptr,");
+  code.e("    true);");
   printf("%s\n", code.to_string().c_str());
   return register_task_variant(TASK_LINEAR_WITH_RESIDUAL, code.to_string());
 }

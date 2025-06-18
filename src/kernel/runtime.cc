@@ -14,6 +14,7 @@
  */
 
 #include "mirage/kernel/graph.h"
+#include "mirage/kernel/task_register.h"
 #include "mirage/transpiler/utils.h"
 #include "mirage/utils/json_utils.h"
 #include <queue>
@@ -552,6 +553,7 @@ TaskGraphResult print_task_graph(
     code.e("#include <filesystem>");
     code.e("using json = nlohmann::json;");
   }
+  code.e("using namespace mirage::runtime;");
   code.e("size_t get_event_id(int my_gpu_id, size_t event_pos, bool "
          "nvshmem_event) {");
   code.e("size_t event_id = ((static_cast<size_t>(my_gpu_id) << 32) | "
@@ -580,7 +582,8 @@ TaskGraphResult print_task_graph(
     // load tasks
     code.e("for (json const &task : json_task_graph[\"all_tasks\"]) {");
     code.e(
-        "TaskDesc task_desc(static_cast<TaskType>(task.at(\"task_type\")));");
+        "TaskDesc task_desc(static_cast<TaskType>(task.at(\"task_type\")),");
+    code.e("            task.at(\"variant_id\"));");
     code.e("if (task.at(\"trigger_event\").is_number_integer()) {");
     code.e("task_desc.trigger_event = task.at(\"trigger_event\").get<unsigned "
            "long long int>();");
@@ -730,6 +733,7 @@ TaskGraphResult print_task_graph(
     tgbody.e("all_tasks.push_back(TaskDesc(TASK_TERMINATE));");
     json_task_graph["all_tasks"].push_back(
         json{{"task_type", TASK_TERMINATE},
+             {"variant_id", 0},
              {"inputs", {}},
              {"outputs", {}},
              {"trigger_event", EVENT_INVALID_ID},
@@ -740,6 +744,7 @@ TaskGraphResult print_task_graph(
     tgbody.e("all_tasks.push_back(TaskDesc(TASK_BEGIN_TASK_GRAPH));");
     json_task_graph["all_tasks"].push_back(
         json{{"task_type", TASK_BEGIN_TASK_GRAPH},
+             {"variant_id", 0},
              {"inputs", {}},
              {"outputs", {}},
              {"trigger_event",
@@ -810,6 +815,7 @@ TaskGraphResult print_task_graph(
               assert(task_desc.num_outputs == 1);
               json json_task = {
                   {"task_type", task_desc.task_type},
+                  {"variant_id", task_desc.variant_id},
                   {"inputs", {}},
                   {"outputs", {}},
                   {"trigger_event",
@@ -965,6 +971,7 @@ TaskGraphResult print_task_graph(
           if (task_desc.dependent_event == EVENT_INVALID_ID) {
             tgbody.e("task_desc.dependent_event = EVENT_INVALID_ID;");
             json_task = {{"task_type", task_desc.task_type},
+                         {"variant_id", task_desc.variant_id},
                          {"inputs", {}},
                          {"outputs", {}},
                          {"trigger_event",
@@ -978,6 +985,7 @@ TaskGraphResult print_task_graph(
                      (task_desc.dependent_event & 0xffffffff));
             json_task = {
                 {"task_type", task_desc.task_type},
+                {"variant_id", task_desc.variant_id},
                 {"inputs", {}},
                 {"outputs", {}},
                 {"trigger_event",
@@ -1243,6 +1251,36 @@ TaskGraphResult print_task_graph(
     code.e(tgbody.to_string());
   }
   code.e("}");
+  code.e("");
+
+  // Generate task implementation
+  std::map<TaskType, std::string> task_type_to_name;
+  task_type_to_name[TASK_EMBEDDING] = "TASK_EMBEDDING";
+  task_type_to_name[TASK_RMS_NORM_LINEAR] = "TASK_RMS_NORM_LINEAR";
+  task_type_to_name[TASK_ATTENTION_1] = "TASK_ATTENTION_1";
+  task_type_to_name[TASK_SILU_MUL_LINEAR_WITH_RESIDUAL] = "TASK_SILU_MUL_LINEAR_WITH_RESIDUAL";
+  task_type_to_name[TASK_LINEAR_WITH_RESIDUAL] = "TASK_LINEAR_WITH_RESIDUAL";
+  task_type_to_name[TASK_ARGMAX_PARTIAL] = "TASK_ARGMAX_PARTIAL";
+  task_type_to_name[TASK_ARGMAX_REDUCE] = "TASK_ARGMAX_REDUCE";
+
+  code.e("__device__ __forceinline__");
+  code.e("void _execute_task(TaskDesc const& task_desc,");
+  code.e("                   int *step) {");
+  TaskRegister *task_register = TaskRegister::get_instance();
+  bool first_task = true;
+  for (const auto& task : task_register->all_task_variants) {
+    for (size_t variant_id = 0; variant_id < task.second.size(); variant_id++) {
+      std::string cond = first_task ? "if" : "else if";
+      assert(task_type_to_name.find(task.first) != task_type_to_name.end());
+      code.e("$ (task_desc.task_type == $ && task_desc.variant_id == $) {",
+          cond, task_type_to_name[task.first], variant_id);
+      code.e("$", task.second[variant_id]);
+      code.e("}");
+      first_task = false;
+    }
+  }
+  code.e("}");
+
   // Write json to output file
   // std::ofstream out("task_graph.json");
   // out << json_task_graph.dump(2);

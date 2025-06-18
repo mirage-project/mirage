@@ -26,6 +26,8 @@
 using bfloat16 = type::bfloat16_t;
 using namespace mirage::runtime;
 
+__device__ __forceinline__ void _execute_task(TaskDesc const& task_desc, int *step);
+
 __device__ __forceinline__ bool is_termination_event(size_t event_loc,
                                                      EventDesc e) {
   return (event_loc == 0);
@@ -73,8 +75,8 @@ __device__ __forceinline__ bool prepare_next_batch(RuntimeConfig config) {
   int step = config.step[0];
   // printf("step = %d\n", step);
   config.step[0] = step + 1;
-  return step + 1 <= 500;
-  // return false;
+  //return step + 1 <= 500;
+  return false;
 }
 
 __device__ __forceinline__ int get_rand_sched_id(size_t event_index,
@@ -295,132 +297,31 @@ __global__ void persistent_kernel(RuntimeConfig config) {
         return;
       } else if (task_desc.task_type == TASK_BEGIN_TASK_GRAPH) {
         // Do nothing
+      } else if (task_desc.task_type == TASK_NVSHMEM_COPY) {
+        size_t size_in_bytes = 2;
+        for (int i = 0; i < task_desc.inputs[0].num_dims; i++) {
+          size_in_bytes *= task_desc.inputs[0].dim[i];
+        }
+        size_t event_index =
+            get_event_position_index(task_desc.trigger_event);
+        int gpu_id =
+            static_cast<int>(get_event_gpu_id(task_desc.trigger_event));
+        assert(gpu_id < config.num_gpus);
+        assert(gpu_id != config.my_gpu_id);
+        nvshmemx_putmem_signal_block(
+            task_desc.outputs[0].base_ptr,
+            task_desc.inputs[0].base_ptr,
+            size_in_bytes,
+            reinterpret_cast<uint64_t *>(
+                &config.all_event_counters[event_index]),
+            1 /*signal*/,
+            NVSHMEM_SIGNAL_ADD,
+            gpu_id);
+      } else if (task_desc.task_type == TASK_REDUCE) {
+        TB_SLEEP_US(1);
       } else {
-        switch (task_desc.task_type) {
-          case TASK_RMS_NORM_LINEAR: {
-            if (task_desc.outputs[0].stride[0] == 3072) {
-              kernel::norm_linear_task_impl<bfloat16, 1, 32, 4096, 3072>(
-                  task_desc.inputs[0].base_ptr,
-                  task_desc.inputs[1].base_ptr,
-                  task_desc.inputs[2].base_ptr,
-                  1e-6f, // eps
-                  task_desc.outputs[0].base_ptr);
-            } else if (task_desc.outputs[0].stride[0] == 12288) {
-              kernel::norm_linear_task_impl<bfloat16, 1, 128, 4096, 12288>(
-                  task_desc.inputs[0].base_ptr,
-                  task_desc.inputs[1].base_ptr,
-                  task_desc.inputs[2].base_ptr,
-                  1e-6f, // eps
-                  task_desc.outputs[0].base_ptr);
-            } else if (task_desc.outputs[0].stride[0] == 153600) {
-              kernel::norm_linear_task_impl<bfloat16, 1, 1600, 4096, 153600>(
-                  task_desc.inputs[0].base_ptr,
-                  task_desc.inputs[1].base_ptr,
-                  task_desc.inputs[2].base_ptr,
-                  1e-6f, // eps
-                  task_desc.outputs[0].base_ptr);
-            } else {
-              printf("Unsupported RMSNorm linear task stride: %d\n",
-                     task_desc.outputs[0].stride[0]);
-              assert(false && "Unsupported RMSNorm linear task");
-            }
-            break;
-          }
-          case TASK_EMBEDDING: {
-            kernel::embedding_kernel<bfloat16>(task_desc.inputs[0].base_ptr,
-                                               task_desc.inputs[1].base_ptr,
-                                               task_desc.outputs[0].base_ptr);
-            break;
-          }
-          case TASK_ATTENTION_1: {
-            kernel::single_batch_decoding_kernel<bfloat16, 4, 1, 128, 1024>(
-                task_desc.inputs[0].base_ptr,
-                task_desc.inputs[1].base_ptr,
-                task_desc.inputs[2].base_ptr,
-                task_desc.outputs[0].base_ptr,
-                config.step[0] /*seq_len*/,
-                true,
-                true,
-                task_desc.inputs[3].base_ptr,
-                task_desc.inputs[4].base_ptr,
-                task_desc.inputs[5].base_ptr,
-                task_desc.inputs[6].base_ptr,
-                1e-6f /*q_eps*/,
-                1e-6f /*k_eps*/);
-            break;
-          }
-          case TASK_ATTENTION_2: {
-            TB_SLEEP_US(1);
-            break;
-          }
-          case TASK_SILU_MUL_LINEAR_WITH_RESIDUAL: {
-            kernel::silu_mul_linear_task_impl<bfloat16, 1, 64, 6144>(
-                task_desc.inputs[0].base_ptr,
-                task_desc.inputs[1].base_ptr,
-                task_desc.inputs[2].base_ptr,
-                task_desc.outputs[0].base_ptr);
-            break;
-          }
-          case TASK_NVSHMEM_COPY: {
-            size_t size_in_bytes = 2;
-            for (int i = 0; i < task_desc.inputs[0].num_dims; i++) {
-              size_in_bytes *= task_desc.inputs[0].dim[i];
-            }
-            size_t event_index =
-                get_event_position_index(task_desc.trigger_event);
-            int gpu_id =
-                static_cast<int>(get_event_gpu_id(task_desc.trigger_event));
-            assert(gpu_id < config.num_gpus);
-            assert(gpu_id != config.my_gpu_id);
-            nvshmemx_putmem_signal_block(
-                task_desc.outputs[0].base_ptr,
-                task_desc.inputs[0].base_ptr,
-                size_in_bytes,
-                reinterpret_cast<uint64_t *>(
-                    &config.all_event_counters[event_index]),
-                1 /*signal*/,
-                NVSHMEM_SIGNAL_ADD,
-                gpu_id);
-            // nvshmem_fence();
-            break;
-          }
-          case TASK_REDUCE: {
-            TB_SLEEP_US(1);
-            break;
-          }
-          case TASK_LINEAR_WITH_RESIDUAL: {
-            kernel::linear_kernel<bfloat16, 1, 64, 4096, 4096>(
-                task_desc.inputs[0].base_ptr,
-                task_desc.inputs[1].base_ptr,
-                task_desc.inputs[2].base_ptr,
-                task_desc.outputs[0].base_ptr);
-            break;
-          }
-          case TASK_ARGMAX: {
-            // We may still need this for small vocab size.
-            // kernel::argmax_kernel<bfloat16, 1, 153600>(
-            //    task_desc.inputs[0].base_ptr, task_desc.outputs[0].base_ptr);
-            break;
-          }
-          case TASK_ARGMAX_PARTIAL: {
-            kernel::argmax_partial_kernel<bfloat16, 1600>(
-                task_desc.inputs[0].base_ptr,
-                task_desc.outputs[0].base_ptr,
-                task_desc.outputs[1].base_ptr);
-            break;
-          }
-          case TASK_ARGMAX_REDUCE: {
-            kernel::argmax_reduce_kernel<bfloat16, 1600, 96>(
-                task_desc.inputs[0].base_ptr,
-                task_desc.inputs[1].base_ptr,
-                task_desc.outputs[0].base_ptr);
-            break;
-          }
-          default: {
-            assert(false && "Unimplemented task");
-          }
-        } // case
-      }   // else
+        _execute_task(task_desc, config.step);
+      }
       __syncthreads();
       if (config.profiling && task_desc.task_type != TASK_TERMINATE) {
         PROFILER_EVENT_END(task_desc.task_type, task_counter++);

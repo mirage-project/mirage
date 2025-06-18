@@ -37,9 +37,9 @@ public:
   int register_argmax_reduce_task(threadblock::Graph const &bgraph, std::vector<int> const &params);
   int register_task_variant(TaskType type, std::string const& code);
 
-private:
+public:
 
-  std::unordered_map<TaskType, std::vector<std::string> > all_task_variants;
+  std::map<TaskType, std::vector<std::string> > all_task_variants;
 };
 
 } // namespace runtime
