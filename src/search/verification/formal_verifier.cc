@@ -207,8 +207,7 @@ std::vector<std::string>
           if (graph.forloop_range > 1) {
             a = "(reduce " + a + " " + df + ")";
           }
-          tensor_exprs.emplace(op->output_tensors[0].guid,
-                               "(rms" + a + ")");
+          tensor_exprs.emplace(op->output_tensors[0].guid, "(rms" + a + ")");
           break;
         }
         case type::TBOperatorType::TB_FORLOOP_ACCUM_RED_LD_SUM_OP: {
