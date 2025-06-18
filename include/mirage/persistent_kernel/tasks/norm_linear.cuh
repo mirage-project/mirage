@@ -153,9 +153,7 @@ __device__ __forceinline__ void
   // intermediate
   T *mul_output = (T *)(smem + MUL_OUTPUT_OFFSET);
   T *element_unary_output = (T *)(smem + ELEMENT_UNARY_OUTPUT_OFFSET);
-  for (int i = threadIdx.x; i < BATCH_SIZE * TILE_SIZE; i += NUM_THREADS) {
-    element_unary_output[i] = T(0.0f);
-  }
+  clear_smem_buffer<T, BATCH_SIZE * TILE_SIZE>(element_unary_output);
   T *mm_intermediate = (T *)(smem + MM_INTERMEDIATE_OFFSET);
   T *mm_output = (T *)(smem + MM_OUTPUT_OFFSET);
   T *reduction_output = (T *)(smem + REDUCTION_OUTPUT_OFFSET);
@@ -238,7 +236,6 @@ __device__ __forceinline__ void
 
     // accumulator
     float s_frag[NUM_ITERS_M][NUM_ITERS_N][8];
-#pragma unroll
     for (uint32_t m = 0; m < NUM_ITERS_M; m++) {
 #pragma unroll
       for (uint32_t n = 0; n < NUM_ITERS_N; n++) {

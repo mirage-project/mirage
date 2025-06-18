@@ -58,4 +58,24 @@ static __device__ __forceinline__ int warp_id() {
   return __shfl_sync(0xffffffff, threadIdx.x / NUM_THREADS_PER_WARP, 0);
 }
 
+template <typename T, int NUM_ELEMENTS>
+__device__ __forceinline__ void clear_smem_buffer(T *buffer) {
+  constexpr int total_bytes = NUM_ELEMENTS * sizeof(T);
+  constexpr int num_128bit_writes = total_bytes / 16;
+  constexpr int remaining_elements_offset = num_128bit_writes * (16 / sizeof(T));
+
+  // Clear the bulk of the buffer using 128-bit writes
+  for (int i = threadIdx.x; i < num_128bit_writes; i += NUM_THREADS) {
+    ((__uint128_t *)buffer)[i] = 0ul;
+  }
+
+  // Handle the tail if the total size is not a multiple of 16 bytes
+  if constexpr ((total_bytes % 16) != 0) {
+    for (int i = remaining_elements_offset + threadIdx.x; i < NUM_ELEMENTS;
+         i += NUM_THREADS) {
+      buffer[i] = T(0.0f);
+    }
+  }
+}
+
 } // namespace kernel
