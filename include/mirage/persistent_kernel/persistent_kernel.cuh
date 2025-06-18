@@ -26,9 +26,8 @@
 using bfloat16 = type::bfloat16_t;
 using namespace mirage::runtime;
 
-__device__ __forceinline__ void _execute_task(TaskDesc const &task_desc,
-                                              int *step,
-                                              long long *tokens);
+__device__ __forceinline__ void
+    _execute_task(TaskDesc const &task_desc, int *step, long long *tokens);
 
 __device__ __forceinline__ bool is_termination_event(size_t event_loc,
                                                      EventDesc e) {
@@ -73,7 +72,8 @@ __global__ void init_kernel(RuntimeConfig config) {
   }
 }
 
-__device__ __forceinline__ bool prepare_next_batch(RuntimeConfig const &config) {
+__device__ __forceinline__ bool
+    prepare_next_batch(RuntimeConfig const &config) {
   int step = config.step[0];
   config.step[0] = step + 1;
   if ((step >= 500) || (config.profiling)) {
