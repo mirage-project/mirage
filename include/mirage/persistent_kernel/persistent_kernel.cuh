@@ -393,28 +393,27 @@ __global__ void persistent_kernel(RuntimeConfig config) {
             kernel::linear_kernel<bfloat16, 1, 64, 4096, 6144>(
                 task_desc.inputs[0].base_ptr,
                 task_desc.inputs[1].base_ptr,
-                task_desc.outputs[0].base_ptr,
-                true,
-                task_desc.inputs[2].base_ptr);
+                task_desc.inputs[2].base_ptr,
+                task_desc.outputs[0].base_ptr);
             break;
           }
           case TASK_ARGMAX: {
             // We may still need this for small vocab size.
-            //kernel::argmax_kernel<bfloat16, 1, 153600>(
+            // kernel::argmax_kernel<bfloat16, 1, 153600>(
             //    task_desc.inputs[0].base_ptr, task_desc.outputs[0].base_ptr);
             break;
           }
           case TASK_ARGMAX_PARTIAL: {
             kernel::argmax_partial_kernel<bfloat16, 1600>(
-                task_desc.inputs[0].base_ptr,  
-                task_desc.outputs[0].base_ptr, 
+                task_desc.inputs[0].base_ptr,
+                task_desc.outputs[0].base_ptr,
                 task_desc.outputs[1].base_ptr);
             break;
           }
           case TASK_ARGMAX_REDUCE: {
             kernel::argmax_reduce_kernel<bfloat16, 1600, 96>(
-                task_desc.inputs[0].base_ptr,  
-                task_desc.inputs[1].base_ptr,  
+                task_desc.inputs[0].base_ptr,
+                task_desc.inputs[1].base_ptr,
                 task_desc.outputs[0].base_ptr);
             break;
           }
@@ -422,7 +421,7 @@ __global__ void persistent_kernel(RuntimeConfig config) {
             assert(false && "Unimplemented task");
           }
         } // case
-      }   // else
+      } // else
       __syncthreads();
       if (config.profiling && task_desc.task_type != TASK_TERMINATE) {
         PROFILER_EVENT_END(task_desc.task_type, task_counter++);

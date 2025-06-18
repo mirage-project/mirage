@@ -68,14 +68,13 @@ __device__ __forceinline__ void block_reduce_max_idx(T &val, long long &idx) {
 }
 
 template <typename T, int CHUNK_SIZE>
-__device__ __forceinline__ void argmax_partial_kernel(
-    void const *__restrict__ input_ptr,
-    void *__restrict__ output_val_ptr,
-    void *__restrict__ output_idx_ptr) {
+__device__ __forceinline__ void
+    argmax_partial_kernel(void const *__restrict__ input_ptr,
+                          void *__restrict__ output_val_ptr,
+                          void *__restrict__ output_idx_ptr) {
   T const *__restrict__ input = static_cast<T const *>(input_ptr);
   T *__restrict__ output_val = static_cast<T *>(output_val_ptr);
-  long long *__restrict__ output_idx =
-      static_cast<long long *>(output_idx_ptr);
+  long long *__restrict__ output_idx = static_cast<long long *>(output_idx_ptr);
 
   int tidx = threadIdx.x;
   T local_max = T(-inf);
@@ -100,11 +99,10 @@ __device__ __forceinline__ void argmax_partial_kernel(
 
 template <typename T, int CHUNK_SIZE, int NUM_PARTIAL_TASKS>
 __device__ __forceinline__ void
-argmax_reduce_kernel(void const *__restrict__ input_val_ptr,
-                     void const *__restrict__ input_idx_ptr,
-                     void *__restrict__ final_output_ptr) {
-  T const *__restrict__ partial_vals =
-      static_cast<T const *>(input_val_ptr);
+    argmax_reduce_kernel(void const *__restrict__ input_val_ptr,
+                         void const *__restrict__ input_idx_ptr,
+                         void *__restrict__ final_output_ptr) {
+  T const *__restrict__ partial_vals = static_cast<T const *>(input_val_ptr);
   long long const *__restrict__ partial_idxs =
       static_cast<long long const *>(input_idx_ptr);
   long long *__restrict__ final_output =
@@ -113,7 +111,7 @@ argmax_reduce_kernel(void const *__restrict__ input_val_ptr,
   int tidx = threadIdx.x;
   T local_max = T(-inf);
   // Pack (chunk_index, relative_index) into a single 64-bit integer
-  long long local_packed_idx = -1; 
+  long long local_packed_idx = -1;
 
   for (int i = tidx; i < NUM_PARTIAL_TASKS; i += blockDim.x) {
     T current_val = partial_vals[i];
