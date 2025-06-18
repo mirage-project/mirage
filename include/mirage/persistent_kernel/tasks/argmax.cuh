@@ -22,7 +22,7 @@ __device__ __forceinline__ void warp_reduce_max_idx(T &val, long long &idx) {
 #pragma unroll
   for (int offset = 16; offset > 0; offset /= 2) {
     float tmp = __shfl_down_sync(0xffffffff, (float)val, offset);
-    T other_val = (T)tmp;
+    T other_val = (T) tmp;
     long long other_idx = __shfl_down_sync(0xffffffff, idx, offset);
     if (other_val > val) {
       val = other_val;
