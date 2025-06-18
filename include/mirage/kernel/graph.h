@@ -1,4 +1,4 @@
-/* Copyright 2023-2024 CMU
+/* Copyright 2023-2025 CMU
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -161,7 +161,7 @@ public:
                         int fused_dim,
                         int num_groups,
                         char const *name);
-  void register_task(char const *task_type);
+  void register_task(char const *task_type, std::vector<int> params);
   runtime::TaskGraphResult generate_task_graph(int num_gpus);
 
   // helper functions
@@ -203,7 +203,7 @@ public:
   // Fields for persistent kernels
   std::map<mirage::type::GuidType, mirage::runtime::IODesc> io_config;
   std::unordered_map<mirage::kernel::KNOperator const *,
-                     std::tuple<int, int, runtime::TaskType>>
+                     std::tuple<int, int, runtime::TaskType, int>>
       task_config;
 
   using OpType = KNOperator;

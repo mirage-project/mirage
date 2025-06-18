@@ -359,13 +359,13 @@ if __name__ == "__main__":
             input=argmax_in,
             output=(argmax_part_value, argmax_part_index),
             grid_dim=(96, 1, 1),
-            block_dim=(1, 1, 1)
+            block_dim=(128, 1, 1)
         )
         mpk.argmax_reduce_layer(
             input=(argmax_part_value, argmax_part_index),
             output=argmax_out,
             grid_dim=(1,1,1),
-            block_dim=(1,1,1)
+            block_dim=(128,1,1)
         )
 
         results = mpk.kn_graph.generate_task_graph(num_gpus=world_size)
@@ -375,18 +375,6 @@ if __name__ == "__main__":
             f.write(results["cuda_code"])
 
         mpk.compile()
-
-        # kernel = mirage.PersistentKernel(
-        #     file_path="/home/ubuntu/mirage_cpp/debug_build/test.cu",
-        #     mpi_rank=rank,
-        #     num_workers=96,
-        #     num_local_schedulers=48,
-        #     num_remote_schedulers=0,
-        #     use_nvshmem=True,
-        #     input_tensors=[item[1] for item in input_tensors],
-        #     meta_tensors=[step],
-        #     profiler_tensor=profiler_tensor,
-        # )
 
     # g = torch.cuda.CUDAGraph()
     stream = torch.cuda.Stream()

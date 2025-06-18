@@ -268,6 +268,8 @@ __device__ __forceinline__ void
         }
         cp_async_fence();
         cp_async_wait<1>();
+      } else {
+        cp_async_wait<0>();
       }
 
       // swap the double buffer

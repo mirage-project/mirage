@@ -919,12 +919,18 @@ cdef class CyKNGraph:
         output = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
         return DTensor(output)
 
-    def register_task(self, CyTBGraph bgraph, str task_type):
+    def register_task(self, CyTBGraph bgraph, str task_type, list[int] params):
         cdef char* cname = NULL
         if task_type is not None:
             py_byte_string = task_type.encode('UTF-8')
             cname = py_byte_string
-        self.p_kgraph.register_task(cname)
+        cdef vector[int] cparams
+        cparams.resize(0)
+        if params is not None:
+            cparams.resize(len(params))
+            for i in range(len(params)):
+                cparams[i] = params[i]
+        self.p_kgraph.register_task(cname, cparams)
 
     def generate_task_graph(self, int num_gpus):
         cdef TaskGraphResult result = self.p_kgraph.generate_task_graph(num_gpus)

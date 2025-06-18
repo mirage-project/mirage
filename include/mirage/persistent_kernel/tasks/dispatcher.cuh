@@ -46,11 +46,11 @@ namespace kernel {
 
 #define DISPATCH_OUTPUT_SIZE_FOR_RED_SIZE_12K(OUTPUT_SIZE, FUNC, T, ...)       \
   if ((OUTPUT_SIZE) == 16) {                                                   \
-    FUNC<T, 1, 16, 12288>(__VA_ARGS__);                                        \
+    FUNC<T, 1, 16, 6144>(__VA_ARGS__);                                         \
   } else if ((OUTPUT_SIZE) == 32) {                                            \
-    FUNC<T, 1, 32, 12288>(__VA_ARGS__);                                        \
+    FUNC<T, 1, 32, 6144>(__VA_ARGS__);                                         \
   } else if ((OUTPUT_SIZE) == 64) {                                            \
-    FUNC<T, 1, 64, 12288>(__VA_ARGS__);                                        \
+    FUNC<T, 1, 64, 6144>(__VA_ARGS__);                                         \
   } else {                                                                     \
     printf("Unsupported output size: %d\n", OUTPUT_SIZE);                      \
   }

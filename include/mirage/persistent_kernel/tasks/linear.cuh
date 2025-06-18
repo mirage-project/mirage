@@ -35,9 +35,9 @@ template <typename T,
           int O_STRIDE = OUTPUT_SIZE>
 __device__ __forceinline__ void linear_kernel(void const *input_ptr,
                                               void const *weight_ptr,
+                                              void const *bias_ptr,
                                               void *output_ptr,
-                                              bool bias,
-                                              void const *bias_ptr) {
+                                              bool bias) {
   constexpr int CHUNK_SIZE = 16 / sizeof(T);
   constexpr int OUTPUT_ATOM_SIZE = OUTPUT_SIZE <= 128 ? OUTPUT_SIZE : 128;
   constexpr int NUM_OUTPUT_ATOMS = OUTPUT_SIZE / OUTPUT_ATOM_SIZE;

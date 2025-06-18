@@ -163,11 +163,11 @@ void register_mugraph(
     std::map<kernel::KNOperator *, std::map<dim3, TaskId, Dim3Comparator>>
         &all_task_maps,
     std::unordered_map<kn::KNOperator const *,
-                       std::tuple<int, int, TaskType>> const &task_configs) {
+                       std::tuple<int, int, TaskType, int>> const &task_configs) {
   // push a begin-graph task and a event to launch dependent asks
   {
     EventDesc e(EVENT_LAUNCH_DEPENDENT_TASKS, 1, 0, 0);
-    TaskDesc t(TASK_BEGIN_TASK_GRAPH);
+    TaskDesc t(TASK_BEGIN_TASK_GRAPH, 0/*variant_id*/);
     t.trigger_event = get_event_id(my_gpu_id, all_events.size(), false);
     all_tasks.push_back(t);
     all_events.push_back(e);
@@ -179,7 +179,7 @@ void register_mugraph(
     if (op->op_type == type::KNOperatorType::KN_INPUT_OP) {
       continue;
     }
-    std::tuple<int, int, TaskType> task_config = task_configs.find(op)->second;
+    std::tuple<int, int, TaskType, int> task_config = task_configs.find(op)->second;
     std::map<dim3, TaskId, Dim3Comparator> cur_task_map;
     assert(op->op_type == type::KNOperatorType::KN_CUSTOMIZED_OP);
     // Customized op
@@ -193,6 +193,7 @@ void register_mugraph(
     int num_inputs = std::get<0>(task_config);
     int num_outputs = std::get<1>(task_config);
     TaskType task_type = std::get<2>(task_config);
+    int variant_id = std::get<3>(task_config);
     assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
     for (auto const &op : bgraph.operators) {
       assert(op->op_type == mirage::type::TB_INPUT_OP);
@@ -247,7 +248,7 @@ void register_mugraph(
               if (tgt_gpu_id == my_gpu_id) {
                 continue;
               }
-              TaskDesc task(TASK_NVSHMEM_COPY);
+              TaskDesc task(TASK_NVSHMEM_COPY, 0/*variant_id*/);
               // task.trigger_event = get_event_id(
               //     tgt_gpu_id, all_events.size(), true /*nvshmem_event*/);
               //  Initialize input/output tensors to the task
@@ -292,7 +293,7 @@ void register_mugraph(
             }
             all_events.push_back(event_desc_1);
             // Step 2: create a task for reduce
-            TaskDesc task(TASK_REDUCE);
+            TaskDesc task(TASK_REDUCE, 0/*variant_id*/);
             for (int i = 0; i < 2; i++) {
               TensorDesc desc;
               tb::STensor stensor = input_ops[i]->output_tensors[0];
@@ -339,7 +340,7 @@ void register_mugraph(
     for (bid.x = 0; bid.x < bgraph.grid_dim.x; bid.x++) {
       for (bid.y = 0; bid.y < bgraph.grid_dim.y; bid.y++) {
         for (bid.z = 0; bid.z < bgraph.grid_dim.z; bid.z++) {
-          TaskDesc task(task_type);
+          TaskDesc task(task_type, variant_id);
           // Initialize input tensors to the task
           for (auto const &input : input_ops) {
             TensorDesc desc;
@@ -537,7 +538,7 @@ TaskGraphResult print_task_graph(
     std::map<kernel::KNOperator *, std::map<dim3, TaskId, Dim3Comparator>> const
         &all_task_maps,
     std::unordered_map<kn::KNOperator const *,
-                       std::tuple<int, int, TaskType>> const &task_configs,
+                       std::tuple<int, int, TaskType, int>> const &task_configs,
     std::map<mirage::type::GuidType, IODesc> const &io_configs,
     bool use_json_format) {
   using mirage::runtime::IODesc;
@@ -752,7 +753,7 @@ TaskGraphResult print_task_graph(
       continue;
     }
     assert(op->op_type == type::KNOperatorType::KN_CUSTOMIZED_OP);
-    std::tuple<int, int, TaskType> task_config = task_configs.find(op)->second;
+    std::tuple<int, int, TaskType, int> task_config = task_configs.find(op)->second;
 
     assert(all_task_maps.find(op) != all_task_maps.end());
     std::map<dim3, TaskId, Dim3Comparator> const &task_map =
@@ -1266,7 +1267,7 @@ TaskGraphResult Graph::generate_task_graph(int _num_gpus) {
   // add the termination event to the event lists
   EventDesc e(EVENT_TERMINATION, 1, 0, 0);
   all_events.push_back(e);
-  TaskDesc t(TASK_TERMINATE);
+  TaskDesc t(TASK_TERMINATE, 0/*variant_id*/);
   all_tasks.push_back(t);
   register_mugraph(*this,
                    num_gpus,

@@ -87,11 +87,12 @@ struct EventDesc {
 };
 
 struct TaskDesc {
-  TaskDesc(TaskType t)
-      : task_type(t), num_inputs(0), num_outputs(0),
+  TaskDesc(TaskType t, int _variant_id)
+      : task_type(t), variant_id(_variant_id), num_inputs(0), num_outputs(0),
         trigger_event(EVENT_INVALID_ID), dependent_event(EVENT_INVALID_ID) {}
   TaskDesc() {}
   TaskType task_type;
+  unsigned variant_id;
   int num_inputs, num_outputs;
   EventId trigger_event;
   EventId dependent_event;

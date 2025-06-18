@@ -253,10 +253,10 @@ class PersistentKernel:
     def attention_layer(
         self,
         input: DTensor,
-        q_norm: DTensor,
-        k_norm: DTensor,
         k_cache: DTensor,
         v_cache: DTensor,
+        q_norm: DTensor,
+        k_norm: DTensor,
         cos_pos_embed: DTensor,
         sin_pos_embed: DTensor,
         output: DTensor,
@@ -266,12 +266,32 @@ class PersistentKernel:
         # Currently assume that input/output
         assert input.num_dims == 2  # (batch_size, fused_outdim / world_size)
         assert output.num_dims == 2  # (batch_size, hidden_size / world_size)
-        assert q_norm.num_dims == 1  # (head_dim)
-        assert k_norm.num_dims == 1  # (head_dim)
         assert k_cache.num_dims == 4  # (batch_size, seq_len, kv_heads, head_dim)
         assert v_cache.num_dims == 4  # (batch_size, seq_len, kv_heads, head_dim)
-        assert cos_pos_embed.num_dims == 2  # (seq_len, head_dim)
-        assert sin_pos_embed.num_dims == 2  # (seq_len, head_dim)
+        head_dim = k_cache.dim(3)
+        num_kv_heads = k_cache.dim(2)
+        num_q_heads = output.dim(1) * self.world_size // head_dim
+        rotary_embed = 0
+        if cos_pos_embed is not None or sin_pos_embed is not None:
+            assert cos_pos_embed.num_dims == 2  # (seq_len, head_dim)
+            assert sin_pos_embed.num_dims == 2  # (seq_len, head_dim)
+            assert cos_pos_embed.dim(1) == head_dim
+            assert sin_pos_embed.dim(1) == head_dim
+            rotary_embed = 1
+        qk_norm = 0
+        if q_norm is not None or k_norm is not None:
+            assert q_norm.num_dims == 1  # (head_dim)
+            assert k_norm.num_dims == 1  # (head_dim)
+            qk_norm = 1
+            assert q_norm.dim(0) == head_dim
+            assert k_norm.dim(0) == head_dim
+
+        # params[0]: num_q_heads
+        # params[1]: num_kv_heads
+        # params[2]: qk_norm
+        # params[3]: rotary_embed
+        params = [num_q_heads, num_kv_heads, qk_norm, rotary_embed]
+
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         tb_graph.new_input(input, (0, 1, -1), -1, True)
         tb_graph.new_input(k_cache, (0, 2, -1), 1, True)
@@ -294,7 +314,7 @@ class PersistentKernel:
             ],
             tb_graph,
         )
-        self.kn_graph.register_task(tb_graph, "attention")
+        self.kn_graph.register_task(tb_graph, "attention", params)
 
     def linear_with_residual_layer(
         self,
@@ -378,6 +398,8 @@ class PersistentKernel:
         output_value, output_index = output
         assert output_value.num_dims == 2  # (batch_size, num_tasks)
         assert output_index.num_dims == 2  # (batch_size, num_tasks)
+        num_tasks = grid_dim[0]
+        self.argmax_partial_output_size = input.dim(1) // num_tasks
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         tb_graph.new_input(input, (1, -1, -1), -1, True)
         tb_graph.new_input(output_value, (1, -1, -1), -1, True)
@@ -399,7 +421,7 @@ class PersistentKernel:
         tb_graph.new_input(input_index, (-1, -1, -1), -1, True)
         tb_graph.new_input(output, (-1, -1, -1), -1, True)
         self.kn_graph.customized([input_value, input_index, output], tb_graph)
-        self.kn_graph.register_task(tb_graph, "argmax_reduce")
+        self.kn_graph.register_task(tb_graph, "argmax_reduce", [self.argmax_partial_output_size])
 
     def compile(
         self,
