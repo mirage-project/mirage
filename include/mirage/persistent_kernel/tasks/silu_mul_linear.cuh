@@ -367,19 +367,4 @@ __device__ __forceinline__ void
   }
 }
 
-template <typename T>
-__device__ __forceinline__ void silu_mul_linear_task(int output_size,
-                                                     void const *input_ptr,
-                                                     void const *weight_ptr,
-                                                     void const *residual_ptr,
-                                                     void *output_ptr) {
-  DISPATCH_OUTPUT_SIZE_FOR_RED_SIZE_12K(output_size,
-                                        silu_mul_linear_task_impl,
-                                        T,
-                                        input_ptr,
-                                        weight_ptr,
-                                        residual_ptr,
-                                        output_ptr);
-}
-
 } // namespace kernel

@@ -547,6 +547,7 @@ class PersistentKernel:
             profiling= True if self.profiler_tensor is not None else False,
             use_nvshmem=use_nvshmem,
         )
+        print("Compiling megakernel using the following command line:")
         print(cc_cmd)
         subprocess.check_call(cc_cmd)
 
@@ -558,6 +559,7 @@ class PersistentKernel:
         self.init_func = getattr(mod, "init_func")
         self.launch_func = getattr(mod, "launch_func")
         self.finalize_func = getattr(mod, "finalize_func")
+        print("Finished megakernel compilation...")
 
         meta_tensors_ptr = [tensor.data_ptr() for tensor in self.meta_tensors]
         profiler_buffer_ptr = (

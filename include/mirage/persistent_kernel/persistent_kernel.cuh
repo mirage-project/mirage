@@ -583,13 +583,12 @@ __global__ void persistent_kernel(RuntimeConfig config) {
             custom_atomic_add_u64(
                 &config.worker_queue_last_ready_task_id[next_worker], 1);
             if (config.verbose) {
-              printf("[%d][SCHD] schd_id(%d) iter_num(%llu) task_idx(%llu) "
+              printf("[%d][SCHD] schd_id(%d) iter_num(%llu) task_idx(1) "
                      "worker_id(%d) "
                      "worker_last_ready_pos(%llu)\n",
                      config.my_gpu_id,
                      sched_id,
                      iteration_num + 1,
-                     1,
                      next_worker,
                      last_task_id + 1);
             }

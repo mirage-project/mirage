@@ -49,7 +49,7 @@ __device__ __forceinline__ void
                                  void const *sin_ptr,
                                  float q_eps,
                                  float k_eps) {
-  constexpr int chunk_size = 16 / sizeof(T);
+  // constexpr int chunk_size = 16 / sizeof(T);
   constexpr size_t MAX_SEQ_LEN = 512;
   constexpr size_t KV_CHUNK_SIZE = 64;
   float const sm_scale = (1.f / sqrt((float)HEAD_DIM));
@@ -188,10 +188,11 @@ __device__ __forceinline__ void
   //  N = 64 per iter
   for (uint32_t kv_idx = 0; kv_idx < num_iterations; kv_idx += 1) {
     // load next k, v
-    int next_iter_len = kv_idx + 1 < num_iterations
-                            ? std::min(seq_len, (kv_idx + 2) * KV_CHUNK_SIZE) -
-                                  (kv_idx + 1) * KV_CHUNK_SIZE
-                            : -1;
+    int next_iter_len =
+        kv_idx + 1 < num_iterations
+            ? static_cast<int>(std::min(seq_len, (kv_idx + 2) * KV_CHUNK_SIZE) -
+                               (kv_idx + 1) * KV_CHUNK_SIZE)
+            : -1;
 
     if (kv_idx + 1 != num_iterations) {
 #pragma unroll

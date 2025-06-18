@@ -31,7 +31,7 @@ __device__ __forceinline__ void
   constexpr int OUT_DIM = 4096;
 
   for (int i = threadIdx.x; i < BATCH_SIZE * OUT_DIM; i += NUM_THREADS) {
-    int idx = i / OUT_DIM;
+    // int idx = i / OUT_DIM;
     int off = i % OUT_DIM;
     // int64_t wordIdx = input_ids[idx];
     int64_t wordIdx = tokens[step - 1];

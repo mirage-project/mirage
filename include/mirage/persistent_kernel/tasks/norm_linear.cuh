@@ -17,7 +17,6 @@
 #pragma once
 #include "common.h"
 #include "copy_sm80.cuh"
-#include "dispatcher.cuh"
 #include "dmem_layout.cuh"
 #include "element_binary.cuh"
 #include "element_unary.cuh"
@@ -380,24 +379,6 @@ __device__ __forceinline__ void
       __syncthreads();
     }
   }
-}
-
-template <typename T>
-__device__ __forceinline__ void norm_linear_task(int output_size,
-                                                 void const *input_ptr,
-                                                 void const *norm_weight_ptr,
-                                                 void const *weight_ptr,
-                                                 float eps,
-                                                 void *output_ptr) {
-
-  DISPATCH_OUTPUT_SIZE_FOR_RED_SIZE_4K(output_size,
-                                       norm_linear_task_impl,
-                                       T,
-                                       input_ptr,
-                                       norm_weight_ptr,
-                                       weight_ptr,
-                                       eps,
-                                       output_ptr);
 }
 
 } // namespace kernel
