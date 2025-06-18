@@ -6,41 +6,30 @@ import shutil
 import sys
 import sysconfig
 
-from .kernel import get_key_paths
+from .core import *
+from .kernel import get_key_paths, KNGraph, TBGraph
 
 HARD_CODE = """
 #include <Python.h>
 #include <cuda_runtime.h>
 
 static PyObject *init_func(PyObject *self, PyObject *args) {
-  PyObject *input_list, *meta_list, *py_profiler_buffer;
-  std::vector<void const *> input_tensors;
+  PyObject *meta_list, *py_profiler_buffer;
   std::vector<void*> meta_tensors;
   int my_mpi_rank, num_workers, num_local_schedulers, num_remote_schedulers;
   void *profiler_buffer;
 
-  if (!PyArg_ParseTuple(args, "OOOiiii", &input_list, &meta_list, &py_profiler_buffer, &my_mpi_rank, &num_workers, &num_local_schedulers, &num_remote_schedulers)) {
+  if (!PyArg_ParseTuple(args, "OOiiii", &meta_list, &py_profiler_buffer, &my_mpi_rank, &num_workers, &num_local_schedulers, &num_remote_schedulers)) {
     PyErr_SetString(PyExc_TypeError, "Invalid parameters");
     return NULL;
   }
 
-  if(!PyList_Check(input_list) || !PyList_Check(meta_list)) {
-    PyErr_SetString(PyExc_TypeError, "Both arg1 and arg2 must be lists.");
+  if(!PyList_Check(meta_list)) {
+    PyErr_SetString(PyExc_TypeError, "arg1 must be a list.");
     return NULL;
   }
 
-  Py_ssize_t input_size = PyList_Size(input_list);
   Py_ssize_t meta_size = PyList_Size(meta_list);
-
-  for(Py_ssize_t i = 0; i < input_size; i++) {
-    PyObject *item = PyList_GetItem(input_list, i);
-    void* tensor = PyLong_AsVoidPtr(item);
-    if(!tensor) {
-      PyErr_Format(PyExc_TypeError, "Failed to convert item %d (input) to void pointer", i);
-      return NULL;
-    }
-    input_tensors.push_back(PyLong_AsVoidPtr(item));
-  }
 
   for(Py_ssize_t i = 0; i < meta_size; i++) {
     PyObject *item = PyList_GetItem(meta_list, i);
@@ -53,7 +42,7 @@ static PyObject *init_func(PyObject *self, PyObject *args) {
   }
   profiler_buffer = PyLong_AsVoidPtr(py_profiler_buffer);
 
-  init_persistent_kernel(input_tensors, meta_tensors, profiler_buffer, my_mpi_rank, num_workers, num_local_schedulers, num_remote_schedulers);
+  init_persistent_kernel(meta_tensors, profiler_buffer, my_mpi_rank, num_workers, num_local_schedulers, num_remote_schedulers);
 
   Py_RETURN_NONE;
 }
@@ -95,25 +84,29 @@ PyMODINIT_FUNC PyInit___mirage_launcher(void) {
 }
 """
 
-def get_compile_command(target_cc,
-                        cc,
-                        file_name,
-                        py_include_dir,
-                        mirage_home_path,
-                        mirage_inc_path,
-                        mirage_deps_path,
-                        nvshmem_inc_path,
-                        nvshmem_lib_path,
-                        mpi_inc_path,
-                        mpi_lib_path,
-                        py_so_path,
-                        profiling,
-                        use_nvshmem):
+
+def get_compile_command(
+    target_cc,
+    cc,
+    file_name,
+    py_include_dir,
+    mirage_home_path,
+    mirage_inc_path,
+    mirage_deps_path,
+    nvshmem_inc_path,
+    nvshmem_lib_path,
+    mpi_inc_path,
+    mpi_lib_path,
+    py_so_path,
+    profiling,
+    use_nvshmem,
+):
     common_cmd = [
         cc,
         file_name,
         "-O3",
         f"-I{py_include_dir}",
+        f"-I{mirage_inc_path}",
         f"-I{os.path.join(mirage_inc_path, 'mirage/persistent_kernel')}",
         f"-I{os.path.join(mirage_deps_path, 'cutlass/include')}",
         f"-I{os.path.join(mirage_home_path, 'deps/json/include')}",
@@ -128,7 +121,7 @@ def get_compile_command(target_cc,
         "-Xcompiler=-fPIC",
         "--expt-relaxed-constexpr",
         "-o",
-        py_so_path
+        py_so_path,
     ]
 
     if use_nvshmem:
@@ -138,11 +131,7 @@ def get_compile_command(target_cc,
             f"-L{nvshmem_lib_path}",
             f"-L{mpi_lib_path}",
         ]
-        nvshmem_flags = [
-            "-lnvshmem_host",
-            "-lnvshmem_device",
-            "-lmpi"
-        ]
+        nvshmem_flags = ["-lnvshmem_host", "-lnvshmem_device", "-lmpi"]
         common_cmd = common_cmd + nvshmem_cmd
         flags = flags + nvshmem_flags
 
@@ -158,28 +147,280 @@ def get_compile_command(target_cc,
 
     return common_cmd + specific_cmd + flags
 
+
 class PersistentKernel:
-    def __init__(self, file_path : str, mpi_rank : int, num_workers : int, num_local_schedulers : int, num_remote_schedulers : int, **kwargs):
+    def __init__(
+        self,
+        world_size: int,
+        mpi_rank: int,
+        num_workers: int,
+        num_local_schedulers: int,
+        num_remote_schedulers: int,
+        meta_tensors: list[torch.Tensor],
+        profiler_tensor: torch.Tensor,
+    ):
         self.__finalized__ = False
+        self._is_compiled = False
+        self.world_size = world_size
         self.mpi_rank = mpi_rank
+        self.num_workers = num_workers
+        self.num_local_schedulers = num_local_schedulers
+        self.num_remote_schedulers = num_remote_schedulers
+        self.kn_graph = KNGraph(CyKNGraph(disable_fingerprint=True))
+        self.meta_tensors = meta_tensors
+        self.profiler_tensor = profiler_tensor
+
+    def attach_input(self, torch_tensor: torch.Tensor, name: str = None) -> DTensor:
+        dims = tuple([d for d in torch_tensor.shape])
+        strides = tuple([s for s in torch_tensor.stride()])
+        # Assert a row-major layout
+        for d in range(len(dims) - 1):
+            assert strides[d] == strides[d + 1] * dims[d + 1]
+        dtype = convert_torch_type_to_dtype(torch_tensor.dtype)
+        t = self.kn_graph.new_input(dims=dims, strides=strides, dtype=dtype)
+        # FIXME: currently assert that name is not None
+        assert name is not None
+        self.kn_graph.attach_torch_tensor(t, torch_tensor, name)
+        return t
+
+    def new_tensor(
+        self,
+        dims: tuple,
+        strides: tuple = None,
+        dtype: dtype = bfloat16,
+        name: str = None,
+        io_category: str = "cuda_tensor",
+    ) -> DTensor:
+        # Assert a row-major layout
+        if strides is not None:
+            for d in range(len(dims) - 1):
+                assert strides[d] == strides[d + 1] * dims[d + 1]
+        t = self.kn_graph.new_input(dims=dims, strides=strides, dtype=dtype)
+        # FIXME: currently assert that name is not None
+        assert name is not None
+        if io_category == "cuda_tensor":
+            self.kn_graph.attach_cuda_tensor(t, name)
+        elif io_category == "nvshmem_tensor":
+            self.kn_graph.attach_nvshmem_tensor(t, name)
+        else:
+            raise RuntimeError(f"Invalid io_category: {io_category}")
+        return t
+
+    def fuse_tensors(
+        self, inputs: list[DTensor], fused_dim: int, num_groups: int, name: str = None
+    ) -> DTensor:
+        # Currently only support fusing the 0-th dimension
+        assert fused_dim == 0
+        t = self.kn_graph.fuse_tensors(inputs, fused_dim, num_groups, name)
+        return t
+
+    def embed_layer(
+        self,
+        input: DTensor,
+        weight: DTensor,
+        output: DTensor,
+        grid_dim: tuple,
+        block_dim: tuple,
+    ):
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(input, (-1, -1, -1), -1, True)
+        tb_graph.new_input(weight, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output, (-1, -1, -1), -1, True)
+        self.kn_graph.customized([input, weight, output], tb_graph)
+        self.kn_graph.register_task(tb_graph, "embedding")
+
+    def rmsnorm_linear_layer(
+        self,
+        input: DTensor,
+        weight_norm: DTensor,
+        weight_linear: DTensor,
+        output: DTensor,
+        grid_dim: tuple,
+        block_dim: tuple,
+    ):
+        # Currently assume that the input/weight_linear/output are 2D tensors
+        assert input.num_dims == 2
+        assert weight_linear.num_dims == 2
+        assert output.num_dims == 2
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(input, (-1, -1, -1), 1, True)
+        tb_graph.new_input(weight_norm, (-1, -1, -1), 0, True)
+        tb_graph.new_input(weight_linear, (0, -1, -1), 1, True)
+        tb_graph.new_input(output, (1, -1, -1), -1, True)
+        self.kn_graph.customized([input, weight_norm, weight_linear, output], tb_graph)
+        self.kn_graph.register_task(tb_graph, "rmsnorm_linear")
+
+    def attention_layer(
+        self,
+        input: DTensor,
+        q_norm: DTensor,
+        k_norm: DTensor,
+        k_cache: DTensor,
+        v_cache: DTensor,
+        cos_pos_embed: DTensor,
+        sin_pos_embed: DTensor,
+        output: DTensor,
+        grid_dim: tuple,
+        block_dim: tuple,
+    ):
+        # Currently assume that input/output
+        assert input.num_dims == 2  # (batch_size, fused_outdim / world_size)
+        assert output.num_dims == 2  # (batch_size, hidden_size / world_size)
+        assert q_norm.num_dims == 1  # (head_dim)
+        assert k_norm.num_dims == 1  # (head_dim)
+        assert k_cache.num_dims == 4  # (batch_size, seq_len, kv_heads, head_dim)
+        assert v_cache.num_dims == 4  # (batch_size, seq_len, kv_heads, head_dim)
+        assert cos_pos_embed.num_dims == 2  # (seq_len, head_dim)
+        assert sin_pos_embed.num_dims == 2  # (seq_len, head_dim)
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(input, (0, 1, -1), -1, True)
+        tb_graph.new_input(k_cache, (0, 2, -1), 1, True)
+        tb_graph.new_input(v_cache, (0, 2, -1), 1, True)
+        tb_graph.new_input(q_norm, (-1, -1, -1), -1, True)
+        tb_graph.new_input(k_norm, (-1, -1, -1), -1, True)
+        tb_graph.new_input(cos_pos_embed, (-1, -1, -1), -1, True)
+        tb_graph.new_input(sin_pos_embed, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output, (0, 1, -1), -1, True)
+        self.kn_graph.customized(
+            [
+                input,
+                k_cache,
+                v_cache,
+                q_norm,
+                k_norm,
+                cos_pos_embed,
+                sin_pos_embed,
+                output,
+            ],
+            tb_graph,
+        )
+        self.kn_graph.register_task(tb_graph, "attention")
+
+    def linear_with_residual_layer(
+        self,
+        input: DTensor,
+        weight: DTensor,
+        residual: DTensor,
+        output: DTensor,
+        grid_dim: tuple,
+        block_dim: tuple,
+    ):
+        # Currently assume that input/output
+        assert input.num_dims == 2  # (batch_size, hidden_size / world_size)
+        assert weight.num_dims == 2  # (hidden_size, hidden_size / world_size)
+        assert residual.num_dims == 2  # (batch_size, hidden_size)
+        assert output.num_dims == 2  # (batch_size, hidden_size)
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(input, (-1, -1, -1), 1, True)
+        tb_graph.new_input(weight, (0, -1, -1), 1, True)
+        tb_graph.new_input(residual, (1, -1, -1), -1, True)
+        tb_graph.new_input(output, (1, -1, -1), -1, True)
+        self.kn_graph.customized([input, weight, residual, output], tb_graph)
+        self.kn_graph.register_task(tb_graph, "linear_with_residual")
+
+    def allreduce_layer(
+        self,
+        input: DTensor,
+        buffer: DTensor,
+        output: DTensor,
+        grid_dim: tuple,
+        block_dim: tuple,
+    ):
+        # Currently assume that input/output
+        assert input.num_dims == 2  # (batch_size, hidden_size)
+        assert buffer.num_dims == 3  # (world_size, batch_size, hidden_size)
+        assert output.num_dims == 2  # (batch_size, hidden_size)
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(input, (1, -1, -1), -1, True)
+        tb_graph.new_input(buffer, (2, -1, -1), -1, True)
+        tb_graph.new_input(output, (1, -1, -1), -1, True)
+        self.kn_graph.customized([input, buffer, output], tb_graph)
+        self.kn_graph.register_task(tb_graph, "allreduce")
+
+    def silu_mul_linear_with_residual_layer(
+        self,
+        input: DTensor,
+        weight: DTensor,
+        residual: DTensor,
+        output: DTensor,
+        grid_dim: tuple,
+        block_dim: tuple,
+    ):
+        # Currently assume that input/output
+        assert input.num_dims == 2  # (batch_size, 2*intermediate_size)
+        assert weight.num_dims == 2  # (hidden_size, intermediate_size)
+        assert residual.num_dims == 2  # (batch_size, hidden_size)
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(input, (-1, -1, -1), 1, True)
+        tb_graph.new_input(weight, (0, -1, -1), 1, True)
+        tb_graph.new_input(residual, (1, -1, -1), 1, True)
+        tb_graph.new_input(output, (1, -1, -1), 1, True)
+        self.kn_graph.customized([input, weight, residual, output], tb_graph)
+        self.kn_graph.register_task(tb_graph, "silu_mul_linear_with_residual")
+
+    def argmax_layer(
+        self, input: DTensor, output: DTensor, grid_dim: tuple, block_dim: tuple
+    ):
+        # Currently assume that input/output
+        assert input.num_dims == 2  # (batch_size, vocab_size)
+        assert output.num_dims == 2  # (batch_size, 1)
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(input, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output, (-1, -1, -1), -1, True)
+        self.kn_graph.customized([input, output], tb_graph)
+        self.kn_graph.register_task(tb_graph, "argmax")
+
+    def argmax_partial_layer(
+        self, input: DTensor, output: tuple[DTensor, DTensor], grid_dim: tuple, block_dim: tuple):
+        # Currently assume that input/output
+        assert input.num_dims == 2  # (batch_size, vocab_size)
+        assert len(output) == 2
+        output_value, output_index = output
+        assert output_value.num_dims == 2  # (batch_size, num_tasks)
+        assert output_index.num_dims == 2  # (batch_size, num_tasks)
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(input, (1, -1, -1), -1, True)
+        tb_graph.new_input(output_value, (1, -1, -1), -1, True)
+        tb_graph.new_input(output_index, (1, -1, -1), -1, True)
+        self.kn_graph.customized([input, output_value, output_index], tb_graph)
+        self.kn_graph.register_task(tb_graph, "argmax_partial")
+
+    def argmax_reduce_layer(
+        self, input: tuple[DTensor, DTensor], output: DTensor, grid_dim: tuple, block_dim: tuple
+    ):
+        # Currently assume that input/output
+        assert len(input) == 2
+        input_value, input_index = input
+        assert input_value.num_dims == 2  # (batch_size, num_tasks)
+        assert input_index.num_dims == 2  # (batch_size, num_tasks)
+        assert output.num_dims == 2  # (batch_size, 1)
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(input_value, (-1, -1, -1), -1, True)
+        tb_graph.new_input(input_index, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output, (-1, -1, -1), -1, True)
+        self.kn_graph.customized([input_value, input_index, output], tb_graph)
+        self.kn_graph.register_task(tb_graph, "argmax_reduce")
+
+    def compile(
+        self,
+        use_nvshmem: bool = True,
+        **kwargs,
+    ):
+        assert not self._is_compiled
+
         MIRAGE_ROOT, INCLUDE_PATH, DEPS_PATH = get_key_paths()
         tempdir_obj = tempfile.TemporaryDirectory()
         tempdir = tempdir_obj.name
-        full_src_file = os.path.join(tempdir, "test.cu")
+        results = self.kn_graph.generate_task_graph(num_gpus=self.world_size)
+
+        cuda_code_path = os.path.join(tempdir, "test.cu")
         so_path = os.path.join(tempdir, "test.cpython-38-x86_64-linux-gnu.so")
         # check json file
-        json_file_path = os.path.join(os.path.dirname(file_path), "task_graph.json")
-        new_json_path = os.path.join(tempdir, "task_graph.json")
-        if not os.path.exists(json_file_path):
-            raise RuntimeError(f"Cannot find json file in directory {json_file_path}")
-        with open(json_file_path, "r") as f:
-            task_graph_json = f.read()
-        with open(new_json_path, "w") as f:
-            f.write(task_graph_json)
-        with open(file_path, "r") as f:
-            task_graph_impl = f.read()
-        with open(full_src_file, "w") as f:
-            f.write(task_graph_impl + HARD_CODE)
+        json_file_path = os.path.join(tempdir, "task_graph.json")
+        with open(json_file_path, "w") as f:
+            f.write(results["json_file"])
+        with open(cuda_code_path, "w") as f:
+            f.write(results["cuda_code"] + HARD_CODE)
 
         cc = shutil.which("nvcc")
         if cc is None:
@@ -197,7 +438,7 @@ class PersistentKernel:
             scheme = "posix_prefix"
         py_include_dir = sysconfig.get_paths(scheme=scheme)["include"]
 
-        #find mirage home
+        # find mirage home
         if "MIRAGE_HOME" in os.environ:
             MIRAGE_HOME_PATH = os.environ.get("MIRAGE_HOME")
         else:
@@ -209,74 +450,86 @@ class PersistentKernel:
             header_file_path = os.path.join(NVSHMEM_INC_PATH, "nvshmem.h")
             if not os.path.exists(header_file_path):
                 raise RuntimeError(
-                    "Environment variable NVSHMEM_INC_PATH is set but cannot find nvshmem.h at {header_file_path}")
+                    "Environment variable NVSHMEM_INC_PATH is set but cannot find nvshmem.h at {header_file_path}"
+                )
         else:
             NVSHMEM_INC_PATH = "/usr/include/nvshmem_12/"
             header_file_path = os.path.join(NVSHMEM_INC_PATH, "nvshmem.h")
             if not os.path.exists(header_file_path):
                 raise RuntimeError(
-                    "Cannot find nvshmem.h, please set environment variable NVSHMEM_INC_PATH")
-        #find nvshmem shared library
+                    "Cannot find nvshmem.h, please set environment variable NVSHMEM_INC_PATH"
+                )
+        # find nvshmem shared library
         if "NVSHMEM_LIB_PATH" in os.environ:
             NVSHMEM_LIB_PATH = os.environ.get("NVSHMEM_LIB_PATH")
             lib_file_path = os.path.join(NVSHMEM_LIB_PATH, "libnvshmem.a")
             if not os.path.exists(lib_file_path):
                 raise RuntimeError(
-                    "Environment variable NVSHMEM_LIB_PATH is set but cannot find libnvshmem.a at {lib_file_path}")
+                    "Environment variable NVSHMEM_LIB_PATH is set but cannot find libnvshmem.a at {lib_file_path}"
+                )
         else:
             NVSHMEM_LIB_PATH = "/usr/lib/x86_64-linux-gnu/"
             lib_file_path = os.path.join(NVSHMEM_LIB_PATH, "libnvshmem.a")
             if not os.path.exists(lib_file_path):
                 raise RuntimeError(
-                    "Cannot find libnvshmem.a, please set environment variable NVSHMEM_LIB_PATH")
+                    "Cannot find libnvshmem.a, please set environment variable NVSHMEM_LIB_PATH"
+                )
         # find mpi include foler
         if "MPI_INC_PATH" in os.environ:
             MPI_INC_PATH = os.environ.get("MPI_INC_PATH")
             header_file_path = os.path.join(MPI_INC_PATH, "mpi.h")
             if not os.path.exists(header_file_path):
                 raise RuntimeError(
-                    "Environment variable MPI_INC_PATH is set but cannot find mpi.h at {header_file_path}")
+                    "Environment variable MPI_INC_PATH is set but cannot find mpi.h at {header_file_path}"
+                )
         else:
             MPI_INC_PATH = "/usr/include/"
             header_file_path = os.path.join(MPI_INC_PATH, "mpi.h")
             if not os.path.exists(header_file_path):
                 raise RuntimeError(
-                    "Cannot find mpi.h, please set environment variable MPI_INC_PATH")
-        #find mpi shared library
+                    "Cannot find mpi.h, please set environment variable MPI_INC_PATH"
+                )
+        # find mpi shared library
         if "MPI_LIB_PATH" in os.environ:
             MPI_LIB_PATH = os.environ.get("MPI_LIB_PATH")
             lib_file_path = os.path.join(NVSHMEM_LIB_PATH, "libmpi.so")
             if not os.path.exists(lib_file_path):
                 raise RuntimeError(
-                    "Environment variable MPI_LIB_PATH is set but cannot find libmpi.so at {lib_file_path}")
+                    "Environment variable MPI_LIB_PATH is set but cannot find libmpi.so at {lib_file_path}"
+                )
         else:
             NVSHMEM_LIB_PATH = "/usr/lib/"
             lib_file_path = os.path.join(NVSHMEM_LIB_PATH, "libmpi.so")
             if not os.path.exists(lib_file_path):
                 raise RuntimeError(
-                    "Cannot find libmpi.so, please set environment variable MPI_LIB_PATH")
-        target_cc = torch.cuda.get_device_properties(0).major * 10 + torch.cuda.get_device_properties(0).minor
-        profiling = kwargs.get("profiling", False)
-        use_nvshmem = kwargs.get("use_nvshmem", True)
+                    "Cannot find libmpi.so, please set environment variable MPI_LIB_PATH"
+                )
+        target_cc = (
+            torch.cuda.get_device_properties(0).major * 10
+            + torch.cuda.get_device_properties(0).minor
+        )
 
-        cc_cmd = get_compile_command(target_cc=target_cc,
-                                     cc=cc,
-                                     file_name=full_src_file,
-                                     py_include_dir=py_include_dir,
-                                     mirage_home_path=MIRAGE_HOME_PATH,
-                                     mirage_inc_path=INCLUDE_PATH,
-                                     mirage_deps_path=DEPS_PATH,
-                                     nvshmem_inc_path=NVSHMEM_INC_PATH,
-                                     nvshmem_lib_path=NVSHMEM_LIB_PATH,
-                                     mpi_inc_path=MPI_INC_PATH,
-                                     mpi_lib_path=MPI_LIB_PATH,
-                                     py_so_path=so_path,
-                                     profiling=profiling,
-                                     use_nvshmem=use_nvshmem)
+        cc_cmd = get_compile_command(
+            target_cc=target_cc,
+            cc=cc,
+            file_name=cuda_code_path,
+            py_include_dir=py_include_dir,
+            mirage_home_path=MIRAGE_HOME_PATH,
+            mirage_inc_path=INCLUDE_PATH,
+            mirage_deps_path=DEPS_PATH,
+            nvshmem_inc_path=NVSHMEM_INC_PATH,
+            nvshmem_lib_path=NVSHMEM_LIB_PATH,
+            mpi_inc_path=MPI_INC_PATH,
+            mpi_lib_path=MPI_LIB_PATH,
+            py_so_path=so_path,
+            profiling= True if self.profiler_tensor is not None else False,
+            use_nvshmem=use_nvshmem,
+        )
         print(cc_cmd)
         subprocess.check_call(cc_cmd)
 
         import importlib.util
+
         spec = importlib.util.spec_from_file_location("__mirage_launcher", so_path)
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
@@ -284,26 +537,34 @@ class PersistentKernel:
         self.launch_func = getattr(mod, "launch_func")
         self.finalize_func = getattr(mod, "finalize_func")
 
-        # initialize persistent kernel
-        input_tensors = kwargs.get("input_tensors", [])
-        meta_tensors = kwargs.get("meta_tensors", [])
-        self.profiler_tensor=kwargs.get("profiler_tensor")
+        meta_tensors_ptr = [tensor.data_ptr() for tensor in self.meta_tensors]
+        profiler_buffer_ptr = (
+            self.profiler_tensor.data_ptr() if self.profiler_tensor is not None else 0
+        )
+        self.init_func(
+            meta_tensors_ptr,
+            profiler_buffer_ptr,
+            self.mpi_rank,
+            self.num_workers,
+            self.num_local_schedulers,
+            self.num_remote_schedulers,
+        )
 
-        input_tensors_ptr = [tensor.data_ptr() for tensor in input_tensors]
-        meta_tensors_ptr = [tensor.data_ptr() for tensor in meta_tensors]
-        profiler_buffer_ptr = self.profiler_tensor.data_ptr() if self.profiler_tensor is not None else 0
-        self.init_func(input_tensors_ptr, meta_tensors_ptr, profiler_buffer_ptr, mpi_rank, num_workers, num_local_schedulers, num_remote_schedulers)
+        self._is_compiled = True
 
-        #self.call_func = getattr(mod, "call_func")
+        # self.call_func = getattr(mod, "call_func")
 
     def __call__(self, **kwargs):
-        #stream = kwargs.get("stream", None)
-        #if stream is None:
+        # stream = kwargs.get("stream", None)
+        # if stream is None:
         #    stream = torch.cuda.default_stream()
         self.launch_func()
         if self.profiler_tensor is not None:
             from .profiler_persistent import export_to_perfetto_trace
-            export_to_perfetto_trace(self.profiler_tensor, f'mirage_{self.mpi_rank}.perfetto-trace')
+
+            export_to_perfetto_trace(
+                self.profiler_tensor, f"mirage_{self.mpi_rank}.perfetto-trace"
+            )
 
     def __del__(self):
         if not self.__finalized__:
@@ -311,5 +572,6 @@ class PersistentKernel:
 
     def finalize(self):
         assert not self.__finalized__
-        self.finalize_func()
+        if self._is_compiled:
+            self.finalize_func()
         self.__finalized__ = True

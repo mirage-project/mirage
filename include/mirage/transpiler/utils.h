@@ -40,6 +40,13 @@ template <>
 }
 
 template <>
+[[maybe_unused]] std::string my_to_string(void *const &value) {
+  std::ostringstream oss;
+  oss << value;
+  return oss.str();
+}
+
+template <>
 [[maybe_unused]] std::string my_to_string(std::string const &value) {
   return value;
 }

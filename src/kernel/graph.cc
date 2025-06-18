@@ -24,7 +24,8 @@
 namespace mirage {
 namespace kernel {
 
-Graph::Graph(dim3 _gpu_dim) : gpu_dim(_gpu_dim) {
+Graph::Graph(dim3 _gpu_dim, bool _disable_fingerprint)
+    : gpu_dim(_gpu_dim), disable_fingerprint(_disable_fingerprint) {
   dmem_data_offset = 0;
   dmem_fp_offset = 0;
 }
@@ -96,6 +97,12 @@ int Graph::get_input_dtensor_shape_and_stride(DTensor const *input,
 
 bool Graph::can_allocate(DTensor const &tensor,
                          bool allocate_fingerprint) const {
+  // We don't need to actually allocate device memory
+  // when fingerprint is disabled (e.g., for very large muGraphs)
+  if (disable_fingerprint) {
+    return true;
+  }
+
   size_t data_size = ((tensor.data_size() + 15) & ~15);
   if (dmem_data_offset + data_size > mirage::config::MAX_DMEM_DATA_SIZE) {
     return false;
@@ -111,6 +118,12 @@ bool Graph::can_allocate(DTensor const &tensor,
 
 bool Graph::can_allocate(size_t data_size_in_bytes,
                          size_t fp_size_in_bytes) const {
+  // We don't need to actually allocate device memory
+  // when fingerprint is disabled (e.g., for very large muGraphs)
+  if (disable_fingerprint) {
+    return true;
+  }
+
   if (dmem_data_offset + data_size_in_bytes >
       mirage::config::MAX_DMEM_DATA_SIZE) {
     return false;
@@ -196,7 +209,7 @@ void from_json(json const &j, Graph &g) {
     jop.at("op_type").get_to(op_type);
     switch (op_type) {
       case type::KNOperatorType::KN_INPUT_OP: {
-        int num_dim, dim[MAX_TENSOR_DIMS];
+        int num_dim, dim[mirage::config::MAX_TENSOR_DIMS];
         type::DataType data_type;
         layout::DmemLayout layout;
         std::vector<size_t> input_strides;
@@ -319,6 +332,95 @@ size_t Graph::get_owner_independent_hash() const {
     hash_combine(ret, h);
   }
   return ret;
+}
+
+// Persistent kernel functions
+using namespace mirage::runtime;
+void Graph::attach_torch_tensor(DTensor const *input,
+                                void *torch_data_ptr,
+                                char const *name) {
+  io_config.emplace(
+      input->guid,
+      IODesc(IODesc::TorchTensor, std::string(name), *input, torch_data_ptr));
+}
+
+void Graph::attach_cuda_tensor(DTensor const *input, char const *name) {
+  io_config.emplace(
+      input->guid, IODesc(IODesc::CUDAMallocTensor, std::string(name), *input));
+}
+
+void Graph::attach_nvshmem_tensor(DTensor const *input, char const *name) {
+  io_config.emplace(
+      input->guid,
+      IODesc(IODesc::NVSHMEMMallocTensor, std::string(name), *input));
+}
+
+DTensor *Graph::fuse_tensors(std::vector<DTensor const *> inputs,
+                             int fused_dim,
+                             int num_groups,
+                             char const *name) {
+  // Currently assert that we fuse along the 0-th dim (for weights)
+  assert(fused_dim == 0);
+  assert(inputs.size() > 0);
+  std::vector<int> dims;
+  for (int i = 0; i < inputs[0]->num_dims; i++) {
+    dims.push_back(inputs[0]->dim[i]);
+  }
+  for (size_t t = 1; t < inputs.size(); t++) {
+    dims[0] += inputs[t]->dim[0];
+    assert(inputs[0]->num_dims == inputs[t]->num_dims);
+    for (int i = 1; i < inputs[t]->num_dims; i++) {
+      assert(dims[i] == inputs[t]->dim[i]);
+    }
+    assert(inputs[0]->data_type == inputs[t]->data_type);
+  }
+  std::vector<size_t> strides(dims.size(), 1);
+  for (int i = inputs[0]->num_dims - 1; i >= 0; i--) {
+    if (i == inputs[0]->num_dims - 1) {
+      strides[i] = 1;
+    } else {
+      strides[i] = strides[i + 1] * dims[i + 1];
+    }
+  }
+  DTensor *fused =
+      new_input_ptr(dims, strides, inputs[0]->data_type, layout::DmemRowMajor);
+  IODesc desc(IODesc::FusedTorchTensor, std::string(name), *fused);
+  desc.num_groups = num_groups;
+  for (size_t t = 0; t < inputs.size(); t++) {
+    assert(io_config.find(inputs[t]->guid) != io_config.end());
+    IODesc sub_desc = io_config.find(inputs[t]->guid)->second;
+    desc.sub_descs.push_back(sub_desc);
+    io_config.erase(inputs[t]->guid);
+  }
+  io_config.emplace(fused->guid, desc);
+  return fused;
+}
+
+void Graph::register_task(char const *task_type) {
+  std::string name = std::string(task_type);
+  if (name == "embedding") {
+    task_config[operators.back()] = std::make_tuple(2, 1, TASK_EMBEDDING);
+  } else if (name == "rmsnorm_linear") {
+    task_config[operators.back()] = std::make_tuple(3, 1, TASK_RMS_NORM_LINEAR);
+  } else if (name == "attention") {
+    task_config[operators.back()] = std::make_tuple(7, 1, TASK_ATTENTION_1);
+  } else if (name == "linear_with_residual") {
+    task_config[operators.back()] =
+        std::make_tuple(3, 1, TASK_LINEAR_WITH_RESIDUAL);
+  } else if (name == "silu_mul_linear_with_residual") {
+    task_config[operators.back()] =
+        std::make_tuple(3, 1, TASK_SILU_MUL_LINEAR_WITH_RESIDUAL);
+  } else if (name == "argmax") {
+    task_config[operators.back()] = std::make_tuple(1, 1, TASK_ARGMAX);
+  } else if (name == "argmax_partial") {
+    task_config[operators.back()] = std::make_tuple(1, 2, TASK_ARGMAX_PARTIAL);
+  } else if (name == "argmax_reduce") {
+    task_config[operators.back()] = std::make_tuple(2, 1, TASK_ARGMAX_REDUCE);
+  } else if (name == "allreduce") {
+    task_config[operators.back()] = std::make_tuple(2, 1, TASK_ALLREDUCE);
+  } else {
+    assert(false && "Unsupported task type");
+  }
 }
 
 } // namespace kernel

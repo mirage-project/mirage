@@ -1,6 +1,7 @@
-""" Global Configuration """
+"""Global Configuration"""
 
 import os
+
 
 class GlobalConfig:
     def __init__(self):
@@ -12,5 +13,6 @@ class GlobalConfig:
 
         # bypass compile errors
         self.bypass_compile_errors = False
+
 
 global_config = GlobalConfig()
