@@ -33,7 +33,8 @@ template <typename T,
           int BATCH_SIZE,
           int OUTPUT_SIZE,
           int REDUCTION_SIZE,
-          int O_STRIDE = OUTPUT_SIZE>
+          int O_STRIDE = OUTPUT_SIZE,
+          int K_PIPE_MAX = 2>
 __device__ __forceinline__ void
     norm_linear_task_impl(void const *input_ptr,
                           void const *norm_weight_ptr,
@@ -94,43 +95,23 @@ __device__ __forceinline__ void
   constexpr size_t ZERO_BUFFER_OFFSET = 0;
   // sizeof(T) * 8
 
-  constexpr size_t SHARED_INPUT_OFFSET = ZERO_BUFFER_OFFSET + sizeof(T) * 8;
-  // sizeof(T) * BATCH_SIZE * TILE_SIZE
+  constexpr size_t SHARED_INPUT_BUFFER_OFFSET =
+      ZERO_BUFFER_OFFSET + sizeof(T) * 8;
+  // sizeof(T) * FORLOOP_RANGE * BATCH_SIZE * TILE_SIZE
 
-  constexpr size_t SHARED_INPUT_BUFFER_1_OFFSET =
-      SHARED_INPUT_OFFSET + sizeof(T) * BATCH_SIZE * TILE_SIZE;
-  // sizeof(T) * BATCH_SIZE * TILE_SIZE
+  constexpr size_t SHARED_NORM_WEIGHT_BUFFER_OFFSET =
+      SHARED_INPUT_BUFFER_OFFSET +
+      sizeof(T) * FORLOOP_RANGE * BATCH_SIZE * TILE_SIZE;
+  // sizeof(T) * FORLOOP_RANGE * BATCH_SIZE * TILE_SIZE
 
-  constexpr size_t SHARED_INPUT_BUFFER_2_OFFSET =
-      SHARED_INPUT_BUFFER_1_OFFSET + sizeof(T) * BATCH_SIZE * TILE_SIZE;
-  // sizeof(T) * BATCH_SIZE * TILE_SIZE
-
-  constexpr size_t SHARED_NORM_WEIGHT_OFFSET =
-      SHARED_INPUT_BUFFER_2_OFFSET + sizeof(T) * BATCH_SIZE * TILE_SIZE;
-  // sizeof(T) * BATCH_SIZE * TILE_SIZE
-
-  constexpr size_t SHARED_NORM_WEIGHT_BUFFER_1_OFFSET =
-      SHARED_NORM_WEIGHT_OFFSET + sizeof(T) * BATCH_SIZE * TILE_SIZE;
-  // sizeof(T) * BATCH_SIZE * TILE_SIZE
-
-  constexpr size_t SHARED_NORM_WEIGHT_BUFFER_2_OFFSET =
-      SHARED_NORM_WEIGHT_BUFFER_1_OFFSET + sizeof(T) * BATCH_SIZE * TILE_SIZE;
-  // sizeof(T) * BATCH_SIZE * TILE_SIZE
-
-  constexpr size_t SHARED_WEIGHT_OFFSET =
-      SHARED_NORM_WEIGHT_BUFFER_2_OFFSET + sizeof(T) * BATCH_SIZE * TILE_SIZE;
-  // sizeof(T) * TILE_SIZE * OUTPUT_ATOM_SIZE
-
-  constexpr size_t SHARED_WEIGHT_BUFFER_1_OFFSET =
-      SHARED_WEIGHT_OFFSET + sizeof(T) * TILE_SIZE * OUTPUT_ATOM_SIZE;
-  // sizeof(T) * TILE_SIZE * OUTPUT_ATOM_SIZE
-
-  constexpr size_t SHARED_WEIGHT_BUFFER_2_OFFSET =
-      SHARED_WEIGHT_BUFFER_1_OFFSET + sizeof(T) * TILE_SIZE * OUTPUT_ATOM_SIZE;
-  // sizeof(T) * TILE_SIZE * OUTPUT_ATOM_SIZE
+  constexpr size_t SHARED_WEIGHT_BUFFER_OFFSET =
+      SHARED_NORM_WEIGHT_BUFFER_OFFSET +
+      sizeof(T) * FORLOOP_RANGE * BATCH_SIZE * TILE_SIZE;
+  // sizeof(T) * K_PIPE_MAX * TILE_SIZE * OUTPUT_ATOM_SIZE
 
   constexpr size_t MUL_OUTPUT_OFFSET =
-      SHARED_WEIGHT_BUFFER_2_OFFSET + sizeof(T) * TILE_SIZE * OUTPUT_ATOM_SIZE;
+      SHARED_WEIGHT_BUFFER_OFFSET +
+      sizeof(T) * K_PIPE_MAX * TILE_SIZE * OUTPUT_ATOM_SIZE;
   // sizeof(T) * BATCH_SIZE * TILE_SIZE
 
   constexpr size_t ELEMENT_UNARY_OUTPUT_OFFSET =
@@ -153,26 +134,21 @@ __device__ __forceinline__ void
   constexpr size_t SHARED_OUTPUT_OFFSET = MM_INTERMEDIATE_OFFSET;
   // reuse mm_intermediate
 
+  // if (threadIdx.x == 0) {
+  //   int const smem_size =
+  //       REDUCTION_OUTPUT_OFFSET +
+  //       sizeof(T) * BATCH_SIZE * 1; // sizeof(T) * BATCH_SIZE * 1
+  //   printf("smem size of norm_linear: %d\n", smem_size);
+  // }
+
   // zero buffer
   T *zero_buf = (T *)(smem + ZERO_BUFFER_OFFSET);
   *((__uint128_t *)zero_buf) = 0ul;
 
-  // copy input
-  T *shared_input = (T *)(smem + SHARED_INPUT_OFFSET);
-  T *shared_input_buffer_1 = (T *)(smem + SHARED_INPUT_BUFFER_1_OFFSET);
-  T *shared_input_buffer_2 = (T *)(smem + SHARED_INPUT_BUFFER_2_OFFSET);
-
-  // copy norm weight
-  T *shared_norm_weight = (T *)(smem + SHARED_NORM_WEIGHT_OFFSET);
-  T *shared_norm_weight_buffer_1 =
-      (T *)(smem + SHARED_NORM_WEIGHT_BUFFER_1_OFFSET);
-  T *shared_norm_weight_buffer_2 =
-      (T *)(smem + SHARED_NORM_WEIGHT_BUFFER_2_OFFSET);
-
-  // copy weight
-  T *shared_weight = (T *)(smem + SHARED_WEIGHT_OFFSET);
-  T *shared_weight_buffer_1 = (T *)(smem + SHARED_WEIGHT_BUFFER_1_OFFSET);
-  T *shared_weight_buffer_2 = (T *)(smem + SHARED_WEIGHT_BUFFER_2_OFFSET);
+  // copy
+  T *shared_input_buffer = (T *)(smem + SHARED_INPUT_BUFFER_OFFSET);
+  T *shared_norm_weight_buffer = (T *)(smem + SHARED_NORM_WEIGHT_BUFFER_OFFSET);
+  T *shared_weight_buffer = (T *)(smem + SHARED_WEIGHT_BUFFER_OFFSET);
 
   // intermediate
   T *mul_output = (T *)(smem + MUL_OUTPUT_OFFSET);
@@ -190,8 +166,12 @@ __device__ __forceinline__ void
   // define the swizzle mode
   using ZeroBufferSmem = smem_row<T, 0, 0, 0, 1, 8, 8>;
   using InputSmem = smem_row<T, 0, 0, 0, BATCH_SIZE, TILE_SIZE, TILE_SIZE>;
+  using InputBufferSmem =
+      smem_row<T, 0, 0, 0, FORLOOP_RANGE * BATCH_SIZE, TILE_SIZE, TILE_SIZE>;
   using WeightSmem =
       smem_col<T, 3, 3, 3, TILE_SIZE, OUTPUT_ATOM_SIZE, TILE_SIZE>;
+  using WeightBufferSmem =
+      smem_col<T, 3, 3, 3, TILE_SIZE, K_PIPE_MAX * OUTPUT_ATOM_SIZE, TILE_SIZE>;
   using OutputSmem =
       smem_row<T, 0, 0, 0, BATCH_SIZE, OUTPUT_ATOM_SIZE, OUTPUT_ATOM_SIZE>;
   using MatMulIntermediateSmem = smem_row<T,
@@ -205,17 +185,9 @@ __device__ __forceinline__ void
 
   ZeroBufferSmem zero_buffer(zero_buf);
 
-  InputSmem input_smem(shared_input);
-  InputSmem input_smem_buffer_1(shared_input_buffer_1);
-  InputSmem input_smem_buffer_2(shared_input_buffer_2);
-
-  InputSmem norm_weight_smem(shared_norm_weight);
-  InputSmem norm_weight_smem_buffer_1(shared_norm_weight_buffer_1);
-  InputSmem norm_weight_smem_buffer_2(shared_norm_weight_buffer_2);
-
-  WeightSmem input_weight_smem(shared_weight);
-  WeightSmem input_weight_smem_buffer_1(shared_weight_buffer_1);
-  WeightSmem input_weight_smem_buffer_2(shared_weight_buffer_2);
+  InputSmem input_smem(shared_input_buffer);
+  InputSmem norm_weight_smem(shared_norm_weight_buffer);
+  WeightSmem weight_smem(shared_weight_buffer);
 
   InputSmem mul_output_smem(mul_output);
   InputSmem element_unary_smem(element_unary_output);
@@ -232,43 +204,34 @@ __device__ __forceinline__ void
     weight_dmem.set_ptr(d_weight);
     output_dmem.set_ptr(d_output);
 
-#pragma unroll
-    for (int i = threadIdx.x; i < NUM_CHUNKS_A; i += NUM_THREADS) {
-      int row = i >> log2_CHUNKS_PER_ROW_A;
-      int col = (i & (CHUNKS_PER_ROW_A - 1)) << log2_CHUNK_SIZE;
-      load_smem(input_smem_buffer_1(row, col), input_dmem(row, col));
-      load_smem(norm_weight_smem_buffer_1(row, col),
-                norm_weight_dmem(row, col));
-    }
+    InputBufferSmem input_buffer_smem(shared_input_buffer);
+    InputBufferSmem norm_weight_buffer_smem(shared_norm_weight_buffer);
+    WeightBufferSmem weight_buffer_smem(shared_weight_buffer);
 
 #pragma unroll
-    for (int i = threadIdx.x; i < NUM_CHUNKS_B; i += NUM_THREADS) {
-      int row = (i & (CHUNKS_PER_COL_B - 1)) << log2_CHUNK_SIZE;
-      int col = i >> log2_CHUNKS_PER_COL_B;
-      load_smem(input_weight_smem_buffer_1(row, col), weight_dmem(row, col));
-    }
-    cp_async_fence();
-
-    if (FORLOOP_RANGE > 1) {
-      InputDmem input_dmem_buffer_1(d_input + TILE_SIZE);
-      InputDmem norm_weight_dmem_buffer_1(d_norm_weight + TILE_SIZE);
-      WeightDmem weight_dmem_buffer_1(d_weight + TILE_SIZE);
-
+    for (int k_pipe = 0; k_pipe < K_PIPE_MAX - 1; k_pipe++) {
+      if (output_atom_idx == 0) {
 #pragma unroll
-      for (int i = threadIdx.x; i < NUM_CHUNKS_A; i += NUM_THREADS) {
-        int row = i >> log2_CHUNKS_PER_ROW_A;
-        int col = (i & (CHUNKS_PER_ROW_A - 1)) << log2_CHUNK_SIZE;
-        load_smem(input_smem_buffer_2(row, col), input_dmem_buffer_1(row, col));
-        load_smem(norm_weight_smem_buffer_2(row, col),
-                  norm_weight_dmem_buffer_1(row, col));
+        for (int i = threadIdx.x; i < NUM_CHUNKS_A; i += NUM_THREADS) {
+          int src_row = i >> log2_CHUNKS_PER_ROW_A;
+          int dst_row = src_row + (k_pipe << log2_constexpr(BATCH_SIZE));
+          int dst_col = (i & (CHUNKS_PER_ROW_A - 1)) << log2_CHUNK_SIZE;
+          int src_col = dst_col + (k_pipe << log2_constexpr(TILE_SIZE));
+          load_smem(input_buffer_smem(dst_row, dst_col),
+                    input_dmem(src_row, src_col));
+          load_smem(norm_weight_buffer_smem(dst_row, dst_col),
+                    norm_weight_dmem(src_row, src_col));
+        }
       }
-
 #pragma unroll
       for (int i = threadIdx.x; i < NUM_CHUNKS_B; i += NUM_THREADS) {
-        int row = (i & (CHUNKS_PER_COL_B - 1)) << log2_CHUNK_SIZE;
-        int col = i >> log2_CHUNKS_PER_COL_B;
-        load_smem(input_weight_smem_buffer_2(row, col),
-                  weight_dmem_buffer_1(row, col));
+        int dst_row = (i & (CHUNKS_PER_COL_B - 1)) << log2_CHUNK_SIZE;
+        int src_row = dst_row + (k_pipe << log2_constexpr(TILE_SIZE));
+        int src_col = i >> log2_CHUNKS_PER_COL_B;
+        int dst_col =
+            src_col + ((k_pipe + 1) << log2_constexpr(OUTPUT_ATOM_SIZE));
+        load_smem(weight_buffer_smem(dst_row, dst_col),
+                  weight_dmem(src_row, src_col));
       }
       cp_async_fence();
     }
@@ -287,70 +250,51 @@ __device__ __forceinline__ void
 
     for (int for_idx = 0; for_idx < FORLOOP_RANGE; for_idx++) {
       // copy
-      if (for_idx + 2 < FORLOOP_RANGE) {
-        InputDmem input_dmem_buffer_2(d_input + TILE_SIZE * (for_idx + 2));
-        InputDmem norm_weight_dmem_buffer_2(d_norm_weight +
-                                            TILE_SIZE * (for_idx + 2));
-        WeightDmem weight_dmem_buffer_2(d_weight + TILE_SIZE * (for_idx + 2));
-
+      if (for_idx + K_PIPE_MAX - 1 < FORLOOP_RANGE) {
+        if (output_atom_idx == 0) {
 #pragma unroll
-        for (int i = threadIdx.x; i < NUM_CHUNKS_A; i += NUM_THREADS) {
-          int row = i >> log2_CHUNKS_PER_ROW_A;
-          int col = (i & (CHUNKS_PER_ROW_A - 1)) << log2_CHUNK_SIZE;
-          load_smem(input_smem(row, col), input_dmem_buffer_2(row, col));
-          load_smem(norm_weight_smem(row, col),
-                    norm_weight_dmem_buffer_2(row, col));
+          for (int i = threadIdx.x; i < NUM_CHUNKS_A; i += NUM_THREADS) {
+            int src_row = i >> log2_CHUNKS_PER_ROW_A;
+            int dst_row = src_row + ((for_idx + K_PIPE_MAX - 1)
+                                     << log2_constexpr(BATCH_SIZE));
+            int dst_col = (i & (CHUNKS_PER_ROW_A - 1)) << log2_CHUNK_SIZE;
+            int src_col = dst_col + ((for_idx + K_PIPE_MAX - 1)
+                                     << log2_constexpr(TILE_SIZE));
+            load_smem(input_buffer_smem(dst_row, dst_col),
+                      input_dmem(src_row, src_col));
+            load_smem(norm_weight_buffer_smem(dst_row, dst_col),
+                      norm_weight_dmem(src_row, src_col));
+          }
         }
-
 #pragma unroll
         for (int i = threadIdx.x; i < NUM_CHUNKS_B; i += NUM_THREADS) {
-          int row = (i & (CHUNKS_PER_COL_B - 1)) << log2_CHUNK_SIZE;
+          int dst_row = (i & (CHUNKS_PER_COL_B - 1)) << log2_CHUNK_SIZE;
+          int src_row = dst_row + ((for_idx + K_PIPE_MAX - 1)
+                                   << log2_constexpr(TILE_SIZE));
           int col = i >> log2_CHUNKS_PER_COL_B;
-          load_smem(input_weight_smem(row, col),
-                    weight_dmem_buffer_2(row, col));
+          load_smem(weight_buffer_smem(dst_row, col),
+                    weight_dmem(src_row, col));
         }
         cp_async_fence();
+        cp_async_wait<K_PIPE_MAX - 1>();
+      } else if (for_idx + K_PIPE_MAX - 1 == FORLOOP_RANGE) {
+        cp_async_wait<0>();
       }
-      cp_async_wait<1>();
 
-      // permute the triple buffers
-      if (for_idx % 3 == 0) {
-        input_smem.set_ptr(shared_input_buffer_1);
-        input_smem_buffer_1.set_ptr(shared_input_buffer_2);
-        input_smem_buffer_2.set_ptr(shared_input);
-        norm_weight_smem.set_ptr(shared_norm_weight_buffer_1);
-        norm_weight_smem_buffer_1.set_ptr(shared_norm_weight_buffer_2);
-        norm_weight_smem_buffer_2.set_ptr(shared_norm_weight);
-        input_weight_smem.set_ptr(shared_weight_buffer_1);
-        input_weight_smem_buffer_1.set_ptr(shared_weight_buffer_2);
-        input_weight_smem_buffer_2.set_ptr(shared_weight);
-      } else if (for_idx % 3 == 1) {
-        input_smem.set_ptr(shared_input_buffer_2);
-        input_smem_buffer_1.set_ptr(shared_input);
-        input_smem_buffer_2.set_ptr(shared_input_buffer_1);
-        norm_weight_smem.set_ptr(shared_norm_weight_buffer_2);
-        norm_weight_smem_buffer_1.set_ptr(shared_norm_weight);
-        norm_weight_smem_buffer_2.set_ptr(shared_norm_weight_buffer_1);
-        input_weight_smem.set_ptr(shared_weight_buffer_2);
-        input_weight_smem_buffer_1.set_ptr(shared_weight);
-        input_weight_smem_buffer_2.set_ptr(shared_weight_buffer_1);
-      } else {
-        input_smem.set_ptr(shared_input);
-        input_smem_buffer_1.set_ptr(shared_input_buffer_1);
-        input_smem_buffer_2.set_ptr(shared_input_buffer_2);
-        norm_weight_smem.set_ptr(shared_norm_weight);
-        norm_weight_smem_buffer_1.set_ptr(shared_norm_weight_buffer_1);
-        norm_weight_smem_buffer_2.set_ptr(shared_norm_weight_buffer_2);
-        input_weight_smem.set_ptr(shared_weight);
-        input_weight_smem_buffer_1.set_ptr(shared_weight_buffer_1);
-        input_weight_smem_buffer_2.set_ptr(shared_weight_buffer_2);
-      }
+      // rotate the buffers
+      input_smem.set_ptr(shared_input_buffer +
+                         BATCH_SIZE * TILE_SIZE * for_idx);
+      norm_weight_smem.set_ptr(shared_norm_weight_buffer +
+                               BATCH_SIZE * TILE_SIZE * for_idx);
+      weight_buffer_smem.set_ptr(shared_weight_buffer +
+                                 TILE_SIZE * OUTPUT_ATOM_SIZE *
+                                     ((for_idx + 1) % K_PIPE_MAX));
+      weight_smem.set_ptr(shared_weight_buffer +
+                          TILE_SIZE * OUTPUT_ATOM_SIZE *
+                              ((for_idx + 1) % K_PIPE_MAX));
       __syncthreads();
 
-      mul<decltype(mul_output_smem),
-          decltype(input_smem),
-          decltype(norm_weight_smem)>(
-          mul_output_smem, input_smem, norm_weight_smem);
+      mul(mul_output_smem, input_smem, norm_weight_smem);
       __syncthreads();
 
       uint32_t a_frag[4], b_frag[4];
@@ -370,20 +314,22 @@ __device__ __forceinline__ void
             T *src_ptr =
                 is_valid ? mul_output_smem(m_row, m_col) : zero_buffer(0, 0);
             ldsm(src_ptr, a_frag);
-            ldsm(input_weight_smem(n_row, n_col), b_frag);
+            ldsm(weight_smem(n_row, n_col), b_frag);
             mma_m16n16k16_bf16bf16bf32(
                 s_frag[m][n], a_frag, b_frag, s_frag[m][n]);
           }
         }
       }
 
-      float const scalars[] = {0.0f, 1.0f / float(REDUCTION_SIZE)};
-      perform_element_unary_chain_kernel<true,
-                                         decltype(element_unary_smem),
-                                         decltype(input_smem),
-                                         ElementUnaryOpType::SQUARE,
-                                         ElementUnaryOpType::MULSCALAR>(
-          element_unary_smem, input_smem, scalars);
+      if (output_atom_idx == 0) {
+        float const scalars[] = {0.0f, 1.0f / float(REDUCTION_SIZE)};
+        perform_element_unary_chain_kernel<true,
+                                           decltype(element_unary_smem),
+                                           decltype(input_smem),
+                                           ElementUnaryOpType::SQUARE,
+                                           ElementUnaryOpType::MULSCALAR>(
+            element_unary_smem, input_smem, scalars);
+      }
       __syncthreads();
     }
 

@@ -32,12 +32,12 @@ template <typename T,
           int BATCH_SIZE,
           int OUTPUT_SIZE,
           int REDUCTION_SIZE,
-          int O_STRIDE = OUTPUT_SIZE>
+          int O_STRIDE = OUTPUT_SIZE,
+          int K_PIPE_MAX = 3>
 __device__ __forceinline__ void linear_kernel(void const *input_ptr,
                                               void const *weight_ptr,
-                                              void *output_ptr,
-                                              bool bias,
-                                              void const *bias_ptr) {
+                                              void const *residual_ptr,
+                                              void *output_ptr) {
   constexpr int CHUNK_SIZE = 16 / sizeof(T);
   constexpr int OUTPUT_ATOM_SIZE = OUTPUT_SIZE <= 128 ? OUTPUT_SIZE : 128;
   constexpr int NUM_OUTPUT_ATOMS = OUTPUT_SIZE / OUTPUT_ATOM_SIZE;
@@ -76,20 +76,21 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
 
   T const *__restrict__ d_input = static_cast<T const *>(input_ptr);
   T const *__restrict__ d_weight = static_cast<T const *>(weight_ptr);
+  T const *__restrict__ d_residual = static_cast<T const *>(residual_ptr);
   T *__restrict__ d_output = static_cast<T *>(output_ptr);
-  T const *__restrict__ d_bias =
-      bias ? static_cast<T const *>(bias_ptr) : nullptr;
 
-  using InputDmem = dmem_row_const<T, BATCH_SIZE, TILE_SIZE, REDUCTION_SIZE>;
+  using InputDmem =
+      dmem_row_const<T, BATCH_SIZE, TILE_SIZE, REDUCTION_SIZE * 2>;
   using WeightDmem =
       dmem_col_const<T, TILE_SIZE, OUTPUT_ATOM_SIZE, REDUCTION_SIZE>;
-  using OutputDmem = dmem_row<T, BATCH_SIZE, OUTPUT_SIZE, O_STRIDE>;
-  using BiasDmem = dmem_row_const<T, BATCH_SIZE, OUTPUT_SIZE, O_STRIDE>;
+  using ResidualDmem =
+      dmem_row_const<T, BATCH_SIZE, OUTPUT_ATOM_SIZE, O_STRIDE>;
+  using OutputDmem = dmem_row<T, BATCH_SIZE, OUTPUT_ATOM_SIZE, O_STRIDE>;
 
   InputDmem input_dmem(d_input);
   WeightDmem weight_dmem(d_weight);
+  ResidualDmem residual_dmem(d_residual);
   OutputDmem output_dmem(d_output);
-  BiasDmem bias_dmem(d_bias);
 
   extern __shared__ char smem[];
 
@@ -97,23 +98,22 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
   constexpr size_t ZERO_BUFFER_OFFSET = 0;
   // sizeof(T) * 8
 
-  constexpr size_t SHARED_INPUT_OFFSET = ZERO_BUFFER_OFFSET + sizeof(T) * 8;
-  // sizeof(T) * BATCH_SIZE * TILE_SIZE
-
   constexpr size_t SHARED_INPUT_BUFFER_OFFSET =
-      SHARED_INPUT_OFFSET + sizeof(T) * BATCH_SIZE * TILE_SIZE;
-  // sizeof(T) * BATCH_SIZE * TILE_SIZE
-
-  constexpr size_t SHARED_WEIGHT_OFFSET =
-      SHARED_INPUT_BUFFER_OFFSET + sizeof(T) * BATCH_SIZE * TILE_SIZE;
-  // sizeof(T) * TILE_SIZE * OUTPUT_ATOM_SIZE
+      ZERO_BUFFER_OFFSET + sizeof(T) * 8;
+  // sizeof(T) * K_PIPE_MAX * BATCH_SIZE * TILE_SIZE
 
   constexpr size_t SHARED_WEIGHT_BUFFER_OFFSET =
-      SHARED_WEIGHT_OFFSET + sizeof(T) * TILE_SIZE * OUTPUT_ATOM_SIZE;
-  // sizeof(T) * TILE_SIZE * OUTPUT_ATOM_SIZE
+      SHARED_INPUT_BUFFER_OFFSET +
+      sizeof(T) * K_PIPE_MAX * BATCH_SIZE * TILE_SIZE;
+  // sizeof(T) * K_PIPE_MAX * TILE_SIZE * OUTPUT_ATOM_SIZE
+
+  constexpr size_t SHARED_RESIDUAL_OFFSET =
+      SHARED_WEIGHT_BUFFER_OFFSET +
+      sizeof(T) * K_PIPE_MAX * TILE_SIZE * OUTPUT_ATOM_SIZE;
+  // sizeof(T) * BATCH_SIZE * OUTPUT_ATOM_SIZE
 
   constexpr size_t MM_INTERMEDIATE_OFFSET =
-      SHARED_WEIGHT_BUFFER_OFFSET + sizeof(T) * TILE_SIZE * OUTPUT_ATOM_SIZE;
+      SHARED_RESIDUAL_OFFSET + sizeof(T) * TILE_SIZE * OUTPUT_ATOM_SIZE;
   // sizeof(T) * NUM_WARPS_K * BATCH_SIZE * OUTPUT_ATOM_SIZE
 
   constexpr size_t SHARED_OUTPUT_OFFSET =
@@ -121,21 +121,16 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
       sizeof(T) * NUM_WARPS_K * BATCH_SIZE * OUTPUT_ATOM_SIZE;
   // sizeof(T) * BATCH_SIZE * OUTPUT_ATOM_SIZE
 
-  constexpr size_t SHARED_BIAS_OFFSET =
-      SHARED_OUTPUT_OFFSET + sizeof(T) * BATCH_SIZE * OUTPUT_ATOM_SIZE;
-  // sizeof(T) * BATCH_SIZE * OUTPUT_ATOM_SIZE
-
   // zero buffer
   T *zero_buf = (T *)(smem + ZERO_BUFFER_OFFSET);
   *((__uint128_t *)zero_buf) = 0ul;
 
-  // copy input
-  T *shared_input = (T *)(smem + SHARED_INPUT_OFFSET);
+  // copy
   T *shared_input_buffer = (T *)(smem + SHARED_INPUT_BUFFER_OFFSET);
-
-  // copy weight
-  T *shared_weight = (T *)(smem + SHARED_WEIGHT_OFFSET);
   T *shared_weight_buffer = (T *)(smem + SHARED_WEIGHT_BUFFER_OFFSET);
+
+  // residual
+  T *shared_residual = (T *)(smem + SHARED_RESIDUAL_OFFSET);
 
   // intermediate
   T *mm_intermediate = (T *)(smem + MM_INTERMEDIATE_OFFSET);
@@ -143,74 +138,78 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
   // output
   T *shared_output = (T *)(smem + SHARED_OUTPUT_OFFSET);
 
-  // bias
-  T *shared_bias = bias ? (T *)(smem + SHARED_BIAS_OFFSET) : nullptr;
-
   // define the swizzle mode
   using ZeroBufferSmem = smem_row<T, 0, 0, 0, 1, 8, 8>;
   using InputSmem = smem_row<T, 0, 0, 0, BATCH_SIZE, TILE_SIZE, TILE_SIZE>;
+  using InputBufferSmem =
+      smem_row<T, 0, 0, 0, K_PIPE_MAX * BATCH_SIZE, TILE_SIZE, TILE_SIZE>;
   using WeightSmem =
       smem_col<T, 3, 3, 3, TILE_SIZE, OUTPUT_ATOM_SIZE, TILE_SIZE>;
+  using WeightBufferSmem =
+      smem_col<T, 3, 3, 3, TILE_SIZE, K_PIPE_MAX * OUTPUT_ATOM_SIZE, TILE_SIZE>;
   using OutputSmem =
       smem_row<T, 0, 0, 0, BATCH_SIZE, OUTPUT_ATOM_SIZE, OUTPUT_ATOM_SIZE>;
   using MatMulIntermediateSmem = smem_row<T,
                                           0,
                                           0,
                                           0,
-                                          BATCH_SIZE * NUM_WARPS_K,
+                                          NUM_WARPS_K * BATCH_SIZE,
                                           OUTPUT_ATOM_SIZE,
                                           OUTPUT_ATOM_SIZE>;
 
   ZeroBufferSmem zero_buffer(zero_buf);
 
-  InputSmem input_smem(shared_input);
-  InputSmem input_smem_buffer(shared_input_buffer);
+  InputSmem input_smem(shared_input_buffer);
+  WeightSmem weight_smem(shared_weight_buffer);
 
-  WeightSmem input_weight_smem(shared_weight);
-  WeightSmem input_weight_smem_buffer(shared_weight_buffer);
+  OutputSmem residual_smem(shared_residual);
 
   MatMulIntermediateSmem mm_intermediate_smem(mm_intermediate);
 
   OutputSmem output_smem(shared_output);
 
-  OutputSmem bias_smem(shared_bias);
-
   for (int output_atom_idx = 0; output_atom_idx < NUM_OUTPUT_ATOMS;
        output_atom_idx++,
            d_weight += OUTPUT_ATOM_SIZE * REDUCTION_SIZE,
-           d_output += OUTPUT_ATOM_SIZE,
-           d_bias = bias ? d_bias + OUTPUT_ATOM_SIZE : nullptr) {
+           d_residual += OUTPUT_ATOM_SIZE,
+           d_output += OUTPUT_ATOM_SIZE) {
     weight_dmem.set_ptr(d_weight);
+    residual_dmem.set_ptr(d_residual);
     output_dmem.set_ptr(d_output);
-    bias_dmem.set_ptr(d_bias);
 
-    // load input
+    InputBufferSmem input_buffer_smem(shared_input_buffer);
+    WeightBufferSmem weight_buffer_smem(shared_weight_buffer);
+
 #pragma unroll
-    for (int i = threadIdx.x; i < NUM_CHUNKS_A; i += NUM_THREADS) {
-      // offset
-      int row = i >> log2_CHUNKS_PER_ROW_A;
-      int col = (i & (CHUNKS_PER_ROW_A - 1)) << log2_CHUNK_SIZE;
-      load_smem(input_smem_buffer(row, col), input_dmem(row, col));
+    for (int i = threadIdx.x; i < NUM_CHUNKS_C; i += NUM_THREADS) {
+      int row = i >> log2_CHUNKS_PER_ROW_C;
+      int col = (i & (CHUNKS_PER_ROW_C - 1)) << log2_CHUNK_SIZE;
+      load_smem(residual_smem(row, col), residual_dmem(row, col));
     }
 
-    // load weight
 #pragma unroll
-    for (int i = threadIdx.x; i < NUM_CHUNKS_B; i += NUM_THREADS) {
-      int row = (i & (CHUNKS_PER_COL_B - 1)) << log2_CHUNK_SIZE;
-      int col = i >> log2_CHUNKS_PER_COL_B;
-      load_smem(input_weight_smem_buffer(row, col), weight_dmem(row, col));
-    }
-
-    // load bias
-    if (bias) {
+    for (int k_pipe = 0; k_pipe < K_PIPE_MAX - 1; k_pipe++) {
 #pragma unroll
-      for (int i = threadIdx.x; i < NUM_CHUNKS_C; i += NUM_THREADS) {
-        int row = i >> log2_CHUNKS_PER_ROW_C;
-        int col = (i & (CHUNKS_PER_ROW_C - 1)) << log2_CHUNK_SIZE;
-        load_smem(bias_smem(row, col), bias_dmem(row, col));
+      for (int i = threadIdx.x; i < NUM_CHUNKS_A; i += NUM_THREADS) {
+        int src_row = i >> log2_CHUNKS_PER_ROW_A;
+        int dst_row = src_row + ((k_pipe + 1) << log2_constexpr(BATCH_SIZE));
+        int dst_col = (i & (CHUNKS_PER_ROW_A - 1)) << log2_CHUNK_SIZE;
+        int src_col = dst_col + (k_pipe << log2_constexpr(TILE_SIZE));
+        load_smem(input_buffer_smem(dst_row, dst_col),
+                  input_dmem(src_row, src_col));
       }
+#pragma unroll
+      for (int i = threadIdx.x; i < NUM_CHUNKS_B; i += NUM_THREADS) {
+        int dst_row = (i & (CHUNKS_PER_COL_B - 1)) << log2_CHUNK_SIZE;
+        int src_row = dst_row + (k_pipe << log2_constexpr(TILE_SIZE));
+        int src_col = i >> log2_CHUNKS_PER_COL_B;
+        int dst_col =
+            src_col + ((k_pipe + 1) << log2_constexpr(OUTPUT_ATOM_SIZE));
+        load_smem(weight_buffer_smem(dst_row, dst_col),
+                  weight_dmem(src_row, src_col));
+      }
+      cp_async_fence();
     }
-    cp_async_fence();
 
     // accumulator
     float s_frag[NUM_ITERS_M][NUM_ITERS_N][8];
@@ -226,39 +225,42 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
 
     for (int for_idx = 0; for_idx < FORLOOP_RANGE; for_idx++) {
       // copy
-      if (for_idx + 1 != FORLOOP_RANGE) {
-        InputDmem input_dmem_buffer(d_input + TILE_SIZE * (for_idx + 1));
-        WeightDmem weight_dmem_buffer(d_weight + TILE_SIZE * (for_idx + 1));
-
+      if (for_idx + K_PIPE_MAX - 1 < FORLOOP_RANGE) {
 #pragma unroll
         for (int i = threadIdx.x; i < NUM_CHUNKS_A; i += NUM_THREADS) {
           int row = i >> log2_CHUNKS_PER_ROW_A;
-          int col = (i & (CHUNKS_PER_ROW_A - 1)) << log2_CHUNK_SIZE;
-          load_smem(input_smem(row, col), input_dmem_buffer(row, col));
+          int dst_col = (i & (CHUNKS_PER_ROW_A - 1)) << log2_CHUNK_SIZE;
+          int src_col = dst_col + ((for_idx + K_PIPE_MAX - 1)
+                                   << log2_constexpr(TILE_SIZE));
+          load_smem(input_buffer_smem(row, dst_col), input_dmem(row, src_col));
         }
-
 #pragma unroll
         for (int i = threadIdx.x; i < NUM_CHUNKS_B; i += NUM_THREADS) {
-          int row = (i & (CHUNKS_PER_COL_B - 1)) << log2_CHUNK_SIZE;
+          int dst_row = (i & (CHUNKS_PER_COL_B - 1)) << log2_CHUNK_SIZE;
+          int src_row = dst_row + ((for_idx + K_PIPE_MAX - 1)
+                                   << log2_constexpr(TILE_SIZE));
           int col = i >> log2_CHUNKS_PER_COL_B;
-          load_smem(input_weight_smem(row, col), weight_dmem_buffer(row, col));
+          load_smem(weight_buffer_smem(dst_row, col),
+                    weight_dmem(src_row, col));
         }
         cp_async_fence();
-        cp_async_wait<1>();
+        cp_async_wait<K_PIPE_MAX - 1>();
+      } else if (for_idx + K_PIPE_MAX - 1 == FORLOOP_RANGE) {
+        cp_async_wait<0>();
       }
 
-      // swap the double buffer
-      if ((for_idx & 1) == 0) {
-        input_smem.set_ptr(shared_input_buffer);
-        input_smem_buffer.set_ptr(shared_input);
-        input_weight_smem.set_ptr(shared_weight_buffer);
-        input_weight_smem_buffer.set_ptr(shared_weight);
-      } else {
-        input_smem.set_ptr(shared_input);
-        input_smem_buffer.set_ptr(shared_input_buffer);
-        input_weight_smem.set_ptr(shared_weight);
-        input_weight_smem_buffer.set_ptr(shared_weight_buffer);
-      }
+      // rotate the buffers
+      input_buffer_smem.set_ptr(shared_input_buffer +
+                                BATCH_SIZE * TILE_SIZE *
+                                    ((for_idx + 1) % K_PIPE_MAX));
+      input_smem.set_ptr(shared_input_buffer +
+                         BATCH_SIZE * TILE_SIZE * ((for_idx + 1) % K_PIPE_MAX));
+      weight_buffer_smem.set_ptr(shared_weight_buffer +
+                                 TILE_SIZE * OUTPUT_ATOM_SIZE *
+                                     ((for_idx + 1) % K_PIPE_MAX));
+      weight_smem.set_ptr(shared_weight_buffer +
+                          TILE_SIZE * OUTPUT_ATOM_SIZE *
+                              ((for_idx + 1) % K_PIPE_MAX));
       __syncthreads();
 
       uint32_t a_frag[4], b_frag[4];
@@ -278,7 +280,7 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
             T *src_ptr =
                 is_valid ? input_smem(m_row, m_col) : zero_buffer(0, 0);
             ldsm(src_ptr, a_frag);
-            ldsm(input_weight_smem(n_row, n_col), b_frag);
+            ldsm(weight_smem(n_row, n_col), b_frag);
             mma_m16n16k16_bf16bf16bf32(
                 s_frag[m][n], a_frag, b_frag, s_frag[m][n]);
           }
@@ -315,8 +317,7 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
     for (int i = threadIdx.x; i < OUTPUT_ATOM_SIZE; i += NUM_THREADS) {
       int row = 0;
       output_dmem.at(row, i) =
-          bias ? output_smem.at(row, i) + bias_smem.at(row, i)
-               : output_smem.at(row, i);
+          output_smem.at(row, i) + residual_smem.at(row, i);
     }
     if (output_atom_idx + 1 < NUM_OUTPUT_ATOMS) {
       __syncthreads();

@@ -244,7 +244,7 @@ void launch_norm_linear(void const *input_ptr,
                         void *output_ptr) {
   dim3 grid_dim(1, 1, 1);
   dim3 block_dim(128, 1, 1);
-  size_t smem_size = 110000;
+  size_t smem_size = 112640;
 
   cudaFuncSetAttribute(
       norm_linear_kernel_wrapper<T, BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE>,
@@ -300,7 +300,7 @@ void launch_silu_mul_linear(void const *input_ptr,
                             void *output_ptr) {
   dim3 grid_dim(1, 1, 1);
   dim3 block_dim(128, 1, 1);
-  size_t smem_size = 36666;
+  size_t smem_size = 112640;
 
   cudaFuncSetAttribute(silu_mul_linear_kernel_wrapper<T,
                                                       BATCH_SIZE,
@@ -343,22 +343,20 @@ void silu_mul_linear(torch::Tensor input,
 template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int REDUCTION_SIZE>
 __global__ void linear_kernel_wrapper(void const *input_ptr,
                                       void const *weight_ptr,
-                                      void *output_ptr,
-                                      bool bias,
-                                      void const *bias_ptr) {
+                                      void const *residual_ptr,
+                                      void *output_ptr) {
   linear_kernel<T, BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE>(
-      input_ptr, weight_ptr, output_ptr, bias, bias_ptr);
+      input_ptr, weight_ptr, residual_ptr, output_ptr);
 }
 
 template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int REDUCTION_SIZE>
 void launch_linear(void const *input_ptr,
                    void const *weight_ptr,
-                   void *output_ptr,
-                   bool bias,
-                   void const *bias_ptr) {
+                   void const *residual_ptr,
+                   void *output_ptr) {
   dim3 grid_dim(1, 1, 1);
   dim3 block_dim(128, 1, 1);
-  size_t smem_size = 36666;
+  size_t smem_size = 112640;
 
   cudaFuncSetAttribute(
       linear_kernel_wrapper<T, BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE>,
@@ -367,29 +365,26 @@ void launch_linear(void const *input_ptr,
 
   linear_kernel_wrapper<T, BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE>
       <<<grid_dim, block_dim, smem_size>>>(
-          input_ptr, weight_ptr, output_ptr, bias, bias_ptr);
+          input_ptr, weight_ptr, residual_ptr, output_ptr);
 }
 
 void linear(torch::Tensor input,
             torch::Tensor weight,
-            torch::Tensor output,
-            bool bias,
-            torch::optional<torch::Tensor> bias_tensor = torch::nullopt) {
+            torch::Tensor residual,
+            torch::Tensor output) {
 
   void const *input_ptr = input.data_ptr();
   void const *weight_ptr = weight.data_ptr();
+  void const *residual_ptr = residual.data_ptr();
   void *output_ptr = output.data_ptr();
-
-  void const *bias_ptr = bias ? bias_tensor->data_ptr() : nullptr;
 
   DISPATCH_OUTPUT_SIZE_FOR_RED_SIZE_4K(output.size(1),
                                        launch_linear,
                                        bfloat16,
                                        input_ptr,
                                        weight_ptr,
-                                       output_ptr,
-                                       bias,
-                                       bias_ptr);
+                                       residual_ptr,
+                                       output_ptr);
 
   cudaError_t err = cudaDeviceSynchronize();
   if (err != cudaSuccess) {

@@ -393,14 +393,13 @@ __global__ void persistent_kernel(RuntimeConfig config) {
             kernel::linear_kernel<bfloat16, 1, 64, 4096, 6144>(
                 task_desc.inputs[0].base_ptr,
                 task_desc.inputs[1].base_ptr,
-                task_desc.outputs[0].base_ptr,
-                true,
-                task_desc.inputs[2].base_ptr);
+                task_desc.inputs[2].base_ptr,
+                task_desc.outputs[0].base_ptr);
             break;
           }
           case TASK_ARGMAX: {
             // We may still need this for small vocab size.
-            //kernel::argmax_kernel<bfloat16, 1, 153600>(
+            // kernel::argmax_kernel<bfloat16, 1, 153600>(
             //    task_desc.inputs[0].base_ptr, task_desc.outputs[0].base_ptr);
             break;
           }
@@ -972,12 +971,12 @@ extern "C" void launch_persistent_kernel() {
   void *args[] = {&global_runtime_config};
   // Launcher persistent kernel
   cudaFuncSetAttribute(
-      persistent_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, 110000);
+      persistent_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, 98304);
   nvshmemx_collective_launch((void const *)persistent_kernel,
                              dim3(108, 1, 1),
                              dim3(128, 1, 1),
                              args,
-                             110000 /*sharedmem*/,
+                             98304 /*sharedmem*/,
                              0 /*stream*/);
   cudaError_t err = cudaDeviceSynchronize();
   if (err != cudaSuccess) {
