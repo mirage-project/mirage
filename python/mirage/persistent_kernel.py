@@ -270,7 +270,7 @@ class PersistentKernel:
         assert v_cache.num_dims == 4  # (batch_size, seq_len, kv_heads, head_dim)
         head_dim = k_cache.dim(3)
         num_kv_heads = k_cache.dim(2)
-        num_q_heads = output.dim(1) * self.world_size // head_dim
+        num_q_heads = output.dim(1) // head_dim
         rotary_embed = 0
         if cos_pos_embed is not None or sin_pos_embed is not None:
             assert cos_pos_embed.num_dims == 2  # (seq_len, head_dim)

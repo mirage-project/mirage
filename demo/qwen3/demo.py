@@ -113,7 +113,7 @@ if __name__ == "__main__":
             num_workers=96,
             num_local_schedulers=48,
             num_remote_schedulers=0,
-            meta_tensors=[step],
+            meta_tensors=[step, tokens],
             profiler_tensor=profiler_tensor,
         )
         x = mpk.attach_input(torch_tensor=input_tokens, name="input_token")
@@ -440,14 +440,14 @@ if __name__ == "__main__":
         torch.cuda.synchronize()
         run_time = starter.elapsed_time(ender)
 
-        generated_ids = tokens[:, :prev_pos]
+        generated_ids = tokens[:, :step[0]]
 
         response = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
         print(response)
 
         print(
             "Prompt length {}, generate length {}, per-token latency {} ms".format(
-                prompt_len, 5120, run_time / (5120 - warmup)
+                prompt_len, step[0], run_time / (step[0] - warmup)
             )
         )
     if world_size > 1:

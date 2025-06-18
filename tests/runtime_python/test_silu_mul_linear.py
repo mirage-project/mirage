@@ -14,16 +14,16 @@ for output_size in output_sizes:
 
     x = torch.randn((1, reduction_size * 2), device="cuda", dtype=torch.bfloat16)
     w = torch.randn((output_size, reduction_size), device="cuda", dtype=torch.bfloat16)
-    bias = torch.randn((1, output_size), device="cuda", dtype=torch.bfloat16)
+    residual = torch.randn((1, output_size), device="cuda", dtype=torch.bfloat16)
     output = torch.empty(1, output_size, device="cuda", dtype=torch.bfloat16)
 
-    runtime_kernel.silu_mul_linear(x, w, bias, output)
+    runtime_kernel.silu_mul_linear(x, w, residual, output)
     torch_out = (
         torch.matmul(
             torch.mul(silu(x[:, :reduction_size]), x[:, reduction_size:]),
             torch.transpose(w, 0, 1),
         )
-        + bias
+        + residual
     )
 
     print("Ratio (kernel / torch):")
@@ -31,7 +31,7 @@ for output_size in output_sizes:
 
     # Warm-up
     for _ in range(16):
-        runtime_kernel.silu_mul_linear(x, w, bias, output)
+        runtime_kernel.silu_mul_linear(x, w, residual, output)
 
     torch.cuda.synchronize()
     starter, ender = (
@@ -41,7 +41,7 @@ for output_size in output_sizes:
     repetitions = 1000
     starter.record()
     for rep in range(repetitions):
-        runtime_kernel.silu_mul_linear(x, w, bias, output)
+        runtime_kernel.silu_mul_linear(x, w, residual, output)
     ender.record()
     torch.cuda.synchronize()
     total_time = starter.elapsed_time(ender)
@@ -77,7 +77,7 @@ for output_size in output_sizes:
     x2 = x[0, reduction_size:].contiguous().unsqueeze(0)
     wt = torch.transpose(w, 0, 1).contiguous()
 
-    input_tensors = [x1, x2, wt, bias]
+    input_tensors = [x1, x2, wt, residual]
 
     for _ in range(16):
         outputs = graph(inputs=input_tensors)

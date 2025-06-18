@@ -115,6 +115,7 @@ struct RuntimeConfig {
   EventId **sched_queues;
   TaskId *first_tasks;
   int *step; // Metadata for LLM serving
+  long long *tokens; // Metadata for LLM serving
   void *profiler_buffer;
   bool verbose;
   bool profiling;

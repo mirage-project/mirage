@@ -55,8 +55,9 @@ int TaskRegister::register_embedding_task(threadblock::Graph const &bgraph,
   code.e("kernel::embedding_kernel<bfloat16>(");
   code.e("    task_desc.inputs[0].base_ptr,");
   code.e("    task_desc.inputs[1].base_ptr,");
-  code.e("    task_desc.outputs[0].base_ptr);");
-  printf("%s\n", code.to_string().c_str());
+  code.e("    task_desc.outputs[0].base_ptr,");
+  code.e("    step[0],");
+  code.e("    tokens);");
   return register_task_variant(TASK_EMBEDDING, code.to_string());
 }
 
@@ -101,7 +102,6 @@ int TaskRegister::register_rmsnorm_linear_task(threadblock::Graph const &bgraph,
   code.e("    task_desc.inputs[2].base_ptr,");
   code.e("    1e-6f,");
   code.e("    task_desc.outputs[0].base_ptr);");
-  printf("%s\n", code.to_string().c_str());
   return register_task_variant(TASK_RMS_NORM_LINEAR, code.to_string());
 }
 
@@ -158,7 +158,6 @@ int TaskRegister::register_attention_task(threadblock::Graph const &bgraph,
   code.e("    task_desc.inputs[6].base_ptr,");
   code.e("    1e-6f,");
   code.e("    1e-6f);");
-  printf("%s\n", code.to_string().c_str());
   return register_task_variant(TASK_ATTENTION_1, code.to_string());
 }
 
@@ -202,7 +201,6 @@ int TaskRegister::register_silu_mul_linear_with_residual_task(
   code.e("    task_desc.inputs[1].base_ptr,");
   code.e("    task_desc.inputs[2].base_ptr,");
   code.e("    task_desc.outputs[0].base_ptr);");
-  printf("%s\n", code.to_string().c_str());
   return register_task_variant(TASK_SILU_MUL_LINEAR_WITH_RESIDUAL,
                                code.to_string());
 }
@@ -246,9 +244,7 @@ int TaskRegister::register_linear_with_residual_task(
   code.e("    task_desc.inputs[0].base_ptr,");
   code.e("    task_desc.inputs[1].base_ptr,");
   code.e("    task_desc.inputs[2].base_ptr,");
-  code.e("    task_desc.outputs[0].base_ptr,");
-  code.e("    true);");
-  printf("%s\n", code.to_string().c_str());
+  code.e("    task_desc.outputs[0].base_ptr);");
   return register_task_variant(TASK_LINEAR_WITH_RESIDUAL, code.to_string());
 }
 
@@ -278,7 +274,6 @@ int TaskRegister::register_argmax_partial_task(threadblock::Graph const &bgraph,
   code.e("    task_desc.inputs[0].base_ptr,");
   code.e("    task_desc.outputs[0].base_ptr,");
   code.e("    task_desc.outputs[1].base_ptr);");
-  printf("%s\n", code.to_string().c_str());
   return register_task_variant(TASK_ARGMAX_PARTIAL, code.to_string());
 }
 
@@ -308,8 +303,9 @@ int TaskRegister::register_argmax_reduce_task(threadblock::Graph const &bgraph,
   code.e("kernel::argmax_reduce_kernel<bfloat16, $, $>(", params[0], num_parts);
   code.e("    task_desc.inputs[0].base_ptr,");
   code.e("    task_desc.inputs[1].base_ptr,");
-  code.e("    task_desc.outputs[0].base_ptr);");
-  printf("%s\n", code.to_string().c_str());
+  code.e("    task_desc.outputs[0].base_ptr,");
+  code.e("    step[0],");
+  code.e("    tokens);");
   return register_task_variant(TASK_ARGMAX_REDUCE, code.to_string());
 }
 

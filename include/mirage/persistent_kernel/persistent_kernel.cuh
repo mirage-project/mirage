@@ -27,7 +27,8 @@ using bfloat16 = type::bfloat16_t;
 using namespace mirage::runtime;
 
 __device__ __forceinline__ void _execute_task(TaskDesc const &task_desc,
-                                              int *step);
+                                              int *step,
+                                              long long *tokens);
 
 __device__ __forceinline__ bool is_termination_event(size_t event_loc,
                                                      EventDesc e) {
@@ -72,12 +73,14 @@ __global__ void init_kernel(RuntimeConfig config) {
   }
 }
 
-__device__ __forceinline__ bool prepare_next_batch(RuntimeConfig config) {
+__device__ __forceinline__ bool prepare_next_batch(RuntimeConfig const &config) {
   int step = config.step[0];
-  // printf("step = %d\n", step);
   config.step[0] = step + 1;
-  // return step + 1 <= 500;
-  return false;
+  if ((step >= 500) || (config.profiling)) {
+    return false;
+  } else {
+    return true;
+  }
 }
 
 __device__ __forceinline__ int get_rand_sched_id(size_t event_index,
@@ -320,7 +323,7 @@ __global__ void persistent_kernel(RuntimeConfig config) {
       } else if (task_desc.task_type == TASK_REDUCE) {
         TB_SLEEP_US(1);
       } else {
-        _execute_task(task_desc, config.step);
+        _execute_task(task_desc, config.step, config.tokens);
       }
       __syncthreads();
       if (config.profiling && task_desc.task_type != TASK_TERMINATE) {
@@ -714,8 +717,9 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
                                        int num_workers,
                                        int num_local_schedulers,
                                        int num_remote_schedulers) {
-  assert(meta_tensors.size() == 1);
+  assert(meta_tensors.size() == 2);
   global_runtime_config.step = static_cast<int *>(meta_tensors[0]);
+  global_runtime_config.tokens = static_cast<long long *>(meta_tensors[1]);
   global_runtime_config.num_workers = num_workers;
   global_runtime_config.num_local_schedulers = num_local_schedulers;
   global_runtime_config.num_remote_schedulers = num_remote_schedulers;
