@@ -219,9 +219,12 @@ __device__ __forceinline__ void
                     v_cache_dmem(cp_finished_seq_len + row, col));
         }
       }
+      cp_async_fence();
+      cp_async_wait<1>();
+    } else {
+      cp_async_wait<0>();
     }
-    cp_async_fence();
-    cp_async_wait<1>();
+
     if ((kv_idx & 1) == 0) {
       k_cache_smem.set_ptr(shared_k_buffer);
       k_cache_smem_buffer.set_ptr(shared_k);

@@ -34,7 +34,7 @@ __device__ __forceinline__ void
     // int idx = i / OUT_DIM;
     int off = i % OUT_DIM;
     // int64_t wordIdx = input_ids[idx];
-    int64_t wordIdx = tokens[step - 1];
+    int64_t wordIdx = tokens[step];
     output[i] = embedding[wordIdx * OUT_DIM + off];
   }
 }
