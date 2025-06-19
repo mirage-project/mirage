@@ -9,7 +9,7 @@
 
 ## Quick Installation
 
-he fastest way to try MPK is to install it directly from source:
+The fastest way to try MPK is to install it directly from source:
 ```bash
 git clone --recursive --branch mpk https://www.github.com/mirage-project/mirage
 cd mirage
