@@ -1,0 +1,87 @@
+// blackwell_pipeline.h
+#pragma once
+#include <cutlass/pipeline/sm100_pipeline.hpp>
+#include "pipeline.h"
+
+namespace tb {
+
+template <int _Stage, class ClusterShape_MNK_, class AtomThrShape_MNK_ = Shape<_1,_1,_1>>
+struct BlackwellAsyncPipeline {
+  static constexpr int Stage = _Stage;
+  using ClusterShape = ClusterShape_MNK_;
+  using AtomThrShape_MNK = AtomThrShape_MNK_;
+  using MainloopPipeline = typename cutlass::PipelineTmaUmmaAsync<Stage, ClusterShape, AtomThrShape_MNK>;
+  using PipelineState = typename cutlass::PipelineState<Stage>;
+  // using SharedStorage = tb::SharedStorage<MainloopPipeline, Stage>;
+  using PipelineParams = typename MainloopPipeline::Params;
+  using BarrierType = typename MainloopPipeline::ProducerBarrierType;
+
+public:
+  PipelineState smem_pipe_read;
+  PipelineParams pipeline_params;
+  PipelineStorage<MainloopPipeline> pipeline_storage;
+  MainloopPipeline pipeline;
+  PipelineState smem_pipe_write;
+
+__device__ __forceinline__
+      BlackwellAsyncPipeline(void *__restrict__ shared_memory_offset,
+                          bool producer,
+                          bool consumer,
+                          uint32_t transactionBytes,
+                          uint32_t num_consumer_wgs)
+      : smem_pipe_read(),
+        smem_pipe_write(cutlass::make_producer_start_state<MainloopPipeline>()),
+        pipeline_params{
+            transactionBytes,
+            producer
+                ? MainloopPipeline::ThreadCategory::Producer
+                : (consumer ? MainloopPipeline::ThreadCategory::Consumer
+                            : MainloopPipeline::ThreadCategory::NonParticipant),
+            (threadIdx.x % cutlass::NumThreadsPerWarpGroup) == 0,
+            cutlass::NumThreadsPerWarpGroup * num_consumer_wgs,
+            1,
+            1},
+        pipeline_storage(shared_memory_offset),
+        pipeline(*(pipeline_storage.mainloop),
+                 pipeline_params,
+                 ClusterShape_MNK_{},
+                 cute::true_type{},  // InitBarriers
+                 cute::true_type{})  // InitMasks
+                 { 
+                  cutlass::pipeline_init_arrive_relaxed(size(ClusterShape{}));
+                  cutlass::pipeline_init_wait(size(ClusterShape{}));
+                 }
+
+
+  __device__ __forceinline__ std::pair<BarrierType *, int> producer_acquire() {
+    pipeline.producer_acquire(smem_pipe_write);
+    BarrierType *tma_barrier = pipeline.producer_get_barrier(smem_pipe_write);
+    int write_stage = smem_pipe_write.index();
+    // if (blockIdx.x == 0 && blockIdx.y == 0 && threadIdx.x == 256 && threadIdx.y == 0) {
+    //   printf("producer_acquire: tma_barrier is %p, write_stage is %d\n", tma_barrier, write_stage);
+    // }
+    return {tma_barrier, write_stage};
+  }
+
+  __device__ __forceinline__ void producer_advance() {
+    ++smem_pipe_write;
+  }
+
+  __device__ __forceinline__ int consumer_wait() {
+    auto barrier_token = pipeline.consumer_try_wait(smem_pipe_read);
+    pipeline.consumer_wait(smem_pipe_read, barrier_token);
+    return smem_pipe_read.index();
+  }
+
+  __device__ __forceinline__ void producer_commit(PipelineState state) {
+    pipeline.producer_commit(state);
+  }
+
+  __device__ __forceinline__ void consumer_release() {
+    pipeline.consumer_release(smem_pipe_read);
+    ++smem_pipe_read;
+  }
+
+};
+
+} // namespace tb

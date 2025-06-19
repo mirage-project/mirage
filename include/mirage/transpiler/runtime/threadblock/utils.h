@@ -71,4 +71,30 @@ static __device__ __forceinline__ void wg_arrive(uint32_t barrier_id) {
 #endif
 }
 
+template <typename TiledMMA, typename ClusterShape_MNK>
+static __device__ __forceinline__
+auto get_cluster_layout() {
+  return tiled_divide(make_layout(ClusterShape_MNK{}),
+                      make_tile(typename TiledMMA::AtomThrID{}));
+}
+
+template <typename TiledMMA, typename ClusterShape_MNK>
+static __device__ __forceinline__
+auto get_mma_coord_vmnk(int blockIdx_x, int blockIdx_y) {
+  auto cluster_layout = get_cluster_layout<TiledMMA, ClusterShape_MNK>();
+  return make_coord(
+      blockIdx_x % size<0>(cluster_layout),
+      blockIdx_x / size<0>(cluster_layout),
+      blockIdx_y,
+      _);
+}
+
+template <typename TiledMMA, typename ClusterShape_MNK>
+static __device__ __forceinline__ auto get_cta_mma(int blockIdx_x, int blockIdx_y) {
+  TiledMMA tiled_mma;
+  auto mma_coord_vmnk = get_mma_coord_vmnk<TiledMMA, ClusterShape_MNK>(blockIdx_x, blockIdx_y);
+  auto mma_v = get<0>(mma_coord_vmnk);
+  return tiled_mma.get_slice(mma_v);
+}
+
 } // namespace tb
