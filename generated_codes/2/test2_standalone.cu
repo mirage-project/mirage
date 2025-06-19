@@ -43,18 +43,21 @@ reference_gemm(TensorA const& tensor_A, TensorB const& tensor_B,
 
 template <class Tensor>
 void
-initialize_tensor(Tensor& tensor, cute::tuple<int, int> value_range = {-2, 2})
+initialize_tensor(Tensor& tensor, cute::tuple<int, int> value_range = {-5, 5})
 {
   using DataType = typename Tensor::element_type;
   auto [min, max] = value_range;
   for (int i = 0; i < cute::size(tensor); i++) {
     // tensor(i) = DataType(int((max-min)*(rand() / double(RAND_MAX)) + min));
     tensor(i) = DataType(1);
+    // tensor(i) = DataType(rand() % 3);
   }
+  tensor(0) = DataType(2);
 }
+
 // 32 warp, 128 warp group
 template <class TMA_10000003, class TMA_10000004>
-__global__ void  __launch_bounds__(384) custom_kernel_0(CUTE_GRID_CONSTANT TMA_10000003 const tma_10000003, CUTE_GRID_CONSTANT TMA_10000004 const tma_10000004,  half_t* dtensor10000005_ptr, half_t const* dtensor10000003_ptr, half_t const* dtensor10000004_ptr) {
+__global__ void  __launch_bounds__(256) custom_kernel_0(CUTE_GRID_CONSTANT TMA_10000003 const tma_10000003, CUTE_GRID_CONSTANT TMA_10000004 const tma_10000004,  half_t* dtensor10000005_ptr, half_t const* dtensor10000003_ptr, half_t const* dtensor10000004_ptr) {
 // block x, y is executing here
 // if (threadIdx.x == 0) {
 //     printf("block x, y is executing here, blockIdx.x is %d, blockIdx.y is %d\n", blockIdx.x, blockIdx.y);
@@ -62,7 +65,7 @@ __global__ void  __launch_bounds__(384) custom_kernel_0(CUTE_GRID_CONSTANT TMA_1
 
 int thread_idx = threadIdx.x;
 static constexpr int NUM_THREADS = 128;
-static constexpr int CONSUMER_NUM_THREADS = 256;
+static constexpr int CONSUMER_NUM_THREADS = 128;
 // UMMA part
 // zy: put cluster shape, tiled_mma, mma_tiler here
 auto cluster_shape = make_shape(Int<4>{}, Int<4>{}, Int<1>{});
@@ -120,7 +123,7 @@ using DTensor10000003TileLayout = Layout<Shape<Int<64>, Int<128>>, Stride<Int<1>
 // zy: add atom thr shape based on tiled mma
 using AtomThrShapeMNK = Shape<decltype(shape<0>(typename decltype(tiled_mma)::ThrLayoutVMNK{})), _1, _1>;
 
-tb::BlackwellAsyncPipeline<4, decltype(cluster_shape), AtomThrShapeMNK> blackwell_async_pipeline_20000012((void *) (buf + 196736), (tb::warpgroup_id() == 2 && tb::warp_id() % mirage::config::NUM_WARPS_PER_GROUP == 0), tb::warpgroup_id() < 2, 32768, 2);
+tb::BlackwellAsyncPipeline<4, decltype(cluster_shape), AtomThrShapeMNK> blackwell_async_pipeline_20000012((void *) (buf + 196736), (tb::warpgroup_id() == 1 && tb::warp_id() % mirage::config::NUM_WARPS_PER_GROUP == 0), tb::warpgroup_id() < 1, 32768, 1);
 // change zy: use the DstLayout
 // using STensor20000012InputAtom = tb::InputTMAAsyncCopy_Blackwell<half_t, decltype(composition(Swizzle<3, 3, 4>{}, Layout<Shape<Int<128>, Int<64>>, Stride<Int<64>, Int<1>>>{})), Layout<Shape<Int<512>, Int<256>>, Stride<Int<256>, Int<1>>>, decltype(tma_10000003), decltype(blackwell_async_pipeline_20000012), true, 4, TiledMMA, MmaTiler_MNK>;
 // if (block0() && threadIdx.x == 0 && threadIdx.y == 0 && threadIdx.z == 0) {
@@ -136,7 +139,7 @@ tb::BlackwellAsyncPipeline<4, decltype(cluster_shape), AtomThrShapeMNK> blackwel
 using STensor20000012InputAtom = tb::InputTMAAsyncCopy_Blackwell<half_t, decltype(composition(Swizzle<3, 4, 3>{}, Layout<Shape<Int<128>, Int<64>>, Stride<Int<1>, Int<128>>>{})), Layout<Shape<Int<512>, Int<256>>, Stride<Int<1>, Int<512>>>, decltype(tma_10000003), decltype(blackwell_async_pipeline_20000012), true, 4, decltype(tiled_mma), decltype(mma_tiler), decltype(cluster_shape)>;
 // // Copy for G->S: dtensor 10000004 -> stensor 20000013
 using DTensor10000004TileLayout = Layout<Shape<Int<256>, Int<64>>, Stride<Int<1>, Int<1024>>>;
-tb::BlackwellAsyncPipeline<4, decltype(cluster_shape)> blackwell_async_pipeline_20000013((void *) (buf + 196800), (tb::warpgroup_id() == 2 && tb::warp_id() % mirage::config::NUM_WARPS_PER_GROUP == 0), tb::warpgroup_id() < 2, 32768, 2);
+tb::BlackwellAsyncPipeline<4, decltype(cluster_shape)> blackwell_async_pipeline_20000013((void *) (buf + 196800), (tb::warpgroup_id() == 1 && tb::warp_id() % mirage::config::NUM_WARPS_PER_GROUP == 0), tb::warpgroup_id() < 1, 32768, 1);
 using STensor20000013InputAtom = tb::InputTMAAsyncCopy_Blackwell<half_t, decltype(composition(Swizzle<3, 4, 3>{}, Layout<Shape<Int<128>, Int<64>>, Stride<Int<1>, Int<128>>>{})), Layout<Shape<Int<1024>, Int<256>>, Stride<Int<1>, Int<1024>>>, decltype(tma_10000004), decltype(blackwell_async_pipeline_20000013), false, 4, decltype(tiled_mma), decltype(mma_tiler), decltype(cluster_shape)>;
 
 
@@ -146,44 +149,43 @@ __syncthreads();
   
   // S->G copy atoms
   // Copy for S->G: stensor 20000015 -> dtensor 10000005
-  // half_t *dtensor10000005_tile_ptr = dtensor10000005_ptr  + blockIdx.x*128*1024 + blockIdx.y*256*1;
-  half_t *dtensor10000005_tile_ptr = dtensor10000005_ptr  + blockIdx.x*128*1024 + blockIdx.y*256*1 - (blockIdx.x % 2)*128*1024;
+  // half_t *dtensor10000005_tile_ptr = dtensor10000005_ptr  + blockIdx.x*128*1024 + blockIdx.y*256*1 - (blockIdx.x % 2)*128*1024;
+  half_t *dtensor10000005_tile_ptr = dtensor10000005_ptr  + blockIdx.x*128*1024 + blockIdx.y*256*1;
 
   using DTensor10000005TileLayout = Layout<Shape<Int<256>, Int<128>>, Stride<Int<1>, Int<1024>>>;
+  // using DTensor10000005TileLayout = Layout<Shape<Int<128>, Int<256>>, Stride<Int<1024>, Int<1>>>;
+  // using STensor20000015OutputAtom = tb::OutputChunkedSyncCopy<half_t, DTensor10000005TileLayout, Layout<Shape<Int<128>, Int<256>>, Stride<Int<1>, Int<128>>>, NUM_THREADS>;
   using STensor20000015OutputAtom = tb::OutputChunkedSyncCopy<half_t, DTensor10000005TileLayout, Layout<Shape<Int<256>, Int<128>>, Stride<Int<1>, Int<256>>>, NUM_THREADS>;
   
   
   using Matmul20000015LayoutA = decltype(composition(Swizzle<3, 3, 4>{}, Layout<Shape<Int<64>, Int<128>>, Stride<Int<1>, Int<64>>>{}));
   using Matmul20000015LayoutB = decltype(composition(Swizzle<3, 3, 4>{}, Layout<Shape<Int<256>, Int<64>>, Stride<Int<1>, Int<256>>>{}));
-  // using Matmul20000015LayoutC = Layout<Shape<Int<256>, Int<128>>, Stride<Int<1>, Int<256>>>;
-  using Matmul20000015LayoutC = Layout<Shape<Int<256>, Int<256>>, Stride<Int<1>, Int<1024>>>;
+  // using Matmul20000015LayoutC = Layout<Shape<Int<128>, Int<256>>, Stride<Int<1>, Int<128>>>;
+  // mirage generated:
+  using Matmul20000015LayoutC = Layout<Shape<Int<256>, Int<128>>, Stride<Int<1>, Int<256>>>;
+  // using Matmul20000015LayoutC = Layout<Shape<Int<256>, Int<256>>, Stride<Int<1024>, Int<1>>>;
   
+
   // zy: add mc and gC to the kernel
   using Matmul20000015Kernel = tb::Blackwell_Matmul<half_t, true, false, Matmul20000015LayoutA, Matmul20000015LayoutB, Matmul20000015LayoutC, NUM_THREADS, 0, false, true, true, true, 4, decltype(cluster_shape), decltype(tiled_mma), decltype(mma_tiler)>;
   auto matmul_20000015_accum = Matmul20000015Kernel::get_mma_tC(blockIdx.x, blockIdx.y, *tmem_base_ptr);
   
-
   __syncthreads();
 
-  int warpgroup_id = tb::warpgroup_id();
 
   if (elect_one_warp && cute::elect_one_sync()) {
     int cta_count = 4; // equals to mma k tiles
     cute::initialize_barrier(*mma_barrier, cta_count);
   }
-  cluster_sync();
+  // cluster_sync();
 
 
-  int gridDimX = gridDim.x;
-  // zy: generate pair mask for mcast
-  int pair_start_x = (blockIdx.x / 2) * 2;
-  int pair_end_x = pair_start_x + 1;
-  int current_y = blockIdx.y;
-  int id0 = current_y * gridDimX + pair_start_x;  // (pair_start_x, current_y)
-  int id1 = current_y * gridDimX + pair_end_x;    // (pair_end_x, current_y)
+  int id0 = blockIdx.y * gridDim.x + (blockIdx.x / 2) * 2;  // (pair_start_x, current_y)
+  int id1 = blockIdx.y * gridDim.x + (blockIdx.x / 2) * 2 + 1;    // (pair_end_x, current_y)
   uint16_t pair_mask = (1 << id0) | (1 << id1);
 
-  if (warpgroup_id == 2) {
+  int warpgroup_id = tb::warpgroup_id();
+  if (warpgroup_id == 1) {
     if (tb::warp_id_in_wg() == 0) {
       for (uint32_t for_idx = 0; for_idx < 4; for_idx++) {
         STensor20000012InputAtom::run(tma_10000003, stensor20000012_ptr, tiled_mma, mma_tiler, for_idx, blackwell_async_pipeline_20000012);
@@ -211,14 +213,40 @@ __syncthreads();
     }
 
     cute::wait_barrier(*mma_barrier, 0);
-    Matmul20000015Kernel::write_tC_to_gC(dtensor10000005_tile_ptr, matmul_20000015_accum, thread_idx);
-
-
-
-    // {
-    //   // OP type: tb_output_op
-    //   STensor20000015OutputAtom::run(dtensor10000005_tile_ptr, stensor20000015_ptr, thread_idx);
+    // if (select_thread()) {
+    //   printf("stensor20000015_ptr\n");
+    //   auto stensor = make_tensor(make_smem_ptr<half_t>(stensor20000015_ptr), Matmul20000015LayoutC{});
+    //   print_tensor(stensor);
     // }
+
+    // Matmul20000015Kernel::write_tC_to_gC(dtensor10000005_tile_ptr-(blockIdx.x % 2)*128*1024, matmul_20000015_accum, thread_idx);
+
+    Matmul20000015Kernel::write_tC_to_sC(stensor20000015_ptr, matmul_20000015_accum, thread_idx);
+    tb::wg_sync<CONSUMER_NUM_THREADS>(8);
+    // if (select_thread()) {
+    //   printf("dtensor10000005_tile_ptr\n");
+    //   auto dtensor = make_tensor(make_gmem_ptr<half_t>(dtensor10000005_tile_ptr), DTensor10000005TileLayout{});
+    //   print_tensor(dtensor);
+    //   printf("stensor20000015_ptr\n");
+    //   auto stensor = make_tensor(make_smem_ptr<half_t>(stensor20000015_ptr), Matmul20000015LayoutC{});
+    //   print_tensor(stensor);
+    // }
+
+    {
+      // OP type: tb_output_op
+      STensor20000015OutputAtom::run(dtensor10000005_tile_ptr, stensor20000015_ptr, thread_idx);
+    }
+
+  //   tb::wg_sync<CONSUMER_NUM_THREADS>(8);
+
+  //   if (select_thread()) {
+  //     printf("dtensor10000005_tile_ptr\n");
+  //     auto dtensor = make_tensor(make_gmem_ptr<half_t>(dtensor10000005_tile_ptr), DTensor10000005TileLayout{});
+  //     print_tensor(dtensor);
+  //     printf("stensor20000015_ptr\n");
+  //     auto stensor = make_tensor(make_smem_ptr<half_t>(stensor20000015_ptr), Matmul20000015LayoutC{});
+  //     print_tensor(stensor);
+  //   }
   }
 
   
@@ -244,19 +272,18 @@ void _execute_mugraph(std::vector<void const *> input_tensors, std::vector<void*
   {
     // OP type: kn_customized_op
     half_t *dtensor10000005 = (half_t*)output_tensors.at(0);  // 更改为half_t*
-
     half_t *dtensor10000003 = (half_t*)input_tensors.at(0);
     half_t *dtensor10000004 = (half_t*)input_tensors.at(1);
     dim3 grid_dim(4, 4, 1);
-    dim3 block_dim(384, 1, 1);
+    dim3 block_dim(256, 1, 1);
     size_t smem_size = 196864 + 32 + 128;  // Add extra space for tmem_base_ptr with alignment padding
     
     // define tmas
-    TiledMMA tiled_mma = cutlass::gemm::collective::detail::sm100_make_2sm_trivial_tiled_mma<half_t, half_t, half_t, Shape<Int<256>, Int<256>>, decltype(cluster_shape), UMMA::Major::K, UMMA::Major::K>();
-
     auto cluster_shape = make_shape(Int<4>{}, Int<4>{}, Int<1>{});
+    TiledMMA tiled_mma = cutlass::gemm::collective::detail::sm100_make_2sm_trivial_tiled_mma<half_t, half_t, half_t, Shape<Int<256>, Int<256>>, decltype(cluster_shape), UMMA::Major::K, UMMA::Major::K>();
     Layout cluster_layout_vmnk = tiled_divide(make_layout(cluster_shape), make_tile(typename decltype(tiled_mma)::AtomThrID{}));
     auto mma_tiler = make_shape(tile_size<0>(tiled_mma), tile_size<1>(tiled_mma), tile_size<2>(tiled_mma)*_4{});
+    
     std::vector<bool> minputs = {true, false};
     
     static constexpr cute::UMMA::Major UMMAMajor_10000003 = UMMA::Major::K;
@@ -266,38 +293,20 @@ void _execute_mugraph(std::vector<void const *> input_tensors, std::vector<void*
     // zy: add a stage to last dim
     using DstPipeLayout_10000003 = decltype(UMMA::tile_to_mma_shape(SmemLayoutAtom_10000003{}, append(DstMNKLayout_10000003{}, Int<4>{}), Step<_1,_2,_3>{}));
     auto g_tensor_10000003 = make_tensor(make_gmem_ptr<half_t>(dtensor10000003), SrcMNKLayout_10000003{});
-    // printf("g_tensor_10000003: \n");
-    // print(g_tensor_10000003);
-    // printf("\nDstMNKLayout_10000003: \n");
-    // print(DstMNKLayout_10000003{});
-    // printf("\nDstPipeLayout_10000003: \n");
-    // print(DstPipeLayout_10000003{});
-    // printf("\nvalue in g_tensor_10000003: \n");
-
-
-    // using debugger_10000003 = tb::Debug<DstMNKLayout_10000003, SrcMNKLayout_10000003, SmemLayoutAtom_10000003, DstPipeLayout_10000003, decltype(tiled_mma), decltype(cluster_layout_vmnk), decltype(mma_tiler), decltype(g_tensor_10000003)>;
-    // debugger_10000003::run(g_tensor_10000003, tiled_mma, cluster_layout_vmnk, mma_tiler);
-    // zy: remember to slice here
     auto tma_10000003 = make_tma_atom_A_sm100(SM100_TMA_2SM_LOAD_MULTICAST{}, g_tensor_10000003, DstPipeLayout_10000003{}(_,_,_,Int<0>{}), mma_tiler, tiled_mma, cluster_layout_vmnk);
     
+
+    // static constexpr cute::UMMA::Major UMMAMajor_10000004 = UMMA::Major::MN;
     static constexpr cute::UMMA::Major UMMAMajor_10000004 = UMMA::Major::K;
     using DstMNKLayout_10000004 = decltype(partition_shape_B(tiled_mma, make_shape(size<1>(mma_tiler), size<2>(mma_tiler))));
     // change to K major for B
+    // using SrcMNKLayout_10000004 = Layout<Shape<Int<1024>, Int<256>>, Stride<Int<1>, Int<1024>>>;
     using SrcMNKLayout_10000004 = Layout<Shape<Int<1024>, Int<256>>, Stride<Int<256>, Int<1>>>;
-    
     // using SrcMNKLayout_10000004 = Layout<Shape<Int<1024>, Int<256>>, Stride<Int<1>, Int<1024>>>;
     using SmemLayoutAtom_10000004 = decltype(cutlass::gemm::collective::detail::sm100_smem_selector<UMMAMajor_10000004, half_t, decltype(get<1>(mma_tiler)), decltype(get<2>(mma_tiler))>());
     // using DstPipeLayout_10000004 = decltype(UMMA::tile_to_mma_shape(SmemLayoutAtom_10000004{}, (DstMNKLayout_10000004{})));
     using DstPipeLayout_10000004 = decltype(UMMA::tile_to_mma_shape(SmemLayoutAtom_10000004{}, append(DstMNKLayout_10000004{}, Int<4>{}), Step<_1,_2,_3>{}));
-    
     auto g_tensor_10000004 = make_tensor(make_gmem_ptr<half_t>(dtensor10000004), SrcMNKLayout_10000004{});
-    // using debugger_10000004 = tb::Debug<DstMNKLayout_10000004, SrcMNKLayout_10000004, SmemLayoutAtom_10000004, DstPipeLayout_10000004, decltype(tiled_mma), decltype(cluster_layout_vmnk), decltype(mma_tiler), decltype(g_tensor_10000004)>;
-    // debugger_10000004::run(g_tensor_10000004, tiled_mma, cluster_layout_vmnk, mma_tiler);
-    // printf("\nDstMNKLayout_10000004: \n");
-    // print(DstMNKLayout_10000004{});
-    // printf("\nDstPipeLayout_10000004: \n");
-    // print(DstPipeLayout_10000004{});
-    
     auto tma_10000004 = make_tma_atom_B_sm100(SM100_TMA_2SM_LOAD_MULTICAST{}, g_tensor_10000004, DstPipeLayout_10000004{}(_,_,_,Int<0>{}), mma_tiler, tiled_mma, cluster_layout_vmnk);
     
     // zy: change to add the DstPipeLayout
@@ -365,6 +374,8 @@ int main() {
     // D tensor MxN N-major (Layout T = Row-Major)
     Layout layout_D = make_layout(make_shape (Gemm_M,   Gemm_N),
                                   make_stride(Gemm_N, Int<1>{}));   // (Gemm_M,Gemm_N):(Gemm_N,_1)
+      // Layout layout_D = make_layout(make_shape (Gemm_M,   Gemm_N),
+      //                           make_stride(Int<1>{}, Gemm_M));   // (Gemm_M,Gemm_N):(Gemm_N,_1)
     
     ////////////////////////////////////////////////////////////
     //
@@ -577,22 +588,36 @@ int main() {
     
     // Print some sample results for debugging
     printf("\nSample results (first 10 elements):\n");
-    printf("Actual output: ");
     for(int i = 0; i < Gemm_M*Gemm_N; i++) {
-      if (host_D_result[i] != 256) {
-        printf("x = %d, y = %d, %.4f ", i/Gemm_N, i%Gemm_N, (float)host_D_result[i]);
-        break;
+      if (host_D_result[i] != host_reference_D[i]) {
+        // printf("Incorrect output: ");
+        printf("x = %d, y = %d, %.4f, %.4f \n", i/Gemm_N, i%Gemm_N, (float)host_D_result[i], (float)host_reference_D[i]);
+        // break;
       }
     }
+
     printf("\n");
-    printf("Reference output: ");
+    printf("Actual output: ");
+    for(int i = 0; i < 16; i++) {
+        printf("%.4f ", (float)host_D_result[i]);
+    }
+    printf("\n Reference output: ");
     for(int i = 0; i < 16; i++) {
         printf("%.4f ", (float)host_reference_D[i]);
     }
     printf("\n");
     
+    // printf("full output: \n");
+    // for(int i = 0; i < Gemm_M*Gemm_N; i++) {
+    //   printf("%.4f ", (float)host_D_result[i]);
+    //   if (i % Gemm_N == Gemm_N - 1) {
+    //     printf("\n");
+    //   }
+    // }
+    // printf("\n");
+
     // Success criteria - for half precision, relative error should be small
-    bool success = relative_error <= 1e-2;  // 1% tolerance, considering half precision limitations
+    bool success = relative_error <= 0;  // 1% tolerance, considering half precision limitations
     printf("Relative error: %.6e\n", relative_error);
     printf("Verification result: %s\n", success ? "PASSED" : "FAILED");
     
