@@ -36,18 +36,18 @@ if __name__ == "__main__":
 
     torch.cuda.set_device(rank)
     with torch.device("cuda"):
-        # model = Qwen3ForCausalLM.from_pretrained(model_name).to("cuda")
-        config = AutoConfig.from_pretrained("/opt/dlami/nvme/models/Qwen3-8B/")
-        model = Qwen3ForCausalLM(config, world_size)
-    load_model(
-        model, f"/opt/dlami/nvme/models/Qwen3-8B/model{rank}-mp{world_size}.safetensors"
-    )
+        model = Qwen3ForCausalLM.from_pretrained(model_name).to("cuda")
+        #config = AutoConfig.from_pretrained("/opt/dlami/nvme/models/Qwen3-8B/")
+        #model = Qwen3ForCausalLM(config, world_size)
+    #load_model(
+    #    model, f"/opt/dlami/nvme/models/Qwen3-8B/model{rank}-mp{world_size}.safetensors"
+    #)
 
     # get all model weight tensors
     tokens = torch.full((1, 32768), 0, dtype=torch.long, device="cuda")
 
-    # tokenizer = AutoTokenizer.from_pretrained(model_name)
-    tokenizer = AutoTokenizer.from_pretrained("/opt/dlami/nvme/models/Qwen3-8B/")
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    # tokenizer = AutoTokenizer.from_pretrained("/opt/dlami/nvme/models/Qwen3-8B/")
 
     prompt = "Give me a short introduction to large language model."
     messages = [
@@ -147,19 +147,19 @@ if __name__ == "__main__":
             dims=(batch_size, hidden_size),
             dtype=mi.bfloat16,
             name="attn_proj_out",
-            io_category="nvshmem_tensor",
+            io_category="nvshmem_tensor" if world_size > 1 else "cuda_tensor"
         )
         allreduce_buf = mpk.new_tensor(
             dims=(world_size, batch_size, hidden_size),
             dtype=mi.bfloat16,
             name="all_reduce_buf",
-            io_category="nvshmem_tensor",
+            io_category="nvshmem_tensor" if world_size > 1 else "cuda_tensor"
         )
         attn_allreduce_out = mpk.new_tensor(
             dims=(batch_size, hidden_size),
             dtype=mi.bfloat16,
             name="attn_allreduce_out",
-            io_category="nvshmem_tensor",
+            io_category="nvshmem_tensor" if world_size > 1 else "cuda_tensor"
         )
         mlp_mid = mpk.new_tensor(
             dims=(batch_size, fused_outdim_2 // world_size),
@@ -171,13 +171,13 @@ if __name__ == "__main__":
             dims=(batch_size, hidden_size),
             dtype=mi.bfloat16,
             name="mlp_out",
-            io_category="nvshmem_tensor",
+            io_category="nvshmem_tensor" if world_size > 1 else "cuda_tensor"
         )
         mlp_final = mpk.new_tensor(
             dims=(batch_size, hidden_size),
             dtype=mi.bfloat16,
             name="mlp_final",
-            io_category="nvshmem_tensor",
+            io_category="nvshmem_tensor" if world_size > 1 else "cuda_tensor"
         )
         argmax_in = mpk.new_tensor(
             dims=(batch_size, vocab_size),

@@ -502,7 +502,7 @@ class Qwen3Model(Qwen3PreTrainedModel):
 
 class Qwen3ForCausalLM(Qwen3PreTrainedModel, GenerationMixin):
 
-    def __init__(self, config, world_size):
+    def __init__(self, config, world_size = 1):
         super().__init__(config)
         self.model = Qwen3Model(config, world_size)
         self.vocab_size = config.vocab_size

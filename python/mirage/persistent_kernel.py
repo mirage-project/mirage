@@ -113,7 +113,6 @@ def get_compile_command(
     ]
 
     flags = [
-        "-ccbin=mpic++",
         "-shared",
         "-std=c++17",
         "-rdc=true",
@@ -131,7 +130,7 @@ def get_compile_command(
             f"-L{nvshmem_lib_path}",
             f"-L{mpi_lib_path}",
         ]
-        nvshmem_flags = ["-lnvshmem_host", "-lnvshmem_device", "-lmpi"]
+        nvshmem_flags = ["-ccbin=mpic++", "-lnvshmem_host", "-lnvshmem_device", "-lmpi"]
         common_cmd = common_cmd + nvshmem_cmd
         flags = flags + nvshmem_flags
 
@@ -169,6 +168,7 @@ class PersistentKernel:
         self.kn_graph = KNGraph(CyKNGraph(disable_fingerprint=True))
         self.meta_tensors = meta_tensors
         self.profiler_tensor = profiler_tensor
+        self.use_nvshmem = True if world_size > 1 else False
 
     def attach_input(self, torch_tensor: torch.Tensor, name: str = None) -> DTensor:
         dims = tuple([d for d in torch_tensor.shape])
@@ -425,7 +425,6 @@ class PersistentKernel:
 
     def compile(
         self,
-        use_nvshmem: bool = True,
         **kwargs,
     ):
         assert not self._is_compiled
@@ -464,68 +463,73 @@ class PersistentKernel:
         if "MIRAGE_HOME" in os.environ:
             MIRAGE_HOME_PATH = os.environ.get("MIRAGE_HOME")
         else:
-            raise RuntimeError("MIRAGE_HOME unspecified")
+            raise RuntimeError("MIRAGE_HOME unspecified; Please set MIRAGE_HOME to be the root of the Mirage folder")
 
-        # find nvshmem include folder and library foldera
-        if "NVSHMEM_INC_PATH" in os.environ:
-            NVSHMEM_INC_PATH = os.environ.get("NVSHMEM_INC_PATH")
-            header_file_path = os.path.join(NVSHMEM_INC_PATH, "nvshmem.h")
-            if not os.path.exists(header_file_path):
-                raise RuntimeError(
-                    "Environment variable NVSHMEM_INC_PATH is set but cannot find nvshmem.h at {header_file_path}"
-                )
-        else:
-            NVSHMEM_INC_PATH = "/usr/include/nvshmem_12/"
-            header_file_path = os.path.join(NVSHMEM_INC_PATH, "nvshmem.h")
-            if not os.path.exists(header_file_path):
-                raise RuntimeError(
-                    "Cannot find nvshmem.h, please set environment variable NVSHMEM_INC_PATH"
-                )
-        # find nvshmem shared library
-        if "NVSHMEM_LIB_PATH" in os.environ:
-            NVSHMEM_LIB_PATH = os.environ.get("NVSHMEM_LIB_PATH")
-            lib_file_path = os.path.join(NVSHMEM_LIB_PATH, "libnvshmem.a")
-            if not os.path.exists(lib_file_path):
-                raise RuntimeError(
-                    "Environment variable NVSHMEM_LIB_PATH is set but cannot find libnvshmem.a at {lib_file_path}"
-                )
-        else:
-            NVSHMEM_LIB_PATH = "/usr/lib/x86_64-linux-gnu/"
-            lib_file_path = os.path.join(NVSHMEM_LIB_PATH, "libnvshmem.a")
-            if not os.path.exists(lib_file_path):
-                raise RuntimeError(
-                    "Cannot find libnvshmem.a, please set environment variable NVSHMEM_LIB_PATH"
-                )
-        # find mpi include foler
-        if "MPI_INC_PATH" in os.environ:
-            MPI_INC_PATH = os.environ.get("MPI_INC_PATH")
-            header_file_path = os.path.join(MPI_INC_PATH, "mpi.h")
-            if not os.path.exists(header_file_path):
-                raise RuntimeError(
-                    "Environment variable MPI_INC_PATH is set but cannot find mpi.h at {header_file_path}"
-                )
-        else:
-            MPI_INC_PATH = "/usr/include/"
-            header_file_path = os.path.join(MPI_INC_PATH, "mpi.h")
-            if not os.path.exists(header_file_path):
-                raise RuntimeError(
-                    "Cannot find mpi.h, please set environment variable MPI_INC_PATH"
-                )
-        # find mpi shared library
-        if "MPI_LIB_PATH" in os.environ:
-            MPI_LIB_PATH = os.environ.get("MPI_LIB_PATH")
-            lib_file_path = os.path.join(NVSHMEM_LIB_PATH, "libmpi.so")
-            if not os.path.exists(lib_file_path):
-                raise RuntimeError(
-                    "Environment variable MPI_LIB_PATH is set but cannot find libmpi.so at {lib_file_path}"
-                )
-        else:
-            NVSHMEM_LIB_PATH = "/usr/lib/"
-            lib_file_path = os.path.join(NVSHMEM_LIB_PATH, "libmpi.so")
-            if not os.path.exists(lib_file_path):
-                raise RuntimeError(
-                    "Cannot find libmpi.so, please set environment variable MPI_LIB_PATH"
-                )
+        NVSHMEM_INC_PATH = None
+        NVSHMEM_LIB_PATH = None
+        MPI_INC_PATH = None
+        MPI_LIB_PATH = None
+        if self.use_nvshmem:
+            # find nvshmem include folder and library folder
+            if "NVSHMEM_INC_PATH" in os.environ:
+                NVSHMEM_INC_PATH = os.environ.get("NVSHMEM_INC_PATH")
+                header_file_path = os.path.join(NVSHMEM_INC_PATH, "nvshmem.h")
+                if not os.path.exists(header_file_path):
+                    raise RuntimeError(
+                        "Environment variable NVSHMEM_INC_PATH is set but cannot find nvshmem.h at {header_file_path}"
+                    )
+            else:
+                NVSHMEM_INC_PATH = "/usr/include/nvshmem_12/"
+                header_file_path = os.path.join(NVSHMEM_INC_PATH, "nvshmem.h")
+                if not os.path.exists(header_file_path):
+                    raise RuntimeError(
+                        "Cannot find nvshmem.h, please set environment variable NVSHMEM_INC_PATH"
+                    )
+            # find nvshmem shared library
+            if "NVSHMEM_LIB_PATH" in os.environ:
+                NVSHMEM_LIB_PATH = os.environ.get("NVSHMEM_LIB_PATH")
+                lib_file_path = os.path.join(NVSHMEM_LIB_PATH, "libnvshmem.a")
+                if not os.path.exists(lib_file_path):
+                    raise RuntimeError(
+                        "Environment variable NVSHMEM_LIB_PATH is set but cannot find libnvshmem.a at {lib_file_path}"
+                    )
+            else:
+                NVSHMEM_LIB_PATH = "/usr/lib/x86_64-linux-gnu/"
+                lib_file_path = os.path.join(NVSHMEM_LIB_PATH, "libnvshmem.a")
+                if not os.path.exists(lib_file_path):
+                    raise RuntimeError(
+                        "Cannot find libnvshmem.a, please set environment variable NVSHMEM_LIB_PATH"
+                    )
+            # find mpi include foler
+            if "MPI_INC_PATH" in os.environ:
+                MPI_INC_PATH = os.environ.get("MPI_INC_PATH")
+                header_file_path = os.path.join(MPI_INC_PATH, "mpi.h")
+                if not os.path.exists(header_file_path):
+                    raise RuntimeError(
+                        "Environment variable MPI_INC_PATH is set but cannot find mpi.h at {header_file_path}"
+                    )
+            else:
+                MPI_INC_PATH = "/usr/include/"
+                header_file_path = os.path.join(MPI_INC_PATH, "mpi.h")
+                if not os.path.exists(header_file_path):
+                    raise RuntimeError(
+                        "Cannot find mpi.h, please set environment variable MPI_INC_PATH"
+                    )
+            # find mpi shared library
+            if "MPI_LIB_PATH" in os.environ:
+                MPI_LIB_PATH = os.environ.get("MPI_LIB_PATH")
+                lib_file_path = os.path.join(NVSHMEM_LIB_PATH, "libmpi.so")
+                if not os.path.exists(lib_file_path):
+                    raise RuntimeError(
+                        "Environment variable MPI_LIB_PATH is set but cannot find libmpi.so at {lib_file_path}"
+                    )
+            else:
+                NVSHMEM_LIB_PATH = "/usr/lib/"
+                lib_file_path = os.path.join(NVSHMEM_LIB_PATH, "libmpi.so")
+                if not os.path.exists(lib_file_path):
+                    raise RuntimeError(
+                        "Cannot find libmpi.so, please set environment variable MPI_LIB_PATH"
+                    )
         target_cc = (
             torch.cuda.get_device_properties(0).major * 10
             + torch.cuda.get_device_properties(0).minor
@@ -545,7 +549,7 @@ class PersistentKernel:
             mpi_lib_path=MPI_LIB_PATH,
             py_so_path=so_path,
             profiling= True if self.profiler_tensor is not None else False,
-            use_nvshmem=use_nvshmem,
+            use_nvshmem=self.use_nvshmem,
         )
         print("Compiling megakernel using the following command line:")
         print(cc_cmd)
