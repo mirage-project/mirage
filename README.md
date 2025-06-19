@@ -1,5 +1,9 @@
 # Mirage: Automatically Generating Fast GPU Kernels without Programming in CUDA/Triton
 
+*Latest News* 🔥
+* [2025/06] We released [Mirage Persistent Kernel (MPK)](https://github.com/mirage-project/mirage/tree/mpk), a compiler and runtime that automatically transforms multi-GPU LLM inference into a high-performance megakernel. To try MPK, please refer to the `mpk` branch for build instructions and usage details: https://github.com/mirage-project/mirage/tree/mpk
+
+## About
 Mirage is a tool that automatically generates fast GPU kernels for PyTorch programs through superoptimization techniques. For example, to get fast GPU kernels for attention, users only need to write a few lines of Python code to describe attention's computation. For a given PyTorch program, Mirage automatically searches the space of potential GPU kernels that are functionally equivalent to the input program and discovers highly-optimized kernel candidates. This approach allows Mirage to find new custom kernels that outperform existing expert-designed ones.
 
 ## Quick Installation
