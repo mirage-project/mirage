@@ -131,10 +131,10 @@ __device__ __forceinline__ void
       long long winning_chunk_idx = local_packed_idx >> 32;
       long long winning_relative_idx = local_packed_idx & 0xFFFFFFFF;
       final_output[0] = winning_chunk_idx * CHUNK_SIZE + winning_relative_idx;
-      tokens[step] = winning_chunk_idx * CHUNK_SIZE + winning_relative_idx;
+      tokens[step + 1] = winning_chunk_idx * CHUNK_SIZE + winning_relative_idx;
     } else {
       final_output[0] = -1;
-      tokens[step] = -1;
+      tokens[step + 1] = -1;
     }
   }
 }
