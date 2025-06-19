@@ -61,7 +61,6 @@ def config_cython():
                         path.join(mirage_path, "deps", "json", "include"),
                         path.join(mirage_path, "deps", "cutlass", "include"),
                         path.join(z3_path, "include"),
-                        "/home/ubuntu/miniconda3/envs/mirage/include/python3.10/",
                         "/usr/local/cuda/include",
                     ],
                     libraries=[

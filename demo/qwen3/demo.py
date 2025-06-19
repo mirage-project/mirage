@@ -245,11 +245,9 @@ if __name__ == "__main__":
             w_q_norm = mpk.attach_input(
                 torch_tensor=layer.self_attn.q_norm.weight, name=f"layer_{i}_q_norm"
             )
-            print(f"layer_{i}_q_norm:", hex(layer.self_attn.q_norm.weight.data_ptr()))
             w_k_norm = mpk.attach_input(
                 torch_tensor=layer.self_attn.k_norm.weight, name=f"layer_{i}_k_norm"
             )
-            print(f"layer_{i}_k_norm:", hex(layer.self_attn.k_norm.weight.data_ptr()))
             k_cache = mpk.attach_input(
                 torch_tensor=model.model.kv_cache[0][i], name=f"layer_{i}_k_cache"
             )
