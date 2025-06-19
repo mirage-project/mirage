@@ -1,65 +1,86 @@
-# Mirage: Automatically Generating Fast GPU Kernels without Programming in CUDA/Triton
+# Mirage Persistent Kernel: Compiling LLMs into a MegaKernel
 
-Mirage is a tool that automatically generates fast GPU kernels for PyTorch programs through superoptimization techniques. For example, to get fast GPU kernels for attention, users only need to write a few lines of Python code to describe attention's computation. For a given PyTorch program, Mirage automatically searches the space of potential GPU kernels that are functionally equivalent to the input program and discovers highly-optimized kernel candidates. This approach allows Mirage to find new custom kernels that outperform existing expert-designed ones.
+*Latest News* 🔥
+* [2025/06] We released [Mirage Persistent Kernel (MPK)](https://github.com/mirage-project/mirage/tree/mpk), a compiler and runtime that automatically transforms multi-GPU LLM inference into a high-performance megakernel.
+
+## About
+
+MPK is a compiler and runtime that automatically transforms LLM inference into a single megakernel — a fused GPU kernel that performs all necessary computation and communication in one launch. This end-to-end GPU fusion approach reduces LLM inference latency by 1.2-6.7x with minimal developer effort.
 
 ## Quick Installation
 
-The quickest way to try Mirage is installing the latest stable release from pip:
+The quickest way to try MPK is installing the latest version from source code:
 ```bash
-pip install mirage-project
-```
-
-We also provide some pre-built binary wheels in the [Release Page](https://github.com/mirage-project/mirage/releases/latest). For example, to install mirage 0.2.2 compiled with CUDA 12.2 for python 3.10, using the following command:
-```bash
-pip install https://github.com/mirage-project/mirage/releases/download/v0.2.2/mirage_project-0.2.2+cu122-cp310-cp310-linux_x86_64.whl
-```
-
-You can also install Mirage from source code:
-```bash
-git clone --recursive https://www.github.com/mirage-project/mirage
+git clone --recursive --branch mpk https://www.github.com/mirage-project/mirage
 cd mirage
 pip install -e . -v
 ```
 
+* [2025/06/19] We are actively working on preparing pre-built binary wheels for MPK and will update the build instructions soon.
+
 ## Quickstart
-Mirage can automatically generate fast GPU kernels for arbitrary PyTorch programs. The Mirage-generated kernels can be integrated into a PyTorch program with a few lines of code changes. As an example, we show how to use Mirage to generate  kernels that fuse [RMSNorm](https://arxiv.org/pdf/1910.07467) and Linear to accelerate Transformer-based large language model computation. More examples are available in [tutorials](https://mirage-project.readthedocs.io/en/latest/tutorials/index.html).
-
-The follow code snippet shows a native PyTorch implementation for a Transformer layer in LLaMA-3-8B.
+Mirage can compile LLMs from the HuggingFace Transformer model zoo into a megakernel with just a few dozen lines of Python code--mainly to specify the megakernel's inputs and outputs. [This demo](https://github.com/mirage-project/mirage/blob/mpk/demo/qwen3/demo.py) shows how to convert the Qwen3-8B model into a megakernel. You can run the demo using the native Triton + FlashInfer kernels as follows.
 ```python
-rms_norm_1 = torch.nn.RMSNorm(4096)
-rms_norm_2 = torch.nn.RMSNorm(4096)
-Y = rms_norm_1(X)
-Z = torch.matmul(Y, Wqkv)
-O = attention(Z)
-U = rms_norm_2(Z)
-V = torch.matmul(U, W13)
-V1, V3 = V.chunk(2, -1) # split omitted in the above figure
-output = torch.matmul(silu(V1) * V3, W2) # silu and this matmul omitted in the above figure
+python demo/qwen3/demo.py
 ```
-<p align="center">
-<img src="img/llama-3-8b-rms-norm-linear.png?raw=true" alt="Mirage generates kernels that fuses RMSNorm and Linear" height="280"/>
-</p>
 
-To accelerate Transformer computation, we can use Mirage to generate GPU kernels that fuse RMSNorm and Linear, as shown in the code snippet below. Generating optimized kernels only requires write a few lines of code to describe the desired computation. The `get_mirage_kernel` function below returns the best kernel discovered by Mirage. These kernels can directly run as functions in your PyTorch programs. This kernel is 1.5–1.7x faster than running the two operators separately in PyTorch.
-
+You can let MPK compile the LLM into a megakernel and run the kernel by pass the `--use-mirage` argument.
 ```python
-def get_mirage_kernel(batch_size, output_dim):
-    graph = mi.new_kernel_graph()
-    X = graph.new_input(dims=(batch_size, 4096), dtype=mi.float16)
-    Wqkv = graph.new_input(dims=(4096, output_dim), dtype=mi.float16)
-    Y = graph.rms_norm(X, normalized_shape=(4096,))
-    Z = graph.matmul(Y, Wqkv)
-    graph.mark_output(Y)
-    return graph.superoptimize()
-
-kernel_1 = get_mirage_kernel(batch_size, output_dim=Wqkv.shape[-1])
-kernel_2 = get_mirage_kernel(batch_size, output_dim=W13.shape[-1])
-Z = kernel_1(inputs=[X, Wqkv])
-O = attention(Z)
-V = kernel_2(inputs=[Z, W13])
-V1, V3 = V.chunk(2, -1) # split omitted in the above figure
-output = torch.matmul(silu(V1) * V3, W2) # silu and this matmul omitted in the above figure
+python demo/qwen3/demo.py --use-mirage
 ```
+
+Meanwhile, we also provide a profiling interface to profile the performance of megakernels by visualizing the execution timeline of each task. You can enable profiling by sending an extra `--profiling` argument.
+```python
+python demo/qwen3/demo.py --use-mirage
+```
+
+## How MPK Works
+After importing the mirage python package, you can create a megakernel (a.k.a, persistent kernel) through the following API.
+```python
+import mirage as mi
+mpk = mi.PersistentKernel(
+    world_size=world_size,
+    mpi_rank=rank,
+    num_workers=96,
+    num_local_schedulers=48,
+    num_remote_schedulers=0,
+    meta_tensors=[step, tokens],
+    profiler_tensor=profiler_tensor,
+)
+```
+where `world_size` and `mpi_rank` specifies the number of GPUs (i.e., tensor parallel size) and the rank of the current GPU. The arguments `num_workers`, `num_local_schedulers`, and `num_remote_schedulers` specifies the number of workers, local schedulers, and remote schedulers. MPK requires that these numbers match the total number of physical SMs (i.e., `num_workers` + (`num_local_schedulers` + `num_remote_schedulers`) / 4 == number of physical SMs). The megakernel currently requires two meta tensors: `step` is an array of integer that specify the current decoding step, and MPK will increase that value by one after each iteration; `tokens` is a tensor of shape `num_requests` x `seq_length` that stores all prompt tokens. MPK will write generated tokens back to the `tokens` tensor.
+
+Next, users can attach `PyTorch.Tensor` to the megakernel by calling `mpk.attach_input`
+```python
+x = mpk.attach_input(torch_tensor=torch_tensor, name="torch_tensor_name")
+```
+where `name` is the name that is used by MPK to refer to the tensor in the generated megakernel.
+
+Alternatively, users can create a new tensor for the megakernel using `mpk.new_tensor`
+```python
+y = mpk.new_tensor(
+    dims=(batch_size, hidden_size),
+    dtype=mi.bfloat16,
+    name="embed_out",
+    io_category="cuda_tensor",
+)
+```
+where `dims` and `dtype` specifies the dimensions and data type of the tensor. Similarly to the previous API, `name` will be used by MPK to refer to this new tensor. Finally, `io_category` indicates how the tensor is allocated and must be one of `cuda_tensor` and `nvshmem_tensor`. Note that tensors that will be accessed by remote GPUs (e.g., during allreduce) must be allocated as an `nvshmem_tensor`.
+
+The next step is to define the computation graph of the LLM. For example, `mpk.rmsnorm_linear_layer` adds an RMSNorm layer followed by a Linear layer and fuses them together.
+```python
+mpk.rmsnorm_linear_layer(
+    input=x,
+    weight_norm=w_norm,
+    weight_linear=w_qkv,
+    output=attn_in,
+    grid_dim=(96, 1, 1),
+    block_dim=(128, 1, 1),
+)
+```
+`weight_norm` and `weight_linear` are the weight tensors for RMSNorm and Linear; `input` and `output` are the input and output tensors of this fused layer; finally, `grid_dim` and `block_dim` specifies the number of thread blocks (i.e., number of tasks in the task graph) and number of thread within each thread block. To minimize latency, it is suggested that the total number of thread blocks is a multiplier of the number of workers to avoid outliers.
+
+Finally, you can compile the LLM into a megakernel by invoking `mpk.compile()`, which produces an optimized task graph and CUDA implementations for each task. You can execute the generated megakernel by calling mpk as a function `mpk()`.
 
 ## Contribution
 Please let us know if you encounter any bugs or have any suggestions by [submitting an issue](https://github.com/mirage-project/mirage/issues).
