@@ -107,9 +107,9 @@ mpk()
 ```
 
 ## Contribution
-Please let us know if you encounter any bugs or have any suggestions by [submitting an issue](https://github.com/mirage-project/mirage/issues).
+We welcome feedback, contributions, and collaborations from the community! Please join our [Slack channel](https://join.slack.com/t/mirage-ag11870/shared_invite/zt-37reobr1i-SKjxeYF3GXdPDoCvtVbjTQ).
 
-We welcome all contributions to Mirage from bug fixes to new features and extensions.
+Please let us know if you encounter any bugs or have any suggestions by [submitting an issue](https://github.com/mirage-project/mirage/issues).
 
 ## Citation
 A paper describing Mirage's techniques is available [on arxiv](https://arxiv.org/abs/2405.05751). Please cite Mirage as:
