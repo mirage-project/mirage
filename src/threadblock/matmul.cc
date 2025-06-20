@@ -53,12 +53,12 @@ TBOperator *Graph::create_matmul_op(STensor const &A, STensor const &B) {
   TBMatmulOp *op = new TBMatmulOp(this, A, B);
 #ifdef MIRAGE_BACKEND_USE_NKI
   int num_dims = op->output_tensors[0].num_dims;
-  if (op->output_tensors[0].dim[num_dims - 2] > 128 && 
+  if (op->output_tensors[0].dim[num_dims - 2] > 128 &&
       op->output_tensors[0].dim[num_dims - 1] > 128) {
     delete op;
     return nullptr;
   }
-  if (op->output_tensors[0].dim[num_dims - 2] > 512 || 
+  if (op->output_tensors[0].dim[num_dims - 2] > 512 ||
       op->output_tensors[0].dim[num_dims - 1] > 512) {
     delete op;
     return nullptr;
