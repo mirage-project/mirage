@@ -352,9 +352,12 @@ __device__ __forceinline__ void
     }
     __syncthreads();
 
-    reduction_sum_row<decltype(mm_output_smem), decltype(mm_intermediate_smem)>(
-        mm_output_smem, mm_intermediate_smem);
-    __syncthreads();
+    if (NUM_WARPS_K > 1) {
+      reduction_sum_row<decltype(mm_output_smem),
+                        decltype(mm_intermediate_smem)>(mm_output_smem,
+                                                        mm_intermediate_smem);
+      __syncthreads();
+    }
 
     if (output_atom_idx == 0) {
       float const scalars[] = {eps, 0.0f};
@@ -367,7 +370,11 @@ __device__ __forceinline__ void
       __syncthreads();
     }
 
-    div_col(output_smem, mm_output_smem, reduction_output_smem);
+    if (NUM_WARPS_K > 1) {
+      div_col(output_smem, mm_output_smem, reduction_output_smem);
+    } else {
+      div_col(output_smem, mm_intermediate_smem, reduction_output_smem);
+    }
     __syncthreads();
 
 #pragma unroll
