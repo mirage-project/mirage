@@ -146,10 +146,7 @@ __device__ __forceinline__ void
   float o[8][8];
 #pragma unroll
   for (int n = 0; n < 8; n++) {
-#pragma unroll
-    for (int frag_idx = 0; frag_idx < 8; frag_idx++) {
-      o[n][frag_idx] = 0.0f;
-    }
+    *((__uint128_t *)o[n]) = 0ul;
   }
   float d_sum = 1.f;
   float m = -inf;
@@ -266,10 +263,7 @@ __device__ __forceinline__ void
     __syncthreads();
 
     float s_frag[8];
-#pragma unroll
-    for (int frag_idx = 0; frag_idx < 8; frag_idx++) {
-      s_frag[frag_idx] = 0.0f;
-    }
+    *((__uint128_t *)s_frag) = 0ul;
 
     uint32_t a_frag[4], b_frag[4], v_frag[4];
 
