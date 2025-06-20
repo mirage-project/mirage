@@ -95,7 +95,7 @@ void from_json(json const &j, KNChunkOp &op) {
   j.at("chunk_dim").get_to(op.chunk_dim);
 }
 
-#ifndef MIRAGE_FINGERPRINT_USE_CUDA
+#ifdef MIRAGE_FINGERPRINT_USE_CPU
 bool KNChunkOp::fingerprint(void) {
   assert(false && "To be implemented");
 }

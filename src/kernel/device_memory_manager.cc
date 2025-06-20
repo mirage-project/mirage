@@ -9,7 +9,7 @@ using namespace mirage::config;
 
 DeviceMemoryManager *DeviceMemoryManager::singleton = nullptr;
 
-#ifndef MIRAGE_FINGERPRINT_USE_CUDA
+#ifdef MIRAGE_FINGERPRINT_USE_CPU
 DeviceMemoryManager::DeviceMemoryManager() {
   num_devices = 1; // Default to 1 device for non-CUDA environments
   auto initizalize_exp_lookup_table =

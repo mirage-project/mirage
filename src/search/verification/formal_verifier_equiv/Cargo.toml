@@ -6,7 +6,7 @@ edition = "2021"
 [dependencies]
 egg = "0.10.0"
 ordered-float = "3.0.0"
-pyo3 = { version = "0.20", features = ["extension-module"] }
+pyo3 = { version = "0.25", features = ["extension-module"] }
 regex = "1"
 
 [lib]

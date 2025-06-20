@@ -88,7 +88,7 @@ KNReductionOp::operator json() const {
               {"output_tensors", output_tensors}};
 }
 
-#ifndef MIRAGE_FINGERPRINT_USE_CUDA
+#ifdef MIRAGE_FINGERPRINT_USE_CPU
 bool KNReductionOp::fingerprint(void) {
   assert(false && "To be implemented");
 }

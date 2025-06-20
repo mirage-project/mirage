@@ -15,7 +15,7 @@
 
 #pragma once
 
-#ifdef MIRAGE_USE_CUDA
+#ifdef MIRAGE_BACKEND_USE_CUDA
 
 #include "mirage/layout.h"
 #include "mirage/type.h"

@@ -46,7 +46,7 @@ size_t DTensor::get_owner_independent_hash() const {
   return ret;
 }
 
-#ifndef MIRAGE_FINGERPRINT_USE_CUDA
+#ifdef MIRAGE_FINGERPRINT_USE_CPU
 cpu::CTensor DTensor::copy_fingerprint_to_ctensor() const {
   cpu::CTensor ctensor;
   ctensor.data_type = data_type;

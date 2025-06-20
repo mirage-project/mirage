@@ -134,7 +134,7 @@ KNElementBinaryOp::operator json() const {
               {"output_tensors", output_tensors}};
 }
 
-#ifndef MIRAGE_FINGERPRINT_USE_CUDA
+#ifdef MIRAGE_FINGERPRINT_USE_CPU
 bool KNElementBinaryOp::fingerprint(void) {
   assert(false && "To be implemented");
   return false;

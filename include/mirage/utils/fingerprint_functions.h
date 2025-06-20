@@ -161,7 +161,7 @@ inline __execution_space__ void accum_square_fingerprint(FPType &accum,
 
 #undef __execution_space__
 
-#ifndef MIRAGE_FINGERPRINT_USE_CUDA
+#ifdef MIRAGE_FINGERPRINT_USE_CPU
 inline void compute_matmul_fingerprint(
     FPType *A_ptr, FPType *B_ptr, FPType *C_ptr, int B, int M, int N, int K) {
   memset(C_ptr, 0, B * M * N * sizeof(FPType));

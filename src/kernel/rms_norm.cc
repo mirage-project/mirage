@@ -124,7 +124,7 @@ KNRMSNormOp::operator json() const {
               {"output_tensors", output_tensors}};
 }
 
-#ifndef MIRAGE_FINGERPRINT_USE_CUDA
+#ifdef MIRAGE_FINGERPRINT_USE_CPU
 bool KNRMSNormOp::fingerprint(void) {
   int num_samples = output_tensors[0].num_elements() / normalized_size;
   kernel::DeviceMemoryManager *dmm =

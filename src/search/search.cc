@@ -143,7 +143,7 @@ void KernelGraphGenerator::generate_next_operator(
 
   if (!is_a_new_thread_start && search_depth <= multithread_threshold_depth) {
     SearchContext c_copied = SerializedSearchContext(c).deserialize();
-#ifdef MIRAGE_FINGERPRINT_USE_CUDA
+#if !defined(MIRAGE_FINGERPRINT_USE_CPU) || defined(MIRAGE_USE_FORMAL_VERIFIER)
 #pragma omp task
 #endif
     {
@@ -400,11 +400,11 @@ void KernelGraphGenerator::generate_kernel_graphs() {
   std::vector<SerializedSearchContext> verified_graphs;
 
   printf("num_thread = %d\n", num_thread);
-#ifdef MIRAGE_FINGERPRINT_USE_CUDA
+#if !defined(MIRAGE_FINGERPRINT_USE_CPU) || defined(MIRAGE_USE_FORMAL_VERIFIER)
 #pragma omp parallel num_threads(num_thread)
 #endif
   {
-#ifdef MIRAGE_FINGERPRINT_USE_CUDA
+#if !defined(MIRAGE_FINGERPRINT_USE_CPU) || defined(MIRAGE_USE_FORMAL_VERIFIER)
 #pragma omp single
 #endif
     {
@@ -535,7 +535,7 @@ bool KernelGraphGenerator::verify(kernel::Graph &g) {
     };
 
     auto save_graph = [&]() {
-#ifdef MIRAGE_FINGERPRINT_USE_CUDA
+#if !defined(MIRAGE_FINGERPRINT_USE_CPU) || defined(MIRAGE_USE_FORMAL_VERIFIER)
 #pragma omp critical
 #endif
       { generated_graphs.push_back(json(g)); }
@@ -588,7 +588,7 @@ void KernelGraphGenerator::generate_next_symbolic_operator(
     if (tb_graph) {
       tb_graph_copy = std::make_shared<SymbolicTBGraph>(*tb_graph);
     }
-#ifdef MIRAGE_FINGERPRINT_USE_CUDA
+#if !defined(MIRAGE_FINGERPRINT_USE_CPU) || defined(MIRAGE_USE_FORMAL_VERIFIER)
 #pragma omp task
 #endif
     generate_next_symbolic_operator(kn_graph_copy,

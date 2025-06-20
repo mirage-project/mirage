@@ -15,7 +15,7 @@
 
 #pragma once
 
-#ifdef MIRAGE_USE_CUDA
+#ifdef MIRAGE_BACKEND_USE_CUDA
 
 #include "mirage/kernel/device_tensor.h"
 #include "mirage/threadblock/operator.h"

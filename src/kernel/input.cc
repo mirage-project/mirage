@@ -93,7 +93,7 @@ KNInputOp::operator json() const {
               {"output_tensors", output_tensors}};
 }
 
-#ifndef MIRAGE_FINGERPRINT_USE_CUDA
+#ifdef MIRAGE_FINGERPRINT_USE_CPU
 bool KNInputOp::fingerprint(void) {
   DeviceMemoryManager *dmm = DeviceMemoryManager::get_instance();
   type::FPType value = 0;

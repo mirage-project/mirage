@@ -264,7 +264,7 @@ size_t KNCustomizedOp::get_owner_independent_hash() const {
   assert(false && "To be implemented");
 }
 
-#ifndef MIRAGE_FINGERPRINT_USE_CUDA
+#ifdef MIRAGE_FINGERPRINT_USE_CPU
 
 bool KNCustomizedOp::fingerprint(void) {
   using threadblock::STensor;

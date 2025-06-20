@@ -159,52 +159,6 @@ DeviceMemoryManager::~DeviceMemoryManager() {
   }
 }
 
-#ifdef DEADCODE
-bool DeviceMemoryManager::allocate(DTensor &tensor, bool allocate_fingerprint) {
-  // assert that the start of the tensor is 16 bytes aligned
-  assert(offset % 16 == 0);
-  char *ret_ptr = base_ptr + offset;
-  size_t tensor_size = tensor.data_size();
-  // make tensor_size a multiplier of 16
-  tensor_size = (tensor_size + 15) / 16 * 16;
-  offset += tensor_size;
-  tensor.data_offset = ret_ptr - base_ptr;
-  allocated_tensors.push_back(std::make_pair(tensor.data_offset, tensor_size));
-
-  if (allocate_fingerprint) {
-    assert(offset % 16 == 0);
-    ret_ptr = base_ptr + offset;
-    size_t tensor_size = tensor.fingerprint_size();
-    tensor_size = (tensor_size + 15) / 16 * 16;
-    offset += tensor_size;
-    tensor.fp_offset = ret_ptr - base_ptr;
-    allocated_tensors.push_back(std::make_pair(tensor.fp_offset, tensor_size));
-  }
-  // Assert that we haven't used more than what we pre-allocated
-  assert(offset <= total_size);
-
-  return true;
-}
-
-bool DeviceMemoryManager::free(DTensor &tensor) {
-  // Currently assume that tensors are freed in the reverse order
-  // so ptr must be the last tensor we have created
-  // Note that a non-negative fp_offset means that we have
-  // allocated memory for its fingerprint
-  if (tensor.fp_offset >= 0) {
-    assert(allocated_tensors.size() > 0);
-    assert(allocated_tensors.back().first == tensor.fp_offset);
-    offset -= allocated_tensors.back().second;
-    allocated_tensors.pop_back();
-  }
-  assert(allocated_tensors.size() > 0);
-  assert(allocated_tensors.back().first == tensor.data_offset);
-  offset -= allocated_tensors.back().second;
-  allocated_tensors.pop_back();
-  return true;
-}
-#endif // DEADCODE
-
 DeviceMemoryManager *DeviceMemoryManager::get_instance() {
   if (singleton == nullptr) {
     int num_devices;

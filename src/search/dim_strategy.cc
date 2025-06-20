@@ -32,7 +32,11 @@ std::vector<dim3>
 
   auto generate_1d_grids = [&](std::vector<int> const &dims) {
     std::vector<dim3> cands;
+#ifdef MIRAGE_BACKEND_USE_CUDA
     for (size_t x = 8; x <= 256; x *= 2) {
+#else
+    for (size_t x : {64, 128, 512}) {
+#endif
       for (int dim : dims) {
         if (dim % x == 0) {
           cands.push_back({dim / x, 1, 1});
@@ -44,7 +48,11 @@ std::vector<dim3>
 
   auto generate_2d_grids = [&](int x, std::vector<int> const &dims) {
     std::vector<dim3> cands;
+#ifdef MIRAGE_BACKEND_USE_CUDA
     for (size_t y : {8, 64, 128, 256}) {
+#else
+    for (size_t y : {64, 128, 512}) {
+#endif
       for (int dim : dims) {
         if (dim % y == 0) {
           cands.push_back({x, dim / y, 1});
@@ -95,6 +103,7 @@ std::vector<dim3>
       cands.push_back({batch, 16, 4});
     }
   }
+#ifdef MIRAGE_BACKEND_USE_CUDA
   cands = filter(cands, [](dim3 const &dim) {
     int num_threadblocks = dim.x * dim.y * dim.z;
     return 32 <= num_threadblocks &&
@@ -104,8 +113,15 @@ std::vector<dim3>
   if (batch != -1 && batch <= config::MAX_NUM_THREADBLOCKS_PER_KERNEL) {
     cands.push_back({batch, 1, 1});
   }
+#endif
 
   cands = deduplicate(cands);
+
+  // print cands
+  for (dim3 const &cand : cands) {
+    std::cerr << "Grid dim candidate: " << cand.x << ", " << cand.y << ", "
+              << cand.z << std::endl;
+  }
 
   if (config.randomized_branches) {
     std::random_shuffle(cands.begin(), cands.end());
@@ -330,9 +346,33 @@ std::vector<int> DimStrategy::get_forloop_range_cand(
     return {1};
   }
 
+  std::vector<int> forloop_range_to_explore = config.frange_to_explore;
+#ifdef MIRAGE_BACKEND_USE_NKI
+  forloop_range_to_explore.clear();
+  for (size_t i = 0; i < input_tensors.size(); ++i) {
+    if (forloop_dim[i] == -1) {
+      continue;
+    }
+    int dim = input_tensors[i].dim[forloop_dim[i]];
+    if (input_map[i].x == forloop_dim[i]) {
+      return {};
+    }
+    if (input_map[i].y == forloop_dim[i]) {
+      return {};
+    }
+    if (input_map[i].z == forloop_dim[i]) {
+      return {};
+    }
+    for (int x : {128, 512}) {
+      if (dim % x == 0) {
+        forloop_range_to_explore.push_back(dim / x);
+      }
+    }
+  }
+  forloop_range_to_explore = deduplicate(forloop_range_to_explore);
+#endif
   std::vector<int> results;
-
-  for (int x : config.frange_to_explore) {
+  for (int x : forloop_range_to_explore) {
     if (config._enable_attention_specific_optimization && x > 8) {
       continue;
     }
@@ -343,23 +383,14 @@ std::vector<int> DimStrategy::get_forloop_range_cand(
       }
       int dim = input_tensors[i].dim[forloop_dim[i]];
       if (input_map[i].x == forloop_dim[i]) {
-#ifdef MIRAGE_USE_NKI
-        return {};
-#endif
         assert(dim % grid_dim.x == 0);
         dim /= grid_dim.x;
       }
       if (input_map[i].y == forloop_dim[i]) {
-#ifdef MIRAGE_USE_NKI
-        return {};
-#endif
         assert(dim % grid_dim.y == 0);
         dim /= grid_dim.y;
       }
       if (input_map[i].z == forloop_dim[i]) {
-#ifdef MIRAGE_USE_NKI
-        return {};
-#endif
         assert(dim % grid_dim.z == 0);
         dim /= grid_dim.z;
       }

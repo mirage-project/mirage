@@ -79,7 +79,7 @@ KNAllReduceOp::operator json() const {
               {"inplace", inplace}};
 }
 
-#ifndef MIRAGE_FINGERPRINT_USE_CUDA
+#ifdef MIRAGE_FINGERPRINT_USE_CPU
 bool KNAllReduceOp::fingerprint(void) {
   assert(false && "To be implemented");
 }

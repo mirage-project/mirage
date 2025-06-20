@@ -112,7 +112,7 @@ void from_json(json const &j, KNMatmulOp &op) {
   j.at("output_tensors").get_to(op.output_tensors);
 }
 
-#ifndef MIRAGE_FINGERPRINT_USE_CUDA
+#ifdef MIRAGE_FINGERPRINT_USE_CPU
 bool KNMatmulOp::fingerprint(void) {
   DeviceMemoryManager *dmm = DeviceMemoryManager::get_instance();
 
