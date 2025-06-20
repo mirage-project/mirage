@@ -1,5 +1,9 @@
 cmake_minimum_required(VERSION 3.24 FATAL_ERROR)
-project(MIRAGE LANGUAGES C CXX CUDA)
+if (NOT "${USE_CUDA}" STREQUAL "OFF")
+  project(MIRAGE LANGUAGES C CXX CUDA)
+else()
+  project(MIRAGE LANGUAGES C CXX)
+endif()
 
 message(STATUS "CMake Version: ${CMAKE_VERSION}")
 
@@ -26,6 +30,16 @@ set(CMAKE_CUDA_ARCHITECTURES "70;75;80;86;89;90")
 file(GLOB_RECURSE MIRAGE_SRCS
   src/*.cc
 )
+
+if (${USE_CUDA} STREQUAL "OFF")
+  file(GLOB_RECURSE MIRAGE_EXCLUDE_SRCS
+    src/transpiler/*.cc
+  )
+
+  list(REMOVE_ITEM MIRAGE_SRCS ${MIRAGE_EXCLUDE_SRCS})
+  
+  message(STATUS "MIRAGE_SRCS: ${MIRAGE_SRCS}")
+endif()
 
 file(GLOB_RECURSE MIRAGE_CUDA_SRCS
   src/*.cu
@@ -95,6 +109,9 @@ list(APPEND MIRAGE_LINK_LIBS ${Z3_LIBRARIES})
 add_subdirectory(deps/json)
 list(APPEND MIRAGE_LINK_LIBS nlohmann_json::nlohmann_json)
 
+link_directories(${CMAKE_SOURCE_DIR}/build/release)
+list(APPEND MIRAGE_LINK_LIBS abstract_subexpr)
+
 #add_subdirectory(deps/z3 z3 EXCLUDE_FROM_ALL)
 #include_directories(deps/z3/src/api/c++)
 #include_directories(deps/z3/src/api)
@@ -136,6 +153,10 @@ if(NOT CARGO_RESULT EQUAL 0)
     "and follow the instructions on the screen.")
 endif()
 
+# set(ABSTRACT_SUBEXPR_LIBRARIES ${PROJECT_SOURCE_DIR}/build/abstract_subexpr/release/libabstract_subexpr.so)
+# set(FORMAL_VERIFIER_LIBRARIES ${PROJECT_SOURCE_DIR}/build/formal_verifier/release/libformal_verifier.so)
+# list(APPEND MIRAGE_LINK_LIBS "-lstdc++fs")
+
 #set RUST
 if(ABSTRACT_SUBEXPR_LIB AND ABSTRACT_SUBEXPR_LIBRARIES)
   message(STATUS "ABSTRACT_SUBEXPR_LIB: ${ABSTRACT_SUBEXPR_LIB}")
@@ -160,6 +181,25 @@ set_target_properties(mirage_runtime PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQ
 set_target_properties(mirage_runtime PROPERTIES CUDA_ARCHITECTURES "70;75;80;86;89;90")
 
 target_compile_features(mirage_runtime PUBLIC cxx_std_17)
+
+if (NOT "${USE_TRITON}" STREQUAL "OFF")
+  target_compile_definitions(mirage_runtime PUBLIC MIRAGE_BACKEND_USE_TRITON)
+  target_compile_definitions(mirage_runtime PUBLIC MIRAGE_FINGERPRINT_USE_CUDA)
+endif()
+
+if (NOT "${USE_CUDA}" STREQUAL "OFF")
+  target_compile_definitions(mirage_runtime PUBLIC MIRAGE_BACKEND_USE_CUDA)
+  target_compile_definitions(mirage_runtime PUBLIC MIRAGE_FINGERPRINT_USE_CUDA)
+endif()
+
+if (NOT "${USE_NKI}" STREQUAL "OFF")
+  target_compile_definitions(mirage_runtime PUBLIC MIRAGE_BACKEND_USE_NKI)
+  target_compile_definitions(mirage_runtime PUBLIC MIRAGE_FINGERPRINT_USE_CPU)
+endif()
+
+if (NOT "${USE_FORMAL_VERIFIER}" STREQUAL "OFF")
+  target_compile_definitions(mirage_runtime PUBLIC MIRAGE_USE_FORMAL_VERIFIER)
+endif()
 
 target_link_libraries(mirage_runtime ${MIRAGE_LINK_LIBS})
 

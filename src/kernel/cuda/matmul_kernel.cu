@@ -28,128 +28,7 @@ using namespace mirage::type;
 using namespace mirage::config;
 using namespace mirage::utils;
 
-bool KNMatmulOp::profile(ProfileResult &result) {
-  assert(false);
-  // Only launch kernel on a single GPU for profiling
-  int gpu_id = 0;
-  checkCUDA(cudaSetDevice(0));
-
-  float alpha = 1.0f, beta = 0.0f;
-  mirage::kernel::DeviceMemoryManager *dmm =
-      mirage::kernel::DeviceMemoryManager::get_instance();
-  void *A = dmm->data_base_ptr[gpu_id] + input_tensors[0].data_offset;
-  void *B = dmm->data_base_ptr[gpu_id] + input_tensors[1].data_offset;
-  void *C = dmm->data_base_ptr[gpu_id] + output_tensors[0].data_offset;
-  int num_dims = input_tensors[0].num_dims;
-  assert(input_tensors[1].num_dims == num_dims);
-  assert(output_tensors[0].num_dims == num_dims);
-  int batch = 1;
-  for (int i = 0; i < num_dims - 2; i++) {
-    assert(input_tensors[0].dim[i] == input_tensors[1].dim[i]);
-    assert(input_tensors[0].dim[i] == output_tensors[0].dim[i]);
-    batch *= input_tensors[0].dim[i];
-  }
-  int row_A = input_tensors[0].dim[num_dims - 2];
-  int column_A = input_tensors[0].dim[num_dims - 1];
-  int row_B = input_tensors[1].dim[num_dims - 2];
-  int column_B = input_tensors[1].dim[num_dims - 1];
-  int row_C = output_tensors[0].dim[num_dims - 2];
-  int column_C = output_tensors[0].dim[num_dims - 1];
-  assert(column_A == row_B);
-  assert(row_C == row_A);
-  assert(column_C == column_B);
-  cudaDataType_t type_A =
-      mirage::utils::to_cuda_datatype(input_tensors[0].data_type);
-  cudaDataType_t type_B =
-      mirage::utils::to_cuda_datatype(input_tensors[1].data_type);
-  cudaDataType_t type_C =
-      mirage::utils::to_cuda_datatype(output_tensors[0].data_type);
-  // TODO: currently set the default to CUBLAS_COMPUTE_16F for best performance
-  cublasComputeType_t compute_type = CUBLAS_COMPUTE_16F;
-  cublasOperation_t trans_A = CUBLAS_OP_N;
-  cublasOperation_t trans_B = CUBLAS_OP_N;
-  if (input_tensors[0].layout == layout::DmemColumnMajor) {
-    trans_A = CUBLAS_OP_T;
-  } else {
-    assert(input_tensors[0].layout == layout::DmemRowMajor);
-  }
-  if (input_tensors[1].layout == layout::DmemColumnMajor) {
-    trans_B = CUBLAS_OP_T;
-  } else {
-    assert(input_tensors[1].layout == layout::DmemRowMajor);
-  }
-  // Currently assume C must be in row major;
-  assert(output_tensors[0].layout == layout::DmemRowMajor);
-  int lda = input_tensors[0].layout == layout::DmemRowMajor ? row_A : column_A;
-  int ldb = input_tensors[1].layout == layout::DmemRowMajor ? row_B : column_B;
-  int ldc = row_C;
-
-  checkCUDA(cudaDeviceSynchronize());
-  cudaEvent_t events[2];
-  checkCUDA(cudaEventCreate(&events[0]));
-  checkCUDA(cudaEventCreate(&events[1]));
-  checkCUDA(cudaEventRecord(events[0]));
-  for (int i = 0; i < 16; i++) {
-    if (batch == 1) {
-      checkCUDA(cublasGemmEx(dmm->blas[gpu_id],
-                             trans_A,
-                             trans_B,
-                             row_C,
-                             column_C,
-                             column_A,
-                             &alpha,
-                             A,
-                             type_A,
-                             lda,
-                             B,
-                             type_B,
-                             ldb,
-                             &beta,
-                             C,
-                             type_C,
-                             ldc,
-                             compute_type,
-                             CUBLAS_GEMM_DEFAULT));
-    } else {
-      int strideA = row_A * column_A;
-      int strideB = row_B * column_B;
-      int strideC = row_C * column_C;
-      checkCUDA(cublasGemmStridedBatchedEx(dmm->blas[gpu_id],
-                                           trans_A,
-                                           trans_B,
-                                           row_C,
-                                           column_C,
-                                           column_A,
-                                           &alpha,
-                                           A,
-                                           type_A,
-                                           lda,
-                                           strideA,
-                                           B,
-                                           type_B,
-                                           ldb,
-                                           strideB,
-                                           &beta,
-                                           C,
-                                           type_C,
-                                           ldc,
-                                           strideC,
-                                           batch,
-                                           compute_type,
-                                           CUBLAS_GEMM_DEFAULT));
-    }
-  }
-  float runtime_ms = 0;
-  checkCUDA(cudaEventRecord(events[1]));
-  checkCUDA(cudaEventSynchronize(events[1]));
-  checkCUDA(cudaEventElapsedTime(&runtime_ms, events[0], events[1]));
-  result.run_time = runtime_ms / 16;
-  printf("BatchMatmul: runtime(%.8lfms)\n", result.run_time);
-  checkCUDA(cudaEventDestroy(events[0]));
-  checkCUDA(cudaEventDestroy(events[1]));
-  return true;
-}
-
+#ifdef MIRAGE_FINGERPRINT_USE_CUDA
 __global__ void compute_matmul_fingerprint(mirage::type::FPType *A_ptr,
                                            mirage::type::FPType *B_ptr,
                                            mirage::type::FPType *C_ptr,
@@ -221,6 +100,7 @@ bool KNMatmulOp::fingerprint(void) {
   }
   return true;
 }
+#endif // MIRAGE_FINGERPRINT_USE_CUDA
 
 } // namespace kernel
 } // namespace mirage

@@ -50,18 +50,20 @@ TBOperator *Graph::create_matmul_op(STensor const &A, STensor const &B) {
     return nullptr;
   }
 
-  // STensor C;
-  // C.num_dims = A.num_dims;
-  // for (int i = 0; i < C.num_dims; i++) {
-  //   C.dim[i] = A.dim[i];
-  // }
-  // C.dim[C.num_dims - 1] = B.dim[C.num_dims - 1];
-  // C.data_type = A.data_type;
-  // if (smem_offset + (off_t)C.size() > (off_t)mirage::config::MAX_SMEM_SIZE) {
-  //   return nullptr;
-  // }
-
   TBMatmulOp *op = new TBMatmulOp(this, A, B);
+#ifdef MIRAGE_BACKEND_USE_NKI
+  int num_dims = op->output_tensors[0].num_dims;
+  if (op->output_tensors[0].dim[num_dims - 2] > 128 &&
+      op->output_tensors[0].dim[num_dims - 1] > 128) {
+    delete op;
+    return nullptr;
+  }
+  if (op->output_tensors[0].dim[num_dims - 2] > 512 ||
+      op->output_tensors[0].dim[num_dims - 1] > 512) {
+    delete op;
+    return nullptr;
+  }
+#endif
   // Check shmem usage
   size_t smem_usage = calculate_shared_memory_usage(op);
   if (smem_usage > mirage::config::MAX_SMEM_SIZE) {

@@ -42,7 +42,6 @@ public:
   int get_output_dtensors(DTensor **inputs);
 
   virtual ~KNOperator();
-  virtual bool profile(ProfileResult &result) = 0;
   virtual bool fingerprint(void) = 0;
   virtual operator json() const = 0;
 
@@ -65,7 +64,6 @@ public:
             mirage::layout::DmemLayout layout,
             int3 input_map = {-1, -1, -1});
   ~KNInputOp();
-  bool profile(ProfileResult &profile);
   bool fingerprint(void);
 
   operator json() const override;
@@ -82,7 +80,6 @@ public:
              std::vector<size_t> const &strides,
              int3 output_map = {-1, -1, -1});
   ~KNOutputOp();
-  bool profile(ProfileResult &profile);
   bool fingerprint(void);
 
   operator json() const override;
