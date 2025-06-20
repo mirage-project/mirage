@@ -2,7 +2,7 @@
 
 # Mirage Persistent Kernel: Compiling LLMs into a MegaKernel
     
-| [Join Slack](https://join.slack.com/t/mirage-ag11870/shared_invite/zt-37reobr1i-SKjxeYF3GXdPDoCvtVbjTQ) | [Roadmap](https://github.com/mirage-project/mirage/issues/325) | [Blog Post](https://zhihaojia.medium.com/compiling-llms-into-a-megakernel-a-path-to-low-latency-inference-cf7840913c17) | 
+| [Join Slack]([https://join.slack.com/t/mirage-ag11870/shared_invite/zt-37reobr1i-SKjxeYF3GXdPDoCvtVbjTQ](https://join.slack.com/t/miragesystem/shared_invite/zt-37reobr1i-SKjxeYF3GXdPDoCvtVbjTQ)) | [Roadmap](https://github.com/mirage-project/mirage/issues/325) | [Blog Post](https://zhihaojia.medium.com/compiling-llms-into-a-megakernel-a-path-to-low-latency-inference-cf7840913c17) | 
 
 </div>
 
