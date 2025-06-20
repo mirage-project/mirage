@@ -69,7 +69,7 @@ static constexpr int CONSUMER_NUM_THREADS = 128;
 // UMMA part
 // zy: put cluster shape, tiled_mma, mma_tiler here
 auto cluster_shape = make_shape(Int<4>{}, Int<4>{}, Int<1>{});
-auto tiled_mma = cutlass::gemm::collective::detail::sm100_make_2sm_trivial_tiled_mma<half_t, half_t, half_t, Shape<Int<256>, Int<256>>, decltype(cluster_shape), UMMA::Major::K, UMMA::Major::K>();
+auto tiled_mma = cutlass::gemm::collective::detail::sm100_make_2sm_trivial_tiled_mma<half_t, half_t, half_t, Shape<Int<256>, Int<256>>, decltype(cluster_shape), UMMA::Major::K, UMMA::Major::MN>();
 auto mma_tiler = make_shape(tile_size<0>(tiled_mma), tile_size<1>(tiled_mma), tile_size<2>(tiled_mma)*_4{});
 uint32_t elect_one_warp = (threadIdx.x / 32 == 0); 
 Layout cluster_layout_vmnk = tiled_divide(make_layout(cluster_shape), make_tile(typename decltype(tiled_mma)::AtomThrID{}));
@@ -213,11 +213,17 @@ __syncthreads();
     }
 
     cute::wait_barrier(*mma_barrier, 0);
-    // if (select_thread()) {
-    //   printf("stensor20000015_ptr\n");
-    //   auto stensor = make_tensor(make_smem_ptr<half_t>(stensor20000015_ptr), Matmul20000015LayoutC{});
-    //   print_tensor(stensor);
-    // }
+    if (select_thread()) {
+      printf("stensor20000015_ptr\n");
+      auto stensor = make_tensor(make_smem_ptr<half_t>(stensor20000015_ptr), Matmul20000015LayoutC{});
+      print_tensor(stensor);
+      printf("stensor20000012_ptr\n");
+      auto stensor2 = make_tensor(make_smem_ptr<half_t>(stensor20000012_ptr), Matmul20000015LayoutA{});
+      print_tensor(stensor2);
+      printf("stensor20000013_ptr\n");
+      auto stensor3 = make_tensor(make_smem_ptr<half_t>(stensor20000013_ptr), Matmul20000015LayoutB{});
+      print_tensor(stensor3);
+    }
 
     // Matmul20000015Kernel::write_tC_to_gC(dtensor10000005_tile_ptr-(blockIdx.x % 2)*128*1024, matmul_20000015_accum, thread_idx);
 
@@ -280,7 +286,7 @@ void _execute_mugraph(std::vector<void const *> input_tensors, std::vector<void*
     
     // define tmas
     auto cluster_shape = make_shape(Int<4>{}, Int<4>{}, Int<1>{});
-    TiledMMA tiled_mma = cutlass::gemm::collective::detail::sm100_make_2sm_trivial_tiled_mma<half_t, half_t, half_t, Shape<Int<256>, Int<256>>, decltype(cluster_shape), UMMA::Major::K, UMMA::Major::K>();
+    TiledMMA tiled_mma = cutlass::gemm::collective::detail::sm100_make_2sm_trivial_tiled_mma<half_t, half_t, half_t, Shape<Int<256>, Int<256>>, decltype(cluster_shape), UMMA::Major::K, UMMA::Major::MN>();
     Layout cluster_layout_vmnk = tiled_divide(make_layout(cluster_shape), make_tile(typename decltype(tiled_mma)::AtomThrID{}));
     auto mma_tiler = make_shape(tile_size<0>(tiled_mma), tile_size<1>(tiled_mma), tile_size<2>(tiled_mma)*_4{});
     
@@ -297,15 +303,15 @@ void _execute_mugraph(std::vector<void const *> input_tensors, std::vector<void*
     
 
     // static constexpr cute::UMMA::Major UMMAMajor_10000004 = UMMA::Major::MN;
-    static constexpr cute::UMMA::Major UMMAMajor_10000004 = UMMA::Major::K;
+    static constexpr cute::UMMA::Major UMMAMajor_10000004 = UMMA::Major::MN;
     using DstMNKLayout_10000004 = decltype(partition_shape_B(tiled_mma, make_shape(size<1>(mma_tiler), size<2>(mma_tiler))));
     // change to K major for B
-    // using SrcMNKLayout_10000004 = Layout<Shape<Int<1024>, Int<256>>, Stride<Int<1>, Int<1024>>>;
-    using SrcMNKLayout_10000004 = Layout<Shape<Int<1024>, Int<256>>, Stride<Int<256>, Int<1>>>;
+    using SrcMNKLayout_10000004 = Layout<Shape<Int<1024>, Int<256>>, Stride<Int<1>, Int<1024>>>;
+    // using SrcMNKLayout_10000004 = Layout<Shape<Int<1024>, Int<256>>, Stride<Int<256>, Int<1>>>;
     // using SrcMNKLayout_10000004 = Layout<Shape<Int<1024>, Int<256>>, Stride<Int<1>, Int<1024>>>;
     using SmemLayoutAtom_10000004 = decltype(cutlass::gemm::collective::detail::sm100_smem_selector<UMMAMajor_10000004, half_t, decltype(get<1>(mma_tiler)), decltype(get<2>(mma_tiler))>());
     // using DstPipeLayout_10000004 = decltype(UMMA::tile_to_mma_shape(SmemLayoutAtom_10000004{}, (DstMNKLayout_10000004{})));
-    using DstPipeLayout_10000004 = decltype(UMMA::tile_to_mma_shape(SmemLayoutAtom_10000004{}, append(DstMNKLayout_10000004{}, Int<4>{}), Step<_1,_2,_3>{}));
+    using DstPipeLayout_10000004 = decltype(UMMA::tile_to_mma_shape(SmemLayoutAtom_10000004{}, append(DstMNKLayout_10000004{}, Int<4>{}), Step<_2,_1,_3>{}));
     auto g_tensor_10000004 = make_tensor(make_gmem_ptr<half_t>(dtensor10000004), SrcMNKLayout_10000004{});
     auto tma_10000004 = make_tma_atom_B_sm100(SM100_TMA_2SM_LOAD_MULTICAST{}, g_tensor_10000004, DstPipeLayout_10000004{}(_,_,_,Int<0>{}), mma_tiler, tiled_mma, cluster_layout_vmnk);
     

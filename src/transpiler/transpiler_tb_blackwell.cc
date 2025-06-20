@@ -70,20 +70,6 @@ static auto get_cute_layout_array(vector<int> dims,
   return {dims, strides};
 }
 
-static auto get_cute_layout_array_k_major(vector<int> dims,
-                                  vector<size_t> strides,
-                                  bool swap01 = true)
-    -> std::pair<std::vector<int>, std::vector<size_t>> {
-  assert(dims.size() == strides.size());
-
-  if (swap01) {
-    std::reverse(dims.begin(), dims.end());
-    strides[0] = dims[1];
-  }
-
-  return {dims, strides};
-}
-
 static string get_reversed_cute_layout(vector<int> dims,
                                        vector<size_t> strides) {
   assert(dims.size() == strides.size());
@@ -316,6 +302,29 @@ static std::pair<bool, std::vector<int64_t>>
   return {false, {}};
 }
 
+static void generate_Tmem_mbarrier_init_code(CodeKeeper &code, int mma_iter_count, string &tmem_base_ptr_name, string &mbarrier_ptr_name) {
+  code.e("// Tensory Memory Allocation");
+
+  code.e("using TmemAllocator = cute::TMEM::Allocator2Sm;");
+  code.e("TmemAllocator tmem_allocator{};");
+  code.e("if (elect_one_warp) { ");
+  code.e("tmem_allocator.allocate(TmemAllocator::Sm100TmemCapacityColumns, $); ", tmem_base_ptr_name);
+  code.e("}");
+  code.e("");
+  code.e("__syncthreads();");
+
+  code.e("// MMA mbarrier Initialization");
+  code.e("if (elect_one_warp && cute::elect_one_sync()) {");
+  code.e("cute::initialize_barrier(*$, $);", 
+      mbarrier_ptr_name,
+      mma_iter_count);
+  code.e("}");
+  code.e("uint16_t pair_mask = (1 << blockIdx.y * gridDim.x + (blockIdx.x / 2) * 2) | (1 << blockIdx.y * gridDim.x + (blockIdx.x / 2) * 2 + 1);");
+  
+}
+
+
+
 // Transpile a custom KN operator (i.e. a custom block graph) into CUDA code
 // Will return a CustomOPTranspileResult object. See comments in transpiler.h
 // for more details
@@ -357,11 +366,10 @@ CustomOPTranspileResult
   // Get the schedule
   TBSched sched = get_threadblock_schedule(g);
 
-  // 修改为 blackwell 的 swizzle plan 函数
   get_threadblock_swizzle_plan_blackwell(g, sched);
 
   // Get the memory allocation plan
-  TBMemoryPlan mem_plan = get_threadblock_memory_plan(g, sched, true);
+  TBMemoryPlan mem_plan = get_threadblock_memory_plan(g, sched, true, true);
 
   std::vector<TMAParams> tmaParamsList;
 
@@ -383,7 +391,7 @@ CustomOPTranspileResult
 
   // Define elect_one_thr and elect_one_warp
   code.e("auto cluster_shape = make_shape(Int<4>{}, Int<4>{}, Int<1>{});");
-  code.e("auto tiled_mma = cutlass::gemm::collective::detail::sm100_make_2sm_trivial_tiled_mma<half_t, half_t, half_t, Shape<Int<256>, Int<256>>, decltype(cluster_shape), UMMA::Major::K, UMMA::Major::K>();");
+  code.e("auto tiled_mma = cutlass::gemm::collective::detail::sm100_make_2sm_trivial_tiled_mma<half_t, half_t, half_t, Shape<Int<256>, Int<256>>, decltype(cluster_shape), UMMA::Major::K, UMMA::Major::MN>();");
   code.e("auto mma_tiler = make_shape(tile_size<0>(tiled_mma), tile_size<1>(tiled_mma), tile_size<2>(tiled_mma)*_4{});");
   code.e("uint32_t elect_one_warp = (threadIdx.x / 32 == 0); ");
   code.e("using AtomThrShapeMNK = Shape<decltype(shape<0>(typename decltype(tiled_mma)::ThrLayoutVMNK{})), _1, _1>;");
@@ -402,32 +410,42 @@ CustomOPTranspileResult
   // code.e("uint32_t *tmem_base_ptr = (uint32_t*)(buf + $);", mem_plan.tmem_base_ptr_offset);
   code.e("");
   // Only one thread initialize Tmem
-  code.e("constexpr size_t TMEM_BASE_PTR_SIZE = sizeof(uint32_t);");
-  code.e("constexpr size_t TMEM_BASE_PTR_ALIGNMENT = 16;");
-  code.e("constexpr size_t CURRENT_SMEM_USAGE = $;", mem_plan.smem_size+256);
-  code.e("constexpr size_t ALIGNED_TMEM_OFFSET = ((CURRENT_SMEM_USAGE + TMEM_BASE_PTR_ALIGNMENT - 1) / TMEM_BASE_PTR_ALIGNMENT) * TMEM_BASE_PTR_ALIGNMENT;");
-  code.e("uint32_t* tmem_base_ptr = (uint32_t*)(buf + ALIGNED_TMEM_OFFSET);");
-  code.e("using TmemAllocator = cute::TMEM::Allocator2Sm;");
-  code.e("TmemAllocator tmem_allocator{};");
-  code.e("if (elect_one_warp) { ");
-  code.e("tmem_allocator.allocate(TmemAllocator::Sm100TmemCapacityColumns, tmem_base_ptr); ");
-  code.e("}");
-  code.e("");
-  code.e("__syncthreads();");
 
-  code.e("constexpr size_t MMA_BARRIER_ALIGNMENT = 16;");
-  code.e("constexpr size_t CURRENT_SMEM_USAGE_WITH_BARRIER = ALIGNED_TMEM_OFFSET + 4;");
-  code.e("constexpr size_t ALIGNED_TMEM_OFFSET_WITH_BARRIER = ((CURRENT_SMEM_USAGE_WITH_BARRIER + MMA_BARRIER_ALIGNMENT - 1) / MMA_BARRIER_ALIGNMENT) * MMA_BARRIER_ALIGNMENT;");
-  code.e("uint64_t *mma_barrier = (uint64_t*)(buf + ALIGNED_TMEM_OFFSET_WITH_BARRIER);");
-  code.e("");
+
+  bool need_mbarrier = false;
+  string tmem_base_ptr_name = "tmem_base_ptr";
+  string mbarrier_ptr_name = "mma_barrier_ptr";
+
   size_t barrier_addr = mem_plan.smem_size;
   for (auto [guid, addr] : mem_plan.addrs) {
-    code.e("$ *stensor$_ptr = ($*)(buf + $);",
-           get_datatype_str(op->input_tensors[0].data_type),
-           guid,
-           get_datatype_str(op->input_tensors[0].data_type),
-           addr);
+    if (guid == mem_plan.tmem_base_ptr_guid) {
+      code.e("uint32_t *$ = (uint32_t*)(buf + $);",
+            tmem_base_ptr_name,
+            addr);
+    }
+    else if (guid >= mem_plan.mbarrier_buf_guid_offset) {
+      code.e("uint64_t *$ = (uint64_t*)(buf + $);",
+            mbarrier_ptr_name,
+            addr);
+      need_mbarrier = true;
+    }
+    else {
+      code.e("$ *stensor$_ptr = ($*)(buf + $);",
+            get_datatype_str(op->input_tensors[0].data_type),
+            guid,
+            get_datatype_str(op->input_tensors[0].data_type),
+            addr);
+    }
   }
+
+  if (need_mbarrier) {
+    CodeKeeper res;
+    generate_Tmem_mbarrier_init_code(res, g.forloop_range, tmem_base_ptr_name, mbarrier_ptr_name);
+    code << res;
+
+  }
+
+
 
   // Define G2SCopy for all input STensors
   code.e("// G->S copy atoms");
@@ -539,7 +557,7 @@ CustomOPTranspileResult
           string smem_layout = mov_last_get_stensor_layout(
               stensor, stensor_meta, real_innermost_dim, !m_input);
 
-          auto [dims, strides] = get_layout_detail::get_cute_layout_array_k_major(
+          auto [dims, strides] = get_layout_detail::get_cute_layout_array(
               vector<int>(dtensor.dim, dtensor.dim + dtensor.num_dims),
               vector<size_t>(dtensor_meta.strides,
                              dtensor_meta.strides + dtensor.num_dims),
@@ -549,7 +567,7 @@ CustomOPTranspileResult
               imap.x >= 0 ? (dtensor.num_dims - 1 - imap.x) : -1,
               imap.y >= 0 ? (dtensor.num_dims - 1 - imap.y) : -1,
               imap.z >= 0 ? (dtensor.num_dims - 1 - imap.z) : -1};
-          // std::cout << "partition_logic: " << partition_logic[0] << ", " << partition_logic[1] << ", " << partition_logic[2] << std::endl;
+          
           // string SrcMNKLayout = generate_partitioned_and_expanded_layout(
           //     dim3(g.grid_dim.x, g.grid_dim.y, g.grid_dim.z),
           //     dims,
@@ -557,9 +575,12 @@ CustomOPTranspileResult
           //     partition_logic,
           //     g.forloop_range,
           //     m_input ? forloop_dim : (dtensor.num_dims - 1 - forloop_dim));
+          
           string SrcMNKLayout = fmt("Layout<Shape<$>, Stride<$>>",
              map_to_cute_int(dims),
              map_to_cute_int(strides));
+
+          
 
           code.e(
               "tb::BlackwellAsyncPipeline<$, decltype(cluster_shape)> "
@@ -944,17 +965,6 @@ CustomOPTranspileResult
              config.num_consumer_wgs + config.num_producer_wgs);
     }
 
-    code.e("if (elect_one_warp && cute::elect_one_sync()) {");
-    code.e("int mma_iter_count = $;", g.forloop_range);
-    code.e("cute::initialize_barrier(*mma_barrier, mma_iter_count);");
-    code.e("}");
-    // code.e("cluster_sync();");
-    code.e("");
-    // define the consumer 2SM sync barrier
-    code.e("int id0 = blockIdx.y * gridDim.x + (blockIdx.x / 2) * 2;");
-    code.e("int id1 = blockIdx.y * gridDim.x + (blockIdx.x / 2) * 2 + 1;");
-    code.e("uint16_t pair_mask = (1 << id0) | (1 << id1);");
-    code.e("");
     // run producers
     code.e("if (warpgroup_id == $) {", config.num_consumer_wgs);
     // allocate tma register files
@@ -1104,7 +1114,8 @@ CustomOPTranspileResult
                      input0.guid,
                      input1.guid);
               code.e("if (elect_one_warp) {");
-              code.e("cutlass::arch::umma_arrive_multicast(mma_barrier, pair_mask);");
+              code.e("cutlass::arch::umma_arrive_multicast($, pair_mask);",
+                     mbarrier_ptr_name);
               code.e("}"); // end of consumer sync
               code.e("}");
 
@@ -1434,7 +1445,7 @@ CustomOPTranspileResult
   if (num_in_reg_accums > 0) {
     code.e("// Write back in-register accumulators");
     // sync all consumer threads across peer CTA to ensure 2sm mma is done
-    code.e("cute::wait_barrier(*mma_barrier, 0);");
+    code.e("cute::wait_barrier(*$, 0);", mbarrier_ptr_name);
     code << in_reg_writeback;
   }
 

@@ -549,15 +549,16 @@ TranspileResult Transpiler::transpile_ugraph() {
           if (config.target_cc == GPU_CC::B200){
             // declare tiled_mma on host, as tma requires it
 
-            // exec.e("auto cluster_shape = make_shape(Int<$>{}, Int<$>{}, Int<$>{});",
-            //   bgraph.cluster_dim.x,
-            //   bgraph.cluster_dim.y,
-            //   bgraph.cluster_dim.z);
+            exec.e("dim3 cluster_dim($, $, $);",
+               bgraph.cluster_dim.x,
+               bgraph.cluster_dim.y,
+               bgraph.cluster_dim.z);
 
             exec.e("auto cluster_shape = make_shape(Int<$>{}, Int<$>{}, Int<$>{});",
-              4,
-              4,
-              1);
+              bgraph.cluster_dim.x,
+              bgraph.cluster_dim.y,
+              bgraph.cluster_dim.z);
+
             exec.e("TiledMMA tiled_mma = "
               "cutlass::gemm::collective::detail::sm100_make_2sm_trivial_tiled_mma<"
               "$, "
@@ -566,7 +567,7 @@ TranspileResult Transpiler::transpile_ugraph() {
               "Shape<Int<256>, Int<256>>, "
               "decltype(cluster_shape), "
               "UMMA::Major::K, "
-              "UMMA::Major::K>();",
+              "UMMA::Major::MN>();",
               get_datatype_str(cur_op->input_tensors[0].data_type),
               get_datatype_str(cur_op->input_tensors[1].data_type),
               get_datatype_str(cur_op->output_tensors[0].data_type));
@@ -598,7 +599,7 @@ TranspileResult Transpiler::transpile_ugraph() {
                            tmaParams.guid));
               } else if (config.target_cc == GPU_CC::B200) {
                 exec.e(fmt("static constexpr cute::UMMA::Major UMMAMajor_$ = "
-                           "UMMA::Major::K;",
+                           "UMMA::Major::MN;",
                            tmaParams.guid));
               } else {
                 assert(false && "Unsupported GPU architecture");
@@ -755,8 +756,6 @@ TranspileResult Transpiler::transpile_ugraph() {
                   tmas,
                   ptr_names);
           } else if (config.target_cc == GPU_CC::B200){
-            // use cluster launch
-            exec.e("dim3 cluster_dim(size<0>(cluster_shape), size<1>(cluster_shape), size<2>(cluster_shape));");
             exec.e("cutlass::ClusterLaunchParams params = {grid_dim, block_dim, cluster_dim, $};",
                   result.smem_size+256);
             exec.e("cutlass::launch_kernel_on_cluster(params, (void const*) kernel_ptr, $ $);",

@@ -213,6 +213,12 @@ struct TBMemoryPlan {
   // $x$, then the guid of the async input buffer is $x +
   // pipelined_input_buf_guid_offset$)
   sguid_t pipelined_input_buf_guid_offset;
+  
+  // The guid offset for tmem base ptr used in blackwell
+  sguid_t tmem_base_ptr_guid;
+
+  // The guid offset for mbarrier ptr used in blackwell
+  sguid_t mbarrier_buf_guid_offset;
 };
 
 } // namespace transpiler

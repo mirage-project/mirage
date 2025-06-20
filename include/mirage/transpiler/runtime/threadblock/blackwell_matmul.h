@@ -49,7 +49,7 @@ public:
   using MmaTiler_MNK = MmaTiler_MNK_;
 
   static constexpr UMMA::Major UmmaMajorA = UMMA::Major::K;
-  static constexpr UMMA::Major UmmaMajorB = UMMA::Major::K;
+  static constexpr UMMA::Major UmmaMajorB = UMMA::Major::MN;
 
   static constexpr int PIPELINE_STAGE_A = IS_PIPELINE_A ? PIPELINE_STAGES : 1;
   static constexpr int PIPELINE_STAGE_B = IS_PIPELINE_B ? PIPELINE_STAGES : 1;
@@ -85,15 +85,11 @@ public:
           SmemLayoutAtom_B{},
           append(DstMNKLayout_B{},
                  Int<PIPELINE_STAGE_B>{}),
-          Step<_1,_2,_3>{}));
+          Step<_2,_1,_3>{}));
 
   using SmemLayoutA = typename Dim01Swapper<SmemLayoutA_>::Result; // [M, K]
   using SmemLayoutB = SmemLayoutB_;                                // [N, K]
-  using SmemLayoutC = typename Dim01Swapper<SmemLayoutC_>::Result;
-  // using SmemLayoutC = SmemLayoutC_;
-
-  // using GmemLayoutC = decltype(make_layout(make_shape(shape<0>(SmemLayoutC{}), shape<1>(SmemLayoutC{})*_2{}), make_stride(_1024{}, _1{})));
-  using GmemLayoutC = decltype(make_layout(make_shape(_256{}, _256{}), make_stride(_1024{}, _1{})));
+  using SmemLayoutC = typename Dim01Swapper<SmemLayoutC_>::Result; // [M, N]
 
 
   using M = decltype(get<0>(shape(SmemLayoutA{})));
@@ -113,7 +109,7 @@ public:
           GmemStrideTypeC,
           T, 
           T, 
-          Shape<Int<32>, Int<32>>,
+          Shape<Int<32>, Int<128>>,
           FusionOp>()
       );
 
@@ -139,10 +135,10 @@ public:
   {
     auto cta_mma = get_cta_mma<TiledMMA, ClusterShape_MNK>(blockIdx.x, blockIdx.y);
 
-    Tensor dummy_gC = make_tensor(make_gmem_ptr((T*)nullptr), GmemLayoutC{});
-    auto tCgC = cta_mma.partition_C(dummy_gC);
+    Tensor dummy_sC = make_tensor(make_smem_ptr((T*)nullptr), SmemLayoutC{});
+    auto tCsC = cta_mma.partition_C(dummy_sC);
 
-    Tensor tCtAcc = cta_mma.make_fragment_C(tCgC);
+    Tensor tCtAcc = cta_mma.make_fragment_C(tCsC);
     tCtAcc.data() = tmem_base_ptr;
 
     return tCtAcc;
@@ -164,40 +160,6 @@ public:
     return tCsC;
   }
 
-  // directly write from tensor memory to global memory
-  template<class TmemAccTensor>
-  static __device__ __forceinline__
-  void write_tC_to_gC(T *__restrict__ c_ptr,
-                      TmemAccTensor const& tCtAcc,
-                         int thread_idx)
-  {
-    // only one warp group is used for Tmem load
-    if (thread_idx >= mirage::config::NUM_THREADS_PER_GROUP) {
-      return;
-    }
-    TiledCopy tiled_t2r_copy = make_tmem_copy(TMemLoadOp{}, tCtAcc);
-    ThrCopy   thr_t2r_copy   = tiled_t2r_copy.get_slice(threadIdx.x);
-
-    auto mma_coord_vmnk = get_mma_coord_vmnk<TiledMMA, ClusterShape_MNK>(blockIdx.x, blockIdx.y);  
-    auto mma_v = get<0>(mma_coord_vmnk);
-
-    TiledMMA tiled_mma;
-    MmaTiler_MNK mma_tiler;
-    auto cta_mma = tiled_mma.get_slice(mma_v);
-    auto gC = make_tensor(make_gmem_ptr(c_ptr), GmemLayoutC{});
-
-    auto tCgC = cta_mma.partition_C(gC);         // (MmaC, NumMma_M, NumMma_N)
-    auto tDgC = thr_t2r_copy.partition_D(tCgC);                   // (CpyD, NumCpy_M, NumCpy_N)
-
-    auto tDtAcc = thr_t2r_copy.partition_S(tCtAcc);               // (CpyS, NumCpy_M, NumCpy_N)
-    auto tDgD   = thr_t2r_copy.partition_D(tCgC);                 // (CpyD, NumCpy_M, NumCpy_N)
-    auto tDrAcc = make_tensor<T>(shape(tDgD));              // (CpyD, NumCpy_M, NumCpy_N)
-    // Load TMEM -> RMEM
-    copy(tiled_t2r_copy, tDtAcc, tDrAcc);
-    // Store RMEM -> GMEM
-    copy(tDrAcc, tDgC);
-  }
-
   // write from tensor memory to smem
   template<class TmemAccTensor>
   static __device__ __forceinline__
@@ -213,9 +175,7 @@ public:
     TiledCopy tiled_t2r_copy = make_tmem_copy(TMemLoadOp{}, tCtAcc);
     ThrCopy   thr_t2r_copy   = tiled_t2r_copy.get_slice(threadIdx.x);
 
-    auto mma_coord_vmnk = get_mma_coord_vmnk<TiledMMA, ClusterShape_MNK>(blockIdx.x, blockIdx.y);  
-    // auto mma_v = get<0>(mma_coord_vmnk); // if write to smem, no need to use peer id
-    auto mma_v = _0{};
+    auto mma_v = _0{}; // if write to smem, no need to use peer id
 
     TiledMMA tiled_mma;
     auto cta_mma = tiled_mma.get_slice(mma_v);
@@ -229,12 +189,14 @@ public:
     // Load TMEM -> RMEM
     copy(tiled_t2r_copy, tDtAcc, tDrAcc);
 
-    // wg_sync<128>(8);
+    // wg_sync<128>(9);
     // if (select_thread()) {
     //   printf("\n tDrAcc:\n");
     //   print_tensor(tDrAcc);
+    //   printf("\n smemlayoutC:\n");
+    //   print(SmemLayoutC{});
     //   // printf("\n tDtAcc:\n");
-    //   // print(tDtAcc);
+    //   // print_tensor(tDtAcc);
     //   // printf("\n tCsC:\n");
     // }
 
@@ -327,7 +289,7 @@ public:
     if (warp_id() == 0) {
       // Execute a MmaTile_M x MmaTile_N x MmaTile_K GEMM
       for (int k_block = 0; k_block < size<2>(tCrA); ++k_block) {
-          gemm(tiled_mma, tCrA(_,_,k_block,read_stage), tCrB(_,_,k_block,read_stage), mma_tC);
+          gemm(tiled_mma, tCrA(_,_,k_block,read_stage), tCrB(_ ,_,k_block,read_stage), mma_tC);
           tiled_mma.accumulate_ = UMMA::ScaleOut::One;
       }
     }

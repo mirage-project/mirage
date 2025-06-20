@@ -264,63 +264,41 @@ public:
           class     Mma_Tiler_,
           class     ClusterShape_MNK_>
 class InputTMAAsyncCopy_Blackwell {
-  static constexpr cute::UMMA::Major UMajor = UMMA::Major::K;
-
-  // using DstMNKLayout = DstLayout;
+  
   using TiledMMA = TiledMMA_;
   using Mma_Tiler = Mma_Tiler_;
   using ClusterShape = ClusterShape_MNK_;
 
+  static constexpr UMMA::Major UMMAMajor = MInput ? UMMA::Major::K : UMMA::Major::MN;
+  
   using SmemLayoutAtom =
       decltype(cutlass::gemm::collective::detail::sm100_smem_selector<
-               UMajor,
+               UMMAMajor,
                T,                                                   
                std::conditional_t<MInput, decltype(get<0>(Mma_Tiler{})), 
                                   decltype(get<1>(Mma_Tiler{}))>,
                decltype(get<2>(Mma_Tiler{}))>());
 
   using DstMNKLayout = 
+      std::conditional_t<MInput, 
       decltype(
               partition_shape_A(TiledMMA{},
-              make_shape(std::conditional_t<MInput, decltype(shape<0>(Mma_Tiler{})), 
-                                                decltype(shape<1>(Mma_Tiler{}))>(),
-              shape<2>(Mma_Tiler{}))));
+              make_shape(shape<0>(Mma_Tiler{}),shape<2>(Mma_Tiler{})))),
+      decltype(
+              partition_shape_B(TiledMMA{},
+              make_shape(shape<1>(Mma_Tiler{}),shape<2>(Mma_Tiler{}))))>;
 
   using DstPipeLayout =
       decltype(UMMA::tile_to_mma_shape(
           SmemLayoutAtom{},
           append(DstMNKLayout{},
                  Int<BlackwellAsyncPipeline::Stage>{}),
-          Step<_1,_2,_3>{}));
-
-
+          std::conditional_t<MInput, Step<_1,_2,_3>, Step<_2,_1,_3>>{}));
 
 public:
   static __device__ __forceinline__
   void prefetch(TMA const &tma) {
     cute::prefetch_tma_descriptor(tma.get_tma_descriptor());
-  }
-
-  template <int Rank>
-  static __device__ auto make_coord_runtime(int imapx, int imapy, int imapz) {
-    if constexpr (Rank == 6) {
-      return make_coord(_,
-                        _,
-                        imapx >= 0 ? blockIdx.x : 0,
-                        imapy >= 0 ? blockIdx.y : 0,
-                        imapz >= 0 ? blockIdx.z : 0,
-                        _);
-    } else if constexpr (Rank == 7) {
-      return make_coord(_,
-                        _,
-                        _,
-                        imapx >= 0 ? blockIdx.x : 0,
-                        imapy >= 0 ? blockIdx.y : 0,
-                        imapz >= 0 ? blockIdx.z : 0,
-                        _);
-    } else {
-      static_assert(Rank == 6 || Rank == 7, "Unsupported SrcLayout rank");
-    }
   }
 
   static __device__ __forceinline__
@@ -341,14 +319,13 @@ public:
       auto cta_in_cluster_coord_vmnk = cluster_layout_vmnk.get_flat_coord(int(cute::block_rank_in_cluster()));
       auto elect_one_cta  = get<0>(cta_in_cluster_coord_vmnk) == Int<0>{};
 
-
       auto mma_coord_vmnk = get_mma_coord_vmnk<TiledMMA, ClusterShape>(blockIdx.x, blockIdx.y);
       auto mma_coord = select<1,2,3>(mma_coord_vmnk);
       decltype(auto) gA = [&]() {
         if constexpr (MInput) {
-          return local_tile(mA, mma_tiler, mma_coord, Step<_1, X,_1>{});  // (MmaTile_M, MmaTile_K, Tiles_K)
+          return local_tile(mA, mma_tiler, mma_coord, Step<_1, X, _1>{});  // (MmaTile_M, MmaTile_K, Tiles_K)
         } else {
-          return local_tile(mA, mma_tiler, mma_coord, Step< X, _1,_1>{});  // (MmaTile_M, MmaTile_K, Tiles_K)
+          return local_tile(mA, mma_tiler, mma_coord, Step< X, _1, _1>{});  // (MmaTile_M, MmaTile_K, Tiles_K)
         }
       }();
 
@@ -364,18 +341,17 @@ public:
         tma_mcast_mask = create_tma_multicast_mask<1>(cluster_layout_vmnk, cta_in_cluster_coord_vmnk);
       }
 
-
       auto [tAgAX, tAsAX] = [&]() {
         if constexpr (MInput) {
           return tma_partition(tma_a,
                               get<2>(cta_in_cluster_coord_vmnk),          // The CTA coordinate along N mode of the cluster
                               make_layout(size<2>(cluster_layout_vmnk)),  // The CTA layout along N mode of the cluster
-                              group_modes<0,3>(tCsA), group_modes<0,3>(tCgA));
+                              group_modes<0,rank(tCsA)-1>(tCsA), group_modes<0,rank(tCgA)-1>(tCgA));
         } else {
           return tma_partition(tma_a,
                               get<1>(cta_in_cluster_coord_vmnk),          // The CTA coordinate along N mode of the cluster
                               make_layout(size<1>(cluster_layout_vmnk)),  // The CTA layout along N mode of the cluster
-                              group_modes<0,3>(tCsA), group_modes<0,3>(tCgA));
+                              group_modes<0,rank(tCsA)-1>(tCsA), group_modes<0,rank(tCgA)-1>(tCgA));
         }
       }();
 
