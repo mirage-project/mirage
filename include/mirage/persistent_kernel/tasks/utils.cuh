@@ -14,6 +14,11 @@
  */
 #pragma once
 #include "common.h"
+
+#define CLEAR_8_FLOATS(v) \
+  *((__uint128_t *)(v)) = 0ul; \
+  *((__uint128_t *)(v + 4)) = 0ul;
+
 namespace kernel {
 using bfloat16 = type::bfloat16_t;
 

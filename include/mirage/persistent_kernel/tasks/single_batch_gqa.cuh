@@ -146,8 +146,7 @@ __device__ __forceinline__ void
   float o[8][8];
 #pragma unroll
   for (int n = 0; n < 8; n++) {
-    *((__uint128_t *)o[n]) = 0ul;
-    *((__uint128_t *)(o[n] + 4)) = 0ul;
+    CLEAR_8_FLOATS(o[n]);
   }
 
   // 16 * 128

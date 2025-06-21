@@ -215,8 +215,7 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
     for (uint32_t m = 0; m < NUM_ITERS_M; m++) {
 #pragma unroll
       for (uint32_t n = 0; n < NUM_ITERS_N; n++) {
-        *((__uint128_t *)s_frag[m][n]) = 0ul;
-        *((__uint128_t *)(s_frag[m][n] + 4)) = 0ul;
+        CLEAR_8_FLOATS(s_frag[m][n]);
       }
     }
 
