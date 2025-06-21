@@ -4,6 +4,7 @@
 #include "silu_mul_linear.cuh"
 #include "single_batch_decoding.cuh"
 #include "single_batch_gqa.cuh"
+#include "bfloat16.h"
 #include <cuda_runtime.h>
 #include <torch/extension.h>
 
@@ -14,6 +15,43 @@ using kernel::silu_mul_linear_task_impl;
 using kernel::single_batch_decoding_kernel;
 using kernel::single_batch_gqa_kernel;
 using bfloat16 = type::bfloat16_t;
+
+#define DISPATCH_OUTPUT_SIZE(OUTPUT_SIZE, FUNC, T, ...)                        \
+  if ((OUTPUT_SIZE) == 16) {                                                   \
+    FUNC<T, 1, 16, 4096>(__VA_ARGS__);                                         \
+  } else if ((OUTPUT_SIZE) == 32) {                                            \
+    FUNC<T, 1, 32, 4096>(__VA_ARGS__);                                         \
+  } else if ((OUTPUT_SIZE) == 64) {                                            \
+    FUNC<T, 1, 64, 4096>(__VA_ARGS__);                                         \
+  } else {                                                                     \
+    printf("Unsupported output size: %d\n", OUTPUT_SIZE);                      \
+  }
+
+#define DISPATCH_OUTPUT_SIZE_FOR_RED_SIZE_4K(OUTPUT_SIZE, FUNC, T, ...)        \
+  if ((OUTPUT_SIZE) == 16) {                                                   \
+    FUNC<T, 1, 16, 4096>(__VA_ARGS__);                                         \
+  } else if ((OUTPUT_SIZE) == 32) {                                            \
+    FUNC<T, 1, 32, 4096>(__VA_ARGS__);                                         \
+  } else if ((OUTPUT_SIZE) == 64) {                                            \
+    FUNC<T, 1, 64, 4096>(__VA_ARGS__);                                         \
+  } else if ((OUTPUT_SIZE) == 256) {                                           \
+    FUNC<T, 1, 256, 4096>(__VA_ARGS__);                                        \
+  } else if ((OUTPUT_SIZE) == 1600) {                                          \
+    FUNC<T, 1, 1600, 4096>(__VA_ARGS__);                                       \
+  } else {                                                                     \
+    printf("Unsupported output size: %d\n", OUTPUT_SIZE);                      \
+  }
+
+#define DISPATCH_OUTPUT_SIZE_FOR_RED_SIZE_12K(OUTPUT_SIZE, FUNC, T, ...)       \
+  if ((OUTPUT_SIZE) == 16) {                                                   \
+    FUNC<T, 1, 16, 12288>(__VA_ARGS__);                                        \
+  } else if ((OUTPUT_SIZE) == 32) {                                            \
+    FUNC<T, 1, 32, 12288>(__VA_ARGS__);                                        \
+  } else if ((OUTPUT_SIZE) == 64) {                                            \
+    FUNC<T, 1, 64, 12288>(__VA_ARGS__);                                        \
+  } else {                                                                     \
+    printf("Unsupported output size: %d\n", OUTPUT_SIZE);                      \
+  }
 
 #define DISPATCH_SEQ_LEN(SEQ_LEN, FUNC, T, ...)                                \
   if ((SEQ_LEN) <= 8) {                                                        \
