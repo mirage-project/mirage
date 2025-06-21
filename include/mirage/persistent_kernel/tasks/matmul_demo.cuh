@@ -109,6 +109,7 @@ __device__ __forceinline__ void norm_linear_kernel(void const *input_ptr,
   //  accumulator
   float s_frag[num_m][num_n][8];
   *((__uint128_t *)s_frag[0][0]) = 0ul;
+  *((__uint128_t *)(s_frag[0][0] + 4)) = 0ul;
 
   for (int for_idx = 0; for_idx < 64; for_idx++) {
     // copy

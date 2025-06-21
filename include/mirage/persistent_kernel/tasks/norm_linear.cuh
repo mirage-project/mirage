@@ -239,6 +239,7 @@ __device__ __forceinline__ void
 #pragma unroll
       for (uint32_t n = 0; n < NUM_ITERS_N; n++) {
         *((__uint128_t *)s_frag[m][n]) = 0ul;
+        *((__uint128_t *)(s_frag[m][n] + 4)) = 0ul;
       }
     }
 

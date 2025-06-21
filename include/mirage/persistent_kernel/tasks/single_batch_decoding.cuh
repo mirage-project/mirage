@@ -147,6 +147,7 @@ __device__ __forceinline__ void
 #pragma unroll
   for (int n = 0; n < 8; n++) {
     *((__uint128_t *)o[n]) = 0ul;
+    *((__uint128_t *)(o[n] + 4)) = 0ul;
   }
   float d_sum = 1.f;
   float m = -inf;
@@ -264,6 +265,7 @@ __device__ __forceinline__ void
 
     float s_frag[8];
     *((__uint128_t *)s_frag) = 0ul;
+    *((__uint128_t *)(s_frag + 4)) = 0ul;
 
     uint32_t a_frag[4], b_frag[4], v_frag[4];
 

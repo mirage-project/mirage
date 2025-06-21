@@ -147,6 +147,7 @@ __device__ __forceinline__ void
 #pragma unroll
   for (int n = 0; n < 8; n++) {
     *((__uint128_t *)o[n]) = 0ul;
+    *((__uint128_t *)(o[n] + 4)) = 0ul;
   }
 
   // 16 * 128
