@@ -14,11 +14,6 @@
  */
 #pragma once
 #include "common.h"
-
-#define CLEAR_8_FLOATS(v) \
-  *((__uint128_t *)(v)) = 0ul; \
-  *((__uint128_t *)(v + 4)) = 0ul;
-
 namespace kernel {
 using bfloat16 = type::bfloat16_t;
 
@@ -81,6 +76,11 @@ __device__ __forceinline__ void clear_smem_buffer(T *buffer) {
       buffer[i] = T(0.0f);
     }
   }
+}
+
+static __device__ __forceinline__ void clear_8_floats(float *buffer) {
+  *((__uint128_t *)(buffer)) = 0ul;
+  *((__uint128_t *)(buffer + 4)) = 0ul;
 }
 
 } // namespace kernel

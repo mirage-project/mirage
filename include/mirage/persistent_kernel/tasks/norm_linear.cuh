@@ -238,7 +238,7 @@ __device__ __forceinline__ void
     for (uint32_t m = 0; m < NUM_ITERS_M; m++) {
 #pragma unroll
       for (uint32_t n = 0; n < NUM_ITERS_N; n++) {
-        CLEAR_8_FLOATS(s_frag[m][n]);
+        clear_8_floats(s_frag[m][n]);
       }
     }
 
