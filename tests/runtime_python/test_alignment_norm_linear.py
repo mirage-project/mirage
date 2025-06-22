@@ -2,7 +2,6 @@ import torch
 from runtime_kernel import norm_linear
 
 torch.set_printoptions(sci_mode=False)
-reduction_size = 4096
 
 def torch_rms_norm(X, G, W, eps):
     variance = X.pow(2).mean(-1, keepdim=True)
@@ -96,5 +95,4 @@ print(expected_output)
 print("Shape of expected output tensor:", expected_output.shape)
 
 print("Ratio (kernel / torch):")
-# Add a small epsilon to avoid division by zero
 print(attn_in / (expected_output))
