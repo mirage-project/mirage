@@ -202,11 +202,12 @@ class Qwen3Attention(nn.Module):
         self.layer_idx = layer_idx
         assert self.layer_idx is not None
         self.hidden_size = config.hidden_size
+        self.qkv_size = config.head_dim * config.num_attention_heads
         self.local_hidden_size = self.hidden_size // self.world_size
+        self.local_qkv_size = self.qkv_size // self.world_size
         self.num_heads = config.num_attention_heads
         self.num_local_heads = self.num_heads
-        self.head_dim = self.hidden_size // self.num_heads
-        assert self.head_dim * self.num_heads == self.hidden_size
+        self.head_dim = config.head_dim
         self.num_key_value_heads = config.num_key_value_heads
         self.num_key_value_groups = self.num_heads // self.num_key_value_heads
         self.key_cache, self.value_cache = kv_cache
@@ -325,7 +326,7 @@ class Qwen3Attention(nn.Module):
                 True
             )
 
-        attn_output = attn_output.reshape(bsz, q_len, self.local_hidden_size)
+        attn_output = attn_output.reshape(bsz, q_len, self.local_qkv_size)
 
         attn_output = self.o_proj(attn_output)
         if self.world_size > 1:
@@ -425,7 +426,7 @@ class Qwen3Model(Qwen3PreTrainedModel):
                 1,
                 4096,
                 config.num_key_value_heads // world_size,
-                config.hidden_size // config.num_attention_heads,
+                config.head_dim,
             ),
             dtype=torch.bfloat16,
             device="cuda",
@@ -436,7 +437,7 @@ class Qwen3Model(Qwen3PreTrainedModel):
                 1,
                 4096,
                 config.num_key_value_heads // world_size,
-                config.hidden_size // config.num_attention_heads,
+                config.head_dim,
             ),
             dtype=torch.bfloat16,
             device="cuda",
