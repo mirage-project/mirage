@@ -16,7 +16,8 @@
 #include "common.h"
 namespace kernel {
 
-template <typename T>
+template <typename T,
+          int OUT_DIM>
 __device__ __forceinline__ void
     embedding_kernel(void const *__restrict__ input_ptr,
                      void const *__restrict__ embedding_ptr,
@@ -28,7 +29,6 @@ __device__ __forceinline__ void
   T const *__restrict__ embedding = static_cast<T const *>(embedding_ptr);
   T *__restrict__ output = static_cast<T *>(output_ptr);
   constexpr int BATCH_SIZE = 1;
-  constexpr int OUT_DIM = 4096;
 
   for (int i = threadIdx.x; i < BATCH_SIZE * OUT_DIM; i += NUM_THREADS) {
     // int idx = i / OUT_DIM;
