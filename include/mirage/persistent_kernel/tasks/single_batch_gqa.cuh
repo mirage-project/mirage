@@ -257,7 +257,7 @@ __device__ __forceinline__ void
     __syncthreads();
 
     float s_frag[8];
-    *((__uint128_t *)s_frag) = 0ul;
+    CLEAR_8_FLOATS(s_frag);
 
     uint32_t a_frag[4], b_frag[4], v_frag[4];
     // MNK = 7, 64, 128, tiledMMA 7, 64, 16, thread layout 1,4,1
