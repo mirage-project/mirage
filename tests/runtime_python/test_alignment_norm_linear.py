@@ -32,13 +32,6 @@ v_tiles = [
     layer_0_v_proj[:, i * 32 : (i + 1) * 32] for i in range(32)
 ]  # [4096, 32] * 32
 
-med = torch.cat(
-            q_tiles[0 * 16 : 1 * 16]
-            + k_tiles[0 * 4 : 1 * 4]
-            + v_tiles[0 * 4 : 1 * 4],
-            dim=1,
-        )
-print("med shape:", med.shape)
 
 layer_0_qkv_proj = torch.cat(
     [
@@ -60,7 +53,6 @@ weights = [
     .to(torch.bfloat16)
     for i in range(192)
 ]
-print("weights shape:", weights[0].shape)
 
 attn_in_tiles = [
     torch.zeros((1, 32), dtype=torch.bfloat16, device="cuda") for _ in range(192)
@@ -95,4 +87,4 @@ print(expected_output)
 print("Shape of expected output tensor:", expected_output.shape)
 
 print("Ratio (kernel / torch):")
-print(attn_in / (expected_output))
+print(attn_in / expected_output)
