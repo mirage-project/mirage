@@ -53,7 +53,7 @@ static __device__ __forceinline__ void wg_increase_regs() {
 // sync inside a warp group
 template <int GROUP_THREADS>
 static __device__ __forceinline__ void wg_sync(uint32_t barrier_id) {
-#ifdef MIRAGE_GRACE_HOPPER
+#if defined(MIRAGE_GRACE_HOPPER) || defined(MIRAGE_BLACKWELL)
   asm volatile("bar.sync %0, %1;\n" ::"r"(barrier_id), "n"(GROUP_THREADS));
 #elif defined(__CUDA_ARCH__)
   asm volatile("brkpt;\n" ::);
@@ -68,6 +68,28 @@ static __device__ __forceinline__ void wg_arrive(uint32_t barrier_id) {
   asm volatile("bar.arrive %0, %1;" : : "r"(barrier_id), "r"(GROUP_THREADS));
 #elif defined(__CUDA_ARCH__)
   asm volatile("brkpt;\n" ::);
+#endif
+}
+
+// Barrier wait
+static __device__ __forceinline__ void
+wait_barrier(uint64_t& smem_barrier,                       // 64 bits user-manged barrier in smem
+             int phase_bit)                                // Current phase bit the barrier waiting to flip
+{
+#if defined(MIRAGE_GRACE_HOPPER) || defined(MIRAGE_BLACKWELL)
+uint32_t smem_int_ptr = cast_smem_ptr_to_uint(&smem_barrier);
+asm volatile(
+  "{\n"
+  ".reg .pred                P1;\n"
+  "LAB_WAIT:\n"
+  "mbarrier.try_wait.parity.shared::cta.b64 P1, [%0], %1;\n"
+  "@P1                       bra DONE;\n"
+  "bra                   LAB_WAIT;\n"
+  "DONE:\n"
+  "}\n"
+  :: "r"(smem_int_ptr),
+      "r"(phase_bit));
+
 #endif
 }
 

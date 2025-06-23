@@ -705,10 +705,6 @@ TranspileResult Transpiler::transpile_ugraph() {
                   // TODO (zy): Support other multicast directions such as not multicast
                   assert(false && "Unsupported multicast direction");
                 }
-
-
-
-
             }
 
             else if (config.target_cc == GPU_CC::H100) {

@@ -272,6 +272,21 @@ static string get_tb_op_str(type::TBOperatorType type) {
   return toString(type);
 }
 
+static void add_cta_warp_selector_if_need(CodeKeeper &code, bool is_in_loop, bool select_one_cta, bool select_one_warp){
+  if (!is_in_loop){
+    return;
+  }
+  if (select_one_cta && select_one_warp){
+    code.e("if (elect_one_cta && elect_one_warp) {");
+  }
+  else if (select_one_cta){
+    code.e("if (elect_one_cta) {");
+  }
+  else if (select_one_warp){
+    code.e("if (elect_one_warp) {");
+  }
+}
+
 static std::pair<bool, std::vector<int64_t>>
     add_loop_node_consumer_wait_if_need(
         tb::TBOperator const *op,
@@ -281,12 +296,11 @@ static std::pair<bool, std::vector<int64_t>>
   if (!is_in_loop) {
     return {false, {}};
   }
-  code.e("if (elect_one_cta && elect_one_warp) {");
   std::vector<int64_t> input_ids_waited;
   for (int i = 0; i < op->input_tensors.size(); i++) {
     int64_t input_id = op->input_tensors.at(i).guid;
     if (pipeline_inputs.find(input_id) != pipeline_inputs.end()) {
-      code.e("int read_idx_$ = blackwell_async_pipeline_$.consumer_wait();", // 修改为 blackwell
+      code.e("int read_idx_$ = blackwell_async_pipeline_$.consumer_wait();",
              input_id,
              input_id);
       // only wait once
@@ -302,7 +316,10 @@ static std::pair<bool, std::vector<int64_t>>
   return {false, {}};
 }
 
-static void generate_Tmem_mbarrier_init_code(CodeKeeper &code, int mma_iter_count, string &tmem_base_ptr_name, string &mbarrier_ptr_name) {
+static void generate_Tmem_mbarrier_init_code(
+  CodeKeeper &code, int arrive_cnt, 
+  string &tmem_base_ptr_name, 
+  string &mbarrier_ptr_name) {
   code.e("// Tensory Memory Allocation");
 
   code.e("using TmemAllocator = cute::TMEM::Allocator2Sm;");
@@ -317,10 +334,11 @@ static void generate_Tmem_mbarrier_init_code(CodeKeeper &code, int mma_iter_coun
   code.e("if (elect_one_warp && cute::elect_one_sync()) {");
   code.e("cute::initialize_barrier(*$, $);", 
       mbarrier_ptr_name,
-      mma_iter_count);
+      arrive_cnt);
   code.e("}");
-  code.e("uint16_t consumer_sync_mask = (1 << blockIdx.y * gridDim.x + (blockIdx.x / 2) * 2) | (1 << blockIdx.y * gridDim.x + (blockIdx.x / 2) * 2 + 1);");
-  
+  // The sync mask for the blocks within the same cluster
+  code.e("uint16_t consumer_sync_mask = static_cast<uint16_t>((1u << size(cluster_shape)) - 1u);");
+  // code.e("uint16_t consumer_sync_mask = (1 << blockIdx.y * gridDim.x + (blockIdx.x / 2) * 2) | (1 << blockIdx.y * gridDim.x + (blockIdx.x / 2) * 2 + 1);");
 }
 
 
@@ -399,12 +417,7 @@ CustomOPTranspileResult
   code.e("// STensors");
   code.e("extern __shared__ char buf[];");
 
-  // Define Tmem using planned memory offset instead of separate __shared__ variable
-  // code.e("__shared__ uint32_t tmem_base;");
-  // code.e("uint32_t *tmem_base_ptr = (uint32_t*)(buf + $);", mem_plan.tmem_base_ptr_offset);
   code.e("");
-  // Only one thread initialize Tmem
-
 
   bool need_mbarrier = false;
   string tmem_base_ptr_name = "tmem_base_ptr";
@@ -434,9 +447,9 @@ CustomOPTranspileResult
 
   if (need_mbarrier) {
     CodeKeeper res;
-    generate_Tmem_mbarrier_init_code(res, g.forloop_range, tmem_base_ptr_name, mbarrier_ptr_name);
+    // In 2sm mma, one one cta in each 2-CTA pair issues arrival
+    generate_Tmem_mbarrier_init_code(res, g.forloop_range * g.cluster_dim.x * g.cluster_dim.y * g.cluster_dim.z / 2, tmem_base_ptr_name, mbarrier_ptr_name);
     code << res;
-
   }
 
   // Pre-define all matmul ops and allocate accumulators (if needed)
@@ -1106,10 +1119,14 @@ CustomOPTranspileResult
       code.e("{");
       code.e("// OP type: $", op_type_str);
 
+      // TODO(zy): support other cases such as 1sm mma 
+      bool use_2sm_mma = true;
+      if (use_2sm_mma && is_in_loop){
+        add_cta_warp_selector_if_need(code, is_in_loop, true, true);
+      }
       auto [need_advance_pipeline, pipe_ids] =
           add_loop_node_consumer_wait_if_need(
               op, code, is_in_loop, pipeline_inputs);
-
       // define
       if (pipe_tma && profiling) {
         // 2000 - 2999
@@ -1159,12 +1176,9 @@ CustomOPTranspileResult
                      pipe_ids.at(0),
                      input0.guid,
                      input1.guid);
-              code.e("if (elect_one_warp) {");
+              // one warp of each block arrive at the barrier
               code.e("cutlass::arch::umma_arrive_multicast_2x1SM($, consumer_sync_mask);",
                      mbarrier_ptr_name);
-              code.e("}"); // end of consumer sync
-              code.e("}");
-
           }
 
           break;
@@ -1409,6 +1423,9 @@ CustomOPTranspileResult
           assert(fmt("Unknown TB op: $", op->op_type).c_str());
         }
       }
+      if (use_2sm_mma && is_in_loop){
+        code.e("}"); // end of cta_warp_selector
+      }
       if (pipe_tma && profiling) {
         code.e("PROFILER_EVENT_END($, $);",
                (op->op_type - type::TB_UNKOWN),
@@ -1491,7 +1508,7 @@ CustomOPTranspileResult
   }
 
   if (num_in_reg_accums > 0) {
-    code.e("// Write back in-register accumulators");
+    code.e("// Write back tensor memory accumulators");
     // sync all consumer threads across peer CTA to ensure 2sm mma is done
     code.e("cute::wait_barrier(*$, 0);", mbarrier_ptr_name);
     code << in_reg_writeback;
