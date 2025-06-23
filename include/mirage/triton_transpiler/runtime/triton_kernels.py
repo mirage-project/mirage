@@ -64,4 +64,3 @@ def reduce_sum_kernel(X_ptr, Out_ptr, M: tl.constexpr, N: tl.constexpr, dim: tl.
         sum_val = tl.sum(tl.load(X_ptr + row_idx * N + col_idx, mask=mask))
         if col_idx[0] == 0:
             tl.store(Out_ptr + row_idx, sum_val)
-

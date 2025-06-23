@@ -6,8 +6,8 @@ sudo apt install -y software-properties-common lsb-release wget python3-pip g++ 
 # Install Z3
 sudo apt-get install -y libz3-4 libz3-dev
 
-# Make sure Z3 lib is found (enforces Z3 version 4.14)
-sudo ln -s /usr/lib/x86_64-linux-gnu/libz3.so /usr/lib/libz3.so.4.14 || true
+# Make sure Z3 lib is found (enforces Z3 version 4.15)
+sudo ln -s /usr/lib/x86_64-linux-gnu/libz3.so /usr/lib/libz3.so.4.15 || true
 sudo ldconfig
 
 # Install CMake
@@ -35,3 +35,10 @@ sudo apt update -y
 rm -f cuda-keyring_1.1-1_all.deb
 sudo apt-get install -y libcudnn9-cuda-12 libcudnn9-dev-cuda-12 libcudnn9-samples
 sudo ldconfig
+
+# Install Rust and Cargo
+sudo rm -rf /var/lib/apt/lists/*
+# Install Rust
+curl https://sh.rustup.rs -sSf | sh -s -- -y
+# shellcheck source=/dev/null
+. "$HOME/.cargo/env"

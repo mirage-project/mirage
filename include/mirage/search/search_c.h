@@ -24,7 +24,8 @@ int cython_search(mirage::kernel::Graph const *input_graph,
                   std::vector<int> frange_to_explore,
                   char const *filename,
                   bool verbose,
-                  char const *default_config);
+                  char const *default_config,
+                  bool is_formal_verified);
 
 void cython_to_json(mirage::kernel::Graph const *input_graph,
                     char const *filename);
