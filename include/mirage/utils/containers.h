@@ -1,9 +1,9 @@
 #pragma once
 
+#include "mirage/vector_types.h"
 #include <algorithm>
 #include <unordered_set>
 #include <vector>
-#include <vector_types.h>
 
 template <typename Container>
 typename Container::const_iterator
@@ -31,8 +31,20 @@ bool contains(std::vector<T> const &v, T const &e) {
   return false;
 }
 
+template <typename Container>
+Container elementwise_add(Container const &c1, Container const &c2) {
+  assert(c1.size() == c2.size());
+  Container result;
+  for (size_t i = 0; i < c1.size(); ++i) {
+    result.push_back(c1[i] + c2[i]);
+  }
+  return result;
+}
+
 bool operator==(dim3 const &lhs, dim3 const &rhs);
 bool operator==(int3 const &lhs, int3 const &rhs);
+std::vector<unsigned int> to_vector(dim3 const &d);
+std::vector<int> to_vector(int3 const &d);
 
 template <typename T>
 std::vector<T> to_vector(int n, T *arr) {
@@ -94,4 +106,14 @@ struct _reversed {
 template <typename T>
 _reversed<T> reversed(T &&iter) {
   return _reversed<T>{iter};
+}
+
+template <typename T>
+std::unordered_set<T> set_union(std::unordered_set<T> const &lhs,
+                                std::unordered_set<T> const &rhs) {
+  std::unordered_set<T> s = lhs;
+  for (auto const &x : rhs) {
+    s.insert(x);
+  }
+  return s;
 }

@@ -32,7 +32,11 @@ std::vector<dim3>
 
   auto generate_1d_grids = [&](std::vector<int> const &dims) {
     std::vector<dim3> cands;
+#ifdef MIRAGE_BACKEND_USE_CUDA
     for (size_t x = 8; x <= 256; x *= 2) {
+#else
+    for (size_t x : {64, 128, 512}) {
+#endif
       for (int dim : dims) {
         if (dim % x == 0) {
           cands.push_back({dim / x, 1, 1});
@@ -44,7 +48,11 @@ std::vector<dim3>
 
   auto generate_2d_grids = [&](int x, std::vector<int> const &dims) {
     std::vector<dim3> cands;
+#ifdef MIRAGE_BACKEND_USE_CUDA
     for (size_t y : {8, 64, 128, 256}) {
+#else
+    for (size_t y : {64, 128, 512}) {
+#endif
       for (int dim : dims) {
         if (dim % y == 0) {
           cands.push_back({x, dim / y, 1});
@@ -95,6 +103,7 @@ std::vector<dim3>
       cands.push_back({batch, 16, 4});
     }
   }
+#ifdef MIRAGE_BACKEND_USE_CUDA
   cands = filter(cands, [](dim3 const &dim) {
     int num_threadblocks = dim.x * dim.y * dim.z;
     return 32 <= num_threadblocks &&
@@ -104,8 +113,15 @@ std::vector<dim3>
   if (batch != -1 && batch <= config::MAX_NUM_THREADBLOCKS_PER_KERNEL) {
     cands.push_back({batch, 1, 1});
   }
+#endif
 
   cands = deduplicate(cands);
+
+  // print cands
+  for (dim3 const &cand : cands) {
+    std::cerr << "Grid dim candidate: " << cand.x << ", " << cand.y << ", "
+              << cand.z << std::endl;
+  }
 
   if (config.randomized_branches) {
     std::random_shuffle(cands.begin(), cands.end());
@@ -330,9 +346,33 @@ std::vector<int> DimStrategy::get_forloop_range_cand(
     return {1};
   }
 
+  std::vector<int> forloop_range_to_explore = config.frange_to_explore;
+#ifdef MIRAGE_BACKEND_USE_NKI
+  forloop_range_to_explore.clear();
+  for (size_t i = 0; i < input_tensors.size(); ++i) {
+    if (forloop_dim[i] == -1) {
+      continue;
+    }
+    int dim = input_tensors[i].dim[forloop_dim[i]];
+    if (input_map[i].x == forloop_dim[i]) {
+      return {};
+    }
+    if (input_map[i].y == forloop_dim[i]) {
+      return {};
+    }
+    if (input_map[i].z == forloop_dim[i]) {
+      return {};
+    }
+    for (int x : {128, 512}) {
+      if (dim % x == 0) {
+        forloop_range_to_explore.push_back(dim / x);
+      }
+    }
+  }
+  forloop_range_to_explore = deduplicate(forloop_range_to_explore);
+#endif
   std::vector<int> results;
-
-  for (int x : config.frange_to_explore) {
+  for (int x : forloop_range_to_explore) {
     if (config._enable_attention_specific_optimization && x > 8) {
       continue;
     }
@@ -430,6 +470,101 @@ std::vector<std::vector<int>> DimStrategy::get_customized_input_cand_idx(
     return {{0, 1, 2, 3}};
   }
   if (all_input.size() == 3) {
+    return {{0, 1, 2}};
+  } else {
+    return {{num_inputs - 2, num_inputs - 1}};
+  }
+}
+
+void generate_input_map_cand(std::vector<SymbolicDTensor> const &tensors,
+                             std::vector<int3> imap_to_explore,
+                             std::vector<int3> cur,
+                             std::vector<std::vector<int3>> &results) {
+  if (cur.size() == tensors.size()) {
+    results.push_back(cur);
+    return;
+  }
+  for (int3 input_map : imap_to_explore) {
+    cur.push_back(input_map);
+    generate_input_map_cand(tensors, imap_to_explore, cur, results);
+    cur.pop_back();
+  }
+}
+
+std::vector<std::vector<int3>> DimStrategy::get_input_map_cand(
+    std::vector<SymbolicDTensor> const &tensors) {
+  std::vector<std::vector<int3>> results;
+  std::vector<int3> imap_to_explore = {
+      {0, -1, 1},
+      {0, 1, -1},
+      {0, 2, -1},
+      {-1, -1, -1},
+      {1, -1, -1},
+      {0, -1, -1},
+  };
+  generate_input_map_cand(tensors, imap_to_explore, {}, results);
+  if (config.randomized_branches) {
+    std::random_shuffle(results.begin(), results.end());
+  }
+  return results;
+}
+
+std::vector<int3>
+    DimStrategy::get_output_map_cand(SymbolicTBGraph const &tb_graph) {
+  std::vector<int3> results;
+  std::vector<int3> omap_to_explore = config.omap_to_explore;
+  omap_to_explore = vector_concat(omap_to_explore,
+                                  {
+                                      {0, 1, -1},
+                                      {0, 2, 1},
+                                      {0, 2, -1},
+                                      {0, -1, -1},
+                                  });
+  if (!config._enable_attention_specific_optimization) {
+    omap_to_explore.push_back({1, -1, -1});
+  }
+  omap_to_explore = deduplicate(omap_to_explore);
+  if (config.randomized_branches) {
+    std::random_shuffle(results.begin(), results.end());
+  }
+  return results;
+}
+
+void generate_forloop_dim(std::vector<SymbolicDTensor> const &input_tensors,
+                          std::vector<int> fmap_to_explore,
+                          std::vector<int> cur,
+                          std::vector<std::vector<int>> &results) {
+  if (cur.size() == input_tensors.size()) {
+    results.push_back(cur);
+    return;
+  }
+
+  for (int dim : fmap_to_explore) {
+    cur.push_back(dim);
+    generate_forloop_dim(input_tensors, fmap_to_explore, cur, results);
+    cur.pop_back();
+  }
+}
+
+std::vector<std::vector<int>> DimStrategy::get_forloop_dim_cand(
+    std::vector<SymbolicDTensor> const &input_tensers) {
+  std::vector<std::vector<int>> results;
+  std::vector<int> fmap_to_explore = {-1, 0, 1, 2};
+  if (!config.fmap_to_explore.empty()) {
+    fmap_to_explore = config.fmap_to_explore;
+  }
+  generate_forloop_dim(input_tensers, fmap_to_explore, {}, results);
+  if (config.randomized_branches) {
+    std::random_shuffle(results.begin(), results.end());
+  }
+  return results;
+}
+
+std::vector<std::vector<int>> DimStrategy::get_customized_input_cand_idx(
+    std::vector<SymbolicDTensor> const &all_inputs) {
+  int num_inputs = all_inputs.size();
+
+  if (all_inputs.size() == 3) {
     return {{0, 1, 2}};
   } else {
     return {{num_inputs - 2, num_inputs - 1}};

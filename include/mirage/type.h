@@ -31,6 +31,11 @@ typedef int64_t GuidType;
 // only to be used in create_op in search.cc
 inline std::unordered_map<std::string, float> CLAMP_MIN_MAX;
 
+enum BackendType {
+  BT_CUDA = 0,
+  BT_NKI = 1,
+};
+
 enum DataType {
   // 1-bit types
   // range: 900-909
@@ -291,6 +296,15 @@ enum TBEpilogueType {
   TB_EPILOGUE_ALLTOALL = 3102,
   TB_EPILOGUE_INVALID = 3199,
 };
+
+NLOHMANN_JSON_SERIALIZE_ENUM(TBEpilogueType,
+                             {
+                                 {TB_EPILOGUE_NONE, "tb_epilogue_none"},
+                                 {TB_EPILOGUE_ALLREDUCE,
+                                  "tb_epilogue_allreduce"},
+                                 {TB_EPILOGUE_ALLTOALL, "tb_epilogue_alltoall"},
+                                 {TB_EPILOGUE_INVALID, "tb_epilogue_invalid"},
+                             })
 
 } // namespace type
 } // namespace mirage

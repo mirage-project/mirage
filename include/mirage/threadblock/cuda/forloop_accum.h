@@ -15,6 +15,8 @@
 
 #pragma once
 
+#ifdef MIRAGE_FINGERPRINT_USE_CUDA
+
 #include "cutlass/cutlass.h"
 #include "cutlass/fast_math.h"
 #include "mirage/utils/fingerprint_functions.h"
@@ -116,3 +118,5 @@ public:
 
 } // namespace threadblock
 } // namespace mirage
+
+#endif // MIRAGE_FINGERPRINT_USE_CUDA

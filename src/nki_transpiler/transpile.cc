@@ -548,7 +548,6 @@ NKITranspileResult NKITranspiler::transpile_ugraph() {
   header.e("import neuronxcc.nki as nki");
   header.e("import neuronxcc.nki.language as nl");
   header.e("import neuronxcc.nki.isa as nisa");
-  header.e("from torch_neuronx import nki_jit");
   CodeKeeper exec;
   exec.e("if __name__ == \"__main__\":");
   exec.inc_indent();
@@ -604,8 +603,7 @@ NKITranspileResult NKITranspiler::transpile_ugraph() {
         // tb::ExecutionPlan const &plan = cur_op->plan;
         tb::Graph const &bgraph = cur_op->bgraph;
         std::vector<std::string> dtensor_names;
-        for (kn::DTensor const &dtensor :
-             Combine(cur_op->output_tensors, cur_op->input_tensors)) {
+        for (kn::DTensor const &dtensor : cur_op->input_tensors) {
           std::string dtensor_name = fmt("dtensor$", dtensor.guid);
           dtensor_names.push_back(dtensor_name);
         }
@@ -613,12 +611,7 @@ NKITranspileResult NKITranspiler::transpile_ugraph() {
         NKICustomOPTranspileResult result = transpile_kn_custom_op(cur_op);
         // Launch kernels
         custom_kernels.e(result.code);
-        exec.e("$[$, $, $]($)",
-               result.func_name,
-               bgraph.grid_dim.x,
-               bgraph.grid_dim.y,
-               bgraph.grid_dim.z,
-               dtensor_names);
+        exec.e("$($)", result.func_name, dtensor_names);
         break;
       }
       case type::KN_ADD_OP:

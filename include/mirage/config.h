@@ -28,18 +28,43 @@ uint16_t const FP_PQ = 13861;
 uint16_t const FP_P_MUL_Q_MOD_1 = 167;
 // FP_Q_MUL_P_MOD_1 is a multiplier of Q and is 1 module P
 uint16_t const FP_Q_MUL_P_MOD_1 = 13695;
-size_t const MAX_SMEM_SIZE = 96 * 1024; // 96 KB
-// Note that we actually save stensors' fingerprints on GPU device memory
-// so MAX_SMEM_FP_SIZE can be larger than MAX_SMEM_SIZE
-size_t const MAX_SMEM_FP_SIZE = 1024 * 1024;                      // 1 MB
-size_t const MAX_DMEM_DATA_SIZE = (size_t)2 * 1024 * 1024 * 1024; // 2 GB
-size_t const MAX_DMEM_FP_SIZE = (size_t)2 * 1024 * 1024 * 1024;   // 2 GB
 size_t const MAX_NUM_THREADBLOCKS_PER_KERNEL = 1024;
-int const MAX_NUM_GPUS = 16;
+int const MAX_NUM_DEVICES = 16;
 int const DEFAULT_TB_REDUCTION_DIMX = 64;
 int const MAX_NUM_WARP_GROUPS = 4;
 int const NUM_THREADS_PER_WARP = 32;
 int const NUM_WARPS_PER_GROUP = 4;
 int const NUM_THREADS_PER_GROUP = NUM_WARPS_PER_GROUP * NUM_THREADS_PER_WARP;
+
+#ifdef MIRAGE_BACKEND_USE_TRITON
+#define MIRAGE_BACKEND_USE_CUDA
+#endif
+
+#if defined(MIRAGE_BACKEND_USE_CUDA) && defined(MIRAGE_BACKEND_USE_NKI)
+#error                                                                         \
+    "Both MIRAGE_BACKEND_USE_CUDA and MIRAGE_BACKEND_USE_NKI are defined. Please define only one backend type."
+#elif defined(MIRAGE_BACKEND_USE_CUDA)
+size_t const MAX_DMEM_SIZE = (size_t)2 * 1024 * 1024 * 1024;    // 2 GB
+size_t const MAX_SMEM_SIZE = 96 * 1024;                         // 96 KB
+#elif defined(MIRAGE_BACKEND_USE_NKI)
+size_t const MAX_DMEM_SIZE = (size_t)32 * 1024 * 1024 * 1024;    // 32 GB
+size_t const MAX_SMEM_SIZE = (size_t)24 * 1024 * 1024;           // 24 MB
+#else
+#error "Please define either MIRAGE_BACKEND_USE_CUDA or MIRAGE_BACKEND_USE_NKI."
+#endif
+
+// Note that we actually save stensors' fingerprints on GPU device memory
+// so MAX_SMEM_FP_SIZE can be larger than MAX_SMEM_SIZE
+#if defined(MIRAGE_FINGERPRINT_USE_CUDA) && defined(MIRAGE_FINGERPRINT_USE_CPU)
+#error                                                                         \
+    "Both MIRAGE_FINGERPRINT_USE_CUDA and MIRAGE_FINGERPRINT_USE_CPU are defined. Please define only one fingerprint type."
+#elif defined(MIRAGE_FINGERPRINT_USE_CUDA)
+size_t const MAX_DMEM_FP_SIZE = (size_t)2 * 1024 * 1024 * 1024; // 2 GB
+size_t const MAX_SMEM_FP_SIZE = (size_t)1024 * 1024;            // 1 MB
+#else
+size_t const MAX_DMEM_FP_SIZE = (size_t)64 * 1024 * 1024 * 1024; // 64 GB
+size_t const MAX_SMEM_FP_SIZE = (size_t)64 * 1024 * 1024;        // 64 MB
+#endif
+
 } // namespace config
 } // namespace mirage
