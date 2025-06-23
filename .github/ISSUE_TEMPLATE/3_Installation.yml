@@ -2,7 +2,6 @@ name: "Installation Issue"
 description: "Report an issue with installation"
 title: "[Installation] - Brief Description"
 labels: ["installation"]
-assignees: []
 
 body:
   - type: textarea

@@ -2,7 +2,6 @@ name: "Report Bug"
 description: "Report a bug in the project"
 title: "[Bug] - Brief Description"
 labels: ["bug"]
-assignees: []
 
 body:
   - type: textarea
