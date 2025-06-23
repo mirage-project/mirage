@@ -14,12 +14,17 @@ struct DimStrategy {
   std::vector<type::TBOperatorType> get_tbop_cand();
   std::vector<std::vector<int3>>
       get_input_map_cand(std::vector<DTensor> const &tensors, dim3 grid_dim);
+  std::vector<std::vector<int3>>
+      get_input_map_cand(std::vector<SymbolicDTensor> const &tensors);
   std::vector<int3> get_output_map_cand(dim3 grid_dim);
+  std::vector<int3> get_output_map_cand(SymbolicTBGraph const &tb_graph);
   std::vector<dim3> get_grid_dim_cand(std::vector<DTensor> const &tensors);
   std::vector<dim3> get_block_dim_cand(std::vector<DTensor> const &tensors,
                                        dim3 grid_dim);
   std::vector<std::vector<int>>
       get_forloop_dim_cand(std::vector<DTensor> const &input_tensers);
+  std::vector<std::vector<int>>
+      get_forloop_dim_cand(std::vector<SymbolicDTensor> const &input_tensers);
   std::vector<int>
       get_forloop_range_cand(std::vector<DTensor> const &input_tensors,
                              std::vector<int3> const &input_map,
@@ -45,6 +50,8 @@ struct DimStrategy {
   }
   std::vector<std::vector<int>>
       get_customized_input_cand_idx(std::vector<DTensor> const &all_inputs);
+  std::vector<std::vector<int>> get_customized_input_cand_idx(
+      std::vector<SymbolicDTensor> const &all_inputs);
 
   GeneratorConfig config;
 };

@@ -6,62 +6,49 @@
 #include <thread>
 #include <vector>
 
+#include "mirage/search/symbolic_graph/tensor_dim_expr.h"
 #include "mirage/utils/containers.h"
+#include "mirage/utils/z3_utils.h"
 
 namespace mirage {
 namespace search {
 
-std::vector<bool> AbstractExpr::subpattern_to(
-    std::vector<std::shared_ptr<AbstractExpr>> const &input_patterns) const {
-  std::vector<std::string> subexpr;
-  std::vector<bool> is_valid;
-  for (auto const &input : input_patterns) {
-    if (input == nullptr) {
-      subexpr.push_back("null");
-      is_valid.push_back(false);
-    } else {
-      subexpr.push_back(input->to_egg().c_str());
-      is_valid.push_back(true);
-    }
+void initialize_final_expr(std::shared_ptr<AbstractExpr const> expr) {
+  get_egraph(expr->to_egg().c_str());
+}
+
+bool subexpr_to_final_expr(std::shared_ptr<AbstractExpr const> expr) {
+  return subexpr_to_final_expr(
+      std::vector<std::shared_ptr<AbstractExpr const>>{expr})[0];
+}
+
+std::vector<bool> subexpr_to_final_expr(
+    std::vector<std::shared_ptr<AbstractExpr const>> const &exprs) {
+  std::vector<std::string> exprs_str =
+      vector_map(exprs, [](std::shared_ptr<AbstractExpr const> const &expr) {
+        return expr->to_egg();
+      });
+
+  char const **exprs_c_str = new char const *[exprs.size()];
+  for (size_t i = 0; i < exprs.size(); ++i) {
+    assert(exprs[i] != nullptr);
+    exprs_c_str[i] = exprs_str[i].c_str();
   }
 
-  std::vector<char const *> c_subexpr;
-  c_subexpr.reserve(subexpr.size());
-  for (auto const &s : subexpr) {
-    c_subexpr.push_back(s.c_str());
+  bool *results_in_raw_array =
+      egg_equiv(exprs_c_str, static_cast<int>(exprs.size()));
+
+  std::vector<bool> results;
+  for (size_t i = 0; i < exprs.size(); ++i) {
+    results.push_back(results_in_raw_array[i]);
   }
 
-  KVPair *datas =
-      egg_equiv(c_subexpr.data(), static_cast<int>(c_subexpr.size()));
+  delete[] exprs_c_str;
 
-  std::unordered_map<int, bool> result;
-  size_t len = c_subexpr.size();
-  for (size_t i = 0; i < len; ++i) {
-    if (is_valid[i]) {
-      result[datas[i].key] = datas[i].value;
-    }
-  }
-  std::vector<int> keys;
-  for (auto const &kv : result) {
-    keys.push_back(kv.first);
-  }
-
-  std::sort(keys.begin(), keys.end());
-  std::vector<bool> ordered_results;
-  for (int key : keys) {
-    ordered_results.push_back(result[key]);
-  }
-  return ordered_results;
+  return results;
 }
 
 Var::Var(std::string const &name) : name(name) {}
-
-z3::expr Var::to_z3(z3::context &c,
-                    std::unordered_set<std::string> &all_variables) const {
-  z3::sort P = c.uninterpreted_sort("P");
-  all_variables.insert(name);
-  return c.constant(name.data(), P);
-}
 
 std::string Var::to_string() const {
   return name;
@@ -71,17 +58,11 @@ std::string Var::to_egg() const {
   return name;
 }
 
-Add::Add(std::shared_ptr<AbstractExpr> lhs, std::shared_ptr<AbstractExpr> rhs)
+Add::Add(std::shared_ptr<AbstractExpr const> lhs,
+         std::shared_ptr<AbstractExpr const> rhs)
     : lhs(lhs), rhs(rhs) {
   assert(lhs);
   assert(rhs);
-}
-
-z3::expr Add::to_z3(z3::context &c,
-                    std::unordered_set<std::string> &all_variables) const {
-  z3::sort P = c.uninterpreted_sort("P");
-  z3::func_decl add = c.function("add", P, P, P);
-  return add(lhs->to_z3(c, all_variables), rhs->to_z3(c, all_variables));
 }
 
 std::string Add::to_string() const {
@@ -92,17 +73,11 @@ std::string Add::to_egg() const {
   return "(+ " + lhs->to_egg() + " " + rhs->to_egg() + ")";
 }
 
-Mul::Mul(std::shared_ptr<AbstractExpr> lhs, std::shared_ptr<AbstractExpr> rhs)
+Mul::Mul(std::shared_ptr<AbstractExpr const> lhs,
+         std::shared_ptr<AbstractExpr const> rhs)
     : lhs(lhs), rhs(rhs) {
   assert(lhs);
   assert(rhs);
-}
-
-z3::expr Mul::to_z3(z3::context &c,
-                    std::unordered_set<std::string> &all_variables) const {
-  z3::sort P = c.uninterpreted_sort("P");
-  z3::func_decl mul = c.function("mul", P, P, P);
-  return mul(lhs->to_z3(c, all_variables), rhs->to_z3(c, all_variables));
 }
 
 std::string Mul::to_string() const {
@@ -113,17 +88,11 @@ std::string Mul::to_egg() const {
   return "(* " + lhs->to_egg() + " " + rhs->to_egg() + ")";
 }
 
-Div::Div(std::shared_ptr<AbstractExpr> lhs, std::shared_ptr<AbstractExpr> rhs)
+Div::Div(std::shared_ptr<AbstractExpr const> lhs,
+         std::shared_ptr<AbstractExpr const> rhs)
     : lhs(lhs), rhs(rhs) {
   assert(lhs);
   assert(rhs);
-}
-
-z3::expr Div::to_z3(z3::context &c,
-                    std::unordered_set<std::string> &all_variables) const {
-  z3::sort P = c.uninterpreted_sort("P");
-  z3::func_decl div = c.function("div", P, P, P);
-  return div(lhs->to_z3(c, all_variables), rhs->to_z3(c, all_variables));
 }
 
 std::string Div::to_string() const {
@@ -134,17 +103,11 @@ std::string Div::to_egg() const {
   return "(/ " + lhs->to_egg() + " " + rhs->to_egg() + ")";
 }
 
-Pow::Pow(std::shared_ptr<AbstractExpr> lhs, std::shared_ptr<AbstractExpr> rhs)
+Pow::Pow(std::shared_ptr<AbstractExpr const> lhs,
+         std::shared_ptr<AbstractExpr const> rhs)
     : lhs(lhs), rhs(rhs) {
   assert(lhs);
   assert(rhs);
-}
-
-z3::expr Pow::to_z3(z3::context &c,
-                    std::unordered_set<std::string> &all_variables) const {
-  z3::sort P = c.uninterpreted_sort("P");
-  z3::func_decl pow = c.function("pow", P, P, P);
-  return pow(lhs->to_z3(c, all_variables), rhs->to_z3(c, all_variables));
 }
 
 std::string Pow::to_string() const {
@@ -155,15 +118,8 @@ std::string Pow::to_egg() const {
   return "(pow " + lhs->to_egg() + " " + rhs->to_egg() + ")";
 }
 
-Exp::Exp(std::shared_ptr<AbstractExpr> exponent) : exponent(exponent) {
+Exp::Exp(std::shared_ptr<AbstractExpr const> exponent) : exponent(exponent) {
   assert(exponent);
-}
-
-z3::expr Exp::to_z3(z3::context &c,
-                    std::unordered_set<std::string> &all_variables) const {
-  z3::sort P = c.uninterpreted_sort("P");
-  z3::func_decl exp = c.function("exp", P, P);
-  return exp(exponent->to_z3(c, all_variables));
 }
 
 std::string Exp::to_string() const {
@@ -174,15 +130,8 @@ std::string Exp::to_egg() const {
   return "(exp " + exponent->to_egg() + ")";
 }
 
-Square::Square(std::shared_ptr<AbstractExpr> a) : a(a) {
+Square::Square(std::shared_ptr<AbstractExpr const> a) : a(a) {
   assert(a);
-}
-
-z3::expr Square::to_z3(z3::context &c,
-                       std::unordered_set<std::string> &all_variables) const {
-  z3::sort P = c.uninterpreted_sort("P");
-  z3::func_decl square = c.function("square", P, P);
-  return square(a->to_z3(c, all_variables));
 }
 
 std::string Square::to_string() const {
@@ -193,15 +142,8 @@ std::string Square::to_egg() const {
   return "(square " + a->to_egg() + ")";
 }
 
-Sqrt::Sqrt(std::shared_ptr<AbstractExpr> a) : a(a) {
+Sqrt::Sqrt(std::shared_ptr<AbstractExpr const> a) : a(a) {
   assert(a);
-}
-
-z3::expr Sqrt::to_z3(z3::context &c,
-                     std::unordered_set<std::string> &all_variables) const {
-  z3::sort P = c.uninterpreted_sort("P");
-  z3::func_decl sqrt = c.function("sqrt", P, P);
-  return sqrt(a->to_z3(c, all_variables));
 }
 
 std::string Sqrt::to_string() const {
@@ -212,15 +154,8 @@ std::string Sqrt::to_egg() const {
   return "(sqrt " + a->to_egg() + ")";
 }
 
-Silu::Silu(std::shared_ptr<AbstractExpr> a) : a(a) {
+Silu::Silu(std::shared_ptr<AbstractExpr const> a) : a(a) {
   assert(a);
-}
-
-z3::expr Silu::to_z3(z3::context &c,
-                     std::unordered_set<std::string> &all_variables) const {
-  z3::sort P = c.uninterpreted_sort("P");
-  z3::func_decl silu = c.function("silu", P, P);
-  return silu(a->to_z3(c, all_variables));
 }
 
 std::string Silu::to_string() const {
@@ -231,15 +166,8 @@ std::string Silu::to_egg() const {
   return "(silu " + a->to_egg() + ")";
 }
 
-Gelu::Gelu(std::shared_ptr<AbstractExpr> a) : a(a) {
+Gelu::Gelu(std::shared_ptr<AbstractExpr const> a) : a(a) {
   assert(a);
-}
-
-z3::expr Gelu::to_z3(z3::context &c,
-                     std::unordered_set<std::string> &all_variables) const {
-  z3::sort P = c.uninterpreted_sort("P");
-  z3::func_decl gelu = c.function("gelu", P, P);
-  return gelu(a->to_z3(c, all_variables));
 }
 
 std::string Gelu::to_string() const {
@@ -250,15 +178,8 @@ std::string Gelu::to_egg() const {
   return "(gelu " + a->to_egg() + ")";
 }
 
-Relu::Relu(std::shared_ptr<AbstractExpr> a) : a(a) {
+Relu::Relu(std::shared_ptr<AbstractExpr const> a) : a(a) {
   assert(a);
-}
-
-z3::expr Relu::to_z3(z3::context &c,
-                     std::unordered_set<std::string> &all_variables) const {
-  z3::sort P = c.uninterpreted_sort("P");
-  z3::func_decl relu = c.function("relu", P, P);
-  return relu(a->to_z3(c, all_variables));
 }
 
 std::string Relu::to_string() const {
@@ -269,18 +190,11 @@ std::string Relu::to_egg() const {
   return "(relu " + a->to_egg() + ")";
 }
 
-Clamp::Clamp(float min_val, float max_val, std::shared_ptr<AbstractExpr> elems)
+Clamp::Clamp(float min_val,
+             float max_val,
+             std::shared_ptr<AbstractExpr const> elems)
     : min_val(min_val), max_val(max_val), elems(elems) {
   assert(elems);
-}
-
-z3::expr Clamp::to_z3(z3::context &c,
-                      std::unordered_set<std::string> &all_variables) const {
-  z3::sort P = c.uninterpreted_sort("P");
-  z3::func_decl clamp =
-      c.function("clamp", c.fpa_sort(8, 24), c.fpa_sort(8, 24), P, P);
-  return clamp(
-      c.fpa_val(min_val), c.fpa_val(max_val), elems->to_z3(c, all_variables));
 }
 
 std::string Clamp::to_string() const {
@@ -294,47 +208,135 @@ std::string Clamp::to_egg() const {
          " " + elems->to_egg() + ")";
 }
 
-RMS::RMS(int red_deg, std::shared_ptr<AbstractExpr> elems)
-    : red_deg(red_deg), elems(elems) {
+RMS::RMS(std::shared_ptr<TensorDimExpr const> reduction_degree,
+         std::shared_ptr<AbstractExpr const> elems)
+    : reduction_degree(reduction_degree), elems(elems) {
   assert(elems);
 }
 
-z3::expr RMS::to_z3(z3::context &c,
-                    std::unordered_set<std::string> &all_variables) const {
-  z3::sort P = c.uninterpreted_sort("P");
-  z3::func_decl rms = c.function("rms", c.int_sort(), P, P);
-  return rms(c.int_val(red_deg), elems->to_z3(c, all_variables));
-}
-
 std::string RMS::to_string() const {
-  return "rms(" + std::to_string(red_deg) + ", " + elems->to_string() + ")";
+  return "rms(" + reduction_degree->to_string() + ", " + elems->to_string() +
+         ")";
 }
 
 std::string RMS::to_egg() const {
-  return "(rms " + std::to_string(red_deg) + " " + elems->to_egg() + ")";
+  return "(rms " + reduction_degree->to_string() + " " + elems->to_egg() + ")";
 }
 
-Red::Red(int red_deg, std::shared_ptr<AbstractExpr> summand)
-    : red_deg(red_deg), summand(summand) {
-  assert(red_deg > 1);
+Red::Red(std::shared_ptr<TensorDimExpr const> reduction_degree,
+         std::shared_ptr<AbstractExpr const> summand)
+    : reduction_degree(reduction_degree), summand(summand) {
+  assert(reduction_degree);
   assert(summand);
 }
 
-z3::expr Red::to_z3(z3::context &c,
-                    std::unordered_set<std::string> &all_variables) const {
-  z3::sort P = c.uninterpreted_sort("P");
-  z3::func_decl red = c.function("red", c.int_sort(), P, P);
-  return red(c.int_val(static_cast<int>(std::ceil(std::log2(red_deg)))),
-             summand->to_z3(c, all_variables));
-}
-
 std::string Red::to_string() const {
-  return "r(" + std::to_string(std::ceil(std::log2(red_deg))) + ", " +
-         summand->to_string() + ")";
+  return "r(" + reduction_degree->to_string() + ", " + summand->to_string() +
+         ")";
 }
 
 std::string Red::to_egg() const {
-  return "(sum " + std::to_string(red_deg) + " " + summand->to_egg() + ")";
+  return "(sum " + reduction_degree->to_string() + " " + summand->to_egg() +
+         ")";
+}
+
+std::shared_ptr<AbstractExpr const>
+    abstract_expr_make_var(std::string const &name) {
+  return std::make_shared<Var>(name);
+}
+
+std::shared_ptr<AbstractExpr const>
+    abstract_expr_make_add(std::shared_ptr<AbstractExpr const> lhs,
+                           std::shared_ptr<AbstractExpr const> rhs) {
+  return std::make_shared<Add>(lhs, rhs);
+}
+
+std::shared_ptr<AbstractExpr const>
+    abstract_expr_make_mul(std::shared_ptr<AbstractExpr const> lhs,
+                           std::shared_ptr<AbstractExpr const> rhs) {
+  return std::make_shared<Mul>(lhs, rhs);
+}
+
+std::shared_ptr<AbstractExpr const>
+    abstract_expr_make_div(std::shared_ptr<AbstractExpr const> lhs,
+                           std::shared_ptr<AbstractExpr const> rhs) {
+  return std::make_shared<Div>(lhs, rhs);
+}
+
+std::shared_ptr<AbstractExpr const>
+    abstract_expr_make_pow(std::shared_ptr<AbstractExpr const> lhs,
+                           std::shared_ptr<AbstractExpr const> rhs) {
+  return std::make_shared<Pow>(lhs, rhs);
+}
+
+std::shared_ptr<AbstractExpr const>
+    abstract_expr_make_exp(std::shared_ptr<AbstractExpr const> exponent) {
+  return std::make_shared<Exp>(exponent);
+}
+
+std::shared_ptr<AbstractExpr const>
+    abstract_expr_make_square(std::shared_ptr<AbstractExpr const> a) {
+  return std::make_shared<Square>(a);
+}
+
+std::shared_ptr<AbstractExpr const>
+    abstract_expr_make_sqrt(std::shared_ptr<AbstractExpr const> a) {
+  return std::make_shared<Sqrt>(a);
+}
+
+std::shared_ptr<AbstractExpr const>
+    abstract_expr_make_silu(std::shared_ptr<AbstractExpr const> a) {
+  return std::make_shared<Silu>(a);
+}
+
+std::shared_ptr<AbstractExpr const>
+    abstract_expr_make_gelu(std::shared_ptr<AbstractExpr const> a) {
+  return std::make_shared<Gelu>(a);
+}
+
+std::shared_ptr<AbstractExpr const>
+    abstract_expr_make_relu(std::shared_ptr<AbstractExpr const> a) {
+  return std::make_shared<Relu>(a);
+}
+
+std::shared_ptr<AbstractExpr const> abstract_expr_make_clamp(
+    float min_val, float max_val, std::shared_ptr<AbstractExpr const> elems) {
+  return std::make_shared<Clamp>(min_val, max_val, elems);
+}
+
+std::shared_ptr<AbstractExpr const>
+    abstract_expr_make_rms(int reduction_degree,
+                           std::shared_ptr<AbstractExpr const> elems) {
+  return abstract_expr_make_rms(dim_expr_make_const(reduction_degree), elems);
+}
+
+std::shared_ptr<AbstractExpr const> abstract_expr_make_rms(
+    std::shared_ptr<TensorDimExpr const> reduction_degree,
+    std::shared_ptr<AbstractExpr const> elems) {
+  return std::make_shared<RMS>(reduction_degree, elems);
+}
+
+std::shared_ptr<AbstractExpr const>
+    abstract_expr_make_rms(SymbolicTensorDim const &reduction_dim,
+                           std::shared_ptr<AbstractExpr const> elems) {
+  return abstract_expr_make_rms(reduction_dim.dim_expr, elems);
+}
+
+std::shared_ptr<AbstractExpr const>
+    abstract_expr_make_red(int reduction_degree,
+                           std::shared_ptr<AbstractExpr const> summand) {
+  return abstract_expr_make_red(dim_expr_make_const(reduction_degree), summand);
+}
+
+std::shared_ptr<AbstractExpr const> abstract_expr_make_red(
+    std::shared_ptr<TensorDimExpr const> reduction_degree,
+    std::shared_ptr<AbstractExpr const> summand) {
+  return std::make_shared<Red>(reduction_degree, summand);
+}
+std::shared_ptr<AbstractExpr const>
+    abstract_expr_make_red(SymbolicTensorDim const &reduction_dim,
+                           std::shared_ptr<AbstractExpr const> summand) {
+  return abstract_expr_make_red(reduction_dim.dim_expr, summand);
 }
 
 } // namespace search
