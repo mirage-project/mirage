@@ -5,7 +5,7 @@ import torch
 import torch.distributed as dist
 import argparse
 import os
-#from mpi4py import MPI
+from mpi4py import MPI
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -14,15 +14,13 @@ if __name__ == "__main__":
         "--profiling", action="store_true", help="Use Profiler to generate trace"
     )
     args = parser.parse_args()
-    #comm = MPI.COMM_WORLD
-    #world_size = comm.Get_size()
-    #rank = comm.Get_rank()
-    #os.environ["RANK"] = str(rank)
-    #os.environ["WORLD_SIZE"] = str(world_size)
-    #os.environ["MASTER_ADDR"] = "localhost"
-    #os.environ["MASTER_PORT"] = "12355"
-    world_size = 1
-    rank = 0
+    comm = MPI.COMM_WORLD
+    world_size = comm.Get_size()
+    rank = comm.Get_rank()
+    os.environ["RANK"] = str(rank)
+    os.environ["WORLD_SIZE"] = str(world_size)
+    os.environ["MASTER_ADDR"] = "localhost"
+    os.environ["MASTER_PORT"] = "12355"
 
     if world_size > 1:
         dist.init_process_group(backend="nccl", init_method="env://")
