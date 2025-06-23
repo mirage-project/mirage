@@ -1,5 +1,7 @@
 #pragma once
 
+#include "threadblock/blackwell_matmul.h"
+#include "threadblock/blackwell_pipeline.h"
 #include "threadblock/element_binary.h"
 #include "threadblock/element_unary.h"
 #include "threadblock/epilogues.h"
@@ -12,5 +14,3 @@
 #include "threadblock/profiler.h"
 #include "threadblock/reduction.h"
 #include "threadblock/utils.h"
-#include "threadblock/blackwell_pipeline.h"
-#include "threadblock/blackwell_matmul.h"
