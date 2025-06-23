@@ -1,0 +1,14 @@
+name: "Call for Comment"
+description: "Propose a plan for discussion"
+title: "[Comment] - Brief Description"
+labels: ["discussion"]
+
+body:
+  - type: textarea
+    id: proposed_plan
+    attributes:
+      label: "Proposed Plan"
+      description: "Provide your proposed plan or idea for discussion."
+      placeholder: "Enter your proposed plan here..."
+    validations:
+      required: true
