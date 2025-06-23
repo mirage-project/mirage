@@ -5,7 +5,7 @@
 
 namespace tb {
 
-template <int _Stage, class ClusterShape_MNK_, class AtomThrShape_MNK_ = Shape<_1,_1,_1>>
+template <int _Stage, class ClusterShape_MNK_, class AtomThrShape_MNK_ = Shape<_2,_1,_1>>
 struct BlackwellAsyncPipeline {
   static constexpr int Stage = _Stage;
   using ClusterShape = ClusterShape_MNK_;
@@ -28,7 +28,8 @@ __device__ __forceinline__
                           bool producer,
                           bool consumer,
                           uint32_t transactionBytes,
-                          uint32_t num_consumer_wgs)
+                          uint32_t num_consumer_wgs,
+                          bool is_leader_cta)
       : smem_pipe_read(),
         smem_pipe_write(cutlass::make_producer_start_state<MainloopPipeline>()),
         pipeline_params{
@@ -37,10 +38,8 @@ __device__ __forceinline__
                 ? MainloopPipeline::ThreadCategory::Producer
                 : (consumer ? MainloopPipeline::ThreadCategory::Consumer
                             : MainloopPipeline::ThreadCategory::NonParticipant),
-            (threadIdx.x % cutlass::NumThreadsPerWarpGroup) == 0,
-            cutlass::NumThreadsPerWarpGroup * num_consumer_wgs,
-            1,
-            1},
+            (threadIdx.x % cutlass::NumThreadsPerWarpGroup) == 0 && is_leader_cta,
+            cutlass::NumThreadsPerWarpGroup * num_consumer_wgs},
         pipeline_storage(shared_memory_offset),
         pipeline(*(pipeline_storage.mainloop),
                  pipeline_params,
@@ -52,14 +51,18 @@ __device__ __forceinline__
                   cutlass::pipeline_init_wait(size(ClusterShape{}));
                  }
 
+  // debug
+  // __device__ __forceinline__ std::pair<BarrierType *, int> producer_acquire(uint32_t k_iter) {
+  //   pipeline.producer_acquire(smem_pipe_write, k_iter);
+  //   BarrierType *tma_barrier = pipeline.producer_get_barrier(smem_pipe_write);
+  //   int write_stage = smem_pipe_write.index();
+  //   return {tma_barrier, write_stage};
+  // }
 
   __device__ __forceinline__ std::pair<BarrierType *, int> producer_acquire() {
     pipeline.producer_acquire(smem_pipe_write);
     BarrierType *tma_barrier = pipeline.producer_get_barrier(smem_pipe_write);
     int write_stage = smem_pipe_write.index();
-    // if (blockIdx.x == 0 && blockIdx.y == 0 && threadIdx.x == 256 && threadIdx.y == 0) {
-    //   printf("producer_acquire: tma_barrier is %p, write_stage is %d\n", tma_barrier, write_stage);
-    // }
     return {tma_barrier, write_stage};
   }
 

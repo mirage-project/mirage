@@ -450,6 +450,11 @@ void Transpiler::resolve_tensor_layout() {
               for (tb::STensor const &input : {input0, input1}) {
                 // If both dims are not the innermost one, cannot use ldmatrix
                 stensor_metas[input0.guid].m_input = true;
+                stensor_metas[input1.guid].n_input = true;
+                stensor_metas[input0.guid].n_matrix_guid = input1.guid;
+                stensor_metas[input1.guid].m_matrix_guid = input0.guid;
+                stensor_metas[input0.guid].c_matrix_guid = output.guid;
+                stensor_metas[input1.guid].c_matrix_guid = output.guid;
                 costs.push_back(
                     z3::ite(!s_is_innermost[input.guid][num_dims - 1] &&
                                 !s_is_innermost[input.guid][num_dims - 2],

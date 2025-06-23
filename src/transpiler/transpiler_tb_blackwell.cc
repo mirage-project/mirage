@@ -281,7 +281,7 @@ static std::pair<bool, std::vector<int64_t>>
   if (!is_in_loop) {
     return {false, {}};
   }
-  code.e("if (elect_one_cta) {");
+  code.e("if (elect_one_cta && elect_one_warp) {");
   std::vector<int64_t> input_ids_waited;
   for (int i = 0; i < op->input_tensors.size(); i++) {
     int64_t input_id = op->input_tensors.at(i).guid;
@@ -319,7 +319,7 @@ static void generate_Tmem_mbarrier_init_code(CodeKeeper &code, int mma_iter_coun
       mbarrier_ptr_name,
       mma_iter_count);
   code.e("}");
-  code.e("uint16_t pair_mask = (1 << blockIdx.y * gridDim.x + (blockIdx.x / 2) * 2) | (1 << blockIdx.y * gridDim.x + (blockIdx.x / 2) * 2 + 1);");
+  code.e("uint16_t consumer_sync_mask = (1 << blockIdx.y * gridDim.x + (blockIdx.x / 2) * 2) | (1 << blockIdx.y * gridDim.x + (blockIdx.x / 2) * 2 + 1);");
   
 }
 
@@ -360,7 +360,6 @@ CustomOPTranspileResult
   // int barrier_size = 16 * config.pipeline_stages;
   int tma_barrier_size = 16 * config.pipeline_stages;
 
-  // int 64
   int cluster_barrier_size = 8;
 
   // Get the schedule
@@ -389,18 +388,13 @@ CustomOPTranspileResult
   code.e("static constexpr int CONSUMER_NUM_THREADS = $;",
          config::NUM_THREADS_PER_GROUP * config.num_consumer_wgs);
 
-  // Define elect_one_thr and elect_one_warp
-  code.e("auto cluster_shape = make_shape(Int<4>{}, Int<4>{}, Int<1>{});");
-  code.e("auto tiled_mma = cutlass::gemm::collective::detail::sm100_make_2sm_trivial_tiled_mma<half_t, half_t, half_t, Shape<Int<256>, Int<256>>, decltype(cluster_shape), UMMA::Major::K, UMMA::Major::MN>();");
-  code.e("auto mma_tiler = make_shape(tile_size<0>(tiled_mma), tile_size<1>(tiled_mma), tile_size<2>(tiled_mma)*_4{});");
-  code.e("uint32_t elect_one_warp = (threadIdx.x / 32 == 0); ");
-  code.e("using AtomThrShapeMNK = Shape<decltype(shape<0>(typename decltype(tiled_mma)::ThrLayoutVMNK{})), _1, _1>;");
+  code.e("auto cluster_shape = make_shape(Int<$>{}, Int<$>{}, Int<$>{});",
+          g.cluster_dim.x,
+          g.cluster_dim.y,
+          g.cluster_dim.z);
 
-  // get cta rank
-  code.e("Layout cluster_layout_vmnk = tiled_divide(make_layout(cluster_shape), make_tile(typename decltype(tiled_mma)::AtomThrID{}));");
+  code.e("uint32_t elect_one_warp = (threadIdx.x / 32 == 0); ");
   code.e("int cta_rank = cute::block_rank_in_cluster();");
-  code.e("auto cta_in_cluster_coord_vmnk = cluster_layout_vmnk.get_flat_coord(cta_rank);");
-  code.e("auto elect_one_cta = get<0>(cta_in_cluster_coord_vmnk) == Int<0>{};");
 
   code.e("// STensors");
   code.e("extern __shared__ char buf[];");
@@ -445,6 +439,137 @@ CustomOPTranspileResult
 
   }
 
+  // Pre-define all matmul ops and allocate accumulators (if needed)
+  // Since we may want to place the accumulator of a matmul op in register
+  // files, we may need to allocate the accumulator in advance, and that
+  // requires us to define the kernel (`using Matmul$Kernel = ...`) in advance
+  for (TBSchedNode const &node :
+       Combine(sched.loop_nodes, sched.post_loop_nodes)) {
+    if (node.type == tb_sched_node_t::OPERATOR &&
+        node.ops.front().first->op_type == type::TB_MATMUL_OP) {
+      tb::TBOperator const *op = node.ops.front().first;
+      tb::TBOperator const *output_op = node.ops.back().first;
+      tb::STensor const &input0 = op->input_tensors.at(0);
+      tb::STensor const &input1 = op->input_tensors.at(1);
+      tb::STensor const &output = output_op->output_tensors.at(0);
+      STensorMeta meta0 = stensor_metas.at(input0.guid);
+      STensorMeta meta1 = stensor_metas.at(input1.guid);
+      STensorMeta meta2 = stensor_metas.at(output.guid);
+      int num_dims = input0.num_dims;
+      assert(input1.num_dims == num_dims && output.num_dims == num_dims);
+      int m = output.dim[num_dims - 2];
+      int n = output.dim[num_dims - 1];
+      int k = input0.dim[num_dims - 1];
+      assert(input0.dim[num_dims - 2] == m && input0.dim[num_dims - 1] == k);
+      assert(input1.dim[num_dims - 2] == k && input1.dim[num_dims - 1] == n);
+
+      if (GPU_CC::H100 == config.target_cc) {
+        // Hopper wgmma
+        assert(num_threads >= 128);
+      } else if (config.target_cc == GPU_CC::B200) {
+        // Blackwell umma
+        assert(num_threads >= 32);
+      } else {
+        assert(0 && "Unsupported GPU Architecture");
+      }
+
+      bool is_ldmatrix_avail = config.target_cc >= GPU_CC::T4;
+      bool is_stmatrix_avail = false;
+
+      int num_exps_before_store = std::count_if(
+          node.ops.begin(), node.ops.end(), [](auto &op_and_meta) {
+            return op_and_meta.first->op_type == type::TB_EXP_OP;
+          });
+      bool is_store_accum =
+          node.ops.back().first->op_type == type::TB_FORLOOP_ACCUM_NO_RED_OP;
+      bool is_accum_in_reg = node.ops.back().second.is_accum_in_reg;
+
+      // For threadblock matmul, cute requires 2-d matrices as inputs / outputs,
+      // we assert that all other leading dimensions are of size 1, and only use
+      // the last two dimensions when generating layouts
+      if (config.target_cc == GPU_CC::B200) {
+
+      code.e("auto tiled_mma = cutlass::gemm::collective::detail::sm100_make_2sm_trivial_tiled_mma<$, $, $, Shape<Int<$>, Int<$>>, decltype(cluster_shape), UMMA::Major::K, UMMA::Major::MN>();",
+            get_datatype_str(input0.data_type),
+            get_datatype_str(input1.data_type),
+            get_datatype_str(output.data_type),
+            2 * m,
+            n);
+
+      assert(k % 16 == 0);
+      code.e("auto mma_tiler = make_shape(tile_size<0>(tiled_mma), tile_size<1>(tiled_mma), tile_size<2>(tiled_mma)*_${});",
+             k / 16);
+
+      code.e("Layout cluster_layout_vmnk = tiled_divide(make_layout(cluster_shape), make_tile(typename decltype(tiled_mma)::AtomThrID{}));");
+      
+      code.e("auto cta_in_cluster_coord_vmnk = cluster_layout_vmnk.get_flat_coord(cta_rank);");
+      code.e("auto elect_one_cta = get<0>(cta_in_cluster_coord_vmnk) == Int<0>{};");
+
+
+      code.e("using Matmul$LayoutA = $;",
+            output.guid,
+            get_stensor_layout(input0, meta0, num_dims - 2 /*start_dim*/));
+      code.e("using Matmul$LayoutB = $;",
+             output.guid,
+             get_stensor_layout(input1, meta1, num_dims - 2 /*start_dim*/));
+      code.e("using Matmul$LayoutC = $;",
+             output.guid,
+             get_stensor_layout(output, meta2, num_dims - 2 /*start_dim*/));
+
+      // code.e("using Mma$Shape_A = decltype(partition_shape_A(tiled_mma, make_shape(size<0>(mma_tiler), size<2>(mma_tiler))));",
+      //         output.guid);
+      // code.e("using Mma$Shape_B = decltype(partition_shape_B(tiled_mma, make_shape(size<1>(mma_tiler), size<2>(mma_tiler))));",
+      //         output.guid);
+      // code.e("using Mma$Shape_C = decltype(partition_shape_C(tiled_mma, make_shape(size<0>(mma_tiler), size<1>(mma_tiler))));",
+      //         output.guid);
+
+      } else {
+      code.e("using Matmul$LayoutC = $;",
+             output.guid,
+             get_stensor_layout(output, meta2, num_dims - 2 /*start_dim*/));
+      }
+      code.e("using Matmul$Kernel = tb::Blackwell_Matmul<$, "
+             "$, $, Matmul$LayoutA, Matmul$LayoutB, "
+             "Matmul$LayoutC, NUM_THREADS, "
+             "$, $, $, $, $, $, decltype(cluster_shape), decltype(tiled_mma), decltype(mma_tiler)>;",
+             output.guid,
+             get_datatype_str(input0.data_type),
+             is_ldmatrix_avail,
+             is_stmatrix_avail,
+             output.guid,
+             output.guid,
+             output.guid,
+             num_exps_before_store,
+             is_accum_in_reg ? false : is_store_accum,
+             config.num_consumer_wgs > 1 ? true : false,
+             meta0.is_pipelined_input,
+             meta1.is_pipelined_input,
+             config.pipeline_stages);
+        code.e("auto matmul_$_accum = Matmul$Kernel::get_mma_tC(blockIdx.x, blockIdx.y, *tmem_base_ptr);",
+               output.guid,
+               output.guid);
+      code.e("");
+    }
+  }
+  code.e("__syncthreads();");
+
+  // Get matmul stensor_guid2stensor
+  std::map<sguid_t, tb::STensor> SGuid2STensor;
+  for (TBSchedNode const &node :
+       Combine(Combine(sched.pre_loop_nodes, sched.loop_nodes),
+               sched.post_loop_nodes)) {
+    if (node.type == tb_sched_node_t::OPERATOR &&
+        node.ops.front().first->op_type == type::TB_MATMUL_OP) {
+      tb::TBOperator const *op = node.ops.front().first;
+      tb::TBOperator const *output_op = node.ops.back().first;
+      tb::STensor const &input0 = op->input_tensors.at(0);
+      tb::STensor const &input1 = op->input_tensors.at(1);
+      tb::STensor const &output = output_op->output_tensors.at(0);
+      SGuid2STensor[input0.guid] = input0;
+      SGuid2STensor[input1.guid] = input1;
+      SGuid2STensor[output.guid] = output;
+    }
+  }
 
 
   // Define G2SCopy for all input STensors
@@ -580,13 +705,12 @@ CustomOPTranspileResult
              map_to_cute_int(dims),
              map_to_cute_int(strides));
 
-          
 
           code.e(
               "tb::BlackwellAsyncPipeline<$, decltype(cluster_shape)> "
               "blackwell_async_pipeline_$((void *) (buf + $), (tb::warpgroup_id() "
               "== $ && tb::warp_id() % mirage::config::NUM_WARPS_PER_GROUP == "
-              "0), tb::warpgroup_id() < $, $, $);",
+              "0), tb::warpgroup_id() < $, $, $, elect_one_cta);",
               config.pipeline_stages,
               stensor.guid,
               barrier_addr,
@@ -626,7 +750,23 @@ CustomOPTranspileResult
               strides,
               partition_logic,
               g.forloop_range,
-              m_input ? forloop_dim : (dtensor.num_dims - 1 - forloop_dim))));
+              m_input ? forloop_dim : (dtensor.num_dims - 1 - forloop_dim),
+              stensor_meta.m_input ? "N_MODE" : stensor_meta.n_input ? "M_MODE" : "NOT_MULTICAST",
+              stensor_meta.m_input ? TiledMMA(get_datatype_str(stensor.data_type),
+                       get_datatype_str(SGuid2STensor[stensor_meta.n_matrix_guid].data_type),
+                       get_datatype_str(SGuid2STensor[stensor_meta.c_matrix_guid].data_type),
+                       stensor.dim[0] * 2,
+                       SGuid2STensor[stensor_meta.n_matrix_guid].dim[1],
+                       stensor.dim[1],
+                       stensor_meta.c_matrix_guid) : 
+                      TiledMMA(get_datatype_str(stensor.data_type),
+                       get_datatype_str(SGuid2STensor[stensor_meta.m_matrix_guid].data_type),
+                       get_datatype_str(SGuid2STensor[stensor_meta.c_matrix_guid].data_type),
+                       SGuid2STensor[stensor_meta.m_matrix_guid].dim[0] * 2,
+                       stensor.dim[1],
+                       stensor.dim[0],
+                       stensor_meta.c_matrix_guid))
+              ));
         }
       }
     }
@@ -820,7 +960,6 @@ CustomOPTranspileResult
                mov_last_get_stensor_layout(
                    stensor, stensor_meta, real_innermost_dim));
       }
-      // TODO(intlsy) Support TMA for Blackwell
     }
   }
   code.e("");
@@ -853,106 +992,13 @@ CustomOPTranspileResult
   }
   code.e("");
 
-  // Pre-define all matmul ops and allocate accumulators (if needed)
-  // Since we may want to place the accumulator of a matmul op in register
-  // files, we may need to allocate the accumulator in advance, and that
-  // requires us to define the kernel (`using Matmul$Kernel = ...`) in advance
-  for (TBSchedNode const &node :
-       Combine(sched.loop_nodes, sched.post_loop_nodes)) {
-    if (node.type == tb_sched_node_t::OPERATOR &&
-        node.ops.front().first->op_type == type::TB_MATMUL_OP) {
-      tb::TBOperator const *op = node.ops.front().first;
-      tb::TBOperator const *output_op = node.ops.back().first;
-      tb::STensor const &input0 = op->input_tensors.at(0);
-      tb::STensor const &input1 = op->input_tensors.at(1);
-      tb::STensor const &output = output_op->output_tensors.at(0);
-      STensorMeta meta0 = stensor_metas.at(input0.guid);
-      STensorMeta meta1 = stensor_metas.at(input1.guid);
-      STensorMeta meta2 = stensor_metas.at(output.guid);
-      int num_dims = input0.num_dims;
-      assert(input1.num_dims == num_dims && output.num_dims == num_dims);
-      int m = output.dim[num_dims - 2];
-      int n = output.dim[num_dims - 1];
-      int k = input0.dim[num_dims - 1];
-      assert(input0.dim[num_dims - 2] == m && input0.dim[num_dims - 1] == k);
-      assert(input1.dim[num_dims - 2] == k && input1.dim[num_dims - 1] == n);
 
-      if (GPU_CC::H100 <= config.target_cc) {
-        // Hopper wgmma
-        assert(num_threads >= 128);
-      } else {
-        // TODO(intlsy): Support more architectures
-        assert(0 && "Unsupported GPU Architecture");
-      }
-
-      bool is_ldmatrix_avail = config.target_cc >= GPU_CC::T4;
-      bool is_stmatrix_avail = false;
-
-      int num_exps_before_store = std::count_if(
-          node.ops.begin(), node.ops.end(), [](auto &op_and_meta) {
-            return op_and_meta.first->op_type == type::TB_EXP_OP;
-          });
-      bool is_store_accum =
-          node.ops.back().first->op_type == type::TB_FORLOOP_ACCUM_NO_RED_OP;
-      bool is_accum_in_reg = node.ops.back().second.is_accum_in_reg;
-
-      // For threadblock matmul, cute requires 2-d matrices as inputs / outputs,
-      // we assert that all other leading dimensions are of size 1, and only use
-      // the last two dimensions when generating layouts
-      if (config.target_cc == GPU_CC::B200) {
-      code.e("using Matmul$LayoutA = $;",
-            output.guid,
-            get_stensor_layout(input0, meta0, num_dims - 2 /*start_dim*/));
-      code.e("using Matmul$LayoutB = $;",
-             output.guid,
-             get_stensor_layout(input1, meta1, num_dims - 2 /*start_dim*/));
-      code.e("using Matmul$LayoutC = $;",
-             output.guid,
-             get_stensor_layout(output, meta2, num_dims - 2 /*start_dim*/));
-
-      // code.e("using Mma$Shape_A = decltype(partition_shape_A(tiled_mma, make_shape(size<0>(mma_tiler), size<2>(mma_tiler))));",
-      //         output.guid);
-      // code.e("using Mma$Shape_B = decltype(partition_shape_B(tiled_mma, make_shape(size<1>(mma_tiler), size<2>(mma_tiler))));",
-      //         output.guid);
-      // code.e("using Mma$Shape_C = decltype(partition_shape_C(tiled_mma, make_shape(size<0>(mma_tiler), size<1>(mma_tiler))));",
-      //         output.guid);
-
-      } else {
-      code.e("using Matmul$LayoutC = $;",
-             output.guid,
-             get_stensor_layout(output, meta2, num_dims - 2 /*start_dim*/));
-      }
-      code.e("using Matmul$Kernel = tb::Blackwell_Matmul<$, "
-             "$, $, Matmul$LayoutA, Matmul$LayoutB, "
-             "Matmul$LayoutC, NUM_THREADS, "
-             "$, $, $, $, $, $, decltype(cluster_shape), decltype(tiled_mma), decltype(mma_tiler)>;",
-             output.guid,
-             get_datatype_str(input0.data_type),
-             is_ldmatrix_avail,
-             is_stmatrix_avail,
-             output.guid,
-             output.guid,
-             output.guid,
-             num_exps_before_store,
-             is_accum_in_reg ? false : is_store_accum,
-             config.num_consumer_wgs > 1 ? true : false,
-             meta0.is_pipelined_input,
-             meta1.is_pipelined_input,
-             config.pipeline_stages);
-        code.e("auto matmul_$_accum = Matmul$Kernel::get_mma_tC(blockIdx.x, blockIdx.y, *tmem_base_ptr);",
-               output.guid,
-               output.guid);
-      code.e("");
-    }
-  }
-  code.e("__syncthreads();");
 
   if (num_pre_loop_copies > 0 || num_clear_accums > 0) {
     code.e("__syncthreads();");
     code.e("");
   }
 
-  // init barrier
 
   bool pipe_tma = !pipeline_inputs.empty();
   // if there is asyc copy defined
@@ -1114,7 +1160,7 @@ CustomOPTranspileResult
                      input0.guid,
                      input1.guid);
               code.e("if (elect_one_warp) {");
-              code.e("cutlass::arch::umma_arrive_multicast($, pair_mask);",
+              code.e("cutlass::arch::umma_arrive_multicast_2x1SM($, consumer_sync_mask);",
                      mbarrier_ptr_name);
               code.e("}"); // end of consumer sync
               code.e("}");
@@ -1412,9 +1458,11 @@ CustomOPTranspileResult
   }
 
   if (!copy_of_inputs.empty()) {
+    code.e("if (elect_one_cta && elect_one_warp) {");
     for (auto const &[pipe_id, op] : copy_of_inputs) {
       code.e("blackwell_async_pipeline_$.consumer_release();", pipe_id);
     }
+    code.e("}");
   }
 
   code.e("}"); // For loop
@@ -1466,7 +1514,7 @@ CustomOPTranspileResult
   if (pipe_tma) {
     code.e("}");
   }
-
+  // release tensor memory
   code.e("__syncthreads();");
   code.e("if (elect_one_warp) { ");
   code.e("tmem_allocator.release_allocation_lock(); ");

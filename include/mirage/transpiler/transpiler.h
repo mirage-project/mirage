@@ -116,8 +116,6 @@ private:
 
   void get_hopper_tmas(CodeKeeper &code, std::vector<TMAParams> tmaParamsList);
 
-  void get_blackwell_tmas(CodeKeeper &code, std::vector<TMAParams> tmaParamsList);
-
   // Transpile the whole uGraph
   TranspileResult transpile_ugraph();
 

@@ -317,7 +317,6 @@ public:
       TiledMMA tiled_mma;
       Layout cluster_layout_vmnk = get_cluster_layout<TiledMMA, ClusterShape>();
       auto cta_in_cluster_coord_vmnk = cluster_layout_vmnk.get_flat_coord(int(cute::block_rank_in_cluster()));
-      auto elect_one_cta  = get<0>(cta_in_cluster_coord_vmnk) == Int<0>{};
 
       auto mma_coord_vmnk = get_mma_coord_vmnk<TiledMMA, ClusterShape>(blockIdx.x, blockIdx.y);
       auto mma_coord = select<1,2,3>(mma_coord_vmnk);
@@ -329,13 +328,21 @@ public:
         }
       }();
 
+
       auto mma_v = get<0>(mma_coord_vmnk);
       ThrMMA cta_mma = tiled_mma.get_slice(mma_v);   // Use Peer CTA coordinate
-      Tensor tCgA = cta_mma.partition_A(gA);         // (MmaA, NumMma_M, NumMma_K, Tiles_K)
+
+      decltype(auto) tCgA = [&]() {
+        if constexpr (MInput) {
+          return cta_mma.partition_A(gA);         // (MmaA, NumMma_M, NumMma_K, Tiles_K)
+        } else {
+          return cta_mma.partition_B(gA);         // (MmaA, NumMma_M, NumMma_K, Tiles_K)
+        }
+      }();
 
       // Project the cluster_layout for tma_A along the N-modes
       uint16_t tma_mcast_mask;
-      if (MInput) {
+      if constexpr (MInput) {
         tma_mcast_mask = create_tma_multicast_mask<2>(cluster_layout_vmnk, cta_in_cluster_coord_vmnk);
       } else {
         tma_mcast_mask = create_tma_multicast_mask<1>(cluster_layout_vmnk, cta_in_cluster_coord_vmnk);
@@ -349,8 +356,8 @@ public:
                               group_modes<0,rank(tCsA)-1>(tCsA), group_modes<0,rank(tCgA)-1>(tCgA));
         } else {
           return tma_partition(tma_a,
-                              get<1>(cta_in_cluster_coord_vmnk),          // The CTA coordinate along N mode of the cluster
-                              make_layout(size<1>(cluster_layout_vmnk)),  // The CTA layout along N mode of the cluster
+                              get<1>(cta_in_cluster_coord_vmnk),          // The CTA coordinate along M mode of the cluster
+                              make_layout(size<1>(cluster_layout_vmnk)),  // The CTA layout along M mode of the cluster
                               group_modes<0,rank(tCsA)-1>(tCsA), group_modes<0,rank(tCgA)-1>(tCgA));
         }
       }();

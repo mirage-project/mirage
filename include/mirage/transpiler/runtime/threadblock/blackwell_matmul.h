@@ -189,74 +189,12 @@ public:
     // Load TMEM -> RMEM
     copy(tiled_t2r_copy, tDtAcc, tDrAcc);
 
-    // wg_sync<128>(9);
-    // if (select_thread()) {
-    //   printf("\n tDrAcc:\n");
-    //   print_tensor(tDrAcc);
-    //   printf("\n smemlayoutC:\n");
-    //   print(SmemLayoutC{});
-    //   // printf("\n tDtAcc:\n");
-    //   // print_tensor(tDtAcc);
-    //   // printf("\n tCsC:\n");
-    // }
-
-    // R2STiledCopyC r2s_tiled_copy_C;
-    // ThrCopy r2s_tiled_copy_C_thr = r2s_tiled_copy_C.get_slice(thread_idx);
-    // auto r2s_rC =
-    //     r2s_tiled_copy_C_thr.retile_S(tDrAcc);            // (R2S, R2S_M, R2S_N)
-    // auto r2s_sC = r2s_tiled_copy_C_thr.partition_D(tCsC); // (R2S, R2S_M, R2S_N)
     TiledCopy tiled_r2s_copy = make_tiled_copy_D(Copy_Atom<SMemStoreOp, T>{}, tiled_t2r_copy);
     ThrCopy thread_r2s = tiled_r2s_copy.get_slice(thread_idx);
     auto r2s_rC = thread_r2s.retile_S(tDrAcc);
     auto r2s_sC = thread_r2s.partition_D(tCsC);
 
-    // if (select_thread()) {
-      // printf("\n r2s_tiled_copy_C:\n");
-      // print(r2s_tiled_copy_C);
-      // printf("\n t2r_copy:\n");
-      // print(tiled_t2r_copy);
-      // printf("\n thr_t2r_copy:\n");
-      // print(thr_t2r_copy);
-      // printf("\n tiled_r2s_copy:\n");
-      // print(tiled_r2s_copy);
-      // printf("\n thread_r2s:\n");
-      // print(thread_r2s);
-    //   printf("\n r2s_rC:\n");
-    //   print(r2s_rC);
-    //   printf("\n r2s_sC:\n");
-    //   print(r2s_sC);
-    //   printf("\n tCtAcc:\n");
-    //   print(tCtAcc);
-    //   printf("\n tDsC:\n");
-    //   print(tDsC);
-    //   printf("\n tDrAcc:\n");
-    //   print(tDrAcc);
-    //   printf("\n tDtAcc:\n");
-    //   print(tDtAcc);
-    //   printf("\n tCsC:\n");
-    //   print(tCsC);
-    //   printf("\n sC:\n");
-    //   print(sC);
-    // }
-
-    // auto r2s_rC_0 = r2s_rC(_,_,_,Int<0>{});
-    // auto r2s_sC_0 = r2s_sC(_,_,_,Int<0>{});
-    // r2s_copy_with_oob_protection<T,
-    //                              M,
-    //                              N,
-    //                              NUM_EXPS_BEFORE_STORE,
-    //                              IS_STORE_ACCUM>(
-    //     tiled_r2s_copy, r2s_rC_0, r2s_sC_0, thread_idx);
     copy(tiled_r2s_copy, r2s_rC, r2s_sC);
-    
-    // tb::wg_sync<128>(9);
-
-    // if (select_thread()) {
-    //   printf("\n sC:\n");
-    //   print_tensor(sC);
-    //   printf("\n r2s_sC: \n");
-    //   print_tensor(r2s_sC);
-    // }
   }
 
   // a_ptr, b_ptr are from smem, mma_tC is from tmem
@@ -271,22 +209,22 @@ public:
            BlackwellAsyncPipeline_A &blackwell_async_pipeline_20000012,
            BlackwellAsyncPipeline_B &blackwell_async_pipeline_20000013)  
   {
-    if (k_iter == 0) {
-      tiled_mma.accumulate_ = UMMA::ScaleOut::Zero;
-    }
-    
-    auto mma_coord_vmnk = get_mma_coord_vmnk<TiledMMA, ClusterShape_MNK>(blockIdx.x, blockIdx.y);  
-
-    auto mma_v = get<0>(mma_coord_vmnk);
-    auto cta_mma = tiled_mma.get_slice(mma_v);
-
-    Tensor tCsA = make_tensor(make_smem_ptr(a_ptr), DstPipeLayout_A{});
-    Tensor tCsB = make_tensor(make_smem_ptr(b_ptr), DstPipeLayout_B{});
-
-    Tensor tCrA = cta_mma.make_fragment_A(tCsA);
-    Tensor tCrB = cta_mma.make_fragment_B(tCsB);
-
     if (warp_id() == 0) {
+      if (k_iter == 0) {
+        tiled_mma.accumulate_ = UMMA::ScaleOut::Zero;
+      }
+
+      auto mma_coord_vmnk = get_mma_coord_vmnk<TiledMMA, ClusterShape_MNK>(blockIdx.x, blockIdx.y);  
+
+      auto mma_v = get<0>(mma_coord_vmnk);
+      auto cta_mma = tiled_mma.get_slice(mma_v);
+
+      Tensor tCsA = make_tensor(make_smem_ptr(a_ptr), DstPipeLayout_A{});
+      Tensor tCsB = make_tensor(make_smem_ptr(b_ptr), DstPipeLayout_B{});
+
+      Tensor tCrA = cta_mma.make_fragment_A(tCsA);
+      Tensor tCrB = cta_mma.make_fragment_B(tCsB);
+
       // Execute a MmaTile_M x MmaTile_N x MmaTile_K GEMM
       for (int k_block = 0; k_block < size<2>(tCrA); ++k_block) {
           gemm(tiled_mma, tCrA(_,_,k_block,read_stage), tCrB(_ ,_,k_block,read_stage), mma_tC);
