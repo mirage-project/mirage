@@ -90,7 +90,9 @@ struct TiledMMA {
   size_t guid;
 
   // Constructor
-  TiledMMA() : A_type("half_t"), B_type("half_t"), C_type("half_t"), M_tile_size(256), N_tile_size(256), K_tile_size(16), guid(0) {}
+  TiledMMA()
+      : A_type("half_t"), B_type("half_t"), C_type("half_t"), M_tile_size(256),
+        N_tile_size(256), K_tile_size(16), guid(0) {}
 
   TiledMMA(std::string const &A_type,
            std::string const &B_type,
@@ -99,7 +101,9 @@ struct TiledMMA {
            int N_tile_size,
            int K_tile_size,
            size_t guid)
-           : A_type(A_type), B_type(B_type), C_type(C_type), M_tile_size(M_tile_size), N_tile_size(N_tile_size), K_tile_size(K_tile_size), guid(guid) {}
+      : A_type(A_type), B_type(B_type), C_type(C_type),
+        M_tile_size(M_tile_size), N_tile_size(N_tile_size),
+        K_tile_size(K_tile_size), guid(guid) {}
 };
 
 struct TMAParams {
@@ -118,7 +122,6 @@ struct TMAParams {
   int forloop_dim;
   std::string multicast_direction;
   TiledMMA tiled_mma;
-  
 
   // Constructor for convenience
   TMAParams(size_t input_id,
@@ -135,7 +138,8 @@ struct TMAParams {
             int forloop_range,
             int forloop_dim,
             std::string const &multicast_direction = "NOT_MULTICAST",
-            TiledMMA const &tiled_mma = TiledMMA("half_t", "half_t", "half_t", 256, 256, 16, 0))
+            TiledMMA const &tiled_mma =
+                TiledMMA("half_t", "half_t", "half_t", 256, 256, 16, 0))
       : input_id(input_id), guid(guid), sguid(sguid), srcLayout(srcLayout),
         dstLayout(dstLayout), m_input(m_input), tile_size(tile_size),
         clusterSize(clusterSize), original_shape(original_shape),
@@ -226,11 +230,11 @@ struct STensorMeta {
   bool n_input = false;
 
   // the guid of the matrix tensor
-  // if have a m matrix as pair with this tensor, which means this matrix is A matrix
-  // m_matrix_guid is the guid of the pair tensor guid
+  // if have a m matrix as pair with this tensor, which means this matrix is A
+  // matrix m_matrix_guid is the guid of the pair tensor guid
   sguid_t m_matrix_guid = 0;
-  // if have a n matrix as pair with this tensor, which means this matrix is B matrix
-  // n_matrix_guid is the guid of the pair tensor guid
+  // if have a n matrix as pair with this tensor, which means this matrix is B
+  // matrix n_matrix_guid is the guid of the pair tensor guid
   sguid_t n_matrix_guid = 0;
   // if have a c matrix as output tensor, which means this matrix is C matrix
   // c_matrix_guid is the guid of the pair tensor guid
@@ -255,7 +259,7 @@ struct TBMemoryPlan {
   // $x$, then the guid of the async input buffer is $x +
   // pipelined_input_buf_guid_offset$)
   sguid_t pipelined_input_buf_guid_offset;
-  
+
   // The guid offset for tmem base ptr used in blackwell
   sguid_t tmem_base_ptr_guid;
 

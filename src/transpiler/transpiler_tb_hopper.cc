@@ -29,7 +29,6 @@
 #include "mirage/transpiler/utils.h"
 #include "mirage/type.h"
 
-
 namespace mirage {
 namespace transpiler {
 
@@ -325,7 +324,8 @@ CustomOPTranspileResult
            (config.num_consumer_wgs + config.num_producer_wgs) * 128 &&
        (g.forloop_range > 1))) {
     assert(false && "compiler assertion failure");
-    return CustomOPTranspileResult{CUDA_T_CONFIG_ERROR, func_name, 0, 0, "", {}};
+    return CustomOPTranspileResult{
+        CUDA_T_CONFIG_ERROR, func_name, 0, 0, "", {}};
   }
 
   // int barrier_size = 16 * config.pipeline_stages;
