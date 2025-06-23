@@ -146,10 +146,7 @@ __device__ __forceinline__ void
   float o[8][8];
 #pragma unroll
   for (int n = 0; n < 8; n++) {
-#pragma unroll
-    for (int frag_idx = 0; frag_idx < 8; frag_idx++) {
-      o[n][frag_idx] = 0.0f;
-    }
+    clear_8_floats(o[n]);
   }
 
   // 16 * 128
@@ -260,10 +257,7 @@ __device__ __forceinline__ void
     __syncthreads();
 
     float s_frag[8];
-#pragma unroll
-    for (int frag_idx = 0; frag_idx < 8; frag_idx++) {
-      s_frag[frag_idx] = 0.0f;
-    }
+    clear_8_floats(s_frag);
 
     uint32_t a_frag[4], b_frag[4], v_frag[4];
     // MNK = 7, 64, 128, tiledMMA 7, 64, 16, thread layout 1,4,1
