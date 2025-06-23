@@ -98,7 +98,7 @@ private:
                                            TBSched const &sched);
 
   void get_threadblock_swizzle_plan_blackwell(tb::Graph const &tb_graph,
-                                             TBSched const &sched);
+                                              TBSched const &sched);
 
   // Get the "optimal" memory plan for a threadblock graph
   TBMemoryPlan get_threadblock_memory_plan(tb::Graph const &tb_graph,
@@ -110,7 +110,7 @@ private:
   CustomOPTranspileResult transpile_kn_custom_op(kn::KNCustomizedOp const *op);
   CustomOPTranspileResult
       transpile_kn_custom_op_hopper(kn::KNCustomizedOp const *op);
-  
+
   CustomOPTranspileResult
       transpile_kn_custom_op_blackwell(kn::KNCustomizedOp const *op);
 
