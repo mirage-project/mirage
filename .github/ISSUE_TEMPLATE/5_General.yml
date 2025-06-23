@@ -2,7 +2,6 @@ name: "General"
 description: "Create a general issue"
 title: "[General] - Brief Description"
 labels: ["question"]
-assignees: []
 
 body:
   - type: textarea
