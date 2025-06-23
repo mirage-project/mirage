@@ -20,8 +20,8 @@
 #include "mirage/kernel/operator.h"
 #include <unordered_map>
 #include <vector>
+#include <cuda_runtime.h>
 
-#include <cublas_v2.h>
 namespace mirage {
 namespace kernel {
 
@@ -56,7 +56,7 @@ public:
 
 public:
   cudaStream_t stream[mirage::config::MAX_NUM_GPUS];
-  cublasHandle_t blas[mirage::config::MAX_NUM_GPUS];
+  // cublasHandle_t blas[mirage::config::MAX_NUM_GPUS];
   // cudnnHandle_t cudnn;
 };
 
