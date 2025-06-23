@@ -158,8 +158,7 @@ TranspileResult Transpiler::transpile_ugraph() {
   header.e("#define USE_NVSHMEM $", use_nvshmem);
   if (config.target_cc == GPU_CC::H100) {
     header.e("#define MIRAGE_GRACE_HOPPER");
-  } 
-  else if (config.target_cc == GPU_CC::B200) {
+  } else if (config.target_cc == GPU_CC::B200) {
     header.e("#define MIRAGE_BLACKWELL");
   }
   header.e("#include \"runtime.h\"");
@@ -523,7 +522,6 @@ TranspileResult Transpiler::transpile_ugraph() {
           DTensorMeta const &meta = dtensor_metas.at(guid);
         }
 
-
         std::vector<TiledMMA> tiled_mmas;
         // TODO (zy): Support 1sm_mma
         bool use_2sm_mma = true;
@@ -540,56 +538,62 @@ TranspileResult Transpiler::transpile_ugraph() {
 
             tmas.append(fmt("tma_$, ", tmaParams.guid));
             tma_tmps.append(fmt("decltype(tma_$)", tmaParams.guid));
-            tma_dst_pipe_layouts.append(fmt("DstPipeLayout_${}", tmaParams.guid));
+            tma_dst_pipe_layouts.append(
+                fmt("DstPipeLayout_${}", tmaParams.guid));
             if (i != result.tmaParamsList.size() - 1) {
               tma_tmps.append(", ");
               m_inputs.append(", ");
               tma_dst_pipe_layouts.append(", ");
             }
-            if (tmaParams.m_input){
+            if (tmaParams.m_input) {
               tiled_mmas.push_back(tmaParams.tiled_mma);
             }
           }
           // init tiled_mmas
-          if (config.target_cc == GPU_CC::B200 && use_2sm_mma){
+          if (config.target_cc == GPU_CC::B200 && use_2sm_mma) {
             exec.e("dim3 cluster_dim($, $, $);",
-               bgraph.cluster_dim.x,
-               bgraph.cluster_dim.y,
-               bgraph.cluster_dim.z);
+                   bgraph.cluster_dim.x,
+                   bgraph.cluster_dim.y,
+                   bgraph.cluster_dim.z);
 
-            exec.e("auto cluster_shape = make_shape(Int<$>{}, Int<$>{}, Int<$>{});",
-              bgraph.cluster_dim.x,
-              bgraph.cluster_dim.y,
-              bgraph.cluster_dim.z);
+            exec.e("auto cluster_shape = make_shape(Int<$>{}, Int<$>{}, "
+                   "Int<$>{});",
+                   bgraph.cluster_dim.x,
+                   bgraph.cluster_dim.y,
+                   bgraph.cluster_dim.z);
 
             // declare tiled_mma on host, as tma requires it
-            for (auto const &tiled_mma : tiled_mmas){
+            for (auto const &tiled_mma : tiled_mmas) {
               exec.e("TiledMMA tiled_mma_$ = "
-                "cutlass::gemm::collective::detail::sm100_make_2sm_trivial_tiled_mma<"
-                "$, $, $, "
-                "Shape<Int<$>, Int<$>>, "
-                "decltype(cluster_shape), "
-                "UMMA::Major::K, "
-                "UMMA::Major::MN>();",
-                tiled_mma.guid,
-                tiled_mma.A_type,
-                tiled_mma.B_type,
-                tiled_mma.C_type,
-                tiled_mma.M_tile_size,
-                tiled_mma.N_tile_size);
+                     "cutlass::gemm::collective::detail::sm100_make_2sm_"
+                     "trivial_tiled_mma<"
+                     "$, $, $, "
+                     "Shape<Int<$>, Int<$>>, "
+                     "decltype(cluster_shape), "
+                     "UMMA::Major::K, "
+                     "UMMA::Major::MN>();",
+                     tiled_mma.guid,
+                     tiled_mma.A_type,
+                     tiled_mma.B_type,
+                     tiled_mma.C_type,
+                     tiled_mma.M_tile_size,
+                     tiled_mma.N_tile_size);
 
-
-              exec.e("Layout cluster_layout_vmnk_$ = tiled_divide(make_layout(cluster_shape), make_tile(typename decltype(tiled_mma_$)::AtomThrID{}));",
-              tiled_mma.guid,
-              tiled_mma.guid);
+              exec.e("Layout cluster_layout_vmnk_$ = "
+                     "tiled_divide(make_layout(cluster_shape), "
+                     "make_tile(typename decltype(tiled_mma_$)::AtomThrID{}));",
+                     tiled_mma.guid,
+                     tiled_mma.guid);
 
               assert(tiled_mma.K_tile_size % 16 == 0);
-              exec.e("auto mma_tiler_$ = make_shape(tile_size<0>(tiled_mma_$), tile_size<1>(tiled_mma_$), tile_size<2>(tiled_mma_$)*_${});",
-              tiled_mma.guid,
-              tiled_mma.guid,
-              tiled_mma.guid,
-              tiled_mma.guid,
-              tiled_mma.K_tile_size / 16);
+              exec.e(
+                  "auto mma_tiler_$ = make_shape(tile_size<0>(tiled_mma_$), "
+                  "tile_size<1>(tiled_mma_$), tile_size<2>(tiled_mma_$)*_${});",
+                  tiled_mma.guid,
+                  tiled_mma.guid,
+                  tiled_mma.guid,
+                  tiled_mma.guid,
+                  tiled_mma.K_tile_size / 16);
             }
 
             exec.e("");
@@ -598,37 +602,38 @@ TranspileResult Transpiler::transpile_ugraph() {
           exec.e(fmt("std::vector<bool> minputs = {$};", m_inputs));
           for (int i = 0; i < result.tmaParamsList.size(); i++) {
             auto const &tmaParams = result.tmaParamsList.at(i);
-            if (config.target_cc == GPU_CC::B200){
-              if (tmaParams.m_input){
-                  exec.e(fmt("static constexpr cute::UMMA::Major UMMAMajor_$ = "
-                                            "UMMA::Major::K;",
-                                            tmaParams.guid));
-                  
-                  exec.e(fmt("using DstMNKLayout_$ = decltype(partition_shape_A(tiled_mma_$, make_shape(size<0>(mma_tiler_$), size<2>(mma_tiler_$))));",
-                            tmaParams.guid,
-                            tmaParams.tiled_mma.guid,
-                            tmaParams.tiled_mma.guid,
-                            tmaParams.tiled_mma.guid));
+            if (config.target_cc == GPU_CC::B200) {
+              if (tmaParams.m_input) {
+                exec.e(fmt("static constexpr cute::UMMA::Major UMMAMajor_$ = "
+                           "UMMA::Major::K;",
+                           tmaParams.guid));
 
-                  exec.e(fmt("using SrcMNKLayout_$ = $;",
-                      tmaParams.guid,
-                      tmaParams.srcLayout));
+                exec.e(fmt(
+                    "using DstMNKLayout_$ = "
+                    "decltype(partition_shape_A(tiled_mma_$, "
+                    "make_shape(size<0>(mma_tiler_$), size<2>(mma_tiler_$))));",
+                    tmaParams.guid,
+                    tmaParams.tiled_mma.guid,
+                    tmaParams.tiled_mma.guid,
+                    tmaParams.tiled_mma.guid));
 
+                exec.e(fmt("using SrcMNKLayout_$ = $;",
+                           tmaParams.guid,
+                           tmaParams.srcLayout));
 
+                exec.e(fmt("using SmemLayoutAtom_$ = "
+                           "decltype(cutlass::gemm::collective::detail::sm100_"
+                           "smem_selector<"
+                           "UMMAMajor_$, $, decltype(get<0>(mma_tiler_$)), "
+                           "decltype(get<2>(mma_tiler_$))>());",
+                           tmaParams.guid,
+                           tmaParams.guid,
+                           get_datatype_str(cur_op->input_tensors[0].data_type),
+                           tmaParams.tiled_mma.guid,
+                           tmaParams.tiled_mma.guid));
 
-                  exec.e(fmt(
-                      "using SmemLayoutAtom_$ = "
-                      "decltype(cutlass::gemm::collective::detail::sm100_smem_selector<"
-                      "UMMAMajor_$, $, decltype(get<0>(mma_tiler_$)), "
-                      "decltype(get<2>(mma_tiler_$))>());",
-                      tmaParams.guid,
-                      tmaParams.guid,
-                      get_datatype_str(cur_op->input_tensors[0].data_type),
-                      tmaParams.tiled_mma.guid,
-                      tmaParams.tiled_mma.guid
-                    ));
-
-                    exec.e(fmt("using DstPipeLayout_$ = "
+                exec.e(
+                    fmt("using DstPipeLayout_$ = "
                         "decltype(UMMA::tile_to_mma_shape(SmemLayoutAtom_${}, "
                         "append(DstMNKLayout_${}, Int<$>{}), "
                         "Step<_1, _2, _3>{}));",
@@ -637,33 +642,36 @@ TranspileResult Transpiler::transpile_ugraph() {
                         tmaParams.guid,
                         config.pipeline_stages));
               } else {
-                  exec.e(fmt("static constexpr cute::UMMA::Major UMMAMajor_$ = "
-                              "UMMA::Major::MN;",
-                              tmaParams.guid));
+                exec.e(fmt("static constexpr cute::UMMA::Major UMMAMajor_$ = "
+                           "UMMA::Major::MN;",
+                           tmaParams.guid));
 
-                  exec.e(fmt("using DstMNKLayout_$ = decltype(partition_shape_B(tiled_mma_$, make_shape(size<1>(mma_tiler_$), size<2>(mma_tiler_$))));",
-                        tmaParams.guid,
-                        tmaParams.tiled_mma.guid,
-                        tmaParams.tiled_mma.guid,
-                        tmaParams.tiled_mma.guid));
+                exec.e(fmt(
+                    "using DstMNKLayout_$ = "
+                    "decltype(partition_shape_B(tiled_mma_$, "
+                    "make_shape(size<1>(mma_tiler_$), size<2>(mma_tiler_$))));",
+                    tmaParams.guid,
+                    tmaParams.tiled_mma.guid,
+                    tmaParams.tiled_mma.guid,
+                    tmaParams.tiled_mma.guid));
 
-                  exec.e(fmt("using SrcMNKLayout_$ = $;",
-                      tmaParams.guid,
-                      tmaParams.srcLayout));
+                exec.e(fmt("using SrcMNKLayout_$ = $;",
+                           tmaParams.guid,
+                           tmaParams.srcLayout));
 
-                  exec.e(fmt(
-                      "using SmemLayoutAtom_$ = "
-                      "decltype(cutlass::gemm::collective::detail::sm100_smem_selector<"
-                      "UMMAMajor_$, $, decltype(get<1>(mma_tiler_$)), "
-                      "decltype(get<2>(mma_tiler_$))>());",
-                      tmaParams.guid,
-                      tmaParams.guid,
-                      get_datatype_str(cur_op->input_tensors[0].data_type),
-                      tmaParams.tiled_mma.guid,
-                      tmaParams.tiled_mma.guid
-                    ));
+                exec.e(fmt("using SmemLayoutAtom_$ = "
+                           "decltype(cutlass::gemm::collective::detail::sm100_"
+                           "smem_selector<"
+                           "UMMAMajor_$, $, decltype(get<1>(mma_tiler_$)), "
+                           "decltype(get<2>(mma_tiler_$))>());",
+                           tmaParams.guid,
+                           tmaParams.guid,
+                           get_datatype_str(cur_op->input_tensors[0].data_type),
+                           tmaParams.tiled_mma.guid,
+                           tmaParams.tiled_mma.guid));
 
-                    exec.e(fmt("using DstPipeLayout_$ = "
+                exec.e(
+                    fmt("using DstPipeLayout_$ = "
                         "decltype(UMMA::tile_to_mma_shape(SmemLayoutAtom_${}, "
                         "append(DstMNKLayout_${}, Int<$>{}), "
                         "Step<_1, _2, _3>{}));",
@@ -674,121 +682,119 @@ TranspileResult Transpiler::transpile_ugraph() {
               }
 
               exec.e(fmt("auto g_tensor_$ = "
-                       "make_tensor(make_gmem_ptr<$>(dtensor$), "
-                       "SrcMNKLayout_${});",
-                       tmaParams.guid,
-                       get_datatype_str(cur_op->input_tensors[0].data_type),
-                       tmaParams.guid,
-                       tmaParams.guid));
+                         "make_tensor(make_gmem_ptr<$>(dtensor$), "
+                         "SrcMNKLayout_${});",
+                         tmaParams.guid,
+                         get_datatype_str(cur_op->input_tensors[0].data_type),
+                         tmaParams.guid,
+                         tmaParams.guid));
 
-              if (tmaParams.multicast_direction == "N_MODE"){
-                  exec.e(
-                    fmt("auto tma_$ = make_tma_atom_A_sm100(SM100_TMA_2SM_LOAD_MULTICAST{}, g_tensor_$, "
-                        "DstPipeLayout_${}(_, _, _, Int<0>{}), mma_tiler_$, tiled_mma_$, cluster_layout_vmnk_$);",
-                        tmaParams.guid,
-                        tmaParams.guid,
-                        tmaParams.guid,
-                        tmaParams.tiled_mma.guid,
-                        tmaParams.tiled_mma.guid,
-                        tmaParams.tiled_mma.guid));
-                } else if (tmaParams.multicast_direction == "M_MODE"){
-                  exec.e(
-                    fmt("auto tma_$ = make_tma_atom_B_sm100(SM100_TMA_2SM_LOAD_MULTICAST{}, g_tensor_$, "
-                        "DstPipeLayout_${}(_, _, _, Int<0>{}), mma_tiler_$, tiled_mma_$, cluster_layout_vmnk_$);",
-                        tmaParams.guid,
-                        tmaParams.guid,
-                        tmaParams.guid,
-                        tmaParams.tiled_mma.guid,
-                        tmaParams.tiled_mma.guid,
-                        tmaParams.tiled_mma.guid));
-                } else {
-                  // TODO (zy): Support other multicast directions such as not multicast
-                  assert(false && "Unsupported multicast direction");
-                }
+              if (tmaParams.multicast_direction == "N_MODE") {
+                exec.e(fmt("auto tma_$ = "
+                           "make_tma_atom_A_sm100(SM100_TMA_2SM_LOAD_MULTICAST{"
+                           "}, g_tensor_$, "
+                           "DstPipeLayout_${}(_, _, _, Int<0>{}), mma_tiler_$, "
+                           "tiled_mma_$, cluster_layout_vmnk_$);",
+                           tmaParams.guid,
+                           tmaParams.guid,
+                           tmaParams.guid,
+                           tmaParams.tiled_mma.guid,
+                           tmaParams.tiled_mma.guid,
+                           tmaParams.tiled_mma.guid));
+              } else if (tmaParams.multicast_direction == "M_MODE") {
+                exec.e(fmt("auto tma_$ = "
+                           "make_tma_atom_B_sm100(SM100_TMA_2SM_LOAD_MULTICAST{"
+                           "}, g_tensor_$, "
+                           "DstPipeLayout_${}(_, _, _, Int<0>{}), mma_tiler_$, "
+                           "tiled_mma_$, cluster_layout_vmnk_$);",
+                           tmaParams.guid,
+                           tmaParams.guid,
+                           tmaParams.guid,
+                           tmaParams.tiled_mma.guid,
+                           tmaParams.tiled_mma.guid,
+                           tmaParams.tiled_mma.guid));
+              } else {
+                // TODO (zy): Support other multicast directions such as not
+                // multicast
+                assert(false && "Unsupported multicast direction");
+              }
             }
 
             else if (config.target_cc == GPU_CC::H100) {
               if (tmaParams.m_input) {
                 exec.e(fmt("static constexpr cute::GMMA::Major GmmaMajor_$ = "
-                          "GMMA::Major::K;",
-                          tmaParams.guid));
+                           "GMMA::Major::K;",
+                           tmaParams.guid));
               } else {
                 exec.e(fmt("static constexpr cute::GMMA::Major GmmaMajor_$ = "
-                          "GMMA::Major::MN;",
-                          tmaParams.guid));
-              } 
+                           "GMMA::Major::MN;",
+                           tmaParams.guid));
+              }
 
               exec.e(fmt("using DstMNKLayout_$ = $;",
-                        tmaParams.guid,
-                        tmaParams.dstLayout));
+                         tmaParams.guid,
+                         tmaParams.dstLayout));
 
               exec.e(fmt("using SrcMNKLayout_$ = $;",
-                        tmaParams.guid,
-                        tmaParams.srcLayout));
+                         tmaParams.guid,
+                         tmaParams.srcLayout));
 
-              exec.e(fmt(
-                  "using SmemLayoutAtom_$ = "
-                  "decltype(cutlass::gemm::collective::detail::ss_smem_selector<"
-                  "GmmaMajor_$, $, decltype(get<0>(DstMNKLayout_${})), "
-                  "decltype(get<1>(DstMNKLayout_${}))>());",
-                  tmaParams.guid,
-                  tmaParams.guid,
-                  get_datatype_str(cur_op->input_tensors[0].data_type),
-                  tmaParams.guid,
-                  tmaParams.guid));
-
+              exec.e(fmt("using SmemLayoutAtom_$ = "
+                         "decltype(cutlass::gemm::collective::detail::ss_smem_"
+                         "selector<"
+                         "GmmaMajor_$, $, decltype(get<0>(DstMNKLayout_${})), "
+                         "decltype(get<1>(DstMNKLayout_${}))>());",
+                         tmaParams.guid,
+                         tmaParams.guid,
+                         get_datatype_str(cur_op->input_tensors[0].data_type),
+                         tmaParams.guid,
+                         tmaParams.guid));
 
               exec.e(fmt("using DstPipeLayout_$ = "
-                        "decltype(tile_to_shape(SmemLayoutAtom_${}, "
-                        "make_shape(shape<0>(DstMNKLayout_${}), "
-                        "shape<1>(DstMNKLayout_${}), Int<$>{}), "
-                        "Step<_1, _2, _3>{}));",
-                        tmaParams.guid,
-                        tmaParams.guid,
-                        tmaParams.guid,
-                        tmaParams.guid,
-                        config.pipeline_stages));
+                         "decltype(tile_to_shape(SmemLayoutAtom_${}, "
+                         "make_shape(shape<0>(DstMNKLayout_${}), "
+                         "shape<1>(DstMNKLayout_${}), Int<$>{}), "
+                         "Step<_1, _2, _3>{}));",
+                         tmaParams.guid,
+                         tmaParams.guid,
+                         tmaParams.guid,
+                         tmaParams.guid,
+                         config.pipeline_stages));
 
-            exec.e(fmt("auto g_tensor_$ = "
-                       "make_tensor(make_gmem_ptr<$>(dtensor$), "
-                       "SrcMNKLayout_${});",
-                       tmaParams.guid,
-                       get_datatype_str(cur_op->input_tensors[0].data_type),
-                       tmaParams.guid,
-                       tmaParams.guid));
-            
+              exec.e(fmt("auto g_tensor_$ = "
+                         "make_tensor(make_gmem_ptr<$>(dtensor$), "
+                         "SrcMNKLayout_${});",
+                         tmaParams.guid,
+                         get_datatype_str(cur_op->input_tensors[0].data_type),
+                         tmaParams.guid,
+                         tmaParams.guid));
+
               exec.e(
                   fmt("auto tma_$ = make_tma_copy(SM90_TMA_LOAD{}, g_tensor_$, "
                       "DstPipeLayout_${}(_, _, Int<0>{}));",
                       tmaParams.guid,
                       tmaParams.guid,
                       tmaParams.guid));
-            } 
-            else {
+            } else {
               assert(false && "Unsupported GPU architecture");
             }
 
             exec.e("");
-
-
           }
 
-
-          exec.e(fmt("auto kernel_ptr = &$<$>;",
-                  result.func_name,
-                  tma_tmps));
+          exec.e(fmt("auto kernel_ptr = &$<$>;", result.func_name, tma_tmps));
 
           if (result.tmaParamsList.size() > 0) {
-            if (config.target_cc == GPU_CC::B200){
+            if (config.target_cc == GPU_CC::B200) {
               exec.e("cudaFuncSetAttribute(kernel_ptr, "
-                    "cudaFuncAttributeMaxDynamicSharedMemorySize, $);",
-                    result.smem_size);
+                     "cudaFuncAttributeMaxDynamicSharedMemorySize, $);",
+                     result.smem_size);
             } else {
               exec.e("cudaFuncSetAttribute($<$>, "
-                    "cudaFuncAttributeMaxDynamicSharedMemorySize, $);",
-                    result.func_name,
-                    tma_tmps,
-                    result.smem_size);
+                     "cudaFuncAttributeMaxDynamicSharedMemorySize, $);",
+                     result.func_name,
+                     tma_tmps,
+                     result.smem_size);
             }
           } else {
             exec.e("cudaFuncSetAttribute($, "
@@ -796,19 +802,20 @@ TranspileResult Transpiler::transpile_ugraph() {
                    result.func_name,
                    result.smem_size);
           }
-          
-          if (config.target_cc == GPU_CC::H100){
+
+          if (config.target_cc == GPU_CC::H100) {
             exec.e("$<<<grid_dim, block_dim, smem_size, stream>>>($ $);",
-                  result.func_name,
-                  tmas,
-                  ptr_names);
-          } else if (config.target_cc == GPU_CC::B200){
-            exec.e("cutlass::ClusterLaunchParams params = {grid_dim, block_dim, cluster_dim, $};",
-                  result.smem_size);
-            exec.e("cutlass::launch_kernel_on_cluster(params, (void const*) kernel_ptr, $ $);",
-                  tmas,
-                  ptr_names);
-            
+                   result.func_name,
+                   tmas,
+                   ptr_names);
+          } else if (config.target_cc == GPU_CC::B200) {
+            exec.e("cutlass::ClusterLaunchParams params = {grid_dim, "
+                   "block_dim, cluster_dim, $};",
+                   result.smem_size);
+            exec.e("cutlass::launch_kernel_on_cluster(params, (void const*) "
+                   "kernel_ptr, $ $);",
+                   tmas,
+                   ptr_names);
           }
 
         } else {
@@ -835,12 +842,13 @@ TranspileResult Transpiler::transpile_ugraph() {
   init.e("}");
   exec.e("}");
 
-  string code = fmt("$\n$\n$\n$\n$\n",
-                    header.to_string(),
-                    custom_kernels.to_string(),
-                    init.to_string(),
-                    config.target_cc == GPU_CC::H100 ? hopper_tma.to_string() : "",
-                    exec.to_string());
+  string code =
+      fmt("$\n$\n$\n$\n$\n",
+          header.to_string(),
+          custom_kernels.to_string(),
+          init.to_string(),
+          config.target_cc == GPU_CC::H100 ? hopper_tma.to_string() : "",
+          exec.to_string());
   vector<OutputTensorDirective> output_directives;
   for (kn::DTensor const &dtensor : this->mugraph_output_tensors) {
     assert(dtensor_metas.find(dtensor.guid) != dtensor_metas.end());

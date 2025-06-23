@@ -261,9 +261,10 @@ TBMemoryPlan Transpiler::get_threadblock_memory_plan(tb::Graph const &tb_graph,
       memory_planner::AllocResult, memory_planner::ALIGNMENT;
   static constexpr sguid_t PIPELINED_INPUT_BUF_GUID_OFFSET =
       10000000; // Should be larger than the number of STensors
-  // mbarrier in blackwell for 2 CTA sync, should be larger than number of STensors and pipeline input buf
-  static constexpr sguid_t MBARRIER_GUID_OFFSET = 30000000; 
-   // tmem base ptr in blackwell for tmem allocation
+  // mbarrier in blackwell for 2 CTA sync, should be larger than number of
+  // STensors and pipeline input buf
+  static constexpr sguid_t MBARRIER_GUID_OFFSET = 30000000;
+  // tmem base ptr in blackwell for tmem allocation
   static constexpr sguid_t TMEM_BASE_PTR_GUID = 40000000;
 
   // Generate all tensor declarations
@@ -495,7 +496,7 @@ TBMemoryPlan Transpiler::get_threadblock_memory_plan(tb::Graph const &tb_graph,
   plan.pipelined_input_buf_guid_offset = PIPELINED_INPUT_BUF_GUID_OFFSET;
   plan.tmem_base_ptr_guid = TMEM_BASE_PTR_GUID;
   plan.mbarrier_buf_guid_offset = MBARRIER_GUID_OFFSET;
-  
+
   // Leave the first 16 bytes of the shared memory for matmul operators
   // TODO(intlsy) Remove this if there is not Matmul op or do not need padding
   assert(ALIGNMENT >= 16);
@@ -515,7 +516,7 @@ TBMemoryPlan Transpiler::get_threadblock_memory_plan(tb::Graph const &tb_graph,
       auto [op, op_meta] = node.ops.front();
       if (op->op_type == type::TB_MATMUL_OP) {
         tb::STensor const &stensor = op->output_tensors.at(0);
-        size_t mbarrier_phy_size = 8; // uint64_t for each barrier
+        size_t mbarrier_phy_size = 8;      // uint64_t for each barrier
         size_t tmem_base_ptr_phy_size = 4; // uint32_t for tmem base ptr
 
         if (!tmem_init) {
@@ -524,9 +525,9 @@ TBMemoryPlan Transpiler::get_threadblock_memory_plan(tb::Graph const &tb_graph,
           tmem_init = true;
         }
         // align to 16 bytes
-        plan.addrs[stensor.guid + MBARRIER_GUID_OFFSET] = (usage+15)/16*16;
-        usage = (usage+15)/16*16 + mbarrier_phy_size;
-
+        plan.addrs[stensor.guid + MBARRIER_GUID_OFFSET] =
+            (usage + 15) / 16 * 16;
+        usage = (usage + 15) / 16 * 16 + mbarrier_phy_size;
       }
     }
   }
