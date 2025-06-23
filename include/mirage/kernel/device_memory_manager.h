@@ -18,9 +18,9 @@
 #include "mirage/kernel/customized.h"
 #include "mirage/kernel/matmul.h"
 #include "mirage/kernel/operator.h"
+#include <cuda_runtime.h>
 #include <unordered_map>
 #include <vector>
-#include <cuda_runtime.h>
 
 namespace mirage {
 namespace kernel {
