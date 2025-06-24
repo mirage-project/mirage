@@ -23,6 +23,7 @@
 #include <cstdint>
 #include <cute/layout.hpp>
 #include <cutlass/arch/reg_reconfig.h>
+#include "utils.h"
 using namespace cute;
 
 namespace tb {
