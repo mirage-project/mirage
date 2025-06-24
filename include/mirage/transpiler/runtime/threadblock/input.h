@@ -20,10 +20,10 @@
 #include "cutlass/gemm/collective/builders/sm90_common.inl"
 #include "cutlass/gemm/gemm.h"
 #include "cutlass/pipeline/pipeline.hpp"
+#include "utils.h"
 #include <cstdint>
 #include <cute/layout.hpp>
 #include <cutlass/arch/reg_reconfig.h>
-#include "utils.h"
 using namespace cute;
 
 namespace tb {

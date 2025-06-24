@@ -6,8 +6,8 @@ namespace mirage {
 namespace transpiler {
 
 // Get the swizzle plan for a threadblock
-void Transpiler::get_threadblock_swizzle_plan_blackwell(tb::Graph const &tb_graph,
-                                              TBSched const &sched) {
+void Transpiler::get_threadblock_swizzle_plan_blackwell(
+    tb::Graph const &tb_graph, TBSched const &sched) {
   // Get a list of all STensors that is not fused
   std::vector<tb::STensor> all_stensors;
   {
