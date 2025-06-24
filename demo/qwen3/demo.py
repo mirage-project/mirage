@@ -7,7 +7,8 @@ import argparse
 import os
 
 def grid_for_rmsnorm_linear_layer(size):
-    # 96 and 64 are enough to cover all Qwen3 model?
+    # 96 and 64 are enough to cover all Qwen3 model? Please update the method
+    # if you meet any incompatibility.
     if size % 96 == 0:
         return 96
     elif size % 64 == 0:
@@ -18,6 +19,9 @@ if __name__ == "__main__":
     parser.add_argument("--use-mirage", action="store_true", help="Use Mirage kernels")
     parser.add_argument(
         "--profiling", action="store_true", help="Use Profiler to generate trace"
+    )
+    parser.add_argument(
+        "--model", type=str, default='Qwen/Qwen3-8B', help="Model path on hugging face"
     )
     args = parser.parse_args()
     try:
@@ -41,16 +45,12 @@ if __name__ == "__main__":
 
     print("Input arguments:", args)
     print(f"world_size({world_size}) rank({rank})")
-    # model_name = "Qwen/Qwen2.5-7B-Instruct"
-    # TODO(Wenqin): set it as 8B befor landing.
-    model_name = "Qwen/Qwen3-0.6B"
+    model_name = args.model
     torch.set_default_dtype(torch.bfloat16)
 
     torch.cuda.set_device(rank)
     with torch.device("cuda"):
         model = Qwen3ForCausalLM.from_pretrained(model_name).to("cuda")
-        # config = AutoConfig.from_pretrained("/opt/dlami/nvme/models/Qwen3-8B/")
-        # model = Qwen3ForCausalLM(config, world_size)
     # load_model(
     #    model, f"/opt/dlami/nvme/models/Qwen3-8B/model{rank}-mp{world_size}.safetensors"
     # )
@@ -59,7 +59,6 @@ if __name__ == "__main__":
     tokens = torch.full((1, 32768), 0, dtype=torch.long, device="cuda")
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
-    # tokenizer = AutoTokenizer.from_pretrained("/opt/dlami/nvme/models/Qwen3-8B/")
 
     prompt = "Give me a short introduction to large language model."
     messages = [
@@ -119,19 +118,14 @@ if __name__ == "__main__":
             ).contiguous()
         else:
             profiler_tensor = None
-        # TODO(Wenqin): How to set num_local_schedulers and num_remote_schedulers? 
-        # Maybe we should remove the below change and let user set it manully?
-        num_workers = 64
-        num_local_schedulers = 16
-        num_remote_schedulers = 0
-        expected_sm_cnt = num_workers + (num_local_schedulers + num_remote_schedulers) / 4
-        assert torch.cuda.get_device_properties(rank).multi_processor_count == expected_sm_cnt
+        # TODO(Wenqin): introduce a method to dynamically get the configuration
+        # to support other GPUs.
         mpk = mi.PersistentKernel(
             world_size=world_size,
             mpi_rank=rank,
-            num_workers=num_workers,
-            num_local_schedulers=num_local_schedulers,
-            num_remote_schedulers=num_remote_schedulers,
+            num_workers=96,
+            num_local_schedulers=48,
+            num_remote_schedulers=0,
             meta_tensors=[step, tokens],
             profiler_tensor=profiler_tensor,
         )
