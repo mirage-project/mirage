@@ -80,6 +80,32 @@ struct TranspileResult {
   std::vector<OutputTensorDirective> output_directives;
 };
 
+struct TiledMMA {
+  std::string A_type;
+  std::string B_type;
+  std::string C_type;
+  int M_tile_size;
+  int N_tile_size;
+  int K_tile_size;
+  size_t guid;
+
+  // Constructor
+  TiledMMA()
+      : A_type("half_t"), B_type("half_t"), C_type("half_t"), M_tile_size(256),
+        N_tile_size(256), K_tile_size(16), guid(0) {}
+
+  TiledMMA(std::string const &A_type,
+           std::string const &B_type,
+           std::string const &C_type,
+           int M_tile_size,
+           int N_tile_size,
+           int K_tile_size,
+           size_t guid)
+      : A_type(A_type), B_type(B_type), C_type(C_type),
+        M_tile_size(M_tile_size), N_tile_size(N_tile_size),
+        K_tile_size(K_tile_size), guid(guid) {}
+};
+
 struct TMAParams {
   size_t input_id; // ID of the TMA
   size_t guid;
@@ -94,6 +120,8 @@ struct TMAParams {
   std::vector<int> partition_logic;
   int forloop_range;
   int forloop_dim;
+  std::string multicast_direction;
+  TiledMMA tiled_mma;
 
   // Constructor for convenience
   TMAParams(size_t input_id,
@@ -108,12 +136,16 @@ struct TMAParams {
             std::vector<size_t> const &original_stride,
             std::vector<int> const &partition_logic,
             int forloop_range,
-            int forloop_dim)
+            int forloop_dim,
+            std::string const &multicast_direction = "NOT_MULTICAST",
+            TiledMMA const &tiled_mma =
+                TiledMMA("half_t", "half_t", "half_t", 256, 256, 16, 0))
       : input_id(input_id), guid(guid), sguid(sguid), srcLayout(srcLayout),
         dstLayout(dstLayout), m_input(m_input), tile_size(tile_size),
         clusterSize(clusterSize), original_shape(original_shape),
         original_stride(original_stride), partition_logic(partition_logic),
-        forloop_range(forloop_range), forloop_dim(forloop_dim) {}
+        forloop_range(forloop_range), forloop_dim(forloop_dim),
+        multicast_direction(multicast_direction), tiled_mma(tiled_mma) {}
 };
 
 // Transpile a custom KN operator (a custom block graph)
@@ -194,6 +226,20 @@ struct STensorMeta {
   // Major K for M input
   bool m_input = false;
 
+  // is N input for matmul
+  bool n_input = false;
+
+  // the guid of the matrix tensor
+  // if have a m matrix as pair with this tensor, which means this matrix is A
+  // matrix m_matrix_guid is the guid of the pair tensor guid
+  sguid_t m_matrix_guid = 0;
+  // if have a n matrix as pair with this tensor, which means this matrix is B
+  // matrix n_matrix_guid is the guid of the pair tensor guid
+  sguid_t n_matrix_guid = 0;
+  // if have a c matrix as output tensor, which means this matrix is C matrix
+  // c_matrix_guid is the guid of the pair tensor guid
+  sguid_t c_matrix_guid = 0;
+
   // if is associate with a tma/cp.async copy
   bool is_pipelined_input = false;
 
@@ -213,6 +259,12 @@ struct TBMemoryPlan {
   // $x$, then the guid of the async input buffer is $x +
   // pipelined_input_buf_guid_offset$)
   sguid_t pipelined_input_buf_guid_offset;
+
+  // The guid offset for tmem base ptr used in blackwell
+  sguid_t tmem_base_ptr_guid;
+
+  // The guid offset for mbarrier ptr used in blackwell
+  sguid_t mbarrier_buf_guid_offset;
 };
 
 } // namespace transpiler
