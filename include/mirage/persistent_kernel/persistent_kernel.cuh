@@ -78,7 +78,7 @@ __device__ __forceinline__ bool
     prepare_next_batch(RuntimeConfig const &config) {
   int step = config.step[0];
   config.step[0] = step + 1;
-  if ((step >= 500) || (config.profiling) ||
+  if ((step >= 4096) || (config.profiling) ||
       (config.tokens[step + 1] == 151645 /*eos_token_id*/)) {
     return false;
   } else {

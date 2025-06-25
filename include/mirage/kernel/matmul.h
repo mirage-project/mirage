@@ -24,7 +24,6 @@ class KNMatmulOp : public mirage::kernel::KNOperator {
 public:
   KNMatmulOp(Graph *_graph, DTensor const &A, DTensor const &B);
   ~KNMatmulOp();
-  bool profile(ProfileResult &profile) override;
   bool fingerprint(void) override;
 
   operator json() const override;
