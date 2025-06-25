@@ -78,7 +78,7 @@ struct hash<std::vector<T>> {
 template <>
 struct hash<dim3> {
   size_t operator()(dim3 const &d) const {
-    return hash<std::tuple<uint, uint, uint>>{}(std::make_tuple(d.x, d.y, d.z));
+    return hash<std::tuple<unsigned int, unsigned int, unsigned int>>{}(std::make_tuple(d.x, d.y, d.z));
   }
 };
 
