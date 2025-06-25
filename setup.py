@@ -67,8 +67,6 @@ def config_cython():
                         "mirage_runtime",
                         "cudadevrt",
                         "cudart_static",
-                        "cudnn",
-                        "cublas",
                         "cudart",
                         "cuda",
                         "z3",

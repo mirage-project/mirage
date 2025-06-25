@@ -16,11 +16,10 @@
 #pragma once
 
 #include "cutlass/array.h"
+#include "cutlass/cutlass.h"
 #include "cutlass/fast_math.h"
 #include "mirage/config.h"
 #include "mirage/type.h"
-#include <cublas_v2.h>
-#include <cutlass/cutlass.h>
 #include <iostream>
 #include <sstream>
 #include <string>
