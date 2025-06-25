@@ -21,12 +21,6 @@
 namespace mirage {
 namespace kernel {
 
-bool KNOutputOp::profile(ProfileResult &profile) {
-  // Do nothing
-  profile.run_time = 0.0f;
-  return true;
-}
-
 bool KNOutputOp::fingerprint(void) {
   // Do nothing
   return true;

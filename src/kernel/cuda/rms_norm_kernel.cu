@@ -27,11 +27,6 @@ namespace kernel {
 
 using namespace mirage::utils;
 
-bool KNRMSNormOp::profile(ProfileResult &result) {
-  // TODO: add profile results
-  return true;
-}
-
 __global__ void compute_rms_norm_fingerprint(FPType *input_ptr,
                                              FPType *output_ptr,
                                              FPType *div_p_lookup_table,

@@ -1,4 +1,10 @@
+<div align="center">
+
 # Mirage Persistent Kernel: Compiling LLMs into a MegaKernel
+    
+| [Join Slack](https://join.slack.com/t/miragesystem/shared_invite/zt-37reobr1i-SKjxeYF3GXdPDoCvtVbjTQ) | [Roadmap](https://github.com/mirage-project/mirage/issues/325) | [Blog Post](https://zhihaojia.medium.com/compiling-llms-into-a-megakernel-a-path-to-low-latency-inference-cf7840913c17) | 
+
+</div>
 
 *Latest News* 🔥
 * [2025/06] We released [Mirage Persistent Kernel (MPK)](https://github.com/mirage-project/mirage/tree/mpk), a compiler and runtime that automatically transforms multi-GPU LLM inference into a high-performance megakernel.
@@ -20,7 +26,7 @@ export MIRAGE_HOME=$pwd
 > 🔧[2025/06/19] We are working on pre-built binary wheels for MPK and will update the installation instructions once they are available.
 
 ## Quickstart
-Mirage allows you to compile LLMs from the Hugging Face model zoo into a megakernel using just a few dizen lines of Python—mainly to define the kernel’s inputs and outputs. See [this demo script](https://github.com/mirage-project/mirage/blob/mpk/demo/qwen3/demo.py) that compiles the Qwen3-8B model into a megakernel.
+Mirage allows you to compile LLMs from the Hugging Face model zoo into a megakernel using just a few dozen lines of Python—mainly to define the kernel’s inputs and outputs. See [this demo script](https://github.com/mirage-project/mirage/blob/mpk/demo/qwen3/demo.py) that compiles the Qwen3-8B model into a megakernel.
 
 We start by running the demo with native Triton and FlashInfer kernels:
 ```bash
@@ -101,9 +107,9 @@ mpk()
 ```
 
 ## Contribution
-Please let us know if you encounter any bugs or have any suggestions by [submitting an issue](https://github.com/mirage-project/mirage/issues).
+We welcome feedback, contributions, and collaborations from the community! Please join our [Slack channel](https://join.slack.com/t/mirage-ag11870/shared_invite/zt-37reobr1i-SKjxeYF3GXdPDoCvtVbjTQ).
 
-We welcome all contributions to Mirage from bug fixes to new features and extensions.
+Please let us know if you encounter any bugs or have any suggestions by [submitting an issue](https://github.com/mirage-project/mirage/issues).
 
 ## Citation
 A paper describing Mirage's techniques is available [on arxiv](https://arxiv.org/abs/2405.05751). Please cite Mirage as:

@@ -33,7 +33,6 @@ from transformers.modeling_utils import PreTrainedModel
 from .configuration_qwen3 import Qwen3Config
 import time
 
-import flashinfer
 import mirage as mi
 from .rope import apply_rotary_pos_emb_triton
 
@@ -166,6 +165,28 @@ class Qwen3MLP(nn.Module):
 
         return output
 
+def naive_attention(
+    q, 
+    key_cache,
+    value_cache,
+    kv_len,
+    layer_idx,
+    is_causal=True, 
+    enable_gqa=True):
+            
+    k = key_cache[layer_idx, 0, :kv_len, :, :] # [kv_seq_len, num_kv_heads, head_dim]
+    v = value_cache[layer_idx, 0, :kv_len, :, :] # [kv_seq_len, num_kv_heads, head_dim]
+
+    q_for_sdpa = q.permute(1, 0, 2)    # [num_q_heads, 1, head_dim]
+    k_for_sdpa = k.permute(1, 0, 2)    # [num_q_heads, kv_seq_len, head_dim]
+    v_for_sdpa = v.permute(1, 0, 2)    # [num_q_heads, kv_seq_len, head_dim]
+
+    attn_output_sdpa = nn.functional.scaled_dot_product_attention(
+        q_for_sdpa, k_for_sdpa, v_for_sdpa, is_causal=is_causal, enable_gqa=enable_gqa
+    )
+    attn_output = attn_output_sdpa.permute(1, 0, 2)
+
+    return attn_output
 
 class Qwen3Attention(nn.Module):
     def __init__(
@@ -181,10 +202,12 @@ class Qwen3Attention(nn.Module):
         self.layer_idx = layer_idx
         assert self.layer_idx is not None
         self.hidden_size = config.hidden_size
+        self.qkv_size = config.head_dim * config.num_attention_heads
+        self.local_hidden_size = self.hidden_size // self.world_size
+        self.local_qkv_size = self.qkv_size // self.world_size
         self.num_heads = config.num_attention_heads
         self.num_local_heads = self.num_heads
-        self.head_dim = self.hidden_size // self.num_heads
-        assert self.head_dim * self.num_heads == self.hidden_size
+        self.head_dim = config.head_dim
         self.num_key_value_heads = config.num_key_value_heads
         self.num_key_value_groups = self.num_heads // self.num_key_value_heads
         self.key_cache, self.value_cache = kv_cache
@@ -241,7 +264,6 @@ class Qwen3Attention(nn.Module):
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
-        decode_wrapper=None,
         step: torch.Tensor = None,
         stream: torch.cuda.Stream = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
@@ -280,23 +302,31 @@ class Qwen3Attention(nn.Module):
             self.key_cache[self.layer_idx, 0, step] = key_states[0]
             self.value_cache[self.layer_idx, 0, step] = value_states[0]
 
+        q = query_states[0] # Shape: [q_len, num_q_heads, head_dim]
+
         if q_len > 1:
-            fl_attn_output = flashinfer.single_prefill_with_kv_cache(
-                query_states[0],
-                self.key_cache[self.layer_idx, 0, :q_len, :, :],
-                self.value_cache[self.layer_idx, 0, :q_len, :, :],
-                causal=True,
-                kv_layout="NHD",
+            attn_output = naive_attention(
+                q,
+                self.key_cache,
+                self.value_cache,
+                q_len,
+                self.layer_idx,
+                True,
+                True
             )
         else:
-            fl_attn_output = decode_wrapper.run(
-                query_states[0],
-                (self.key_cache[self.layer_idx], self.value_cache[self.layer_idx]),
+            kv_seq_len = step.item() + 1
+            attn_output = naive_attention(
+                q,
+                self.key_cache,
+                self.value_cache,
+                kv_seq_len,
+                self.layer_idx,
+                False,
+                True
             )
 
-        attn_output = fl_attn_output.view(
-            bsz, q_len, self.hidden_size // self.world_size
-        )
+        attn_output = attn_output.reshape(bsz, q_len, self.local_qkv_size)
 
         attn_output = self.o_proj(attn_output)
         if self.world_size > 1:
@@ -331,7 +361,6 @@ class Qwen3DecoderLayer(nn.Module):
         position_embeddings: Optional[
             Tuple[torch.Tensor, torch.Tensor]
         ] = None,  # will become mandatory in v4.46
-        decode_wrapper=None,
         step: torch.Tensor = None,
         stream: torch.cuda.Stream = None,
         **kwargs,
@@ -349,7 +378,6 @@ class Qwen3DecoderLayer(nn.Module):
             hidden_states=hidden_states,
             attention_mask=attention_mask,
             position_embeddings=position_embeddings,
-            decode_wrapper=decode_wrapper,
             step=step,
             stream=stream,
         )
@@ -388,14 +416,17 @@ class Qwen3Model(Qwen3PreTrainedModel):
         super().__init__(config)
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
-        # KV cache layout is (L, N, P, H, D) where L is the number of layers, N is the max number of pages (i.e., 1), P is the page size (i.e., config.max_embedding_positions), H is the number of key-value heads, and D is the hidden dim size
+        # KV cache layout is (L, N, P, H, D) where L is the number of layers, 
+        # N is the max number of pages (i.e., 1), 
+        # P is the page size (i.e., config.max_embedding_positions), 
+        # H is the number of key-value heads, and D is the hidden dim size
         key_cache = torch.empty(
             (
                 config.num_hidden_layers,
                 1,
                 4096,
                 config.num_key_value_heads // world_size,
-                config.hidden_size // config.num_attention_heads,
+                config.head_dim,
             ),
             dtype=torch.bfloat16,
             device="cuda",
@@ -406,7 +437,7 @@ class Qwen3Model(Qwen3PreTrainedModel):
                 1,
                 4096,
                 config.num_key_value_heads // world_size,
-                config.hidden_size // config.num_attention_heads,
+                config.head_dim,
             ),
             dtype=torch.bfloat16,
             device="cuda",
@@ -429,34 +460,7 @@ class Qwen3Model(Qwen3PreTrainedModel):
         # Initialize weights and apply final processing
         self.post_init()
 
-        # Create flashinfer decode wrapper
-        workspace_buffer = torch.empty(
-            128 * 1024 * 1024, dtype=torch.uint8, device="cuda"
-        )
-        kv_page_indices = torch.arange(1).int().to("cuda")
-        kv_page_indptr = torch.tensor([0, 1], dtype=torch.int32, device="cuda")
         self.kv_last_page_len = torch.tensor([0], dtype=torch.int32, device="cuda")
-        self.decode_wrapper = flashinfer.BatchDecodeWithPagedKVCacheWrapper(
-            workspace_buffer,
-            kv_layout="NHD",
-            use_cuda_graph=True,
-            use_tensor_cores=True,
-            paged_kv_indptr_buffer=kv_page_indptr,
-            paged_kv_indices_buffer=kv_page_indices,
-            paged_kv_last_page_len_buffer=self.kv_last_page_len,
-        )
-        self.decode_wrapper.plan(
-            kv_page_indptr,
-            kv_page_indices,
-            self.kv_last_page_len,
-            config.num_attention_heads,  # num_qo_heads,
-            config.num_key_value_heads,  # num_kv_heads,
-            128,  # head_dimension
-            32768,  # page_size
-            pos_encoding_mode="NONE",
-            q_data_type=torch.bfloat16,
-            kv_data_type=torch.bfloat16,
-        )
 
     def get_input_embeddings(self):
         return self.embed_tokens
@@ -488,7 +492,6 @@ class Qwen3Model(Qwen3PreTrainedModel):
                 hidden_states,
                 attention_mask=causal_mask,
                 position_embeddings=position_embeddings,
-                decode_wrapper=self.decode_wrapper,
                 step=step,
                 stream=stream,
             )
@@ -502,7 +505,7 @@ class Qwen3Model(Qwen3PreTrainedModel):
 
 class Qwen3ForCausalLM(Qwen3PreTrainedModel, GenerationMixin):
 
-    def __init__(self, config, world_size = 1):
+    def __init__(self, config, world_size=1):
         super().__init__(config)
         self.model = Qwen3Model(config, world_size)
         self.vocab_size = config.vocab_size

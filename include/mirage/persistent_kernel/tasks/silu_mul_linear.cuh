@@ -242,10 +242,7 @@ __device__ __forceinline__ void
     for (uint32_t m = 0; m < NUM_ITERS_M; m++) {
 #pragma unroll
       for (uint32_t n = 0; n < NUM_ITERS_N; n++) {
-#pragma unroll
-        for (uint32_t i = 0; i < 8; i++) {
-          s_frag[m][n][i] = 0.0f;
-        }
+        clear_8_floats(s_frag[m][n]);
       }
     }
 
@@ -351,15 +348,19 @@ __device__ __forceinline__ void
     }
     __syncthreads();
 
-    reduction_sum_row<decltype(output_smem), decltype(mm_intermediate_smem)>(
-        output_smem, mm_intermediate_smem);
-    __syncthreads();
+    if (NUM_WARPS_K > 1) {
+      reduction_sum_row<decltype(output_smem), decltype(mm_intermediate_smem)>(
+          output_smem, mm_intermediate_smem);
+      __syncthreads();
+    }
 
 #pragma unroll
     for (int i = threadIdx.x; i < OUTPUT_SIZE; i += NUM_THREADS) {
       int row = 0;
       output_dmem.at(row, i) =
-          output_smem.at(row, i) + residual_smem.at(row, i);
+          NUM_WARPS_K > 1
+              ? output_smem.at(row, i) + residual_smem.at(row, i)
+              : mm_intermediate_smem.at(row, i) + residual_smem.at(row, i);
     }
     if (output_atom_idx + 1 < NUM_OUTPUT_ATOMS) {
       __syncthreads();

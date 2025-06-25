@@ -4,6 +4,7 @@
 #include "silu_mul_linear.cuh"
 #include "single_batch_decoding.cuh"
 #include "single_batch_gqa.cuh"
+#include "bfloat16.h"
 #include <cuda_runtime.h>
 #include <torch/extension.h>
 
@@ -14,129 +15,6 @@ using kernel::silu_mul_linear_task_impl;
 using kernel::single_batch_decoding_kernel;
 using kernel::single_batch_gqa_kernel;
 using bfloat16 = type::bfloat16_t;
-
-#define DISPATCH_SEQ_LEN(SEQ_LEN, FUNC, T, ...)                                \
-  if ((SEQ_LEN) <= 8) {                                                        \
-    FUNC<T, 8>(__VA_ARGS__);                                                   \
-  } else if ((SEQ_LEN) <= 16) {                                                \
-    FUNC<T, 16>(__VA_ARGS__);                                                  \
-  } else if ((SEQ_LEN) <= 24) {                                                \
-    FUNC<T, 24>(__VA_ARGS__);                                                  \
-  } else if ((SEQ_LEN) <= 32) {                                                \
-    FUNC<T, 32>(__VA_ARGS__);                                                  \
-  } else if ((SEQ_LEN) <= 40) {                                                \
-    FUNC<T, 40>(__VA_ARGS__);                                                  \
-  } else if ((SEQ_LEN) <= 48) {                                                \
-    FUNC<T, 48>(__VA_ARGS__);                                                  \
-  } else if ((SEQ_LEN) <= 56) {                                                \
-    FUNC<T, 56>(__VA_ARGS__);                                                  \
-  } else if ((SEQ_LEN) <= 64) {                                                \
-    FUNC<T, 64>(__VA_ARGS__);                                                  \
-  } else if ((SEQ_LEN) <= 72) {                                                \
-    FUNC<T, 72>(__VA_ARGS__);                                                  \
-  } else if ((SEQ_LEN) <= 80) {                                                \
-    FUNC<T, 80>(__VA_ARGS__);                                                  \
-  } else if ((SEQ_LEN) <= 88) {                                                \
-    FUNC<T, 88>(__VA_ARGS__);                                                  \
-  } else if ((SEQ_LEN) <= 96) {                                                \
-    FUNC<T, 96>(__VA_ARGS__);                                                  \
-  } else if ((SEQ_LEN) <= 104) {                                               \
-    FUNC<T, 104>(__VA_ARGS__);                                                 \
-  } else if ((SEQ_LEN) <= 112) {                                               \
-    FUNC<T, 112>(__VA_ARGS__);                                                 \
-  } else if ((SEQ_LEN) <= 120) {                                               \
-    FUNC<T, 120>(__VA_ARGS__);                                                 \
-  } else if ((SEQ_LEN) <= 128) {                                               \
-    FUNC<T, 128>(__VA_ARGS__);                                                 \
-  } else {                                                                     \
-    printf("Unsupported seq_len: %zu\n", SEQ_LEN);                             \
-  }
-
-// Single Batch Decoding
-
-// template <typename T>
-// __global__ void
-//     single_batch_decoding_kernel_wrapper(void const *qkv_ptr,
-//                                          void *k_cache_ptr,
-//                                          void *v_cache_ptr,
-//                                          void *output_ptr,
-//                                          size_t seq_len,
-//                                          bool qk_norm,
-//                                          bool rotary_embed,
-//                                          void const *qnorm_weight_ptr,
-//                                          void const *knorm_weight_ptr,
-//                                          void const *cos_ptr,
-//                                          void const *sin_ptr,
-//                                          float q_eps,
-//                                          float k_eps) {
-//   single_batch_decoding_kernel<T, 4>(qkv_ptr,
-//                                      k_cache_ptr,
-//                                      v_cache_ptr,
-//                                      output_ptr,
-//                                      seq_len,
-//                                      qk_norm,
-//                                      rotary_embed,
-//                                      qnorm_weight_ptr,
-//                                      knorm_weight_ptr,
-//                                      cos_ptr,
-//                                      sin_ptr,
-//                                      q_eps,
-//                                      k_eps);
-// }
-
-// void single_batch_decoding(
-//     torch::Tensor qkv,
-//     torch::Tensor k_cache,
-//     torch::Tensor v_cache,
-//     torch::Tensor output,
-//     size_t seq_len,
-//     bool qk_norm,
-//     bool rotary_embed,
-//     torch::optional<torch::Tensor> qnorm_weight = torch::nullopt,
-//     torch::optional<torch::Tensor> knorm_weight = torch::nullopt,
-//     torch::optional<torch::Tensor> cos = torch::nullopt,
-//     torch::optional<torch::Tensor> sin = torch::nullopt,
-//     float q_eps = 0.0f,
-//     float k_eps = 0.0f) {
-
-//   void const *qkv_ptr = qkv.data_ptr();
-//   void *k_cache_ptr = k_cache.data_ptr();
-//   void *v_cache_ptr = v_cache.data_ptr();
-//   void *output_ptr = output.data_ptr();
-
-//   void const *qnorm_weight_ptr = qk_norm ? qnorm_weight->data_ptr() :
-//   nullptr; void const *knorm_weight_ptr = qk_norm ? knorm_weight->data_ptr()
-//   : nullptr; void const *cos_ptr = rotary_embed ? cos->data_ptr() : nullptr;
-//   void const *sin_ptr = rotary_embed ? sin->data_ptr() : nullptr;
-
-//   dim3 grid_dim(1, 1, 1);
-//   dim3 block_dim(128, 1, 1);
-//   size_t smem_size = 88888;
-
-//   cudaFuncSetAttribute(single_batch_decoding_kernel_wrapper<bfloat16>,
-//                        cudaFuncAttributeMaxDynamicSharedMemorySize,
-//                        smem_size);
-
-//   single_batch_decoding_kernel_wrapper<bfloat16>
-//       <<<grid_dim, block_dim, smem_size>>>(qkv_ptr,
-//                                            k_cache_ptr,
-//                                            v_cache_ptr,
-//                                            output_ptr,
-//                                            seq_len,
-//                                            qk_norm,
-//                                            rotary_embed,
-//                                            qnorm_weight_ptr,
-//                                            knorm_weight_ptr,
-//                                            cos_ptr,
-//                                            sin_ptr,
-//                                            q_eps,
-//                                            k_eps);
-
-//   cudaError_t err = cudaDeviceSynchronize();
-//   if (err != cudaSuccess) {
-//     printf("CUDA kernel launch error: %s\n", cudaGetErrorString(err));
-//   }
-// }
 
 template <typename T>
 __global__ void single_batch_gqa_kernel_wrapper(void const *qkv_ptr,
@@ -267,14 +145,31 @@ void norm_linear(torch::Tensor input,
   void const *weight_ptr = weight.data_ptr();
   void *output_ptr = output.data_ptr();
 
-  DISPATCH_OUTPUT_SIZE_FOR_RED_SIZE_4K(output.size(1),
-                                       launch_norm_linear,
-                                       bfloat16,
-                                       input_ptr,
-                                       norm_weight_ptr,
-                                       weight_ptr,
-                                       eps,
-                                       output_ptr);
+  switch (output.size(1)) {
+    case 16:
+      launch_norm_linear<bfloat16, 1, 16, 4096>(input_ptr, norm_weight_ptr,
+                                                weight_ptr, eps, output_ptr);
+      break;
+    case 32:
+      launch_norm_linear<bfloat16, 1, 32, 4096>(input_ptr, norm_weight_ptr,
+                                                weight_ptr, eps, output_ptr);
+      break;
+    case 64:
+      launch_norm_linear<bfloat16, 1, 64, 4096>(input_ptr, norm_weight_ptr,
+                                                weight_ptr, eps, output_ptr);
+      break;
+    case 256:
+      launch_norm_linear<bfloat16, 1, 256, 4096>(input_ptr, norm_weight_ptr,
+                                                weight_ptr, eps, output_ptr);
+      break;
+    case 1600:
+      launch_norm_linear<bfloat16, 1, 1600, 4096>(input_ptr, norm_weight_ptr,
+                                                weight_ptr, eps, output_ptr);
+      break;
+    default:
+      printf("Unsupported output size in test: %zu\n", output.size(1));
+      break;
+  }
 
   cudaError_t err = cudaDeviceSynchronize();
   if (err != cudaSuccess) {
@@ -324,13 +219,23 @@ void silu_mul_linear(torch::Tensor input,
   void const *bias_ptr = bias.data_ptr();
   void *output_ptr = output.data_ptr();
 
-  DISPATCH_OUTPUT_SIZE_FOR_RED_SIZE_12K(output.size(1),
-                                        launch_silu_mul_linear,
-                                        bfloat16,
-                                        input_ptr,
-                                        weight_ptr,
-                                        bias_ptr,
-                                        output_ptr);
+  switch (output.size(1)) {
+    case 16:
+      launch_silu_mul_linear<bfloat16, 1, 16, 12288>(input_ptr, weight_ptr,
+                                                     bias_ptr, output_ptr);
+      break;
+    case 32:
+      launch_silu_mul_linear<bfloat16, 1, 32, 12288>(input_ptr, weight_ptr,
+                                                     bias_ptr, output_ptr);
+      break;
+    case 64:
+      launch_silu_mul_linear<bfloat16, 1, 64, 12288>(input_ptr, weight_ptr,
+                                                     bias_ptr, output_ptr);
+      break;
+    default:
+      printf("Unsupported output size in test: %zu\n", output.size(1));
+      break;
+  }
 
   cudaError_t err = cudaDeviceSynchronize();
   if (err != cudaSuccess) {
@@ -378,13 +283,23 @@ void linear(torch::Tensor input,
   void const *residual_ptr = residual.data_ptr();
   void *output_ptr = output.data_ptr();
 
-  DISPATCH_OUTPUT_SIZE_FOR_RED_SIZE_4K(output.size(1),
-                                       launch_linear,
-                                       bfloat16,
-                                       input_ptr,
-                                       weight_ptr,
-                                       residual_ptr,
-                                       output_ptr);
+  switch (output.size(1)) {
+    case 16:
+      launch_linear<bfloat16, 1, 16, 4096>(input_ptr, weight_ptr,
+                                           residual_ptr, output_ptr);
+      break;
+    case 32:
+      launch_linear<bfloat16, 1, 32, 4096>(input_ptr, weight_ptr,
+                                           residual_ptr, output_ptr);
+      break;
+    case 64:
+      launch_linear<bfloat16, 1, 64, 4096>(input_ptr, weight_ptr,
+                                           residual_ptr, output_ptr);
+      break;
+    default:
+      printf("Unsupported output size in test: %zu\n", output.size(1));
+      break;
+  }
 
   cudaError_t err = cudaDeviceSynchronize();
   if (err != cudaSuccess) {

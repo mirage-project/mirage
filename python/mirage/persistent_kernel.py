@@ -430,8 +430,7 @@ class PersistentKernel:
         assert not self._is_compiled
 
         MIRAGE_ROOT, INCLUDE_PATH, DEPS_PATH = get_key_paths()
-        tempdir_obj = tempfile.TemporaryDirectory()
-        tempdir = tempdir_obj.name
+        tempdir = tempfile.gettempdir()
         results = self.kn_graph.generate_task_graph(num_gpus=self.world_size)
 
         cuda_code_path = os.path.join(tempdir, "test.cu")

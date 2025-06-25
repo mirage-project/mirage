@@ -78,7 +78,8 @@ __device__ __forceinline__ bool
     prepare_next_batch(RuntimeConfig const &config) {
   int step = config.step[0];
   config.step[0] = step + 1;
-  if ((step >= 500) || (config.profiling)) {
+  if ((step >= 4096) || (config.profiling) ||
+      (config.tokens[step + 1] == 151645 /*eos_token_id*/)) {
     return false;
   } else {
     return true;
@@ -900,7 +901,8 @@ extern "C" void launch_persistent_kernel() {
                              98304 /*sharedmem*/,
                              0 /*stream*/);
 #else
-  persistent_kernel<<<dim3(108, 1, 1), dim3(128, 1, 1), 98304/*smem*/>>>(global_runtime_config);
+  persistent_kernel<<<dim3(108, 1, 1), dim3(128, 1, 1), 98304 /*smem*/>>>(
+      global_runtime_config);
 #endif
   cudaError_t err = cudaDeviceSynchronize();
   if (err != cudaSuccess) {

@@ -1,0 +1,14 @@
+name: "Request Feature"
+description: "Request a new feature"
+title: "[Feature Request] - Brief Description"
+labels: ["features"]
+
+body:
+  - type: textarea
+    id: feature_description
+    attributes:
+      label: "Feature Description"
+      description: "Describe the feature you are requesting."
+      placeholder: "Enter feature description here..."
+    validations:
+      required: true

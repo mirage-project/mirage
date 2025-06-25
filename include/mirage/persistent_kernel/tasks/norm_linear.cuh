@@ -152,9 +152,7 @@ __device__ __forceinline__ void
   // intermediate
   T *mul_output = (T *)(smem + MUL_OUTPUT_OFFSET);
   T *element_unary_output = (T *)(smem + ELEMENT_UNARY_OUTPUT_OFFSET);
-  for (int i = threadIdx.x; i < BATCH_SIZE * TILE_SIZE; i += NUM_THREADS) {
-    element_unary_output[i] = T(0.0f);
-  }
+  clear_smem_buffer<T, BATCH_SIZE * TILE_SIZE>(element_unary_output);
   T *mm_intermediate = (T *)(smem + MM_INTERMEDIATE_OFFSET);
   T *mm_output = (T *)(smem + MM_OUTPUT_OFFSET);
   T *reduction_output = (T *)(smem + REDUCTION_OUTPUT_OFFSET);
@@ -240,10 +238,7 @@ __device__ __forceinline__ void
     for (uint32_t m = 0; m < NUM_ITERS_M; m++) {
 #pragma unroll
       for (uint32_t n = 0; n < NUM_ITERS_N; n++) {
-#pragma unroll
-        for (uint32_t i = 0; i < 8; i++) {
-          s_frag[m][n][i] = 0.0f;
-        }
+        clear_8_floats(s_frag[m][n]);
       }
     }
 
@@ -352,9 +347,12 @@ __device__ __forceinline__ void
     }
     __syncthreads();
 
-    reduction_sum_row<decltype(mm_output_smem), decltype(mm_intermediate_smem)>(
-        mm_output_smem, mm_intermediate_smem);
-    __syncthreads();
+    if (NUM_WARPS_K > 1) {
+      reduction_sum_row<decltype(mm_output_smem),
+                        decltype(mm_intermediate_smem)>(mm_output_smem,
+                                                        mm_intermediate_smem);
+      __syncthreads();
+    }
 
     if (output_atom_idx == 0) {
       float const scalars[] = {eps, 0.0f};
@@ -367,7 +365,11 @@ __device__ __forceinline__ void
       __syncthreads();
     }
 
-    div_col(output_smem, mm_output_smem, reduction_output_smem);
+    if (NUM_WARPS_K > 1) {
+      div_col(output_smem, mm_output_smem, reduction_output_smem);
+    } else {
+      div_col(output_smem, mm_intermediate_smem, reduction_output_smem);
+    }
     __syncthreads();
 
 #pragma unroll

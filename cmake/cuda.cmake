@@ -45,15 +45,9 @@ macro(find_cuda use_cuda)
       find_library(CUDA_CUDA_LIBRARY cuda
         ${CUDA_TOOLKIT_ROOT_DIR}/lib/x64
         ${CUDA_TOOLKIT_ROOT_DIR}/lib/Win32)
-      find_library(CUDA_NVRTC_LIBRARY nvrtc
-        ${CUDA_TOOLKIT_ROOT_DIR}/lib/x64
-        ${CUDA_TOOLKIT_ROOT_DIR}/lib/Win32)
-      find_library(CUDA_CUDNN_LIBRARY cudnn
-        ${CUDA_TOOLKIT_ROOT_DIR}/lib/x64
-        ${CUDA_TOOLKIT_ROOT_DIR}/lib/Win32)
-      find_library(CUDA_CUBLAS_LIBRARY cublas
-        ${CUDA_TOOLKIT_ROOT_DIR}/lib/x64
-        ${CUDA_TOOLKIT_ROOT_DIR}/lib/Win32)
+      #find_library(CUDA_NVRTC_LIBRARY nvrtc
+      #  ${CUDA_TOOLKIT_ROOT_DIR}/lib/x64
+      #  ${CUDA_TOOLKIT_ROOT_DIR}/lib/Win32)
     else(MSVC)
       find_library(_CUDA_CUDA_LIBRARY cuda
         PATHS ${CUDA_TOOLKIT_ROOT_DIR}
@@ -66,16 +60,8 @@ macro(find_cuda use_cuda)
       #  PATHS ${CUDA_TOOLKIT_ROOT_DIR}
       #  PATH_SUFFIXES lib lib64 lib64/stubs lib/x86_64-linux-gnu
       #  NO_DEFAULT_PATH)
-      find_library(CUDA_CUDNN_LIBRARY cudnn
-        ${CUDA_TOOLKIT_ROOT_DIR}/lib64
-        ${CUDA_TOOLKIT_ROOT_DIR}/lib)
-      find_library(CUDA_CUBLAS_LIBRARY cublas
-        #/opt/nvidia/hpc_sdk/Linux_x86_64/23.9/math_libs/12.2/lib64/
-        ${CUDA_TOOLKIT_ROOT_DIR}/lib64
-        ${CUDA_TOOLKIT_ROOT_DIR}/lib)
     endif(MSVC)
     #list(APPEND CUDA_INCLUDE_DIRS /opt/nvidia/hpc_sdk/Linux_x86_64/23.9/math_libs/12.2/include)
-    #list(APPEND CUDA_INCLUDE_DIRS /global/common/software/nersc/pm-2023q2/sw/cudnn-8.9.3.28_cuda12/include)
     message(STATUS "CUDA_INCLUDE_DIRS=" ${CUDA_INCLUDE_DIRS})
     message(STATUS "Found CUDA_TOOLKIT_ROOT_DIR=" ${CUDA_TOOLKIT_ROOT_DIR})
     message(STATUS "Found CUDA_CUDA_LIBRARY=" ${CUDA_CUDA_LIBRARY})

@@ -41,11 +41,11 @@ if __name__ == "__main__":
     torch.cuda.set_device(rank)
     with torch.device("cuda"):
         model = Qwen3ForCausalLM.from_pretrained(model_name).to("cuda")
-        #config = AutoConfig.from_pretrained("/opt/dlami/nvme/models/Qwen3-8B/")
-        #model = Qwen3ForCausalLM(config, world_size)
-    #load_model(
+        # config = AutoConfig.from_pretrained("/opt/dlami/nvme/models/Qwen3-8B/")
+        # model = Qwen3ForCausalLM(config, world_size)
+    # load_model(
     #    model, f"/opt/dlami/nvme/models/Qwen3-8B/model{rank}-mp{world_size}.safetensors"
-    #)
+    # )
 
     # get all model weight tensors
     tokens = torch.full((1, 32768), 0, dtype=torch.long, device="cuda")
@@ -151,19 +151,19 @@ if __name__ == "__main__":
             dims=(batch_size, hidden_size),
             dtype=mi.bfloat16,
             name="attn_proj_out",
-            io_category="nvshmem_tensor" if world_size > 1 else "cuda_tensor"
+            io_category="nvshmem_tensor" if world_size > 1 else "cuda_tensor",
         )
         allreduce_buf = mpk.new_tensor(
             dims=(world_size, batch_size, hidden_size),
             dtype=mi.bfloat16,
             name="all_reduce_buf",
-            io_category="nvshmem_tensor" if world_size > 1 else "cuda_tensor"
+            io_category="nvshmem_tensor" if world_size > 1 else "cuda_tensor",
         )
         attn_allreduce_out = mpk.new_tensor(
             dims=(batch_size, hidden_size),
             dtype=mi.bfloat16,
             name="attn_allreduce_out",
-            io_category="nvshmem_tensor" if world_size > 1 else "cuda_tensor"
+            io_category="nvshmem_tensor" if world_size > 1 else "cuda_tensor",
         )
         mlp_mid = mpk.new_tensor(
             dims=(batch_size, fused_outdim_2 // world_size),
@@ -175,13 +175,13 @@ if __name__ == "__main__":
             dims=(batch_size, hidden_size),
             dtype=mi.bfloat16,
             name="mlp_out",
-            io_category="nvshmem_tensor" if world_size > 1 else "cuda_tensor"
+            io_category="nvshmem_tensor" if world_size > 1 else "cuda_tensor",
         )
         mlp_final = mpk.new_tensor(
             dims=(batch_size, hidden_size),
             dtype=mi.bfloat16,
             name="mlp_final",
-            io_category="nvshmem_tensor" if world_size > 1 else "cuda_tensor"
+            io_category="nvshmem_tensor" if world_size > 1 else "cuda_tensor",
         )
         argmax_in = mpk.new_tensor(
             dims=(batch_size, vocab_size),
@@ -361,13 +361,13 @@ if __name__ == "__main__":
             input=argmax_in,
             output=(argmax_part_value, argmax_part_index),
             grid_dim=(96, 1, 1),
-            block_dim=(128, 1, 1)
+            block_dim=(128, 1, 1),
         )
         mpk.argmax_reduce_layer(
             input=(argmax_part_value, argmax_part_index),
             output=argmax_out,
-            grid_dim=(1,1,1),
-            block_dim=(128,1,1)
+            grid_dim=(1, 1, 1),
+            block_dim=(128, 1, 1),
         )
 
         results = mpk.kn_graph.generate_task_graph(num_gpus=world_size)
@@ -431,7 +431,7 @@ if __name__ == "__main__":
         )
         next_token = logits.argmax(dim=-1)
         next_token = next_token[0, -1]
-        input_tokens[0] = next_token
+        tokens[0, prompt_len] = next_token
         torch.cuda.synchronize()
         starter.record()
 
@@ -442,7 +442,7 @@ if __name__ == "__main__":
         torch.cuda.synchronize()
         run_time = starter.elapsed_time(ender)
 
-        generated_ids = tokens[:, :step[0]]
+        generated_ids = tokens[:, : step[0]]
 
         response = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
         print(response)

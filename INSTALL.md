@@ -83,3 +83,14 @@ git clone --recursive https://www.github.com/mirage-project/mirage
 ```python
 python demo/demo_group_query_attention_spec_decode.py --checkpoint demo/checkpoint_group_query_attn_spec_decode.json
 ```
+
+## Modal
+
+[Modal](https://modal.com) provides GPUs to try MPK with minimal setup.
+
+```
+pip install modal
+modal setup
+modal run demo/qwen3/demo_modal.py
+```
+

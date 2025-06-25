@@ -79,8 +79,7 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
   T const *__restrict__ d_residual = static_cast<T const *>(residual_ptr);
   T *__restrict__ d_output = static_cast<T *>(output_ptr);
 
-  using InputDmem =
-      dmem_row_const<T, BATCH_SIZE, TILE_SIZE, REDUCTION_SIZE * 2>;
+  using InputDmem = dmem_row_const<T, BATCH_SIZE, TILE_SIZE, REDUCTION_SIZE>;
   using WeightDmem =
       dmem_col_const<T, TILE_SIZE, OUTPUT_ATOM_SIZE, REDUCTION_SIZE>;
   using ResidualDmem =
@@ -113,7 +112,7 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
   // sizeof(T) * BATCH_SIZE * OUTPUT_ATOM_SIZE
 
   constexpr size_t MM_INTERMEDIATE_OFFSET =
-      SHARED_RESIDUAL_OFFSET + sizeof(T) * TILE_SIZE * OUTPUT_ATOM_SIZE;
+      SHARED_RESIDUAL_OFFSET + sizeof(T) * BATCH_SIZE * OUTPUT_ATOM_SIZE;
   // sizeof(T) * NUM_WARPS_K * BATCH_SIZE * OUTPUT_ATOM_SIZE
 
   constexpr size_t SHARED_OUTPUT_OFFSET =
@@ -216,10 +215,7 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
     for (uint32_t m = 0; m < NUM_ITERS_M; m++) {
 #pragma unroll
       for (uint32_t n = 0; n < NUM_ITERS_N; n++) {
-#pragma unroll
-        for (uint32_t i = 0; i < 8; i++) {
-          s_frag[m][n][i] = 0.0f;
-        }
+        clear_8_floats(s_frag[m][n]);
       }
     }
 
@@ -309,15 +305,19 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
     }
     __syncthreads();
 
-    reduction_sum_row<decltype(output_smem), decltype(mm_intermediate_smem)>(
-        output_smem, mm_intermediate_smem);
-    __syncthreads();
+    if (NUM_WARPS_K > 1) {
+      reduction_sum_row<decltype(output_smem), decltype(mm_intermediate_smem)>(
+          output_smem, mm_intermediate_smem);
+      __syncthreads();
+    }
 
 #pragma unroll
     for (int i = threadIdx.x; i < OUTPUT_ATOM_SIZE; i += NUM_THREADS) {
       int row = 0;
       output_dmem.at(row, i) =
-          output_smem.at(row, i) + residual_smem.at(row, i);
+          NUM_WARPS_K > 1
+              ? output_smem.at(row, i) + residual_smem.at(row, i)
+              : mm_intermediate_smem.at(row, i) + residual_smem.at(row, i);
     }
     if (output_atom_idx + 1 < NUM_OUTPUT_ATOMS) {
       __syncthreads();
