@@ -14,15 +14,24 @@
 # - CUDA_TOOLKIT_ROOT_DIR
 # - CUDA_CUDA_LIBRARY
 # - CUDA_CUDART_LIBRARY
-# - CUDA_NVRTC_LIBRARY
-# - CUDA_CUDNN_LIBRARY
-# - CUDA_CUBLAS_LIBRARY
+# - [Disabled] CUDA_NVRTC_LIBRARY
 #
 macro(find_cuda use_cuda)
   set(__use_cuda ${use_cuda})
   if(__use_cuda STREQUAL "ON")
-    cmake_policy(SET CMP0146 OLD)
-    find_package(CUDA QUIET)
+    if(${CMAKE_VERSION} VERSION_GREATER_EQUAL "3.17")
+      find_package(CUDAToolkit QUIET)
+      if(CUDAToolkit_FOUND)
+        set(CUDA_FOUND TRUE)
+        set(CUDA_INCLUDE_DIRS ${CUDAToolkit_INCLUDE_DIRS})
+        set(CUDA_TOOLKIT_ROOT_DIR ${CUDAToolkit_ROOT})
+        set(CUDA_CUDA_LIBRARY ${CUDAToolkit_LIBRARY_DIR}/libcuda.so)
+        set(CUDA_CUDART_LIBRARY ${CUDAToolkit_LIBRARY_DIR}/libcudart.so)
+        # set(CUDA_NVRTC_LIBRARY ${CUDAToolkit_LIBRARY_DIR}/libnvrtc.so)
+      endif()
+    else()
+      find_package(CUDA QUIET)
+    endif()
   elseif(IS_DIRECTORY ${__use_cuda})
     set(CUDA_TOOLKIT_ROOT_DIR ${__use_cuda})
     message(STATUS "Custom CUDA_PATH=" ${CUDA_TOOLKIT_ROOT_DIR})
@@ -66,8 +75,6 @@ macro(find_cuda use_cuda)
     message(STATUS "Found CUDA_TOOLKIT_ROOT_DIR=" ${CUDA_TOOLKIT_ROOT_DIR})
     message(STATUS "Found CUDA_CUDA_LIBRARY=" ${CUDA_CUDA_LIBRARY})
     message(STATUS "Found CUDA_CUDART_LIBRARY=" ${CUDA_CUDART_LIBRARY})
-    message(STATUS "Found CUDA_NVRTC_LIBRARY=" ${CUDA_NVRTC_LIBRARY})
-    message(STATUS "Found CUDA_CUDNN_LIBRARY=" ${CUDA_CUDNN_LIBRARY})
-    message(STATUS "Found CUDA_CUBLAS_LIBRARY=" ${CUDA_CUBLAS_LIBRARY})
+    # message(STATUS "Found CUDA_NVRTC_LIBRARY=" ${CUDA_NVRTC_LIBRARY})
   endif(CUDA_FOUND)
 endmacro(find_cuda)
