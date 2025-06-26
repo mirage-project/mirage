@@ -564,28 +564,13 @@ NKITranspileResult NKITranspiler::transpile_ugraph() {
              fmt("dtensor$", dtensor.guid),
              shape);
     }
-#ifdef DEADCODE
-    if (op->op_type == type::KNOperatorType::KN_INPUT_OP) {
-      std::string shape;
-      kn::DTensor dtensor = op->output_tensors.at(0);
-      for (int i = 0; i < dtensor.num_dims; i++) {
-        shape += fmt("$,", dtensor.dim[i]);
-      }
-      exec.e("$ = torch.randn(($), dtype=torch.float16).to(device=device)",
-             fmt("dtensor$", dtensor.guid),
-             shape);
-    }
-    if (op->op_type == type::KNOperatorType::KN_OUTPUT_OP) {
-      std::string shape;
-      kn::DTensor dtensor = op->input_tensors.at(0);
-      for (int i = 0; i < dtensor.num_dims; i++) {
-        shape += fmt("$,", dtensor.dim[i]);
-      }
-      exec.e("$ = torch.randn(($), dtype=torch.float16).to(device=device)",
-             fmt("dtensor$", dtensor.guid),
-             shape);
-    }
-#endif
+  }
+  // Generate helper functions
+  CodeKeeper helper;
+  std::vector<HelperFunction> helper_functions;
+  helper_functions.push_back(tiled_matmul_function());
+  for (HelperFunction const &hf : helper_functions) {
+    helper.e(hf.get_code());
   }
   CodeKeeper custom_kernels;
   for (kn::KNOperator *const op : g->operators) {
@@ -644,8 +629,9 @@ NKITranspileResult NKITranspiler::transpile_ugraph() {
     }
   }
 
-  std::string code = fmt("$\n$\n$",
+  std::string code = fmt("$\n$\n$\n$",
                          header.to_string(),
+                         helper.to_string(),
                          custom_kernels.to_string(),
                          exec.to_string());
   return NKITranspileResult{std::move(code)};

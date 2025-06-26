@@ -1,10 +1,4 @@
 cmake_minimum_required(VERSION 3.24 FATAL_ERROR)
-if (NOT "${USE_CUDA}" STREQUAL "OFF")
-  project(MIRAGE LANGUAGES C CXX CUDA)
-else()
-  project(MIRAGE LANGUAGES C CXX)
-endif()
-
 message(STATUS "CMake Version: ${CMAKE_VERSION}")
 
 if (EXISTS ${CMAKE_CURRENT_BINARY_DIR}/config.cmake)
@@ -13,6 +7,13 @@ else()
   if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/config.cmake)
     include(${CMAKE_CURRENT_SOURCE_DIR}/config.cmake)
   endif()
+endif()
+
+if (NOT "${USE_CUDA}" STREQUAL "OFF")
+  project(MIRAGE LANGUAGES C CXX CUDA)
+else()
+  message(STATUS "USE_CUDA is OFF, will not use CUDA")
+  project(MIRAGE LANGUAGES C CXX)
 endif()
 
 #include directories
@@ -49,11 +50,13 @@ include(CheckCXXCompilerFlag)
 check_cxx_compiler_flag("-std=c++17" SUPPORT_CXX17)
 
 #set CUDA version
-include(deps/cutlass/CUDA.cmake)
-string(REPLACE "." ";" CUDA_VERSION_PARTS ${CUDA_VERSION})
-list(GET CUDA_VERSION_PARTS 0 CUDA_VERSION_MAJOR)
-list(GET CUDA_VERSION_PARTS 1 CUDA_VERSION_MINOR)
-list(APPEND CMAKE_CUDA_FLAGS "-D__CUDACC_VER_MAJOR__=${CUDA_VERSION_MAJOR} -D__CUDACC_VER_MINOR__=${CUDA_VERSION_MINOR}")
+if (NOT "${USE_CUDA}" STREQUAL "OFF")
+  include(deps/cutlass/CUDA.cmake)
+  string(REPLACE "." ";" CUDA_VERSION_PARTS ${CUDA_VERSION})
+  list(GET CUDA_VERSION_PARTS 0 CUDA_VERSION_MAJOR)
+  list(GET CUDA_VERSION_PARTS 1 CUDA_VERSION_MINOR)
+  list(APPEND CMAKE_CUDA_FLAGS "-D__CUDACC_VER_MAJOR__=${CUDA_VERSION_MAJOR} -D__CUDACC_VER_MINOR__=${CUDA_VERSION_MINOR}")
+endif()
 
 # TODO: Currently disable CUTLASS_ARCH_MMA_SM80_ENABLED flag
 # since we target Triton to perform codegen
@@ -153,9 +156,9 @@ if(NOT CARGO_RESULT EQUAL 0)
     "and follow the instructions on the screen.")
 endif()
 
-# set(ABSTRACT_SUBEXPR_LIBRARIES ${PROJECT_SOURCE_DIR}/build/abstract_subexpr/release/libabstract_subexpr.so)
-# set(FORMAL_VERIFIER_LIBRARIES ${PROJECT_SOURCE_DIR}/build/formal_verifier/release/libformal_verifier.so)
-# list(APPEND MIRAGE_LINK_LIBS "-lstdc++fs")
+set(ABSTRACT_SUBEXPR_LIBRARIES ${PROJECT_SOURCE_DIR}/build/abstract_subexpr/release/libabstract_subexpr.so)
+set(FORMAL_VERIFIER_LIBRARIES ${PROJECT_SOURCE_DIR}/build/formal_verifier/release/libformal_verifier.so)
+list(APPEND MIRAGE_LINK_LIBS "-lstdc++fs")
 
 #set RUST
 if(ABSTRACT_SUBEXPR_LIB AND ABSTRACT_SUBEXPR_LIBRARIES)
@@ -401,15 +404,6 @@ if("${BUILD_CPP_EXAMPLES}" STREQUAL "ON")
   target_link_libraries(${CPP_EXAMPLES_BIN} mirage_runtime)
 endif()
 
-if ("${BUILD_CPP_EXAMPLES}" STREQUAL "ON")
-  set(CPP_EXAMPLES_DIR cpp_examples)
-  set(CPP_EXAMPLES_BIN profile)
-  file(GLOB CPP_EXAMPLES_SRCS ${CPP_EXAMPLES_DIR}/${CPP_EXAMPLES_BIN}.cc)
-  add_executable(${CPP_EXAMPLES_BIN} ${CPP_EXAMPLES_SRCS})
-  set_target_properties(${CPP_EXAMPLES_BIN}
-    PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CPP_EXAMPLES_DIR})
-  target_link_libraries(${CPP_EXAMPLES_BIN} mirage_runtime)
-endif()
 
 option(MIRAGE_BUILD_UNIT_TEST "build unit tests" OFF)
 

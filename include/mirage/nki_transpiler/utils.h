@@ -19,6 +19,8 @@ std::string get_tensor_shape_tuple(T const &tensor) {
   return fmt("($)", result);
 }
 
+std::string get_python_literal(bool value);
+
 enum class NKITensorInitializer {
   NONE,
   ZERO,
@@ -41,7 +43,7 @@ std::string allocate_nki_tensor(T const &tensor,
       break;
   }
   std::string tensor_shape = get_tensor_shape_tuple(tensor);
-  std::string nki_dtype = mirage_dtype_to_nki(tensor.data_type);
+  std::string nki_dtype = "dtype";
   return fmt("$($, dtype=$, buffer=$)", api, tensor_shape, nki_dtype, buffer);
 }
 

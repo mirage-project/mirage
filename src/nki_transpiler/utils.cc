@@ -37,5 +37,9 @@ std::string mirage_dtype_to_nki(type::DataType dt) {
   return nki_type;
 }
 
+std::string get_python_literal(bool value) {
+  return value ? "True" : "False";
+}
+
 } // namespace nki_transpiler
 } // namespace mirage

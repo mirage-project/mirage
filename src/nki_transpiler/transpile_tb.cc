@@ -113,7 +113,7 @@ NKICustomOPTranspileResult
   // Generate code prologue
   CodeKeeper code;
   code.e("@nki.jit");
-  code.e("def $($):",
+  code.e("def $($, dtype=nl.float16):",
          func_name,
          map<kn::DTensor, string>(op->input_tensors,
                                   [](kn::DTensor const &dtensor) -> string {
@@ -162,34 +162,29 @@ NKICustomOPTranspileResult
       // this can postpone necessary transpose to be perform after
       // for loop
       STensorMeta meta = stensor_metas.at(before_accum_stensor.guid);
-      std::string nki_dtype =
-          mirage_dtype_to_nki(before_accum_stensor.data_type);
       // Assert that only the last two dims can have size larger than 1
       for (int i = 0; i < stensor.num_dims - 2; i++) {
         assert(stensor.dim[i] == 1);
       }
       if (stensor.num_dims == 1) {
         // Create a 1D tile
-        code.e("$ = nl.zeros(($), dtype=$, buffer=nl.sbuf)",
+        code.e("$ = nl.zeros(($), dtype, buffer=nl.sbuf)",
                fmt("stensor$", stensor.guid),
-               stensor.dim[0],
-               nki_dtype);
+               stensor.dim[0]);
       } else {
         // Create a 2D tile
         if (meta.partition_dim == stensor.num_dims - 2) {
-          code.e("$ = nl.zeros(($, $), dtype=$, buffer=nl.sbuf)",
+          code.e("$ = nl.zeros(($, $), dtype=dtype, buffer=nl.sbuf)",
                  fmt("stensor$", stensor.guid),
                  stensor.dim[stensor.num_dims - 2],
-                 stensor.dim[stensor.num_dims - 1],
-                 nki_dtype);
+                 stensor.dim[stensor.num_dims - 1]);
         } else {
           assert(meta.partition_dim == stensor.num_dims - 1);
           // num_dims - 1 is the partition_dim
-          code.e("$ = nl.zeros(($, $), dtype=$, buffer=nl.sbuf)",
+          code.e("$ = nl.zeros(($, $), dtype=dtype, buffer=nl.sbuf)",
                  fmt("stensor$", stensor.guid),
                  stensor.dim[stensor.num_dims - 1],
-                 stensor.dim[stensor.num_dims - 2],
-                 nki_dtype);
+                 stensor.dim[stensor.num_dims - 2]);
         }
       }
     }
@@ -222,25 +217,22 @@ NKICustomOPTranspileResult
         }
         bool transposed = false;
         std::string range = "";
-        std::string nki_dtype = mirage_dtype_to_nki(stensor.data_type);
         if (meta.partition_dim == stensor.num_dims - 2) {
           // Normal case
-          code.e("$ = nl.ndarray(($, $), dtype=$, buffer=nl.sbuf)",
+          code.e("$ = nl.ndarray(($, $), dtype=dtype, buffer=nl.sbuf)",
                  fmt("stensor$", stensor.guid),
                  stensor.dim[stensor.num_dims - 2],
-                 stensor.dim[stensor.num_dims - 1],
-                 nki_dtype);
+                 stensor.dim[stensor.num_dims - 1]);
         } else {
           // Tranposed case
           assert(meta.partition_dim == stensor.num_dims - 1);
           // partition dim is the innermost dimension so we need
           // to use load_transposed2d
           transposed = true;
-          code.e("$ = nl.ndarray(($, $), dtype=$, buffer=nl.sbuf)",
+          code.e("$ = nl.ndarray(($, $), dtype=dtype, buffer=nl.sbuf)",
                  fmt("stensor$", stensor.guid),
                  stensor.dim[stensor.num_dims - 1],
-                 stensor.dim[stensor.num_dims - 2],
-                 nki_dtype);
+                 stensor.dim[stensor.num_dims - 2]);
         }
 
         int3 imap = input_op->input_map;
@@ -315,105 +307,24 @@ NKICustomOPTranspileResult
         STensorMeta meta2 = stensor_metas.at(output.guid);
         std::string operand0 = fmt("stensor$", input0.guid);
         std::string operand1 = fmt("stensor$", input1.guid);
-        int input0_par = 0, input0_contr = 1;
-        int input1_par = 1, input1_contr = 0;
-
-        // transpiler should be able to split bigger matmul in the forloop
-        // accumulator, this assertion possibly mean a bug in nki transpiler.
-        assert(
-            !(input0.dim[input0_par] > 512 || input1.dim[input1_par] > 512) &&
-            "attempting to compute matmul output shape bigger than "
-            "largest possible legal shape(128,512) in nki");
-
-        /* Special case:
-           When both input0 and input1 have parallel axis mapped
-           to partition dimension, but nki requires contraction
-           axis mappend to partition dimension. Since contraction
-           axis of both stensor is mapped to free dim, it may be
-           possible that sizes are greater than 128, which is
-           illegal in nki and we need to split the matmul op into
-           (128, n) & (128, m) shapes.
-        */
-        auto splitMatmulAlongContractionAxis = [&]() {
-          // split matmul into (128, n) & (128, m)
-          std::string i0_paxis =
-              fmt("nl.arange($)[:, None]", input0.dim[input0_par]);
-          std::string contr_axis =
-              fmt("accidx * 128 + nl.arange(128)[None, :]");
-          std::string i1_paxis =
-              fmt("nl.arange($)[:, None]", input1.dim[input1_par]);
-          std::string op0 =
-              fmt("stensor$[$, $]", input0.guid, i0_paxis, contr_axis);
-          std::string op1 =
-              fmt("stensor$[$, $]", input1.guid, i1_paxis, contr_axis);
-
-          // emit a psum buffer for accum.
-          int accum_psize = meta2.partition_dim == 0 ? input0.dim[input0_par]
-                                                     : input1.dim[input1_par];
-          int accum_fsize = meta2.partition_dim == 0 ? input1.dim[input1_par]
-                                                     : input0.dim[input0_par];
-
-          code.e("accum$ = nl.zeros(($, $), dtype=nl.float32, buffer=nl.psum)",
-                 output.guid,
-                 accum_psize,
-                 accum_fsize);
-
-          code.e("for accidx in range(($ + $ - 1) // $):",
-                 input0.dim[input0_contr],
-                 NeuronArch::pmax,
-                 NeuronArch::pmax);
-          code.inc_indent();
-
-          if (meta2.partition_dim == 0) {
-            code.e("accum$ += nisa.nc_matmul(nl.transpose($), nl.transpose($))",
-                   output.guid,
-                   op0,
-                   op1);
-          } else {
-            code.e("accum$ += nisa.nc_matmul(nl.transpose($), nl.transpose($))",
-                   output.guid,
-                   op1,
-                   op0);
-          }
-          code.dec_indent();
-          // emit to copy from psum to sbuf, type cast to fp16
-          // todo: we need to check whether output tensor is of fp16 or not.
-          code.e("stensor$ = nl.copy(accum$, dtype=nl.float16)",
-                 output.guid,
-                 output.guid);
-        };
-
-        if (meta0.partition_dim == input0_par &&
-            meta1.partition_dim == input1_par &&
-            input0.dim[input0_contr] > 128) { // todo : change to arch value
-          splitMatmulAlongContractionAxis();
-        } else {
-          // Add a nl.transpose if input0's partition dim is not
-          // output.num_dims - 1
-          if (meta0.partition_dim != output.num_dims - 1) {
-            operand0 = fmt("nl.transpose($)", operand0);
-          }
-          // Add a nl.transpose if input1's partition dim is not
-          // output.num_dims - 2
-          if (meta1.partition_dim != output.num_dims - 2) {
-            operand1 = fmt("nl.transpose($)", operand1);
-          }
-          if (meta2.partition_dim == output.num_dims - 2) {
-            // First oprand: input0
-            // Second operand: input1
-            code.e("$ = nisa.nc_matmul($, $)",
-                   fmt("stensor$", output.guid),
+        int num_dims = input0.num_dims;
+        assert(num_dims == 2); // FIXME: currently only support 2D matmul
+        HelperFunction tiled_matmul = tiled_matmul_function();
+        code.e("$ = $",
+               fmt("stensor$", output.guid),
+               tiled_matmul.get_invocation({
                    operand0,
-                   operand1);
-          } else {
-            // First oprand: input1
-            // Second operand: input0
-            assert(meta2.partition_dim == output.num_dims - 1);
-            code.e("$ = nisa.nc_matmul($, $)",
-                   fmt("stensor$", output.guid),
                    operand1,
-                   operand0);
-          }
+                   get_python_literal(meta0.partition_dim == 1),
+                   get_python_literal(meta1.partition_dim == 1),
+                   "dtype",
+               }));
+        // handle transpose
+        if (meta2.partition_dim != num_dims - 2) {
+          // Need a transpose after matmul
+          code.e("$ = nl.transpose($)",
+                 fmt("stensor$", output.guid),
+                 fmt("stensor$", output.guid));
         }
         break;
       }
@@ -423,12 +334,6 @@ NKICustomOPTranspileResult
         STensorMeta meta0 = stensor_metas.at(input.guid);
         STensorMeta meta1 = stensor_metas.at(output.guid);
         assert(input.num_dims == output.num_dims);
-        if (meta0.partition_dim != meta1.partition_dim) {
-          // Need to perform a transpose before accum
-          // we defer the transpose to be after forloop
-          // to reduce transpose costs
-          // Do nothing here
-        }
         code.e("$ += $",
                fmt("stensor$", output.guid),
                fmt("stensor$", input.guid));
@@ -770,7 +675,7 @@ std::optional<NKICustomOPTranspileResult>
   // generate function signature
   CodeKeeper code;
   code.e("@nki_jit");
-  code.e("def $($):",
+  code.e("def $($, dtype):",
          func_name,
          map<kn::DTensor, string>(op->input_tensors,
                                   [](kn::DTensor const &dtensor) -> string {
