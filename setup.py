@@ -39,7 +39,11 @@ else:
     cuda_home = "/usr/local/cuda"
 
 cuda_include_dir = os.path.join(cuda_home, "include")
-cuda_library_dirs = [os.path.join(cuda_home, "lib"), os.path.join(cuda_home, "lib64")]
+cuda_library_dirs = [
+    os.path.join(cuda_home, "lib"),
+    os.path.join(cuda_home, "lib64"),
+    os.path.join(cuda_home, "lib64", "stubs"),
+]
 
 z3_path = path.dirname(z3.__file__)
 print(f"Z3 path: {z3_path}", flush=True)
