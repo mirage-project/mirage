@@ -136,7 +136,7 @@ try:
         cwd=build_dir,
         env=os.environ.copy(),
     )
-    subprocess.check_call(["make", "-j"], cwd=build_dir, env=os.environ.copy())
+    subprocess.check_call(["make", "-j4"], cwd=build_dir, env=os.environ.copy())
     print("Mirage runtime library built successfully.")
 except subprocess.CalledProcessError as e:
     print("Failed to build runtime library.")
