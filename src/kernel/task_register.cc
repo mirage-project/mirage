@@ -49,10 +49,10 @@ int TaskRegister::register_task_variant(runtime::TaskType type,
 
 int TaskRegister::register_embedding_task(threadblock::Graph const &bgraph,
                                           std::vector<int> const &params) {
-  assert(params.size() == 0);
+  assert(params.size() == 1);
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
-  code.e("kernel::embedding_kernel<bfloat16>(");
+  code.e("kernel::embedding_kernel<bfloat16, $>(", params[0]);
   code.e("    task_desc.inputs[0].base_ptr,");
   code.e("    task_desc.inputs[1].base_ptr,");
   code.e("    task_desc.outputs[0].base_ptr,");

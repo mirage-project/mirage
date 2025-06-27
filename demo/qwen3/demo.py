@@ -6,11 +6,22 @@ import torch.distributed as dist
 import argparse
 import os
 
+def grid_for_rmsnorm_linear_layer(size):
+    # 96 and 64 are enough to cover all Qwen3 model? Please update the method
+    # if you meet any incompatibility.
+    if size % 96 == 0:
+        return 96
+    elif size % 64 == 0:
+        return 64
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--use-mirage", action="store_true", help="Use Mirage kernels")
     parser.add_argument(
         "--profiling", action="store_true", help="Use Profiler to generate trace"
+    )
+    parser.add_argument(
+        "--model", type=str, default='Qwen/Qwen3-8B', help="Model path on hugging face"
     )
     args = parser.parse_args()
     try:
@@ -34,15 +45,12 @@ if __name__ == "__main__":
 
     print("Input arguments:", args)
     print(f"world_size({world_size}) rank({rank})")
-    # model_name = "Qwen/Qwen2.5-7B-Instruct"
-    model_name = "Qwen/Qwen3-8B"
+    model_name = args.model
     torch.set_default_dtype(torch.bfloat16)
 
     torch.cuda.set_device(rank)
     with torch.device("cuda"):
         model = Qwen3ForCausalLM.from_pretrained(model_name).to("cuda")
-        # config = AutoConfig.from_pretrained("/opt/dlami/nvme/models/Qwen3-8B/")
-        # model = Qwen3ForCausalLM(config, world_size)
     # load_model(
     #    model, f"/opt/dlami/nvme/models/Qwen3-8B/model{rank}-mp{world_size}.safetensors"
     # )
@@ -51,7 +59,6 @@ if __name__ == "__main__":
     tokens = torch.full((1, 32768), 0, dtype=torch.long, device="cuda")
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
-    # tokenizer = AutoTokenizer.from_pretrained("/opt/dlami/nvme/models/Qwen3-8B/")
 
     prompt = "Give me a short introduction to large language model."
     messages = [
@@ -101,7 +108,7 @@ if __name__ == "__main__":
         num_kv_heads = model.config.num_key_value_heads
         num_local_q_heads = num_q_heads // world_size
         num_local_kv_heads = num_kv_heads // world_size
-        head_dim = hidden_size // num_q_heads
+        head_dim = model.config.head_dim
         fused_outdim_1 = (num_q_heads + 2 * num_kv_heads) * head_dim
         fused_outdim_2 = 2 * intermediate_size
 
@@ -111,6 +118,8 @@ if __name__ == "__main__":
             ).contiguous()
         else:
             profiler_tensor = None
+        # TODO(Wenqin): introduce a method to dynamically get the configuration
+        # to support other GPUs.
         mpk = mi.PersistentKernel(
             world_size=world_size,
             mpi_rank=rank,
@@ -242,7 +251,7 @@ if __name__ == "__main__":
                 weight_norm=w_norm,
                 weight_linear=w_qkv,
                 output=attn_in,
-                grid_dim=(96, 1, 1),
+                grid_dim=(grid_for_rmsnorm_linear_layer(w_qkv.dim(0)), 1, 1),
                 block_dim=(128, 1, 1),
             )
             # add attention
@@ -316,7 +325,7 @@ if __name__ == "__main__":
                 weight_norm=w_norm,
                 weight_linear=w_gatedup,
                 output=mlp_mid,
-                grid_dim=(96, 1, 1),
+                grid_dim=(grid_for_rmsnorm_linear_layer(w_gatedup.dim(0)), 1, 1),
                 block_dim=(128, 1, 1),
             )
             # add silu_mul_linear layer
@@ -353,7 +362,7 @@ if __name__ == "__main__":
             weight_norm=w_norm,
             weight_linear=w_proj,
             output=argmax_in,
-            grid_dim=(96, 1, 1),
+            grid_dim=(grid_for_rmsnorm_linear_layer(w_proj.dim(0)), 1, 1),
             block_dim=(128, 1, 1),
         )
         # add argmax layer

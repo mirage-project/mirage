@@ -227,7 +227,7 @@ class PersistentKernel:
         tb_graph.new_input(weight, (-1, -1, -1), -1, True)
         tb_graph.new_input(output, (-1, -1, -1), -1, True)
         self.kn_graph.customized([input, weight, output], tb_graph)
-        self.kn_graph.register_task(tb_graph, "embedding")
+        self.kn_graph.register_task(tb_graph, "embedding", [weight.dim(1)])
 
     def rmsnorm_linear_layer(
         self,
