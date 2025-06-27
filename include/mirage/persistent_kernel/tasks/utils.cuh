@@ -62,7 +62,8 @@ template <typename T, int NUM_ELEMENTS>
 __device__ __forceinline__ void clear_smem_buffer(T *buffer) {
   constexpr int total_bytes = NUM_ELEMENTS * sizeof(T);
   constexpr int num_128bit_writes = total_bytes / 16;
-  constexpr int remaining_elements_offset = num_128bit_writes * (16 / sizeof(T));
+  constexpr int remaining_elements_offset =
+      num_128bit_writes * (16 / sizeof(T));
 
   // Clear the bulk of the buffer using 128-bit writes
   for (int i = threadIdx.x; i < num_128bit_writes; i += NUM_THREADS) {

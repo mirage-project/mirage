@@ -778,5 +778,5 @@ class KNGraph:
     def register_task(self, bgraph: TBGraph, task_type: str, params: list[int] = None):
         return self.cygraph.register_task(bgraph.cygraph, task_type, params)
 
-    def generate_task_graph(self, num_gpus: int):
-        return self.cygraph.generate_task_graph(num_gpus)
+    def generate_task_graph(self, num_gpus: int, my_gpu_id: int):
+        return self.cygraph.generate_task_graph(num_gpus, my_gpu_id)

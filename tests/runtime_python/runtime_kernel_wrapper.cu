@@ -1,10 +1,10 @@
 #include "argmax.cuh"
+#include "bfloat16.h"
 #include "linear.cuh"
 #include "norm_linear.cuh"
 #include "silu_mul_linear.cuh"
 #include "single_batch_decoding.cuh"
 #include "single_batch_gqa.cuh"
-#include "bfloat16.h"
 #include <cuda_runtime.h>
 #include <torch/extension.h>
 
@@ -147,24 +147,24 @@ void norm_linear(torch::Tensor input,
 
   switch (output.size(1)) {
     case 16:
-      launch_norm_linear<bfloat16, 1, 16, 4096>(input_ptr, norm_weight_ptr,
-                                                weight_ptr, eps, output_ptr);
+      launch_norm_linear<bfloat16, 1, 16, 4096>(
+          input_ptr, norm_weight_ptr, weight_ptr, eps, output_ptr);
       break;
     case 32:
-      launch_norm_linear<bfloat16, 1, 32, 4096>(input_ptr, norm_weight_ptr,
-                                                weight_ptr, eps, output_ptr);
+      launch_norm_linear<bfloat16, 1, 32, 4096>(
+          input_ptr, norm_weight_ptr, weight_ptr, eps, output_ptr);
       break;
     case 64:
-      launch_norm_linear<bfloat16, 1, 64, 4096>(input_ptr, norm_weight_ptr,
-                                                weight_ptr, eps, output_ptr);
+      launch_norm_linear<bfloat16, 1, 64, 4096>(
+          input_ptr, norm_weight_ptr, weight_ptr, eps, output_ptr);
       break;
     case 256:
-      launch_norm_linear<bfloat16, 1, 256, 4096>(input_ptr, norm_weight_ptr,
-                                                weight_ptr, eps, output_ptr);
+      launch_norm_linear<bfloat16, 1, 256, 4096>(
+          input_ptr, norm_weight_ptr, weight_ptr, eps, output_ptr);
       break;
     case 1600:
-      launch_norm_linear<bfloat16, 1, 1600, 4096>(input_ptr, norm_weight_ptr,
-                                                weight_ptr, eps, output_ptr);
+      launch_norm_linear<bfloat16, 1, 1600, 4096>(
+          input_ptr, norm_weight_ptr, weight_ptr, eps, output_ptr);
       break;
     default:
       printf("Unsupported output size in test: %zu\n", output.size(1));
@@ -221,16 +221,16 @@ void silu_mul_linear(torch::Tensor input,
 
   switch (output.size(1)) {
     case 16:
-      launch_silu_mul_linear<bfloat16, 1, 16, 12288>(input_ptr, weight_ptr,
-                                                     bias_ptr, output_ptr);
+      launch_silu_mul_linear<bfloat16, 1, 16, 12288>(
+          input_ptr, weight_ptr, bias_ptr, output_ptr);
       break;
     case 32:
-      launch_silu_mul_linear<bfloat16, 1, 32, 12288>(input_ptr, weight_ptr,
-                                                     bias_ptr, output_ptr);
+      launch_silu_mul_linear<bfloat16, 1, 32, 12288>(
+          input_ptr, weight_ptr, bias_ptr, output_ptr);
       break;
     case 64:
-      launch_silu_mul_linear<bfloat16, 1, 64, 12288>(input_ptr, weight_ptr,
-                                                     bias_ptr, output_ptr);
+      launch_silu_mul_linear<bfloat16, 1, 64, 12288>(
+          input_ptr, weight_ptr, bias_ptr, output_ptr);
       break;
     default:
       printf("Unsupported output size in test: %zu\n", output.size(1));
@@ -285,16 +285,16 @@ void linear(torch::Tensor input,
 
   switch (output.size(1)) {
     case 16:
-      launch_linear<bfloat16, 1, 16, 4096>(input_ptr, weight_ptr,
-                                           residual_ptr, output_ptr);
+      launch_linear<bfloat16, 1, 16, 4096>(
+          input_ptr, weight_ptr, residual_ptr, output_ptr);
       break;
     case 32:
-      launch_linear<bfloat16, 1, 32, 4096>(input_ptr, weight_ptr,
-                                           residual_ptr, output_ptr);
+      launch_linear<bfloat16, 1, 32, 4096>(
+          input_ptr, weight_ptr, residual_ptr, output_ptr);
       break;
     case 64:
-      launch_linear<bfloat16, 1, 64, 4096>(input_ptr, weight_ptr,
-                                           residual_ptr, output_ptr);
+      launch_linear<bfloat16, 1, 64, 4096>(
+          input_ptr, weight_ptr, residual_ptr, output_ptr);
       break;
     default:
       printf("Unsupported output size in test: %zu\n", output.size(1));
