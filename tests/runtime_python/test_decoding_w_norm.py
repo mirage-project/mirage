@@ -67,7 +67,7 @@ def attention_decode(q, k_cache, v_cache, valid_len, q_weight, k_weight, eps, co
     mask = torch.arange(valid_len, device=scores.device)[None, :] <= (valid_len - 1)
     scores = scores.masked_fill(~mask[None, None, :], float("-inf"))
 
-    attn = F.softmax(scores, dim=-1)
+    attn = F.softmax(scores / np.sqrt(head_dim), dim=-1)
     out = torch.matmul(attn, v)
     return out
 

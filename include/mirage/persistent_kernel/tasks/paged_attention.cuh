@@ -60,6 +60,8 @@ __device__ __forceinline__ void
   constexpr size_t MAX_PAGES_PER_REQUEST =
       (MAX_SEQ_LEN + PAGE_SIZE - 1) / PAGE_SIZE;
 
+  float const sm_scale = 1.f / sqrtf(float(HEAD_DIM));
+
   int warp_idx = warp_id();
   int lane_idx = lane_id();
 
@@ -340,7 +342,7 @@ __device__ __forceinline__ void
     m = max(m, shfl_xor_sync(m, 0x1));
     m = max(m, shfl_xor_sync(m, 0x2));
 
-    float rescale = expf(m_prev - m);
+    float rescale = expf(m_prev * sm_scale - m * sm_scale);
 
     // update d: get partial sum
     float d_partial = 0.f;
@@ -353,7 +355,7 @@ __device__ __forceinline__ void
         int col = (warp_idx << 4) + ((lane_idx & 0x3) << 1) + (i << 3) + j;
         x_frag_f[idx] =
             row < NUM_Q_PER_KV && col < curr_iter_len && x_frag_f[idx] != -inf
-                ? expf(x_frag_f[idx] - m)
+                ? expf(x_frag_f[idx] * sm_scale - m * sm_scale)
                 : 0.f;
         d_partial += x_frag_f[idx];
       }
@@ -392,6 +394,7 @@ __device__ __forceinline__ void
   }
 
   // write intermediate results to buffer in shared memory
+  m *= m != -inf ? sm_scale : 1.f;
   s_m_buffer[threadIdx.x] = m;
   s_d_buffer[threadIdx.x] = d;
   for (int n = 0; n < HEAD_DIM / 16; n++) {

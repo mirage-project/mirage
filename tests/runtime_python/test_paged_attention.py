@@ -1,3 +1,4 @@
+import numpy as np
 import torch
 import torch.nn.functional as F
 import runtime_kernel
@@ -80,7 +81,7 @@ def torch_paged_attention(
     scores = torch.matmul(q, k.transpose(-2, -1))
     mask = torch.arange(seq_len, device=scores.device)[None, :] <= (seq_len - 1)
     scores = scores.masked_fill(~mask[None, None, :], float("-inf"))
-    attn = F.softmax(scores, dim=-1)
+    attn = F.softmax(scores / np.sqrt(head_dim), dim=-1)
     out = torch.matmul(attn, v)
     return out
 
