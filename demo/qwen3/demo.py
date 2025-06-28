@@ -118,13 +118,12 @@ if __name__ == "__main__":
             ).contiguous()
         else:
             profiler_tensor = None
-        # TODO(Wenqin): introduce a method to dynamically get the configuration
-        # to support other GPUs.
+        num_workers, num_schedulers = mi.get_configurations_from_gpu(rank)
         mpk = mi.PersistentKernel(
             world_size=world_size,
             mpi_rank=rank,
-            num_workers=96,
-            num_local_schedulers=48,
+            num_workers=num_workers,
+            num_local_schedulers=num_schedulers,
             num_remote_schedulers=0,
             meta_tensors=[step, tokens],
             profiler_tensor=profiler_tensor,
