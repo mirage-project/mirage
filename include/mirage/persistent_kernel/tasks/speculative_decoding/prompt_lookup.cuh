@@ -18,15 +18,18 @@
 #include <climits>
 
 namespace kernel {
-
+// TODO:(Jianan Ji) These could be further merged as one?
 // Find the first n-gram in the sequence
-template <typename T, int NGRAM_SIZE, int NUM_WORKERS>
+template <int NGRAM_SIZE, int NUM_WORKERS>
 static __device__ __forceinline__ void 
-      find_ngram_partial_kernel(void const *__restrict__ input_ptr,
-                                int *__restrict__ ngram_id_ptr,
-                                long long *__restrict__ output_id_ptr,
+      find_ngram_partial_kernel(long long const *__restrict__ input_ptr,
+                                long long  *__restrict__ output_id_ptr,
                                 int input_token_num) {
-  T const *__restrict__ input = static_cast<T const *>(input_ptr);
+  if (input_token_num <= NGRAM_SIZE) {
+    return;
+  }
+  long long const *__restrict__ ngram_id_ptr = input_ptr + input_token_num - NGRAM_SIZE;
+
   long long *__restrict__ output = output_id_ptr;
 
   int block_id = blockIdx.x;
@@ -43,13 +46,13 @@ static __device__ __forceinline__ void
     ngram[t_id] = ngram_id_ptr[t_id];
   }
 
-  for (int idx = t_id + block_id * NUM_THREADS; idx < input_token_num; idx += NUM_WORKERS * NUM_THREADS) {
+  for (int idx = t_id + block_id * NUM_THREADS; idx < input_token_num - NGRAM_SIZE; idx += NUM_WORKERS * NUM_THREADS) {
     
     // Load input tokens into shared memory
-    input_tokens[t_id] = input[idx];
+    input_tokens[t_id] = input_ptr[idx];
     if (t_id >= NUM_THREADS_PER_WARP && t_id < NUM_THREADS_PER_WARP + NGRAM_SIZE - 1) {
         input_tokens[NUM_THREADS + t_id - NUM_THREADS_PER_WARP] =
-            input[idx + (NUM_THREADS - NUM_THREADS_PER_WARP) + t_id - NUM_THREADS_PER_WARP];
+            input_ptr[idx + (NUM_THREADS - NUM_THREADS_PER_WARP) + t_id - NUM_THREADS_PER_WARP];
     }
     __syncthreads();
 
@@ -85,14 +88,16 @@ static __device__ __forceinline__ void
 }
 
 // Find the first n-gram in the sequence
-template <int NUM_PARTIAL_TASKS>
+template <int NGRAM_SIZE, int SPEC_LENGTH, int NUM_PARTIAL_TASKS>
 static __device__ __forceinline__ void 
 find_ngram_global_kernel(long long const *__restrict__ input_array,
+                         long long const *__restrict__ tokens_ptr,
                          long long *__restrict__ output_result) {
     
+    int t_id = threadIdx.x;
     __shared__ long long block_min_idx_shared;
     
-    if (threadIdx.x == 0) {
+    if (t_id == 0) {
         block_min_idx_shared = INT_MAX;
     }
     __syncthreads();
@@ -106,11 +111,11 @@ find_ngram_global_kernel(long long const *__restrict__ input_array,
     
     __syncthreads();
     
-    if (threadIdx.x == 0) {
+    if (t_id < SPEC_LENGTH) {
         if (block_min_idx_shared != INT_MAX) {
-            output_result[0] = block_min_idx_shared;
+            output_result[t_id] = tokens_ptr[block_min_idx_shared + NGRAM_SIZE + t_id];
         } else {
-            output_result[0] = -1;
+            output_result[t_id] = -1;
         }
     }
 }
