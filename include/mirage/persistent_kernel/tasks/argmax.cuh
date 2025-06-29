@@ -16,7 +16,7 @@
 #include "common.h"
 #include "utils.cuh"
 namespace kernel {
-
+// TODO:(Jianan Ji) These might be further merged as one task?
 template <typename T>
 __device__ __forceinline__ void warp_reduce_max_idx(T &val, long long &idx) {
 #pragma unroll
