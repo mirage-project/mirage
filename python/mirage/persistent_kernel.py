@@ -8,6 +8,12 @@ import sysconfig
 
 from .core import *
 from .kernel import get_key_paths, KNGraph, TBGraph
+from .speculative import (
+    SpecDecodeConfig,
+    LookaheadConfig,
+    PromptLookupConfig,
+    prompt_lookup_ngram_layer,
+)
 
 HARD_CODE = """
 #include <Python.h>
@@ -157,6 +163,7 @@ class PersistentKernel:
         num_remote_schedulers: int,
         meta_tensors: list[torch.Tensor],
         profiler_tensor: torch.Tensor,
+        spec_decode_config: SpecDecodeConfig
     ):
         self.__finalized__ = False
         self._is_compiled = False
@@ -169,6 +176,7 @@ class PersistentKernel:
         self.meta_tensors = meta_tensors
         self.profiler_tensor = profiler_tensor
         self.use_nvshmem = True if world_size > 1 else False
+        self.spec_decode_config = spec_decode_config
 
     def attach_input(self, torch_tensor: torch.Tensor, name: str = None) -> DTensor:
         dims = tuple([d for d in torch_tensor.shape])
@@ -422,15 +430,105 @@ class PersistentKernel:
         tb_graph.new_input(output, (-1, -1, -1), -1, True)
         self.kn_graph.customized([input_value, input_index, output], tb_graph)
         self.kn_graph.register_task(tb_graph, "argmax_reduce", [self.argmax_partial_output_size])
+        
+    def find_ngram_partial_layer(
+        self, input: DTensor, output: DTensor, grid_dim: tuple, block_dim: tuple, ngram_size: int = 3):
+        # Currently assume that input/output
+        assert input.num_dims == 2  # (batch_size, vocab_size)
+        assert output.num_dims == 2  # (batch_size, num_tasks)
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(input, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output, (-1, -1, -1), -1, True)
+        self.kn_graph.customized([input, output], tb_graph)
+        self.kn_graph.register_task(tb_graph, "find_ngram_partial", [ngram_size])
+        
+    def find_ngram_global_layer(
+        self, input: DTensor, output: DTensor, grid_dim: tuple, block_dim: tuple, spec_length: int = 5):
+        # Currently assume that input/output
+        assert input.num_dims == 2  # (batch_size, vocab_size)
+        assert output.num_dims == 2  # (batch_size, 1)
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(input, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output, (-1, -1, -1), -1, True)
+        self.kn_graph.customized([input, output], tb_graph)
+        self.kn_graph.register_task(tb_graph, "find_ngram_global", [spec_length])
+        
+    def target_verify_greedy_layer(
+        self, input: tuple[DTensor, DTensor], output: DTensor, grid_dim: tuple, block_dim: tuple):
+        # Currently assume that input/output
+        assert len(input) == 2
+        spec_tokens, target_tokens = input
+        assert spec_tokens.num_dims == 2  # (batch_size, vocab_size)
+        assert target_tokens.num_dims == 2  # (batch_size, vocab_size)
+        assert output.num_dims == 2  # (batch_size, 1)
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(spec_tokens, (-1, -1, -1), -1, True)
+        tb_graph.new_input(target_tokens, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output, (-1, -1, -1), -1, True)
+        self.kn_graph.customized([spec_tokens, target_tokens, output], tb_graph)
+        self.kn_graph.register_task(tb_graph, "target_verify_greedy")
+
+    def draft_forward_layer_dispatcher(
+        self,
+        spec_decode: SpecDecodeConfig,
+        tokens: DTensor,
+        grid_dim: tuple[int, int, int],
+        block_dim: tuple[int, int, int],
+    ):
+        if spec_decode.method == "promptlookup":
+            partial_ngram_output = self.new_tensor(
+                dims=(tokens.dim(0), 96),
+                dtype=int64,
+                name="partial_ngram_output",
+                io_category="cuda_tensor",
+            )
+            self.find_ngram_partial_layer(
+                input=tokens, output=partial_ngram_output, grid_dim=grid_dim, block_dim=block_dim, ngram_size=spec_decode.ngram_size
+            )
+            spec_tokens = self.new_tensor(
+                dims=(tokens.dim(0), spec_decode.spec_length),
+                dtype=int64,
+                name="spec_tokens",
+                io_category="cuda_tensor",
+            )   
+            self.find_ngram_global_layer(
+                input=partial_ngram_output, output=spec_tokens, grid_dim=(1, 1, 1), block_dim=(128, 1, 1), spec_length=spec_decode.spec_length
+            )
+            return spec_tokens
+        else:
+            raise ValueError(f"Invalid spec decode method: {spec_decode.method}")
+    
+    def verify_layer_dispatcher(
+        self,
+        spec_decode: SpecDecodeConfig,
+        spec_tokens: DTensor,
+        target_output: DTensor,
+    ):
+        if spec_decode.method == "promptlookup":
+            verify_out = self.new_tensor(
+                dims=(1, 1),
+                dtype=int64,
+                name="verify_out",
+                io_category="cuda_tensor",
+            )
+            self.target_verify_greedy_layer(
+                input=(spec_tokens, target_output), output=verify_out, grid_dim=(1, 1, 1), block_dim=(128, 1, 1)
+            )
+            return verify_out
+        else:
+            raise ValueError(f"Invalid spec decode method: {spec_decode.method}")
 
     def compile(
         self,
         **kwargs,
     ):
         assert not self._is_compiled
+        
+        output_dir = kwargs.get("output_dir", None)
 
         MIRAGE_ROOT, INCLUDE_PATH, DEPS_PATH = get_key_paths()
         tempdir = tempfile.gettempdir()
+        print(f"tempdir: {tempdir}")
         results = self.kn_graph.generate_task_graph(num_gpus=self.world_size)
 
         cuda_code_path = os.path.join(tempdir, "test.cu")
@@ -441,6 +539,11 @@ class PersistentKernel:
             f.write(results["json_file"])
         with open(cuda_code_path, "w") as f:
             f.write(results["cuda_code"] + HARD_CODE)
+            
+        if output_dir is not None:
+            os.makedirs(output_dir, exist_ok=True)
+            shutil.copy(cuda_code_path, os.path.join(output_dir, "test.cu"))
+            shutil.copy(json_file_path, os.path.join(output_dir, "task_graph.json"))
 
         cc = shutil.which("nvcc")
         if cc is None:

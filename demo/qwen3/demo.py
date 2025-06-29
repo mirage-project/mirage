@@ -12,6 +12,13 @@ if __name__ == "__main__":
     parser.add_argument(
         "--profiling", action="store_true", help="Use Profiler to generate trace"
     )
+    # lookahead or promptlookup
+    parser.add_argument(
+        "--spec-decode",
+        default=None,
+        choices=["promptlookup", "lookahead"],
+        help="Enable speculative decoding with 'lookahead' or 'promptlookup' mode.",
+    )
     args = parser.parse_args()
     try:
         from mpi4py import MPI
@@ -111,6 +118,13 @@ if __name__ == "__main__":
             ).contiguous()
         else:
             profiler_tensor = None
+        if args.spec_decode:
+            spec_decode_config = mi.speculative.LookaheadConfig(
+                ngram_size=3,
+                spec_length=5,
+            )
+        else:
+            spec_decode_config = None
         mpk = mi.PersistentKernel(
             world_size=world_size,
             mpi_rank=rank,
@@ -119,7 +133,10 @@ if __name__ == "__main__":
             num_remote_schedulers=0,
             meta_tensors=[step, tokens],
             profiler_tensor=profiler_tensor,
+            spec_decode_config=spec_decode_config,
         )
+        if args.spec_decode == "promptlookup":
+            all_tokens = mpk.attach_input(torch_tensor=tokens, name="all_tokens")
         x = mpk.attach_input(torch_tensor=input_tokens, name="input_token")
         cos_pos_embed = mpk.attach_input(
             torch_tensor=position_embeddings[0][0, :4096, :],
@@ -208,6 +225,15 @@ if __name__ == "__main__":
             io_category="cuda_tensor",
         )
 
+        # add spec tokens layer
+        if args.spec_decode:
+            spec_tokens = mpk.draft_forward_layer_dispatcher(
+                spec_decode = args.spec_decode, 
+                tokens = all_tokens,
+                grid_dim=(96, 1, 1),
+                block_dim=(128, 1, 1),
+            )
+            x = spec_tokens
         # Add Embed
         w = mpk.attach_input(
             torch_tensor=model.model.embed_tokens.weight, name="embed_tokens"
@@ -369,6 +395,15 @@ if __name__ == "__main__":
             grid_dim=(1, 1, 1),
             block_dim=(128, 1, 1),
         )
+        if args.spec_decode:
+            # TODO:(Jianan Ji) Align the output of argmax_reduce with the spec tokens
+            verify_out = mpk.verify_layer_dispatcher(
+                spec_decode = args.spec_decode,
+                spec_tokens = spec_tokens,
+                target_output = argmax_out,
+                grid_dim = (1, 1, 1),
+                block_dim = (128, 1, 1),
+            )
 
         results = mpk.kn_graph.generate_task_graph(num_gpus=world_size)
         with open("task_graph.json", "w") as f:
@@ -436,7 +471,7 @@ if __name__ == "__main__":
         starter.record()
 
         step.fill_(prompt_len)
-        mpk()
+        mpk(output_dir="output")
 
         ender.record()
         torch.cuda.synchronize()
