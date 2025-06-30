@@ -2,6 +2,7 @@ import torch
 import torch.nn.functional as F
 import runtime_kernel
 import numpy as np
+
 torch.set_printoptions(sci_mode=False)
 
 q_heads = 4
@@ -13,10 +14,13 @@ max_seq_len = 512
 
 device = "cuda"
 dtype = torch.bfloat16
+
+
 def rotate_half(x):
     x1 = x[..., : x.shape[-1] // 2]
     x2 = x[..., x.shape[-1] // 2 :]
     return torch.cat((-x2, x1), dim=-1)
+
 
 def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
     q_fp32 = q.to(torch.float32)
@@ -29,6 +33,7 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
     q_embed = (q_fp32 * cos_fp32) + (rotate_half(q_fp32) * sin_fp32)
     k_embed = (k_fp32 * cos_fp32) + (rotate_half(k_fp32) * sin_fp32)
     return q_embed.to(torch.bfloat16), k_embed.to(torch.bfloat16)
+
 
 def rmsnorm(X, W, eps):
     # variance = X.pow(2).mean(-1, keepdim=True)
@@ -43,6 +48,7 @@ def rmsnorm(X, W, eps):
     X_normed = X_fp32 * inv_rms
     out = X_normed * W_fp32
     return out.to(torch.bfloat16)
+
 
 def attention_decode(q, k_cache, v_cache, valid_len, q_weight, k_weight, eps, cos, sin):
 
@@ -61,14 +67,18 @@ def attention_decode(q, k_cache, v_cache, valid_len, q_weight, k_weight, eps, co
     mask = torch.arange(valid_len, device=scores.device)[None, :] <= (valid_len - 1)
     scores = scores.masked_fill(~mask[None, None, :], float("-inf"))
 
-    attn = F.softmax(scores, dim=-1) 
+    attn = F.softmax(scores / np.sqrt(head_dim), dim=-1)
     out = torch.matmul(attn, v)
     return out
+
 
 k_cache_torch = torch.empty((1, max_seq_len, head_dim), device=device, dtype=dtype)
 v_cache_torch = torch.empty((1, max_seq_len, head_dim), device=device, dtype=dtype)
 k_cache_mirage = torch.empty((max_seq_len, head_dim), device=device, dtype=dtype)
-v_cache_mirage =torch.empty((max_seq_len, head_dim), device=device, dtype=dtype)
+v_cache_mirage = torch.empty((max_seq_len, head_dim), device=device, dtype=dtype)
+
+all_cos = torch.randn((513, head_dim), device=device, dtype=dtype)
+all_sin = torch.randn((513, head_dim), device=device, dtype=dtype)
 
 for i in range(512):
     seq_len = i + 1
@@ -77,7 +87,7 @@ for i in range(512):
     # qkv = torch.full((num_total_heads, head_dim), 0.1, device=device, dtype=dtype)
 
     q = qkv[:q_heads].unsqueeze(1)
-    k = qkv[q_heads:q_heads+1]
+    k = qkv[q_heads : q_heads + 1]
     v = qkv[-1:]
 
     k_cache_torch[0, seq_len - 1] = k
@@ -92,19 +102,40 @@ for i in range(512):
     qnorm_weight = torch.randn((1, head_dim), device=device, dtype=dtype)
     knorm_weight = torch.randn((1, head_dim), device=device, dtype=dtype)
 
-    cos = torch.randn((1, head_dim), device=device, dtype=dtype)
-    sin = torch.randn((1, head_dim), device=device, dtype=dtype)
+    cos = all_cos[seq_len].unsqueeze(0).clone()
+    sin = all_sin[seq_len].unsqueeze(0).clone()
 
-
-
-
-    torch_output = attention_decode(q, k_cache_torch, v_cache_torch, seq_len, q_weight=qnorm_weight, k_weight=knorm_weight, eps=eps, cos=cos, sin=sin)
+    torch_output = attention_decode(
+        q,
+        k_cache_torch,
+        v_cache_torch,
+        seq_len,
+        q_weight=qnorm_weight,
+        k_weight=knorm_weight,
+        eps=eps,
+        cos=cos,
+        sin=sin,
+    )
     torch_output = torch_output.squeeze(0).squeeze(1)
-
-    
 
     mirage_output = torch.empty((q_heads, head_dim), device=device, dtype=dtype)
     # runtime_kernel.single_batch_gqa(qkv_mirage, k_cache_mirage, v_cache_mirage, mirage_output, seq_len, False)
-    runtime_kernel.single_batch_decoding(qkv_mirage, k_cache_mirage, v_cache_mirage, mirage_output, seq_len, True, True, qnorm_weight, knorm_weight, cos, sin, eps, eps)
+    runtime_kernel.single_batch_decoding(
+        qkv_mirage,
+        k_cache_mirage,
+        v_cache_mirage,
+        mirage_output,
+        seq_len,
+        True,
+        True,
+        qnorm_weight,
+        knorm_weight,
+        all_cos,
+        all_sin,
+        eps,
+        eps,
+    )
     diff = mirage_output - torch_output
     print("seq_len res:", seq_len, "min:", diff.min().item(), "max:", diff.max().item())
+    print("torch_output / mirage_output:")
+    print(torch_output / mirage_output)
