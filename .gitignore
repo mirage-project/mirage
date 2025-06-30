@@ -52,3 +52,7 @@ wheelhouse/
 demo/mirage_search_checkpoint.json
 demo/*generated*
 benchmark/*generated*
+
+# Temp file
+task_graph.json
+test.cu
