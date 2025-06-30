@@ -21,6 +21,9 @@
 #include <unordered_map>
 #include <vector>
 
+#ifdef MIRAGE_FINGERPRINT_USE_CUDA
+#include <cublas_v2.h>
+#endif
 namespace mirage {
 namespace kernel {
 
