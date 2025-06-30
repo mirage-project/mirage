@@ -9,6 +9,7 @@ import os
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--use-mirage", action="store_true", help="Use Mirage kernels")
+    parser.add_argument("--output-dir", help="Output files directory")
     parser.add_argument(
         "--profiling", action="store_true", help="Use Profiler to generate trace"
     )
@@ -238,9 +239,15 @@ if __name__ == "__main__":
         w = mpk.attach_input(
             torch_tensor=model.model.embed_tokens.weight, name="embed_tokens"
         )
-        mpk.embed_layer(
-            input=x, weight=w, output=y, grid_dim=(1, 1, 1), block_dim=(128, 1, 1)
-        )
+        if args.spec_decode:
+            # TODO:(Jianan Ji) Later use a more elegant way to do the branch
+            mpk.embed_layer(
+                input=x, weight=w, output=y, grid_dim=(spec_decode_config.spec_length, 1, 1), block_dim=(128, 1, 1)
+            )
+        else:
+            mpk.embed_layer(
+                input=x, weight=w, output=y, grid_dim=(1, 1, 1), block_dim=(128, 1, 1)
+            )
         x = y
         for i, layer in enumerate(model.model.layers):
             # add rmsnorm + linear
@@ -411,7 +418,7 @@ if __name__ == "__main__":
         with open("test.cu", "w") as f:
             f.write(results["cuda_code"])
 
-        mpk.compile()
+        mpk.compile(output_dir=args.output_dir)
 
     # g = torch.cuda.CUDAGraph()
     stream = torch.cuda.Stream()
