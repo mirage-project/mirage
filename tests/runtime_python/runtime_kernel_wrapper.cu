@@ -2,6 +2,7 @@
 #include "bfloat16.h"
 #include "linear.cuh"
 #include "norm_linear.cuh"
+#include "paged_attention.cuh"
 #include "silu_mul_linear.cuh"
 #include "single_batch_decoding.cuh"
 #include "single_batch_gqa.cuh"
@@ -11,6 +12,7 @@
 // using kernel::argmax_kernel;
 using kernel::linear_kernel;
 using kernel::norm_linear_task_impl;
+using kernel::paged_attention_task_impl;
 using kernel::silu_mul_linear_task_impl;
 using kernel::single_batch_decoding_kernel;
 using kernel::single_batch_gqa_kernel;
@@ -91,6 +93,244 @@ void single_batch_gqa(
                                            sin_ptr,
                                            q_eps,
                                            k_eps);
+
+  cudaError_t err = cudaDeviceSynchronize();
+  if (err != cudaSuccess) {
+    printf("CUDA kernel launch error: %s\n", cudaGetErrorString(err));
+  }
+}
+
+// Single Batch Decoding
+
+template <typename T,
+          int NUM_Q_HEADS,
+          int NUM_KV_HEADS,
+          int HEAD_DIM,
+          int WEIGHT_STRIDE>
+__global__ void single_batch_decoding_wrapper(void const *qkv_ptr,
+                                              void *k_cache_ptr,
+                                              void *v_cache_ptr,
+                                              void *output_ptr,
+                                              size_t seq_len,
+                                              bool qk_norm,
+                                              bool rotary_emd,
+                                              void const *qnorm_weight_ptr,
+                                              void const *knorm_weight_ptr,
+                                              void const *cos_ptr,
+                                              void const *sin_ptr,
+                                              float q_eps,
+                                              float k_eps) {
+  single_batch_decoding_kernel<T,
+                               NUM_Q_HEADS,
+                               NUM_KV_HEADS,
+                               HEAD_DIM,
+                               WEIGHT_STRIDE>(qkv_ptr,
+                                              k_cache_ptr,
+                                              v_cache_ptr,
+                                              output_ptr,
+                                              seq_len,
+                                              qk_norm,
+                                              rotary_emd,
+                                              qnorm_weight_ptr,
+                                              knorm_weight_ptr,
+                                              cos_ptr,
+                                              sin_ptr,
+                                              q_eps,
+                                              k_eps);
+}
+
+void single_batch_decoding(
+    torch::Tensor qkv,
+    torch::Tensor k_cache,
+    torch::Tensor v_cache,
+    torch::Tensor output,
+    size_t seq_len,
+    bool qk_norm,
+    bool rotary_emd,
+    torch::optional<torch::Tensor> qnorm_weight = torch::nullopt,
+    torch::optional<torch::Tensor> knorm_weight = torch::nullopt,
+    torch::optional<torch::Tensor> cos = torch::nullopt,
+    torch::optional<torch::Tensor> sin = torch::nullopt,
+    float q_eps = 0.0f,
+    float k_eps = 0.0f) {
+  void const *qkv_ptr = qkv.data_ptr();
+  void *k_cache_ptr = k_cache.data_ptr();
+  void *v_cache_ptr = v_cache.data_ptr();
+  void *output_ptr = output.data_ptr();
+
+  dim3 grid_dim(1, 1, 1);
+  dim3 block_dim(128, 1, 1);
+  size_t smem_size = 88888;
+
+  void const *qnorm_weight_ptr = qk_norm ? qnorm_weight->data_ptr() : nullptr;
+  void const *knorm_weight_ptr = qk_norm ? knorm_weight->data_ptr() : nullptr;
+  void const *cos_ptr = rotary_emd ? cos->data_ptr() : nullptr;
+  void const *sin_ptr = rotary_emd ? sin->data_ptr() : nullptr;
+
+  cudaFuncSetAttribute(single_batch_decoding_wrapper<bfloat16, 4, 1, 128, 128>,
+                       cudaFuncAttributeMaxDynamicSharedMemorySize,
+                       smem_size);
+
+  single_batch_decoding_wrapper<bfloat16, 4, 1, 128, 128>
+      <<<grid_dim, block_dim, smem_size>>>(qkv_ptr,
+                                           k_cache_ptr,
+                                           v_cache_ptr,
+                                           output_ptr,
+                                           seq_len,
+                                           qk_norm,
+                                           rotary_emd,
+                                           qnorm_weight_ptr,
+                                           knorm_weight_ptr,
+                                           cos_ptr,
+                                           sin_ptr,
+                                           q_eps,
+                                           k_eps);
+
+  cudaError_t err = cudaDeviceSynchronize();
+  if (err != cudaSuccess) {
+    printf("CUDA kernel launch error: %s\n", cudaGetErrorString(err));
+  }
+}
+
+// Paged Attention
+
+template <typename T,
+          int NUM_Q_PER_KV,
+          int HEAD_DIM,
+          int PAGE_SIZE,
+          int MAX_SEQ_LEN,
+          int KV_STRIDE>
+__global__ void paged_attention_wrapper(void const *qkv_ptr,
+                                        void *paged_k_cache_ptr,
+                                        void *paged_v_cache_ptr,
+                                        void *output_ptr,
+                                        void const *paged_kv_indices_buffer_ptr,
+                                        size_t seq_len,
+                                        bool qk_norm,
+                                        bool rope,
+                                        void const *q_norm_weight_ptr,
+                                        void const *k_norm_weight_ptr,
+                                        void const *cos_ptr,
+                                        void const *sin_ptr,
+                                        float q_eps,
+                                        float k_eps) {
+  paged_attention_task_impl<T,
+                            NUM_Q_PER_KV,
+                            HEAD_DIM,
+                            PAGE_SIZE,
+                            MAX_SEQ_LEN,
+                            KV_STRIDE>(qkv_ptr,
+                                       paged_k_cache_ptr,
+                                       paged_v_cache_ptr,
+                                       output_ptr,
+                                       paged_kv_indices_buffer_ptr,
+                                       seq_len,
+                                       qk_norm,
+                                       rope,
+                                       q_norm_weight_ptr,
+                                       k_norm_weight_ptr,
+                                       cos_ptr,
+                                       sin_ptr,
+                                       q_eps,
+                                       k_eps);
+}
+
+template <typename T,
+          int NUM_Q_PER_KV,
+          int HEAD_DIM,
+          int PAGE_SIZE,
+          int MAX_SEQ_LEN,
+          int KV_STRIDE>
+void launch_paged_attention(void const *qkv_ptr,
+                            void *paged_k_cache_ptr,
+                            void *paged_v_cache_ptr,
+                            void *output_ptr,
+                            void const *paged_kv_indices_buffer_ptr,
+                            size_t seq_len,
+                            bool qk_norm,
+                            bool rope,
+                            void const *q_norm_weight_ptr,
+                            void const *k_norm_weight_ptr,
+                            void const *cos_ptr,
+                            void const *sin_ptr,
+                            float q_eps,
+                            float k_eps) {
+  dim3 grid_dim(1, 1, 1);
+  dim3 block_dim(128, 1, 1);
+  size_t smem_size = 112640;
+
+  cudaFuncSetAttribute(paged_attention_wrapper<T,
+                                               NUM_Q_PER_KV,
+                                               HEAD_DIM,
+                                               PAGE_SIZE,
+                                               MAX_SEQ_LEN,
+                                               KV_STRIDE>,
+                       cudaFuncAttributeMaxDynamicSharedMemorySize,
+                       smem_size);
+
+  paged_attention_wrapper<T,
+                          NUM_Q_PER_KV,
+                          HEAD_DIM,
+                          PAGE_SIZE,
+                          MAX_SEQ_LEN,
+                          KV_STRIDE>
+      <<<grid_dim, block_dim, smem_size>>>(qkv_ptr,
+                                           paged_k_cache_ptr,
+                                           paged_v_cache_ptr,
+                                           output_ptr,
+                                           paged_kv_indices_buffer_ptr,
+                                           seq_len,
+                                           qk_norm,
+                                           rope,
+                                           q_norm_weight_ptr,
+                                           k_norm_weight_ptr,
+                                           cos_ptr,
+                                           sin_ptr,
+                                           q_eps,
+                                           k_eps);
+}
+
+void paged_attention(
+    torch::Tensor qkv,
+    torch::Tensor paged_k_cache,
+    torch::Tensor paged_v_cache,
+    torch::Tensor output,
+    torch::Tensor paged_kv_indices_buffer,
+    size_t seq_len,
+    bool qk_norm,
+    bool rope,
+    torch::optional<torch::Tensor> q_norm_weight = torch::nullopt,
+    torch::optional<torch::Tensor> k_norm_weight = torch::nullopt,
+    torch::optional<torch::Tensor> cos = torch::nullopt,
+    torch::optional<torch::Tensor> sin = torch::nullopt,
+    float q_eps = 0.0f,
+    float k_eps = 0.0f) {
+  void const *qkv_ptr = qkv.data_ptr();
+  void *paged_k_cache_ptr = paged_k_cache.data_ptr();
+  void *paged_v_cache_ptr = paged_v_cache.data_ptr();
+  void *output_ptr = output.data_ptr();
+  void const *paged_kv_indices_buffer_ptr = paged_kv_indices_buffer.data_ptr();
+
+  void const *q_norm_weight_ptr = qk_norm ? q_norm_weight->data_ptr() : nullptr;
+  void const *k_norm_weight_ptr = qk_norm ? k_norm_weight->data_ptr() : nullptr;
+  void const *cos_ptr = rope ? cos->data_ptr() : nullptr;
+  void const *sin_ptr = rope ? sin->data_ptr() : nullptr;
+
+  launch_paged_attention<bfloat16, 4, 128, 64, 512, 128>(
+      qkv_ptr,
+      paged_k_cache_ptr,
+      paged_v_cache_ptr,
+      output_ptr,
+      paged_kv_indices_buffer_ptr,
+      seq_len,
+      qk_norm,
+      rope,
+      q_norm_weight_ptr,
+      k_norm_weight_ptr,
+      cos_ptr,
+      sin_ptr,
+      q_eps,
+      k_eps);
 
   cudaError_t err = cudaDeviceSynchronize();
   if (err != cudaSuccess) {
@@ -349,9 +589,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   // m.def("argmax", &argmax, "argmax kernel");
   m.def("norm_linear", &norm_linear, "RMSNorm Linear kernel");
   m.def("silu_mul_linear", &silu_mul_linear, "SILU MUL Linear kernel");
-  // m.def("single_batch_gqa", &single_batch_gqa, "Decoding kernel");
-  m.def("single_batch_gqa",
-        &single_batch_gqa,
+  m.def("single_batch_decoding",
+        &single_batch_decoding,
         py::arg("qkv"),
         py::arg("k_cache"),
         py::arg("v_cache"),
@@ -365,22 +604,5 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("sin") = py::none(),
         py::arg("q_eps") = 0.0f,
         py::arg("k_eps") = 0.0f);
-  // m.def("single_batch_decoding",
-  //       &single_batch_decoding,
-  //       py::arg("qkv"),
-  //       py::arg("k_cache"),
-  //       py::arg("v_cache"),
-  //       py::arg("output"),
-  //       py::arg("seq_len"),
-  //       py::arg("qk_norm"),
-  //       py::arg("rotary_embed"),
-  //       py::arg("qnorm_weight") = py::none(),
-  //       py::arg("knorm_weight") = py::none(),
-  //       py::arg("cos") = py::none(),
-  //       py::arg("sin") = py::none(),
-  //       py::arg("q_eps") = 0.0f,
-  //       py::arg("k_eps") = 0.0f);
-  // m.def("single_batch_decoding",
-  //       &single_batch_decoding,
-  //       "FlashAttention Decoding kernel");
+  m.def("paged_attention", &paged_attention, "Paged Attention");
 }
