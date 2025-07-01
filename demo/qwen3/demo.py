@@ -20,6 +20,19 @@ if __name__ == "__main__":
         choices=["promptlookup", "lookahead"],
         help="Enable speculative decoding with 'lookahead' or 'promptlookup' mode.",
     )
+    parser.add_argument(
+        "--ngram-size",
+        default=3,
+        type=int,
+        help="Ngram size for lookahead spec decode",
+    )
+    parser.add_argument(
+        "--spec-length",
+        default=5,
+        type=int,
+        help="Spec length for lookahead spec decode",
+    )
+
     args = parser.parse_args()
     try:
         from mpi4py import MPI
@@ -119,13 +132,12 @@ if __name__ == "__main__":
             ).contiguous()
         else:
             profiler_tensor = None
-        if args.spec_decode:
-            spec_decode_config = mi.speculative.LookaheadConfig(
-                ngram_size=3,
-                spec_length=5,
-            )
-        else:
-            spec_decode_config = None
+            
+        spec_decode_config = mi.speculative.spec_decode_class(
+            args.spec_decode,
+            ngram_size=args.ngram_size,
+            spec_length=args.spec_length,
+        )
         mpk = mi.PersistentKernel(
             world_size=world_size,
             mpi_rank=rank,
@@ -147,8 +159,13 @@ if __name__ == "__main__":
             torch_tensor=position_embeddings[1][0, :4096, :],
             name="sin_position_embedding",
         )
+        if spec_decode_config:
+            # Currently assume batch size is 1
+            y_dims = (spec_decode_config.spec_length + 1, hidden_size)
+        else:
+            y_dims = (batch_size, hidden_size)
         y = mpk.new_tensor(
-            dims=(batch_size, hidden_size),
+            dims=y_dims,
             dtype=mi.bfloat16,
             name="embed_out",
             io_category="cuda_tensor",
@@ -227,9 +244,9 @@ if __name__ == "__main__":
         )
 
         # add spec tokens layer
-        if args.spec_decode:
+        if spec_decode_config:
             spec_tokens = mpk.draft_forward_layer_dispatcher(
-                spec_decode = args.spec_decode, 
+                spec_decode_config = spec_decode_config, 
                 tokens = all_tokens,
                 grid_dim=(96, 1, 1),
                 block_dim=(128, 1, 1),
@@ -239,15 +256,18 @@ if __name__ == "__main__":
         w = mpk.attach_input(
             torch_tensor=model.model.embed_tokens.weight, name="embed_tokens"
         )
-        if args.spec_decode:
-            # TODO:(Jianan Ji) Later use a more elegant way to do the branch
-            mpk.embed_layer(
-                input=x, weight=w, output=y, grid_dim=(spec_decode_config.spec_length, 1, 1), block_dim=(128, 1, 1)
-            )
-        else:
-            mpk.embed_layer(
-                input=x, weight=w, output=y, grid_dim=(1, 1, 1), block_dim=(128, 1, 1)
-            )
+        
+        embed_grid_dim = (1, 1, 1)
+        if spec_decode_config:
+            embed_grid_dim = (96 // spec_decode_config.spec_length, spec_decode_config.spec_length + 1, 1)
+
+        mpk.embed_layer(
+            input=x, 
+            weight=w, 
+            output=y, 
+            grid_dim=embed_grid_dim, 
+            block_dim=(128, 1, 1)
+        )
         x = y
         for i, layer in enumerate(model.model.layers):
             # add rmsnorm + linear
