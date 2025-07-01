@@ -115,8 +115,9 @@ find_ngram_global_kernel(long long const *__restrict__ input_array,
       output_result[0] = tokens_ptr[step];
     }
     else if (t_id < SPEC_LENGTH + 1) {
-        if (block_min_idx_shared != INT_MAX) {
-            output_result[t_id] = tokens_ptr[block_min_idx_shared + NGRAM_SIZE + t_id - 1];
+        int spec_token_idx = block_min_idx_shared + NGRAM_SIZE + t_id - 1;
+        if (block_min_idx_shared != INT_MAX && spec_token_idx <= step) {
+            output_result[t_id] = tokens_ptr[spec_token_idx];
         } else {
             output_result[t_id] = -1;
         }

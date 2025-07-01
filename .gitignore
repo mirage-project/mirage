@@ -52,3 +52,6 @@ wheelhouse/
 demo/mirage_search_checkpoint.json
 demo/*generated*
 benchmark/*generated*
+
+# Output files of runtime
+output/

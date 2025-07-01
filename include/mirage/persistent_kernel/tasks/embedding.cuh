@@ -49,9 +49,10 @@ __device__ __forceinline__ void
   T const *__restrict__ embedding = static_cast<T const *>(embedding_ptr);
   T *__restrict__ output = static_cast<T *>(output_ptr);
   int64_t wordIdx = input_ids[0];
-
-  for (int i = threadIdx.x; i < CHUNK_SIZE; i += NUM_THREADS) {
-    output[i] = embedding[wordIdx * OUTPUT_DIM_SIZE + i];
+  if (wordIdx >= 0) {
+    for (int i = threadIdx.x; i < CHUNK_SIZE; i += NUM_THREADS) {
+      output[i] = embedding[wordIdx * OUTPUT_DIM_SIZE + i];
+    }
   }
 }
 
