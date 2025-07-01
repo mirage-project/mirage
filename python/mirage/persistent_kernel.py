@@ -10,9 +10,7 @@ from .core import *
 from .kernel import get_key_paths, KNGraph, TBGraph
 from .speculative import (
     SpecDecodeConfig,
-    LookaheadConfig,
     PromptLookupConfig,
-    prompt_lookup_ngram_layer,
 )
 
 HARD_CODE = """
@@ -177,6 +175,9 @@ class PersistentKernel:
         self.profiler_tensor = profiler_tensor
         self.use_nvshmem = True if world_size > 1 else False
         self.spec_decode_config = spec_decode_config
+        self._spec_decode_handlers = {
+            "promptlookup": self.prompt_lookup_layer,
+        }
 
     def attach_input(self, torch_tensor: torch.Tensor, name: str = None) -> DTensor:
         dims = tuple([d for d in torch_tensor.shape])
@@ -224,16 +225,23 @@ class PersistentKernel:
 
     def embed_layer(
         self,
-        input: DTensor,
-        weight: DTensor,
-        output: DTensor,
+        input: DTensor, # [batch_size, num_spec_tokens]
+        weight: DTensor, # [vocab_size, hidden_size]
+        output: DTensor, # [batch_size, hidden_size]
         grid_dim: tuple,
         block_dim: tuple,
     ):
+        # TODO: Support batch size > 1
+        # tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        # tb_graph.new_input(input, (-1, -1, -1), -1, True)
+        # tb_graph.new_input(weight, (-1, -1, -1), -1, True)
+        # tb_graph.new_input(output, (-1, -1, -1), -1, True)
+        # self.kn_graph.customized([input, weight, output], tb_graph)
+        # self.kn_graph.register_task(tb_graph, "embedding")
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
-        tb_graph.new_input(input, (-1, -1, -1), -1, True)
-        tb_graph.new_input(weight, (-1, -1, -1), -1, True)
-        tb_graph.new_input(output, (-1, -1, -1), -1, True)
+        tb_graph.new_input(input, (-1, 1, -1), -1, True)
+        tb_graph.new_input(weight, (1, -1, -1), -1, True)
+        tb_graph.new_input(output, (1, 0, -1), -1, True)
         self.kn_graph.customized([input, weight, output], tb_graph)
         self.kn_graph.register_task(tb_graph, "embedding")
 
@@ -443,15 +451,19 @@ class PersistentKernel:
         self.kn_graph.register_task(tb_graph, "find_ngram_partial", [ngram_size])
         
     def find_ngram_global_layer(
-        self, input: DTensor, output: DTensor, grid_dim: tuple, block_dim: tuple, spec_length: int = 5):
+        self, input: tuple[DTensor, DTensor], output: DTensor, grid_dim: tuple, block_dim: tuple, ngram_size: int = 3, spec_length: int = 5):
         # Currently assume that input/output
-        assert input.num_dims == 2  # (batch_size, vocab_size)
+        assert len(input) == 2
+        partial_results, tokens = input
+        assert partial_results.num_dims == 2  # (batch_size, num_tasks)
+        assert tokens.num_dims == 2  # (batch_size, vocab_size)
         assert output.num_dims == 2  # (batch_size, 1)
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
-        tb_graph.new_input(input, (-1, -1, -1), -1, True)
+        tb_graph.new_input(partial_results, (-1, -1, -1), -1, True)
+        tb_graph.new_input(tokens, (-1, -1, -1), -1, True)
         tb_graph.new_input(output, (-1, -1, -1), -1, True)
-        self.kn_graph.customized([input, output], tb_graph)
-        self.kn_graph.register_task(tb_graph, "find_ngram_global", [spec_length])
+        self.kn_graph.customized([partial_results, tokens, output], tb_graph)
+        self.kn_graph.register_task(tb_graph, "find_ngram_global", [ngram_size, spec_length])
         
     def target_verify_greedy_layer(
         self, input: tuple[DTensor, DTensor], output: DTensor, grid_dim: tuple, block_dim: tuple):
@@ -468,35 +480,54 @@ class PersistentKernel:
         self.kn_graph.customized([spec_tokens, target_tokens, output], tb_graph)
         self.kn_graph.register_task(tb_graph, "target_verify_greedy")
 
-    def draft_forward_layer_dispatcher(
-        self,
-        spec_decode: SpecDecodeConfig,
+    def prompt_lookup_layer(
+        self, 
+        spec_decode_config: PromptLookupConfig,
         tokens: DTensor,
         grid_dim: tuple[int, int, int],
         block_dim: tuple[int, int, int],
     ):
-        if spec_decode.method == "promptlookup":
-            partial_ngram_output = self.new_tensor(
-                dims=(tokens.dim(0), 96),
-                dtype=int64,
-                name="partial_ngram_output",
-                io_category="cuda_tensor",
-            )
-            self.find_ngram_partial_layer(
-                input=tokens, output=partial_ngram_output, grid_dim=grid_dim, block_dim=block_dim, ngram_size=spec_decode.ngram_size
-            )
-            spec_tokens = self.new_tensor(
-                dims=(tokens.dim(0), spec_decode.spec_length),
-                dtype=int64,
-                name="spec_tokens",
-                io_category="cuda_tensor",
-            )   
-            self.find_ngram_global_layer(
-                input=partial_ngram_output, output=spec_tokens, grid_dim=(1, 1, 1), block_dim=(128, 1, 1), spec_length=spec_decode.spec_length
-            )
-            return spec_tokens
-        else:
-            raise ValueError(f"Invalid spec decode method: {spec_decode.method}")
+        partial_ngram_output = self.new_tensor(
+            dims=(tokens.dim(0), 96),
+            dtype=int64,
+            name="partial_ngram_output",
+            io_category="cuda_tensor",
+        )
+        self.find_ngram_partial_layer(
+            input=tokens, 
+            output=partial_ngram_output, 
+            grid_dim=grid_dim, 
+            block_dim=block_dim, 
+            ngram_size=spec_decode_config.ngram_size
+        )
+        spec_tokens = self.new_tensor(
+            dims=(tokens.dim(0), spec_decode_config.spec_length + 1),
+            dtype=int64,
+            name="spec_tokens",
+            io_category="cuda_tensor",
+        )   
+        self.find_ngram_global_layer(
+            input=(partial_ngram_output, tokens), 
+            output=spec_tokens, 
+            grid_dim=(1, 1, 1), 
+            block_dim=(128, 1, 1), 
+            ngram_size=spec_decode_config.ngram_size,
+            spec_length=spec_decode_config.spec_length
+        )
+        return spec_tokens
+    
+    def draft_forward_layer_dispatcher(
+        self,
+        spec_decode_config: SpecDecodeConfig,
+        tokens: DTensor,
+        grid_dim: tuple[int, int, int],
+        block_dim: tuple[int, int, int],
+    ):
+        method = spec_decode_config.method
+        handler = self._spec_decode_handlers[method]
+        if handler is None:
+            raise ValueError(f"Invalid spec decode method: {method}")
+        return handler(spec_decode_config, tokens, grid_dim, block_dim)
     
     def verify_layer_dispatcher(
         self,
