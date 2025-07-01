@@ -1065,10 +1065,7 @@ bool check_range(std::pair<size_t, IKNRange> const &init_range,
                  std::vector<IKNRange> const &target_ranges,
                  kernel::Graph const &graph,
                  std::shared_ptr<threadblock::Graph const> tb_graph) {
-<<<<<<< HEAD
   // Disable range check for now
-=======
->>>>>>> upstream/search
   return true;
   std::vector<IKNRange> interact_ranges =
       get_interact_ranges(init_range, graph, tb_graph);
