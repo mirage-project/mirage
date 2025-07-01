@@ -54,5 +54,6 @@ demo/*generated*
 benchmark/*generated*
 
 # Temp file
-task_graph.json
+task_graph*.json
 test.cu
+kernel*.cu
