@@ -92,7 +92,8 @@ template <int NGRAM_SIZE, int SPEC_LENGTH, int NUM_PARTIAL_TASKS>
 static __device__ __forceinline__ void 
 find_ngram_global_kernel(long long const *__restrict__ input_array,
                          long long const *__restrict__ tokens_ptr,
-                         long long *__restrict__ output_result) {
+                         long long *__restrict__ output_result,
+                         int step) {
     
     int t_id = threadIdx.x;
     __shared__ long long block_min_idx_shared;
@@ -110,10 +111,12 @@ find_ngram_global_kernel(long long const *__restrict__ input_array,
     }
     
     __syncthreads();
-    
-    if (t_id < SPEC_LENGTH) {
+    if (t_id == 0) {
+      output_result[0] = tokens_ptr[step];
+    }
+    else if (t_id < SPEC_LENGTH + 1) {
         if (block_min_idx_shared != INT_MAX) {
-            output_result[t_id] = tokens_ptr[block_min_idx_shared + NGRAM_SIZE + t_id];
+            output_result[t_id] = tokens_ptr[block_min_idx_shared + NGRAM_SIZE + t_id - 1];
         } else {
             output_result[t_id] = -1;
         }
