@@ -29,7 +29,8 @@ using bfloat16 = type::bfloat16_t;
 using namespace mirage::runtime;
 
 __device__ __forceinline__ void
-    _execute_task(TaskDesc const &task_desc, int *step, long long *tokens);
+    _execute_task(TaskDesc const &task_desc,
+                  RuntimeConfig const &runtime_config);
 
 __device__ __forceinline__ bool is_termination_event(size_t event_loc,
                                                      EventDesc e) {
@@ -338,7 +339,7 @@ __global__ void persistent_kernel(RuntimeConfig config) {
                                            task_desc.inputs[0].dim[1],
                                            task_desc.inputs[0].stride[0]);
       } else {
-        _execute_task(task_desc, config.step, config.tokens);
+        _execute_task(task_desc, config);
       }
       __syncthreads();
       if (config.profiling && task_desc.task_type != TASK_TERMINATE) {

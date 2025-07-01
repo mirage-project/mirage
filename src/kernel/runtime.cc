@@ -1225,8 +1225,7 @@ TaskGraphResult print_task_graph(
 
   code.e("__device__ __forceinline__");
   code.e("void _execute_task(TaskDesc const& task_desc,");
-  code.e("                   int *step,");
-  code.e("                   long long *tokens) {");
+  code.e("                   RuntimeConfig const &runtime_config) {");
   TaskRegister *task_register = TaskRegister::get_instance();
   bool first_task = true;
   for (auto const &task : task_register->all_task_variants) {

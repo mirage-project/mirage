@@ -16,8 +16,7 @@
 #include "common.h"
 namespace kernel {
 
-template <typename T,
-          int OUT_DIM>
+template <typename T, int OUT_DIM>
 __device__ __forceinline__ void
     embedding_kernel(void const *__restrict__ input_ptr,
                      void const *__restrict__ embedding_ptr,

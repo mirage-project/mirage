@@ -2,7 +2,7 @@
 #include "embedding.cuh"
 #include "linear.cuh"
 #include "norm_linear.cuh"
-#include "reduction.cuh"
 #include "paged_attention.cuh"
+#include "reduction.cuh"
 #include "silu_mul_linear.cuh"
 #include "single_batch_decoding.cuh"
