@@ -21,6 +21,7 @@
 
 #include <cmath>
 
+#ifdef MIRAGE_FINGERPRINT_USE_CUDA
 namespace mirage {
 __constant__ float CLAMP_MIN_MAX_DEVICE[2];
 namespace threadblock {
@@ -28,62 +29,6 @@ namespace threadblock {
 using namespace cutlass;
 using namespace mirage::type;
 using namespace mirage::utils;
-
-template <typename ElementType>
-class ElementUnaryExecutor {
-public:
-  CUTLASS_DEVICE
-  ElementUnaryExecutor(mirage::type::TBOperatorType op_type,
-                       ElementType *base_ptr,
-                       int num_elements,
-                       int thread_id,
-                       int num_threads) {
-    // assert(input.smem_offset == output.smem_offset);
-    // int num_elements = output.num_elements();
-    if (op_type == mirage::type::TB_EXP_OP) {
-      for (int i = thread_id; i < num_elements; i += num_threads) {
-        base_ptr[i] = cutlass::fast_exp(base_ptr[i]);
-      }
-    } else if (op_type == mirage::type::TB_SQUARE_OP) {
-      for (int i = thread_id; i < num_elements; i += num_threads) {
-        base_ptr[i] = base_ptr[i] * base_ptr[i];
-      }
-    } else if (op_type == mirage::type::TB_SQRT_OP) {
-      for (int i = thread_id; i < num_elements; i += num_threads) {
-        base_ptr[i] = cutlass::fast_sqrt(base_ptr[i]);
-      }
-    } else if (op_type == mirage::type::TB_SILU_OP) {
-      for (int i = thread_id; i < num_elements; i += num_threads) {
-        ElementType x = base_ptr[i];
-        base_ptr[i] = x / (1 + cutlass::fast_exp(-x));
-      }
-    } else if (op_type == mirage::type::TB_GELU_OP) {
-      for (int i = thread_id; i < num_elements; i += num_threads) {
-        ElementType x = base_ptr[i];
-        // assuming floating point
-        base_ptr[i] = (x / 2.0f) * (1.0f + erff(x / sqrtf(2.0f)));
-      }
-    } else if (op_type == mirage::type::TB_RELU_OP) {
-      for (int i = thread_id; i < num_elements; i += num_threads) {
-        ElementType x = base_ptr[i];
-        if (x > 0.f) {
-          base_ptr[i] = x;
-        } else {
-          base_ptr[i] = 0.f;
-        }
-      }
-    } else if (op_type == mirage::type::TB_CLAMP_OP) {
-      ElementType x = base_ptr[thread_id];
-      if (x < CLAMP_MIN_MAX_DEVICE[0]) {
-        base_ptr[thread_id] = CLAMP_MIN_MAX_DEVICE[0];
-      } else if (x > CLAMP_MIN_MAX_DEVICE[1]) {
-        base_ptr[thread_id] = CLAMP_MIN_MAX_DEVICE[1];
-      } else {
-        base_ptr[thread_id] = x;
-      }
-    }
-  }
-};
 
 class TBElementUnaryFingerPrinter {
 public:
@@ -137,3 +82,5 @@ public:
 
 } // namespace threadblock
 } // namespace mirage
+
+#endif // MIRAGE_FINGERPRINT_USE_CUDA

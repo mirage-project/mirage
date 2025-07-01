@@ -15,6 +15,8 @@
 
 #pragma once
 
+#ifdef MIRAGE_BACKEND_USE_CUDA
+
 #include "mirage/layout.h"
 #include "mirage/type.h"
 #include <vector_types.h>
@@ -50,3 +52,4 @@ inline void serialize_rms_norm_op_parameters(int *params,
 
 } // namespace threadblock
 } // namespace mirage
+#endif

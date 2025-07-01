@@ -22,6 +22,7 @@
 
 #include "mirage/kernel/element_binary.h"
 #include "mirage/kernel/graph.h"
+#include "mirage/nki_transpiler/helper_function.h"
 #include "mirage/transpiler/structs.h"
 
 namespace mirage {

@@ -88,5 +88,11 @@ KNReductionOp::operator json() const {
               {"output_tensors", output_tensors}};
 }
 
+#ifdef MIRAGE_FINGERPRINT_USE_CPU
+bool KNReductionOp::fingerprint(void) {
+  assert(false && "To be implemented");
+}
+#endif
+
 } // namespace kernel
 } // namespace mirage

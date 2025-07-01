@@ -1,6 +1,6 @@
 #pragma once
 #include "mirage/kernel/graph.h"
-#include <vector_types.h>
+#include "mirage/vector_types.h"
 
 namespace mirage {
 namespace search_c {
@@ -14,6 +14,7 @@ struct MDim3 {
 };
 
 int cython_search(mirage::kernel::Graph const *input_graph,
+                  char const *backend,
                   int max_num_graphs,
                   mirage::kernel::Graph **new_graphs,
                   std::vector<MInt3> imap_to_explore,

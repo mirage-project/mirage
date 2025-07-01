@@ -15,6 +15,8 @@
 
 #pragma once
 
+#ifdef MIRAGE_BACKEND_USE_CUDA
+
 #include "mirage/layout.h"
 #include <vector_types.h>
 
@@ -107,3 +109,4 @@ inline void serialize_input_loader_parameters(
 
 } // namespace threadblock
 } // namespace mirage
+#endif

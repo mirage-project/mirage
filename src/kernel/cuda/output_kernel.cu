@@ -21,16 +21,12 @@
 namespace mirage {
 namespace kernel {
 
-bool KNOutputOp::profile(ProfileResult &profile) {
-  // Do nothing
-  profile.run_time = 0.0f;
-  return true;
-}
-
+#ifdef MIRAGE_FINGERPRINT_USE_CUDA
 bool KNOutputOp::fingerprint(void) {
   // Do nothing
   return true;
 }
+#endif // MIRAGE_FINGERPRINT_USE_CUDA
 
 } // namespace kernel
 } // namespace mirage

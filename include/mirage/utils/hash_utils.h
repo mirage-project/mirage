@@ -1,11 +1,11 @@
 #pragma once
 
+#include "mirage/vector_types.h"
 #include <functional>
 #include <tuple>
 #include <type_traits>
 #include <utility>
 #include <vector>
-#include <vector_types.h>
 
 // tuple hashing pulled from
 // https://www.variadic.xyz/2018/01/15/hashing-stdpair-and-stdtuple/

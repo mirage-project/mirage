@@ -16,13 +16,13 @@
 
 #include "mirage/type.h"
 #include <cassert>
-#include <cute/layout.hpp>
+// #include <cute/layout.hpp>
 #include <functional>
 #include <iostream>
 #include <string>
 #include <vector>
 
-using namespace cute;
+// using namespace cute;
 
 namespace mirage {
 namespace transpiler {

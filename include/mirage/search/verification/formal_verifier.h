@@ -19,6 +19,7 @@ public:
 private:
   std::vector<std::string> input_exprs;
   std::unordered_set<std::string> all_dims;
+  std::vector<std::vector<int>> shapes_std;
 
   static std::mutex formal_verifier_mutex;
 };

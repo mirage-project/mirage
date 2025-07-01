@@ -7,10 +7,10 @@
 #include "mirage/search/symbolic_graph/symbolic_tensor.h"
 #include "mirage/search/symbolic_graph/tensor_dim_constraints.h"
 #include "mirage/threadblock/graph.h"
+#include "mirage/vector_types.h"
 
 #include <unordered_map>
 #include <unordered_set>
-#include <vector_types.h>
 
 namespace mirage {
 namespace search {

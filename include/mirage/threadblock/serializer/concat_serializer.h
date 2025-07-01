@@ -15,6 +15,8 @@
 
 #pragma once
 
+#ifdef MIRAGE_BACKEND_USE_CUDA
+
 namespace mirage {
 namespace threadblock {
 
@@ -59,3 +61,4 @@ inline void serialize_concat_op_parameters(int *params,
 
 } // namespace threadblock
 } // namespace mirage
+#endif

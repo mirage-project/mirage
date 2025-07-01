@@ -308,6 +308,7 @@ cdef extern from "mirage/search/search_c.h" namespace "mirage::search_c":
         unsigned int z
 
     cdef int cython_search(const CppKNGraph *input_graph,
+                           const char *backend,
                            int max_num_new_graphs,
                            CppKNGraph** new_graphs,
                            vector[MInt3] imaps,

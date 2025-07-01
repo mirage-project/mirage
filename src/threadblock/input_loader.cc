@@ -45,6 +45,21 @@ TBOperator *Graph::create_input_op(mirage::kernel::DTensor const &dtensor,
                                    mirage::layout::SmemLayout layout) {
   TBInputOp *op = new TBInputOp(this, dtensor, input_map, forloop_dim, layout);
 
+#ifdef MIRAGE_BACKEND_USE_NKI
+  auto check_pmax = [](TBInputOp *op) {
+    for (int i = 0; i < op->output_tensors[0].num_dims; ++i) {
+      if (op->output_tensors[0].dim[i] <= 128) {
+        return true;
+      }
+    }
+    return false;
+  };
+  if (!check_pmax(op)) {
+    delete op;
+    return nullptr;
+  }
+#endif
+
   // Check shmem usage
   size_t smem_usage = calculate_shared_memory_usage(op);
   if (smem_usage > mirage::config::MAX_SMEM_SIZE) {

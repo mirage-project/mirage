@@ -33,7 +33,7 @@ struct CTensor {
     for (int i = 0; i < MAX_TENSOR_DIMS; i++) {
       dim[i] = 0;
     }
-    for (int i = 0; i < mirage::config::MAX_NUM_GPUS; i++) {
+    for (int i = 0; i < mirage::config::MAX_NUM_DEVICES; i++) {
       fp_ptr[i] = nullptr;
     }
   }
@@ -82,7 +82,7 @@ struct CTensor {
   mirage::layout::CmemLayout layout;
   int num_dims;
   int dim[MAX_TENSOR_DIMS];
-  mirage::type::FPType *fp_ptr[mirage::config::MAX_NUM_GPUS];
+  mirage::type::FPType *fp_ptr[mirage::config::MAX_NUM_DEVICES];
 };
 
 } // namespace cpu

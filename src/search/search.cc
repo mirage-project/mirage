@@ -143,7 +143,9 @@ void KernelGraphGenerator::generate_next_operator(
 
   if (!is_a_new_thread_start && search_depth <= multithread_threshold_depth) {
     SearchContext c_copied = SerializedSearchContext(c).deserialize();
+#if !defined(MIRAGE_FINGERPRINT_USE_CPU) || defined(MIRAGE_USE_FORMAL_VERIFIER)
 #pragma omp task
+#endif
     {
       generate_next_operator(
           c_copied, verify, verified_graphs, search_depth, true);
@@ -398,9 +400,13 @@ void KernelGraphGenerator::generate_kernel_graphs() {
   std::vector<SerializedSearchContext> verified_graphs;
 
   printf("num_thread = %d\n", num_thread);
+#if !defined(MIRAGE_FINGERPRINT_USE_CPU) || defined(MIRAGE_USE_FORMAL_VERIFIER)
 #pragma omp parallel num_threads(num_thread)
+#endif
   {
+#if !defined(MIRAGE_FINGERPRINT_USE_CPU) || defined(MIRAGE_USE_FORMAL_VERIFIER)
 #pragma omp single
+#endif
     {
       generate_next_operator(
           c,
@@ -529,7 +535,9 @@ bool KernelGraphGenerator::verify(kernel::Graph &g) {
     };
 
     auto save_graph = [&]() {
+#if !defined(MIRAGE_FINGERPRINT_USE_CPU) || defined(MIRAGE_USE_FORMAL_VERIFIER)
 #pragma omp critical
+#endif
       { generated_graphs.push_back(json(g)); }
     };
 
@@ -580,7 +588,9 @@ void KernelGraphGenerator::generate_next_symbolic_operator(
     if (tb_graph) {
       tb_graph_copy = std::make_shared<SymbolicTBGraph>(*tb_graph);
     }
-    // #pragma omp task
+#if !defined(MIRAGE_FINGERPRINT_USE_CPU) || defined(MIRAGE_USE_FORMAL_VERIFIER)
+#pragma omp task
+#endif
     generate_next_symbolic_operator(kn_graph_copy,
                                     tb_graph_copy,
                                     input_dtensor_indices_for_tb_graph,

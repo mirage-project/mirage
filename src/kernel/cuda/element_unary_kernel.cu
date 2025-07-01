@@ -30,104 +30,8 @@ using namespace mirage::type;
 using namespace mirage::config;
 using namespace mirage::utils;
 
+#ifdef MIRAGE_FINGERPRINT_USE_CUDA
 __constant__ float CLAMP_MIN_MAX_DEVICE[2];
-
-template <typename DT>
-__global__ void execute_elementunary(mirage::type::KNOperatorType type,
-                                     DT *input_ptr,
-                                     DT *output_ptr,
-                                     int num_elements) {
-  int i = threadIdx.x + blockIdx.x * blockDim.x;
-  if (type == mirage::type::KN_EXP_OP) {
-    if (i < num_elements) {
-      output_ptr[i] = cutlass::fast_exp(input_ptr[i]);
-    }
-  } else if (type == mirage::type::KN_SQUARE_OP) {
-    if (i < num_elements) {
-      output_ptr[i] = input_ptr[i] * input_ptr[i];
-    }
-  } else if (type == mirage::type::KN_SQRT_OP) {
-    if (i < num_elements) {
-      output_ptr[i] = cutlass::fast_sqrt(input_ptr[i]);
-    }
-  } else if (type == mirage::type::KN_SILU_OP) {
-    if (i < num_elements) {
-      DT x = input_ptr[i];
-      output_ptr[i] = x / (1.0f + cutlass::fast_exp(-x));
-    }
-  } else if (type == mirage::type::KN_GELU_OP) {
-    if (i < num_elements) {
-      DT x = input_ptr[i];
-      output_ptr[i] = (x / 2.0f) * (1.0f + erff(x / sqrtf(2.0f)));
-    }
-  } else if (type == mirage::type::KN_RELU_OP) {
-    if (i < num_elements) {
-      DT x = input_ptr[i];
-      if (x > 0.0f) {
-        output_ptr[i] = x;
-      } else {
-        output_ptr[i] = 0.0f;
-      }
-    }
-  } else if (type == mirage::type::KN_CLAMP_OP) {
-    if (i < num_elements) {
-      DT x = input_ptr[i];
-      if (x < CLAMP_MIN_MAX_DEVICE[0]) {
-        output_ptr[i] = CLAMP_MIN_MAX_DEVICE[0];
-      } else if (x > CLAMP_MIN_MAX_DEVICE[1]) {
-        output_ptr[i] = CLAMP_MIN_MAX_DEVICE[1];
-      } else {
-        output_ptr[i] = x;
-      }
-    }
-  } else {
-    assert(false && "Unimplemented");
-  }
-}
-
-bool KNElementUnaryOp::profile(ProfileResult &result) {
-  // Only launch kernel on a single GPU for profiling
-  // checkCUDA(cudaSetDevice(0));
-  assert(input_tensors[0].num_elements() == output_tensors[0].num_elements());
-  assert(input_tensors[0].data_type == DT_FLOAT16);
-  assert(output_tensors[0].data_type == DT_FLOAT16);
-  mirage::kernel::DeviceMemoryManager *dmm =
-      mirage::kernel::DeviceMemoryManager::get_instance();
-  cutlass::half_t *input_ptr = reinterpret_cast<cutlass::half_t *>(
-      dmm->data_base_ptr[0] + input_tensors[0].data_offset);
-  cutlass::half_t *output_ptr = reinterpret_cast<cutlass::half_t *>(
-      dmm->data_base_ptr[0] + output_tensors[0].data_offset);
-  int num_elements = input_tensors[0].num_elements();
-  int const num_threads_per_blk = 1024;
-  int num_blocks =
-      (num_elements + num_threads_per_blk - 1) / num_threads_per_blk;
-  checkCUDA(cudaDeviceSynchronize());
-  cudaEvent_t events[2];
-  checkCUDA(cudaEventCreate(&events[0]));
-  checkCUDA(cudaEventCreate(&events[1]));
-  checkCUDA(cudaEventRecord(events[0]));
-
-  if (op_type == mirage::type::KNOperatorType::KN_CLAMP_OP) {
-    KNClampUnaryOp *clamp_op = dynamic_cast<KNClampUnaryOp *>(this);
-    float CLAMP_MIN_MAX_HOST[2] = {clamp_op->min_val, clamp_op->max_val};
-    cudaMemcpyToSymbol(
-        CLAMP_MIN_MAX_DEVICE, CLAMP_MIN_MAX_HOST, sizeof(float) * 2);
-  }
-
-  for (int i = 0; i < ProfileResult::NUM_ITERATIONS; i++) {
-    execute_elementunary<<<num_blocks, num_threads_per_blk>>>(
-        op_type, input_ptr, output_ptr, num_elements);
-  }
-  float runtime_ms = 0;
-  checkCUDA(cudaEventRecord(events[1]));
-  checkCUDA(cudaEventSynchronize(events[1]));
-  checkCUDA(cudaEventElapsedTime(&runtime_ms, events[0], events[1]));
-  result.run_time = runtime_ms / ProfileResult::NUM_ITERATIONS;
-  printf("ElementUnary: runtime(%.8lfms)\n", result.run_time);
-  checkCUDA(cudaEventDestroy(events[0]));
-  checkCUDA(cudaEventDestroy(events[1]));
-  return true;
-}
 
 __global__ void
     compute_elementunary_fingerprint(mirage::type::KNOperatorType type,
@@ -193,6 +97,7 @@ bool KNElementUnaryOp::fingerprint(void) {
   }
   return true;
 }
+#endif // MIRAGE_FINGERPRINT_USE_CUDA
 
 } // namespace kernel
 } // namespace mirage

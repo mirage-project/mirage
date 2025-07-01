@@ -15,6 +15,8 @@
 
 #pragma once
 
+#ifdef MIRAGE_BACKEND_USE_CUDA
+
 #include <vector_types.h>
 
 namespace mirage {
@@ -65,3 +67,4 @@ inline void serialize_elementbinary_op_parameters(int *params,
 
 } // namespace threadblock
 } // namespace mirage
+#endif
