@@ -243,7 +243,7 @@ class PersistentKernel:
         tb_graph.new_input(weight, (1, -1, -1), -1, True)
         tb_graph.new_input(output, (1, 0, -1), -1, True)
         self.kn_graph.customized([input, weight, output], tb_graph)
-        self.kn_graph.register_task(tb_graph, "embedding")
+        self.kn_graph.register_task(tb_graph, "embedding", [weight.dim(1)])
 
     def rmsnorm_linear_layer(
         self,
@@ -407,7 +407,12 @@ class PersistentKernel:
         self.kn_graph.register_task(tb_graph, "argmax")
 
     def argmax_partial_layer(
-        self, input: DTensor, output: tuple[DTensor, DTensor], grid_dim: tuple, block_dim: tuple):
+        self,
+        input: DTensor,
+        output: tuple[DTensor, DTensor],
+        grid_dim: tuple,
+        block_dim: tuple,
+    ):
         # Currently assume that input/output
         assert input.num_dims == 2  # (batch_size, vocab_size)
         assert len(output) == 2
@@ -424,7 +429,11 @@ class PersistentKernel:
         self.kn_graph.register_task(tb_graph, "argmax_partial")
 
     def argmax_reduce_layer(
-        self, input: tuple[DTensor, DTensor], output: DTensor, grid_dim: tuple, block_dim: tuple
+        self,
+        input: tuple[DTensor, DTensor],
+        output: DTensor,
+        grid_dim: tuple,
+        block_dim: tuple,
     ):
         # Currently assume that input/output
         assert len(input) == 2
@@ -437,7 +446,9 @@ class PersistentKernel:
         tb_graph.new_input(input_index, (1, 0, -1), -1, True)
         tb_graph.new_input(output, (0, 1, -1), -1, True) #TODO: Make sure the output map is expected
         self.kn_graph.customized([input_value, input_index, output], tb_graph)
-        self.kn_graph.register_task(tb_graph, "argmax_reduce", [self.argmax_partial_output_size])
+        self.kn_graph.register_task(
+            tb_graph, "argmax_reduce", [self.argmax_partial_output_size]
+        )
         
     def find_ngram_partial_layer(
         self, input: DTensor, output: DTensor, grid_dim: tuple, block_dim: tuple, ngram_size: int = 3):
@@ -558,8 +569,8 @@ class PersistentKernel:
         output_dir = kwargs.get("output_dir", None)
 
         MIRAGE_ROOT, INCLUDE_PATH, DEPS_PATH = get_key_paths()
-        tempdir = tempfile.gettempdir()
-        print(f"tempdir: {tempdir}")
+        tempdir_obj = tempfile.TemporaryDirectory()
+        tempdir = tempdir_obj.name
         results = self.kn_graph.generate_task_graph(num_gpus=self.world_size)
 
         cuda_code_path = os.path.join(tempdir, "test.cu")
@@ -596,7 +607,9 @@ class PersistentKernel:
         if "MIRAGE_HOME" in os.environ:
             MIRAGE_HOME_PATH = os.environ.get("MIRAGE_HOME")
         else:
-            raise RuntimeError("MIRAGE_HOME unspecified; Please set MIRAGE_HOME to be the root of the Mirage folder")
+            raise RuntimeError(
+                "MIRAGE_HOME unspecified; Please set MIRAGE_HOME to be the root of the Mirage folder"
+            )
 
         NVSHMEM_INC_PATH = None
         NVSHMEM_LIB_PATH = None
@@ -681,7 +694,7 @@ class PersistentKernel:
             mpi_inc_path=MPI_INC_PATH,
             mpi_lib_path=MPI_LIB_PATH,
             py_so_path=so_path,
-            profiling= True if self.profiler_tensor is not None else False,
+            profiling=True if self.profiler_tensor is not None else False,
             use_nvshmem=self.use_nvshmem,
         )
         print("Compiling megakernel using the following command line:")

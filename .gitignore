@@ -55,3 +55,6 @@ benchmark/*generated*
 
 # Output files of runtime
 output/
+# Temp file
+task_graph.json
+test.cu

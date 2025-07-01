@@ -889,19 +889,23 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
 
 // Entry point for C/C++
 extern "C" void launch_persistent_kernel() {
+  int device;
+  cudaGetDevice(&device);
+  int sm_count;
+  cudaDeviceGetAttribute(&sm_count, cudaDevAttrMultiProcessorCount, device);
   // Launcher persistent kernel
   cudaFuncSetAttribute(
       persistent_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, 98304);
 #ifdef USE_NVSHMEM
   void *args[] = {&global_runtime_config};
   nvshmemx_collective_launch((void const *)persistent_kernel,
-                             dim3(108, 1, 1),
+                             dim3(sm_count, 1, 1),
                              dim3(128, 1, 1),
                              args,
                              98304 /*sharedmem*/,
                              0 /*stream*/);
 #else
-  persistent_kernel<<<dim3(108, 1, 1), dim3(128, 1, 1), 98304 /*smem*/>>>(
+  persistent_kernel<<<dim3(sm_count, 1, 1), dim3(128, 1, 1), 98304 /*smem*/>>>(
       global_runtime_config);
 #endif
   cudaError_t err = cudaDeviceSynchronize();
