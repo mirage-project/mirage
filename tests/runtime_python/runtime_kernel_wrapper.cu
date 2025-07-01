@@ -19,6 +19,8 @@ using kernel::single_batch_gqa_kernel;
 using kernel::embedding_kernel;
 using kernel::find_ngram_partial_kernel;
 using kernel::find_ngram_global_kernel;
+using kernel::argmax_partial_kernel;
+using kernel::argmax_reduce_kernel;
 using bfloat16 = type::bfloat16_t;
 
 template <typename T>
@@ -312,41 +314,6 @@ void linear(torch::Tensor input,
   }
 }
 
-// Argmax
-
-// template <typename T>
-// __global__ void argmax_kernel_wrapper(void const *input_ptr, void
-// *output_ptr) {
-//   argmax_kernel<T, 1, 32768>(input_ptr, output_ptr);
-// }
-
-// template <typename T>
-// void launch_argmax(void const *input_ptr, void *output_ptr) {
-//   dim3 grid_dim(1, 1, 1);
-//   dim3 block_dim(128, 1, 1);
-//   size_t smem_size = 36666;
-
-//   cudaFuncSetAttribute(argmax_kernel_wrapper<T>,
-//                        cudaFuncAttributeMaxDynamicSharedMemorySize,
-//                        smem_size);
-
-//   argmax_kernel_wrapper<T>
-//       <<<grid_dim, block_dim, smem_size>>>(input_ptr, output_ptr);
-// }
-
-// void argmax(torch::Tensor input, torch::Tensor output) {
-
-//   void const *input_ptr = input.data_ptr();
-//   void *output_ptr = output.data_ptr();
-
-//   launch_argmax<bfloat16>(input_ptr, output_ptr);
-
-//   cudaError_t err = cudaDeviceSynchronize();
-//   if (err != cudaSuccess) {
-//     printf("CUDA kernel launch error: %s\n", cudaGetErrorString(err));
-//   }
-// }
-
 // Embedding Kernel
 template <typename T, int CHUNK_SIZE, int OUTPUT_DIM_SIZE>
 __global__ void embedding_kernel_wrapper(void const *input_ptr,
@@ -449,16 +416,105 @@ void prompt_lookup(torch::Tensor all_tokens,
   }
 }
 
+// Argmax Kernel
+template <typename T, int BATCH_SIZE, int CHUNK_SIZE, int NUM_PARTIAL_TASKS>
+__global__ void argmax_partial_kernel_wrapper(void const *__restrict__ input_ptr,
+                                              void *__restrict__ output_val_ptr,
+                                              void *__restrict__ output_idx_ptr,
+                                              int vocab_size) {
+  int batch_idx = blockIdx.y;
+  int chunk_idx = blockIdx.x;
+
+  T const *row_input_ptr = static_cast<T const *>(input_ptr) + batch_idx * BATCH_SIZE * vocab_size + chunk_idx * CHUNK_SIZE;
+  T *row_output_val_ptr = static_cast<T *>(output_val_ptr) + batch_idx * BATCH_SIZE * NUM_PARTIAL_TASKS + chunk_idx;
+  long long *row_output_idx_ptr = static_cast<long long *>(output_idx_ptr) + batch_idx * BATCH_SIZE * NUM_PARTIAL_TASKS + chunk_idx;
+
+  argmax_partial_kernel<T, BATCH_SIZE, CHUNK_SIZE, NUM_PARTIAL_TASKS>(
+      row_input_ptr, row_output_val_ptr, row_output_idx_ptr);
+}
+
+template <typename T, int CHUNK_SIZE, int NUM_PARTIAL_TASKS>
+__global__ void argmax_reduce_kernel_wrapper(void const *__restrict__ input_val_ptr,
+                                             void const *__restrict__ input_idx_ptr,
+                                             void *__restrict__ final_output_ptr,
+                                             int step,
+                                             long long *tokens) {
+  int row_idx = blockIdx.y;
+  T const *row_input_val_ptr = static_cast<T const *>(input_val_ptr) + row_idx * NUM_PARTIAL_TASKS;
+  long long const *row_input_idx_ptr = static_cast<long long const *>(input_idx_ptr) + row_idx * NUM_PARTIAL_TASKS;
+  long long *row_output_ptr = static_cast<long long *>(final_output_ptr) + row_idx;
+
+  argmax_reduce_kernel<T, CHUNK_SIZE, NUM_PARTIAL_TASKS>(
+      row_input_val_ptr, row_input_idx_ptr, row_output_ptr, step, tokens);
+}
+
+void argmax(
+  torch::Tensor input, 
+  torch::Tensor final_output,
+  torch::Tensor partial_idx,
+  torch::Tensor partial_val) {
+  // long long n_row = input.size(0);
+  // long long vocab_size = input.size(1);
+  constexpr long long n_row = 6;
+  constexpr long long vocab_size = 153600;
+  
+  constexpr int TOTAL_TASKS = 96;
+  long long chunk_size = vocab_size / TOTAL_TASKS;
+  if (vocab_size % TOTAL_TASKS != 0) {
+      throw std::runtime_error("vocab_size must be divisible by NUM_PARTIAL_TASKS");
+  }
+
+  constexpr int BATCH_NUM = 3;
+  constexpr int BATCH_SIZE = 2;
+  constexpr int TASK_PER_BATCH = TOTAL_TASKS / BATCH_NUM; // 32
+  constexpr int CHUNK_SIZE = vocab_size / TASK_PER_BATCH; // 4800
+
+  dim3 partial_grid_dim(TOTAL_TASKS / BATCH_NUM, BATCH_NUM, 1);
+
+  // Create intermediate tensors for partial results
+  // auto options_val = torch::TensorOptions().dtype(input.dtype()).device(input.device());
+  auto options_idx = torch::TensorOptions().dtype(torch::kInt64).device(input.device());
+  // torch::Tensor partial_val = torch::empty({n_row, TASK_PER_BATCH}, options_val);
+  // torch::Tensor partial_idx = torch::empty({n_row, TASK_PER_BATCH}, options_idx);
+  torch::Tensor tokens = torch::empty({1}, options_idx);
+
+  // Launch partial kernel
+  dim3 block_dim(128, 1, 1);
+  if (BATCH_SIZE == 2) {
+
+    argmax_partial_kernel_wrapper<bfloat16, BATCH_SIZE, CHUNK_SIZE, TASK_PER_BATCH>
+      <<<partial_grid_dim, block_dim>>>(
+          input.data_ptr(),
+          partial_val.data_ptr(),
+          partial_idx.data_ptr(),
+          vocab_size);
+  }
+
+  // Launch reduce kernel
+  dim3 reduce_grid_dim(1, n_row, 1);
+  argmax_reduce_kernel_wrapper<bfloat16, CHUNK_SIZE, TASK_PER_BATCH>
+      <<<reduce_grid_dim, block_dim>>>(
+          partial_val.data_ptr(),
+          partial_idx.data_ptr(),
+          final_output.data_ptr(),
+          0,
+          static_cast<long long *>(tokens.data_ptr()));
+  
+  cudaError_t err = cudaDeviceSynchronize();
+  if (err != cudaSuccess) {
+    printf("CUDA kernel launch error in argmax: %s\n", cudaGetErrorString(err));
+  }
+}
+
 // pybind11 bindings
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("prompt_lookup", &prompt_lookup, "Prompt lookup kernel");
   m.def("embedding", &embedding, "Embedding kernel");
   m.def("linear", &linear, "Linear kernel");
-  // m.def("argmax", &argmax, "argmax kernel");
+  m.def("argmax", &argmax, "Argmax kernel");
   m.def("norm_linear", &norm_linear, "RMSNorm Linear kernel");
   m.def("silu_mul_linear", &silu_mul_linear, "SILU MUL Linear kernel");
-  // m.def("single_batch_gqa", &single_batch_gqa, "Decoding kernel");
   m.def("single_batch_gqa",
         &single_batch_gqa,
         py::arg("qkv"),
@@ -474,22 +530,4 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("sin") = py::none(),
         py::arg("q_eps") = 0.0f,
         py::arg("k_eps") = 0.0f);
-  // m.def("single_batch_decoding",
-  //       &single_batch_decoding,
-  //       py::arg("qkv"),
-  //       py::arg("k_cache"),
-  //       py::arg("v_cache"),
-  //       py::arg("output"),
-  //       py::arg("seq_len"),
-  //       py::arg("qk_norm"),
-  //       py::arg("rotary_embed"),
-  //       py::arg("qnorm_weight") = py::none(),
-  //       py::arg("knorm_weight") = py::none(),
-  //       py::arg("cos") = py::none(),
-  //       py::arg("sin") = py::none(),
-  //       py::arg("q_eps") = 0.0f,
-  //       py::arg("k_eps") = 0.0f);
-  // m.def("single_batch_decoding",
-  //       &single_batch_decoding,
-  //       "FlashAttention Decoding kernel");
 }

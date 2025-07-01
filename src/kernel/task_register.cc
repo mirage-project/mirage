@@ -286,11 +286,13 @@ int TaskRegister::register_argmax_partial_task(threadblock::Graph const &bgraph,
     }
   }
   assert(input_ops[0]->output_tensors[0].num_dims == 2);
+  int batch_size = input_ops[0]->output_tensors[0].dim[0];
   int num_elements = input_ops[0]->output_tensors[0].dim[1];
+  int num_partial_tasks = output_ops[0]->output_tensors[0].dim[0];
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
-  code.e("kernel::argmax_partial_kernel<bfloat16, $>(", num_elements);
+  code.e("kernel::argmax_partial_kernel<bfloat16, $, $, $>(", batch_size, num_elements, num_partial_tasks);
   code.e("    task_desc.inputs[0].base_ptr,");
   code.e("    task_desc.outputs[0].base_ptr,");
   code.e("    task_desc.outputs[1].base_ptr);");

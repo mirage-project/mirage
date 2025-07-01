@@ -218,26 +218,30 @@ if __name__ == "__main__":
             name="mlp_final",
             io_category="nvshmem_tensor" if world_size > 1 else "cuda_tensor",
         )
+        if spec_decode_config.method == "promptlookup":
+            argmax_batch_size = batch_size * (spec_decode_config.spec_length + 1)
+        else:
+            argmax_batch_size = batch_size
         argmax_in = mpk.new_tensor(
-            dims=(batch_size, vocab_size),
+            dims=(argmax_batch_size, vocab_size),
             dtype=mi.bfloat16,
             name="argmax_in",
             io_category="cuda_tensor",
         )
         argmax_part_value = mpk.new_tensor(
-            dims=(batch_size, 96),
+            dims=(argmax_batch_size, 96 // argmax_batch_size),
             dtype=mi.bfloat16,
             name="argmax_part_value",
             io_category="cuda_tensor",
         )
         argmax_part_index = mpk.new_tensor(
-            dims=(batch_size, 96),
+            dims=(argmax_batch_size, 96 // argmax_batch_size),
             dtype=mi.int64,
             name="argmax_part_index",
             io_category="cuda_tensor",
         )
         argmax_out = mpk.new_tensor(
-            dims=(batch_size, 1),
+            dims=(1, argmax_batch_size),
             dtype=mi.int64,
             name="argmax_out",
             io_category="cuda_tensor",
@@ -410,16 +414,22 @@ if __name__ == "__main__":
             block_dim=(128, 1, 1),
         )
         # add argmax layer
+        if spec_decode_config.method == "promptlookup":
+            argmax_partial_grid_dim = (96 // spec_decode_config.spec_length, spec_decode_config.spec_length + 1, 1)
+            argmax_reduce_grid_dim = (1, spec_decode_config.spec_length + 1, 1)
+        else:
+            argmax_partial_grid_dim = (96, 1, 1)
+            argmax_reduce_grid_dim = (1, 1, 1)
         mpk.argmax_partial_layer(
             input=argmax_in,
             output=(argmax_part_value, argmax_part_index),
-            grid_dim=(96, 1, 1),
+            grid_dim=argmax_partial_grid_dim,
             block_dim=(128, 1, 1),
         )
         mpk.argmax_reduce_layer(
             input=(argmax_part_value, argmax_part_index),
             output=argmax_out,
-            grid_dim=(1, 1, 1),
+            grid_dim=argmax_reduce_grid_dim,
             block_dim=(128, 1, 1),
         )
         if args.spec_decode:

@@ -417,9 +417,9 @@ class PersistentKernel:
         num_tasks = grid_dim[0]
         self.argmax_partial_output_size = input.dim(1) // num_tasks
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
-        tb_graph.new_input(input, (1, -1, -1), -1, True)
-        tb_graph.new_input(output_value, (1, -1, -1), -1, True)
-        tb_graph.new_input(output_index, (1, -1, -1), -1, True)
+        tb_graph.new_input(input, (1, 0, -1), -1, True)
+        tb_graph.new_input(output_value, (1, 0, -1), -1, True)
+        tb_graph.new_input(output_index, (1, 0, -1), -1, True)
         self.kn_graph.customized([input, output_value, output_index], tb_graph)
         self.kn_graph.register_task(tb_graph, "argmax_partial")
 
@@ -433,9 +433,9 @@ class PersistentKernel:
         assert input_index.num_dims == 2  # (batch_size, num_tasks)
         assert output.num_dims == 2  # (batch_size, 1)
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
-        tb_graph.new_input(input_value, (-1, -1, -1), -1, True)
-        tb_graph.new_input(input_index, (-1, -1, -1), -1, True)
-        tb_graph.new_input(output, (-1, -1, -1), -1, True)
+        tb_graph.new_input(input_value, (1, 0, -1), -1, True)
+        tb_graph.new_input(input_index, (1, 0, -1), -1, True)
+        tb_graph.new_input(output, (0, 1, -1), -1, True) #TODO: Make sure the output map is expected
         self.kn_graph.customized([input_value, input_index, output], tb_graph)
         self.kn_graph.register_task(tb_graph, "argmax_reduce", [self.argmax_partial_output_size])
         
