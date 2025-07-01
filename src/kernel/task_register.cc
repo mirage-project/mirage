@@ -200,7 +200,8 @@ int TaskRegister::register_silu_mul_linear_with_residual_task(
   code.e("    task_desc.inputs[0].base_ptr,");
   code.e("    task_desc.inputs[1].base_ptr,");
   code.e("    task_desc.inputs[2].base_ptr,");
-  code.e("    task_desc.outputs[0].base_ptr);");
+  code.e("    task_desc.outputs[0].base_ptr,");
+  code.e("    runtime_config.my_gpu_id == 0);");
   return register_task_variant(TASK_SILU_MUL_LINEAR_WITH_RESIDUAL,
                                code.to_string());
 }
@@ -244,7 +245,8 @@ int TaskRegister::register_linear_with_residual_task(
   code.e("    task_desc.inputs[0].base_ptr,");
   code.e("    task_desc.inputs[1].base_ptr,");
   code.e("    task_desc.inputs[2].base_ptr,");
-  code.e("    task_desc.outputs[0].base_ptr);");
+  code.e("    task_desc.outputs[0].base_ptr,");
+  code.e("    runtime_config.my_gpu_id == 0);");
   return register_task_variant(TASK_LINEAR_WITH_RESIDUAL, code.to_string());
 }
 
