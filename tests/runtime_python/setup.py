@@ -14,6 +14,7 @@ setup(
             ],
             include_dirs=[
                 os.path.join(this_dir, '../../include/mirage/persistent_kernel/tasks'),
+                os.path.join(this_dir, '../../include/mirage/persistent_kernel/tasks/speculative_decoding'),
             ],
             extra_compile_args={
                 'cxx': [],

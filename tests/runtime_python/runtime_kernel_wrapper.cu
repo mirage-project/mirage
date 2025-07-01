@@ -4,6 +4,8 @@
 #include "silu_mul_linear.cuh"
 #include "single_batch_decoding.cuh"
 #include "single_batch_gqa.cuh"
+#include "embedding.cuh"
+#include "prompt_lookup.cuh"
 #include "bfloat16.h"
 #include <cuda_runtime.h>
 #include <torch/extension.h>
@@ -14,6 +16,9 @@ using kernel::norm_linear_task_impl;
 using kernel::silu_mul_linear_task_impl;
 using kernel::single_batch_decoding_kernel;
 using kernel::single_batch_gqa_kernel;
+using kernel::embedding_kernel;
+using kernel::find_ngram_partial_kernel;
+using kernel::find_ngram_global_kernel;
 using bfloat16 = type::bfloat16_t;
 
 template <typename T>
@@ -342,9 +347,113 @@ void linear(torch::Tensor input,
 //   }
 // }
 
+// Embedding Kernel
+template <typename T, int CHUNK_SIZE, int OUTPUT_DIM_SIZE>
+__global__ void embedding_kernel_wrapper(void const *input_ptr,
+                                         void const *embedding_ptr,
+                                         void *output_ptr) {
+  int input_offset = blockIdx.x;
+  int64_t const *__restrict__ input = static_cast<int64_t const *>(input_ptr) + input_offset;
+  int embedding_offset = blockIdx.y * CHUNK_SIZE;
+  T const *__restrict__ embedding = static_cast<T const *>(embedding_ptr) + embedding_offset;
+  int output_offset = blockIdx.y * CHUNK_SIZE + blockIdx.x * OUTPUT_DIM_SIZE;
+  T *__restrict__ output = static_cast<T *>(output_ptr) + output_offset;
+
+  if (blockIdx.x == 1 && blockIdx.y == 1 && threadIdx.x == 0) {
+    printf("input_offset: %d, embedding_offset: %d, output_offset: %d\n", input_offset, embedding_offset, output_offset);
+  }
+  embedding_kernel<T, CHUNK_SIZE, OUTPUT_DIM_SIZE>(
+      input, embedding, output);
+  // if (blockIdx.x == 1 && blockIdx.y == 1) {
+  //   printf("input: %d, embedding: %d, output: %d\n", input, embedding, output);
+  // }
+}
+
+void embedding(torch::Tensor input,
+               torch::Tensor weight,
+               torch::Tensor output) {
+
+  dim3 grid_dim(input.size(1), output.size(1) / 128, 1);
+  printf("grid_dim: %d, %d, %d\n", grid_dim.x, grid_dim.y, grid_dim.z);
+  dim3 block_dim(128, 1, 1);
+
+  embedding_kernel_wrapper<float, 128, 4096><<<grid_dim, block_dim>>>(
+      input.data_ptr(),
+      weight.data_ptr(),
+      output.data_ptr());
+
+  cudaError_t err = cudaDeviceSynchronize();
+  if (err != cudaSuccess) {
+    printf("CUDA kernel launch error in embedding: %s\n",
+           cudaGetErrorString(err));
+  }
+}
+
+// Prompt Lookup Kernel
+template <int NGRAM_SIZE, int NUM_WORKERS>
+__global__ void find_ngram_partial_kernel_wrapper(long long const *__restrict__ input_ptr,
+                                                  long long *__restrict__ output_id_ptr,
+                                                  int input_token_num) {
+  // Each block gets a pointer to its unique output slot.
+  long long *block_output_ptr = output_id_ptr + blockIdx.x;
+  find_ngram_partial_kernel<NGRAM_SIZE, NUM_WORKERS>(input_ptr, block_output_ptr, input_token_num);
+}
+
+template <int NGRAM_SIZE, int SPEC_LENGTH, int NUM_PARTIAL_TASKS>
+__global__ void find_ngram_global_kernel_wrapper(long long const *__restrict__ input_array,
+                                                 long long const *__restrict__ tokens_ptr,
+                                                 long long *__restrict__ output_result,
+                                                 int step) {
+  find_ngram_global_kernel<NGRAM_SIZE, SPEC_LENGTH, NUM_PARTIAL_TASKS>(input_array, tokens_ptr, output_result, step);
+}
+
+void prompt_lookup(torch::Tensor all_tokens,
+                   int prompt_len,
+                   int ngram_size,
+                   int spec_length,
+                   torch::Tensor final_output) {
+  
+  constexpr int NUM_WORKERS = 96; // Corresponds to grid size
+  dim3 partial_grid_dim(NUM_WORKERS, 1, 1);
+  dim3 partial_block_dim(128, 1, 1);
+  
+  auto partial_output_options = torch::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA);
+  torch::Tensor partial_output = torch::full({NUM_WORKERS}, INT_MAX, partial_output_options);
+  
+  if (ngram_size == 3) {
+    find_ngram_partial_kernel_wrapper<3, NUM_WORKERS><<<partial_grid_dim, partial_block_dim>>>(
+        static_cast<long long const *>(all_tokens.data_ptr()),
+        static_cast<long long *>(partial_output.data_ptr()),
+        prompt_len);
+  } else {
+    throw std::runtime_error("Unsupported ngram_size for prompt_lookup test");
+  }
+
+  dim3 global_grid_dim(1, 1, 1);
+  dim3 global_block_dim(128, 1, 1);
+
+  if (ngram_size == 3 && spec_length == 5) {
+     find_ngram_global_kernel_wrapper<3, 5, NUM_WORKERS><<<global_grid_dim, global_block_dim>>>(
+        static_cast<long long const *>(partial_output.data_ptr()),
+        static_cast<long long const *>(all_tokens.data_ptr()),
+        static_cast<long long *>(final_output.data_ptr()),
+        prompt_len);
+  } else {
+     throw std::runtime_error("Unsupported ngram_size/spec_length for prompt_lookup test");
+  }
+  
+  cudaError_t err = cudaDeviceSynchronize();
+  if (err != cudaSuccess) {
+    printf("CUDA kernel launch error in prompt_lookup: %s\n",
+           cudaGetErrorString(err));
+  }
+}
+
 // pybind11 bindings
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  m.def("prompt_lookup", &prompt_lookup, "Prompt lookup kernel");
+  m.def("embedding", &embedding, "Embedding kernel");
   m.def("linear", &linear, "Linear kernel");
   // m.def("argmax", &argmax, "argmax kernel");
   m.def("norm_linear", &norm_linear, "RMSNorm Linear kernel");
