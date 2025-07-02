@@ -22,11 +22,11 @@ template <int NUM_SPEC_TOKENS>
 __device__ __forceinline__ void
     target_verify_greedy_kernel(void const *__restrict__ spec_token_id_ptr,
                          void const *__restrict__ target_token_id_ptr, 
-                         void *__restrict__ final_output_ptr,
+                         void *__restrict__ new_accepted_len_ptr,
                          void *__restrict__ tokens_ptr) { // Point to empty slots directly
     long long const *__restrict__ spec_token_id = static_cast<long long const *>(spec_token_id_ptr);
     long long const *__restrict__ target_token_id = static_cast<long long const *>(target_token_id_ptr);
-    int *__restrict__ new_accepted_len = static_cast<int *>(final_output_ptr);
+    int *__restrict__ new_accepted_len = static_cast<int *>(new_accepted_len_ptr);
     long long *__restrict__ new_tokens = static_cast<long long *>(tokens_ptr);
 
     int t_id = threadIdx.x;

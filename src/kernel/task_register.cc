@@ -390,7 +390,8 @@ int TaskRegister::register_find_ngram_global_task(threadblock::Graph const &bgra
   code.e("kernel::find_ngram_global_kernel<$, $, $>(", params[0], params[1], num_parts);
   code.e("    task_desc.inputs[0].base_ptr,");
   code.e("    task_desc.inputs[1].base_ptr,");
-  code.e("    task_desc.inputs[1].base_ptr + step[0] + 1);");
+  code.e("    task_desc.outputs[0].base_ptr);");
+  code.e("    step[0] + 1);");
   return register_task_variant(TASK_FIND_NGRAM_GLOBAL, code.to_string());
 }
 
@@ -412,14 +413,15 @@ int TaskRegister::register_target_verify_greedy_task(threadblock::Graph const &b
     }
   }
   assert(input_ops[0]->output_tensors[0].num_dims == 2);
-  int num_spec_tokens = input_ops[0]->output_tensors[0].dim[1];
+  int num_spec_tokens = input_ops[0]->output_tensors[0].dim[1] - 1;
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
   code.e("kernel::target_verify_greedy_kernel<$>(", num_spec_tokens);
   code.e("    task_desc.inputs[0].base_ptr,");
   code.e("    task_desc.inputs[1].base_ptr,");
-  code.e("    task_desc.outputs[0].base_ptr);");
+  code.e("    new_token_num,"); // int pointer
+  code.e("    tokens + step[0] + 1);");
   return register_task_variant(TASK_TARGET_VERIFY_GREEDY, code.to_string());
 }
 

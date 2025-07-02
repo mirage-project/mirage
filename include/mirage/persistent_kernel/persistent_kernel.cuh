@@ -29,7 +29,7 @@ using bfloat16 = type::bfloat16_t;
 using namespace mirage::runtime;
 
 __device__ __forceinline__ void
-    _execute_task(TaskDesc const &task_desc, int *step, long long *tokens);
+    _execute_task(TaskDesc const &task_desc, int *step, long long *tokens, int *new_token_num);
 
 __device__ __forceinline__ bool is_termination_event(size_t event_loc,
                                                      EventDesc e) {
@@ -77,7 +77,7 @@ __global__ void init_kernel(RuntimeConfig config) {
 __device__ __forceinline__ bool
     prepare_next_batch(RuntimeConfig const &config) {
   int step = config.step[0];
-  config.step[0] = step + 1;
+  config.step[0] = step + config.new_token_num;
   if ((step >= 4096) || (config.profiling) ||
       (config.tokens[step + 1] == 151645 /*eos_token_id*/)) {
     return false;
@@ -328,7 +328,7 @@ __global__ void persistent_kernel(RuntimeConfig config) {
       } else if (task_desc.task_type == TASK_REDUCE) {
         TB_SLEEP_US(1);
       } else {
-        _execute_task(task_desc, config.step, config.tokens);
+        _execute_task(task_desc, config.step, config.tokens, &(config.new_token_num));
       }
       __syncthreads();
       if (config.profiling && task_desc.task_type != TASK_TERMINATE) {
@@ -761,6 +761,7 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
   global_runtime_config.num_graphs = 1;
   global_runtime_config.verbose = false;
   global_runtime_config.profiling = profiler_buffer != nullptr;
+  global_runtime_config.new_token_num = 1;
 
   std::vector<TaskDesc> all_tasks;
   std::vector<EventDesc> all_events;
