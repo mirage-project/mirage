@@ -29,7 +29,6 @@ def get_scheduler(sm_cnt, worker):
 # them.
 def get_configurations_from_gpu(rank):
     # Reference: https://github.com/mirage-project/mirage/issues/354
-    assert rank == 0, "we only support 1 gpu yet."
     props = torch.cuda.get_device_properties(rank)
     sm_cnt = props.multi_processor_count
     print("sm_cnt: ", sm_cnt)

@@ -16,10 +16,11 @@ HARD_CODE = """
 static PyObject *init_func(PyObject *self, PyObject *args) {
   PyObject *meta_list, *py_profiler_buffer;
   std::vector<void*> meta_tensors;
-  int my_mpi_rank, num_workers, num_local_schedulers, num_remote_schedulers;
+  int my_mpi_rank, num_workers, num_local_schedulers, num_remote_schedulers, max_seq_length;
+  long long eos_token_id;
   void *profiler_buffer;
 
-  if (!PyArg_ParseTuple(args, "OOiiii", &meta_list, &py_profiler_buffer, &my_mpi_rank, &num_workers, &num_local_schedulers, &num_remote_schedulers)) {
+  if (!PyArg_ParseTuple(args, "OOiiiiiL", &meta_list, &py_profiler_buffer, &my_mpi_rank, &num_workers, &num_local_schedulers, &num_remote_schedulers, &max_seq_length, &eos_token_id)) {
     PyErr_SetString(PyExc_TypeError, "Invalid parameters");
     return NULL;
   }
@@ -42,7 +43,7 @@ static PyObject *init_func(PyObject *self, PyObject *args) {
   }
   profiler_buffer = PyLong_AsVoidPtr(py_profiler_buffer);
 
-  init_persistent_kernel(meta_tensors, profiler_buffer, my_mpi_rank, num_workers, num_local_schedulers, num_remote_schedulers);
+  init_persistent_kernel(meta_tensors, profiler_buffer, my_mpi_rank, num_workers, num_local_schedulers, num_remote_schedulers, max_seq_length, eos_token_id);
 
   Py_RETURN_NONE;
 }
@@ -130,7 +131,7 @@ def get_compile_command(
             f"-L{nvshmem_lib_path}",
             f"-L{mpi_lib_path}",
         ]
-        nvshmem_flags = ["-ccbin=mpic++", "-lnvshmem_host", "-lnvshmem_device", "-lmpi"]
+        nvshmem_flags = ["-DUSE_NVSHMEM", "-ccbin=mpic++", "-lnvshmem_host", "-lnvshmem_device", "-lmpi"]
         common_cmd = common_cmd + nvshmem_cmd
         flags = flags + nvshmem_flags
 
@@ -155,6 +156,8 @@ class PersistentKernel:
         num_workers: int,
         num_local_schedulers: int,
         num_remote_schedulers: int,
+        max_seq_length: int,
+        eos_token_id: int64,
         meta_tensors: list[torch.Tensor],
         profiler_tensor: torch.Tensor,
     ):
@@ -165,6 +168,8 @@ class PersistentKernel:
         self.num_workers = num_workers
         self.num_local_schedulers = num_local_schedulers
         self.num_remote_schedulers = num_remote_schedulers
+        self.max_seq_length = max_seq_length
+        self.eos_token_id = eos_token_id
         self.kn_graph = KNGraph(CyKNGraph(disable_fingerprint=True))
         self.meta_tensors = meta_tensors
         self.profiler_tensor = profiler_tensor
@@ -443,7 +448,7 @@ class PersistentKernel:
         MIRAGE_ROOT, INCLUDE_PATH, DEPS_PATH = get_key_paths()
         tempdir_obj = tempfile.TemporaryDirectory()
         tempdir = tempdir_obj.name
-        results = self.kn_graph.generate_task_graph(num_gpus=self.world_size)
+        results = self.kn_graph.generate_task_graph(num_gpus=self.world_size, my_gpu_id=self.mpi_rank)
 
         cuda_code_path = os.path.join(tempdir, "test.cu")
         so_path = os.path.join(tempdir, "test.cpython-38-x86_64-linux-gnu.so")
@@ -519,29 +524,29 @@ class PersistentKernel:
                 header_file_path = os.path.join(MPI_INC_PATH, "mpi.h")
                 if not os.path.exists(header_file_path):
                     raise RuntimeError(
-                        "Environment variable MPI_INC_PATH is set but cannot find mpi.h at {header_file_path}"
+                        f"Environment variable MPI_INC_PATH is set but cannot find mpi.h at {header_file_path}"
                     )
             else:
                 MPI_INC_PATH = "/usr/include/"
                 header_file_path = os.path.join(MPI_INC_PATH, "mpi.h")
                 if not os.path.exists(header_file_path):
                     raise RuntimeError(
-                        "Cannot find mpi.h, please set environment variable MPI_INC_PATH"
+                        f"Cannot find mpi.h, please set environment variable MPI_INC_PATH"
                     )
             # find mpi shared library
             if "MPI_LIB_PATH" in os.environ:
                 MPI_LIB_PATH = os.environ.get("MPI_LIB_PATH")
-                lib_file_path = os.path.join(NVSHMEM_LIB_PATH, "libmpi.so")
+                lib_file_path = os.path.join(MPI_LIB_PATH, "libmpi.so")
                 if not os.path.exists(lib_file_path):
                     raise RuntimeError(
-                        "Environment variable MPI_LIB_PATH is set but cannot find libmpi.so at {lib_file_path}"
+                        f"Environment variable MPI_LIB_PATH is set but cannot find libmpi.so at {lib_file_path}"
                     )
             else:
                 NVSHMEM_LIB_PATH = "/usr/lib/"
-                lib_file_path = os.path.join(NVSHMEM_LIB_PATH, "libmpi.so")
+                lib_file_path = os.path.join(MPI_LIB_PATH, "libmpi.so")
                 if not os.path.exists(lib_file_path):
                     raise RuntimeError(
-                        "Cannot find libmpi.so, please set environment variable MPI_LIB_PATH"
+                        f"Cannot find libmpi.so, please set environment variable MPI_LIB_PATH"
                     )
         target_cc = (
             torch.cuda.get_device_properties(0).major * 10
@@ -589,6 +594,8 @@ class PersistentKernel:
             self.num_workers,
             self.num_local_schedulers,
             self.num_remote_schedulers,
+            self.max_seq_length,
+            self.eos_token_id,
         )
 
         self._is_compiled = True

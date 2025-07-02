@@ -91,6 +91,8 @@ def build_mirage_graph(model, world_size, rank, args, tokens_tensor, step_tensor
         num_workers=96,
         num_local_schedulers=48,
         num_remote_schedulers=0,
+        max_seq_length=4096,
+        eos_token_id=model.config.eos_token_id,
         meta_tensors=[step_tensor, tokens_tensor],
         profiler_tensor=profiler_tensor,
     )
