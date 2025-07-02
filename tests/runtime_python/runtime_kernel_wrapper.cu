@@ -1,6 +1,7 @@
 #include "argmax.cuh"
 #include "bfloat16.h"
 #include "linear.cuh"
+#include "norm.cuh"
 #include "norm_linear.cuh"
 #include "paged_attention.cuh"
 #include "silu_mul_linear.cuh"
@@ -372,7 +373,7 @@ void launch_norm_linear(void const *input_ptr,
                         void *output_ptr) {
   dim3 grid_dim(1, 1, 1);
   dim3 block_dim(128, 1, 1);
-  size_t smem_size = 112640;
+  size_t smem_size = 1024 * 99;
 
   cudaFuncSetAttribute(
       norm_linear_kernel_wrapper<T, BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE>,
@@ -424,6 +425,167 @@ void norm_linear(torch::Tensor input,
   cudaError_t err = cudaDeviceSynchronize();
   if (err != cudaSuccess) {
     printf("CUDA kernel launch error: %s\n", cudaGetErrorString(err));
+  }
+}
+
+// Window RMSNorm Linear
+
+template <typename T, int BATCH_SIZE, int WINDOW_SIZE, int HEAD_DIM>
+__global__ void window_rms_norm_kernel_wrapper(void const *input_ptr,
+                                               void const *weight_ptr,
+                                               float eps,
+                                               void *output_ptr,
+                                               bool rotary_emd = false,
+                                               void const *cos_ptr = nullptr,
+                                               void const *sin_ptr = nullptr) {
+  constexpr size_t q_num = BATCH_SIZE * WINDOW_SIZE;
+  using Smem = kernel::smem_row<T, 3, 3, 3, q_num, 128, 128>;
+
+  extern __shared__ char smem[];
+  T *smem_ptr = reinterpret_cast<T *>(smem);
+  Smem input_smem(smem_ptr);
+
+  // TODO(Wenqin): q_num * HEAD_DIM is a conservative number.
+  float *reduce_smem = reinterpret_cast<float *>(smem) + q_num * HEAD_DIM;
+
+  T const *d_input = static_cast<T const *>(input_ptr);
+  T *d_output = const_cast<T *>(static_cast<T const *>(output_ptr));
+
+  kernel::dmem_row_const<T, q_num, 128, 128> input_dmem(d_input);
+  kernel::dmem_row<T, q_num, 128, 128> output_dmem(d_output);
+
+  for (int i = threadIdx.x; i < q_num * (HEAD_DIM / 8); i += NUM_THREADS) {
+    int row = i / 16;
+    int col = (i % 16) * 8;
+    kernel::load_smem(input_smem(row, col), input_dmem(row, col));
+  }
+  kernel::cp_async_fence();
+  kernel::cp_async_wait<0>();
+
+  // some thread didn't issue any cp.async ldgsts inst, so we should ask them
+  // to wait.
+  __syncthreads();
+
+  T const *norm_weight_ptr = static_cast<T const *>(weight_ptr);
+  T const *rope_cos_ptr = static_cast<T const *>(cos_ptr);
+  T const *rope_sin_ptr = static_cast<T const *>(sin_ptr);
+
+  kernel::window_rms_norm<T, Smem, 1, WINDOW_SIZE, HEAD_DIM>(input_smem,
+                                                             norm_weight_ptr,
+                                                             reduce_smem,
+                                                             eps,
+                                                             rotary_emd,
+                                                             rope_cos_ptr,
+                                                             rope_sin_ptr);
+
+  __syncthreads();
+
+  for (int i = threadIdx.x; i < q_num * (HEAD_DIM / 8); i += NUM_THREADS) {
+    // write back
+    int row = i / 16;
+    int col = (i % 16) * 8;
+    for (int j = 0; j < 8; j++) {
+      int col_j = col + j;
+      *output_dmem(row, col_j) = *input_smem(row, col_j);
+    }
+  }
+}
+
+#define WINDOW_RMSNORM_LINEAR_LAUNCHER(HEAD_DIM, WINDOW_SIZE)                  \
+  launch_window_rms_norm<bfloat16, 1, WINDOW_SIZE, HEAD_DIM>(                  \
+      input_ptr, weight_ptr, eps, output_ptr, rotary_emd, cos_ptr, sin_ptr);
+
+#define DISPATCH_WINDOW_RMSNORM_LINEAR_WINDOW_SIZE(HEAD_DIM)                   \
+  switch (window_size) {                                                       \
+    case 1:                                                                    \
+      WINDOW_RMSNORM_LINEAR_LAUNCHER(HEAD_DIM, 1);                             \
+      break;                                                                   \
+    case 2:                                                                    \
+      WINDOW_RMSNORM_LINEAR_LAUNCHER(HEAD_DIM, 2);                             \
+      break;                                                                   \
+    case 3:                                                                    \
+      WINDOW_RMSNORM_LINEAR_LAUNCHER(HEAD_DIM, 3);                             \
+      break;                                                                   \
+    case 4:                                                                    \
+      WINDOW_RMSNORM_LINEAR_LAUNCHER(HEAD_DIM, 4);                             \
+      break;                                                                   \
+    default:                                                                   \
+      printf("Unsupported window size in test: %zu\n", window_size);           \
+      break;                                                                   \
+  }
+
+#define DISPATCH_WINDOW_RMSNORM_LINEAR_HEAD_DIM()                              \
+  switch (head_dim) {                                                          \
+    case 16:                                                                   \
+      DISPATCH_WINDOW_RMSNORM_LINEAR_WINDOW_SIZE(16);                          \
+      break;                                                                   \
+    case 32:                                                                   \
+      DISPATCH_WINDOW_RMSNORM_LINEAR_WINDOW_SIZE(32);                          \
+      break;                                                                   \
+    case 64:                                                                   \
+      DISPATCH_WINDOW_RMSNORM_LINEAR_WINDOW_SIZE(64);                          \
+      break;                                                                   \
+    case 128:                                                                  \
+      DISPATCH_WINDOW_RMSNORM_LINEAR_WINDOW_SIZE(128);                         \
+      break;                                                                   \
+    case 256:                                                                  \
+      DISPATCH_WINDOW_RMSNORM_LINEAR_WINDOW_SIZE(256);                         \
+      break;                                                                   \
+    case 1600:                                                                 \
+      DISPATCH_WINDOW_RMSNORM_LINEAR_WINDOW_SIZE(1600);                        \
+      break;                                                                   \
+    default:                                                                   \
+      printf("Unsupported head dim in test: %zu\n", head_dim);                 \
+      break;                                                                   \
+  }
+
+#define WINDOW_RMSNORM_LINEAR() DISPATCH_WINDOW_RMSNORM_LINEAR_HEAD_DIM()
+
+template <typename T, int BATCH_SIZE, int WINDOW_SIZE, int HEAD_DIM>
+void launch_window_rms_norm(void const *input_ptr,
+                            void const *weight_ptr,
+                            float eps,
+                            void *output_ptr,
+                            bool rotary_emd = false,
+                            void const *cos_ptr = nullptr,
+                            void const *sin_ptr = nullptr) {
+  dim3 grid_dim(1, 1, 1);
+  dim3 block_dim(128, 1, 1);
+  size_t smem_size = 1024 * 99;
+
+  cudaFuncSetAttribute(
+      window_rms_norm_kernel_wrapper<T, BATCH_SIZE, WINDOW_SIZE, HEAD_DIM>,
+      cudaFuncAttributeMaxDynamicSharedMemorySize,
+      smem_size);
+
+  window_rms_norm_kernel_wrapper<T, BATCH_SIZE, WINDOW_SIZE, HEAD_DIM>
+      <<<grid_dim, block_dim, smem_size>>>(
+          input_ptr, weight_ptr, eps, output_ptr, rotary_emd, cos_ptr, sin_ptr);
+}
+
+void window_rms_norm(
+    torch::Tensor input, // shape [batch, window_size, head_dim]
+    torch::Tensor weight,
+    float eps,
+    torch::Tensor output,
+    bool rotary_emd = false,
+    torch::optional<torch::Tensor> cos = c10::nullopt,
+    torch::optional<torch::Tensor> sin = c10::nullopt) {
+  void const *input_ptr = input.data_ptr();
+  void const *weight_ptr = weight.data_ptr();
+  void const *cos_ptr = cos ? cos->data_ptr() : nullptr;
+  void const *sin_ptr = sin ? sin->data_ptr() : nullptr;
+  void *output_ptr = output.data_ptr();
+  size_t head_dim = output.size(2);
+  size_t window_size = output.size(1);
+  auto dtype = input.dtype().toScalarType();
+
+  DISPATCH_WINDOW_RMSNORM_LINEAR_HEAD_DIM();
+
+  cudaError_t err = cudaDeviceSynchronize();
+  if (err != cudaSuccess) {
+    printf("CUDA window_norm_linear kernel launch error: %s\n",
+           cudaGetErrorString(err));
   }
 }
 
@@ -816,4 +978,5 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("q_eps") = 0.0f,
         py::arg("k_eps") = 0.0f);
   m.def("paged_attention", &paged_attention, "Paged Attention");
+  m.def("window_rms_norm", &window_rms_norm, "Window RMSNorm");
 }

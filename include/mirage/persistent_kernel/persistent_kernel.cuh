@@ -29,7 +29,8 @@ using bfloat16 = type::bfloat16_t;
 using namespace mirage::runtime;
 
 __device__ __forceinline__ void
-    _execute_task(TaskDesc const &task_desc, int *step, long long *tokens, int *new_token_num);
+    _execute_task(TaskDesc const &task_desc,
+                  RuntimeConfig const &runtime_config);
 
 __device__ __forceinline__ bool is_termination_event(size_t event_loc,
                                                      EventDesc e) {
@@ -78,8 +79,8 @@ __device__ __forceinline__ bool
     prepare_next_batch(RuntimeConfig const &config) {
   int step = config.step[0];
   config.step[0] = step + config.new_token_num;
-  if ((step >= 4096) || (config.profiling) ||
-      (config.tokens[step + 1] == 151645 /*eos_token_id*/)) {
+  if ((step + 2 >= config.max_seq_length) || (config.profiling) ||
+      (config.tokens[step + 1] == config.eos_token_id)) {
     return false;
   } else {
     return true;
@@ -326,9 +327,19 @@ __global__ void persistent_kernel(RuntimeConfig config) {
             gpu_id);
 #endif
       } else if (task_desc.task_type == TASK_REDUCE) {
-        TB_SLEEP_US(1);
+        // Currently support 2D reduction, buffer has an extra world_size dim
+        assert(task_desc.inputs[0].num_dims == 2);
+        assert(task_desc.inputs[1].num_dims == 3);
+        kernel::reduction_kernel<bfloat16>(task_desc.inputs[0].base_ptr,
+                                           task_desc.inputs[1].base_ptr,
+                                           task_desc.outputs[0].base_ptr,
+                                           config.num_gpus,
+                                           config.my_gpu_id,
+                                           task_desc.inputs[0].dim[0],
+                                           task_desc.inputs[0].dim[1],
+                                           task_desc.inputs[0].stride[0]);
       } else {
-        _execute_task(task_desc, config.step, config.tokens, &(config.new_token_num));
+        _execute_task(task_desc, config);
       }
       __syncthreads();
       if (config.profiling && task_desc.task_type != TASK_TERMINATE) {
@@ -728,13 +739,17 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
                                        int my_rank,
                                        int num_workers,
                                        int num_local_schedulers,
-                                       int num_remote_schedulers) {
+                                       int num_remote_schedulers,
+                                       int max_seq_length,
+                                       long long eos_token_id) {
   assert(meta_tensors.size() == 2);
   global_runtime_config.step = static_cast<int *>(meta_tensors[0]);
   global_runtime_config.tokens = static_cast<long long *>(meta_tensors[1]);
   global_runtime_config.num_workers = num_workers;
   global_runtime_config.num_local_schedulers = num_local_schedulers;
   global_runtime_config.num_remote_schedulers = num_remote_schedulers;
+  global_runtime_config.max_seq_length = max_seq_length;
+  global_runtime_config.eos_token_id = eos_token_id;
   global_runtime_config.profiler_buffer = profiler_buffer;
   int num_schedulers = num_local_schedulers + num_remote_schedulers;
 

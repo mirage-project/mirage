@@ -41,6 +41,7 @@ if __name__ == "__main__":
         help="Spec length for lookahead spec decode",
     )
 
+    parser.add_argument("--model-path", type=str, default=None, help="Path to a local model (necessary for multi-GPU demo)")
     parser.add_argument(
         "--model", type=str, default='Qwen/Qwen3-8B', help="Model path on hugging face"
     )
@@ -71,15 +72,21 @@ if __name__ == "__main__":
 
     torch.cuda.set_device(rank)
     with torch.device("cuda"):
-        model = Qwen3ForCausalLM.from_pretrained(model_name).to("cuda")
-    # load_model(
-    #    model, f"/opt/dlami/nvme/models/Qwen3-8B/model{rank}-mp{world_size}.safetensors"
-    # )
+        if args.model_path is not None:
+            # load model locally (necessary for multi-GPU case)
+            print(f"Load model from model path: {args.model_path}")
+            config = AutoConfig.from_pretrained(args.model_path)
+            model = Qwen3ForCausalLM(config, world_size)
+            load_model(
+                model, f"{args.model_path}/model{rank}-mp{world_size}.safetensors"
+            )
+            tokenizer = AutoTokenizer.from_pretrained(args.model_path)
+        else:
+            model = Qwen3ForCausalLM.from_pretrained(model_name).to("cuda")
+            tokenizer = AutoTokenizer.from_pretrained(model_name)
 
     # get all model weight tensors
     tokens = torch.full((1, 32768), 0, dtype=torch.long, device="cuda")
-
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
 
     prompt = "Give me a short introduction to large language model."
     messages = [
@@ -152,6 +159,8 @@ if __name__ == "__main__":
             num_workers=num_workers,
             num_local_schedulers=num_schedulers,
             num_remote_schedulers=0,
+            max_seq_length=512,
+            eos_token_id=model.config.eos_token_id,
             meta_tensors=[step, tokens],
             profiler_tensor=profiler_tensor,
             spec_decode_config=spec_decode_config,
@@ -450,10 +459,10 @@ if __name__ == "__main__":
                 block_dim = (128, 1, 1),
             )
 
-        results = mpk.kn_graph.generate_task_graph(num_gpus=world_size)
-        with open("task_graph.json", "w") as f:
+        results = mpk.kn_graph.generate_task_graph(num_gpus=world_size, my_gpu_id=rank)
+        with open(f"task_graph_{rank}.json", "w") as f:
             f.write(results["json_file"])
-        with open("test.cu", "w") as f:
+        with open(f"kernel_{rank}.cu", "w") as f:
             f.write(results["cuda_code"])
 
         mpk.compile(output_dir=args.output_dir)

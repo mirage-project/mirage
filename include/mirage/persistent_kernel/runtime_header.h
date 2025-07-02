@@ -117,8 +117,10 @@ struct RuntimeConfig {
   TaskId **worker_queues;
   EventId **sched_queues;
   TaskId *first_tasks;
-  int *step;         // Metadata for LLM serving
-  long long *tokens; // Metadata for LLM serving
+  int *step;              // Metadata for LLM serving
+  long long *tokens;      // Metadata for LLM serving
+  long long eos_token_id; // Metadata for LLM serving
+  int max_seq_length;     // Metadata for LLM serving
   int new_token_num;
   void *profiler_buffer;
   bool verbose;

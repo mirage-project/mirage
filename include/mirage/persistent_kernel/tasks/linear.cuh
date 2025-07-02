@@ -37,7 +37,8 @@ template <typename T,
 __device__ __forceinline__ void linear_kernel(void const *input_ptr,
                                               void const *weight_ptr,
                                               void const *residual_ptr,
-                                              void *output_ptr) {
+                                              void *output_ptr,
+                                              bool residual = true) {
   constexpr int CHUNK_SIZE = 16 / sizeof(T);
   constexpr int OUTPUT_ATOM_SIZE = OUTPUT_SIZE <= 128 ? OUTPUT_SIZE : 128;
   constexpr int NUM_OUTPUT_ATOMS = OUTPUT_SIZE / OUTPUT_ATOM_SIZE;
@@ -76,7 +77,8 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
 
   T const *__restrict__ d_input = static_cast<T const *>(input_ptr);
   T const *__restrict__ d_weight = static_cast<T const *>(weight_ptr);
-  T const *__restrict__ d_residual = static_cast<T const *>(residual_ptr);
+  T const *__restrict__ d_residual =
+      residual ? static_cast<T const *>(residual_ptr) : nullptr;
   T *__restrict__ d_output = static_cast<T *>(output_ptr);
 
   using InputDmem = dmem_row_const<T, BATCH_SIZE, TILE_SIZE, REDUCTION_SIZE>;
@@ -129,7 +131,8 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
   T *shared_weight_buffer = (T *)(smem + SHARED_WEIGHT_BUFFER_OFFSET);
 
   // residual
-  T *shared_residual = (T *)(smem + SHARED_RESIDUAL_OFFSET);
+  T *shared_residual =
+      residual ? (T *)(smem + SHARED_RESIDUAL_OFFSET) : nullptr;
 
   // intermediate
   T *mm_intermediate = (T *)(smem + MM_INTERMEDIATE_OFFSET);
@@ -170,7 +173,7 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
   for (int output_atom_idx = 0; output_atom_idx < NUM_OUTPUT_ATOMS;
        output_atom_idx++,
            d_weight += OUTPUT_ATOM_SIZE * REDUCTION_SIZE,
-           d_residual += OUTPUT_ATOM_SIZE,
+           d_residual = residual ? d_residual + OUTPUT_ATOM_SIZE : nullptr,
            d_output += OUTPUT_ATOM_SIZE) {
     weight_dmem.set_ptr(d_weight);
     residual_dmem.set_ptr(d_residual);
@@ -179,11 +182,13 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
     InputBufferSmem input_buffer_smem(shared_input_buffer);
     WeightBufferSmem weight_buffer_smem(shared_weight_buffer);
 
+    if (residual) {
 #pragma unroll
-    for (int i = threadIdx.x; i < NUM_CHUNKS_C; i += NUM_THREADS) {
-      int row = i >> log2_CHUNKS_PER_ROW_C;
-      int col = (i & (CHUNKS_PER_ROW_C - 1)) << log2_CHUNK_SIZE;
-      load_smem(residual_smem(row, col), residual_dmem(row, col));
+      for (int i = threadIdx.x; i < NUM_CHUNKS_C; i += NUM_THREADS) {
+        int row = i >> log2_CHUNKS_PER_ROW_C;
+        int col = (i & (CHUNKS_PER_ROW_C - 1)) << log2_CHUNK_SIZE;
+        load_smem(residual_smem(row, col), residual_dmem(row, col));
+      }
     }
 
 #pragma unroll
@@ -314,10 +319,9 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
 #pragma unroll
     for (int i = threadIdx.x; i < OUTPUT_ATOM_SIZE; i += NUM_THREADS) {
       int row = 0;
-      output_dmem.at(row, i) =
-          NUM_WARPS_K > 1
-              ? output_smem.at(row, i) + residual_smem.at(row, i)
-              : mm_intermediate_smem.at(row, i) + residual_smem.at(row, i);
+      T val = NUM_WARPS_K > 1 ? output_smem.at(row, i)
+                              : mm_intermediate_smem.at(row, i);
+      output_dmem.at(row, i) = residual ? val + residual_smem.at(row, i) : val;
     }
     if (output_atom_idx + 1 < NUM_OUTPUT_ATOMS) {
       __syncthreads();
