@@ -8,6 +8,7 @@
 #include "single_batch_gqa.cuh"
 #include "embedding.cuh"
 #include "prompt_lookup.cuh"
+#include "target_verify.cuh"
 #include "bfloat16.h"
 #include <cuda_runtime.h>
 #include <torch/extension.h>
@@ -24,6 +25,7 @@ using kernel::find_ngram_partial_kernel;
 using kernel::find_ngram_global_kernel;
 using kernel::argmax_partial_kernel;
 using kernel::argmax_reduce_kernel;
+using kernel::target_verify_greedy_kernel;
 using bfloat16 = type::bfloat16_t;
 
 template <typename T>
@@ -657,6 +659,47 @@ void prompt_lookup(torch::Tensor all_tokens,
   }
 }
 
+// Verify Kernel
+template <int NUM_SPEC_TOKENS>
+__global__ void target_verify_greedy_kernel_wrapper(
+                                 void const *__restrict__ spec_token_id_ptr,
+                                 void const *__restrict__ target_token_id_ptr, 
+                                 void *__restrict__ final_output_ptr,
+                                 void *__restrict__ tokens_ptr) {
+    target_verify_greedy_kernel<NUM_SPEC_TOKENS>(
+        spec_token_id_ptr, target_token_id_ptr, final_output_ptr, tokens_ptr);
+}
+
+void verify(torch::Tensor spec_tokens,
+            torch::Tensor target_tokens,
+            torch::Tensor accepted_len,
+            torch::Tensor new_tokens) {
+    
+    constexpr int NUM_SPEC_TOKENS = 5; // Must match python test
+    if (spec_tokens.size(0) != NUM_SPEC_TOKENS + 1 ||
+        target_tokens.size(0) < NUM_SPEC_TOKENS ||
+        accepted_len.size(0) != 1 ||
+        new_tokens.size(0) != NUM_SPEC_TOKENS + 1)
+         {
+        throw std::runtime_error("Invalid tensor shape for verify test");
+    }
+
+    dim3 grid_dim(1, 1, 1);
+    dim3 block_dim(128, 1, 1);
+
+    target_verify_greedy_kernel_wrapper<NUM_SPEC_TOKENS><<<grid_dim, block_dim>>>(
+        spec_tokens.data_ptr(),
+        target_tokens.data_ptr(),
+        accepted_len.data_ptr(),
+        new_tokens.data_ptr()
+    );
+
+    cudaError_t err = cudaDeviceSynchronize();
+    if (err != cudaSuccess) {
+        printf("CUDA kernel launch error in verify: %s\n", cudaGetErrorString(err));
+    }
+}
+
 // Argmax Kernel
 template <typename T, int BATCH_SIZE, int CHUNK_SIZE, int NUM_PARTIAL_TASKS>
 __global__ void argmax_partial_kernel_wrapper(void const *__restrict__ input_ptr,
@@ -754,6 +797,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("embedding", &embedding, "Embedding kernel");
   m.def("linear", &linear, "Linear kernel");
   m.def("argmax", &argmax, "Argmax kernel");
+  m.def("verify", &verify, "Target verification kernel");
   m.def("norm_linear", &norm_linear, "RMSNorm Linear kernel");
   m.def("silu_mul_linear", &silu_mul_linear, "SILU MUL Linear kernel");
   m.def("single_batch_decoding",

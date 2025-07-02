@@ -21,18 +21,40 @@ namespace kernel {
 template <int NUM_SPEC_TOKENS>
 __device__ __forceinline__ void
     target_verify_greedy_kernel(void const *__restrict__ spec_token_id_ptr,
-                         void const *__restrict__ target_token_id_ptr,
-                         void *__restrict__ final_output_ptr) {
-    int const *__restrict__ spec_token_id = static_cast<int const *>(spec_token_id_ptr);
-    int const *__restrict__ target_token_id = static_cast<int const *>(target_token_id_ptr);
-    int *__restrict__ accepted_spec_token_num = static_cast<int *>(final_output_ptr);
-    for(int i = 0; i < NUM_SPEC_TOKENS; i++) {
-        if(spec_token_id_ptr[i] != target_token_id_ptr[i]) {
-            accepted_spec_token_num[0] = i;
-            return;
+                         void const *__restrict__ target_token_id_ptr, 
+                         void *__restrict__ final_output_ptr,
+                         void *__restrict__ tokens_ptr) { // Point to empty slots directly
+    long long const *__restrict__ spec_token_id = static_cast<long long const *>(spec_token_id_ptr);
+    long long const *__restrict__ target_token_id = static_cast<long long const *>(target_token_id_ptr);
+    int *__restrict__ new_accepted_len = static_cast<int *>(final_output_ptr);
+    long long *__restrict__ new_tokens = static_cast<long long *>(tokens_ptr);
+
+    int t_id = threadIdx.x;
+    __shared__ int local_accepted_num_smem;
+
+    if (t_id == 0) {
+        int accepted_count = NUM_SPEC_TOKENS;
+        for(int i = 0; i < NUM_SPEC_TOKENS; i++) {
+            // spec_token_id[0] is original token, [1...NUM_SPEC_TOKENS] are speculative ones.
+            if(spec_token_id[i + 1] != target_token_id[i]) {
+                accepted_count = i;
+                break;
+            }
         }
+        local_accepted_num_smem = accepted_count;
     }
-    accepted_spec_token_num[0] = NUM_SPEC_TOKENS + 1;
+    __syncthreads();
+
+    int final_accepted_count = local_accepted_num_smem;
+
+    // Copy the newly accepted tokens and the first non-matching target token.
+    if (t_id < final_accepted_count + 1) {
+        new_tokens[t_id] = target_token_id[t_id];
+    }
+
+    if (t_id == NUM_THREADS_PER_WARP) {
+        new_accepted_len[0] = final_accepted_count + 1;
+    }
 }
 
 } // namespace kernel
