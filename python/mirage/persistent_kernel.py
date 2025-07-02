@@ -176,7 +176,10 @@ class PersistentKernel:
         self.use_nvshmem = True if world_size > 1 else False
         self.spec_decode_config = spec_decode_config
         self._spec_decode_handlers = {
-            "promptlookup": self.prompt_lookup_layer,
+            "promptlookup": self.prompt_lookup_spec_handler,
+        }
+        self._spec_verify_handlers = {
+            "promptlookup": self.prompt_lookup_verify_handler,
         }
 
     def attach_input(self, torch_tensor: torch.Tensor, name: str = None) -> DTensor:
@@ -475,23 +478,8 @@ class PersistentKernel:
         tb_graph.new_input(output, (-1, -1, -1), -1, True)
         self.kn_graph.customized([partial_results, tokens, output], tb_graph)
         self.kn_graph.register_task(tb_graph, "find_ngram_global", [ngram_size, spec_length])
-        
-    def target_verify_greedy_layer(
-        self, input: tuple[DTensor, DTensor], output: DTensor, grid_dim: tuple, block_dim: tuple):
-        # Currently assume that input/output
-        assert len(input) == 2
-        spec_tokens, target_tokens = input
-        assert spec_tokens.num_dims == 2  # (batch_size, vocab_size)
-        assert target_tokens.num_dims == 2  # (batch_size, vocab_size)
-        assert output.num_dims == 2  # (batch_size, 1)
-        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
-        tb_graph.new_input(spec_tokens, (-1, -1, -1), -1, True)
-        tb_graph.new_input(target_tokens, (-1, -1, -1), -1, True)
-        tb_graph.new_input(output, (-1, -1, -1), -1, True)
-        self.kn_graph.customized([spec_tokens, target_tokens, output], tb_graph)
-        self.kn_graph.register_task(tb_graph, "target_verify_greedy")
 
-    def prompt_lookup_layer(
+    def prompt_lookup_spec_handler(
         self, 
         spec_decode_config: PromptLookupConfig,
         tokens: DTensor,
@@ -540,25 +528,55 @@ class PersistentKernel:
             raise ValueError(f"Invalid spec decode method: {method}")
         return handler(spec_decode_config, tokens, grid_dim, block_dim)
     
-    def verify_layer_dispatcher(
+    def target_verify_greedy_layer(
+        self, input: tuple[DTensor, DTensor], output: DTensor, grid_dim: tuple, block_dim: tuple):
+        # Currently assume that input/output
+        # This tensor is not realy used
+        assert len(input) == 2
+        spec_tokens, target_tokens = input
+        assert spec_tokens.num_dims == 2  # (batch_size, vocab_size)
+        assert target_tokens.num_dims == 2  # (batch_size, vocab_size)
+        assert output.num_dims == 2  # (batch_size, 1)
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(spec_tokens, (-1, -1, -1), -1, True)
+        tb_graph.new_input(target_tokens, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output, (-1, -1, -1), -1, True)
+        self.kn_graph.customized([spec_tokens, target_tokens, output], tb_graph)
+        self.kn_graph.register_task(tb_graph, "target_verify_greedy")
+        
+    def prompt_lookup_verify_handler(
         self,
-        spec_decode: SpecDecodeConfig,
+        spec_decode_config: SpecDecodeConfig,
         spec_tokens: DTensor,
         target_output: DTensor,
+        grid_dim: tuple[int, int, int],
+        block_dim: tuple[int, int, int],
     ):
-        if spec_decode.method == "promptlookup":
-            verify_out = self.new_tensor(
-                dims=(1, 1),
-                dtype=int64,
-                name="verify_out",
-                io_category="cuda_tensor",
-            )
-            self.target_verify_greedy_layer(
-                input=(spec_tokens, target_output), output=verify_out, grid_dim=(1, 1, 1), block_dim=(128, 1, 1)
-            )
-            return verify_out
-        else:
-            raise ValueError(f"Invalid spec decode method: {spec_decode.method}")
+        # This tensor is not realy used
+        verify_out = self.new_tensor(
+            dims=(1, 1),
+            dtype=int64,
+            name="verify_out",
+            io_category="cuda_tensor",
+        )
+        self.target_verify_greedy_layer(
+            input=(spec_tokens, target_output), output=verify_out, grid_dim=grid_dim, block_dim=block_dim
+        )
+        return verify_out
+    
+    def verify_layer_dispatcher(
+        self,
+        spec_decode_config: SpecDecodeConfig,
+        spec_tokens: DTensor,
+        target_output: DTensor,
+        grid_dim: tuple[int, int, int] = (1, 1, 1),
+        block_dim: tuple[int, int, int] = (128, 1, 1),
+    ):
+        method = spec_decode_config.method
+        handler = self._spec_verify_handlers[method]
+        if handler is None:
+            raise ValueError(f"Invalid spec decode method: {method}")
+        return handler(spec_decode_config, spec_tokens, target_output, grid_dim, block_dim)
 
     def compile(
         self,
