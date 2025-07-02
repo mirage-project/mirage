@@ -17,7 +17,6 @@
 #include "common.h"
 #include "utils.cuh"
 namespace kernel {
-// TODO(Wenqin): modify 128 in this kernel as NUM_THREADS
 template <typename T, typename InputSmem, int NUM_HEAD, int HEAD_DIM = 128>
 __device__ __forceinline__ void rms_norm(InputSmem smem_input,
                                          T const *weight_ptr,
@@ -34,10 +33,10 @@ __device__ __forceinline__ void rms_norm(InputSmem smem_input,
     float sum = 0.0f;
 
 #pragma unroll
-    for (uint32_t i = 0; i < (HEAD_DIM / 128); i++) {
+    for (uint32_t i = 0; i < (HEAD_DIM / NUM_THREADS); i++) {
       sum +=
-          (float)smem_input.at(head_idx + row_offset, threadIdx.x + i * 128) *
-          (float)smem_input.at(head_idx + row_offset, threadIdx.x + i * 128);
+          (float)smem_input.at(head_idx + row_offset, threadIdx.x + i * NUM_THREADS) *
+          (float)smem_input.at(head_idx + row_offset, threadIdx.x + i * NUM_THREADS);
     }
 
 #pragma unroll
@@ -66,7 +65,7 @@ __device__ __forceinline__ void rms_norm(InputSmem smem_input,
 
     // multiply with weight
 #pragma unroll
-    for (uint32_t i = threadIdx.x; i < HEAD_DIM; i += 128) {
+    for (uint32_t i = threadIdx.x; i < HEAD_DIM; i += NUM_THREADS) {
       float val = smem_input.at(head_idx + row_offset, i);
       float w = (float)weight_ptr[i];
       val *= rms_rcp * w;
@@ -155,7 +154,7 @@ __device__ __forceinline__ void window_rms_norm(InputSmem smem_input,
           __syncthreads();
           int offset = (i / HEAD_DIM) * HEAD_DIM + i;
           const T* cur_cos_ptr = cos_ptr + win_idx * HEAD_DIM;
-          const T* cur_sin_ptr = sin_ptr + win_idx* HEAD_DIM;
+          const T* cur_sin_ptr = sin_ptr + win_idx * HEAD_DIM;
           float cos = (float)cur_cos_ptr[offset];
           float sin = (float)cur_sin_ptr[offset];
           if (i < HEAD_DIM / 2) {

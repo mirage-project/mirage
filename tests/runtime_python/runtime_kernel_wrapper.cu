@@ -426,8 +426,8 @@ __global__ void window_rms_norm_kernel_wrapper(void const *input_ptr,
                                           float eps,
                                           void *output_ptr,
                                           bool rotary_emd = false,
-                                          T const *cos_ptr = nullptr,
-                                          T const *sin_ptr = nullptr) {
+                                          void const *cos_ptr = nullptr,
+                                          void const *sin_ptr = nullptr) {
   constexpr size_t q_num = BATCH_SIZE * WINDOW_SIZE;
   using Smem = kernel::smem_row<T, 3, 3, 3, q_num, 128, 128>;
 
@@ -452,15 +452,21 @@ __global__ void window_rms_norm_kernel_wrapper(void const *input_ptr,
   kernel::cp_async_fence();
   kernel::cp_async_wait<0>();
 
+  // some thread didn't issue any cp.async ldgsts inst, so we should ask them
+  // to wait.
+  __syncthreads();
+
   T const* norm_weight_ptr = static_cast<T const*>(weight_ptr);
+  T const* rope_cos_ptr = static_cast<T const*>(cos_ptr);
+  T const* rope_sin_ptr = static_cast<T const*>(sin_ptr);
 
   kernel::window_rms_norm<T, Smem, 1,
                         WINDOW_SIZE,
                         HEAD_DIM>(
-      input_smem, norm_weight_ptr, reduce_smem, eps, rotary_emd, cos_ptr, sin_ptr);
+      input_smem, norm_weight_ptr, reduce_smem, eps, rotary_emd, rope_cos_ptr, rope_sin_ptr);
 
   __syncthreads();
-
+  
   for (int i = threadIdx.x; i < q_num * (HEAD_DIM / 8); i += NUM_THREADS) {
     // write back
     int row = i / 16;
@@ -474,7 +480,7 @@ __global__ void window_rms_norm_kernel_wrapper(void const *input_ptr,
 
 #define WINDOW_RMSNORM_LINEAR_LAUNCHER(HEAD_DIM, WINDOW_SIZE)            \
   launch_window_rms_norm<bfloat16, 1, WINDOW_SIZE, HEAD_DIM>(         \
-      input_ptr, weight_ptr, eps, output_ptr);
+      input_ptr, weight_ptr, eps, output_ptr, rotary_emd, cos_ptr, sin_ptr);
 
 #define DISPATCH_WINDOW_RMSNORM_LINEAR_WINDOW_SIZE(HEAD_DIM)            \
   switch (window_size) {                                                   \
@@ -526,7 +532,10 @@ template <typename T, int BATCH_SIZE, int WINDOW_SIZE, int HEAD_DIM>
 void launch_window_rms_norm(void const *input_ptr,
                         void const *weight_ptr,
                         float eps,
-                        void *output_ptr) {
+                        void *output_ptr,
+                        bool rotary_emd = false,
+                        void const *cos_ptr = nullptr,
+                        void const *sin_ptr = nullptr) {
   dim3 grid_dim(1, 1, 1);
   dim3 block_dim(128, 1, 1);
   size_t smem_size = 1024 * 99;
@@ -538,18 +547,24 @@ void launch_window_rms_norm(void const *input_ptr,
 
   window_rms_norm_kernel_wrapper<T, BATCH_SIZE, WINDOW_SIZE, HEAD_DIM>
       <<<grid_dim, block_dim, smem_size>>>(
-          input_ptr, weight_ptr, eps, output_ptr);
+          input_ptr, weight_ptr, eps, output_ptr, rotary_emd, cos_ptr, sin_ptr);
 }
 
 void window_rms_norm(torch::Tensor input, // shape [batch, window_size, head_dim]
-                 torch::Tensor weight,
-                 float eps,
-                 torch::Tensor output) {
+                      torch::Tensor weight,
+                      float eps,
+                      torch::Tensor output,
+                      bool rotary_emd = false,
+                      torch::optional<torch::Tensor> cos = c10::nullopt,
+                      torch::optional<torch::Tensor> sin = c10::nullopt) {
   void const *input_ptr = input.data_ptr();
   void const *weight_ptr = weight.data_ptr();
+  void const *cos_ptr = cos ? cos->data_ptr() : nullptr;
+  void const *sin_ptr = sin ? sin->data_ptr() : nullptr;
   void *output_ptr = output.data_ptr();
   size_t head_dim = output.size(2);
   size_t window_size = output.size(1);
+  auto dtype = input.dtype().toScalarType();
 
   DISPATCH_WINDOW_RMSNORM_LINEAR_HEAD_DIM();
 
