@@ -360,7 +360,7 @@ int TaskRegister::register_find_ngram_partial_task(threadblock::Graph const &bgr
   code.e("kernel::find_ngram_partial_kernel<$, $>(", params[0], num_parts);
   code.e("    task_desc.inputs[0].base_ptr,");
   code.e("    task_desc.outputs[0].base_ptr,");
-  code.e("    step[0] + 1);");
+  code.e("    runtime_config.step[0] + 1);");
 
   return register_task_variant(TASK_FIND_NGRAM_PARTIAL, code.to_string());
 }
@@ -393,7 +393,7 @@ int TaskRegister::register_find_ngram_global_task(threadblock::Graph const &bgra
   code.e("    task_desc.inputs[0].base_ptr,");
   code.e("    task_desc.inputs[1].base_ptr,");
   code.e("    task_desc.outputs[0].base_ptr);");
-  code.e("    step[0] + 1);");
+  code.e("    runtime_config.step[0] + 1);");
   return register_task_variant(TASK_FIND_NGRAM_GLOBAL, code.to_string());
 }
 
@@ -422,8 +422,8 @@ int TaskRegister::register_target_verify_greedy_task(threadblock::Graph const &b
   code.e("kernel::target_verify_greedy_kernel<$>(", num_spec_tokens);
   code.e("    task_desc.inputs[0].base_ptr,");
   code.e("    task_desc.inputs[1].base_ptr,");
-  code.e("    new_token_num,"); // int pointer
-  code.e("    tokens + step[0] + 1);");
+  code.e("    &(runtime_config.new_token_num),"); // int pointer
+  code.e("    runtime_config.tokens + runtime_config.step[0] + 1);");
   return register_task_variant(TASK_TARGET_VERIFY_GREEDY, code.to_string());
 }
 
