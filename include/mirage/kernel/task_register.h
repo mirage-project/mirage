@@ -44,10 +44,6 @@ public:
                                   std::vector<int> const &params);
   int register_softmax_task(threadblock::Graph const &bgraph,
                             std::vector<int> const &params);
-  int register_softmax_partial_task(threadblock::Graph const &bgraph,
-                                    std::vector<int> const &params);
-  int register_softmax_reduce_task(threadblock::Graph const &bgraph,
-                                   std::vector<int> const &params);
   int register_task_variant(TaskType type, std::string const &code);
 
 public:
