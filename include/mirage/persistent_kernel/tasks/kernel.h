@@ -6,3 +6,4 @@
 #include "reduction.cuh"
 #include "silu_mul_linear.cuh"
 #include "single_batch_decoding.cuh"
+#include "softmax.cuh"

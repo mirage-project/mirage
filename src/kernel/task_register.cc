@@ -311,5 +311,100 @@ int TaskRegister::register_argmax_reduce_task(threadblock::Graph const &bgraph,
   return register_task_variant(TASK_ARGMAX_REDUCE, code.to_string());
 }
 
+int TaskRegister::register_softmax_task(threadblock::Graph const &bgraph,
+                                       std::vector<int> const &params) {
+  // params[0]: temperature (as int, will be divided by 1000 for float)
+  assert(params.size() == 1);
+  std::vector<tb::TBInputOp *> input_ops;
+  std::vector<tb::TBInputOp *> output_ops;
+  int num_inputs = 1;
+  int num_outputs = 1;
+
+  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    if (input_ops.size() < (size_t)num_inputs) {
+      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    } else {
+      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    }
+  }
+  assert(input_ops[0]->output_tensors[0].num_dims == 2);
+  int num_elements = input_ops[0]->output_tensors[0].dim[1];
+  float temperature = params[0] / 1000.0f;
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::softmax_kernel<bfloat16, $>(", num_elements);
+  code.e("    task_desc.inputs[0].base_ptr,");
+  code.e("    task_desc.outputs[0].base_ptr,");
+  code.e("    $f);", temperature);
+  return register_task_variant(TASK_SOFTMAX, code.to_string());
+}
+
+int TaskRegister::register_softmax_partial_task(threadblock::Graph const &bgraph,
+                                               std::vector<int> const &params) {
+  // params[0]: temperature (as int, will be divided by 1000 for float)
+  assert(params.size() == 1);
+  std::vector<tb::TBInputOp *> input_ops;
+  std::vector<tb::TBInputOp *> output_ops;
+  int num_inputs = 1;
+  int num_outputs = 3; // exp_output, max_output, sum_output
+
+  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    if (input_ops.size() < (size_t)num_inputs) {
+      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    } else {
+      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    }
+  }
+  assert(input_ops[0]->output_tensors[0].num_dims == 2);
+  int num_elements = input_ops[0]->output_tensors[0].dim[1];
+  float temperature = params[0] / 1000.0f;
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::softmax_partial_kernel<bfloat16, $>(", num_elements);
+  code.e("    task_desc.inputs[0].base_ptr,");
+  code.e("    task_desc.outputs[0].base_ptr,"); // exp values
+  code.e("    task_desc.outputs[1].base_ptr,"); // max values
+  code.e("    task_desc.outputs[2].base_ptr,"); // sum values
+  code.e("    $f);", temperature);
+  return register_task_variant(TASK_SOFTMAX_PARTIAL, code.to_string());
+}
+
+int TaskRegister::register_softmax_reduce_task(threadblock::Graph const &bgraph,
+                                              std::vector<int> const &params) {
+  // params[0]: chunk_size
+  assert(params.size() == 1);
+  std::vector<tb::TBInputOp *> input_ops;
+  std::vector<tb::TBInputOp *> output_ops;
+  int num_inputs = 3; // exp_values, max_values, sum_values
+  int num_outputs = 1; // exp_values is also output
+
+  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    if (input_ops.size() < (size_t)num_inputs) {
+      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    } else {
+      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    }
+  }
+  assert(input_ops[1]->output_tensors[0].num_dims == 2);
+  int num_chunks = input_ops[1]->output_tensors[0].dim[1];
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::softmax_reduce_kernel<bfloat16, $>(", num_chunks);
+  code.e("    task_desc.inputs[0].base_ptr,"); // exp_values (also output)
+  code.e("    task_desc.inputs[1].base_ptr,"); // max_values
+  code.e("    task_desc.inputs[2].base_ptr,"); // sum_values
+  code.e("    $);", params[0]); // chunk_size
+  return register_task_variant(TASK_SOFTMAX_REDUCE, code.to_string());
+}
+
 } // namespace runtime
 } // namespace mirage

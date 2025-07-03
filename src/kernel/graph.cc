@@ -438,6 +438,10 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
     task_config[op] = std::make_tuple(2, 1, TASK_ARGMAX_REDUCE, variant_id);
   } else if (name == "allreduce") {
     task_config[op] = std::make_tuple(2, 1, TASK_ALLREDUCE, 0);
+  } else if (name == "softmax") {
+    int variant_id =
+        task_register->register_softmax_task(customized->bgraph, params);
+    task_config[op] = std::make_tuple(1, 1, TASK_SOFTMAX, variant_id);
   } else {
     assert(false && "Unsupported task type");
   }

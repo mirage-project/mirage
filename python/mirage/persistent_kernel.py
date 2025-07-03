@@ -439,6 +439,80 @@ class PersistentKernel:
             tb_graph, "argmax_reduce", [self.argmax_partial_output_size]
         )
 
+    def softmax_layer(
+        self,
+        input: DTensor,
+        output: DTensor,
+        grid_dim: tuple,
+        block_dim: tuple,
+        temperature: float = 1.0,
+    ):
+        # Single-stage softmax for smaller vocab sizes
+        assert input.num_dims == 2  # (batch_size, vocab_size)
+        assert output.num_dims == 2  # (batch_size, vocab_size)
+        assert input.dim(0) == output.dim(0)
+        assert input.dim(1) == output.dim(1)
+        
+        # Convert temperature to int (multiply by 1000 for precision)
+        temp_int = int(temperature * 1000)
+        
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(input, (1, -1, -1), -1, True)
+        tb_graph.new_input(output, (1, -1, -1), -1, True)
+        self.kn_graph.customized([input, output], tb_graph)
+        self.kn_graph.register_task(tb_graph, "softmax", [temp_int])
+
+    def softmax_partial_layer(
+        self,
+        input: DTensor,
+        output: tuple[DTensor, DTensor, DTensor],
+        grid_dim: tuple,
+        block_dim: tuple,
+        temperature: float = 1.0,
+    ):
+        # Stage 1 of two-stage softmax for large vocab sizes
+        assert input.num_dims == 2  # (batch_size, vocab_size)
+        assert len(output) == 3
+        exp_output, max_output, sum_output = output
+        assert exp_output.num_dims == 2  # (batch_size, vocab_size)
+        assert max_output.num_dims == 2  # (batch_size, num_tasks)
+        assert sum_output.num_dims == 2  # (batch_size, num_tasks)
+        
+        num_tasks = grid_dim[0]
+        self.softmax_chunk_size = input.dim(1) // num_tasks
+        temp_int = int(temperature * 1000)
+        
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(input, (1, -1, -1), -1, True)
+        tb_graph.new_input(exp_output, (1, -1, -1), -1, True)
+        tb_graph.new_input(max_output, (1, -1, -1), -1, True)
+        tb_graph.new_input(sum_output, (1, -1, -1), -1, True)
+        self.kn_graph.customized([input, exp_output, max_output, sum_output], tb_graph)
+        self.kn_graph.register_task(tb_graph, "softmax_partial", [temp_int])
+
+    def softmax_reduce_layer(
+        self,
+        input: tuple[DTensor, DTensor, DTensor],
+        output: DTensor,
+        grid_dim: tuple,
+        block_dim: tuple,
+    ):
+        # Stage 2 of two-stage softmax
+        assert len(input) == 3
+        exp_values, max_values, sum_values = input
+        assert exp_values.num_dims == 2  # (batch_size, vocab_size)
+        assert max_values.num_dims == 2  # (batch_size, num_tasks)
+        assert sum_values.num_dims == 2  # (batch_size, num_tasks)
+        assert output.num_dims == 2  # (batch_size, vocab_size)
+        
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(exp_values, (-1, -1, -1), -1, True)
+        tb_graph.new_input(max_values, (-1, -1, -1), -1, True)
+        tb_graph.new_input(sum_values, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output, (-1, -1, -1), -1, True)
+        self.kn_graph.customized([exp_values, max_values, sum_values, output], tb_graph)
+        self.kn_graph.register_task(tb_graph, "softmax_reduce", [self.softmax_chunk_size])
+
     def compile(
         self,
         **kwargs,
