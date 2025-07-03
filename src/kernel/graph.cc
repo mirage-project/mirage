@@ -438,6 +438,21 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
     task_config[op] = std::make_tuple(2, 1, TASK_ARGMAX_REDUCE, variant_id);
   } else if (name == "allreduce") {
     task_config[op] = std::make_tuple(2, 1, TASK_ALLREDUCE, 0);
+  } else if (name == "find_ngram_partial") {
+    int variant_id =
+        task_register->register_find_ngram_partial_task(customized->bgraph,
+                                                         params);
+    task_config[op] = std::make_tuple(1, 1, TASK_FIND_NGRAM_PARTIAL, variant_id);
+  } else if (name == "find_ngram_global") {
+    int variant_id =
+        task_register->register_find_ngram_global_task(customized->bgraph,
+                                                         params);
+    task_config[op] = std::make_tuple(1, 1, TASK_FIND_NGRAM_GLOBAL, variant_id);
+  } else if (name == "target_verify_greedy") {
+    int variant_id =
+        task_register->register_target_verify_greedy_task(customized->bgraph,
+                                                          params);
+    task_config[op] = std::make_tuple(2, 1, TASK_TARGET_VERIFY_GREEDY, variant_id);
   } else {
     assert(false && "Unsupported task type");
   }

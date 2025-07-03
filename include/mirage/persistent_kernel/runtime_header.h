@@ -50,6 +50,9 @@ enum TaskType {
   TASK_ARGMAX = 109,
   TASK_ARGMAX_PARTIAL = 110,
   TASK_ARGMAX_REDUCE = 111,
+  TASK_FIND_NGRAM_PARTIAL = 112,
+  TASK_FIND_NGRAM_GLOBAL = 113,
+  TASK_TARGET_VERIFY_GREEDY = 114,
   TASK_NVSHMEM_COPY = 199,
   TASK_SCHD_TASKS = 200,
   TASK_SCHD_EVENTS = 201,
@@ -118,6 +121,7 @@ struct RuntimeConfig {
   long long *tokens;      // Metadata for LLM serving
   long long eos_token_id; // Metadata for LLM serving
   int max_seq_length;     // Metadata for LLM serving
+  int new_token_num;
   void *profiler_buffer;
   bool verbose;
   bool profiling;

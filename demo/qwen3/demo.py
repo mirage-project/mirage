@@ -17,9 +17,30 @@ def grid_for_rmsnorm_linear_layer(size):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--use-mirage", action="store_true", help="Use Mirage kernels")
+    parser.add_argument("--output-dir", help="Output files directory")
     parser.add_argument(
         "--profiling", action="store_true", help="Use Profiler to generate trace"
     )
+    # lookahead or promptlookup
+    parser.add_argument(
+        "--spec-decode",
+        default=None,
+        choices=["promptlookup", "lookahead"],
+        help="Enable speculative decoding with 'lookahead' or 'promptlookup' mode.",
+    )
+    parser.add_argument(
+        "--ngram-size",
+        default=3,
+        type=int,
+        help="Ngram size for lookahead spec decode",
+    )
+    parser.add_argument(
+        "--spec-length",
+        default=5,
+        type=int,
+        help="Spec length for lookahead spec decode",
+    )
+
     parser.add_argument("--model-path", type=str, default=None, help="Path to a local model (necessary for multi-GPU demo)")
     parser.add_argument(
         "--model", type=str, default='Qwen/Qwen3-8B', help="Model path on hugging face"
@@ -125,6 +146,21 @@ if __name__ == "__main__":
             ).contiguous()
         else:
             profiler_tensor = None
+            
+        spec_decode_config = mi.speculative.spec_decode_class(
+            args.spec_decode,
+            ngram_size=args.ngram_size,
+            spec_length=args.spec_length,
+        )
+        if spec_decode_config.method == "promptlookup":
+            all_tokens = mpk.attach_input(torch_tensor=tokens, name="all_tokens")
+            argmax_batch_size = batch_size * (spec_decode_config.spec_length + 1)
+            num_tokens_extend = spec_decode_config.spec_length + 1
+        else:
+            argmax_batch_size = batch_size
+            num_tokens_extend = 1
+        total_tokens_per_iter = batch_size * num_tokens_extend
+            
         num_workers, num_schedulers = mi.get_configurations_from_gpu(rank)
         mpk = mi.PersistentKernel(
             world_size=world_size,
@@ -136,7 +172,9 @@ if __name__ == "__main__":
             eos_token_id=model.config.eos_token_id,
             meta_tensors=[step, tokens],
             profiler_tensor=profiler_tensor,
+            spec_decode_config=spec_decode_config,
         )
+        
         x = mpk.attach_input(torch_tensor=input_tokens, name="input_token")
         cos_pos_embed = mpk.attach_input(
             torch_tensor=position_embeddings[0][0, :4096, :],
@@ -146,91 +184,107 @@ if __name__ == "__main__":
             torch_tensor=position_embeddings[1][0, :4096, :],
             name="sin_position_embedding",
         )
+
         y = mpk.new_tensor(
-            dims=(batch_size, hidden_size),
+            dims=(total_tokens_per_iter, hidden_size),
             dtype=mi.bfloat16,
             name="embed_out",
             io_category="cuda_tensor",
         )
         attn_in = mpk.new_tensor(
-            dims=(batch_size, fused_outdim_1 // world_size),
+            dims=(total_tokens_per_iter, fused_outdim_1 // world_size),
             dtype=mi.bfloat16,
             name="attn_in",
             io_category="cuda_tensor",
         )
         attn_out = mpk.new_tensor(
-            dims=(batch_size, num_local_q_heads * head_dim),
+            dims=(total_tokens_per_iter, num_local_q_heads * head_dim),
             dtype=mi.bfloat16,
             name="attn_out",
             io_category="cuda_tensor",
         )
         attn_proj_out = mpk.new_tensor(
-            dims=(batch_size, hidden_size),
+            dims=(total_tokens_per_iter, hidden_size),
             dtype=mi.bfloat16,
             name="attn_proj_out",
             io_category="nvshmem_tensor" if world_size > 1 else "cuda_tensor",
         )
         allreduce_buf = mpk.new_tensor(
-            dims=(world_size, batch_size, hidden_size),
+            dims=(world_size, total_tokens_per_iter, hidden_size),
             dtype=mi.bfloat16,
             name="all_reduce_buf",
             io_category="nvshmem_tensor" if world_size > 1 else "cuda_tensor",
         )
         attn_allreduce_out = mpk.new_tensor(
-            dims=(batch_size, hidden_size),
+            dims=(total_tokens_per_iter, hidden_size),
             dtype=mi.bfloat16,
             name="attn_allreduce_out",
             io_category="nvshmem_tensor" if world_size > 1 else "cuda_tensor",
         )
         mlp_mid = mpk.new_tensor(
-            dims=(batch_size, fused_outdim_2 // world_size),
+            dims=(total_tokens_per_iter, fused_outdim_2 // world_size),
             dtype=mi.bfloat16,
             name="mlp_mid",
             io_category="cuda_tensor",
         )
         mlp_out = mpk.new_tensor(
-            dims=(batch_size, hidden_size),
+            dims=(total_tokens_per_iter, hidden_size),
             dtype=mi.bfloat16,
             name="mlp_out",
             io_category="nvshmem_tensor" if world_size > 1 else "cuda_tensor",
         )
         mlp_final = mpk.new_tensor(
-            dims=(batch_size, hidden_size),
+            dims=(total_tokens_per_iter, hidden_size),
             dtype=mi.bfloat16,
             name="mlp_final",
             io_category="nvshmem_tensor" if world_size > 1 else "cuda_tensor",
         )
+
         argmax_in = mpk.new_tensor(
-            dims=(batch_size, vocab_size),
+            dims=(total_tokens_per_iter, vocab_size),
             dtype=mi.bfloat16,
             name="argmax_in",
             io_category="cuda_tensor",
         )
         argmax_part_value = mpk.new_tensor(
-            dims=(batch_size, 96),
+            dims=(total_tokens_per_iter, 96 // (batch_size * num_tokens_extend)),
             dtype=mi.bfloat16,
             name="argmax_part_value",
             io_category="cuda_tensor",
         )
         argmax_part_index = mpk.new_tensor(
-            dims=(batch_size, 96),
+            dims=(total_tokens_per_iter, 96 // (batch_size * num_tokens_extend)),
             dtype=mi.int64,
             name="argmax_part_index",
             io_category="cuda_tensor",
         )
         argmax_out = mpk.new_tensor(
-            dims=(batch_size, 1),
+            dims=(1, total_tokens_per_iter),
             dtype=mi.int64,
             name="argmax_out",
             io_category="cuda_tensor",
         )
 
+        # add spec tokens layer
+        if spec_decode_config:
+            spec_tokens = mpk.draft_forward_layer_dispatcher(
+                spec_decode_config = spec_decode_config, 
+                tokens = all_tokens,
+                grid_dim=(96, 1, 1),
+                block_dim=(128, 1, 1),
+            )
+            x = spec_tokens
         # Add Embed
         w = mpk.attach_input(
             torch_tensor=model.model.embed_tokens.weight, name="embed_tokens"
         )
+        
         mpk.embed_layer(
-            input=x, weight=w, output=y, grid_dim=(1, 1, 1), block_dim=(128, 1, 1)
+            input=x, 
+            weight=w, 
+            output=y, 
+            grid_dim=(96 // total_tokens_per_iter, total_tokens_per_iter, 1), 
+            block_dim=(128, 1, 1)
         )
         x = y
         for i, layer in enumerate(model.model.layers):
@@ -284,7 +338,7 @@ if __name__ == "__main__":
                 cos_pos_embed=cos_pos_embed,
                 sin_pos_embed=sin_pos_embed,
                 output=attn_out,
-                grid_dim=(batch_size, num_local_kv_heads, 1),
+                grid_dim=(total_tokens_per_iter, num_local_kv_heads, 1),
                 block_dim=(128, 1, 1),
             )
             # add linear w/ residual
@@ -374,18 +428,33 @@ if __name__ == "__main__":
             block_dim=(128, 1, 1),
         )
         # add argmax layer
+        if spec_decode_config.method == "promptlookup":
+            argmax_partial_grid_dim = (96 // spec_decode_config.spec_length, spec_decode_config.spec_length + 1, 1)
+            argmax_reduce_grid_dim = (1, spec_decode_config.spec_length + 1, 1)
+        else:
+            argmax_partial_grid_dim = (96, 1, 1)
+            argmax_reduce_grid_dim = (1, 1, 1)
         mpk.argmax_partial_layer(
             input=argmax_in,
             output=(argmax_part_value, argmax_part_index),
-            grid_dim=(96, 1, 1),
+            grid_dim=argmax_partial_grid_dim,
             block_dim=(128, 1, 1),
         )
         mpk.argmax_reduce_layer(
             input=(argmax_part_value, argmax_part_index),
             output=argmax_out,
-            grid_dim=(1, 1, 1),
+            grid_dim=argmax_reduce_grid_dim,
             block_dim=(128, 1, 1),
         )
+        if args.spec_decode:
+            # TODO:(Jianan Ji) Align the output of argmax_reduce with the spec tokens
+            verify_out = mpk.verify_layer_dispatcher(
+                spec_decode = args.spec_decode,
+                spec_tokens = spec_tokens,
+                target_output = argmax_out,
+                grid_dim = (1, 1, 1),
+                block_dim = (128, 1, 1),
+            )
 
         results = mpk.kn_graph.generate_task_graph(num_gpus=world_size, my_gpu_id=rank)
         with open(f"task_graph_{rank}.json", "w") as f:
@@ -393,7 +462,7 @@ if __name__ == "__main__":
         with open(f"kernel_{rank}.cu", "w") as f:
             f.write(results["cuda_code"])
 
-        mpk.compile()
+        mpk.compile(output_dir=args.output_dir)
 
     # g = torch.cuda.CUDAGraph()
     stream = torch.cuda.Stream()
@@ -453,7 +522,7 @@ if __name__ == "__main__":
         starter.record()
 
         step.fill_(prompt_len)
-        mpk()
+        mpk(output_dir="output")
 
         ender.record()
         torch.cuda.synchronize()

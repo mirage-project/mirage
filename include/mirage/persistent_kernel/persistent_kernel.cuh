@@ -78,7 +78,7 @@ __global__ void init_kernel(RuntimeConfig config) {
 __device__ __forceinline__ bool
     prepare_next_batch(RuntimeConfig const &config) {
   int step = config.step[0];
-  config.step[0] = step + 1;
+  config.step[0] = step + config.new_token_num;
   if ((step + 2 >= config.max_seq_length) || (config.profiling) ||
       (config.tokens[step + 1] == config.eos_token_id)) {
     return false;
@@ -776,6 +776,7 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
   global_runtime_config.num_graphs = 1;
   global_runtime_config.verbose = false;
   global_runtime_config.profiling = profiler_buffer != nullptr;
+  global_runtime_config.new_token_num = 1;
 
   std::vector<TaskDesc> all_tasks;
   std::vector<EventDesc> all_events;
