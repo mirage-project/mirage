@@ -152,6 +152,15 @@ if __name__ == "__main__":
             ngram_size=args.ngram_size,
             spec_length=args.spec_length,
         )
+        if spec_decode_config.method == "promptlookup":
+            all_tokens = mpk.attach_input(torch_tensor=tokens, name="all_tokens")
+            argmax_batch_size = batch_size * (spec_decode_config.spec_length + 1)
+            num_tokens_extend = spec_decode_config.spec_length + 1
+        else:
+            argmax_batch_size = batch_size
+            num_tokens_extend = 1
+        total_tokens_per_iter = batch_size * num_tokens_extend
+            
         num_workers, num_schedulers = mi.get_configurations_from_gpu(rank)
         mpk = mi.PersistentKernel(
             world_size=world_size,
@@ -165,8 +174,7 @@ if __name__ == "__main__":
             profiler_tensor=profiler_tensor,
             spec_decode_config=spec_decode_config,
         )
-        if args.spec_decode == "promptlookup":
-            all_tokens = mpk.attach_input(torch_tensor=tokens, name="all_tokens")
+        
         x = mpk.attach_input(torch_tensor=input_tokens, name="input_token")
         cos_pos_embed = mpk.attach_input(
             torch_tensor=position_embeddings[0][0, :4096, :],
@@ -176,89 +184,82 @@ if __name__ == "__main__":
             torch_tensor=position_embeddings[1][0, :4096, :],
             name="sin_position_embedding",
         )
-        if spec_decode_config:
-            # Currently assume batch size is 1
-            y_dims = (spec_decode_config.spec_length + 1, hidden_size)
-        else:
-            y_dims = (batch_size, hidden_size)
+
         y = mpk.new_tensor(
-            dims=y_dims,
+            dims=(total_tokens_per_iter, hidden_size),
             dtype=mi.bfloat16,
             name="embed_out",
             io_category="cuda_tensor",
         )
         attn_in = mpk.new_tensor(
-            dims=(batch_size, fused_outdim_1 // world_size),
+            dims=(total_tokens_per_iter, fused_outdim_1 // world_size),
             dtype=mi.bfloat16,
             name="attn_in",
             io_category="cuda_tensor",
         )
         attn_out = mpk.new_tensor(
-            dims=(batch_size, num_local_q_heads * head_dim),
+            dims=(total_tokens_per_iter, num_local_q_heads * head_dim),
             dtype=mi.bfloat16,
             name="attn_out",
             io_category="cuda_tensor",
         )
         attn_proj_out = mpk.new_tensor(
-            dims=(batch_size, hidden_size),
+            dims=(total_tokens_per_iter, hidden_size),
             dtype=mi.bfloat16,
             name="attn_proj_out",
             io_category="nvshmem_tensor" if world_size > 1 else "cuda_tensor",
         )
         allreduce_buf = mpk.new_tensor(
-            dims=(world_size, batch_size, hidden_size),
+            dims=(world_size, total_tokens_per_iter, hidden_size),
             dtype=mi.bfloat16,
             name="all_reduce_buf",
             io_category="nvshmem_tensor" if world_size > 1 else "cuda_tensor",
         )
         attn_allreduce_out = mpk.new_tensor(
-            dims=(batch_size, hidden_size),
+            dims=(total_tokens_per_iter, hidden_size),
             dtype=mi.bfloat16,
             name="attn_allreduce_out",
             io_category="nvshmem_tensor" if world_size > 1 else "cuda_tensor",
         )
         mlp_mid = mpk.new_tensor(
-            dims=(batch_size, fused_outdim_2 // world_size),
+            dims=(total_tokens_per_iter, fused_outdim_2 // world_size),
             dtype=mi.bfloat16,
             name="mlp_mid",
             io_category="cuda_tensor",
         )
         mlp_out = mpk.new_tensor(
-            dims=(batch_size, hidden_size),
+            dims=(total_tokens_per_iter, hidden_size),
             dtype=mi.bfloat16,
             name="mlp_out",
             io_category="nvshmem_tensor" if world_size > 1 else "cuda_tensor",
         )
         mlp_final = mpk.new_tensor(
-            dims=(batch_size, hidden_size),
+            dims=(total_tokens_per_iter, hidden_size),
             dtype=mi.bfloat16,
             name="mlp_final",
             io_category="nvshmem_tensor" if world_size > 1 else "cuda_tensor",
         )
-        if spec_decode_config.method == "promptlookup":
-            argmax_batch_size = batch_size * (spec_decode_config.spec_length + 1)
-        else:
-            argmax_batch_size = batch_size
+
         argmax_in = mpk.new_tensor(
-            dims=(argmax_batch_size, vocab_size),
+            dims=(total_tokens_per_iter, vocab_size),
             dtype=mi.bfloat16,
             name="argmax_in",
             io_category="cuda_tensor",
         )
         argmax_part_value = mpk.new_tensor(
-            dims=(argmax_batch_size, 96 // argmax_batch_size),
+            dims=(total_tokens_per_iter, 96 // (batch_size * num_tokens_extend)),
             dtype=mi.bfloat16,
             name="argmax_part_value",
             io_category="cuda_tensor",
         )
         argmax_part_index = mpk.new_tensor(
-            dims=(argmax_batch_size, 96 // argmax_batch_size),
+            dims=(total_tokens_per_iter, 96 // (batch_size * num_tokens_extend)),
             dtype=mi.int64,
             name="argmax_part_index",
             io_category="cuda_tensor",
         )
         argmax_out = mpk.new_tensor(
-            dims=(1, argmax_batch_size),
+            dims=(1, total_tokens_per_iter),
             dtype=mi.int64,
             name="argmax_out",
             io_category="cuda_tensor",
@@ -278,15 +279,11 @@ if __name__ == "__main__":
             torch_tensor=model.model.embed_tokens.weight, name="embed_tokens"
         )
         
-        embed_grid_dim = (1, 1, 1)
-        if spec_decode_config:
-            embed_grid_dim = (96 // spec_decode_config.spec_length, spec_decode_config.spec_length + 1, 1)
-
         mpk.embed_layer(
             input=x, 
             weight=w, 
             output=y, 
-            grid_dim=embed_grid_dim, 
+            grid_dim=(96 // total_tokens_per_iter, total_tokens_per_iter, 1), 
             block_dim=(128, 1, 1)
         )
         x = y
@@ -341,7 +338,7 @@ if __name__ == "__main__":
                 cos_pos_embed=cos_pos_embed,
                 sin_pos_embed=sin_pos_embed,
                 output=attn_out,
-                grid_dim=(batch_size, num_local_kv_heads, 1),
+                grid_dim=(total_tokens_per_iter, num_local_kv_heads, 1),
                 block_dim=(128, 1, 1),
             )
             # add linear w/ residual
