@@ -132,6 +132,7 @@ try:
             "-DZ3_LIBRARIES=" + path.join(z3_path, "lib", "libz3.so"),
             "-DCMAKE_C_COMPILER=" + os.environ["CC"],
             "-DCMAKE_CXX_COMPILER=" + os.environ["CXX"],
+            "-DCMAKE_CUDA_ARCHITECTURES=70;75;80;86;89;90",
         ],
         cwd=build_dir,
         env=os.environ.copy(),

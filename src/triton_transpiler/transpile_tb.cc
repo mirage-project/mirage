@@ -74,6 +74,16 @@ string operator_type_to_triton(type::TBOperatorType type) {
       return "tl.sigmoid";
     case type::TB_SQRT_OP:
       return "tl.sqrt";
+    case type::TB_GELU_OP:
+      return "tl.gelu";
+    case type::TB_SIN_OP:
+      return "tl.sin";
+    case type::TB_COS_OP:
+      return "tl.cos";
+    case type::TB_RELU_OP:
+      return "tl.relu";
+    case type::TB_CLAMP_OP:
+      return "tl.clamp";
     case type::TB_SQUARE_OP:
       return "tl.square";
     case type::TB_DIV_OP:
@@ -339,7 +349,12 @@ TritonCustomOPTranspileResult
 
       case type::TB_EXP_OP:
       case type::TB_SILU_OP:
-      case type::TB_SQRT_OP: {
+      case type::TB_GELU_OP:
+      case type::TB_SIN_OP:
+      case type::TB_COS_OP:
+      case type::TB_SQRT_OP:
+      case type::TB_RELU_OP:
+      case type::TB_CLAMP_OP: {
         tb::STensor const &input = tb_op->input_tensors.at(0);
         tb::STensor const &output = tb_op->output_tensors.at(0);
         assert(input.num_dims == output.num_dims);
@@ -512,7 +527,12 @@ TritonCustomOPTranspileResult
 
       case type::TB_EXP_OP:
       case type::TB_SILU_OP:
-      case type::TB_SQRT_OP: {
+      case type::TB_GELU_OP:
+      case type::TB_SIN_OP:
+      case type::TB_COS_OP:
+      case type::TB_SQRT_OP:
+      case type::TB_RELU_OP:
+      case type::TB_CLAMP_OP: {
         tb::STensor const &input = tb_op->input_tensors.at(0);
         tb::STensor const &output = tb_op->output_tensors.at(0);
 

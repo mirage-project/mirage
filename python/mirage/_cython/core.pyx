@@ -717,6 +717,16 @@ cdef class CyKNGraph:
         t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
         return DTensor(t)
     
+    def sin(self, DTensor input):
+        cdef CppDTensor* ptr = self.p_kgraph.sin(input.c_ptr)
+        t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
+        return DTensor(t)
+    
+    def cos(self, DTensor input):
+        cdef CppDTensor* ptr = self.p_kgraph.cos(input.c_ptr)
+        t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
+        return DTensor(t)
+    
     def relu(self, DTensor input):
         cdef CppDTensor* ptr = self.p_kgraph.relu(input.c_ptr)
         t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
@@ -1004,6 +1014,16 @@ cdef class CyTBGraph:
     
     def gelu(self, STensor A):
         cdef CppSTensor* ptr = self.p_bgraph.gelu(A.c_ptr)
+        t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
+        return STensor(t)
+    
+    def sin(self, STensor A):
+        cdef CppSTensor* ptr = self.p_bgraph.sin(A.c_ptr)
+        t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
+        return STensor(t)
+    
+    def cos(self, STensor A):
+        cdef CppSTensor* ptr = self.p_bgraph.cos(A.c_ptr)
         t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
         return STensor(t)
     

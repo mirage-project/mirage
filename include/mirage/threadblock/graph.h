@@ -83,6 +83,10 @@ public:
   STensor *silu(STensor const *A);
   STensor gelu(STensor const &A);
   STensor *gelu(STensor const *A);
+  STensor sin(STensor const &A);
+  STensor *sin(STensor const *A);
+  STensor cos(STensor const &A);
+  STensor *cos(STensor const *A);
   STensor relu(STensor const &A);
   STensor *relu(STensor const *A);
   STensor clamp(STensor const &A, float const &min_val, float const &max_val);

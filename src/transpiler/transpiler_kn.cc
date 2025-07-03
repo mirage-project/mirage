@@ -133,6 +133,10 @@ static string get_kn_op_str(type::KNOperatorType type) {
         return "SILU";
       case type::KN_GELU_OP:
         return "GELU";
+      case type::KN_SIN_OP:
+        return "SIN";
+      case type::KN_COS_OP:
+        return "COS";
       case type::KN_SQUARE_OP:
         return "SQUARE";
       case type::KN_SQRT_OP:
@@ -254,6 +258,8 @@ TranspileResult Transpiler::transpile_ugraph() {
       case type::KNOperatorType::KN_EXP_OP:
       case type::KNOperatorType::KN_SILU_OP:
       case type::KNOperatorType::KN_GELU_OP:
+      case type::KNOperatorType::KN_SIN_OP:
+      case type::KNOperatorType::KN_COS_OP:
       case type::KNOperatorType::KN_RELU_OP:
       case type::KNOperatorType::KN_CLAMP_OP:
       case type::KNOperatorType::KN_SQUARE_OP:

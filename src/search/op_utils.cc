@@ -22,6 +22,8 @@ bool is_unary(type::TBOperatorType op) {
       type::TBOperatorType::TB_SQRT_OP,
       type::TBOperatorType::TB_SILU_OP,
       type::TBOperatorType::TB_GELU_OP,
+      type::TBOperatorType::TB_SIN_OP,
+      type::TBOperatorType::TB_COS_OP,
       type::TBOperatorType::TB_RELU_OP,
       type::TBOperatorType::TB_CLAMP_OP,
       type::TBOperatorType::TB_RMS_NORM_OP,
@@ -63,6 +65,8 @@ bool is_unary(type::KNOperatorType op) {
       type::KNOperatorType::KN_CLAMP_OP,
       type::KNOperatorType::KN_RMS_NORM_OP,
       type::KNOperatorType::KN_OUTPUT_OP,
+      type::KNOperatorType::KN_SIN_OP,
+      type::KNOperatorType::KN_COS_OP,
   };
   return contains(true_values, op);
 }
@@ -125,6 +129,10 @@ std::shared_ptr<AbstractExpr> get_pattern(type::KNOperatorType op,
       return std::make_shared<Sqrt>(opd);
     case type::KNOperatorType::KN_GELU_OP:
       return std::make_shared<Gelu>(opd);
+    case type::KNOperatorType::KN_SIN_OP:
+      return std::make_shared<Sin>(opd);
+    case type::KNOperatorType::KN_COS_OP:
+      return std::make_shared<Cos>(opd);
     case type::KNOperatorType::KN_RELU_OP:
       return std::make_shared<Relu>(opd);
     case type::KNOperatorType::KN_CLAMP_OP:
@@ -157,6 +165,10 @@ std::shared_ptr<AbstractExpr> get_pattern(type::TBOperatorType op,
       return std::make_shared<Silu>(opd);
     case type::TBOperatorType::TB_GELU_OP:
       return std::make_shared<Gelu>(opd);
+    case type::TBOperatorType::TB_SIN_OP:
+      return std::make_shared<Sin>(opd);
+    case type::TBOperatorType::TB_COS_OP:
+      return std::make_shared<Cos>(opd);
     case type::TBOperatorType::TB_RELU_OP:
       return std::make_shared<Relu>(opd);
     case type::TBOperatorType::TB_CLAMP_OP:
@@ -385,6 +397,8 @@ TBOperator *create_op(threadblock::Graph &g,
     case type::TBOperatorType::TB_SQRT_OP:
     case type::TBOperatorType::TB_SILU_OP:
     case type::TBOperatorType::TB_GELU_OP:
+    case type::TBOperatorType::TB_SIN_OP:
+    case type::TBOperatorType::TB_COS_OP:
     case type::TBOperatorType::TB_RELU_OP:
       return g.create_elementunary_op(input, type);
     case type::TBOperatorType::TB_CLAMP_OP:

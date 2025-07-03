@@ -50,6 +50,12 @@ string ugraph_tboperator_type_to_nki(const ty::TBOperatorType type) {
       return "nl.square";
     case ty::TB_SQRT_OP:
       return "nl.sqrt";
+    case ty::TB_GELU_OP:
+      return "nl.gelu";
+    case ty::TB_SIN_OP:
+      return "nl.sin";
+    case ty::TB_COS_OP:
+      return "nl.cos";
     case ty::TB_RELU_OP:
       return "nl.relu";
     case ty::TB_CLAMP_OP:
@@ -78,6 +84,12 @@ string ugraph_knoperator_type_to_nki(const ty::KNOperatorType type) {
       return "nl.square";
     case ty::KN_SQRT_OP:
       return "nl.sqrt";
+    case ty::KN_GELU_OP:
+      return "nl.gelu";
+    case ty::KN_SIN_OP:
+      return "nl.sin";
+    case ty::KN_COS_OP:
+      return "nl.cos";
     case ty::KN_RELU_OP:
       return "nl.relu";
     case ty::KN_CLAMP_OP:
@@ -438,8 +450,13 @@ NKICustomOPTranspileResult
       }
       case type::TB_EXP_OP:
       case type::TB_SILU_OP:
+      case type::TB_GELU_OP:
+      case type::TB_SIN_OP:
+      case type::TB_COS_OP:
       case type::TB_SQUARE_OP:
       case type::TB_SQRT_OP:
+      case type::TB_RELU_OP:
+      case type::TB_CLAMP_OP:
       case type::TB_MUL_SCALAR_OP: {
         tb::STensor const &input = tb_op->input_tensors.at(0);
         tb::STensor const &output = tb_op->output_tensors.at(0);
@@ -619,6 +636,9 @@ NKICustomOPTranspileResult
       }
       case type::TB_EXP_OP:
       case type::TB_SILU_OP:
+      case type::TB_GELU_OP:
+      case type::TB_SIN_OP:
+      case type::TB_COS_OP:
       case type::TB_SQUARE_OP:
       case type::TB_SQRT_OP:
       case type::TB_RELU_OP:

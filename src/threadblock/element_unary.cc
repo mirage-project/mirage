@@ -60,6 +60,22 @@ STensor *Graph::gelu(STensor const *input) {
   return elementunary(input, mirage::type::TB_GELU_OP);
 }
 
+STensor Graph::sin(STensor const &input) {
+  return elementunary(input, mirage::type::TB_SIN_OP);
+}
+
+STensor *Graph::sin(STensor const *input) {
+  return elementunary(input, mirage::type::TB_SIN_OP);
+}
+
+STensor Graph::cos(STensor const &input) {
+  return elementunary(input, mirage::type::TB_COS_OP);
+}
+
+STensor *Graph::cos(STensor const *input) {
+  return elementunary(input, mirage::type::TB_COS_OP);
+}
+
 STensor Graph::relu(STensor const &input) {
   return elementunary(input, mirage::type::TB_RELU_OP);
 }
