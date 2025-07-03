@@ -63,6 +63,22 @@ DTensor *Graph::gelu(DTensor const *input) {
   return elementunary(input, mirage::type::KN_GELU_OP);
 }
 
+DTensor Graph::sin(DTensor const &input) {
+  return elementunary(input, mirage::type::KN_SIN_OP);
+}
+
+DTensor *Graph::sin(DTensor const *input) {
+  return elementunary(input, mirage::type::KN_SIN_OP);
+}
+
+DTensor Graph::cos(DTensor const &input) {
+  return elementunary(input, mirage::type::KN_COS_OP);
+}
+
+DTensor *Graph::cos(DTensor const *input) {
+  return elementunary(input, mirage::type::KN_COS_OP);
+}
+
 DTensor Graph::relu(DTensor const &input) {
   return elementunary(input, mirage::type::KN_RELU_OP);
 }

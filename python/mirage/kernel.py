@@ -243,6 +243,12 @@ class KNGraph:
     def gelu(self, A: DTensor):
         return self.cygraph.gelu(A)
 
+    def sin(self, A: DTensor):
+        return self.cygraph.sin(A)
+
+    def cos(self, A: DTensor):
+        return self.cygraph.cos(A)
+
     def relu(self, A: DTensor):
         return self.cygraph.relu(A)
 

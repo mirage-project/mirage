@@ -71,6 +71,10 @@ public:
   DTensor *silu(DTensor const *input);
   DTensor gelu(DTensor const &input);
   DTensor *gelu(DTensor const *input);
+  DTensor sin(DTensor const &input);
+  DTensor *sin(DTensor const *input);
+  DTensor cos(DTensor const &input);
+  DTensor *cos(DTensor const *input);
   DTensor relu(DTensor const &input);
   DTensor *relu(DTensor const *input);
   DTensor

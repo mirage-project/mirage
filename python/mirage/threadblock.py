@@ -29,6 +29,12 @@ class TBGraph:
     def gelu(self, A: STensor):
         return self.cygraph.gelu(A)
 
+    def sin(self, A: STensor):
+        return self.cygraph.sin(A)
+
+    def cos(self, A: STensor):
+        return self.cygraph.cos(A)
+
     def relu(self, A: STensor):
         return self.cygraph.relu(A)
 

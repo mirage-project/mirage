@@ -96,6 +96,28 @@ inline __device__ FPType compute_gelu_fingerprint(FPType input,
   return result;
 }
 
+inline __device__ FPType compute_sin_fingerprint(FPType input) {
+  // Simple approximation: use the input modulo some value to simulate sin behavior
+  uint32_t q_residual = input % FP_Q;
+  uint32_t p_residual = input % FP_P;
+  // Simulate sin by using some transformation of the input
+  q_residual = (q_residual * 7) % FP_Q;  // Simple transformation
+  p_residual = (p_residual * 7) % FP_P;
+  uint32_t z = p_residual * FP_Q_MUL_P_MOD_1 + q_residual * FP_P_MUL_Q_MOD_1;
+  return z % FP_PQ;
+}
+
+inline __device__ FPType compute_cos_fingerprint(FPType input) {
+  // Simple approximation: use the input modulo some value to simulate cos behavior
+  uint32_t q_residual = input % FP_Q;
+  uint32_t p_residual = input % FP_P;
+  // Simulate cos by using some transformation of the input (different from sin)
+  q_residual = (q_residual * 11) % FP_Q;  // Different transformation
+  p_residual = (p_residual * 11) % FP_P;
+  uint32_t z = p_residual * FP_Q_MUL_P_MOD_1 + q_residual * FP_P_MUL_Q_MOD_1;
+  return z % FP_PQ;
+}
+
 inline __device__ FPType compute_clamp_fingerprint(FPType input) {
   // We use min(max(FP_Q/3, input), FP_Q*2/3) to approximate clamp
   // Note that we ignore the input arguments to clamp
