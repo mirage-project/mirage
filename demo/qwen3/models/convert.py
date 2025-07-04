@@ -74,6 +74,9 @@ def main(hf_ckpt_path, save_path, mp):
         new_file_path = os.path.join(save_path, os.path.basename(file_path))
         shutil.copyfile(file_path, new_file_path)
 
+    for file_path in glob(os.path.join(hf_ckpt_path, "*config*")):
+        new_file_path = os.path.join(save_path, os.path.basename(file_path))
+        shutil.copyfile(file_path, new_file_path)
 
 if __name__ == "__main__":
     parser = ArgumentParser()

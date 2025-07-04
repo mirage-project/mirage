@@ -162,7 +162,7 @@ public:
                         int num_groups,
                         char const *name);
   void register_task(char const *task_type, std::vector<int> params);
-  runtime::TaskGraphResult generate_task_graph(int num_gpus);
+  runtime::TaskGraphResult generate_task_graph(int num_gpus, int my_gpu_id);
 
   // helper functions
   int get_num_input_dtensors() const;

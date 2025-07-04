@@ -49,15 +49,15 @@ int TaskRegister::register_task_variant(runtime::TaskType type,
 
 int TaskRegister::register_embedding_task(threadblock::Graph const &bgraph,
                                           std::vector<int> const &params) {
-  assert(params.size() == 0);
+  assert(params.size() == 1);
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
-  code.e("kernel::embedding_kernel<bfloat16>(");
+  code.e("kernel::embedding_kernel<bfloat16, $>(", params[0]);
   code.e("    task_desc.inputs[0].base_ptr,");
   code.e("    task_desc.inputs[1].base_ptr,");
   code.e("    task_desc.outputs[0].base_ptr,");
-  code.e("    step[0],");
-  code.e("    tokens);");
+  code.e("    runtime_config.step[0],");
+  code.e("    runtime_config.tokens);");
   return register_task_variant(TASK_EMBEDDING, code.to_string());
 }
 
@@ -149,7 +149,7 @@ int TaskRegister::register_attention_task(threadblock::Graph const &bgraph,
   code.e("    task_desc.inputs[1].base_ptr,");
   code.e("    task_desc.inputs[2].base_ptr,");
   code.e("    task_desc.outputs[0].base_ptr,");
-  code.e("    step[0],");
+  code.e("    runtime_config.step[0],");
   code.e("    $,", params[2] > 0);
   code.e("    $,", params[3] > 0);
   code.e("    task_desc.inputs[3].base_ptr,");
@@ -200,7 +200,8 @@ int TaskRegister::register_silu_mul_linear_with_residual_task(
   code.e("    task_desc.inputs[0].base_ptr,");
   code.e("    task_desc.inputs[1].base_ptr,");
   code.e("    task_desc.inputs[2].base_ptr,");
-  code.e("    task_desc.outputs[0].base_ptr);");
+  code.e("    task_desc.outputs[0].base_ptr,");
+  code.e("    runtime_config.my_gpu_id == 0);");
   return register_task_variant(TASK_SILU_MUL_LINEAR_WITH_RESIDUAL,
                                code.to_string());
 }
@@ -244,7 +245,8 @@ int TaskRegister::register_linear_with_residual_task(
   code.e("    task_desc.inputs[0].base_ptr,");
   code.e("    task_desc.inputs[1].base_ptr,");
   code.e("    task_desc.inputs[2].base_ptr,");
-  code.e("    task_desc.outputs[0].base_ptr);");
+  code.e("    task_desc.outputs[0].base_ptr,");
+  code.e("    runtime_config.my_gpu_id == 0);");
   return register_task_variant(TASK_LINEAR_WITH_RESIDUAL, code.to_string());
 }
 
@@ -304,8 +306,8 @@ int TaskRegister::register_argmax_reduce_task(threadblock::Graph const &bgraph,
   code.e("    task_desc.inputs[0].base_ptr,");
   code.e("    task_desc.inputs[1].base_ptr,");
   code.e("    task_desc.outputs[0].base_ptr,");
-  code.e("    step[0],");
-  code.e("    tokens);");
+  code.e("    runtime_config.step[0],");
+  code.e("    runtime_config.tokens);");
   return register_task_variant(TASK_ARGMAX_REDUCE, code.to_string());
 }
 

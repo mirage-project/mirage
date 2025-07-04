@@ -20,7 +20,6 @@ namespace kernel {
 
 using bfloat16 = type::bfloat16_t;
 
-constexpr int NUM_THREADS = 128;
 // reduction on dim 0
 template <typename SMEM_DST, typename SMEM_SRC>
 static __device__ __forceinline__ void reduction_sum_row(SMEM_DST dst,
@@ -28,7 +27,7 @@ static __device__ __forceinline__ void reduction_sum_row(SMEM_DST dst,
 
   static constexpr int REDUCTION_FACTOR = SMEM_SRC::ROW;
   for (int dst_elem_idx = threadIdx.x; dst_elem_idx < SMEM_DST::size();
-       dst_elem_idx += NUM_THREADS) {
+       dst_elem_idx += blockDim.x) {
     float result = 0;
     int dst_col = dst_elem_idx % SMEM_DST::COL;
 
@@ -49,7 +48,7 @@ static __device__ __forceinline__ void
     reduction_sum_row(SMEM_DST dst, SMEM_SRC src, float const *scalars) {
   static constexpr int REDUCTION_FACTOR = SMEM_SRC::ROW;
   for (int dst_elem_idx = threadIdx.x; dst_elem_idx < SMEM_DST::size();
-       dst_elem_idx += NUM_THREADS) {
+       dst_elem_idx += blockDim.x) {
     float result = 0;
     int dst_col = dst_elem_idx % SMEM_DST::COL;
 
@@ -69,7 +68,7 @@ static __device__ __forceinline__ void reduction_sum_col(SMEM_DST dst,
                                                          SMEM_SRC src) {
   static constexpr int REDUCTION_FACTOR = SMEM_SRC::COL;
   for (int dst_elem_idx = threadIdx.x; dst_elem_idx < SMEM_DST::size();
-       dst_elem_idx += NUM_THREADS) {
+       dst_elem_idx += blockDim.x) {
     // TODO xinhaoc make this result float32
     float result = 0.0f;
     int dst_row = dst_elem_idx / SMEM_DST::COL;
@@ -91,7 +90,7 @@ static __device__ __forceinline__ void
     reduction_sum_col(SMEM_DST dst, SMEM_SRC src, float const *scalars) {
   static constexpr int REDUCTION_FACTOR = SMEM_SRC::COL;
   for (int dst_elem_idx = threadIdx.x; dst_elem_idx < SMEM_DST::size();
-       dst_elem_idx += NUM_THREADS) {
+       dst_elem_idx += blockDim.x) {
     // TODO xinhaoc make this result float32
     float result = 0.0f;
     int dst_row = dst_elem_idx / SMEM_DST::COL;
@@ -102,6 +101,35 @@ static __device__ __forceinline__ void
     result = perform_element_unary_chain<float, FirstOp, RemainingOps...>(
         result, scalars, 0);
     dst.at(dst_elem_idx) = bfloat16(result);
+  }
+}
+
+// Assume that input/buffer/output have the same stride
+template <typename T>
+__device__ __forceinline__ void reduction_kernel(void const *input_ptr,
+                                                 void const *buf_ptr,
+                                                 void *output_ptr,
+                                                 int num_gpus,
+                                                 int my_gpu_id,
+                                                 int batch_size,
+                                                 int output_size,
+                                                 int stride) {
+  T const *__restrict__ d_input = static_cast<T const *>(input_ptr);
+  T const *__restrict__ d_buffer = static_cast<T const *>(buf_ptr);
+  T *__restrict__ d_output = static_cast<T *>(output_ptr);
+  for (int idx = threadIdx.x; idx < output_size * batch_size;
+       idx += blockDim.x) {
+    T accum = static_cast<T>(0.0f);
+    int batch = idx / output_size;
+    int offset = idx % output_size;
+    for (int i = 0; i < num_gpus; i++) {
+      if (i == my_gpu_id) {
+        accum += d_input[batch * stride + offset];
+      } else {
+        accum += d_buffer[i * batch_size * stride + batch * stride + offset];
+      }
+    }
+    d_output[batch * stride + offset] = accum;
   }
 }
 

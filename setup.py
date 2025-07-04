@@ -32,6 +32,19 @@ else:
 
 import z3
 
+nvcc_path = shutil.which("nvcc")
+if nvcc_path:
+    cuda_home = os.path.dirname(os.path.dirname(nvcc_path))
+else:
+    cuda_home = "/usr/local/cuda"
+
+cuda_include_dir = os.path.join(cuda_home, "include")
+cuda_library_dirs = [
+    os.path.join(cuda_home, "lib"),
+    os.path.join(cuda_home, "lib64"),
+    os.path.join(cuda_home, "lib64", "stubs"),
+]
+
 z3_path = path.dirname(z3.__file__)
 print(f"Z3 path: {z3_path}", flush=True)
 
@@ -61,7 +74,7 @@ def config_cython():
                         path.join(mirage_path, "deps", "json", "include"),
                         path.join(mirage_path, "deps", "cutlass", "include"),
                         path.join(z3_path, "include"),
-                        "/usr/local/cuda/include",
+                        cuda_include_dir,
                     ],
                     libraries=[
                         "mirage_runtime",
@@ -76,10 +89,8 @@ def config_cython():
                     library_dirs=[
                         path.join(mirage_path, "build"),
                         path.join(z3_path, "lib"),
-                        "/usr/local/cuda/lib",
-                        "/usr/local/cuda/lib64",
-                        "/usr/local/cuda/lib64/stubs",
-                    ],
+                    ]
+                    + cuda_library_dirs,
                     extra_compile_args=["-std=c++17", "-fopenmp"],
                     extra_link_args=["-fPIC", "-fopenmp"],
                     language="c++",
@@ -93,8 +104,9 @@ def config_cython():
 
 # build Mirage runtime library
 try:
-    nvcc_path = shutil.which("nvcc")
-    os.environ["CUDACXX"] = nvcc_path if nvcc_path else "/usr/local/cuda/bin/nvcc"
+    os.environ["CUDACXX"] = nvcc_path if nvcc_path else os.path.join(
+        cuda_home, "bin", "nvcc"
+    )
     mirage_path = path.dirname(__file__)
     # z3_path = os.path.join(mirage_path, 'deps', 'z3', 'build')
     # os.environ['Z3_DIR'] = z3_path
@@ -124,7 +136,7 @@ try:
         cwd=build_dir,
         env=os.environ.copy(),
     )
-    subprocess.check_call(["make", "-j"], cwd=build_dir, env=os.environ.copy())
+    subprocess.check_call(["make", "-j4"], cwd=build_dir, env=os.environ.copy())
     print("Mirage runtime library built successfully.")
 except subprocess.CalledProcessError as e:
     print("Failed to build runtime library.")

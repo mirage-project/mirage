@@ -6,11 +6,23 @@ import torch.distributed as dist
 import argparse
 import os
 
+def grid_for_rmsnorm_linear_layer(size):
+    # 96 and 64 are enough to cover all Qwen3 model? Please update the method
+    # if you meet any incompatibility.
+    if size % 96 == 0:
+        return 96
+    elif size % 64 == 0:
+        return 64
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--use-mirage", action="store_true", help="Use Mirage kernels")
     parser.add_argument(
         "--profiling", action="store_true", help="Use Profiler to generate trace"
+    )
+    parser.add_argument("--model-path", type=str, default=None, help="Path to a local model (necessary for multi-GPU demo)")
+    parser.add_argument(
+        "--model", type=str, default='Qwen/Qwen3-8B', help="Model path on hugging face"
     )
     args = parser.parse_args()
     try:
@@ -34,24 +46,26 @@ if __name__ == "__main__":
 
     print("Input arguments:", args)
     print(f"world_size({world_size}) rank({rank})")
-    # model_name = "Qwen/Qwen2.5-7B-Instruct"
-    model_name = "Qwen/Qwen3-8B"
+    model_name = args.model
     torch.set_default_dtype(torch.bfloat16)
 
     torch.cuda.set_device(rank)
     with torch.device("cuda"):
-        model = Qwen3ForCausalLM.from_pretrained(model_name).to("cuda")
-        # config = AutoConfig.from_pretrained("/opt/dlami/nvme/models/Qwen3-8B/")
-        # model = Qwen3ForCausalLM(config, world_size)
-    # load_model(
-    #    model, f"/opt/dlami/nvme/models/Qwen3-8B/model{rank}-mp{world_size}.safetensors"
-    # )
+        if args.model_path is not None:
+            # load model locally (necessary for multi-GPU case)
+            print(f"Load model from model path: {args.model_path}")
+            config = AutoConfig.from_pretrained(args.model_path)
+            model = Qwen3ForCausalLM(config, world_size)
+            load_model(
+                model, f"{args.model_path}/model{rank}-mp{world_size}.safetensors"
+            )
+            tokenizer = AutoTokenizer.from_pretrained(args.model_path)
+        else:
+            model = Qwen3ForCausalLM.from_pretrained(model_name).to("cuda")
+            tokenizer = AutoTokenizer.from_pretrained(model_name)
 
     # get all model weight tensors
     tokens = torch.full((1, 32768), 0, dtype=torch.long, device="cuda")
-
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    # tokenizer = AutoTokenizer.from_pretrained("/opt/dlami/nvme/models/Qwen3-8B/")
 
     prompt = "Give me a short introduction to large language model."
     messages = [
@@ -101,7 +115,7 @@ if __name__ == "__main__":
         num_kv_heads = model.config.num_key_value_heads
         num_local_q_heads = num_q_heads // world_size
         num_local_kv_heads = num_kv_heads // world_size
-        head_dim = hidden_size // num_q_heads
+        head_dim = model.config.head_dim
         fused_outdim_1 = (num_q_heads + 2 * num_kv_heads) * head_dim
         fused_outdim_2 = 2 * intermediate_size
 
@@ -111,12 +125,15 @@ if __name__ == "__main__":
             ).contiguous()
         else:
             profiler_tensor = None
+        num_workers, num_schedulers = mi.get_configurations_from_gpu(rank)
         mpk = mi.PersistentKernel(
             world_size=world_size,
             mpi_rank=rank,
-            num_workers=96,
-            num_local_schedulers=48,
+            num_workers=num_workers,
+            num_local_schedulers=num_schedulers,
             num_remote_schedulers=0,
+            max_seq_length=512,
+            eos_token_id=model.config.eos_token_id,
             meta_tensors=[step, tokens],
             profiler_tensor=profiler_tensor,
         )
@@ -242,7 +259,7 @@ if __name__ == "__main__":
                 weight_norm=w_norm,
                 weight_linear=w_qkv,
                 output=attn_in,
-                grid_dim=(96, 1, 1),
+                grid_dim=(grid_for_rmsnorm_linear_layer(w_qkv.dim(0)), 1, 1),
                 block_dim=(128, 1, 1),
             )
             # add attention
@@ -316,7 +333,7 @@ if __name__ == "__main__":
                 weight_norm=w_norm,
                 weight_linear=w_gatedup,
                 output=mlp_mid,
-                grid_dim=(96, 1, 1),
+                grid_dim=(grid_for_rmsnorm_linear_layer(w_gatedup.dim(0)), 1, 1),
                 block_dim=(128, 1, 1),
             )
             # add silu_mul_linear layer
@@ -353,7 +370,7 @@ if __name__ == "__main__":
             weight_norm=w_norm,
             weight_linear=w_proj,
             output=argmax_in,
-            grid_dim=(96, 1, 1),
+            grid_dim=(grid_for_rmsnorm_linear_layer(w_proj.dim(0)), 1, 1),
             block_dim=(128, 1, 1),
         )
         # add argmax layer
@@ -370,10 +387,10 @@ if __name__ == "__main__":
             block_dim=(128, 1, 1),
         )
 
-        results = mpk.kn_graph.generate_task_graph(num_gpus=world_size)
-        with open("task_graph.json", "w") as f:
+        results = mpk.kn_graph.generate_task_graph(num_gpus=world_size, my_gpu_id=rank)
+        with open(f"task_graph_{rank}.json", "w") as f:
             f.write(results["json_file"])
-        with open("test.cu", "w") as f:
+        with open(f"kernel_{rank}.cu", "w") as f:
             f.write(results["cuda_code"])
 
         mpk.compile()
