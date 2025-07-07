@@ -77,19 +77,20 @@ __device__ __forceinline__ void rms_norm(InputSmem smem_input,
         int offset = (i / HEAD_DIM) * HEAD_DIM + i;
         float cos = (float)cos_ptr[offset];
         float sin = (float)sin_ptr[offset];
+        float v_rot;
         if (i < HEAD_DIM / 2) {
           float v1 = (float)smem_input.at(head_idx + row_offset, i);
           float v2 =
               (float)smem_input.at(head_idx + row_offset, i + HEAD_DIM / 2);
-          float v_rot = v1 * cos - v2 * sin;
-          smem_input.at(head_idx + row_offset, i) = (T)v_rot;
+          v_rot = v1 * cos - v2 * sin;
         } else {
           float v1 = (float)smem_input.at(head_idx + row_offset, i);
           float v2 =
               (float)smem_input.at(head_idx + row_offset, i - HEAD_DIM / 2);
-          float v_rot = v1 * cos + v2 * sin;
-          smem_input.at(head_idx + row_offset, i) = (T)v_rot;
+          v_rot = v1 * cos + v2 * sin;
         }
+        __syncthreads();
+        smem_input.at(head_idx + row_offset, i) = (T)v_rot;
       }
     }
   }
@@ -110,16 +111,16 @@ __device__ __forceinline__ void window_rms_norm(InputSmem smem_input,
   // smem_input: NUM_HEADS * WINDOW_SIZE, HEAD_DIM
   int warp_idx = warp_id();
 #pragma unroll
-  for (int head_idx = 0; head_idx < NUM_HEAD; ++head_idx) {
+  for (int win_idx = 0; win_idx < WINDOW_SIZE; ++win_idx) {
 #pragma unroll
-    for (int win_idx = 0; win_idx < WINDOW_SIZE; win_idx++) {
+  for (int head_idx = 0; head_idx < NUM_HEAD; ++head_idx) {
       float sum = 0.0f;
 #pragma unroll
       for (uint32_t i = 0; i < (HEAD_DIM / NUM_THREADS); i++) {
-        sum += (float)smem_input.at(head_idx * WINDOW_SIZE + win_idx,
-                                    threadIdx.x + i * NUM_THREADS) *
-               (float)smem_input.at(head_idx * WINDOW_SIZE + win_idx,
-                                    threadIdx.x + i * NUM_THREADS);
+        int row = win_idx * NUM_HEAD + head_idx;
+        int col = threadIdx.x + i * NUM_THREADS;
+        float val = (float)smem_input.at(row, col);
+        sum += val * val;
       }
 
 #pragma unroll
@@ -151,10 +152,10 @@ __device__ __forceinline__ void window_rms_norm(InputSmem smem_input,
       // multiply with weight
 #pragma unroll
       for (uint32_t i = threadIdx.x; i < HEAD_DIM; i += NUM_THREADS) {
-        float val = smem_input.at(head_idx * WINDOW_SIZE + win_idx, i);
+        float val = smem_input.at(win_idx * NUM_HEAD + head_idx, i);
         float w = (float)weight_ptr[i];
         val *= rms_rcp * w;
-        smem_input.at(head_idx * WINDOW_SIZE + win_idx, i) = (T)val;
+        smem_input.at(win_idx * NUM_HEAD + head_idx, i) = (T)val;
 
         if (rotary_emd) {
           // we should do rope for all the window size q and k, because they
@@ -165,24 +166,25 @@ __device__ __forceinline__ void window_rms_norm(InputSmem smem_input,
           T const *cur_sin_ptr = sin_ptr + win_idx * HEAD_DIM;
           float cos = (float)cur_cos_ptr[offset];
           float sin = (float)cur_sin_ptr[offset];
+          float v_rot;
           if (i < HEAD_DIM / 2) {
             float v1 =
-                (float)smem_input.at(head_idx * WINDOW_SIZE + win_idx, i);
-            float v2 = (float)smem_input.at(head_idx * WINDOW_SIZE + win_idx,
+                (float)smem_input.at(win_idx * NUM_HEAD + head_idx, i);
+            float v2 = (float)smem_input.at(win_idx * NUM_HEAD + head_idx,
                                             i + HEAD_DIM / 2);
-            float v_rot = v1 * cos - v2 * sin;
-            smem_input.at(head_idx * WINDOW_SIZE + win_idx, i) = (T)v_rot;
+            v_rot = v1 * cos - v2 * sin;
           } else {
             float v1 =
-                (float)smem_input.at(head_idx * WINDOW_SIZE + win_idx, i);
-            float v2 = (float)smem_input.at(head_idx * WINDOW_SIZE + win_idx,
+                (float)smem_input.at(win_idx * NUM_HEAD + head_idx, i);
+            float v2 = (float)smem_input.at(win_idx * NUM_HEAD + head_idx,
                                             i - HEAD_DIM / 2);
-            float v_rot = v1 * cos + v2 * sin;
-            smem_input.at(head_idx * WINDOW_SIZE + win_idx, i) = (T)v_rot;
+            v_rot = v1 * cos + v2 * sin;
           }
+          __syncthreads();
+          smem_input.at(win_idx * NUM_HEAD + head_idx, i) = (T)v_rot;
         }
-      }
-    }
-  }
+      } // i
+    } // head_idx
+  } // win_idx
 }
 } // namespace kernel
