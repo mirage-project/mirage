@@ -1,5 +1,6 @@
 #include "argmax.cuh"
 #include "bfloat16.h"
+#include "blackwell/norm_linear_blackwell.cuh"
 #include "linear.cuh"
 #include "norm.cuh"
 #include "norm_linear.cuh"
@@ -17,6 +18,8 @@ using kernel::paged_attention_task_impl;
 using kernel::silu_mul_linear_task_impl;
 using kernel::single_batch_decoding_kernel;
 using kernel::single_batch_gqa_kernel;
+
+using kernel::blackwell::norm_linear_blackwell_impl;
 using bfloat16 = type::bfloat16_t;
 
 template <typename T>
@@ -418,6 +421,91 @@ void norm_linear(torch::Tensor input,
   }
 }
 
+// Blackwell RMSNorm Linear
+template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int REDUCTION_SIZE>
+__global__ void
+    norm_linear_blackwell_kernel_wrapper(void const *input_ptr,
+                                         void const *norm_weight_ptr,
+                                         void const *weight_ptr,
+                                         float eps,
+                                         void *output_ptr) {
+  norm_linear_blackwell_impl<T,
+                             BATCH_SIZE,
+                             OUTPUT_SIZE,
+                             REDUCTION_SIZE,
+                             OUTPUT_SIZE>(
+      input_ptr, norm_weight_ptr, weight_ptr, eps, output_ptr);
+}
+
+template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int REDUCTION_SIZE>
+void launch_norm_linear_blackwell(void const *input_ptr,
+                                  void const *norm_weight_ptr,
+                                  void const *weight_ptr,
+                                  float eps,
+                                  void *output_ptr) {
+  dim3 grid_dim(1, 1, 1);
+  dim3 block_dim(128, 1, 1);
+  size_t smem_size = 1024 * 120;
+
+  cudaFuncSetAttribute(norm_linear_blackwell_kernel_wrapper<T,
+                                                            BATCH_SIZE,
+                                                            OUTPUT_SIZE,
+                                                            REDUCTION_SIZE>,
+                       cudaFuncAttributeMaxDynamicSharedMemorySize,
+                       smem_size);
+
+  norm_linear_blackwell_kernel_wrapper<T,
+                                       BATCH_SIZE,
+                                       OUTPUT_SIZE,
+                                       REDUCTION_SIZE>
+      <<<grid_dim, block_dim, smem_size>>>(
+          input_ptr, norm_weight_ptr, weight_ptr, eps, output_ptr);
+}
+
+void norm_linear_blackwell(torch::Tensor input,
+                           torch::Tensor norm_weight,
+                           torch::Tensor weight,
+                           float eps,
+                           torch::Tensor output) {
+
+  void const *input_ptr = input.data_ptr();
+  void const *norm_weight_ptr = norm_weight.data_ptr();
+  void const *weight_ptr = weight.data_ptr();
+  void *output_ptr = output.data_ptr();
+  int const BATCH_SIZE = 1;
+  switch (output.size(1)) {
+    case 16:
+      launch_norm_linear_blackwell<bfloat16, BATCH_SIZE, 16, 4096>(
+          input_ptr, norm_weight_ptr, weight_ptr, eps, output_ptr);
+      break;
+    case 32:
+      launch_norm_linear_blackwell<bfloat16, BATCH_SIZE, 32, 4096>(
+          input_ptr, norm_weight_ptr, weight_ptr, eps, output_ptr);
+      break;
+    case 64:
+      launch_norm_linear_blackwell<bfloat16, BATCH_SIZE, 64, 4096>(
+          input_ptr, norm_weight_ptr, weight_ptr, eps, output_ptr);
+      break;
+    case 256:
+      launch_norm_linear_blackwell<bfloat16, BATCH_SIZE, 256, 4096>(
+          input_ptr, norm_weight_ptr, weight_ptr, eps, output_ptr);
+      break;
+    case 1600:
+      launch_norm_linear_blackwell<bfloat16, BATCH_SIZE, 1600, 4096>(
+          input_ptr, norm_weight_ptr, weight_ptr, eps, output_ptr);
+      break;
+    default:
+      printf("Unsupported output size in Blackwell test: %zu\n",
+             output.size(1));
+      break;
+  }
+
+  cudaError_t err = cudaDeviceSynchronize();
+  if (err != cudaSuccess) {
+    printf("CUDA Blackwell kernel launch error: %s\n", cudaGetErrorString(err));
+  }
+}
+
 // Window RMSNorm Linear
 
 template <typename T, int BATCH_SIZE, int WINDOW_SIZE, int HEAD_DIM>
@@ -768,4 +856,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("k_eps") = 0.0f);
   m.def("paged_attention", &paged_attention, "Paged Attention");
   m.def("window_rms_norm", &window_rms_norm, "Window RMSNorm");
+  m.def("norm_linear_blackwell",
+        &norm_linear_blackwell,
+        "Blackwell RMSNorm Linear kernel");
 }
