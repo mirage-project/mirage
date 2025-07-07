@@ -13,6 +13,7 @@
  * limitations under the License.
  */
 
+// TODO: Optimize threads for multi tokens 
  #pragma once
  #include "common.h"
  #include "copy_sm80.cuh"
