@@ -12,7 +12,6 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-#pragma once
 namespace kernel {
 namespace blackwell {
 
@@ -47,7 +46,7 @@ __device__ inline static void load_tmem_to_reg(uint32_t const &tmem_ptr,
 }
 
 __device__ inline static void cp_smem_to_tmem(uint32_t const &tmem_ptr,
-                                              uint32_t &smem_desc) {
+                                              uint32_t const &smem_desc) {
   asm volatile("tcgen05.cp.cta_group::1.4x256b [%0], %1;"
                :
                : "r"(tmem_ptr), "l"(uint64_t(smem_desc)));

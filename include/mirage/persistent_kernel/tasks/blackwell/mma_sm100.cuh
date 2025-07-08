@@ -188,25 +188,26 @@ __device__ __forceinline__ uint64_t make_smem_desc(T *smem_ptr,
 }
 
 __device__ inline static void
-    call_mma_m64n64k16_bf16bf16f32(uint32_t *d_addr,
-                                   uint64_t const &a_desc,
+    call_mma_m64n64k16_bf16bf16f32(uint32_t const &d_addr,
+                                //    uint64_t const &a_desc,
+                                   uint32_t const &a_tmem_ptr,
                                    uint64_t const &b_desc,
                                    uint32_t idesc,
                                    bool accumulate = false) {
 
   if (threadIdx.x % 32 == 0) {
-    auto uint_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(d_addr));
+    // auto uint_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(d_addr));
     uint32_t mask[4] = {0, 0, 0, 0};
     uint32_t scaleC = 1;
     asm volatile("{\n\t"
                  ".reg .pred p;\n\t"
                  "setp.ne.b32 p, %4, 0;\n\t"
-                 "tcgen05.mma.cta_group::1.kind::f16 [%0], %1, %2, %3,{%5, %6, "
+                 "tcgen05.mma.cta_group::1.kind::f16 [%0], [%1], %2, %3,{%5, %6, "
                  "%7, %8}, p; \n\t"
                  "}\n"
                  :
-                 : "r"(uint_ptr),
-                   "l"(a_desc),
+                 : "r"(d_addr),
+                   "r"(a_tmem_ptr),
                    "l"(b_desc),
                    "r"(idesc),
                    "r"(scaleC),
@@ -217,13 +218,14 @@ __device__ inline static void
   }
 }
 
+template <typename T>
 __device__ inline static void
-    mma_m64n64k16_bf16bf16f32(bfloat16 *A_ptr, bfloat16 *B_ptr, uint32_t *D) {
+    mma_m64n64k16_bf16bf16f32(uint32_t &A, T *B, uint32_t &D) {
   uint32_t idesc =
-      mma_instruction_descriptor<float, bfloat16, 16, 16, false, true, false>();
-  uint64_t a_desc = make_smem_desc(A_ptr, 1, 0, 0, 0, false);
-  uint64_t b_desc = make_smem_desc(B_ptr, 1, 1, 0, 0, false);
-  call_mma_m64n64k16_bf16bf16f32(D, a_desc, b_desc, idesc);
+      mma_instruction_descriptor<float, T, 64, 16, false, true, false>();
+//   uint64_t a_desc = make_smem_desc(A_ptr, 1, 0, 0, 0, false);
+  uint64_t b_desc = make_smem_desc(B, 1, 1, 0, 0, false);
+  call_mma_m64n64k16_bf16bf16f32(D, A, b_desc, idesc);
 }
 } // namespace blackwell
 } // namespace kernel

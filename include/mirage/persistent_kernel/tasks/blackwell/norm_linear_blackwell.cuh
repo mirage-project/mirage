@@ -46,6 +46,13 @@ __device__ __forceinline__ void
                                void const *weight_ptr,
                                float eps,
                                void *output_ptr) {
+
+                                    // if (threadIdx.x == 0) {
+    // printf("in cuda input_ptr is %p\n", input_ptr);
+    // printf("in cuda norm_weight_ptr is %p\n", norm_weight_ptr);
+    // printf("in cuda weight_ptr is %p\n", weight_ptr);
+    // printf("in cuda output_ptr is %p\n", output_ptr);
+  // }
   constexpr int CHUNK_SIZE = 16 / sizeof(T);
   constexpr int OUTPUT_ATOM_SIZE = OUTPUT_SIZE <= 128 ? OUTPUT_SIZE : 128;
   constexpr int NUM_OUTPUT_ATOMS = OUTPUT_SIZE / OUTPUT_ATOM_SIZE;
@@ -107,7 +114,7 @@ __device__ __forceinline__ void
   constexpr size_t TMEM_ADDR_A_OFFSET = TMEM_ADDR_OFFSET + 16;
 
   constexpr size_t SHARED_INPUT_BUFFER_OFFSET =
-      TMEM_ADDR_A_OFFSET + sizeof(uint32_t);
+      TMEM_ADDR_A_OFFSET + 16;
   // sizeof(T) * FORLOOP_RANGE * BATCH_SIZE * TILE_SIZE
 
   constexpr size_t SHARED_NORM_WEIGHT_BUFFER_OFFSET =
@@ -255,15 +262,6 @@ __device__ __forceinline__ void
       cp_async_fence();
     }
 
-    // accumulator
-    //     float s_frag[NUM_ITERS_M][NUM_ITERS_N][8];
-    //     for (uint32_t m = 0; m < NUM_ITERS_M; m++) {
-    // #pragma unroll
-    //       for (uint32_t n = 0; n < NUM_ITERS_N; n++) {
-    //         clear_8_floats(s_frag[m][n]);
-    //       }
-    //     }
-
     for (int for_idx = 0; for_idx < FORLOOP_RANGE; for_idx++) {
       // copy
       if (for_idx + K_PIPE_MAX - 1 < FORLOOP_RANGE) {
@@ -313,6 +311,15 @@ __device__ __forceinline__ void
       mul(mul_output_smem, input_smem, norm_weight_smem);
       __syncthreads();
 
+      // if (threadIdx.x == 0) {
+      //   printf("input_dmem(0,0) is %f\n", float(input_dmem.at(0,0)));
+      //   printf("input_smem(0,0) is %f\n", float(input_smem.at(0,0)));
+      //   printf("norm_weight_dmem(0,0) is %f\n", float(norm_weight_dmem.at(0,0)));
+      //   printf("norm_weight_smem(0,0) is %f\n", float(norm_weight_smem.at(0,0)));
+      //   printf("mul_output_smem(0,0) is %f\n", float(mul_output_smem.at(0,0)));
+      //   printf("mul_output_smem(0,1) is %f\n", float(mul_output_smem.at(0,1)));
+      // }
+
       // matmul
       // if (threadIdx.x == 0 && blockIdx.x == 0 && blockIdx.y == 0 &&
       // blockIdx.z == 0) {
@@ -338,42 +345,61 @@ __device__ __forceinline__ void
                         (((lane_idx & 0xF) >> 3) << 3);
             T *src_ptr =
                 is_valid ? mul_output_smem(m_row, m_col) : zero_buffer(0, 0);
-            uint64_t a_desc = make_smem_desc(src_ptr, , 0, 0, 0, false);
-            cp_smem_to_tmem(*tmem_addr_ptr_A, a_desc);
-            // ldsm(src_ptr, a_frag);
-            // ldsm(weight_smem(n_row, n_col), b_frag);
-            // printf("threadIdx.x is %d, blockIdx.x is %d, blockIdx.y is %d,
-            // blockIdx.z is %d, m_row is %d, m_col is %d, n_row is %d, n_col is
-            // %d\n", threadIdx.x, blockIdx.x, blockIdx.y, blockIdx.z, m_row,
-            // m_col, n_row, n_col); mma_m16n16k16_bf16bf16bf32(
-            //     s_frag[m][n], a_frag, b_frag, s_frag[m][n]);
-            // mma_m64n64k16_bf16bf16f32(
-            //     src_ptr, weight_smem(n_row, n_col), tmem_addr_ptr);
 
-            // before_thread_sync();
+            uint64_t a_desc = make_smem_desc(src_ptr,0 , 0, 0, 0, false);
+            // if (threadIdx.x == 0) {
+            //   printf("src_ptr(0,0) is %f\n", src_ptr[0]);
+            //   printf("a_desc is %lu\n", a_desc);
+            // }
+            cp_smem_to_tmem(*tmem_addr_ptr_A, a_desc);
+
+            before_thread_sync();
+            __syncthreads();
+            after_thread_sync();
+
+            uint32_t regD[8];
+            load_tmem_to_reg(*tmem_addr_ptr_A, regD);
+
+            printf("threadIdx.x: %d, warp_idx: %d, TMEM:R8C0 V0  %f\n", threadIdx.x, warp_idx, ((float *)regD)[0]);
+            printf("threadIdx.x: %d, warp_idx: %d, TMEM:R8C1 V0  %f\n", threadIdx.x, warp_idx, ((float *)regD)[1]);
+            printf("threadIdx.x: %d, warp_idx: %d, TMEM:R8C2 V0  %f\n", threadIdx.x, warp_idx, ((float *)regD)[2]);
+            printf("threadIdx.x: %d, warp_idx: %d, TMEM:R8C3 V0  %f\n", threadIdx.x, warp_idx, ((float *)regD)[3]);
+            printf("threadIdx.x: %d, warp_idx: %d, TMEM:R8C4 V0  %f\n", threadIdx.x, warp_idx, ((float *)regD)[4]);
+            printf("threadIdx.x: %d, warp_idx: %d, TMEM:R8C5 V0  %f\n", threadIdx.x, warp_idx, ((float *)regD)[5]);
+
+            mma_m64n64k16_bf16bf16f32(
+                *tmem_addr_ptr_A, weight_smem(n_row, n_col), *tmem_addr_ptr);
+
           }
         }
       }
 
       __syncthreads();
       // Copy result from TMEM to Register
-      uint32_t regD[8];
-      if (warp_idx == 0) {
-        load_tmem_to_reg(*tmem_addr_ptr, regD);
-        load_wait();
-      }
+      // uint32_t regD[8];
+      // if (warp_idx == 0) {
+        // load_tmem_to_reg(*tmem_addr_ptr, regD);
+        // load_wait();
 
-      if (threadIdx.x == 8) {
-        printf("warp_idx is %d\n", warp_idx);
-        printf("TMEM:R8C0 V0  %f\n", ((float *)regD)[0]);
-        printf("TMEM:R8C1 V0  %f\n", ((float *)regD)[1]);
-        printf("TMEM:R8C2 V0  %f\n", ((float *)regD)[2]);
-        printf("TMEM:R8C3 V0  %f\n", ((float *)regD)[3]);
-        printf("TMEM:R8C4 V0  %f\n", ((float *)regD)[4]);
-        printf("TMEM:R8C5 V0  %f\n", ((float *)regD)[5]);
-        printf("TMEM:R8C6 V0  %f\n", ((float *)regD)[6]);
-        printf("TMEM:R8C7 V0  %f\n", ((float *)regD)[7]);
-      }
+        // printf("threadIdx.x: %d, warp_idx: %d, TMEM:R8C0 V0  %f\n", threadIdx.x, warp_idx, ((float *)regD)[0]);
+        // printf("threadIdx.x: %d, warp_idx: %d, TMEM:R8C1 V0  %f\n", threadIdx.x, warp_idx, ((float *)regD)[1]);
+        // printf("threadIdx.x: %d, warp_idx: %d, TMEM:R8C2 V0  %f\n", threadIdx.x, warp_idx, ((float *)regD)[2]);
+        // printf("threadIdx.x: %d, warp_idx: %d, TMEM:R8C3 V0  %f\n", threadIdx.x, warp_idx, ((float *)regD)[3]);
+        // printf("threadIdx.x: %d, warp_idx: %d, TMEM:R8C4 V0  %f\n", threadIdx.x, warp_idx, ((float *)regD)[4]);
+        // printf("threadIdx.x: %d, warp_idx: %d, TMEM:R8C5 V0  %f\n", threadIdx.x, warp_idx, ((float *)regD)[5]);
+      // }
+
+      // if (threadIdx.x == 8) {
+      //   printf("warp_idx is %d\n", warp_idx);
+      //   printf("TMEM:R8C0 V0  %f\n", ((float *)regD)[0]);
+      //   printf("TMEM:R8C1 V0  %f\n", ((float *)regD)[1]);
+      //   printf("TMEM:R8C2 V0  %f\n", ((float *)regD)[2]);
+      //   printf("TMEM:R8C3 V0  %f\n", ((float *)regD)[3]);
+      //   printf("TMEM:R8C4 V0  %f\n", ((float *)regD)[4]);
+      //   printf("TMEM:R8C5 V0  %f\n", ((float *)regD)[5]);
+      //   printf("TMEM:R8C6 V0  %f\n", ((float *)regD)[6]);
+      //   printf("TMEM:R8C7 V0  %f\n", ((float *)regD)[7]);
+      // }
 
       if (output_atom_idx == 0) {
         float const scalars[] = {0.0f, 1.0f / float(REDUCTION_SIZE)};
