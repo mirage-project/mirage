@@ -1,6 +1,7 @@
 #include "argmax.cuh"
 #include "bfloat16.h"
 #include "linear.cuh"
+#include "multitoken_paged_attention.cuh"
 #include "norm.cuh"
 #include "norm_linear.cuh"
 #include "paged_attention.cuh"
@@ -12,6 +13,7 @@
 
 // using kernel::argmax_kernel;
 using kernel::linear_kernel;
+using kernel::multitoken_paged_attention_task_impl;
 using kernel::norm_linear_task_impl;
 using kernel::paged_attention_task_impl;
 using kernel::silu_mul_linear_task_impl;
@@ -324,6 +326,184 @@ void paged_attention(
       output_ptr,
       paged_kv_indices_buffer_ptr,
       seq_len,
+      qk_norm,
+      rope,
+      q_norm_weight_ptr,
+      k_norm_weight_ptr,
+      cos_ptr,
+      sin_ptr,
+      q_eps,
+      k_eps);
+
+  cudaError_t err = cudaDeviceSynchronize();
+  if (err != cudaSuccess) {
+    printf("CUDA kernel launch error: %s\n", cudaGetErrorString(err));
+  }
+}
+
+// Multitoken Paged Attention
+
+template <typename T,
+          int NUM_QO_HEADS,
+          int NUM_KV_HEADS,
+          int HEAD_DIM,
+          int PAGE_SIZE,
+          int MAX_SEQ_LEN,
+          int MAX_TOKENS = 1>
+__global__ void multitoken_paged_attention_wrapper(
+    void const *qkv_ptr,
+    void *paged_k_cache_ptr,
+    void *paged_v_cache_ptr,
+    void *output_ptr,
+    int const *qo_indptr_buffer_ptr,
+    int const *paged_kv_indptr_buffer_ptr,
+    int const *paged_kv_indices_buffer_ptr,
+    int const *paged_kv_last_page_len_buffer_ptr,
+    int request_id,
+    bool qk_norm,
+    bool rope,
+    void const *q_norm_weight_ptr,
+    void const *k_norm_weight_ptr,
+    void const *cos_ptr,
+    void const *sin_ptr,
+    float q_eps,
+    float k_eps) {
+  multitoken_paged_attention_task_impl<T,
+                                       NUM_QO_HEADS,
+                                       NUM_KV_HEADS,
+                                       HEAD_DIM,
+                                       PAGE_SIZE,
+                                       MAX_SEQ_LEN,
+                                       MAX_TOKENS>(
+      qkv_ptr,
+      paged_k_cache_ptr,
+      paged_v_cache_ptr,
+      output_ptr,
+      qo_indptr_buffer_ptr,
+      paged_kv_indptr_buffer_ptr,
+      paged_kv_indices_buffer_ptr,
+      paged_kv_last_page_len_buffer_ptr,
+      request_id,
+      qk_norm,
+      rope,
+      q_norm_weight_ptr,
+      k_norm_weight_ptr,
+      cos_ptr,
+      sin_ptr,
+      q_eps,
+      k_eps);
+}
+
+template <typename T,
+          int NUM_QO_HEADS,
+          int NUM_KV_HEADS,
+          int HEAD_DIM,
+          int PAGE_SIZE,
+          int MAX_SEQ_LEN,
+          int MAX_TOKENS = 1>
+void launch_multitoken_paged_attention(
+    void const *qkv_ptr,
+    void *paged_k_cache_ptr,
+    void *paged_v_cache_ptr,
+    void *output_ptr,
+    int const *qo_indptr_buffer_ptr,
+    int const *paged_kv_indptr_buffer_ptr,
+    int const *paged_kv_indices_buffer_ptr,
+    int const *paged_kv_last_page_len_buffer_ptr,
+    int request_id,
+    bool qk_norm,
+    bool rope,
+    void const *q_norm_weight_ptr,
+    void const *k_norm_weight_ptr,
+    void const *cos_ptr,
+    void const *sin_ptr,
+    float q_eps,
+    float k_eps) {
+  dim3 grid_dim(1, 1, 1);
+  dim3 block_dim(128, 1, 1);
+  size_t smem_size = 112640;
+
+  cudaFuncSetAttribute(multitoken_paged_attention_wrapper<T,
+                                                          NUM_QO_HEADS,
+                                                          NUM_KV_HEADS,
+                                                          HEAD_DIM,
+                                                          PAGE_SIZE,
+                                                          MAX_SEQ_LEN,
+                                                          MAX_TOKENS>,
+                       cudaFuncAttributeMaxDynamicSharedMemorySize,
+                       smem_size);
+
+  multitoken_paged_attention_wrapper<T,
+                                     NUM_QO_HEADS,
+                                     NUM_KV_HEADS,
+                                     HEAD_DIM,
+                                     PAGE_SIZE,
+                                     MAX_SEQ_LEN,
+                                     MAX_TOKENS>
+      <<<grid_dim, block_dim, smem_size>>>(qkv_ptr,
+                                           paged_k_cache_ptr,
+                                           paged_v_cache_ptr,
+                                           output_ptr,
+                                           qo_indptr_buffer_ptr,
+                                           paged_kv_indptr_buffer_ptr,
+                                           paged_kv_indices_buffer_ptr,
+                                           paged_kv_last_page_len_buffer_ptr,
+                                           request_id,
+                                           qk_norm,
+                                           rope,
+                                           q_norm_weight_ptr,
+                                           k_norm_weight_ptr,
+                                           cos_ptr,
+                                           sin_ptr,
+                                           q_eps,
+                                           k_eps);
+}
+
+void multitoken_paged_attention(
+    torch::Tensor qkv,
+    torch::Tensor paged_k_cache,
+    torch::Tensor paged_v_cache,
+    torch::Tensor output,
+    torch::Tensor qo_indptr_buffer,
+    torch::Tensor paged_kv_indptr_buffer,
+    torch::Tensor paged_kv_indices_buffer,
+    torch::Tensor paged_kv_last_page_len_buffer,
+    int request_id,
+    bool qk_norm,
+    bool rope,
+    torch::optional<torch::Tensor> q_norm_weight = torch::nullopt,
+    torch::optional<torch::Tensor> k_norm_weight = torch::nullopt,
+    torch::optional<torch::Tensor> cos = torch::nullopt,
+    torch::optional<torch::Tensor> sin = torch::nullopt,
+    float q_eps = 0.0f,
+    float k_eps = 0.0f) {
+  void const *qkv_ptr = qkv.data_ptr();
+  void *paged_k_cache_ptr = paged_k_cache.data_ptr();
+  void *paged_v_cache_ptr = paged_v_cache.data_ptr();
+  void *output_ptr = output.data_ptr();
+  int const *qo_indptr_buffer_ptr = qo_indptr_buffer.data_ptr<int>();
+  int const *paged_kv_indptr_buffer_ptr =
+      paged_kv_indptr_buffer.data_ptr<int>();
+  int const *paged_kv_indices_buffer_ptr =
+      paged_kv_indices_buffer.data_ptr<int>();
+  int const *paged_kv_last_page_len_buffer_ptr =
+      paged_kv_last_page_len_buffer.data_ptr<int>();
+
+  void const *q_norm_weight_ptr = qk_norm ? q_norm_weight->data_ptr() : nullptr;
+  void const *k_norm_weight_ptr = qk_norm ? k_norm_weight->data_ptr() : nullptr;
+  void const *cos_ptr = rope ? cos->data_ptr() : nullptr;
+  void const *sin_ptr = rope ? sin->data_ptr() : nullptr;
+
+  launch_multitoken_paged_attention<bfloat16, 4, 1, 128, 64, 512, 4>(
+      qkv_ptr,
+      paged_k_cache_ptr,
+      paged_v_cache_ptr,
+      output_ptr,
+      qo_indptr_buffer_ptr,
+      paged_kv_indptr_buffer_ptr,
+      paged_kv_indices_buffer_ptr,
+      paged_kv_last_page_len_buffer_ptr,
+      request_id,
       qk_norm,
       rope,
       q_norm_weight_ptr,
@@ -767,5 +947,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("q_eps") = 0.0f,
         py::arg("k_eps") = 0.0f);
   m.def("paged_attention", &paged_attention, "Paged Attention");
+  m.def("multitoken_paged_attention",
+        &multitoken_paged_attention,
+        "Multitoken Paged Attention");
   m.def("window_rms_norm", &window_rms_norm, "Window RMSNorm");
 }
