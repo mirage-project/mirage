@@ -53,5 +53,7 @@ demo/mirage_search_checkpoint.json
 demo/*generated*
 benchmark/*generated*
 
-# Rust
-src/search/abstract_expr/abstract_subexpr/*.lock
+# Temp file
+task_graph*.json
+test.cu
+kernel*.cu

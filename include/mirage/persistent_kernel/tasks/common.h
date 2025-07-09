@@ -1,4 +1,4 @@
-/* Copyright 2023 CMU
+/* Copyright 2025 CMU
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,19 +14,13 @@
  */
 
 #pragma once
+#include "bfloat16.h"
+#include <cassert>
+#include <cstdint>
+#include <cstdio>
 
-#include "mirage/utils/json_utils.h"
+constexpr int NUM_THREADS = 128;
+constexpr int NUM_THREADS_PER_WARP = 32;
+constexpr int NUM_WARPS = 4;
 
-namespace mirage {
-
-struct ProfileResult {
-  static int const NUM_WARPUP_ITERATIONS = 1024;
-  static int const NUM_ITERATIONS = 1024;
-  float run_time;
-
-  static ProfileResult infinity();
-};
-
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(ProfileResult, run_time);
-
-} // namespace mirage
+constexpr float inf = 5e4;

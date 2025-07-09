@@ -33,14 +33,22 @@ cdef extern from "vector_types.h":
 cdef extern from "mirage/type.h" namespace "mirage::type":
     # This must be consistent with mirage/type.h
     cdef enum DataType:
-        DT_INT4 = 920,
+        DT_FLOAT4 = 920,
+        DT_INT4 = 925,
+        DT_UINT4 = 926,
         DT_FLOAT8 = 930,
         DT_INT8 = 935,
-        DT_BFLOAT16 = 940,
-        DT_FLOAT16 = 941,
-        DT_UINT16 = 945,
+        DT_UINT8 = 936,
+        DT_FLOAT16 = 940,
+        DT_BFLOAT16 = 941,
+        DT_INT16 = 945,
+        DT_UINT16 = 946,
         DT_FLOAT32 = 950,
+        DT_INT32 = 955,
+        DT_UINT32 = 956,
         DT_DOUBLE = 960,
+        DT_INT64 = 965,
+        DT_UINT64 = 966,
         DT_UNKNOWN = 999,
     cdef enum TBEpilogueType:
         TB_EPILOGUE_NONE = 3100,
@@ -175,6 +183,11 @@ cdef extern from "mirage/kernel/device_tensor.h" namespace "mirage::kernel":
         #void *data_ptr
         int owner_ts_idx
 
+cdef extern from "mirage/kernel/runtime.h" namespace "mirage::runtime":
+    ctypedef struct TaskGraphResult:
+        string cuda_code
+        string json_file
+
 cdef extern from "mirage/kernel/graph.h" namespace "mirage::kernel":
 
     cdef cppclass CppKNOperator "mirage::kernel::KNOperator":
@@ -189,7 +202,7 @@ cdef extern from "mirage/kernel/graph.h" namespace "mirage::kernel":
         void get_bgraph(CppTBGraph** bgraph)
 
     cdef cppclass CppKNGraph "mirage::kernel::Graph":
-        CppKNGraph()
+        CppKNGraph(dim3 gpu_dim, bool disable_fingerprint)
         CppDTensor* new_input_ptr(vector[int] dims,
                                   vector[size_t] strides,
                                   DataType data_type,
@@ -219,6 +232,22 @@ cdef extern from "mirage/kernel/graph.h" namespace "mirage::kernel":
         void generate_triton_program(const char *filepath)
         void generate_cuda_program(const char *filepath)
         size_t get_owner_independent_hash() const
+        # Persistent kernel functions
+        void attach_torch_tensor(const CppDTensor *input,
+                                 void *torch_data_ptr,
+                                 const char *name)
+        void attach_cuda_tensor(const CppDTensor *input,
+                                const char *name)
+        void attach_nvshmem_tensor(const CppDTensor *input,
+                                   const char *name)
+        CppDTensor* fuse_tensors(vector[const CppDTensor*] inputs,
+                                 int fused_dim,
+                                 int num_groups,
+                                 const char *name)
+        void register_task(const char *task_type,
+                           vector[int] params)
+        TaskGraphResult generate_task_graph(int num_gpus, int my_gpu_id)
+
         vector[CppKNOperator*] operators
 
 cdef extern from "mirage/threadblock/graph.h" namespace "mirage::threadblock":
@@ -254,9 +283,10 @@ cdef extern from "mirage/threadblock/graph.h" namespace "mirage::threadblock":
                    int reduction_dimx)
 
         CppSTensor* new_input(const CppDTensor* dtensor,
-                           int3 input_map,
-                           int forloop_dim,
-                           SmemLayout layout)
+                             int3 input_map,
+                             int forloop_dim,
+                             SmemLayout layout,
+                             bool store_in_dmem)
         CppDTensor* new_output(const CppSTensor* stensor,
                             int3 output_map,
                             int forloop_dim,

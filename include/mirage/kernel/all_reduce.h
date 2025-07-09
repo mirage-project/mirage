@@ -24,7 +24,6 @@ class KNAllReduceOp : public mirage::kernel::KNOperator {
 public:
   KNAllReduceOp(Graph *_graph, DTensor const &input, bool inplace);
   ~KNAllReduceOp();
-  bool profile(ProfileResult &profile) override;
   bool fingerprint(void) override;
 
   operator json() const override;
