@@ -18,6 +18,7 @@ using kernel::paged_attention_task_impl;
 using kernel::silu_mul_linear_task_impl;
 using kernel::single_batch_decoding_kernel;
 using kernel::single_batch_gqa_kernel;
+using kernel::single_batch_multitoken_decoding_kernel;
 using bfloat16 = type::bfloat16_t;
 
 template <typename T>
@@ -215,24 +216,24 @@ __global__ void single_batch_multitoken_decoding_wrapper(void const *qkv_ptr,
                                                         void const *sin_ptr,
                                                         float q_eps,
                                                         float k_eps) {
-  single_batch_decoding_kernel<T,
-                               NUM_Q_HEADS,
-                               NUM_KV_HEADS,
-                               HEAD_DIM,
-                               WEIGHT_STRIDE,
-                               NUM_TOKENS>(qkv_ptr,
-                                          k_cache_ptr,
-                                          v_cache_ptr,
-                                          output_ptr,
-                                          seq_len,
-                                          qk_norm,
-                                          rotary_emd,
-                                          qnorm_weight_ptr,
-                                          knorm_weight_ptr,
-                                          cos_ptr,
-                                          sin_ptr,
-                                          q_eps,
-                                          k_eps);
+  single_batch_multitoken_decoding_kernel<T,
+                                         NUM_Q_HEADS,
+                                         NUM_KV_HEADS,
+                                         HEAD_DIM,
+                                         WEIGHT_STRIDE,
+                                         NUM_TOKENS>(qkv_ptr,
+                                                     k_cache_ptr,
+                                                     v_cache_ptr,
+                                                     output_ptr,
+                                                     seq_len,
+                                                     qk_norm,
+                                                     rotary_emd,
+                                                     qnorm_weight_ptr,
+                                                     knorm_weight_ptr,
+                                                     cos_ptr,
+                                                     sin_ptr,
+                                                     q_eps,
+                                                     k_eps);
 }
 
 void single_batch_multitoken_decoding(
@@ -269,10 +270,10 @@ void single_batch_multitoken_decoding(
   constexpr int HEAD_DIM = 128;
   constexpr int WEIGHT_STRIDE = 128;
   
-  int num_tokens = qkv.size(0) / (NUM_Q_HEADS + NUM_KV_HEADS);
+  int num_tokens = qkv.size(0) / (NUM_Q_HEADS + NUM_KV_HEADS + NUM_KV_HEADS);
   
   // Validate input shapes
-  if (num_tokens * (NUM_Q_HEADS + NUM_KV_HEADS) != qkv.size(0)) {
+  if (num_tokens * (NUM_Q_HEADS + NUM_KV_HEADS + NUM_KV_HEADS) != qkv.size(0)) {
     throw std::runtime_error("Invalid qkv tensor shape");
   }
   

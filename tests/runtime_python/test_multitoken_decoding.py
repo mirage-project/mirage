@@ -26,9 +26,17 @@ qkv = torch.randn(num_tokens * (q_heads + k_heads + v_heads), head_dim, device=d
 # Expected output shape: (num_tokens * q_heads, head_dim)
 mirage_output = torch.empty((num_tokens * q_heads, head_dim), device=device, dtype=dtype)
 
-# Call your multitoken kernel
+# Call your multitoken kernel with all required parameters
 runtime_kernel.single_batch_multitoken_decoding(
-    qkv, k_cache_mirage, v_cache_mirage, mirage_output, seq_len
+    qkv, k_cache_mirage, v_cache_mirage, mirage_output, seq_len,
+    qk_norm=False,  # No QK normalization
+    rotary_embed=False,  # No rotary embeddings
+    qnorm_weight=None,  # No Q normalization weights
+    knorm_weight=None,  # No K normalization weights
+    cos=None,  # No cosine for rotary
+    sin=None,  # No sine for rotary
+    q_eps=0.0,  # Q epsilon for normalization
+    k_eps=0.0   # K epsilon for normalization
 )
 
 expected_output_shape = (num_tokens * q_heads, head_dim)
@@ -52,7 +60,15 @@ for test_tokens in [1, 2, 4]:
     
     try:
         runtime_kernel.single_batch_multitoken_decoding(
-            test_qkv, k_cache_mirage, v_cache_mirage, test_output, seq_len
+            test_qkv, k_cache_mirage, v_cache_mirage, test_output, seq_len,
+            qk_norm=False,
+            rotary_embed=False,
+            qnorm_weight=None,
+            knorm_weight=None,
+            cos=None,
+            sin=None,
+            q_eps=0.0,
+            k_eps=0.0
         )
         print(f"✓ {test_tokens} tokens: Success")
         print(f"  Input shape: {test_qkv.shape}")
