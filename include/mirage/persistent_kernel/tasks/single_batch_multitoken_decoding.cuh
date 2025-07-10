@@ -26,9 +26,11 @@
 #include "utils.cuh"
 namespace kernel {
 
-// Multi-token decoding kernel
+// Multi-token parallel decoding kernel for speculative decoding
 // Input layout: [Q_token0, K_token0, V_token0, Q_token1, K_token1, V_token1, ...]
 // Each token has NUM_Q_HEADS Q heads, NUM_KV_HEADS K heads, NUM_KV_HEADS V heads
+// All tokens are candidates for the same position and see the same KV context
+// KV cache IS updated with all tokens starting at position seq_len-1
 template <typename T,
           int NUM_Q_HEADS,
           int NUM_KV_HEADS,
@@ -61,11 +63,6 @@ __device__ __forceinline__ void
     return;  // Early exit to prevent buffer overflow
   }
 
-  size_t num_iterations = (seq_len + KV_CHUNK_SIZE - 1) / KV_CHUNK_SIZE;
-  int curr_iter_len = std::min(seq_len, KV_CHUNK_SIZE);
-  int cp_finished_seq_len = curr_iter_len;
-  int last_seq_len = curr_iter_len;
-
   const __restrict__ T *d_qkv = static_cast<T const *>(qkv_ptr);
   T __restrict__ *d_k_cache = static_cast<T *>(k_cache_ptr);
   T __restrict__ *d_v_cache = static_cast<T *>(v_cache_ptr);
@@ -83,7 +80,6 @@ __device__ __forceinline__ void
   T *shared_k_buffer = (T *)(smem + 18304);
   T *shared_v = (T *)(smem + 34688);
   T *shared_v_buffer = (T *)(smem + 51072);
-  T *shared_output = (T *)(smem + 128);
   T *zero_buf = (T *)(smem);
 
   // flashattn metadata - need more space for multi-token
@@ -93,6 +89,9 @@ __device__ __forceinline__ void
 
   float *qnorm_sum = (float *)(smem + 84864);
   float *knorm_sum = (float *)(smem + 84880);
+  
+  // Place shared_output after all other allocations
+  T *shared_output = (T *)(smem + 84896);
 
   // Shared memory abstractions
   smem_row<T, 1, 1, 1, 1, 8, 8> zero_buffer(zero_buf);
@@ -113,8 +112,28 @@ __device__ __forceinline__ void
     zero_buffer.at(i) = (bfloat16)0.0f;
   }
 
-  // Process each token
+  // Calculate sequence length parameters (same for all tokens)
+  // seq_len is the position where new tokens will be written
+  // Valid cache is from 0 to seq_len-1
+  size_t cache_len = seq_len > 0 ? seq_len - 1 : 0;
+  size_t num_iterations = cache_len > 0 ? (cache_len + KV_CHUNK_SIZE - 1) / KV_CHUNK_SIZE : 0;
+  int curr_iter_len = cache_len > 0 ? std::min(static_cast<int>(cache_len), static_cast<int>(KV_CHUNK_SIZE)) : 0;
+  int cp_finished_seq_len = curr_iter_len;
+  int last_seq_len = curr_iter_len;
+
+  // Process each token independently (all see same context)
   for (int token_idx = 0; token_idx < NUM_TOKENS; token_idx++) {
+    
+    // Reset KV cache smem pointers for each token
+    k_cache_smem.set_ptr(shared_k);
+    k_cache_smem_buffer.set_ptr(shared_k_buffer);
+    v_cache_smem.set_ptr(shared_v);
+    v_cache_smem_buffer.set_ptr(shared_v_buffer);
+    
+    // Reset iteration variables for each token
+    curr_iter_len = cache_len > 0 ? std::min(static_cast<int>(cache_len), static_cast<int>(KV_CHUNK_SIZE)) : 0;
+    cp_finished_seq_len = curr_iter_len;
+    
     // Calculate offsets for current token in input layout
     // Layout: [Q_heads, K_heads, V_heads] for each token
     int heads_per_token = NUM_Q_HEADS + NUM_KV_HEADS + NUM_KV_HEADS;
@@ -137,6 +156,7 @@ __device__ __forceinline__ void
       int col = (i % 16) * 8;
       load_smem(q_smem(row, col), q_dmem(row, col));
     }
+    __syncthreads();  // Ensure Q is fully loaded before proceeding
 
     // Initialize flash attention metadata
     float o[8][8];
@@ -147,39 +167,36 @@ __device__ __forceinline__ void
     float d_sum = 1.f;
     float m = -inf;
 
-    // Load first KV chunk
+    // Load first KV chunk (only from cache, not including current token)
     #pragma unroll
     for (int i = threadIdx.x; i < (curr_iter_len * 16); i += NUM_THREADS) {
       int row = i / 16;
       int col = (i % 16) * 8;
-      if (row == seq_len - 1 + token_idx) {
-        // Load from current token's K
-        load_smem(k_cache_smem_buffer(row, col), k_dmem(0, col));
-      } else {
-        // Load from cache
-        load_smem(k_cache_smem_buffer(row, col), k_cache_dmem(row, col));
-      }
+      // Load from cache only
+      load_smem(k_cache_smem_buffer(row, col), k_cache_dmem(row, col));
     }
 
     #pragma unroll
     for (int i = threadIdx.x; i < (curr_iter_len * 16); i += NUM_THREADS) {
       int row = i / 16;
       int col = (i % 16) * 8;
-      if (row == seq_len - 1 + token_idx) {
-        // Load from current token's V
-        load_smem(v_cache_smem_buffer(row, col), v_dmem(0, col));
-      } else {
-        // Load from cache
-        load_smem(v_cache_smem_buffer(row, col), v_cache_dmem(row, col));
-      }
+      // Load from cache only
+      load_smem(v_cache_smem_buffer(row, col), v_cache_dmem(row, col));
     }
     cp_async_fence();
 
-    // KV iteration
-    for (uint32_t kv_idx = 0; kv_idx < num_iterations; kv_idx += 1) {
+    // KV iteration - skip if no cache
+    if (cache_len == 0) {
+      // No cache, output should be zeros
+      #pragma unroll
+      for (int n = 0; n < 8; n++) {
+        clear_8_floats(o[n]);
+      }
+    } else {
+      for (uint32_t kv_idx = 0; kv_idx < num_iterations; kv_idx += 1) {
       int next_iter_len =
           kv_idx + 1 < num_iterations
-              ? static_cast<int>(std::min(seq_len + token_idx + 1, 
+              ? static_cast<int>(std::min(cache_len, 
                                          (kv_idx + 2) * KV_CHUNK_SIZE) -
                                  (kv_idx + 1) * KV_CHUNK_SIZE)
               : -1;
@@ -190,22 +207,16 @@ __device__ __forceinline__ void
           int row = i / 16;
           int col = (i % 16) * 8;
           int global_row = cp_finished_seq_len + row;
-          if (global_row == seq_len - 1 + token_idx) {
-            load_smem(k_cache_smem(row, col), k_dmem(0, col));
-          } else {
-            load_smem(k_cache_smem(row, col), k_cache_dmem(global_row, col));
-          }
+          // Always load from cache (no current token in KV)
+          load_smem(k_cache_smem(row, col), k_cache_dmem(global_row, col));
         }
         #pragma unroll
         for (int i = threadIdx.x; i < (next_iter_len * 16); i += NUM_THREADS) {
           int row = i / 16;
           int col = (i % 16) * 8;
           int global_row = cp_finished_seq_len + row;
-          if (global_row == seq_len - 1 + token_idx) {
-            load_smem(v_cache_smem(row, col), v_dmem(0, col));
-          } else {
-            load_smem(v_cache_smem(row, col), v_cache_dmem(global_row, col));
-          }
+          // Always load from cache (no current token in KV)
+          load_smem(v_cache_smem(row, col), v_cache_dmem(global_row, col));
         }
         cp_async_fence();
         cp_async_wait<1>();
@@ -236,8 +247,8 @@ __device__ __forceinline__ void
             q_eps,
             0,
             rotary_emd,
-            static_cast<T const *>(cos_ptr) + (seq_len + token_idx) * HEAD_DIM,
-            static_cast<T const *>(sin_ptr) + (seq_len + token_idx) * HEAD_DIM);
+            static_cast<T const *>(cos_ptr) + seq_len * HEAD_DIM,
+            static_cast<T const *>(sin_ptr) + seq_len * HEAD_DIM);
       }
 
       if (qk_norm && kv_idx == num_iterations - 1) {
@@ -248,8 +259,8 @@ __device__ __forceinline__ void
             k_eps,
             curr_iter_len - 1,
             rotary_emd,
-            static_cast<T const *>(cos_ptr) + (seq_len + token_idx) * HEAD_DIM,
-            static_cast<T const *>(sin_ptr) + (seq_len + token_idx) * HEAD_DIM);
+            static_cast<T const *>(cos_ptr) + seq_len * HEAD_DIM,
+            static_cast<T const *>(sin_ptr) + seq_len * HEAD_DIM);
       }
       __syncthreads();
 
@@ -349,6 +360,7 @@ __device__ __forceinline__ void
         curr_iter_len = next_iter_len;
       }
     }
+    } // End of cache_len > 0 check
 
     // Store intermediate results
     for (int n = 0; n < 8; n++) {
@@ -414,19 +426,12 @@ __device__ __forceinline__ void
     }
     __syncthreads();
 
-    // Update KV cache for current token
+    // Update KV cache with current token's K and V
+    // All tokens are written sequentially starting at seq_len-1
     #pragma unroll
-    for (int i = threadIdx.x; i < (NUM_KV_HEADS * HEAD_DIM); i += NUM_THREADS) {
-      int head = i / HEAD_DIM;
-      int col = i % HEAD_DIM;
-      k_cache_dmem.at(seq_len - 1 + token_idx, col) = k_dmem.at(head, col);
-    }
-
-    #pragma unroll
-    for (int i = threadIdx.x; i < (NUM_KV_HEADS * HEAD_DIM); i += NUM_THREADS) {
-      int head = i / HEAD_DIM;
-      int col = i % HEAD_DIM;
-      v_cache_dmem.at(seq_len - 1 + token_idx, col) = v_dmem.at(head, col);
+    for (int i = threadIdx.x; i < HEAD_DIM; i += NUM_THREADS) {
+      k_cache_dmem.at(seq_len - 1 + token_idx, i) = k_dmem.at(0, i);
+      v_cache_dmem.at(seq_len - 1 + token_idx, i) = v_dmem.at(0, i);
     }
 
     // Write output to device memory
