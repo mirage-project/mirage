@@ -999,6 +999,5 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("multitoken_paged_attention",
         &multitoken_paged_attention,
         "Multitoken Paged Attention");
-  m.def("window_rms_norm", &window_rms_norm, "Window RMSNorm");
   m.def("rms_norm", &rms_norm, "Window RMSNorm");
 }
