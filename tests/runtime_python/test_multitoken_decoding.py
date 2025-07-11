@@ -2,6 +2,7 @@ import torch
 import torch.nn.functional as F
 import runtime_kernel
 import numpy as np
+import time
 
 # Set random seed for reproducibility
 torch.manual_seed(42)
@@ -17,6 +18,13 @@ max_seq_len = 512
 
 device = "cuda"
 dtype = torch.bfloat16
+
+
+def get_memory_usage():
+    """Get current GPU memory usage in MB."""
+    if torch.cuda.is_available():
+        return torch.cuda.memory_allocated() / 1024 / 1024
+    return 0
 
 
 def pytorch_multitoken_attention(qkv, k_cache, v_cache, seq_len):
@@ -93,6 +101,7 @@ def test_multitoken_kernel():
     for seq_len, description in test_cases:
         print(f"\nTest Case: seq_len={seq_len} ({description})")
         print("-" * 40)
+        torch.cuda.empty_cache()
 
         # 1. Random initialization
         # Initialize caches with random values
@@ -118,19 +127,42 @@ def test_multitoken_kernel():
         )
 
         # 2. Calculate expected results using PyTorch
+        # Measure memory before PyTorch execution
+        mem_before_pytorch = get_memory_usage()
+
+        # Measure PyTorch execution time
+        start_time_pytorch = time.perf_counter()
         expected_outputs, expected_k_cache, expected_v_cache = (
             pytorch_multitoken_attention(
                 qkv, k_cache_init.clone(), v_cache_init.clone(), seq_len
             )
         )
+        torch.cuda.synchronize()
+        end_time_pytorch = time.perf_counter()
 
-        # 3. Run the kernel
+        # Measure memory after PyTorch execution
+        mem_after_pytorch = get_memory_usage()
+
+        pytorch_time_ms = (end_time_pytorch - start_time_pytorch) * 1000
+        pytorch_memory_used_mb = mem_after_pytorch - mem_before_pytorch
+
+        # Print profiling results for PyTorch
+        print(f"PyTorch Performance:")
+        print(f"  Execution time: {pytorch_time_ms:.3f} ms")
+        print(f"  Memory used: {pytorch_memory_used_mb:.2f} MB")
+
+        # 3. Run the kernel with profiling
         k_cache_kernel = k_cache_init.clone()
         v_cache_kernel = v_cache_init.clone()
         kernel_outputs = torch.empty(
             (num_tokens * q_heads, head_dim), device=device, dtype=dtype
         )
 
+        # Measure memory before kernel execution
+        mem_before = get_memory_usage()
+
+        # Measure kernel execution time
+        start_time = time.perf_counter()
         runtime_kernel.single_batch_multitoken_decoding(
             qkv,
             k_cache_kernel,
@@ -147,8 +179,20 @@ def test_multitoken_kernel():
             0.0,
         )
         torch.cuda.synchronize()
+        end_time = time.perf_counter()
+
+        # Measure memory after kernel execution
+        mem_after = get_memory_usage()
+
+        kernel_time_ms = (end_time - start_time) * 1000
+        memory_used_mb = mem_after - mem_before
 
         kernel_outputs = kernel_outputs.view(num_tokens, q_heads, head_dim)
+
+        # Print profiling results
+        print(f"Kernel Performance:")
+        print(f"  Execution time: {kernel_time_ms:.3f} ms")
+        print(f"  Memory used: {memory_used_mb:.2f} MB")
 
         # 4. Compare results
         # Compare attention outputs
