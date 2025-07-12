@@ -26,6 +26,17 @@
 #include "utils.cuh"
 namespace kernel {
 
+  /**
+ * For every token we launch with the kernel we store one bit per past-position:
+ *
+ *   1 == “this K/V position is visible”
+ *   0 == “masked (do NOT attend)”
+ *
+ * Layout in global memory:
+ *   mask[token_idx * num_mask_words + word_idx]
+ */
+using MaskWord = uint64_t;
+
 // Multi-token parallel decoding kernel for speculative decoding
 // Input layout: [Q_token0, K_token0, V_token0, Q_token1, K_token1, V_token1, ...]
 // Each token has NUM_Q_HEADS Q heads, NUM_KV_HEADS K heads, NUM_KV_HEADS V heads
@@ -50,7 +61,11 @@ __device__ __forceinline__ void
                                  void const *cos_ptr,
                                  void const *sin_ptr,
                                  float q_eps,
-                                 float k_eps) {
+                                 float k_eps,
+                                 uint32_t prompt_len,
+                                 uint32_t mask_words_per_token,
+                                 MaskWord const *attn_mask_ptr
+                                ) {
   constexpr size_t MAX_SEQ_LEN = 512;
   constexpr size_t KV_CHUNK_SIZE = 64;
   float const sm_scale = (1.f / sqrt((float)HEAD_DIM));
@@ -194,7 +209,31 @@ __device__ __forceinline__ void
       }
     } else {
       for (uint32_t kv_idx = 0; kv_idx < num_iterations; kv_idx += 1) {
-      int next_iter_len =
+        // Fetch 64-bit mask that covers this KV chunk
+        // 0 => fully masked
+        MaskWord local_mask_word;
+
+        // If no mask, default to full attention
+        if (attn_mask_ptr == nullptr || mask_words_per_token == 0) {
+          local_mask_word = 0xFFFFFFFFFFFFFFFFull;
+        } else {
+          int word_idx = (kv_idx * KV_CHUNK_SIZE) >> 6;
+          local_mask_word =
+              attn_mask_ptr[token_idx * mask_words_per_token + word_idx];
+        }
+
+        int chunk_start = kv_idx * KV_CHUNK_SIZE;
+        int chunk_end   = chunk_start + KV_CHUNK_SIZE - 1;
+
+        if (chunk_end < prompt_len) {
+          local_mask_word = 0xFFFFFFFFFFFFFFFFull;
+        } else if (chunk_start < prompt_len) {
+          int prompt_bits = prompt_len - chunk_start;
+          MaskWord lower  = 0xFFFFFFFFFFFFFFFFull >> (64 - prompt_bits);
+          local_mask_word |= lower;
+        }
+
+        int next_iter_len =
           kv_idx + 1 < num_iterations
               ? static_cast<int>(std::min(cache_len, 
                                          (kv_idx + 2) * KV_CHUNK_SIZE) -
@@ -298,7 +337,11 @@ __device__ __forceinline__ void
         for (int j = 0; j < 2; ++j) {
           int idx = i * 4 + j;
           int col = (idx_in_warp % 4) * 2 + i * 8 + j + warp_idx * 16;
-          s_frag[idx] = (col < curr_iter_len) ? s_frag[idx] : -inf;
+          bool is_valid_col = (col < curr_iter_len);
+          bool is_allowed_by_mask = (local_mask_word >> (col & 63)) & 1ull;
+          
+          // Requires bit mask to be 1 and in current chunk
+          s_frag[idx] = (is_valid_col && is_allowed_by_mask) ? s_frag[idx] : -inf;
           m = max(s_frag[idx], m);
         }
       }
@@ -319,10 +362,9 @@ __device__ __forceinline__ void
           int idx = i * 4 + j;
           int col = (idx_in_warp % 4) * 2 + i * 8 + j + warp_idx * 16;
           int row = idx_in_warp / 4;
-          s_frag[idx] = ((col < curr_iter_len) && (row < NUM_Q_HEADS))
-                            ? expf(s_frag[idx] * sm_scale - m * sm_scale)
-                            : 0;
-          d_local += s_frag[idx];
+          float prob = expf(s_frag[idx] * sm_scale - m * sm_scale);
+          s_frag[idx] = prob;
+          d_local += prob;
         }
       }
 
@@ -354,11 +396,12 @@ __device__ __forceinline__ void
       }
       __syncthreads();
 
-      if (kv_idx != num_iterations) {
-        last_seq_len = curr_iter_len;
-        cp_finished_seq_len += next_iter_len;
-        curr_iter_len = next_iter_len;
-      }
+      // Unconditionally update seq length in the case
+      // where we masked the entire chunk
+      last_seq_len        = curr_iter_len;
+      cp_finished_seq_len += curr_iter_len;
+      curr_iter_len       = next_iter_len > 0 ? next_iter_len : curr_iter_len;
+      
     }
     } // End of cache_len > 0 check
 
