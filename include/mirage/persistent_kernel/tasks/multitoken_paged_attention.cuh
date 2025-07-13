@@ -328,9 +328,9 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl(
             token_idx * NUM_QO_PER_KV,
             rope,
             static_cast<T const *>(cos_ptr) +
-                (token_idx + seq_len - num_tokens + 1) * HEAD_DIM,
+                (token_idx + seq_len - num_tokens) * HEAD_DIM,
             static_cast<T const *>(sin_ptr) +
-                (token_idx + seq_len - num_tokens + 1) * HEAD_DIM);
+                (token_idx + seq_len - num_tokens) * HEAD_DIM);
       }
     }
 
@@ -347,9 +347,9 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl(
             token_idx + curr_iter_len - num_tokens,
             rope,
             static_cast<T const *>(cos_ptr) +
-                (token_idx + seq_len - num_tokens + 1) * HEAD_DIM,
+                (token_idx + seq_len - num_tokens) * HEAD_DIM,
             static_cast<T const *>(sin_ptr) +
-                (token_idx + seq_len - num_tokens + 1) * HEAD_DIM);
+                (token_idx + seq_len - num_tokens) * HEAD_DIM);
       }
     }
     __syncthreads();
