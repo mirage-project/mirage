@@ -280,8 +280,8 @@ __device__ __forceinline__ void
           q_eps,
           0,
           rope,
-          static_cast<T const *>(cos_ptr) + seq_len * HEAD_DIM,
-          static_cast<T const *>(sin_ptr) + seq_len * HEAD_DIM);
+          static_cast<T const *>(cos_ptr) + (seq_len - 1) * HEAD_DIM,
+          static_cast<T const *>(sin_ptr) + (seq_len - 1) * HEAD_DIM);
     }
 
     // K norm
@@ -293,8 +293,8 @@ __device__ __forceinline__ void
           k_eps,
           curr_iter_len - 1,
           rope,
-          static_cast<T const *>(cos_ptr) + seq_len * HEAD_DIM,
-          static_cast<T const *>(sin_ptr) + seq_len * HEAD_DIM);
+          static_cast<T const *>(cos_ptr) + (seq_len - 1) * HEAD_DIM,
+          static_cast<T const *>(sin_ptr) + (seq_len - 1) * HEAD_DIM);
     }
     __syncthreads();
 

@@ -135,7 +135,7 @@ for i in range(512):
         eps,
         eps,
     )
-    diff = mirage_output - torch_output
-    print("seq_len res:", seq_len, "min:", diff.min().item(), "max:", diff.max().item())
     print("torch_output / mirage_output:")
     print(torch_output / mirage_output)
+    diff = mirage_output - torch_output
+    print("seq_len res:", seq_len, "min:", diff.min().item(), "max:", diff.max().item())
