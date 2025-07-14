@@ -30,40 +30,43 @@ def get_memory_usage():
 def create_attention_mask(num_tokens, seq_len, prompt_len, device):
     """
     Create attention mask for multitoken decoding.
-    
+
     Args:
         num_tokens: Number of tokens being processed
         seq_len: Current sequence length
         prompt_len: Length of prompt (all positions < prompt_len are always visible)
         device: Device to create tensor on
-    
+
     Returns:
         mask: [num_tokens, mask_words_per_token] uint64 tensor
         mask_words_per_token: Number of 64-bit words per token
     """
     total_kv_len = seq_len + num_tokens - 1
     mask_words_per_token = (total_kv_len + 63) // 64  # ceil_div
-    
+
     # Create mask tensor
-    mask = torch.zeros((num_tokens, mask_words_per_token), dtype=torch.uint64, device=device)
-    
+    mask = torch.zeros(
+        (num_tokens, mask_words_per_token), dtype=torch.uint64, device="cpu"
+    )
+
     for token_idx in range(num_tokens):
         for pos in range(total_kv_len):
             word_idx = pos // 64
             bit_idx = pos % 64
-            
+
             # All positions < prompt_len are always visible
             if pos < prompt_len:
-                mask[token_idx, word_idx] |= (1 << bit_idx)
+                mask[token_idx, word_idx] |= 1 << bit_idx
             else:
-                # For positions >= prompt_len, you can customize the mask
-                # Here we make all positions visible (you can modify this)
-                mask[token_idx, word_idx] |= (1 << bit_idx)
-    
-    return mask, mask_words_per_token
+                # Customize the mask for positions >= prompt_len
+                mask[token_idx, word_idx] |= 1 << bit_idx
+
+    return mask.to(device), mask_words_per_token
 
 
-def pytorch_multitoken_attention(qkv, k_cache, v_cache, seq_len, prompt_len=0, attn_mask=None):
+def pytorch_multitoken_attention(
+    qkv, k_cache, v_cache, seq_len, prompt_len=0, attn_mask=None
+):
     """
     PyTorch reference implementation with attention mask support.
 
@@ -108,23 +111,25 @@ def pytorch_multitoken_attention(qkv, k_cache, v_cache, seq_len, prompt_len=0, a
 
             # Attention computation
             scores = torch.matmul(q, k_context.transpose(-2, -1)) / (head_dim**0.5)
-            
+
             # Apply attention mask if provided
             if attn_mask is not None:
                 # Create mask for current token
                 token_mask = torch.zeros(seq_len - 1, dtype=torch.bool, device=device)
-                
+
                 # Check each position in the mask
                 for pos in range(seq_len - 1):
                     word_idx = pos // 64
                     bit_idx = pos % 64
                     if word_idx < attn_mask.shape[1]:
-                        token_mask[pos] = bool(attn_mask[token_idx, word_idx] & (1 << bit_idx))
-                
+                        token_mask[pos] = bool(
+                            attn_mask[token_idx, word_idx] & (1 << bit_idx)
+                        )
+
                 # Apply mask: set masked positions to -inf
                 mask_expanded = token_mask.unsqueeze(0).expand(q_heads, -1)
-                scores = scores.masked_fill(~mask_expanded, float('-inf'))
-            
+                scores = scores.masked_fill(~mask_expanded, float("-inf"))
+
             attn_weights = F.softmax(scores, dim=-1)
             output = torch.matmul(attn_weights, v_context).squeeze(1)
         else:
@@ -154,7 +159,9 @@ def test_multitoken_kernel():
     all_passed = True
 
     for seq_len, prompt_len, description in test_cases:
-        print(f"\nTest Case: seq_len={seq_len}, prompt_len={prompt_len} ({description})")
+        print(
+            f"\nTest Case: seq_len={seq_len}, prompt_len={prompt_len} ({description})"
+        )
         print("-" * 50)
         torch.cuda.empty_cache()
 
@@ -194,7 +201,12 @@ def test_multitoken_kernel():
         start_time_pytorch = time.perf_counter()
         expected_outputs, expected_k_cache, expected_v_cache = (
             pytorch_multitoken_attention(
-                qkv, k_cache_init.clone(), v_cache_init.clone(), seq_len, prompt_len, attn_mask
+                qkv,
+                k_cache_init.clone(),
+                v_cache_init.clone(),
+                seq_len,
+                prompt_len,
+                attn_mask,
             )
         )
         torch.cuda.synchronize()
@@ -231,12 +243,12 @@ def test_multitoken_kernel():
             seq_len,
             False,  # qk_norm
             False,  # rotary_emd
-            None,   # qnorm_weight
-            None,   # knorm_weight
-            None,   # cos
-            None,   # sin
-            0.0,    # q_eps
-            0.0,    # k_eps
+            None,  # qnorm_weight
+            None,  # knorm_weight
+            None,  # cos
+            None,  # sin
+            0.0,  # q_eps
+            0.0,  # k_eps
             prompt_len,
             mask_words_per_token,
             attn_mask,
@@ -336,4 +348,5 @@ def test_multitoken_kernel():
 
 
 if __name__ == "__main__":
+    print(runtime_kernel.__file__)
     test_multitoken_kernel()
