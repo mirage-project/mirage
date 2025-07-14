@@ -215,7 +215,10 @@ __global__ void single_batch_multitoken_decoding_wrapper(void const *qkv_ptr,
                                                         void const *cos_ptr,
                                                         void const *sin_ptr,
                                                         float q_eps,
-                                                        float k_eps) {
+                                                        float k_eps,
+                                                        uint32_t prompt_len,
+                                                        uint32_t mask_words_per_token,
+                                                        uint64_t const *attn_mask_ptr) {
   single_batch_multitoken_decoding_kernel<T,
                                          NUM_Q_HEADS,
                                          NUM_KV_HEADS,
@@ -233,7 +236,10 @@ __global__ void single_batch_multitoken_decoding_wrapper(void const *qkv_ptr,
                                                      cos_ptr,
                                                      sin_ptr,
                                                      q_eps,
-                                                     k_eps);
+                                                     k_eps,
+                                                     prompt_len,
+                                                     mask_words_per_token,
+                                                     attn_mask_ptr);
 }
 
 void single_batch_multitoken_decoding(
@@ -249,7 +255,10 @@ void single_batch_multitoken_decoding(
     torch::optional<torch::Tensor> cos = torch::nullopt,
     torch::optional<torch::Tensor> sin = torch::nullopt,
     float q_eps = 0.0f,
-    float k_eps = 0.0f) {
+    float k_eps = 0.0f,
+    uint32_t prompt_len = 0,
+    uint32_t mask_words_per_token = 0,
+    torch::optional<torch::Tensor> attn_mask = torch::nullopt) {
   
   void const *qkv_ptr = qkv.data_ptr();
   void *k_cache_ptr = k_cache.data_ptr();
@@ -277,6 +286,18 @@ void single_batch_multitoken_decoding(
     throw std::runtime_error("Invalid qkv tensor shape");
   }
   
+  // Setup mask parameters
+  uint32_t computed_mask_words_per_token = mask_words_per_token;
+  const uint64_t* attn_mask_ptr = nullptr;
+  
+  if (attn_mask.has_value() && attn_mask->defined()) {
+    // Compute mask_words_per_token if not provided
+    if (computed_mask_words_per_token == 0) {
+      computed_mask_words_per_token = (seq_len + num_tokens - 1 + 63) / 64; // ceil_div
+    }
+    attn_mask_ptr = reinterpret_cast<const uint64_t*>(attn_mask->data_ptr());
+  }
+  
   // Dispatch based on number of tokens
   switch (num_tokens) {
     case 1:
@@ -286,7 +307,8 @@ void single_batch_multitoken_decoding(
       single_batch_multitoken_decoding_wrapper<bfloat16, NUM_Q_HEADS, NUM_KV_HEADS, HEAD_DIM, WEIGHT_STRIDE, 1>
           <<<grid_dim, block_dim, smem_size>>>(qkv_ptr, k_cache_ptr, v_cache_ptr, output_ptr,
                                                seq_len, qk_norm, rotary_emd, qnorm_weight_ptr,
-                                               knorm_weight_ptr, cos_ptr, sin_ptr, q_eps, k_eps);
+                                               knorm_weight_ptr, cos_ptr, sin_ptr, q_eps, k_eps,
+                                               prompt_len, computed_mask_words_per_token, attn_mask_ptr);
       break;
     case 2:
       cudaFuncSetAttribute(single_batch_multitoken_decoding_wrapper<bfloat16, NUM_Q_HEADS, NUM_KV_HEADS, HEAD_DIM, WEIGHT_STRIDE, 2>,
@@ -295,7 +317,8 @@ void single_batch_multitoken_decoding(
       single_batch_multitoken_decoding_wrapper<bfloat16, NUM_Q_HEADS, NUM_KV_HEADS, HEAD_DIM, WEIGHT_STRIDE, 2>
           <<<grid_dim, block_dim, smem_size>>>(qkv_ptr, k_cache_ptr, v_cache_ptr, output_ptr,
                                                seq_len, qk_norm, rotary_emd, qnorm_weight_ptr,
-                                               knorm_weight_ptr, cos_ptr, sin_ptr, q_eps, k_eps);
+                                               knorm_weight_ptr, cos_ptr, sin_ptr, q_eps, k_eps,
+                                               prompt_len, computed_mask_words_per_token, attn_mask_ptr);
       break;
     case 3:
       cudaFuncSetAttribute(single_batch_multitoken_decoding_wrapper<bfloat16, NUM_Q_HEADS, NUM_KV_HEADS, HEAD_DIM, WEIGHT_STRIDE, 3>,
@@ -304,7 +327,8 @@ void single_batch_multitoken_decoding(
       single_batch_multitoken_decoding_wrapper<bfloat16, NUM_Q_HEADS, NUM_KV_HEADS, HEAD_DIM, WEIGHT_STRIDE, 3>
           <<<grid_dim, block_dim, smem_size>>>(qkv_ptr, k_cache_ptr, v_cache_ptr, output_ptr,
                                                seq_len, qk_norm, rotary_emd, qnorm_weight_ptr,
-                                               knorm_weight_ptr, cos_ptr, sin_ptr, q_eps, k_eps);
+                                               knorm_weight_ptr, cos_ptr, sin_ptr, q_eps, k_eps,
+                                               prompt_len, computed_mask_words_per_token, attn_mask_ptr);
       break;
     case 4:
       cudaFuncSetAttribute(single_batch_multitoken_decoding_wrapper<bfloat16, NUM_Q_HEADS, NUM_KV_HEADS, HEAD_DIM, WEIGHT_STRIDE, 4>,
@@ -313,7 +337,8 @@ void single_batch_multitoken_decoding(
       single_batch_multitoken_decoding_wrapper<bfloat16, NUM_Q_HEADS, NUM_KV_HEADS, HEAD_DIM, WEIGHT_STRIDE, 4>
           <<<grid_dim, block_dim, smem_size>>>(qkv_ptr, k_cache_ptr, v_cache_ptr, output_ptr,
                                                seq_len, qk_norm, rotary_emd, qnorm_weight_ptr,
-                                               knorm_weight_ptr, cos_ptr, sin_ptr, q_eps, k_eps);
+                                               knorm_weight_ptr, cos_ptr, sin_ptr, q_eps, k_eps,
+                                               prompt_len, computed_mask_words_per_token, attn_mask_ptr);
       break;
     default:
       throw std::runtime_error("Unsupported number of tokens: " + std::to_string(num_tokens));
@@ -914,5 +939,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("cos") = py::none(),
         py::arg("sin") = py::none(),
         py::arg("q_eps") = 0.0f,
-        py::arg("k_eps") = 0.0f);
+        py::arg("k_eps") = 0.0f,
+        py::arg("prompt_len") = 0,
+        py::arg("mask_words_per_token") = 0,
+        py::arg("attn_mask") = py::none());
 }
