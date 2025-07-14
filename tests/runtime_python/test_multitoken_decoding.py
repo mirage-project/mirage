@@ -44,10 +44,8 @@ def create_attention_mask(num_tokens, seq_len, prompt_len, device):
     total_kv_len = seq_len + num_tokens - 1
     mask_words_per_token = (total_kv_len + 63) // 64  # ceil_div
 
-    # Create mask tensor
-    mask = torch.zeros(
-        (num_tokens, mask_words_per_token), dtype=torch.uint64, device="cpu"
-    )
+    # Create mask array in numpy first
+    mask_np = np.zeros((num_tokens, mask_words_per_token), dtype=np.uint64)
 
     for token_idx in range(num_tokens):
         for pos in range(total_kv_len):
@@ -56,12 +54,15 @@ def create_attention_mask(num_tokens, seq_len, prompt_len, device):
 
             # All positions < prompt_len are always visible
             if pos < prompt_len:
-                mask[token_idx, word_idx] |= 1 << bit_idx
+                # Use numpy uint64 to handle bit shifting properly
+                mask_np[token_idx, word_idx] |= np.uint64(1) << np.uint64(bit_idx)
             else:
                 # Customize the mask for positions >= prompt_len
-                mask[token_idx, word_idx] |= 1 << bit_idx
+                mask_np[token_idx, word_idx] |= np.uint64(1) << np.uint64(bit_idx)
 
-    return mask.to(device), mask_words_per_token
+    # Convert to torch tensor
+    mask = torch.from_numpy(mask_np).to(device)
+    return mask, mask_words_per_token
 
 
 def pytorch_multitoken_attention(
@@ -106,8 +107,9 @@ def pytorch_multitoken_attention(
         # Compute attention using cache (excluding new tokens)
         if seq_len > 1:
             # Use positions 0 to seq_len-2 for attention
-            k_context = k_cache[: seq_len - 1].unsqueeze(0).expand(q_heads, -1, -1)
-            v_context = v_cache[: seq_len - 1].unsqueeze(0).expand(q_heads, -1, -1)
+            # Note: k_cache and v_cache are [seq_len, head_dim] for single K/V heads
+            k_context = k_cache[: seq_len - 1].unsqueeze(0)  # [1, seq_len-1, head_dim]
+            v_context = v_cache[: seq_len - 1].unsqueeze(0)  # [1, seq_len-1, head_dim]
 
             # Attention computation
             scores = torch.matmul(q, k_context.transpose(-2, -1)) / (head_dim**0.5)
@@ -117,21 +119,27 @@ def pytorch_multitoken_attention(
                 # Create mask for current token
                 token_mask = torch.zeros(seq_len - 1, dtype=torch.bool, device=device)
 
+                # Move attn_mask to CPU for bitwise operations
+                attn_mask_cpu = attn_mask.cpu()
+
                 # Check each position in the mask
                 for pos in range(seq_len - 1):
                     word_idx = pos // 64
                     bit_idx = pos % 64
                     if word_idx < attn_mask.shape[1]:
-                        token_mask[pos] = bool(
-                            attn_mask[token_idx, word_idx] & (1 << bit_idx)
-                        )
+                        # Perform bitwise operation on CPU
+                        # Keep as uint64 to avoid overflow when converting to int
+                        mask_val = attn_mask_cpu[token_idx, word_idx].item()
+                        # Use numpy for consistent uint64 bit operations
+                        token_mask[pos] = bool(mask_val & (np.uint64(1) << np.uint64(bit_idx)))
 
                 # Apply mask: set masked positions to -inf
-                mask_expanded = token_mask.unsqueeze(0).expand(q_heads, -1)
+                mask_expanded = token_mask.unsqueeze(0).unsqueeze(0)  # [1, 1, seq_len-1]
                 scores = scores.masked_fill(~mask_expanded, float("-inf"))
 
             attn_weights = F.softmax(scores, dim=-1)
-            output = torch.matmul(attn_weights, v_context).squeeze(1)
+            output = torch.matmul(attn_weights, v_context)
+            output = output.squeeze(1)
         else:
             # No context, output zeros
             output = torch.zeros((q_heads, head_dim), device=device, dtype=dtype)
@@ -268,6 +276,10 @@ def test_multitoken_kernel():
         print(f"Kernel Performance:")
         print(f"  Execution time: {kernel_time_ms:.3f} ms")
         print(f"  Memory used: {memory_used_mb:.2f} MB")
+
+        # Debug: Print shapes
+        print(f"  Expected outputs shape: {expected_outputs.shape}")
+        print(f"  Kernel outputs shape: {kernel_outputs.shape}")
 
         # 5. Compare results
         # Compare attention outputs
