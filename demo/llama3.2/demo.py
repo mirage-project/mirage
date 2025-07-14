@@ -85,8 +85,20 @@ if __name__ == "__main__":
         batch_size = 1
         hidden_size = model.config.hidden_size
         intermediate_size = model.config.intermediate_size
-        lm_head_weight = model.lm_head.weight
-        vocab_size = model.config.vocab_size
+        padded_vocab_size = ((model.config.vocab_size + 95) // 96) * 96
+        lm_head_weight = torch.cat(
+            (
+                model.lm_head.weight,
+                torch.zeros(
+                    (padded_vocab_size - model.config.vocab_size, hidden_size), 
+                    dtype=torch.bfloat16, 
+                    device="cuda"
+                ),
+            ),
+            0,
+        )
+        assert lm_head_weight.stride()[0] == hidden_size
+        vocab_size = padded_vocab_size
         num_q_heads = model.config.num_attention_heads
         num_kv_heads = model.config.num_key_value_heads
         num_local_q_heads = num_q_heads // world_size
@@ -248,16 +260,10 @@ if __name__ == "__main__":
             v_cache = mpk.attach_input(
                 torch_tensor=model.model.kv_cache[1][i], name=f"layer_{i}_v_cache"
             )
-            w_q_norm = mpk.attach_input(
-                torch_tensor=torch.ones(head_dim, dtype=torch.bfloat16, device="cuda"), name=f"layer_{i}_q_norm_dummy"
-            )
-            w_k_norm = mpk.attach_input(
-                torch_tensor=torch.ones(head_dim, dtype=torch.bfloat16, device="cuda"), name=f"layer_{i}_k_norm_dummy"
-            )
             mpk.attention_layer(
                 input=attn_in,
-                q_norm=w_q_norm,
-                k_norm=w_k_norm,
+                q_norm=None,
+                k_norm=None,
                 k_cache=k_cache,
                 v_cache=v_cache,
                 cos_pos_embed=cos_pos_embed,
