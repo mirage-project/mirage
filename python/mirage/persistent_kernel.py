@@ -120,6 +120,7 @@ def get_compile_command(
         "-use_fast_math",
         "-Xcompiler=-fPIC",
         "--expt-relaxed-constexpr",
+        "-diag-suppress=177",  # Suppress "variable declared but never referenced" warnings
         "-o",
         py_so_path,
     ]
@@ -462,6 +463,75 @@ class PersistentKernel:
         self.kn_graph.customized([input, output], tb_graph)
         self.kn_graph.register_task(tb_graph, "softmax", [temp_int])
 
+    def mask_attention_layer(
+        self,
+        qkv: DTensor,
+        k_cache: DTensor,
+        v_cache: DTensor,
+        output: DTensor,
+        qnorm_weight: DTensor,
+        knorm_weight: DTensor,
+        cos: DTensor,
+        sin: DTensor,
+        attn_mask: DTensor,
+        num_q_heads: int,
+        num_kv_heads: int,
+        head_dim: int,
+        weight_stride: int,
+        num_tokens: int,
+        seq_len: int,
+        grid_dim: tuple,
+        block_dim: tuple,
+        qk_norm: bool = False,
+        rotary_emb: bool = False,
+        q_eps: float = 1e-6,
+        k_eps: float = 1e-6,
+        prompt_len: int = 0,
+        mask_words_per_token: int = 0,
+    ):
+        # Validate input dimensions
+        assert qkv.num_dims == 2
+        assert k_cache.num_dims == 2
+        assert v_cache.num_dims == 2
+        assert output.num_dims == 2
+        assert attn_mask.num_dims == 2
+        
+        # Convert float epsilons to int (multiply by 1000000 for precision)
+        q_eps_int = int(q_eps * 1000000)
+        k_eps_int = int(k_eps * 1000000)
+        
+        # Pack parameters
+        params = [
+            num_q_heads,
+            num_kv_heads,
+            head_dim,
+            weight_stride,
+            num_tokens,
+            seq_len,
+            1 if qk_norm else 0,
+            1 if rotary_emb else 0,
+            q_eps_int,
+            k_eps_int,
+            prompt_len,
+            mask_words_per_token,
+        ]
+        
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 85280))  # Shared memory size from kernel
+        tb_graph.new_input(qkv, (1, -1, -1), -1, True)
+        tb_graph.new_input(k_cache, (1, -1, -1), -1, True)
+        tb_graph.new_input(v_cache, (1, -1, -1), -1, True)
+        tb_graph.new_input(qnorm_weight, (1, -1, -1), -1, True)
+        tb_graph.new_input(knorm_weight, (1, -1, -1), -1, True)
+        tb_graph.new_input(cos, (1, -1, -1), -1, True)
+        tb_graph.new_input(sin, (1, -1, -1), -1, True)
+        tb_graph.new_input(attn_mask, (1, -1, -1), -1, True)
+        tb_graph.new_input(output, (1, -1, -1), -1, True)
+        
+        self.kn_graph.customized(
+            [qkv, k_cache, v_cache, qnorm_weight, knorm_weight, cos, sin, attn_mask, output], 
+            tb_graph
+        )
+        self.kn_graph.register_task(tb_graph, "mask_attention", params)
 
     def compile(
         self,

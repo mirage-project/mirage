@@ -342,6 +342,72 @@ int TaskRegister::register_softmax_task(threadblock::Graph const &bgraph,
   return register_task_variant(TASK_SOFTMAX, code.to_string());
 }
 
+int TaskRegister::register_mask_attention_task(threadblock::Graph const &bgraph,
+                                                std::vector<int> const &params) {
+  // params[0]: num_q_heads
+  // params[1]: num_kv_heads
+  // params[2]: head_dim
+  // params[3]: weight_stride
+  // params[4]: num_tokens
+  // params[5]: seq_len
+  // params[6]: qk_norm (0 or 1)
+  // params[7]: rotary_emb (0 or 1)
+  // params[8]: q_eps (as int, will be divided by 1000000 for float)
+  // params[9]: k_eps (as int, will be divided by 1000000 for float)
+  // params[10]: prompt_len
+  // params[11]: mask_words_per_token
+  assert(params.size() == 12);
+  
+  int num_q_heads = params[0];
+  int num_kv_heads = params[1];
+  int head_dim = params[2];
+  int weight_stride = params[3];
+  int num_tokens = params[4];
+  size_t seq_len = params[5];
+  bool qk_norm = params[6] != 0;
+  bool rotary_emb = params[7] != 0;
+  float q_eps = params[8] / 1000000.0f;
+  float k_eps = params[9] / 1000000.0f;
+  uint32_t prompt_len = params[10];
+  uint32_t mask_words_per_token = params[11];
+  
+  std::vector<tb::TBInputOp *> input_ops;
+  std::vector<tb::TBInputOp *> output_ops;
+  int num_inputs = 8; // qkv, k_cache, v_cache, qnorm_weight, knorm_weight, cos, sin, attn_mask
+  int num_outputs = 1; // output
+  
+  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    if (input_ops.size() < (size_t)num_inputs) {
+      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    } else {
+      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    }
+  }
+  
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::single_batch_multitoken_decoding_kernel<bfloat16, $, $, $, $, $>(", 
+         num_q_heads, num_kv_heads, head_dim, weight_stride, num_tokens);
+  code.e("    task_desc.inputs[0].base_ptr,"); // qkv
+  code.e("    task_desc.inputs[1].base_ptr,"); // k_cache
+  code.e("    task_desc.inputs[2].base_ptr,"); // v_cache
+  code.e("    task_desc.outputs[0].base_ptr,"); // output
+  code.e("    $,", seq_len); // seq_len
+  code.e("    $,", qk_norm ? "true" : "false"); // qk_norm
+  code.e("    $,", rotary_emb ? "true" : "false"); // rotary_emb
+  code.e("    task_desc.inputs[3].base_ptr,"); // qnorm_weight
+  code.e("    task_desc.inputs[4].base_ptr,"); // knorm_weight
+  code.e("    task_desc.inputs[5].base_ptr,"); // cos
+  code.e("    task_desc.inputs[6].base_ptr,"); // sin
+  code.e("    $f,", q_eps); // q_eps
+  code.e("    $f,", k_eps); // k_eps
+  code.e("    $,", prompt_len); // prompt_len
+  code.e("    $,", mask_words_per_token); // mask_words_per_token
+  code.e("    reinterpret_cast<kernel::MaskWord const *>(task_desc.inputs[7].base_ptr));"); // attn_mask
+  return register_task_variant(TASK_MASK_ATTENTION, code.to_string());
+}
 
 } // namespace runtime
 } // namespace mirage

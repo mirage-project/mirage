@@ -442,6 +442,10 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
     int variant_id =
         task_register->register_softmax_task(customized->bgraph, params);
     task_config[op] = std::make_tuple(1, 1, TASK_SOFTMAX, variant_id);
+  } else if (name == "mask_attention") {
+    int variant_id =
+        task_register->register_mask_attention_task(customized->bgraph, params);
+    task_config[op] = std::make_tuple(8, 1, TASK_MASK_ATTENTION, variant_id);
   } else {
     assert(false && "Unsupported task type");
   }

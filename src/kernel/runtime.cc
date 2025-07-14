@@ -1223,6 +1223,7 @@ TaskGraphResult print_task_graph(
   task_type_to_name[TASK_ARGMAX_PARTIAL] = "TASK_ARGMAX_PARTIAL";
   task_type_to_name[TASK_ARGMAX_REDUCE] = "TASK_ARGMAX_REDUCE";
   task_type_to_name[TASK_SOFTMAX] = "TASK_SOFTMAX";
+  task_type_to_name[TASK_MASK_ATTENTION] = "TASK_MASK_ATTENTION";
 
   code.e("__device__ __forceinline__");
   code.e("void _execute_task(TaskDesc const& task_desc,");
