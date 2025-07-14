@@ -220,6 +220,10 @@ pub fn rules(mut nums: Vec<u32>) -> Vec<Rewrite> {
             => "(partition (sum ?t0 ?d0) ?d1 ?d2 ?i0)"  
             if is_unique(&["?d0", "?d1"]) ),
 
+        rw!("replicate_sum"; 
+            "(sum (replicate ?t0 ?d1 ?i0) ?d0)"
+            => "(replicate (sum ?t0 ?d0) ?d1 ?i0)" ),
+
         rw!("combine_sum"; 
             "(combine (sum ?t0 ?d0) ?d1 ?d2)" 
             => "(sum (combine ?t0 ?d1 ?d2) ?d0)" 
@@ -247,7 +251,6 @@ pub fn rules(mut nums: Vec<u32>) -> Vec<Rewrite> {
             => "(partition (matmul ?t0 ?t1) ?d0 ?d1 ?i0)"
             if is_datadim(&["?d0"], vec!["data_dim2".to_string()]) ),
     ];
-
 
    let mut rules4 = vec![
         rw!("reduce-partition-combine";
@@ -461,6 +464,15 @@ pub fn rules(mut nums: Vec<u32>) -> Vec<Rewrite> {
 
     ].concat();
 
+    let mut rules9 = vec![
+
+        rw!("bc-div-commute-partition";
+            "(bc_div (partition ?t0 ?d0 ?d1 ?i0) ?t1)"
+            <=> "(partition (bc_div ?t0 ?t1) ?d0 ?d1 ?i0)" 
+            if is_datadim(&["?d0"], vec!["data_dim0".to_string()]) ),
+
+    ].concat();
+
     for i in 0..nums.len() {
         for j in (i+1)..nums.len() {
             let a = *(&mut nums[i]);
@@ -486,6 +498,7 @@ pub fn rules(mut nums: Vec<u32>) -> Vec<Rewrite> {
     rules.append(&mut rules6);
     rules.append(&mut rules7);
     rules.append(&mut rules8);
+    rules.append(&mut rules9);
 
     rules
 }
