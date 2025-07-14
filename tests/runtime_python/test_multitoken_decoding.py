@@ -27,15 +27,53 @@ def get_memory_usage():
     return 0
 
 
-def pytorch_multitoken_attention(qkv, k_cache, v_cache, seq_len):
+def create_attention_mask(num_tokens, seq_len, prompt_len, device):
     """
-    PyTorch reference implementation.
+    Create attention mask for multitoken decoding.
+    
+    Args:
+        num_tokens: Number of tokens being processed
+        seq_len: Current sequence length
+        prompt_len: Length of prompt (all positions < prompt_len are always visible)
+        device: Device to create tensor on
+    
+    Returns:
+        mask: [num_tokens, mask_words_per_token] uint64 tensor
+        mask_words_per_token: Number of 64-bit words per token
+    """
+    total_kv_len = seq_len + num_tokens - 1
+    mask_words_per_token = (total_kv_len + 63) // 64  # ceil_div
+    
+    # Create mask tensor
+    mask = torch.zeros((num_tokens, mask_words_per_token), dtype=torch.uint64, device=device)
+    
+    for token_idx in range(num_tokens):
+        for pos in range(total_kv_len):
+            word_idx = pos // 64
+            bit_idx = pos % 64
+            
+            # All positions < prompt_len are always visible
+            if pos < prompt_len:
+                mask[token_idx, word_idx] |= (1 << bit_idx)
+            else:
+                # For positions >= prompt_len, you can customize the mask
+                # Here we make all positions visible (you can modify this)
+                mask[token_idx, word_idx] |= (1 << bit_idx)
+    
+    return mask, mask_words_per_token
+
+
+def pytorch_multitoken_attention(qkv, k_cache, v_cache, seq_len, prompt_len=0, attn_mask=None):
+    """
+    PyTorch reference implementation with attention mask support.
 
     Args:
         qkv: [num_tokens * (q_heads + k_heads + v_heads), head_dim]
         k_cache: [max_seq_len, head_dim]
         v_cache: [max_seq_len, head_dim]
         seq_len: Position where new tokens will be written
+        prompt_len: Length of prompt (all positions < prompt_len are always visible)
+        attn_mask: [num_tokens, mask_words_per_token] uint64 tensor
 
     Returns:
         outputs: [num_tokens, q_heads, head_dim]
@@ -70,6 +108,23 @@ def pytorch_multitoken_attention(qkv, k_cache, v_cache, seq_len):
 
             # Attention computation
             scores = torch.matmul(q, k_context.transpose(-2, -1)) / (head_dim**0.5)
+            
+            # Apply attention mask if provided
+            if attn_mask is not None:
+                # Create mask for current token
+                token_mask = torch.zeros(seq_len - 1, dtype=torch.bool, device=device)
+                
+                # Check each position in the mask
+                for pos in range(seq_len - 1):
+                    word_idx = pos // 64
+                    bit_idx = pos % 64
+                    if word_idx < attn_mask.shape[1]:
+                        token_mask[pos] = bool(attn_mask[token_idx, word_idx] & (1 << bit_idx))
+                
+                # Apply mask: set masked positions to -inf
+                mask_expanded = token_mask.unsqueeze(0).expand(q_heads, -1)
+                scores = scores.masked_fill(~mask_expanded, float('-inf'))
+            
             attn_weights = F.softmax(scores, dim=-1)
             output = torch.matmul(attn_weights, v_context).squeeze(1)
         else:
@@ -82,25 +137,25 @@ def pytorch_multitoken_attention(qkv, k_cache, v_cache, seq_len):
 
 
 def test_multitoken_kernel():
-    """Test the multitoken kernel with random initialization."""
+    """Test the multitoken kernel with random initialization and attention masks."""
 
-    print("Multi-token Decoding Kernel Test")
-    print("=" * 60)
+    print("Multi-token Decoding Kernel Test with Attention Masks")
+    print("=" * 70)
 
-    # Test different sequence lengths
+    # Test different sequence lengths and prompt lengths
     test_cases = [
-        (1, "No context"),
-        (2, "Single context token"),
-        (5, "Multiple context tokens"),
-        (32, "Medium context"),
-        (100, "Large context"),
+        (1, 0, "No context, no prompt"),
+        (2, 1, "Single context token, prompt_len=1"),
+        (5, 2, "Multiple context tokens, prompt_len=2"),
+        (32, 10, "Medium context, prompt_len=10"),
+        (100, 50, "Large context, prompt_len=50"),
     ]
 
     all_passed = True
 
-    for seq_len, description in test_cases:
-        print(f"\nTest Case: seq_len={seq_len} ({description})")
-        print("-" * 40)
+    for seq_len, prompt_len, description in test_cases:
+        print(f"\nTest Case: seq_len={seq_len}, prompt_len={prompt_len} ({description})")
+        print("-" * 50)
         torch.cuda.empty_cache()
 
         # 1. Random initialization
@@ -126,7 +181,12 @@ def test_multitoken_kernel():
             * 0.1
         )
 
-        # 2. Calculate expected results using PyTorch
+        # 2. Create attention mask
+        attn_mask, mask_words_per_token = create_attention_mask(
+            num_tokens, seq_len, prompt_len, device
+        )
+
+        # 3. Calculate expected results using PyTorch
         # Measure memory before PyTorch execution
         mem_before_pytorch = get_memory_usage()
 
@@ -134,7 +194,7 @@ def test_multitoken_kernel():
         start_time_pytorch = time.perf_counter()
         expected_outputs, expected_k_cache, expected_v_cache = (
             pytorch_multitoken_attention(
-                qkv, k_cache_init.clone(), v_cache_init.clone(), seq_len
+                qkv, k_cache_init.clone(), v_cache_init.clone(), seq_len, prompt_len, attn_mask
             )
         )
         torch.cuda.synchronize()
@@ -151,7 +211,7 @@ def test_multitoken_kernel():
         print(f"  Execution time: {pytorch_time_ms:.3f} ms")
         print(f"  Memory used: {pytorch_memory_used_mb:.2f} MB")
 
-        # 3. Run the kernel with profiling
+        # 4. Run the kernel with profiling
         k_cache_kernel = k_cache_init.clone()
         v_cache_kernel = v_cache_init.clone()
         kernel_outputs = torch.empty(
@@ -169,14 +229,17 @@ def test_multitoken_kernel():
             v_cache_kernel,
             kernel_outputs,
             seq_len,
-            False,
-            False,
-            None,
-            None,
-            None,
-            None,
-            0.0,
-            0.0,
+            False,  # qk_norm
+            False,  # rotary_emd
+            None,   # qnorm_weight
+            None,   # knorm_weight
+            None,   # cos
+            None,   # sin
+            0.0,    # q_eps
+            0.0,    # k_eps
+            prompt_len,
+            mask_words_per_token,
+            attn_mask,
         )
         torch.cuda.synchronize()
         end_time = time.perf_counter()
@@ -194,7 +257,7 @@ def test_multitoken_kernel():
         print(f"  Execution time: {kernel_time_ms:.3f} ms")
         print(f"  Memory used: {memory_used_mb:.2f} MB")
 
-        # 4. Compare results
+        # 5. Compare results
         # Compare attention outputs
         output_diff = (expected_outputs - kernel_outputs).abs()
         max_output_diff = output_diff.max().item()
@@ -264,12 +327,12 @@ def test_multitoken_kernel():
             all_passed = False
 
     # Final summary
-    print("\n" + "=" * 60)
+    print("\n" + "=" * 70)
     if all_passed:
         print("✅ ALL TESTS PASSED!")
     else:
         print("❌ SOME TESTS FAILED!")
-    print("=" * 60)
+    print("=" * 70)
 
 
 if __name__ == "__main__":
