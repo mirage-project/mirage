@@ -1,4 +1,3 @@
-
 /* Copyright 2025 CMU
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -244,8 +243,8 @@ __device__ __forceinline__ void
           q_eps,
           0,
           rotary_emd,
-          static_cast<T const *>(cos_ptr) + seq_len * HEAD_DIM,
-          static_cast<T const *>(sin_ptr) + seq_len * HEAD_DIM);
+          static_cast<T const *>(cos_ptr) + (seq_len - 1) * HEAD_DIM,
+          static_cast<T const *>(sin_ptr) + (seq_len - 1) * HEAD_DIM);
     }
 
     // knorm
@@ -257,8 +256,8 @@ __device__ __forceinline__ void
           k_eps,
           curr_iter_len - 1,
           rotary_emd,
-          static_cast<T const *>(cos_ptr) + seq_len * HEAD_DIM,
-          static_cast<T const *>(sin_ptr) + seq_len * HEAD_DIM);
+          static_cast<T const *>(cos_ptr) + (seq_len - 1) * HEAD_DIM,
+          static_cast<T const *>(sin_ptr) + (seq_len - 1) * HEAD_DIM);
     }
     __syncthreads();
 
@@ -367,7 +366,7 @@ __device__ __forceinline__ void
       cp_finished_seq_len += next_iter_len;
       curr_iter_len = next_iter_len;
     }
-  }
+  } // kv_idx
 
   for (int n = 0; n < 8; n++) {
     // write the result to osmem, index is 0, 1, 4, 5
@@ -392,6 +391,8 @@ __device__ __forceinline__ void
 #pragma unroll
     for (uint32_t tidx = 0; tidx < 4; tidx++) {
       // head idx is idx in warp / 4
+      // TODO: this is int shmem_idx = idx_in_warp + tidx * 32
+      // This is actually mapping to previous threadid
       int shmem_idx = (idx_in_warp / 4) * 4 + tidx * 32 + (idx_in_warp % 4);
       float other_m = max_smem[shmem_idx];
       float other_d = d_smem[shmem_idx];

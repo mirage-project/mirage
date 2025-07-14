@@ -136,12 +136,6 @@ __device__ __forceinline__ void
       sizeof(T) * NUM_WARPS_K * BATCH_SIZE * OUTPUT_ATOM_SIZE;
   // sizeof(T) * BATCH_SIZE * OUTPUT_ATOM_SIZE
 
-  // if (threadIdx.x == 0) {
-  //   int const smem_size =
-  //       SHARED_OUTPUT_OFFSET + sizeof(T) * BATCH_SIZE * OUTPUT_ATOM_SIZE;
-  //   printf("smem size of silu_mul %d\n", smem_size);
-  // }
-
   // zero buffer
   T *zero_buf = (T *)(smem + ZERO_BUFFER_OFFSET);
   *((__uint128_t *)zero_buf) = 0ul;
@@ -221,7 +215,7 @@ __device__ __forceinline__ void
 #pragma unroll
       for (int i = threadIdx.x; i < NUM_CHUNKS_A; i += NUM_THREADS) {
         int src_row = i >> log2_CHUNKS_PER_ROW_A;
-        int dst_row = src_row + ((k_pipe + 1) << log2_constexpr(BATCH_SIZE));
+        int dst_row = src_row + ((k_pipe + 1) * BATCH_SIZE);
         int dst_col = (i & (CHUNKS_PER_ROW_A - 1)) << log2_CHUNK_SIZE;
         int src_col = dst_col + (k_pipe << log2_constexpr(TILE_SIZE));
         load_smem(input_buffer_smem(dst_row, dst_col),
@@ -360,11 +354,13 @@ __device__ __forceinline__ void
     }
 
 #pragma unroll
-    for (int i = threadIdx.x; i < OUTPUT_SIZE; i += NUM_THREADS) {
-      int row = 0;
-      T val = NUM_WARPS_K > 1 ? output_smem.at(row, i)
-                              : mm_intermediate_smem.at(row, i);
-      output_dmem.at(row, i) = residual ? val + residual_smem.at(row, i) : val;
+    for (int row = 0; row < BATCH_SIZE; row++) {
+      for (int i = threadIdx.x; i < OUTPUT_SIZE; i += NUM_THREADS) {
+        T val = NUM_WARPS_K > 1 ? output_smem.at(row, i)
+                                : mm_intermediate_smem.at(row, i);
+        output_dmem.at(row, i) =
+            residual ? val + residual_smem.at(row, i) : val;
+      }
     }
     if (output_atom_idx + 1 < NUM_OUTPUT_ATOMS) {
       __syncthreads();

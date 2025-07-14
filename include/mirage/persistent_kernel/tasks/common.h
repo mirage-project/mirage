@@ -14,6 +14,7 @@
  */
 
 #pragma once
+#include "../runtime_header.h"
 #include "bfloat16.h"
 #include <cassert>
 #include <cstdint>

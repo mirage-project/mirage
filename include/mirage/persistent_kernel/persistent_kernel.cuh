@@ -78,7 +78,17 @@ __global__ void init_kernel(RuntimeConfig config) {
 __device__ __forceinline__ bool
     prepare_next_batch(RuntimeConfig const &config) {
   int step = config.step[0];
-  config.step[0] = step + 1;
+  if (config.verbose) {
+    printf("step: %d, new_token_num(%p): %d, new_token_ids:\n",
+           step,
+           config.new_token_nums,
+           config.new_token_nums[0]);
+    for (int i = 0; i < config.new_token_nums[0]; i++) {
+      printf("%lld ", config.tokens[step + 1 + i]);
+    }
+    printf("\n");
+  }
+  config.step[0] = step + config.new_token_nums[0];
   if ((step + 2 >= config.max_seq_length) || (config.profiling) ||
       (config.tokens[step + 1] == config.eos_token_id)) {
     return false;
@@ -339,6 +349,10 @@ __global__ void persistent_kernel(RuntimeConfig config) {
                                            task_desc.inputs[0].dim[1],
                                            task_desc.inputs[0].stride[0]);
       } else {
+        if (config.verbose && threadIdx.x == 0 && blockIdx.x == 0) {
+          printf("[worker] _execute_task EXECUTE_TASK %d\n",
+                 task_desc.task_type);
+        }
         _execute_task(task_desc, config);
       }
       __syncthreads();
@@ -359,7 +373,7 @@ __global__ void persistent_kernel(RuntimeConfig config) {
           int num_triggers = config.all_event_num_triggers[event_index];
           if (config.verbose) {
             printf("[%d][DONE] worker_id(%d) iter_num(%llu) task_idx(%llu) "
-                   "event_id(%llx) "
+                   "event_id(%llu) "
                    "event_type(local) count(%llu)\n",
                    config.my_gpu_id,
                    worker_id,
@@ -583,6 +597,9 @@ __global__ void persistent_kernel(RuntimeConfig config) {
         }
         // This is the ending task of the current task graph
         if (e.event_type == EVENT_END_OF_TASK_GRAPH) {
+          if (config.verbose) {
+            printf("[SCHD] END_OF_TASK_GRAPH\n");
+          }
           // Check if we want to continue
           if (!prepare_next_batch(config)) {
             terminate_schedulers(config);
@@ -599,7 +616,8 @@ __global__ void persistent_kernel(RuntimeConfig config) {
             custom_atomic_add_u64(
                 &config.worker_queue_last_ready_task_id[next_worker], 1);
             if (config.verbose) {
-              printf("[%d][SCHD] schd_id(%d) iter_num(%llu) task_idx(1) "
+              printf("[%d][SCHD]EVENT_END_OF_TASK_GRAPH schd_id(%d) "
+                     "iter_num(%llu) task_idx(1) "
                      "worker_id(%d) "
                      "worker_last_ready_pos(%llu)\n",
                      config.my_gpu_id,
@@ -634,16 +652,22 @@ __global__ void persistent_kernel(RuntimeConfig config) {
                 __threadfence();
                 custom_atomic_add_u64(
                     &config.worker_queue_last_ready_task_id[next_worker], 1);
-                if (config.verbose) {
-                  printf("[%d][SCHD] schd_id(%d) iter_num(%llu) task_idx(%llu) "
+                if (config.verbose && sched_id == 0) {
+                  printf("[%d][SCHD] EVENT_LAUNCH_DEPENDENT_TASKS schd_id(%d) "
+                         "iter_num(%llu) task_idx(%llu) "
                          "worker_id(%d) "
-                         "worker_last_ready_pos(%llu)\n",
+                         "worker_last_ready_pos(%llu)"
+                         "event_id(%llu)"
+                         "event_range(%llu-%llu)\n",
                          config.my_gpu_id,
                          sched_id,
                          iteration_num,
                          position_index,
                          next_worker,
-                         last_task_id + 1);
+                         last_task_id + 1,
+                         event_id,
+                         e.first_task_id,
+                         e.last_task_id);
                 }
                 next_worker = (next_worker == my_last_worker - 1)
                                   ? my_first_worker
@@ -683,7 +707,8 @@ __global__ void persistent_kernel(RuntimeConfig config) {
             custom_atomic_add_u64(
                 &config.worker_queue_last_ready_task_id[next_worker], 1);
             if (config.verbose) {
-              printf("[%d][SCHD] schd_id(%d) iter_num(%llu) task_idx(%llu) "
+              printf("[%d][SCHD] EXECUTE_TASK schd_id(%d) iter_num(%llu) "
+                     "task_idx(%llu) "
                      "worker_id(%d) "
                      "worker_last_ready_pos(%llu)\n",
                      config.my_gpu_id,
@@ -742,9 +767,10 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
                                        int num_remote_schedulers,
                                        int max_seq_length,
                                        long long eos_token_id) {
-  assert(meta_tensors.size() == 2);
+  assert(meta_tensors.size() == 3);
   global_runtime_config.step = static_cast<int *>(meta_tensors[0]);
   global_runtime_config.tokens = static_cast<long long *>(meta_tensors[1]);
+  global_runtime_config.new_token_nums = static_cast<int *>(meta_tensors[2]);
   global_runtime_config.num_workers = num_workers;
   global_runtime_config.num_local_schedulers = num_local_schedulers;
   global_runtime_config.num_remote_schedulers = num_remote_schedulers;
@@ -781,13 +807,6 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
   std::vector<EventDesc> all_events;
   std::vector<TaskId> first_tasks;
   _init_persistent_kernel(all_tasks, all_events, first_tasks, npes, mype);
-  // for (size_t i = 0; i < all_tasks.size(); i++) {
-  //   printf(
-  //       "task[%zu]: task_type(%d) trigger_event(%llx)
-  //       dependent_event(%llx)\n", i, all_tasks[i].task_type,
-  //       all_tasks[i].trigger_event,
-  //       all_tasks[i].dependent_event);
-  // }
 
   // Initialize worker queue last task id
   // Each worker now maintains a local and a remote worker queue
@@ -909,19 +928,21 @@ extern "C" void launch_persistent_kernel() {
   int sm_count;
   cudaDeviceGetAttribute(&sm_count, cudaDevAttrMultiProcessorCount, device);
   // Launcher persistent kernel
-  cudaFuncSetAttribute(
-      persistent_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, 98304);
+  cudaFuncSetAttribute(persistent_kernel,
+                       cudaFuncAttributeMaxDynamicSharedMemorySize,
+                       MAX_SHARE_MEMORY_SIZE);
 #ifdef USE_NVSHMEM
   void *args[] = {&global_runtime_config};
   nvshmemx_collective_launch((void const *)persistent_kernel,
                              dim3(sm_count, 1, 1),
                              dim3(128, 1, 1),
                              args,
-                             98304 /*sharedmem*/,
+                             MAX_SHARE_MEMORY_SIZE /*sharedmem*/,
                              0 /*stream*/);
 #else
-  persistent_kernel<<<dim3(sm_count, 1, 1), dim3(128, 1, 1), 98304 /*smem*/>>>(
-      global_runtime_config);
+  persistent_kernel<<<dim3(sm_count, 1, 1),
+                      dim3(128, 1, 1),
+                      MAX_SHARE_MEMORY_SIZE /*smem*/>>>(global_runtime_config);
 #endif
   cudaError_t err = cudaDeviceSynchronize();
   if (err != cudaSuccess) {

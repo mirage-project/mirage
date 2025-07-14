@@ -20,6 +20,8 @@
 namespace mirage {
 namespace runtime {
 
+constexpr int MAX_SHARE_MEMORY_SIZE = 150 * 1024;
+
 typedef unsigned long long int TaskId;
 unsigned long long int const TASK_INVALID_ID = 0x7fffffffffffffff;
 // Task IDs are 64-bit values encoding both the current iteration of the task
@@ -50,6 +52,10 @@ enum TaskType {
   TASK_ARGMAX = 109,
   TASK_ARGMAX_PARTIAL = 110,
   TASK_ARGMAX_REDUCE = 111,
+  TASK_FIND_NGRAM_PARTIAL = 112,
+  TASK_FIND_NGRAM_GLOBAL = 113,
+  TASK_TARGET_VERIFY_GREEDY = 114,
+  TASK_SINGLE_BATCH_EXTEND_ATTENTION = 115,
   TASK_NVSHMEM_COPY = 199,
   TASK_SCHD_TASKS = 200,
   TASK_SCHD_EVENTS = 201,
@@ -118,6 +124,7 @@ struct RuntimeConfig {
   long long *tokens;      // Metadata for LLM serving
   long long eos_token_id; // Metadata for LLM serving
   int max_seq_length;     // Metadata for LLM serving
+  int *new_token_nums;    // Metadata for LLM serving
   void *profiler_buffer;
   bool verbose;
   bool profiling;
