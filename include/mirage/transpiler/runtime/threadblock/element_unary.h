@@ -15,6 +15,8 @@ enum class ElementUnaryOpType {
   EXP,
   SILU,
   GELU,
+  SIN,
+  COS,
   RELU,
   CLAMP,
   SQUARE,
@@ -36,6 +38,10 @@ static __device__ __forceinline__ T
     return (T)(((float)a) * (1.0f / (1.0f + expf((float)-a))));
   } else if constexpr (OP == ElementUnaryOpType::GELU) {
     return (T)((((float)a) / 2.0f) * (1.0f + erff(((float)a) / sqrtf(2.0f))));
+  } else if constexpr (OP == ElementUnaryOpType::SIN) {
+    return (T)(sinf((float)a));
+  } else if constexpr (OP == ElementUnaryOpType::COS) {
+    return (T)(cosf((float)a));
   } else if constexpr (OP == ElementUnaryOpType::RELU) {
     return (T)(fmaxf(0.f, (float)a));
   } else if constexpr (OP == ElementUnaryOpType::CLAMP) {

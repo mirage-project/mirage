@@ -9,7 +9,7 @@
 
 namespace kn {
 
-enum class ElementUnaryOpType { EXP, SILU, GELU, RELU, CLAMP, SQUARE, SQRT };
+enum class ElementUnaryOpType { EXP, SILU, GELU, SIN, COS, RELU, CLAMP, SQUARE, SQRT };
 
 template <typename T, ElementUnaryOpType OP>
 static __device__ __forceinline__ T perform_element_unary_op(T a) {
@@ -24,6 +24,10 @@ static __device__ __forceinline__ T perform_element_unary_op(T a) {
     return (T)(((float)a) * (1.0f / (1.0f + expf((float)-a))));
   } else if constexpr (OP == ElementUnaryOpType::GELU) {
     return (T)((((float)a) / 2.0f) * (1.0f + erff(((float)a) / sqrtf(2.0f))));
+  } else if constexpr (OP == ElementUnaryOpType::SIN) {
+    return (T)(sinf((float)a));
+  } else if constexpr (OP == ElementUnaryOpType::COS) {
+    return (T)(cosf((float)a));
   } else if constexpr (OP == ElementUnaryOpType::SQUARE) {
     return (T)((float)a * (float)a);
   } else if constexpr (OP == ElementUnaryOpType::SQRT) {

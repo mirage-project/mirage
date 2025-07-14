@@ -256,6 +256,10 @@ static string get_tb_op_str(type::TBOperatorType type) {
         return "SILU";
       case type::TB_GELU_OP:
         return "GELU";
+      case type::TB_SIN_OP:
+        return "SIN";
+      case type::TB_COS_OP:
+        return "COS";
       case type::TB_RELU_OP:
         return "RELU";
       case type::TB_CLAMP_OP:
@@ -1065,6 +1069,8 @@ CustomOPTranspileResult
         case type::TB_EXP_OP:
         case type::TB_SILU_OP:
         case type::TB_GELU_OP:
+        case type::TB_SIN_OP:
+        case type::TB_COS_OP:
         case type::TB_RELU_OP:
         case type::TB_CLAMP_OP:
         case type::TB_SQUARE_OP:

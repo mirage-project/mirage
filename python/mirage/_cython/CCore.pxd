@@ -68,6 +68,8 @@ cdef extern from "mirage/type.h" namespace "mirage::type":
         KN_SILU_OP = 1104,
         KN_SIGMOID_OP = 1105,
         KN_GELU_OP = 1106,
+        KN_SIN_OP = 1107,
+        KN_COS_OP = 1108,
         KN_RELU_OP = 1150,
         KN_CLAMP_OP = 1151,
         KN_LOG_OP = 1160,
@@ -111,6 +113,8 @@ cdef extern from "mirage/type.h" namespace "mirage::type":
         TB_SILU_OP = 2104,
         TB_SIGMOID_OP = 2105,
         TB_GELU_OP = 2106,
+        TB_SIN_OP = 2107,
+        TB_COS_OP = 2108,
         TB_RELU_OP = 2150,
         TB_CLAMP_OP = 2151,
         TB_LOG_OP = 2160,
@@ -208,6 +212,8 @@ cdef extern from "mirage/kernel/graph.h" namespace "mirage::kernel":
         CppDTensor* exp(const CppDTensor* input)
         CppDTensor* silu(const CppDTensor* input)
         CppDTensor* gelu(const CppDTensor* input)
+        CppDTensor* sin(const CppDTensor* input)
+        CppDTensor* cos(const CppDTensor* input)
         CppDTensor* relu(const CppDTensor* input)
         CppDTensor* clamp(const CppDTensor* input, float min_val, float max_val)
         CppDTensor* sqrt(const CppDTensor* input)
@@ -290,6 +296,8 @@ cdef extern from "mirage/threadblock/graph.h" namespace "mirage::threadblock":
         CppSTensor* exp(const CppSTensor *A)
         CppSTensor* silu(const CppSTensor *A)
         CppSTensor* gelu(const CppSTensor *A)
+        CppSTensor* sin(const CppSTensor *A)
+        CppSTensor* cos(const CppSTensor *A)
         CppSTensor* relu(const CppSTensor *A)
         CppSTensor* clamp(const CppSTensor *A, float min_val, float max_val)
         CppSTensor* square(const CppSTensor *A)

@@ -63,6 +63,14 @@ public:
         // assuming floating point
         base_ptr[i] = (x / 2.0f) * (1.0f + erff(x / sqrtf(2.0f)));
       }
+    } else if (op_type == mirage::type::TB_SIN_OP) {
+      for (int i = thread_id; i < num_elements; i += num_threads) {
+        base_ptr[i] = sinf(base_ptr[i]);
+      }
+    } else if (op_type == mirage::type::TB_COS_OP) {
+      for (int i = thread_id; i < num_elements; i += num_threads) {
+        base_ptr[i] = cosf(base_ptr[i]);
+      }
     } else if (op_type == mirage::type::TB_RELU_OP) {
       for (int i = thread_id; i < num_elements; i += num_threads) {
         ElementType x = base_ptr[i];
@@ -128,6 +136,14 @@ public:
     } else if (type == mirage::type::TB_GELU_OP) {
       for (int i = thread_id; i < num_elements; i += num_threads) {
         base_ptr[i] = compute_gelu_fingerprint(base_ptr[i], exp_lookup_table);
+      }
+    } else if (type == mirage::type::TB_SIN_OP) {
+      for (int i = thread_id; i < num_elements; i += num_threads) {
+        base_ptr[i] = compute_sin_fingerprint(base_ptr[i]);
+      }
+    } else if (type == mirage::type::TB_COS_OP) {
+      for (int i = thread_id; i < num_elements; i += num_threads) {
+        base_ptr[i] = compute_cos_fingerprint(base_ptr[i]);
       }
     } else {
       assert(false && "Unimplemented");

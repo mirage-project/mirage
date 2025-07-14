@@ -149,6 +149,8 @@ kernel::Graph const *rewrite_graph_for_online_softmax(kernel::Graph const *g) {
         case KN_SQRT_OP:
         case KN_SILU_OP:
         case KN_GELU_OP:
+        case KN_SIN_OP:
+        case KN_COS_OP:
         case KN_RELU_OP:
         case KN_CLAMP_OP: {
           assert(dtensor_inputs.size() == 1);
@@ -514,6 +516,8 @@ Transpiler::Transpiler(kernel::Graph const *_graph,
       case KN_SQRT_OP:
       case KN_SILU_OP:
       case KN_GELU_OP:
+      case KN_SIN_OP:
+      case KN_COS_OP:
       case KN_RELU_OP:
       case KN_CLAMP_OP: {
         assert(dtensor_inputs.size() == 1);
@@ -596,6 +600,8 @@ Transpiler::Transpiler(kernel::Graph const *_graph,
             case TB_SQRT_OP:
             case TB_SILU_OP:
             case TB_GELU_OP:
+            case TB_SIN_OP:
+            case TB_COS_OP:
             case TB_RELU_OP:
             case TB_CLAMP_OP:
             case TB_MUL_SCALAR_OP: {

@@ -115,6 +115,24 @@ public:
   std::shared_ptr<AbstractExpr> a;
 };
 
+class Sin : public AbstractExpr {
+public:
+  Sin(std::shared_ptr<AbstractExpr> a);
+  z3::expr to_z3(z3::context &c,
+                 std::unordered_set<std::string> &all_variables) const override;
+  std::string to_string() const override;
+  std::shared_ptr<AbstractExpr> a;
+};
+
+class Cos : public AbstractExpr {
+public:
+  Cos(std::shared_ptr<AbstractExpr> a);
+  z3::expr to_z3(z3::context &c,
+                 std::unordered_set<std::string> &all_variables) const override;
+  std::string to_string() const override;
+  std::shared_ptr<AbstractExpr> a;
+};
+
 class Relu : public AbstractExpr {
 public:
   Relu(std::shared_ptr<AbstractExpr> a);

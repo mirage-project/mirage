@@ -93,6 +93,9 @@ TritonTranspiler::TritonTranspiler(kernel::Graph const *_graph,
       case KN_SQUARE_OP:
       case KN_SQRT_OP:
       case KN_SILU_OP:
+      case KN_GELU_OP:
+      case KN_SIN_OP:
+      case KN_COS_OP:
       case KN_RELU_OP:
       case KN_CLAMP_OP: {
         assert(dtensor_inputs.size() == 1);
@@ -174,6 +177,11 @@ TritonTranspiler::TritonTranspiler(kernel::Graph const *_graph,
             case TB_SQUARE_OP:
             case TB_SQRT_OP:
             case TB_SILU_OP:
+            case TB_GELU_OP:
+            case TB_SIN_OP:
+            case TB_COS_OP:
+            case TB_RELU_OP:
+            case TB_CLAMP_OP:
             case TB_MUL_SCALAR_OP: {
               assert(stensor_inputs.size() == 1);
               threadblock::STensor st =

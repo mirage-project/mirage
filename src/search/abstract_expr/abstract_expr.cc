@@ -283,6 +283,36 @@ std::string Gelu::to_string() const {
   return "gelu(" + a->to_string() + ")";
 }
 
+Sin::Sin(std::shared_ptr<AbstractExpr> a) : a(a) {
+  assert(a);
+}
+
+z3::expr Sin::to_z3(z3::context &c,
+                    std::unordered_set<std::string> &all_variables) const {
+  z3::sort P = c.uninterpreted_sort("P");
+  z3::func_decl sin = c.function("sin", P, P);
+  return sin(a->to_z3(c, all_variables));
+}
+
+std::string Sin::to_string() const {
+  return "sin(" + a->to_string() + ")";
+}
+
+Cos::Cos(std::shared_ptr<AbstractExpr> a) : a(a) {
+  assert(a);
+}
+
+z3::expr Cos::to_z3(z3::context &c,
+                    std::unordered_set<std::string> &all_variables) const {
+  z3::sort P = c.uninterpreted_sort("P");
+  z3::func_decl cos = c.function("cos", P, P);
+  return cos(a->to_z3(c, all_variables));
+}
+
+std::string Cos::to_string() const {
+  return "cos(" + a->to_string() + ")";
+}
+
 Relu::Relu(std::shared_ptr<AbstractExpr> a) : a(a) {
   assert(a);
 }
