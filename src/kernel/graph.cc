@@ -416,6 +416,11 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
     int variant_id =
         task_register->register_attention_task(customized->bgraph, params);
     task_config[op] = std::make_tuple(7, 1, TASK_ATTENTION_1, variant_id);
+  } else if (name == "single_batch_extend_attention") {
+    int variant_id = task_register->register_single_batch_extend_attention_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(7, 1, TASK_SINGLE_BATCH_EXTEND_ATTENTION, variant_id);
   } else if (name == "linear_with_residual") {
     int variant_id = task_register->register_linear_with_residual_task(
         customized->bgraph, params);
@@ -438,6 +443,20 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
     task_config[op] = std::make_tuple(2, 1, TASK_ARGMAX_REDUCE, variant_id);
   } else if (name == "allreduce") {
     task_config[op] = std::make_tuple(2, 1, TASK_ALLREDUCE, 0);
+  } else if (name == "find_ngram_partial") {
+    int variant_id = task_register->register_find_ngram_partial_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(1, 1, TASK_FIND_NGRAM_PARTIAL, variant_id);
+  } else if (name == "find_ngram_global") {
+    int variant_id = task_register->register_find_ngram_global_task(
+        customized->bgraph, params);
+    task_config[op] = std::make_tuple(2, 1, TASK_FIND_NGRAM_GLOBAL, variant_id);
+  } else if (name == "target_verify_greedy") {
+    int variant_id = task_register->register_target_verify_greedy_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(2, 1, TASK_TARGET_VERIFY_GREEDY, variant_id);
   } else {
     assert(false && "Unsupported task type");
   }

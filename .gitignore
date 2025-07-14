@@ -53,7 +53,12 @@ demo/mirage_search_checkpoint.json
 demo/*generated*
 benchmark/*generated*
 
+# Output files of runtime
+output/
 # Temp file
 task_graph*.json
 test.cu
 kernel*.cu
+
+#runtime
+*.perfetto-trace
