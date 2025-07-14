@@ -104,7 +104,6 @@ string ugraph_knoperator_type_to_nki(ty::KNOperatorType const type) {
 NKICustomOPTranspileResult
     NKITranspiler::transpile_kn_custom_op(kn::KNCustomizedOp const *op) {
   tb::Graph const &g = op->bgraph;
-  static int nki_custom_kernel_idx_counter = 0;
   int cur_custom_kernel_idx = nki_custom_kernel_idx_counter++;
   string func_name = fmt("custom_kernel_$", cur_custom_kernel_idx);
 
@@ -113,13 +112,14 @@ NKICustomOPTranspileResult
   // Generate code prologue
   CodeKeeper code;
   code.e("@nki.jit");
-  code.e("def $($, dtype=nl.float16):",
+  code.e("def $($):",
          func_name,
          map<kn::DTensor, string>(op->input_tensors,
                                   [](kn::DTensor const &dtensor) -> string {
-                                    return fmt("dtensor$", dtensor.guid);
+                                    return get_tensor_variable_name(dtensor);
                                   }));
   code.inc_indent();
+  code.e("dtype = $.dtype", get_tensor_variable_name(op->input_tensors[0]));
   // Create output tensors
   std::vector<std::string> return_tensors;
   for (tb::TBOperator *tb_op : g.operators) {
@@ -130,6 +130,7 @@ NKICustomOPTranspileResult
       code.e("$ = $",
              tensor_id,
              allocate_nki_tensor(output_op->dtensor,
+                                 -1,
                                  NKITensorInitializer::NONE,
                                  "nl.shared_hbm"));
       return_tensors.push_back(tensor_id);
@@ -166,31 +167,16 @@ NKICustomOPTranspileResult
       for (int i = 0; i < stensor.num_dims - 2; i++) {
         assert(stensor.dim[i] == 1);
       }
-      if (stensor.num_dims == 1) {
-        // Create a 1D tile
-        code.e("$ = nl.zeros(($), dtype, buffer=nl.sbuf)",
-               fmt("stensor$", stensor.guid),
-               stensor.dim[0]);
-      } else {
-        // Create a 2D tile
-        if (meta.partition_dim == stensor.num_dims - 2) {
-          code.e("$ = nl.zeros(($, $), dtype=dtype, buffer=nl.sbuf)",
-                 fmt("stensor$", stensor.guid),
-                 stensor.dim[stensor.num_dims - 2],
-                 stensor.dim[stensor.num_dims - 1]);
-        } else {
-          assert(meta.partition_dim == stensor.num_dims - 1);
-          // num_dims - 1 is the partition_dim
-          code.e("$ = nl.zeros(($, $), dtype=dtype, buffer=nl.sbuf)",
-                 fmt("stensor$", stensor.guid),
-                 stensor.dim[stensor.num_dims - 1],
-                 stensor.dim[stensor.num_dims - 2]);
-        }
-      }
+      code.e("$ = $",
+             get_tensor_variable_name(stensor),
+             allocate_nki_tensor(stensor,
+                                 meta.partition_dim,
+                                 NKITensorInitializer::ZERO,
+                                 "nl.sbuf"));
     }
   }
   if (g.forloop_range > 1) {
-    code.e("for i in range($):", g.forloop_range);
+    code.e("for i in nl.affine_range($):", g.forloop_range);
     code.inc_indent();
   }
   // Generate code for operators before accum
@@ -215,83 +201,62 @@ NKICustomOPTranspileResult
         for (int i = 0; i < stensor.num_dims - 2; i++) {
           assert(stensor.dim[i] == 1);
         }
-        bool transposed = false;
-        std::string range = "";
-        if (meta.partition_dim == stensor.num_dims - 2) {
-          // Normal case
-          code.e("$ = nl.ndarray(($, $), dtype=dtype, buffer=nl.sbuf)",
-                 fmt("stensor$", stensor.guid),
-                 stensor.dim[stensor.num_dims - 2],
-                 stensor.dim[stensor.num_dims - 1]);
-        } else {
-          // Tranposed case
-          assert(meta.partition_dim == stensor.num_dims - 1);
-          // partition dim is the innermost dimension so we need
-          // to use load_transposed2d
-          transposed = true;
-          code.e("$ = nl.ndarray(($, $), dtype=dtype, buffer=nl.sbuf)",
-                 fmt("stensor$", stensor.guid),
-                 stensor.dim[stensor.num_dims - 1],
-                 stensor.dim[stensor.num_dims - 2]);
-        }
+        bool transposed = meta.partition_dim == stensor.num_dims - 1;
+        int partition_dim_degree =
+            get_partition_dimension_degree(stensor, meta.partition_dim);
+        int partition_dim_size =
+            get_partition_dimension_size(stensor, meta.partition_dim);
+        code.e("$ = $",
+               get_tensor_variable_name(stensor),
+               allocate_nki_tensor(stensor,
+                                   meta.partition_dim,
+                                   NKITensorInitializer::NONE,
+                                   "nl.sbuf"));
+        code.e("for idx in nl.affine_range($):", partition_dim_degree);
+        code.inc_indent();
+        std::vector<std::string> range_for_each_dim;
 
         int3 imap = input_op->input_map;
         int forloop_dim = input_op->forloop_dim;
         for (int i = 0; i < stensor.num_dims; i++) {
-          std::string index;
-          if (imap.x == i) {
-            int scale_factor = stensor.dim[i];
-            if (forloop_dim == i) {
-              scale_factor *= g.forloop_range;
+          std::vector<std::string> index_terms;
+          for (int j = 0; j < 3; ++j) {
+            if (to_vector(imap)[j] == i) {
+              int scale_factor = stensor.dim[i];
+              if (forloop_dim == i) {
+                scale_factor *= g.forloop_range;
+              }
+              index_terms.push_back(
+                  fmt("$ * $", SPMD_iterators[j], scale_factor));
             }
-            index = fmt("$ * $", SPMD_iterators[0], scale_factor);
-          } else if (imap.y == i) {
-            int scale_factor = stensor.dim[i];
-            if (forloop_dim == i) {
-              scale_factor *= g.forloop_range;
-            }
-            index = fmt("$ * $", SPMD_iterators[1], scale_factor);
-          } else if (imap.z == i) {
-            int scale_factor = stensor.dim[i];
-            if (forloop_dim == i) {
-              scale_factor *= g.forloop_range;
-            }
-            index = fmt("$ * $", SPMD_iterators[2], scale_factor);
           }
           if (forloop_dim == i) {
-            if (index == "") {
-              index = fmt("i * $", stensor.dim[i]);
-            } else {
-              index = index + fmt("+ i * $", stensor.dim[i]);
-            }
+            index_terms.push_back(fmt("i * $", stensor.dim[i]));
           }
-          if (i == stensor.num_dims - 2) {
-            if (index == "") {
-              index = fmt("nl.arange($)[:, None]", stensor.dim[i]);
-            } else {
-              index = index + fmt(" + nl.arange($)[:, None]", stensor.dim[i]);
-            }
-          } else if (i == stensor.num_dims - 1) {
-            if (index == "") {
-              index = fmt("nl.arange($)[None, :]", stensor.dim[i]);
-            } else {
-              index = index + fmt(" + nl.arange($)[None, :]", stensor.dim[i]);
-            }
+          int range_size = stensor.dim[i];
+          if (meta.partition_dim == i) {
+            index_terms.push_back(fmt("idx * $", partition_dim_size));
+            range_size = partition_dim_size;
           }
-          if (index == "") {
-            index = "0";
+          // if (i == stensor.num_dims - 2) {
+          //   index_terms.push_back(fmt("nl.arange($)[:, None]", range_size));
+          // } else if (i == stensor.num_dims - 1) {
+          //   index_terms.push_back(fmt("nl.arange($)[None, :]", range_size));
+          // }
+          std::string index = str_join(index_terms, "+", "0");
+          if (i >= stensor.num_dims - 2) {
+            index = get_dim_start_length(index, range_size);
           }
-          range += index;
-          if (i < stensor.num_dims - 1) {
-            range += ", ";
-          }
+          range_for_each_dim.push_back(index);
         }
+        std::string range = str_join(range_for_each_dim, ", ");
 
-        code.e("$ = $($[$])",
-               fmt("stensor$", stensor.guid),
+        code.e("$[:,idx,:] = $($[$])",
+               get_tensor_variable_name(stensor),
                transposed ? "nl.load_transpose2d" : "nl.load",
-               fmt("dtensor$", dtensor.guid),
+               get_tensor_variable_name(dtensor),
                range);
+        code.dec_indent();
         break;
       }
       case type::TB_OUTPUT_OP: {
@@ -309,22 +274,33 @@ NKICustomOPTranspileResult
         std::string operand1 = fmt("stensor$", input1.guid);
         int num_dims = input0.num_dims;
         assert(num_dims == 2); // FIXME: currently only support 2D matmul
-        HelperFunction tiled_matmul = tiled_matmul_function();
-        code.e("$ = $",
-               fmt("stensor$", output.guid),
-               tiled_matmul.get_invocation({
-                   operand0,
-                   operand1,
-                   get_python_literal(meta0.partition_dim == 1),
-                   get_python_literal(meta1.partition_dim == 1),
-                   "dtype",
-               }));
-        // handle transpose
-        if (meta2.partition_dim != num_dims - 2) {
-          // Need a transpose after matmul
-          code.e("$ = nl.transpose($)",
+        std::string accumulator = [&](tb::STensor const &stensor) {
+          for (tb::TBOperator *op : g.operators) {
+            if (op->op_type == type::TB_FORLOOP_ACCUM_NO_RED_OP) {
+              if (op->input_tensors[0].guid == stensor.guid) {
+                return get_tensor_variable_name(op->output_tensors[0]);
+              }
+            }
+          }
+          return std::string("");
+        }(output);
+        if (accumulator.empty()) {
+          code.e("$ = $",
                  fmt("stensor$", output.guid),
-                 fmt("stensor$", output.guid));
+                 tiled_matmul_function().get_invocation({
+                     operand0,
+                     operand1,
+                     get_python_literal(meta0.partition_dim == 1),
+                     get_python_literal(meta1.partition_dim == 1),
+                     "dtype",
+                 }));
+        } else {
+          code.e(tiled_matmul_accum_function().get_invocation({
+              operand0,
+              operand1,
+              accumulator,
+              get_python_literal(meta0.partition_dim == 1),
+          }));
         }
         break;
       }
@@ -334,9 +310,11 @@ NKICustomOPTranspileResult
         STensorMeta meta0 = stensor_metas.at(input.guid);
         STensorMeta meta1 = stensor_metas.at(output.guid);
         assert(input.num_dims == output.num_dims);
-        code.e("$ += $",
-               fmt("stensor$", output.guid),
-               fmt("stensor$", input.guid));
+        if (input.owner_op->op_type != type::TB_MATMUL_OP) {
+          code.e("$ += $",
+                 fmt("stensor$", output.guid),
+                 fmt("stensor$", input.guid));
+        }
         break;
       }
       case type::TB_EXP_OP:
@@ -355,20 +333,17 @@ NKICustomOPTranspileResult
               static_cast<tb::TBElementUnaryOp *>(tb_op);
           optional_second_operand = fmt(", $", unary->scalar);
         }
+        string first_operand = get_tensor_variable_name(input);
         if (meta0.partition_dim != meta1.partition_dim) {
           // Need a transpose before elementwise
-          code.e("$ = $(nl.transpose($)$)",
-                 fmt("stensor$", output.guid),
-                 ugraph_tboperator_type_to_nki(tb_op->op_type),
-                 fmt("stensor$", input.guid),
-                 optional_second_operand);
-        } else {
-          code.e("$ = $($$)",
-                 fmt("stensor$", output.guid),
-                 ugraph_tboperator_type_to_nki(tb_op->op_type),
-                 fmt("stensor$", input.guid),
-                 optional_second_operand);
+          first_operand =
+              tiled_transpose_function().get_invocation({first_operand});
         }
+        code.e("$ = $($$)",
+               fmt("stensor$", output.guid),
+               ugraph_tboperator_type_to_nki(tb_op->op_type),
+               first_operand,
+               optional_second_operand);
         break;
       }
       case type::TB_ADD_OP:
@@ -384,20 +359,21 @@ NKICustomOPTranspileResult
         STensorMeta meta2 = stensor_metas.at(output.guid);
         assert(input0.num_dims == input1.num_dims);
         assert(input1.num_dims == output.num_dims);
-        bool transpose0 = false, transpose1 = false;
+        string first_operand = get_tensor_variable_name(input0);
+        string second_operand = get_tensor_variable_name(input1);
         if (meta0.partition_dim != meta2.partition_dim) {
-          transpose0 = true;
+          first_operand =
+              tiled_transpose_function().get_invocation({first_operand});
         }
         if (meta1.partition_dim != meta2.partition_dim) {
-          transpose1 = true;
+          second_operand =
+              tiled_transpose_function().get_invocation({second_operand});
         }
         code.e("$ = $($, $)",
-               fmt("stensor$", output.guid),
+               get_tensor_variable_name(output),
                ugraph_tboperator_type_to_nki(tb_op->op_type),
-               transpose0 ? fmt("nl.transpose(stensor$)", input0.guid)
-                          : fmt("stensor$", input0.guid),
-               transpose1 ? fmt("nl.transpose(stensor$)", input1.guid)
-                          : fmt("stensor$", input1.guid));
+               first_operand,
+               second_operand);
         break;
       }
       case type::TB_REDUCTION_0_OP:
@@ -446,9 +422,8 @@ NKICustomOPTranspileResult
       STensorMeta meta0 = stensor_metas.at(input.guid);
       STensorMeta meta1 = stensor_metas.at(output.guid);
       if (meta0.partition_dim != meta1.partition_dim) {
-        code.e("$ = nl.transpose($)",
-               fmt("stensor$", output.guid),
-               fmt("stensor$", output.guid));
+        string var = get_tensor_variable_name(output);
+        code.e("$ = $", var, tiled_transpose_function().get_invocation({var}));
       }
     }
   }
@@ -479,46 +454,53 @@ NKICustomOPTranspileResult
           assert(stensor.dim[i] == 1);
         }
         bool need_transpose = false;
+        bool partition_dim = meta.partition_dim;
         if (meta.partition_dim == stensor.num_dims - 1) {
           need_transpose = true;
+          partition_dim = stensor.num_dims - 2;
+          code.e("$ = $",
+                 get_tensor_variable_name(stensor),
+                 tiled_transpose_function().get_invocation(
+                     {get_tensor_variable_name(stensor)}));
         }
+        int partition_dim_degree =
+            get_partition_dimension_degree(stensor, partition_dim);
+        int partition_dim_size =
+            get_partition_dimension_size(stensor, partition_dim);
+        code.e("for idx in nl.affine_range($):", partition_dim_degree);
+        code.inc_indent();
         int3 omap = output_op->output_map;
-        std::string range = "";
+        std::vector<std::string> range_for_each_dim;
         for (int i = 0; i < stensor.num_dims; i++) {
-          std::string index;
-          if (omap.x == i) {
-            index = fmt("$ * $", SPMD_iterators[0], stensor.dim[i]);
-          } else if (omap.y == i) {
-            index = fmt("$ * $", SPMD_iterators[1], stensor.dim[i]);
-          } else if (omap.z == i) {
-            index = fmt("$ * $", SPMD_iterators[2], stensor.dim[i]);
-          }
-          if (i == stensor.num_dims - 2) {
-            if (index == "") {
-              index = fmt("nl.arange($)[:, None]", stensor.dim[i]);
-            } else {
-              index = index + fmt(" + nl.arange($)[:, None]", stensor.dim[i]);
-            }
-          } else if (i == stensor.num_dims - 1) {
-            if (index == "") {
-              index = fmt("nl.arange($)[None, :]", stensor.dim[i]);
-            } else {
-              index = index + fmt(" + nl.arange($)[None, :]", stensor.dim[i]);
+          std::vector<std::string> index_terms;
+          for (int j = 0; j < 3; ++j) {
+            if (to_vector(omap)[j] == i) {
+              index_terms.push_back(
+                  fmt("$ * $", SPMD_iterators[j], stensor.dim[i]));
             }
           }
-          if (index == "") {
-            index = "0";
+          int range_size = stensor.dim[i];
+          if (meta.partition_dim == i) {
+            index_terms.push_back(fmt("idx * $", partition_dim_size));
+            range_size = partition_dim_size;
           }
-          range += index;
-          if (i < stensor.num_dims - 1) {
-            range += ", ";
+          // if (i == stensor.num_dims - 2) {
+          //   index_terms.push_back(fmt("nl.arange($)[:, None]", range_size));
+          // } else if (i == stensor.num_dims - 1) {
+          //   index_terms.push_back(fmt("nl.arange($)[None, :]", range_size));
+          // }
+          std::string index = str_join(index_terms, "+", "0");
+          if (i >= stensor.num_dims - 2) {
+            index = get_dim_start_length(index, range_size);
           }
+          range_for_each_dim.push_back(index);
         }
-        code.e("nl.store($[$], $)",
-               fmt("dtensor$", dtensor.guid),
+        std::string range = str_join(range_for_each_dim, ",");
+        code.e("nl.store($[$], $[:, idx, :])",
+               get_tensor_variable_name(dtensor),
                range,
-               need_transpose ? fmt("nl.transpose(stensor$)", stensor.guid)
-                              : fmt("stensor$", stensor.guid));
+               get_tensor_variable_name(stensor));
+        code.dec_indent();
         break;
       }
       case type::TB_EXP_OP:
@@ -539,20 +521,16 @@ NKICustomOPTranspileResult
               static_cast<tb::TBElementUnaryOp *>(tb_op);
           optional_second_operand = fmt(", $", unary->scalar);
         }
+        string first_operand = get_tensor_variable_name(input);
         if (meta0.partition_dim != meta1.partition_dim) {
-          // Need a transpose before elementwise
-          code.e("$ = $(nl.transpose($)$)",
-                 fmt("stensor$", output.guid),
-                 ugraph_tboperator_type_to_nki(tb_op->op_type),
-                 fmt("stensor$", input.guid),
-                 optional_second_operand);
-        } else {
-          code.e("$ = $($$)",
-                 fmt("stensor$", output.guid),
-                 ugraph_tboperator_type_to_nki(tb_op->op_type),
-                 fmt("stensor$", input.guid),
-                 optional_second_operand);
+          first_operand =
+              tiled_transpose_function().get_invocation({first_operand});
         }
+        code.e("$ = $($$)",
+               fmt("stensor$", output.guid),
+               ugraph_tboperator_type_to_nki(tb_op->op_type),
+               first_operand,
+               optional_second_operand);
         break;
       }
       case type::TB_ADD_OP:
@@ -568,20 +546,21 @@ NKICustomOPTranspileResult
         STensorMeta meta2 = stensor_metas.at(output.guid);
         assert(input0.num_dims == input1.num_dims);
         assert(input1.num_dims == output.num_dims);
-        bool transpose0 = false, transpose1 = false;
+        string first_operand = get_tensor_variable_name(input0);
+        string second_operand = get_tensor_variable_name(input1);
         if (meta0.partition_dim != meta2.partition_dim) {
-          transpose0 = true;
+          first_operand =
+              tiled_transpose_function().get_invocation({first_operand});
         }
         if (meta1.partition_dim != meta2.partition_dim) {
-          transpose1 = true;
+          second_operand =
+              tiled_transpose_function().get_invocation({second_operand});
         }
         code.e("$ = $($, $)",
-               fmt("stensor$", output.guid),
+               get_tensor_variable_name(output),
                ugraph_tboperator_type_to_nki(tb_op->op_type),
-               transpose0 ? fmt("nl.transpose(stensor$)", input0.guid)
-                          : fmt("stensor$", input0.guid),
-               transpose1 ? fmt("nl.transpose(stensor$)", input1.guid)
-                          : fmt("stensor$", input1.guid));
+               first_operand,
+               second_operand);
         break;
       }
       case type::TB_REDUCTION_0_OP:
@@ -606,7 +585,7 @@ NKICustomOPTranspileResult
         assert(reduc_dim != meta0.partition_dim);
         // reduction is perform on axis=1, since axis=0 maps to
         // the partition dim
-        code.e("$ = nl.sum($, axis=1, keepdims=True)",
+        code.e("$ = nl.sum($, axis=-1, keepdims=True)",
                fmt("stensor$", output.guid),
                fmt("stensor$", input.guid));
         break;
@@ -632,7 +611,7 @@ NKICustomOPTranspileResult
         assert(reduc_dim != meta0.partition_dim);
         // reduction is perform on axis=1, since axis=0 maps to
         // the partition dim
-        code.e("$ = nl.sum($, axis=1, keepdims=True)",
+        code.e("$ = nl.sum($, axis=-11, keepdims=True)",
                fmt("stensor$", output.guid),
                fmt("stensor$", input.guid));
         break;
@@ -679,7 +658,7 @@ std::optional<NKICustomOPTranspileResult>
          func_name,
          map<kn::DTensor, string>(op->input_tensors,
                                   [](kn::DTensor const &dtensor) -> string {
-                                    return fmt("dtensor$", dtensor.guid);
+                                    return get_tensor_variable_name(dtensor);
                                   }));
   code.inc_indent();
 

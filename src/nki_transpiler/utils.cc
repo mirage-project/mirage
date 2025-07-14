@@ -41,5 +41,13 @@ std::string get_python_literal(bool value) {
   return value ? "True" : "False";
 }
 
+std::string get_tensor_variable_name(kernel::DTensor const &tensor) {
+  return fmt("dtensor$", tensor.guid);
+}
+
+std::string get_tensor_variable_name(threadblock::STensor const &tensor) {
+  return fmt("stensor$", tensor.guid);
+}
+
 } // namespace nki_transpiler
 } // namespace mirage

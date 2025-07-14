@@ -46,7 +46,7 @@ DT get_tensor_in_new_graph(std::unordered_map<size_t, DT> mapping,
 
 NKITranspiler::NKITranspiler(kernel::Graph const *_graph,
                              NKITranspilerConfig const &_config)
-    : config(_config) {
+    : config(_config), nki_custom_kernel_idx_counter(0) {
   // using mirnage::type namespace to simplify code
   using namespace mirage::type;
 
@@ -339,9 +339,9 @@ std::optional<NKIErrorInfo> NKITranspiler::resolve_tensor_layout() {
     for (int i = 0; i < num_dims; i++) {
       partition_exprs.push_back(s_is_partition[stensor.guid][i]);
       // A partition dimension cannot be larger than 128
-      if (stensor.dim[i] > 128) {
-        opt.add(!s_is_partition[stensor.guid][i]);
-      }
+      // if (stensor.dim[i] > 128) {
+      //   opt.add(!s_is_partition[stensor.guid][i]);
+      // }
       // A partition dimension must be the last two dims
       if ((i != num_dims - 1) && (i != num_dims - 2)) {
         opt.add(!s_is_partition[stensor.guid][i]);
@@ -568,7 +568,9 @@ NKITranspileResult NKITranspiler::transpile_ugraph() {
   // Generate helper functions
   CodeKeeper helper;
   std::vector<HelperFunction> helper_functions;
+  helper_functions.push_back(tiled_transpose_function());
   helper_functions.push_back(tiled_matmul_function());
+  helper_functions.push_back(tiled_matmul_accum_function());
   for (HelperFunction const &hf : helper_functions) {
     helper.e(hf.get_code());
   }

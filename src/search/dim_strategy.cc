@@ -35,7 +35,7 @@ std::vector<dim3>
 #ifdef MIRAGE_BACKEND_USE_CUDA
     for (size_t x = 8; x <= 256; x *= 2) {
 #else
-    for (size_t x : {128, 512, 1024, 2048}) {
+    for (size_t x = 1024; x <= 8192; x *= 2) {
 #endif
       for (int dim : dims) {
         if (dim % x == 0) {
@@ -51,7 +51,7 @@ std::vector<dim3>
 #ifdef MIRAGE_BACKEND_USE_CUDA
     for (size_t y : {8, 64, 128, 256}) {
 #else
-    for (size_t y : {128, 512, 1024, 2048}) {
+    for (size_t y = 1024; y <= 8192; y *= 2) {
 #endif
       for (int dim : dims) {
         if (dim % y == 0) {
@@ -64,7 +64,7 @@ std::vector<dim3>
 
   auto generate_2d_grids = [&](std::vector<int> const &dims) {
     std::vector<dim3> cands;
-    std::vector<int> size_to_try{128, 512, 1024, 2048}, dim_to_try;
+    std::vector<int> size_to_try{/*128, 512, */ 1024, 2048, 4096}, dim_to_try;
     for (size_t x : size_to_try) {
       for (int dim : dims) {
         if (dim % x == 0) {
@@ -281,12 +281,12 @@ std::vector<int3> DimStrategy::get_output_map_cand(dim3 grid_dim) {
   omap_to_explore = vector_concat(omap_to_explore,
                                   {
                                       {0, 1, -1},
-                                      // {0, 2, 1},
-                                      // {0, 2, -1},
+                                      {0, 2, 1},
+                                      {0, 2, -1},
                                       {0, -1, -1},
-                                      // {-1, 2, 1},
+                                      {-1, 2, 1},
                                       {-1, 1, -1},
-                                      // {-1, 2, -1},
+                                      {-1, 2, -1},
                                       {-1, -1, -1},
                                   });
   if (!config._enable_attention_specific_optimization) {
@@ -381,7 +381,7 @@ std::vector<int> DimStrategy::get_forloop_range_cand(
     if (input_map[i].z == forloop_dim[i]) {
       return {};
     }
-    for (int x : {128, 512}) {
+    for (size_t x = 1024; x <= 8192; x *= 2) {
       if (dim % x == 0) {
         forloop_range_to_explore.push_back(dim / x);
       }
@@ -391,9 +391,6 @@ std::vector<int> DimStrategy::get_forloop_range_cand(
 #endif
   std::vector<int> results;
   for (int x : forloop_range_to_explore) {
-    if (config._enable_attention_specific_optimization && x > 8) {
-      continue;
-    }
     bool feasible = true;
     for (size_t i = 0; i < input_tensors.size(); ++i) {
       if (forloop_dim[i] == -1) {

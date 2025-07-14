@@ -16,7 +16,9 @@ struct HelperFunction {
   std::string get_invocation(std::vector<std::string> const &args) const;
 };
 
+HelperFunction tiled_transpose_function();
 HelperFunction tiled_matmul_function();
+HelperFunction tiled_matmul_accum_function();
 
 } // namespace nki_transpiler
 } // namespace mirage

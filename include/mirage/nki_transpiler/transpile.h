@@ -105,6 +105,8 @@ private:
   std::vector<mirage::kernel::DTensor> mugraph_output_tensors;
   std::unordered_map<decltype(tb::STensor::guid), STensorMeta>
       stensor_metas; // STensor guid -> metadata
+  int nki_custom_kernel_idx_counter;
+
 public:
   NKITranspiler(kernel::Graph const *_graph,
                 NKITranspilerConfig const &_config);
