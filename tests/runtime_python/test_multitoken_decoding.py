@@ -55,10 +55,15 @@ def create_attention_mask(num_tokens, seq_len, prompt_len, device):
             # All positions < prompt_len are always visible
             if pos < prompt_len:
                 # Use numpy uint64 to handle bit shifting properly
+                # Randomly decide whether to mask this position or not
                 mask_np[token_idx, word_idx] |= np.uint64(1) << np.uint64(bit_idx)
             else:
                 # Customize the mask for positions >= prompt_len
-                mask_np[token_idx, word_idx] |= np.uint64(1) << np.uint64(bit_idx)
+                # For positions >= prompt_len, randomly decide whether to mask this position
+                # This simulates a random attention pattern for testing
+                if np.random.random() > 0.5:  # 50% chance to keep the token visible
+                    mask_np[token_idx, word_idx] |= np.uint64(1) << np.uint64(bit_idx)
+            
 
     # Convert to torch tensor
     mask = torch.from_numpy(mask_np).to(device)
@@ -135,6 +140,7 @@ def pytorch_multitoken_attention(
 
                 # Apply mask: set masked positions to -inf
                 mask_expanded = token_mask.unsqueeze(0).unsqueeze(0)  # [1, 1, seq_len-1]
+                print(f"mask_expanded: {mask_expanded}")
                 scores = scores.masked_fill(~mask_expanded, float("-inf"))
 
             attn_weights = F.softmax(scores, dim=-1)
@@ -162,6 +168,7 @@ def test_multitoken_kernel():
         (5, 2, "Multiple context tokens, prompt_len=2"),
         (32, 10, "Medium context, prompt_len=10"),
         (100, 50, "Large context, prompt_len=50"),
+        (180, 150, "Prompt 150 tokens, 30 non-prompt tokens in cache"),  # New test case
     ]
 
     all_passed = True
