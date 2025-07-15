@@ -6,3 +6,6 @@
 #include "reduction.cuh"
 #include "silu_mul_linear.cuh"
 #include "single_batch_decoding.cuh"
+#include "single_batch_extend.cuh"
+#include "speculative_decoding/prompt_lookup.cuh"
+#include "speculative_decoding/target_verify.cuh"

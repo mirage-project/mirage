@@ -124,6 +124,6 @@ __device__ __forceinline__ void rms_norm(InputSmem smem_input,
         }
       }
     } // head_idx
-  } // win_idx
+  }   // win_idx
 }
 } // namespace kernel

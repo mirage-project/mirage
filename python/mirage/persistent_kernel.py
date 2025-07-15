@@ -8,6 +8,10 @@ import sysconfig
 
 from .core import *
 from .kernel import get_key_paths, KNGraph, TBGraph
+from .speculative import (
+    SpecDecodeConfig,
+    PromptLookupConfig,
+)
 
 HARD_CODE = """
 #include <Python.h>
@@ -160,6 +164,7 @@ class PersistentKernel:
         eos_token_id: int64,
         meta_tensors: list[torch.Tensor],
         profiler_tensor: torch.Tensor,
+        spec_decode_config: SpecDecodeConfig
     ):
         self.__finalized__ = False
         self._is_compiled = False
@@ -174,6 +179,13 @@ class PersistentKernel:
         self.meta_tensors = meta_tensors
         self.profiler_tensor = profiler_tensor
         self.use_nvshmem = True if world_size > 1 else False
+        self.spec_decode_config = spec_decode_config
+        self._spec_decode_handlers = {
+            "promptlookup": self.prompt_lookup_spec_handler,
+        }
+        self._spec_verify_handlers = {
+            "promptlookup": self.prompt_lookup_verify_handler,
+        }
 
     def attach_input(self, torch_tensor: torch.Tensor, name: str = None) -> DTensor:
         dims = tuple([d for d in torch_tensor.shape])
@@ -221,18 +233,26 @@ class PersistentKernel:
 
     def embed_layer(
         self,
-        input: DTensor,
-        weight: DTensor,
-        output: DTensor,
+        input: DTensor, # [batch_size, num_spec_tokens]
+        weight: DTensor, # [vocab_size, hidden_size]
+        output: DTensor, # [batch_size, hidden_size]
         grid_dim: tuple,
         block_dim: tuple,
+        input_source: int = 0, # 0: all_tokens, 1: input_token
     ):
+        # TODO: Support batch size > 1
+        # tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        # tb_graph.new_input(input, (-1, -1, -1), -1, True)
+        # tb_graph.new_input(weight, (-1, -1, -1), -1, True)
+        # tb_graph.new_input(output, (-1, -1, -1), -1, True)
+        # self.kn_graph.customized([input, weight, output], tb_graph)
+        # self.kn_graph.register_task(tb_graph, "embedding")
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
-        tb_graph.new_input(input, (-1, -1, -1), -1, True)
-        tb_graph.new_input(weight, (-1, -1, -1), -1, True)
-        tb_graph.new_input(output, (-1, -1, -1), -1, True)
+        tb_graph.new_input(input, (-1, 1, -1), -1, True)
+        tb_graph.new_input(weight, (1, -1, -1), -1, True)
+        tb_graph.new_input(output, (1, 0, -1), -1, True)
         self.kn_graph.customized([input, weight, output], tb_graph)
-        self.kn_graph.register_task(tb_graph, "embedding", [weight.dim(1)])
+        self.kn_graph.register_task(tb_graph, "embedding", [input_source])
 
     def rmsnorm_linear_layer(
         self,
@@ -320,6 +340,77 @@ class PersistentKernel:
             tb_graph,
         )
         self.kn_graph.register_task(tb_graph, "attention", params)
+        
+    def single_batch_extend_attention_layer(
+        self,
+        input: DTensor, # [6, 6144]
+        k_cache: DTensor, 
+        v_cache: DTensor,
+        q_norm: DTensor,
+        k_norm: DTensor,
+        cos_pos_embed: DTensor,
+        sin_pos_embed: DTensor,
+        output: DTensor,
+        grid_dim: tuple, # (6, 8, 1)
+        block_dim: tuple,
+    ):
+        # Currently assume that input/output
+        assert input.num_dims == 2  # (batch_size, fused_outdim / world_size)
+        assert output.num_dims == 2  # (batch_size, hidden_size / world_size)
+        assert k_cache.num_dims == 4  # (batch_size, seq_len, kv_heads, head_dim)
+        assert v_cache.num_dims == 4  # (batch_size, seq_len, kv_heads, head_dim)
+        head_dim = k_cache.dim(3)
+        num_kv_heads = k_cache.dim(2)
+        num_q_heads = output.dim(1) // head_dim # 32
+        rotary_embed = 0
+        output_stride = output.dim(1)
+
+        extend_num = input.dim(0) - 1
+        if cos_pos_embed is not None or sin_pos_embed is not None:
+            assert cos_pos_embed.num_dims == 2  # (seq_len, head_dim)
+            assert sin_pos_embed.num_dims == 2  # (seq_len, head_dim)
+            assert cos_pos_embed.dim(1) == head_dim
+            assert sin_pos_embed.dim(1) == head_dim
+            rotary_embed = 1
+        qk_norm = 0
+        if q_norm is not None or k_norm is not None:
+            assert q_norm.num_dims == 1  # (head_dim)
+            assert k_norm.num_dims == 1  # (head_dim)
+            qk_norm = 1
+            assert q_norm.dim(0) == head_dim
+            assert k_norm.dim(0) == head_dim
+
+        # params[0]: num_q_heads
+        # params[1]: num_kv_heads
+        # params[2]: qk_norm
+        # params[3]: rotary_embed
+        # params[4]: extend_num
+        # params[5]: output_stride
+        params = [num_q_heads, num_kv_heads, qk_norm, rotary_embed, extend_num, output_stride]
+
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(input, (0, 1, -1), -1, True)
+        tb_graph.new_input(k_cache, (0, 2, -1), 1, True)
+        tb_graph.new_input(v_cache, (0, 2, -1), 1, True)
+        tb_graph.new_input(q_norm, (-1, -1, -1), -1, True)
+        tb_graph.new_input(k_norm, (-1, -1, -1), -1, True)
+        tb_graph.new_input(cos_pos_embed, (-1, -1, -1), -1, True)
+        tb_graph.new_input(sin_pos_embed, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output, (0, 1, -1), -1, True)
+        self.kn_graph.customized(
+            [
+                input,
+                k_cache,
+                v_cache,
+                q_norm,
+                k_norm,
+                cos_pos_embed,
+                sin_pos_embed,
+                output,
+            ],
+            tb_graph,
+        )
+        self.kn_graph.register_task(tb_graph, "single_batch_extend_attention", params)
 
     def linear_with_residual_layer(
         self,
@@ -411,9 +502,9 @@ class PersistentKernel:
         num_tasks = grid_dim[0]
         self.argmax_partial_output_size = input.dim(1) // num_tasks
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
-        tb_graph.new_input(input, (1, -1, -1), -1, True)
-        tb_graph.new_input(output_value, (1, -1, -1), -1, True)
-        tb_graph.new_input(output_index, (1, -1, -1), -1, True)
+        tb_graph.new_input(input, (1, 0, -1), -1, True)
+        tb_graph.new_input(output_value, (1, 0, -1), -1, True)
+        tb_graph.new_input(output_index, (1, 0, -1), -1, True)
         self.kn_graph.customized([input, output_value, output_index], tb_graph)
         self.kn_graph.register_task(tb_graph, "argmax_partial")
 
@@ -431,19 +522,146 @@ class PersistentKernel:
         assert input_index.num_dims == 2  # (batch_size, num_tasks)
         assert output.num_dims == 2  # (batch_size, 1)
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
-        tb_graph.new_input(input_value, (-1, -1, -1), -1, True)
-        tb_graph.new_input(input_index, (-1, -1, -1), -1, True)
-        tb_graph.new_input(output, (-1, -1, -1), -1, True)
+        tb_graph.new_input(input_value, (1, 0, -1), -1, True)
+        tb_graph.new_input(input_index, (1, 0, -1), -1, True)
+        tb_graph.new_input(output, (0, 1, -1), -1, True) #TODO: Make sure the output map is expected
         self.kn_graph.customized([input_value, input_index, output], tb_graph)
         self.kn_graph.register_task(
             tb_graph, "argmax_reduce", [self.argmax_partial_output_size]
         )
+        
+    def find_ngram_partial_layer(
+        self, input: DTensor, output: DTensor, grid_dim: tuple, block_dim: tuple, ngram_size: int = 3):
+        # Currently assume that input/output
+        assert input.num_dims == 2  # (batch_size, seq_len)
+        assert output.num_dims == 2  # (batch_size, num_tasks)
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(input, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output, (1, -1, -1), -1, True)
+        self.kn_graph.customized([input, output], tb_graph)
+        self.kn_graph.register_task(tb_graph, "find_ngram_partial", [ngram_size])
+        
+    def find_ngram_global_layer(
+        self, input: tuple[DTensor, DTensor], output: DTensor, grid_dim: tuple, block_dim: tuple, ngram_size: int = 3, spec_length: int = 5):
+        # Currently assume that input/output
+        assert len(input) == 2
+        partial_results, tokens = input
+        assert partial_results.num_dims == 2  # (batch_size, num_tasks)
+        assert tokens.num_dims == 2  # (batch_size, vocab_size)
+        assert output.num_dims == 2  # (batch_size, 1)
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(partial_results, (-1, -1, -1), -1, True)
+        tb_graph.new_input(tokens, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output, (-1, -1, -1), -1, True)
+        self.kn_graph.customized([partial_results, tokens, output], tb_graph)
+        self.kn_graph.register_task(tb_graph, "find_ngram_global", [ngram_size, spec_length])
+
+    def prompt_lookup_spec_handler(
+        self, 
+        spec_decode_config: PromptLookupConfig,
+        tokens: DTensor,
+        grid_dim: tuple[int, int, int],
+        block_dim: tuple[int, int, int],
+    ):
+        partial_ngram_output = self.new_tensor(
+            dims=(tokens.dim(0), 96),
+            dtype=int64,
+            name="partial_ngram_output",
+            io_category="cuda_tensor",
+        )
+        self.find_ngram_partial_layer(
+            input=tokens, 
+            output=partial_ngram_output, 
+            grid_dim=grid_dim, 
+            block_dim=block_dim, 
+            ngram_size=spec_decode_config.ngram_size
+        )
+        spec_tokens = self.new_tensor(
+            dims=(tokens.dim(0), spec_decode_config.spec_length + 1),
+            dtype=int64,
+            name="spec_tokens",
+            io_category="cuda_tensor",
+        )   
+        self.find_ngram_global_layer(
+            input=(partial_ngram_output, tokens), 
+            output=spec_tokens, 
+            grid_dim=(1, 1, 1), 
+            block_dim=(128, 1, 1), 
+            ngram_size=spec_decode_config.ngram_size,
+            spec_length=spec_decode_config.spec_length
+        )
+        return spec_tokens
+    
+    def draft_forward_layer_dispatcher(
+        self,
+        spec_decode_config: SpecDecodeConfig,
+        tokens: DTensor,
+        grid_dim: tuple[int, int, int],
+        block_dim: tuple[int, int, int],
+    ):
+        method = spec_decode_config.method
+        handler = self._spec_decode_handlers[method]
+        if handler is None:
+            raise ValueError(f"Invalid spec decode method: {method}")
+        return handler(spec_decode_config, tokens, grid_dim, block_dim)
+    
+    def target_verify_greedy_layer(
+        self, input: tuple[DTensor, DTensor], output: DTensor, grid_dim: tuple, block_dim: tuple):
+        # Currently assume that input/output
+        # This tensor is not realy used
+        assert len(input) == 2
+        spec_tokens, target_tokens = input
+        assert spec_tokens.num_dims == 2  # (batch_size, vocab_size)
+        assert target_tokens.num_dims == 2  # (batch_size, vocab_size)
+        assert output.num_dims == 2  # (batch_size, 1)
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(spec_tokens, (-1, -1, -1), -1, True)
+        tb_graph.new_input(target_tokens, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output, (-1, -1, -1), -1, True)
+        self.kn_graph.customized([spec_tokens, target_tokens, output], tb_graph)
+        self.kn_graph.register_task(tb_graph, "target_verify_greedy")
+        
+    def prompt_lookup_verify_handler(
+        self,
+        spec_decode_config: SpecDecodeConfig,
+        spec_tokens: DTensor,
+        target_output: DTensor,
+        grid_dim: tuple[int, int, int],
+        block_dim: tuple[int, int, int],
+    ):
+        # This tensor is not realy used
+        verify_out = self.new_tensor(
+            dims=(1, 1),
+            dtype=int64,
+            name="verify_out",
+            io_category="cuda_tensor",
+        )
+        self.target_verify_greedy_layer(
+            input=(spec_tokens, target_output), output=verify_out, grid_dim=grid_dim, block_dim=block_dim
+        )
+        return verify_out
+    
+    def verify_layer_dispatcher(
+        self,
+        spec_decode_config: SpecDecodeConfig,
+        spec_tokens: DTensor,
+        target_output: DTensor,
+        grid_dim: tuple[int, int, int] = (1, 1, 1),
+        block_dim: tuple[int, int, int] = (128, 1, 1),
+    ):
+        method = spec_decode_config.method
+        handler = self._spec_verify_handlers[method]
+        if handler is None:
+            raise ValueError(f"Invalid spec decode method: {method}")
+        return handler(spec_decode_config, spec_tokens, target_output, grid_dim, block_dim)
 
     def compile(
         self,
         **kwargs,
     ):
         assert not self._is_compiled
+        
+        output_dir = kwargs.get("output_dir", None)
 
         MIRAGE_ROOT, INCLUDE_PATH, DEPS_PATH = get_key_paths()
         tempdir_obj = tempfile.TemporaryDirectory()
@@ -458,6 +676,11 @@ class PersistentKernel:
             f.write(results["json_file"])
         with open(cuda_code_path, "w") as f:
             f.write(results["cuda_code"] + HARD_CODE)
+            
+        if output_dir is not None:
+            os.makedirs(output_dir, exist_ok=True)
+            shutil.copy(cuda_code_path, os.path.join(output_dir, "test.cu"))
+            shutil.copy(json_file_path, os.path.join(output_dir, "task_graph.json"))
 
         cc = shutil.which("nvcc")
         if cc is None:

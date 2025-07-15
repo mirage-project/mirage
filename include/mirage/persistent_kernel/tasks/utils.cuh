@@ -21,6 +21,17 @@ constexpr int log2_constexpr(int n, int p = 0) {
   return (n <= 1) ? p : log2_constexpr(n >> 1, p + 1);
 }
 
+constexpr int max_power_of_two_le(int x) {
+  if (x <= 0) {
+    return 0;
+  }
+  int result = 1;
+  while ((result << 1) <= x) {
+    result <<= 1;
+  }
+  return result;
+}
+
 __device__ __forceinline__ void
     convert_f32_to_bf16_uint32(float const (&s_frag)[8],
                                uint32_t (&a_frag)[4]) {

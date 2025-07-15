@@ -16,7 +16,6 @@
 #include "common.h"
 #include "utils.cuh"
 namespace kernel {
-
 template <typename T>
 __device__ __forceinline__ void warp_reduce_max_idx(T &val, long long &idx) {
 #pragma unroll
@@ -67,7 +66,7 @@ __device__ __forceinline__ void block_reduce_max_idx(T &val, long long &idx) {
   }
 }
 
-template <typename T, int CHUNK_SIZE>
+template <typename T, int BATCH_SIZE, int CHUNK_SIZE, int NUM_PARTIAL_TASKS>
 __device__ __forceinline__ void
     argmax_partial_kernel(void const *__restrict__ input_ptr,
                           void *__restrict__ output_val_ptr,
@@ -77,23 +76,27 @@ __device__ __forceinline__ void
   long long *__restrict__ output_idx = static_cast<long long *>(output_idx_ptr);
 
   int tidx = threadIdx.x;
-  T local_max = T(-inf);
-  long long local_idx = -1;
 
-  // TODO: try vectorize
-  for (int i = tidx; i < CHUNK_SIZE; i += blockDim.x) {
-    T val = input[i];
-    if (val > local_max) {
-      local_max = val;
-      local_idx = i;
+// TODO: try vectorize
+#pragma unroll
+  for (int batch_idx = 0; batch_idx < BATCH_SIZE; batch_idx++) {
+    T local_max = T(-inf);
+    long long local_idx = -1;
+#pragma unroll
+    for (int i = tidx; i < CHUNK_SIZE; i += NUM_THREADS) {
+      T val = input[i + batch_idx * CHUNK_SIZE * NUM_PARTIAL_TASKS];
+      if (val > local_max) {
+        local_max = val;
+        local_idx = i;
+      }
     }
-  }
 
-  block_reduce_max_idx<T>(local_max, local_idx);
+    block_reduce_max_idx<T>(local_max, local_idx);
 
-  if (tidx == 0) {
-    output_val[0] = local_max;
-    output_idx[0] = local_idx;
+    if (tidx == 0) {
+      output_val[batch_idx * NUM_PARTIAL_TASKS] = local_max;
+      output_idx[batch_idx * NUM_PARTIAL_TASKS] = local_idx;
+    }
   }
 }
 
@@ -115,6 +118,7 @@ __device__ __forceinline__ void
   // Pack (chunk_index, relative_index) into a single 64-bit integer
   long long local_packed_idx = -1;
 
+#pragma unroll
   for (int i = tidx; i < NUM_PARTIAL_TASKS; i += blockDim.x) {
     T current_val = partial_vals[i];
     if (current_val > local_max) {

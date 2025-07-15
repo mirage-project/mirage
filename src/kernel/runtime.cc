@@ -396,11 +396,22 @@ void register_mugraph(
     }
     // Step 2: create events between operators
     if (pre_op == nullptr) {
-      // Assert that the first op launches a single task
-      assert(tasks.size() == 1);
-      first_tasks.push_back(all_tasks.size());
-      cur_task_map[dim3(0, 0, 0)] = all_tasks.size();
-      all_tasks.push_back(tasks[0]);
+      dim3 bid;
+      for (bid.x = 0; bid.x < bgraph.grid_dim.x; bid.x++) {
+        for (bid.y = 0; bid.y < bgraph.grid_dim.y; bid.y++) {
+          for (bid.z = 0; bid.z < bgraph.grid_dim.z; bid.z++) {
+            cur_task_map[bid] = all_tasks.size();
+
+            int offset = bid.x * bgraph.grid_dim.y * bgraph.grid_dim.z +
+                         bid.y * bgraph.grid_dim.z + bid.z;
+
+            if (bid.x == 0 && bid.y == 0 && bid.z == 0) {
+              first_tasks.push_back(all_tasks.size());
+            }
+            all_tasks.push_back(tasks[offset]);
+          }
+        }
+      }
     } else {
       // Step 2.1: analyze dependencies between thread blocks of the two ops
       std::vector<int> producer_partition(mirage::config::MAX_TENSOR_DIMS, 1);
@@ -1222,6 +1233,11 @@ TaskGraphResult print_task_graph(
   task_type_to_name[TASK_LINEAR_WITH_RESIDUAL] = "TASK_LINEAR_WITH_RESIDUAL";
   task_type_to_name[TASK_ARGMAX_PARTIAL] = "TASK_ARGMAX_PARTIAL";
   task_type_to_name[TASK_ARGMAX_REDUCE] = "TASK_ARGMAX_REDUCE";
+  task_type_to_name[TASK_FIND_NGRAM_PARTIAL] = "TASK_FIND_NGRAM_PARTIAL";
+  task_type_to_name[TASK_FIND_NGRAM_GLOBAL] = "TASK_FIND_NGRAM_GLOBAL";
+  task_type_to_name[TASK_TARGET_VERIFY_GREEDY] = "TASK_TARGET_VERIFY_GREEDY";
+  task_type_to_name[TASK_SINGLE_BATCH_EXTEND_ATTENTION] =
+      "TASK_SINGLE_BATCH_EXTEND_ATTENTION";
 
   code.e("__device__ __forceinline__");
   code.e("void _execute_task(TaskDesc const& task_desc,");
