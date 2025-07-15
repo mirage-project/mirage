@@ -167,6 +167,7 @@ class Qwen3Config(PretrainedConfig):
         sliding_window=4096,
         max_window_layers=28,
         attention_dropout=0.0,
+        batch_size=1,
         **kwargs,
     ):
         self.vocab_size = vocab_size
@@ -195,6 +196,7 @@ class Qwen3Config(PretrainedConfig):
         self.rope_scaling = rope_scaling
         self.attention_bias = attention_bias
         self.attention_dropout = attention_dropout
+        self.batch_size = batch_size
         # Validate the correctness of rotary position embeddings parameters
         # BC: if there is a 'type' field, move it to 'rope_type'.
         if self.rope_scaling is not None and "type" in self.rope_scaling:
