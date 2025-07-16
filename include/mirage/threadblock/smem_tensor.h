@@ -43,6 +43,7 @@ struct alignas(16) STensor {
     owner_ts_idx = -1000;
     smem_offset = 128;
     after_accum = false;
+    store_in_dmem = false;
   }
 
   CUTLASS_HOST_DEVICE
@@ -112,6 +113,10 @@ struct alignas(16) STensor {
   }
 
   size_t size() const {
+    if (num_dims == 0) {
+      // Special treatment for empty tensors
+      return 0;
+    }
     size_t num_elements = 1;
     using namespace mirage::type;
     size_t data_type_size = 1;
@@ -127,6 +132,11 @@ struct alignas(16) STensor {
       }
       case DT_FLOAT32: {
         data_type_size = 4;
+        break;
+      }
+      case DT_INT64:
+      case DT_DOUBLE: {
+        data_type_size = 8;
         break;
       }
       case DT_UNKNOWN:
@@ -169,6 +179,10 @@ struct alignas(16) STensor {
   // This flag is false by default and should only be
   // changed to true by a forloop accumulator
   bool after_accum;
+
+  // a flag indicating if the stensor is saved
+  // in device memory; false by default
+  bool store_in_dmem;
 
   static std::atomic<int64_t> next_guid;
 };

@@ -15,6 +15,7 @@
 
 #pragma once
 
+#include "mirage/config.h"
 #include "mirage/cpu/cmem_tensor.h"
 #include "mirage/layout.h"
 #include "mirage/type.h"
@@ -25,8 +26,6 @@
 
 namespace mirage {
 namespace kernel {
-
-constexpr int MAX_TENSOR_DIMS = 4;
 
 class KNOperator;
 
@@ -107,6 +106,8 @@ struct alignas(16) DTensor {
     return num_elements() * data_type_size;
   }
 
+  static const DTensor EMPTY_TENSOR;
+
   // hash related functions
   size_t get_owner_independent_hash() const;
 
@@ -118,7 +119,7 @@ public:
   mirage::type::DataType data_type;
   mirage::layout::DmemLayout layout;
   int num_dims;
-  int dim[MAX_TENSOR_DIMS];
+  int dim[mirage::config::MAX_TENSOR_DIMS];
   type::GuidType guid;
   // int stride[MAX_TENSOR_DIMS];
   //  DTensor fields
