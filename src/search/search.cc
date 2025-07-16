@@ -323,8 +323,8 @@ void KernelGraphGenerator::generate_next_operator(
 
     // Case B1. Finish and return to kernel-level search
     if (!output_tensors.empty()) {
-      for (int3 output_map :
-          dim_strategy.get_output_map_cand(output_tensors, c.tb_graph->grid_dim)) {
+      for (int3 output_map : dim_strategy.get_output_map_cand(
+               output_tensors, c.tb_graph->grid_dim)) {
         if (create_threadblock_outputs(output_map)) {
           KNOperator *new_op = c.kn_graph->create_customized_op(
               get_input_tensors(*c.tb_graph), *c.tb_graph);
@@ -336,7 +336,8 @@ void KernelGraphGenerator::generate_next_operator(
           std::shared_ptr<threadblock::Graph> tb_graph = c.tb_graph;
           c.tb_graph = nullptr;
           if (check_range(init_ranges, target_ranges, *c.kn_graph)) {
-            generate_next_operator(c, verify, verified_graphs, search_depth + 1);
+            generate_next_operator(
+                c, verify, verified_graphs, search_depth + 1);
           }
           c.tb_graph = tb_graph;
           c.level = SearchLevel::LV_THREADBLOCK;
@@ -344,7 +345,7 @@ void KernelGraphGenerator::generate_next_operator(
           c.kn_graph->operators.pop_back();
         }
         while (c.tb_graph->operators.back()->op_type ==
-              type::TBOperatorType::TB_OUTPUT_OP) {
+               type::TBOperatorType::TB_OUTPUT_OP) {
           c.tb_graph->operators.pop_back();
         }
       }

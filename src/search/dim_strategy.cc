@@ -275,7 +275,9 @@ std::vector<std::vector<int3>>
   return results;
 }
 
-std::vector<int3> DimStrategy::get_output_map_cand(std::vector<STensor> const &tensors, dim3 grid_dim) {
+std::vector<int3>
+    DimStrategy::get_output_map_cand(std::vector<STensor> const &tensors,
+                                     dim3 grid_dim) {
   auto is_valid_output_map = [&](int3 output_map) {
     if ((grid_dim.x == 1 && output_map.x != -1) ||
         (grid_dim.x > 1 && output_map.x == -1)) {
@@ -290,8 +292,7 @@ std::vector<int3> DimStrategy::get_output_map_cand(std::vector<STensor> const &t
       return false;
     }
     for (STensor const &tensor : tensors) {
-      if (output_map.x >= tensor.num_dims ||
-          output_map.y >= tensor.num_dims ||
+      if (output_map.x >= tensor.num_dims || output_map.y >= tensor.num_dims ||
           output_map.z >= tensor.num_dims) {
         return false;
       }
