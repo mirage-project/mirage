@@ -35,7 +35,7 @@ std::vector<dim3>
 #ifdef MIRAGE_BACKEND_USE_CUDA
     for (size_t x = 8; x <= 256; x *= 2) {
 #else
-    for (size_t x = 1024; x <= 8192; x *= 2) {
+    for (size_t x = 128; x <= 8192; x *= 2) {
 #endif
       for (int dim : dims) {
         if (dim % x == 0) {
@@ -51,7 +51,7 @@ std::vector<dim3>
 #ifdef MIRAGE_BACKEND_USE_CUDA
     for (size_t y : {8, 64, 128, 256}) {
 #else
-    for (size_t y = 1024; y <= 8192; y *= 2) {
+    for (size_t y = 128; y <= 8192; y *= 2) {
 #endif
       for (int dim : dims) {
         if (dim % y == 0) {
@@ -275,7 +275,30 @@ std::vector<std::vector<int3>>
   return results;
 }
 
-std::vector<int3> DimStrategy::get_output_map_cand(dim3 grid_dim) {
+std::vector<int3> DimStrategy::get_output_map_cand(std::vector<STensor> const &tensors, dim3 grid_dim) {
+  auto is_valid_output_map = [&](int3 output_map) {
+    if ((grid_dim.x == 1 && output_map.x != -1) ||
+        (grid_dim.x > 1 && output_map.x == -1)) {
+      return false;
+    }
+    if ((grid_dim.y == 1 && output_map.y != -1) ||
+        (grid_dim.y > 1 && output_map.y == -1)) {
+      return false;
+    }
+    if ((grid_dim.z == 1 && output_map.z != -1) ||
+        (grid_dim.z > 1 && output_map.z == -1)) {
+      return false;
+    }
+    for (STensor const &tensor : tensors) {
+      if (output_map.x >= tensor.num_dims ||
+          output_map.y >= tensor.num_dims ||
+          output_map.z >= tensor.num_dims) {
+        return false;
+      }
+    }
+    return true;
+  };
+
   std::vector<int3> results;
   std::vector<int3> omap_to_explore = config.omap_to_explore;
   omap_to_explore = vector_concat(omap_to_explore,
@@ -288,25 +311,13 @@ std::vector<int3> DimStrategy::get_output_map_cand(dim3 grid_dim) {
                                       {-1, 1, -1},
                                       {-1, 2, -1},
                                       {-1, -1, -1},
+                                      {1, -1, -1},
                                   });
-  if (!config._enable_attention_specific_optimization) {
-    omap_to_explore.push_back({1, -1, -1});
-  }
   omap_to_explore = deduplicate(omap_to_explore);
   for (int3 output_map : omap_to_explore) {
-    if ((grid_dim.x == 1 && output_map.x != -1) ||
-        (grid_dim.x > 1 && output_map.x == -1)) {
-      continue;
+    if (is_valid_output_map(output_map)) {
+      results.push_back(output_map);
     }
-    if ((grid_dim.y == 1 && output_map.y != -1) ||
-        (grid_dim.y > 1 && output_map.y == -1)) {
-      continue;
-    }
-    if ((grid_dim.z == 1 && output_map.z != -1) ||
-        (grid_dim.z > 1 && output_map.z == -1)) {
-      continue;
-    }
-    results.push_back(output_map);
   }
   if (config.randomized_branches) {
     std::random_shuffle(results.begin(), results.end());
@@ -381,7 +392,7 @@ std::vector<int> DimStrategy::get_forloop_range_cand(
     if (input_map[i].z == forloop_dim[i]) {
       return {};
     }
-    for (size_t x = 1024; x <= 8192; x *= 2) {
+    for (size_t x = 128; x <= 8192; x *= 2) {
       if (dim % x == 0) {
         forloop_range_to_explore.push_back(dim / x);
       }

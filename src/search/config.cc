@@ -13,7 +13,7 @@ GeneratorConfig GeneratorConfig::get_default_config() {
       16 /* search_thread */,
       VerifierType::PROBABILISTIC_VERIFIER,
       {
-          type::KN_MATMUL_OP,
+          // type::KN_MATMUL_OP,
           // type::KN_EXP_OP,
           // type::KN_SQUARE_OP,
           // type::KN_SQRT_OP,
@@ -30,7 +30,7 @@ GeneratorConfig GeneratorConfig::get_default_config() {
       } /* knop_to_explore */,
       {
           type::TB_MATMUL_OP,
-          // type::TB_EXP_OP,
+          type::TB_EXP_OP,
           // type::TB_SQUARE_OP,
           // type::TB_SQRT_OP,
           // type::TB_SILU_OP,
@@ -43,7 +43,7 @@ GeneratorConfig GeneratorConfig::get_default_config() {
           // type::TB_POW_OP,
           // type::TB_RMS_NORM_OP,
           type::TB_FORLOOP_ACCUM_NO_RED_OP,
-          // type::TB_FORLOOP_ACCUM_RED_LD_SUM_OP,
+          type::TB_FORLOOP_ACCUM_RED_LD_SUM_OP,
           // type::TB_FORLOOP_ACCUM_RED_LD_MEAN_OP,
           // type::TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP,
           type::TB_FORLOOP_ACCUM_RED_LD_RMS_OP,

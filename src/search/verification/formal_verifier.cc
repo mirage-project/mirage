@@ -233,10 +233,14 @@ std::vector<std::string>
         }
         case type::TBOperatorType::TB_FORLOOP_ACCUM_RED_LD_RMS_OP: {
           std::string a = tensor_exprs.at(op->input_tensors[0].guid);
+          // square
+          a = "(square " + a + ")";
+          // reduce
           if (graph.forloop_range > 1) {
             a = "(reduce " + a + " " + df + ")";
           }
-          tensor_exprs.emplace(op->output_tensors[0].guid, "(rms" + a + ")");
+          a = "(sum " + a + " " + data_dim[0] + ")";
+          tensor_exprs.emplace(op->output_tensors[0].guid, "(sqrt " + a + ")");
           break;
         }
         case type::TBOperatorType::TB_FORLOOP_ACCUM_RED_LD_SUM_OP: {
@@ -303,7 +307,7 @@ std::vector<std::string>
         case type::TBOperatorType::TB_RMS_NORM_OP: {
           std::string a = tensor_exprs.at(op->input_tensors[0].guid);
           tensor_exprs.emplace(op->output_tensors[0].guid,
-                               "(rms_norm " + a + ")");
+                               "(rms_norm " + a + " " + data_dim[0] + ")");
           break;
         }
         case type::TBOperatorType::TB_SQUARE_OP: {
@@ -420,7 +424,7 @@ std::vector<std::string>
         case type::KNOperatorType::KN_RMS_NORM_OP: {
           std::string a = tensor_exprs.at(op->input_tensors[0].guid);
           tensor_exprs.emplace(op->output_tensors[0].guid,
-                               "(rms_norm " + a + ")");
+                               "(rms_norm " + a + " " + data_dim[0] + ")");
           break;
         }
         case type::KNOperatorType::KN_SILU_OP: {

@@ -61,6 +61,7 @@ endif()
 # TODO: Currently disable CUTLASS_ARCH_MMA_SM80_ENABLED flag
 # since we target Triton to perform codegen
 #list(APPEND CMAKE_CUDA_FLAGS "-DCUTLASS_ARCH_MMA_SM80_ENABLED")
+set(CMAKE_BUILD_TYPE "Debug")
 
 if ("${CMAKE_BUILD_TYPE}" STREQUAL "Debug")
   message("Build in Debug mode")
@@ -404,9 +405,9 @@ if("${BUILD_CPP_EXAMPLES}" STREQUAL "ON")
   target_link_libraries(${CPP_EXAMPLES_BIN} mirage_runtime)
 endif()
 
-if ("${BUILD_CPP_EXAMPLES}" STREQUAL "ON")
+if (true)
   set(CPP_EXAMPLES_DIR cpp_examples)
-  set(CPP_EXAMPLES_BIN nki_rms_norm)
+  set(CPP_EXAMPLES_BIN nki)
   file(GLOB CPP_EXAMPLES_SRCS ${CPP_EXAMPLES_DIR}/${CPP_EXAMPLES_BIN}.cc)
   add_executable(${CPP_EXAMPLES_BIN} ${CPP_EXAMPLES_SRCS})
   set_target_properties(${CPP_EXAMPLES_BIN}
