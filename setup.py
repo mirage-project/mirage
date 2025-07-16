@@ -75,8 +75,6 @@ def config_cython():
                         path.join(mirage_path, "build", "abstract_subexpr", "release"),
                         path.join(mirage_path, "build", "formal_verifier", "release"),
                         path.join(z3_path, "include"),
-                        path.join(mirage_path, "build", "abstract_subexpr", "release"),
-                        path.join(mirage_path, "build", "formal_verifier", "release"),
                         cuda_include_dir,
                     ],
                     libraries=[
@@ -196,7 +194,7 @@ try:
         cwd=build_dir,
         env=os.environ.copy(),
     )
-    subprocess.check_call(["make", "-j4"], cwd=build_dir, env=os.environ.copy())
+    subprocess.check_call(["make", "-j8"], cwd=build_dir, env=os.environ.copy())
     print("Mirage runtime library built successfully.")
 except subprocess.CalledProcessError as e:
     print("Failed to build runtime library.")

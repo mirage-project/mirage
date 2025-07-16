@@ -153,7 +153,7 @@ endif()
 include_directories(${FORMAL_VERIFIER_LIB})
 list(APPEND MIRAGE_LINK_LIBS ${FORMAL_VERIFIER_LIBRARIES})
 
-set_target_properties(mirage_runtime PROPERTIES CUDA_ARCHITECTURES "70;75;80;86;89;90")
+set_target_properties(mirage_runtime PROPERTIES CUDA_ARCHITECTURES "80;86;89;90;100")
 
 target_compile_features(mirage_runtime PUBLIC cxx_std_17)
 
