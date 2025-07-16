@@ -762,9 +762,12 @@ cdef class CyKNGraph:
         cinputs.resize(len(inputs))
         cdef DTensor t
         for i in range(len(inputs)):
-            assert(type(inputs[i]) == DTensor)
-            t = inputs[i]
-            cinputs[i] = t.c_ptr
+            if inputs[i] is None:
+                cinputs[i] = NULL
+            else:
+                assert (type(inputs[i]) == DTensor)
+                t = inputs[i]
+                cinputs[i] = t.c_ptr
         cdef CppDTensor* coutputs[1024]
         num_outputs = self.p_kgraph.customized(cinputs, coutputs, bgraph.p_bgraph)
         outputs = list()
@@ -974,7 +977,10 @@ cdef class CyTBGraph:
         c_input_map.x = input_map[0]
         c_input_map.y = input_map[1]
         c_input_map.z = input_map[2]
-        cdef CppSTensor* ptr = self.p_bgraph.new_input(dtensor.c_ptr, c_input_map, forloop_dim, SmemRowMajor, store_in_dmem)
+        cdef CppDTensor* dtensor_cptr = NULL
+        if dtensor is not None:
+            dtensor_cptr = dtensor.c_ptr
+        cdef CppSTensor* ptr = self.p_bgraph.new_input(dtensor_cptr, c_input_map, forloop_dim, SmemRowMajor, store_in_dmem)
         t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
         return STensor(t)
 
