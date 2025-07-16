@@ -973,12 +973,12 @@ TaskGraphResult print_task_graph(
             if (input_ops[i]->dtensor == kernel::DTensor::EMPTY_TENSOR) {
               json json_dims = json::array();
               json json_strides = json::array();
-              json_task["inputs"].push_back(json{
-                  {"base_ptr", "nullptr"},
-                  {"offset", 0},
-                  {"data_type", type::DT_UNKNOWN},
-                  {"dims", json_dims},
-                  {"strides", json_strides}});
+              json_task["inputs"].push_back(
+                  json{{"base_ptr", "nullptr"},
+                       {"offset", 0},
+                       {"data_type", type::DT_UNKNOWN},
+                       {"dims", json_dims},
+                       {"strides", json_strides}});
               continue;
             }
             off_t offset = 0;

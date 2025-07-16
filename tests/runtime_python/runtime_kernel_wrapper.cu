@@ -5,20 +5,25 @@
 #include "norm.cuh"
 #include "norm_linear.cuh"
 // #include "norm_linear_original.cuh"
+#include "bfloat16.h"
+#include "embedding.cuh"
 #include "paged_attention.cuh"
+#include "prompt_lookup.cuh"
 #include "silu_mul_linear.cuh"
 #include "single_batch_decoding.cuh"
 #include "single_batch_extend.cuh"
 #include "single_batch_gqa.cuh"
-#include "embedding.cuh"
-#include "prompt_lookup.cuh"
 #include "target_verify.cuh"
-#include "bfloat16.h"
 #include <cstdio>
 #include <cuda_runtime.h>
 #include <torch/extension.h>
 
 // using kernel::argmax_kernel;
+using kernel::argmax_partial_kernel;
+using kernel::argmax_reduce_kernel;
+using kernel::embedding_kernel;
+using kernel::find_ngram_global_kernel;
+using kernel::find_ngram_partial_kernel;
 using kernel::linear_kernel;
 using kernel::multitoken_paged_attention_task_impl;
 using kernel::norm_linear_task_impl;
@@ -27,11 +32,6 @@ using kernel::silu_mul_linear_task_impl;
 using kernel::single_batch_decoding_kernel;
 using kernel::single_batch_extend_kernel;
 using kernel::single_batch_gqa_kernel;
-using kernel::embedding_kernel;
-using kernel::find_ngram_partial_kernel;
-using kernel::find_ngram_global_kernel;
-using kernel::argmax_partial_kernel;
-using kernel::argmax_reduce_kernel;
 using kernel::target_verify_greedy_kernel;
 using bfloat16 = type::bfloat16_t;
 
@@ -238,20 +238,20 @@ __global__ void single_batch_extend_wrapper(void const *qkv_ptr,
                              HEAD_DIM,
                              WEIGHT_STRIDE,
                              EXTEND_NUM>(qkv_ptr,
-                                        k_cache_ptr,
-                                        v_cache_ptr,
-                                        output_ptr,
-                                        seq_len,
-                                        qk_norm,
-                                        rotary_emd,
-                                        qnorm_weight_ptr,
-                                        knorm_weight_ptr,
-                                        cos_ptr,
-                                        sin_ptr,
-                                        q_eps,
-                                        k_eps,
-                                        q_norm_debug_ptr,
-                                        k_norm_debug_ptr);
+                                         k_cache_ptr,
+                                         v_cache_ptr,
+                                         output_ptr,
+                                         seq_len,
+                                         qk_norm,
+                                         rotary_emd,
+                                         qnorm_weight_ptr,
+                                         knorm_weight_ptr,
+                                         cos_ptr,
+                                         sin_ptr,
+                                         q_eps,
+                                         k_eps,
+                                         q_norm_debug_ptr,
+                                         k_norm_debug_ptr);
 }
 
 void single_batch_extend(
@@ -284,39 +284,43 @@ void single_batch_extend(
   void const *knorm_weight_ptr = qk_norm ? knorm_weight->data_ptr() : nullptr;
   void const *cos_ptr = rotary_emd ? cos->data_ptr() : nullptr;
   void const *sin_ptr = rotary_emd ? sin->data_ptr() : nullptr;
-  
+
   // Debug output pointers (optional)
-  void *q_norm_debug_ptr = q_norm_debug.has_value() ? q_norm_debug->data_ptr() : nullptr;
-  void *k_norm_debug_ptr = k_norm_debug.has_value() ? k_norm_debug->data_ptr() : nullptr;
+  void *q_norm_debug_ptr =
+      q_norm_debug.has_value() ? q_norm_debug->data_ptr() : nullptr;
+  void *k_norm_debug_ptr =
+      k_norm_debug.has_value() ? k_norm_debug->data_ptr() : nullptr;
 
   // Dynamic dispatch based on extend_num
   printf("single_batch_extend extend_num: %d\n", extend_num);
   switch (extend_num) {
     case 0:
-      cudaFuncSetAttribute(single_batch_extend_wrapper<bfloat16, 4, 1, 128, 128, 0>,
-                            cudaFuncAttributeMaxDynamicSharedMemorySize,
-                            smem_size);
-        single_batch_extend_wrapper<bfloat16, 4, 1, 128, 128, 0>
-            <<<grid_dim, block_dim, smem_size>>>(qkv_ptr,
-                                                k_cache_ptr,
-                                                v_cache_ptr,
-                                                output_ptr,
-                                                seq_len,
-                                                qk_norm,
-                                                rotary_emd,
-                                                qnorm_weight_ptr,
-                                                knorm_weight_ptr,
-                                                cos_ptr,
-                                                sin_ptr,
-                                                q_eps,
-                                                k_eps,
-                                                q_norm_debug_ptr,
-                                                k_norm_debug_ptr);
+      cudaFuncSetAttribute(
+          single_batch_extend_wrapper<bfloat16, 4, 1, 128, 128, 0>,
+          cudaFuncAttributeMaxDynamicSharedMemorySize,
+          smem_size);
+      single_batch_extend_wrapper<bfloat16, 4, 1, 128, 128, 0>
+          <<<grid_dim, block_dim, smem_size>>>(qkv_ptr,
+                                               k_cache_ptr,
+                                               v_cache_ptr,
+                                               output_ptr,
+                                               seq_len,
+                                               qk_norm,
+                                               rotary_emd,
+                                               qnorm_weight_ptr,
+                                               knorm_weight_ptr,
+                                               cos_ptr,
+                                               sin_ptr,
+                                               q_eps,
+                                               k_eps,
+                                               q_norm_debug_ptr,
+                                               k_norm_debug_ptr);
       break;
     case 1:
-      cudaFuncSetAttribute(single_batch_extend_wrapper<bfloat16, 4, 1, 128, 128, 1>,
-                           cudaFuncAttributeMaxDynamicSharedMemorySize,
-                           smem_size);
+      cudaFuncSetAttribute(
+          single_batch_extend_wrapper<bfloat16, 4, 1, 128, 128, 1>,
+          cudaFuncAttributeMaxDynamicSharedMemorySize,
+          smem_size);
       single_batch_extend_wrapper<bfloat16, 4, 1, 128, 128, 1>
           <<<grid_dim, block_dim, smem_size>>>(qkv_ptr,
                                                k_cache_ptr,
@@ -335,9 +339,10 @@ void single_batch_extend(
                                                k_norm_debug_ptr);
       break;
     case 2:
-      cudaFuncSetAttribute(single_batch_extend_wrapper<bfloat16, 4, 1, 128, 128, 2>,
-                           cudaFuncAttributeMaxDynamicSharedMemorySize,
-                           smem_size);
+      cudaFuncSetAttribute(
+          single_batch_extend_wrapper<bfloat16, 4, 1, 128, 128, 2>,
+          cudaFuncAttributeMaxDynamicSharedMemorySize,
+          smem_size);
       single_batch_extend_wrapper<bfloat16, 4, 1, 128, 128, 2>
           <<<grid_dim, block_dim, smem_size>>>(qkv_ptr,
                                                k_cache_ptr,
@@ -356,9 +361,10 @@ void single_batch_extend(
                                                k_norm_debug_ptr);
       break;
     case 3:
-      cudaFuncSetAttribute(single_batch_extend_wrapper<bfloat16, 4, 1, 128, 128, 3>,
-                           cudaFuncAttributeMaxDynamicSharedMemorySize,
-                           smem_size);
+      cudaFuncSetAttribute(
+          single_batch_extend_wrapper<bfloat16, 4, 1, 128, 128, 3>,
+          cudaFuncAttributeMaxDynamicSharedMemorySize,
+          smem_size);
       single_batch_extend_wrapper<bfloat16, 4, 1, 128, 128, 3>
           <<<grid_dim, block_dim, smem_size>>>(qkv_ptr,
                                                k_cache_ptr,
@@ -377,9 +383,10 @@ void single_batch_extend(
                                                k_norm_debug_ptr);
       break;
     case 4:
-      cudaFuncSetAttribute(single_batch_extend_wrapper<bfloat16, 4, 1, 128, 128, 4>,
-                           cudaFuncAttributeMaxDynamicSharedMemorySize,
-                           smem_size);
+      cudaFuncSetAttribute(
+          single_batch_extend_wrapper<bfloat16, 4, 1, 128, 128, 4>,
+          cudaFuncAttributeMaxDynamicSharedMemorySize,
+          smem_size);
       single_batch_extend_wrapper<bfloat16, 4, 1, 128, 128, 4>
           <<<grid_dim, block_dim, smem_size>>>(qkv_ptr,
                                                k_cache_ptr,
@@ -398,9 +405,10 @@ void single_batch_extend(
                                                k_norm_debug_ptr);
       break;
     case 5:
-      cudaFuncSetAttribute(single_batch_extend_wrapper<bfloat16, 4, 1, 128, 128, 5>,
-                           cudaFuncAttributeMaxDynamicSharedMemorySize,
-                           smem_size);
+      cudaFuncSetAttribute(
+          single_batch_extend_wrapper<bfloat16, 4, 1, 128, 128, 5>,
+          cudaFuncAttributeMaxDynamicSharedMemorySize,
+          smem_size);
 
       printf("single_batch_extend_wrapper<bfloat16, 4, 1, 128, 128, 5>\n");
       single_batch_extend_wrapper<bfloat16, 4, 1, 128, 128, 5>
@@ -763,7 +771,10 @@ __global__ void norm_linear_kernel_wrapper(void const *input_ptr,
                                            void const *weight_ptr,
                                            float eps,
                                            void *output_ptr) {
-  printf("norm_linear_kernel_wrapper<T, %d, %d, %d>\n", BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE);
+  printf("norm_linear_kernel_wrapper<T, %d, %d, %d>\n",
+         BATCH_SIZE,
+         OUTPUT_SIZE,
+         REDUCTION_SIZE);
   norm_linear_task_impl<T,
                         BATCH_SIZE,
                         OUTPUT_SIZE,
@@ -782,60 +793,63 @@ void launch_norm_linear(void const *input_ptr,
   dim3 block_dim(128, 1, 1);
   size_t smem_size = 1024 * 150;
 
-
   cudaFuncSetAttribute(
       norm_linear_kernel_wrapper<T, BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE>,
       cudaFuncAttributeMaxDynamicSharedMemorySize,
       smem_size);
 
-  printf("norm_linear_kernel_wrapper<T, %d, %d, %d>\n", BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE);
+  printf("norm_linear_kernel_wrapper<T, %d, %d, %d>\n",
+         BATCH_SIZE,
+         OUTPUT_SIZE,
+         REDUCTION_SIZE);
   norm_linear_kernel_wrapper<T, BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE>
       <<<grid_dim, block_dim, smem_size>>>(
           input_ptr, norm_weight_ptr, weight_ptr, eps, output_ptr);
 }
 
 // Macro-based dispatch system for norm_linear - Three-dimensional dispatch
-#define NORM_LINEAR_CALL(BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE) \
-  launch_norm_linear<bfloat16, BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE>( \
+#define NORM_LINEAR_CALL(BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE)              \
+  launch_norm_linear<bfloat16, BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE>(       \
       input_ptr, norm_weight_ptr, weight_ptr, eps, output_ptr);
 
-#define NORM_LINEAR_DISPATCH_REDUCTION_SIZE_CASE(BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE) \
-  case REDUCTION_SIZE: \
-    NORM_LINEAR_CALL(BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE) \
+#define NORM_LINEAR_DISPATCH_REDUCTION_SIZE_CASE(                              \
+    BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE)                                   \
+  case REDUCTION_SIZE:                                                         \
+    NORM_LINEAR_CALL(BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE)                  \
     break;
 
-#define NORM_LINEAR_DISPATCH_REDUCTION_SIZE(BATCH_SIZE, OUTPUT_SIZE) \
-  switch (input.size(1)) { \
-    NORM_LINEAR_DISPATCH_REDUCTION_SIZE_CASE(BATCH_SIZE, OUTPUT_SIZE, 4096) \
-    NORM_LINEAR_DISPATCH_REDUCTION_SIZE_CASE(BATCH_SIZE, OUTPUT_SIZE, 256) \
-    NORM_LINEAR_DISPATCH_REDUCTION_SIZE_CASE(BATCH_SIZE, OUTPUT_SIZE, 128) \
-    default: \
-      printf("Unsupported reduction size in test: %zu\n", input.size(1)); \
-      break; \
+#define NORM_LINEAR_DISPATCH_REDUCTION_SIZE(BATCH_SIZE, OUTPUT_SIZE)           \
+  switch (input.size(1)) {                                                     \
+    NORM_LINEAR_DISPATCH_REDUCTION_SIZE_CASE(BATCH_SIZE, OUTPUT_SIZE, 4096)    \
+    NORM_LINEAR_DISPATCH_REDUCTION_SIZE_CASE(BATCH_SIZE, OUTPUT_SIZE, 256)     \
+    NORM_LINEAR_DISPATCH_REDUCTION_SIZE_CASE(BATCH_SIZE, OUTPUT_SIZE, 128)     \
+    default:                                                                   \
+      printf("Unsupported reduction size in test: %zu\n", input.size(1));      \
+      break;                                                                   \
   }
 
-#define NORM_LINEAR_DISPATCH_OUTPUT_SIZE(BATCH_SIZE, OUTPUT_SIZE) \
-  case OUTPUT_SIZE: \
-    NORM_LINEAR_DISPATCH_REDUCTION_SIZE(BATCH_SIZE, OUTPUT_SIZE) \
+#define NORM_LINEAR_DISPATCH_OUTPUT_SIZE(BATCH_SIZE, OUTPUT_SIZE)              \
+  case OUTPUT_SIZE:                                                            \
+    NORM_LINEAR_DISPATCH_REDUCTION_SIZE(BATCH_SIZE, OUTPUT_SIZE)               \
     break;
 
 // Define all specific combinations
-#define NORM_LINEAR_DISPATCH_COMBINATIONS(BATCH_SIZE) \
-  switch (output.size(1)) { \
-    NORM_LINEAR_DISPATCH_OUTPUT_SIZE(BATCH_SIZE, 16) \
-    NORM_LINEAR_DISPATCH_OUTPUT_SIZE(BATCH_SIZE, 32) \
-    NORM_LINEAR_DISPATCH_OUTPUT_SIZE(BATCH_SIZE, 64) \
-    NORM_LINEAR_DISPATCH_OUTPUT_SIZE(BATCH_SIZE, 256) \
-    NORM_LINEAR_DISPATCH_OUTPUT_SIZE(BATCH_SIZE, 1600) \
-    default: \
-      printf("Unsupported output size in test: %zu\n", output.size(1)); \
-      break; \
+#define NORM_LINEAR_DISPATCH_COMBINATIONS(BATCH_SIZE)                          \
+  switch (output.size(1)) {                                                    \
+    NORM_LINEAR_DISPATCH_OUTPUT_SIZE(BATCH_SIZE, 16)                           \
+    NORM_LINEAR_DISPATCH_OUTPUT_SIZE(BATCH_SIZE, 32)                           \
+    NORM_LINEAR_DISPATCH_OUTPUT_SIZE(BATCH_SIZE, 64)                           \
+    NORM_LINEAR_DISPATCH_OUTPUT_SIZE(BATCH_SIZE, 256)                          \
+    NORM_LINEAR_DISPATCH_OUTPUT_SIZE(BATCH_SIZE, 1600)                         \
+    default:                                                                   \
+      printf("Unsupported output size in test: %zu\n", output.size(1));        \
+      break;                                                                   \
   }
 
-#define NORM_LINEAR_DISPATCH_BATCH_SIZE(BATCH_SIZE) \
-  case BATCH_SIZE: \
-    printf("input.size(0) == %d\n", BATCH_SIZE); \
-    NORM_LINEAR_DISPATCH_COMBINATIONS(BATCH_SIZE) \
+#define NORM_LINEAR_DISPATCH_BATCH_SIZE(BATCH_SIZE)                            \
+  case BATCH_SIZE:                                                             \
+    printf("input.size(0) == %d\n", BATCH_SIZE);                               \
+    NORM_LINEAR_DISPATCH_COMBINATIONS(BATCH_SIZE)                              \
     break;
 
 void norm_linear(torch::Tensor input,
@@ -849,7 +863,9 @@ void norm_linear(torch::Tensor input,
   void const *weight_ptr = weight.data_ptr();
   void *output_ptr = output.data_ptr();
 
-  printf("input.size(0): %zu, output.size(1): %zu\n", input.size(0), output.size(1));
+  printf("input.size(0): %zu, output.size(1): %zu\n",
+         input.size(0),
+         output.size(1));
 
   switch (input.size(0)) {
     NORM_LINEAR_DISPATCH_BATCH_SIZE(1)
@@ -1113,22 +1129,22 @@ void launch_silu_mul_linear(void const *input_ptr,
           input_ptr, weight_ptr, bias_ptr, output_ptr);
 }
 
-#define SILU_MUL_LINEAR_DISPATCH_OUTPUT_SIZE(BATCH_SIZE, OUTPUT_SIZE) \
-  case OUTPUT_SIZE: \
-    launch_silu_mul_linear<bfloat16, BATCH_SIZE, OUTPUT_SIZE, 12288>( \
-        input_ptr, weight_ptr, bias_ptr, output_ptr); \
+#define SILU_MUL_LINEAR_DISPATCH_OUTPUT_SIZE(BATCH_SIZE, OUTPUT_SIZE)          \
+  case OUTPUT_SIZE:                                                            \
+    launch_silu_mul_linear<bfloat16, BATCH_SIZE, OUTPUT_SIZE, 12288>(          \
+        input_ptr, weight_ptr, bias_ptr, output_ptr);                          \
     break;
 
-#define SILU_MUL_LINEAR_DISPATCH_BATCH_SIZE(BATCH_SIZE) \
-  case BATCH_SIZE: \
-    switch (output.size(1)) { \
-    SILU_MUL_LINEAR_DISPATCH_OUTPUT_SIZE(BATCH_SIZE, 16) \
-    SILU_MUL_LINEAR_DISPATCH_OUTPUT_SIZE(BATCH_SIZE, 32) \
-    SILU_MUL_LINEAR_DISPATCH_OUTPUT_SIZE(BATCH_SIZE, 64) \
-    default: \
-      printf("Unsupported output size in test: %zu\n", output.size(1)); \
-      break; \
-    } \
+#define SILU_MUL_LINEAR_DISPATCH_BATCH_SIZE(BATCH_SIZE)                        \
+  case BATCH_SIZE:                                                             \
+    switch (output.size(1)) {                                                  \
+      SILU_MUL_LINEAR_DISPATCH_OUTPUT_SIZE(BATCH_SIZE, 16)                     \
+      SILU_MUL_LINEAR_DISPATCH_OUTPUT_SIZE(BATCH_SIZE, 32)                     \
+      SILU_MUL_LINEAR_DISPATCH_OUTPUT_SIZE(BATCH_SIZE, 64)                     \
+      default:                                                                 \
+        printf("Unsupported output size in test: %zu\n", output.size(1));      \
+        break;                                                                 \
+    }                                                                          \
     break;
 
 void silu_mul_linear(torch::Tensor input,
@@ -1189,24 +1205,22 @@ void launch_linear(void const *input_ptr,
           input_ptr, weight_ptr, residual_ptr, output_ptr);
 }
 
+#define LINEAR_DISPATCH_OUTPUT_SIZE(BATCH_SIZE, OUTPUT_SIZE)                   \
+  case OUTPUT_SIZE:                                                            \
+    launch_linear<bfloat16, BATCH_SIZE, OUTPUT_SIZE, 4096>(                    \
+        input_ptr, weight_ptr, residual_ptr, output_ptr);                      \
+    break;
 
-
-#define LINEAR_DISPATCH_OUTPUT_SIZE(BATCH_SIZE, OUTPUT_SIZE) \
-  case OUTPUT_SIZE: \
-    launch_linear<bfloat16, BATCH_SIZE, OUTPUT_SIZE, 4096>( \
-        input_ptr, weight_ptr, residual_ptr, output_ptr); \
-    break; \
-
-#define LINEAR_DISPATCH_BATCH_SIZE(BATCH_SIZE) \
-  case BATCH_SIZE: \
-    switch (output.size(1)) { \
-    LINEAR_DISPATCH_OUTPUT_SIZE(BATCH_SIZE, 16) \
-    LINEAR_DISPATCH_OUTPUT_SIZE(BATCH_SIZE, 32) \
-    LINEAR_DISPATCH_OUTPUT_SIZE(BATCH_SIZE, 64) \
-    default: \
-      printf("Unsupported output size in test: %zu\n", output.size(1)); \
-      break; \
-    } \
+#define LINEAR_DISPATCH_BATCH_SIZE(BATCH_SIZE)                                 \
+  case BATCH_SIZE:                                                             \
+    switch (output.size(1)) {                                                  \
+      LINEAR_DISPATCH_OUTPUT_SIZE(BATCH_SIZE, 16)                              \
+      LINEAR_DISPATCH_OUTPUT_SIZE(BATCH_SIZE, 32)                              \
+      LINEAR_DISPATCH_OUTPUT_SIZE(BATCH_SIZE, 64)                              \
+      default:                                                                 \
+        printf("Unsupported output size in test: %zu\n", output.size(1));      \
+        break;                                                                 \
+    }                                                                          \
     break;
 
 void linear(torch::Tensor input,
@@ -1243,19 +1257,24 @@ __global__ void embedding_kernel_wrapper(void const *input_ptr,
                                          void const *embedding_ptr,
                                          void *output_ptr) {
   int input_offset = blockIdx.x;
-  int64_t const *__restrict__ input = static_cast<int64_t const *>(input_ptr) + input_offset;
+  int64_t const *__restrict__ input =
+      static_cast<int64_t const *>(input_ptr) + input_offset;
   int embedding_offset = blockIdx.y * CHUNK_SIZE;
-  T const *__restrict__ embedding = static_cast<T const *>(embedding_ptr) + embedding_offset;
+  T const *__restrict__ embedding =
+      static_cast<T const *>(embedding_ptr) + embedding_offset;
   int output_offset = blockIdx.y * CHUNK_SIZE + blockIdx.x * OUTPUT_DIM_SIZE;
   T *__restrict__ output = static_cast<T *>(output_ptr) + output_offset;
 
   if (blockIdx.x == 1 && blockIdx.y == 1 && threadIdx.x == 0) {
-    printf("input_offset: %d, embedding_offset: %d, output_offset: %d\n", input_offset, embedding_offset, output_offset);
+    printf("input_offset: %d, embedding_offset: %d, output_offset: %d\n",
+           input_offset,
+           embedding_offset,
+           output_offset);
   }
-  embedding_kernel<T, 1, CHUNK_SIZE, OUTPUT_DIM_SIZE>(
-      input, embedding, output);
+  embedding_kernel<T, 1, CHUNK_SIZE, OUTPUT_DIM_SIZE>(input, embedding, output);
   // if (blockIdx.x == 1 && blockIdx.y == 1) {
-  //   printf("input: %d, embedding: %d, output: %d\n", input, embedding, output);
+  //   printf("input: %d, embedding: %d, output: %d\n", input, embedding,
+  //   output);
   // }
 }
 
@@ -1268,9 +1287,7 @@ void embedding(torch::Tensor input,
   dim3 block_dim(128, 1, 1);
 
   embedding_kernel_wrapper<float, 128, 4096><<<grid_dim, block_dim>>>(
-      input.data_ptr(),
-      weight.data_ptr(),
-      output.data_ptr());
+      input.data_ptr(), weight.data_ptr(), output.data_ptr());
 
   cudaError_t err = cudaDeviceSynchronize();
   if (err != cudaSuccess) {
@@ -1281,20 +1298,24 @@ void embedding(torch::Tensor input,
 
 // Prompt Lookup Kernel
 template <int NGRAM_SIZE, int NUM_WORKERS>
-__global__ void find_ngram_partial_kernel_wrapper(long long const *__restrict__ input_ptr,
-                                                  long long *__restrict__ output_id_ptr,
-                                                  int input_token_num) {
+__global__ void
+    find_ngram_partial_kernel_wrapper(long long const *__restrict__ input_ptr,
+                                      long long *__restrict__ output_id_ptr,
+                                      int input_token_num) {
   // Each block gets a pointer to its unique output slot.
   long long *block_output_ptr = output_id_ptr + blockIdx.x;
-  find_ngram_partial_kernel<NGRAM_SIZE, NUM_WORKERS>(input_ptr, block_output_ptr, input_token_num);
+  find_ngram_partial_kernel<NGRAM_SIZE, NUM_WORKERS>(
+      input_ptr, block_output_ptr, input_token_num);
 }
 
 template <int NGRAM_SIZE, int SPEC_LENGTH, int NUM_PARTIAL_TASKS>
-__global__ void find_ngram_global_kernel_wrapper(long long const *__restrict__ input_array,
-                                                 long long const *__restrict__ tokens_ptr,
-                                                 long long *__restrict__ output_result,
-                                                 int step) {
-  find_ngram_global_kernel<NGRAM_SIZE, SPEC_LENGTH, NUM_PARTIAL_TASKS>(input_array, tokens_ptr, output_result, step);
+__global__ void
+    find_ngram_global_kernel_wrapper(long long const *__restrict__ input_array,
+                                     long long const *__restrict__ tokens_ptr,
+                                     long long *__restrict__ output_result,
+                                     int step) {
+  find_ngram_global_kernel<NGRAM_SIZE, SPEC_LENGTH, NUM_PARTIAL_TASKS>(
+      input_array, tokens_ptr, output_result, step);
 }
 
 void prompt_lookup(torch::Tensor all_tokens,
@@ -1302,19 +1323,22 @@ void prompt_lookup(torch::Tensor all_tokens,
                    int ngram_size,
                    int spec_length,
                    torch::Tensor final_output) {
-  
+
   constexpr int NUM_WORKERS = 96; // Corresponds to grid size
   dim3 partial_grid_dim(NUM_WORKERS, 1, 1);
   dim3 partial_block_dim(128, 1, 1);
-  
-  auto partial_output_options = torch::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA);
-  torch::Tensor partial_output = torch::full({NUM_WORKERS}, INT_MAX, partial_output_options);
-  
+
+  auto partial_output_options =
+      torch::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA);
+  torch::Tensor partial_output =
+      torch::full({NUM_WORKERS}, INT_MAX, partial_output_options);
+
   if (ngram_size == 3) {
-    find_ngram_partial_kernel_wrapper<3, NUM_WORKERS><<<partial_grid_dim, partial_block_dim>>>(
-        static_cast<long long const *>(all_tokens.data_ptr()),
-        static_cast<long long *>(partial_output.data_ptr()),
-        prompt_len);
+    find_ngram_partial_kernel_wrapper<3, NUM_WORKERS>
+        <<<partial_grid_dim, partial_block_dim>>>(
+            static_cast<long long const *>(all_tokens.data_ptr()),
+            static_cast<long long *>(partial_output.data_ptr()),
+            prompt_len);
   } else {
     throw std::runtime_error("Unsupported ngram_size for prompt_lookup test");
   }
@@ -1323,15 +1347,17 @@ void prompt_lookup(torch::Tensor all_tokens,
   dim3 global_block_dim(128, 1, 1);
 
   if (ngram_size == 3 && spec_length == 5) {
-     find_ngram_global_kernel_wrapper<3, 5, NUM_WORKERS><<<global_grid_dim, global_block_dim>>>(
-        static_cast<long long const *>(partial_output.data_ptr()),
-        static_cast<long long const *>(all_tokens.data_ptr()),
-        static_cast<long long *>(final_output.data_ptr()),
-        prompt_len);
+    find_ngram_global_kernel_wrapper<3, 5, NUM_WORKERS>
+        <<<global_grid_dim, global_block_dim>>>(
+            static_cast<long long const *>(partial_output.data_ptr()),
+            static_cast<long long const *>(all_tokens.data_ptr()),
+            static_cast<long long *>(final_output.data_ptr()),
+            prompt_len);
   } else {
-     throw std::runtime_error("Unsupported ngram_size/spec_length for prompt_lookup test");
+    throw std::runtime_error(
+        "Unsupported ngram_size/spec_length for prompt_lookup test");
   }
-  
+
   cudaError_t err = cudaDeviceSynchronize();
   if (err != cudaSuccess) {
     printf("CUDA kernel launch error in prompt_lookup: %s\n",
@@ -1342,90 +1368,99 @@ void prompt_lookup(torch::Tensor all_tokens,
 // Verify Kernel
 template <int NUM_SPEC_TOKENS>
 __global__ void target_verify_greedy_kernel_wrapper(
-                                 void const *__restrict__ spec_token_id_ptr,
-                                 void const *__restrict__ target_token_id_ptr, 
-                                 void *__restrict__ final_output_ptr,
-                                 void *__restrict__ tokens_ptr) {
-    target_verify_greedy_kernel<NUM_SPEC_TOKENS>(
-        spec_token_id_ptr, target_token_id_ptr, final_output_ptr, tokens_ptr);
+    void const *__restrict__ spec_token_id_ptr,
+    void const *__restrict__ target_token_id_ptr,
+    void *__restrict__ final_output_ptr,
+    void *__restrict__ tokens_ptr) {
+  target_verify_greedy_kernel<NUM_SPEC_TOKENS>(
+      spec_token_id_ptr, target_token_id_ptr, final_output_ptr, tokens_ptr);
 }
 
 void verify(torch::Tensor spec_tokens,
             torch::Tensor target_tokens,
             torch::Tensor accepted_len,
             torch::Tensor new_tokens) {
-    
-    constexpr int NUM_SPEC_TOKENS = 5; // Must match python test
-    if (spec_tokens.size(0) != NUM_SPEC_TOKENS + 1 ||
-        target_tokens.size(0) < NUM_SPEC_TOKENS ||
-        accepted_len.size(0) != 1 ||
-        new_tokens.size(0) != NUM_SPEC_TOKENS + 1)
-         {
-        throw std::runtime_error("Invalid tensor shape for verify test");
-    }
 
-    dim3 grid_dim(1, 1, 1);
-    dim3 block_dim(128, 1, 1);
+  constexpr int NUM_SPEC_TOKENS = 5; // Must match python test
+  if (spec_tokens.size(0) != NUM_SPEC_TOKENS + 1 ||
+      target_tokens.size(0) < NUM_SPEC_TOKENS || accepted_len.size(0) != 1 ||
+      new_tokens.size(0) != NUM_SPEC_TOKENS + 1) {
+    throw std::runtime_error("Invalid tensor shape for verify test");
+  }
 
-    target_verify_greedy_kernel_wrapper<NUM_SPEC_TOKENS><<<grid_dim, block_dim>>>(
-        spec_tokens.data_ptr(),
-        target_tokens.data_ptr(),
-        accepted_len.data_ptr(),
-        new_tokens.data_ptr()
-    );
+  dim3 grid_dim(1, 1, 1);
+  dim3 block_dim(128, 1, 1);
 
-    cudaError_t err = cudaDeviceSynchronize();
-    if (err != cudaSuccess) {
-        printf("CUDA kernel launch error in verify: %s\n", cudaGetErrorString(err));
-    }
+  target_verify_greedy_kernel_wrapper<NUM_SPEC_TOKENS>
+      <<<grid_dim, block_dim>>>(spec_tokens.data_ptr(),
+                                target_tokens.data_ptr(),
+                                accepted_len.data_ptr(),
+                                new_tokens.data_ptr());
+
+  cudaError_t err = cudaDeviceSynchronize();
+  if (err != cudaSuccess) {
+    printf("CUDA kernel launch error in verify: %s\n", cudaGetErrorString(err));
+  }
 }
 
 // Argmax Kernel
 template <typename T, int BATCH_SIZE, int CHUNK_SIZE, int NUM_PARTIAL_TASKS>
-__global__ void argmax_partial_kernel_wrapper(void const *__restrict__ input_ptr,
-                                              void *__restrict__ output_val_ptr,
-                                              void *__restrict__ output_idx_ptr,
-                                              int vocab_size) {
+__global__ void
+    argmax_partial_kernel_wrapper(void const *__restrict__ input_ptr,
+                                  void *__restrict__ output_val_ptr,
+                                  void *__restrict__ output_idx_ptr,
+                                  int vocab_size) {
   int batch_idx = blockIdx.y;
   int chunk_idx = blockIdx.x;
 
-  T const *row_input_ptr = static_cast<T const *>(input_ptr) + batch_idx * BATCH_SIZE * vocab_size + chunk_idx * CHUNK_SIZE;
-  T *row_output_val_ptr = static_cast<T *>(output_val_ptr) + batch_idx * BATCH_SIZE * NUM_PARTIAL_TASKS + chunk_idx;
-  long long *row_output_idx_ptr = static_cast<long long *>(output_idx_ptr) + batch_idx * BATCH_SIZE * NUM_PARTIAL_TASKS + chunk_idx;
+  T const *row_input_ptr = static_cast<T const *>(input_ptr) +
+                           batch_idx * BATCH_SIZE * vocab_size +
+                           chunk_idx * CHUNK_SIZE;
+  T *row_output_val_ptr = static_cast<T *>(output_val_ptr) +
+                          batch_idx * BATCH_SIZE * NUM_PARTIAL_TASKS +
+                          chunk_idx;
+  long long *row_output_idx_ptr = static_cast<long long *>(output_idx_ptr) +
+                                  batch_idx * BATCH_SIZE * NUM_PARTIAL_TASKS +
+                                  chunk_idx;
 
   argmax_partial_kernel<T, BATCH_SIZE, CHUNK_SIZE, NUM_PARTIAL_TASKS>(
       row_input_ptr, row_output_val_ptr, row_output_idx_ptr);
 }
 
 template <typename T, int CHUNK_SIZE, int NUM_PARTIAL_TASKS>
-__global__ void argmax_reduce_kernel_wrapper(void const *__restrict__ input_val_ptr,
-                                             void const *__restrict__ input_idx_ptr,
-                                             void *__restrict__ final_output_ptr,
-                                             int step,
-                                             long long *tokens) {
+__global__ void
+    argmax_reduce_kernel_wrapper(void const *__restrict__ input_val_ptr,
+                                 void const *__restrict__ input_idx_ptr,
+                                 void *__restrict__ final_output_ptr,
+                                 int step,
+                                 long long *tokens) {
   int row_idx = blockIdx.y;
-  T const *row_input_val_ptr = static_cast<T const *>(input_val_ptr) + row_idx * NUM_PARTIAL_TASKS;
-  long long const *row_input_idx_ptr = static_cast<long long const *>(input_idx_ptr) + row_idx * NUM_PARTIAL_TASKS;
-  long long *row_output_ptr = static_cast<long long *>(final_output_ptr) + row_idx;
+  T const *row_input_val_ptr =
+      static_cast<T const *>(input_val_ptr) + row_idx * NUM_PARTIAL_TASKS;
+  long long const *row_input_idx_ptr =
+      static_cast<long long const *>(input_idx_ptr) +
+      row_idx * NUM_PARTIAL_TASKS;
+  long long *row_output_ptr =
+      static_cast<long long *>(final_output_ptr) + row_idx;
 
   argmax_reduce_kernel<T, CHUNK_SIZE, NUM_PARTIAL_TASKS>(
       row_input_val_ptr, row_input_idx_ptr, row_output_ptr, step, tokens);
 }
 
-void argmax(
-  torch::Tensor input, 
-  torch::Tensor final_output,
-  torch::Tensor partial_idx,
-  torch::Tensor partial_val) {
+void argmax(torch::Tensor input,
+            torch::Tensor final_output,
+            torch::Tensor partial_idx,
+            torch::Tensor partial_val) {
   // long long n_row = input.size(0);
   // long long vocab_size = input.size(1);
   constexpr long long n_row = 6;
   constexpr long long vocab_size = 153600;
-  
+
   constexpr int TOTAL_TASKS = 96;
   long long chunk_size = vocab_size / TOTAL_TASKS;
   if (vocab_size % TOTAL_TASKS != 0) {
-      throw std::runtime_error("vocab_size must be divisible by NUM_PARTIAL_TASKS");
+    throw std::runtime_error(
+        "vocab_size must be divisible by NUM_PARTIAL_TASKS");
   }
 
   constexpr int BATCH_NUM = 3;
@@ -1436,22 +1471,27 @@ void argmax(
   dim3 partial_grid_dim(TOTAL_TASKS / BATCH_NUM, BATCH_NUM, 1);
 
   // Create intermediate tensors for partial results
-  // auto options_val = torch::TensorOptions().dtype(input.dtype()).device(input.device());
-  auto options_idx = torch::TensorOptions().dtype(torch::kInt64).device(input.device());
-  // torch::Tensor partial_val = torch::empty({n_row, TASK_PER_BATCH}, options_val);
-  // torch::Tensor partial_idx = torch::empty({n_row, TASK_PER_BATCH}, options_idx);
+  // auto options_val =
+  // torch::TensorOptions().dtype(input.dtype()).device(input.device());
+  auto options_idx =
+      torch::TensorOptions().dtype(torch::kInt64).device(input.device());
+  // torch::Tensor partial_val = torch::empty({n_row, TASK_PER_BATCH},
+  // options_val); torch::Tensor partial_idx = torch::empty({n_row,
+  // TASK_PER_BATCH}, options_idx);
   torch::Tensor tokens = torch::empty({1}, options_idx);
 
   // Launch partial kernel
   dim3 block_dim(128, 1, 1);
   if (BATCH_SIZE == 2) {
 
-    argmax_partial_kernel_wrapper<bfloat16, BATCH_SIZE, CHUNK_SIZE, TASK_PER_BATCH>
-      <<<partial_grid_dim, block_dim>>>(
-          input.data_ptr(),
-          partial_val.data_ptr(),
-          partial_idx.data_ptr(),
-          vocab_size);
+    argmax_partial_kernel_wrapper<bfloat16,
+                                  BATCH_SIZE,
+                                  CHUNK_SIZE,
+                                  TASK_PER_BATCH>
+        <<<partial_grid_dim, block_dim>>>(input.data_ptr(),
+                                          partial_val.data_ptr(),
+                                          partial_idx.data_ptr(),
+                                          vocab_size);
   }
 
   // Launch reduce kernel
@@ -1463,7 +1503,7 @@ void argmax(
           final_output.data_ptr(),
           0,
           static_cast<long long *>(tokens.data_ptr()));
-  
+
   cudaError_t err = cudaDeviceSynchronize();
   if (err != cudaSuccess) {
     printf("CUDA kernel launch error in argmax: %s\n", cudaGetErrorString(err));
