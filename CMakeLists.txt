@@ -61,7 +61,6 @@ endif()
 # TODO: Currently disable CUTLASS_ARCH_MMA_SM80_ENABLED flag
 # since we target Triton to perform codegen
 #list(APPEND CMAKE_CUDA_FLAGS "-DCUTLASS_ARCH_MMA_SM80_ENABLED")
-set(CMAKE_BUILD_TYPE "Debug")
 
 if ("${CMAKE_BUILD_TYPE}" STREQUAL "Debug")
   message("Build in Debug mode")
