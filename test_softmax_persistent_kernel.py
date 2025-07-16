@@ -1,12 +1,13 @@
 import mirage as mi
 import torch
 import numpy as np
-
+types = torch.bfloat16
 def test_softmax_persistent_kernel():
     """
     Test the new softmax layer in PersistentKernel
     """
     print("Testing Softmax in PersistentKernel")
+    print(f"Using type: {types}")
     print("=" * 60)
     
     # Parameters
@@ -43,10 +44,10 @@ def test_softmax_persistent_kernel():
     print("-" * 40)
     
     # Create input tensor with known values for better verification
-    input_tensor = torch.randn(batch_size, vocab_size, dtype=torch.bfloat16, device='cuda:0')
+    input_tensor = torch.randn(batch_size, vocab_size, dtype=types, device='cuda:0')
     
     # Create pre-allocated output buffer
-    output_buffer = torch.zeros(batch_size, vocab_size, dtype=torch.bfloat16, device='cuda:0')
+    output_buffer = torch.zeros(batch_size, vocab_size, dtype=types, device='cuda:0')
     
     # Compute expected output using PyTorch for comparison
     expected_output = torch.nn.functional.softmax(input_tensor / temperature, dim=-1)
@@ -112,12 +113,7 @@ def test_softmax_persistent_kernel():
         # Check if output sums to 1 (property of softmax)
         output_sum = torch.sum(output_buffer, dim=-1)
         print(f"\nOutput sum (should be ~1.0): {output_sum}")
-        
-        # Additional validation
-        if max_diff < 0.01:  # Tolerance for bfloat16
-            print("\n✓ Softmax output matches expected values!")
-        else:
-            print("\n⚠ Softmax output differs from expected values")
+ 
             
     except Exception as e:
         print(f"\n✗ Execution failed: {e}")

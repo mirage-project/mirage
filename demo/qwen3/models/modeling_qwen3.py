@@ -428,7 +428,7 @@ class Qwen3Model(Qwen3PreTrainedModel):
                 config.num_key_value_heads // world_size,
                 config.head_dim,
             ),
-            dtype=torch.bfloat16,
+            dtype=torch.get_default_dtype(),
             device="cuda",
         )
         value_cache = torch.empty(
@@ -439,7 +439,7 @@ class Qwen3Model(Qwen3PreTrainedModel):
                 config.num_key_value_heads // world_size,
                 config.head_dim,
             ),
-            dtype=torch.bfloat16,
+            dtype=torch.get_default_dtype(),
             device="cuda",
         )
 
