@@ -21,10 +21,12 @@
 namespace mirage {
 namespace kernel {
 
+#ifdef MIRAGE_FINGERPRINT_USE_CUDA
 bool KNOutputOp::fingerprint(void) {
   // Do nothing
   return true;
 }
+#endif // MIRAGE_FINGERPRINT_USE_CUDA
 
 } // namespace kernel
 } // namespace mirage

@@ -15,6 +15,8 @@
 
 #pragma once
 
+#ifdef MIRAGE_FINGERPRINT_USE_CUDA
+
 #include "cutlass/cutlass.h"
 #include "cutlass/fast_math.h"
 #include "mirage/utils/cuda_helper.h"
@@ -25,56 +27,6 @@ namespace threadblock {
 
 using namespace cutlass;
 using namespace mirage::type;
-
-#ifdef DEADCODE
-
-template <typename ElementType>
-CUTLASS_DEVICE void perform_reduction(ElementType *input_ptr,
-                                      ElementType *output_ptr,
-                                      int num_input_elements,
-                                      int num_output_elements,
-                                      int num_threads) {
-  // FIXME: note that this implementation is an approximate
-  // it access the same as of input/output stensors but does not
-  // correctly calculate the final result
-  ElementType sum = static_cast<ElementType>(0.0f);
-  for (int i = threadIdx.x; i < num_input_elements; i += num_threads) {
-    sum += input_ptr[i];
-  }
-  for (int i = threadIdx.x; i < num_output_elements; i += num_threads) {
-    output_ptr[i] = sum;
-  }
-}
-
-template <typename ElementType>
-class SimpleRedunctionExecutor {
-public:
-  CUTLASS_DEVICE
-  SimpleRedunctionExecutor( // mirage::type::TBOperatorType type,
-      ElementType *input_ptr,
-      ElementType *output_ptr,
-      int output_num_elements,
-      int reduction_degree,
-      int inner_range,
-      int thread_id,
-      int num_threads) {
-    // int reduction_dim = mirage::utils::get_reduction_dim(type);
-    // int num_dims = output.num_dims;
-    // ElementType *input_ptr = (ElementType *)(smem_buffer +
-    // input.smem_offset); ElementType *output_ptr = (ElementType *)(smem_buffer
-    // + output.smem_offset);
-
-    // int num_output_elements = output.num_elements();
-    // int num_input_elements = input.num_elements();
-    //  int reduction_degree = num_input_elements / num_output_elements;
-    perform_reduction<ElementType>(input_ptr,
-                                   output_ptr,
-                                   output_num_elements * reduction_degree,
-                                   output_num_elements,
-                                   num_threads);
-  }
-};
-#endif
 
 class TBConcatFingerprinter {
 public:
@@ -110,3 +62,5 @@ public:
 
 } // namespace threadblock
 } // namespace mirage
+
+#endif // MIRAGE_FINGERPRINT_USE_CUDA

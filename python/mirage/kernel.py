@@ -569,6 +569,7 @@ class KNGraph:
             previous_checkpoint = None
         cygraphs = search(
             self.cygraph,
+            backend=backend,
             imaps=imaps,
             omaps=omaps,
             griddims=griddims,

@@ -46,7 +46,7 @@ DT get_tensor_in_new_graph(std::unordered_map<size_t, DT> mapping,
 
 NKITranspiler::NKITranspiler(kernel::Graph const *_graph,
                              NKITranspilerConfig const &_config)
-    : config(_config) {
+    : config(_config), nki_custom_kernel_idx_counter(0) {
   // using mirnage::type namespace to simplify code
   using namespace mirage::type;
 
@@ -339,9 +339,9 @@ std::optional<NKIErrorInfo> NKITranspiler::resolve_tensor_layout() {
     for (int i = 0; i < num_dims; i++) {
       partition_exprs.push_back(s_is_partition[stensor.guid][i]);
       // A partition dimension cannot be larger than 128
-      if (stensor.dim[i] > 128) {
-        opt.add(!s_is_partition[stensor.guid][i]);
-      }
+      // if (stensor.dim[i] > 128) {
+      //   opt.add(!s_is_partition[stensor.guid][i]);
+      // }
       // A partition dimension must be the last two dims
       if ((i != num_dims - 1) && (i != num_dims - 2)) {
         opt.add(!s_is_partition[stensor.guid][i]);
@@ -548,7 +548,6 @@ NKITranspileResult NKITranspiler::transpile_ugraph() {
   header.e("import neuronxcc.nki as nki");
   header.e("import neuronxcc.nki.language as nl");
   header.e("import neuronxcc.nki.isa as nisa");
-  header.e("from torch_neuronx import nki_jit");
   CodeKeeper exec;
   exec.e("if __name__ == \"__main__\":");
   exec.inc_indent();
@@ -565,28 +564,15 @@ NKITranspileResult NKITranspiler::transpile_ugraph() {
              fmt("dtensor$", dtensor.guid),
              shape);
     }
-#ifdef DEADCODE
-    if (op->op_type == type::KNOperatorType::KN_INPUT_OP) {
-      std::string shape;
-      kn::DTensor dtensor = op->output_tensors.at(0);
-      for (int i = 0; i < dtensor.num_dims; i++) {
-        shape += fmt("$,", dtensor.dim[i]);
-      }
-      exec.e("$ = torch.randn(($), dtype=torch.float16).to(device=device)",
-             fmt("dtensor$", dtensor.guid),
-             shape);
-    }
-    if (op->op_type == type::KNOperatorType::KN_OUTPUT_OP) {
-      std::string shape;
-      kn::DTensor dtensor = op->input_tensors.at(0);
-      for (int i = 0; i < dtensor.num_dims; i++) {
-        shape += fmt("$,", dtensor.dim[i]);
-      }
-      exec.e("$ = torch.randn(($), dtype=torch.float16).to(device=device)",
-             fmt("dtensor$", dtensor.guid),
-             shape);
-    }
-#endif
+  }
+  // Generate helper functions
+  CodeKeeper helper;
+  std::vector<HelperFunction> helper_functions;
+  helper_functions.push_back(tiled_transpose_function());
+  helper_functions.push_back(tiled_matmul_function());
+  helper_functions.push_back(tiled_matmul_accum_function());
+  for (HelperFunction const &hf : helper_functions) {
+    helper.e(hf.get_code());
   }
   CodeKeeper custom_kernels;
   for (kn::KNOperator *const op : g->operators) {
@@ -604,8 +590,7 @@ NKITranspileResult NKITranspiler::transpile_ugraph() {
         // tb::ExecutionPlan const &plan = cur_op->plan;
         tb::Graph const &bgraph = cur_op->bgraph;
         std::vector<std::string> dtensor_names;
-        for (kn::DTensor const &dtensor :
-             Combine(cur_op->output_tensors, cur_op->input_tensors)) {
+        for (kn::DTensor const &dtensor : cur_op->input_tensors) {
           std::string dtensor_name = fmt("dtensor$", dtensor.guid);
           dtensor_names.push_back(dtensor_name);
         }
@@ -613,12 +598,7 @@ NKITranspileResult NKITranspiler::transpile_ugraph() {
         NKICustomOPTranspileResult result = transpile_kn_custom_op(cur_op);
         // Launch kernels
         custom_kernels.e(result.code);
-        exec.e("$[$, $, $]($)",
-               result.func_name,
-               bgraph.grid_dim.x,
-               bgraph.grid_dim.y,
-               bgraph.grid_dim.z,
-               dtensor_names);
+        exec.e("$($)", result.func_name, dtensor_names);
         break;
       }
       case type::KN_ADD_OP:
@@ -651,8 +631,9 @@ NKITranspileResult NKITranspiler::transpile_ugraph() {
     }
   }
 
-  std::string code = fmt("$\n$\n$",
+  std::string code = fmt("$\n$\n$\n$",
                          header.to_string(),
+                         helper.to_string(),
                          custom_kernels.to_string(),
                          exec.to_string());
   return NKITranspileResult{std::move(code)};

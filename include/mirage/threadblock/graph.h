@@ -20,8 +20,8 @@
 #include "mirage/threadblock/operator.h"
 #include "mirage/threadblock/serializer/kernel_params.h"
 #include "mirage/threadblock/smem_tensor.h"
+#include "mirage/vector_types.h"
 #include <vector>
-#include <vector_types.h>
 
 namespace mirage {
 namespace threadblock {
@@ -187,8 +187,10 @@ public:
   void free_fingerprint(std::vector<STensor> const &tensors);
   size_t calculate_shared_memory_usage(TBOperator *new_op);
 
+#ifdef MIRAGE_BACKEND_USE_CUDA
   KernelParams get_kernel_params();
   NewKernelParams get_new_kernel_params(bool fingerprint) const;
+#endif
 
   int get_smem_size_with_pipeline() const;
 

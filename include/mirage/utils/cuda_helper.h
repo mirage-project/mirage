@@ -144,7 +144,7 @@ namespace utils {
 using namespace mirage::type;
 
 struct FpPointerList {
-  mirage::type::FPType *ptrs[mirage::config::MAX_NUM_GPUS];
+  mirage::type::FPType *ptrs[mirage::config::MAX_NUM_DEVICES];
 };
 
 cudaDataType_t to_cuda_datatype(DataType type);
