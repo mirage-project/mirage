@@ -823,62 +823,6 @@ void KNCustomizedOp::run() {
       new_params, bgraph.forloop_range, dmm->data_base_ptr[gpu_id]);
 }
 
-bool KNCustomizedOp::profile(ProfileResult &result) {
-  assert(false);
-  // Launch kernel on a single GPU
-  // assert(kgraph->gpu_dim.x == 1);
-  int gpu_id = 0;
-  checkCUDA(cudaSetDevice(0));
-
-  if (!mirage::type::CLAMP_MIN_MAX.empty()) {
-    float CLAMP_MIN_MAX_HOST[2] = {mirage::type::CLAMP_MIN_MAX["min_val"],
-                                   mirage::type::CLAMP_MIN_MAX["max_val"]};
-    cudaMemcpyToSymbol(
-        CLAMP_MIN_MAX_DEVICE, CLAMP_MIN_MAX_HOST, sizeof(float) * 2);
-  }
-
-  printf("smem_offset = %ld\n", bgraph.smem_offset);
-  int max_smem_size = mirage::config::MAX_SMEM_SIZE;
-  assert(bgraph.smem_offset <= max_smem_size);
-  if (bgraph.smem_offset > 48 * 1024) {
-    checkCUDA(cudaFuncSetAttribute(customized_kernel_function,
-                                   cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                   bgraph.smem_offset));
-  }
-
-  checkCUDA(cudaDeviceSynchronize());
-  cudaEvent_t events[2];
-  checkCUDA(cudaEventCreate(&events[0]));
-  checkCUDA(cudaEventCreate(&events[1]));
-  mirage::kernel::DeviceMemoryManager *dmm =
-      mirage::kernel::DeviceMemoryManager::get_instance();
-  // mirage::threadblock::KernelParams params = bgraph.get_kernel_params();
-  mirage::threadblock::NewKernelParams new_params =
-      bgraph.get_new_kernel_params(false /*fingerprint_kernel*/);
-  for (int i = 0; i < 1024; i++) {
-    customized_kernel_function<<<bgraph.grid_dim,
-                                 bgraph.block_dim,
-                                 bgraph.smem_offset>>>(
-        new_params, bgraph.forloop_range, dmm->data_base_ptr[gpu_id]);
-  }
-  checkCUDA(cudaEventRecord(events[0]));
-  for (int i = 0; i < ProfileResult::NUM_ITERATIONS; i++) {
-    customized_kernel_function<<<bgraph.grid_dim,
-                                 bgraph.block_dim,
-                                 bgraph.smem_offset>>>(
-        new_params, bgraph.forloop_range, dmm->data_base_ptr[gpu_id]);
-  }
-  float runtime_ms = 0;
-  checkCUDA(cudaEventRecord(events[1]));
-  checkCUDA(cudaEventSynchronize(events[1]));
-  checkCUDA(cudaEventElapsedTime(&runtime_ms, events[0], events[1]));
-  result.run_time = runtime_ms / ProfileResult::NUM_ITERATIONS;
-  printf("KNCustomizedOp: runtime(%.8lfms)\n", result.run_time);
-  checkCUDA(cudaEventDestroy(events[0]));
-  checkCUDA(cudaEventDestroy(events[1]));
-  return true;
-}
-
 __global__ void
     compute_epilogue_fingerprint(mirage::utils::FpPointerList fp_ptr_list,
                                  mirage::type::TBEpilogueType type,

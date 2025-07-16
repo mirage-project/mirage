@@ -26,7 +26,6 @@ public:
                    DTensor const &input,
                    mirage::type::KNOperatorType type);
   ~KNElementUnaryOp();
-  bool profile(ProfileResult &profile) override;
   bool fingerprint(void) override;
 
   operator json() const override;

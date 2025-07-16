@@ -57,54 +57,6 @@ __global__ void execute_elementbinary(mirage::type::KNOperatorType type,
   }
 }
 
-bool KNElementBinaryOp::profile(ProfileResult &result) {
-  // Only launch kernel on a single GPU for profiling
-  // checkCUDA(cudaSetDevice(0));
-  assert(input_tensors[0].data_type == DT_FLOAT16);
-  assert(input_tensors[1].data_type == DT_FLOAT16);
-  assert(output_tensors[0].data_type == DT_FLOAT16);
-  mirage::kernel::DeviceMemoryManager *dmm =
-      mirage::kernel::DeviceMemoryManager::get_instance();
-  cutlass::half_t *input1_ptr = reinterpret_cast<cutlass::half_t *>(
-      dmm->data_base_ptr[0] + input_tensors[0].data_offset);
-  cutlass::half_t *input2_ptr = reinterpret_cast<cutlass::half_t *>(
-      dmm->data_base_ptr[0] + input_tensors[1].data_offset);
-  cutlass::half_t *output_ptr = reinterpret_cast<cutlass::half_t *>(
-      dmm->data_base_ptr[0] + output_tensors[0].data_offset);
-
-  int num_elements = output_tensors[0].num_elements();
-  int factor1 =
-      output_tensors[0].num_elements() / input_tensors[0].num_elements();
-  int factor2 =
-      output_tensors[0].num_elements() / input_tensors[1].num_elements();
-  int const num_threads_per_blk = 1024;
-  int num_blocks =
-      (num_elements + num_threads_per_blk - 1) / num_threads_per_blk;
-  checkCUDA(cudaDeviceSynchronize());
-  cudaEvent_t events[2];
-  checkCUDA(cudaEventCreate(&events[0]));
-  checkCUDA(cudaEventCreate(&events[1]));
-  checkCUDA(cudaEventRecord(events[0]));
-  for (int i = 0; i < 16; i++) {
-    execute_elementbinary<<<num_blocks, num_threads_per_blk>>>(op_type,
-                                                               input1_ptr,
-                                                               input2_ptr,
-                                                               output_ptr,
-                                                               factor1,
-                                                               factor2,
-                                                               num_elements);
-  }
-  float runtime_ms = 0;
-  checkCUDA(cudaEventRecord(events[1]));
-  checkCUDA(cudaEventSynchronize(events[1]));
-  checkCUDA(cudaEventElapsedTime(&runtime_ms, events[0], events[1]));
-  result.run_time = runtime_ms / 16;
-  printf("ElementBinary: runtime(%.8lfms)\n", result.run_time);
-  checkCUDA(cudaEventDestroy(events[0]));
-  checkCUDA(cudaEventDestroy(events[1]));
-  return true;
-}
-
 __global__ void
     compute_elementbinary_fingerprint(mirage::type::KNOperatorType type,
                                       char *dmem_fp_ptr,
