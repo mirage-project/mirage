@@ -99,7 +99,7 @@ def config_cython():
                     extra_compile_args=["-std=c++17", "-fopenmp"],
                     extra_link_args=[
                         "-fPIC",
-                        "-fopenmp"
+                        "-fopenmp",
                         "-lrt",
                         f"-Wl,-rpath,{path.join(mirage_path, 'build', 'abstract_subexpr', 'release')}",
                         f"-Wl,-rpath,{path.join(mirage_path, 'build', 'formal_verifier', 'release')}",
