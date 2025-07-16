@@ -281,37 +281,34 @@ class PersistentKernel:
         input: DTensor,
         k_cache: DTensor,
         v_cache: DTensor,
-        q_norm: Optional[DTensor],
-        k_norm: Optional[DTensor],
+        q_norm: DTensor,
+        k_norm: DTensor,
         cos_pos_embed: DTensor,
         sin_pos_embed: DTensor,
         output: DTensor,
         grid_dim: tuple,
         block_dim: tuple,
     ):
-        # Validate shapes --------------------------------------------------
+        # Currently assume that input/output
         assert input.num_dims == 2  # (batch_size, fused_outdim / world_size)
         assert output.num_dims == 2  # (batch_size, hidden_size / world_size)
         assert k_cache.num_dims == 4  # (batch_size, seq_len, kv_heads, head_dim)
         assert v_cache.num_dims == 4  # (batch_size, seq_len, kv_heads, head_dim)
-
         head_dim = k_cache.dim(3)
         num_kv_heads = k_cache.dim(2)
         num_q_heads = output.dim(1) // head_dim
-
-        # Rotary positional embedding flag --------------------------------
-        rotary_embed = int(cos_pos_embed is not None or sin_pos_embed is not None)
-        if rotary_embed:
+        rotary_embed = 0
+        if cos_pos_embed is not None or sin_pos_embed is not None:
             assert cos_pos_embed.num_dims == 2  # (seq_len, head_dim)
             assert sin_pos_embed.num_dims == 2  # (seq_len, head_dim)
             assert cos_pos_embed.dim(1) == head_dim
             assert sin_pos_embed.dim(1) == head_dim
-
-        # q-k norm flag ----------------------------------------------------
-        qk_norm = int(q_norm is not None and k_norm is not None)
-        if qk_norm:
+            rotary_embed = 1
+        qk_norm = 0
+        if q_norm is not None or k_norm is not None:
             assert q_norm.num_dims == 1  # (head_dim)
             assert k_norm.num_dims == 1  # (head_dim)
+            qk_norm = 1
             assert q_norm.dim(0) == head_dim
             assert k_norm.dim(0) == head_dim
 
@@ -325,57 +322,26 @@ class PersistentKernel:
         tb_graph.new_input(input, (0, 1, -1), -1, True)
         tb_graph.new_input(k_cache, (0, 2, -1), 1, True)
         tb_graph.new_input(v_cache, (0, 2, -1), 1, True)
-
-        # Register optional norm tensors (create 1-element placeholders if None).
-        # q_norm tensor
-        if q_norm is not None:
-            tb_graph.new_input(q_norm, (-1, -1, -1), -1, True)
-            q_norm_tensor = q_norm
-        else:
-            counter = getattr(self, "_norm_placeholder_counter", 0)
-            q_norm_tensor = self.new_tensor(
-                dims=(1,),
-                dtype=bfloat16,
-                name=f"q_norm_unused_{counter}",
-                io_category="cuda_tensor",
-            )
-            self._norm_placeholder_counter = counter + 1
-            tb_graph.new_input(q_norm_tensor, (-1, -1, -1), -1, True)
-
-        # k_norm tensor
-        if k_norm is not None:
-            tb_graph.new_input(k_norm, (-1, -1, -1), -1, True)
-            k_norm_tensor = k_norm
-        else:
-            counter = getattr(self, "_norm_placeholder_counter", 0)
-            k_norm_tensor = self.new_tensor(
-                dims=(1,),
-                dtype=bfloat16,
-                name=f"k_norm_unused_{counter}",
-                io_category="cuda_tensor",
-            )
-            self._norm_placeholder_counter = counter + 1
-            tb_graph.new_input(k_norm_tensor, (-1, -1, -1), -1, True)
-
+        tb_graph.new_input(q_norm, (-1, -1, -1), -1, True)
+        tb_graph.new_input(k_norm, (-1, -1, -1), -1, True)
         tb_graph.new_input(cos_pos_embed, (-1, -1, -1), -1, True)
         tb_graph.new_input(sin_pos_embed, (-1, -1, -1), -1, True)
         tb_graph.new_input(output, (0, 1, -1), -1, True)
-
-        # Build the tensor list for the customized operation.
-        tensors = [
-            input,
-            k_cache,
-            v_cache,
-            q_norm_tensor,
-            k_norm_tensor,
-            cos_pos_embed,
-            sin_pos_embed,
-            output,
-        ]
-
-        self.kn_graph.customized(tensors, tb_graph)
+        self.kn_graph.customized(
+            [
+                input,
+                k_cache,
+                v_cache,
+                q_norm,
+                k_norm,
+                cos_pos_embed,
+                sin_pos_embed,
+                output,
+            ],
+            tb_graph,
+        )
         self.kn_graph.register_task(tb_graph, "attention", params)
-        
+
     def single_batch_extend_attention_layer(
         self,
         input: DTensor, # [6, 6144]
