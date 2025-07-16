@@ -1,7 +1,8 @@
 cmake>=3.24
 cython>=0.28
-z3-solver==4.15.0.0
-# torch>=2.0
+z3-solver==4.15
+torch>=2.4
+accelerate==1.8.0
 numpy
 graphviz
 tqdm

@@ -32,6 +32,7 @@ using namespace mirage::config;
 using namespace mirage::utils;
 
 #ifdef MIRAGE_FINGERPRINT_USE_CUDA
+
 __global__ void
     compute_elementbinary_fingerprint(mirage::type::KNOperatorType type,
                                       char *dmem_fp_ptr,

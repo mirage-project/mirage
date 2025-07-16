@@ -30,6 +30,7 @@ uint16_t const FP_P_MUL_Q_MOD_1 = 167;
 uint16_t const FP_Q_MUL_P_MOD_1 = 13695;
 size_t const MAX_NUM_THREADBLOCKS_PER_KERNEL = 1024;
 int const MAX_NUM_DEVICES = 16;
+constexpr int MAX_TENSOR_DIMS = 4;
 int const DEFAULT_TB_REDUCTION_DIMX = 64;
 int const MAX_NUM_WARP_GROUPS = 4;
 int const NUM_THREADS_PER_WARP = 32;

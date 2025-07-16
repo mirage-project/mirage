@@ -67,6 +67,7 @@ KNInputOp::KNInputOp(Graph *_graph,
                      int3 _input_map)
     : KNOperator(_graph, mirage::type::KN_INPUT_OP), input_strides(strides),
       input_map(_input_map) {
+  assert(dims.size() == strides.size());
   DTensor tensor;
   tensor.num_dims = dims.size();
   for (int i = tensor.num_dims - 1; i >= 0; i--) {

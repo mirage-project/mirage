@@ -16,7 +16,6 @@
 #pragma once
 
 #include "mirage/kernel/device_tensor.h"
-#include "mirage/profile_result.h"
 #include "mirage/utils/json_utils.h"
 #include <vector>
 

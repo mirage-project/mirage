@@ -53,5 +53,15 @@ demo/mirage_search_checkpoint.json
 demo/*generated*
 benchmark/*generated*
 
-# Rust lock files
+# Rust
 Cargo.lock
+
+# Output files of runtime
+output/
+# Temp file
+task_graph*.json
+test.cu
+kernel*.cu
+
+#runtime
+*.perfetto-trace
