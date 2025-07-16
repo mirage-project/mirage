@@ -130,7 +130,6 @@ pub extern "C" fn get_egraph(expr: *const c_char) -> () {
         .filter_map(|cap| cap.get(1).unwrap().as_str().parse::<u32>().ok())
         .collect();
 
-    let start = std::time::Instant::now();
     let duration = Duration::from_secs(10);
 
     let runner: Runner<Expr, ()> = Runner::default()
