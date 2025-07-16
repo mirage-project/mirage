@@ -359,7 +359,8 @@ TBMemoryPlan Transpiler::get_threadblock_memory_plan(tb::Graph const &tb_graph,
     }
     auto [last_op, last_op_meta] = node.ops.back();
     if (last_op->op_type == type::TB_FORLOOP_ACCUM_NO_RED_OP ||
-        last_op->op_type == type::TB_FORLOOP_ACCUM_NO_RED_RESCALE_OP) {
+        last_op->op_type == type::TB_FORLOOP_ACCUM_NO_RED_RESCALE_OP ||
+        last_op->op_type == type::TB_FORLOOP_ACCUM_MAX_OP) {
       tb::STensor const &accum = last_op->output_tensors.at(0);
       size_t phy_size = get_phy_size(accum);
       int earlist_free_time =
@@ -390,7 +391,8 @@ TBMemoryPlan Transpiler::get_threadblock_memory_plan(tb::Graph const &tb_graph,
     }
     auto [last_op, last_op_meta] = node.ops.back();
     if (last_op->op_type != type::TB_FORLOOP_ACCUM_NO_RED_OP &&
-        last_op->op_type != type::TB_FORLOOP_ACCUM_NO_RED_RESCALE_OP) {
+        last_op->op_type != type::TB_FORLOOP_ACCUM_NO_RED_RESCALE_OP &&
+        last_op->op_type != type::TB_FORLOOP_ACCUM_MAX_OP) {
       for (tb::STensor const &output_tensor : last_op->output_tensors) {
         size_t phy_size = get_phy_size(output_tensor);
         int earlist_free_time =

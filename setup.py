@@ -46,7 +46,6 @@ cuda_library_dirs = [
 ]
 
 z3_path = path.dirname(z3.__file__)
-print(f"Z3 path: {z3_path}", flush=True)
 
 # Use version.py to get package version
 version_file = os.path.join(os.path.dirname(__file__), "python/mirage/version.py")
@@ -73,6 +72,8 @@ def config_cython():
                         path.join(mirage_path, "include"),
                         path.join(mirage_path, "deps", "json", "include"),
                         path.join(mirage_path, "deps", "cutlass", "include"),
+                        path.join(mirage_path, "build", "abstract_subexpr", "release"),
+                        path.join(mirage_path, "build", "formal_verifier", "release"),
                         path.join(z3_path, "include"),
                         cuda_include_dir,
                     ],
@@ -85,14 +86,24 @@ def config_cython():
                         "z3",
                         "gomp",
                         "rt",
+                        "abstract_subexpr",
+                        "formal_verifier",
                     ],
                     library_dirs=[
                         path.join(mirage_path, "build"),
                         path.join(z3_path, "lib"),
+                        path.join(mirage_path, "build", "abstract_subexpr", "release"),
+                        path.join(mirage_path, "build", "formal_verifier", "release"),
                     ]
                     + cuda_library_dirs,
                     extra_compile_args=["-std=c++17", "-fopenmp"],
-                    extra_link_args=["-fPIC", "-fopenmp"],
+                    extra_link_args=[
+                        "-fPIC",
+                        "-fopenmp",
+                        "-lrt",
+                        f"-Wl,-rpath,{path.join(mirage_path, 'build', 'abstract_subexpr', 'release')}",
+                        f"-Wl,-rpath,{path.join(mirage_path, 'build', 'formal_verifier', 'release')}",
+                    ],
                     language="c++",
                 )
             )
@@ -100,6 +111,49 @@ def config_cython():
     except ImportError:
         print("WARNING: cython is not installed!!!")
         raise SystemExit(1)
+    
+# Install Rust if not yet available
+try:
+    # Attempt to run a Rust command to check if Rust is installed
+    subprocess.check_output(['cargo', '--version'])
+except FileNotFoundError:
+    print("Rust/Cargo not found, installing it...")
+    # Rust is not installed, so install it using rustup
+    try:
+        subprocess.run("curl https://sh.rustup.rs -sSf | sh -s -- -y", shell=True, check=True)
+        print("Rust and Cargo installed successfully.")
+    except subprocess.CalledProcessError as e:
+        print(f"Error: {e}")
+    # Add the cargo binary directory to the PATH
+    os.environ["PATH"] = f"{os.path.join(os.environ.get('HOME', '/root'), '.cargo', 'bin')}:{os.environ.get('PATH', '')}"
+
+mirage_path = path.dirname(__file__)
+# z3_path = os.path.join(mirage_path, 'deps', 'z3', 'build')
+# os.environ['Z3_DIR'] = z3_path
+if mirage_path == '':
+    mirage_path = '.'
+
+try:
+    subprocess.check_output(['cargo', 'build', '--release', '--target-dir', '../../../../build/abstract_subexpr'], cwd='src/search/abstract_expr/abstract_subexpr')
+except subprocess.CalledProcessError as e:
+    print("Failed to build abstract_subexpr Rust library, building it ...")
+    try:
+        subprocess.run(['cargo', 'build', '--release', '--target-dir', '../../../../build/abstract_subexpr'], cwd='src/search/abstract_expr/abstract_subexpr', check=True)
+        print("Abstract_subexpr Rust library built successfully.")
+    except subprocess.CalledProcessError as e:
+        print("Failed to build abstract_subexpr Rust library.")
+    os.environ['ABSTRACT_SUBEXPR_LIB'] = os.path.join(mirage_path,'build', 'abstract_subexpr', 'release', 'libabstract_subexpr.so')
+
+try:
+    subprocess.check_output(['cargo', 'build', '--release', '--target-dir', '../../../../build/formal_verifier'], cwd='src/search/verification/formal_verifier_equiv')
+except subprocess.CalledProcessError as e:
+    print("Failed to build formal_verifier Rust library, building it ...")
+    try:
+        subprocess.run(['cargo', 'build', '--release', '--target-dir', '../../../../build/formal_verifier'], cwd='src/search/verification/formal_verifier_equiv', check=True)
+        print("formal_verifier Rust library built successfully.")
+    except subprocess.CalledProcessError as e:
+        print("Failed to build formal_verifier Rust library.")
+    os.environ['FORMAL_VERIFIER_LIB'] = os.path.join(mirage_path,'build', 'formal_verifier', 'release', 'libformal_verifier.so')
 
 
 # build Mirage runtime library
@@ -130,13 +184,17 @@ try:
             "..",
             "-DZ3_CXX_INCLUDE_DIRS=" + z3_path + "/include/",
             "-DZ3_LIBRARIES=" + path.join(z3_path, "lib", "libz3.so"),
+            '-DABSTRACT_SUBEXPR_LIB=' + path.join(mirage_path, 'build', 'abstract_subexpr', 'release'),
+            '-DABSTRACT_SUBEXPR_LIBRARIES=' + path.join(mirage_path, 'build', 'abstract_subexpr', 'release', 'libabstract_subexpr.so'),
+            '-DFORMAL_VERIFIER_LIB=' + path.join(mirage_path, 'build', 'formal_verifier', 'release'),
+            '-DFORMAL_VERIFIER_LIBRARIES=' + path.join(mirage_path, 'build', 'formal_verifier', 'release', 'libformal_verifier.so'),
             "-DCMAKE_C_COMPILER=" + os.environ["CC"],
             "-DCMAKE_CXX_COMPILER=" + os.environ["CXX"],
         ],
         cwd=build_dir,
         env=os.environ.copy(),
     )
-    subprocess.check_call(["make", "-j4"], cwd=build_dir, env=os.environ.copy())
+    subprocess.check_call(["make", "-j8"], cwd=build_dir, env=os.environ.copy())
     print("Mirage runtime library built successfully.")
 except subprocess.CalledProcessError as e:
     print("Failed to build runtime library.")

@@ -546,6 +546,7 @@ class KNGraph:
         use_graph_dataset: bool = True,
         use_cached_graphs: bool = True,
         save_codes: bool = False,
+        is_formal_verified: bool = False,
     ):
         if use_graph_dataset:
             cached_graph = graph_dataset.find(
@@ -577,6 +578,7 @@ class KNGraph:
             previous_checkpoint=previous_checkpoint,
             verbose=verbose,
             default_config=config,
+            is_formal_verified=is_formal_verified,
         )
         all_graphs = [KNGraph(g) for g in cygraphs]
         print("Finished search, discovering {} mugraphs ...".format(len(all_graphs)))

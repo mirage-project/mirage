@@ -27,6 +27,20 @@ public:
   }
 };
 
+// Initialize the max accumulator
+// (Just fill the accumulator with the minimum value of T)
+template <typename T, int NUM_ELEMS, int NUM_THREADS>
+class InitMaxAccumulatorKernel {
+public:
+  static __device__ __forceinline__ void run(T *__restrict__ accum,
+                                             int thread_idx) {
+    for (int elem_idx = thread_idx; elem_idx < NUM_ELEMS;
+         elem_idx += NUM_THREADS) {
+      accum[elem_idx] = std::numeric_limits<T>::lowest();
+    }
+  }
+};
+
 template <typename T, class AccumLayout, class SrcLayout, int NUM_THREADS>
 class ForloopAccumKernel {
 public:
@@ -45,7 +59,6 @@ public:
   }
 };
 
-// Only support matrix/vector
 template <typename T,
           class AccumLayout,
           class SrcLayout,
@@ -76,15 +89,26 @@ public:
               rescale[rescale_layout(elem_idx % rescale_numel)] +
           src[src_layout(elem_idx)];
     }
-    // Print debug info
-    // if (thread_idx == 0) {
-    //   printf("**********ForloopAccumRescaleKernel**********\n"
-    //          "accum[0]: %f, rescale[0]: %f, src[0]: %f\n"
-    //          "---------------------------------------------\n",
-    //          (float)accum[accum_layout(0)],
-    //          (float)rescale[rescale_layout(0)],
-    //          (float)src[src_layout(0)]);
-    // }
+  }
+};
+
+template <typename T, class AccumLayout, class SrcLayout, int NUM_THREADS>
+class ForloopAccumMaxKernel {
+public:
+  using Numel = decltype(size(AccumLayout{}));
+  CUTE_STATIC_ASSERT_V(Numel{} == size(SrcLayout{}));
+
+  static __device__ __forceinline__ void
+      run(T *__restrict__ accum, T const *__restrict__ src, int thread_idx) {
+    constexpr auto numel = Numel{};
+    auto accum_layout = AccumLayout{};
+    auto src_layout = SrcLayout{};
+    for (int elem_idx = thread_idx; elem_idx < numel; elem_idx += NUM_THREADS) {
+      float max_val = (float)accum[accum_layout(elem_idx)];
+      float src_val = (float)src[src_layout(elem_idx)];
+      accum[accum_layout(elem_idx)] =
+          max_val > src_val ? (T)max_val : (T)src_val;
+    }
   }
 };
 

@@ -129,7 +129,7 @@ STensor Graph::elementunary(STensor const &input,
 STensor *Graph::elementunary(STensor const *input,
                              mirage::type::TBOperatorType type,
                              float const &scalar) {
-  TBOperator *op = create_elementunary_op(*input, type);
+  TBOperator *op = create_elementunary_op(*input, type, scalar);
   assert(op != nullptr);
   operators.push_back(op);
   return &op->output_tensors[0];

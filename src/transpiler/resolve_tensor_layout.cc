@@ -516,9 +516,9 @@ void Transpiler::resolve_tensor_layout() {
             break;
           }
           case type::TB_ADD_OP:
-          case type::TB_SUB_OP:
           case type::TB_MUL_OP:
           case type::TB_DIV_OP:
+          case type::TB_SUB_OP:
           case type::TB_POW_OP: {
             tb::STensor const &input0 = tb_op->input_tensors.at(0);
             tb::STensor const &input1 = tb_op->input_tensors.at(1);
@@ -551,7 +551,8 @@ void Transpiler::resolve_tensor_layout() {
             }
             break;
           }
-          case type::TB_FORLOOP_ACCUM_NO_RED_OP: {
+          case type::TB_FORLOOP_ACCUM_NO_RED_OP:
+          case type::TB_FORLOOP_ACCUM_MAX_OP: {
             assert(tb_op == output_op);
             tb::STensor const &input = tb_op->input_tensors.at(0);
             tb::STensor const &output = tb_op->output_tensors.at(0);

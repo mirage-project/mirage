@@ -218,6 +218,7 @@ enum TBOperatorType {
   TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP = 2504,
   TB_FORLOOP_ACCUM_NO_RED_RESCALE_OP = 2505,
   TB_FORLOOP_ACCUM_RED_LD_SUM_RESCALE_OP = 2506,
+  TB_FORLOOP_ACCUM_MAX_OP = 2507,
   TB_FORLOOP_ACCUM_LAST_OP = 2599,
   TB_CUSTOMIZED_OP = 2999
 };
@@ -240,9 +241,9 @@ NLOHMANN_JSON_SERIALIZE_ENUM(
         {TB_CLAMP_OP, "tb_clamp_op"},
         {TB_LOG_OP, "tb_log_op"},
         {TB_ADD_OP, "tb_add_op"},
-        {TB_SUB_OP, "tb_sub_op"},
         {TB_MUL_OP, "tb_mul_op"},
         {TB_DIV_OP, "tb_div_op"},
+        {TB_SUB_OP, "tb_sub_op"},
         {TB_POW_OP, "tb_pow_op"},
         {TB_REDUCTION_FIRST_OP_ID, "tb_reduction_first_op_id"},
         {TB_REDUCTION_0_OP, "tb_reduction_0_op"},
@@ -277,6 +278,7 @@ NLOHMANN_JSON_SERIALIZE_ENUM(
          "tb_forloop_accum_nored_rescale_op"},
         {TB_FORLOOP_ACCUM_RED_LD_SUM_RESCALE_OP,
          "tb_forloop_accum_red_ld_sum_rescale_op"},
+        {TB_FORLOOP_ACCUM_MAX_OP, "tb_forloop_accum_max_op"},
         {TB_FORLOOP_ACCUM_LAST_OP, "tb_forloop_accum_last_op"},
         {TB_CUSTOMIZED_OP, "tb_customized_op"},
     })
@@ -298,6 +300,15 @@ enum TBEpilogueType {
   TB_EPILOGUE_ALLTOALL = 3102,
   TB_EPILOGUE_INVALID = 3199,
 };
+
+NLOHMANN_JSON_SERIALIZE_ENUM(TBEpilogueType,
+                             {
+                                 {TB_EPILOGUE_NONE, "tb_epilogue_none"},
+                                 {TB_EPILOGUE_ALLREDUCE,
+                                  "tb_epilogue_allreduce"},
+                                 {TB_EPILOGUE_ALLTOALL, "tb_epilogue_alltoall"},
+                                 {TB_EPILOGUE_INVALID, "tb_epilogue_invalid"},
+                             })
 
 } // namespace type
 } // namespace mirage

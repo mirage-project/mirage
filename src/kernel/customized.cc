@@ -42,7 +42,7 @@ int Graph::customized(std::vector<DTensor const *> _inputs,
                       mirage::threadblock::Graph const *bgraph) {
   std::vector<DTensor> inputs;
   for (auto const &t : _inputs) {
-    inputs.push_back(*t);
+    inputs.push_back(t == nullptr ? DTensor::EMPTY_TENSOR : *t);
   }
   KNOperator *op = create_customized_op(inputs, *bgraph);
   assert(op != nullptr);
@@ -182,9 +182,9 @@ KNCustomizedOp::KNCustomizedOp(mirage::kernel::Graph *_kgraph,
         break;
       }
       case mirage::type::TB_ADD_OP:
-      case mirage::type::TB_SUB_OP:
       case mirage::type::TB_MUL_OP:
       case mirage::type::TB_DIV_OP:
+      case mirage::type::TB_SUB_OP:
       case mirage::type::TB_POW_OP: {
         assert(my_inputs.size() == 2);
         bgraph.elementbinary(my_inputs[0], my_inputs[1], op->op_type);
@@ -240,6 +240,11 @@ KNCustomizedOp::KNCustomizedOp(mirage::kernel::Graph *_kgraph,
       case mirage::type::TB_FORLOOP_ACCUM_RED_LD_SUM_RESCALE_OP: {
         assert(my_inputs.size() == 2);
         bgraph.forloop_accum_rescale(my_inputs[0], my_inputs[1], op->op_type);
+        break;
+      }
+      case mirage::type::TB_FORLOOP_ACCUM_MAX_OP: {
+        assert(my_inputs.size() == 1);
+        bgraph.forloop_accum_max(my_inputs[0]);
         break;
       }
       default: {

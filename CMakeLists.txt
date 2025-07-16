@@ -109,6 +109,50 @@ add_library(mirage_runtime ${MIRAGE_SRCS})
 #set_target_properties(mirage_runtime
 #  PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 
+# Ensure Rust is installed
+execute_process(COMMAND rustc --version
+  RESULT_VARIABLE RUST_COMMAND_RESULT
+  OUTPUT_VARIABLE RUSTC_OUTPUT
+  ERROR_QUIET)
+
+if(NOT RUST_COMMAND_RESULT EQUAL 0)
+  message(FATAL_ERROR
+    "Rust is not installed on the system. Please install it by running: \n"
+    "'curl https://sh.rustup.rs -sSf | sh -s -- -y' \n"
+    "and follow the instructions on the screen.")
+endif()
+
+# Ensure Cargo is installed
+execute_process(COMMAND cargo --version
+  RESULT_VARIABLE CARGO_RESULT
+  OUTPUT_QUIET ERROR_QUIET)
+
+if(NOT CARGO_RESULT EQUAL 0)
+  message(FATAL_ERROR
+    "Rust is installed, but cargo is not. Please install it by running: \n"
+    "'curl https://sh.rustup.rs -sSf | sh -s -- -y' \n"
+    "and follow the instructions on the screen.")
+endif()
+
+#set RUST
+if(ABSTRACT_SUBEXPR_LIB AND ABSTRACT_SUBEXPR_LIBRARIES)
+  message(STATUS "ABSTRACT_SUBEXPR_LIB: ${ABSTRACT_SUBEXPR_LIB}")
+  message(STATUS "ABSTRACT_SUBEXPR_LIBRARIES: ${ABSTRACT_SUBEXPR_LIBRARIES}")
+else()
+  message(STATUS "ABSTRACT_SUBEXPR_LIB not set, will build it")
+endif()
+include_directories(${ABSTRACT_SUBEXPR_LIB})
+list(APPEND MIRAGE_LINK_LIBS ${ABSTRACT_SUBEXPR_LIBRARIES})
+
+if(FORMAL_VERIFIER_LIB AND FORMAL_VERIFIER_LIBRARIES)
+  message(STATUS "FORMAL_VERIFIER_LIB: ${FORMAL_VERIFIER_LIB}")
+  message(STATUS "FORMAL_VERIFIER_LIBRARIES: ${FORMAL_VERIFIER_LIBRARIES}")
+else()
+  message(STATUS "FORMAL_VERIFIER_LIB not set, will build it")
+endif()
+include_directories(${FORMAL_VERIFIER_LIB})
+list(APPEND MIRAGE_LINK_LIBS ${FORMAL_VERIFIER_LIBRARIES})
+
 set_target_properties(mirage_runtime PROPERTIES CUDA_ARCHITECTURES "70;75;80;86;89;90")
 
 target_compile_features(mirage_runtime PUBLIC cxx_std_17)
@@ -123,6 +167,9 @@ install(TARGETS mirage_runtime
 
 install(DIRECTORY ${PROJECT_SOURCE_DIR}/include
     DESTINATION .)
+
+install(FILES ${ABSTRACT_SUBEXPR_LIBRARIES} 
+    DESTINATION lib)
 
 if ("${BUILD_CPP_EXAMPLES}" STREQUAL "ON")
   set(CPP_EXAMPLES_DIR cpp_examples)
@@ -292,6 +339,17 @@ endif()
 if ("${BUILD_CPP_EXAMPLES}" STREQUAL "ON")
   set(CPP_EXAMPLES_DIR cpp_examples)
   set(CPP_EXAMPLES_BIN chameleon)
+  file(GLOB CPP_EXAMPLES_SRCS ${CPP_EXAMPLES_DIR}/${CPP_EXAMPLES_BIN}.cc)
+  add_executable(${CPP_EXAMPLES_BIN} ${CPP_EXAMPLES_SRCS})
+  set_target_properties(${CPP_EXAMPLES_BIN}
+    PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CPP_EXAMPLES_DIR})
+  target_link_libraries(${CPP_EXAMPLES_BIN} mirage_runtime)
+endif()
+
+# egg_tests
+if("${BUILD_CPP_EXAMPLES}" STREQUAL "ON")
+  set(CPP_EXAMPLES_DIR cpp_examples)
+  set(CPP_EXAMPLES_BIN egg_tests)
   file(GLOB CPP_EXAMPLES_SRCS ${CPP_EXAMPLES_DIR}/${CPP_EXAMPLES_BIN}.cc)
   add_executable(${CPP_EXAMPLES_BIN} ${CPP_EXAMPLES_SRCS})
   set_target_properties(${CPP_EXAMPLES_BIN}
