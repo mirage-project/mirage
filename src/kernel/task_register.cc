@@ -50,14 +50,42 @@ int TaskRegister::register_task_variant(runtime::TaskType type,
 int TaskRegister::register_embedding_task(threadblock::Graph const &bgraph,
                                           std::vector<int> const &params) {
   assert(params.size() == 1);
+  // params[0]: input source (0: tokens, 1: input_token)
+  int batch_size = 0, output_size = 0, output_stride = 0;
+  std::vector<tb::TBInputOp *> input_ops;
+  std::vector<tb::TBInputOp *> output_ops;
+  int num_inputs = 2;
+  int num_outputs = 1;
+
+  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    if (input_ops.size() < (size_t)num_inputs) {
+      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    } else {
+      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    }
+  }
+  assert(output_ops[0]->output_tensors[0].num_dims == 2);
+  batch_size = output_ops[0]->output_tensors[0].dim[0];
+  output_size = output_ops[0]->output_tensors[0].dim[1];
+  kn::KNInputOp *kn_input_op =
+      static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
+  output_stride = static_cast<int>(kn_input_op->input_strides[0]);
+
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
-  code.e("kernel::embedding_kernel<bfloat16, $>(", params[0]);
-  code.e("    task_desc.inputs[0].base_ptr,");
+  code.e("kernel::embedding_kernel<bfloat16, $, $, $>(",
+         batch_size,
+         output_size,
+         output_stride);
+  if (params[0] == 0) {
+    code.e("    runtime_config.tokens + runtime_config.step[0], ");
+  } else if (params[0] == 1) {
+    code.e("    task_desc.inputs[0].base_ptr,");
+  }
   code.e("    task_desc.inputs[1].base_ptr,");
-  code.e("    task_desc.outputs[0].base_ptr,");
-  code.e("    runtime_config.step[0],");
-  code.e("    runtime_config.tokens);");
+  code.e("    task_desc.outputs[0].base_ptr);");
   return register_task_variant(TASK_EMBEDDING, code.to_string());
 }
 
@@ -149,7 +177,7 @@ int TaskRegister::register_attention_task(threadblock::Graph const &bgraph,
   code.e("    task_desc.inputs[1].base_ptr,");
   code.e("    task_desc.inputs[2].base_ptr,");
   code.e("    task_desc.outputs[0].base_ptr,");
-  code.e("    runtime_config.step[0],");
+  code.e("    runtime_config.step[0] + 1,");
   code.e("    $,", params[2] > 0);
   code.e("    $,", params[3] > 0);
   code.e("    task_desc.inputs[3].base_ptr,");
@@ -159,6 +187,68 @@ int TaskRegister::register_attention_task(threadblock::Graph const &bgraph,
   code.e("    1e-6f,");
   code.e("    1e-6f);");
   return register_task_variant(TASK_ATTENTION_1, code.to_string());
+}
+
+int TaskRegister::register_single_batch_extend_attention_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params[0]: num_q_heads
+  // params[1]: num_kv_heads
+  // params[2]: qk_norm
+  // params[3]: rotary_emd
+  // params[4]: extend_num
+  // params[5]: output_stride
+  assert(params.size() == 6);
+  std::vector<tb::TBInputOp *> input_ops;
+  std::vector<tb::TBInputOp *> output_ops;
+  int num_inputs = 7;
+  int num_outputs = 1;
+
+  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    if (input_ops.size() < (size_t)num_inputs) {
+      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    } else {
+      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    }
+  }
+  assert(output_ops[0]->output_tensors[0].num_dims == 2);
+  int output_size = output_ops[0]->dtensor.dim[1];
+  int num_q_heads = params[0];
+  int num_kv_heads = params[1];
+  int extend_num = params[4];
+  int head_dim = output_size / num_q_heads;
+  int kv_stride = head_dim * num_kv_heads;
+  int output_stride = params[5];
+  // Assert that k_cache has the same head_dim
+  assert(input_ops[1]->output_tensors[0].num_dims == 4);
+  assert(head_dim == input_ops[1]->output_tensors[0].dim[3]);
+  assert(input_ops[2]->output_tensors[0].num_dims == 4);
+  assert(head_dim == input_ops[2]->output_tensors[0].dim[3]);
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::single_batch_extend_kernel<bfloat16, $, $, $, $, $, $>(",
+         num_q_heads / num_kv_heads,
+         1,
+         head_dim,
+         kv_stride,
+         output_stride,
+         extend_num);
+  code.e("    task_desc.inputs[0].base_ptr,");
+  code.e("    task_desc.inputs[1].base_ptr,");
+  code.e("    task_desc.inputs[2].base_ptr,");
+  code.e("    task_desc.outputs[0].base_ptr,");
+  code.e("    runtime_config.step[0] + 1,");
+  code.e("    $,", params[2] > 0);
+  code.e("    $,", params[3] > 0);
+  code.e("    task_desc.inputs[3].base_ptr,");
+  code.e("    task_desc.inputs[4].base_ptr,");
+  code.e("    task_desc.inputs[5].base_ptr,");
+  code.e("    task_desc.inputs[6].base_ptr,");
+  code.e("    1e-6f,");
+  code.e("    1e-6f);");
+  return register_task_variant(TASK_SINGLE_BATCH_EXTEND_ATTENTION,
+                               code.to_string());
 }
 
 int TaskRegister::register_silu_mul_linear_with_residual_task(
@@ -268,11 +358,16 @@ int TaskRegister::register_argmax_partial_task(threadblock::Graph const &bgraph,
     }
   }
   assert(input_ops[0]->output_tensors[0].num_dims == 2);
+  int batch_size = input_ops[0]->output_tensors[0].dim[0];
   int num_elements = input_ops[0]->output_tensors[0].dim[1];
+  int num_partial_tasks = output_ops[0]->output_tensors[0].dim[0];
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
-  code.e("kernel::argmax_partial_kernel<bfloat16, $>(", num_elements);
+  code.e("kernel::argmax_partial_kernel<bfloat16, $, $, $>(",
+         batch_size,
+         num_elements,
+         num_partial_tasks);
   code.e("    task_desc.inputs[0].base_ptr,");
   code.e("    task_desc.outputs[0].base_ptr,");
   code.e("    task_desc.outputs[1].base_ptr);");
@@ -309,6 +404,103 @@ int TaskRegister::register_argmax_reduce_task(threadblock::Graph const &bgraph,
   code.e("    runtime_config.step[0],");
   code.e("    runtime_config.tokens);");
   return register_task_variant(TASK_ARGMAX_REDUCE, code.to_string());
+}
+
+int TaskRegister::register_find_ngram_partial_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params[0]: ngram size
+  assert(params.size() == 1);
+  std::vector<tb::TBInputOp *> input_ops;
+  std::vector<tb::TBInputOp *> output_ops;
+  int num_inputs = 1;
+  int num_outputs = 1;
+
+  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    if (input_ops.size() < (size_t)num_inputs) {
+      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    } else {
+      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    }
+  }
+
+  assert(output_ops[0]->output_tensors[0].num_dims == 2);
+  int num_parts = output_ops[0]->output_tensors[0].dim[1];
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::find_ngram_partial_kernel<$, $>(", params[0], num_parts);
+  code.e("    task_desc.inputs[0].base_ptr,");
+  code.e("    task_desc.outputs[0].base_ptr,");
+  code.e("    runtime_config.step[0] + 1);");
+
+  return register_task_variant(TASK_FIND_NGRAM_PARTIAL, code.to_string());
+}
+
+int TaskRegister::register_find_ngram_global_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params[0]: ngram size
+  // params[1]: spec length
+  assert(params.size() == 2);
+  std::vector<tb::TBInputOp *> input_ops;
+  std::vector<tb::TBInputOp *> output_ops;
+  int num_inputs = 2;
+  int num_outputs = 1;
+
+  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    if (input_ops.size() < (size_t)num_inputs) {
+      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    } else {
+      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    }
+  }
+  assert(input_ops[0]->output_tensors[0].num_dims == 2);
+  int num_parts = input_ops[0]->output_tensors[0].dim[1];
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::find_ngram_global_kernel<$, $, $>(",
+         params[0],
+         params[1],
+         num_parts);
+  code.e("    task_desc.inputs[0].base_ptr,");
+  code.e("    task_desc.inputs[1].base_ptr,");
+  code.e("    task_desc.outputs[0].base_ptr,");
+  code.e("    runtime_config.step[0]);");
+  return register_task_variant(TASK_FIND_NGRAM_GLOBAL, code.to_string());
+}
+
+int TaskRegister::register_target_verify_greedy_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  assert(params.size() == 0);
+  std::vector<tb::TBInputOp *> input_ops;
+  std::vector<tb::TBInputOp *> output_ops;
+  int num_inputs = 2;
+  int num_outputs = 1;
+
+  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    if (input_ops.size() < (size_t)num_inputs) {
+      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    } else {
+      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    }
+  }
+  assert(input_ops[0]->output_tensors[0].num_dims == 2);
+  int num_spec_tokens = input_ops[0]->output_tensors[0].dim[1] - 1;
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::target_verify_greedy_kernel<$>(", num_spec_tokens);
+  code.e("    task_desc.inputs[0].base_ptr,");
+  code.e("    task_desc.inputs[1].base_ptr,");
+  code.e("    (void*)(runtime_config.new_token_nums),"); // int pointer
+  code.e("    (void*)(runtime_config.tokens + runtime_config.step[0] + 1));");
+  return register_task_variant(TASK_TARGET_VERIFY_GREEDY, code.to_string());
 }
 
 } // namespace runtime

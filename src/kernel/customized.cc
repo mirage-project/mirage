@@ -42,7 +42,7 @@ int Graph::customized(std::vector<DTensor const *> _inputs,
                       mirage::threadblock::Graph const *bgraph) {
   std::vector<DTensor> inputs;
   for (auto const &t : _inputs) {
-    inputs.push_back(*t);
+    inputs.push_back(t == nullptr ? DTensor::EMPTY_TENSOR : *t);
   }
   KNOperator *op = create_customized_op(inputs, *bgraph);
   assert(op != nullptr);

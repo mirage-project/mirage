@@ -110,7 +110,7 @@ op_nodelabel_mapping = {
     "tb_split_1_op": "Split 1",
     "tb_split_2_op": "Split 2",
     "tb_split_last_op_id": "Split Last",
-    "tb_forloop_accum_no_red_op": "ForloopAccum\n(No Reduction)",
+    "tb_forloop_accum_nored_op": "ForloopAccum\n(No Reduction)",
     "tb_forloop_accum_red_ld_sum_op": "ForloopAccum\n(Reduction=Sum)",
     "tb_forloop_accum_red_ld_mean_op": "ForloopAccum\n(Reduction=Mean)",
     "tb_forloop_accum_red_ld_rms_op": "ForloopAccum\n(Reduction=RMS)",

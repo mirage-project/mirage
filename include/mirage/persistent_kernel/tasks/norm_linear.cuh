@@ -1,4 +1,3 @@
-
 /* Copyright 2025 CMU
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -41,7 +40,17 @@ __device__ __forceinline__ void
                           float eps,
                           void *output_ptr) {
   constexpr int CHUNK_SIZE = 16 / sizeof(T);
-  constexpr int OUTPUT_ATOM_SIZE = OUTPUT_SIZE <= 128 ? OUTPUT_SIZE : 128;
+
+  // TODO: Update the formula since norm weight is cut down
+  constexpr int MAX_OUTPUT_ATOM_SIZE = max_power_of_two_le(
+      (mirage::runtime::MAX_SHARE_MEMORY_SIZE - 16 - 16898 * BATCH_SIZE) /
+      (4 * (128 + BATCH_SIZE)));
+
+  constexpr int OUTPUT_LIMIT = OUTPUT_SIZE <= 128 ? OUTPUT_SIZE : 128;
+  constexpr int OUTPUT_ATOM_SIZE = OUTPUT_LIMIT <= MAX_OUTPUT_ATOM_SIZE
+                                       ? OUTPUT_LIMIT
+                                       : MAX_OUTPUT_ATOM_SIZE;
+
   constexpr int NUM_OUTPUT_ATOMS = OUTPUT_SIZE / OUTPUT_ATOM_SIZE;
   constexpr int TILE_SIZE = 128;
   constexpr int FORLOOP_RANGE = REDUCTION_SIZE / TILE_SIZE;
@@ -61,7 +70,8 @@ __device__ __forceinline__ void
       OUTPUT_ATOM_SIZE / 16 <= 4 ? OUTPUT_ATOM_SIZE / 16 : 4;
   constexpr int NUM_WARPS_K = 4 / NUM_WARPS_N;
 
-  constexpr int NUM_ITERS_M = 1;
+  constexpr int NUM_ITERS_M =
+      1; // TODO: Batch size more than 16 will cause error
   constexpr int NUM_ITERS_N = OUTPUT_ATOM_SIZE / NUM_WARPS_N / 16;
   constexpr int NUM_ITERS_K = TILE_SIZE / NUM_WARPS_K / 16;
 
@@ -78,13 +88,15 @@ __device__ __forceinline__ void
   T const *__restrict__ d_weight = static_cast<T const *>(weight_ptr);
   T *__restrict__ d_output = static_cast<T *>(output_ptr);
 
-  using InputDmem = dmem_row_const<T, BATCH_SIZE, TILE_SIZE, REDUCTION_SIZE>;
+  using InputDmem =
+      dmem_row_const<T, BATCH_SIZE, REDUCTION_SIZE, REDUCTION_SIZE>;
+  using NormWeightDmem = dmem_row_const<T, 1, REDUCTION_SIZE, REDUCTION_SIZE>;
   using WeightDmem =
       dmem_col_const<T, TILE_SIZE, OUTPUT_ATOM_SIZE, REDUCTION_SIZE>;
   using OutputDmem = dmem_row<T, BATCH_SIZE, OUTPUT_ATOM_SIZE, O_STRIDE>;
 
   InputDmem input_dmem(d_input);
-  InputDmem norm_weight_dmem(d_norm_weight);
+  NormWeightDmem norm_weight_dmem(d_norm_weight);
   WeightDmem weight_dmem(d_weight);
   OutputDmem output_dmem(d_output);
 
@@ -101,11 +113,10 @@ __device__ __forceinline__ void
   constexpr size_t SHARED_NORM_WEIGHT_BUFFER_OFFSET =
       SHARED_INPUT_BUFFER_OFFSET +
       sizeof(T) * FORLOOP_RANGE * BATCH_SIZE * TILE_SIZE;
-  // sizeof(T) * FORLOOP_RANGE * BATCH_SIZE * TILE_SIZE
+  // sizeof(T) * REDUCTION_SIZE
 
   constexpr size_t SHARED_WEIGHT_BUFFER_OFFSET =
-      SHARED_NORM_WEIGHT_BUFFER_OFFSET +
-      sizeof(T) * FORLOOP_RANGE * BATCH_SIZE * TILE_SIZE;
+      SHARED_NORM_WEIGHT_BUFFER_OFFSET + sizeof(T) * FORLOOP_RANGE * TILE_SIZE;
   // sizeof(T) * K_PIPE_MAX * TILE_SIZE * OUTPUT_ATOM_SIZE
 
   constexpr size_t MUL_OUTPUT_OFFSET =
@@ -133,13 +144,6 @@ __device__ __forceinline__ void
   constexpr size_t SHARED_OUTPUT_OFFSET = MM_INTERMEDIATE_OFFSET;
   // reuse mm_intermediate
 
-  // if (threadIdx.x == 0) {
-  //   int const smem_size =
-  //       REDUCTION_OUTPUT_OFFSET +
-  //       sizeof(T) * BATCH_SIZE * 1; // sizeof(T) * BATCH_SIZE * 1
-  //   printf("smem size of norm_linear: %d\n", smem_size);
-  // }
-
   // zero buffer
   T *zero_buf = (T *)(smem + ZERO_BUFFER_OFFSET);
   *((__uint128_t *)zero_buf) = 0ul;
@@ -163,8 +167,16 @@ __device__ __forceinline__ void
   // define the swizzle mode
   using ZeroBufferSmem = smem_row<T, 0, 0, 0, 1, 8, 8>;
   using InputSmem = smem_row<T, 0, 0, 0, BATCH_SIZE, TILE_SIZE, TILE_SIZE>;
+  using NormWeightSmem = smem_row<T, 0, 0, 0, 1, TILE_SIZE, TILE_SIZE>;
   using InputBufferSmem =
       smem_row<T, 0, 0, 0, FORLOOP_RANGE * BATCH_SIZE, TILE_SIZE, TILE_SIZE>;
+  using NormWeightBufferSmem = smem_row<T,
+                                        0,
+                                        0,
+                                        0,
+                                        1,
+                                        FORLOOP_RANGE * TILE_SIZE,
+                                        FORLOOP_RANGE * TILE_SIZE>;
   using WeightSmem =
       smem_col<T, 3, 3, 3, TILE_SIZE, OUTPUT_ATOM_SIZE, TILE_SIZE>;
   using WeightBufferSmem =
@@ -183,7 +195,7 @@ __device__ __forceinline__ void
   ZeroBufferSmem zero_buffer(zero_buf);
 
   InputSmem input_smem(shared_input_buffer);
-  InputSmem norm_weight_smem(shared_norm_weight_buffer);
+  NormWeightSmem norm_weight_smem(shared_norm_weight_buffer);
   WeightSmem weight_smem(shared_weight_buffer);
 
   InputSmem mul_output_smem(mul_output);
@@ -194,6 +206,7 @@ __device__ __forceinline__ void
 
   OutputSmem output_smem(shared_output);
 
+#pragma unroll
   for (int output_atom_idx = 0; output_atom_idx < NUM_OUTPUT_ATOMS;
        output_atom_idx++,
            d_weight += OUTPUT_ATOM_SIZE * REDUCTION_SIZE,
@@ -202,7 +215,7 @@ __device__ __forceinline__ void
     output_dmem.set_ptr(d_output);
 
     InputBufferSmem input_buffer_smem(shared_input_buffer);
-    InputBufferSmem norm_weight_buffer_smem(shared_norm_weight_buffer);
+    NormWeightBufferSmem norm_weight_buffer_smem(shared_norm_weight_buffer);
     WeightBufferSmem weight_buffer_smem(shared_weight_buffer);
 
 #pragma unroll
@@ -210,14 +223,22 @@ __device__ __forceinline__ void
       if (output_atom_idx == 0) {
 #pragma unroll
         for (int i = threadIdx.x; i < NUM_CHUNKS_A; i += NUM_THREADS) {
-          int src_row = i >> log2_CHUNKS_PER_ROW_A;
-          int dst_row = src_row + (k_pipe << log2_constexpr(BATCH_SIZE));
-          int dst_col = (i & (CHUNKS_PER_ROW_A - 1)) << log2_CHUNK_SIZE;
-          int src_col = dst_col + (k_pipe << log2_constexpr(TILE_SIZE));
-          load_smem(input_buffer_smem(dst_row, dst_col),
-                    input_dmem(src_row, src_col));
-          load_smem(norm_weight_buffer_smem(dst_row, dst_col),
-                    norm_weight_dmem(src_row, src_col));
+          int input_src_row = i >> log2_CHUNKS_PER_ROW_A;
+          int input_dst_row =
+              input_src_row +
+              (k_pipe * BATCH_SIZE); // Batch size may not be power of 2
+          int input_dst_col = (i & (CHUNKS_PER_ROW_A - 1)) << log2_CHUNK_SIZE;
+          int input_src_col =
+              input_dst_col + (k_pipe << log2_constexpr(TILE_SIZE));
+
+          int norm_weight_col =
+              input_dst_col + (k_pipe << log2_constexpr(TILE_SIZE));
+          load_smem(input_buffer_smem(input_dst_row, input_dst_col),
+                    input_dmem(input_src_row, input_src_col));
+          if (input_src_row == 0) {
+            load_smem(norm_weight_buffer_smem(0, input_dst_col),
+                      norm_weight_dmem(0, norm_weight_col));
+          }
         }
       }
 #pragma unroll
@@ -235,6 +256,7 @@ __device__ __forceinline__ void
 
     // accumulator
     float s_frag[NUM_ITERS_M][NUM_ITERS_N][8];
+#pragma unroll
     for (uint32_t m = 0; m < NUM_ITERS_M; m++) {
 #pragma unroll
       for (uint32_t n = 0; n < NUM_ITERS_N; n++) {
@@ -248,16 +270,22 @@ __device__ __forceinline__ void
         if (output_atom_idx == 0) {
 #pragma unroll
           for (int i = threadIdx.x; i < NUM_CHUNKS_A; i += NUM_THREADS) {
-            int src_row = i >> log2_CHUNKS_PER_ROW_A;
-            int dst_row = src_row + ((for_idx + K_PIPE_MAX - 1)
-                                     << log2_constexpr(BATCH_SIZE));
-            int dst_col = (i & (CHUNKS_PER_ROW_A - 1)) << log2_CHUNK_SIZE;
-            int src_col = dst_col + ((for_idx + K_PIPE_MAX - 1)
-                                     << log2_constexpr(TILE_SIZE));
-            load_smem(input_buffer_smem(dst_row, dst_col),
-                      input_dmem(src_row, src_col));
-            load_smem(norm_weight_buffer_smem(dst_row, dst_col),
-                      norm_weight_dmem(src_row, src_col));
+            int input_src_row = i >> log2_CHUNKS_PER_ROW_A;
+            int input_dst_row =
+                input_src_row + ((for_idx + K_PIPE_MAX - 1) * BATCH_SIZE);
+            int input_dst_col = (i & (CHUNKS_PER_ROW_A - 1)) << log2_CHUNK_SIZE;
+            int input_src_col = input_dst_col + ((for_idx + K_PIPE_MAX - 1)
+                                                 << log2_constexpr(TILE_SIZE));
+            load_smem(input_buffer_smem(input_dst_row, input_dst_col),
+                      input_dmem(input_src_row, input_src_col));
+
+            int norm_weight_col =
+                input_dst_col +
+                ((for_idx + K_PIPE_MAX - 1) << log2_constexpr(TILE_SIZE));
+            if (input_src_row == 0) {
+              load_smem(norm_weight_buffer_smem(0, norm_weight_col),
+                        norm_weight_dmem(0, norm_weight_col));
+            }
           }
         }
 #pragma unroll
@@ -278,8 +306,7 @@ __device__ __forceinline__ void
       // rotate the buffers
       input_smem.set_ptr(shared_input_buffer +
                          BATCH_SIZE * TILE_SIZE * for_idx);
-      norm_weight_smem.set_ptr(shared_norm_weight_buffer +
-                               BATCH_SIZE * TILE_SIZE * for_idx);
+      norm_weight_smem.set_ptr(shared_norm_weight_buffer + TILE_SIZE * for_idx);
       weight_buffer_smem.set_ptr(shared_weight_buffer +
                                  TILE_SIZE * OUTPUT_ATOM_SIZE *
                                      ((for_idx + 1) % K_PIPE_MAX));
@@ -288,7 +315,7 @@ __device__ __forceinline__ void
                               ((for_idx + 1) % K_PIPE_MAX));
       __syncthreads();
 
-      mul(mul_output_smem, input_smem, norm_weight_smem);
+      mul_broadcast_row(mul_output_smem, input_smem, norm_weight_smem);
       __syncthreads();
 
       uint32_t a_frag[4], b_frag[4];
@@ -373,9 +400,11 @@ __device__ __forceinline__ void
     __syncthreads();
 
 #pragma unroll
-    for (int i = threadIdx.x; i < OUTPUT_ATOM_SIZE; i += NUM_THREADS) {
-      int row = 0;
-      output_dmem.at(row, i) = output_smem.at(row, i);
+    for (int row = 0; row < BATCH_SIZE; row++) {
+#pragma unroll
+      for (int i = threadIdx.x; i < OUTPUT_ATOM_SIZE; i += NUM_THREADS) {
+        output_dmem.at(row, i) = output_smem.at(row, i);
+      }
     }
     if (output_atom_idx + 1 < NUM_OUTPUT_ATOMS) {
       __syncthreads();

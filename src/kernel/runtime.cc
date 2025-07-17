@@ -396,11 +396,20 @@ void register_mugraph(
     }
     // Step 2: create events between operators
     if (pre_op == nullptr) {
-      // Assert that the first op launches a single task
-      assert(tasks.size() == 1);
-      first_tasks.push_back(all_tasks.size());
-      cur_task_map[dim3(0, 0, 0)] = all_tasks.size();
-      all_tasks.push_back(tasks[0]);
+      dim3 bid;
+      for (bid.x = 0; bid.x < bgraph.grid_dim.x; bid.x++) {
+        for (bid.y = 0; bid.y < bgraph.grid_dim.y; bid.y++) {
+          for (bid.z = 0; bid.z < bgraph.grid_dim.z; bid.z++) {
+            cur_task_map[bid] = all_tasks.size();
+
+            int offset = bid.x * bgraph.grid_dim.y * bgraph.grid_dim.z +
+                         bid.y * bgraph.grid_dim.z + bid.z;
+
+            first_tasks.push_back(all_tasks.size());
+            all_tasks.push_back(tasks[offset]);
+          }
+        }
+      }
     } else {
       // Step 2.1: analyze dependencies between thread blocks of the two ops
       std::vector<int> producer_partition(mirage::config::MAX_TENSOR_DIMS, 1);
@@ -504,8 +513,10 @@ bool sanity_check(mirage::kernel::Graph const &graph,
   }
   std::queue<TaskId> task_queue;
   std::queue<EventId> event_queue;
-  assert(first_tasks.size() == 1);
-  task_queue.push(first_tasks[0]);
+  printf("First tasks: %d\n", (int)first_tasks.size());
+  for (size_t i = 0; i < first_tasks.size(); i++) {
+    task_queue.push(first_tasks[i]);
+  }
   while (!(task_queue.empty() && event_queue.empty())) {
     // Execute tasks
     while (!task_queue.empty()) {
@@ -959,6 +970,17 @@ TaskGraphResult print_task_graph(
                        {"trigger_event", task_desc.trigger_event},
                        {"dependent_event", task_desc.dependent_event}};
           for (int i = 0; i < task_desc.num_inputs; i++) {
+            if (input_ops[i]->dtensor == kernel::DTensor::EMPTY_TENSOR) {
+              json json_dims = json::array();
+              json json_strides = json::array();
+              json_task["inputs"].push_back(
+                  json{{"base_ptr", "nullptr"},
+                       {"offset", 0},
+                       {"data_type", type::DT_UNKNOWN},
+                       {"dims", json_dims},
+                       {"strides", json_strides}});
+              continue;
+            }
             off_t offset = 0;
             int num_dims = input_ops[i]->dtensor.num_dims;
             int3 input_map = input_ops[i]->input_map;
@@ -1204,6 +1226,8 @@ TaskGraphResult print_task_graph(
     json_task_graph["first_tasks"].push_back(task);
   }
   if (use_json_format) {
+    // Add nullptr for tensors set as None
+    code.e("all_tensors[\"nullptr\"] = nullptr;");
     code.e("construct_task_graph(num_gpus, my_gpu_id, all_tasks, all_events, "
            "first_tasks, all_tensors);");
   } else {
@@ -1222,6 +1246,11 @@ TaskGraphResult print_task_graph(
   task_type_to_name[TASK_LINEAR_WITH_RESIDUAL] = "TASK_LINEAR_WITH_RESIDUAL";
   task_type_to_name[TASK_ARGMAX_PARTIAL] = "TASK_ARGMAX_PARTIAL";
   task_type_to_name[TASK_ARGMAX_REDUCE] = "TASK_ARGMAX_REDUCE";
+  task_type_to_name[TASK_FIND_NGRAM_PARTIAL] = "TASK_FIND_NGRAM_PARTIAL";
+  task_type_to_name[TASK_FIND_NGRAM_GLOBAL] = "TASK_FIND_NGRAM_GLOBAL";
+  task_type_to_name[TASK_TARGET_VERIFY_GREEDY] = "TASK_TARGET_VERIFY_GREEDY";
+  task_type_to_name[TASK_SINGLE_BATCH_EXTEND_ATTENTION] =
+      "TASK_SINGLE_BATCH_EXTEND_ATTENTION";
 
   code.e("__device__ __forceinline__");
   code.e("void _execute_task(TaskDesc const& task_desc,");

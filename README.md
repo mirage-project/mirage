@@ -20,7 +20,7 @@ The fastest way to try MPK is to install it directly from source:
 git clone --recursive --branch mpk https://www.github.com/mirage-project/mirage
 cd mirage
 pip install -e . -v
-export MIRAGE_HOME=$pwd
+export MIRAGE_HOME=$(pwd)
 ```
 
 > 🔧[2025/06/19] We are working on pre-built binary wheels for MPK and will update the installation instructions once they are available.

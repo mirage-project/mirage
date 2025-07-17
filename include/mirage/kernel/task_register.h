@@ -34,6 +34,8 @@ public:
                                    std::vector<int> const &params);
   int register_attention_task(threadblock::Graph const &bgraph,
                               std::vector<int> const &params);
+  int register_single_batch_extend_attention_task(
+      threadblock::Graph const &bgraph, std::vector<int> const &params);
   int register_linear_with_residual_task(threadblock::Graph const &bgraph,
                                          std::vector<int> const &params);
   int register_silu_mul_linear_with_residual_task(
@@ -42,6 +44,12 @@ public:
                                    std::vector<int> const &params);
   int register_argmax_reduce_task(threadblock::Graph const &bgraph,
                                   std::vector<int> const &params);
+  int register_find_ngram_partial_task(threadblock::Graph const &bgraph,
+                                       std::vector<int> const &params);
+  int register_find_ngram_global_task(threadblock::Graph const &bgraph,
+                                      std::vector<int> const &params);
+  int register_target_verify_greedy_task(threadblock::Graph const &bgraph,
+                                         std::vector<int> const &params);
   int register_task_variant(TaskType type, std::string const &code);
 
 public:
