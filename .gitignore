@@ -62,6 +62,3 @@ kernel*.cu
 
 #runtime
 *.perfetto-trace
-
-#venv
-mi-venv

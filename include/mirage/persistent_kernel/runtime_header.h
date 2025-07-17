@@ -128,6 +128,7 @@ struct RuntimeConfig {
   void *profiler_buffer;
   bool verbose;
   bool profiling;
+  bool split;
 };
 
 } // namespace runtime
