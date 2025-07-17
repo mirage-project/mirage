@@ -81,11 +81,11 @@ std::vector<STensor> Graph::reduction_max(STensor const &input, int dim) {
   return op->output_tensors;
 }
 
-std::vector<STensor> *Graph::reduction_max(STensor const *input, int dim) {
+std::vector<STensor *> Graph::reduction_max(STensor const *input, int dim) {
   TBOperator *op = create_reduction_max_op(*input, dim);
   assert(op != nullptr);
   operators.push_back(op);
-  return &op->output_tensors;
+  return std::vector<STensor *>{&op->output_tensors[0], &op->output_tensors[1]};
 }
 
 TBOperator *Graph::create_reduction_max_op(STensor const &input, int dim) {

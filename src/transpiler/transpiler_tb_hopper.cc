@@ -747,7 +747,8 @@ CustomOPTranspileResult
       continue;
     }
     auto [last_op, last_op_meta] = node.ops.back();
-    if (last_op->op_type == type::TB_FORLOOP_ACCUM_NO_RED_OP &&
+    if ((last_op->op_type == type::TB_FORLOOP_ACCUM_NO_RED_OP ||
+         last_op->op_type == type::TB_FORLOOP_ACCUM_NO_RED_RESCALE_OP) &&
         !last_op_meta.is_accum_in_reg) {
       tb::TBForloopAccumOp const *accum_op =
           dynamic_cast<tb::TBForloopAccumOp const *>(last_op);
@@ -766,6 +767,32 @@ CustomOPTranspileResult
     }
   }
   code.e("");
+
+  // Initialize all max accumulators
+  int num_init_max_accums = 0;
+  for (TBSchedNode const &node : sched.loop_nodes) {
+    if (node.type != tb_sched_node_t::OPERATOR) {
+      continue;
+    }
+    auto [last_op, last_op_meta] = node.ops.back();
+    if (last_op->op_type == type::TB_FORLOOP_ACCUM_MAX_OP &&
+        !last_op_meta.is_accum_in_reg) {
+      tb::TBForloopAccumOp const *accum_op =
+          dynamic_cast<tb::TBForloopAccumOp const *>(last_op);
+      tb::STensor const &accum = accum_op->output_tensors.at(0);
+      STensorMeta const &accum_meta = stensor_metas.at(accum.guid);
+      size_t num_elems = 0;
+      for (int i = 0; i < accum.num_dims; ++i) {
+        num_elems = std::max(num_elems, accum.dim[i] * accum_meta.strides[i]);
+      }
+      code.e("tb::InitMaxAccumulatorKernel<$, $, "
+             "NUM_THREADS>::run(stensor$_ptr, thread_idx);",
+             get_datatype_str(accum.data_type),
+             num_elems,
+             accum.guid);
+      num_init_max_accums += 1;
+    }
+  }
 
   // Pre-define all matmul ops and allocate accumulators (if needed)
   // Since we may want to place the accumulator of a matmul op in register
@@ -810,7 +837,10 @@ CustomOPTranspileResult
             return op_and_meta.first->op_type == type::TB_EXP_OP;
           });
       bool is_store_accum =
-          node.ops.back().first->op_type == type::TB_FORLOOP_ACCUM_NO_RED_OP;
+          node.ops.back().first->op_type == type::TB_FORLOOP_ACCUM_NO_RED_OP ||
+          node.ops.back().first->op_type ==
+              type::TB_FORLOOP_ACCUM_NO_RED_RESCALE_OP ||
+          node.ops.back().first->op_type == type::TB_FORLOOP_ACCUM_MAX_OP;
       bool is_accum_in_reg = node.ops.back().second.is_accum_in_reg;
 
       // For threadblock matmul, cute requires 2-d matrices as inputs / outputs,
@@ -853,7 +883,8 @@ CustomOPTranspileResult
   }
   code.e("__syncthreads();");
 
-  if (num_pre_loop_copies > 0 || num_clear_accums > 0) {
+  if (num_pre_loop_copies > 0 || num_clear_accums > 0 ||
+      num_init_max_accums > 0) {
     code.e("__syncthreads();");
     code.e("");
   }
@@ -1125,6 +1156,7 @@ CustomOPTranspileResult
         case type::TB_ADD_OP:
         case type::TB_MUL_OP:
         case type::TB_DIV_OP:
+        case type::TB_SUB_OP:
         case type::TB_POW_OP: {
           tb::STensor const &input0 = op->input_tensors.at(0);
           tb::STensor const &input1 = op->input_tensors.at(1);
@@ -1153,6 +1185,7 @@ CustomOPTranspileResult
           string op_type_str = op->op_type == type::TB_ADD_OP   ? "ADD"
                                : op->op_type == type::TB_MUL_OP ? "MUL"
                                : op->op_type == type::TB_DIV_OP ? "DIV"
+                               : op->op_type == type::TB_SUB_OP ? "SUB"
                                : op->op_type == type::TB_POW_OP ? "POW"
                                                                 : "";
           assert(op_type_str != "");
@@ -1284,6 +1317,88 @@ CustomOPTranspileResult
                  input.guid);
           break;
         }
+        case type::TB_FORLOOP_ACCUM_NO_RED_RESCALE_OP: {
+          assert(sched_node.ops.size() == 1); // Should not be fused
+          assert(is_in_loop);
+          tb::STensor const &input = op->input_tensors.at(0);
+          tb::STensor const &rescale = op->input_tensors.at(1);
+          tb::STensor const &accum = op->output_tensors.at(0);
+          int num_dims = input.num_dims;
+          // Find the iteration dim
+          int iter_dim = -1;
+          for (int i = 0; i < num_dims; ++i) {
+            bool failed = false;
+            for (tb::STensor const &stensor : {input, rescale, accum}) {
+              STensorMeta meta = stensor_metas.at(stensor.guid);
+              if (i != meta.innermost_dim && meta.swizzled_dim != i) {
+                failed = true;
+                break;
+              }
+            }
+            if (!failed) {
+              iter_dim = i;
+              break;
+            }
+          }
+          assert(iter_dim != -1);
+          // Define layouts
+          string in_layout = mov_last_get_stensor_layout(
+              input, stensor_metas.at(input.guid), iter_dim);
+          string rescale_layout = mov_last_get_stensor_layout(
+              rescale, stensor_metas.at(rescale.guid), iter_dim);
+          string accum_layout = mov_last_get_stensor_layout(
+              accum, stensor_metas.at(accum.guid), iter_dim);
+          code.e("using Kernel = tb::ForloopAccumRescaleKernel<$, $, $, $, "
+                 "NUM_THREADS>;",
+                 get_datatype_str(input.data_type),
+                 accum_layout,
+                 in_layout,
+                 rescale_layout);
+          code.e("Kernel::run(stensor$_ptr, stensor$_ptr, stensor$_ptr, "
+                 "thread_idx);",
+                 accum.guid,
+                 input.guid,
+                 rescale.guid);
+          break;
+        }
+        case type::TB_FORLOOP_ACCUM_MAX_OP: {
+          assert(sched_node.ops.size() == 1); // Should not be fused
+          assert(is_in_loop);
+          tb::STensor const &input = op->input_tensors.at(0);
+          tb::STensor const &accum = op->output_tensors.at(0);
+          int num_dims = input.num_dims;
+          // Find the iteration dim
+          int iter_dim = -1;
+          for (int i = 0; i < num_dims; ++i) {
+            bool failed = false;
+            for (tb::STensor const &stensor : {input, accum}) {
+              STensorMeta meta = stensor_metas.at(stensor.guid);
+              if (i != meta.innermost_dim && meta.swizzled_dim != i) {
+                failed = true;
+                break;
+              }
+            }
+            if (!failed) {
+              iter_dim = i;
+              break;
+            }
+          }
+          assert(iter_dim != -1);
+          // Define layouts
+          string in_layout = mov_last_get_stensor_layout(
+              input, stensor_metas.at(input.guid), iter_dim);
+          string accum_layout = mov_last_get_stensor_layout(
+              accum, stensor_metas.at(accum.guid), iter_dim);
+          code.e(
+              "using Kernel = tb::ForloopAccumMaxKernel<$, $, $, NUM_THREADS>;",
+              get_datatype_str(input.data_type),
+              accum_layout,
+              in_layout);
+          code.e("Kernel::run(stensor$_ptr, stensor$_ptr, thread_idx);",
+                 accum.guid,
+                 input.guid);
+          break;
+        }
         case type::TB_CONCAT_0_OP:
         case type::TB_CONCAT_1_OP:
         case type::TB_CONCAT_2_OP: {
@@ -1369,8 +1484,10 @@ CustomOPTranspileResult
       continue;
     }
     auto [last_op, last_op_meta] = node.ops.back();
-    if (last_op->op_type == type::TB_FORLOOP_ACCUM_NO_RED_OP &&
-        last_op_meta.is_accum_in_reg) {
+    if ((last_op->op_type == type::TB_FORLOOP_ACCUM_NO_RED_OP ||
+         last_op->op_type == type::TB_FORLOOP_ACCUM_NO_RED_RESCALE_OP ||
+         last_op->op_type == type::TB_FORLOOP_ACCUM_MAX_OP) &&
+        !last_op_meta.is_accum_in_reg) {
       tb::TBForloopAccumOp const *accum_op =
           dynamic_cast<tb::TBForloopAccumOp const *>(last_op);
       tb::STensor const &accum = accum_op->output_tensors.at(0);
