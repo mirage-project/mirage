@@ -92,6 +92,38 @@ TBOperator *
   return op;
 }
 
+STensor Graph::forloop_accum_max(STensor const &input) {
+  TBOperator *op = create_forloop_accum_max_op(input);
+  assert(op != nullptr);
+  operators.push_back(op);
+  return op->output_tensors[0];
+}
+
+STensor *Graph::forloop_accum_max(STensor const *input) {
+  TBOperator *op = create_forloop_accum_max_op(*input);
+  assert(op != nullptr);
+  operators.push_back(op);
+  return &op->output_tensors[0];
+}
+
+TBOperator *Graph::create_forloop_accum_max_op(STensor const &input) {
+  // Input stensor must be before accumulation (i.e., inside forloop)
+  if (input.after_accum) {
+    return nullptr;
+  }
+  TBForloopAccumOp *op =
+      new TBForloopAccumOp(this, input, mirage::type::TB_FORLOOP_ACCUM_MAX_OP);
+  // Check shmem usage
+  size_t smem_usage = calculate_shared_memory_usage(op);
+  if (smem_usage > mirage::config::MAX_SMEM_SIZE) {
+    delete op;
+    return nullptr;
+  } else {
+    return op;
+  }
+  return op;
+}
+
 TBForloopAccumOp::TBForloopAccumOp(Graph *_graph,
                                    STensor const &input,
                                    mirage::type::TBOperatorType type)
@@ -101,7 +133,8 @@ TBForloopAccumOp::TBForloopAccumOp(Graph *_graph,
   assert(!input.after_accum);
   STensor output = input;
   switch (type) {
-    case mirage::type::TB_FORLOOP_ACCUM_NO_RED_OP: {
+    case mirage::type::TB_FORLOOP_ACCUM_NO_RED_OP:
+    case mirage::type::TB_FORLOOP_ACCUM_MAX_OP: {
       // Do nothing
       break;
     }
