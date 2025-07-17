@@ -205,16 +205,6 @@ std::shared_ptr<AbstractExpr const>
     abstract_expr_make_rms(SymbolicTensorDim const &reduction_dim,
                            std::shared_ptr<AbstractExpr const> elems);
 
-std::shared_ptr<AbstractExpr const>
-    abstract_expr_make_rms(int reduction_degree,
-                           std::shared_ptr<AbstractExpr const> elems);
-std::shared_ptr<AbstractExpr const> abstract_expr_make_rms(
-    std::shared_ptr<TensorDimExpr const> reduction_degree,
-    std::shared_ptr<AbstractExpr const> elems);
-std::shared_ptr<AbstractExpr const>
-    abstract_expr_make_rms(SymbolicTensorDim const &reduction_dim,
-                           std::shared_ptr<AbstractExpr const> elems);
-
 class Red : public AbstractExpr {
 public:
   Red(std::shared_ptr<TensorDimExpr const> reduction_degree,

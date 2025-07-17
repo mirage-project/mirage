@@ -15,10 +15,6 @@
 #include "mirage/search/verification/verifier.h"
 #include "mirage/utils/json_utils.h"
 
-extern "C" {
-void get_egraph(char const *expr);
-}
-
 namespace mirage {
 namespace search {
 
