@@ -550,19 +550,12 @@ __device__ void execute_scheduler(RuntimeConfig config, int offset) {
 
   __shared__ size_t cur_event_pos[8];
   __shared__ size_t last_event_pos[8];
+  __shared__ EventId *sched_queues[8];
+  __shared__ int sched_queue_ids[8];
+
   if (threadIdx.x < 8) {
     cur_event_pos[threadIdx.x] = 0;
     last_event_pos[threadIdx.x] = 0;
-  }
-
-  __shared__ EventId *sched_queues[8];
-  __shared__ int sched_queue_ids[8];
-  __shared__ size_t worker_queue_next_free_task_pos[2 * MAX_NUM_WORKERS];
-
-  for (int i = 0; i < (MAX_NUM_WORKERS + blockDim.x - 1) / blockDim.x; i++) {
-    if (threadIdx.x + i * blockDim.x < 2 * MAX_NUM_WORKERS) {
-      worker_queue_next_free_task_pos[threadIdx.x + i * blockDim.x] = 0;
-    }
   }
 
   __syncthreads();
@@ -608,6 +601,11 @@ __device__ void execute_scheduler(RuntimeConfig config, int offset) {
              sched_id,
              my_first_worker,
              my_last_worker);
+    }
+
+    size_t worker_queue_next_free_task_pos[2 * MAX_NUM_WORKERS];
+    for (int i = 0; i < 2 * MAX_NUM_WORKERS; i++) {
+      worker_queue_next_free_task_pos[i] = 0;
     }
 
     worker_queue_next_free_task_pos[0] = 1;
