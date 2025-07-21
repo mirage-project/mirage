@@ -216,6 +216,8 @@ def get_tb_operator_type_string(int op_type):
         return "tb_mul_op"
     elif op_type == TB_DIV_OP:
         return "tb_div_op"
+    elif op_type == TB_SUB_OP:
+        return "tb_sub_op"
     elif op_type == TB_POW_OP:
         return "tb_pow_op"
     elif op_type == TB_REDUCTION_FIRST_OP_ID:
@@ -232,6 +234,12 @@ def get_tb_operator_type_string(int op_type):
         return "tb_reduction_1_to_dimx_op"
     elif op_type == TB_REDUCTION_2_TO_DIMX_OP:
         return "tb_reduction_2_to_dimx_op"
+    elif op_type == TB_REDUCTION_0_MAX_OP:
+        return "tb_reduction_0_max_op"
+    elif op_type == TB_REDUCTION_1_MAX_OP:
+        return "tb_reduction_1_max_op"
+    elif op_type == TB_REDUCTION_2_MAX_OP:
+        return "tb_reduction_2_max_op"
     elif op_type == TB_REDUCTION_LAST_OP_ID:
         return "tb_reduction_last_op_id"
     elif op_type == TB_RMS_NORM_OP:
@@ -268,6 +276,12 @@ def get_tb_operator_type_string(int op_type):
         return "tb_forloop_accum_red_ld_rms_op"
     elif op_type == TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP:
         return "tb_forloop_accum_redtox_ld_sum_op"
+    elif op_type == TB_FORLOOP_ACCUM_NO_RED_RESCALE_OP:
+        return "tb_forloop_accum_no_red_rescale_op"
+    elif op_type == TB_FORLOOP_ACCUM_RED_LD_SUM_RESCALE_OP:
+        return "tb_forloop_accum_red_ld_sum_rescale_op"
+    elif op_type == TB_FORLOOP_ACCUM_MAX_OP:
+        return "tb_forloop_accum_max_op"
     elif op_type == TB_FORLOOP_ACCUM_LAST_OP:
         return "tb_forloop_accum_last_op"
     elif op_type == TB_CUSTOMIZED_OP:
@@ -370,6 +384,15 @@ def string_to_accum_optype(acc):
     else:
         assert False, "Unsupported accum optype"
         return None
+
+def string_to_accum_rescale_optype(acc):
+     if acc is None:
+         return TB_FORLOOP_ACCUM_NO_RED_RESCALE_OP
+     elif acc == "sum":
+         return TB_FORLOOP_ACCUM_RED_LD_SUM_RESCALE_OP
+     else:
+         assert False, "Unsupported accum rescale optype"
+         return None
 
 cdef class DTensor:
     cdef CppDTensor* c_ptr # Hold a Tensor instance
@@ -762,9 +785,12 @@ cdef class CyKNGraph:
         cinputs.resize(len(inputs))
         cdef DTensor t
         for i in range(len(inputs)):
-            assert(type(inputs[i]) == DTensor)
-            t = inputs[i]
-            cinputs[i] = t.c_ptr
+            if inputs[i] is None:
+                cinputs[i] = NULL
+            else:
+                assert (type(inputs[i]) == DTensor)
+                t = inputs[i]
+                cinputs[i] = t.c_ptr
         cdef CppDTensor* coutputs[1024]
         num_outputs = self.p_kgraph.customized(cinputs, coutputs, bgraph.p_bgraph)
         outputs = list()
@@ -974,7 +1000,10 @@ cdef class CyTBGraph:
         c_input_map.x = input_map[0]
         c_input_map.y = input_map[1]
         c_input_map.z = input_map[2]
-        cdef CppSTensor* ptr = self.p_bgraph.new_input(dtensor.c_ptr, c_input_map, forloop_dim, SmemRowMajor, store_in_dmem)
+        cdef CppDTensor* dtensor_cptr = NULL
+        if dtensor is not None:
+            dtensor_cptr = dtensor.c_ptr
+        cdef CppSTensor* ptr = self.p_bgraph.new_input(dtensor_cptr, c_input_map, forloop_dim, SmemRowMajor, store_in_dmem)
         t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
         return STensor(t)
 
@@ -1027,6 +1056,11 @@ cdef class CyTBGraph:
         t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
         return STensor(t)
 
+    def mul_scalar(self, STensor A, float scalar):
+        cdef CppSTensor* ptr = self.p_bgraph.mul_scalar(A.c_ptr, scalar)
+        t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
+        return STensor(t)
+
     def add(self, STensor A, STensor B):
         cdef CppSTensor* ptr = self.p_bgraph.add(A.c_ptr, B.c_ptr)
         t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
@@ -1042,10 +1076,21 @@ cdef class CyTBGraph:
         t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
         return STensor(t)
 
+    def sub(self, STensor A, STensor B):
+        cdef CppSTensor* ptr = self.p_bgraph.sub(A.c_ptr, B.c_ptr)
+        t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
+        return STensor(t)
+
     def reduction(self, STensor A, int dim):
         cdef CppSTensor* ptr = self.p_bgraph.reduction(A.c_ptr, dim)
         t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
         return STensor(t)
+
+    def reduction_max(self, STensor A, int dim):
+        cdef vector[CppSTensor*] ptr = self.p_bgraph.reduction_max(A.c_ptr, dim)
+        t0 = ctypes.cast(<unsigned long long>ptr[0], ctypes.c_void_p)
+        t1 = ctypes.cast(<unsigned long long>ptr[1], ctypes.c_void_p)
+        return STensor(t0), STensor(t1)
 
     def rms_norm(self, STensor A):
         cdef CppSTensor* ptr = self.p_bgraph.rms_norm(A.c_ptr)
@@ -1060,6 +1105,17 @@ cdef class CyTBGraph:
     def forloop_accum(self, STensor A, str acc):
         optype = string_to_accum_optype(acc)
         cdef CppSTensor* ptr = self.p_bgraph.forloop_accum(A.c_ptr, optype)
+        t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
+        return STensor(t)
+
+    def forloop_accum_rescale(self, STensor A, STensor B, str acc):
+        optype = string_to_accum_rescale_optype(acc)
+        cdef CppSTensor* ptr = self.p_bgraph.forloop_accum_rescale(A.c_ptr, B.c_ptr, optype)
+        t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
+        return STensor(t)
+
+    def forloop_accum_max(self, STensor A):
+        cdef CppSTensor* ptr = self.p_bgraph.forloop_accum_max(A.c_ptr)
         t = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
         return STensor(t)
 
@@ -1085,7 +1141,7 @@ cdef class CyTBGraph:
                 operators.append(CyTBOperator(ptr))
             return operators
 
-def search(CyKNGraph input_graph, *, int max_num_new_graphs = 1024, list imaps = None, list omaps = None, list griddims = None, list blockdims = None, list fmaps = None, list franges = None, str previous_checkpoint = None, bool verbose, str default_config = None):
+def search(CyKNGraph input_graph, *, int max_num_new_graphs = 1024, list imaps = None, list omaps = None, list griddims = None, list blockdims = None, list fmaps = None, list franges = None, str previous_checkpoint = None, bool verbose, str default_config = None, bool is_formal_verified):
     # set cimaps
     cdef vector[MInt3] cimaps
     cimaps.resize(0)
@@ -1153,7 +1209,9 @@ def search(CyKNGraph input_graph, *, int max_num_new_graphs = 1024, list imaps =
     if default_config is not None:
         py_byte_string = default_config.encode('UTF-8')
         cconfig = py_byte_string
-    num = cython_search(input_graph.p_kgraph, max_num_new_graphs, cnewgraphs, cimaps, comaps, cgriddims, cblockdims, cfmaps, cfranges, cprevious_checkpoint, cverbose, cconfig)
+    # set is_formal_verified
+    cis_formal_verifed = is_formal_verified
+    num = cython_search(input_graph.p_kgraph, max_num_new_graphs, cnewgraphs, cimaps, comaps, cgriddims, cblockdims, cfmaps, cfranges, cprevious_checkpoint, cverbose, cconfig, cis_formal_verifed)
     new_graphs = list()
     for i in range(num):
         ptr = ctypes.cast(<unsigned long long>cnewgraphs[i], ctypes.c_void_p)

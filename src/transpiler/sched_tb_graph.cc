@@ -251,7 +251,8 @@ TBSched Transpiler::get_threadblock_schedule(tb::Graph const &tb_graph) {
         } else {
           op_meta.is_accum_in_reg = false;
         }
-      } else if (op->op_type == type::TB_FORLOOP_ACCUM_NO_RED_RESCALE_OP) {
+      } else if (op->op_type == type::TB_FORLOOP_ACCUM_NO_RED_RESCALE_OP ||
+                 op->op_type == type::TB_FORLOOP_ACCUM_MAX_OP) {
         op_meta.is_accum_in_reg = false;
       }
       op2op_meta[op] = op_meta;
@@ -332,7 +333,8 @@ TBSched Transpiler::get_threadblock_schedule(tb::Graph const &tb_graph) {
     for (tb::TBOperator *const op : tb_graph.operators) {
       if (op->op_type == type::TB_INPUT_OP ||
           op->op_type == type::TB_FORLOOP_ACCUM_NO_RED_OP ||
-          op->op_type == type::TB_FORLOOP_ACCUM_NO_RED_RESCALE_OP) {
+          op->op_type == type::TB_FORLOOP_ACCUM_NO_RED_RESCALE_OP ||
+          op->op_type == type::TB_FORLOOP_ACCUM_MAX_OP) {
         op2chaining_meta[op] = {0, next_chain_idx++, 0};
       }
     }
@@ -368,7 +370,8 @@ TBSched Transpiler::get_threadblock_schedule(tb::Graph const &tb_graph) {
         [&](tb::TBOperator const *op) {
           if (op->op_type == type::TB_INPUT_OP ||
               op->op_type == type::TB_FORLOOP_ACCUM_NO_RED_OP ||
-              op->op_type == type::TB_FORLOOP_ACCUM_NO_RED_RESCALE_OP) {
+              op->op_type == type::TB_FORLOOP_ACCUM_NO_RED_RESCALE_OP ||
+              op->op_type == type::TB_FORLOOP_ACCUM_MAX_OP) {
             return false;
           } else {
             return true;

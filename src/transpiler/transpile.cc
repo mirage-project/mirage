@@ -15,6 +15,7 @@
 
 #include "mirage/transpiler/transpile.h"
 #include "mirage/kernel/graph.h"
+#include "mirage/threadblock/element_unary.h"
 #include "mirage/threadblock/graph.h"
 #include "mirage/transpiler/transpiler.h"
 #include <cassert>
@@ -311,8 +312,7 @@ kernel::Graph const *rewrite_graph_for_online_softmax(kernel::Graph const *g) {
               case TB_SILU_OP:
               case TB_GELU_OP:
               case TB_RELU_OP:
-              case TB_CLAMP_OP:
-              case TB_MUL_SCALAR_OP: {
+              case TB_CLAMP_OP: {
                 assert(stensor_inputs.size() == 1);
                 threadblock::STensor st =
                     tbg->elementunary(stensor_inputs[0], bop->op_type);
@@ -320,10 +320,21 @@ kernel::Graph const *rewrite_graph_for_online_softmax(kernel::Graph const *g) {
                 stensor_mapping[bop->output_tensors[0].guid] = st;
                 break;
               }
+              case TB_MUL_SCALAR_OP: {
+                assert(stensor_inputs.size() == 1);
+                assert(bop->output_tensors.size() == 1);
+                threadblock::TBElementUnaryOp *mul_scalar_op =
+                    static_cast<threadblock::TBElementUnaryOp *>(bop);
+                threadblock::STensor st = tbg->elementunary(
+                    stensor_inputs[0], bop->op_type, mul_scalar_op->scalar);
+                stensor_mapping[bop->output_tensors[0].guid] = st;
+                break;
+              }
               case TB_ADD_OP:
-              case TB_SUB_OP:
               case TB_MUL_OP:
-              case TB_DIV_OP: {
+              case TB_DIV_OP:
+              case TB_SUB_OP:
+              case TB_POW_OP: {
                 assert(stensor_inputs.size() == 2);
                 threadblock::STensor st = tbg->elementbinary(
                     stensor_inputs[0], stensor_inputs[1], bop->op_type);
@@ -408,6 +419,14 @@ kernel::Graph const *rewrite_graph_for_online_softmax(kernel::Graph const *g) {
                     stensor_inputs[0],
                     stensor_inputs[1],
                     TB_FORLOOP_ACCUM_RED_LD_SUM_RESCALE_OP);
+                stensor_mapping[bop->output_tensors[0].guid] = st;
+                break;
+              }
+              case TB_FORLOOP_ACCUM_MAX_OP: {
+                assert(stensor_inputs.size() == 1);
+                assert(bop->output_tensors.size() == 1);
+                threadblock::STensor st =
+                    tbg->forloop_accum_max(stensor_inputs[0]);
                 stensor_mapping[bop->output_tensors[0].guid] = st;
                 break;
               }
@@ -597,8 +616,7 @@ Transpiler::Transpiler(kernel::Graph const *_graph,
             case TB_SILU_OP:
             case TB_GELU_OP:
             case TB_RELU_OP:
-            case TB_CLAMP_OP:
-            case TB_MUL_SCALAR_OP: {
+            case TB_CLAMP_OP: {
               assert(stensor_inputs.size() == 1);
               threadblock::STensor st =
                   tbg->elementunary(stensor_inputs[0], bop->op_type);
@@ -606,10 +624,20 @@ Transpiler::Transpiler(kernel::Graph const *_graph,
               stensor_mapping[bop->output_tensors[0].guid] = st;
               break;
             }
+            case TB_MUL_SCALAR_OP: {
+              assert(stensor_inputs.size() == 1);
+              assert(bop->output_tensors.size() == 1);
+              threadblock::TBElementUnaryOp *mul_scalar_op =
+                  static_cast<threadblock::TBElementUnaryOp *>(bop);
+              threadblock::STensor st = tbg->elementunary(
+                  stensor_inputs[0], bop->op_type, mul_scalar_op->scalar);
+              stensor_mapping[bop->output_tensors[0].guid] = st;
+              break;
+            }
             case TB_ADD_OP:
-            case TB_SUB_OP:
             case TB_MUL_OP:
             case TB_DIV_OP:
+            case TB_SUB_OP:
             case TB_POW_OP: {
               assert(stensor_inputs.size() == 2);
               threadblock::STensor st = tbg->elementbinary(
@@ -695,6 +723,14 @@ Transpiler::Transpiler(kernel::Graph const *_graph,
               stensor_mapping[bop->output_tensors[0].guid] = st;
               break;
             }
+            case TB_FORLOOP_ACCUM_MAX_OP: {
+              assert(stensor_inputs.size() == 1);
+              assert(bop->output_tensors.size() == 1);
+              threadblock::STensor st =
+                  tbg->forloop_accum_max(stensor_inputs[0]);
+              stensor_mapping[bop->output_tensors[0].guid] = st;
+              break;
+            }
             case TB_RMS_NORM_OP: {
               assert(stensor_inputs.size() == 1);
               threadblock::STensor st = stensor_inputs[0];
@@ -741,7 +777,8 @@ Transpiler::Transpiler(kernel::Graph const *_graph,
         if (bop->op_type >= TB_FORLOOP_ACCUM_FIRST_OP &&
             bop->op_type <= TB_FORLOOP_ACCUM_LAST_OP) {
           assert(bop->op_type == TB_FORLOOP_ACCUM_NO_RED_OP ||
-                 bop->op_type == TB_FORLOOP_ACCUM_NO_RED_RESCALE_OP);
+                 bop->op_type == TB_FORLOOP_ACCUM_NO_RED_RESCALE_OP ||
+                 bop->op_type == TB_FORLOOP_ACCUM_MAX_OP);
         }
         if (bop->op_type == TB_RMS_NORM_OP) {
           assert(false);

@@ -40,7 +40,7 @@ using std::string;
 
 namespace {
 // Todo: Remove the code duplication.
-string ugraph_tboperator_type_to_nki(const ty::TBOperatorType type) {
+string ugraph_tboperator_type_to_nki(ty::TBOperatorType const type) {
   switch (type) {
     case ty::TB_EXP_OP:
       return "nl.exp";
@@ -62,13 +62,15 @@ string ugraph_tboperator_type_to_nki(const ty::TBOperatorType type) {
       return "nl.multiply";
     case ty::TB_DIV_OP:
       return "nl.divide";
+    case ty::TB_SUB_OP:
+      return "nl.subtract";
     case ty::TB_POW_OP:
       return "nl.power";
     default:
       assert(false);
   }
 }
-string ugraph_knoperator_type_to_nki(const ty::KNOperatorType type) {
+string ugraph_knoperator_type_to_nki(ty::KNOperatorType const type) {
   switch (type) {
     case ty::KN_EXP_OP:
       return "nl.exp";
@@ -97,7 +99,7 @@ string ugraph_knoperator_type_to_nki(const ty::KNOperatorType type) {
   }
 }
 
-string mirage_dtype_to_nki(const ty::DataType dt) {
+string mirage_dtype_to_nki(ty::DataType const dt) {
   string nki_type;
   switch (dt) {
     case ty::DataType::DT_INT4:
@@ -471,6 +473,7 @@ NKICustomOPTranspileResult
       case type::TB_ADD_OP:
       case type::TB_MUL_OP:
       case type::TB_DIV_OP:
+      case type::TB_SUB_OP:
       case type::TB_POW_OP: {
         tb::STensor const &input0 = tb_op->input_tensors.at(0);
         tb::STensor const &input1 = tb_op->input_tensors.at(1);
@@ -654,6 +657,7 @@ NKICustomOPTranspileResult
       case type::TB_ADD_OP:
       case type::TB_MUL_OP:
       case type::TB_DIV_OP:
+      case type::TB_SUB_OP:
       case type::TB_POW_OP: {
         tb::STensor const &input0 = tb_op->input_tensors.at(0);
         tb::STensor const &input1 = tb_op->input_tensors.at(1);

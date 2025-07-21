@@ -106,6 +106,8 @@ struct alignas(16) DTensor {
     return num_elements() * data_type_size;
   }
 
+  static const DTensor EMPTY_TENSOR;
+
   // hash related functions
   size_t get_owner_independent_hash() const;
 

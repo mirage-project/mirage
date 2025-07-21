@@ -255,11 +255,17 @@ AllocResult plan_memory(vector<TensorDecl> const &tensor_decls) {
 
 TBMemoryPlan Transpiler::get_threadblock_memory_plan(tb::Graph const &tb_graph,
                                                      TBSched const &tb_sched,
-                                                     bool hopper_arch) {
+                                                     bool hopper_arch,
+                                                     bool blackwell_arch) {
   using memory_planner::Range, memory_planner::TensorDecl,
       memory_planner::AllocResult, memory_planner::ALIGNMENT;
   static constexpr sguid_t PIPELINED_INPUT_BUF_GUID_OFFSET =
       10000000; // Should be larger than the number of STensors
+  // mbarrier in blackwell for 2 CTA sync, should be larger than number of
+  // STensors and pipeline input buf
+  static constexpr sguid_t MBARRIER_GUID_OFFSET = 30000000;
+  // tmem base ptr in blackwell for tmem allocation
+  static constexpr sguid_t TMEM_BASE_PTR_GUID = 40000000;
 
   // Generate all tensor declarations
   // The i-th pre_loop_nodes is executed during time slice #i
@@ -359,7 +365,8 @@ TBMemoryPlan Transpiler::get_threadblock_memory_plan(tb::Graph const &tb_graph,
     }
     auto [last_op, last_op_meta] = node.ops.back();
     if (last_op->op_type == type::TB_FORLOOP_ACCUM_NO_RED_OP ||
-        last_op->op_type == type::TB_FORLOOP_ACCUM_NO_RED_RESCALE_OP) {
+        last_op->op_type == type::TB_FORLOOP_ACCUM_NO_RED_RESCALE_OP ||
+        last_op->op_type == type::TB_FORLOOP_ACCUM_MAX_OP) {
       tb::STensor const &accum = last_op->output_tensors.at(0);
       size_t phy_size = get_phy_size(accum);
       int earlist_free_time =
@@ -390,7 +397,8 @@ TBMemoryPlan Transpiler::get_threadblock_memory_plan(tb::Graph const &tb_graph,
     }
     auto [last_op, last_op_meta] = node.ops.back();
     if (last_op->op_type != type::TB_FORLOOP_ACCUM_NO_RED_OP &&
-        last_op->op_type != type::TB_FORLOOP_ACCUM_NO_RED_RESCALE_OP) {
+        last_op->op_type != type::TB_FORLOOP_ACCUM_NO_RED_RESCALE_OP &&
+        last_op->op_type != type::TB_FORLOOP_ACCUM_MAX_OP) {
       for (tb::STensor const &output_tensor : last_op->output_tensors) {
         size_t phy_size = get_phy_size(output_tensor);
         int earlist_free_time =
@@ -476,7 +484,11 @@ TBMemoryPlan Transpiler::get_threadblock_memory_plan(tb::Graph const &tb_graph,
         }
       }
     }
-    assert(num_stensors == (int)alloc_result.addrs.size());
+    if (blackwell_arch) {
+      assert(num_stensors == (int)alloc_result.addrs.size());
+    } else {
+      assert(num_stensors == (int)alloc_result.addrs.size());
+    }
   }
 
   // Generate the memory plan
@@ -484,6 +496,8 @@ TBMemoryPlan Transpiler::get_threadblock_memory_plan(tb::Graph const &tb_graph,
   plan.smem_size = alloc_result.peak_memory_usage;
   plan.addrs = alloc_result.addrs;
   plan.pipelined_input_buf_guid_offset = PIPELINED_INPUT_BUF_GUID_OFFSET;
+  plan.tmem_base_ptr_guid = TMEM_BASE_PTR_GUID;
+  plan.mbarrier_buf_guid_offset = MBARRIER_GUID_OFFSET;
 
   // Leave the first 16 bytes of the shared memory for matmul operators
   // TODO(intlsy) Remove this if there is not Matmul op or do not need padding
@@ -491,6 +505,33 @@ TBMemoryPlan Transpiler::get_threadblock_memory_plan(tb::Graph const &tb_graph,
   plan.smem_size += ALIGNMENT;
   for (auto &kv : plan.addrs) {
     kv.second += ALIGNMENT;
+  }
+
+  if (blackwell_arch) {
+    bool tmem_init = false;
+    size_t usage = 0;
+    for (int i = 0; i < (int)tb_sched.loop_nodes.size(); ++i) {
+      TBSchedNode const &node = tb_sched.loop_nodes[i];
+      if (node.type != tb_sched_node_t::OPERATOR) {
+        continue;
+      }
+      auto [op, op_meta] = node.ops.front();
+      if (op->op_type == type::TB_MATMUL_OP) {
+        tb::STensor const &stensor = op->output_tensors.at(0);
+        size_t mbarrier_phy_size = 8;      // uint64_t for each barrier
+        size_t tmem_base_ptr_phy_size = 4; // uint32_t for tmem base ptr
+
+        if (!tmem_init) {
+          plan.addrs[TMEM_BASE_PTR_GUID] = 0;
+          usage += tmem_base_ptr_phy_size;
+          tmem_init = true;
+        }
+        // align to 16 bytes
+        plan.addrs[stensor.guid + MBARRIER_GUID_OFFSET] =
+            (usage + 15) / 16 * 16;
+        usage = (usage + 15) / 16 * 16 + mbarrier_phy_size;
+      }
+    }
   }
 
   if (plan.smem_size > mirage::config::MAX_SMEM_SIZE) {

@@ -216,6 +216,7 @@ template <typename T,
           int NUM_KV_HEADS,
           int HEAD_DIM,
           int WEIGHT_STRIDE,
+          int OUTPUT_STRIDE,
           int EXTEND_NUM>
 __global__ void single_batch_extend_wrapper(void const *qkv_ptr,
                                             void *k_cache_ptr,
@@ -237,6 +238,7 @@ __global__ void single_batch_extend_wrapper(void const *qkv_ptr,
                              NUM_KV_HEADS,
                              HEAD_DIM,
                              WEIGHT_STRIDE,
+                             OUTPUT_STRIDE,
                              EXTEND_NUM>(qkv_ptr,
                                          k_cache_ptr,
                                          v_cache_ptr,
@@ -253,6 +255,35 @@ __global__ void single_batch_extend_wrapper(void const *qkv_ptr,
                                          q_norm_debug_ptr,
                                          k_norm_debug_ptr);
 }
+
+#define SINGLE_BATCH_EXTEND_NUM_CASE(BATCH_SIZE)                               \
+  case BATCH_SIZE:                                                             \
+    cudaFuncSetAttribute(single_batch_extend_wrapper<bfloat16,                 \
+                                                     4,                        \
+                                                     1,                        \
+                                                     128,                      \
+                                                     128,                      \
+                                                     128,                      \
+                                                     BATCH_SIZE>,              \
+                         cudaFuncAttributeMaxDynamicSharedMemorySize,          \
+                         smem_size);                                           \
+    single_batch_extend_wrapper<bfloat16, 4, 1, 128, 128, 128, BATCH_SIZE>     \
+        <<<grid_dim, block_dim, smem_size>>>(qkv_ptr,                          \
+                                             k_cache_ptr,                      \
+                                             v_cache_ptr,                      \
+                                             output_ptr,                       \
+                                             seq_len,                          \
+                                             qk_norm,                          \
+                                             rotary_emd,                       \
+                                             qnorm_weight_ptr,                 \
+                                             knorm_weight_ptr,                 \
+                                             cos_ptr,                          \
+                                             sin_ptr,                          \
+                                             q_eps,                            \
+                                             k_eps,                            \
+                                             q_norm_debug_ptr,                 \
+                                             k_norm_debug_ptr);                \
+    break;
 
 void single_batch_extend(
     torch::Tensor qkv,
@@ -294,140 +325,12 @@ void single_batch_extend(
   // Dynamic dispatch based on extend_num
   printf("single_batch_extend extend_num: %d\n", extend_num);
   switch (extend_num) {
-    case 0:
-      cudaFuncSetAttribute(
-          single_batch_extend_wrapper<bfloat16, 4, 1, 128, 128, 0>,
-          cudaFuncAttributeMaxDynamicSharedMemorySize,
-          smem_size);
-      single_batch_extend_wrapper<bfloat16, 4, 1, 128, 128, 0>
-          <<<grid_dim, block_dim, smem_size>>>(qkv_ptr,
-                                               k_cache_ptr,
-                                               v_cache_ptr,
-                                               output_ptr,
-                                               seq_len,
-                                               qk_norm,
-                                               rotary_emd,
-                                               qnorm_weight_ptr,
-                                               knorm_weight_ptr,
-                                               cos_ptr,
-                                               sin_ptr,
-                                               q_eps,
-                                               k_eps,
-                                               q_norm_debug_ptr,
-                                               k_norm_debug_ptr);
-      break;
-    case 1:
-      cudaFuncSetAttribute(
-          single_batch_extend_wrapper<bfloat16, 4, 1, 128, 128, 1>,
-          cudaFuncAttributeMaxDynamicSharedMemorySize,
-          smem_size);
-      single_batch_extend_wrapper<bfloat16, 4, 1, 128, 128, 1>
-          <<<grid_dim, block_dim, smem_size>>>(qkv_ptr,
-                                               k_cache_ptr,
-                                               v_cache_ptr,
-                                               output_ptr,
-                                               seq_len,
-                                               qk_norm,
-                                               rotary_emd,
-                                               qnorm_weight_ptr,
-                                               knorm_weight_ptr,
-                                               cos_ptr,
-                                               sin_ptr,
-                                               q_eps,
-                                               k_eps,
-                                               q_norm_debug_ptr,
-                                               k_norm_debug_ptr);
-      break;
-    case 2:
-      cudaFuncSetAttribute(
-          single_batch_extend_wrapper<bfloat16, 4, 1, 128, 128, 2>,
-          cudaFuncAttributeMaxDynamicSharedMemorySize,
-          smem_size);
-      single_batch_extend_wrapper<bfloat16, 4, 1, 128, 128, 2>
-          <<<grid_dim, block_dim, smem_size>>>(qkv_ptr,
-                                               k_cache_ptr,
-                                               v_cache_ptr,
-                                               output_ptr,
-                                               seq_len,
-                                               qk_norm,
-                                               rotary_emd,
-                                               qnorm_weight_ptr,
-                                               knorm_weight_ptr,
-                                               cos_ptr,
-                                               sin_ptr,
-                                               q_eps,
-                                               k_eps,
-                                               q_norm_debug_ptr,
-                                               k_norm_debug_ptr);
-      break;
-    case 3:
-      cudaFuncSetAttribute(
-          single_batch_extend_wrapper<bfloat16, 4, 1, 128, 128, 3>,
-          cudaFuncAttributeMaxDynamicSharedMemorySize,
-          smem_size);
-      single_batch_extend_wrapper<bfloat16, 4, 1, 128, 128, 3>
-          <<<grid_dim, block_dim, smem_size>>>(qkv_ptr,
-                                               k_cache_ptr,
-                                               v_cache_ptr,
-                                               output_ptr,
-                                               seq_len,
-                                               qk_norm,
-                                               rotary_emd,
-                                               qnorm_weight_ptr,
-                                               knorm_weight_ptr,
-                                               cos_ptr,
-                                               sin_ptr,
-                                               q_eps,
-                                               k_eps,
-                                               q_norm_debug_ptr,
-                                               k_norm_debug_ptr);
-      break;
-    case 4:
-      cudaFuncSetAttribute(
-          single_batch_extend_wrapper<bfloat16, 4, 1, 128, 128, 4>,
-          cudaFuncAttributeMaxDynamicSharedMemorySize,
-          smem_size);
-      single_batch_extend_wrapper<bfloat16, 4, 1, 128, 128, 4>
-          <<<grid_dim, block_dim, smem_size>>>(qkv_ptr,
-                                               k_cache_ptr,
-                                               v_cache_ptr,
-                                               output_ptr,
-                                               seq_len,
-                                               qk_norm,
-                                               rotary_emd,
-                                               qnorm_weight_ptr,
-                                               knorm_weight_ptr,
-                                               cos_ptr,
-                                               sin_ptr,
-                                               q_eps,
-                                               k_eps,
-                                               q_norm_debug_ptr,
-                                               k_norm_debug_ptr);
-      break;
-    case 5:
-      cudaFuncSetAttribute(
-          single_batch_extend_wrapper<bfloat16, 4, 1, 128, 128, 5>,
-          cudaFuncAttributeMaxDynamicSharedMemorySize,
-          smem_size);
-
-      printf("single_batch_extend_wrapper<bfloat16, 4, 1, 128, 128, 5>\n");
-      single_batch_extend_wrapper<bfloat16, 4, 1, 128, 128, 5>
-          <<<grid_dim, block_dim, smem_size>>>(qkv_ptr,
-                                               k_cache_ptr,
-                                               v_cache_ptr,
-                                               output_ptr,
-                                               seq_len,
-                                               qk_norm,
-                                               rotary_emd,
-                                               qnorm_weight_ptr,
-                                               knorm_weight_ptr,
-                                               cos_ptr,
-                                               sin_ptr,
-                                               q_eps,
-                                               k_eps,
-                                               q_norm_debug_ptr,
-                                               k_norm_debug_ptr);
-      break;
+    SINGLE_BATCH_EXTEND_NUM_CASE(0);
+    SINGLE_BATCH_EXTEND_NUM_CASE(1);
+    SINGLE_BATCH_EXTEND_NUM_CASE(2);
+    SINGLE_BATCH_EXTEND_NUM_CASE(3);
+    SINGLE_BATCH_EXTEND_NUM_CASE(4);
+    SINGLE_BATCH_EXTEND_NUM_CASE(5);
     default:
       printf("Unsupported extend_num: %d\n", extend_num);
       break;
@@ -771,10 +674,10 @@ __global__ void norm_linear_kernel_wrapper(void const *input_ptr,
                                            void const *weight_ptr,
                                            float eps,
                                            void *output_ptr) {
-  printf("norm_linear_kernel_wrapper<T, %d, %d, %d>\n",
-         BATCH_SIZE,
-         OUTPUT_SIZE,
-         REDUCTION_SIZE);
+  // printf("norm_linear_kernel_wrapper<T, %d, %d, %d>\n",
+  //        BATCH_SIZE,
+  //        OUTPUT_SIZE,
+  //        REDUCTION_SIZE);
   norm_linear_task_impl<T,
                         BATCH_SIZE,
                         OUTPUT_SIZE,
@@ -839,7 +742,12 @@ void launch_norm_linear(void const *input_ptr,
     NORM_LINEAR_DISPATCH_OUTPUT_SIZE(BATCH_SIZE, 16)                           \
     NORM_LINEAR_DISPATCH_OUTPUT_SIZE(BATCH_SIZE, 32)                           \
     NORM_LINEAR_DISPATCH_OUTPUT_SIZE(BATCH_SIZE, 64)                           \
+    NORM_LINEAR_DISPATCH_OUTPUT_SIZE(BATCH_SIZE, 96)                           \
+    NORM_LINEAR_DISPATCH_OUTPUT_SIZE(BATCH_SIZE, 112)                          \
+    NORM_LINEAR_DISPATCH_OUTPUT_SIZE(BATCH_SIZE, 160)                          \
+    NORM_LINEAR_DISPATCH_OUTPUT_SIZE(BATCH_SIZE, 192)                          \
     NORM_LINEAR_DISPATCH_OUTPUT_SIZE(BATCH_SIZE, 256)                          \
+    NORM_LINEAR_DISPATCH_OUTPUT_SIZE(BATCH_SIZE, 544)                          \
     NORM_LINEAR_DISPATCH_OUTPUT_SIZE(BATCH_SIZE, 1600)                         \
     default:                                                                   \
       printf("Unsupported output size in test: %zu\n", output.size(1));        \

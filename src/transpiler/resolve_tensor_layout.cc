@@ -446,10 +446,16 @@ void Transpiler::resolve_tensor_layout() {
                 opt.add(z3::implies(!s_is_innermost[input.guid][num_dims - 2],
                                     s_is_swizzled[input.guid][num_dims - 2]));
               }
-            } else if (this->config.target_cc == GPU_CC::H100) {
+            } else if (this->config.target_cc == GPU_CC::H100 ||
+                       this->config.target_cc == GPU_CC::B200) {
               for (tb::STensor const &input : {input0, input1}) {
                 // If both dims are not the innermost one, cannot use ldmatrix
                 stensor_metas[input0.guid].m_input = true;
+                stensor_metas[input1.guid].n_input = true;
+                stensor_metas[input0.guid].n_matrix_guid = input1.guid;
+                stensor_metas[input1.guid].m_matrix_guid = input0.guid;
+                stensor_metas[input0.guid].c_matrix_guid = output.guid;
+                stensor_metas[input1.guid].c_matrix_guid = output.guid;
                 costs.push_back(
                     z3::ite(!s_is_innermost[input.guid][num_dims - 1] &&
                                 !s_is_innermost[input.guid][num_dims - 2],
@@ -516,9 +522,9 @@ void Transpiler::resolve_tensor_layout() {
             break;
           }
           case type::TB_ADD_OP:
-          case type::TB_SUB_OP:
           case type::TB_MUL_OP:
           case type::TB_DIV_OP:
+          case type::TB_SUB_OP:
           case type::TB_POW_OP: {
             tb::STensor const &input0 = tb_op->input_tensors.at(0);
             tb::STensor const &input1 = tb_op->input_tensors.at(1);
@@ -551,7 +557,8 @@ void Transpiler::resolve_tensor_layout() {
             }
             break;
           }
-          case type::TB_FORLOOP_ACCUM_NO_RED_OP: {
+          case type::TB_FORLOOP_ACCUM_NO_RED_OP:
+          case type::TB_FORLOOP_ACCUM_MAX_OP: {
             assert(tb_op == output_op);
             tb::STensor const &input = tb_op->input_tensors.at(0);
             tb::STensor const &output = tb_op->output_tensors.at(0);

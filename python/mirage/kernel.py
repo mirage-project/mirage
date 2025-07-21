@@ -81,7 +81,11 @@ static struct PyModuleDef ModuleDef = {
   "__mirage_launcher",
   NULL, //documentation
   -1, //size
-  ModuleMethods
+  ModuleMethods,
+  nullptr,                  // m_slots     
+  nullptr,                  // m_traverse  
+  nullptr,                  // m_clear     
+  nullptr,                  // m_free      
 };
 
 PyMODINIT_FUNC PyInit___mirage_launcher(void) {
@@ -153,6 +157,11 @@ def get_cc_cmd(
         specific_cmd = [
             "-arch=sm_90a",
             "-gencode=arch=compute_90a,code=sm_90a",
+        ] + (["-DMIRAGE_ENABLE_PROFILER"] if profiling else [])
+    elif target == 100:
+        specific_cmd = [
+            "-arch=sm_100a",
+            "-gencode=arch=compute_100a,code=sm_100a",
         ] + (["-DMIRAGE_ENABLE_PROFILER"] if profiling else [])
     else:
         specific_cmd = [
@@ -546,6 +555,7 @@ class KNGraph:
         use_graph_dataset: bool = True,
         use_cached_graphs: bool = True,
         save_codes: bool = False,
+        is_formal_verified: bool = False,
     ):
         if use_graph_dataset:
             cached_graph = graph_dataset.find(
@@ -577,6 +587,7 @@ class KNGraph:
             previous_checkpoint=previous_checkpoint,
             verbose=verbose,
             default_config=config,
+            is_formal_verified=is_formal_verified,
         )
         all_graphs = [KNGraph(g) for g in cygraphs]
         print("Finished search, discovering {} mugraphs ...".format(len(all_graphs)))
