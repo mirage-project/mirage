@@ -408,6 +408,10 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
     int variant_id =
         task_register->register_embedding_task(customized->bgraph, params);
     task_config[op] = std::make_tuple(2, 1, TASK_EMBEDDING, variant_id);
+  } else if (name == "multi_token_embedding") {
+    int variant_id =
+        task_register->register_multi_token_embedding_task(customized->bgraph, params);
+    task_config[op] = std::make_tuple(2, 1, TASK_MULTI_TOKEN_EMBEDDING, variant_id);
   } else if (name == "rmsnorm_linear") {
     int variant_id =
         task_register->register_rmsnorm_linear_task(customized->bgraph, params);

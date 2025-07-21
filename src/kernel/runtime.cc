@@ -1215,6 +1215,7 @@ TaskGraphResult print_task_graph(
   // Generate task implementation
   std::map<TaskType, std::string> task_type_to_name;
   task_type_to_name[TASK_EMBEDDING] = "TASK_EMBEDDING";
+  task_type_to_name[TASK_MULTI_TOKEN_EMBEDDING] = "TASK_MULTI_TOKEN_EMBEDDING";
   task_type_to_name[TASK_RMS_NORM_LINEAR] = "TASK_RMS_NORM_LINEAR";
   task_type_to_name[TASK_ATTENTION_1] = "TASK_ATTENTION_1";
   task_type_to_name[TASK_SILU_MUL_LINEAR_WITH_RESIDUAL] =

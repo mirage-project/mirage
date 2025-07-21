@@ -235,6 +235,30 @@ class PersistentKernel:
         self.kn_graph.customized([input, weight, output], tb_graph)
         self.kn_graph.register_task(tb_graph, "embedding", [weight.dim(1)])
 
+    def multi_token_embed_layer(
+        self,
+        token_ids: DTensor,
+        weight: DTensor,
+        output: DTensor,
+        grid_dim: tuple,
+        block_dim: tuple,
+        max_tokens: int = 32,
+    ):
+        # token_ids: (num_tokens,) - array of token IDs
+        # weight: (vocab_size, embedding_dim) - embedding table
+        # output: (1, num_tokens * embedding_dim) - concatenated embeddings
+        assert token_ids.num_dims == 1
+        assert weight.num_dims == 2
+        assert output.num_dims == 2
+        assert output.dim(0) == 1
+        
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(token_ids, (-1, -1, -1), -1, True)
+        tb_graph.new_input(weight, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output, (-1, -1, -1), -1, True)
+        self.kn_graph.customized([token_ids, weight, output], tb_graph)
+        self.kn_graph.register_task(tb_graph, "multi_token_embedding", [weight.dim(1), max_tokens])
+
     def rmsnorm_linear_layer(
         self,
         input: DTensor,

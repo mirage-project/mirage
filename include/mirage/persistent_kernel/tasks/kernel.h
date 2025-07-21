@@ -1,5 +1,6 @@
 #include "argmax.cuh"
 #include "embedding.cuh"
+#include "multi_token_embedding.cuh"
 #include "linear.cuh"
 #include "norm_linear.cuh"
 #include "paged_attention.cuh"

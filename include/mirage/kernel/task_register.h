@@ -30,6 +30,8 @@ public:
   static TaskRegister *get_instance();
   int register_embedding_task(threadblock::Graph const &bgraph,
                               std::vector<int> const &params);
+  int register_multi_token_embedding_task(threadblock::Graph const &bgraph,
+                                          std::vector<int> const &params);
   int register_rmsnorm_linear_task(threadblock::Graph const &bgraph,
                                    std::vector<int> const &params);
   int register_attention_task(threadblock::Graph const &bgraph,

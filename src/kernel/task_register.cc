@@ -61,6 +61,23 @@
    return register_task_variant(TASK_EMBEDDING, code.to_string());
  }
  
+ int TaskRegister::register_multi_token_embedding_task(threadblock::Graph const &bgraph,
+                                                       std::vector<int> const &params) {
+   // params[0] = OUT_DIM (embedding dimension per token)
+   // params[1] = MAX_TOKENS
+   assert(params.size() == 2);
+   mirage::transpiler::CodeKeeper code;
+   code.inc_indent();
+   code.e("kernel::multi_token_embedding_kernel<bfloat16, $, $>(",
+          params[0], params[1]);
+   code.e("    task_desc.inputs[0].base_ptr,");  // token_ids
+   code.e("    task_desc.inputs[1].base_ptr,");  // embedding_table
+   code.e("    task_desc.outputs[0].base_ptr,"); // output [1, num_tokens * OUT_DIM]
+   code.e("    task_desc.inputs[0].dim[0],");    // num_tokens
+   code.e("    task_desc.inputs[1].stride[0]);"); // embedding_stride
+   return register_task_variant(TASK_MULTI_TOKEN_EMBEDDING, code.to_string());
+ }
+ 
  int TaskRegister::register_rmsnorm_linear_task(threadblock::Graph const &bgraph,
                                                 std::vector<int> const &params) {
    assert(params.size() == 0);
