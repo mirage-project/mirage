@@ -71,9 +71,11 @@ __device__ __forceinline__ void
 
   // using SM80_16x8x16_F16F16F16F16_TNX2 = 16X16X16
   constexpr int NUM_WARPS_N =
-      OUTPUT_ATOM_SIZE / 16 <= 4 ? OUTPUT_ATOM_SIZE / 16 : 4;
+      (OUTPUT_ATOM_SIZE / 16 == 3) ? 4 :
+      (OUTPUT_ATOM_SIZE / 16 <= 4 ? OUTPUT_ATOM_SIZE / 16 : 4);
   constexpr int LAST_NUM_WARPS_N =
-      LAST_OUTPUT_ATOM_SIZE / 16 <= 4 ? LAST_OUTPUT_ATOM_SIZE / 16 : 4;
+      (LAST_OUTPUT_ATOM_SIZE / 16 == 3) ? 4 :
+      (LAST_OUTPUT_ATOM_SIZE / 16 <= 4 ? LAST_OUTPUT_ATOM_SIZE / 16 : 4);
 
   constexpr int NUM_WARPS_K = 4 / NUM_WARPS_N;
   constexpr int LAST_NUM_WARPS_K =
