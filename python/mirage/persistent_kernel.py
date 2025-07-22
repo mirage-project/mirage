@@ -151,41 +151,17 @@ def get_compile_command(
 
     return common_cmd + specific_cmd + flags
 
+class MirageTensor:
+    def __init__(self, dims: list, strides: list = None, dtype: dtype = bfloat16, name: str = None):
+        self.dims = dims
+        self.strides = strides
+        self.dtype = dtype
+        self.name = name
 
-class PersistentKernel:
-    def __init__(
-        self,
-        world_size: int,
-        mpi_rank: int,
-        num_workers: int,
-        num_local_schedulers: int,
-        num_remote_schedulers: int,
-        max_seq_length: int,
-        eos_token_id: int64,
-        meta_tensors: list[torch.Tensor],
-        profiler_tensor: torch.Tensor,
-        spec_decode_config: SpecDecodeConfig
-    ):
-        self.__finalized__ = False
-        self._is_compiled = False
-        self.world_size = world_size
-        self.mpi_rank = mpi_rank
-        self.num_workers = num_workers
-        self.num_local_schedulers = num_local_schedulers
-        self.num_remote_schedulers = num_remote_schedulers
-        self.max_seq_length = max_seq_length
-        self.eos_token_id = eos_token_id
-        self.kn_graph = KNGraph(CyKNGraph(disable_fingerprint=True))
-        self.meta_tensors = meta_tensors
-        self.profiler_tensor = profiler_tensor
-        self.use_nvshmem = True if world_size > 1 else False
-        self.spec_decode_config = spec_decode_config
-        self._spec_decode_handlers = {
-            "promptlookup": self.prompt_lookup_spec_handler,
-        }
-        self._spec_verify_handlers = {
-            "promptlookup": self.prompt_lookup_verify_handler,
-        }
+# a wrapper class of KNGraph:
+class PersistentKNGraph:
+    def __init__(self, kgraph: KNGraph):
+        self.kn_graph = kgraph
 
     def attach_input(self, torch_tensor: torch.Tensor, name: str = None) -> DTensor:
         dims = tuple([d for d in torch_tensor.shape])
@@ -198,29 +174,6 @@ class PersistentKernel:
         # FIXME: currently assert that name is not None
         assert name is not None
         self.kn_graph.attach_torch_tensor(t, torch_tensor, name)
-        return t
-
-    def new_tensor(
-        self,
-        dims: tuple,
-        strides: tuple = None,
-        dtype: dtype = bfloat16,
-        name: str = None,
-        io_category: str = "cuda_tensor",
-    ) -> DTensor:
-        # Assert a row-major layout
-        if strides is not None:
-            for d in range(len(dims) - 1):
-                assert strides[d] == strides[d + 1] * dims[d + 1]
-        t = self.kn_graph.new_input(dims=dims, strides=strides, dtype=dtype)
-        # FIXME: currently assert that name is not None
-        assert name is not None
-        if io_category == "cuda_tensor":
-            self.kn_graph.attach_cuda_tensor(t, name)
-        elif io_category == "nvshmem_tensor":
-            self.kn_graph.attach_nvshmem_tensor(t, name)
-        else:
-            raise RuntimeError(f"Invalid io_category: {io_category}")
         return t
 
     def fuse_tensors(
@@ -555,6 +508,66 @@ class PersistentKernel:
         tb_graph.new_input(output, (-1, -1, -1), -1, True)
         self.kn_graph.customized([partial_results, tokens, output], tb_graph)
         self.kn_graph.register_task(tb_graph, "find_ngram_global", [ngram_size, spec_length])
+
+class PersistentKernel:
+    def __init__(
+        self,
+        world_size: int,
+        mpi_rank: int,
+        num_workers: int,
+        num_local_schedulers: int,
+        num_remote_schedulers: int,
+        max_seq_length: int,
+        eos_token_id: int64,
+        meta_tensors: list[torch.Tensor],
+        profiler_tensor: torch.Tensor,
+        spec_decode_config: SpecDecodeConfig
+    ):
+        self.__finalized__ = False
+        self._is_compiled = False
+        self.world_size = world_size
+        self.mpi_rank = mpi_rank
+        self.num_workers = num_workers
+        self.num_local_schedulers = num_local_schedulers
+        self.num_remote_schedulers = num_remote_schedulers
+        self.max_seq_length = max_seq_length
+        self.eos_token_id = eos_token_id
+        self.meta_tensors = meta_tensors
+        self.profiler_tensor = profiler_tensor
+        self.use_nvshmem = True if world_size > 1 else False
+        self.spec_decode_config = spec_decode_config
+        self._spec_decode_handlers = {
+            "promptlookup": self.prompt_lookup_spec_handler,
+        }
+        self._spec_verify_handlers = {
+            "promptlookup": self.prompt_lookup_verify_handler,
+        }
+
+    def new_kernel_graph(self):
+        return KNGraph(CyKNGraph(disable_fingerprint=True))
+
+    def new_tensor(
+        self,
+        dims: tuple,
+        strides: tuple = None,
+        dtype: dtype = bfloat16,
+        name: str = None,
+        io_category: str = "cuda_tensor",
+    ) -> DTensor:
+        # Assert a row-major layout
+        if strides is not None:
+            for d in range(len(dims) - 1):
+                assert strides[d] == strides[d + 1] * dims[d + 1]
+        t = self.kn_graph.new_input(dims=dims, strides=strides, dtype=dtype)
+        # FIXME: currently assert that name is not None
+        assert name is not None
+        if io_category == "cuda_tensor":
+            self.kn_graph.attach_cuda_tensor(t, name)
+        elif io_category == "nvshmem_tensor":
+            self.kn_graph.attach_nvshmem_tensor(t, name)
+        else:
+            raise RuntimeError(f"Invalid io_category: {io_category}")
+        return t
 
     def prompt_lookup_spec_handler(
         self, 

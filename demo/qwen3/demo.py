@@ -286,7 +286,6 @@ if __name__ == "__main__":
             name="mlp_final",
             io_category="nvshmem_tensor" if world_size > 1 else "cuda_tensor",
         )
-
         argmax_in = mpk.new_tensor(
             dims=(total_tokens_per_iter, vocab_size),
             dtype=mi.bfloat16,

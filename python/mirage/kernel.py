@@ -203,7 +203,6 @@ class Handle:
         if self.remain_op:
             self.remain_op()
 
-
 class KNGraph:
     def __init__(self, graph):
         self.cygraph = graph
