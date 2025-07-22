@@ -486,6 +486,33 @@ class PersistentKernel:
         tb_graph.new_input(output, (1, -1, -1), -1, True)
         self.kn_graph.customized([input, output], tb_graph)
         self.kn_graph.register_task(tb_graph, "softmax", [temp_int])
+    
+    def multi_token_softmax_layer(
+        self,
+        logits: DTensor,
+        output: DTensor,
+        grid_dim: tuple,
+        block_dim: tuple,
+        vocab_size: int,
+        max_tokens: int = 64,
+        temperature: float = 1.0,
+    ):
+        # logits: (1, num_tokens * vocab_size) - concatenated logits for all tokens
+        # output: (1, num_tokens * vocab_size) - concatenated probabilities
+        assert logits.num_dims == 2
+        assert output.num_dims == 2
+        assert logits.dim(0) == 1 and output.dim(0) == 1
+        assert logits.dim(1) == output.dim(1)
+        assert logits.dim(1) % vocab_size == 0
+        
+        # Convert temperature to int (multiply by 1000 for precision)
+        temp_int = int(temperature * 1000)
+        
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(logits, (1, -1, -1), -1, True)
+        tb_graph.new_input(output, (1, -1, -1), -1, True)
+        self.kn_graph.customized([logits, output], tb_graph)
+        self.kn_graph.register_task(tb_graph, "multi_token_softmax", [vocab_size, max_tokens, temp_int])
 
     def mask_attention_layer(
         self,

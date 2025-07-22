@@ -378,6 +378,66 @@
    return register_task_variant(TASK_SOFTMAX, code.to_string());
  }
  
+ int TaskRegister::register_multi_token_softmax_task(threadblock::Graph const &bgraph,
+                                                     std::vector<int> const &params) {
+   // params[0]: vocab_size
+   // params[1]: max_tokens
+   // params[2]: temperature (as int, will be divided by 1000 for float)
+   assert(params.size() == 3);
+   
+   std::vector<tb::TBInputOp *> input_ops;
+   std::vector<tb::TBInputOp *> output_ops;
+   int num_inputs = 1;
+   int num_outputs = 1;
+ 
+   assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+   for (auto const &op : bgraph.operators) {
+     assert(op->op_type == mirage::type::TB_INPUT_OP);
+     if (input_ops.size() < (size_t)num_inputs) {
+       input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+     } else {
+       output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+     }
+   }
+   
+   // Input should be [1, num_tokens * vocab_size]
+   assert(input_ops[0]->output_tensors[0].num_dims == 2);
+   assert(input_ops[0]->output_tensors[0].dim[0] == 1);
+   
+   int vocab_size = params[0];
+   int max_tokens = params[1];
+   float temperature = params[2] / 1000.0f;
+   
+   // Get the data type from the input tensor
+   mirage::type::DataType dtype = input_ops[0]->dtensor.data_type;
+   std::string dtype_str;
+   
+   // Map data type to string for code generation
+   switch (dtype) {
+     case mirage::type::DT_FLOAT32:
+       dtype_str = "float";
+       break;
+     case mirage::type::DT_BFLOAT16:
+       dtype_str = "bfloat16";
+       break;
+     case mirage::type::DT_FLOAT16:
+       dtype_str = "half";
+       break;
+     default:
+       assert(false && "Unsupported data type for multi-token softmax");
+   }
+ 
+   mirage::transpiler::CodeKeeper code;
+   code.inc_indent();
+   code.e("kernel::multi_token_softmax_kernel<$, $, $>(", dtype_str, vocab_size, max_tokens);
+   code.e("    task_desc.inputs[0].base_ptr,");
+   code.e("    task_desc.outputs[0].base_ptr,");
+   code.e("    task_desc.inputs[0].dim[1] / $,", vocab_size); // num_tokens = total_size / vocab_size
+   code.e("    $f);", temperature);
+   
+   return register_task_variant(TASK_MULTI_TOKEN_SOFTMAX, code.to_string());
+ }
+ 
  int TaskRegister::register_mask_attention_task(threadblock::Graph const &bgraph,
                                                  std::vector<int> const &params) {
    // params[0]: num_q_heads

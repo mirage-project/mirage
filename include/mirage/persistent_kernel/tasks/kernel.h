@@ -9,3 +9,4 @@
 #include "single_batch_decoding.cuh"
 #include "single_batch_multitoken_decoding.cuh"
 #include "softmax.cuh"
+#include "multi_token_softmax.cuh"
