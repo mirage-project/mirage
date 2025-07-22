@@ -537,8 +537,8 @@ __device__ void execute_worker(RuntimeConfig config) {
         }
 #endif
       }
+      cur_task_pos[queue_idx] += 1;      
     }
-    cur_task_pos[queue_idx] += 1;
   }
 }
 
@@ -891,7 +891,7 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
   global_runtime_config.num_graphs = 1;
   global_runtime_config.verbose = false;
   global_runtime_config.profiling = profiler_buffer != nullptr;
-  global_runtime_config.split_worker_scheduler = true;
+  global_runtime_config.split_worker_scheduler = false;
 
   std::vector<TaskDesc> all_tasks;
   std::vector<EventDesc> all_events;
