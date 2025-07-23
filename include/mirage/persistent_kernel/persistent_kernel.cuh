@@ -537,7 +537,7 @@ __device__ void execute_worker(RuntimeConfig config) {
         }
 #endif
       }
-      cur_task_pos[queue_idx] += 1;      
+      cur_task_pos[queue_idx] += 1;
     }
   }
 }
@@ -548,18 +548,6 @@ __device__ void execute_scheduler(RuntimeConfig config, int offset) {
   int warp_id = threadIdx.x / 32;
   int warp_thread_id = threadIdx.x % 32;
 
-  __shared__ size_t cur_event_pos[8];
-  __shared__ size_t last_event_pos[8];
-  __shared__ EventId *sched_queues[8];
-  __shared__ int sched_queue_ids[8];
-
-  if (threadIdx.x < 8) {
-    cur_event_pos[threadIdx.x] = 0;
-    last_event_pos[threadIdx.x] = 0;
-  }
-
-  __syncthreads();
-
   // CANNOT use syncthreads below
   if (warp_id < 4 && warp_thread_id == 0) {
     int sched_id = blockIdx.x * 4 + warp_id + offset;
@@ -567,16 +555,16 @@ __device__ void execute_scheduler(RuntimeConfig config, int offset) {
     //   int sched_id = (blockIdx.x - config.num_workers);
     int num_sched_queues = 1;
     size_t iteration_num = 0;
-
-    sched_queues[warp_id * 2 + 0] = config.sched_queues[sched_id];
-    sched_queue_ids[warp_id * 2 + 0] = sched_id;
+    EventId *sched_queues[2];
+    int sched_queue_ids[2];
+    sched_queues[0] = config.sched_queues[sched_id];
+    sched_queue_ids[0] = sched_id;
     unsigned long long int my_first_worker, my_last_worker;
     if (sched_id < config.num_local_schedulers) {
       // local schedulers also (collectively) process events from
       // the global queue
-      sched_queues[warp_id * 2 + num_sched_queues] =
-          config.sched_queues[num_schedulers];
-      sched_queue_ids[warp_id * 2 + num_sched_queues] = num_schedulers;
+      sched_queues[num_sched_queues] = config.sched_queues[num_schedulers];
+      sched_queue_ids[num_sched_queues] = num_schedulers;
       num_sched_queues++;
       get_first_last_ids(config.num_workers,
                          config.num_local_schedulers,
@@ -602,6 +590,11 @@ __device__ void execute_scheduler(RuntimeConfig config, int offset) {
              my_first_worker,
              my_last_worker);
     }
+    size_t cur_event_pos[2], last_event_pos[2];
+    for (int i = 0; i < 2; i++) {
+      cur_event_pos[i] = 0;
+      last_event_pos[i] = 0;
+    }
 
     size_t worker_queue_next_free_task_pos[2 * MAX_NUM_WORKERS];
     for (int i = 0; i < 2 * MAX_NUM_WORKERS; i++) {
@@ -615,18 +608,16 @@ __device__ void execute_scheduler(RuntimeConfig config, int offset) {
       // if (config.profiling) {
       //   PROFILER_EVENT_START(TASK_GET_EVENT, event_counter);
       // }
-      while (cur_event_pos[warp_id * 2 + queue_idx] ==
-             last_event_pos[warp_id * 2 + queue_idx]) {
+      while (cur_event_pos[queue_idx] == last_event_pos[queue_idx]) {
         //__threadfence();
         // last_event_id = config.sched_queue_last_ready_event_id[sched_id];
         // last_event_id =
         //    atomicAdd(&config.sched_queue_last_ready_event_id[sched_id], 0);
         asm volatile("ld.acquire.gpu.u64 %0, [%1];"
-                     : "=l"(last_event_pos[warp_id * 2 + queue_idx])
+                     : "=l"(last_event_pos[queue_idx])
                      : "l"(&config.sched_queue_last_ready_event_id
-                            [sched_queue_ids[warp_id * 2 + queue_idx]]));
-        if (cur_event_pos[warp_id * 2 + queue_idx] <
-            last_event_pos[warp_id * 2 + queue_idx]) {
+                            [sched_queue_ids[queue_idx]]));
+        if (cur_event_pos[queue_idx] < last_event_pos[queue_idx]) {
           break;
         } else {
           queue_idx = (queue_idx == num_sched_queues - 1) ? 0 : queue_idx + 1;
@@ -635,14 +626,12 @@ __device__ void execute_scheduler(RuntimeConfig config, int offset) {
         __nanosleep(10);
       }
       // Make sure the schedule queue is not overflow
-      assert(cur_event_pos[warp_id * 2 + queue_idx] +
-                 config.per_sched_queue_len >
-             last_event_pos[warp_id * 2 + queue_idx]);
+      assert(cur_event_pos[queue_idx] + config.per_sched_queue_len >
+             last_event_pos[queue_idx]);
       __threadfence();
       // Launch new tasks
-      EventId event_id = sched_queues[warp_id * 2 + queue_idx]
-                                     [cur_event_pos[warp_id * 2 + queue_idx] %
-                                      config.per_sched_queue_len];
+      EventId event_id = sched_queues[queue_idx][cur_event_pos[queue_idx] %
+                                                 config.per_sched_queue_len];
       EventDesc e = config.all_events[event_id];
       // if (config.profiling) {
       //   PROFILER_EVENT_END(TASK_GET_EVENT, event_counter++);
@@ -796,7 +785,7 @@ __device__ void execute_scheduler(RuntimeConfig config, int offset) {
           // }
         }
       }
-      cur_event_pos[warp_id * 2 + queue_idx] += 1;
+      cur_event_pos[queue_idx] += 1;
     }
   }
 }
@@ -891,7 +880,7 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
   global_runtime_config.num_graphs = 1;
   global_runtime_config.verbose = false;
   global_runtime_config.profiling = profiler_buffer != nullptr;
-  global_runtime_config.split_worker_scheduler = false;
+  global_runtime_config.split_worker_scheduler = true;
 
   std::vector<TaskDesc> all_tasks;
   std::vector<EventDesc> all_events;
@@ -1020,7 +1009,8 @@ extern "C" void launch_persistent_kernel() {
 
   if (global_runtime_config.split_worker_scheduler) {
     printf("worker kernel & scheduler kernel\n");
-    // Launcher persistent kernel
+
+    // Launcher worker & scheduler kernel
     cudaFuncSetAttribute(worker_kernel,
                          cudaFuncAttributeMaxDynamicSharedMemorySize,
                          MAX_SHARE_MEMORY_SIZE);
@@ -1032,23 +1022,9 @@ extern "C" void launch_persistent_kernel() {
     cudaStreamCreate(&worker_stream);
     cudaStreamCreate(&scheduler_stream);
 
-#ifdef USE_NVSHMEM
-    void *args[] = {&global_runtime_config};
-    nvshmemx_collective_launch(
-        (void const *)scheduler_kernel,
-        dim3(global_runtime_config.num_local_schedulers / 4, 1, 1),
-        dim3(128, 1, 1),
-        args,
-        MAX_SHARE_MEMORY_SIZE /*sharedmem*/,
-        scheduler_stream /*stream*/);
-
-    nvshmemx_collective_launch((void const *)worker_kernel,
-                               dim3(global_runtime_config.num_workers, 1, 1),
-                               dim3(128, 1, 1),
-                               args,
-                               MAX_SHARE_MEMORY_SIZE /*sharedmem*/,
-                               worker_stream /*stream*/);
-#else
+    // The split kernel does not support NVSHMEM because
+    // nvshmemx_collective_launch launches kernels sequentially, which blocks
+    // the interaction between the worker kernel and the scheduler kernel
     scheduler_kernel<<<
         dim3(global_runtime_config.num_local_schedulers / 4, 1, 1),
         dim3(128, 1, 1),
@@ -1059,8 +1035,6 @@ extern "C" void launch_persistent_kernel() {
                     dim3(128, 1, 1),
                     MAX_SHARE_MEMORY_SIZE /*smem*/,
                     worker_stream>>>(global_runtime_config);
-
-#endif
 
     cudaError_t err = cudaDeviceSynchronize();
     if (err != cudaSuccess) {
