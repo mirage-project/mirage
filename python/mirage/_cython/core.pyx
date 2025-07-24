@@ -1306,3 +1306,42 @@ def cy_from_json(str filename):
     ptr = cython_from_json(cfilename)
     graph = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
     return CyKNGraph(graph)
+
+def cy_new_cuda_tensor(tuple dims,
+                       tuple strides,
+                       dtype : dtype,
+                       str name):
+    cdef vector[int] cdims
+    cdef vector[size_t] cstrides
+    cdims.resize(len(dims))
+    for i in range(len(dims)):
+        cdims[i] = dims[i]
+    cstrides.resize(len(strides))
+    for i in range(len(strides)):
+        cstrides[i] = strides[i]
+    c_type = convert_dtype_to_ctype(dtype)
+    cdef char* cname = NULL
+    if name is not None:
+        py_byte_string = name.encode('UTF-8')
+        cname = py_byte_string
+    cython_new_cuda_tensor(cdims, cstrides, c_type, cname)
+
+def cy_new_nvshmem_tensor(tuple dims,
+                          tuple strides,
+                          dtype : dtype,
+                          str name):
+    cdef vector[int] cdims
+    cdef vector[size_t] cstrides
+    cdims.resize(len(dims))
+    for i in range(len(dims)):
+        cdims[i] = dims[i]
+    cstrides.resize(len(strides))
+    for i in range(len(strides)):
+        cstrides[i] = strides[i]
+    c_type = convert_dtype_to_ctype(dtype)
+    cdef char* cname = NULL
+    if name is not None:
+        py_byte_string = name.encode('UTF-8')
+        cname = py_byte_string
+    cython_new_nvshmem_tensor(cdims, cstrides, c_type, cname)
+

@@ -188,6 +188,16 @@ cdef extern from "mirage/kernel/runtime.h" namespace "mirage::runtime":
         string cuda_code
         string json_file
 
+    cdef void cython_new_cuda_tensor(vector[int] dims,
+                                     vector[size_t] strides,
+                                     DataType data_type,
+                                     const char *name)
+
+    cdef void cython_new_nvshmem_tensor(vector[int] dims,
+                                        vector[size_t] strides,
+                                        DataType data_type,
+                                        const char *name)
+
 cdef extern from "mirage/kernel/graph.h" namespace "mirage::kernel":
 
     cdef cppclass CppKNOperator "mirage::kernel::KNOperator":

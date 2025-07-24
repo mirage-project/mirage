@@ -47,5 +47,35 @@ struct TaskGraphResult {
   std::string json_file;
 };
 
+class RuntimeTensorManager {
+public:
+  static RuntimeTensorManager *singleton;
+  RuntimeTensorManager();
+public:
+  static RuntimeTensorManager *get_instance();
+  void new_cuda_tensor(std::vector<int> const &dims,
+                       std::vector<size_t> const &strides,
+                       mirage::type::DataType data_type,
+                       char const *name);
+  void new_nvshmem_tensor(std::vector<int> const &dims,
+                          std::vector<size_t> const &strides,
+                          mirage::type::DataType data_type,
+                          char const *name);
+  std::unordered_map<std::string, size_t> cuda_tensors;
+  std::unordered_map<std::string, size_t> nvshmem_tensors;
+};
+
+void cython_new_cuda_tensor(
+    std::vector<int> const &dims,
+    std::vector<size_t> const &strides,
+    mirage::type::DataType data_type,
+    char const *name);
+
+void cython_new_nvshmem_tensor(
+    std::vector<int> const &dims,
+    std::vector<size_t> const &strides,
+    mirage::type::DataType data_type,
+    char const *name);
+
 } // namespace runtime
 } // namespace mirage

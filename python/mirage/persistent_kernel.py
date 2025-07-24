@@ -152,28 +152,73 @@ def get_compile_command(
     return common_cmd + specific_cmd + flags
 
 class MirageTensor:
-    def __init__(self, dims: list, strides: list = None, dtype: dtype = bfloat16, name: str = None):
-        self.dims = dims
-        self.strides = strides
-        self.dtype = dtype
-        self.name = name
+    def __init__(self,
+                 dims: list,
+                 strides: list = None,
+                 dtype: dtype = bfloat16,
+                 name: str = None,
+                 io_category: str = "cuda_tensor"):
+        self._dims = dims
+        self._strides = strides
+        self._dtype = dtype
+        self._name = name
+        self._io_category = io_category
+
+    @property
+    def dims(self):
+        return self._dims
+
+    @property
+    def strides(self):
+        return self._strides
+
+    @property
+    def dtype(self):
+        return self._dtype
+
+    @property
+    def name(self):
+        return self._name
+
+    @property
+    def io_category(self):
+        return self._io_category
 
 # a wrapper class of KNGraph:
 class PersistentKNGraph:
     def __init__(self, kgraph: KNGraph):
         self.kn_graph = kgraph
 
-    def attach_input(self, torch_tensor: torch.Tensor, name: str = None) -> DTensor:
-        dims = tuple([d for d in torch_tensor.shape])
-        strides = tuple([s for s in torch_tensor.stride()])
+    def attach_input(self, tensor: torch.Tensor or MirageTensor, dims: tuple, name: str = None) -> DTensor:
+        if isinstance(tensor, torch.Tensor):
+            assert len(dims) == len(tensor.shape)
+            for i in range(len(dims)):
+                assert dims[i] <= tensor.shape[i], f"Attached shape {dims} cannot be larger than the original tensor shape {tensor.shape}"
+            # dims = tuple([d for d in tensor.shape])
+            strides = tuple([s for s in tensor.stride()])
+            dtype = convert_torch_type_to_dtype(tensor.dtype)
+        else:
+            assert type(tensor) == MirageTensor, f"Unsupported tensor type"
+            assert len(dims) == len(tensor.dims), f"Attached shape must have the same number of dims as the original tensor"
+            for i in range(len(dims)):
+                assert dims[i] <= tensor.dims[i], f"Attached shape {dims} cannot be larger than the original tensor shape {tensor.shape}"
+            # dims = tensor.dims
+            strides = tensor.strides
+            dtype = tensor.dtype
         # Assert a row-major layout
-        for d in range(len(dims) - 1):
-            assert strides[d] == strides[d + 1] * dims[d + 1]
-        dtype = convert_torch_type_to_dtype(torch_tensor.dtype)
+        # for d in range(len(dims) - 1):
+            # assert strides[d] == strides[d + 1] * dims[d + 1]
         t = self.kn_graph.new_input(dims=dims, strides=strides, dtype=dtype)
         # FIXME: currently assert that name is not None
         assert name is not None
-        self.kn_graph.attach_torch_tensor(t, torch_tensor, name)
+        if isinstance(tensor, torch.Tensor):
+            self.kn_graph.attach_torch_tensor(t, tensor, name)
+        elif tensor.io_category == "cuda_tensor":
+            self.kn_graph.attach_cuda_tensor(t, name)
+        elif tensor.io_category == "nvshmem_tensor":
+            self.kn_graph.attach_nvshmem_tensor(t, name)
+        else:
+            raise RuntimeError(f"Unsupported io_category: {tensor.io_category}")
         return t
 
     def fuse_tensors(
@@ -201,7 +246,7 @@ class PersistentKNGraph:
         # self.kn_graph.customized([input, weight, output], tb_graph)
         # self.kn_graph.register_task(tb_graph, "embedding")
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
-        tb_graph.new_input(input, (-1, 1, -1), -1, True)
+        tb_graph.new_input(input, (-1, 0, -1), -1, True)
         tb_graph.new_input(weight, (1, -1, -1), -1, True)
         tb_graph.new_input(output, (1, 0, -1), -1, True)
         self.kn_graph.customized([input, weight, output], tb_graph)
@@ -272,8 +317,8 @@ class PersistentKNGraph:
 
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         tb_graph.new_input(input, (0, 1, -1), -1, True)
-        tb_graph.new_input(k_cache, (0, 2, -1), 1, True)
-        tb_graph.new_input(v_cache, (0, 2, -1), 1, True)
+        tb_graph.new_input(k_cache, (-1, 2, -1), 1, True)
+        tb_graph.new_input(v_cache, (-1, 2, -1), 1, True)
         tb_graph.new_input(q_norm, (-1, -1, -1), -1, True)
         tb_graph.new_input(k_norm, (-1, -1, -1), -1, True)
         tb_graph.new_input(cos_pos_embed, (-1, -1, -1), -1, True)
@@ -452,12 +497,12 @@ class PersistentKNGraph:
         output_value, output_index = output
         assert output_value.num_dims == 2  # (batch_size, num_tasks)
         assert output_index.num_dims == 2  # (batch_size, num_tasks)
-        num_tasks = grid_dim[0]
-        self.argmax_partial_output_size = input.dim(1) // num_tasks
+        num_tasks_per_request = grid_dim[1]
+        self.argmax_partial_output_size = input.dim(1) // num_tasks_per_request
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
-        tb_graph.new_input(input, (1, 0, -1), -1, True)
-        tb_graph.new_input(output_value, (1, 0, -1), -1, True)
-        tb_graph.new_input(output_index, (1, 0, -1), -1, True)
+        tb_graph.new_input(input, (0, 1, -1), -1, True)
+        tb_graph.new_input(output_value, (0, 1, -1), -1, True)
+        tb_graph.new_input(output_index, (0, 1, -1), -1, True)
         self.kn_graph.customized([input, output_value, output_index], tb_graph)
         self.kn_graph.register_task(tb_graph, "argmax_partial")
 
@@ -475,8 +520,8 @@ class PersistentKNGraph:
         assert input_index.num_dims == 2  # (batch_size, num_tasks)
         assert output.num_dims == 2  # (batch_size, 1)
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
-        tb_graph.new_input(input_value, (1, 0, -1), -1, True)
-        tb_graph.new_input(input_index, (1, 0, -1), -1, True)
+        tb_graph.new_input(input_value, (0, 1, -1), -1, True)
+        tb_graph.new_input(input_index, (0, 1, -1), -1, True)
         tb_graph.new_input(output, (0, 1, -1), -1, True) #TODO: Make sure the output map is expected
         self.kn_graph.customized([input_value, input_index, output], tb_graph)
         self.kn_graph.register_task(
@@ -544,7 +589,7 @@ class PersistentKernel:
         }
 
     def new_kernel_graph(self):
-        return KNGraph(CyKNGraph(disable_fingerprint=True))
+        return PersistentKNGraph(KNGraph(CyKNGraph(disable_fingerprint=True)))
 
     def new_tensor(
         self,
@@ -554,17 +599,24 @@ class PersistentKernel:
         name: str = None,
         io_category: str = "cuda_tensor",
     ) -> DTensor:
-        # Assert a row-major layout
-        if strides is not None:
+        if strides is None:
+            total_elements = 1
+            strides = []
+            for d in reversed(dims):
+                strides.append(total_elements)
+                total_elements *= d
+            strides = tuple(reversed(strides))
+        else:
+            # Check row-major layout
             for d in range(len(dims) - 1):
                 assert strides[d] == strides[d + 1] * dims[d + 1]
-        t = self.kn_graph.new_input(dims=dims, strides=strides, dtype=dtype)
         # FIXME: currently assert that name is not None
         assert name is not None
+        t = MirageTensor(dims, strides, dtype, name, io_category)
         if io_category == "cuda_tensor":
-            self.kn_graph.attach_cuda_tensor(t, name)
+            cy_new_cuda_tensor(dims, strides, dtype, name)
         elif io_category == "nvshmem_tensor":
-            self.kn_graph.attach_nvshmem_tensor(t, name)
+            cy_new_nvshmem_tensor(dims, strides, dtype, name)
         else:
             raise RuntimeError(f"Invalid io_category: {io_category}")
         return t
