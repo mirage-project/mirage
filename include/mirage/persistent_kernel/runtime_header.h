@@ -133,6 +133,10 @@ struct RuntimeConfig {
   long long eos_token_id; // Metadata for LLM serving
   int max_seq_length;     // Metadata for LLM serving
   int *new_token_nums;    // Metadata for LLM serving
+  int *qo_indptr_buffer;        // Metadata for LLM serving (paged attention)
+  int *paged_kv_indptr_buffer;  // Metadata for LLM serving (paged attention)
+  int *paged_kv_indices_buffer; // Metadata for LLM serving (paged attention)
+  int *paged_kv_last_page_len_buffer; // Metadata for LLM serving
   void *profiler_buffer;
   bool verbose;
   bool profiling;
