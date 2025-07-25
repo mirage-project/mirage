@@ -26,8 +26,8 @@ constexpr int MAX_SHARE_MEMORY_SIZE = 224 * 1024;
 constexpr int MAX_SHARE_MEMORY_SIZE = 96 * 1024;
 #elif defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
 constexpr int MAX_SHARE_MEMORY_SIZE = 160 * 1024;
-#else
-constexpr int MAX_SHARE_MEMORY_SIZE = 96 * 1024;
+#else // TODO: This always fall into else case
+constexpr int MAX_SHARE_MEMORY_SIZE = 160 * 1024;
 #endif
 
 typedef unsigned long long int TaskId;
