@@ -128,9 +128,7 @@ __device__ __forceinline__ void
   // smem_row<T, 3, 3, 3, NUM_Q_HEADS, 128, 128> output_smem(shared_output);
 
   // todo, add a chunk assigned function
-  for (int i = 0; i < 8; i++) {
-    zero_buffer.at(i) = (bfloat16)0.0f;
-  }
+  vec_zero_t<T, 8>::fill_zero(zero_buf);
 
 // load first Q, K, V
 #pragma unroll

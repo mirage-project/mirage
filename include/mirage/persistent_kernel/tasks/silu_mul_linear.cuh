@@ -138,7 +138,7 @@ __device__ __forceinline__ void
 
   // zero buffer
   T *zero_buf = (T *)(smem + ZERO_BUFFER_OFFSET);
-  *((__uint128_t *)zero_buf) = 0ul;
+  vec_zero_t<T, 8>::fill_zero(zero_buf);
 
   // copy
   T *shared_input_buffer = (T *)(smem + SHARED_INPUT_BUFFER_OFFSET);
