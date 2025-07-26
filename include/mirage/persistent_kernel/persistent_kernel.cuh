@@ -584,7 +584,7 @@ __device__ void execute_scheduler(RuntimeConfig config, int offset) {
     }
 
     // ONLY can run when comment this chunk
-    if (config.profiling) {
+    if (config.verbose || config.profiling) {
       printf("[SCHD] sched_id(%d) first_worker(%llu) last_worker(%llu)\n",
              sched_id,
              my_first_worker,
@@ -596,12 +596,14 @@ __device__ void execute_scheduler(RuntimeConfig config, int offset) {
       last_event_pos[i] = 0;
     }
 
-    size_t worker_queue_next_free_task_pos[2 * MAX_NUM_WORKERS];
-    for (int i = 0; i < 2 * MAX_NUM_WORKERS; i++) {
+    size_t worker_queue_next_free_task_pos[MAX_WORKER_PER_SCHEDULER];
+    for (int i = 0; i < MAX_WORKER_PER_SCHEDULER; i++) {
       worker_queue_next_free_task_pos[i] = 0;
     }
 
-    worker_queue_next_free_task_pos[0] = 1;
+    if (sched_id == 0) {
+      worker_queue_next_free_task_pos[0] = 1;
+    }
     int next_worker = my_first_worker;
     int queue_idx = 0;
     while (true) {
@@ -640,7 +642,8 @@ __device__ void execute_scheduler(RuntimeConfig config, int offset) {
         // terminate all workers
         if (sched_id < config.num_local_schedulers) {
           for (int i = my_first_worker; i < my_last_worker; i++) {
-            size_t last_task_id = worker_queue_next_free_task_pos[i]++;
+            size_t last_task_id =
+                worker_queue_next_free_task_pos[i - my_first_worker]++;
             config
                 .worker_queues[i][last_task_id % config.per_worker_queue_len] =
                 0;
@@ -662,7 +665,8 @@ __device__ void execute_scheduler(RuntimeConfig config, int offset) {
           terminate_schedulers(config);
         } else {
           // Launch task 1 (begin_task_graph) for the next iteration
-          size_t last_task_id = worker_queue_next_free_task_pos[next_worker]++;
+          size_t last_task_id =
+              worker_queue_next_free_task_pos[next_worker - my_first_worker]++;
           config.worker_queues[next_worker]
                               [last_task_id % config.per_worker_queue_len] =
               compute_task_id(iteration_num + 1, 1 /*begin_task_graph*/);
@@ -701,7 +705,8 @@ __device__ void execute_scheduler(RuntimeConfig config, int offset) {
                 e.first_task_id + i * config.num_workers + j;
             if (position_index < e.last_task_id) {
               size_t last_task_id =
-                  worker_queue_next_free_task_pos[next_worker]++;
+                  worker_queue_next_free_task_pos[next_worker -
+                                                  my_first_worker]++;
               config.worker_queues[next_worker]
                                   [last_task_id % config.per_worker_queue_len] =
                   compute_task_id(iteration_num, position_index);
@@ -755,7 +760,8 @@ __device__ void execute_scheduler(RuntimeConfig config, int offset) {
           //      &(config.worker_queue_next_free_task_id[next_worker]), 1);
           //  size_t last_task_id = custom_atomic_add_u64(
           //     &(config.worker_queue_next_free_task_id[next_worker]), 1);
-          size_t last_task_id = worker_queue_next_free_task_pos[next_worker]++;
+          size_t last_task_id =
+              worker_queue_next_free_task_pos[next_worker - my_first_worker]++;
           config.worker_queues[next_worker]
                               [last_task_id % config.per_worker_queue_len] =
               compute_task_id(iteration_num, i);
