@@ -22,6 +22,7 @@
 #include "mma.cuh"
 #include "norm.cuh"
 #include "reduction.cuh"
+#include "rotary_embedding.cuh"
 #include "smem_layout.cuh"
 #include "utils.cuh"
 namespace kernel {
@@ -72,10 +73,10 @@ __device__ __forceinline__ void
   int last_seq_len = curr_iter_len;
 
   // These are just the first line of the new qkvs
-  const __restrict__ T *d_q = static_cast<T const *>(qkv_ptr);
-  const __restrict__ T *d_k =
+  __restrict__ T const *d_q = static_cast<T const *>(qkv_ptr);
+  __restrict__ T const *d_k =
       static_cast<T const *>(qkv_ptr) + HEAD_DIM * NUM_Q_HEADS;
-  const __restrict__ T *d_v =
+  __restrict__ T const *d_v =
       static_cast<T const *>(qkv_ptr) + HEAD_DIM * (NUM_Q_HEADS + NUM_KV_HEADS);
   constexpr int GLOBAL_QKVS_OFFSET =
       HEAD_DIM * (NUM_Q_HEADS + NUM_KV_HEADS + NUM_KV_HEADS) * 8;
@@ -326,38 +327,60 @@ __device__ __forceinline__ void
     }
     __syncthreads();
 
-    // Q norm - only execute in the first chunk (kv_idx == 0) since all Q tokens
-    // are loaded at once
-    if (qk_norm && kv_idx == 0) {
-      rms_norm<T, QSmem, NUM_Q_HEADS, EXTEND_NUM + 1, HEAD_DIM>(
-          q_smem,
-          static_cast<T const *>(qnorm_weight_ptr),
-          qnorm_sum,
-          q_eps,
-          0, // token_offset = 0 for Q tokens
-          rotary_emd,
-          static_cast<T const *>(cos_ptr) + (seq_len - 1) * HEAD_DIM,
-          static_cast<T const *>(sin_ptr) + (seq_len - 1) * HEAD_DIM);
-    }
-
-    // K norm - only execute for chunks that contain new K tokens
-    if (qk_norm && cur_chunk_new_kv_start < cur_chunk_new_kv_end) {
-      for (int kv_pos = cur_chunk_new_kv_start; kv_pos < cur_chunk_new_kv_end;
-           kv_pos++) {
-
-        int token_offset_in_chunk = kv_pos - chunk_start;
-
-        rms_norm<T, KSmem, NUM_KV_HEADS, 1, HEAD_DIM>(
-            k_cache_smem,
-            static_cast<T const *>(knorm_weight_ptr),
-            knorm_sum,
-            k_eps,
-            token_offset_in_chunk,
+    if (qk_norm) {
+      // Q norm - only execute in the first chunk (kv_idx == 0) since all Q
+      // tokens are loaded at once
+      if (kv_idx == 0) {
+        rms_norm<T, QSmem, NUM_Q_HEADS, EXTEND_NUM + 1, HEAD_DIM>(
+            q_smem,
+            static_cast<T const *>(qnorm_weight_ptr),
+            qnorm_sum,
+            q_eps,
+            0, // token_offset = 0 for Q tokens
             rotary_emd,
-            static_cast<T const *>(cos_ptr) + kv_pos * HEAD_DIM,
-            static_cast<T const *>(sin_ptr) + kv_pos * HEAD_DIM);
+            static_cast<T const *>(cos_ptr) + (seq_len - 1) * HEAD_DIM,
+            static_cast<T const *>(sin_ptr) + (seq_len - 1) * HEAD_DIM);
+      }
+      // K norm - only execute for chunks that contain new K tokens
+      else if (cur_chunk_new_kv_start < cur_chunk_new_kv_end) {
+        for (int kv_pos = cur_chunk_new_kv_start; kv_pos < cur_chunk_new_kv_end;
+             kv_pos++) {
+
+          int token_offset_in_chunk = kv_pos - chunk_start;
+
+          rms_norm<T, KSmem, NUM_KV_HEADS, 1, HEAD_DIM>(
+              k_cache_smem,
+              static_cast<T const *>(knorm_weight_ptr),
+              knorm_sum,
+              k_eps,
+              token_offset_in_chunk,
+              rotary_emd,
+              static_cast<T const *>(cos_ptr) + kv_pos * HEAD_DIM,
+              static_cast<T const *>(sin_ptr) + kv_pos * HEAD_DIM);
+        }
+      }
+    } else {
+      if (rotary_emd && kv_idx == 0) {
+        // q rope
+        rotary_embedding<T, QSmem, NUM_Q_HEADS, EXTEND_NUM + 1, HEAD_DIM>(
+            q_smem,
+            static_cast<T const *>(cos_ptr) + (seq_len - 1) * HEAD_DIM,
+            static_cast<T const *>(sin_ptr) + (seq_len - 1) * HEAD_DIM,
+            0);
+      } else if (rotary_emd && cur_chunk_new_kv_start < cur_chunk_new_kv_end) {
+        for (int kv_pos = cur_chunk_new_kv_start; kv_pos < cur_chunk_new_kv_end;
+             kv_pos++) {
+          int token_offset_in_chunk = kv_pos - chunk_start;
+          // k rope
+          rotary_embedding<T, KSmem, NUM_KV_HEADS, 1, HEAD_DIM>(
+              k_cache_smem,
+              static_cast<T const *>(cos_ptr) + kv_pos * HEAD_DIM,
+              static_cast<T const *>(sin_ptr) + kv_pos * HEAD_DIM,
+              token_offset_in_chunk);
+        }
       }
     }
+
     __syncthreads();
 
     // MMA

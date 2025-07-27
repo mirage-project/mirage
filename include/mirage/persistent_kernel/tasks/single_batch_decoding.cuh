@@ -22,6 +22,7 @@
 #include "mma.cuh"
 #include "norm.cuh"
 #include "reduction.cuh"
+#include "rotary_embedding.cuh"
 #include "smem_layout.cuh"
 #include "utils.cuh"
 namespace kernel {
@@ -62,10 +63,10 @@ __device__ __forceinline__ void
   int cp_finished_seq_len = curr_iter_len;
   int last_seq_len = curr_iter_len;
 
-  const __restrict__ T *d_q = static_cast<T const *>(qkv_ptr);
-  const __restrict__ T *d_k =
+  __restrict__ T const *d_q = static_cast<T const *>(qkv_ptr);
+  __restrict__ T const *d_k =
       static_cast<T const *>(qkv_ptr) + HEAD_DIM * NUM_Q_HEADS;
-  const __restrict__ T *d_v =
+  __restrict__ T const *d_v =
       static_cast<T const *>(qkv_ptr) + HEAD_DIM * (NUM_Q_HEADS + NUM_KV_HEADS);
   T __restrict__ *d_k_cache = static_cast<T *>(k_cache_ptr);
   T __restrict__ *d_v_cache = static_cast<T *>(v_cache_ptr);
@@ -232,31 +233,48 @@ __device__ __forceinline__ void
     }
     __syncthreads();
 
-    // q_norm
-    if (qk_norm && kv_idx == 0) {
-      rms_norm<T, QSmem, NUM_Q_HEADS, 1, HEAD_DIM>(
-          q_smem,
-          static_cast<T const *>(qnorm_weight_ptr),
-          qnorm_sum,
-          q_eps,
-          0,
-          rotary_emd,
-          static_cast<T const *>(cos_ptr) + (seq_len - 1) * HEAD_DIM,
-          static_cast<T const *>(sin_ptr) + (seq_len - 1) * HEAD_DIM);
+    if (qk_norm) {
+      if (kv_idx == 0) {
+        // q_norm && rope
+        rms_norm<T, QSmem, NUM_Q_HEADS, 1, HEAD_DIM>(
+            q_smem,
+            static_cast<T const *>(qnorm_weight_ptr),
+            qnorm_sum,
+            q_eps,
+            0,
+            rotary_emd,
+            static_cast<T const *>(cos_ptr) + (seq_len - 1) * HEAD_DIM,
+            static_cast<T const *>(sin_ptr) + (seq_len - 1) * HEAD_DIM);
+      } else if (kv_idx == num_iterations - 1) {
+        // knorm && rope
+        rms_norm<T, KSmem, NUM_KV_HEADS, 1, HEAD_DIM>(
+            k_cache_smem,
+            static_cast<T const *>(knorm_weight_ptr),
+            knorm_sum,
+            k_eps,
+            curr_iter_len - 1,
+            rotary_emd,
+            static_cast<T const *>(cos_ptr) + (seq_len - 1) * HEAD_DIM,
+            static_cast<T const *>(sin_ptr) + (seq_len - 1) * HEAD_DIM);
+      }
+    } else {
+      if (rotary_emd && kv_idx == 0) {
+        // q rope
+        rotary_embedding<T, QSmem, NUM_Q_HEADS, 1, HEAD_DIM>(
+            q_smem,
+            static_cast<T const *>(cos_ptr) + (seq_len - 1) * HEAD_DIM,
+            static_cast<T const *>(sin_ptr) + (seq_len - 1) * HEAD_DIM,
+            0);
+      } else if (rotary_emd && kv_idx == num_iterations - 1) {
+        // k rope
+        rotary_embedding<T, KSmem, NUM_KV_HEADS, 1, HEAD_DIM>(
+            k_cache_smem,
+            static_cast<T const *>(cos_ptr) + (seq_len - 1) * HEAD_DIM,
+            static_cast<T const *>(sin_ptr) + (seq_len - 1) * HEAD_DIM,
+            curr_iter_len - 1);
+      }
     }
 
-    // knorm
-    if (qk_norm && kv_idx == num_iterations - 1) {
-      rms_norm<T, KSmem, NUM_KV_HEADS, 1, HEAD_DIM>(
-          k_cache_smem,
-          static_cast<T const *>(knorm_weight_ptr),
-          knorm_sum,
-          k_eps,
-          curr_iter_len - 1,
-          rotary_emd,
-          static_cast<T const *>(cos_ptr) + (seq_len - 1) * HEAD_DIM,
-          static_cast<T const *>(sin_ptr) + (seq_len - 1) * HEAD_DIM);
-    }
     __syncthreads();
 
     float s_frag[8];
