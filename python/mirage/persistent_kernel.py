@@ -89,8 +89,10 @@ PyMODINIT_FUNC PyInit___mirage_launcher(void) {
 }
 """
 
+valid_persistent_kernel_modes = {"offline", "online", "onepass"}
 
 def get_compile_command(
+    mpk,
     target_cc,
     cc,
     file_name,
@@ -128,6 +130,20 @@ def get_compile_command(
         py_so_path,
     ]
 
+    if mpk.mode == "offline":
+        flags = flags + ["-DMODE_OFFLINE"]
+    elif mpk.mode == "online":
+        flags = flags + ["-DMODE_ONLINE"]
+    elif mpk.mode == "onepass":
+        flags = flags + ["-DMODE_ONEPASS"]
+    else:
+        raise ValueError(f"Invalid persistent kernel mode: {mode}")
+
+    flags = flags + [f"-DMPK_MAX_NUM_BATCHED_REQUESTS={mpk.max_num_batched_requests}"]
+    flags = flags + [f"-DMPK_MAX_NUM_BATCHED_TOKENS={mpk.max_num_batched_tokens}"]
+    flags = flags + [f"-DMPK_MAX_NUM_PAGES={mpk.max_num_pages}"]
+    flags = flags + [f"-DMPK_PAGE_SIZE={mpk.page_size}"]
+
     if use_nvshmem:
         nvshmem_cmd = [
             f"-I{nvshmem_inc_path}",
@@ -155,25 +171,39 @@ def get_compile_command(
 class PersistentKernel:
     def __init__(
         self,
+        mode: str = "offline",
         world_size: int,
         mpi_rank: int,
         num_workers: int,
         num_local_schedulers: int,
         num_remote_schedulers: int,
         max_seq_length: int,
+        max_num_batched_requests: int,
+        max_num_batched_tokens: int,
+        page_attention: bool,
+        max_num_pages: int,
+        page_size: int,
         eos_token_id: int64,
-        meta_tensors: list[torch.Tensor],
+        meta_tensors: dict,
         profiler_tensor: torch.Tensor,
         spec_decode_config: SpecDecodeConfig
     ):
         self.__finalized__ = False
         self._is_compiled = False
+        if mode not in valid_persistent_kernel_modes:
+            ravise ValueError(f"Invalid persistent kernel mode: {mode}")
+        self.mode = mode,
         self.world_size = world_size
         self.mpi_rank = mpi_rank
         self.num_workers = num_workers
         self.num_local_schedulers = num_local_schedulers
         self.num_remote_schedulers = num_remote_schedulers
         self.max_seq_length = max_seq_length
+        self.max_num_batched_requests = max_num_batched_requests
+        self.max_num_batched_tokens = max_num_batched_tokens
+        self.page_attention = page_attention
+        self.max_num_pages = max_num_pages
+        self.page_size = page_size
         self.eos_token_id = eos_token_id
         self.kn_graph = KNGraph(CyKNGraph(disable_fingerprint=True))
         self.meta_tensors = meta_tensors
@@ -186,6 +216,16 @@ class PersistentKernel:
         self._spec_verify_handlers = {
             "promptlookup": self.prompt_lookup_verify_handler,
         }
+        # Check tensor shapes
+        if self.page_attetion:
+            qo_indptr_buffer = self.meta_tensors["qo_indptr_buffer"]
+            assert qo_indptr_buffer.shape == (self.max_num_batched_requests+1,)
+            paged_kv_indptr_buffer = self.meta_tensors["paged_kv_indptr_buffer"]
+            assert paged_kv_indptr_buffer.shape == (self.max_num_batched_requests+1,)
+            paged_kv_indices_buffer = self.meta_tensors["paged_kv_indices_buffer"]
+            assert paged_kv_indices_buffer.shape == (self.max_num_pages,)
+            paged_kv_last_page_len_buffer = self.meta_tensors["paged_kv_last_page_len_buffer"]
+            assert paged_kv_last_page_len_buffer.shape == (self.max_num_batched_requests,)
 
     def attach_input(self, torch_tensor: torch.Tensor, name: str = None) -> DTensor:
         dims = tuple([d for d in torch_tensor.shape])
@@ -430,6 +470,10 @@ class PersistentKernel:
         assert output.num_dims == 2  # (num_tokens, hidden_size / world_size)
         assert k_cache.num_dims == 4  # (num_pages, page_size, kv_heads, head_dim)
         assert v_cache.num_dims == 4  # (num_pages, page_size, kv_heads, head_dim)
+        assert k_cache.dim(0) == self.max_num_pages
+        assert v_cache.dim(0) == self.max_num_pages
+        assert k_cache.dim(1) == self.page_size
+        assert v_cache.dim(1) == self.page_size
         head_dim = k_cache.dim(3)
         num_kv_heads = k_cache.dim(2)
         num_q_heads = output.dim(1) // head_dim
@@ -455,6 +499,8 @@ class PersistentKernel:
         params = [num_q_heads, num_kv_heads, qk_norm, rotary_embed]
 
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        assert grid_dim.x == self.max_num_batched_requests
+        assert grid_dim.y == num_kv_heads
         tb_graph.new_input(input, (-1, 1, -1), -1, True)
         tb_graph.new_input(k_cache, (-1, 2, -1), 1, True)
         tb_graph.new_input(v_cache, (-1, 2, -1), 1, True)
@@ -476,8 +522,7 @@ class PersistentKernel:
             ],
             tb_graph,
         )
-        self.kn_graph.register_task(tb_graph, "attention", params)
-
+        self.kn_graph.register_task(tb_graph, "paged_attention", params)
 
     def linear_with_residual_layer(
         self,
@@ -844,6 +889,7 @@ class PersistentKernel:
         )
 
         cc_cmd = get_compile_command(
+            mpk=self,
             target_cc=target_cc,
             cc=cc,
             file_name=cuda_code_path,

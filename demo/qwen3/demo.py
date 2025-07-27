@@ -114,7 +114,7 @@ if __name__ == "__main__":
             tokenizer = AutoTokenizer.from_pretrained(model_name)
 
     # get all model weight tensors
-    tokens = torch.full((1, 32768), 0, dtype=torch.long, device="cuda")
+    tokens = torch.full((128, 4096), 0, dtype=torch.long, device="cuda")
 
     # prompt = "Give me a short introduction to large language model."
     # This prompt is copied from https://github.com/apoorvumang/prompt-lookup-decoding/blob/main/demo-pld.ipynb
@@ -223,8 +223,22 @@ if __name__ == "__main__":
             num_local_schedulers=num_schedulers,
             num_remote_schedulers=0,
             max_seq_length=args.max_seq_length,
+            max_num_batched_requests=max_num_batched_requests,
+            max_num_batched_tokens=max_num_batched_tokens,
+            page_attention=args.page_attention,
+            max_num_pages=args.max_num_pages,
+            page_size=args.page_size,
             eos_token_id=model.config.eos_token_id,
-            meta_tensors=[step, tokens, num_new_tokens, qo_indptr_buffer, paged_kv_indptr_buffer, paged_kv_indices_buffer, paged_kv_last_page_len_buffer],
+            mode="offline",
+            meta_tensors={
+                "step": step,
+                "tokens": tokens,
+                "num_new_tokens": num_new_tokens,
+                "qo_indptr_buffer": qo_indptr_buffer,
+                "paged_kv_indptr_buffer": paged_kv_indptr_buffer,
+                "paged_kv_indices_buffer": paged_kv_indices_buffer,
+                "paged_kv_last_page_len_buffer": paged_kv_last_page_len_buffer,
+            },
             profiler_tensor=profiler_tensor,
             spec_decode_config=spec_decode_config,
         )

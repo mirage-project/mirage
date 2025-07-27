@@ -28,6 +28,12 @@
 using bfloat16 = type::bfloat16_t;
 using namespace mirage::runtime;
 
+// Configurations for the MPK runtime
+#define MPK_MAX_NUM_BATCHED_REQUESTS 16
+#define MPK_MAX_NUM_BATCHED_TOKENS 64
+#define MPK_MAX_NUM_PAGES 1024
+#define MPK_PAGE_SIZE 64
+
 __device__ __forceinline__ void
     _execute_task(TaskDesc const &task_desc,
                   RuntimeConfig const &runtime_config);
@@ -62,19 +68,162 @@ __device__ __forceinline__ TaskId compute_task_id(size_t iteration_num,
   return ((iteration_num << 32) | position_index);
 }
 
-__global__ void init_kernel(RuntimeConfig config) {
+__global__ void init_kernel(
+    RuntimeConfig config,
+    size_t end_of_task_graph_event_pos) {
   assert(gridDim.x == 1);
   assert(gridDim.y == 1);
   assert(gridDim.z == 1);
   // Only a single thread that initializes everything
   if (threadIdx.x == 0) {
-    // Send task 1 to worker[0]
-    config.worker_queue_last_ready_task_id[0] = 1;
-    config.worker_queues[0][0] =
-        compute_task_id(1 /*iteration_num*/, 1 /*task_begin_task_graph*/);
+    // Send event to scheduler[0]
+    config.sched_queue_next_free_event_id[0] = 1;
+    config.sched_queues[0][0] = end_of_task_graph_event_pos;
+    config.sched_queue_last_ready_event_id[0] = 1;a
+    // initialize metadata
+    for (int i = 0; i < config.total_num_requests; i++) {
+      config.step[i] = 0;
+    }
+    *config.next_request_id = 0;
+    for (int i = 0; i < MPK_MAX_NUM_BATCHED_REQUESTS; i++) {
+      config.request_ids[i] = -1;
+    }
+    for (int i = 0; i < MPK_MAX_NUM_BATCHED_REQUESTS + 1; i++) {
+      config.qo_indptr_buffer[i] = 0;
+      config.paged_kv_indptr_buffer[i] = 0;
+    }
+    // Page manager
+    *config.page_queue_head = 0;
+    *config.page_queue_tail = MPK_MAX_NUM_PAGES;
+    for (int i = 0; i < MPK_MAX_NUM_PAGES; i++) {
+      config.page_queue[i] = i;
+    }
   }
 }
 
+#ifdef MODE_OFFLINE
+// TODO: parallelize this processing
+__device__ __forceinline__ bool
+    prepare_next_batch(RuntimeConfig const &config) {
+  __shared__ smem_kv_indices[MAX_NUM_PAGES];
+  int page_queue_head = *config.page_queue_head;
+  int page_queue_tail = *config.page_queue_tail;
+  // Step 1: finalize previous batch
+  for (int i = 0; i < MPK_MAX_NUM_BATCHED_REQUESTS; i++) {
+    int request_id = config.request_ids[i];
+    if (request_id != -1) {
+      // Step 1.1: move output_tokens to tokens
+      int step = config.step[request_id];
+      int qo_indptr = config.qo_indptr_buffer[i];
+      int num_tokens = config.qo_indptr_buffer[i+1] - qo_indptr;
+      int prompt_len = config.prompt_length[request_id];
+      for (int j = 0; j < num_tokens; j++) {
+        if (step + j + 1>= prompt_len) {
+          config.tokens[request_id * MPK_MAX_SEQ_LENGTH + seq_len + j + 1] = config.output_tokens[qo_indptr + j];
+        }
+      }
+      config.step[request_id] = step + num_tokens;
+      if ((step + 2 >= config.max_seq_length) || (config.profiling) || (config.tokens[request_id * MPK_MAX_SEQ_LENGTH + step + num_tokens] == config.eos_token_id)) {
+        // Request is done
+        config.request_ids[i] = -1;
+        // Free pages
+        int kv_indptr = config.paged_kv_indptr_buffer[i];
+        int num_pages = config.paged_kv_indptr_buffer[i+1] - kv_indptr;
+        for (int j = 0; j < num_pages; j++) {
+          config.page_queue[page_queue_tail % MPK_MAX_NUM_PAGES] = config.paged_kv_indices_buffer[kv_indptr+j];
+          page_queue_tail ++;
+        }
+      }
+    }
+  }
+
+  // Step 2: copy kv_indices to shared mem
+  int num_pages = config.paged_kv_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS];
+  for (int i = 0; i < num_pages; i++) {
+    smem_kv_indices[i] = config.paged_kv_indices_buffer[i];
+  }
+
+  // Step 3: prepare next batch
+  int num_reqs = 0, num_tokens = 0;
+  num_pages = 0;
+  for (int i = 0; i < MPK_MAX_NUM_BATCHED_REQUESTS; i++) {
+    int request_id = config.request_ids[i];
+    if (request_id != -1) {
+      int kv_indptr = config.paged_kv_indptr_buffer[i];
+      int num_old_pages = config.paged_kv_indptr_buffer[i+1] - kv_indptr;
+      config.request_ids[num_reqs] = request_id;
+      config.qo_indptr_buffer[num_reqs] = num_tokens;
+      config.paged_kv_indptr_buffer[num_reqs] = num_pages;
+      int step = config.step[request_id];
+      int num_new_tokens = config.prompt_length[request_id] - step;
+      if (num_new_tokens > 0) {
+        // Prefill requests
+        num_new_tokens = min(num_new_tokens, MPK_MAX_NUM_BATCHED_TOKENS - num_tokens);
+      } else {
+        // Decode requests
+        num_new_tokens = min(1, MPK_MAX_NUM_BATCHED_TOKENS - num_tokens);
+      }
+      // Move tokens to input_tokens
+      for (int j = 0; j < num_new_tokens; j++) {
+        config.input_tokens[num_tokens + j] = config.tokens[request_id * MPK_MAX_SEQ_LENGTH + step + j];
+      }
+      // Prepare page indptrs
+      int num_new_pages = (step + num_new_tokens + MPK_PAGE_SIZE - 1) / MPK_PAGE_SIZE;
+      config.paged_kv_last_page_len_buffer[i] = (step + num_new_tokens) % MPK_PAGE_SIZE;
+      for (int j = 0; j < num_old_pages; j++) {
+        config.paged_kv_indices_buffer[num_pages+j] = smem_kv_indices[kv_indptr+j];
+      }
+      for (int j = num_old_pages; j < num_new_pages; j++) {
+        config.paged_kv_indices_buffer[num_pages+j] = config.page_queue[page_queue_head % MPK_MAX_NUM_PAGES];
+        page_queue_head++;
+      }
+      num_pages += num_new_pages;
+      num_tokens += num_new_tokens;
+      num_reqs++;
+    }
+  }
+
+  // Add a new prefill request
+  if (num_reqs < MPK_MAX_NUM_BATCHED_REQUESTS && num_tokens < MPK_MAX_NUM_BATCHED_TOKENS) {
+    int next_request_id = *config.next_request_id;
+    if (next_request_id < config.total_num_requests) {
+      config.request_ids[num_reqs] = next_request_id;
+      config.qo_indptr_buffer[num_reqs] = num_tokens;
+      config.paged_kv_indptr_buffer[num_reqs] = num_pages;
+      // Prefill request
+      int num_new_tokens = min(config.prompt_length[next_request_id], MPK_MAX_NUM_BATCHED_TOKENS - num_tokens);
+      // Move tokens to input tokens
+      for (int j = 0; j < num_new_tokens; j++) {
+        config.input_tokens[num_tokens + j] = config.tokens[next_request_id * MPK_MAX_SEQ_LENGTH + j];
+      }
+      int num_new_pages = (num_new_tokens + MPK_PAGE_SIZE - 1) / MPK_PAGE_SIZE;
+      for (int j = 0; j < num_new_pages; j++) {
+        config.paged_kv_indices_buffer[num_pages+j] = config.page_queue[page_queue_head % MPK_MAX_NUM_PAGES];
+        page_queue_head++;
+      }
+      config.qo_indptr[num_reqs+1] = num_tokens + num_new_tokens;
+      num_tokens += num_new_tokens;
+      num_pages += num_new_pages;
+      num_reqs ++;
+      *config.next_request_id = next_request_id + 1;
+    }
+  }
+
+  // Step 4: Update all unused requests slots
+  for (int i = num_reqs; i <= MPK_MAX_NUM_BATCHED_REQUESTS; i++) {
+    config.qo_indptr_buffer[i] = num_tokens;
+    config.paged_kv_indptr_buffer[i] = num_pages;
+  }
+
+  if (num_tokens == 0) {
+    return false;
+  } else {
+    return true;
+  }
+}
+#endif
+
+#ifdef MODE_ONLINE
 __device__ __forceinline__ bool
     prepare_next_batch(RuntimeConfig const &config) {
   int step = config.step[0];
@@ -96,6 +245,7 @@ __device__ __forceinline__ bool
     return true;
   }
 }
+#endif
 
 __device__ __forceinline__ int get_rand_sched_id(size_t event_index,
                                                  int worker_id,
@@ -394,9 +544,6 @@ __device__ void execute_worker(RuntimeConfig config) {
                                          task_desc.inputs[0].dim[1],
                                          task_desc.inputs[0].stride[0]);
     } else {
-      if (config.verbose && threadIdx.x == 0 && blockIdx.x == 0) {
-        printf("[worker] _execute_task EXECUTE_TASK %d\n", task_desc.task_type);
-      }
       _execute_task(task_desc, config);
     }
     __syncthreads();
@@ -483,12 +630,6 @@ __device__ void execute_worker(RuntimeConfig config) {
         assert(task_desc.task_type == TASK_NVSHMEM_COPY);
         // Note that nvshmem copy task signal counter during data copy
         // we don't need to do anything here is the task type is NVSHMEM_COPY
-        // int gpu_id = static_cast<int>(get_event_gpu_id(event_id));
-        // assert(gpu_id < config.num_gpus);
-        // assert(gpu_id != config.my_gpu_id);
-        // EventCounter count = nvshmem_ulonglong_atomic_fetch_add(
-        //    &config.all_event_counters[event_index], 1, gpu_id);
-
         if (config.verbose) {
           printf("[%d][DONE] worker_id(%d) task_id(%llu) event_id(%llx) "
                  "event_type(remote)\n",
@@ -497,45 +638,6 @@ __device__ void execute_worker(RuntimeConfig config) {
                  get_task_position_index(cur_task_id),
                  event_id);
         }
-
-#ifdef DEADCODE
-        if (count == 1) {
-          // The event has been triggered enough times
-          // Refresh the event counter
-          // Note that we load a local event since all task graphs
-          // are replicated across gpus and therefore they have the same
-          // event metadata (i.e., config.all_events[i] should be the same
-          // across GPUs)
-          EventDesc event_desc = config.all_events[event_index];
-          nvshmem_ulonglong_atomic_add(&config.all_event_counters[event_index],
-                                       event_desc.num_triggers,
-                                       gpu_id);
-          // Add the event to the schedule queue
-          int sched_id = config.num_local_schedulers +
-                         get_rand_sched_id(event_index,
-                                           worker_id,
-                                           config.num_workers,
-                                           config.num_remote_schedulers);
-          size_t last_event_pos = nvshmem_ulonglong_atomic_fetch_add(
-              &config.sched_queue_next_free_event_id[sched_id], 1, gpu_id);
-          nvshmem_ulonglong_p(
-              &config.sched_queues[sched_id]
-                                  [last_event_pos % config.per_sched_queue_len],
-              event_index,
-              gpu_id);
-          // use nvshmem_quiet to force completion of remote transfer
-          // before updating the last_ready_event_id
-          nvshmem_fence();
-          size_t old;
-          do {
-            old = nvshmem_ulonglong_atomic_compare_swap(
-                &config.sched_queue_last_ready_event_id[sched_id],
-                last_event_pos,
-                last_event_pos + 1,
-                gpu_id);
-          } while (old != last_event_pos);
-        }
-#endif
       }
       cur_task_pos[queue_idx] += 1;
     }
@@ -837,6 +939,14 @@ static void _init_persistent_kernel(std::vector<TaskDesc> &all_tasks,
 
 static RuntimeConfig global_runtime_config;
 
+// meta_tensors[0]: seq_lengths
+// meta_tensors[1]: tokens
+// meta_tensors[2]: new_tokens_nums
+// meta_tensors[3]: qo_indptr_buffer
+// meta_tensors[4]: paged_kv_indptr_buffer
+// meta_tensors[5]: paged_kv_indices_buffer
+// meta_tensors[6]: paged_kv_last_page_len_buffer
+
 extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
                                        void *profiler_buffer,
                                        int my_rank,
@@ -845,10 +955,14 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
                                        int num_remote_schedulers,
                                        int max_seq_length,
                                        long long eos_token_id) {
-  assert(meta_tensors.size() == 3);
+  assert(meta_tensors.size() == 7);
   global_runtime_config.step = static_cast<int *>(meta_tensors[0]);
   global_runtime_config.tokens = static_cast<long long *>(meta_tensors[1]);
   global_runtime_config.new_token_nums = static_cast<int *>(meta_tensors[2]);
+  global_runtime_config.qo_indptr_buffer = static_cast<int*>(meta_tensors[3]);
+  global_runtime_config.paged_kv_indptr_buffer = static_cast<int*>(meta_tensors[4]);
+  global_runtime_config.paged_kv_indices_buffer = static_cast<int*>(meta_tensors[5]);
+  global_runtime_config.paged_kv_last_page_len_buffer = static_cast<int*>(meta_tensors[6]);
   global_runtime_config.num_workers = num_workers;
   global_runtime_config.num_local_schedulers = num_local_schedulers;
   global_runtime_config.num_remote_schedulers = num_remote_schedulers;
@@ -859,6 +973,11 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
 
   // Initialize nvshmem
   cudaSetDevice(my_rank);
+#ifdef MODE_OFFLINE
+  global_runtime_config.next_request_id =
+      gpu_malloc<int>(sizeof(int));
+#endif
+
 #ifdef USE_NVSHMEM
   MPI_Comm mpi_comm = MPI_COMM_WORLD;
   nvshmemx_init_attr_t attr = NVSHMEMX_INIT_ATTR_INITIALIZER;
