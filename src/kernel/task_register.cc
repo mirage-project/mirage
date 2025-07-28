@@ -190,8 +190,7 @@ int TaskRegister::register_attention_task(threadblock::Graph const &bgraph,
 }
 
 int TaskRegister::register_paged_attention_task(
-    threadblock::Graph const &bgraph,
-    std::vector<int> const &params) {
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
   // params[0]: num_q_heads
   // params[1]: num_kv_heads
   // params[2]: qk_norm
@@ -229,12 +228,13 @@ int TaskRegister::register_paged_attention_task(
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
-  code.e("kernel::multitoken_paged_attention_task_impl<bfloat16, $, $, $, $, $>(",
-         num_q_heads / num_kv_heads,
-         1,
-         head_dim,
-         max_seq_len,
-         page_size);
+  code.e(
+      "kernel::multitoken_paged_attention_task_impl<bfloat16, $, $, $, $, $>(",
+      num_q_heads / num_kv_heads,
+      1,
+      head_dim,
+      max_seq_len,
+      page_size);
   code.e("    task_desc.inputs[0].base_ptr,");
   code.e("    task_desc.inputs[1].base_ptr,");
   code.e("    task_desc.inputs[2].base_ptr,");
@@ -254,7 +254,6 @@ int TaskRegister::register_paged_attention_task(
   code.e("    1e-6f);");
   return register_task_variant(TASK_PAGED_ATTENTION_1, code.to_string());
 }
-
 
 int TaskRegister::register_single_batch_extend_attention_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
