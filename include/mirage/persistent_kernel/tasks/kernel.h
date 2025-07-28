@@ -4,6 +4,7 @@
 #include "norm_linear.cuh"
 #include "paged_attention.cuh"
 #include "reduction.cuh"
+#include "rotary_embedding.cuh"
 #include "silu_mul_linear.cuh"
 #include "single_batch_decoding.cuh"
 #include "single_batch_extend.cuh"

@@ -202,6 +202,7 @@ static constexpr int V100 = 70;
 static constexpr int T4 = 75;
 static constexpr int A100 = 80;
 static constexpr int H100 = 90;
+static constexpr int B200 = 100;
 } // namespace GPU_CC
 
 // A handy iterator class for combining two iterators

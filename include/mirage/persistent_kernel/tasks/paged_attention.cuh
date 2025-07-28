@@ -22,6 +22,7 @@
 #include "mma.cuh"
 #include "norm.cuh"
 #include "reduction.cuh"
+#include "rotary_embedding.cuh"
 #include "smem_layout.cuh"
 #include "utils.cuh"
 
@@ -271,31 +272,52 @@ __device__ __forceinline__ void
     }
     __syncthreads();
 
-    // Q norm
-    if (qk_norm && iter == 0) {
-      rms_norm<T, QOSmem, NUM_Q_PER_KV, HEAD_DIM>(
-          q_smem,
-          static_cast<T const *>(q_norm_weight_ptr),
-          s_q_norm_sum,
-          q_eps,
-          0,
-          rope,
-          static_cast<T const *>(cos_ptr) + (seq_len - 1) * HEAD_DIM,
-          static_cast<T const *>(sin_ptr) + (seq_len - 1) * HEAD_DIM);
+    if (qk_norm) {
+      // Q norm
+      if (iter == 0) {
+        rms_norm<T, QOSmem, NUM_Q_PER_KV, HEAD_DIM>(
+            q_smem,
+            static_cast<T const *>(q_norm_weight_ptr),
+            s_q_norm_sum,
+            q_eps,
+            0,
+            rope,
+            static_cast<T const *>(cos_ptr) + (seq_len - 1) * HEAD_DIM,
+            static_cast<T const *>(sin_ptr) + (seq_len - 1) * HEAD_DIM);
+      }
+      // K norm
+      else if (iter == num_iters - 1) {
+        rms_norm<T, KVSmem, 1, HEAD_DIM>(
+            k_smem,
+            static_cast<T const *>(k_norm_weight_ptr),
+            s_k_norm_sum,
+            k_eps,
+            curr_iter_len - 1,
+            rope,
+            static_cast<T const *>(cos_ptr) + (seq_len - 1) * HEAD_DIM,
+            static_cast<T const *>(sin_ptr) + (seq_len - 1) * HEAD_DIM);
+      }
+    } else {
+      if (rope) {
+        // q rope
+        if (iter == 0) {
+          rotary_embedding<T, QOSmem, NUM_Q_PER_KV, HEAD_DIM>(
+              q_smem,
+              static_cast<T const *>(cos_ptr) + (seq_len - 1) * HEAD_DIM,
+              static_cast<T const *>(sin_ptr) + (seq_len - 1) * HEAD_DIM,
+              0);
+        }
+        // k rope
+        else if (iter == num_iters - 1) {
+          rotary_embedding<T, KVSmem, 1, HEAD_DIM>(
+              k_smem,
+              static_cast<T const *>(cos_ptr) + (seq_len - 1) * HEAD_DIM,
+              static_cast<T const *>(sin_ptr) + (seq_len - 1) * HEAD_DIM,
+              curr_iter_len - 1);
+        }
+      }
     }
 
-    // K norm
-    if (qk_norm && iter == num_iters - 1) {
-      rms_norm<T, KVSmem, 1, HEAD_DIM>(
-          k_smem,
-          static_cast<T const *>(k_norm_weight_ptr),
-          s_k_norm_sum,
-          k_eps,
-          curr_iter_len - 1,
-          rope,
-          static_cast<T const *>(cos_ptr) + (seq_len - 1) * HEAD_DIM,
-          static_cast<T const *>(sin_ptr) + (seq_len - 1) * HEAD_DIM);
-    }
     __syncthreads();
 
     // compute X = QK^T

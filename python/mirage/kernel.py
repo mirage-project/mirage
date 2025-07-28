@@ -81,7 +81,11 @@ static struct PyModuleDef ModuleDef = {
   "__mirage_launcher",
   NULL, //documentation
   -1, //size
-  ModuleMethods
+  ModuleMethods,
+  nullptr,                  // m_slots     
+  nullptr,                  // m_traverse  
+  nullptr,                  // m_clear     
+  nullptr,                  // m_free      
 };
 
 PyMODINIT_FUNC PyInit___mirage_launcher(void) {
@@ -153,6 +157,11 @@ def get_cc_cmd(
         specific_cmd = [
             "-arch=sm_90a",
             "-gencode=arch=compute_90a,code=sm_90a",
+        ] + (["-DMIRAGE_ENABLE_PROFILER"] if profiling else [])
+    elif target == 100:
+        specific_cmd = [
+            "-arch=sm_100a",
+            "-gencode=arch=compute_100a,code=sm_100a",
         ] + (["-DMIRAGE_ENABLE_PROFILER"] if profiling else [])
     else:
         specific_cmd = [

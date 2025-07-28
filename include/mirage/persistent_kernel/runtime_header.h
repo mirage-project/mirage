@@ -136,6 +136,7 @@ struct RuntimeConfig {
   void *profiler_buffer;
   bool verbose;
   bool profiling;
+  bool split_worker_scheduler;
 };
 
 } // namespace runtime
