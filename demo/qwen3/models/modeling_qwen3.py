@@ -213,14 +213,14 @@ class Qwen3Attention(nn.Module):
         self.key_cache, self.value_cache = kv_cache
         assert kv_cache[0].shape == (
             config.num_hidden_layers,
-            1,
+            16,
             4096,
             self.num_key_value_heads // world_size,
             self.head_dim,
         )
         assert kv_cache[1].shape == (
             config.num_hidden_layers,
-            1,
+            16,
             4096,
             self.num_key_value_heads // world_size,
             self.head_dim,

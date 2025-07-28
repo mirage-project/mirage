@@ -37,7 +37,7 @@ if __name__ == "__main__":
     parser.add_argument("--max-num-batched-tokens", default=8, type=int, help="Max number of tokens in a batch")
     parser.add_argument("--max-num-batched-requests", default=4, type=int, help="Max number of requests in a batch")
     parser.add_argument("--page-size", default=4096, type=int, help="Page size")
-    parser.add_argument("--max-num-pages", default=1, type=int, help="Max num pages")
+    parser.add_argument("--max-num-pages", default=16, type=int, help="Max num pages")
     parser.add_argument("--output-dir", help="Output files directory")
     parser.add_argument(
         "--profiling", action="store_true", help="Use Profiler to generate trace"
@@ -162,8 +162,8 @@ if __name__ == "__main__":
     starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(
         enable_timing=True
     )
-    step = torch.tensor([0], dtype=torch.int32, device="cuda")
-    num_new_tokens = torch.tensor([1], dtype=torch.int32, device="cuda")
+    step = torch.full((total_num_requests, ), 0, dtype=torch.int32, device="cuda")
+    num_new_tokens = torch.full((total_num_requests, ), 1, dtype=torch.int32, device="cuda")
 
     if args.use_mirage:
         import mirage as mi
@@ -359,8 +359,7 @@ if __name__ == "__main__":
             weight=w, 
             output=y, 
             # grid_dim=(max_factor_leq_n(hidden_size, 96 // args.max_num_batched_tokens), total_tokens_per_iter, 1), 
-            # grid_dim=(1, 1, 1), 
-            grid_dim=(args.max_num_batched_tokens, 1, 1),
+            grid_dim=(1, 1, 1), 
             block_dim=(128, 1, 1),
             input_source=(spec_decode_config is not None) # 0: all_tokens, 1: input_token (spec decoding)
         )
@@ -623,6 +622,7 @@ if __name__ == "__main__":
         run_time = starter.elapsed_time(ender)
 
         # print(f"generated_ids: {generated_ids}")
+        print("tokens.shape = ", tokens.shape)
         for r in range(total_num_requests):
             generated_ids = tokens[r, : step[r] + 1]
             response = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
@@ -630,7 +630,7 @@ if __name__ == "__main__":
 
         print(
             "Prompt length {}, generate length {}, per-token latency {} ms".format(
-                prompt_len, step[0] + 1 - prompt_lengths[0], run_time / (step[0] + 1 - prompt_lengths[0])
+                prompt_lengths[0], step[0] + 1 - prompt_lengths[0], run_time / (step[0] + 1 - prompt_lengths[0])
             )
         )
     if world_size > 1:

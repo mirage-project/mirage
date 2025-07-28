@@ -54,6 +54,7 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl(
     void const *sin_ptr,
     float q_eps,
     float k_eps) {
+  return; // FIXME: remove this line after debugging
   constexpr int NUM_QO_PER_KV = NUM_QO_HEADS / NUM_KV_HEADS;
 
   // NOTE(Jinchen): The input is a packed QKV tensor, which may contain

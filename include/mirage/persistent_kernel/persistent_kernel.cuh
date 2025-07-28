@@ -107,15 +107,6 @@ __device__ __forceinline__ bool
   __shared__ int smem_kv_indices[MPK_MAX_NUM_PAGES];
   int page_queue_head = *config.page_queue_head;
   int page_queue_tail = *config.page_queue_tail;
-  if (config.verbose) {
-    for (int i = 0; i < MPK_MAX_NUM_BATCHED_REQUESTS; i++) {
-      printf("qo_indptr[%d] = %d\n", i, config.qo_indptr_buffer[i]);
-    }
-    int num_tokens = config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS];
-    for (int i = 0; i < num_tokens; i++) {
-      printf("input_tokens[%d] = %lld\n", i, config.input_tokens[i]);
-    }
-  }
   // Step 1: finalize previous batch
   for (int i = 0; i < MPK_MAX_NUM_BATCHED_REQUESTS; i++) {
     int request_id = config.request_ids[i];
@@ -184,7 +175,7 @@ __device__ __forceinline__ bool
       // Prepare page indptrs
       int num_new_pages =
           (step + num_new_tokens + MPK_PAGE_SIZE - 1) / MPK_PAGE_SIZE;
-      config.paged_kv_last_page_len_buffer[i] =
+      config.paged_kv_last_page_len_buffer[num_reqs] =
           (step + num_new_tokens) % MPK_PAGE_SIZE;
       for (int j = 0; j < num_old_pages; j++) {
         config.paged_kv_indices_buffer[num_pages + j] =
@@ -218,12 +209,13 @@ __device__ __forceinline__ bool
             config.tokens[next_request_id * MPK_MAX_SEQ_LENGTH + j];
       }
       int num_new_pages = (num_new_tokens + MPK_PAGE_SIZE - 1) / MPK_PAGE_SIZE;
+      config.paged_kv_last_page_len_buffer[num_reqs] =
+          num_new_tokens % MPK_PAGE_SIZE;
       for (int j = 0; j < num_new_pages; j++) {
         config.paged_kv_indices_buffer[num_pages + j] =
             config.page_queue[page_queue_head % MPK_MAX_NUM_PAGES];
         page_queue_head++;
       }
-      config.qo_indptr_buffer[num_reqs + 1] = num_tokens + num_new_tokens;
       num_tokens += num_new_tokens;
       num_pages += num_new_pages;
       num_reqs++;
@@ -233,9 +225,14 @@ __device__ __forceinline__ bool
 
   // Step 4: Update all unused requests slots
   for (int i = num_reqs; i <= MPK_MAX_NUM_BATCHED_REQUESTS; i++) {
+    config.request_ids[i] = -1;
     config.qo_indptr_buffer[i] = num_tokens;
     config.paged_kv_indptr_buffer[i] = num_pages;
   }
+
+  // Step 5: update page head tail
+  *config.page_queue_head = page_queue_head;
+  *config.page_queue_tail = page_queue_tail;
 
   if (num_tokens == 0) {
     return false;
@@ -1033,7 +1030,7 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
   global_runtime_config.num_gpus = npes;
   global_runtime_config.my_gpu_id = mype;
   global_runtime_config.num_graphs = 1;
-  global_runtime_config.verbose = true;
+  global_runtime_config.verbose = false;
   global_runtime_config.profiling = profiler_buffer != nullptr;
   global_runtime_config.split_worker_scheduler = false;
 

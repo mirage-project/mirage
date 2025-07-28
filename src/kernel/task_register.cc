@@ -466,9 +466,9 @@ int TaskRegister::register_argmax_reduce_task(threadblock::Graph const &bgraph,
   code.e("kernel::argmax_reduce_kernel<bfloat16, $, $>(", params[0], num_parts);
   code.e("    task_desc.inputs[0].base_ptr,");
   code.e("    task_desc.inputs[1].base_ptr,");
-  code.e("    task_desc.outputs[0].base_ptr,");
-  code.e("    runtime_config.step[0],");
-  code.e("    runtime_config.tokens);");
+  code.e("    task_desc.outputs[0].base_ptr);");
+  //code.e("    runtime_config.step[0],");
+  //code.e("    runtime_config.tokens);");
   return register_task_variant(TASK_ARGMAX_REDUCE, code.to_string());
 }
 
