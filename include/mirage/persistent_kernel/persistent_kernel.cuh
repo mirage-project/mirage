@@ -29,10 +29,10 @@ using bfloat16 = type::bfloat16_t;
 using namespace mirage::runtime;
 
 // Configurations for the MPK runtime
-#define MPK_MAX_NUM_BATCHED_REQUESTS 16
-#define MPK_MAX_NUM_BATCHED_TOKENS 64
-#define MPK_MAX_NUM_PAGES 1024
-#define MPK_PAGE_SIZE 64
+//#define MPK_MAX_NUM_BATCHED_REQUESTS 16
+//#define MPK_MAX_NUM_BATCHED_TOKENS 64
+//#define MPK_MAX_NUM_PAGES 1024
+//#define MPK_PAGE_SIZE 64
 
 __device__ __forceinline__ void
     _execute_task(TaskDesc const &task_desc,
@@ -79,9 +79,8 @@ __global__ void init_kernel(RuntimeConfig config,
     config.sched_queue_next_free_event_id[0] = 1;
     config.sched_queues[0][0] = end_of_task_graph_event_pos;
     config.sched_queue_last_ready_event_id[0] = 1;
-    a
-        // initialize metadata
-        for (int i = 0; i < config.total_num_requests; i++) {
+    // initialize metadata
+    for (int i = 0; i < config.total_num_requests; i++) {
       config.step[i] = 0;
     }
     *config.next_request_id = 0;
@@ -105,7 +104,7 @@ __global__ void init_kernel(RuntimeConfig config,
 // TODO: parallelize this processing
 __device__ __forceinline__ bool
     prepare_next_batch(RuntimeConfig const &config) {
-  __shared__ smem_kv_indices[MAX_NUM_PAGES];
+  __shared__ int smem_kv_indices[MPK_MAX_NUM_PAGES];
   int page_queue_head = *config.page_queue_head;
   int page_queue_tail = *config.page_queue_tail;
   // Step 1: finalize previous batch
@@ -119,7 +118,7 @@ __device__ __forceinline__ bool
       int prompt_len = config.prompt_length[request_id];
       for (int j = 0; j < num_tokens; j++) {
         if (step + j + 1 >= prompt_len) {
-          config.tokens[request_id * MPK_MAX_SEQ_LENGTH + seq_len + j + 1] =
+          config.tokens[request_id * MPK_MAX_SEQ_LENGTH + step + j + 1] =
               config.output_tokens[qo_indptr + j];
         }
       }
@@ -215,7 +214,7 @@ __device__ __forceinline__ bool
             config.page_queue[page_queue_head % MPK_MAX_NUM_PAGES];
         page_queue_head++;
       }
-      config.qo_indptr[num_reqs + 1] = num_tokens + num_new_tokens;
+      config.qo_indptr_buffer[num_reqs + 1] = num_tokens + num_new_tokens;
       num_tokens += num_new_tokens;
       num_pages += num_new_pages;
       num_reqs++;
@@ -953,13 +952,16 @@ static void _init_persistent_kernel(std::vector<TaskDesc> &all_tasks,
 
 static RuntimeConfig global_runtime_config;
 
-// meta_tensors[0]: seq_lengths
+// meta_tensors[0]: seq_length
 // meta_tensors[1]: tokens
-// meta_tensors[2]: new_tokens_nums
-// meta_tensors[3]: qo_indptr_buffer
-// meta_tensors[4]: paged_kv_indptr_buffer
-// meta_tensors[5]: paged_kv_indices_buffer
-// meta_tensors[6]: paged_kv_last_page_len_buffer
+// meta_tensors[2]: input_tokens
+// meta_tensors[3]: output_tokens
+// meta_tensors[4]: new_tokens_nums
+// meta_tensors[5]: prompt_length
+// meta_tensors[6]: qo_indptr_buffer
+// meta_tensors[7]: paged_kv_indptr_buffer
+// meta_tensors[8]: paged_kv_indices_buffer
+// meta_tensors[9]: paged_kv_last_page_len_buffer
 
 extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
                                        void *profiler_buffer,
@@ -968,18 +970,22 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
                                        int num_local_schedulers,
                                        int num_remote_schedulers,
                                        int max_seq_length,
+                                       int total_num_requests,
                                        long long eos_token_id) {
-  assert(meta_tensors.size() == 7);
+  assert(meta_tensors.size() == 10);
   global_runtime_config.step = static_cast<int *>(meta_tensors[0]);
   global_runtime_config.tokens = static_cast<long long *>(meta_tensors[1]);
-  global_runtime_config.new_token_nums = static_cast<int *>(meta_tensors[2]);
-  global_runtime_config.qo_indptr_buffer = static_cast<int *>(meta_tensors[3]);
+  global_runtime_config.input_tokens = static_cast<long long *>(meta_tensors[2]);
+  global_runtime_config.output_tokens = static_cast<long long *>(meta_tensors[3]);
+  global_runtime_config.new_token_nums = static_cast<int *>(meta_tensors[4]);
+  global_runtime_config.prompt_length = static_cast<int *>(meta_tensors[5]);
+  global_runtime_config.qo_indptr_buffer = static_cast<int *>(meta_tensors[6]);
   global_runtime_config.paged_kv_indptr_buffer =
-      static_cast<int *>(meta_tensors[4]);
+      static_cast<int *>(meta_tensors[7]);
   global_runtime_config.paged_kv_indices_buffer =
-      static_cast<int *>(meta_tensors[5]);
+      static_cast<int *>(meta_tensors[8]);
   global_runtime_config.paged_kv_last_page_len_buffer =
-      static_cast<int *>(meta_tensors[6]);
+      static_cast<int *>(meta_tensors[9]);
   global_runtime_config.num_workers = num_workers;
   global_runtime_config.num_local_schedulers = num_local_schedulers;
   global_runtime_config.num_remote_schedulers = num_remote_schedulers;
@@ -990,8 +996,13 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
 
   // Initialize nvshmem
   cudaSetDevice(my_rank);
-#ifdef MODE_OFFLINE
+#if defined(MODE_OFFLINE) || defined(MODE_ONLINE)
+  global_runtime_config.request_ids = gpu_malloc<int>(sizeof(int) * MPK_MAX_NUM_BATCHED_REQUESTS);
   global_runtime_config.next_request_id = gpu_malloc<int>(sizeof(int));
+  global_runtime_config.page_queue = gpu_malloc<int>(MPK_MAX_NUM_PAGES * sizeof(int));
+  global_runtime_config.page_queue_head = gpu_malloc<int>(sizeof(int));
+  global_runtime_config.page_queue_tail = gpu_malloc<int>(sizeof(int));
+  global_runtime_config.total_num_requests = total_num_requests;
 #endif
 
 #ifdef USE_NVSHMEM
@@ -1127,7 +1138,11 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
   }
 
   // launch init kernel
-  init_kernel<<<dim3(1, 1, 1), dim3(128, 1, 1)>>>(global_runtime_config);
+  size_t end_of_task_graph_event_pos = all_events.size() - 1;
+  assert(all_events[end_of_task_graph_event_pos].event_type == EVENT_END_OF_TASK_GRAPH);
+  init_kernel<<<dim3(1, 1, 1), dim3(128, 1, 1)>>>(
+      global_runtime_config,
+      end_of_task_graph_event_pos);
   cudaDeviceSynchronize();
 #ifdef USE_NVSHMEM
   // Add a global barrier for all init_kernel to complete
@@ -1216,6 +1231,12 @@ extern "C" void finalize_persistent_kernel() {
   gpu_free(global_runtime_config.all_event_num_triggers);
   gpu_free(global_runtime_config.all_tasks);
   gpu_free(global_runtime_config.all_events);
+#if defined(MODE_OFFLINE) || defined(MODE_ONLINE)
+  gpu_free(global_runtime_config.next_request_id);
+  gpu_free(global_runtime_config.page_queue);
+  gpu_free(global_runtime_config.page_queue_head);
+  gpu_free(global_runtime_config.page_queue_tail);
+#endif
   int num_workers = global_runtime_config.num_workers;
   std::vector<TaskId *> host_worker_queues(num_workers * 2);
   cudaMemcpy(host_worker_queues.data(),

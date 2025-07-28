@@ -64,6 +64,8 @@ enum TaskType {
   TASK_FIND_NGRAM_GLOBAL = 113,
   TASK_TARGET_VERIFY_GREEDY = 114,
   TASK_SINGLE_BATCH_EXTEND_ATTENTION = 115,
+  TASK_PAGED_ATTENTION_1 = 116,
+  TASK_PAGED_ATTENTION_2 = 117,
   TASK_NVSHMEM_COPY = 199,
   TASK_SCHD_TASKS = 200,
   TASK_SCHD_EVENTS = 201,
@@ -103,7 +105,8 @@ struct EventDesc {
 struct TaskDesc {
   TaskDesc(TaskType t, int _variant_id)
       : task_type(t), variant_id(_variant_id), num_inputs(0), num_outputs(0),
-        trigger_event(EVENT_INVALID_ID), dependent_event(EVENT_INVALID_ID) {}
+        trigger_event(EVENT_INVALID_ID), dependent_event(EVENT_INVALID_ID),
+        request_id(-1) {}
   TaskDesc() {}
   TaskType task_type;
   unsigned variant_id;
@@ -112,6 +115,7 @@ struct TaskDesc {
   EventId dependent_event;
   TensorDesc inputs[MAX_INPUTS_PER_TASK];
   TensorDesc outputs[MAX_OUTPUTS_PER_TASK];
+  int request_id; // Used for paged attention
 };
 
 struct RuntimeConfig {
@@ -130,6 +134,8 @@ struct RuntimeConfig {
   TaskId *first_tasks;
   int *step;                    // Metadata for LLM serving
   long long *tokens;            // Metadata for LLM serving
+  long long *input_tokens;      // Metadata for LLM serving
+  long long *output_tokens;     // Metadata for LLM serving
   long long eos_token_id;       // Metadata for LLM serving
   int max_seq_length;           // Metadata for LLM serving
   int *new_token_nums;          // Metadata for LLM serving
@@ -137,6 +143,15 @@ struct RuntimeConfig {
   int *paged_kv_indptr_buffer;  // Metadata for LLM serving (paged attention)
   int *paged_kv_indices_buffer; // Metadata for LLM serving (paged attention)
   int *paged_kv_last_page_len_buffer; // Metadata for LLM serving
+#if defined(MODE_OFFLINE) || defined(MODE_ONLINE)
+  int *prompt_length;           // Metadata for online/offline serving
+  int *request_ids;             // Metadata for online/offline serving
+  int *page_queue;              // Metadata for online/offline serving
+  int *page_queue_head;         // Metadata for online/offline serving
+  int *page_queue_tail;         // Metadata for oneline/offline serving
+  int *next_request_id;         // Metadata for LLM serving
+  int total_num_requests;       // Metadata for LLM serving
+#endif
   void *profiler_buffer;
   bool verbose;
   bool profiling;

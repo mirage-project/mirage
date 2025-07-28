@@ -33,9 +33,9 @@ template <typename T,
           int NUM_QO_HEADS,
           int NUM_KV_HEADS,
           int HEAD_DIM,
-          int PAGE_SIZE,
           int MAX_SEQ_LEN,
-          int MAX_TOKENS = 1>
+          int PAGE_SIZE,
+          int MAX_TOKENS = 64>
 __device__ __forceinline__ void multitoken_paged_attention_task_impl(
     void const *qkv_ptr,
     void *paged_k_cache_ptr,

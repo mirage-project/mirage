@@ -34,6 +34,8 @@ public:
                                    std::vector<int> const &params);
   int register_attention_task(threadblock::Graph const &bgraph,
                               std::vector<int> const &params);
+  int register_paged_attention_task(threadblock::Graph const &bgraph,
+                              std::vector<int> const &params);
   int register_single_batch_extend_attention_task(
       threadblock::Graph const &bgraph, std::vector<int> const &params);
   int register_linear_with_residual_task(threadblock::Graph const &bgraph,

@@ -189,6 +189,73 @@ int TaskRegister::register_attention_task(threadblock::Graph const &bgraph,
   return register_task_variant(TASK_ATTENTION_1, code.to_string());
 }
 
+int TaskRegister::register_paged_attention_task(
+    threadblock::Graph const &bgraph,
+    std::vector<int> const &params) {
+  // params[0]: num_q_heads
+  // params[1]: num_kv_heads
+  // params[2]: qk_norm
+  // params[3]: rotary_emd
+  // params[4]: max_seq_len
+  // params[5]: page_size
+  assert(params.size() == 6);
+  std::vector<tb::TBInputOp *> input_ops;
+  std::vector<tb::TBInputOp *> output_ops;
+  int num_inputs = 7;
+  int num_outputs = 1;
+
+  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    if (input_ops.size() < (size_t)num_inputs) {
+      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    } else {
+      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    }
+  }
+  assert(output_ops[0]->output_tensors[0].num_dims == 2);
+  int output_size = output_ops[0]->dtensor.dim[1];
+  int num_q_heads = params[0];
+  int num_kv_heads = params[1];
+  int head_dim = output_size / num_q_heads;
+  int kv_stride = head_dim * num_kv_heads;
+  int max_seq_len = params[4];
+  int page_size = params[5];
+  // Assert that k_cache has the same head_dim
+  assert(input_ops[1]->output_tensors[0].num_dims == 4);
+  assert(head_dim == input_ops[1]->output_tensors[0].dim[3]);
+  assert(input_ops[2]->output_tensors[0].num_dims == 4);
+  assert(head_dim == input_ops[2]->output_tensors[0].dim[3]);
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::multitoken_paged_attention_task_impl<bfloat16, $, $, $, $, $>(",
+         num_q_heads / num_kv_heads,
+         1,
+         head_dim,
+         max_seq_len,
+         page_size);
+  code.e("    task_desc.inputs[0].base_ptr,");
+  code.e("    task_desc.inputs[1].base_ptr,");
+  code.e("    task_desc.inputs[2].base_ptr,");
+  code.e("    task_desc.outputs[0].base_ptr,");
+  code.e("    runtime_config.qo_indptr_buffer,");
+  code.e("    runtime_config.paged_kv_indptr_buffer,");
+  code.e("    runtime_config.paged_kv_indices_buffer,");
+  code.e("    runtime_config.paged_kv_last_page_len_buffer,");
+  code.e("    task_desc.request_id,");
+  code.e("    $,", params[2] > 0);
+  code.e("    $,", params[3] > 0);
+  code.e("    task_desc.inputs[3].base_ptr,");
+  code.e("    task_desc.inputs[4].base_ptr,");
+  code.e("    task_desc.inputs[5].base_ptr,");
+  code.e("    task_desc.inputs[6].base_ptr,");
+  code.e("    1e-6f,");
+  code.e("    1e-6f);");
+  return register_task_variant(TASK_PAGED_ATTENTION_1, code.to_string());
+}
+
+
 int TaskRegister::register_single_batch_extend_attention_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   // params[0]: num_q_heads
