@@ -20,7 +20,7 @@ from libcpp cimport bool
 
 ctypedef unsigned long int size_t
 
-cdef extern from "vector_types.h":
+cdef extern from "mirage/vector_types.h":
     ctypedef struct dim3:
         unsigned int x
         unsigned int y

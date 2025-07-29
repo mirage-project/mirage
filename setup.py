@@ -21,6 +21,7 @@ import sysconfig
 from setuptools import find_packages, setup, Command
 from contextlib import contextmanager
 import subprocess
+import re
 
 # need to use distutils.core for correct placement of cython dll
 if "--inplace" in sys.argv:
@@ -52,6 +53,32 @@ version_file = os.path.join(os.path.dirname(__file__), "python/mirage/version.py
 with open(version_file, "r") as f:
     exec(f.read())  # This will define __version__
 
+def get_backend_macros(config_file):
+    flags = {
+        "USE_CUDA":   None,
+        "USE_NKI":    None,
+        "USE_TRITON": None,
+    }
+
+    pattern = re.compile(r'^\s*set\s*\(\s*(USE_CUDA|USE_NKI|USE_TRITON)\s+(ON|OFF)\s*\)', re.IGNORECASE)
+    
+    with open(config_file, 'r') as f:
+        for line in f:
+            match = pattern.match(line)
+            if match:
+                var, val = match.groups()
+                flags[var] = (val.upper() == "ON")
+    
+    macros = []
+    if flags.get("USE_CUDA") or flags.get("USE_TRITON"):
+        macros.append(("MIRAGE_BACKEND_USE_CUDA", None))
+        macros.append(("MIRAGE_FINGERPRINT_USE_CUDA", None))
+    elif flags.get("USE_NKI"):
+        macros.append(("MIRAGE_BACKEND_USE_NKI", None))
+        macros.append(("MIRAGE_FINGERPRINT_USE_CPU", None))
+    else:
+        raise KeyError("Please select either USE_CUDA or USE_NKI in config.cmake file")
+    return macros
 
 def config_cython():
     sys_cflags = sysconfig.get_config_var("CFLAGS")
@@ -59,55 +86,42 @@ def config_cython():
         from Cython.Build import cythonize
 
         ret = []
-        mirage_path = ""
+        mirage_path = ''
+        config_path = path.join(mirage_path, "config.cmake")
+        macros = get_backend_macros(config_path)
         cython_path = path.join(mirage_path, "python/mirage/_cython")
         for fn in os.listdir(cython_path):
             if not fn.endswith(".pyx"):
                 continue
-            ret.append(
-                Extension(
-                    "mirage.%s" % fn[:-4],
-                    ["%s/%s" % (cython_path, fn)],
-                    include_dirs=[
-                        path.join(mirage_path, "include"),
-                        path.join(mirage_path, "deps", "json", "include"),
-                        path.join(mirage_path, "deps", "cutlass", "include"),
-                        path.join(mirage_path, "build", "abstract_subexpr", "release"),
-                        path.join(mirage_path, "build", "formal_verifier", "release"),
-                        path.join(z3_path, "include"),
-                        cuda_include_dir,
-                    ],
-                    libraries=[
-                        "mirage_runtime",
-                        "cudadevrt",
-                        "cudart_static",
-                        "cudart",
-                        "cuda",
-                        "z3",
-                        "gomp",
-                        "rt",
-                        "abstract_subexpr",
-                        "formal_verifier",
-                    ],
-                    library_dirs=[
-                        path.join(mirage_path, "build"),
-                        path.join(z3_path, "lib"),
-                        path.join(mirage_path, "build", "abstract_subexpr", "release"),
-                        path.join(mirage_path, "build", "formal_verifier", "release"),
-                    ]
-                    + cuda_library_dirs,
-                    extra_compile_args=["-std=c++17", "-fopenmp"],
-                    extra_link_args=[
-                        "-fPIC",
-                        "-fopenmp",
-                        "-lrt",
-                        f"-Wl,-rpath,{path.join(mirage_path, 'build', 'abstract_subexpr', 'release')}",
-                        f"-Wl,-rpath,{path.join(mirage_path, 'build', 'formal_verifier', 'release')}",
-                    ],
-                    language="c++",
-                )
-            )
-        return cythonize(ret, compiler_directives={"language_level": 3})
+            ret.append(Extension(
+                "mirage.%s" % fn[:-4],
+                ["%s/%s" % (cython_path, fn)],
+                include_dirs=[path.join(mirage_path, "include"),
+                              path.join(mirage_path, "deps", "json", "include"),
+                              path.join(mirage_path, "deps", "cutlass", "include"),
+                              path.join(z3_path, "include"),
+                              path.join(mirage_path, "build", "abstract_subexpr", "release"),
+                              path.join(mirage_path, "build", "formal_verifier", "release"),
+                              "/usr/local/cuda/include"],
+                libraries=["mirage_runtime", "cudadevrt", "cudart_static", "cudnn", "cublas", "cudart", "cuda", "z3", "gomp", "abstract_subexpr", "formal_verifier"],
+                library_dirs=[path.join(mirage_path, "build"),
+                              path.join(z3_path, "lib"),
+                              path.join(mirage_path, "build", "abstract_subexpr", "release"),
+                              path.join(mirage_path, "build", "formal_verifier", "release"),
+                              "/usr/local/cuda/lib",
+                              "/usr/local/cuda/lib64",
+                              "/usr/local/cuda/lib64/stubs"],
+                define_macros=macros,
+                extra_compile_args=["-std=c++17", "-fopenmp"],
+                extra_link_args=[
+                    "-fPIC",
+                    "-fopenmp",
+                    "-lrt",
+                    f"-Wl,-rpath,{path.join(mirage_path, 'build', 'abstract_subexpr', 'release')}",
+                    f"-Wl,-rpath,{path.join(mirage_path, 'build', 'formal_verifier', 'release')}",
+                ],
+                language="c++"))
+        return cythonize(ret, compiler_directives={"language_level" : 3})
     except ImportError:
         print("WARNING: cython is not installed!!!")
         raise SystemExit(1)
