@@ -120,6 +120,7 @@ if __name__ == "__main__":
         else:
             profiler_tensor = None
         num_workers, num_schedulers = mi.get_configurations_from_gpu(rank)
+        num_new_tokens = torch.tensor([1], dtype=torch.int32, device="cuda")
         mpk = mi.PersistentKernel(
             world_size=world_size,
             mpi_rank=rank,
@@ -128,8 +129,9 @@ if __name__ == "__main__":
             num_remote_schedulers=0,
             max_seq_length=512,
             eos_token_id=eos_token_id,
-            meta_tensors=[step, tokens],
+            meta_tensors=[step, tokens, num_new_tokens],
             profiler_tensor=profiler_tensor,
+            spec_decode_config=None,
         )
         x = mpk.attach_input(torch_tensor=input_tokens, name="input_token")
         cos_pos_embed = mpk.attach_input(
@@ -251,7 +253,7 @@ if __name__ == "__main__":
                 weight_norm=w_norm,
                 weight_linear=w_qkv,
                 output=attn_in,
-                grid_dim=(grid_for_rmsnorm_linear_layer(w_qkv.dim(0)), 1, 1),
+                grid_dim=(80, 1, 1),
                 block_dim=(128, 1, 1),
             )
             k_cache = mpk.attach_input(
