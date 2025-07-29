@@ -43,11 +43,13 @@ __device__ __forceinline__ void
                           void *output_ptr) {
   constexpr int CHUNK_SIZE = 16 / sizeof(T);
 
-  // TODO: Update the formula since norm weight is cut down
-  constexpr int MAX_OUTPUT_ATOM_SIZE = max_power_of_two_le(
-      (mirage::runtime::MAX_SHARE_MEMORY_SIZE - 16 - 16898 * BATCH_SIZE) /
-      (4 * (128 + BATCH_SIZE)));
-
+  constexpr int TILE_SIZE = 128;
+  static constexpr int MAX_OUTPUT_ATOM_SIZE = max_power_of_two_le(
+      (mirage::runtime::MAX_SHARE_MEMORY_SIZE / sizeof(T) -
+       ((REDUCTION_SIZE + 2 * TILE_SIZE + 1) * BATCH_SIZE + REDUCTION_SIZE +
+        8)) /
+      (K_PIPE_MAX * TILE_SIZE +
+       5 * BATCH_SIZE));
   constexpr int OUTPUT_LIMIT = OUTPUT_SIZE <= 128 ? OUTPUT_SIZE : 128;
   constexpr int OUTPUT_ATOM_SIZE = OUTPUT_LIMIT <= MAX_OUTPUT_ATOM_SIZE
                                        ? OUTPUT_LIMIT
@@ -57,7 +59,6 @@ __device__ __forceinline__ void
       OUTPUT_SIZE / OUTPUT_ATOM_SIZE; // Full output atoms
   constexpr int LAST_OUTPUT_ATOM_SIZE = OUTPUT_SIZE % OUTPUT_ATOM_SIZE;
 
-  constexpr int TILE_SIZE = 128;
   constexpr int FORLOOP_RANGE = REDUCTION_SIZE / TILE_SIZE;
   static_assert(REDUCTION_SIZE % TILE_SIZE == 0,
                 "REDUCTION_SIZE must be a multiple of TILE_SIZE.");
