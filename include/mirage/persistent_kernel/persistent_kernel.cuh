@@ -234,6 +234,8 @@ __device__ __forceinline__ bool
   *config.page_queue_head = page_queue_head;
   *config.page_queue_tail = page_queue_tail;
 
+  printf("Next batch: steps[%d %d %d %d]\n", config.step[0], config.step[1], config.step[2], config.step[3]);
+
   if (num_tokens == 0) {
     return false;
   } else {
