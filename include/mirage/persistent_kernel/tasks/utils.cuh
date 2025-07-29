@@ -95,4 +95,26 @@ static __device__ __forceinline__ void clear_8_floats(float *buffer) {
   *((__uint128_t *)(buffer + 4)) = 0ul;
 }
 
+// Vectorized zero initialization struct
+template<typename T, int N>
+struct vec_zero_t {
+    static __device__ __forceinline__ void fill_zero(T* ptr) {
+        // Ensure sizeof(T) * N is a multiple of 16 bytes
+        static_assert((sizeof(T) * N) % 16 == 0, "sizeof(T) * N must be a multiple of 16 bytes for proper vectorized operations");
+
+        constexpr int total_bytes = sizeof(T) * N;
+        constexpr int num_chunks = total_bytes / sizeof(__uint128_t);
+        __uint128_t* vec_ptr = reinterpret_cast<__uint128_t*>(ptr);
+        constexpr int max_iters = (num_chunks + NUM_THREADS - 1) / NUM_THREADS;
+
+        #pragma unroll
+        for (int i = 0; i < max_iters; ++i) {
+            int idx = i * blockDim.x + threadIdx.x;
+            if (idx < num_chunks) {
+                vec_ptr[idx] = 0ul;
+            }
+        }
+    }
+};
+
 } // namespace kernel
