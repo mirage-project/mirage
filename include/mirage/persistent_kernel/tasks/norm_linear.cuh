@@ -27,8 +27,6 @@ namespace kernel {
 
 using bfloat16 = type::bfloat16_t;
 
-
-
 template <typename T,
           int BATCH_SIZE,
           int OUTPUT_SIZE,
