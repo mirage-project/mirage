@@ -513,6 +513,55 @@ class PersistentKernel:
         tb_graph.new_input(output, (1, -1, -1), -1, True)
         self.kn_graph.customized([logits, output], tb_graph)
         self.kn_graph.register_task(tb_graph, "multi_token_softmax", [vocab_size, max_tokens, temp_int])
+    
+    def multi_token_linear_layer(
+        self,
+        input: DTensor,      # Shape: (1, num_tokens * reduction_size)
+        weight: DTensor,     # Shape: (reduction_size, output_size)
+        residual: DTensor,   # Shape: (1, num_tokens * output_size)
+        output: DTensor,     # Shape: (1, num_tokens * output_size)
+        grid_dim: tuple,     # Must be (num_tokens, 1, 1)
+        block_dim: tuple,    # e.g., (128, 1, 1)
+        max_tokens: int = 64,
+    ):
+        # Validate grid dimension
+        num_tokens = grid_dim[0]
+        assert grid_dim == (num_tokens, 1, 1), "Grid must be (num_tokens, 1, 1)"
+        
+        # Validate tensor shapes
+        assert input.num_dims == 2 and input.dim(0) == 1
+        assert weight.num_dims == 2
+        assert residual.num_dims == 2 and residual.dim(0) == 1
+        assert output.num_dims == 2 and output.dim(0) == 1
+        
+        # Derive dimensions
+        reduction_size = weight.dim(0)
+        output_size = weight.dim(1)
+        
+        # Validate dimension alignment
+        assert input.dim(1) == num_tokens * reduction_size
+        assert residual.dim(1) == num_tokens * output_size
+        assert output.dim(1) == num_tokens * output_size
+        
+        # Create threadblock graph
+        # Calculate shared memory size needed
+        smem_size = reduction_size * 2  # sizeof(bfloat16) = 2
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, smem_size))
+        
+        # Key mapping configuration:
+        # - Input: Map dimension 1 to grid.x (partition by tokens)
+        # - Weight: No mapping (shared across all blocks)
+        # - Residual: Map dimension 1 to grid.x (partition by tokens)
+        # - Output: Map dimension 1 to grid.x (partition by tokens)
+        tb_graph.new_input(input, (1, -1, -1), 1, True)
+        tb_graph.new_input(weight, (-1, -1, -1), 1, True)
+        tb_graph.new_input(residual, (1, -1, -1), 1, True)
+        tb_graph.new_input(output, (1, -1, -1), -1, True)
+        
+        # Register with kernel graph
+        self.kn_graph.customized([input, weight, residual, output], tb_graph)
+        self.kn_graph.register_task(tb_graph, "multi_token_linear", 
+                                   [output_size, reduction_size, max_tokens])
 
     def mask_attention_layer(
         self,

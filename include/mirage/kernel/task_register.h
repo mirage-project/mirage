@@ -48,6 +48,8 @@ public:
                             std::vector<int> const &params);
   int register_multi_token_softmax_task(threadblock::Graph const &bgraph,
                                         std::vector<int> const &params);
+  int register_multi_token_linear_task(threadblock::Graph const &bgraph,
+                                       std::vector<int> const &params);
   int register_mask_attention_task(threadblock::Graph const &bgraph,
                                    std::vector<int> const &params);
   int register_task_variant(TaskType type, std::string const &code);

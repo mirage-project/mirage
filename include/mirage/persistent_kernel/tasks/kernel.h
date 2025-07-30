@@ -10,3 +10,4 @@
 #include "single_batch_multitoken_decoding.cuh"
 #include "softmax.cuh"
 #include "multi_token_softmax.cuh"
+#include "multi_token_linear.cuh"

@@ -1225,6 +1225,7 @@ TaskGraphResult print_task_graph(
   task_type_to_name[TASK_ARGMAX_REDUCE] = "TASK_ARGMAX_REDUCE";
   task_type_to_name[TASK_SOFTMAX] = "TASK_SOFTMAX";
   task_type_to_name[TASK_MULTI_TOKEN_SOFTMAX] = "TASK_MULTI_TOKEN_SOFTMAX";
+  task_type_to_name[TASK_MULTI_TOKEN_LINEAR] = "TASK_MULTI_TOKEN_LINEAR";
   task_type_to_name[TASK_MASK_ATTENTION] = "TASK_MASK_ATTENTION";
 
   code.e("__device__ __forceinline__");
