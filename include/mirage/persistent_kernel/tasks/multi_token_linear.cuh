@@ -32,10 +32,8 @@ __device__ __forceinline__ void multi_token_linear_kernel(
     int num_tokens,             // Runtime number of tokens
     bool residual = true) 
 {
-    // Optimized implementation with tiling and better memory access patterns
-    constexpr int TILE_K = 128;  // Tile size for reduction dimension
-    constexpr int TILE_N = 64;   // Tile size for output dimension
-    constexpr int THREADS_PER_BLOCK = 256;  // Typical block size
+    // Simple and efficient implementation
+    // Each thread computes one or more complete dot products
     
     // Cast pointers
     T const *input = static_cast<T const *>(input_ptr);
@@ -43,86 +41,35 @@ __device__ __forceinline__ void multi_token_linear_kernel(
     T const *residual_base = residual ? static_cast<T const *>(residual_ptr) : nullptr;
     T *output = static_cast<T *>(output_ptr);
     
-    // Shared memory layout
+    // Shared memory for input vector only
     extern __shared__ char smem[];
     T *shared_input = reinterpret_cast<T *>(smem);
-    T *shared_weight = shared_input + TILE_K;  // Weight tile after input
     
-    // Thread configuration
-    const int tid = threadIdx.x;
-    const int warp_id = tid / 32;
-    const int lane_id = tid % 32;
-    const int num_warps = blockDim.x / 32;
+    // Load entire input vector into shared memory
+    for (int i = threadIdx.x; i < REDUCTION_SIZE; i += blockDim.x) {
+        shared_input[i] = input[i];
+    }
+    __syncthreads();
     
-    // Process output in tiles
-    for (int output_tile_start = 0; output_tile_start < OUTPUT_SIZE; output_tile_start += TILE_N) {
-        const int output_tile_size = min(TILE_N, OUTPUT_SIZE - output_tile_start);
+    // Each thread computes multiple outputs
+    // Use grid-stride loop for better load balancing
+    for (int out_idx = threadIdx.x; out_idx < OUTPUT_SIZE; out_idx += blockDim.x) {
+        float sum = 0.0f;
         
-        // Accumulator for this thread's outputs
-        float acc[4] = {0.0f, 0.0f, 0.0f, 0.0f};  // Each thread handles up to 4 outputs
-        const int outputs_per_thread = (output_tile_size + blockDim.x - 1) / blockDim.x;
-        
-        // Process reduction dimension in tiles
-        for (int k_tile_start = 0; k_tile_start < REDUCTION_SIZE; k_tile_start += TILE_K) {
-            const int k_tile_size = min(TILE_K, REDUCTION_SIZE - k_tile_start);
-            
-            // Cooperative load of input tile into shared memory
-            __syncthreads();
-            #pragma unroll 4
-            for (int i = tid; i < k_tile_size; i += blockDim.x) {
-                shared_input[i] = input[k_tile_start + i];
-            }
-            
-            // Cooperative load of weight tile into shared memory
-            // Each thread loads one or more elements
-            const int weight_elements = k_tile_size * output_tile_size;
-            #pragma unroll 2
-            for (int i = tid; i < weight_elements; i += blockDim.x) {
-                int k_idx = i / output_tile_size;
-                int n_idx = i % output_tile_size;
-                shared_weight[i] = weight[(k_tile_start + k_idx) * OUTPUT_SIZE + 
-                                         output_tile_start + n_idx];
-            }
-            __syncthreads();
-            
-            // Compute matrix multiplication for this tile
-            #pragma unroll 4
-            for (int out_idx = 0; out_idx < outputs_per_thread && 
-                 tid * outputs_per_thread + out_idx < output_tile_size; out_idx++) {
-                const int n_idx = tid * outputs_per_thread + out_idx;
-                
-                // Use registers to accumulate partial sums
-                float partial_sum = 0.0f;
-                
-                // Unroll the reduction loop for better ILP
-                #pragma unroll 8
-                for (int k = 0; k < k_tile_size; k++) {
-                    partial_sum += float(shared_input[k]) * 
-                                  float(shared_weight[k * output_tile_size + n_idx]);
-                }
-                
-                acc[out_idx] += partial_sum;
-            }
+        // Compute dot product
+        // Access weight matrix in column-major order for coalescing
+        #pragma unroll 8
+        for (int k = 0; k < REDUCTION_SIZE; k++) {
+            sum += float(shared_input[k]) * float(weight[k * OUTPUT_SIZE + out_idx]);
         }
         
-        // Write results for this output tile
-        __syncthreads();
-        #pragma unroll 4
-        for (int out_idx = 0; out_idx < outputs_per_thread && 
-             tid * outputs_per_thread + out_idx < output_tile_size; out_idx++) {
-            const int global_out_idx = output_tile_start + tid * outputs_per_thread + out_idx;
-            if (global_out_idx < OUTPUT_SIZE) {
-                float result = acc[out_idx];
-                
-                // Add residual if enabled
-                if (residual) {
-                    result += float(residual_base[global_out_idx]);
-                }
-                
-                // Store result
-                output[global_out_idx] = T(result);
-            }
+        // Add residual if enabled
+        if (residual) {
+            sum += float(residual_base[out_idx]);
         }
+        
+        // Store result
+        output[out_idx] = T(sum);
     }
 }
 

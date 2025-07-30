@@ -544,7 +544,7 @@ class PersistentKernel:
         assert output.dim(1) == num_tokens * output_size
         
         # Create threadblock graph
-        # Calculate shared memory size needed
+        # Shared memory only needed for input vector
         smem_size = reduction_size * 2  # sizeof(bfloat16) = 2
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, smem_size))
         
