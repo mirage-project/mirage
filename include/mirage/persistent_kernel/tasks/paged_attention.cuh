@@ -275,7 +275,7 @@ __device__ __forceinline__ void
     if (qk_norm) {
       // Q norm
       if (iter == 0) {
-        rms_norm<T, QOSmem, NUM_Q_PER_KV, HEAD_DIM>(
+        rms_norm<T, QOSmem, NUM_Q_PER_KV, 1, HEAD_DIM>(
             q_smem,
             static_cast<T const *>(q_norm_weight_ptr),
             s_q_norm_sum,
@@ -287,7 +287,7 @@ __device__ __forceinline__ void
       }
       // K norm
       else if (iter == num_iters - 1) {
-        rms_norm<T, KVSmem, 1, HEAD_DIM>(
+        rms_norm<T, KVSmem, 1, 1, HEAD_DIM>(
             k_smem,
             static_cast<T const *>(k_norm_weight_ptr),
             s_k_norm_sum,

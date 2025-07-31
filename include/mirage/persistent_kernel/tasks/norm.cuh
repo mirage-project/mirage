@@ -21,7 +21,7 @@ template <typename T,
           typename InputSmem,
           int NUM_HEAD,
           int WINDOW_SIZE,
-          int HEAD_DIM = 128>
+          int HEAD_DIM>
 __device__ __forceinline__ void rms_norm(InputSmem smem_input,
                                          T const *weight_ptr,
                                          float *reduce_smem,

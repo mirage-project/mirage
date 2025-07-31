@@ -121,7 +121,7 @@ paged_v_cache = torch.empty(
 paged_kv_indptr_buffer = torch.arange(
     max_num_pages + 1, device=device, dtype=torch.int32
 )
-qo_indptr_buffer = torch.tensor([0, 4], device=device, dtype=torch.int32)
+qo_indptr_buffer = torch.tensor([0, max_tokens], device=device, dtype=torch.int32)
 paged_kv_indptr_buffer = torch.tensor([0, 1], device=device, dtype=torch.int32)
 paged_kv_indices_buffer = torch.arange(max_num_pages, device=device, dtype=torch.int32)
 paged_kv_last_page_len_buffer = torch.tensor(
@@ -197,4 +197,5 @@ torch_out = torch_multitoken_paged_attention(
     eps=eps,
 )
 print("Ratio (Mirage / Torch):")
+torch.set_printoptions(profile="full")
 print(mirage_output / torch_out)

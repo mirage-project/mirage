@@ -36,7 +36,7 @@ template <typename T,
           int HEAD_DIM,
           int MAX_SEQ_LEN,
           int PAGE_SIZE,
-          int MAX_TOKENS = 64>
+          int MAX_TOKENS = 8>
 __device__ __forceinline__ void multitoken_paged_attention_task_impl(
     void const *qkv_ptr,
     void *paged_k_cache_ptr,
@@ -55,7 +55,6 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl(
     void const *sin_ptr,
     float q_eps,
     float k_eps) {
-  return; // FIXME: remove this line after debugging
   constexpr int NUM_QO_PER_KV = NUM_QO_HEADS / NUM_KV_HEADS;
 
   // NOTE(Jinchen): The input is a packed QKV tensor, which may contain
@@ -84,6 +83,10 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl(
 
   int const first_token_pos = qo_indptr_buffer_ptr[request_id];
   int const last_token_pos = qo_indptr_buffer_ptr[request_id + 1];
+  // Exit the current task is number of query tokens is zero
+  if (first_token_pos == last_token_pos) {
+    return;
+  }
   int const num_tokens = last_token_pos - first_token_pos;
 
   // NOTE(Jinchen): to simplify the implementation, we assume that the metadata
@@ -183,6 +186,8 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl(
   constexpr size_t S_O_BUFFER_OFFSET = S_D_BUFFER_OFFSET + S_D_BUFFER_SIZE;
   [[maybe_unused]] constexpr size_t S_O_BUFFER_SIZE =
       sizeof(float) * MMA_ITERS_M * NUM_THREADS * 64;
+  constexpr size_t S_TOTAL_OFFSET = S_O_BUFFER_OFFSET + S_O_BUFFER_SIZE;
+  static_assert(S_TOTAL_OFFSET <= mirage::runtime::MAX_SHARE_MEMORY_SIZE);
 
   extern __shared__ char smem[];
 
@@ -214,7 +219,8 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl(
   size_t const num_iters = (seq_len + KV_TILE_SIZE - 1) / KV_TILE_SIZE;
   int curr_iter_len = min(seq_len, KV_TILE_SIZE);
   int cp_finished_seq_len = 0;
-
+  // assert no leafover to be handled when loading qkv
+  static_assert(HEAD_DIM % CP_CHUNK_SIZE == 0);
 #pragma unroll
   for (int chunk_idx = threadIdx.x;
        chunk_idx < num_tokens * NUM_QO_PER_KV * HEAD_DIM / CP_CHUNK_SIZE;
@@ -323,7 +329,7 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl(
       if (iter == 0) {
 #pragma unroll
         for (int token_idx = 0; token_idx < num_tokens; token_idx++) {
-          rms_norm<T, QOSmem, NUM_QO_PER_KV, HEAD_DIM>(
+          rms_norm<T, QOSmem, NUM_QO_PER_KV, 1, HEAD_DIM>(
               q_smem,
               static_cast<T const *>(q_norm_weight_ptr),
               s_q_norm_sum,
@@ -339,9 +345,9 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl(
       // K norm
       // NOTE(Jinchen): assume that MAX_TOKENS is less than or equal to
       // KV_TILE_SIZE, so the new tokens are always in the last tile
-      else if (iter == num_iters - 1) {
+      if (iter == num_iters - 1) {
         for (int token_idx = 0; token_idx < num_tokens; token_idx++) {
-          rms_norm<T, KVSmem, 1, HEAD_DIM>(
+          rms_norm<T, KVSmem, 1, 1, HEAD_DIM>(
               k_smem,
               static_cast<T const *>(k_norm_weight_ptr),
               s_k_norm_sum,
@@ -367,7 +373,8 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl(
                   (token_idx + seq_len - num_tokens) * HEAD_DIM,
               token_idx * NUM_QO_PER_KV);
         }
-      } else if (rope && iter == num_iters - 1) {
+      }
+      if (rope && iter == num_iters - 1) {
         for (int token_idx = 0; token_idx < num_tokens; token_idx++) {
           // k rope
           rotary_embedding<T, KVSmem, 1, HEAD_DIM>(

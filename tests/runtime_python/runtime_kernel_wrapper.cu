@@ -643,7 +643,7 @@ void multitoken_paged_attention(
   void const *cos_ptr = rope ? cos->data_ptr() : nullptr;
   void const *sin_ptr = rope ? sin->data_ptr() : nullptr;
 
-  launch_multitoken_paged_attention<bfloat16, 4, 1, 128, 64, 512, 4>(
+  launch_multitoken_paged_attention<bfloat16, 4, 1, 128, 512, 4096>(
       qkv_ptr,
       paged_k_cache_ptr,
       paged_v_cache_ptr,
@@ -1357,7 +1357,7 @@ __global__ void
       static_cast<long long *>(final_output_ptr) + row_idx;
 
   argmax_reduce_kernel<T, CHUNK_SIZE, NUM_PARTIAL_TASKS>(
-      row_input_val_ptr, row_input_idx_ptr, row_output_ptr, step, tokens);
+      row_input_val_ptr, row_input_idx_ptr, row_output_ptr);
 }
 
 void argmax(torch::Tensor input,
