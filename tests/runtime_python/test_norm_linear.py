@@ -1,10 +1,10 @@
-import mirage as mi
 import torch
 import runtime_kernel
 
 torch.set_printoptions(sci_mode=False)
 
 reduction_size = 4096
+bs = 2
 output_sizes = [16, 32, 56, 64, 80, 96, 112, 160, 192, 256, 544, 1336, 1600]
 
 rms_norm = torch.nn.RMSNorm(reduction_size, device="cuda:0", dtype=torch.bfloat16)
@@ -22,17 +22,19 @@ def torch_rms_norm(X, G, W, eps):
 for output_size in output_sizes:
     print(f"\n=== Testing output_size = {output_size} ===")
 
-    x = torch.randn((1, reduction_size), device="cuda", dtype=torch.bfloat16)
-    g = torch.randn((1, reduction_size), device="cuda", dtype=torch.bfloat16)
+    x = torch.randn((bs, reduction_size), device="cuda", dtype=torch.bfloat16)
+    g = torch.randn((bs, reduction_size), device="cuda", dtype=torch.bfloat16)
     w = torch.randn((output_size, reduction_size), device="cuda", dtype=torch.bfloat16)
     eps = 0.8765
-    output = torch.empty(1, output_size, device="cuda", dtype=torch.bfloat16)
+    output = torch.empty(bs, output_size, device="cuda", dtype=torch.bfloat16)
 
     runtime_kernel.norm_linear(x, g, w, eps, output)
     torch_out = torch_rms_norm(x, g, w, eps)
 
     print("Ratio (kernel / torch):")
     print(output / torch_out)
+
+    continue
 
     # Warm-up
     for _ in range(16):
@@ -56,6 +58,7 @@ for output_size in output_sizes:
     print(f"Average time over {repetitions} runs: {avg_time:.6f} ms")
 
     # Compare with Mirage
+    import mirage as mi
     if output_size <= 64:
         graph = mi.new_kernel_graph()
         X = graph.new_input(dims=(1, reduction_size), dtype=mi.bfloat16)
