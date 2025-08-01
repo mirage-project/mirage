@@ -214,7 +214,6 @@ __device__ __forceinline__ void
         constexpr int NUM_ITERS_K = TILE_SIZE / NUM_WARPS_K / 16;
 
         constexpr int log2_NUM_WARPS_N = log2_constexpr(NUM_WARPS_N);
-        constexpr int log2_NUM_WARPS_K = log2_constexpr(NUM_WARPS_K);
         constexpr int log2_NUM_ITERS_K = log2_constexpr(NUM_ITERS_K);
 
         using MatMulIntermediateSmem = smem_row<T,
