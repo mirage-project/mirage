@@ -2,7 +2,7 @@
 Adapted from https://gist.github.com/aksh-at/1b84f106b0510037d766f3f95cbe5777
 Sets up an SSH server in a Modal container.
 This requires you to `pip install sshtunnel` locally.
-After running this with `modal run launch_ssh.py`, connect to SSH with `ssh -p 9090 root@localhost`,
+After running this with `modal run demo_modal_ssh.py`, connect to SSH with `ssh -p 9090 root@localhost`,
 or from VSCode/Pycharm.
 This uses simple password authentication, but you can store your own key in a modal Secret instead.
 """
