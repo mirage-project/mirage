@@ -190,8 +190,7 @@ __device__ __forceinline__ void
       smem_col<T, 3, 3, 3, TILE_SIZE, OUTPUT_ATOM_SIZE, TILE_SIZE>;
   using WeightBufferSmem =
       smem_col<T, 3, 3, 3, TILE_SIZE, K_PIPE_MAX * OUTPUT_ATOM_SIZE, TILE_SIZE>;
-  using OutputSmem =
-      smem_row<T, 0, 0, 0, BATCH_SIZE, OUTPUT_ATOM_SIZE, OUTPUT_ATOM_SIZE>;
+
   using ReductionOutputSmem = smem_row<T, 0, 0, 0, BATCH_SIZE, 1, 1>;
 
   ZeroBufferSmem zero_buffer(zero_buf);
@@ -202,10 +201,8 @@ __device__ __forceinline__ void
 
   InputSmem mul_output_smem(mul_output);
   InputSmem element_unary_smem(element_unary_output);
-  OutputSmem mm_output_smem(mm_output);
+  
   ReductionOutputSmem reduction_output_smem(reduction_output);
-
-  OutputSmem output_smem(shared_output);
 
   auto process_atom =
       [&]<int OUTPUT_ATOM_SIZE, int NUM_WARPS_N, int NUM_WARPS_K>(
@@ -217,6 +214,7 @@ __device__ __forceinline__ void
         constexpr int NUM_ITERS_K = TILE_SIZE / NUM_WARPS_K / 16;
 
         constexpr int log2_NUM_WARPS_N = log2_constexpr(NUM_WARPS_N);
+        constexpr int log2_NUM_WARPS_K = log2_constexpr(NUM_WARPS_K);
         constexpr int log2_NUM_ITERS_K = log2_constexpr(NUM_ITERS_K);
 
         using MatMulIntermediateSmem = smem_row<T,
@@ -226,6 +224,12 @@ __device__ __forceinline__ void
                                                 NUM_WARPS_K * BATCH_SIZE,
                                                 OUTPUT_ATOM_SIZE,
                                                 OUTPUT_ATOM_SIZE>;
+        using OutputSmem =
+              smem_row<T, 0, 0, 0, BATCH_SIZE, OUTPUT_ATOM_SIZE, OUTPUT_ATOM_SIZE>;
+        OutputSmem mm_output_smem(mm_output);
+        OutputSmem output_smem(shared_output);
+
+        clear_smem_buffer<T, NUM_WARPS_K * BATCH_SIZE * OUTPUT_ATOM_SIZE>(mm_intermediate);
         MatMulIntermediateSmem mm_intermediate_smem(mm_intermediate);
 
         int warp_row = warp_idx >> log2_NUM_WARPS_N;
@@ -342,6 +346,7 @@ __device__ __forceinline__ void
 
           uint32_t a_frag[4], b_frag[4];
           for (uint32_t m = 0; m < NUM_ITERS_M; m++) {
+            // TODO: This m_row doesn't consider m
             int m_row = (lane_idx & 0xF);
             bool is_smem_valid = (m_row < BATCH_SIZE);
 #pragma unroll
@@ -391,9 +396,9 @@ __device__ __forceinline__ void
                 int col = (n << (4 + log2_NUM_WARPS_N)) + (warp_col << 4) +
                           ((lane_idx & 0x3) << 1) + ((i >> 1) << 3);
                 if (col < OUTPUT_ATOM_SIZE) {
-                  mm_intermediate_smem.at(warp_row + row_in_warp, col) =
+                  mm_intermediate_smem.at(warp_row * BATCH_SIZE + row_in_warp, col) =
                       bfloat16(s_frag[m][n][(i << 1)]);
-                  mm_intermediate_smem.at(warp_row + row_in_warp, col + 1) =
+                  mm_intermediate_smem.at(warp_row * BATCH_SIZE + row_in_warp, col + 1) =
                       bfloat16(s_frag[m][n][(i << 1) | 0x1]);
                 }
               }
