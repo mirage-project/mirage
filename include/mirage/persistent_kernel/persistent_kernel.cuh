@@ -728,9 +728,9 @@ __device__ void execute_scheduler(RuntimeConfig config, int offset) {
       worker_queue_next_free_task_pos[i] = 0;
     }
 
-    //if (sched_id == 0) {
-    //  worker_queue_next_free_task_pos[0] = 1;
-    //}
+    // if (sched_id == 0) {
+    //   worker_queue_next_free_task_pos[0] = 1;
+    // }
     int next_worker = my_first_worker;
     int queue_idx = 0;
     while (true) {

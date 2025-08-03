@@ -247,7 +247,8 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl(
     int col = (chunk_idx % (HEAD_DIM / CP_CHUNK_SIZE)) * CP_CHUNK_SIZE;
     if (dst_row + cp_finished_seq_len < seq_len - num_tokens) {
       // load from KV Cache
-      // int page_idx = page_indices[(dst_row + cp_finished_seq_len) / PAGE_SIZE];
+      // int page_idx = page_indices[(dst_row + cp_finished_seq_len) /
+      // PAGE_SIZE];
       int page_offset = (dst_row + cp_finished_seq_len) % PAGE_SIZE;
       int src_row = page_idx_0 * PAGE_SIZE + page_offset;
       load_smem(k_buffer_smem(dst_row, col), paged_k_cache_dmem(src_row, col));
@@ -297,7 +298,7 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl(
         int col = (chunk_idx % (HEAD_DIM / CP_CHUNK_SIZE)) * CP_CHUNK_SIZE;
         if (dst_row + cp_finished_seq_len < seq_len - num_tokens) {
           // load from KV Cache
-          //int page_idx =
+          // int page_idx =
           //    page_indices[(dst_row + cp_finished_seq_len) / PAGE_SIZE];
           int page_offset = (dst_row + cp_finished_seq_len) % PAGE_SIZE;
           int src_row = page_idx * PAGE_SIZE + page_offset;
@@ -331,9 +332,11 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl(
     }
     __syncthreads();
 
-    int kv_tokens_to_process = min(curr_iter_len,
-                                   max(iter * KV_TILE_SIZE + curr_iter_len - (seq_len - num_tokens), 0));
-    int first_kv_token_to_process = iter * KV_TILE_SIZE + curr_iter_len - kv_tokens_to_process;
+    int kv_tokens_to_process = min(
+        curr_iter_len,
+        max(iter * KV_TILE_SIZE + curr_iter_len - (seq_len - num_tokens), 0));
+    int first_kv_token_to_process =
+        iter * KV_TILE_SIZE + curr_iter_len - kv_tokens_to_process;
     if (qk_norm) {
       // Q norm
       if (iter == 0) {
@@ -342,11 +345,10 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl(
             static_cast<T const *>(q_norm_weight_ptr),
             s_q_norm_sum,
             q_eps,
-	    num_tokens/*window_size*/,
-            0/*token_offset*/,
+            num_tokens /*window_size*/,
+            0 /*token_offset*/,
             rope,
-            static_cast<T const *>(cos_ptr) +
-                (seq_len - num_tokens) * HEAD_DIM,
+            static_cast<T const *>(cos_ptr) + (seq_len - num_tokens) * HEAD_DIM,
             static_cast<T const *>(sin_ptr) +
                 (seq_len - num_tokens) * HEAD_DIM);
       }
@@ -357,7 +359,7 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl(
             static_cast<T const *>(k_norm_weight_ptr),
             s_k_norm_sum,
             k_eps,
-	    kv_tokens_to_process/*window_size*/,
+            kv_tokens_to_process /*window_size*/,
             curr_iter_len - kv_tokens_to_process,
             rope,
             static_cast<T const *>(cos_ptr) +
@@ -398,11 +400,13 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl(
     // update the KV Cache
     if (kv_tokens_to_process > 0) {
       int page_idx = page_indices[first_kv_token_to_process / PAGE_SIZE];
-      for (int elem_idx = threadIdx.x; elem_idx < kv_tokens_to_process * HEAD_DIM;
+      for (int elem_idx = threadIdx.x;
+           elem_idx < kv_tokens_to_process * HEAD_DIM;
            elem_idx += NUM_THREADS) {
         int token_idx = elem_idx / HEAD_DIM;
         int col = elem_idx % HEAD_DIM;
-        // int page_idx = page_indices[(token_idx + first_kv_token_to_process) / PAGE_SIZE];
+        // int page_idx = page_indices[(token_idx + first_kv_token_to_process) /
+        // PAGE_SIZE];
         int page_offset = (token_idx + first_kv_token_to_process) % PAGE_SIZE;
         int src_row = (token_idx + first_kv_token_to_process) % KV_TILE_SIZE;
         int dst_row = page_idx * PAGE_SIZE + page_offset;

@@ -336,7 +336,7 @@ __device__ __forceinline__ void
             static_cast<T const *>(qnorm_weight_ptr),
             qnorm_sum,
             q_eps,
-	    EXTEND_NUM+1 /*window_size*/,
+            EXTEND_NUM + 1 /*window_size*/,
             0, // token_offset = 0 for Q tokens
             rotary_emd,
             static_cast<T const *>(cos_ptr) + (seq_len - 1) * HEAD_DIM,
@@ -354,7 +354,7 @@ __device__ __forceinline__ void
               static_cast<T const *>(knorm_weight_ptr),
               knorm_sum,
               k_eps,
-	      1 /*window_size*/,
+              1 /*window_size*/,
               token_offset_in_chunk,
               rotary_emd,
               static_cast<T const *>(cos_ptr) + kv_pos * HEAD_DIM,

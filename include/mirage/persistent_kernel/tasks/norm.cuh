@@ -17,10 +17,7 @@
 #include "common.h"
 #include "utils.cuh"
 namespace kernel {
-template <typename T,
-          typename InputSmem,
-          int NUM_HEAD,
-          int HEAD_DIM>
+template <typename T, typename InputSmem, int NUM_HEAD, int HEAD_DIM>
 __device__ __forceinline__ void rms_norm(InputSmem smem_input,
                                          T const *weight_ptr,
                                          float *reduce_smem,
