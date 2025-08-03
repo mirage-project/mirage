@@ -4,13 +4,15 @@ import torch.nn.functional as F
 import runtime_kernel
 
 torch.set_printoptions(sci_mode=False)
+torch.set_printoptions(profile="full")
 
 qo_heads = 4
 kv_heads = 1
 head_dim = 128
 page_size = 64
 max_num_pages = 64
-max_tokens = 4
+prompt_len = 8
+max_tokens = 8
 
 device = "cuda"
 dtype = torch.bfloat16
@@ -133,10 +135,16 @@ torch_paged_v_cache = paged_v_cache.clone()
 
 all_cos = torch.randn((513, head_dim), device=device, dtype=dtype)
 all_sin = torch.randn((513, head_dim), device=device, dtype=dtype)
+#all_cos = torch.full((513, head_dim), 0.1, device=device, dtype=dtype)
+#all_sin = torch.full((513, head_dim), 0.1, device=device, dtype=dtype)
 
 qkv = torch.randn(
     (max_tokens, (qo_heads + 2 * kv_heads) * head_dim), device=device, dtype=dtype
 )
+
+#qkv = torch.full(
+#    (max_tokens, (qo_heads + 2 * kv_heads) * head_dim), 0.1, device=device, dtype=dtype
+#)
 
 q = qkv[:max_tokens, : qo_heads * head_dim]
 q = q.view(max_tokens, qo_heads, head_dim)
@@ -154,8 +162,8 @@ mirage_qkv = qkv.clone()
 q_norm_weight = torch.randn((1, head_dim), device=device, dtype=dtype)
 k_norm_weight = torch.randn((1, head_dim), device=device, dtype=dtype)
 
-torch_cos = all_cos[1 : max_tokens + 1, :]
-torch_sin = all_sin[1 : max_tokens + 1, :]
+torch_cos = all_cos[0 : max_tokens + 1, :]
+torch_sin = all_sin[0 : max_tokens + 1, :]
 
 eps = 1e-5
 
@@ -197,5 +205,5 @@ torch_out = torch_multitoken_paged_attention(
     eps=eps,
 )
 print("Ratio (Mirage / Torch):")
-torch.set_printoptions(profile="full")
 print(mirage_output / torch_out)
+

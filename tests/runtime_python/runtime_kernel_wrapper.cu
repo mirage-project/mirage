@@ -496,9 +496,9 @@ template <typename T,
           int NUM_QO_HEADS,
           int NUM_KV_HEADS,
           int HEAD_DIM,
-          int PAGE_SIZE,
           int MAX_SEQ_LEN,
-          int MAX_TOKENS = 1>
+          int PAGE_SIZE,
+          int MAX_TOKENS = 8>
 __global__ void multitoken_paged_attention_wrapper(
     void const *qkv_ptr,
     void *paged_k_cache_ptr,
@@ -521,8 +521,8 @@ __global__ void multitoken_paged_attention_wrapper(
                                        NUM_QO_HEADS,
                                        NUM_KV_HEADS,
                                        HEAD_DIM,
-                                       PAGE_SIZE,
                                        MAX_SEQ_LEN,
+                                       PAGE_SIZE,
                                        MAX_TOKENS>(
       qkv_ptr,
       paged_k_cache_ptr,
@@ -547,9 +547,9 @@ template <typename T,
           int NUM_QO_HEADS,
           int NUM_KV_HEADS,
           int HEAD_DIM,
-          int PAGE_SIZE,
           int MAX_SEQ_LEN,
-          int MAX_TOKENS = 1>
+          int PAGE_SIZE,
+          int MAX_TOKENS = 8>
 void launch_multitoken_paged_attention(
     void const *qkv_ptr,
     void *paged_k_cache_ptr,
@@ -570,14 +570,14 @@ void launch_multitoken_paged_attention(
     float k_eps) {
   dim3 grid_dim(1, 1, 1);
   dim3 block_dim(128, 1, 1);
-  size_t smem_size = 112640;
+  size_t smem_size = mirage::runtime::MAX_SHARE_MEMORY_SIZE;
 
   cudaFuncSetAttribute(multitoken_paged_attention_wrapper<T,
                                                           NUM_QO_HEADS,
                                                           NUM_KV_HEADS,
                                                           HEAD_DIM,
-                                                          PAGE_SIZE,
                                                           MAX_SEQ_LEN,
+                                                          PAGE_SIZE,
                                                           MAX_TOKENS>,
                        cudaFuncAttributeMaxDynamicSharedMemorySize,
                        smem_size);
@@ -586,8 +586,8 @@ void launch_multitoken_paged_attention(
                                      NUM_QO_HEADS,
                                      NUM_KV_HEADS,
                                      HEAD_DIM,
-                                     PAGE_SIZE,
                                      MAX_SEQ_LEN,
+                                     PAGE_SIZE,
                                      MAX_TOKENS>
       <<<grid_dim, block_dim, smem_size>>>(qkv_ptr,
                                            paged_k_cache_ptr,
@@ -854,14 +854,15 @@ __global__ void rms_norm_kernel_wrapper(void const *input_ptr,
   T const *rope_cos_ptr = static_cast<T const *>(cos_ptr);
   T const *rope_sin_ptr = static_cast<T const *>(sin_ptr);
 
-  kernel::rms_norm<T, Smem, HEAD_NUM, WINDOW_SIZE, HEAD_DIM>(input_smem,
-                                                             norm_weight_ptr,
-                                                             reduce_smem,
-                                                             eps,
-                                                             token_offset,
-                                                             rotary_emd,
-                                                             rope_cos_ptr,
-                                                             rope_sin_ptr);
+  kernel::rms_norm<T, Smem, HEAD_NUM, HEAD_DIM>(input_smem,
+                                                norm_weight_ptr,
+                                                reduce_smem,
+                                                eps,
+                                                WINDOW_SIZE,
+                                                token_offset,
+                                                rotary_emd,
+                                                rope_cos_ptr,
+                                                rope_sin_ptr);
 
   __syncthreads();
 

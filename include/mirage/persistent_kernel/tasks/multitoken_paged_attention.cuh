@@ -184,7 +184,7 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl(
       sizeof(float) * MMA_ITERS_M * NUM_THREADS * 2;
 
   constexpr size_t S_O_BUFFER_OFFSET = S_D_BUFFER_OFFSET + S_D_BUFFER_SIZE;
-  [[maybe_unused]] constexpr size_t S_O_BUFFER_SIZE =
+  constexpr size_t S_O_BUFFER_SIZE =
       sizeof(float) * MMA_ITERS_M * NUM_THREADS * 64;
   constexpr size_t S_TOTAL_OFFSET = S_O_BUFFER_OFFSET + S_O_BUFFER_SIZE;
   static_assert(S_TOTAL_OFFSET <= mirage::runtime::MAX_SHARE_MEMORY_SIZE);
@@ -216,11 +216,16 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl(
   KVSmem k_smem(s_k), v_smem(s_v);
   KVSmem k_buffer_smem(s_k_buffer), v_buffer_smem(s_v_buffer);
 
-  size_t const num_iters = (seq_len + KV_TILE_SIZE - 1) / KV_TILE_SIZE;
+  int const num_iters = (seq_len + KV_TILE_SIZE - 1) / KV_TILE_SIZE;
   int curr_iter_len = min(seq_len, KV_TILE_SIZE);
   int cp_finished_seq_len = 0;
   // assert no leafover to be handled when loading qkv
   static_assert(HEAD_DIM % CP_CHUNK_SIZE == 0);
+
+  // Currently assume that PAGE_SIZE is a multiplier of KV_TILE_SIZE
+  // so that we access a single page in one iteration
+  static_assert(PAGE_SIZE % KV_TILE_SIZE == 0);
+
 #pragma unroll
   for (int chunk_idx = threadIdx.x;
        chunk_idx < num_tokens * NUM_QO_PER_KV * HEAD_DIM / CP_CHUNK_SIZE;
@@ -233,6 +238,7 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl(
     load_smem(q_smem(dst_row, dst_col), q_dmem(src_row, src_col));
   }
 
+  int page_idx_0 = page_indices[0];
 #pragma unroll
   for (int chunk_idx = threadIdx.x;
        chunk_idx < curr_iter_len * HEAD_DIM / CP_CHUNK_SIZE;
@@ -241,9 +247,9 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl(
     int col = (chunk_idx % (HEAD_DIM / CP_CHUNK_SIZE)) * CP_CHUNK_SIZE;
     if (dst_row + cp_finished_seq_len < seq_len - num_tokens) {
       // load from KV Cache
-      int page_idx = page_indices[(dst_row + cp_finished_seq_len) / PAGE_SIZE];
+      // int page_idx = page_indices[(dst_row + cp_finished_seq_len) / PAGE_SIZE];
       int page_offset = (dst_row + cp_finished_seq_len) % PAGE_SIZE;
-      int src_row = page_idx * PAGE_SIZE + page_offset;
+      int src_row = page_idx_0 * PAGE_SIZE + page_offset;
       load_smem(k_buffer_smem(dst_row, col), paged_k_cache_dmem(src_row, col));
       load_smem(v_buffer_smem(dst_row, col), paged_v_cache_dmem(src_row, col));
     } else {
@@ -277,11 +283,12 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl(
     }
   }
 
-  for (size_t iter = 0; iter < num_iters; iter++) {
+  for (int iter = 0; iter < num_iters; iter++) {
     int next_iter_len = iter + 1 < num_iters
                             ? min(seq_len - cp_finished_seq_len, KV_TILE_SIZE)
                             : 0;
     if (next_iter_len > 0) {
+      int page_idx = page_indices[cp_finished_seq_len / PAGE_SIZE];
 #pragma unroll
       for (int chunk_idx = threadIdx.x;
            chunk_idx < curr_iter_len * HEAD_DIM / CP_CHUNK_SIZE;
@@ -290,8 +297,8 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl(
         int col = (chunk_idx % (HEAD_DIM / CP_CHUNK_SIZE)) * CP_CHUNK_SIZE;
         if (dst_row + cp_finished_seq_len < seq_len - num_tokens) {
           // load from KV Cache
-          int page_idx =
-              page_indices[(dst_row + cp_finished_seq_len) / PAGE_SIZE];
+          //int page_idx =
+          //    page_indices[(dst_row + cp_finished_seq_len) / PAGE_SIZE];
           int page_offset = (dst_row + cp_finished_seq_len) % PAGE_SIZE;
           int src_row = page_idx * PAGE_SIZE + page_offset;
           load_smem(k_smem(dst_row, col), paged_k_cache_dmem(src_row, col));
@@ -324,44 +331,42 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl(
     }
     __syncthreads();
 
+    int kv_tokens_to_process = min(curr_iter_len,
+                                   max(iter * KV_TILE_SIZE + curr_iter_len - (seq_len - num_tokens), 0));
+    int first_kv_token_to_process = iter * KV_TILE_SIZE + curr_iter_len - kv_tokens_to_process;
     if (qk_norm) {
       // Q norm
       if (iter == 0) {
-#pragma unroll
-        for (int token_idx = 0; token_idx < num_tokens; token_idx++) {
-          rms_norm<T, QOSmem, NUM_QO_PER_KV, 1, HEAD_DIM>(
-              q_smem,
-              static_cast<T const *>(q_norm_weight_ptr),
-              s_q_norm_sum,
-              q_eps,
-              token_idx * NUM_QO_PER_KV,
-              rope,
-              static_cast<T const *>(cos_ptr) +
-                  (token_idx + seq_len - num_tokens) * HEAD_DIM,
-              static_cast<T const *>(sin_ptr) +
-                  (token_idx + seq_len - num_tokens) * HEAD_DIM);
-        }
+        rms_norm<T, QOSmem, NUM_QO_PER_KV, HEAD_DIM>(
+            q_smem,
+            static_cast<T const *>(q_norm_weight_ptr),
+            s_q_norm_sum,
+            q_eps,
+	    num_tokens/*window_size*/,
+            0/*token_offset*/,
+            rope,
+            static_cast<T const *>(cos_ptr) +
+                (seq_len - num_tokens) * HEAD_DIM,
+            static_cast<T const *>(sin_ptr) +
+                (seq_len - num_tokens) * HEAD_DIM);
       }
       // K norm
-      // NOTE(Jinchen): assume that MAX_TOKENS is less than or equal to
-      // KV_TILE_SIZE, so the new tokens are always in the last tile
-      if (iter == num_iters - 1) {
-        for (int token_idx = 0; token_idx < num_tokens; token_idx++) {
-          rms_norm<T, KVSmem, 1, 1, HEAD_DIM>(
-              k_smem,
-              static_cast<T const *>(k_norm_weight_ptr),
-              s_k_norm_sum,
-              k_eps,
-              token_idx + curr_iter_len - num_tokens,
-              rope,
-              static_cast<T const *>(cos_ptr) +
-                  (token_idx + seq_len - num_tokens) * HEAD_DIM,
-              static_cast<T const *>(sin_ptr) +
-                  (token_idx + seq_len - num_tokens) * HEAD_DIM);
-        }
+      if (kv_tokens_to_process > 0) {
+        rms_norm<T, KVSmem, 1, HEAD_DIM>(
+            k_smem,
+            static_cast<T const *>(k_norm_weight_ptr),
+            s_k_norm_sum,
+            k_eps,
+	    kv_tokens_to_process/*window_size*/,
+            curr_iter_len - kv_tokens_to_process,
+            rope,
+            static_cast<T const *>(cos_ptr) +
+                first_kv_token_to_process * HEAD_DIM,
+            static_cast<T const *>(sin_ptr) +
+                first_kv_token_to_process * HEAD_DIM);
       }
-    } else {
-      if (rope && iter == 0) {
+    } else if (rope) {
+      if (iter == 0) {
 #pragma unroll
         for (int token_idx = 0; token_idx < num_tokens; token_idx++) {
           // q rope
@@ -374,21 +379,37 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl(
               token_idx * NUM_QO_PER_KV);
         }
       }
-      if (rope && iter == num_iters - 1) {
-        for (int token_idx = 0; token_idx < num_tokens; token_idx++) {
+      if (kv_tokens_to_process > 0) {
+        for (int token_idx = 0; token_idx < kv_tokens_to_process; token_idx++) {
           // k rope
           rotary_embedding<T, KVSmem, 1, HEAD_DIM>(
               k_smem,
               static_cast<T const *>(cos_ptr) +
-                  (token_idx + seq_len - num_tokens) * HEAD_DIM,
+                  (token_idx + first_kv_token_to_process) * HEAD_DIM,
               static_cast<T const *>(sin_ptr) +
-                  (token_idx + seq_len - num_tokens) * HEAD_DIM,
-              token_idx + curr_iter_len - num_tokens);
+                  (token_idx + first_kv_token_to_process) * HEAD_DIM,
+              token_idx + curr_iter_len - kv_tokens_to_process);
         }
       }
     }
 
     __syncthreads();
+
+    // update the KV Cache
+    if (kv_tokens_to_process > 0) {
+      int page_idx = page_indices[first_kv_token_to_process / PAGE_SIZE];
+      for (int elem_idx = threadIdx.x; elem_idx < kv_tokens_to_process * HEAD_DIM;
+           elem_idx += NUM_THREADS) {
+        int token_idx = elem_idx / HEAD_DIM;
+        int col = elem_idx % HEAD_DIM;
+        // int page_idx = page_indices[(token_idx + first_kv_token_to_process) / PAGE_SIZE];
+        int page_offset = (token_idx + first_kv_token_to_process) % PAGE_SIZE;
+        int src_row = (token_idx + first_kv_token_to_process) % KV_TILE_SIZE;
+        int dst_row = page_idx * PAGE_SIZE + page_offset;
+        paged_k_cache_dmem.at(dst_row, col) = k_smem.at(src_row, col);
+        paged_v_cache_dmem.at(dst_row, col) = v_smem.at(src_row, col);
+      }
+    }
 
     // compute X = QK^T
     // NOTE(Jinchen): we use m16n16k16 mma, and let warp layout be
@@ -440,8 +461,8 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl(
                   ((frag_idx >> 2) << 3) + (frag_idx & 0x1);
         int token_idx = row / NUM_QO_PER_KV;
         bool is_valid =
-            row < num_tokens * NUM_QO_PER_KV &&
-            col + iter * KV_TILE_SIZE <= token_idx + seq_len - num_tokens;
+            (row < num_tokens * NUM_QO_PER_KV) &&
+            (col + iter * KV_TILE_SIZE <= token_idx + seq_len - num_tokens);
         x_frag_f[m][frag_idx] = is_valid ? x_frag_f[m][frag_idx] : -inf;
         m_local[m][(frag_idx & 0x3) >> 1] =
             max(m_local[m][(frag_idx & 0x3) >> 1], x_frag_f[m][frag_idx]);
@@ -480,7 +501,6 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl(
         d_partial[m][(frag_idx & 0x3) >> 1] += x_frag_f[m][frag_idx];
       }
     }
-
     // update d: get local sum across 4 threads in a row
 #pragma unroll
     for (int m = 0; m < MMA_ITERS_M; m++) {
@@ -607,19 +627,6 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl(
     o_smem.at(row, col) = bfloat16(o_global / d_global);
   }
   __syncthreads();
-
-  // update the KV Cache
-  for (int elem_idx = threadIdx.x; elem_idx < num_tokens * HEAD_DIM;
-       elem_idx += NUM_THREADS) {
-    int token_idx = elem_idx / HEAD_DIM;
-    int col = elem_idx % HEAD_DIM;
-    int page_idx = page_indices[(token_idx + seq_len - num_tokens) / PAGE_SIZE];
-    int page_offset = (token_idx + seq_len - num_tokens) % PAGE_SIZE;
-    int src_row = (token_idx + seq_len - num_tokens) % KV_TILE_SIZE;
-    int dst_row = page_idx * PAGE_SIZE + page_offset;
-    paged_k_cache_dmem.at(dst_row, col) = k_smem.at(src_row, col);
-    paged_v_cache_dmem.at(dst_row, col) = v_smem.at(src_row, col);
-  }
 
   // store the output
   for (int elem_idx = threadIdx.x;

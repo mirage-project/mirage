@@ -229,11 +229,12 @@ __device__ __forceinline__ void
 
     // q_norm
     if (qk_norm && kv_idx == 0) {
-      rms_norm<T, QSmem, NUM_Q_HEADS, 1, HEAD_DIM>(
+      rms_norm<T, QSmem, NUM_Q_HEADS, HEAD_DIM>(
           q_smem,
           static_cast<T const *>(qnorm_weight_ptr),
           qnorm_sum,
           q_eps,
+          1/*num_tokens*/,
           0,
           rotary_emd,
           static_cast<T const *>(cos_ptr),
@@ -242,11 +243,12 @@ __device__ __forceinline__ void
 
     // knorm
     if (qk_norm && kv_idx == num_iterations - 1) {
-      rms_norm<T, KSmem, NUM_K_HEADS, 1, HEAD_DIM>(
+      rms_norm<T, KSmem, NUM_K_HEADS, HEAD_DIM>(
           k_cache_smem,
           static_cast<T const *>(knorm_weight_ptr),
           knorm_sum,
           k_eps,
+          1/*num_tokens*/,
           curr_iter_len - 1,
           rotary_emd,
           static_cast<T const *>(cos_ptr),

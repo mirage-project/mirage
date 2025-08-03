@@ -23,7 +23,7 @@ for output_size in output_sizes:
     print(f"\n=== Testing output_size = {output_size} ===")
 
     x = torch.randn((bs, reduction_size), device="cuda", dtype=torch.bfloat16)
-    g = torch.randn((bs, reduction_size), device="cuda", dtype=torch.bfloat16)
+    g = torch.randn((1, reduction_size), device="cuda", dtype=torch.bfloat16)
     w = torch.randn((output_size, reduction_size), device="cuda", dtype=torch.bfloat16)
     eps = 0.8765
     output = torch.empty(bs, output_size, device="cuda", dtype=torch.bfloat16)
