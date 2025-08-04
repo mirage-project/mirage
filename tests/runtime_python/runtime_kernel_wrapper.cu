@@ -1341,7 +1341,7 @@ __global__ void
       row_input_ptr, row_output_val_ptr, row_output_idx_ptr);
 }
 
-template <typename T, int CHUNK_SIZE, int NUM_PARTIAL_TASKS>
+template <typename T, int BATCH_SIZE, int CHUNK_SIZE, int NUM_PARTIAL_TASKS>
 __global__ void
     argmax_reduce_kernel_wrapper(void const *__restrict__ input_val_ptr,
                                  void const *__restrict__ input_idx_ptr,
@@ -1357,7 +1357,7 @@ __global__ void
   long long *row_output_ptr =
       static_cast<long long *>(final_output_ptr) + row_idx;
 
-  argmax_reduce_kernel<T, CHUNK_SIZE, NUM_PARTIAL_TASKS>(
+  argmax_reduce_kernel<T, BATCH_SIZE, CHUNK_SIZE, NUM_PARTIAL_TASKS>(
       row_input_val_ptr, row_input_idx_ptr, row_output_ptr);
 }
 
@@ -1410,7 +1410,7 @@ void argmax(torch::Tensor input,
 
   // Launch reduce kernel
   dim3 reduce_grid_dim(1, n_row, 1);
-  argmax_reduce_kernel_wrapper<bfloat16, CHUNK_SIZE, TASK_PER_BATCH>
+  argmax_reduce_kernel_wrapper<bfloat16, BATCH_SIZE, CHUNK_SIZE, TASK_PER_BATCH>
       <<<reduce_grid_dim, block_dim>>>(
           partial_val.data_ptr(),
           partial_idx.data_ptr(),
