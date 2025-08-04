@@ -464,7 +464,10 @@ int TaskRegister::register_argmax_reduce_task(threadblock::Graph const &bgraph,
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
-  code.e("kernel::argmax_reduce_kernel<bfloat16, $, $, $>(", batch_size, params[0], num_parts);
+  code.e("kernel::argmax_reduce_kernel<bfloat16, $, $, $>(",
+         batch_size,
+         params[0],
+         num_parts);
   code.e("    task_desc.inputs[0].base_ptr,");
   code.e("    task_desc.inputs[1].base_ptr,");
   code.e("    task_desc.outputs[0].base_ptr);");

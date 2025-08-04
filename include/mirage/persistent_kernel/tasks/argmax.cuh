@@ -127,7 +127,8 @@ __device__ __forceinline__ void
       if (current_val > local_max) {
         local_max = current_val;
         // Higher 32 bits for chunk_index (i), lower 32 for relative_index
-        local_packed_idx = ((long long)i << 32) | partial_idxs[i + batch_idx * NUM_PARTIAL_TASKS];
+        local_packed_idx = ((long long)i << 32) |
+                           partial_idxs[i + batch_idx * NUM_PARTIAL_TASKS];
       }
     }
 
@@ -137,7 +138,8 @@ __device__ __forceinline__ void
       if (local_packed_idx != -1) {
         long long winning_chunk_idx = local_packed_idx >> 32;
         long long winning_relative_idx = local_packed_idx & 0xFFFFFFFF;
-        final_output[batch_idx] = winning_chunk_idx * CHUNK_SIZE + winning_relative_idx;
+        final_output[batch_idx] =
+            winning_chunk_idx * CHUNK_SIZE + winning_relative_idx;
         // tokens[step + 1] = winning_chunk_idx * CHUNK_SIZE +
         // winning_relative_idx;
       } else {
