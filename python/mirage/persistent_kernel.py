@@ -635,7 +635,7 @@ class PersistentKernel:
         tb_graph.new_input(output_value, (1, 0, -1), -1, True)
         tb_graph.new_input(output_index, (1, 0, -1), -1, True)
         self.kn_graph.customized([input, output_value, output_index], tb_graph)
-        self.kn_graph.register_task(tb_graph, "argmax_partial")
+        self.kn_graph.register_task(tb_graph, "argmax_partial", [num_tasks])
 
     def argmax_reduce_layer(
         self,

@@ -408,7 +408,8 @@ int TaskRegister::register_linear_with_residual_task(
 
 int TaskRegister::register_argmax_partial_task(threadblock::Graph const &bgraph,
                                                std::vector<int> const &params) {
-  assert(params.size() == 0);
+  // params[0]: num_partial_tasks
+  assert(params.size() == 1);
   std::vector<tb::TBInputOp *> input_ops;
   std::vector<tb::TBInputOp *> output_ops;
   int num_inputs = 1;
@@ -426,7 +427,7 @@ int TaskRegister::register_argmax_partial_task(threadblock::Graph const &bgraph,
   assert(input_ops[0]->output_tensors[0].num_dims == 2);
   int batch_size = input_ops[0]->output_tensors[0].dim[0];
   int num_elements = input_ops[0]->output_tensors[0].dim[1];
-  int num_partial_tasks = output_ops[0]->output_tensors[0].dim[0];
+  int num_partial_tasks = params[0];
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
