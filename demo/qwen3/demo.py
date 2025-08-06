@@ -361,7 +361,7 @@ if __name__ == "__main__":
             # grid_dim=(max_factor_leq_n(hidden_size, 96 // args.max_num_batched_tokens), total_tokens_per_iter, 1), 
             grid_dim=(1, 1, 1), 
             block_dim=(128, 1, 1),
-            input_source=(spec_decode_config is not None) # 0: all_tokens, 1: input_token (spec decoding)
+            input_source=1,
         )
         x = y
         for i, layer in enumerate(model.model.layers):
