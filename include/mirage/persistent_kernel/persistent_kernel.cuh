@@ -117,7 +117,7 @@ __device__ __forceinline__ bool
       int num_tokens = config.qo_indptr_buffer[i + 1] - qo_indptr;
       int prompt_len = config.prompt_length[request_id];
       for (int j = 0; j < num_tokens; j++) {
-        if (step + j + 1 >= prompt_len) {
+        if (step + j + 1 >= prompt_len && step + j + 1 < config.max_seq_length) {
           config.tokens[request_id * MPK_MAX_SEQ_LENGTH + step + j + 1] =
               config.output_tokens[qo_indptr + j];
         }
