@@ -24,9 +24,6 @@ template <typename T,
 struct smem_row {
   T *__restrict__ base_ptr;
   using value_type = T;
-  static constexpr size_t ROW = ROW_;
-  static constexpr size_t COL = COL_;
-  static constexpr size_t SIZE = ROW * COL;
 
   // static constexpr size_t Pow2_M = (1 << M);
   // static constexpr size_t Pow2_S = (1 << S);
@@ -38,9 +35,6 @@ struct smem_row {
     base_ptr = ptr;
   }
 
-  static constexpr size_t size() {
-    return ROW * COL;
-  }
   // 2D access
   __device__ __forceinline__ T *operator()(size_t logical_idx_row,
                                            size_t logical_idx_col) {
@@ -134,9 +128,6 @@ struct smem_col {
   T *base_ptr;
 
   using value_type = T;
-
-  static constexpr size_t ROW = ROW_;
-  static constexpr size_t COL = COL_;
 
   static constexpr size_t Pow2_M = (1 << M);
   static constexpr size_t Pow2_S = (1 << S);
