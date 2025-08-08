@@ -33,6 +33,8 @@ namespace kernel {
 template <typename T,
           int NUM_QO_HEADS,
           int NUM_KV_HEADS,
+          int KV_CACHE_STRIDE,
+          int O_STRIDE,
           int HEAD_DIM,
           int MAX_SEQ_LEN,
           int PAGE_SIZE,
@@ -61,11 +63,9 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl(
   // multiple tokens. The shape of the packed QKV tensor is
   // [num_tokens, head_dim * (num_qo_heads + num_kv_heads * 2)]
   constexpr int QKV_STRIDE = (NUM_QO_HEADS + NUM_KV_HEADS * 2) * HEAD_DIM;
-  constexpr int O_STRIDE = NUM_QO_HEADS * HEAD_DIM;
   // NOTE(Jinchen): assume the layout of KV Cache is NHD,
   // i.e., the shape of KV Cache is
   // [max_num_pages, page_size, num_kv_heads, head_dim]
-  constexpr int KV_CACHE_STRIDE = NUM_KV_HEADS * HEAD_DIM;
 
   constexpr int CP_CHUNK_SIZE = 16 / sizeof(T);
   constexpr int KV_TILE_SIZE = 64;
@@ -115,7 +115,7 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl(
     int tail_offset = num_pages - tail_pages;
     for (int i = threadIdx.x; i < tail_pages; i += NUM_THREADS) {
       page_indices[tail_offset + i] =
-          paged_kv_indices_buffer_ptr[tail_offset + i];
+          paged_kv_indices_buffer_ptr[first_page_pos + tail_offset + i];
     }
   }
   __syncthreads();

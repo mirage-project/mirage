@@ -229,9 +229,11 @@ int TaskRegister::register_paged_attention_task(
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
   code.e(
-      "kernel::multitoken_paged_attention_task_impl<bfloat16, $, $, $, $, $>(",
+      "kernel::multitoken_paged_attention_task_impl<bfloat16, $, $, $, $, $, $, $>(",
       num_q_heads / num_kv_heads,
       1,
+      kv_stride,
+      output_size,
       head_dim,
       max_seq_len,
       page_size);
