@@ -117,15 +117,17 @@ __device__ __forceinline__ bool
       int num_tokens = config.qo_indptr_buffer[i + 1] - qo_indptr;
       int prompt_len = config.prompt_length[request_id];
       for (int j = 0; j < num_tokens; j++) {
-        if (step + j + 1 >= prompt_len && step + j + 1 < config.max_seq_length) {
+        if (step + j + 1 >= prompt_len &&
+            step + j + 1 < config.max_seq_length) {
           config.tokens[request_id * MPK_MAX_SEQ_LENGTH + step + j + 1] =
               config.output_tokens[qo_indptr + j];
         }
       }
       config.step[request_id] = step + num_tokens;
       if ((step + num_tokens >= config.max_seq_length) || (config.profiling) ||
-          ((config.tokens[request_id * MPK_MAX_SEQ_LENGTH + step + num_tokens] ==
-           config.eos_token_id) && (step + num_tokens >= prompt_len))) {
+          ((config.tokens[request_id * MPK_MAX_SEQ_LENGTH + step +
+                          num_tokens] == config.eos_token_id) &&
+           (step + num_tokens >= prompt_len))) {
         // Request is done
         config.request_ids[i] = -1;
         // Free pages

@@ -126,7 +126,7 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl(
   T const *__restrict__ d_v = d_k + HEAD_DIM;
   T *__restrict__ d_paged_k_cache = reinterpret_cast<T *>(paged_k_cache_ptr);
   T *__restrict__ d_paged_v_cache = reinterpret_cast<T *>(paged_v_cache_ptr);
-  T *__restrict__ d_output = 
+  T *__restrict__ d_output =
       reinterpret_cast<T *>(output_ptr) + first_token_pos * O_STRIDE;
 
   // DTensors' layouts
