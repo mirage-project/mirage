@@ -1078,6 +1078,8 @@ void silu_mul_linear(torch::Tensor input,
     SILU_MUL_LINEAR_DISPATCH_BATCH_SIZE(4)
     SILU_MUL_LINEAR_DISPATCH_BATCH_SIZE(5)
     SILU_MUL_LINEAR_DISPATCH_BATCH_SIZE(6)
+    SILU_MUL_LINEAR_DISPATCH_BATCH_SIZE(7)
+    SILU_MUL_LINEAR_DISPATCH_BATCH_SIZE(8)
     default:
       printf("Unsupported output size in test: %zu\n", output.size(1));
       break;

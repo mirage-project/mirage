@@ -123,9 +123,9 @@ __device__ __forceinline__ bool
         }
       }
       config.step[request_id] = step + num_tokens;
-      if ((step + 2 >= config.max_seq_length) || (config.profiling) ||
-          (config.tokens[request_id * MPK_MAX_SEQ_LENGTH + step + num_tokens] ==
-           config.eos_token_id)) {
+      if ((step + num_tokens >= config.max_seq_length) || (config.profiling) ||
+          ((config.tokens[request_id * MPK_MAX_SEQ_LENGTH + step + num_tokens] ==
+           config.eos_token_id) && (step + num_tokens >= prompt_len))) {
         // Request is done
         config.request_ids[i] = -1;
         // Free pages
@@ -1044,7 +1044,7 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
   global_runtime_config.num_graphs = 1;
   global_runtime_config.verbose = false;
   global_runtime_config.profiling = profiler_buffer != nullptr;
-  global_runtime_config.split_worker_scheduler = false;
+  global_runtime_config.split_worker_scheduler = true;
 
   std::vector<TaskDesc> all_tasks;
   std::vector<EventDesc> all_events;
