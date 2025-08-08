@@ -213,6 +213,7 @@ int TaskRegister::register_paged_attention_task(
     }
   }
   assert(output_ops[0]->output_tensors[0].num_dims == 2);
+  int qkv_stride = input_ops[0]->dtensor.dim[1];
   int output_size = output_ops[0]->dtensor.dim[1];
   int num_q_heads = params[0];
   int num_kv_heads = params[1];
@@ -229,10 +230,11 @@ int TaskRegister::register_paged_attention_task(
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
   code.e(
-      "kernel::multitoken_paged_attention_task_impl<bfloat16, $, $, $, $, $, $, $>(",
+      "kernel::multitoken_paged_attention_task_impl<bfloat16, $, $, $, $, $, $, $, $>(",
       num_q_heads / num_kv_heads,
       1,
       kv_stride,
+      qkv_stride,
       output_size,
       head_dim,
       max_seq_len,

@@ -34,6 +34,7 @@ template <typename T,
           int NUM_QO_HEADS,
           int NUM_KV_HEADS,
           int KV_CACHE_STRIDE,
+          int QKV_STRIDE,
           int O_STRIDE,
           int HEAD_DIM,
           int MAX_SEQ_LEN,
@@ -62,7 +63,6 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl(
   // NOTE(Jinchen): The input is a packed QKV tensor, which may contain
   // multiple tokens. The shape of the packed QKV tensor is
   // [num_tokens, head_dim * (num_qo_heads + num_kv_heads * 2)]
-  constexpr int QKV_STRIDE = (NUM_QO_HEADS + NUM_KV_HEADS * 2) * HEAD_DIM;
   // NOTE(Jinchen): assume the layout of KV Cache is NHD,
   // i.e., the shape of KV Cache is
   // [max_num_pages, page_size, num_kv_heads, head_dim]
@@ -126,15 +126,15 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl(
   T const *__restrict__ d_v = d_k + HEAD_DIM;
   T *__restrict__ d_paged_k_cache = reinterpret_cast<T *>(paged_k_cache_ptr);
   T *__restrict__ d_paged_v_cache = reinterpret_cast<T *>(paged_v_cache_ptr);
-  T *__restrict__ d_output =
-      reinterpret_cast<T *>(output_ptr) + first_token_pos * QKV_STRIDE;
+  T *__restrict__ d_output = 
+      reinterpret_cast<T *>(output_ptr) + first_token_pos * O_STRIDE;
 
   // DTensors' layouts
   using QDmem =
-      dmem_row_const<T, MAX_TOKENS * NUM_QO_PER_KV, HEAD_DIM, QKV_STRIDE>;
+      dmem_row_const<T, MAX_TOKENS, HEAD_DIM * NUM_QO_PER_KV, QKV_STRIDE>;
   using KVDmem = dmem_row_const<T, MAX_TOKENS, HEAD_DIM, QKV_STRIDE>;
   using KVCacheDmem = dmem_row<T, KV_TILE_SIZE, HEAD_DIM, KV_CACHE_STRIDE>;
-  using ODmem = dmem_row<T, MAX_TOKENS * NUM_QO_PER_KV, HEAD_DIM, O_STRIDE>;
+  using ODmem = dmem_row<T, MAX_TOKENS, HEAD_DIM * NUM_QO_PER_KV, O_STRIDE>;
 
   QDmem q_dmem(d_q);
   KVDmem k_dmem(d_k), v_dmem(d_v);
