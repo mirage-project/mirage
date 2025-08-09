@@ -582,6 +582,22 @@ class PersistentKernel:
         self.kn_graph.customized([input, buffer, output], tb_graph)
         self.kn_graph.register_task(tb_graph, "allreduce")
 
+    def silu_mul_layer(
+        self,
+        input: DTensor,
+        output: DTensor,
+        grid_dim: tuple,
+        block_dim: tuple,
+    ):
+        # Currently assume that input/output
+        assert input.num_dims == 2 # (batch_size, 2 * intermediate_size)
+        assert output.num_dims == 2 # (batch_size, intermediate_size)
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(input, (1, -1, -1), 1, True)
+        tb_graph.new_input(output, (1, -1, -1), 1, True)
+        self.kn_graph.customized([input, output], tb_graph)
+        self.kn_graph.register_task(tb_graph, "silu_mul")
+
     def silu_mul_linear_with_residual_layer(
         self,
         input: DTensor,

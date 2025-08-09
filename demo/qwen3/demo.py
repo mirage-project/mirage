@@ -302,6 +302,12 @@ if __name__ == "__main__":
             name="mlp_mid",
             io_category="cuda_tensor",
         )
+        silu_mul_out = mpk.new_tensor(
+            dims=(args.max_num_batched_tokens, intermediate_size // world_size),
+            dtype=mi.bfloat16,
+            name="silu_mul_out",
+            io_category="cuda_tensor",
+        )
         mlp_out = mpk.new_tensor(
             dims=(args.max_num_batched_tokens, hidden_size),
             dtype=mi.bfloat16,
@@ -468,11 +474,11 @@ if __name__ == "__main__":
             w_up_proj = mpk.attach_input(
                 torch_tensor=layer.mlp.up_proj.weight, name=f"layer_{i}_up_proj"
             )
-
+            rmsnorm_num_tasks = grid_for_rmsnorm_linear_layer(w_gate_proj.dim(0) + w_up_proj.dim(0))
             w_gatedup = mpk.fuse_tensors(
                 inputs=[w_gate_proj, w_up_proj],
                 fused_dim=0,
-                num_groups=1,
+                num_groups=rmsnorm_num_tasks//2,
                 name=f"layer_{i}_gatedup_proj",
             )
             mpk.rmsnorm_linear_layer(
@@ -480,15 +486,21 @@ if __name__ == "__main__":
                 weight_norm=w_norm,
                 weight_linear=w_gatedup,
                 output=mlp_mid,
-                grid_dim=(grid_for_rmsnorm_linear_layer(w_gatedup.dim(0)), 1, 1),
+                grid_dim=(rmsnorm_num_tasks, 1, 1),
+                block_dim=(128, 1, 1),
+            )
+            mpk.silu_mul_layer(
+                input=mlp_mid,
+                output=silu_mul_out,
+                grid_dim=(rmsnorm_num_tasks//2, 1, 1),
                 block_dim=(128, 1, 1),
             )
             # add silu_mul_linear layer
             w = mpk.attach_input(
                 torch_tensor=layer.mlp.down_proj.weight, name=f"layer_{i}_down_proj"
             )
-            mpk.silu_mul_linear_with_residual_layer(
-                input=mlp_mid,
+            mpk.linear_with_residual_layer(
+                input=silu_mul_out,
                 weight=w,
                 residual=x,
                 output=mlp_out,

@@ -1235,6 +1235,7 @@ TaskGraphResult print_task_graph(
   task_type_to_name[TASK_EMBEDDING] = "TASK_EMBEDDING";
   task_type_to_name[TASK_RMS_NORM_LINEAR] = "TASK_RMS_NORM_LINEAR";
   task_type_to_name[TASK_ATTENTION_1] = "TASK_ATTENTION_1";
+  task_type_to_name[TASK_SILU_MUL] = "TASK_SILU_MUL";
   task_type_to_name[TASK_SILU_MUL_LINEAR_WITH_RESIDUAL] =
       "TASK_SILU_MUL_LINEAR_WITH_RESIDUAL";
   task_type_to_name[TASK_LINEAR_WITH_RESIDUAL] = "TASK_LINEAR_WITH_RESIDUAL";
