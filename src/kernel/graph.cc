@@ -431,8 +431,8 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
     task_config[op] =
         std::make_tuple(3, 1, TASK_LINEAR_WITH_RESIDUAL, variant_id);
   } else if (name == "silu_mul") {
-    int variant_id = task_register->register_silu_mul_task(
-        customized->bgraph, params);
+    int variant_id =
+        task_register->register_silu_mul_task(customized->bgraph, params);
     task_config[op] = std::make_tuple(1, 1, TASK_SILU_MUL, variant_id);
   } else if (name == "silu_mul_linear_with_residual") {
     int variant_id = task_register->register_silu_mul_linear_with_residual_task(

@@ -17,10 +17,13 @@
 #include "utils.cuh"
 namespace kernel {
 
-template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int I_STRIDE, int O_STRIDE>
-__device__ __forceinline__ void
-    silu_mul_task_impl(void const *input_ptr,
-                       void *output_ptr) {
+template <typename T,
+          int BATCH_SIZE,
+          int OUTPUT_SIZE,
+          int I_STRIDE,
+          int O_STRIDE>
+__device__ __forceinline__ void silu_mul_task_impl(void const *input_ptr,
+                                                   void *output_ptr) {
   T const *__restrict__ d_input = static_cast<T const *>(input_ptr);
   T const *__restrict__ d_mul = static_cast<T const *>(input_ptr) + OUTPUT_SIZE;
   T *__restrict__ d_output = static_cast<T *>(output_ptr);
@@ -32,8 +35,8 @@ __device__ __forceinline__ void
     float input_val = float(d_input[batch_idx * I_STRIDE + offset]);
     T mul_val = d_mul[batch_idx * I_STRIDE + offset];
     d_output[batch_idx * O_STRIDE + offset] =
-      T(input_val / (1.0f + expf(-input_val))) * mul_val;
+        T(input_val / (1.0f + expf(-input_val))) * mul_val;
   }
 }
 
-}
+} // namespace kernel

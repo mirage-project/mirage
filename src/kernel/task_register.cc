@@ -321,8 +321,8 @@ int TaskRegister::register_single_batch_extend_attention_task(
                                code.to_string());
 }
 
-int TaskRegister::register_silu_mul_task(
-    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+int TaskRegister::register_silu_mul_task(threadblock::Graph const &bgraph,
+                                         std::vector<int> const &params) {
   assert(params.size() == 0);
   int batch_size = 0, output_size = 0, input_stride, output_stride;
   std::vector<tb::TBInputOp *> input_ops;
@@ -362,8 +362,7 @@ int TaskRegister::register_silu_mul_task(
          output_stride);
   code.e("    task_desc.inputs[0].base_ptr,");
   code.e("    task_desc.outputs[0].base_ptr);");
-  return register_task_variant(TASK_SILU_MUL,
-                               code.to_string());
+  return register_task_variant(TASK_SILU_MUL, code.to_string());
 }
 
 int TaskRegister::register_silu_mul_linear_with_residual_task(
