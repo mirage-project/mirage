@@ -37,6 +37,7 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
                                               void const *weight_ptr,
                                               void const *residual_ptr,
                                               void *output_ptr,
+                                              int num_active_tokens,
                                               bool residual = true) {
   constexpr int CHUNK_SIZE = 16 / sizeof(T);
   constexpr int OUTPUT_ATOM_SIZE = OUTPUT_SIZE <= 128 ? OUTPUT_SIZE : 128;
@@ -266,7 +267,7 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
       uint32_t a_frag[4], b_frag[4];
       for (uint32_t m = 0; m < NUM_ITERS_M; m++) {
         int m_row = (lane_idx & 0xF);
-        bool is_valid = (m_row < BATCH_SIZE);
+        bool is_valid = (m_row < num_active_tokens);
 #pragma unroll
         for (uint32_t n = 0; n < NUM_ITERS_N; n++) {
           int n_col = (n << (4 + log2_NUM_WARPS_N)) + (warp_col << 4) +
@@ -296,7 +297,7 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
 #pragma unroll
         for (uint32_t i = 0; i < 4; i++) {
           int row_in_warp = (lane_idx >> 2) + ((i & 0x1) << 3);
-          if (row_in_warp < BATCH_SIZE) {
+          if (row_in_warp < num_active_tokens) {
             int col = (n << (4 + log2_NUM_WARPS_N)) + (warp_col << 4) +
                       ((lane_idx & 0x3) << 1) + ((i >> 1) << 3);
             mm_intermediate_smem.at(warp_row + row_in_warp, col) =
@@ -316,7 +317,7 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
     }
 
 #pragma unroll
-    for (int row = 0; row < BATCH_SIZE; row++) {
+    for (int row = 0; row < num_active_tokens; row++) {
 #pragma unroll
       for (int i = threadIdx.x; i < OUTPUT_ATOM_SIZE; i += NUM_THREADS) {
         T val = NUM_WARPS_K > 1 ? output_smem.at(row, i)

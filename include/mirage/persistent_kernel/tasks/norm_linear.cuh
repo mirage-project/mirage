@@ -37,6 +37,7 @@ __device__ __forceinline__ void
     norm_linear_task_impl(void const *input_ptr,
                           void const *norm_weight_ptr,
                           void const *weight_ptr,
+                          int num_active_tokens,
                           float eps,
                           void *output_ptr) {
   constexpr int CHUNK_SIZE = 16 / sizeof(T);
@@ -344,7 +345,7 @@ __device__ __forceinline__ void
       for (uint32_t m = 0; m < NUM_ITERS_M; m++) {
         // TODO: This m_row doesn't consider m
         int m_row = (lane_idx & 0xF);
-        bool is_smem_valid = (m_row < BATCH_SIZE);
+        bool is_smem_valid = (m_row < num_active_tokens);
 #pragma unroll
         for (uint32_t n = 0; n < NUM_ITERS_N; n++) {
           int n_col = (n << (4 + log2_NUM_WARPS_N)) + (warp_col << 4) +
@@ -388,7 +389,7 @@ __device__ __forceinline__ void
 #pragma unroll
         for (uint32_t i = 0; i < 4; i++) {
           int row_in_warp = (lane_idx >> 2) + ((i & 0x1) << 3);
-          if (row_in_warp < BATCH_SIZE) {
+          if (row_in_warp < num_active_tokens) {
             int col = (n << (4 + log2_NUM_WARPS_N)) + (warp_col << 4) +
                       ((lane_idx & 0x3) << 1) + ((i >> 1) << 3);
             if (col < OUTPUT_ATOM_SIZE) {
