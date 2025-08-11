@@ -10,8 +10,13 @@ import os
 # torch.set_printoptions(threshold=2000)
 
 def grid_for_rmsnorm_linear_layer(size):
+    print("rms norm size: ", size)
+    # size = 4096 means it convert hidden states in to 16+2*8=32 heads = 4096
+    # size = 6144 means it couvert attn output to 2*3072=6144 (2*intermediate)
     # 96 and 64 are enough to cover all Qwen3 model? Please update the method
     # if you meet any incompatibility.
+    if size == 6144:
+        return 64
     if size % 96 == 0:
         return 96
     elif size % 64 == 0:
@@ -414,7 +419,7 @@ if __name__ == "__main__":
                 weight=w,
                 residual=x,
                 output=attn_proj_out,
-                grid_dim=(hidden_size // 64, 1, 1),
+                grid_dim=(64, 1, 1),
                 block_dim=(128, 1, 1),
             )
             # reset residual input as x
@@ -464,7 +469,7 @@ if __name__ == "__main__":
                 weight=w,
                 residual=x,
                 output=mlp_out,
-                grid_dim=(hidden_size // 64, 1, 1),
+                grid_dim=(64, 1, 1),
                 block_dim=(128, 1, 1),
             )
             # reset residual input as x
