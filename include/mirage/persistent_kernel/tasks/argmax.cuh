@@ -70,7 +70,8 @@ template <typename T, int BATCH_SIZE, int CHUNK_SIZE, int NUM_PARTIAL_TASKS>
 __device__ __forceinline__ void
     argmax_partial_kernel(void const *__restrict__ input_ptr,
                           void *__restrict__ output_val_ptr,
-                          void *__restrict__ output_idx_ptr) {
+                          void *__restrict__ output_idx_ptr,
+                          int num_active_tokens) {
   T const *__restrict__ input = static_cast<T const *>(input_ptr);
   T *__restrict__ output_val = static_cast<T *>(output_val_ptr);
   long long *__restrict__ output_idx = static_cast<long long *>(output_idx_ptr);
@@ -79,7 +80,7 @@ __device__ __forceinline__ void
 
 // TODO: try vectorize
 #pragma unroll
-  for (int batch_idx = 0; batch_idx < BATCH_SIZE; batch_idx++) {
+  for (int batch_idx = 0; batch_idx < num_active_tokens; batch_idx++) {
     T local_max = T(-inf);
     long long local_idx = -1;
 #pragma unroll
@@ -104,7 +105,8 @@ template <typename T, int BATCH_SIZE, int CHUNK_SIZE, int NUM_PARTIAL_TASKS>
 __device__ __forceinline__ void
     argmax_reduce_kernel(void const *__restrict__ input_val_ptr,
                          void const *__restrict__ input_idx_ptr,
-                         void *__restrict__ final_output_ptr) {
+                         void *__restrict__ final_output_ptr,
+                         int num_active_tokens) {
   // int step,
   // long long *tokens) {
   T const *__restrict__ partial_vals = static_cast<T const *>(input_val_ptr);
@@ -116,7 +118,7 @@ __device__ __forceinline__ void
   int tidx = threadIdx.x;
 // TODO: try vectorize
 #pragma unroll
-  for (int batch_idx = 0; batch_idx < BATCH_SIZE; batch_idx++) {
+  for (int batch_idx = 0; batch_idx < num_active_tokens; batch_idx++) {
     T local_max = T(-inf);
     // Pack (chunk_index, relative_index) into a single 64-bit integer
     long long local_packed_idx = -1;

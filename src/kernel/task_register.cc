@@ -488,7 +488,8 @@ int TaskRegister::register_argmax_partial_task(threadblock::Graph const &bgraph,
          num_partial_tasks);
   code.e("    task_desc.inputs[0].base_ptr,");
   code.e("    task_desc.outputs[0].base_ptr,");
-  code.e("    task_desc.outputs[1].base_ptr);");
+  code.e("    task_desc.outputs[1].base_ptr,");
+  code.e("    runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS]);");
   return register_task_variant(TASK_ARGMAX_PARTIAL, code.to_string());
 }
 
@@ -522,7 +523,8 @@ int TaskRegister::register_argmax_reduce_task(threadblock::Graph const &bgraph,
          num_parts);
   code.e("    task_desc.inputs[0].base_ptr,");
   code.e("    task_desc.inputs[1].base_ptr,");
-  code.e("    task_desc.outputs[0].base_ptr);");
+  code.e("    task_desc.outputs[0].base_ptr,");
+  code.e("    runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS]);");
   return register_task_variant(TASK_ARGMAX_REDUCE, code.to_string());
 }
 
