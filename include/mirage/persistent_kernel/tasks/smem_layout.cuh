@@ -27,15 +27,21 @@ struct smem_row {
   static constexpr size_t ROW = ROW_;
   static constexpr size_t COL = COL_;
   static constexpr size_t SIZE = ROW * COL;
+  
+  // row_offset is for cases where the base_ptr is pointed to the middle of another
+  // swizzle pattern, causing the swizzle starting from 0 by default incorrect.
+  // Therefore, we need to make address mapping logic aware of the offset.
+  // For example, A = smem_row<T, 3, 3, 3, 8, 128, 128>(ptr) and you want B to point
+  // to the 2nd row of A, you should set B = smem_row<T, 3, 3, 3, 8, 128, 128>(ptr + 128, 1)
+  // instead of B = smem_row<T, 3, 3, 3, 8, 128, 128>(ptr + 128)
+  // TODO: This should also be applied to other similar templates
+  size_t row_offset = 0;
 
-  // static constexpr size_t Pow2_M = (1 << M);
-  // static constexpr size_t Pow2_S = (1 << S);
-  // static constexpr size_t Pow2_B = (1 << B);
+  __device__ __forceinline__ smem_row(T *ptr, size_t row_offset_ = 0) : base_ptr(ptr), row_offset(row_offset_) {}
 
-  __device__ __forceinline__ smem_row(T *ptr) : base_ptr(ptr) {}
-
-  __device__ __forceinline__ void set_ptr(T *ptr) {
+  __device__ __forceinline__ void set_ptr(T *ptr, size_t row_offset_ = 0) {
     base_ptr = ptr;
+    row_offset = row_offset_;
   }
 
   static constexpr size_t size() {
@@ -45,28 +51,16 @@ struct smem_row {
   __device__ __forceinline__ T *operator()(size_t logical_idx_row,
                                            size_t logical_idx_col) {
     size_t logical_idx = logical_idx_row * STRIDE + logical_idx_col;
+    size_t logical_idx_with_offset = (logical_idx_row + row_offset) * STRIDE + logical_idx_col;
     // assert(logical_idx < SIZE);
-
-    // first get the block -> 3,3,3 means 8*8*8 = 8 rows * 8 cols * 8elements
-    // size_t block_idx = logical_idx / (Pow2_M * Pow2_S * Pow2_B);
-    // size_t in_block_idx = logical_idx % (Pow2_M * Pow2_S * Pow2_B);
-
-    // //get the irow and icol inside the block
-    // size_t irow = in_block_idx / (Pow2_M * Pow2_S);
-    // size_t icol = (in_block_idx / (Pow2_M)) % (Pow2_S);
-    // icol = irow ^ icol;
-    // size_t offset_in_bank = in_block_idx % (Pow2_M);
-
-    // size_t phy_offset = block_idx * (Pow2_M * Pow2_S * Pow2_B) + irow *
-    // (Pow2_M * Pow2_S)
-    // + icol * (Pow2_M) + offset_in_bank;
 
     size_t block_idx = logical_idx >> (M + S + B);
     size_t in_block_idx = logical_idx & ((1 << (M + S + B)) - 1);
 
     size_t irow = in_block_idx >> (M + S);
+    size_t irow_with_offset = (logical_idx_with_offset & ((1 << (M + S + B)) - 1)) >> (M + S);
     size_t icol = (in_block_idx >> M) & ((1 << S) - 1);
-    icol ^= irow;
+    icol ^= irow_with_offset;
     size_t offset_in_bank = in_block_idx & ((1 << M) - 1);
     size_t phy_offset = (block_idx << (M + S + B)) + (irow << (M + S)) +
                         (icol << M) + offset_in_bank;
@@ -76,14 +70,16 @@ struct smem_row {
   __device__ __forceinline__ T &at(size_t logical_idx_row,
                                    size_t logical_idx_col) {
     size_t logical_idx = logical_idx_row * STRIDE + logical_idx_col;
+    size_t logical_idx_with_offset = (logical_idx_row + row_offset) * STRIDE + logical_idx_col;
     // assert(logical_idx < SIZE);
 
     size_t block_idx = logical_idx >> (M + S + B);
     size_t in_block_idx = logical_idx & ((1 << (M + S + B)) - 1);
 
     size_t irow = in_block_idx >> (M + S);
+    size_t irow_with_offset = (logical_idx_with_offset & ((1 << (M + S + B)) - 1)) >> (M + S);
     size_t icol = (in_block_idx >> M) & ((1 << S) - 1);
-    icol ^= irow;
+    icol ^= irow_with_offset;
     size_t offset_in_bank = in_block_idx & ((1 << M) - 1);
 
     size_t phy_offset = (block_idx << (M + S + B)) + (irow << (M + S)) +
@@ -94,12 +90,17 @@ struct smem_row {
   // 1D access
   __device__ __forceinline__ T &at(size_t logical_idx) {
     // assert(logical_idx < SIZE);
+    size_t logical_idx_row = logical_idx / STRIDE;
+    size_t logical_idx_col = logical_idx % STRIDE;
+    size_t logical_idx_with_offset = (logical_idx_row + row_offset) * STRIDE + logical_idx_col;
+
     size_t block_idx = logical_idx >> (M + S + B);
     size_t in_block_idx = logical_idx & ((1 << (M + S + B)) - 1);
 
     size_t irow = in_block_idx >> (M + S);
+    size_t irow_with_offset = (logical_idx_with_offset & ((1 << (M + S + B)) - 1)) >> (M + S);
     size_t icol = (in_block_idx >> M) & ((1 << S) - 1);
-    icol ^= irow;
+    icol ^= irow_with_offset;
     size_t offset_in_bank = in_block_idx & ((1 << M) - 1);
 
     size_t phy_offset = (block_idx << (M + S + B)) + (irow << (M + S)) +
@@ -109,12 +110,17 @@ struct smem_row {
 
   __device__ __forceinline__ T *operator[](size_t logical_idx) const {
     // assert(logical_idx < SIZE);
+    size_t logical_idx_row = logical_idx / STRIDE;
+    size_t logical_idx_col = logical_idx % STRIDE;
+    size_t logical_idx_with_offset = (logical_idx_row + row_offset) * STRIDE + logical_idx_col;
+
     size_t block_idx = logical_idx >> (M + S + B);
     size_t in_block_idx = logical_idx & ((1 << (M + S + B)) - 1);
 
     size_t irow = in_block_idx >> (M + S);
+    size_t irow_with_offset = (logical_idx_with_offset & ((1 << (M + S + B)) - 1)) >> (M + S);
     size_t icol = (in_block_idx >> M) & ((1 << S) - 1);
-    icol ^= irow;
+    icol ^= irow_with_offset;
     size_t offset_in_bank = in_block_idx & ((1 << M) - 1);
 
     size_t phy_offset = (block_idx << (M + S + B)) + (irow << (M + S)) +
