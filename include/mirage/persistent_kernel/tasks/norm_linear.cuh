@@ -328,7 +328,7 @@ __device__ __forceinline__ void
 
       // rotate the buffers
       input_smem.set_ptr(shared_input_buffer +
-                         BATCH_SIZE * TILE_SIZE * for_idx, BATCH_SIZE * for_idx);
+                         BATCH_SIZE * TILE_SIZE * for_idx);
       norm_weight_smem.set_ptr(shared_norm_weight_buffer + TILE_SIZE * for_idx);
       weight_buffer_smem.set_ptr(shared_weight_buffer +
                                  TILE_SIZE * OUTPUT_ATOM_SIZE *
