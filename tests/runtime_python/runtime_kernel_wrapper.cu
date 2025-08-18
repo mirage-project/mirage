@@ -662,13 +662,21 @@ void multitoken_paged_attention(
   int const head_dim = 128;
   int const qkv_stride = (qo_heads + 2 * kv_heads) * head_dim;
   assert(qkv_stride == qkv.stride(0));
-  int const kv_stride =  head_dim * kv_heads;
+  int const kv_stride = head_dim * kv_heads;
   assert(kv_stride == paged_k_cache.stride(1));
   int const o_stride = head_dim * qo_heads;
   int const page_size = 4096;
   int const max_seq_len = 512;
 
-  launch_multitoken_paged_attention<bfloat16, qo_heads, kv_heads, kv_stride, qkv_stride, o_stride, head_dim, max_seq_len, page_size>(
+  launch_multitoken_paged_attention<bfloat16,
+                                    qo_heads,
+                                    kv_heads,
+                                    kv_stride,
+                                    qkv_stride,
+                                    o_stride,
+                                    head_dim,
+                                    max_seq_len,
+                                    page_size>(
       qkv_ptr,
       paged_k_cache_ptr,
       paged_v_cache_ptr,
@@ -1124,7 +1132,11 @@ __global__ void linear_kernel_wrapper(void const *input_ptr,
                                       void const *residual_ptr,
                                       void *output_ptr) {
   linear_kernel<T, BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE>(
-      input_ptr, weight_ptr, residual_ptr, output_ptr, BATCH_SIZE/*num_active_tokens*/);
+      input_ptr,
+      weight_ptr,
+      residual_ptr,
+      output_ptr,
+      BATCH_SIZE /*num_active_tokens*/);
 }
 
 template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int REDUCTION_SIZE>
@@ -1365,7 +1377,10 @@ __global__ void
                                   chunk_idx;
 
   argmax_partial_kernel<T, BATCH_SIZE, CHUNK_SIZE, NUM_PARTIAL_TASKS>(
-      row_input_ptr, row_output_val_ptr, row_output_idx_ptr, BATCH_SIZE/*num_active_tokens*/);
+      row_input_ptr,
+      row_output_val_ptr,
+      row_output_idx_ptr,
+      BATCH_SIZE /*num_active_tokens*/);
 }
 
 template <typename T, int BATCH_SIZE, int CHUNK_SIZE, int NUM_PARTIAL_TASKS>
@@ -1385,7 +1400,10 @@ __global__ void
       static_cast<long long *>(final_output_ptr) + row_idx;
 
   argmax_reduce_kernel<T, BATCH_SIZE, CHUNK_SIZE, NUM_PARTIAL_TASKS>(
-      row_input_val_ptr, row_input_idx_ptr, row_output_ptr, BATCH_SIZE/*num_active_tokens*/);
+      row_input_val_ptr,
+      row_input_idx_ptr,
+      row_output_ptr,
+      BATCH_SIZE /*num_active_tokens*/);
 }
 
 void argmax(torch::Tensor input,

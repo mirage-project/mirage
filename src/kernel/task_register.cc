@@ -116,9 +116,7 @@ int TaskRegister::register_rmsnorm_task(threadblock::Graph const &bgraph,
   assert(output_ops[0]->dtensor.dim[1] == input_ops[0]->dtensor.dim[1]);
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
-  code.e("kernel::rms_norm_impl<bfloat16, $, $>(",
-         batch_size,
-         hidden_dim);
+  code.e("kernel::rms_norm_impl<bfloat16, $, $>(", batch_size, hidden_dim);
   code.e("    task_desc.inputs[0].base_ptr,");
   code.e("    task_desc.inputs[1].base_ptr,");
   code.e("    task_desc.outputs[0].base_ptr,");
@@ -449,10 +447,9 @@ int TaskRegister::register_silu_mul_linear_with_residual_task(
                                code.to_string());
 }
 
-int TaskRegister::register_linear_task(
-    threadblock::Graph const &bgraph,
-    std::vector<int> const &params,
-    bool with_residual) {
+int TaskRegister::register_linear_task(threadblock::Graph const &bgraph,
+                                       std::vector<int> const &params,
+                                       bool with_residual) {
   assert(params.size() == 0);
   int batch_size = 0, output_size = 0, reduction_size = 0, output_stride = 0;
   std::vector<tb::TBInputOp *> input_ops;

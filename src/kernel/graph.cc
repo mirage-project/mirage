@@ -431,12 +431,11 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
         std::make_tuple(7, 1, TASK_SINGLE_BATCH_EXTEND_ATTENTION, variant_id);
   } else if (name == "linear") {
     int variant_id = task_register->register_linear_task(
-        customized->bgraph, params, false/*with_residual*/);
-    task_config[op] =
-        std::make_tuple(2, 1, TASK_LINEAR, variant_id);
+        customized->bgraph, params, false /*with_residual*/);
+    task_config[op] = std::make_tuple(2, 1, TASK_LINEAR, variant_id);
   } else if (name == "linear_with_residual") {
     int variant_id = task_register->register_linear_task(
-        customized->bgraph, params, true/*with_residual*/);
+        customized->bgraph, params, true /*with_residual*/);
     task_config[op] =
         std::make_tuple(3, 1, TASK_LINEAR_WITH_RESIDUAL, variant_id);
   } else if (name == "silu_mul") {

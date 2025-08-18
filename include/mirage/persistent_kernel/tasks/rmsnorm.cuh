@@ -17,9 +17,7 @@
 #include "utils.cuh"
 namespace kernel {
 
-template <typename T,
-          int BATCH_SIZE,
-          int HIDDEN_DIM>
+template <typename T, int BATCH_SIZE, int HIDDEN_DIM>
 __device__ __forceinline__ void rms_norm_impl(void const *input_ptr,
                                               void const *weight_ptr,
                                               void *output_ptr,
@@ -34,7 +32,7 @@ __device__ __forceinline__ void rms_norm_impl(void const *input_ptr,
   float sum = 0.0f;
 #pragma unroll
   for (int i = threadIdx.x; i < HIDDEN_DIM; i += blockDim.x) {
-    float val = (float) d_input[i];
+    float val = (float)d_input[i];
     sum += val * val;
   }
 #pragma unroll
@@ -50,7 +48,7 @@ __device__ __forceinline__ void rms_norm_impl(void const *input_ptr,
   for (int offset = NUM_WARPS / 2; offset > 0; offset /= 2) {
     sum += shfl_xor_sync(sum, offset);
   }
-  if (threadIdx.x ==0) {
+  if (threadIdx.x == 0) {
     reduce_smem[0] = sum;
   }
   __syncthreads();
@@ -59,8 +57,8 @@ __device__ __forceinline__ void rms_norm_impl(void const *input_ptr,
 
 #pragma unroll
   for (int i = threadIdx.x; i < HIDDEN_DIM; i += NUM_THREADS) {
-    float val = (float) d_input[i];
-    float w = (float) d_weight[i];
+    float val = (float)d_input[i];
+    float w = (float)d_weight[i];
     val *= rms_rcp * w;
     d_output[i] = (T)val;
   }

@@ -45,7 +45,8 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
   constexpr int TILE_SIZE = 128;
   constexpr int FORLOOP_RANGE = REDUCTION_SIZE / TILE_SIZE;
 
-  constexpr int WEIGHT_PIPE_MAX = PIPE_MAX < NUM_OUTPUT_ATOMS ? PIPE_MAX : NUM_OUTPUT_ATOMS;
+  constexpr int WEIGHT_PIPE_MAX =
+      PIPE_MAX < NUM_OUTPUT_ATOMS ? PIPE_MAX : NUM_OUTPUT_ATOMS;
 
   constexpr int NUM_CHUNKS_A = BATCH_SIZE * TILE_SIZE / CHUNK_SIZE;
   constexpr int NUM_CHUNKS_B = TILE_SIZE * OUTPUT_ATOM_SIZE / CHUNK_SIZE;
@@ -89,8 +90,7 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
   using InputDmem = dmem_row_const<T, BATCH_SIZE, TILE_SIZE, REDUCTION_SIZE>;
   using WeightDmem =
       dmem_col_const<T, TILE_SIZE, OUTPUT_ATOM_SIZE, REDUCTION_SIZE>;
-  using ResidualDmem =
-      dmem_row_const<T, BATCH_SIZE, OUTPUT_SIZE, O_STRIDE>;
+  using ResidualDmem = dmem_row_const<T, BATCH_SIZE, OUTPUT_SIZE, O_STRIDE>;
   using OutputDmem = dmem_row<T, BATCH_SIZE, OUTPUT_SIZE, O_STRIDE>;
 
   InputDmem input_dmem(d_input);
@@ -113,7 +113,8 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
   // sizeof(T) * TILE_SIZE * WEIGHT_PIPE_MAX * OUTPUT_ATOM_SIZE
 
   constexpr size_t MM_INTERMEDIATE_OFFSET =
-      SHARED_WEIGHT_BUFFER_OFFSET + sizeof(T) * TILE_SIZE * WEIGHT_PIPE_MAX * OUTPUT_ATOM_SIZE;
+      SHARED_WEIGHT_BUFFER_OFFSET +
+      sizeof(T) * TILE_SIZE * WEIGHT_PIPE_MAX * OUTPUT_ATOM_SIZE;
   // sizeof(T) * NUM_WARPS_K * BATCH_SIZE * OUTPUT_ATOM_SIZE
 
   constexpr size_t SHARED_OUTPUT_OFFSET =
@@ -138,8 +139,13 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
   // define the swizzle mode
   using ZeroBufferSmem = smem_row<T, 0, 0, 0, 1, 8, 8>;
   using InputSmem = smem_row<T, 3, 3, 3, BATCH_SIZE, TILE_SIZE, TILE_SIZE>;
-  using WeightSmem =
-      smem_col<T, 3, 3, 3, TILE_SIZE, WEIGHT_PIPE_MAX * OUTPUT_ATOM_SIZE, TILE_SIZE>;
+  using WeightSmem = smem_col<T,
+                              3,
+                              3,
+                              3,
+                              TILE_SIZE,
+                              WEIGHT_PIPE_MAX * OUTPUT_ATOM_SIZE,
+                              TILE_SIZE>;
   using OutputFullSmem =
       smem_row<T, 0, 0, 0, BATCH_SIZE, OUTPUT_SIZE, OUTPUT_SIZE>;
   using OutputAtomViewSmem =
@@ -163,7 +169,8 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
   // Initialize output_smem: if residual is provided, preload it; otherwise zero
 
 #pragma unroll
-  for (int i = threadIdx.x; i < BATCH_SIZE * OUTPUT_SIZE / CHUNK_SIZE; i += NUM_THREADS) {
+  for (int i = threadIdx.x; i < BATCH_SIZE * OUTPUT_SIZE / CHUNK_SIZE;
+       i += NUM_THREADS) {
     int row = i / (OUTPUT_SIZE / CHUNK_SIZE);
     int col = (i % (OUTPUT_SIZE / CHUNK_SIZE)) << log2_CHUNK_SIZE;
     if (residual) {
@@ -174,7 +181,8 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
   }
 
   // Outer loop over K tiles; inner loop over output atoms
-  for (int for_idx = 0; for_idx < FORLOOP_RANGE; for_idx++, d_weight += TILE_SIZE) {
+  for (int for_idx = 0; for_idx < FORLOOP_RANGE;
+       for_idx++, d_weight += TILE_SIZE) {
 
     weight_dmem.set_ptr(d_weight);
 
@@ -194,7 +202,7 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
       for (int i = threadIdx.x; i < NUM_CHUNKS_B; i += NUM_THREADS) {
         int src_row = (i & (CHUNKS_PER_COL_B - 1)) << log2_CHUNK_SIZE;
         int dst_row = (i & (CHUNKS_PER_COL_B - 1)) << log2_CHUNK_SIZE;
-        
+
         int src_stage = w_pipe;
         int buffer_stage = (w_pipe + 1) % WEIGHT_PIPE_MAX;
 
@@ -208,7 +216,8 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
     }
 
     // Loop over output atoms for this K-slice
-    for (int output_atom_idx = 0; output_atom_idx < NUM_OUTPUT_ATOMS; output_atom_idx++) {
+    for (int output_atom_idx = 0; output_atom_idx < NUM_OUTPUT_ATOMS;
+         output_atom_idx++) {
       // Prefetch next weight atom into ring buffer stage_write
       if (output_atom_idx + WEIGHT_PIPE_MAX - 1 < NUM_OUTPUT_ATOMS) {
 #pragma unroll
@@ -217,13 +226,15 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
           int dst_row = (i & (CHUNKS_PER_COL_B - 1)) << log2_CHUNK_SIZE;
 
           int src_stage = output_atom_idx + WEIGHT_PIPE_MAX - 1;
-          int buffer_stage = (output_atom_idx + WEIGHT_PIPE_MAX) % WEIGHT_PIPE_MAX;
-          
+          int buffer_stage =
+              (output_atom_idx + WEIGHT_PIPE_MAX) % WEIGHT_PIPE_MAX;
+
           int col_within = i >> log2_CHUNKS_PER_COL_B;
           int src_col = src_stage * OUTPUT_ATOM_SIZE + col_within;
           int dst_col = buffer_stage * OUTPUT_ATOM_SIZE + col_within;
 
-          load_smem(weight_smem(dst_row, dst_col), weight_dmem(src_row, src_col));
+          load_smem(weight_smem(dst_row, dst_col),
+                    weight_dmem(src_row, src_col));
         }
         cp_async_fence();
         cp_async_wait<WEIGHT_PIPE_MAX - 1>();
@@ -257,10 +268,12 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
             int n_row = (warp_row << (4 + log2_NUM_ITERS_K)) + (k << 4) +
                         (((lane_idx & 0xF) >> 3) << 3);
             int weight_stage_read = (output_atom_idx + 1) % WEIGHT_PIPE_MAX;
-            T *src_ptr = is_valid ? input_smem(m_row, m_col)
-                                  : zero_buffer(0, 0);
+            T *src_ptr =
+                is_valid ? input_smem(m_row, m_col) : zero_buffer(0, 0);
             ldsm(src_ptr, a_frag);
-            ldsm(weight_smem(n_row, weight_stage_read * OUTPUT_ATOM_SIZE + n_col), b_frag);
+            ldsm(weight_smem(n_row,
+                             weight_stage_read * OUTPUT_ATOM_SIZE + n_col),
+                 b_frag);
             mma_m16n16k16_bf16bf16bf32(
                 s_frag[m][n], a_frag, b_frag, s_frag[m][n]);
           }
@@ -294,11 +307,13 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
       if (NUM_WARPS_K > 1) {
         // Reduce across K-warps and accumulate into output_smem slice
         OutputAtomViewSmem out_slice(shared_output + atom_col_offset);
-        reduction_sum_row_add<OutputAtomViewSmem, decltype(mm_intermediate_smem)>(
+        reduction_sum_row_add<OutputAtomViewSmem,
+                              decltype(mm_intermediate_smem)>(
             out_slice, mm_intermediate_smem);
       } else {
         // Directly accumulate without reduction across warps
-        for (int idx = threadIdx.x; idx < BATCH_SIZE * OUTPUT_ATOM_SIZE; idx += NUM_THREADS) {
+        for (int idx = threadIdx.x; idx < BATCH_SIZE * OUTPUT_ATOM_SIZE;
+             idx += NUM_THREADS) {
           int row = idx / OUTPUT_ATOM_SIZE;
           if (row < num_active_tokens) {
             int col = idx % OUTPUT_ATOM_SIZE;
@@ -312,7 +327,8 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
     }
   }
 
-  // Final writeback: store accumulated output (residual already included if any)
+  // Final writeback: store accumulated output (residual already included if
+  // any)
   // TODO: loop over BATCH_SIZE * OUTPUT_SIZE
 #pragma unroll
   for (int row = 0; row < num_active_tokens; row++) {
