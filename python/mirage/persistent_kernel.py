@@ -309,6 +309,24 @@ class PersistentKernel:
         self.kn_graph.customized([input, weight, output], tb_graph)
         self.kn_graph.register_task(tb_graph, "embedding", [input_source])
 
+    def rmsnorm_layer(
+        self,
+        input: DTensor,
+        weight: DTensor,
+        output: DTensor,
+        grid_dim: tuple,
+        block_dim: tuple,
+    ):
+        # Currently assume that the input/output are 2D tensors
+        assert input.num_dims == 2
+        assert output.num_dims == 2
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(input, (0, -1, -1), 1, True)
+        tb_graph.new_input(weight, (-1, -1, -1), 0, True)
+        tb_graph.new_input(output, (0, -1, -1), 1, True)
+        self.kn_graph.customized([input, weight, output], tb_graph)
+        self.kn_graph.register_task(tb_graph, "rmsnorm")
+
     def rmsnorm_linear_layer(
         self,
         input: DTensor,
@@ -540,6 +558,25 @@ class PersistentKernel:
             tb_graph,
         )
         self.kn_graph.register_task(tb_graph, "paged_attention", params)
+
+    def linear_layer(
+        self,
+        input: DTensor,
+        weight: DTensor,
+        output: DTensor,
+        grid_dim: tuple,
+        block_dim: tuple,
+    ):
+        # Currently assume that input/output
+        assert input.num_dims == 2  # (batch_size, hidden_size / world_size)
+        assert weight.num_dims == 2  # (hidden_size, hidden_size / world_size)
+        assert output.num_dims == 2  # (batch_size, hidden_size)
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(input, (-1, -1, -1), 1, True)
+        tb_graph.new_input(weight, (0, -1, -1), 1, True)
+        tb_graph.new_input(output, (1, -1, -1), -1, True)
+        self.kn_graph.customized([input, weight, output], tb_graph)
+        self.kn_graph.register_task(tb_graph, "linear")
 
     def linear_with_residual_layer(
         self,

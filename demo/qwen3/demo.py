@@ -266,6 +266,12 @@ if __name__ == "__main__":
             name="embed_out",
             io_category="cuda_tensor",
         )
+        rmsnorm_out = mpk.new_tensor(
+            dims=(args.max_num_batched_tokens, hidden_size),
+            dtype=mi.bfloat16,
+            name="rmsnorm_out",
+            io_category="cuda_tensor",
+        )
         attn_in = mpk.new_tensor(
             dims=(args.max_num_batched_tokens, fused_outdim_1 // world_size), # [6, 6144]
             dtype=mi.bfloat16,
@@ -391,6 +397,20 @@ if __name__ == "__main__":
                 num_groups=model.config.num_key_value_heads // world_size,
                 name=f"layer_{i}_qkv_proj",
             )
+            #mpk.rmsnorm_layer(
+            #    input=x,
+            #    weight=w_norm,
+            #    output=rmsnorm_out,
+            #    grid_dim=(mpk.max_num_batched_tokens, 1, 1),
+            #    block_dim=(128, 1, 1),
+            #)
+            #mpk.linear_layer(
+            #    input=rmsnorm_out,
+            #    weight=w_qkv,
+            #    output=attn_in,
+            #    grid_dim=(grid_for_rmsnorm_linear_layer(w_qkv.dim(0)), 1, 1),
+            #    block_dim=(128, 1, 1),
+            #)
             mpk.rmsnorm_linear_layer(
                 input=x,
                 weight_norm=w_norm,
@@ -481,6 +501,20 @@ if __name__ == "__main__":
                 num_groups=rmsnorm_num_tasks//2,
                 name=f"layer_{i}_gatedup_proj",
             )
+            #mpk.rmsnorm_layer(
+            #    input=x,
+            #    weight=w_norm,
+            #    output=rmsnorm_out,
+            #    grid_dim=(mpk.max_num_batched_tokens, 1, 1),
+            #    block_dim=(128, 1, 1),
+            #)
+            #mpk.linear_layer(
+            #    input=rmsnorm_out,
+            #    weight=w_gatedup,
+            #    output=mlp_mid,
+            #    grid_dim=(rmsnorm_num_tasks, 1, 1),
+            #    block_dim=(128, 1, 1),
+            #)
             mpk.rmsnorm_linear_layer(
                 input=x,
                 weight_norm=w_norm,

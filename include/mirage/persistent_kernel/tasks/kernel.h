@@ -2,6 +2,7 @@
 #include "embedding.cuh"
 #include "linear.cuh"
 #include "multitoken_paged_attention.cuh"
+#include "rmsnorm.cuh"
 #include "norm_linear.cuh"
 #include "paged_attention.cuh"
 #include "reduction.cuh"

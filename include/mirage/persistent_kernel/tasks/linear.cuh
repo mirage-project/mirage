@@ -38,7 +38,7 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
                                               void const *residual_ptr,
                                               void *output_ptr,
                                               int num_active_tokens,
-                                              bool residual = true) {
+                                              bool residual) {
   constexpr int CHUNK_SIZE = 16 / sizeof(T);
   constexpr int OUTPUT_ATOM_SIZE = OUTPUT_SIZE <= 128 ? OUTPUT_SIZE : 128;
   constexpr int NUM_OUTPUT_ATOMS = OUTPUT_SIZE / OUTPUT_ATOM_SIZE;
@@ -79,9 +79,12 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
 
   T const *__restrict__ d_input = static_cast<T const *>(input_ptr);
   T const *__restrict__ d_weight = static_cast<T const *>(weight_ptr);
-  T const *__restrict__ d_residual =
-      residual ? static_cast<T const *>(residual_ptr) : nullptr;
+  T const *__restrict__ d_residual = static_cast<T const *>(residual_ptr);
   T *__restrict__ d_output = static_cast<T *>(output_ptr);
+  // CANNOT perform residual when redisual_ptr is nullptr
+  if (residual_ptr == nullptr) {
+    assert(!residual);
+  }
 
   using InputDmem = dmem_row_const<T, BATCH_SIZE, TILE_SIZE, REDUCTION_SIZE>;
   using WeightDmem =

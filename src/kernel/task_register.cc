@@ -89,6 +89,43 @@ int TaskRegister::register_embedding_task(threadblock::Graph const &bgraph,
   return register_task_variant(TASK_EMBEDDING, code.to_string());
 }
 
+int TaskRegister::register_rmsnorm_task(threadblock::Graph const &bgraph,
+                                        std::vector<int> const &params) {
+  assert(params.size() == 0);
+  std::vector<tb::TBInputOp *> input_ops;
+  std::vector<tb::TBInputOp *> output_ops;
+  int num_inputs = 2;
+  int num_outputs = 1;
+
+  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    if (input_ops.size() < (size_t)num_inputs) {
+      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    } else {
+      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    }
+  }
+  assert(output_ops[0]->output_tensors[0].num_dims == 2);
+  int batch_size = output_ops[0]->output_tensors[0].dim[0];
+  int hidden_dim = output_ops[0]->output_tensors[0].dim[1];
+  // Currently assume that each rmsnorm task processes one token
+  assert(batch_size == 1);
+  assert(input_ops[0]->dtensor.num_dims == 2);
+  assert(output_ops[0]->dtensor.dim[0] == input_ops[0]->dtensor.dim[0]);
+  assert(output_ops[0]->dtensor.dim[1] == input_ops[0]->dtensor.dim[1]);
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::rms_norm_impl<bfloat16, $, $>(",
+         batch_size,
+         hidden_dim);
+  code.e("    task_desc.inputs[0].base_ptr,");
+  code.e("    task_desc.inputs[1].base_ptr,");
+  code.e("    task_desc.outputs[0].base_ptr,");
+  code.e("    1e-6f);");
+  return register_task_variant(TASK_RMS_NORM, code.to_string());
+}
+
 int TaskRegister::register_rmsnorm_linear_task(threadblock::Graph const &bgraph,
                                                std::vector<int> const &params) {
   assert(params.size() == 0);
@@ -412,13 +449,15 @@ int TaskRegister::register_silu_mul_linear_with_residual_task(
                                code.to_string());
 }
 
-int TaskRegister::register_linear_with_residual_task(
-    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+int TaskRegister::register_linear_task(
+    threadblock::Graph const &bgraph,
+    std::vector<int> const &params,
+    bool with_residual) {
   assert(params.size() == 0);
   int batch_size = 0, output_size = 0, reduction_size = 0, output_stride = 0;
   std::vector<tb::TBInputOp *> input_ops;
   std::vector<tb::TBInputOp *> output_ops;
-  int num_inputs = 3;
+  int num_inputs = with_residual ? 3 : 2;
   int num_outputs = 1;
 
   assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
@@ -450,11 +489,23 @@ int TaskRegister::register_linear_with_residual_task(
          output_stride);
   code.e("    task_desc.inputs[0].base_ptr,");
   code.e("    task_desc.inputs[1].base_ptr,");
-  code.e("    task_desc.inputs[2].base_ptr,");
+  if (with_residual) {
+    code.e("    task_desc.inputs[2].base_ptr,");
+  } else {
+    code.e("    nullptr,");
+  }
   code.e("    task_desc.outputs[0].base_ptr,");
   code.e("    runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS],");
-  code.e("    runtime_config.my_gpu_id == 0);");
-  return register_task_variant(TASK_LINEAR_WITH_RESIDUAL, code.to_string());
+  if (with_residual) {
+    code.e("    runtime_config.my_gpu_id == 0);");
+  } else {
+    code.e("    false/*residual*/);");
+  }
+  if (with_residual) {
+    return register_task_variant(TASK_LINEAR_WITH_RESIDUAL, code.to_string());
+  } else {
+    return register_task_variant(TASK_LINEAR, code.to_string());
+  }
 }
 
 int TaskRegister::register_argmax_partial_task(threadblock::Graph const &bgraph,
