@@ -39,21 +39,21 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
                                               void const *residual_ptr,
                                               void *output_ptr,
                                               bool residual = true) {
-  constexpr int CHUNK_SIZE = 16 / sizeof(T);
-  constexpr int OUTPUT_ATOM_SIZE = OUTPUT_SIZE <= 128 ? OUTPUT_SIZE : 128;
+  constexpr int CHUNK_SIZE = 16 / sizeof(T); // 8
+  constexpr int OUTPUT_ATOM_SIZE = OUTPUT_SIZE <= 128 ? OUTPUT_SIZE : 128; // 48
   constexpr int NUM_OUTPUT_ATOMS = OUTPUT_SIZE / OUTPUT_ATOM_SIZE;
   constexpr int TILE_SIZE = 128;
   constexpr int FORLOOP_RANGE = REDUCTION_SIZE / TILE_SIZE;
 
   constexpr int NUM_CHUNKS_A = BATCH_SIZE * TILE_SIZE / CHUNK_SIZE;
   constexpr int NUM_CHUNKS_B = TILE_SIZE * OUTPUT_ATOM_SIZE / CHUNK_SIZE; // 768
-  constexpr int NUM_CHUNKS_C = BATCH_SIZE * OUTPUT_ATOM_SIZE / CHUNK_SIZE;
+  constexpr int NUM_CHUNKS_C = BATCH_SIZE * OUTPUT_ATOM_SIZE / CHUNK_SIZE; // 6
 
   constexpr int CHUNKS_PER_ROW_A = TILE_SIZE / CHUNK_SIZE;
   constexpr int CHUNKS_PER_COL_B = TILE_SIZE / CHUNK_SIZE;
-  constexpr int CHUNKS_PER_ROW_C = OUTPUT_ATOM_SIZE / CHUNK_SIZE;
+  constexpr int CHUNKS_PER_ROW_C = OUTPUT_ATOM_SIZE / CHUNK_SIZE; // 6
 
-  constexpr int log2_CHUNK_SIZE = log2_constexpr(CHUNK_SIZE);
+  constexpr int log2_CHUNK_SIZE = log2_constexpr(CHUNK_SIZE); // 3
   constexpr int log2_CHUNKS_PER_ROW_A = log2_constexpr(CHUNKS_PER_ROW_A);
   constexpr int log2_CHUNKS_PER_COL_B = log2_constexpr(CHUNKS_PER_COL_B);
   // constexpr int log2_CHUNKS_PER_ROW_C = log2_constexpr(CHUNKS_PER_ROW_C);
@@ -207,8 +207,9 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
     if (residual) {
 #pragma unroll
       for (int i = threadIdx.x; i < NUM_CHUNKS_C; i += NUM_THREADS) {
+        // Change the map between row, col and the offset.
         int row = i / CHUNKS_PER_ROW_C;
-        int col = (i & (CHUNKS_PER_ROW_C - 1)) << log2_CHUNK_SIZE;
+        int col = (i % CHUNKS_PER_ROW_C) << log2_CHUNK_SIZE;
         load_smem(residual_smem(row, col), residual_dmem(row, col));
       }
     }
@@ -382,41 +383,44 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
     }
   }
   if(OUTPUT_SIZE == 16) {
-    __nanosleep(100000);
-    if(threadIdx.x == 0) {
-      printf("Insider kernel last 16 output:\n");
-      for(int ii = 0; ii < 16; ii ++) {
-        float vv = __bfloat162float(static_cast<__nv_bfloat16*>(output_ptr)[ii]);
-        printf("%f ", vv);
-      }
-      printf("\n");
-      printf("Insider kernel last 32-16 output:\n");
-      for(int ii = 0; ii < 16; ii ++) {
-        float vv = __bfloat162float(static_cast<__nv_bfloat16*>(output_ptr-32)[ii]);
-        printf("%f ", vv);
-      }
-      printf("\n");
-      printf("Insider kernel last 4096 residual inputs:\n");
-      for(int ii = 0; ii < 4096; ii ++) {
-        void const* residual_start = residual_ptr - 8160;
-        float vv = __bfloat162float(static_cast<__nv_bfloat16 const*>(residual_start)[ii]);
-        printf("%f, ", vv);
-      }
-      printf("\n");
-      printf("Insider kernel first 16 weight inputs:\n");
-      for(int ii = 0; ii < 16; ii ++) {
-        // void const* weight_start = weight_ptr - 33423360;
-        float vv = __bfloat162float(static_cast<__nv_bfloat16 const*>(weight_ptr)[ii]);
-        printf("%f ", vv);
-      }
-      printf("\n");
-      printf("Insider kernel inputs:\n");
-      for(int ii = 0; ii < 4096; ii ++) {
-        float vv = __bfloat162float(static_cast<__nv_bfloat16 const*>(input_ptr)[ii]);
-        printf("%f, ", vv);
-      }
-      printf("\n");
-    }
+    // if(threadIdx.x == 0) {
+    //   printf("calling 16 cols kernel once!\n");
+    // }
+    // __nanosleep(1000000);
+    // if(threadIdx.x == 0) {
+    //   printf("Insider kernel last 16 output:\n");
+    //   for(int ii = 0; ii < 16; ii ++) {
+    //     float vv = __bfloat162float(static_cast<__nv_bfloat16*>(output_ptr)[ii]);
+    //     printf("%f ", vv);
+    //   }
+    //   printf("\n");
+    //   printf("Insider kernel all 4096 output:\n");
+    //   for(int ii = 0; ii < 4096; ii ++) {
+    //     float vv = __bfloat162float(static_cast<__nv_bfloat16*>(output_ptr-8160)[ii]);
+    //     printf("%f, ", vv);
+    //   }
+    //   printf("\n");
+    //   printf("Insider kernel last 4096 residual inputs:\n");
+    //   for(int ii = 0; ii < 4096; ii ++) {
+    //     void const* residual_start = residual_ptr - 8160;
+    //     float vv = __bfloat162float(static_cast<__nv_bfloat16 const*>(residual_start)[ii]);
+    //     printf("%f, ", vv);
+    //   }
+    //   printf("\n");
+    //   printf("Insider kernel first 16 weight inputs:\n");
+    //   for(int ii = 0; ii < 16; ii ++) {
+    //     // void const* weight_start = weight_ptr - 33423360;
+    //     float vv = __bfloat162float(static_cast<__nv_bfloat16 const*>(weight_ptr)[ii]);
+    //     printf("%f ", vv);
+    //   }
+    //   printf("\n");
+    //   printf("Insider kernel inputs:\n");
+    //   for(int ii = 0; ii < 4096; ii ++) {
+    //     float vv = __bfloat162float(static_cast<__nv_bfloat16 const*>(input_ptr)[ii]);
+    //     printf("%f, ", vv);
+    //   }
+    //   printf("\n");
+    // }
   }
 }
 

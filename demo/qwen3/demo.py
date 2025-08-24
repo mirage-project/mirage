@@ -58,7 +58,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--max-seq-length",
-        default=214,
+        default=512,
         type=int,
         help="Max sequence length for lookahead spec decode",
     )
@@ -136,6 +136,7 @@ if __name__ == "__main__":
                 """
     question = "Can you please change x axis to start from 0"
     prompt = code_text + "\n" + question
+    # prompt = "Who are you"
     messages = [
         {
             "role": "system",
