@@ -98,12 +98,8 @@ TBInputOp::TBInputOp(Graph *_graph,
     }
     if (dim_idx >= 0) {
       assert(tensor.dim[dim_idx] > 0);
-      // assert(tensor.dim[dim_idx] % dim_div == 0);
+      assert(tensor.dim[dim_idx] % dim_div == 0);
       tensor.dim[dim_idx] /= dim_div;
-      if(tensor.dim[dim_idx] % dim_div != 0) {
-        // TODO(Wenqin): fix it later for align with shared memory loading.
-        tensor.dim[dim_idx] += 1;
-      }
     }
   }
 
