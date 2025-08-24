@@ -32,6 +32,7 @@ setup(
                 'cxx': [],
                 'nvcc': [
                     '-O3',
+                    # "-G",
                     '-gencode=arch=compute_80,code=sm_80',
                 ]
             }

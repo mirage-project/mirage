@@ -138,6 +138,7 @@ def get_compile_command(
         "-use_fast_math",
         "-Xcompiler=-fPIC",
         "--expt-relaxed-constexpr",
+        # "-G",
         "-o",
         py_so_path,
     ]
@@ -446,6 +447,7 @@ class PersistentKernel:
         tb_graph.new_input(residual, (1, -1, -1), -1, True)
         tb_graph.new_input(output, (1, -1, -1), -1, True)
         self.kn_graph.customized([input, weight, residual, output], tb_graph)
+        # print("create op for linear_with_residual_layer")
         self.kn_graph.register_task(tb_graph, "linear_with_residual")
 
     def allreduce_layer(

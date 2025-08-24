@@ -422,6 +422,7 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
     task_config[op] =
         std::make_tuple(7, 1, TASK_SINGLE_BATCH_EXTEND_ATTENTION, variant_id);
   } else if (name == "linear_with_residual") {
+    // TODO: we may have to register two kinds of task here, one for 48 per block, another one for 16 per block, how to do it?
     int variant_id = task_register->register_linear_with_residual_task(
         customized->bgraph, params);
     task_config[op] =

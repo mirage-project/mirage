@@ -79,6 +79,7 @@ TBInputOp::TBInputOp(Graph *_graph,
   tensor.data_type = dtensor.data_type;
   for (int i = 0; i < tensor.num_dims; i++) {
     tensor.dim[i] = dtensor.dim[i];
+    // printf("dtensor.dim[%d]: %d\n", i, dtensor.dim[i]);
   }
 
   for (int d = 0; d < 3; d++) {
@@ -98,8 +99,19 @@ TBInputOp::TBInputOp(Graph *_graph,
     }
     if (dim_idx >= 0) {
       assert(tensor.dim[dim_idx] > 0);
-      assert(tensor.dim[dim_idx] % dim_div == 0);
+      // assert(tensor.dim[dim_idx] % dim_div == 0);
+      int tmp = tensor.dim[dim_idx];
       tensor.dim[dim_idx] /= dim_div;
+      if(tmp % dim_div != 0) {
+        // TODO(Wenqin): fix it later for align with shared memory loading.
+        if(dim_div == 86) {
+          tensor.dim[dim_idx] += 1;
+          printf("advanced by 1 when we setting dim as 86.\n");
+        } else {
+          printf("not advanced by 1 when we setting dim as 85.\n");
+        }
+        printf("tensor.dim[%d]: %d, dim_div: %d, tensor.dim[dim_idx]: %d\n", dim_idx, tmp, dim_div, tensor.dim[dim_idx]);
+      }
     }
   }
 

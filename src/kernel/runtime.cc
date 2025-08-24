@@ -178,6 +178,7 @@ void register_mugraph(
   kn::KNCustomizedOp const *pre_op = nullptr;
   std::map<dim3, TaskId, Dim3Comparator> pre_task_map;
   for (auto const &op : graph.operators) {
+    // printf("a new op!\n");
     if (op->op_type == type::KNOperatorType::KN_INPUT_OP) {
       continue;
     }
@@ -355,6 +356,11 @@ void register_mugraph(
     // Step 1: add all tasks based on their blockIdx
     // (bid.x, bid.y, bid.z) ordering
     for (bid.x = 0; bid.x < bgraph.grid_dim.x; bid.x++) {
+      if(bgraph.grid_dim.x == 86 && bid.x == 85) {
+        // TODO(Wenqin): support a layer to use two different variant of op here.
+        printf("task_type: %d, we should update the task here to use output as 16 task!!!!\n", task_type);
+        variant_id = 1;
+      }
       for (bid.y = 0; bid.y < bgraph.grid_dim.y; bid.y++) {
         for (bid.z = 0; bid.z < bgraph.grid_dim.z; bid.z++) {
           TaskDesc task(task_type, variant_id);
@@ -432,16 +438,16 @@ void register_mugraph(
           consumer_partition[d] = bgraph.grid_dim.x;
         }
         if (d == input_map.y) {
-          consumer_partition[d] = bgraph.grid_dim.y;
+          consumer_partition[d] = bgraph.grid_dim.y; // d = 1, consumer_partition[1] = 32
         }
         if (d == input_map.z) {
           consumer_partition[d] = bgraph.grid_dim.z;
         }
         if (d == output_map.x) {
-          producer_partition[d] = pre_op->bgraph.grid_dim.x;
+          producer_partition[d] = pre_op->bgraph.grid_dim.x; // d = 0, producer_partition[0] = 1
         }
         if (d == output_map.y) {
-          producer_partition[d] = pre_op->bgraph.grid_dim.y;
+          producer_partition[d] = pre_op->bgraph.grid_dim.y; // d = 1, producer_partition[0] = 8
         }
         if (d == output_map.z) {
           producer_partition[d] = pre_op->bgraph.grid_dim.z;
@@ -451,7 +457,7 @@ void register_mugraph(
       // number of events is the product of gcd of producer/consumer
       std::vector<int> event_dims(mirage::config::MAX_TENSOR_DIMS, 1);
       for (int d = 0; d < mirage::config::MAX_TENSOR_DIMS; d++) {
-        event_dims[d] = std::gcd(producer_partition[d], consumer_partition[d]);
+        event_dims[d] = std::gcd(producer_partition[d], consumer_partition[d]); // event_dims: 1, 8, 1
       }
       dfs_create_events_add_tasks(0,                       /*depth*/
                                   my_gpu_id,               /*my_gpu_id*/
@@ -1092,6 +1098,11 @@ TaskGraphResult print_task_graph(
               if (input_map.x >= 0) {
                 size_t block_size =
                     io_desc.tensor.dim[input_map.x] / bgraph.grid_dim.x;
+                if(io_desc.tensor.dim[input_map.x] % bgraph.grid_dim.x != 0) {
+                  // TODO(Wenqin): make it elegent here.
+                  // printf("io_desc.tensor.dim[input_map.x]: %d, bgraph.grid_dim.x: %d\n", io_desc.tensor.dim[input_map.x], bgraph.grid_dim.x);
+                  block_size += 1;
+                }
                 offset +=
                     block_size * bid.x * io_desc.tensor.stride[input_map.x];
               }
@@ -1149,6 +1160,10 @@ TaskGraphResult print_task_graph(
             if (output_map.x >= 0) {
               size_t block_size =
                   io_desc.tensor.dim[output_map.x] / bgraph.grid_dim.x;
+              if(io_desc.tensor.dim[output_map.x] % bgraph.grid_dim.x != 0) {
+                  // TODO(Wenqin): make it elegent here.
+                  block_size += 1;
+                }
               offset +=
                   block_size * bid.x * io_desc.tensor.stride[output_map.x];
             }

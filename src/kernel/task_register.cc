@@ -321,6 +321,8 @@ int TaskRegister::register_linear_with_residual_task(
   reduction_size = input_ops[0]->dtensor.dim[1];
   // get output stride
   assert(output_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
+  printf("linear layer task output_size: %d\n", output_size);
+  printf("output_ops[0]->dtensor.dim[1]: %d\n", output_ops[0]->dtensor.dim[1]);
   kn::KNInputOp *kn_input_op =
       static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
   output_stride = static_cast<int>(kn_input_op->input_strides[0]);
@@ -337,7 +339,39 @@ int TaskRegister::register_linear_with_residual_task(
   code.e("    task_desc.inputs[2].base_ptr,");
   code.e("    task_desc.outputs[0].base_ptr,");
   code.e("    runtime_config.my_gpu_id == 0);");
-  return register_task_variant(TASK_LINEAR_WITH_RESIDUAL, code.to_string());
+  if(output_ops[0]->dtensor.dim[1] % output_size == 0) {
+    // normal way, we could just return
+    return register_task_variant(TASK_LINEAR_WITH_RESIDUAL, code.to_string());
+  } else {
+    // an add hoc solution here, we register two kinds of task.
+    int return_val = register_task_variant(TASK_LINEAR_WITH_RESIDUAL, code.to_string());
+    mirage::transpiler::CodeKeeper tail_variant_code;
+    tail_variant_code.inc_indent();
+    tail_variant_code.e("kernel::linear_kernel<bfloat16, $, $, $, $>(",
+          batch_size,
+          output_ops[0]->dtensor.dim[1] % output_size,
+          reduction_size,
+          output_stride);
+    tail_variant_code.e("    task_desc.inputs[0].base_ptr,");
+    tail_variant_code.e("    task_desc.inputs[1].base_ptr,");
+    tail_variant_code.e("    task_desc.inputs[2].base_ptr,");
+    tail_variant_code.e("    task_desc.outputs[0].base_ptr,");
+    tail_variant_code.e("    runtime_config.my_gpu_id == 0);");
+
+    // print res for 16 cols kernel here.
+    // tail_variant_code.e("    if(threadIdx.x == 0) {");
+    // tail_variant_code.e("      printf(\"Outside kernel:\\n\");");
+    // tail_variant_code.e("      for(int ii = 0; ii < 16; ii ++) {");
+    // tail_variant_code.e("        float vv = __bfloat162float(static_cast<__nv_bfloat16*>(task_desc.outputs[0].base_ptr)[ii]);");
+    // tail_variant_code.e("        printf(\"%f \", vv);");
+    // tail_variant_code.e("      }");
+    // tail_variant_code.e("      printf(\"\\n\");");
+    // tail_variant_code.e("    }");
+
+    register_task_variant(TASK_LINEAR_WITH_RESIDUAL, tail_variant_code.to_string());
+
+    return return_val;
+  }
 }
 
 int TaskRegister::register_argmax_partial_task(threadblock::Graph const &bgraph,
