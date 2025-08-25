@@ -164,7 +164,7 @@ void register_mugraph(
     std::map<kernel::KNOperator *, std::map<dim3, TaskId, Dim3Comparator>>
         &all_task_maps,
     std::unordered_map<kn::KNOperator const *,
-                       std::tuple<int, int, TaskType, int>> const
+                       std::tuple<int, int, TaskType, int, int>> const
         &task_configs) {
   // push a begin-graph task and a event to launch dependent asks
   {
@@ -178,11 +178,10 @@ void register_mugraph(
   kn::KNCustomizedOp const *pre_op = nullptr;
   std::map<dim3, TaskId, Dim3Comparator> pre_task_map;
   for (auto const &op : graph.operators) {
-    // printf("a new op!\n");
     if (op->op_type == type::KNOperatorType::KN_INPUT_OP) {
       continue;
     }
-    std::tuple<int, int, TaskType, int> task_config =
+    std::tuple<int, int, TaskType, int, int> task_config =
         task_configs.find(op)->second;
     std::map<dim3, TaskId, Dim3Comparator> cur_task_map;
     assert(op->op_type == type::KNOperatorType::KN_CUSTOMIZED_OP);
@@ -198,6 +197,7 @@ void register_mugraph(
     int num_outputs = std::get<1>(task_config);
     TaskType task_type = std::get<2>(task_config);
     int variant_id = std::get<3>(task_config);
+    int tail_variant_id = std::get<4>(task_config);
     assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
     for (auto const &op : bgraph.operators) {
       assert(op->op_type == mirage::type::TB_INPUT_OP);
@@ -356,10 +356,10 @@ void register_mugraph(
     // Step 1: add all tasks based on their blockIdx
     // (bid.x, bid.y, bid.z) ordering
     for (bid.x = 0; bid.x < bgraph.grid_dim.x; bid.x++) {
-      if(bgraph.grid_dim.x == 86 && bid.x == 85) {
-        // TODO(Wenqin): support a layer to use two different variant of op here.
-        printf("task_type: %d, we should update the task here to use output as 16 task!!!!\n", task_type);
-        variant_id = 1;
+      // TODO(Wenqin): We use two vriants for an OP here, if the block is the last one we will use the tail_variant_id, but the last block may not in dim x, try to fix it later. 
+      if(bid.x == bgraph.grid_dim.x - 1 && tail_variant_id != -1) {
+        // printf("task_type: %d, we should update the task here to use output as 16 task!!!!\n", task_type);
+        variant_id = tail_variant_id;
       }
       for (bid.y = 0; bid.y < bgraph.grid_dim.y; bid.y++) {
         for (bid.z = 0; bid.z < bgraph.grid_dim.z; bid.z++) {
@@ -572,7 +572,7 @@ TaskGraphResult print_task_graph(
     std::map<kernel::KNOperator *, std::map<dim3, TaskId, Dim3Comparator>> const
         &all_task_maps,
     std::unordered_map<kn::KNOperator const *,
-                       std::tuple<int, int, TaskType, int>> const &task_configs,
+                       std::tuple<int, int, TaskType, int, int>> const &task_configs,
     std::map<mirage::type::GuidType, IODesc> const &io_configs,
     bool use_json_format) {
   using mirage::runtime::IODesc;
@@ -780,7 +780,7 @@ TaskGraphResult print_task_graph(
       continue;
     }
     assert(op->op_type == type::KNOperatorType::KN_CUSTOMIZED_OP);
-    std::tuple<int, int, TaskType, int> task_config =
+    std::tuple<int, int, TaskType, int, int> task_config =
         task_configs.find(op)->second;
 
     assert(all_task_maps.find(op) != all_task_maps.end());

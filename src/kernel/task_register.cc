@@ -296,7 +296,7 @@ int TaskRegister::register_silu_mul_linear_with_residual_task(
                                code.to_string());
 }
 
-int TaskRegister::register_linear_with_residual_task(
+std::pair<int, int> TaskRegister::register_linear_with_residual_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   assert(params.size() == 0);
   int batch_size = 0, output_size = 0, reduction_size = 0, output_stride = 0;
@@ -341,10 +341,10 @@ int TaskRegister::register_linear_with_residual_task(
   code.e("    runtime_config.my_gpu_id == 0);");
   if(output_ops[0]->dtensor.dim[1] % output_size == 0) {
     // normal way, we could just return
-    return register_task_variant(TASK_LINEAR_WITH_RESIDUAL, code.to_string());
+    return {register_task_variant(TASK_LINEAR_WITH_RESIDUAL, code.to_string()), -1};
   } else {
     // an add hoc solution here, we register two kinds of task.
-    int return_val = register_task_variant(TASK_LINEAR_WITH_RESIDUAL, code.to_string());
+    int variant_id = register_task_variant(TASK_LINEAR_WITH_RESIDUAL, code.to_string());
     mirage::transpiler::CodeKeeper tail_variant_code;
     tail_variant_code.inc_indent();
     tail_variant_code.e("kernel::linear_kernel<bfloat16, $, $, $, $>(",
@@ -358,19 +358,9 @@ int TaskRegister::register_linear_with_residual_task(
     tail_variant_code.e("    task_desc.outputs[0].base_ptr,");
     tail_variant_code.e("    runtime_config.my_gpu_id == 0);");
 
-    // print res for 16 cols kernel here.
-    // tail_variant_code.e("    if(threadIdx.x == 0) {");
-    // tail_variant_code.e("      printf(\"Outside kernel:\\n\");");
-    // tail_variant_code.e("      for(int ii = 0; ii < 16; ii ++) {");
-    // tail_variant_code.e("        float vv = __bfloat162float(static_cast<__nv_bfloat16*>(task_desc.outputs[0].base_ptr)[ii]);");
-    // tail_variant_code.e("        printf(\"%f \", vv);");
-    // tail_variant_code.e("      }");
-    // tail_variant_code.e("      printf(\"\\n\");");
-    // tail_variant_code.e("    }");
+    int tail_variant_id = register_task_variant(TASK_LINEAR_WITH_RESIDUAL, tail_variant_code.to_string());
 
-    register_task_variant(TASK_LINEAR_WITH_RESIDUAL, tail_variant_code.to_string());
-
-    return return_val;
+    return {variant_id, tail_variant_id};
   }
 }
 

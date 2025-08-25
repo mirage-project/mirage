@@ -336,6 +336,10 @@ size_t Graph::get_owner_independent_hash() const {
   return ret;
 }
 
+std::tuple<int, int, runtime::TaskType, int, int> Graph::make_task_config(int input_size, int output_size, runtime::TaskType task_type, int variant_id, int tail_variant_id) const {
+  return std::make_tuple(input_size, output_size, task_type, variant_id, tail_variant_id);
+}
+
 // Persistent kernel functions
 using namespace mirage::runtime;
 void Graph::attach_torch_tensor(DTensor const *input,
@@ -407,57 +411,57 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
   if (name == "embedding") {
     int variant_id =
         task_register->register_embedding_task(customized->bgraph, params);
-    task_config[op] = std::make_tuple(2, 1, TASK_EMBEDDING, variant_id);
+    task_config[op] = make_task_config(2, 1, TASK_EMBEDDING, variant_id);
   } else if (name == "rmsnorm_linear") {
     int variant_id =
         task_register->register_rmsnorm_linear_task(customized->bgraph, params);
-    task_config[op] = std::make_tuple(3, 1, TASK_RMS_NORM_LINEAR, variant_id);
+    task_config[op] = make_task_config(3, 1, TASK_RMS_NORM_LINEAR, variant_id);
   } else if (name == "attention") {
     int variant_id =
         task_register->register_attention_task(customized->bgraph, params);
-    task_config[op] = std::make_tuple(7, 1, TASK_ATTENTION_1, variant_id);
+    task_config[op] = make_task_config(7, 1, TASK_ATTENTION_1, variant_id);
   } else if (name == "single_batch_extend_attention") {
     int variant_id = task_register->register_single_batch_extend_attention_task(
         customized->bgraph, params);
     task_config[op] =
-        std::make_tuple(7, 1, TASK_SINGLE_BATCH_EXTEND_ATTENTION, variant_id);
+        make_task_config(7, 1, TASK_SINGLE_BATCH_EXTEND_ATTENTION, variant_id);
   } else if (name == "linear_with_residual") {
     // TODO: we may have to register two kinds of task here, one for 48 per block, another one for 16 per block, how to do it?
-    int variant_id = task_register->register_linear_with_residual_task(
+    std::pair<int, int> variant_ids = task_register->register_linear_with_residual_task(
         customized->bgraph, params);
     task_config[op] =
-        std::make_tuple(3, 1, TASK_LINEAR_WITH_RESIDUAL, variant_id);
+        make_task_config(3, 1, TASK_LINEAR_WITH_RESIDUAL, variant_ids.first, variant_ids.second);
   } else if (name == "silu_mul_linear_with_residual") {
     int variant_id = task_register->register_silu_mul_linear_with_residual_task(
         customized->bgraph, params);
     task_config[op] =
-        std::make_tuple(3, 1, TASK_SILU_MUL_LINEAR_WITH_RESIDUAL, variant_id);
+        make_task_config(3, 1, TASK_SILU_MUL_LINEAR_WITH_RESIDUAL, variant_id);
   } else if (name == "argmax") {
-    task_config[op] = std::make_tuple(1, 1, TASK_ARGMAX, 0);
+    task_config[op] = make_task_config(1, 1, TASK_ARGMAX, 0);
   } else if (name == "argmax_partial") {
     int variant_id =
         task_register->register_argmax_partial_task(customized->bgraph, params);
-    task_config[op] = std::make_tuple(1, 2, TASK_ARGMAX_PARTIAL, variant_id);
+    task_config[op] = make_task_config(1, 2, TASK_ARGMAX_PARTIAL, variant_id);
   } else if (name == "argmax_reduce") {
     int variant_id =
         task_register->register_argmax_reduce_task(customized->bgraph, params);
-    task_config[op] = std::make_tuple(2, 1, TASK_ARGMAX_REDUCE, variant_id);
+    task_config[op] = make_task_config(2, 1, TASK_ARGMAX_REDUCE, variant_id);
   } else if (name == "allreduce") {
-    task_config[op] = std::make_tuple(2, 1, TASK_ALLREDUCE, 0);
+    task_config[op] = make_task_config(2, 1, TASK_ALLREDUCE, 0);
   } else if (name == "find_ngram_partial") {
     int variant_id = task_register->register_find_ngram_partial_task(
         customized->bgraph, params);
     task_config[op] =
-        std::make_tuple(1, 1, TASK_FIND_NGRAM_PARTIAL, variant_id);
+        make_task_config(1, 1, TASK_FIND_NGRAM_PARTIAL, variant_id);
   } else if (name == "find_ngram_global") {
     int variant_id = task_register->register_find_ngram_global_task(
         customized->bgraph, params);
-    task_config[op] = std::make_tuple(2, 1, TASK_FIND_NGRAM_GLOBAL, variant_id);
+    task_config[op] = make_task_config(2, 1, TASK_FIND_NGRAM_GLOBAL, variant_id);
   } else if (name == "target_verify_greedy") {
     int variant_id = task_register->register_target_verify_greedy_task(
         customized->bgraph, params);
     task_config[op] =
-        std::make_tuple(2, 1, TASK_TARGET_VERIFY_GREEDY, variant_id);
+        make_task_config(2, 1, TASK_TARGET_VERIFY_GREEDY, variant_id);
   } else {
     assert(false && "Unsupported task type");
   }

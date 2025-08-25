@@ -28,6 +28,21 @@ namespace kernel {
 
 using bfloat16 = type::bfloat16_t;
 
+
+constexpr unsigned int roundUpToPowerOf2(unsigned int n) noexcept {
+    if (n <= 1) {
+        return 1;
+    }
+    n--;
+    n |= n >> 1;
+    n |= n >> 2;
+    n |= n >> 4;
+    n |= n >> 8;
+    n |= n >> 16;
+    n++;
+    return n;
+}
+
 template <typename T,
           int BATCH_SIZE,
           int OUTPUT_SIZE,
@@ -39,31 +54,32 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
                                               void const *residual_ptr,
                                               void *output_ptr,
                                               bool residual = true) {
-  constexpr int CHUNK_SIZE = 16 / sizeof(T); // 8
-  constexpr int OUTPUT_ATOM_SIZE = OUTPUT_SIZE <= 128 ? OUTPUT_SIZE : 128; // 48
+  constexpr int CHUNK_SIZE = 16 / sizeof(T);
+  constexpr int OUTPUT_ATOM_SIZE = OUTPUT_SIZE <= 128 ? OUTPUT_SIZE : 128;
   constexpr int NUM_OUTPUT_ATOMS = OUTPUT_SIZE / OUTPUT_ATOM_SIZE;
   constexpr int TILE_SIZE = 128;
   constexpr int FORLOOP_RANGE = REDUCTION_SIZE / TILE_SIZE;
 
   constexpr int NUM_CHUNKS_A = BATCH_SIZE * TILE_SIZE / CHUNK_SIZE;
-  constexpr int NUM_CHUNKS_B = TILE_SIZE * OUTPUT_ATOM_SIZE / CHUNK_SIZE; // 768
-  constexpr int NUM_CHUNKS_C = BATCH_SIZE * OUTPUT_ATOM_SIZE / CHUNK_SIZE; // 6
+  constexpr int NUM_CHUNKS_B = TILE_SIZE * OUTPUT_ATOM_SIZE / CHUNK_SIZE;
+  constexpr int NUM_CHUNKS_C = BATCH_SIZE * OUTPUT_ATOM_SIZE / CHUNK_SIZE;
 
   constexpr int CHUNKS_PER_ROW_A = TILE_SIZE / CHUNK_SIZE;
   constexpr int CHUNKS_PER_COL_B = TILE_SIZE / CHUNK_SIZE;
-  constexpr int CHUNKS_PER_ROW_C = OUTPUT_ATOM_SIZE / CHUNK_SIZE; // 6
+  constexpr int CHUNKS_PER_ROW_C = OUTPUT_ATOM_SIZE / CHUNK_SIZE;
 
-  constexpr int log2_CHUNK_SIZE = log2_constexpr(CHUNK_SIZE); // 3
+  constexpr int log2_CHUNK_SIZE = log2_constexpr(CHUNK_SIZE);
   constexpr int log2_CHUNKS_PER_ROW_A = log2_constexpr(CHUNKS_PER_ROW_A);
   constexpr int log2_CHUNKS_PER_COL_B = log2_constexpr(CHUNKS_PER_COL_B);
   // constexpr int log2_CHUNKS_PER_ROW_C = log2_constexpr(CHUNKS_PER_ROW_C);
 
   // using SM80_16x8x16_F16F16F16F16_TNX2 = 16X16X16
-  constexpr int NUM_WARPS_N = 4; // set it as 4 forcely.
+  // TODO(Wenqin): How to make it graceful? We take 48 cols as OUTPUT_ATOM_SIZE, so it means there is actually 3 warps in N dim, but shall we set it as 3? There're 4 warps in a block, but the below code 
+  constexpr int NUM_WARPS_N = roundUpToPowerOf2(OUTPUT_ATOM_SIZE / 16 <= 4 ? OUTPUT_ATOM_SIZE / 16 : 4);
   constexpr int NUM_WARPS_K = 4 / NUM_WARPS_N;
 
   constexpr int NUM_ITERS_M = 1;
-  constexpr int NUM_ITERS_N = 1; // set it as 1 forcely, OUTPUT_ATOM_SIZE / NUM_WARPS_N / 16;
+  constexpr int NUM_ITERS_N = (OUTPUT_ATOM_SIZE + NUM_WARPS_N * 16 - 1) / (NUM_WARPS_N * 16);
   constexpr int NUM_ITERS_K = TILE_SIZE / NUM_WARPS_K / 16;
 
   constexpr int log2_NUM_WARPS_N = log2_constexpr(NUM_WARPS_N);
@@ -90,7 +106,6 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
   // d_weight += OUTPUT_SIZE * REDUCTION_SIZE * bid;
   // d_residual += OUTPUT_SIZE * BATCH_SIZE * bid;
   // d_output += OUTPUT_SIZE * BATCH_SIZE * bid;
-  // if(bid > 86) return; // we only need 85 blocks (4096 / 48 = 85.3333).
 
   using InputDmem = dmem_row_const<T, BATCH_SIZE, TILE_SIZE, REDUCTION_SIZE>;
   using WeightDmem =
@@ -190,17 +205,6 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
     residual_dmem.set_ptr(d_residual);
     output_dmem.set_ptr(d_output);
 
-    // if(threadIdx.x == 0){
-    //   for(int i = 0; i < 2048; i ++) {
-    //     for(int j = 0; j < 48; j ++) {
-    //       float f = *weight_dmem(i, j);
-    //       if(f != 1) {
-    //         printf("gmem w in row: %d, col: %d is not 1, it's %f\n", i, j, f);
-    //       }
-    //     }
-    //   }
-    // }
-
     InputBufferSmem input_buffer_smem(shared_input_buffer);
     WeightBufferSmem weight_buffer_smem(shared_weight_buffer);
 
@@ -275,17 +279,6 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
         cp_async_wait<0>();
       }
 
-      // if(threadIdx.x == 0){
-      //   for(int i = 0; i < TILE_SIZE; i ++) {
-      //     for(int j = 0; j < OUTPUT_SIZE; j ++) {
-      //       float f = *weight_smem(i, j);
-      //       if(f != 1) {
-      //         printf("smem b 1 in row: %d, col: %d is not 1, it's %f\n", i, j, f);
-      //       }
-      //     }
-      //   }
-      // }
-
       // rotate the buffers
       input_buffer_smem.set_ptr(shared_input_buffer +
                                 BATCH_SIZE * TILE_SIZE *
@@ -299,18 +292,9 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
                           TILE_SIZE * OUTPUT_ATOM_SIZE *
                               ((for_idx + 1) % K_PIPE_MAX));
       __syncthreads();
-      // if(threadIdx.x == 0){
-      //   for(int i = 0; i < TILE_SIZE; i ++) {
-      //     for(int j = 0; j < OUTPUT_SIZE; j ++) {
-      //       float f = *weight_smem(i, j);
-      //       if(f != 1) {
-      //         printf("smem b 2 in row: %d, col: %d is not 1, it's %f\n", i, j, f);
-      //       }
-      //     }
-      //   }
-      // }
 
-      /*if(warp_col < 3)*/ {
+      // TODO(Wenqin): it seems if we add if(warp_col < OUTPUT_ATOM_SIZE / 16) below, it will bring some perf regression, how about adding some padding in weight_smem to remove this branch?
+      if(warp_col < OUTPUT_ATOM_SIZE / 16) {
         uint32_t a_frag[4], b_frag[4];
         for (uint32_t m = 0; m < NUM_ITERS_M; m++) {
           int m_row = (lane_idx & 0xF);
@@ -343,19 +327,22 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
     }
 
     // write back to shared memory
-    for (uint32_t m = 0; m < NUM_ITERS_M; m++) {
+    // TODO(Wenqin): it seems if we add if(warp_col < OUTPUT_ATOM_SIZE / 16) below, it will bring some perf regression, how about adding some padding in mm_intermediate_smem to remove this branch?
+    if(warp_col < OUTPUT_ATOM_SIZE / 16) {
+      for (uint32_t m = 0; m < NUM_ITERS_M; m++) {
 #pragma unroll
-      for (uint32_t n = 0; n < NUM_ITERS_N; n++) {
+        for (uint32_t n = 0; n < NUM_ITERS_N; n++) {
 #pragma unroll
-        for (uint32_t i = 0; i < 4; i++) {
-          int row_in_warp = (lane_idx >> 2) + ((i & 0x1) << 3);
-          if (row_in_warp < BATCH_SIZE) {
-            int col = (n << (4 + log2_NUM_WARPS_N)) + (warp_col << 4) +
-                      ((lane_idx & 0x3) << 1) + ((i >> 1) << 3);
-            mm_intermediate_smem.at(warp_row + row_in_warp, col) =
-                bfloat16(s_frag[m][n][(i << 1)]);
-            mm_intermediate_smem.at(warp_row + row_in_warp, col + 1) =
-                bfloat16(s_frag[m][n][(i << 1) | 0x1]);
+          for (uint32_t i = 0; i < 4; i++) {
+            int row_in_warp = (lane_idx >> 2) + ((i & 0x1) << 3);
+            if (row_in_warp < BATCH_SIZE) {
+              int col = (n << (4 + log2_NUM_WARPS_N)) + (warp_col << 4) +
+                        ((lane_idx & 0x3) << 1) + ((i >> 1) << 3);
+              mm_intermediate_smem.at(warp_row + row_in_warp, col) =
+                  bfloat16(s_frag[m][n][(i << 1)]);
+              mm_intermediate_smem.at(warp_row + row_in_warp, col + 1) =
+                  bfloat16(s_frag[m][n][(i << 1) | 0x1]);
+            }
           }
         }
       }
@@ -381,46 +368,6 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
     if (output_atom_idx + 1 < NUM_OUTPUT_ATOMS) {
       __syncthreads();
     }
-  }
-  if(OUTPUT_SIZE == 16) {
-    // if(threadIdx.x == 0) {
-    //   printf("calling 16 cols kernel once!\n");
-    // }
-    // __nanosleep(1000000);
-    // if(threadIdx.x == 0) {
-    //   printf("Insider kernel last 16 output:\n");
-    //   for(int ii = 0; ii < 16; ii ++) {
-    //     float vv = __bfloat162float(static_cast<__nv_bfloat16*>(output_ptr)[ii]);
-    //     printf("%f ", vv);
-    //   }
-    //   printf("\n");
-    //   printf("Insider kernel all 4096 output:\n");
-    //   for(int ii = 0; ii < 4096; ii ++) {
-    //     float vv = __bfloat162float(static_cast<__nv_bfloat16*>(output_ptr-8160)[ii]);
-    //     printf("%f, ", vv);
-    //   }
-    //   printf("\n");
-    //   printf("Insider kernel last 4096 residual inputs:\n");
-    //   for(int ii = 0; ii < 4096; ii ++) {
-    //     void const* residual_start = residual_ptr - 8160;
-    //     float vv = __bfloat162float(static_cast<__nv_bfloat16 const*>(residual_start)[ii]);
-    //     printf("%f, ", vv);
-    //   }
-    //   printf("\n");
-    //   printf("Insider kernel first 16 weight inputs:\n");
-    //   for(int ii = 0; ii < 16; ii ++) {
-    //     // void const* weight_start = weight_ptr - 33423360;
-    //     float vv = __bfloat162float(static_cast<__nv_bfloat16 const*>(weight_ptr)[ii]);
-    //     printf("%f ", vv);
-    //   }
-    //   printf("\n");
-    //   printf("Insider kernel inputs:\n");
-    //   for(int ii = 0; ii < 4096; ii ++) {
-    //     float vv = __bfloat162float(static_cast<__nv_bfloat16 const*>(input_ptr)[ii]);
-    //     printf("%f, ", vv);
-    //   }
-    //   printf("\n");
-    // }
   }
 }
 
