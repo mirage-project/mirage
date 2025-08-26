@@ -13,7 +13,7 @@
  * limitations under the License.
  */
 
-#ifdef MIRAGE_USE_TRITON
+#ifdef MIRAGE_BACKEND_USE_CUDA
 
 #include "mirage/kernel/customized.h"
 #include "mirage/kernel/graph.h"
@@ -511,4 +511,4 @@ void Graph::generate_triton_program(char const *file_path) {
 } // namespace kernel
 } // namespace mirage
 
-#endif // MIRAGE_USE_TRITON
+#endif // MIRAGE_BACKEND_USE_CUDA

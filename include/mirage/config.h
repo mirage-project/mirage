@@ -37,10 +37,6 @@ int const NUM_THREADS_PER_WARP = 32;
 int const NUM_WARPS_PER_GROUP = 4;
 int const NUM_THREADS_PER_GROUP = NUM_WARPS_PER_GROUP * NUM_THREADS_PER_WARP;
 
-#ifdef MIRAGE_BACKEND_USE_TRITON
-#define MIRAGE_BACKEND_USE_CUDA
-#endif
-
 #if defined(MIRAGE_BACKEND_USE_CUDA) && defined(MIRAGE_BACKEND_USE_NKI)
 #error                                                                         \
     "Both MIRAGE_BACKEND_USE_CUDA and MIRAGE_BACKEND_USE_NKI are defined. Please define only one backend type."

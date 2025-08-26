@@ -57,10 +57,9 @@ def get_backend_macros(config_file):
     flags = {
         "USE_CUDA":   None,
         "USE_NKI":    None,
-        "USE_TRITON": None,
     }
 
-    pattern = re.compile(r'^\s*set\s*\(\s*(USE_CUDA|USE_NKI|USE_TRITON)\s+(ON|OFF)\s*\)', re.IGNORECASE)
+    pattern = re.compile(r'^\s*set\s*\(\s*(USE_CUDA|USE_NKI)\s+(ON|OFF)\s*\)', re.IGNORECASE)
     
     with open(config_file, 'r') as f:
         for line in f:
@@ -70,7 +69,7 @@ def get_backend_macros(config_file):
                 flags[var] = (val.upper() == "ON")
     
     macros = []
-    if flags.get("USE_CUDA") or flags.get("USE_TRITON"):
+    if flags.get("USE_CUDA"):
         macros.append(("MIRAGE_BACKEND_USE_CUDA", None))
         macros.append(("MIRAGE_FINGERPRINT_USE_CUDA", None))
     elif flags.get("USE_NKI"):
