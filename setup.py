@@ -92,35 +92,51 @@ def config_cython():
         for fn in os.listdir(cython_path):
             if not fn.endswith(".pyx"):
                 continue
-            ret.append(Extension(
-                "mirage.%s" % fn[:-4],
-                ["%s/%s" % (cython_path, fn)],
-                include_dirs=[path.join(mirage_path, "include"),
-                              path.join(mirage_path, "deps", "json", "include"),
-                              path.join(mirage_path, "deps", "cutlass", "include"),
-                              path.join(z3_path, "include"),
-                              path.join(mirage_path, "build", "abstract_subexpr", "release"),
-                              path.join(mirage_path, "build", "formal_verifier", "release"),
-                              "/usr/local/cuda/include"],
-                libraries=["mirage_runtime", "cudadevrt", "cudart_static", "cudnn", "cublas", "cudart", "cuda", "z3", "gomp", "abstract_subexpr", "formal_verifier"],
-                library_dirs=[path.join(mirage_path, "build"),
-                              path.join(z3_path, "lib"),
-                              path.join(mirage_path, "build", "abstract_subexpr", "release"),
-                              path.join(mirage_path, "build", "formal_verifier", "release"),
-                              "/usr/local/cuda/lib",
-                              "/usr/local/cuda/lib64",
-                              "/usr/local/cuda/lib64/stubs"],
-                define_macros=macros,
-                extra_compile_args=["-std=c++17", "-fopenmp"],
-                extra_link_args=[
-                    "-fPIC",
-                    "-fopenmp",
-                    "-lrt",
-                    f"-Wl,-rpath,{path.join(mirage_path, 'build', 'abstract_subexpr', 'release')}",
-                    f"-Wl,-rpath,{path.join(mirage_path, 'build', 'formal_verifier', 'release')}",
-                ],
-                language="c++"))
-        return cythonize(ret, compiler_directives={"language_level" : 3})
+            ret.append(
+                Extension(
+                    "mirage.%s" % fn[:-4],
+                    ["%s/%s" % (cython_path, fn)],
+                    include_dirs=[
+                        path.join(mirage_path, "include"),
+                        path.join(mirage_path, "deps", "json", "include"),
+                        path.join(mirage_path, "deps", "cutlass", "include"),
+                        path.join(mirage_path, "build", "abstract_subexpr", "release"),
+                        path.join(mirage_path, "build", "formal_verifier", "release"),
+                        path.join(z3_path, "include"),
+                        cuda_include_dir,
+                    ],
+                    libraries=[
+                        "mirage_runtime",
+                        "cudadevrt",
+                        "cudart_static",
+                        "cudart",
+                        "cuda",
+                        "z3",
+                        "gomp",
+                        "rt",
+                        "abstract_subexpr",
+                        "formal_verifier",
+                    ],
+                    library_dirs=[
+                        path.join(mirage_path, "build"),
+                        path.join(z3_path, "lib"),
+                        path.join(mirage_path, "build", "abstract_subexpr", "release"),
+                        path.join(mirage_path, "build", "formal_verifier", "release"),
+                    ]
+                    + cuda_library_dirs,
+                    define_macros=macros,
+                    extra_compile_args=["-std=c++17", "-fopenmp"],
+                    extra_link_args=[
+                        "-fPIC",
+                        "-fopenmp",
+                        "-lrt",
+                        f"-Wl,-rpath,{path.join(mirage_path, 'build', 'abstract_subexpr', 'release')}",
+                        f"-Wl,-rpath,{path.join(mirage_path, 'build', 'formal_verifier', 'release')}",
+                    ],
+                    language="c++",
+                )
+            )
+        return cythonize(ret, compiler_directives={"language_level": 3})
     except ImportError:
         print("WARNING: cython is not installed!!!")
         raise SystemExit(1)

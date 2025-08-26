@@ -330,7 +330,7 @@ if __name__ == "__main__":
             input=x, 
             weight=w, 
             output=y, 
-            grid_dim=(max_factor_leq_n(4096, 96 // total_tokens_per_iter), total_tokens_per_iter, 1), 
+            grid_dim=(max_factor_leq_n(hidden_size, 96 // total_tokens_per_iter), total_tokens_per_iter, 1), 
             # grid_dim=(1, 1, 1), 
             block_dim=(128, 1, 1),
             input_source=(spec_decode_config is not None) # 0: all_tokens, 1: input_token (spec decoding)

@@ -105,7 +105,20 @@ def get_compile_command(
     py_so_path,
     profiling,
     use_nvshmem,
+    num_workers=None,
+    num_local_schedulers=None,
+    num_remote_schedulers=None,
 ):
+    max_worker_per_scheduler = 128
+    if num_workers != None and num_local_schedulers != None and num_remote_schedulers != None:
+        min_schedulers = 0
+        if num_remote_schedulers == 0:
+            min_schedulers = num_local_schedulers
+        else:
+            min_schedulers = min(num_local_schedulers, num_remote_schedulers)
+        # advance by 1 for the scheduler who are handling the not divisiable num_worker.
+        max_worker_per_scheduler = (num_workers // min_schedulers) + 1
+
     common_cmd = [
         cc,
         file_name,
@@ -115,6 +128,7 @@ def get_compile_command(
         f"-I{os.path.join(mirage_inc_path, 'mirage/persistent_kernel')}",
         f"-I{os.path.join(mirage_deps_path, 'cutlass/include')}",
         f"-I{os.path.join(mirage_home_path, 'deps/json/include')}",
+        f"-DMAX_WORKER_PER_SCHEDULER={max_worker_per_scheduler}",
     ]
 
     flags = [
@@ -791,6 +805,9 @@ class PersistentKernel:
             py_so_path=so_path,
             profiling=True if self.profiler_tensor is not None else False,
             use_nvshmem=self.use_nvshmem,
+            num_workers=self.num_workers,
+            num_local_schedulers=self.num_local_schedulers, 
+            num_remote_schedulers=self.num_remote_schedulers,
         )
         print("Compiling megakernel using the following command line:")
         print(cc_cmd)

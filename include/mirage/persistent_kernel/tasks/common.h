@@ -19,9 +19,11 @@
 #include <cassert>
 #include <cstdint>
 #include <cstdio>
+#include <iostream>
 
 constexpr int NUM_THREADS = 128;
 constexpr int NUM_THREADS_PER_WARP = 32;
 constexpr int NUM_WARPS = 4;
+constexpr int WARPGROUP_WARPS = 4;
 
 constexpr float inf = 5e4;
