@@ -79,7 +79,6 @@ TBInputOp::TBInputOp(Graph *_graph,
   tensor.data_type = dtensor.data_type;
   for (int i = 0; i < tensor.num_dims; i++) {
     tensor.dim[i] = dtensor.dim[i];
-    // printf("dtensor.dim[%d]: %d\n", i, dtensor.dim[i]);
   }
 
   for (int d = 0; d < 3; d++) {

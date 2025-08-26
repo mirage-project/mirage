@@ -321,8 +321,6 @@ std::pair<int, int> TaskRegister::register_linear_with_residual_task(
   reduction_size = input_ops[0]->dtensor.dim[1];
   // get output stride
   assert(output_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
-  printf("linear layer task output_size: %d\n", output_size);
-  printf("output_ops[0]->dtensor.dim[1]: %d\n", output_ops[0]->dtensor.dim[1]);
   kn::KNInputOp *kn_input_op =
       static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
   output_stride = static_cast<int>(kn_input_op->input_strides[0]);

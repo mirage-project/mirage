@@ -433,21 +433,23 @@ void register_mugraph(
       }
       // assert that their is at least a single tensor shared between ops
       assert(num_shared_tensors >= 1);
+      printf("num_shared_tensors: %d\n", num_shared_tensors);
+      // TODO(Wenqin): try to fix the dependence check for the linear layer with 86 workers, and it may followed by an attention layer, so we should cover the case.
       for (int d = 0; d < mirage::config::MAX_TENSOR_DIMS; d++) {
         if (d == input_map.x) {
           consumer_partition[d] = bgraph.grid_dim.x;
         }
         if (d == input_map.y) {
-          consumer_partition[d] = bgraph.grid_dim.y; // d = 1, consumer_partition[1] = 32
+          consumer_partition[d] = bgraph.grid_dim.y; // we assume 8 for qwen3-8b attention layer.
         }
         if (d == input_map.z) {
           consumer_partition[d] = bgraph.grid_dim.z;
         }
         if (d == output_map.x) {
-          producer_partition[d] = pre_op->bgraph.grid_dim.x; // d = 0, producer_partition[0] = 1
+          producer_partition[d] = pre_op->bgraph.grid_dim.x;
         }
         if (d == output_map.y) {
-          producer_partition[d] = pre_op->bgraph.grid_dim.y; // d = 1, producer_partition[0] = 8
+          producer_partition[d] = pre_op->bgraph.grid_dim.y; // we assume 86 for qwen3-8b linear layer.
         }
         if (d == output_map.z) {
           producer_partition[d] = pre_op->bgraph.grid_dim.z;
@@ -457,7 +459,7 @@ void register_mugraph(
       // number of events is the product of gcd of producer/consumer
       std::vector<int> event_dims(mirage::config::MAX_TENSOR_DIMS, 1);
       for (int d = 0; d < mirage::config::MAX_TENSOR_DIMS; d++) {
-        event_dims[d] = std::gcd(producer_partition[d], consumer_partition[d]); // event_dims: 1, 8, 1
+        event_dims[d] = std::gcd(producer_partition[d], consumer_partition[d]); // event_dims: 1, 86/8, 1 - > 1, 11, 8, what we expected is also 1, 11, 8, so we don't need any change here, right?
       }
       dfs_create_events_add_tasks(0,                       /*depth*/
                                   my_gpu_id,               /*my_gpu_id*/
@@ -1100,7 +1102,7 @@ TaskGraphResult print_task_graph(
                     io_desc.tensor.dim[input_map.x] / bgraph.grid_dim.x;
                 if(io_desc.tensor.dim[input_map.x] % bgraph.grid_dim.x != 0) {
                   // TODO(Wenqin): make it elegent here.
-                  // printf("io_desc.tensor.dim[input_map.x]: %d, bgraph.grid_dim.x: %d\n", io_desc.tensor.dim[input_map.x], bgraph.grid_dim.x);
+                  // if the tensor dim size is not divisible of the grid dim at x, we think there should be a tail variant, so we should advance the block size by 1.
                   block_size += 1;
                 }
                 offset +=

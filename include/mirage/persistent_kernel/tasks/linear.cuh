@@ -238,8 +238,6 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
             src_col + ((k_pipe + 1) * OUTPUT_ATOM_SIZE); // OUTPUT_ATOM_SIZE is not an exp of 2, we couldn't use log here.
         load_smem(weight_buffer_smem(dst_row, dst_col),
                   weight_dmem(src_row, src_col));
-        // printf("loading weight 1 from gmem at row: %d, col: %d\n", src_row, src_col);
-        // printf("loading weight 1 into smem at row: %d, col: %d\n", dst_row, dst_col);
       }
       cp_async_fence();
     }
@@ -328,6 +326,7 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
 
     // write back to shared memory
     // TODO(Wenqin): it seems if we add if(warp_col < OUTPUT_ATOM_SIZE / 16) below, it will bring some perf regression, how about adding some padding in mm_intermediate_smem to remove this branch?
+    // The reason that the correctness was keep when we don't have this condition is that the mma inst will access some shared meory which don't load any data, and will not store the result to the results GMEM(just store 48 cols in final result matrix).
     if(warp_col < OUTPUT_ATOM_SIZE / 16) {
       for (uint32_t m = 0; m < NUM_ITERS_M; m++) {
 #pragma unroll
