@@ -486,27 +486,6 @@ __global__ void compute_customizedop_fingerprint(
   }
 }
 
-void KNCustomizedOp::run() {
-  mirage::kernel::DeviceMemoryManager *dmm =
-      mirage::kernel::DeviceMemoryManager::get_instance();
-  // mirage::threadblock::KernelParams params = bgraph.get_kernel_params();
-  mirage::threadblock::NewKernelParams new_params =
-      bgraph.get_new_kernel_params(false /*fingerprint_kernel*/);
-  // Assume a single GPU for now
-  assert(kgraph->gpu_dim.x == 1);
-  int gpu_id = 0;
-  if (!mirage::type::CLAMP_MIN_MAX.empty()) {
-    float CLAMP_MIN_MAX_HOST[2] = {mirage::type::CLAMP_MIN_MAX["min_val"],
-                                   mirage::type::CLAMP_MIN_MAX["max_val"]};
-    cudaMemcpyToSymbol(
-        CLAMP_MIN_MAX_DEVICE, CLAMP_MIN_MAX_HOST, sizeof(float) * 2);
-  }
-  customized_kernel_function<<<bgraph.grid_dim,
-                               bgraph.block_dim,
-                               bgraph.smem_offset>>>(
-      new_params, bgraph.forloop_range, dmm->data_base_ptr[gpu_id]);
-}
-
 __global__ void
     compute_epilogue_fingerprint(mirage::utils::FpPointerList fp_ptr_list,
                                  mirage::type::TBEpilogueType type,
