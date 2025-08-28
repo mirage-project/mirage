@@ -1103,7 +1103,8 @@ TaskGraphResult print_task_graph(
                 if(io_desc.tensor.dim[input_map.x] % bgraph.grid_dim.x != 0) {
                   // TODO(Wenqin): make it elegent here.
                   // if the tensor dim size is not divisible of the grid dim at x, we think there should be a tail variant, so we should advance the block size by 1.
-                  block_size += 1;
+                  // we should add fine granularity control and assert here.
+                  block_size = ((block_size + 15) / 16) * 16;
                 }
                 offset +=
                     block_size * bid.x * io_desc.tensor.stride[input_map.x];
@@ -1164,7 +1165,7 @@ TaskGraphResult print_task_graph(
                   io_desc.tensor.dim[output_map.x] / bgraph.grid_dim.x;
               if(io_desc.tensor.dim[output_map.x] % bgraph.grid_dim.x != 0) {
                   // TODO(Wenqin): make it elegent here.
-                  block_size += 1;
+                  block_size = ((block_size + 15) / 16) * 16;
                 }
               offset +=
                   block_size * bid.x * io_desc.tensor.stride[output_map.x];

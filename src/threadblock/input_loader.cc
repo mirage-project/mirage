@@ -103,13 +103,8 @@ TBInputOp::TBInputOp(Graph *_graph,
       tensor.dim[dim_idx] /= dim_div;
       if(tmp % dim_div != 0) {
         // TODO(Wenqin): fix it later for align with shared memory loading.
-        if(dim_div == 86) {
-          tensor.dim[dim_idx] += 1;
-          printf("advanced by 1 when we setting dim as 86.\n");
-        } else {
-          printf("not advanced by 1 when we setting dim as 85.\n");
-        }
-        printf("tensor.dim[%d]: %d, dim_div: %d, tensor.dim[dim_idx]: %d\n", dim_idx, tmp, dim_div, tensor.dim[dim_idx]);
+        // should add some assert here.
+        tensor.dim[dim_idx] = ((tensor.dim[dim_idx] + 15) / 16) * 16;
       }
     }
   }
