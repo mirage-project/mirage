@@ -50,6 +50,9 @@ public:
                                       std::vector<int> const &params);
   int register_target_verify_greedy_task(threadblock::Graph const &bgraph,
                                          std::vector<int> const &params);
+  // Hopper tasks
+  int register_linear_hopper_task(threadblock::Graph const &bgraph,
+                                  std::vector<int> const &params);
   int register_task_variant(TaskType type, std::string const &code);
 
 public:

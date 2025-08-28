@@ -503,5 +503,102 @@ int TaskRegister::register_target_verify_greedy_task(
   return register_task_variant(TASK_TARGET_VERIFY_GREEDY, code.to_string());
 }
 
+int TaskRegister::register_linear_hopper_task(threadblock::Graph const &bgraph,
+                                              std::vector<int> const &params) {
+  assert(params.size() == 0);
+  int batch_size = 0, output_size = 0, reduction_size = 0, output_stride = 0;
+  std::vector<tb::TBInputOp *> input_ops;
+  std::vector<tb::TBInputOp *> output_ops;
+  int num_inputs = 3;
+  int num_outputs = 1;
+
+  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    if (input_ops.size() < (size_t)num_inputs) {
+      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    } else {
+      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    }
+  }
+  assert(output_ops[0]->output_tensors[0].num_dims == 2);
+  batch_size = input_ops[0]->input_tensors[0].dim[0];
+  output_size = output_ops[0]->output_tensors[0].dim[1];
+  assert(input_ops[0]->dtensor.num_dims == 2);
+  reduction_size = input_ops[0]->dtensor.dim[1];
+  assert(output_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
+  kn::KNInputOp *kn_input_op =
+      static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
+  output_stride = static_cast<int>(kn_input_op->input_strides[0]);
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  // define TMAs
+  constexpr int B = 3;
+  constexpr int M = 3;
+  constexpr int S = 3;
+  constexpr int TMA_CP_ASYNC_SIZE = 64;
+  constexpr int TILE_SIZE = 128;
+  int OUTPUT_TMA_CP_SIZE = output_size < 64 ? output_size : 64;
+  code.e("using TMA_A = kernel::tma::tma_2d<bfloat16, $, $, $, $, $, $, $, $, $, true>;",
+      B,
+      M,
+      S,
+      batch_size,
+      reduction_size,
+      batch_size,
+      TMA_CP_ASYNC_SIZE,
+      1,
+      (TILE_SIZE + TMA_CP_ASYNC_SIZE - 1) / TMA_CP_ASYNC_SIZE);
+  code.e("using TMA_B = kernel::tma::tma_2d<bfloat16, $, $, $, $, $, $, $, $, $, true>;",
+         B,
+         M,
+         S,
+         output_size,
+         reduction_size,
+         output_size,
+         TMA_CP_ASYNC_SIZE,
+         1,
+         (TILE_SIZE + TMA_CP_ASYNC_SIZE - 1) / TMA_CP_ASYNC_SIZE);
+
+  code.e("using TMA_RESIDUAL = kernel::tma::tma_2d<bfloat16, $, $, $, $, $, $, $, $, $, true>;",
+         0,
+         0,
+         0,
+         batch_size,
+         output_size,
+         batch_size,
+         OUTPUT_TMA_CP_SIZE,
+         1,
+         (TILE_SIZE + OUTPUT_TMA_CP_SIZE - 1) / OUTPUT_TMA_CP_SIZE);
+
+  code.e("using TMA_OUT = kernel::tma::tma_2d<bfloat16, $, $, $, $, $, $, $, $, $, true>;",
+         0,
+         0,
+         0,
+         batch_size,
+         output_size,
+         batch_size,
+         OUTPUT_TMA_CP_SIZE,
+         1,
+         (TILE_SIZE + OUTPUT_TMA_CP_SIZE - 1) / OUTPUT_TMA_CP_SIZE);
+
+  code.e("TMA_A tma_a(task_desc.inputs[0].base_ptr);");
+  code.e("TMA_B tma_b(task_desc.inputs[1].base_ptr);");
+  code.e("TMA_RESIDUAL tma_residual(task_desc.inputs[2].base_ptr);");
+  code.e("TMA_OUT tma_out(task_desc.outputs[0].base_ptr);");
+
+  code.e("kernel::linear_kernel_hopper<bfloat16, $, $, $, $, TMA_A, TMA_B, TMA_RESIDUAL, TMA_OUT>(",
+         batch_size,
+         output_size,
+         reduction_size,
+         output_stride);
+  code.e("    tma_a,");
+  code.e("    tma_b,");
+  code.e("    tma_residual,");
+  code.e("    tma_out);");
+  return register_task_variant(TASK_LINEAR_HOPPER, code.to_string());
+}
+
 } // namespace runtime
 } // namespace mirage

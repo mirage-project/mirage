@@ -669,6 +669,99 @@ class PersistentKernel:
             raise ValueError(f"Invalid spec decode method: {method}")
         return handler(spec_decode_config, spec_tokens, target_output, grid_dim, block_dim)
 
+
+
+
+    def linear_with_residual_layer_hopper(
+        self,
+        input: DTensor,
+        weight: DTensor,
+        residual: DTensor,
+        output: DTensor,
+        grid_dim: tuple,
+        block_dim: tuple,
+    ):
+        # Currently assume that input/output
+        assert input.num_dims == 2  # (batch_size, hidden_size / world_size)
+        assert weight.num_dims == 2  # (hidden_size, hidden_size / world_size)
+        assert residual.num_dims == 2  # (batch_size, hidden_size)
+        assert output.num_dims == 2  # (batch_size, hidden_size)
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(input, (-1, -1, -1), 1, True)
+        tb_graph.new_input(weight, (0, -1, -1), 1, True)
+        tb_graph.new_input(residual, (1, -1, -1), -1, True)
+        tb_graph.new_input(output, (1, -1, -1), -1, True)
+        self.kn_graph.customized([input, weight, residual, output], tb_graph)
+        self.kn_graph.register_task(tb_graph, "linear_with_residual_hopper")
+
+
+
+    def attention_layer_hopper(
+            self,
+            input: DTensor,
+            k_cache: DTensor,
+            v_cache: DTensor,
+            q_norm: DTensor,
+            k_norm: DTensor,
+            cos_pos_embed: DTensor,
+            sin_pos_embed: DTensor,
+            output: DTensor,
+            grid_dim: tuple,
+            block_dim: tuple,
+        ):
+            # Currently assume that input/output
+            assert input.num_dims == 2  # (batch_size, fused_outdim / world_size)
+            assert output.num_dims == 2  # (batch_size, hidden_size / world_size)
+            assert k_cache.num_dims == 4  # (batch_size, seq_len, kv_heads, head_dim)
+            assert v_cache.num_dims == 4  # (batch_size, seq_len, kv_heads, head_dim)
+            head_dim = k_cache.dim(3)
+            num_kv_heads = k_cache.dim(2)
+            num_q_heads = output.dim(1) // head_dim
+            rotary_embed = 0
+            if cos_pos_embed is not None or sin_pos_embed is not None:
+                assert cos_pos_embed.num_dims == 2  # (seq_len, head_dim)
+                assert sin_pos_embed.num_dims == 2  # (seq_len, head_dim)
+                assert cos_pos_embed.dim(1) == head_dim
+                assert sin_pos_embed.dim(1) == head_dim
+                rotary_embed = 1
+            qk_norm = 0
+            if q_norm is not None or k_norm is not None:
+                assert q_norm.num_dims == 1  # (head_dim)
+                assert k_norm.num_dims == 1  # (head_dim)
+                qk_norm = 1
+                assert q_norm.dim(0) == head_dim
+                assert k_norm.dim(0) == head_dim
+
+            # params[0]: num_q_heads
+            # params[1]: num_kv_heads
+            # params[2]: qk_norm
+            # params[3]: rotary_embed
+            params = [num_q_heads, num_kv_heads, qk_norm, rotary_embed]
+
+            tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+            tb_graph.new_input(input, (0, 1, -1), -1, True)
+            tb_graph.new_input(k_cache, (0, 2, -1), 1, True)
+            tb_graph.new_input(v_cache, (0, 2, -1), 1, True)
+            tb_graph.new_input(q_norm, (-1, -1, -1), -1, True)
+            tb_graph.new_input(k_norm, (-1, -1, -1), -1, True)
+            tb_graph.new_input(cos_pos_embed, (-1, -1, -1), -1, True)
+            tb_graph.new_input(sin_pos_embed, (-1, -1, -1), -1, True)
+            tb_graph.new_input(output, (0, 1, -1), -1, True)
+            self.kn_graph.customized(
+                [
+                    input,
+                    k_cache,
+                    v_cache,
+                    q_norm,
+                    k_norm,
+                    cos_pos_embed,
+                    sin_pos_embed,
+                    output,
+                ],
+                tb_graph,
+            )
+            self.kn_graph.register_task(tb_graph, "attention_hopper", params)
+
     def compile(
         self,
         **kwargs,
