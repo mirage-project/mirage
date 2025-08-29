@@ -65,14 +65,13 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
   constexpr int log2_CHUNKS_PER_ROW_C = log2_constexpr(CHUNKS_PER_ROW_C);
 
   // using SM80_16x8x16_F16F16F16F16_TNX2 = 16X16X16
-  constexpr int NUM_WARPS_N =
-      OUTPUT_ATOM_SIZE / 16 <= 4 ? OUTPUT_ATOM_SIZE / 16 : 4;
+  constexpr int NUM_WARPS_N = 4; // We always use NUM_WARPS_K = 1 and NUM_WARPS_N = 4
   constexpr int NUM_WARPS_K = 4 / NUM_WARPS_N;
 
   //TODO: support NUM_ITERS_M > 1, i.e., BATCH_SIZE > 16
   constexpr int NUM_ITERS_M = 1;
-  constexpr int NUM_ITERS_N = OUTPUT_ATOM_SIZE / NUM_WARPS_N / 16;
-  constexpr int NUM_ITERS_K = TILE_SIZE / NUM_WARPS_K / 16;
+  constexpr int NUM_ITERS_N = (OUTPUT_ATOM_SIZE + NUM_WARPS_N * 16 - 1) / (NUM_WARPS_N * 16);
+  constexpr int NUM_ITERS_K = (TILE_SIZE + NUM_WARPS_K * 16 - 1) / (NUM_WARPS_K * 16);
 
   constexpr int log2_NUM_WARPS_N = log2_constexpr(NUM_WARPS_N);
   constexpr int log2_NUM_ITERS_K = log2_constexpr(NUM_ITERS_K);
@@ -254,12 +253,13 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
       uint32_t a_frag[4], b_frag[4];
       for (uint32_t m = 0; m < NUM_ITERS_M; m++) {
         int m_row = (lane_idx & 0xF) + (m << 4);
-        bool is_valid = (m_row < num_active_tokens);
+        bool is_input_valid = (m_row < num_active_tokens);
         int smem_row = m_row + cur_input_stage * BATCH_SIZE;
 #pragma unroll
         for (uint32_t n = 0; n < NUM_ITERS_N; n++) {
           int n_col = (n << (4 + log2_NUM_WARPS_N)) + (warp_col << 4) +
                       ((lane_idx >> 4) << 3) + (lane_idx & 0x7);
+          bool is_weight_valid = (n_col < OUTPUT_ATOM_SIZE);
 #pragma unroll
           for (uint32_t k = 0; k < NUM_ITERS_K; k++) {
             int m_col = (warp_row << (4 + log2_NUM_ITERS_K)) + (k << 4) +
@@ -270,12 +270,16 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
 
             // Do not use ternary operator here, it will cause the 
             // compiler to generate branch among threads
-            T* valid_ptr = input_smem(smem_row, m_col);
-            T* invalid_ptr = zero_buffer(0, 0);
-            T* src_ptr = is_valid ? valid_ptr : invalid_ptr;
+            T* valid_input_ptr = input_smem(smem_row, m_col);
+            T* invalid_input_ptr = zero_buffer(0, 0);
+            T* input_ptr = is_input_valid ? valid_input_ptr : invalid_input_ptr;
 
-            ldsm(src_ptr, a_frag);
-            ldsm(weight_smem(n_row, weight_stage_read * OUTPUT_ATOM_SIZE + n_col), b_frag);
+            T* valid_weight_ptr = weight_smem(n_row, weight_stage_read * OUTPUT_ATOM_SIZE + n_col);
+            T* invalid_weight_ptr = zero_buffer(0, 0);
+            T* weight_ptr = is_weight_valid ? valid_weight_ptr : invalid_weight_ptr;
+
+            ldsm(input_ptr, a_frag);
+            ldsm(weight_ptr, b_frag);
             mma_m16n16k16_bf16bf16bf32(
                 s_frag[output_atom_idx][m][n], a_frag, b_frag, s_frag[output_atom_idx][m][n]);
           }
@@ -298,9 +302,10 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
 #pragma unroll
           for (uint32_t i = 0; i < 4; i++) {
             int row_in_warp = (lane_idx >> 2) + ((i & 0x1) << 3);
-            if (row_in_warp < num_active_tokens) {
-              int col = (n << (4 + log2_NUM_WARPS_N)) + (warp_col << 4) +
-                        ((lane_idx & 0x3) << 1) + ((i >> 1) << 3) + output_atom_idx * OUTPUT_ATOM_SIZE;
+            int col_within = (n << (4 + log2_NUM_WARPS_N)) + (warp_col << 4) +
+                      ((lane_idx & 0x3) << 1) + ((i >> 1) << 3);
+            int col = col_within + output_atom_idx * OUTPUT_ATOM_SIZE;
+            if (row_in_warp < num_active_tokens && col_within < OUTPUT_ATOM_SIZE) {
               output_smem.at(row_in_warp, col) +=
                   bfloat16(s_frag[output_atom_idx][m][n][(i << 1)]);
               output_smem.at(row_in_warp, col + 1) +=
