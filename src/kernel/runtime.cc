@@ -645,8 +645,9 @@ TaskGraphResult print_task_graph(
     // TMA
     code.e("if ((task.at(\"task_type\") >= 150 && task.at(\"task_type\") < "
            "200)) {");
-    code.e("input.tma_desc_ptr = "
-           "static_cast<void*>(create_tma_desc_from_tensor(task, input));");
+    // code.e("input.tma_desc_ptr = "
+    //        "static_cast<void*>(create_tma_desc_from_tensor(task, input));");
+    code.e("printf(\"1\");");
     code.e("}");
 
     code.e("task_desc.inputs[task_desc.num_inputs++] = input;");

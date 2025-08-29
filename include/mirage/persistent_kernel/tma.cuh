@@ -22,14 +22,14 @@ __host__ inline CUtensorMap *
                                 TensorDesc const &tensor_desc) {
   CUtensorMap host_desc;
 
-  fill_tma_desc(&host_desc, tensor_desc.base_ptr); // host-only function
+  fill_tma_desc_by_task(&host_desc, task_desc, tensor_desc); // host-only function
   cudaMalloc(&desc_ptr, sizeof(CUtensorMap));
   cudaMemcpy(desc_ptr, &host_desc, sizeof(CUtensorMap), cudaMemcpyHostToDevice);
   return desc_ptr;
 }
 
-__host__ static inline void fill_tma_desc(CUtensorMap *tma_desc, void *src) {
-  static_assert(ROW_MAJOR == true);
+template <int NDIM>
+__host__ static inline void fill_tma_desc(CUtensorMap *tma_desc, void *src, uint64_t const (&GMEM_SHAPE)[NDIM], uint64_t const (&GMEM_STRIDE)[NDIM], uint32_t const (&SMEM_SHAPE)[NDIM], uint32_t const (&SMEM_STRIDE)[NDIM]) {
   constexpr uint32_t tma_dim = 5;
   void *global_addr = src;
 
@@ -168,5 +168,34 @@ smem_box_stride[4]);
     std::cerr << "Error in tile TMA descriptor creation: " << error_string
               << std::endl;
     assert(false);
+  }
+}
+
+template <typename TaskDesc, typename TensorDesc>
+__host__ inline CUtensorMap *
+  fill_tma_desc_by_task(CUtensorMap *tma_desc, TaskDesc const &task_desc,
+                                TensorDesc const &tensor_desc, uint16_t const param_id) {
+  switch (task_desc.task_type) {
+    case TASK_LINEAR_WITH_RESIDUAL_HOPPER:
+      const int batch_size = task_desc.inputs[0].dim[0];
+      const int output_size = task_desc.outputs[0].dim[0];
+      const int reduction_size = task_desc.inputs[0].dim[1];
+
+      if (param_id == 0) {
+        size_t gmem_shape[5] = {batch_size, reduction_size, 1, 1, 1};
+        size_t gmem_stride[5] = {tensor_desc.stride[0], tensor_desc.stride[1], 0, 0, 0};
+        size_t smem_shape[5] = {batch_size, 64, batch_size, (reduction_size + 63) / 64, 1};
+        size_t smem_stride[5] = {1, 1, 1, 1, 1};
+        fill_tma_desc(tma_desc, tensor_desc.base_ptr, {batch_size, reduction_size}, tensor_desc.gmem_stride, tensor_desc.smem_shape, tensor_desc.smem_stride);
+      } else if (param_id == 1) {
+        fill_tma_desc(tma_desc, tensor_desc.base_ptr, tensor_desc.gmem_shape, tensor_desc.gmem_stride, tensor_desc.smem_shape, tensor_desc.smem_stride);
+      } else if (param_id == 2) {
+        fill_tma_desc(tma_desc, tensor_desc.base_ptr, tensor_desc.gmem_shape, tensor_desc.gmem_stride, tensor_desc.smem_shape, tensor_desc.smem_stride);
+      } else if (param_id == 3) {
+        fill_tma_desc(tma_desc, tensor_desc.base_ptr, tensor_desc.gmem_shape, tensor_desc.gmem_stride, tensor_desc.smem_shape, tensor_desc.smem_stride);
+      }
+      break;
+    default:
+      assert(false);
   }
 }
