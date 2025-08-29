@@ -86,8 +86,7 @@ enum EventType {
 
 struct TensorDesc {
   int num_dims;
-#ifdef ENABLE_TMA
-
+  void *tma_desc_ptr;
   void *base_ptr;
   int data_type;
   int dim[mirage::config::MAX_TENSOR_DIMS];

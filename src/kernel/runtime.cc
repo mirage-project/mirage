@@ -641,6 +641,14 @@ TaskGraphResult print_task_graph(
     code.e("input.dim[i] = tensor[\"dims\"][i].get<int>();");
     code.e("input.stride[i] = tensor[\"strides\"][i].get<int>();");
     code.e("}");
+
+    // TMA
+    code.e("if ((task.at(\"task_type\") >= 150 && task.at(\"task_type\") < "
+           "200)) {");
+    code.e("input.tma_desc_ptr = "
+           "static_cast<void*>(create_tma_desc_from_tensor(task, input));");
+    code.e("}");
+
     code.e("task_desc.inputs[task_desc.num_inputs++] = input;");
     code.e("}");
     // load outputs
@@ -1251,7 +1259,8 @@ TaskGraphResult print_task_graph(
   task_type_to_name[TASK_TARGET_VERIFY_GREEDY] = "TASK_TARGET_VERIFY_GREEDY";
   task_type_to_name[TASK_SINGLE_BATCH_EXTEND_ATTENTION] =
       "TASK_SINGLE_BATCH_EXTEND_ATTENTION";
-  task_type_to_name[TASK_LINEAR_WITH_RESIDUAL_HOPPER] = "TASK_LINEAR_WITH_RESIDUAL_HOPPER";
+  task_type_to_name[TASK_LINEAR_WITH_RESIDUAL_HOPPER] =
+      "TASK_LINEAR_WITH_RESIDUAL_HOPPER";
 
   code.e("__device__ __forceinline__");
   code.e("void _execute_task(TaskDesc const& task_desc,");
