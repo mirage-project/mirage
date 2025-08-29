@@ -5,6 +5,7 @@
 #include "norm_linear.cuh"
 #include "paged_attention.cuh"
 #include "reduction.cuh"
+#include "rmsnorm.cuh"
 #include "rotary_embedding.cuh"
 #include "silu_mul.cuh"
 #include "silu_mul_linear.cuh"

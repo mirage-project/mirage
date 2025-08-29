@@ -83,15 +83,17 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
 
   T const *__restrict__ d_input = static_cast<T const *>(input_ptr);
   T const *__restrict__ d_weight = static_cast<T const *>(weight_ptr);
-  T const *__restrict__ d_residual =
-      residual ? static_cast<T const *>(residual_ptr) : nullptr;
+  T const *__restrict__ d_residual = static_cast<T const *>(residual_ptr);
   T *__restrict__ d_output = static_cast<T *>(output_ptr);
+  // CANNOT perform residual when redisual_ptr is nullptr
+  if (residual_ptr == nullptr) {
+    assert(!residual);
+  }
 
   using InputDmem = dmem_row_const<T, BATCH_SIZE, TILE_SIZE, REDUCTION_SIZE>;
   using WeightDmem =
       dmem_col_const<T, TILE_SIZE, OUTPUT_ATOM_SIZE, REDUCTION_SIZE>;
-  using ResidualDmem =
-      dmem_row_const<T, BATCH_SIZE, OUTPUT_SIZE, O_STRIDE>;
+  using ResidualDmem = dmem_row_const<T, BATCH_SIZE, OUTPUT_SIZE, O_STRIDE>;
   using OutputDmem = dmem_row<T, BATCH_SIZE, OUTPUT_SIZE, O_STRIDE>;
 
   InputDmem input_dmem(d_input);
@@ -146,7 +148,8 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
 
   // Initialize output_smem: if residual is provided, preload it; otherwise zero
 #pragma unroll
-  for (int i = threadIdx.x; i < BATCH_SIZE * OUTPUT_SIZE / CHUNK_SIZE; i += NUM_THREADS) {
+  for (int i = threadIdx.x; i < BATCH_SIZE * OUTPUT_SIZE / CHUNK_SIZE;
+       i += NUM_THREADS) {
     int row = i / (OUTPUT_SIZE / CHUNK_SIZE);
     int col = (i % (OUTPUT_SIZE / CHUNK_SIZE)) << log2_CHUNK_SIZE;
     //TODO: use ignore-src in load_smem to avoid if-else
@@ -240,7 +243,8 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
           int src_col = src_stage * OUTPUT_ATOM_SIZE + col_within;
           int dst_col = buffer_stage * OUTPUT_ATOM_SIZE + col_within;
 
-          load_smem(weight_smem(dst_row, dst_col), weight_dmem(src_row, src_col));
+          load_smem(weight_smem(dst_row, dst_col),
+                    weight_dmem(src_row, src_col));
         }
         cp_async_fence();
         cp_async_wait<WEIGHT_PIPE_MAX - 1>();

@@ -48,7 +48,7 @@ static __device__ __forceinline__ void reduction_sum_row(SMEM_DST dst,
 // reduction on dim 0. Add the result to the existing value.
 template <typename SMEM_DST, typename SMEM_SRC>
 static __device__ __forceinline__ void reduction_sum_row_add(SMEM_DST dst,
-                                                         SMEM_SRC src) {
+                                                             SMEM_SRC src) {
   static constexpr int NUM_WARPS_K = SMEM_SRC::ROW / SMEM_DST::ROW;
   static_assert(SMEM_SRC::ROW % SMEM_DST::ROW == 0,
                 "Incompatible reduction dimensions");

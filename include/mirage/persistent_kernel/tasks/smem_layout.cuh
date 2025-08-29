@@ -25,6 +25,10 @@ template <typename T,
 struct smem_row {
   T *__restrict__ base_ptr;
   using value_type = T;
+  static constexpr int b = B;
+  static constexpr int m = M;
+  static constexpr int s = S;
+
   static constexpr size_t ROW = ROW_;
   static constexpr size_t COL = COL_;
   static constexpr size_t SIZE = ROW * COL;
@@ -141,6 +145,10 @@ struct smem_col {
   T *base_ptr;
 
   using value_type = T;
+
+  static constexpr int b = B;
+  static constexpr int m = M;
+  static constexpr int s = S;
 
   static constexpr size_t ROW = ROW_;
   static constexpr size_t COL = COL_;

@@ -30,6 +30,8 @@ public:
   static TaskRegister *get_instance();
   int register_embedding_task(threadblock::Graph const &bgraph,
                               std::vector<int> const &params);
+  int register_rmsnorm_task(threadblock::Graph const &bgraph,
+                            std::vector<int> const &params);
   int register_rmsnorm_linear_task(threadblock::Graph const &bgraph,
                                    std::vector<int> const &params);
   int register_attention_task(threadblock::Graph const &bgraph,
@@ -38,8 +40,9 @@ public:
                                     std::vector<int> const &params);
   int register_single_batch_extend_attention_task(
       threadblock::Graph const &bgraph, std::vector<int> const &params);
-  int register_linear_with_residual_task(threadblock::Graph const &bgraph,
-                                         std::vector<int> const &params);
+  int register_linear_task(threadblock::Graph const &bgraph,
+                           std::vector<int> const &params,
+                           bool with_residual);
   int register_silu_mul_task(threadblock::Graph const &bgraph,
                              std::vector<int> const &params);
   int register_silu_mul_linear_with_residual_task(
