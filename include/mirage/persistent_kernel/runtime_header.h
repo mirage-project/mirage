@@ -64,7 +64,7 @@ enum TaskType {
   TASK_FIND_NGRAM_GLOBAL = 113,
   TASK_TARGET_VERIFY_GREEDY = 114,
   TASK_SINGLE_BATCH_EXTEND_ATTENTION = 115,
-  TASK_LINEAR_HOPPER = 150,
+  TASK_LINEAR_WITH_RESIDUAL_HOPPER = 150,
   TASK_NORM_LINEAR_HOPPER = 151,
   TASK_ATTENTION_HOPPER = 152,
   TASK_NVSHMEM_COPY = 199,
@@ -86,6 +86,8 @@ enum EventType {
 
 struct TensorDesc {
   int num_dims;
+#ifdef ENABLE_TMA
+
   void *base_ptr;
   int data_type;
   int dim[mirage::config::MAX_TENSOR_DIMS];

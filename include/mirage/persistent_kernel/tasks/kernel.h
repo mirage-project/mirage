@@ -10,3 +10,7 @@
 #include "single_batch_extend.cuh"
 #include "speculative_decoding/prompt_lookup.cuh"
 #include "speculative_decoding/target_verify.cuh"
+// Hopper kernels
+#include "hopper/linear_hopper.cuh"
+#include "hopper/norm_linear_hopper.cuh"
+#include "hopper/multitoken_paged_attention_hopper.cuh"

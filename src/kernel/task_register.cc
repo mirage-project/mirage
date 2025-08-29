@@ -503,7 +503,7 @@ int TaskRegister::register_target_verify_greedy_task(
   return register_task_variant(TASK_TARGET_VERIFY_GREEDY, code.to_string());
 }
 
-int TaskRegister::register_linear_hopper_task(threadblock::Graph const &bgraph,
+int TaskRegister::register_linear_with_residual_hopper_task(threadblock::Graph const &bgraph,
                                               std::vector<int> const &params) {
   assert(params.size() == 0);
   int batch_size = 0, output_size = 0, reduction_size = 0, output_stride = 0;
@@ -522,7 +522,7 @@ int TaskRegister::register_linear_hopper_task(threadblock::Graph const &bgraph,
     }
   }
   assert(output_ops[0]->output_tensors[0].num_dims == 2);
-  batch_size = input_ops[0]->input_tensors[0].dim[0];
+  batch_size = output_ops[0]->output_tensors[0].dim[0];
   output_size = output_ops[0]->output_tensors[0].dim[1];
   assert(input_ops[0]->dtensor.num_dims == 2);
   reduction_size = input_ops[0]->dtensor.dim[1];
@@ -583,10 +583,10 @@ int TaskRegister::register_linear_hopper_task(threadblock::Graph const &bgraph,
          1,
          (TILE_SIZE + OUTPUT_TMA_CP_SIZE - 1) / OUTPUT_TMA_CP_SIZE);
 
-  code.e("TMA_A tma_a(task_desc.inputs[0].base_ptr);");
-  code.e("TMA_B tma_b(task_desc.inputs[1].base_ptr);");
-  code.e("TMA_RESIDUAL tma_residual(task_desc.inputs[2].base_ptr);");
-  code.e("TMA_OUT tma_out(task_desc.outputs[0].base_ptr);");
+  // code.e("TMA_A tma_a(task_desc.inputs[0].base_ptr);");
+  // code.e("TMA_B tma_b(task_desc.inputs[1].base_ptr);");
+  // code.e("TMA_RESIDUAL tma_residual(task_desc.inputs[2].base_ptr);");
+  // code.e("TMA_OUT tma_out(task_desc.outputs[0].base_ptr);");
 
   code.e("kernel::linear_kernel_hopper<bfloat16, $, $, $, $, TMA_A, TMA_B, TMA_RESIDUAL, TMA_OUT>(",
          batch_size,
@@ -597,7 +597,8 @@ int TaskRegister::register_linear_hopper_task(threadblock::Graph const &bgraph,
   code.e("    tma_b,");
   code.e("    tma_residual,");
   code.e("    tma_out);");
-  return register_task_variant(TASK_LINEAR_HOPPER, code.to_string());
+
+  return register_task_variant(TASK_LINEAR_WITH_RESIDUAL_HOPPER, code.to_string());
 }
 
 } // namespace runtime
