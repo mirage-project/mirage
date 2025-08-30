@@ -16,6 +16,7 @@
 #pragma once
 #include "common.h"
 #include "utils.cuh"
+#include "hopper/utils.cuh"
 namespace kernel {
 template <typename T,
           typename InputSmem,
@@ -62,7 +63,7 @@ __device__ __forceinline__ void rms_norm(InputSmem smem_input,
       if (threadIdx.x % 32 == 0) {
         reduce_smem[warp_idx] = sum;
       }
-      __syncthreads();
+      wg_sync<128>(7);
       sum = threadIdx.x < NUM_WARPS ? reduce_smem[threadIdx.x] : 0.0f;
 
 #pragma unroll
@@ -75,7 +76,7 @@ __device__ __forceinline__ void rms_norm(InputSmem smem_input,
         reduce_smem[0] = sum;
       }
 
-      __syncthreads();
+      wg_sync<128>(7);
 
       float rms_rcp = rsqrt(reduce_smem[0] / float(HEAD_DIM) + eps);
 
@@ -93,7 +94,7 @@ __device__ __forceinline__ void rms_norm(InputSmem smem_input,
           if (rotary_emd) {
             // we should do rope for all the window size q and k, because they
             // came from hidden states, we didn't apply rope yet.
-            __syncthreads();
+            wg_sync<128>(7);
             int offset = (i / HEAD_DIM) * HEAD_DIM + i;
             T const *cur_cos_ptr = cos_ptr + win_idx * HEAD_DIM;
             T const *cur_sin_ptr = sin_ptr + win_idx * HEAD_DIM;
@@ -110,17 +111,17 @@ __device__ __forceinline__ void rms_norm(InputSmem smem_input,
               float v2 = (float)smem_input.at(row, col - HEAD_DIM / 2);
               v_rot = v1 * cos + v2 * sin;
             }
-            __syncthreads();
+            wg_sync<128>(7);
             // output shape (window_size, head_num, head_dim)
             smem_input.at(row, col) = (T)v_rot;
           }
         } // i
       } else {
-        // we should keep __syncthreads number same as the for loop when
+        // we should keep wg_sync<128>(7);mber same as the for loop when
         // HEAD_DIM smaller than NUM_THREAD
         if (rotary_emd) {
-          __syncthreads();
-          __syncthreads();
+          wg_sync<128>(7);
+          wg_sync<128>(7);
         }
       }
     } // head_idx

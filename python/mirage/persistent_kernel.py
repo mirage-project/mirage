@@ -128,6 +128,10 @@ def get_compile_command(
         f"-I{os.path.join(mirage_inc_path, 'mirage/persistent_kernel')}",
         f"-I{os.path.join(mirage_deps_path, 'cutlass/include')}",
         f"-I{os.path.join(mirage_home_path, 'deps/json/include')}",
+        "-I/usr/local/cuda/lib",
+        "-I/usr/local/cuda/lib64",
+        "-I/usr/local/cuda/lib64/stubs",
+        "-I/usr/local/include",
         f"-DMAX_WORKER_PER_SCHEDULER={max_worker_per_scheduler}",
     ]
 
@@ -154,10 +158,11 @@ def get_compile_command(
         common_cmd = common_cmd + nvshmem_cmd
         flags = flags + nvshmem_flags
 
-    if target_cc == 90:
+    if target_cc >= 90:
         specific_cmd = [
             "-arch=sm_90a",
             "-gencode=arch=compute_90a,code=sm_90a",
+            "-DMIRAGE_GRACE_HOPPER",
         ] + (["-DMIRAGE_ENABLE_PROFILER"] if profiling else [])
     else:
         specific_cmd = [
@@ -682,7 +687,17 @@ class PersistentKernel:
         grid_dim: tuple,
         block_dim: tuple,
     ):
-        # Currently assume that input/output
+        # for i in range(input.num_dims):
+        #     print(f"input.shape[{i}] = {input.dim(i)}")
+        # print(f"input.shape")
+        # for i in range(weight.num_dims):
+        #     print(f"weight.shape[{i}] = {weight.dim(i)}")
+        # for i in range(residual.num_dims):
+        #     print(f"residual.shape[{i}] = {residual.dim(i)}")
+        # for i in range(output.num_dims):
+        #     print(f"output.shape[{i}] = {output.dim(i)}")
+        # print(f"grid_dim = {grid_dim}")
+        # print(f"block_dim = {block_dim}")
         assert input.num_dims == 2  # (batch_size, hidden_size / world_size)
         assert weight.num_dims == 2  # (hidden_size, hidden_size / world_size)
         assert residual.num_dims == 2  # (batch_size, hidden_size)

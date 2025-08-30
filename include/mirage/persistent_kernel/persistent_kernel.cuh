@@ -989,7 +989,7 @@ extern "C" void launch_persistent_kernel() {
         scheduler_stream>>>(global_runtime_config);
 
     worker_kernel<<<dim3(global_runtime_config.num_workers, 1, 1),
-                    dim3(128, 1, 1),
+                    dim3(256, 1, 1),
                     MAX_SHARE_MEMORY_SIZE /*smem*/,
                     worker_stream>>>(global_runtime_config);
 

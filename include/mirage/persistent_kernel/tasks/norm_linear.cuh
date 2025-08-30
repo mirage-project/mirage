@@ -23,6 +23,7 @@
 #include "reduction.cuh"
 #include "smem_layout.cuh"
 #include "utils.cuh"
+#include "hopper/utils.cuh"
 namespace kernel {
 
 using bfloat16 = type::bfloat16_t;
@@ -41,6 +42,9 @@ __device__ __forceinline__ void
                           void const *weight_ptr,
                           float eps,
                           void *output_ptr) {
+      if (threadIdx.x >= 128) {
+        return;
+      }
   constexpr int CHUNK_SIZE = 16 / sizeof(T);
 
   // TODO: Update the formula since norm weight is cut down
@@ -331,10 +335,10 @@ __device__ __forceinline__ void
           weight_smem.set_ptr(shared_weight_buffer +
                               TILE_SIZE * OUTPUT_ATOM_SIZE *
                                   ((for_idx + 1) % K_PIPE_MAX));
-          __syncthreads();
+          wg_sync<128>(9);
 
           mul_broadcast_row(mul_output_smem, input_smem, norm_weight_smem);
-          __syncthreads();
+          wg_sync<128>(9);
 
           uint32_t a_frag[4], b_frag[4];
           for (uint32_t m = 0; m < NUM_ITERS_M; m++) {
@@ -373,7 +377,7 @@ __device__ __forceinline__ void
                                                ElementUnaryOpType::MULSCALAR>(
                 element_unary_smem, input_smem, scalars);
           }
-          __syncthreads();
+          wg_sync<128>(9);
         }
 
         // write back to shared memory
@@ -396,13 +400,13 @@ __device__ __forceinline__ void
             }
           }
         }
-        __syncthreads();
+        wg_sync<128>(9);
 
         if (NUM_WARPS_K > 1) {
           reduction_sum_row<decltype(mm_output_smem),
                             decltype(mm_intermediate_smem)>(
               mm_output_smem, mm_intermediate_smem);
-          __syncthreads();
+          wg_sync<128>(9);
         }
 
         if (output_atom_idx == 0) {
@@ -413,7 +417,7 @@ __device__ __forceinline__ void
                             ElementUnaryOpType::ADDSCALAR,
                             ElementUnaryOpType::SQRT>(
               reduction_output_smem, element_unary_smem, scalars);
-          __syncthreads();
+          wg_sync<128>(9);
         }
 
         if (NUM_WARPS_K > 1) {
@@ -421,7 +425,7 @@ __device__ __forceinline__ void
         } else {
           div_col(output_smem, mm_intermediate_smem, reduction_output_smem);
         }
-        __syncthreads();
+        wg_sync<128>(9);
 
 #pragma unroll
         for (int row = 0; row < BATCH_SIZE; row++) {
@@ -432,7 +436,7 @@ __device__ __forceinline__ void
         }
         if (output_atom_idx + 1 <
             (NUM_OUTPUT_ATOMS + (LAST_OUTPUT_ATOM_SIZE > 0))) {
-          __syncthreads();
+          wg_sync<128>(9);
         }
       };
 

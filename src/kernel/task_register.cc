@@ -539,6 +539,7 @@ int TaskRegister::register_linear_with_residual_hopper_task(threadblock::Graph c
   constexpr int S = 3;
   constexpr int TMA_CP_ASYNC_SIZE = 64;
   constexpr int TILE_SIZE = 128;
+  constexpr int Kstages = 2;
   int OUTPUT_TMA_CP_SIZE = output_size < 64 ? output_size : 64;
   code.e("using TMA_A = kernel::tma::tma_2d<bfloat16, $, $, $, $, $, $, $, $, $, $, true>;",
       B,
@@ -593,10 +594,11 @@ int TaskRegister::register_linear_with_residual_hopper_task(threadblock::Graph c
   code.e("TMA_RESIDUAL tma_residual(static_cast<CUtensorMap*>(task_desc.inputs[2].tma_desc_ptr));");
   code.e("TMA_OUT tma_out(static_cast<CUtensorMap*>(task_desc.outputs[0].tma_desc_ptr));");
 
-  code.e("kernel::linear_kernel_hopper<bfloat16, $, $, $, $, TMA_A, TMA_B, TMA_RESIDUAL, TMA_OUT>(",
+  code.e("kernel::linear_kernel_hopper<bfloat16, $, $, $, $, TMA_A, TMA_B, TMA_RESIDUAL, TMA_OUT, $>(",
          batch_size,
          output_size,
          reduction_size,
+         Kstages,
          output_stride);
   code.e("    tma_a,");
   code.e("    tma_b,");
