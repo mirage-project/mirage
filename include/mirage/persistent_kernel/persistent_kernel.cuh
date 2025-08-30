@@ -14,6 +14,7 @@
  */
 
 #include "profiler.h"
+#include "tma.cuh"
 #include "runtime_header.h"
 #include "utils.cuh"
 #include "tasks/kernel.h"

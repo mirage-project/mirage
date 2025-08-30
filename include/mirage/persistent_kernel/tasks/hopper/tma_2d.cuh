@@ -43,6 +43,10 @@ struct tma_2d {
   static constexpr size_t SMEM_REPEAT_COL = SMEM_REPEAT_COL_;
   static constexpr size_t SMEM_REPEAT_ROW = SMEM_REPEAT_ROW_;
 
+  __host__ inline tma_2d(CUtensorMap *desc_ptr) {
+    this->desc_ptr = desc_ptr;
+  }
+
   __host__ inline tma_2d(void *src) {
     CUtensorMap host_desc;
     create_tma_desc(&host_desc, src); // host-only function
