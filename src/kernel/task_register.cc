@@ -540,7 +540,7 @@ int TaskRegister::register_linear_with_residual_hopper_task(threadblock::Graph c
   constexpr int TMA_CP_ASYNC_SIZE = 64;
   constexpr int TILE_SIZE = 128;
   int OUTPUT_TMA_CP_SIZE = output_size < 64 ? output_size : 64;
-  code.e("using TMA_A = kernel::tma::tma_2d<bfloat16, $, $, $, $, $, $, $, $, $, true>;",
+  code.e("using TMA_A = kernel::tma::tma_2d<bfloat16, $, $, $, $, $, $, $, $, $, $, true>;",
       B,
       M,
       S,
@@ -549,8 +549,10 @@ int TaskRegister::register_linear_with_residual_hopper_task(threadblock::Graph c
       batch_size,
       TMA_CP_ASYNC_SIZE,
       1,
-      (TILE_SIZE + TMA_CP_ASYNC_SIZE - 1) / TMA_CP_ASYNC_SIZE);
-  code.e("using TMA_B = kernel::tma::tma_2d<bfloat16, $, $, $, $, $, $, $, $, $, true>;",
+      (TILE_SIZE + TMA_CP_ASYNC_SIZE - 1) / TMA_CP_ASYNC_SIZE,
+      batch_size * TMA_CP_ASYNC_SIZE);
+
+  code.e("using TMA_B = kernel::tma::tma_2d<bfloat16, $, $, $, $, $, $, $, $, $, $, true>;",
          B,
          M,
          S,
@@ -559,9 +561,10 @@ int TaskRegister::register_linear_with_residual_hopper_task(threadblock::Graph c
          output_size,
          TMA_CP_ASYNC_SIZE,
          1,
-         (TILE_SIZE + TMA_CP_ASYNC_SIZE - 1) / TMA_CP_ASYNC_SIZE);
+         (TILE_SIZE + TMA_CP_ASYNC_SIZE - 1) / TMA_CP_ASYNC_SIZE,
+         output_size * TMA_CP_ASYNC_SIZE);
 
-  code.e("using TMA_RESIDUAL = kernel::tma::tma_2d<bfloat16, $, $, $, $, $, $, $, $, $, true>;",
+  code.e("using TMA_RESIDUAL = kernel::tma::tma_2d<bfloat16, $, $, $, $, $, $, $, $, $, $, true>;",
          0,
          0,
          0,
@@ -570,9 +573,10 @@ int TaskRegister::register_linear_with_residual_hopper_task(threadblock::Graph c
          batch_size,
          OUTPUT_TMA_CP_SIZE,
          1,
-         (TILE_SIZE + OUTPUT_TMA_CP_SIZE - 1) / OUTPUT_TMA_CP_SIZE);
+         (TILE_SIZE + OUTPUT_TMA_CP_SIZE - 1) / OUTPUT_TMA_CP_SIZE,
+         batch_size * TMA_CP_ASYNC_SIZE);
 
-  code.e("using TMA_OUT = kernel::tma::tma_2d<bfloat16, $, $, $, $, $, $, $, $, $, true>;",
+  code.e("using TMA_OUT = kernel::tma::tma_2d<bfloat16, $, $, $, $, $, $, $, $, $, $, true>;",
          0,
          0,
          0,
@@ -581,22 +585,23 @@ int TaskRegister::register_linear_with_residual_hopper_task(threadblock::Graph c
          batch_size,
          OUTPUT_TMA_CP_SIZE,
          1,
-         (TILE_SIZE + OUTPUT_TMA_CP_SIZE - 1) / OUTPUT_TMA_CP_SIZE);
-
-  code.e("TMA_A tma_a(task_desc.inputs[0].tma_desc_ptr);");
-  code.e("TMA_B tma_b(task_desc.inputs[1].tma_desc_ptr);");
-  code.e("TMA_RESIDUAL tma_residual(task_desc.inputs[2].tma_desc_ptr);");
-  code.e("TMA_OUT tma_out(task_desc.outputs[0].tma_desc_ptr);");
+         (TILE_SIZE + OUTPUT_TMA_CP_SIZE - 1) / OUTPUT_TMA_CP_SIZE,
+         batch_size * TMA_CP_ASYNC_SIZE);
+  code.inc_indent();
+  code.e("TMA_A tma_a(static_cast<CUtensorMap*>(task_desc.inputs[0].tma_desc_ptr));");
+  code.e("TMA_B tma_b(static_cast<CUtensorMap*>(task_desc.inputs[1].tma_desc_ptr));");
+  code.e("TMA_RESIDUAL tma_residual(static_cast<CUtensorMap*>(task_desc.inputs[2].tma_desc_ptr));");
+  code.e("TMA_OUT tma_out(static_cast<CUtensorMap*>(task_desc.outputs[0].tma_desc_ptr));");
 
   code.e("kernel::linear_kernel_hopper<bfloat16, $, $, $, $, TMA_A, TMA_B, TMA_RESIDUAL, TMA_OUT>(",
          batch_size,
          output_size,
          reduction_size,
          output_stride);
-  code.e("    task_desc.inputs[0].tma_desc_ptr,");
-  code.e("    task_desc.inputs[1].tma_desc_ptr,");
-  code.e("    task_desc.inputs[2].tma_desc_ptr,");
-  code.e("    task_desc.outputs[0].tma_desc_ptr);");
+  code.e("    tma_a,");
+  code.e("    tma_b,");
+  code.e("    tma_residual,");
+  code.e("    tma_out);");
 
   return register_task_variant(TASK_LINEAR_WITH_RESIDUAL_HOPPER, code.to_string());
 }

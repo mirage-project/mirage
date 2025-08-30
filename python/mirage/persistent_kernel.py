@@ -136,6 +136,7 @@ def get_compile_command(
         "-std=c++17",
         "-rdc=true",
         "-use_fast_math",
+        "-lcuda",
         "-Xcompiler=-fPIC",
         "--expt-relaxed-constexpr",
         "-o",

@@ -1,17 +1,17 @@
 /* Copyright 2025 CMU
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+*
+* Licensed under the Apache License, Version 2.0 (the "License");
+* you may not use this file except in compliance with the License.
+* You may obtain a copy of the License at
+*
+*     http://www.apache.org/licenses/LICENSE-2.0
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific language governing permissions and
+* limitations under the License.
+*/
 
 #pragma once
 #include <cuda.h>
@@ -33,7 +33,7 @@ __host__ inline CUtensorMap *
 }
 
 template <typename T, int B, int M, int S, int NDIM>
-__host__ static inline void fill_tma_desc(CUtensorMap *tma_desc, void *src, uint64_t const (&gmem_shape)[NDIM], uint64_t const (&gmem_stride)[NDIM], uint32_t const (&smem_shape)[NDIM], uint32_t const (&smem_stride)[NDIM], size_t smem_repeat_row, size_t smem_repeat_col, size_t smem_tma_stride) {
+__host__ static inline void fill_tma_desc(CUtensorMap *tma_desc, void * const src, uint64_t const (&gmem_shape)[NDIM], uint64_t const (&gmem_stride)[NDIM], uint32_t const (&smem_shape)[NDIM], size_t smem_repeat_row, size_t smem_repeat_col, size_t smem_tma_stride) {
   constexpr uint32_t tma_dim = 5;
   void *global_addr = src;
 
@@ -48,8 +48,8 @@ __host__ static inline void fill_tma_desc(CUtensorMap *tma_desc, void *src, uint
       CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE;
   constexpr CUtensorMapSwizzle tma_swizzle =
       (B == 1   ? CU_TENSOR_MAP_SWIZZLE_32B
-       : B == 2 ? CU_TENSOR_MAP_SWIZZLE_64B
-       : B == 3 ? CU_TENSOR_MAP_SWIZZLE_128B
+      : B == 2 ? CU_TENSOR_MAP_SWIZZLE_64B
+      : B == 3 ? CU_TENSOR_MAP_SWIZZLE_128B
                 : CU_TENSOR_MAP_SWIZZLE_NONE);
 
   uint64_t gmem_prob_shape[5];
@@ -86,7 +86,7 @@ __host__ static inline void fill_tma_desc(CUtensorMap *tma_desc, void *src, uint
   }
 
   assert((reinterpret_cast<uint64_t>(global_addr) & 0b1111) ==
-         0); // Address must be 16B-aligned
+        0); // Address must be 16B-aligned
 
   assert(gmem_prob_shape[0] >= (uint64_t(1)));       // Size must be min 1
   assert(gmem_prob_shape[0] <= (uint64_t(1) << 32)); // Size must be max 2^32
@@ -101,21 +101,21 @@ __host__ static inline void fill_tma_desc(CUtensorMap *tma_desc, void *src, uint
 
   // Assert the byte strides. Tma Descriptor uses byte strides
   assert((gmem_prob_stride[1]) <
-         (uint64_t(1) << 40)); // Stride must be max 2^40
+        (uint64_t(1) << 40)); // Stride must be max 2^40
   assert((gmem_prob_stride[1] & 0b1111) ==
-         0); // Stride must be multiple of 16B (128b)
+        0); // Stride must be multiple of 16B (128b)
   assert((gmem_prob_stride[2]) <
-         (uint64_t(1) << 40)); // Stride must be max 2^40
+        (uint64_t(1) << 40)); // Stride must be max 2^40
   assert((gmem_prob_stride[2] & 0b1111) ==
-         0); // Stride must be multiple of 16B (128b)
+        0); // Stride must be multiple of 16B (128b)
   assert((gmem_prob_stride[3]) <
-         (uint64_t(1) << 40)); // Stride must be max 2^40
+        (uint64_t(1) << 40)); // Stride must be max 2^40
   assert((gmem_prob_stride[3] & 0b1111) ==
-         0); // Stride must be multiple of 16B (128b)
+        0); // Stride must be multiple of 16B (128b)
   assert((gmem_prob_stride[4]) <
-         (uint64_t(1) << 40)); // Stride must be max 2^40
+        (uint64_t(1) << 40)); // Stride must be max 2^40
   assert((gmem_prob_stride[4] & 0b1111) ==
-         0); // Stride must be multiple of 16B (128b)
+        0); // Stride must be multiple of 16B (128b)
 
   if constexpr (NDIM == 2) {
     smem_box_shape[0] = smem_shape[1];
@@ -200,17 +200,17 @@ smem_box_stride[4]);
 #endif
 
   CUresult result = cuTensorMapEncodeTiled(tma_desc,
-                                           tma_format,
-                                           tma_dim,
-                                           global_addr,
-                                           gmem_shape_ptr,
-                                           gmem_stride_ptr + 1,
-                                           smem_box_shape_ptr,
-                                           smem_box_stride_ptr,
-                                           CU_TENSOR_MAP_INTERLEAVE_NONE,
-                                           tma_swizzle,
-                                           CU_TENSOR_MAP_L2_PROMOTION_NONE,
-                                           CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
+                                          tma_format,
+                                          tma_dim,
+                                          global_addr,
+                                          gmem_shape_ptr,
+                                          gmem_stride_ptr + 1,
+                                          smem_box_shape_ptr,
+                                          smem_box_stride_ptr,
+                                          CU_TENSOR_MAP_INTERLEAVE_NONE,
+                                          tma_swizzle,
+                                          CU_TENSOR_MAP_L2_PROMOTION_NONE,
+                                          CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
 
   char const *error_string;
   CUresult res = cuGetErrorString(result, &error_string);
@@ -231,23 +231,21 @@ smem_box_stride[4]);
 }
 
 template <typename TaskDesc, typename TensorDesc>
-__host__ inline CUtensorMap *
+__host__ inline void
   fill_tma_desc_by_task(CUtensorMap *tma_desc, TaskDesc const &task_desc,
                                 TensorDesc const &tensor_desc, uint16_t const param_id) {
   switch (task_desc.task_type) {
-    case TASK_LINEAR_WITH_RESIDUAL_HOPPER:
+    case mirage::runtime::TASK_LINEAR_WITH_RESIDUAL_HOPPER:
     {
-      const int batch_size = task_desc.inputs[0].dim[0];
-      const int output_size = task_desc.outputs[0].dim[0];
-      const int reduction_size = task_desc.inputs[0].dim[1];
       const int cp_async_size = 64;
-      const int output_tma_cp_size = output_size < 64 ? output_size : 64;
 
       if (param_id == 0) {
         // TMA_INPUT
-        size_t gmem_shape[2] = {batch_size, reduction_size};
-        size_t gmem_stride[2] = {1, reduction_size};
-        size_t smem_shape[2] = {batch_size, cp_async_size};
+        const int batch_size = tensor_desc.dim[0];
+        const int reduction_size = tensor_desc.dim[1];
+        uint64_t gmem_shape[2] = {static_cast<uint64_t>(batch_size), static_cast<uint64_t>(reduction_size)};
+        uint64_t gmem_stride[2] = {1, static_cast<uint64_t>(reduction_size)};
+        uint32_t smem_shape[2] = {static_cast<uint32_t>(batch_size), static_cast<uint32_t>(cp_async_size)};
         constexpr int B = 3;
         constexpr int M = 3;
         constexpr int S = 3;
@@ -258,9 +256,11 @@ __host__ inline CUtensorMap *
         fill_tma_desc<bfloat16, B, M, S, 2>(tma_desc, tensor_desc.base_ptr, gmem_shape, gmem_stride, smem_shape, smem_repeat_row, smem_repeat_col, smem_tma_stride);
       } else if (param_id == 1) {
         // TMA_WEIGHT
-        size_t gmem_shape[2] = {output_size, reduction_size};
-        size_t gmem_stride[2] = {1, reduction_size};
-        size_t smem_shape[2] = {output_size, cp_async_size};
+        const int output_size = tensor_desc.dim[0];
+        const int reduction_size = tensor_desc.dim[1];
+        uint64_t gmem_shape[2] = {static_cast<uint64_t>(output_size), static_cast<uint64_t>(reduction_size)};
+        uint64_t gmem_stride[2] = {1, static_cast<uint64_t>(reduction_size)};
+        uint32_t smem_shape[2] = {static_cast<uint32_t>(output_size), static_cast<uint32_t>(cp_async_size)};
         constexpr int B = 3;
         constexpr int M = 3;
         constexpr int S = 3;
@@ -271,9 +271,11 @@ __host__ inline CUtensorMap *
         fill_tma_desc<bfloat16, B, M, S, 2>(tma_desc, tensor_desc.base_ptr, gmem_shape, gmem_stride, smem_shape, smem_repeat_row, smem_repeat_col, smem_tma_stride);
       } else if (param_id == 2) {
         // TMA_RESIDUAL
-        size_t gmem_shape[2] = {batch_size, output_size};
-        size_t gmem_stride[2] = {1, output_size};
-        size_t smem_shape[2] = {batch_size, cp_async_size};
+        const int batch_size = tensor_desc.dim[0];
+        const int output_size = tensor_desc.dim[1];
+        uint64_t gmem_shape[2] = {static_cast<uint64_t>(batch_size), static_cast<uint64_t>(output_size)};
+        uint64_t gmem_stride[2] = {1, static_cast<uint64_t>(output_size)};
+        uint32_t smem_shape[2] = {static_cast<uint32_t>(batch_size), static_cast<uint32_t>(cp_async_size)};
         constexpr int B = 0;
         constexpr int M = 0;
         constexpr int S = 0;
@@ -284,13 +286,15 @@ __host__ inline CUtensorMap *
         fill_tma_desc<bfloat16, B, M, S, 2>(tma_desc, tensor_desc.base_ptr, gmem_shape, gmem_stride, smem_shape, smem_repeat_row, smem_repeat_col, smem_tma_stride);
       } else if (param_id == 3) {
         // TMA_OUT
-        size_t gmem_shape[2] = {batch_size, output_size};
-        size_t gmem_stride[2] = {1, output_size};
-        size_t smem_shape[2] = {batch_size, cp_async_size};
+        const int batch_size = tensor_desc.dim[0];
+        const int output_size = tensor_desc.dim[1];
+        const int output_tma_cp_size = output_size < 64 ? output_size : 64;
+        uint64_t gmem_shape[2] = {static_cast<uint64_t>(batch_size), static_cast<uint64_t>(output_size)};
+        uint64_t gmem_stride[2] = {1, static_cast<uint64_t>(output_size)};
+        uint32_t smem_shape[2] = {static_cast<uint32_t>(batch_size), static_cast<uint32_t>(cp_async_size)};
         constexpr int B = 0;
         constexpr int M = 0;
         constexpr int S = 0;
-        constexpr int TILE_SIZE = 128;
         size_t smem_repeat_row = 1;
         size_t smem_repeat_col = (output_size + output_tma_cp_size - 1) / output_tma_cp_size;
         size_t smem_tma_stride = 1;

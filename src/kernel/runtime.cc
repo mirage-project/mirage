@@ -647,7 +647,7 @@ TaskGraphResult print_task_graph(
     code.e("if ((task.at(\"task_type\") >= 150 && task.at(\"task_type\") < "
            "200)) {");
     code.e("input.tma_desc_ptr = "
-           "static_cast<void*>(create_tma_desc_from_tensor(task, input, param_id));");
+           "static_cast<void*>(create_tma_desc_from_tensor(task_desc, input, param_id));");
     code.e("param_id++;");
     code.e("}");
     code.e("task_desc.inputs[task_desc.num_inputs++] = input;");
@@ -672,7 +672,7 @@ TaskGraphResult print_task_graph(
     code.e("if ((task.at(\"task_type\") >= 150 && task.at(\"task_type\") < "
           "200)) {");
     code.e("output.tma_desc_ptr = "
-      "static_cast<void*>(create_tma_desc_from_tensor(task, output, param_id));");
+      "static_cast<void*>(create_tma_desc_from_tensor(task_desc, output, param_id));");
     code.e("param_id++;");
     code.e("}");
     code.e("task_desc.outputs[task_desc.num_outputs++] = output;");
