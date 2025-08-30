@@ -447,7 +447,7 @@ if __name__ == "__main__":
                     block_dim=(128, 1, 1),
                 )
             else:
-                mpk.paged_attention_layer(
+                mpk.attention_layer(
                     input=attn_in,
                     k_cache=k_cache,
                     v_cache=v_cache,
@@ -463,7 +463,7 @@ if __name__ == "__main__":
             w = mpk.attach_input(
                 torch_tensor=layer.self_attn.o_proj.weight, name=f"layer_{i}_o_proj"
             )
-            mpk.linear_with_residual_layer_hopper(
+            mpk.linear_with_residual_layer(
                 input=attn_out,
                 weight=w,
                 residual=x,
@@ -533,7 +533,7 @@ if __name__ == "__main__":
             w = mpk.attach_input(
                 torch_tensor=layer.mlp.down_proj.weight, name=f"layer_{i}_down_proj"
             )
-            mpk.linear_with_residual_layer_hopper(
+            mpk.linear_with_residual_layer(
                 input=silu_mul_out,
                 weight=w,
                 residual=x,

@@ -23,6 +23,7 @@
 #include "reduction.cuh"
 #include "smem_layout.cuh"
 #include "utils.cuh"
+#include "hopper/utils.cuh"
 namespace kernel {
 
 using bfloat16 = type::bfloat16_t;
@@ -39,6 +40,9 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
                                               void *output_ptr,
                                               int num_active_tokens,
                                               bool residual) {
+  if (threadIdx.x >= 128) {
+    return;
+  }
   constexpr int CHUNK_SIZE = 16 / sizeof(T);
   constexpr int OUTPUT_ATOM_SIZE = OUTPUT_SIZE <= 128 ? OUTPUT_SIZE : 128;
   constexpr int NUM_OUTPUT_ATOMS = OUTPUT_SIZE / OUTPUT_ATOM_SIZE;
@@ -241,7 +245,7 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
       } else if (output_atom_idx + WEIGHT_PIPE_MAX - 1 == NUM_OUTPUT_ATOMS) {
         cp_async_wait<0>();
       }
-      __syncthreads();
+      wg_sync<128>(7);
 
       // accumulator
       float s_frag[NUM_ITERS_M][NUM_ITERS_N][8];
@@ -300,7 +304,7 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
           }
         }
       }
-      __syncthreads();
+      wg_sync<128>(7);
 
       // Accumulate this atom's contribution into the full output_smem at offset
       int atom_col_offset = output_atom_idx * OUTPUT_ATOM_SIZE;
@@ -323,7 +327,7 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
           }
         }
       }
-      __syncthreads();
+      wg_sync<128>(7);
     }
   }
 
