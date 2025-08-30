@@ -213,8 +213,8 @@ void launch_linear_hopper(void *input_ptr,
   delete[] iteration_times;
   cudaEventDestroy(start);
   cudaEventDestroy(stop);
+  #endif
 }
-#endif
 
 #define DISPATCH_LINEAR_HOPPER_REDUCTION_SIZE_CASE(                            \
     BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE)                                   \
@@ -267,8 +267,8 @@ void launch_linear_hopper(void *input_ptr,
     void *output_ptr = output.data_ptr();
 
     switch (input.size(0)) {
-      //  DISPATCH_LINEAR_HOPPER_BATCH_SIZE_CASE(16)
-      DISPATCH_LINEAR_HOPPER_BATCH_SIZE_CASE(64)
+      DISPATCH_LINEAR_HOPPER_BATCH_SIZE_CASE(1)
+      DISPATCH_LINEAR_HOPPER_BATCH_SIZE_CASE(64) 
       default:
         printf("Unsupported batch size in test: %zu\n", output.size(0));
         break;
@@ -860,7 +860,7 @@ void launch_linear_hopper(void *input_ptr,
     delete[] iteration_times;
     cudaEventDestroy(start);
     cudaEventDestroy(stop);
-#endif
+    #endif
   }
 
   void multitoken_paged_attention_hopper(

@@ -72,7 +72,7 @@ public:
         int smem_offset = SMEM_STRIDE_ * j;
         int const tma_coords_local[NDIM] = {tma_coords[0] + static_cast<int>(j * SMEM_COL),
                                             tma_coords[1] + static_cast<int>(i * SMEM_ROW)};
-#if 1
+#if 0
         printf("tma_coords: %d, %d\n", tma_coords[0], tma_coords[1]);
         printf("tma_coords_local: %d, %d\n",
               tma_coords_local[0],
