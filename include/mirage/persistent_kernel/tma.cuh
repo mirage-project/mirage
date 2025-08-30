@@ -19,17 +19,17 @@
 template <typename TaskDesc, typename TensorDesc>
 __host__ inline CUtensorMap *
     create_tma_desc_from_tensor(TaskDesc const &task_desc,
-                                TensorDesc const &tensor_desc) {
+                                TensorDesc const &tensor_desc, uint16_t const param_id) {
   CUtensorMap host_desc;
-
-  fill_tma_desc_by_task(&host_desc, task_desc, tensor_desc); // host-only function
+  CUtensorMap *desc_ptr;
+  fill_tma_desc_by_task(&host_desc, task_desc, tensor_desc, param_id); // host-only function
   cudaMalloc(&desc_ptr, sizeof(CUtensorMap));
   cudaMemcpy(desc_ptr, &host_desc, sizeof(CUtensorMap), cudaMemcpyHostToDevice);
   return desc_ptr;
 }
 
 template <int NDIM>
-__host__ static inline void fill_tma_desc(CUtensorMap *tma_desc, void *src, uint64_t const (&GMEM_SHAPE)[NDIM], uint64_t const (&GMEM_STRIDE)[NDIM], uint32_t const (&SMEM_SHAPE)[NDIM], uint32_t const (&SMEM_STRIDE)[NDIM]) {
+__host__ static inline void fill_tma_desc(CUtensorMap *tma_desc, void *src, uint64_t const (&gmem_shape)[NDIM], uint64_t const (&gmem_stride)[NDIM], uint32_t const (&smem_shape)[NDIM], uint32_t const (&smem_stride)[NDIM], size_t smem_repeat_row, size_t smem_repeat_col, size_t smem_tma_stride) {
   constexpr uint32_t tma_dim = 5;
   void *global_addr = src;
 
@@ -48,8 +48,17 @@ __host__ static inline void fill_tma_desc(CUtensorMap *tma_desc, void *src, uint
        : B == 3 ? CU_TENSOR_MAP_SWIZZLE_128B
                 : CU_TENSOR_MAP_SWIZZLE_NONE);
 
-  uint64_t gmem_prob_shape[5] = {GMEM_COL, GMEM_ROW, 1, 1, 1};
-  uint64_t gmem_prob_stride[5] = {sizeof(T), GMEM_COL * sizeof(T), 0, 0, 0};
+  if constexpr (NDIM == 2) {
+      uint64_t gmem_prob_shape[5] = {gmem_shape[1], gmem_shape[0], 1, 1, 1};
+      uint64_t gmem_prob_stride[5] = {sizeof(T), gmem_stride[1] * sizeof(T), 0, 0, 0};
+  }
+  else if constexpr (NDIM == 3) {
+    uint64_t gmem_prob_shape[5] = {gmem_shape[2], gmem_shape[1], gmem_shape[0], 1, 1};
+    uint64_t gmem_prob_stride[5] = {sizeof(T), gmem_stride[1] * sizeof(T), gmem_stride[0] * sizeof(T), 0, 0};
+  }
+  else {
+    assert(false);
+  }
 
   assert((reinterpret_cast<uint64_t>(global_addr) & 0b1111) ==
          0); // Address must be 16B-aligned
@@ -83,8 +92,17 @@ __host__ static inline void fill_tma_desc(CUtensorMap *tma_desc, void *src, uint
   assert((gmem_prob_stride[4] & 0b1111) ==
          0); // Stride must be multiple of 16B (128b)
 
-  uint32_t smem_box_shape[5] = {SMEM_COL, SMEM_ROW, 1, 1, 1};
-  uint32_t smem_box_stride[5] = {1, 1, 1, 1, 1};
+  if constexpr (NDIM == 2) {
+    uint32_t smem_box_shape[5] = {smem_shape[1], smem_shape[0], 1, 1, 1};
+    uint32_t smem_box_stride[5] = {1, 1, 1, 1, 1};
+  }
+  else if constexpr (NDIM == 3) {
+    uint32_t smem_box_shape[5] = {smem_shape[2], smem_shape[1], smem_shape[0], 1, 1};
+    uint32_t smem_box_stride[5] = {1, 1, 1, 1, 1};
+  }
+  else {
+    assert(false);
+  }
 
   assert(smem_box_shape[0] >= (uint32_t(1)));      // Size must be min 1
   assert(smem_box_shape[0] <= (uint32_t(1) << 8)); // Size must be max 2^8 = 256
@@ -180,19 +198,61 @@ __host__ inline CUtensorMap *
       const int batch_size = task_desc.inputs[0].dim[0];
       const int output_size = task_desc.outputs[0].dim[0];
       const int reduction_size = task_desc.inputs[0].dim[1];
+      const int cp_async_size = 64;
+      const int output_tma_cp_size = output_size < 64 ? output_size : 64;
 
       if (param_id == 0) {
-        size_t gmem_shape[5] = {batch_size, reduction_size, 1, 1, 1};
-        size_t gmem_stride[5] = {tensor_desc.stride[0], tensor_desc.stride[1], 0, 0, 0};
-        size_t smem_shape[5] = {batch_size, 64, batch_size, (reduction_size + 63) / 64, 1};
-        size_t smem_stride[5] = {1, 1, 1, 1, 1};
-        fill_tma_desc(tma_desc, tensor_desc.base_ptr, {batch_size, reduction_size}, tensor_desc.gmem_stride, tensor_desc.smem_shape, tensor_desc.smem_stride);
+        // TMA_INPUT
+        size_t gmem_shape[2] = {batch_size, reduction_size};
+        size_t gmem_stride[2] = {1, reduction_size};
+        size_t smem_shape[2] = {batch_size, cp_async_size};
+        constexpr int B = 3;
+        constexpr int M = 3;
+        constexpr int S = 3;
+        constexpr int TILE_SIZE = 128;
+        size_t smem_repeat_row = 1;
+        size_t smem_repeat_col = (TILE_SIZE + cp_async_size - 1) / cp_async_size;
+        size_t smem_tma_stride = 1;
+        fill_tma_desc<B, M, S>(tma_desc, gmem_shape, gmem_stride, smem_shape, smem_repeat_row, smem_repeat_col, smem_tma_stride);
       } else if (param_id == 1) {
-        fill_tma_desc(tma_desc, tensor_desc.base_ptr, tensor_desc.gmem_shape, tensor_desc.gmem_stride, tensor_desc.smem_shape, tensor_desc.smem_stride);
+        // TMA_WEIGHT
+        size_t gmem_shape[2] = {output_size, reduction_size};
+        size_t gmem_stride[2] = {1, reduction_size};
+        size_t smem_shape[2] = {output_size, cp_async_size};
+        constexpr int B = 3;
+        constexpr int M = 3;
+        constexpr int S = 3;
+        constexpr int TILE_SIZE = 128;
+        size_t smem_repeat_row = 1;
+        size_t smem_repeat_col = (TILE_SIZE + cp_async_size - 1) / cp_async_size;
+        size_t smem_tma_stride = 1;
+        fill_tma_desc<B, M, S>(tma_desc, gmem_shape, gmem_stride, smem_shape, smem_repeat_row, smem_repeat_col, smem_tma_stride);
       } else if (param_id == 2) {
-        fill_tma_desc(tma_desc, tensor_desc.base_ptr, tensor_desc.gmem_shape, tensor_desc.gmem_stride, tensor_desc.smem_shape, tensor_desc.smem_stride);
+        // TMA_RESIDUAL
+        size_t gmem_shape[2] = {batch_size, output_size};
+        size_t gmem_stride[2] = {1, output_size};
+        size_t smem_shape[2] = {batch_size, cp_async_size};
+        constexpr int B = 0;
+        constexpr int M = 0;
+        constexpr int S = 0;
+        constexpr int TILE_SIZE = 128;
+        size_t smem_repeat_row = 1;
+        size_t smem_repeat_col = (TILE_SIZE + cp_async_size - 1) / cp_async_size;
+        size_t smem_tma_stride = 1;
+        fill_tma_desc<B, M, S>(tma_desc, gmem_shape, gmem_stride, smem_shape, smem_repeat_row, smem_repeat_col, smem_tma_stride);
       } else if (param_id == 3) {
-        fill_tma_desc(tma_desc, tensor_desc.base_ptr, tensor_desc.gmem_shape, tensor_desc.gmem_stride, tensor_desc.smem_shape, tensor_desc.smem_stride);
+        // TMA_OUT
+        size_t gmem_shape[2] = {batch_size, output_size};
+        size_t gmem_stride[2] = {1, output_size};
+        size_t smem_shape[2] = {batch_size, cp_async_size};
+        constexpr int B = 0;
+        constexpr int M = 0;
+        constexpr int S = 0;
+        constexpr int TILE_SIZE = 128;
+        size_t smem_repeat_row = 1;
+        size_t smem_repeat_col = (output_size + output_tma_cp_size - 1) / output_tma_cp_size;
+        size_t smem_tma_stride = 1;
+        fill_tma_desc<B, M, S>(tma_desc, gmem_shape, gmem_stride, smem_shape, smem_repeat_row, smem_repeat_col, smem_tma_stride);
       }
       break;
     default:

@@ -627,6 +627,7 @@ TaskGraphResult print_task_graph(
 
     // load inputs
     code.e("task_desc.num_inputs = 0;");
+    code.e("uint16_t param_id = 0;");
     code.e("for (json const &tensor : task[\"inputs\"]) {");
     code.e("TensorDesc input;");
     code.e("std::string name = tensor.at(\"base_ptr\").get<std::string>();");
@@ -645,11 +646,10 @@ TaskGraphResult print_task_graph(
     // TMA
     code.e("if ((task.at(\"task_type\") >= 150 && task.at(\"task_type\") < "
            "200)) {");
-    // code.e("input.tma_desc_ptr = "
-    //        "static_cast<void*>(create_tma_desc_from_tensor(task, input));");
-    code.e("printf(\"1\");");
+    code.e("input.tma_desc_ptr = "
+           "static_cast<void*>(create_tma_desc_from_tensor(task, input));");
     code.e("}");
-
+    code.e("param_id++;");
     code.e("task_desc.inputs[task_desc.num_inputs++] = input;");
     code.e("}");
     // load outputs
@@ -669,6 +669,12 @@ TaskGraphResult print_task_graph(
     code.e("output.dim[i] = tensor[\"dims\"][i];");
     code.e("output.stride[i] = tensor[\"strides\"][i];");
     code.e("}");
+    code.e("if ((task.at(\"task_type\") >= 150 && task.at(\"task_type\") < "
+          "200)) {");
+    code.e("output.tma_desc_ptr = "
+          "static_cast<void*>(create_tma_desc_from_tensor(task, output));");
+    code.e("}");
+    code.e("param_id++;");
     code.e("task_desc.outputs[task_desc.num_outputs++] = output;");
     code.e("}");
     code.e("all_tasks.push_back(task_desc);");
