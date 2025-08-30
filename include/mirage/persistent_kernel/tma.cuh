@@ -15,6 +15,10 @@
 
 #pragma once
 #include <cuda.h>
+#include "tasks/common.h"
+#include "runtime_header.h"
+
+using bfloat16 = type::bfloat16_t;
 
 template <typename TaskDesc, typename TensorDesc>
 __host__ inline CUtensorMap *
@@ -28,7 +32,7 @@ __host__ inline CUtensorMap *
   return desc_ptr;
 }
 
-template <int NDIM>
+template <typename T, int B, int M, int S, int NDIM>
 __host__ static inline void fill_tma_desc(CUtensorMap *tma_desc, void *src, uint64_t const (&gmem_shape)[NDIM], uint64_t const (&gmem_stride)[NDIM], uint32_t const (&smem_shape)[NDIM], uint32_t const (&smem_stride)[NDIM], size_t smem_repeat_row, size_t smem_repeat_col, size_t smem_tma_stride) {
   constexpr uint32_t tma_dim = 5;
   void *global_addr = src;
@@ -48,13 +52,34 @@ __host__ static inline void fill_tma_desc(CUtensorMap *tma_desc, void *src, uint
        : B == 3 ? CU_TENSOR_MAP_SWIZZLE_128B
                 : CU_TENSOR_MAP_SWIZZLE_NONE);
 
+  uint64_t gmem_prob_shape[5];
+  uint64_t gmem_prob_stride[5];
+  uint32_t smem_box_shape[5];
+  uint32_t smem_box_stride[5];
+
   if constexpr (NDIM == 2) {
-      uint64_t gmem_prob_shape[5] = {gmem_shape[1], gmem_shape[0], 1, 1, 1};
-      uint64_t gmem_prob_stride[5] = {sizeof(T), gmem_stride[1] * sizeof(T), 0, 0, 0};
+      gmem_prob_shape[0] = gmem_shape[1];
+      gmem_prob_shape[1] = gmem_shape[0];
+      gmem_prob_shape[2] = 1;
+      gmem_prob_shape[3] = 1;
+      gmem_prob_shape[4] = 1;
+      gmem_prob_stride[0] = sizeof(T);
+      gmem_prob_stride[1] = gmem_stride[1] * sizeof(T);
+      gmem_prob_stride[2] = 0;
+      gmem_prob_stride[3] = 0;
+      gmem_prob_stride[4] = 0;
   }
   else if constexpr (NDIM == 3) {
-    uint64_t gmem_prob_shape[5] = {gmem_shape[2], gmem_shape[1], gmem_shape[0], 1, 1};
-    uint64_t gmem_prob_stride[5] = {sizeof(T), gmem_stride[1] * sizeof(T), gmem_stride[0] * sizeof(T), 0, 0};
+    gmem_prob_shape[0] = gmem_shape[2];
+    gmem_prob_shape[1] = gmem_shape[1];
+    gmem_prob_shape[2] = gmem_shape[0];
+    gmem_prob_shape[3] = 1;
+    gmem_prob_shape[4] = 1;
+    gmem_prob_stride[0] = sizeof(T);
+    gmem_prob_stride[1] = gmem_stride[1] * sizeof(T);
+    gmem_prob_stride[2] = gmem_stride[0] * sizeof(T);
+    gmem_prob_stride[3] = 0;
+    gmem_prob_stride[4] = 0;
   }
   else {
     assert(false);
@@ -93,12 +118,28 @@ __host__ static inline void fill_tma_desc(CUtensorMap *tma_desc, void *src, uint
          0); // Stride must be multiple of 16B (128b)
 
   if constexpr (NDIM == 2) {
-    uint32_t smem_box_shape[5] = {smem_shape[1], smem_shape[0], 1, 1, 1};
-    uint32_t smem_box_stride[5] = {1, 1, 1, 1, 1};
+    smem_box_shape[0] = smem_shape[1];
+    smem_box_shape[1] = smem_shape[0];
+    smem_box_shape[2] = 1;
+    smem_box_shape[3] = 1;
+    smem_box_shape[4] = 1;
+    smem_box_stride[0] = 1;
+    smem_box_stride[1] = 1;
+    smem_box_stride[2] = 1;
+    smem_box_stride[3] = 1;
+    smem_box_stride[4] = 1;
   }
   else if constexpr (NDIM == 3) {
-    uint32_t smem_box_shape[5] = {smem_shape[2], smem_shape[1], smem_shape[0], 1, 1};
-    uint32_t smem_box_stride[5] = {1, 1, 1, 1, 1};
+    smem_box_shape[0] = smem_shape[2];
+    smem_box_shape[1] = smem_shape[1];
+    smem_box_shape[2] = smem_shape[0];
+    smem_box_shape[3] = 1;
+    smem_box_shape[4] = 1;
+    smem_box_stride[0] = 1;
+    smem_box_stride[1] = 1;
+    smem_box_stride[2] = 1;
+    smem_box_stride[3] = 1;
+    smem_box_stride[4] = 1;
   }
   else {
     assert(false);
@@ -195,6 +236,7 @@ __host__ inline CUtensorMap *
                                 TensorDesc const &tensor_desc, uint16_t const param_id) {
   switch (task_desc.task_type) {
     case TASK_LINEAR_WITH_RESIDUAL_HOPPER:
+    {
       const int batch_size = task_desc.inputs[0].dim[0];
       const int output_size = task_desc.outputs[0].dim[0];
       const int reduction_size = task_desc.inputs[0].dim[1];
@@ -213,7 +255,7 @@ __host__ inline CUtensorMap *
         size_t smem_repeat_row = 1;
         size_t smem_repeat_col = (TILE_SIZE + cp_async_size - 1) / cp_async_size;
         size_t smem_tma_stride = 1;
-        fill_tma_desc<B, M, S>(tma_desc, gmem_shape, gmem_stride, smem_shape, smem_repeat_row, smem_repeat_col, smem_tma_stride);
+        fill_tma_desc<bfloat16, B, M, S, 2>(tma_desc, tensor_desc.base_ptr, gmem_shape, gmem_stride, smem_shape, smem_repeat_row, smem_repeat_col, smem_tma_stride);
       } else if (param_id == 1) {
         // TMA_WEIGHT
         size_t gmem_shape[2] = {output_size, reduction_size};
@@ -226,7 +268,7 @@ __host__ inline CUtensorMap *
         size_t smem_repeat_row = 1;
         size_t smem_repeat_col = (TILE_SIZE + cp_async_size - 1) / cp_async_size;
         size_t smem_tma_stride = 1;
-        fill_tma_desc<B, M, S>(tma_desc, gmem_shape, gmem_stride, smem_shape, smem_repeat_row, smem_repeat_col, smem_tma_stride);
+        fill_tma_desc<bfloat16, B, M, S, 2>(tma_desc, tensor_desc.base_ptr, gmem_shape, gmem_stride, smem_shape, smem_repeat_row, smem_repeat_col, smem_tma_stride);
       } else if (param_id == 2) {
         // TMA_RESIDUAL
         size_t gmem_shape[2] = {batch_size, output_size};
@@ -239,7 +281,7 @@ __host__ inline CUtensorMap *
         size_t smem_repeat_row = 1;
         size_t smem_repeat_col = (TILE_SIZE + cp_async_size - 1) / cp_async_size;
         size_t smem_tma_stride = 1;
-        fill_tma_desc<B, M, S>(tma_desc, gmem_shape, gmem_stride, smem_shape, smem_repeat_row, smem_repeat_col, smem_tma_stride);
+        fill_tma_desc<bfloat16, B, M, S, 2>(tma_desc, tensor_desc.base_ptr, gmem_shape, gmem_stride, smem_shape, smem_repeat_row, smem_repeat_col, smem_tma_stride);
       } else if (param_id == 3) {
         // TMA_OUT
         size_t gmem_shape[2] = {batch_size, output_size};
@@ -252,9 +294,10 @@ __host__ inline CUtensorMap *
         size_t smem_repeat_row = 1;
         size_t smem_repeat_col = (output_size + output_tma_cp_size - 1) / output_tma_cp_size;
         size_t smem_tma_stride = 1;
-        fill_tma_desc<B, M, S>(tma_desc, gmem_shape, gmem_stride, smem_shape, smem_repeat_row, smem_repeat_col, smem_tma_stride);
+        fill_tma_desc<bfloat16, B, M, S, 2>(tma_desc, tensor_desc.base_ptr, gmem_shape, gmem_stride, smem_shape, smem_repeat_row, smem_repeat_col, smem_tma_stride);
       }
       break;
+    }
     default:
       assert(false);
   }
