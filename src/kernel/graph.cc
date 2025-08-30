@@ -408,6 +408,10 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
     int variant_id =
         task_register->register_embedding_task(customized->bgraph, params);
     task_config[op] = std::make_tuple(2, 1, TASK_EMBEDDING, variant_id);
+  } else if (name == "rmsnorm") {
+    int variant_id =
+        task_register->register_rmsnorm_task(customized->bgraph, params);
+    task_config[op] = std::make_tuple(2, 1, TASK_RMS_NORM, variant_id);
   } else if (name == "rmsnorm_linear") {
     int variant_id =
         task_register->register_rmsnorm_linear_task(customized->bgraph, params);
@@ -416,16 +420,28 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
     int variant_id =
         task_register->register_attention_task(customized->bgraph, params);
     task_config[op] = std::make_tuple(7, 1, TASK_ATTENTION_1, variant_id);
+  } else if (name == "paged_attention") {
+    int variant_id = task_register->register_paged_attention_task(
+        customized->bgraph, params);
+    task_config[op] = std::make_tuple(7, 1, TASK_PAGED_ATTENTION_1, variant_id);
   } else if (name == "single_batch_extend_attention") {
     int variant_id = task_register->register_single_batch_extend_attention_task(
         customized->bgraph, params);
     task_config[op] =
         std::make_tuple(7, 1, TASK_SINGLE_BATCH_EXTEND_ATTENTION, variant_id);
+  } else if (name == "linear") {
+    int variant_id = task_register->register_linear_task(
+        customized->bgraph, params, false /*with_residual*/);
+    task_config[op] = std::make_tuple(2, 1, TASK_LINEAR, variant_id);
   } else if (name == "linear_with_residual") {
-    int variant_id = task_register->register_linear_with_residual_task(
-        customized->bgraph, params);
+    int variant_id = task_register->register_linear_task(
+        customized->bgraph, params, true /*with_residual*/);
     task_config[op] =
         std::make_tuple(3, 1, TASK_LINEAR_WITH_RESIDUAL, variant_id);
+  } else if (name == "silu_mul") {
+    int variant_id =
+        task_register->register_silu_mul_task(customized->bgraph, params);
+    task_config[op] = std::make_tuple(1, 1, TASK_SILU_MUL, variant_id);
   } else if (name == "silu_mul_linear_with_residual") {
     int variant_id = task_register->register_silu_mul_linear_with_residual_task(
         customized->bgraph, params);

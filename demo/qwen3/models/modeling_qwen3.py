@@ -213,14 +213,14 @@ class Qwen3Attention(nn.Module):
         self.key_cache, self.value_cache = kv_cache
         assert kv_cache[0].shape == (
             config.num_hidden_layers,
-            1,
+            16,
             4096,
             self.num_key_value_heads // world_size,
             self.head_dim,
         )
         assert kv_cache[1].shape == (
             config.num_hidden_layers,
-            1,
+            16,
             4096,
             self.num_key_value_heads // world_size,
             self.head_dim,
@@ -412,7 +412,7 @@ class Qwen3PreTrainedModel(PreTrainedModel):
 
 
 class Qwen3Model(Qwen3PreTrainedModel):
-    def __init__(self, config: Qwen3Config, world_size: int):
+    def __init__(self, config: Qwen3Config, world_size: int, max_num_pages: int, page_size: int):
         super().__init__(config)
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
@@ -423,8 +423,8 @@ class Qwen3Model(Qwen3PreTrainedModel):
         key_cache = torch.empty(
             (
                 config.num_hidden_layers,
-                1,
-                4096,
+                max_num_pages,
+                page_size,
                 config.num_key_value_heads // world_size,
                 config.head_dim,
             ),
@@ -434,8 +434,8 @@ class Qwen3Model(Qwen3PreTrainedModel):
         value_cache = torch.empty(
             (
                 config.num_hidden_layers,
-                1,
-                4096,
+                max_num_pages,
+                page_size,
                 config.num_key_value_heads // world_size,
                 config.head_dim,
             ),
@@ -505,9 +505,9 @@ class Qwen3Model(Qwen3PreTrainedModel):
 
 class Qwen3ForCausalLM(Qwen3PreTrainedModel, GenerationMixin):
 
-    def __init__(self, config, world_size=1):
+    def __init__(self, config, world_size, max_num_pages, page_size):
         super().__init__(config)
-        self.model = Qwen3Model(config, world_size)
+        self.model = Qwen3Model(config, world_size, max_num_pages, page_size)
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         # Initialize weights and apply final processing

@@ -20,11 +20,11 @@ HARD_CODE = """
 static PyObject *init_func(PyObject *self, PyObject *args) {
   PyObject *meta_list, *py_profiler_buffer;
   std::vector<void*> meta_tensors;
-  int my_mpi_rank, num_workers, num_local_schedulers, num_remote_schedulers, max_seq_length;
+  int my_mpi_rank, num_workers, num_local_schedulers, num_remote_schedulers, max_seq_length, total_num_requests;
   long long eos_token_id;
   void *profiler_buffer;
 
-  if (!PyArg_ParseTuple(args, "OOiiiiiL", &meta_list, &py_profiler_buffer, &my_mpi_rank, &num_workers, &num_local_schedulers, &num_remote_schedulers, &max_seq_length, &eos_token_id)) {
+  if (!PyArg_ParseTuple(args, "OOiiiiiiL", &meta_list, &py_profiler_buffer, &my_mpi_rank, &num_workers, &num_local_schedulers, &num_remote_schedulers, &max_seq_length, &total_num_requests, &eos_token_id)) {
     PyErr_SetString(PyExc_TypeError, "Invalid parameters");
     return NULL;
   }
@@ -47,7 +47,7 @@ static PyObject *init_func(PyObject *self, PyObject *args) {
   }
   profiler_buffer = PyLong_AsVoidPtr(py_profiler_buffer);
 
-  init_persistent_kernel(meta_tensors, profiler_buffer, my_mpi_rank, num_workers, num_local_schedulers, num_remote_schedulers, max_seq_length, eos_token_id);
+  init_persistent_kernel(meta_tensors, profiler_buffer, my_mpi_rank, num_workers, num_local_schedulers, num_remote_schedulers, max_seq_length, total_num_requests, eos_token_id);
 
   Py_RETURN_NONE;
 }
@@ -89,8 +89,10 @@ PyMODINIT_FUNC PyInit___mirage_launcher(void) {
 }
 """
 
+valid_persistent_kernel_modes = {"offline", "online", "onepass"}
 
 def get_compile_command(
+    mpk,
     target_cc,
     cc,
     file_name,
@@ -128,10 +130,6 @@ def get_compile_command(
         f"-I{os.path.join(mirage_inc_path, 'mirage/persistent_kernel')}",
         f"-I{os.path.join(mirage_deps_path, 'cutlass/include')}",
         f"-I{os.path.join(mirage_home_path, 'deps/json/include')}",
-        "-I/usr/local/cuda/lib",
-        "-I/usr/local/cuda/lib64",
-        "-I/usr/local/cuda/lib64/stubs",
-        "-I/usr/local/include",
         f"-DMAX_WORKER_PER_SCHEDULER={max_worker_per_scheduler}",
     ]
 
@@ -147,6 +145,21 @@ def get_compile_command(
         py_so_path,
     ]
 
+    if mpk.mode == "offline":
+        flags = flags + ["-DMODE_OFFLINE"]
+    elif mpk.mode == "online":
+        flags = flags + ["-DMODE_ONLINE"]
+    elif mpk.mode == "onepass":
+        flags = flags + ["-DMODE_ONEPASS"]
+    else:
+        raise ValueError(f"Invalid persistent kernel mode: {mpk.mode}")
+
+    flags = flags + [f"-DMPK_MAX_NUM_BATCHED_REQUESTS={mpk.max_num_batched_requests}"]
+    flags = flags + [f"-DMPK_MAX_NUM_BATCHED_TOKENS={mpk.max_num_batched_tokens}"]
+    flags = flags + [f"-DMPK_MAX_NUM_PAGES={mpk.max_num_pages}"]
+    flags = flags + [f"-DMPK_PAGE_SIZE={mpk.page_size}"]
+    flags = flags + [f"-DMPK_MAX_SEQ_LENGTH={mpk.max_seq_length}"]
+
     if use_nvshmem:
         nvshmem_cmd = [
             f"-I{nvshmem_inc_path}",
@@ -158,11 +171,12 @@ def get_compile_command(
         common_cmd = common_cmd + nvshmem_cmd
         flags = flags + nvshmem_flags
 
-    if target_cc >= 90:
+    if target_cc == 90:
         specific_cmd = [
             "-arch=sm_90a",
             "-gencode=arch=compute_90a,code=sm_90a",
-            "-DMIRAGE_GRACE_HOPPER",
+            "-DENABLE_TMA",
+            "-DMIRAGE_GRACE_HOPPER"
         ] + (["-DMIRAGE_ENABLE_PROFILER"] if profiling else [])
     else:
         specific_cmd = [
@@ -175,25 +189,37 @@ def get_compile_command(
 class PersistentKernel:
     def __init__(
         self,
+        mode: str,
         world_size: int,
         mpi_rank: int,
         num_workers: int,
         num_local_schedulers: int,
         num_remote_schedulers: int,
         max_seq_length: int,
+        max_num_batched_requests: int,
+        max_num_batched_tokens: int,
+        max_num_pages: int,
+        page_size: int,
         eos_token_id: int64,
-        meta_tensors: list[torch.Tensor],
+        meta_tensors: dict,
         profiler_tensor: torch.Tensor,
         spec_decode_config: SpecDecodeConfig
     ):
         self.__finalized__ = False
         self._is_compiled = False
+        if mode not in valid_persistent_kernel_modes:
+            raise ValueError(f"Invalid persistent kernel mode: {mode}")
+        self.mode = mode
         self.world_size = world_size
         self.mpi_rank = mpi_rank
         self.num_workers = num_workers
         self.num_local_schedulers = num_local_schedulers
         self.num_remote_schedulers = num_remote_schedulers
         self.max_seq_length = max_seq_length
+        self.max_num_batched_requests = max_num_batched_requests
+        self.max_num_batched_tokens = max_num_batched_tokens
+        self.max_num_pages = max_num_pages
+        self.page_size = page_size
         self.eos_token_id = eos_token_id
         self.kn_graph = KNGraph(CyKNGraph(disable_fingerprint=True))
         self.meta_tensors = meta_tensors
@@ -206,6 +232,18 @@ class PersistentKernel:
         self._spec_verify_handlers = {
             "promptlookup": self.prompt_lookup_verify_handler,
         }
+        # determine total number of requests for offline serving
+        self.total_num_requests = meta_tensors["tokens"].shape[0]
+        assert self.max_seq_length == meta_tensors["tokens"].shape[1]
+        # Check tensor shapes
+        qo_indptr_buffer = self.meta_tensors["qo_indptr_buffer"]
+        assert qo_indptr_buffer.shape == (self.max_num_batched_requests+1,)
+        paged_kv_indptr_buffer = self.meta_tensors["paged_kv_indptr_buffer"]
+        assert paged_kv_indptr_buffer.shape == (self.max_num_batched_requests+1,)
+        paged_kv_indices_buffer = self.meta_tensors["paged_kv_indices_buffer"]
+        assert paged_kv_indices_buffer.shape == (self.max_num_pages,)
+        paged_kv_last_page_len_buffer = self.meta_tensors["paged_kv_last_page_len_buffer"]
+        assert paged_kv_last_page_len_buffer.shape == (self.max_num_batched_requests,)
 
     def attach_input(self, torch_tensor: torch.Tensor, name: str = None) -> DTensor:
         dims = tuple([d for d in torch_tensor.shape])
@@ -273,6 +311,24 @@ class PersistentKernel:
         tb_graph.new_input(output, (1, 0, -1), -1, True)
         self.kn_graph.customized([input, weight, output], tb_graph)
         self.kn_graph.register_task(tb_graph, "embedding", [input_source])
+
+    def rmsnorm_layer(
+        self,
+        input: DTensor,
+        weight: DTensor,
+        output: DTensor,
+        grid_dim: tuple,
+        block_dim: tuple,
+    ):
+        # Currently assume that the input/output are 2D tensors
+        assert input.num_dims == 2
+        assert output.num_dims == 2
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(input, (0, -1, -1), 1, True)
+        tb_graph.new_input(weight, (-1, -1, -1), 0, True)
+        tb_graph.new_input(output, (0, -1, -1), 1, True)
+        self.kn_graph.customized([input, weight, output], tb_graph)
+        self.kn_graph.register_task(tb_graph, "rmsnorm")
 
     def rmsnorm_linear_layer(
         self,
@@ -432,6 +488,99 @@ class PersistentKernel:
         )
         self.kn_graph.register_task(tb_graph, "single_batch_extend_attention", params)
 
+    def paged_attention_layer(
+        self,
+        input: DTensor,
+        k_cache: DTensor,
+        v_cache: DTensor,
+        q_norm: DTensor,
+        k_norm: DTensor,
+        cos_pos_embed: DTensor,
+        sin_pos_embed: DTensor,
+        output: DTensor,
+        grid_dim: tuple,
+        block_dim: tuple,
+    ):
+        # Currently assume that input/output
+        assert input.num_dims == 2  # (num_tokens, fused_outdim / world_size)
+        assert output.num_dims == 2  # (num_tokens, hidden_size / world_size)
+        assert k_cache.num_dims == 4  # (num_pages, page_size, kv_heads, head_dim)
+        assert v_cache.num_dims == 4  # (num_pages, page_size, kv_heads, head_dim)
+        assert k_cache.dim(0) == self.max_num_pages
+        assert v_cache.dim(0) == self.max_num_pages
+        assert k_cache.dim(1) == self.page_size
+        assert v_cache.dim(1) == self.page_size
+        head_dim = k_cache.dim(3)
+        num_kv_heads = k_cache.dim(2)
+        num_q_heads = output.dim(1) // head_dim
+        rotary_embed = 0
+        if cos_pos_embed is not None or sin_pos_embed is not None:
+            assert cos_pos_embed.num_dims == 2  # (seq_len, head_dim)
+            assert sin_pos_embed.num_dims == 2  # (seq_len, head_dim)
+            assert cos_pos_embed.dim(1) == head_dim
+            assert sin_pos_embed.dim(1) == head_dim
+            rotary_embed = 1
+        qk_norm = 0
+        if q_norm is not None or k_norm is not None:
+            assert q_norm.num_dims == 1  # (head_dim)
+            assert k_norm.num_dims == 1  # (head_dim)
+            qk_norm = 1
+            assert q_norm.dim(0) == head_dim
+            assert k_norm.dim(0) == head_dim
+
+        # params[0]: num_q_heads
+        # params[1]: num_kv_heads
+        # params[2]: qk_norm
+        # params[3]: rotary_embed
+        # params[4]: max_seq_len
+        # params[5]: page_size
+        params = [num_q_heads, num_kv_heads, qk_norm, rotary_embed, self.max_seq_length, self.page_size]
+
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        assert grid_dim[0] == self.max_num_batched_requests
+        assert grid_dim[1] == num_kv_heads
+        tb_graph.new_input(input, (-1, 1, -1), -1, True)
+        tb_graph.new_input(k_cache, (-1, 2, -1), 1, True)
+        tb_graph.new_input(v_cache, (-1, 2, -1), 1, True)
+        tb_graph.new_input(q_norm, (-1, -1, -1), -1, True)
+        tb_graph.new_input(k_norm, (-1, -1, -1), -1, True)
+        tb_graph.new_input(cos_pos_embed, (-1, -1, -1), -1, True)
+        tb_graph.new_input(sin_pos_embed, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output, (-1, 1, -1), -1, True)
+        self.kn_graph.customized(
+            [
+                input,
+                k_cache,
+                v_cache,
+                q_norm,
+                k_norm,
+                cos_pos_embed,
+                sin_pos_embed,
+                output,
+            ],
+            tb_graph,
+        )
+        self.kn_graph.register_task(tb_graph, "paged_attention", params)
+
+    def linear_layer(
+        self,
+        input: DTensor,
+        weight: DTensor,
+        output: DTensor,
+        grid_dim: tuple,
+        block_dim: tuple,
+    ):
+        # Currently assume that input/output
+        assert input.num_dims == 2  # (batch_size, hidden_size / world_size)
+        assert weight.num_dims == 2  # (hidden_size, hidden_size / world_size)
+        assert output.num_dims == 2  # (batch_size, hidden_size)
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(input, (-1, -1, -1), 1, True)
+        tb_graph.new_input(weight, (0, -1, -1), 1, True)
+        tb_graph.new_input(output, (1, -1, -1), -1, True)
+        self.kn_graph.customized([input, weight, output], tb_graph)
+        self.kn_graph.register_task(tb_graph, "linear")
+
     def linear_with_residual_layer(
         self,
         input: DTensor,
@@ -472,6 +621,22 @@ class PersistentKernel:
         tb_graph.new_input(output, (1, -1, -1), -1, True)
         self.kn_graph.customized([input, buffer, output], tb_graph)
         self.kn_graph.register_task(tb_graph, "allreduce")
+
+    def silu_mul_layer(
+        self,
+        input: DTensor,
+        output: DTensor,
+        grid_dim: tuple,
+        block_dim: tuple,
+    ):
+        # Currently assume that input/output
+        assert input.num_dims == 2 # (batch_size, 2 * intermediate_size)
+        assert output.num_dims == 2 # (batch_size, intermediate_size)
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(input, (1, -1, -1), 1, True)
+        tb_graph.new_input(output, (1, -1, -1), 1, True)
+        self.kn_graph.customized([input, output], tb_graph)
+        self.kn_graph.register_task(tb_graph, "silu_mul")
 
     def silu_mul_linear_with_residual_layer(
         self,
@@ -526,7 +691,7 @@ class PersistentKernel:
         tb_graph.new_input(output_value, (1, 0, -1), -1, True)
         tb_graph.new_input(output_index, (1, 0, -1), -1, True)
         self.kn_graph.customized([input, output_value, output_index], tb_graph)
-        self.kn_graph.register_task(tb_graph, "argmax_partial")
+        self.kn_graph.register_task(tb_graph, "argmax_partial", [num_tasks])
 
     def argmax_reduce_layer(
         self,
@@ -675,9 +840,7 @@ class PersistentKernel:
             raise ValueError(f"Invalid spec decode method: {method}")
         return handler(spec_decode_config, spec_tokens, target_output, grid_dim, block_dim)
 
-
-
-
+    
     def linear_with_residual_layer_hopper(
         self,
         input: DTensor,
@@ -687,17 +850,7 @@ class PersistentKernel:
         grid_dim: tuple,
         block_dim: tuple,
     ):
-        # for i in range(input.num_dims):
-        #     print(f"input.shape[{i}] = {input.dim(i)}")
-        # print(f"input.shape")
-        # for i in range(weight.num_dims):
-        #     print(f"weight.shape[{i}] = {weight.dim(i)}")
-        # for i in range(residual.num_dims):
-        #     print(f"residual.shape[{i}] = {residual.dim(i)}")
-        # for i in range(output.num_dims):
-        #     print(f"output.shape[{i}] = {output.dim(i)}")
-        # print(f"grid_dim = {grid_dim}")
-        # print(f"block_dim = {block_dim}")
+        # Currently assume that input/output
         assert input.num_dims == 2  # (batch_size, hidden_size / world_size)
         assert weight.num_dims == 2  # (hidden_size, hidden_size / world_size)
         assert residual.num_dims == 2  # (batch_size, hidden_size)
@@ -709,74 +862,6 @@ class PersistentKernel:
         tb_graph.new_input(output, (1, -1, -1), -1, True)
         self.kn_graph.customized([input, weight, residual, output], tb_graph)
         self.kn_graph.register_task(tb_graph, "linear_with_residual_hopper")
-
-
-
-    def attention_layer_hopper(
-            self,
-            input: DTensor,
-            k_cache: DTensor,
-            v_cache: DTensor,
-            q_norm: DTensor,
-            k_norm: DTensor,
-            cos_pos_embed: DTensor,
-            sin_pos_embed: DTensor,
-            output: DTensor,
-            grid_dim: tuple,
-            block_dim: tuple,
-        ):
-            # Currently assume that input/output
-            assert input.num_dims == 2  # (batch_size, fused_outdim / world_size)
-            assert output.num_dims == 2  # (batch_size, hidden_size / world_size)
-            assert k_cache.num_dims == 4  # (batch_size, seq_len, kv_heads, head_dim)
-            assert v_cache.num_dims == 4  # (batch_size, seq_len, kv_heads, head_dim)
-            head_dim = k_cache.dim(3)
-            num_kv_heads = k_cache.dim(2)
-            num_q_heads = output.dim(1) // head_dim
-            rotary_embed = 0
-            if cos_pos_embed is not None or sin_pos_embed is not None:
-                assert cos_pos_embed.num_dims == 2  # (seq_len, head_dim)
-                assert sin_pos_embed.num_dims == 2  # (seq_len, head_dim)
-                assert cos_pos_embed.dim(1) == head_dim
-                assert sin_pos_embed.dim(1) == head_dim
-                rotary_embed = 1
-            qk_norm = 0
-            if q_norm is not None or k_norm is not None:
-                assert q_norm.num_dims == 1  # (head_dim)
-                assert k_norm.num_dims == 1  # (head_dim)
-                qk_norm = 1
-                assert q_norm.dim(0) == head_dim
-                assert k_norm.dim(0) == head_dim
-
-            # params[0]: num_q_heads
-            # params[1]: num_kv_heads
-            # params[2]: qk_norm
-            # params[3]: rotary_embed
-            params = [num_q_heads, num_kv_heads, qk_norm, rotary_embed]
-
-            tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
-            tb_graph.new_input(input, (0, 1, -1), -1, True)
-            tb_graph.new_input(k_cache, (0, 2, -1), 1, True)
-            tb_graph.new_input(v_cache, (0, 2, -1), 1, True)
-            tb_graph.new_input(q_norm, (-1, -1, -1), -1, True)
-            tb_graph.new_input(k_norm, (-1, -1, -1), -1, True)
-            tb_graph.new_input(cos_pos_embed, (-1, -1, -1), -1, True)
-            tb_graph.new_input(sin_pos_embed, (-1, -1, -1), -1, True)
-            tb_graph.new_input(output, (0, 1, -1), -1, True)
-            self.kn_graph.customized(
-                [
-                    input,
-                    k_cache,
-                    v_cache,
-                    q_norm,
-                    k_norm,
-                    cos_pos_embed,
-                    sin_pos_embed,
-                    output,
-                ],
-                tb_graph,
-            )
-            self.kn_graph.register_task(tb_graph, "attention_hopper", params)
 
     def compile(
         self,
@@ -900,6 +985,7 @@ class PersistentKernel:
         )
 
         cc_cmd = get_compile_command(
+            mpk=self,
             target_cc=target_cc,
             cc=cc,
             file_name=cuda_code_path,
@@ -932,7 +1018,19 @@ class PersistentKernel:
         self.finalize_func = getattr(mod, "finalize_func")
         print("Finished megakernel compilation...")
 
-        meta_tensors_ptr = [tensor.data_ptr() for tensor in self.meta_tensors]
+        #meta_tensors_ptr = [tensor.data_ptr() for tensor in self.meta_tensors]
+        meta_tensors = list()
+        meta_tensors.append(self.meta_tensors["step"])
+        meta_tensors.append(self.meta_tensors["tokens"])
+        meta_tensors.append(self.meta_tensors["input_tokens"])
+        meta_tensors.append(self.meta_tensors["output_tokens"])
+        meta_tensors.append(self.meta_tensors["num_new_tokens"])
+        meta_tensors.append(self.meta_tensors["prompt_lengths"])
+        meta_tensors.append(self.meta_tensors["qo_indptr_buffer"])
+        meta_tensors.append(self.meta_tensors["paged_kv_indptr_buffer"])
+        meta_tensors.append(self.meta_tensors["paged_kv_indices_buffer"])
+        meta_tensors.append(self.meta_tensors["paged_kv_last_page_len_buffer"])
+        meta_tensors_ptr = [tensor.data_ptr() for tensor in meta_tensors]
         profiler_buffer_ptr = (
             self.profiler_tensor.data_ptr() if self.profiler_tensor is not None else 0
         )
@@ -944,6 +1042,7 @@ class PersistentKernel:
             self.num_local_schedulers,
             self.num_remote_schedulers,
             self.max_seq_length,
+            self.total_num_requests,
             self.eos_token_id,
         )
 
