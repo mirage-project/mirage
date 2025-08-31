@@ -141,7 +141,7 @@ def get_compile_command(
         "-o",
         py_so_path,
     ]
-    flags = flags + [f"-DMIRAGE_TARGET_CC={target_cc}"]
+    flags = flags + [f"-DMPK_TARGET_CC={target_cc}"]
 
     if use_nvshmem:
         nvshmem_cmd = [

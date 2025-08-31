@@ -20,11 +20,11 @@
 namespace mirage {
 namespace runtime {
 
-#if MIRAGE_TARGET_CC >= 90
+#if MPK_TARGET_CC >= 90
 constexpr int MAX_SHARE_MEMORY_SIZE = 224 * 1024;
-#elif MIRAGE_TARGET_CC >= 86
+#elif MPK_TARGET_CC >= 86
 constexpr int MAX_SHARE_MEMORY_SIZE = 96 * 1024;
-#elif MIRAGE_TARGET_CC >= 80
+#elif MPK_TARGET_CC >= 80
 constexpr int MAX_SHARE_MEMORY_SIZE = 160 * 1024;
 #else
 constexpr int MAX_SHARE_MEMORY_SIZE = 96 * 1024;
