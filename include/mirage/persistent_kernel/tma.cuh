@@ -258,10 +258,15 @@ __host__ inline void
       } else if (param_id == 1) {
         // TMA_WEIGHT
         const int output_size = tensor_desc.dim[0];
+        const int output_atom_size =
+    (output_size >= 256) ? 256 :
+    (output_size >= 128) ? 128 :
+    (output_size >=  64) ?  64 :
+    (output_size >=  32) ?  32 : 16;
         const int reduction_size = tensor_desc.dim[1];
         uint64_t gmem_shape[2] = {static_cast<uint64_t>(output_size), static_cast<uint64_t>(reduction_size)};
         uint64_t gmem_stride[2] = {1, static_cast<uint64_t>(reduction_size)};
-        uint32_t smem_shape[2] = {static_cast<uint32_t>(output_size), static_cast<uint32_t>(cp_async_size)};
+        uint32_t smem_shape[2] = {static_cast<uint32_t>(output_atom_size), static_cast<uint32_t>(cp_async_size)};
         constexpr int B = 3;
         constexpr int M = 3;
         constexpr int S = 3;

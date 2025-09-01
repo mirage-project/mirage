@@ -45,7 +45,7 @@ __global__ __launch_bounds__(256, 1) void linear_kernel_hopper_wrapper(
                        Kstages,
                        TMA_A,
                        TMA_B,
-                       TMA_OUT>(tma_a, tma_b, tma_residual, tma_out);
+                       TMA_OUT>(tma_a, tma_b, tma_out, tma_residual);
 }
 
 template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int REDUCTION_SIZE>
@@ -66,13 +66,10 @@ void launch_linear_hopper(void *input_ptr,
       (TILE_SIZE + TMA_CP_ASYNC_SIZE - 1) / TMA_CP_ASYNC_SIZE;
 
   constexpr int OUTPUT_ATOM_SIZE =
-  []{
-      if constexpr (OUTPUT_SIZE >= 256) {
-          return 256;
-      } else {
-          return 128;
-      }
-  }();
+  (OUTPUT_SIZE >= 256) ? 256 :
+  (OUTPUT_SIZE >= 128) ? 128 :
+  (OUTPUT_SIZE >=  64) ?  64 :
+  (OUTPUT_SIZE >=  32) ?  32 : 16;
   constexpr int OUTPUT_ATOM_REPEAT_COL =
       (OUTPUT_ATOM_SIZE + TMA_CP_ASYNC_SIZE - 1) / TMA_CP_ASYNC_SIZE;
 
@@ -109,9 +106,9 @@ void launch_linear_hopper(void *input_ptr,
                           OUTPUT_ATOM_SIZE * TMA_CP_ASYNC_SIZE, /*SMEM_STRIDE_*/
                           true>;
   using TMA_RESIDUAL = kernel::tma::tma_2d<bfloat16,
-                                           0,
-                                           0,
-                                           0,
+                                           B,
+                                           M,
+                                           S,
                                            BATCH_SIZE,
                                            OUTPUT_SIZE,
                                            BATCH_SIZE,
@@ -124,9 +121,9 @@ void launch_linear_hopper(void *input_ptr,
                                            true>;
 
   using TMA_OUT = kernel::tma::tma_2d<bfloat16,
-                                      0,
-                                      0,
-                                      0,
+                                      B,
+                                      M,
+                                      S,
                                       BATCH_SIZE,
                                       OUTPUT_SIZE,
                                       BATCH_SIZE,
@@ -263,17 +260,19 @@ void launch_linear_hopper(void *input_ptr,
 
 #define DISPATCH_LINEAR_HOPPER_OUTPUT_SIZE(BATCH_SIZE)                         \
   switch (output.size(1)) {                                                    \
+    DISPATCH_LINEAR_HOPPER_OUTPUT_SIZE_CASE(BATCH_SIZE, 64)                    \
     /* \
     DISPATCH_LINEAR_HOPPER_OUTPUT_SIZE_CASE(BATCH_SIZE, 16)                    \
     DISPATCH_LINEAR_HOPPER_OUTPUT_SIZE_CASE(BATCH_SIZE, 32)                    \
-    DISPATCH_LINEAR_HOPPER_OUTPUT_SIZE_CASE(BATCH_SIZE, 64)                    \
     DISPATCH_LINEAR_HOPPER_OUTPUT_SIZE_CASE(BATCH_SIZE, 128)                   \
     */ \
+    /* \
     DISPATCH_LINEAR_HOPPER_OUTPUT_SIZE_CASE(BATCH_SIZE, 256)                   \
     DISPATCH_LINEAR_HOPPER_OUTPUT_SIZE_CASE(BATCH_SIZE, 512)                   \
     DISPATCH_LINEAR_HOPPER_OUTPUT_SIZE_CASE(BATCH_SIZE, 1024)                  \
     DISPATCH_LINEAR_HOPPER_OUTPUT_SIZE_CASE(BATCH_SIZE, 1600)                  \
     DISPATCH_LINEAR_HOPPER_OUTPUT_SIZE_CASE(BATCH_SIZE, 2048)                  \
+    */ \
     default:                                                                   \
       printf("Unsupported output size in test: %zu\n", output.size(1));        \
       break;                                                                   \

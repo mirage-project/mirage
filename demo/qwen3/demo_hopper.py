@@ -578,7 +578,7 @@ if __name__ == "__main__":
             weight=w_proj,
             output=argmax_in,
             # grid_dim=(grid_for_rmsnorm_linear_layer(w_proj.dim(0)), 1, 1),
-            grid_dim=(2400, 1, 1),
+            grid_dim=(75, 1, 1),
             block_dim=(128, 1, 1),
         )
         # mpk.rmsnorm_linear_layer(
