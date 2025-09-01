@@ -32,7 +32,7 @@ template <typename T,
           int OUTPUT_SIZE,
           int REDUCTION_SIZE,
           int O_STRIDE = OUTPUT_SIZE,
-          int PIPE_MAX = 3>
+          int PIPE_MAX = 2>
 __device__ __forceinline__ void linear_kernel(void const *input_ptr,
                                               void const *weight_ptr,
                                               void const *residual_ptr,
@@ -218,7 +218,6 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
     for (int output_atom_idx = 0; output_atom_idx < NUM_OUTPUT_ATOMS; ++output_atom_idx, ++global_pipe_idx) {
       // Prefetch next weight atom into ring buffer stage_write
       if (global_pipe_idx < TOTAL_WEIGHT_BLOCKS_TO_LOAD) {
-#pragma unroll
         // Load input tile at the first output atom
         if (global_pipe_idx % NUM_OUTPUT_ATOMS == 0) {
           #pragma unroll

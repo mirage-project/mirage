@@ -112,7 +112,7 @@ if __name__ == "__main__":
             model = Qwen3ForCausalLM.from_pretrained(model_name, world_size=1, max_num_pages=args.max_num_pages, page_size=args.page_size).to("cuda")
             tokenizer = AutoTokenizer.from_pretrained(model_name)
 
-    total_num_requests = 4
+    total_num_requests = args.max_num_batched_requests
     # get all model weight tensors
     tokens = torch.full((total_num_requests, args.max_seq_length), 0, dtype=torch.long, device="cuda")
 
@@ -146,6 +146,7 @@ if __name__ == "__main__":
     text = tokenizer.apply_chat_template(
         messages, tokenize=False, add_generation_prompt=True
     )
+    text = "."
     model_inputs = tokenizer([text], return_tensors="pt").to(model.device)
     for r in range(total_num_requests):
         for i in range(model_inputs.input_ids.shape[-1]):
