@@ -61,13 +61,14 @@ __device__ __forceinline__ void
   constexpr int INPUT_TMA_TILE_SIZE = 64;
   constexpr int WEIGHT_TMA_TILE_SIZE = INPUT_TMA_TILE_SIZE;
   constexpr int OUTPUT_TMA_TILE_SIZE = OUTPUT_SIZE < 64 ? OUTPUT_SIZE : 64;
+  constexpr int OUTPUT_ATOM_SIZE = OUTPUT_SIZE <= 128 ? OUTPUT_SIZE : 128;
 
   constexpr int TMA_TRANS_BYTES_A = sizeof(T) * BATCH_SIZE * TILE_SIZE;
-  constexpr int TMA_TRANS_BYTES_B = sizeof(T) * TILE_SIZE * OUTPUT_SIZE;
-  constexpr int TMA_TRANS_BYTES_RESIDUAL = sizeof(T) * BATCH_SIZE * OUTPUT_SIZE;
+  constexpr int TMA_TRANS_BYTES_B = sizeof(T) * TILE_SIZE * OUTPUT_ATOM_SIZE;
+  constexpr int TMA_TRANS_BYTES_RESIDUAL = sizeof(T) * BATCH_SIZE * OUTPUT_ATOM_SIZE;
 
   // using SM90_64x64x16_F32BF16BF16
-  // constexpr int num_n = OUTPUT_SIZE / 64;
+  constexpr int num_n = OUTPUT_SIZE / OUTPUT_ATOM_SIZE;
   // constexpr int num_m = BATCH_SIZE / 64;
   constexpr int num_k = REDUCTION_SIZE / TILE_SIZE;
 
@@ -91,13 +92,13 @@ __device__ __forceinline__ void
 
   constexpr size_t SHARED_RESIDUAL_BUFFER_OFFSET =
       SHARED_WEIGHT_BUFFER_OFFSET +
-      sizeof(T) * Kstages * TILE_SIZE * OUTPUT_SIZE;
+      sizeof(T) * Kstages * TILE_SIZE * OUTPUT_ATOM_SIZE;
 
   constexpr size_t SHARED_MM_OUTPUT_BUFFER_OFFSET =
-      SHARED_RESIDUAL_BUFFER_OFFSET + sizeof(T) * BATCH_SIZE * OUTPUT_SIZE;
+      SHARED_RESIDUAL_BUFFER_OFFSET + sizeof(T) * BATCH_SIZE * OUTPUT_ATOM_SIZE * Kstages;
 
   constexpr size_t SHARED_INPUT_BARRIER_OFFSET =
-      (SHARED_MM_OUTPUT_BUFFER_OFFSET + sizeof(T) * BATCH_SIZE * OUTPUT_SIZE +
+      (SHARED_MM_OUTPUT_BUFFER_OFFSET + sizeof(T) * BATCH_SIZE * OUTPUT_ATOM_SIZE * Kstages +
        15) /
       16 * 16;
 
@@ -109,6 +110,11 @@ __device__ __forceinline__ void
 
   constexpr size_t SHARED_COMPUTE_DONE_OFFSET =
       (SHARED_RESIDUAL_BARRIER_OFFSET + 8 * Kstages + 7) / 8 * 8;
+  constexpr size_t TOTAL_SHARED_MEMORY = SHARED_COMPUTE_DONE_OFFSET + 8 * Kstages;
+  if (threadIdx.x == 0) {
+    printf("TOTAL_SHARED_MEMORY: %llu\n", TOTAL_SHARED_MEMORY);
+  }
+  assert(TOTAL_SHARED_MEMORY <= 224 * 1024);
 
   // copy input
   T *shared_input = (T *)(smem + SHARED_INPUT_BUFFER_OFFSET);
@@ -134,7 +140,7 @@ __device__ __forceinline__ void
                               B,
                               M,
                               S,
-                              OUTPUT_SIZE,
+                              OUTPUT_ATOM_SIZE,
                               WEIGHT_TMA_TILE_SIZE,
                               TILE_SIZE / WEIGHT_TMA_TILE_SIZE>;
   WeightSmem input_weight_smem(shared_weight);
@@ -146,7 +152,7 @@ __device__ __forceinline__ void
                                 0,
                                 BATCH_SIZE,
                                 OUTPUT_TMA_TILE_SIZE,
-                                OUTPUT_SIZE / OUTPUT_TMA_TILE_SIZE>;
+                                OUTPUT_ATOM_SIZE / OUTPUT_TMA_TILE_SIZE>;
   ResidualSmem residual_smem(shared_residual);
 
   using A_DESC = wgmma::mma_descriptor<InputSmem>;
@@ -158,13 +164,8 @@ __device__ __forceinline__ void
                               0,
                               BATCH_SIZE,
                               OUTPUT_TMA_TILE_SIZE,
-                              OUTPUT_SIZE / OUTPUT_TMA_TILE_SIZE>;
+                              OUTPUT_ATOM_SIZE / OUTPUT_TMA_TILE_SIZE>;
   OutputSmem mm_output_smem(mm_output);
-  float s_frag[32];
-#pragma unroll
-  for (int i = 0; i < 4; i++) {
-    clear_8_floats(s_frag + i * 8);
-  }
 
   // define barries
   Barrier *input_barrier =
@@ -193,140 +194,149 @@ __device__ __forceinline__ void
 
     // wg_decrease_regs<32>();
     if (lane_id() == 0 && warp_idx == (NUM_WARPGROUPS * WARPGROUP_WARPS - 4)) {
-      int prefetch = (Kstages < num_k) ? Kstages : num_k;
-      for (int i = 0; i < prefetch; i++) {
-        int slot = i % Kstages;
-        int tma_coords_A[2] = {i * TILE_SIZE, 0};
-        int tma_coords_B[2] = {i * TILE_SIZE, 0};
+      for (int output_atom_idx = 0; output_atom_idx < num_n; output_atom_idx++) {
+        int prefetch = (Kstages < num_k) ? Kstages : num_k;
+        for (int i = 0; i < prefetch; i++) {
+          int slot = (output_atom_idx * num_k + i) % Kstages;
+          int tma_coords_A[2] = {i * TILE_SIZE, 0};
+          int tma_coords_B[2] = {i * TILE_SIZE, 0};
 
-        input_smem_buffer.set_ptr(shared_input +
-                                  slot * TMA_TRANS_BYTES_A / sizeof(T));
-        set_barrier_transaction_bytes(input_barrier[slot], TMA_TRANS_BYTES_A);
-        tma_a.tma_cp_async(
-            input_barrier[slot], input_smem_buffer(0, 0), tma_coords_A);
+          input_smem_buffer.set_ptr(shared_input +
+                                    slot * TMA_TRANS_BYTES_A / sizeof(T));
+          set_barrier_transaction_bytes(input_barrier[slot], TMA_TRANS_BYTES_A);
+          tma_a.tma_cp_async(
+              input_barrier[slot], input_smem_buffer(0, 0), tma_coords_A);
 
-        input_weight_smem_buffer.set_ptr(shared_weight +
-                                         slot * TMA_TRANS_BYTES_B / sizeof(T));
-        set_barrier_transaction_bytes(weight_barrier[slot], TMA_TRANS_BYTES_B);
-        tma_b.tma_cp_async(
-            weight_barrier[slot], input_weight_smem_buffer(0, 0), tma_coords_B);
-      }
+          // input_weight_smem_buffer.set_ptr(shared_weight +
+          //                                 slot * TMA_TRANS_BYTES_B / sizeof(T));
+          // set_barrier_transaction_bytes(weight_barrier[slot], TMA_TRANS_BYTES_B);
+          // tma_b.tma_cp_async(
+          //     weight_barrier[slot], input_weight_smem_buffer(0, 0), tma_coords_B);
+        }
 
-      // launch tma for residual
-      set_barrier_transaction_bytes(residual_barrier[0],
-                                    TMA_TRANS_BYTES_RESIDUAL);
-      tma_residual.tma_cp_async(
-          residual_barrier[0], residual_smem(0, 0), {0, 0});
+        // launch tma for residual
+        set_barrier_transaction_bytes(residual_barrier[0],
+                                      TMA_TRANS_BYTES_RESIDUAL);
+        tma_residual.tma_cp_async(
+            residual_barrier[0], residual_smem(0, 0), {0, 0});
 
-      for (int i = prefetch; i < num_k; i++) {
-        int slot = i % Kstages;
-        int phase = (i / Kstages) % 2;
-        wait(compute_done[slot], phase ^ 1);
+        for (int i = prefetch; i < num_k; i++) {
+          int slot = (output_atom_idx * num_k + i) % Kstages;
+          int phase = ((output_atom_idx * num_k + i) / Kstages) % 2;
+          wait(compute_done[slot], phase ^ 1);
 
 
-        int tma_coords_A[2] = {i * TILE_SIZE, 0};
-        int tma_coords_B[2] = {i * TILE_SIZE, 0};
+          int tma_coords_A[2] = {i * TILE_SIZE, 0};
+          int tma_coords_B[2] = {i * TILE_SIZE, 0};
 
-        input_smem_buffer.set_ptr(shared_input +
-                                  slot * TMA_TRANS_BYTES_A / sizeof(T));
-        set_barrier_transaction_bytes(input_barrier[slot], TMA_TRANS_BYTES_A);
-        tma_a.tma_cp_async(
-            input_barrier[slot], input_smem_buffer(0, 0), tma_coords_A);
+          input_smem_buffer.set_ptr(shared_input +
+                                    slot * TMA_TRANS_BYTES_A / sizeof(T));
+          set_barrier_transaction_bytes(input_barrier[slot], TMA_TRANS_BYTES_A);
+          tma_a.tma_cp_async(
+              input_barrier[slot], input_smem_buffer(0, 0), tma_coords_A);
 
-        input_weight_smem_buffer.set_ptr(shared_weight +
-                                         slot * TMA_TRANS_BYTES_B / sizeof(T));
-        set_barrier_transaction_bytes(weight_barrier[slot], TMA_TRANS_BYTES_B);
-        tma_b.tma_cp_async(
-            weight_barrier[slot], input_weight_smem_buffer(0, 0), tma_coords_B);
+          // input_weight_smem_buffer.set_ptr(shared_weight +
+          //                                 slot * TMA_TRANS_BYTES_B / sizeof(T));
+          // set_barrier_transaction_bytes(weight_barrier[slot], TMA_TRANS_BYTES_B);
+          // tma_b.tma_cp_async(
+          //     weight_barrier[slot], input_weight_smem_buffer(0, 0), tma_coords_B);
 
+        }
       }
     }
   } else {
     // warp specialization compute warpgroup
     // wg_increase_regs<160>();
-    for (int i = 0; i < num_k; i++) {
-      int slot = i % Kstages;
-      int phase = (i / Kstages) % 2;
-      // wait input, weight
-      wait(input_barrier[slot], phase);
-      wait(weight_barrier[slot], phase);
+    float s_frag[32];
+    for (int output_atom_idx = 0; output_atom_idx < num_n; output_atom_idx++) {
+      #pragma unroll
+        for (int i = 0; i < 4; i++) {
+          clear_8_floats(s_frag + i * 8);
+        }
+
+      for (int i = 0; i < num_k; i++) {
+        int slot = (output_atom_idx * num_k + i) % Kstages;
+        int phase = ((output_atom_idx * num_k + i) / Kstages) % 2;
+        // wait input, weight
+        wait(input_barrier[slot], phase);
+        wait(weight_barrier[slot], phase);
 
 
-      input_smem.set_ptr(shared_input + (slot)*TMA_TRANS_BYTES_A / sizeof(T));
-      input_weight_smem.set_ptr(shared_weight +
-                                (slot)*TMA_TRANS_BYTES_B / sizeof(T));
+        input_smem.set_ptr(shared_input + (slot)*TMA_TRANS_BYTES_A / sizeof(T));
+        input_weight_smem.set_ptr(shared_weight +
+                                  (slot)*TMA_TRANS_BYTES_B / sizeof(T));
 
-      //  if (threadIdx.x == 0) {
-      //    printf("i: %d\n", i);
-      //    printf("input_smem ptr: %p\n", input_smem(0, 0));
-      //    printf("input_weight_smem ptr: %p\n", input_weight_smem(0, 0));
-      //    printf("input_smem\n");
-      //    for (int j = 0; j < BATCH_SIZE; j++) {
-      //      for (int k = 0; k < TILE_SIZE; k++) {
-      //        printf("%f ", (float)input_smem.at(j, k));
-      //      }
-      //      printf("\n");
-      //    }
-      //  printf("input_weight_smem\n");
-      //  for (int j = 0; j < TILE_SIZE; j++) {
-      //    for (int k = 0; k < OUTPUT_SIZE; k++) {
-      //      printf("%f ", (float)input_weight_smem.at(j, k));
-      //    }
-      //    printf("\n");
-      //  }
-      //  }
+        //  if (threadIdx.x == 0) {
+        //    printf("i: %d\n", i);
+        //    printf("input_smem ptr: %p\n", input_smem(0, 0));
+        //    printf("input_weight_smem ptr: %p\n", input_weight_smem(0, 0));
+        //    printf("input_smem\n");
+        //    for (int j = 0; j < BATCH_SIZE; j++) {
+        //      for (int k = 0; k < TILE_SIZE; k++) {
+        //        printf("%f ", (float)input_smem.at(j, k));
+        //      }
+        //      printf("\n");
+        //    }
+        //  printf("input_weight_smem\n");
+        //  for (int j = 0; j < TILE_SIZE; j++) {
+        //    for (int k = 0; k < OUTPUT_SIZE; k++) {
+        //      printf("%f ", (float)input_weight_smem.at(j, k));
+        //    }
+        //    printf("\n");
+        //  }
+        //  }
 
-      A_DESC a_desc(input_smem(0, 0));
-      B_DESC b_desc(input_weight_smem(0, 0));
+        A_DESC a_desc(input_smem(0, 0));
+        B_DESC b_desc(input_weight_smem(0, 0));
 
-      //   wgmma::warpgroup_fence_fragment(s_frag);
-      wgmma::warpgroup_arrive();
-      // wgmma
-      wgmma::mma<bfloat16,
-                 64,
-                 OUTPUT_SIZE,
-                 16,
-                 InputSmem,
-                 WeightSmem,
-                 A_DESC,
-                 B_DESC,
-                 false,
-                 false>(s_frag, a_desc, b_desc);
-      wgmma::mma_commit_group();
-      wgmma::mma_async_wait();
-      //   wgmma::warpgroup_fence_fragment(s_frag);
+        //   wgmma::warpgroup_fence_fragment(s_frag);
+        wgmma::warpgroup_arrive();
+        // wgmma
+        wgmma::mma<bfloat16,
+                  64,
+                  OUTPUT_ATOM_SIZE,
+                  16,
+                  InputSmem,
+                  WeightSmem,
+                  A_DESC,
+                  B_DESC,
+                  false,
+                  false>(s_frag, a_desc, b_desc);
+        wgmma::mma_commit_group();
+        wgmma::mma_async_wait();
+        //   wgmma::warpgroup_fence_fragment(s_frag);
 
-      // flip compute done
-      if (idx_in_warp == 0 && warp_idx % 4 == 0) {
-        arrive(compute_done[slot], 1);
+        // flip compute done
+        if (idx_in_warp == 0 && warp_idx % 4 == 0) {
+          arrive(compute_done[slot], 1);
+        }
       }
-    }
-    // https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#asynchronous-warpgroup-level-matrix-register-fragment-wgmma-64n16:~:text=The%20layout%20of%20the%20fragments%20held%20by%20different%20threads%20is%20shown%20in%20Figure%20149.
-    // write back to shared memory
-
-    wait(residual_barrier[0], 0);
-
+    
+      wait(residual_barrier[0], 0);
+      // https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#asynchronous-warpgroup-level-matrix-register-fragment-wgmma-64n16:~:text=The%20layout%20of%20the%20fragments%20held%20by%20different%20threads%20is%20shown%20in%20Figure%20149.
+      // write back to shared memory
 #pragma unroll 1
-    for (uint32_t i = 0; i < (OUTPUT_SIZE / 4); i++) {
-      int row = (warp_idx % 4) * 16 + (i % 2) * 8 + idx_in_warp / 4;
-      int col = (i / 2) * 8 + (idx_in_warp % 4) * 2;
-      mm_output_smem.at(row, col) =
-          bfloat16(s_frag[i * 2]) + residual_smem.at(row, col);
-      mm_output_smem.at(row, col + 1) =
-          bfloat16(s_frag[i * 2 + 1]) + residual_smem.at(row, col + 1);
-    }
+      for (uint32_t i = 0; i < (OUTPUT_ATOM_SIZE / 4); i++) {
+        int row = (warp_idx % 4) * 16 + (i % 2) * 8 + idx_in_warp / 4;
+        int col = (i / 2) * 8 + (idx_in_warp % 4) * 2;
+        mm_output_smem.at(row, col) =
+            bfloat16(s_frag[i * 2]) + residual_smem.at(row, col);
+        mm_output_smem.at(row, col + 1) =
+            bfloat16(s_frag[i * 2 + 1]) + residual_smem.at(row, col + 1);
+      }
 
-    // make sure generic proxy's modification to smem is visible to tma store
-    // async proxy this is intra-thread sync
-    async_proxy_fence();
+      // make sure generic proxy's modification to smem is visible to tma store
+      // async proxy this is intra-thread sync
+      async_proxy_fence();
 
-    // this is inter-thread sync
-    // wg_sync<THREADS_PER_WARPGROUP * CONSUMER_WARPGROUPS>(8);
+      // this is inter-thread sync
+      // wg_sync<THREADS_PER_WARPGROUP * CONSUMER_WARPGROUPS>(8);
 
-    // copy back to dmem
-    if (warp_idx % 4 == 0 && lane_id() == 0) {
-      tma_out.tma_store_async(mm_output_smem(0, 0), {0, 0});
-      store_commit_group();
+      // copy back to dmem
+      if (warp_idx % 4 == 0 && lane_id() == 0) {
+        tma_out.tma_store_async(mm_output_smem(0, 0), {output_atom_idx * OUTPUT_ATOM_SIZE, 0});
+        store_commit_group();
+      }
     }
   }
 }

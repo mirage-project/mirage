@@ -62,8 +62,9 @@ void launch_linear_hopper(void *input_ptr,
   constexpr int TILE_SIZE = 128; // we should modify this param if we want larger tile size
   constexpr int TMA_CP_ASYNC_REPEAT_COL =
       (TILE_SIZE + TMA_CP_ASYNC_SIZE - 1) / TMA_CP_ASYNC_SIZE;
+  constexpr int OUTPUT_ATOM_SIZE = OUTPUT_SIZE <= 128 ? OUTPUT_SIZE : 128;
   constexpr int OUTPUT_REPEAT_COL =
-      (OUTPUT_SIZE + TMA_CP_ASYNC_SIZE - 1) / TMA_CP_ASYNC_SIZE;
+      (OUTPUT_ATOM_SIZE + TMA_CP_ASYNC_SIZE - 1) / TMA_CP_ASYNC_SIZE;
 
   constexpr int OUTPUT_TMA_CP_SIZE = OUTPUT_SIZE < 64 ? OUTPUT_SIZE : 64;
 
@@ -86,8 +87,9 @@ void launch_linear_hopper(void *input_ptr,
                                         S,
                                         OUTPUT_SIZE,
                                         REDUCTION_SIZE,
-                                        OUTPUT_SIZE,
+                                        OUTPUT_ATOM_SIZE,
                                         TMA_CP_ASYNC_SIZE,
+                                        // (OUTPUT_SIZE + SMEM_ROW_TMA_CP_SIZE - 1) / SMEM_ROW_TMA_CP_SIZE,
                                         1,
                                         TMA_CP_ASYNC_REPEAT_COL,
                                         OUTPUT_SIZE * TMA_CP_ASYNC_SIZE,
@@ -246,6 +248,9 @@ void launch_linear_hopper(void *input_ptr,
     DISPATCH_LINEAR_HOPPER_OUTPUT_SIZE_CASE(BATCH_SIZE, 16)                    \
     DISPATCH_LINEAR_HOPPER_OUTPUT_SIZE_CASE(BATCH_SIZE, 32)                    \
     DISPATCH_LINEAR_HOPPER_OUTPUT_SIZE_CASE(BATCH_SIZE, 64)                    \
+    DISPATCH_LINEAR_HOPPER_OUTPUT_SIZE_CASE(BATCH_SIZE, 128)                   \
+    DISPATCH_LINEAR_HOPPER_OUTPUT_SIZE_CASE(BATCH_SIZE, 256)                   \
+    DISPATCH_LINEAR_HOPPER_OUTPUT_SIZE_CASE(BATCH_SIZE, 1600)                  \
     default:                                                                   \
       printf("Unsupported output size in test: %zu\n", output.size(1));        \
       break;                                                                   \

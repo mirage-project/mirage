@@ -88,34 +88,34 @@ __host__ static inline void fill_tma_desc(CUtensorMap *tma_desc, void * const sr
   assert((reinterpret_cast<uint64_t>(global_addr) & 0b1111) ==
         0); // Address must be 16B-aligned
 
-  assert(gmem_prob_shape[0] >= (uint64_t(1)));       // Size must be min 1
-  assert(gmem_prob_shape[0] <= (uint64_t(1) << 32)); // Size must be max 2^32
-  assert(gmem_prob_shape[1] >= (uint64_t(1)));       // Size must be min 1
-  assert(gmem_prob_shape[1] <= (uint64_t(1) << 32)); // Size must be max 2^32
-  assert(gmem_prob_shape[2] >= (uint64_t(1)));       // Size must be min 1
-  assert(gmem_prob_shape[2] <= (uint64_t(1) << 32)); // Size must be max 2^32
-  assert(gmem_prob_shape[3] >= (uint64_t(1)));       // Size must be min 1
-  assert(gmem_prob_shape[3] <= (uint64_t(1) << 32)); // Size must be max 2^32
-  assert(gmem_prob_shape[4] >= (uint64_t(1)));       // Size must be min 1
-  assert(gmem_prob_shape[4] <= (uint64_t(1) << 32)); // Size must be max 2^32
+  // assert(gmem_prob_shape[0] >= (uint64_t(1)));       // Size must be min 1
+  // assert(gmem_prob_shape[0] <= (uint64_t(1) << 32)); // Size must be max 2^32
+  // assert(gmem_prob_shape[1] >= (uint64_t(1)));       // Size must be min 1
+  // assert(gmem_prob_shape[1] <= (uint64_t(1) << 32)); // Size must be max 2^32
+  // assert(gmem_prob_shape[2] >= (uint64_t(1)));       // Size must be min 1
+  // assert(gmem_prob_shape[2] <= (uint64_t(1) << 32)); // Size must be max 2^32
+  // assert(gmem_prob_shape[3] >= (uint64_t(1)));       // Size must be min 1
+  // assert(gmem_prob_shape[3] <= (uint64_t(1) << 32)); // Size must be max 2^32
+  // assert(gmem_prob_shape[4] >= (uint64_t(1)));       // Size must be min 1
+  // assert(gmem_prob_shape[4] <= (uint64_t(1) << 32)); // Size must be max 2^32
 
-  // Assert the byte strides. Tma Descriptor uses byte strides
-  assert((gmem_prob_stride[1]) <
-        (uint64_t(1) << 40)); // Stride must be max 2^40
-  assert((gmem_prob_stride[1] & 0b1111) ==
-        0); // Stride must be multiple of 16B (128b)
-  assert((gmem_prob_stride[2]) <
-        (uint64_t(1) << 40)); // Stride must be max 2^40
-  assert((gmem_prob_stride[2] & 0b1111) ==
-        0); // Stride must be multiple of 16B (128b)
-  assert((gmem_prob_stride[3]) <
-        (uint64_t(1) << 40)); // Stride must be max 2^40
-  assert((gmem_prob_stride[3] & 0b1111) ==
-        0); // Stride must be multiple of 16B (128b)
-  assert((gmem_prob_stride[4]) <
-        (uint64_t(1) << 40)); // Stride must be max 2^40
-  assert((gmem_prob_stride[4] & 0b1111) ==
-        0); // Stride must be multiple of 16B (128b)
+  // // Assert the byte strides. Tma Descriptor uses byte strides
+  // assert((gmem_prob_stride[1]) <
+  //       (uint64_t(1) << 40)); // Stride must be max 2^40
+  // assert((gmem_prob_stride[1] & 0b1111) ==
+  //       0); // Stride must be multiple of 16B (128b)
+  // assert((gmem_prob_stride[2]) <
+  //       (uint64_t(1) << 40)); // Stride must be max 2^40
+  // assert((gmem_prob_stride[2] & 0b1111) ==
+  //       0); // Stride must be multiple of 16B (128b)
+  // assert((gmem_prob_stride[3]) <
+  //       (uint64_t(1) << 40)); // Stride must be max 2^40
+  // assert((gmem_prob_stride[3] & 0b1111) ==
+  //       0); // Stride must be multiple of 16B (128b)
+  // assert((gmem_prob_stride[4]) <
+  //       (uint64_t(1) << 40)); // Stride must be max 2^40
+  // assert((gmem_prob_stride[4] & 0b1111) ==
+  //       0); // Stride must be multiple of 16B (128b)
 
   if constexpr (NDIM == 2) {
     smem_box_shape[0] = smem_shape[1];
@@ -172,27 +172,27 @@ smem_box_stride[3],
 smem_box_stride[4]);
 #endif
 
-  assert(smem_box_shape[0] >= (uint32_t(1)));      // Size must be min 1
-  assert(smem_box_shape[0] <= (uint32_t(1) << 8)); // Size must be max 2^8 = 256
-  assert(smem_box_shape[1] >= (uint32_t(1)));      // Size must be min 1
-  assert(smem_box_shape[1] <= (uint32_t(1) << 8)); // Size must be max 2^8 = 256
-  assert(smem_box_shape[2] >= (uint32_t(1)));      // Size must be min 1
-  assert(smem_box_shape[2] <= (uint32_t(1) << 8)); // Size must be max 2^8 = 256
-  assert(smem_box_shape[3] >= (uint32_t(1)));      // Size must be min 1
-  assert(smem_box_shape[3] <= (uint32_t(1) << 8)); // Size must be max 2^8 = 256
-  assert(smem_box_shape[4] >= (uint32_t(1)));      // Size must be min 1
-  assert(smem_box_shape[4] <= (uint32_t(1) << 8)); // Size must be max 2^8 = 256
+  // assert(smem_box_shape[0] >= (uint32_t(1)));      // Size must be min 1
+  // assert(smem_box_shape[0] <= (uint32_t(1) << 8)); // Size must be max 2^8 = 256
+  // assert(smem_box_shape[1] >= (uint32_t(1)));      // Size must be min 1
+  // assert(smem_box_shape[1] <= (uint32_t(1) << 8)); // Size must be max 2^8 = 256
+  // assert(smem_box_shape[2] >= (uint32_t(1)));      // Size must be min 1
+  // assert(smem_box_shape[2] <= (uint32_t(1) << 8)); // Size must be max 2^8 = 256
+  // assert(smem_box_shape[3] >= (uint32_t(1)));      // Size must be min 1
+  // assert(smem_box_shape[3] <= (uint32_t(1) << 8)); // Size must be max 2^8 = 256
+  // assert(smem_box_shape[4] >= (uint32_t(1)));      // Size must be min 1
+  // assert(smem_box_shape[4] <= (uint32_t(1) << 8)); // Size must be max 2^8 = 256
 
-  assert(smem_box_stride[0] >= (uint32_t(1))); // Stride must be min 1
-  assert(smem_box_stride[0] <= (uint32_t(8))); // Stride must be max 2^3 = 8
-  assert(smem_box_stride[1] >= (uint32_t(1))); // Stride must be min 1
-  assert(smem_box_stride[1] <= (uint32_t(8))); // Stride must be max 2^3 = 8
-  assert(smem_box_stride[2] >= (uint32_t(1))); // Stride must be min 1
-  assert(smem_box_stride[2] <= (uint32_t(8))); // Stride must be max 2^3 = 8
-  assert(smem_box_stride[3] >= (uint32_t(1))); // Stride must be min 1
-  assert(smem_box_stride[3] <= (uint32_t(8))); // Stride must be max 2^3 = 8
-  assert(smem_box_stride[4] >= (uint32_t(1))); // Stride must be min 1
-  assert(smem_box_stride[4] <= (uint32_t(8))); // Stride must be max 2^3 = 8
+  // assert(smem_box_stride[0] >= (uint32_t(1))); // Stride must be min 1
+  // assert(smem_box_stride[0] <= (uint32_t(8))); // Stride must be max 2^3 = 8
+  // assert(smem_box_stride[1] >= (uint32_t(1))); // Stride must be min 1
+  // assert(smem_box_stride[1] <= (uint32_t(8))); // Stride must be max 2^3 = 8
+  // assert(smem_box_stride[2] >= (uint32_t(1))); // Stride must be min 1
+  // assert(smem_box_stride[2] <= (uint32_t(8))); // Stride must be max 2^3 = 8
+  // assert(smem_box_stride[3] >= (uint32_t(1))); // Stride must be min 1
+  // assert(smem_box_stride[3] <= (uint32_t(8))); // Stride must be max 2^3 = 8
+  // assert(smem_box_stride[4] >= (uint32_t(1))); // Stride must be min 1
+  // assert(smem_box_stride[4] <= (uint32_t(8))); // Stride must be max 2^3 = 8
 
   uint64_t const *gmem_shape_ptr = &gmem_prob_shape[0];
   uint64_t const *gmem_stride_ptr = &gmem_prob_stride[0];

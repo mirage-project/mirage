@@ -564,28 +564,31 @@ if __name__ == "__main__":
             torch_tensor=model.model.norm.weight, name="model_norm_weight"
         )
         w_proj = mpk.attach_input(torch_tensor=lm_head_weight, name="lm_head")
-        # mpk.rmsnorm_layer(
+        print("grid_for_rmsnorm_linear_layer(w_proj.dim(0)) = ", grid_for_rmsnorm_linear_layer(w_proj.dim(0)))
+        print("w_proj.dim(0) = ", w_proj.dim(0))
+        mpk.rmsnorm_layer(
+            input=x,
+            weight=w_norm,
+            output=rmsnorm_out_2,
+            grid_dim=(mpk.max_num_batched_tokens, 1, 1),
+            block_dim=(128, 1, 1),
+        )
+        mpk.linear_layer_hopper(
+            input=rmsnorm_out_2,
+            weight=w_proj,
+            output=argmax_in,
+            # grid_dim=(grid_for_rmsnorm_linear_layer(w_proj.dim(0)), 1, 1),
+            grid_dim=(2400, 1, 1),
+            block_dim=(128, 1, 1),
+        )
+        # mpk.rmsnorm_linear_layer(
         #     input=x,
-        #     weight=w_norm,
-        #     output=rmsnorm_out_2,
-        #     grid_dim=(mpk.max_num_batched_tokens, 1, 1),
-        #     block_dim=(128, 1, 1),
-        # )
-        # mpk.linear_layer_hopper(
-        #     input=rmsnorm_out_2,
-        #     weight=w_proj,
+        #     weight_norm=w_norm,
+        #     weight_linear=w_proj,
         #     output=argmax_in,
         #     grid_dim=(grid_for_rmsnorm_linear_layer(w_proj.dim(0)), 1, 1),
         #     block_dim=(128, 1, 1),
         # )
-        mpk.rmsnorm_linear_layer(
-            input=x,
-            weight_norm=w_norm,
-            weight_linear=w_proj,
-            output=argmax_in,
-            grid_dim=(grid_for_rmsnorm_linear_layer(w_proj.dim(0)), 1, 1),
-            block_dim=(128, 1, 1),
-        )
         # add argmax layer
         if spec_decode_config and spec_decode_config.method == "promptlookup":
             argmax_partial_grid_dim = (max_factor_leq_n(153600, 96 // (spec_decode_config.spec_length + 1)), 
