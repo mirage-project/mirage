@@ -475,13 +475,17 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
         std::make_tuple(2, 1, TASK_TARGET_VERIFY_GREEDY, variant_id);
   }
   // Hopper tasks
-  else if (name == "linear_with_residual_hopper") {
-    int variant_id = task_register->register_linear_with_residual_hopper_task(
-        customized->bgraph, params);
+  else if (name == "linear_hopper") {
+    int variant_id = task_register->register_linear_hopper_task(
+        customized->bgraph, params, false /*with_residual*/);
+    task_config[op] = std::make_tuple(2, 1, TASK_LINEAR_HOPPER, variant_id);
+  } else if (name == "linear_with_residual_hopper") {
+    int variant_id = task_register->register_linear_hopper_task(
+        customized->bgraph, params, true /*with_residual*/);
     task_config[op] =
         std::make_tuple(3, 1, TASK_LINEAR_WITH_RESIDUAL_HOPPER, variant_id);
   } else {
-    assert(false && "Unsupported task type");
+    assert(false && "Unsupported task type: " + name);
   }
 }
 

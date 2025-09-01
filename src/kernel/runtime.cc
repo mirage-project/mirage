@@ -1269,7 +1269,9 @@ TaskGraphResult print_task_graph(
   task_type_to_name[TASK_SINGLE_BATCH_EXTEND_ATTENTION] =
       "TASK_SINGLE_BATCH_EXTEND_ATTENTION";
   task_type_to_name[TASK_PAGED_ATTENTION_1] = "TASK_PAGED_ATTENTION_1";
+  task_type_to_name[TASK_LINEAR_HOPPER] = "TASK_LINEAR_HOPPER";
   task_type_to_name[TASK_LINEAR_WITH_RESIDUAL_HOPPER] = "TASK_LINEAR_WITH_RESIDUAL_HOPPER";
+  task_type_to_name[TASK_PAGED_ATTENTION_HOPPER] = "TASK_PAGED_ATTENTION_HOPPER";
 
   code.e("__device__ __forceinline__");
   code.e("void _execute_task(TaskDesc const& task_desc,");

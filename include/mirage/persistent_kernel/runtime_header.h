@@ -20,14 +20,14 @@
 namespace mirage {
 namespace runtime {
 
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+#if MPK_TARGET_CC >= 90
 constexpr int MAX_SHARE_MEMORY_SIZE = 224 * 1024;
-#elif defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 860
+#elif MPK_TARGET_CC >= 86
 constexpr int MAX_SHARE_MEMORY_SIZE = 96 * 1024;
-#elif defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+#elif MPK_TARGET_CC >= 80
 constexpr int MAX_SHARE_MEMORY_SIZE = 160 * 1024;
 #else
-constexpr int MAX_SHARE_MEMORY_SIZE = 96 * 1024;
+  constexpr int MAX_SHARE_MEMORY_SIZE = 96 * 1024;
 #endif
 
 typedef unsigned long long int TaskId;
@@ -69,9 +69,9 @@ enum TaskType {
   TASK_SILU_MUL = 118,
   TASK_RMS_NORM = 119,
   TASK_LINEAR = 120,
-  TASK_LINEAR_WITH_RESIDUAL_HOPPER = 150,
-  TASK_NORM_LINEAR_HOPPER = 151,
-  TASK_ATTENTION_HOPPER = 152,
+  TASK_LINEAR_HOPPER = 150,
+  TASK_LINEAR_WITH_RESIDUAL_HOPPER = 151,
+  TASK_PAGED_ATTENTION_HOPPER = 152,
   TASK_NVSHMEM_COPY = 199,
   TASK_SCHD_TASKS = 200,
   TASK_SCHD_EVENTS = 201,
@@ -92,9 +92,9 @@ enum EventType {
 struct TensorDesc {
   int num_dims;
   void *base_ptr;
-#ifdef ENABLE_TMA
-  void *tma_desc_ptr;
-#endif
+// #ifdef ENABLE_TMA
+//   void *tma_desc_ptr;
+// #endif
   int data_type;
   int dim[mirage::config::MAX_TENSOR_DIMS];
   int stride[mirage::config::MAX_TENSOR_DIMS];

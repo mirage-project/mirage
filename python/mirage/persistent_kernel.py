@@ -144,6 +144,7 @@ def get_compile_command(
         "-o",
         py_so_path,
     ]
+    flags = flags + [f"-DMPK_TARGET_CC={target_cc}"]
 
     if mpk.mode == "offline":
         flags = flags + ["-DMODE_OFFLINE"]
@@ -159,6 +160,7 @@ def get_compile_command(
     flags = flags + [f"-DMPK_MAX_NUM_PAGES={mpk.max_num_pages}"]
     flags = flags + [f"-DMPK_PAGE_SIZE={mpk.page_size}"]
     flags = flags + [f"-DMPK_MAX_SEQ_LENGTH={mpk.max_seq_length}"]
+    
 
     if use_nvshmem:
         nvshmem_cmd = [
@@ -182,6 +184,8 @@ def get_compile_command(
         specific_cmd = [
             "-arch=native",
         ]
+    
+    
 
     return common_cmd + specific_cmd + flags
 
@@ -841,6 +845,25 @@ class PersistentKernel:
         return handler(spec_decode_config, spec_tokens, target_output, grid_dim, block_dim)
 
     
+    def linear_layer_hopper(
+        self,
+        input: DTensor,
+        weight: DTensor,
+        output: DTensor,
+        grid_dim: tuple,
+        block_dim: tuple,
+    ):
+        # Currently assume that input/output
+        assert input.num_dims == 2  # (batch_size, hidden_size / world_size)
+        assert weight.num_dims == 2  # (hidden_size, hidden_size / world_size)
+        assert output.num_dims == 2  # (batch_size, hidden_size)
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(input, (-1, -1, -1), 1, True)
+        tb_graph.new_input(weight, (0, -1, -1), 1, True)
+        tb_graph.new_input(output, (1, -1, -1), -1, True)
+        self.kn_graph.customized([input, weight, output], tb_graph)
+        self.kn_graph.register_task(tb_graph, "linear_hopper")
+
     def linear_with_residual_layer_hopper(
         self,
         input: DTensor,

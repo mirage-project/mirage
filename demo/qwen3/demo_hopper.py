@@ -404,7 +404,7 @@ if __name__ == "__main__":
                 grid_dim=(mpk.max_num_batched_tokens, 1, 1),
                 block_dim=(128, 1, 1),
             )
-            mpk.linear_layer(
+            mpk.linear_layer_hopper(
                 input=rmsnorm_out,
                 weight=w_qkv,
                 output=attn_in,
@@ -447,7 +447,7 @@ if __name__ == "__main__":
                     block_dim=(128, 1, 1),
                 )
             else:
-                mpk.attention_layer(
+                mpk.paged_attention_layer(
                     input=attn_in,
                     k_cache=k_cache,
                     v_cache=v_cache,
@@ -463,7 +463,7 @@ if __name__ == "__main__":
             w = mpk.attach_input(
                 torch_tensor=layer.self_attn.o_proj.weight, name=f"layer_{i}_o_proj"
             )
-            mpk.linear_with_residual_layer(
+            mpk.linear_with_residual_layer_hopper(
                 input=attn_out,
                 weight=w,
                 residual=x,
@@ -508,7 +508,7 @@ if __name__ == "__main__":
                 grid_dim=(mpk.max_num_batched_tokens, 1, 1),
                 block_dim=(128, 1, 1),
             )
-            mpk.linear_layer(
+            mpk.linear_layer_hopper(
                 input=rmsnorm_out,
                 weight=w_gatedup,
                 output=mlp_mid,
@@ -533,7 +533,7 @@ if __name__ == "__main__":
             w = mpk.attach_input(
                 torch_tensor=layer.mlp.down_proj.weight, name=f"layer_{i}_down_proj"
             )
-            mpk.linear_with_residual_layer(
+            mpk.linear_with_residual_layer_hopper(
                 input=silu_mul_out,
                 weight=w,
                 residual=x,

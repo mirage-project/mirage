@@ -672,13 +672,13 @@ int TaskRegister::register_target_verify_greedy_task(
   return register_task_variant(TASK_TARGET_VERIFY_GREEDY, code.to_string());
 }
 
-int TaskRegister::register_linear_with_residual_hopper_task(
-    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+int TaskRegister::register_linear_hopper_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params, bool with_residual) {
   assert(params.size() == 0);
   int batch_size = 0, output_size = 0, reduction_size = 0, output_stride = 0;
   std::vector<tb::TBInputOp *> input_ops;
   std::vector<tb::TBInputOp *> output_ops;
-  int num_inputs = 3;
+  int num_inputs = with_residual ? 3 : 2;
   int num_outputs = 1;
 
   assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
@@ -736,18 +736,20 @@ int TaskRegister::register_linear_with_residual_hopper_task(
          (TILE_SIZE + TMA_CP_ASYNC_SIZE - 1) / TMA_CP_ASYNC_SIZE,
          output_size * TMA_CP_ASYNC_SIZE);
 
-  code.e("using TMA_RESIDUAL = kernel::tma::tma_2d<bfloat16, $, $, $, $, $, $, "
-         "$, $, $, $, true>;",
-         0,
-         0,
-         0,
-         batch_size,
-         output_size,
-         batch_size,
-         OUTPUT_TMA_CP_SIZE,
-         1,
-         (TILE_SIZE + OUTPUT_TMA_CP_SIZE - 1) / OUTPUT_TMA_CP_SIZE,
-         batch_size * TMA_CP_ASYNC_SIZE);
+  if (with_residual) {
+    code.e("using TMA_RESIDUAL = kernel::tma::tma_2d<bfloat16, $, $, $, $, $, $, "
+          "$, $, $, $, true>;",
+          0,
+          0,
+          0,
+          batch_size,
+          output_size,
+          batch_size,
+          OUTPUT_TMA_CP_SIZE,
+          1,
+          (TILE_SIZE + OUTPUT_TMA_CP_SIZE - 1) / OUTPUT_TMA_CP_SIZE,
+          batch_size * TMA_CP_ASYNC_SIZE);
+  }
 
   code.e("using TMA_OUT = kernel::tma::tma_2d<bfloat16, $, $, $, $, $, $, $, "
          "$, $, $, true>;",
@@ -762,13 +764,12 @@ int TaskRegister::register_linear_with_residual_hopper_task(
          (TILE_SIZE + OUTPUT_TMA_CP_SIZE - 1) / OUTPUT_TMA_CP_SIZE,
          batch_size * TMA_CP_ASYNC_SIZE);
   code.inc_indent();
-  code.e("TMA_A "
-         "tma_a(static_cast<CUtensorMap*>(task_desc.inputs[0].tma_desc_ptr));");
-  code.e("TMA_B "
-         "tma_b(static_cast<CUtensorMap*>(task_desc.inputs[1].tma_desc_ptr));");
-  code.e("TMA_RESIDUAL "
-         "tma_residual(static_cast<CUtensorMap*>(task_desc.inputs[2].tma_desc_"
-         "ptr));");
+  code.e("TMA_A tma_a(static_cast<CUtensorMap*>(task_desc.inputs[0].tma_desc_ptr));");
+  code.e("TMA_B tma_b(static_cast<CUtensorMap*>(task_desc.inputs[1].tma_desc_ptr));");
+  if (with_residual) {
+    code.e("TMA_RESIDUAL tma_residual(static_cast<CUtensorMap*>(task_desc.inputs[2].tma_desc_"
+           "ptr));");
+  }
   code.e(
       "TMA_OUT "
       "tma_out(static_cast<CUtensorMap*>(task_desc.outputs[0].tma_desc_ptr));");
@@ -782,11 +783,18 @@ int TaskRegister::register_linear_with_residual_hopper_task(
          output_stride);
   code.e("    tma_a,");
   code.e("    tma_b,");
-  code.e("    tma_residual,");
+  if (with_residual) {
+    code.e("    tma_residual,");
+  }
   code.e("    tma_out);");
 
-  return register_task_variant(TASK_LINEAR_WITH_RESIDUAL_HOPPER,
-                               code.to_string());
+  if (with_residual) {
+    return register_task_variant(TASK_LINEAR_WITH_RESIDUAL_HOPPER,
+                                 code.to_string());
+  } else {
+    return register_task_variant(TASK_LINEAR_HOPPER,
+                                 code.to_string());
+  }
 }
 
 } // namespace runtime
