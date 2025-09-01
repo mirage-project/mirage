@@ -137,7 +137,7 @@ __device__ void terminate_schedulers(RuntimeConfig config) {
     // size_t last_event_id =
     //     atomicAdd(&config.sched_queue_next_free_event_id[i], 1);
     size_t last_event_id =
-        custom_atomic_add_u64(&config.sched_queue_next_free_event_id[i], 1);
+        atom_add_release_gpu_u64(&config.sched_queue_next_free_event_id[i], 1);
     st_relaxed_gpu_u64(&config.sched_queues[i][last_event_id % config.per_sched_queue_len], 0);
     // Use st.relaxed to make sure sched_queue updates are visible to scheduler
     // CTAs before incrementing its last_ready_event_id
@@ -146,7 +146,7 @@ __device__ void terminate_schedulers(RuntimeConfig config) {
       // old = atomicCAS(&config.sched_queue_last_ready_event_id[i],
       //                 last_event_id,
       //                 last_event_id + 1);
-      old = custom_atomic_cas_u64(&config.sched_queue_last_ready_event_id[i],
+      old = atom_cas_release_gpu_u64(&config.sched_queue_last_ready_event_id[i],
                                   last_event_id,
                                   last_event_id + 1);
     } while (old != last_event_id);
@@ -253,7 +253,7 @@ __device__ void execute_worker(RuntimeConfig config) {
         // last_task_id =
         //    atomicAdd(&config.worker_queue_last_ready_task_id[worker_id],
         //    0);
-        last_task_pos[queue_idx] = ld_relaxed_gpu_u64(&config.worker_queue_last_ready_task_id[worker_queue_ids[queue_idx]]);
+        last_task_pos[queue_idx] = ld_acquire_gpu_u64(&config.worker_queue_last_ready_task_id[worker_queue_ids[queue_idx]]);
         if (cur_task_pos[queue_idx] < last_task_pos[queue_idx]) {
           break;
         } else {
@@ -264,8 +264,8 @@ __device__ void execute_worker(RuntimeConfig config) {
       }
       assert(cur_task_pos[queue_idx] + config.per_worker_queue_len >
              last_task_pos[queue_idx]);
-      cur_task_id = ld_acquire_gpu_u64(&worker_queues[queue_idx][cur_task_pos[queue_idx] %
-                                             config.per_worker_queue_len]);
+      cur_task_id = ld_relaxed_gpu_u64(&worker_queues[queue_idx][cur_task_pos[queue_idx] %
+                                       config.per_worker_queue_len]);
 
       if (config.verbose) {
         printf("[%d][FTCH] worker_id(%d) queue_idx(%d) cur_task_pos(%llu, "
@@ -307,7 +307,7 @@ __device__ void execute_worker(RuntimeConfig config) {
             get_task_iteration_num(cur_task_id);
         EventCounter actual_counts = 0;
         while (actual_counts < needed_counts) {
-          actual_counts = ld_relaxed_gpu_u64(&config.all_event_counters[event_index]);
+          actual_counts = ld_acquire_gpu_u64(&config.all_event_counters[event_index]);
           __nanosleep(10);
         }
       }
@@ -377,7 +377,7 @@ __device__ void execute_worker(RuntimeConfig config) {
         // Case 1: Trigger a local non-nvshmem event
         // int count = atomicSub(&config.all_event_counters[event_index], 1);
         EventCounter count =
-            custom_atomic_add_u64(&config.all_event_counters[event_index], 1);
+            atom_add_release_gpu_u64(&config.all_event_counters[event_index], 1);
         int num_triggers = config.all_event_num_triggers[event_index];
         if (config.verbose) {
           printf("[%d][DONE] worker_id(%d) iter_num(%llu) task_idx(%llu) "
@@ -400,7 +400,7 @@ __device__ void execute_worker(RuntimeConfig config) {
           EventDesc event_desc = config.all_events[event_index];
           // The event has been triggered enough times
           // Refresh the event counter
-          // custom_atomic_add_u64(&config.all_event_counters[event_index],
+          // atom_add_release_gpu_u64(&config.all_event_counters[event_index],
           //                       event_desc.num_triggers);
           // Add the event to the schedule_queue
           // Note that events launching massive tasks are scheduled
@@ -420,7 +420,7 @@ __device__ void execute_worker(RuntimeConfig config) {
                                         worker_id,
                                         config.num_workers,
                                         config.num_local_schedulers);
-            size_t last_event_pos = custom_atomic_add_u64(
+            size_t last_event_pos = atom_add_release_gpu_u64(
                 &config.sched_queue_next_free_event_id[sched_id], 1);
             st_relaxed_gpu_u64(&config.sched_queues[sched_id]
                                                        [last_event_pos % config.per_sched_queue_len],
@@ -429,7 +429,7 @@ __device__ void execute_worker(RuntimeConfig config) {
             // scheduler CTA before updating its last_ready_event_id
             size_t old;
             do {
-              old = custom_atomic_cas_u64(
+              old = atom_cas_release_gpu_u64(
                   &config.sched_queue_last_ready_event_id[sched_id],
                   last_event_pos,
                   last_event_pos + 1);
@@ -576,7 +576,7 @@ __device__ void execute_scheduler(RuntimeConfig config, int offset) {
         // last_event_id = config.sched_queue_last_ready_event_id[sched_id];
         // last_event_id =
         //    atomicAdd(&config.sched_queue_last_ready_event_id[sched_id], 0);
-        last_event_pos[queue_idx] = ld_relaxed_gpu_u64(&config.sched_queue_last_ready_event_id[sched_queue_ids[queue_idx]]);
+        last_event_pos[queue_idx] = ld_acquire_gpu_u64(&config.sched_queue_last_ready_event_id[sched_queue_ids[queue_idx]]);
 
         if (cur_event_pos[queue_idx] < last_event_pos[queue_idx]) {
           break;
@@ -591,8 +591,8 @@ __device__ void execute_scheduler(RuntimeConfig config, int offset) {
              last_event_pos[queue_idx]);
       // Launch new tasks
       // Use ld.acquire to read latest events 
-      EventId event_id = ld_acquire_gpu_u64(&sched_queues[queue_idx][cur_event_pos[queue_idx] %
-                                             config.per_sched_queue_len]);
+      EventId event_id = ld_relaxed_gpu_u64(&sched_queues[queue_idx][cur_event_pos[queue_idx] %
+                                            config.per_sched_queue_len]);
       EventDesc e = config.all_events[event_id];
       // if (config.profiling) {
       //   PROFILER_EVENT_END(TASK_GET_EVENT, event_counter++);
@@ -604,7 +604,7 @@ __device__ void execute_scheduler(RuntimeConfig config, int offset) {
             size_t last_task_id =
                 worker_queue_next_free_task_pos[i - my_first_worker]++;
             st_relaxed_gpu_u64(&config.worker_queues[i][last_task_id % config.per_worker_queue_len], 0);
-            custom_atomic_add_u64(&config.worker_queue_last_ready_task_id[i],
+            atom_add_release_gpu_u64(&config.worker_queue_last_ready_task_id[i],
                                   1);
           }
         }
@@ -627,7 +627,7 @@ __device__ void execute_scheduler(RuntimeConfig config, int offset) {
                               compute_task_id(iteration_num + 1, 1 /*begin_task_graph*/));
           // Use st.relaxed to make sure writes to worker_queues is visible to worker CTAs
           // before we increase its last_ready_task_id
-          custom_atomic_add_u64(
+          atom_add_release_gpu_u64(
               &config.worker_queue_last_ready_task_id[next_worker], 1);
 
           if (config.verbose) {
@@ -665,7 +665,7 @@ __device__ void execute_scheduler(RuntimeConfig config, int offset) {
                                  compute_task_id(iteration_num, position_index));
               // Use st.relaxed to make sure writes to worker_queues is visible to worker CTAs
               // before we increase its last_ready_task_id
-              custom_atomic_add_u64(
+              atom_add_release_gpu_u64(
                   &config.worker_queue_last_ready_task_id[next_worker], 1);
 
               if (config.verbose && sched_id == 0) {
@@ -710,7 +710,7 @@ __device__ void execute_scheduler(RuntimeConfig config, int offset) {
           // }
           //  size_t last_task_id = atomicAdd(
           //      &(config.worker_queue_next_free_task_id[next_worker]), 1);
-          //  size_t last_task_id = custom_atomic_add_u64(
+          //  size_t last_task_id = atom_add_release_gpu_u64(
           //     &(config.worker_queue_next_free_task_id[next_worker]), 1);
           size_t last_task_id =
               worker_queue_next_free_task_pos[next_worker - my_first_worker]++;
@@ -718,7 +718,7 @@ __device__ void execute_scheduler(RuntimeConfig config, int offset) {
                               compute_task_id(iteration_num, i));
           // Use st.relaxed to make sure writes to worker_queues is visible to worker CTAs
           // before we increase its last_ready_task_id
-          custom_atomic_add_u64(
+          atom_add_release_gpu_u64(
               &config.worker_queue_last_ready_task_id[next_worker], 1);
 
           if (config.verbose) {
