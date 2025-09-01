@@ -113,12 +113,12 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
 
   constexpr size_t SHARED_WEIGHT_BUFFER_OFFSET =
       SHARED_INPUT_BUFFER_OFFSET + sizeof(T) * BATCH_SIZE * INPUT_PIPE_MAX * TILE_SIZE;
-  // sizeof(T) * TILE_SIZE * WEIGHT_PIPE_MAX * OUTPUT_ATOM_SIZE
+  // sizeof(T) * TILE_SIZE * WEIGHT_PIPE_MAX * OUTPUT_SIZE
 
   constexpr size_t SHARED_OUTPUT_OFFSET =
       // MM_INTERMEDIATE_OFFSET +
       SHARED_WEIGHT_BUFFER_OFFSET +
-      sizeof(T) * NUM_WARPS_K * BATCH_SIZE * OUTPUT_ATOM_SIZE;
+      sizeof(T) * TILE_SIZE * WEIGHT_PIPE_MAX * OUTPUT_SIZE;
   // sizeof(T) * BATCH_SIZE * OUTPUT_SIZE
 
   // zero buffer
