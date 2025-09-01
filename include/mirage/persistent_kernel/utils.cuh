@@ -13,7 +13,7 @@
  * limitations under the License.
  */
 
-__device__ __forceinline__ int custom_atomic_add_s32(int *addr, int val) {
+__device__ __forceinline__ int atom_add_release_gpu_s32(int *addr, int val) {
   int old_val;
   asm volatile("atom.add.release.gpu.s32 %0,[%1],%2;"
                : "=r"(old_val)
@@ -23,8 +23,8 @@ __device__ __forceinline__ int custom_atomic_add_s32(int *addr, int val) {
 }
 
 __device__ __forceinline__ unsigned long long int
-    custom_atomic_add_u64(unsigned long long int *addr,
-                          unsigned long long int val) {
+    atom_add_release_gpu_u64(unsigned long long int *addr,
+                             unsigned long long int val) {
   unsigned long long int old_val;
   asm volatile("atom.add.release.gpu.u64 %0,[%1],%2;"
                : "=l"(old_val)
@@ -34,9 +34,9 @@ __device__ __forceinline__ unsigned long long int
 }
 
 __device__ __forceinline__ unsigned long long int
-    custom_atomic_cas_u64(unsigned long long int *addr,
-                          unsigned long long int cmp,
-                          unsigned long long int val) {
+    atom_cas_release_gpu_u64(unsigned long long int *addr,
+                             unsigned long long int cmp,
+                             unsigned long long int val) {
   unsigned long long int old_val;
   asm volatile("atom.cas.release.gpu.b64 %0,[%1],%2,%3;"
                : "=l"(old_val)
@@ -48,25 +48,18 @@ __device__ __forceinline__ unsigned long long int
 __device__ __forceinline__ unsigned long long int
     ld_acquire_gpu_u64(unsigned long long int *addr) {
   unsigned long long int val;
-  asm volatile("ld.acquire.gpu.u64 %0, [%1];"
-               : "=l"(val)
-               : "l"(addr));
+  asm volatile("ld.acquire.gpu.u64 %0, [%1];" : "=l"(val) : "l"(addr));
   return val;
 }
 
 __device__ __forceinline__ unsigned long long int
     ld_relaxed_gpu_u64(unsigned long long int *addr) {
   unsigned long long int val;
-  asm volatile("ld.relaxed.gpu.u64 %0, [%1];"
-               : "=l"(val)
-               : "l"(addr));
+  asm volatile("ld.relaxed.gpu.u64 %0, [%1];" : "=l"(val) : "l"(addr));
   return val;
 }
 
-__device__ __forceinline__ void
-    st_relaxed_gpu_u64(unsigned long long int *addr, 
-                       unsigned long long int val) {
-  asm volatile("st.relaxed.gpu.u64 [%0], %1;"
-               :
-               : "l"(addr), "l"(val));
+__device__ __forceinline__ void st_relaxed_gpu_u64(unsigned long long int *addr,
+                                                   unsigned long long int val) {
+  asm volatile("st.relaxed.gpu.u64 [%0], %1;" : : "l"(addr), "l"(val));
 }

@@ -28,7 +28,7 @@ for output_size in output_sizes:
     eps = 0.8765
     output = torch.empty(bs, output_size, device="cuda", dtype=torch.bfloat16)
 
-    runtime_kernel.norm_linear(x, g, w, eps, output)
+    runtime_kernel.norm_linear(x, g, w, output, eps)
     torch_out = torch_rms_norm(x, g, w, eps)
 
     print("Ratio (kernel / torch):")
@@ -38,7 +38,7 @@ for output_size in output_sizes:
 
     # Warm-up
     for _ in range(16):
-        runtime_kernel.norm_linear(x, g, w, eps, output)
+        runtime_kernel.norm_linear(x, g, w, output, eps)
 
     torch.cuda.synchronize()
     starter, ender = (
@@ -48,7 +48,7 @@ for output_size in output_sizes:
     repetitions = 1000
     starter.record()
     for rep in range(repetitions):
-        runtime_kernel.norm_linear(x, g, w, eps, output)
+        runtime_kernel.norm_linear(x, g, w, output, eps)
     ender.record()
     torch.cuda.synchronize()
 

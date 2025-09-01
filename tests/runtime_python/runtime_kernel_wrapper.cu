@@ -594,6 +594,7 @@ void launch_multitoken_paged_attention(
                        cudaFuncAttributeMaxDynamicSharedMemorySize,
                        smem_size);
 
+#ifndef MIRAGE_PROFILE_AMPERE
   multitoken_paged_attention_wrapper<T,
                                      NUM_QO_HEADS,
                                      NUM_KV_HEADS,
@@ -621,6 +622,106 @@ void launch_multitoken_paged_attention(
                                            sin_ptr,
                                            q_eps,
                                            k_eps);
+#else
+
+  cudaEvent_t start, stop;
+  cudaEventCreate(&start);
+  cudaEventCreate(&stop);
+
+  constexpr int WARMUP_RUNS = 16;
+  constexpr int BENCHMARK_RUNS = 1000;
+
+  printf("=== Multitoken Paged Attention Kernel Performance Profiling ===\n");
+
+  for (int i = 0; i < WARMUP_RUNS; i++) {
+    multitoken_paged_attention_wrapper<T,
+                                       NUM_QO_HEADS,
+                                       NUM_KV_HEADS,
+                                       HEAD_DIM,
+                                       PAGE_SIZE,
+                                       MAX_SEQ_LEN,
+                                       MAX_TOKENS>
+        <<<grid_dim, block_dim, smem_size>>>(qkv_ptr,
+                                             paged_k_cache_ptr,
+                                             paged_v_cache_ptr,
+                                             output_ptr,
+                                             qo_indptr_buffer_ptr,
+                                             paged_kv_indptr_buffer_ptr,
+                                             paged_kv_indices_buffer_ptr,
+                                             paged_kv_last_page_len_buffer_ptr,
+                                             request_id,
+                                             qk_norm,
+                                             rope,
+                                             q_norm_weight_ptr,
+                                             k_norm_weight_ptr,
+                                             cos_ptr,
+                                             sin_ptr,
+                                             q_eps,
+                                             k_eps);
+  }
+  cudaDeviceSynchronize();
+
+  printf("Running %d benchmark iterations...\n", BENCHMARK_RUNS);
+
+  float *iteration_times = new float[BENCHMARK_RUNS];
+  float total_time_ms = 0.0f;
+
+  for (int i = 0; i < BENCHMARK_RUNS; i++) {
+    cudaEventRecord(start);
+    multitoken_paged_attention_wrapper<T,
+                                       NUM_QO_HEADS,
+                                       NUM_KV_HEADS,
+                                       HEAD_DIM,
+                                       PAGE_SIZE,
+                                       MAX_SEQ_LEN,
+                                       MAX_TOKENS>
+        <<<grid_dim, block_dim, smem_size>>>(qkv_ptr,
+                                             paged_k_cache_ptr,
+                                             paged_v_cache_ptr,
+                                             output_ptr,
+                                             qo_indptr_buffer_ptr,
+                                             paged_kv_indptr_buffer_ptr,
+                                             paged_kv_indices_buffer_ptr,
+                                             paged_kv_last_page_len_buffer_ptr,
+                                             request_id,
+                                             qk_norm,
+                                             rope,
+                                             q_norm_weight_ptr,
+                                             k_norm_weight_ptr,
+                                             cos_ptr,
+                                             sin_ptr,
+                                             q_eps,
+                                             k_eps);
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+
+    float iteration_time_ms;
+    cudaEventElapsedTime(&iteration_time_ms, start, stop);
+
+    iteration_times[i] = iteration_time_ms;
+    total_time_ms += iteration_time_ms;
+  }
+
+  float avg_time_ms = total_time_ms / BENCHMARK_RUNS;
+
+  printf("\n=== Multitoken Paged Attention Performance Results ===\n");
+  printf("Configuration:\n");
+  printf("  NUM_QO_HEADS=%d, NUM_KV_HEADS=%d, HEAD_DIM=%d\n",
+         NUM_QO_HEADS,
+         NUM_KV_HEADS,
+         HEAD_DIM);
+  printf("  PAGE_SIZE=%d, MAX_SEQ_LEN=%d, MAX_TOKENS=%d\n",
+         PAGE_SIZE,
+         MAX_SEQ_LEN,
+         MAX_TOKENS);
+  printf("  Average: %.3f ms\n", avg_time_ms);
+
+  printf("===============================\n");
+
+  delete[] iteration_times;
+  cudaEventDestroy(start);
+  cudaEventDestroy(stop);
+#endif
 }
 
 void multitoken_paged_attention(

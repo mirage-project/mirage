@@ -34,6 +34,7 @@ setup(
                     '-O3',
                     '-gencode=arch=compute_80,code=sm_80',
                     '-gencode=arch=compute_90a,code=sm_90a',
+                    '-DMIRAGE_PROFILE_AMPERE',
                 ]
             }
         )

@@ -128,10 +128,6 @@ struct smem_col {
   static constexpr size_t ROW = ROW_;
   static constexpr size_t COL = COL_;
 
-  static constexpr size_t Pow2_M = (1 << M);
-  static constexpr size_t Pow2_S = (1 << S);
-  static constexpr size_t Pow2_B = (1 << B);
-
   __device__ __forceinline__ smem_col(T *ptr) : base_ptr(ptr) {}
 
   __device__ __forceinline__ void set_ptr(T *ptr) {
