@@ -73,7 +73,7 @@ void launch_linear_hopper(void *input_ptr,
           return 128;
       }
   }();
-  constexpr int OUTPUT_REPEAT_COL =
+  constexpr int OUTPUT_ATOM_REPEAT_COL =
       (OUTPUT_ATOM_SIZE + TMA_CP_ASYNC_SIZE - 1) / TMA_CP_ASYNC_SIZE;
 
   constexpr int OUTPUT_TMA_CP_SIZE = OUTPUT_SIZE < 64 ? OUTPUT_SIZE : 64;
@@ -106,7 +106,7 @@ void launch_linear_hopper(void *input_ptr,
                           1,                               /*GMEM_STRIDE_COL_*/
                           1,                               /*SMEM_REPEAT_ROW_*/
                           TMA_CP_ASYNC_REPEAT_COL,         /*SMEM_REPEAT_COL_*/
-                          OUTPUT_SIZE * TMA_CP_ASYNC_SIZE, /*SMEM_STRIDE_*/
+                          OUTPUT_ATOM_SIZE * TMA_CP_ASYNC_SIZE, /*SMEM_STRIDE_*/
                           true>;
   using TMA_RESIDUAL = kernel::tma::tma_2d<bfloat16,
                                            0,
@@ -119,7 +119,7 @@ void launch_linear_hopper(void *input_ptr,
                                            OUTPUT_SIZE,
                                            1,
                                            1,
-                                           OUTPUT_REPEAT_COL,
+                                           OUTPUT_ATOM_REPEAT_COL,
                                            BATCH_SIZE * TMA_CP_ASYNC_SIZE,
                                            true>;
 
@@ -134,7 +134,7 @@ void launch_linear_hopper(void *input_ptr,
                                       OUTPUT_SIZE,
                                       1,
                                       1,
-                                      OUTPUT_REPEAT_COL,
+                                      OUTPUT_ATOM_REPEAT_COL,
                                       BATCH_SIZE * TMA_CP_ASYNC_SIZE,
                                       true>;
   TMA_A tma_a(input_ptr);
@@ -194,8 +194,6 @@ void launch_linear_hopper(void *input_ptr,
 
   float *iteration_times = new float[BENCHMARK_RUNS];
   float total_time_ms = 0.0f;
-  float min_time_ms = FLT_MAX;
-  float max_time_ms = 0.0f;
 
   for (int i = 0; i < BENCHMARK_RUNS; i++) {
     cudaEventRecord(start);
@@ -245,11 +243,13 @@ void launch_linear_hopper(void *input_ptr,
 
 #define DISPATCH_LINEAR_HOPPER_REDUCTION_SIZE(BATCH_SIZE, OUTPUT_SIZE)         \
   switch (input.size(1)) {                                                     \
+/* \
     DISPATCH_LINEAR_HOPPER_REDUCTION_SIZE_CASE(BATCH_SIZE, OUTPUT_SIZE, 64)    \
     DISPATCH_LINEAR_HOPPER_REDUCTION_SIZE_CASE(BATCH_SIZE, OUTPUT_SIZE, 128)   \
     DISPATCH_LINEAR_HOPPER_REDUCTION_SIZE_CASE(BATCH_SIZE, OUTPUT_SIZE, 256)   \
     DISPATCH_LINEAR_HOPPER_REDUCTION_SIZE_CASE(BATCH_SIZE, OUTPUT_SIZE, 512)   \
     DISPATCH_LINEAR_HOPPER_REDUCTION_SIZE_CASE(BATCH_SIZE, OUTPUT_SIZE, 3072)  \
+*/ \
     DISPATCH_LINEAR_HOPPER_REDUCTION_SIZE_CASE(BATCH_SIZE, OUTPUT_SIZE, 4096)  \
     default:                                                                   \
       printf("Unsupported reduction size in test: %zu\n", input.size(1));      \
@@ -263,12 +263,17 @@ void launch_linear_hopper(void *input_ptr,
 
 #define DISPATCH_LINEAR_HOPPER_OUTPUT_SIZE(BATCH_SIZE)                         \
   switch (output.size(1)) {                                                    \
+    /* \
     DISPATCH_LINEAR_HOPPER_OUTPUT_SIZE_CASE(BATCH_SIZE, 16)                    \
     DISPATCH_LINEAR_HOPPER_OUTPUT_SIZE_CASE(BATCH_SIZE, 32)                    \
     DISPATCH_LINEAR_HOPPER_OUTPUT_SIZE_CASE(BATCH_SIZE, 64)                    \
     DISPATCH_LINEAR_HOPPER_OUTPUT_SIZE_CASE(BATCH_SIZE, 128)                   \
+    */ \
     DISPATCH_LINEAR_HOPPER_OUTPUT_SIZE_CASE(BATCH_SIZE, 256)                   \
     DISPATCH_LINEAR_HOPPER_OUTPUT_SIZE_CASE(BATCH_SIZE, 512)                   \
+    DISPATCH_LINEAR_HOPPER_OUTPUT_SIZE_CASE(BATCH_SIZE, 1024)                  \
+    DISPATCH_LINEAR_HOPPER_OUTPUT_SIZE_CASE(BATCH_SIZE, 1600)                  \
+    DISPATCH_LINEAR_HOPPER_OUTPUT_SIZE_CASE(BATCH_SIZE, 2048)                  \
     default:                                                                   \
       printf("Unsupported output size in test: %zu\n", output.size(1));        \
       break;                                                                   \
@@ -466,7 +471,7 @@ void norm_linear_kernel(torch::Tensor input,
   void *output_ptr = output.data_ptr();
 
   switch (input.size(0)) {
-    DISPATCH_NORM_LINEAR_HOPPER_BATCH_SIZE_CASE(64)
+    // DISPATCH_NORM_LINEAR_HOPPER_BATCH_SIZE_CASE(64)
     default:
       printf("Unsupported output size in test: %zu\n", output.size(0));
       break;
@@ -696,7 +701,7 @@ void launch_multitoken_paged_attention_hopper(
                           num_tokens * NUM_QO_HEADS * TMA_CP_SIZE,
                           true>;
 
-  bfloat16 *__restrict__ qkv_ptr_bf16 = static_cast<bfloat16 *>(qkv_ptr);
+  // bfloat16 *__restrict__ qkv_ptr_bf16 = static_cast<bfloat16 *>(qkv_ptr);
 
   TMA_Q tma_q(qkv_ptr);
   TMA_KV tma_k(qkv_ptr);

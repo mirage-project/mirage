@@ -85,7 +85,7 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
   constexpr int Kstages = 2;
   // NOTE(Yu): we use m64n64k16 mma atom to compute matrix multiplication
   constexpr int MMA_ITERS_M = (MAX_TOKENS * NUM_QO_PER_KV + 63) / 64;
-  constexpr int QSMEM_ROW = 64;
+  // constexpr int QSMEM_ROW = 64;
 
   // the scale factor for normalization in softmax
   float const sm_scale = 1.0f / sqrtf(static_cast<float>(HEAD_DIM));
@@ -251,7 +251,7 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
 
   int const TMA_TRANS_BYTES_Q =
       num_tokens * NUM_QO_PER_KV * HEAD_DIM * sizeof(T);
-  int TMA_TRANS_BYTES_KV = curr_iter_len * HEAD_DIM * sizeof(T);
+  // int TMA_TRANS_BYTES_KV = curr_iter_len * HEAD_DIM * sizeof(T);
 
   //  define barries
   Barrier *q_barrier = reinterpret_cast<Barrier *>(smem + S_Q_BARRIER_OFFSET);
@@ -319,8 +319,8 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
       }
 
       if (kv_rows > 0) {
-        int src_row = begin + cache_rows - boundary;
-        int per_token_stride = NUM_QO_PER_KV + 2 * NUM_KV_HEADS;
+        // int src_row = begin + cache_rows - boundary;
+        // int per_token_stride = NUM_QO_PER_KV + 2 * NUM_KV_HEADS;
 
         // assume tma_k, tma_v both have qkv_ptr as src_ptr
         int coords_k[3] = {0, NUM_QO_PER_KV, 0};
@@ -383,8 +383,8 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
           }
 
           if (kv_rows > 0) {
-            int src_row = begin + cache_rows - boundary;
-            int per_token_stride = NUM_QO_PER_KV + 2 * NUM_KV_HEADS;
+            // int src_row = begin + cache_rows - boundary;
+            // int per_token_stride = NUM_QO_PER_KV + 2 * NUM_KV_HEADS;
 
             int coords_k[3] = {0, NUM_QO_PER_KV, 0};
             int coords_v[3] = {0, NUM_QO_PER_KV + NUM_KV_HEADS, 0};
@@ -685,9 +685,10 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
       wg_sync<THREADS_PER_WARPGROUP * CONSUMER_WARPGROUPS>(9);
 
       uint32_t x_frag[MMA_ITERS_M][16];
-      for (int m = 0; m < MMA_ITERS_M; m++) {
 #pragma unroll
+      for (int m = 0; m < MMA_ITERS_M; m++) {
         convert_32_f32_to_16_bf16_uint32(x_frag_f[m], x_frag[m]);
+#pragma unroll
         for (int n = 0; n < HEAD_DIM / 64; n++) {
           V_DESC v_desc(v_smem(m * 64, n * 64));
           wgmma::warpgroup_arrive();

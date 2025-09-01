@@ -1,13 +1,13 @@
 import torch
 import runtime_kernel_hopper
 
-# torch.set_printoptions(sci_mode=False, profile="full")
-torch.set_printoptions(sci_mode=False)
+torch.set_printoptions(sci_mode=False, profile="full")
+# torch.set_printoptions(sci_mode=False)
 
 g = torch.Generator(device="cuda").manual_seed(1234)
 
 reduction_sizes = [4096]
-output_sizes = [512]
+output_sizes = [2048]
 batch_size = 1
 
 for reduction_size in reduction_sizes:
@@ -38,6 +38,7 @@ for reduction_size in reduction_sizes:
         # print("output.shape", output.shape)
         # print(output)
 
+        print("out.shape", torch_out.shape)
         print("Ratio (kernel / torch):")
         print(output / torch_out)
 
