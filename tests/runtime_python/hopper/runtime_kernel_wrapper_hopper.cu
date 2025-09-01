@@ -1,17 +1,17 @@
 /* Copyright 2025 CMU
-*
-* Licensed under the Apache License, Version 2.0 (the "License");
-* you may not use this file except in compliance with the License.
-* You may obtain a copy of the License at
-*
-*     http://www.apache.org/licenses/LICENSE-2.0
-*
-* Unless required by applicable law or agreed to in writing, software
-* distributed under the License is distributed on an "AS IS" BASIS,
-* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific language governing permissions and
-* limitations under the License.
-*/
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 #include "bfloat16.h"
 #include "hopper/linear_hopper.cuh"
 #include "hopper/multitoken_paged_attention_hopper.cuh"
@@ -39,13 +39,13 @@ __global__ __launch_bounds__(256, 1) void linear_kernel_hopper_wrapper(
     const __grid_constant__ TMA_RESIDUAL tma_residual,
     const __grid_constant__ TMA_OUT tma_out) {
   linear_kernel_hopper<T,
-                      BATCH_SIZE,
-                      OUTPUT_SIZE,
-                      REDUCTION_SIZE,
-                      Kstages,
-                      TMA_A,
-                      TMA_B,
-                      TMA_OUT>(tma_a, tma_b, tma_residual, tma_out);
+                       BATCH_SIZE,
+                       OUTPUT_SIZE,
+                       REDUCTION_SIZE,
+                       Kstages,
+                       TMA_A,
+                       TMA_B,
+                       TMA_OUT>(tma_a, tma_b, tma_residual, tma_out);
 }
 
 template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int REDUCTION_SIZE>
@@ -58,8 +58,10 @@ void launch_linear_hopper(void *input_ptr,
   constexpr int M = 3;
   constexpr int S = 3;
 
-  constexpr int TMA_CP_ASYNC_SIZE = 64; // note that if swizzle 128 is used, 64 is maximal cp size
-  constexpr int TILE_SIZE = 128; // we should modify this param if we want larger tile size
+  constexpr int TMA_CP_ASYNC_SIZE =
+      64; // note that if swizzle 128 is used, 64 is maximal cp size
+  constexpr int TILE_SIZE =
+      128; // we should modify this param if we want larger tile size
   constexpr int TMA_CP_ASYNC_REPEAT_COL =
       (TILE_SIZE + TMA_CP_ASYNC_SIZE - 1) / TMA_CP_ASYNC_SIZE;
   constexpr int OUTPUT_REPEAT_COL =
@@ -67,52 +69,51 @@ void launch_linear_hopper(void *input_ptr,
 
   constexpr int OUTPUT_TMA_CP_SIZE = OUTPUT_SIZE < 64 ? OUTPUT_SIZE : 64;
 
-
   using TMA_A = kernel::tma::tma_2d<bfloat16,
-                                        B,
-                                        M,
-                                        S,
-                                        BATCH_SIZE,
-                                        REDUCTION_SIZE,
-                                        BATCH_SIZE,
-                                        TMA_CP_ASYNC_SIZE,
-                                        1,
-                                        TMA_CP_ASYNC_REPEAT_COL,
-                                        true>;
+                                    B,
+                                    M,
+                                    S,
+                                    BATCH_SIZE,
+                                    REDUCTION_SIZE,
+                                    BATCH_SIZE,
+                                    TMA_CP_ASYNC_SIZE,
+                                    1,
+                                    TMA_CP_ASYNC_REPEAT_COL,
+                                    true>;
   using TMA_B = kernel::tma::tma_2d<bfloat16,
-                                        B,
-                                        M,
-                                        S,
-                                        OUTPUT_SIZE,
-                                        REDUCTION_SIZE,
-                                        OUTPUT_SIZE,
-                                        TMA_CP_ASYNC_SIZE,
-                                        1,
-                                        TMA_CP_ASYNC_REPEAT_COL,
-                                        true>;
+                                    B,
+                                    M,
+                                    S,
+                                    OUTPUT_SIZE,
+                                    REDUCTION_SIZE,
+                                    OUTPUT_SIZE,
+                                    TMA_CP_ASYNC_SIZE,
+                                    1,
+                                    TMA_CP_ASYNC_REPEAT_COL,
+                                    true>;
   using TMA_RESIDUAL = kernel::tma::tma_2d<bfloat16,
-                                        0,
-                                        0,
-                                        0,
-                                        BATCH_SIZE,
-                                        OUTPUT_SIZE,
-                                        BATCH_SIZE,
-                                        OUTPUT_TMA_CP_SIZE,
-                                        1,
-                                        OUTPUT_REPEAT_COL,
-                                        true>;
+                                           0,
+                                           0,
+                                           0,
+                                           BATCH_SIZE,
+                                           OUTPUT_SIZE,
+                                           BATCH_SIZE,
+                                           OUTPUT_TMA_CP_SIZE,
+                                           1,
+                                           OUTPUT_REPEAT_COL,
+                                           true>;
 
   using TMA_OUT = kernel::tma::tma_2d<bfloat16,
-                                  0,
-                                  0,
-                                  0,
-                                  BATCH_SIZE,
-                                  OUTPUT_SIZE,
-                                  BATCH_SIZE,
-                                  OUTPUT_TMA_CP_SIZE,
-                                  1,
-                                  OUTPUT_REPEAT_COL,
-                                  true>;
+                                      0,
+                                      0,
+                                      0,
+                                      BATCH_SIZE,
+                                      OUTPUT_SIZE,
+                                      BATCH_SIZE,
+                                      OUTPUT_TMA_CP_SIZE,
+                                      1,
+                                      OUTPUT_REPEAT_COL,
+                                      true>;
   TMA_A tma_a(input_ptr);
   TMA_B tma_b(weight_ptr);
   TMA_RESIDUAL tma_residual(residual_ptr);
@@ -129,18 +130,18 @@ void launch_linear_hopper(void *input_ptr,
                                                     TMA_B,
                                                     TMA_RESIDUAL,
                                                     TMA_OUT>,
-                      cudaFuncAttributeMaxDynamicSharedMemorySize,
-                      smem_size);
+                       cudaFuncAttributeMaxDynamicSharedMemorySize,
+                       smem_size);
 
 #ifndef MIRAGE_PROFILE_HOPPER
   linear_kernel_hopper_wrapper<T,
-                              BATCH_SIZE,
-                              OUTPUT_SIZE,
-                              REDUCTION_SIZE,
-                              TMA_A,
-                              TMA_B,
-                              TMA_RESIDUAL,
-                              TMA_OUT>
+                               BATCH_SIZE,
+                               OUTPUT_SIZE,
+                               REDUCTION_SIZE,
+                               TMA_A,
+                               TMA_B,
+                               TMA_RESIDUAL,
+                               TMA_OUT>
       <<<grid_dim, block_dim, smem_size>>>(tma_a, tma_b, tma_residual, tma_out);
 #else
 
@@ -155,13 +156,13 @@ void launch_linear_hopper(void *input_ptr,
 
   for (int i = 0; i < WARMUP_RUNS; i++) {
     linear_kernel_hopper_wrapper<T,
-                                BATCH_SIZE,
-                                OUTPUT_SIZE,
-                                REDUCTION_SIZE,
-                                TMA_A,
-                                TMA_B,
-                                TMA_RESIDUAL,
-                                TMA_OUT><<<grid_dim, block_dim, smem_size>>>(
+                                 BATCH_SIZE,
+                                 OUTPUT_SIZE,
+                                 REDUCTION_SIZE,
+                                 TMA_A,
+                                 TMA_B,
+                                 TMA_RESIDUAL,
+                                 TMA_OUT><<<grid_dim, block_dim, smem_size>>>(
         tma_a, tma_b, tma_residual, tma_out);
   }
   cudaDeviceSynchronize(); // Wait for all warmup runs to complete
@@ -176,13 +177,13 @@ void launch_linear_hopper(void *input_ptr,
   for (int i = 0; i < BENCHMARK_RUNS; i++) {
     cudaEventRecord(start);
     linear_kernel_hopper_wrapper<T,
-                                BATCH_SIZE,
-                                OUTPUT_SIZE,
-                                REDUCTION_SIZE,
-                                TMA_A,
-                                TMA_B,
-                                TMA_RESIDUAL,
-                                TMA_OUT><<<grid_dim, block_dim, smem_size>>>(
+                                 BATCH_SIZE,
+                                 OUTPUT_SIZE,
+                                 REDUCTION_SIZE,
+                                 TMA_A,
+                                 TMA_B,
+                                 TMA_RESIDUAL,
+                                 TMA_OUT><<<grid_dim, block_dim, smem_size>>>(
         tma_a, tma_b, tma_residual, tma_out);
     cudaEventRecord(stop);
     cudaEventSynchronize(stop);
@@ -198,9 +199,9 @@ void launch_linear_hopper(void *input_ptr,
   printf("\n=== Performance Results ===\n");
   printf("Configuration:\n");
   printf("  BATCH_SIZE=%d, OUTPUT_SIZE=%d, REDUCTION_SIZE=%d\n",
-        BATCH_SIZE,
-        OUTPUT_SIZE,
-        REDUCTION_SIZE);
+         BATCH_SIZE,
+         OUTPUT_SIZE,
+         REDUCTION_SIZE);
   printf(" TILE SIZE: %d\n", TILE_SIZE);
   printf("  Average: %.3f ms\n", avg_time_ms);
 
@@ -253,9 +254,9 @@ void launch_linear_hopper(void *input_ptr,
     break;
 
   void linear_kernel(torch::Tensor input,
-                    torch::Tensor weight,
-                    torch::Tensor residual,
-                    torch::Tensor output) {
+                     torch::Tensor weight,
+                     torch::Tensor residual,
+                     torch::Tensor output) {
 
     void *input_ptr = input.data_ptr();
     void *weight_ptr = weight.data_ptr();
@@ -306,10 +307,10 @@ void launch_linear_hopper(void *input_ptr,
 
   template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int REDUCTION_SIZE>
   void launch_norm_linear_hopper(void *input_ptr,
-                                void *norm_weight_ptr,
-                                void *weight_ptr,
-                                void *output_ptr,
-                                float eps) {
+                                 void *norm_weight_ptr,
+                                 void *weight_ptr,
+                                 void *output_ptr,
+                                 float eps) {
 
     constexpr int B = 3;
     constexpr int M = 3;
@@ -318,38 +319,38 @@ void launch_linear_hopper(void *input_ptr,
     constexpr int TILE_SIZE = 64;
 
     using TMA_INPUT = kernel::tma::tma_2d<bfloat16,
-                                      B,
-                                      M,
-                                      S,
-                                      BATCH_SIZE,
-                                      REDUCTION_SIZE,
-                                      BATCH_SIZE,
-                                      TILE_SIZE>;
+                                          B,
+                                          M,
+                                          S,
+                                          BATCH_SIZE,
+                                          REDUCTION_SIZE,
+                                          BATCH_SIZE,
+                                          TILE_SIZE>;
     using TMA_NORM_WEIGHT = kernel::tma::tma_2d<bfloat16,
-                                            B,
-                                            M,
-                                            S,
-                                            BATCH_SIZE,
-                                            REDUCTION_SIZE,
-                                            BATCH_SIZE,
-                                            TILE_SIZE>;
+                                                B,
+                                                M,
+                                                S,
+                                                BATCH_SIZE,
+                                                REDUCTION_SIZE,
+                                                BATCH_SIZE,
+                                                TILE_SIZE>;
     using TMA_LINEAR_WEIGHT = kernel::tma::tma_2d<bfloat16,
-                                              B,
-                                              M,
-                                              S,
-                                              OUTPUT_SIZE,
-                                              REDUCTION_SIZE,
-                                              OUTPUT_SIZE,
-                                              TILE_SIZE>;
+                                                  B,
+                                                  M,
+                                                  S,
+                                                  OUTPUT_SIZE,
+                                                  REDUCTION_SIZE,
+                                                  OUTPUT_SIZE,
+                                                  TILE_SIZE>;
 
     using TMA_OUT = kernel::tma::tma_2d<bfloat16,
-                                    0,
-                                    0,
-                                    0,
-                                    BATCH_SIZE,
-                                    OUTPUT_SIZE,
-                                    BATCH_SIZE,
-                                    OUTPUT_SIZE>;
+                                        0,
+                                        0,
+                                        0,
+                                        BATCH_SIZE,
+                                        OUTPUT_SIZE,
+                                        BATCH_SIZE,
+                                        OUTPUT_SIZE>;
 
     TMA_INPUT tma_input(input_ptr);
     TMA_NORM_WEIGHT tma_norm_weight(norm_weight_ptr);
@@ -360,15 +361,15 @@ void launch_linear_hopper(void *input_ptr,
     dim3 block_dim(256, 1, 1);
     size_t smem_size = 88888;
     cudaFuncSetAttribute(norm_linear_kernel_hopper_wrapper<T,
-                                                          BATCH_SIZE,
-                                                          OUTPUT_SIZE,
-                                                          REDUCTION_SIZE,
-                                                          TMA_INPUT,
-                                                          TMA_NORM_WEIGHT,
-                                                          TMA_LINEAR_WEIGHT,
-                                                          TMA_OUT>,
-                        cudaFuncAttributeMaxDynamicSharedMemorySize,
-                        smem_size);
+                                                           BATCH_SIZE,
+                                                           OUTPUT_SIZE,
+                                                           REDUCTION_SIZE,
+                                                           TMA_INPUT,
+                                                           TMA_NORM_WEIGHT,
+                                                           TMA_LINEAR_WEIGHT,
+                                                           TMA_OUT>,
+                         cudaFuncAttributeMaxDynamicSharedMemorySize,
+                         smem_size);
 
     norm_linear_kernel_hopper_wrapper<T,
                                       BATCH_SIZE,
@@ -395,10 +396,10 @@ void launch_linear_hopper(void *input_ptr,
 #define DISPATCH_NORM_LINEAR_HOPPER_REDUCTION_SIZE(BATCH_SIZE, OUTPUT_SIZE)    \
   switch (input.size(1)) {                                                     \
     /*DISPATCH_NORM_LINEAR_HOPPER_REDUCTION_SIZE_CASE(BATCH_SIZE, OUTPUT_SIZE, \
-    128) DISPATCH_NORM_LINEAR_HOPPER_REDUCTION_SIZE_CASE(BATCH_SIZE,                   \
+    128) DISPATCH_NORM_LINEAR_HOPPER_REDUCTION_SIZE_CASE(BATCH_SIZE,           \
     OUTPUT_SIZE, 256)                                                          \
     DISPATCH_NORM_LINEAR_HOPPER_REDUCTION_SIZE_CASE(BATCH_SIZE, OUTPUT_SIZE,   \
-    512) DISPATCH_NORM_LINEAR_HOPPER_REDUCTION_SIZE_CASE(BATCH_SIZE,                   \
+    512) DISPATCH_NORM_LINEAR_HOPPER_REDUCTION_SIZE_CASE(BATCH_SIZE,           \
     OUTPUT_SIZE, 3072)  */                                                     \
     DISPATCH_NORM_LINEAR_HOPPER_REDUCTION_SIZE_CASE(                           \
         BATCH_SIZE, OUTPUT_SIZE, 4096)                                         \
@@ -473,8 +474,10 @@ void launch_linear_hopper(void *input_ptr,
       const __grid_constant__ TMA_KV tma_v,
       const __grid_constant__ TMA_PAGED_KV tma_paged_k_cache,
       const __grid_constant__ TMA_PAGED_KV tma_paged_v_cache,
-      const __grid_constant__ TMA_PAGED_KV_CACHE_TAIL_PAGE tma_paged_k_cache_tail_page,
-      const __grid_constant__ TMA_PAGED_KV_CACHE_TAIL_PAGE tma_paged_v_cache_tail_page,
+      const __grid_constant__ TMA_PAGED_KV_CACHE_TAIL_PAGE
+          tma_paged_k_cache_tail_page,
+      const __grid_constant__ TMA_PAGED_KV_CACHE_TAIL_PAGE
+          tma_paged_v_cache_tail_page,
       const __grid_constant__ TMA_OUTPUT tma_output,
       void *paged_k_cache_ptr,
       void *paged_v_cache_ptr,
@@ -493,20 +496,20 @@ void launch_linear_hopper(void *input_ptr,
       float k_eps) {
 
     multitoken_paged_attention_hopper_impl<T,
-                                          NUM_QO_HEADS,
-                                          NUM_KV_HEADS,
-                                          KV_CACHE_STRIDE,
-                                          QKV_STRIDE,
-                                          O_STRIDE,
-                                          HEAD_DIM,
-                                          MAX_SEQ_LEN,
-                                          PAGE_SIZE,
-                                          TMA_Q,
-                                          TMA_KV,
-                                          TMA_PAGED_KV,
-                                          TMA_PAGED_KV_CACHE_TAIL_PAGE,
-                                          TMA_OUTPUT,
-                                          MAX_TOKENS>(
+                                           NUM_QO_HEADS,
+                                           NUM_KV_HEADS,
+                                           KV_CACHE_STRIDE,
+                                           QKV_STRIDE,
+                                           O_STRIDE,
+                                           HEAD_DIM,
+                                           MAX_SEQ_LEN,
+                                           PAGE_SIZE,
+                                           TMA_Q,
+                                           TMA_KV,
+                                           TMA_PAGED_KV,
+                                           TMA_PAGED_KV_CACHE_TAIL_PAGE,
+                                           TMA_OUTPUT,
+                                           MAX_TOKENS>(
         tma_q,
         tma_k,
         tma_v,
@@ -575,90 +578,97 @@ void launch_linear_hopper(void *input_ptr,
     constexpr int NUM_PAGES = 100;
     constexpr int TAIL_PAGE_SIZE = prompt_len % PAGE_SIZE;
 
-    using TMA_Q = kernel::tma::tma_3d<bfloat16,
-                                            B,
-                                            M,
-                                            S,
-                                            num_tokens,
-                                            (NUM_QO_HEADS + 2 * NUM_KV_HEADS),
-                                            HEAD_DIM,
-                                            num_tokens,
-                                            NUM_QO_HEADS,
-                                            TMA_CP_SIZE,
-                                            1,
-                                            (HEAD_DIM + TMA_CP_SIZE - 1) / TMA_CP_SIZE,
-                                            num_tokens * NUM_QO_HEADS * TMA_CP_SIZE,
-                                            (NUM_QO_HEADS + 2 * NUM_KV_HEADS) * HEAD_DIM,
-                                            HEAD_DIM,
-                                            1,
-                                            true>;
+    using TMA_Q =
+        kernel::tma::tma_3d<bfloat16,
+                            B,
+                            M,
+                            S,
+                            num_tokens,
+                            (NUM_QO_HEADS + 2 * NUM_KV_HEADS),
+                            HEAD_DIM,
+                            num_tokens,
+                            NUM_QO_HEADS,
+                            TMA_CP_SIZE,
+                            1,
+                            (HEAD_DIM + TMA_CP_SIZE - 1) / TMA_CP_SIZE,
+                            num_tokens * NUM_QO_HEADS * TMA_CP_SIZE,
+                            (NUM_QO_HEADS + 2 * NUM_KV_HEADS) * HEAD_DIM,
+                            HEAD_DIM,
+                            1,
+                            true>;
 
-    using TMA_KV = kernel::tma::tma_3d<bfloat16,
-                                B,
-                                M,
-                                S,
-                                num_tokens,
-                                (NUM_QO_HEADS + 2 * NUM_KV_HEADS),
-                                HEAD_DIM,
-                                num_tokens,
-                                NUM_KV_HEADS,
-                                TMA_CP_SIZE,
-                                1,
-                                (HEAD_DIM + TMA_CP_SIZE - 1) / TMA_CP_SIZE,
-                                KV_TILE_SIZE * TMA_CP_SIZE, // skip number of rows between current 64 cols and next 64 cols
-                                (NUM_QO_HEADS + 2 * NUM_KV_HEADS) * HEAD_DIM,
-                                HEAD_DIM,
-                                1,
-                                true>;
+    using TMA_KV =
+        kernel::tma::tma_3d<bfloat16,
+                            B,
+                            M,
+                            S,
+                            num_tokens,
+                            (NUM_QO_HEADS + 2 * NUM_KV_HEADS),
+                            HEAD_DIM,
+                            num_tokens,
+                            NUM_KV_HEADS,
+                            TMA_CP_SIZE,
+                            1,
+                            (HEAD_DIM + TMA_CP_SIZE - 1) / TMA_CP_SIZE,
+                            KV_TILE_SIZE *
+                                TMA_CP_SIZE, // skip number of rows between
+                                             // current 64 cols and next 64 cols
+                            (NUM_QO_HEADS + 2 * NUM_KV_HEADS) * HEAD_DIM,
+                            HEAD_DIM,
+                            1,
+                            true>;
 
-    using TMA_PAGED_KV_CACHE = kernel::tma::tma_3d<bfloat16,
-                                                B,
-                                                M,
-                                                S,
-                                                NUM_PAGES,
-                                                PAGE_SIZE,
-                                                HEAD_DIM,
-                                                1,
-                                                KV_TILE_SIZE,
-                                                TMA_CP_SIZE,
-                                                1,
-                                                (HEAD_DIM + TMA_CP_SIZE - 1) / TMA_CP_SIZE,
-                                                KV_TILE_SIZE * TMA_CP_SIZE,
-                                                PAGE_SIZE * HEAD_DIM,
-                                                HEAD_DIM,
-                                                1,
-                                                true>;
+    using TMA_PAGED_KV_CACHE =
+        kernel::tma::tma_3d<bfloat16,
+                            B,
+                            M,
+                            S,
+                            NUM_PAGES,
+                            PAGE_SIZE,
+                            HEAD_DIM,
+                            1,
+                            KV_TILE_SIZE,
+                            TMA_CP_SIZE,
+                            1,
+                            (HEAD_DIM + TMA_CP_SIZE - 1) / TMA_CP_SIZE,
+                            KV_TILE_SIZE * TMA_CP_SIZE,
+                            PAGE_SIZE * HEAD_DIM,
+                            HEAD_DIM,
+                            1,
+                            true>;
 
-    using TMA_PAGED_KV_CACHE_TAIL_PAGE = kernel::tma::tma_3d<bfloat16,
-                                                B,
-                                                M,
-                                                S,
-                                                NUM_PAGES,
-                                                PAGE_SIZE,
-                                                HEAD_DIM,
-                                                1,
-                                                TAIL_PAGE_SIZE,
-                                                TMA_CP_SIZE,
-                                                1,
-                                                (HEAD_DIM + TMA_CP_SIZE - 1) / TMA_CP_SIZE,
-                                                KV_TILE_SIZE * NUM_KV_HEADS * TMA_CP_SIZE,
-                                                PAGE_SIZE * HEAD_DIM,
-                                                HEAD_DIM,
-                                                1,
-                                                true>;
+    using TMA_PAGED_KV_CACHE_TAIL_PAGE =
+        kernel::tma::tma_3d<bfloat16,
+                            B,
+                            M,
+                            S,
+                            NUM_PAGES,
+                            PAGE_SIZE,
+                            HEAD_DIM,
+                            1,
+                            TAIL_PAGE_SIZE,
+                            TMA_CP_SIZE,
+                            1,
+                            (HEAD_DIM + TMA_CP_SIZE - 1) / TMA_CP_SIZE,
+                            KV_TILE_SIZE * NUM_KV_HEADS * TMA_CP_SIZE,
+                            PAGE_SIZE * HEAD_DIM,
+                            HEAD_DIM,
+                            1,
+                            true>;
 
-    using TMA_OUTPUT = kernel::tma::tma_2d<bfloat16,
-                                                3,
-                                                3,
-                                                3,
-                                                num_tokens * NUM_QO_HEADS,
-                                                HEAD_DIM,
-                                                num_tokens * NUM_QO_HEADS,
-                                                TMA_CP_SIZE,
-                                                1,
-                                                (HEAD_DIM + TMA_CP_SIZE - 1) / TMA_CP_SIZE,
-                                                num_tokens * NUM_QO_HEADS * TMA_CP_SIZE,
-                                                true>;
+    using TMA_OUTPUT =
+        kernel::tma::tma_2d<bfloat16,
+                            3,
+                            3,
+                            3,
+                            num_tokens * NUM_QO_HEADS,
+                            HEAD_DIM,
+                            num_tokens * NUM_QO_HEADS,
+                            TMA_CP_SIZE,
+                            1,
+                            (HEAD_DIM + TMA_CP_SIZE - 1) / TMA_CP_SIZE,
+                            num_tokens * NUM_QO_HEADS * TMA_CP_SIZE,
+                            true>;
 
     bfloat16 *__restrict__ qkv_ptr_bf16 = static_cast<bfloat16 *>(qkv_ptr);
 
@@ -707,155 +717,155 @@ void launch_linear_hopper(void *input_ptr,
                                               TMA_OUTPUT,
                                               num_tokens>
         <<<grid_dim, block_dim, smem_size>>>(tma_q,
-                                            tma_k,
-                                            tma_v,
-                                            tma_paged_k_cache,
-                                            tma_paged_v_cache,
-                                            tma_paged_k_cache_tail_page,
-                                            tma_paged_v_cache_tail_page,
-                                            tma_output,
-                                            paged_k_cache_ptr,
-                                            paged_v_cache_ptr,
-                                            qo_indptr_buffer_ptr,
-                                            paged_kv_indptr_buffer_ptr,
-                                            paged_kv_indices_buffer_ptr,
-                                            paged_kv_last_page_len_buffer_ptr,
-                                            request_id,
-                                            qk_norm,
-                                            rope,
-                                            q_norm_weight_ptr,
-                                            k_norm_weight_ptr,
-                                            cos_ptr,
-                                            sin_ptr,
-                                            q_eps,
-                                            k_eps);
+                                             tma_k,
+                                             tma_v,
+                                             tma_paged_k_cache,
+                                             tma_paged_v_cache,
+                                             tma_paged_k_cache_tail_page,
+                                             tma_paged_v_cache_tail_page,
+                                             tma_output,
+                                             paged_k_cache_ptr,
+                                             paged_v_cache_ptr,
+                                             qo_indptr_buffer_ptr,
+                                             paged_kv_indptr_buffer_ptr,
+                                             paged_kv_indices_buffer_ptr,
+                                             paged_kv_last_page_len_buffer_ptr,
+                                             request_id,
+                                             qk_norm,
+                                             rope,
+                                             q_norm_weight_ptr,
+                                             k_norm_weight_ptr,
+                                             cos_ptr,
+                                             sin_ptr,
+                                             q_eps,
+                                             k_eps);
 #else
 
-    cudaEvent_t start, stop;
-    cudaEventCreate(&start);
-    cudaEventCreate(&stop);
+  cudaEvent_t start, stop;
+  cudaEventCreate(&start);
+  cudaEventCreate(&stop);
 
-    constexpr int WARMUP_RUNS = 16;
-    constexpr int BENCHMARK_RUNS = 1000;
+  constexpr int WARMUP_RUNS = 16;
+  constexpr int BENCHMARK_RUNS = 1000;
 
-    printf("=== Multitoken Paged Attention Kernel Performance Profiling ===\n");
+  printf("=== Multitoken Paged Attention Kernel Performance Profiling ===\n");
 
-    for (int i = 0; i < WARMUP_RUNS; i++) {
-      multitoken_paged_attention_wrapper_hopper<T,
-                                                NUM_QO_HEADS,
-                                                NUM_KV_HEADS,
-                                                KV_CACHE_STRIDE,
-                                                QKV_STRIDE,
-                                                O_STRIDE,
-                                                HEAD_DIM,
-                                                MAX_SEQ_LEN,
-                                                PAGE_SIZE,
-                                                TMA_Q,
-                                                TMA_KV,
-                                                TMA_PAGED_KV_CACHE,
-                                                TMA_PAGED_KV_CACHE_TAIL_PAGE,
-                                                TMA_OUTPUT,
-                                                num_tokens>
-          <<<grid_dim, block_dim, smem_size>>>(tma_q,
-                                              tma_k,
-                                              tma_v,
-                                              tma_paged_k_cache,
-                                              tma_paged_v_cache,
-                                              tma_paged_k_cache_tail_page,
-                                              tma_paged_v_cache_tail_page,
-                                              tma_output,
-                                              paged_k_cache_ptr,
-                                              paged_v_cache_ptr,
-                                              qo_indptr_buffer_ptr,
-                                              paged_kv_indptr_buffer_ptr,
-                                              paged_kv_indices_buffer_ptr,
-                                              paged_kv_last_page_len_buffer_ptr,
-                                              request_id,
-                                              qk_norm,
-                                              rope,
-                                              q_norm_weight_ptr,
-                                              k_norm_weight_ptr,
-                                              cos_ptr,
-                                              sin_ptr,
-                                              q_eps,
-                                              k_eps);
-    }
-    cudaDeviceSynchronize();
+  for (int i = 0; i < WARMUP_RUNS; i++) {
+    multitoken_paged_attention_wrapper_hopper<T,
+                                              NUM_QO_HEADS,
+                                              NUM_KV_HEADS,
+                                              KV_CACHE_STRIDE,
+                                              QKV_STRIDE,
+                                              O_STRIDE,
+                                              HEAD_DIM,
+                                              MAX_SEQ_LEN,
+                                              PAGE_SIZE,
+                                              TMA_Q,
+                                              TMA_KV,
+                                              TMA_PAGED_KV_CACHE,
+                                              TMA_PAGED_KV_CACHE_TAIL_PAGE,
+                                              TMA_OUTPUT,
+                                              num_tokens>
+        <<<grid_dim, block_dim, smem_size>>>(tma_q,
+                                             tma_k,
+                                             tma_v,
+                                             tma_paged_k_cache,
+                                             tma_paged_v_cache,
+                                             tma_paged_k_cache_tail_page,
+                                             tma_paged_v_cache_tail_page,
+                                             tma_output,
+                                             paged_k_cache_ptr,
+                                             paged_v_cache_ptr,
+                                             qo_indptr_buffer_ptr,
+                                             paged_kv_indptr_buffer_ptr,
+                                             paged_kv_indices_buffer_ptr,
+                                             paged_kv_last_page_len_buffer_ptr,
+                                             request_id,
+                                             qk_norm,
+                                             rope,
+                                             q_norm_weight_ptr,
+                                             k_norm_weight_ptr,
+                                             cos_ptr,
+                                             sin_ptr,
+                                             q_eps,
+                                             k_eps);
+  }
+  cudaDeviceSynchronize();
 
-    printf("Running %d benchmark iterations...\n", BENCHMARK_RUNS);
+  printf("Running %d benchmark iterations...\n", BENCHMARK_RUNS);
 
-    float *iteration_times = new float[BENCHMARK_RUNS];
-    float total_time_ms = 0.0f;
+  float *iteration_times = new float[BENCHMARK_RUNS];
+  float total_time_ms = 0.0f;
 
-    for (int i = 0; i < BENCHMARK_RUNS; i++) {
-      cudaEventRecord(start);
-      multitoken_paged_attention_wrapper_hopper<T,
-                                                NUM_QO_HEADS,
-                                                NUM_KV_HEADS,
-                                                KV_CACHE_STRIDE,
-                                                QKV_STRIDE,
-                                                O_STRIDE,
-                                                HEAD_DIM,
-                                                MAX_SEQ_LEN,
-                                                PAGE_SIZE,
-                                                TMA_Q,
-                                                TMA_KV,
-                                                TMA_PAGED_KV_CACHE,
-                                                TMA_PAGED_KV_CACHE_TAIL_PAGE,
-                                                TMA_OUTPUT,
-                                                num_tokens>
-          <<<grid_dim, block_dim, smem_size>>>(tma_q,
-                                              tma_k,
-                                              tma_v,
-                                              tma_paged_k_cache,
-                                              tma_paged_v_cache,
-                                              tma_paged_k_cache_tail_page,
-                                              tma_paged_v_cache_tail_page,
-                                              tma_output,
-                                              paged_k_cache_ptr,
-                                              paged_v_cache_ptr,
-                                              qo_indptr_buffer_ptr,
-                                              paged_kv_indptr_buffer_ptr,
-                                              paged_kv_indices_buffer_ptr,
-                                              paged_kv_last_page_len_buffer_ptr,
-                                              request_id,
-                                              qk_norm,
-                                              rope,
-                                              q_norm_weight_ptr,
-                                              k_norm_weight_ptr,
-                                              cos_ptr,
-                                              sin_ptr,
-                                              q_eps,
-                                              k_eps);
-      cudaEventRecord(stop);
-      cudaEventSynchronize(stop);
+  for (int i = 0; i < BENCHMARK_RUNS; i++) {
+    cudaEventRecord(start);
+    multitoken_paged_attention_wrapper_hopper<T,
+                                              NUM_QO_HEADS,
+                                              NUM_KV_HEADS,
+                                              KV_CACHE_STRIDE,
+                                              QKV_STRIDE,
+                                              O_STRIDE,
+                                              HEAD_DIM,
+                                              MAX_SEQ_LEN,
+                                              PAGE_SIZE,
+                                              TMA_Q,
+                                              TMA_KV,
+                                              TMA_PAGED_KV_CACHE,
+                                              TMA_PAGED_KV_CACHE_TAIL_PAGE,
+                                              TMA_OUTPUT,
+                                              num_tokens>
+        <<<grid_dim, block_dim, smem_size>>>(tma_q,
+                                             tma_k,
+                                             tma_v,
+                                             tma_paged_k_cache,
+                                             tma_paged_v_cache,
+                                             tma_paged_k_cache_tail_page,
+                                             tma_paged_v_cache_tail_page,
+                                             tma_output,
+                                             paged_k_cache_ptr,
+                                             paged_v_cache_ptr,
+                                             qo_indptr_buffer_ptr,
+                                             paged_kv_indptr_buffer_ptr,
+                                             paged_kv_indices_buffer_ptr,
+                                             paged_kv_last_page_len_buffer_ptr,
+                                             request_id,
+                                             qk_norm,
+                                             rope,
+                                             q_norm_weight_ptr,
+                                             k_norm_weight_ptr,
+                                             cos_ptr,
+                                             sin_ptr,
+                                             q_eps,
+                                             k_eps);
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
 
-      float iteration_time_ms;
-      cudaEventElapsedTime(&iteration_time_ms, start, stop);
+    float iteration_time_ms;
+    cudaEventElapsedTime(&iteration_time_ms, start, stop);
 
-      iteration_times[i] = iteration_time_ms;
-      total_time_ms += iteration_time_ms;
-    }
+    iteration_times[i] = iteration_time_ms;
+    total_time_ms += iteration_time_ms;
+  }
 
-    float avg_time_ms = total_time_ms / BENCHMARK_RUNS;
+  float avg_time_ms = total_time_ms / BENCHMARK_RUNS;
 
-    printf("\n=== Multitoken Paged Attention Performance Results ===\n");
-    printf("Configuration:\n");
-    printf("  NUM_QO_HEADS=%d, NUM_KV_HEADS=%d, HEAD_DIM=%d\n",
-          NUM_QO_HEADS,
-          NUM_KV_HEADS,
-          HEAD_DIM);
-    printf("  MAX_SEQ_LEN=%d, PAGE_SIZE=%d, MAX_TOKENS=%d\n",
-          MAX_SEQ_LEN,
-          PAGE_SIZE,
-          MAX_TOKENS);
-    printf("  Average: %.3f ms\n", avg_time_ms);
+  printf("\n=== Multitoken Paged Attention Performance Results ===\n");
+  printf("Configuration:\n");
+  printf("  NUM_QO_HEADS=%d, NUM_KV_HEADS=%d, HEAD_DIM=%d\n",
+         NUM_QO_HEADS,
+         NUM_KV_HEADS,
+         HEAD_DIM);
+  printf("  MAX_SEQ_LEN=%d, PAGE_SIZE=%d, MAX_TOKENS=%d\n",
+         MAX_SEQ_LEN,
+         PAGE_SIZE,
+         MAX_TOKENS);
+  printf("  Average: %.3f ms\n", avg_time_ms);
 
-    printf("===============================\n");
+  printf("===============================\n");
 
-    delete[] iteration_times;
-    cudaEventDestroy(start);
-    cudaEventDestroy(stop);
+  delete[] iteration_times;
+  cudaEventDestroy(start);
+  cudaEventDestroy(stop);
 #endif
   }
 
@@ -907,14 +917,14 @@ void launch_linear_hopper(void *input_ptr,
     int const max_seq_len = 512;
 
     launch_multitoken_paged_attention_hopper<bfloat16,
-                                            qo_heads,
-                                            kv_heads,
-                                            kv_stride,
-                                            qkv_stride,
-                                            o_stride,
-                                            head_dim,
-                                            max_seq_len,
-                                            page_size>(
+                                             qo_heads,
+                                             kv_heads,
+                                             kv_stride,
+                                             qkv_stride,
+                                             o_stride,
+                                             head_dim,
+                                             max_seq_len,
+                                             page_size>(
         qkv_ptr,
         paged_k_cache_ptr,
         paged_v_cache_ptr,

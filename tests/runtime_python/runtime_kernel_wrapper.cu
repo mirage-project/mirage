@@ -692,13 +692,13 @@ void launch_multitoken_paged_attention(
   printf("\n=== Multitoken Paged Attention Performance Results ===\n");
   printf("Configuration:\n");
   printf("  NUM_QO_HEADS=%d, NUM_KV_HEADS=%d, HEAD_DIM=%d\n",
-        NUM_QO_HEADS,
-        NUM_KV_HEADS,
-        HEAD_DIM);
+         NUM_QO_HEADS,
+         NUM_KV_HEADS,
+         HEAD_DIM);
   printf("  PAGE_SIZE=%d, MAX_SEQ_LEN=%d, MAX_TOKENS=%d\n",
-        PAGE_SIZE,
-        MAX_SEQ_LEN,
-        MAX_TOKENS);
+         PAGE_SIZE,
+         MAX_SEQ_LEN,
+         MAX_TOKENS);
   printf("  Average: %.3f ms\n", avg_time_ms);
 
   printf("===============================\n");

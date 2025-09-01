@@ -64,6 +64,6 @@ __device__ __forceinline__ void rotary_embedding(InputSmem smem_input,
       }
     }
   }
-  }
+}
 
 } // namespace kernel
