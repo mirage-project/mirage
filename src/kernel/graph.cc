@@ -485,7 +485,7 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
     task_config[op] =
         std::make_tuple(3, 1, TASK_LINEAR_WITH_RESIDUAL_HOPPER, variant_id);
   } else {
-    assert(false && "Unsupported task type: " + name);
+    assert(false && "Unsupported task type");
   }
 }
 

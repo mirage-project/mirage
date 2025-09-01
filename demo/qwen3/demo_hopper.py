@@ -326,6 +326,12 @@ if __name__ == "__main__":
             name="mlp_final",
             io_category="nvshmem_tensor" if world_size > 1 else "cuda_tensor",
         )
+        rmsnorm_out_2 = mpk.new_tensor(
+            dims=(args.max_num_batched_tokens, hidden_size),
+            dtype=mi.bfloat16,
+            name="rmsnorm_out_2",
+            io_category="cuda_tensor",
+        )
         argmax_in = mpk.new_tensor(
             dims=(args.max_num_batched_tokens, vocab_size),
             dtype=mi.bfloat16,
@@ -409,7 +415,7 @@ if __name__ == "__main__":
                 weight=w_qkv,
                 output=attn_in,
                 grid_dim=(grid_for_rmsnorm_linear_layer(w_qkv.dim(0)), 1, 1),
-                block_dim=(128, 1, 1),
+                block_dim=(256, 1, 1),
             )
             #mpk.rmsnorm_linear_layer(
             #    input=x,
@@ -469,7 +475,7 @@ if __name__ == "__main__":
                 residual=x,
                 output=attn_proj_out,
                 grid_dim=(hidden_size // 64, 1, 1),
-                block_dim=(128, 1, 1),
+                block_dim=(256, 1, 1),
             )
             # reset residual input as x
             x = attn_proj_out
@@ -513,7 +519,7 @@ if __name__ == "__main__":
                 weight=w_gatedup,
                 output=mlp_mid,
                 grid_dim=(rmsnorm_num_tasks, 1, 1),
-                block_dim=(128, 1, 1),
+                block_dim=(256, 1, 1),
             )
             #mpk.rmsnorm_linear_layer(
             #    input=x,
@@ -539,7 +545,7 @@ if __name__ == "__main__":
                 residual=x,
                 output=mlp_out,
                 grid_dim=(hidden_size // 64, 1, 1),
-                block_dim=(128, 1, 1),
+                block_dim=(256, 1, 1),
             )
             # reset residual input as x
             x = mlp_out
@@ -558,6 +564,20 @@ if __name__ == "__main__":
             torch_tensor=model.model.norm.weight, name="model_norm_weight"
         )
         w_proj = mpk.attach_input(torch_tensor=lm_head_weight, name="lm_head")
+        # mpk.rmsnorm_layer(
+        #     input=x,
+        #     weight=w_norm,
+        #     output=rmsnorm_out_2,
+        #     grid_dim=(mpk.max_num_batched_tokens, 1, 1),
+        #     block_dim=(128, 1, 1),
+        # )
+        # mpk.linear_layer_hopper(
+        #     input=rmsnorm_out_2,
+        #     weight=w_proj,
+        #     output=argmax_in,
+        #     grid_dim=(grid_for_rmsnorm_linear_layer(w_proj.dim(0)), 1, 1),
+        #     block_dim=(128, 1, 1),
+        # )
         mpk.rmsnorm_linear_layer(
             input=x,
             weight_norm=w_norm,

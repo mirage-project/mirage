@@ -92,9 +92,9 @@ enum EventType {
 struct TensorDesc {
   int num_dims;
   void *base_ptr;
-// #ifdef ENABLE_TMA
-//   void *tma_desc_ptr;
-// #endif
+#ifdef ENABLE_TMA
+  void *tma_desc_ptr;
+#endif
   int data_type;
   int dim[mirage::config::MAX_TENSOR_DIMS];
   int stride[mirage::config::MAX_TENSOR_DIMS];

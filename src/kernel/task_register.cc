@@ -775,11 +775,12 @@ int TaskRegister::register_linear_hopper_task(
       "tma_out(static_cast<CUtensorMap*>(task_desc.outputs[0].tma_desc_ptr));");
 
   code.e("kernel::linear_kernel_hopper<bfloat16, $, $, $, $, TMA_A, TMA_B, "
-         "TMA_RESIDUAL, TMA_OUT, $>(",
+         "$TMA_OUT, $>(",
          batch_size,
          output_size,
          reduction_size,
          Kstages,
+         with_residual ? "TMA_RESIDUAL, " : "",
          output_stride);
   code.e("    tma_a,");
   code.e("    tma_b,");
