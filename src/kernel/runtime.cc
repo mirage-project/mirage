@@ -654,8 +654,8 @@ TaskGraphResult print_task_graph(
     code.e("input.stride[i] = tensor[\"strides\"][i].get<int>();");
     code.e("}");
     // TMA
-    code.e("if ((task.at(\"task_type\") >= 150 && task.at(\"task_type\") < "
-           "200)) {");
+    code.e("if ((task.at(\"task_type\") >= TASK_HOPPER_TASK_BEGIN && task.at(\"task_type\") < "
+           "TASK_HOPPER_TASK_END)) {");
     code.e("input.tma_desc_ptr = "
            "static_cast<void*>(create_tma_desc_from_tensor(task_desc, input, "
            "param_id));");
@@ -683,8 +683,8 @@ TaskGraphResult print_task_graph(
     code.e("}");
 
     // TMA
-    code.e("if ((task.at(\"task_type\") >= 150 && task.at(\"task_type\") < "
-           "200)) {");
+    code.e("if ((task.at(\"task_type\") >= TASK_HOPPER_TASK_BEGIN && task.at(\"task_type\") < "
+           "TASK_HOPPER_TASK_END)) {");
     code.e("output.tma_desc_ptr = "
            "static_cast<void*>(create_tma_desc_from_tensor(task_desc, output, "
            "param_id));");

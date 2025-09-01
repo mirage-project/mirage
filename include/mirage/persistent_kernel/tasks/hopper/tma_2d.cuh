@@ -27,6 +27,8 @@ template <typename T,
           size_t GMEM_COL_,
           size_t SMEM_ROW_,
           size_t SMEM_COL_,
+          size_t GMEM_STRIDE_ROW_ = 1,
+          size_t GMEM_STRIDE_COL_ = 1,
           size_t SMEM_REPEAT_ROW_ = 1,
           size_t SMEM_REPEAT_COL_ = 1,
           size_t SMEM_STRIDE_ = 1,
@@ -209,7 +211,7 @@ private:
                   : CU_TENSOR_MAP_SWIZZLE_NONE);
 
     uint64_t gmem_prob_shape[5] = {GMEM_COL, GMEM_ROW, 1, 1, 1};
-    uint64_t gmem_prob_stride[5] = {sizeof(T), GMEM_COL * sizeof(T), 0, 0, 0};
+    uint64_t gmem_prob_stride[5] = {sizeof(T), GMEM_STRIDE_ROW_ * sizeof(T), 0, 0, 0};
 
     assert((reinterpret_cast<uint64_t>(global_addr) & 0b1111) ==
            0); // Address must be 16B-aligned
