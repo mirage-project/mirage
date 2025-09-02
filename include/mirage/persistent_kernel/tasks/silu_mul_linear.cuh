@@ -24,7 +24,6 @@
 #include "reduction.cuh"
 #include "smem_layout.cuh"
 #include "utils.cuh"
-#include "hopper/utils.cuh"
 namespace kernel {
 
 using bfloat16 = type::bfloat16_t;
@@ -41,9 +40,6 @@ __device__ __forceinline__ void
                               void const *residual_ptr,
                               void *output_ptr,
                               bool residual = true) {
-          if (threadIdx.x >= 128) {
-            return;
-          }
   constexpr int CHUNK_SIZE = 16 / sizeof(T);
   constexpr int OUTPUT_ATOM_SIZE = OUTPUT_SIZE <= 128 ? OUTPUT_SIZE : 128;
   constexpr int NUM_OUTPUT_ATOMS = OUTPUT_SIZE / OUTPUT_ATOM_SIZE;
@@ -293,7 +289,7 @@ __device__ __forceinline__ void
       weight_smem.set_ptr(shared_weight_buffer +
                           TILE_SIZE * OUTPUT_ATOM_SIZE *
                               ((for_idx + 1) % K_PIPE_MAX));
-      wg_sync<128>(5);
+      __syncthreads();
 
       // fuse SiLU and mul
 #pragma unroll
@@ -303,7 +299,7 @@ __device__ __forceinline__ void
         silu_mul_output_smem.at(i) =
             T(input_val * (1.0f / (1.0f + expf(-input_val)))) * mul_val;
       }
-      wg_sync<128>(5);
+      __syncthreads();
 
       uint32_t a_frag[4], b_frag[4];
       for (uint32_t m = 0; m < NUM_ITERS_M; m++) {
@@ -328,7 +324,7 @@ __device__ __forceinline__ void
           }
         }
       }
-      wg_sync<128>(5);
+      __syncthreads();
     }
 
     // write back to shared memory
@@ -349,12 +345,12 @@ __device__ __forceinline__ void
         }
       }
     }
-    wg_sync<128>(5);
+    __syncthreads();
 
     if (NUM_WARPS_K > 1) {
       reduction_sum_row<decltype(output_smem), decltype(mm_intermediate_smem)>(
           output_smem, mm_intermediate_smem);
-      wg_sync<128>(5);
+      __syncthreads();
     }
 
 #pragma unroll
@@ -367,7 +363,7 @@ __device__ __forceinline__ void
       }
     }
     if (output_atom_idx + 1 < NUM_OUTPUT_ATOMS) {
-      wg_sync<128>(5);
+      __syncthreads();
     }
   }
 }

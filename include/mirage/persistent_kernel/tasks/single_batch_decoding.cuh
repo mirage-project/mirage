@@ -25,7 +25,6 @@
 #include "rotary_embedding.cuh"
 #include "smem_layout.cuh"
 #include "utils.cuh"
-#include "hopper/utils.cuh"
 namespace kernel {
 
 // kernel Input: 9X128, K_Cache: 4KX128, V_Cache:4KX128
@@ -50,9 +49,6 @@ __device__ __forceinline__ void
                                  void const *sin_ptr,
                                  float q_eps,
                                  float k_eps) {
-                                  if (threadIdx.x >= 128) {
-                                    return;
-                                  }
   // constexpr int chunk_size = 16 / sizeof(T);
   constexpr size_t MAX_SEQ_LEN = 512;
   constexpr size_t KV_CHUNK_SIZE = 64;
@@ -235,7 +231,7 @@ __device__ __forceinline__ void
       v_cache_smem.set_ptr(shared_v);
       v_cache_smem_buffer.set_ptr(shared_v_buffer);
     }
-    wg_sync<128>(4);
+    __syncthreads();
 
     if (qk_norm) {
       if (kv_idx == 0) {
@@ -281,7 +277,7 @@ __device__ __forceinline__ void
       }
     }
 
-    wg_sync<128>(4);
+    __syncthreads();
 
     float s_frag[8];
     clear_8_floats(s_frag);
@@ -308,7 +304,7 @@ __device__ __forceinline__ void
       ldsm(src_ptr_B, &b_frag[0]);
       mma_m16n16k16_bf16bf16bf32(s_frag, a_frag, b_frag, s_frag);
     }
-    wg_sync<128>(4);
+    __syncthreads();
 
     // update flashattention
     float m_prev = m;
@@ -381,7 +377,7 @@ __device__ __forceinline__ void
       ldsm_t(src_ptr_C, v_frag);
       mma_m16n16k16_bf16bf16bf32(o[n], o_frag, v_frag, o[n]);
     }
-    wg_sync<128>(4);
+    __syncthreads();
 
     if (kv_idx != num_iterations) {
       last_seq_len = curr_iter_len;
@@ -404,7 +400,7 @@ __device__ __forceinline__ void
   }
   d_smem[threadIdx.x] = d_sum;
   max_smem[threadIdx.x] = m;
-  wg_sync<128>(4);
+  __syncthreads();
   m = -inf;
   d_sum = 1.f;
   // update flashattention metadata across threads
@@ -439,7 +435,7 @@ __device__ __forceinline__ void
       }
     }
   }
-  wg_sync<128>(4);
+  __syncthreads();
 
   // update the o and m and d on other warps
   // print each head
@@ -457,7 +453,7 @@ __device__ __forceinline__ void
       }
     }
   }
-  wg_sync<128>(4);
+  __syncthreads();
 
 // update KV cache
 #pragma unroll

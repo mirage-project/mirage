@@ -23,7 +23,6 @@
 #include "reduction.cuh"
 #include "smem_layout.cuh"
 #include "utils.cuh"
-#include "hopper/utils.cuh"
 namespace kernel {
 
 using bfloat16 = type::bfloat16_t;
@@ -245,7 +244,7 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
       } else if (output_atom_idx + WEIGHT_PIPE_MAX - 1 == NUM_OUTPUT_ATOMS) {
         cp_async_wait<0>();
       }
-      wg_sync<128>(7);
+      __syncthreads();
 
       // accumulator
       float s_frag[NUM_ITERS_M][NUM_ITERS_N][8];
@@ -304,7 +303,7 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
           }
         }
       }
-      wg_sync<128>(7);
+      __syncthreads();
 
       // Accumulate this atom's contribution into the full output_smem at offset
       int atom_col_offset = output_atom_idx * OUTPUT_ATOM_SIZE;
@@ -327,7 +326,7 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
           }
         }
       }
-      wg_sync<128>(7);
+      __syncthreads();
     }
   }
 

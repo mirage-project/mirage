@@ -98,7 +98,7 @@ __device__ __forceinline__ void
           ? (SHARED_WEIGHT_BUFFER_OFFSET +
              sizeof(T) * Kstages * TILE_SIZE * OUTPUT_ATOM_SIZE + 1023) /
                 1024 * 1024
-          : 0;
+          : SHARED_WEIGHT_BUFFER_OFFSET;
 
   constexpr size_t SHARED_MM_OUTPUT_BUFFER_OFFSET =
       (SHARED_RESIDUAL_BUFFER_OFFSET +
@@ -115,7 +115,7 @@ __device__ __forceinline__ void
 
   constexpr size_t SHARED_RESIDUAL_BARRIER_OFFSET =
       HAS_RESIDUAL ? (SHARED_WEIGHT_BARRIER_OFFSET + 8 * Kstages + 7) / 8 * 8
-                   : 0;
+                   : SHARED_WEIGHT_BARRIER_OFFSET;
 
   constexpr size_t SHARED_COMPUTE_DONE_OFFSET =
       (SHARED_RESIDUAL_BARRIER_OFFSET + 8 * Kstages + 7) / 8 * 8;
@@ -127,7 +127,14 @@ __device__ __forceinline__ void
       SHARED_RESIDUAL_DONE_OFFSET + 8 * Kstages;
 
   if (threadIdx.x == 0) {
-    printf("TOTAL_SHARED_MEMORY: %llu\n", TOTAL_SHARED_MEMORY);
+    printf("threadIdx.x: %d, TOTAL_SHARED_MEMORY: %llu, BATCH_SIZE: %d, "
+           "OUTPUT_SIZE: %d, REDUCTION_SIZE: %d, Kstages: %d\n",
+           threadIdx.x,
+           TOTAL_SHARED_MEMORY,
+           BATCH_SIZE,
+           OUTPUT_SIZE,
+           REDUCTION_SIZE,
+           Kstages);
   }
   assert(TOTAL_SHARED_MEMORY <= 224 * 1024);
 
@@ -219,6 +226,9 @@ __device__ __forceinline__ void
     if (lane_id() == 0 && warp_idx == (NUM_WARPGROUPS * WARPGROUP_WARPS - 4)) {
       for (int output_atom_idx = 0; output_atom_idx < NUM_ITER_N;
            output_atom_idx++) {
+        printf("output_atom_idx: %d start, has residual: %d\n",
+               output_atom_idx,
+               HAS_RESIDUAL);
         // launch tma for residual
         int slot_residual = output_atom_idx % Kstages;
         int phase_residual = output_atom_idx / Kstages % 2;
@@ -226,18 +236,24 @@ __device__ __forceinline__ void
           wait(residual_done[slot_residual], phase_residual ^ 1);
         }
 
-        residual_smem.set_ptr(shared_residual + slot_residual *
-                                                    TMA_TRANS_BYTES_RESIDUAL /
-                                                    sizeof(T));
-        set_barrier_transaction_bytes(residual_barrier[slot_residual],
-                                      TMA_TRANS_BYTES_RESIDUAL);
+        printf("cp residual start\n");
+
         if constexpr (HAS_RESIDUAL) {
+          residual_smem.set_ptr(shared_residual + slot_residual *
+                                                      TMA_TRANS_BYTES_RESIDUAL /
+                                                      sizeof(T));
+          set_barrier_transaction_bytes(residual_barrier[slot_residual],
+                                        TMA_TRANS_BYTES_RESIDUAL);
           tma_residual->tma_cp_async(residual_barrier[slot_residual],
                                      residual_smem(0, 0),
                                      {output_atom_idx * OUTPUT_ATOM_SIZE, 0});
         }
+        printf("cp residual done\n");
 
         for (int i = 0; i < NUM_ITER_K; i++) {
+          if (threadIdx.x == 128) {
+            printf("iteration i start: %d\n", i);
+          }
           int slot = (output_atom_idx * NUM_ITER_K + i) % Kstages;
           int phase = ((output_atom_idx * NUM_ITER_K + i) / Kstages) % 2;
           wait(compute_done[slot], phase ^ 1);
@@ -258,6 +274,13 @@ __device__ __forceinline__ void
                                         TMA_TRANS_BYTES_B);
           tma_b.tma_cp_async(
               weight_barrier[slot], input_weight_smem(0, 0), tma_coords_B);
+          if (threadIdx.x == 128) {
+            printf("iteration i done: %d\n", i);
+          }
+        }
+
+        if (threadIdx.x == 128) {
+          printf("n iterations: %d done\n", output_atom_idx);
         }
       }
     }
@@ -375,6 +398,12 @@ __device__ __forceinline__ void
       }
     }
   }
+  // if (threadIdx.x == 0) {
+  printf(
+      "threadIdx.x: %d, total shared memory: %llu, linear_kernel_hopper done\n",
+      threadIdx.x,
+      TOTAL_SHARED_MEMORY);
+  // }
 }
 
 } // namespace kernel

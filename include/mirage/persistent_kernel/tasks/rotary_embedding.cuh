@@ -16,7 +16,6 @@
 #pragma once
 #include "common.h"
 #include "utils.cuh"
-#include "hopper/utils.cuh"
 namespace kernel {
 
 template <typename T,
@@ -59,8 +58,7 @@ __device__ __forceinline__ void rotary_embedding(InputSmem smem_input,
           float v2 = static_cast<float>(smem_input.at(row, col - HEAD_DIM / 2));
           v_rot = v1 * cos + v2 * sin;
         }
-        // __syncthreads();
-        wg_sync<128>(6);
+        __syncthreads();
         smem_input.at(row, col) = static_cast<T>(v_rot);
       }
     }
