@@ -101,8 +101,8 @@ def config_cython():
                         "-fPIC",
                         "-fopenmp",
                         "-lrt",
-                        f"-Wl,-rpath,{path.join(mirage_path, 'build', 'abstract_subexpr', 'release')}",
-                        f"-Wl,-rpath,{path.join(mirage_path, 'build', 'formal_verifier', 'release')}",
+                        f"-Wl,-rpath,{path.join('$ORIGIN', '..', '..', 'build', 'abstract_subexpr', 'release')}",
+                        f"-Wl,-rpath,{path.join('$ORIGIN', '..', '..', 'build', 'formal_verifier', 'release')}",
                     ],
                     language="c++",
                 )
