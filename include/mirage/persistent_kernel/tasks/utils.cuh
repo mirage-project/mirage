@@ -33,6 +33,17 @@ constexpr int max_power_of_two_le(int x) {
 }
 
 __device__ __forceinline__ void
+    convert_32_f32_to_16_bf16_uint32(float const (&s_frag)[32],
+                                     uint32_t (&a_frag)[16]) {
+#pragma unroll
+  for (int i = 0; i < 16; ++i) {
+    bfloat16 low = bfloat16(s_frag[2 * i]);
+    bfloat16 high = bfloat16(s_frag[2 * i + 1]);
+    a_frag[i] = (static_cast<uint32_t>(high.storage) << 16) | low.storage;
+  }
+}
+
+__device__ __forceinline__ void
     convert_f32_to_bf16_uint32(float const (&s_frag)[8],
                                uint32_t (&a_frag)[4]) {
 #pragma unroll

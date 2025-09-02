@@ -13,6 +13,8 @@
  * limitations under the License.
  */
 
+#pragma once
+
 // decrease register files in a wg
 template <uint32_t RegCount>
 static __device__ __forceinline__ void wg_decrease_regs() {

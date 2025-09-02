@@ -29,6 +29,7 @@ setup(
             ],
             include_dirs=[
                 os.path.join(this_dir, '../../../include/mirage/persistent_kernel/tasks'),
+                os.path.join(this_dir, '../../../include'),
             ],
             libraries=["cuda"],
             library_dirs=cuda_library_dirs,
@@ -38,6 +39,7 @@ setup(
                     '-O3',
                     '-gencode=arch=compute_90a,code=sm_90a',
                     '-DMIRAGE_GRACE_HOPPER',
+                    '-DMIRAGE_PROFILE_HOPPER',
                 ]
             }
         )
