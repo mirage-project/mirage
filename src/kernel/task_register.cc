@@ -1,17 +1,17 @@
 /* Copyright 2023-2025 CMU
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+*
+* Licensed under the Apache License, Version 2.0 (the "License");
+* you may not use this file except in compliance with the License.
+* You may obtain a copy of the License at
+*
+*     http://www.apache.org/licenses/LICENSE-2.0
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific language governing permissions and
+* limitations under the License.
+*/
 #include "mirage/kernel/task_register.h"
 #include "mirage/kernel/operator.h"
 #include "mirage/transpiler/utils.h"
@@ -75,9 +75,9 @@ int TaskRegister::register_embedding_task(threadblock::Graph const &bgraph,
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
   code.e("kernel::embedding_kernel<bfloat16, $, $, $>(",
-         batch_size,
-         output_size,
-         output_stride);
+        batch_size,
+        output_size,
+        output_stride);
   if (params[0] == 0) {
     code.e("    runtime_config.tokens + runtime_config.step[0], ");
   } else if (params[0] == 1) {
@@ -124,7 +124,7 @@ int TaskRegister::register_rmsnorm_task(threadblock::Graph const &bgraph,
 }
 
 int TaskRegister::register_rmsnorm_linear_task(threadblock::Graph const &bgraph,
-                                               std::vector<int> const &params) {
+                                              std::vector<int> const &params) {
   assert(params.size() == 0);
   int batch_size = 0, output_size = 0, reduction_size = 0, output_stride = 0;
   std::vector<tb::TBInputOp *> input_ops;
@@ -155,10 +155,10 @@ int TaskRegister::register_rmsnorm_linear_task(threadblock::Graph const &bgraph,
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
   code.e("kernel::norm_linear_task_impl<bfloat16, $, $, $, $>(",
-         batch_size,
-         output_size,
-         reduction_size,
-         output_stride);
+        batch_size,
+        output_size,
+        reduction_size,
+        output_stride);
   code.e("    task_desc.inputs[0].base_ptr,");
   code.e("    task_desc.inputs[1].base_ptr,");
   code.e("    task_desc.inputs[2].base_ptr,");
@@ -204,10 +204,10 @@ int TaskRegister::register_attention_task(threadblock::Graph const &bgraph,
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
   code.e("kernel::single_batch_decoding_kernel<bfloat16, $, $, $, $>(",
-         num_q_heads / num_kv_heads,
-         1,
-         head_dim,
-         kv_stride);
+        num_q_heads / num_kv_heads,
+        1,
+        head_dim,
+        kv_stride);
   code.e("    task_desc.inputs[0].base_ptr,");
   code.e("    task_desc.inputs[1].base_ptr,");
   code.e("    task_desc.inputs[2].base_ptr,");
@@ -265,15 +265,15 @@ int TaskRegister::register_paged_attention_task(
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
   code.e("kernel::multitoken_paged_attention_task_impl<bfloat16, $, $, $, $, "
-         "$, $, $, $>(",
-         num_q_heads / num_kv_heads,
-         1,
-         kv_stride,
-         qkv_stride,
-         output_size,
-         head_dim,
-         max_seq_len,
-         page_size);
+        "$, $, $, $>(",
+        num_q_heads / num_kv_heads,
+        1,
+        kv_stride,
+        qkv_stride,
+        output_size,
+        head_dim,
+        max_seq_len,
+        page_size);
   code.e("    task_desc.inputs[0].base_ptr,");
   code.e("    task_desc.inputs[1].base_ptr,");
   code.e("    task_desc.inputs[2].base_ptr,");
@@ -333,12 +333,12 @@ int TaskRegister::register_single_batch_extend_attention_task(
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
   code.e("kernel::single_batch_extend_kernel<bfloat16, $, $, $, $, $, $>(",
-         num_q_heads / num_kv_heads,
-         1,
-         head_dim,
-         kv_stride,
-         output_stride,
-         extend_num);
+        num_q_heads / num_kv_heads,
+        1,
+        head_dim,
+        kv_stride,
+        output_stride,
+        extend_num);
   code.e("    task_desc.inputs[0].base_ptr,");
   code.e("    task_desc.inputs[1].base_ptr,");
   code.e("    task_desc.inputs[2].base_ptr,");
@@ -353,11 +353,11 @@ int TaskRegister::register_single_batch_extend_attention_task(
   code.e("    1e-6f,");
   code.e("    1e-6f);");
   return register_task_variant(TASK_SINGLE_BATCH_EXTEND_ATTENTION,
-                               code.to_string());
+                              code.to_string());
 }
 
 int TaskRegister::register_silu_mul_task(threadblock::Graph const &bgraph,
-                                         std::vector<int> const &params) {
+                                        std::vector<int> const &params) {
   assert(params.size() == 0);
   int batch_size = 0, output_size = 0, input_stride, output_stride;
   std::vector<tb::TBInputOp *> input_ops;
@@ -391,10 +391,10 @@ int TaskRegister::register_silu_mul_task(threadblock::Graph const &bgraph,
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
   code.e("kernel::silu_mul_task_impl<bfloat16, $, $, $, $>(",
-         batch_size,
-         output_size,
-         input_stride,
-         output_stride);
+        batch_size,
+        output_size,
+        input_stride,
+        output_stride);
   code.e("    task_desc.inputs[0].base_ptr,");
   code.e("    task_desc.outputs[0].base_ptr,");
   code.e("    runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS]);");
@@ -433,22 +433,22 @@ int TaskRegister::register_silu_mul_linear_with_residual_task(
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
   code.e("kernel::silu_mul_linear_task_impl<bfloat16, $, $, $, $>(",
-         batch_size,
-         output_size,
-         reduction_size,
-         output_stride);
+        batch_size,
+        output_size,
+        reduction_size,
+        output_stride);
   code.e("    task_desc.inputs[0].base_ptr,");
   code.e("    task_desc.inputs[1].base_ptr,");
   code.e("    task_desc.inputs[2].base_ptr,");
   code.e("    task_desc.outputs[0].base_ptr,");
   code.e("    runtime_config.my_gpu_id == 0);");
   return register_task_variant(TASK_SILU_MUL_LINEAR_WITH_RESIDUAL,
-                               code.to_string());
+                              code.to_string());
 }
 
 int TaskRegister::register_linear_task(threadblock::Graph const &bgraph,
-                                       std::vector<int> const &params,
-                                       bool with_residual) {
+                                      std::vector<int> const &params,
+                                      bool with_residual) {
   assert(params.size() == 0);
   int batch_size = 0, output_size = 0, reduction_size = 0, output_stride = 0;
   std::vector<tb::TBInputOp *> input_ops;
@@ -479,10 +479,10 @@ int TaskRegister::register_linear_task(threadblock::Graph const &bgraph,
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
   code.e("kernel::linear_kernel<bfloat16, $, $, $, $>(",
-         batch_size,
-         output_size,
-         reduction_size,
-         output_stride);
+        batch_size,
+        output_size,
+        reduction_size,
+        output_stride);
   code.e("    task_desc.inputs[0].base_ptr,");
   code.e("    task_desc.inputs[1].base_ptr,");
   if (with_residual) {
@@ -505,7 +505,7 @@ int TaskRegister::register_linear_task(threadblock::Graph const &bgraph,
 }
 
 int TaskRegister::register_argmax_partial_task(threadblock::Graph const &bgraph,
-                                               std::vector<int> const &params) {
+                                              std::vector<int> const &params) {
   // params[0]: num_partial_tasks
   assert(params.size() == 1);
   std::vector<tb::TBInputOp *> input_ops;
@@ -530,9 +530,9 @@ int TaskRegister::register_argmax_partial_task(threadblock::Graph const &bgraph,
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
   code.e("kernel::argmax_partial_kernel<bfloat16, $, $, $>(",
-         batch_size,
-         num_elements,
-         num_partial_tasks);
+        batch_size,
+        num_elements,
+        num_partial_tasks);
   code.e("    task_desc.inputs[0].base_ptr,");
   code.e("    task_desc.outputs[0].base_ptr,");
   code.e("    task_desc.outputs[1].base_ptr,");
@@ -565,9 +565,9 @@ int TaskRegister::register_argmax_reduce_task(threadblock::Graph const &bgraph,
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
   code.e("kernel::argmax_reduce_kernel<bfloat16, $, $, $>(",
-         batch_size,
-         params[0],
-         num_parts);
+        batch_size,
+        params[0],
+        num_parts);
   code.e("    task_desc.inputs[0].base_ptr,");
   code.e("    task_desc.inputs[1].base_ptr,");
   code.e("    task_desc.outputs[0].base_ptr,");
@@ -632,9 +632,9 @@ int TaskRegister::register_find_ngram_global_task(
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
   code.e("kernel::find_ngram_global_kernel<$, $, $>(",
-         params[0],
-         params[1],
-         num_parts);
+        params[0],
+        params[1],
+        num_parts);
   code.e("    task_desc.inputs[0].base_ptr,");
   code.e("    task_desc.inputs[1].base_ptr,");
   code.e("    task_desc.outputs[0].base_ptr,");
@@ -716,35 +716,35 @@ int TaskRegister::register_linear_hopper_task(
     (output_size >=  64) ?  64 :
     (output_size >=  32) ?  32 : 16;
   code.e("using TMA_A = kernel::tma::tma_2d<bfloat16, $, $, $, $, $, $, $, $, "
-         "$, $, $, $, true>;",
-         B,
-         M,
-         S,
-         batch_size, /*GMEM_ROW_*/
-         reduction_size, /*GMEM_COL_*/
-         batch_size, /*SMEM_ROW_*/
-         TMA_CP_ASYNC_SIZE, /*SMEM_COL_*/
-         reduction_size, /*GMEM_STRIDE_ROW_*/
-         1, /*GMEM_STRIDE_COL_*/
-         1, /*SMEM_REPEAT_ROW_*/
-         (TILE_SIZE + TMA_CP_ASYNC_SIZE - 1) / TMA_CP_ASYNC_SIZE, /*SMEM_REPEAT_COL_*/
-         batch_size * TMA_CP_ASYNC_SIZE /*SMEM_STRIDE_*/
+        "$, $, $, $, true>;",
+        B,
+        M,
+        S,
+        batch_size, /*GMEM_ROW_*/
+        reduction_size, /*GMEM_COL_*/
+        batch_size, /*SMEM_ROW_*/
+        TMA_CP_ASYNC_SIZE, /*SMEM_COL_*/
+        reduction_size, /*GMEM_STRIDE_ROW_*/
+        1, /*GMEM_STRIDE_COL_*/
+        1, /*SMEM_REPEAT_ROW_*/
+        (TILE_SIZE + TMA_CP_ASYNC_SIZE - 1) / TMA_CP_ASYNC_SIZE, /*SMEM_REPEAT_COL_*/
+        batch_size * TMA_CP_ASYNC_SIZE /*SMEM_STRIDE_*/
         );
 
   code.e("using TMA_B = kernel::tma::tma_2d<bfloat16, $, $, $, $, $, $, $, $, "
-         "$, $, $, $, true>;",
-         B,
-         M,
-         S,
-         output_size, /*GMEM_ROW_*/
-         reduction_size, /*GMEM_COL_*/
-         output_atom_size, /*SMEM_ROW_*/
-         TMA_CP_ASYNC_SIZE, /*SMEM_COL_*/
-         reduction_size, /*GMEM_STRIDE_ROW_*/
-         1, /*GMEM_STRIDE_COL_*/
-         1, /*SMEM_REPEAT_ROW_*/
-         (TILE_SIZE + TMA_CP_ASYNC_SIZE - 1) / TMA_CP_ASYNC_SIZE, /*SMEM_REPEAT_COL_*/
-         output_size * TMA_CP_ASYNC_SIZE /*SMEM_STRIDE_*/
+        "$, $, $, $, true>;",
+        B,
+        M,
+        S,
+        output_size, /*GMEM_ROW_*/
+        reduction_size, /*GMEM_COL_*/
+        output_atom_size, /*SMEM_ROW_*/
+        TMA_CP_ASYNC_SIZE, /*SMEM_COL_*/
+        reduction_size, /*GMEM_STRIDE_ROW_*/
+        1, /*GMEM_STRIDE_COL_*/
+        1, /*SMEM_REPEAT_ROW_*/
+        (TILE_SIZE + TMA_CP_ASYNC_SIZE - 1) / TMA_CP_ASYNC_SIZE, /*SMEM_REPEAT_COL_*/
+        output_size * TMA_CP_ASYNC_SIZE /*SMEM_STRIDE_*/
         );
 
   if (with_residual) {
@@ -766,52 +766,55 @@ int TaskRegister::register_linear_hopper_task(
   }
 
   code.e("using TMA_OUT = kernel::tma::tma_2d<bfloat16, $, $, $, $, $, $, $, "
-         "$, $, $, $, $, true>;",
-         B,
-         M,
-         S,
-         batch_size, /*GMEM_ROW_*/
-         output_size, /*GMEM_COL_*/
-         batch_size, /*SMEM_ROW_*/
-         output_tma_cp_size, /*SMEM_COL_*/
-         output_size, /*GMEM_STRIDE_ROW_*/
-         1, /*GMEM_STRIDE_COL_*/
-         1, /*SMEM_REPEAT_ROW_*/
-         (TILE_SIZE + output_tma_cp_size - 1) / output_tma_cp_size, /*SMEM_REPEAT_COL_*/
-         batch_size * TMA_CP_ASYNC_SIZE /*SMEM_STRIDE_*/
-         );
+        "$, $, $, $, $, true>;",
+        B,
+        M,
+        S,
+        batch_size, /*GMEM_ROW_*/
+        output_size, /*GMEM_COL_*/
+        batch_size, /*SMEM_ROW_*/
+        output_tma_cp_size, /*SMEM_COL_*/
+        output_size, /*GMEM_STRIDE_ROW_*/
+        1, /*GMEM_STRIDE_COL_*/
+        1, /*SMEM_REPEAT_ROW_*/
+        (TILE_SIZE + output_tma_cp_size - 1) / output_tma_cp_size, /*SMEM_REPEAT_COL_*/
+        batch_size * TMA_CP_ASYNC_SIZE /*SMEM_STRIDE_*/
+        );
   code.inc_indent();
   code.e("TMA_A tma_a(static_cast<CUtensorMap*>(task_desc.inputs[0].tma_desc_ptr));");
   code.e("TMA_B tma_b(static_cast<CUtensorMap*>(task_desc.inputs[1].tma_desc_ptr));");
   if (with_residual) {
     code.e("TMA_RESIDUAL tma_residual(static_cast<CUtensorMap*>(task_desc.inputs[2].tma_desc_"
-           "ptr));");
+          "ptr));");
   }
   code.e(
       "TMA_OUT "
       "tma_out(static_cast<CUtensorMap*>(task_desc.outputs[0].tma_desc_ptr));");
 
   code.e("kernel::linear_kernel_hopper<bfloat16, $, $, $, $, TMA_A, TMA_B, "
-         "$TMA_OUT, $>(",
-         batch_size,
-         output_size,
-         reduction_size,
-         Kstages,
-         with_residual ? "TMA_RESIDUAL, " : "",
-         output_stride);
+        "TMA_OUT, $, $>(",
+        batch_size,
+        output_size,
+        reduction_size,
+        Kstages,
+        with_residual ? "TMA_RESIDUAL" : "void",
+        output_stride);
   code.e("    tma_a,");
   code.e("    tma_b,");
+  code.e("    tma_out, ");
   if (with_residual) {
-    code.e("    tma_residual,");
+    code.e("    &tma_residual");
+  } else {
+    code.e("    nullptr");
   }
-  code.e("    tma_out);");
-
+  code.e(");");
+  
   if (with_residual) {
     return register_task_variant(TASK_LINEAR_WITH_RESIDUAL_HOPPER,
-                                 code.to_string());
+                                code.to_string());
   } else {
     return register_task_variant(TASK_LINEAR_HOPPER,
-                                 code.to_string());
+                                code.to_string());
   }
 }
 

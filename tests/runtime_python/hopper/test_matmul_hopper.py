@@ -1,13 +1,13 @@
 import torch
 import runtime_kernel_hopper
 
-torch.set_printoptions(sci_mode=False, profile="full")
-# torch.set_printoptions(sci_mode=False)
+# torch.set_printoptions(sci_mode=False, profile="full")
+torch.set_printoptions(sci_mode=False)
 
 g = torch.Generator(device="cuda").manual_seed(1234)
 
 reduction_sizes = [4096]
-output_sizes = [64]
+output_sizes = [2048]
 batch_size = 1
 
 for reduction_size in reduction_sizes:
@@ -27,7 +27,7 @@ for reduction_size in reduction_sizes:
             for j in range(reduction_size):
                 x[i, j] = 0.01 * (i * reduction_size + j)
 
-        runtime_kernel_hopper.linear(x, w, None, output)
+        runtime_kernel_hopper.linear(x, w, residual, output)
         torch_out = torch.matmul(x, torch.transpose(w, 0, 1))
         torch_out = torch_out + residual
 
@@ -38,7 +38,6 @@ for reduction_size in reduction_sizes:
         # print("output.shape", output.shape)
         # print(output)
 
-        print("out.shape", torch_out.shape)
         print("Ratio (kernel / torch):")
         print(output / torch_out)
 

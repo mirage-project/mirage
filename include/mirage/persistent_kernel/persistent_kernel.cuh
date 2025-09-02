@@ -1018,7 +1018,7 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
   global_runtime_config.num_gpus = npes;
   global_runtime_config.my_gpu_id = mype;
   global_runtime_config.num_graphs = 1;
-  global_runtime_config.verbose = false;
+  global_runtime_config.verbose = true;
   global_runtime_config.profiling = profiler_buffer != nullptr;
   global_runtime_config.split_worker_scheduler = true;
 
