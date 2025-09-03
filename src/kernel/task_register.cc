@@ -711,6 +711,7 @@ int TaskRegister::register_linear_hopper_task(threadblock::Graph const &bgraph,
   constexpr int TILE_SIZE = 128;
   constexpr int Kstages = 2;
   int const SMEM_M_SIZE = batch_size;
+  // int const SMEM_M_SIZE = 64;
   int const output_tma_cp_size = output_size < 64 ? output_size : 64;
   int const output_atom_size = (output_size >= 256)   ? 256
                                : (output_size >= 128) ? 128
@@ -762,7 +763,7 @@ int TaskRegister::register_linear_hopper_task(threadblock::Graph const &bgraph,
         output_size,        /*GMEM_COL_*/
         batch_size,         /*SMEM_ROW_*/
         output_tma_cp_size, /*SMEM_COL_*/
-        output_stride,        /*GMEM_STRIDE_ROW_*/
+        output_size,        /*GMEM_STRIDE_ROW_*/
         1,                  /*GMEM_STRIDE_COL_*/
         1,                  /*SMEM_REPEAT_ROW_*/
         (TILE_SIZE + output_tma_cp_size - 1) /

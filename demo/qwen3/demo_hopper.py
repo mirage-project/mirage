@@ -485,7 +485,7 @@ if __name__ == "__main__":
                 weight=w,
                 residual=x,
                 output=attn_proj_out,
-                grid_dim=(hidden_size // 64, 1, 1),
+                grid_dim=(hidden_size // 128, 1, 1),
                 block_dim=(128, 1, 1),
             )
             # reset residual input as x

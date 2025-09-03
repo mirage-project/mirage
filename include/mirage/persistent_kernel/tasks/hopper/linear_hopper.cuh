@@ -26,7 +26,7 @@
 #include "tma.cuh"
 #include "utils.cuh"
 #include "wgmma.cuh"
-#define DEBUG_HOPPER 1
+#define DEBUG_HOPPER 0
 namespace kernel {
 
 using namespace tma;
@@ -48,7 +48,7 @@ __device__ __forceinline__ void
                          const TMA_OUT &tma_out,
                          const TMA_RESIDUAL *tma_residual = nullptr) {
 
-  if (threadIdx.x == 0 && blockIdx.x == 9) {
+  if (threadIdx.x == 0 && blockIdx.x == 9 && DEBUG_HOPPER) {
     printf("linear_kernel_hopper start, blockIdx.x: %d, blockIdx.y: %d, batch size: %d, output size: %d, reduction size: %d, kstages: %d\n", blockIdx.x, blockIdx.y, BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE, Kstages);
   }
   constexpr int TILE_SIZE =
@@ -70,12 +70,9 @@ __device__ __forceinline__ void
   constexpr int OUTPUT_ATOM_SIZE = OUTPUT_SIZE <= 256 ? OUTPUT_SIZE : 256;
   constexpr bool HAS_RESIDUAL = !std::is_void<TMA_RESIDUAL>::value;
 
-  if (threadIdx.x == 0 && blockIdx.x == 9) {
-    printf("HAS_RESIDUAL: %d\n", HAS_RESIDUAL);
-  }
-
   // Yu: may need to adjust when batch size is larger than 64
-  constexpr int SMEM_M_SIZE = BATCH_SIZE < 64 ? 64 : BATCH_SIZE;
+  // constexpr int SMEM_M_SIZE = BATCH_SIZE < 64 ? 64 : BATCH_SIZE;
+  constexpr int SMEM_M_SIZE = BATCH_SIZE;
 
   constexpr int TMA_TRANS_BYTES_A = sizeof(T) * BATCH_SIZE * TILE_SIZE;
   constexpr int TMA_TRANS_BYTES_B = sizeof(T) * TILE_SIZE * OUTPUT_ATOM_SIZE;

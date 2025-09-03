@@ -33,7 +33,7 @@ __host__ inline CUtensorMap *
 }
 
 template <typename T, int B, int M, int S, int NDIM>
-__host__ static inline void fill_tma_desc(CUtensorMap *tma_desc, void * const src, uint64_t const (&gmem_shape)[NDIM], uint64_t const (&gmem_stride)[NDIM], uint32_t const (&smem_shape)[NDIM], size_t smem_repeat_row, size_t smem_repeat_col, size_t smem_tma_stride) {
+__host__ static inline void fill_tma_desc(CUtensorMap *tma_desc, void * const src, uint64_t const (&gmem_shape)[NDIM], uint64_t const (&gmem_stride)[NDIM], uint32_t const (&smem_shape)[NDIM], size_t smem_repeat_row, size_t smem_repeat_col) {
   constexpr uint32_t tma_dim = 5;
   void *global_addr = src;
 
@@ -239,6 +239,10 @@ __host__ inline void
     case mirage::runtime::TASK_LINEAR_WITH_RESIDUAL_HOPPER:
     {
       const int cp_async_size = 64;
+      const size_t smem_repeat_row = 1;
+      constexpr int B = 3;
+      constexpr int M = 3;
+      constexpr int S = 3;
 
       if (param_id == 0) {
         // TMA_INPUT
@@ -247,14 +251,10 @@ __host__ inline void
         uint64_t gmem_shape[2] = {static_cast<uint64_t>(batch_size), static_cast<uint64_t>(reduction_size)};
         uint64_t gmem_stride[2] = {1, static_cast<uint64_t>(reduction_size)};
         uint32_t smem_shape[2] = {static_cast<uint32_t>(batch_size), static_cast<uint32_t>(cp_async_size)};
-        constexpr int B = 3;
-        constexpr int M = 3;
-        constexpr int S = 3;
         constexpr int TILE_SIZE = 128;
-        size_t smem_repeat_row = 1;
+
         size_t smem_repeat_col = (TILE_SIZE + cp_async_size - 1) / cp_async_size;
-        size_t smem_tma_stride = 1;
-        fill_tma_desc<bfloat16, B, M, S, 2>(tma_desc, tensor_desc.base_ptr, gmem_shape, gmem_stride, smem_shape, smem_repeat_row, smem_repeat_col, smem_tma_stride);
+        fill_tma_desc<bfloat16, B, M, S, 2>(tma_desc, tensor_desc.base_ptr, gmem_shape, gmem_stride, smem_shape, smem_repeat_row, smem_repeat_col);
       } else if (param_id == 1) {
         // TMA_WEIGHT
         const int output_size = tensor_desc.dim[0];
@@ -267,45 +267,42 @@ __host__ inline void
         uint64_t gmem_shape[2] = {static_cast<uint64_t>(output_size), static_cast<uint64_t>(reduction_size)};
         uint64_t gmem_stride[2] = {1, static_cast<uint64_t>(reduction_size)};
         uint32_t smem_shape[2] = {static_cast<uint32_t>(output_atom_size), static_cast<uint32_t>(cp_async_size)};
-        constexpr int B = 3;
-        constexpr int M = 3;
-        constexpr int S = 3;
         constexpr int TILE_SIZE = 128;
-        size_t smem_repeat_row = 1;
         size_t smem_repeat_col = (TILE_SIZE + cp_async_size - 1) / cp_async_size;
-        size_t smem_tma_stride = 1;
-        fill_tma_desc<bfloat16, B, M, S, 2>(tma_desc, tensor_desc.base_ptr, gmem_shape, gmem_stride, smem_shape, smem_repeat_row, smem_repeat_col, smem_tma_stride);
+        fill_tma_desc<bfloat16, B, M, S, 2>(tma_desc, tensor_desc.base_ptr, gmem_shape, gmem_stride, smem_shape, smem_repeat_row, smem_repeat_col);
       } else if (param_id == 2 && task_desc.task_type == mirage::runtime::TASK_LINEAR_WITH_RESIDUAL_HOPPER) {
         // TMA_RESIDUAL
-        printf("TMA_RESIDUAL created\n");
         const int batch_size = tensor_desc.dim[0];
         const int output_size = tensor_desc.dim[1];
+        const int output_stride = (tensor_desc.stride[0]);
+        // printf("output_size: %d, output stride: %d\n", output_size, stride);
+        const int output_atom_size = (output_size >= 256) ? 256 :
+        (output_size >= 128) ? 128 :
+        (output_size >=  64) ?  64 :
+        (output_size >=  32) ?  32 : 16;
+        // printf("output_atom_size: %d\n", output_atom_size);
+        const int output_tma_cp_size = output_atom_size < 64 ? output_atom_size : 64;
         uint64_t gmem_shape[2] = {static_cast<uint64_t>(batch_size), static_cast<uint64_t>(output_size)};
-        uint64_t gmem_stride[2] = {1, static_cast<uint64_t>(output_size)};
-        uint32_t smem_shape[2] = {static_cast<uint32_t>(batch_size), static_cast<uint32_t>(cp_async_size)};
-        constexpr int B = 0;
-        constexpr int M = 0;
-        constexpr int S = 0;
-        constexpr int TILE_SIZE = 128;
-        size_t smem_repeat_row = 1;
-        size_t smem_repeat_col = (TILE_SIZE + cp_async_size - 1) / cp_async_size;
-        size_t smem_tma_stride = 1;
-        fill_tma_desc<bfloat16, B, M, S, 2>(tma_desc, tensor_desc.base_ptr, gmem_shape, gmem_stride, smem_shape, smem_repeat_row, smem_repeat_col, smem_tma_stride);
+        uint64_t gmem_stride[2] = {1, static_cast<uint64_t>(output_stride)};
+        uint32_t smem_shape[2] = {static_cast<uint32_t>(batch_size), static_cast<uint32_t>(output_tma_cp_size)};
+        size_t smem_repeat_col = (output_atom_size + output_tma_cp_size - 1) / output_tma_cp_size;
+        fill_tma_desc<bfloat16, B, M, S, 2>(tma_desc, tensor_desc.base_ptr, gmem_shape, gmem_stride, smem_shape, smem_repeat_row, smem_repeat_col);
       } else if (param_id == 3 && task_desc.task_type == mirage::runtime::TASK_LINEAR_WITH_RESIDUAL_HOPPER || param_id == 2 && task_desc.task_type == mirage::runtime::TASK_LINEAR_HOPPER) {
         // TMA_OUT
         const int batch_size = tensor_desc.dim[0];
         const int output_size = tensor_desc.dim[1];
-        const int output_tma_cp_size = output_size < 64 ? output_size : 64;
+        const int output_stride = (tensor_desc.stride[0]);
+        // printf("output_size: %d, output stride: %d\n", output_size, stride);
+        const int output_atom_size = (output_size >= 256) ? 256 :
+        (output_size >= 128) ? 128 :
+        (output_size >=  64) ?  64 :
+        (output_size >=  32) ?  32 : 16;
+        const int output_tma_cp_size = output_atom_size < 64 ? output_atom_size : 64;
         uint64_t gmem_shape[2] = {static_cast<uint64_t>(batch_size), static_cast<uint64_t>(output_size)};
-        uint64_t gmem_stride[2] = {1, static_cast<uint64_t>(output_size)};
-        uint32_t smem_shape[2] = {static_cast<uint32_t>(batch_size), static_cast<uint32_t>(cp_async_size)};
-        constexpr int B = 0;
-        constexpr int M = 0;
-        constexpr int S = 0;
-        size_t smem_repeat_row = 1;
-        size_t smem_repeat_col = (output_size + output_tma_cp_size - 1) / output_tma_cp_size;
-        size_t smem_tma_stride = 1;
-        fill_tma_desc<bfloat16, B, M, S, 2>(tma_desc, tensor_desc.base_ptr, gmem_shape, gmem_stride, smem_shape, smem_repeat_row, smem_repeat_col, smem_tma_stride);
+        uint64_t gmem_stride[2] = {1, static_cast<uint64_t>(output_stride)};
+        uint32_t smem_shape[2] = {static_cast<uint32_t>(batch_size), static_cast<uint32_t>(output_tma_cp_size)};
+        size_t smem_repeat_col = (output_atom_size + output_tma_cp_size - 1) / output_tma_cp_size;
+        fill_tma_desc<bfloat16, B, M, S, 2>(tma_desc, tensor_desc.base_ptr, gmem_shape, gmem_stride, smem_shape, smem_repeat_row, smem_repeat_col);
       }
       break;
     }
