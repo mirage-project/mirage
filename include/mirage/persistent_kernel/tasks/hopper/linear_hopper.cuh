@@ -26,6 +26,7 @@
 #include "tma.cuh"
 #include "utils.cuh"
 #include "wgmma.cuh"
+#define DEBUG_HOPPER 1
 namespace kernel {
 
 using namespace tma;
@@ -47,7 +48,7 @@ __device__ __forceinline__ void
                          const TMA_OUT &tma_out,
                          const TMA_RESIDUAL *tma_residual = nullptr) {
 
-  if (threadIdx.x == 0 && blockIdx.x <= 10) {
+  if (threadIdx.x == 0 && blockIdx.x == 9) {
     printf("linear_kernel_hopper start, blockIdx.x: %d, blockIdx.y: %d, batch size: %d, output size: %d, reduction size: %d, kstages: %d\n", blockIdx.x, blockIdx.y, BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE, Kstages);
   }
   constexpr int TILE_SIZE =
@@ -58,6 +59,7 @@ __device__ __forceinline__ void
   constexpr int CONSUMER_WARPGROUPS = 1;
   constexpr int PRODUCER_WARPGROUPS = 1;
   constexpr int NUM_WARPGROUPS = CONSUMER_WARPGROUPS + PRODUCER_WARPGROUPS;
+  constexpr int THREADS_PER_WARPGROUP = 128;
 
   // The actual tma instructions are issued for each 64 cols when swizzle<3,3,3>
   // is used large tile size is wrapped, but
@@ -67,6 +69,13 @@ __device__ __forceinline__ void
   // constexpr int OUTPUT_ATOM_SIZE = OUTPUT_SIZE <= 128 ? OUTPUT_SIZE : 128;
   constexpr int OUTPUT_ATOM_SIZE = OUTPUT_SIZE <= 256 ? OUTPUT_SIZE : 256;
   constexpr bool HAS_RESIDUAL = !std::is_void<TMA_RESIDUAL>::value;
+
+  if (threadIdx.x == 0 && blockIdx.x == 9) {
+    printf("HAS_RESIDUAL: %d\n", HAS_RESIDUAL);
+  }
+
+  // Yu: may need to adjust when batch size is larger than 64
+  constexpr int SMEM_M_SIZE = BATCH_SIZE < 64 ? 64 : BATCH_SIZE;
 
   constexpr int TMA_TRANS_BYTES_A = sizeof(T) * BATCH_SIZE * TILE_SIZE;
   constexpr int TMA_TRANS_BYTES_B = sizeof(T) * TILE_SIZE * OUTPUT_ATOM_SIZE;
@@ -93,35 +102,31 @@ __device__ __forceinline__ void
 
   constexpr size_t SHARED_WEIGHT_BUFFER_OFFSET =
       (SHARED_INPUT_BUFFER_OFFSET +
-       sizeof(T) * Kstages * BATCH_SIZE * TILE_SIZE + 1023) /
+       sizeof(T) * Kstages * SMEM_M_SIZE * TILE_SIZE + 1023) /
       1024 * 1024;
 
-  constexpr size_t SHARED_RESIDUAL_BUFFER_OFFSET =
-      HAS_RESIDUAL
-          ? (SHARED_WEIGHT_BUFFER_OFFSET +
+  constexpr size_t SHARED_RESIDUAL_BUFFER_OFFSET = (SHARED_WEIGHT_BUFFER_OFFSET +
              sizeof(T) * Kstages * TILE_SIZE * OUTPUT_ATOM_SIZE + 1023) /
-                1024 * 1024
-          : SHARED_WEIGHT_BUFFER_OFFSET;
+                1024 * 1024;
 
   constexpr size_t SHARED_MM_OUTPUT_BUFFER_OFFSET =
+      HAS_RESIDUAL ? 
       (SHARED_RESIDUAL_BUFFER_OFFSET +
-       sizeof(T) * BATCH_SIZE * OUTPUT_ATOM_SIZE * Kstages + 1023) /
-      1024 * 1024;
+       sizeof(T) * SMEM_M_SIZE * OUTPUT_ATOM_SIZE * Kstages + 1023) /
+      1024 * 1024 : SHARED_RESIDUAL_BUFFER_OFFSET;
 
   constexpr size_t SHARED_INPUT_BARRIER_OFFSET =
       (SHARED_MM_OUTPUT_BUFFER_OFFSET +
-       sizeof(T) * BATCH_SIZE * OUTPUT_ATOM_SIZE * Kstages + 15) /
+       sizeof(T) * SMEM_M_SIZE * OUTPUT_ATOM_SIZE * Kstages + 15) /
       16 * 16;
 
   constexpr size_t SHARED_WEIGHT_BARRIER_OFFSET =
       (SHARED_INPUT_BARRIER_OFFSET + 8 * Kstages + 7) / 8 * 8;
 
-  constexpr size_t SHARED_RESIDUAL_BARRIER_OFFSET =
-      HAS_RESIDUAL ? (SHARED_WEIGHT_BARRIER_OFFSET + 8 * Kstages + 7) / 8 * 8
-                   : SHARED_WEIGHT_BARRIER_OFFSET;
+  constexpr size_t SHARED_RESIDUAL_BARRIER_OFFSET = (SHARED_WEIGHT_BARRIER_OFFSET + 8 * Kstages + 7) / 8 * 8;
 
-  constexpr size_t SHARED_COMPUTE_DONE_OFFSET =
-      (SHARED_RESIDUAL_BARRIER_OFFSET + 8 * Kstages + 7) / 8 * 8;
+  constexpr size_t SHARED_COMPUTE_DONE_OFFSET = HAS_RESIDUAL ? 
+      (SHARED_RESIDUAL_BARRIER_OFFSET + 8 * Kstages + 7) / 8 * 8 : SHARED_RESIDUAL_BARRIER_OFFSET;
 
   constexpr size_t SHARED_RESIDUAL_DONE_OFFSET =
       (SHARED_COMPUTE_DONE_OFFSET + 8 * Kstages + 7) / 8 * 8;
@@ -146,7 +151,7 @@ __device__ __forceinline__ void
                              B,
                              M,
                              S,
-                             BATCH_SIZE,
+                             SMEM_M_SIZE,
                              INPUT_TMA_TILE_SIZE,
                              TILE_SIZE / INPUT_TMA_TILE_SIZE>;
   InputSmem input_smem(shared_input);
@@ -164,7 +169,7 @@ __device__ __forceinline__ void
                                 B,
                                 M,
                                 S,
-                                BATCH_SIZE,
+                                SMEM_M_SIZE,
                                 OUTPUT_TMA_TILE_SIZE,
                                 OUTPUT_ATOM_SIZE / OUTPUT_TMA_TILE_SIZE>;
   ResidualSmem residual_smem(shared_residual);
@@ -176,7 +181,7 @@ __device__ __forceinline__ void
                               B,
                               M,
                               S,
-                              BATCH_SIZE,
+                              SMEM_M_SIZE,
                               OUTPUT_TMA_TILE_SIZE,
                               OUTPUT_ATOM_SIZE / OUTPUT_TMA_TILE_SIZE>;
   OutputSmem mm_output_smem(mm_output);
@@ -215,7 +220,7 @@ __device__ __forceinline__ void
   // warp specialization data movement warpgroup
   if (warpgroup_id == NUM_WARPGROUPS - 1) {
 
-    // wg_decrease_regs<32>();
+    wg_decrease_regs<32>();
     if (lane_id() == 0 && warp_idx == (NUM_WARPGROUPS * WARPGROUP_WARPS - 4)) {
       for (int output_atom_idx = 0; output_atom_idx < NUM_ITER_N;
            output_atom_idx++) {
@@ -224,9 +229,15 @@ __device__ __forceinline__ void
               //  HAS_RESIDUAL);
         // launch tma for residual
         int slot_residual = output_atom_idx % Kstages;
-        int phase_residual = output_atom_idx / Kstages % 2;
+        int phase_residual = (output_atom_idx / Kstages) % 2;
         if constexpr (HAS_RESIDUAL) {
+          if (blockIdx.x == 9 && DEBUG_HOPPER) {
+            printf("wait residual done start, slot_residual: %d, phase_residual: %d\n", slot_residual, phase_residual);
+          }
           wait(residual_done[slot_residual], phase_residual ^ 1);
+          if (blockIdx.x == 9 && DEBUG_HOPPER) {
+            printf("wait residual done done, slot_residual: %d, phase_residual: %d\n", slot_residual, phase_residual);
+          }
         }
 
         // printf("cp residual start\n");
@@ -237,6 +248,9 @@ __device__ __forceinline__ void
                                                       sizeof(T));
           set_barrier_transaction_bytes(residual_barrier[slot_residual],
                                         TMA_TRANS_BYTES_RESIDUAL);
+          if (blockIdx.x == 9 && DEBUG_HOPPER) {
+            printf("cp residual, slot_residual: %d, phase_residual: %d\n", slot_residual, phase_residual);
+          }
           tma_residual->tma_cp_async(residual_barrier[slot_residual],
                                      residual_smem(0, 0),
                                      {output_atom_idx * OUTPUT_ATOM_SIZE, 0});
@@ -244,11 +258,11 @@ __device__ __forceinline__ void
         // printf("cp residual done\n");
 
         for (int i = 0; i < NUM_ITER_K; i++) {
-          if (threadIdx.x == 128 && blockIdx.x == 9) {
-            printf("producer iteration i start, i: %d\n", i);
-          }
           int slot = (output_atom_idx * NUM_ITER_K + i) % Kstages;
           int phase = ((output_atom_idx * NUM_ITER_K + i) / Kstages) % 2;
+          if (threadIdx.x == 128 && blockIdx.x == 9 && DEBUG_HOPPER) {
+            printf("producer iteration i start, i: %d, phase: %d, slot: %d\n", i, phase, slot);
+          }
           wait(compute_done[slot], phase ^ 1);
 
           int tma_coords_A[2] = {i * TILE_SIZE, 0};
@@ -267,8 +281,8 @@ __device__ __forceinline__ void
                                         TMA_TRANS_BYTES_B);
           tma_b.tma_cp_async(
               weight_barrier[slot], input_weight_smem(0, 0), tma_coords_B);
-          if (threadIdx.x == 128 && blockIdx.x == 9) {
-            printf("producer iteration i done, i: %d\n", i);
+          if (threadIdx.x == 128 && blockIdx.x == 9 && DEBUG_HOPPER) {
+            printf("producer iteration i done, i: %d, slot: %d\n", i, slot);
           }
         }
 
@@ -279,11 +293,11 @@ __device__ __forceinline__ void
     }
   } else {
     // warp specialization compute warpgroup
-    // wg_increase_regs<160>();
+    wg_increase_regs<160>();
     float s_frag[OUTPUT_ATOM_SIZE / 2];
     for (int output_atom_idx = 0; output_atom_idx < NUM_ITER_N;
          output_atom_idx++) {
-        if (threadIdx.x == 128 && blockIdx.x == 9) {
+        if (threadIdx.x == 0 && blockIdx.x == 9 && DEBUG_HOPPER) {
           printf("consumer iteration output_atom_idx = %d start\n", output_atom_idx);
         }
 #pragma unroll
@@ -292,7 +306,7 @@ __device__ __forceinline__ void
       }
 
       for (int i = 0; i < NUM_ITER_K; i++) {
-        if (threadIdx.x == 128 && blockIdx.x == 9) {
+        if (threadIdx.x == 0 && blockIdx.x == 9 && DEBUG_HOPPER) {
           printf("consumer iteration output_atom_idx = %d, i = %d start\n", output_atom_idx, i);
         }
         int slot = (output_atom_idx * NUM_ITER_K + i) % Kstages;
@@ -349,7 +363,7 @@ __device__ __forceinline__ void
         if (idx_in_warp == 0 && warp_idx % 4 == 0) {
           arrive(compute_done[slot], 1);
         }
-        if (threadIdx.x == 128 && blockIdx.x == 9) {
+        if (threadIdx.x == 0 && blockIdx.x == 9 && DEBUG_HOPPER) {
           printf("consumer iteration output_atom_idx = %d, i = %d done\n", output_atom_idx, i);
         }
       }
@@ -359,10 +373,16 @@ __device__ __forceinline__ void
       if constexpr (HAS_RESIDUAL) {
         slot_residual = output_atom_idx % Kstages;
         phase_residual = output_atom_idx / Kstages % 2;
+        if (blockIdx.x == 9 && DEBUG_HOPPER) {
+          printf("wait residual barrier start, threadIdx.x: %d, slot_residual: %d, phase_residual: %d\n", threadIdx.x, slot_residual, phase_residual);
+        }
         wait(residual_barrier[slot_residual], phase_residual);
         residual_smem.set_ptr(shared_residual + slot_residual *
                                                     TMA_TRANS_BYTES_RESIDUAL /
                                                     sizeof(T));
+        if (blockIdx.x == 9 && DEBUG_HOPPER) {
+          printf("wait residual barrier done, threadIdx.x: %d, slot_residual: %d, phase_residual: %d\n", threadIdx.x, slot_residual, phase_residual);
+        }
       }
 
       // https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#asynchronous-warpgroup-level-matrix-register-fragment-wgmma-64n16:~:text=The%20layout%20of%20the%20fragments%20held%20by%20different%20threads%20is%20shown%20in%20Figure%20149.
@@ -387,7 +407,7 @@ __device__ __forceinline__ void
       async_proxy_fence();
 
       // this is inter-thread sync
-      // wg_sync<THREADS_PER_WARPGROUP * CONSUMER_WARPGROUPS>(8);
+      // wg_sync<THREADS_PER_WARPGROUP * CONSUMER_WARPGROUPS>(1);
 
       // copy back to dmem
       if (warp_idx % 4 == 0 && lane_id() == 0) {
@@ -398,13 +418,19 @@ __device__ __forceinline__ void
           arrive(residual_done[slot_residual], 1);
         }
       }
-      if (threadIdx.x == 128 && blockIdx.x == 9) {
-        printf("consumer iteration output_atom_idx = %d done\n", output_atom_idx);
+      if (blockIdx.x == 9 && DEBUG_HOPPER) {
+        printf("threadIdx.x: %d, consumer iteration output_atom_idx = %d done\n", threadIdx.x, output_atom_idx);
       }
     }
   }
+  if (blockIdx.x == 9 && DEBUG_HOPPER) {
+    printf("before sync, threadIdx.x: %d, blockIdx.x: %d\n", threadIdx.x, blockIdx.x);
+  }
   __syncthreads();
-  if (threadIdx.x == 0 && blockIdx.x <= 10) {
+  if (blockIdx.x == 9 && DEBUG_HOPPER) {
+    printf("after sync, threadIdx.x: %d, blockIdx.x: %d\n", threadIdx.x, blockIdx.x);
+  }
+  if (threadIdx.x == 0 && blockIdx.x == 9 && DEBUG_HOPPER) {
    printf("linear_kernel_hopper done, blockIdx.x: %d, blockIdx.y: %d, batch size: %d, output size: %d, reduction size: %d, kstages: %d\n", blockIdx.x, blockIdx.y, BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE, Kstages);
   }
 }

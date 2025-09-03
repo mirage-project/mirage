@@ -204,6 +204,8 @@ if __name__ == "__main__":
         )
             
         num_workers, num_schedulers = mi.get_configurations_from_gpu(rank)
+        print("num_workers: ", num_workers)
+        print("num_schedulers: ", num_schedulers)
         qo_indptr_buffer = torch.empty(
             args.max_num_batched_requests + 1, dtype=torch.int32, device="cuda")
         paged_kv_indptr_buffer = torch.empty(
@@ -469,6 +471,15 @@ if __name__ == "__main__":
             w = mpk.attach_input(
                 torch_tensor=layer.self_attn.o_proj.weight, name=f"layer_{i}_o_proj"
             )
+            # mpk.linear_with_residual_layer(
+            #     input=attn_out,
+            #     weight=w,
+            #     residual=x,
+            #     output=attn_proj_out,
+            #     grid_dim=(hidden_size // 64, 1, 1),
+            #     block_dim=(128, 1, 1),
+            # )
+
             mpk.linear_with_residual_layer_hopper(
                 input=attn_out,
                 weight=w,
@@ -519,7 +530,7 @@ if __name__ == "__main__":
                 weight=w_gatedup,
                 output=mlp_mid,
                 grid_dim=(rmsnorm_num_tasks, 1, 1),
-                block_dim=(128, 1, 1),
+                block_dim=(256, 1, 1),
             )
             #mpk.rmsnorm_linear_layer(
             #    input=x,
@@ -539,7 +550,7 @@ if __name__ == "__main__":
             w = mpk.attach_input(
                 torch_tensor=layer.mlp.down_proj.weight, name=f"layer_{i}_down_proj"
             )
-            mpk.linear_with_residual_layer_hopper(
+            mpk.linear_with_residual_layer(
                 input=silu_mul_out,
                 weight=w,
                 residual=x,

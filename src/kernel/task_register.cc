@@ -710,6 +710,7 @@ int TaskRegister::register_linear_hopper_task(threadblock::Graph const &bgraph,
   constexpr int TMA_CP_ASYNC_SIZE = 64;
   constexpr int TILE_SIZE = 128;
   constexpr int Kstages = 2;
+  int const SMEM_M_SIZE = batch_size;
   int const output_tma_cp_size = output_size < 64 ? output_size : 64;
   int const output_atom_size = (output_size >= 256)   ? 256
                                : (output_size >= 128) ? 128
@@ -730,7 +731,7 @@ int TaskRegister::register_linear_hopper_task(threadblock::Graph const &bgraph,
          1,                 /*SMEM_REPEAT_ROW_*/
          (TILE_SIZE + TMA_CP_ASYNC_SIZE - 1) /
              TMA_CP_ASYNC_SIZE,         /*SMEM_REPEAT_COL_*/
-         batch_size * TMA_CP_ASYNC_SIZE /*SMEM_STRIDE_*/
+         SMEM_M_SIZE * TMA_CP_ASYNC_SIZE /*SMEM_STRIDE_*/
   );
 
   code.e("using TMA_B = kernel::tma::tma_2d<bfloat16, $, $, $, $, $, $, $, $, "
@@ -761,12 +762,12 @@ int TaskRegister::register_linear_hopper_task(threadblock::Graph const &bgraph,
         output_size,        /*GMEM_COL_*/
         batch_size,         /*SMEM_ROW_*/
         output_tma_cp_size, /*SMEM_COL_*/
-        output_size,        /*GMEM_STRIDE_ROW_*/
+        output_stride,        /*GMEM_STRIDE_ROW_*/
         1,                  /*GMEM_STRIDE_COL_*/
         1,                  /*SMEM_REPEAT_ROW_*/
         (TILE_SIZE + output_tma_cp_size - 1) /
             output_tma_cp_size,        /*SMEM_REPEAT_COL_*/
-        batch_size * TMA_CP_ASYNC_SIZE /*SMEM_STRIDE_*/
+        SMEM_M_SIZE * TMA_CP_ASYNC_SIZE /*SMEM_STRIDE_*/
     );
   }
 
@@ -779,12 +780,12 @@ int TaskRegister::register_linear_hopper_task(threadblock::Graph const &bgraph,
          output_size,        /*GMEM_COL_*/
          batch_size,         /*SMEM_ROW_*/
          output_tma_cp_size, /*SMEM_COL_*/
-         output_size,        /*GMEM_STRIDE_ROW_*/
+         output_stride,        /*GMEM_STRIDE_ROW_*/
          1,                  /*GMEM_STRIDE_COL_*/
          1,                  /*SMEM_REPEAT_ROW_*/
          (TILE_SIZE + output_tma_cp_size - 1) /
              output_tma_cp_size,        /*SMEM_REPEAT_COL_*/
-         batch_size * TMA_CP_ASYNC_SIZE /*SMEM_STRIDE_*/
+         SMEM_M_SIZE * TMA_CP_ASYNC_SIZE /*SMEM_STRIDE_*/
   );
   code.inc_indent();
   code.e("TMA_A "
@@ -800,6 +801,7 @@ int TaskRegister::register_linear_hopper_task(threadblock::Graph const &bgraph,
   code.e(
       "TMA_OUT "
       "tma_out(static_cast<CUtensorMap*>(task_desc.outputs[0].tma_desc_ptr));");
+  // code.e("printf(\"linear_kernel_hopper start\");");
 
   code.e("kernel::linear_kernel_hopper<bfloat16, $, $, $, $, TMA_A, TMA_B, "
          "TMA_OUT, $, $>(",

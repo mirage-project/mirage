@@ -25,6 +25,9 @@ template <typename T,
 __device__ __forceinline__ void silu_mul_task_impl(void const *input_ptr,
                                                    void *output_ptr,
                                                    int num_active_tokens) {
+  if (threadIdx.x >= 128) {
+    return;
+  }
   T const *__restrict__ d_input = static_cast<T const *>(input_ptr);
   T const *__restrict__ d_mul = static_cast<T const *>(input_ptr) + OUTPUT_SIZE;
   T *__restrict__ d_output = static_cast<T *>(output_ptr);

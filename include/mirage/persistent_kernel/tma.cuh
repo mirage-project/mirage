@@ -277,6 +277,7 @@ __host__ inline void
         fill_tma_desc<bfloat16, B, M, S, 2>(tma_desc, tensor_desc.base_ptr, gmem_shape, gmem_stride, smem_shape, smem_repeat_row, smem_repeat_col, smem_tma_stride);
       } else if (param_id == 2 && task_desc.task_type == mirage::runtime::TASK_LINEAR_WITH_RESIDUAL_HOPPER) {
         // TMA_RESIDUAL
+        printf("TMA_RESIDUAL created\n");
         const int batch_size = tensor_desc.dim[0];
         const int output_size = tensor_desc.dim[1];
         uint64_t gmem_shape[2] = {static_cast<uint64_t>(batch_size), static_cast<uint64_t>(output_size)};

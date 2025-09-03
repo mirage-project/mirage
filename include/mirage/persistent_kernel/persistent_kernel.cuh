@@ -388,6 +388,10 @@ __device__ void execute_worker(RuntimeConfig config) {
   __shared__ TaskId cur_task_id;
   __shared__ TaskDesc task_desc;
 
+  if (threadIdx.x == 0) {
+    printf("execute_worker start, blockIdx.x: %d, total threads: %d\n", blockIdx.x, blockDim.x);
+  }
+
   PROFILER_CLOSURE_PARAMS_DECL;
   if (config.profiling) {
     PROFILER_INIT(static_cast<uint64_t *>(config.profiler_buffer),
@@ -905,11 +909,13 @@ __global__ void persistent_kernel(RuntimeConfig config) {
 }
 
 __global__ void worker_kernel(RuntimeConfig config) {
+  printf("worker kernel start\n");
   worker_checker(config);
   execute_worker(config);
 }
 
 __global__ void scheduler_kernel(RuntimeConfig config) {
+  printf("scheduler kernel start\n");
   scheduler_checker(config);
   execute_scheduler(config, 0);
 }
@@ -1020,7 +1026,7 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
   global_runtime_config.num_graphs = 1;
   global_runtime_config.verbose = false;
   global_runtime_config.profiling = profiler_buffer != nullptr;
-  global_runtime_config.split_worker_scheduler = true;
+  global_runtime_config.split_worker_scheduler = false;
 
   std::vector<TaskDesc> all_tasks;
   std::vector<EventDesc> all_events;
@@ -1153,6 +1159,7 @@ extern "C" void launch_persistent_kernel() {
 
   if (global_runtime_config.split_worker_scheduler) {
     printf("worker kernel & scheduler kernel\n");
+    printf("MAX_SHARE_MEMORY_SIZE: %d\n", MAX_SHARE_MEMORY_SIZE);
 
     // Launcher worker & scheduler kernel
     cudaFuncSetAttribute(worker_kernel,
@@ -1160,7 +1167,7 @@ extern "C" void launch_persistent_kernel() {
                          MAX_SHARE_MEMORY_SIZE);
     cudaFuncSetAttribute(scheduler_kernel,
                          cudaFuncAttributeMaxDynamicSharedMemorySize,
-                         MAX_SHARE_MEMORY_SIZE);
+                         MAX_SHARE_MEMORY_SIZE / 3);
 
     cudaStream_t worker_stream, scheduler_stream;
     cudaStreamCreate(&worker_stream);
@@ -1169,12 +1176,14 @@ extern "C" void launch_persistent_kernel() {
     // The split kernel does not support NVSHMEM because
     // nvshmemx_collective_launch launches kernels sequentially, which blocks
     // the interaction between the worker kernel and the scheduler kernel
+    printf("in launch, scheduler_kernel start\n");
     scheduler_kernel<<<
         dim3(global_runtime_config.num_local_schedulers / 4, 1, 1),
         dim3(128, 1, 1),
-        MAX_SHARE_MEMORY_SIZE /*smem*/,
+        MAX_SHARE_MEMORY_SIZE / 3/*smem*/,
         scheduler_stream>>>(global_runtime_config);
 
+    printf("in launch, worker_kernel start\n");
     worker_kernel<<<dim3(global_runtime_config.num_workers, 1, 1),
                     dim3(256, 1, 1),
                     MAX_SHARE_MEMORY_SIZE /*smem*/,
@@ -1205,7 +1214,7 @@ extern "C" void launch_persistent_kernel() {
                                0 /*stream*/);
 #else
     persistent_kernel<<<dim3(sm_count, 1, 1),
-                        dim3(128, 1, 1),
+                        dim3(256, 1, 1),
                         MAX_SHARE_MEMORY_SIZE /*smem*/>>>(
         global_runtime_config);
 #endif
