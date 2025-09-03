@@ -47,6 +47,10 @@ __device__ __forceinline__ void
                          const TMA_OUT &tma_out,
                          const TMA_RESIDUAL *tma_residual = nullptr) {
 
+                          printf("threadIdx.x: %d, blockIdx.x: %d\n", threadIdx.x, blockIdx.x);
+  if (threadIdx.x == 0 && blockIdx.x <= 10) {
+    printf("linear_kernel_hopper start, blockIdx.x: %d, blockIdx.y: %d, batch size: %d, output size: %d, reduction size: %d, kstages: %d\n", blockIdx.x, blockIdx.y, BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE, Kstages);
+  }
   constexpr int TILE_SIZE =
       REDUCTION_SIZE < TMA_A::SMEM_COL * TMA_A::SMEM_REPEAT_COL
           ? REDUCTION_SIZE
@@ -126,16 +130,6 @@ __device__ __forceinline__ void
   constexpr size_t TOTAL_SHARED_MEMORY =
       SHARED_RESIDUAL_DONE_OFFSET + 8 * Kstages;
 
-  if (threadIdx.x == 0) {
-    printf("threadIdx.x: %d, TOTAL_SHARED_MEMORY: %llu, BATCH_SIZE: %d, "
-           "OUTPUT_SIZE: %d, REDUCTION_SIZE: %d, Kstages: %d\n",
-           threadIdx.x,
-           TOTAL_SHARED_MEMORY,
-           BATCH_SIZE,
-           OUTPUT_SIZE,
-           REDUCTION_SIZE,
-           Kstages);
-  }
   assert(TOTAL_SHARED_MEMORY <= 224 * 1024);
 
   // copy input
@@ -226,9 +220,9 @@ __device__ __forceinline__ void
     if (lane_id() == 0 && warp_idx == (NUM_WARPGROUPS * WARPGROUP_WARPS - 4)) {
       for (int output_atom_idx = 0; output_atom_idx < NUM_ITER_N;
            output_atom_idx++) {
-        printf("output_atom_idx: %d start, has residual: %d\n",
-               output_atom_idx,
-               HAS_RESIDUAL);
+        // printf("output_atom_idx: %d start, has residual: %d\n",
+              //  output_atom_idx,
+              //  HAS_RESIDUAL);
         // launch tma for residual
         int slot_residual = output_atom_idx % Kstages;
         int phase_residual = output_atom_idx / Kstages % 2;
@@ -236,7 +230,7 @@ __device__ __forceinline__ void
           wait(residual_done[slot_residual], phase_residual ^ 1);
         }
 
-        printf("cp residual start\n");
+        // printf("cp residual start\n");
 
         if constexpr (HAS_RESIDUAL) {
           residual_smem.set_ptr(shared_residual + slot_residual *
@@ -248,11 +242,11 @@ __device__ __forceinline__ void
                                      residual_smem(0, 0),
                                      {output_atom_idx * OUTPUT_ATOM_SIZE, 0});
         }
-        printf("cp residual done\n");
+        // printf("cp residual done\n");
 
         for (int i = 0; i < NUM_ITER_K; i++) {
-          if (threadIdx.x == 128) {
-            printf("iteration i start: %d\n", i);
+          if (threadIdx.x == 128 && blockIdx.x == 9) {
+            printf("producer iteration i start, i: %d\n", i);
           }
           int slot = (output_atom_idx * NUM_ITER_K + i) % Kstages;
           int phase = ((output_atom_idx * NUM_ITER_K + i) / Kstages) % 2;
@@ -274,14 +268,14 @@ __device__ __forceinline__ void
                                         TMA_TRANS_BYTES_B);
           tma_b.tma_cp_async(
               weight_barrier[slot], input_weight_smem(0, 0), tma_coords_B);
-          if (threadIdx.x == 128) {
-            printf("iteration i done: %d\n", i);
+          if (threadIdx.x == 128 && blockIdx.x == 9) {
+            printf("producer iteration i done, i: %d\n", i);
           }
         }
 
-        if (threadIdx.x == 128) {
-          printf("n iterations: %d done\n", output_atom_idx);
-        }
+        // if (threadIdx.x == 128) {
+        //   printf("n iterations: %d done\n", output_atom_idx);
+        // }
       }
     }
   } else {
@@ -290,12 +284,18 @@ __device__ __forceinline__ void
     float s_frag[OUTPUT_ATOM_SIZE / 2];
     for (int output_atom_idx = 0; output_atom_idx < NUM_ITER_N;
          output_atom_idx++) {
+        if (threadIdx.x == 128 && blockIdx.x == 9) {
+          printf("consumer iteration output_atom_idx = %d start\n", output_atom_idx);
+        }
 #pragma unroll
       for (int i = 0; i < OUTPUT_ATOM_SIZE / 16; i++) {
         clear_8_floats(s_frag + i * 8);
       }
 
       for (int i = 0; i < NUM_ITER_K; i++) {
+        if (threadIdx.x == 128 && blockIdx.x == 9) {
+          printf("consumer iteration output_atom_idx = %d, i = %d start\n", output_atom_idx, i);
+        }
         int slot = (output_atom_idx * NUM_ITER_K + i) % Kstages;
         int phase = ((output_atom_idx * NUM_ITER_K + i) / Kstages) % 2;
         // wait input, weight
@@ -350,6 +350,9 @@ __device__ __forceinline__ void
         if (idx_in_warp == 0 && warp_idx % 4 == 0) {
           arrive(compute_done[slot], 1);
         }
+        if (threadIdx.x == 128 && blockIdx.x == 9) {
+          printf("consumer iteration output_atom_idx = %d, i = %d done\n", output_atom_idx, i);
+        }
       }
 
       int slot_residual;
@@ -396,14 +399,15 @@ __device__ __forceinline__ void
           arrive(residual_done[slot_residual], 1);
         }
       }
+      if (threadIdx.x == 128 && blockIdx.x == 9) {
+        printf("consumer iteration output_atom_idx = %d done\n", output_atom_idx);
+      }
     }
   }
-  // if (threadIdx.x == 0) {
-  printf(
-      "threadIdx.x: %d, total shared memory: %llu, linear_kernel_hopper done\n",
-      threadIdx.x,
-      TOTAL_SHARED_MEMORY);
-  // }
+  __syncthreads();
+  if (threadIdx.x == 0 && blockIdx.x <= 10) {
+   printf("linear_kernel_hopper done, blockIdx.x: %d, blockIdx.y: %d, batch size: %d, output size: %d, reduction size: %d, kstages: %d\n", blockIdx.x, blockIdx.y, BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE, Kstages);
+  }
 }
 
 } // namespace kernel

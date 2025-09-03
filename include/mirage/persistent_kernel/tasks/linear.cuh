@@ -39,9 +39,6 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
                                               void *output_ptr,
                                               int num_active_tokens,
                                               bool residual) {
-  if (threadIdx.x >= 128) {
-    return;
-  }
   constexpr int CHUNK_SIZE = 16 / sizeof(T);
   constexpr int OUTPUT_ATOM_SIZE = OUTPUT_SIZE <= 128 ? OUTPUT_SIZE : 128;
   constexpr int NUM_OUTPUT_ATOMS = OUTPUT_SIZE / OUTPUT_ATOM_SIZE;
