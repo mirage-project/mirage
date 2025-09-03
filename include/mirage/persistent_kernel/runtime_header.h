@@ -103,7 +103,8 @@ struct EventDesc {
 struct TaskDesc {
   TaskDesc(TaskType t, int _variant_id)
       : task_type(t), variant_id(_variant_id), num_inputs(0), num_outputs(0),
-        trigger_event(EVENT_INVALID_ID), dependent_event(EVENT_INVALID_ID) {}
+        trigger_event(EVENT_INVALID_ID), dependent_event(EVENT_INVALID_ID),
+        is_tail_task(false) {}
   TaskDesc() {}
   TaskType task_type;
   unsigned variant_id;
@@ -112,6 +113,7 @@ struct TaskDesc {
   EventId dependent_event;
   TensorDesc inputs[MAX_INPUTS_PER_TASK];
   TensorDesc outputs[MAX_OUTPUTS_PER_TASK];
+  bool is_tail_task;
 };
 
 struct RuntimeConfig {

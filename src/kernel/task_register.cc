@@ -296,7 +296,7 @@ int TaskRegister::register_silu_mul_linear_with_residual_task(
                                code.to_string());
 }
 
-int TaskRegister::register_linear_with_residual_task(
+std::pair<int, bool> TaskRegister::register_linear_with_residual_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   assert(params.size() == 0);
   int batch_size = 0, output_size = 0, reduction_size = 0, output_stride = 0;
@@ -336,8 +336,10 @@ int TaskRegister::register_linear_with_residual_task(
   code.e("    task_desc.inputs[1].base_ptr,");
   code.e("    task_desc.inputs[2].base_ptr,");
   code.e("    task_desc.outputs[0].base_ptr,");
-  code.e("    runtime_config.my_gpu_id == 0);");
-  return register_task_variant(TASK_LINEAR_WITH_RESIDUAL, code.to_string());
+  code.e("    runtime_config.my_gpu_id == 0,");
+  code.e("    task_desc.is_tail_task);");
+  return {register_task_variant(TASK_LINEAR_WITH_RESIDUAL, code.to_string()),
+          output_ops[0]->dtensor.dim[1] % output_size == 0};
 }
 
 int TaskRegister::register_argmax_partial_task(threadblock::Graph const &bgraph,

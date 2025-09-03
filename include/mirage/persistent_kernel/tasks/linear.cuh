@@ -28,6 +28,20 @@ namespace kernel {
 
 using bfloat16 = type::bfloat16_t;
 
+constexpr unsigned int roundUpToPowerOf2(unsigned int n) noexcept {
+  if (n <= 1) {
+    return 1;
+  }
+  n--;
+  n |= n >> 1;
+  n |= n >> 2;
+  n |= n >> 4;
+  n |= n >> 8;
+  n |= n >> 16;
+  n++;
+  return n;
+}
+
 template <typename T,
           int BATCH_SIZE,
           int OUTPUT_SIZE,
@@ -38,33 +52,39 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
                                               void const *weight_ptr,
                                               void const *residual_ptr,
                                               void *output_ptr,
-                                              bool residual = true) {
-  constexpr int CHUNK_SIZE = 16 / sizeof(T);
+                                              bool residual = true,
+                                              bool is_tail = false) {
+  constexpr int CHUNK_SIZE = 16 / sizeof(T); // 8
   constexpr int OUTPUT_ATOM_SIZE = OUTPUT_SIZE <= 128 ? OUTPUT_SIZE : 128;
   constexpr int NUM_OUTPUT_ATOMS = OUTPUT_SIZE / OUTPUT_ATOM_SIZE;
   constexpr int TILE_SIZE = 128;
   constexpr int FORLOOP_RANGE = REDUCTION_SIZE / TILE_SIZE;
 
   constexpr int NUM_CHUNKS_A = BATCH_SIZE * TILE_SIZE / CHUNK_SIZE;
-  constexpr int NUM_CHUNKS_B = TILE_SIZE * OUTPUT_ATOM_SIZE / CHUNK_SIZE;
+  constexpr int NUM_CHUNKS_B =
+      TILE_SIZE * OUTPUT_ATOM_SIZE / CHUNK_SIZE; // 128*48/8=768
   constexpr int NUM_CHUNKS_C = BATCH_SIZE * OUTPUT_ATOM_SIZE / CHUNK_SIZE;
 
   constexpr int CHUNKS_PER_ROW_A = TILE_SIZE / CHUNK_SIZE;
-  constexpr int CHUNKS_PER_COL_B = TILE_SIZE / CHUNK_SIZE;
+  constexpr int CHUNKS_PER_COL_B = TILE_SIZE / CHUNK_SIZE; // 16
   constexpr int CHUNKS_PER_ROW_C = OUTPUT_ATOM_SIZE / CHUNK_SIZE;
 
   constexpr int log2_CHUNK_SIZE = log2_constexpr(CHUNK_SIZE);
   constexpr int log2_CHUNKS_PER_ROW_A = log2_constexpr(CHUNKS_PER_ROW_A);
-  constexpr int log2_CHUNKS_PER_COL_B = log2_constexpr(CHUNKS_PER_COL_B);
-  constexpr int log2_CHUNKS_PER_ROW_C = log2_constexpr(CHUNKS_PER_ROW_C);
+  constexpr int log2_CHUNKS_PER_COL_B = log2_constexpr(CHUNKS_PER_COL_B); // 4
+  // constexpr int log2_CHUNKS_PER_ROW_C = log2_constexpr(CHUNKS_PER_ROW_C);
 
   // using SM80_16x8x16_F16F16F16F16_TNX2 = 16X16X16
+  // TODO(Wenqin): How to make it graceful? We take 48 cols as OUTPUT_ATOM_SIZE,
+  // so it means there is actually 3 warps in N dim, but shall we set it as 3?
+  // There're 4 warps in a block, but the below code
   constexpr int NUM_WARPS_N =
-      OUTPUT_ATOM_SIZE / 16 <= 4 ? OUTPUT_ATOM_SIZE / 16 : 4;
+      roundUpToPowerOf2(OUTPUT_ATOM_SIZE / 16 <= 4 ? OUTPUT_ATOM_SIZE / 16 : 4);
   constexpr int NUM_WARPS_K = 4 / NUM_WARPS_N;
 
   constexpr int NUM_ITERS_M = 1;
-  constexpr int NUM_ITERS_N = OUTPUT_ATOM_SIZE / NUM_WARPS_N / 16;
+  constexpr int NUM_ITERS_N =
+      (OUTPUT_ATOM_SIZE + NUM_WARPS_N * 16 - 1) / (NUM_WARPS_N * 16);
   constexpr int NUM_ITERS_K = TILE_SIZE / NUM_WARPS_K / 16;
 
   constexpr int log2_NUM_WARPS_N = log2_constexpr(NUM_WARPS_N);
@@ -80,6 +100,15 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
   T const *__restrict__ d_residual =
       residual ? static_cast<T const *>(residual_ptr) : nullptr;
   T *__restrict__ d_output = static_cast<T *>(output_ptr);
+
+  // Below code for runtime kernel wrapper test.
+  // is_tail = blockIdx.x == 85 ? true : false;
+  // int bid = blockIdx.x;
+  // d_weight += OUTPUT_SIZE * REDUCTION_SIZE * bid;
+  // d_residual += OUTPUT_SIZE * BATCH_SIZE * bid;
+  // d_output += OUTPUT_SIZE * BATCH_SIZE * bid;
+
+  int const actual_output_size = is_tail ? O_STRIDE % OUTPUT_SIZE : OUTPUT_SIZE;
 
   using InputDmem = dmem_row_const<T, BATCH_SIZE, TILE_SIZE, REDUCTION_SIZE>;
   using WeightDmem =
@@ -185,9 +214,12 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
     if (residual) {
 #pragma unroll
       for (int i = threadIdx.x; i < NUM_CHUNKS_C; i += NUM_THREADS) {
-        int row = i >> log2_CHUNKS_PER_ROW_C;
-        int col = (i & (CHUNKS_PER_ROW_C - 1)) << log2_CHUNK_SIZE;
-        load_smem(residual_smem(row, col), residual_dmem(row, col));
+        // Change the map between row, col and the offset.
+        int row = i / CHUNKS_PER_ROW_C;
+        int col = (i % CHUNKS_PER_ROW_C) << log2_CHUNK_SIZE;
+        if (col < actual_output_size) {
+          load_smem(residual_smem(row, col), residual_dmem(row, col));
+        }
       }
     }
 
@@ -208,9 +240,13 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
         int src_row = dst_row + (k_pipe << log2_constexpr(TILE_SIZE));
         int src_col = i >> log2_CHUNKS_PER_COL_B;
         int dst_col =
-            src_col + ((k_pipe + 1) << log2_constexpr(OUTPUT_ATOM_SIZE));
-        load_smem(weight_buffer_smem(dst_row, dst_col),
-                  weight_dmem(src_row, src_col));
+            src_col + ((k_pipe + 1) *
+                       OUTPUT_ATOM_SIZE); // OUTPUT_ATOM_SIZE is not an exp of
+                                          // 2, we couldn't use log here.
+        if (src_col < actual_output_size) {
+          load_smem(weight_buffer_smem(dst_row, dst_col),
+                    weight_dmem(src_row, src_col));
+        }
       }
       cp_async_fence();
     }
@@ -241,8 +277,10 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
           int src_row = dst_row + ((for_idx + K_PIPE_MAX - 1)
                                    << log2_constexpr(TILE_SIZE));
           int col = i >> log2_CHUNKS_PER_COL_B;
-          load_smem(weight_buffer_smem(dst_row, col),
-                    weight_dmem(src_row, col));
+          if (col < actual_output_size) {
+            load_smem(weight_buffer_smem(dst_row, col),
+                      weight_dmem(src_row, col));
+          }
         }
         cp_async_fence();
         cp_async_wait<K_PIPE_MAX - 1>();
@@ -264,26 +302,36 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
                               ((for_idx + 1) % K_PIPE_MAX));
       __syncthreads();
 
-      uint32_t a_frag[4], b_frag[4];
-      for (uint32_t m = 0; m < NUM_ITERS_M; m++) {
-        int m_row = (lane_idx & 0xF);
-        bool is_valid = (m_row < BATCH_SIZE);
+      // TODO(Wenqin): it seems if we add if(warp_col < OUTPUT_ATOM_SIZE / 16)
+      // below, it will bring some perf regression, how about adding some
+      // padding in weight_smem to remove this branch?
+      if (warp_col < OUTPUT_ATOM_SIZE / 16) {
+        uint32_t a_frag[4], b_frag[4];
+        for (uint32_t m = 0; m < NUM_ITERS_M; m++) {
+          int m_row = (lane_idx & 0xF);
+          bool is_valid = (m_row < BATCH_SIZE);
 #pragma unroll
-        for (uint32_t n = 0; n < NUM_ITERS_N; n++) {
-          int n_col = (n << (4 + log2_NUM_WARPS_N)) + (warp_col << 4) +
-                      ((lane_idx >> 4) << 3) + (lane_idx & 0x7);
+          for (uint32_t n = 0; n < NUM_ITERS_N; n++) {
+            int n_col = (n << (4 + log2_NUM_WARPS_N)) + (warp_col << 4) +
+                        ((lane_idx >> 4) << 3) + (lane_idx & 0x7);
 #pragma unroll
-          for (uint32_t k = 0; k < NUM_ITERS_K; k++) {
-            int m_col = (warp_row << (4 + log2_NUM_ITERS_K)) + (k << 4) +
-                        ((lane_idx >> 4) << 3);
-            int n_row = (warp_row << (4 + log2_NUM_ITERS_K)) + (k << 4) +
-                        (((lane_idx & 0xF) >> 3) << 3);
-            T *src_ptr =
-                is_valid ? input_smem(m_row, m_col) : zero_buffer(0, 0);
-            ldsm(src_ptr, a_frag);
-            ldsm(weight_smem(n_row, n_col), b_frag);
-            mma_m16n16k16_bf16bf16bf32(
-                s_frag[m][n], a_frag, b_frag, s_frag[m][n]);
+            for (uint32_t k = 0; k < NUM_ITERS_K; k++) {
+              int m_col = (warp_row << (4 + log2_NUM_ITERS_K)) + (k << 4) +
+                          ((lane_idx >> 4) << 3);
+              int n_row = (warp_row << (4 + log2_NUM_ITERS_K)) + (k << 4) +
+                          (((lane_idx & 0xF) >> 3) << 3);
+              T *src_ptr =
+                  is_valid ? input_smem(m_row, m_col) : zero_buffer(0, 0);
+              ldsm(src_ptr, a_frag);
+              ldsm(weight_smem(n_row, n_col), b_frag);
+              // float bb = *reinterpret_cast<bfloat16*>(&b_frag[0]);
+              // if(bb != 1) {
+              //   printf("bb is not 1, it's %f in block: %d, thread: %d\n", bb,
+              //   blockIdx.x, threadIdx.x);
+              // }
+              mma_m16n16k16_bf16bf16bf32(
+                  s_frag[m][n], a_frag, b_frag, s_frag[m][n]);
+            }
           }
         }
       }
@@ -291,19 +339,28 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
     }
 
     // write back to shared memory
-    for (uint32_t m = 0; m < NUM_ITERS_M; m++) {
+    // TODO(Wenqin): it seems if we add if(warp_col < OUTPUT_ATOM_SIZE / 16)
+    // below, it will bring some perf regression, how about adding some padding
+    // in mm_intermediate_smem to remove this branch? The reason that the
+    // correctness was keep when we don't have this condition is that the mma
+    // inst will access some shared meory which don't load any data, and will
+    // not store the result to the results GMEM(just store 48 cols in final
+    // result matrix).
+    if (warp_col < OUTPUT_ATOM_SIZE / 16) {
+      for (uint32_t m = 0; m < NUM_ITERS_M; m++) {
 #pragma unroll
-      for (uint32_t n = 0; n < NUM_ITERS_N; n++) {
+        for (uint32_t n = 0; n < NUM_ITERS_N; n++) {
 #pragma unroll
-        for (uint32_t i = 0; i < 4; i++) {
-          int row_in_warp = (lane_idx >> 2) + ((i & 0x1) << 3);
-          if (row_in_warp < BATCH_SIZE) {
-            int col = (n << (4 + log2_NUM_WARPS_N)) + (warp_col << 4) +
-                      ((lane_idx & 0x3) << 1) + ((i >> 1) << 3);
-            mm_intermediate_smem.at(warp_row + row_in_warp, col) =
-                bfloat16(s_frag[m][n][(i << 1)]);
-            mm_intermediate_smem.at(warp_row + row_in_warp, col + 1) =
-                bfloat16(s_frag[m][n][(i << 1) | 0x1]);
+          for (uint32_t i = 0; i < 4; i++) {
+            int row_in_warp = (lane_idx >> 2) + ((i & 0x1) << 3);
+            if (row_in_warp < BATCH_SIZE) {
+              int col = (n << (4 + log2_NUM_WARPS_N)) + (warp_col << 4) +
+                        ((lane_idx & 0x3) << 1) + ((i >> 1) << 3);
+              mm_intermediate_smem.at(warp_row + row_in_warp, col) =
+                  bfloat16(s_frag[m][n][(i << 1)]);
+              mm_intermediate_smem.at(warp_row + row_in_warp, col + 1) =
+                  bfloat16(s_frag[m][n][(i << 1) | 0x1]);
+            }
           }
         }
       }
@@ -322,8 +379,10 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
       for (int i = threadIdx.x; i < OUTPUT_ATOM_SIZE; i += NUM_THREADS) {
         T val = NUM_WARPS_K > 1 ? output_smem.at(row, i)
                                 : mm_intermediate_smem.at(row, i);
-        output_dmem.at(row, i) =
-            residual ? val + residual_smem.at(row, i) : val;
+        if (i < actual_output_size) {
+          output_dmem.at(row, i) =
+              residual ? val + residual_smem.at(row, i) : val;
+        }
       }
     }
     if (output_atom_idx + 1 < NUM_OUTPUT_ATOMS) {

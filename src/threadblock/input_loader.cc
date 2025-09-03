@@ -98,8 +98,14 @@ TBInputOp::TBInputOp(Graph *_graph,
     }
     if (dim_idx >= 0) {
       assert(tensor.dim[dim_idx] > 0);
-      assert(tensor.dim[dim_idx] % dim_div == 0);
+      // assert(tensor.dim[dim_idx] % dim_div == 0);
+      int tmp = tensor.dim[dim_idx];
       tensor.dim[dim_idx] /= dim_div;
+      if(tmp % dim_div != 0) {
+        // TODO(Wenqin): fix it later for align with shared memory loading.
+        // should add some assert here.
+        tensor.dim[dim_idx] = ((tensor.dim[dim_idx] + 15) / 16) * 16;
+      }
     }
   }
 

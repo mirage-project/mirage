@@ -182,6 +182,9 @@ public:
   // hash related functions
   size_t get_owner_independent_hash() const;
 
+  std::tuple<int, int, runtime::TaskType, int, bool>
+      make_task_config(int, int, runtime::TaskType, int, bool = false) const;
+
 public:
   std::vector<mirage::kernel::KNOperator *> operators;
   dim3 gpu_dim;
@@ -203,7 +206,7 @@ public:
   // Fields for persistent kernels
   std::map<mirage::type::GuidType, mirage::runtime::IODesc> io_config;
   std::unordered_map<mirage::kernel::KNOperator const *,
-                     std::tuple<int, int, runtime::TaskType, int>>
+                     std::tuple<int, int, runtime::TaskType, int, bool>>
       task_config;
 
   using OpType = KNOperator;

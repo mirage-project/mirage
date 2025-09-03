@@ -164,7 +164,7 @@ void register_mugraph(
     std::map<kernel::KNOperator *, std::map<dim3, TaskId, Dim3Comparator>>
         &all_task_maps,
     std::unordered_map<kn::KNOperator const *,
-                       std::tuple<int, int, TaskType, int>> const
+                       std::tuple<int, int, TaskType, int, bool>> const
         &task_configs) {
   // push a begin-graph task and a event to launch dependent asks
   {
@@ -181,7 +181,7 @@ void register_mugraph(
     if (op->op_type == type::KNOperatorType::KN_INPUT_OP) {
       continue;
     }
-    std::tuple<int, int, TaskType, int> task_config =
+    std::tuple<int, int, TaskType, int, bool> task_config =
         task_configs.find(op)->second;
     std::map<dim3, TaskId, Dim3Comparator> cur_task_map;
     assert(op->op_type == type::KNOperatorType::KN_CUSTOMIZED_OP);
@@ -197,6 +197,7 @@ void register_mugraph(
     int num_outputs = std::get<1>(task_config);
     TaskType task_type = std::get<2>(task_config);
     int variant_id = std::get<3>(task_config);
+    bool has_tail_task = std::get<4>(task_config);
     assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
     for (auto const &op : bgraph.operators) {
       assert(op->op_type == mirage::type::TB_INPUT_OP);
@@ -291,8 +292,8 @@ void register_mugraph(
             } // for tgt_gpu_id
             ag_pre_task_map[bid] = pre_tasks;
           } // for bid.z
-        }   // for bid.y
-      }     // for bid.x
+        } // for bid.y
+      } // for bid.x
       for (bid.x = 0; bid.x < bgraph.grid_dim.x; bid.x++) {
         for (bid.y = 0; bid.y < bgraph.grid_dim.y; bid.y++) {
           for (bid.z = 0; bid.z < bgraph.grid_dim.z; bid.z++) {
@@ -358,6 +359,13 @@ void register_mugraph(
       for (bid.y = 0; bid.y < bgraph.grid_dim.y; bid.y++) {
         for (bid.z = 0; bid.z < bgraph.grid_dim.z; bid.z++) {
           TaskDesc task(task_type, variant_id);
+          if (bid.x == bgraph.grid_dim.x - 1 &&
+              bid.y == bgraph.grid_dim.y - 1 &&
+              bid.z == bgraph.grid_dim.z - 1 && has_tail_task) {
+            // TODO(Wenqin): make the bid.x == bgraph.grid_dim.x - 1 work for
+            // all cases that not just dispatch in x dim.
+            task.is_tail_task = true;
+          }
           // Initialize input tensors to the task
           for (auto const &input : input_ops) {
             TensorDesc desc;
@@ -432,7 +440,8 @@ void register_mugraph(
           consumer_partition[d] = bgraph.grid_dim.x;
         }
         if (d == input_map.y) {
-          consumer_partition[d] = bgraph.grid_dim.y;
+          consumer_partition[d] =
+              bgraph.grid_dim.y; // we assume 8 for qwen3-8b attention layer.
         }
         if (d == input_map.z) {
           consumer_partition[d] = bgraph.grid_dim.z;
@@ -441,7 +450,9 @@ void register_mugraph(
           producer_partition[d] = pre_op->bgraph.grid_dim.x;
         }
         if (d == output_map.y) {
-          producer_partition[d] = pre_op->bgraph.grid_dim.y;
+          producer_partition[d] =
+              pre_op->bgraph.grid_dim
+                  .y; // we assume 86 for qwen3-8b linear layer.
         }
         if (d == output_map.z) {
           producer_partition[d] = pre_op->bgraph.grid_dim.z;
@@ -451,7 +462,11 @@ void register_mugraph(
       // number of events is the product of gcd of producer/consumer
       std::vector<int> event_dims(mirage::config::MAX_TENSOR_DIMS, 1);
       for (int d = 0; d < mirage::config::MAX_TENSOR_DIMS; d++) {
-        event_dims[d] = std::gcd(producer_partition[d], consumer_partition[d]);
+        event_dims[d] = std::gcd(
+            producer_partition[d],
+            consumer_partition[d]); // event_dims: 1, 86/8, 1 - > 1, 11, 8, what
+                                    // we expected is also 1, 11, 8, so we don't
+                                    // need any change here, right?
       }
       dfs_create_events_add_tasks(0,                       /*depth*/
                                   my_gpu_id,               /*my_gpu_id*/
@@ -566,7 +581,8 @@ TaskGraphResult print_task_graph(
     std::map<kernel::KNOperator *, std::map<dim3, TaskId, Dim3Comparator>> const
         &all_task_maps,
     std::unordered_map<kn::KNOperator const *,
-                       std::tuple<int, int, TaskType, int>> const &task_configs,
+                       std::tuple<int, int, TaskType, int, bool>> const
+        &task_configs,
     std::map<mirage::type::GuidType, IODesc> const &io_configs,
     bool use_json_format) {
   using mirage::runtime::IODesc;
@@ -610,6 +626,14 @@ TaskGraphResult print_task_graph(
     code.e("for (json const &task : json_task_graph[\"all_tasks\"]) {");
     code.e("TaskDesc task_desc(static_cast<TaskType>(task.at(\"task_type\")),");
     code.e("            task.at(\"variant_id\"));");
+    code.e("if (task.contains(\"is_tail_task\")) {");
+    code.e("if (task.at(\"is_tail_task\").is_boolean()) {");
+    code.e("task_desc.is_tail_task = task.at(\"is_tail_task\").get<bool>();");
+    code.e("}");
+    code.e("else {");
+    code.e("assert(false);");
+    code.e("}");
+    code.e("}");
     code.e("if (task.at(\"trigger_event\").is_number_integer()) {");
     code.e("task_desc.trigger_event = task.at(\"trigger_event\").get<unsigned "
            "long long int>();");
@@ -774,7 +798,7 @@ TaskGraphResult print_task_graph(
       continue;
     }
     assert(op->op_type == type::KNOperatorType::KN_CUSTOMIZED_OP);
-    std::tuple<int, int, TaskType, int> task_config =
+    std::tuple<int, int, TaskType, int, bool> task_config =
         task_configs.find(op)->second;
 
     assert(all_task_maps.find(op) != all_task_maps.end());
@@ -825,7 +849,8 @@ TaskGraphResult print_task_graph(
                                 {"inputs", {}},
                                 {"outputs", {}},
                                 {"trigger_event", task_desc.trigger_event},
-                                {"dependent_event", task_desc.dependent_event}};
+                                {"dependent_event", task_desc.dependent_event},
+                                {"is_tail_task", task_desc.is_tail_task}};
               off_t offset = 0;
               // Add input
               int3 input_map = input_ops[0]->input_map;
@@ -939,10 +964,10 @@ TaskGraphResult print_task_graph(
               tgbody.e("}");
               task_pos++;
             } // for tgt_gpu_id
-          }   // for bid.z
-        }     // for bid.y
-      }       // for bid.x
-    }         // if task_type == TASK_ALLREDUCE
+          } // for bid.z
+        } // for bid.y
+      } // for bid.x
+    } // if task_type == TASK_ALLREDUCE
 
     for (bid.x = 0; bid.x < bgraph.grid_dim.x; bid.x++) {
       for (bid.y = 0; bid.y < bgraph.grid_dim.y; bid.y++) {
@@ -968,7 +993,8 @@ TaskGraphResult print_task_graph(
                        {"inputs", {}},
                        {"outputs", {}},
                        {"trigger_event", task_desc.trigger_event},
-                       {"dependent_event", task_desc.dependent_event}};
+                       {"dependent_event", task_desc.dependent_event},
+                       {"is_tail_task", task_desc.is_tail_task}};
           for (int i = 0; i < task_desc.num_inputs; i++) {
             if (input_ops[i]->dtensor == kernel::DTensor::EMPTY_TENSOR) {
               json json_dims = json::array();
@@ -1092,6 +1118,14 @@ TaskGraphResult print_task_graph(
               if (input_map.x >= 0) {
                 size_t block_size =
                     io_desc.tensor.dim[input_map.x] / bgraph.grid_dim.x;
+                if (io_desc.tensor.dim[input_map.x] % bgraph.grid_dim.x != 0) {
+                  // TODO(Wenqin): make it elegent here.
+                  // if the tensor dim size is not divisible of the grid dim at
+                  // x, we think there should be a tail variant, so we should
+                  // round up the block size by 16. we should add fine
+                  // granularity control and assert here.
+                  block_size = ((block_size + 15) / 16) * 16;
+                }
                 offset +=
                     block_size * bid.x * io_desc.tensor.stride[input_map.x];
               }
@@ -1149,6 +1183,10 @@ TaskGraphResult print_task_graph(
             if (output_map.x >= 0) {
               size_t block_size =
                   io_desc.tensor.dim[output_map.x] / bgraph.grid_dim.x;
+              if (io_desc.tensor.dim[output_map.x] % bgraph.grid_dim.x != 0) {
+                // TODO(Wenqin): make it elegent here.
+                block_size = ((block_size + 15) / 16) * 16;
+              }
               offset +=
                   block_size * bid.x * io_desc.tensor.stride[output_map.x];
             }

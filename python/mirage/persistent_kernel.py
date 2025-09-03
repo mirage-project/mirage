@@ -138,6 +138,7 @@ def get_compile_command(
         "-use_fast_math",
         "-Xcompiler=-fPIC",
         "--expt-relaxed-constexpr",
+        # "-G",
         "-o",
         py_so_path,
     ]
