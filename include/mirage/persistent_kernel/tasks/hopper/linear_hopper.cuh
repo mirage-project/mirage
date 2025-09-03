@@ -47,7 +47,6 @@ __device__ __forceinline__ void
                          const TMA_OUT &tma_out,
                          const TMA_RESIDUAL *tma_residual = nullptr) {
 
-                          printf("threadIdx.x: %d, blockIdx.x: %d\n", threadIdx.x, blockIdx.x);
   if (threadIdx.x == 0 && blockIdx.x <= 10) {
     printf("linear_kernel_hopper start, blockIdx.x: %d, blockIdx.y: %d, batch size: %d, output size: %d, reduction size: %d, kstages: %d\n", blockIdx.x, blockIdx.y, BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE, Kstages);
   }
