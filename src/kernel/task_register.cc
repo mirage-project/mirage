@@ -763,10 +763,10 @@ int TaskRegister::register_linear_hopper_task(threadblock::Graph const &bgraph,
         output_size,        /*GMEM_COL_*/
         batch_size,         /*SMEM_ROW_*/
         output_tma_cp_size, /*SMEM_COL_*/
-        output_size,        /*GMEM_STRIDE_ROW_*/
+        output_stride,        /*GMEM_STRIDE_ROW_*/
         1,                  /*GMEM_STRIDE_COL_*/
         1,                  /*SMEM_REPEAT_ROW_*/
-        (TILE_SIZE + output_tma_cp_size - 1) /
+        (output_atom_size + output_tma_cp_size - 1) /
             output_tma_cp_size,        /*SMEM_REPEAT_COL_*/
         SMEM_M_SIZE * TMA_CP_ASYNC_SIZE /*SMEM_STRIDE_*/
     );
@@ -784,7 +784,7 @@ int TaskRegister::register_linear_hopper_task(threadblock::Graph const &bgraph,
          output_stride,        /*GMEM_STRIDE_ROW_*/
          1,                  /*GMEM_STRIDE_COL_*/
          1,                  /*SMEM_REPEAT_ROW_*/
-         (TILE_SIZE + output_tma_cp_size - 1) /
+         (output_atom_size + output_tma_cp_size - 1) /
              output_tma_cp_size,        /*SMEM_REPEAT_COL_*/
          SMEM_M_SIZE * TMA_CP_ASYNC_SIZE /*SMEM_STRIDE_*/
   );

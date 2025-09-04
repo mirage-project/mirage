@@ -412,7 +412,7 @@ if __name__ == "__main__":
                 grid_dim=(mpk.max_num_batched_tokens, 1, 1),
                 block_dim=(128, 1, 1),
             )
-            mpk.linear_layer(
+            mpk.linear_layer_hopper(
                 input=rmsnorm_out,
                 weight=w_qkv,
                 output=attn_in,
@@ -512,12 +512,22 @@ if __name__ == "__main__":
                 torch_tensor=layer.mlp.up_proj.weight, name=f"layer_{i}_up_proj"
             )
             rmsnorm_num_tasks = grid_for_rmsnorm_linear_layer(w_gate_proj.dim(0) + w_up_proj.dim(0))
+            # print("rmsnorm_num_tasks = ", rmsnorm_num_tasks, "w_gate_proj.dim(0) = ", w_gate_proj.dim(0), "w_up_proj.dim(0) = ", w_up_proj.dim(0))
+            print("rmsout.dim(0) = ", rmsnorm_out.dim(0))
+            print("rmsout.dim(1) = ", rmsnorm_out.dim(1))
+            print("w_gate_proj.dim(0)) is ", w_gate_proj.dim(0))
+            print("w_gate_proj.dim(1) is ", w_gate_proj.dim(1))
+            print("w_up_proj.dim(0)) is ", w_up_proj.dim(0))
+            print("w_up_proj.dim(1) is ", w_up_proj.dim(1))
+
             w_gatedup = mpk.fuse_tensors(
                 inputs=[w_gate_proj, w_up_proj],
                 fused_dim=0,
                 num_groups=rmsnorm_num_tasks//2,
                 name=f"layer_{i}_gatedup_proj",
             )
+            print("w_gatedup.dim(0) is ", w_gatedup.dim(0))
+            print("w_gatedup.dim(1) is ", w_gatedup.dim(1))
             mpk.rmsnorm_layer(
                 input=x,
                 weight=w_norm,
@@ -525,11 +535,11 @@ if __name__ == "__main__":
                 grid_dim=(mpk.max_num_batched_tokens, 1, 1),
                 block_dim=(128, 1, 1),
             )
-            mpk.linear_layer(
+            mpk.linear_layer_hopper(
                 input=rmsnorm_out,
                 weight=w_gatedup,
                 output=mlp_mid,
-                grid_dim=(rmsnorm_num_tasks, 1, 1),
+                grid_dim=(rmsnorm_num_tasks * 2, 1, 1),
                 block_dim=(256, 1, 1),
             )
             #mpk.rmsnorm_linear_layer(
@@ -550,12 +560,12 @@ if __name__ == "__main__":
             w = mpk.attach_input(
                 torch_tensor=layer.mlp.down_proj.weight, name=f"layer_{i}_down_proj"
             )
-            mpk.linear_with_residual_layer(
+            mpk.linear_with_residual_layer_hopper(
                 input=silu_mul_out,
                 weight=w,
                 residual=x,
                 output=mlp_out,
-                grid_dim=(hidden_size // 64, 1, 1),
+                grid_dim=(hidden_size // 128, 1, 1),
                 block_dim=(128, 1, 1),
             )
             # reset residual input as x
@@ -584,12 +594,12 @@ if __name__ == "__main__":
             grid_dim=(mpk.max_num_batched_tokens, 1, 1),
             block_dim=(128, 1, 1),
         )
-        mpk.linear_layer(
+        mpk.linear_layer_hopper(
             input=rmsnorm_out_2,
             weight=w_proj,
             output=argmax_in,
-            grid_dim=(grid_for_rmsnorm_linear_layer(w_proj.dim(0)), 1, 1),
-            # grid_dim=(75, 1, 1),
+            # grid_dim=(grid_for_rmsnorm_linear_layer(w_proj.dim(0)), 1, 1),
+            grid_dim=(75, 1, 1),
             block_dim=(128, 1, 1),
         )
         # mpk.rmsnorm_linear_layer(
