@@ -65,6 +65,8 @@ kernel*.cu
 #runtime
 *.perfetto-trace
 
-test/[!.]*
+tests_cu/[!.]*
+!tests_cu/Makefile
+!tests_cu/test_linear.cu
 report
 ncu_tmp
