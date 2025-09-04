@@ -455,6 +455,7 @@ if __name__ == "__main__":
                     block_dim=(128, 1, 1),
                 )
             else:
+                # import pdb; pdb.set_trace()
                 mpk.paged_attention_layer(
                     input=attn_in,
                     k_cache=k_cache,

@@ -1038,7 +1038,7 @@ int TaskRegister::register_paged_attention_hopper_task(
   code.e("    1e-6f,");
   code.e("    1e-6f);");
 
-  return register_task_variant(TASK_PAGED_ATTENTION_1, code.to_string());
+  return register_task_variant(TASK_PAGED_ATTENTION_HOPPER, code.to_string());
 }
 
 } // namespace runtime

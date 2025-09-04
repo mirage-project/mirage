@@ -371,9 +371,6 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
       // const int page_size = task_desc.params[5];
 
       if (param_id == 0 || param_id == 1) {
-        // --- qkv tensor -> TMA_Q (id=0) / TMA_KV (id=1) ---
-        // 期望 qkv 的张量形状为 [num_tokens,
-        // (num_q_heads+2*num_kv_heads)*head_dim]
         const uint64_t num_tokens = static_cast<uint64_t>(tensor_desc.dim[0]);
         const uint64_t qkv_cols = static_cast<uint64_t>(tensor_desc.dim[1]);
         const uint64_t qkv_rows =
@@ -383,7 +380,7 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
         const uint64_t head_dim = qkv_cols / qkv_rows;
 
         const uint64_t qkv_depth_stride = static_cast<uint64_t>(
-            tensor_desc.stride[0]); // 行主布局：每个 token 的跨度
+            tensor_desc.stride[0]);
         const uint64_t qkv_row_stride = head_dim;
         const uint64_t qkv_col_stride = 1;
 
@@ -410,9 +407,6 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
                                             smem_repeat_col);
       } else if (param_id == 2 || param_id == 3 || param_id == 4 ||
                  param_id == 5) {
-        // --- paged KV cache -> 整页/尾页 TMA（K & V 相同形状，只是张量不同）
-        // --- 期望 cache 张量形状为 [num_pages, page_size, num_kv_heads,
-        // head_dim]
         const uint64_t num_pages = static_cast<uint64_t>(tensor_desc.dim[0]);
         const uint64_t page_size = static_cast<uint64_t>(tensor_desc.dim[1]);
         const uint64_t kv_heads_dim = static_cast<uint64_t>(tensor_desc.dim[2]);
@@ -428,8 +422,6 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
         uint64_t gmem_shape[3] = {num_pages, page_size, head_dim};
         uint64_t gmem_stride[3] = {depth_stride, row_stride, col_stride};
 
-        // SMEM 形状：按 kernel 的 tile 设为 {1, KV_TILE_SIZE,
-        // 64}，实际传输行数由 barrier 控制
         uint32_t smem_shape[3] = {1u,
                                   static_cast<uint32_t>(KV_TILE_SIZE),
                                   static_cast<uint32_t>(cp_async_size)};
@@ -444,8 +436,6 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
                                             smem_repeat_row,
                                             smem_repeat_col);
       } else if (param_id == 6) {
-        // --- O (output) -> TMA_OUTPUT (2D) ---
-        // 期望输出形状为 [num_tokens * num_q_heads, head_dim]
         const uint64_t rows = static_cast<uint64_t>(tensor_desc.dim[0]);
         const uint64_t cols = static_cast<uint64_t>(tensor_desc.dim[1]);
         const uint64_t out_stride =

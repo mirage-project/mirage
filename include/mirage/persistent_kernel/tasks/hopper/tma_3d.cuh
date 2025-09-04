@@ -50,6 +50,10 @@ struct tma_3d {
   static constexpr size_t SMEM_REPEAT_COL = SMEM_REPEAT_COL_;
   static constexpr size_t SMEM_REPEAT_ROW = SMEM_REPEAT_ROW_;
 
+  __device__ inline tma_3d(CUtensorMap *desc_ptr) {
+    this->desc_ptr = desc_ptr;
+  }
+
   __host__ inline tma_3d(void *src) {
     CUtensorMap host_desc;
     create_tma_desc(&host_desc, src); // host-only function
