@@ -384,6 +384,9 @@ __device__ __forceinline__ void
 
       // https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#asynchronous-warpgroup-level-matrix-register-fragment-wgmma-64n16:~:text=The%20layout%20of%20the%20fragments%20held%20by%20different%20threads%20is%20shown%20in%20Figure%20149.
       // write back to shared memory
+      store_async_wait<Kstages - 1>();
+      int slot_output = output_atom_idx % Kstages;
+      mm_output_smem.set_ptr(mm_output + slot_output * BATCH_SIZE * OUTPUT_ATOM_SIZE);
 #pragma unroll 1
       for (uint32_t i = 0; i < (OUTPUT_ATOM_SIZE / 4); i++) {
         int row = (warp_idx % 4) * 16 + (i % 2) * 8 + idx_in_warp / 4;
@@ -404,7 +407,7 @@ __device__ __forceinline__ void
       async_proxy_fence();
 
       // this is inter-thread sync
-      // wg_sync<THREADS_PER_WARPGROUP * CONSUMER_WARPGROUPS>(1);
+      wg_sync<THREADS_PER_WARPGROUP * CONSUMER_WARPGROUPS>(1);
 
       // copy back to dmem
       if (warp_idx % 4 == 0 && lane_id() == 0) {
@@ -423,6 +426,7 @@ __device__ __forceinline__ void
   if (blockIdx.x == 9 && DEBUG_HOPPER) {
     printf("before sync, threadIdx.x: %d, blockIdx.x: %d\n", threadIdx.x, blockIdx.x);
   }
+  store_async_wait<0>();
   __syncthreads();
   if (blockIdx.x == 9 && DEBUG_HOPPER) {
     printf("after sync, threadIdx.x: %d, blockIdx.x: %d\n", threadIdx.x, blockIdx.x);

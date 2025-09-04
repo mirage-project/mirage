@@ -749,7 +749,7 @@ int TaskRegister::register_linear_hopper_task(threadblock::Graph const &bgraph,
          1,                 /*SMEM_REPEAT_ROW_*/
          (TILE_SIZE + TMA_CP_ASYNC_SIZE - 1) /
              TMA_CP_ASYNC_SIZE,          /*SMEM_REPEAT_COL_*/
-         output_size * TMA_CP_ASYNC_SIZE /*SMEM_STRIDE_*/
+         output_atom_size * TMA_CP_ASYNC_SIZE /*SMEM_STRIDE_*/
   );
 
   if (with_residual) {

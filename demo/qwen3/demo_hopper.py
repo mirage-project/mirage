@@ -535,11 +535,12 @@ if __name__ == "__main__":
                 grid_dim=(mpk.max_num_batched_tokens, 1, 1),
                 block_dim=(128, 1, 1),
             )
+            print("rmsnorm_num_tasks = ", rmsnorm_num_tasks)
             mpk.linear_layer_hopper(
                 input=rmsnorm_out,
                 weight=w_gatedup,
                 output=mlp_mid,
-                grid_dim=(rmsnorm_num_tasks * 2, 1, 1),
+                grid_dim=(rmsnorm_num_tasks, 1, 1),
                 block_dim=(256, 1, 1),
             )
             #mpk.rmsnorm_linear_layer(
@@ -600,6 +601,8 @@ if __name__ == "__main__":
             output=argmax_in,
             # grid_dim=(grid_for_rmsnorm_linear_layer(w_proj.dim(0)), 1, 1),
             grid_dim=(75, 1, 1),
+            # grid_dim=(300, 1, 1),
+            # grid_dim=(600, 1, 1),
             block_dim=(128, 1, 1),
         )
         # mpk.rmsnorm_linear_layer(

@@ -100,7 +100,7 @@ void launch_linear_hopper(void *input_ptr,
       (OUTPUT_ATOM_SIZE + TMA_CP_ASYNC_SIZE - 1) / TMA_CP_ASYNC_SIZE;
 
   constexpr int OUTPUT_TMA_CP_SIZE = OUTPUT_SIZE < 64 ? OUTPUT_SIZE : 64;
-  constexpr int SMEM_M_SIZE = 64;
+  constexpr int SMEM_M_SIZE = BATCH_SIZE;
   using TMA_A =
       kernel::tma::tma_2d<bfloat16,
                           B,
@@ -310,12 +310,12 @@ void launch_linear_hopper(void *input_ptr,
 #define DISPATCH_LINEAR_HOPPER_OUTPUT_SIZE(BATCH_SIZE)                         \
   switch (output.size(1)) {                                                    \
     DISPATCH_LINEAR_HOPPER_OUTPUT_SIZE_CASE(BATCH_SIZE, 64)                    \
-    /*                                                                         \
+    DISPATCH_LINEAR_HOPPER_OUTPUT_SIZE_CASE(BATCH_SIZE, 128)                   \
     DISPATCH_LINEAR_HOPPER_OUTPUT_SIZE_CASE(BATCH_SIZE, 256)                   \
     DISPATCH_LINEAR_HOPPER_OUTPUT_SIZE_CASE(BATCH_SIZE, 1600)                  \
+    /*                                                                         \
     DISPATCH_LINEAR_HOPPER_OUTPUT_SIZE_CASE(BATCH_SIZE, 16)                    \
     DISPATCH_LINEAR_HOPPER_OUTPUT_SIZE_CASE(BATCH_SIZE, 32)                    \
-    DISPATCH_LINEAR_HOPPER_OUTPUT_SIZE_CASE(BATCH_SIZE, 128)                   \
     */                                                                         \
     /*                                                                         \
     DISPATCH_LINEAR_HOPPER_OUTPUT_SIZE_CASE(BATCH_SIZE, 512)                   \

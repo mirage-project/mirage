@@ -1,13 +1,13 @@
 import torch
 import runtime_kernel_hopper
 
-# torch.set_printoptions(sci_mode=False, profile="full")
-torch.set_printoptions(sci_mode=False)
+torch.set_printoptions(sci_mode=False, profile="full")
+# torch.set_printoptions(sci_mode=False)
 
 g = torch.Generator(device="cuda").manual_seed(1234)
 
 reduction_sizes = [4096]
-output_sizes = [64]
+output_sizes = [1600]
 batch_size = 8
 
 for reduction_size in reduction_sizes:
