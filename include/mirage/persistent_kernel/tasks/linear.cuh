@@ -231,6 +231,7 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
             load_smem(input_smem(dst_row, dst_col), input_dmem(src_row, src_col));
           }
         }
+#pragma unroll
         for (int i = threadIdx.x; i < NUM_CHUNKS_B; i += NUM_THREADS) {
           int dst_row = (i & (CHUNKS_PER_COL_B - 1)) << log2_CHUNK_SIZE;
           int src_row = dst_row + (global_pipe_idx / NUM_OUTPUT_ATOMS) * TILE_SIZE;
@@ -254,6 +255,7 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
 
       // MMA using the loaded input and weight tiles
       uint32_t a_frag[4], b_frag[4];
+#pragma unroll
       for (uint32_t m = 0; m < NUM_ITERS_M; m++) {
         int m_row = (lane_idx & 0xF) + (m << 4);
         bool is_input_valid = (m_row < num_active_tokens);

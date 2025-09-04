@@ -146,7 +146,7 @@ if __name__ == "__main__":
     text = tokenizer.apply_chat_template(
         messages, tokenize=False, add_generation_prompt=True
     )
-    text = "."
+    #text = "."
     model_inputs = tokenizer([text], return_tensors="pt").to(model.device)
     for r in range(total_num_requests):
         for i in range(model_inputs.input_ids.shape[-1]):
@@ -668,10 +668,10 @@ if __name__ == "__main__":
         torch.cuda.synchronize()
         run_time = starter.elapsed_time(ender)
 
-        # print(f"generated_ids: {generated_ids}")
         print("tokens.shape = ", tokens.shape)
         for r in range(total_num_requests):
             generated_ids = tokens[r, : step[r] + 1]
+            print(f"generated_ids: {generated_ids}")
             response = tokenizer.decode(generated_ids, skip_special_tokens=True)
             print(response)
 
