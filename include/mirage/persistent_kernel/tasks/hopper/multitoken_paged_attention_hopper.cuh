@@ -1,17 +1,17 @@
 /* Copyright 2025 CMU
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+*
+* Licensed under the Apache License, Version 2.0 (the "License");
+* you may not use this file except in compliance with the License.
+* You may obtain a copy of the License at
+*
+*     http://www.apache.org/licenses/LICENSE-2.0
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific language governing permissions and
+* limitations under the License.
+*/
 
 #pragma once
 #include "../common.h"
@@ -85,7 +85,7 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
   constexpr int Kstages = 2;
   // NOTE(Yu): we use m64n64k16 mma atom to compute matrix multiplication
   constexpr int MMA_ITERS_M = (MAX_TOKENS * NUM_QO_PER_KV + 63) / 64;
-  // constexpr int QSMEM_ROW = 64;
+  constexpr int QSMEM_ROW = 64;
 
   // the scale factor for normalization in softmax
   float const sm_scale = 1.0f / sqrtf(static_cast<float>(HEAD_DIM));
@@ -112,7 +112,7 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
   __shared__ int page_indices[MAX_PAGES_PER_REQUEST];
 #pragma unroll
   for (int i = threadIdx.x; i < num_pages * sizeof(int) / 16;
-       i += NUM_THREADS) {
+      i += NUM_THREADS) {
     __uint128_t const *src_ptr =
         reinterpret_cast<__uint128_t const *>(paged_kv_indices_buffer_ptr +
                                               first_page_pos) +
@@ -168,7 +168,7 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
   // align to size of float
   constexpr size_t S_Q_NORM_SUM_OFFSET =
       ((S_O_OFFSET + S_O_SIZE + sizeof(float) - 1) &
-       ~size_t(sizeof(float) - 1));
+      ~size_t(sizeof(float) - 1));
   constexpr size_t S_Q_NORM_SUM_SIZE =
       sizeof(float) * 4; // 4 floats for 4 warps
 
@@ -251,7 +251,7 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
 
   int const TMA_TRANS_BYTES_Q =
       num_tokens * NUM_QO_PER_KV * HEAD_DIM * sizeof(T);
-  // int TMA_TRANS_BYTES_KV = curr_iter_len * HEAD_DIM * sizeof(T);
+  int TMA_TRANS_BYTES_KV = curr_iter_len * HEAD_DIM * sizeof(T);
 
   //  define barries
   Barrier *q_barrier = reinterpret_cast<Barrier *>(smem + S_Q_BARRIER_OFFSET);
@@ -291,8 +291,8 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
       int end = begin + curr_iter_len;
       int boundary = seq_len - num_tokens;
       int cache_rows = (begin >= boundary) ? 0
-                       : (end <= boundary) ? (end - begin)
-                                           : (boundary - begin);
+                      : (end <= boundary) ? (end - begin)
+                                          : (boundary - begin);
 
       int kv_rows = curr_iter_len - cache_rows;
 
@@ -319,8 +319,8 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
       }
 
       if (kv_rows > 0) {
-        // int src_row = begin + cache_rows - boundary;
-        // int per_token_stride = NUM_QO_PER_KV + 2 * NUM_KV_HEADS;
+        int src_row = begin + cache_rows - boundary;
+        int per_token_stride = NUM_QO_PER_KV + 2 * NUM_KV_HEADS;
 
         // assume tma_k, tma_v both have qkv_ptr as src_ptr
         int coords_k[3] = {0, NUM_QO_PER_KV, 0};
@@ -354,8 +354,8 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
           int end = begin + next_iter_len;
           int boundary = seq_len - num_tokens;
           int cache_rows = (begin >= boundary) ? 0
-                           : (end <= boundary) ? (end - begin)
-                                               : (boundary - begin);
+                          : (end <= boundary) ? (end - begin)
+                                              : (boundary - begin);
 
           int kv_rows = next_iter_len - cache_rows;
 
@@ -383,8 +383,8 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
           }
 
           if (kv_rows > 0) {
-            // int src_row = begin + cache_rows - boundary;
-            // int per_token_stride = NUM_QO_PER_KV + 2 * NUM_KV_HEADS;
+            int src_row = begin + cache_rows - boundary;
+            int per_token_stride = NUM_QO_PER_KV + 2 * NUM_KV_HEADS;
 
             int coords_k[3] = {0, NUM_QO_PER_KV, 0};
             int coords_v[3] = {0, NUM_QO_PER_KV + NUM_KV_HEADS, 0};
@@ -536,7 +536,7 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
         }
         if (kv_tokens_to_process > 0) {
           for (int token_idx = 0; token_idx < kv_tokens_to_process;
-               token_idx++) {
+              token_idx++) {
             // k rope
             rotary_embedding_wg<T,
                                 KVSmem,
@@ -560,8 +560,8 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
       if (kv_tokens_to_process > 0) {
         int page_idx = page_indices[first_kv_token_to_process / PAGE_SIZE];
         for (int elem_idx = threadIdx.x;
-             elem_idx < kv_tokens_to_process * HEAD_DIM;
-             elem_idx += NUM_THREADS) {
+            elem_idx < kv_tokens_to_process * HEAD_DIM;
+            elem_idx += NUM_THREADS) {
           int token_idx = elem_idx / HEAD_DIM;
           int col = elem_idx % HEAD_DIM;
           int page_offset = (token_idx + first_kv_token_to_process) % PAGE_SIZE;
@@ -652,7 +652,7 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
           x_frag_f[m][frag_idx] =
               x_frag_f[m][frag_idx] != -inf
                   ? expf(x_frag_f[m][frag_idx] * sm_scale -
-                         m_local[m][(frag_idx & 0x3) >> 1] * sm_scale)
+                        m_local[m][(frag_idx & 0x3) >> 1] * sm_scale)
                   : 0.f;
           d_partial[m][(frag_idx & 0x3) >> 1] += x_frag_f[m][frag_idx];
         }
@@ -685,10 +685,9 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
       wg_sync<THREADS_PER_WARPGROUP * CONSUMER_WARPGROUPS>(9);
 
       uint32_t x_frag[MMA_ITERS_M][16];
-#pragma unroll
       for (int m = 0; m < MMA_ITERS_M; m++) {
-        convert_32_f32_to_16_bf16_uint32(x_frag_f[m], x_frag[m]);
 #pragma unroll
+        convert_32_f32_to_16_bf16_uint32(x_frag_f[m], x_frag[m]);
         for (int n = 0; n < HEAD_DIM / 64; n++) {
           V_DESC v_desc(v_smem(m * 64, n * 64));
           wgmma::warpgroup_arrive();
@@ -714,18 +713,18 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
       m_local[m][0] *= m_local[m][0] != -inf ? sm_scale : 1.f;
       m_local[m][1] *= m_local[m][1] != -inf ? sm_scale : 1.f;
       s_m_buffer[m * CONSUMER_WARPGROUPS * THREADS_PER_WARPGROUP * 2 +
-                 threadIdx.x * 2] = m_local[m][0];
+                threadIdx.x * 2] = m_local[m][0];
       s_m_buffer[m * CONSUMER_WARPGROUPS * THREADS_PER_WARPGROUP * 2 +
-                 threadIdx.x * 2 + 1] = m_local[m][1];
+                threadIdx.x * 2 + 1] = m_local[m][1];
       s_d_buffer[m * CONSUMER_WARPGROUPS * THREADS_PER_WARPGROUP * 2 +
-                 threadIdx.x * 2] = d[m][0];
+                threadIdx.x * 2] = d[m][0];
       s_d_buffer[m * CONSUMER_WARPGROUPS * THREADS_PER_WARPGROUP * 2 +
-                 threadIdx.x * 2 + 1] = d[m][1];
+                threadIdx.x * 2 + 1] = d[m][1];
       for (int n = 0; n < HEAD_DIM / 64; n++) {
 #pragma unroll
         for (int frag_idx = 0; frag_idx < 32; frag_idx++) {
           s_o_buffer[m * CONSUMER_WARPGROUPS * THREADS_PER_WARPGROUP * 64 +
-                     threadIdx.x * 64 + n * 32 + frag_idx] = o[m][n][frag_idx];
+                    threadIdx.x * 64 + n * 32 + frag_idx] = o[m][n][frag_idx];
         }
       }
     }
@@ -734,8 +733,8 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
     // get global m, d, and o
     // each thread handles an element in o in each iteration
     for (int elem_idx = threadIdx.x;
-         elem_idx < num_tokens * NUM_QO_PER_KV * HEAD_DIM;
-         elem_idx += NUM_THREADS) {
+        elem_idx < num_tokens * NUM_QO_PER_KV * HEAD_DIM;
+        elem_idx += NUM_THREADS) {
       int row = elem_idx / HEAD_DIM;
       int col = elem_idx % HEAD_DIM;
       int t_idx = (row / 16) * 32 + (row % 8) * 4 + (col % 8) / 2;
@@ -748,9 +747,9 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
       float o_global = 0.f;
 
       int md_smem_offset = (row / 64) * CONSUMER_WARPGROUPS *
-                               THREADS_PER_WARPGROUP * 2 // mma iter m
-                           + t_idx * 2                   // corresponding thread
-                           + (frag_idx % 4) / 2; // first half or second half
+                              THREADS_PER_WARPGROUP * 2 // mma iter m
+                          + t_idx * 2                   // corresponding thread
+                          + (frag_idx % 4) / 2; // first half or second half
 
       m_global = s_m_buffer[md_smem_offset];
       d_global = s_d_buffer[md_smem_offset];

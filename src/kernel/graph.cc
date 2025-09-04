@@ -484,6 +484,10 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
         customized->bgraph, params, true /*with_residual*/);
     task_config[op] =
         std::make_tuple(3, 1, TASK_LINEAR_WITH_RESIDUAL_HOPPER, variant_id);
+  } else if (name == "paged_attention_hopper") {
+    int variant_id = task_register->register_paged_attention_hopper_task(
+        customized->bgraph, params);
+    task_config[op] = std::make_tuple(7, 1, TASK_PAGED_ATTENTION_HOPPER, variant_id);
   } else {
     assert(false && "Unsupported task type");
   }

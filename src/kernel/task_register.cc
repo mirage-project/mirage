@@ -731,7 +731,7 @@ int TaskRegister::register_linear_hopper_task(threadblock::Graph const &bgraph,
          1,                 /*GMEM_STRIDE_COL_*/
          1,                 /*SMEM_REPEAT_ROW_*/
          (TILE_SIZE + TMA_CP_ASYNC_SIZE - 1) /
-             TMA_CP_ASYNC_SIZE,         /*SMEM_REPEAT_COL_*/
+             TMA_CP_ASYNC_SIZE,          /*SMEM_REPEAT_COL_*/
          SMEM_M_SIZE * TMA_CP_ASYNC_SIZE /*SMEM_STRIDE_*/
   );
 
@@ -748,7 +748,7 @@ int TaskRegister::register_linear_hopper_task(threadblock::Graph const &bgraph,
          1,                 /*GMEM_STRIDE_COL_*/
          1,                 /*SMEM_REPEAT_ROW_*/
          (TILE_SIZE + TMA_CP_ASYNC_SIZE - 1) /
-             TMA_CP_ASYNC_SIZE,          /*SMEM_REPEAT_COL_*/
+             TMA_CP_ASYNC_SIZE,               /*SMEM_REPEAT_COL_*/
          output_atom_size * TMA_CP_ASYNC_SIZE /*SMEM_STRIDE_*/
   );
 
@@ -763,11 +763,11 @@ int TaskRegister::register_linear_hopper_task(threadblock::Graph const &bgraph,
         output_size,        /*GMEM_COL_*/
         batch_size,         /*SMEM_ROW_*/
         output_tma_cp_size, /*SMEM_COL_*/
-        output_stride,        /*GMEM_STRIDE_ROW_*/
+        output_stride,      /*GMEM_STRIDE_ROW_*/
         1,                  /*GMEM_STRIDE_COL_*/
         1,                  /*SMEM_REPEAT_ROW_*/
         (output_atom_size + output_tma_cp_size - 1) /
-            output_tma_cp_size,        /*SMEM_REPEAT_COL_*/
+            output_tma_cp_size,         /*SMEM_REPEAT_COL_*/
         SMEM_M_SIZE * TMA_CP_ASYNC_SIZE /*SMEM_STRIDE_*/
     );
   }
@@ -781,11 +781,11 @@ int TaskRegister::register_linear_hopper_task(threadblock::Graph const &bgraph,
          output_size,        /*GMEM_COL_*/
          batch_size,         /*SMEM_ROW_*/
          output_tma_cp_size, /*SMEM_COL_*/
-         output_stride,        /*GMEM_STRIDE_ROW_*/
+         output_stride,      /*GMEM_STRIDE_ROW_*/
          1,                  /*GMEM_STRIDE_COL_*/
          1,                  /*SMEM_REPEAT_ROW_*/
          (output_atom_size + output_tma_cp_size - 1) /
-             output_tma_cp_size,        /*SMEM_REPEAT_COL_*/
+             output_tma_cp_size,         /*SMEM_REPEAT_COL_*/
          SMEM_M_SIZE * TMA_CP_ASYNC_SIZE /*SMEM_STRIDE_*/
   );
   code.inc_indent();
@@ -829,124 +829,217 @@ int TaskRegister::register_linear_hopper_task(threadblock::Graph const &bgraph,
     return register_task_variant(TASK_LINEAR_HOPPER, code.to_string());
   }
 }
+int TaskRegister::register_paged_attention_hopper_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params[0]: num_q_heads
+  // params[1]: num_kv_heads
+  // params[2]: qk_norm
+  // params[3]: rotary_emd
+  // params[4]: max_seq_len
+  // params[5]: page_size
+  assert(params.size() == 6);
 
-// hopper paged attention task
-// int TaskRegister::register_paged_attention_task_hopper(
-//     threadblock::Graph const &bgraph, std::vector<int> const &params) {
-//   // params[0]: num_q_heads
-//   // params[1]: num_kv_heads
-//   // params[2]: qk_norm
-//   // params[3]: rotary_emd
-//   // params[4]: max_seq_len
-//   // params[5]: page_size
-//   assert(params.size() == 6);
-//   std::vector<tb::TBInputOp *> input_ops;
-//   std::vector<tb::TBInputOp *> output_ops;
-//   int num_inputs = 7;
-//   int num_outputs = 1;
+  std::vector<tb::TBInputOp *> input_ops;
+  std::vector<tb::TBInputOp *> output_ops;
+  int num_inputs = 7;
+  int num_outputs = 1;
 
-//   assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
-//   for (auto const &op : bgraph.operators) {
-//     assert(op->op_type == mirage::type::TB_INPUT_OP);
-//     if (input_ops.size() < (size_t)num_inputs) {
-//       input_ops.push_back(static_cast<tb::TBInputOp *>(op));
-//     } else {
-//       output_ops.push_back(static_cast<tb::TBInputOp *>(op));
-//     }
-//   }
-//   assert(output_ops[0]->output_tensors[0].num_dims == 2);
-//   int qkv_stride = input_ops[0]->dtensor.dim[1];
-//   int output_size = output_ops[0]->dtensor.dim[1];
-//   int num_q_heads = params[0];
-//   int num_kv_heads = params[1];
-//   int head_dim = output_size / num_q_heads;
-//   int kv_stride = head_dim * num_kv_heads;
-//   int max_seq_len = params[4];
-//   int page_size = params[5];
-//   // Assert that k_cache has the same head_dim
-//   assert(input_ops[1]->output_tensors[0].num_dims == 4);
-//   assert(head_dim == input_ops[1]->output_tensors[0].dim[3]);
-//   assert(input_ops[2]->output_tensors[0].num_dims == 4);
-//   assert(head_dim == input_ops[2]->output_tensors[0].dim[3]);
+  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    if ((int)input_ops.size() < num_inputs) {
+      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    } else {
+      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    }
+  }
 
-//   // define TMAs
-//   constexpr int B = 3;
-//   constexpr int M = 3;
-//   constexpr int S = 3;
-//   constexpr int TMA_CP_ASYNC_SIZE = 64;
-//   constexpr int TILE_SIZE = 128;
-//   constexpr int Kstages = 2;
-//   int const output_tma_cp_size = output_size < 64 ? output_size : 64;
-//   int const output_atom_size = (output_size >= 256)   ? 256
-//                                : (output_size >= 128) ? 128
-//                                : (output_size >= 64)  ? 64
-//                                : (output_size >= 32)  ? 32
-//                                                       : 16;
-//   code.e("using TMA_Q = kernel::tma::tma_3d<bfloat16, $, $, $, $, $, $, $, $, "
-//          "$, $, $, $, true>;",
-//          B,
-//          M,
-//          S,
-//          batch_size,        /*GMEM_ROW_*/
-//          reduction_size,    /*GMEM_COL_*/
-//          batch_size,        /*SMEM_ROW_*/
-//          TMA_CP_ASYNC_SIZE, /*SMEM_COL_*/
-//          reduction_size,    /*GMEM_STRIDE_ROW_*/
-//          1,                 /*GMEM_STRIDE_COL_*/
-//          1,                 /*SMEM_REPEAT_ROW_*/
-//          (TILE_SIZE + TMA_CP_ASYNC_SIZE - 1) /
-//              TMA_CP_ASYNC_SIZE,         /*SMEM_REPEAT_COL_*/
-//          batch_size * TMA_CP_ASYNC_SIZE /*SMEM_STRIDE_*/
-//   );
+  // Shapes/strides
+  assert(output_ops[0]->output_tensors[0].num_dims == 2);
+  int qkv_stride = input_ops[0]->dtensor.dim[1];
+  int output_size = output_ops[0]->dtensor.dim[1];
+  int num_q_heads = params[0];
+  int num_kv_heads = params[1];
+  int head_dim = output_size / num_q_heads;
+  int kv_stride = head_dim * num_kv_heads;
+  int max_seq_len = params[4];
+  int page_size = params[5];
 
-//   code.e("using TMA_B = kernel::tma::tma_2d<bfloat16, $, $, $, $, $, $, $, $, "
-//          "$, $, $, $, true>;",
-//          B,
-//          M,
-//          S,
-//          output_size,       /*GMEM_ROW_*/
-//          reduction_size,    /*GMEM_COL_*/
-//          output_atom_size,  /*SMEM_ROW_*/
-//          TMA_CP_ASYNC_SIZE, /*SMEM_COL_*/
-//          reduction_size,    /*GMEM_STRIDE_ROW_*/
-//          1,                 /*GMEM_STRIDE_COL_*/
-//          1,                 /*SMEM_REPEAT_ROW_*/
-//          (TILE_SIZE + TMA_CP_ASYNC_SIZE - 1) /
-//              TMA_CP_ASYNC_SIZE,          /*SMEM_REPEAT_COL_*/
-//          output_size * TMA_CP_ASYNC_SIZE /*SMEM_STRIDE_*/
-//   );
+  assert(input_ops[1]->output_tensors[0].num_dims == 4);
+  assert(head_dim == input_ops[1]->output_tensors[0].dim[3]);
+  assert(input_ops[2]->output_tensors[0].num_dims == 4);
+  assert(head_dim == input_ops[2]->output_tensors[0].dim[3]);
 
-//   mirage::transpiler::CodeKeeper code;
-//   code.inc_indent();
-//   code.e("kernel::multitoken_paged_attention_hopper_impl<bfloat16, $, $, $, $, "
-//          "$, $, $, $>(",
-//          num_q_heads / num_kv_heads,
-//          1,
-//          kv_stride,
-//          qkv_stride,
-//          output_size,
-//          head_dim,
-//          max_seq_len,
-//          page_size);
-//   code.e("    task_desc.inputs[0].base_ptr,");
-//   code.e("    task_desc.inputs[1].base_ptr,");
-//   code.e("    task_desc.inputs[2].base_ptr,");
-//   code.e("    task_desc.outputs[0].base_ptr,");
-//   code.e("    runtime_config.qo_indptr_buffer,");
-//   code.e("    runtime_config.paged_kv_indptr_buffer,");
-//   code.e("    runtime_config.paged_kv_indices_buffer,");
-//   code.e("    runtime_config.paged_kv_last_page_len_buffer,");
-//   code.e("    task_desc.request_id,");
-//   code.e("    $,", params[2] > 0);
-//   code.e("    $,", params[3] > 0);
-//   code.e("    task_desc.inputs[3].base_ptr,");
-//   code.e("    task_desc.inputs[4].base_ptr,");
-//   code.e("    task_desc.inputs[5].base_ptr,");
-//   code.e("    task_desc.inputs[6].base_ptr,");
-//   code.e("    1e-6f,");
-//   code.e("    1e-6f);");
-//   return register_task_variant(TASK_PAGED_ATTENTION_1, code.to_string());
-// }
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+
+  constexpr int B = 3, M = 3, S = 3;
+  constexpr int TMA_CP_ASYNC_SIZE = 64;
+  constexpr int KV_TILE_SIZE = 64;
+  constexpr int NUM_TOKENS = 4;
+  int const qkv_rows = num_q_heads + 2 * num_kv_heads;
+  int const smem_repeat_col =
+      (head_dim + TMA_CP_ASYNC_SIZE - 1) / TMA_CP_ASYNC_SIZE;
+  int const q_smem_stride = NUM_TOKENS * num_q_heads * TMA_CP_ASYNC_SIZE;
+  int const kv_smem_stride = KV_TILE_SIZE * TMA_CP_ASYNC_SIZE;
+  int const num_pages = (max_seq_len + page_size - 1) / page_size;
+
+  code.e("using TMA_Q = kernel::tma::tma_3d<bfloat16, $, $, $, $, $, $, $, $, "
+         "$, $, $, $, $, $, $, true>;",
+         B,
+         M,
+         S,
+         NUM_TOKENS,          /* GMEM_DEPTH */
+         qkv_rows,            /* GMEM_ROW   */
+         head_dim,            /* GMEM_COL   */
+         NUM_TOKENS,          /* SMEM_DEPTH */
+         num_q_heads,         /* SMEM_ROW   */
+         TMA_CP_ASYNC_SIZE,   /* SMEM_COL   */
+         qkv_rows * head_dim, /* GMEM_STRIDE_DEPTH */
+         head_dim,            /* GMEM_STRIDE_ROW   */
+         1,                   /* GMEM_STRIDE_COL   */
+         1,                   /* SMEM_REPEAT_ROW   */
+         smem_repeat_col,     /* SMEM_REPEAT_COL   */
+         q_smem_stride        /* SMEM_STRIDE       */
+  );
+
+  code.e("using TMA_KV = kernel::tma::tma_3d<bfloat16, $, $, $, $, $, $, $, $, "
+         "$, $, $, $, $, $, $, true>;",
+         B,
+         M,
+         S,
+         NUM_TOKENS,          /* GMEM_DEPTH */
+         qkv_rows,            /* GMEM_ROW   */
+         head_dim,            /* GMEM_COL   */
+         NUM_TOKENS,          /* SMEM_DEPTH */
+         num_kv_heads,        /* SMEM_ROW   */
+         TMA_CP_ASYNC_SIZE,   /* SMEM_COL   */
+         qkv_rows * head_dim, /* GMEM_STRIDE_DEPTH */
+         head_dim,            /* GMEM_STRIDE_ROW   */
+         1,                   /* GMEM_STRIDE_COL   */
+         1,                   /* SMEM_REPEAT_ROW   */
+         smem_repeat_col,     /* SMEM_REPEAT_COL   */
+         kv_smem_stride       /* SMEM_STRIDE       */
+  );
+
+  code.e("using TMA_PAGED_KV_CACHE = kernel::tma::tma_3d<bfloat16, $, $, $, $, "
+         "$, $, $, $, $, $, $, $, $, $, $, true>;",
+         B,
+         M,
+         S,
+         num_pages,            /* GMEM_DEPTH */
+         page_size,            /* GMEM_ROW   */
+         head_dim,             /* GMEM_COL   */
+         1,                    /* SMEM_DEPTH */
+         KV_TILE_SIZE,         /* SMEM_ROW   */
+         TMA_CP_ASYNC_SIZE,    /* SMEM_COL   */
+         page_size * head_dim, /* GMEM_STRIDE_DEPTH */
+         head_dim,             /* GMEM_STRIDE_ROW   */
+         1,                    /* GMEM_STRIDE_COL   */
+         1,                    /* SMEM_REPEAT_ROW   */
+         smem_repeat_col,      /* SMEM_REPEAT_COL   */
+         kv_smem_stride        /* SMEM_STRIDE       */
+  );
+
+  code.e("using TMA_PAGED_KV_CACHE_TAIL_PAGE = kernel::tma::tma_3d<bfloat16, "
+         "$, $, $, $, $, $, $, $, $, $, $, $, $, $, $, true>;",
+         B,
+         M,
+         S,
+         num_pages,            /* GMEM_DEPTH */
+         page_size,            /* GMEM_ROW   */
+         head_dim,             /* GMEM_COL   */
+         1,                    /* SMEM_DEPTH */
+         KV_TILE_SIZE,         /* SMEM_ROW   */
+         TMA_CP_ASYNC_SIZE,    /* SMEM_COL   */
+         page_size * head_dim, /* GMEM_STRIDE_DEPTH */
+         head_dim,             /* GMEM_STRIDE_ROW   */
+         1,                    /* GMEM_STRIDE_COL   */
+         1,                    /* SMEM_REPEAT_ROW   */
+         smem_repeat_col,      /* SMEM_REPEAT_COL   */
+         kv_smem_stride        /* SMEM_STRIDE       */
+  );
+
+  code.e("using TMA_OUTPUT = kernel::tma::tma_2d<bfloat16, $, $, $, $, $, $, "
+         "$, $, $, $, $, $, true>;",
+         B,
+         M,
+         S,
+         NUM_TOKENS * num_q_heads,                    /* GMEM_ROW  */
+         head_dim,                                    /* GMEM_COL  */
+         NUM_TOKENS * num_q_heads,                    /* SMEM_ROW  */
+         TMA_CP_ASYNC_SIZE,                           /* SMEM_COL  */
+         head_dim,                                    /* GMEM_STRIDE_ROW */
+         1,                                           /* GMEM_STRIDE_COL */
+         1,                                           /* SMEM_REPEAT_ROW */
+         smem_repeat_col,                             /* SMEM_REPEAT_COL */
+         NUM_TOKENS * num_q_heads * TMA_CP_ASYNC_SIZE /* SMEM_STRIDE */
+  );
+
+  code.e("TMA_Q  tma_q "
+         "(static_cast<CUtensorMap*>(task_desc.inputs[0].tma_desc_ptr));");
+  code.e("TMA_KV tma_k "
+         "(static_cast<CUtensorMap*>(task_desc.inputs[0].tma_desc_ptr));");
+  code.e("TMA_KV tma_v "
+         "(static_cast<CUtensorMap*>(task_desc.inputs[0].tma_desc_ptr));");
+
+  code.e("TMA_PAGED_KV_CACHE "
+         "tma_paged_k_cache(static_cast<CUtensorMap*>(task_desc.inputs[1].tma_"
+         "desc_ptr));");
+  code.e("TMA_PAGED_KV_CACHE "
+         "tma_paged_v_cache(static_cast<CUtensorMap*>(task_desc.inputs[2].tma_"
+         "desc_ptr));");
+  code.e("TMA_PAGED_KV_CACHE_TAIL_PAGE "
+         "tma_paged_k_cache_tail_page(static_cast<CUtensorMap*>(task_desc."
+         "inputs[1].tma_desc_ptr));");
+  code.e("TMA_PAGED_KV_CACHE_TAIL_PAGE "
+         "tma_paged_v_cache_tail_page(static_cast<CUtensorMap*>(task_desc."
+         "inputs[2].tma_desc_ptr));");
+
+  code.e("TMA_OUTPUT "
+         "tma_output(static_cast<CUtensorMap*>(task_desc.outputs[0].tma_desc_"
+         "ptr));");
+
+  code.e("kernel::multitoken_paged_attention_hopper_impl<bfloat16, $, $, $, $, "
+         "$, $, $, $, "
+         "TMA_Q, TMA_KV, TMA_PAGED_KV_CACHE, TMA_PAGED_KV_CACHE_TAIL_PAGE, "
+         "TMA_OUTPUT, $>(",
+         num_q_heads,  /* NUM_QO_HEADS               */
+         num_kv_heads, /* NUM_KV_HEADS               */
+         kv_stride,    /* KV_CACHE_STRIDE            */
+         qkv_stride,   /* QKV_STRIDE                 */
+         output_size,  /* O_STRIDE (= num_q_heads*head_dim) */
+         head_dim,     /* HEAD_DIM                   */
+         max_seq_len,  /* MAX_SEQ_LEN                */
+         page_size,    /* PAGE_SIZE                  */
+         NUM_TOKENS    /* MAX_TOKENS                 */
+  );
+  code.e("    tma_q,");
+  code.e("    tma_k,");
+  code.e("    tma_v,");
+  code.e("    tma_paged_k_cache,");
+  code.e("    tma_paged_v_cache,");
+  code.e("    tma_paged_k_cache_tail_page,");
+  code.e("    tma_paged_v_cache_tail_page,");
+  code.e("    tma_output,");
+  code.e("    task_desc.inputs[1].base_ptr,");
+  code.e("    task_desc.inputs[2].base_ptr,");
+  code.e("    runtime_config.qo_indptr_buffer,");
+  code.e("    runtime_config.paged_kv_indptr_buffer,");
+  code.e("    runtime_config.paged_kv_indices_buffer,");
+  code.e("    runtime_config.paged_kv_last_page_len_buffer,");
+  code.e("    task_desc.request_id,");
+  code.e("    $,", params[2] > 0); // qk_norm
+  code.e("    $,", params[3] > 0); // rope
+  code.e("    task_desc.inputs[3].base_ptr,");
+  code.e("    task_desc.inputs[4].base_ptr,");
+  code.e("    task_desc.inputs[5].base_ptr,");
+  code.e("    task_desc.inputs[6].base_ptr,");
+  code.e("    1e-6f,");
+  code.e("    1e-6f);");
+
+  return register_task_variant(TASK_PAGED_ATTENTION_1, code.to_string());
+}
 
 } // namespace runtime
 } // namespace mirage

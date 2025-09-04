@@ -29,13 +29,13 @@ template <typename T,
           size_t SMEM_DEPTH_,
           size_t SMEM_ROW_,
           size_t SMEM_COL_,
+          size_t GMEM_STRIDE_DEPTH_ = 1,
+          size_t GMEM_STRIDE_ROW_ = 1,
+          size_t GMEM_STRIDE_COL_ = 1,
           size_t SMEM_REPEAT_ROW_ = 1,
           size_t SMEM_REPEAT_COL_ = 1,
           size_t SMEM_STRIDE_ = 1, // used for num_tokens, since each token's
                                    // heads are contiguous in smem
-          size_t GMEM_STRIDE_DEPTH_ = 1,
-          size_t GMEM_STRIDE_ROW_ = 1,
-          size_t GMEM_STRIDE_COL_ = 1,
           bool ROW_MAJOR = true>
 struct tma_3d {
 
