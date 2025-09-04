@@ -671,7 +671,6 @@ if __name__ == "__main__":
         print("tokens.shape = ", tokens.shape)
         for r in range(total_num_requests):
             generated_ids = tokens[r, : step[r] + 1]
-            print(f"generated_ids: {generated_ids}")
             response = tokenizer.decode(generated_ids, skip_special_tokens=True)
             print(response)
 

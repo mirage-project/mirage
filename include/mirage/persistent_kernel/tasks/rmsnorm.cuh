@@ -76,6 +76,7 @@ __device__ __forceinline__ void rms_norm_impl(void const *input_ptr,
     } else if (for_idx + 1 == NUM_TILES) {
       cp_async_wait<0>();
     }
+    __syncthreads();
 #pragma unroll
     for (int i = threadIdx.x; i < TILE_SIZE; i += NUM_THREADS) {
       float val = (float) shared_input_buffer[for_idx * TILE_SIZE + i];
@@ -83,11 +84,6 @@ __device__ __forceinline__ void rms_norm_impl(void const *input_ptr,
     }
   }
 
-//#pragma unroll
-//  for (int i = threadIdx.x; i < HIDDEN_DIM; i += blockDim.x) {
-//    float val = (float)d_input[i];
-//    sum2 += val * val;
-//  }
 #pragma unroll
   for (int offset = NUM_THREADS_PER_WARP / 2; offset > 0; offset /= 2) {
     sum += shfl_xor_sync(sum, offset);
