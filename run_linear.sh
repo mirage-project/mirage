@@ -8,7 +8,7 @@ set -euo pipefail
 EXP_NAME="${1:-linear_p2_64}"
 
 PROJECT_ROOT="/home/jianan/mirage"
-TEST_DIR="${PROJECT_ROOT}/test"
+TEST_DIR="${PROJECT_ROOT}/tests_cu"
 OUT_BIN="test_${EXP_NAME}"
 OUT_PATH="${TEST_DIR}/${OUT_BIN}"
 REPORT_DIR="${PROJECT_ROOT}/report"
