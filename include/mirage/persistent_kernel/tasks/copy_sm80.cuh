@@ -53,13 +53,13 @@ __device__ __forceinline__ void load_smem(T *smem_ptr, T const *gmem_ptr) {
 }
 
 template <typename FP8>
-__device__ __forceinline__ void load_row_8x8b(const FP8* smem_row_ptr,
-                                                    uint64_t &row_reg) {
-  uint32_t smem_int_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(smem_row_ptr));
-  asm volatile(
-      "ld.shared.b64 {%0}, [%1];\n"
-      : "=l"(row_reg)
-      : "r"(smem_int_ptr));
+__device__ __forceinline__ void load_row_8x8b(const FP8 *smem_row_ptr,
+                                              uint64_t &row_reg) {
+  uint32_t smem_int_ptr =
+      static_cast<uint32_t>(__cvta_generic_to_shared(smem_row_ptr));
+  asm volatile("ld.shared.b64 {%0}, [%1];\n"
+               : "=l"(row_reg)
+               : "r"(smem_int_ptr));
 }
 
 template <typename T>

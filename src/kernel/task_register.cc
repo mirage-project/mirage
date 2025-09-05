@@ -297,9 +297,9 @@ int TaskRegister::register_silu_mul_linear_with_residual_task(
 }
 
 int TaskRegister::register_linear_with_residual_task(
-    threadblock::Graph const &bgraph, std::vector<int> const &params,
-    bool quantized
-  ) {
+    threadblock::Graph const &bgraph,
+    std::vector<int> const &params,
+    bool quantized) {
   assert(params.size() == 0);
   int batch_size = 0, output_size = 0, reduction_size = 0, output_stride = 0;
   std::vector<tb::TBInputOp *> input_ops;
