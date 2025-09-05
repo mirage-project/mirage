@@ -24,13 +24,13 @@ template <typename T,
 struct smem_row {
   T *__restrict__ base_ptr;
   using value_type = T;
+  static constexpr int b = B;
+  static constexpr int m = M;
+  static constexpr int s = S;
+
   static constexpr size_t ROW = ROW_;
   static constexpr size_t COL = COL_;
   static constexpr size_t SIZE = ROW * COL;
-
-  // static constexpr size_t Pow2_M = (1 << M);
-  // static constexpr size_t Pow2_S = (1 << S);
-  // static constexpr size_t Pow2_B = (1 << B);
 
   __device__ __forceinline__ smem_row(T *ptr) : base_ptr(ptr) {}
 
@@ -135,12 +135,12 @@ struct smem_col {
 
   using value_type = T;
 
+  static constexpr int b = B;
+  static constexpr int m = M;
+  static constexpr int s = S;
+
   static constexpr size_t ROW = ROW_;
   static constexpr size_t COL = COL_;
-
-  static constexpr size_t Pow2_M = (1 << M);
-  static constexpr size_t Pow2_S = (1 << S);
-  static constexpr size_t Pow2_B = (1 << B);
 
   __device__ __forceinline__ smem_col(T *ptr) : base_ptr(ptr) {}
 

@@ -22,6 +22,7 @@
 #include "mma.cuh"
 #include "norm.cuh"
 #include "reduction.cuh"
+#include "rotary_embedding.cuh"
 #include "smem_layout.cuh"
 #include "utils.cuh"
 
@@ -316,42 +317,69 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl(
     }
     __syncthreads();
 
-    // Q norm
-    if (qk_norm && iter == 0) {
+    if (qk_norm) {
+      // Q norm
+      if (iter == 0) {
 #pragma unroll
-      for (int token_idx = 0; token_idx < num_tokens; token_idx++) {
-        rms_norm<T, QOSmem, NUM_QO_PER_KV, HEAD_DIM>(
-            q_smem,
-            static_cast<T const *>(q_norm_weight_ptr),
-            s_q_norm_sum,
-            q_eps,
-            token_idx * NUM_QO_PER_KV,
-            rope,
-            static_cast<T const *>(cos_ptr) +
-                (token_idx + seq_len - num_tokens) * HEAD_DIM,
-            static_cast<T const *>(sin_ptr) +
-                (token_idx + seq_len - num_tokens) * HEAD_DIM);
+        for (int token_idx = 0; token_idx < num_tokens; token_idx++) {
+          rms_norm<T, QOSmem, NUM_QO_PER_KV, HEAD_DIM>(
+              q_smem,
+              static_cast<T const *>(q_norm_weight_ptr),
+              s_q_norm_sum,
+              q_eps,
+              token_idx * NUM_QO_PER_KV,
+              rope,
+              static_cast<T const *>(cos_ptr) +
+                  (token_idx + seq_len - num_tokens) * HEAD_DIM,
+              static_cast<T const *>(sin_ptr) +
+                  (token_idx + seq_len - num_tokens) * HEAD_DIM);
+        }
+      }
+      // K norm
+      // NOTE(Jinchen): assume that MAX_TOKENS is less than or equal to
+      // KV_TILE_SIZE, so the new tokens are always in the last tile
+      else if (iter == num_iters - 1) {
+        for (int token_idx = 0; token_idx < num_tokens; token_idx++) {
+          rms_norm<T, KVSmem, 1, HEAD_DIM>(
+              k_smem,
+              static_cast<T const *>(k_norm_weight_ptr),
+              s_k_norm_sum,
+              k_eps,
+              token_idx + curr_iter_len - num_tokens,
+              rope,
+              static_cast<T const *>(cos_ptr) +
+                  (token_idx + seq_len - num_tokens) * HEAD_DIM,
+              static_cast<T const *>(sin_ptr) +
+                  (token_idx + seq_len - num_tokens) * HEAD_DIM);
+        }
+      }
+    } else {
+      if (rope && iter == 0) {
+#pragma unroll
+        for (int token_idx = 0; token_idx < num_tokens; token_idx++) {
+          // q rope
+          rotary_embedding<T, QOSmem, NUM_QO_PER_KV, HEAD_DIM>(
+              q_smem,
+              static_cast<T const *>(cos_ptr) +
+                  (token_idx + seq_len - num_tokens) * HEAD_DIM,
+              static_cast<T const *>(sin_ptr) +
+                  (token_idx + seq_len - num_tokens) * HEAD_DIM,
+              token_idx * NUM_QO_PER_KV);
+        }
+      } else if (rope && iter == num_iters - 1) {
+        for (int token_idx = 0; token_idx < num_tokens; token_idx++) {
+          // k rope
+          rotary_embedding<T, KVSmem, 1, HEAD_DIM>(
+              k_smem,
+              static_cast<T const *>(cos_ptr) +
+                  (token_idx + seq_len - num_tokens) * HEAD_DIM,
+              static_cast<T const *>(sin_ptr) +
+                  (token_idx + seq_len - num_tokens) * HEAD_DIM,
+              token_idx + curr_iter_len - num_tokens);
+        }
       }
     }
 
-    // K norm
-    // NOTE(Jinchen): assume that MAX_TOKENS is less than or equal to
-    // KV_TILE_SIZE, so the new tokens are always in the last tile
-    if (qk_norm && iter == num_iters - 1) {
-      for (int token_idx = 0; token_idx < num_tokens; token_idx++) {
-        rms_norm<T, KVSmem, 1, HEAD_DIM>(
-            k_smem,
-            static_cast<T const *>(k_norm_weight_ptr),
-            s_k_norm_sum,
-            k_eps,
-            token_idx + curr_iter_len - num_tokens,
-            rope,
-            static_cast<T const *>(cos_ptr) +
-                (token_idx + seq_len - num_tokens) * HEAD_DIM,
-            static_cast<T const *>(sin_ptr) +
-                (token_idx + seq_len - num_tokens) * HEAD_DIM);
-      }
-    }
     __syncthreads();
 
     // compute X = QK^T

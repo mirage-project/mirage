@@ -20,11 +20,11 @@
 namespace mirage {
 namespace runtime {
 
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+#if MPK_TARGET_CC >= 90
 constexpr int MAX_SHARE_MEMORY_SIZE = 224 * 1024;
-#elif defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 860
+#elif MPK_TARGET_CC >= 86
 constexpr int MAX_SHARE_MEMORY_SIZE = 96 * 1024;
-#elif defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+#elif MPK_TARGET_CC >= 80
 constexpr int MAX_SHARE_MEMORY_SIZE = 160 * 1024;
 #else
 constexpr int MAX_SHARE_MEMORY_SIZE = 96 * 1024;

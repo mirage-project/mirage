@@ -12,18 +12,27 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 #pragma once
-#include "../runtime_header.h"
-#include "bfloat16.h"
-#include <cassert>
-#include <cstdint>
-#include <cstdio>
-#include <iostream>
+#include "../common.h"
+#include "barrier.cuh"
+#include "tma_2d.cuh"
+#include "tma_3d.cuh"
+#include <cuda.h>
+namespace kernel {
+namespace tma {
 
-constexpr int NUM_THREADS = 128;
-constexpr int NUM_THREADS_PER_WARP = 32;
-constexpr int NUM_WARPS = 4;
-constexpr int WARPGROUP_WARPS = 4;
+__device__ static inline void async_proxy_fence() {
+  asm volatile("fence.proxy.async.shared::cta;");
+}
 
-constexpr float inf = 5e4;
+__device__ static inline void store_commit_group() {
+  asm volatile("cp.async.bulk.commit_group;");
+}
+
+template <int N = 0>
+__device__ static inline void store_async_wait() {
+  asm volatile("cp.async.bulk.wait_group %0;" : : "n"(N) : "memory");
+}
+
+} // namespace tma
+} // namespace kernel
