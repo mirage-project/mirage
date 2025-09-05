@@ -14,11 +14,11 @@ from safetensors import safe_open
 
 def get_fp8_tensors() -> Dict[int, Dict[str, torch.Tensor]]:
     # files = [
-    #     "/home/hengrui/models/Qwen3-8B-FP8v2/model-00001-of-00002.safetensors",
-    #     "/home/hengrui/models/Qwen3-8B-FP8v2/model-00002-of-00002.safetensors",
+    #     "../../models/Qwen3-8B-FP8/model-00001-of-00002.safetensors",
+    #     "../../models/Qwen3-8B-FP8/model-00002-of-00002.safetensors",
     # ]
     files = [
-    "/home/hengrui/models/Qwen3-8B-FP8v3-reorder/qwen3-8b-fp8v3-reorder.pth"
+    "../../models/Qwen3-8B-FP8v3-reorder/qwen3-8b-fp8v3-reorder.pth"
     ]
 
     device = "cpu"  
