@@ -790,18 +790,18 @@ int TaskRegister::register_linear_hopper_task(threadblock::Graph const &bgraph,
   );
   code.inc_indent();
   code.e("TMA_A "
-         "tma_a(static_cast<CUtensorMap*>(task_desc.inputs[0].tma_desc_ptr));");
+         "tma_a(static_cast<CUtensorMap*>(task_desc.inputs[0].tma_desc_ptrs[0]));");
   code.e("TMA_B "
-         "tma_b(static_cast<CUtensorMap*>(task_desc.inputs[1].tma_desc_ptr));");
+         "tma_b(static_cast<CUtensorMap*>(task_desc.inputs[1].tma_desc_ptrs[0]));");
   if (with_residual) {
     code.e(
         "TMA_RESIDUAL "
         "tma_residual(static_cast<CUtensorMap*>(task_desc.inputs[2].tma_desc_"
-        "ptr));");
+        "ptrs[0]));");
   }
   code.e(
       "TMA_OUT "
-      "tma_out(static_cast<CUtensorMap*>(task_desc.outputs[0].tma_desc_ptr));");
+      "tma_out(static_cast<CUtensorMap*>(task_desc.outputs[0].tma_desc_ptrs[0]));");
   // code.e("printf(\"linear_kernel_hopper start\");");
 
   code.e("kernel::linear_kernel_hopper<bfloat16, $, $, $, $, TMA_A, TMA_B, "
@@ -864,6 +864,9 @@ int TaskRegister::register_paged_attention_hopper_task(
   int kv_stride = head_dim * num_kv_heads;
   int max_seq_len = params[4];
   int page_size = params[5];
+  int num_tokens = input_ops[0]->dtensor.dim[0];
+
+  printf("num_tokens = %d\n", num_tokens);
 
   assert(input_ops[1]->output_tensors[0].num_dims == 4);
   assert(head_dim == input_ops[1]->output_tensors[0].dim[3]);
@@ -876,11 +879,10 @@ int TaskRegister::register_paged_attention_hopper_task(
   constexpr int B = 3, M = 3, S = 3;
   constexpr int TMA_CP_ASYNC_SIZE = 64;
   constexpr int KV_TILE_SIZE = 64;
-  constexpr int NUM_TOKENS = 4;
   int const qkv_rows = num_q_heads + 2 * num_kv_heads;
   int const smem_repeat_col =
       (head_dim + TMA_CP_ASYNC_SIZE - 1) / TMA_CP_ASYNC_SIZE;
-  int const q_smem_stride = NUM_TOKENS * num_q_heads * TMA_CP_ASYNC_SIZE;
+  int const q_smem_stride = num_tokens * num_q_heads * TMA_CP_ASYNC_SIZE;
   int const kv_smem_stride = KV_TILE_SIZE * TMA_CP_ASYNC_SIZE;
   int const num_pages = (max_seq_len + page_size - 1) / page_size;
 
@@ -889,10 +891,10 @@ int TaskRegister::register_paged_attention_hopper_task(
          B,
          M,
          S,
-         NUM_TOKENS,          /* GMEM_DEPTH */
+         num_tokens,          /* GMEM_DEPTH */
          qkv_rows,            /* GMEM_ROW   */
          head_dim,            /* GMEM_COL   */
-         NUM_TOKENS,          /* SMEM_DEPTH */
+         num_tokens,          /* SMEM_DEPTH */
          num_q_heads,         /* SMEM_ROW   */
          TMA_CP_ASYNC_SIZE,   /* SMEM_COL   */
          qkv_rows * head_dim, /* GMEM_STRIDE_DEPTH */
@@ -908,10 +910,10 @@ int TaskRegister::register_paged_attention_hopper_task(
          B,
          M,
          S,
-         NUM_TOKENS,          /* GMEM_DEPTH */
+         num_tokens,          /* GMEM_DEPTH */
          qkv_rows,            /* GMEM_ROW   */
          head_dim,            /* GMEM_COL   */
-         NUM_TOKENS,          /* SMEM_DEPTH */
+         num_tokens,          /* SMEM_DEPTH */
          num_kv_heads,        /* SMEM_ROW   */
          TMA_CP_ASYNC_SIZE,   /* SMEM_COL   */
          qkv_rows * head_dim, /* GMEM_STRIDE_DEPTH */
@@ -965,40 +967,40 @@ int TaskRegister::register_paged_attention_hopper_task(
          B,
          M,
          S,
-         NUM_TOKENS * num_q_heads,                    /* GMEM_ROW  */
+         num_tokens * num_q_heads,                    /* GMEM_ROW  */
          head_dim,                                    /* GMEM_COL  */
-         NUM_TOKENS * num_q_heads,                    /* SMEM_ROW  */
+         num_tokens * num_q_heads,                    /* SMEM_ROW  */
          TMA_CP_ASYNC_SIZE,                           /* SMEM_COL  */
          head_dim,                                    /* GMEM_STRIDE_ROW */
          1,                                           /* GMEM_STRIDE_COL */
          1,                                           /* SMEM_REPEAT_ROW */
          smem_repeat_col,                             /* SMEM_REPEAT_COL */
-         NUM_TOKENS * num_q_heads * TMA_CP_ASYNC_SIZE /* SMEM_STRIDE */
+         num_tokens * num_q_heads * TMA_CP_ASYNC_SIZE /* SMEM_STRIDE */
   );
 
   code.e("TMA_Q  tma_q "
-         "(static_cast<CUtensorMap*>(task_desc.inputs[0].tma_desc_ptr));");
+         "(static_cast<CUtensorMap*>(task_desc.inputs[0].tma_desc_ptrs[0]));");
   code.e("TMA_KV tma_k "
-         "(static_cast<CUtensorMap*>(task_desc.inputs[0].tma_desc_ptr));");
+         "(static_cast<CUtensorMap*>(task_desc.inputs[0].tma_desc_ptrs[1]));");
   code.e("TMA_KV tma_v "
-         "(static_cast<CUtensorMap*>(task_desc.inputs[0].tma_desc_ptr));");
+         "(static_cast<CUtensorMap*>(task_desc.inputs[0].tma_desc_ptrs[2]));");
 
   code.e("TMA_PAGED_KV_CACHE "
          "tma_paged_k_cache(static_cast<CUtensorMap*>(task_desc.inputs[1].tma_"
-         "desc_ptr));");
+         "desc_ptrs[0]));");
   code.e("TMA_PAGED_KV_CACHE "
          "tma_paged_v_cache(static_cast<CUtensorMap*>(task_desc.inputs[2].tma_"
-         "desc_ptr));");
+         "desc_ptrs[0]));");
   code.e("TMA_PAGED_KV_CACHE_TAIL_PAGE "
          "tma_paged_k_cache_tail_page(static_cast<CUtensorMap*>(task_desc."
-         "inputs[1].tma_desc_ptr));");
+         "inputs[1].tma_desc_ptrs[1]));");
   code.e("TMA_PAGED_KV_CACHE_TAIL_PAGE "
          "tma_paged_v_cache_tail_page(static_cast<CUtensorMap*>(task_desc."
-         "inputs[2].tma_desc_ptr));");
+         "inputs[2].tma_desc_ptrs[1]));");
 
   code.e("TMA_OUTPUT "
          "tma_output(static_cast<CUtensorMap*>(task_desc.outputs[0].tma_desc_"
-         "ptr));");
+         "ptrs[0]));");
 
   code.e("kernel::multitoken_paged_attention_hopper_impl<bfloat16, $, $, $, $, "
          "$, $, $, $, "
@@ -1012,7 +1014,7 @@ int TaskRegister::register_paged_attention_hopper_task(
          head_dim,     /* HEAD_DIM                   */
          max_seq_len,  /* MAX_SEQ_LEN                */
          page_size,    /* PAGE_SIZE                  */
-         NUM_TOKENS    /* MAX_TOKENS                 */
+         num_tokens    /* MAX_TOKENS                 */
   );
   code.e("    tma_q,");
   code.e("    tma_k,");

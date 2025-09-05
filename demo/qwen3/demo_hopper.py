@@ -456,7 +456,7 @@ if __name__ == "__main__":
                 )
             else:
                 # import pdb; pdb.set_trace()
-                mpk.paged_attention_layer(
+                mpk.paged_attention_layer_hopper(
                     input=attn_in,
                     k_cache=k_cache,
                     v_cache=v_cache,

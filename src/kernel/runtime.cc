@@ -676,17 +676,9 @@ TaskGraphResult print_task_graph(
     code.e("task_desc.outputs[task_desc.num_outputs++] = output;");
     code.e("}");
     
-    // create TMA desc for inputs+outputs (combined, maintain param_id order: inputs then outputs)
-    code.e("{");
+    // create TMA desc for each task
     code.e("if (task.at(\"task_type\") > TASK_HOPPER_TASK_BEGIN && task.at(\"task_type\") < TASK_HOPPER_TASK_END) {");
-    code.e("size_t total = task_desc.num_inputs + task_desc.num_outputs;");
-    code.e("for (size_t k = 0; k < total; ++k) {");
-    code.e("TensorDesc &tensor_desc = (k < static_cast<size_t>(task_desc.num_inputs))");
-    code.e("? task_desc.inputs[k]");
-    code.e(": task_desc.outputs[k - task_desc.num_inputs];");
-    code.e("tensor_desc.tma_desc_ptr = static_cast<void*>(create_tma_desc_from_tensor(task_desc, tensor_desc, k));");
-    code.e("}");
-    code.e("}");
+    code.e("create_tma_desc_by_task(task_desc);");   
     code.e("}");
     
     code.e("all_tasks.push_back(task_desc);");

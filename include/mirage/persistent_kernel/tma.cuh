@@ -18,22 +18,12 @@
 #include "tasks/common.h"
 #include <cuda.h>
 
+namespace mirage {
+namespace runtime {
+
 using bfloat16 = type::bfloat16_t;
 
-template <typename TaskDesc, typename TensorDesc>
-__host__ inline CUtensorMap *
-    create_tma_desc_from_tensor(TaskDesc const &task_desc,
-                                TensorDesc const &tensor_desc,
-                                size_t const param_id) {
-  CUtensorMap host_desc;
-  CUtensorMap *desc_ptr;
-  fill_tma_desc_by_task(
-      &host_desc, task_desc, tensor_desc, param_id); // host-only function
-  cudaMalloc(&desc_ptr, sizeof(CUtensorMap));
-  cudaMemcpy(desc_ptr, &host_desc, sizeof(CUtensorMap), cudaMemcpyHostToDevice);
-  return desc_ptr;
-}
-
+// NOTE(Yu): Assume smem_stride is always 1, so we don't pass it as an argument
 template <typename T, int B, int M, int S, int NDIM>
 __host__ static inline void fill_tma_desc(CUtensorMap *tma_desc,
                                           void *const src,
@@ -94,34 +84,35 @@ __host__ static inline void fill_tma_desc(CUtensorMap *tma_desc,
   assert((reinterpret_cast<uint64_t>(global_addr) & 0b1111) ==
          0); // Address must be 16B-aligned
 
-  // assert(gmem_prob_shape[0] >= (uint64_t(1)));       // Size must be min 1
-  // assert(gmem_prob_shape[0] <= (uint64_t(1) << 32)); // Size must be max 2^32
-  // assert(gmem_prob_shape[1] >= (uint64_t(1)));       // Size must be min 1
-  // assert(gmem_prob_shape[1] <= (uint64_t(1) << 32)); // Size must be max 2^32
-  // assert(gmem_prob_shape[2] >= (uint64_t(1)));       // Size must be min 1
-  // assert(gmem_prob_shape[2] <= (uint64_t(1) << 32)); // Size must be max 2^32
-  // assert(gmem_prob_shape[3] >= (uint64_t(1)));       // Size must be min 1
-  // assert(gmem_prob_shape[3] <= (uint64_t(1) << 32)); // Size must be max 2^32
-  // assert(gmem_prob_shape[4] >= (uint64_t(1)));       // Size must be min 1
-  // assert(gmem_prob_shape[4] <= (uint64_t(1) << 32)); // Size must be max 2^32
+  assert(gmem_prob_shape[0] >= (uint64_t(1)));       // Size must be min 1
+  assert(gmem_prob_shape[0] <= (uint64_t(1) << 32)); // Size must be max 2^32
+  assert(gmem_prob_shape[1] >= (uint64_t(1)));       // Size must be min 1
+  assert(gmem_prob_shape[1] <= (uint64_t(1) << 32)); // Size must be max 2^32
+  assert(gmem_prob_shape[2] >= (uint64_t(1)));       // Size must be min 1
+  assert(gmem_prob_shape[2] <= (uint64_t(1) << 32)); // Size must be max 2^32
+  assert(gmem_prob_shape[3] >= (uint64_t(1)));       // Size must be min 1
+  assert(gmem_prob_shape[3] <= (uint64_t(1) << 32)); // Size must be max 2^32
+  assert(gmem_prob_shape[4] >= (uint64_t(1)));       // Size must be min 1
+  assert(gmem_prob_shape[4] <= (uint64_t(1) << 32)); // Size must be max 2^32
 
-  // // Assert the byte strides. Tma Descriptor uses byte strides
-  // assert((gmem_prob_stride[1]) <
-  //       (uint64_t(1) << 40)); // Stride must be max 2^40
-  // assert((gmem_prob_stride[1] & 0b1111) ==
-  //       0); // Stride must be multiple of 16B (128b)
-  // assert((gmem_prob_stride[2]) <
-  //       (uint64_t(1) << 40)); // Stride must be max 2^40
-  // assert((gmem_prob_stride[2] & 0b1111) ==
-  //       0); // Stride must be multiple of 16B (128b)
-  // assert((gmem_prob_stride[3]) <
-  //       (uint64_t(1) << 40)); // Stride must be max 2^40
-  // assert((gmem_prob_stride[3] & 0b1111) ==
-  //       0); // Stride must be multiple of 16B (128b)
-  // assert((gmem_prob_stride[4]) <
-  //       (uint64_t(1) << 40)); // Stride must be max 2^40
-  // assert((gmem_prob_stride[4] & 0b1111) ==
-  //       0); // Stride must be multiple of 16B (128b)
+  // Assert the byte strides. Tma Descriptor uses byte strides
+  assert((gmem_prob_stride[1]) <
+        (uint64_t(1) << 40)); // Stride must be max 2^40
+  assert((gmem_prob_stride[1] & 0b1111) ==
+        0); // Stride must be multiple of 16B (128b)
+  assert((gmem_prob_stride[2]) <
+        (uint64_t(1) << 40)); // Stride must be max 2^40
+  printf("gmem_prob_stride[2]: %lu\n", gmem_prob_stride[2]);
+  assert((gmem_prob_stride[2] & 0b1111) ==
+        0); // Stride must be multiple of 16B (128b)
+  assert((gmem_prob_stride[3]) <
+        (uint64_t(1) << 40)); // Stride must be max 2^40
+  assert((gmem_prob_stride[3] & 0b1111) ==
+        0); // Stride must be multiple of 16B (128b)
+  assert((gmem_prob_stride[4]) <
+        (uint64_t(1) << 40)); // Stride must be max 2^40
+  assert((gmem_prob_stride[4] & 0b1111) ==
+        0); // Stride must be multiple of 16B (128b)
 
   if constexpr (NDIM == 2) {
     smem_box_shape[0] = smem_shape[1];
@@ -151,53 +142,52 @@ __host__ static inline void fill_tma_desc(CUtensorMap *tma_desc,
 
 #if 0
 printf("gmem_prob_shape: %lu, %lu, %lu, %lu, %lu\n",
-gmem_prob_shape[0],
-gmem_prob_shape[1],
-gmem_prob_shape[2],
-gmem_prob_shape[3],
-gmem_prob_shape[4]);
+      gmem_prob_shape[0],
+      gmem_prob_shape[1],
+      gmem_prob_shape[2],
+      gmem_prob_shape[3],
+      gmem_prob_shape[4]);
 printf("gmem_prob_stride: %lu, %lu, %lu, %lu, %lu\n",
-gmem_prob_stride[0],
-gmem_prob_stride[1],
-gmem_prob_stride[2],
-gmem_prob_stride[3],
-gmem_prob_stride[4]);
+      gmem_prob_stride[0],
+      gmem_prob_stride[1],
+      gmem_prob_stride[2],
+      gmem_prob_stride[3],
+      gmem_prob_stride[4]);
 printf("smem_box_shape: %d, %d, %d, %d, %d\n",
-smem_box_shape[0],
-smem_box_shape[1],
-smem_box_shape[2],
-smem_box_shape[3],
-smem_box_shape[4]);
+      smem_box_shape[0],
+      smem_box_shape[1],
+      smem_box_shape[2],
+      smem_box_shape[3],
+      smem_box_shape[4]);
 printf("smem_box_stride: %d, %d, %d, %d, %d\n",
-smem_box_stride[0],
-smem_box_stride[1],
-smem_box_stride[2],
-smem_box_stride[3],
-smem_box_stride[4]);
+      smem_box_stride[0],
+      smem_box_stride[1],
+      smem_box_stride[2],
+      smem_box_stride[3],
+      smem_box_stride[4]);
 #endif
 
-  // assert(smem_box_shape[0] >= (uint32_t(1)));      // Size must be min 1
-  // assert(smem_box_shape[0] <= (uint32_t(1) << 8)); // Size must be max 2^8 =
-  // 256 assert(smem_box_shape[1] >= (uint32_t(1)));      // Size must be min 1
-  // assert(smem_box_shape[1] <= (uint32_t(1) << 8)); // Size must be max 2^8 =
-  // 256 assert(smem_box_shape[2] >= (uint32_t(1)));      // Size must be min 1
-  // assert(smem_box_shape[2] <= (uint32_t(1) << 8)); // Size must be max 2^8 =
-  // 256 assert(smem_box_shape[3] >= (uint32_t(1)));      // Size must be min 1
-  // assert(smem_box_shape[3] <= (uint32_t(1) << 8)); // Size must be max 2^8 =
-  // 256 assert(smem_box_shape[4] >= (uint32_t(1)));      // Size must be min 1
-  // assert(smem_box_shape[4] <= (uint32_t(1) << 8)); // Size must be max 2^8 =
-  // 256
+  assert(smem_box_shape[0] >= (uint32_t(1)));      // Size must be min 1
+  assert(smem_box_shape[0] <= (uint32_t(1) << 8)); // Size must be max 2^8 = 256 
+  assert(smem_box_shape[1] >= (uint32_t(1)));      // Size must be min 1
+  assert(smem_box_shape[1] <= (uint32_t(1) << 8)); // Size must be max 2^8 = 256
+  assert(smem_box_shape[2] >= (uint32_t(1)));      // Size must be min 1
+  assert(smem_box_shape[2] <= (uint32_t(1) << 8)); // Size must be max 2^8 = 256
+  assert(smem_box_shape[3] >= (uint32_t(1)));      // Size must be min 1
+  assert(smem_box_shape[3] <= (uint32_t(1) << 8)); // Size must be max 2^8 = 256
+  assert(smem_box_shape[4] >= (uint32_t(1)));      // Size must be min 1
+  assert(smem_box_shape[4] <= (uint32_t(1) << 8)); // Size must be max 2^8 = 256
 
-  // assert(smem_box_stride[0] >= (uint32_t(1))); // Stride must be min 1
-  // assert(smem_box_stride[0] <= (uint32_t(8))); // Stride must be max 2^3 = 8
-  // assert(smem_box_stride[1] >= (uint32_t(1))); // Stride must be min 1
-  // assert(smem_box_stride[1] <= (uint32_t(8))); // Stride must be max 2^3 = 8
-  // assert(smem_box_stride[2] >= (uint32_t(1))); // Stride must be min 1
-  // assert(smem_box_stride[2] <= (uint32_t(8))); // Stride must be max 2^3 = 8
-  // assert(smem_box_stride[3] >= (uint32_t(1))); // Stride must be min 1
-  // assert(smem_box_stride[3] <= (uint32_t(8))); // Stride must be max 2^3 = 8
-  // assert(smem_box_stride[4] >= (uint32_t(1))); // Stride must be min 1
-  // assert(smem_box_stride[4] <= (uint32_t(8))); // Stride must be max 2^3 = 8
+  assert(smem_box_stride[0] >= (uint32_t(1))); // Stride must be min 1
+  assert(smem_box_stride[0] <= (uint32_t(8))); // Stride must be max 2^3 = 8
+  assert(smem_box_stride[1] >= (uint32_t(1))); // Stride must be min 1
+  assert(smem_box_stride[1] <= (uint32_t(8))); // Stride must be max 2^3 = 8
+  assert(smem_box_stride[2] >= (uint32_t(1))); // Stride must be min 1
+  assert(smem_box_stride[2] <= (uint32_t(8))); // Stride must be max 2^3 = 8
+  assert(smem_box_stride[3] >= (uint32_t(1))); // Stride must be min 1
+  assert(smem_box_stride[3] <= (uint32_t(8))); // Stride must be max 2^3 = 8
+  assert(smem_box_stride[4] >= (uint32_t(1))); // Stride must be min 1
+  assert(smem_box_stride[4] <= (uint32_t(8))); // Stride must be max 2^3 = 8
 
   uint64_t const *gmem_shape_ptr = &gmem_prob_shape[0];
   uint64_t const *gmem_stride_ptr = &gmem_prob_stride[0];
@@ -235,14 +225,15 @@ smem_box_stride[4]);
   }
 }
 
-template <typename TaskDesc, typename TensorDesc>
 __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
                                            TaskDesc const &task_desc,
                                            TensorDesc const &tensor_desc,
-                                           size_t const param_id) {
+                                           size_t param_id,
+                                           size_t tma_desc_id = 0) {
   switch (task_desc.task_type) {
-    case mirage::runtime::TASK_LINEAR_HOPPER:
-    case mirage::runtime::TASK_LINEAR_WITH_RESIDUAL_HOPPER: {
+    case TASK_LINEAR_HOPPER:
+    case TASK_LINEAR_WITH_RESIDUAL_HOPPER: 
+    {
       int const cp_async_size = 64;
       const size_t smem_repeat_row = 1;
       constexpr int B = 3;
@@ -295,7 +286,7 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
                                             smem_repeat_col);
       } else if (param_id == 2 &&
                  task_desc.task_type ==
-                     mirage::runtime::TASK_LINEAR_WITH_RESIDUAL_HOPPER) {
+                     TASK_LINEAR_WITH_RESIDUAL_HOPPER) {
         // TMA_RESIDUAL
         int const batch_size = tensor_desc.dim[0];
         int const output_size = tensor_desc.dim[1];
@@ -325,9 +316,9 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
                                             smem_repeat_col);
       } else if (param_id == 3 &&
                      task_desc.task_type ==
-                         mirage::runtime::TASK_LINEAR_WITH_RESIDUAL_HOPPER ||
+                         TASK_LINEAR_WITH_RESIDUAL_HOPPER ||
                  param_id == 2 && task_desc.task_type ==
-                                      mirage::runtime::TASK_LINEAR_HOPPER) {
+                                      TASK_LINEAR_HOPPER) {
         // TMA_OUT
         int const batch_size = tensor_desc.dim[0];
         int const output_size = tensor_desc.dim[1];
@@ -357,119 +348,173 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
       }
       break;
     }
-    case mirage::runtime::TASK_PAGED_ATTENTION_HOPPER: {
-      // constexpr int B = 3, M = 3, S = 3;
-      // constexpr int TMA_CP_ASYNC_SIZE = 64;
-      // constexpr int KV_TILE_SIZE = 64;
+    case TASK_PAGED_ATTENTION_HOPPER: 
+    {
+      using T = bfloat16;
+      constexpr int B = 3, M = 3, S = 3;
+      constexpr int TMA_CP_ASYNC_SIZE = 64;
+      constexpr int KV_TILE_SIZE = 64;
+      const size_t smem_repeat_row = 1;
 
-      // const size_t smem_repeat_row = 1;
-      // const auto &k_cache = task_desc.inputs[1];
-      // const auto &output = task_desc.inputs[7];
-      // const int num_pages = k_cache.dim[0];
-      // const int page_size = k_cache.dim[1];
-      // const int head_dim = k_cache.dim[3];
-      // const int num_kv_heads = k_cache.dim[2];
-      // const int num_q_heads = output.dim[1] / head_dim;
-    
+      auto &qkv =
+          task_desc.inputs[0]; // [num_tokens, (num_q + 2*num_kv)*head_dim]
+      auto &k_cache =
+          task_desc.inputs[1]; // [num_pages, page_size, num_kv, head_dim]
 
-      // const int qk_norm   = task_desc.params[2];
-      // const int rotary    = task_desc.params[3];
-      // const int max_seq   = task_desc.params[4];
-      // const int page_size = task_desc.params[5];
+      int const num_tokens = qkv.dim[0];
+      int const qkv_cols = qkv.dim[1];
+      int const num_pages = k_cache.dim[0];
+      int const page_size = k_cache.dim[1];
+      int const num_kv_heads = k_cache.dim[2];
+      int const head_dim = k_cache.dim[3];
+      int const num_q_heads = qkv_cols / head_dim - 2 * num_kv_heads;
+      assert(num_q_heads > 0 && "Invalid num_q_heads derived from qkv");
 
-      if (param_id == 0 || param_id == 1) {
-        const uint64_t num_tokens = static_cast<uint64_t>(tensor_desc.dim[0]);
-        const uint64_t qkv_cols = static_cast<uint64_t>(tensor_desc.dim[1]);
-        const uint64_t qkv_rows =
-            static_cast<uint64_t>(num_q_heads + 2 * num_kv_heads);
-        assert(qkv_cols % qkv_rows == 0 &&
-               "qkv inner dim must be divisible by qkv_rows");
-        const uint64_t head_dim = qkv_cols / qkv_rows;
+      printf("num_tokens: %d, num_q_heads: %d, num_kv_heads: %d, head_dim: %d\n", num_tokens, num_q_heads, num_kv_heads, head_dim);
+      printf("num_pages: %d, page_size: %d\n", num_pages, page_size);
 
-        const uint64_t qkv_depth_stride = static_cast<uint64_t>(
-            tensor_desc.stride[0]);
-        const uint64_t qkv_row_stride = head_dim;
-        const uint64_t qkv_col_stride = 1;
+      if (param_id == 0) {
+      // map 2D qkv to 3D: [depth=num_tokens, row=num heads, col=head_dim]
+      uint64_t gmem_shape[3] = {
+          static_cast<uint64_t>(num_tokens),
+          static_cast<uint64_t>(num_q_heads + 2 * num_kv_heads),
+          static_cast<uint64_t>(head_dim)};
+      uint64_t gmem_stride[3] = {
+          1, static_cast<uint64_t>(head_dim), static_cast<uint64_t>((num_q_heads + 2 * num_kv_heads) * head_dim)};
+      uint32_t smem_shape[3] = {
+          static_cast<uint32_t>(num_tokens),
+          static_cast<uint32_t>(tma_desc_id == 0 ? num_q_heads : num_kv_heads),
+          static_cast<uint32_t>(TMA_CP_ASYNC_SIZE)};
+      const size_t smem_repeat_col = static_cast<size_t>(
+          (head_dim + TMA_CP_ASYNC_SIZE - 1) / TMA_CP_ASYNC_SIZE);
 
-        uint64_t gmem_shape[3] = {num_tokens, qkv_rows, head_dim};
-        uint64_t gmem_stride[3] = {
-            qkv_depth_stride, qkv_row_stride, qkv_col_stride};
-
-        const uint32_t smem_depth = static_cast<uint32_t>(num_tokens);
-        const uint32_t smem_row = (param_id == 0)
-                                      ? static_cast<uint32_t>(num_q_heads)
-                                      : static_cast<uint32_t>(num_kv_heads);
-        const uint32_t smem_col = cp_async_size;
-        uint32_t smem_shape[3] = {smem_depth, smem_row, smem_col};
-
-        const size_t smem_repeat_col =
-            static_cast<size_t>((head_dim + cp_async_size - 1) / cp_async_size);
-
-        fill_tma_desc<bfloat16, B, M, S, 3>(tma_desc,
-                                            tensor_desc.base_ptr,
-                                            gmem_shape,
-                                            gmem_stride,
-                                            smem_shape,
-                                            smem_repeat_row,
-                                            smem_repeat_col);
-      } else if (param_id == 2 || param_id == 3 || param_id == 4 ||
-                 param_id == 5) {
-        const uint64_t num_pages = static_cast<uint64_t>(tensor_desc.dim[0]);
-        const uint64_t page_size = static_cast<uint64_t>(tensor_desc.dim[1]);
-        const uint64_t kv_heads_dim = static_cast<uint64_t>(tensor_desc.dim[2]);
-        const uint64_t head_dim = static_cast<uint64_t>(tensor_desc.dim[3]);
-        assert(static_cast<int>(kv_heads_dim) == num_kv_heads);
-
-        // 将 4D 物理布局折叠为 3D：depth=num_pages, row=page_size, col=head_dim
-        // 行/层步长需要把 head 维合并进去
-        const uint64_t row_stride = head_dim * kv_heads_dim;
-        const uint64_t depth_stride = page_size * row_stride;
-        const uint64_t col_stride = 1;
-
-        uint64_t gmem_shape[3] = {num_pages, page_size, head_dim};
-        uint64_t gmem_stride[3] = {depth_stride, row_stride, col_stride};
+      fill_tma_desc<T, B, M, S, 3>(tma_desc,
+                                   tensor_desc.base_ptr,
+                                   gmem_shape,
+                                   gmem_stride,
+                                   smem_shape,
+                                   smem_repeat_row,
+                                   smem_repeat_col);
+      }
+      
+      else if (param_id == 1 || param_id == 2) {
+        // paged_k_cache_ptr / paged_v_cache_ptr
+        // tensor is 3D: [num_pages, page_size, head_dim]
+        uint64_t gmem_shape[3] = {static_cast<uint64_t>(num_pages),
+                                  static_cast<uint64_t>(page_size),
+                                  static_cast<uint64_t>(head_dim)};
+        uint64_t gmem_stride[3] = {1, static_cast<uint64_t>(head_dim), static_cast<uint64_t>(page_size * head_dim)};
+        // TODO(Yu): fix tail page
 
         uint32_t smem_shape[3] = {1u,
                                   static_cast<uint32_t>(KV_TILE_SIZE),
-                                  static_cast<uint32_t>(cp_async_size)};
-        const size_t smem_repeat_col =
-            static_cast<size_t>((head_dim + cp_async_size - 1) / cp_async_size);
+                                  static_cast<uint32_t>(TMA_CP_ASYNC_SIZE)};
+        const size_t smem_repeat_col = static_cast<size_t>(
+            (head_dim + TMA_CP_ASYNC_SIZE - 1) / TMA_CP_ASYNC_SIZE);
 
-        fill_tma_desc<bfloat16, B, M, S, 3>(tma_desc,
-                                            tensor_desc.base_ptr,
-                                            gmem_shape,
-                                            gmem_stride,
-                                            smem_shape,
-                                            smem_repeat_row,
-                                            smem_repeat_col);
-      } else if (param_id == 6) {
-        const uint64_t rows = static_cast<uint64_t>(tensor_desc.dim[0]);
-        const uint64_t cols = static_cast<uint64_t>(tensor_desc.dim[1]);
-        const uint64_t out_stride =
-            static_cast<uint64_t>(tensor_desc.stride[0]);
+        fill_tma_desc<T, B, M, S, 3>(tma_desc,
+                                     tensor_desc.base_ptr,
+                                     gmem_shape,
+                                     gmem_stride,
+                                     smem_shape,
+                                     smem_repeat_row,
+                                     smem_repeat_col);
+      }
+      else if (param_id == 3) {
+        uint64_t gmem_shape[2] = {static_cast<uint64_t>(num_tokens * num_q_heads),
+                                  static_cast<uint64_t>(head_dim)};
+        uint64_t gmem_stride[2] = {1, static_cast<uint64_t>(head_dim)};
 
-        uint64_t gmem_shape[2] = {rows, cols};
-        uint64_t gmem_stride[2] = {1, out_stride};
+        uint32_t smem_shape[2] = {static_cast<uint32_t>(num_tokens * num_q_heads),
+                                  static_cast<uint32_t>(TMA_CP_ASYNC_SIZE)};
+        const size_t smem_repeat_col = static_cast<size_t>(
+            (head_dim + TMA_CP_ASYNC_SIZE - 1) / TMA_CP_ASYNC_SIZE);
 
-        uint32_t smem_shape[2] = {static_cast<uint32_t>(rows),
-                                  static_cast<uint32_t>(cp_async_size)};
-        const size_t smem_repeat_col =
-            static_cast<size_t>((cols + cp_async_size - 1) / cp_async_size);
-
-        fill_tma_desc<bfloat16, B, M, S, 2>(tma_desc,
-                                            tensor_desc.base_ptr,
-                                            gmem_shape,
-                                            gmem_stride,
-                                            smem_shape,
-                                            smem_repeat_row,
-                                            smem_repeat_col);
-      } else {
+        fill_tma_desc<T, B, M, S, 2>(tma_desc,
+                                     tensor_desc.base_ptr,
+                                     gmem_shape,
+                                     gmem_stride,
+                                     smem_shape,
+                                     smem_repeat_row,
+                                     smem_repeat_col);
+      }
+      else {
         assert(false && "Unknown param_id for TASK_PAGED_ATTENTION_HOPPER");
+      }
+
+      break;
+    }
+  default:
+    assert(false);
+}
+}
+
+
+// create the tma descs for each tensor, some tensors may have multiple tma
+// descs
+__host__ inline void create_tma_desc_for_tensor(TaskDesc &task_desc,
+                                                TensorDesc &tensor_desc,
+                                                size_t param_id,
+                                                size_t tma_desc_id) {
+  CUtensorMap host_desc;
+  CUtensorMap *desc_ptr;
+  fill_tma_desc_by_task(&host_desc,
+                        task_desc,
+                        tensor_desc,
+                        param_id,
+                        tma_desc_id); // host-only function
+  cudaMalloc(&desc_ptr, sizeof(CUtensorMap));
+  cudaMemcpy(desc_ptr, &host_desc, sizeof(CUtensorMap), cudaMemcpyHostToDevice);
+  tensor_desc.tma_desc_ptrs[tma_desc_id] = desc_ptr;
+}
+
+__host__ inline void create_tma_desc_by_task(TaskDesc &task_desc) {
+  switch (task_desc.task_type) {
+    case TASK_LINEAR_HOPPER:
+    case TASK_LINEAR_WITH_RESIDUAL_HOPPER: {
+      // all tensors have 1 tma_desc
+      for (size_t param_id = 0;
+           param_id < task_desc.num_inputs + task_desc.num_outputs;
+           param_id++) {
+        TensorDesc &tensor_desc =
+            (param_id < task_desc.num_inputs)
+                ? task_desc.inputs[param_id]
+                : task_desc.outputs[param_id - task_desc.num_inputs];
+        create_tma_desc_for_tensor(task_desc, tensor_desc, param_id, 0);
       }
       break;
     }
-
+    case TASK_PAGED_ATTENTION_HOPPER: {
+      constexpr int TMA_TENSOR_NUM =
+          4; // 3 input tensors and 1 output tensor that need TMA
+      for (size_t param_id = 0; param_id < TMA_TENSOR_NUM; param_id++) {
+        TensorDesc &tensor_desc =
+            (param_id < 3) ? task_desc.inputs[param_id] : task_desc.outputs[0];
+        // qkv has 3 tma_descs
+        if (param_id == 0) {
+          for (size_t tma_desc_id = 0; tma_desc_id < 3; tma_desc_id++) {
+            create_tma_desc_for_tensor(
+                task_desc, tensor_desc, param_id, tma_desc_id);
+          }
+        }
+        // paged_k_cache and paged_v_cache both have 2 tma_descs
+        else if (param_id == 1 || param_id == 2) {
+          for (size_t tma_desc_id = 0; tma_desc_id < 2; tma_desc_id++) {
+            create_tma_desc_for_tensor(
+                task_desc, tensor_desc, param_id, tma_desc_id);
+          }
+        }
+        // output only has 1 tma_desc
+        else {
+          create_tma_desc_for_tensor(task_desc, tensor_desc, param_id, 0);
+        }
+      }
+      break;
+    }
     default:
       assert(false);
   }
 }
+
+} // namespace runtime
+} // namespace mirage

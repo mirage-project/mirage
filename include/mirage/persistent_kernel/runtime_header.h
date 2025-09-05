@@ -95,7 +95,7 @@ struct TensorDesc {
   int num_dims;
   void *base_ptr;
 #ifdef ENABLE_TMA
-  void *tma_desc_ptr;
+  void *tma_desc_ptrs[mirage::config::MAX_TMA_DESC_PER_TENSOR];
 #endif
   int data_type;
   int dim[mirage::config::MAX_TENSOR_DIMS];
