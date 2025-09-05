@@ -297,15 +297,16 @@ int TaskRegister::register_silu_mul_linear_with_residual_task(
 }
 
 int TaskRegister::register_linear_with_residual_task(
-    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+    threadblock::Graph const &bgraph, std::vector<int> const &params,
+    bool quantized
+  ) {
   assert(params.size() == 0);
   int batch_size = 0, output_size = 0, reduction_size = 0, output_stride = 0;
   std::vector<tb::TBInputOp *> input_ops;
   std::vector<tb::TBInputOp *> output_ops;
-  int num_inputs = 3;
+  int num_inputs = quantized ? 4 : 3;
   int num_outputs = 1;
-
-  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+  // assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
   for (auto const &op : bgraph.operators) {
     assert(op->op_type == mirage::type::TB_INPUT_OP);
     if (input_ops.size() < (size_t)num_inputs) {
@@ -327,14 +328,27 @@ int TaskRegister::register_linear_with_residual_task(
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
-  code.e("kernel::linear_kernel<bfloat16, $, $, $, $>(",
-         batch_size,
-         output_size,
-         reduction_size,
-         output_stride);
+  if (quantized) {
+    code.e("kernel::linear_kernel_fp8_weight<bfloat16, $, $, $, $>(",
+           batch_size,
+           output_size,
+           reduction_size,
+           output_stride);
+  } else {
+    code.e("kernel::linear_kernel<bfloat16, $, $, $, $>(",
+           batch_size,
+           output_size,
+           reduction_size,
+           output_stride);
+  }
   code.e("    task_desc.inputs[0].base_ptr,");
   code.e("    task_desc.inputs[1].base_ptr,");
-  code.e("    task_desc.inputs[2].base_ptr,");
+  if (quantized) {
+    code.e("    task_desc.inputs[2].base_ptr,");
+    code.e("    task_desc.inputs[3].base_ptr,");
+  } else {
+    code.e("    task_desc.inputs[2].base_ptr,");
+  }
   code.e("    task_desc.outputs[0].base_ptr,");
   code.e("    runtime_config.my_gpu_id == 0);");
   return register_task_variant(TASK_LINEAR_WITH_RESIDUAL, code.to_string());

@@ -117,4 +117,24 @@ struct vec_zero_t {
     }
 };
 
+// FP8 format enum
+enum FP8Format {
+  FP8_E4M3 = 0,
+  FP8_E5M2 = 1
+};
+
+__device__ __forceinline__ uint32_t fp8x2_to_bf16_v2(uint16_t v) {
+  uint32_t vv = (v & 0xFF00u) << 8 | (v & 0x00FFu); // insert 8 bits gap for 2nd fp8
+  uint32_t m =  vv        & 0x00070007u;    // 0..7
+  uint32_t e = (vv >> 3) & 0x000F000Fu;      // 0..15
+  e = ((e + 0x00780078) << 7) | (m << 4);
+  vv = (vv & 0x00800080u) << 8;
+  return vv | e;
+}
+
+// Ceil-div as constexpr
+constexpr int ceil_div_constexpr(int a, int b) {
+  return (a + b - 1) / b;
+}
+
 } // namespace kernel
