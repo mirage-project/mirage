@@ -24,7 +24,7 @@ template <typename TaskDesc, typename TensorDesc>
 __host__ inline CUtensorMap *
     create_tma_desc_from_tensor(TaskDesc const &task_desc,
                                 TensorDesc const &tensor_desc,
-                                uint16_t const param_id) {
+                                size_t const param_id) {
   CUtensorMap host_desc;
   CUtensorMap *desc_ptr;
   fill_tma_desc_by_task(
@@ -239,7 +239,7 @@ template <typename TaskDesc, typename TensorDesc>
 __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
                                            TaskDesc const &task_desc,
                                            TensorDesc const &tensor_desc,
-                                           uint16_t const param_id) {
+                                           size_t const param_id) {
   switch (task_desc.task_type) {
     case mirage::runtime::TASK_LINEAR_HOPPER:
     case mirage::runtime::TASK_LINEAR_WITH_RESIDUAL_HOPPER: {
@@ -358,13 +358,20 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
       break;
     }
     case mirage::runtime::TASK_PAGED_ATTENTION_HOPPER: {
-      constexpr int B = 3, M = 3, S = 3;
-      constexpr int cp_async_size = 64;
-      constexpr int KV_TILE_SIZE = 64;
-      const size_t smem_repeat_row = 1;
+      // constexpr int B = 3, M = 3, S = 3;
+      // constexpr int TMA_CP_ASYNC_SIZE = 64;
+      // constexpr int KV_TILE_SIZE = 64;
 
-      int const num_q_heads = task_desc.params[0];
-      int const num_kv_heads = task_desc.params[1];
+      // const size_t smem_repeat_row = 1;
+      // const auto &k_cache = task_desc.inputs[1];
+      // const auto &output = task_desc.inputs[7];
+      // const int num_pages = k_cache.dim[0];
+      // const int page_size = k_cache.dim[1];
+      // const int head_dim = k_cache.dim[3];
+      // const int num_kv_heads = k_cache.dim[2];
+      // const int num_q_heads = output.dim[1] / head_dim;
+    
+
       // const int qk_norm   = task_desc.params[2];
       // const int rotary    = task_desc.params[3];
       // const int max_seq   = task_desc.params[4];
