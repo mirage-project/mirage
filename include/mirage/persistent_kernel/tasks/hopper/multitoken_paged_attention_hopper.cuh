@@ -101,6 +101,9 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
     return;
   }
   int const num_tokens = last_token_pos - first_token_pos;
+  // if (threadIdx.x == 0) {
+  //   printf("qo_indptr_buffer_ptr[0] and [1]: %d, %d, request_id: %d, first_token_pos: %d, last_token_pos: %d\n", qo_indptr_buffer_ptr[0], qo_indptr_buffer_ptr[1], request_id, first_token_pos, last_token_pos);
+  // }
 
   int const first_page_pos = paged_kv_indptr_buffer_ptr[request_id];
   int const last_page_pos = paged_kv_indptr_buffer_ptr[request_id + 1];
@@ -110,6 +113,7 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
 
   // Load the paged KV indices into shared memory
   __shared__ int page_indices[MAX_PAGES_PER_REQUEST];
+
 #pragma unroll
   for (int i = threadIdx.x; i < num_pages * sizeof(int) / 16;
       i += NUM_THREADS) {
@@ -120,6 +124,13 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
     __uint128_t *dst_ptr = reinterpret_cast<__uint128_t *>(page_indices) + i;
     *dst_ptr = *src_ptr;
   }
+
+// #pragma unroll
+//   for (int i = threadIdx.x; i < num_pages; i += blockDim.x) {
+//     page_indices[i] = paged_kv_indices_buffer_ptr[first_page_pos + i];
+//   }
+
+
   if (num_pages % (16 / sizeof(int)) != 0) {
     int tail_pages = num_pages % (16 / sizeof(int));
     int tail_offset = num_pages - tail_pages;
@@ -295,7 +306,8 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
                                           : (boundary - begin);
 
       int kv_rows = curr_iter_len - cache_rows;
-
+      // printf("begin: %d, end: %d, boundary: %d, cache_rows: %d, kv_rows: %d, curr_iter_len: %d\n", begin, end, boundary, cache_rows, kv_rows, curr_iter_len);
+      
       // load from tail page
       if (cache_rows < KV_TILE_SIZE) {
         int page = page_indices[begin / PAGE_SIZE];

@@ -1167,7 +1167,7 @@ extern "C" void launch_persistent_kernel() {
                          MAX_SHARE_MEMORY_SIZE);
     cudaFuncSetAttribute(scheduler_kernel,
                          cudaFuncAttributeMaxDynamicSharedMemorySize,
-                         MAX_SHARE_MEMORY_SIZE / 3);
+                         MAX_SHARE_MEMORY_SIZE);
 
     cudaStream_t worker_stream, scheduler_stream;
     cudaStreamCreate(&worker_stream);
@@ -1180,7 +1180,7 @@ extern "C" void launch_persistent_kernel() {
     scheduler_kernel<<<
         dim3(global_runtime_config.num_local_schedulers / 4, 1, 1),
         dim3(128, 1, 1),
-        MAX_SHARE_MEMORY_SIZE / 3/*smem*/,
+        MAX_SHARE_MEMORY_SIZE /*smem*/,
         scheduler_stream>>>(global_runtime_config);
 
     printf("in launch, worker_kernel start\n");

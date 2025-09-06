@@ -860,13 +860,12 @@ int TaskRegister::register_paged_attention_hopper_task(
   int output_size = output_ops[0]->dtensor.dim[1];
   int num_q_heads = params[0];
   int num_kv_heads = params[1];
+  int num_q_heads_per_kv = num_q_heads / num_kv_heads;
   int head_dim = output_size / num_q_heads;
   int kv_stride = head_dim * num_kv_heads;
   int max_seq_len = params[4];
   int page_size = params[5];
   int num_tokens = input_ops[0]->dtensor.dim[0];
-
-  printf("num_tokens = %d\n", num_tokens);
 
   assert(input_ops[1]->output_tensors[0].num_dims == 4);
   assert(head_dim == input_ops[1]->output_tensors[0].dim[3]);
@@ -879,10 +878,10 @@ int TaskRegister::register_paged_attention_hopper_task(
   constexpr int B = 3, M = 3, S = 3;
   constexpr int TMA_CP_ASYNC_SIZE = 64;
   constexpr int KV_TILE_SIZE = 64;
-  int const qkv_rows = num_q_heads + 2 * num_kv_heads;
+  int const qkv_rows = num_q_heads_per_kv + 2;
   int const smem_repeat_col =
       (head_dim + TMA_CP_ASYNC_SIZE - 1) / TMA_CP_ASYNC_SIZE;
-  int const q_smem_stride = num_tokens * num_q_heads * TMA_CP_ASYNC_SIZE;
+  int const q_smem_stride = num_tokens * num_q_heads_per_kv * TMA_CP_ASYNC_SIZE;
   int const kv_smem_stride = KV_TILE_SIZE * TMA_CP_ASYNC_SIZE;
   int const num_pages = (max_seq_len + page_size - 1) / page_size;
 
@@ -895,7 +894,7 @@ int TaskRegister::register_paged_attention_hopper_task(
          qkv_rows,            /* GMEM_ROW   */
          head_dim,            /* GMEM_COL   */
          num_tokens,          /* SMEM_DEPTH */
-         num_q_heads,         /* SMEM_ROW   */
+         num_q_heads_per_kv,         /* SMEM_ROW   */
          TMA_CP_ASYNC_SIZE,   /* SMEM_COL   */
          qkv_rows * head_dim, /* GMEM_STRIDE_DEPTH */
          head_dim,            /* GMEM_STRIDE_ROW   */
@@ -914,7 +913,7 @@ int TaskRegister::register_paged_attention_hopper_task(
          qkv_rows,            /* GMEM_ROW   */
          head_dim,            /* GMEM_COL   */
          num_tokens,          /* SMEM_DEPTH */
-         num_kv_heads,        /* SMEM_ROW   */
+         1,        /* SMEM_ROW   */
          TMA_CP_ASYNC_SIZE,   /* SMEM_COL   */
          qkv_rows * head_dim, /* GMEM_STRIDE_DEPTH */
          head_dim,            /* GMEM_STRIDE_ROW   */
@@ -967,15 +966,15 @@ int TaskRegister::register_paged_attention_hopper_task(
          B,
          M,
          S,
-         num_tokens * num_q_heads,                    /* GMEM_ROW  */
+         num_tokens * num_q_heads_per_kv,                    /* GMEM_ROW  */
          head_dim,                                    /* GMEM_COL  */
-         num_tokens * num_q_heads,                    /* SMEM_ROW  */
+         num_tokens * num_q_heads_per_kv,                    /* SMEM_ROW  */
          TMA_CP_ASYNC_SIZE,                           /* SMEM_COL  */
          head_dim,                                    /* GMEM_STRIDE_ROW */
          1,                                           /* GMEM_STRIDE_COL */
          1,                                           /* SMEM_REPEAT_ROW */
          smem_repeat_col,                             /* SMEM_REPEAT_COL */
-         num_tokens * num_q_heads * TMA_CP_ASYNC_SIZE /* SMEM_STRIDE */
+         num_tokens * num_q_heads_per_kv * TMA_CP_ASYNC_SIZE /* SMEM_STRIDE */
   );
 
   code.e("TMA_Q  tma_q "
@@ -1006,8 +1005,8 @@ int TaskRegister::register_paged_attention_hopper_task(
          "$, $, $, $, "
          "TMA_Q, TMA_KV, TMA_PAGED_KV_CACHE, TMA_PAGED_KV_CACHE_TAIL_PAGE, "
          "TMA_OUTPUT, $>(",
-         num_q_heads,  /* NUM_QO_HEADS               */
-         num_kv_heads, /* NUM_KV_HEADS               */
+         num_q_heads_per_kv,  /* NUM_QO_HEADS               */
+         1, /* NUM_KV_HEADS               */
          kv_stride,    /* KV_CACHE_STRIDE            */
          qkv_stride,   /* QKV_STRIDE                 */
          output_size,  /* O_STRIDE (= num_q_heads*head_dim) */

@@ -384,7 +384,9 @@ if __name__ == "__main__":
             input_source=1,
         )
         x = y
-        for i, layer in enumerate(model.model.layers):
+        # for i, layer in enumerate(model.model.layers):
+        for i in range(len(model.model.layers)):
+            layer = model.model.layers[i]
             # add rmsnorm + linear
             w_norm = mpk.attach_input(
                 torch_tensor=layer.input_layernorm.weight,

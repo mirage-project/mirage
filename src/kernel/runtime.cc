@@ -363,7 +363,8 @@ void register_mugraph(
               (task_type == TASK_ATTENTION_2) ||
               (task_type == TASK_SINGLE_BATCH_EXTEND_ATTENTION) ||
               (task_type == TASK_PAGED_ATTENTION_1) ||
-              (task_type == TASK_PAGED_ATTENTION_2)) {
+              (task_type == TASK_PAGED_ATTENTION_2) ||
+              (task_type == TASK_PAGED_ATTENTION_HOPPER)) {
             // Note that we assume grid_dim.x corresponds to
             // the request dimension
             task.request_id = bid.x;

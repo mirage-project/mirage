@@ -74,7 +74,7 @@ __host__ static inline void fill_tma_desc(CUtensorMap *tma_desc,
     gmem_prob_shape[4] = 1;
     gmem_prob_stride[0] = sizeof(T);
     gmem_prob_stride[1] = gmem_stride[1] * sizeof(T);
-    gmem_prob_stride[2] = gmem_stride[0] * sizeof(T);
+    gmem_prob_stride[2] = gmem_stride[2] * sizeof(T);
     gmem_prob_stride[3] = 0;
     gmem_prob_stride[4] = 0;
   } else {
@@ -102,7 +102,6 @@ __host__ static inline void fill_tma_desc(CUtensorMap *tma_desc,
         0); // Stride must be multiple of 16B (128b)
   assert((gmem_prob_stride[2]) <
         (uint64_t(1) << 40)); // Stride must be max 2^40
-  printf("gmem_prob_stride[2]: %lu\n", gmem_prob_stride[2]);
   assert((gmem_prob_stride[2] & 0b1111) ==
         0); // Stride must be multiple of 16B (128b)
   assert((gmem_prob_stride[3]) <
@@ -369,9 +368,6 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
       int const head_dim = k_cache.dim[3];
       int const num_q_heads = qkv_cols / head_dim - 2 * num_kv_heads;
       assert(num_q_heads > 0 && "Invalid num_q_heads derived from qkv");
-
-      printf("num_tokens: %d, num_q_heads: %d, num_kv_heads: %d, head_dim: %d\n", num_tokens, num_q_heads, num_kv_heads, head_dim);
-      printf("num_pages: %d, page_size: %d\n", num_pages, page_size);
 
       if (param_id == 0) {
       // map 2D qkv to 3D: [depth=num_tokens, row=num heads, col=head_dim]
