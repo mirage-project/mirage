@@ -98,11 +98,12 @@ TBInputOp::TBInputOp(Graph *_graph,
     }
     if (dim_idx >= 0) {
       assert(tensor.dim[dim_idx] > 0);
-      if(tensor.dim[dim_idx] % dim_div == 0) {
+      if (tensor.dim[dim_idx] % dim_div == 0) {
         tensor.dim[dim_idx] /= dim_div;
       } else {
         // we will generate a tail task here.
-        tensor.dim[dim_idx] = get_block_size_when_has_tail(tensor.dim[dim_idx], dim_div);
+        tensor.dim[dim_idx] =
+            get_block_size_when_has_tail(tensor.dim[dim_idx], dim_div);
       }
     }
   }

@@ -447,8 +447,7 @@ void register_mugraph(
           producer_partition[d] = pre_op->bgraph.grid_dim.x;
         }
         if (d == output_map.y) {
-          producer_partition[d] =
-              pre_op->bgraph.grid_dim.y;
+          producer_partition[d] = pre_op->bgraph.grid_dim.y;
         }
         if (d == output_map.z) {
           producer_partition[d] = pre_op->bgraph.grid_dim.z;
@@ -458,9 +457,7 @@ void register_mugraph(
       // number of events is the product of gcd of producer/consumer
       std::vector<int> event_dims(mirage::config::MAX_TENSOR_DIMS, 1);
       for (int d = 0; d < mirage::config::MAX_TENSOR_DIMS; d++) {
-        event_dims[d] = std::gcd(
-            producer_partition[d],
-            consumer_partition[d]);
+        event_dims[d] = std::gcd(producer_partition[d], consumer_partition[d]);
       }
       dfs_create_events_add_tasks(0,                       /*depth*/
                                   my_gpu_id,               /*my_gpu_id*/
@@ -1113,8 +1110,10 @@ TaskGraphResult print_task_graph(
                 size_t block_size =
                     io_desc.tensor.dim[input_map.x] / bgraph.grid_dim.x;
                 if (io_desc.tensor.dim[input_map.x] % bgraph.grid_dim.x != 0) {
-                  // TODO(Wenqin): for the tail task, instead of the block size, we should use the remainder.
-                  block_size = get_block_size_when_has_tail(io_desc.tensor.dim[input_map.x], bgraph.grid_dim.x);
+                  // TODO(Wenqin): for the tail task, instead of the block size,
+                  // we should use the remainder.
+                  block_size = get_block_size_when_has_tail(
+                      io_desc.tensor.dim[input_map.x], bgraph.grid_dim.x);
                 }
                 offset +=
                     block_size * bid.x * io_desc.tensor.stride[input_map.x];
@@ -1174,7 +1173,8 @@ TaskGraphResult print_task_graph(
               size_t block_size =
                   io_desc.tensor.dim[output_map.x] / bgraph.grid_dim.x;
               if (io_desc.tensor.dim[output_map.x] % bgraph.grid_dim.x != 0) {
-                block_size = get_block_size_when_has_tail(io_desc.tensor.dim[output_map.x], bgraph.grid_dim.x);
+                block_size = get_block_size_when_has_tail(
+                    io_desc.tensor.dim[output_map.x], bgraph.grid_dim.x);
               }
               offset +=
                   block_size * bid.x * io_desc.tensor.stride[output_map.x];
