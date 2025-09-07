@@ -98,13 +98,6 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
       residual ? static_cast<T const *>(residual_ptr) : nullptr;
   T *__restrict__ d_output = static_cast<T *>(output_ptr);
 
-  // Below code for runtime kernel wrapper test.
-  // is_tail = blockIdx.x == 85 ? true : false;
-  // int bid = blockIdx.x;
-  // d_weight += OUTPUT_SIZE * REDUCTION_SIZE * bid;
-  // d_residual += OUTPUT_SIZE * BATCH_SIZE * bid;
-  // d_output += OUTPUT_SIZE * BATCH_SIZE * bid;
-
   int const actual_output_size = is_tail ? O_STRIDE % OUTPUT_SIZE : OUTPUT_SIZE;
 
   using InputDmem = dmem_row_const<T, BATCH_SIZE, TILE_SIZE, REDUCTION_SIZE>;
@@ -315,11 +308,6 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
                 is_valid ? input_smem(m_row, m_col) : zero_buffer(0, 0);
             ldsm(src_ptr, a_frag);
             ldsm(weight_smem(n_row, n_col), b_frag);
-            // float bb = *reinterpret_cast<bfloat16*>(&b_frag[0]);
-            // if(bb != 1) {
-            //   printf("bb is not 1, it's %f in block: %d, thread: %d\n", bb,
-            //   blockIdx.x, threadIdx.x);
-            // }
             mma_m16n16k16_bf16bf16bf32(
                 s_frag[m][n], a_frag, b_frag, s_frag[m][n]);
           }
@@ -328,7 +316,7 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
       __syncthreads();
     }
 
-
+    // write back to shared memory
     for (uint32_t m = 0; m < NUM_ITERS_M; m++) {
 #pragma unroll
       for (uint32_t n = 0; n < NUM_ITERS_N; n++) {
