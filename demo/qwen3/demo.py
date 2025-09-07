@@ -9,17 +9,37 @@ import os
 # print limitation
 # torch.set_printoptions(threshold=2000)
 
-def grid_for_rmsnorm_linear_layer(size):
+def grid_for_linear_layer(size, num_workers):
     # 96 and 64 are enough to cover all Qwen3 model? Please update the method
     # if you meet any incompatibility.
-    if size % 96 == 0:
-        return 96
-    elif size % 64 == 0:
-        return 64
-    
+    linear_task_output_size = [32, 48, 64]
+    # No tail task
+    no_tail_max = 0
+    for output_size in linear_task_output_size:
+        required_tasks = size // output_size
+        if size % output_size == 0 and required_tasks <= num_workers:
+            no_tail_max = max(no_tail_max, required_tasks)
+
+    # With tail task
+    tail_max = 0
+    for output_size in linear_task_output_size:
+        required_tasks = size // output_size + 1
+        if size % output_size != 0 and required_tasks <= num_workers:
+            tail_max = max(tail_max, required_tasks)
+
+    workers = max(tail_max, no_tail_max)
+    if workers == 0:
+        # fallback
+        if size % 96 == 0:
+            workers = 96
+        elif size % 64 == 0:
+            workers = 64
+    return workers
+
 # Return the largest factor of m that is less than or equal to n
 # This is used to determine the grid size
 def max_factor_leq_n(m: int, n: int) -> int:
+
     max_factor = 1
     i = 1
     while i * i <= m:
@@ -362,7 +382,7 @@ if __name__ == "__main__":
                 weight_norm=w_norm,
                 weight_linear=w_qkv,
                 output=attn_in,
-                grid_dim=(grid_for_rmsnorm_linear_layer(w_qkv.dim(0)), 1, 1),
+                grid_dim=(grid_for_linear_layer(w_qkv.dim(0), num_workers), 1, 1),
                 block_dim=(128, 1, 1),
             )
             # add attention
@@ -415,7 +435,7 @@ if __name__ == "__main__":
                 residual=x,
                 output=attn_proj_out,
                 # TODO(Wenqin): make it elegent here
-                grid_dim=(86, 1, 1),
+                grid_dim=(grid_for_linear_layer(w.dim(0), num_workers), 1, 1),
                 block_dim=(128, 1, 1),
             )
             # reset residual input as x
@@ -453,7 +473,7 @@ if __name__ == "__main__":
                 weight_norm=w_norm,
                 weight_linear=w_gatedup,
                 output=mlp_mid,
-                grid_dim=(grid_for_rmsnorm_linear_layer(w_gatedup.dim(0)), 1, 1),
+                grid_dim=(grid_for_linear_layer(w_gatedup.dim(0), num_workers), 1, 1),
                 block_dim=(128, 1, 1),
             )
             # add silu_mul_linear layer
@@ -490,7 +510,7 @@ if __name__ == "__main__":
             weight_norm=w_norm,
             weight_linear=w_proj,
             output=argmax_in,
-            grid_dim=(grid_for_rmsnorm_linear_layer(w_proj.dim(0)), 1, 1),
+            grid_dim=(grid_for_linear_layer(w_proj.dim(0), num_workers), 1, 1),
             block_dim=(128, 1, 1),
         )
         # add argmax layer

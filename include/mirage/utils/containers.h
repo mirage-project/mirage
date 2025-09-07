@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <iostream>
 #include <unordered_set>
 #include <vector>
 #include <vector_types.h>
@@ -105,3 +106,6 @@ std::unordered_set<T> set_union(std::unordered_set<T> const &lhs,
   }
   return s;
 }
+
+// TODO(Wenqin): maybe we should put the helper to another util file?
+int get_block_size_when_has_tail(int size, int grid);

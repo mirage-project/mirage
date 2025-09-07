@@ -25,9 +25,6 @@ for output_size in output_sizes:
 
     runtime_kernel.linear(x, w, residual, output)
     print("kernel output 1:\n", output)
-    # print(output[0][955 : 965])
-    # print(output[0][4075 : 4080])
-    # runtime_kernel.tail_linear(x, w, residual, output)
     print("kernel output 2:\n", output)
     print("residual:\n", residual)
     torch_out = torch.matmul(x, torch.transpose(w, 0, 1)) + residual
@@ -66,6 +63,14 @@ for output_size in output_sizes:
         val2 = torch_out[0][index].item()
         print(f"Index {index}: Gap = {gap:.2f}, Tensor1 value = {val1:.2f}, Tensor2 value = {val2:.2f}")
     
+    
+    idx = 3422
+    print("output[0][idx]: ", output[0][idx])
+    print("torch_out[0][idx]: ", torch_out[0][idx])
+
+    print(torch_out[0][4080 :])
+    print(output[0][4080 :])
+
     idx = 3422
     print("output[0][idx]: ", output[0][idx])
     print("torch_out[0][idx]: ", torch_out[0][idx])
@@ -73,21 +78,35 @@ for output_size in output_sizes:
     print(torch_out[0][4080 :])
     print(output[0][4080 :])
     # Warm-up
-    # for _ in range(16):
-    #     runtime_kernel.linear(x, w, residual, output)
+    for _ in range(16):
+        runtime_kernel.linear(x, w, residual, output)
 
-    # torch.cuda.synchronize()
-    # starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(
-    #     enable_timing=True
-    # )
-    # repetitions = 1000
-    # starter.record()
-    # for rep in range(repetitions):
-    #     runtime_kernel.linear(x, w, residual, output)
-    # ender.record()
-    # torch.cuda.synchronize()
-    # total_time = starter.elapsed_time(ender)
-    # avg_time = total_time / repetitions
-    # print(f"Average time over {repetitions} runs: {avg_time:.6f} ms")
+    torch.cuda.synchronize()
+    starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(
+        enable_timing=True
+    )
+    repetitions = 1000
+    starter.record()
+    for rep in range(repetitions):
+        runtime_kernel.linear(x, w, residual, output)
+    ender.record()
+    torch.cuda.synchronize()
+    total_time = starter.elapsed_time(ender)
+    avg_time = total_time / repetitions
+    print(f"Average time over {repetitions} runs: {avg_time:.6f} ms")
+
+    torch.cuda.synchronize()
+    starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(
+        enable_timing=True
+    )
+    repetitions = 1000
+    starter.record()
+    for rep in range(repetitions):
+        runtime_kernel.baseline_linear(x, w, residual, output)
+    ender.record()
+    torch.cuda.synchronize()
+    total_time = starter.elapsed_time(ender)
+    avg_time = total_time / repetitions
+    print(f"Average baseline time over {repetitions} runs: {avg_time:.6f} ms")
 
     # Compare with Mirage

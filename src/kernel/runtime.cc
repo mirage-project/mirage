@@ -362,8 +362,6 @@ void register_mugraph(
           if (bid.x == bgraph.grid_dim.x - 1 &&
               bid.y == bgraph.grid_dim.y - 1 &&
               bid.z == bgraph.grid_dim.z - 1 && has_tail_task) {
-            // TODO(Wenqin): make the bid.x == bgraph.grid_dim.x - 1 work for
-            // all cases that not just dispatch in x dim.
             task.is_tail_task = true;
           }
           // Initialize input tensors to the task
@@ -440,8 +438,7 @@ void register_mugraph(
           consumer_partition[d] = bgraph.grid_dim.x;
         }
         if (d == input_map.y) {
-          consumer_partition[d] =
-              bgraph.grid_dim.y; // we assume 8 for qwen3-8b attention layer.
+          consumer_partition[d] = bgraph.grid_dim.y;
         }
         if (d == input_map.z) {
           consumer_partition[d] = bgraph.grid_dim.z;
@@ -451,8 +448,7 @@ void register_mugraph(
         }
         if (d == output_map.y) {
           producer_partition[d] =
-              pre_op->bgraph.grid_dim
-                  .y; // we assume 86 for qwen3-8b linear layer.
+              pre_op->bgraph.grid_dim.y;
         }
         if (d == output_map.z) {
           producer_partition[d] = pre_op->bgraph.grid_dim.z;
@@ -464,9 +460,7 @@ void register_mugraph(
       for (int d = 0; d < mirage::config::MAX_TENSOR_DIMS; d++) {
         event_dims[d] = std::gcd(
             producer_partition[d],
-            consumer_partition[d]); // event_dims: 1, 86/8, 1 - > 1, 11, 8, what
-                                    // we expected is also 1, 11, 8, so we don't
-                                    // need any change here, right?
+            consumer_partition[d]);
       }
       dfs_create_events_add_tasks(0,                       /*depth*/
                                   my_gpu_id,               /*my_gpu_id*/
@@ -1119,12 +1113,8 @@ TaskGraphResult print_task_graph(
                 size_t block_size =
                     io_desc.tensor.dim[input_map.x] / bgraph.grid_dim.x;
                 if (io_desc.tensor.dim[input_map.x] % bgraph.grid_dim.x != 0) {
-                  // TODO(Wenqin): make it elegent here.
-                  // if the tensor dim size is not divisible of the grid dim at
-                  // x, we think there should be a tail variant, so we should
-                  // round up the block size by 16. we should add fine
-                  // granularity control and assert here.
-                  block_size = ((block_size + 15) / 16) * 16;
+                  // TODO(Wenqin): for the tail task, instead of the block size, we should use the remainder.
+                  block_size = get_block_size_when_has_tail(io_desc.tensor.dim[input_map.x], bgraph.grid_dim.x);
                 }
                 offset +=
                     block_size * bid.x * io_desc.tensor.stride[input_map.x];
@@ -1184,8 +1174,7 @@ TaskGraphResult print_task_graph(
               size_t block_size =
                   io_desc.tensor.dim[output_map.x] / bgraph.grid_dim.x;
               if (io_desc.tensor.dim[output_map.x] % bgraph.grid_dim.x != 0) {
-                // TODO(Wenqin): make it elegent here.
-                block_size = ((block_size + 15) / 16) * 16;
+                block_size = get_block_size_when_has_tail(io_desc.tensor.dim[output_map.x], bgraph.grid_dim.x);
               }
               offset +=
                   block_size * bid.x * io_desc.tensor.stride[output_map.x];

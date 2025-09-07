@@ -98,13 +98,11 @@ TBInputOp::TBInputOp(Graph *_graph,
     }
     if (dim_idx >= 0) {
       assert(tensor.dim[dim_idx] > 0);
-      // assert(tensor.dim[dim_idx] % dim_div == 0);
-      int tmp = tensor.dim[dim_idx];
-      tensor.dim[dim_idx] /= dim_div;
-      if(tmp % dim_div != 0) {
-        // TODO(Wenqin): fix it later for align with shared memory loading.
-        // should add some assert here.
-        tensor.dim[dim_idx] = ((tensor.dim[dim_idx] + 15) / 16) * 16;
+      if(tensor.dim[dim_idx] % dim_div == 0) {
+        tensor.dim[dim_idx] /= dim_div;
+      } else {
+        // we will generate a tail task here.
+        tensor.dim[dim_idx] = get_block_size_when_has_tail(tensor.dim[dim_idx], dim_div);
       }
     }
   }

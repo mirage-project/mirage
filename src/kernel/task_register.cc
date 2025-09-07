@@ -339,7 +339,7 @@ std::pair<int, bool> TaskRegister::register_linear_with_residual_task(
   code.e("    runtime_config.my_gpu_id == 0,");
   code.e("    task_desc.is_tail_task);");
   return {register_task_variant(TASK_LINEAR_WITH_RESIDUAL, code.to_string()),
-          output_ops[0]->dtensor.dim[1] % output_size == 0};
+          output_ops[0]->dtensor.dim[1] % output_size != 0};
 }
 
 int TaskRegister::register_argmax_partial_task(threadblock::Graph const &bgraph,
