@@ -292,8 +292,8 @@ void register_mugraph(
             } // for tgt_gpu_id
             ag_pre_task_map[bid] = pre_tasks;
           } // for bid.z
-        } // for bid.y
-      } // for bid.x
+        }   // for bid.y
+      }     // for bid.x
       for (bid.x = 0; bid.x < bgraph.grid_dim.x; bid.x++) {
         for (bid.y = 0; bid.y < bgraph.grid_dim.y; bid.y++) {
           for (bid.z = 0; bid.z < bgraph.grid_dim.z; bid.z++) {
@@ -955,10 +955,10 @@ TaskGraphResult print_task_graph(
               tgbody.e("}");
               task_pos++;
             } // for tgt_gpu_id
-          } // for bid.z
-        } // for bid.y
-      } // for bid.x
-    } // if task_type == TASK_ALLREDUCE
+          }   // for bid.z
+        }     // for bid.y
+      }       // for bid.x
+    }         // if task_type == TASK_ALLREDUCE
 
     for (bid.x = 0; bid.x < bgraph.grid_dim.x; bid.x++) {
       for (bid.y = 0; bid.y < bgraph.grid_dim.y; bid.y++) {
