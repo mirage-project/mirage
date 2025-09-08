@@ -41,9 +41,11 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
                                               bool residual) {
   constexpr int CHUNK_SIZE = 16 / sizeof(T);
   constexpr int OUTPUT_ATOM_SIZE = OUTPUT_SIZE <= 128 ? OUTPUT_SIZE : 128;
+  constexpr int log2_OUTPUT_ATOM_SIZE = log2_constexpr(OUTPUT_ATOM_SIZE);
   constexpr int NUM_OUTPUT_ATOMS = (OUTPUT_SIZE + OUTPUT_ATOM_SIZE - 1) / OUTPUT_ATOM_SIZE;
 
   constexpr int TILE_SIZE = 128;
+  constexpr int log2_TILE_SIZE = log2_constexpr(TILE_SIZE);
   constexpr int SMEM_MAX_BANDWIDTH = 128 / sizeof(T);
   constexpr int FORLOOP_RANGE = REDUCTION_SIZE / TILE_SIZE;
 
@@ -162,34 +164,34 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
 
   // Warm up weight and input tiles for the first WEIGHT_PIPE_MAX - 1 atoms
   int global_pipe_idx = 0;
-#pragma unroll
+#pragma unroll 0
   for (; global_pipe_idx < WEIGHT_PIPE_MAX - 1; ++global_pipe_idx) {
+    int src_stage_offset = (global_pipe_idx % NUM_OUTPUT_ATOMS) << log2_OUTPUT_ATOM_SIZE;
+    int buffer_stage_offset = (global_pipe_idx % WEIGHT_PIPE_MAX) << log2_OUTPUT_ATOM_SIZE;
+    int global_pipe_row = global_pipe_idx  / NUM_OUTPUT_ATOMS;
+    int global_pipe_offset = global_pipe_row << log2_TILE_SIZE;
+    int input_pipe_offset = (global_pipe_row % INPUT_PIPE_MAX) * BATCH_SIZE;
+
+    // int buffer_stage = global_pipe_idx % WEIGHT_PIPE_MAX;
     if (global_pipe_idx % NUM_OUTPUT_ATOMS == 0) {
       #pragma unroll
       for (int i = threadIdx.x; i < NUM_CHUNKS_A; i += NUM_THREADS) {
         int src_row = i >> log2_CHUNKS_PER_ROW_A;
-        int dst_row = src_row + ((global_pipe_idx / NUM_OUTPUT_ATOMS) % INPUT_PIPE_MAX) * BATCH_SIZE;
+        int dst_row = src_row + input_pipe_offset;
         
         int dst_col = (i & (CHUNKS_PER_ROW_A - 1)) << log2_CHUNK_SIZE;
-        int src_col = dst_col + (global_pipe_idx / NUM_OUTPUT_ATOMS) * TILE_SIZE;
-        
-        // if (i == 0) {
-          // printf("Warm up: threadIdx.x: %d, i: %d, global_pipe_idx: %d, loading [input] tile. [%p](%d, %d) -> (%d, %d)\n", threadIdx.x, i, global_pipe_idx, (void*)input_dmem(src_row, src_col), src_row, src_col, dst_row, dst_col);
-        // }
+        int src_col = dst_col + global_pipe_offset;
         load_smem(input_smem(dst_row, dst_col), input_dmem(src_row, src_col));
       }
     }
     #pragma unroll
     for (int i = threadIdx.x; i < NUM_CHUNKS_B; i += NUM_THREADS) {
       int dst_row = (i & (CHUNKS_PER_COL_B - 1)) << log2_CHUNK_SIZE;
-      int src_row = dst_row + (global_pipe_idx / NUM_OUTPUT_ATOMS) * TILE_SIZE;
-      
-      int src_stage = global_pipe_idx % NUM_OUTPUT_ATOMS;
-      int buffer_stage = global_pipe_idx % WEIGHT_PIPE_MAX;
+      int src_row = dst_row + global_pipe_offset;
 
       int col_within = i >> log2_CHUNKS_PER_COL_B;
-      int src_col = src_stage * OUTPUT_ATOM_SIZE + col_within;
-      int dst_col = buffer_stage * OUTPUT_ATOM_SIZE + col_within;
+      int src_col = src_stage_offset + col_within;
+      int dst_col = buffer_stage_offset + col_within;
 
       load_smem(weight_smem(dst_row, dst_col), weight_dmem(src_row, src_col));
     }
@@ -209,24 +211,30 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
       }
     }
   }
-#pragma unroll
+#pragma unroll 2
   for (int for_idx = 0; for_idx < FORLOOP_RANGE; for_idx++) {
     int cur_input_stage = for_idx % INPUT_PIPE_MAX;
 
     // Loop over output atoms for this K-slice
 #pragma unroll
     for (int output_atom_idx = 0; output_atom_idx < NUM_OUTPUT_ATOMS; ++output_atom_idx, ++global_pipe_idx) {
+      int src_stage_offset = (global_pipe_idx % NUM_OUTPUT_ATOMS) << log2_OUTPUT_ATOM_SIZE;
+      int buffer_stage_offset = (global_pipe_idx % WEIGHT_PIPE_MAX) << log2_OUTPUT_ATOM_SIZE;
+      int global_pipe_row = global_pipe_idx  / NUM_OUTPUT_ATOMS;
+      int global_pipe_offset = global_pipe_row << log2_TILE_SIZE;
+      int input_pipe_offset = (global_pipe_row % INPUT_PIPE_MAX) * BATCH_SIZE;
+
       // Prefetch next weight atom into ring buffer stage_write
       if (global_pipe_idx < TOTAL_WEIGHT_BLOCKS_TO_LOAD) {
         // Load input tile at the first output atom
         if (global_pipe_idx % NUM_OUTPUT_ATOMS == 0) {
           #pragma unroll
-          for (int i = threadIdx.x; i < NUM_CHUNKS_A; i += NUM_THREADS) {
+          for (int i = threadIdx.x; i < NUM_CHUNKS_A; i += NUM_THREADS) { // 1 time
             int src_row = i >> log2_CHUNKS_PER_ROW_A;
-            int dst_row = src_row + ((global_pipe_idx / NUM_OUTPUT_ATOMS) % INPUT_PIPE_MAX) * BATCH_SIZE;
+            int dst_row = src_row + input_pipe_offset;
             
             int dst_col = (i & (CHUNKS_PER_ROW_A - 1)) << log2_CHUNK_SIZE;
-            int src_col = dst_col + (global_pipe_idx / NUM_OUTPUT_ATOMS) * TILE_SIZE;
+            int src_col = dst_col + global_pipe_offset;
             
             load_smem(input_smem(dst_row, dst_col), input_dmem(src_row, src_col));
           }
@@ -234,14 +242,11 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
 #pragma unroll
         for (int i = threadIdx.x; i < NUM_CHUNKS_B; i += NUM_THREADS) {
           int dst_row = (i & (CHUNKS_PER_COL_B - 1)) << log2_CHUNK_SIZE;
-          int src_row = dst_row + (global_pipe_idx / NUM_OUTPUT_ATOMS) * TILE_SIZE;
-
-          int src_stage = global_pipe_idx % NUM_OUTPUT_ATOMS;
-          int buffer_stage = global_pipe_idx % WEIGHT_PIPE_MAX;
+          int src_row = dst_row + global_pipe_offset;
           
           int col_within = i >> log2_CHUNKS_PER_COL_B;
-          int src_col = src_stage * OUTPUT_ATOM_SIZE + col_within;
-          int dst_col = buffer_stage * OUTPUT_ATOM_SIZE + col_within;
+          int src_col = src_stage_offset + col_within;
+          int dst_col = buffer_stage_offset + col_within;
 
           load_smem(weight_smem(dst_row, dst_col),
                     weight_dmem(src_row, src_col));
@@ -265,7 +270,7 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
           int n_col = (n << (4 + log2_NUM_WARPS_N)) + (warp_col << 4) +
                       ((lane_idx >> 4) << 3) + (lane_idx & 0x7);
           bool is_weight_valid = (n_col < OUTPUT_ATOM_SIZE);
-#pragma unroll
+#pragma unroll 0
           for (uint32_t k = 0; k < NUM_ITERS_K; k++) {
             int m_col = (warp_row << (4 + log2_NUM_ITERS_K)) + (k << 4) +
                         ((lane_idx >> 4) << 3);
@@ -298,7 +303,7 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
     // We always use NUM_WARPS_K = 1
     assert(false);
   } else {
-    #pragma unroll
+#pragma unroll
     for (uint32_t output_atom_idx = 0; output_atom_idx < NUM_OUTPUT_ATOMS; output_atom_idx++) {
 #pragma unroll
       for (uint32_t m = 0; m < NUM_ITERS_M; m++) {
