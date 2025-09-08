@@ -356,29 +356,35 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
       const size_t smem_repeat_row = 1;
 
       auto &qkv =
-          task_desc.inputs[0]; // [num_tokens, (num_q + 2*num_kv)*head_dim]
+          task_desc.inputs[0]; // [max_tokens, (num_q + 2*num_kv)*head_dim]
       auto &k_cache =
           task_desc.inputs[1]; // [num_pages, page_size, num_kv, head_dim]
 
-      int const num_tokens = qkv.dim[0];
+      int const max_tokens = qkv.dim[0];
       int const qkv_cols = qkv.dim[1];
       int const num_pages = k_cache.dim[0];
       int const page_size = k_cache.dim[1];
       int const num_kv_heads = k_cache.dim[2];
       int const head_dim = k_cache.dim[3];
       int const num_q_heads = qkv_cols / head_dim - 2 * num_kv_heads;
-      assert(num_q_heads > 0 && "Invalid num_q_heads derived from qkv");
 
+      assert(num_q_heads > 0 && "Invalid num_q_heads derived from qkv");
+      
       if (param_id == 0) {
-      // map 2D qkv to 3D: [depth=num_tokens, row=num heads, col=head_dim]
+        // map 2D qkv to 3D: [depth=num_tokens, row=num heads, col=head_dim]
+//    qkv.dim: 8, 768
+//    qkv.stride: 6144, 1
+      // printf("qkv.dim: %d, %d\n", qkv.dim[0], qkv.dim[1]);
+      // printf("qkv.stride: %d, %d\n", qkv.stride[0], qkv.stride[1]);
+
       uint64_t gmem_shape[3] = {
-          static_cast<uint64_t>(num_tokens),
+          static_cast<uint64_t>(max_tokens),
           static_cast<uint64_t>(num_q_heads + 2 * num_kv_heads),
           static_cast<uint64_t>(head_dim)};
       uint64_t gmem_stride[3] = {
-          1, static_cast<uint64_t>(head_dim), static_cast<uint64_t>((num_q_heads + 2 * num_kv_heads) * head_dim)};
+          1, static_cast<uint64_t>(head_dim), static_cast<uint64_t>(qkv.stride[0])};
       uint32_t smem_shape[3] = {
-          static_cast<uint32_t>(num_tokens),
+          static_cast<uint32_t>(max_tokens),
           static_cast<uint32_t>(tma_desc_id == 0 ? num_q_heads : num_kv_heads),
           static_cast<uint32_t>(TMA_CP_ASYNC_SIZE)};
       const size_t smem_repeat_col = static_cast<size_t>(
@@ -417,11 +423,11 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
                                      smem_repeat_col);
       }
       else if (param_id == 3) {
-        uint64_t gmem_shape[2] = {static_cast<uint64_t>(num_tokens * num_q_heads),
+        uint64_t gmem_shape[2] = {static_cast<uint64_t>(max_tokens * num_q_heads),
                                   static_cast<uint64_t>(head_dim)};
         uint64_t gmem_stride[2] = {1, static_cast<uint64_t>(head_dim)};
 
-        uint32_t smem_shape[2] = {static_cast<uint32_t>(num_tokens * num_q_heads),
+        uint32_t smem_shape[2] = {static_cast<uint32_t>(max_tokens * num_q_heads),
                                   static_cast<uint32_t>(TMA_CP_ASYNC_SIZE)};
         const size_t smem_repeat_col = static_cast<size_t>(
             (head_dim + TMA_CP_ASYNC_SIZE - 1) / TMA_CP_ASYNC_SIZE);
