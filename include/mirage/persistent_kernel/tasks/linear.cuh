@@ -32,7 +32,7 @@ template <typename T,
           int OUTPUT_SIZE,
           int REDUCTION_SIZE,
           int O_STRIDE = OUTPUT_SIZE,
-          int PIPE_MAX = 3>
+          int PIPE_MAX = 2>
 __device__ __forceinline__ void linear_kernel(void const *input_ptr,
                                               void const *weight_ptr,
                                               void const *residual_ptr,
