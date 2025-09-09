@@ -273,20 +273,20 @@ __device__ void execute_worker(RuntimeConfig config) {
           &worker_queues[queue_idx][cur_task_pos[queue_idx] %
                                     config.per_worker_queue_len]);
 #ifdef MPK_ENABLE_VERBOSE
-      printf("[%d][FTCH] worker_id(%d) queue_idx(%d) cur_task_pos(%llu, "
-             "%llu) last_task_pos(%llu, %llu) "
-             "task_id(%llu) task_type(%d) event_id(%llx) \n",
-             config.my_gpu_id,
-             worker_id,
-             queue_idx,
-             cur_task_pos[0],
-             cur_task_pos[1],
-             last_task_pos[0],
-             last_task_pos[1],
-             get_task_position_index(cur_task_id),
-             config.all_tasks[get_task_position_index(cur_task_id)].task_type,
-             config.all_tasks[get_task_position_index(cur_task_id)]
-                 .trigger_event);
+      printf(
+          "[%d][FTCH] worker_id(%d) queue_idx(%d) cur_task_pos(%llu, "
+          "%llu) last_task_pos(%llu, %llu) "
+          "task_id(%llu) task_type(%d) event_id(%llx) \n",
+          config.my_gpu_id,
+          worker_id,
+          queue_idx,
+          cur_task_pos[0],
+          cur_task_pos[1],
+          last_task_pos[0],
+          last_task_pos[1],
+          get_task_position_index(cur_task_id),
+          config.all_tasks[get_task_position_index(cur_task_id)].task_type,
+          config.all_tasks[get_task_position_index(cur_task_id)].trigger_event);
 #endif
     }
     __syncthreads();
@@ -585,7 +585,7 @@ __device__ void execute_scheduler(RuntimeConfig config, int offset) {
       }
       // This is the ending task of the current task graph
       if (e.event_type == EVENT_END_OF_TASK_GRAPH) {
-#ifdef MPK_ENABLE_VERBOSE 
+#ifdef MPK_ENABLE_VERBOSE
         printf("[SCHD] END_OF_TASK_GRAPH\n");
 #endif
 
