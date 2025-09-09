@@ -164,7 +164,7 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
 
   // Warm up weight and input tiles for the first WEIGHT_PIPE_MAX - 1 atoms
   int global_pipe_idx = 0;
-#pragma unroll 0
+//#pragma unroll 0
   for (; global_pipe_idx < WEIGHT_PIPE_MAX - 1; ++global_pipe_idx) {
     int src_stage_offset = (global_pipe_idx % NUM_OUTPUT_ATOMS) << log2_OUTPUT_ATOM_SIZE;
     int buffer_stage_offset = (global_pipe_idx % WEIGHT_PIPE_MAX) << log2_OUTPUT_ATOM_SIZE;
@@ -270,7 +270,7 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
           int n_col = (n << (4 + log2_NUM_WARPS_N)) + (warp_col << 4) +
                       ((lane_idx >> 4) << 3) + (lane_idx & 0x7);
           bool is_weight_valid = (n_col < OUTPUT_ATOM_SIZE);
-#pragma unroll 0
+#pragma unroll
           for (uint32_t k = 0; k < NUM_ITERS_K; k++) {
             int m_col = (warp_row << (4 + log2_NUM_ITERS_K)) + (k << 4) +
                         ((lane_idx >> 4) << 3);
