@@ -134,8 +134,6 @@ struct RuntimeConfig {
   int max_seq_length;     // Metadata for LLM serving
   int *new_token_nums;    // Metadata for LLM serving
   void *profiler_buffer;
-  bool verbose;
-  bool profiling;
   bool split_worker_scheduler;
 };
 
