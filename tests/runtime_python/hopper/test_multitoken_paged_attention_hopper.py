@@ -9,10 +9,10 @@ torch.set_printoptions(profile="full")
 qo_heads = 4
 kv_heads = 1
 head_dim = 128
-page_size = 64
+page_size = 4096
 max_num_pages = 64
 prompt_len = 8
-max_tokens = 4
+max_tokens = 8
 
 device = "cuda"
 dtype = torch.bfloat16
@@ -63,15 +63,16 @@ def torch_multitoken_paged_attention(
     sin,
     eps=1e-6,
 ):
-    first_page_pos = paged_kv_indptr_buffer[request_id]
-    last_page_pos = paged_kv_indptr_buffer[request_id + 1]
-    num_pages = last_page_pos - first_page_pos
-    page_indices = [
+    first_page_pos = paged_kv_indptr_buffer[request_id] #0
+    last_page_pos = paged_kv_indptr_buffer[request_id + 1] #1
+    num_pages = last_page_pos - first_page_pos # 1
+    page_indices = [ # 0
         paged_kv_indices_buffer[i] for i in range(first_page_pos, last_page_pos)
     ]
-    last_page_len = paged_kv_last_page_len_buffer[request_id]
+    last_page_len = paged_kv_last_page_len_buffer[request_id] # 16
     seq_len = (num_pages - 1) * page_size + last_page_len
-    k_cache = torch.cat(
+    # import pdb; pdb.set_trace()
+    k_cache = torch.cat( #(64,128)
         [paged_k_cache[page_idx] for page_idx in page_indices],
         dim=0,
     )
@@ -124,9 +125,9 @@ paged_v_cache = torch.empty(
     device=device,
     dtype=dtype,
 )
-paged_kv_indptr_buffer = torch.arange(
-    max_num_pages + 1, device=device, dtype=torch.int32
-)
+# paged_kv_indptr_buffer = torch.arange(
+#     max_num_pages + 1, device=device, dtype=torch.int32
+# )
 qo_indptr_buffer = torch.tensor([0, max_tokens], device=device, dtype=torch.int32)
 paged_kv_indptr_buffer = torch.tensor([0, 1], device=device, dtype=torch.int32)
 paged_kv_indices_buffer = torch.arange(max_num_pages, device=device, dtype=torch.int32)
@@ -145,9 +146,9 @@ qkv = torch.randn(
     (max_tokens, (qo_heads + 2 * kv_heads) * head_dim), device=device, dtype=dtype
 )
 
-# for i in range(qkv.shape[0]):
-#     for j in range(qkv.shape[1]):
-#         qkv[i, j] = 0.1 + 0.1 * (i * qkv.shape[1] + j)
+for i in range(qkv.shape[0]):
+    for j in range(qkv.shape[1]):
+        qkv[i, j] = 0.1 + 0.1 * (i * qkv.shape[1] + j)
 
 # print("qkv.shape", qkv.shape)
 # print("qkv[:, :qo_heads * head_dim] is", qkv[:, :qo_heads * head_dim].shape)

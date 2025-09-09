@@ -72,7 +72,8 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
     void const *cos_ptr,
     void const *sin_ptr,
     float q_eps,
-    float k_eps) {
+    float k_eps,
+    void *output_ptr) {
   constexpr int NUM_QO_PER_KV = NUM_QO_HEADS / NUM_KV_HEADS;
 
   constexpr int KV_TILE_SIZE = 64;
@@ -145,12 +146,16 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
 
   T *__restrict__ d_paged_k_cache = reinterpret_cast<T *>(paged_k_cache_ptr);
   T *__restrict__ d_paged_v_cache = reinterpret_cast<T *>(paged_v_cache_ptr);
+  T *__restrict__ d_output =
+  reinterpret_cast<T *>(output_ptr) + first_token_pos * O_STRIDE;
 
   //  DTensors' layouts
   using KVCacheDmem = dmem_row<T, KV_TILE_SIZE, HEAD_DIM, KV_CACHE_STRIDE>;
+  using ODmem = dmem_row<T, MAX_TOKENS, HEAD_DIM * NUM_QO_PER_KV, O_STRIDE>;
 
   KVCacheDmem paged_k_cache_dmem(d_paged_k_cache),
       paged_v_cache_dmem(d_paged_v_cache);
+  ODmem o_dmem(d_output);
 
   // STensors' offsets and sizes
 
@@ -933,9 +938,19 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
     async_proxy_fence();
 
     // copy back to dmem
-    if (warp_idx % 4 == 0 && lane_id() == 0) {
-      tma_output.tma_store_async(o_smem(0, 0), {0, 0});
-      store_commit_group();
+    // if (warp_idx % 4 == 0 && lane_id() == 0) {
+    //   tma_output.tma_store_async(o_smem(0, 0), {0, 0});
+    //   store_commit_group();
+    // }
+        // store the output
+    for (int elem_idx = threadIdx.x;
+        elem_idx < num_tokens * NUM_QO_PER_KV * HEAD_DIM;
+        elem_idx += NUM_THREADS) {
+      int src_row = elem_idx / HEAD_DIM;
+      int src_col = elem_idx % HEAD_DIM;
+      int dst_row = src_row / NUM_QO_PER_KV;
+      int dst_col = src_col + (src_row % NUM_QO_PER_KV) * HEAD_DIM;
+      o_dmem.at(dst_row, dst_col) = o_smem.at(src_row, src_col);
     }
   }
 }

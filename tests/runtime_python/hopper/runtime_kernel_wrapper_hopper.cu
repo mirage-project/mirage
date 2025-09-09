@@ -655,7 +655,7 @@ void launch_multitoken_paged_attention_hopper(
   constexpr int TMA_CP_SIZE = 64;
   constexpr int KV_TILE_SIZE = 64;
   constexpr int prompt_len = 8;
-  constexpr int num_tokens = 4;
+  constexpr int num_tokens = 8;
 
   constexpr int NUM_PAGES = 100;
   constexpr int TAIL_PAGE_SIZE = prompt_len % PAGE_SIZE;
@@ -695,7 +695,7 @@ void launch_multitoken_paged_attention_hopper(
                           1,
                           1,
                           (HEAD_DIM + TMA_CP_SIZE - 1) / TMA_CP_SIZE,
-                          KV_TILE_SIZE *
+                          num_tokens * NUM_KV_HEADS *
                               TMA_CP_SIZE, // skip number of rows between
                                            // current 64 cols and next 64 cols
                           true>;
@@ -728,14 +728,14 @@ void launch_multitoken_paged_attention_hopper(
                           PAGE_SIZE,
                           HEAD_DIM,
                           1,
-                          TAIL_PAGE_SIZE,
+                          KV_TILE_SIZE,
                           TMA_CP_SIZE,
                           PAGE_SIZE * HEAD_DIM,
                           HEAD_DIM,
                           1,
                           1,
                           (HEAD_DIM + TMA_CP_SIZE - 1) / TMA_CP_SIZE,
-                          TAIL_PAGE_SIZE * NUM_KV_HEADS * TMA_CP_SIZE, // not sure tail or kv tile size, to be determined
+                          KV_TILE_SIZE * NUM_KV_HEADS * TMA_CP_SIZE, // not sure tail or kv tile size, to be determined
                           true>;
 
   using TMA_OUTPUT =
