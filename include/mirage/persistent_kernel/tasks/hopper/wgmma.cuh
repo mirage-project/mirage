@@ -1381,7 +1381,8 @@ __device__ static inline void
 
       float *frag_k;
       if constexpr (N == 16) {
-        frag_k = frag + k_iter * 8;
+        // frag_k = frag + k_iter * 8;
+        frag_k = frag;
         wgmma_m64n16k16_bf16bf16bf32_rs<tnspB>(a_frag_k[0],
                                                a_frag_k[1],
                                                a_frag_k[2],
@@ -1396,7 +1397,8 @@ __device__ static inline void
                                                frag_k[6],
                                                frag_k[7]);
       } else if constexpr (N == 64) {
-        frag_k = frag + k_iter * 32;
+        // frag_k = frag + k_iter * 32;
+        frag_k = frag;
         wgmma_m64n64k16_bf16bf16bf32_rs<tnspB>(a_frag_k[0],
                                                a_frag_k[1],
                                                a_frag_k[2],

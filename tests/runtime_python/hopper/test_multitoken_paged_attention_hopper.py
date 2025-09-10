@@ -11,7 +11,7 @@ kv_heads = 1
 head_dim = 128
 page_size = 4096
 max_num_pages = 64
-prompt_len = 8
+prompt_len = 45
 max_tokens = 8
 
 device = "cuda"
@@ -81,6 +81,7 @@ def torch_multitoken_paged_attention(
         dim=0,
     )
 
+    
     norm_q = torch.zeros_like(q)
     norm_k = torch.zeros_like(k_cache[-num_tokens:, :])
     for i in range(num_tokens):
@@ -128,12 +129,24 @@ paged_v_cache = torch.empty(
 # paged_kv_indptr_buffer = torch.arange(
 #     max_num_pages + 1, device=device, dtype=torch.int32
 # )
-qo_indptr_buffer = torch.tensor([0, max_tokens], device=device, dtype=torch.int32)
+# only handle 2,3,4 tokens for this request
+# start, end = 2, 5
+start, end = 0, max_tokens
+num_tokens = end - start 
+qo_indptr_buffer = torch.tensor([start, end], device=device, dtype=torch.int32)
 paged_kv_indptr_buffer = torch.tensor([0, 1], device=device, dtype=torch.int32)
 paged_kv_indices_buffer = torch.arange(max_num_pages, device=device, dtype=torch.int32)
 paged_kv_last_page_len_buffer = torch.tensor(
-    [prompt_len + max_tokens], device=device, dtype=torch.int32
+    [prompt_len + num_tokens], device=device, dtype=torch.int32
 )
+
+# fill the kv cache with previous prompt
+prompt_k = torch.randn((prompt_len, kv_heads * head_dim), device=device, dtype=dtype)
+prompt_v = torch.randn((prompt_len, kv_heads * head_dim), device=device, dtype=dtype)
+
+page_idx = paged_kv_indices_buffer[0].item()
+paged_k_cache[page_idx, 0:prompt_len] = prompt_k
+paged_v_cache[page_idx, 0:prompt_len] = prompt_v
 
 torch_paged_k_cache = paged_k_cache.clone()
 torch_paged_v_cache = paged_v_cache.clone()
@@ -148,7 +161,8 @@ qkv = torch.randn(
 
 for i in range(qkv.shape[0]):
     for j in range(qkv.shape[1]):
-        qkv[i, j] = 0.1 + 0.1 * (i * qkv.shape[1] + j)
+        # qkv[i, j] = 0.1 + 0.1 * (i * qkv.shape[1] + j)
+        qkv[i, j] = 0.1
 
 # print("qkv.shape", qkv.shape)
 # print("qkv[:, :qo_heads * head_dim] is", qkv[:, :qo_heads * head_dim].shape)
@@ -168,8 +182,8 @@ page_idx = paged_kv_indices_buffer[0]
 page_offset = prompt_len
 assert prompt_len < page_size, "Assume prompt can fit in a single page for now"
 
-torch_paged_k_cache[page_idx, page_offset : page_offset + max_tokens] = k
-torch_paged_v_cache[page_idx, page_offset : page_offset + max_tokens] = v
+torch_paged_k_cache[page_idx, page_offset : page_offset + num_tokens] = k[start:end]
+torch_paged_v_cache[page_idx, page_offset : page_offset + num_tokens] = v[start:end]
 
 mirage_qkv = qkv.clone()
 
@@ -203,20 +217,25 @@ runtime_kernel.multitoken_paged_attention(
     eps,
 )
 
+q_slice = qkv[start:end, : qo_heads * head_dim].view(num_tokens, qo_heads, head_dim)
 torch_out = torch_multitoken_paged_attention(
-    q,
+    q_slice,
     torch_paged_k_cache,
     torch_paged_v_cache,
     paged_kv_indptr_buffer,
     paged_kv_indices_buffer,
     paged_kv_last_page_len_buffer,
     0,
-    max_tokens,
+    num_tokens,
     q_norm_weight,
     k_norm_weight,
     torch_cos,
     torch_sin,
     eps=eps,
 )
+
+print("mirage_output", mirage_output)
+print("torch_out", torch_out)
 print("Ratio (Mirage / Torch):")
-print(mirage_output / torch_out)
+mirage_output_slice = mirage_output[start*qo_heads:end*qo_heads, :]
+print(mirage_output_slice / torch_out)
