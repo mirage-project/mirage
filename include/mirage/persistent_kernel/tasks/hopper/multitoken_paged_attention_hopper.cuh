@@ -285,7 +285,7 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
 
   using Q_DESC = wgmma::mma_descriptor<QOSmem>;
   using K_DESC = wgmma::mma_descriptor<KVSmem, false>;
-  using V_DESC = wgmma::mma_descriptor<KVSmem, false>;
+  using V_DESC = wgmma::mma_descriptor<KVSmem, true>;
 
   QOSmem q_smem(s_q), o_smem(s_o);
   KVSmem k_smem(s_k), v_smem(s_v);
@@ -352,7 +352,7 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
                                           : (boundary - begin);
 
       int kv_rows = curr_iter_len - cache_rows;
-      if (1) {
+      if (threadIdx.x == 0 && DEBUG_HOPPER) {
       printf("blockIdx.x: %d, begin: %d, end: %d, boundary: %d, cache_rows: %d, kv_rows: %d, curr_iter_len: %d\n", blockIdx.x, begin, end, boundary, cache_rows, kv_rows, curr_iter_len);
       }
       
@@ -418,10 +418,15 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
       }
       wait(compute_done[slot], phase ^ 1);
 
+      int begin = (iter + 1) * KV_TILE_SIZE;
+      if (begin >= seq_len) continue;
+
+      int next_iter_len = min(seq_len - begin, KV_TILE_SIZE);
+
       
-      int next_iter_len = iter + 1 < num_iters
-      ? min(seq_len - cp_finished_seq_len, KV_TILE_SIZE)
-      : 0;
+      // int next_iter_len = iter + 1 < num_iters
+      // ? min(seq_len - cp_finished_seq_len, KV_TILE_SIZE)
+      // : 0;
 
       if (threadIdx.x == 128 && blockIdx.x <= 10 && DEBUG_HOPPER) {
         printf("next_iter_len: %d, num_iter is %d, iter %d wait compute_done done, blockIdx.x: %d\n", next_iter_len, num_iters, iter, blockIdx.x);
@@ -434,7 +439,8 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
           //                               next_iter_len * HEAD_DIM * sizeof(T));
           // set_barrier_transaction_bytes(v_barrier[slot],
           //                               next_iter_len * HEAD_DIM * sizeof(T));
-          int begin = cp_finished_seq_len;
+          // int begin = cp_finished_seq_len;
+          int begin = (iter + 1) * KV_TILE_SIZE;
           int end = begin + next_iter_len;
           int boundary = seq_len - num_tokens;
           int cache_rows = (begin >= boundary) ? 0

@@ -11,7 +11,7 @@ kv_heads = 1
 head_dim = 128
 page_size = 4096
 max_num_pages = 64
-prompt_len = 45
+prompt_len = 501
 max_tokens = 8
 
 device = "cuda"
@@ -131,7 +131,7 @@ paged_v_cache = torch.empty(
 # )
 # only handle 2,3,4 tokens for this request
 # start, end = 2, 5
-start, end = 0, max_tokens
+start, end = 2, 5
 num_tokens = end - start 
 qo_indptr_buffer = torch.tensor([start, end], device=device, dtype=torch.int32)
 paged_kv_indptr_buffer = torch.tensor([0, 1], device=device, dtype=torch.int32)
@@ -162,7 +162,7 @@ qkv = torch.randn(
 for i in range(qkv.shape[0]):
     for j in range(qkv.shape[1]):
         # qkv[i, j] = 0.1 + 0.1 * (i * qkv.shape[1] + j)
-        qkv[i, j] = 0.1
+        qkv[i, j] = 0.5
 
 # print("qkv.shape", qkv.shape)
 # print("qkv[:, :qo_heads * head_dim] is", qkv[:, :qo_heads * head_dim].shape)
