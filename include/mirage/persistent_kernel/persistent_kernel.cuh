@@ -256,23 +256,28 @@ __device__ __forceinline__ bool
 __device__ __forceinline__ bool
     prepare_next_batch(RuntimeConfig const &config) {
   int step = config.step[0];
-  if (config.verbose) {
-    printf("step: %d, new_token_num(%p): %d, new_token_ids:\n",
-           step,
-           config.new_token_nums,
-           config.new_token_nums[0]);
-    for (int i = 0; i < config.new_token_nums[0]; i++) {
-      printf("%lld ", config.tokens[step + 1 + i]);
-    }
-    printf("\n");
+#ifdef MPK_EANBLE_VERBOSE
+  printf("step: %d, new_token_num(%p): %d, new_token_ids:\n",
+         step,
+         config.new_token_nums,
+         config.new_token_nums[0]);
+  for (int i = 0; i < config.new_token_nums[0]; i++) {
+    printf("%lld ", config.tokens[step + 1 + i]);
   }
+  printf("\n");
+#endif
   config.step[0] = step + config.new_token_nums[0];
-  if ((step + 2 >= config.max_seq_length) || (config.profiling) ||
+
+#ifdef MPK_ENABLE_PROFILING
+  return false;
+#else
+  if ((step + 2 >= config.max_seq_length) ||
       (config.tokens[step + 1] == config.eos_token_id)) {
     return false;
   } else {
     return true;
   }
+#endif
 }
 #endif
 
@@ -385,13 +390,13 @@ __device__ void execute_worker(RuntimeConfig config) {
   __shared__ TaskId cur_task_id;
   __shared__ TaskDesc task_desc;
 
+#ifdef MPK_ENABLE_PROFILING
   PROFILER_CLOSURE_PARAMS_DECL;
-  if (config.profiling) {
-    PROFILER_INIT(static_cast<uint64_t *>(config.profiler_buffer),
-                  0,
-                  1,
-                  (threadIdx.x % 128 == 0));
-  }
+  PROFILER_INIT(static_cast<uint64_t *>(config.profiler_buffer),
+                0,
+                1,
+                (threadIdx.x % 128 == 0));
+#endif
 
   int worker_id = blockIdx.x;
   __shared__ TaskId *worker_queues[2];
@@ -422,16 +427,13 @@ __device__ void execute_worker(RuntimeConfig config) {
   }
 
   int queue_idx = 0;
+#ifdef MPK_ENABLE_PROFILING
   size_t task_counter = 0;
+#endif
   while (true) {
     // fetch next task from a task queue
     if (threadIdx.x == 0) {
       while (cur_task_pos[queue_idx] == last_task_pos[queue_idx]) {
-        //__threadfence();
-        // last_task_id = config.worker_queue_last_ready_task_id[worker_id];
-        // last_task_id =
-        //    atomicAdd(&config.worker_queue_last_ready_task_id[worker_id],
-        //    0);
         last_task_pos[queue_idx] = ld_acquire_gpu_u64(
             &config
                  .worker_queue_last_ready_task_id[worker_queue_ids[queue_idx]]);
@@ -448,23 +450,22 @@ __device__ void execute_worker(RuntimeConfig config) {
       cur_task_id = ld_relaxed_gpu_u64(
           &worker_queues[queue_idx][cur_task_pos[queue_idx] %
                                     config.per_worker_queue_len]);
-
-      if (config.verbose) {
-        printf("[%d][FTCH] worker_id(%d) queue_idx(%d) cur_task_pos(%llu, "
-               "%llu) last_task_pos(%llu, %llu) "
-               "task_id(%llu) task_type(%d) event_id(%llx) \n",
-               config.my_gpu_id,
-               worker_id,
-               queue_idx,
-               cur_task_pos[0],
-               cur_task_pos[1],
-               last_task_pos[0],
-               last_task_pos[1],
-               get_task_position_index(cur_task_id),
-               config.all_tasks[get_task_position_index(cur_task_id)].task_type,
-               config.all_tasks[get_task_position_index(cur_task_id)]
-                   .trigger_event);
-      }
+#ifdef MPK_ENABLE_VERBOSE
+      printf(
+          "[%d][FTCH] worker_id(%d) queue_idx(%d) cur_task_pos(%llu, "
+          "%llu) last_task_pos(%llu, %llu) "
+          "task_id(%llu) task_type(%d) event_id(%llx) \n",
+          config.my_gpu_id,
+          worker_id,
+          queue_idx,
+          cur_task_pos[0],
+          cur_task_pos[1],
+          last_task_pos[0],
+          last_task_pos[1],
+          get_task_position_index(cur_task_id),
+          config.all_tasks[get_task_position_index(cur_task_id)].task_type,
+          config.all_tasks[get_task_position_index(cur_task_id)].trigger_event);
+#endif
     }
     __syncthreads();
     int *smem_as_int = reinterpret_cast<int *>(&task_desc);
@@ -497,9 +498,11 @@ __device__ void execute_worker(RuntimeConfig config) {
     }
     __syncthreads();
 
-    if (config.profiling && task_desc.task_type != TASK_TERMINATE) {
+#ifdef MPK_ENABLE_PROFILING
+    if (task_desc.task_type != TASK_TERMINATE) {
       PROFILER_EVENT_START(task_desc.task_type, task_counter);
     }
+#endif
 
     // Successfully fetched a new task
     if (task_desc.task_type == TASK_TERMINATE) {
@@ -539,13 +542,20 @@ __device__ void execute_worker(RuntimeConfig config) {
                                          task_desc.inputs[0].dim[1],
                                          task_desc.inputs[0].stride[0]);
     } else {
+#ifdef MPK_ENABLE_VERBOSE
+      if (threadIdx.x == 0 && blockIdx.x == 0) {
+        printf("[worker] _execute_task EXECUTE_TASK %d\n", task_desc.task_type);
+      }
+#endif
       _execute_task(task_desc, config);
     }
     __syncthreads();
 
-    if (config.profiling && task_desc.task_type != TASK_TERMINATE) {
+#ifdef MPK_ENABLE_PROFILING
+    if (task_desc.task_type != TASK_TERMINATE) {
       PROFILER_EVENT_END(task_desc.task_type, task_counter++);
     }
+#endif
 
     // Trigger event
     if (threadIdx.x == 0) {
@@ -559,24 +569,23 @@ __device__ void execute_worker(RuntimeConfig config) {
         EventCounter count = atom_add_release_gpu_u64(
             &config.all_event_counters[event_index], 1);
         int num_triggers = config.all_event_num_triggers[event_index];
-        if (config.verbose) {
-          printf("[%d][DONE] worker_id(%d) iter_num(%llu) task_idx(%llu) "
-                 "event_id(%llu) "
-                 "event_type(local) count(%llu)\n",
-                 config.my_gpu_id,
-                 worker_id,
-                 get_task_iteration_num(cur_task_id),
-                 get_task_position_index(cur_task_id),
-                 event_id,
-                 count);
-        }
+#ifdef MPK_ENABLE_VERBOSE
+        printf("[%d][DONE] worker_id(%d) iter_num(%llu) task_idx(%llu) "
+               "event_id(%llu) "
+               "event_type(local) count(%llu)\n",
+               config.my_gpu_id,
+               worker_id,
+               get_task_iteration_num(cur_task_id),
+               get_task_position_index(cur_task_id),
+               event_id,
+               count);
+#endif
 
         if ((count + 1) == static_cast<EventCounter>(num_triggers) *
                                get_task_iteration_num(cur_task_id)) {
-          if (config.profiling) {
-            PROFILER_EVENT_START(TASK_SCHD_EVENTS, task_counter);
-          }
-
+#ifdef MPK_ENABLE_PROFILING
+          PROFILER_EVENT_START(TASK_SCHD_EVENTS, task_counter);
+#endif
           EventDesc event_desc = config.all_events[event_index];
           // The event has been triggered enough times
           // Refresh the event counter
@@ -617,24 +626,23 @@ __device__ void execute_worker(RuntimeConfig config) {
                   last_event_pos + 1);
             } while (old != last_event_pos);
           }
-          if (config.profiling) {
-            PROFILER_EVENT_END(TASK_SCHD_EVENTS, task_counter++);
-          }
+#ifdef MPK_ENABLE_PROFILING
+          PROFILER_EVENT_END(TASK_SCHD_EVENTS, task_counter++);
+#endif
         }
       } else {
         // Case 2: trigger a nvshmem event
         assert(task_desc.task_type == TASK_NVSHMEM_COPY);
         // Note that nvshmem copy task signal counter during data copy
         // we don't need to do anything here is the task type is NVSHMEM_COPY
-        if (config.verbose) {
-          printf("[%d][DONE] worker_id(%d) task_id(%llu) event_id(%llx) "
-                 "event_type(remote)\n",
-                 config.my_gpu_id,
-                 worker_id,
-                 get_task_position_index(cur_task_id),
-                 event_id);
-        }
-      }
+#ifdef MPK_ENABLE_VERBOSE
+        printf("[%d][DONE] worker_id(%d) task_id(%llu) event_id(%llx) "
+               "event_type(remote)\n",
+               config.my_gpu_id,
+               worker_id,
+               get_task_position_index(cur_task_id),
+               event_id);
+#endif
       cur_task_pos[queue_idx] += 1;
     }
   }
@@ -682,12 +690,12 @@ __device__ void execute_scheduler(RuntimeConfig config, int offset) {
     }
 
     // ONLY can run when comment this chunk
-    if (config.verbose) {
-      printf("[SCHD] sched_id(%d) first_worker(%llu) last_worker(%llu)\n",
-             sched_id,
-             my_first_worker,
-             my_last_worker);
-    }
+#ifdef MPK_ENABLE_VERBOSE
+    printf("[SCHD] sched_id(%d) first_worker(%llu) last_worker(%llu)\n",
+           sched_id,
+           my_first_worker,
+           my_last_worker);
+#endif
     size_t cur_event_pos[2], last_event_pos[2];
     for (int i = 0; i < 2; i++) {
       cur_event_pos[i] = 0;
@@ -705,9 +713,6 @@ __device__ void execute_scheduler(RuntimeConfig config, int offset) {
     int next_worker = my_first_worker;
     int queue_idx = 0;
     while (true) {
-      // if (config.profiling) {
-      //   PROFILER_EVENT_START(TASK_GET_EVENT, event_counter);
-      // }
       while (cur_event_pos[queue_idx] == last_event_pos[queue_idx]) {
         //__threadfence();
         // last_event_id = config.sched_queue_last_ready_event_id[sched_id];
@@ -734,9 +739,6 @@ __device__ void execute_scheduler(RuntimeConfig config, int offset) {
           &sched_queues[queue_idx]
                        [cur_event_pos[queue_idx] % config.per_sched_queue_len]);
       EventDesc e = config.all_events[event_id];
-      // if (config.profiling) {
-      //   PROFILER_EVENT_END(TASK_GET_EVENT, event_counter++);
-      // }
       if (is_termination_event(event_id, e)) {
         // terminate all workers
         if (sched_id < config.num_local_schedulers) {
@@ -755,6 +757,9 @@ __device__ void execute_scheduler(RuntimeConfig config, int offset) {
       }
       // This is the ending task of the current task graph
       if (e.event_type == EVENT_END_OF_TASK_GRAPH) {
+#ifdef MPK_ENABLE_VERBOSE
+        printf("[SCHD] END_OF_TASK_GRAPH\n");
+#endif
         // Check if we want to continue
         if (!prepare_next_batch(config)) {
           terminate_schedulers(config);
@@ -770,19 +775,17 @@ __device__ void execute_scheduler(RuntimeConfig config, int offset) {
           // worker CTAs before we increase its last_ready_task_id
           atom_add_release_gpu_u64(
               &config.worker_queue_last_ready_task_id[next_worker], 1);
-
-          if (config.verbose) {
-            printf("[%d][SCHD] END_OF_TASK_GRAPH schd_id(%d) "
-                   "iter_num(%llu) task_idx(1) "
-                   "worker_id(%d) "
-                   "worker_last_ready_pos(%llu)\n",
-                   config.my_gpu_id,
-                   sched_id,
-                   iteration_num + 1,
-                   next_worker,
-                   last_task_id + 1);
-          }
-
+#ifdef MPK_ENABLE_VERBOSE
+          printf("[%d][SCHD]EVENT_END_OF_TASK_GRAPH schd_id(%d) "
+                 "iter_num(%llu) task_idx(1) "
+                 "worker_id(%d) "
+                 "worker_last_ready_pos(%llu)\n",
+                 config.my_gpu_id,
+                 sched_id,
+                 iteration_num + 1,
+                 next_worker,
+                 last_task_id + 1);
+#endif
           next_worker = (next_worker == my_last_worker - 1) ? my_first_worker
                                                             : next_worker + 1;
         }
@@ -812,7 +815,8 @@ __device__ void execute_scheduler(RuntimeConfig config, int offset) {
               atom_add_release_gpu_u64(
                   &config.worker_queue_last_ready_task_id[next_worker], 1);
 
-              if (config.verbose && sched_id == 0) {
+#ifdef MPK_ENABLE_VERBOSE
+              if (sched_id == 0) {
                 printf("[%d][SCHD] EVENT_LAUNCH_DEPENDENT_TASKS schd_id(%d) "
                        "iter_num(%llu) task_idx(%llu) "
                        "worker_id(%d) "
@@ -829,6 +833,7 @@ __device__ void execute_scheduler(RuntimeConfig config, int offset) {
                        e.first_task_id,
                        e.last_task_id);
               }
+#endif
               next_worker = (next_worker == my_last_worker - 1)
                                 ? my_first_worker
                                 : next_worker + 1;
@@ -849,9 +854,6 @@ __device__ void execute_scheduler(RuntimeConfig config, int offset) {
           my_last_task += e.first_task_id;
         }
         for (size_t i = my_first_task; i < my_last_task; i++) {
-          // if (config.profiling) {
-          //   PROFILER_EVENT_START(TASK_SCHD_TASKS, event_counter);
-          // }
           //  size_t last_task_id = atomicAdd(
           //      &(config.worker_queue_next_free_task_id[next_worker]), 1);
           //  size_t last_task_id = atom_add_release_gpu_u64(
@@ -867,24 +869,21 @@ __device__ void execute_scheduler(RuntimeConfig config, int offset) {
           atom_add_release_gpu_u64(
               &config.worker_queue_last_ready_task_id[next_worker], 1);
 
-          if (config.verbose) {
-            printf("[%d][SCHD] EXECUTE_TASK schd_id(%d) iter_num(%llu) "
-                   "task_idx(%llu) "
-                   "worker_id(%d) "
-                   "worker_last_ready_pos(%llu)\n",
-                   config.my_gpu_id,
-                   sched_id,
-                   iteration_num,
-                   i,
-                   next_worker,
-                   last_task_id + 1);
-          }
+#ifdef MPK_ENABLE_VERBOSE
+          printf("[%d][SCHD] EXECUTE_TASK schd_id(%d) iter_num(%llu) "
+                 "task_idx(%llu) "
+                 "worker_id(%d) "
+                 "worker_last_ready_pos(%llu)\n",
+                 config.my_gpu_id,
+                 sched_id,
+                 iteration_num,
+                 i,
+                 next_worker,
+                 last_task_id + 1);
+#endif
 
           next_worker = (next_worker == my_last_worker - 1) ? my_first_worker
                                                             : next_worker + 1;
-          // if (config.profiling) {
-          //   PROFILER_EVENT_END(TASK_SCHD_TASKS, event_counter++);
-          // }
         }
       }
       cur_event_pos[queue_idx] += 1;
@@ -1015,8 +1014,6 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
   global_runtime_config.num_gpus = npes;
   global_runtime_config.my_gpu_id = mype;
   global_runtime_config.num_graphs = 1;
-  global_runtime_config.verbose = false;
-  global_runtime_config.profiling = profiler_buffer != nullptr;
   global_runtime_config.split_worker_scheduler = true;
 
   std::vector<TaskDesc> all_tasks;

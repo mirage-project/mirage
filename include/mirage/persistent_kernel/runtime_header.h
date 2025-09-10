@@ -156,8 +156,6 @@ struct RuntimeConfig {
   int total_num_requests; // Metadata for LLM serving
 #endif
   void *profiler_buffer;
-  bool verbose;
-  bool profiling;
   bool split_worker_scheduler;
 };
 
