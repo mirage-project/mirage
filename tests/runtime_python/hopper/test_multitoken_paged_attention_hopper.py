@@ -63,16 +63,15 @@ def torch_multitoken_paged_attention(
     sin,
     eps=1e-6,
 ):
-    first_page_pos = paged_kv_indptr_buffer[request_id] #0
-    last_page_pos = paged_kv_indptr_buffer[request_id + 1] #1
-    num_pages = last_page_pos - first_page_pos # 1
-    page_indices = [ # 0
+    first_page_pos = paged_kv_indptr_buffer[request_id]
+    last_page_pos = paged_kv_indptr_buffer[request_id + 1]
+    num_pages = last_page_pos - first_page_pos
+    page_indices = [
         paged_kv_indices_buffer[i] for i in range(first_page_pos, last_page_pos)
     ]
-    last_page_len = paged_kv_last_page_len_buffer[request_id] # 16
+    last_page_len = paged_kv_last_page_len_buffer[request_id]
     seq_len = (num_pages - 1) * page_size + last_page_len
-    # import pdb; pdb.set_trace()
-    k_cache = torch.cat( #(64,128)
+    k_cache = torch.cat(
         [paged_k_cache[page_idx] for page_idx in page_indices],
         dim=0,
     )
@@ -101,14 +100,10 @@ def torch_multitoken_paged_attention(
     v = v_cache[:seq_len, :]
     v = v.view(seq_len * kv_heads, head_dim)
     scores = torch.matmul(norm_q, k.transpose(-2, -1))
-    #scores = scores.reshape(num_tokens * qo_heads, (num_tokens + prompt_len)* kv_heads)
     assert scores.shape==(num_tokens * qo_heads, seq_len * kv_heads)
     mask = torch.tril(torch.randn((num_tokens, num_tokens), device=device, dtype=dtype))
     mask = torch.cat((torch.randn((num_tokens, prompt_len), device=device, dtype=dtype), mask), dim=-1)
     mask = mask.repeat_interleave(qo_heads, dim=0).repeat_interleave(kv_heads, dim=1)
-    # print("scores.shape", scores.shape)
-    # print("mask.shape", mask.shape)
-    # print(mask)
 
     scores = scores.masked_fill(mask == 0, float("-inf"))
     attn = F.softmax(scores / np.sqrt(head_dim), dim=-1)
@@ -153,25 +148,13 @@ torch_paged_v_cache = paged_v_cache.clone()
 
 all_cos = torch.randn((513, head_dim), device=device, dtype=dtype)
 all_sin = torch.randn((513, head_dim), device=device, dtype=dtype)
-#all_cos = torch.full((513, head_dim), 0.1, device=device, dtype=dtype)
-#all_sin = torch.full((513, head_dim), 0.1, device=device, dtype=dtype)
 qkv = torch.randn(
     (max_tokens, (qo_heads + 2 * kv_heads) * head_dim), device=device, dtype=dtype
 )
 
-for i in range(qkv.shape[0]):
-    for j in range(qkv.shape[1]):
-        # qkv[i, j] = 0.1 + 0.1 * (i * qkv.shape[1] + j)
-        qkv[i, j] = 0.5
-
-# print("qkv.shape", qkv.shape)
-# print("qkv[:, :qo_heads * head_dim] is", qkv[:, :qo_heads * head_dim].shape)
-# print("qkv[:, :qo_heads * head_dim] shape is", qkv[:, :qo_heads * head_dim].shape)
-# print("q is", qkv[:, :qo_heads * head_dim])
-
-#qkv = torch.full(
-#    (max_tokens, (qo_heads + 2 * kv_heads) * head_dim), 0.1, device=device, dtype=dtype
-#)
+# for i in range(qkv.shape[0]):
+#     for j in range(qkv.shape[1]):
+#         qkv[i, j] = 0.5
 
 q = qkv[:max_tokens, : qo_heads * head_dim]
 q = q.view(max_tokens, qo_heads, head_dim)

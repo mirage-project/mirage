@@ -138,7 +138,7 @@ __device__ __forceinline__ bool
         }
       }
       config.step[request_id] = step + num_tokens;
-      if ((step + num_tokens >= config.max_seq_length) || (config.profiling) ||
+      if ((step + num_tokens >= config.max_seq_length) ||
           ((config.tokens[request_id * MPK_MAX_SEQ_LENGTH + step +
                           num_tokens] == config.eos_token_id) &&
            (step + num_tokens >= prompt_len))) {
@@ -921,13 +921,11 @@ __global__ void persistent_kernel(RuntimeConfig config) {
 }
 
 __global__ void worker_kernel(RuntimeConfig config) {
-  printf("worker kernel start\n");
   worker_checker(config);
   execute_worker(config);
 }
 
 __global__ void scheduler_kernel(RuntimeConfig config) {
-  printf("scheduler kernel start\n");
   scheduler_checker(config);
   execute_scheduler(config, 0);
 }

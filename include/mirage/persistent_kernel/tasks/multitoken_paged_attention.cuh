@@ -19,13 +19,13 @@
 #include "dmem_layout.cuh"
 #include "element_binary.cuh"
 #include "element_unary.cuh"
-#include "hopper/utils.cuh"
 #include "mma.cuh"
 #include "norm.cuh"
 #include "reduction.cuh"
 #include "rotary_embedding.cuh"
 #include "smem_layout.cuh"
 #include "utils.cuh"
+
 namespace kernel {
 
 // NOTE(Jinchen): this task implements the paged attention where a causal mask
@@ -58,9 +58,6 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl(
     void const *sin_ptr,
     float q_eps,
     float k_eps) {
-  if (threadIdx.x >= 128) {
-    return;
-  }
   constexpr int NUM_QO_PER_KV = NUM_QO_HEADS / NUM_KV_HEADS;
 
   // NOTE(Jinchen): The input is a packed QKV tensor, which may contain
@@ -121,7 +118,7 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl(
           paged_kv_indices_buffer_ptr[first_page_pos + tail_offset + i];
     }
   }
-  wg_sync<128>(9);
+  __syncthreads();
 
   T const *__restrict__ d_q =
       reinterpret_cast<T const *>(qkv_ptr) + first_token_pos * QKV_STRIDE;
@@ -333,7 +330,7 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl(
       v_smem.set_ptr(s_v);
       v_buffer_smem.set_ptr(s_v_buffer);
     }
-    wg_sync<128>(9);
+    __syncthreads();
 
     int kv_tokens_to_process = min(
         curr_iter_len,
@@ -398,7 +395,7 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl(
       }
     }
 
-    wg_sync<128>(9);
+    __syncthreads();
 
     // update the KV Cache
     if (kv_tokens_to_process > 0) {
@@ -445,7 +442,7 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl(
         mma_m16n16k16_bf16bf16bf32(x_frag_f[m], q_frag, kt_frag, x_frag_f[m]);
       }
     }
-    wg_sync<128>(9);
+    __syncthreads();
 
     // update m_local: get partial max
     // NOTE(Jinchen): each thread maintains MMA_ITERS_M * 2 partial max
@@ -549,7 +546,7 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl(
         mma_m16n16k16_bf16bf16bf32(o[m][n], x_frag[m], v_frag, o[m][n]);
       }
     }
-    wg_sync<128>(9);
+    __syncthreads();
 
     curr_iter_len = next_iter_len;
   }
@@ -571,7 +568,7 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl(
       }
     }
   }
-  wg_sync<128>(9);
+  __syncthreads();
 
   // get global m, d, and o
   // each thread handles an element in o in each iteration
@@ -633,7 +630,7 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl(
     }
     o_smem.at(row, col) = bfloat16(o_global / d_global);
   }
-  wg_sync<128>(9);
+  __syncthreads();
 
   // store the output
   for (int elem_idx = threadIdx.x;
