@@ -139,7 +139,7 @@ __host__ static inline void fill_tma_desc(CUtensorMap *tma_desc,
     assert(false);
   }
 
-#if 1
+#if 0
 printf("gmem_prob_shape: %lu, %lu, %lu, %lu, %lu\n",
       gmem_prob_shape[0],
       gmem_prob_shape[1],
@@ -374,17 +374,13 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
           static_cast<uint64_t>(num_q_heads + 2 * num_kv_heads),
           static_cast<uint64_t>(head_dim)};
       uint64_t gmem_stride[3] = {
-          1, static_cast<uint64_t>(head_dim), static_cast<uint64_t>(head_dim * (num_q_heads + 2 * num_kv_heads) * 4)};
+          1, static_cast<uint64_t>(head_dim), static_cast<uint64_t>(qkv.stride[0])};
       uint32_t smem_shape[3] = {
           static_cast<uint32_t>(max_tokens),
           static_cast<uint32_t>(tma_desc_id == 0 ? num_q_heads : num_kv_heads),
           static_cast<uint32_t>(TMA_CP_ASYNC_SIZE)};
       const size_t smem_repeat_col = static_cast<size_t>(
           (head_dim + TMA_CP_ASYNC_SIZE - 1) / TMA_CP_ASYNC_SIZE);
-      printf("gmem_shape: %lu, %lu, %lu\n", gmem_shape[0], gmem_shape[1], gmem_shape[2]);
-      printf("gmem_stride: %lu, %lu, %lu\n", gmem_stride[0], gmem_stride[1], gmem_stride[2]);
-      printf("smem_shape: %d, %d, %d\n", smem_shape[0], smem_shape[1], smem_shape[2]);
-      printf("smem_repeat_col: %lu\n", smem_repeat_col);
       fill_tma_desc<T, B, M, S, 3>(tma_desc,
                                    tensor_desc.base_ptr,
                                    gmem_shape,

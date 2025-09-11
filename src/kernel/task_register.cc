@@ -1012,7 +1012,8 @@ int TaskRegister::register_paged_attention_hopper_task(
   code.e("    task_desc.inputs[6].base_ptr,");
   code.e("    1e-6f,");
   code.e("    1e-6f,");
-  code.e("    task_desc.outputs[0].base_ptr);");
+  code.e("    task_desc.outputs[0].base_ptr,");
+  code.e("    task_desc.inputs[0].base_ptr);");
 
   return register_task_variant(TASK_PAGED_ATTENTION_HOPPER, code.to_string());
 }

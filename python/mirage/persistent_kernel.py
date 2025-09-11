@@ -177,7 +177,7 @@ def get_compile_command(
         specific_cmd = [
             "-arch=sm_90a",
             "-gencode=arch=compute_90a,code=sm_90a",
-            "-DENABLE_TMA",
+            "-DENABLE_MPK_TMA",
             "-DMIRAGE_GRACE_HOPPER"
         ] + (["-DMIRAGE_ENABLE_PROFILER"] if profiling else [])
     else:

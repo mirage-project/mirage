@@ -14,7 +14,7 @@
  */
 
 #include "profiler.h"
-#ifdef ENABLE_TMA
+#ifdef ENABLE_MPK_TMA
 #include "tma.cuh"
 #endif
 #include "runtime_header.h"
@@ -387,10 +387,6 @@ __device__ void persistent_checker(RuntimeConfig config) {
 __device__ void execute_worker(RuntimeConfig config) {
   __shared__ TaskId cur_task_id;
   __shared__ TaskDesc task_desc;
-
-  if (threadIdx.x == 0) {
-    printf("execute_worker start, blockIdx.x: %d, total threads: %d\n", blockIdx.x, blockDim.x);
-  }
 
   PROFILER_CLOSURE_PARAMS_DECL;
   if (config.profiling) {

@@ -571,7 +571,8 @@ __global__ void multitoken_paged_attention_wrapper_hopper(
     void const *sin_ptr,
     float q_eps,
     float k_eps,
-    void *output_ptr) {
+    void *output_ptr,
+    void *qkv_ptr) {
 
   multitoken_paged_attention_hopper_impl<T,
                                          NUM_QO_HEADS,
@@ -608,7 +609,8 @@ __global__ void multitoken_paged_attention_wrapper_hopper(
       sin_ptr,
       q_eps,
       k_eps,
-      output_ptr);
+      output_ptr,
+      qkv_ptr);
 }
 
 template <typename T,
@@ -792,7 +794,8 @@ void launch_multitoken_paged_attention_hopper(
                                           sin_ptr,
                                           q_eps,
                                           k_eps,
-                                          output_ptr);
+                                          output_ptr,
+                                          qkv_ptr);
 #else
 
   cudaEvent_t start, stop;
