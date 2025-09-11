@@ -25,8 +25,6 @@
 #include "../rotary_embedding.cuh"
 #include "../smem_layout.cuh"
 #include "../utils.cuh"
-#include "norm_wg.cuh"
-#include "rotary_embedding_wg.cuh"
 #include "smem_layout_tma.cuh"
 #include "tma.cuh"
 #include "utils.cuh"
@@ -83,9 +81,11 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
   constexpr int PRODUCER_WARPGROUPS = 1;
   constexpr int NUM_WARPGROUPS = CONSUMER_WARPGROUPS + PRODUCER_WARPGROUPS;
   constexpr int Kstages = 2;
+  constexpr int CP_CHUNK_SIZE = 16 / sizeof(T);
+  constexpr int PRODUCER_WARPGROUP_SYNC_BARRIER_ID = 8;
+  constexpr int CONSUMER_WARPGROUP_SYNC_BARRIER_ID = 9;
   // NOTE(Yu): we use m64n64k16 mma atom to compute matrix multiplication
   constexpr int MMA_ITERS_M = (MAX_TOKENS * NUM_QO_PER_KV + 63) / 64;
-  constexpr int CP_CHUNK_SIZE = 16 / sizeof(T);
 
   // the scale factor for normalization in softmax
   float const sm_scale = 1.0f / sqrtf(static_cast<float>(HEAD_DIM));
@@ -337,7 +337,8 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
       tma_q.tma_cp_async(q_barrier[0], non_cached_q_smem(0, 0), {0, 0, 0});
     }
 
-    wg_sync<THREADS_PER_WARPGROUP * CONSUMER_WARPGROUPS>(8);
+    wg_sync<THREADS_PER_WARPGROUP * PRODUCER_WARPGROUPS>(
+        PRODUCER_WARPGROUP_SYNC_BARRIER_ID);
 
     // load k and v
     int page_idx_0 = page_indices[0];
@@ -365,7 +366,8 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
       }
     }
 
-    wg_sync<THREADS_PER_WARPGROUP * PRODUCER_WARPGROUPS>(8);
+    wg_sync<THREADS_PER_WARPGROUP * PRODUCER_WARPGROUPS>(
+        PRODUCER_WARPGROUP_SYNC_BARRIER_ID);
 
     if (lane_idx == 0 && warp_idx % 4 == 0) {
 
@@ -420,7 +422,8 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
       }
     }
 
-    wg_sync<THREADS_PER_WARPGROUP * PRODUCER_WARPGROUPS>(8);
+    wg_sync<THREADS_PER_WARPGROUP * PRODUCER_WARPGROUPS>(
+        PRODUCER_WARPGROUP_SYNC_BARRIER_ID);
 
     // start loading next tile in kv smem
     for (int iter = 0; iter < num_iters - 1; iter++) {
@@ -456,7 +459,8 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
           }
         }
 
-        wg_sync<THREADS_PER_WARPGROUP * PRODUCER_WARPGROUPS>(8);
+        wg_sync<THREADS_PER_WARPGROUP * PRODUCER_WARPGROUPS>(
+            PRODUCER_WARPGROUP_SYNC_BARRIER_ID);
 
         if (lane_idx == 0 && warp_idx % 4 == 0) {
           // arrive(k_barrier[slot], 1);
@@ -512,7 +516,8 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
         }
       }
 
-      wg_sync<THREADS_PER_WARPGROUP * PRODUCER_WARPGROUPS>(8);
+      wg_sync<THREADS_PER_WARPGROUP * PRODUCER_WARPGROUPS>(
+          PRODUCER_WARPGROUP_SYNC_BARRIER_ID);
 
       // rotate the buffers
       if ((iter & 0x1) == 0) {
@@ -534,7 +539,8 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
         non_cached_v_smem.set_ptr(s_non_cached_v);
         non_cached_v_buffer_smem.set_ptr(s_non_cached_v_buffer);
       }
-      wg_sync<THREADS_PER_WARPGROUP * PRODUCER_WARPGROUPS>(8);
+      wg_sync<THREADS_PER_WARPGROUP * PRODUCER_WARPGROUPS>(
+          PRODUCER_WARPGROUP_SYNC_BARRIER_ID);
     }
 
   } else {
@@ -576,7 +582,8 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
       q_smem.at(row, col) = non_cached_q_smem.at(src_row + row, col);
     }
 
-    wg_sync<THREADS_PER_WARPGROUP * CONSUMER_WARPGROUPS>(9);
+    wg_sync<THREADS_PER_WARPGROUP * CONSUMER_WARPGROUPS>(
+        CONSUMER_WARPGROUP_SYNC_BARRIER_ID);
 
     for (int iter = 0; iter < num_iters; iter++) {
       int phase = (iter / Kstages) % 2;
@@ -604,7 +611,8 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
         non_cached_v_buffer_smem.set_ptr(s_non_cached_v_buffer);
       }
 
-      wg_sync<THREADS_PER_WARPGROUP * CONSUMER_WARPGROUPS>(9);
+      wg_sync<THREADS_PER_WARPGROUP * CONSUMER_WARPGROUPS>(
+          CONSUMER_WARPGROUP_SYNC_BARRIER_ID);
 
       int curr_iter_len = min(seq_len - iter * KV_TILE_SIZE, KV_TILE_SIZE);
 
@@ -632,16 +640,18 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
         }
       }
 
-      wg_sync<THREADS_PER_WARPGROUP * CONSUMER_WARPGROUPS>(9);
+      wg_sync<THREADS_PER_WARPGROUP * CONSUMER_WARPGROUPS>(
+          CONSUMER_WARPGROUP_SYNC_BARRIER_ID);
 
       if (qk_norm) {
         // Q norm
         if (iter == 0) {
-          rms_norm_wg<T,
-                      QOSmem,
-                      NUM_QO_PER_KV,
-                      HEAD_DIM,
-                      THREADS_PER_WARPGROUP * CONSUMER_WARPGROUPS>(
+          rms_norm<T,
+                   QOSmem,
+                   NUM_QO_PER_KV,
+                   HEAD_DIM,
+                   THREADS_PER_WARPGROUP * CONSUMER_WARPGROUPS,
+                   CONSUMER_WARPGROUP_SYNC_BARRIER_ID>(
               q_smem,
               static_cast<T const *>(q_norm_weight_ptr),
               s_q_norm_sum,
@@ -652,16 +662,16 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
               static_cast<T const *>(cos_ptr) +
                   (seq_len - num_tokens) * HEAD_DIM,
               static_cast<T const *>(sin_ptr) +
-                  (seq_len - num_tokens) * HEAD_DIM,
-              9);
+                  (seq_len - num_tokens) * HEAD_DIM);
         }
         // K norm
         if (kv_tokens_to_process > 0) {
-          rms_norm_wg<T,
-                      KVSmem,
-                      1,
-                      HEAD_DIM,
-                      THREADS_PER_WARPGROUP * CONSUMER_WARPGROUPS>(
+          rms_norm<T,
+                   KVSmem,
+                   1,
+                   HEAD_DIM,
+                   THREADS_PER_WARPGROUP * CONSUMER_WARPGROUPS,
+                   CONSUMER_WARPGROUP_SYNC_BARRIER_ID>(
               k_smem,
               static_cast<T const *>(k_norm_weight_ptr),
               s_k_norm_sum,
@@ -672,49 +682,49 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
               static_cast<T const *>(cos_ptr) +
                   first_kv_token_to_process * HEAD_DIM,
               static_cast<T const *>(sin_ptr) +
-                  first_kv_token_to_process * HEAD_DIM,
-              9);
+                  first_kv_token_to_process * HEAD_DIM);
         }
       } else if (rope) {
         if (iter == 0) {
 #pragma unroll
           for (int token_idx = 0; token_idx < num_tokens; token_idx++) {
             // q rope
-            rotary_embedding_wg<T,
-                                QOSmem,
-                                NUM_QO_PER_KV,
-                                HEAD_DIM,
-                                THREADS_PER_WARPGROUP * CONSUMER_WARPGROUPS>(
+            rotary_embedding<T,
+                             QOSmem,
+                             NUM_QO_PER_KV,
+                             HEAD_DIM,
+                             THREADS_PER_WARPGROUP * CONSUMER_WARPGROUPS,
+                             CONSUMER_WARPGROUP_SYNC_BARRIER_ID>(
                 q_smem,
                 static_cast<T const *>(cos_ptr) +
                     (token_idx + seq_len - num_tokens) * HEAD_DIM,
                 static_cast<T const *>(sin_ptr) +
                     (token_idx + seq_len - num_tokens) * HEAD_DIM,
-                token_idx * NUM_QO_PER_KV,
-                9);
+                token_idx * NUM_QO_PER_KV);
           }
         }
         if (kv_tokens_to_process > 0) {
           for (int token_idx = 0; token_idx < kv_tokens_to_process;
                token_idx++) {
             // k rope
-            rotary_embedding_wg<T,
-                                KVSmem,
-                                1,
-                                HEAD_DIM,
-                                THREADS_PER_WARPGROUP * CONSUMER_WARPGROUPS>(
+            rotary_embedding<T,
+                             KVSmem,
+                             1,
+                             HEAD_DIM,
+                             THREADS_PER_WARPGROUP * CONSUMER_WARPGROUPS,
+                             CONSUMER_WARPGROUP_SYNC_BARRIER_ID>(
                 k_smem,
                 static_cast<T const *>(cos_ptr) +
                     (token_idx + first_kv_token_to_process) * HEAD_DIM,
                 static_cast<T const *>(sin_ptr) +
                     (token_idx + first_kv_token_to_process) * HEAD_DIM,
-                token_idx + curr_iter_len - kv_tokens_to_process,
-                9);
+                token_idx + curr_iter_len - kv_tokens_to_process);
           }
         }
       }
 
-      wg_sync<THREADS_PER_WARPGROUP * CONSUMER_WARPGROUPS>(9);
+      wg_sync<THREADS_PER_WARPGROUP * CONSUMER_WARPGROUPS>(
+          CONSUMER_WARPGROUP_SYNC_BARRIER_ID);
 
       // update the KV Cache
       if (kv_tokens_to_process > 0) {
@@ -753,7 +763,8 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
         wgmma::mma_async_wait();
       }
 
-      wg_sync<THREADS_PER_WARPGROUP * CONSUMER_WARPGROUPS>(9);
+      wg_sync<THREADS_PER_WARPGROUP * CONSUMER_WARPGROUPS>(
+          CONSUMER_WARPGROUP_SYNC_BARRIER_ID);
 
       // update m_local: get partial max
       // NOTE(Yu): We do 64x64x16 mma, and each thread saves 32 register values,
@@ -842,7 +853,8 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
         }
       }
 
-      wg_sync<THREADS_PER_WARPGROUP * CONSUMER_WARPGROUPS>(9);
+      wg_sync<THREADS_PER_WARPGROUP * CONSUMER_WARPGROUPS>(
+          CONSUMER_WARPGROUP_SYNC_BARRIER_ID);
 
       uint32_t x_frag[MMA_ITERS_M][16];
 #pragma unroll
@@ -859,7 +871,8 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
         }
       }
 
-      wg_sync<THREADS_PER_WARPGROUP * CONSUMER_WARPGROUPS>(9);
+      wg_sync<THREADS_PER_WARPGROUP * CONSUMER_WARPGROUPS>(
+          CONSUMER_WARPGROUP_SYNC_BARRIER_ID);
 
       if (warp_idx == 0 && lane_idx == 0) {
         arrive(compute_done[slot], 1);
@@ -887,7 +900,8 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
         }
       }
     }
-    wg_sync<THREADS_PER_WARPGROUP * CONSUMER_WARPGROUPS>(9);
+    wg_sync<THREADS_PER_WARPGROUP * CONSUMER_WARPGROUPS>(
+        CONSUMER_WARPGROUP_SYNC_BARRIER_ID);
 
     // get global m, d, and o
     // each thread handles an element in o in each iteration
@@ -921,7 +935,8 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
 
       o_smem.at(row, col) = bfloat16(o_global / d_global);
     }
-    wg_sync<THREADS_PER_WARPGROUP * CONSUMER_WARPGROUPS>(9);
+    wg_sync<THREADS_PER_WARPGROUP * CONSUMER_WARPGROUPS>(
+        CONSUMER_WARPGROUP_SYNC_BARRIER_ID);
 
     // async_proxy_fence();
 

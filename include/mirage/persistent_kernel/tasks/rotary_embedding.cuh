@@ -22,7 +22,10 @@ template <typename T,
           typename InputSmem,
           int NUM_HEAD,
           int WINDOW_SIZE,
-          int HEAD_DIM = 128>
+          int HEAD_DIM = 128,
+          int SYNC_NUM_THREADS = 0, // if set to 0, use __syncthreads, otherwise
+                                    // use wg_sync
+          int BARRIER_ID = 6>
 __device__ __forceinline__ void rotary_embedding(InputSmem smem_input,
                                                  T const *cos_ptr,
                                                  T const *sin_ptr,
@@ -58,7 +61,11 @@ __device__ __forceinline__ void rotary_embedding(InputSmem smem_input,
           float v2 = static_cast<float>(smem_input.at(row, col - HEAD_DIM / 2));
           v_rot = v1 * cos + v2 * sin;
         }
-        __syncthreads();
+        if constexpr (SYNC_NUM_THREADS > 0) {
+          wg_sync<SYNC_NUM_THREADS>(BARRIER_ID);
+        } else {
+          __syncthreads();
+        }
         smem_input.at(row, col) = static_cast<T>(v_rot);
       }
     }

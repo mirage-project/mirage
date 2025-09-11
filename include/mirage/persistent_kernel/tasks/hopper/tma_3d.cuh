@@ -23,9 +23,9 @@ template <typename T,
           int B,
           int M,
           int S,
-          size_t GMEM_DEPTH_, // page number in paged attention
-          size_t GMEM_ROW_,   // head number in one page
-          size_t GMEM_COL_,   // head dimension
+          size_t GMEM_DEPTH_,
+          size_t GMEM_ROW_,
+          size_t GMEM_COL_,
           size_t SMEM_DEPTH_,
           size_t SMEM_ROW_,
           size_t SMEM_COL_,
@@ -34,8 +34,7 @@ template <typename T,
           size_t GMEM_STRIDE_COL_ = 1,
           size_t SMEM_REPEAT_ROW_ = 1,
           size_t SMEM_REPEAT_COL_ = 1,
-          size_t SMEM_STRIDE_ = 1, // used for num_tokens, since each token's
-                                   // heads are contiguous in smem
+          size_t SMEM_STRIDE_ = 1,
           bool ROW_MAJOR = true>
 struct tma_3d {
 
@@ -81,7 +80,6 @@ public:
             tma_coords[0] + static_cast<int>(j * SMEM_COL),
             tma_coords[1] + static_cast<int>(i * SMEM_ROW),
             tma_coords[2]};
-        // int const tma_coords_local[NDIM] = {0,0,0};
 #if 0
           printf("tma_coords: %d, %d, %d\n", tma_coords[0], tma_coords[1], tma_coords[2]);
           printf("tma_coords_local: %d, %d, %d\n",
@@ -167,8 +165,6 @@ public:
     uint64_t gmem_int_desc = reinterpret_cast<uint64_t>(desc_ptr);
     uint32_t smem_int_ptr =
         static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr));
-    // not sure what this line means
-    //  cutlass::arch::synclog_emit_tma_load(
     int c0 = 0, c1 = 0, c2 = 0, c3 = 0, c4 = 0;
     if constexpr (NDIM > 0) {
       c0 = tma_coords[0];

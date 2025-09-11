@@ -164,8 +164,6 @@ public:
     uint64_t gmem_int_desc = reinterpret_cast<uint64_t>(desc_ptr);
     uint32_t smem_int_ptr =
         static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr));
-    // not sure what this line means
-    //  cutlass::arch::synclog_emit_tma_load(
     int c0 = 0, c1 = 0, c2 = 0, c3 = 0, c4 = 0;
     if constexpr (NDIM > 0) {
       c0 = tma_coords[0];

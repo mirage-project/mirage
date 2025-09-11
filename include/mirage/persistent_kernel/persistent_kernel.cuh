@@ -38,6 +38,16 @@ using namespace mirage::runtime;
 // #define MPK_MAX_NUM_PAGES 1024
 // #define MPK_PAGE_SIZE 64
 
+#if defined(MIRAGE_GRACE_HOPPER)
+constexpr int WORKER_THREADS = 256;
+constexpr int SINGLE_KERNEL_THREADS = 256;
+#else
+constexpr int WORKER_THREADS = 128;
+constexpr int SINGLE_KERNEL_THREADS = 128;
+#endif
+constexpr int INIT_THREADS = 128;
+constexpr int SCHEDULER_THREADS = 128;
+
 __device__ __forceinline__ void
     _execute_task(TaskDesc const &task_desc,
                   RuntimeConfig const &runtime_config);
@@ -1137,8 +1147,8 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
   size_t end_of_task_graph_event_pos = all_events.size() - 1;
   assert(all_events[end_of_task_graph_event_pos].event_type ==
          EVENT_END_OF_TASK_GRAPH);
-  init_kernel<<<dim3(1, 1, 1), dim3(128, 1, 1)>>>(global_runtime_config,
-                                                  end_of_task_graph_event_pos);
+  init_kernel<<<dim3(1, 1, 1), dim3(INIT_THREADS, 1, 1)>>>(
+      global_runtime_config, end_of_task_graph_event_pos);
   cudaDeviceSynchronize();
 #ifdef USE_NVSHMEM
   // Add a global barrier for all init_kernel to complete
@@ -1155,7 +1165,6 @@ extern "C" void launch_persistent_kernel() {
 
   if (global_runtime_config.split_worker_scheduler) {
     printf("worker kernel & scheduler kernel\n");
-    printf("MAX_SHARE_MEMORY_SIZE: %d\n", MAX_SHARE_MEMORY_SIZE);
 
     // Launcher worker & scheduler kernel
     cudaFuncSetAttribute(worker_kernel,
@@ -1172,16 +1181,14 @@ extern "C" void launch_persistent_kernel() {
     // The split kernel does not support NVSHMEM because
     // nvshmemx_collective_launch launches kernels sequentially, which blocks
     // the interaction between the worker kernel and the scheduler kernel
-    printf("in launch, scheduler_kernel start\n");
     scheduler_kernel<<<
         dim3(global_runtime_config.num_local_schedulers / 4, 1, 1),
-        dim3(128, 1, 1),
+        dim3(SCHEDULER_THREADS, 1, 1),
         MAX_SHARE_MEMORY_SIZE /*smem*/,
         scheduler_stream>>>(global_runtime_config);
 
-    printf("in launch, worker_kernel start\n");
     worker_kernel<<<dim3(global_runtime_config.num_workers, 1, 1),
-                    dim3(256, 1, 1),
+                    dim3(WORKER_THREADS, 1, 1),
                     MAX_SHARE_MEMORY_SIZE /*smem*/,
                     worker_stream>>>(global_runtime_config);
 
@@ -1204,13 +1211,13 @@ extern "C" void launch_persistent_kernel() {
     void *args[] = {&global_runtime_config};
     nvshmemx_collective_launch((void const *)persistent_kernel,
                                dim3(sm_count, 1, 1),
-                               dim3(128, 1, 1),
+                               dim3(SINGLE_KERNEL_THREADS, 1, 1),
                                args,
                                MAX_SHARE_MEMORY_SIZE /*sharedmem*/,
                                0 /*stream*/);
 #else
     persistent_kernel<<<dim3(sm_count, 1, 1),
-                        dim3(256, 1, 1),
+                        dim3(SINGLE_KERNEL_THREADS, 1, 1),
                         MAX_SHARE_MEMORY_SIZE /*smem*/>>>(
         global_runtime_config);
 #endif

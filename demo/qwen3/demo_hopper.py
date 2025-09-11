@@ -457,7 +457,6 @@ if __name__ == "__main__":
                     block_dim=(128, 1, 1),
                 )
             else:
-                # import pdb; pdb.set_trace()
                 mpk.paged_attention_layer_hopper(
                     input=attn_in,
                     k_cache=k_cache,
@@ -474,14 +473,6 @@ if __name__ == "__main__":
             w = mpk.attach_input(
                 torch_tensor=layer.self_attn.o_proj.weight, name=f"layer_{i}_o_proj"
             )
-            # mpk.linear_with_residual_layer(
-            #     input=attn_out,
-            #     weight=w,
-            #     residual=x,
-            #     output=attn_proj_out,
-            #     grid_dim=(hidden_size // 64, 1, 1),
-            #     block_dim=(128, 1, 1),
-            # )
 
             mpk.linear_with_residual_layer_hopper(
                 input=attn_out,
@@ -515,22 +506,12 @@ if __name__ == "__main__":
                 torch_tensor=layer.mlp.up_proj.weight, name=f"layer_{i}_up_proj"
             )
             rmsnorm_num_tasks = grid_for_rmsnorm_linear_layer(w_gate_proj.dim(0) + w_up_proj.dim(0))
-            # print("rmsnorm_num_tasks = ", rmsnorm_num_tasks, "w_gate_proj.dim(0) = ", w_gate_proj.dim(0), "w_up_proj.dim(0) = ", w_up_proj.dim(0))
-            print("rmsout.dim(0) = ", rmsnorm_out.dim(0))
-            print("rmsout.dim(1) = ", rmsnorm_out.dim(1))
-            print("w_gate_proj.dim(0)) is ", w_gate_proj.dim(0))
-            print("w_gate_proj.dim(1) is ", w_gate_proj.dim(1))
-            print("w_up_proj.dim(0)) is ", w_up_proj.dim(0))
-            print("w_up_proj.dim(1) is ", w_up_proj.dim(1))
-
             w_gatedup = mpk.fuse_tensors(
                 inputs=[w_gate_proj, w_up_proj],
                 fused_dim=0,
                 num_groups=rmsnorm_num_tasks//2,
                 name=f"layer_{i}_gatedup_proj",
             )
-            print("w_gatedup.dim(0) is ", w_gatedup.dim(0))
-            print("w_gatedup.dim(1) is ", w_gatedup.dim(1))
             mpk.rmsnorm_layer(
                 input=x,
                 weight=w_norm,
@@ -538,7 +519,6 @@ if __name__ == "__main__":
                 grid_dim=(mpk.max_num_batched_tokens, 1, 1),
                 block_dim=(128, 1, 1),
             )
-            print("rmsnorm_num_tasks = ", rmsnorm_num_tasks)
             mpk.linear_layer_hopper(
                 input=rmsnorm_out,
                 weight=w_gatedup,
@@ -589,8 +569,6 @@ if __name__ == "__main__":
             torch_tensor=model.model.norm.weight, name="model_norm_weight"
         )
         w_proj = mpk.attach_input(torch_tensor=lm_head_weight, name="lm_head")
-        print("grid_for_rmsnorm_linear_layer(w_proj.dim(0)) = ", grid_for_rmsnorm_linear_layer(w_proj.dim(0)))
-        print("w_proj.dim(0) = ", w_proj.dim(0))
         mpk.rmsnorm_layer(
             input=x,
             weight=w_norm,
@@ -602,10 +580,7 @@ if __name__ == "__main__":
             input=rmsnorm_out_2,
             weight=w_proj,
             output=argmax_in,
-            # grid_dim=(grid_for_rmsnorm_linear_layer(w_proj.dim(0)), 1, 1),
             grid_dim=(75, 1, 1),
-            # grid_dim=(300, 1, 1),
-            # grid_dim=(600, 1, 1),
             block_dim=(128, 1, 1),
         )
         # mpk.rmsnorm_linear_layer(
@@ -717,8 +692,6 @@ if __name__ == "__main__":
         torch.cuda.synchronize()
         run_time = starter.elapsed_time(ender)
 
-        # print(f"generated_ids: {generated_ids}")
-        print("tokens.shape = ", tokens.shape)
         for r in range(total_num_requests):
             generated_ids = tokens[r, : step[r] + 1]
             response = tokenizer.decode(generated_ids, skip_special_tokens=True)

@@ -454,21 +454,6 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
                                   static_cast<uint32_t>(TMA_CP_ASYNC_SIZE)};
         const size_t smem_repeat_col = static_cast<size_t>(
             (head_dim + TMA_CP_ASYNC_SIZE - 1) / TMA_CP_ASYNC_SIZE);
-
-        printf("gmem_shape: %lu, %lu, %lu\n",
-               gmem_shape[0],
-               gmem_shape[1],
-               gmem_shape[2]);
-        printf("gmem_stride: %lu, %lu, %lu\n",
-               gmem_stride[0],
-               gmem_stride[1],
-               gmem_stride[2]);
-        printf("smem_shape: %u, %u, %u\n",
-               smem_shape[0],
-               smem_shape[1],
-               smem_shape[2]);
-        printf("smem_repeat_col: %lu\n", smem_repeat_col);
-
         fill_tma_desc<T, B, M, S, 3>(tma_desc,
                                      tensor_desc.base_ptr,
                                      gmem_shape,

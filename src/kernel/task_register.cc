@@ -965,8 +965,7 @@ int TaskRegister::register_paged_attention_hopper_task(
          1,
          1,
          smem_repeat_col,
-         max_tokens * num_q_heads_per_kv * TMA_CP_ASYNC_SIZE /* SMEM_STRIDE */
-  );
+         max_tokens * num_q_heads_per_kv * TMA_CP_ASYNC_SIZE);
 
   code.e("TMA_Q  tma_q "
          "(static_cast<CUtensorMap*>(task_desc.inputs[0].tma_desc_ptrs[0]));");
