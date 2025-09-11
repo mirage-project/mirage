@@ -113,8 +113,8 @@ __device__ __forceinline__ void rms_norm(InputSmem smem_input,
             int offset = (i / HEAD_DIM) * HEAD_DIM + i;
             T const *cur_cos_ptr = cos_ptr + win_idx * HEAD_DIM;
             T const *cur_sin_ptr = sin_ptr + win_idx * HEAD_DIM;
-            float cos = (float)cur_cos_ptr[offset];
-            float sin = (float)cur_sin_ptr[offset];
+            float cos = (float)cur_cos_ptr[i];
+            float sin = (float)cur_sin_ptr[i];
 
             float v_rot;
             if (i < HEAD_DIM / 2) {

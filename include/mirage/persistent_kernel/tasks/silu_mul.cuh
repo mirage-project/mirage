@@ -25,15 +25,13 @@ template <typename T,
 __device__ __forceinline__ void silu_mul_task_impl(void const *input_ptr,
                                                    void *output_ptr,
                                                    int num_active_tokens) {
-  if (threadIdx.x >= 128) {
-    return;
-  }
   T const *__restrict__ d_input = static_cast<T const *>(input_ptr);
   T const *__restrict__ d_mul = static_cast<T const *>(input_ptr) + OUTPUT_SIZE;
   T *__restrict__ d_output = static_cast<T *>(output_ptr);
 
 #pragma unroll
-  for (int i = threadIdx.x; i < num_active_tokens * OUTPUT_SIZE; i += 128) {
+  for (int i = threadIdx.x; i < num_active_tokens * OUTPUT_SIZE;
+       i += blockDim.x) {
     int batch_idx = i / OUTPUT_SIZE;
     int offset = i % OUTPUT_SIZE;
     float input_val = float(d_input[batch_idx * I_STRIDE + offset]);

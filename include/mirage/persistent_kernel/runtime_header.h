@@ -27,7 +27,7 @@ constexpr int MAX_SHARE_MEMORY_SIZE = 96 * 1024;
 #elif MPK_TARGET_CC >= 80
 constexpr int MAX_SHARE_MEMORY_SIZE = 160 * 1024;
 #else
-constexpr int MAX_SHARE_MEMORY_SIZE = 96 * 1024;
+constexpr int MAX_SHARE_MEMORY_SIZE = 160 * 1024;
 #endif
 
 typedef unsigned long long int TaskId;

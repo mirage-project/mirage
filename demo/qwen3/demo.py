@@ -34,6 +34,10 @@ def max_factor_leq_n(m: int, n: int) -> int:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--use-mirage", action="store_true", help="Use Mirage kernels")
+    parser.add_argument("--max-num-batched-tokens", default=8, type=int, help="Max number of tokens in a batch")
+    parser.add_argument("--max-num-batched-requests", default=4, type=int, help="Max number of requests in a batch")
+    parser.add_argument("--page-size", default=4096, type=int, help="Page size")
+    parser.add_argument("--max-num-pages", default=16, type=int, help="Max num pages")
     parser.add_argument("--output-dir", help="Output files directory")
     parser.add_argument(
         "--profiling", action="store_true", help="Use Profiler to generate trace"
@@ -99,19 +103,20 @@ if __name__ == "__main__":
             # load model locally (necessary for multi-GPU case)
             print(f"Load model from model path: {args.model_path}")
             config = AutoConfig.from_pretrained(args.model_path)
-            model = Qwen3ForCausalLM(config, world_size)
+            model = Qwen3ForCausalLM(config, world_size, args.max_num_pages, args.page_size)
             load_model(
                 model, f"{args.model_path}/model{rank}-mp{world_size}.safetensors"
             )
             tokenizer = AutoTokenizer.from_pretrained(args.model_path)
         else:
-            model = Qwen3ForCausalLM.from_pretrained(model_name).to("cuda")
+            model = Qwen3ForCausalLM.from_pretrained(model_name, world_size=1, max_num_pages=args.max_num_pages, page_size=args.page_size).to("cuda")
             tokenizer = AutoTokenizer.from_pretrained(model_name)
 
+    total_num_requests = args.max_num_batched_requests
     # get all model weight tensors
-    tokens = torch.full((1, 32768), 0, dtype=torch.long, device="cuda")
+    tokens = torch.full((total_num_requests, args.max_seq_length), 0, dtype=torch.long, device="cuda")
 
-    # prompt = "Give me a short introduction to large language model."
+    prompt = "Give me a short introduction to large language model."
     # This prompt is copied from https://github.com/apoorvumang/prompt-lookup-decoding/blob/main/demo-pld.ipynb
     code_text = """import numpy as np
                 import matplotlib.pyplot as plt
@@ -129,8 +134,8 @@ if __name__ == "__main__":
                 plt.text(average_throughput*0.9, max(plt.ylim())*0.9, f'Average: {average_throughput:.2f}', color = 'red')
                 plt.show()
                 """
-    question = "Can you please change x axis to start from 0"
-    prompt = code_text + "\n" + question
+    #question = "Can you please change x axis to start from 0"
+    #prompt = code_text + "\n" + question
     messages = [
         {
             "role": "system",
@@ -141,26 +146,29 @@ if __name__ == "__main__":
     text = tokenizer.apply_chat_template(
         messages, tokenize=False, add_generation_prompt=True
     )
+    #text = "."
     model_inputs = tokenizer([text], return_tensors="pt").to(model.device)
-    for i in range(model_inputs.input_ids.shape[-1]):
-        tokens[0, i] = model_inputs.input_ids[0, i]
-    prompt_len = model_inputs.input_ids.shape[-1]
+    for r in range(total_num_requests):
+        for i in range(model_inputs.input_ids.shape[-1]):
+            tokens[r, i] = model_inputs.input_ids[0, i]
+    prompt_lengths = torch.full((total_num_requests,), model_inputs.input_ids.shape[-1], dtype=torch.int, device="cuda")
     positions = torch.arange(32768).unsqueeze(0).to(model.device)
     position_embeddings = model.model.rotary_emb(positions)
 
     # get all model weight tensors
-    input_tokens = torch.full((1, 1), 0, dtype=torch.long, device="cuda")
+    input_tokens = torch.full((args.max_num_batched_tokens, 1), 0, dtype=torch.long, device="cuda")
+    output_tokens = torch.full((args.max_num_batched_tokens, 1), 0, dtype=torch.long, device="cuda")
     prev_pos = 0
 
     starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(
         enable_timing=True
     )
-    step = torch.tensor([0], dtype=torch.int32, device="cuda")
-    num_new_tokens = torch.tensor([1], dtype=torch.int32, device="cuda")
+    step = torch.full((total_num_requests, ), 0, dtype=torch.int32, device="cuda")
+    num_new_tokens = torch.full((total_num_requests, ), 1, dtype=torch.int32, device="cuda")
+
     if args.use_mirage:
         import mirage as mi
 
-        batch_size = 1
         hidden_size = model.config.hidden_size
         intermediate_size = model.config.intermediate_size
         # pad vocab_size to facilitate task graph creation
@@ -197,30 +205,51 @@ if __name__ == "__main__":
         )
             
         num_workers, num_schedulers = mi.get_configurations_from_gpu(rank)
+        qo_indptr_buffer = torch.empty(
+            args.max_num_batched_requests + 1, dtype=torch.int32, device="cuda")
+        paged_kv_indptr_buffer = torch.empty(
+            args.max_num_batched_requests + 1, dtype=torch.int32, device="cuda")
+        paged_kv_indices_buffer = torch.empty(
+            args.max_num_pages, dtype=torch.int32, device="cuda")
+        paged_kv_last_page_len_buffer = torch.empty(
+            args.max_num_batched_requests, dtype=torch.int32, device="cuda")
         mpk = mi.PersistentKernel(
+            mode="offline",
             world_size=world_size,
             mpi_rank=rank,
             num_workers=num_workers,
             num_local_schedulers=num_schedulers,
             num_remote_schedulers=0,
             max_seq_length=args.max_seq_length,
+            max_num_batched_requests=args.max_num_batched_requests,
+            max_num_batched_tokens=args.max_num_batched_tokens,
+            max_num_pages=args.max_num_pages,
+            page_size=args.page_size,
             eos_token_id=model.config.eos_token_id,
-            meta_tensors=[step, tokens, num_new_tokens],
+            meta_tensors={
+                "step": step,
+                "tokens": tokens,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "num_new_tokens": num_new_tokens,
+                "prompt_lengths": prompt_lengths,
+                "qo_indptr_buffer": qo_indptr_buffer,
+                "paged_kv_indptr_buffer": paged_kv_indptr_buffer,
+                "paged_kv_indices_buffer": paged_kv_indices_buffer,
+                "paged_kv_last_page_len_buffer": paged_kv_last_page_len_buffer,
+            },
             profiler_tensor=profiler_tensor,
             spec_decode_config=spec_decode_config,
         )
         
         if spec_decode_config and spec_decode_config.method == "promptlookup":
             all_tokens = mpk.attach_input(torch_tensor=tokens, name="all_tokens")
-            argmax_batch_size = batch_size * (spec_decode_config.spec_length + 1)
             num_tokens_extend = spec_decode_config.spec_length + 1
         else:
-            argmax_batch_size = batch_size
             num_tokens_extend = 1
-        total_tokens_per_iter = batch_size * num_tokens_extend
         
-        # TODO: Make the code run well even if 96 % total_tokens_per_iter != 0
-        assert(96 % total_tokens_per_iter == 0)
+        # TODO: Make the code run well even if 96 % max_num_batched_tokens != 0
+        # assert(96 % args.max_num_batched_tokens == 0)
         
         x = mpk.attach_input(torch_tensor=input_tokens, name="input_token")
         cos_pos_embed = mpk.attach_input(
@@ -233,84 +262,96 @@ if __name__ == "__main__":
         )
 
         y = mpk.new_tensor(
-            dims=(total_tokens_per_iter, hidden_size),
+            dims=(args.max_num_batched_tokens, hidden_size),
             dtype=mi.bfloat16,
             name="embed_out",
             io_category="cuda_tensor",
         )
+        rmsnorm_out = mpk.new_tensor(
+            dims=(args.max_num_batched_tokens, hidden_size),
+            dtype=mi.bfloat16,
+            name="rmsnorm_out",
+            io_category="cuda_tensor",
+        )
         attn_in = mpk.new_tensor(
-            dims=(total_tokens_per_iter, fused_outdim_1 // world_size), # [6, 6144]
+            dims=(args.max_num_batched_tokens, fused_outdim_1 // world_size), # [6, 6144]
             dtype=mi.bfloat16,
             name="attn_in",
             io_category="cuda_tensor",
         )
         attn_out = mpk.new_tensor(
-            dims=(total_tokens_per_iter, num_local_q_heads * head_dim),
+            dims=(args.max_num_batched_tokens, num_local_q_heads * head_dim),
             dtype=mi.bfloat16,
             name="attn_out",
             io_category="cuda_tensor",
         )
         attn_proj_out = mpk.new_tensor(
-            dims=(total_tokens_per_iter, hidden_size),
+            dims=(args.max_num_batched_tokens, hidden_size),
             dtype=mi.bfloat16,
             name="attn_proj_out",
             io_category="nvshmem_tensor" if world_size > 1 else "cuda_tensor",
         )
         allreduce_buf = mpk.new_tensor(
-            dims=(world_size, total_tokens_per_iter, hidden_size),
+            dims=(world_size, args.max_num_batched_tokens, hidden_size),
             dtype=mi.bfloat16,
             name="all_reduce_buf",
             io_category="nvshmem_tensor" if world_size > 1 else "cuda_tensor",
         )
         attn_allreduce_out = mpk.new_tensor(
-            dims=(total_tokens_per_iter, hidden_size),
+            dims=(args.max_num_batched_tokens, hidden_size),
             dtype=mi.bfloat16,
             name="attn_allreduce_out",
             io_category="nvshmem_tensor" if world_size > 1 else "cuda_tensor",
         )
         mlp_mid = mpk.new_tensor(
-            dims=(total_tokens_per_iter, fused_outdim_2 // world_size),
+            dims=(args.max_num_batched_tokens, fused_outdim_2 // world_size),
             dtype=mi.bfloat16,
             name="mlp_mid",
             io_category="cuda_tensor",
         )
+        silu_mul_out = mpk.new_tensor(
+            dims=(args.max_num_batched_tokens, intermediate_size // world_size),
+            dtype=mi.bfloat16,
+            name="silu_mul_out",
+            io_category="cuda_tensor",
+        )
         mlp_out = mpk.new_tensor(
-            dims=(total_tokens_per_iter, hidden_size),
+            dims=(args.max_num_batched_tokens, hidden_size),
             dtype=mi.bfloat16,
             name="mlp_out",
             io_category="nvshmem_tensor" if world_size > 1 else "cuda_tensor",
         )
         mlp_final = mpk.new_tensor(
-            dims=(total_tokens_per_iter, hidden_size),
+            dims=(args.max_num_batched_tokens, hidden_size),
             dtype=mi.bfloat16,
             name="mlp_final",
             io_category="nvshmem_tensor" if world_size > 1 else "cuda_tensor",
         )
-
         argmax_in = mpk.new_tensor(
-            dims=(total_tokens_per_iter, vocab_size),
+            dims=(args.max_num_batched_tokens, vocab_size),
             dtype=mi.bfloat16,
             name="argmax_in",
             io_category="cuda_tensor",
         )
         argmax_part_value = mpk.new_tensor(
-            dims=(total_tokens_per_iter, 96 // (batch_size * num_tokens_extend)),
+            dims=(args.max_num_batched_tokens, mpk.num_workers),
             dtype=mi.bfloat16,
             name="argmax_part_value",
             io_category="cuda_tensor",
         )
         argmax_part_index = mpk.new_tensor(
-            dims=(total_tokens_per_iter, 96 // (batch_size * num_tokens_extend)),
+            dims=(args.max_num_batched_tokens, mpk.num_workers),
             dtype=mi.int64,
             name="argmax_part_index",
             io_category="cuda_tensor",
         )
-        argmax_out = mpk.new_tensor(
-            dims=(1, total_tokens_per_iter),
-            dtype=mi.int64,
-            name="argmax_out",
-            io_category="cuda_tensor",
-        )
+        argmax_out = mpk.attach_input(torch_tensor=output_tokens, name="output_token")
+        #argmax_out = mpk.new_tensor(
+        #    dims=(args.max_num_batched_tokens, 1),
+        #    dtype=mi.int64,
+        #    name="argmax_out",
+        #    io_category="cuda_tensor",
+        #)
 
         # add spec tokens layer
         if spec_decode_config:
@@ -330,10 +371,10 @@ if __name__ == "__main__":
             input=x, 
             weight=w, 
             output=y, 
-            grid_dim=(max_factor_leq_n(hidden_size, 96 // total_tokens_per_iter), total_tokens_per_iter, 1), 
-            # grid_dim=(1, 1, 1), 
+            # grid_dim=(max_factor_leq_n(hidden_size, 96 // args.max_num_batched_tokens), total_tokens_per_iter, 1), 
+            grid_dim=(1, 1, 1), 
             block_dim=(128, 1, 1),
-            input_source=(spec_decode_config is not None) # 0: all_tokens, 1: input_token (spec decoding)
+            input_source=1,
         )
         x = y
         for i, layer in enumerate(model.model.layers):
@@ -357,14 +398,28 @@ if __name__ == "__main__":
                 num_groups=model.config.num_key_value_heads // world_size,
                 name=f"layer_{i}_qkv_proj",
             )
-            mpk.rmsnorm_linear_layer(
+            mpk.rmsnorm_layer(
                 input=x,
-                weight_norm=w_norm,
-                weight_linear=w_qkv,
+                weight=w_norm,
+                output=rmsnorm_out,
+                grid_dim=(mpk.max_num_batched_tokens, 1, 1),
+                block_dim=(128, 1, 1),
+            )
+            mpk.linear_layer(
+                input=rmsnorm_out,
+                weight=w_qkv,
                 output=attn_in,
                 grid_dim=(grid_for_rmsnorm_linear_layer(w_qkv.dim(0)), 1, 1),
                 block_dim=(128, 1, 1),
             )
+            #mpk.rmsnorm_linear_layer(
+            #    input=x,
+            #    weight_norm=w_norm,
+            #    weight_linear=w_qkv,
+            #    output=attn_in,
+            #    grid_dim=(grid_for_rmsnorm_linear_layer(w_qkv.dim(0)), 1, 1),
+            #    block_dim=(128, 1, 1),
+            #)
             # add attention
             w_q_norm = mpk.attach_input(
                 torch_tensor=layer.self_attn.q_norm.weight, name=f"layer_{i}_q_norm"
@@ -393,7 +448,7 @@ if __name__ == "__main__":
                     block_dim=(128, 1, 1),
                 )
             else:
-                mpk.attention_layer(
+                mpk.paged_attention_layer(
                     input=attn_in,
                     k_cache=k_cache,
                     v_cache=v_cache,
@@ -402,7 +457,7 @@ if __name__ == "__main__":
                     cos_pos_embed=cos_pos_embed,
                     sin_pos_embed=sin_pos_embed,
                     output=attn_out,
-                    grid_dim=(total_tokens_per_iter, num_local_kv_heads, 1),
+                    grid_dim=(mpk.max_num_batched_requests, num_local_kv_heads, 1),
                     block_dim=(128, 1, 1),
                 )
             # add linear w/ residual
@@ -440,27 +495,47 @@ if __name__ == "__main__":
             w_up_proj = mpk.attach_input(
                 torch_tensor=layer.mlp.up_proj.weight, name=f"layer_{i}_up_proj"
             )
-
+            rmsnorm_num_tasks = grid_for_rmsnorm_linear_layer(w_gate_proj.dim(0) + w_up_proj.dim(0))
             w_gatedup = mpk.fuse_tensors(
                 inputs=[w_gate_proj, w_up_proj],
                 fused_dim=0,
-                num_groups=1,
+                num_groups=rmsnorm_num_tasks//2,
                 name=f"layer_{i}_gatedup_proj",
             )
-            mpk.rmsnorm_linear_layer(
+            mpk.rmsnorm_layer(
                 input=x,
-                weight_norm=w_norm,
-                weight_linear=w_gatedup,
+                weight=w_norm,
+                output=rmsnorm_out,
+                grid_dim=(mpk.max_num_batched_tokens, 1, 1),
+                block_dim=(128, 1, 1),
+            )
+            mpk.linear_layer(
+                input=rmsnorm_out,
+                weight=w_gatedup,
                 output=mlp_mid,
-                grid_dim=(grid_for_rmsnorm_linear_layer(w_gatedup.dim(0)), 1, 1),
+                grid_dim=(rmsnorm_num_tasks, 1, 1),
+                block_dim=(128, 1, 1),
+            )
+            #mpk.rmsnorm_linear_layer(
+            #    input=x,
+            #    weight_norm=w_norm,
+            #    weight_linear=w_gatedup,
+            #    output=mlp_mid,
+            #    grid_dim=(rmsnorm_num_tasks, 1, 1),
+            #    block_dim=(128, 1, 1),
+            #)
+            mpk.silu_mul_layer(
+                input=mlp_mid,
+                output=silu_mul_out,
+                grid_dim=(rmsnorm_num_tasks//2, 1, 1),
                 block_dim=(128, 1, 1),
             )
             # add silu_mul_linear layer
             w = mpk.attach_input(
                 torch_tensor=layer.mlp.down_proj.weight, name=f"layer_{i}_down_proj"
             )
-            mpk.silu_mul_linear_with_residual_layer(
-                input=mlp_mid,
+            mpk.linear_with_residual_layer(
+                input=silu_mul_out,
                 weight=w,
                 residual=x,
                 output=mlp_out,
@@ -499,7 +574,7 @@ if __name__ == "__main__":
                                        1)
             argmax_reduce_grid_dim = (1, spec_decode_config.spec_length + 1, 1)
         else:
-            argmax_partial_grid_dim = (96, 1, 1)
+            argmax_partial_grid_dim = (mpk.num_workers, 1, 1)
             argmax_reduce_grid_dim = (1, 1, 1)
         mpk.argmax_partial_layer(
             input=argmax_in,
@@ -571,38 +646,37 @@ if __name__ == "__main__":
         )
     else:
         # prefill phase
-        step.fill_(prompt_len - 1)
-        input_ids = tokens[:, 0:prompt_len]
-        cos_embeddings = position_embeddings[0][:, 0:prompt_len]
-        sin_embeddings = position_embeddings[1][:, 0:prompt_len]
-        logits = model.forward(
-            input_ids=input_ids,
-            position_embeddings=(cos_embeddings, sin_embeddings),
-            step=step,
-            stream=stream,
-        )
-        next_token = logits.argmax(dim=-1)
-        next_token = next_token[0, -1]
-        tokens[0, prompt_len] = next_token
-        torch.cuda.synchronize()
+        #step.fill_(prompt_len - 1)
+        #input_ids = tokens[:, 0:prompt_len]
+        #cos_embeddings = position_embeddings[0][:, 0:prompt_len]
+        #sin_embeddings = position_embeddings[1][:, 0:prompt_len]
+        #logits = model.forward(
+        #    input_ids=input_ids,
+        #    position_embeddings=(cos_embeddings, sin_embeddings),
+        #    step=step,
+        #    stream=stream,
+        #)
+        #next_token = logits.argmax(dim=-1)
+        #next_token = next_token[0, -1]
+        #tokens[0, prompt_len] = next_token
+        #torch.cuda.synchronize()
+        #step.fill_(prompt_len)
+
         starter.record()
-
-        step.fill_(prompt_len)
         mpk()
-
         ender.record()
         torch.cuda.synchronize()
         run_time = starter.elapsed_time(ender)
 
-        generated_ids = tokens[:, : step[0] + 1]
-        # print(f"generated_ids: {generated_ids}")
-
-        response = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
-        print(response)
+        print("tokens.shape = ", tokens.shape)
+        for r in range(total_num_requests):
+            generated_ids = tokens[r, : step[r] + 1]
+            response = tokenizer.decode(generated_ids, skip_special_tokens=True)
+            print(response)
 
         print(
             "Prompt length {}, generate length {}, per-token latency {} ms".format(
-                prompt_len, step[0] - prompt_len, run_time / (step[0] - prompt_len)
+                prompt_lengths[0], step[0] + 1 - prompt_lengths[0], run_time / (step[0] + 1 - prompt_lengths[0])
             )
         )
     if world_size > 1:

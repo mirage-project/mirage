@@ -160,7 +160,6 @@ def get_compile_command(
     flags = flags + [f"-DMPK_MAX_NUM_PAGES={mpk.max_num_pages}"]
     flags = flags + [f"-DMPK_PAGE_SIZE={mpk.page_size}"]
     flags = flags + [f"-DMPK_MAX_SEQ_LENGTH={mpk.max_seq_length}"]
-    
 
     if use_nvshmem:
         nvshmem_cmd = [

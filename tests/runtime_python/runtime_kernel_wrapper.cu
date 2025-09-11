@@ -495,10 +495,13 @@ void paged_attention(
 template <typename T,
           int NUM_QO_HEADS,
           int NUM_KV_HEADS,
+          int KV_CACHE_STRIDE,
+          int QKV_STRIDE,
+          int O_STRIDE,
           int HEAD_DIM,
-          int PAGE_SIZE,
           int MAX_SEQ_LEN,
-          int MAX_TOKENS = 1>
+          int PAGE_SIZE,
+          int MAX_TOKENS = 8>
 __global__ void multitoken_paged_attention_wrapper(
     void const *qkv_ptr,
     void *paged_k_cache_ptr,
@@ -520,9 +523,12 @@ __global__ void multitoken_paged_attention_wrapper(
   multitoken_paged_attention_task_impl<T,
                                        NUM_QO_HEADS,
                                        NUM_KV_HEADS,
+                                       KV_CACHE_STRIDE,
+                                       QKV_STRIDE,
+                                       O_STRIDE,
                                        HEAD_DIM,
-                                       PAGE_SIZE,
                                        MAX_SEQ_LEN,
+                                       PAGE_SIZE,
                                        MAX_TOKENS>(
       qkv_ptr,
       paged_k_cache_ptr,
@@ -546,10 +552,13 @@ __global__ void multitoken_paged_attention_wrapper(
 template <typename T,
           int NUM_QO_HEADS,
           int NUM_KV_HEADS,
+          int KV_CACHE_STRIDE,
+          int QKV_STRIDE,
+          int O_STRIDE,
           int HEAD_DIM,
-          int PAGE_SIZE,
           int MAX_SEQ_LEN,
-          int MAX_TOKENS = 1>
+          int PAGE_SIZE,
+          int MAX_TOKENS = 8>
 void launch_multitoken_paged_attention(
     void const *qkv_ptr,
     void *paged_k_cache_ptr,
@@ -570,14 +579,17 @@ void launch_multitoken_paged_attention(
     float k_eps) {
   dim3 grid_dim(1, 1, 1);
   dim3 block_dim(128, 1, 1);
-  size_t smem_size = 112640;
+  size_t smem_size = mirage::runtime::MAX_SHARE_MEMORY_SIZE;
 
   cudaFuncSetAttribute(multitoken_paged_attention_wrapper<T,
                                                           NUM_QO_HEADS,
                                                           NUM_KV_HEADS,
+                                                          KV_CACHE_STRIDE,
+                                                          QKV_STRIDE,
+                                                          O_STRIDE,
                                                           HEAD_DIM,
-                                                          PAGE_SIZE,
                                                           MAX_SEQ_LEN,
+                                                          PAGE_SIZE,
                                                           MAX_TOKENS>,
                        cudaFuncAttributeMaxDynamicSharedMemorySize,
                        smem_size);
@@ -586,9 +598,12 @@ void launch_multitoken_paged_attention(
   multitoken_paged_attention_wrapper<T,
                                      NUM_QO_HEADS,
                                      NUM_KV_HEADS,
+                                     KV_CACHE_STRIDE,
+                                     QKV_STRIDE,
+                                     O_STRIDE,
                                      HEAD_DIM,
-                                     PAGE_SIZE,
                                      MAX_SEQ_LEN,
+                                     PAGE_SIZE,
                                      MAX_TOKENS>
       <<<grid_dim, block_dim, smem_size>>>(qkv_ptr,
                                            paged_k_cache_ptr,
@@ -743,8 +758,26 @@ void multitoken_paged_attention(
   void const *k_norm_weight_ptr = qk_norm ? k_norm_weight->data_ptr() : nullptr;
   void const *cos_ptr = rope ? cos->data_ptr() : nullptr;
   void const *sin_ptr = rope ? sin->data_ptr() : nullptr;
+  int const qo_heads = 4;
+  int const kv_heads = 1;
+  int const head_dim = 128;
+  int const qkv_stride = (qo_heads + 2 * kv_heads) * head_dim;
+  assert(qkv_stride == qkv.stride(0));
+  int const kv_stride = head_dim * kv_heads;
+  assert(kv_stride == paged_k_cache.stride(1));
+  int const o_stride = head_dim * qo_heads;
+  int const page_size = 4096;
+  int const max_seq_len = 512;
 
-  launch_multitoken_paged_attention<bfloat16, 4, 1, 128, 64, 512, 4>(
+  launch_multitoken_paged_attention<bfloat16,
+                                    qo_heads,
+                                    kv_heads,
+                                    kv_stride,
+                                    qkv_stride,
+                                    o_stride,
+                                    head_dim,
+                                    max_seq_len,
+                                    page_size>(
       qkv_ptr,
       paged_k_cache_ptr,
       paged_v_cache_ptr,
@@ -786,7 +819,7 @@ __global__ void norm_linear_kernel_wrapper(void const *input_ptr,
                         OUTPUT_SIZE,
                         REDUCTION_SIZE,
                         OUTPUT_SIZE>(
-      input_ptr, norm_weight_ptr, weight_ptr, eps, output_ptr);
+      input_ptr, norm_weight_ptr, weight_ptr, BATCH_SIZE, eps, output_ptr);
 }
 
 template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int REDUCTION_SIZE>
@@ -955,14 +988,15 @@ __global__ void rms_norm_kernel_wrapper(void const *input_ptr,
   T const *rope_cos_ptr = static_cast<T const *>(cos_ptr);
   T const *rope_sin_ptr = static_cast<T const *>(sin_ptr);
 
-  kernel::rms_norm<T, Smem, HEAD_NUM, WINDOW_SIZE, HEAD_DIM>(input_smem,
-                                                             norm_weight_ptr,
-                                                             reduce_smem,
-                                                             eps,
-                                                             token_offset,
-                                                             rotary_emd,
-                                                             rope_cos_ptr,
-                                                             rope_sin_ptr);
+  kernel::rms_norm<T, Smem, HEAD_NUM, HEAD_DIM>(input_smem,
+                                                norm_weight_ptr,
+                                                reduce_smem,
+                                                eps,
+                                                WINDOW_SIZE,
+                                                token_offset,
+                                                rotary_emd,
+                                                rope_cos_ptr,
+                                                rope_sin_ptr);
 
   __syncthreads();
 
@@ -1178,6 +1212,8 @@ void silu_mul_linear(torch::Tensor input,
     SILU_MUL_LINEAR_DISPATCH_BATCH_SIZE(4)
     SILU_MUL_LINEAR_DISPATCH_BATCH_SIZE(5)
     SILU_MUL_LINEAR_DISPATCH_BATCH_SIZE(6)
+    SILU_MUL_LINEAR_DISPATCH_BATCH_SIZE(7)
+    SILU_MUL_LINEAR_DISPATCH_BATCH_SIZE(8)
     default:
       printf("Unsupported output size in test: %zu\n", output.size(1));
       break;
@@ -1197,7 +1233,12 @@ __global__ void linear_kernel_wrapper(void const *input_ptr,
                                       void const *residual_ptr,
                                       void *output_ptr) {
   linear_kernel<T, BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE>(
-      input_ptr, weight_ptr, residual_ptr, output_ptr);
+      input_ptr,
+      weight_ptr,
+      residual_ptr,
+      output_ptr,
+      BATCH_SIZE /*num_active_tokens*/,
+      true);
 }
 
 template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int REDUCTION_SIZE>
@@ -1438,10 +1479,13 @@ __global__ void
                                   chunk_idx;
 
   argmax_partial_kernel<T, BATCH_SIZE, CHUNK_SIZE, NUM_PARTIAL_TASKS>(
-      row_input_ptr, row_output_val_ptr, row_output_idx_ptr);
+      row_input_ptr,
+      row_output_val_ptr,
+      row_output_idx_ptr,
+      BATCH_SIZE /*num_active_tokens*/);
 }
 
-template <typename T, int CHUNK_SIZE, int NUM_PARTIAL_TASKS>
+template <typename T, int BATCH_SIZE, int CHUNK_SIZE, int NUM_PARTIAL_TASKS>
 __global__ void
     argmax_reduce_kernel_wrapper(void const *__restrict__ input_val_ptr,
                                  void const *__restrict__ input_idx_ptr,
@@ -1457,8 +1501,11 @@ __global__ void
   long long *row_output_ptr =
       static_cast<long long *>(final_output_ptr) + row_idx;
 
-  argmax_reduce_kernel<T, CHUNK_SIZE, NUM_PARTIAL_TASKS>(
-      row_input_val_ptr, row_input_idx_ptr, row_output_ptr, step, tokens);
+  argmax_reduce_kernel<T, BATCH_SIZE, CHUNK_SIZE, NUM_PARTIAL_TASKS>(
+      row_input_val_ptr,
+      row_input_idx_ptr,
+      row_output_ptr,
+      BATCH_SIZE /*num_active_tokens*/);
 }
 
 void argmax(torch::Tensor input,
@@ -1510,7 +1557,7 @@ void argmax(torch::Tensor input,
 
   // Launch reduce kernel
   dim3 reduce_grid_dim(1, n_row, 1);
-  argmax_reduce_kernel_wrapper<bfloat16, CHUNK_SIZE, TASK_PER_BATCH>
+  argmax_reduce_kernel_wrapper<bfloat16, BATCH_SIZE, CHUNK_SIZE, TASK_PER_BATCH>
       <<<reduce_grid_dim, block_dim>>>(
           partial_val.data_ptr(),
           partial_idx.data_ptr(),
