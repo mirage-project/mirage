@@ -13,6 +13,7 @@
  * limitations under the License.
  */
 #pragma once
+#pragma once
 #include "../common.h"
 #include "barrier.cuh"
 #include "tma_2d.cuh"

@@ -186,6 +186,8 @@ def get_compile_command(
         ]
     
     
+    if profiling:
+        flags = flags + ["-DMPK_ENABLE_PROFILING"]
 
     return common_cmd + specific_cmd + flags
 
