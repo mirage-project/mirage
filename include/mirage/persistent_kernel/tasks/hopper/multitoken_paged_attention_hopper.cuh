@@ -1,17 +1,17 @@
 /* Copyright 2025 CMU
-*
-* Licensed under the Apache License, Version 2.0 (the "License");
-* you may not use this file except in compliance with the License.
-* You may obtain a copy of the License at
-*
-*     http://www.apache.org/licenses/LICENSE-2.0
-*
-* Unless required by applicable law or agreed to in writing, software
-* distributed under the License is distributed on an "AS IS" BASIS,
-* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific language governing permissions and
-* limitations under the License.
-*/
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
 #pragma once
 #include "../common.h"
@@ -72,7 +72,6 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
     float q_eps,
     float k_eps,
     void *output_ptr,
-    void *qkv_ptr,
     int head_group) {
   constexpr int NUM_QO_PER_KV = NUM_QO_HEADS / NUM_KV_HEADS;
 
@@ -86,8 +85,7 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
   constexpr int Kstages = 2;
   // NOTE(Yu): we use m64n64k16 mma atom to compute matrix multiplication
   constexpr int MMA_ITERS_M = (MAX_TOKENS * NUM_QO_PER_KV + 63) / 64;
-  constexpr int TMA_ROWS = 8;
-  // constexpr int QSMEM_ROW = 64;
+  constexpr int CP_CHUNK_SIZE = 16 / sizeof(T);
 
   // the scale factor for normalization in softmax
   float const sm_scale = 1.0f / sqrtf(static_cast<float>(HEAD_DIM));
@@ -103,32 +101,27 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
     return;
   }
   int const num_tokens = last_token_pos - first_token_pos;
-  
+
   int const first_page_pos = paged_kv_indptr_buffer_ptr[request_id];
   int const last_page_pos = paged_kv_indptr_buffer_ptr[request_id + 1];
   int const num_pages = last_page_pos - first_page_pos;
-  int const seq_len = (num_pages - 1) * PAGE_SIZE + paged_kv_last_page_len_buffer_ptr[request_id];
+  int const seq_len = (num_pages - 1) * PAGE_SIZE +
+                      paged_kv_last_page_len_buffer_ptr[request_id];
   int const prompt_len = seq_len - num_tokens;
-  
+
   // Load the paged KV indices into shared memory
   __shared__ int page_indices[MAX_PAGES_PER_REQUEST];
 
-// #pragma unroll
-//   for (int i = threadIdx.x; i < num_pages * sizeof(int) / 16;
-//       i += NUM_THREADS) {
-//     __uint128_t const *src_ptr =
-//         reinterpret_cast<__uint128_t const *>(paged_kv_indices_buffer_ptr +
-//                                               first_page_pos) +
-//         i;
-//     __uint128_t *dst_ptr = reinterpret_cast<__uint128_t *>(page_indices) + i;
-//     *dst_ptr = *src_ptr;
-//   }
-
 #pragma unroll
-  for (int i = threadIdx.x; i < num_pages; i += blockDim.x) {
-    page_indices[i] = paged_kv_indices_buffer_ptr[first_page_pos + i];
+  for (int i = threadIdx.x; i < num_pages * sizeof(int) / 16;
+       i += NUM_THREADS) {
+    __uint128_t const *src_ptr =
+        reinterpret_cast<__uint128_t const *>(paged_kv_indices_buffer_ptr +
+                                              first_page_pos) +
+        i;
+    __uint128_t *dst_ptr = reinterpret_cast<__uint128_t *>(page_indices) + i;
+    *dst_ptr = *src_ptr;
   }
-
 
   if (num_pages % (16 / sizeof(int)) != 0) {
     int tail_pages = num_pages % (16 / sizeof(int));
@@ -141,28 +134,19 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
 
   __syncthreads();
 
-  T const *__restrict__ d_q =
-  reinterpret_cast<T const *>(qkv_ptr) + first_token_pos * QKV_STRIDE;
-T const *__restrict__ d_k = d_q + NUM_QO_PER_KV * HEAD_DIM;
-T const *__restrict__ d_v = d_k + HEAD_DIM;
   T *__restrict__ d_paged_k_cache = reinterpret_cast<T *>(paged_k_cache_ptr);
   T *__restrict__ d_paged_v_cache = reinterpret_cast<T *>(paged_v_cache_ptr);
-  #ifdef OUTPUT_PTR
+#ifdef OUTPUT_PTR
   T *__restrict__ d_output =
-  reinterpret_cast<T *>(output_ptr) + first_token_pos * O_STRIDE;
-  #endif
+      reinterpret_cast<T *>(output_ptr) + first_token_pos * O_STRIDE;
+#endif
 
-  //  DTensors' layouts  
-  using QDmem =
-      dmem_row_const<T, MAX_TOKENS, HEAD_DIM * NUM_QO_PER_KV, QKV_STRIDE>;
-  using KVDmem = dmem_row_const<T, MAX_TOKENS, HEAD_DIM, QKV_STRIDE>;
+  //  DTensors' layouts
   using KVCacheDmem = dmem_row<T, KV_TILE_SIZE, HEAD_DIM, KV_CACHE_STRIDE>;
 #ifdef OUTPUT_PTR
   using ODmem = dmem_row<T, MAX_TOKENS, HEAD_DIM * NUM_QO_PER_KV, O_STRIDE>;
 #endif
 
-QDmem q_dmem(d_q);
-KVDmem k_dmem(d_k), v_dmem(d_v);
   KVCacheDmem paged_k_cache_dmem(d_paged_k_cache),
       paged_v_cache_dmem(d_paged_v_cache);
 #ifdef OUTPUT_PTR
@@ -194,27 +178,37 @@ KVDmem k_dmem(d_k), v_dmem(d_v);
       (S_V_BUFFER_OFFSET + S_V_BUFFER_SIZE + 1023) / 1024 * 1024;
   constexpr size_t S_O_SIZE = S_Q_SIZE;
 
-  constexpr size_t S_NON_CACHED_Q_OFFSET = (S_O_OFFSET + S_O_SIZE + 1023) / 1024 * 1024;
-  constexpr size_t S_NON_CACHED_Q_SIZE = sizeof(T) * MAX_TOKENS * NUM_QO_PER_KV * HEAD_DIM;
+  constexpr size_t S_NON_CACHED_Q_OFFSET =
+      (S_O_OFFSET + S_O_SIZE + 1023) / 1024 * 1024;
+  constexpr size_t S_NON_CACHED_Q_SIZE =
+      sizeof(T) * MAX_TOKENS * NUM_QO_PER_KV * HEAD_DIM;
 
-  constexpr size_t S_NON_CACHED_K_OFFSET = (S_NON_CACHED_Q_OFFSET + S_NON_CACHED_Q_SIZE + 1023) / 1024 * 1024;
-  constexpr size_t S_NON_CACHED_K_SIZE = sizeof(T) * MAX_TOKENS * NUM_KV_HEADS * HEAD_DIM;
+  constexpr size_t S_NON_CACHED_K_OFFSET =
+      (S_NON_CACHED_Q_OFFSET + S_NON_CACHED_Q_SIZE + 1023) / 1024 * 1024;
+  constexpr size_t S_NON_CACHED_K_SIZE =
+      sizeof(T) * MAX_TOKENS * NUM_KV_HEADS * HEAD_DIM;
 
-  constexpr size_t S_NON_CACHED_V_OFFSET = (S_NON_CACHED_K_OFFSET + S_NON_CACHED_K_SIZE + 1023) / 1024 * 1024;
-  constexpr size_t S_NON_CACHED_V_SIZE = sizeof(T) * MAX_TOKENS * NUM_KV_HEADS * HEAD_DIM;
+  constexpr size_t S_NON_CACHED_V_OFFSET =
+      (S_NON_CACHED_K_OFFSET + S_NON_CACHED_K_SIZE + 1023) / 1024 * 1024;
+  constexpr size_t S_NON_CACHED_V_SIZE =
+      sizeof(T) * MAX_TOKENS * NUM_KV_HEADS * HEAD_DIM;
 
-  constexpr size_t S_NON_CACHED_K_BUFFER_OFFSET = 
+  constexpr size_t S_NON_CACHED_K_BUFFER_OFFSET =
       (S_NON_CACHED_V_OFFSET + S_NON_CACHED_V_SIZE + 1023) / 1024 * 1024;
-  constexpr size_t S_NON_CACHED_K_BUFFER_SIZE = sizeof(T) * MAX_TOKENS * NUM_KV_HEADS * HEAD_DIM;
+  constexpr size_t S_NON_CACHED_K_BUFFER_SIZE =
+      sizeof(T) * MAX_TOKENS * NUM_KV_HEADS * HEAD_DIM;
 
-  constexpr size_t S_NON_CACHED_V_BUFFER_OFFSET = 
-      (S_NON_CACHED_K_BUFFER_OFFSET + S_NON_CACHED_K_BUFFER_SIZE + 1023) / 1024 * 1024;
-  constexpr size_t S_NON_CACHED_V_BUFFER_SIZE = sizeof(T) * MAX_TOKENS * NUM_KV_HEADS * HEAD_DIM;
+  constexpr size_t S_NON_CACHED_V_BUFFER_OFFSET =
+      (S_NON_CACHED_K_BUFFER_OFFSET + S_NON_CACHED_K_BUFFER_SIZE + 1023) /
+      1024 * 1024;
+  constexpr size_t S_NON_CACHED_V_BUFFER_SIZE =
+      sizeof(T) * MAX_TOKENS * NUM_KV_HEADS * HEAD_DIM;
 
   // align to size of float
   constexpr size_t S_Q_NORM_SUM_OFFSET =
-      ((S_NON_CACHED_V_BUFFER_OFFSET + S_NON_CACHED_V_BUFFER_SIZE + sizeof(float) - 1) &
-      ~size_t(sizeof(float) - 1));
+      ((S_NON_CACHED_V_BUFFER_OFFSET + S_NON_CACHED_V_BUFFER_SIZE +
+        sizeof(float) - 1) &
+       ~size_t(sizeof(float) - 1));
   constexpr size_t S_Q_NORM_SUM_SIZE =
       sizeof(float) * 4; // 4 floats for 4 warps
 
@@ -266,8 +260,10 @@ KVDmem k_dmem(d_k), v_dmem(d_v);
   T *s_non_cached_q = reinterpret_cast<T *>(smem + S_NON_CACHED_Q_OFFSET);
   T *s_non_cached_k = reinterpret_cast<T *>(smem + S_NON_CACHED_K_OFFSET);
   T *s_non_cached_v = reinterpret_cast<T *>(smem + S_NON_CACHED_V_OFFSET);
-  T *s_non_cached_k_buffer = reinterpret_cast<T *>(smem + S_NON_CACHED_K_BUFFER_OFFSET);
-  T *s_non_cached_v_buffer = reinterpret_cast<T *>(smem + S_NON_CACHED_V_BUFFER_OFFSET);
+  T *s_non_cached_k_buffer =
+      reinterpret_cast<T *>(smem + S_NON_CACHED_K_BUFFER_OFFSET);
+  T *s_non_cached_v_buffer =
+      reinterpret_cast<T *>(smem + S_NON_CACHED_V_BUFFER_OFFSET);
   float *s_q_norm_sum = reinterpret_cast<float *>(smem + S_Q_NORM_SUM_OFFSET);
   float *s_k_norm_sum = reinterpret_cast<float *>(smem + S_K_NORM_SUM_OFFSET);
   float *s_m_buffer = reinterpret_cast<float *>(smem + S_M_BUFFER_OFFSET);
@@ -283,10 +279,15 @@ KVDmem k_dmem(d_k), v_dmem(d_v);
                           64,
                           (HEAD_DIM + 63) / 64>;
   using KVSmem = smem_tma<T, 3, 3, 3, KV_TILE_SIZE, 64, (HEAD_DIM + 63) / 64>;
-  using NonCachedQSmem = smem_tma<T, 3, 3, 3, MAX_TOKENS * NUM_QO_PER_KV, 64, (HEAD_DIM + 63) / 64>;
-  using NonCachedKVSmem = smem_tma<T, 3, 3, 3, MAX_TOKENS * NUM_KV_HEADS, 64, (HEAD_DIM + 63) / 64>;
-
-  // static_assert((MAX_TOKENS * NUM_KV_HEADS * HEAD_DIM) % 1024 == 0);
+  using NonCachedQSmem = smem_tma<T,
+                                  3,
+                                  3,
+                                  3,
+                                  MAX_TOKENS * NUM_QO_PER_KV,
+                                  64,
+                                  (HEAD_DIM + 63) / 64>;
+  using NonCachedKVSmem =
+      smem_tma<T, 3, 3, 3, MAX_TOKENS * NUM_KV_HEADS, 64, (HEAD_DIM + 63) / 64>;
 
   using Q_DESC = wgmma::mma_descriptor<QOSmem>;
   using K_DESC = wgmma::mma_descriptor<KVSmem, false>;
@@ -297,8 +298,10 @@ KVDmem k_dmem(d_k), v_dmem(d_v);
   KVSmem k_buffer_smem(s_k_buffer), v_buffer_smem(s_v_buffer);
   // use for temporary buffer for non-cached kv by TMA
   NonCachedQSmem non_cached_q_smem(s_non_cached_q);
-  NonCachedKVSmem non_cached_k_smem(s_non_cached_k), non_cached_v_smem(s_non_cached_v);
-  NonCachedKVSmem non_cached_k_buffer_smem(s_non_cached_k_buffer), non_cached_v_buffer_smem(s_non_cached_v_buffer);
+  NonCachedKVSmem non_cached_k_smem(s_non_cached_k),
+      non_cached_v_smem(s_non_cached_v);
+  NonCachedKVSmem non_cached_k_buffer_smem(s_non_cached_k_buffer),
+      non_cached_v_buffer_smem(s_non_cached_v_buffer);
 
   int const num_iters = (seq_len + KV_TILE_SIZE - 1) / KV_TILE_SIZE;
   int curr_iter_len = min(seq_len, KV_TILE_SIZE);
@@ -306,10 +309,6 @@ KVDmem k_dmem(d_k), v_dmem(d_v);
   // Currently assume that PAGE_SIZE is a multiplier of KV_TILE_SIZE
   // so that we access a single page in one iteration
   static_assert(PAGE_SIZE % KV_TILE_SIZE == 0);
-
-  // int const TMA_TRANS_BYTES_Q =
-  //     MAX_TOKENS * NUM_QO_PER_KV * HEAD_DIM * sizeof(T);
-  // int TMA_TRANS_BYTES_KV = curr_iter_len * HEAD_DIM * sizeof(T);
 
   //  define barries
   Barrier *q_barrier = reinterpret_cast<Barrier *>(smem + S_Q_BARRIER_OFFSET);
@@ -333,55 +332,40 @@ KVDmem k_dmem(d_k), v_dmem(d_v);
     // prefetch
     // load q
     if (lane_idx == 0 && warp_idx % 4 == 0) {
-      set_barrier_transaction_bytes(q_barrier[0], MAX_TOKENS * NUM_QO_PER_KV * HEAD_DIM * sizeof(T));
+      set_barrier_transaction_bytes(
+          q_barrier[0], MAX_TOKENS * NUM_QO_PER_KV * HEAD_DIM * sizeof(T));
       tma_q.tma_cp_async(q_barrier[0], non_cached_q_smem(0, 0), {0, 0, 0});
     }
 
-    // constexpr int CP_CHUNK_SIZE = 16 / sizeof(T);
-// #pragma unroll
-//   for (int chunk_idx = threadIdx.x - 128;
-//        chunk_idx < num_tokens * NUM_QO_PER_KV * HEAD_DIM;
-//        chunk_idx += NUM_THREADS) {
-//     // int ck = chunk_idx % 128;
-//     int src_row = chunk_idx / (NUM_QO_PER_KV * HEAD_DIM);
-//     int src_col = (chunk_idx % (NUM_QO_PER_KV * HEAD_DIM));
-//     int dst_row = src_row * NUM_QO_PER_KV + src_col / HEAD_DIM;
-//     int dst_col = src_col % HEAD_DIM;
-//     q_smem.at(dst_row, dst_col) = q_dmem.at(src_row, src_col);
-//   }
-
     wg_sync<THREADS_PER_WARPGROUP * CONSUMER_WARPGROUPS>(8);
-
-    // if (lane_idx == 0 && warp_idx % 4 == 0) {
-    //   arrive(q_barrier[0], 1);
-    // }
 
     // load k and v
     int page_idx_0 = page_indices[0];
-  #pragma unroll
-      for (int chunk_idx = threadIdx.x - 128;
-           chunk_idx < curr_iter_len * HEAD_DIM;
-           chunk_idx += NUM_THREADS) {
-        int dst_row = chunk_idx / (HEAD_DIM);
-        int col = (chunk_idx % (HEAD_DIM));
-        if (dst_row < seq_len - num_tokens) {
-          // load from KV Cache
-          // int page_idx = page_indices[(dst_row + cp_finished_seq_len) /
-          // PAGE_SIZE];
-          int page_offset = (dst_row) % PAGE_SIZE;
-          int src_row = page_idx_0 * PAGE_SIZE + page_offset;
-          k_buffer_smem.at(dst_row, col) = paged_k_cache_dmem.at(src_row, col);
-          v_buffer_smem.at(dst_row, col) = paged_v_cache_dmem.at(src_row, col);
-        } else {
-          // load from QKV
-          int src_row = dst_row - (seq_len - num_tokens);
-          // k_buffer_smem.at(dst_row, col) = k_dmem.at(src_row, col);
-          // v_buffer_smem.at(dst_row, col) = v_dmem.at(src_row, col);
-        }
+#pragma unroll
+    for (int chunk_idx = threadIdx.x - NUM_THREADS * CONSUMER_WARPGROUPS;
+         chunk_idx < curr_iter_len * HEAD_DIM / CP_CHUNK_SIZE;
+         chunk_idx += NUM_THREADS) {
+      int dst_row = chunk_idx / (HEAD_DIM / CP_CHUNK_SIZE);
+      int col = (chunk_idx % (HEAD_DIM / CP_CHUNK_SIZE)) * CP_CHUNK_SIZE;
+      if (dst_row < seq_len - num_tokens) {
+        // load from KV Cache
+        // int page_idx = page_indices[(dst_row + cp_finished_seq_len) /
+        // PAGE_SIZE];
+        int page_offset = (dst_row) % PAGE_SIZE;
+        int src_row = page_idx_0 * PAGE_SIZE + page_offset;
+        load_smem(k_buffer_smem(dst_row, col),
+                  paged_k_cache_dmem(src_row, col));
+        load_smem(v_buffer_smem(dst_row, col),
+                  paged_v_cache_dmem(src_row, col));
+      } else {
+        // load from QKV
+        // int src_row = dst_row - (seq_len - num_tokens);
+        // k_buffer_smem.at(dst_row, col) = k_dmem.at(src_row, col);
+        // v_buffer_smem.at(dst_row, col) = v_dmem.at(src_row, col);
       }
+    }
 
-      wg_sync<THREADS_PER_WARPGROUP * PRODUCER_WARPGROUPS>(8);
-
+    wg_sync<THREADS_PER_WARPGROUP * PRODUCER_WARPGROUPS>(8);
 
     if (lane_idx == 0 && warp_idx % 4 == 0) {
 
@@ -390,44 +374,49 @@ KVDmem k_dmem(d_k), v_dmem(d_v);
       int begin = 0;
       int end = begin + curr_iter_len;
       int cache_rows = (begin >= prompt_len) ? 0
-                      : (end <= prompt_len) ? (end - begin)
-                                          : (prompt_len - begin);
+                       : (end <= prompt_len) ? (end - begin)
+                                             : (prompt_len - begin);
 
       int kv_rows = curr_iter_len - cache_rows;
-      // set_barrier_transaction_bytes(k_barrier[0],
-      //   ((cache_rows == 0 ? 0 : KV_TILE_SIZE) * HEAD_DIM * sizeof(T)));
 
       set_barrier_transaction_bytes(k_barrier[0],
-        ((kv_rows == 0 ? 0 : MAX_TOKENS)) * HEAD_DIM * sizeof(T));
+                                    ((kv_rows == 0 ? 0 : MAX_TOKENS)) *
+                                        HEAD_DIM * sizeof(T));
       set_barrier_transaction_bytes(v_barrier[0],
-        ((kv_rows == 0 ? 0 : MAX_TOKENS)) * HEAD_DIM * sizeof(T));
+                                    ((kv_rows == 0 ? 0 : MAX_TOKENS)) *
+                                        HEAD_DIM * sizeof(T));
 
       // set_barrier_transaction_bytes(k_barrier[0],
-      //   ((cache_rows == 0 ? 0 : KV_TILE_SIZE) + (kv_rows == 0 ? 0 : MAX_TOKENS)) * HEAD_DIM * sizeof(T));
+      //   ((cache_rows == 0 ? 0 : KV_TILE_SIZE) + (kv_rows == 0 ? 0 :
+      //   MAX_TOKENS)) * HEAD_DIM * sizeof(T));
       // set_barrier_transaction_bytes(v_barrier[0],
-      //         ((cache_rows == 0 ? 0 : KV_TILE_SIZE) + (kv_rows == 0 ? 0 : MAX_TOKENS)) * HEAD_DIM * sizeof(T));
+      //         ((cache_rows == 0 ? 0 : KV_TILE_SIZE) + (kv_rows == 0 ? 0 :
+      //         MAX_TOKENS)) * HEAD_DIM * sizeof(T));
 
       // load from kv cache
-      if (cache_rows > 0) {
-        int page = page_indices[begin / PAGE_SIZE];
-        int in_page_row = begin % PAGE_SIZE;
-        int coords[3] = {0, in_page_row, page};
-        // tma_paged_k_cache.tma_cp_async(
-        //     k_barrier[0], k_buffer_smem(0, 0), coords);
-        // printf("load current tile from kv cache, page: %d, in_page_row: %d, cache_rows: %d\n", page, in_page_row, cache_rows);
-        // tma_paged_v_cache.tma_cp_async(
-        //     v_barrier[0], v_buffer_smem(0, 0), coords);
-      } 
+      // NOTE(Yu): currently not used, because we use cp_async to load kv cache
+      // if (cache_rows > 0) {
+      //   int page = page_indices[begin / PAGE_SIZE];
+      //   int in_page_row = begin % PAGE_SIZE;
+      //   int coords[3] = {0, in_page_row, page};
+      // tma_paged_k_cache.tma_cp_async(
+      //     k_barrier[0], k_buffer_smem(0, 0), coords);
+      // printf("load current tile from kv cache, page: %d, in_page_row: %d,
+      // cache_rows: %d\n", page, in_page_row, cache_rows);
+      // tma_paged_v_cache.tma_cp_async(
+      //     v_barrier[0], v_buffer_smem(0, 0), coords);
+      // }
       // load from non-cached kv
       if (kv_rows > 0) {
-        // assume tma_k, tma_v both have qkv_ptr as src_ptr
-          int coords_k[3] = {0, NUM_QO_PER_KV, 0};
-          int coords_v[3] = {0, NUM_QO_PER_KV + NUM_KV_HEADS, 0};
-          // each time copy one token and one head (kv head is only 1)
-          tma_k.tma_cp_async(
-              k_barrier[0], non_cached_k_buffer_smem(0, 0), coords_k);
-          tma_v.tma_cp_async(
-              v_barrier[0], non_cached_v_buffer_smem(0, 0), coords_v);
+        // assume tma_k, tma_v both have qkv_ptr as src_ptr, i.e. no offset for
+        // k,v
+        int coords_k[3] = {0, NUM_QO_PER_KV, 0};
+        int coords_v[3] = {0, NUM_QO_PER_KV + NUM_KV_HEADS, 0};
+        // each time copy one token and one head (kv head is only 1)
+        tma_k.tma_cp_async(
+            k_barrier[0], non_cached_k_buffer_smem(0, 0), coords_k);
+        tma_v.tma_cp_async(
+            v_barrier[0], non_cached_v_buffer_smem(0, 0), coords_v);
       }
     }
 
@@ -440,34 +429,34 @@ KVDmem k_dmem(d_k), v_dmem(d_v);
 
       wait(compute_done[slot], phase ^ 1);
 
-      int next_iter_len = min(seq_len - (iter + 1) * KV_TILE_SIZE, KV_TILE_SIZE);
-      
+      int next_iter_len =
+          min(seq_len - (iter + 1) * KV_TILE_SIZE, KV_TILE_SIZE);
+
       if (next_iter_len > 0) {
-      int page_idx = page_indices[(iter+1) * KV_TILE_SIZE / PAGE_SIZE];
-      #pragma unroll
-            for (int chunk_idx = threadIdx.x - 128;
-                  chunk_idx < next_iter_len * HEAD_DIM;
-                  chunk_idx += NUM_THREADS) {
-              int dst_row = chunk_idx / (HEAD_DIM);
-              int col = (chunk_idx % (HEAD_DIM));
-              if (dst_row + (iter+1) * KV_TILE_SIZE < seq_len - num_tokens) {
-                // load from KV Cache
-                // int page_idx =
-                //    page_indices[(dst_row + cp_finished_seq_len) / PAGE_SIZE];
-                int page_offset = (dst_row + (iter+1) * KV_TILE_SIZE) % PAGE_SIZE;
-                int src_row = page_idx * PAGE_SIZE + page_offset;
-                k_smem.at(dst_row, col) = paged_k_cache_dmem.at(src_row, col);
-                v_smem.at(dst_row, col) = paged_v_cache_dmem.at(src_row, col);
-              } else {
-                // load from QKV
-                // int src_row = dst_row + (iter+1) * KV_TILE_SIZE - (seq_len - num_tokens);
-                // k_smem.at(dst_row, col) = k_dmem.at(src_row, col);
-                // v_smem.at(dst_row, col) = v_dmem.at(src_row, col);
-              }
-            }
+        int page_idx = page_indices[(iter + 1) * KV_TILE_SIZE / PAGE_SIZE];
+#pragma unroll
+        for (int chunk_idx = threadIdx.x - NUM_THREADS * CONSUMER_WARPGROUPS;
+             chunk_idx < next_iter_len * HEAD_DIM / CP_CHUNK_SIZE;
+             chunk_idx += NUM_THREADS) {
+          int dst_row = chunk_idx / (HEAD_DIM / CP_CHUNK_SIZE);
+          int col = (chunk_idx % (HEAD_DIM / CP_CHUNK_SIZE)) * CP_CHUNK_SIZE;
+          if (dst_row + (iter + 1) * KV_TILE_SIZE < seq_len - num_tokens) {
+            // load from KV Cache
+            // int page_idx =
+            //    page_indices[(dst_row + cp_finished_seq_len) / PAGE_SIZE];
+            int page_offset = (dst_row + (iter + 1) * KV_TILE_SIZE) % PAGE_SIZE;
+            int src_row = page_idx * PAGE_SIZE + page_offset;
+            load_smem(k_smem(dst_row, col), paged_k_cache_dmem(src_row, col));
+            load_smem(v_smem(dst_row, col), paged_v_cache_dmem(src_row, col));
+          } else {
+            // load from QKV
+            // int src_row = dst_row + (iter+1) * KV_TILE_SIZE - (seq_len -
+            // num_tokens); k_smem.at(dst_row, col) = k_dmem.at(src_row, col);
+            // v_smem.at(dst_row, col) = v_dmem.at(src_row, col);
+          }
+        }
 
         wg_sync<THREADS_PER_WARPGROUP * PRODUCER_WARPGROUPS>(8);
-
 
         if (lane_idx == 0 && warp_idx % 4 == 0) {
           // arrive(k_barrier[slot], 1);
@@ -476,35 +465,41 @@ KVDmem k_dmem(d_k), v_dmem(d_v);
           int end = begin + next_iter_len;
           int boundary = seq_len - num_tokens;
           int cache_rows = (begin >= boundary) ? 0
-                          : (end <= boundary) ? (end - begin)
-                                              : (boundary - begin);
+                           : (end <= boundary) ? (end - begin)
+                                               : (boundary - begin);
           int kv_rows = next_iter_len - cache_rows;
 
           set_barrier_transaction_bytes(k_barrier[slot],
-                                        ((kv_rows == 0 ? 0 : MAX_TOKENS)) * HEAD_DIM * sizeof(T));
+                                        ((kv_rows == 0 ? 0 : MAX_TOKENS)) *
+                                            HEAD_DIM * sizeof(T));
 
           set_barrier_transaction_bytes(v_barrier[slot],
-            ((kv_rows == 0 ? 0 : MAX_TOKENS)) * HEAD_DIM * sizeof(T));
+                                        ((kv_rows == 0 ? 0 : MAX_TOKENS)) *
+                                            HEAD_DIM * sizeof(T));
 
           // set_barrier_transaction_bytes(k_barrier[slot],
-          //                               ((cache_rows == 0 ? 0 : KV_TILE_SIZE) * HEAD_DIM * sizeof(T)));
-
-          // set_barrier_transaction_bytes(k_barrier[slot],
-          //                               ((cache_rows == 0 ? 0 : KV_TILE_SIZE) + (kv_rows == 0 ? 0 : MAX_TOKENS)) * HEAD_DIM * sizeof(T));
+          //                               ((cache_rows == 0 ? 0 : KV_TILE_SIZE)
+          //                               + (kv_rows == 0 ? 0 : MAX_TOKENS)) *
+          //                               HEAD_DIM * sizeof(T));
           // set_barrier_transaction_bytes(v_barrier[slot],
-          //                               ((cache_rows == 0 ? 0 : KV_TILE_SIZE) + (kv_rows == 0 ? 0 : MAX_TOKENS)) * HEAD_DIM * sizeof(T));
+          //                               ((cache_rows == 0 ? 0 : KV_TILE_SIZE)
+          //                               + (kv_rows == 0 ? 0 : MAX_TOKENS)) *
+          //                               HEAD_DIM * sizeof(T));
           // load from kv cache
-          if (cache_rows > 0) {
-            int page = page_indices[begin / PAGE_SIZE];
-            int in_page_row = begin % PAGE_SIZE;
-            int coords[3] = {0, in_page_row, page};
-            // tma_paged_k_cache.tma_cp_async(
-            //     k_barrier[slot], k_smem(0, 0), coords);
+          // NOTE(Yu): currently not used, because we use cp_async to load kv
+          // cache if (cache_rows > 0) {
+          //   int page = page_indices[begin / PAGE_SIZE];
+          //   int in_page_row = begin % PAGE_SIZE;
+          //   int coords[3] = {0, in_page_row, page};
+          // tma_paged_k_cache.tma_cp_async(
+          //     k_barrier[slot], k_smem(0, 0), coords);
           //   tma_paged_v_cache.tma_cp_async(
           //       v_barrier[slot], v_smem(0, 0), coords);
-             // printf("load next tile from kv cache, page: %d, in_page_row: %d, cache_rows: %d\n", page, in_page_row, cache_rows);
-          }
+          // printf("load next tile from kv cache, page: %d, in_page_row: %d,
+          // cache_rows: %d\n", page, in_page_row, cache_rows);
+          // }
 
+          // load k v from new tokens
           if (kv_rows > 0) {
             int coords_k[3] = {0, NUM_QO_PER_KV, 0};
             int coords_v[3] = {0, NUM_QO_PER_KV + NUM_KV_HEADS, 0};
@@ -573,10 +568,12 @@ KVDmem k_dmem(d_k), v_dmem(d_v);
 
     // copy from non-cached q smem to q smem
     int src_row = first_token_pos * NUM_QO_PER_KV;
-    for (int elem_idx = threadIdx.x; elem_idx < num_tokens * NUM_QO_PER_KV * HEAD_DIM; elem_idx += NUM_THREADS) {
+    for (int elem_idx = threadIdx.x;
+         elem_idx < num_tokens * NUM_QO_PER_KV * HEAD_DIM;
+         elem_idx += NUM_THREADS) {
       int row = elem_idx / HEAD_DIM;
       int col = elem_idx % HEAD_DIM;
-      q_smem.at(row, col) = non_cached_q_smem.at(src_row + row, col); 
+      q_smem.at(row, col) = non_cached_q_smem.at(src_row + row, col);
     }
 
     wg_sync<THREADS_PER_WARPGROUP * CONSUMER_WARPGROUPS>(9);
@@ -584,21 +581,8 @@ KVDmem k_dmem(d_k), v_dmem(d_v);
     for (int iter = 0; iter < num_iters; iter++) {
       int phase = (iter / Kstages) % 2;
       int slot = iter % Kstages;
-
-      // if (threadIdx.x == 0) {
-      //   printf("num_iter is %d, iter %d wait k v_barrier start, blockIdx.x: %d, slot: %d, phase: %d\n", num_iters, iter, blockIdx.x, slot, phase);
-      // }
-
       wait(k_barrier[slot], phase);
-      // if (threadIdx.x == 0) {
-      //   printf("num_iter is %d, iter %d wait k_barrier done, blockIdx.x: %d\n", num_iters, iter, blockIdx.x);
-      // }
       wait(v_barrier[slot], phase);
-
-        // if (threadIdx.x == 0) {
-        //   printf("num_iter is %d, iter %d wait v_barrier done, blockIdx.x: %d\n", num_iters, iter, blockIdx.x);
-        // }
-
       // rotate the buffers
       if ((iter & 0x1) == 0) {
         k_smem.set_ptr(s_k_buffer);
@@ -623,23 +607,21 @@ KVDmem k_dmem(d_k), v_dmem(d_v);
       wg_sync<THREADS_PER_WARPGROUP * CONSUMER_WARPGROUPS>(9);
 
       int curr_iter_len = min(seq_len - iter * KV_TILE_SIZE, KV_TILE_SIZE);
-      
-      int kv_tokens_to_process = min(
-          curr_iter_len,
-          max(iter * KV_TILE_SIZE + curr_iter_len - prompt_len, 0));
+
+      int kv_tokens_to_process =
+          min(curr_iter_len,
+              max(iter * KV_TILE_SIZE + curr_iter_len - prompt_len, 0));
       int first_kv_token_to_process =
           iter * KV_TILE_SIZE + curr_iter_len - kv_tokens_to_process;
 
       int begin = iter * KV_TILE_SIZE;
-      int end   = begin + curr_iter_len;
       int cache_rows = max(0, min(curr_iter_len, prompt_len - begin));
-      int kv_rows    = curr_iter_len - cache_rows;
+      int kv_rows = curr_iter_len - cache_rows;
 
       if (kv_rows > 0) {
 #pragma unroll
-        for (int elem_idx = threadIdx.x;
-            elem_idx < kv_rows * HEAD_DIM;
-            elem_idx += NUM_THREADS) {
+        for (int elem_idx = threadIdx.x; elem_idx < kv_rows * HEAD_DIM;
+             elem_idx += NUM_THREADS) {
           int token_idx = elem_idx / HEAD_DIM;
           int col = elem_idx % HEAD_DIM;
 
@@ -714,7 +696,7 @@ KVDmem k_dmem(d_k), v_dmem(d_v);
         }
         if (kv_tokens_to_process > 0) {
           for (int token_idx = 0; token_idx < kv_tokens_to_process;
-              token_idx++) {
+               token_idx++) {
             // k rope
             rotary_embedding_wg<T,
                                 KVSmem,
@@ -738,8 +720,8 @@ KVDmem k_dmem(d_k), v_dmem(d_v);
       if (kv_tokens_to_process > 0) {
         int page_idx = page_indices[first_kv_token_to_process / PAGE_SIZE];
         for (int elem_idx = threadIdx.x;
-            elem_idx < kv_tokens_to_process * HEAD_DIM;
-            elem_idx += NUM_THREADS) {
+             elem_idx < kv_tokens_to_process * HEAD_DIM;
+             elem_idx += NUM_THREADS) {
           int token_idx = elem_idx / HEAD_DIM;
           int col = elem_idx % HEAD_DIM;
           int page_offset = (token_idx + first_kv_token_to_process) % PAGE_SIZE;
@@ -830,7 +812,7 @@ KVDmem k_dmem(d_k), v_dmem(d_v);
           x_frag_f[m][frag_idx] =
               x_frag_f[m][frag_idx] != -inf
                   ? expf(x_frag_f[m][frag_idx] * sm_scale -
-                        m_local[m][(frag_idx & 0x3) >> 1] * sm_scale)
+                         m_local[m][(frag_idx & 0x3) >> 1] * sm_scale)
                   : 0.f;
           d_partial[m][(frag_idx & 0x3) >> 1] += x_frag_f[m][frag_idx];
         }
@@ -879,9 +861,7 @@ KVDmem k_dmem(d_k), v_dmem(d_v);
 
       wg_sync<THREADS_PER_WARPGROUP * CONSUMER_WARPGROUPS>(9);
 
-
       if (warp_idx == 0 && lane_idx == 0) {
-        // printf("num_iter is %d, iter %d arrive compute_done, blockIdx.x: %d\n", num_iters, iter, blockIdx.x);
         arrive(compute_done[slot], 1);
       }
     }
@@ -892,18 +872,18 @@ KVDmem k_dmem(d_k), v_dmem(d_v);
       m_local[m][0] *= m_local[m][0] != -inf ? sm_scale : 1.f;
       m_local[m][1] *= m_local[m][1] != -inf ? sm_scale : 1.f;
       s_m_buffer[m * CONSUMER_WARPGROUPS * THREADS_PER_WARPGROUP * 2 +
-                threadIdx.x * 2] = m_local[m][0];
+                 threadIdx.x * 2] = m_local[m][0];
       s_m_buffer[m * CONSUMER_WARPGROUPS * THREADS_PER_WARPGROUP * 2 +
-                threadIdx.x * 2 + 1] = m_local[m][1];
+                 threadIdx.x * 2 + 1] = m_local[m][1];
       s_d_buffer[m * CONSUMER_WARPGROUPS * THREADS_PER_WARPGROUP * 2 +
-                threadIdx.x * 2] = d[m][0];
+                 threadIdx.x * 2] = d[m][0];
       s_d_buffer[m * CONSUMER_WARPGROUPS * THREADS_PER_WARPGROUP * 2 +
-                threadIdx.x * 2 + 1] = d[m][1];
+                 threadIdx.x * 2 + 1] = d[m][1];
       for (int n = 0; n < HEAD_DIM / 64; n++) {
 #pragma unroll
         for (int frag_idx = 0; frag_idx < 32; frag_idx++) {
           s_o_buffer[m * CONSUMER_WARPGROUPS * THREADS_PER_WARPGROUP * 64 +
-                    threadIdx.x * 64 + n * 32 + frag_idx] = o[m][n][frag_idx];
+                     threadIdx.x * 64 + n * 32 + frag_idx] = o[m][n][frag_idx];
         }
       }
     }
@@ -912,8 +892,8 @@ KVDmem k_dmem(d_k), v_dmem(d_v);
     // get global m, d, and o
     // each thread handles an element in o in each iteration
     for (int elem_idx = threadIdx.x;
-        elem_idx < num_tokens * NUM_QO_PER_KV * HEAD_DIM;
-        elem_idx += NUM_THREADS) {
+         elem_idx < num_tokens * NUM_QO_PER_KV * HEAD_DIM;
+         elem_idx += NUM_THREADS) {
       int row = elem_idx / HEAD_DIM;
       int col = elem_idx % HEAD_DIM;
 
@@ -925,11 +905,11 @@ KVDmem k_dmem(d_k), v_dmem(d_v);
       float m_global = -inf;
       float d_global = 1.f;
       float o_global = 0.f;
-      
+
       int md_smem_offset = (row / 64) * CONSUMER_WARPGROUPS *
-                              THREADS_PER_WARPGROUP * 2 // mma iter m
-                          + t_idx * 2                   // corresponding thread
-                          + (frag_idx % 4) / 2; // first half or second half
+                               THREADS_PER_WARPGROUP * 2 // mma iter m
+                           + t_idx * 2                   // corresponding thread
+                           + (frag_idx % 4) / 2; // first half or second half
 
       m_global = s_m_buffer[md_smem_offset];
       d_global = s_d_buffer[md_smem_offset];
@@ -945,27 +925,29 @@ KVDmem k_dmem(d_k), v_dmem(d_v);
 
     // async_proxy_fence();
 
+    // store the output
+#ifdef OUTPUT_PTR
+    for (int elem_idx = threadIdx.x;
+         elem_idx < num_tokens * NUM_QO_PER_KV * HEAD_DIM;
+         elem_idx += NUM_THREADS) {
+      int src_row = elem_idx / HEAD_DIM;
+      int src_col = elem_idx % HEAD_DIM;
+      int dst_row = src_row / NUM_QO_PER_KV;
+      int dst_col = src_col + (src_row % NUM_QO_PER_KV) * HEAD_DIM;
+      o_dmem.at(dst_row, dst_col) = o_smem.at(src_row, src_col);
+    }
+#else
+    // copy back to dmem
+    if (warp_idx % 4 == 0 && lane_id() == 0) {
+      for (int token_idx = first_token_pos; token_idx < last_token_pos;
+           token_idx++) {
+        tma_output.tma_store_async(o_smem(0, 0),
+                                   {0, head_group * NUM_QO_PER_KV, token_idx});
+        store_commit_group();
+      }
+    }
+    store_async_wait<0>();
+#endif
   }
-  // store the output
-    #ifdef OUTPUT_PTR
-      for (int elem_idx = threadIdx.x;
-          elem_idx < num_tokens * NUM_QO_PER_KV * HEAD_DIM;
-          elem_idx += NUM_THREADS * NUM_WARPGROUPS) {
-        int src_row = elem_idx / HEAD_DIM;
-        int src_col = elem_idx % HEAD_DIM;
-        int dst_row = src_row / NUM_QO_PER_KV;
-        int dst_col = src_col + (src_row % NUM_QO_PER_KV) * HEAD_DIM;
-        o_dmem.at(dst_row, dst_col) = o_smem.at(src_row, src_col);
-      }
-    #else
-      // copy back to dmem
-      if (warp_idx % 4 == 0 && lane_id() == 0) {
-        for (int token_idx = first_token_pos; token_idx < last_token_pos; token_idx++) {
-          tma_output.tma_store_async(o_smem(0, 0), {0, head_group * NUM_QO_PER_KV, token_idx});
-          store_commit_group();
-        }
-      }
-      store_async_wait<0>();
-    #endif
 }
 } // namespace kernel

@@ -14,8 +14,8 @@
  */
 #pragma once
 #include "common.h"
-#include "utils.cuh"
 #include "hopper/utils.cuh"
+#include "utils.cuh"
 namespace kernel {
 
 template <typename T, int BATCH_SIZE, int HIDDEN_DIM>
@@ -23,44 +23,51 @@ __device__ __forceinline__ void rms_norm_impl(void const *input_ptr,
                                               void const *weight_ptr,
                                               void *output_ptr,
                                               float eps) {
-  if (threadIdx.x >= 128) {
-    return;
-  }
-  static_assert(BATCH_SIZE == 1);
+
+  int const num_warps = blockDim.x / NUM_THREADS_PER_WARP;
+  int const lane = threadIdx.x & (NUM_THREADS_PER_WARP - 1);
+  int const warp_id = threadIdx.x / NUM_THREADS_PER_WARP;
+
   extern __shared__ char smem[];
   float *reduce_smem = reinterpret_cast<float *>(smem);
 
   T const *__restrict__ d_input = static_cast<T const *>(input_ptr);
   T const *__restrict__ d_weight = static_cast<T const *>(weight_ptr);
   T *__restrict__ d_output = static_cast<T *>(output_ptr);
+
   float sum = 0.0f;
 #pragma unroll
-  for (int i = threadIdx.x; i < HIDDEN_DIM; i += 128) {
-    float val = (float)d_input[i];
-    sum += val * val;
+  for (int i = threadIdx.x; i < HIDDEN_DIM; i += blockDim.x) {
+    float v = (float)d_input[i];
+    sum += v * v;
   }
+
 #pragma unroll
-  for (int offset = NUM_THREADS_PER_WARP / 2; offset > 0; offset /= 2) {
+  for (int offset = NUM_THREADS_PER_WARP / 2; offset > 0; offset >>= 1) {
     sum += shfl_xor_sync(sum, offset);
   }
-  if (threadIdx.x % 32 == 0) {
-    reduce_smem[threadIdx.x / 32] = sum;
+
+  if (lane == 0) {
+    reduce_smem[warp_id] = sum;
   }
-  wg_sync<128>(4);
-  sum = threadIdx.x < NUM_WARPS ? reduce_smem[threadIdx.x] : 0.0f;
+  __syncthreads();
+
+  if (warp_id == 0) {
+    float t = (lane < num_warps) ? reduce_smem[lane] : 0.0f;
 #pragma unroll
-  for (int offset = NUM_WARPS / 2; offset > 0; offset /= 2) {
-    sum += shfl_xor_sync(sum, offset);
+    for (int offset = NUM_THREADS_PER_WARP / 2; offset > 0; offset >>= 1) {
+      t += shfl_xor_sync(t, offset);
+    }
+    if (lane == 0) {
+      reduce_smem[0] = t;
+    }
   }
-  if (threadIdx.x == 0) {
-    reduce_smem[0] = sum;
-  }
-  wg_sync<128>(4);
+  __syncthreads();
 
   float rms_rcp = rsqrt(reduce_smem[0] / float(HIDDEN_DIM) + eps);
 
 #pragma unroll
-  for (int i = threadIdx.x; i < HIDDEN_DIM; i += NUM_THREADS) {
+  for (int i = threadIdx.x; i < HIDDEN_DIM; i += blockDim.x) {
     float val = (float)d_input[i];
     float w = (float)d_weight[i];
     val *= rms_rcp * w;

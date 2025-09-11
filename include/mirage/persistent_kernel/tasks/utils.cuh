@@ -34,12 +34,12 @@ constexpr int max_power_of_two_le(int x) {
 
 __device__ __forceinline__ void
     convert_32_f32_to_16_bf16_uint32(float const (&s_frag)[32],
-                               uint32_t (&a_frag)[16]) {
+                                     uint32_t (&a_frag)[16]) {
 #pragma unroll
   for (int i = 0; i < 16; ++i) {
     bfloat16 low = bfloat16(s_frag[2 * i]);
     bfloat16 high = bfloat16(s_frag[2 * i + 1]);
-    a_frag[i] = (static_cast<uint32_t>(high.storage) << 16) | low.storage; 
+    a_frag[i] = (static_cast<uint32_t>(high.storage) << 16) | low.storage;
   }
 }
 
@@ -107,25 +107,27 @@ static __device__ __forceinline__ void clear_8_floats(float *buffer) {
 }
 
 // Vectorized zero initialization struct
-template<typename T, int N>
+template <typename T, int N>
 struct vec_zero_t {
-    static __device__ __forceinline__ void fill_zero(T* ptr) {
-        // Ensure sizeof(T) * N is a multiple of 16 bytes
-        static_assert((sizeof(T) * N) % 16 == 0, "sizeof(T) * N must be a multiple of 16 bytes for proper vectorized operations");
+  static __device__ __forceinline__ void fill_zero(T *ptr) {
+    // Ensure sizeof(T) * N is a multiple of 16 bytes
+    static_assert((sizeof(T) * N) % 16 == 0,
+                  "sizeof(T) * N must be a multiple of 16 bytes for proper "
+                  "vectorized operations");
 
-        constexpr int total_bytes = sizeof(T) * N;
-        constexpr int num_chunks = total_bytes / sizeof(__uint128_t);
-        __uint128_t* vec_ptr = reinterpret_cast<__uint128_t*>(ptr);
-        constexpr int max_iters = (num_chunks + NUM_THREADS - 1) / NUM_THREADS;
+    constexpr int total_bytes = sizeof(T) * N;
+    constexpr int num_chunks = total_bytes / sizeof(__uint128_t);
+    __uint128_t *vec_ptr = reinterpret_cast<__uint128_t *>(ptr);
+    constexpr int max_iters = (num_chunks + NUM_THREADS - 1) / NUM_THREADS;
 
-        #pragma unroll
-        for (int i = 0; i < max_iters; ++i) {
-            int idx = i * blockDim.x + threadIdx.x;
-            if (idx < num_chunks) {
-                vec_ptr[idx] = 0ul;
-            }
-        }
+#pragma unroll
+    for (int i = 0; i < max_iters; ++i) {
+      int idx = i * blockDim.x + threadIdx.x;
+      if (idx < num_chunks) {
+        vec_ptr[idx] = 0ul;
+      }
     }
+  }
 };
 
 } // namespace kernel

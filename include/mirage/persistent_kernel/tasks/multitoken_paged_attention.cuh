@@ -19,13 +19,13 @@
 #include "dmem_layout.cuh"
 #include "element_binary.cuh"
 #include "element_unary.cuh"
+#include "hopper/utils.cuh"
 #include "mma.cuh"
 #include "norm.cuh"
 #include "reduction.cuh"
 #include "rotary_embedding.cuh"
 #include "smem_layout.cuh"
 #include "utils.cuh"
-#include "hopper/utils.cuh"
 namespace kernel {
 
 // NOTE(Jinchen): this task implements the paged attention where a causal mask

@@ -35,9 +35,9 @@ __device__ static inline void initialize_barrier(
         1) // Thread count expected to arrive/wait on this barrier
 {
 #if defined(MIRAGE_GRACE_HOPPER)
-void const *const barrier_ptr = &smem_barrier;
-uint32_t smem_int_ptr =
-static_cast<uint32_t>(__cvta_generic_to_shared(barrier_ptr));
+  void const *const barrier_ptr = &smem_barrier;
+  uint32_t smem_int_ptr =
+      static_cast<uint32_t>(__cvta_generic_to_shared(barrier_ptr));
   asm volatile("mbarrier.init.shared::cta.b64 [%0], %1;\n" ::"r"(smem_int_ptr),
                "r"(thread_count));
 #elif defined(__CUDA_ARCH__)

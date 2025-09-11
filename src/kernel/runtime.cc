@@ -680,12 +680,13 @@ TaskGraphResult print_task_graph(
 
     code.e("task_desc.outputs[task_desc.num_outputs++] = output;");
     code.e("}");
-    
+
     // create TMA desc for each task
-    code.e("if (task.at(\"task_type\") > TASK_HOPPER_TASK_BEGIN && task.at(\"task_type\") < TASK_HOPPER_TASK_END) {");
-    code.e("create_tma_desc_by_task(task_desc);");   
+    code.e("if (task.at(\"task_type\") > TASK_HOPPER_TASK_BEGIN && "
+           "task.at(\"task_type\") < TASK_HOPPER_TASK_END) {");
+    code.e("create_tma_desc_by_task(task_desc);");
     code.e("}");
-    
+
     code.e("all_tasks.push_back(task_desc);");
     code.e("}");
     // load events
@@ -1264,8 +1265,10 @@ TaskGraphResult print_task_graph(
       "TASK_SINGLE_BATCH_EXTEND_ATTENTION";
   task_type_to_name[TASK_PAGED_ATTENTION_1] = "TASK_PAGED_ATTENTION_1";
   task_type_to_name[TASK_LINEAR_HOPPER] = "TASK_LINEAR_HOPPER";
-  task_type_to_name[TASK_LINEAR_WITH_RESIDUAL_HOPPER] = "TASK_LINEAR_WITH_RESIDUAL_HOPPER";
-  task_type_to_name[TASK_PAGED_ATTENTION_HOPPER] = "TASK_PAGED_ATTENTION_HOPPER";
+  task_type_to_name[TASK_LINEAR_WITH_RESIDUAL_HOPPER] =
+      "TASK_LINEAR_WITH_RESIDUAL_HOPPER";
+  task_type_to_name[TASK_PAGED_ATTENTION_HOPPER] =
+      "TASK_PAGED_ATTENTION_HOPPER";
 
   code.e("__device__ __forceinline__");
   code.e("void _execute_task(TaskDesc const& task_desc,");
