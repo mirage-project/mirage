@@ -885,6 +885,7 @@ int TaskRegister::register_paged_attention_hopper_task(
   int const kv_smem_stride = KV_TILE_SIZE * TMA_CP_ASYNC_SIZE;
   int const non_cached_kv_smem_stride = max_tokens * TMA_CP_ASYNC_SIZE;
   int const num_pages = (max_seq_len + page_size - 1) / page_size;
+  int const num_head_group = qkv_stride / head_dim / (num_q_heads_per_kv + 2);
 
   code.e("using TMA_Q = kernel::tma::tma_3d<bfloat16, $, $, $, $, $, $, $, $, "
         "$, $, $, $, $, $, $, true>;",
@@ -924,17 +925,20 @@ int TaskRegister::register_paged_attention_hopper_task(
         non_cached_kv_smem_stride       /* SMEM_STRIDE       */
   );
 
-  code.e("using TMA_PAGED_KV_CACHE = kernel::tma::tma_3d<bfloat16, $, $, $, $, "
-        "$, $, $, $, $, $, $, $, $, $, $, true>;",
+  code.e("using TMA_PAGED_KV_CACHE = kernel::tma::tma_4d<bfloat16, $, $, $, $, "
+        "$, $, $, $, $, $, $, $, $, $, $, $, $, $, true>;",
         B,
         M,
         S,
-        num_pages,            /* GMEM_DEPTH */
-        page_size,            /* GMEM_ROW   */
+        num_pages,            /* GMEM_OUTERMOST_ */
+        page_size,            /* GMEM_DEPTH   */
+        num_head_group,       /* GMEM_ROW   */
         head_dim,             /* GMEM_COL   */
-        1,                    /* SMEM_DEPTH */
-        KV_TILE_SIZE,         /* SMEM_ROW   */
+        1,                    /* SMEM_OUTERMOST_ */
+        KV_TILE_SIZE,         /* SMEM_DEPTH   */
+        num_q_heads_per_kv,                    /* SMEM_ROW   */
         TMA_CP_ASYNC_SIZE,    /* SMEM_COL   */
+        page_size * head_dim * num_head_group, /* GMEM_STRIDE_OUTERMOST_ */
         page_size * head_dim, /* GMEM_STRIDE_DEPTH */
         head_dim,             /* GMEM_STRIDE_ROW   */
         1,                    /* GMEM_STRIDE_COL   */
@@ -943,19 +947,22 @@ int TaskRegister::register_paged_attention_hopper_task(
         kv_smem_stride        /* SMEM_STRIDE       */
   );
 
-  code.e("using TMA_OUTPUT = kernel::tma::tma_2d<bfloat16, $, $, $, $, $, $, "
-        "$, $, $, $, $, $, true>;",
+  code.e("using TMA_OUTPUT = kernel::tma::tma_3d<bfloat16, $, $, $, $, $, $, "
+        "$, $, $, $, $, $, $, $, $, true>;",
         B,
         M,
         S,
-        max_tokens * num_q_heads_per_kv,                    /* GMEM_ROW  */
-        head_dim,                                    /* GMEM_COL  */
-        max_tokens * num_q_heads_per_kv,                    /* SMEM_ROW  */
-        TMA_CP_ASYNC_SIZE,                           /* SMEM_COL  */
-        head_dim,                                    /* GMEM_STRIDE_ROW */
-        1,                                           /* GMEM_STRIDE_COL */
-        1,                                           /* SMEM_REPEAT_ROW */
-        smem_repeat_col,                             /* SMEM_REPEAT_COL */
+        max_tokens,
+        num_q_heads_per_kv * num_head_group,                       
+        head_dim,                                  
+        max_tokens,
+        num_q_heads_per_kv,                  
+        TMA_CP_ASYNC_SIZE,                           
+        head_dim * num_head_group * num_head_group,   
+        head_dim,                                
+        1,                             
+        1,                                   
+        smem_repeat_col,                      
         max_tokens * num_q_heads_per_kv * TMA_CP_ASYNC_SIZE /* SMEM_STRIDE */
   );
 
@@ -1013,7 +1020,8 @@ int TaskRegister::register_paged_attention_hopper_task(
   code.e("    1e-6f,");
   code.e("    1e-6f,");
   code.e("    task_desc.outputs[0].base_ptr,");
-  code.e("    task_desc.inputs[0].base_ptr);");
+  code.e("    task_desc.inputs[0].base_ptr,");
+  code.e("    task_desc.head_group);");
 
   return register_task_variant(TASK_PAGED_ATTENTION_HOPPER, code.to_string());
 }

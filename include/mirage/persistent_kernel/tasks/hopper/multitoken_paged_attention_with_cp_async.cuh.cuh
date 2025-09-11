@@ -47,7 +47,6 @@ template <typename T,
           typename TMA_Q,
           typename TMA_KV,
           typename TMA_PAGED_KV_CACHE,
-          typename TMA_OUTPUT,
           int MAX_TOKENS = 8>
 __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
     const TMA_Q &tma_q,
@@ -55,7 +54,6 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
     const TMA_KV &tma_v,
     const TMA_PAGED_KV_CACHE &tma_paged_k_cache,
     const TMA_PAGED_KV_CACHE &tma_paged_v_cache,
-    const TMA_OUTPUT &tma_output,
     void *paged_k_cache_ptr,
     void *paged_v_cache_ptr,
     int const *qo_indptr_buffer_ptr,
@@ -370,8 +368,10 @@ KVDmem k_dmem(d_k), v_dmem(d_v);
           // PAGE_SIZE];
           int page_offset = (dst_row) % PAGE_SIZE;
           int src_row = page_idx_0 * PAGE_SIZE + page_offset;
-          k_buffer_smem.at(dst_row, col) = paged_k_cache_dmem.at(src_row, col);
-          v_buffer_smem.at(dst_row, col) = paged_v_cache_dmem.at(src_row, col);
+        //   k_buffer_smem.at(dst_row, col) = paged_k_cache_dmem.at(src_row, col);
+        //   v_buffer_smem.at(dst_row, col) = paged_v_cache_dmem.at(src_row, col);
+            load_smem(k_buffer_smem(dst_row, col), paged_k_cache_dmem(src_row, col));
+            load_smem(v_buffer_smem(dst_row, col), paged_v_cache_dmem(src_row, col));
         } else {
           // load from QKV
           int src_row = dst_row - (seq_len - num_tokens);
@@ -456,8 +456,10 @@ KVDmem k_dmem(d_k), v_dmem(d_v);
                 //    page_indices[(dst_row + cp_finished_seq_len) / PAGE_SIZE];
                 int page_offset = (dst_row + (iter+1) * KV_TILE_SIZE) % PAGE_SIZE;
                 int src_row = page_idx * PAGE_SIZE + page_offset;
-                k_smem.at(dst_row, col) = paged_k_cache_dmem.at(src_row, col);
-                v_smem.at(dst_row, col) = paged_v_cache_dmem.at(src_row, col);
+                // k_smem.at(dst_row, col) = paged_k_cache_dmem.at(src_row, col);
+                // v_smem.at(dst_row, col) = paged_v_cache_dmem.at(src_row, col);
+                load_smem(k_smem(dst_row, col), paged_k_cache_dmem(src_row, col));
+                load_smem(v_smem(dst_row, col), paged_v_cache_dmem(src_row, col));
               } else {
                 // load from QKV
                 // int src_row = dst_row + (iter+1) * KV_TILE_SIZE - (seq_len - num_tokens);
@@ -943,29 +945,30 @@ KVDmem k_dmem(d_k), v_dmem(d_v);
     }
     wg_sync<THREADS_PER_WARPGROUP * CONSUMER_WARPGROUPS>(9);
 
-    // async_proxy_fence();
+    async_proxy_fence();
 
+    // store the output
+#ifdef OUTPUT_PTR
+    for (int elem_idx = threadIdx.x;
+        elem_idx < num_tokens * NUM_QO_PER_KV * HEAD_DIM;
+        elem_idx += NUM_THREADS) {
+      int src_row = elem_idx / HEAD_DIM;
+      int src_col = elem_idx % HEAD_DIM;
+      int dst_row = src_row / NUM_QO_PER_KV;
+      int dst_col = src_col + (src_row % NUM_QO_PER_KV) * HEAD_DIM;
+      o_dmem.at(dst_row, dst_col) = o_smem.at(src_row, src_col);
+    }
+#else
+    // copy back to dmem
+    if (warp_idx % 4 == 0 && lane_id() == 0) {
+
+      for (int token_idx = first_token_pos; token_idx < last_token_pos; token_idx++) {
+        tma_output.tma_store_async(o_smem(0, 0), {0, head_group * NUM_QO_PER_KV, token_idx});
+        store_commit_group();
+      }
+    }
+    store_async_wait<0>();
+#endif
   }
-  // store the output
-    #ifdef OUTPUT_PTR
-      for (int elem_idx = threadIdx.x;
-          elem_idx < num_tokens * NUM_QO_PER_KV * HEAD_DIM;
-          elem_idx += NUM_THREADS * NUM_WARPGROUPS) {
-        int src_row = elem_idx / HEAD_DIM;
-        int src_col = elem_idx % HEAD_DIM;
-        int dst_row = src_row / NUM_QO_PER_KV;
-        int dst_col = src_col + (src_row % NUM_QO_PER_KV) * HEAD_DIM;
-        o_dmem.at(dst_row, dst_col) = o_smem.at(src_row, src_col);
-      }
-    #else
-      // copy back to dmem
-      if (warp_idx % 4 == 0 && lane_id() == 0) {
-        for (int token_idx = first_token_pos; token_idx < last_token_pos; token_idx++) {
-          tma_output.tma_store_async(o_smem(0, 0), {0, head_group * NUM_QO_PER_KV, token_idx});
-          store_commit_group();
-        }
-      }
-      store_async_wait<0>();
-    #endif
 }
 } // namespace kernel

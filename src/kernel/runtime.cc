@@ -369,6 +369,9 @@ void register_mugraph(
             // the request dimension
             task.request_id = bid.x;
           }
+          if (task_type == TASK_PAGED_ATTENTION_HOPPER) {
+            task.head_group = bid.y;
+          }
           // Initialize input tensors to the task
           for (auto const &input : input_ops) {
             TensorDesc desc;
@@ -377,9 +380,6 @@ void register_mugraph(
             desc.num_dims = stensor.num_dims;
             desc.data_type = stensor.data_type;
             // Assume always partition head group on gridDim.y dimension
-#ifdef ENABLE_MPK_TMA
-            desc.head_group = bid.y;
-#endif
             for (int d = stensor.num_dims - 1; d >= 0; d--) {
               desc.dim[d] = stensor.dim[d];
               desc.stride[d] =
@@ -396,9 +396,6 @@ void register_mugraph(
             tb::STensor stensor = output->output_tensors[0];
             desc.num_dims = stensor.num_dims;
             desc.data_type = stensor.data_type;
-#ifdef ENABLE_MPK_TMA
-            desc.head_group = bid.y;
-#endif
             for (int d = stensor.num_dims - 1; d >= 0; d--) {
               desc.dim[d] = stensor.dim[d];
               desc.stride[d] =
@@ -656,11 +653,6 @@ TaskGraphResult print_task_graph(
         "assert(tensor.at(\"dims\").size() == tensor.at(\"strides\").size());");
     code.e("input.num_dims = tensor.at(\"dims\").size();");
     code.e("input.data_type = tensor.at(\"data_type\").get<int>();");
-#ifdef ENABLE_MPK_TMA
-    code.e("if (task.at(\"task_type\") == TASK_PAGED_ATTENTION_HOPPER) {");
-    code.e("input.head_group = tensor.at(\"head_group\").get<int>();");
-    code.e("}");
-#endif
     code.e("for (int i = 0; i < input.num_dims; i++) {");
     code.e("input.dim[i] = tensor[\"dims\"][i].get<int>();");
     code.e("input.stride[i] = tensor[\"strides\"][i].get<int>();");
@@ -681,11 +673,6 @@ TaskGraphResult print_task_graph(
         "assert(tensor.at(\"dims\").size() == tensor.at(\"strides\").size());");
     code.e("output.num_dims = tensor.at(\"dims\").size();");
     code.e("output.data_type = tensor.at(\"data_type\").get<int>();");
-#ifdef ENABLE_MPK_TMA
-    code.e("if (task.at(\"task_type\") == TASK_PAGED_ATTENTION_HOPPER) {");
-    code.e("output.head_group = tensor.at(\"head_group\").get<int>();");
-    code.e("}");
-#endif
     code.e("for (int i = 0; i < output.num_dims; i++) {");
     code.e("output.dim[i] = tensor[\"dims\"][i];");
     code.e("output.stride[i] = tensor[\"strides\"][i];");
@@ -1007,6 +994,7 @@ TaskGraphResult print_task_graph(
       tgbody.e("{");
       tgbody.e("TaskDesc task_desc(static_cast<TaskType>($));",
                task_desc.task_type);
+      tgbody.e("task_desc.head_group = $;", task_desc.head_group);
       size_t gpu_id = ((task_desc.trigger_event >> 32) & 0xffff);
       size_t event_pos = (task_desc.trigger_event & 0xffffffff);
       bool is_nvshmem_event =

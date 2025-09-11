@@ -23,21 +23,23 @@
            int B,
            int M,
            int S,
-           size_t GMEM_DEPTH_, // page number in paged attention
-           size_t GMEM_ROW_,   // head number in one page
-           size_t GMEM_COL_,   // head dimension
+           size_t GMEM_OUTERMOST_,
+           size_t GMEM_DEPTH_,
+           size_t GMEM_ROW_,
+           size_t GMEM_COL_,
+           size_t SMEM_OUTERMOST_,
            size_t SMEM_DEPTH_,
            size_t SMEM_ROW_,
            size_t SMEM_COL_,
+           size_t GMEM_STRIDE_OUTERMOST_ = 1,
            size_t GMEM_STRIDE_DEPTH_ = 1,
            size_t GMEM_STRIDE_ROW_ = 1,
            size_t GMEM_STRIDE_COL_ = 1,
            size_t SMEM_REPEAT_ROW_ = 1,
            size_t SMEM_REPEAT_COL_ = 1,
-           size_t SMEM_STRIDE_ = 1, // used for num_tokens, since each token's
-                                    // heads are contiguous in smem
+           size_t SMEM_STRIDE_ = 1,
            bool ROW_MAJOR = true>
- struct tma_3d {
+ struct tma_4d {
  
    CUtensorMap *desc_ptr;
  
@@ -46,15 +48,13 @@
    static constexpr size_t SMEM_DEPTH = SMEM_DEPTH_;
    static constexpr size_t SMEM_ROW = SMEM_ROW_;
    static constexpr size_t SMEM_COL = SMEM_COL_;
+
  
-   static constexpr size_t SMEM_REPEAT_COL = SMEM_REPEAT_COL_;
-   static constexpr size_t SMEM_REPEAT_ROW = SMEM_REPEAT_ROW_;
- 
-   __device__ inline tma_3d(CUtensorMap *desc_ptr) {
+   __device__ inline tma_4d(CUtensorMap *desc_ptr) {
      this->desc_ptr = desc_ptr;
    }
  
-   __host__ inline tma_3d(void *src) {
+   __host__ inline tma_4d(void *src) {
      CUtensorMap host_desc;
      create_tma_desc(&host_desc, src); // host-only function
      cudaMalloc(&desc_ptr, sizeof(CUtensorMap));
@@ -74,12 +74,12 @@
                                        T *smem_ptr,
                                        int const (&tma_coords)[NDIM]) const {
  #pragma unroll
-     for (size_t i = 0; i < SMEM_REPEAT_ROW; i++) {
-       for (size_t j = 0; j < SMEM_REPEAT_COL; j++) {
+       for (size_t j = 0; j < SMEM_REPEAT_COL_; j++) {
          int smem_offset = SMEM_STRIDE_ * j;
          int const tma_coords_local[NDIM] = {tma_coords[0] + static_cast<int>(j * SMEM_COL),
-                                             tma_coords[1] + static_cast<int>(i * SMEM_ROW),
-                                             tma_coords[2]};
+                                             tma_coords[1],
+                                             tma_coords[2],
+                                             tma_coords[3]};
          // int const tma_coords_local[NDIM] = {0,0,0};
  #if 0
           printf("tma_coords: %d, %d, %d\n", tma_coords[0], tma_coords[1], tma_coords[2]);
@@ -94,7 +94,7 @@
  #endif
          launch_tma_cp_async(mbar, smem_ptr + smem_offset, tma_coords_local);
        }
-     }
+     
    }
  
    template <int NDIM>
@@ -146,14 +146,13 @@
    __device__ inline void tma_store_async(T *smem_ptr,
                                           int const (&tma_coords)[NDIM]) const {
  #pragma unroll
-     for (size_t i = 0; i < SMEM_REPEAT_ROW; i++) {
-       for (size_t j = 0; j < SMEM_REPEAT_COL; j++) {
+       for (size_t j = 0; j < SMEM_REPEAT_COL_; j++) {
          int smem_offset = SMEM_STRIDE_ * j;
          int const tma_coords_local[NDIM] = {tma_coords[0] + static_cast<int>(j * SMEM_COL),
-                                             tma_coords[1] + static_cast<int>(i * SMEM_ROW),
-                                             tma_coords[2]};
+                                             tma_coords[1],
+                                             tma_coords[2],
+                                             tma_coords[3]};
          launch_tma_store_async(smem_ptr + smem_offset, tma_coords_local);
-       }
      }
    }
  
@@ -222,13 +221,13 @@
           : B == 3 ? CU_TENSOR_MAP_SWIZZLE_128B
                    : CU_TENSOR_MAP_SWIZZLE_NONE);
  
-     uint64_t gmem_prob_shape[5] = {GMEM_COL, GMEM_ROW, GMEM_DEPTH_, 1, 1};
+     uint64_t gmem_prob_shape[5] = {GMEM_COL, GMEM_ROW, GMEM_DEPTH_, GMEM_OUTERMOST_, 1};
      //  uint64_t gmem_prob_stride[5] = {sizeof(T), GMEM_COL * sizeof(T),
      //  GMEM_ROW * GMEM_COL * sizeof(T), 0, 0};
      uint64_t gmem_prob_stride[5] = {sizeof(T),
                                      GMEM_STRIDE_ROW_ * sizeof(T),
                                      GMEM_STRIDE_DEPTH_ * sizeof(T),
-                                     0,
+                                     GMEM_STRIDE_OUTERMOST_ * sizeof(T),
                                      0};
      assert((reinterpret_cast<uint64_t>(global_addr) & 0b1111) ==
             0); // Address must be 16B-aligned
@@ -262,7 +261,7 @@
      assert((gmem_prob_stride[4] & 0b1111) ==
             0); // Stride must be multiple of 16B (128b)
  
-     uint32_t smem_box_shape[5] = {SMEM_COL, SMEM_ROW, SMEM_DEPTH, 1, 1};
+     uint32_t smem_box_shape[5] = {SMEM_COL, SMEM_ROW, SMEM_DEPTH, SMEM_OUTERMOST_, 1};
      uint32_t smem_box_stride[5] = {1, 1, 1, 1, 1};
  
      assert(smem_box_shape[0] >= (uint32_t(1))); // Size must be min 1

@@ -95,7 +95,6 @@ struct TensorDesc {
   int num_dims;
   void *base_ptr;
 #ifdef ENABLE_MPK_TMA
-  int head_group;
   void *tma_desc_ptrs[mirage::config::MAX_TMA_DESC_PER_TENSOR];
 #endif
   int data_type;
@@ -128,6 +127,7 @@ struct TaskDesc {
   TensorDesc inputs[MAX_INPUTS_PER_TASK];
   TensorDesc outputs[MAX_OUTPUTS_PER_TASK];
   int request_id; // Used for paged attention
+  int head_group; // Used for paged attention hopper
 };
 
 struct RuntimeConfig {

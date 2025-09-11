@@ -157,14 +157,6 @@ set_target_properties(mirage_runtime PROPERTIES CUDA_ARCHITECTURES "70;75;80;86;
 
 target_compile_features(mirage_runtime PUBLIC cxx_std_17)
 
-# Add ENABLE_MPK_TMA flag if enabled
-if(ENABLE_MPK_TMA)
-  target_compile_definitions(mirage_runtime PUBLIC ENABLE_MPK_TMA)
-  message(STATUS "ENABLE_MPK_TMA is enabled")
-else()
-  message(STATUS "ENABLE_MPK_TMA is disabled")
-endif()
-
 target_link_libraries(mirage_runtime ${MIRAGE_LINK_LIBS})
 
 target_include_directories(mirage_runtime
