@@ -943,25 +943,6 @@ int TaskRegister::register_paged_attention_hopper_task(
         kv_smem_stride        /* SMEM_STRIDE       */
   );
 
-  code.e("using TMA_PAGED_KV_CACHE_TAIL_PAGE = kernel::tma::tma_3d<bfloat16, "
-        "$, $, $, $, $, $, $, $, $, $, $, $, $, $, $, true>;",
-        B,
-        M,
-        S,
-        num_pages,            /* GMEM_DEPTH */
-        page_size,            /* GMEM_ROW   */
-        head_dim,             /* GMEM_COL   */
-        1,                    /* SMEM_DEPTH */
-        KV_TILE_SIZE,         /* SMEM_ROW   */
-        TMA_CP_ASYNC_SIZE,    /* SMEM_COL   */
-        page_size * head_dim, /* GMEM_STRIDE_DEPTH */
-        head_dim,             /* GMEM_STRIDE_ROW   */
-        1,                    /* GMEM_STRIDE_COL   */
-        1,                    /* SMEM_REPEAT_ROW   */
-        smem_repeat_col,      /* SMEM_REPEAT_COL   */
-        kv_smem_stride        /* SMEM_STRIDE       */
-  );
-
   code.e("using TMA_OUTPUT = kernel::tma::tma_2d<bfloat16, $, $, $, $, $, $, "
         "$, $, $, $, $, $, true>;",
         B,
@@ -991,12 +972,6 @@ int TaskRegister::register_paged_attention_hopper_task(
   code.e("TMA_PAGED_KV_CACHE "
         "tma_paged_v_cache(static_cast<CUtensorMap*>(task_desc.inputs[2].tma_"
         "desc_ptrs[0]));");
-  code.e("TMA_PAGED_KV_CACHE_TAIL_PAGE "
-        "tma_paged_k_cache_tail_page(static_cast<CUtensorMap*>(task_desc."
-        "inputs[1].tma_desc_ptrs[1]));");
-  code.e("TMA_PAGED_KV_CACHE_TAIL_PAGE "
-        "tma_paged_v_cache_tail_page(static_cast<CUtensorMap*>(task_desc."
-        "inputs[2].tma_desc_ptrs[1]));");
 
   code.e("TMA_OUTPUT "
         "tma_output(static_cast<CUtensorMap*>(task_desc.outputs[0].tma_desc_"
@@ -1004,7 +979,7 @@ int TaskRegister::register_paged_attention_hopper_task(
 
   code.e("kernel::multitoken_paged_attention_hopper_impl<bfloat16, $, $, $, $, "
         "$, $, $, $, "
-        "TMA_Q, TMA_KV, TMA_PAGED_KV_CACHE, TMA_PAGED_KV_CACHE_TAIL_PAGE, "
+        "TMA_Q, TMA_KV, TMA_PAGED_KV_CACHE, "
         "TMA_OUTPUT, $>(",
         num_q_heads_per_kv,  /* NUM_QO_HEADS               */
         1, /* NUM_KV_HEADS               */
@@ -1021,8 +996,6 @@ int TaskRegister::register_paged_attention_hopper_task(
   code.e("    tma_v,");
   code.e("    tma_paged_k_cache,");
   code.e("    tma_paged_v_cache,");
-  code.e("    tma_paged_k_cache_tail_page,");
-  code.e("    tma_paged_v_cache_tail_page,");
   code.e("    tma_output,");
   code.e("    task_desc.inputs[1].base_ptr,");
   code.e("    task_desc.inputs[2].base_ptr,");

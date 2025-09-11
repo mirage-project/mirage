@@ -139,7 +139,7 @@ __host__ static inline void fill_tma_desc(CUtensorMap *tma_desc,
     assert(false);
   }
 
-#if 0
+#if 1
 printf("gmem_prob_shape: %lu, %lu, %lu, %lu, %lu\n",
       gmem_prob_shape[0],
       gmem_prob_shape[1],
@@ -290,13 +290,11 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
         int const batch_size = tensor_desc.dim[0];
         int const output_size = tensor_desc.dim[1];
         int const output_stride = (tensor_desc.stride[0]);
-        // printf("output_size: %d, output stride: %d\n", output_size, stride);
         int const output_atom_size = (output_size >= 256)   ? 256
                                      : (output_size >= 128) ? 128
                                      : (output_size >= 64)  ? 64
                                      : (output_size >= 32)  ? 32
                                                             : 16;
-        // printf("output_atom_size: %d\n", output_atom_size);
         int const output_tma_cp_size =
             output_atom_size < 64 ? output_atom_size : 64;
         uint64_t gmem_shape[2] = {static_cast<uint64_t>(batch_size),
@@ -322,7 +320,6 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
         int const batch_size = tensor_desc.dim[0];
         int const output_size = tensor_desc.dim[1];
         int const output_stride = (tensor_desc.stride[0]);
-        // printf("output_size: %d, output stride: %d\n", output_size, stride);
         int const output_atom_size = (output_size >= 256)   ? 256
                                      : (output_size >= 128) ? 128
                                      : (output_size >= 64)  ? 64
@@ -372,24 +369,22 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
       
       if (param_id == 0) {
         // map 2D qkv to 3D: [depth=num_tokens, row=num heads, col=head_dim]
-//    qkv.dim: 8, 768
-//    qkv.stride: 6144, 1
-      // printf("qkv.dim: %d, %d\n", qkv.dim[0], qkv.dim[1]);
-      // printf("qkv.stride: %d, %d\n", qkv.stride[0], qkv.stride[1]);
-
       uint64_t gmem_shape[3] = {
           static_cast<uint64_t>(max_tokens),
           static_cast<uint64_t>(num_q_heads + 2 * num_kv_heads),
           static_cast<uint64_t>(head_dim)};
       uint64_t gmem_stride[3] = {
-          1, static_cast<uint64_t>(head_dim), static_cast<uint64_t>(qkv.stride[0])};
+          1, static_cast<uint64_t>(head_dim), static_cast<uint64_t>(head_dim * (num_q_heads + 2 * num_kv_heads) * 4)};
       uint32_t smem_shape[3] = {
           static_cast<uint32_t>(max_tokens),
           static_cast<uint32_t>(tma_desc_id == 0 ? num_q_heads : num_kv_heads),
           static_cast<uint32_t>(TMA_CP_ASYNC_SIZE)};
       const size_t smem_repeat_col = static_cast<size_t>(
           (head_dim + TMA_CP_ASYNC_SIZE - 1) / TMA_CP_ASYNC_SIZE);
-
+      printf("gmem_shape: %lu, %lu, %lu\n", gmem_shape[0], gmem_shape[1], gmem_shape[2]);
+      printf("gmem_stride: %lu, %lu, %lu\n", gmem_stride[0], gmem_stride[1], gmem_stride[2]);
+      printf("smem_shape: %d, %d, %d\n", smem_shape[0], smem_shape[1], smem_shape[2]);
+      printf("smem_repeat_col: %lu\n", smem_repeat_col);
       fill_tma_desc<T, B, M, S, 3>(tma_desc,
                                    tensor_desc.base_ptr,
                                    gmem_shape,
@@ -406,7 +401,6 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
                                   static_cast<uint64_t>(page_size),
                                   static_cast<uint64_t>(head_dim)};
         uint64_t gmem_stride[3] = {1, static_cast<uint64_t>(head_dim), static_cast<uint64_t>(page_size * head_dim)};
-        // TODO(Yu): fix tail page
 
         uint32_t smem_shape[3] = {1u,
                                   static_cast<uint32_t>(KV_TILE_SIZE),
@@ -499,12 +493,10 @@ __host__ inline void create_tma_desc_by_task(TaskDesc &task_desc) {
                 task_desc, tensor_desc, param_id, tma_desc_id);
           }
         }
-        // paged_k_cache and paged_v_cache both have 2 tma_descs
+        // paged_k_cache and paged_v_cache
         else if (param_id == 1 || param_id == 2) {
-          for (size_t tma_desc_id = 0; tma_desc_id < 2; tma_desc_id++) {
-            create_tma_desc_for_tensor(
-                task_desc, tensor_desc, param_id, tma_desc_id);
-          }
+          create_tma_desc_for_tensor(
+              task_desc, tensor_desc, param_id, 0);
         }
         // output only has 1 tma_desc
         else {
