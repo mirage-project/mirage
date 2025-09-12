@@ -120,6 +120,12 @@ bool Graph::can_allocate(DTensor const &tensor,
 
 bool Graph::can_allocate(size_t data_size_in_bytes,
                          size_t fp_size_in_bytes) const {
+  // We don't need to actually allocate device memory
+  // when fingerprint is disabled (e.g., for very large muGraphs)
+  if (disable_fingerprint) {
+    return true;
+  }
+
   if (dmem_data_offset + data_size_in_bytes > mirage::config::MAX_DMEM_SIZE) {
     return false;
   }
