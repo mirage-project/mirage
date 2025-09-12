@@ -138,10 +138,14 @@ __device__ __forceinline__ bool
         }
       }
       config.step[request_id] = step + num_tokens;
+#ifdef MPK_ENABLE_PROFILING
+      if (true) {
+#else
       if ((step + num_tokens >= config.max_seq_length) ||
           ((config.tokens[request_id * MPK_MAX_SEQ_LENGTH + step +
                           num_tokens] == config.eos_token_id) &&
            (step + num_tokens >= prompt_len))) {
+#endif
         // Request is done
         config.request_ids[i] = -1;
         // Free pages
@@ -250,12 +254,12 @@ __device__ __forceinline__ bool
   *config.page_queue_head = page_queue_head;
   *config.page_queue_tail = page_queue_tail;
 
-  printf("Next batch: steps[%d %d %d %d] num_active_tokens(%d)\n",
-         config.step[0],
-         config.step[1],
-         config.step[2],
-         config.step[3],
-         config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS]);
+  //printf("Next batch: steps[%d %d %d %d] num_active_tokens(%d)\n",
+  //       config.step[0],
+  //       config.step[1],
+  //       config.step[2],
+  //       config.step[3],
+  //       config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS]);
 
   if (num_tokens == 0) {
     return false;
@@ -523,8 +527,8 @@ __device__ void execute_worker(RuntimeConfig config) {
       return;
     } else if (task_desc.task_type == TASK_BEGIN_TASK_GRAPH) {
       // Do nothing
-    } else if (task_desc.task_type == TASK_NVSHMEM_COPY) {
 #ifdef USE_NVSHMEM
+    } else if (task_desc.task_type == TASK_NVSHMEM_COPY) {
       size_t size_in_bytes = 2;
       for (int i = 0; i < task_desc.inputs[0].num_dims; i++) {
         size_in_bytes *= task_desc.inputs[0].dim[i];
@@ -648,11 +652,6 @@ __device__ void execute_worker(RuntimeConfig config) {
         assert(task_desc.task_type == TASK_NVSHMEM_COPY);
         // Note that nvshmem copy task signal counter during data copy
         // we don't need to do anything here is the task type is NVSHMEM_COPY
-        // int gpu_id = static_cast<int>(get_event_gpu_id(event_id));
-        // assert(gpu_id < config.num_gpus);
-        // assert(gpu_id != config.my_gpu_id);
-        // EventCounter count = nvshmem_ulonglong_atomic_fetch_add(
-        //    &config.all_event_counters[event_index], 1, gpu_id);
 #ifdef MPK_ENABLE_VERBOSE
         printf("[%d][DONE] worker_id(%d) task_id(%llu) event_id(%llx) "
                "event_type(remote)\n",
@@ -779,7 +778,6 @@ __device__ void execute_scheduler(RuntimeConfig config, int offset) {
 #ifdef MPK_ENABLE_VERBOSE
         printf("[SCHD] END_OF_TASK_GRAPH\n");
 #endif
-
         // Check if we want to continue
         if (!prepare_next_batch(config)) {
           terminate_schedulers(config);
