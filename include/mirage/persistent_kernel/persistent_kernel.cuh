@@ -1151,7 +1151,7 @@ extern "C" void launch_persistent_kernel() {
   cudaDeviceGetAttribute(&sm_count, cudaDevAttrMultiProcessorCount, device);
 
   if (global_runtime_config.split_worker_scheduler) {
-    printf("worker kernel & scheduler kernel\n");
+    // printf("worker kernel & scheduler kernel\n");
 
     // Launcher worker & scheduler kernel
     cudaFuncSetAttribute(worker_kernel,
@@ -1187,9 +1187,9 @@ extern "C" void launch_persistent_kernel() {
     cudaStreamDestroy(worker_stream);
     cudaStreamDestroy(scheduler_stream);
 
-    printf("Finished Launch Persistent Kernel\n");
+    // printf("Finished Launch Persistent Kernel\n");
   } else {
-    printf("a single persistent kernel\n");
+    // printf("a single persistent kernel\n");
     // Launcher persistent kernel
     cudaFuncSetAttribute(persistent_kernel,
                          cudaFuncAttributeMaxDynamicSharedMemorySize,
@@ -1212,7 +1212,7 @@ extern "C" void launch_persistent_kernel() {
     if (err != cudaSuccess) {
       printf("CUDA kernel launch error: %s\n", cudaGetErrorString(err));
     }
-    printf("Finished Launch Persistent Kernel\n");
+    // printf("Finished Launch Persistent Kernel\n");
   }
 }
 

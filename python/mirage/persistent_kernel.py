@@ -46,20 +46,23 @@ static PyObject *init_func(PyObject *self, PyObject *args) {
     meta_tensors.push_back(PyLong_AsVoidPtr(item));
   }
   profiler_buffer = PyLong_AsVoidPtr(py_profiler_buffer);
-
+Py_BEGIN_ALLOW_THREADS
   init_persistent_kernel(meta_tensors, profiler_buffer, my_mpi_rank, num_workers, num_local_schedulers, num_remote_schedulers, max_seq_length, total_num_requests, eos_token_id);
-
+Py_END_ALLOW_THREADS
   Py_RETURN_NONE;
 }
 
 static PyObject *launch_func(PyObject *self, PyObject *args) {
+Py_BEGIN_ALLOW_THREADS
   launch_persistent_kernel();
-
+Py_END_ALLOW_THREADS
   Py_RETURN_NONE;
 }
 
 static PyObject *finalize_func(PyObject *self, PyObject *args) {
+Py_BEGIN_ALLOW_THREADS
   finalize_persistent_kernel();
+Py_END_ALLOW_THREADS
 
   Py_RETURN_NONE;
 }
@@ -852,14 +855,15 @@ class PersistentKernel:
         output_dir = kwargs.get("output_dir", None)
 
         MIRAGE_ROOT, INCLUDE_PATH, DEPS_PATH = get_key_paths()
-        tempdir_obj = tempfile.TemporaryDirectory()
-        tempdir = tempdir_obj.name
+
+        interm_output_dir = "./lithos_output"
+        os.makedirs(interm_output_dir, exist_ok=True)
         results = self.kn_graph.generate_task_graph(num_gpus=self.world_size, my_gpu_id=self.mpi_rank)
 
-        cuda_code_path = os.path.join(tempdir, "test.cu")
-        so_path = os.path.join(tempdir, "test.cpython-38-x86_64-linux-gnu.so")
+        cuda_code_path = os.path.join(interm_output_dir, "test.cu")
+        so_path = os.path.join(interm_output_dir, "test.cpython-38-x86_64-linux-gnu.so")
         # check json file
-        json_file_path = os.path.join(tempdir, "task_graph.json")
+        json_file_path = os.path.join(interm_output_dir, "task_graph.json")
         with open(json_file_path, "w") as f:
             f.write(results["json_file"])
         with open(cuda_code_path, "w") as f:
