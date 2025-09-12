@@ -11,8 +11,13 @@
 // #include "../include/mirage/persistent_kernel/tasks/linear_reg_mem.cuh"
 // #include "../include/mirage/persistent_kernel/tasks/linear_3d.cuh"
 // #include "../include/mirage/persistent_kernel/tasks/linear_3d_ld.cuh"
-#include "../include/mirage/persistent_kernel/tasks/linear.cuh"
-// #include "../include/mirage/persistent_kernel/tasks/linear_3d_ld_seq.cuh"
+// #include "../include/mirage/persistent_kernel/tasks/linear.cuh"
+#include "../include/mirage/persistent_kernel/tasks/linear_3d_ld_seq.cuh"
+
+// #define LINEAR_MPK
+// #ifdef LINEAR_MPK
+// #include "../include/mirage/persistent_kernel/tasks/linear_mpk.cuh"
+// #endif
 
 #define CUDA_CHECK(call)                                                 \
   do {                                                                   \
@@ -109,7 +114,23 @@ bool compare_results(const std::vector<T>& ref_output, const std::vector<T>& ker
 #endif
 // =================================================================
 
-
+#ifdef LINEAR_MPK
+template <typename T,
+          int BATCH_SIZE,
+          int OUTPUT_SIZE,
+          int REDUCTION_SIZE,
+          int O_STRIDE,
+          int K_PIPE_MAX>
+__global__ void linear_kernel_launcher(void const *input_ptr,
+                                       void const *weight_ptr,
+                                       void const *residual_ptr,
+                                       void *output_ptr,
+                                       int num_active_tokens,
+                                       bool use_residual) {
+  kernel::linear_kernel<T, BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE, O_STRIDE, K_PIPE_MAX>(
+      input_ptr, weight_ptr, residual_ptr, output_ptr, use_residual);
+}
+#else
 template <typename T,
           int BATCH_SIZE,
           int OUTPUT_SIZE,
@@ -125,12 +146,13 @@ __global__ void linear_kernel_launcher(void const *input_ptr,
   kernel::linear_kernel<T, BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE, O_STRIDE, K_PIPE_MAX>(
       input_ptr, weight_ptr, residual_ptr, output_ptr, num_active_tokens, use_residual);
 }
+#endif
 
 int main() {
   using T = type::bfloat16_t;
 
   std::cout << "Starting test_linear" << std::endl;
-  constexpr int BATCH_SIZE = 8;       // Must be <= 16 (NUM_ITERS_M == 1)
+  constexpr int BATCH_SIZE = 1;       // Must be <= 16 (NUM_ITERS_M == 1)
   constexpr int OUTPUT_SIZE = 64;     // Use 128 to match one atom in linear
   constexpr int REDUCTION_SIZE = 4096; // Must be multiple of 128
   constexpr int O_STRIDE = OUTPUT_SIZE;
