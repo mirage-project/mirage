@@ -69,6 +69,8 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
   // using SM80_16x8x16_F16F16F16F16_TNX2 = 16X16X16
   constexpr int NUM_WARPS_N = 4; // We always use NUM_WARPS_K = 1 and NUM_WARPS_N = 4
   constexpr int NUM_WARPS_K = 4 / NUM_WARPS_N;
+  // Do not support split K for now
+  static_assert(NUM_WARPS_K == 1);
 
   //TODO: support NUM_ITERS_M > 1, i.e., BATCH_SIZE > 16
   constexpr int NUM_ITERS_M = 1;
@@ -164,7 +166,7 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
 
   // Warm up weight and input tiles for the first WEIGHT_PIPE_MAX - 1 atoms
   int global_pipe_idx = 0;
-#pragma unroll 0
+//#pragma unroll 0
   for (; global_pipe_idx < WEIGHT_PIPE_MAX - 1; ++global_pipe_idx) {
     int src_stage_offset = (global_pipe_idx % NUM_OUTPUT_ATOMS) << log2_OUTPUT_ATOM_SIZE;
     int buffer_stage_offset = (global_pipe_idx % WEIGHT_PIPE_MAX) << log2_OUTPUT_ATOM_SIZE;
@@ -270,7 +272,7 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
           int n_col = (n << (4 + log2_NUM_WARPS_N)) + (warp_col << 4) +
                       ((lane_idx >> 4) << 3) + (lane_idx & 0x7);
           bool is_weight_valid = (n_col < OUTPUT_ATOM_SIZE);
-#pragma unroll 0
+#pragma unroll
           for (uint32_t k = 0; k < NUM_ITERS_K; k++) {
             int m_col = (warp_row << (4 + log2_NUM_ITERS_K)) + (k << 4) +
                         ((lane_idx >> 4) << 3);
@@ -299,28 +301,23 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
     }
   }
   // Accumulate this atom's contribution into the full output_smem at offset
-  if (NUM_WARPS_K > 1) {
-    // We always use NUM_WARPS_K = 1
-    assert(false);
-  } else {
 #pragma unroll
-    for (uint32_t output_atom_idx = 0; output_atom_idx < NUM_OUTPUT_ATOMS; output_atom_idx++) {
+  for (uint32_t output_atom_idx = 0; output_atom_idx < NUM_OUTPUT_ATOMS; output_atom_idx++) {
 #pragma unroll
-      for (uint32_t m = 0; m < NUM_ITERS_M; m++) {
+    for (uint32_t m = 0; m < NUM_ITERS_M; m++) {
 #pragma unroll
-        for (uint32_t n = 0; n < NUM_ITERS_N; n++) {
+      for (uint32_t n = 0; n < NUM_ITERS_N; n++) {
 #pragma unroll
-          for (uint32_t i = 0; i < 4; i++) {
-            int row_in_warp = (lane_idx >> 2) + ((i & 0x1) << 3);
-            int col_within = (n << (4 + log2_NUM_WARPS_N)) + (warp_col << 4) +
-                      ((lane_idx & 0x3) << 1) + ((i >> 1) << 3);
-            int col = col_within + output_atom_idx * OUTPUT_ATOM_SIZE;
-            if (row_in_warp < num_active_tokens && col_within < OUTPUT_ATOM_SIZE) {
-              output_smem.at(row_in_warp, col) +=
-                  bfloat16(s_frag[output_atom_idx][m][n][(i << 1)]);
-              output_smem.at(row_in_warp, col + 1) +=
-                  bfloat16(s_frag[output_atom_idx][m][n][(i << 1) | 0x1]);
-            }
+        for (uint32_t i = 0; i < 4; i++) {
+          int row_in_warp = (lane_idx >> 2) + ((i & 0x1) << 3);
+          int col_within = (n << (4 + log2_NUM_WARPS_N)) + (warp_col << 4) +
+                    ((lane_idx & 0x3) << 1) + ((i >> 1) << 3);
+          int col = col_within + output_atom_idx * OUTPUT_ATOM_SIZE;
+          if (row_in_warp < num_active_tokens && col_within < OUTPUT_ATOM_SIZE) {
+            output_smem.at(row_in_warp, col) +=
+                bfloat16(s_frag[output_atom_idx][m][n][(i << 1)]);
+            output_smem.at(row_in_warp, col + 1) +=
+                bfloat16(s_frag[output_atom_idx][m][n][(i << 1) | 0x1]);
           }
         }
       }
