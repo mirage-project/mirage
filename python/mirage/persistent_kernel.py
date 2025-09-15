@@ -211,6 +211,7 @@ class PersistentKernel:
         eos_token_id: int64,
         meta_tensors: dict,
         profiler_tensor: torch.Tensor,
+        trace_name: str,
         spec_decode_config: SpecDecodeConfig
     ):
         self.__finalized__ = False
@@ -232,6 +233,7 @@ class PersistentKernel:
         self.kn_graph = KNGraph(CyKNGraph(disable_fingerprint=True))
         self.meta_tensors = meta_tensors
         self.profiler_tensor = profiler_tensor
+        self.trace_name = trace_name
         self.use_nvshmem = True if world_size > 1 else False
         self.spec_decode_config = spec_decode_config
         self._spec_decode_handlers = {
@@ -1159,9 +1161,14 @@ class PersistentKernel:
         self.launch_func()
         if self.profiler_tensor is not None:
             from .profiler_persistent import export_to_perfetto_trace
+            
+            if self.trace_name:
+                trace_name = self.trace_name + ".perfetto-trace"
+            else:
+                trace_name = f"mirage_{self.mpi_rank}.perfetto-trace"
 
             export_to_perfetto_trace(
-                self.profiler_tensor, f"mirage_{self.mpi_rank}.perfetto-trace"
+                self.profiler_tensor, trace_name
             )
 
     def __del__(self):

@@ -40,6 +40,7 @@ if __name__ == "__main__":
     parser.add_argument("--max-num-pages", default=16, type=int, help="Max num pages")
     parser.add_argument("--output-dir", help="Output files directory")
     parser.add_argument("--target-cc", default=80, type=int, help="Target Compute Capability")
+    parser.add_argument("--trace-name", default="", help="Perfetto trace output name")
     parser.add_argument(
         "--profiling", action="store_true", help="Use Profiler to generate trace"
     )
@@ -240,6 +241,7 @@ if __name__ == "__main__":
                 "paged_kv_last_page_len_buffer": paged_kv_last_page_len_buffer,
             },
             profiler_tensor=profiler_tensor,
+            trace_name=args.trace_name,
             spec_decode_config=spec_decode_config,
         )
         
