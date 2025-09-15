@@ -39,6 +39,7 @@ if __name__ == "__main__":
     parser.add_argument("--page-size", default=4096, type=int, help="Page size")
     parser.add_argument("--max-num-pages", default=16, type=int, help="Max num pages")
     parser.add_argument("--output-dir", help="Output files directory")
+    parser.add_argument("--target-cc", default=90, type=int, help="Target Compute Capability")
     parser.add_argument(
         "--profiling", action="store_true", help="Use Profiler to generate trace"
     )
@@ -627,7 +628,7 @@ if __name__ == "__main__":
         with open(f"kernel_{rank}.cu", "w") as f:
             f.write(results["cuda_code"])
 
-        mpk.compile(output_dir=args.output_dir)
+        mpk.compile(output_dir=args.output_dir, target_cc=args.target_cc)
 
     # g = torch.cuda.CUDAGraph()
     stream = torch.cuda.Stream()

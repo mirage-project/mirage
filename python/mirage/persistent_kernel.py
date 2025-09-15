@@ -1081,7 +1081,7 @@ class PersistentKernel:
                     raise RuntimeError(
                         f"Cannot find libmpi.so, please set environment variable MPI_LIB_PATH"
                     )
-        target_cc = (
+        target_cc = kwargs.get("target_cc",
             torch.cuda.get_device_properties(0).major * 10
             + torch.cuda.get_device_properties(0).minor
         )

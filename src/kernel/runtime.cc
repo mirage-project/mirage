@@ -682,11 +682,12 @@ TaskGraphResult print_task_graph(
     code.e("}");
 
     // create TMA desc for each task
+    code.e("#ifdef ENABLE_MPK_TMA");
     code.e("if (task.at(\"task_type\") > TASK_HOPPER_TASK_BEGIN && "
            "task.at(\"task_type\") < TASK_HOPPER_TASK_END) {");
     code.e("create_tma_desc_by_task(task_desc);");
     code.e("}");
-
+    code.e("#endif");
     code.e("all_tasks.push_back(task_desc);");
     code.e("}");
     // load events

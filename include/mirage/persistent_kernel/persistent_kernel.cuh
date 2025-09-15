@@ -39,14 +39,14 @@ using namespace mirage::runtime;
 // #define MPK_PAGE_SIZE 64
 
 #if defined(MIRAGE_GRACE_HOPPER)
-constexpr int WORKER_THREADS = 256;
-constexpr int SINGLE_KERNEL_THREADS = 256;
+#define WORKER_THREADS 256
+#define SINGLE_KERNEL_THREADS 256
 #else
-constexpr int WORKER_THREADS = 128;
-constexpr int SINGLE_KERNEL_THREADS = 128;
+#define WORKER_THREADS 128
+#define SINGLE_KERNEL_THREADS 128
 #endif
-constexpr int INIT_THREADS = 128;
-constexpr int SCHEDULER_THREADS = 128;
+#define INIT_THREADS 128
+#define SCHEDULER_THREADS 128
 
 __device__ __forceinline__ void
     _execute_task(TaskDesc const &task_desc,
@@ -254,12 +254,12 @@ __device__ __forceinline__ bool
   *config.page_queue_head = page_queue_head;
   *config.page_queue_tail = page_queue_tail;
 
-  //printf("Next batch: steps[%d %d %d %d] num_active_tokens(%d)\n",
-  //       config.step[0],
-  //       config.step[1],
-  //       config.step[2],
-  //       config.step[3],
-  //       config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS]);
+  // printf("Next batch: steps[%d %d %d %d] num_active_tokens(%d)\n",
+  //        config.step[0],
+  //        config.step[1],
+  //        config.step[2],
+  //        config.step[3],
+  //        config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS]);
 
   if (num_tokens == 0) {
     return false;

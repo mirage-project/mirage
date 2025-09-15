@@ -186,7 +186,7 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
 
   // Warm up weight and input tiles for the first WEIGHT_PIPE_MAX - 1 atoms
   int global_pipe_idx = 0;
-//#pragma unroll 0
+  // #pragma unroll 0
   for (; global_pipe_idx < WEIGHT_PIPE_MAX - 1; ++global_pipe_idx) {
     int src_stage_offset = (global_pipe_idx % NUM_OUTPUT_ATOMS)
                            << log2_OUTPUT_ATOM_SIZE;
@@ -336,7 +336,8 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
   }
   // Accumulate this atom's contribution into the full output_smem at offset
 #pragma unroll
-  for (uint32_t output_atom_idx = 0; output_atom_idx < NUM_OUTPUT_ATOMS; output_atom_idx++) {
+  for (uint32_t output_atom_idx = 0; output_atom_idx < NUM_OUTPUT_ATOMS;
+       output_atom_idx++) {
 #pragma unroll
     for (uint32_t m = 0; m < NUM_ITERS_M; m++) {
 #pragma unroll
@@ -345,9 +346,10 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
         for (uint32_t i = 0; i < 4; i++) {
           int row_in_warp = (lane_idx >> 2) + ((i & 0x1) << 3);
           int col_within = (n << (4 + log2_NUM_WARPS_N)) + (warp_col << 4) +
-                    ((lane_idx & 0x3) << 1) + ((i >> 1) << 3);
+                           ((lane_idx & 0x3) << 1) + ((i >> 1) << 3);
           int col = col_within + output_atom_idx * OUTPUT_ATOM_SIZE;
-          if (row_in_warp < num_active_tokens && col_within < OUTPUT_ATOM_SIZE) {
+          if (row_in_warp < num_active_tokens &&
+              col_within < OUTPUT_ATOM_SIZE) {
             output_smem.at(row_in_warp, col) +=
                 bfloat16(s_frag[output_atom_idx][m][n][(i << 1)]);
             output_smem.at(row_in_warp, col + 1) +=

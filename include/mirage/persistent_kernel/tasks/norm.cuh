@@ -110,7 +110,6 @@ __device__ __forceinline__ void rms_norm(InputSmem smem_input,
             } else {
               __syncthreads();
             }
-            int offset = (i / HEAD_DIM) * HEAD_DIM + i;
             T const *cur_cos_ptr = cos_ptr + win_idx * HEAD_DIM;
             T const *cur_sin_ptr = sin_ptr + win_idx * HEAD_DIM;
             float cos = (float)cur_cos_ptr[i];
@@ -136,13 +135,17 @@ __device__ __forceinline__ void rms_norm(InputSmem smem_input,
           }
         } // i
       } else {
-        if (rotary_emd) {
-          if constexpr (SYNC_NUM_THREADS > 0) {
-            wg_sync<SYNC_NUM_THREADS>(BARRIER_ID);
-            wg_sync<SYNC_NUM_THREADS>(BARRIER_ID);
-          } else {
-            __syncthreads();
-            __syncthreads();
+        // we should keep __syncthreads number same as the for loop when
+        // HEAD_DIM smaller than NUM_THREAD
+        for (uint32_t i = threadIdx.x; i < HEAD_DIM; i += NUM_THREADS) {
+          if (rotary_emd) {
+            if constexpr (SYNC_NUM_THREADS > 0) {
+              wg_sync<SYNC_NUM_THREADS>(BARRIER_ID);
+              wg_sync<SYNC_NUM_THREADS>(BARRIER_ID);
+            } else {
+              __syncthreads();
+              __syncthreads();
+            }
           }
         }
       }
