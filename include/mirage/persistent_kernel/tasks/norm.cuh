@@ -15,16 +15,9 @@
 
 #pragma once
 #include "common.h"
-#include "hopper/utils.cuh"
 #include "utils.cuh"
 namespace kernel {
-template <typename T,
-          typename InputSmem,
-          int NUM_HEAD,
-          int HEAD_DIM,
-          int SYNC_NUM_THREADS = 0, // if set to 0, use __syncthreads, otherwise
-                                    // use wg_sync
-          int BARRIER_ID = 5>
+template <typename T, typename InputSmem, int NUM_HEAD, int HEAD_DIM>
 __device__ __forceinline__ void rms_norm(InputSmem smem_input,
                                          T const *weight_ptr,
                                          float *reduce_smem,
@@ -66,11 +59,7 @@ __device__ __forceinline__ void rms_norm(InputSmem smem_input,
       if (threadIdx.x % 32 == 0) {
         reduce_smem[warp_idx] = sum;
       }
-      if constexpr (SYNC_NUM_THREADS > 0) {
-        wg_sync<SYNC_NUM_THREADS>(BARRIER_ID);
-      } else {
-        __syncthreads();
-      }
+      __syncthreads();
       sum = threadIdx.x < NUM_WARPS ? reduce_smem[threadIdx.x] : 0.0f;
 
 #pragma unroll
@@ -83,11 +72,7 @@ __device__ __forceinline__ void rms_norm(InputSmem smem_input,
         reduce_smem[0] = sum;
       }
 
-      if constexpr (SYNC_NUM_THREADS > 0) {
-        wg_sync<SYNC_NUM_THREADS>(BARRIER_ID);
-      } else {
-        __syncthreads();
-      }
+      __syncthreads();
 
       float rms_rcp = rsqrt(reduce_smem[0] / float(HEAD_DIM) + eps);
 
@@ -105,11 +90,7 @@ __device__ __forceinline__ void rms_norm(InputSmem smem_input,
           if (rotary_emd) {
             // we should do rope for all the window size q and k, because they
             // came from hidden states, we didn't apply rope yet.
-            if constexpr (SYNC_NUM_THREADS > 0) {
-              wg_sync<SYNC_NUM_THREADS>(BARRIER_ID);
-            } else {
-              __syncthreads();
-            }
+            __syncthreads();
             T const *cur_cos_ptr = cos_ptr + win_idx * HEAD_DIM;
             T const *cur_sin_ptr = sin_ptr + win_idx * HEAD_DIM;
             float cos = (float)cur_cos_ptr[i];
@@ -125,11 +106,7 @@ __device__ __forceinline__ void rms_norm(InputSmem smem_input,
               float v2 = (float)smem_input.at(row, col - HEAD_DIM / 2);
               v_rot = v1 * cos + v2 * sin;
             }
-            if constexpr (SYNC_NUM_THREADS > 0) {
-              wg_sync<SYNC_NUM_THREADS>(BARRIER_ID);
-            } else {
-              __syncthreads();
-            }
+            __syncthreads();
             // output shape (window_size, head_num, head_dim)
             smem_input.at(row, col) = (T)v_rot;
           }
@@ -139,13 +116,8 @@ __device__ __forceinline__ void rms_norm(InputSmem smem_input,
         // HEAD_DIM smaller than NUM_THREAD
         for (uint32_t i = threadIdx.x; i < HEAD_DIM; i += NUM_THREADS) {
           if (rotary_emd) {
-            if constexpr (SYNC_NUM_THREADS > 0) {
-              wg_sync<SYNC_NUM_THREADS>(BARRIER_ID);
-              wg_sync<SYNC_NUM_THREADS>(BARRIER_ID);
-            } else {
-              __syncthreads();
-              __syncthreads();
-            }
+            __syncthreads();
+            __syncthreads();
           }
         }
       }
