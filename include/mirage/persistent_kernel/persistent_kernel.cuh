@@ -14,7 +14,7 @@
  */
 
 #include "profiler.h"
-#ifdef ENABLE_MPK_TMA
+#ifdef MPK_ENABLE_TMA
 #include "tma.cuh"
 #endif
 #include "runtime_header.h"

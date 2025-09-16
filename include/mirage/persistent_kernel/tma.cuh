@@ -530,6 +530,10 @@ __host__ inline void create_tma_desc_by_task(TaskDesc &task_desc) {
       }
       break;
     }
+    case TASK_RMS_NORM_HOPPER: {
+      // no TMA needed
+      break;
+    }
     default:
       assert(false);
   }

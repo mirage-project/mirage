@@ -16,3 +16,4 @@
 // Hopper kernels
 #include "hopper/linear_hopper.cuh"
 #include "hopper/multitoken_paged_attention_hopper.cuh"
+#include "hopper/rmsnorm_hopper.cuh"

@@ -73,6 +73,7 @@ enum TaskType {
   TASK_LINEAR_WITH_RESIDUAL_HOPPER = 151,
   TASK_LINEAR_HOPPER = 152,
   TASK_PAGED_ATTENTION_HOPPER = 153,
+  TASK_RMS_NORM_HOPPER = 154,
   TASK_HOPPER_TASK_END = 198, // Hopper end placeholder, not a real task
   TASK_NVSHMEM_COPY = 199,
   TASK_SCHD_TASKS = 200,
@@ -94,7 +95,7 @@ enum EventType {
 struct TensorDesc {
   int num_dims;
   void *base_ptr;
-#ifdef ENABLE_MPK_TMA
+#ifdef MPK_ENABLE_TMA
   void *tma_desc_ptrs[mirage::config::MAX_TMA_DESC_PER_TENSOR];
 #endif
   int data_type;

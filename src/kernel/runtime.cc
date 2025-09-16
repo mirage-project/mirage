@@ -682,7 +682,7 @@ TaskGraphResult print_task_graph(
     code.e("}");
 
     // create TMA desc for each task
-    code.e("#ifdef ENABLE_MPK_TMA");
+    code.e("#ifdef MPK_ENABLE_TMA");
     code.e("if (task.at(\"task_type\") > TASK_HOPPER_TASK_BEGIN && "
            "task.at(\"task_type\") < TASK_HOPPER_TASK_END) {");
     code.e("create_tma_desc_by_task(task_desc);");
@@ -1270,6 +1270,7 @@ TaskGraphResult print_task_graph(
       "TASK_LINEAR_WITH_RESIDUAL_HOPPER";
   task_type_to_name[TASK_PAGED_ATTENTION_HOPPER] =
       "TASK_PAGED_ATTENTION_HOPPER";
+  task_type_to_name[TASK_RMS_NORM_HOPPER] = "TASK_RMS_NORM_HOPPER";
 
   code.e("__device__ __forceinline__");
   code.e("void _execute_task(TaskDesc const& task_desc,");

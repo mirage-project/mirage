@@ -26,7 +26,6 @@
 #include "tma.cuh"
 #include "utils.cuh"
 #include "wgmma.cuh"
-#define DEBUG_HOPPER 0
 namespace kernel {
 
 using namespace tma;

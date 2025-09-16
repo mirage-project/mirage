@@ -20,16 +20,15 @@
 #include "../element_binary.cuh"
 #include "../element_unary.cuh"
 #include "../mma.cuh"
-#include "../norm.cuh"
 #include "../reduction.cuh"
-#include "../rotary_embedding.cuh"
 #include "../smem_layout.cuh"
 #include "../utils.cuh"
+#include "norm_hopper.cuh"
+#include "rotary_embedding_hopper.cuh"
 #include "smem_layout_tma.cuh"
 #include "tma.cuh"
 #include "utils.cuh"
 #include "wgmma.cuh"
-#define DEBUG_HOPPER 0
 #define OUTPUT_PTR 1
 namespace kernel {
 
@@ -646,12 +645,12 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
       if (qk_norm) {
         // Q norm
         if (iter == 0) {
-          rms_norm<T,
-                   QOSmem,
-                   NUM_QO_PER_KV,
-                   HEAD_DIM,
-                   THREADS_PER_WARPGROUP * CONSUMER_WARPGROUPS,
-                   CONSUMER_WARPGROUP_SYNC_BARRIER_ID>(
+          rms_norm_hopper<T,
+                          QOSmem,
+                          NUM_QO_PER_KV,
+                          HEAD_DIM,
+                          THREADS_PER_WARPGROUP * CONSUMER_WARPGROUPS,
+                          CONSUMER_WARPGROUP_SYNC_BARRIER_ID>(
               q_smem,
               static_cast<T const *>(q_norm_weight_ptr),
               s_q_norm_sum,
@@ -666,12 +665,12 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
         }
         // K norm
         if (kv_tokens_to_process > 0) {
-          rms_norm<T,
-                   KVSmem,
-                   1,
-                   HEAD_DIM,
-                   THREADS_PER_WARPGROUP * CONSUMER_WARPGROUPS,
-                   CONSUMER_WARPGROUP_SYNC_BARRIER_ID>(
+          rms_norm_hopper<T,
+                          KVSmem,
+                          1,
+                          HEAD_DIM,
+                          THREADS_PER_WARPGROUP * CONSUMER_WARPGROUPS,
+                          CONSUMER_WARPGROUP_SYNC_BARRIER_ID>(
               k_smem,
               static_cast<T const *>(k_norm_weight_ptr),
               s_k_norm_sum,
@@ -689,12 +688,12 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
 #pragma unroll
           for (int token_idx = 0; token_idx < num_tokens; token_idx++) {
             // q rope
-            rotary_embedding<T,
-                             QOSmem,
-                             NUM_QO_PER_KV,
-                             HEAD_DIM,
-                             THREADS_PER_WARPGROUP * CONSUMER_WARPGROUPS,
-                             CONSUMER_WARPGROUP_SYNC_BARRIER_ID>(
+            rotary_embedding_hopper<T,
+                                    QOSmem,
+                                    NUM_QO_PER_KV,
+                                    HEAD_DIM,
+                                    THREADS_PER_WARPGROUP * CONSUMER_WARPGROUPS,
+                                    CONSUMER_WARPGROUP_SYNC_BARRIER_ID>(
                 q_smem,
                 static_cast<T const *>(cos_ptr) +
                     (token_idx + seq_len - num_tokens) * HEAD_DIM,
@@ -707,12 +706,12 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
           for (int token_idx = 0; token_idx < kv_tokens_to_process;
                token_idx++) {
             // k rope
-            rotary_embedding<T,
-                             KVSmem,
-                             1,
-                             HEAD_DIM,
-                             THREADS_PER_WARPGROUP * CONSUMER_WARPGROUPS,
-                             CONSUMER_WARPGROUP_SYNC_BARRIER_ID>(
+            rotary_embedding_hopper<T,
+                                    KVSmem,
+                                    1,
+                                    HEAD_DIM,
+                                    THREADS_PER_WARPGROUP * CONSUMER_WARPGROUPS,
+                                    CONSUMER_WARPGROUP_SYNC_BARRIER_ID>(
                 k_smem,
                 static_cast<T const *>(cos_ptr) +
                     (token_idx + first_kv_token_to_process) * HEAD_DIM,

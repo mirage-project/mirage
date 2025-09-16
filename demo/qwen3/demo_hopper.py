@@ -39,7 +39,7 @@ if __name__ == "__main__":
     parser.add_argument("--page-size", default=4096, type=int, help="Page size")
     parser.add_argument("--max-num-pages", default=16, type=int, help="Max num pages")
     parser.add_argument("--output-dir", help="Output files directory")
-    parser.add_argument("--target-cc", default=90, type=int, help="Target Compute Capability")
+    parser.add_argument("--trace-name", default="qwen3", help="Perfetto trace output name")
     parser.add_argument(
         "--profiling", action="store_true", help="Use Profiler to generate trace"
     )
@@ -192,7 +192,7 @@ if __name__ == "__main__":
         fused_outdim_2 = 2 * intermediate_size
 
         if args.profiling:
-            profiler_tensor = torch.empty(
+            profiler_tensor = torch.zeros(
                 3000 * 128, dtype=torch.uint64, device="cuda"
             ).contiguous()
         else:
@@ -241,7 +241,8 @@ if __name__ == "__main__":
                 "paged_kv_last_page_len_buffer": paged_kv_last_page_len_buffer,
             },
             profiler_tensor=profiler_tensor,
-            spec_decode_config=spec_decode_config,
+            trace_name=args.trace_name,
+            spec_decode_config=spec_decode_config
         )
         
         if spec_decode_config and spec_decode_config.method == "promptlookup":
@@ -415,7 +416,7 @@ if __name__ == "__main__":
                 grid_dim=(mpk.max_num_batched_tokens, 1, 1),
                 block_dim=(128, 1, 1),
             )
-            mpk.linear_layer_hopper(
+            mpk.linear_layer(
                 input=rmsnorm_out,
                 weight=w_qkv,
                 output=attn_in,
@@ -458,7 +459,7 @@ if __name__ == "__main__":
                     block_dim=(128, 1, 1),
                 )
             else:
-                mpk.paged_attention_layer_hopper(
+                mpk.paged_attention_layer(
                     input=attn_in,
                     k_cache=k_cache,
                     v_cache=v_cache,
@@ -475,7 +476,7 @@ if __name__ == "__main__":
                 torch_tensor=layer.self_attn.o_proj.weight, name=f"layer_{i}_o_proj"
             )
 
-            mpk.linear_with_residual_layer_hopper(
+            mpk.linear_with_residual_layer(
                 input=attn_out,
                 weight=w,
                 residual=x,
@@ -520,7 +521,7 @@ if __name__ == "__main__":
                 grid_dim=(mpk.max_num_batched_tokens, 1, 1),
                 block_dim=(128, 1, 1),
             )
-            mpk.linear_layer_hopper(
+            mpk.linear_layer(
                 input=rmsnorm_out,
                 weight=w_gatedup,
                 output=mlp_mid,
@@ -545,7 +546,7 @@ if __name__ == "__main__":
             w = mpk.attach_input(
                 torch_tensor=layer.mlp.down_proj.weight, name=f"layer_{i}_down_proj"
             )
-            mpk.linear_with_residual_layer_hopper(
+            mpk.linear_with_residual_layer(
                 input=silu_mul_out,
                 weight=w,
                 residual=x,
@@ -577,7 +578,7 @@ if __name__ == "__main__":
             grid_dim=(mpk.max_num_batched_tokens, 1, 1),
             block_dim=(128, 1, 1),
         )
-        mpk.linear_layer_hopper(
+        mpk.linear_layer(
             input=rmsnorm_out_2,
             weight=w_proj,
             output=argmax_in,
@@ -628,7 +629,7 @@ if __name__ == "__main__":
         with open(f"kernel_{rank}.cu", "w") as f:
             f.write(results["cuda_code"])
 
-        mpk.compile(output_dir=args.output_dir, target_cc=args.target_cc)
+        mpk.compile(output_dir=args.output_dir)
 
     # g = torch.cuda.CUDAGraph()
     stream = torch.cuda.Stream()

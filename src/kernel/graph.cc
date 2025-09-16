@@ -489,6 +489,10 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
         customized->bgraph, params);
     task_config[op] =
         std::make_tuple(7, 1, TASK_PAGED_ATTENTION_HOPPER, variant_id);
+  } else if (name == "rmsnorm_hopper") {
+    int variant_id =
+        task_register->register_rmsnorm_hopper_task(customized->bgraph, params);
+    task_config[op] = std::make_tuple(2, 1, TASK_RMS_NORM_HOPPER, variant_id);
   } else {
     assert(false && "Unsupported task type");
   }

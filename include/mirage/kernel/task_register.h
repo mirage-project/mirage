@@ -63,6 +63,8 @@ public:
                                   bool with_residual);
   int register_paged_attention_hopper_task(threadblock::Graph const &bgraph,
                                            std::vector<int> const &params);
+  int register_rmsnorm_hopper_task(threadblock::Graph const &bgraph,
+                                   std::vector<int> const &params);
   int register_task_variant(TaskType type, std::string const &code);
 
 public:

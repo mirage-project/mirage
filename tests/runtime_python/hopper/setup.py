@@ -30,7 +30,6 @@ setup(
             include_dirs=[
                 os.path.join(this_dir, '../../../include/mirage/persistent_kernel/tasks'),
                 os.path.join(this_dir, '../../../include'),
-                os.path.join(this_dir, '../../../include'),
             ],
             libraries=["cuda"],
             library_dirs=cuda_library_dirs,

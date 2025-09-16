@@ -176,7 +176,7 @@ def get_compile_command(
         specific_cmd = [
             "-arch=sm_90a",
             "-gencode=arch=compute_90a,code=sm_90a",
-            "-DENABLE_MPK_TMA",
+            "-DMPK_ENABLE_TMA",
             "-DMIRAGE_GRACE_HOPPER"
         ] + (["-DMIRAGE_ENABLE_PROFILER"] if profiling else [])
     else:
@@ -184,10 +184,6 @@ def get_compile_command(
             "-arch=native",
         ]
     
-    
-    if profiling:
-        flags = flags + ["-DMPK_ENABLE_PROFILING"]
-
     if profiling:
         flags = flags + ["-DMPK_ENABLE_PROFILING"]
 
@@ -245,6 +241,7 @@ class PersistentKernel:
         # determine total number of requests for offline serving
         self.total_num_requests = meta_tensors["tokens"].shape[0]
         assert self.max_seq_length == meta_tensors["tokens"].shape[1]
+        self.target_cc = torch.cuda.get_device_properties(0).major * 10 + torch.cuda.get_device_properties(0).minor
         # Check tensor shapes
         qo_indptr_buffer = self.meta_tensors["qo_indptr_buffer"]
         assert qo_indptr_buffer.shape == (self.max_num_batched_requests+1,)
@@ -338,7 +335,7 @@ class PersistentKernel:
         tb_graph.new_input(weight, (-1, -1, -1), 0, True)
         tb_graph.new_input(output, (0, -1, -1), 1, True)
         self.kn_graph.customized([input, weight, output], tb_graph)
-        self.kn_graph.register_task(tb_graph, "rmsnorm")
+        self.kn_graph.register_task(tb_graph, "rmsnorm_hopper" if self.target_cc == 90 else "rmsnorm")
 
     def rmsnorm_linear_layer(
         self,
@@ -570,7 +567,7 @@ class PersistentKernel:
             ],
             tb_graph,
         )
-        self.kn_graph.register_task(tb_graph, "paged_attention", params)
+        self.kn_graph.register_task(tb_graph, "paged_attention_hopper" if self.target_cc == 90 else "paged_attention", params)
 
     def linear_layer(
         self,
@@ -589,7 +586,7 @@ class PersistentKernel:
         tb_graph.new_input(weight, (0, -1, -1), 1, True)
         tb_graph.new_input(output, (1, -1, -1), -1, True)
         self.kn_graph.customized([input, weight, output], tb_graph)
-        self.kn_graph.register_task(tb_graph, "linear")
+        self.kn_graph.register_task(tb_graph, "linear_hopper" if self.target_cc == 90 else "linear")
 
     def linear_with_residual_layer(
         self,
@@ -611,7 +608,7 @@ class PersistentKernel:
         tb_graph.new_input(residual, (1, -1, -1), -1, True)
         tb_graph.new_input(output, (1, -1, -1), -1, True)
         self.kn_graph.customized([input, weight, residual, output], tb_graph)
-        self.kn_graph.register_task(tb_graph, "linear_with_residual")
+        self.kn_graph.register_task(tb_graph, "linear_with_residual_hopper" if self.target_cc == 90 else "linear_with_residual")
 
     def allreduce_layer(
         self,
@@ -850,123 +847,6 @@ class PersistentKernel:
             raise ValueError(f"Invalid spec decode method: {method}")
         return handler(spec_decode_config, spec_tokens, target_output, grid_dim, block_dim)
 
-    
-    def linear_layer_hopper(
-        self,
-        input: DTensor,
-        weight: DTensor,
-        output: DTensor,
-        grid_dim: tuple,
-        block_dim: tuple,
-    ):
-        # Currently assume that input/output
-        assert input.num_dims == 2  # (batch_size, hidden_size / world_size)
-        assert weight.num_dims == 2  # (hidden_size, hidden_size / world_size)
-        assert output.num_dims == 2  # (batch_size, hidden_size)
-        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
-        tb_graph.new_input(input, (-1, -1, -1), 1, True)
-        tb_graph.new_input(weight, (0, -1, -1), 1, True)
-        tb_graph.new_input(output, (1, -1, -1), -1, True)
-        self.kn_graph.customized([input, weight, output], tb_graph)
-        self.kn_graph.register_task(tb_graph, "linear_hopper")
-
-    def linear_with_residual_layer_hopper(
-        self,
-        input: DTensor,
-        weight: DTensor,
-        residual: DTensor,
-        output: DTensor,
-        grid_dim: tuple,
-        block_dim: tuple,
-    ):
-        # Currently assume that input/output
-        assert input.num_dims == 2  # (batch_size, hidden_size / world_size)
-        assert weight.num_dims == 2  # (hidden_size, hidden_size / world_size)
-        assert residual.num_dims == 2  # (batch_size, hidden_size)
-        assert output.num_dims == 2  # (batch_size, hidden_size)
-        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
-        tb_graph.new_input(input, (-1, -1, -1), 1, True)
-        tb_graph.new_input(weight, (0, -1, -1), 1, True)
-        tb_graph.new_input(residual, (1, -1, -1), -1, True)
-        tb_graph.new_input(output, (1, -1, -1), -1, True)
-        self.kn_graph.customized([input, weight, residual, output], tb_graph)
-        self.kn_graph.register_task(tb_graph, "linear_with_residual_hopper")
-
-
-    def paged_attention_layer_hopper(
-        self,
-        input: DTensor,
-        k_cache: DTensor,
-        v_cache: DTensor,
-        q_norm: DTensor,
-        k_norm: DTensor,
-        cos_pos_embed: DTensor,
-        sin_pos_embed: DTensor,
-        output: DTensor,
-        grid_dim: tuple,
-        block_dim: tuple,
-    ):
-        # Currently assume that input/output
-        assert input.num_dims == 2  # (num_tokens, fused_outdim / world_size)
-        assert output.num_dims == 2  # (num_tokens, hidden_size / world_size)
-        assert k_cache.num_dims == 4  # (num_pages, page_size, kv_heads, head_dim)
-        assert v_cache.num_dims == 4  # (num_pages, page_size, kv_heads, head_dim)
-        assert k_cache.dim(0) == self.max_num_pages
-        assert v_cache.dim(0) == self.max_num_pages
-        assert k_cache.dim(1) == self.page_size
-        assert v_cache.dim(1) == self.page_size
-        head_dim = k_cache.dim(3)
-        num_kv_heads = k_cache.dim(2)
-        num_q_heads = output.dim(1) // head_dim
-        rotary_embed = 0
-        if cos_pos_embed is not None or sin_pos_embed is not None:
-            assert cos_pos_embed.num_dims == 2  # (seq_len, head_dim)
-            assert sin_pos_embed.num_dims == 2  # (seq_len, head_dim)
-            assert cos_pos_embed.dim(1) == head_dim
-            assert sin_pos_embed.dim(1) == head_dim
-            rotary_embed = 1
-        qk_norm = 0
-        if q_norm is not None or k_norm is not None:
-            assert q_norm.num_dims == 1  # (head_dim)
-            assert k_norm.num_dims == 1  # (head_dim)
-            qk_norm = 1
-            assert q_norm.dim(0) == head_dim
-            assert k_norm.dim(0) == head_dim
-
-        # params[0]: num_q_heads
-        # params[1]: num_kv_heads
-        # params[2]: qk_norm
-        # params[3]: rotary_embed
-        # params[4]: max_seq_len
-        # params[5]: page_size
-        params = [num_q_heads, num_kv_heads, qk_norm, rotary_embed, self.max_seq_length, self.page_size]
-
-        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
-        assert grid_dim[0] == self.max_num_batched_requests
-        assert grid_dim[1] == num_kv_heads
-        tb_graph.new_input(input, (-1, 1, -1), -1, True)
-        tb_graph.new_input(k_cache, (-1, 2, -1), 1, True)
-        tb_graph.new_input(v_cache, (-1, 2, -1), 1, True)
-        tb_graph.new_input(q_norm, (-1, -1, -1), -1, True)
-        tb_graph.new_input(k_norm, (-1, -1, -1), -1, True)
-        tb_graph.new_input(cos_pos_embed, (-1, -1, -1), -1, True)
-        tb_graph.new_input(sin_pos_embed, (-1, -1, -1), -1, True)
-        tb_graph.new_input(output, (-1, 1, -1), -1, True)
-        self.kn_graph.customized(
-            [
-                input,
-                k_cache,
-                v_cache,
-                q_norm,
-                k_norm,
-                cos_pos_embed,
-                sin_pos_embed,
-                output,
-            ],
-            tb_graph,
-        )
-        self.kn_graph.register_task(tb_graph, "paged_attention_hopper", params)
-
     def compile(
         self,
         **kwargs,
@@ -1083,14 +963,10 @@ class PersistentKernel:
                     raise RuntimeError(
                         f"Cannot find libmpi.so, please set environment variable MPI_LIB_PATH"
                     )
-        target_cc = kwargs.get("target_cc",
-            torch.cuda.get_device_properties(0).major * 10
-            + torch.cuda.get_device_properties(0).minor
-        )
 
         cc_cmd = get_compile_command(
             mpk=self,
-            target_cc=target_cc,
+            target_cc=self.target_cc,
             cc=cc,
             file_name=cuda_code_path,
             py_include_dir=py_include_dir,
