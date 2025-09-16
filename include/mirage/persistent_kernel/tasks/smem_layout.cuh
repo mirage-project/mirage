@@ -51,7 +51,7 @@ struct smem_row {
     return offset_in_bank;
   }
   __device__ __forceinline__ int get_phy_offset(size_t logical_idx_row,
-                                           size_t logical_idx_col) {
+                                                size_t logical_idx_col) {
     size_t logical_idx = logical_idx_row * STRIDE + logical_idx_col;
     // assert(logical_idx < SIZE);
 
@@ -160,30 +160,30 @@ struct smem_col {
   }
 
   __device__ __forceinline__ int get_original_icol(size_t logical_idx_row,
-                                                    size_t logical_idx_col) {
-  size_t logical_idx = logical_idx_col * STRIDE + logical_idx_row;
-  // assert(logical_idx < SIZE);
+                                                   size_t logical_idx_col) {
+    size_t logical_idx = logical_idx_col * STRIDE + logical_idx_row;
+    // assert(logical_idx < SIZE);
 
-  size_t block_idx = logical_idx >> (M + S + B);
-  size_t in_block_idx = logical_idx & ((1 << (M + S + B)) - 1);
+    size_t block_idx = logical_idx >> (M + S + B);
+    size_t in_block_idx = logical_idx & ((1 << (M + S + B)) - 1);
 
-  size_t irow = in_block_idx >> (M + S);
-  size_t icol = (in_block_idx >> M) & ((1 << S) - 1);
-  return icol;
+    size_t irow = in_block_idx >> (M + S);
+    size_t icol = (in_block_idx >> M) & ((1 << S) - 1);
+    return icol;
   }
-  
+
   __device__ __forceinline__ int get_swizzled_icol(size_t logical_idx_row,
-                                                    size_t logical_idx_col) {
-  size_t logical_idx = logical_idx_col * STRIDE + logical_idx_row;
-  // assert(logical_idx < SIZE);
+                                                   size_t logical_idx_col) {
+    size_t logical_idx = logical_idx_col * STRIDE + logical_idx_row;
+    // assert(logical_idx < SIZE);
 
-  size_t block_idx = logical_idx >> (M + S + B);
-  size_t in_block_idx = logical_idx & ((1 << (M + S + B)) - 1);
+    size_t block_idx = logical_idx >> (M + S + B);
+    size_t in_block_idx = logical_idx & ((1 << (M + S + B)) - 1);
 
-  size_t irow = in_block_idx >> (M + S);
-  size_t icol = (in_block_idx >> M) & ((1 << S) - 1);
-  icol ^= irow;
-  return icol;
+    size_t irow = in_block_idx >> (M + S);
+    size_t icol = (in_block_idx >> M) & ((1 << S) - 1);
+    icol ^= irow;
+    return icol;
   }
 
   __device__ __forceinline__ int get_phy_offset(size_t logical_idx_row,
@@ -198,8 +198,8 @@ struct smem_col {
     size_t icol = (in_block_idx >> M) & ((1 << S) - 1);
     icol ^= irow;
     size_t offset_in_bank = in_block_idx & ((1 << M) - 1);
-    
-    size_t phy_offset = (block_idx << (M + S + B)) + (irow << (M + S)) + 
+
+    size_t phy_offset = (block_idx << (M + S + B)) + (irow << (M + S)) +
                         (icol << M) + offset_in_bank;
     return phy_offset;
   }
@@ -265,32 +265,31 @@ struct smem_col {
   }
 };
 
-
 template <int B, int M, int S>
 struct SwizzleOffsetCalculator {
-    static constexpr size_t B_BITS = B;
-    static constexpr size_t M_BITS = M;
-    static constexpr size_t S_BITS = S;
-    static constexpr size_t BLOCK_BITS = B + M + S;
-    static constexpr size_t M_AND_S_BITS = M + S;
+  static constexpr size_t B_BITS = B;
+  static constexpr size_t M_BITS = M;
+  static constexpr size_t S_BITS = S;
+  static constexpr size_t BLOCK_BITS = B + M + S;
+  static constexpr size_t M_AND_S_BITS = M + S;
 
-    static constexpr size_t MASK_IN_BLOCK = (1 << BLOCK_BITS) - 1;
-    static constexpr size_t MASK_S = (1 << S_BITS) - 1;
-    static constexpr size_t MASK_M = (1 << M_BITS) - 1;
+  static constexpr size_t MASK_IN_BLOCK = (1 << BLOCK_BITS) - 1;
+  static constexpr size_t MASK_S = (1 << S_BITS) - 1;
+  static constexpr size_t MASK_M = (1 << M_BITS) - 1;
 
-    __device__ __forceinline__ static size_t get_phy_offset(size_t logical_idx) {
-        const size_t block_idx = logical_idx >> BLOCK_BITS;
-        const size_t in_block_idx = logical_idx & MASK_IN_BLOCK;
+  __device__ __forceinline__ static size_t get_phy_offset(size_t logical_idx) {
+    const size_t block_idx = logical_idx >> BLOCK_BITS;
+    const size_t in_block_idx = logical_idx & MASK_IN_BLOCK;
 
-        const size_t irow = in_block_idx >> M_AND_S_BITS;
-        size_t icol = (in_block_idx >> M_BITS) & MASK_S;
-        icol ^= irow;
+    const size_t irow = in_block_idx >> M_AND_S_BITS;
+    size_t icol = (in_block_idx >> M_BITS) & MASK_S;
+    icol ^= irow;
 
-        const size_t offset_in_bank = in_block_idx & MASK_M;
+    const size_t offset_in_bank = in_block_idx & MASK_M;
 
-        return (block_idx << BLOCK_BITS) + (irow << M_AND_S_BITS) +
-               (icol << M_BITS) + offset_in_bank;
-    }
+    return (block_idx << BLOCK_BITS) + (irow << M_AND_S_BITS) +
+           (icol << M_BITS) + offset_in_bank;
+  }
 };
 
 // Row-major layout with split column dimension: OUTER_COL x INNER_COL
@@ -318,15 +317,20 @@ struct smem_row_2dcol {
 
   __device__ __forceinline__ smem_row_2dcol(T *ptr) : base_ptr(ptr) {}
 
-  __device__ __forceinline__ void set_ptr(T *ptr) { base_ptr = ptr; }
+  __device__ __forceinline__ void set_ptr(T *ptr) {
+    base_ptr = ptr;
+  }
 
-  static constexpr size_t size() { return ROW * COL; }
+  static constexpr size_t size() {
+    return ROW * COL;
+  }
 
   __device__ __forceinline__ int get_offset_in_bank(size_t logical_idx_row,
                                                     size_t logical_idx_col) {
     size_t inner_col = logical_idx_col & ((1 << log2_INNER_COL) - 1);
     size_t outer_col = logical_idx_col >> log2_INNER_COL;
-    size_t logical_idx = outer_col * STRIDE_OUTER_COL + logical_idx_row * STRIDE + inner_col;
+    size_t logical_idx =
+        outer_col * STRIDE_OUTER_COL + logical_idx_row * STRIDE + inner_col;
     size_t in_block_idx = logical_idx & ((1 << (M + S + B)) - 1);
     size_t offset_in_bank = in_block_idx & ((1 << M) - 1);
     return offset_in_bank;
@@ -336,11 +340,11 @@ struct smem_row_2dcol {
                                            size_t logical_idx_col) {
     size_t inner_col = logical_idx_col & ((1 << log2_INNER_COL) - 1);
     size_t outer_col = logical_idx_col >> log2_INNER_COL;
-    size_t logical_idx = outer_col * STRIDE_OUTER_COL + logical_idx_row * STRIDE + inner_col;
+    size_t logical_idx =
+        outer_col * STRIDE_OUTER_COL + logical_idx_row * STRIDE + inner_col;
     // return &base_ptr[get_swizzled_offset(logical_idx)];
     return &base_ptr[OffsetCalculator::get_phy_offset(logical_idx)];
   }
-
 };
 
 // Column-major layout with split row dimension: OUTER_ROW x INNER_ROW
@@ -370,14 +374,18 @@ struct smem_col_2drow {
 
   __device__ __forceinline__ smem_col_2drow(T *ptr) : base_ptr(ptr) {}
 
-  __device__ __forceinline__ void set_ptr(T *ptr) { base_ptr = ptr; }
+  __device__ __forceinline__ void set_ptr(T *ptr) {
+    base_ptr = ptr;
+  }
 
-  static constexpr size_t size() { return ROW * COL; }
+  static constexpr size_t size() {
+    return ROW * COL;
+  }
 
   __device__ __forceinline__ size_t get_swizzled_icol(size_t logical_idx) {
     size_t block_idx = logical_idx >> (M + S + B);
     size_t in_block_idx = logical_idx & ((1 << (M + S + B)) - 1);
-    
+
     size_t irow = in_block_idx >> (M + S);
     size_t icol = (in_block_idx >> M) & ((1 << S) - 1);
     icol ^= irow;
@@ -388,7 +396,8 @@ struct smem_col_2drow {
                                                     size_t logical_idx_col) {
     size_t inner_row = logical_idx_row & INNER_ROW_MASK;
     size_t outer_row = logical_idx_row >> log2_INNER_ROW;
-    size_t logical_idx = outer_row * STRIDE_OUTER_ROW + logical_idx_col * STRIDE + inner_row;
+    size_t logical_idx =
+        outer_row * STRIDE_OUTER_ROW + logical_idx_col * STRIDE + inner_row;
     return logical_idx;
   }
 
@@ -403,7 +412,6 @@ struct smem_col_2drow {
     size_t logical_idx = get_logical_idx(logical_idx_row, logical_idx_col);
     return &base_ptr[OffsetCalculator::get_phy_offset(logical_idx)];
   }
-
 };
 
 } // namespace kernel

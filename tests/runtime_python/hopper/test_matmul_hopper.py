@@ -1,14 +1,14 @@
 import torch
 import runtime_kernel_hopper
 
-# torch.set_printoptions(sci_mode=False, profile="full")
-torch.set_printoptions(sci_mode=False)
+torch.set_printoptions(sci_mode=False, profile="full")
+# torch.set_printoptions(sci_mode=False)
 
 g = torch.Generator(device="cuda").manual_seed(1234)
 
 reduction_sizes = [4096]
-output_sizes = [16, 32, 64]
-batch_size = 64
+output_sizes = [1600]
+batch_size = 8
 
 for reduction_size in reduction_sizes:
     for output_size in output_sizes:
@@ -23,11 +23,12 @@ for reduction_size in reduction_sizes:
         residual = torch.randn(batch_size, output_size, device="cuda", dtype=torch.bfloat16)
         output = torch.empty(batch_size, output_size, device="cuda", dtype=torch.bfloat16)
 
-        for i in range(batch_size):
-            for j in range(reduction_size):
-                x[i, j] = 0.01 * (i * reduction_size + j)
+        # for i in range(batch_size):
+        #     for j in range(reduction_size):
+        #         x[i, j] = 0.01 * (i * reduction_size + j)
 
-        runtime_kernel_hopper.linear(x, w, residual, output)
+        runtime_kernel_hopper.linear(x, w, residual, output) # with residual
+        # runtime_kernel_hopper.linear(x, w, None, output) # without residual
         torch_out = torch.matmul(x, torch.transpose(w, 0, 1))
         torch_out = torch_out + residual
 

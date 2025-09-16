@@ -27,6 +27,8 @@ template <typename T,
           size_t GMEM_COL_,
           size_t SMEM_ROW_,
           size_t SMEM_COL_,
+          size_t GMEM_STRIDE_ROW_ = 1,
+          size_t GMEM_STRIDE_COL_ = 1,
           size_t SMEM_REPEAT_ROW_ = 1,
           size_t SMEM_REPEAT_COL_ = 1,
           size_t SMEM_STRIDE_ = 1,
@@ -42,6 +44,10 @@ struct tma_2d {
 
   static constexpr size_t SMEM_REPEAT_COL = SMEM_REPEAT_COL_;
   static constexpr size_t SMEM_REPEAT_ROW = SMEM_REPEAT_ROW_;
+
+  __device__ inline tma_2d(CUtensorMap *desc_ptr) {
+    this->desc_ptr = desc_ptr;
+  }
 
   __host__ inline tma_2d(void *src) {
     CUtensorMap host_desc;
@@ -66,8 +72,9 @@ public:
     for (size_t i = 0; i < SMEM_REPEAT_ROW; i++) {
       for (size_t j = 0; j < SMEM_REPEAT_COL; j++) {
         int smem_offset = SMEM_STRIDE_ * j;
-        int const tma_coords_local[NDIM] = {tma_coords[0] + j * SMEM_COL,
-                                            tma_coords[1] + i * SMEM_ROW};
+        int const tma_coords_local[NDIM] = {
+            tma_coords[0] + static_cast<int>(j * SMEM_COL),
+            tma_coords[1] + static_cast<int>(i * SMEM_ROW)};
 #if 0
         printf("tma_coords: %d, %d\n", tma_coords[0], tma_coords[1]);
         printf("tma_coords_local: %d, %d\n",
@@ -134,8 +141,9 @@ public:
     for (size_t i = 0; i < SMEM_REPEAT_ROW; i++) {
       for (size_t j = 0; j < SMEM_REPEAT_COL; j++) {
         int smem_offset = SMEM_STRIDE_ * j;
-        int const tma_coords_local[NDIM] = {tma_coords[0] + j * SMEM_COL,
-                                            tma_coords[1] + i * SMEM_ROW};
+        int const tma_coords_local[NDIM] = {
+            tma_coords[0] + static_cast<int>(j * SMEM_COL),
+            tma_coords[1] + static_cast<int>(i * SMEM_ROW)};
         launch_tma_store_async(smem_ptr + smem_offset, tma_coords_local);
       }
     }
@@ -205,7 +213,8 @@ private:
                   : CU_TENSOR_MAP_SWIZZLE_NONE);
 
     uint64_t gmem_prob_shape[5] = {GMEM_COL, GMEM_ROW, 1, 1, 1};
-    uint64_t gmem_prob_stride[5] = {sizeof(T), GMEM_COL * sizeof(T), 0, 0, 0};
+    uint64_t gmem_prob_stride[5] = {
+        sizeof(T), GMEM_STRIDE_ROW_ * sizeof(T), 0, 0, 0};
 
     assert((reinterpret_cast<uint64_t>(global_addr) & 0b1111) ==
            0); // Address must be 16B-aligned

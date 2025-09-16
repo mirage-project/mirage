@@ -355,9 +355,6 @@ __device__ __forceinline__ void
     // async proxy this is intra-thread sync
     async_proxy_fence();
 
-    // this is inter-thread sync
-    // wg_sync<THREADS_PER_WARPGROUP * CONSUMER_WARPGROUPS>(8);
-
     // copy back to dmem
     if (warp_idx % 4 == 0 && lane_id() == 0) {
       tma_out.tma_store_async(mm_output_smem(0, 0), {0, 0});

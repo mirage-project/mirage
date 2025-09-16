@@ -473,6 +473,26 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
         customized->bgraph, params);
     task_config[op] =
         std::make_tuple(2, 1, TASK_TARGET_VERIFY_GREEDY, variant_id);
+  }
+  // Hopper tasks
+  else if (name == "linear_hopper") {
+    int variant_id = task_register->register_linear_hopper_task(
+        customized->bgraph, params, false /*with_residual*/);
+    task_config[op] = std::make_tuple(2, 1, TASK_LINEAR_HOPPER, variant_id);
+  } else if (name == "linear_with_residual_hopper") {
+    int variant_id = task_register->register_linear_hopper_task(
+        customized->bgraph, params, true /*with_residual*/);
+    task_config[op] =
+        std::make_tuple(3, 1, TASK_LINEAR_WITH_RESIDUAL_HOPPER, variant_id);
+  } else if (name == "paged_attention_hopper") {
+    int variant_id = task_register->register_paged_attention_hopper_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(7, 1, TASK_PAGED_ATTENTION_HOPPER, variant_id);
+  } else if (name == "rmsnorm_hopper") {
+    int variant_id =
+        task_register->register_rmsnorm_hopper_task(customized->bgraph, params);
+    task_config[op] = std::make_tuple(2, 1, TASK_RMS_NORM_HOPPER, variant_id);
   } else {
     assert(false && "Unsupported task type");
   }

@@ -27,3 +27,5 @@ constexpr int NUM_WARPS = 4;
 constexpr int WARPGROUP_WARPS = 4;
 
 constexpr float inf = 5e4;
+
+constexpr int WORKER_NUM_THREADS = 256; // Grace Hopper setting

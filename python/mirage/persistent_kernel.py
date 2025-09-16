@@ -138,6 +138,7 @@ def get_compile_command(
         "-std=c++17",
         "-rdc=true",
         "-use_fast_math",
+        "-lcuda",
         "-Xcompiler=-fPIC",
         "--expt-relaxed-constexpr",
         "-o",
@@ -175,12 +176,14 @@ def get_compile_command(
         specific_cmd = [
             "-arch=sm_90a",
             "-gencode=arch=compute_90a,code=sm_90a",
-        ]
+            "-DMPK_ENABLE_TMA",
+            "-DMIRAGE_GRACE_HOPPER"
+        ] + (["-DMIRAGE_ENABLE_PROFILER"] if profiling else [])
     else:
         specific_cmd = [
             "-arch=native",
         ]
-
+    
     if profiling:
         flags = flags + ["-DMPK_ENABLE_PROFILING"]
 
@@ -238,6 +241,7 @@ class PersistentKernel:
         # determine total number of requests for offline serving
         self.total_num_requests = meta_tensors["tokens"].shape[0]
         assert self.max_seq_length == meta_tensors["tokens"].shape[1]
+        self.target_cc = torch.cuda.get_device_properties(0).major * 10 + torch.cuda.get_device_properties(0).minor
         # Check tensor shapes
         qo_indptr_buffer = self.meta_tensors["qo_indptr_buffer"]
         assert qo_indptr_buffer.shape == (self.max_num_batched_requests+1,)
@@ -331,7 +335,7 @@ class PersistentKernel:
         tb_graph.new_input(weight, (-1, -1, -1), 0, True)
         tb_graph.new_input(output, (0, -1, -1), 1, True)
         self.kn_graph.customized([input, weight, output], tb_graph)
-        self.kn_graph.register_task(tb_graph, "rmsnorm")
+        self.kn_graph.register_task(tb_graph, "rmsnorm_hopper" if self.target_cc == 90 else "rmsnorm")
 
     def rmsnorm_linear_layer(
         self,
@@ -563,7 +567,7 @@ class PersistentKernel:
             ],
             tb_graph,
         )
-        self.kn_graph.register_task(tb_graph, "paged_attention", params)
+        self.kn_graph.register_task(tb_graph, "paged_attention_hopper" if self.target_cc == 90 else "paged_attention", params)
 
     def linear_layer(
         self,
@@ -582,7 +586,7 @@ class PersistentKernel:
         tb_graph.new_input(weight, (0, -1, -1), 1, True)
         tb_graph.new_input(output, (1, -1, -1), -1, True)
         self.kn_graph.customized([input, weight, output], tb_graph)
-        self.kn_graph.register_task(tb_graph, "linear")
+        self.kn_graph.register_task(tb_graph, "linear_hopper" if self.target_cc == 90 else "linear")
 
     def linear_with_residual_layer(
         self,
@@ -604,7 +608,7 @@ class PersistentKernel:
         tb_graph.new_input(residual, (1, -1, -1), -1, True)
         tb_graph.new_input(output, (1, -1, -1), -1, True)
         self.kn_graph.customized([input, weight, residual, output], tb_graph)
-        self.kn_graph.register_task(tb_graph, "linear_with_residual")
+        self.kn_graph.register_task(tb_graph, "linear_with_residual_hopper" if self.target_cc == 90 else "linear_with_residual")
 
     def allreduce_layer(
         self,
@@ -959,14 +963,10 @@ class PersistentKernel:
                     raise RuntimeError(
                         f"Cannot find libmpi.so, please set environment variable MPI_LIB_PATH"
                     )
-        target_cc = (
-            torch.cuda.get_device_properties(0).major * 10
-            + torch.cuda.get_device_properties(0).minor
-        )
 
         cc_cmd = get_compile_command(
             mpk=self,
-            target_cc=target_cc,
+            target_cc=self.target_cc,
             cc=cc,
             file_name=cuda_code_path,
             py_include_dir=py_include_dir,

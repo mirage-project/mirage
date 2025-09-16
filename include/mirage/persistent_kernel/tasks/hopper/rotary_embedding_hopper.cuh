@@ -24,12 +24,12 @@ template <typename T,
           int NUM_HEAD,
           int WINDOW_SIZE,
           int HEAD_DIM = 128,
-          int NUM_THREADS = 128>
-__device__ __forceinline__ void rotary_embedding_wg(InputSmem smem_input,
+          int NUM_THREADS = 128,
+          int BARRIER_ID = 9>
+__device__ __forceinline__ void rotary_embedding_hopper(InputSmem smem_input,
                                                     T const *cos_ptr,
                                                     T const *sin_ptr,
-                                                    int token_offset = 0,
-                                                    uint32_t barrier_id = 9) {
+                                                    int token_offset = 0) {
 #pragma unroll
   for (int win_idx = 0; win_idx < WINDOW_SIZE; ++win_idx) {
 
@@ -61,7 +61,7 @@ __device__ __forceinline__ void rotary_embedding_wg(InputSmem smem_input,
           float v2 = static_cast<float>(smem_input.at(row, col - HEAD_DIM / 2));
           v_rot = v1 * cos + v2 * sin;
         }
-        wg_sync<NUM_THREADS>(barrier_id);
+        wg_sync<NUM_THREADS>(BARRIER_ID);
         smem_input.at(row, col) = static_cast<T>(v_rot);
       }
     }
