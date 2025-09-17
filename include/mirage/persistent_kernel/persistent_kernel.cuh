@@ -166,7 +166,7 @@ __device__ void worker_checker(RuntimeConfig config) {
   // Each scheduelr SM serves four schedulers
   int num_schedulers =
       config.num_local_schedulers + config.num_remote_schedulers;
-  assert(num_schedulers % 4 == 0);
+
   assert(gridDim.x == config.num_workers);
   assert(config.num_workers <= MAX_NUM_WORKERS);
   // We will reinterpret TaskDesc as an array of integers to
@@ -181,15 +181,11 @@ __device__ void scheduler_checker(RuntimeConfig config) {
   // Each scheduelr SM serves four schedulers
   int num_schedulers =
       config.num_local_schedulers + config.num_remote_schedulers;
-  assert(num_schedulers % 4 == 0);
-  assert(gridDim.x == num_schedulers / 4);
+
   assert(config.num_workers <= MAX_NUM_WORKERS);
   // We will reinterpret TaskDesc as an array of integers to
   // collectively load it from device to shared memory
   assert(sizeof(TaskDesc) % sizeof(int) == 0);
-
-  // assert that we have at least four warps per thread block
-  assert(blockDim.x >= 128);
 }
 
 __device__ void persistent_checker(RuntimeConfig config) {
@@ -476,15 +472,15 @@ __device__ void execute_worker(RuntimeConfig config) {
   }
 }
 
+// need to alter as there is only one warp per block
 __device__ void execute_scheduler(RuntimeConfig config, int offset) {
   int num_schedulers =
       config.num_local_schedulers + config.num_remote_schedulers;
-  int warp_id = threadIdx.x / 32;
   int warp_thread_id = threadIdx.x % 32;
 
   // CANNOT use syncthreads below
-  if (warp_id < 4 && warp_thread_id == 0) {
-    int sched_id = blockIdx.x * 4 + warp_id + offset;
+  if (warp_thread_id == 0) {
+    int sched_id = blockIdx.x + offset;
     // if (threadIdx.x == 0) {
     //   int sched_id = (blockIdx.x - config.num_workers);
     int num_sched_queues = 1;
@@ -494,6 +490,7 @@ __device__ void execute_scheduler(RuntimeConfig config, int offset) {
     sched_queues[0] = config.sched_queues[sched_id];
     sched_queue_ids[0] = sched_id;
     unsigned long long int my_first_worker, my_last_worker;
+
     if (sched_id < config.num_local_schedulers) {
       // local schedulers also (collectively) process events from
       // the global queue
@@ -929,6 +926,7 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
 }
 
 // Entry point for C/C++
+// TODO: change launch config
 extern "C" void launch_persistent_kernel() {
   int device;
   cudaGetDevice(&device);
@@ -953,16 +951,15 @@ extern "C" void launch_persistent_kernel() {
     // The split kernel does not support NVSHMEM because
     // nvshmemx_collective_launch launches kernels sequentially, which blocks
     // the interaction between the worker kernel and the scheduler kernel
-    scheduler_kernel<<<
-        dim3(global_runtime_config.num_local_schedulers / 4, 1, 1),
-        dim3(128, 1, 1),
-        MAX_SHARE_MEMORY_SIZE /*smem*/,
-        scheduler_stream>>>(global_runtime_config);
-
     worker_kernel<<<dim3(global_runtime_config.num_workers, 1, 1),
                     dim3(128, 1, 1),
                     MAX_SHARE_MEMORY_SIZE /*smem*/,
                     worker_stream>>>(global_runtime_config);
+
+    scheduler_kernel<<<dim3(global_runtime_config.num_local_schedulers, 1, 1),
+                       dim3(32, 1, 1),
+                       0 /*smem*/,
+                       scheduler_stream>>>(global_runtime_config);
 
     cudaError_t err = cudaDeviceSynchronize();
     if (err != cudaSuccess) {
