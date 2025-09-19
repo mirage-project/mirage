@@ -359,6 +359,7 @@ if __name__ == "__main__":
                 inputs=[w_q, w_k, w_v],
                 fused_dim=0,
                 num_groups=model.config.num_key_value_heads // world_size,
+                #num_groups=1,
                 name=f"layer_{i}_qkv_proj",
             )
             mpk.rmsnorm_linear_layer(
@@ -366,7 +367,7 @@ if __name__ == "__main__":
                 weight_norm=w_norm,
                 weight_linear=w_qkv,
                 output=attn_in,
-                grid_dim=(4, 1, 1),
+                grid_dim=(32, 1, 1),
                 block_dim=(128, 1, 1),
             )
             # add attention
@@ -493,7 +494,7 @@ if __name__ == "__main__":
             weight_norm=w_norm,
             weight_linear=w_proj,
             output=argmax_in,
-            grid_dim=(grid_for_rmsnorm_linear_layer(w_proj.dim(0)), 1, 1),
+            grid_dim=(2, 1, 1),
             block_dim=(128, 1, 1),
         )
         # add argmax layer
