@@ -177,13 +177,20 @@ __device__ __forceinline__ void
   using A_DESC = wgmma::mma_descriptor<WeightSmem>;
   using B_DESC = wgmma::mma_descriptor<InputSmem>;
 
+  // using OutputSmem = smem_tma<T,
+  //                             B,
+  //                             M,
+  //                             S,
+  //                             OUTPUT_SIZE, // or OUTPUT_ATOM_SIZE?
+  //                             SMEM_M_SIZE, 
+  //                             1>;
   using OutputSmem = smem_tma<T,
-                              B,
-                              M,
-                              S,
-                              OUTPUT_SIZE,
-                              SMEM_M_SIZE,
-                              1>;
+                  B,
+                  M,
+                  S,
+                  SMEM_M_SIZE,
+                  OUTPUT_ATOM_SIZE,
+                  1>;
   OutputSmem mm_output_smem(mm_output);
 
   // define barries
@@ -362,13 +369,17 @@ __device__ __forceinline__ void
           //   printf("threadIdx.x: %d, i: %d, warp_idx: %d, idx_in_warp: %d, (row, col): (%d, %d), (float)s_frag[%d] = %f\n", threadIdx.x, output_atom_idx, warp_idx, idx_in_warp, row, col, i * 2 + 1, (float)(bfloat16(s_frag[i * 2 + 1])));
           // }
           if constexpr (HAS_RESIDUAL) {
-            mm_output_smem.at(row, col) =
-            bfloat16(s_frag[i * 2]) + residual_smem.at(col, row);
-            mm_output_smem.at(row, col + 1) =
-            bfloat16(s_frag[i * 2 + 1]) + residual_smem.at(col + 1, row);
+            // mm_output_smem.at(row, col) =
+            // bfloat16(s_frag[i * 2]) + residual_smem.at(col, row);
+            // mm_output_smem.at(row, col + 1) =
+            // bfloat16(s_frag[i * 2 + 1]) + residual_smem.at(col + 1, row);
+              mm_output_smem.at(col, row) =
+              bfloat16(s_frag[i * 2]) + residual_smem.at(col, row);
+              mm_output_smem.at(col + 1, row) =
+              bfloat16(s_frag[i * 2 + 1]) + residual_smem.at(col + 1, row);
           } else {
-            mm_output_smem.at(row, col) = bfloat16(s_frag[i * 2]);
-            mm_output_smem.at(row, col + 1) = bfloat16(s_frag[i * 2 + 1]);
+            mm_output_smem.at(col, row) = bfloat16(s_frag[i * 2]);
+            mm_output_smem.at(col + 1, row) = bfloat16(s_frag[i * 2 + 1]);
           }
 #if 0
           if (1) {
@@ -415,14 +426,14 @@ __device__ __forceinline__ void
       constexpr int CHUNK_SIZE = 16 / sizeof(T);
       constexpr int log2_CHUNK_SIZE = log2_constexpr(CHUNK_SIZE);
       constexpr int NUM_CHUNKS_OUTPUT = BATCH_SIZE * OUTPUT_ATOM_SIZE / CHUNK_SIZE;
-      constexpr int CHUNKS_PER_ROW_C = OUTPUT_SIZE / CHUNK_SIZE;
+      constexpr int CHUNKS_PER_ROW_C = OUTPUT_ATOM_SIZE / CHUNK_SIZE;
 
     #pragma unroll
       for (int i = threadIdx.x; i < NUM_CHUNKS_OUTPUT; i += NUM_THREADS) {
         int row = i / CHUNKS_PER_ROW_C;
         int col = (i % CHUNKS_PER_ROW_C) << log2_CHUNK_SIZE;
-        printf("threadIdx.x: %d, row = %d, col = %d, output_dmem_ptr = %p, 128 bit aligned = %d\n", threadIdx.x, row, col, ((void *)&output_dmem.at(col, row + output_atom_idx * OUTPUT_ATOM_SIZE)), ((uintptr_t)&output_dmem.at(col, row + output_atom_idx * OUTPUT_ATOM_SIZE)) % 128 == 0);
-        *((__uint128_t *)((void *)&output_dmem.at(col, row + output_atom_idx * OUTPUT_ATOM_SIZE))) = *((__uint128_t *)((void *)&mm_output_smem.at(row, col)));
+        // printf("threadIdx.x: %d, row = %d, col = %d, output_dmem_ptr = %p, 128 bit aligned = %d\n", threadIdx.x, row, col, ((void *)&output_dmem.at(col, row + output_atom_idx * OUTPUT_ATOM_SIZE)), ((uintptr_t)&output_dmem.at(col, row + output_atom_idx * OUTPUT_ATOM_SIZE)) % 16 == 0);
+        *((__uint128_t *)((void *)&output_dmem.at(row, col + output_atom_idx * OUTPUT_ATOM_SIZE))) = *((__uint128_t *)((void *)&mm_output_smem.at(row, col)));
       }
 
 
