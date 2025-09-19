@@ -117,3 +117,14 @@ std::unordered_set<T> set_union(std::unordered_set<T> const &lhs,
   }
   return s;
 }
+
+template <typename T>
+std::unordered_set<T> set_union(std::vector<std::unordered_set<T>> const &sets) {
+  std::unordered_set<T> s;
+  for (auto const &set : sets) {
+    for (auto const &x : set) {
+      s.insert(x);
+    }
+  }
+  return s;
+}

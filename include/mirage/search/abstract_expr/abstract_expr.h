@@ -32,6 +32,8 @@ public:
 
   virtual std::string to_string() const = 0;
   virtual std::string to_egg() const = 0;
+
+  static bool symbolic_expr;
 };
 
 void initialize_final_expr(std::shared_ptr<AbstractExpr const> expr);
@@ -201,9 +203,6 @@ std::shared_ptr<AbstractExpr const>
 std::shared_ptr<AbstractExpr const> abstract_expr_make_rms(
     std::shared_ptr<TensorDimExpr const> reduction_degree,
     std::shared_ptr<AbstractExpr const> elems);
-std::shared_ptr<AbstractExpr const>
-    abstract_expr_make_rms(SymbolicTensorDim const &reduction_dim,
-                           std::shared_ptr<AbstractExpr const> elems);
 
 class Red : public AbstractExpr {
 public:
@@ -222,10 +221,6 @@ std::shared_ptr<AbstractExpr const>
 std::shared_ptr<AbstractExpr const> abstract_expr_make_red(
     std::shared_ptr<TensorDimExpr const> reduction_degree,
     std::shared_ptr<AbstractExpr const> summand);
-
-std::shared_ptr<AbstractExpr const>
-    abstract_expr_make_red(SymbolicTensorDim const &reduction_dim,
-                           std::shared_ptr<AbstractExpr const> summand);
 
 } // namespace search
 } // namespace mirage

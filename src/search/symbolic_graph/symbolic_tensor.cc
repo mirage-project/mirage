@@ -1,4 +1,5 @@
 #include "mirage/search/symbolic_graph/symbolic_tensor.h"
+#include "mirage/search/symbolic_graph/tensor_dim_expr.h"
 
 namespace mirage {
 namespace search {
@@ -11,11 +12,21 @@ SymbolicSTensor::SymbolicSTensor(std::vector<SymbolicTensorDim> dim_templates,
     : dims(dim_templates), after_accum(after_accum) {}
 
 SymbolicDTensor::operator json() const {
-  return json{{"dims", dims}};
+  std::vector<json> dims_json;
+  for (auto const &dim : dims) {
+    // dims_json.push_back(*dim);
+    dims_json.push_back((dim->to_string()));
+  }
+  return json{{"dims", dims_json}};
 }
 
 SymbolicSTensor::operator json() const {
-  return json{{"dims", dims}, {"after_accum", after_accum}};
+  std::vector<json> dims_json;
+  for (auto const &dim : dims) {
+    // dims_json.push_back(*dim);
+    dims_json.push_back((dim->to_string()));
+  }
+  return json{{"dims", dims_json}, {"after_accum", after_accum}};
 }
 
 } // namespace search

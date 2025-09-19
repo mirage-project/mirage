@@ -1,6 +1,7 @@
 #pragma once
 
-#include "mirage/search/symbolic_graph/tensor_dim_constraint.h"
+#include "mirage/search/symbolic_graph/tensor_dim_expr.h"
+#include "mirage/search/symbolic_graph/dim_var_assignments.h"
 
 #include <vector>
 
@@ -64,6 +65,8 @@ public:
   bool add_constraints(
       std::unordered_set<TensorDimConstraint> const &constraints);
   bool satisfiable() const;
+  std::unordered_set<TensorDimConstraint> get_all_constraints() const;
+  DimVarAssignments get_a_satisfying_assignment() const;
 
   operator json() const;
 

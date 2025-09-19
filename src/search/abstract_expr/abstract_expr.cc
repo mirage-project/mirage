@@ -13,6 +13,8 @@
 namespace mirage {
 namespace search {
 
+bool AbstractExpr::symbolic_expr = false;
+
 void initialize_final_expr(std::shared_ptr<AbstractExpr const> expr) {
   get_egraph(expr->to_egg().c_str());
 }
@@ -220,6 +222,9 @@ std::string RMS::to_string() const {
 }
 
 std::string RMS::to_egg() const {
+  if (AbstractExpr::symbolic_expr) {
+    return "(grms " + elems->to_egg() + ")";
+  }
   return "(rms " + reduction_degree->to_string() + " " + elems->to_egg() + ")";
 }
 
@@ -236,6 +241,9 @@ std::string Red::to_string() const {
 }
 
 std::string Red::to_egg() const {
+  if (AbstractExpr::symbolic_expr) {
+    return "(gsum " + summand->to_egg() + ")";
+  }
   return "(sum " + reduction_degree->to_string() + " " + summand->to_egg() +
          ")";
 }
@@ -317,12 +325,6 @@ std::shared_ptr<AbstractExpr const> abstract_expr_make_rms(
 }
 
 std::shared_ptr<AbstractExpr const>
-    abstract_expr_make_rms(SymbolicTensorDim const &reduction_dim,
-                           std::shared_ptr<AbstractExpr const> elems) {
-  return abstract_expr_make_rms(reduction_dim.dim_expr, elems);
-}
-
-std::shared_ptr<AbstractExpr const>
     abstract_expr_make_red(int reduction_degree,
                            std::shared_ptr<AbstractExpr const> summand) {
   if (reduction_degree == 1) {
@@ -335,11 +337,6 @@ std::shared_ptr<AbstractExpr const> abstract_expr_make_red(
     std::shared_ptr<TensorDimExpr const> reduction_degree,
     std::shared_ptr<AbstractExpr const> summand) {
   return std::make_shared<Red>(reduction_degree, summand);
-}
-std::shared_ptr<AbstractExpr const>
-    abstract_expr_make_red(SymbolicTensorDim const &reduction_dim,
-                           std::shared_ptr<AbstractExpr const> summand) {
-  return abstract_expr_make_red(reduction_dim.dim_expr, summand);
 }
 
 } // namespace search

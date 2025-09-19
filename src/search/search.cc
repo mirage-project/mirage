@@ -1,12 +1,16 @@
 #include "mirage/search/search.h"
 #include "mirage/kernel/customized.h"
 #include "mirage/kernel/device_memory_manager.h"
+#include "mirage/search/abstract_expr/abstract_expr.h"
 #include "mirage/search/abstract_expr/abstract_expr_eval.h"
 #include "mirage/search/dim_strategy.h"
 #include "mirage/search/op_utils.h"
+#include "mirage/search/symbolic_graph/dim_var_assignments.h"
 #include "mirage/search/symbolic_graph/op_args.h"
+#include "mirage/search/symbolic_graph/tensor_dim_constraints.h"
 #include "mirage/search/verification/formal_verifier.h"
 #include "mirage/search/verification/probabilistic_verifier.h"
+#include "mirage/type.h"
 #include "mirage/utils/containers.h"
 #include "mirage/utils/json_utils.h"
 
@@ -29,7 +33,7 @@ KernelGraphGenerator::KernelGraphGenerator(
   // setting num_thread
   unsigned int max_num_threads = std::thread::hardware_concurrency();
   if (config.search_thread > max_num_threads) {
-    printf("Config number of threads (%d) too high, setting num_thread to %d",
+    printf("Config number of threads (%ld) too high, setting num_thread to %d",
            config.search_thread,
            max_num_threads);
     num_thread = max_num_threads;
@@ -509,10 +513,8 @@ bool KernelGraphGenerator::check_abstract_expr(
     return false;
   }
 
-  for (auto const &final_expr : computation_graph_output_exprs) {
-    if (subexpr_to_final_expr(expr)) {
-      return true;
-    }
+  if (subexpr_to_final_expr(expr)) {
+    return true;
   }
 
   return false;
@@ -573,12 +575,15 @@ double KernelGraphGenerator::get_elapsed_time_in_sec() const {
 }
 
 void KernelGraphGenerator::show_statistics() const {
+  double elapsed_time = get_elapsed_time_in_sec();
+  double states_per_second = num_total_states.load() / elapsed_time;
   printf(
-      "[Search] States: %d, Random tests: %d, Valid mugraphs: %d, Time: %lf\r",
+      "[Search] States: %d, Random tests: %d, Valid mugraphs: %d, Time: %lf, States per second: %lf\r",
       num_total_states.load(),
       num_total_random_tests.load(),
       num_valid_kernel_graphs.load(),
-      get_elapsed_time_in_sec());
+      get_elapsed_time_in_sec(),
+      states_per_second);
 }
 
 void KernelGraphGenerator::generate_next_symbolic_operator(
@@ -588,7 +593,7 @@ void KernelGraphGenerator::generate_next_symbolic_operator(
     SearchLevel level,
     int search_depth) {
 
-  if (0 < search_depth && search_depth <= multithread_threshold_depth) {
+  if (0 < search_depth && search_depth <= (int)multithread_threshold_depth) {
     std::shared_ptr<SymbolicKNGraph> kn_graph_copy =
         std::make_shared<SymbolicKNGraph>(*kn_graph);
     std::shared_ptr<SymbolicTBGraph> tb_graph_copy;
@@ -604,6 +609,11 @@ void KernelGraphGenerator::generate_next_symbolic_operator(
                                     level,
                                     -search_depth);
     return;
+  }
+
+  ++num_total_states;
+  if (num_total_states % 100 == 1) {
+    show_statistics();
   }
 
   if (search_depth < 0) {
@@ -715,12 +725,12 @@ void KernelGraphGenerator::generate_next_symbolic_operator(
   } else {
     // threadblock-level search
     assert(tb_graph != nullptr);
-
+    
     // Case B1: Create the customized operator and return to kernel-level search
-    auto create_threadblock_outputs = [&](int3 output_map) {
+    auto create_threadblock_outputs = [&]() {
       // Compute the nubmer of consumers for each tensor
       std::vector<int> num_consumers(tb_graph->tensors.size(), 0);
-      for (auto const input_indices : tb_graph->input_indices) {
+      for (auto const &input_indices : tb_graph->input_indices) {
         for (int input_index : input_indices) {
           num_consumers[input_index]++;
         }
@@ -745,8 +755,6 @@ void KernelGraphGenerator::generate_next_symbolic_operator(
       for (int output_index : output_tensor_indices) {
         if (!tb_graph->add_output(
                 output_index,
-                output_map,
-                -1,
                 mirage::type::TBEpilogueType::TB_EPILOGUE_NONE)) {
           return false;
         }
@@ -755,23 +763,21 @@ void KernelGraphGenerator::generate_next_symbolic_operator(
       return true;
     };
 
-    for (int3 output_map : dim_strategy.get_output_map_cand(*tb_graph)) {
-      if (create_threadblock_outputs(output_map)) {
-        // Create the customized operator
-        if (kn_graph->add_customized_operator(
-                *tb_graph, input_dtensor_indices_for_tb_graph)) {
-          // Recursively generate the next operator
-          generate_next_symbolic_operator(
-              kn_graph, nullptr, {}, SearchLevel::LV_KERNEL, search_depth + 1);
-          // Revert the changes
-          kn_graph->remove_last_operator();
-        }
+    if (create_threadblock_outputs()) {
+      // Create the customized operator
+      if (kn_graph->add_customized_operator(
+              *tb_graph, input_dtensor_indices_for_tb_graph)) {
+        // Recursively generate the next operator
+        generate_next_symbolic_operator(
+            kn_graph, nullptr, {}, SearchLevel::LV_KERNEL, search_depth + 1);
+        // Revert the changes
+        kn_graph->remove_last_operator();
       }
-      // Revert the changes
-      while (tb_graph->operators.back().op_type ==
-             type::TBOperatorType::TB_OUTPUT_OP) {
-        tb_graph->remove_last_operator();
-      }
+    }
+    // Revert the changes
+    while (tb_graph->operators.back().op_type ==
+            type::TBOperatorType::TB_OUTPUT_OP) {
+      tb_graph->remove_last_operator();
     }
 
     // Upper bound of the number of operators
@@ -810,7 +816,6 @@ void KernelGraphGenerator::generate_next_symbolic_operator(
         // Obtain the abstract expression of the output tensor
         std::shared_ptr<AbstractExpr const> expr =
             get_abstract_expr(op_type, input_tensors, input_exprs, *tb_graph);
-        std::cerr << expr->to_string() << std::endl;
         // Check if the abstract expression is a subexpression of the final
         // output
         if (!check_abstract_expr(expr)) {
@@ -835,25 +840,34 @@ void KernelGraphGenerator::generate_next_symbolic_operator(
 
 bool KernelGraphGenerator::instantiate_symbolic_graph(
     SymbolicKNGraph const &symbolic_graph) {
-  {
-    ++num_symbolic_graphs;
-    std::cerr << "symbolic graph: " << json(symbolic_graph) << std::endl;
+  return false;
+  DimVarAssignments a_satisfying_assignment = symbolic_graph.conds.get_a_satisfying_assignment();
+  kernel::Graph *instantiated_graph = symbolic_graph.to_kernel_graph(a_satisfying_assignment);
+  if (instantiated_graph == nullptr) {
     return false;
   }
+  if (verify(*instantiated_graph)) {
+    std::cerr << "symbolic graph: " << json(symbolic_graph) << std::endl;
+    this->generated_graphs.push_back(json(symbolic_graph));
+  }
+  return true;
 
   // TODO: move to SearchConfig
   std::vector<int> grid_dim_cands = {1, 4, 8, 16, 32, 64, 128};
   std::vector<int> frange_cands = {1, 2, 4, 8, 16, 32, 64};
 
   auto get_var_index = [](SymbolicTensorDim const &dim) {
-    assert(dim.dim_expr->is_var());
+    assert(dim->is_var());
     std::shared_ptr<TensorDimVar const> var =
-        std::static_pointer_cast<TensorDimVar const>(dim.dim_expr);
+        std::static_pointer_cast<TensorDimVar const>(dim);
     return var->index;
   };
 
   auto combine_candidate_assignments =
       [](std::vector<std::vector<DimVarAssignments>> const &assignment_sets) {
+        if (assignment_sets.empty()) {
+          return std::vector<DimVarAssignments>();
+        }
         std::vector<DimVarAssignments> combined_assignments =
             assignment_sets[0];
         for (size_t i = 1; i < assignment_sets.size(); ++i) {
@@ -908,6 +922,9 @@ bool KernelGraphGenerator::instantiate_symbolic_graph(
        get_kn_graph_assignments(symbolic_graph)) {
     kernel::Graph *instantiated_graph =
         symbolic_graph.to_kernel_graph(assignments);
+    if (instantiated_graph == nullptr) {
+      continue;
+    }
     if (verify(*instantiated_graph)) {
       at_least_one_valid = true;
       this->generated_graphs.push_back(json(*instantiated_graph));

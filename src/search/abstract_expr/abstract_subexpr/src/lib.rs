@@ -25,6 +25,9 @@ define_language! {
         "relu" = Relu(Id),
         "clamp" = Clamp([Id; 3]),
         "rms" = Rms([Id; 2]),
+        
+        "gsum" = Gsum(Id),
+        "grms" = Grms(Id),
 
         Constant(Constant),
         Symbol(Symbol),
@@ -56,12 +59,19 @@ pub fn rules(mut nums: Vec<u32>) -> Vec<Rewrite> {
         rw!("sum-add"; "(sum ?i (+ ?a ?b))" => "(+ (sum ?i ?a) (sum ?i ?b))"),
         rw!("sum-add-inv"; "(+ (sum ?i ?a) (sum ?i ?b))" => "(sum ?i (+ ?a ?b))" ),
         rw!("sum-mul"; "(sum ?i (* ?a ?b))" => "(* (sum ?i ?a) ?b)" ),
-        rw!("sum-mul-2"; "(sum ?i (* ?a ?b))" => "(* (sum ?i ?b) ?a)" ),
+        // rw!("sum-mul-2"; "(sum ?i (* ?a ?b))" => "(* (sum ?i ?b) ?a)" ),
         rw!("sum-mul-inv"; "(* (sum ?i ?a) ?b)" => "(sum ?i (* ?a ?b))" ),
         rw!("sum-div"; "(sum ?i (/ ?a ?b))" => "(/ (sum ?i ?a) ?b)" ), 
         rw!("sum-div-inv"; "(/ (sum ?i ?a) ?b)" => "(sum ?i (/ ?a ?b))"),
 
+        rw!("gsum-mul"; "(gsum (* ?a ?b))" => "(* (gsum ?a) ?b)"),
+        rw!("gsum-mul-inv"; "(* (gsum ?a) ?b)" => "(gsum (* ?a ?b))"),
+        rw!("gsum-div"; "(gsum (/ ?a ?b))" => "(/ (gsum ?a) ?b)"),
+        rw!("gsum-div-inv"; "(/ (gsum ?a) ?b)" => "(gsum (/ ?a ?b))"),
+        rw!("gsum-gsum"; "(gsum (gsum ?a))" => "(gsum ?a)"),
+        rw!("gsum-gsum-inv"; "(gsum ?a)" => "(gsum (gsum ?a))"),
     ];
+
     let sum_rules = vec![
         rw!("sum-mul-mul"; "(sum ?i (sum ?j (* ?a ?b)))" => "(* (sum ?i ?a) (sum ?j ?b))"),
         rw!("sum-mul-mul-inv"; "(* (sum ?i ?a) (sum ?j ?b))" => "(sum ?i (sum ?j (* ?a ?b)))"),

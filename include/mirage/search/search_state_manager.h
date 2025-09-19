@@ -22,7 +22,7 @@ public:
 template <typename T>
 class GlobalWorkerQueueManager : public SearchStateManager<T> {
 public:
-  GlobalWorkerQueueManager(std::chrono::milliseconds timeout = 1000)
+  GlobalWorkerQueueManager(std::chrono::milliseconds timeout = std::chrono::milliseconds(1000))
       : timeout(timeout){};
 
   void add_state(T const &c) override {

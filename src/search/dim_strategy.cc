@@ -9,9 +9,6 @@ DimStrategy::DimStrategy(GeneratorConfig const &config) : config(config) {}
 
 std::vector<type::KNOperatorType> DimStrategy::get_knop_cand() {
   std::vector<type::KNOperatorType> cands = config.knop_to_explore;
-  if (config.randomized_branches) {
-    std::random_shuffle(cands.begin(), cands.end());
-  }
   return cands;
 }
 
@@ -20,9 +17,6 @@ std::vector<type::TBOperatorType> DimStrategy::get_tbop_cand() {
   if (config._enable_concat_matmul_transformation) {
     cands.push_back(type::TBOperatorType::TB_CONCAT_THEN_MATMUL_OP);
     cands = deduplicate(cands);
-  }
-  if (config.randomized_branches) {
-    std::random_shuffle(cands.begin(), cands.end());
   }
   return cands;
 }
@@ -140,9 +134,6 @@ std::vector<dim3>
 
   cands = deduplicate(cands);
 
-  if (config.randomized_branches) {
-    std::random_shuffle(cands.begin(), cands.end());
-  }
   return cands;
 }
 
@@ -151,9 +142,6 @@ std::vector<dim3>
                                     dim3 grid_dim) {
   std::vector<dim3> cands = config.block_dim_to_explore;
   cands.push_back({128, 1, 1});
-  if (config.randomized_branches) {
-    std::random_shuffle(cands.begin(), cands.end());
-  }
   return cands;
 }
 
@@ -269,9 +257,6 @@ std::vector<std::vector<int3>>
     }
     generate_input_map_cand(tensors, grid_dim, imap_to_explore, {}, results);
   }
-  if (config.randomized_branches) {
-    std::random_shuffle(results.begin(), results.end());
-  }
   return results;
 }
 
@@ -320,9 +305,6 @@ std::vector<int3>
       results.push_back(output_map);
     }
   }
-  if (config.randomized_branches) {
-    std::random_shuffle(results.begin(), results.end());
-  }
   return results;
 }
 
@@ -354,9 +336,6 @@ std::vector<std::vector<int>> DimStrategy::get_forloop_dim_cand(
     fmap_to_explore = config.fmap_to_explore;
   }
   generate_forloop_dim(input_tensors, fmap_to_explore, {}, results);
-  if (config.randomized_branches) {
-    std::random_shuffle(results.begin(), results.end());
-  }
   return results;
 }
 
@@ -430,9 +409,6 @@ std::vector<int> DimStrategy::get_forloop_range_cand(
       results.push_back(x);
     }
   }
-  if (config.randomized_branches) {
-    std::random_shuffle(results.begin(), results.end());
-  }
   return results;
 }
 
@@ -440,9 +416,6 @@ std::vector<std::vector<int>> DimStrategy::get_unary_input(int num_tensors) {
   std::vector<std::vector<int>> result;
   for (int i = 0; i < num_tensors; ++i) {
     result.push_back({i});
-  }
-  if (config.randomized_branches) {
-    std::random_shuffle(result.begin(), result.end());
   }
   return result;
 }
@@ -453,9 +426,6 @@ std::vector<std::vector<int>> DimStrategy::get_binary_input(int num_tensors) {
     for (int j = 0; j < num_tensors; ++j) {
       result.push_back({i, j});
     }
-  }
-  if (config.randomized_branches) {
-    std::random_shuffle(result.begin(), result.end());
   }
   return result;
 }
@@ -482,9 +452,6 @@ std::vector<std::vector<int>> DimStrategy::get_nary_input(int num_tensors,
   std::vector<std::vector<int>> result;
   std::vector<int> cur;
   mirage::search::get_nary_input(n, num_tensors, cur, result);
-  if (config.randomized_branches) {
-    std::random_shuffle(result.begin(), result.end());
-  }
   return result;
 }
 
@@ -530,9 +497,6 @@ std::vector<std::vector<int3>> DimStrategy::get_input_map_cand(
       {0, -1, -1},
   };
   generate_input_map_cand(tensors, imap_to_explore, {}, results);
-  if (config.randomized_branches) {
-    std::random_shuffle(results.begin(), results.end());
-  }
   return results;
 }
 
@@ -551,9 +515,7 @@ std::vector<int3>
     omap_to_explore.push_back({1, -1, -1});
   }
   omap_to_explore = deduplicate(omap_to_explore);
-  if (config.randomized_branches) {
-    std::random_shuffle(results.begin(), results.end());
-  }
+  results = omap_to_explore;
   return results;
 }
 
@@ -581,9 +543,6 @@ std::vector<std::vector<int>> DimStrategy::get_forloop_dim_cand(
     fmap_to_explore = config.fmap_to_explore;
   }
   generate_forloop_dim(input_tensers, fmap_to_explore, {}, results);
-  if (config.randomized_branches) {
-    std::random_shuffle(results.begin(), results.end());
-  }
   return results;
 }
 

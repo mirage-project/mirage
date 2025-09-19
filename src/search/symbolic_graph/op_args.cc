@@ -21,14 +21,13 @@ KNRMSNormOpArgs::KNRMSNormOpArgs(int normalized_size)
 KNCustomizedOpArgs::KNCustomizedOpArgs(SymbolicTBGraph tb_graph_template)
     : tb_graph_template(tb_graph_template) {}
 
-TBInputOpArgs::TBInputOpArgs(SymbolicDTensor dtensor, SymbolicMap const &imap)
+TBInputOpArgs::TBInputOpArgs(SymbolicDTensor dtensor, SymbolicIMap const &imap)
     : dtensor(dtensor), imap(imap) {}
 
 TBOutputOpArgs::TBOutputOpArgs(SymbolicDTensor dtensor,
-                               int3 output_map,
-                               int forloop_dim,
+                              SymbolicOmap const &output_map,
                                mirage::type::TBEpilogueType epilogue)
-    : dtensor(dtensor), output_map(output_map), forloop_dim(forloop_dim),
+    : dtensor(dtensor), output_map(output_map),
       epilogue(epilogue) {}
 
 TBConcatOpArgs::TBConcatOpArgs(int concat_dim) : concat_dim(concat_dim) {}
@@ -76,7 +75,6 @@ TBInputOpArgs::operator json() const {
 TBOutputOpArgs::operator json() const {
   return json{{"dtensor", dtensor},
               {"output_map", output_map},
-              {"forloop_dim", forloop_dim},
               {"epilogue", epilogue}};
 }
 

@@ -6,10 +6,10 @@
 #include "mirage/search/symbolic_graph/symbolic_op.h"
 #include "mirage/search/symbolic_graph/symbolic_tensor.h"
 #include "mirage/search/symbolic_graph/tensor_dim_constraints.h"
+#include "mirage/search/symbolic_graph/tensor_dim_expr.h"
 #include "mirage/threadblock/graph.h"
 #include "mirage/vector_types.h"
 
-#include <unordered_map>
 #include <unordered_set>
 
 namespace mirage {
@@ -25,19 +25,11 @@ public:
                            std::vector<kernel::DTensor> const &inputs) const;
   bool add_operator(type::TBOperatorType op_type,
                     std::vector<int> input_indices);
-  bool add_input(SymbolicDTensor dtensor, SymbolicMap const &imap);
   bool add_input(SymbolicDTensor dtensor);
-  bool add_input(SymbolicDTensor dtensor, int3 input_map, int forloop_dim);
-  // bool add_output(int input_index,
-  //                 SymbolicMap const &omap,
-  //                 mirage::type::TBEpilogueType epilogue_type);
-  // bool add_output(int input_index, mirage::type::TBEpilogueType
-  // epilogue_type);
-  bool add_output(int input_index,
-                  int3 output_map,
-                  int forloop_dim,
-                  mirage::type::TBEpilogueType epilogue_type);
+  bool add_output(int input_index, mirage::type::TBEpilogueType epilogue_type);
   bool remove_last_operator();
+  TensorDimConstraint get_memory_usage_constraint() const;
+  bool check_memory_usage();
 
   tensor_dim_var_index_t dim_variable_index_base;
   tensor_dim_var_index_t next_dim_variable_index;
@@ -81,7 +73,7 @@ public:
   std::vector<std::vector<int>> output_indices;
 
   std::vector<std::unordered_set<TensorDimConstraint>> conds_from_op;
-  std::unordered_set<TensorDimConstraint> conds;
+  TensorDimConstraints conds;
 
   operator json() const;
 

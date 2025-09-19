@@ -1,6 +1,10 @@
 #include "mirage/search/symbolic_graph/symbolic_graph.h"
 #include "mirage/search/op_utils.h"
 #include "mirage/search/symbolic_graph/op_args.h"
+#include "mirage/search/symbolic_graph/tensor_dim_expr.h"
+#include "mirage/type.h"
+
+#include <iostream>
 
 namespace mirage {
 namespace search {
@@ -8,21 +12,22 @@ namespace search {
 SymbolicTBGraph::SymbolicTBGraph(tensor_dim_var_index_t dim_variable_index_base)
     : dim_variable_index_base(dim_variable_index_base),
       next_dim_variable_index(dim_variable_index_base),
-      grid_dim({SymbolicTensorDim(
-                    std::make_shared<TensorDimVar>(next_dim_variable_index++)),
-                SymbolicTensorDim(
-                    std::make_shared<TensorDimVar>(next_dim_variable_index++)),
-                SymbolicTensorDim(std::make_shared<TensorDimVar>(
-                    next_dim_variable_index++))}),
-      block_dim({SymbolicTensorDim(std::make_shared<TensorDimConst>(128)),
-                 SymbolicTensorDim(std::make_shared<TensorDimConst>(1)),
-                 SymbolicTensorDim(std::make_shared<TensorDimConst>(1))}),
+      grid_dim({std::make_shared<TensorDimVar>(next_dim_variable_index++),
+                    std::make_shared<TensorDimVar>(next_dim_variable_index++),
+                    std::make_shared<TensorDimVar>(next_dim_variable_index++),
+                std::make_shared<TensorDimVar>(next_dim_variable_index++),
+                std::make_shared<TensorDimVar>(
+                    next_dim_variable_index++)}),
+      block_dim({std::make_shared<TensorDimConst>(128),
+                 std::make_shared<TensorDimConst>(1),
+                 std::make_shared<TensorDimConst>(1),
+                 std::make_shared<TensorDimConst>(1)}),
       forloop_range(SymbolicTensorDim(
           std::make_shared<TensorDimVar>(next_dim_variable_index++))) {
-  assert(conds.add_constraint(make_non_negative_constraint(grid_dim[0])));
-  assert(conds.add_constraint(make_non_negative_constraint(grid_dim[1])));
-  assert(conds.add_constraint(make_non_negative_constraint(grid_dim[2])));
-  assert(conds.add_constraint(make_non_negative_constraint(forloop_range)));
+  assert(conds.add_constraint(grid_dim[0] >= 1));
+  assert(conds.add_constraint(grid_dim[1] >= 1));
+  assert(conds.add_constraint(grid_dim[2] >= 1));
+  assert(conds.add_constraint(forloop_range >= 1));
 }
 
 bool SymbolicTBGraph::remove_last_operator() {
@@ -71,6 +76,22 @@ threadblock::Graph *SymbolicTBGraph::to_threadblock_graph(
   return graph;
 }
 
+TensorDimConstraint SymbolicTBGraph::get_memory_usage_constraint() const {
+  SymbolicTensorDim total_size = dim_expr_make_const(0);
+  for (size_t i = 0; i < this->operators.size(); i++) {
+    if (is_unary(this->operators[i].op_type) || this->operators[i].op_type == type::TBOperatorType::TB_FORLOOP_ACCUM_NO_RED_OP) {
+      continue;
+    }
+  }
+  return total_size <= mirage::config::MAX_SMEM_SIZE;
+}
+
+bool SymbolicTBGraph::check_memory_usage() {
+  bool valid = this->conds.add_constraint(this->get_memory_usage_constraint());
+  this->conds.revert();
+  return valid;
+}
+
 bool SymbolicTBGraph::add_operator(type::TBOperatorType op_type,
                                    std::vector<int> input_indices) {
   for (size_t i = 1; i < input_indices.size(); i++) {
@@ -95,10 +116,11 @@ bool SymbolicTBGraph::add_operator(type::TBOperatorType op_type,
         return false;
       }
       {
-        std::unordered_set<TensorDimConstraint> constraints;
+        std::unordered_set<TensorDimConstraint> constraints;        
         for (size_t i = 0; i < A.dims.size(); i++) {
           if ((int)i != concat_dim) {
-            constraints.insert(make_equal_constraint(A.dims[i], B.dims[i]));
+            std::shared_ptr<TensorDimExpr const> dim_expr = dim_expr_make_eq(A.dims[i], B.dims[i]);
+            constraints.insert(dim_expr);
           }
         }
         if (!conds.add_constraints(constraints)) {
@@ -113,10 +135,7 @@ bool SymbolicTBGraph::add_operator(type::TBOperatorType op_type,
           if ((int)i != concat_dim) {
             dim_templates.push_back(A.dims[i]);
           } else {
-            std::shared_ptr<TensorDimExpr const> dim_expr =
-                std::make_shared<TensorDimAdd const>(A.dims[i].dim_expr,
-                                                     B.dims[i].dim_expr);
-            dim_templates.push_back(SymbolicTensorDim(dim_expr));
+            dim_templates.push_back(A.dims[i] + B.dims[i]);
           }
         }
         SymbolicSTensor C(dim_templates, A.after_accum);
@@ -152,8 +171,9 @@ bool SymbolicTBGraph::add_operator(type::TBOperatorType op_type,
       {
         std::unordered_set<TensorDimConstraint> constraints;
         for (size_t i = 0; i < A.dims.size(); i++) {
-          constraints.insert(
-              make_equal_or_one_constraint(A.dims[i], B.dims[i]));
+          constraints.insert(dim_expr_make_disj(
+            {A.dims[i] == B.dims[i], A.dims[i] == 1, B.dims[i] == 1}
+          ));
         }
         if (!conds.add_constraints(constraints)) {
           return false;
@@ -185,12 +205,11 @@ bool SymbolicTBGraph::add_operator(type::TBOperatorType op_type,
         if (op_type == type::TBOperatorType::TB_FORLOOP_ACCUM_RED_LD_SUM_OP ||
             op_type == type::TBOperatorType::TB_FORLOOP_ACCUM_RED_LD_MEAN_OP ||
             op_type == type::TBOperatorType::TB_FORLOOP_ACCUM_RED_LD_RMS_OP) {
-          dim_templates[dim_templates.size() - 1] =
-              SymbolicTensorDim(std::make_shared<TensorDimConst>(1));
+          dim_templates[dim_templates.size() - 1] = dim_expr_make_const(1);
         } else if (op_type ==
                    type::TBOperatorType::TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP) {
-          dim_templates[dim_templates.size() - 1] = SymbolicTensorDim(
-              std::make_shared<TensorDimConst>(this->reduction_dimx));
+          dim_templates[dim_templates.size() - 1] = 
+              dim_expr_make_const(this->reduction_dimx);
         }
         SymbolicSTensor B(dim_templates, true);
         this->tensors.push_back(B);
@@ -209,25 +228,17 @@ bool SymbolicTBGraph::add_operator(type::TBOperatorType op_type,
       {
         std::unordered_set<TensorDimConstraint> constraints;
         for (size_t i = 0; i < A.dims.size() - 2; i++) {
-          constraints.insert(make_equal_constraint(
-              A.dims[i],
-              SymbolicTensorDim(std::make_shared<TensorDimConst>(1))));
-          constraints.insert(make_equal_constraint(
-              B.dims[i],
-              SymbolicTensorDim(std::make_shared<TensorDimConst>(1))));
+          constraints.insert(A.dims[i] == 1);
+          constraints.insert(B.dims[i] == 1);
         }
-        constraints.insert(make_equal_constraint(A.dims[A.dims.size() - 1],
-                                                 B.dims[B.dims.size() - 2]));
+        constraints.insert(A.dims[A.dims.size() - 1] == B.dims[B.dims.size() - 2]);
         if (!conds.add_constraints(constraints)) {
           return false;
         }
       }
       this->operators.push_back(SymbolicTBOp(op_type));
       {
-        std::vector<SymbolicTensorDim> dim_templates;
-        for (size_t i = 0; i < A.dims.size(); i++) {
-          dim_templates.push_back(A.dims[i]);
-        }
+        std::vector<SymbolicTensorDim> dim_templates = A.dims;
         dim_templates[dim_templates.size() - 1] = B.dims[B.dims.size() - 1];
         SymbolicSTensor C(dim_templates, A.after_accum);
         this->tensors.push_back(C);
@@ -251,8 +262,7 @@ bool SymbolicTBGraph::add_operator(type::TBOperatorType op_type,
           op_type, std::make_shared<TBReductionOpArgs>(reduction_dim, 1)));
       {
         std::vector<SymbolicTensorDim> dim_templates = A.dims;
-        dim_templates[reduction_dim] =
-            SymbolicTensorDim(std::make_shared<TensorDimConst>(1));
+        dim_templates[reduction_dim] = dim_expr_make_const(1);
         SymbolicSTensor B(dim_templates, A.after_accum);
         this->tensors.push_back(B);
       }
@@ -277,8 +287,7 @@ bool SymbolicTBGraph::add_operator(type::TBOperatorType op_type,
                            reduction_dim, this->reduction_dimx)));
       {
         std::vector<SymbolicTensorDim> dim_templates = A.dims;
-        dim_templates[reduction_dim] = SymbolicTensorDim(
-            std::make_shared<TensorDimConst>(this->reduction_dimx));
+        dim_templates[reduction_dim] = dim_expr_make_const(this->reduction_dimx);
         SymbolicSTensor B(dim_templates, A.after_accum);
         this->tensors.push_back(B);
       }
@@ -300,29 +309,42 @@ bool SymbolicTBGraph::add_operator(type::TBOperatorType op_type,
       return false;
     }
   }
+  // if (!this->check_memory_usage()) {
+  //   this->remove_last_operator();
+  //   return false;
+  // }
   return true;
 }
 
-bool SymbolicTBGraph::add_input(SymbolicDTensor dtensor,
-                                SymbolicMap const &imap) {
+bool SymbolicTBGraph::add_input(SymbolicDTensor dtensor) {
+  auto get_data_dims = [](SymbolicDTensor const &dtensor) {
+    std::vector<size_t> data_dims;
+    for (size_t i = 0; i < dtensor.dims.size(); ++i) {
+      data_dims.push_back(i);
+    }
+    return data_dims;
+  };
+  SymbolicIMap imap(
+    {grid_dim[0], grid_dim[1], grid_dim[2], forloop_range},
+    get_data_dims(dtensor),
+    next_dim_variable_index
+  );
   {
     std::unordered_set<TensorDimConstraint> constraints;
+    // Each tensor dim should be mapped to at most one device dim
     for (size_t i = 0; i < dtensor.dims.size(); ++i) {
-      std::vector<SymbolicTensorDim> dims;
-      for (SymbolicTensorDim const &device_dim : imap.device_dims) {
-        dims.push_back(SymbolicTensorDim(imap.map_mat.at({device_dim, i})));
-      }
-      dims.pop_back(); // exclude forloop dim
-      constraints.insert(make_sum_geq_zero_constraint(dims));
-      constraints.insert(make_sum_leq_one_constraint(dims));
+      auto num_mapped = imap.mat.at({grid_dim[0], i}) + imap.mat.at({grid_dim[1], i}) + imap.mat.at({grid_dim[2], i});
+      constraints.insert(num_mapped <= 1);
+      constraints.insert(num_mapped >= (int)0);
     }
-    for (SymbolicTensorDim const &device_dim : imap.device_dims) {
-      std::vector<SymbolicTensorDim> dims;
-      for (size_t i = 0; i < dtensor.dims.size(); ++i) {
-        dims.push_back(SymbolicTensorDim(imap.map_mat.at({device_dim, i})));
+    // Each device dim should be mapped to at most one tensor dim
+    for (SymbolicTensorDim const &device_dim : imap.parallel_dims) {
+      std::shared_ptr<TensorDimExpr const> num_mapped = imap.mat.at({device_dim, 0});
+      for (size_t i = 1; i < dtensor.dims.size(); ++i) {
+        num_mapped = num_mapped + imap.mat.at({device_dim, i});
       }
-      constraints.insert(make_sum_geq_zero_constraint(dims));
-      constraints.insert(make_sum_leq_one_constraint(dims));
+      constraints.insert(num_mapped <= 1);
+      constraints.insert(num_mapped >= (int)0);
     }
     if (!conds.add_constraints(constraints)) {
       return false;
@@ -333,18 +355,14 @@ bool SymbolicTBGraph::add_input(SymbolicDTensor dtensor,
       std::make_shared<TBInputOpArgs const>(dtensor, imap);
   SymbolicTBOp op(type::TBOperatorType::TB_INPUT_OP, args);
 
-  auto compute_symbolic_stensor = [](SymbolicDTensor const &dtensor,
-                                     SymbolicMap const &imap) {
+  auto compute_symbolic_stensor = [&](SymbolicDTensor const &dtensor,
+                                     SymbolicIMap const &imap) {
     std::vector<SymbolicTensorDim> dim_templates = dtensor.dims;
-    assert(dim_templates.size() == imap.num_tensor_dims);
+    assert(dim_templates.size() == imap.data_dims.size());
     for (size_t i = 0; i < dim_templates.size(); ++i) {
-      for (SymbolicTensorDim const &device_dim : imap.device_dims) {
-        dim_templates[i].dim_expr = dim_expr_make_div(
-            dim_templates[i].dim_expr,
-            dim_expr_make_ite(imap.map_mat.at({device_dim, i}),
-                              device_dim.dim_expr,
-                              dim_expr_make_const(1)));
-      }
+      SymbolicTensorDim divisor = grid_dim[0] * imap.mat.at({grid_dim[0], i}) + grid_dim[1] * imap.mat.at({grid_dim[1], i}) + grid_dim[2] * imap.mat.at({grid_dim[2], i});
+      divisor = divisor * (forloop_range * imap.mat.at({forloop_range, i}));
+      dim_templates[i] = dim_templates[i] / divisor;
     }
     return SymbolicSTensor(dim_templates, false);
   };
@@ -359,63 +377,54 @@ bool SymbolicTBGraph::add_input(SymbolicDTensor dtensor,
   return true;
 }
 
-bool SymbolicTBGraph::add_input(SymbolicDTensor dtensor) {
-  SymbolicMap imap(
-      /*symbolic_dims=*/{grid_dim[0], grid_dim[1], grid_dim[2], forloop_range},
-      /*num_tensor_dims=*/dtensor.dims.size(),
-      /*index_counter=*/next_dim_variable_index);
-  return add_input(dtensor, imap);
-}
-
-bool SymbolicTBGraph::add_input(SymbolicDTensor dtensor,
-                                int3 input_map,
-                                int forloop_dim) {
-  SymbolicMap imap(
-      /*symbolic_dims=*/{grid_dim[0], grid_dim[1], grid_dim[2], forloop_range},
-      /*num_tensor_dims=*/dtensor.dims.size(),
-      /*mapped_dims=*/
-      {{grid_dim[0], input_map.x},
-       {grid_dim[1], input_map.y},
-       {grid_dim[2], input_map.z},
-       {forloop_range, forloop_dim}});
-  return add_input(dtensor, imap);
-}
-
-bool SymbolicTBGraph::add_output(int input_index,
-                                 int3 output_map,
-                                 int forloop_dim,
-                                 mirage::type::TBEpilogueType epilogue_type) {
-  if (!tensors[input_index].after_accum) {
-    return false;
-  }
-  // create dtensor template
-  std::vector<SymbolicTensorDim> dim_templates = tensors[input_index].dims;
-  for (int d = 0; d < 3; ++d) {
-    int dim_idx = -1;
-    if (d == 0) {
-      dim_idx = output_map.x;
+bool SymbolicTBGraph::add_output(int input_index, mirage::type::TBEpilogueType epilogue_type) {
+  auto get_data_dims = [](SymbolicSTensor const &stensor) {
+    std::vector<size_t> data_dims;
+    for (size_t i = 0; i < stensor.dims.size(); ++i) {
+      data_dims.push_back(i);
     }
-    if (d == 1) {
-      dim_idx = output_map.y;
+    return data_dims;
+  };
+  SymbolicOmap omap(
+    {grid_dim[0], grid_dim[1], grid_dim[2]},
+    get_data_dims(this->tensors[input_index]),
+    next_dim_variable_index
+  );
+  {
+    std::unordered_set<TensorDimConstraint> constraints;
+    // Each tensor dim should be mapped to at most one device dim
+    for (size_t i = 0; i < tensors[input_index].dims.size(); ++i) {
+      auto num_mapped = omap.mat.at({grid_dim[0], i}) + omap.mat.at({grid_dim[1], i}) + omap.mat.at({grid_dim[2], i});
+      constraints.insert(num_mapped <= 1);
+      constraints.insert(num_mapped >= (int)0);
     }
-    if (d == 2) {
-      dim_idx = output_map.z;
+    // Each device dim should be mapped to at most one tensor dim
+    for (SymbolicTensorDim const &device_dim : omap.parallel_dims) {
+      std::shared_ptr<TensorDimExpr const> num_mapped = omap.mat.at({device_dim, 0});
+      for (size_t i = 1; i < tensors[input_index].dims.size(); ++i) {
+        num_mapped = num_mapped + omap.mat.at({device_dim, i});
+      }
+      constraints.insert(dim_expr_make_ite(device_dim == 1, num_mapped == 0, num_mapped == 1));
     }
-    if (dim_idx >= 0) {
-      dim_templates[dim_idx] = SymbolicTensorDim(std::make_shared<TensorDimMul>(
-          dim_templates[dim_idx].dim_expr, grid_dim[d].dim_expr));
+    if (!conds.add_constraints(constraints)) {
+      return false;
     }
   }
-  if (forloop_dim >= 0) {
-    dim_templates[forloop_dim] =
-        SymbolicTensorDim(std::make_shared<TensorDimMul>(
-            dim_templates[forloop_dim].dim_expr, forloop_range.dim_expr));
-  }
-  SymbolicDTensor dtensor(dim_templates);
 
-  // create op template
-  std::shared_ptr<OpArgs const> args = std::make_shared<TBOutputOpArgs const>(
-      dtensor, output_map, forloop_dim, epilogue_type);
+  auto compute_symbolic_dtensor = [&](SymbolicSTensor const &stensor,
+                                     SymbolicOmap const &omap) {
+    std::vector<SymbolicTensorDim> dim_templates = stensor.dims;
+    assert(dim_templates.size() == omap.data_dims.size());
+    for (size_t i = 0; i < dim_templates.size(); ++i) {
+      SymbolicTensorDim multiplier = grid_dim[0] * omap.mat.at({grid_dim[0], i}) + grid_dim[1] * omap.mat.at({grid_dim[1], i}) + grid_dim[2] * omap.mat.at({grid_dim[2], i});
+      dim_templates[i] = dim_templates[i] * multiplier;
+    }
+    return SymbolicDTensor(dim_templates);
+  };
+
+  SymbolicDTensor dtensor = compute_symbolic_dtensor(this->tensors[input_index], omap);
+  std::shared_ptr<OpArgs const> args =
+      std::make_shared<TBOutputOpArgs const>(dtensor, omap, epilogue_type);
   SymbolicTBOp op(type::TBOperatorType::TB_OUTPUT_OP, args);
   operators.push_back(op);
   input_indices.push_back({input_index});
@@ -475,26 +484,7 @@ bool SymbolicKNGraph::remove_last_operator() {
   }
   input_indices.pop_back();
   output_indices.pop_back();
-  for (TensorDimConstraint const &constraint : conds_from_op.back()) {
-    conds.erase(constraint);
-  }
-  conds_from_op.pop_back();
-  return true;
-}
-
-bool SymbolicKNGraph::add_conds_for_new_op(
-    std::unordered_set<TensorDimConstraint> const &new_conds) {
-  if (!check_satisfiability(this->conds, new_conds)) {
-    return false;
-  }
-  std::unordered_set<TensorDimConstraint> truly_new_conds;
-  for (TensorDimConstraint const &constraint : new_conds) {
-    if (conds.find(constraint) == conds.end()) {
-      conds.insert(constraint);
-      truly_new_conds.insert(constraint);
-    }
-  }
-  conds_from_op.push_back(truly_new_conds);
+  conds.revert();
   return true;
 }
 
@@ -514,9 +504,11 @@ bool SymbolicKNGraph::add_operator(type::KNOperatorType op_type,
         std::unordered_set<TensorDimConstraint> constraints;
         for (size_t i = 0; i < A.dims.size(); i++) {
           constraints.insert(
-              make_equal_or_one_constraint(A.dims[i], B.dims[i]));
+              dim_expr_make_disj(
+                {A.dims[i] == B.dims[i], A.dims[i] == 1, B.dims[i] == 1}
+              ));
         }
-        if (!add_conds_for_new_op(constraints)) {
+        if (!conds.add_constraints(constraints)) {
           return false;
         }
       }
@@ -531,6 +523,9 @@ bool SymbolicKNGraph::add_operator(type::KNOperatorType op_type,
     case type::KNOperatorType::KN_SQRT_OP:
     case type::KNOperatorType::KN_SILU_OP: {
       assert(input_indices.size() == 1);
+      if (!conds.add_constraints({})) {
+        return false;
+      }
       SymbolicDTensor A = this->tensors[input_indices[0]];
       this->operators.push_back(SymbolicKNOp(op_type));
       this->tensors.push_back(A);
@@ -548,11 +543,10 @@ bool SymbolicKNGraph::add_operator(type::KNOperatorType op_type,
       {
         std::unordered_set<TensorDimConstraint> constraints;
         for (size_t i = 0; i < A.dims.size() - 2; i++) {
-          constraints.insert(make_equal_constraint(A.dims[i], B.dims[i]));
+          constraints.insert(A.dims[i] == B.dims[i]);
         }
-        constraints.insert(make_equal_constraint(A.dims[A.dims.size() - 1],
-                                                 B.dims[B.dims.size() - 2]));
-        if (!add_conds_for_new_op(constraints)) {
+        constraints.insert(A.dims[A.dims.size() - 1] == B.dims[B.dims.size() - 2]);
+        if (!conds.add_constraints(constraints)) {
           return false;
         }
       }
@@ -581,14 +575,16 @@ bool SymbolicKNGraph::add_operator(type::KNOperatorType op_type,
       if ((int)A.dims.size() <= reduction_dim) {
         return false;
       }
+      if (!conds.add_constraints({})) {
+        return false;
+      }
       this->operators.push_back(
           SymbolicKNOp(op_type,
                        std::make_shared<KNReductionOpArgs>(
                            reduction_dim, reduction_dim_size)));
       {
         std::vector<SymbolicTensorDim> dim_templates = A.dims;
-        dim_templates[reduction_dim] = SymbolicTensorDim(
-            std::make_shared<TensorDimConst>(reduction_dim_size));
+        dim_templates[reduction_dim] = dim_expr_make_const(reduction_dim_size);
         SymbolicDTensor B(dim_templates);
         this->tensors.push_back(B);
       }
@@ -605,9 +601,20 @@ bool SymbolicKNGraph::add_operator(type::KNOperatorType op_type,
 
 bool SymbolicKNGraph::add_customized_operator(SymbolicTBGraph tb_graph,
                                               std::vector<int> input_indices) {
+  assert(tb_graph.conds.add_constraint(tb_graph.get_memory_usage_constraint()));
+  // std::cerr << "Checking tb_graph conds" << std::endl;
+  // std::cerr << json(tb_graph) << std::endl;
+  // if (!tb_graph.conds.satisfiable()) {
+  //   std::cerr << json(tb_graph) << std::endl;
+  //   std::cerr << "tb_graph conds not satisfiable" << std::endl;
+  //   return false;
+  // }
   this->operators.push_back(
       SymbolicKNOp(type::KNOperatorType::KN_CUSTOMIZED_OP,
                    std::make_shared<KNCustomizedOpArgs>(tb_graph)));
+  if (!conds.add_constraints(tb_graph.conds.get_all_constraints())) {
+    return false;
+  }
   std::vector<int> output_indices;
   for (auto const &op : tb_graph.operators) {
     if (op.op_type == type::TBOperatorType::TB_OUTPUT_OP) {
@@ -633,7 +640,7 @@ bool SymbolicKNGraph::add_input(std::vector<int> input_dims,
     std::vector<SymbolicTensorDim> dim_templates;
     for (size_t i = 0; i < input_dims.size(); i++) {
       dim_templates.push_back(
-          SymbolicTensorDim(std::make_shared<TensorDimConst>(input_dims[i])));
+          dim_expr_make_const(input_dims[i]));
     }
     SymbolicDTensor tensor(dim_templates);
     this->tensors.push_back(tensor);
@@ -646,6 +653,9 @@ bool SymbolicKNGraph::add_input(std::vector<int> input_dims,
 bool SymbolicKNGraph::add_output(int input_index,
                                  std::vector<size_t> output_strides,
                                  int3 output_map) {
+  if (!conds.add_constraints({})) {
+    return false;
+  }
   this->operators.push_back(SymbolicKNOp(
       type::KNOperatorType::KN_OUTPUT_OP,
       std::make_shared<KNOutputOpArgs>(output_strides, output_map)));
@@ -655,10 +665,18 @@ bool SymbolicKNGraph::add_output(int input_index,
 }
 
 SymbolicTBGraph::operator json() const {
+  std::vector<json> grid_dim_json;
+  for (auto const &dim : grid_dim) {
+    grid_dim_json.push_back(json(*dim));
+  }
+  std::vector<json> block_dim_json;
+  for (auto const &dim : block_dim) {
+    block_dim_json.push_back(json(*dim));
+  }
   return json{
-      {"grid_dim", grid_dim},
-      {"block_dim", block_dim},
-      {"forloop_range", forloop_range},
+      {"grid_dim", grid_dim_json},
+      {"block_dim", block_dim_json},
+      {"forloop_range", *forloop_range},
       {"reduction_dimx", reduction_dimx},
       {"operators", operators},
       {"tensors", tensors},

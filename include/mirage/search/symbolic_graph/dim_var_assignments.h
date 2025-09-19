@@ -1,12 +1,14 @@
 #pragma once
 
 #include "mirage/search/symbolic_graph/types.h"
+
+#include <memory>
 #include <unordered_map>
 
 namespace mirage {
 namespace search {
 
-class SymbolicTensorDim;
+class TensorDimExpr;
 
 class DimVarAssignments {
 public:
@@ -15,7 +17,7 @@ public:
       std::unordered_map<tensor_dim_var_index_t, int> const &assignments);
 
   void assign(tensor_dim_var_index_t dim_var_index, int value);
-  int get_value(SymbolicTensorDim const &dim_expr) const;
+  int get_value(std::shared_ptr<TensorDimExpr const> const &dim_expr) const;
   int get_value(tensor_dim_var_index_t dim_var_index) const;
   bool has_assignment(tensor_dim_var_index_t dim_var_index) const;
 

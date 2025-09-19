@@ -1,5 +1,5 @@
 #include "mirage/search/symbolic_graph/dim_var_assignments.h"
-#include "mirage/search/symbolic_graph/symbolic_tensor_dim.h"
+#include "mirage/search/symbolic_graph/tensor_dim_expr.h"
 
 namespace mirage {
 namespace search {
@@ -14,7 +14,7 @@ void DimVarAssignments::assign(tensor_dim_var_index_t dim_var_index,
 }
 
 int DimVarAssignments::get_value(SymbolicTensorDim const &dim_template) const {
-  return dim_template.dim_expr->get_value(*this);
+  return dim_template->get_value(*this);
 }
 
 int DimVarAssignments::get_value(tensor_dim_var_index_t dim_var_index) const {

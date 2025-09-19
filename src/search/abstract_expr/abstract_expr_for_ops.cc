@@ -1,4 +1,6 @@
 #include "mirage/search/abstract_expr/abstract_expr_for_ops.h"
+#include "mirage/search/symbolic_graph/tensor_dim_expr.h"
+#include <iostream>
 
 namespace mirage {
 namespace search {
@@ -233,32 +235,47 @@ std::shared_ptr<AbstractExpr const> get_abstract_expr(
     }
     case type::TBOperatorType::TB_FORLOOP_ACCUM_RED_LD_RMS_OP: {
       assert(opds.size() == 1);
-      std::shared_ptr<TensorDimExpr const> reduction_size_expr =
-          dim_expr_make_mul(
-              g.forloop_range.dim_expr,
-              tensors[0].dims[tensors[0].dims.size() - 1].dim_expr);
+      std::shared_ptr<TensorDimExpr const> reduction_size_expr = g.forloop_range * tensors[0].dims[tensors[0].dims.size() - 1];
       return abstract_expr_make_rms(reduction_size_expr, opds[0]);
     }
     case type::TBOperatorType::TB_FORLOOP_ACCUM_RED_LD_SUM_OP: {
       assert(opds.size() == 1);
-      std::shared_ptr<TensorDimExpr const> reduction_size_expr =
-          dim_expr_make_mul(
-              g.forloop_range.dim_expr,
-              tensors[0].dims[tensors[0].dims.size() - 1].dim_expr);
+      std::shared_ptr<TensorDimExpr const> reduction_size_expr = g.forloop_range * tensors[0].dims[tensors[0].dims.size() - 1];
       return abstract_expr_make_red(reduction_size_expr, opds[0]);
     }
     case type::TBOperatorType::TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP: {
       assert(opds.size() == 1);
-      std::shared_ptr<TensorDimExpr const> reduction_size_expr =
-          dim_expr_make_mul(
-              g.forloop_range.dim_expr,
-              tensors[0].dims[tensors[0].dims.size() - 1].dim_expr);
-      reduction_size_expr = dim_expr_make_div(
-          reduction_size_expr, dim_expr_make_const(g.reduction_dimx));
+      std::shared_ptr<TensorDimExpr const> reduction_size_expr = g.forloop_range * tensors[0].dims[tensors[0].dims.size() - 1] / dim_expr_make_const(g.reduction_dimx);
       return abstract_expr_make_red(reduction_size_expr, opds[0]);
     }
+    case type::TBOperatorType::TB_SQUARE_OP: {
+      assert(opds.size() == 1);
+      return abstract_expr_make_square(opds[0]);
+    }
+    case type::TBOperatorType::TB_SQRT_OP: {
+      assert(opds.size() == 1);
+      return abstract_expr_make_sqrt(opds[0]);
+    }
+    case type::TBOperatorType::TB_GELU_OP: {
+      assert(opds.size() == 1);
+      return abstract_expr_make_gelu(opds[0]);
+    }
+    case type::TBOperatorType::TB_RELU_OP: {
+      assert(opds.size() == 1);
+      return abstract_expr_make_relu(opds[0]);
+    }
+    case type::TBOperatorType::TB_CLAMP_OP: {
+      assert(opds.size() == 1);
+      return abstract_expr_make_clamp(type::CLAMP_MIN_MAX["min_val"],
+                                      type::CLAMP_MIN_MAX["max_val"],
+                                      opds[0]);
+    }
+    case type::TBOperatorType::TB_POW_OP: {
+      assert(opds.size() == 2);
+      return abstract_expr_make_pow(opds[0], opds[1]);
+    }
     default: {
-      fprintf(stderr, "Unsupported operator: %d\n", (int)op);
+      std::cerr << "Unsupported operator: " << json(op) << std::endl;
       assert(false);
     }
   }
@@ -302,8 +319,34 @@ std::shared_ptr<AbstractExpr const> get_abstract_expr(
           abstract_expr_make_rms(tensors[0].dims[tensors[0].dims.size() - 1],
                                  opds[0]));
     }
+    case type::KNOperatorType::KN_SQUARE_OP: {
+      assert(opds.size() == 1);
+      return abstract_expr_make_square(opds[0]);
+    }
+    case type::KNOperatorType::KN_SQRT_OP: {
+      assert(opds.size() == 1);
+      return abstract_expr_make_sqrt(opds[0]);
+    }
+    case type::KNOperatorType::KN_GELU_OP: {
+      assert(opds.size() == 1);
+      return abstract_expr_make_gelu(opds[0]);
+    }
+    case type::KNOperatorType::KN_RELU_OP: {
+      assert(opds.size() == 1);
+      return abstract_expr_make_relu(opds[0]);
+    }
+    case type::KNOperatorType::KN_CLAMP_OP: {
+      assert(opds.size() == 1);
+      return abstract_expr_make_clamp(type::CLAMP_MIN_MAX["min_val"],
+                                      type::CLAMP_MIN_MAX["max_val"],
+                                      opds[0]);
+    }
+    case type::KNOperatorType::KN_POW_OP: {
+      assert(opds.size() == 2);
+      return abstract_expr_make_pow(opds[0], opds[1]);
+    }
     default: {
-      fprintf(stderr, "Unsupported operator: %d\n", (int)op);
+      std::cerr << "Unsupported operator: " << json(op) << std::endl;
       assert(false);
     }
   }

@@ -21,7 +21,7 @@ ProbabilisticVerifier::ProbabilisticVerifier(kernel::Graph const &input_graph) {
 
 OutputMatch ProbabilisticVerifier::verify(kernel::Graph const &graph) {
 
-  int num_outputs;
+  int num_outputs = 0;
 
   for (auto const &op : graph.operators) {
     for (auto const &tensor : op->output_tensors) {
