@@ -252,9 +252,9 @@ __device__ __forceinline__ void
           int tma_coords_B[2] = {i * TILE_SIZE, 0};
 
           input_weight_smem.set_ptr(shared_weight +
-                                    slot * TMA_TRANS_BYTES_A / sizeof(T));
+                                    slot * OUTPUT_ATOM_SIZE * TILE_SIZE);
           input_smem.set_ptr(shared_input +
-                             slot * TMA_TRANS_BYTES_B / sizeof(T));
+                             slot * SMEM_M_SIZE * TILE_SIZE);
 
           set_barrier_transaction_bytes(weight_barrier[slot],
                                         TMA_TRANS_BYTES_A);
@@ -307,8 +307,8 @@ __device__ __forceinline__ void
 #endif
 
         input_weight_smem.set_ptr(shared_weight +
-                                  (slot)*TMA_TRANS_BYTES_A / sizeof(T));
-        input_smem.set_ptr(shared_input + (slot)*TMA_TRANS_BYTES_B / sizeof(T));
+                                  (slot)*OUTPUT_ATOM_SIZE * TILE_SIZE);
+        input_smem.set_ptr(shared_input + (slot)*SMEM_M_SIZE * TILE_SIZE);
         A_DESC a_desc(input_weight_smem(0, 0));
         B_DESC b_desc(input_smem(0, 0));
 
@@ -348,7 +348,7 @@ __device__ __forceinline__ void
 
       // https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#asynchronous-warpgroup-level-matrix-register-fragment-wgmma-64n16:~:text=The%20layout%20of%20the%20fragments%20held%20by%20different%20threads%20is%20shown%20in%20Figure%20149.
       // write back to shared memory
-      store_async_wait<0>();
+      store_async_wait<Kstages - 1>();
       int slot_output = output_atom_idx % Kstages;
       mm_output_smem.set_ptr(mm_output +
                              slot_output * BATCH_SIZE * OUTPUT_ATOM_SIZE);
@@ -401,28 +401,37 @@ __device__ __forceinline__ void
       wg_sync<THREADS_PER_WARPGROUP * CONSUMER_WARPGROUPS>(1);
 
       // copy back to dmem
-      // if (warp_idx % 4 == 0 && lane_id() == 0) {
+      if (warp_idx % 4 == 0 && lane_id() == 0) {
       //   tma_out.tma_store_async(mm_output_smem(0, 0),
       //                           {output_atom_idx * OUTPUT_ATOM_SIZE, 0});
       //   store_commit_group();
-      //   if constexpr (HAS_RESIDUAL) {
-      //     arrive(residual_done[slot_residual], 1);
-      //   }
-      // }
+        if constexpr (HAS_RESIDUAL) {
+          arrive(residual_done[slot_residual], 1);
+        }
+      }
       // Final writeback: store accumulated output (residual already included if
       // any)
 
-      // constexpr int CHUNK_SIZE = 16 / sizeof(T);
-      // constexpr int NUM_CHUNKS_OUTPUT = BATCH_SIZE * OUTPUT_ATOM_SIZE / CHUNK_SIZE;
-      // constexpr int CHUNKS_PER_ROW_C = OUTPUT_ATOM_SIZE / CHUNK_SIZE;
+      constexpr int CHUNK_SIZE = 16 / sizeof(T);
+      constexpr int log2_CHUNK_SIZE = log2_constexpr(CHUNK_SIZE);
+      constexpr int NUM_CHUNKS_OUTPUT = BATCH_SIZE * OUTPUT_ATOM_SIZE / CHUNK_SIZE;
+      constexpr int CHUNKS_PER_ROW_C = OUTPUT_SIZE / CHUNK_SIZE;
 
-
-#pragma unroll
-      for (int i = threadIdx.x; i < OUTPUT_ATOM_SIZE * SMEM_M_SIZE; i += NUM_THREADS) {
-        int src_row = i / SMEM_M_SIZE;
-        int src_col = (i % SMEM_M_SIZE);
-        output_dmem.at(src_col, src_row+output_atom_idx * OUTPUT_ATOM_SIZE) = mm_output_smem.at(src_row, src_col);
+    #pragma unroll
+      for (int i = threadIdx.x; i < NUM_CHUNKS_OUTPUT; i += NUM_THREADS) {
+        int row = i / CHUNKS_PER_ROW_C;
+        int col = (i % CHUNKS_PER_ROW_C) << log2_CHUNK_SIZE;
+        printf("threadIdx.x: %d, row = %d, col = %d, output_dmem_ptr = %p, 128 bit aligned = %d\n", threadIdx.x, row, col, ((void *)&output_dmem.at(col, row + output_atom_idx * OUTPUT_ATOM_SIZE)), ((uintptr_t)&output_dmem.at(col, row + output_atom_idx * OUTPUT_ATOM_SIZE)) % 128 == 0);
+        *((__uint128_t *)((void *)&output_dmem.at(col, row + output_atom_idx * OUTPUT_ATOM_SIZE))) = *((__uint128_t *)((void *)&mm_output_smem.at(row, col)));
       }
+
+
+// #pragma unroll
+//       for (int i = threadIdx.x; i < OUTPUT_ATOM_SIZE * SMEM_M_SIZE; i += NUM_THREADS) {
+//         int src_row = i / SMEM_M_SIZE;
+//         int src_col = (i % SMEM_M_SIZE);
+//         output_dmem.at(src_col, src_row+output_atom_idx * OUTPUT_ATOM_SIZE) = mm_output_smem.at(src_row, src_col);
+//       }
     }
   }
   // store_async_wait<0>();

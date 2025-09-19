@@ -95,11 +95,12 @@ void launch_linear_swapAB(void *input_ptr,
   constexpr int TMA_CP_ASYNC_REPEAT_COL =
       (TILE_SIZE + TMA_CP_ASYNC_SIZE - 1) / TMA_CP_ASYNC_SIZE;
 
-  constexpr int OUTPUT_ATOM_SIZE = (OUTPUT_SIZE >= 256)   ? 256
-                                   : (OUTPUT_SIZE >= 128) ? 128
-                                   : (OUTPUT_SIZE >= 64)  ? 64
-                                   : (OUTPUT_SIZE >= 32)  ? 32
-                                                          : 16;
+  // constexpr int OUTPUT_ATOM_SIZE = (OUTPUT_SIZE >= 256)   ? 256
+  //                                  : (OUTPUT_SIZE >= 128) ? 128
+  //                                  : (OUTPUT_SIZE >= 64)  ? 64
+  //                                  : (OUTPUT_SIZE >= 32)  ? 32
+  //                                                         : 16;
+  constexpr int OUTPUT_ATOM_SIZE = OUTPUT_SIZE < 64 ? OUTPUT_SIZE : 64;
   constexpr int OUTPUT_ATOM_REPEAT_COL =
       (OUTPUT_ATOM_SIZE + TMA_CP_ASYNC_SIZE - 1) / TMA_CP_ASYNC_SIZE;
 
@@ -687,9 +688,9 @@ void launch_linear_hopper(void *input_ptr,
     DISPATCH_LINEAR_HOPPER_REDUCTION_SIZE_CASE(BATCH_SIZE, OUTPUT_SIZE, 256)   \
     DISPATCH_LINEAR_HOPPER_REDUCTION_SIZE_CASE(BATCH_SIZE, OUTPUT_SIZE, 512)   \
     DISPATCH_LINEAR_HOPPER_REDUCTION_SIZE_CASE(BATCH_SIZE, OUTPUT_SIZE, 3072)  \
-    DISPATCH_LINEAR_HOPPER_REDUCTION_SIZE_CASE(BATCH_SIZE, OUTPUT_SIZE, 12288) \
-*/                                                                             \
+    */                                                                             \
     DISPATCH_LINEAR_HOPPER_REDUCTION_SIZE_CASE(BATCH_SIZE, OUTPUT_SIZE, 4096)  \
+    DISPATCH_LINEAR_HOPPER_REDUCTION_SIZE_CASE(BATCH_SIZE, OUTPUT_SIZE, 12288) \
     default:                                                                   \
       printf("Unsupported reduction size in test: %zu\n", input.size(1));      \
       break;                                                                   \
@@ -702,11 +703,10 @@ void launch_linear_hopper(void *input_ptr,
 
 #define DISPATCH_LINEAR_HOPPER_OUTPUT_SIZE(BATCH_SIZE)                         \
   switch (output.size(1)) {                                                    \
-    DISPATCH_LINEAR_HOPPER_OUTPUT_SIZE_CASE(BATCH_SIZE, 16)                    \
     DISPATCH_LINEAR_HOPPER_OUTPUT_SIZE_CASE(BATCH_SIZE, 64)                    \
-    /*                                                                         \
     DISPATCH_LINEAR_HOPPER_OUTPUT_SIZE_CASE(BATCH_SIZE, 128)                   \
     DISPATCH_LINEAR_HOPPER_OUTPUT_SIZE_CASE(BATCH_SIZE, 256)                   \
+    /*                                                                         \
     DISPATCH_LINEAR_HOPPER_OUTPUT_SIZE_CASE(BATCH_SIZE, 1600)                  \
     DISPATCH_LINEAR_HOPPER_OUTPUT_SIZE_CASE(BATCH_SIZE, 32)                    \
     DISPATCH_LINEAR_HOPPER_OUTPUT_SIZE_CASE(BATCH_SIZE, 512)                   \
@@ -1391,7 +1391,7 @@ void linear_kernel(torch::Tensor input,
 // }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-   m.def("linear", &linear_kernel, "Linear kernel");
+  //  m.def("linear", &linear_kernel, "Linear kernel");
   m.def("linear_swapAB", &linear_swapAB_kernel, "Linear swapAB kernel");
   // m.def("norm_linear", &norm_linear_kernel, "NormLinear kernel");
   // m.def("multitoken_paged_attention",
