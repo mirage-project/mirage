@@ -50,7 +50,6 @@ __device__ __forceinline__ void
   constexpr int OUTPUT_ATOM_SIZE = OUTPUT_LIMIT <= MAX_OUTPUT_ATOM_SIZE
                                        ? OUTPUT_LIMIT
                                        : MAX_OUTPUT_ATOM_SIZE;
-
   constexpr int NUM_OUTPUT_ATOMS =
       OUTPUT_SIZE / OUTPUT_ATOM_SIZE; // Full output atoms
   constexpr int LAST_OUTPUT_ATOM_SIZE = OUTPUT_SIZE % OUTPUT_ATOM_SIZE;
@@ -151,6 +150,9 @@ __device__ __forceinline__ void
 
   constexpr size_t SHARED_OUTPUT_OFFSET = MM_INTERMEDIATE_OFFSET;
   // reuse mm_intermediate
+
+  constexpr size_t TOTAL_OFFSET = SHARED_OUTPUT_OFFSET + sizeof(T) * BATCH_SIZE * OUTPUT_ATOM_SIZE;
+  static_assert(TOTAL_OFFSET <= mirage::runtime::MAX_SHARE_MEMORY_SIZE);
 
   // zero buffer
   T *zero_buf = (T *)(smem + ZERO_BUFFER_OFFSET);

@@ -26,6 +26,8 @@
 #include <unistd.h>
 #include <vector>
 
+// #define MPK_ENABLE_VERBOSE
+
 using bfloat16 = type::bfloat16_t;
 using namespace mirage::runtime;
 
@@ -164,8 +166,8 @@ __device__ void worker_checker(RuntimeConfig config) {
   assert(gridDim.z == 1);
   // Each worker SM serves a single worker
   // Each scheduelr SM serves four schedulers
-  int num_schedulers =
-      config.num_local_schedulers + config.num_remote_schedulers;
+  //int num_schedulers =
+  //    config.num_local_schedulers + config.num_remote_schedulers;
 
   assert(gridDim.x == config.num_workers);
   assert(config.num_workers <= MAX_NUM_WORKERS);
@@ -179,8 +181,8 @@ __device__ void scheduler_checker(RuntimeConfig config) {
   assert(gridDim.z == 1);
   // Each worker SM serves a single worker
   // Each scheduelr SM serves four schedulers
-  int num_schedulers =
-      config.num_local_schedulers + config.num_remote_schedulers;
+  //int num_schedulers =
+  //    config.num_local_schedulers + config.num_remote_schedulers;
 
   assert(config.num_workers <= MAX_NUM_WORKERS);
   // We will reinterpret TaskDesc as an array of integers to
@@ -553,7 +555,9 @@ __device__ void execute_scheduler(RuntimeConfig config, int offset) {
           queue_idx = (queue_idx == num_sched_queues - 1) ? 0 : queue_idx + 1;
         }
         // nanosleep to avoid overwhelming I/O
-        __nanosleep(10);
+	// scheduler sleeps longer (10us) since we launch all tasks at the beginning of
+	// each task graph execution
+        __nanosleep(10000);
       }
       // Make sure the schedule queue is not overflow
       assert(cur_event_pos[queue_idx] + config.per_sched_queue_len >
@@ -800,8 +804,6 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
   int mype = 0;
   int npes = 1;
 #endif
-  global_runtime_config.per_worker_queue_len = 1024;
-  global_runtime_config.per_sched_queue_len = 1024;
   global_runtime_config.num_gpus = npes;
   global_runtime_config.my_gpu_id = mype;
   global_runtime_config.num_graphs = 1;
@@ -811,6 +813,8 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
   std::vector<EventDesc> all_events;
   std::vector<TaskId> first_tasks;
   _init_persistent_kernel(all_tasks, all_events, first_tasks, npes, mype);
+  global_runtime_config.per_worker_queue_len = max(all_tasks.size(), static_cast<size_t>(131072)/*128K*/);
+  global_runtime_config.per_sched_queue_len = max(all_events.size(), static_cast<size_t>(131072)/*128K*/);
 
   // Initialize worker queue last task id
   // Each worker now maintains a local and a remote worker queue
