@@ -20,7 +20,7 @@ for reduction_size in reduction_sizes:
         w = torch.randn(
             (output_size, reduction_size), device="cuda", dtype=torch.bfloat16
         )
-        residual = torch.zeros(batch_size, output_size, device="cuda", dtype=torch.bfloat16)
+        residual = torch.randn(batch_size, output_size, device="cuda", dtype=torch.bfloat16)
         output = torch.empty(batch_size, output_size, device="cuda", dtype=torch.bfloat16)
 
         for i in range(batch_size):
@@ -41,10 +41,7 @@ for reduction_size in reduction_sizes:
         # runtime_kernel_hopper.linear(x, w, None, output) # without residual
 
         torch_out = torch.matmul(x, torch.transpose(w, 0, 1))
-        # torch_out = torch_out + residual # with residual
-
-        print(output.shape)
-        print(torch_out)
+        torch_out = torch_out + residual # with residual
 
         print("Ratio (kernel / torch):")
         print(output / torch_out)

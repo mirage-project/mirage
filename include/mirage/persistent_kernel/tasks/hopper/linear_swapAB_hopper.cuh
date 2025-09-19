@@ -65,8 +65,9 @@ __device__ __forceinline__ void
   constexpr int OUTPUT_ATOM_SIZE = OUTPUT_SIZE < 64 ? OUTPUT_SIZE : 64;
   constexpr bool HAS_RESIDUAL = !std::is_void<TMA_RESIDUAL>::value;
 
-  // NOTE(Yu): may need to adjust when batch size is larger than 64
-  constexpr int SMEM_M_SIZE = BATCH_SIZE < 16 ? BATCH_SIZE : 16;
+  // NOTE(Yu): Assume batch size is smaller than 16, and padding the batch size to 16
+  static_assert(BATCH_SIZE <= 16, "Batch size must be smaller or equal to 16 in swapAB");
+  constexpr int SMEM_M_SIZE = 16;
 
   constexpr int TMA_TRANS_BYTES_A = sizeof(T) * TILE_SIZE * OUTPUT_ATOM_SIZE;
   constexpr int TMA_TRANS_BYTES_B = sizeof(T) * BATCH_SIZE * TILE_SIZE;
@@ -269,11 +270,11 @@ __device__ __forceinline__ void
   } else {
     // warp specialization compute warpgroup
     wg_increase_regs<160>();
-    float s_frag[OUTPUT_ATOM_SIZE / 2];
+    float s_frag[SMEM_M_SIZE / 2];
     for (int output_atom_idx = 0; output_atom_idx < NUM_ITER_N;
          output_atom_idx++) {
 #pragma unroll
-      for (int i = 0; i < OUTPUT_ATOM_SIZE / 16; i++) {
+      for (int i = 0; i < SMEM_M_SIZE / 16; i++) {
         clear_8_floats(s_frag + i * 8);
       }
 
@@ -283,7 +284,7 @@ __device__ __forceinline__ void
         // wait input, weight
         wait(input_barrier[slot], phase);
         wait(weight_barrier[slot], phase);
-
+#if 0
         if (threadIdx.x == 0) {
          printf("i: %d\n", i);
          printf("input_smem ptr: %p\n", input_smem(0, 0));
@@ -303,6 +304,7 @@ __device__ __forceinline__ void
            printf("\n");
          }
        }
+#endif
 
         input_weight_smem.set_ptr(shared_weight +
                                   (slot)*TMA_TRANS_BYTES_A / sizeof(T));
@@ -317,8 +319,8 @@ __device__ __forceinline__ void
                    64, // output atom size fixed to 64
                    16, // Assume batch size is not larger than 16
                    16,
-                   InputSmem,
                    WeightSmem,
+                   InputSmem,
                    A_DESC,
                    B_DESC,
                    false,
@@ -346,7 +348,7 @@ __device__ __forceinline__ void
 
       // https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#asynchronous-warpgroup-level-matrix-register-fragment-wgmma-64n16:~:text=The%20layout%20of%20the%20fragments%20held%20by%20different%20threads%20is%20shown%20in%20Figure%20149.
       // write back to shared memory
-      store_async_wait<Kstages - 1>();
+      store_async_wait<0>();
       int slot_output = output_atom_idx % Kstages;
       mm_output_smem.set_ptr(mm_output +
                              slot_output * BATCH_SIZE * OUTPUT_ATOM_SIZE);
@@ -354,15 +356,28 @@ __device__ __forceinline__ void
       for (uint32_t i = 0; i < (SMEM_M_SIZE / 4); i++) {
         int row = (warp_idx % 4) * 16 + (i % 2) * 8 + idx_in_warp / 4;
         int col = (i / 2) * 8 + (idx_in_warp % 4) * 2;
-        if constexpr (HAS_RESIDUAL) {
-          mm_output_smem.at(row, col) =
-              bfloat16(s_frag[i * 2]) + residual_smem.at(row, col);
-          mm_output_smem.at(row, col + 1) =
-              bfloat16(s_frag[i * 2 + 1]) + residual_smem.at(row, col + 1);
-        } else {
-          mm_output_smem.at(row, col) = bfloat16(s_frag[i * 2]);
-          mm_output_smem.at(row, col + 1) = bfloat16(s_frag[i * 2 + 1]);
-        }
+
+        // if (1) {
+          //   printf("threadIdx.x: %d, i: %d, warp_idx: %d, idx_in_warp: %d, (row, col): (%d, %d), (float)s_frag[%d] = %f\n", threadIdx.x, output_atom_idx, warp_idx, idx_in_warp, row, col, i * 2, (float)(bfloat16(s_frag[i * 2])));
+          //   printf("threadIdx.x: %d, i: %d, warp_idx: %d, idx_in_warp: %d, (row, col): (%d, %d), (float)s_frag[%d] = %f\n", threadIdx.x, output_atom_idx, warp_idx, idx_in_warp, row, col, i * 2 + 1, (float)(bfloat16(s_frag[i * 2 + 1])));
+          // }
+          if constexpr (HAS_RESIDUAL) {
+            mm_output_smem.at(row, col) =
+            bfloat16(s_frag[i * 2]) + residual_smem.at(col, row);
+            mm_output_smem.at(row, col + 1) =
+            bfloat16(s_frag[i * 2 + 1]) + residual_smem.at(col + 1, row);
+          } else {
+            mm_output_smem.at(row, col) = bfloat16(s_frag[i * 2]);
+            mm_output_smem.at(row, col + 1) = bfloat16(s_frag[i * 2 + 1]);
+          }
+#if 0
+          if (1) {
+            printf("has residual: %d, residual_smem.at(%d, %d) = %f\n", HAS_RESIDUAL, row, col, (float)residual_smem.at(row, col));
+            printf("has residual: %d, residual_smem.at(%d, %d) = %f\n", HAS_RESIDUAL, row, col + 1, (float)residual_smem.at(row, col + 1));
+            printf("threadIdx.x: %d, i: %d, (row, col): (%d, %d), (float)s_frag[%d] = %f\n", threadIdx.x, i, row, col, i * 2, (float)(bfloat16(s_frag[i * 2])));
+            printf("threadIdx.x: %d, i: %d, (row, col): (%d, %d), (float)s_frag[%d] = %f\n", threadIdx.x, i, row, col, i * 2 + 1, (float)(bfloat16(s_frag[i * 2 + 1])));
+          }
+#endif
       }
 
       // make sure generic proxy's modification to smem is visible to tma store
@@ -371,17 +386,19 @@ __device__ __forceinline__ void
 
       // this is inter-thread sync
       wg_sync<THREADS_PER_WARPGROUP * CONSUMER_WARPGROUPS>(1);
-
+#if 0
       if (threadIdx.x == 0) {
 
         printf("mm_output_smem\n");
         for (int j = 0; j < BATCH_SIZE; j++) {
           for (int k = 0; k < OUTPUT_SIZE; k++) {
-            printf("%f ", (float)mm_output_smem.at(j, k));
+            printf("%f ", (float)mm_output_smem.at(k, j));
           }
           printf("\n");
         }
       }
+#endif
+      wg_sync<THREADS_PER_WARPGROUP * CONSUMER_WARPGROUPS>(1);
 
       // copy back to dmem
       // if (warp_idx % 4 == 0 && lane_id() == 0) {
@@ -399,9 +416,7 @@ __device__ __forceinline__ void
       // constexpr int NUM_CHUNKS_OUTPUT = BATCH_SIZE * OUTPUT_ATOM_SIZE / CHUNK_SIZE;
       // constexpr int CHUNKS_PER_ROW_C = OUTPUT_ATOM_SIZE / CHUNK_SIZE;
 
-      if (threadIdx.x == 0) {
-        printf("batch size: %d, output size: %d, output atom size: %d\n", BATCH_SIZE, OUTPUT_SIZE, OUTPUT_ATOM_SIZE);
-      }
+
 #pragma unroll
       for (int i = threadIdx.x; i < OUTPUT_ATOM_SIZE * SMEM_M_SIZE; i += NUM_THREADS) {
         int src_row = i / SMEM_M_SIZE;

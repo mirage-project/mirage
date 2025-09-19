@@ -243,7 +243,7 @@ void launch_linear_swapAB(void *input_ptr,
                                    TMA_B,
                                    TMA_RESIDUAL,
                                    TMA_OUT><<<grid_dim, block_dim, smem_size>>>(
-          tma_a, tma_b, tma_residual, tma_out);
+          tma_a, tma_b, tma_residual, tma_out, output_ptr);
     } else {
       linear_kernel_swapAB_no_residual_hopper_wrapper<T,
                                                BATCH_SIZE,
@@ -252,7 +252,7 @@ void launch_linear_swapAB(void *input_ptr,
                                                TMA_A,
                                                TMA_B,
                                                TMA_OUT>
-          <<<grid_dim, block_dim, smem_size>>>(tma_a, tma_b, tma_out);
+          <<<grid_dim, block_dim, smem_size>>>(tma_a, tma_b, tma_out, output_ptr);
     }
   }
   cudaDeviceSynchronize(); // Wait for all warmup runs to complete
@@ -273,7 +273,7 @@ void launch_linear_swapAB(void *input_ptr,
                                    TMA_B,
                                    TMA_RESIDUAL,
                                    TMA_OUT><<<grid_dim, block_dim, smem_size>>>(
-          tma_a, tma_b, tma_residual, tma_out);
+          tma_a, tma_b, tma_residual, tma_out, output_ptr);
     } else {
       linear_kernel_swapAB_no_residual_hopper_wrapper<T,
                                                BATCH_SIZE,
@@ -282,7 +282,7 @@ void launch_linear_swapAB(void *input_ptr,
                                                TMA_A,
                                                TMA_B,
                                                TMA_OUT>
-          <<<grid_dim, block_dim, smem_size>>>(tma_a, tma_b, tma_out);
+          <<<grid_dim, block_dim, smem_size>>>(tma_a, tma_b, tma_out, output_ptr);
     }
     cudaEventRecord(stop);
     cudaEventSynchronize(stop);
@@ -327,8 +327,8 @@ void launch_linear_swapAB(void *input_ptr,
     DISPATCH_LINEAR_SWAPAB_REDUCTION_SIZE_CASE(BATCH_SIZE, OUTPUT_SIZE, 256)   \
     DISPATCH_LINEAR_SWAPAB_REDUCTION_SIZE_CASE(BATCH_SIZE, OUTPUT_SIZE, 512)   \
     DISPATCH_LINEAR_SWAPAB_REDUCTION_SIZE_CASE(BATCH_SIZE, OUTPUT_SIZE, 3072)  \
+    */                                                                             \
     DISPATCH_LINEAR_SWAPAB_REDUCTION_SIZE_CASE(BATCH_SIZE, OUTPUT_SIZE, 12288) \
-*/                                                                             \
     DISPATCH_LINEAR_SWAPAB_REDUCTION_SIZE_CASE(BATCH_SIZE, OUTPUT_SIZE, 4096)  \
     default:                                                                   \
       printf("Unsupported reduction size in test: %zu\n", input.size(1));      \
@@ -344,9 +344,9 @@ void launch_linear_swapAB(void *input_ptr,
   switch (output.size(1)) {                                                    \
     DISPATCH_LINEAR_SWAPAB_OUTPUT_SIZE_CASE(BATCH_SIZE, 16)                    \
     DISPATCH_LINEAR_SWAPAB_OUTPUT_SIZE_CASE(BATCH_SIZE, 64)                    \
-    /*                                                                         \
     DISPATCH_LINEAR_SWAPAB_OUTPUT_SIZE_CASE(BATCH_SIZE, 128)                   \
     DISPATCH_LINEAR_SWAPAB_OUTPUT_SIZE_CASE(BATCH_SIZE, 256)                   \
+    /*                                                                         \
     DISPATCH_LINEAR_SWAPAB_OUTPUT_SIZE_CASE(BATCH_SIZE, 1600)                  \
     DISPATCH_LINEAR_SWAPAB_OUTPUT_SIZE_CASE(BATCH_SIZE, 32)                    \
     DISPATCH_LINEAR_SWAPAB_OUTPUT_SIZE_CASE(BATCH_SIZE, 512)                   \
@@ -375,8 +375,8 @@ void linear_swapAB_kernel(torch::Tensor input,
   void *output_ptr = output.data_ptr();
 
   switch (input.size(0)) {
-    DISPATCH_LINEAR_SWAPAB_BATCH_SIZE_CASE(64)
     DISPATCH_LINEAR_SWAPAB_BATCH_SIZE_CASE(8)
+    DISPATCH_LINEAR_SWAPAB_BATCH_SIZE_CASE(16)
     default:
       printf("Unsupported batch size in test: %zu\n", output.size(0));
       break;
