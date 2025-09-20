@@ -363,11 +363,6 @@ __device__ __forceinline__ void
       for (uint32_t i = 0; i < (SMEM_M_SIZE / 4); i++) {
         int row = (warp_idx % 4) * 16 + (i % 2) * 8 + idx_in_warp / 4;
         int col = (i / 2) * 8 + (idx_in_warp % 4) * 2;
-
-        // if (1) {
-          //   printf("threadIdx.x: %d, i: %d, warp_idx: %d, idx_in_warp: %d, (row, col): (%d, %d), (float)s_frag[%d] = %f\n", threadIdx.x, output_atom_idx, warp_idx, idx_in_warp, row, col, i * 2, (float)(bfloat16(s_frag[i * 2])));
-          //   printf("threadIdx.x: %d, i: %d, warp_idx: %d, idx_in_warp: %d, (row, col): (%d, %d), (float)s_frag[%d] = %f\n", threadIdx.x, output_atom_idx, warp_idx, idx_in_warp, row, col, i * 2 + 1, (float)(bfloat16(s_frag[i * 2 + 1])));
-          // }
           if constexpr (HAS_RESIDUAL) {
             // mm_output_smem.at(row, col) =
             // bfloat16(s_frag[i * 2]) + residual_smem.at(col, row);
@@ -413,40 +408,16 @@ __device__ __forceinline__ void
 
       // copy back to dmem
       if (warp_idx % 4 == 0 && lane_id() == 0) {
-      //   tma_out.tma_store_async(mm_output_smem(0, 0),
-      //                           {output_atom_idx * OUTPUT_ATOM_SIZE, 0});
-      //   store_commit_group();
+        tma_out.tma_store_async(mm_output_smem(0, 0),
+                                {output_atom_idx * OUTPUT_ATOM_SIZE, 0});
+        store_commit_group();
         if constexpr (HAS_RESIDUAL) {
           arrive(residual_done[slot_residual], 1);
         }
       }
-      // Final writeback: store accumulated output (residual already included if
-      // any)
-
-      constexpr int CHUNK_SIZE = 16 / sizeof(T);
-      constexpr int log2_CHUNK_SIZE = log2_constexpr(CHUNK_SIZE);
-      constexpr int NUM_CHUNKS_OUTPUT = BATCH_SIZE * OUTPUT_ATOM_SIZE / CHUNK_SIZE;
-      constexpr int CHUNKS_PER_ROW_C = OUTPUT_ATOM_SIZE / CHUNK_SIZE;
-
-    #pragma unroll
-      for (int i = threadIdx.x; i < NUM_CHUNKS_OUTPUT; i += NUM_THREADS) {
-        int row = i / CHUNKS_PER_ROW_C;
-        int col = (i % CHUNKS_PER_ROW_C) << log2_CHUNK_SIZE;
-        // printf("threadIdx.x: %d, row = %d, col = %d, output_dmem_ptr = %p, 128 bit aligned = %d\n", threadIdx.x, row, col, ((void *)&output_dmem.at(col, row + output_atom_idx * OUTPUT_ATOM_SIZE)), ((uintptr_t)&output_dmem.at(col, row + output_atom_idx * OUTPUT_ATOM_SIZE)) % 16 == 0);
-        *((__uint128_t *)((void *)&output_dmem.at(row, col + output_atom_idx * OUTPUT_ATOM_SIZE))) = *((__uint128_t *)((void *)&mm_output_smem.at(row, col)));
-      }
-
-
-// #pragma unroll
-//       for (int i = threadIdx.x; i < OUTPUT_ATOM_SIZE * SMEM_M_SIZE; i += NUM_THREADS) {
-//         int src_row = i / SMEM_M_SIZE;
-//         int src_col = (i % SMEM_M_SIZE);
-//         output_dmem.at(src_col, src_row+output_atom_idx * OUTPUT_ATOM_SIZE) = mm_output_smem.at(src_row, src_col);
-//       }
     }
   }
   // store_async_wait<0>();
-  // __syncthreads();
 }
 
 } // namespace kernel

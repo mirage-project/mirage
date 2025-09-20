@@ -735,10 +735,10 @@ void linear_kernel(torch::Tensor input,
   void *output_ptr = output.data_ptr();
 
   switch (input.size(0)) {
-    DISPATCH_LINEAR_HOPPER_BATCH_SIZE_CASE(64)
     DISPATCH_LINEAR_HOPPER_BATCH_SIZE_CASE(8)
     /* \
     DISPATCH_LINEAR_HOPPER_BATCH_SIZE_CASE(1)
+    DISPATCH_LINEAR_HOPPER_BATCH_SIZE_CASE(64)
     */
     default:
       printf("Unsupported batch size in test: %zu\n", output.size(0));
