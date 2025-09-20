@@ -403,8 +403,8 @@ __device__ __forceinline__ void
           printf("\n");
         }
       }
-#endif
       wg_sync<THREADS_PER_WARPGROUP * CONSUMER_WARPGROUPS>(1);
+#endif
 
       // copy back to dmem
       if (warp_idx % 4 == 0 && lane_id() == 0) {
@@ -415,6 +415,7 @@ __device__ __forceinline__ void
           arrive(residual_done[slot_residual], 1);
         }
       }
+      store_async_wait<0>();
     }
   }
   // store_async_wait<0>();

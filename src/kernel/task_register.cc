@@ -1192,7 +1192,6 @@ int TaskRegister::register_linear_swapAB_hopper_task(threadblock::Graph const &b
   code.e("TMA_OUT "
          "tma_out(static_cast<CUtensorMap*>(task_desc.outputs[0].tma_desc_ptrs["
          "0]));");
-  // code.e("printf(\"linear_kernel_hopper start\");");
 
   code.e("kernel::linear_swapAB_kernel_hopper<bfloat16, $, $, $, $, TMA_A, TMA_B, "
          "TMA_OUT, $, $>(",
