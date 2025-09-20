@@ -493,6 +493,15 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
     int variant_id =
         task_register->register_rmsnorm_hopper_task(customized->bgraph, params);
     task_config[op] = std::make_tuple(2, 1, TASK_RMS_NORM_HOPPER, variant_id);
+  } else if (name == "linear_swapAB_hopper") {
+    int variant_id = task_register->register_linear_swapAB_hopper_task(
+        customized->bgraph, params, false /*with_residual*/);
+    task_config[op] = std::make_tuple(2, 1, TASK_LINEAR_SWAPAB_HOPPER, variant_id);
+  } else if (name == "linear_swapAB_with_residual_hopper") {
+    int variant_id = task_register->register_linear_swapAB_hopper_task(
+        customized->bgraph, params, true /*with_residual*/);
+    task_config[op] =
+        std::make_tuple(3, 1, TASK_LINEAR_SWAPAB_WITH_RESIDUAL_HOPPER, variant_id);
   } else {
     assert(false && "Unsupported task type");
   }

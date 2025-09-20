@@ -65,7 +65,11 @@ public:
                                            std::vector<int> const &params);
   int register_rmsnorm_hopper_task(threadblock::Graph const &bgraph,
                                    std::vector<int> const &params);
+  int register_linear_swapAB_hopper_task(threadblock::Graph const &bgraph,
+                                        std::vector<int> const &params,
+                                        bool with_residual);
   int register_task_variant(TaskType type, std::string const &code);
+
 
 public:
   std::map<TaskType, std::vector<std::string>> all_task_variants;

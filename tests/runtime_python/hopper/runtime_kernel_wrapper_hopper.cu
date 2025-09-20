@@ -21,7 +21,7 @@
 #include <torch/extension.h>
 
 using kernel::linear_kernel_hopper;
-using kernel::linear_kernel_swapAB_hopper;
+using kernel::linear_swapAB_kernel_hopper;
 using kernel::multitoken_paged_attention_hopper_impl;
 using kernel::norm_linear_kernel_hopper;
 using bfloat16 = type::bfloat16_t;
@@ -34,7 +34,7 @@ template <typename T,
           typename TMA_B,
           typename TMA_RESIDUAL,
           typename TMA_OUT,
-          int Kstages = 2>
+          int Kstages = 4>
 __global__ __launch_bounds__(256, 1) void linear_kernel_swapAB_hopper_wrapper(
     const __grid_constant__ TMA_A tma_a,
     const __grid_constant__ TMA_B tma_b,
@@ -42,7 +42,7 @@ __global__ __launch_bounds__(256, 1) void linear_kernel_swapAB_hopper_wrapper(
     const __grid_constant__ TMA_OUT tma_out,
     void *output_ptr) {
 
-  linear_kernel_swapAB_hopper<T,
+  linear_swapAB_kernel_hopper<T,
                        BATCH_SIZE,
                        OUTPUT_SIZE,
                        REDUCTION_SIZE,
@@ -67,7 +67,7 @@ __global__
         const __grid_constant__ TMA_OUT tma_out,
         void *output_ptr) {
 
-  linear_kernel_swapAB_hopper<T,
+  linear_swapAB_kernel_hopper<T,
                        BATCH_SIZE,
                        OUTPUT_SIZE,
                        REDUCTION_SIZE,
@@ -1391,7 +1391,7 @@ void linear_kernel(torch::Tensor input,
 // }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-  //  m.def("linear", &linear_kernel, "Linear kernel");
+   m.def("linear", &linear_kernel, "Linear kernel");
   m.def("linear_swapAB", &linear_swapAB_kernel, "Linear swapAB kernel");
   // m.def("norm_linear", &norm_linear_kernel, "NormLinear kernel");
   // m.def("multitoken_paged_attention",

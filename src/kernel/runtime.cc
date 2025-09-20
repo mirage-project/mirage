@@ -1271,6 +1271,9 @@ TaskGraphResult print_task_graph(
   task_type_to_name[TASK_PAGED_ATTENTION_HOPPER] =
       "TASK_PAGED_ATTENTION_HOPPER";
   task_type_to_name[TASK_RMS_NORM_HOPPER] = "TASK_RMS_NORM_HOPPER";
+  task_type_to_name[TASK_LINEAR_SWAPAB_HOPPER] = "TASK_LINEAR_SWAPAB_HOPPER";
+  task_type_to_name[TASK_LINEAR_SWAPAB_WITH_RESIDUAL_HOPPER] =
+      "TASK_LINEAR_SWAPAB_WITH_RESIDUAL_HOPPER";
 
   code.e("__device__ __forceinline__");
   code.e("void _execute_task(TaskDesc const& task_desc,");

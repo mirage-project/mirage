@@ -42,7 +42,7 @@ template <typename T,
           typename TMA_RESIDUAL = void,
           int OUTPUT_STRIDE = OUTPUT_SIZE>
 __device__ __forceinline__ void
-    linear_kernel_swapAB_hopper(const TMA_A &tma_a,
+    linear_swapAB_kernel_hopper(const TMA_A &tma_a,
                                 const TMA_B &tma_b,
                                 const TMA_OUT &tma_out,
                                 const TMA_RESIDUAL *tma_residual = nullptr,
