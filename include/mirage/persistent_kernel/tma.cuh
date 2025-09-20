@@ -555,12 +555,6 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
                                   static_cast<uint32_t>(output_tma_cp_size)};
         size_t smem_repeat_col =
             (output_atom_size + output_tma_cp_size - 1) / output_tma_cp_size;
-        if (task_desc.task_type == TASK_LINEAR_SWAPAB_HOPPER) {
-          printf("gmem_shape: %llu, %llu\n", gmem_shape[0], gmem_shape[1]);
-          printf("gmem_stride: %llu, %llu\n", gmem_stride[0], gmem_stride[1]);
-          printf("smem_shape: %u, %u\n", smem_shape[0], smem_shape[1]);
-          printf("smem_repeat_col: %llu\n", smem_repeat_col);
-        }
         fill_tma_desc<bfloat16, B, M, S, 2>(tma_desc,
                                             tensor_desc.base_ptr,
                                             gmem_shape,

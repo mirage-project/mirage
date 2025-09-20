@@ -131,6 +131,9 @@ __device__ __forceinline__ void
       SHARED_RESIDUAL_DONE_OFFSET + 8 * Kstages;
 
   static_assert(TOTAL_SHARED_MEMORY <= 224 * 1024);
+  // if (threadIdx.x == 0) {
+  //   printf("BATCH_SIZE: %d, OUTPUT_SIZE: %d, REDUCTION_SIZE: %d, Kstages: %d, TOTAL_SHARED_MEMORY: %llu\n", BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE, Kstages, TOTAL_SHARED_MEMORY);
+  // }
 
   // copy input
   T *shared_input = (T *)(smem + SHARED_INPUT_BUFFER_OFFSET);
@@ -240,8 +243,7 @@ __device__ __forceinline__ void
 
         if constexpr (HAS_RESIDUAL) {
           residual_smem.set_ptr(shared_residual + slot_residual *
-                                                      TMA_TRANS_BYTES_RESIDUAL /
-                                                      sizeof(T));
+                                                      SMEM_M_SIZE * OUTPUT_ATOM_SIZE);
           set_barrier_transaction_bytes(residual_barrier[slot_residual],
                                         TMA_TRANS_BYTES_RESIDUAL);
           tma_residual->tma_cp_async(residual_barrier[slot_residual],
@@ -284,6 +286,8 @@ __device__ __forceinline__ void
       for (int i = 0; i < SMEM_M_SIZE / 16; i++) {
         clear_8_floats(s_frag + i * 8);
       }
+
+      wg_sync<THREADS_PER_WARPGROUP * CONSUMER_WARPGROUPS>(1);
 
       for (int i = 0; i < NUM_ITER_K; i++) {
         int slot = (output_atom_idx * NUM_ITER_K + i) % Kstages;
@@ -349,16 +353,16 @@ __device__ __forceinline__ void
         phase_residual = output_atom_idx / Kstages % 2;
         wait(residual_barrier[slot_residual], phase_residual);
         residual_smem.set_ptr(shared_residual + slot_residual *
-                                                    TMA_TRANS_BYTES_RESIDUAL /
-                                                    sizeof(T));
+                                                    SMEM_M_SIZE * OUTPUT_ATOM_SIZE);
       }
 
       // https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#asynchronous-warpgroup-level-matrix-register-fragment-wgmma-64n16:~:text=The%20layout%20of%20the%20fragments%20held%20by%20different%20threads%20is%20shown%20in%20Figure%20149.
       // write back to shared memory
+      // wg_sync<THREADS_PER_WARPGROUP * CONSUMER_WARPGROUPS>(1);
       store_async_wait<Kstages - 1>();
       int slot_output = output_atom_idx % Kstages;
       mm_output_smem.set_ptr(mm_output +
-                             slot_output * BATCH_SIZE * OUTPUT_ATOM_SIZE);
+                             slot_output * SMEM_M_SIZE * OUTPUT_ATOM_SIZE);
 #pragma unroll 1
       for (uint32_t i = 0; i < (SMEM_M_SIZE / 4); i++) {
         int row = (warp_idx % 4) * 16 + (i % 2) * 8 + idx_in_warp / 4;
@@ -415,10 +419,12 @@ __device__ __forceinline__ void
           arrive(residual_done[slot_residual], 1);
         }
       }
-      store_async_wait<0>();
+      // wg_sync<THREADS_PER_WARPGROUP * CONSUMER_WARPGROUPS>(1);
+      // store_async_wait<0>();
     }
   }
   // store_async_wait<0>();
+  // __syncthreads();
 }
 
 } // namespace kernel

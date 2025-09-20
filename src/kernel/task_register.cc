@@ -1100,7 +1100,7 @@ int TaskRegister::register_linear_swapAB_hopper_task(threadblock::Graph const &b
   constexpr int S = 3;
   constexpr int TMA_CP_ASYNC_SIZE = 64;
   constexpr int TILE_SIZE = 128;
-  constexpr int Kstages = 3;
+  int Kstages = 6;
   assert(batch_size <= 16);
   int const SMEM_M_SIZE = 16; // batch size padded to 16
   // int const SMEM_M_SIZE = 64;
