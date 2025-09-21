@@ -1100,12 +1100,11 @@ int TaskRegister::register_linear_swapAB_hopper_task(threadblock::Graph const &b
   constexpr int S = 3;
   constexpr int TMA_CP_ASYNC_SIZE = 64;
   constexpr int TILE_SIZE = 128;
-  int Kstages = 6;
+  constexpr int Kstages = 5;
   assert(batch_size <= 16);
   int const SMEM_M_SIZE = 16; // batch size padded to 16
-  // int const SMEM_M_SIZE = 64;
   int const output_tma_cp_size = output_size < 64 ? output_size : 64;
-  int const output_atom_size = output_size < 64 ? output_size : 64;
+  int const output_atom_size = 64;
   code.e("using TMA_B = kernel::tma::tma_2d<bfloat16, $, $, $, $, $, $, $, $, "
          "$, $, $, $, true>;",
          B,
@@ -1141,12 +1140,15 @@ int TaskRegister::register_linear_swapAB_hopper_task(threadblock::Graph const &b
   );
 
   if (with_residual) {
+    const int B_ = output_tma_cp_size < 64 ? 0 : B;
+    const int M_ = output_tma_cp_size < 64 ? 0 : M;
+    const int S_ = output_tma_cp_size < 64 ? 0 : S;
     code.e(
         "using TMA_RESIDUAL = kernel::tma::tma_2d<bfloat16, $, $, $, $, $, $, "
         "$, $, $, $, $, $, true>;",
-        B,
-        M,
-        S,
+        0,
+        0,
+        0,
         batch_size,         /*GMEM_ROW_*/
         output_size,        /*GMEM_COL_*/
         batch_size,         /*SMEM_ROW_*/
@@ -1154,9 +1156,8 @@ int TaskRegister::register_linear_swapAB_hopper_task(threadblock::Graph const &b
         output_stride,      /*GMEM_STRIDE_ROW_*/
         1,                  /*GMEM_STRIDE_COL_*/
         1,                  /*SMEM_REPEAT_ROW_*/
-        (output_atom_size + output_tma_cp_size - 1) /
-            output_tma_cp_size,         /*SMEM_REPEAT_COL_*/
-        SMEM_M_SIZE * TMA_CP_ASYNC_SIZE /*SMEM_STRIDE_*/
+        1,         /*SMEM_REPEAT_COL_*/
+        SMEM_M_SIZE * output_tma_cp_size /*SMEM_STRIDE_*/
     );
   }
 

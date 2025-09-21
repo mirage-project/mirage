@@ -62,7 +62,7 @@ __device__ __forceinline__ void
   constexpr int INPUT_TMA_TILE_SIZE = 64;
   constexpr int WEIGHT_TMA_TILE_SIZE = INPUT_TMA_TILE_SIZE;
   constexpr int OUTPUT_TMA_TILE_SIZE = OUTPUT_SIZE < 64 ? OUTPUT_SIZE : 64;
-  constexpr int OUTPUT_ATOM_SIZE = OUTPUT_SIZE < 64 ? OUTPUT_SIZE : 64;
+  constexpr int OUTPUT_ATOM_SIZE = 64; // this is padded if OUTPUT_SIZE < 64
   constexpr bool HAS_RESIDUAL = !std::is_void<TMA_RESIDUAL>::value;
 
   // NOTE(Yu): Assume batch size is smaller than 16, and padding the batch size to 16
@@ -72,7 +72,7 @@ __device__ __forceinline__ void
   constexpr int TMA_TRANS_BYTES_A = sizeof(T) * TILE_SIZE * OUTPUT_ATOM_SIZE;
   constexpr int TMA_TRANS_BYTES_B = sizeof(T) * BATCH_SIZE * TILE_SIZE;
   constexpr int TMA_TRANS_BYTES_RESIDUAL =
-      HAS_RESIDUAL ? sizeof(T) * BATCH_SIZE * OUTPUT_ATOM_SIZE : 0;
+      HAS_RESIDUAL ? sizeof(T) * BATCH_SIZE * (OUTPUT_SIZE < OUTPUT_ATOM_SIZE ? OUTPUT_SIZE : OUTPUT_ATOM_SIZE) : 0;
 
   // using SM90_64x64x16_F32BF16BF16
   constexpr int NUM_ITER_N =
@@ -169,9 +169,9 @@ __device__ __forceinline__ void
   WeightSmem input_weight_smem(shared_weight);
 
   using ResidualSmem = smem_tma<T,
-                                B,
-                                M,
-                                S,
+                                0,
+                                0,
+                                0,
                                 SMEM_M_SIZE,
                                 OUTPUT_TMA_TILE_SIZE,
                                 OUTPUT_ATOM_SIZE / OUTPUT_TMA_TILE_SIZE>;
@@ -243,12 +243,12 @@ __device__ __forceinline__ void
 
         if constexpr (HAS_RESIDUAL) {
           residual_smem.set_ptr(shared_residual + slot_residual *
-                                                      SMEM_M_SIZE * OUTPUT_ATOM_SIZE);
+                                                      SMEM_M_SIZE * OUTPUT_TMA_TILE_SIZE);
           set_barrier_transaction_bytes(residual_barrier[slot_residual],
                                         TMA_TRANS_BYTES_RESIDUAL);
           tma_residual->tma_cp_async(residual_barrier[slot_residual],
                                      residual_smem(0, 0),
-                                     {output_atom_idx * OUTPUT_ATOM_SIZE, 0});
+                                     {output_atom_idx * OUTPUT_TMA_TILE_SIZE, 0});
         }
 
         for (int i = 0; i < NUM_ITER_K; i++) {
@@ -353,9 +353,30 @@ __device__ __forceinline__ void
         phase_residual = output_atom_idx / Kstages % 2;
         wait(residual_barrier[slot_residual], phase_residual);
         residual_smem.set_ptr(shared_residual + slot_residual *
-                                                    SMEM_M_SIZE * OUTPUT_ATOM_SIZE);
+                                                    SMEM_M_SIZE * OUTPUT_TMA_TILE_SIZE);
       }
 
+#if 0
+      if (threadIdx.x == 0) {
+        printf("residual_smem\n");
+        for (int i = 0; i < SMEM_M_SIZE; i++) {
+          for (int j = 0; j < OUTPUT_TMA_TILE_SIZE; j++) {
+            printf("%f ", (float)residual_smem.at(i, j));
+          }
+          printf("\n");
+        }
+
+        printf("in raw memory\n");
+        for (int i = 0; i < SMEM_M_SIZE; i++) {
+          for (int j = 0; j < OUTPUT_TMA_TILE_SIZE; j++) {
+            printf("%f ", (float)(reinterpret_cast<bfloat16 *>(residual_smem(0,0))[i * OUTPUT_TMA_TILE_SIZE + j]));
+          }
+          printf("\n");
+        }
+      }
+
+
+#endif
       // https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#asynchronous-warpgroup-level-matrix-register-fragment-wgmma-64n16:~:text=The%20layout%20of%20the%20fragments%20held%20by%20different%20threads%20is%20shown%20in%20Figure%20149.
       // write back to shared memory
       // wg_sync<THREADS_PER_WARPGROUP * CONSUMER_WARPGROUPS>(1);
@@ -419,10 +440,11 @@ __device__ __forceinline__ void
           arrive(residual_done[slot_residual], 1);
         }
       }
-      // wg_sync<THREADS_PER_WARPGROUP * CONSUMER_WARPGROUPS>(1);
-      // store_async_wait<0>();
     }
   }
+  // if (threadIdx.x == 0) {
+  //   printf("END: BATCH_SIZE: %d, OUTPUT_SIZE: %d, REDUCTION_SIZE: %d, Kstages: %d, TOTAL_SHARED_MEMORY: %llu\n", BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE, Kstages, TOTAL_SHARED_MEMORY);
+  // }
   // store_async_wait<0>();
   // __syncthreads();
 }
