@@ -244,8 +244,10 @@ __device__ __forceinline__ bool
   }
 
   // Step 4: Update all unused requests slots
-  for (int i = num_reqs; i <= MPK_MAX_NUM_BATCHED_REQUESTS; i++) {
+  for (int i = num_reqs; i < MPK_MAX_NUM_BATCHED_REQUESTS; i++) {
     config.request_ids[i] = -1;
+  }
+  for (int i = num_reqs; i <= MPK_MAX_NUM_BATCHED_REQUESTS; i++) {
     config.qo_indptr_buffer[i] = num_tokens;
     config.paged_kv_indptr_buffer[i] = num_pages;
   }
@@ -1004,7 +1006,7 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
   cudaSetDevice(my_rank);
 #if defined(MODE_OFFLINE) || defined(MODE_ONLINE)
   global_runtime_config.request_ids =
-      gpu_malloc<int>(sizeof(int) * MPK_MAX_NUM_BATCHED_REQUESTS);
+      gpu_malloc<int>(sizeof(int) * (MPK_MAX_NUM_BATCHED_REQUESTS + 1));
   global_runtime_config.next_request_id = gpu_malloc<int>(sizeof(int));
   global_runtime_config.page_queue =
       gpu_malloc<int>(MPK_MAX_NUM_PAGES * sizeof(int));
