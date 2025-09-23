@@ -244,7 +244,7 @@ __device__ __forceinline__ bool
   }
 
   // Step 4: Update all unused requests slots
-  for (int i = num_reqs; i <= MPK_MAX_NUM_BATCHED_REQUESTS; i++) {
+  for (int i = num_reqs; i < MPK_MAX_NUM_BATCHED_REQUESTS; i++) {
     config.request_ids[i] = -1;
     config.qo_indptr_buffer[i] = num_tokens;
     config.paged_kv_indptr_buffer[i] = num_pages;
