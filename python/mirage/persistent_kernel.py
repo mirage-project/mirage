@@ -179,6 +179,7 @@ def get_compile_command(
             "-DMPK_ENABLE_TMA",
             "-DMIRAGE_GRACE_HOPPER",
             "-DNDEBUG",
+            # "-DMPK_EANBLE_VERBOSE",
         ] + (["-DMIRAGE_ENABLE_PROFILER"] if profiling else [])
     else:
         specific_cmd = [
@@ -587,8 +588,6 @@ class PersistentKernel:
         tb_graph.new_input(weight, (0, -1, -1), 1, True)
         tb_graph.new_input(output, (1, -1, -1), -1, True)
         self.kn_graph.customized([input, weight, output], tb_graph)
-        partitioned_output_size = weight.dim(0) / grid_dim[0]
-        print(partitioned_output_size, weight.dim(0), grid_dim[0])
         self.kn_graph.register_task(tb_graph, "linear_swapAB_hopper" if self.target_cc == 90 else "linear")
 
     def linear_with_residual_layer(

@@ -503,6 +503,7 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
         uint64_t gmem_shape[2] = {static_cast<uint64_t>(output_size),
                                   static_cast<uint64_t>(reduction_size)};
         uint64_t gmem_stride[2] = {1, static_cast<uint64_t>(reduction_size)};
+        // NOTE(Yu): even for output_size < output_atom_size, we still use output_atom_size as padding
         uint32_t smem_shape[2] = {static_cast<uint32_t>(output_atom_size),
                                   static_cast<uint32_t>(cp_async_size)};
         constexpr int TILE_SIZE = 128;
@@ -547,14 +548,13 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
         int const output_size = tensor_desc.dim[1];
         int const output_stride = (tensor_desc.stride[0]);
         int const output_tma_cp_size =
-            output_atom_size < 64 ? output_atom_size : 64;
+            output_size < 64 ? output_size : 64;
         uint64_t gmem_shape[2] = {static_cast<uint64_t>(batch_size),
-                                  static_cast<uint64_t>(output_size)};
+                                  static_cast<uint64_t>(output_size < 64 ? output_size : output_size)};
         uint64_t gmem_stride[2] = {1, static_cast<uint64_t>(output_stride)};
         uint32_t smem_shape[2] = {static_cast<uint32_t>(batch_size),
                                   static_cast<uint32_t>(output_tma_cp_size)};
-        size_t smem_repeat_col =
-            (output_atom_size + output_tma_cp_size - 1) / output_tma_cp_size;
+        size_t smem_repeat_col = 1;
         fill_tma_desc<bfloat16, B, M, S, 2>(tma_desc,
                                             tensor_desc.base_ptr,
                                             gmem_shape,
