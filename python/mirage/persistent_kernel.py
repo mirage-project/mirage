@@ -134,7 +134,7 @@ def get_compile_command(
     flags = [
         "-shared",
         "-std=c++17",
-        "-rdc=true",
+        "-rdc=false",
         "-use_fast_math",
         "-Xcompiler=-fPIC",
         "--expt-relaxed-constexpr",
