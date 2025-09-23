@@ -58,21 +58,22 @@ __device__ __forceinline__ void
   constexpr int THREADS_PER_WARPGROUP = 128;
 
   // The actual tma instructions are issued for each 64 cols when swizzle<3,3,3>
-  // is used large tile size is wrapped, but
   constexpr int INPUT_TMA_TILE_SIZE = 64;
   constexpr int WEIGHT_TMA_TILE_SIZE = INPUT_TMA_TILE_SIZE;
   constexpr int OUTPUT_TMA_TILE_SIZE = OUTPUT_SIZE < 64 ? OUTPUT_SIZE : 64;
   constexpr int OUTPUT_ATOM_SIZE = 64; // this is padded if OUTPUT_SIZE < 64
   constexpr bool HAS_RESIDUAL = !std::is_void<TMA_RESIDUAL>::value;
 
-  // NOTE(Yu): Assume batch size is smaller than 16, and padding the batch size to 16
-  static_assert(BATCH_SIZE <= 16, "Batch size must be smaller or equal to 16 in swapAB");
+  // NOTE(Yu): Assume batch size is smaller than 16, and padding the batch size
+  // to 16
+  static_assert(BATCH_SIZE <= 16,
+                "Batch size must be smaller or equal to 16 in swapAB");
   constexpr int SMEM_M_SIZE = 16;
 
   constexpr int TMA_TRANS_BYTES_A = sizeof(T) * TILE_SIZE * OUTPUT_ATOM_SIZE;
   constexpr int TMA_TRANS_BYTES_B = sizeof(T) * BATCH_SIZE * TILE_SIZE;
   constexpr int TMA_TRANS_BYTES_RESIDUAL =
-      HAS_RESIDUAL ? sizeof(T) * BATCH_SIZE * (OUTPUT_SIZE < OUTPUT_ATOM_SIZE ? OUTPUT_SIZE : OUTPUT_ATOM_SIZE) : 0;
+      HAS_RESIDUAL ? sizeof(T) * BATCH_SIZE * OUTPUT_TMA_TILE_SIZE : 0;
 
   // using SM90_64x64x16_F32BF16BF16
   constexpr int NUM_ITER_N =
@@ -131,9 +132,6 @@ __device__ __forceinline__ void
       SHARED_RESIDUAL_DONE_OFFSET + 8 * Kstages;
 
   static_assert(TOTAL_SHARED_MEMORY <= 224 * 1024);
-  // if (threadIdx.x == 0) {
-  //   printf("BATCH_SIZE: %d, OUTPUT_SIZE: %d, REDUCTION_SIZE: %d, Kstages: %d, TOTAL_SHARED_MEMORY: %llu\n", BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE, Kstages, TOTAL_SHARED_MEMORY);
-  // }
 
   // copy input
   T *shared_input = (T *)(smem + SHARED_INPUT_BUFFER_OFFSET);
@@ -179,21 +177,7 @@ __device__ __forceinline__ void
 
   using A_DESC = wgmma::mma_descriptor<WeightSmem>;
   using B_DESC = wgmma::mma_descriptor<InputSmem>;
-
-  // using OutputSmem = smem_tma<T,
-  //                             B,
-  //                             M,
-  //                             S,
-  //                             OUTPUT_SIZE, // or OUTPUT_ATOM_SIZE?
-  //                             SMEM_M_SIZE, 
-  //                             1>;
-  using OutputSmem = smem_tma<T,
-                  B,
-                  M,
-                  S,
-                  SMEM_M_SIZE,
-                  OUTPUT_ATOM_SIZE,
-                  1>;
+  using OutputSmem = smem_tma<T, B, M, S, SMEM_M_SIZE, OUTPUT_ATOM_SIZE, 1>;
   OutputSmem mm_output_smem(mm_output);
 
   // define barries
@@ -229,46 +213,44 @@ __device__ __forceinline__ void
 
   // warp specialization data movement warpgroup
   if (warpgroup_id == NUM_WARPGROUPS - 1) {
-
     wg_decrease_regs<32>();
-    if (lane_id() == 0 && warp_idx == (NUM_WARPGROUPS * WARPGROUP_WARPS - 4)) {
-      for (int output_atom_idx = 0; output_atom_idx < NUM_ITER_N;
-           output_atom_idx++) {
-        // launch tma for residual
-        int slot_residual = output_atom_idx % Kstages;
-        int phase_residual = (output_atom_idx / Kstages) % 2;
+    for (int output_atom_idx = 0; output_atom_idx < NUM_ITER_N;
+         output_atom_idx++) {
+      int slot_residual = output_atom_idx % Kstages;
+      int phase_residual = (output_atom_idx / Kstages) % 2;
+
+      // launch tma for residual
+      if (lane_id() == 0 &&
+          warp_idx == (NUM_WARPGROUPS * WARPGROUP_WARPS - 4)) {
+
         if constexpr (HAS_RESIDUAL) {
           wait(residual_done[slot_residual], phase_residual ^ 1);
-        }
-
-        if constexpr (HAS_RESIDUAL) {
-          residual_smem.set_ptr(shared_residual + slot_residual *
-                                                      SMEM_M_SIZE * OUTPUT_TMA_TILE_SIZE);
+          residual_smem.set_ptr(shared_residual + slot_residual * SMEM_M_SIZE *
+                                                      OUTPUT_TMA_TILE_SIZE);
           set_barrier_transaction_bytes(residual_barrier[slot_residual],
                                         TMA_TRANS_BYTES_RESIDUAL);
-          tma_residual->tma_cp_async(residual_barrier[slot_residual],
-                                     residual_smem(0, 0),
-                                     {output_atom_idx * OUTPUT_TMA_TILE_SIZE, 0});
+          tma_residual->tma_cp_async(
+              residual_barrier[slot_residual],
+              residual_smem(0, 0),
+              {output_atom_idx * OUTPUT_TMA_TILE_SIZE, 0});
         }
+      }
 
-        for (int i = 0; i < NUM_ITER_K; i++) {
-          int slot = (output_atom_idx * NUM_ITER_K + i) % Kstages;
-          int phase = ((output_atom_idx * NUM_ITER_K + i) / Kstages) % 2;
+      for (int i = 0; i < NUM_ITER_K; i++) {
+        int slot = (output_atom_idx * NUM_ITER_K + i) % Kstages;
+        int phase = ((output_atom_idx * NUM_ITER_K + i) / Kstages) % 2;
+        if (lane_id() == 0 &&
+            warp_idx == (NUM_WARPGROUPS * WARPGROUP_WARPS - 4)) {
           wait(compute_done[slot], phase ^ 1);
-
           int tma_coords_A[2] = {i * TILE_SIZE,
                                  output_atom_idx * OUTPUT_ATOM_SIZE};
           int tma_coords_B[2] = {i * TILE_SIZE, 0};
-
           input_weight_smem.set_ptr(shared_weight +
                                     slot * OUTPUT_ATOM_SIZE * TILE_SIZE);
-          input_smem.set_ptr(shared_input +
-                             slot * SMEM_M_SIZE * TILE_SIZE);
-
+          input_smem.set_ptr(shared_input + slot * SMEM_M_SIZE * TILE_SIZE);
           set_barrier_transaction_bytes(weight_barrier[slot],
                                         TMA_TRANS_BYTES_A);
           set_barrier_transaction_bytes(input_barrier[slot], TMA_TRANS_BYTES_B);
-
           tma_a.tma_cp_async(
               weight_barrier[slot], input_weight_smem(0, 0), tma_coords_A);
           tma_b.tma_cp_async(
@@ -295,27 +277,6 @@ __device__ __forceinline__ void
         // wait input, weight
         wait(input_barrier[slot], phase);
         wait(weight_barrier[slot], phase);
-#if 0
-        if (threadIdx.x == 0) {
-         printf("i: %d\n", i);
-         printf("input_smem ptr: %p\n", input_smem(0, 0));
-         printf("input_weight_smem ptr: %p\n", input_weight_smem(0, 0));
-         printf("input_smem\n");
-         for (int j = 0; j < BATCH_SIZE; j++) {
-           for (int k = 0; k < TILE_SIZE; k++) {
-             printf("%f ", (float)input_smem.at(j, k));
-           }
-           printf("\n");
-         }
-         printf("input_weight_smem\n");
-        for (int j = 0; j < OUTPUT_ATOM_SIZE; j++) {
-         for (int k = 0; k < TILE_SIZE; k++) {
-             printf("%f ", (float)input_weight_smem.at(j, k));
-           }
-           printf("\n");
-         }
-       }
-#endif
 
         input_weight_smem.set_ptr(shared_weight +
                                   (slot)*OUTPUT_ATOM_SIZE * TILE_SIZE);
@@ -352,31 +313,9 @@ __device__ __forceinline__ void
         slot_residual = output_atom_idx % Kstages;
         phase_residual = output_atom_idx / Kstages % 2;
         wait(residual_barrier[slot_residual], phase_residual);
-        residual_smem.set_ptr(shared_residual + slot_residual *
-                                                    SMEM_M_SIZE * OUTPUT_TMA_TILE_SIZE);
+        residual_smem.set_ptr(shared_residual + slot_residual * SMEM_M_SIZE *
+                                                    OUTPUT_TMA_TILE_SIZE);
       }
-
-#if 0
-      if (threadIdx.x == 0) {
-        printf("residual_smem\n");
-        for (int i = 0; i < SMEM_M_SIZE; i++) {
-          for (int j = 0; j < OUTPUT_TMA_TILE_SIZE; j++) {
-            printf("%f ", (float)residual_smem.at(i, j));
-          }
-          printf("\n");
-        }
-
-        printf("in raw memory\n");
-        for (int i = 0; i < SMEM_M_SIZE; i++) {
-          for (int j = 0; j < OUTPUT_TMA_TILE_SIZE; j++) {
-            printf("%f ", (float)(reinterpret_cast<bfloat16 *>(residual_smem(0,0))[i * OUTPUT_TMA_TILE_SIZE + j]));
-          }
-          printf("\n");
-        }
-      }
-
-
-#endif
       // https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#asynchronous-warpgroup-level-matrix-register-fragment-wgmma-64n16:~:text=The%20layout%20of%20the%20fragments%20held%20by%20different%20threads%20is%20shown%20in%20Figure%20149.
       // write back to shared memory
       // wg_sync<THREADS_PER_WARPGROUP * CONSUMER_WARPGROUPS>(1);
@@ -388,27 +327,15 @@ __device__ __forceinline__ void
       for (uint32_t i = 0; i < (SMEM_M_SIZE / 4); i++) {
         int row = (warp_idx % 4) * 16 + (i % 2) * 8 + idx_in_warp / 4;
         int col = (i / 2) * 8 + (idx_in_warp % 4) * 2;
-          if constexpr (HAS_RESIDUAL) {
-            // mm_output_smem.at(row, col) =
-            // bfloat16(s_frag[i * 2]) + residual_smem.at(col, row);
-            // mm_output_smem.at(row, col + 1) =
-            // bfloat16(s_frag[i * 2 + 1]) + residual_smem.at(col + 1, row);
-              mm_output_smem.at(col, row) =
+        if constexpr (HAS_RESIDUAL) {
+          mm_output_smem.at(col, row) =
               bfloat16(s_frag[i * 2]) + residual_smem.at(col, row);
-              mm_output_smem.at(col + 1, row) =
+          mm_output_smem.at(col + 1, row) =
               bfloat16(s_frag[i * 2 + 1]) + residual_smem.at(col + 1, row);
-          } else {
-            mm_output_smem.at(col, row) = bfloat16(s_frag[i * 2]);
-            mm_output_smem.at(col + 1, row) = bfloat16(s_frag[i * 2 + 1]);
-          }
-#if 0
-          if (1) {
-            printf("has residual: %d, residual_smem.at(%d, %d) = %f\n", HAS_RESIDUAL, row, col, (float)residual_smem.at(row, col));
-            printf("has residual: %d, residual_smem.at(%d, %d) = %f\n", HAS_RESIDUAL, row, col + 1, (float)residual_smem.at(row, col + 1));
-            printf("threadIdx.x: %d, i: %d, (row, col): (%d, %d), (float)s_frag[%d] = %f\n", threadIdx.x, i, row, col, i * 2, (float)(bfloat16(s_frag[i * 2])));
-            printf("threadIdx.x: %d, i: %d, (row, col): (%d, %d), (float)s_frag[%d] = %f\n", threadIdx.x, i, row, col, i * 2 + 1, (float)(bfloat16(s_frag[i * 2 + 1])));
-          }
-#endif
+        } else {
+          mm_output_smem.at(col, row) = bfloat16(s_frag[i * 2]);
+          mm_output_smem.at(col + 1, row) = bfloat16(s_frag[i * 2 + 1]);
+        }
       }
 
       // make sure generic proxy's modification to smem is visible to tma store
@@ -417,20 +344,6 @@ __device__ __forceinline__ void
 
       // this is inter-thread sync
       wg_sync<THREADS_PER_WARPGROUP * CONSUMER_WARPGROUPS>(1);
-#if 0
-      if (threadIdx.x == 0) {
-
-        printf("mm_output_smem\n");
-        for (int j = 0; j < BATCH_SIZE; j++) {
-          for (int k = 0; k < OUTPUT_SIZE; k++) {
-            printf("%f ", (float)mm_output_smem.at(k, j));
-          }
-          printf("\n");
-        }
-      }
-      wg_sync<THREADS_PER_WARPGROUP * CONSUMER_WARPGROUPS>(1);
-#endif
-
       // copy back to dmem
       if (warp_idx % 4 == 0 && lane_id() == 0) {
         tma_out.tma_store_async(mm_output_smem(0, 0),
@@ -442,11 +355,5 @@ __device__ __forceinline__ void
       }
     }
   }
-  // if (threadIdx.x == 0) {
-  //   printf("END: BATCH_SIZE: %d, OUTPUT_SIZE: %d, REDUCTION_SIZE: %d, Kstages: %d, TOTAL_SHARED_MEMORY: %llu\n", BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE, Kstages, TOTAL_SHARED_MEMORY);
-  // }
-  // store_async_wait<0>();
-  // __syncthreads();
 }
-
 } // namespace kernel

@@ -43,13 +43,14 @@ __global__ __launch_bounds__(256, 1) void linear_kernel_swapAB_hopper_wrapper(
     void *output_ptr = nullptr) {
 
   linear_swapAB_kernel_hopper<T,
-                       BATCH_SIZE,
-                       OUTPUT_SIZE,
-                       REDUCTION_SIZE,
-                       Kstages,
-                       TMA_A,
-                       TMA_B,
-                       TMA_OUT>(tma_a, tma_b, tma_out, &tma_residual, output_ptr);
+                              BATCH_SIZE,
+                              OUTPUT_SIZE,
+                              REDUCTION_SIZE,
+                              Kstages,
+                              TMA_A,
+                              TMA_B,
+                              TMA_OUT>(
+      tma_a, tma_b, tma_out, &tma_residual, output_ptr);
 }
 
 template <typename T,
@@ -68,14 +69,14 @@ __global__
         void *output_ptr = nullptr) {
 
   linear_swapAB_kernel_hopper<T,
-                       BATCH_SIZE,
-                       OUTPUT_SIZE,
-                       REDUCTION_SIZE,
-                       Kstages,
-                       TMA_A,
-                       TMA_B,
-                       TMA_OUT,
-                       void>(tma_a, tma_b, tma_out, nullptr, output_ptr);
+                              BATCH_SIZE,
+                              OUTPUT_SIZE,
+                              REDUCTION_SIZE,
+                              Kstages,
+                              TMA_A,
+                              TMA_B,
+                              TMA_OUT,
+                              void>(tma_a, tma_b, tma_out, nullptr, output_ptr);
 }
 
 template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int REDUCTION_SIZE>
@@ -170,13 +171,13 @@ void launch_linear_swapAB(void *input_ptr,
 
   if (residual_ptr != nullptr) {
     cudaFuncSetAttribute(linear_kernel_swapAB_hopper_wrapper<T,
-                                                      BATCH_SIZE,
-                                                      OUTPUT_SIZE,
-                                                      REDUCTION_SIZE,
-                                                      TMA_A,
-                                                      TMA_B,
-                                                      TMA_RESIDUAL,
-                                                      TMA_OUT>,
+                                                             BATCH_SIZE,
+                                                             OUTPUT_SIZE,
+                                                             REDUCTION_SIZE,
+                                                             TMA_A,
+                                                             TMA_B,
+                                                             TMA_RESIDUAL,
+                                                             TMA_OUT>,
                          cudaFuncAttributeMaxDynamicSharedMemorySize,
                          smem_size);
 
@@ -184,12 +185,12 @@ void launch_linear_swapAB(void *input_ptr,
 
     cudaFuncSetAttribute(
         linear_kernel_swapAB_no_residual_hopper_wrapper<T,
-                                                 BATCH_SIZE,
-                                                 OUTPUT_SIZE,
-                                                 REDUCTION_SIZE,
-                                                 TMA_A,
-                                                 TMA_B,
-                                                 TMA_OUT>,
+                                                        BATCH_SIZE,
+                                                        OUTPUT_SIZE,
+                                                        REDUCTION_SIZE,
+                                                        TMA_A,
+                                                        TMA_B,
+                                                        TMA_OUT>,
         cudaFuncAttributeMaxDynamicSharedMemorySize,
         smem_size);
   }
@@ -198,23 +199,24 @@ void launch_linear_swapAB(void *input_ptr,
   if (residual_ptr != nullptr) {
 
     linear_kernel_swapAB_hopper_wrapper<T,
-                                 BATCH_SIZE,
-                                 OUTPUT_SIZE,
-                                 REDUCTION_SIZE,
-                                 TMA_A,
-                                 TMA_B,
-                                 TMA_RESIDUAL,
-                                 TMA_OUT><<<grid_dim, block_dim, smem_size>>>(
-        tma_a, tma_b, tma_residual, tma_out, output_ptr);
+                                        BATCH_SIZE,
+                                        OUTPUT_SIZE,
+                                        REDUCTION_SIZE,
+                                        TMA_A,
+                                        TMA_B,
+                                        TMA_RESIDUAL,
+                                        TMA_OUT>
+        <<<grid_dim, block_dim, smem_size>>>(
+            tma_a, tma_b, tma_residual, tma_out, output_ptr);
   } else {
 
     linear_kernel_swapAB_no_residual_hopper_wrapper<T,
-                                             BATCH_SIZE,
-                                             OUTPUT_SIZE,
-                                             REDUCTION_SIZE,
-                                             TMA_A,
-                                             TMA_B,
-                                             TMA_OUT>
+                                                    BATCH_SIZE,
+                                                    OUTPUT_SIZE,
+                                                    REDUCTION_SIZE,
+                                                    TMA_A,
+                                                    TMA_B,
+                                                    TMA_OUT>
         <<<grid_dim, block_dim, smem_size>>>(tma_a, tma_b, tma_out, output_ptr);
   }
 #else
@@ -231,23 +233,25 @@ void launch_linear_swapAB(void *input_ptr,
   for (int i = 0; i < WARMUP_RUNS; i++) {
     if (residual_ptr != nullptr) {
       linear_kernel_swapAB_hopper_wrapper<T,
-                                   BATCH_SIZE,
-                                   OUTPUT_SIZE,
-                                   REDUCTION_SIZE,
-                                   TMA_A,
-                                   TMA_B,
-                                   TMA_RESIDUAL,
-                                   TMA_OUT><<<grid_dim, block_dim, smem_size>>>(
-          tma_a, tma_b, tma_residual, tma_out, output_ptr);
+                                          BATCH_SIZE,
+                                          OUTPUT_SIZE,
+                                          REDUCTION_SIZE,
+                                          TMA_A,
+                                          TMA_B,
+                                          TMA_RESIDUAL,
+                                          TMA_OUT>
+          <<<grid_dim, block_dim, smem_size>>>(
+              tma_a, tma_b, tma_residual, tma_out, output_ptr);
     } else {
       linear_kernel_swapAB_no_residual_hopper_wrapper<T,
-                                               BATCH_SIZE,
-                                               OUTPUT_SIZE,
-                                               REDUCTION_SIZE,
-                                               TMA_A,
-                                               TMA_B,
-                                               TMA_OUT>
-          <<<grid_dim, block_dim, smem_size>>>(tma_a, tma_b, tma_out, output_ptr);
+                                                      BATCH_SIZE,
+                                                      OUTPUT_SIZE,
+                                                      REDUCTION_SIZE,
+                                                      TMA_A,
+                                                      TMA_B,
+                                                      TMA_OUT>
+          <<<grid_dim, block_dim, smem_size>>>(
+              tma_a, tma_b, tma_out, output_ptr);
     }
   }
   cudaDeviceSynchronize(); // Wait for all warmup runs to complete
@@ -261,23 +265,25 @@ void launch_linear_swapAB(void *input_ptr,
     cudaEventRecord(start);
     if (residual_ptr != nullptr) {
       linear_kernel_swapAB_hopper_wrapper<T,
-                                   BATCH_SIZE,
-                                   OUTPUT_SIZE,
-                                   REDUCTION_SIZE,
-                                   TMA_A,
-                                   TMA_B,
-                                   TMA_RESIDUAL,
-                                   TMA_OUT><<<grid_dim, block_dim, smem_size>>>(
-          tma_a, tma_b, tma_residual, tma_out, output_ptr);
+                                          BATCH_SIZE,
+                                          OUTPUT_SIZE,
+                                          REDUCTION_SIZE,
+                                          TMA_A,
+                                          TMA_B,
+                                          TMA_RESIDUAL,
+                                          TMA_OUT>
+          <<<grid_dim, block_dim, smem_size>>>(
+              tma_a, tma_b, tma_residual, tma_out, output_ptr);
     } else {
       linear_kernel_swapAB_no_residual_hopper_wrapper<T,
-                                               BATCH_SIZE,
-                                               OUTPUT_SIZE,
-                                               REDUCTION_SIZE,
-                                               TMA_A,
-                                               TMA_B,
-                                               TMA_OUT>
-          <<<grid_dim, block_dim, smem_size>>>(tma_a, tma_b, tma_out, output_ptr);
+                                                      BATCH_SIZE,
+                                                      OUTPUT_SIZE,
+                                                      REDUCTION_SIZE,
+                                                      TMA_A,
+                                                      TMA_B,
+                                                      TMA_OUT>
+          <<<grid_dim, block_dim, smem_size>>>(
+              tma_a, tma_b, tma_out, output_ptr);
     }
     cudaEventRecord(stop);
     cudaEventSynchronize(stop);
@@ -322,7 +328,7 @@ void launch_linear_swapAB(void *input_ptr,
     DISPATCH_LINEAR_SWAPAB_REDUCTION_SIZE_CASE(BATCH_SIZE, OUTPUT_SIZE, 256)   \
     DISPATCH_LINEAR_SWAPAB_REDUCTION_SIZE_CASE(BATCH_SIZE, OUTPUT_SIZE, 512)   \
     DISPATCH_LINEAR_SWAPAB_REDUCTION_SIZE_CASE(BATCH_SIZE, OUTPUT_SIZE, 3072)  \
-    */                                                                             \
+    */                                                                         \
     DISPATCH_LINEAR_SWAPAB_REDUCTION_SIZE_CASE(BATCH_SIZE, OUTPUT_SIZE, 12288) \
     DISPATCH_LINEAR_SWAPAB_REDUCTION_SIZE_CASE(BATCH_SIZE, OUTPUT_SIZE, 4096)  \
     default:                                                                   \
@@ -361,9 +367,9 @@ void launch_linear_swapAB(void *input_ptr,
     break;
 
 void linear_swapAB_kernel(torch::Tensor input,
-                   torch::Tensor weight,
-                   c10::optional<at::Tensor> residual,
-                   torch::Tensor output) {
+                          torch::Tensor weight,
+                          c10::optional<at::Tensor> residual,
+                          torch::Tensor output) {
 
   void *input_ptr = input.data_ptr();
   void *weight_ptr = weight.data_ptr();
@@ -471,10 +477,9 @@ void linear_swapAB_kernel(torch::Tensor input,
 //                           REDUCTION_SIZE,                  /*GMEM_COL_*/
 //                           BATCH_SIZE,                      /*SMEM_ROW_*/
 //                           TMA_CP_ASYNC_SIZE,               /*SMEM_COL_*/
-//                           REDUCTION_SIZE,                  /*GMEM_STRIDE_ROW_*/
-//                           1,                               /*GMEM_STRIDE_COL_*/
-//                           1,                               /*SMEM_REPEAT_ROW_*/
-//                           TMA_CP_ASYNC_REPEAT_COL,         /*SMEM_REPEAT_COL_*/
+//                           REDUCTION_SIZE, /*GMEM_STRIDE_ROW_*/ 1,
+//                           /*GMEM_STRIDE_COL_*/ 1, /*SMEM_REPEAT_ROW_*/
+//                           TMA_CP_ASYNC_REPEAT_COL, /*SMEM_REPEAT_COL_*/
 //                           SMEM_M_SIZE * TMA_CP_ASYNC_SIZE, /*SMEM_STRIDE_*/
 //                           true>;
 //   using TMA_B =
@@ -490,8 +495,8 @@ void linear_swapAB_kernel(torch::Tensor input,
 //                           1,                       /*GMEM_STRIDE_COL_*/
 //                           1,                       /*SMEM_REPEAT_ROW_*/
 //                           TMA_CP_ASYNC_REPEAT_COL, /*SMEM_REPEAT_COL_*/
-//                           OUTPUT_ATOM_SIZE * TMA_CP_ASYNC_SIZE, /*SMEM_STRIDE_*/
-//                           true>;
+//                           OUTPUT_ATOM_SIZE * TMA_CP_ASYNC_SIZE,
+//                           /*SMEM_STRIDE_*/ true>;
 //   using TMA_RESIDUAL = kernel::tma::tma_2d<bfloat16,
 //                                            B,
 //                                            M,
@@ -566,7 +571,8 @@ void linear_swapAB_kernel(torch::Tensor input,
 //                                  TMA_A,
 //                                  TMA_B,
 //                                  TMA_RESIDUAL,
-//                                  TMA_OUT><<<grid_dim, block_dim, smem_size>>>(
+//                                  TMA_OUT><<<grid_dim, block_dim,
+//                                  smem_size>>>(
 //         tma_a, tma_b, tma_residual, tma_out);
 //   } else {
 
@@ -599,7 +605,8 @@ void linear_swapAB_kernel(torch::Tensor input,
 //                                    TMA_A,
 //                                    TMA_B,
 //                                    TMA_RESIDUAL,
-//                                    TMA_OUT><<<grid_dim, block_dim, smem_size>>>(
+//                                    TMA_OUT><<<grid_dim, block_dim,
+//                                    smem_size>>>(
 //           tma_a, tma_b, tma_residual, tma_out);
 //     } else {
 //       linear_kernel_hopper_no_residual_wrapper<T,
@@ -629,7 +636,8 @@ void linear_swapAB_kernel(torch::Tensor input,
 //                                    TMA_A,
 //                                    TMA_B,
 //                                    TMA_RESIDUAL,
-//                                    TMA_OUT><<<grid_dim, block_dim, smem_size>>>(
+//                                    TMA_OUT><<<grid_dim, block_dim,
+//                                    smem_size>>>(
 //           tma_a, tma_b, tma_residual, tma_out);
 //     } else {
 //       linear_kernel_hopper_no_residual_wrapper<T,
