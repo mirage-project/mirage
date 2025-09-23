@@ -45,8 +45,7 @@ __device__ __forceinline__ void
     linear_swapAB_kernel_hopper(const TMA_A &tma_a,
                                 const TMA_B &tma_b,
                                 const TMA_OUT &tma_out,
-                                const TMA_RESIDUAL *tma_residual = nullptr,
-                                void *output_ptr = nullptr) {
+                                const TMA_RESIDUAL *tma_residual = nullptr) {
 
   constexpr int TILE_SIZE =
       REDUCTION_SIZE < TMA_A::SMEM_COL * TMA_A::SMEM_REPEAT_COL
@@ -112,8 +111,8 @@ __device__ __forceinline__ void
 
   constexpr size_t SHARED_INPUT_BARRIER_OFFSET =
       (SHARED_MM_OUTPUT_BUFFER_OFFSET +
-       sizeof(T) * SMEM_M_SIZE * OUTPUT_ATOM_SIZE * Kstages + 15) /
-      16 * 16;
+       sizeof(T) * SMEM_M_SIZE * OUTPUT_ATOM_SIZE * Kstages + 7) /
+      8 * 8;
 
   constexpr size_t SHARED_WEIGHT_BARRIER_OFFSET =
       (SHARED_INPUT_BARRIER_OFFSET + 8 * Kstages + 7) / 8 * 8;
@@ -143,10 +142,6 @@ __device__ __forceinline__ void
   // output
   T *mm_output = (T *)(smem + SHARED_MM_OUTPUT_BUFFER_OFFSET);
 
-  T *__restrict__ d_output = static_cast<T *>(output_ptr);
-  using OutputDmem = dmem_row<T, BATCH_SIZE, OUTPUT_SIZE, OUTPUT_STRIDE>;
-  OutputDmem output_dmem(d_output);
-
   // define the swizzle mode
   using InputSmem = smem_tma<T,
                              B,
@@ -167,9 +162,9 @@ __device__ __forceinline__ void
   WeightSmem input_weight_smem(shared_weight);
 
   using ResidualSmem = smem_tma<T,
-                                0,
-                                0,
-                                0,
+                                B,
+                                M,
+                                S,
                                 SMEM_M_SIZE,
                                 OUTPUT_TMA_TILE_SIZE,
                                 OUTPUT_ATOM_SIZE / OUTPUT_TMA_TILE_SIZE>;
@@ -196,7 +191,7 @@ __device__ __forceinline__ void
           ? reinterpret_cast<Barrier *>(smem + SHARED_RESIDUAL_DONE_OFFSET)
           : nullptr;
 
-  // init the barriers and launch the first group of copy
+  // init the barriers
   if (threadIdx.x == 0) {
     for (int i = 0; i < Kstages; i++) {
       initialize_barrier(input_barrier[i], 1);
@@ -354,6 +349,7 @@ __device__ __forceinline__ void
         }
       }
     }
+    store_async_wait<0>();
   }
 }
 } // namespace kernel

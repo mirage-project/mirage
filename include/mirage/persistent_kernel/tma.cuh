@@ -530,10 +530,7 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
         uint32_t smem_shape[2] = {static_cast<uint32_t>(batch_size),
                                   static_cast<uint32_t>(output_tma_cp_size)};
         size_t smem_repeat_col = 1;
-        int const B_ = output_tma_cp_size < 64 ? 0 : B;
-        int const M_ = output_tma_cp_size < 64 ? 0 : M;
-        int const S_ = output_tma_cp_size < 64 ? 0 : S;
-        fill_tma_desc<bfloat16, 0, 0, 0, 2>(tma_desc,
+        fill_tma_desc<bfloat16, B, M, S, 2>(tma_desc,
                                             tensor_desc.base_ptr,
                                             gmem_shape,
                                             gmem_stride,
@@ -550,9 +547,7 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
         int const output_stride = (tensor_desc.stride[0]);
         int const output_tma_cp_size = output_size < 64 ? output_size : 64;
         uint64_t gmem_shape[2] = {static_cast<uint64_t>(batch_size),
-                                  static_cast<uint64_t>(output_size < 64
-                                                            ? output_size
-                                                            : output_size)};
+                                  static_cast<uint64_t>(output_size)};
         uint64_t gmem_stride[2] = {1, static_cast<uint64_t>(output_stride)};
         uint32_t smem_shape[2] = {static_cast<uint32_t>(batch_size),
                                   static_cast<uint32_t>(output_tma_cp_size)};

@@ -39,8 +39,7 @@ __global__ __launch_bounds__(256, 1) void linear_kernel_swapAB_hopper_wrapper(
     const __grid_constant__ TMA_A tma_a,
     const __grid_constant__ TMA_B tma_b,
     const __grid_constant__ TMA_RESIDUAL tma_residual,
-    const __grid_constant__ TMA_OUT tma_out,
-    void *output_ptr = nullptr) {
+    const __grid_constant__ TMA_OUT tma_out) {
 
   linear_swapAB_kernel_hopper<T,
                               BATCH_SIZE,
@@ -49,8 +48,7 @@ __global__ __launch_bounds__(256, 1) void linear_kernel_swapAB_hopper_wrapper(
                               Kstages,
                               TMA_A,
                               TMA_B,
-                              TMA_OUT>(
-      tma_a, tma_b, tma_out, &tma_residual, output_ptr);
+                              TMA_OUT>(tma_a, tma_b, tma_out, &tma_residual);
 }
 
 template <typename T,
@@ -65,8 +63,7 @@ __global__
     __launch_bounds__(256, 1) void linear_kernel_swapAB_no_residual_hopper_wrapper(
         const __grid_constant__ TMA_A tma_a,
         const __grid_constant__ TMA_B tma_b,
-        const __grid_constant__ TMA_OUT tma_out,
-        void *output_ptr = nullptr) {
+        const __grid_constant__ TMA_OUT tma_out) {
 
   linear_swapAB_kernel_hopper<T,
                               BATCH_SIZE,
@@ -76,7 +73,7 @@ __global__
                               TMA_A,
                               TMA_B,
                               TMA_OUT,
-                              void>(tma_a, tma_b, tma_out, nullptr, output_ptr);
+                              void>(tma_a, tma_b, tma_out, nullptr);
 }
 
 template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int REDUCTION_SIZE>
@@ -207,7 +204,7 @@ void launch_linear_swapAB(void *input_ptr,
                                         TMA_RESIDUAL,
                                         TMA_OUT>
         <<<grid_dim, block_dim, smem_size>>>(
-            tma_a, tma_b, tma_residual, tma_out, output_ptr);
+            tma_a, tma_b, tma_residual, tma_out);
   } else {
 
     linear_kernel_swapAB_no_residual_hopper_wrapper<T,
@@ -217,7 +214,7 @@ void launch_linear_swapAB(void *input_ptr,
                                                     TMA_A,
                                                     TMA_B,
                                                     TMA_OUT>
-        <<<grid_dim, block_dim, smem_size>>>(tma_a, tma_b, tma_out, output_ptr);
+        <<<grid_dim, block_dim, smem_size>>>(tma_a, tma_b, tma_out);
   }
 #else
 
@@ -241,7 +238,7 @@ void launch_linear_swapAB(void *input_ptr,
                                           TMA_RESIDUAL,
                                           TMA_OUT>
           <<<grid_dim, block_dim, smem_size>>>(
-              tma_a, tma_b, tma_residual, tma_out, output_ptr);
+              tma_a, tma_b, tma_residual, tma_out);
     } else {
       linear_kernel_swapAB_no_residual_hopper_wrapper<T,
                                                       BATCH_SIZE,
@@ -250,8 +247,7 @@ void launch_linear_swapAB(void *input_ptr,
                                                       TMA_A,
                                                       TMA_B,
                                                       TMA_OUT>
-          <<<grid_dim, block_dim, smem_size>>>(
-              tma_a, tma_b, tma_out, output_ptr);
+          <<<grid_dim, block_dim, smem_size>>>(tma_a, tma_b, tma_out);
     }
   }
   cudaDeviceSynchronize(); // Wait for all warmup runs to complete
@@ -273,7 +269,7 @@ void launch_linear_swapAB(void *input_ptr,
                                           TMA_RESIDUAL,
                                           TMA_OUT>
           <<<grid_dim, block_dim, smem_size>>>(
-              tma_a, tma_b, tma_residual, tma_out, output_ptr);
+              tma_a, tma_b, tma_residual, tma_out);
     } else {
       linear_kernel_swapAB_no_residual_hopper_wrapper<T,
                                                       BATCH_SIZE,
@@ -282,8 +278,7 @@ void launch_linear_swapAB(void *input_ptr,
                                                       TMA_A,
                                                       TMA_B,
                                                       TMA_OUT>
-          <<<grid_dim, block_dim, smem_size>>>(
-              tma_a, tma_b, tma_out, output_ptr);
+          <<<grid_dim, block_dim, smem_size>>>(tma_a, tma_b, tma_out);
     }
     cudaEventRecord(stop);
     cudaEventSynchronize(stop);

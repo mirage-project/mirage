@@ -179,7 +179,7 @@ def get_compile_command(
             "-DMPK_ENABLE_TMA",
             "-DMIRAGE_GRACE_HOPPER",
             "-DNDEBUG",
-            # "-DMPK_EANBLE_VERBOSE",
+            # "-DMPK_ENABLE_VERBOSE",
         ] + (["-DMIRAGE_ENABLE_PROFILER"] if profiling else [])
     else:
         specific_cmd = [
