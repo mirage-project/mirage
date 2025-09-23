@@ -363,10 +363,14 @@ void register_mugraph(
               (task_type == TASK_ATTENTION_2) ||
               (task_type == TASK_SINGLE_BATCH_EXTEND_ATTENTION) ||
               (task_type == TASK_PAGED_ATTENTION_1) ||
-              (task_type == TASK_PAGED_ATTENTION_2)) {
+              (task_type == TASK_PAGED_ATTENTION_2) ||
+              (task_type == TASK_PAGED_ATTENTION_HOPPER)) {
             // Note that we assume grid_dim.x corresponds to
             // the request dimension
             task.request_id = bid.x;
+          }
+          if (task_type == TASK_PAGED_ATTENTION_HOPPER) {
+            task.head_group = bid.y;
           }
           // Initialize input tensors to the task
           for (auto const &input : input_ops) {
@@ -375,6 +379,7 @@ void register_mugraph(
             tb::STensor stensor = input->output_tensors[0];
             desc.num_dims = stensor.num_dims;
             desc.data_type = stensor.data_type;
+            // Assume always partition head group on gridDim.y dimension
             for (int d = stensor.num_dims - 1; d >= 0; d--) {
               desc.dim[d] = stensor.dim[d];
               desc.stride[d] =
@@ -652,6 +657,7 @@ TaskGraphResult print_task_graph(
     code.e("input.dim[i] = tensor[\"dims\"][i].get<int>();");
     code.e("input.stride[i] = tensor[\"strides\"][i].get<int>();");
     code.e("}");
+
     code.e("task_desc.inputs[task_desc.num_inputs++] = input;");
     code.e("}");
     // load outputs
@@ -671,8 +677,17 @@ TaskGraphResult print_task_graph(
     code.e("output.dim[i] = tensor[\"dims\"][i];");
     code.e("output.stride[i] = tensor[\"strides\"][i];");
     code.e("}");
+
     code.e("task_desc.outputs[task_desc.num_outputs++] = output;");
     code.e("}");
+
+    // create TMA desc for each task
+    code.e("#ifdef MPK_ENABLE_TMA");
+    code.e("if (task.at(\"task_type\") > TASK_HOPPER_TASK_BEGIN && "
+           "task.at(\"task_type\") < TASK_HOPPER_TASK_END) {");
+    code.e("create_tma_desc_by_task(task_desc);");
+    code.e("}");
+    code.e("#endif");
     code.e("all_tasks.push_back(task_desc);");
     code.e("}");
     // load events
@@ -981,6 +996,7 @@ TaskGraphResult print_task_graph(
       tgbody.e("{");
       tgbody.e("TaskDesc task_desc(static_cast<TaskType>($));",
                task_desc.task_type);
+      tgbody.e("task_desc.head_group = $;", task_desc.head_group);
       size_t gpu_id = ((task_desc.trigger_event >> 32) & 0xffff);
       size_t event_pos = (task_desc.trigger_event & 0xffffffff);
       bool is_nvshmem_event =
@@ -1249,6 +1265,15 @@ TaskGraphResult print_task_graph(
   task_type_to_name[TASK_SINGLE_BATCH_EXTEND_ATTENTION] =
       "TASK_SINGLE_BATCH_EXTEND_ATTENTION";
   task_type_to_name[TASK_PAGED_ATTENTION_1] = "TASK_PAGED_ATTENTION_1";
+  task_type_to_name[TASK_LINEAR_HOPPER] = "TASK_LINEAR_HOPPER";
+  task_type_to_name[TASK_LINEAR_WITH_RESIDUAL_HOPPER] =
+      "TASK_LINEAR_WITH_RESIDUAL_HOPPER";
+  task_type_to_name[TASK_PAGED_ATTENTION_HOPPER] =
+      "TASK_PAGED_ATTENTION_HOPPER";
+  task_type_to_name[TASK_RMS_NORM_HOPPER] = "TASK_RMS_NORM_HOPPER";
+  task_type_to_name[TASK_LINEAR_SWAPAB_HOPPER] = "TASK_LINEAR_SWAPAB_HOPPER";
+  task_type_to_name[TASK_LINEAR_SWAPAB_WITH_RESIDUAL_HOPPER] =
+      "TASK_LINEAR_SWAPAB_WITH_RESIDUAL_HOPPER";
 
   code.e("__device__ __forceinline__");
   code.e("void _execute_task(TaskDesc const& task_desc,");

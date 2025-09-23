@@ -14,6 +14,9 @@
  */
 
 #include "profiler.h"
+#ifdef MPK_ENABLE_TMA
+#include "tma.cuh"
+#endif
 #include "runtime_header.h"
 #include "tasks/kernel.h"
 #include "utils.cuh"
@@ -34,6 +37,16 @@ using namespace mirage::runtime;
 // #define MPK_MAX_NUM_BATCHED_TOKENS 64
 // #define MPK_MAX_NUM_PAGES 1024
 // #define MPK_PAGE_SIZE 64
+
+#if defined(MIRAGE_GRACE_HOPPER)
+#define WORKER_THREADS 256
+#define SINGLE_KERNEL_THREADS 256
+#else
+#define WORKER_THREADS 128
+#define SINGLE_KERNEL_THREADS 128
+#endif
+#define INIT_THREADS 128
+#define SCHEDULER_THREADS 128
 
 __device__ __forceinline__ void
     _execute_task(TaskDesc const &task_desc,
@@ -125,10 +138,14 @@ __device__ __forceinline__ bool
         }
       }
       config.step[request_id] = step + num_tokens;
-      if ((step + num_tokens >= config.max_seq_length) || (config.profiling) ||
+#ifdef MPK_ENABLE_PROFILING
+      if (true) {
+#else
+      if ((step + num_tokens >= config.max_seq_length) ||
           ((config.tokens[request_id * MPK_MAX_SEQ_LENGTH + step +
                           num_tokens] == config.eos_token_id) &&
            (step + num_tokens >= prompt_len))) {
+#endif
         // Request is done
         config.request_ids[i] = -1;
         // Free pages
@@ -227,8 +244,10 @@ __device__ __forceinline__ bool
   }
 
   // Step 4: Update all unused requests slots
-  for (int i = num_reqs; i <= MPK_MAX_NUM_BATCHED_REQUESTS; i++) {
+  for (int i = num_reqs; i < MPK_MAX_NUM_BATCHED_REQUESTS; i++) {
     config.request_ids[i] = -1;
+  }
+  for (int i = num_reqs; i <= MPK_MAX_NUM_BATCHED_REQUESTS; i++) {
     config.qo_indptr_buffer[i] = num_tokens;
     config.paged_kv_indptr_buffer[i] = num_pages;
   }
@@ -510,8 +529,8 @@ __device__ void execute_worker(RuntimeConfig config) {
       return;
     } else if (task_desc.task_type == TASK_BEGIN_TASK_GRAPH) {
       // Do nothing
-    } else if (task_desc.task_type == TASK_NVSHMEM_COPY) {
 #ifdef USE_NVSHMEM
+    } else if (task_desc.task_type == TASK_NVSHMEM_COPY) {
       size_t size_in_bytes = 2;
       for (int i = 0; i < task_desc.inputs[0].num_dims; i++) {
         size_in_bytes *= task_desc.inputs[0].dim[i];
@@ -643,6 +662,7 @@ __device__ void execute_worker(RuntimeConfig config) {
                get_task_position_index(cur_task_id),
                event_id);
 #endif
+      }
       cur_task_pos[queue_idx] += 1;
     }
   }
@@ -986,7 +1006,7 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
   cudaSetDevice(my_rank);
 #if defined(MODE_OFFLINE) || defined(MODE_ONLINE)
   global_runtime_config.request_ids =
-      gpu_malloc<int>(sizeof(int) * MPK_MAX_NUM_BATCHED_REQUESTS);
+      gpu_malloc<int>(sizeof(int) * (MPK_MAX_NUM_BATCHED_REQUESTS + 1));
   global_runtime_config.next_request_id = gpu_malloc<int>(sizeof(int));
   global_runtime_config.page_queue =
       gpu_malloc<int>(MPK_MAX_NUM_PAGES * sizeof(int));
@@ -1129,8 +1149,8 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
   size_t end_of_task_graph_event_pos = all_events.size() - 1;
   assert(all_events[end_of_task_graph_event_pos].event_type ==
          EVENT_END_OF_TASK_GRAPH);
-  init_kernel<<<dim3(1, 1, 1), dim3(128, 1, 1)>>>(global_runtime_config,
-                                                  end_of_task_graph_event_pos);
+  init_kernel<<<dim3(1, 1, 1), dim3(INIT_THREADS, 1, 1)>>>(
+      global_runtime_config, end_of_task_graph_event_pos);
   cudaDeviceSynchronize();
 #ifdef USE_NVSHMEM
   // Add a global barrier for all init_kernel to complete
@@ -1165,12 +1185,12 @@ extern "C" void launch_persistent_kernel() {
     // the interaction between the worker kernel and the scheduler kernel
     scheduler_kernel<<<
         dim3(global_runtime_config.num_local_schedulers / 4, 1, 1),
-        dim3(128, 1, 1),
+        dim3(SCHEDULER_THREADS, 1, 1),
         MAX_SHARE_MEMORY_SIZE /*smem*/,
         scheduler_stream>>>(global_runtime_config);
 
     worker_kernel<<<dim3(global_runtime_config.num_workers, 1, 1),
-                    dim3(128, 1, 1),
+                    dim3(WORKER_THREADS, 1, 1),
                     MAX_SHARE_MEMORY_SIZE /*smem*/,
                     worker_stream>>>(global_runtime_config);
 
@@ -1193,13 +1213,13 @@ extern "C" void launch_persistent_kernel() {
     void *args[] = {&global_runtime_config};
     nvshmemx_collective_launch((void const *)persistent_kernel,
                                dim3(sm_count, 1, 1),
-                               dim3(128, 1, 1),
+                               dim3(SINGLE_KERNEL_THREADS, 1, 1),
                                args,
                                MAX_SHARE_MEMORY_SIZE /*sharedmem*/,
                                0 /*stream*/);
 #else
     persistent_kernel<<<dim3(sm_count, 1, 1),
-                        dim3(128, 1, 1),
+                        dim3(SINGLE_KERNEL_THREADS, 1, 1),
                         MAX_SHARE_MEMORY_SIZE /*smem*/>>>(
         global_runtime_config);
 #endif

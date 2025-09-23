@@ -69,6 +69,14 @@ enum TaskType {
   TASK_SILU_MUL = 118,
   TASK_RMS_NORM = 119,
   TASK_LINEAR = 120,
+  TASK_HOPPER_TASK_BEGIN = 150, // Hopper start placeholder, not a real task
+  TASK_LINEAR_WITH_RESIDUAL_HOPPER = 151,
+  TASK_LINEAR_HOPPER = 152,
+  TASK_PAGED_ATTENTION_HOPPER = 153,
+  TASK_RMS_NORM_HOPPER = 154,
+  TASK_LINEAR_SWAPAB_HOPPER = 155,
+  TASK_LINEAR_SWAPAB_WITH_RESIDUAL_HOPPER = 156,
+  TASK_HOPPER_TASK_END = 198, // Hopper end placeholder, not a real task
   TASK_NVSHMEM_COPY = 199,
   TASK_SCHD_TASKS = 200,
   TASK_SCHD_EVENTS = 201,
@@ -89,6 +97,9 @@ enum EventType {
 struct TensorDesc {
   int num_dims;
   void *base_ptr;
+#ifdef MPK_ENABLE_TMA
+  void *tma_desc_ptrs[mirage::config::MAX_TMA_DESC_PER_TENSOR];
+#endif
   int data_type;
   int dim[mirage::config::MAX_TENSOR_DIMS];
   int stride[mirage::config::MAX_TENSOR_DIMS];
@@ -119,6 +130,7 @@ struct TaskDesc {
   TensorDesc inputs[MAX_INPUTS_PER_TASK];
   TensorDesc outputs[MAX_OUTPUTS_PER_TASK];
   int request_id; // Used for paged attention
+  int head_group; // Used for paged attention hopper
 };
 
 struct RuntimeConfig {

@@ -1233,7 +1233,12 @@ __global__ void linear_kernel_wrapper(void const *input_ptr,
                                       void const *residual_ptr,
                                       void *output_ptr) {
   linear_kernel<T, BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE>(
-      input_ptr, weight_ptr, residual_ptr, output_ptr, BATCH_SIZE/*num_active_tokens*/, true);
+      input_ptr,
+      weight_ptr,
+      residual_ptr,
+      output_ptr,
+      BATCH_SIZE /*num_active_tokens*/,
+      true);
 }
 
 template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int REDUCTION_SIZE>
