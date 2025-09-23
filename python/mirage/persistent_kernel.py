@@ -177,7 +177,9 @@ def get_compile_command(
             "-arch=sm_90a",
             "-gencode=arch=compute_90a,code=sm_90a",
             "-DMPK_ENABLE_TMA",
-            "-DMIRAGE_GRACE_HOPPER"
+            "-DMIRAGE_GRACE_HOPPER",
+            "-DNDEBUG",
+            # "-DMPK_ENABLE_VERBOSE",
         ] + (["-DMIRAGE_ENABLE_PROFILER"] if profiling else [])
     else:
         specific_cmd = [
@@ -586,7 +588,7 @@ class PersistentKernel:
         tb_graph.new_input(weight, (0, -1, -1), 1, True)
         tb_graph.new_input(output, (1, -1, -1), -1, True)
         self.kn_graph.customized([input, weight, output], tb_graph)
-        self.kn_graph.register_task(tb_graph, "linear_hopper" if self.target_cc == 90 else "linear")
+        self.kn_graph.register_task(tb_graph, "linear_swapAB_hopper" if self.target_cc == 90 else "linear")
 
     def linear_with_residual_layer(
         self,
@@ -608,7 +610,7 @@ class PersistentKernel:
         tb_graph.new_input(residual, (1, -1, -1), -1, True)
         tb_graph.new_input(output, (1, -1, -1), -1, True)
         self.kn_graph.customized([input, weight, residual, output], tb_graph)
-        self.kn_graph.register_task(tb_graph, "linear_with_residual_hopper" if self.target_cc == 90 else "linear_with_residual")
+        self.kn_graph.register_task(tb_graph, "linear_swapAB_with_residual_hopper" if self.target_cc == 90 else "linear_with_residual")
 
     def allreduce_layer(
         self,
