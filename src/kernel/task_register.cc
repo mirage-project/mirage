@@ -1063,9 +1063,10 @@ int TaskRegister::register_rmsnorm_hopper_task(threadblock::Graph const &bgraph,
   return register_task_variant(TASK_RMS_NORM_HOPPER, code.to_string());
 }
 
-int TaskRegister::register_linear_swapAB_hopper_task(threadblock::Graph const &bgraph,
-                                              std::vector<int> const &params,
-                                              bool with_residual) {
+int TaskRegister::register_linear_swapAB_hopper_task(
+    threadblock::Graph const &bgraph,
+    std::vector<int> const &params,
+    bool with_residual) {
   assert(params.size() == 0);
   int batch_size = 0, output_size = 0, reduction_size = 0, output_stride = 0;
   std::vector<tb::TBInputOp *> input_ops;
@@ -1140,23 +1141,23 @@ int TaskRegister::register_linear_swapAB_hopper_task(threadblock::Graph const &b
   );
 
   if (with_residual) {
-    const int B_ = output_tma_cp_size < 64 ? 0 : B;
-    const int M_ = output_tma_cp_size < 64 ? 0 : M;
-    const int S_ = output_tma_cp_size < 64 ? 0 : S;
+    int const B_ = output_tma_cp_size < 64 ? 0 : B;
+    int const M_ = output_tma_cp_size < 64 ? 0 : M;
+    int const S_ = output_tma_cp_size < 64 ? 0 : S;
     code.e(
         "using TMA_RESIDUAL = kernel::tma::tma_2d<bfloat16, $, $, $, $, $, $, "
         "$, $, $, $, $, $, true>;",
         0,
         0,
         0,
-        batch_size,         /*GMEM_ROW_*/
-        output_size,        /*GMEM_COL_*/
-        batch_size,         /*SMEM_ROW_*/
-        output_tma_cp_size, /*SMEM_COL_*/
-        output_stride,      /*GMEM_STRIDE_ROW_*/
-        1,                  /*GMEM_STRIDE_COL_*/
-        1,                  /*SMEM_REPEAT_ROW_*/
-        1,         /*SMEM_REPEAT_COL_*/
+        batch_size,                      /*GMEM_ROW_*/
+        output_size,                     /*GMEM_COL_*/
+        batch_size,                      /*SMEM_ROW_*/
+        output_tma_cp_size,              /*SMEM_COL_*/
+        output_stride,                   /*GMEM_STRIDE_ROW_*/
+        1,                               /*GMEM_STRIDE_COL_*/
+        1,                               /*SMEM_REPEAT_ROW_*/
+        1,                               /*SMEM_REPEAT_COL_*/
         SMEM_M_SIZE * output_tma_cp_size /*SMEM_STRIDE_*/
     );
   }
@@ -1194,14 +1195,15 @@ int TaskRegister::register_linear_swapAB_hopper_task(threadblock::Graph const &b
          "tma_out(static_cast<CUtensorMap*>(task_desc.outputs[0].tma_desc_ptrs["
          "0]));");
 
-  code.e("kernel::linear_swapAB_kernel_hopper<bfloat16, $, $, $, $, TMA_A, TMA_B, "
-         "TMA_OUT, $, $>(",
-         batch_size,
-         output_size,
-         reduction_size,
-         Kstages,
-         with_residual ? "TMA_RESIDUAL" : "void",
-         output_stride);
+  code.e(
+      "kernel::linear_swapAB_kernel_hopper<bfloat16, $, $, $, $, TMA_A, TMA_B, "
+      "TMA_OUT, $, $>(",
+      batch_size,
+      output_size,
+      reduction_size,
+      Kstages,
+      with_residual ? "TMA_RESIDUAL" : "void",
+      output_stride);
   code.e("    tma_a,");
   code.e("    tma_b,");
   code.e("    tma_out, ");
