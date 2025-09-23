@@ -19,8 +19,8 @@
 #include "mirage/kernel/operator.h"
 #include "mirage/threadblock/graph.h"
 #include "mirage/threadblock/operator.h"
+#include "mirage/vector_types.h"
 #include <tuple>
-#include <vector_types.h>
 
 namespace mirage {
 namespace kernel {
@@ -31,7 +31,6 @@ public:
                  std::vector<DTensor> const &inputs,
                  mirage::threadblock::Graph const &_graph);
   virtual ~KNCustomizedOp();
-  void run(void);
   bool fingerprint(void);
   size_t get_owner_independent_hash() const override;
 

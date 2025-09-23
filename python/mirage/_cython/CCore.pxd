@@ -20,7 +20,7 @@ from libcpp cimport bool
 
 ctypedef unsigned long int size_t
 
-cdef extern from "vector_types.h":
+cdef extern from "mirage/vector_types.h":
     ctypedef struct dim3:
         unsigned int x
         unsigned int y
@@ -338,6 +338,7 @@ cdef extern from "mirage/search/search_c.h" namespace "mirage::search_c":
         unsigned int z
 
     cdef int cython_search(const CppKNGraph *input_graph,
+                           const char *backend,
                            int max_num_new_graphs,
                            CppKNGraph** new_graphs,
                            vector[MInt3] imaps,

@@ -54,7 +54,8 @@ demo/*generated*
 benchmark/*generated*
 
 # Rust
-src/search/abstract_expr/abstract_subexpr/*.lock
+Cargo.lock
+
 # Output files of runtime
 output/
 # Temp file

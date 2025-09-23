@@ -31,31 +31,7 @@ using namespace mirage::type;
 using namespace mirage::config;
 using namespace mirage::utils;
 
-template <typename DT>
-__global__ void execute_elementbinary(mirage::type::KNOperatorType type,
-                                      DT *input1_ptr,
-                                      DT *input2_ptr,
-                                      DT *output_ptr,
-                                      int factor1,
-                                      int factor2,
-                                      int num_elements) {
-  int i = threadIdx.x + blockIdx.x * blockDim.x;
-  if (i < num_elements) {
-    DT operand_A = input1_ptr[i / factor1];
-    DT operand_B = input2_ptr[i / factor2];
-    if (type == mirage::type::KN_ADD_OP) {
-      output_ptr[i] = operand_A + operand_B;
-    } else if (type == mirage::type::KN_MUL_OP) {
-      output_ptr[i] = operand_A * operand_B;
-    } else if (type == mirage::type::KN_DIV_OP) {
-      output_ptr[i] = operand_A / operand_B;
-    } else if (type == mirage::type::KN_POW_OP) {
-      output_ptr[i] = powf(operand_A, operand_B);
-    } else {
-      assert(false && "Unimplemented");
-    }
-  }
-}
+#ifdef MIRAGE_FINGERPRINT_USE_CUDA
 
 __global__ void
     compute_elementbinary_fingerprint(mirage::type::KNOperatorType type,
@@ -192,6 +168,7 @@ bool KNElementBinaryOp::fingerprint(void) {
   }
   return true;
 }
+#endif // MIRAGE_FINGERPRINT_USE_CUDA
 
 } // namespace kernel
 } // namespace mirage

@@ -29,21 +29,7 @@ using namespace mirage::type;
 using namespace mirage::config;
 using namespace mirage::utils;
 
-template <typename DT>
-__global__ void execute_reduction(DT *input_ptr,
-                                  DT *output_ptr,
-                                  int num_input_elements,
-                                  int num_output_elements) {
-  int idx = threadIdx.x + blockIdx.x * blockDim.x;
-  DT sum = static_cast<DT>(0.0f);
-  if (idx < num_output_elements) {
-    for (int i = 0; i < num_input_elements; i += num_output_elements) {
-      sum += input_ptr[i];
-    }
-    output_ptr[idx] = sum;
-  }
-}
-
+#ifdef MIRAGE_FINGERPRINT_USE_CUDA
 __global__ void compute_reduction_fingerprint(FPType *input_ptr,
                                               FPType *output_ptr,
                                               int num_elements,
@@ -58,17 +44,6 @@ __global__ void compute_reduction_fingerprint(FPType *input_ptr,
     for (int k = 0; k < reduction_factor; k++) {
       FPType input = input_ptr[n * input_stride + m + k * output_stride];
       result = compute_add_fingerprint(result, input);
-      if (threadIdx.x == 0 && blockIdx.x == 0 && blockIdx.y == 0) {
-        // printf("result(%d) output_stride(%d) input_stride(%d) i(%d), n(%d) "
-        //        "m(%d) k(%d)\n",
-        //        result,
-        //        output_stride,
-        //        input_stride,
-        //        i,
-        //        n,
-        //        m,
-        //        k);
-      }
     }
     output_ptr[i] = result;
   }
@@ -115,6 +90,7 @@ bool KNReductionOp::fingerprint(void) {
   }
   return true;
 }
+#endif // MIRAGE_FINGERPRINT_USE_CUDA
 
 } // namespace kernel
 } // namespace mirage

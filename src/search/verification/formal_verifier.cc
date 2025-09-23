@@ -1,5 +1,7 @@
 #include "mirage/search/verification/formal_verifier.h"
 #include "mirage/search/op_utils.h"
+#include "mirage/utils/containers.h"
+
 #include <iostream>
 
 namespace mirage {
@@ -8,18 +10,46 @@ namespace search {
 std::mutex FormalVerifier::formal_verifier_mutex;
 
 FormalVerifier::FormalVerifier(kernel::Graph const &input_graph) {
+  for (kernel::KNOperator *op : input_graph.operators) {
+    if (op->op_type == type::KNOperatorType::KN_OUTPUT_OP) {
+      shapes_std.push_back(
+          to_vector(op->input_tensors[0].num_dims, op->input_tensors[0].dim));
+    }
+  }
   input_exprs = get_concrete_exprs(input_graph, true, all_dims);
 }
 
 OutputMatch FormalVerifier::verify(kernel::Graph const &graph) {
   std::lock_guard<std::mutex> lock(formal_verifier_mutex);
 
+  std::vector<std::vector<int>> shapes;
+  auto is_output_tensor = [&](kernel::DTensor const &dtensor) {
+    for (kernel::KNOperator const *op : graph.operators) {
+      for (kernel::DTensor const &input_tensor : op->input_tensors) {
+        if (input_tensor.guid == dtensor.guid) {
+          return false;
+        }
+      }
+    }
+    return true;
+  };
+  for (kernel::KNOperator *op : graph.operators) {
+    for (kernel::DTensor dtensor : op->output_tensors) {
+      if (is_output_tensor(dtensor)) {
+        shapes.push_back(to_vector(dtensor.num_dims, dtensor.dim));
+      }
+    }
+  }
+  assert(shapes.size() == shapes_std.size());
   std::vector<std::string> graph_exprs =
       get_concrete_exprs(graph, false, all_dims);
   assert(input_exprs.size() == graph_exprs.size());
 
   auto verify_with_match = [&](OutputMatch const &match) {
     for (size_t i = 0; i < match.size(); i++) {
+      if (shapes_std[i] != shapes[match[i]]) {
+        return false;
+      }
       bool is_equiv =
           check_equiv(input_exprs[i].c_str(), graph_exprs[match[i]].c_str());
       if (!is_equiv) {

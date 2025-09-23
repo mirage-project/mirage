@@ -6,3 +6,6 @@ accelerate==1.8.0
 numpy
 graphviz
 tqdm
+transformers==4.53.0
+protobuf==3.20.0
+tg4perfetto==0.0.4

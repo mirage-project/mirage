@@ -144,7 +144,7 @@ def get_compile_command(
         "-o",
         py_so_path,
     ]
-    flags = flags + [f"-DMPK_TARGET_CC={target_cc}"]
+    flags = flags + [f"-DMPK_TARGET_CC={target_cc}", "-DMIRAGE_BACKEND_USE_CUDA"]
 
     if mpk.mode == "offline":
         flags = flags + ["-DMODE_OFFLINE"]
