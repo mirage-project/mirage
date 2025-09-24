@@ -167,24 +167,19 @@ class Qwen3MLP(nn.Module):
 
 def naive_attention(
     q, 
-    key_cache,
-    value_cache,
-    kv_len,
-    layer_idx,
+    k,
+    v,
     is_causal=True, 
-    enable_gqa=True):
-            
-    k = key_cache[layer_idx, 0, :kv_len, :, :] # [kv_seq_len, num_kv_heads, head_dim]
-    v = value_cache[layer_idx, 0, :kv_len, :, :] # [kv_seq_len, num_kv_heads, head_dim]
-
-    q_for_sdpa = q.permute(1, 0, 2)    # [num_q_heads, 1, head_dim]
-    k_for_sdpa = k.permute(1, 0, 2)    # [num_q_heads, kv_seq_len, head_dim]
-    v_for_sdpa = v.permute(1, 0, 2)    # [num_q_heads, kv_seq_len, head_dim]
+    ):
+    
+    q_for_sdpa = q.permute(0, 2, 1, 3)    # [bsz, num_q_heads, q_len, head_dim]
+    k_for_sdpa = k.permute(0, 2, 1, 3)    # [bsz, num_kv_heads, kv_seq_len, head_dim]
+    v_for_sdpa = v.permute(0, 2, 1, 3)    # [bsz, num_kv_heads, kv_seq_len, head_dim]
 
     attn_output_sdpa = nn.functional.scaled_dot_product_attention(
-        q_for_sdpa, k_for_sdpa, v_for_sdpa, is_causal=is_causal, enable_gqa=enable_gqa
+        q_for_sdpa, k_for_sdpa, v_for_sdpa, is_causal=is_causal
     )
-    attn_output = attn_output_sdpa.permute(1, 0, 2)
+    attn_output = attn_output_sdpa.permute(0, 2, 1, 3)
 
     return attn_output
 
@@ -213,14 +208,14 @@ class Qwen3Attention(nn.Module):
         self.key_cache, self.value_cache = kv_cache
         assert kv_cache[0].shape == (
             config.num_hidden_layers,
-            1,
+            config.batch_size,
             4096,
             self.num_key_value_heads // world_size,
             self.head_dim,
         )
         assert kv_cache[1].shape == (
             config.num_hidden_layers,
-            1,
+            config.batch_size,
             4096,
             self.num_key_value_heads // world_size,
             self.head_dim,
@@ -296,35 +291,35 @@ class Qwen3Attention(nn.Module):
         )
 
         if q_len > 1:
-            self.key_cache[self.layer_idx, 0, :q_len] = key_states[0]
-            self.value_cache[self.layer_idx, 0, :q_len] = value_states[0]
+            self.key_cache[self.layer_idx, :, :q_len] = key_states
+            self.value_cache[self.layer_idx, :, :q_len] = value_states
         else:
-            self.key_cache[self.layer_idx, 0, step] = key_states[0]
-            self.value_cache[self.layer_idx, 0, step] = value_states[0]
+            self.key_cache[self.layer_idx, :, step] = key_states
+            self.value_cache[self.layer_idx, :, step] = value_states
 
-        q = query_states[0] # Shape: [q_len, num_q_heads, head_dim]
+        q = query_states # Shape: [bsz, q_len, num_q_heads, head_dim]
 
         if q_len > 1:
-            attn_output = naive_attention(
-                q,
-                self.key_cache,
-                self.value_cache,
-                q_len,
-                self.layer_idx,
-                True,
-                True
-            )
+            k = self.key_cache[self.layer_idx, :, :q_len, :, :]
+            v = self.value_cache[self.layer_idx, :, :q_len, :, :]
+            is_causal = True
         else:
             kv_seq_len = step.item() + 1
-            attn_output = naive_attention(
-                q,
-                self.key_cache,
-                self.value_cache,
-                kv_seq_len,
-                self.layer_idx,
-                False,
-                True
-            )
+            k = self.key_cache[self.layer_idx, :, :kv_seq_len, :, :]
+            v = self.value_cache[self.layer_idx, :, :kv_seq_len, :, :]
+            is_causal = False
+        
+        # repeat k/v heads if necessary
+        if self.num_key_value_groups > 1:
+            k = k.repeat_interleave(self.num_key_value_groups, dim=2)
+            v = v.repeat_interleave(self.num_key_value_groups, dim=2)
+            
+        attn_output = naive_attention(
+            q,
+            k,
+            v,
+            is_causal=is_causal,
+        )
 
         attn_output = attn_output.reshape(bsz, q_len, self.local_qkv_size)
 
@@ -423,7 +418,7 @@ class Qwen3Model(Qwen3PreTrainedModel):
         key_cache = torch.empty(
             (
                 config.num_hidden_layers,
-                1,
+                config.batch_size,
                 4096,
                 config.num_key_value_heads // world_size,
                 config.head_dim,
@@ -434,7 +429,7 @@ class Qwen3Model(Qwen3PreTrainedModel):
         value_cache = torch.empty(
             (
                 config.num_hidden_layers,
-                1,
+                config.batch_size,
                 4096,
                 config.num_key_value_heads // world_size,
                 config.head_dim,

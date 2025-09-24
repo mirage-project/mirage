@@ -5,6 +5,7 @@ import torch
 import torch.distributed as dist
 import argparse
 import os
+import sys
 
 # print limitation
 # torch.set_printoptions(threshold=2000)
@@ -16,7 +17,7 @@ def grid_for_rmsnorm_linear_layer(size):
         return 96
     elif size % 64 == 0:
         return 64
-    
+
 # Return the largest factor of m that is less than or equal to n
 # This is used to determine the grid size
 def max_factor_leq_n(m: int, n: int) -> int:
@@ -68,7 +69,13 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model", type=str, default='Qwen/Qwen3-8B', help="Model path on hugging face"
     )
+    parser.add_argument("--batch-size", type=int, default=1, help="Batch size for inference")
     args = parser.parse_args()
+
+    # TODO: Remove this when batch size code is merged to mirage path
+    if args.batch_size > 1 and args.use_mirage:
+        sys.exit("Batch size > 1 unsupported in mirage path")
+
     try:
         from mpi4py import MPI
         comm = MPI.COMM_WORLD
@@ -99,57 +106,77 @@ if __name__ == "__main__":
             # load model locally (necessary for multi-GPU case)
             print(f"Load model from model path: {args.model_path}")
             config = AutoConfig.from_pretrained(args.model_path)
+            config.batch_size = args.batch_size
             model = Qwen3ForCausalLM(config, world_size)
             load_model(
                 model, f"{args.model_path}/model{rank}-mp{world_size}.safetensors"
             )
             tokenizer = AutoTokenizer.from_pretrained(args.model_path)
         else:
-            model = Qwen3ForCausalLM.from_pretrained(model_name).to("cuda")
+            config = AutoConfig.from_pretrained(model_name)
+            config.batch_size = args.batch_size
+            model = Qwen3ForCausalLM.from_pretrained(
+                model_name, config=config
+            ).to("cuda")
             tokenizer = AutoTokenizer.from_pretrained(model_name)
 
+    if model.config.pad_token_id is None:
+        model.config.pad_token_id = model.config.eos_token_id
+
     # get all model weight tensors
-    tokens = torch.full((1, 32768), 0, dtype=torch.long, device="cuda")
+    tokens = torch.full((args.batch_size, 32768), 0, dtype=torch.long, device="cuda")
 
-    # prompt = "Give me a short introduction to large language model."
-    # This prompt is copied from https://github.com/apoorvumang/prompt-lookup-decoding/blob/main/demo-pld.ipynb
-    code_text = """import numpy as np
-                import matplotlib.pyplot as plt
+    if args.batch_size > 1:
+        prompts = [
+            f"{i+1}. Give me a short introduction to large language models."
+            for i in range(args.batch_size)
+        ]
+    else:
+        # This prompt is copied from https://github.com/apoorvumang/prompt-lookup-decoding/blob/main/demo-pld.ipynb
+        code_text = """import numpy as np
+                    import matplotlib.pyplot as plt
 
-                # Calculate the average
-                average_throughput = np.mean(tokens_per_sec_arr)
-                print(f"Average Throughput: {average_throughput} tokens/sec")
+                    # Calculate the average
+                    average_throughput = np.mean(tokens_per_sec_arr)
+                    print(f"Average Throughput: {average_throughput} tokens/sec")
 
-                # Plotting the histogram
-                plt.hist(tokens_per_sec_arr, bins=20, color='blue', edgecolor='black', alpha=0.7)
-                plt.title('Histogram of Throughput Values')
-                plt.xlabel('Tokens per Second')
-                plt.ylabel('Frequency')
-                plt.axvline(average_throughput, color='red', linestyle='dashed', linewidth=1)
-                plt.text(average_throughput*0.9, max(plt.ylim())*0.9, f'Average: {average_throughput:.2f}', color = 'red')
-                plt.show()
-                """
-    question = "Can you please change x axis to start from 0"
-    prompt = code_text + "\n" + question
-    messages = [
-        {
-            "role": "system",
-            "content": "You are Qwen, created by Alibaba Cloud. You are a helpful assistant.",
-        },
-        {"role": "user", "content": prompt},
+                    # Plotting the histogram
+                    plt.hist(tokens_per_sec_arr, bins=20, color='blue', edgecolor='black', alpha=0.7)
+                    plt.title('Histogram of Throughput Values')
+                    plt.xlabel('Tokens per Second')
+                    plt.ylabel('Frequency')
+                    plt.axvline(average_throughput, color='red', linestyle='dashed', linewidth=1)
+                    plt.text(average_throughput*0.9, max(plt.ylim())*0.9, f'Average: {average_throughput:.2f}', color = 'red')
+                    plt.show()
+                    """
+        question = "Can you please change x axis to start from 0"
+        prompt = code_text + "\n" + question
+        prompts = [prompt]
+    messages_list = [
+        [
+            {
+                "role": "system",
+                "content": "You are Qwen, created by Alibaba Cloud. You are a helpful assistant.",
+            },
+            {"role": "user", "content": prompt},
+        ]
+        for prompt in prompts
     ]
-    text = tokenizer.apply_chat_template(
-        messages, tokenize=False, add_generation_prompt=True
-    )
-    model_inputs = tokenizer([text], return_tensors="pt").to(model.device)
-    for i in range(model_inputs.input_ids.shape[-1]):
-        tokens[0, i] = model_inputs.input_ids[0, i]
+    texts = [
+        tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        )
+        for messages in messages_list
+    ]
+    model_inputs = tokenizer(texts, return_tensors="pt", padding=True).to(model.device)
     prompt_len = model_inputs.input_ids.shape[-1]
+    tokens[:, :prompt_len] = model_inputs.input_ids
+    total_input_tokens = (model_inputs.input_ids != model.config.pad_token_id).sum().item()
     positions = torch.arange(32768).unsqueeze(0).to(model.device)
     position_embeddings = model.model.rotary_emb(positions)
 
     # get all model weight tensors
-    input_tokens = torch.full((1, 1), 0, dtype=torch.long, device="cuda")
+    input_tokens = torch.full((args.batch_size, 1), 0, dtype=torch.long, device="cuda")
     prev_pos = 0
 
     starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(
@@ -160,7 +187,7 @@ if __name__ == "__main__":
     if args.use_mirage:
         import mirage as mi
 
-        batch_size = 1
+        batch_size = args.batch_size
         hidden_size = model.config.hidden_size
         intermediate_size = model.config.intermediate_size
         # pad vocab_size to facilitate task graph creation
@@ -189,13 +216,13 @@ if __name__ == "__main__":
             ).contiguous()
         else:
             profiler_tensor = None
-            
+
         spec_decode_config = mi.speculative.spec_decode_class(
             args.spec_decode,
             ngram_size=args.ngram_size,
             spec_length=args.spec_length,
         )
-            
+
         num_workers, num_schedulers = mi.get_configurations_from_gpu(rank)
         mpk = mi.PersistentKernel(
             world_size=world_size,
@@ -209,7 +236,7 @@ if __name__ == "__main__":
             profiler_tensor=profiler_tensor,
             spec_decode_config=spec_decode_config,
         )
-        
+
         if spec_decode_config and spec_decode_config.method == "promptlookup":
             all_tokens = mpk.attach_input(torch_tensor=tokens, name="all_tokens")
             argmax_batch_size = batch_size * (spec_decode_config.spec_length + 1)
@@ -218,10 +245,10 @@ if __name__ == "__main__":
             argmax_batch_size = batch_size
             num_tokens_extend = 1
         total_tokens_per_iter = batch_size * num_tokens_extend
-        
+
         # TODO: Make the code run well even if 96 % total_tokens_per_iter != 0
         assert(96 % total_tokens_per_iter == 0)
-        
+
         x = mpk.attach_input(torch_tensor=input_tokens, name="input_token")
         cos_pos_embed = mpk.attach_input(
             torch_tensor=position_embeddings[0][0, :4096, :],
@@ -325,7 +352,7 @@ if __name__ == "__main__":
         w = mpk.attach_input(
             torch_tensor=model.model.embed_tokens.weight, name="embed_tokens"
         )
-        
+
         mpk.embed_layer(
             input=x, 
             weight=w, 
@@ -535,6 +562,9 @@ if __name__ == "__main__":
     warmup = 0
     output_len = 512
     if not args.use_mirage:
+        unfinished_sequences = torch.ones(
+            args.batch_size, dtype=torch.long, device="cuda"
+        )
         for cur_pos in range(prompt_len, prompt_len + output_len):
             step.fill_(cur_pos - 1)
             input_ids = tokens[:, prev_pos:cur_pos]
@@ -547,10 +577,18 @@ if __name__ == "__main__":
                 stream=stream,
             )
             next_token = logits.argmax(dim=-1)
-            next_token = next_token[0, -1]
-            tokens[0, cur_pos] = next_token
+            next_token = next_token[:, -1]
+
+            next_token = next_token * unfinished_sequences + model.config.pad_token_id * (
+                1 - unfinished_sequences
+            )
+            tokens[:, cur_pos] = next_token
             prev_pos = cur_pos
-            if next_token == model.config.eos_token_id:
+
+            unfinished_sequences = unfinished_sequences.mul(
+                (next_token != model.config.eos_token_id).long()
+            )
+            if unfinished_sequences.max() == 0:
                 break
             if cur_pos == prompt_len + warmup:
                 torch.cuda.synchronize()
@@ -560,15 +598,27 @@ if __name__ == "__main__":
         torch.cuda.synchronize()
         run_time = starter.elapsed_time(ender)
 
-        generated_ids = tokens[:, :prev_pos]
+        generated_ids = tokens[:, : prev_pos + 1]
 
-        response = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
-        print(response)
-        print(
-            "Prompt length {}, generate length {}, per-token latency {} ms".format(
-                prompt_len, cur_pos - prompt_len, run_time / (cur_pos - prompt_len)
-            )
+        response = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
+        for i, r in enumerate(response):
+            print(f"Response {i+1}:")
+            print(r)
+            print("---")
+
+        print("\n--- Benchmarks ---")
+        output_tokens_per_batch = tokens[:, prompt_len : prev_pos + 1]
+        total_generated_tokens = (
+            (output_tokens_per_batch != model.config.pad_token_id).sum().item()
         )
+        print(f"Batch size: {args.batch_size}")
+        print(f"Padded input length: {prompt_len}")
+        print(f"Input tokens (unpadded): {total_input_tokens}")
+        print(f"Output tokens: {total_generated_tokens}")
+        print(f"Decoding steps (max length): {prev_pos + 1 - prompt_len}")
+        print(f"Total generation time: {run_time:.2f} ms")
+        print(f"Throughput (generation): {total_generated_tokens / (run_time / 1000):.2f} tokens/sec")
+        print(f"Per-token latency (generation): {run_time / total_generated_tokens:.2f} ms/token")
     else:
         # prefill phase
         step.fill_(prompt_len - 1)
