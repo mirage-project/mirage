@@ -39,7 +39,7 @@ template <typename T_,
           int REDUCTION_SIZE,
           int O_STRIDE = OUTPUT_SIZE,
           int PIPE_MAX = 3>
-__device__ __forceinline__ void linear_kernel(void const *input_ptr,
+__device__ __noinline__ void linear_kernel(void const *input_ptr,
                                               void const *weight_ptr,
                                               void const *residual_ptr,
                                               void *output_ptr,
@@ -48,7 +48,7 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
 // template <typename Config>
 // __global__ void /* __launch_bounds__(128, 1) */
 // gemm_multi_stage(void *Dptr, const void *Aptr, const void *Bptr, const void *Rptr, int m, int n, int k) {
-  #if 1
+  #if 0
   if (threadIdx.x == 0) {
     printf("Entering linear_kernel with BATCH_SIZE: %d, OUTPUT_SIZE: %d, REDUCTION_SIZE: %d, O_STRIDE: %d, PIPE_MAX: %d, residual: %d\n", BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE, O_STRIDE, PIPE_MAX, residual);
   }
