@@ -44,7 +44,7 @@ def get_configurations_from_gpu(rank):
     elif sm_cnt >= 132:
         worker = 128
     elif sm_cnt >= 108:
-        worker = 108
+        worker = 96
     elif sm_cnt >= 68:
         worker = 64
     elif sm_cnt >= 40:
