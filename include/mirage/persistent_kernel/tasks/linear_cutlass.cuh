@@ -33,6 +33,7 @@ namespace kernel {
 
 using bfloat16 = type::bfloat16_t;
 
+// Modified from https://github.com/reed-lau/cute-gemm/blob/main/gemm-multi-stage.cu
 template <typename T_,
           int BATCH_SIZE,
           int OUTPUT_SIZE,
