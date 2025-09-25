@@ -125,6 +125,13 @@ def get_compile_command(
         cc,
         file_name,
         "-O3",
+        # Use following flags when debugging
+        # "-O0",
+        # "-g",
+        # "-G",
+        # "--ptxas-options=-v",
+        # "-Xptxas=-v",
+        # "-lineinfo",
         f"-I{py_include_dir}",
         f"-I{mirage_inc_path}",
         f"-I{os.path.join(mirage_inc_path, 'mirage/persistent_kernel')}",
@@ -160,6 +167,8 @@ def get_compile_command(
     flags = flags + [f"-DMPK_MAX_NUM_PAGES={mpk.max_num_pages}"]
     flags = flags + [f"-DMPK_PAGE_SIZE={mpk.page_size}"]
     flags = flags + [f"-DMPK_MAX_SEQ_LENGTH={mpk.max_seq_length}"]
+    # Use when debugging
+    # flags = flags + [f"-DMPK_ENABLE_VERBOSE"]
 
     if use_nvshmem:
         nvshmem_cmd = [
