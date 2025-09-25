@@ -60,21 +60,11 @@ __device__ __forceinline__ void norm_linear_kernel(void const *input_ptr,
 
   extern __shared__ T smem[];
 
-  // copy input
-  T *shared_input = (T *)(smem + 2176);
-  T *shared_input_buffer = (T *)(smem + 4224);
-  // copy weight
-  T *shared_weight = (T *)(smem + 6272);
-  T *shared_weight_buffer = (T *)(smem + 14464);
-  // intermidiate
-  T *mm_output = (T *)(smem + 2176);
-  T *element_unary_output = (T *)(smem + 128);
-  T *reduction_output = (T *)(smem + 4224);
-  // out
-  T *shared_output = (T *)(smem + 128);
+  fz
 
-  // define the swizzle mode
-  smem_row<T, 3, 3, 3, 16, 64, 64> input_smem(shared_input);
+      // define the swizzle mode
+      smem_row<T, 3, 3, 3, 16, 64, 64>
+          input_smem(shared_input);
   smem_row<T, 3, 3, 3, 16, 64, 64> input_smem_buffer(shared_input_buffer);
 
   smem_row<T, 3, 3, 3, 64, 64, 64> input_weight_smem(shared_weight);
