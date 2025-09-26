@@ -69,6 +69,7 @@ enum TaskType {
   TASK_SILU_MUL = 118,
   TASK_RMS_NORM = 119,
   TASK_LINEAR = 120,
+  // Hopper Tasks
   TASK_HOPPER_TASK_BEGIN = 150, // Hopper start placeholder, not a real task
   TASK_LINEAR_WITH_RESIDUAL_HOPPER = 151,
   TASK_LINEAR_HOPPER = 152,
@@ -77,6 +78,11 @@ enum TaskType {
   TASK_LINEAR_SWAPAB_HOPPER = 155,
   TASK_LINEAR_SWAPAB_WITH_RESIDUAL_HOPPER = 156,
   TASK_HOPPER_TASK_END = 198, // Hopper end placeholder, not a real task
+  // SM100 Tasks
+  TASK_SM100_TASK_BEGIN = 250, // SM100 start placeholder, not a real task
+  TASK_LINEAR_WITH_RESIDUAL_SM100 = 251,
+  TASK_LINEAR_SM100 = 252,
+  TASK_SM100_TASK_END = 298, // SM100 end placeholder, not a real task
   TASK_NVSHMEM_COPY = 199,
   TASK_SCHD_TASKS = 200,
   TASK_SCHD_EVENTS = 201,

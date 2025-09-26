@@ -4,7 +4,7 @@
 #include "multitoken_paged_attention.cuh"
 #include "norm.cuh"
 #include "norm_linear.cuh"
-// #include "norm_linear_original.cuh"
+#include "norm_linear_original.cuh"
 #include "bfloat16.h"
 #include "embedding.cuh"
 #include "paged_attention.cuh"
