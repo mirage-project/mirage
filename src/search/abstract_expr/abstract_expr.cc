@@ -325,6 +325,9 @@ std::shared_ptr<AbstractExpr const>
 std::shared_ptr<AbstractExpr const>
     abstract_expr_make_red(int reduction_degree,
                            std::shared_ptr<AbstractExpr const> summand) {
+  if (reduction_degree == 1) {
+    return summand;
+  }
   return abstract_expr_make_red(dim_expr_make_const(reduction_degree), summand);
 }
 

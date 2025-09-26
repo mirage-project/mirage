@@ -54,15 +54,6 @@ STensor Graph::reduction_to_dimx(STensor const &input, int dim) {
 }
 
 TBOperator *Graph::create_reduction_to_dimx_op(STensor const &input, int dim) {
-  // STensor output = input;
-  // assert(output.num_dims > dim);
-  // assert(output.layout == mirage::layout::SmemRowMajor);
-  // output.dim[dim] = this->reduction_dimx;
-  // if (smem_offset + (off_t)output.size() >
-  //     (off_t)mirage::config::MAX_SMEM_SIZE) {
-  //   return nullptr;
-  // }
-
   TBOperator *op = new TBReductionOp(this, input, dim, this->reduction_dimx);
   // Check shmem usage
   size_t smem_usage = calculate_shared_memory_usage(op);
@@ -115,10 +106,6 @@ TBReductionOp::TBReductionOp(Graph *bgraph,
                            mirage::type::TB_REDUCTION_0_TO_DIMX_OP + dim),
                  input),
       reduce_dim(dim), reduce_size(size) {
-  // mirage::type::TBOperatorType type =
-  // static_cast<mirage::type::TBOperatorType>(
-  //     mirage::type::TB_REDUCTION_0_OP + dim);
-  // this->op_type = type;
   STensor output = input;
   assert(output.num_dims > reduce_dim);
   assert(output.layout == mirage::layout::SmemRowMajor);
@@ -150,5 +137,6 @@ TBReductionOp::operator json() const {
               {"reduce_dim", reduce_dim},
               {"reduce_size", reduce_size}};
 }
+
 } // namespace threadblock
 } // namespace mirage

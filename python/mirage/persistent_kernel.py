@@ -76,7 +76,11 @@ static struct PyModuleDef ModuleDef = {
   "__mirage_launcher",
   NULL, //documentation
   -1, //size
-  ModuleMethods
+  ModuleMethods,
+  NULL, // m_slots
+  NULL, // m_traverse
+  NULL, // m_clear
+  NULL  // m_free
 };
 
 PyMODINIT_FUNC PyInit___mirage_launcher(void) {
@@ -143,7 +147,7 @@ def get_compile_command(
     flags = [
         "-shared",
         "-std=c++17",
-        "-rdc=true",
+        "-rdc=false",
         "-use_fast_math",
         "-lcuda",
         "-Xcompiler=-fPIC",
@@ -151,7 +155,7 @@ def get_compile_command(
         "-o",
         py_so_path,
     ]
-    flags = flags + [f"-DMPK_TARGET_CC={target_cc}"]
+    flags = flags + [f"-DMPK_TARGET_CC={target_cc}", "-DMIRAGE_BACKEND_USE_CUDA"]
 
     if mpk.mode == "offline":
         flags = flags + ["-DMODE_OFFLINE"]
@@ -195,6 +199,9 @@ def get_compile_command(
             "-arch=native",
         ]
     
+    if profiling:
+        flags = flags + ["-DMPK_ENABLE_PROFILING"]
+
     if profiling:
         flags = flags + ["-DMPK_ENABLE_PROFILING"]
 

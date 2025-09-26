@@ -16,6 +16,8 @@ header_files += glob.glob(os.path.join(header_root_dir, '*.h'))
 
 print(header_files)
 
+macros=[("MIRAGE_BACKEND_USE_CUDA", None), ("MIRAGE_FINGERPRINT_USE_CUDA", None)]
+
 setup(
     name='runtime_kernel',
     ext_modules=[
@@ -23,6 +25,7 @@ setup(
             name='runtime_kernel',
             sources=[os.path.join(this_dir, 'runtime_kernel_wrapper.cu')],
             depends=header_files,
+            define_macros=macros,
             include_dirs=[
                 include_dir,
                 spec_decode_include_dir,
@@ -34,7 +37,6 @@ setup(
                     '-O3',
                     '-gencode=arch=compute_80,code=sm_80',
                     '-gencode=arch=compute_90a,code=sm_90a',
-                    '-DMIRAGE_PROFILE_AMPERE',
                 ]
             }
         )

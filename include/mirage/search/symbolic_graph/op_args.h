@@ -3,9 +3,9 @@
 #include "mirage/search/symbolic_graph/symbolic_graph.h"
 #include "mirage/search/symbolic_graph/symbolic_map.h"
 #include "mirage/type.h"
+#include "mirage/vector_types.h"
 
 #include <vector>
-#include <vector_types.h>
 
 namespace mirage {
 namespace search {

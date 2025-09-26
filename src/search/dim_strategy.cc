@@ -32,7 +32,11 @@ std::vector<dim3>
 
   auto generate_1d_grids = [&](std::vector<int> const &dims) {
     std::vector<dim3> cands;
+#ifdef MIRAGE_BACKEND_USE_CUDA
     for (size_t x = 8; x <= 256; x *= 2) {
+#else
+    for (size_t x = 128; x <= 8192; x *= 2) {
+#endif
       for (int dim : dims) {
         if (dim % x == 0) {
           cands.push_back({dim / x, 1, 1});
@@ -42,12 +46,36 @@ std::vector<dim3>
     return cands;
   };
 
-  auto generate_2d_grids = [&](int x, std::vector<int> const &dims) {
+  auto generate_2d_grids_with_x = [&](int x, std::vector<int> const &dims) {
     std::vector<dim3> cands;
+#ifdef MIRAGE_BACKEND_USE_CUDA
     for (size_t y : {8, 64, 128, 256}) {
+#else
+    for (size_t y = 128; y <= 8192; y *= 2) {
+#endif
       for (int dim : dims) {
         if (dim % y == 0) {
           cands.push_back({x, dim / y, 1});
+        }
+      }
+    }
+    return cands;
+  };
+
+  auto generate_2d_grids = [&](std::vector<int> const &dims) {
+    std::vector<dim3> cands;
+    std::vector<int> size_to_try{/*128, 512, */ 1024, 2048, 4096}, dim_to_try;
+    for (size_t x : size_to_try) {
+      for (int dim : dims) {
+        if (dim % x == 0) {
+          dim_to_try.push_back(dim / x);
+        }
+      }
+    }
+    for (size_t x : dim_to_try) {
+      for (size_t y : dim_to_try) {
+        if (x >= y) {
+          cands.push_back({x, y, 1});
         }
       }
     }
@@ -86,10 +114,11 @@ std::vector<dim3>
   std::vector<dim3> cands = config.grid_dim_to_explore;
   int batch = get_batch();
 
+#ifdef MIRAGE_BACKEND_USE_CUDA
   cands = vector_concat(cands, generate_1d_grids(get_dims()));
   if (config._enable_attention_specific_optimization) {
     if (batch != -1) {
-      cands = vector_concat(cands, generate_2d_grids(batch, get_dims()));
+      cands = vector_concat(cands, generate_2d_grids_with_x(batch, get_dims()));
     }
     if (tensors.size() > 2) {
       cands.push_back({batch, 16, 4});
@@ -104,6 +133,10 @@ std::vector<dim3>
   if (batch != -1 && batch <= config::MAX_NUM_THREADBLOCKS_PER_KERNEL) {
     cands.push_back({batch, 1, 1});
   }
+#else
+  cands = vector_concat(cands, generate_1d_grids(get_dims()));
+  cands = vector_concat(cands, generate_2d_grids(get_dims()));
+#endif
 
   cands = deduplicate(cands);
 
@@ -227,6 +260,7 @@ std::vector<std::vector<int3>>
         {0, -1, 1},
         {0, 1, -1},
         {0, 2, -1},
+        {-1, 1, -1},
     };
     if (!config._enable_attention_specific_optimization) {
       imap_to_explore.push_back({-1, -1, -1});
@@ -241,7 +275,31 @@ std::vector<std::vector<int3>>
   return results;
 }
 
-std::vector<int3> DimStrategy::get_output_map_cand(dim3 grid_dim) {
+std::vector<int3>
+    DimStrategy::get_output_map_cand(std::vector<STensor> const &tensors,
+                                     dim3 grid_dim) {
+  auto is_valid_output_map = [&](int3 output_map) {
+    if ((grid_dim.x == 1 && output_map.x != -1) ||
+        (grid_dim.x > 1 && output_map.x == -1)) {
+      return false;
+    }
+    if ((grid_dim.y == 1 && output_map.y != -1) ||
+        (grid_dim.y > 1 && output_map.y == -1)) {
+      return false;
+    }
+    if ((grid_dim.z == 1 && output_map.z != -1) ||
+        (grid_dim.z > 1 && output_map.z == -1)) {
+      return false;
+    }
+    for (STensor const &tensor : tensors) {
+      if (output_map.x >= tensor.num_dims || output_map.y >= tensor.num_dims ||
+          output_map.z >= tensor.num_dims) {
+        return false;
+      }
+    }
+    return true;
+  };
+
   std::vector<int3> results;
   std::vector<int3> omap_to_explore = config.omap_to_explore;
   omap_to_explore = vector_concat(omap_to_explore,
@@ -254,25 +312,13 @@ std::vector<int3> DimStrategy::get_output_map_cand(dim3 grid_dim) {
                                       {-1, 1, -1},
                                       {-1, 2, -1},
                                       {-1, -1, -1},
+                                      {1, -1, -1},
                                   });
-  if (!config._enable_attention_specific_optimization) {
-    omap_to_explore.push_back({1, -1, -1});
-  }
   omap_to_explore = deduplicate(omap_to_explore);
   for (int3 output_map : omap_to_explore) {
-    if ((grid_dim.x == 1 && output_map.x != -1) ||
-        (grid_dim.x > 1 && output_map.x == -1)) {
-      continue;
+    if (is_valid_output_map(output_map)) {
+      results.push_back(output_map);
     }
-    if ((grid_dim.y == 1 && output_map.y != -1) ||
-        (grid_dim.y > 1 && output_map.y == -1)) {
-      continue;
-    }
-    if ((grid_dim.z == 1 && output_map.z != -1) ||
-        (grid_dim.z > 1 && output_map.z == -1)) {
-      continue;
-    }
-    results.push_back(output_map);
   }
   if (config.randomized_branches) {
     std::random_shuffle(results.begin(), results.end());
@@ -330,12 +376,33 @@ std::vector<int> DimStrategy::get_forloop_range_cand(
     return {1};
   }
 
-  std::vector<int> results;
-
-  for (int x : config.frange_to_explore) {
-    if (config._enable_attention_specific_optimization && x > 8) {
+  std::vector<int> forloop_range_to_explore = config.frange_to_explore;
+#ifdef MIRAGE_BACKEND_USE_NKI
+  forloop_range_to_explore.clear();
+  for (size_t i = 0; i < input_tensors.size(); ++i) {
+    if (forloop_dim[i] == -1) {
       continue;
     }
+    int dim = input_tensors[i].dim[forloop_dim[i]];
+    if (input_map[i].x == forloop_dim[i]) {
+      return {};
+    }
+    if (input_map[i].y == forloop_dim[i]) {
+      return {};
+    }
+    if (input_map[i].z == forloop_dim[i]) {
+      return {};
+    }
+    for (size_t x = 128; x <= 8192; x *= 2) {
+      if (dim % x == 0) {
+        forloop_range_to_explore.push_back(dim / x);
+      }
+    }
+  }
+  forloop_range_to_explore = deduplicate(forloop_range_to_explore);
+#endif
+  std::vector<int> results;
+  for (int x : forloop_range_to_explore) {
     bool feasible = true;
     for (size_t i = 0; i < input_tensors.size(); ++i) {
       if (forloop_dim[i] == -1) {

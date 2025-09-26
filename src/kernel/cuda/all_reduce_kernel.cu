@@ -30,6 +30,7 @@ using namespace mirage::type;
 using namespace mirage::config;
 using namespace mirage::utils;
 
+#ifdef MIRAGE_FINGERPRINT_USE_CUDA
 __global__ void compute_allreduce_fingerprint(
     mirage::utils::FpPointerList fp_ptr_list, int num_gpus, int num_elements) {
   int i = threadIdx.x + blockIdx.x * blockDim.x;
@@ -70,6 +71,7 @@ bool KNAllReduceOp::fingerprint(void) {
   checkCUDA(cudaDeviceSynchronize());
   return true;
 }
+#endif
 
 } // namespace kernel
 } // namespace mirage

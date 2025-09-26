@@ -1,6 +1,7 @@
 #include "mirage/search/verification/output_match.h"
 
 #include <algorithm>
+#include <cassert>
 
 namespace mirage {
 namespace search {

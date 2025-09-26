@@ -28,20 +28,7 @@ namespace kernel {
 using namespace mirage::type;
 using namespace mirage::config;
 
-template <typename DT>
-__global__ void
-    init_input(char *dmem_base_ptr, DTensor const A, size_t num_elements) {
-  int idx = (threadIdx.x + blockIdx.x * blockDim.x);
-  int kColumn = A.dim[A.num_dims - 1];
-  // int myRow = idx / kColumn;
-  int myColumn = idx % kColumn;
-  DT *data_ptr = (DT *)(dmem_base_ptr + A.data_offset);
-  if (idx < num_elements) {
-    data_ptr[idx] = ((float)myColumn);
-    // printf("idx(%d) v(%.f)\n", idx, (float)myRow);
-  }
-}
-
+#ifdef MIRAGE_FINGERPRINT_USE_CUDA
 __global__ void init_input_fingerprint(char *fp_base_ptr,
                                        DTensor const A,
                                        size_t num_elements,
@@ -77,6 +64,7 @@ bool KNInputOp::fingerprint(void) {
   }
   return true;
 }
+#endif // MIRAGE_FINGERPRINT_USE_CUDA
 
 } // namespace kernel
 } // namespace mirage

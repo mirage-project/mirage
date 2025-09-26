@@ -27,6 +27,7 @@ namespace kernel {
 
 using namespace mirage::utils;
 
+#ifdef MIRAGE_FINGERPRINT_USE_CUDA
 __global__ void compute_rms_norm_fingerprint(FPType *input_ptr,
                                              FPType *output_ptr,
                                              FPType *div_p_lookup_table,
@@ -98,6 +99,8 @@ bool KNRMSNormOp::fingerprint(void) {
   }
   return true;
 }
+
+#endif // MIRAGE_FINGERPRINT_USE_CUDA
 
 } // namespace kernel
 } // namespace mirage

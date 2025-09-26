@@ -79,5 +79,11 @@ KNAllReduceOp::operator json() const {
               {"inplace", inplace}};
 }
 
+#ifdef MIRAGE_FINGERPRINT_USE_CPU
+bool KNAllReduceOp::fingerprint(void) {
+  assert(false && "To be implemented");
+}
+#endif
+
 } // namespace kernel
 } // namespace mirage

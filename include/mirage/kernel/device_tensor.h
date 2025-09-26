@@ -111,7 +111,6 @@ struct alignas(16) DTensor {
   // hash related functions
   size_t get_owner_independent_hash() const;
 
-  // bool has_same_fingerprint(DTensor const &ref) const;
   bool has_same_fingerprint(mirage::cpu::CTensor const &ref) const;
   mirage::cpu::CTensor copy_fingerprint_to_ctensor() const;
 
@@ -131,7 +130,7 @@ public:
   int64_t data_offset;
   // pointer to fingerprint
   // mirage::type::FPType *fp_ptr;
-  // offset in device memory
+  // offset in device memory in bytes
   int64_t fp_offset;
 
   static std::atomic<int64_t> next_guid;

@@ -31,6 +31,11 @@ typedef int64_t GuidType;
 // only to be used in create_op in search.cc
 inline std::unordered_map<std::string, float> CLAMP_MIN_MAX;
 
+enum BackendType {
+  BT_CUDA = 0,
+  BT_NKI = 1,
+};
+
 enum DataType {
   // 1-bit types
   // range: 900-909

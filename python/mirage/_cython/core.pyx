@@ -1141,7 +1141,7 @@ cdef class CyTBGraph:
                 operators.append(CyTBOperator(ptr))
             return operators
 
-def search(CyKNGraph input_graph, *, int max_num_new_graphs = 1024, list imaps = None, list omaps = None, list griddims = None, list blockdims = None, list fmaps = None, list franges = None, str previous_checkpoint = None, bool verbose, str default_config = None, bool is_formal_verified):
+def search(CyKNGraph input_graph, *, str backend = "cuda", int max_num_new_graphs = 1024, list imaps = None, list omaps = None, list griddims = None, list blockdims = None, list fmaps = None, list franges = None, str previous_checkpoint = None, bool verbose, str default_config = None, bool is_formal_verified):
     # set cimaps
     cdef vector[MInt3] cimaps
     cimaps.resize(0)
@@ -1199,19 +1199,24 @@ def search(CyKNGraph input_graph, *, int max_num_new_graphs = 1024, list imaps =
     cdef CppKNGraph* cnewgraphs[1024]
     # set verbose
     cverbose = verbose
+    # set backend
+    cdef char* cbackend = NULL
+    if backend is not None:
+        py_byte_string_backend = backend.encode('UTF-8')
+        cbackend = py_byte_string_backend
     # set previous_checkpoint
     cdef char* cprevious_checkpoint = NULL
     if previous_checkpoint is not None:
-        py_byte_string = previous_checkpoint.encode('UTF-8')
-        cprevious_checkpoint = py_byte_string
+        py_byte_string_cp = previous_checkpoint.encode('UTF-8')
+        cprevious_checkpoint = py_byte_string_cp
     # convert config description
     cdef char* cconfig = NULL
     if default_config is not None:
-        py_byte_string = default_config.encode('UTF-8')
-        cconfig = py_byte_string
+        py_byte_string_config = default_config.encode('UTF-8')
+        cconfig = py_byte_string_config
     # set is_formal_verified
     cis_formal_verifed = is_formal_verified
-    num = cython_search(input_graph.p_kgraph, max_num_new_graphs, cnewgraphs, cimaps, comaps, cgriddims, cblockdims, cfmaps, cfranges, cprevious_checkpoint, cverbose, cconfig, cis_formal_verifed)
+    num = cython_search(input_graph.p_kgraph, cbackend, max_num_new_graphs, cnewgraphs, cimaps, comaps, cgriddims, cblockdims, cfmaps, cfranges, cprevious_checkpoint, cverbose, cconfig, cis_formal_verifed)
     new_graphs = list()
     for i in range(num):
         ptr = ctypes.cast(<unsigned long long>cnewgraphs[i], ctypes.c_void_p)

@@ -28,6 +28,7 @@ using namespace mirage::type;
 using namespace mirage::config;
 using namespace mirage::utils;
 
+#ifdef MIRAGE_FINGERPRINT_USE_CUDA
 __global__ void compute_matmul_fingerprint(mirage::type::FPType *A_ptr,
                                            mirage::type::FPType *B_ptr,
                                            mirage::type::FPType *C_ptr,
@@ -99,6 +100,7 @@ bool KNMatmulOp::fingerprint(void) {
   }
   return true;
 }
+#endif // MIRAGE_FINGERPRINT_USE_CUDA
 
 } // namespace kernel
 } // namespace mirage

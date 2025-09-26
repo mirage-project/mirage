@@ -3,7 +3,6 @@
 #include "containers.h"
 #include <fstream>
 #include <nlohmann/json.hpp>
-#include <vector_types.h>
 
 using json = nlohmann::json;
 

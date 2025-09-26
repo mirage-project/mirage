@@ -30,60 +30,8 @@ using namespace mirage::type;
 using namespace mirage::config;
 using namespace mirage::utils;
 
+#ifdef MIRAGE_FINGERPRINT_USE_CUDA
 __constant__ float CLAMP_MIN_MAX_DEVICE[2];
-
-template <typename DT>
-__global__ void execute_elementunary(mirage::type::KNOperatorType type,
-                                     DT *input_ptr,
-                                     DT *output_ptr,
-                                     int num_elements) {
-  int i = threadIdx.x + blockIdx.x * blockDim.x;
-  if (type == mirage::type::KN_EXP_OP) {
-    if (i < num_elements) {
-      output_ptr[i] = cutlass::fast_exp(input_ptr[i]);
-    }
-  } else if (type == mirage::type::KN_SQUARE_OP) {
-    if (i < num_elements) {
-      output_ptr[i] = input_ptr[i] * input_ptr[i];
-    }
-  } else if (type == mirage::type::KN_SQRT_OP) {
-    if (i < num_elements) {
-      output_ptr[i] = cutlass::fast_sqrt(input_ptr[i]);
-    }
-  } else if (type == mirage::type::KN_SILU_OP) {
-    if (i < num_elements) {
-      DT x = input_ptr[i];
-      output_ptr[i] = x / (1.0f + cutlass::fast_exp(-x));
-    }
-  } else if (type == mirage::type::KN_GELU_OP) {
-    if (i < num_elements) {
-      DT x = input_ptr[i];
-      output_ptr[i] = (x / 2.0f) * (1.0f + erff(x / sqrtf(2.0f)));
-    }
-  } else if (type == mirage::type::KN_RELU_OP) {
-    if (i < num_elements) {
-      DT x = input_ptr[i];
-      if (x > 0.0f) {
-        output_ptr[i] = x;
-      } else {
-        output_ptr[i] = 0.0f;
-      }
-    }
-  } else if (type == mirage::type::KN_CLAMP_OP) {
-    if (i < num_elements) {
-      DT x = input_ptr[i];
-      if (x < CLAMP_MIN_MAX_DEVICE[0]) {
-        output_ptr[i] = CLAMP_MIN_MAX_DEVICE[0];
-      } else if (x > CLAMP_MIN_MAX_DEVICE[1]) {
-        output_ptr[i] = CLAMP_MIN_MAX_DEVICE[1];
-      } else {
-        output_ptr[i] = x;
-      }
-    }
-  } else {
-    assert(false && "Unimplemented");
-  }
-}
 
 __global__ void
     compute_elementunary_fingerprint(mirage::type::KNOperatorType type,
@@ -149,6 +97,7 @@ bool KNElementUnaryOp::fingerprint(void) {
   }
   return true;
 }
+#endif // MIRAGE_FINGERPRINT_USE_CUDA
 
 } // namespace kernel
 } // namespace mirage
