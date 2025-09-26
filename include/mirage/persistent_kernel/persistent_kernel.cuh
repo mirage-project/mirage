@@ -268,7 +268,6 @@ __device__ __forceinline__ bool
   } else {
     return true;
   }
-#endif
 }
 #endif
 
