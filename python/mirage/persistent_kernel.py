@@ -76,7 +76,11 @@ static struct PyModuleDef ModuleDef = {
   "__mirage_launcher",
   NULL, //documentation
   -1, //size
-  ModuleMethods
+  ModuleMethods,
+  NULL, // m_slots
+  NULL, // m_traverse
+  NULL, // m_clear
+  NULL  // m_free
 };
 
 PyMODINIT_FUNC PyInit___mirage_launcher(void) {
