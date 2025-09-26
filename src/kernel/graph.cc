@@ -541,6 +541,17 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
         customized->bgraph, params, true /*with_residual*/);
     task_config[op] = std::make_tuple(
         3, 1, TASK_LINEAR_SWAPAB_WITH_RESIDUAL_HOPPER, variant_id);
+  } 
+  // SM100 tasks
+  else if (name == "linear_sm100") {
+    int variant_id = task_register->register_linear_sm100_task(
+        customized->bgraph, params, false /*with_residual*/);
+    task_config[op] = std::make_tuple(2, 1, TASK_LINEAR_SM100, variant_id);
+  } else if (name == "linear_with_residual_sm100") {
+    int variant_id = task_register->register_linear_sm100_task(
+        customized->bgraph, params, true /*with_residual*/);
+    task_config[op] =
+        std::make_tuple(3, 1, TASK_LINEAR_WITH_RESIDUAL_SM100, variant_id);
   } else {
     assert(false && "Unsupported task type");
   }
