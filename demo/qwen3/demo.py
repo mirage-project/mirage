@@ -676,9 +676,8 @@ if __name__ == "__main__":
             response = tokenizer.decode(generated_ids, skip_special_tokens=True)
             print(response)
 
-        print(
-            "Prompt length {}, generate length {}, per-token latency {} ms".format(
-                prompt_lengths[0], step[0] + 1 - prompt_lengths[0], run_time / (step[0] + 1 - prompt_lengths[0])
+        print("Prompt length {}, generate length {}, per-token latency (both prefill and decode): {} ms".format(
+              prompt_lengths[0], step[0] + 1 - prompt_lengths[0], run_time / (step[0] + 1)
             )
         )
     if world_size > 1:
