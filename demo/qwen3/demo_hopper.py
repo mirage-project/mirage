@@ -12,7 +12,9 @@ import os
 def grid_for_rmsnorm_linear_layer(size):
     # 96 and 64 are enough to cover all Qwen3 model? Please update the method
     # if you meet any incompatibility.
-    if size % 96 == 0:
+    if size % 128 == 0:
+        return 128
+    elif size % 96 == 0:
         return 96
     elif size % 64 == 0:
         return 64
@@ -403,9 +405,9 @@ if __name__ == "__main__":
             w_v = mpk.attach_input(
                 torch_tensor=layer.self_attn.v_proj.weight, name=f"layer_{i}_v_proj"
             )
-            w_qkv = mpk.fuse_tensors(
+            w_qkv = mpk.shuffle_tensors(
                 inputs=[w_q, w_k, w_v],
-                fused_dim=0,
+                shuffled_dim=0,
                 num_groups=model.config.num_key_value_heads // world_size,
                 name=f"layer_{i}_qkv_proj",
             )
@@ -508,9 +510,9 @@ if __name__ == "__main__":
                 torch_tensor=layer.mlp.up_proj.weight, name=f"layer_{i}_up_proj"
             )
             rmsnorm_num_tasks = grid_for_rmsnorm_linear_layer(w_gate_proj.dim(0) + w_up_proj.dim(0))
-            w_gatedup = mpk.fuse_tensors(
+            w_gatedup = mpk.shuffle_tensors(
                 inputs=[w_gate_proj, w_up_proj],
-                fused_dim=0,
+                shuffled_dim=0,
                 num_groups=rmsnorm_num_tasks//2,
                 name=f"layer_{i}_gatedup_proj",
             )

@@ -436,8 +436,6 @@ DTensor *Graph::shuffle_tensors(std::vector<DTensor const *> inputs,
   return shuffled;
 }
 
-
-
 void Graph::register_task(char const *task_type, std::vector<int> params) {
   std::string name = std::string(task_type);
   KNOperator const *op = operators.back();
