@@ -764,6 +764,42 @@ TaskGraphResult print_task_graph(
         }
         break;
       }
+      case IODesc::ShuffledTorchTensor: {
+        code.e("void *$;", desc.name);
+        size_t size = mirage::type::get_datatype_size(
+            static_cast<type::DataType>(desc.tensor.data_type));
+        for (int i = 0; i < desc.tensor.num_dims; i++) {
+          size *= desc.tensor.dim[i];
+        }
+        code.e("cudaMalloc(&$, $);", desc.name, size);
+
+        size_t bytes_per_row = size / desc.tensor.dim[0];
+        size_t bytes_per_group = 0;
+        std::vector<size_t> bytes_per_tensor;
+        for (int i = 0; i < desc.sub_descs.size(); i++) {
+          bytes_per_group += bytes_per_row * desc.sub_descs[i].tensor.dim[0] / desc.num_groups;
+          bytes_per_tensor.push_back(bytes_per_row * desc.sub_descs[i].tensor.dim[0] / desc.num_groups);
+        }
+
+        size_t start_addr = reinterpret_cast<uintptr_t>(desc.tensor.base_ptr);
+        for (int i = 0; i < desc.sub_descs.size(); i++) {
+          // printf("i is %d, desc.tensor.base_ptr is %p, desc.sub_descs[i].torch_data_ptr is %p, name is %s\n", i, desc.tensor.base_ptr, desc.sub_descs[i].torch_data_ptr, desc.sub_descs[i].name.c_str());
+          code.e("cudaMemcpy2DAsync(reinterpret_cast<void *>(static_cast<char*>($) + $), $, reinterpret_cast<const void *>($), $, $, $, cudaMemcpyDeviceToDevice);", 
+            desc.name, /*dst address*/
+            start_addr, /*dst bytes offset between each copy*/
+            bytes_per_group, /*dst bytes offset between each copy*/
+            desc.sub_descs[i].torch_data_ptr, /*src address*/
+            bytes_per_tensor[i], /*src bytes offset between each copy*/
+            bytes_per_tensor[i], /*width*/
+            desc.num_groups /*height*/
+          );
+          start_addr += bytes_per_tensor[i];
+        }
+        if (use_json_format) {
+          code.e("all_tensors[\"$\"] = $;", desc.name, desc.name);
+        }
+        break;
+      }
       default:
         assert(false);
     }

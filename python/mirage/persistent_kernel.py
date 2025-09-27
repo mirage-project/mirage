@@ -311,6 +311,14 @@ class PersistentKernel:
         t = self.kn_graph.fuse_tensors(inputs, fused_dim, num_groups, name)
         return t
 
+    def shuffle_tensors(
+        self, inputs: list[DTensor], shuffled_dim: int, num_groups: int, name: str = None
+    ) -> DTensor:
+        # Currently only support shuffling the 0-th dimension
+        assert shuffled_dim == 0
+        t = self.kn_graph.shuffle_tensors(inputs, shuffled_dim, num_groups, name)
+        return t
+
     def embed_layer(
         self,
         input: DTensor, # [batch_size, num_spec_tokens]
