@@ -57,15 +57,20 @@ __device__ __noinline__ void linear_kernel(void const *input_ptr,
   using T = std::conditional_t<std::is_same_v<T_, bfloat16>, cute::bfloat16_t, float>; // A temporary hack
   constexpr int TILE_SIZE = 128;
   constexpr int kSmemLayoutCBatch = 1;
-  // TODO: add better way to determine PIPE_DEPTH
-  constexpr int PIPE_DEPTH = OUTPUT_SIZE >= 256 ? 2 : 3;
-  // config::GemmConfig<
-  //   T, BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE, 16, 128, TILE_SIZE, PIPE_MAX, kSmemLayoutCBatch, float
-  // > gemm_config;
+  // TODO: Verify this is efficient
+  // constexpr int PIPE_DEPTH = OUTPUT_SIZE < 256 ? 5 : PIPE_MAX;
   using Config = config::GemmConfig<
-    T, BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE, 16, 128, TILE_SIZE, PIPE_DEPTH, kSmemLayoutCBatch, float
+    T, BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE, 16, 128, TILE_SIZE, PIPE_MAX, kSmemLayoutCBatch, float
   >;
   using namespace cute;
+  // if (threadIdx.x == 0) {
+  //   printf("SmemLayoutAtom: \n"); print(typename Config::SmemLayoutAtom{}); printf("\n");
+  //   printf("SmemLayoutA: \n"); print(typename Config::SmemLayoutA{}); printf("\n");
+  //   printf("SmemLayoutB: \n"); print(typename Config::SmemLayoutB{}); printf("\n");
+  //   printf("SmemLayoutAtomC: \n"); print(typename Config::SmemLayoutAtomC{}); printf("\n");
+  //   printf("SmemLayoutC: \n"); print(typename Config::SmemLayoutC{}); printf("\n");
+  // }
+  // return;
 
   using SmemLayoutA = typename Config::SmemLayoutA;
   using SmemLayoutB = typename Config::SmemLayoutB;
@@ -142,15 +147,6 @@ __device__ __noinline__ void linear_kernel(void const *input_ptr,
                             make_coord(m_iter, n_iter));  // (kTileM, kTileN, m, n) (_16,_128,1,1):(128,_1,2048,_128)
       Tensor gR = local_tile(R, make_tile(Int<kTileM>{}, Int<kTileN>{}),
                             make_coord(m_iter, n_iter));  // (kTileM, kTileN, m, n) (_16,_128,1,1):(128,_1,2048,_128)
-  // slice the tensor to small one which is used for current thread block.
-  // Tensor gA = local_tile(A, make_tile(Int<kTileM>{}, Int<kTileK>{}),
-  //                        make_coord(iy, _));  // (kTileM, kTileK, k)
-  // Tensor gB = local_tile(B, make_tile(Int<kTileN>{}, Int<kTileK>{}),
-  //                        make_coord(ix, _));  // (kTileN, kTileK, k)
-  // Tensor gD = local_tile(D, make_tile(Int<kTileM>{}, Int<kTileN>{}),
-  //                        make_coord(iy, ix));  // (kTileM, kTileN)
-  // Tensor gR = local_tile(R, make_tile(Int<kTileM>{}, Int<kTileN>{}),
-  //                        make_coord(iy, ix));  // (kTileM, kTileN)
       #if 0
       if (idx == 0) {
         printf("gA: \n"); print(gA); printf("\n");
@@ -436,7 +432,10 @@ struct GemmConfig {
   static constexpr int LoopM = (BATCH_SIZE_ + kTileM - 1) / kTileM;
   static constexpr int kTileK = kTileK_;
   static constexpr int kStage = kStage_;
+  // TODO: add better way to determine PIPE_DEPTH
+  // static constexpr int kStage = OUTPUT_SIZE_ < 128 ? 5 : 3;
   static constexpr int kSmemLayoutCBatch = kSmemLayoutCBatch_;
+  static constexpr int BankMaxElemNum = 128 / sizeof(T);
 
   static constexpr int kShmLoadSwizzleM = 3;
   static constexpr int kShmLoadSwizzleS = 3;
@@ -444,8 +443,8 @@ struct GemmConfig {
 
   using SmemLayoutAtom = decltype(composition(
       Swizzle<kShmLoadSwizzleB, kShmLoadSwizzleM, kShmLoadSwizzleS>{},
-      make_layout(make_shape(Int<8>{}, Int<kTileK>{}),
-                  make_stride(Int<kTileK>{}, Int<1>{}))));
+      make_layout(make_shape(Int<8>{}, Int<BankMaxElemNum>{}),
+                  make_stride(Int<BankMaxElemNum>{}, Int<1>{}))));
   using SmemLayoutA = decltype(
       tile_to_shape(SmemLayoutAtom{},
                     make_shape(Int<kTileM>{}, Int<kTileK>{}, Int<kStage>{})));
@@ -487,8 +486,8 @@ struct GemmConfig {
   using S2RCopyAtomB = s2r_copy_atom;
 
   using SmemLayoutAtomC = decltype(composition(
-      Swizzle<2, 3, 3>{}, make_layout(make_shape(Int<kMmaPM>{}, Int<kMmaPN>{}),
-                                      make_stride(Int<kMmaPN>{}, Int<1>{}))));
+      Swizzle<3, 3, 3>{}, make_layout(make_shape(Int<kMmaPM>{}, Int<BankMaxElemNum>{}),
+                                      make_stride(Int<BankMaxElemNum>{}, Int<1>{}))));
   using SmemLayoutC = decltype(tile_to_shape(
       SmemLayoutAtomC{},
       make_shape(Int<kMmaPM>{}, Int<kMmaPN>{}, Int<kSmemLayoutCBatch>{})));
