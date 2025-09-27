@@ -67,7 +67,8 @@ __global__ __launch_bounds__(128, 1) void linear_kernel_sm100_wrapper(
 template <class SharedStorage,
           class ATensor, class BTensor, class CTensor, class DTensor,
           class MmaTiler_MNK, class EpiTiler_MN, class TiledMMA, class ClusterShape_MNK,
-          class TmaAtomA, class TmaAtomB, class TmaAtomD, int Num_AB_Stage, int Num_ACC_Stage, int Num_D_Stage>
+          class TmaAtomA, class TmaAtomB, class TmaAtomD, 
+          int Num_AB_Stage, int Num_ACC_Stage, int Num_C_Stage, bool NoBias>
 __global__ __launch_bounds__(256, 1) void linear_kernel_ws_sm100_wrapper(
             ATensor mA,                      // (Gemm_M, Gemm_K)
             BTensor mB,                      // (Gemm_N, Gemm_K)
@@ -85,7 +86,7 @@ __global__ __launch_bounds__(256, 1) void linear_kernel_ws_sm100_wrapper(
 
   kernel::linear_kernel_ws_sm100<SharedStorage, ATensor, BTensor, CTensor, DTensor,
                       MmaTiler_MNK, EpiTiler_MN, TiledMMA, ClusterShape_MNK,
-                      TmaAtomA, TmaAtomB, TmaAtomD, Num_AB_Stage, Num_ACC_Stage, Num_D_Stage>(
+                      TmaAtomA, TmaAtomB, TmaAtomD, Num_AB_Stage, Num_ACC_Stage, Num_C_Stage, NoBias>(
                       mA, mB, mC, mD,
                       mma_tiler, epi_tiler, tiled_mma, cluster_shape,
                       &tma_atom_A, &tma_atom_B, &tma_atom_D, num_tmem_columns);
@@ -196,24 +197,24 @@ void launch_linear_sm100(TypeA const* device_ptr_A,
   }
 }
 
-template <class TypeA, class TypeB, class TypeC, class TypeD, class LayoutA, class LayoutB, class LayoutC, class LayoutD>
+template <class TypeA, class TypeB, class TypeBias, class TypeC, class LayoutA, class LayoutB, class LayoutBias, class LayoutC>
 void launch_linear_sm100_warp_specialized(TypeA const* device_ptr_input,
                                           TypeB const* device_ptr_weight,
-                                          TypeC const* device_ptr_residual,
-                                          TypeD      * device_ptr_output,
+                                          TypeBias const* device_ptr_bias,
+                                          TypeC      * device_ptr_output,
                                           LayoutA layout_A,
                                           LayoutB layout_B,
-                                          LayoutC layout_C,
-                                          LayoutD layout_D) {
+                                          LayoutBias layout_Bias,
+                                          LayoutC layout_C) {
   // Ensure the input/output tensor dimensions match for GEMM
-  assert(cute::shape<0>(layout_A) == cute::shape<1>(layout_D));  // Gemm_M
-  assert(cute::shape<0>(layout_B) == cute::shape<0>(layout_D));  // Gemm_N
-  assert(cute::shape<1>(layout_A) == cute::shape<1>(layout_B));  // Gemm_K
-
-  assert(device_ptr_residual != nullptr);
-
   assert(cute::shape<0>(layout_A) == cute::shape<1>(layout_C));  // Gemm_M
   assert(cute::shape<0>(layout_B) == cute::shape<0>(layout_C));  // Gemm_N
+  assert(cute::shape<1>(layout_A) == cute::shape<1>(layout_B));  // Gemm_K
+
+  if (device_ptr_bias != nullptr) {
+    assert(cute::shape<0>(layout_A) == cute::shape<1>(layout_Bias));  // Gemm_M
+    assert(cute::shape<0>(layout_B) == cute::shape<0>(layout_Bias));  // Gemm_N
+  }
 
   using TypeAcc = float;
   // SwapAB configuration
@@ -221,14 +222,14 @@ void launch_linear_sm100_warp_specialized(TypeA const* device_ptr_input,
   const int mma_n = 32;
 
   const int num_ab_stage = 8;
-  const int num_d_stage = 4;
+  const int num_c_stage = 4;
   const int num_acc_stage = 2;
 
   // Represent the full tensors in global memory
   cute::Tensor mA = cute::make_tensor(cute::make_gmem_ptr(device_ptr_weight), layout_A);      // (Gemm_M, Gemm_K)
   cute::Tensor mB = cute::make_tensor(cute::make_gmem_ptr(device_ptr_input), layout_B);      // (Gemm_N, Gemm_K)
-  cute::Tensor mC = cute::make_tensor(cute::make_gmem_ptr(device_ptr_residual), layout_C);      // (Gemm_N, Gemm_M)
-  cute::Tensor mD = cute::make_tensor(cute::make_gmem_ptr(device_ptr_output), layout_D);      // (Gemm_N, Gemm_M)
+  cute::Tensor mBias = cute::make_tensor(cute::make_gmem_ptr(device_ptr_bias), layout_Bias);      // (Gemm_N, Gemm_M)
+  cute::Tensor mC = cute::make_tensor(cute::make_gmem_ptr(device_ptr_output), layout_C);      // (Gemm_N, Gemm_M)
 
   // // TODO(Zhihao): add dispatch for residual
 
@@ -256,27 +257,27 @@ void launch_linear_sm100_warp_specialized(TypeA const* device_ptr_input,
   // Pre-partitioned Tile Shape (MmaTile_N, MmaTile_K) to post-partitioned (MmaB, NumMma_N, NumMma_K)
   auto mma_shape_B = cute::partition_shape_B(tiled_mma, cute::make_shape(cute::size<1>(mma_tiler), cute::size<2>(mma_tiler), cute::Int<num_ab_stage>{}));
   // Pre-partitioned Tile Shape (MmaTile_N, MmaTile_M) to post-partitioned (MmaC, NumMma_N, NumMma_K)
-  auto mma_shape_D = cute::make_shape(cute::make_shape(cute::size<1>(mma_tiler), cute::size<0>(mma_tiler)), cute::Int<1>{}, cute::Int<1>{}, cute::Int<num_d_stage>{});
+  auto mma_shape_C = cute::make_shape(cute::make_shape(cute::size<1>(mma_tiler), cute::size<0>(mma_tiler)), cute::Int<1>{}, cute::Int<1>{}, cute::Int<num_c_stage>{});
 
   // Print and inspect mma_shape_A, and mma_shape_B for this example.
   // cute::print("mma_shape_A:\t"); cute::print(mma_shape_A); cute::print("\n");  // mma_shape_A:  ((_128,_16),_1,_4,_8)
   // cute::print("mma_shape_B:\t"); cute::print(mma_shape_B); cute::print("\n");  // mma_shape_B:  ((_32,_16),_1,_4,_8)
-  // cute::print("mma_shape_D:\t"); cute::print(mma_shape_D); cute::print("\n");  // mma_shape_D:  ((_32,_128),_1,_1,_4)
+  // cute::print("mma_shape_C:\t"); cute::print(mma_shape_C); cute::print("\n");  // mma_shape_C:  ((_32,_128),_1,_1,_4)
 
-  auto epi_tiler = cute::make_tile(cute::size<0,0>(mma_shape_D), cute::size<0,1>(mma_shape_D));
+  auto epi_tiler = cute::make_tile(cute::size<0,0>(mma_shape_C), cute::size<0,1>(mma_shape_C));
 
   auto sA_layout = cute::UMMA::tile_to_mma_shape(cute::UMMA::Layout_K_SW128_Atom<TypeA>{}, mma_shape_A);
   auto sB_layout = cute::UMMA::tile_to_mma_shape(cute::UMMA::Layout_K_SW128_Atom<TypeB>{}, mma_shape_B);
-  // constuct unswizzled layout for D
-  auto sD_layout_fake = cute::UMMA::tile_to_mma_shape(cute::UMMA::Layout_K_INTER_Atom<TypeD>{}, mma_shape_D);
-  auto sD_shape = cute::make_shape(cute::make_shape(cute::Int<mma_n>{}, cute::Int<mma_m>{}), cute::Int<1>{}, cute::Int<1>{}, cute::make_shape(cute::Int<1>{}, cute::Int<num_d_stage>{}));
-  auto sD_stride = cute::make_stride(cute::make_stride(cute::Int<mma_m>{}, cute::Int<1>{}), cute::Int<0>{}, cute::Int<0>{}, cute::make_stride(cute::Int<0>{}, cute::Int<mma_m * mma_n>{}));
-  auto sD_layout = cute::composition(sD_layout_fake.layout_a(), sD_layout_fake.offset(), cute::make_layout(sD_shape, sD_stride));
+  // constuct unswizzled layout for C
+  auto sC_layout_fake = cute::UMMA::tile_to_mma_shape(cute::UMMA::Layout_K_INTER_Atom<TypeC>{}, mma_shape_C);
+  auto sC_shape = cute::make_shape(cute::make_shape(cute::Int<mma_n>{}, cute::Int<mma_m>{}), cute::Int<1>{}, cute::Int<1>{}, cute::make_shape(cute::Int<1>{}, cute::Int<num_c_stage>{}));
+  auto sC_stride = cute::make_stride(cute::make_stride(cute::Int<mma_m>{}, cute::Int<1>{}), cute::Int<0>{}, cute::Int<0>{}, cute::make_stride(cute::Int<0>{}, cute::Int<mma_m * mma_n>{}));
+  auto sC_layout = cute::composition(sC_layout_fake.layout_a(), sC_layout_fake.offset(), cute::make_layout(sC_shape, sC_stride));
 
   // Print and inspect sA_layout and sB_layout for this example.
   // cute::print("sA_layout:\t"); cute::print(sA_layout); cute::print("\n");      // sA_layout:   Sw<3,4,3> o smem_ptr[16b](unset) o ((_128,_16),_1,_4):((_64,_1),_0,_16)
   // cute::print("sB_layout:\t"); cute::print(sB_layout); cute::print("\n");      // sB_layout:   Sw<3,4,3> o smem_ptr[16b](unset) o ((_256,_16),_1,_4):((_64,_1),_0,_16)
-  // cute::print("sD_layout:\t"); cute::print(sD_layout); cute::print("\n");      // sD_layout:   Sw<3,4,3> o smem_ptr[16b](unset) o ((_256,_16),_1,_4):((_64,_1),_0,_16)
+  // cute::print("sC_layout:\t"); cute::print(sC_layout); cute::print("\n");      // sC_layout:   Sw<3,4,3> o smem_ptr[16b](unset) o ((_256,_16),_1,_4):((_64,_1),_0,_16)
   
   // The cluster shape and layout
   auto cluster_shape = cute::make_shape(cute::Int<1>{}, cute::Int<1>{}, cute::Int<1>{});
@@ -308,17 +309,17 @@ void launch_linear_sm100_warp_specialized(TypeA const* device_ptr_input,
 
   // cute::print("tma_atom_B:\t"); cute::print(tma_atom_B); cute::print("\n");
 
-  cute::Copy_Atom tma_atom_D = cute::make_tma_atom(
+  cute::Copy_Atom tma_atom_C = cute::make_tma_atom(
       cute::SM90_TMA_STORE{},        // TMA Store Op
-      mD,                     // Source GMEM tensor
-      sD_layout(cute::_, cute::_, cute::_, cute::Int<0>{}),             // Destination SMEM layout
+      mC,                     // Source GMEM tensor
+      sC_layout(cute::_, cute::_, cute::_, cute::Int<0>{}),             // Destination SMEM layout
       epi_tiler
     );
-  cute::Tensor mD_tma = tma_atom_D.get_tma_tensor(cute::shape(mD));   // (Gemm_N, Gemm_K)
+  cute::Tensor mC_tma = tma_atom_C.get_tma_tensor(cute::shape(mC));   // (Gemm_N, Gemm_K)
 
   // cute::print("tma_atom_D:\t"); cute::print(tma_atom_D); cute::print("\n");
 
-  using SMEMStorage = kernel::PipedSharedStorage<TypeA, TypeB, TypeD, decltype(sA_layout), decltype(sB_layout), decltype(sD_layout), num_ab_stage, num_acc_stage>;
+  using SMEMStorage = kernel::PipedSharedStorage<TypeA, TypeB, TypeC, decltype(sA_layout), decltype(sB_layout), decltype(sC_layout), num_ab_stage, num_acc_stage>;
 
   int smemBytes = sizeof(SMEMStorage);
 
@@ -328,23 +329,45 @@ void launch_linear_sm100_warp_specialized(TypeA const* device_ptr_input,
   dim3 cluster_dim(1, 1, 1);
   dim3 block_dim(256, 1, 1);
 
-  auto* kernel_ptr = &linear_kernel_ws_sm100_wrapper<SMEMStorage,
-                                decltype(mA_tma), decltype(mB_tma), decltype(mC), decltype(mD_tma),
+  if(device_ptr_bias != nullptr){
+    auto* kernel_ptr = &linear_kernel_ws_sm100_wrapper<SMEMStorage,
+                                decltype(mA_tma), decltype(mB_tma), decltype(mBias), decltype(mC_tma),
                                 decltype(mma_tiler), decltype(epi_tiler), decltype(tiled_mma), decltype(cluster_shape),
-                                decltype(tma_atom_A), decltype(tma_atom_B), decltype(tma_atom_D), num_ab_stage, num_acc_stage, num_d_stage>;
-  CUTE_CHECK_ERROR(cudaFuncSetAttribute(kernel_ptr,
-                    cudaFuncAttributeMaxDynamicSharedMemorySize,
-                    smemBytes));
-  cutlass::ClusterLaunchParams params = {grid_dim, block_dim, cluster_dim, smemBytes};
-  cutlass::Status status = cutlass::launch_kernel_on_cluster(params, (void const*) kernel_ptr,
-                                                            mA_tma, mB_tma, mC, mD_tma,
-                                                            mma_tiler, epi_tiler, tiled_mma, cluster_shape,
-                                                            tma_atom_A, tma_atom_B, tma_atom_D, num_tmem_columns);
-  CUTE_CHECK_LAST();
+                                decltype(tma_atom_A), decltype(tma_atom_B), decltype(tma_atom_C), num_ab_stage, num_acc_stage, num_c_stage, false>;
+    CUTE_CHECK_ERROR(cudaFuncSetAttribute(kernel_ptr,
+                      cudaFuncAttributeMaxDynamicSharedMemorySize,
+                      smemBytes));
+    cutlass::ClusterLaunchParams params = {grid_dim, block_dim, cluster_dim, smemBytes};
+    cutlass::Status status = cutlass::launch_kernel_on_cluster(params, (void const*) kernel_ptr,
+                                                              mA_tma, mB_tma, mBias, mC_tma,
+                                                              mma_tiler, epi_tiler, tiled_mma, cluster_shape,
+                                                              tma_atom_A, tma_atom_B, tma_atom_C, num_tmem_columns);
+    CUTE_CHECK_LAST();
 
-  if (status != cutlass::Status::kSuccess) {
-    std::cerr << "Error: Failed at kernel Launch" << std::endl;
+    if (status != cutlass::Status::kSuccess) {
+      std::cerr << "Error: Failed at kernel Launch" << std::endl;
+    }
+  } else {
+    auto* kernel_ptr = &linear_kernel_ws_sm100_wrapper<SMEMStorage,
+                                decltype(mA_tma), decltype(mB_tma), decltype(mBias), decltype(mC_tma),
+                                decltype(mma_tiler), decltype(epi_tiler), decltype(tiled_mma), decltype(cluster_shape),
+                                decltype(tma_atom_A), decltype(tma_atom_B), decltype(tma_atom_C), num_ab_stage, num_acc_stage, num_c_stage, true>;
+    CUTE_CHECK_ERROR(cudaFuncSetAttribute(kernel_ptr,
+                      cudaFuncAttributeMaxDynamicSharedMemorySize,
+                      smemBytes));
+    cutlass::ClusterLaunchParams params = {grid_dim, block_dim, cluster_dim, smemBytes};
+    cutlass::Status status = cutlass::launch_kernel_on_cluster(params, (void const*) kernel_ptr,
+                                                              mA_tma, mB_tma, mBias, mC_tma,
+                                                              mma_tiler, epi_tiler, tiled_mma, cluster_shape,
+                                                              tma_atom_A, tma_atom_B, tma_atom_C, num_tmem_columns);
+    CUTE_CHECK_LAST();
+
+    if (status != cutlass::Status::kSuccess) {
+      std::cerr << "Error: Failed at kernel Launch" << std::endl;
+    }
   }
+
+  
 
 }
 
@@ -355,7 +378,7 @@ void linear_kernel(at::Tensor const& input,
   auto const* input_ptr = static_cast<const bfloat16*>(input.data_ptr());
   auto const* weight_ptr = static_cast<const bfloat16*>(weight.data_ptr());
   bool has_residual = residual.has_value();
-  auto const* residual_ptr = static_cast<const float*>(residual->data_ptr());
+  auto const* residual_ptr = has_residual ? static_cast<const float*>(residual->data_ptr()) : nullptr;
   auto *output_ptr = static_cast<float*>(output.data_ptr());
   
   // A tensor MxK K-major (Layout T = Row-Major)
@@ -393,7 +416,7 @@ void linear_kernel_warp_specialized(torch::Tensor input,
   auto const* input_ptr = static_cast<const bfloat16*>(input.data_ptr());
   auto const* weight_ptr = static_cast<const bfloat16*>(weight.data_ptr());
   bool has_residual = residual.has_value();
-  auto const* residual_ptr = static_cast<const bfloat16*>(residual->data_ptr());
+  auto const* residual_ptr = has_residual ? static_cast<const bfloat16*>(residual->data_ptr()) : nullptr;
   auto *output_ptr = static_cast<bfloat16*>(output.data_ptr());
   
   // A tensor MxK K-major (Layout T = Row-Major)
@@ -402,8 +425,8 @@ void linear_kernel_warp_specialized(torch::Tensor input,
   auto layout_B = cute::make_layout(cute::make_shape(input.size(0), input.size(1)), cute::make_stride(input.size(1), cute::Int<1>{}));   // (Gemm_N,Gemm_K):(Gemm_K,_1)
   // C tensor MxN N-major (Layout T = Row-Major)
   auto layout_C = cute::make_layout(cute::make_shape(input.size(0), weight.size(0)), cute::make_stride(weight.size(0), cute::Int<1>{}));   // (Gemm_M,Gemm_N):(Gemm_N,_1)
-  // D tensor MxN N-major (Layout T = Row-Major)
-  auto layout_D = cute::make_layout(cute::make_shape(input.size(0), weight.size(0)), cute::make_stride(weight.size(0), cute::Int<1>{}));   // (Gemm_M,Gemm_N):(Gemm_N,_1)
+  // Bias tensor MxN N-major (Layout T = Row-Major)
+  auto layout_Bias = cute::make_layout(cute::make_shape(input.size(0), weight.size(0)), cute::make_stride(weight.size(0), cute::Int<1>{}));   // (Gemm_M,Gemm_N):(Gemm_N,_1)
 
   launch_linear_sm100_warp_specialized(
     input_ptr,
@@ -412,8 +435,8 @@ void linear_kernel_warp_specialized(torch::Tensor input,
     output_ptr,
     layout_A,
     layout_B,
-    layout_C,
-    layout_D
+    layout_Bias,
+    layout_C
   );  
 
   cudaError_t err = cudaDeviceSynchronize();
