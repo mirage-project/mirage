@@ -158,9 +158,9 @@ __device__ __forceinline__ void
 
   // define the swizzle mode
   using ZeroBufferSmem = smem_row<T, 0, 0, 0, 1, 8, 8>;
-  using InputSmem = smem_row<T, 3, 3, 3, BATCH_SIZE, TILE_SIZE, TILE_SIZE>;
+  using InputSmem = smem_row<T, 0, 0, 0, BATCH_SIZE, TILE_SIZE, TILE_SIZE>;
   using InputBufferSmem =
-      smem_row<T, 3, 3, 3, K_PIPE_MAX * BATCH_SIZE, TILE_SIZE, TILE_SIZE>;
+      smem_row<T, 0, 0, 0, K_PIPE_MAX * BATCH_SIZE, TILE_SIZE, TILE_SIZE>;
   using WeightSmem =
       smem_col<T, 3, 3, 3, TILE_SIZE, OUTPUT_ATOM_SIZE, TILE_SIZE>;
   using WeightBufferSmem =
