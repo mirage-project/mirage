@@ -5,42 +5,7 @@ import mirage as mi
 import json
 from op import Operator
 from build_computation_graph import get_computation_graph
-
-# ids_to_nodes = {}
-
-# def build_computational_graph(op_node, unique_operators):
-#     unique_operators.add(op_node.name)
-#     if op_node.input_ops != []:
-#         return
-    
-#     local_scope = {}
-#     exec(
-# f"""
-# def hook_fn(inputs, outputs):
-#     if {id(op_node.fn)} in ids_to_nodes:
-#         op_node = ids_to_nodes[{id(op_node.fn)}]
-#         op_node.input_tensor_shapes = [(input.shape, id(input)) if input != None else None for input in inputs]
-#         op_node.output_tensor_shapes = [(output.shape, id(output)) if output != None else None for output in outputs]
-# """,
-#     globals(),
-#     local_scope
-#     )
-
-#     op_node.fn.register_hook(local_scope["hook_fn"])
-
-#     if id(op_node.fn) not in ids_to_nodes:
-#         ids_to_nodes[id(op_node.fn)] = op_node
-
-#     for next_fn in op_node.fn.next_functions:
-#         if id(next_fn[0]) in ids_to_nodes:
-#             ids_to_nodes[id(next_fn[0])].output_ops.append(op_node)
-#         else:
-#             if next_fn[0] == None:
-#                 continue
-#             ids_to_nodes[id(next_fn[0])] = Operator(name=next_fn[0].name(), fn=next_fn[0], input_ops=[], output_ops=[op_node])
-#         op_node.input_ops.append(ids_to_nodes[id(next_fn[0])])
-        
-#         build_computational_graph(ids_to_nodes[id(next_fn[0])], unique_operators)
+from build_dataset import augment_partitions, serialize_subgraphs_to_json
 
 def copy_subgraph(subgraph):
     new_subgraph = {}
@@ -155,6 +120,61 @@ def partition_graph(model,
         get_partitions(op_node, min_num_ops, max_num_ops, all_subgraphs, UNSUPPORTED_OPS, COMPOSITE_OPS, IGNORE_OPS)
     return all_subgraphs, unique_operators
 
+def partition_graph_with_sampling(model, 
+                                 dummy_input, 
+                                 min_num_ops=2, 
+                                 max_num_ops=4, 
+                                 augmentation_factor=5,
+                                 UNSUPPORTED_OPS=set(), 
+                                 COMPOSITE_OPS=dict(), 
+                                 IGNORE_OPS=set()):
+    """
+    Generate augmented dataset using only valid partitions as seeds.
+    
+    Args:
+        model: The model to analyze
+        dummy_input: Dummy input for the model
+        min_num_ops: Minimum number of operations in a partition
+        max_num_ops: Maximum number of operations in a partition
+        augmentation_factor: Number of variations to create per valid partition
+        UNSUPPORTED_OPS: Set of unsupported operations
+        COMPOSITE_OPS: Dictionary of composite operations
+        IGNORE_OPS: Set of operations to ignore
+        
+    Returns:
+        Tuple of (augmented_subgraphs, unique_operators)
+    """
+    
+    # Get the computation graph
+    unique_operators = {}
+    operators = get_computation_graph(model, dummy_input, unique_operators, "onnx")
+
+    # Get valid partitions (already in adjacency list format)
+    valid_partitions = []
+    for _, op_node in operators.items():
+        get_partitions(op_node, min_num_ops, max_num_ops, valid_partitions, 
+                      UNSUPPORTED_OPS, COMPOSITE_OPS, IGNORE_OPS)
+    
+    print(f"Found {len(valid_partitions)} valid partitions")
+    
+    # Augment the valid partitions
+    augmented_subgraphs = augment_partitions(
+        valid_partitions=valid_partitions,
+        UNSUPPORTED_OPS=UNSUPPORTED_OPS,
+        IGNORE_OPS=IGNORE_OPS,
+        augmentation_factor=augmentation_factor,
+        perturbation_strategies=['expand', 'contract', 'perturb']
+    )
+    
+    print(f"Generated {len(augmented_subgraphs)} total subgraphs (including originals)")
+    print(f"Augmentation ratio: {len(augmented_subgraphs) / len(valid_partitions):.1f}x")
+    
+    # Serialize the results
+    serialize_subgraphs_to_json(augmented_subgraphs, 
+                               filename='scripts/augmented_partitions.json')
+    
+    return augmented_subgraphs, unique_operators
+
 def function_map(graph, func, inputs, kwargs={}):
     match func.fn:
         case "MatMul": return graph.matmul(*inputs)
@@ -193,7 +213,7 @@ def function_map(graph, func, inputs, kwargs={}):
             reduced = graph.reduction(matrix, dim)
             return graph.div(reduced, num_els)
         case _: 
-            raise NotImplementedError
+            raise NotImplementedError(f"{func.fn} not implemented")
 
 # Take in an adjacency list formatted subgraph and generate a mirage kernel graph
 def to_kernel_graph(subgraph):
@@ -257,7 +277,7 @@ def to_kernel_graph(subgraph):
     return graph, dims
         
 def generate_all_kernels(model, dummy_inputs, min_num_ops=2, max_num_ops=4, UNSUPPORTED_OPS=set(), COMPOSITE_OPS=set(), IGNORE_OPS=set(), dataset_name=None):
-    subgraphs, _ = partition_graph(model, dummy_inputs, min_num_ops, max_num_ops, UNSUPPORTED_OPS, COMPOSITE_OPS, IGNORE_OPS)
+    subgraphs, _ = partition_graph_with_sampling(model, dummy_inputs, min_num_ops, max_num_ops, 5, UNSUPPORTED_OPS, COMPOSITE_OPS, IGNORE_OPS)
     kernel_input_dims = []
     all_kernels = []
     hashes = set()
@@ -270,17 +290,17 @@ def generate_all_kernels(model, dummy_inputs, min_num_ops=2, max_num_ops=4, UNSU
         if graph_hash in hashes:
             continue
         hashes.add(graph_hash)
-        
-        # save original mugraph
-        kernel_graph.to_json(f"original_{graph_hash}.json")
-        
+
         try:
             print(f"Superoptimizing {graph_hash}")
             optimized_graph, best_perf = kernel_graph.superoptimize()
         except Exception as e:
             print(f"Subgraph {graph_hash} superoptimize failed with error: {e}")
             continue
-
+        
+        # save original mugraph
+        kernel_graph.to_json(f"original_{graph_hash}.json")
+        
         performance[graph_hash] = best_perf
         optimized_graph.to_json(f"optimized_{graph_hash}.json")
         all_kernels.append(optimized_graph)

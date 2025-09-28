@@ -17,9 +17,12 @@ class Operator:
         op_dict["output_ops"] = [op.name for op in op_dict["output_ops"]]
         return op_dict
     
+    def __repr__(self):
+        return f"\n{self.name}\n<-IN: {[op.name for op in self.input_ops]}\n->OUT: {[op.name for op in self.output_ops]}\nIN_TENSORS: {self.input_tensor_shapes}\nOUT_TENSORS: {self.output_tensor_shapes}\n"
+        
     def to_json(self):
         return json.dumps(self, default=lambda obj : obj.__json__())
-    
+
     def from_json(self, op):
         if isinstance(op, str):
             op = json.loads(op)

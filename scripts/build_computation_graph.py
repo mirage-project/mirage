@@ -177,19 +177,16 @@ def parse_onnx_model(model, unique_operators):
             if input_name in shape_value_dict and input_name in tensor_id:
                 shape = shape_value_dict[input_name]
 
-                # TODO we should leave modifying the graph structure to partition_graph.py
-                # since build_computational graph should faithfully construct the model
+                # modifications for specific operators
                 if i == 0:
                     if op_type == "Softmax":
                         shape = shape[:3]
                 if i == 1:
-                    if op_type in ["Div", "Add", "Pow"]:
-                        shape = input_tensor_shapes[0][0]
                     if op_type == "ReduceMean":
                         # the second tensor of ReduceMean is a 1x1 tensor with the reduction dimension
                         # TODO for now, we assume the last dimension is the reduction dimension always
                         continue
-                    if op_type == "MatMul":
+                    elif op_type == "MatMul":
                         if 0 in shape:
                             shape = tuple()
                         elif (len(input_tensor_shapes[0][0]) - len(shape)) == 1:
@@ -201,16 +198,16 @@ def parse_onnx_model(model, unique_operators):
         for output_name in node.output:
             if output_name in shape_value_dict and output_name in tensor_id:
                 shape = shape_value_dict[output_name]
+
+                # modifications for specfic operators
                 if i == 0:
                     if op_type == "Softmax":
                         shape = shape[:3]
                 output_tensor_shapes.append((shape, tensor_id[output_name]))
         
         operator = Operator(name=node_name, fn=op_type, input_ops=[], output_ops=[], input_tensor_shapes=input_tensor_shapes, output_tensor_shapes=output_tensor_shapes, additional_params=additional_params, kwargs=kwargs)
-        # operator = {"name":node_name, "fn":op_type, "input_ops":[], "output_ops":[], "input_tensor_shapes":input_tensor_shapes, "output_tensor_shapes":output_tensor_shapes}
         operators[node_name] = operator
         
-
     # Connect the input ops
     for node in model.graph.node:
         node_name = node.name or f"{node.op_type}_{id(node)}"
@@ -225,9 +222,6 @@ def parse_onnx_model(model, unique_operators):
                 dummy_const_operator = Operator(name=input_name, fn="Constant")
                 operators[node.name].input_ops.append(dummy_const_operator)
     
-    # print("After adding inputs")
-    # print(operators)
-    
     # Filling in output ops
     for node in model.graph.node:
         node_name = node.name or f"{node.op_type}_{id(node)}"
@@ -239,13 +233,37 @@ def parse_onnx_model(model, unique_operators):
             else:
                 dummy_const_operator = Operator(name=output_name, fn="Constant")
                 operators[node.name].output_ops.append(dummy_const_operator)
-    # print("After adding outputs")
-    # print(operators)
+    
+    # pass to reassign tensor shapes
+    def backward(op, succ_shape):
+        if op.fn in ["Softmax", "MatMul", "ReduceMean"]:
+            return
 
-    # print([node.name for node in model.graph.node])
-    # root_node = operators[model.graph.node[0].name]
-    # print_computational_graph(operators['node_Transpose_0'])
-    # print_computational_graph(root_node)
+        for i in range(len(op.input_tensor_shapes)):
+            op.input_tensor_shapes[i] = succ_shape
+        op.output_tensor_shapes[0] = succ_shape
+        
+        for pred in op.input_ops:
+            # since we must have visited this node before during topological traversal,
+            # we know what the input and output shapes are the same
+            if pred.output_tensor_shapes and pred.output_tensor_shapes[0] != succ_shape:
+                backward(pred, succ_shape)
+
+    for node in model.graph.node: # ensure topological order
+        op = operators[node.name]
+        if op.fn in ["Softmax", "MatMul", "ReduceMean"]:
+            continue
+        
+        # predecessor's output shapes should conform to current op's output shape
+        shape = op.output_tensor_shapes[0]
+
+        for pred in op.input_ops:
+            if pred.output_tensor_shapes and pred.output_tensor_shapes[0] != shape:
+                backward(pred, shape)
+        
+        for i in range(len(op.input_tensor_shapes)):
+            op.input_tensor_shapes[i] = shape
+
     return operators
 
 def test_cfg():
@@ -354,7 +372,7 @@ def get_computation_graph(model, dummy_input, unique_operators, method):
                 model,
                 dummy_input,
                 onnx_path,
-                # dynamo=True
+                dynamo=True
             )
             
             shape_inference.infer_shapes_path(model_path="scripts/onnx/integrate_test.onnx",

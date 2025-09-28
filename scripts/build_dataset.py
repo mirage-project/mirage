@@ -3,14 +3,14 @@ from collections import deque, defaultdict
 from typing import Dict, List, Set, Optional, Any, Tuple
 import json
 from build_computation_graph import get_computation_graph
-from partition_graph import get_partitions
 
 def _shallow_copy_adjacency(partition: Dict[Any, List[Any]]) -> Dict[Any, List[Any]]:
     """Create a shallow copy of adjacency list."""
     return {node: list(connections) for node, connections in partition.items()}
 
 def _expand_partition_adjacency(partition: Dict[Any, List[Any]], 
-                               all_operators: Dict[str, Any],
+                               UNSUPPORTED_OPS: set,
+                               IGNORE_OPS: set,
                                expansion_size: int = 2) -> Dict[Any, List[Any]]:
     """Expand a partition in adjacency list format by adding connected neighbors."""
     
@@ -23,15 +23,17 @@ def _expand_partition_adjacency(partition: Dict[Any, List[Any]],
     for op_node in partition_nodes:
         # Check input neighbors
         for input_op in op_node.input_ops:
-            if (hasattr(input_op, 'name') and 
-                input_op.name in all_operators and 
+            if (hasattr(input_op, 'fn') and 
+                input_op.fn not in UNSUPPORTED_OPS and 
+                input_op.fn not in IGNORE_OPS and
                 input_op not in partition_nodes):
                 boundary_candidates.append(input_op)
         
         # Check output neighbors  
         for output_op in op_node.output_ops:
-            if (hasattr(output_op, 'name') and 
-                output_op.name in all_operators and 
+            if (hasattr(output_op, 'fn') and 
+                output_op.fn not in UNSUPPORTED_OPS and
+                output_op.fn not in IGNORE_OPS and
                 output_op not in partition_nodes):
                 boundary_candidates.append(output_op)
     
@@ -103,7 +105,8 @@ def _contract_partition_adjacency(partition: Dict[Any, List[Any]],
 
 
 def _perturb_partition_adjacency(partition: Dict[Any, List[Any]],
-                                all_operators: Dict[str, Any],
+                                UNSUPPORTED_OPS: set,
+                                IGNORE_OPS: set,
                                 perturbation_ratio: float = 0.3) -> Dict[Any, List[Any]]:
     """Create a variation by removing some nodes and adding new connected ones."""
     
@@ -112,13 +115,14 @@ def _perturb_partition_adjacency(partition: Dict[Any, List[Any]],
     
     # First contract, then expand
     contracted = _contract_partition_adjacency(partition, num_to_change)
-    perturbed = _expand_partition_adjacency(contracted, all_operators, num_to_change)
+    perturbed = _expand_partition_adjacency(contracted, UNSUPPORTED_OPS, IGNORE_OPS, num_to_change)
     
     return perturbed
 
 
 def augment_partitions(valid_partitions: List[Dict[Any, List[Any]]],
-                      all_operators: Dict[str, Any],
+                      UNSUPPORTED_OPS: set,
+                      IGNORE_OPS: set,
                       augmentation_factor: int = 5,
                       perturbation_strategies: List[str] = None) -> List[Dict[Any, List[Any]]]:
     """
@@ -148,7 +152,7 @@ def augment_partitions(valid_partitions: List[Dict[Any, List[Any]]],
             
             if strategy == 'expand':
                 expansion_size = random.randint(1, 3)
-                augmented = _expand_partition_adjacency(partition, all_operators, expansion_size)
+                augmented = _expand_partition_adjacency(partition, UNSUPPORTED_OPS, IGNORE_OPS, expansion_size)
             
             elif strategy == 'contract':
                 if len(partition) > 3:  # Only contract if large enough
@@ -159,7 +163,7 @@ def augment_partitions(valid_partitions: List[Dict[Any, List[Any]]],
             
             elif strategy == 'perturb':
                 perturbation_ratio = random.uniform(0.2, 0.5)
-                augmented = _perturb_partition_adjacency(partition, all_operators, perturbation_ratio)
+                augmented = _perturb_partition_adjacency(partition, UNSUPPORTED_OPS, IGNORE_OPS, perturbation_ratio)
             
             else:
                 continue
@@ -221,58 +225,3 @@ def serialize_subgraphs_to_json(subgraphs: List[Dict[Any, List[Any]]], filename:
         print(f"Saved {len(subgraphs)} subgraphs to {filename}")
     
     return json_str
-
-
-def partition_graph_with_sampling(model, 
-                                 dummy_input, 
-                                 min_num_ops=2, 
-                                 max_num_ops=4, 
-                                 augmentation_factor=5,
-                                 UNSUPPORTED_OPS=set(), 
-                                 COMPOSITE_OPS=dict(), 
-                                 IGNORE_OPS=set()):
-    """
-    Generate augmented dataset using only valid partitions as seeds.
-    
-    Args:
-        model: The model to analyze
-        dummy_input: Dummy input for the model
-        min_num_ops: Minimum number of operations in a partition
-        max_num_ops: Maximum number of operations in a partition
-        augmentation_factor: Number of variations to create per valid partition
-        UNSUPPORTED_OPS: Set of unsupported operations
-        COMPOSITE_OPS: Dictionary of composite operations
-        IGNORE_OPS: Set of operations to ignore
-        
-    Returns:
-        Tuple of (augmented_subgraphs, unique_operators)
-    """
-    
-    # Get the computation graph
-    unique_operators = {}
-    operators = get_computation_graph(model, dummy_input, unique_operators, "onnx")
-
-    # Get valid partitions (already in adjacency list format)
-    valid_partitions = []
-    for _, op_node in operators.items():
-        get_partitions(op_node, min_num_ops, max_num_ops, valid_partitions, 
-                      UNSUPPORTED_OPS, COMPOSITE_OPS, IGNORE_OPS)
-    
-    print(f"Found {len(valid_partitions)} valid partitions")
-    
-    # Augment the valid partitions
-    augmented_subgraphs = augment_partitions(
-        valid_partitions=valid_partitions,
-        all_operators=operators,
-        augmentation_factor=augmentation_factor,
-        perturbation_strategies=['expand', 'contract', 'perturb']
-    )
-    
-    print(f"Generated {len(augmented_subgraphs)} total subgraphs (including originals)")
-    print(f"Augmentation ratio: {len(augmented_subgraphs) / len(valid_partitions):.1f}x")
-    
-    # Serialize the results
-    serialize_subgraphs_to_json(augmented_subgraphs, 
-                               filename='scripts/augmented_partitions.json')
-    
-    return augmented_subgraphs, unique_operators
