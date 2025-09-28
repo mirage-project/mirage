@@ -178,9 +178,6 @@ def parse_onnx_model(model, unique_operators):
                 shape = shape_value_dict[input_name]
 
                 # modifications for specific operators
-                if i == 0:
-                    if op_type == "Softmax":
-                        shape = shape[:3]
                 if i == 1:
                     if op_type == "ReduceMean":
                         # the second tensor of ReduceMean is a 1x1 tensor with the reduction dimension
@@ -199,10 +196,6 @@ def parse_onnx_model(model, unique_operators):
             if output_name in shape_value_dict and output_name in tensor_id:
                 shape = shape_value_dict[output_name]
 
-                # modifications for specfic operators
-                if i == 0:
-                    if op_type == "Softmax":
-                        shape = shape[:3]
                 output_tensor_shapes.append((shape, tensor_id[output_name]))
         
         operator = Operator(name=node_name, fn=op_type, input_ops=[], output_ops=[], input_tensor_shapes=input_tensor_shapes, output_tensor_shapes=output_tensor_shapes, additional_params=additional_params, kwargs=kwargs)
@@ -235,34 +228,37 @@ def parse_onnx_model(model, unique_operators):
                 operators[node.name].output_ops.append(dummy_const_operator)
     
     # pass to reassign tensor shapes
-    def backward(op, succ_shape):
-        if op.fn in ["Softmax", "MatMul", "ReduceMean"]:
+    def backward(op, succ_shape, first_pass=False):
+        if not op.output_tensor_shapes:
             return
-
-        for i in range(len(op.input_tensor_shapes)):
-            op.input_tensor_shapes[i] = succ_shape
-        op.output_tensor_shapes[0] = succ_shape
+        if not first_pass and op.output_tensor_shapes[0] == succ_shape:
+            return
+        # if op.fn in ["ReduceMean", "ReduceSum"]:
+        #     return
         
-        for pred in op.input_ops:
-            # since we must have visited this node before during topological traversal,
-            # we know what the input and output shapes are the same
-            if pred.output_tensor_shapes and pred.output_tensor_shapes[0] != succ_shape:
+        if op.fn == "MatMul":
+            batch_dims = succ_shape[:-2]
+            left_shape = batch_dims + op.input_tensor_shapes[0][-2:]
+            op.input_tensor_shapes[0] = left_shape
+            backward(op.input_ops[0], left_shape)
+
+            right_shape = batch_dims + op.input_tensor_shapes[1][-2:]
+            op.input_tensor_shapes[1] = right_shape
+            backward(op.input_ops[1], right_shape)
+        else:
+            for i in range(len(op.input_tensor_shapes)):
+                op.input_tensor_shapes[i] = succ_shape
+            op.output_tensor_shapes[0] = succ_shape
+            
+            for pred in op.input_ops:
+                # since we must have visited this node before during topological traversal,
+                # we know what the input and output shapes are the same
                 backward(pred, succ_shape)
 
     for node in model.graph.node: # ensure topological order
         op = operators[node.name]
-        if op.fn in ["Softmax", "MatMul", "ReduceMean"]:
-            continue
-        
-        # predecessor's output shapes should conform to current op's output shape
         shape = op.output_tensor_shapes[0]
-
-        for pred in op.input_ops:
-            if pred.output_tensor_shapes and pred.output_tensor_shapes[0] != shape:
-                backward(pred, shape)
-        
-        for i in range(len(op.input_tensor_shapes)):
-            op.input_tensor_shapes[i] = shape
+        backward(op, shape, first_pass=True)
 
     return operators
 
