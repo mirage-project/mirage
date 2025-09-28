@@ -73,6 +73,13 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model", type=str, default='Qwen/Qwen3-8B', help="Model path on hugging face"
     )
+    parser.add_argument(
+        "--no-force-inline",
+        action="store_false",
+        dest="force_inline",
+        default=True,
+        help="Force inline some method to avoid register spill and local memory access",
+    )
     args = parser.parse_args()
     try:
         from mpi4py import MPI
@@ -242,6 +249,7 @@ if __name__ == "__main__":
             profiler_tensor=profiler_tensor,
             trace_name=args.trace_name,
             spec_decode_config=spec_decode_config,
+            force_inline_worker_scheduler_method=args.force_inline,
         )
         
         if spec_decode_config and spec_decode_config.method == "promptlookup":
