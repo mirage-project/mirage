@@ -147,7 +147,6 @@ if __name__ == "__main__":
     text = tokenizer.apply_chat_template(
         messages, tokenize=False, add_generation_prompt=True
     )
-    #text = "."
     model_inputs = tokenizer([text], return_tensors="pt").to(model.device)
     for r in range(total_num_requests):
         for i in range(model_inputs.input_ids.shape[-1]):
@@ -561,14 +560,28 @@ if __name__ == "__main__":
             torch_tensor=model.model.norm.weight, name="model_norm_weight"
         )
         w_proj = mpk.attach_input(torch_tensor=lm_head_weight, name="lm_head")
-        mpk.rmsnorm_linear_layer(
+        mpk.rmsnorm_layer(
             input=x,
-            weight_norm=w_norm,
-            weight_linear=w_proj,
+            weight=w_norm,
+            output=rmsnorm_out,
+            grid_dim=(mpk.max_num_batched_tokens, 1, 1),
+            block_dim=(128, 1, 1),
+        )
+        mpk.linear_layer(
+            input=rmsnorm_out,
+            weight=w_proj,
             output=argmax_in,
             grid_dim=(grid_for_rmsnorm_linear_layer(w_proj.dim(0)), 1, 1),
             block_dim=(128, 1, 1),
         )
+        #mpk.rmsnorm_linear_layer(
+        #    input=x,
+        #    weight_norm=w_norm,
+        #    weight_linear=w_proj,
+        #    output=argmax_in,
+        #    grid_dim=(grid_for_rmsnorm_linear_layer(w_proj.dim(0)), 1, 1),
+        #    block_dim=(128, 1, 1),
+        #)
         # add argmax layer
         if spec_decode_config and spec_decode_config.method == "promptlookup":
             argmax_partial_grid_dim = (max_factor_leq_n(153600, 96 // (spec_decode_config.spec_length + 1)), 

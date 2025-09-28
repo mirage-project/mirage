@@ -331,7 +331,7 @@ __device__ __forceinline__ void
   }
 }
 
-__device__ void terminate_schedulers(RuntimeConfig config) {
+__device__ __forceinline__ void terminate_schedulers(RuntimeConfig config) {
   // Event ID 0 is the termination event
   int num_schedulers =
       config.num_local_schedulers + config.num_remote_schedulers;
@@ -356,13 +356,13 @@ __device__ void terminate_schedulers(RuntimeConfig config) {
   }
 }
 
-__device__ void worker_checker(RuntimeConfig config) {
+__device__ __forceinline__ void worker_checker(RuntimeConfig config) {
   assert(gridDim.y == 1);
   assert(gridDim.z == 1);
   // Each worker SM serves a single worker
   // Each scheduelr SM serves four schedulers
-  int num_schedulers =
-      config.num_local_schedulers + config.num_remote_schedulers;
+  // int num_schedulers =
+  //    config.num_local_schedulers + config.num_remote_schedulers;
 
   assert(gridDim.x == config.num_workers);
   assert(config.num_workers <= MAX_NUM_WORKERS);
@@ -371,13 +371,13 @@ __device__ void worker_checker(RuntimeConfig config) {
   assert(sizeof(TaskDesc) % sizeof(int) == 0);
 }
 
-__device__ void scheduler_checker(RuntimeConfig config) {
+__device__ __forceinline__ void scheduler_checker(RuntimeConfig config) {
   assert(gridDim.y == 1);
   assert(gridDim.z == 1);
   // Each worker SM serves a single worker
   // Each scheduelr SM serves four schedulers
-  int num_schedulers =
-      config.num_local_schedulers + config.num_remote_schedulers;
+  // int num_schedulers =
+  //    config.num_local_schedulers + config.num_remote_schedulers;
 
   assert(config.num_workers <= MAX_NUM_WORKERS);
   // We will reinterpret TaskDesc as an array of integers to
@@ -385,7 +385,7 @@ __device__ void scheduler_checker(RuntimeConfig config) {
   assert(sizeof(TaskDesc) % sizeof(int) == 0);
 }
 
-__device__ void persistent_checker(RuntimeConfig config) {
+__device__ __forceinline__ void persistent_checker(RuntimeConfig config) {
   assert(gridDim.y == 1);
   assert(gridDim.z == 1);
   // Each worker SM serves a single worker
@@ -401,7 +401,7 @@ __device__ void persistent_checker(RuntimeConfig config) {
   assert(blockDim.x >= 128);
 }
 
-__device__ void execute_worker(RuntimeConfig config) {
+__device__ __forceinline__ void execute_worker(RuntimeConfig config) {
   __shared__ TaskId cur_task_id;
   __shared__ TaskDesc task_desc;
 
@@ -665,7 +665,7 @@ __device__ void execute_worker(RuntimeConfig config) {
 }
 
 // need to alter as there is only one warp per block
-__device__ void execute_scheduler(RuntimeConfig config, int offset) {
+__device__ __forceinline__ void execute_scheduler(RuntimeConfig config, int offset) {
   int num_schedulers =
       config.num_local_schedulers + config.num_remote_schedulers;
   int warp_thread_id = threadIdx.x % 32;
