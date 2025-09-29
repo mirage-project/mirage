@@ -1,12 +1,12 @@
-import mirage as mi
 import torch
 import runtime_kernel
 
 torch.set_printoptions(sci_mode=False)
 
-reduction_size = 12288
+#reduction_size = 12288
+reduction_size = 4096
 output_sizes = [16, 32, 64]
-batch_size = 6
+batch_size = 8
 
 silu = torch.nn.SiLU()
 
@@ -50,7 +50,8 @@ for output_size in output_sizes:
     print(f"Average time over {repetitions} runs: {avg_time:.6f} ms")
 
     # Compare with Mirage
-
+    continue
+    import mirage as mi
     graph = mi.new_kernel_graph()
     X = graph.new_input(dims=(1, reduction_size), dtype=mi.bfloat16)
     M = graph.new_input(dims=(1, reduction_size), dtype=mi.bfloat16)

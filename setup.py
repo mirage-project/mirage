@@ -130,8 +130,8 @@ def config_cython():
                         "-fPIC",
                         "-fopenmp",
                         "-lrt",
-                        f"-Wl,-rpath,{path.join(mirage_path, 'build', 'abstract_subexpr', 'release')}",
-                        f"-Wl,-rpath,{path.join(mirage_path, 'build', 'formal_verifier', 'release')}",
+                        f"-Wl,-rpath,{path.join('$ORIGIN', '..', '..', 'build', 'abstract_subexpr', 'release')}",
+                        f"-Wl,-rpath,{path.join('$ORIGIN', '..', '..', 'build', 'formal_verifier', 'release')}",
                     ],
                     language="c++",
                 )
@@ -211,6 +211,7 @@ try:
         [
             "cmake",
             "..",
+            "-DCMAKE_BUILD_TYPE=Debug",
             "-DZ3_CXX_INCLUDE_DIRS=" + z3_path + "/include/",
             "-DZ3_LIBRARIES=" + path.join(z3_path, "lib", "libz3.so"),
             '-DABSTRACT_SUBEXPR_LIB=' + path.join(mirage_path, 'build', 'abstract_subexpr', 'release'),

@@ -65,3 +65,7 @@ kernel*.cu
 
 #runtime
 *.perfetto-trace
+
+test/[!.]*
+report
+ncu_tmp

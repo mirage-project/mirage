@@ -23,9 +23,6 @@ def get_shared_memory_capacity(target_cc):
 
 
 def get_scheduler(sm_cnt, worker):
-    if sm_cnt == 108:
-        return 27
-
     scheduler = 4 * (sm_cnt - worker)
     assert scheduler > 0, "worker count is not compatible with sm count on"
     "the GPU"
@@ -44,7 +41,7 @@ def get_configurations_from_gpu(rank):
     elif sm_cnt >= 132:
         worker = 128
     elif sm_cnt >= 108:
-        worker = 108
+        worker = 96
     elif sm_cnt >= 68:
         worker = 64
     elif sm_cnt >= 40:

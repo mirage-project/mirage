@@ -36,6 +36,7 @@ int const MAX_NUM_WARP_GROUPS = 4;
 int const NUM_THREADS_PER_WARP = 32;
 int const NUM_WARPS_PER_GROUP = 4;
 int const NUM_THREADS_PER_GROUP = NUM_WARPS_PER_GROUP * NUM_THREADS_PER_WARP;
+constexpr int MAX_TMA_DESC_PER_TENSOR = 3;
 
 #if defined(MIRAGE_BACKEND_USE_CUDA) && defined(MIRAGE_BACKEND_USE_NKI)
 #error                                                                         \

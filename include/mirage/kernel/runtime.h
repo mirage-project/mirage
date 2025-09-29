@@ -26,7 +26,8 @@ struct IODesc {
     TorchTensor,
     FusedTorchTensor,
     CUDAMallocTensor,
-    NVSHMEMMallocTensor
+    NVSHMEMMallocTensor,
+    ShuffledTorchTensor
   };
   IODesc(IOType _type,
          std::string _name,
@@ -37,7 +38,7 @@ struct IODesc {
   TensorDesc tensor;
   // Only used for torch tensor
   void *torch_data_ptr;
-  // Only used for fused tensors
+  // Only used for fused tensors and shuffled tensors
   int num_groups;
   std::vector<IODesc> sub_descs;
 };

@@ -12,7 +12,9 @@ import os
 def grid_for_rmsnorm_linear_layer(size):
     # 96 and 64 are enough to cover all Qwen3 model? Please update the method
     # if you meet any incompatibility.
-    if size % 96 == 0:
+    if size % 128 == 0:
+        return 128
+    elif size % 96 == 0:
         return 96
     elif size % 64 == 0:
         return 64
@@ -39,7 +41,7 @@ if __name__ == "__main__":
     parser.add_argument("--page-size", default=4096, type=int, help="Page size")
     parser.add_argument("--max-num-pages", default=16, type=int, help="Max num pages")
     parser.add_argument("--output-dir", help="Output files directory")
-    parser.add_argument("--trace-name", default="", help="Perfetto trace output name")
+    parser.add_argument("--trace-name", default="qwen3", help="Perfetto trace output name")
     parser.add_argument(
         "--profiling", action="store_true", help="Use Profiler to generate trace"
     )
@@ -113,7 +115,7 @@ if __name__ == "__main__":
             model = Qwen3ForCausalLM.from_pretrained(model_name, world_size=1, max_num_pages=args.max_num_pages, page_size=args.page_size).to("cuda")
             tokenizer = AutoTokenizer.from_pretrained(model_name)
 
-    total_num_requests = args.max_num_batched_requests
+    total_num_requests = 4
     # get all model weight tensors
     tokens = torch.full((total_num_requests, args.max_seq_length), 0, dtype=torch.long, device="cuda")
 
@@ -205,6 +207,8 @@ if __name__ == "__main__":
         )
             
         num_workers, num_schedulers = mi.get_configurations_from_gpu(rank)
+        print("num_workers: ", num_workers)
+        print("num_schedulers: ", num_schedulers)
         qo_indptr_buffer = torch.empty(
             args.max_num_batched_requests + 1, dtype=torch.int32, device="cuda")
         paged_kv_indptr_buffer = torch.empty(
@@ -240,7 +244,7 @@ if __name__ == "__main__":
             },
             profiler_tensor=profiler_tensor,
             trace_name=args.trace_name,
-            spec_decode_config=spec_decode_config,
+            spec_decode_config=spec_decode_config
         )
         
         if spec_decode_config and spec_decode_config.method == "promptlookup":
@@ -328,6 +332,12 @@ if __name__ == "__main__":
             name="mlp_final",
             io_category="nvshmem_tensor" if world_size > 1 else "cuda_tensor",
         )
+        rmsnorm_out_2 = mpk.new_tensor(
+            dims=(args.max_num_batched_tokens, hidden_size),
+            dtype=mi.bfloat16,
+            name="rmsnorm_out_2",
+            io_category="cuda_tensor",
+        )
         argmax_in = mpk.new_tensor(
             dims=(args.max_num_batched_tokens, vocab_size),
             dtype=mi.bfloat16,
@@ -378,7 +388,9 @@ if __name__ == "__main__":
             input_source=1,
         )
         x = y
-        for i, layer in enumerate(model.model.layers):
+        # for i, layer in enumerate(model.model.layers):
+        for i in range(len(model.model.layers)):
+            layer = model.model.layers[i]
             # add rmsnorm + linear
             w_norm = mpk.attach_input(
                 torch_tensor=layer.input_layernorm.weight,
@@ -465,12 +477,13 @@ if __name__ == "__main__":
             w = mpk.attach_input(
                 torch_tensor=layer.self_attn.o_proj.weight, name=f"layer_{i}_o_proj"
             )
+
             mpk.linear_with_residual_layer(
                 input=attn_out,
                 weight=w,
                 residual=x,
                 output=attn_proj_out,
-                grid_dim=(hidden_size // 64, 1, 1),
+                grid_dim=(hidden_size // 128, 1, 1),
                 block_dim=(128, 1, 1),
             )
             # reset residual input as x
@@ -515,7 +528,7 @@ if __name__ == "__main__":
                 weight=w_gatedup,
                 output=mlp_mid,
                 grid_dim=(rmsnorm_num_tasks, 1, 1),
-                block_dim=(128, 1, 1),
+                block_dim=(256, 1, 1),
             )
             #mpk.rmsnorm_linear_layer(
             #    input=x,
@@ -540,7 +553,7 @@ if __name__ == "__main__":
                 weight=w,
                 residual=x,
                 output=mlp_out,
-                grid_dim=(hidden_size // 64, 1, 1),
+                grid_dim=(hidden_size // 128, 1, 1),
                 block_dim=(128, 1, 1),
             )
             # reset residual input as x
@@ -563,25 +576,25 @@ if __name__ == "__main__":
         mpk.rmsnorm_layer(
             input=x,
             weight=w_norm,
-            output=rmsnorm_out,
+            output=rmsnorm_out_2,
             grid_dim=(mpk.max_num_batched_tokens, 1, 1),
             block_dim=(128, 1, 1),
         )
         mpk.linear_layer(
-            input=rmsnorm_out,
+            input=rmsnorm_out_2,
             weight=w_proj,
             output=argmax_in,
-            grid_dim=(grid_for_rmsnorm_linear_layer(w_proj.dim(0)), 1, 1),
+            grid_dim=(75, 1, 1),
             block_dim=(128, 1, 1),
         )
-        #mpk.rmsnorm_linear_layer(
-        #    input=x,
-        #    weight_norm=w_norm,
-        #    weight_linear=w_proj,
-        #    output=argmax_in,
-        #    grid_dim=(grid_for_rmsnorm_linear_layer(w_proj.dim(0)), 1, 1),
-        #    block_dim=(128, 1, 1),
-        #)
+        # mpk.rmsnorm_linear_layer(
+        #     input=x,
+        #     weight_norm=w_norm,
+        #     weight_linear=w_proj,
+        #     output=argmax_in,
+        #     grid_dim=(grid_for_rmsnorm_linear_layer(w_proj.dim(0)), 1, 1),
+        #     block_dim=(128, 1, 1),
+        # )
         # add argmax layer
         if spec_decode_config and spec_decode_config.method == "promptlookup":
             argmax_partial_grid_dim = (max_factor_leq_n(153600, 96 // (spec_decode_config.spec_length + 1)), 
@@ -683,14 +696,14 @@ if __name__ == "__main__":
         torch.cuda.synchronize()
         run_time = starter.elapsed_time(ender)
 
-        print("tokens.shape = ", tokens.shape)
         for r in range(total_num_requests):
             generated_ids = tokens[r, : step[r] + 1]
             response = tokenizer.decode(generated_ids, skip_special_tokens=True)
             print(response)
 
-        print("Prompt length {}, generate length {}, per-token latency (both prefill and decode): {} ms".format(
-              prompt_lengths[0], step[0] + 1 - prompt_lengths[0], run_time / (step[0] + 1)
+        print(
+            "Prompt length {}, generate length {}, per-token latency {} ms".format(
+                prompt_lengths[0], step[0] + 1 - prompt_lengths[0], run_time / (step[0] + 1 - prompt_lengths[0])
             )
         )
     if world_size > 1:

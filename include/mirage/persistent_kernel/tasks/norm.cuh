@@ -17,15 +17,12 @@
 #include "common.h"
 #include "utils.cuh"
 namespace kernel {
-template <typename T,
-          typename InputSmem,
-          int NUM_HEAD,
-          int WINDOW_SIZE,
-          int HEAD_DIM = 128>
+template <typename T, typename InputSmem, int NUM_HEAD, int HEAD_DIM>
 __device__ __forceinline__ void rms_norm(InputSmem smem_input,
                                          T const *weight_ptr,
                                          float *reduce_smem,
                                          float eps,
+                                         int window_size,
                                          int token_offset = 0,
                                          bool rotary_emd = false,
                                          T const *cos_ptr = nullptr,
@@ -36,7 +33,7 @@ __device__ __forceinline__ void rms_norm(InputSmem smem_input,
   // TODO(Wenqin): handle if speculative window of k span two chunks.
   int warp_idx = warp_id();
 #pragma unroll
-  for (int win_idx = 0; win_idx < WINDOW_SIZE; ++win_idx) {
+  for (int win_idx = 0; win_idx < window_size; ++win_idx) {
     // token_offset is the offset for first token in input SMEM (auto-agressive
     // decoding or speculative decoding window), for Q, token_offset is always
     // 0. For K, token_offset is the offset of k (except speculative window) in
@@ -94,11 +91,10 @@ __device__ __forceinline__ void rms_norm(InputSmem smem_input,
             // we should do rope for all the window size q and k, because they
             // came from hidden states, we didn't apply rope yet.
             __syncthreads();
-            int offset = (i / HEAD_DIM) * HEAD_DIM + i;
             T const *cur_cos_ptr = cos_ptr + win_idx * HEAD_DIM;
             T const *cur_sin_ptr = sin_ptr + win_idx * HEAD_DIM;
-            float cos = (float)cur_cos_ptr[offset];
-            float sin = (float)cur_sin_ptr[offset];
+            float cos = (float)cur_cos_ptr[i];
+            float sin = (float)cur_sin_ptr[i];
 
             float v_rot;
             if (i < HEAD_DIM / 2) {
@@ -118,9 +114,11 @@ __device__ __forceinline__ void rms_norm(InputSmem smem_input,
       } else {
         // we should keep __syncthreads number same as the for loop when
         // HEAD_DIM smaller than NUM_THREAD
-        if (rotary_emd) {
-          __syncthreads();
-          __syncthreads();
+        for (uint32_t i = threadIdx.x; i < HEAD_DIM; i += NUM_THREADS) {
+          if (rotary_emd) {
+            __syncthreads();
+            __syncthreads();
+          }
         }
       }
     } // head_idx

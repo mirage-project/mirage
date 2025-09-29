@@ -17,6 +17,7 @@
 #include "barrier.cuh"
 #include "tma_2d.cuh"
 #include "tma_3d.cuh"
+#include "tma_4d.cuh"
 #include <cuda.h>
 namespace kernel {
 namespace tma {

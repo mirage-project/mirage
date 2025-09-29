@@ -22,8 +22,9 @@ template <typename T,
           typename InputSmem,
           int NUM_HEAD,
           int HEAD_DIM,
-          int NUM_THREADS>
-__device__ __forceinline__ void rms_norm_wg(InputSmem smem_input,
+          int NUM_THREADS,
+          int BARRIER_ID = 9>
+__device__ __forceinline__ void rms_norm_hopper(InputSmem smem_input,
                                             T const *weight_ptr,
                                             float *reduce_smem,
                                             float eps,
@@ -31,8 +32,7 @@ __device__ __forceinline__ void rms_norm_wg(InputSmem smem_input,
                                             int token_offset = 0,
                                             bool rotary_emd = false,
                                             T const *cos_ptr = nullptr,
-                                            T const *sin_ptr = nullptr,
-                                            uint32_t barrier_id = 9) {
+                                            T const *sin_ptr = nullptr) {
   // For __syncthread divergence dead lock.
   static_assert(NUM_THREADS <= HEAD_DIM || HEAD_DIM % 32 == 0);
   // smem_input: NUM_HEADS * (WINDOW_SIZE or CHUNK_SIZE), HEAD_DIM
@@ -65,7 +65,7 @@ __device__ __forceinline__ void rms_norm_wg(InputSmem smem_input,
       if (threadIdx.x % 32 == 0) {
         reduce_smem[warp_idx] = sum;
       }
-      wg_sync<NUM_THREADS>(barrier_id);
+      wg_sync<NUM_THREADS>(BARRIER_ID);
       sum = threadIdx.x < NUM_WARPS ? reduce_smem[threadIdx.x] : 0.0f;
 
 #pragma unroll
@@ -78,7 +78,7 @@ __device__ __forceinline__ void rms_norm_wg(InputSmem smem_input,
         reduce_smem[0] = sum;
       }
 
-      wg_sync<NUM_THREADS>(barrier_id);
+      wg_sync<NUM_THREADS>(BARRIER_ID);
 
       float rms_rcp = rsqrt(reduce_smem[0] / float(HEAD_DIM) + eps);
 
@@ -96,7 +96,7 @@ __device__ __forceinline__ void rms_norm_wg(InputSmem smem_input,
           if (rotary_emd) {
             // we should do rope for all the window size q and k, because they
             // came from hidden states, we didn't apply rope yet.
-            wg_sync<NUM_THREADS>(barrier_id);
+            wg_sync<NUM_THREADS>(BARRIER_ID);
             T const *cur_cos_ptr = cos_ptr + win_idx * HEAD_DIM;
             T const *cur_sin_ptr = sin_ptr + win_idx * HEAD_DIM;
             float cos = (float)cur_cos_ptr[i];
@@ -112,7 +112,7 @@ __device__ __forceinline__ void rms_norm_wg(InputSmem smem_input,
               float v2 = (float)smem_input.at(row, col - HEAD_DIM / 2);
               v_rot = v1 * cos + v2 * sin;
             }
-            wg_sync<NUM_THREADS>(barrier_id);
+            wg_sync<NUM_THREADS>(BARRIER_ID);
             // output shape (window_size, head_num, head_dim)
             smem_input.at(row, col) = (T)v_rot;
           }
@@ -122,8 +122,8 @@ __device__ __forceinline__ void rms_norm_wg(InputSmem smem_input,
         // HEAD_DIM smaller than NUM_THREAD
         for (uint32_t i = threadIdx.x; i < HEAD_DIM; i += NUM_THREADS) {
           if (rotary_emd) {
-            wg_sync<NUM_THREADS>(barrier_id);
-            wg_sync<NUM_THREADS>(barrier_id);
+            wg_sync<NUM_THREADS>(BARRIER_ID);
+            wg_sync<NUM_THREADS>(BARRIER_ID);
           }
         }
       }

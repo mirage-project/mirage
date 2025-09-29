@@ -24,16 +24,47 @@ using bfloat16 = type::bfloat16_t;
 template <typename SMEM_DST, typename SMEM_SRC>
 static __device__ __forceinline__ void reduction_sum_row(SMEM_DST dst,
                                                          SMEM_SRC src) {
+  static constexpr int NUM_WARPS_K = SMEM_SRC::ROW / SMEM_DST::ROW;
+  static_assert(SMEM_SRC::ROW % SMEM_DST::ROW == 0,
+                "Incompatible reduction dimensions");
 
-  static constexpr int REDUCTION_FACTOR = SMEM_SRC::ROW;
   for (int dst_elem_idx = threadIdx.x; dst_elem_idx < SMEM_DST::size();
        dst_elem_idx += blockDim.x) {
     float result = 0;
+    int dst_row = dst_elem_idx / SMEM_DST::COL;
     int dst_col = dst_elem_idx % SMEM_DST::COL;
 
 #pragma unroll
-    for (int i = 0; i < REDUCTION_FACTOR; ++i) {
-      result += float(src.at(i, dst_col));
+    for (int k = 0; k < NUM_WARPS_K; ++k) {
+      // The source rows are laid out as [warp_k_0_b_0, warp_k_0_b_1, ...,
+      // warp_k_1_b_0, ...]
+      int src_row = k * SMEM_DST::ROW + dst_row;
+      result += float(src.at(src_row, dst_col));
+    }
+    dst.at(dst_elem_idx) = bfloat16(result);
+  }
+}
+
+// reduction on dim 0. Add the result to the existing value.
+template <typename SMEM_DST, typename SMEM_SRC>
+static __device__ __forceinline__ void reduction_sum_row_add(SMEM_DST dst,
+                                                             SMEM_SRC src) {
+  static constexpr int NUM_WARPS_K = SMEM_SRC::ROW / SMEM_DST::ROW;
+  static_assert(SMEM_SRC::ROW % SMEM_DST::ROW == 0,
+                "Incompatible reduction dimensions");
+
+  for (int dst_elem_idx = threadIdx.x; dst_elem_idx < SMEM_DST::size();
+       dst_elem_idx += blockDim.x) {
+    float result = float(dst.at(dst_elem_idx));
+    int dst_row = dst_elem_idx / SMEM_DST::COL;
+    int dst_col = dst_elem_idx % SMEM_DST::COL;
+
+#pragma unroll
+    for (int k = 0; k < NUM_WARPS_K; ++k) {
+      // The source rows are laid out as [warp_k_0_b_0, warp_k_0_b_1, ...,
+      // warp_k_1_b_0, ...]
+      int src_row = k * SMEM_DST::ROW + dst_row;
+      result += float(src.at(src_row, dst_col));
     }
     dst.at(dst_elem_idx) = bfloat16(result);
   }

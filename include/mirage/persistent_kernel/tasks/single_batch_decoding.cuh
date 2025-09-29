@@ -236,22 +236,24 @@ __device__ __forceinline__ void
     if (qk_norm) {
       if (kv_idx == 0) {
         // q_norm && rope
-        rms_norm<T, QSmem, NUM_Q_HEADS, 1, HEAD_DIM>(
+        rms_norm<T, QSmem, NUM_Q_HEADS, HEAD_DIM>(
             q_smem,
             static_cast<T const *>(qnorm_weight_ptr),
             qnorm_sum,
             q_eps,
+            1 /*num_tokens*/,
             0,
             rotary_emd,
             static_cast<T const *>(cos_ptr) + (seq_len - 1) * HEAD_DIM,
             static_cast<T const *>(sin_ptr) + (seq_len - 1) * HEAD_DIM);
       } else if (kv_idx == num_iterations - 1) {
         // knorm && rope
-        rms_norm<T, KSmem, NUM_KV_HEADS, 1, HEAD_DIM>(
+        rms_norm<T, KSmem, NUM_KV_HEADS, HEAD_DIM>(
             k_cache_smem,
             static_cast<T const *>(knorm_weight_ptr),
             knorm_sum,
             k_eps,
+            1 /*num_tokens*/,
             curr_iter_len - 1,
             rotary_emd,
             static_cast<T const *>(cos_ptr) + (seq_len - 1) * HEAD_DIM,

@@ -42,10 +42,10 @@ template <typename T,
           typename TMA_RESIDUAL = void,
           int OUTPUT_STRIDE = OUTPUT_SIZE>
 __device__ __forceinline__ void
-    linear_kernel_hopper(const TMA_A &tma_a,
-                         const TMA_B &tma_b,
-                         const TMA_OUT &tma_out,
-                         const TMA_RESIDUAL *tma_residual = nullptr) {
+    linear_swapAB_kernel_hopper(const TMA_A &tma_a,
+                                const TMA_B &tma_b,
+                                const TMA_OUT &tma_out,
+                                const TMA_RESIDUAL *tma_residual = nullptr) {
 
   constexpr int TILE_SIZE =
       REDUCTION_SIZE < TMA_A::SMEM_COL * TMA_A::SMEM_REPEAT_COL
@@ -57,20 +57,22 @@ __device__ __forceinline__ void
   constexpr int THREADS_PER_WARPGROUP = 128;
 
   // The actual tma instructions are issued for each 64 cols when swizzle<3,3,3>
-  // is used large tile size is wrapped, but
   constexpr int INPUT_TMA_TILE_SIZE = 64;
   constexpr int WEIGHT_TMA_TILE_SIZE = INPUT_TMA_TILE_SIZE;
   constexpr int OUTPUT_TMA_TILE_SIZE = OUTPUT_SIZE < 64 ? OUTPUT_SIZE : 64;
-  constexpr int OUTPUT_ATOM_SIZE = OUTPUT_SIZE <= 256 ? OUTPUT_SIZE : 256;
+  constexpr int OUTPUT_ATOM_SIZE = 64; // this is padded if OUTPUT_SIZE < 64
   constexpr bool HAS_RESIDUAL = !std::is_void<TMA_RESIDUAL>::value;
 
-  // NOTE(Yu): may need to adjust when batch size is larger than 64
-  constexpr int SMEM_M_SIZE = BATCH_SIZE;
+  // NOTE(Yu): Assume batch size is smaller than 16, and padding the batch size
+  // to 16
+  static_assert(BATCH_SIZE <= 16,
+                "Batch size must be smaller or equal to 16 in swapAB");
+  constexpr int SMEM_M_SIZE = 16;
 
-  constexpr int TMA_TRANS_BYTES_A = sizeof(T) * BATCH_SIZE * TILE_SIZE;
-  constexpr int TMA_TRANS_BYTES_B = sizeof(T) * TILE_SIZE * OUTPUT_ATOM_SIZE;
+  constexpr int TMA_TRANS_BYTES_A = sizeof(T) * TILE_SIZE * OUTPUT_ATOM_SIZE;
+  constexpr int TMA_TRANS_BYTES_B = sizeof(T) * BATCH_SIZE * TILE_SIZE;
   constexpr int TMA_TRANS_BYTES_RESIDUAL =
-      HAS_RESIDUAL ? sizeof(T) * BATCH_SIZE * OUTPUT_ATOM_SIZE : 0;
+      HAS_RESIDUAL ? sizeof(T) * BATCH_SIZE * OUTPUT_TMA_TILE_SIZE : 0;
 
   // using SM90_64x64x16_F32BF16BF16
   constexpr int NUM_ITER_N =
@@ -109,8 +111,8 @@ __device__ __forceinline__ void
 
   constexpr size_t SHARED_INPUT_BARRIER_OFFSET =
       (SHARED_MM_OUTPUT_BUFFER_OFFSET +
-       sizeof(T) * SMEM_M_SIZE * OUTPUT_ATOM_SIZE * Kstages + 15) /
-      16 * 16;
+       sizeof(T) * SMEM_M_SIZE * OUTPUT_ATOM_SIZE * Kstages + 7) /
+      8 * 8;
 
   constexpr size_t SHARED_WEIGHT_BARRIER_OFFSET =
       (SHARED_INPUT_BARRIER_OFFSET + 8 * Kstages + 7) / 8 * 8;
@@ -168,16 +170,9 @@ __device__ __forceinline__ void
                                 OUTPUT_ATOM_SIZE / OUTPUT_TMA_TILE_SIZE>;
   ResidualSmem residual_smem(shared_residual);
 
-  using A_DESC = wgmma::mma_descriptor<InputSmem>;
-  using B_DESC = wgmma::mma_descriptor<WeightSmem>;
-
-  using OutputSmem = smem_tma<T,
-                              B,
-                              M,
-                              S,
-                              SMEM_M_SIZE,
-                              OUTPUT_TMA_TILE_SIZE,
-                              OUTPUT_ATOM_SIZE / OUTPUT_TMA_TILE_SIZE>;
+  using A_DESC = wgmma::mma_descriptor<WeightSmem>;
+  using B_DESC = wgmma::mma_descriptor<InputSmem>;
+  using OutputSmem = smem_tma<T, B, M, S, SMEM_M_SIZE, OUTPUT_ATOM_SIZE, 1>;
   OutputSmem mm_output_smem(mm_output);
 
   // define barries
@@ -196,7 +191,7 @@ __device__ __forceinline__ void
           ? reinterpret_cast<Barrier *>(smem + SHARED_RESIDUAL_DONE_OFFSET)
           : nullptr;
 
-  // init the barriers and launch the first group of copy
+  // init the barriers
   if (threadIdx.x == 0) {
     for (int i = 0; i < Kstages; i++) {
       initialize_barrier(input_barrier[i], 1);
@@ -213,63 +208,63 @@ __device__ __forceinline__ void
 
   // warp specialization data movement warpgroup
   if (warpgroup_id == NUM_WARPGROUPS - 1) {
-
     wg_decrease_regs<32>();
-    if (lane_id() == 0 && warp_idx == (NUM_WARPGROUPS * WARPGROUP_WARPS - 4)) {
-      for (int output_atom_idx = 0; output_atom_idx < NUM_ITER_N;
-           output_atom_idx++) {
-        // launch tma for residual
-        int slot_residual = output_atom_idx % Kstages;
-        int phase_residual = (output_atom_idx / Kstages) % 2;
+    for (int output_atom_idx = 0; output_atom_idx < NUM_ITER_N;
+         output_atom_idx++) {
+      int slot_residual = output_atom_idx % Kstages;
+      int phase_residual = (output_atom_idx / Kstages) % 2;
+
+      // launch tma for residual
+      if (lane_id() == 0 &&
+          warp_idx == (NUM_WARPGROUPS * WARPGROUP_WARPS - 4)) {
+
         if constexpr (HAS_RESIDUAL) {
           wait(residual_done[slot_residual], phase_residual ^ 1);
-        }
-
-        if constexpr (HAS_RESIDUAL) {
-          residual_smem.set_ptr(shared_residual + slot_residual *
-                                                      TMA_TRANS_BYTES_RESIDUAL /
-                                                      sizeof(T));
+          residual_smem.set_ptr(shared_residual + slot_residual * SMEM_M_SIZE *
+                                                      OUTPUT_TMA_TILE_SIZE);
           set_barrier_transaction_bytes(residual_barrier[slot_residual],
                                         TMA_TRANS_BYTES_RESIDUAL);
-          tma_residual->tma_cp_async(residual_barrier[slot_residual],
-                                     residual_smem(0, 0),
-                                     {output_atom_idx * OUTPUT_ATOM_SIZE, 0});
+          tma_residual->tma_cp_async(
+              residual_barrier[slot_residual],
+              residual_smem(0, 0),
+              {output_atom_idx * OUTPUT_TMA_TILE_SIZE, 0});
         }
+      }
 
-        for (int i = 0; i < NUM_ITER_K; i++) {
-          int slot = (output_atom_idx * NUM_ITER_K + i) % Kstages;
-          int phase = ((output_atom_idx * NUM_ITER_K + i) / Kstages) % 2;
+      for (int i = 0; i < NUM_ITER_K; i++) {
+        int slot = (output_atom_idx * NUM_ITER_K + i) % Kstages;
+        int phase = ((output_atom_idx * NUM_ITER_K + i) / Kstages) % 2;
+        if (lane_id() == 0 &&
+            warp_idx == (NUM_WARPGROUPS * WARPGROUP_WARPS - 4)) {
           wait(compute_done[slot], phase ^ 1);
-
-          int tma_coords_A[2] = {i * TILE_SIZE, 0};
-          int tma_coords_B[2] = {i * TILE_SIZE,
+          int tma_coords_A[2] = {i * TILE_SIZE,
                                  output_atom_idx * OUTPUT_ATOM_SIZE};
-
-          input_smem.set_ptr(shared_input +
-                             slot * TMA_TRANS_BYTES_A / sizeof(T));
-          set_barrier_transaction_bytes(input_barrier[slot], TMA_TRANS_BYTES_A);
-          tma_a.tma_cp_async(
-              input_barrier[slot], input_smem(0, 0), tma_coords_A);
-
+          int tma_coords_B[2] = {i * TILE_SIZE, 0};
           input_weight_smem.set_ptr(shared_weight +
-                                    slot * TMA_TRANS_BYTES_B / sizeof(T));
+                                    slot * OUTPUT_ATOM_SIZE * TILE_SIZE);
+          input_smem.set_ptr(shared_input + slot * SMEM_M_SIZE * TILE_SIZE);
           set_barrier_transaction_bytes(weight_barrier[slot],
-                                        TMA_TRANS_BYTES_B);
+                                        TMA_TRANS_BYTES_A);
+          set_barrier_transaction_bytes(input_barrier[slot], TMA_TRANS_BYTES_B);
+          tma_a.tma_cp_async(
+              weight_barrier[slot], input_weight_smem(0, 0), tma_coords_A);
           tma_b.tma_cp_async(
-              weight_barrier[slot], input_weight_smem(0, 0), tma_coords_B);
+              input_barrier[slot], input_smem(0, 0), tma_coords_B);
         }
       }
     }
   } else {
     // warp specialization compute warpgroup
     wg_increase_regs<160>();
-    float s_frag[OUTPUT_ATOM_SIZE / 2];
+    float s_frag[SMEM_M_SIZE / 2];
     for (int output_atom_idx = 0; output_atom_idx < NUM_ITER_N;
          output_atom_idx++) {
 #pragma unroll
-      for (int i = 0; i < OUTPUT_ATOM_SIZE / 16; i++) {
+      for (int i = 0; i < SMEM_M_SIZE / 16; i++) {
         clear_8_floats(s_frag + i * 8);
       }
+
+      wg_sync<THREADS_PER_WARPGROUP * CONSUMER_WARPGROUPS>(1);
 
       for (int i = 0; i < NUM_ITER_K; i++) {
         int slot = (output_atom_idx * NUM_ITER_K + i) % Kstages;
@@ -278,21 +273,21 @@ __device__ __forceinline__ void
         wait(input_barrier[slot], phase);
         wait(weight_barrier[slot], phase);
 
-        input_smem.set_ptr(shared_input + (slot)*TMA_TRANS_BYTES_A / sizeof(T));
         input_weight_smem.set_ptr(shared_weight +
-                                  (slot)*TMA_TRANS_BYTES_B / sizeof(T));
-        A_DESC a_desc(input_smem(0, 0));
-        B_DESC b_desc(input_weight_smem(0, 0));
+                                  (slot)*OUTPUT_ATOM_SIZE * TILE_SIZE);
+        input_smem.set_ptr(shared_input + (slot)*SMEM_M_SIZE * TILE_SIZE);
+        A_DESC a_desc(input_weight_smem(0, 0));
+        B_DESC b_desc(input_smem(0, 0));
 
         wgmma::warpgroup_fence_fragment(s_frag);
         wgmma::warpgroup_arrive();
         // wgmma
         wgmma::mma<bfloat16,
-                   64,
-                   OUTPUT_ATOM_SIZE,
+                   64, // output atom size fixed to 64
+                   16, // Assume batch size is not larger than 16
                    16,
-                   InputSmem,
                    WeightSmem,
+                   InputSmem,
                    A_DESC,
                    B_DESC,
                    false,
@@ -313,29 +308,28 @@ __device__ __forceinline__ void
         slot_residual = output_atom_idx % Kstages;
         phase_residual = output_atom_idx / Kstages % 2;
         wait(residual_barrier[slot_residual], phase_residual);
-        residual_smem.set_ptr(shared_residual + slot_residual *
-                                                    TMA_TRANS_BYTES_RESIDUAL /
-                                                    sizeof(T));
+        residual_smem.set_ptr(shared_residual + slot_residual * SMEM_M_SIZE *
+                                                    OUTPUT_TMA_TILE_SIZE);
       }
-
       // https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#asynchronous-warpgroup-level-matrix-register-fragment-wgmma-64n16:~:text=The%20layout%20of%20the%20fragments%20held%20by%20different%20threads%20is%20shown%20in%20Figure%20149.
       // write back to shared memory
+      // wg_sync<THREADS_PER_WARPGROUP * CONSUMER_WARPGROUPS>(1);
       store_async_wait<Kstages - 1>();
       int slot_output = output_atom_idx % Kstages;
       mm_output_smem.set_ptr(mm_output +
-                             slot_output * BATCH_SIZE * OUTPUT_ATOM_SIZE);
+                             slot_output * SMEM_M_SIZE * OUTPUT_ATOM_SIZE);
 #pragma unroll 1
-      for (uint32_t i = 0; i < (OUTPUT_ATOM_SIZE / 4); i++) {
+      for (uint32_t i = 0; i < (SMEM_M_SIZE / 4); i++) {
         int row = (warp_idx % 4) * 16 + (i % 2) * 8 + idx_in_warp / 4;
         int col = (i / 2) * 8 + (idx_in_warp % 4) * 2;
         if constexpr (HAS_RESIDUAL) {
-          mm_output_smem.at(row, col) =
-              bfloat16(s_frag[i * 2]) + residual_smem.at(row, col);
-          mm_output_smem.at(row, col + 1) =
-              bfloat16(s_frag[i * 2 + 1]) + residual_smem.at(row, col + 1);
+          mm_output_smem.at(col, row) =
+              bfloat16(s_frag[i * 2]) + residual_smem.at(col, row);
+          mm_output_smem.at(col + 1, row) =
+              bfloat16(s_frag[i * 2 + 1]) + residual_smem.at(col + 1, row);
         } else {
-          mm_output_smem.at(row, col) = bfloat16(s_frag[i * 2]);
-          mm_output_smem.at(row, col + 1) = bfloat16(s_frag[i * 2 + 1]);
+          mm_output_smem.at(col, row) = bfloat16(s_frag[i * 2]);
+          mm_output_smem.at(col + 1, row) = bfloat16(s_frag[i * 2 + 1]);
         }
       }
 
@@ -345,7 +339,6 @@ __device__ __forceinline__ void
 
       // this is inter-thread sync
       wg_sync<THREADS_PER_WARPGROUP * CONSUMER_WARPGROUPS>(1);
-
       // copy back to dmem
       if (warp_idx % 4 == 0 && lane_id() == 0) {
         tma_out.tma_store_async(mm_output_smem(0, 0),
@@ -356,9 +349,7 @@ __device__ __forceinline__ void
         }
       }
     }
+    store_async_wait<0>();
   }
-  store_async_wait<0>();
-  __syncthreads();
 }
-
 } // namespace kernel
