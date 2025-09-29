@@ -34,9 +34,23 @@ class GraphSplitter:
         if isinstance(op_type, str):
             op_type_lower = op_type.lower()
             # If operation is in the unsupported list, it's not supported
-            return not any(unsupported_op in op_type_lower for unsupported_op in self.mirage_unsupported_ops)
+            if any(unsupported_op in op_type_lower for unsupported_op in self.mirage_unsupported_ops):
+                return False
+        else:
+            return False
         
-        return False
+        # Check for 4D tensors and broadcast operations (not supported)
+        from partition_graph import contains_4D_tensors
+        if contains_4D_tensors(op):
+            return False
+        
+        if hasattr(op, 'input_tensor_shapes') and op.input_tensor_shapes:
+            input_dims = len(op.input_tensor_shapes[0][0])
+            for s in op.input_tensor_shapes:
+                if len(s[0]) != input_dims:
+                    return False
+        
+        return True
     
     def split_graph(self, operators_graph: Dict) -> Tuple[List[Tuple[Dict, str]], Dict[int, Set[int]], List[Dict]]:
         """
@@ -85,9 +99,9 @@ class GraphSplitter:
             )
         
         # Print debug info
-        self._print_subgraph_info(subgraphs, subgraph_io)
+        # self._print_subgraph_info(subgraphs, subgraph_io)
         
-        return subgraphs, subgraph_deps, subgraph_io
+        return subgraphs, subgraph_deps, subgraph_io, sorted_ops
     
     def _topological_sort(self, operators_graph: Dict) -> List[Any]:
         """
@@ -617,7 +631,7 @@ def process_operator_graph(operators: Dict, IGNORE_OPS: Set[str] = None, UNSUPPO
         print(f"Total unsupported ops: {', '.join(splitter.mirage_unsupported_ops)}")
     
     print("Splitting operator graph into subgraphs...")
-    subgraphs, subgraph_deps, subgraph_io = splitter.split_graph(operators_graph)
+    subgraphs, subgraph_deps, subgraph_io, sorted_ops = splitter.split_graph(operators_graph)
     
     adjacency_list_subgraphs = splitter.convert_to_adjacency_list(subgraphs)
     
@@ -639,88 +653,59 @@ def process_operator_graph(operators: Dict, IGNORE_OPS: Set[str] = None, UNSUPPO
             total_tensors = sum(len(indices) for indices in tensor_inputs.values())
             print(f"  - Has {total_tensors} tensor inputs")
     
-    print("\nAdjacency List Representation (with Tensor Shapes and Connections):")
-    for sg_id, adj_list in enumerate(adjacency_list_subgraphs):
-        sg_type = subgraphs[sg_id][1]
-        op_type = "Supported" if sg_type == "mirage" else "Unsupported"
-        print(f"Subgraph {sg_id} ({op_type}):")
+    # print("\nAdjacency List Representation (with Tensor Shapes and Connections):")
+    # for sg_id, adj_list in enumerate(adjacency_list_subgraphs):
+    #     sg_type = subgraphs[sg_id][1]
+    #     op_type = "Supported" if sg_type == "mirage" else "Unsupported"
+    #     print(f"Subgraph {sg_id} ({op_type}):")
         
-        for op, op_info in adj_list.items():
-            outputs = op_info["outputs"]
-            input_shapes = op_info["input_tensor_shapes"]
-            output_shapes = op_info["output_tensor_shapes"]
+    #     for op, op_info in adj_list.items():
+    #         outputs = op_info["outputs"]
+    #         input_shapes = op_info["input_tensor_shapes"]
+    #         output_shapes = op_info["output_tensor_shapes"]
             
-            print(f"  {op.name} (fn={op.fn}):")
+    #         print(f"  {op.name} (fn={op.fn}):")
             
-            # Print input operations
-            print("    Input Operations:")
-            for i, in_op in enumerate(op.input_ops):
-                print(f"      [{i}] {in_op.name}")
+    #         # Print input operations
+    #         print("    Input Operations:")
+    #         for i, in_op in enumerate(op.input_ops):
+    #             print(f"      [{i}] {in_op.name}")
             
-            print("    Input Tensor Shapes:")
-            for i, shape_info in enumerate(input_shapes):
-                if shape_info:
-                    shape, tensor_id = shape_info
-                    is_external = i >= len(op.input_ops) or op.input_ops[i] is None
-                    source = "External Input" if is_external else f"From {op.input_ops[i].name}"
-                    print(f"      [{i}] {source}: shape={shape}, id={tensor_id}")
-                else:
-                    print(f"      [{i}] None")
+    #         print("    Input Tensor Shapes:")
+    #         for i, shape_info in enumerate(input_shapes):
+    #             if shape_info:
+    #                 shape, tensor_id = shape_info
+    #                 is_external = i >= len(op.input_ops) or op.input_ops[i] is None
+    #                 source = "External Input" if is_external else f"From {op.input_ops[i].name}"
+    #                 print(f"      [{i}] {source}: shape={shape}, id={tensor_id}")
+    #             else:
+    #                 print(f"      [{i}] None")
             
-            print("    Output Tensor Shapes:")
-            for i, shape_info in enumerate(output_shapes):
-                if shape_info:
-                    shape, tensor_id = shape_info
-                    print(f"      [{i}] shape={shape}, id={tensor_id}")
-                else:
-                    print(f"      [{i}] None")
+    #         print("    Output Tensor Shapes:")
+    #         for i, shape_info in enumerate(output_shapes):
+    #             if shape_info:
+    #                 shape, tensor_id = shape_info
+    #                 print(f"      [{i}] shape={shape}, id={tensor_id}")
+    #             else:
+    #                 print(f"      [{i}] None")
             
-            print("    Output Operations:")
-            for i, out_op in enumerate(outputs):
-                target_sg = "?"
-                for other_sg_id, (other_sg, _) in enumerate(subgraphs):
-                    if out_op in other_sg:
-                        target_sg = other_sg_id
-                        break
+    #         print("    Output Operations:")
+    #         for i, out_op in enumerate(outputs):
+    #             target_sg = "?"
+    #             for other_sg_id, (other_sg, _) in enumerate(subgraphs):
+    #                 if out_op in other_sg:
+    #                     target_sg = other_sg_id
+    #                     break
                 
-                if target_sg == sg_id:
-                    print(f"      [{i}] -> {out_op.name}")
-                else:
-                    print(f"      [{i}] -> {out_op.name} (→ Subgraph {target_sg})")
+    #             if target_sg == sg_id:
+    #                 print(f"      [{i}] -> {out_op.name}")
+    #             else:
+    #                 print(f"      [{i}] -> {out_op.name} (→ Subgraph {target_sg})")
             
-            print()
+    #         print()
 
-    # convert subgraphs to kernel graphs
-    # kernel_graphs = []
-    # input_dims = []
-
-    # try:
-    #     print("\nGenerating Mirage kernel graphs...")
-    #     for i, (sg, sg_type) in enumerate(subgraphs):
-    #         if sg_type == "mirage":
-    #             print(f"Processing subgraph {i}...")
-    #             try:
-    #                 kernel_graph, dims = splitter.to_kernel_graph(sg) 
-    #                 kernel_graphs.append(kernel_graph)
-    #                 input_dims.append(dims)
-    #                 print(f"Successfully processed subgraph {i}")
-    #             except Exception as e:
-    #                 print(f"Error processing subgraph {i}: {e}")
-    #                 import traceback
-    #                 traceback.print_exc()
-    #         else:
-    #             print(f"Skipping subgraph {i}: not supported by Mirage")
-        
-    #     print(f"Generated {len(kernel_graphs)} Mirage kernel graphs")
-        
-    # except Exception as e:
-    #     print(f"Error in kernel graph generation: {e}")
-    #     import traceback
-    #     traceback.print_exc()
     
-    
-    
-    return subgraphs, subgraph_deps
+    return subgraphs, subgraph_deps, sorted_ops
 
 def preprocess_special_operators(operators_graph: Dict, IGNORE_OPS: Set[str] = None) -> Dict:
     """
@@ -831,5 +816,10 @@ def remove_ignored_operators(operators_graph: Dict, IGNORE_OPS: Set[str]) -> Dic
     for op in result:
         op.output_ops = [next_op for next_op in op.output_ops if next_op in result]
         op.input_ops = [prev_op for prev_op in op.input_ops if prev_op in result]
+    
+    # Rebuild connections broken by ignored ops
+    for (out_op, input_idx), (source_op, tensor_id) in replacements.items():
+        if source_op in result and out_op in result and out_op not in source_op.output_ops:
+            source_op.output_ops.append(out_op)
         
     return result
