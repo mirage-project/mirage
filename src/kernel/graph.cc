@@ -395,6 +395,47 @@ DTensor *Graph::fuse_tensors(std::vector<DTensor const *> inputs,
   return fused;
 }
 
+DTensor *Graph::shuffle_tensors(std::vector<DTensor const *> inputs,
+                                int shuffled_dim,
+                                int num_groups,
+                                char const *name) {
+  // Currently assert that we shuffle along the 0-th dim (for weights)
+  assert(shuffled_dim == 0);
+  assert(inputs.size() > 0);
+  std::vector<int> dims;
+  for (int i = 0; i < inputs[0]->num_dims; i++) {
+    dims.push_back(inputs[0]->dim[i]);
+  }
+  for (size_t t = 1; t < inputs.size(); t++) {
+    dims[0] += inputs[t]->dim[0];
+    assert(inputs[0]->num_dims == inputs[t]->num_dims);
+    for (int i = 1; i < inputs[t]->num_dims; i++) {
+      assert(dims[i] == inputs[t]->dim[i]);
+    }
+    assert(inputs[0]->data_type == inputs[t]->data_type);
+  }
+  std::vector<size_t> strides(dims.size(), 1);
+  for (int i = inputs[0]->num_dims - 1; i >= 0; i--) {
+    if (i == inputs[0]->num_dims - 1) {
+      strides[i] = 1;
+    } else {
+      strides[i] = strides[i + 1] * dims[i + 1];
+    }
+  }
+  DTensor *shuffled =
+      new_input_ptr(dims, strides, inputs[0]->data_type, layout::DmemRowMajor);
+  IODesc desc(IODesc::ShuffledTorchTensor, std::string(name), *shuffled);
+  desc.num_groups = num_groups;
+  for (size_t t = 0; t < inputs.size(); t++) {
+    assert(io_config.find(inputs[t]->guid) != io_config.end());
+    IODesc sub_desc = io_config.find(inputs[t]->guid)->second;
+    desc.sub_descs.push_back(sub_desc);
+    io_config.erase(inputs[t]->guid);
+  }
+  io_config.emplace(shuffled->guid, desc);
+  return shuffled;
+}
+
 void Graph::register_task(char const *task_type, std::vector<int> params) {
   std::string name = std::string(task_type);
   KNOperator const *op = operators.back();

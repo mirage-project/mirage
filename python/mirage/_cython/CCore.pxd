@@ -244,6 +244,10 @@ cdef extern from "mirage/kernel/graph.h" namespace "mirage::kernel":
                                  int fused_dim,
                                  int num_groups,
                                  const char *name)
+        CppDTensor* shuffle_tensors(vector[const CppDTensor*] inputs,
+                                 int shuffled_dim,
+                                 int num_groups,
+                                 const char *name)
         void register_task(const char *task_type,
                            vector[int] params)
         TaskGraphResult generate_task_graph(int num_gpus, int my_gpu_id)
