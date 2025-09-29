@@ -945,6 +945,23 @@ cdef class CyKNGraph:
         output = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
         return DTensor(output)
 
+    def shuffle_tensors(self, list[DTensor] inputs, int shuffled_dim, int num_groups, str name):
+        cdef vector[const CppDTensor*] cinputs
+        cinputs.resize(len(inputs))
+        cdef DTensor t
+        for i in range(len(inputs)):
+            assert(type(inputs[i]) == DTensor)
+            t = inputs[i]
+            cinputs[i] = t.c_ptr
+        cdef char* cname = NULL
+        if name is not None:
+            py_byte_string = name.encode('UTF-8')
+            cname = py_byte_string
+        cdef CppDTensor* ptr = self.p_kgraph.shuffle_tensors(cinputs, shuffled_dim, num_groups, cname)
+        output = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
+        return DTensor(output)
+
+
     def register_task(self, CyTBGraph bgraph, str task_type, list[int] params):
         cdef char* cname = NULL
         if task_type is not None:

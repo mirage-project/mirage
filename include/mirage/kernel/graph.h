@@ -161,6 +161,10 @@ public:
                         int fused_dim,
                         int num_groups,
                         char const *name);
+  DTensor *shuffle_tensors(std::vector<DTensor const *> inputs,
+                           int shuffled_dim,
+                           int num_groups,
+                           char const *name);
   void register_task(char const *task_type, std::vector<int> params);
   runtime::TaskGraphResult generate_task_graph(int num_gpus, int my_gpu_id);
 
