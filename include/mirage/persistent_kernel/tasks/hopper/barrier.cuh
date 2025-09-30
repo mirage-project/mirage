@@ -34,7 +34,7 @@ __device__ static inline void initialize_barrier(
     int thread_count =
         1) // Thread count expected to arrive/wait on this barrier
 {
-#if defined(MIRAGE_GRACE_HOPPER)
+#if defined(MIRAGE_GRACE_HOPPER) || defined(MIRAGE_GRACE_BLACKWELL)
   void const *const barrier_ptr = &smem_barrier;
   uint32_t smem_int_ptr =
       static_cast<uint32_t>(__cvta_generic_to_shared(barrier_ptr));
@@ -49,7 +49,7 @@ __device__ static inline void set_barrier_transaction_bytes(
     Barrier &smem_barrier, // 64 bits user-manged barrier in smem
     uint32_t bytes)        // Number of bytes transfered by per TMA transaction
 {
-#if defined(MIRAGE_GRACE_HOPPER)
+#if defined(MIRAGE_GRACE_HOPPER) || defined(MIRAGE_GRACE_BLACKWELL)
   if (lane_id() == 0) {
     void const *const barrier_ptr = &smem_barrier;
     uint32_t smem_int_ptr =
@@ -65,7 +65,7 @@ __device__ static inline void set_barrier_transaction_bytes(
 }
 
 __device__ static inline void wait(Barrier &smem_barrier, uint32_t phase) {
-#if defined(MIRAGE_GRACE_HOPPER)
+#if defined(MIRAGE_GRACE_HOPPER) || defined(MIRAGE_GRACE_BLACKWELL)
   void const *const ptr = &smem_barrier;
   uint32_t mbar_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(ptr));
   asm volatile("{\n"

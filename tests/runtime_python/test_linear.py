@@ -6,7 +6,7 @@ torch.set_printoptions(sci_mode=False)
 reduction_size = 4096
 output_sizes = [16, 32, 64]
 
-batch_size = 6
+batch_size = 4
 
 for output_size in output_sizes:
     print(f"\n=== Testing output_size = {output_size} ===")
@@ -18,8 +18,13 @@ for output_size in output_sizes:
     runtime_kernel.linear(x, w, residual, output)
     torch_out = torch.matmul(x, torch.transpose(w, 0, 1)) + residual
 
-    print("Ratio (kernel / torch):")
-    print(output / torch_out)
+    torch.testing.assert_close(
+        output,
+        torch_out,
+        rtol=1e-2,
+        atol=1e-2,
+    )
+    print("Test passed!")
 
     # Warm-up
     for _ in range(16):

@@ -23,6 +23,8 @@
 #include "reduction.cuh"
 #include "smem_layout.cuh"
 #include "utils.cuh"
+
+#include <cutlass/arch/barrier.h>   
 namespace kernel {
 
 using bfloat16 = type::bfloat16_t;
@@ -39,7 +41,8 @@ __device__ __forceinline__ void
                           void const *weight_ptr,
                           float eps,
                           void *output_ptr) {
-  constexpr int CHUNK_SIZE = 16 / sizeof(T);
+  cutlass::arch::NamedBarrier wg_barrier(NUM_THREADS, /*bar-id*/6);
+  if (threadIdx.x < NUM_THREADS){
 
   // TODO: Update the formula since norm weight is cut down
   constexpr int MAX_OUTPUT_ATOM_SIZE = max_power_of_two_le(
@@ -51,126 +54,134 @@ __device__ __forceinline__ void
                                        ? OUTPUT_LIMIT
                                        : MAX_OUTPUT_ATOM_SIZE;
 
-  constexpr int NUM_OUTPUT_ATOMS =
-      OUTPUT_SIZE / OUTPUT_ATOM_SIZE; // Full output atoms
-  constexpr int LAST_OUTPUT_ATOM_SIZE = OUTPUT_SIZE % OUTPUT_ATOM_SIZE;
+    constexpr int TILE_SIZE = 128;
+    static constexpr int MAX_OUTPUT_ATOM_SIZE =
+        max_power_of_two_le((mirage::runtime::MAX_SHARE_MEMORY_SIZE / sizeof(T) -
+                            ((REDUCTION_SIZE + 2 * TILE_SIZE + 1) * BATCH_SIZE +
+                              REDUCTION_SIZE + 8)) /
+                            (K_PIPE_MAX * TILE_SIZE + 5 * BATCH_SIZE));
+    constexpr int OUTPUT_LIMIT = OUTPUT_SIZE <= 128 ? OUTPUT_SIZE : 128;
+    constexpr int OUTPUT_ATOM_SIZE = OUTPUT_LIMIT <= MAX_OUTPUT_ATOM_SIZE
+                                        ? OUTPUT_LIMIT
+                                        : MAX_OUTPUT_ATOM_SIZE;
 
   constexpr int TILE_SIZE = 128;
   constexpr int FORLOOP_RANGE = REDUCTION_SIZE / TILE_SIZE;
   static_assert(REDUCTION_SIZE % TILE_SIZE == 0,
                 "REDUCTION_SIZE must be a multiple of TILE_SIZE.");
 
-  constexpr int NUM_CHUNKS_A = BATCH_SIZE * TILE_SIZE / CHUNK_SIZE;
+    constexpr int FORLOOP_RANGE = REDUCTION_SIZE / TILE_SIZE;
+    static_assert(REDUCTION_SIZE % TILE_SIZE == 0,
+                  "REDUCTION_SIZE must be a multiple of TILE_SIZE.");
 
-  constexpr int CHUNKS_PER_ROW_A = TILE_SIZE / CHUNK_SIZE;
-  constexpr int CHUNKS_PER_COL_B = TILE_SIZE / CHUNK_SIZE;
+    constexpr int NUM_CHUNKS_A = BATCH_SIZE * TILE_SIZE / CHUNK_SIZE;
 
-  constexpr int log2_CHUNK_SIZE = log2_constexpr(CHUNK_SIZE);
-  constexpr int log2_CHUNKS_PER_ROW_A = log2_constexpr(CHUNKS_PER_ROW_A);
-  constexpr int log2_CHUNKS_PER_COL_B = log2_constexpr(CHUNKS_PER_COL_B);
+    constexpr int CHUNKS_PER_ROW_A = TILE_SIZE / CHUNK_SIZE;
+    constexpr int CHUNKS_PER_COL_B = TILE_SIZE / CHUNK_SIZE;
 
-  // using SM80_16x8x16_F16F16F16F16_TNX2 = 16X16X16
-  constexpr int NUM_WARPS_N =
-      ((OUTPUT_ATOM_SIZE + 15) / 16 == 3)
-          ? 4
-          : ((OUTPUT_ATOM_SIZE + 15) / 16 <= 4 ? (OUTPUT_ATOM_SIZE + 15) / 16
-                                               : 4);
-  constexpr int LAST_NUM_WARPS_N =
-      ((LAST_OUTPUT_ATOM_SIZE + 15) / 16 == 3)
-          ? 4
-          : ((LAST_OUTPUT_ATOM_SIZE + 15) / 16 <= 4
-                 ? (LAST_OUTPUT_ATOM_SIZE + 15) / 16
-                 : 4);
+    constexpr int log2_CHUNK_SIZE = log2_constexpr(CHUNK_SIZE);
+    constexpr int log2_CHUNKS_PER_ROW_A = log2_constexpr(CHUNKS_PER_ROW_A);
+    constexpr int log2_CHUNKS_PER_COL_B = log2_constexpr(CHUNKS_PER_COL_B);
 
-  constexpr int NUM_WARPS_K = 4 / NUM_WARPS_N;
-  constexpr int LAST_NUM_WARPS_K =
-      (LAST_NUM_WARPS_N == 0) ? 0 : (4 / LAST_NUM_WARPS_N);
-  constexpr int NUM_ITERS_M =
-      1; // TODO: Batch size more than 16 will cause error
+    // using SM80_16x8x16_F16F16F16F16_TNX2 = 16X16X16
+    constexpr int NUM_WARPS_N =
+        ((OUTPUT_ATOM_SIZE + 15) / 16 == 3)
+            ? 4
+            : ((OUTPUT_ATOM_SIZE + 15) / 16 <= 4 ? (OUTPUT_ATOM_SIZE + 15) / 16
+                                                : 4);
+    constexpr int LAST_NUM_WARPS_N =
+        ((LAST_OUTPUT_ATOM_SIZE + 15) / 16 == 3)
+            ? 4
+            : ((LAST_OUTPUT_ATOM_SIZE + 15) / 16 <= 4
+                  ? (LAST_OUTPUT_ATOM_SIZE + 15) / 16
+                  : 4);
 
-  int warp_idx = warp_id();
-  int lane_idx = lane_id();
+    constexpr int NUM_WARPS_K = 4 / NUM_WARPS_N;
+    constexpr int LAST_NUM_WARPS_K =
+        (LAST_NUM_WARPS_N == 0) ? 0 : (4 / LAST_NUM_WARPS_N);
+    constexpr int NUM_ITERS_M =
+        1; // TODO: Batch size more than 16 will cause error
 
-  T const *__restrict__ d_input = static_cast<T const *>(input_ptr);
-  T const *__restrict__ d_norm_weight = static_cast<T const *>(norm_weight_ptr);
-  T const *__restrict__ d_weight = static_cast<T const *>(weight_ptr);
-  T *__restrict__ d_output = static_cast<T *>(output_ptr);
+    int warp_idx = warp_id();
+    int lane_idx = lane_id();
 
-  using InputDmem =
-      dmem_row_const<T, BATCH_SIZE, REDUCTION_SIZE, REDUCTION_SIZE>;
-  using NormWeightDmem = dmem_row_const<T, 1, REDUCTION_SIZE, REDUCTION_SIZE>;
-  using WeightDmem =
-      dmem_col_const<T, TILE_SIZE, OUTPUT_ATOM_SIZE, REDUCTION_SIZE>;
-  using OutputDmem = dmem_row<T, BATCH_SIZE, OUTPUT_ATOM_SIZE, O_STRIDE>;
+    T const *__restrict__ d_input = static_cast<T const *>(input_ptr);
+    T const *__restrict__ d_norm_weight = static_cast<T const *>(norm_weight_ptr);
+    T const *__restrict__ d_weight = static_cast<T const *>(weight_ptr);
+    T *__restrict__ d_output = static_cast<T *>(output_ptr);
 
-  InputDmem input_dmem(d_input);
-  NormWeightDmem norm_weight_dmem(d_norm_weight);
-  WeightDmem weight_dmem(d_weight);
-  OutputDmem output_dmem(d_output);
+    using InputDmem =
+        dmem_row_const<T, BATCH_SIZE, REDUCTION_SIZE, REDUCTION_SIZE>;
+    using NormWeightDmem = dmem_row_const<T, 1, REDUCTION_SIZE, REDUCTION_SIZE>;
+    using WeightDmem =
+        dmem_col_const<T, TILE_SIZE, OUTPUT_ATOM_SIZE, REDUCTION_SIZE>;
+    using OutputDmem = dmem_row<T, BATCH_SIZE, OUTPUT_ATOM_SIZE, O_STRIDE>;
 
-  extern __shared__ char smem[];
+    InputDmem input_dmem(d_input);
+    NormWeightDmem norm_weight_dmem(d_norm_weight);
+    WeightDmem weight_dmem(d_weight);
+    OutputDmem output_dmem(d_output);
 
-  // STensors' offsets
-  constexpr size_t ZERO_BUFFER_OFFSET = 0;
-  // sizeof(T) * 8
+    extern __shared__ char smem[];
 
-  constexpr size_t SHARED_INPUT_BUFFER_OFFSET =
-      ZERO_BUFFER_OFFSET + sizeof(T) * 8;
-  // sizeof(T) * FORLOOP_RANGE * BATCH_SIZE * TILE_SIZE
+    // STensors' offsets
+    constexpr size_t ZERO_BUFFER_OFFSET = 0;
+    // sizeof(T) * 8
 
-  constexpr size_t SHARED_NORM_WEIGHT_BUFFER_OFFSET =
-      SHARED_INPUT_BUFFER_OFFSET +
-      sizeof(T) * FORLOOP_RANGE * BATCH_SIZE * TILE_SIZE;
-  // sizeof(T) * REDUCTION_SIZE
+    constexpr size_t SHARED_INPUT_BUFFER_OFFSET =
+        ZERO_BUFFER_OFFSET + sizeof(T) * 8;
+    // sizeof(T) * FORLOOP_RANGE * BATCH_SIZE * TILE_SIZE
 
-  constexpr size_t SHARED_WEIGHT_BUFFER_OFFSET =
-      SHARED_NORM_WEIGHT_BUFFER_OFFSET + sizeof(T) * FORLOOP_RANGE * TILE_SIZE;
-  // sizeof(T) * K_PIPE_MAX * TILE_SIZE * OUTPUT_ATOM_SIZE
+    constexpr size_t SHARED_NORM_WEIGHT_BUFFER_OFFSET =
+        SHARED_INPUT_BUFFER_OFFSET +
+        sizeof(T) * FORLOOP_RANGE * BATCH_SIZE * TILE_SIZE;
+    // sizeof(T) * REDUCTION_SIZE
 
-  constexpr size_t MUL_OUTPUT_OFFSET =
-      SHARED_WEIGHT_BUFFER_OFFSET +
-      sizeof(T) * K_PIPE_MAX * TILE_SIZE * OUTPUT_ATOM_SIZE;
-  // sizeof(T) * BATCH_SIZE * TILE_SIZE
+    constexpr size_t SHARED_WEIGHT_BUFFER_OFFSET =
+        SHARED_NORM_WEIGHT_BUFFER_OFFSET + sizeof(T) * FORLOOP_RANGE * TILE_SIZE;
+    // sizeof(T) * K_PIPE_MAX * TILE_SIZE * OUTPUT_ATOM_SIZE
 
-  constexpr size_t ELEMENT_UNARY_OUTPUT_OFFSET =
-      MUL_OUTPUT_OFFSET + sizeof(T) * BATCH_SIZE * TILE_SIZE;
-  // sizeof(T) * BATCH_SIZE * TILE_SIZE
+    constexpr size_t MUL_OUTPUT_OFFSET =
+        SHARED_WEIGHT_BUFFER_OFFSET +
+        sizeof(T) * K_PIPE_MAX * TILE_SIZE * OUTPUT_ATOM_SIZE;
+    // sizeof(T) * BATCH_SIZE * TILE_SIZE
 
-  constexpr size_t MM_INTERMEDIATE_OFFSET =
-      ELEMENT_UNARY_OUTPUT_OFFSET + sizeof(T) * BATCH_SIZE * TILE_SIZE;
-  // sizeof(T) * NUM_WARPS_K * BATCH_SIZE * OUTPUT_ATOM_SIZE
+    constexpr size_t ELEMENT_UNARY_OUTPUT_OFFSET =
+        MUL_OUTPUT_OFFSET + sizeof(T) * BATCH_SIZE * TILE_SIZE;
+    // sizeof(T) * BATCH_SIZE * TILE_SIZE
 
-  constexpr size_t MM_OUTPUT_OFFSET =
-      MM_INTERMEDIATE_OFFSET +
-      sizeof(T) * NUM_WARPS_K * BATCH_SIZE * OUTPUT_ATOM_SIZE;
-  // sizeof(T) * BATCH_SIZE * OUTPUT_ATOM_SIZE
+    constexpr size_t MM_INTERMEDIATE_OFFSET =
+        ELEMENT_UNARY_OUTPUT_OFFSET + sizeof(T) * BATCH_SIZE * TILE_SIZE;
+    // sizeof(T) * NUM_WARPS_K * BATCH_SIZE * OUTPUT_ATOM_SIZE
 
-  constexpr size_t REDUCTION_OUTPUT_OFFSET =
-      MM_OUTPUT_OFFSET + sizeof(T) * BATCH_SIZE * OUTPUT_ATOM_SIZE;
-  // sizeof(T) * BATCH_SIZE * 1
+    constexpr size_t MM_OUTPUT_OFFSET =
+        MM_INTERMEDIATE_OFFSET +
+        sizeof(T) * NUM_WARPS_K * BATCH_SIZE * OUTPUT_ATOM_SIZE;
+    // sizeof(T) * BATCH_SIZE * OUTPUT_ATOM_SIZE
 
-  constexpr size_t SHARED_OUTPUT_OFFSET = MM_INTERMEDIATE_OFFSET;
-  // reuse mm_intermediate
+    constexpr size_t REDUCTION_OUTPUT_OFFSET =
+        MM_OUTPUT_OFFSET + sizeof(T) * BATCH_SIZE * OUTPUT_ATOM_SIZE;
+    // sizeof(T) * BATCH_SIZE * 1
 
-  // zero buffer
-  T *zero_buf = (T *)(smem + ZERO_BUFFER_OFFSET);
-  vec_zero_t<T, 8>::fill_zero(zero_buf);
+    constexpr size_t SHARED_OUTPUT_OFFSET = MM_INTERMEDIATE_OFFSET;
+    // reuse mm_intermediate
 
-  // copy
-  T *shared_input_buffer = (T *)(smem + SHARED_INPUT_BUFFER_OFFSET);
-  T *shared_norm_weight_buffer = (T *)(smem + SHARED_NORM_WEIGHT_BUFFER_OFFSET);
-  T *shared_weight_buffer = (T *)(smem + SHARED_WEIGHT_BUFFER_OFFSET);
+    // zero buffer
+    T *zero_buf = (T *)(smem + ZERO_BUFFER_OFFSET);
+    vec_zero_t<T, 8>::fill_zero(zero_buf);
 
-  // intermediate
-  T *mul_output = (T *)(smem + MUL_OUTPUT_OFFSET);
-  T *element_unary_output = (T *)(smem + ELEMENT_UNARY_OUTPUT_OFFSET);
-  clear_smem_buffer<T, BATCH_SIZE * TILE_SIZE>(element_unary_output);
-  T *mm_intermediate = (T *)(smem + MM_INTERMEDIATE_OFFSET);
-  T *mm_output = (T *)(smem + MM_OUTPUT_OFFSET);
-  T *reduction_output = (T *)(smem + REDUCTION_OUTPUT_OFFSET);
+    // copy
+    T *shared_input_buffer = (T *)(smem + SHARED_INPUT_BUFFER_OFFSET);
+    T *shared_norm_weight_buffer = (T *)(smem + SHARED_NORM_WEIGHT_BUFFER_OFFSET);
+    T *shared_weight_buffer = (T *)(smem + SHARED_WEIGHT_BUFFER_OFFSET);
 
-  // output
-  T *shared_output = (T *)(smem + SHARED_OUTPUT_OFFSET);
+    // intermediate
+    T *mul_output = (T *)(smem + MUL_OUTPUT_OFFSET);
+    T *element_unary_output = (T *)(smem + ELEMENT_UNARY_OUTPUT_OFFSET);
+    clear_smem_buffer<T, BATCH_SIZE * TILE_SIZE>(element_unary_output);
+    T *mm_intermediate = (T *)(smem + MM_INTERMEDIATE_OFFSET);
+    T *mm_output = (T *)(smem + MM_OUTPUT_OFFSET);
+    T *reduction_output = (T *)(smem + REDUCTION_OUTPUT_OFFSET);
 
   // define the swizzle mode
   using ZeroBufferSmem = smem_row<T, 0, 0, 0, 1, 8, 8>;
@@ -193,11 +204,9 @@ __device__ __forceinline__ void
       smem_row<T, 0, 0, 0, BATCH_SIZE, OUTPUT_ATOM_SIZE, OUTPUT_ATOM_SIZE>;
   using ReductionOutputSmem = smem_row<T, 0, 0, 0, BATCH_SIZE, 1, 1>;
 
-  ZeroBufferSmem zero_buffer(zero_buf);
+    using ReductionOutputSmem = smem_row<T, 0, 0, 0, BATCH_SIZE, 1, 1>;
 
-  InputSmem input_smem(shared_input_buffer);
-  NormWeightSmem norm_weight_smem(shared_norm_weight_buffer);
-  WeightSmem weight_smem(shared_weight_buffer);
+    ZeroBufferSmem zero_buffer(zero_buf);
 
   InputSmem mul_output_smem(mul_output);
   InputSmem element_unary_smem(element_unary_output);
@@ -439,21 +448,53 @@ __device__ __forceinline__ void
         }
       };
 
-#pragma unroll
-  for (int output_atom_idx = 0; output_atom_idx < NUM_OUTPUT_ATOMS;
-       output_atom_idx++,
-           d_weight += OUTPUT_ATOM_SIZE * REDUCTION_SIZE,
-           d_output += OUTPUT_ATOM_SIZE) {
-    process_atom
-        .template operator()<OUTPUT_ATOM_SIZE, NUM_WARPS_N, NUM_WARPS_K>(
-            output_atom_idx, d_weight, d_output);
-  }
+      if (output_atom_idx == 0) {
+        float const scalars[] = {eps, 0.0f};
+        reduction_sum_col<T,
+                          decltype(reduction_output_smem),
+                          decltype(element_unary_smem),
+                          ElementUnaryOpType::ADDSCALAR,
+                          ElementUnaryOpType::SQRT>(
+            reduction_output_smem, element_unary_smem, scalars);
+        wg_barrier.arrive_and_wait();
+      }
 
-  // Tail output atom that less than OUTPUT_ATOM_SIZE
-  if constexpr (LAST_OUTPUT_ATOM_SIZE > 0) {
-    process_atom.template
-        operator()<LAST_OUTPUT_ATOM_SIZE, LAST_NUM_WARPS_N, LAST_NUM_WARPS_K>(
-            NUM_OUTPUT_ATOMS, d_weight, d_output);
+      if (NUM_WARPS_K > 1) {
+        div_col(output_smem, mm_output_smem, reduction_output_smem);
+      } else {
+        div_col(output_smem, mm_intermediate_smem, reduction_output_smem);
+      }
+      wg_barrier.arrive_and_wait();
+
+  #pragma unroll
+      for (int row = 0; row < BATCH_SIZE; row++) {
+  #pragma unroll
+        for (int i = threadIdx.x; i < OUTPUT_ATOM_SIZE; i += NUM_THREADS) {
+          output_dmem.at(row, i) = output_smem.at(row, i);
+        }
+      }
+      if (output_atom_idx + 1 <
+          (NUM_OUTPUT_ATOMS + (LAST_OUTPUT_ATOM_SIZE > 0))) {
+        wg_barrier.arrive_and_wait();
+      }
+    };
+
+  #pragma unroll
+    for (int output_atom_idx = 0; output_atom_idx < NUM_OUTPUT_ATOMS;
+        output_atom_idx++,
+            d_weight += OUTPUT_ATOM_SIZE * REDUCTION_SIZE,
+            d_output += OUTPUT_ATOM_SIZE) {
+      process_atom
+          .template operator()<OUTPUT_ATOM_SIZE, NUM_WARPS_N, NUM_WARPS_K>(
+              output_atom_idx, d_weight, d_output);
+    }
+
+    // Tail output atom that less than OUTPUT_ATOM_SIZE
+    if constexpr (LAST_OUTPUT_ATOM_SIZE > 0) {
+      process_atom.template
+          operator()<LAST_OUTPUT_ATOM_SIZE, LAST_NUM_WARPS_N, LAST_NUM_WARPS_K>(
+              NUM_OUTPUT_ATOMS, d_weight, d_output);
+    }
   }
 }
 

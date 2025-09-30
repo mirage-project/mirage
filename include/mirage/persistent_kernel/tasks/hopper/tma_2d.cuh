@@ -92,7 +92,7 @@ public:
   template <int NDIM>
   __device__ inline void launch_tma_cp_async(
       Barrier &mbar, T *smem_ptr, int const (&tma_coords)[NDIM]) const {
-#ifdef MIRAGE_GRACE_HOPPER
+#if defined(MIRAGE_GRACE_HOPPER) || defined(MIRAGE_GRACE_BLACKWELL)
     uint64_t gmem_int_desc = reinterpret_cast<uint64_t>(desc_ptr);
     uint32_t smem_int_mbar =
         static_cast<uint32_t>(__cvta_generic_to_shared(&mbar));
@@ -153,7 +153,7 @@ public:
   __device__ inline void
       launch_tma_store_async(void *smem_ptr,
                              int const (&tma_coords)[NDIM]) const {
-#ifdef MIRAGE_GRACE_HOPPER
+#if defined(MIRAGE_GRACE_HOPPER) || defined(MIRAGE_GRACE_BLACKWELL)
     uint64_t gmem_int_desc = reinterpret_cast<uint64_t>(desc_ptr);
     uint32_t smem_int_ptr =
         static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr));

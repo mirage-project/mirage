@@ -15,10 +15,21 @@
 
 #pragma once
 
+// CuTe includes
+#include <cute/tensor.hpp>                      // CuTe tensor implementation
+#include "cute/layout.hpp"
+#include "cutlass/cutlass.h"
+#include "cutlass/epilogue/collective/collective_builder.hpp"
+#include "cutlass/gemm/collective/collective_builder.hpp"
+
 #include "mirage/config.h"
+#include "tasks/bfloat16.h"
 
 namespace mirage {
 namespace runtime {
+
+using namespace cute;
+using bfloat16 = type::bfloat16_t;
 
 #if MPK_TARGET_CC >= 90
 constexpr int MAX_SHARE_MEMORY_SIZE = 224 * 1024;

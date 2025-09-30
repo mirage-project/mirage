@@ -19,3 +19,5 @@
 #include "hopper/linear_swapAB_hopper.cuh"
 #include "hopper/multitoken_paged_attention_hopper.cuh"
 #include "hopper/rmsnorm_hopper.cuh"
+// SM100 kernels
+#include "blackwell/linear_sm100_warp_specialized.cuh"

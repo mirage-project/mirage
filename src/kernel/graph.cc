@@ -552,7 +552,8 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
         customized->bgraph, params, true /*with_residual*/);
     task_config[op] =
         std::make_tuple(3, 1, TASK_LINEAR_WITH_RESIDUAL_SM100, variant_id);
-  } else {
+  } 
+  else {
     assert(false && "Unsupported task type");
   }
 }
