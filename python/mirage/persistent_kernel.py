@@ -609,9 +609,7 @@ class PersistentKernel:
         tb_graph.new_input(weight, (0, -1, -1), 1, True)
         tb_graph.new_input(output, (1, -1, -1), -1, True)
         self.kn_graph.customized([input, weight, output], tb_graph)
-        hopper_linear_kernel = "linear_hopper" if output.dim(0) / grid_dim[0] >= 256 else "linear_swapAB_hopper"
-        print(f"hopper_linear_kernel: {hopper_linear_kernel}")
-        self.kn_graph.register_task(tb_graph, hopper_linear_kernel if self.target_cc == 90 else "linear")
+        self.kn_graph.register_task(tb_graph, "linear_swapAB_hopper" if self.target_cc == 90 else "linear")
 
     def linear_with_residual_layer(
         self,

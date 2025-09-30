@@ -513,7 +513,6 @@ if __name__ == "__main__":
                 torch_tensor=layer.mlp.up_proj.weight, name=f"layer_{i}_up_proj"
             )
             rmsnorm_num_tasks = grid_for_rmsnorm_linear_layer(w_gate_proj.dim(0) + w_up_proj.dim(0))
-            # rmsnorm_num_tasks = (w_gate_proj.dim(0) + w_up_proj.dim(0)) // 64
             w_gatedup = mpk.shuffle_tensors(
                 inputs=[w_gate_proj, w_up_proj],
                 shuffled_dim=0,
@@ -527,7 +526,6 @@ if __name__ == "__main__":
                 grid_dim=(mpk.max_num_batched_tokens, 1, 1),
                 block_dim=(256, 1, 1),
             )
-            print("rmsnorm_num_tasks", rmsnorm_num_tasks, w_gate_proj.dim(0) + w_up_proj.dim(0))
             mpk.linear_layer(
                 input=rmsnorm_out,
                 weight=w_gatedup,
