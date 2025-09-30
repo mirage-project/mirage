@@ -362,13 +362,17 @@ def partition_graph_with_dp(model,
                         j = ops_list.index(output_op)
                         adj[i][j] = 1
             
-            # Apply DAG partitioning
-            partition_boundaries = solve_partitions(list(range(n)), cost_function, max_nodes_per_partition, adj)
+            # Apply DAG partitioning with connectivity constraint
+            def cost_function_with_adj(nodes):
+                return cost_function(nodes, adj)
+            partition_boundaries = solve_partitions(list(range(n)), cost_function_with_adj, max_nodes_per_partition, adj)
             
             # Convert partitions to kernel graphs
             for p_id, boundary in enumerate(partition_boundaries):
                 start = 0 if p_id == 0 else partition_boundaries[p_id-1] 
                 partition_ops = ops_list[start:boundary]
+                
+                print(f"Partition {p_id}: {[op.name for op in partition_ops]}")
                 
                 partition_subgraph = {}
                 for op in partition_ops:

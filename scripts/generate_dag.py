@@ -73,7 +73,7 @@ def solve_helper(topological_sort, cf, max_nodes_in_partition, i, dp, adj):
   costs = []
   for j in range(min(max_nodes_in_partition, len(topological_sort) - i)):
       if dp[i][j][0] == 0:
-          local_cost = cost_function(topological_sort[i:i+j+1])
+          local_cost = cost_function(topological_sort[i:i+j+1], adj)
           _, _, partitions = solve_helper(topological_sort, cf, max_nodes_in_partition, i+j+1, dp, adj)
           dependent_costs = find_dependent_costs(i, i + j + 1, partitions, adj, dp)
           dp[i][j] = (local_cost + dependent_costs, local_cost, partitions + [i + j + 1])
@@ -81,7 +81,22 @@ def solve_helper(topological_sort, cf, max_nodes_in_partition, i, dp, adj):
       costs.append((dp[i][j]))
   return min(costs)
 
-def cost_function(nodes): 
+def is_connected(nodes, adj):
+  if len(nodes) <= 1: return True
+  visited = set([nodes[0]])
+  queue = [nodes[0]]
+  while queue:
+    node = queue.pop(0)
+    for next_node in nodes:
+      if next_node not in visited and (adj[node][next_node] or adj[next_node][node]):
+        visited.add(next_node)
+        queue.append(next_node)
+  return len(visited) == len(nodes)
+
+
+def cost_function(nodes, adj=None): 
+  if adj is not None and not is_connected(nodes, adj):
+    return float('inf')
   mod = 6 - sum(nodes) % 6
   # mod = 6 - len(nodes)
   # print(len(nodes))

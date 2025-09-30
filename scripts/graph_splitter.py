@@ -17,13 +17,12 @@ class SubgraphData:
 class GraphSplitter:
     """Splits a mixed operator graph into Mirage-supported and unsupported subgraphs."""
     
-    def __init__(self):
-        # Operations that are NOT supported by Mirage
-        self.mirage_unsupported_ops = {
-            "abs", "concat", "equal", "expand", "gather", "pow", 
-            "reshape", "shape", "slice", "sqrt", "transpose", 
-            "trilu", "unsqueeze", "where", "layernorm", "layernormalization", "tanh"
-        }
+    def __init__(self, unsupported_ops=None):
+        # Operations that are NOT supported by Mirage (from user input)
+        self.mirage_unsupported_ops = set()
+        if unsupported_ops:
+            # Convert all names to lowercase for case-insensitive matching
+            self.mirage_unsupported_ops = {op.lower() for op in unsupported_ops}
     
     def is_supported_op(self, op) -> bool:
         """Check if an operation is supported by Mirage."""
@@ -515,94 +514,7 @@ class GraphSplitter:
         
         return adjacency_list_subgraphs
 
-    def to_kernel_graph(self, sg):
-        """
-        Generate a Mirage kernel graph from a subgraph.
-
-        Args:
-            sg: dict, the subgraph to convert to a Mirage kernel graph
-            
-        Returns:
-            tuple: (graph, dims)
-        """
-        import mirage as mi
-        
-        # Define operation mapping
-        OP_MAP = {
-            'matmul': lambda g, *args: g.matmul(*args),
-            'gemm': lambda g, *args: g.matmul(*args),  # Map Gemm to matmul
-            'exp': lambda g, *args: g.exp(*args),
-            'silu': lambda g, *args: g.silu(*args),
-            'gelu': lambda g, *args: g.gelu(*args),
-            'relu': lambda g, *args: g.relu(*args),
-            'add': lambda g, *args: g.add(*args),
-            'mul': lambda g, *args: g.mul(*args),
-            'div': lambda g, *args: g.div(*args),
-        }
-        
-        graph = mi.new_kernel_graph()
-        dims = []
-        # Store the output tensors and reference counts (based on ID)
-        intermediates = {}
-        
-        # Process each operator in the subgraph
-        for op in sg:
-            inputs = []
-            
-            # Process input tensors
-            for shape_info in op.input_tensor_shapes:
-                if shape_info is None:
-                    inputs.append(None)
-                    continue
-                    
-                shape, tensor_id = shape_info
-                
-                if tensor_id not in intermediates:
-                    if shape is not None:
-                        dims.append(shape)
-                        inputs.append(graph.new_input(dims=shape, dtype=mi.float16))
-                    else:
-                        inputs.append(None)
-                else:
-                    # Tensor produced by previous operations in the subgraph
-                    tensor, ref_count = intermediates[tensor_id]
-                    inputs.append(tensor)
-                    intermediates[tensor_id] = (tensor, ref_count + 1)
-            
-            # Get operation type and convert to lowercase for case-insensitive matching
-            fn_name = (op.fn if hasattr(op, 'fn') else op.name).lower()
-            
-            try:
-                # Find the operation in the mapping
-                for op_type, op_func in OP_MAP.items():
-                    if op_type in fn_name:
-                        res = op_func(graph, *inputs)
-                        break
-                else:
-                    print(f"Unsupported operation: {fn_name}")
-                    continue
-                    
-            except Exception as e:
-                print(f"Error executing {fn_name}: {e}")
-                continue
-            
-            # Store output tensors
-            if isinstance(res, list):
-                for i, tensor in enumerate(res):
-                    if i < len(op.output_tensor_shapes) and op.output_tensor_shapes[i]:
-                        tensor_id = op.output_tensor_shapes[i][1]
-                        intermediates[tensor_id] = (tensor, 0)
-            else:
-                if op.output_tensor_shapes and op.output_tensor_shapes[0]:
-                    tensor_id = op.output_tensor_shapes[0][1]
-                    intermediates[tensor_id] = (res, 0)
-        
-        # Mark unused tensors as outputs
-        for tensor_id, (tensor, ref_count) in intermediates.items():
-            if ref_count == 0:
-                graph.mark_output(tensor)
-            
-        return graph, dims
+    
 
 def process_operator_graph(operators: Dict, IGNORE_OPS: Set[str] = None, UNSUPPORTED_OPS: Set[str] = None) -> Tuple[List[Tuple[Dict, str]], Dict[int, Set[int]]]:
     """
@@ -620,15 +532,7 @@ def process_operator_graph(operators: Dict, IGNORE_OPS: Set[str] = None, UNSUPPO
     # Preprocess the graph to handle special operators
     operators_graph = preprocess_special_operators(operators_graph, IGNORE_OPS)
     
-    splitter = GraphSplitter()
-    
-    # Update unsupported ops based on UNSUPPORTED_OPS
-    if UNSUPPORTED_OPS:
-        # Convert all names to lowercase for case-insensitive matching
-        unsupported_ops_lower = {op.lower() for op in UNSUPPORTED_OPS}
-        # Add user-specified unsupported ops to the existing list
-        splitter.mirage_unsupported_ops.update(unsupported_ops_lower)
-        print(f"Total unsupported ops: {', '.join(splitter.mirage_unsupported_ops)}")
+    splitter = GraphSplitter(UNSUPPORTED_OPS)
     
     print("Splitting operator graph into subgraphs...")
     subgraphs, subgraph_deps, subgraph_io, sorted_ops = splitter.split_graph(operators_graph)
