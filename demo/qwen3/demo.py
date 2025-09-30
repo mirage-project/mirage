@@ -348,12 +348,6 @@ if __name__ == "__main__":
             io_category="cuda_tensor",
         )
         argmax_out = mpk.attach_input(torch_tensor=output_tokens, name="output_token")
-        #argmax_out = mpk.new_tensor(
-        #    dims=(args.max_num_batched_tokens, 1),
-        #    dtype=mi.int64,
-        #    name="argmax_out",
-        #    io_category="cuda_tensor",
-        #)
 
         # add spec tokens layer
         if spec_decode_config:
@@ -414,14 +408,6 @@ if __name__ == "__main__":
                 grid_dim=(grid_for_rmsnorm_linear_layer(w_qkv.dim(0)), 1, 1),
                 block_dim=(128, 1, 1),
             )
-            #mpk.rmsnorm_linear_layer(
-            #    input=x,
-            #    weight_norm=w_norm,
-            #    weight_linear=w_qkv,
-            #    output=attn_in,
-            #    grid_dim=(grid_for_rmsnorm_linear_layer(w_qkv.dim(0)), 1, 1),
-            #    block_dim=(128, 1, 1),
-            #)
             # add attention
             w_q_norm = mpk.attach_input(
                 torch_tensor=layer.self_attn.q_norm.weight, name=f"layer_{i}_q_norm"
@@ -518,14 +504,6 @@ if __name__ == "__main__":
                 grid_dim=(rmsnorm_num_tasks, 1, 1),
                 block_dim=(128, 1, 1),
             )
-            #mpk.rmsnorm_linear_layer(
-            #    input=x,
-            #    weight_norm=w_norm,
-            #    weight_linear=w_gatedup,
-            #    output=mlp_mid,
-            #    grid_dim=(rmsnorm_num_tasks, 1, 1),
-            #    block_dim=(128, 1, 1),
-            #)
             mpk.silu_mul_layer(
                 input=mlp_mid,
                 output=silu_mul_out,

@@ -1222,5 +1222,69 @@ int TaskRegister::register_linear_swapAB_hopper_task(
   }
 }
 
+// SM100 Tasks
+
+int TaskRegister::register_linear_sm100_task(threadblock::Graph const &bgraph,
+                                       std::vector<int> const &params,
+                                       bool with_residual) {
+  assert(params.size() == 0);
+  int batch_size = 0, output_size = 0, reduction_size = 0, output_stride = 0;
+  std::vector<tb::TBInputOp *> input_ops;
+  std::vector<tb::TBInputOp *> output_ops;
+  int num_inputs = with_residual ? 3 : 2;
+  int num_outputs = 1;
+
+  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    if (input_ops.size() < (size_t)num_inputs) {
+      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    } else {
+      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    }
+  }
+  assert(output_ops[0]->output_tensors[0].num_dims == 2);
+  batch_size = output_ops[0]->output_tensors[0].dim[0];
+  output_size = output_ops[0]->output_tensors[0].dim[1];
+  assert(input_ops[0]->dtensor.num_dims == 2);
+  reduction_size = input_ops[0]->dtensor.dim[1];
+  printf("linear task: batch_size=%d, output_size=%d, reduction_size=%d\n",
+        batch_size,
+        output_size,
+        reduction_size);
+  // get output stride
+  assert(output_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
+  kn::KNInputOp *kn_input_op =
+      static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
+  output_stride = static_cast<int>(kn_input_op->input_strides[0]);
+
+  mirage::transpiler::CodeKeeper code;
+  // code.inc_indent();
+  // code.e("kernel::linear_kernel<bfloat16, $, $, $, $>(",
+  //        batch_size,
+  //        output_size,
+  //        reduction_size,
+  //        output_stride);
+  // code.e("    task_desc.inputs[0].base_ptr,");
+  // code.e("    task_desc.inputs[1].base_ptr,");
+  // if (with_residual) {
+  //   code.e("    task_desc.inputs[2].base_ptr,");
+  // } else {
+  //   code.e("    nullptr,");
+  // }
+  // code.e("    task_desc.outputs[0].base_ptr,");
+  // code.e("    runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS],");
+  // if (with_residual) {
+  //   code.e("    runtime_config.my_gpu_id == 0);");
+  // } else {
+  //   code.e("    false/*residual*/);");
+  // }
+  if (with_residual) {
+    return register_task_variant(TASK_LINEAR_WITH_RESIDUAL_SM100, code.to_string());
+  } else {
+    return register_task_variant(TASK_LINEAR_SM100, code.to_string());
+  }
+}
+
 } // namespace runtime
 } // namespace mirage

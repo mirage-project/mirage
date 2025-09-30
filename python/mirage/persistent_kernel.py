@@ -357,7 +357,7 @@ class PersistentKernel:
         tb_graph.new_input(weight, (-1, -1, -1), 0, True)
         tb_graph.new_input(output, (0, -1, -1), 1, True)
         self.kn_graph.customized([input, weight, output], tb_graph)
-        self.kn_graph.register_task(tb_graph, "rmsnorm_hopper" if self.target_cc == 90 else "rmsnorm")
+        self.kn_graph.register_task(tb_graph, "rmsnorm_hopper" if self.target_cc >= 90 else "rmsnorm")
 
     def rmsnorm_linear_layer(
         self,
@@ -589,7 +589,10 @@ class PersistentKernel:
             ],
             tb_graph,
         )
-        self.kn_graph.register_task(tb_graph, "paged_attention_hopper" if self.target_cc == 90 else "paged_attention", params)
+        task_name = "paged_attention"
+        if self.target_cc == 90:
+            task_name = "paged_attention_hopper"
+        self.kn_graph.register_task(tb_graph, task_name, params)
 
     def linear_layer(
         self,
@@ -608,12 +611,11 @@ class PersistentKernel:
         tb_graph.new_input(weight, (0, -1, -1), 1, True)
         tb_graph.new_input(output, (1, -1, -1), -1, True)
         self.kn_graph.customized([input, weight, output], tb_graph)
-        self.kn_graph.register_task(tb_graph, "linear_swapAB_hopper" if self.target_cc == 90 else "linear")
         impl_name = "linear"
         if self.target_cc == 90:
             impl_name = "linear_swapAB_hopper"
-        elif self.target_cc == 100:
-            impl_name = "linear_sm100"
+        # elif self.target_cc == 100:
+        #     impl_name = "linear_sm100"
         self.kn_graph.register_task(tb_graph, impl_name)
 
 

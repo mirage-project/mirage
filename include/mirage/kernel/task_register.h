@@ -65,16 +65,13 @@ public:
                                            std::vector<int> const &params);
   int register_rmsnorm_hopper_task(threadblock::Graph const &bgraph,
                                    std::vector<int> const &params);
-<<<<<<< HEAD
   int register_linear_swapAB_hopper_task(threadblock::Graph const &bgraph,
                                          std::vector<int> const &params,
                                          bool with_residual);
-=======
   // SM100 tasks
   int register_linear_sm100_task(threadblock::Graph const &bgraph,
                                   std::vector<int> const &params,
                                   bool with_residual);
->>>>>>> 780f89d (sm100_linear_warp_specialized unit test added)
   int register_task_variant(TaskType type, std::string const &code);
 
 

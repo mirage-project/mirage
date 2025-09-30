@@ -683,9 +683,15 @@ TaskGraphResult print_task_graph(
 
     // create TMA desc for each task
     code.e("#ifdef MPK_ENABLE_TMA");
+    // Hopper Tasks
     code.e("if (task.at(\"task_type\") > TASK_HOPPER_TASK_BEGIN && "
            "task.at(\"task_type\") < TASK_HOPPER_TASK_END) {");
     code.e("create_tma_desc_by_task(task_desc);");
+    code.e("}");
+    // SM100 Tasks
+    code.e("if (task.at(\"task_type\") > TASK_SM100_TASK_BEGIN && "
+           "task.at(\"task_type\") < TASK_SM100_TASK_END) {");
+    code.e("create_sm100_tma_desc_by_task(task_desc);");
     code.e("}");
     code.e("#endif");
     code.e("all_tasks.push_back(task_desc);");
@@ -709,7 +715,7 @@ TaskGraphResult print_task_graph(
   }
 
   code.e(
-      "static void _init_persistent_kernel(std::vector<TaskDesc> &all_tasks,");
+      "static void _init_persistent_kernel(CUTE_GRID_CONSTANT std::vector<TaskDesc> &all_tasks,");
   code.e("                                    std::vector<EventDesc> "
          "&all_events,");
   code.e("                                  std::vector<TaskId> &first_tasks,");

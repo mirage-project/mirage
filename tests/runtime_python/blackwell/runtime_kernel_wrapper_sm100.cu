@@ -12,8 +12,10 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-#include "blackwell/linear_sm100.cuh"
 #include "blackwell/linear_sm100_warp_specialized.cuh"
+#include "blackwell/linear_sm100_mpk.cuh"
+#include "blackwell/utils.cuh"
+#include "hopper/tma_2d.cuh"
 #include <cuda_runtime.h>
 #include <torch/extension.h>
 
@@ -40,162 +42,36 @@
 
 using bfloat16 = cute::bfloat16_t;
 
-template <class SharedStorage,
-          class ATensor, class BTensor, class CTensor, class DTensor,
-          class MmaTiler_MNK, class TiledMMA, class ClusterShape_MNK,
-          class TmaAtomA, class TmaAtomB>
-__global__ __launch_bounds__(128, 1) void linear_kernel_sm100_wrapper(
-            ATensor mA,                      // (Gemm_M, Gemm_K)
-            BTensor mB,                      // (Gemm_N, Gemm_K)
-            CTensor mC,                      // (Gemm_M, Gemm_N)
-            DTensor mD,                      // (Gemm_M, Gemm_N)
-            MmaTiler_MNK mma_tiler,          // <MmaTile_M, MmaTile_N, MmaTile_K>
-            TiledMMA tiled_mma,              // <    Mma_M,     Mma_N,     Mma_K>
-            ClusterShape_MNK cluster_shape,  // (ClusterM, ClusterN, ClusterK)
-            CUTE_GRID_CONSTANT TmaAtomA const tma_atom_A,
-            CUTE_GRID_CONSTANT TmaAtomB const tma_atom_B
-) {
+// Linear SM100 Warp Specialized
 
-  kernel::linear_kernel_sm100<SharedStorage, ATensor, BTensor, CTensor, DTensor,
-                      MmaTiler_MNK, TiledMMA, ClusterShape_MNK,
-                      TmaAtomA, TmaAtomB>(
-                      mA, mB, mC, mD,
-                      mma_tiler, tiled_mma, cluster_shape,
-                      &tma_atom_A, &tma_atom_B);
-
-}
 template <class SharedStorage,
-          class ATensor, class BTensor, class CTensor, class DTensor,
-          class MmaTiler_MNK, class EpiTiler_MN, class TiledMMA, class ClusterShape_MNK,
-          class TmaAtomA, class TmaAtomB, class TmaAtomD, 
+          class ATensor, class BTensor, class BiasTensor, class CTensor,
+          class MmaTiler_MNK, class EpiTiler_MN, class TiledMMA, 
+          class TmaAtomA, class TmaAtomB, class TmaAtomC, 
           int Num_AB_Stage, int Num_ACC_Stage, int Num_C_Stage, bool NoBias>
 __global__ __launch_bounds__(256, 1) void linear_kernel_ws_sm100_wrapper(
             ATensor mA,                      // (Gemm_M, Gemm_K)
             BTensor mB,                      // (Gemm_N, Gemm_K)
-            CTensor mC,                      // (Gemm_M, Gemm_N)
-            DTensor mD,                      // (Gemm_M, Gemm_N)
+            BiasTensor mBias,                      // (Gemm_M, Gemm_N)
+            CTensor mC,                     // (Gemm_M, Gemm_N)
             MmaTiler_MNK mma_tiler,          // <MmaTile_M, MmaTile_N, MmaTile_K>
             EpiTiler_MN epi_tiler,           // <EpiTile_M, EpiTile_N>
             TiledMMA tiled_mma,              // <    Mma_M,     Mma_N,     Mma_K>
-            ClusterShape_MNK cluster_shape,  // (ClusterM, ClusterN, ClusterK)
             CUTE_GRID_CONSTANT TmaAtomA const tma_atom_A,
             CUTE_GRID_CONSTANT TmaAtomB const tma_atom_B,
-            CUTE_GRID_CONSTANT TmaAtomD const tma_atom_D,
+            CUTE_GRID_CONSTANT TmaAtomC const tma_atom_C,
             const int num_tmem_columns
 ) {
 
-  kernel::linear_kernel_ws_sm100<SharedStorage, ATensor, BTensor, CTensor, DTensor,
-                      MmaTiler_MNK, EpiTiler_MN, TiledMMA, ClusterShape_MNK,
-                      TmaAtomA, TmaAtomB, TmaAtomD, Num_AB_Stage, Num_ACC_Stage, Num_C_Stage, NoBias>(
-                      mA, mB, mC, mD,
-                      mma_tiler, epi_tiler, tiled_mma, cluster_shape,
-                      &tma_atom_A, &tma_atom_B, &tma_atom_D, num_tmem_columns);
+  kernel::linear_kernel_ws_sm100<SharedStorage, ATensor, BTensor, BiasTensor, CTensor,
+                      MmaTiler_MNK, EpiTiler_MN, TiledMMA,
+                      TmaAtomA, TmaAtomB, TmaAtomC, Num_AB_Stage, Num_ACC_Stage, Num_C_Stage, NoBias>(
+                      mA, mB, mBias, mC,
+                      mma_tiler, epi_tiler, tiled_mma,
+                      &tma_atom_A, &tma_atom_B, &tma_atom_C, num_tmem_columns);
 
 }
 
-template <class TypeA, class TypeB, class TypeC, class TypeD, class LayoutA, class LayoutB, class LayoutC, class LayoutD>
-void launch_linear_sm100(TypeA const* device_ptr_A,
-                          TypeB const* device_ptr_B,
-                          TypeC const* device_ptr_C,
-                          TypeD      * device_ptr_D,
-                          LayoutA layout_A,
-                          LayoutB layout_B,
-                          LayoutC layout_C,
-                          LayoutD layout_D) {
-  // Ensure the input/output tensor dimensions match for GEMM
-  assert(cute::shape<0>(layout_A) == cute::shape<0>(layout_D));  // Gemm_M
-  assert(cute::shape<0>(layout_B) == cute::shape<1>(layout_D));  // Gemm_N
-  assert(cute::shape<1>(layout_A) == cute::shape<1>(layout_B));  // Gemm_K
-
-  assert(device_ptr_C != nullptr);
-
-  assert(cute::shape<0>(layout_A) == cute::shape<0>(layout_C));  // Gemm_M
-  assert(cute::shape<0>(layout_B) == cute::shape<1>(layout_C));  // Gemm_N
-
-  // Represent the full tensors in global memory
-  cute::Tensor mA = cute::make_tensor(cute::make_gmem_ptr(device_ptr_A), layout_A);      // (Gemm_M, Gemm_K)
-  cute::Tensor mB = cute::make_tensor(cute::make_gmem_ptr(device_ptr_B), layout_B);      // (Gemm_N, Gemm_K)
-  cute::Tensor mC = cute::make_tensor(cute::make_gmem_ptr(device_ptr_C), layout_C);      // (Gemm_M, Gemm_N)
-  cute::Tensor mD = cute::make_tensor(cute::make_gmem_ptr(device_ptr_D), layout_D);      // (Gemm_M, Gemm_N)
-
-  // printf("ptr_a[0] value: %f\n", static_cast<float>(device_ptr_A[0]));
-
-  // // TODO(Zhihao): add dispatch for residual
-
-  // Get M, N, K dimensions of the GEMM we are running
-  auto Gemm_M = cute::shape<0>(layout_A);
-  auto Gemm_N = cute::shape<0>(layout_B);
-  auto Gemm_K = cute::shape<1>(layout_A);
-
-  cute::TiledMMA tiled_mma = cute::make_tiled_mma(cute::SM100_MMA_F16BF16_SS<TypeA, TypeB, float,           // Mma's A, B, and Accumulator types
-                                                                 128, 128,                            // Mma M and N dimensions
-                                                                 cute::UMMA::Major::K, cute::UMMA::Major::K>{});  // A and B layouts
-
-  // Define MMA tiler sizes (static)
-  auto bM = cute::tile_size<0>(tiled_mma);             // MMA Tile M. We'll use 1 MMAs per MMA Tile M.
-  auto bN = cute::tile_size<1>(tiled_mma);             // MMA Tile N. We'll use 1 MMAs per MMA Tile M.
-  auto bK = cute::tile_size<2>(tiled_mma) * cute::Int<4>{};  // MMA Tile K. We'll use 4 MMAs per MMA Tile K. For 16b types, tcgen05.mma has K16.
-  auto mma_tiler = cute::make_shape(bM, bN, bK);       // (MMA_M, MMA_N, MMA_K)
-
-  // Pre-partitioned Tile Shape (MmaTile_M, MmaTile_K) to post-partitioned (MmaA, NumMma_M, NumMma_K)
-  auto mma_shape_A = cute::partition_shape_A(tiled_mma, cute::make_shape(cute::size<0>(mma_tiler), cute::size<2>(mma_tiler)));
-  // Pre-partitioned Tile Shape (MmaTile_N, MmaTile_K) to post-partitioned (MmaB, NumMma_N, NumMma_K)
-  auto mma_shape_B = cute::partition_shape_B(tiled_mma, cute::make_shape(cute::size<1>(mma_tiler), cute::size<2>(mma_tiler)));
-
-  auto sA_layout = cute::UMMA::tile_to_mma_shape(cute::UMMA::Layout_K_SW128_Atom<TypeA>{}, mma_shape_A);
-  auto sB_layout = cute::UMMA::tile_to_mma_shape(cute::UMMA::Layout_K_SW128_Atom<TypeB>{}, mma_shape_B);
-
-  // The cluster shape and layout
-  auto cluster_shape = cute::make_shape(cute::Int<1>{}, cute::Int<1>{}, cute::Int<1>{});
-  cute::Layout cluster_layout_vmnk = cute::tiled_divide(cute::make_layout(cluster_shape),
-                                            cute::make_tile(typename decltype(tiled_mma)::AtomThrID{}));
-
-  // Create TMA descriptors for A and B matrices
-  cute::Copy_Atom tma_atom_A = cute::make_tma_atom_A_sm100(
-    cute::SM90_TMA_LOAD{},        // TMA Load Op
-    mA,                     // Source GMEM tensor
-    sA_layout,              // Destination SMEM layout
-    mma_tiler,
-    tiled_mma,
-    cluster_layout_vmnk  // MK Tiler for TMA operation
-  );
-  cute::Tensor mA_tma = tma_atom_A.get_tma_tensor(cute::shape(mA));   // (Gemm_M, Gemm_K)
-
-  cute::Copy_Atom tma_atom_B = cute::make_tma_atom_B_sm100(
-      cute::SM90_TMA_LOAD{},        // TMA Load Op
-      mB,                     // Source GMEM tensor
-      sB_layout,              // Destination SMEM layout
-      mma_tiler,
-      tiled_mma,
-      cluster_layout_vmnk  // NK Tiler for TMA operation
-    );
-  cute::Tensor mB_tma = tma_atom_B.get_tma_tensor(cute::shape(mB));   // (Gemm_N, Gemm_K)
-
-  using SMEMStorage = kernel::SharedStorage<TypeA, TypeB, decltype(sA_layout), decltype(sB_layout)>;
-
-  dim3 grid_dim(1, 1, 1);
-  dim3 cluster_dim(1, 1, 1);
-  dim3 block_dim(128, 1, 1);
-  int smem_size = 224 * 1024;
-
-  auto* kernel_ptr = &linear_kernel_sm100_wrapper<SMEMStorage,
-                                decltype(mA_tma), decltype(mB_tma), decltype(mC), decltype(mD),
-                                decltype(mma_tiler), decltype(tiled_mma), decltype(cluster_shape),
-                                decltype(tma_atom_A), decltype(tma_atom_B)>;
-  CUTE_CHECK_ERROR(cudaFuncSetAttribute(kernel_ptr,
-                    cudaFuncAttributeMaxDynamicSharedMemorySize,
-                    smem_size));
-  cutlass::ClusterLaunchParams params = {grid_dim, block_dim, cluster_dim, smem_size};
-  cutlass::Status status = cutlass::launch_kernel_on_cluster(params, (void const*) kernel_ptr,
-                                                            mA_tma, mB_tma, mC, mD,
-                                                            mma_tiler, tiled_mma, cluster_shape,
-                                                            tma_atom_A, tma_atom_B);
-  CUTE_CHECK_LAST();
-
-  if (status != cutlass::Status::kSuccess) {
-    std::cerr << "Error: Failed at kernel Launch" << std::endl;
-  }
-}
 
 template <class TypeA, class TypeB, class TypeBias, class TypeC, class LayoutA, class LayoutB, class LayoutBias, class LayoutC>
 void launch_linear_sm100_warp_specialized(TypeA const* device_ptr_input,
@@ -317,8 +193,6 @@ void launch_linear_sm100_warp_specialized(TypeA const* device_ptr_input,
     );
   cute::Tensor mC_tma = tma_atom_C.get_tma_tensor(cute::shape(mC));   // (Gemm_N, Gemm_K)
 
-  // cute::print("tma_atom_D:\t"); cute::print(tma_atom_D); cute::print("\n");
-
   using SMEMStorage = kernel::PipedSharedStorage<TypeA, TypeB, TypeC, decltype(sA_layout), decltype(sB_layout), decltype(sC_layout), num_ab_stage, num_acc_stage>;
 
   int smemBytes = sizeof(SMEMStorage);
@@ -332,7 +206,7 @@ void launch_linear_sm100_warp_specialized(TypeA const* device_ptr_input,
   if(device_ptr_bias != nullptr){
     auto* kernel_ptr = &linear_kernel_ws_sm100_wrapper<SMEMStorage,
                                 decltype(mA_tma), decltype(mB_tma), decltype(mBias), decltype(mC_tma),
-                                decltype(mma_tiler), decltype(epi_tiler), decltype(tiled_mma), decltype(cluster_shape),
+                                decltype(mma_tiler), decltype(epi_tiler), decltype(tiled_mma),
                                 decltype(tma_atom_A), decltype(tma_atom_B), decltype(tma_atom_C), num_ab_stage, num_acc_stage, num_c_stage, false>;
     CUTE_CHECK_ERROR(cudaFuncSetAttribute(kernel_ptr,
                       cudaFuncAttributeMaxDynamicSharedMemorySize,
@@ -340,7 +214,7 @@ void launch_linear_sm100_warp_specialized(TypeA const* device_ptr_input,
     cutlass::ClusterLaunchParams params = {grid_dim, block_dim, cluster_dim, smemBytes};
     cutlass::Status status = cutlass::launch_kernel_on_cluster(params, (void const*) kernel_ptr,
                                                               mA_tma, mB_tma, mBias, mC_tma,
-                                                              mma_tiler, epi_tiler, tiled_mma, cluster_shape,
+                                                              mma_tiler, epi_tiler, tiled_mma, 
                                                               tma_atom_A, tma_atom_B, tma_atom_C, num_tmem_columns);
     CUTE_CHECK_LAST();
 
@@ -350,7 +224,7 @@ void launch_linear_sm100_warp_specialized(TypeA const* device_ptr_input,
   } else {
     auto* kernel_ptr = &linear_kernel_ws_sm100_wrapper<SMEMStorage,
                                 decltype(mA_tma), decltype(mB_tma), decltype(mBias), decltype(mC_tma),
-                                decltype(mma_tiler), decltype(epi_tiler), decltype(tiled_mma), decltype(cluster_shape),
+                                decltype(mma_tiler), decltype(epi_tiler), decltype(tiled_mma),
                                 decltype(tma_atom_A), decltype(tma_atom_B), decltype(tma_atom_C), num_ab_stage, num_acc_stage, num_c_stage, true>;
     CUTE_CHECK_ERROR(cudaFuncSetAttribute(kernel_ptr,
                       cudaFuncAttributeMaxDynamicSharedMemorySize,
@@ -358,52 +232,13 @@ void launch_linear_sm100_warp_specialized(TypeA const* device_ptr_input,
     cutlass::ClusterLaunchParams params = {grid_dim, block_dim, cluster_dim, smemBytes};
     cutlass::Status status = cutlass::launch_kernel_on_cluster(params, (void const*) kernel_ptr,
                                                               mA_tma, mB_tma, mBias, mC_tma,
-                                                              mma_tiler, epi_tiler, tiled_mma, cluster_shape,
+                                                              mma_tiler, epi_tiler, tiled_mma,
                                                               tma_atom_A, tma_atom_B, tma_atom_C, num_tmem_columns);
     CUTE_CHECK_LAST();
 
     if (status != cutlass::Status::kSuccess) {
       std::cerr << "Error: Failed at kernel Launch" << std::endl;
     }
-  }
-
-  
-
-}
-
-void linear_kernel(at::Tensor const& input,
-                   at::Tensor const& weight,
-                   c10::optional<at::Tensor> residual,
-                   at::Tensor& output) {
-  auto const* input_ptr = static_cast<const bfloat16*>(input.data_ptr());
-  auto const* weight_ptr = static_cast<const bfloat16*>(weight.data_ptr());
-  bool has_residual = residual.has_value();
-  auto const* residual_ptr = has_residual ? static_cast<const float*>(residual->data_ptr()) : nullptr;
-  auto *output_ptr = static_cast<float*>(output.data_ptr());
-  
-  // A tensor MxK K-major (Layout T = Row-Major)
-  auto layout_A = cute::make_layout(cute::make_shape(input.size(0), input.size(1)), cute::make_stride(input.size(1), cute::Int<1>{}));   // (Gemm_M,Gemm_K):(Gemm_K,_1)
-  // B tensor NxK K-major (Layout N = Column-Major)
-  auto layout_B = cute::make_layout(cute::make_shape(weight.size(0), weight.size(1)), cute::make_stride(weight.size(1), cute::Int<1>{}));   // (Gemm_N,Gemm_K):(Gemm_K,_1)
-  // C tensor MxN N-major (Layout T = Row-Major)
-  auto layout_C = cute::make_layout(cute::make_shape(input.size(0), weight.size(0)), cute::make_stride(weight.size(0), cute::Int<1>{}));   // (Gemm_M,Gemm_N):(Gemm_N,_1)
-  // D tensor MxN N-major (Layout T = Row-Major)
-  auto layout_D = cute::make_layout(cute::make_shape(input.size(0), weight.size(0)), cute::make_stride(weight.size(0), cute::Int<1>{}));   // (Gemm_M,Gemm_N):(Gemm_N,_1)
-
-  launch_linear_sm100(
-    input_ptr,
-    weight_ptr,
-    residual_ptr,
-    output_ptr,
-    layout_A,
-    layout_B,
-    layout_C,
-    layout_D
-  );  
-
-  cudaError_t err = cudaDeviceSynchronize();
-  if (err != cudaSuccess) {
-    printf("CUDA kernel launch error: %s\n", cudaGetErrorString(err));
   }
 }
 
@@ -445,7 +280,220 @@ void linear_kernel_warp_specialized(torch::Tensor input,
   }
 }
 
+// sm100_linear_mpk
+
+template <typename T,
+          int BATCH_SIZE,
+          int OUTPUT_SIZE,
+          int REDUCTION_SIZE,
+          typename TMA_A,
+          typename TMA_B,
+          class BiasTensor,
+          typename TMA_OUT,
+          class MmaTiler_MNK,
+          class EpiTiler_MN,
+          class TiledMMA,
+          bool NoBias, 
+          int NUM_AB_STAGE = 8,
+          int NUM_ACC_STAGE = 2,
+          int NUM_C_STAGE = 4>
+__global__ __launch_bounds__(256, 1) void linear_sm100_mpk_wrapper(
+    const __grid_constant__ TMA_A tma_a,
+    const __grid_constant__ TMA_B tma_b,
+    BiasTensor mBias,
+    const __grid_constant__ TMA_OUT tma_out,
+    MmaTiler_MNK mma_tiler,
+    EpiTiler_MN epi_tiler,
+    TiledMMA tiled_mma,
+    const int num_tmem_columns) {
+
+  kernel::linear_sm100_mpk_task_impl<
+          T, 
+          TMA_A,
+          TMA_B,
+          BiasTensor,
+          TMA_OUT,
+          MmaTiler_MNK,
+          EpiTiler_MN,
+          TiledMMA,
+          BATCH_SIZE,
+          OUTPUT_SIZE,
+          REDUCTION_SIZE,
+          NoBias,
+          NUM_AB_STAGE,
+          NUM_ACC_STAGE,
+          NUM_C_STAGE>(tma_a, tma_b, mBias, tma_out, mma_tiler, epi_tiler, tiled_mma, num_tmem_columns);
+}
+
+template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int REDUCTION_SIZE>
+void launch_linear_sm100_mpk(void *input_ptr,
+                          void *weight_ptr,
+                          void *output_ptr,
+                          void *residual_ptr = nullptr) {
+
+  constexpr int B = 3;
+  constexpr int M = 3;
+  constexpr int S = 3;
+
+  using TypeAcc = float;
+
+  constexpr int MMA_M = 128;
+  constexpr int MMA_N = 32;
+
+  constexpr int TMA_CP_ASYNC_SIZE =
+      64; // note that if swizzle 128 is used, 64 is maximal cp size
+  constexpr int TILE_SIZE =
+      64; // we should modify this param if we want larger tile size
+  constexpr int TMA_CP_ASYNC_REPEAT_COL =
+      (TILE_SIZE + TMA_CP_ASYNC_SIZE - 1) / TMA_CP_ASYNC_SIZE;
+
+  constexpr int OUTPUT_ATOM_SIZE = 128; // this is padded
+  constexpr int OUTPUT_TMA_CP_SIZE = 128;
+  constexpr int OUTPUT_ATOM_REPEAT_COL = 1;
+
+  constexpr int num_tmem_columns = MMA_N * 2;
+  assert(num_tmem_columns <= 512);
+
+  cute::TiledMMA tiled_mma = cute::make_tiled_mma(cute::SM100_MMA_F16BF16_SS<T, T, TypeAcc,           // Mma's A, B, and Accumulator types
+                                                                 MMA_M, MMA_N,                            // Mma M and N dimensions
+                                                                 cute::UMMA::Major::K, cute::UMMA::Major::K>{});  // A and B layouts
+  auto bM = cute::tile_size<0>(tiled_mma);             // MMA Tile M. We'll use 1 MMAs per MMA Tile M.
+  auto bN = cute::tile_size<1>(tiled_mma);             // MMA Tile N. We'll use 1 MMAs per MMA Tile N.
+  auto bK = cute::tile_size<2>(tiled_mma) * cute::Int<4>{};  // MMA Tile K. We'll use 4 MMAs per MMA Tile K. For 16b types, tcgen05.mma has K16.
+
+  auto mma_tiler = cute::make_shape(bM, bN, bK);       // (MMA_M, MMA_N, MMA_K)
+
+  auto epi_tiler = cute::make_tile(cute::size<1>(mma_tiler), cute::size<0>(mma_tiler)); // SwapAB configuration
+
+  constexpr int SMEM_M_SIZE = 32;
+  using TMA_B =
+      kernel::tma::tma_2d<bfloat16,
+                          B,
+                          M,
+                          S,
+                          BATCH_SIZE,                      /*GMEM_ROW_*/
+                          REDUCTION_SIZE,                  /*GMEM_COL_*/
+                          BATCH_SIZE,                     /*SMEM_ROW_*/
+                          TMA_CP_ASYNC_SIZE,               /*SMEM_COL_*/
+                          REDUCTION_SIZE,                  /*GMEM_STRIDE_ROW_*/
+                          1,                               /*GMEM_STRIDE_COL_*/
+                          1,                               /*SMEM_REPEAT_ROW_*/
+                          TMA_CP_ASYNC_REPEAT_COL,         /*SMEM_REPEAT_COL_*/
+                          SMEM_M_SIZE * TMA_CP_ASYNC_SIZE, /*SMEM_STRIDE_*/
+                          true>;
+  using TMA_A =
+      kernel::tma::tma_2d<bfloat16,
+                          B,
+                          M,
+                          S,
+                          OUTPUT_SIZE,             /*GMEM_ROW_*/
+                          REDUCTION_SIZE,          /*GMEM_COL_*/
+                          OUTPUT_ATOM_SIZE,        /*SMEM_ROW_*/
+                          TMA_CP_ASYNC_SIZE,       /*SMEM_COL_*/
+                          REDUCTION_SIZE,          /*GMEM_STRIDE_ROW_*/
+                          1,                       /*GMEM_STRIDE_COL_*/
+                          1,                       /*SMEM_REPEAT_ROW_*/
+                          TMA_CP_ASYNC_REPEAT_COL, /*SMEM_REPEAT_COL_*/
+                          OUTPUT_ATOM_SIZE * TMA_CP_ASYNC_SIZE, /*SMEM_STRIDE_*/
+                          true>;
+
+  using TMA_OUT = kernel::tma::tma_2d<bfloat16,
+                                      0,
+                                      M,
+                                      S,
+                                      BATCH_SIZE,
+                                      OUTPUT_SIZE,
+                                      BATCH_SIZE,
+                                      OUTPUT_TMA_CP_SIZE,
+                                      OUTPUT_SIZE,
+                                      1,
+                                      1,
+                                      OUTPUT_ATOM_REPEAT_COL,
+                                      SMEM_M_SIZE * OUTPUT_TMA_CP_SIZE,
+                                      true>;
+  TMA_A tma_a(weight_ptr);
+  TMA_B tma_b(input_ptr);
+  
+  cute::Layout layout_Bias = cute::make_layout(cute::make_shape(BATCH_SIZE, OUTPUT_SIZE), cute::make_stride(OUTPUT_SIZE, cute::Int<1>{}));   // (Gemm_M,Gemm_N):(Gemm_N,_1)
+  cute::Tensor mBias = cute::make_tensor(cute::make_gmem_ptr(static_cast<T*>(residual_ptr)), layout_Bias);      // (Gemm_N, Gemm_M)
+
+  TMA_OUT tma_out(output_ptr);
+
+  dim3 grid_dim(1, 1, 1);
+  dim3 block_dim(256, 1, 1);
+  dim3 cluster_dim(1, 1, 1);
+  int smemBytes = 224 * 1024;
+
+  if(residual_ptr != nullptr){
+    auto* kernel_ptr = &linear_sm100_mpk_wrapper<T,
+                                BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE,
+                                decltype(tma_a), decltype(tma_b), decltype(mBias), decltype(tma_out),
+                                decltype(mma_tiler), decltype(epi_tiler), decltype(tiled_mma),
+                                false>;
+    CUTE_CHECK_ERROR(cudaFuncSetAttribute(kernel_ptr,
+                      cudaFuncAttributeMaxDynamicSharedMemorySize,
+                      smemBytes));
+    cutlass::ClusterLaunchParams params = {grid_dim, block_dim, cluster_dim, smemBytes};
+    cutlass::Status status = cutlass::launch_kernel_on_cluster(params, (void const*) kernel_ptr,
+                                                              tma_a, tma_b, mBias, tma_out, 
+                                                              mma_tiler, epi_tiler, tiled_mma, num_tmem_columns);
+    CUTE_CHECK_LAST();
+
+    if (status != cutlass::Status::kSuccess) {
+      std::cerr << "Error: Failed at kernel Launch" << std::endl;
+    }
+  } else {
+    auto* kernel_ptr = &linear_sm100_mpk_wrapper<T,
+                                BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE,
+                                decltype(tma_a), decltype(tma_b), decltype(mBias), decltype(tma_out),
+                                decltype(mma_tiler), decltype(epi_tiler), decltype(tiled_mma),
+                                true>;
+    CUTE_CHECK_ERROR(cudaFuncSetAttribute(kernel_ptr,
+                      cudaFuncAttributeMaxDynamicSharedMemorySize,
+                      smemBytes));
+    cutlass::ClusterLaunchParams params = {grid_dim, block_dim, cluster_dim, smemBytes};
+    cutlass::Status status = cutlass::launch_kernel_on_cluster(params, (void const*) kernel_ptr,
+                                                              tma_a, tma_b, mBias, tma_out, 
+                                                              mma_tiler, epi_tiler, tiled_mma, num_tmem_columns);
+    CUTE_CHECK_LAST();
+
+    if (status != cutlass::Status::kSuccess) {
+      std::cerr << "Error: Failed at kernel Launch" << std::endl;
+    }
+  }
+
+}
+
+void linear_sm100_mpk_kernel(torch::Tensor input,
+                          torch::Tensor weight,
+                          c10::optional<at::Tensor> residual,
+                          torch::Tensor output) {
+
+  void *input_ptr = input.data_ptr();
+  void *weight_ptr = weight.data_ptr();
+  bool has_residual = residual.has_value();
+  void *residual_ptr = has_residual ? residual->data_ptr() : nullptr;
+  void *output_ptr = output.data_ptr();
+
+  // const int BATCH_SIZE = input.size(0);
+  // const int OUTPUT_SIZE = output.size(1);
+  // const int REDUCTION_SIZE = weight.size(1);
+
+  constexpr int BATCH_SIZE = 32;
+  constexpr int OUTPUT_SIZE = 1024;
+  constexpr int REDUCTION_SIZE = 4096;
+
+
+
+  launch_linear_sm100_mpk<bfloat16, BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE>(input_ptr, weight_ptr, output_ptr, residual_ptr);      
+  cudaError_t err = cudaDeviceSynchronize();
+  if (err != cudaSuccess) {
+    printf("CUDA kernel launch error: %s\n", cudaGetErrorString(err));
+  }
+}
+
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-  m.def("linear", &linear_kernel, "Linear kernel");
   m.def("linear_warp_specialized", &linear_kernel_warp_specialized, "Linear kernel Warp Specialized");
+  m.def("linear_sm100_mpk", &linear_sm100_mpk_kernel, "Linear kernel SM100 MPK");
 }

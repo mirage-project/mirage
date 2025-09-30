@@ -6,11 +6,11 @@ torch.set_printoptions(sci_mode=False, profile="full")
 
 g = torch.Generator(device="cuda").manual_seed(1234)
 
-reduction_sizes = [4096]
-output_sizes = [1024]
-batch_size = 4 # TODO(Zhihao): will have misalignment issue when batch size >= 63, need to fix it in the kernel later
+reduction_sizes = [4096, 12288]
+output_sizes = [64, 256]
+batch_size = 8 # TODO(Zhihao): will have misalignment issue when batch size >= 63, need to fix it in the kernel later
 
-has_residual = False
+has_residual = True
 
 for reduction_size in reduction_sizes:
     for output_size in output_sizes:

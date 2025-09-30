@@ -16,6 +16,8 @@ cuda_library_dirs = [
     os.path.join(cuda_home, "lib64", "stubs"),
 ]
 
+macros=[("MIRAGE_BACKEND_USE_CUDA", None), ("MIRAGE_FINGERPRINT_USE_CUDA", None)]
+
 setup(
     name='runtime_kernel_blackwell',
     ext_modules=[
@@ -25,9 +27,10 @@ setup(
                 os.path.join(this_dir, 'runtime_kernel_wrapper_sm100.cu'),
             ],
             depends=[
-                os.path.join(this_dir, '../../../include/mirage/persistent_kernel/tasks/blackwell/linear_sm100.cuh'),
                 os.path.join(this_dir, '../../../include/mirage/persistent_kernel/tasks/blackwell/linear_sm100_warp_specialized.cuh'),
+                os.path.join(this_dir, '../../../include/mirage/persistent_kernel/tasks/blackwell/linear_sm100_mpk.cuh'),
             ],
+            define_macros=macros,
             include_dirs=[
                 os.path.join(this_dir, '../../../include/mirage/persistent_kernel/tasks'),
                 os.path.join(this_dir, '../../../include'),

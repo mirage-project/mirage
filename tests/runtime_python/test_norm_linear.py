@@ -28,7 +28,7 @@ for output_size in output_sizes:
     eps = 0.8765
     output = torch.empty(bs, output_size, device="cuda", dtype=torch.bfloat16)
 
-    runtime_kernel.norm_linear(x, g, w, output, eps)
+    runtime_kernel.norm_linear(x, g, w, eps, output)
     torch_out = torch_rms_norm(x, g, w, eps)
 
     print("Ratio (kernel / torch):")
