@@ -34,11 +34,12 @@ setup(
             libraries=["cuda"],
             library_dirs=cuda_library_dirs,
             extra_compile_args={
-                'cxx': ['-DMIRAGE_GRACE_HOPPER'],
+                'cxx': ['-DMIRAGE_GRACE_HOPPER', '-DMIRAGE_BACKEND_USE_CUDA'],
                 'nvcc': [
                     '-O3',
                     '-gencode=arch=compute_90a,code=sm_90a',
                     '-DMIRAGE_GRACE_HOPPER',
+                    '-DMIRAGE_BACKEND_USE_CUDA',
                     # '-DMIRAGE_PROFILE_HOPPER',
                 ]
             }
