@@ -81,10 +81,10 @@ int TaskRegister::register_embedding_task(threadblock::Graph const &bgraph,
   if (params[0] == 0) {
     code.e("    runtime_config.tokens + runtime_config.step[0], ");
   } else if (params[0] == 1) {
-    code.e("    task_desc.inputs[0].base_ptr,");
+    code.e("    task_desc.input_ptrs[0],");
   }
-  code.e("    task_desc.inputs[1].base_ptr,");
-  code.e("    task_desc.outputs[0].base_ptr);");
+  code.e("    task_desc.input_ptrs[1],");
+  code.e("    task_desc.output_ptrs[0]);");
   return register_task_variant(TASK_EMBEDDING, code.to_string());
 }
 
@@ -116,9 +116,9 @@ int TaskRegister::register_rmsnorm_task(threadblock::Graph const &bgraph,
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
   code.e("kernel::rms_norm_impl<bfloat16, $, $>(", batch_size, hidden_dim);
-  code.e("    task_desc.inputs[0].base_ptr,");
-  code.e("    task_desc.inputs[1].base_ptr,");
-  code.e("    task_desc.outputs[0].base_ptr,");
+  code.e("    task_desc.input_ptrs[0],");
+  code.e("    task_desc.input_ptrs[1],");
+  code.e("    task_desc.output_ptrs[0],");
   code.e("    1e-6f);");
   return register_task_variant(TASK_RMS_NORM, code.to_string());
 }
@@ -159,12 +159,12 @@ int TaskRegister::register_rmsnorm_linear_task(threadblock::Graph const &bgraph,
          output_size,
          reduction_size,
          output_stride);
-  code.e("    task_desc.inputs[0].base_ptr,");
-  code.e("    task_desc.inputs[1].base_ptr,");
-  code.e("    task_desc.inputs[2].base_ptr,");
+  code.e("    task_desc.input_ptrs[0],");
+  code.e("    task_desc.input_ptrs[1],");
+  code.e("    task_desc.input_ptrs[2],");
   code.e("    runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS],");
   code.e("    1e-6f,");
-  code.e("    task_desc.outputs[0].base_ptr);");
+  code.e("    task_desc.output_ptrs[0]);");
   return register_task_variant(TASK_RMS_NORM_LINEAR, code.to_string());
 }
 
@@ -208,17 +208,17 @@ int TaskRegister::register_attention_task(threadblock::Graph const &bgraph,
          1,
          head_dim,
          kv_stride);
-  code.e("    task_desc.inputs[0].base_ptr,");
-  code.e("    task_desc.inputs[1].base_ptr,");
-  code.e("    task_desc.inputs[2].base_ptr,");
-  code.e("    task_desc.outputs[0].base_ptr,");
+  code.e("    task_desc.input_ptrs[0],");
+  code.e("    task_desc.input_ptrs[1],");
+  code.e("    task_desc.input_ptrs[2],");
+  code.e("    task_desc.output_ptrs[0],");
   code.e("    runtime_config.step[0] + 1,");
   code.e("    $,", params[2] > 0);
   code.e("    $,", params[3] > 0);
-  code.e("    task_desc.inputs[3].base_ptr,");
-  code.e("    task_desc.inputs[4].base_ptr,");
-  code.e("    task_desc.inputs[5].base_ptr,");
-  code.e("    task_desc.inputs[6].base_ptr,");
+  code.e("    task_desc.input_ptrs[3],");
+  code.e("    task_desc.input_ptrs[4],");
+  code.e("    task_desc.input_ptrs[5],");
+  code.e("    task_desc.input_ptrs[6],");
   code.e("    1e-6f,");
   code.e("    1e-6f);");
   return register_task_variant(TASK_ATTENTION_1, code.to_string());
@@ -274,10 +274,10 @@ int TaskRegister::register_paged_attention_task(
          head_dim,
          max_seq_len,
          page_size);
-  code.e("    task_desc.inputs[0].base_ptr,");
-  code.e("    task_desc.inputs[1].base_ptr,");
-  code.e("    task_desc.inputs[2].base_ptr,");
-  code.e("    task_desc.outputs[0].base_ptr,");
+  code.e("    task_desc.input_ptrs[0],");
+  code.e("    task_desc.input_ptrs[1],");
+  code.e("    task_desc.input_ptrs[2],");
+  code.e("    task_desc.output_ptrs[0],");
   code.e("    runtime_config.qo_indptr_buffer,");
   code.e("    runtime_config.paged_kv_indptr_buffer,");
   code.e("    runtime_config.paged_kv_indices_buffer,");
@@ -285,10 +285,10 @@ int TaskRegister::register_paged_attention_task(
   code.e("    task_desc.request_id,");
   code.e("    $,", params[2] > 0);
   code.e("    $,", params[3] > 0);
-  code.e("    task_desc.inputs[3].base_ptr,");
-  code.e("    task_desc.inputs[4].base_ptr,");
-  code.e("    task_desc.inputs[5].base_ptr,");
-  code.e("    task_desc.inputs[6].base_ptr,");
+  code.e("    task_desc.input_ptrs[3],");
+  code.e("    task_desc.input_ptrs[4],");
+  code.e("    task_desc.input_ptrs[5],");
+  code.e("    task_desc.input_ptrs[6],");
   code.e("    1e-6f,");
   code.e("    1e-6f);");
   return register_task_variant(TASK_PAGED_ATTENTION_1, code.to_string());
@@ -339,17 +339,17 @@ int TaskRegister::register_single_batch_extend_attention_task(
          kv_stride,
          output_stride,
          extend_num);
-  code.e("    task_desc.inputs[0].base_ptr,");
-  code.e("    task_desc.inputs[1].base_ptr,");
-  code.e("    task_desc.inputs[2].base_ptr,");
-  code.e("    task_desc.outputs[0].base_ptr,");
+  code.e("    task_desc.input_ptrs[0],");
+  code.e("    task_desc.input_ptrs[1],");
+  code.e("    task_desc.input_ptrs[2],");
+  code.e("    task_desc.output_ptrs[0],");
   code.e("    runtime_config.step[0] + 1,");
   code.e("    $,", params[2] > 0);
   code.e("    $,", params[3] > 0);
-  code.e("    task_desc.inputs[3].base_ptr,");
-  code.e("    task_desc.inputs[4].base_ptr,");
-  code.e("    task_desc.inputs[5].base_ptr,");
-  code.e("    task_desc.inputs[6].base_ptr,");
+  code.e("    task_desc.input_ptrs[3],");
+  code.e("    task_desc.input_ptrs[4],");
+  code.e("    task_desc.input_ptrs[5],");
+  code.e("    task_desc.input_ptrs[6],");
   code.e("    1e-6f,");
   code.e("    1e-6f);");
   return register_task_variant(TASK_SINGLE_BATCH_EXTEND_ATTENTION,
@@ -395,8 +395,8 @@ int TaskRegister::register_silu_mul_task(threadblock::Graph const &bgraph,
          output_size,
          input_stride,
          output_stride);
-  code.e("    task_desc.inputs[0].base_ptr,");
-  code.e("    task_desc.outputs[0].base_ptr,");
+  code.e("    task_desc.input_ptrs[0],");
+  code.e("    task_desc.output_ptrs[0],");
   code.e("    runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS]);");
   return register_task_variant(TASK_SILU_MUL, code.to_string());
 }
@@ -437,10 +437,10 @@ int TaskRegister::register_silu_mul_linear_with_residual_task(
          output_size,
          reduction_size,
          output_stride);
-  code.e("    task_desc.inputs[0].base_ptr,");
-  code.e("    task_desc.inputs[1].base_ptr,");
-  code.e("    task_desc.inputs[2].base_ptr,");
-  code.e("    task_desc.outputs[0].base_ptr,");
+  code.e("    task_desc.input_ptrs[0],");
+  code.e("    task_desc.input_ptrs[1],");
+  code.e("    task_desc.input_ptrs[2],");
+  code.e("    task_desc.output_ptrs[0],");
   code.e("    runtime_config.my_gpu_id == 0);");
   return register_task_variant(TASK_SILU_MUL_LINEAR_WITH_RESIDUAL,
                                code.to_string());
@@ -483,14 +483,14 @@ int TaskRegister::register_linear_task(threadblock::Graph const &bgraph,
          output_size,
          reduction_size,
          output_stride);
-  code.e("    task_desc.inputs[0].base_ptr,");
-  code.e("    task_desc.inputs[1].base_ptr,");
+  code.e("    task_desc.input_ptrs[0],");
+  code.e("    task_desc.input_ptrs[1],");
   if (with_residual) {
-    code.e("    task_desc.inputs[2].base_ptr,");
+    code.e("    task_desc.input_ptrs[2],");
   } else {
     code.e("    nullptr,");
   }
-  code.e("    task_desc.outputs[0].base_ptr,");
+  code.e("    task_desc.output_ptrs[0],");
   code.e("    runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS],");
   if (with_residual) {
     code.e("    runtime_config.my_gpu_id == 0);");
@@ -533,9 +533,9 @@ int TaskRegister::register_argmax_partial_task(threadblock::Graph const &bgraph,
          batch_size,
          num_elements,
          num_partial_tasks);
-  code.e("    task_desc.inputs[0].base_ptr,");
-  code.e("    task_desc.outputs[0].base_ptr,");
-  code.e("    task_desc.outputs[1].base_ptr,");
+  code.e("    task_desc.input_ptrs[0],");
+  code.e("    task_desc.output_ptrs[0],");
+  code.e("    task_desc.output_ptrs[1],");
   code.e("    runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS]);");
   return register_task_variant(TASK_ARGMAX_PARTIAL, code.to_string());
 }
@@ -568,9 +568,9 @@ int TaskRegister::register_argmax_reduce_task(threadblock::Graph const &bgraph,
          batch_size,
          params[0],
          num_parts);
-  code.e("    task_desc.inputs[0].base_ptr,");
-  code.e("    task_desc.inputs[1].base_ptr,");
-  code.e("    task_desc.outputs[0].base_ptr,");
+  code.e("    task_desc.input_ptrs[0],");
+  code.e("    task_desc.input_ptrs[1],");
+  code.e("    task_desc.output_ptrs[0],");
   code.e("    runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS]);");
   return register_task_variant(TASK_ARGMAX_REDUCE, code.to_string());
 }
@@ -600,8 +600,8 @@ int TaskRegister::register_find_ngram_partial_task(
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
   code.e("kernel::find_ngram_partial_kernel<$, $>(", params[0], num_parts);
-  code.e("    task_desc.inputs[0].base_ptr,");
-  code.e("    task_desc.outputs[0].base_ptr,");
+  code.e("    task_desc.input_ptrs[0],");
+  code.e("    task_desc.output_ptrs[0],");
   code.e("    runtime_config.step[0] + 1);");
 
   return register_task_variant(TASK_FIND_NGRAM_PARTIAL, code.to_string());
@@ -635,9 +635,9 @@ int TaskRegister::register_find_ngram_global_task(
          params[0],
          params[1],
          num_parts);
-  code.e("    task_desc.inputs[0].base_ptr,");
-  code.e("    task_desc.inputs[1].base_ptr,");
-  code.e("    task_desc.outputs[0].base_ptr,");
+  code.e("    task_desc.input_ptrs[0],");
+  code.e("    task_desc.input_ptrs[1],");
+  code.e("    task_desc.output_ptrs[0],");
   code.e("    runtime_config.step[0]);");
   return register_task_variant(TASK_FIND_NGRAM_GLOBAL, code.to_string());
 }
@@ -665,8 +665,8 @@ int TaskRegister::register_target_verify_greedy_task(
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
   code.e("kernel::target_verify_greedy_kernel<$>(", num_spec_tokens);
-  code.e("    task_desc.inputs[0].base_ptr,");
-  code.e("    task_desc.inputs[1].base_ptr,");
+  code.e("    task_desc.input_ptrs[0],");
+  code.e("    task_desc.input_ptrs[1],");
   code.e("    (void*)(runtime_config.new_token_nums),"); // int pointer
   code.e("    (void*)(runtime_config.tokens + runtime_config.step[0] + 1));");
   return register_task_variant(TASK_TARGET_VERIFY_GREEDY, code.to_string());
@@ -790,20 +790,18 @@ int TaskRegister::register_linear_hopper_task(threadblock::Graph const &bgraph,
   );
   code.inc_indent();
   code.e("TMA_A "
-         "tma_a(static_cast<CUtensorMap*>(task_desc.inputs[0].tma_desc_ptrs[0])"
+         "tma_a(static_cast<CUtensorMap*>(task_desc.input_tma_desc_ptrs[0][0])"
          ");");
   code.e("TMA_B "
-         "tma_b(static_cast<CUtensorMap*>(task_desc.inputs[1].tma_desc_ptrs[0])"
+         "tma_b(static_cast<CUtensorMap*>(task_desc.input_tma_desc_ptrs[1][0])"
          ");");
   if (with_residual) {
     code.e(
         "TMA_RESIDUAL "
-        "tma_residual(static_cast<CUtensorMap*>(task_desc.inputs[2].tma_desc_"
-        "ptrs[0]));");
+        "tma_residual(static_cast<CUtensorMap*>(task_desc.input_tma_desc_ptrs[2][0]));");
   }
   code.e("TMA_OUT "
-         "tma_out(static_cast<CUtensorMap*>(task_desc.outputs[0].tma_desc_ptrs["
-         "0]));");
+         "tma_out(static_cast<CUtensorMap*>(task_desc.output_tma_desc_ptrs[0][0]));");
   // code.e("printf(\"linear_kernel_hopper start\");");
 
   code.e("kernel::linear_kernel_hopper<bfloat16, $, $, $, $, TMA_A, TMA_B, "
@@ -968,22 +966,19 @@ int TaskRegister::register_paged_attention_hopper_task(
          max_tokens * num_q_heads_per_kv * TMA_CP_ASYNC_SIZE);
 
   code.e("TMA_Q  tma_q "
-         "(static_cast<CUtensorMap*>(task_desc.inputs[0].tma_desc_ptrs[0]));");
+         "(static_cast<CUtensorMap*>(task_desc.input_tma_desc_ptrs[0][0]));");
   code.e("TMA_KV tma_k "
-         "(static_cast<CUtensorMap*>(task_desc.inputs[0].tma_desc_ptrs[1]));");
+         "(static_cast<CUtensorMap*>(task_desc.input_tma_desc_ptrs[0][1]));");
   code.e("TMA_KV tma_v "
-         "(static_cast<CUtensorMap*>(task_desc.inputs[0].tma_desc_ptrs[2]));");
+         "(static_cast<CUtensorMap*>(task_desc.input_tma_desc_ptrs[0][2]));");
 
   code.e("TMA_PAGED_KV_CACHE "
-         "tma_paged_k_cache(static_cast<CUtensorMap*>(task_desc.inputs[1].tma_"
-         "desc_ptrs[0]));");
+         "tma_paged_k_cache(static_cast<CUtensorMap*>(task_desc.input_tma_desc_ptrs[1][0]));");
   code.e("TMA_PAGED_KV_CACHE "
-         "tma_paged_v_cache(static_cast<CUtensorMap*>(task_desc.inputs[2].tma_"
-         "desc_ptrs[0]));");
+         "tma_paged_k_cache(static_cast<CUtensorMap*>(task_desc.input_tma_desc_ptrs[2][0]));");
 
   code.e("TMA_OUTPUT "
-         "tma_output(static_cast<CUtensorMap*>(task_desc.outputs[0].tma_desc_"
-         "ptrs[0]));");
+         "tma_output(static_cast<CUtensorMap*>(task_desc.output_tma_desc_ptrs[0][0]));");
 
   code.e("kernel::multitoken_paged_attention_hopper_impl<bfloat16, $, $, $, $, "
          "$, $, $, $, "
@@ -1005,8 +1000,8 @@ int TaskRegister::register_paged_attention_hopper_task(
   code.e("    tma_paged_k_cache,");
   code.e("    tma_paged_v_cache,");
   code.e("    tma_output,");
-  code.e("    task_desc.inputs[1].base_ptr,");
-  code.e("    task_desc.inputs[2].base_ptr,");
+  code.e("    task_desc.input_ptrs[1],");
+  code.e("    task_desc.input_ptrs[2],");
   code.e("    runtime_config.qo_indptr_buffer,");
   code.e("    runtime_config.paged_kv_indptr_buffer,");
   code.e("    runtime_config.paged_kv_indices_buffer,");
@@ -1014,13 +1009,13 @@ int TaskRegister::register_paged_attention_hopper_task(
   code.e("    task_desc.request_id,");
   code.e("    $,", params[2] > 0); // qk_norm
   code.e("    $,", params[3] > 0); // rope
-  code.e("    task_desc.inputs[3].base_ptr,");
-  code.e("    task_desc.inputs[4].base_ptr,");
-  code.e("    task_desc.inputs[5].base_ptr,");
-  code.e("    task_desc.inputs[6].base_ptr,");
+  code.e("    task_desc.input_ptrs[3],");
+  code.e("    task_desc.input_ptrs[4],");
+  code.e("    task_desc.input_ptrs[5],");
+  code.e("    task_desc.input_ptrs[6],");
   code.e("    1e-6f,");
   code.e("    1e-6f,");
-  code.e("    task_desc.outputs[0].base_ptr,");
+  code.e("    task_desc.output_ptrs[0],");
   code.e("    task_desc.head_group);");
 
   return register_task_variant(TASK_PAGED_ATTENTION_HOPPER, code.to_string());
@@ -1056,9 +1051,9 @@ int TaskRegister::register_rmsnorm_hopper_task(threadblock::Graph const &bgraph,
   code.inc_indent();
   code.e(
       "kernel::rms_norm_hopper_impl<bfloat16, $, $>(", batch_size, hidden_dim);
-  code.e("    task_desc.inputs[0].base_ptr,");
-  code.e("    task_desc.inputs[1].base_ptr,");
-  code.e("    task_desc.outputs[0].base_ptr,");
+  code.e("    task_desc.input_ptrs[0],");
+  code.e("    task_desc.input_ptrs[1],");
+  code.e("    task_desc.output_ptrs[0],");
   code.e("    1e-6f);");
   return register_task_variant(TASK_RMS_NORM_HOPPER, code.to_string());
 }
@@ -1180,20 +1175,16 @@ int TaskRegister::register_linear_swapAB_hopper_task(
   );
   code.inc_indent();
   code.e("TMA_A "
-         "tma_a(static_cast<CUtensorMap*>(task_desc.inputs[1].tma_desc_ptrs[0])"
-         ");");
+         "tma_a(static_cast<CUtensorMap*>(task_desc.input_tma_desc_ptrs[1][0]));");
   code.e("TMA_B "
-         "tma_b(static_cast<CUtensorMap*>(task_desc.inputs[0].tma_desc_ptrs[0])"
-         ");");
+         "tma_b(static_cast<CUtensorMap*>(task_desc.input_tma_desc_ptrs[0][0]));");
   if (with_residual) {
     code.e(
         "TMA_RESIDUAL "
-        "tma_residual(static_cast<CUtensorMap*>(task_desc.inputs[2].tma_desc_"
-        "ptrs[0]));");
+        "tma_residual(static_cast<CUtensorMap*>(task_desc.input_tma_desc_ptrs[2][0]));");
   }
   code.e("TMA_OUT "
-         "tma_out(static_cast<CUtensorMap*>(task_desc.outputs[0].tma_desc_ptrs["
-         "0]));");
+         "tma_out(static_cast<CUtensorMap*>(task_desc.output_tma_desc_ptrs[0][0]));");
 
   code.e(
       "kernel::linear_swapAB_kernel_hopper<bfloat16, $, $, $, $, TMA_A, TMA_B, "
