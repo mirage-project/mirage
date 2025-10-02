@@ -348,6 +348,12 @@ if __name__ == "__main__":
             io_category="cuda_tensor",
         )
         argmax_out = mpk.attach_input(torch_tensor=output_tokens, name="output_token")
+        #argmax_out = mpk.new_tensor(
+        #    dims=(args.max_num_batched_tokens, 1),
+        #    dtype=mi.int64,
+        #    name="argmax_out",
+        #    io_category="cuda_tensor",
+        #)
 
         # add spec tokens layer
         if spec_decode_config:
@@ -388,9 +394,9 @@ if __name__ == "__main__":
             w_v = mpk.attach_input(
                 torch_tensor=layer.self_attn.v_proj.weight, name=f"layer_{i}_v_proj"
             )
-            w_qkv = mpk.fuse_tensors(
+            w_qkv = mpk.shuffle_tensors(
                 inputs=[w_q, w_k, w_v],
-                fused_dim=0,
+                shuffled_dim=0,
                 num_groups=model.config.num_key_value_heads // world_size,
                 name=f"layer_{i}_qkv_proj",
             )
@@ -408,6 +414,14 @@ if __name__ == "__main__":
                 grid_dim=(grid_for_rmsnorm_linear_layer(w_qkv.dim(0)), 1, 1),
                 block_dim=(128, 1, 1),
             )
+            #mpk.rmsnorm_linear_layer(
+            #    input=x,
+            #    weight_norm=w_norm,
+            #    weight_linear=w_qkv,
+            #    output=attn_in,
+            #    grid_dim=(grid_for_rmsnorm_linear_layer(w_qkv.dim(0)), 1, 1),
+            #    block_dim=(128, 1, 1),
+            #)
             # add attention
             w_q_norm = mpk.attach_input(
                 torch_tensor=layer.self_attn.q_norm.weight, name=f"layer_{i}_q_norm"
@@ -484,9 +498,9 @@ if __name__ == "__main__":
                 torch_tensor=layer.mlp.up_proj.weight, name=f"layer_{i}_up_proj"
             )
             rmsnorm_num_tasks = grid_for_rmsnorm_linear_layer(w_gate_proj.dim(0) + w_up_proj.dim(0))
-            w_gatedup = mpk.fuse_tensors(
+            w_gatedup = mpk.shuffle_tensors(
                 inputs=[w_gate_proj, w_up_proj],
-                fused_dim=0,
+                shuffled_dim=0,
                 num_groups=rmsnorm_num_tasks//2,
                 name=f"layer_{i}_gatedup_proj",
             )
@@ -504,6 +518,14 @@ if __name__ == "__main__":
                 grid_dim=(rmsnorm_num_tasks, 1, 1),
                 block_dim=(128, 1, 1),
             )
+            #mpk.rmsnorm_linear_layer(
+            #    input=x,
+            #    weight_norm=w_norm,
+            #    weight_linear=w_gatedup,
+            #    output=mlp_mid,
+            #    grid_dim=(rmsnorm_num_tasks, 1, 1),
+            #    block_dim=(128, 1, 1),
+            #)
             mpk.silu_mul_layer(
                 input=mlp_mid,
                 output=silu_mul_out,
@@ -539,14 +561,28 @@ if __name__ == "__main__":
             torch_tensor=model.model.norm.weight, name="model_norm_weight"
         )
         w_proj = mpk.attach_input(torch_tensor=lm_head_weight, name="lm_head")
-        mpk.rmsnorm_linear_layer(
+        mpk.rmsnorm_layer(
             input=x,
-            weight_norm=w_norm,
-            weight_linear=w_proj,
+            weight=w_norm,
+            output=rmsnorm_out,
+            grid_dim=(mpk.max_num_batched_tokens, 1, 1),
+            block_dim=(128, 1, 1),
+        )
+        mpk.linear_layer(
+            input=rmsnorm_out,
+            weight=w_proj,
             output=argmax_in,
             grid_dim=(grid_for_rmsnorm_linear_layer(w_proj.dim(0)), 1, 1),
             block_dim=(128, 1, 1),
         )
+        #mpk.rmsnorm_linear_layer(
+        #    input=x,
+        #    weight_norm=w_norm,
+        #    weight_linear=w_proj,
+        #    output=argmax_in,
+        #    grid_dim=(grid_for_rmsnorm_linear_layer(w_proj.dim(0)), 1, 1),
+        #    block_dim=(128, 1, 1),
+        #)
         # add argmax layer
         if spec_decode_config and spec_decode_config.method == "promptlookup":
             argmax_partial_grid_dim = (max_factor_leq_n(153600, 96 // (spec_decode_config.spec_length + 1)), 

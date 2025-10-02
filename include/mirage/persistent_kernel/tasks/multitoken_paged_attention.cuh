@@ -60,9 +60,7 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl(
     void const *sin_ptr,
     float q_eps,
     float k_eps) {
-  // barrier for first 4 worker warps
   cutlass::arch::NamedBarrier wg_barrier(NUM_THREADS, /*bar-id*/6);
-
   if (threadIdx.x < NUM_THREADS){
     constexpr int NUM_QO_PER_KV = NUM_QO_HEADS / NUM_KV_HEADS;
 
@@ -648,7 +646,7 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl(
       int dst_col = src_col + (src_row % NUM_QO_PER_KV) * HEAD_DIM;
       o_dmem.at(dst_row, dst_col) = o_smem.at(src_row, src_col);
     }
-  }
+  } // threadIdx.x < NUM_THREADS
 }
 
 } // namespace kernel

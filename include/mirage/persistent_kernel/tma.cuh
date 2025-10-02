@@ -518,7 +518,8 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
                                             smem_shape,
                                             smem_repeat_row,
                                             smem_repeat_col);
-      } else if (param_id == 2 && (task_desc.task_type == TASK_LINEAR_SWAPAB_WITH_RESIDUAL_HOPPER)) {
+      } else if (param_id == 2 && task_desc.task_type ==
+                                      TASK_LINEAR_SWAPAB_WITH_RESIDUAL_HOPPER) {
         // TMA_RESIDUAL
         int const batch_size = tensor_desc.dim[0];
         int const output_size = tensor_desc.dim[1];
@@ -537,8 +538,10 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
                                             smem_shape,
                                             smem_repeat_row,
                                             smem_repeat_col);
-      } else if (param_id == 3 && (task_desc.task_type == TASK_LINEAR_SWAPAB_WITH_RESIDUAL_HOPPER) ||
-                 param_id == 2 && (task_desc.task_type == TASK_LINEAR_SWAPAB_HOPPER)) {
+      } else if (param_id == 3 && task_desc.task_type ==
+                                      TASK_LINEAR_SWAPAB_WITH_RESIDUAL_HOPPER ||
+                 param_id == 2 &&
+                     task_desc.task_type == TASK_LINEAR_SWAPAB_HOPPER) {
         // TMA_OUT
         int const batch_size = tensor_desc.dim[0];
         int const output_size = tensor_desc.dim[1];
