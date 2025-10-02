@@ -100,6 +100,7 @@ def config_cython():
                         path.join(mirage_path, "include"),
                         path.join(mirage_path, "deps", "json", "include"),
                         path.join(mirage_path, "deps", "cutlass", "include"),
+                        path.join(mirage_path, "deps", "cutlass", "tools", "util", "include"),
                         path.join(mirage_path, "build", "abstract_subexpr", "release"),
                         path.join(mirage_path, "build", "formal_verifier", "release"),
                         path.join(z3_path, "include"),

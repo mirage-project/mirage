@@ -29,9 +29,11 @@ setup(
             depends=[
                 os.path.join(this_dir, '../../../include/mirage/persistent_kernel/tasks/blackwell/linear_sm100_warp_specialized.cuh'),
                 os.path.join(this_dir, '../../../include/mirage/persistent_kernel/tasks/blackwell/linear_sm100_mpk.cuh'),
+                os.path.join(this_dir, '../../../include/mirage/persistent_kernel/tasks/blackwell/utils.cuh'),
             ],
             define_macros=macros,
             include_dirs=[
+                os.path.join(this_dir, '../../../include/mirage/persistent_kernel/'),
                 os.path.join(this_dir, '../../../include/mirage/persistent_kernel/tasks'),
                 os.path.join(this_dir, '../../../include'),
                 os.path.join(this_dir, '../../../deps/cutlass/include'),
@@ -45,6 +47,7 @@ setup(
                     '-O3',
                     '-gencode=arch=compute_100a,code=sm_100a',
                     '-DMIRAGE_GRACE_BLACKWELL',
+                    '-DMPK_ENABLE_TMA',
                 ]
             }
         )

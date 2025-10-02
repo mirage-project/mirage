@@ -1248,39 +1248,121 @@ int TaskRegister::register_linear_sm100_task(threadblock::Graph const &bgraph,
   output_size = output_ops[0]->output_tensors[0].dim[1];
   assert(input_ops[0]->dtensor.num_dims == 2);
   reduction_size = input_ops[0]->dtensor.dim[1];
-  printf("linear task: batch_size=%d, output_size=%d, reduction_size=%d\n",
-        batch_size,
-        output_size,
-        reduction_size);
-  // get output stride
   assert(output_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
   kn::KNInputOp *kn_input_op =
       static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
   output_stride = static_cast<int>(kn_input_op->input_strides[0]);
 
   mirage::transpiler::CodeKeeper code;
-  // code.inc_indent();
-  // code.e("kernel::linear_kernel<bfloat16, $, $, $, $>(",
-  //        batch_size,
-  //        output_size,
-  //        reduction_size,
-  //        output_stride);
-  // code.e("    task_desc.inputs[0].base_ptr,");
-  // code.e("    task_desc.inputs[1].base_ptr,");
-  // if (with_residual) {
-  //   code.e("    task_desc.inputs[2].base_ptr,");
-  // } else {
-  //   code.e("    nullptr,");
-  // }
-  // code.e("    task_desc.outputs[0].base_ptr,");
-  // code.e("    runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS],");
-  // if (with_residual) {
-  //   code.e("    runtime_config.my_gpu_id == 0);");
-  // } else {
-  //   code.e("    false/*residual*/);");
-  // }
+  code.inc_indent();
+  // define MMA
+  constexpr int MMA_M = 128;
+  constexpr int MMA_N = 32;
+  constexpr int bM = 128;
+  constexpr int bN = 32;
+  constexpr int bK = 64;
+  constexpr int num_ab_stages = 8;
+  constexpr int num_acc_stages = 2;
+  constexpr int num_c_stages = 4;
+  constexpr int num_tmem_columns = bN * num_acc_stages;
+  assert(num_tmem_columns <= 512);
+  // define TMAs
+  constexpr int B = 3;
+  constexpr int M = 3;
+  constexpr int S = 3;
+  constexpr int TMA_CP_ASYNC_SIZE = 64;
+  constexpr int TILE_SIZE = 64;
+  int const output_tma_cp_size = 128;
+  int const output_atom_size = 128;
+  code.e("using TMA_A = kernel::tma::tma_2d<cute::bfloat16_t, $, $, $, $, $, $, $, $, "
+         "$, $, $, $, true>;",
+         B,
+         M,
+         S,
+         output_size,        /*GMEM_ROW_*/
+         reduction_size,    /*GMEM_COL_*/
+         MMA_M,             /*SMEM_ROW_*/
+         TMA_CP_ASYNC_SIZE, /*SMEM_COL_*/
+         reduction_size,    /*GMEM_STRIDE_ROW_*/
+         1,                 /*GMEM_STRIDE_COL_*/
+         1,                 /*SMEM_REPEAT_ROW_*/
+         (TILE_SIZE + TMA_CP_ASYNC_SIZE - 1) /
+             TMA_CP_ASYNC_SIZE,          /*SMEM_REPEAT_COL_*/
+         MMA_M * TMA_CP_ASYNC_SIZE /*SMEM_STRIDE_*/
+  );
+
+  code.e("using TMA_B = kernel::tma::tma_2d<cute::bfloat16_t, $, $, $, $, $, $, $, $, "
+         "$, $, $, $, true>;",
+         B,
+         M,
+         S,
+         batch_size,       /*GMEM_ROW_*/
+         reduction_size,    /*GMEM_COL_*/
+         MMA_N,  /*SMEM_ROW_*/
+         TMA_CP_ASYNC_SIZE, /*SMEM_COL_*/
+         reduction_size,    /*GMEM_STRIDE_ROW_*/
+         1,                 /*GMEM_STRIDE_COL_*/
+         1,                 /*SMEM_REPEAT_ROW_*/
+         (TILE_SIZE + TMA_CP_ASYNC_SIZE - 1) /
+             TMA_CP_ASYNC_SIZE,               /*SMEM_REPEAT_COL_*/
+         MMA_N * TMA_CP_ASYNC_SIZE /*SMEM_STRIDE_*/
+  );
+
+  code.e("using TMA_OUT = kernel::tma::tma_2d<cute::bfloat16_t, $, $, $, $, $, $, $, "
+         "$, $, $, $, $, true>;",
+         0,
+         M,
+         S,
+         batch_size,         /*GMEM_ROW_*/
+         output_size,        /*GMEM_COL_*/
+         MMA_N,              /*SMEM_ROW_*/
+         MMA_M,              /*SMEM_COL_*/
+         output_stride,      /*GMEM_STRIDE_ROW_*/
+         1,                  /*GMEM_STRIDE_COL_*/
+         1,                  /*SMEM_REPEAT_ROW_*/
+         (output_atom_size + output_tma_cp_size - 1) /
+             output_tma_cp_size,         /*SMEM_REPEAT_COL_*/
+         MMA_N * MMA_M                 /*SMEM_STRIDE_*/
+  );
+  code.inc_indent();
+  code.e("TMA_A "
+         "tma_a(static_cast<CUtensorMap*>(task_desc.inputs[1].tma_desc_ptrs[0])"
+         ");");
+  code.e("TMA_B "
+         "tma_b(static_cast<CUtensorMap*>(task_desc.inputs[0].tma_desc_ptrs[0])"
+         ");");
+  code.e("TMA_OUT "
+         "tma_out(static_cast<CUtensorMap*>(task_desc.outputs[0].tma_desc_ptrs["
+         "0]));");
+  // Bias Tensor setup
+  code.e("cute::Layout layout_Bias = cute::make_layout(cute::make_shape($, $), cute::make_stride($, cute::Int<1>{}));",
+          batch_size,
+          output_size,
+          output_stride
+  );
+  code.e("cute::Tensor mBias = cute::make_tensor(cute::make_gmem_ptr(static_cast<cute::bfloat16_t*>($)), layout_Bias);",
+          with_residual ? "task_desc.inputs[2].base_ptr" : "nullptr"
+  );
+  code.e("kernel::linear_sm100_mpk_task_impl<cute::bfloat16_t, TMA_A, TMA_B, decltype(mBias), TMA_OUT, "
+         "$, $, $, $, $, $, "
+         "$, $, $>(",
+         MMA_M,
+         MMA_N,
+         batch_size,
+         output_size,
+         reduction_size,
+         with_residual ? "false" : "true",
+         num_ab_stages,
+         num_acc_stages,
+         num_c_stages);
+  code.e("    tma_a,");
+  code.e("    tma_b,");
+  code.e("    mBias,");
+  code.e("    tma_out); ");
+
   if (with_residual) {
-    return register_task_variant(TASK_LINEAR_WITH_RESIDUAL_SM100, code.to_string());
+    return register_task_variant(TASK_LINEAR_WITH_RESIDUAL_SM100,
+                                 code.to_string());
   } else {
     return register_task_variant(TASK_LINEAR_SM100, code.to_string());
   }
