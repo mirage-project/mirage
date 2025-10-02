@@ -404,8 +404,10 @@ const int TASK_DESCS_BUFFER_LENGTH = 16;
 __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
   __shared__ TaskId task_ids[TASK_DESCS_BUFFER_LENGTH];
   __shared__ TaskDesc task_descs[TASK_DESCS_BUFFER_LENGTH];
-  //__shared__ TaskId cur_task_id;
-  //__shared__ TaskDesc task_desc;
+  __shared__ TaskId *worker_queues[2];
+  __shared__ int worker_queue_ids[2];
+  __shared__ size_t next_task_pos[2];
+  __shared__ size_t last_task_pos[2];
 
 #ifdef MPK_ENABLE_PROFILING
   PROFILER_CLOSURE_PARAMS_DECL;
@@ -416,10 +418,7 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
 #endif
 
   int worker_id = blockIdx.x;
-  __shared__ TaskId *worker_queues[2];
-  __shared__ int worker_queue_ids[2];
-  TaskId *local_worker_queue = config.worker_queues[worker_id];
-  worker_queues[0] = local_worker_queue;
+  worker_queues[0] = config.worker_queues[worker_id];
   worker_queue_ids[0] = worker_id;
   int num_worker_queues = 1;
   if (config.num_gpus > 1) {
@@ -429,9 +428,6 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
     worker_queue_ids[num_worker_queues] = worker_id + config.num_workers;
     num_worker_queues++;
   }
-
-  __shared__ size_t next_task_pos[2];
-  __shared__ size_t last_task_pos[2];
 
   if (threadIdx.x == 0) {
     for (int i = 0; i < 2; i++) {
