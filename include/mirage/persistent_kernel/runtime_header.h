@@ -133,7 +133,7 @@ struct FullTaskDesc {
   int head_group; // Used for paged attention hopper
 };
 
-struct TaskDesc {
+struct alignas(16) TaskDesc {
   TaskDesc(FullTaskDesc t)
       : task_type(t.task_type), variant_id(t.variant_id),
         trigger_event(t.trigger_event), dependent_event(t.dependent_event),

@@ -1317,7 +1317,7 @@ TaskGraphResult print_task_graph(
       "TASK_LINEAR_SWAPAB_WITH_RESIDUAL_HOPPER";
 
   code.e("__device__ __forceinline__");
-  code.e("void _execute_task(TaskDesc const& task_desc,");
+  code.e("void _execute_task(TaskDesc const* task_desc,");
   code.e("                   RuntimeConfig const &runtime_config) {");
   TaskRegister *task_register = TaskRegister::get_instance();
   bool first_task = true;
@@ -1325,7 +1325,7 @@ TaskGraphResult print_task_graph(
     for (size_t variant_id = 0; variant_id < task.second.size(); variant_id++) {
       std::string cond = first_task ? "if" : "else if";
       assert(task_type_to_name.find(task.first) != task_type_to_name.end());
-      code.e("$ (task_desc.task_type == $ && task_desc.variant_id == $) {",
+      code.e("$ (task_desc->task_type == $ && task_desc->variant_id == $) {",
              cond,
              task_type_to_name[task.first],
              variant_id);
