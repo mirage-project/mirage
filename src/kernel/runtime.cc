@@ -691,7 +691,7 @@ TaskGraphResult print_task_graph(
     // SM100 Tasks
     code.e("if (task.at(\"task_type\") > TASK_SM100_TASK_BEGIN && "
            "task.at(\"task_type\") < TASK_SM100_TASK_END) {");
-    code.e("create_sm100_tma_desc_by_task(task_desc);");
+    code.e("create_tma_desc_by_task(task_desc);");
     code.e("}");
     code.e("#endif");
     code.e("all_tasks.push_back(task_desc);");
@@ -715,7 +715,7 @@ TaskGraphResult print_task_graph(
   }
 
   code.e(
-      "static void _init_persistent_kernel(CUTE_GRID_CONSTANT std::vector<TaskDesc> &all_tasks,");
+      "static void _init_persistent_kernel(std::vector<TaskDesc> &all_tasks,");
   code.e("                                    std::vector<EventDesc> "
          "&all_events,");
   code.e("                                  std::vector<TaskId> &first_tasks,");
@@ -1321,6 +1321,9 @@ TaskGraphResult print_task_graph(
   task_type_to_name[TASK_LINEAR_SWAPAB_HOPPER] = "TASK_LINEAR_SWAPAB_HOPPER";
   task_type_to_name[TASK_LINEAR_SWAPAB_WITH_RESIDUAL_HOPPER] =
       "TASK_LINEAR_SWAPAB_WITH_RESIDUAL_HOPPER";
+  task_type_to_name[TASK_LINEAR_SM100] = "TASK_LINEAR_SM100";
+  task_type_to_name[TASK_LINEAR_WITH_RESIDUAL_SM100] =
+      "TASK_LINEAR_WITH_RESIDUAL_SM100";
 
   code.e("__device__ __forceinline__");
   code.e("void _execute_task(TaskDesc const& task_desc,");

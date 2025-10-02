@@ -281,11 +281,6 @@ namespace kernel {
 
             // Perform MMA operation
 
-            // if(cute::elect_one_sync() && k_tile == 0 && m_tile == 0 && n_tile == 0) {
-            //   cute::print("tCsA[0]:\t"); cute::print(tCsA[0]); cute::print("\n"); //
-            //   cute::print("tCsB[0]:\t"); cute::print(tCsB[0]); cute::print("\n"); //
-            // } mma_wg_barrier.arrive_and_wait();
-
             for (int k_block = 0; k_block < cute::size<2>(tCrA); ++k_block) {
               cute::gemm(tiled_mma, tCrA(cute::_, cute::_, k_block, smem_rd_buffer), tCrB(cute::_, cute::_, k_block, smem_rd_buffer), tCtAcc_Slice);
               tiled_mma.accumulate_ = cute::UMMA::ScaleOut::One;
@@ -316,7 +311,7 @@ namespace kernel {
       if (warp_idx == 0) {
         tmem_allocator.allocate(num_tmem_columns, &shared_storage.tmem_base_ptr);
       }
-      tmem_allocation_result_barrier.arrive();
+      tmem_allocation_result_barrier.arrive_and_wait();
       tCtAcc.data() = shared_storage.tmem_base_ptr;
 
       using AccType = typename decltype(tCtAcc)::value_type;

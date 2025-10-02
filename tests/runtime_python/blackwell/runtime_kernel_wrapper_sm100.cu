@@ -16,6 +16,7 @@
 #include "blackwell/linear_sm100_mpk.cuh"
 #include "blackwell/utils.cuh"
 #include "hopper/tma_2d.cuh"
+#include "tma.cuh"
 #include <cuda_runtime.h>
 #include <torch/extension.h>
 
@@ -286,26 +287,85 @@ template <typename T,
           int BATCH_SIZE,
           int OUTPUT_SIZE,
           int REDUCTION_SIZE,
-          typename TMA_A,
-          typename TMA_B,
           class BiasTensor,
-          typename TMA_OUT,
-          class MmaTiler_MNK,
-          class EpiTiler_MN,
-          class TiledMMA,
+          int MMA_M,
+          int MMA_N,
           bool NoBias, 
           int NUM_AB_STAGE = 8,
           int NUM_ACC_STAGE = 2,
           int NUM_C_STAGE = 4>
 __global__ __launch_bounds__(256, 1) void linear_sm100_mpk_wrapper(
-    const __grid_constant__ TMA_A tma_a,
-    const __grid_constant__ TMA_B tma_b,
+    void * tma_a_desc_ptr,
+    void * tma_b_desc_ptr,
     BiasTensor mBias,
-    const __grid_constant__ TMA_OUT tma_out,
-    MmaTiler_MNK mma_tiler,
-    EpiTiler_MN epi_tiler,
-    TiledMMA tiled_mma,
-    const int num_tmem_columns) {
+    void * tma_out_desc_ptr) {
+
+  constexpr int B = 3;
+  constexpr int M = 3;
+  constexpr int S = 3;
+
+  using TypeAcc = float;
+
+  constexpr int TMA_CP_ASYNC_SIZE =
+      64; // note that if swizzle 128 is used, 64 is maximal cp size
+  constexpr int TILE_SIZE =
+      64; // we should modify this param if we want larger tile size
+  constexpr int TMA_CP_ASYNC_REPEAT_COL =
+      (TILE_SIZE + TMA_CP_ASYNC_SIZE - 1) / TMA_CP_ASYNC_SIZE;
+
+  constexpr int OUTPUT_ATOM_SIZE = 128; // this is padded
+  constexpr int OUTPUT_TMA_CP_SIZE = 128;
+  constexpr int OUTPUT_ATOM_REPEAT_COL = 1;
+  
+  using TMA_B =
+      kernel::tma::tma_2d<bfloat16,
+                          B,
+                          M,
+                          S,
+                          BATCH_SIZE,                      /*GMEM_ROW_*/
+                          REDUCTION_SIZE,                  /*GMEM_COL_*/
+                          MMA_N,                           /*SMEM_ROW_*/
+                          TMA_CP_ASYNC_SIZE,               /*SMEM_COL_*/
+                          REDUCTION_SIZE,                  /*GMEM_STRIDE_ROW_*/
+                          1,                               /*GMEM_STRIDE_COL_*/
+                          1,                               /*SMEM_REPEAT_ROW_*/
+                          TMA_CP_ASYNC_REPEAT_COL,         /*SMEM_REPEAT_COL_*/
+                          MMA_N * TMA_CP_ASYNC_SIZE, /*SMEM_STRIDE_*/
+                          true>;
+  using TMA_A =
+      kernel::tma::tma_2d<bfloat16,
+                          B,
+                          M,
+                          S,
+                          OUTPUT_SIZE,             /*GMEM_ROW_*/
+                          REDUCTION_SIZE,          /*GMEM_COL_*/
+                          MMA_M,                   /*SMEM_ROW_*/
+                          TMA_CP_ASYNC_SIZE,       /*SMEM_COL_*/
+                          REDUCTION_SIZE,          /*GMEM_STRIDE_ROW_*/
+                          1,                       /*GMEM_STRIDE_COL_*/
+                          1,                       /*SMEM_REPEAT_ROW_*/
+                          TMA_CP_ASYNC_REPEAT_COL, /*SMEM_REPEAT_COL_*/
+                          MMA_M * TMA_CP_ASYNC_SIZE, /*SMEM_STRIDE_*/
+                          true>;
+
+  using TMA_OUT = kernel::tma::tma_2d<bfloat16,
+                                      0,
+                                      M,
+                                      S,
+                                      BATCH_SIZE,              /*GMEM_ROW_*/
+                                      OUTPUT_SIZE,             /*GMEM_COL_*/
+                                      MMA_N,                   /*SMEM_ROW_*/
+                                      MMA_M,                   /*SMEM_COL_*/
+                                      OUTPUT_SIZE,             /*GMEM_STRIDE_ROW_*/
+                                      1,                       /*GMEM_STRIDE_COL_*/
+                                      1,                       /*SMEM_REPEAT_ROW_*/
+                                      OUTPUT_ATOM_REPEAT_COL,  /*SMEM_REPEAT_COL_*/
+                                      MMA_N * MMA_M,           /*SMEM_STRIDE_*/
+                                      true>;
+  
+  TMA_A tma_a(static_cast<CUtensorMap*>(tma_a_desc_ptr));
+  TMA_B tma_b(static_cast<CUtensorMap*>(tma_b_desc_ptr));
+  TMA_OUT tma_out(static_cast<CUtensorMap*>(tma_out_desc_ptr));
 
   kernel::linear_sm100_mpk_task_impl<
           T, 
@@ -313,16 +373,15 @@ __global__ __launch_bounds__(256, 1) void linear_sm100_mpk_wrapper(
           TMA_B,
           BiasTensor,
           TMA_OUT,
-          MmaTiler_MNK,
-          EpiTiler_MN,
-          TiledMMA,
+          MMA_M,
+          MMA_N,
           BATCH_SIZE,
           OUTPUT_SIZE,
           REDUCTION_SIZE,
           NoBias,
           NUM_AB_STAGE,
           NUM_ACC_STAGE,
-          NUM_C_STAGE>(tma_a, tma_b, mBias, tma_out, mma_tiler, epi_tiler, tiled_mma, num_tmem_columns);
+          NUM_C_STAGE>(tma_a, tma_b, mBias, tma_out);
 }
 
 template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int REDUCTION_SIZE>
@@ -351,73 +410,85 @@ void launch_linear_sm100_mpk(void *input_ptr,
   constexpr int OUTPUT_TMA_CP_SIZE = 128;
   constexpr int OUTPUT_ATOM_REPEAT_COL = 1;
 
-  constexpr int num_tmem_columns = MMA_N * 2;
-  assert(num_tmem_columns <= 512);
+  // TMA_A tma_a(weight_ptr);
+  // TMA_B tma_b(input_ptr);
+  // TMA_OUT tma_out(output_ptr);
 
-  cute::TiledMMA tiled_mma = cute::make_tiled_mma(cute::SM100_MMA_F16BF16_SS<T, T, TypeAcc,           // Mma's A, B, and Accumulator types
-                                                                 MMA_M, MMA_N,                            // Mma M and N dimensions
-                                                                 cute::UMMA::Major::K, cute::UMMA::Major::K>{});  // A and B layouts
-  auto bM = cute::tile_size<0>(tiled_mma);             // MMA Tile M. We'll use 1 MMAs per MMA Tile M.
-  auto bN = cute::tile_size<1>(tiled_mma);             // MMA Tile N. We'll use 1 MMAs per MMA Tile N.
-  auto bK = cute::tile_size<2>(tiled_mma) * cute::Int<4>{};  // MMA Tile K. We'll use 4 MMAs per MMA Tile K. For 16b types, tcgen05.mma has K16.
+  CUtensorMap host_i_desc;
+  CUtensorMap host_w_desc;
+  CUtensorMap host_o_desc;
+  CUtensorMap *desc_i_ptr;
+  CUtensorMap *desc_w_ptr;
+  CUtensorMap *desc_o_ptr;
 
-  auto mma_tiler = cute::make_shape(bM, bN, bK);       // (MMA_M, MMA_N, MMA_K)
+  // TMA_INPUT
+  uint64_t i_gmem_shape[2] = {static_cast<uint64_t>(BATCH_SIZE),
+                            static_cast<uint64_t>(REDUCTION_SIZE)};
+  uint64_t i_gmem_stride[2] = {1, static_cast<uint64_t>(REDUCTION_SIZE)};
+  uint32_t i_smem_shape[2] = {static_cast<uint32_t>(MMA_N),
+                            static_cast<uint32_t>(TMA_CP_ASYNC_SIZE)};
 
-  auto epi_tiler = cute::make_tile(cute::size<1>(mma_tiler), cute::size<0>(mma_tiler)); // SwapAB configuration
-
-  constexpr int SMEM_M_SIZE = 32;
-  using TMA_B =
-      kernel::tma::tma_2d<bfloat16,
-                          B,
-                          M,
-                          S,
-                          BATCH_SIZE,                      /*GMEM_ROW_*/
-                          REDUCTION_SIZE,                  /*GMEM_COL_*/
-                          BATCH_SIZE,                     /*SMEM_ROW_*/
-                          TMA_CP_ASYNC_SIZE,               /*SMEM_COL_*/
-                          REDUCTION_SIZE,                  /*GMEM_STRIDE_ROW_*/
-                          1,                               /*GMEM_STRIDE_COL_*/
-                          1,                               /*SMEM_REPEAT_ROW_*/
-                          TMA_CP_ASYNC_REPEAT_COL,         /*SMEM_REPEAT_COL_*/
-                          SMEM_M_SIZE * TMA_CP_ASYNC_SIZE, /*SMEM_STRIDE_*/
-                          true>;
-  using TMA_A =
-      kernel::tma::tma_2d<bfloat16,
-                          B,
-                          M,
-                          S,
-                          OUTPUT_SIZE,             /*GMEM_ROW_*/
-                          REDUCTION_SIZE,          /*GMEM_COL_*/
-                          OUTPUT_ATOM_SIZE,        /*SMEM_ROW_*/
-                          TMA_CP_ASYNC_SIZE,       /*SMEM_COL_*/
-                          REDUCTION_SIZE,          /*GMEM_STRIDE_ROW_*/
-                          1,                       /*GMEM_STRIDE_COL_*/
-                          1,                       /*SMEM_REPEAT_ROW_*/
-                          TMA_CP_ASYNC_REPEAT_COL, /*SMEM_REPEAT_COL_*/
-                          OUTPUT_ATOM_SIZE * TMA_CP_ASYNC_SIZE, /*SMEM_STRIDE_*/
-                          true>;
-
-  using TMA_OUT = kernel::tma::tma_2d<bfloat16,
-                                      0,
-                                      M,
-                                      S,
-                                      BATCH_SIZE,
-                                      OUTPUT_SIZE,
-                                      BATCH_SIZE,
-                                      OUTPUT_TMA_CP_SIZE,
-                                      OUTPUT_SIZE,
+  size_t i_smem_repeat_col =
+      (TILE_SIZE + TMA_CP_ASYNC_SIZE - 1) / TMA_CP_ASYNC_SIZE;
+  mirage::runtime::fill_tma_desc<bfloat16, B, M, S, 2>(&host_i_desc,
+                                      static_cast<bfloat16 *>(input_ptr),
+                                      i_gmem_shape,
+                                      i_gmem_stride,
+                                      i_smem_shape,
                                       1,
+                                      i_smem_repeat_col);
+
+  // TMA_WEIGHT
+  uint64_t w_gmem_shape[2] = {static_cast<uint64_t>(OUTPUT_SIZE),
+                            static_cast<uint64_t>(REDUCTION_SIZE)};
+  uint64_t w_gmem_stride[2] = {1, static_cast<uint64_t>(REDUCTION_SIZE)};
+  uint32_t w_smem_shape[2] = {static_cast<uint32_t>(MMA_M),
+                            static_cast<uint32_t>(TMA_CP_ASYNC_SIZE)};
+  size_t w_smem_repeat_col =
+      (TILE_SIZE + TMA_CP_ASYNC_SIZE - 1) / TMA_CP_ASYNC_SIZE;
+  mirage::runtime::fill_tma_desc<bfloat16, B, M, S, 2>(&host_w_desc,
+                                      static_cast<bfloat16 *>(weight_ptr),
+                                      w_gmem_shape,
+                                      w_gmem_stride,
+                                      w_smem_shape,
                                       1,
-                                      OUTPUT_ATOM_REPEAT_COL,
-                                      SMEM_M_SIZE * OUTPUT_TMA_CP_SIZE,
-                                      true>;
-  TMA_A tma_a(weight_ptr);
-  TMA_B tma_b(input_ptr);
+                                      w_smem_repeat_col);
+
+  // TMA_OUT
+  int const output_stride = OUTPUT_SIZE;
+  uint64_t o_gmem_shape[2] = {static_cast<uint64_t>(BATCH_SIZE),
+                            static_cast<uint64_t>(OUTPUT_SIZE)};
+  uint64_t o_gmem_stride[2] = {1, static_cast<uint64_t>(output_stride)};
+  uint32_t o_smem_shape[2] = {static_cast<uint32_t>(MMA_N),
+                            static_cast<uint32_t>(MMA_M)};
+  size_t o_smem_repeat_col = 1;
+  mirage::runtime::fill_tma_desc<bfloat16, 0, M, S, 2>(&host_o_desc,
+                                      static_cast<bfloat16 *>(output_ptr),
+                                      o_gmem_shape,
+                                      o_gmem_stride,
+                                      o_smem_shape,
+                                      1,
+                                      o_smem_repeat_col);
   
+  cudaMalloc(&desc_i_ptr, sizeof(CUtensorMap));
+  cudaMalloc(&desc_w_ptr, sizeof(CUtensorMap));
+  cudaMalloc(&desc_o_ptr, sizeof(CUtensorMap));
+
+  cudaMemcpy(desc_i_ptr, &host_i_desc, sizeof(CUtensorMap), cudaMemcpyHostToDevice);
+  cudaMemcpy(desc_w_ptr, &host_w_desc, sizeof(CUtensorMap), cudaMemcpyHostToDevice);
+  cudaMemcpy(desc_o_ptr, &host_o_desc, sizeof(CUtensorMap), cudaMemcpyHostToDevice);
+
+  void *tma_desc_input;
+  void *tma_desc_weight;
+  void *tma_desc_output;
+
+  tma_desc_input = desc_i_ptr;
+  tma_desc_weight = desc_w_ptr;
+  tma_desc_output = desc_o_ptr;
+
+  // Residual
   cute::Layout layout_Bias = cute::make_layout(cute::make_shape(BATCH_SIZE, OUTPUT_SIZE), cute::make_stride(OUTPUT_SIZE, cute::Int<1>{}));   // (Gemm_M,Gemm_N):(Gemm_N,_1)
   cute::Tensor mBias = cute::make_tensor(cute::make_gmem_ptr(static_cast<T*>(residual_ptr)), layout_Bias);      // (Gemm_N, Gemm_M)
-
-  TMA_OUT tma_out(output_ptr);
 
   dim3 grid_dim(1, 1, 1);
   dim3 block_dim(256, 1, 1);
@@ -427,16 +498,15 @@ void launch_linear_sm100_mpk(void *input_ptr,
   if(residual_ptr != nullptr){
     auto* kernel_ptr = &linear_sm100_mpk_wrapper<T,
                                 BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE,
-                                decltype(tma_a), decltype(tma_b), decltype(mBias), decltype(tma_out),
-                                decltype(mma_tiler), decltype(epi_tiler), decltype(tiled_mma),
+                                decltype(mBias), 
+                                MMA_M, MMA_N,
                                 false>;
     CUTE_CHECK_ERROR(cudaFuncSetAttribute(kernel_ptr,
                       cudaFuncAttributeMaxDynamicSharedMemorySize,
                       smemBytes));
     cutlass::ClusterLaunchParams params = {grid_dim, block_dim, cluster_dim, smemBytes};
     cutlass::Status status = cutlass::launch_kernel_on_cluster(params, (void const*) kernel_ptr,
-                                                              tma_a, tma_b, mBias, tma_out, 
-                                                              mma_tiler, epi_tiler, tiled_mma, num_tmem_columns);
+                                                              tma_desc_weight, tma_desc_input, mBias, tma_desc_output);
     CUTE_CHECK_LAST();
 
     if (status != cutlass::Status::kSuccess) {
@@ -445,16 +515,15 @@ void launch_linear_sm100_mpk(void *input_ptr,
   } else {
     auto* kernel_ptr = &linear_sm100_mpk_wrapper<T,
                                 BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE,
-                                decltype(tma_a), decltype(tma_b), decltype(mBias), decltype(tma_out),
-                                decltype(mma_tiler), decltype(epi_tiler), decltype(tiled_mma),
+                                decltype(mBias),
+                                MMA_M, MMA_N,
                                 true>;
     CUTE_CHECK_ERROR(cudaFuncSetAttribute(kernel_ptr,
                       cudaFuncAttributeMaxDynamicSharedMemorySize,
                       smemBytes));
     cutlass::ClusterLaunchParams params = {grid_dim, block_dim, cluster_dim, smemBytes};
     cutlass::Status status = cutlass::launch_kernel_on_cluster(params, (void const*) kernel_ptr,
-                                                              tma_a, tma_b, mBias, tma_out, 
-                                                              mma_tiler, epi_tiler, tiled_mma, num_tmem_columns);
+                                                              tma_desc_weight, tma_desc_input, mBias, tma_desc_output);
     CUTE_CHECK_LAST();
 
     if (status != cutlass::Status::kSuccess) {
@@ -479,11 +548,12 @@ void linear_sm100_mpk_kernel(torch::Tensor input,
   // const int OUTPUT_SIZE = output.size(1);
   // const int REDUCTION_SIZE = weight.size(1);
 
-  constexpr int BATCH_SIZE = 32;
-  constexpr int OUTPUT_SIZE = 1024;
+  constexpr int BATCH_SIZE = 8;
+  constexpr int OUTPUT_SIZE = 64*96;
   constexpr int REDUCTION_SIZE = 4096;
 
-
+  assert(input.size(1) == REDUCTION_SIZE);
+  assert(weight.size(0) == OUTPUT_SIZE);
 
   launch_linear_sm100_mpk<bfloat16, BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE>(input_ptr, weight_ptr, output_ptr, residual_ptr);      
   cudaError_t err = cudaDeviceSynchronize();

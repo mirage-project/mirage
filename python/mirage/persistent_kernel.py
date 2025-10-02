@@ -622,8 +622,8 @@ class PersistentKernel:
         impl_name = "linear"
         if self.target_cc == 90:
             impl_name = "linear_swapAB_hopper"
-        # elif self.target_cc == 100:
-        #     impl_name = "linear_sm100"
+        elif self.target_cc == 100:
+            impl_name = "linear_sm100"
         self.kn_graph.register_task(tb_graph, impl_name)
 
 
@@ -650,8 +650,8 @@ class PersistentKernel:
         impl_name = "linear_with_residual"
         if self.target_cc == 90:
             impl_name = "linear_swapAB_with_residual_hopper"
-        # elif self.target_cc == 100:
-        #     impl_name = "linear_with_residual_sm100"
+        elif self.target_cc == 100:
+            impl_name = "linear_with_residual_sm100"
         self.kn_graph.register_task(tb_graph, impl_name)
 
     def allreduce_layer(
