@@ -165,8 +165,10 @@ struct alignas(16) TaskDesc {
   void *input_ptrs[MAX_INPUTS_PER_TASK];
   void *output_ptrs[MAX_OUTPUTS_PER_TASK];
 #ifdef MPK_ENABLE_TMA
-  void *input_tma_desc_ptrs[MAX_INPUTS_PER_TASK][mirage::config::MAX_TMA_DESC_PER_TENSOR];
-  void *output_tma_desc_ptrs[MAX_INPUTS_PER_TASK][mirage::config::MAX_TMA_DESC_PER_TENSOR];
+  void *input_tma_desc_ptrs[MAX_INPUTS_PER_TASK]
+                           [mirage::config::MAX_TMA_DESC_PER_TENSOR];
+  void *output_tma_desc_ptrs[MAX_INPUTS_PER_TASK]
+                            [mirage::config::MAX_TMA_DESC_PER_TENSOR];
 #endif
   int request_id; // Used for paged attention
   int head_group; // Used for paged attention hopper

@@ -398,8 +398,12 @@ __device__ __forceinline__ void persistent_checker(RuntimeConfig config) {
   static_assert(sizeof(TaskDesc) % sizeof(int) == 0);
   assert(blockDim.x >= 128);
 }
-
+#ifdef MIRAGE_GRACE_HOPPER
+int const TASK_DESCS_BUFFER_LENGTH = 5;
+#else
 int const TASK_DESCS_BUFFER_LENGTH = 16;
+#endif
+
 __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
   __shared__ TaskId task_ids[TASK_DESCS_BUFFER_LENGTH];
   __shared__ TaskDesc task_descs[TASK_DESCS_BUFFER_LENGTH];
