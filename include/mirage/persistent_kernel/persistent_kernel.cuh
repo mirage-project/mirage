@@ -33,7 +33,6 @@
 using bfloat16 = type::bfloat16_t;
 using namespace mirage::runtime;
 using namespace kernel;
-
 // Configurations for the MPK runtime
 // #define MPK_MAX_NUM_BATCHED_REQUESTS 16
 // #define MPK_MAX_NUM_BATCHED_TOKENS 64
@@ -277,7 +276,7 @@ __device__ __forceinline__ bool
 __device__ __forceinline__ bool
     prepare_next_batch(RuntimeConfig const &config) {
   int step = config.step[0];
-#ifdef MPK_EANBLE_VERBOSE
+#ifdef MPK_ENABLE_VERBOSE
   printf("step: %d, new_token_num(%p): %d, new_token_ids:\n",
          step,
          config.new_token_nums,
@@ -417,14 +416,12 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
                 (threadIdx.x % 128 == 0));
 #endif
 
-  int worker_id = blockIdx.x;
+  const int worker_id = blockIdx.x;
   worker_queues[0] = config.worker_queues[worker_id];
   worker_queue_ids[0] = worker_id;
   int num_worker_queues = 1;
   if (config.num_gpus > 1) {
-    TaskId *remote_worker_queue =
-        config.worker_queues[worker_id + config.num_workers];
-    worker_queues[num_worker_queues] = remote_worker_queue;
+    worker_queues[num_worker_queues] = config.worker_queues[worker_id + config.num_workers];
     worker_queue_ids[num_worker_queues] = worker_id + config.num_workers;
     num_worker_queues++;
   }
@@ -436,15 +433,17 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
     for (int i = 0; i < 2; i++) {
       last_task_pos[i] = 0;
     }
+    //num_loaded_tasks = 0;
   }
 
-  int queue_idx = 0, queue_pos = 0, queue_len = 0;
+  int queue_pos = 0, queue_len = 0;
 #ifdef MPK_ENABLE_PROFILING
   size_t task_counter = 0;
 #endif
   while (true) {
     // fetch next task from a task queue if task_descs is empty
     if (queue_pos == queue_len) {
+      int queue_idx = 0;
       if (threadIdx.x == 0) {
         while (next_task_pos[queue_idx] == last_task_pos[queue_idx]) {
           last_task_pos[queue_idx] = ld_acquire_gpu_u64(
@@ -462,9 +461,9 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
                last_task_pos[queue_idx]);
       }
       __syncthreads();
-      int tasks_to_load = min((int)(last_task_pos[queue_idx] - next_task_pos[queue_idx]), TASK_DESCS_BUFFER_LENGTH);
+      int num_loaded_tasks = min((int)(last_task_pos[queue_idx] - next_task_pos[queue_idx]), TASK_DESCS_BUFFER_LENGTH);
       // Load task ids
-      if (threadIdx.x < tasks_to_load) {
+      if (threadIdx.x < num_loaded_tasks) {
         task_ids[threadIdx.x] = ld_relaxed_gpu_u64(
             &worker_queues[queue_idx][(next_task_pos[queue_idx] + threadIdx.x) %
                                       config.per_worker_queue_len]);
@@ -472,7 +471,7 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
       __syncthreads();
       if (threadIdx.x == 0) {
 #ifdef MPK_ENABLE_VERBOSE
-        for (int i = 0; i < tasks_to_load; i++) {
+        for (int i = 0; i < num_loaded_tasks; i++) {
           printf(
               "[%d][FTCH] worker_id(%d) queue_idx(%d) next_task_pos(%llu, "
               "%llu) last_task_pos(%llu, %llu) "
@@ -489,22 +488,22 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
               config.all_tasks[get_task_position_index(task_ids[i])].trigger_event);
         }
 #endif
-        next_task_pos[queue_idx] += tasks_to_load;
+        next_task_pos[queue_idx] += num_loaded_tasks;
       }
       // Load task descs
       static_assert(sizeof(TaskDesc) % 16 == 0);
       constexpr int TASK_SIZE = sizeof(TaskDesc) / 16; // 128b copy-async
-      if (threadIdx.x < tasks_to_load * TASK_SIZE) {
-        int task_idx = threadIdx.x / TASK_SIZE;
-        int offset = threadIdx.x % TASK_SIZE;
-        load_smem(reinterpret_cast<char*>(task_descs) + threadIdx.x * 16,
+      for (int i = threadIdx.x; i < num_loaded_tasks * TASK_SIZE; i += blockDim.x) {
+        int task_idx = i / TASK_SIZE;
+        int offset = i % TASK_SIZE;
+        load_smem(reinterpret_cast<char*>(task_descs) + i * 16,
                   reinterpret_cast<char*>(config.all_tasks + get_task_position_index(task_ids[task_idx])) + offset * 16);
       }
       cp_async_fence();
       cp_async_wait<0>();
       __syncthreads();
       queue_pos = 0;
-      queue_len = tasks_to_load;
+      queue_len = num_loaded_tasks;
     }
     TaskDesc *task_desc = task_descs + queue_pos;
     // Make sure task is ready before start execution
