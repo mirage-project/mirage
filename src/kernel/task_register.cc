@@ -796,12 +796,13 @@ int TaskRegister::register_linear_hopper_task(threadblock::Graph const &bgraph,
          "tma_b(static_cast<CUtensorMap*>(task_desc->input_tma_desc_ptrs[1][0])"
          ");");
   if (with_residual) {
-    code.e(
-        "TMA_RESIDUAL "
-        "tma_residual(static_cast<CUtensorMap*>(task_desc->input_tma_desc_ptrs[2][0]));");
+    code.e("TMA_RESIDUAL "
+           "tma_residual(static_cast<CUtensorMap*>(task_desc->input_tma_desc_"
+           "ptrs[2][0]));");
   }
   code.e("TMA_OUT "
-         "tma_out(static_cast<CUtensorMap*>(task_desc->output_tma_desc_ptrs[0][0]));");
+         "tma_out(static_cast<CUtensorMap*>(task_desc->output_tma_desc_ptrs[0]["
+         "0]));");
   // code.e("printf(\"linear_kernel_hopper start\");");
 
   code.e("kernel::linear_kernel_hopper<bfloat16, $, $, $, $, TMA_A, TMA_B, "
@@ -973,12 +974,15 @@ int TaskRegister::register_paged_attention_hopper_task(
          "(static_cast<CUtensorMap*>(task_desc->input_tma_desc_ptrs[0][2]));");
 
   code.e("TMA_PAGED_KV_CACHE "
-         "tma_paged_k_cache(static_cast<CUtensorMap*>(task_desc->input_tma_desc_ptrs[1][0]));");
+         "tma_paged_k_cache(static_cast<CUtensorMap*>(task_desc->input_tma_"
+         "desc_ptrs[1][0]));");
   code.e("TMA_PAGED_KV_CACHE "
-         "tma_paged_k_cache(static_cast<CUtensorMap*>(task_desc->input_tma_desc_ptrs[2][0]));");
+         "tma_paged_k_cache(static_cast<CUtensorMap*>(task_desc->input_tma_"
+         "desc_ptrs[2][0]));");
 
   code.e("TMA_OUTPUT "
-         "tma_output(static_cast<CUtensorMap*>(task_desc->output_tma_desc_ptrs[0][0]));");
+         "tma_output(static_cast<CUtensorMap*>(task_desc->output_tma_desc_ptrs["
+         "0][0]));");
 
   code.e("kernel::multitoken_paged_attention_hopper_impl<bfloat16, $, $, $, $, "
          "$, $, $, $, "
@@ -1175,16 +1179,19 @@ int TaskRegister::register_linear_swapAB_hopper_task(
   );
   code.inc_indent();
   code.e("TMA_A "
-         "tma_a(static_cast<CUtensorMap*>(task_desc->input_tma_desc_ptrs[1][0]));");
+         "tma_a(static_cast<CUtensorMap*>(task_desc->input_tma_desc_ptrs[1][0])"
+         ");");
   code.e("TMA_B "
-         "tma_b(static_cast<CUtensorMap*>(task_desc->input_tma_desc_ptrs[0][0]));");
+         "tma_b(static_cast<CUtensorMap*>(task_desc->input_tma_desc_ptrs[0][0])"
+         ");");
   if (with_residual) {
-    code.e(
-        "TMA_RESIDUAL "
-        "tma_residual(static_cast<CUtensorMap*>(task_desc->input_tma_desc_ptrs[2][0]));");
+    code.e("TMA_RESIDUAL "
+           "tma_residual(static_cast<CUtensorMap*>(task_desc->input_tma_desc_"
+           "ptrs[2][0]));");
   }
   code.e("TMA_OUT "
-         "tma_out(static_cast<CUtensorMap*>(task_desc->output_tma_desc_ptrs[0][0]));");
+         "tma_out(static_cast<CUtensorMap*>(task_desc->output_tma_desc_ptrs[0]["
+         "0]));");
 
   code.e(
       "kernel::linear_swapAB_kernel_hopper<bfloat16, $, $, $, $, TMA_A, TMA_B, "

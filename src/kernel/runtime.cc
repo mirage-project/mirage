@@ -623,7 +623,8 @@ TaskGraphResult print_task_graph(
     code.e("json_file >> json_task_graph;");
     // load tasks
     code.e("for (json const &task : json_task_graph[\"all_tasks\"]) {");
-    code.e("FullTaskDesc task_desc(static_cast<TaskType>(task.at(\"task_type\")),");
+    code.e("FullTaskDesc "
+           "task_desc(static_cast<TaskType>(task.at(\"task_type\")),");
     code.e("            task.at(\"variant_id\"));");
     code.e("task_desc.request_id = task.at(\"request_id\").get<int>();");
     code.e("if (task.at(\"trigger_event\").is_number_integer()) {");
@@ -708,8 +709,8 @@ TaskGraphResult print_task_graph(
     code.e("");
   }
 
-  code.e(
-      "static void _init_persistent_kernel(std::vector<FullTaskDesc> &all_tasks,");
+  code.e("static void _init_persistent_kernel(std::vector<FullTaskDesc> "
+         "&all_tasks,");
   code.e("                                    std::vector<EventDesc> "
          "&all_events,");
   code.e("                                  std::vector<TaskId> &first_tasks,");

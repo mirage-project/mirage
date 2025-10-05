@@ -27,9 +27,9 @@ template <typename T,
           int NUM_THREADS = 128,
           int BARRIER_ID = 9>
 __device__ __forceinline__ void rotary_embedding_hopper(InputSmem smem_input,
-                                                    T const *cos_ptr,
-                                                    T const *sin_ptr,
-                                                    int token_offset = 0) {
+                                                        T const *cos_ptr,
+                                                        T const *sin_ptr,
+                                                        int token_offset = 0) {
 #pragma unroll
   for (int win_idx = 0; win_idx < WINDOW_SIZE; ++win_idx) {
 

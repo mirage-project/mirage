@@ -147,12 +147,12 @@ struct alignas(16) TaskDesc {
 #ifdef MPK_ENABLE_TMA
     for (int i = 0; i < t.num_inputs; i++) {
       for (int k = 0; k < MAX_TMA_DESC_PER_TENSOR; k++) {
-	input_tma_desc_ptrs[i][k] = t.inputs[i].tma_desc_ptrs[k];
+        input_tma_desc_ptrs[i][k] = t.inputs[i].tma_desc_ptrs[k];
       }
     }
     for (int i = 0; i < t.num_outputs; i++) {
       for (int k = 0; k < MAX_TMA_DESC_PER_TENSOR; k++) {
-	output_tma_desc_ptrs[i][k] = t.outputs[i].tma_desc_ptrs[k];
+        output_tma_desc_ptrs[i][k] = t.outputs[i].tma_desc_ptrs[k];
       }
     }
 #endif
@@ -162,8 +162,8 @@ struct alignas(16) TaskDesc {
   unsigned variant_id;
   EventId trigger_event;
   EventId dependent_event;
-  void* input_ptrs[MAX_INPUTS_PER_TASK];
-  void* output_ptrs[MAX_OUTPUTS_PER_TASK];
+  void *input_ptrs[MAX_INPUTS_PER_TASK];
+  void *output_ptrs[MAX_OUTPUTS_PER_TASK];
 #ifdef MPK_ENABLE_TMA
   void *input_tma_desc_ptrs[MAX_INPUTS_PER_TASK][MAX_TMA_DESC_PER_TENSOR];
   void *output_tma_desc_ptrs[MAX_INPUTS_PER_TASK][MAX_TMA_DESC_PER_TENSOR];

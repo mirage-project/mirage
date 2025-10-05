@@ -257,12 +257,12 @@ __device__ __forceinline__ bool
   *config.page_queue_head = page_queue_head;
   *config.page_queue_tail = page_queue_tail;
 
-  //printf("Next batch: steps[%d %d %d %d] num_active_tokens(%d)\n",
-  //       config.step[0],
-  //       config.step[1],
-  //       config.step[2],
-  //       config.step[3],
-  //       config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS]);
+  // printf("Next batch: steps[%d %d %d %d] num_active_tokens(%d)\n",
+  //        config.step[0],
+  //        config.step[1],
+  //        config.step[2],
+  //        config.step[3],
+  //        config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS]);
 
   if (num_tokens == 0) {
     return false;
@@ -399,7 +399,7 @@ __device__ __forceinline__ void persistent_checker(RuntimeConfig config) {
   assert(blockDim.x >= 128);
 }
 
-const int TASK_DESCS_BUFFER_LENGTH = 16;
+int const TASK_DESCS_BUFFER_LENGTH = 16;
 __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
   __shared__ TaskId task_ids[TASK_DESCS_BUFFER_LENGTH];
   __shared__ TaskDesc task_descs[TASK_DESCS_BUFFER_LENGTH];
@@ -416,12 +416,13 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
                 (threadIdx.x % 128 == 0));
 #endif
 
-  const int worker_id = blockIdx.x;
+  int const worker_id = blockIdx.x;
   worker_queues[0] = config.worker_queues[worker_id];
   worker_queue_ids[0] = worker_id;
   int num_worker_queues = 1;
   if (config.num_gpus > 1) {
-    worker_queues[num_worker_queues] = config.worker_queues[worker_id + config.num_workers];
+    worker_queues[num_worker_queues] =
+        config.worker_queues[worker_id + config.num_workers];
     worker_queue_ids[num_worker_queues] = worker_id + config.num_workers;
     num_worker_queues++;
   }
@@ -433,7 +434,7 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
     for (int i = 0; i < 2; i++) {
       last_task_pos[i] = 0;
     }
-    //num_loaded_tasks = 0;
+    // num_loaded_tasks = 0;
   }
 
   int queue_pos = 0, queue_len = 0;
@@ -446,13 +447,14 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
       int queue_idx = 0;
       if (threadIdx.x == 0) {
         while (next_task_pos[queue_idx] == last_task_pos[queue_idx]) {
-          last_task_pos[queue_idx] = ld_acquire_gpu_u64(
-              &config
-                   .worker_queue_last_ready_task_id[worker_queue_ids[queue_idx]]);
+          last_task_pos[queue_idx] =
+              ld_acquire_gpu_u64(&config.worker_queue_last_ready_task_id
+                                      [worker_queue_ids[queue_idx]]);
           if (next_task_pos[queue_idx] < last_task_pos[queue_idx]) {
             break;
           } else {
-            queue_idx = (queue_idx == num_worker_queues - 1) ? 0 : queue_idx + 1;
+            queue_idx =
+                (queue_idx == num_worker_queues - 1) ? 0 : queue_idx + 1;
           }
           // nanosleep to avoid overwhelming I/O
           __nanosleep(10);
@@ -461,7 +463,9 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
                last_task_pos[queue_idx]);
       }
       __syncthreads();
-      int num_loaded_tasks = min((int)(last_task_pos[queue_idx] - next_task_pos[queue_idx]), TASK_DESCS_BUFFER_LENGTH);
+      int num_loaded_tasks =
+          min((int)(last_task_pos[queue_idx] - next_task_pos[queue_idx]),
+              TASK_DESCS_BUFFER_LENGTH);
       // Load task ids
       if (threadIdx.x < num_loaded_tasks) {
         task_ids[threadIdx.x] = ld_relaxed_gpu_u64(
@@ -485,7 +489,8 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
               last_task_pos[1],
               get_task_position_index(task_ids[i]),
               config.all_tasks[get_task_position_index(task_ids[i])].task_type,
-              config.all_tasks[get_task_position_index(task_ids[i])].trigger_event);
+              config.all_tasks[get_task_position_index(task_ids[i])]
+                  .trigger_event);
         }
 #endif
         next_task_pos[queue_idx] += num_loaded_tasks;
@@ -493,11 +498,15 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
       // Load task descs
       static_assert(sizeof(TaskDesc) % 16 == 0);
       constexpr int TASK_SIZE = sizeof(TaskDesc) / 16; // 128b copy-async
-      for (int i = threadIdx.x; i < num_loaded_tasks * TASK_SIZE; i += blockDim.x) {
+      for (int i = threadIdx.x; i < num_loaded_tasks * TASK_SIZE;
+           i += blockDim.x) {
         int task_idx = i / TASK_SIZE;
         int offset = i % TASK_SIZE;
-        load_smem(reinterpret_cast<char*>(task_descs) + i * 16,
-                  reinterpret_cast<char*>(config.all_tasks + get_task_position_index(task_ids[task_idx])) + offset * 16);
+        load_smem(reinterpret_cast<char *>(task_descs) + i * 16,
+                  reinterpret_cast<char *>(
+                      config.all_tasks +
+                      get_task_position_index(task_ids[task_idx])) +
+                      offset * 16);
       }
       cp_async_fence();
       cp_async_wait<0>();
@@ -560,8 +569,8 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
           gpu_id);
     } else if (task_desc.task_type == TASK_REDUCE) {
       // Currently support 2D reduction, buffer has an extra world_size dim
-      //assert(task_desc.inputs[0].num_dims == 2);
-      //assert(task_desc.inputs[1].num_dims == 3);
+      // assert(task_desc.inputs[0].num_dims == 2);
+      // assert(task_desc.inputs[1].num_dims == 3);
       kernel::reduction_kernel<bfloat16>(task_desc->input_ptrs[0],
                                          task_desc->input_ptrs[1],
                                          task_desc->output_ptrs[0],
@@ -574,7 +583,8 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
     } else {
 #ifdef MPK_ENABLE_VERBOSE
       if (threadIdx.x == 0 && blockIdx.x == 0) {
-        printf("[worker] _execute_task EXECUTE_TASK %d\n", task_desc->task_type);
+        printf("[worker] _execute_task EXECUTE_TASK %d\n",
+               task_desc->task_type);
       }
 #endif
       _execute_task(task_desc, config);
@@ -680,7 +690,8 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
 }
 
 // need to alter as there is only one warp per block
-__device__ __forceinline__ void execute_scheduler(RuntimeConfig config, int offset) {
+__device__ __forceinline__ void execute_scheduler(RuntimeConfig config,
+                                                  int offset) {
   int num_schedulers =
       config.num_local_schedulers + config.num_remote_schedulers;
   int warp_thread_id = threadIdx.x % 32;
@@ -1053,7 +1064,7 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
   std::vector<TaskId> first_tasks;
   _init_persistent_kernel(all_fulltasks, all_events, first_tasks, npes, mype);
   std::vector<TaskDesc> all_tasks;
-  for (const auto & ft : all_fulltasks) {
+  for (auto const &ft : all_fulltasks) {
     TaskDesc task_desc(ft);
     all_tasks.push_back(task_desc);
   }

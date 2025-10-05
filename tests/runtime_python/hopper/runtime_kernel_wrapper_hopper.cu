@@ -666,10 +666,10 @@ void linear_swapAB_kernel(torch::Tensor input,
 
 //   printf("===============================\n");
 
-  PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("linear", &linear_kernel, "Linear kernel");
-    m.def("norm_linear", &norm_linear_kernel, "NormLinear kernel");
-    m.def("multitoken_paged_attention",
-          &multitoken_paged_attention_hopper,
-          "Multitoken paged attention for Grace Hopper GPU");
-  }
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  m.def("linear", &linear_kernel, "Linear kernel");
+  m.def("norm_linear", &norm_linear_kernel, "NormLinear kernel");
+  m.def("multitoken_paged_attention",
+        &multitoken_paged_attention_hopper,
+        "Multitoken paged attention for Grace Hopper GPU");
+}
