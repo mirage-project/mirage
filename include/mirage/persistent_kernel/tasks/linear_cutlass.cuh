@@ -108,7 +108,6 @@ __device__ __noinline__ void linear_kernel(void const *input_ptr,
   // constexpr int n = Config::OUTPUT_SIZE;
   // constexpr int k = Config::REDUCTION_SIZE;
 
-
   extern __shared__ char smem[];
   // Align the shared memory to 128 bytes
   T *shm_data = (T *)((reinterpret_cast<uintptr_t>(smem) + 127) / 128 * 128);

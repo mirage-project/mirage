@@ -34,8 +34,9 @@ template <typename T>
 __device__ __forceinline__ void block_reduce_max_idx(T &val, long long &idx) {
   // Align the shared memory to 128 bytes
   extern __shared__ char smem[];
-  long long *smem_idxs = (long long *)((reinterpret_cast<uintptr_t>(smem) + 127) / 128 * 128);
-  T *smem_vals = reinterpret_cast<T*>(smem_idxs + 32); // max 32 warps
+  long long *smem_idxs =
+      (long long *)((reinterpret_cast<uintptr_t>(smem) + 127) / 128 * 128);
+  T *smem_vals = reinterpret_cast<T *>(smem_idxs + 32); // max 32 warps
 
   warp_reduce_max_idx(val, idx);
 
