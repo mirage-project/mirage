@@ -709,7 +709,7 @@ int TaskRegister::register_linear_hopper_task(threadblock::Graph const &bgraph,
   constexpr int S = 3;
   constexpr int TMA_CP_ASYNC_SIZE = 64;
   constexpr int TILE_SIZE = 128;
-  constexpr int Kstages = 2;
+  int const Kstages = output_size >= 256 ? 3 : 6;
   int const SMEM_M_SIZE = batch_size;
   // int const SMEM_M_SIZE = 64;
   int const output_tma_cp_size = output_size < 64 ? output_size : 64;

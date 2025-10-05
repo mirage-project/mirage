@@ -115,7 +115,8 @@ if __name__ == "__main__":
             model = Qwen3ForCausalLM.from_pretrained(model_name, world_size=1, max_num_pages=args.max_num_pages, page_size=args.page_size).to("cuda")
             tokenizer = AutoTokenizer.from_pretrained(model_name)
 
-    total_num_requests = 4
+    # total_num_requests = 4
+    total_num_requests = args.max_num_batched_requests
     # get all model weight tensors
     tokens = torch.full((total_num_requests, args.max_seq_length), 0, dtype=torch.long, device="cuda")
 
@@ -370,7 +371,7 @@ if __name__ == "__main__":
                 spec_decode_config = spec_decode_config, 
                 tokens = all_tokens,
                 grid_dim=(96, 1, 1),
-                block_dim=(128, 1, 1),
+                block_dim=(256, 1, 1),
             )
             x = spec_tokens
         # Add Embed
@@ -384,7 +385,7 @@ if __name__ == "__main__":
             output=y, 
             # grid_dim=(max_factor_leq_n(hidden_size, 96 // args.max_num_batched_tokens), total_tokens_per_iter, 1), 
             grid_dim=(1, 1, 1), 
-            block_dim=(128, 1, 1),
+            block_dim=(256, 1, 1),
             input_source=1,
         )
         x = y
@@ -416,14 +417,15 @@ if __name__ == "__main__":
                 weight=w_norm,
                 output=rmsnorm_out,
                 grid_dim=(mpk.max_num_batched_tokens, 1, 1),
-                block_dim=(128, 1, 1),
+                block_dim=(256, 1, 1),
             )
             mpk.linear_layer(
                 input=rmsnorm_out,
                 weight=w_qkv,
                 output=attn_in,
-                grid_dim=(grid_for_rmsnorm_linear_layer(w_qkv.dim(0)), 1, 1),
-                block_dim=(128, 1, 1),
+                # grid_dim=(grid_for_rmsnorm_linear_layer(w_qkv.dim(0)), 1, 1),
+                grid_dim=(w_qkv.dim(0) // 64, 1, 1),
+                block_dim=(256, 1, 1),
             )
             #mpk.rmsnorm_linear_layer(
             #    input=x,
@@ -431,7 +433,7 @@ if __name__ == "__main__":
             #    weight_linear=w_qkv,
             #    output=attn_in,
             #    grid_dim=(grid_for_rmsnorm_linear_layer(w_qkv.dim(0)), 1, 1),
-            #    block_dim=(128, 1, 1),
+            #    block_dim=(256, 1, 1),
             #)
             # add attention
             w_q_norm = mpk.attach_input(
@@ -458,7 +460,7 @@ if __name__ == "__main__":
                     sin_pos_embed=sin_pos_embed,
                     output=attn_out,
                     grid_dim=(1, num_local_kv_heads, 1), #TODO: further divide across batch dim
-                    block_dim=(128, 1, 1),
+                    block_dim=(256, 1, 1),
                 )
             else:
                 mpk.paged_attention_layer(
@@ -471,7 +473,7 @@ if __name__ == "__main__":
                     sin_pos_embed=sin_pos_embed,
                     output=attn_out,
                     grid_dim=(mpk.max_num_batched_requests, num_local_kv_heads, 1),
-                    block_dim=(128, 1, 1),
+                    block_dim=(256, 1, 1),
                 )
             # add linear w/ residual
             w = mpk.attach_input(
@@ -483,8 +485,9 @@ if __name__ == "__main__":
                 weight=w,
                 residual=x,
                 output=attn_proj_out,
-                grid_dim=(hidden_size // 128, 1, 1),
-                block_dim=(128, 1, 1),
+                # grid_dim=(hidden_size // 128, 1, 1),
+                grid_dim=(hidden_size // 64, 1, 1),
+                block_dim=(256, 1, 1),
             )
             # reset residual input as x
             x = attn_proj_out
@@ -495,7 +498,7 @@ if __name__ == "__main__":
                     buffer=allreduce_buf,
                     output=attn_allreduce_out,
                     grid_dim=(hidden_size // 64, 1, 1),
-                    block_dim=(128, 1, 1),
+                    block_dim=(256, 1, 1),
                 )
                 x = attn_allreduce_out
             # add rmsnorm_linear layer
@@ -521,13 +524,14 @@ if __name__ == "__main__":
                 weight=w_norm,
                 output=rmsnorm_out,
                 grid_dim=(mpk.max_num_batched_tokens, 1, 1),
-                block_dim=(128, 1, 1),
+                block_dim=(256, 1, 1),
             )
             mpk.linear_layer(
                 input=rmsnorm_out,
                 weight=w_gatedup,
                 output=mlp_mid,
-                grid_dim=(rmsnorm_num_tasks, 1, 1),
+                # grid_dim=(rmsnorm_num_tasks, 1, 1),
+                grid_dim=((w_gate_proj.dim(0) + w_up_proj.dim(0)) // 64, 1, 1),
                 block_dim=(256, 1, 1),
             )
             #mpk.rmsnorm_linear_layer(
@@ -536,13 +540,13 @@ if __name__ == "__main__":
             #    weight_linear=w_gatedup,
             #    output=mlp_mid,
             #    grid_dim=(rmsnorm_num_tasks, 1, 1),
-            #    block_dim=(128, 1, 1),
+            #    block_dim=(256, 1, 1),
             #)
             mpk.silu_mul_layer(
                 input=mlp_mid,
                 output=silu_mul_out,
                 grid_dim=(rmsnorm_num_tasks//2, 1, 1),
-                block_dim=(128, 1, 1),
+                block_dim=(256, 1, 1),
             )
             # add silu_mul_linear layer
             w = mpk.attach_input(
@@ -553,8 +557,9 @@ if __name__ == "__main__":
                 weight=w,
                 residual=x,
                 output=mlp_out,
-                grid_dim=(hidden_size // 128, 1, 1),
-                block_dim=(128, 1, 1),
+                # grid_dim=(hidden_size // 128, 1, 1),
+                grid_dim=(hidden_size // 64, 1, 1),
+                block_dim=(256, 1, 1),
             )
             # reset residual input as x
             x = mlp_out
@@ -564,7 +569,7 @@ if __name__ == "__main__":
                     buffer=allreduce_buf,
                     output=mlp_final,
                     grid_dim=(hidden_size // 64, 1, 1),
-                    block_dim=(128, 1, 1),
+                    block_dim=(256, 1, 1),
                 )
                 x = mlp_final
 
@@ -578,14 +583,14 @@ if __name__ == "__main__":
             weight=w_norm,
             output=rmsnorm_out_2,
             grid_dim=(mpk.max_num_batched_tokens, 1, 1),
-            block_dim=(128, 1, 1),
+            block_dim=(256, 1, 1),
         )
         mpk.linear_layer(
             input=rmsnorm_out_2,
             weight=w_proj,
             output=argmax_in,
-            grid_dim=(75, 1, 1),
-            block_dim=(128, 1, 1),
+            grid_dim=(vocab_size // 256, 1, 1),
+            block_dim=(256, 1, 1),
         )
         # mpk.rmsnorm_linear_layer(
         #     input=x,
@@ -593,7 +598,7 @@ if __name__ == "__main__":
         #     weight_linear=w_proj,
         #     output=argmax_in,
         #     grid_dim=(grid_for_rmsnorm_linear_layer(w_proj.dim(0)), 1, 1),
-        #     block_dim=(128, 1, 1),
+        #     block_dim=(256, 1, 1),
         # )
         # add argmax layer
         if spec_decode_config and spec_decode_config.method == "promptlookup":
@@ -608,13 +613,13 @@ if __name__ == "__main__":
             input=argmax_in,
             output=(argmax_part_value, argmax_part_index),
             grid_dim=argmax_partial_grid_dim,
-            block_dim=(128, 1, 1),
+            block_dim=(256, 1, 1),
         )
         mpk.argmax_reduce_layer(
             input=(argmax_part_value, argmax_part_index),
             output=argmax_out,
             grid_dim=argmax_reduce_grid_dim,
-            block_dim=(128, 1, 1),
+            block_dim=(256, 1, 1),
         )
         if spec_decode_config:
             verify_out = mpk.verify_layer_dispatcher(
