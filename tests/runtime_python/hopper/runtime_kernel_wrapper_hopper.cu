@@ -1305,11 +1305,93 @@ void linear_kernel(torch::Tensor input,
 
 //   printf("===============================\n");
 
+//   delete[] iteration_times;
+//   cudaEventDestroy(start);
+//   cudaEventDestroy(stop);
+// #endif
+// }
+
+// void multitoken_paged_attention_hopper(
+//     torch::Tensor qkv,
+//     torch::Tensor paged_k_cache,
+//     torch::Tensor paged_v_cache,
+//     torch::Tensor output,
+//     torch::Tensor qo_indptr_buffer,
+//     torch::Tensor paged_kv_indptr_buffer,
+//     torch::Tensor paged_kv_indices_buffer,
+//     torch::Tensor paged_kv_last_page_len_buffer,
+//     int request_id,
+//     bool qk_norm,
+//     bool rope,
+//     torch::optional<torch::Tensor> q_norm_weight = torch::nullopt,
+//     torch::optional<torch::Tensor> k_norm_weight = torch::nullopt,
+//     torch::optional<torch::Tensor> cos = torch::nullopt,
+//     torch::optional<torch::Tensor> sin = torch::nullopt,
+//     float q_eps = 0.0f,
+//     float k_eps = 0.0f) {
+//   void *qkv_ptr = qkv.data_ptr();
+//   void *paged_k_cache_ptr = paged_k_cache.data_ptr();
+//   void *paged_v_cache_ptr = paged_v_cache.data_ptr();
+//   void *output_ptr = output.data_ptr();
+//   int const *qo_indptr_buffer_ptr = qo_indptr_buffer.data_ptr<int>();
+//   int const *paged_kv_indptr_buffer_ptr =
+//       paged_kv_indptr_buffer.data_ptr<int>();
+//   int const *paged_kv_indices_buffer_ptr =
+//       paged_kv_indices_buffer.data_ptr<int>();
+//   int const *paged_kv_last_page_len_buffer_ptr =
+//       paged_kv_last_page_len_buffer.data_ptr<int>();
+
+//   void const *q_norm_weight_ptr = qk_norm ? q_norm_weight->data_ptr() :
+//   nullptr; void const *k_norm_weight_ptr = qk_norm ?
+//   k_norm_weight->data_ptr() : nullptr; void const *cos_ptr = rope ?
+//   cos->data_ptr() : nullptr; void const *sin_ptr = rope ? sin->data_ptr() :
+//   nullptr; int const qo_heads = 4; int const kv_heads = 1; int const head_dim
+//   = 128; int const qkv_stride = (qo_heads + 2 * kv_heads) * head_dim;
+//   assert(qkv_stride == qkv.stride(0));
+//   int const kv_stride = head_dim * kv_heads;
+//   assert(kv_stride == paged_k_cache.stride(1));
+//   int const o_stride = head_dim * qo_heads;
+//   int const page_size = 4096;
+//   int const max_seq_len = 512;
+
+//   launch_multitoken_paged_attention_hopper<bfloat16,
+//                                            qo_heads,
+//                                            kv_heads,
+//                                            kv_stride,
+//                                            qkv_stride,
+//                                            o_stride,
+//                                            head_dim,
+//                                            max_seq_len,
+//                                            page_size>(
+//       qkv_ptr,
+//       paged_k_cache_ptr,
+//       paged_v_cache_ptr,
+//       output_ptr,
+//       qo_indptr_buffer_ptr,
+//       paged_kv_indptr_buffer_ptr,
+//       paged_kv_indices_buffer_ptr,
+//       paged_kv_last_page_len_buffer_ptr,
+//       request_id,
+//       qk_norm,
+//       rope,
+//       q_norm_weight_ptr,
+//       k_norm_weight_ptr,
+//       cos_ptr,
+//       sin_ptr,
+//       q_eps,
+//       k_eps);
+
+//   cudaError_t err = cudaDeviceSynchronize();
+//   if (err != cudaSuccess) {
+//     printf("CUDA kernel launch error: %s\n", cudaGetErrorString(err));
+//   }
+// }
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("linear", &linear_kernel, "Linear kernel");
-  m.def("norm_linear", &norm_linear_kernel, "NormLinear kernel");
-  m.def("multitoken_paged_attention",
-        &multitoken_paged_attention_hopper,
-        "Multitoken paged attention for Grace Hopper GPU");
+  m.def("linear_swapAB", &linear_swapAB_kernel, "Linear swapAB kernel");
+  // m.def("norm_linear", &norm_linear_kernel, "NormLinear kernel");
+  // m.def("multitoken_paged_attention",
+  //       &multitoken_paged_attention_hopper,
+  //       "Multitoken paged attention for Grace Hopper GPU");
 }
-
