@@ -399,10 +399,17 @@ __device__ __forceinline__ void persistent_checker(RuntimeConfig config) {
   assert(blockDim.x >= 128);
 }
 
-int const TASK_DESCS_BUFFER_LENGTH = 16;
 __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
-  __shared__ TaskId task_ids[TASK_DESCS_BUFFER_LENGTH];
+  // Make sure overall smem usage here do not exceed 3KB
+  // last_task_pos: 2 * 8 = 16 B
+  // next_task_pos: 2 * 8 = 16 B
+  // worker_queue_ids: 2 * 4 = 8 B
+  // worker_queues: 2 * 8 = 16 B
+  // remaining: 3016 B
+  constexpr int TASK_DESCS_BUFFER_LENGTH =
+      std::min(3016 / (int)(sizeof(TaskDesc) + sizeof(TaskId)), 16);
   __shared__ TaskDesc task_descs[TASK_DESCS_BUFFER_LENGTH];
+  __shared__ TaskId task_ids[TASK_DESCS_BUFFER_LENGTH];
   __shared__ TaskId *worker_queues[2];
   __shared__ int worker_queue_ids[2];
   __shared__ size_t next_task_pos[2];
