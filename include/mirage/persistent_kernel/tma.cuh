@@ -247,7 +247,7 @@ __host__ static inline void fill_tma_desc(CUtensorMap *tma_desc,
 }
 
 __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
-                                           TaskDesc const &task_desc,
+                                           FullTaskDesc const &task_desc,
                                            TensorDesc const &tensor_desc,
                                            size_t param_id,
                                            size_t tma_desc_id = 0) {
@@ -569,7 +569,7 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
 
 // create the tma descs for each tensor, some tensors may have multiple tma
 // descs
-__host__ inline void create_tma_desc_for_tensor(TaskDesc &task_desc,
+__host__ inline void create_tma_desc_for_tensor(FullTaskDesc &task_desc,
                                                 TensorDesc &tensor_desc,
                                                 size_t param_id,
                                                 size_t tma_desc_id) {
@@ -585,7 +585,7 @@ __host__ inline void create_tma_desc_for_tensor(TaskDesc &task_desc,
   tensor_desc.tma_desc_ptrs[tma_desc_id] = desc_ptr;
 }
 
-__host__ inline void create_tma_desc_by_task(TaskDesc &task_desc) {
+__host__ inline void create_tma_desc_by_task(FullTaskDesc &task_desc) {
   switch (task_desc.task_type) {
     case TASK_LINEAR_HOPPER:
     case TASK_LINEAR_WITH_RESIDUAL_HOPPER:

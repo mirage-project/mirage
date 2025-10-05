@@ -977,7 +977,7 @@ int TaskRegister::register_paged_attention_hopper_task(
          "tma_paged_k_cache(static_cast<CUtensorMap*>(task_desc->input_tma_"
          "desc_ptrs[1][0]));");
   code.e("TMA_PAGED_KV_CACHE "
-         "tma_paged_k_cache(static_cast<CUtensorMap*>(task_desc->input_tma_"
+         "tma_paged_v_cache(static_cast<CUtensorMap*>(task_desc->input_tma_"
          "desc_ptrs[2][0]));");
 
   code.e("TMA_OUTPUT "
