@@ -326,7 +326,7 @@ class Qwen3Attention(nn.Module):
                 True
             )
 
-        attn_output = attn_output.reshape(bsz, q_len, self.local_qkv_size)
+        attn_output = attn_output.reshape(bsz, q_len, self.num_heads * self.head_dim)
 
         attn_output = self.o_proj(attn_output)
         if self.world_size > 1:
@@ -412,7 +412,7 @@ class Qwen3PreTrainedModel(PreTrainedModel):
 
 
 class Qwen3Model(Qwen3PreTrainedModel):
-    def __init__(self, config: Qwen3Config, world_size: int, max_num_pages: int, page_size: int):
+    def __init__(self, config: Qwen3Config, world_size: int, max_num_pages: int, page_size: int, max_num_batched_requests: int = 4):
         super().__init__(config)
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
@@ -460,7 +460,7 @@ class Qwen3Model(Qwen3PreTrainedModel):
         # Initialize weights and apply final processing
         self.post_init()
 
-        self.kv_last_page_len = torch.tensor([0], dtype=torch.int32, device="cuda")
+        self.kv_last_page_len = torch.zeros(max_num_batched_requests, dtype=torch.int32, device="cuda")
 
     def get_input_embeddings(self):
         return self.embed_tokens
@@ -505,9 +505,9 @@ class Qwen3Model(Qwen3PreTrainedModel):
 
 class Qwen3ForCausalLM(Qwen3PreTrainedModel, GenerationMixin):
 
-    def __init__(self, config, world_size, max_num_pages, page_size):
+    def __init__(self, config, world_size, max_num_pages, page_size, max_num_batched_requests=4):
         super().__init__(config)
-        self.model = Qwen3Model(config, world_size, max_num_pages, page_size)
+        self.model = Qwen3Model(config, world_size, max_num_pages, page_size, max_num_batched_requests)
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         # Initialize weights and apply final processing
