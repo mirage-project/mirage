@@ -237,23 +237,31 @@ def parse_onnx_model(model, unique_operators):
         #     return
         
         if op.fn == "MatMul":
-            batch_dims = succ_shape[:-2]
-            left_shape = batch_dims + op.input_tensor_shapes[0][-2:]
+            succ_shape_tuple, _ = succ_shape  # Extract shape, ignore tensor_id
+            batch_dims = succ_shape_tuple[:-2]
+            
+            left_old_shape, left_tensor_id = op.input_tensor_shapes[0]
+            left_shape = (batch_dims + left_old_shape[-2:], left_tensor_id)
             op.input_tensor_shapes[0] = left_shape
             backward(op.input_ops[0], left_shape)
 
-            right_shape = batch_dims + op.input_tensor_shapes[1][-2:]
+            right_old_shape, right_tensor_id = op.input_tensor_shapes[1]
+            right_shape = (batch_dims + right_old_shape[-2:], right_tensor_id)
             op.input_tensor_shapes[1] = right_shape
             backward(op.input_ops[1], right_shape)
         else:
+            new_shape, _ = succ_shape  # Extract shape, ignore tensor_id
             for i in range(len(op.input_tensor_shapes)):
-                op.input_tensor_shapes[i] = succ_shape
+                _, tensor_id = op.input_tensor_shapes[i]
+                op.input_tensor_shapes[i] = (new_shape, tensor_id)
             op.output_tensor_shapes[0] = succ_shape
             
             for pred in op.input_ops:
                 # since we must have visited this node before during topological traversal,
                 # we know what the input and output shapes are the same
-                backward(pred, succ_shape)
+                # Propagate with predecessor's own output (preserving its tensor_id)
+                if pred.output_tensor_shapes:
+                    backward(pred, pred.output_tensor_shapes[0])
 
     for node in model.graph.node: # ensure topological order
         op = operators[node.name]
