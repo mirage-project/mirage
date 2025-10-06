@@ -407,10 +407,10 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
   // worker_queues: 2 * 8 = 16 B
   // remaining: 3016 B
 
-  constexpr int TASK_DESCS_BUFFER_LENGTH =
-      std::min((mirage::runtime::PRELOADING_BUFFER_SHARED_MEMORY - 56) /
-                   (int)(sizeof(TaskDesc) + sizeof(TaskId)),
-               16);
+  constexpr int TASK_DESCS_BUFFER_LENGTH = std::min(
+      (mirage::runtime::WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE - 56) /
+          (int)(sizeof(TaskDesc) + sizeof(TaskId)),
+      16);
   __shared__ TaskDesc task_descs[TASK_DESCS_BUFFER_LENGTH];
   __shared__ TaskId task_ids[TASK_DESCS_BUFFER_LENGTH];
   __shared__ TaskId *worker_queues[2];
@@ -1210,10 +1210,10 @@ extern "C" void launch_persistent_kernel() {
     // Launcher worker & scheduler kernel
     cudaFuncSetAttribute(worker_kernel,
                          cudaFuncAttributeMaxDynamicSharedMemorySize,
-                         MAX_SHARE_MEMORY_SIZE);
+                         MAX_DYNAMIC_SHARED_MEMORY_SIZE);
     cudaFuncSetAttribute(scheduler_kernel,
                          cudaFuncAttributeMaxDynamicSharedMemorySize,
-                         MAX_SHARE_MEMORY_SIZE);
+                         MAX_DYNAMIC_SHARED_MEMORY_SIZE);
 
     cudaStream_t worker_stream, scheduler_stream;
     cudaStreamCreate(&worker_stream);
@@ -1224,7 +1224,7 @@ extern "C" void launch_persistent_kernel() {
     // the interaction between the worker kernel and the scheduler kernel
     worker_kernel<<<dim3(global_runtime_config.num_workers, 1, 1),
                     dim3(WORKER_THREADS, 1, 1),
-                    MAX_SHARE_MEMORY_SIZE /*smem*/,
+                    MAX_DYNAMIC_SHARED_MEMORY_SIZE /*smem*/,
                     worker_stream>>>(global_runtime_config);
 
     scheduler_kernel<<<dim3(global_runtime_config.num_local_schedulers, 1, 1),
@@ -1246,19 +1246,19 @@ extern "C" void launch_persistent_kernel() {
     // Launcher persistent kernel
     cudaFuncSetAttribute(persistent_kernel,
                          cudaFuncAttributeMaxDynamicSharedMemorySize,
-                         MAX_SHARE_MEMORY_SIZE);
+                         MAX_DYNAMIC_SHARED_MEMORY_SIZE);
 #ifdef USE_NVSHMEM
     void *args[] = {&global_runtime_config};
     nvshmemx_collective_launch((void const *)persistent_kernel,
                                dim3(sm_count, 1, 1),
                                dim3(SINGLE_KERNEL_THREADS, 1, 1),
                                args,
-                               MAX_SHARE_MEMORY_SIZE /*sharedmem*/,
+                               MAX_DYNAMIC_SHARED_MEMORY_SIZE /*sharedmem*/,
                                0 /*stream*/);
 #else
     persistent_kernel<<<dim3(sm_count, 1, 1),
                         dim3(SINGLE_KERNEL_THREADS, 1, 1),
-                        MAX_SHARE_MEMORY_SIZE /*smem*/>>>(
+                        MAX_DYNAMIC_SHARED_MEMORY_SIZE /*smem*/>>>(
         global_runtime_config);
 #endif
     cudaError_t err = cudaDeviceSynchronize();

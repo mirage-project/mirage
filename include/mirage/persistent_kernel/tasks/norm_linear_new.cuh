@@ -43,11 +43,11 @@ __device__ __forceinline__ void
   constexpr int CHUNK_SIZE = 16 / sizeof(T);
 
   constexpr int TILE_SIZE = 128;
-  static constexpr int MAX_OUTPUT_ATOM_SIZE =
-      max_power_of_two_le((mirage::runtime::MAX_SHARE_MEMORY_SIZE / sizeof(T) -
-                           ((REDUCTION_SIZE + 2 * TILE_SIZE + 1) * BATCH_SIZE +
-                            REDUCTION_SIZE + 8)) /
-                          (K_PIPE_MAX * TILE_SIZE + 5 * BATCH_SIZE));
+  static constexpr int MAX_OUTPUT_ATOM_SIZE = max_power_of_two_le(
+      (mirage::runtime::MAX_DYNAMIC_SHARED_MEMORY_SIZE / sizeof(T) -
+       ((REDUCTION_SIZE + 2 * TILE_SIZE + 1) * BATCH_SIZE + REDUCTION_SIZE +
+        8)) /
+      (K_PIPE_MAX * TILE_SIZE + 5 * BATCH_SIZE));
   constexpr int OUTPUT_LIMIT = OUTPUT_SIZE <= 128 ? OUTPUT_SIZE : 128;
   constexpr int OUTPUT_ATOM_SIZE = OUTPUT_LIMIT <= MAX_OUTPUT_ATOM_SIZE
                                        ? OUTPUT_LIMIT

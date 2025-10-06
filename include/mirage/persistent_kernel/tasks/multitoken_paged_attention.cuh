@@ -187,7 +187,8 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl(
   constexpr size_t S_O_BUFFER_SIZE =
       sizeof(float) * MMA_ITERS_M * NUM_THREADS * 64;
   constexpr size_t S_TOTAL_OFFSET = S_O_BUFFER_OFFSET + S_O_BUFFER_SIZE;
-  static_assert(S_TOTAL_OFFSET <= mirage::runtime::MAX_SHARE_MEMORY_SIZE);
+  static_assert(S_TOTAL_OFFSET <=
+                mirage::runtime::MAX_DYNAMIC_SHARED_MEMORY_SIZE);
 
   extern __shared__ char smem[];
 
