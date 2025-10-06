@@ -424,6 +424,7 @@ if __name__ == "__main__":
                 weight=w_qkv,
                 output=attn_in,
                 # grid_dim=(grid_for_rmsnorm_linear_layer(w_qkv.dim(0)), 1, 1),
+                # TODO: may worth trying other partition optimization for larger batches
                 grid_dim=(w_qkv.dim(0) // 64, 1, 1),
                 block_dim=(256, 1, 1),
             )

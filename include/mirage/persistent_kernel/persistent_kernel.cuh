@@ -406,8 +406,11 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
   // worker_queue_ids: 2 * 4 = 8 B
   // worker_queues: 2 * 8 = 16 B
   // remaining: 3016 B
+
   constexpr int TASK_DESCS_BUFFER_LENGTH =
-      std::min(3016 / (int)(sizeof(TaskDesc) + sizeof(TaskId)), 16);
+      std::min((mirage::runtime::PRELOADING_BUFFER_SHARED_MEMORY - 56) /
+                   (int)(sizeof(TaskDesc) + sizeof(TaskId)),
+               16);
   __shared__ TaskDesc task_descs[TASK_DESCS_BUFFER_LENGTH];
   __shared__ TaskId task_ids[TASK_DESCS_BUFFER_LENGTH];
   __shared__ TaskId *worker_queues[2];
@@ -420,7 +423,7 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
   PROFILER_INIT(static_cast<uint64_t *>(config.profiler_buffer),
                 0,
                 1,
-                (threadIdx.x % 128 == 0));
+                (threadIdx.x % WORKER_THREADS == 0));
 #endif
 
   int const worker_id = blockIdx.x;

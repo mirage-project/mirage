@@ -20,14 +20,24 @@
 namespace mirage {
 namespace runtime {
 
-#if MPK_TARGET_CC >= 90
-constexpr int MAX_SHARE_MEMORY_SIZE = 224 * 1024;
-#elif MPK_TARGET_CC >= 86
-constexpr int MAX_SHARE_MEMORY_SIZE = 96 * 1024;
-#elif MPK_TARGET_CC >= 80
-constexpr int MAX_SHARE_MEMORY_SIZE = 160 * 1024;
+#if defined(MIRAGE_GRACE_HOPPER)
+constexpr int PRELOADING_BUFFER_SHARED_MEMORY = 9 * 1024;
 #else
-constexpr int MAX_SHARE_MEMORY_SIZE = 160 * 1024;
+constexpr int PRELOADING_BUFFER_SHARED_MEMORY = 3 * 1024;
+#endif
+
+#if MPK_TARGET_CC >= 90
+constexpr int MAX_SHARE_MEMORY_SIZE =
+    224 * 1024 - PRELOADING_BUFFER_SHARED_MEMORY;
+#elif MPK_TARGET_CC >= 86
+constexpr int MAX_SHARE_MEMORY_SIZE =
+    96 * 1024 - PRELOADING_BUFFER_SHARED_MEMORY;
+#elif MPK_TARGET_CC >= 80
+constexpr int MAX_SHARE_MEMORY_SIZE =
+    160 * 1024 - PRELOADING_BUFFER_SHARED_MEMORY;
+#else
+constexpr int MAX_SHARE_MEMORY_SIZE =
+    160 * 1024 - PRELOADING_BUFFER_SHARED_MEMORY;
 #endif
 
 typedef unsigned long long int TaskId;
