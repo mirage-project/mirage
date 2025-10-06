@@ -1257,9 +1257,9 @@ int TaskRegister::register_linear_sm100_task(threadblock::Graph const &bgraph,
   code.inc_indent();
   // define MMA
   constexpr int MMA_M = 128;
-  constexpr int MMA_N = 32;
+  constexpr int MMA_N = 16;
   constexpr int bM = 128;
-  constexpr int bN = 32;
+  constexpr int bN = MMA_N;
   constexpr int bK = 64;
   constexpr int num_ab_stages = 8;
   constexpr int num_acc_stages = 2;

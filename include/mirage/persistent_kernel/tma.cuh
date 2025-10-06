@@ -571,7 +571,7 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
       constexpr int M = 3;
       constexpr int S = 3;
       constexpr int MMA_M = 128;
-      constexpr int MMA_N = 32;
+      constexpr int MMA_N = 16;
       constexpr int output_atom_size = 64;
 
       if (param_id == 0) {
