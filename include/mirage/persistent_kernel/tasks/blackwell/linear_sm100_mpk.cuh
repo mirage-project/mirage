@@ -138,13 +138,10 @@ template <typename T_,
     //     cute::print("sC_layout:\t"); cute::print(sC_layout); cute::print("\n"); // sC_layout:   ArithTuple(_0,0) o ((_32,_128),_1,_1,4):((_1@1,_1@0),_0,_128@0,_4@0)
     // } __syncthreads();
 
-    // tma_2d const params
-    constexpr int SMEM_M_SIZE = 32;
-
     using SharedStorage = PipedSharedStorage<T_, T_, T_, decltype(sA_layout), decltype(sB_layout), decltype(sC_layout), NUM_AB_STAGE, NUM_ACC_STAGE>;
 
     extern __shared__ char shared_memory[];
-    uintptr_t aligned_smem = (reinterpret_cast<uintptr_t>(shared_memory) + 1023) / 1024 * 1024;
+    uintptr_t aligned_smem = (reinterpret_cast<uintptr_t>(shared_memory) + 127) / 128 * 128;
     SharedStorage& shared_storage = *reinterpret_cast<SharedStorage*>(aligned_smem);
 
     // Initialize the barriers in shared memory
@@ -185,8 +182,9 @@ template <typename T_,
     //   cute::print("sC_epi:\t"); cute::print(sC_epi); cute::print("\n");
     // } __syncthreads();
 
-    int tma_trans_bytes_A = sizeof(T_) * cute::size<1>(mma_tiler) * cute::size<2>(mma_tiler);
-    int tma_trans_bytes_B = sizeof(T_) * cute::size<0>(mma_tiler) * cute::size<2>(mma_tiler);
+    // int tma_trans_bytes_A = sizeof(T_) * cute::size<1>(mma_tiler) * cute::size<2>(mma_tiler);
+    // int tma_trans_bytes_B = sizeof(T_) * cute::size<0>(mma_tiler) * cute::size<2>(mma_tiler);
+    int tma_transaction_bytes = sizeof(T_) * cute::size<1>(mma_tiler) * cute::size<2>(mma_tiler) + sizeof(T_) * cute::size<0>(mma_tiler) * cute::size<2>(mma_tiler);
 
     constexpr int TILE_SIZE = 64;
     constexpr int INPUT_TMA_TILE_SIZE = 64;
@@ -312,10 +310,11 @@ template <typename T_,
               int tma_coords_A[2] = {k_tile * TILE_SIZE, m_tile * OUTPUT_ATOM_SIZE};
               int tma_coords_B[2] = {k_tile * TILE_SIZE, n_tile * INPUT_TMA_TILE_SIZE};
               input_weight_smem.set_ptr(shared_weight + smem_wr_buffer * OUTPUT_ATOM_SIZE * TILE_SIZE);
-              input_smem.set_ptr(shared_input + smem_wr_buffer * SMEM_M_SIZE * TILE_SIZE);
-              set_barrier_transaction_bytes(ab_full_mbar_ptr[smem_wr_buffer], tma_trans_bytes_A + tma_trans_bytes_B);
-              tma_a.tma_cp_async(ab_full_mbar_ptr[smem_wr_buffer], input_weight_smem(0, 0), tma_coords_A);
-              tma_b.tma_cp_async(ab_full_mbar_ptr[smem_wr_buffer], input_smem(0, 0), tma_coords_B);
+              input_smem.set_ptr(shared_input + smem_wr_buffer * MMA_N * TILE_SIZE);
+              cute::set_barrier_transaction_bytes(shared_storage.ab_full_mbar_ptr[smem_wr_buffer], tma_transaction_bytes);
+              // set_barrier_transaction_bytes(ab_full_mbar_ptr[smem_wr_buffer], tma_transaction_bytes);
+              tma_a.tma_cp_async(ab_full_mbar_ptr[smem_wr_buffer], input_weight_smem.base_ptr, tma_coords_A);
+              tma_b.tma_cp_async(ab_full_mbar_ptr[smem_wr_buffer], input_smem.base_ptr, tma_coords_B);
             }
 
             if (tma_wr_k_tile_next < k_tile_count){
@@ -362,18 +361,21 @@ template <typename T_,
           // Initialize the accumulator to zero
           tiled_mma.accumulate_ = cute::UMMA::ScaleOut::Zero;
 
-          // CUTE_UNROLL
           for (int k_tile=0; k_tile < k_tile_count; ++k_tile) {
             int mma_rd_k_tile_next = mma_rd_k_tile + 1;
             int smem_rd_buffer_next = (num_prev_k_blk + mma_rd_k_tile_next) % NUM_AB_STAGE;
             int mma_rd_ab_full_phase_next = smem_rd_buffer_next == 0 ? mma_rd_ab_full_phase ^ 1 : mma_rd_ab_full_phase;
+            
 
             if (!peek_ab_full_status){
-              wait(ab_full_mbar_ptr[smem_rd_buffer], mma_rd_ab_full_phase);
+              cute::wait_barrier(shared_storage.ab_full_mbar_ptr[smem_rd_buffer], mma_rd_ab_full_phase);
             }
 
-            // Perform MMA operation
+            // if (!peek_ab_full_status){
+            //   wait(ab_full_mbar_ptr[smem_rd_buffer], mma_rd_ab_full_phase);
+            // }
 
+            // Perform MMA operation
             for (int k_block = 0; k_block < cute::size<2>(tCrA); ++k_block) {
               cute::gemm(tiled_mma, tCrA(cute::_, cute::_, k_block, smem_rd_buffer), tCrB(cute::_, cute::_, k_block, smem_rd_buffer), tCtAcc_Slice);
               tiled_mma.accumulate_ = cute::UMMA::ScaleOut::One;
@@ -463,8 +465,7 @@ template <typename T_,
             }
           }
 
-          mm_output_smem.set_ptr(mm_output + c_smem_wr_buffer_idx * SMEM_M_SIZE * OUTPUT_ATOM_SIZE);
-
+          mm_output_smem.set_ptr(mm_output + c_smem_wr_buffer_idx * MMA_N * OUTPUT_ATOM_SIZE);
 
           cute::wait_barrier(shared_storage.acc_full_mbar_ptr[acc_buf_idx], acc_full_phase);
           // T2R copy
@@ -497,7 +498,7 @@ template <typename T_,
           epilogue_wg_barrier.arrive_and_wait(); // Ensure all threads have issued fence
 
           if (warp_idx == 0 && cute::elect_one_sync()){
-            tma_out.tma_store_async(mm_output_smem(0, 0), {m_tile * OUTPUT_ATOM_SIZE, n_tile * INPUT_TMA_TILE_SIZE});
+            tma_out.tma_store_async(mm_output_smem.base_ptr, {m_tile * OUTPUT_ATOM_SIZE, n_tile * INPUT_TMA_TILE_SIZE});
             cute::tma_store_arrive();
             cute::tma_store_wait<NUM_C_STAGE-1>();
           }
@@ -525,4 +526,3 @@ template <typename T_,
 
 
 } // namespace kernel
-
