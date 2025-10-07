@@ -52,6 +52,16 @@ __device__ __forceinline__ void load_smem(T *smem_ptr, T const *gmem_ptr) {
 #endif
 }
 
+template <typename FP8>
+__device__ __forceinline__ void load_row_8x8b(const FP8 *smem_row_ptr,
+                                              uint64_t &row_reg) {
+  uint32_t smem_int_ptr =
+      static_cast<uint32_t>(__cvta_generic_to_shared(smem_row_ptr));
+  asm volatile("ld.shared.b64 {%0}, [%1];\n"
+               : "=l"(row_reg)
+               : "r"(smem_int_ptr));
+}
+
 template <typename T>
 __device__ __forceinline__ void ldsm_divergence(uint32_t smem_int_ptr,
                                                 uint32_t *R) {

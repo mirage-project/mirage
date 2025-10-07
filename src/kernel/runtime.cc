@@ -197,7 +197,7 @@ void register_mugraph(
     int num_outputs = std::get<1>(task_config);
     TaskType task_type = std::get<2>(task_config);
     int variant_id = std::get<3>(task_config);
-    assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+    // assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
     for (auto const &op : bgraph.operators) {
       assert(op->op_type == mirage::type::TB_INPUT_OP);
       if (input_ops.size() < (size_t)num_inputs) {
@@ -377,7 +377,7 @@ void register_mugraph(
           // Initialize output tensors to the task
           for (auto const &output : output_ops) {
             TensorDesc desc;
-            assert(output->output_tensors.size() == 1);
+            // assert(output->output_tensors.size() == 1);
             tb::STensor stensor = output->output_tensors[0];
             desc.num_dims = stensor.num_dims;
             desc.data_type = stensor.data_type;

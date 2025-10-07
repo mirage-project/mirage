@@ -37,7 +37,8 @@ public:
   int register_single_batch_extend_attention_task(
       threadblock::Graph const &bgraph, std::vector<int> const &params);
   int register_linear_with_residual_task(threadblock::Graph const &bgraph,
-                                         std::vector<int> const &params);
+                                         std::vector<int> const &params,
+                                         bool quantized = true);
   int register_silu_mul_linear_with_residual_task(
       threadblock::Graph const &bgraph, std::vector<int> const &params);
   int register_argmax_partial_task(threadblock::Graph const &bgraph,

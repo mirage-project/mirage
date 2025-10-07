@@ -134,7 +134,9 @@ def get_compile_command(
     flags = [
         "-shared",
         "-std=c++17",
+        # "-DJSON_HAS_RANGES=0",  # Disable ranges in json library for compatibility
         "-rdc=true",
+        # "-lstdc++fs", # Add this flag to adapt to gcc8
         "-use_fast_math",
         "-Xcompiler=-fPIC",
         "--expt-relaxed-constexpr",
@@ -208,7 +210,12 @@ class PersistentKernel:
         # Assert a row-major layout
         for d in range(len(dims) - 1):
             assert strides[d] == strides[d + 1] * dims[d + 1]
-        dtype = convert_torch_type_to_dtype(torch_tensor.dtype)
+        detype = None
+        if torch_tensor.dtype == torch.float8_e4m3fn:
+            dtype = convert_torch_type_to_dtype(torch.int8)
+        else:
+            dtype = convert_torch_type_to_dtype(torch_tensor.dtype)
+        
         t = self.kn_graph.new_input(dims=dims, strides=strides, dtype=dtype)
         # FIXME: currently assert that name is not None
         assert name is not None
@@ -435,19 +442,28 @@ class PersistentKernel:
         output: DTensor,
         grid_dim: tuple,
         block_dim: tuple,
+        scale: DTensor = None,
     ):
         # Currently assume that input/output
         assert input.num_dims == 2  # (batch_size, hidden_size / world_size)
         assert weight.num_dims == 2  # (hidden_size, hidden_size / world_size)
+        if scale is not None:
+            assert scale.num_dims == 2  # (hidden_size / 128, hidden_size / world_size / 128)
         assert residual.num_dims == 2  # (batch_size, hidden_size)
         assert output.num_dims == 2  # (batch_size, hidden_size)
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         tb_graph.new_input(input, (-1, -1, -1), 1, True)
         tb_graph.new_input(weight, (0, -1, -1), 1, True)
+        if scale is not None:
+            tb_graph.new_input(scale, (-1, -1, -1), 1, True)
         tb_graph.new_input(residual, (1, -1, -1), -1, True)
         tb_graph.new_input(output, (1, -1, -1), -1, True)
-        self.kn_graph.customized([input, weight, residual, output], tb_graph)
-        self.kn_graph.register_task(tb_graph, "linear_with_residual")
+        if scale is not None:
+            self.kn_graph.customized([input, weight, scale, residual, output], tb_graph)
+            self.kn_graph.register_task(tb_graph, "linear_with_residual")
+        else:
+            self.kn_graph.customized([input, weight, residual, output], tb_graph)
+            self.kn_graph.register_task(tb_graph, "linear_with_residual_unquant")
 
     def allreduce_layer(
         self,

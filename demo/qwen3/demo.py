@@ -9,6 +9,41 @@ import os
 # print limitation
 # torch.set_printoptions(threshold=2000)
 
+from typing import List, Dict, Iterable, Optional
+from safetensors import safe_open
+
+def get_fp8_tensors() -> Dict[int, Dict[str, torch.Tensor]]:
+    # files = [
+    #     "../../models/Qwen3-8B-FP8/model-00001-of-00002.safetensors",
+    #     "../../models/Qwen3-8B-FP8/model-00002-of-00002.safetensors",
+    # ]
+    files = [
+    "../../models/Qwen3-8B-FP8v3-reorder/qwen3-8b-fp8v3-reorder.pth"
+    ]
+
+    device = "cpu"  
+    # layer_id -> {"weight": Tensor, "weight_scale_inv": Tensor}
+    layer_weights = {}
+    for path in files:
+        with safe_open(path, framework="pt", device=device) as f:
+            for key in f.keys():
+                if "self_attn.o_proj" in key and ("weight" in key or "weight_scale_inv" in key):
+                    parts = key.split(".")
+                    try:
+                        layer_id = int(parts[2])  
+                    except ValueError:
+                        continue
+
+                    if layer_id not in layer_weights:
+                        layer_weights[layer_id] = {}
+
+                    tensor = f.get_tensor(key)
+                    if "weight_scale_inv" in key:
+                        layer_weights[layer_id]["weight_scale_inv"] = tensor
+                    elif "weight" in key:
+                        layer_weights[layer_id]["weight"] = tensor
+    return layer_weights
+
 def grid_for_rmsnorm_linear_layer(size):
     # 96 and 64 are enough to cover all Qwen3 model? Please update the method
     # if you meet any incompatibility.
@@ -68,6 +103,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model", type=str, default='Qwen/Qwen3-8B', help="Model path on hugging face"
     )
+    parser.add_argument("--quant-fp8", default=False, action="store_true", help="Use fp8 quantization")
     args = parser.parse_args()
     try:
         from mpi4py import MPI
@@ -94,8 +130,16 @@ if __name__ == "__main__":
     torch.set_default_dtype(torch.bfloat16)
 
     torch.cuda.set_device(rank)
+    layer_fp8 = None
     with torch.device("cuda"):
-        if args.model_path is not None:
+        if args.quant_fp8:
+            # load model with fp8 quantization
+            fp8_model_name = "Qwen/Qwen3-8B-FP8"
+            print(f"Load model {model_name} with fp8 quantization")
+            model = Qwen3ForCausalLM.from_pretrained(model_name).to("cuda")
+            tokenizer = AutoTokenizer.from_pretrained(model_name)
+            layers_fp8 = get_fp8_tensors()
+        elif args.model_path is not None:
             # load model locally (necessary for multi-GPU case)
             print(f"Load model from model path: {args.model_path}")
             config = AutoConfig.from_pretrained(args.model_path)
@@ -406,17 +450,44 @@ if __name__ == "__main__":
                     block_dim=(128, 1, 1),
                 )
             # add linear w/ residual
-            w = mpk.attach_input(
-                torch_tensor=layer.self_attn.o_proj.weight, name=f"layer_{i}_o_proj"
-            )
-            mpk.linear_with_residual_layer(
-                input=attn_out,
-                weight=w,
-                residual=x,
-                output=attn_proj_out,
-                grid_dim=(hidden_size // 64, 1, 1),
-                block_dim=(128, 1, 1),
-            )
+            # find the same layer in the fp8 model
+            w = None
+            scale = None
+            if args.quant_fp8:
+                layer_fp8 = layers_fp8[i]
+                w_tensor = layer_fp8["weight"].to("cuda")
+                # print(w_tensor)
+                scale_tensor = layer_fp8["weight_scale_inv"].to("cuda")
+                w = mpk.attach_input(
+                    torch_tensor=w_tensor, name=f"layer_{i}_o_proj_quant"
+                )
+                scale = mpk.attach_input(
+                    torch_tensor=scale_tensor, name=f"layer_{i}_o_proj_scale"
+                )
+                mpk.linear_with_residual_layer(
+                    input=attn_out,
+                    weight=w,
+                    residual=x,
+                    output=attn_proj_out,
+                    grid_dim=(hidden_size // 64, 1, 1),
+                    block_dim=(128, 1, 1),
+                    scale=scale,
+                )
+            else:
+                # use the original model weight
+                w = mpk.attach_input(
+                    torch_tensor=layer.self_attn.o_proj.weight, name=f"layer_{i}_o_proj"
+                )
+                # w only describes the shape of the weight tensor and some metadata, not include the actual data or address
+                mpk.linear_with_residual_layer(
+                    input=attn_out,
+                    weight=w,
+                    residual=x,
+                    output=attn_proj_out,
+                    grid_dim=(hidden_size // 64, 1, 1),
+                    block_dim=(128, 1, 1),
+                )
+            
             # reset residual input as x
             x = attn_proj_out
             # add allreduce if needed
