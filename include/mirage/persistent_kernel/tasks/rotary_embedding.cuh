@@ -16,6 +16,7 @@
 #pragma once
 #include "common.h"
 #include "utils.cuh"
+#include <cutlass/arch/barrier.h>
 
 namespace kernel {
 
@@ -28,42 +29,47 @@ __device__ __forceinline__ void rotary_embedding(InputSmem smem_input,
                                                  T const *cos_ptr,
                                                  T const *sin_ptr,
                                                  int token_offset = 0) {
-#pragma unroll
-  for (int win_idx = 0; win_idx < WINDOW_SIZE; ++win_idx) {
+  cutlass::arch::NamedBarrier wg_barrier(NUM_THREADS, /*bar-id*/6);
+  if(threadIdx.x < NUM_THREADS){
+  #pragma unroll
+    for (int win_idx = 0; win_idx < WINDOW_SIZE; ++win_idx) {
 
-    int smem_seq_idx = token_offset + win_idx;
+      int smem_seq_idx = token_offset + win_idx;
 
-#pragma unroll
-    for (int head_idx = 0; head_idx < NUM_HEAD; ++head_idx) {
+  #pragma unroll
+      for (int head_idx = 0; head_idx < NUM_HEAD; ++head_idx) {
 
-      T const *cur_cos_ptr = cos_ptr + win_idx * HEAD_DIM;
-      T const *cur_sin_ptr = sin_ptr + win_idx * HEAD_DIM;
+        T const *cur_cos_ptr = cos_ptr + win_idx * HEAD_DIM;
+        T const *cur_sin_ptr = sin_ptr + win_idx * HEAD_DIM;
 
-#pragma unroll
-      for (uint32_t i = threadIdx.x; i < HEAD_DIM; i += NUM_THREADS) {
-        int offset = (i / HEAD_DIM) * HEAD_DIM + i;
+  #pragma unroll
+        for (uint32_t i = threadIdx.x; i < HEAD_DIM; i += NUM_THREADS) {
+          int offset = (i / HEAD_DIM) * HEAD_DIM + i;
 
-        int row = smem_seq_idx * NUM_HEAD + head_idx;
-        int col = i;
+          int row = smem_seq_idx * NUM_HEAD + head_idx;
+          int col = i;
 
-        float cos = static_cast<float>(cur_cos_ptr[offset]);
-        float sin = static_cast<float>(cur_sin_ptr[offset]);
+          float cos = static_cast<float>(cur_cos_ptr[offset]);
+          float sin = static_cast<float>(cur_sin_ptr[offset]);
 
-        float v_rot;
-        if (i < HEAD_DIM / 2) {
-          float v1 = static_cast<float>(smem_input.at(row, col));
-          float v2 = static_cast<float>(smem_input.at(row, col + HEAD_DIM / 2));
-          v_rot = v1 * cos - v2 * sin;
-        } else {
-          float v1 = static_cast<float>(smem_input.at(row, col));
-          float v2 = static_cast<float>(smem_input.at(row, col - HEAD_DIM / 2));
-          v_rot = v1 * cos + v2 * sin;
+          float v_rot;
+          if (i < HEAD_DIM / 2) {
+            float v1 = static_cast<float>(smem_input.at(row, col));
+            float v2 = static_cast<float>(smem_input.at(row, col + HEAD_DIM / 2));
+            v_rot = v1 * cos - v2 * sin;
+          } else {
+            float v1 = static_cast<float>(smem_input.at(row, col));
+            float v2 = static_cast<float>(smem_input.at(row, col - HEAD_DIM / 2));
+            v_rot = v1 * cos + v2 * sin;
+          }
+          wg_barrier.arrive_and_wait();
+          smem_input.at(row, col) = static_cast<T>(v_rot);
         }
-        __syncthreads();
-        smem_input.at(row, col) = static_cast<T>(v_rot);
       }
     }
+
   }
+
 }
 
 } // namespace kernel
