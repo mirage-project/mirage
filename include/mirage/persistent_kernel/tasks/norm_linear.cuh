@@ -45,7 +45,11 @@ __device__ __forceinline__ void
   cutlass::arch::NamedBarrier wg_barrier(NUM_THREADS, /*bar-id*/6);
   if (threadIdx.x < NUM_THREADS){
 
-    constexpr int CHUNK_SIZE = 16 / sizeof(T);
+  // TODO: Update the formula since norm weight is cut down
+  constexpr int MAX_OUTPUT_ATOM_SIZE =
+      max_power_of_two_le((mirage::runtime::MAX_DYNAMIC_SHARED_MEMORY_SIZE -
+                           16 - 16898 * BATCH_SIZE) /
+                          (4 * (128 + BATCH_SIZE)));
 
     constexpr int TILE_SIZE = 128;
     static constexpr int MAX_OUTPUT_ATOM_SIZE =

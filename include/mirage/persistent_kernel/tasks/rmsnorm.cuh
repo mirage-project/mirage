@@ -34,23 +34,22 @@ __device__ __forceinline__ void rms_norm_impl(void const *input_ptr,
   T const *__restrict__ d_weight = static_cast<T const *>(weight_ptr);
   T *__restrict__ d_output = static_cast<T *>(output_ptr);
 
-  //using InputDmem =
-  //    dmem_row_const<T, BATCH_SIZE, HIDDEN_DIM, HIDDEN_DIM>;
-  //using OutputDmem =
-  //    dmem_row<T, BATCH_SIZE, HIDDEN_DIM, HIDDEN_DIM>;
+  // using InputDmem =
+  //     dmem_row_const<T, BATCH_SIZE, HIDDEN_DIM, HIDDEN_DIM>;
+  // using OutputDmem =
+  //     dmem_row<T, BATCH_SIZE, HIDDEN_DIM, HIDDEN_DIM>;
 
-  //InputDmem input_dmem(d_input);
-  //OutputDmem output_dmem(d_output);
+  // InputDmem input_dmem(d_input);
+  // OutputDmem output_dmem(d_output);
 
-  constexpr size_t SHARED_WEIGHT_BUFFER_OFFSET =
-      sizeof(T) * HIDDEN_DIM;
+  constexpr size_t SHARED_WEIGHT_BUFFER_OFFSET = sizeof(T) * HIDDEN_DIM;
   constexpr size_t SHARED_OUTPUT_BUFFER_OFFSET =
       SHARED_WEIGHT_BUFFER_OFFSET + sizeof(T) * HIDDEN_DIM;
   constexpr size_t REDUCE_BUFFER_OFFSET =
       SHARED_OUTPUT_BUFFER_OFFSET + sizeof(T) * HIDDEN_DIM;
-  T *shared_input_buffer = (T*)(smem);
-  T *shared_weight_buffer = (T*)(smem + SHARED_WEIGHT_BUFFER_OFFSET);
-  T *shared_output_buffer = (T*)(smem + SHARED_OUTPUT_BUFFER_OFFSET);
+  T *shared_input_buffer = (T *)(smem);
+  T *shared_weight_buffer = (T *)(smem + SHARED_WEIGHT_BUFFER_OFFSET);
+  T *shared_output_buffer = (T *)(smem + SHARED_OUTPUT_BUFFER_OFFSET);
   float *reduce_smem = reinterpret_cast<float *>(smem + REDUCE_BUFFER_OFFSET);
 
   // Warm up input tiles for the first atoms
@@ -64,13 +63,16 @@ __device__ __forceinline__ void rms_norm_impl(void const *input_ptr,
 
   float sum = 0.0f;
 #pragma unroll
-  for (int for_idx = 0; for_idx < NUM_TILES; for_idx ++) {
+  for (int for_idx = 0; for_idx < NUM_TILES; for_idx++) {
     // copy
     if (for_idx + 1 < NUM_TILES) {
-      load_smem(shared_input_buffer + threadIdx.x * CHUNK_SIZE + (for_idx + 1) * TILE_SIZE,
+      load_smem(shared_input_buffer + threadIdx.x * CHUNK_SIZE +
+                    (for_idx + 1) * TILE_SIZE,
                 d_input + threadIdx.x * CHUNK_SIZE + (for_idx + 1) * TILE_SIZE);
-      load_smem(shared_weight_buffer + threadIdx.x * CHUNK_SIZE + (for_idx + 1) * TILE_SIZE,
-                d_weight + threadIdx.x * CHUNK_SIZE + (for_idx + 1)* TILE_SIZE);
+      load_smem(shared_weight_buffer + threadIdx.x * CHUNK_SIZE +
+                    (for_idx + 1) * TILE_SIZE,
+                d_weight + threadIdx.x * CHUNK_SIZE +
+                    (for_idx + 1) * TILE_SIZE);
       cp_async_fence();
       cp_async_wait<1>();
     } else if (for_idx + 1 == NUM_TILES) {
@@ -79,7 +81,7 @@ __device__ __forceinline__ void rms_norm_impl(void const *input_ptr,
     __syncthreads();
 #pragma unroll
     for (int i = threadIdx.x; i < TILE_SIZE; i += NUM_THREADS) {
-      float val = (float) shared_input_buffer[for_idx * TILE_SIZE + i];
+      float val = (float)shared_input_buffer[for_idx * TILE_SIZE + i];
       sum += val * val;
     }
   }
@@ -114,7 +116,8 @@ __device__ __forceinline__ void rms_norm_impl(void const *input_ptr,
   __syncthreads();
 #pragma unroll
   for (int i = threadIdx.x; i < NUM_CHUNKS_OUTPUT; i += NUM_THREADS) {
-    *((__uint128_t *)((void *)&d_output[i * CHUNK_SIZE])) = *((__uint128_t *)((void *)&shared_output_buffer[i * CHUNK_SIZE]));
+    *((__uint128_t *)((void *)&d_output[i * CHUNK_SIZE])) =
+        *((__uint128_t *)((void *)&shared_output_buffer[i * CHUNK_SIZE]));
   }
 }
 

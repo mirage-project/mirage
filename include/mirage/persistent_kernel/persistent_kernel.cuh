@@ -14,6 +14,7 @@
  */
 
 #include "profiler.h"
+#include "tasks/copy_sm80.cuh"
 #ifdef MPK_ENABLE_TMA
 #include "tma.cuh"
 #endif
@@ -31,7 +32,7 @@
 
 using bfloat16 = type::bfloat16_t;
 using namespace mirage::runtime;
-
+using namespace kernel;
 // Configurations for the MPK runtime
 // #define MPK_MAX_NUM_BATCHED_REQUESTS 16
 // #define MPK_MAX_NUM_BATCHED_TOKENS 64
@@ -52,7 +53,7 @@ using namespace mirage::runtime;
 #define SCHEDULER_THREADS 128
 
 __device__ __forceinline__ void
-    _execute_task(TaskDesc const &task_desc,
+    _execute_task(TaskDesc const *task_desc,
                   RuntimeConfig const &runtime_config);
 
 __device__ __forceinline__ bool is_termination_event(size_t event_loc,
@@ -259,12 +260,12 @@ __device__ __forceinline__ bool
   *config.page_queue_head = page_queue_head;
   *config.page_queue_tail = page_queue_tail;
 
-  //printf("Next batch: steps[%d %d %d %d] num_active_tokens(%d)\n",
-  //       config.step[0],
-  //       config.step[1],
-  //       config.step[2],
-  //       config.step[3],
-  //       config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS]);
+  // printf("Next batch: steps[%d %d %d %d] num_active_tokens(%d)\n",
+  //        config.step[0],
+  //        config.step[1],
+  //        config.step[2],
+  //        config.step[3],
+  //        config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS]);
 
   if (num_tokens == 0) {
     return false;
@@ -278,7 +279,7 @@ __device__ __forceinline__ bool
 __device__ __forceinline__ bool
     prepare_next_batch(RuntimeConfig const &config) {
   int step = config.step[0];
-#ifdef MPK_EANBLE_VERBOSE
+#ifdef MPK_ENABLE_VERBOSE
   printf("step: %d, new_token_num(%p): %d, new_token_ids:\n",
          step,
          config.new_token_nums,
@@ -371,7 +372,7 @@ __device__ __forceinline__ void worker_checker(RuntimeConfig config) {
   assert(config.num_workers <= MAX_NUM_WORKERS);
   // We will reinterpret TaskDesc as an array of integers to
   // collectively load it from device to shared memory
-  assert(sizeof(TaskDesc) % sizeof(int) == 0);
+  static_assert(sizeof(TaskDesc) % sizeof(int) == 0);
 }
 
 __device__ __forceinline__ void scheduler_checker(RuntimeConfig config) {
@@ -383,9 +384,6 @@ __device__ __forceinline__ void scheduler_checker(RuntimeConfig config) {
   //    config.num_local_schedulers + config.num_remote_schedulers;
 
   assert(config.num_workers <= MAX_NUM_WORKERS);
-  // We will reinterpret TaskDesc as an array of integers to
-  // collectively load it from device to shared memory
-  assert(sizeof(TaskDesc) % sizeof(int) == 0);
 }
 
 __device__ __forceinline__ void persistent_checker(RuntimeConfig config) {
@@ -400,112 +398,148 @@ __device__ __forceinline__ void persistent_checker(RuntimeConfig config) {
   assert(config.num_workers <= MAX_NUM_WORKERS);
   // We will reinterpret TaskDesc as an array of integers to
   // collectively load it from device to shared memory
-  assert(sizeof(TaskDesc) % sizeof(int) == 0);
+  static_assert(sizeof(TaskDesc) % sizeof(int) == 0);
   assert(blockDim.x >= 128);
 }
 
 __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
-  __shared__ TaskId cur_task_id;
-  __shared__ TaskDesc task_desc;
+  // Make sure overall smem usage here do not exceed 3KB
+  // last_task_pos: 2 * 8 = 16 B
+  // next_task_pos: 2 * 8 = 16 B
+  // worker_queue_ids: 2 * 4 = 8 B
+  // worker_queues: 2 * 8 = 16 B
+  // remaining: 3016 B
+
+  constexpr int TASK_DESCS_BUFFER_LENGTH = std::min(
+      (mirage::runtime::WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE - 56) /
+          (int)(sizeof(TaskDesc) + sizeof(TaskId)),
+      16);
+  __shared__ TaskDesc task_descs[TASK_DESCS_BUFFER_LENGTH];
+  __shared__ TaskId task_ids[TASK_DESCS_BUFFER_LENGTH];
+  __shared__ TaskId *worker_queues[2];
+  __shared__ int worker_queue_ids[2];
+  __shared__ size_t next_task_pos[2];
+  __shared__ size_t last_task_pos[2];
 
 #ifdef MPK_ENABLE_PROFILING
   PROFILER_CLOSURE_PARAMS_DECL;
   PROFILER_INIT(static_cast<uint64_t *>(config.profiler_buffer),
                 0,
                 1,
-                (threadIdx.x % 128 == 0));
+                (threadIdx.x % WORKER_THREADS == 0));
 #endif
 
-  int worker_id = blockIdx.x;
-  __shared__ TaskId *worker_queues[2];
-  __shared__ int worker_queue_ids[2];
-  TaskId *local_worker_queue = config.worker_queues[worker_id];
-  worker_queues[0] = local_worker_queue;
+  int const worker_id = blockIdx.x;
+  worker_queues[0] = config.worker_queues[worker_id];
   worker_queue_ids[0] = worker_id;
   int num_worker_queues = 1;
   if (config.num_gpus > 1) {
-    TaskId *remote_worker_queue =
+    worker_queues[num_worker_queues] =
         config.worker_queues[worker_id + config.num_workers];
-    worker_queues[num_worker_queues] = remote_worker_queue;
     worker_queue_ids[num_worker_queues] = worker_id + config.num_workers;
     num_worker_queues++;
   }
 
-  size_t cur_task_pos[2];
-  __shared__ size_t last_task_pos[2];
-
-  for (int i = 0; i < 2; i++) {
-    cur_task_pos[i] = 0;
-  }
-
   if (threadIdx.x == 0) {
+    for (int i = 0; i < 2; i++) {
+      next_task_pos[i] = 0;
+    }
     for (int i = 0; i < 2; i++) {
       last_task_pos[i] = 0;
     }
+    // num_loaded_tasks = 0;
   }
 
-  int queue_idx = 0;
+  int queue_pos = 0, queue_len = 0;
 #ifdef MPK_ENABLE_PROFILING
   size_t task_counter = 0;
 #endif
   while (true) {
-    // fetch next task from a task queue
-    if (threadIdx.x == 0) {
-      while (cur_task_pos[queue_idx] == last_task_pos[queue_idx]) {
-        last_task_pos[queue_idx] = ld_acquire_gpu_u64(
-            &config
-                 .worker_queue_last_ready_task_id[worker_queue_ids[queue_idx]]);
-        if (cur_task_pos[queue_idx] < last_task_pos[queue_idx]) {
-          break;
-        } else {
-          queue_idx = (queue_idx == num_worker_queues - 1) ? 0 : queue_idx + 1;
+    // fetch next task from a task queue if task_descs is empty
+    if (queue_pos == queue_len) {
+      int queue_idx = 0;
+      if (threadIdx.x == 0) {
+        while (next_task_pos[queue_idx] == last_task_pos[queue_idx]) {
+          last_task_pos[queue_idx] =
+              ld_acquire_gpu_u64(&config.worker_queue_last_ready_task_id
+                                      [worker_queue_ids[queue_idx]]);
+          if (next_task_pos[queue_idx] < last_task_pos[queue_idx]) {
+            break;
+          } else {
+            queue_idx =
+                (queue_idx == num_worker_queues - 1) ? 0 : queue_idx + 1;
+          }
+          // nanosleep to avoid overwhelming I/O
+          __nanosleep(10);
         }
-        // nanosleep to avoid overwhelming I/O
-        __nanosleep(10);
+        assert(next_task_pos[queue_idx] + config.per_worker_queue_len >
+               last_task_pos[queue_idx]);
       }
-      assert(cur_task_pos[queue_idx] + config.per_worker_queue_len >
-             last_task_pos[queue_idx]);
-      cur_task_id = ld_relaxed_gpu_u64(
-          &worker_queues[queue_idx][cur_task_pos[queue_idx] %
-                                    config.per_worker_queue_len]);
+      __syncthreads();
+      int num_loaded_tasks =
+          min((int)(last_task_pos[queue_idx] - next_task_pos[queue_idx]),
+              TASK_DESCS_BUFFER_LENGTH);
+      // Load task ids
+      if (threadIdx.x < num_loaded_tasks) {
+        task_ids[threadIdx.x] = ld_relaxed_gpu_u64(
+            &worker_queues[queue_idx][(next_task_pos[queue_idx] + threadIdx.x) %
+                                      config.per_worker_queue_len]);
+      }
+      __syncthreads();
+      if (threadIdx.x == 0) {
 #ifdef MPK_ENABLE_VERBOSE
-      printf(
-          "[%d][FTCH] worker_id(%d) queue_idx(%d) cur_task_pos(%llu, "
-          "%llu) last_task_pos(%llu, %llu) "
-          "task_id(%llu) task_type(%d) event_id(%llx) \n",
-          config.my_gpu_id,
-          worker_id,
-          queue_idx,
-          cur_task_pos[0],
-          cur_task_pos[1],
-          last_task_pos[0],
-          last_task_pos[1],
-          get_task_position_index(cur_task_id),
-          config.all_tasks[get_task_position_index(cur_task_id)].task_type,
-          config.all_tasks[get_task_position_index(cur_task_id)].trigger_event);
+        for (int i = 0; i < num_loaded_tasks; i++) {
+          printf(
+              "[%d][FTCH] worker_id(%d) queue_idx(%d) next_task_pos(%llu, "
+              "%llu) last_task_pos(%llu, %llu) "
+              "task_id(%llu) task_type(%d) event_id(%llx) \n",
+              config.my_gpu_id,
+              worker_id,
+              queue_idx,
+              next_task_pos[0],
+              next_task_pos[1],
+              last_task_pos[0],
+              last_task_pos[1],
+              get_task_position_index(task_ids[i]),
+              config.all_tasks[get_task_position_index(task_ids[i])].task_type,
+              config.all_tasks[get_task_position_index(task_ids[i])]
+                  .trigger_event);
+        }
 #endif
+        next_task_pos[queue_idx] += num_loaded_tasks;
+      }
+      // Load task descs
+      static_assert(sizeof(TaskDesc) % 16 == 0);
+      constexpr int TASK_SIZE = sizeof(TaskDesc) / 16; // 128b copy-async
+      for (int i = threadIdx.x; i < num_loaded_tasks * TASK_SIZE;
+           i += blockDim.x) {
+        int task_idx = i / TASK_SIZE;
+        int offset = i % TASK_SIZE;
+        load_smem(reinterpret_cast<char *>(task_descs) + i * 16,
+                  reinterpret_cast<char *>(
+                      config.all_tasks +
+                      get_task_position_index(task_ids[task_idx])) +
+                      offset * 16);
+      }
+      cp_async_fence();
+      cp_async_wait<0>();
+      __syncthreads();
+      queue_pos = 0;
+      queue_len = num_loaded_tasks;
     }
-    __syncthreads();
-    int *smem_as_int = reinterpret_cast<int *>(&task_desc);
-    int const *dmem_as_int = reinterpret_cast<int *>(
-        config.all_tasks + get_task_position_index(cur_task_id));
-    for (int i = threadIdx.x; i * sizeof(int) < sizeof(TaskDesc);
-         i += blockDim.x) {
-      smem_as_int[i] = dmem_as_int[i];
-    }
-    __syncthreads();
+    TaskDesc *task_desc = task_descs + queue_pos;
     // Make sure task is ready before start execution
     if (threadIdx.x == 0) {
-      if (task_desc.dependent_event != EVENT_INVALID_ID) {
+      if (task_desc->dependent_event != EVENT_INVALID_ID) {
         // Wait until the event has been triggered enough times
-        EventId event_id = task_desc.dependent_event;
+        EventId event_id = task_desc->dependent_event;
         assert(!is_nvshmem_event(event_id));
         assert(get_event_gpu_id(event_id) == config.my_gpu_id);
         size_t event_index = get_event_position_index(event_id);
         EventCounter needed_counts =
             static_cast<EventCounter>(
                 config.all_event_num_triggers[event_index]) *
-            get_task_iteration_num(cur_task_id);
+            get_task_iteration_num(task_ids[queue_pos]);
         EventCounter actual_counts = 0;
         while (actual_counts < needed_counts) {
           actual_counts =
@@ -517,52 +551,53 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
     __syncthreads();
 
 #ifdef MPK_ENABLE_PROFILING
-    if (task_desc.task_type != TASK_TERMINATE) {
-      PROFILER_EVENT_START(task_desc.task_type, task_counter);
+    if (task_desc->task_type != TASK_TERMINATE) {
+      PROFILER_EVENT_START(task_desc->task_type, task_counter);
     }
 #endif
 
     // Successfully fetched a new task
-    if (task_desc.task_type == TASK_TERMINATE) {
+    if (task_desc->task_type == TASK_TERMINATE) {
       // Terminate
       return;
-    } else if (task_desc.task_type == TASK_BEGIN_TASK_GRAPH) {
+    } else if (task_desc->task_type == TASK_BEGIN_TASK_GRAPH) {
       // Do nothing
 #ifdef USE_NVSHMEM
-    } else if (task_desc.task_type == TASK_NVSHMEM_COPY) {
+    } else if (task_desc->task_type == TASK_NVSHMEM_COPY) {
       size_t size_in_bytes = 2;
       for (int i = 0; i < task_desc.inputs[0].num_dims; i++) {
         size_in_bytes *= task_desc.inputs[0].dim[i];
       }
-      size_t event_index = get_event_position_index(task_desc.trigger_event);
-      int gpu_id = static_cast<int>(get_event_gpu_id(task_desc.trigger_event));
+      size_t event_index = get_event_position_index(task_desc->trigger_event);
+      int gpu_id = static_cast<int>(get_event_gpu_id(task_desc->trigger_event));
       assert(gpu_id < config.num_gpus);
       assert(gpu_id != config.my_gpu_id);
       nvshmemx_putmem_signal_block(
-          task_desc.outputs[0].base_ptr,
-          task_desc.inputs[0].base_ptr,
+          task_desc->output_ptrs[0],
+          task_desc->input_ptrs[0],
           size_in_bytes,
           reinterpret_cast<uint64_t *>(&config.all_event_counters[event_index]),
           1 /*signal*/,
           NVSHMEM_SIGNAL_ADD,
           gpu_id);
-#endif
     } else if (task_desc.task_type == TASK_REDUCE) {
       // Currently support 2D reduction, buffer has an extra world_size dim
-      assert(task_desc.inputs[0].num_dims == 2);
-      assert(task_desc.inputs[1].num_dims == 3);
-      kernel::reduction_kernel<bfloat16>(task_desc.inputs[0].base_ptr,
-                                         task_desc.inputs[1].base_ptr,
-                                         task_desc.outputs[0].base_ptr,
+      // assert(task_desc.inputs[0].num_dims == 2);
+      // assert(task_desc.inputs[1].num_dims == 3);
+      kernel::reduction_kernel<bfloat16>(task_desc->input_ptrs[0],
+                                         task_desc->input_ptrs[1],
+                                         task_desc->output_ptrs[0],
                                          config.num_gpus,
                                          config.my_gpu_id,
-                                         task_desc.inputs[0].dim[0],
-                                         task_desc.inputs[0].dim[1],
-                                         task_desc.inputs[0].stride[0]);
+                                         task_desc->inputs[0].dim[0],
+                                         task_desc->inputs[0].dim[1],
+                                         task_desc->inputs[0].stride[0]);
+#endif
     } else {
 #ifdef MPK_ENABLE_VERBOSE
       if (threadIdx.x == 0 && blockIdx.x == 0) {
-        printf("[worker] _execute_task EXECUTE_TASK %d\n", task_desc.task_type);
+        printf("[worker] _execute_task EXECUTE_TASK %d\n",
+               task_desc->task_type);
       }
 #endif
       _execute_task(task_desc, config);
@@ -570,14 +605,14 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
     __syncthreads();
 
 #ifdef MPK_ENABLE_PROFILING
-    if (task_desc.task_type != TASK_TERMINATE) {
-      PROFILER_EVENT_END(task_desc.task_type, task_counter++);
+    if (task_desc->task_type != TASK_TERMINATE) {
+      PROFILER_EVENT_END(task_desc->task_type, task_counter++);
     }
 #endif
 
     // Trigger event
     if (threadIdx.x == 0) {
-      EventId event_id = task_desc.trigger_event;
+      EventId event_id = task_desc->trigger_event;
       size_t event_index = get_event_position_index(event_id);
       if (!is_nvshmem_event(event_id)) {
         size_t gpu_id = get_event_gpu_id(event_id);
@@ -593,14 +628,14 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
                "event_type(local) count(%llu)\n",
                config.my_gpu_id,
                worker_id,
-               get_task_iteration_num(cur_task_id),
-               get_task_position_index(cur_task_id),
+               get_task_iteration_num(task_ids[queue_pos]),
+               get_task_position_index(task_ids[queue_pos]),
                event_id,
                count);
 #endif
 
         if ((count + 1) == static_cast<EventCounter>(num_triggers) *
-                               get_task_iteration_num(cur_task_id)) {
+                               get_task_iteration_num(task_ids[queue_pos])) {
 #ifdef MPK_ENABLE_PROFILING
           PROFILER_EVENT_START(TASK_SCHD_EVENTS, task_counter);
 #endif
@@ -650,7 +685,7 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
         }
       } else {
         // Case 2: trigger a nvshmem event
-        assert(task_desc.task_type == TASK_NVSHMEM_COPY);
+        assert(task_desc->task_type == TASK_NVSHMEM_COPY);
         // Note that nvshmem copy task signal counter during data copy
         // we don't need to do anything here is the task type is NVSHMEM_COPY
 #ifdef MPK_ENABLE_VERBOSE
@@ -658,17 +693,18 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
                "event_type(remote)\n",
                config.my_gpu_id,
                worker_id,
-               get_task_position_index(cur_task_id),
+               get_task_position_index(task_ids[queue_pos]),
                event_id);
 #endif
       }
-      cur_task_pos[queue_idx] += 1;
     }
+    queue_pos += 1;
   }
 }
 
 // need to alter as there is only one warp per block
-__device__ __forceinline__ void execute_scheduler(RuntimeConfig config, int offset) {
+__device__ __forceinline__ void execute_scheduler(RuntimeConfig config,
+                                                  int offset) {
   int num_schedulers =
       config.num_local_schedulers + config.num_remote_schedulers;
   int warp_thread_id = threadIdx.x % 32;
@@ -950,7 +986,7 @@ void gpu_free(void *ptr) {
 }
 
 // The following function will be generated by the transpiler
-static void _init_persistent_kernel(std::vector<TaskDesc> &all_tasks,
+static void _init_persistent_kernel(std::vector<FullTaskDesc> &all_tasks,
                                     std::vector<EventDesc> &all_events,
                                     std::vector<TaskId> &first_tasks,
                                     int num_gpus,
@@ -1036,10 +1072,15 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
   global_runtime_config.num_graphs = 1;
   global_runtime_config.split_worker_scheduler = true;
 
-  std::vector<TaskDesc> all_tasks;
+  std::vector<FullTaskDesc> all_fulltasks;
   std::vector<EventDesc> all_events;
   std::vector<TaskId> first_tasks;
-  _init_persistent_kernel(all_tasks, all_events, first_tasks, npes, mype);
+  _init_persistent_kernel(all_fulltasks, all_events, first_tasks, npes, mype);
+  std::vector<TaskDesc> all_tasks;
+  for (auto const &ft : all_fulltasks) {
+    TaskDesc task_desc(ft);
+    all_tasks.push_back(task_desc);
+  }
 
   // Initialize worker queue last task id
   // Each worker now maintains a local and a remote worker queue
@@ -1168,15 +1209,15 @@ extern "C" void launch_persistent_kernel() {
 
   if (global_runtime_config.split_worker_scheduler) {
     printf("worker kernel & scheduler kernel\n");
-    printf("smem size: %d\n", MAX_SHARE_MEMORY_SIZE);
+    printf("smem size: %d\n", MAX_DYNAMIC_SHARED_MEMORY_SIZE);
 
     // Launcher worker & scheduler kernel
     cudaFuncSetAttribute(worker_kernel,
                          cudaFuncAttributeMaxDynamicSharedMemorySize,
-                         MAX_SHARE_MEMORY_SIZE);
+                         MAX_DYNAMIC_SHARED_MEMORY_SIZE);
     cudaFuncSetAttribute(scheduler_kernel,
                          cudaFuncAttributeMaxDynamicSharedMemorySize,
-                         MAX_SHARE_MEMORY_SIZE);
+                         MAX_DYNAMIC_SHARED_MEMORY_SIZE);
 
     cudaStream_t worker_stream, scheduler_stream;
     cudaStreamCreate(&worker_stream);
@@ -1187,7 +1228,7 @@ extern "C" void launch_persistent_kernel() {
     // the interaction between the worker kernel and the scheduler kernel
     worker_kernel<<<dim3(global_runtime_config.num_workers, 1, 1),
                     dim3(WORKER_THREADS, 1, 1),
-                    MAX_SHARE_MEMORY_SIZE /*smem*/,
+                    MAX_DYNAMIC_SHARED_MEMORY_SIZE /*smem*/,
                     worker_stream>>>(global_runtime_config);
 
     scheduler_kernel<<<dim3(global_runtime_config.num_local_schedulers, 1, 1),
@@ -1209,19 +1250,19 @@ extern "C" void launch_persistent_kernel() {
     // Launcher persistent kernel
     cudaFuncSetAttribute(persistent_kernel,
                          cudaFuncAttributeMaxDynamicSharedMemorySize,
-                         MAX_SHARE_MEMORY_SIZE);
+                         MAX_DYNAMIC_SHARED_MEMORY_SIZE);
 #ifdef USE_NVSHMEM
     void *args[] = {&global_runtime_config};
     nvshmemx_collective_launch((void const *)persistent_kernel,
                                dim3(sm_count, 1, 1),
                                dim3(SINGLE_KERNEL_THREADS, 1, 1),
                                args,
-                               MAX_SHARE_MEMORY_SIZE /*sharedmem*/,
+                               MAX_DYNAMIC_SHARED_MEMORY_SIZE /*sharedmem*/,
                                0 /*stream*/);
 #else
     persistent_kernel<<<dim3(sm_count, 1, 1),
                         dim3(SINGLE_KERNEL_THREADS, 1, 1),
-                        MAX_SHARE_MEMORY_SIZE /*smem*/>>>(
+                        MAX_DYNAMIC_SHARED_MEMORY_SIZE /*smem*/>>>(
         global_runtime_config);
 #endif
     cudaError_t err = cudaDeviceSynchronize();

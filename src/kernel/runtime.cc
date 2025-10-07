@@ -59,8 +59,8 @@ void dfs_create_events_add_tasks(
     dim3 producer_lo_bid,
     dim3 producer_hi_bid,
     std::vector<EventDesc> &all_events,
-    std::vector<TaskDesc> &all_tasks,
-    std::vector<TaskDesc> const &cur_op_tasks,
+    std::vector<FullTaskDesc> &all_tasks,
+    std::vector<FullTaskDesc> const &cur_op_tasks,
     std::map<dim3, TaskId, Dim3Comparator> const &pre_task_map,
     std::map<dim3, TaskId, Dim3Comparator> &cur_task_map) {
   if (depth >= mirage::config::MAX_TENSOR_DIMS) {
@@ -158,7 +158,7 @@ void register_mugraph(
     mirage::kernel::Graph const &graph,
     int num_gpus,
     int my_gpu_id,
-    std::vector<TaskDesc> &all_tasks,
+    std::vector<FullTaskDesc> &all_tasks,
     std::vector<EventDesc> &all_events,
     std::vector<TaskId> &first_tasks,
     std::map<kernel::KNOperator *, std::map<dim3, TaskId, Dim3Comparator>>
@@ -169,7 +169,7 @@ void register_mugraph(
   // push a begin-graph task and a event to launch dependent asks
   {
     EventDesc e(EVENT_LAUNCH_DEPENDENT_TASKS, 1, 0, 0);
-    TaskDesc t(TASK_BEGIN_TASK_GRAPH, 0 /*variant_id*/);
+    FullTaskDesc t(TASK_BEGIN_TASK_GRAPH, 0 /*variant_id*/);
     t.trigger_event = get_event_id(my_gpu_id, all_events.size(), false);
     all_tasks.push_back(t);
     all_events.push_back(e);
@@ -190,7 +190,7 @@ void register_mugraph(
         dynamic_cast<kn::KNCustomizedOp const *>(op);
     tb::Graph const &bgraph = cur_op->bgraph;
     dim3 bid;
-    std::vector<TaskDesc> tasks;
+    std::vector<FullTaskDesc> tasks;
     std::vector<tb::TBInputOp *> input_ops;
     std::vector<tb::TBInputOp *> output_ops;
     int num_inputs = std::get<0>(task_config);
@@ -251,7 +251,7 @@ void register_mugraph(
               if (tgt_gpu_id == my_gpu_id) {
                 continue;
               }
-              TaskDesc task(TASK_NVSHMEM_COPY, 0 /*variant_id*/);
+              FullTaskDesc task(TASK_NVSHMEM_COPY, 0 /*variant_id*/);
               // task.trigger_event = get_event_id(
               //     tgt_gpu_id, all_events.size(), true /*nvshmem_event*/);
               //  Initialize input tensors to the task
@@ -310,7 +310,7 @@ void register_mugraph(
             }
             all_events.push_back(event_desc_1);
             // Step 2: create a task for reduce
-            TaskDesc task(TASK_REDUCE, 0 /*variant_id*/);
+            FullTaskDesc task(TASK_REDUCE, 0 /*variant_id*/);
             for (int i = 0; i < 2; i++) {
               TensorDesc desc;
               tb::STensor stensor = input_ops[i]->output_tensors[0];
@@ -357,7 +357,7 @@ void register_mugraph(
     for (bid.x = 0; bid.x < bgraph.grid_dim.x; bid.x++) {
       for (bid.y = 0; bid.y < bgraph.grid_dim.y; bid.y++) {
         for (bid.z = 0; bid.z < bgraph.grid_dim.z; bid.z++) {
-          TaskDesc task(task_type, variant_id);
+          FullTaskDesc task(task_type, variant_id);
           // Set request_id for attention and paged_attention
           if ((task_type == TASK_ATTENTION_1) ||
               (task_type == TASK_ATTENTION_2) ||
@@ -517,7 +517,7 @@ void register_mugraph(
 }
 
 bool sanity_check(mirage::kernel::Graph const &graph,
-                  std::vector<TaskDesc> const &all_tasks,
+                  std::vector<FullTaskDesc> const &all_tasks,
                   std::vector<EventDesc> const &all_events,
                   std::vector<TaskId> const &first_tasks) {
   std::unordered_set<EventId> triggered_events;
@@ -539,7 +539,7 @@ bool sanity_check(mirage::kernel::Graph const &graph,
       task_queue.pop();
       assert(executed_tasks.count(task) == 0);
       executed_tasks.insert(task);
-      TaskDesc desc = all_tasks[task];
+      FullTaskDesc desc = all_tasks[task];
       if (desc.trigger_event != EVENT_INVALID_ID) {
         EventId event_id = desc.trigger_event;
         size_t event_pos = event_id & 0xffffffff;
@@ -575,7 +575,7 @@ TaskGraphResult print_task_graph(
     mirage::kernel::Graph const &graph,
     int num_gpus,
     int my_gpu_id,
-    std::vector<TaskDesc> const &all_tasks,
+    std::vector<FullTaskDesc> const &all_tasks,
     std::vector<EventDesc> const &all_events,
     std::vector<TaskId> const &first_tasks,
     std::map<kernel::KNOperator *, std::map<dim3, TaskId, Dim3Comparator>> const
@@ -611,7 +611,7 @@ TaskGraphResult print_task_graph(
   if (use_json_format) {
     code.e("void construct_task_graph(int num_gpus,");
     code.e("                          int my_gpu_id,");
-    code.e("                          std::vector<TaskDesc> &all_tasks,");
+    code.e("                          std::vector<FullTaskDesc> &all_tasks,");
     code.e("                          std::vector<EventDesc> &all_events,");
     code.e("                          std::vector<TaskId> &first_tasks,");
     code.e("                          std::map<std::string, void*> const "
@@ -623,7 +623,8 @@ TaskGraphResult print_task_graph(
     code.e("json_file >> json_task_graph;");
     // load tasks
     code.e("for (json const &task : json_task_graph[\"all_tasks\"]) {");
-    code.e("TaskDesc task_desc(static_cast<TaskType>(task.at(\"task_type\")),");
+    code.e("FullTaskDesc "
+           "task_desc(static_cast<TaskType>(task.at(\"task_type\")),");
     code.e("            task.at(\"variant_id\"));");
     code.e("task_desc.request_id = task.at(\"request_id\").get<int>();");
     code.e("if (task.at(\"trigger_event\").is_number_integer()) {");
@@ -714,8 +715,8 @@ TaskGraphResult print_task_graph(
     code.e("");
   }
 
-  code.e(
-      "static void _init_persistent_kernel(std::vector<TaskDesc> &all_tasks,");
+  code.e("static void _init_persistent_kernel(std::vector<FullTaskDesc> "
+         "&all_tasks,");
   code.e("                                    std::vector<EventDesc> "
          "&all_events,");
   code.e("                                  std::vector<TaskId> &first_tasks,");
@@ -817,7 +818,7 @@ TaskGraphResult print_task_graph(
       {"all_tasks", {}}, {"all_events", {}}, {"first_tasks", {}}};
   // generate task[0]
   {
-    tgbody.e("all_tasks.push_back(TaskDesc(TASK_TERMINATE));");
+    tgbody.e("all_tasks.push_back(FullTaskDesc(TASK_TERMINATE));");
     json_task_graph["all_tasks"].push_back(
         json{{"task_type", TASK_TERMINATE},
              {"variant_id", 0},
@@ -829,7 +830,7 @@ TaskGraphResult print_task_graph(
   }
   // generate task[1]
   {
-    tgbody.e("all_tasks.push_back(TaskDesc(TASK_BEGIN_TASK_GRAPH));");
+    tgbody.e("all_tasks.push_back(FullTaskDesc(TASK_BEGIN_TASK_GRAPH));");
     json_task_graph["all_tasks"].push_back(
         json{{"task_type", TASK_BEGIN_TASK_GRAPH},
              {"variant_id", 0},
@@ -881,11 +882,11 @@ TaskGraphResult print_task_graph(
               if (tgt_gpu_id == my_gpu_id) {
                 continue;
               }
-              TaskDesc task_desc = all_tasks[task_pos];
+              FullTaskDesc task_desc = all_tasks[task_pos];
               assert(task_desc.task_type == TASK_NVSHMEM_COPY);
               tgbody.e("// task[$]", task_pos);
               tgbody.e("{");
-              tgbody.e("TaskDesc task_desc(static_cast<TaskType>($));",
+              tgbody.e("FullTaskDesc task_desc(static_cast<TaskType>($));",
                        task_desc.task_type);
               bool is_nvshmem_event =
                   ((task_desc.trigger_event & EVENT_NVSHMEM_TAG) > 0);
@@ -1020,7 +1021,7 @@ TaskGraphResult print_task_graph(
     for (int i = 0;
          i < bgraph.grid_dim.x * bgraph.grid_dim.y * bgraph.grid_dim.z;
          i++) {
-      TaskDesc task_desc = all_tasks[task_pos];
+      FullTaskDesc task_desc = all_tasks[task_pos];
       assert(task_desc.task_type == task_type || task_type == TASK_ALLREDUCE);
       // find current task in grid_dim
       for (int j = 0;
@@ -1039,7 +1040,7 @@ TaskGraphResult print_task_graph(
       assert(task_pos == (task_id & 0xffffffff));
       tgbody.e("// task[$]", task_pos);
       tgbody.e("{");
-      tgbody.e("TaskDesc task_desc(static_cast<TaskType>($));",
+      tgbody.e("FullTaskDesc task_desc(static_cast<TaskType>($));",
                task_desc.task_type);
       tgbody.e("task_desc.head_group = $;", task_desc.head_group);
       size_t gpu_id = ((task_desc.trigger_event >> 32) & 0xffff);
@@ -1326,7 +1327,7 @@ TaskGraphResult print_task_graph(
       "TASK_LINEAR_WITH_RESIDUAL_SM100";
 
   code.e("__device__ __forceinline__");
-  code.e("void _execute_task(TaskDesc const& task_desc,");
+  code.e("void _execute_task(TaskDesc const* task_desc,");
   code.e("                   RuntimeConfig const &runtime_config) {");
   TaskRegister *task_register = TaskRegister::get_instance();
   bool first_task = true;
@@ -1334,7 +1335,7 @@ TaskGraphResult print_task_graph(
     for (size_t variant_id = 0; variant_id < task.second.size(); variant_id++) {
       std::string cond = first_task ? "if" : "else if";
       assert(task_type_to_name.find(task.first) != task_type_to_name.end());
-      code.e("$ (task_desc.task_type == $ && task_desc.variant_id == $) {",
+      code.e("$ (task_desc->task_type == $ && task_desc->variant_id == $) {",
              cond,
              task_type_to_name[task.first],
              variant_id);
@@ -1356,7 +1357,7 @@ TaskGraphResult print_task_graph(
 }
 
 TaskGraphResult Graph::generate_task_graph(int _num_gpus, int _my_gpu_id) {
-  std::vector<TaskDesc> all_tasks;
+  std::vector<FullTaskDesc> all_tasks;
   std::vector<EventDesc> all_events;
   std::vector<TaskId> first_tasks;
   int num_gpus, my_gpu_id;
@@ -1367,7 +1368,7 @@ TaskGraphResult Graph::generate_task_graph(int _num_gpus, int _my_gpu_id) {
   // add the termination event to the event lists
   EventDesc e(EVENT_TERMINATION, 1, 0, 0);
   all_events.push_back(e);
-  TaskDesc t(TASK_TERMINATE, 0 /*variant_id*/);
+  FullTaskDesc t(TASK_TERMINATE, 0 /*variant_id*/);
   all_tasks.push_back(t);
   register_mugraph(*this,
                    num_gpus,

@@ -20,14 +20,24 @@
 namespace mirage {
 namespace runtime {
 
-#if MPK_TARGET_CC >= 90
-constexpr int MAX_SHARE_MEMORY_SIZE = 224 * 1024;
-#elif MPK_TARGET_CC >= 86
-constexpr int MAX_SHARE_MEMORY_SIZE = 96 * 1024;
-#elif MPK_TARGET_CC >= 80
-constexpr int MAX_SHARE_MEMORY_SIZE = 160 * 1024;
+#if defined(MIRAGE_GRACE_HOPPER) || defined(MIRAGE_GRACE_BLACKWELL)
+constexpr int WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE = 9 * 1024;
 #else
-constexpr int MAX_SHARE_MEMORY_SIZE = 160 * 1024;
+constexpr int WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE = 3 * 1024;
+#endif
+
+#if MPK_TARGET_CC >= 90
+constexpr int MAX_DYNAMIC_SHARED_MEMORY_SIZE =
+    227 * 1024 - WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE;
+#elif MPK_TARGET_CC >= 86
+constexpr int MAX_DYNAMIC_SHARED_MEMORY_SIZE =
+    99 * 1024 - WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE;
+#elif MPK_TARGET_CC >= 80
+constexpr int MAX_DYNAMIC_SHARED_MEMORY_SIZE =
+    163 * 1024 - WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE;
+#else
+constexpr int MAX_DYNAMIC_SHARED_MEMORY_SIZE =
+    163 * 1024 - WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE;
 #endif
 
 typedef unsigned long long int TaskId;
@@ -122,12 +132,12 @@ struct EventDesc {
   TaskId first_task_id, last_task_id;
 };
 
-struct TaskDesc {
-  TaskDesc(TaskType t, int _variant_id)
+struct FullTaskDesc {
+  FullTaskDesc(TaskType t, int _variant_id)
       : task_type(t), variant_id(_variant_id), num_inputs(0), num_outputs(0),
         trigger_event(EVENT_INVALID_ID), dependent_event(EVENT_INVALID_ID),
         request_id(-1) {}
-  TaskDesc() {}
+  FullTaskDesc() {}
   TaskType task_type;
   unsigned variant_id;
   int num_inputs, num_outputs;
@@ -135,6 +145,47 @@ struct TaskDesc {
   EventId dependent_event;
   TensorDesc inputs[MAX_INPUTS_PER_TASK];
   TensorDesc outputs[MAX_OUTPUTS_PER_TASK];
+  int request_id; // Used for paged attention
+  int head_group; // Used for paged attention hopper
+};
+
+struct alignas(16) TaskDesc {
+  TaskDesc(FullTaskDesc t)
+      : task_type(t.task_type), variant_id(t.variant_id),
+        trigger_event(t.trigger_event), dependent_event(t.dependent_event),
+        request_id(t.request_id), head_group(t.head_group) {
+    for (int i = 0; i < t.num_inputs; i++) {
+      input_ptrs[i] = t.inputs[i].base_ptr;
+    }
+    for (int i = 0; i < t.num_outputs; i++) {
+      output_ptrs[i] = t.outputs[i].base_ptr;
+    }
+#ifdef MPK_ENABLE_TMA
+    for (int i = 0; i < t.num_inputs; i++) {
+      for (int k = 0; k < mirage::config::MAX_TMA_DESC_PER_TENSOR; k++) {
+        input_tma_desc_ptrs[i][k] = t.inputs[i].tma_desc_ptrs[k];
+      }
+    }
+    for (int i = 0; i < t.num_outputs; i++) {
+      for (int k = 0; k < mirage::config::MAX_TMA_DESC_PER_TENSOR; k++) {
+        output_tma_desc_ptrs[i][k] = t.outputs[i].tma_desc_ptrs[k];
+      }
+    }
+#endif
+  }
+  TaskDesc() {}
+  TaskType task_type;
+  unsigned variant_id;
+  EventId trigger_event;
+  EventId dependent_event;
+  void *input_ptrs[MAX_INPUTS_PER_TASK];
+  void *output_ptrs[MAX_OUTPUTS_PER_TASK];
+#ifdef MPK_ENABLE_TMA
+  void *input_tma_desc_ptrs[MAX_INPUTS_PER_TASK]
+                           [mirage::config::MAX_TMA_DESC_PER_TENSOR];
+  void *output_tma_desc_ptrs[MAX_INPUTS_PER_TASK]
+                            [mirage::config::MAX_TMA_DESC_PER_TENSOR];
+#endif
   int request_id; // Used for paged attention
   int head_group; // Used for paged attention hopper
 };

@@ -25,14 +25,14 @@ template <typename T,
           int NUM_THREADS,
           int BARRIER_ID = 9>
 __device__ __forceinline__ void rms_norm_hopper(InputSmem smem_input,
-                                            T const *weight_ptr,
-                                            float *reduce_smem,
-                                            float eps,
-                                            int window_size,
-                                            int token_offset = 0,
-                                            bool rotary_emd = false,
-                                            T const *cos_ptr = nullptr,
-                                            T const *sin_ptr = nullptr) {
+                                                T const *weight_ptr,
+                                                float *reduce_smem,
+                                                float eps,
+                                                int window_size,
+                                                int token_offset = 0,
+                                                bool rotary_emd = false,
+                                                T const *cos_ptr = nullptr,
+                                                T const *sin_ptr = nullptr) {
   // For __syncthread divergence dead lock.
   static_assert(NUM_THREADS <= HEAD_DIM || HEAD_DIM % 32 == 0);
   // smem_input: NUM_HEADS * (WINDOW_SIZE or CHUNK_SIZE), HEAD_DIM
