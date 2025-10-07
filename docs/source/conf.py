@@ -59,6 +59,7 @@ extensions = [
     'sphinx_rtd_theme',
     'sphinx.ext.autodoc',
     'm2r2',
+    'sphinxcontrib.mermaid',
 ]
 
 # Theme options are theme-specific and customize the look and feel of a theme
