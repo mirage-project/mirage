@@ -3,10 +3,13 @@ from itertools import combinations as comb
 import time
 import mirage as mi
 import json
+import numpy as np
 from op import Operator
 from build_computation_graph import get_computation_graph
 from build_dataset import augment_partitions, serialize_subgraphs_to_json
 import os
+from generate_dag import solve_partitions, cost_function
+from graph_splitter import process_operator_graph
 
 def copy_subgraph(subgraph):
     new_subgraph = {}
@@ -316,6 +319,85 @@ def generate_all_kernels(model, dummy_inputs, root_dir, dataset_name, min_num_op
     json.dump(performance, open(os.path.join(root_dir, f"{dataset_name}_performance.json"), "w"))
     
     return all_kernels, kernel_input_dims
+
+def partition_graph_with_dp(model, 
+                          dummy_input, 
+                          IGNORE_OPS=None, 
+                          UNSUPPORTED_OPS=None,
+                          max_nodes_per_partition=4,
+                          ):
+    """
+    Graph partitioning using graph_splitter + DP partitioning
+    
+    """
+    
+    from graph_splitter import process_operator_graph
+    from generate_dag import solve_partitions, cost_function
+    import numpy as np
+    
+    print("Building computation graph...")
+    unique_operators = {}
+    operators = get_computation_graph(model, dummy_input, unique_operators, "onnx")
+    
+    print("Splitting graph into supported/unsupported subgraphs...")
+    if IGNORE_OPS is None:
+        IGNORE_OPS = {"Identity", "Cast", "Constant", "Dropout"}
+    if UNSUPPORTED_OPS is None:
+        UNSUPPORTED_OPS = set()
+        
+    subgraphs, deps, sorted_ops = process_operator_graph(operators, IGNORE_OPS, UNSUPPORTED_OPS)
+    
+    print("Applying dynamic programming partitioning to large Mirage subgraphs...")
+    
+    partitions = []
+    hashes = set()
+    
+    for sg_id, (sg_dict, sg_type) in enumerate(subgraphs):
+        if sg_type == "mirage" and len(sg_dict) > max_nodes_per_partition:
+            print(f"  Partitioning subgraph {sg_id} ({len(sg_dict)} ops)...")
+            
+            # Extract operators in topological order
+            ops_list = [op for op in sorted_ops if op in sg_dict] 
+            n = len(ops_list)
+            adj = np.zeros((n, n), dtype=int)
+            
+            # Build adjacency matrix
+            for i, op in enumerate(ops_list):
+                for output_op in op.output_ops:
+                    if output_op in ops_list:
+                        j = ops_list.index(output_op)
+                        adj[i][j] = 1
+            
+            # Apply DAG partitioning with connectivity constraint
+            def cost_function_with_adj(nodes):
+                return cost_function(nodes, adj)
+            partition_boundaries = solve_partitions(list(range(n)), cost_function_with_adj, max_nodes_per_partition, adj)
+            
+            # Convert partitions to kernel graphs
+            for p_id, boundary in enumerate(partition_boundaries):
+                start = 0 if p_id == 0 else partition_boundaries[p_id-1] 
+                partition_ops = ops_list[start:boundary]
+                
+                print(f"Partition {p_id}: {[op.name for op in partition_ops]}")
+                
+                partition_subgraph = {}
+                for op in partition_ops:
+                    partition_subgraph[op] = True
+                
+                    kernel_graph, dims = to_kernel_graph(partition_subgraph)
+                    graph_hash = kernel_graph.get_owner_independent_hash()
+                    if graph_hash in hashes:
+                        continue
+                    hashes.add(graph_hash)
+                    kernel_graph.to_json(f"original_{graph_hash}.json")
+                    try:
+                        print(f"Superoptimizing {graph_hash}")
+                        optimized_graph, best_perf = kernel_graph.superoptimize()
+                    except Exception as e:
+                        print(f"Subgraph {graph_hash} superoptimize failed with error: {e}")
+                        continue
+                    
+     
 
 def time_kernels(kernels, input_dims, device, iterations=1):
     times = []
