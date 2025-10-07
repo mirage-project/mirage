@@ -17,6 +17,7 @@
 #include "utils.cuh"
 namespace kernel {
 
+// BATCH_SIZE is not used here, probably because it is implicitly encoded by the factor between the output_size and output_ptr offsets
 template <typename T,
           int BATCH_SIZE,
           int OUTPUT_SIZE,

@@ -69,3 +69,10 @@ kernel*.cu
 test/[!.]*
 report
 ncu_tmp
+
+#logs
+*.txt
+*.csv
+anthony_scratch/
+compiled_output/
+venv
