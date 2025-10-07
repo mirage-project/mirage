@@ -6,6 +6,7 @@ import json
 from op import Operator
 from build_computation_graph import get_computation_graph
 from build_dataset import augment_partitions, serialize_subgraphs_to_json
+import os
 
 def copy_subgraph(subgraph):
     new_subgraph = {}
@@ -60,9 +61,9 @@ def get_partitions_helper(op_node, curr_subgraph, num_ops, min_num_ops, max_num_
         visited.add(id(output_op.name))
         
         # .union(COMPOSITE_OPS) ensures that no second operator of a subgraph is composite op
-        if output_op.fn in UNSUPPORTED_OPS:
+        if output_op.fn in UNSUPPORTED_OPS.union(IGNORE_OPS):
             return
-        
+
         input_dims = len(output_op.input_tensor_shapes[0][0])
         if input_dims == 0:
             return
@@ -276,39 +277,44 @@ def to_kernel_graph(subgraph):
         if tsr_cnt[1] == 0: graph.mark_output(tsr_cnt[0])
     return graph, dims
         
-def generate_all_kernels(model, dummy_inputs, min_num_ops=2, max_num_ops=4, UNSUPPORTED_OPS=set(), COMPOSITE_OPS=set(), IGNORE_OPS=set(), dataset_name=None):
-    subgraphs, _ = partition_graph_with_sampling(model, dummy_inputs, min_num_ops, max_num_ops, 5, UNSUPPORTED_OPS, COMPOSITE_OPS, IGNORE_OPS)
+def generate_all_kernels(model, dummy_inputs, root_dir, dataset_name, min_num_ops=2, max_num_ops=4, aug_factor=5, UNSUPPORTED_OPS=set(), COMPOSITE_OPS=set(), IGNORE_OPS=set()):
+    subgraphs, _ = partition_graph_with_sampling(model, dummy_inputs, min_num_ops, max_num_ops, aug_factor, UNSUPPORTED_OPS, COMPOSITE_OPS, IGNORE_OPS)
     kernel_input_dims = []
     all_kernels = []
-    hashes = set()
+    
+    done = [int(f.split("_")[1].split(".")[0]) for f in os.listdir(root_dir) if f.startswith("optimized_")]
+    hashes = set(done)
+
     performance = {}
     for subgraph in subgraphs:
         kernel_graph, dims = to_kernel_graph(subgraph)
-        
+    
         # check for duplicate subgraphs
         graph_hash = kernel_graph.get_owner_independent_hash()
         if graph_hash in hashes:
             continue
         hashes.add(graph_hash)
 
+        # save original mugraph
+        kernel_graph.to_json(os.path.join(root_dir, f"original_{graph_hash}.json"))
+        
         try:
             print(f"Superoptimizing {graph_hash}")
             optimized_graph, best_perf = kernel_graph.superoptimize()
         except Exception as e:
             print(f"Subgraph {graph_hash} superoptimize failed with error: {e}")
             continue
-        
-        # save original mugraph
-        kernel_graph.to_json(f"original_{graph_hash}.json")
-        
+                
         performance[graph_hash] = best_perf
-        optimized_graph.to_json(f"optimized_{graph_hash}.json")
+
+        # save optimized mugraph
+        optimized_graph.to_json(os.path.join(root_dir, f"optimized_{graph_hash}.json"))
         all_kernels.append(optimized_graph)
         kernel_input_dims.append(dims)
-    if dataset_name is not None:
-        json.dump(performance, open(f"{dataset_name}_performance.json", "w"))
-    else:
-        json.dump(performance, open("performance.json", "w"))
+    
+    # save performance
+    json.dump(performance, open(os.path.join(root_dir, f"{dataset_name}_performance.json"), "w"))
+    
     return all_kernels, kernel_input_dims
 
 def time_kernels(kernels, input_dims, device, iterations=1):
