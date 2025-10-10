@@ -364,7 +364,8 @@ void register_mugraph(
               (task_type == TASK_SINGLE_BATCH_EXTEND_ATTENTION) ||
               (task_type == TASK_PAGED_ATTENTION_1) ||
               (task_type == TASK_PAGED_ATTENTION_2) ||
-              (task_type == TASK_PAGED_ATTENTION_HOPPER)) {
+              (task_type == TASK_PAGED_ATTENTION_HOPPER) ||
+              (task_type == TASK_ATTN_SM100)) {
             // Note that we assume grid_dim.x corresponds to
             // the request dimension
             task.request_id = bid.x;
@@ -691,7 +692,7 @@ TaskGraphResult print_task_graph(
     code.e("}");
     // SM100 Tasks
     code.e("if (task.at(\"task_type\") > TASK_SM100_TASK_BEGIN && "
-           "task.at(\"task_type\") < TASK_SM100_TASK_END) {");
+           "task.at(\"task_type\") < TASK_ATTN_SM100) {");
     code.e("create_tma_desc_by_task(task_desc);");
     code.e("}");
     code.e("#endif");
@@ -1330,6 +1331,9 @@ TaskGraphResult print_task_graph(
   task_type_to_name[TASK_LINEAR_SM100] = "TASK_LINEAR_SM100";
   task_type_to_name[TASK_LINEAR_WITH_RESIDUAL_SM100] =
       "TASK_LINEAR_WITH_RESIDUAL_SM100";
+  task_type_to_name[TASK_ATTN_SM100] = "TASK_ATTN_SM100";
+  task_type_to_name[TASK_ARGMAX_PARTIAL_SM100] = "TASK_ARGMAX_PARTIAL_SM100";
+  task_type_to_name[TASK_ARGMAX_REDUCE_SM100] = "TASK_ARGMAX_REDUCE_SM100";
 
   code.e("__device__ __forceinline__");
   code.e("void _execute_task(TaskDesc const* task_desc,");

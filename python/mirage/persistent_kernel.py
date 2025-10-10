@@ -598,10 +598,12 @@ class PersistentKernel:
             ],
             tb_graph,
         )
-        task_name = "paged_attention"
         if self.target_cc == 90:
-            task_name = "paged_attention_hopper"
-        self.kn_graph.register_task(tb_graph, task_name, params)
+            self.kn_graph.register_task(tb_graph, "paged_attention_hopper", params)
+        elif self.target_cc == 100:
+            self.kn_graph.register_task(tb_graph, "paged_attention_sm100", params)
+        else:
+            self.kn_graph.register_task(tb_graph, "paged_attention", params)
 
     def linear_layer(
         self,
@@ -756,7 +758,10 @@ class PersistentKernel:
         tb_graph.new_input(output_value, (1, 0, -1), -1, True)
         tb_graph.new_input(output_index, (1, 0, -1), -1, True)
         self.kn_graph.customized([input, output_value, output_index], tb_graph)
-        self.kn_graph.register_task(tb_graph, "argmax_partial", [num_tasks])
+        if self.target_cc == 100:
+            self.kn_graph.register_task(tb_graph, "argmax_partial_sm100", [num_tasks])
+        else:
+            self.kn_graph.register_task(tb_graph, "argmax_partial", [num_tasks])
 
     def argmax_reduce_layer(
         self,
@@ -776,9 +781,14 @@ class PersistentKernel:
         tb_graph.new_input(input_index, (1, 0, -1), -1, True)
         tb_graph.new_input(output, (0, 1, -1), -1, True) #TODO: Make sure the output map is expected
         self.kn_graph.customized([input_value, input_index, output], tb_graph)
-        self.kn_graph.register_task(
-            tb_graph, "argmax_reduce", [self.argmax_partial_output_size]
-        )
+        if self.target_cc == 100:
+            self.kn_graph.register_task(
+                tb_graph, "argmax_reduce_sm100", [self.argmax_partial_output_size]
+            )
+        else:
+            self.kn_graph.register_task(
+                tb_graph, "argmax_reduce", [self.argmax_partial_output_size]
+            )
         
     def find_ngram_partial_layer(
         self, input: DTensor, output: DTensor, grid_dim: tuple, block_dim: tuple, ngram_size: int = 3):

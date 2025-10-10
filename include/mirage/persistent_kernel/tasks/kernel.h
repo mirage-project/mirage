@@ -26,4 +26,6 @@
 #include "hopper/silu_mul_hopper.cuh"
 // SM100 kernels
 #include "blackwell/linear_sm100_mpk.cuh"
+#include "blackwell/attention_sm100.cuh"
+#include "blackwell/argmax_sm100.cuh"
 

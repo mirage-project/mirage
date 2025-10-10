@@ -571,7 +571,20 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
         customized->bgraph, params, true /*with_residual*/);
     task_config[op] =
         std::make_tuple(3, 1, TASK_LINEAR_WITH_RESIDUAL_SM100, variant_id);
-  } else {
+  } else if (name == "paged_attention_sm100"){
+    int variant_id = task_register->register_paged_attention_sm100_task(
+        customized->bgraph, params);
+    task_config[op] = std::make_tuple(7, 1, TASK_ATTN_SM100, variant_id);
+  } else if (name == "argmax_partial_sm100") {
+    int variant_id = task_register->register_argmax_partial_sm100_task(
+        customized->bgraph, params);
+    task_config[op] = std::make_tuple(1, 2, TASK_ARGMAX_PARTIAL_SM100, variant_id);
+  } else if (name == "argmax_reduce_sm100") {
+    int variant_id = task_register->register_argmax_reduce_sm100_task(
+        customized->bgraph, params);
+    task_config[op] = std::make_tuple(2, 1, TASK_ARGMAX_REDUCE_SM100, variant_id);
+  }
+  else {
     assert(false && "Unsupported task type");
   }
 }
