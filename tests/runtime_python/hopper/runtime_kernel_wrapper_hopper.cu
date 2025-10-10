@@ -58,7 +58,7 @@ template <typename T,
           typename TMA_A,
           typename TMA_B,
           typename TMA_OUT,
-          int Kstages = 2>
+          int Kstages = 4>
 __global__
     __launch_bounds__(256, 1) void linear_kernel_swapAB_no_residual_hopper_wrapper(
         const __grid_constant__ TMA_A tma_a,
@@ -97,7 +97,7 @@ void launch_linear_swapAB(void *input_ptr,
   constexpr int OUTPUT_TMA_CP_SIZE = OUTPUT_SIZE < 64 ? OUTPUT_SIZE : 64;
   constexpr int OUTPUT_ATOM_REPEAT_COL = 1;
 
-  constexpr int SMEM_M_SIZE = 16;
+  constexpr int SMEM_M_SIZE = BATCH_SIZE <= 8 ? 8 : 16;
   using TMA_B =
       kernel::tma::tma_2d<bfloat16,
                           B,
@@ -1388,6 +1388,7 @@ void linear_kernel(torch::Tensor input,
 // }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+
   m.def("linear", &linear_kernel, "Linear kernel");
   m.def("linear_swapAB", &linear_swapAB_kernel, "Linear swapAB kernel");
   // m.def("norm_linear", &norm_linear_kernel, "NormLinear kernel");

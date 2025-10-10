@@ -64,7 +64,7 @@ struct tma_2d {
   }
 
 public:
-  template <int NDIM>
+  template <int NDIM, typename Barrier>
   __device__ inline void tma_cp_async(Barrier &mbar,
                                       T *smem_ptr,
                                       int const (&tma_coords)[NDIM]) const {
@@ -89,7 +89,7 @@ public:
     }
   }
 
-  template <int NDIM>
+  template <int NDIM, typename Barrier>
   __device__ inline void launch_tma_cp_async(
       Barrier &mbar, T *smem_ptr, int const (&tma_coords)[NDIM]) const {
 #if defined(MIRAGE_GRACE_HOPPER) || defined(MIRAGE_GRACE_BLACKWELL)

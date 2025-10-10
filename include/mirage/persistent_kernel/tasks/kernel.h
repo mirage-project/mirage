@@ -15,9 +15,15 @@
 #include "speculative_decoding/prompt_lookup.cuh"
 #include "speculative_decoding/target_verify.cuh"
 // Hopper kernels
+#include "cute/hopper/gemm_ws.cuh"
+#include "cute/hopper/gemm_ws_cooperative.cuh"
+#include "cute/hopper/gemm_ws_mpk.cuh"
+#include "hopper/embedding_hopper.cuh"
 #include "hopper/linear_hopper.cuh"
 #include "hopper/linear_swapAB_hopper.cuh"
 #include "hopper/multitoken_paged_attention_hopper.cuh"
 #include "hopper/rmsnorm_hopper.cuh"
+#include "hopper/silu_mul_hopper.cuh"
 // SM100 kernels
 #include "blackwell/linear_sm100_mpk.cuh"
+

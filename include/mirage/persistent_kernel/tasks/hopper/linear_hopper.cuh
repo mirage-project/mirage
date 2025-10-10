@@ -128,7 +128,8 @@ __device__ __forceinline__ void
   constexpr size_t TOTAL_SHARED_MEMORY =
       SHARED_RESIDUAL_DONE_OFFSET + 8 * Kstages;
 
-  static_assert(TOTAL_SHARED_MEMORY <= 224 * 1024);
+  static_assert(TOTAL_SHARED_MEMORY <=
+                mirage::runtime::MAX_DYNAMIC_SHARED_MEMORY_SIZE);
 
   // copy input
   T *shared_input = (T *)(smem + SHARED_INPUT_BUFFER_OFFSET);
@@ -214,7 +215,7 @@ __device__ __forceinline__ void
   // warp specialization data movement warpgroup
   if (warpgroup_id == NUM_WARPGROUPS - 1) {
 
-    wg_decrease_regs<32>();
+    // wg_decrease_regs<32>();
     if (lane_id() == 0 && warp_idx == (NUM_WARPGROUPS * WARPGROUP_WARPS - 4)) {
       for (int output_atom_idx = 0; output_atom_idx < NUM_ITER_N;
            output_atom_idx++) {
@@ -262,7 +263,7 @@ __device__ __forceinline__ void
     }
   } else {
     // warp specialization compute warpgroup
-    wg_increase_regs<160>();
+    // wg_increase_regs<160>();
     float s_frag[OUTPUT_ATOM_SIZE / 2];
     for (int output_atom_idx = 0; output_atom_idx < NUM_ITER_N;
          output_atom_idx++) {

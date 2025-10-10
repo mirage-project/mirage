@@ -20,16 +20,18 @@ cuda_library_dirs = [
 ]
 
 setup(
-    name='runtime_kernel_hopper',
+    name='runtime_kernel_cute_hopper',
     ext_modules=[
         CUDAExtension(
-            name='runtime_kernel_hopper',
+            name='runtime_kernel_cute_hopper',
             sources=[
-                os.path.join(this_dir, 'runtime_kernel_wrapper_hopper.cu'),
+                os.path.join(this_dir, 'gemm.cu'),
             ],
             include_dirs=[
-                os.path.join(this_dir, '../../../include/mirage/persistent_kernel/tasks'),
-                os.path.join(this_dir, '../../../include'),
+                os.path.join(this_dir, '../../../../include/mirage/persistent_kernel/tasks/cute/hopper'),
+                os.path.join(this_dir, '../../../../include'),
+                os.path.join(this_dir, '../../../../deps/cutlass/include'),
+                os.path.join(this_dir, '../../../../deps/cutlass/tools/util/include'),
             ],
             libraries=["cuda"],
             library_dirs=cuda_library_dirs,
@@ -39,11 +41,9 @@ setup(
                 'nvcc': [
                     '-O3',
                     '-gencode=arch=compute_90a,code=sm_90a',
-                    '-DMIRAGE_BACKEND_USE_CUDA',
                     '-DMIRAGE_GRACE_HOPPER',
                     '-DMIRAGE_PROFILE_HOPPER',
                     '-DMIRAGE_BACKEND_USE_CUDA',
-                    # '-DMIRAGE_PROFILE_HOPPER',
                 ]
             }
         )

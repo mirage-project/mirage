@@ -27,5 +27,8 @@ constexpr int NUM_WARPS = 4;
 constexpr int WARPGROUP_WARPS = 4;
 
 constexpr float inf = 5e4;
-
-constexpr int WORKER_NUM_THREADS = 256; // Grace Hopper setting
+// TODO: only setting this for Hopper can have compilation issues on blackwell and presumably ampere
+#if defined(MIRAGE_GRACE_HOPPER) || defined(MIRAGE_GRACE_BLACKWELL)
+constexpr int WORKER_NUM_THREADS = 256;   // Grace Hopper setting
+constexpr int CONSUMER_NUM_THREADS = 128; // Grace Hopper setting
+#endif

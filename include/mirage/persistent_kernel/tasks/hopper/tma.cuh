@@ -35,5 +35,10 @@ __device__ static inline void store_async_wait() {
   asm volatile("cp.async.bulk.wait_group %0;" : : "n"(N) : "memory");
 }
 
+__device__ __forceinline__ void prefetch_tma_descriptor(CUtensorMap const *p) {
+  uint64_t gmem_int_desc = reinterpret_cast<uint64_t>(p);
+  asm volatile("prefetch.tensormap [%0];" ::"l"(gmem_int_desc) : "memory");
+}
+
 } // namespace tma
 } // namespace kernel

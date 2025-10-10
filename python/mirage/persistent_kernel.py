@@ -140,6 +140,7 @@ def get_compile_command(
         f"-I{mirage_inc_path}",
         f"-I{os.path.join(mirage_inc_path, 'mirage/persistent_kernel')}",
         f"-I{os.path.join(mirage_deps_path, 'cutlass/include')}",
+        f"-I{os.path.join(mirage_deps_path, 'cutlass/tools/util/include')}",
         f"-I{os.path.join(mirage_home_path, 'deps/json/include')}",
         f"-DMAX_WORKER_PER_SCHEDULER={max_worker_per_scheduler}",
     ]
@@ -347,7 +348,7 @@ class PersistentKernel:
         tb_graph.new_input(weight, (1, -1, -1), -1, True)
         tb_graph.new_input(output, (1, 0, -1), -1, True)
         self.kn_graph.customized([input, weight, output], tb_graph)
-        self.kn_graph.register_task(tb_graph, "embedding", [input_source])
+        self.kn_graph.register_task(tb_graph, "embedding_hopper" if self.target_cc == 90 else "embedding", [input_source])
 
     def rmsnorm_layer(
         self,
@@ -619,13 +620,19 @@ class PersistentKernel:
         tb_graph.new_input(weight, (0, -1, -1), 1, True)
         tb_graph.new_input(output, (1, -1, -1), -1, True)
         self.kn_graph.customized([input, weight, output], tb_graph)
-        impl_name = "linear"
-        if self.target_cc == 90:
-            impl_name = "linear_swapAB_hopper"
-        elif self.target_cc == 100:
-            impl_name = "linear_sm100"
-        self.kn_graph.register_task(tb_graph, impl_name)
 
+        if self.target_cc == 100:
+            self.kn_graph.register_task(tb_graph, "linear_sm100")
+        elif self.target_cc == 90:
+            if weight.dim(0) // grid_dim[0] <= 64:
+                self.kn_graph.register_task(tb_graph, "linear_swapAB_hopper")
+                # self.kn_graph.register_task(tb_graph, "linear_cutlass_hopper")
+            else:
+                self.kn_graph.register_task(tb_graph, "linear_swapAB_hopper")
+        elif self.target_cc == 80:
+            self.kn_graph.register_task(tb_graph, "linear")
+        else:
+            assert False
 
     def linear_with_residual_layer(
         self,
@@ -647,12 +654,19 @@ class PersistentKernel:
         tb_graph.new_input(residual, (1, -1, -1), -1, True)
         tb_graph.new_input(output, (1, -1, -1), -1, True)
         self.kn_graph.customized([input, weight, residual, output], tb_graph)
-        impl_name = "linear_with_residual"
-        if self.target_cc == 90:
-            impl_name = "linear_swapAB_with_residual_hopper"
-        elif self.target_cc == 100:
-            impl_name = "linear_with_residual_sm100"
-        self.kn_graph.register_task(tb_graph, impl_name)
+        
+        if self.target_cc == 100:
+            self.kn_graph.register_task(tb_graph, "linear_with_residual_sm100")
+        elif self.target_cc == 90:
+            if weight.dim(0) // grid_dim[0] <= 64:
+                # self.kn_graph.register_task(tb_graph, "linear_cutlass_with_residual_hopper")
+                self.kn_graph.register_task(tb_graph, "linear_swapAB_with_residual_hopper")
+            else:
+                self.kn_graph.register_task(tb_graph, "linear_swapAB_with_residual_hopper")
+        elif self.target_cc == 80:
+            self.kn_graph.register_task(tb_graph, "linear_with_residual")
+        else:
+            assert False
 
     def allreduce_layer(
         self,
@@ -687,7 +701,7 @@ class PersistentKernel:
         tb_graph.new_input(input, (1, -1, -1), 1, True)
         tb_graph.new_input(output, (1, -1, -1), 1, True)
         self.kn_graph.customized([input, output], tb_graph)
-        self.kn_graph.register_task(tb_graph, "silu_mul")
+        self.kn_graph.register_task(tb_graph, "silu_mul_hopper" if self.target_cc == 90 else "silu_mul")
 
     def silu_mul_linear_with_residual_layer(
         self,
