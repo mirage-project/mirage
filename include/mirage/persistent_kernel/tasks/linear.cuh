@@ -23,8 +23,6 @@
 #include "reduction.cuh"
 #include "smem_layout.cuh"
 #include "utils.cuh"
-
-#include <cutlass/arch/barrier.h>   
 namespace kernel {
 
 using bfloat16 = type::bfloat16_t;
@@ -67,9 +65,10 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
   constexpr int CHUNKS_PER_COL_B = TILE_SIZE / CHUNK_SIZE;
   constexpr int CHUNKS_PER_ROW_C = OUTPUT_SIZE / CHUNK_SIZE;
 
-    constexpr int TOTAL_WEIGHT_BLOCKS_TO_LOAD = FORLOOP_RANGE * NUM_OUTPUT_ATOMS; // For global pipe loading
-    constexpr int WEIGHT_PIPE_MAX = PIPE_MAX < TOTAL_WEIGHT_BLOCKS_TO_LOAD ? PIPE_MAX : TOTAL_WEIGHT_BLOCKS_TO_LOAD;
-    constexpr int INPUT_PIPE_MAX = WEIGHT_PIPE_MAX;
+  constexpr int log2_CHUNK_SIZE = log2_constexpr(CHUNK_SIZE);
+  constexpr int log2_CHUNKS_PER_ROW_A = log2_constexpr(CHUNKS_PER_ROW_A);
+  constexpr int log2_CHUNKS_PER_COL_B = log2_constexpr(CHUNKS_PER_COL_B);
+  constexpr int log2_CHUNKS_PER_ROW_C = log2_constexpr(CHUNKS_PER_ROW_C);
 
   // using SM80_16x8x16_F16F16F16F16_TNX2 = 16X16X16
   constexpr int NUM_WARPS_N =
@@ -85,16 +84,13 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
   constexpr int NUM_ITERS_K =
       (TILE_SIZE + NUM_WARPS_K * 16 - 1) / (NUM_WARPS_K * 16);
 
-    constexpr int log2_CHUNK_SIZE = log2_constexpr(CHUNK_SIZE);
-    constexpr int log2_CHUNKS_PER_ROW_A = log2_constexpr(CHUNKS_PER_ROW_A);
-    constexpr int log2_CHUNKS_PER_COL_B = log2_constexpr(CHUNKS_PER_COL_B);
-    constexpr int log2_CHUNKS_PER_ROW_C = log2_constexpr(CHUNKS_PER_ROW_C);
+  constexpr int log2_NUM_WARPS_N = log2_constexpr(NUM_WARPS_N);
+  constexpr int log2_NUM_ITERS_K = log2_constexpr(NUM_ITERS_K);
 
-    // using SM80_16x8x16_F16F16F16F16_TNX2 = 16X16X16
-    constexpr int NUM_WARPS_N = 4; // We always use NUM_WARPS_K = 1 and NUM_WARPS_N = 4
-    constexpr int NUM_WARPS_K = 4 / NUM_WARPS_N;
-    // Do not support split K for now
-    static_assert(NUM_WARPS_K == 1);
+  int warp_idx = warp_id();
+  int warp_row = warp_idx >> log2_NUM_WARPS_N;
+  int warp_col = warp_idx & (NUM_WARPS_N - 1);
+  int lane_idx = lane_id();
 
   T const *__restrict__ d_input = static_cast<T const *>(input_ptr);
   T const *__restrict__ d_weight = static_cast<T const *>(weight_ptr);
@@ -111,25 +107,16 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
   using ResidualDmem = dmem_row_const<T, BATCH_SIZE, OUTPUT_SIZE, O_STRIDE>;
   using OutputDmem = dmem_row<T, BATCH_SIZE, OUTPUT_SIZE, O_STRIDE>;
 
-    int warp_idx = warp_id();
-    int warp_row = warp_idx >> log2_NUM_WARPS_N;
-    int warp_col = warp_idx & (NUM_WARPS_N - 1);
-    int lane_idx = lane_id();
+  InputDmem input_dmem(d_input);
+  WeightDmem weight_dmem(d_weight);
+  ResidualDmem residual_dmem(d_residual);
+  OutputDmem output_dmem(d_output);
 
-    T const *__restrict__ d_input = static_cast<T const *>(input_ptr);
-    T const *__restrict__ d_weight = static_cast<T const *>(weight_ptr);
-    T const *__restrict__ d_residual = static_cast<T const *>(residual_ptr);
-    T *__restrict__ d_output = static_cast<T *>(output_ptr);
-    // CANNOT perform residual when redisual_ptr is nullptr
-    if (residual_ptr == nullptr) {
-      assert(!residual);
-    }
+  extern __shared__ char smem[];
 
-    using InputDmem = dmem_row_const<T, BATCH_SIZE, TILE_SIZE, REDUCTION_SIZE>;
-    using WeightDmem =
-        dmem_col_const<T, TILE_SIZE, OUTPUT_ATOM_SIZE, REDUCTION_SIZE>;
-    using ResidualDmem = dmem_row_const<T, BATCH_SIZE, OUTPUT_SIZE, O_STRIDE>;
-    using OutputDmem = dmem_row<T, BATCH_SIZE, OUTPUT_SIZE, O_STRIDE>;
+  // STensors' offsets
+  constexpr size_t ZERO_BUFFER_OFFSET = 0;
+  // sizeof(T) * 8
 
   constexpr size_t SHARED_INPUT_BUFFER_OFFSET =
       ZERO_BUFFER_OFFSET + sizeof(T) * 64;
@@ -146,15 +133,13 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
       sizeof(T) * TILE_SIZE * WEIGHT_PIPE_MAX * OUTPUT_SIZE;
   // sizeof(T) * BATCH_SIZE * OUTPUT_SIZE
 
-    constexpr size_t SHARED_OUTPUT_OFFSET =
-        // MM_INTERMEDIATE_OFFSET +
-        SHARED_WEIGHT_BUFFER_OFFSET +
-        sizeof(T) * TILE_SIZE * WEIGHT_PIPE_MAX * OUTPUT_SIZE;
-    // sizeof(T) * BATCH_SIZE * OUTPUT_SIZE
+  // zero buffer
+  T *zero_buf = (T *)(smem + ZERO_BUFFER_OFFSET);
+  vec_zero_t<T, 8>::fill_zero(zero_buf);
 
-    // zero buffer
-    T *zero_buf = (T *)(smem + ZERO_BUFFER_OFFSET);
-    vec_zero_t<T, 8>::fill_zero(zero_buf);
+  // copy
+  T *shared_input_buffer = (T *)(smem + SHARED_INPUT_BUFFER_OFFSET);
+  T *shared_weight_buffer = (T *)(smem + SHARED_WEIGHT_BUFFER_OFFSET);
 
   // output
   T *shared_output = (T *)(smem + SHARED_OUTPUT_OFFSET);
@@ -178,10 +163,10 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
   using OutputFullSmem =
       smem_row<T, 3, 3, 3, BATCH_SIZE, OUTPUT_SIZE, OUTPUT_SIZE>;
 
-    InputSmem input_smem(shared_input_buffer);
-    WeightSmem weight_smem(shared_weight_buffer);
+  ZeroBufferSmem zero_buffer(zero_buf);
 
-    OutputFullSmem output_smem(shared_output);
+  InputSmem input_smem(shared_input_buffer);
+  WeightSmem weight_smem(shared_weight_buffer);
 
   OutputFullSmem output_smem(shared_output);
 
@@ -346,6 +331,7 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
           }
         }
       }
+      __syncthreads();
     }
   }
   // Accumulate this atom's contribution into the full output_smem at offset
