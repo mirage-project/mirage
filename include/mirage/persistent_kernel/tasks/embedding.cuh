@@ -14,7 +14,6 @@
  */
 #pragma once
 #include "common.h"
-#include <cutlass/arch/barrier.h>   
 
 namespace kernel {
 
