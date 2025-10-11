@@ -147,7 +147,6 @@ if __name__ == "__main__":
     text = tokenizer.apply_chat_template(
         messages, tokenize=False, add_generation_prompt=True
     )
-    #text = "."
     model_inputs = tokenizer([text], return_tensors="pt").to(model.device)
     for r in range(total_num_requests):
         for i in range(model_inputs.input_ids.shape[-1]):
