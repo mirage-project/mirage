@@ -244,7 +244,8 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
   constexpr size_t S_COMPUTE_DONE_SIZE = 8 * Kstages;
 
   constexpr size_t S_TOTAL_OFFSET = S_COMPUTE_DONE_OFFSET + S_COMPUTE_DONE_SIZE;
-  static_assert(S_TOTAL_OFFSET <= 224 * 1024);
+  static_assert(S_TOTAL_OFFSET <=
+                mirage::runtime::MAX_DYNAMIC_SHARED_MEMORY_SIZE);
 
   extern __shared__ char smem_ptr[];
 

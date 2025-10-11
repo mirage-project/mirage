@@ -51,10 +51,14 @@ __device__ __forceinline__ void
       REDUCTION_SIZE < TMA_A::SMEM_COL * TMA_A::SMEM_REPEAT_COL
           ? REDUCTION_SIZE
           : TMA_A::SMEM_COL * TMA_A::SMEM_REPEAT_COL;
+
   constexpr int CONSUMER_WARPGROUPS = 1;
   constexpr int PRODUCER_WARPGROUPS = 1;
   constexpr int NUM_WARPGROUPS = CONSUMER_WARPGROUPS + PRODUCER_WARPGROUPS;
   constexpr int THREADS_PER_WARPGROUP = 128;
+  // NOTE(Yu): cause mpk to hang, to be fixed
+  // constexpr int MMA_ATOM_N = (BATCH_SIZE <= 8) ? 8 : 16;
+  constexpr int MMA_ATOM_N = 16;
 
   // The actual tma instructions are issued for each 64 cols when swizzle<3,3,3>
   constexpr int INPUT_TMA_TILE_SIZE = 64;
@@ -67,6 +71,8 @@ __device__ __forceinline__ void
   // to 16
   static_assert(BATCH_SIZE <= 16,
                 "Batch size must be smaller or equal to 16 in swapAB");
+  // NOTE(Yu): cause mpk to hang, to be fixed
+  // constexpr int SMEM_M_SIZE = (BATCH_SIZE <= 8) ? 8 : 16;
   constexpr int SMEM_M_SIZE = 16;
 
   constexpr int TMA_TRANS_BYTES_A = sizeof(T) * TILE_SIZE * OUTPUT_ATOM_SIZE;
@@ -130,7 +136,8 @@ __device__ __forceinline__ void
   constexpr size_t TOTAL_SHARED_MEMORY =
       SHARED_RESIDUAL_DONE_OFFSET + 8 * Kstages;
 
-  static_assert(TOTAL_SHARED_MEMORY <= 224 * 1024);
+  static_assert(TOTAL_SHARED_MEMORY <=
+                mirage::runtime::MAX_DYNAMIC_SHARED_MEMORY_SIZE);
 
   // copy input
   T *shared_input = (T *)(smem + SHARED_INPUT_BUFFER_OFFSET);
@@ -208,7 +215,15 @@ __device__ __forceinline__ void
 
   // warp specialization data movement warpgroup
   if (warpgroup_id == NUM_WARPGROUPS - 1) {
-    wg_decrease_regs<32>();
+    // wg_decrease_regs<32>();
+    if (lane_id() == 0 && warp_idx == (NUM_WARPGROUPS * WARPGROUP_WARPS - 4)) {
+      prefetch_tma_descriptor(tma_a.desc_ptr);
+      prefetch_tma_descriptor(tma_b.desc_ptr);
+      prefetch_tma_descriptor(tma_out.desc_ptr);
+      if constexpr (HAS_RESIDUAL) {
+        prefetch_tma_descriptor(tma_residual->desc_ptr);
+      }
+    }
     for (int output_atom_idx = 0; output_atom_idx < NUM_ITER_N;
          output_atom_idx++) {
       int slot_residual = output_atom_idx % Kstages;
@@ -255,12 +270,14 @@ __device__ __forceinline__ void
     }
   } else {
     // warp specialization compute warpgroup
-    wg_increase_regs<160>();
+    // wg_increase_regs<160>();
     float s_frag[SMEM_M_SIZE / 2];
     for (int output_atom_idx = 0; output_atom_idx < NUM_ITER_N;
          output_atom_idx++) {
+
+      constexpr int CLEAR_ITERS = SMEM_M_SIZE / 16 <= 0 ? 1 : SMEM_M_SIZE / 16;
 #pragma unroll
-      for (int i = 0; i < SMEM_M_SIZE / 16; i++) {
+      for (int i = 0; i < CLEAR_ITERS; i++) {
         clear_8_floats(s_frag + i * 8);
       }
 
@@ -278,13 +295,12 @@ __device__ __forceinline__ void
         input_smem.set_ptr(shared_input + (slot)*SMEM_M_SIZE * TILE_SIZE);
         A_DESC a_desc(input_weight_smem(0, 0));
         B_DESC b_desc(input_smem(0, 0));
-
         wgmma::warpgroup_fence_fragment(s_frag);
         wgmma::warpgroup_arrive();
         // wgmma
         wgmma::mma<bfloat16,
-                   64, // output atom size fixed to 64
-                   16, // Assume batch size is not larger than 16
+                   64,         // output atom size fixed to 64
+                   MMA_ATOM_N, // Assume batch size is not larger than 16
                    16,
                    WeightSmem,
                    InputSmem,

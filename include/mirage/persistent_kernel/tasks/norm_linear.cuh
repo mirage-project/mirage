@@ -42,9 +42,10 @@ __device__ __forceinline__ void
   constexpr int CHUNK_SIZE = 16 / sizeof(T);
 
   // TODO: Update the formula since norm weight is cut down
-  constexpr int MAX_OUTPUT_ATOM_SIZE = max_power_of_two_le(
-      (mirage::runtime::MAX_SHARE_MEMORY_SIZE - 16 - 16898 * BATCH_SIZE) /
-      (4 * (128 + BATCH_SIZE)));
+  constexpr int MAX_OUTPUT_ATOM_SIZE =
+      max_power_of_two_le((mirage::runtime::MAX_DYNAMIC_SHARED_MEMORY_SIZE -
+                           16 - 16898 * BATCH_SIZE) /
+                          (4 * (128 + BATCH_SIZE)));
 
   constexpr int OUTPUT_LIMIT = OUTPUT_SIZE <= 128 ? OUTPUT_SIZE : 128;
   constexpr int OUTPUT_ATOM_SIZE = OUTPUT_LIMIT <= MAX_OUTPUT_ATOM_SIZE

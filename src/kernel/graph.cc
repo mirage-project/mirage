@@ -541,7 +541,50 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
         customized->bgraph, params, true /*with_residual*/);
     task_config[op] = std::make_tuple(
         3, 1, TASK_LINEAR_SWAPAB_WITH_RESIDUAL_HOPPER, variant_id);
-  } else {
+  } 
+  else if (name == "linear_cutlass_hopper") {
+    int variant_id = task_register->register_linear_cutlass_hopper_task(
+        customized->bgraph, params, false /*with_residual*/);
+    task_config[op] =
+        std::make_tuple(2, 1, TASK_LINEAR_CUTLASS_HOPPER, variant_id);
+  } else if (name == "linear_cutlass_with_residual_hopper") {
+    int variant_id = task_register->register_linear_cutlass_hopper_task(
+        customized->bgraph, params, true /*with_residual*/);
+    task_config[op] = std::make_tuple(
+        3, 1, TASK_LINEAR_CUTLASS_WITH_RESIDUAL_HOPPER, variant_id);
+  } else if (name == "silu_mul_hopper") {
+    int variant_id = task_register->register_silu_mul_hopper_task(
+        customized->bgraph, params);
+    task_config[op] = std::make_tuple(1, 1, TASK_SILU_MUL_HOPPER, variant_id);
+  } else if (name == "embedding_hopper") {
+    int variant_id = task_register->register_embedding_hopper_task(
+        customized->bgraph, params);
+    task_config[op] = std::make_tuple(2, 1, TASK_EMBEDDING_HOPPER, variant_id);
+  } 
+  // SM100 tasks
+  else if (name == "linear_sm100") {
+    int variant_id = task_register->register_linear_sm100_task(
+        customized->bgraph, params, false /*with_residual*/);
+    task_config[op] = std::make_tuple(2, 1, TASK_LINEAR_SM100, variant_id);
+  } else if (name == "linear_with_residual_sm100") {
+    int variant_id = task_register->register_linear_sm100_task(
+        customized->bgraph, params, true /*with_residual*/);
+    task_config[op] =
+        std::make_tuple(3, 1, TASK_LINEAR_WITH_RESIDUAL_SM100, variant_id);
+  } else if (name == "paged_attention_sm100"){
+    int variant_id = task_register->register_paged_attention_sm100_task(
+        customized->bgraph, params);
+    task_config[op] = std::make_tuple(7, 1, TASK_ATTN_SM100, variant_id);
+  } else if (name == "argmax_partial_sm100") {
+    int variant_id = task_register->register_argmax_partial_sm100_task(
+        customized->bgraph, params);
+    task_config[op] = std::make_tuple(1, 2, TASK_ARGMAX_PARTIAL_SM100, variant_id);
+  } else if (name == "argmax_reduce_sm100") {
+    int variant_id = task_register->register_argmax_reduce_sm100_task(
+        customized->bgraph, params);
+    task_config[op] = std::make_tuple(2, 1, TASK_ARGMAX_REDUCE_SM100, variant_id);
+  }
+  else {
     assert(false && "Unsupported task type");
   }
 }

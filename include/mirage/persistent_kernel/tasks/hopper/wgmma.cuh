@@ -101,6 +101,37 @@ __device__ static inline void warpgroup_commit_batch() {
 
 template <int tnspA, int tnspB>
 __device__ static inline void
+    wgmma_m64n8k16_bf16bf16bf32(uint64_t const &desc_a,
+                                uint64_t const &desc_b,
+                                float &d00,
+                                float &d01,
+                                float &d02,
+                                float &d03) {
+#ifdef MIRAGE_GRACE_HOPPER
+  asm volatile("{\n"
+               ".reg .pred p;\n"
+               "setp.ne.b32 p, %6, 0;\n"
+               "wgmma.mma_async.sync.aligned.m64n8k16.f32.bf16.bf16 "
+               "{%0,  %1,  %2,  %3},"
+               " %4,"
+               " %5,"
+               " p,   %7,  %8,  %9,  %10;\n"
+               "}\n"
+               : "+f"(d00), "+f"(d01), "+f"(d02), "+f"(d03)
+               : "l"(desc_a),
+                 "l"(desc_b),
+                 "r"(int32_t(1)),
+                 "n"(int32_t(1)),
+                 "n"(int32_t(1)),
+                 "n"(int32_t(tnspA)),
+                 "n"(int32_t(tnspB)));
+#else
+  asm volatile("brkpt;\n" ::);
+#endif
+}
+
+template <int tnspA, int tnspB>
+__device__ static inline void
     wgmma_m64n16k16_bf16bf16bf32(uint64_t const &desc_a,
                                  uint64_t const &desc_b,
                                  float &d00,
@@ -771,7 +802,14 @@ __device__ static inline void mma(float *frag, A_DESC a_desc, B_DESC b_desc) {
 
       size_t a_offset = (k % 4) * 32 + (k / 4) * 2 * SMEM_A::ROW * a_col_param;
       size_t b_offset = (k % 4) * 32 + (k / 4) * 2 * SMEM_B::ROW * b_col_param;
-      if constexpr (N == 16) {
+      if constexpr (N == 8) {
+        wgmma_m64n8k16_bf16bf16bf32<tnspA, tnspB>(a_desc.at(a_offset),
+                                                  b_desc.at(b_offset),
+                                                  frag[0],
+                                                  frag[1],
+                                                  frag[2],
+                                                  frag[3]);
+      } else if constexpr (N == 16) {
         wgmma_m64n16k16_bf16bf16bf32<tnspA, tnspB>(a_desc.at(a_offset),
                                                    b_desc.at(b_offset),
                                                    frag[0],
