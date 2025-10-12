@@ -1,0 +1,296 @@
+#pragma once
+#include <cstdio>
+#include <iostream>
+
+// Use Thrust to handle host/device allocations
+#include <thrust/device_vector.h>
+#include <thrust/host_vector.h>
+
+// Cutlass includes
+#include <cutlass/half.h> // F16 data type
+// #include <cutlass/util/print_error.hpp>
+#include <cutlass/arch/barrier.h>
+#include <cutlass/cluster_launch.hpp>
+#include <cutlass/cutlass.h>
+#include <cutlass/numeric_conversion.h>
+#include <cutlass/numeric_types.h>
+
+// CuTe includes
+#include <cute/algorithm/cooperative_copy.hpp> // Auto vectorized copy operation
+#include <cute/arch/cluster_sm90.hpp> // CuTe functions for querying the details of cluster launched
+#include <cute/arch/tmem_allocator_sm100.hpp> // TMEM allocator for SM100
+#include <cute/numeric/integral_constant.hpp> // Compile time in constants such as _1, _256 etc.
+#include <cute/tensor.hpp>                    // CuTe tensor implementation
+// using namespace cute;
+
+// topk_reduce includes
+#include <cooperative_groups.h>
+#include <cooperative_groups/reduce.h>
+#include <cub/cub.cuh>
+
+// mirage includes
+#include "../common/dmem_layout.cuh"
+#include "../common/worker_config.h"
+#include "utils.cuh"
+// #include "../element_binary.cuh"
+// #include "../element_unary.cuh"
+// #include "../reduction.cuh"
+// #include "../smem_layout.cuh"
+// #include "../utils.cuh"
+#include "../hopper/barrier.cuh"
+#include "../hopper/smem_layout_tma.cuh"
+#include "../hopper/tma.cuh"
+
+// ====================== TopK softmax things ===============================
+
+/*
+  A Top-K gating softmax written to exploit when the number of experts in the MoE layers
+  are a small power of 2. This allows us to cleanly share the rows among the threads in
+  a single warp and eliminate communication between warps (so no need to use shared mem).
+
+  It fuses the softmax, max and argmax into a single kernel.
+
+  Limitations:
+  1) This implementation is intended for when the number of experts is a small power of 2.
+  2) This implementation assumes k is small, but will work for any k.
+  3) This implementation assumes 8 warps are being used.
+*/
+
+
+namespace kernel {
+
+static constexpr int WARP_SIZE = 32;
+
+// ========================== Util functions to convert types ==========================
+template <typename T>
+__device__ inline float _convert_to_float(T x) {
+  if constexpr (std::is_same_v<T, __half>) {
+    return __half2float(x);
+  } else if constexpr (std::is_same_v<T, __nv_bfloat16>) {
+    return __bfloat162float(x);
+  } else if constexpr (std::is_same_v<T, float>) {
+    return x;
+  } else {
+    return static_cast<float>(x);
+  }
+}
+
+// ====================== Fused TopK softmax kernel ===============================
+// This kernel fuses the softmax, max and argmax into a single kernel.
+// Block size is strictly 256 (8 warps): dim3 block(WARP_SIZE, WARPS_PER_CTA)
+template <typename T, int VPT, int NUM_EXPERTS, int WARPS_PER_CTA, int BYTES_PER_LDG>
+__launch_bounds__(WARPS_PER_CTA * WARP_SIZE) __global__
+void topkGatingSoftmaxFused(
+    const T* __restrict__ input,   // [num_rows, NUM_EXPERTS]
+    const bool* __restrict__ finished,
+    float* __restrict__ output,    // [num_rows, k]
+    const int num_rows,
+    int* __restrict__ indices,     // [num_rows, k]
+    const int k,
+    const int start_expert,
+    const int end_expert,
+    const bool renormalize) {
+  // Compile-time checks
+  static_assert(VPT == (VPT & -VPT), "VPT must be power of 2");
+  static_assert(NUM_EXPERTS == (NUM_EXPERTS & -NUM_EXPERTS), "NUM_EXPERTS must be power of 2");
+  static_assert(BYTES_PER_LDG == (BYTES_PER_LDG & -BYTES_PER_LDG), "BYTES_PER_LDG must be power of 2");
+  static_assert(BYTES_PER_LDG <= 16, "BYTES_PER_LDG must be leq 16");
+
+  // Number of bytes each thread pulls in per load
+  static constexpr int ELTS_PER_LDG = BYTES_PER_LDG / sizeof(T);
+  static constexpr int ELTS_PER_ROW = NUM_EXPERTS;
+  static constexpr int THREADS_PER_ROW = ELTS_PER_ROW / VPT;         // subgroup size in a warp
+  static constexpr int LDG_PER_THREAD = VPT / ELTS_PER_LDG;
+
+  static_assert(VPT % ELTS_PER_LDG == 0, "The elements per thread must be a multiple of the elements per ldg");
+  static_assert(WARP_SIZE % THREADS_PER_ROW == 0, "The threads per row must cleanly divide the threads per warp");
+  static_assert(THREADS_PER_ROW == (THREADS_PER_ROW & -THREADS_PER_ROW), "THREADS_PER_ROW must be power of 2");
+  static_assert(THREADS_PER_ROW <= WARP_SIZE, "THREADS_PER_ROW can be at most warp size");
+
+  // Work partitioning
+  static constexpr int ELTS_PER_WARP = WARP_SIZE * VPT;
+  static constexpr int ROWS_PER_WARP = ELTS_PER_WARP / ELTS_PER_ROW; // rows each warp processes
+  static_assert(ELTS_PER_WARP % ELTS_PER_ROW == 0, "The elts per row must cleanly divide the total elt per warp");
+  static constexpr int ROWS_PER_CTA = WARPS_PER_CTA * ROWS_PER_WARP;
+
+  const int cta_base_row = blockIdx.x * ROWS_PER_CTA;
+  const int warp_base_row = cta_base_row + threadIdx.y * ROWS_PER_WARP;
+
+  const int thread_row_in_warp = threadIdx.x / THREADS_PER_ROW;
+  const int thread_row = warp_base_row + thread_row_in_warp;
+  if (thread_row >= num_rows) {
+    return;
+  }
+
+  const bool row_is_active = finished ? !finished[thread_row] : true;
+
+  // Compute per-thread read pointers
+  const T* thread_row_ptr = input + thread_row * ELTS_PER_ROW;
+  const int thread_group_idx = threadIdx.x % THREADS_PER_ROW;
+  const int first_elt_read_by_thread = thread_group_idx * (BYTES_PER_LDG / sizeof(T));
+  const T* thread_read_ptr = thread_row_ptr + first_elt_read_by_thread;
+
+  using AccessType = cutlass::AlignedArray<T, ELTS_PER_LDG>;
+  T row_chunk_temp[VPT];
+  AccessType* row_chunk_vec_ptr = reinterpret_cast<AccessType*>(&row_chunk_temp);
+  const AccessType* vec_thread_read_ptr = reinterpret_cast<const AccessType*>(thread_read_ptr);
+
+  // Vectorized loads across the row
+  for (int ii = 0; ii < LDG_PER_THREAD; ++ii) {
+    row_chunk_vec_ptr[ii] = vec_thread_read_ptr[ii * THREADS_PER_ROW];
+  }
+
+  float row_chunk[VPT];
+  for (int ii = 0; ii < VPT; ++ii) {
+    row_chunk[ii] = _convert_to_float<T>(row_chunk_temp[ii]);
+  }
+
+  // Max reduction within subgroup
+  float thread_max = row_chunk[0];
+  for (int ii = 1; ii < VPT; ++ii) {
+    thread_max = max(thread_max, row_chunk[ii]);
+  }
+  for (int mask = THREADS_PER_ROW / 2; mask > 0; mask /= 2) {
+    float other = __shfl_xor_sync(0xffffffff, thread_max, mask, THREADS_PER_ROW);
+    thread_max = max(thread_max, other);
+  }
+
+  // Softmax numerator and sum within subgroup
+  float row_sum = 0.f;
+  for (int ii = 0; ii < VPT; ++ii) {
+    row_chunk[ii] = expf(row_chunk[ii] - thread_max);
+    row_sum += row_chunk[ii];
+  }
+  for (int mask = THREADS_PER_ROW / 2; mask > 0; mask /= 2) {
+    row_sum += __shfl_xor_sync(0xffffffff, row_sum, mask, THREADS_PER_ROW);
+  }
+
+  const float inv_row_sum = 1.f / row_sum;
+  for (int ii = 0; ii < VPT; ++ii) {
+    row_chunk[ii] = row_chunk[ii] * inv_row_sum;
+  }
+
+  // Fused Top-K selection within subgroup
+  int start_col = first_elt_read_by_thread;
+  static constexpr int COLS_PER_GROUP_LDG = ELTS_PER_LDG * THREADS_PER_ROW;
+  float row_sum_for_renormalize = 0.f;
+
+  for (int k_idx = 0; k_idx < k; ++k_idx) {
+    float max_val = row_chunk[0];
+    int expert = start_col;
+    for (int ldg = 0, col = start_col; ldg < LDG_PER_THREAD; ++ldg, col += COLS_PER_GROUP_LDG) {
+      for (int ii = 0; ii < ELTS_PER_LDG; ++ii) {
+        float val = row_chunk[ldg * ELTS_PER_LDG + ii];
+        if (val > max_val) {
+          max_val = val;
+          expert = col + ii;
+        }
+      }
+    }
+
+    // Argmax reduce across subgroup with index tie-breaker (prefer lower index)
+    for (int mask = THREADS_PER_ROW / 2; mask > 0; mask /= 2) {
+      float other_max = __shfl_xor_sync(0xffffffff, max_val, mask, THREADS_PER_ROW);
+      int other_expert = __shfl_xor_sync(0xffffffff, expert, mask, THREADS_PER_ROW);
+      if (other_max > max_val || (other_max == max_val && other_expert < expert)) {
+        max_val = other_max;
+        expert = other_expert;
+      }
+    }
+
+    // Write out the selected top-k value/index (one thread per subgroup writes)
+    if (thread_group_idx == 0) {
+      const bool node_uses_expert = expert >= start_expert && expert < end_expert;
+      const bool should_process_row = row_is_active && node_uses_expert;
+      const int out_idx = k * thread_row + k_idx;
+      output[out_idx] = max_val;
+      indices[out_idx] = should_process_row ? (expert - start_expert) : NUM_EXPERTS;
+      row_sum_for_renormalize += max_val;
+    }
+
+    // Blank out the winning value for the next iteration
+    if (k_idx + 1 < k) {
+      const int ldg_group_for_expert = expert / COLS_PER_GROUP_LDG;
+      const int thread_to_clear_in_group = (expert / ELTS_PER_LDG) % THREADS_PER_ROW;
+      if (thread_group_idx == thread_to_clear_in_group) {
+        const int offset_for_expert = expert % ELTS_PER_LDG;
+        row_chunk[ldg_group_for_expert * ELTS_PER_LDG + offset_for_expert] = -10000.f;
+      }
+    }
+  }
+
+  // Optional renormalization of top-k weights
+  if (renormalize && thread_group_idx == 0) {
+    float inv = 1.f / row_sum_for_renormalize;
+    for (int k_idx = 0; k_idx < k; ++k_idx) {
+      const int out_idx = k * thread_row + k_idx;
+      output[out_idx] = output[out_idx] * inv;
+    }
+  }
+}
+
+namespace detail {
+template <typename T, int EXPERTS, int BYTES_PER_LDG>
+struct TopkConstants {
+  static constexpr int ELTS_PER_LDG = BYTES_PER_LDG / sizeof(T);
+  static_assert(EXPERTS / (ELTS_PER_LDG * WARP_SIZE) == 0 || EXPERTS % (ELTS_PER_LDG * WARP_SIZE) == 0, "");
+  static constexpr int VECs_PER_THREAD = (EXPERTS / (ELTS_PER_LDG * WARP_SIZE)) > 0 ? (EXPERTS / (ELTS_PER_LDG * WARP_SIZE)) : 1;
+  static constexpr int VPT = VECs_PER_THREAD * ELTS_PER_LDG;
+  static constexpr int ROWS_PER_WARP = WARP_SIZE / (EXPERTS / VPT);
+};
+} // namespace detail
+
+template <typename T, int EXPERTS>
+static inline void _launch_topk_gating_softmax_fused_helper(
+    const T* gating_output,
+    float* topk_weights,
+    int* topk_indices,
+    const int num_rows,
+    const int k,
+    const bool renormalize,
+    cudaStream_t stream) {
+  static constexpr std::size_t MAX_BYTES_PER_LDG = 16;
+  static constexpr int BYTES_PER_LDG = (sizeof(T) * EXPERTS) < MAX_BYTES_PER_LDG ? (sizeof(T) * EXPERTS) : MAX_BYTES_PER_LDG;
+  using C = detail::TopkConstants<T, EXPERTS, BYTES_PER_LDG>;
+  static constexpr int VPT = C::VPT;
+  static constexpr int ROWS_PER_WARP = C::ROWS_PER_WARP;
+  static constexpr int WARPS_PER_TB = 8; // strictly 8 warps -> 256 threads
+
+  const int num_warps = (num_rows + ROWS_PER_WARP - 1) / ROWS_PER_WARP;
+  const int num_blocks = (num_warps + WARPS_PER_TB - 1) / WARPS_PER_TB;
+
+  dim3 block_dim(WARP_SIZE, WARPS_PER_TB);
+  topkGatingSoftmaxFused<T, VPT, EXPERTS, WARPS_PER_TB, BYTES_PER_LDG><<<num_blocks, block_dim, 0, stream>>>(
+      gating_output, /*finished*/ nullptr, topk_weights, num_rows, topk_indices, k, 0, EXPERTS, renormalize);
+}
+
+// Public entry: Fused top-k softmax (expects num_experts to be power of 2 up to 256)
+template <typename T>
+static inline void topk_softmax_fused_sm100(
+    const T* gating_output,
+    float* topk_weights,
+    int* topk_indices,
+    const int num_rows,
+    const int num_experts,
+    const int topk,
+    const bool renormalize,
+    cudaStream_t stream) {
+  switch (num_experts) {
+    case 1:  _launch_topk_gating_softmax_fused_helper<T, 1 >(gating_output, topk_weights, topk_indices, num_rows, topk, renormalize, stream); break;
+    case 2:  _launch_topk_gating_softmax_fused_helper<T, 2 >(gating_output, topk_weights, topk_indices, num_rows, topk, renormalize, stream); break;
+    case 4:  _launch_topk_gating_softmax_fused_helper<T, 4 >(gating_output, topk_weights, topk_indices, num_rows, topk, renormalize, stream); break;
+    case 8:  _launch_topk_gating_softmax_fused_helper<T, 8 >(gating_output, topk_weights, topk_indices, num_rows, topk, renormalize, stream); break;
+    case 16: _launch_topk_gating_softmax_fused_helper<T, 16>(gating_output, topk_weights, topk_indices, num_rows, topk, renormalize, stream); break;
+    case 32: _launch_topk_gating_softmax_fused_helper<T, 32>(gating_output, topk_weights, topk_indices, num_rows, topk, renormalize, stream); break;
+    case 64: _launch_topk_gating_softmax_fused_helper<T, 64>(gating_output, topk_weights, topk_indices, num_rows, topk, renormalize, stream); break;
+    case 128:_launch_topk_gating_softmax_fused_helper<T, 128>(gating_output, topk_weights, topk_indices, num_rows, topk, renormalize, stream); break;
+    case 256:_launch_topk_gating_softmax_fused_helper<T, 256>(gating_output, topk_weights, topk_indices, num_rows, topk, renormalize, stream); break;
+    default:
+      // Only the fused implementation (power-of-two experts up to 256) is supported here
+      // to keep a strict 256-thread kernel configuration.
+      printf("[topk_softmax_fused_sm100] Unsupported num_experts=%d (must be power-of-two <= 256)\n", num_experts);
+  }
+}
+
+} // namespace kernel
+
