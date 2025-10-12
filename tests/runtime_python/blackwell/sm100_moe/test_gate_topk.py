@@ -26,6 +26,9 @@ for reduction_size in reduction_sizes:
             w = torch.randn(
                 (num_expert, reduction_size), device="cuda", dtype=torch.bfloat16
             )
+            
+            x_float = x.to(torch.float)
+            w_float = w.to(torch.float)
 
             topk_indices = torch.empty(batch_size, num_topk, device="cuda", dtype=torch.int32)
             topk_weights = torch.empty(batch_size, num_topk, device="cuda", dtype=torch.float)
@@ -33,36 +36,43 @@ for reduction_size in reduction_sizes:
             assert(not has_residual)
             residual = None
             runtime_kernel_blackwell.gate_topk_sm100(x, w, residual, topk_indices, topk_weights)
+            # print(topk_indices, topk_weights)
             
             # ref implementation
-            torch_out = torch.matmul(x, torch.transpose(w, 0, 1)).to(torch.float)
+            torch_out = torch.matmul(x_float, torch.transpose(w_float, 0, 1))
             torch_topk_values, torch_topk_indices = torch.topk(torch_out, num_topk, dim=1)
             torch_topk_weights = F.softmax(torch_topk_values, dim=1, dtype=torch.float)
             
-            # print(torch_topk_indices, torch_topk_values)
+            # print(torch_topk_indices, torch_topk_weights)
             
-            # torch.testing.assert_close(
-            #     output,
-            #     torch_out,
-            #     rtol=1e-2,
-            #     atol=1e-2,
-            # )
-            # print("Test passed!")
+            torch.testing.assert_close(
+                topk_indices,
+                torch_topk_indices.to(torch.int32),
+                rtol=1e-2,
+                atol=1e-2,
+            )
+            torch.testing.assert_close(
+                topk_weights,
+                torch_topk_weights,
+                rtol=1e-2,
+                atol=1e-2,
+            )
+            print("Test passed!")
 
-            # # Warm-up
-            # for _ in range(16):
-            #     runtime_kernel_blackwell.gate_topk_sm100(x, w, residual, output)
+            # Warm-up
+            for _ in range(16):
+                runtime_kernel_blackwell.gate_topk_sm100(x, w, residual, topk_indices, topk_weights)
 
-            # torch.cuda.synchronize()
-            # starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(
-            #     enable_timing=True
-            # )
-            # repetitions = 1000
-            # starter.record()
-            # for rep in range(repetitions):
-            #     runtime_kernel_blackwell.gate_topk_sm100(x, w, residual, output)
-            # ender.record()
-            # torch.cuda.synchronize()
-            # total_time = starter.elapsed_time(ender)
-            # avg_time = total_time / repetitions
-            # print(f"Average time over {repetitions} runs: {avg_time:.6f} ms")
+            torch.cuda.synchronize()
+            starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(
+                enable_timing=True
+            )
+            repetitions = 1000
+            starter.record()
+            for rep in range(repetitions):
+                runtime_kernel_blackwell.gate_topk_sm100(x, w, residual, topk_indices, topk_weights)
+            ender.record()
+            torch.cuda.synchronize()
+            total_time = starter.elapsed_time(ender)
+            avg_time = total_time / repetitions
+            print(f"Average time over {repetitions} runs: {avg_time:.6f} ms")

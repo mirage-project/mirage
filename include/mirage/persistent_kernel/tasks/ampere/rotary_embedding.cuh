@@ -14,8 +14,7 @@
  */
 
 #pragma once
-#include "common.h"
-#include "utils.cuh"
+#include "tasks/common/common_header.cuh"
 
 namespace kernel {
 

@@ -14,12 +14,6 @@
  */
 
 #pragma once
-#include "../runtime_header.h"
-#include "bfloat16.h"
-#include <cassert>
-#include <cstdint>
-#include <cstdio>
-#include <iostream>
 
 constexpr int NUM_THREADS = 128;
 constexpr int NUM_THREADS_PER_WARP = 32;
@@ -27,7 +21,8 @@ constexpr int NUM_WARPS = 4;
 constexpr int WARPGROUP_WARPS = 4;
 
 constexpr float inf = 5e4;
-// TODO: only setting this for Hopper can have compilation issues on blackwell and presumably ampere
+// TODO: only setting this for Hopper can have compilation issues on blackwell
+// and presumably ampere
 #if defined(MIRAGE_GRACE_HOPPER) || defined(MIRAGE_GRACE_BLACKWELL)
 constexpr int WORKER_NUM_THREADS = 256;   // Grace Hopper setting
 constexpr int CONSUMER_NUM_THREADS = 128; // Grace Hopper setting

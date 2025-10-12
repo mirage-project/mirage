@@ -13,14 +13,23 @@
  * limitations under the License.
  */
 #pragma once
+<<<<<<< HEAD
 #include "../common.h"
 #include "../utils.cuh"
+=======
+#include "tasks/common/utils.cuh"
+>>>>>>> a9350c9bc768725303052c61f2737f4dafaa643c
 
 #include <cutlass/arch/barrier.h>
 
 namespace kernel {
 template <typename T>
+<<<<<<< HEAD
 __device__ __forceinline__ void warp_reduce_max_idx_sm100(T &val, long long &idx) {
+=======
+__device__ __forceinline__ void warp_reduce_max_idx_sm100(T &val,
+                                                          long long &idx) {
+>>>>>>> a9350c9bc768725303052c61f2737f4dafaa643c
 #pragma unroll
   for (int offset = 16; offset > 0; offset /= 2) {
     float tmp = __shfl_down_sync(0xffffffff, (float)val, offset);
@@ -34,14 +43,23 @@ __device__ __forceinline__ void warp_reduce_max_idx_sm100(T &val, long long &idx
 }
 
 template <typename T>
+<<<<<<< HEAD
 __device__ __forceinline__ void block_reduce_max_idx_sm100(T &val, long long &idx) {
+=======
+__device__ __forceinline__ void block_reduce_max_idx_sm100(T &val,
+                                                           long long &idx) {
+>>>>>>> a9350c9bc768725303052c61f2737f4dafaa643c
   // Align the shared memory to 128 bytes
   extern __shared__ char smem[];
   long long *smem_idxs =
       (long long *)((reinterpret_cast<uintptr_t>(smem) + 127) / 128 * 128);
   T *smem_vals = reinterpret_cast<T *>(smem_idxs + 32); // max 32 warps
 
+<<<<<<< HEAD
   cutlass::arch::NamedBarrier wg_barrier(NUM_THREADS, /*bar-id*/6);
+=======
+  cutlass::arch::NamedBarrier wg_barrier(NUM_THREADS, /*bar-id*/ 6);
+>>>>>>> a9350c9bc768725303052c61f2737f4dafaa643c
 
   warp_reduce_max_idx_sm100(val, idx);
 
@@ -77,15 +95,22 @@ __device__ __forceinline__ void block_reduce_max_idx_sm100(T &val, long long &id
 template <typename T, int BATCH_SIZE, int CHUNK_SIZE, int NUM_PARTIAL_TASKS>
 __device__ __forceinline__ void
     argmax_partial_sm100_kernel(void const *__restrict__ input_ptr,
+<<<<<<< HEAD
                           void *__restrict__ output_val_ptr,
                           void *__restrict__ output_idx_ptr,
                           int num_active_tokens) {
+=======
+                                void *__restrict__ output_val_ptr,
+                                void *__restrict__ output_idx_ptr,
+                                int num_active_tokens) {
+>>>>>>> a9350c9bc768725303052c61f2737f4dafaa643c
   T const *__restrict__ input = static_cast<T const *>(input_ptr);
   T *__restrict__ output_val = static_cast<T *>(output_val_ptr);
   long long *__restrict__ output_idx = static_cast<long long *>(output_idx_ptr);
 
   int tidx = threadIdx.x;
 
+<<<<<<< HEAD
   if (tidx < NUM_THREADS){
 
     // TODO: try vectorize
@@ -109,15 +134,46 @@ __device__ __forceinline__ void
           output_idx[batch_idx * NUM_PARTIAL_TASKS] = local_idx;
         }
       }
+=======
+  if (tidx < NUM_THREADS) {
+
+// TODO: try vectorize
+#pragma unroll
+    for (int batch_idx = 0; batch_idx < num_active_tokens; batch_idx++) {
+      T local_max = T(-inf);
+      long long local_idx = -1;
+#pragma unroll
+      for (int i = tidx; i < CHUNK_SIZE; i += NUM_THREADS) {
+        T val = input[i + batch_idx * CHUNK_SIZE * NUM_PARTIAL_TASKS];
+        if (val > local_max) {
+          local_max = val;
+          local_idx = i;
+        }
+      }
+
+      block_reduce_max_idx_sm100<T>(local_max, local_idx);
+
+      if (tidx == 0) {
+        output_val[batch_idx * NUM_PARTIAL_TASKS] = local_max;
+        output_idx[batch_idx * NUM_PARTIAL_TASKS] = local_idx;
+      }
+    }
+>>>>>>> a9350c9bc768725303052c61f2737f4dafaa643c
   }
 }
 
 template <typename T, int BATCH_SIZE, int CHUNK_SIZE, int NUM_PARTIAL_TASKS>
 __device__ __forceinline__ void
     argmax_reduce_sm100_kernel(void const *__restrict__ input_val_ptr,
+<<<<<<< HEAD
                          void const *__restrict__ input_idx_ptr,
                          void *__restrict__ final_output_ptr,
                          int num_active_tokens) {
+=======
+                               void const *__restrict__ input_idx_ptr,
+                               void *__restrict__ final_output_ptr,
+                               int num_active_tokens) {
+>>>>>>> a9350c9bc768725303052c61f2737f4dafaa643c
   // int step,
   // long long *tokens) {
   T const *__restrict__ partial_vals = static_cast<T const *>(input_val_ptr);
@@ -127,7 +183,11 @@ __device__ __forceinline__ void
       static_cast<long long *>(final_output_ptr);
 
   int tidx = threadIdx.x;
+<<<<<<< HEAD
   if (tidx < NUM_THREADS){
+=======
+  if (tidx < NUM_THREADS) {
+>>>>>>> a9350c9bc768725303052c61f2737f4dafaa643c
 // TODO: try vectorize
 #pragma unroll
     for (int batch_idx = 0; batch_idx < num_active_tokens; batch_idx++) {
@@ -135,14 +195,22 @@ __device__ __forceinline__ void
       // Pack (chunk_index, relative_index) into a single 64-bit integer
       long long local_packed_idx = -1;
 
+<<<<<<< HEAD
   #pragma unroll
+=======
+#pragma unroll
+>>>>>>> a9350c9bc768725303052c61f2737f4dafaa643c
       for (int i = tidx; i < NUM_PARTIAL_TASKS; i += NUM_THREADS) {
         T current_val = partial_vals[i + batch_idx * NUM_PARTIAL_TASKS];
         if (current_val > local_max) {
           local_max = current_val;
           // Higher 32 bits for chunk_index (i), lower 32 for relative_index
           local_packed_idx = ((long long)i << 32) |
+<<<<<<< HEAD
                             partial_idxs[i + batch_idx * NUM_PARTIAL_TASKS];
+=======
+                             partial_idxs[i + batch_idx * NUM_PARTIAL_TASKS];
+>>>>>>> a9350c9bc768725303052c61f2737f4dafaa643c
         }
       }
 

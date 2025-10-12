@@ -1478,8 +1478,8 @@ int TaskRegister::register_embedding_hopper_task(
 
 // SM100 Tasks
 int TaskRegister::register_linear_sm100_task(threadblock::Graph const &bgraph,
-                                       std::vector<int> const &params,
-                                       bool with_residual) {
+                                             std::vector<int> const &params,
+                                             bool with_residual) {
   assert(params.size() == 0);
   int batch_size = 0, output_size = 0, reduction_size = 0, output_stride = 0;
   std::vector<tb::TBInputOp *> input_ops;
@@ -1527,12 +1527,13 @@ int TaskRegister::register_linear_sm100_task(threadblock::Graph const &bgraph,
   constexpr int TILE_SIZE = 64;
   int const output_tma_cp_size = 128;
   int const output_atom_size = 128;
-  code.e("using TMA_A = kernel::tma::tma_2d<cute::bfloat16_t, $, $, $, $, $, $, $, $, "
+  code.e("using TMA_A = kernel::tma::tma_2d<cute::bfloat16_t, $, $, $, $, $, "
+         "$, $, $, "
          "$, $, $, $, true>;",
          B,
          M,
          S,
-         output_size,        /*GMEM_ROW_*/
+         output_size,       /*GMEM_ROW_*/
          reduction_size,    /*GMEM_COL_*/
          MMA_M,             /*SMEM_ROW_*/
          TMA_CP_ASYNC_SIZE, /*SMEM_COL_*/
@@ -1540,42 +1541,44 @@ int TaskRegister::register_linear_sm100_task(threadblock::Graph const &bgraph,
          1,                 /*GMEM_STRIDE_COL_*/
          1,                 /*SMEM_REPEAT_ROW_*/
          (TILE_SIZE + TMA_CP_ASYNC_SIZE - 1) /
-             TMA_CP_ASYNC_SIZE,          /*SMEM_REPEAT_COL_*/
+             TMA_CP_ASYNC_SIZE,    /*SMEM_REPEAT_COL_*/
          MMA_M * TMA_CP_ASYNC_SIZE /*SMEM_STRIDE_*/
   );
 
-  code.e("using TMA_B = kernel::tma::tma_2d<cute::bfloat16_t, $, $, $, $, $, $, $, $, "
+  code.e("using TMA_B = kernel::tma::tma_2d<cute::bfloat16_t, $, $, $, $, $, "
+         "$, $, $, "
          "$, $, $, $, true>;",
          B,
          M,
          S,
-         batch_size,       /*GMEM_ROW_*/
+         batch_size,        /*GMEM_ROW_*/
          reduction_size,    /*GMEM_COL_*/
-         MMA_N,  /*SMEM_ROW_*/
+         MMA_N,             /*SMEM_ROW_*/
          TMA_CP_ASYNC_SIZE, /*SMEM_COL_*/
          reduction_size,    /*GMEM_STRIDE_ROW_*/
          1,                 /*GMEM_STRIDE_COL_*/
          1,                 /*SMEM_REPEAT_ROW_*/
          (TILE_SIZE + TMA_CP_ASYNC_SIZE - 1) /
-             TMA_CP_ASYNC_SIZE,               /*SMEM_REPEAT_COL_*/
+             TMA_CP_ASYNC_SIZE,    /*SMEM_REPEAT_COL_*/
          MMA_N * TMA_CP_ASYNC_SIZE /*SMEM_STRIDE_*/
   );
 
-  code.e("using TMA_OUT = kernel::tma::tma_2d<cute::bfloat16_t, $, $, $, $, $, $, $, "
+  code.e("using TMA_OUT = kernel::tma::tma_2d<cute::bfloat16_t, $, $, $, $, $, "
+         "$, $, "
          "$, $, $, $, $, true>;",
          0,
          M,
          S,
-         batch_size,         /*GMEM_ROW_*/
-         output_size,        /*GMEM_COL_*/
-         MMA_N,              /*SMEM_ROW_*/
-         MMA_M,              /*SMEM_COL_*/
-         output_stride,      /*GMEM_STRIDE_ROW_*/
-         1,                  /*GMEM_STRIDE_COL_*/
-         1,                  /*SMEM_REPEAT_ROW_*/
+         batch_size,    /*GMEM_ROW_*/
+         output_size,   /*GMEM_COL_*/
+         MMA_N,         /*SMEM_ROW_*/
+         MMA_M,         /*SMEM_COL_*/
+         output_stride, /*GMEM_STRIDE_ROW_*/
+         1,             /*GMEM_STRIDE_COL_*/
+         1,             /*SMEM_REPEAT_ROW_*/
          (output_atom_size + output_tma_cp_size - 1) /
-             output_tma_cp_size,         /*SMEM_REPEAT_COL_*/
-         MMA_N * MMA_M                 /*SMEM_STRIDE_*/
+             output_tma_cp_size, /*SMEM_REPEAT_COL_*/
+         MMA_N * MMA_M           /*SMEM_STRIDE_*/
   );
   code.inc_indent();
   code.e("TMA_A "
@@ -1588,15 +1591,17 @@ int TaskRegister::register_linear_sm100_task(threadblock::Graph const &bgraph,
          "tma_out(static_cast<CUtensorMap*>(task_desc->output_tma_desc_ptrs[0]["
          "0]));");
   // Bias Tensor setup
-  code.e("cute::Layout layout_Bias = cute::make_layout(cute::make_shape($, $), cute::make_stride($, cute::Int<1>{}));",
-          batch_size,
-          output_size,
-          output_stride
-  );
-  code.e("cute::Tensor mBias = cute::make_tensor(cute::make_gmem_ptr(static_cast<cute::bfloat16_t*>($)), layout_Bias);",
-          with_residual ? "task_desc->input_ptrs[2]" : "nullptr"
-  );
-  code.e("kernel::linear_sm100_mpk_task_impl<cute::bfloat16_t, TMA_A, TMA_B, decltype(mBias), TMA_OUT, "
+  code.e("cute::Layout layout_Bias = cute::make_layout(cute::make_shape($, $), "
+         "cute::make_stride($, cute::Int<1>{}));",
+         batch_size,
+         output_size,
+         output_stride);
+  code.e("cute::Tensor mBias = "
+         "cute::make_tensor(cute::make_gmem_ptr(static_cast<cute::bfloat16_t*>("
+         "$)), layout_Bias);",
+         with_residual ? "task_desc->input_ptrs[2]" : "nullptr");
+  code.e("kernel::linear_sm100_mpk_task_impl<cute::bfloat16_t, TMA_A, TMA_B, "
+         "decltype(mBias), TMA_OUT, "
          "$, $, $, $, $, $, "
          "$, $, $>(",
          MMA_M,
@@ -1661,7 +1666,8 @@ int TaskRegister::register_paged_attention_sm100_task(
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
-  code.e("kernel::multitoken_paged_attention_sm100_task_impl<bfloat16, $, $, $, $, "
+  code.e("kernel::multitoken_paged_attention_sm100_task_impl<bfloat16, $, $, "
+         "$, $, "
          "$, $, $, $>(",
          num_q_heads / num_kv_heads,
          1,
@@ -1691,8 +1697,8 @@ int TaskRegister::register_paged_attention_sm100_task(
   return register_task_variant(TASK_ATTN_SM100, code.to_string());
 }
 
-int TaskRegister::register_argmax_partial_sm100_task(threadblock::Graph const &bgraph,
-                                               std::vector<int> const &params) {
+int TaskRegister::register_argmax_partial_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
   // params[0]: num_partial_tasks
   assert(params.size() == 1);
   std::vector<tb::TBInputOp *> input_ops;
@@ -1727,8 +1733,8 @@ int TaskRegister::register_argmax_partial_sm100_task(threadblock::Graph const &b
   return register_task_variant(TASK_ARGMAX_PARTIAL_SM100, code.to_string());
 }
 
-int TaskRegister::register_argmax_reduce_sm100_task(threadblock::Graph const &bgraph,
-                                              std::vector<int> const &params) {
+int TaskRegister::register_argmax_reduce_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
   // params[0]: output size
   assert(params.size() == 1);
   std::vector<tb::TBInputOp *> input_ops;
@@ -1761,8 +1767,6 @@ int TaskRegister::register_argmax_reduce_sm100_task(threadblock::Graph const &bg
   code.e("    runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS]);");
   return register_task_variant(TASK_ARGMAX_REDUCE_SM100, code.to_string());
 }
-
-
 
 } // namespace runtime
 } // namespace mirage

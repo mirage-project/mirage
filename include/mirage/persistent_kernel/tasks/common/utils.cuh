@@ -13,7 +13,9 @@
  * limitations under the License.
  */
 #pragma once
-#include "common.h"
+#include "bfloat16.h"
+#include "worker_config.h"
+
 namespace kernel {
 using bfloat16 = type::bfloat16_t;
 

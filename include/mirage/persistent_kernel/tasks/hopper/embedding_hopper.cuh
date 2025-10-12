@@ -13,7 +13,7 @@
  * limitations under the License.
  */
 #pragma once
-#include "../common.h"
+#include "../common/worker_config.h"
 namespace kernel {
 
 template <typename T, int BATCH_SIZE, int CHUNK_SIZE, int OUTPUT_DIM_SIZE>

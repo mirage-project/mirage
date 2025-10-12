@@ -13,7 +13,7 @@
  * limitations under the License.
  */
 #pragma once
-#include "../common.h"
+// #include "../common/utils.h"
 #include "barrier.cuh"
 #include <cuda.h>
 namespace kernel {

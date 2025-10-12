@@ -14,9 +14,8 @@
  */
 
 #pragma once
-#include "../common.h"
-#include "../utils.cuh"
-#include "utils.cuh"
+#include "../common/utils.cuh"
+// #include "utils.cuh"
 namespace kernel {
 
 template <typename T,

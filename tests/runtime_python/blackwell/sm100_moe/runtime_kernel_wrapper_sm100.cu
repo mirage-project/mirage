@@ -12,8 +12,8 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-#include "blackwell/gate_topk_sm100.cuh"
-#include "blackwell/utils.cuh"
+#include "runtime_header.h"
+#include "blackwell/task_header.cuh"
 #include "hopper/tma_2d.cuh"
 #include "tma.cuh"
 #include <cuda_runtime.h>
@@ -21,10 +21,6 @@
 
 #include <iostream>
 #include <cstdio>
-
-// Use Thrust to handle host/device allocations
-#include <thrust/host_vector.h>
-#include <thrust/device_vector.h>
 
 // Cutlass includes
 #include <cutlass/half.h>                       // F16 data type
@@ -151,8 +147,6 @@ void launch_gate_topk_sm100(void *input_ptr,
       64; // note that if swizzle 128 is used, 64 is maximal cp size
   constexpr int TILE_SIZE =
       64; // we should modify this param if we want larger tile size
-  constexpr int TMA_CP_ASYNC_REPEAT_COL =
-      (TILE_SIZE + TMA_CP_ASYNC_SIZE - 1) / TMA_CP_ASYNC_SIZE;
 
   // TMA_A tma_a(weight_ptr);
   // TMA_B tma_b(input_ptr);

@@ -14,8 +14,12 @@
  */
 
 #pragma once
+<<<<<<< HEAD
 #include "../common.h"
 #include "../utils.cuh"
+=======
+#include "tasks/common/common_header.cuh"
+>>>>>>> a9350c9bc768725303052c61f2737f4dafaa643c
 #include <cutlass/arch/barrier.h>
 
 namespace kernel {
@@ -26,23 +30,40 @@ template <typename T,
           int WINDOW_SIZE,
           int HEAD_DIM = 128>
 __device__ __forceinline__ void rotary_embedding_sm100(InputSmem smem_input,
+<<<<<<< HEAD
                                                  T const *cos_ptr,
                                                  T const *sin_ptr,
                                                  int token_offset = 0) {
   cutlass::arch::NamedBarrier wg_barrier(NUM_THREADS, /*bar-id*/6);
   if(threadIdx.x < NUM_THREADS){
   #pragma unroll
+=======
+                                                       T const *cos_ptr,
+                                                       T const *sin_ptr,
+                                                       int token_offset = 0) {
+  cutlass::arch::NamedBarrier wg_barrier(NUM_THREADS, /*bar-id*/ 6);
+  if (threadIdx.x < NUM_THREADS) {
+#pragma unroll
+>>>>>>> a9350c9bc768725303052c61f2737f4dafaa643c
     for (int win_idx = 0; win_idx < WINDOW_SIZE; ++win_idx) {
 
       int smem_seq_idx = token_offset + win_idx;
 
+<<<<<<< HEAD
   #pragma unroll
+=======
+#pragma unroll
+>>>>>>> a9350c9bc768725303052c61f2737f4dafaa643c
       for (int head_idx = 0; head_idx < NUM_HEAD; ++head_idx) {
 
         T const *cur_cos_ptr = cos_ptr + win_idx * HEAD_DIM;
         T const *cur_sin_ptr = sin_ptr + win_idx * HEAD_DIM;
 
+<<<<<<< HEAD
   #pragma unroll
+=======
+#pragma unroll
+>>>>>>> a9350c9bc768725303052c61f2737f4dafaa643c
         for (uint32_t i = threadIdx.x; i < HEAD_DIM; i += NUM_THREADS) {
           int offset = (i / HEAD_DIM) * HEAD_DIM + i;
 
@@ -55,11 +76,21 @@ __device__ __forceinline__ void rotary_embedding_sm100(InputSmem smem_input,
           float v_rot;
           if (i < HEAD_DIM / 2) {
             float v1 = static_cast<float>(smem_input.at(row, col));
+<<<<<<< HEAD
             float v2 = static_cast<float>(smem_input.at(row, col + HEAD_DIM / 2));
             v_rot = v1 * cos - v2 * sin;
           } else {
             float v1 = static_cast<float>(smem_input.at(row, col));
             float v2 = static_cast<float>(smem_input.at(row, col - HEAD_DIM / 2));
+=======
+            float v2 =
+                static_cast<float>(smem_input.at(row, col + HEAD_DIM / 2));
+            v_rot = v1 * cos - v2 * sin;
+          } else {
+            float v1 = static_cast<float>(smem_input.at(row, col));
+            float v2 =
+                static_cast<float>(smem_input.at(row, col - HEAD_DIM / 2));
+>>>>>>> a9350c9bc768725303052c61f2737f4dafaa643c
             v_rot = v1 * cos + v2 * sin;
           }
           wg_barrier.arrive_and_wait();
@@ -67,9 +98,13 @@ __device__ __forceinline__ void rotary_embedding_sm100(InputSmem smem_input,
         }
       }
     }
+<<<<<<< HEAD
 
   }
 
+=======
+  }
+>>>>>>> a9350c9bc768725303052c61f2737f4dafaa643c
 }
 
 } // namespace kernel

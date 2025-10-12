@@ -14,9 +14,6 @@
  */
 
 #pragma once
-#include "common.h"
-#include "copy_sm80.cuh"
-#include "dmem_layout.cuh"
 #include "element_binary.cuh"
 #include "element_unary.cuh"
 #include "mma.cuh"
@@ -24,7 +21,7 @@
 #include "reduction.cuh"
 #include "rotary_embedding.cuh"
 #include "smem_layout.cuh"
-#include "utils.cuh"
+#include "tasks/common/common_header.cuh"
 
 namespace kernel {
 

@@ -14,13 +14,12 @@
  */
 
 #include "profiler.h"
-#include "tasks/copy_sm80.cuh"
+#include "tasks/common/copy_sm80.cuh"
 #ifdef MPK_ENABLE_TMA
 #include "tma.cuh"
 #endif
+#include "mpk_atoms.cuh"
 #include "runtime_header.h"
-#include "tasks/kernel.h"
-#include "utils.cuh"
 #ifdef USE_NVSHMEM
 #include <mpi.h>
 #include <nvshmem.h>
@@ -29,6 +28,14 @@
 #include <thread>
 #include <unistd.h>
 #include <vector>
+
+#if defined(MIRAGE_GRACE_HOPPER)
+#include "tasks/hopper/task_header.cuh"
+#elif defined(MIRAGE_GRACE_BLACKWELL)
+#include "tasks/blackwell/task_header.cuh"
+#else
+#include "tasks/ampere/task_header.cuh"
+#endif
 
 using bfloat16 = type::bfloat16_t;
 using namespace mirage::runtime;
