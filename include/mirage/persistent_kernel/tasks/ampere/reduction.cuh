@@ -157,7 +157,8 @@ __device__ __forceinline__ void reduction_kernel(void const *input_ptr,
       if (i == MY_GPU_ID) {
         accum += d_input[batch * OUTPUT_STRIDE + offset];
       } else {
-        accum += d_buffer[i * BATCH_SIZE * OUTPUT_STRIDE + batch * OUTPUT_STRIDE + offset];
+        accum += d_buffer[i * BATCH_SIZE * OUTPUT_STRIDE +
+                          batch * OUTPUT_STRIDE + offset];
       }
     }
     d_output[batch * OUTPUT_STRIDE + offset] = accum;

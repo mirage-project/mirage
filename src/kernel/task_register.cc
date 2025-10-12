@@ -575,7 +575,8 @@ int TaskRegister::register_argmax_reduce_task(threadblock::Graph const &bgraph,
   return register_task_variant(TASK_ARGMAX_REDUCE, code.to_string());
 }
 
-int TaskRegister::register_reduce_task(threadblock::Graph const &bgraph, std::vector<int> const &params) {
+int TaskRegister::register_reduce_task(threadblock::Graph const &bgraph,
+                                       std::vector<int> const &params) {
   // params[0]: num_gpus
   // params[1]: my_gpu_id
   assert(params.size() == 2);
