@@ -14,7 +14,6 @@
  */
 #pragma once
 #include "common.h"
-
 namespace kernel {
 
 template <typename T, int OUT_DIM>

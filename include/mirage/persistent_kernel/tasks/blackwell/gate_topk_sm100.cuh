@@ -40,17 +40,15 @@ namespace kernel {
 // The shared memory buffers for A, B, and C matrices.
 template <class TypeA,           // Tensor A data type
           class TypeB,           // Tensor B data type
-          class TypeC,           // Tensor C data type
+          class TypeRed,         // Tensor C data type
           class ASmemLayout,     
           class BSmemLayout,
-          class CSmemLayout,
           int Num_AB_Stage,
           int Num_ACC_Stage> 
-struct PipedSharedStorage
+struct GateTopKSharedStorage
 {
   alignas(128) cute::ArrayEngine<TypeA, cute::cosize_v<ASmemLayout>> A;
   alignas(128) cute::ArrayEngine<TypeB, cute::cosize_v<BSmemLayout>> B;
-  alignas(128) cute::ArrayEngine<TypeC, cute::cosize_v<CSmemLayout>> C;
 
   alignas(16) cute::uint64_t ab_full_mbar_ptr[Num_AB_Stage];  
   alignas(16) cute::uint64_t ab_empty_mbar_ptr[Num_AB_Stage]; 
@@ -60,31 +58,39 @@ struct PipedSharedStorage
 
   alignas(16) cute::uint32_t tmem_base_ptr; // Base pointer for TMEM allocation
 
+  alignas(16) cute::uint32_t reduce_indices_buffer[32]; // Buffer for reduction indices
+  alignas(16) TypeRed reduce_values_buffer[32];  // Buffer for reduction values
+
   CUTE_DEVICE constexpr auto tensor_sA() { return cute::make_tensor(cute::make_smem_ptr(A.begin()), ASmemLayout{}); }
   CUTE_DEVICE constexpr auto tensor_sB() { return cute::make_tensor(cute::make_smem_ptr(B.begin()), BSmemLayout{}); }
-  CUTE_DEVICE constexpr auto tensor_sC() { return cute::make_tensor(cute::make_smem_ptr(C.begin()), CSmemLayout{}); }
 };
 
 template <typename T_,
           typename TMA_A,
           typename TMA_B,
           class BiasTensor,
-          typename TMA_OUT,
+          class IndicesTensor,
+          class WeightsTensor,
           int MMA_M,
           int MMA_N,
           int BATCH_SIZE,
           int OUTPUT_SIZE,
           int REDUCTION_SIZE,
+          int NUM_TOPK,
           bool NOBIAS,
           int NUM_AB_STAGE = 8,
           int NUM_ACC_STAGE = 2,
           int NUM_C_STAGE = 4>
-  __device__ __noinline__ void linear_sm100_mpk_task_impl(
+  __device__ __noinline__ void gate_topk_sm100_task_impl(
             const TMA_A &tma_a,
             const TMA_B &tma_b,
             BiasTensor mBias,
-            const TMA_OUT &tma_out
+            IndicesTensor mIndices,
+            WeightsTensor mWeights
   ) {
+    static_assert(NUM_TOPK < 32, "Top K must have K < WarpSize");
+    static_assert(BATCH_SIZE <= MMA_N, "Currently only support batch size <= MMA_N");
+
     int warp_idx = cutlass::canonical_warp_idx_sync();
 
     // Construct the MMA grid coordinate from the CTA grid coordinate
@@ -118,12 +124,10 @@ template <typename T_,
     
     cute::Tensor mA = cute::make_coord_tensor(cute::make_layout(cute::make_shape(OUTPUT_SIZE, REDUCTION_SIZE), cute::make_stride(cute::E<1>{}, cute::E<0>{}))); // ArithTuple(_0,_0) o (output_size,reduction_size):(_1@1,_1@0)
     cute::Tensor mB = cute::make_coord_tensor(cute::make_layout(cute::make_shape(BATCH_SIZE, REDUCTION_SIZE), cute::make_stride(cute::E<1>{}, cute::E<0>{}))); // ArithTuple(_0,_0) o (batch_size,reduction_size):(_1@1,_1@0)
-    cute::Tensor mC = cute::make_coord_tensor(cute::make_layout(cute::make_shape(BATCH_SIZE, OUTPUT_SIZE), cute::make_stride(cute::E<1>{}, cute::E<0>{}))); // ArithTuple(_0,_0) o (batch_size,output_size):(_1@1,_1@0)
     
     cute::Tensor gA = cute::local_tile(mA, mma_tiler, mma_coord, cute::Step<cute::_1,cute::X,cute::_1>{});  // ArithTuple(_0,_0) o (_128,_64,8,64):(_1@1,_1@0,_128@1,_64@0)
     cute::Tensor gB = cute::local_tile(mB, mma_tiler, mma_coord, cute::Step<cute::X,cute::_1,cute::_1>{});  // ArithTuple(_0,_0) o (_32,_64,1,64):(_1@1,_1@0,_32@1,_64@0)
     cute::Tensor gBias = cute::local_tile(mBias, cd_tiler, mma_coord, cute::Step<cute::_1,cute::_1,cute::X>{});  // gmem_ptr[16b](0x7704bd040000) o (_32,_128,1,8):(1024,_1,32768,_128)
-    cute::Tensor gC = cute::local_tile(mC, cd_tiler, mma_coord, cute::Step<cute::_1,cute::_1,cute::X>{});  // ArithTuple(_0,_0) o (_32,_128,1,8):(_1@1,_1@0,_32@1,_128@0)
 
     // if (cute::thread0()) {
     //   cute::print("mA:\t"); cute::print(mA); cute::print("\n");       // mA:      ArithTuple(_0,_0) o (output_size,reduction_size):(_1@1,_1@0)
@@ -142,31 +146,22 @@ template <typename T_,
     auto mma_shape_A = cute::partition_shape_A(tiled_mma, cute::make_shape(cute::Int<MMA_M>{}, cute::size<2>(mma_tiler), cute::Int<NUM_AB_STAGE>{}));
     // Pre-partitioned Tile Shape (MmaTile_N, MmaTile_K) to post-partitioned (MmaB, NumMma_N, NumMma_K)
     auto mma_shape_B = cute::partition_shape_B(tiled_mma, cute::make_shape(cute::Int<MMA_N>{}, cute::size<2>(mma_tiler), cute::Int<NUM_AB_STAGE>{}));
-    // Pre-partitioned Tile Shape (MmaTile_N, MmaTile_M) to post-partitioned (MmaC, NumMma_N, NumMma_K)
-    auto mma_shape_C = cute::make_shape(cute::make_shape(cute::Int<MMA_N>{}, cute::Int<MMA_M>{}), cute::Int<1>{}, cute::Int<1>{}, cute::Int<NUM_C_STAGE>{});
 
     // Print and inspect mma_shape_A, and mma_shape_B for this example.
     // if (cute::thread0()) {
     //     cute::print("mma_shape_A:\t"); cute::print(mma_shape_A); cute::print("\n");  // mma_shape_A:  ((_128,_16),_1,_4,_8)
     //     cute::print("mma_shape_B:\t"); cute::print(mma_shape_B); cute::print("\n");  // mma_shape_B:  ((_32,_16),_1,_4,_8)
-    //     cute::print("mma_shape_C:\t"); cute::print(mma_shape_C); cute::print("\n");  // mma_shape_C:  ((_32,_128),_1,_1,_4)
     // } __syncthreads();
 
     auto sA_layout = cute::UMMA::tile_to_mma_shape(cute::UMMA::Layout_K_SW128_Atom<T_>{}, mma_shape_A);
     auto sB_layout = cute::UMMA::tile_to_mma_shape(cute::UMMA::Layout_K_SW128_Atom<T_>{}, mma_shape_B);
-    // constuct unswizzled layout for C
-    auto sC_layout_fake = cute::UMMA::tile_to_mma_shape(cute::UMMA::Layout_K_INTER_Atom<T_>{}, mma_shape_C);
-    auto sC_shape = cute::make_shape(cute::make_shape(cute::Int<MMA_N>{}, cute::Int<MMA_M>{}), cute::Int<1>{}, cute::Int<1>{}, cute::make_shape(cute::Int<1>{}, cute::Int<NUM_C_STAGE>{}));
-    auto sC_stride = cute::make_stride(cute::make_stride(cute::Int<MMA_M>{}, cute::Int<1>{}), cute::Int<0>{}, cute::Int<0>{}, cute::make_stride(cute::Int<0>{}, cute::Int<MMA_M*MMA_N>{}));
-    auto sC_layout = cute::composition(sC_layout_fake.layout_a(), sC_layout_fake.offset(), cute::make_layout(sC_shape, sC_stride));
 
     // if (cute::thread0()){
     //     cute::print("sA_layout:\t"); cute::print(sA_layout); cute::print("\n"); // sA_layout:   ArithTuple(_0,0) o ((_128,_16),_1,_4,8):((_1@1,_1@0),_0,_16@0,_8@0)
     //     cute::print("sB_layout:\t"); cute::print(sB_layout); cute::print("\n"); // sB_layout:   ArithTuple(_0,0) o ((_32,_16),_1,_4,8):((_1@1,_1@0),_0,_16@0,_8@0)
-    //     cute::print("sC_layout:\t"); cute::print(sC_layout); cute::print("\n"); // sC_layout:   ArithTuple(_0,0) o ((_32,_128),_1,_1,4):((_1@1,_1@0),_0,_128@0,_4@0)
     // } __syncthreads();
 
-    using SharedStorage = PipedSharedStorage<T_, T_, T_, decltype(sA_layout), decltype(sB_layout), decltype(sC_layout), NUM_AB_STAGE, NUM_ACC_STAGE>;
+    using SharedStorage = GateTopKSharedStorage<T_, T_, float, decltype(sA_layout), decltype(sB_layout), NUM_AB_STAGE, NUM_ACC_STAGE>;
 
     extern __shared__ char shared_memory[];
     uintptr_t aligned_smem = (reinterpret_cast<uintptr_t>(shared_memory) + 127) / 128 * 128;
@@ -437,28 +432,25 @@ template <typename T_,
 
       using AccType = typename decltype(tCtAcc)::value_type;
       using TypeBias = T_;
-      using TypeC = T_;
 
       cutlass::NumericConverter<AccType, TypeBias> converterBias;
-      cutlass::NumericConverter<TypeC, AccType> converter;
-
 
       cute::TiledCopy tiled_copy_t2r = cute::make_tmem_copy(cute::SM100_TMEM_LOAD_32dp32b1x{}, tCtAcc(cute::_, cute::_, cute::_, 0)); // (128,32)
       cute::ThrCopy thr_copy_t2r = tiled_copy_t2r.get_slice(threadIdx.x);
       cute::Tensor tTR_tAcc = thr_copy_t2r.partition_S(tCtAcc); // tmem_[32b](0x0000.0000) o ((_32,_1),_32,_1,_1,_2):((_65536,_0),_1,_0,_0,_32)
 
-      cute::Tensor tCgC_fake = cute::make_tensor<TypeC>(cute::shape(tCtAcc(cute::_, cute::_, cute::_, 0))); // (T2R, T2R_M, T2R_N)
+      cute::Tensor tCgC_fake = cute::make_tensor<AccType>(cute::shape(tCtAcc(cute::_, cute::_, cute::_, 0))); // (T2R, T2R_M, T2R_N)
       cute::Tensor tTR_rAcc_fake = thr_copy_t2r.partition_D(tCgC_fake);
-      cute::Tensor tTR_rAcc = cute::make_tensor<AccType>(cute::shape(tTR_rAcc_fake)); // ptr[32b](some_ptr) o ((_1,_1),_32,_1,_1):((_0,_0),_1,_0,_0)
+      cute::Tensor tTR_rAcc = cute::make_fragment_like<AccType>(tTR_rAcc_fake); // ptr[32b](some_ptr) o ((_1,_1),_32,_1,_1):((_0,_0),_1,_0,_0)
 
-      // if(threadIdx.x == 0) {
-      //   cute::print("tiled_copy_t2r:\t"); cute::print(tiled_copy_t2r); cute::print("\n"); //
-      //   cute::print("thr_copy_t2r:\t"); cute::print(thr_copy_t2r); cute::print("\n"); // 
-      //   cute::print("tTR_tAcc:\t"); cute::print(tTR_tAcc); cute::print("\n"); // 
-      //   cute::print("tTR_rAcc:\t"); cute::print(tTR_rAcc); cute::print("\n"); // 
-      //   cute::print("tCtAcc:\t"); cute::print(tCtAcc); cute::print("\n"); //
-      //   printf("tmem_base_ptr: %u\n", shared_storage.tmem_base_ptr);
-      // } epilogue_wg_barrier.arrive_and_wait();
+      if(threadIdx.x == 0) {
+        cute::print("tiled_copy_t2r:\t"); cute::print(tiled_copy_t2r); cute::print("\n"); //
+        cute::print("thr_copy_t2r:\t"); cute::print(thr_copy_t2r); cute::print("\n"); // 
+        cute::print("tTR_tAcc:\t"); cute::print(tTR_tAcc); cute::print("\n"); // 
+        cute::print("tTR_rAcc:\t"); cute::print(tTR_rAcc); cute::print("\n"); // 
+        cute::print("tCtAcc:\t"); cute::print(tCtAcc); cute::print("\n"); //
+        printf("tmem_base_ptr: %u\n", shared_storage.tmem_base_ptr);
+      } epilogue_wg_barrier.arrive_and_wait();
 
       int num_tiles_executed = 0;
       for (int m_tile=0; m_tile < cute::size<3>(tCgA); ++m_tile) {
@@ -470,7 +462,7 @@ template <typename T_,
           cute::Tensor tCgBias = gBias(cute::_, cute::_, n_tile, m_tile); // (Mma_M, Mma_N)
           cute::Tensor tCrBiasTypeBias = cute::make_tensor<TypeBias>(cute::shape(tTR_rAcc(0, cute::_, 0, 0))); // (T2R_M, T2R_N)
           cute::Tensor tCrBiasTypeAcc = cute::make_tensor<AccType>(cute::shape(tCrBiasTypeBias));
-          cute::Tensor tCrC = cute::make_tensor<TypeC>(cute::shape(tCrBiasTypeBias));
+          cute::Tensor tCrC = cute::make_tensor<AccType>(cute::shape(tCrBiasTypeBias));
 
           // if(threadIdx.x == 0 and m_tile == 0 and n_tile == 0) {
           //   cute::print("tCgBias:\t"); cute::print(tCgBias); cute::print("\n"); //
@@ -491,8 +483,6 @@ template <typename T_,
             }
           }
 
-          mm_output_smem.set_ptr(mm_output + c_smem_wr_buffer_idx * MMA_N * OUTPUT_ATOM_SIZE);
-
           cute::wait_barrier(shared_storage.acc_full_mbar_ptr[acc_buf_idx], acc_full_phase);
           // T2R copy
           cute::copy(tiled_copy_t2r, tTR_tAcc(cute::_, cute::_, cute::_, cute::_, acc_buf_idx), tTR_rAcc);
@@ -510,31 +500,19 @@ template <typename T_,
             }
           }
           
-          CUTE_UNROLL
-          for (int i = 0; i < tCrC.size(); i++) {
-            tCrC[i] = converter(tTR_rAcc[i]);
+          // argtopk
+
+          static constexpr float minValue = -1.F;
+
+          for (int batch_idx = 0; batch_idx < BATCH_SIZE; ++batch_idx) {
+            for (int kk = 0; kk < NUM_TOPK; ++kk){
+              
+            }
           }
 
-          // R2S copy
-          cute::Tensor sC_epi_slice = cute::flatten(sC_epi(cute::_, 0, 0, c_smem_wr_buffer_idx)); 
-          cute::copy(tCrC, sC_epi_slice(cute::_, threadIdx.x));
-
-          // S2G TMA
-          cute::tma_store_fence(); // Ensure C smem stores are visible to TMA
-          epilogue_wg_barrier.arrive_and_wait(); // Ensure all threads have issued fence
-
-          if (warp_idx == 0 && cute::elect_one_sync()){
-            tma_out.tma_store_async(mm_output_smem.base_ptr, {m_tile * OUTPUT_ATOM_SIZE, n_tile * INPUT_TMA_TILE_SIZE});
-            cute::tma_store_arrive();
-            cute::tma_store_wait<NUM_C_STAGE-1>();
-          }
 
           num_tiles_executed++;
         }
-      }
-      // wait all TMA stores to complete
-      if (warp_idx == 0 && cute::elect_one_sync()){
-        cute::tma_store_wait<0>();
       }
     }
     __syncthreads();

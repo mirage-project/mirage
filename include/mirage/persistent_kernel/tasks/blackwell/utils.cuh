@@ -41,33 +41,5 @@ namespace kernel {
 
     return static_cast<bool>(waitComplete);
   }
-
-  // The shared memory buffers for A, B, C, and D matrices.
-  template <class TypeA,           // Tensor A data type
-            class TypeB,           // Tensor B data type
-            class TypeC,           // Tensor C data type
-            class ASmemLayout,     
-            class BSmemLayout,
-            class CSmemLayout,
-            int Num_AB_Stage,
-            int Num_ACC_Stage> 
-  struct PipedSharedStorage
-  {
-    alignas(128) cute::ArrayEngine<TypeA, cute::cosize_v<ASmemLayout>> A;
-    alignas(128) cute::ArrayEngine<TypeB, cute::cosize_v<BSmemLayout>> B;
-    alignas(128) cute::ArrayEngine<TypeC, cute::cosize_v<CSmemLayout>> C;
-
-    alignas(16) cute::uint64_t ab_full_mbar_ptr[Num_AB_Stage];  
-    alignas(16) cute::uint64_t ab_empty_mbar_ptr[Num_AB_Stage]; 
-
-    alignas(16) cute::uint64_t acc_full_mbar_ptr[Num_ACC_Stage];  
-    alignas(16) cute::uint64_t acc_empty_mbar_ptr[Num_ACC_Stage]; 
-
-    alignas(16) cute::uint32_t tmem_base_ptr; // Base pointer for TMEM allocation
-
-    CUTE_DEVICE constexpr auto tensor_sA() { return cute::make_tensor(cute::make_smem_ptr(A.begin()), ASmemLayout{}); }
-    CUTE_DEVICE constexpr auto tensor_sB() { return cute::make_tensor(cute::make_smem_ptr(B.begin()), BSmemLayout{}); }
-    CUTE_DEVICE constexpr auto tensor_sC() { return cute::make_tensor(cute::make_smem_ptr(C.begin()), CSmemLayout{}); }
-  };
 } // namespace kernel
 
