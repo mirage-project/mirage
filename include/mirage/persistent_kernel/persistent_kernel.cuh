@@ -570,10 +570,6 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
       // Do nothing
 #ifdef USE_NVSHMEM
     } else if (task_desc->task_type == TASK_NVSHMEM_COPY) {
-      size_t size_in_bytes = 2;
-      for (int i = 0; i < task_desc.inputs[0].num_dims; i++) {
-        size_in_bytes *= task_desc.inputs[0].dim[i];
-      }
       size_t event_index = get_event_position_index(task_desc->trigger_event);
       int gpu_id = static_cast<int>(get_event_gpu_id(task_desc->trigger_event));
       assert(gpu_id < config.num_gpus);
@@ -581,23 +577,11 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
       nvshmemx_putmem_signal_block(
           task_desc->output_ptrs[0],
           task_desc->input_ptrs[0],
-          size_in_bytes,
+          task_desc->xfer_size_in_bytes,
           reinterpret_cast<uint64_t *>(&config.all_event_counters[event_index]),
           1 /*signal*/,
           NVSHMEM_SIGNAL_ADD,
           gpu_id);
-    } else if (task_desc.task_type == TASK_REDUCE) {
-      // Currently support 2D reduction, buffer has an extra world_size dim
-      // assert(task_desc.inputs[0].num_dims == 2);
-      // assert(task_desc.inputs[1].num_dims == 3);
-      kernel::reduction_kernel<bfloat16>(task_desc->input_ptrs[0],
-                                         task_desc->input_ptrs[1],
-                                         task_desc->output_ptrs[0],
-                                         config.num_gpus,
-                                         config.my_gpu_id,
-                                         task_desc->inputs[0].dim[0],
-                                         task_desc->inputs[0].dim[1],
-                                         task_desc->inputs[0].stride[0]);
 #endif
     } else {
 #ifdef MPK_ENABLE_VERBOSE
@@ -1087,6 +1071,14 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
   std::vector<TaskDesc> all_tasks;
   for (auto const &ft : all_fulltasks) {
     TaskDesc task_desc(ft);
+    // Reinterpret part of TaskDesc to save xfer_size information
+    if (ft.task_type == TASK_NVSHMEM_COPY) {
+      int size_in_bytes = 2;
+      for (int i = 0; i < ft.inputs[0].num_dims; i++) {
+        size_in_bytes *= ft.inputs[0].dim[i];
+      }
+      task_desc.xfer_size_in_bytes = size_in_bytes;
+    }
     all_tasks.push_back(task_desc);
   }
 

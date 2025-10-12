@@ -193,8 +193,13 @@ struct alignas(16) TaskDesc {
   void *output_tma_desc_ptrs[MAX_INPUTS_PER_TASK]
                             [mirage::config::MAX_TMA_DESC_PER_TENSOR];
 #endif
-  int request_id; // Used for paged attention
-  int head_group; // Used for paged attention hopper
+  union {
+    struct {
+      int request_id; // Used for paged attention
+      int head_group; // Used for paged attention hopper
+    };
+    size_t xfer_size_in_bytes; // Used for nvshmem
+  };
 };
 
 struct RuntimeConfig {
