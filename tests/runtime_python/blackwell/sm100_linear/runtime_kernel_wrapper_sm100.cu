@@ -12,8 +12,8 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-#include "blackwell/linear_sm100_mpk.cuh"
-#include "blackwell/utils.cuh"
+#include "runtime_header.h"
+#include "blackwell/task_header.cuh"
 #include "hopper/tma_2d.cuh"
 #include "tma.cuh"
 #include <cuda_runtime.h>
@@ -21,10 +21,6 @@
 
 #include <iostream>
 #include <cstdio>
-
-// Use Thrust to handle host/device allocations
-#include <thrust/host_vector.h>
-#include <thrust/device_vector.h>
 
 // Cutlass includes
 #include <cutlass/half.h>                       // F16 data type
@@ -325,6 +321,5 @@ void linear_sm100_mpk_kernel(torch::Tensor input,
 
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-  m.def("linear_warp_specialized", &linear_kernel_warp_specialized, "Linear kernel Warp Specialized");
   m.def("linear_sm100_mpk", &linear_sm100_mpk_kernel, "Linear kernel SM100 MPK");
 }

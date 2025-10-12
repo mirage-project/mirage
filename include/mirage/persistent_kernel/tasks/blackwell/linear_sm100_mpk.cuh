@@ -117,9 +117,6 @@ __device__ __noinline__ void
 
   auto mma_tiler = cute::make_shape(bM, bN, bK); // (MMA_M, MMA_N, MMA_K)
 
-  auto epi_tiler = cute::make_tile(cute::Int<MMA_N>{},
-                                   cute::Int<MMA_M>{}); // SwapAB configuration
-
   // Partition the GMEM tensors with the mma_tiler and mma_coord to get the
   // slices processed
   //   by this mma tile.
@@ -323,9 +320,6 @@ __device__ __noinline__ void
       cta_mma.partition_A(gA); // (MmaA, NumMma_M, NumMma_K, Tiles_K)
   cute::Tensor tCgB =
       cta_mma.partition_B(gB); // (MmaB, NumMma_N, NumMma_K, Tiles_K)
-
-  cute::Tensor tCgC_epi = cute::tiled_divide(
-      gC, epi_tiler); // (EpiTile_M, EpiTile_N, Tiles_M, Tiles_N)
 
   // if (cute::thread0()) {
   //   cute::print("tCgA:\t"); cute::print(tCgA); cute::print("\n");  // tCgA:
@@ -676,7 +670,7 @@ __device__ __noinline__ void
 
           CUTE_UNROLL
           for (int i = 0; i < tCrBiasTypeBias.size(); i++) {
-            tCrBiasTypeAcc[i] = tCrBiasTypeBias[i];
+            tCrBiasTypeAcc[i] = converterBias(tCrBiasTypeBias[i]);
           }
         }
 

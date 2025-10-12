@@ -1,13 +1,13 @@
 #pragma once
-#include <iostream>
 #include <cstdio>
+#include <iostream>
 
 // Use Thrust to handle host/device allocations
-#include <thrust/host_vector.h>
 #include <thrust/device_vector.h>
+#include <thrust/host_vector.h>
 
 // Cutlass includes
-#include <cutlass/half.h>                       // F16 data type
+#include <cutlass/half.h> // F16 data type
 // #include <cutlass/util/print_error.hpp>
 #include <cutlass/arch/barrier.h>
 #include <cutlass/cluster_launch.hpp>
@@ -16,26 +16,92 @@
 #include <cutlass/numeric_types.h>
 
 // CuTe includes
-#include <cute/tensor.hpp>                      // CuTe tensor implementation
-#include <cute/arch/cluster_sm90.hpp>           // CuTe functions for querying the details of cluster launched
-#include <cute/numeric/integral_constant.hpp>   // Compile time in constants such as _1, _256 etc.
-#include <cute/algorithm/cooperative_copy.hpp>  // Auto vectorized copy operation
-#include <cute/arch/tmem_allocator_sm100.hpp>   // TMEM allocator for SM100
+#include <cute/algorithm/cooperative_copy.hpp> // Auto vectorized copy operation
+#include <cute/arch/cluster_sm90.hpp> // CuTe functions for querying the details of cluster launched
+#include <cute/arch/tmem_allocator_sm100.hpp> // TMEM allocator for SM100
+#include <cute/numeric/integral_constant.hpp> // Compile time in constants such as _1, _256 etc.
+#include <cute/tensor.hpp>                    // CuTe tensor implementation
 // using namespace cute;
 
+// topk_reduce includes
+#include <cooperative_groups.h>
+#include <cooperative_groups/reduce.h>
+#include <cub/cub.cuh>
+
+// mirage includes
+#include "../common/dmem_layout.cuh"
+#include "../common/worker_config.h"
 #include "utils.cuh"
-#include "../common.h"
-#include "../dmem_layout.cuh"
-#include "../element_binary.cuh"
-#include "../element_unary.cuh"
-#include "../reduction.cuh"
-#include "../smem_layout.cuh"
-#include "../utils.cuh"
+// #include "../element_binary.cuh"
+// #include "../element_unary.cuh"
+// #include "../reduction.cuh"
+// #include "../smem_layout.cuh"
+// #include "../utils.cuh"
+#include "../hopper/barrier.cuh"
 #include "../hopper/smem_layout_tma.cuh"
 #include "../hopper/tma.cuh"
-#include "../hopper/barrier.cuh"
 
 namespace kernel {
+
+namespace cg = cooperative_groups;
+static constexpr int WarpSize = 32;
+
+template <typename TypeW_>
+struct TopKRedType {
+  using TypeW = TypeW_;
+  static_assert(std::is_same_v<TypeW, float> || std::is_same_v<TypeW, half> ||
+                    std::is_same_v<TypeW, __nv_bfloat16>,
+                "Top K reduction only implemented for float, float16 and bfloat16");
+
+  using TypeCmp = std::conditional_t<sizeof(TypeW) == 4, uint64_t, uint32_t>;
+  using IdxT = std::conditional_t<sizeof(TypeW) == 4, int32_t, int16_t>;
+  static constexpr int moveBits = (sizeof(TypeW) == 4) ? 32 : 16;
+  static constexpr int maxIdx = 65535;
+
+  TypeCmp compVal;
+
+  static __device__ inline TypeCmp makeCmpVal(TypeW val, int32_t idx = 0) {
+    auto valueBits = cub::Traits<TypeW>::TwiddleIn(
+        reinterpret_cast<typename cub::Traits<TypeW>::UnsignedBits&>(val));
+    TypeCmp compactTmp;
+    memcpy(&compactTmp, &valueBits, sizeof(valueBits));
+    compactTmp = (compactTmp << moveBits) | (0xFFFF & (maxIdx - idx));
+    // Use 65535 minus idx to give higher priority to elements with smaller indices.
+    return compactTmp;
+  }
+
+  static __device__ inline void unpack(TypeW& value, int32_t& index, TypeCmp cmp) {
+    // Since idx is always smaller than 65536 and positive, we can directly use it as the lower 16
+    // bits
+    index = maxIdx - static_cast<int32_t>(cmp & 0xFFFF);
+
+    auto compactTmp = cmp >> moveBits;
+    auto valueBits = cub::Traits<TypeW>::TwiddleOut(
+        reinterpret_cast<typename cub::Traits<TypeW>::UnsignedBits&>(compactTmp));
+    value = reinterpret_cast<TypeW&>(valueBits);
+  }
+
+  __device__ TopKRedType() = default;
+
+  __device__ TopKRedType(TypeW val, int32_t idx) : compVal(makeCmpVal(val, idx)) {}
+
+  __device__ operator TypeCmp() const noexcept { return compVal; }
+
+  __device__ inline TypeCmp reduce(cg::thread_block_tile<WarpSize> const& warp) {
+#ifdef __CUDA_ARCH__
+    static constexpr bool hasFastRedux = __CUDA_ARCH__ >= 1000;
+#else
+    static constexpr bool hasFastRedux = false;
+#endif
+    if constexpr (!hasFastRedux || sizeof(TypeCmp) == 8) {
+      return cg::reduce(warp, compVal, cg::greater<TypeCmp>{});
+    } else {
+      TypeCmp result;
+      asm("redux.sync.max.u32 %0, %1, 0xffffffff;\n" : "=r"(result) : "r"(compVal));
+      return result;
+    }
+  }
+};
 
 // The shared memory buffers for A, B, and C matrices.
 template <class TypeA,           // Tensor A data type
@@ -58,7 +124,6 @@ struct GateTopKSharedStorage
 
   alignas(16) cute::uint32_t tmem_base_ptr; // Base pointer for TMEM allocation
 
-  alignas(16) cute::uint32_t reduce_indices_buffer[32]; // Buffer for reduction indices
   alignas(16) TypeRed reduce_values_buffer[32];  // Buffer for reduction values
 
   CUTE_DEVICE constexpr auto tensor_sA() { return cute::make_tensor(cute::make_smem_ptr(A.begin()), ASmemLayout{}); }
@@ -88,8 +153,14 @@ template <typename T_,
             IndicesTensor mIndices,
             WeightsTensor mWeights
   ) {
-    static_assert(NUM_TOPK < 32, "Top K must have K < WarpSize");
+    
+    static_assert(NUM_TOPK <= 8, "Top K must have K <= 8");
     static_assert(BATCH_SIZE <= MMA_N, "Currently only support batch size <= MMA_N");
+
+    using AccType = float;
+
+    auto block = cg::this_thread_block();
+    auto warp = cg::tiled_partition<WarpSize>(block);
 
     int warp_idx = cutlass::canonical_warp_idx_sync();
 
@@ -101,7 +172,7 @@ template <typename T_,
 
     constexpr int num_tmem_columns = MMA_N * NUM_ACC_STAGE;
 
-    cute::TiledMMA tiled_mma = cute::make_tiled_mma(cute::SM100_MMA_F16BF16_SS<T_, T_, float,           // Mma's A, B, and Accumulator types
+    cute::TiledMMA tiled_mma = cute::make_tiled_mma(cute::SM100_MMA_F16BF16_SS<T_, T_, AccType,           // Mma's A, B, and Accumulator types
                                                                     MMA_M, MMA_N,                            // Mma M and N dimensions
                                                                     cute::UMMA::Major::K, cute::UMMA::Major::K>{});  // A and B layouts
     auto bM = cute::tile_size<0>(tiled_mma);             // MMA Tile M. We'll use 1 MMAs per MMA Tile M.
@@ -109,8 +180,6 @@ template <typename T_,
     auto bK = cute::tile_size<2>(tiled_mma) * cute::Int<4>{};  // MMA Tile K. We'll use 4 MMAs per MMA Tile K. For 16b types, tcgen05.mma has K16.
 
     auto mma_tiler = cute::make_shape(bM, bN, bK);       // (MMA_M, MMA_N, MMA_K)
-
-    auto epi_tiler = cute::make_tile(cute::Int<MMA_N>{}, cute::Int<MMA_M>{}); // SwapAB configuration
 
     // Partition the GMEM tensors with the mma_tiler and mma_coord to get the slices processed
     //   by this mma tile.
@@ -160,8 +229,9 @@ template <typename T_,
     //     cute::print("sA_layout:\t"); cute::print(sA_layout); cute::print("\n"); // sA_layout:   ArithTuple(_0,0) o ((_128,_16),_1,_4,8):((_1@1,_1@0),_0,_16@0,_8@0)
     //     cute::print("sB_layout:\t"); cute::print(sB_layout); cute::print("\n"); // sB_layout:   ArithTuple(_0,0) o ((_32,_16),_1,_4,8):((_1@1,_1@0),_0,_16@0,_8@0)
     // } __syncthreads();
+    using TypeRed = typename TopKRedType<AccType>::TypeCmp;
 
-    using SharedStorage = GateTopKSharedStorage<T_, T_, float, decltype(sA_layout), decltype(sB_layout), NUM_AB_STAGE, NUM_ACC_STAGE>;
+    using SharedStorage = GateTopKSharedStorage<T_, T_, TypeRed, decltype(sA_layout), decltype(sB_layout), NUM_AB_STAGE, NUM_ACC_STAGE>;
 
     extern __shared__ char shared_memory[];
     uintptr_t aligned_smem = (reinterpret_cast<uintptr_t>(shared_memory) + 127) / 128 * 128;
@@ -183,7 +253,6 @@ template <typename T_,
     // Represent the SMEM buffers for A and B
     cute::Tensor tCsA = shared_storage.tensor_sA();         // (MmaA, NumMma_M, NumMma_K, Tiles_K)
     cute::Tensor tCsB = shared_storage.tensor_sB();         // (MmaB, NumMma_M, NumMma_K, Tiles_K)
-    cute::Tensor sC_epi = shared_storage.tensor_sC();               // (EpiTile)
 
     //
     // Mma partitioning for A and B
@@ -194,15 +263,12 @@ template <typename T_,
     cute::Tensor tCgA = cta_mma.partition_A(gA);         // (MmaA, NumMma_M, NumMma_K, Tiles_K)
     cute::Tensor tCgB = cta_mma.partition_B(gB);         // (MmaB, NumMma_N, NumMma_K, Tiles_K)
 
-    cute::Tensor tCgC_epi = cute::tiled_divide(gC, epi_tiler); // (EpiTile_M, EpiTile_N, Tiles_M, Tiles_N)
-
     // if (cute::thread0()) {
     //   cute::print("tCgA:\t"); cute::print(tCgA); cute::print("\n");  // tCgA:   ArithTuple(_0,0) o ((_128,_16),_1,_4,64):((_1@1,_1@0),_0,_16@0,_64@0)
     //   cute::print("tCgB:\t"); cute::print(tCgB); cute::print("\n");  // tCgB:   ArithTuple(_0,0) o ((_32,_16),_1,_4,64):((_1@1,_1@0),_0,_16@0,_64@0)
     //   cute::print("tCgC_epi:\t"); cute::print(tCgC_epi); cute::print("\n");  // tCgC:   ArithTuple(_0,_0) o ((_32,_128),_1,_1,1,8):((_1@1,_1@0),_0,_0,_32@1,_128@0)
     //   cute::print("tCsA:\t"); cute::print(tCsA); cute::print("\n");
     //   cute::print("tCsB:\t"); cute::print(tCsB); cute::print("\n");
-    //   cute::print("sC_epi:\t"); cute::print(sC_epi); cute::print("\n");
     // } __syncthreads();
 
     // int tma_trans_bytes_A = sizeof(T_) * cute::size<1>(mma_tiler) * cute::size<2>(mma_tiler);
@@ -219,7 +285,6 @@ template <typename T_,
 
     T_ *shared_weight = shared_storage.A.begin();
     T_ *shared_input = shared_storage.B.begin();
-    T_ *mm_output = shared_storage.C.begin();
 
     Barrier *ab_full_mbar_ptr = reinterpret_cast<Barrier *>(shared_storage.ab_full_mbar_ptr);
 
@@ -240,15 +305,6 @@ template <typename T_,
                                 WEIGHT_TMA_TILE_SIZE,
                                 1>; // 64/64 = 1
     WeightSmem input_weight_smem(shared_weight);
-
-    using OutputSmem = smem_tma<T_, 
-                                0, 
-                                M, 
-                                S, 
-                                MMA_N, 
-                                OUTPUT_ATOM_SIZE, 
-                                1>;
-    OutputSmem mm_output_smem(mm_output);
 
     // // check tma descriptor:
     // if(threadIdx.x == 0){
@@ -430,10 +486,10 @@ template <typename T_,
       tmem_allocation_result_barrier.arrive_and_wait();
       tCtAcc.data() = shared_storage.tmem_base_ptr;
 
-      using AccType = typename decltype(tCtAcc)::value_type;
       using TypeBias = T_;
-
       cutlass::NumericConverter<AccType, TypeBias> converterBias;
+
+      using RedType = TopKRedType<AccType>;
 
       cute::TiledCopy tiled_copy_t2r = cute::make_tmem_copy(cute::SM100_TMEM_LOAD_32dp32b1x{}, tCtAcc(cute::_, cute::_, cute::_, 0)); // (128,32)
       cute::ThrCopy thr_copy_t2r = tiled_copy_t2r.get_slice(threadIdx.x);
@@ -443,21 +499,25 @@ template <typename T_,
       cute::Tensor tTR_rAcc_fake = thr_copy_t2r.partition_D(tCgC_fake);
       cute::Tensor tTR_rAcc = cute::make_fragment_like<AccType>(tTR_rAcc_fake); // ptr[32b](some_ptr) o ((_1,_1),_32,_1,_1):((_0,_0),_1,_0,_0)
 
-      if(threadIdx.x == 0) {
-        cute::print("tiled_copy_t2r:\t"); cute::print(tiled_copy_t2r); cute::print("\n"); //
-        cute::print("thr_copy_t2r:\t"); cute::print(thr_copy_t2r); cute::print("\n"); // 
-        cute::print("tTR_tAcc:\t"); cute::print(tTR_tAcc); cute::print("\n"); // 
-        cute::print("tTR_rAcc:\t"); cute::print(tTR_rAcc); cute::print("\n"); // 
-        cute::print("tCtAcc:\t"); cute::print(tCtAcc); cute::print("\n"); //
-        printf("tmem_base_ptr: %u\n", shared_storage.tmem_base_ptr);
-      } epilogue_wg_barrier.arrive_and_wait();
+      cute::Tensor tInd_rInd = cute::make_tensor<int32_t>(cute::make_shape(cute::Int<NUM_TOPK>{})); //
+      cute::Tensor tWeight_rWeight = cute::make_tensor<AccType>(cute::make_shape(cute::Int<NUM_TOPK>{})); //
+
+      // if(threadIdx.x == 0) {
+      //   cute::print("tiled_copy_t2r:\t"); cute::print(tiled_copy_t2r); cute::print("\n"); //
+      //   cute::print("thr_copy_t2r:\t"); cute::print(thr_copy_t2r); cute::print("\n"); // 
+      //   cute::print("tTR_tAcc:\t"); cute::print(tTR_tAcc); cute::print("\n"); // 
+      //   cute::print("tTR_rAcc:\t"); cute::print(tTR_rAcc); cute::print("\n"); // 
+      //   cute::print("tCtAcc:\t"); cute::print(tCtAcc); cute::print("\n"); //
+      //   cute::print("mIndices:\t"); cute::print(mIndices); cute::print("\n"); //
+      //   cute::print("mWeights:\t"); cute::print(mWeights); cute::print("\n"); //
+      //   printf("tmem_base_ptr: %u\n", shared_storage.tmem_base_ptr);
+      // } epilogue_wg_barrier.arrive_and_wait();
 
       int num_tiles_executed = 0;
       for (int m_tile=0; m_tile < cute::size<3>(tCgA); ++m_tile) {
         for (int n_tile=0; n_tile < cute::size<3>(tCgB); ++n_tile) {
           int acc_buf_idx = num_tiles_executed % NUM_ACC_STAGE;
           int acc_full_phase = num_tiles_executed / NUM_ACC_STAGE % 2;
-          int c_smem_wr_buffer_idx = num_tiles_executed % NUM_C_STAGE;
 
           cute::Tensor tCgBias = gBias(cute::_, cute::_, n_tile, m_tile); // (Mma_M, Mma_N)
           cute::Tensor tCrBiasTypeBias = cute::make_tensor<TypeBias>(cute::shape(tTR_rAcc(0, cute::_, 0, 0))); // (T2R_M, T2R_N)
@@ -479,7 +539,7 @@ template <typename T_,
 
             CUTE_UNROLL
             for (int i = 0; i < tCrBiasTypeBias.size(); i++) {
-              tCrBiasTypeAcc[i] = tCrBiasTypeBias[i];
+              tCrBiasTypeAcc[i] = converterBias(tCrBiasTypeBias[i]);
             }
           }
 
@@ -503,13 +563,61 @@ template <typename T_,
           // argtopk
 
           static constexpr float minValue = -1.F;
+          typename RedType::TypeCmp packedMax{};
 
+          CUTE_UNROLL
           for (int batch_idx = 0; batch_idx < BATCH_SIZE; ++batch_idx) {
+            RedType topK(tTR_rAcc[batch_idx], threadIdx.x);
+            CUTE_UNROLL
             for (int kk = 0; kk < NUM_TOPK; ++kk){
-              
+              packedMax = topK.reduce(warp);
+              if (cute::elect_one_sync()){
+                shared_storage.reduce_values_buffer[warp_idx * NUM_TOPK + kk] = packedMax;
+              }
+              if (topK.compVal == packedMax){
+                topK = RedType{minValue, static_cast<int32_t>(threadIdx.x)};
+              }
             }
+
+            epilogue_wg_barrier.arrive_and_wait();
+
+            if (warp_idx == 0){
+              topK.compVal = threadIdx.x < NUM_TOPK * 4 ? shared_storage.reduce_values_buffer[threadIdx.x] : RedType::makeCmpVal(minValue, threadIdx.x);
+              __syncwarp();
+
+              float maxScore = float{0.f};
+              float sumScore = float{0.f};
+
+              CUTE_UNROLL
+              for (int kk = 0; kk < NUM_TOPK; ++kk){
+                packedMax = topK.reduce(warp);
+                if (threadIdx.x == batch_idx){
+                  RedType::unpack(tWeight_rWeight(kk), tInd_rInd(kk), packedMax);
+                  if(kk == 0){
+                    maxScore = static_cast<float>(tWeight_rWeight(kk));
+                  }
+                  tWeight_rWeight(kk) = static_cast<float>(exp(tWeight_rWeight(kk) - maxScore));
+                  sumScore += static_cast<float>(tWeight_rWeight(kk));
+                }
+                if (topK.compVal == packedMax){
+                  topK = RedType{minValue, static_cast<int32_t>(threadIdx.x)};
+                }
+              }
+
+              for (int kk = 0; kk < NUM_TOPK; ++kk){
+                if (threadIdx.x == batch_idx){
+                  tWeight_rWeight(kk) = static_cast<float>(tWeight_rWeight(kk) / sumScore);
+                }
+              }
+            }
+
+            epilogue_wg_barrier.arrive_and_wait();
           }
 
+          if(threadIdx.x < BATCH_SIZE){
+            cute::copy(tWeight_rWeight, mWeights(threadIdx.x, cute::_));
+            cute::copy(tInd_rInd, mIndices(threadIdx.x, cute::_));
+          }
 
           num_tiles_executed++;
         }
@@ -525,8 +633,6 @@ template <typename T_,
       tmem_allocator.free(shared_storage.tmem_base_ptr, num_tmem_columns);
     }
 
-  } // end linear_sm100_mpk_task_impl
-
-
+  } // end gate_topk_sm100_task_impl
 
 } // namespace kernel

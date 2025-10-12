@@ -62,11 +62,7 @@ __device__ __forceinline__ void
     } else {
       // TODO: This might not be necessary
       for (int i = threadIdx.x; i < CHUNK_SIZE;
-<<<<<<< HEAD:include/mirage/persistent_kernel/tasks/embedding.cuh
-          i += blockDim.x) { // writing 0 to output
-=======
            i += blockDim.x) { // writing 0 to output
->>>>>>> a9350c9bc768725303052c61f2737f4dafaa643c:include/mirage/persistent_kernel/tasks/ampere/embedding.cuh
         output[batch_idx * OUTPUT_DIM_SIZE + i] = T(0.0f);
       }
     }
