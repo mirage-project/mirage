@@ -14,7 +14,7 @@
  */
 
 #pragma once
-#include "../utils.cuh"
+#include "../common/utils.cuh"
 
 namespace kernel {
 struct Barrier {

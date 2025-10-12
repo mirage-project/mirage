@@ -13,8 +13,7 @@
  * limitations under the License.
  */
 #pragma once
-#include "../common.h"
-#include "../utils.cuh"
+#include "../common/utils.cuh"
 namespace kernel {
 
 template <typename T, int BATCH_SIZE, int HIDDEN_DIM, int NUM_THREADS = 256>

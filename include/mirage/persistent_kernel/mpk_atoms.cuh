@@ -12,6 +12,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+#pragma once
 
 __device__ __forceinline__ int atom_add_release_gpu_s32(int *addr, int val) {
   int old_val;

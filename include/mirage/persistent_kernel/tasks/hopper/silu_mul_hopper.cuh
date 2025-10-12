@@ -13,8 +13,7 @@
  * limitations under the License.
  */
 #pragma once
-#include "../common.h"
-#include "../utils.cuh"
+#include "../common/utils.cuh"
 namespace kernel {
 
 template <typename T,

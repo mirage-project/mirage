@@ -13,8 +13,7 @@
  * limitations under the License.
  */
 #pragma once
-#include "../common.h"
-#include "../utils.cuh"
+#include "tasks/common/utils.cuh"
 
 #include <cutlass/arch/barrier.h>
 

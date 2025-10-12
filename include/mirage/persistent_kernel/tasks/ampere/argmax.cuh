@@ -13,8 +13,7 @@
  * limitations under the License.
  */
 #pragma once
-#include "common.h"
-#include "utils.cuh"
+#include "tasks/common/common_header.cuh"
 namespace kernel {
 template <typename T>
 __device__ __forceinline__ void warp_reduce_max_idx(T &val, long long &idx) {

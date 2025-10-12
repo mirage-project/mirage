@@ -15,7 +15,7 @@
 
 #pragma once
 #include "runtime_header.h"
-#include "tasks/common.h"
+#include "tasks/common/common_header.cuh"
 #include <cuda.h>
 
 namespace mirage {

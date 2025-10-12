@@ -13,7 +13,7 @@
  * limitations under the License.
  */
 #pragma once
-#include "../common.h"
+#include "../common/common_header.cuh"
 #include "barrier.cuh"
 #include "tma_2d.cuh"
 #include "tma_3d.cuh"
