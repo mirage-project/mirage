@@ -14,13 +14,12 @@
  */
 #pragma once
 
-#include "utils.cuh"
 #include "bfloat16.h"
-#include "dmem_layout.cuh"
 #include "copy_sm80.cuh"
+#include "dmem_layout.cuh"
+#include "utils.cuh"
 
 #include <cassert>
 #include <cstdint>
 #include <cstdio>
 #include <iostream>
-

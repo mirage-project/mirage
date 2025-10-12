@@ -665,7 +665,8 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
                                             smem_shape,
                                             smem_repeat_row,
                                             smem_repeat_col);
-      } else if (param_id == 3 && (task_desc.task_type == TASK_LINEAR_WITH_RESIDUAL_SM100) ||
+      } else if (param_id == 3 &&
+                     (task_desc.task_type == TASK_LINEAR_WITH_RESIDUAL_SM100) ||
                  param_id == 2 && (task_desc.task_type == TASK_LINEAR_SM100)) {
         // TMA_OUT
         int const batch_size = tensor_desc.dim[0];

@@ -18,8 +18,8 @@
 #ifdef MPK_ENABLE_TMA
 #include "tma.cuh"
 #endif
-#include "runtime_header.h"
 #include "mpk_atoms.cuh"
+#include "runtime_header.h"
 #ifdef USE_NVSHMEM
 #include <mpi.h>
 #include <nvshmem.h>

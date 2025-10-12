@@ -13,8 +13,8 @@
  * limitations under the License.
  */
 #pragma once
-#include "tasks/common/common_header.cuh"
 #include "element_unary.cuh"
+#include "tasks/common/common_header.cuh"
 
 namespace kernel {
 

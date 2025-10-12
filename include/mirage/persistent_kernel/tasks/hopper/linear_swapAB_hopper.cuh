@@ -16,10 +16,10 @@
 
 #pragma once
 #include "../common/dmem_layout.cuh"
-//#include "../element_binary.cuh"
-//#include "../element_unary.cuh"
-//#include "../reduction.cuh"
-//#include "../smem_layout.cuh"
+// #include "../element_binary.cuh"
+// #include "../element_unary.cuh"
+// #include "../reduction.cuh"
+// #include "../smem_layout.cuh"
 #include "../common/utils.cuh"
 #include "smem_layout_tma.cuh"
 #include "tma.cuh"

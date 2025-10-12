@@ -20,32 +20,32 @@
 namespace kernel {
 template <typename T, typename InputSmem, int NUM_HEAD, int HEAD_DIM>
 __device__ __forceinline__ void rms_norm_sm100(InputSmem smem_input,
-                                         T const *weight_ptr,
-                                         float *reduce_smem,
-                                         float eps,
-                                         int window_size,
-                                         int token_offset = 0,
-                                         bool rotary_emd = false,
-                                         T const *cos_ptr = nullptr,
-                                         T const *sin_ptr = nullptr) {
-  cutlass::arch::NamedBarrier wg_barrier(NUM_THREADS, /*bar-id*/6);
-  if(threadIdx.x < NUM_THREADS){
-      // For __syncthread divergence dead lock.
+                                               T const *weight_ptr,
+                                               float *reduce_smem,
+                                               float eps,
+                                               int window_size,
+                                               int token_offset = 0,
+                                               bool rotary_emd = false,
+                                               T const *cos_ptr = nullptr,
+                                               T const *sin_ptr = nullptr) {
+  cutlass::arch::NamedBarrier wg_barrier(NUM_THREADS, /*bar-id*/ 6);
+  if (threadIdx.x < NUM_THREADS) {
+    // For __syncthread divergence dead lock.
     static_assert(NUM_THREADS <= HEAD_DIM || HEAD_DIM % 32 == 0);
     // smem_input: NUM_HEADS * (WINDOW_SIZE or CHUNK_SIZE), HEAD_DIM
     // TODO(Wenqin): handle if speculative window of k span two chunks.
     int warp_idx = warp_id();
-  #pragma unroll
+#pragma unroll
     for (int win_idx = 0; win_idx < window_size; ++win_idx) {
-      // token_offset is the offset for first token in input SMEM (auto-agressive
-      // decoding or speculative decoding window), for Q, token_offset is always
-      // 0. For K, token_offset is the offset of k (except speculative window) in
-      // the SMEM chunk.
+      // token_offset is the offset for first token in input SMEM
+      // (auto-agressive decoding or speculative decoding window), for Q,
+      // token_offset is always 0. For K, token_offset is the offset of k
+      // (except speculative window) in the SMEM chunk.
       int smem_seq_idx = token_offset + win_idx;
-  #pragma unroll
+#pragma unroll
       for (int head_idx = 0; head_idx < NUM_HEAD; ++head_idx) {
         float sum = 0.0f;
-  #pragma unroll
+#pragma unroll
         for (uint32_t i = threadIdx.x; i < HEAD_DIM; i += NUM_THREADS) {
           int row = smem_seq_idx * NUM_HEAD + head_idx;
           int col = i;
@@ -53,9 +53,9 @@ __device__ __forceinline__ void rms_norm_sm100(InputSmem smem_input,
           sum += val * val;
         }
 
-  #pragma unroll
+#pragma unroll
         for (uint32_t offset = NUM_THREADS_PER_WARP / 2; offset > 0;
-            offset /= 2) {
+             offset /= 2) {
           sum += shfl_xor_sync(sum, offset);
         }
 
@@ -65,9 +65,9 @@ __device__ __forceinline__ void rms_norm_sm100(InputSmem smem_input,
         wg_barrier.arrive_and_wait();
         sum = threadIdx.x < NUM_WARPS ? reduce_smem[threadIdx.x] : 0.0f;
 
-  #pragma unroll
+#pragma unroll
         for (uint32_t offset = NUM_THREADS_PER_WARP / 2; offset > 0;
-            offset /= 2) {
+             offset /= 2) {
           sum += shfl_xor_sync(sum, offset);
         }
 
@@ -81,7 +81,7 @@ __device__ __forceinline__ void rms_norm_sm100(InputSmem smem_input,
 
         // multiply with weight
         if (threadIdx.x < HEAD_DIM) {
-  #pragma unroll
+#pragma unroll
           for (uint32_t i = threadIdx.x; i < HEAD_DIM; i += NUM_THREADS) {
             int row = smem_seq_idx * NUM_HEAD + head_idx;
             int col = i;
@@ -127,6 +127,5 @@ __device__ __forceinline__ void rms_norm_sm100(InputSmem smem_input,
       } // head_idx
     }   // win_idx
   }
-  
 }
 } // namespace kernel

@@ -77,18 +77,16 @@ public:
                                      std::vector<int> const &params);
   // SM100 tasks
   int register_linear_sm100_task(threadblock::Graph const &bgraph,
-                                  std::vector<int> const &params,
-                                  bool with_residual);
+                                 std::vector<int> const &params,
+                                 bool with_residual);
   int register_paged_attention_sm100_task(threadblock::Graph const &bgraph,
-                                   std::vector<int> const &params);
+                                          std::vector<int> const &params);
   int register_argmax_partial_sm100_task(threadblock::Graph const &bgraph,
-                                        std::vector<int> const &params);
+                                         std::vector<int> const &params);
   int register_argmax_reduce_sm100_task(threadblock::Graph const &bgraph,
-                                       std::vector<int> const &params);
-  // SM100 tasks end 
+                                        std::vector<int> const &params);
+  // SM100 tasks end
   int register_task_variant(TaskType type, std::string const &code);
-
-
 
 public:
   std::map<TaskType, std::vector<std::string>> all_task_variants;

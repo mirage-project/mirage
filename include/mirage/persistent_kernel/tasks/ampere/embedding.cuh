@@ -62,7 +62,7 @@ __device__ __forceinline__ void
     } else {
       // TODO: This might not be necessary
       for (int i = threadIdx.x; i < CHUNK_SIZE;
-          i += blockDim.x) { // writing 0 to output
+           i += blockDim.x) { // writing 0 to output
         output[batch_idx * OUTPUT_DIM_SIZE + i] = T(0.0f);
       }
     }

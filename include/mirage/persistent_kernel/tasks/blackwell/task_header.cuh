@@ -11,6 +11,6 @@
 #include "tasks/hopper/rmsnorm_hopper.cuh"
 #include "tasks/hopper/silu_mul_hopper.cuh"
 // Blackwell task impls
-#include "linear_sm100_mpk.cuh"
-#include "attention_sm100.cuh"
 #include "argmax_sm100.cuh"
+#include "attention_sm100.cuh"
+#include "linear_sm100_mpk.cuh"
