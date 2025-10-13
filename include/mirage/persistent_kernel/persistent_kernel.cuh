@@ -1032,16 +1032,6 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
 
   // Initialize nvshmem
   cudaSetDevice(my_rank);
-#if defined(MODE_OFFLINE) || defined(MODE_ONLINE)
-  global_runtime_config.request_ids =
-      gpu_malloc<int>(sizeof(int) * (MPK_MAX_NUM_BATCHED_REQUESTS + 1));
-  global_runtime_config.next_request_id = gpu_malloc<int>(sizeof(int));
-  global_runtime_config.page_queue =
-      gpu_malloc<int>(MPK_MAX_NUM_PAGES * sizeof(int));
-  global_runtime_config.page_queue_head = gpu_malloc<int>(sizeof(int));
-  global_runtime_config.page_queue_tail = gpu_malloc<int>(sizeof(int));
-  global_runtime_config.total_num_requests = total_num_requests;
-#endif
 
 #ifdef USE_NVSHMEM
   MPI_Comm mpi_comm = MPI_COMM_WORLD;
@@ -1056,6 +1046,17 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
 #else
   int mype = 0;
   int npes = 1;
+#endif
+
+#if defined(MODE_OFFLINE) || defined(MODE_ONLINE)
+  global_runtime_config.request_ids =
+      gpu_malloc<int>(sizeof(int) * (MPK_MAX_NUM_BATCHED_REQUESTS + 1));
+  global_runtime_config.next_request_id = gpu_malloc<int>(sizeof(int));
+  global_runtime_config.page_queue =
+      gpu_malloc<int>(MPK_MAX_NUM_PAGES * sizeof(int));
+  global_runtime_config.page_queue_head = gpu_malloc<int>(sizeof(int));
+  global_runtime_config.page_queue_tail = gpu_malloc<int>(sizeof(int));
+  global_runtime_config.total_num_requests = total_num_requests;
 #endif
   global_runtime_config.per_worker_queue_len = 1024;
   global_runtime_config.per_sched_queue_len = 1024;

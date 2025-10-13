@@ -600,10 +600,14 @@ int TaskRegister::register_reduce_task(threadblock::Graph const &bgraph,
   assert(output_ops[0]->output_tensors[0].num_dims == 2);
   int batch_size = input_ops[0]->output_tensors[0].dim[0];
   int output_size = input_ops[0]->output_tensors[0].dim[1];
-  int output_stride = input_ops[0]->output_tensors[0].stride[0];
+  // get output stride
+  assert(output_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
+  kn::KNInputOp *kn_input_op =
+      static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
+  int output_stride = static_cast<int>(kn_input_op->input_strides[0]);
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
-  code.e("kernel::reduction_kernel<bfloat16, $, $, $, $>(",
+  code.e("kernel::reduction_kernel<bfloat16, $, $, $, $, $>(",
          params[0],
          params[1],
          batch_size,
@@ -611,7 +615,7 @@ int TaskRegister::register_reduce_task(threadblock::Graph const &bgraph,
          output_stride);
   code.e("    task_desc->input_ptrs[0],");
   code.e("    task_desc->input_ptrs[1],");
-  code.e("    task_desc->output_ptrs[0];");
+  code.e("    task_desc->output_ptrs[0]);");
   return register_task_variant(TASK_REDUCE, code.to_string());
 }
 
