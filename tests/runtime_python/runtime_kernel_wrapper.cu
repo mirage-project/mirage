@@ -819,7 +819,7 @@ __global__ void norm_linear_kernel_wrapper(void const *input_ptr,
                         OUTPUT_SIZE,
                         REDUCTION_SIZE,
                         OUTPUT_SIZE>(
-      input_ptr, norm_weight_ptr, weight_ptr, BATCH_SIZE, eps, output_ptr);
+      input_ptr, norm_weight_ptr, weight_ptr, eps, output_ptr);
 }
 
 template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int REDUCTION_SIZE>

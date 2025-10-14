@@ -303,7 +303,7 @@ __device__ __forceinline__ void
       if (rope) {
         // q rope
         if (iter == 0) {
-          rotary_embedding<T, QOSmem, NUM_Q_PER_KV, HEAD_DIM>(
+          rotary_embedding<T, QOSmem, NUM_Q_PER_KV, 1, HEAD_DIM>(
               q_smem,
               static_cast<T const *>(cos_ptr) + (seq_len - 1) * HEAD_DIM,
               static_cast<T const *>(sin_ptr) + (seq_len - 1) * HEAD_DIM,
@@ -311,7 +311,7 @@ __device__ __forceinline__ void
         }
         // k rope
         else if (iter == num_iters - 1) {
-          rotary_embedding<T, KVSmem, 1, HEAD_DIM>(
+          rotary_embedding<T, KVSmem, 1, 1, HEAD_DIM>(
               k_smem,
               static_cast<T const *>(cos_ptr) + (seq_len - 1) * HEAD_DIM,
               static_cast<T const *>(sin_ptr) + (seq_len - 1) * HEAD_DIM,
