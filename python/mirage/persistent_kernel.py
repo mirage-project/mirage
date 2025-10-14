@@ -148,7 +148,7 @@ def get_compile_command(
     flags = [
         "-shared",
         "-std=c++17",
-        "-rdc=false",
+        "-rdc=false" if not use_nvshmem else "-rdc=true",
         "-use_fast_math",
         "-lcuda",
         "-Xcompiler=-fPIC",
@@ -682,12 +682,15 @@ class PersistentKernel:
         assert input.num_dims == 2  # (batch_size, hidden_size)
         assert buffer.num_dims == 3  # (world_size, batch_size, hidden_size)
         assert output.num_dims == 2  # (batch_size, hidden_size)
+        # params[0]: num_gpus
+        # params[1]: my_gpu_id
+        params = [self.world_size, self.mpi_rank]
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         tb_graph.new_input(input, (1, -1, -1), -1, True)
         tb_graph.new_input(buffer, (2, -1, -1), -1, True)
         tb_graph.new_input(output, (1, -1, -1), -1, True)
         self.kn_graph.customized([input, buffer, output], tb_graph)
-        self.kn_graph.register_task(tb_graph, "allreduce")
+        self.kn_graph.register_task(tb_graph, "allreduce", params)
 
     def silu_mul_layer(
         self,

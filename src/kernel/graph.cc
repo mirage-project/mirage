@@ -496,7 +496,9 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
         task_register->register_argmax_reduce_task(customized->bgraph, params);
     task_config[op] = std::make_tuple(2, 1, TASK_ARGMAX_REDUCE, variant_id);
   } else if (name == "allreduce") {
-    task_config[op] = std::make_tuple(2, 1, TASK_ALLREDUCE, 0);
+    int variant_id =
+        task_register->register_reduce_task(customized->bgraph, params);
+    task_config[op] = std::make_tuple(2, 1, TASK_ALLREDUCE, variant_id);
   } else if (name == "find_ngram_partial") {
     int variant_id = task_register->register_find_ngram_partial_task(
         customized->bgraph, params);

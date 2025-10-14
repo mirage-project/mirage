@@ -900,7 +900,8 @@ TaskGraphResult print_task_graph(
                                 {"inputs", {}},
                                 {"outputs", {}},
                                 {"trigger_event", task_desc.trigger_event},
-                                {"dependent_event", task_desc.dependent_event}};
+                                {"dependent_event", task_desc.dependent_event},
+                                {"request_id", task_desc.request_id}};
               off_t offset = 0;
               // Add input
               int3 input_map = input_ops[0]->input_map;
@@ -1308,6 +1309,7 @@ TaskGraphResult print_task_graph(
   task_type_to_name[TASK_LINEAR_WITH_RESIDUAL] = "TASK_LINEAR_WITH_RESIDUAL";
   task_type_to_name[TASK_ARGMAX_PARTIAL] = "TASK_ARGMAX_PARTIAL";
   task_type_to_name[TASK_ARGMAX_REDUCE] = "TASK_ARGMAX_REDUCE";
+  task_type_to_name[TASK_REDUCE] = "TASK_REDUCE";
   task_type_to_name[TASK_FIND_NGRAM_PARTIAL] = "TASK_FIND_NGRAM_PARTIAL";
   task_type_to_name[TASK_FIND_NGRAM_GLOBAL] = "TASK_FIND_NGRAM_GLOBAL";
   task_type_to_name[TASK_TARGET_VERIFY_GREEDY] = "TASK_TARGET_VERIFY_GREEDY";

@@ -136,31 +136,32 @@ static __device__ __forceinline__ void
 }
 
 // Assume that input/buffer/output have the same stride
-template <typename T>
+template <typename T,
+          int NUM_GPUS,
+          int MY_GPU_ID,
+          int BATCH_SIZE,
+          int OUTPUT_SIZE,
+          int OUTPUT_STRIDE>
 __device__ __forceinline__ void reduction_kernel(void const *input_ptr,
                                                  void const *buf_ptr,
-                                                 void *output_ptr,
-                                                 int num_gpus,
-                                                 int my_gpu_id,
-                                                 int batch_size,
-                                                 int output_size,
-                                                 int stride) {
+                                                 void *output_ptr) {
   T const *__restrict__ d_input = static_cast<T const *>(input_ptr);
   T const *__restrict__ d_buffer = static_cast<T const *>(buf_ptr);
   T *__restrict__ d_output = static_cast<T *>(output_ptr);
-  for (int idx = threadIdx.x; idx < output_size * batch_size;
+  for (int idx = threadIdx.x; idx < OUTPUT_SIZE * BATCH_SIZE;
        idx += blockDim.x) {
     T accum = static_cast<T>(0.0f);
-    int batch = idx / output_size;
-    int offset = idx % output_size;
-    for (int i = 0; i < num_gpus; i++) {
-      if (i == my_gpu_id) {
-        accum += d_input[batch * stride + offset];
+    int batch = idx / OUTPUT_SIZE;
+    int offset = idx % OUTPUT_SIZE;
+    for (int i = 0; i < NUM_GPUS; i++) {
+      if (i == MY_GPU_ID) {
+        accum += d_input[batch * OUTPUT_STRIDE + offset];
       } else {
-        accum += d_buffer[i * batch_size * stride + batch * stride + offset];
+        accum += d_buffer[i * BATCH_SIZE * OUTPUT_STRIDE +
+                          batch * OUTPUT_STRIDE + offset];
       }
     }
-    d_output[batch * stride + offset] = accum;
+    d_output[batch * OUTPUT_STRIDE + offset] = accum;
   }
 }
 
