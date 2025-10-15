@@ -159,17 +159,19 @@ class LlamaAttention(nn.Module):
         self.is_causal = True
         self.max_position_embeddings = 4096
         self.key_cache, self.value_cache = kv_cache
+        
+        num_layers, max_num_pages, page_size, num_kv_heads_per_device, head_dim = kv_cache[0].shape
         assert kv_cache[0].shape == (
             config.num_hidden_layers,
-            1,
-            4096,
+            max_num_pages,
+            page_size,
             self.num_key_value_heads // world_size,
             self.head_dim,
         )
         assert kv_cache[1].shape == (
             config.num_hidden_layers,
-            1,
-            4096,
+            max_num_pages,
+            page_size,
             self.num_key_value_heads // world_size,
             self.head_dim,
         )
@@ -249,7 +251,12 @@ class LlamaAttention(nn.Module):
                 True
             )
 
-        attn_output = attn_output.reshape(bsz, q_len, self.local_qkv_size)
+        # Fix: reshape correctly based on actual tensor shape
+        if len(attn_output.shape) == 3 and attn_output.shape[0] == q_len:
+            # attn_output is [q_len, num_heads, head_dim], need to reshape to [bsz, q_len, local_qkv_size]
+            attn_output = attn_output.reshape(q_len, -1).unsqueeze(0).expand(bsz, -1, -1)
+        else:
+            attn_output = attn_output.reshape(bsz, q_len, self.local_qkv_size)
 
         attn_output = self.o_proj(attn_output)
         if self.world_size > 1:
@@ -294,7 +301,9 @@ class LlamaDecoderLayer(nn.Module):
         residual = hidden_states
         hidden_states = self.mlp(self.post_attention_layernorm, hidden_states, stream=stream)
         hidden_states = residual + hidden_states
-        return hidden_states
+        
+        outputs = (hidden_states,)
+        return outputs
 
 
 class LlamaPreTrainedModel(PreTrainedModel):
@@ -312,7 +321,8 @@ class LlamaPreTrainedModel(PreTrainedModel):
                 module.weight.data[module.padding_idx].zero_()
 
 class LlamaModel(LlamaPreTrainedModel):
-    def __init__(self, config: LlamaConfig, world_size: int = 1):
+    def __init__(self, config: LlamaConfig, world_size: int = 1,
+        max_num_pages: int = 1, page_size: int = 4096):
         super().__init__(config)
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
@@ -320,8 +330,8 @@ class LlamaModel(LlamaPreTrainedModel):
         key_cache = torch.empty(
             (
                 config.num_hidden_layers,
-                1,
-                4096,
+                max_num_pages,
+                page_size,
                 config.num_key_value_heads // world_size,
                 config.head_dim,
             ),
@@ -331,8 +341,8 @@ class LlamaModel(LlamaPreTrainedModel):
         value_cache = torch.empty(
             (
                 config.num_hidden_layers,
-                1,
-                4096,
+                max_num_pages,
+                page_size,
                 config.num_key_value_heads // world_size,
                 config.head_dim,
             ),
@@ -376,13 +386,14 @@ class LlamaModel(LlamaPreTrainedModel):
         self.kv_last_page_len.copy_(step + 1)
 
         for decoder_layer in self.layers:
-            hidden_states = decoder_layer(
+            layer_outputs = decoder_layer(
                 hidden_states,
                 attention_mask=attention_mask,
                 position_embeddings=position_embeddings,
                 step=step,
                 stream=stream,
             )
+            hidden_states = layer_outputs[0]
 
         hidden_states = self.norm(hidden_states)
 
@@ -390,9 +401,9 @@ class LlamaModel(LlamaPreTrainedModel):
 
 # mostly same
 class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
-    def __init__(self, config, world_size=1):
+    def __init__(self, config, world_size=1, max_num_pages=1, page_size=4096):
         super().__init__(config)
-        self.model = LlamaModel(config, world_size)
+        self.model = LlamaModel(config, world_size, max_num_pages, page_size)
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         self.post_init()
