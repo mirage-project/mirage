@@ -7,6 +7,7 @@ from onnx import shape_inference
 from op import Operator
 import torch.nn.functional as F
 import custom_onnx_operators
+import numpy as np
 
 device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 
@@ -228,13 +229,12 @@ def parse_onnx_model(model, unique_operators):
                 operators[node.name].output_ops.append(dummy_const_operator)
     
     # pass to reassign tensor shapes
-    def backward(op, succ_shape, first_pass=False):
+    def backward(op, succ_shape, visited):
         if not op.output_tensor_shapes:
             return
-        if not first_pass and op.output_tensor_shapes[0] == succ_shape:
+        if id(op) in visited:
             return
-        # if op.fn in ["ReduceMean", "ReduceSum"]:
-        #     return
+        visited.add(id(op))
         
         if op.fn == "MatMul":
             succ_shape_tuple, _ = succ_shape  # Extract shape, ignore tensor_id
@@ -243,12 +243,12 @@ def parse_onnx_model(model, unique_operators):
             left_old_shape, left_tensor_id = op.input_tensor_shapes[0]
             left_shape = (batch_dims + left_old_shape[-2:], left_tensor_id)
             op.input_tensor_shapes[0] = left_shape
-            backward(op.input_ops[0], left_shape)
+            backward(op.input_ops[0], left_shape, visited)
 
             right_old_shape, right_tensor_id = op.input_tensor_shapes[1]
             right_shape = (batch_dims + right_old_shape[-2:], right_tensor_id)
             op.input_tensor_shapes[1] = right_shape
-            backward(op.input_ops[1], right_shape)
+            backward(op.input_ops[1], right_shape, visited)
         else:
             new_shape, _ = succ_shape  # Extract shape, ignore tensor_id
             for i in range(len(op.input_tensor_shapes)):
@@ -261,12 +261,13 @@ def parse_onnx_model(model, unique_operators):
                 # we know what the input and output shapes are the same
                 # Propagate with predecessor's own output (preserving its tensor_id)
                 if pred.output_tensor_shapes:
-                    backward(pred, pred.output_tensor_shapes[0])
+                    backward(pred, pred.output_tensor_shapes[0], visited)
 
+    visited = set()
     for node in model.graph.node: # ensure topological order
         op = operators[node.name]
         shape = op.output_tensor_shapes[0]
-        backward(op, shape, first_pass=True)
+        backward(op, shape, visited)
 
     return operators
 
