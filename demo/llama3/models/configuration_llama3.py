@@ -17,12 +17,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""LLaMA model configuration"""
+"""LLaMA3 model configuration"""
 
 from transformers.configuration_utils import PretrainedConfig
 from transformers.modeling_rope_utils import rope_config_validation
 
-class LlamaConfig(PretrainedConfig):
+class Llama3Config(PretrainedConfig):
     r"""
     This is the configuration class to store the configuration of a [`Llama3Model`]. It is used to instantiate a Llama3
     model according to the specified arguments, defining the model architecture. Instantiating a configuration with the

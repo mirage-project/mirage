@@ -17,7 +17,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""PyTorch LLaMA model."""
+"""PyTorch Llama3 model."""
 
 import math
 import torch.distributed as dist
@@ -30,17 +30,15 @@ from transformers.activations import ACT2FN
 from transformers.generation import GenerationMixin
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 from transformers.modeling_utils import PreTrainedModel
-from .configuration_llama3 import LlamaConfig
-# from .configuration_llama3_2 import LlamaConfig
+from .configuration_llama3 import Llama3Config
 import time
 
 from .rope import apply_rotary_pos_emb_triton
 
-# same
-class LlamaRMSNorm(nn.Module):
+class Llama3RMSNorm(nn.Module):
     def __init__(self, hidden_size, eps=1e-6):
         """
-        LlamaRMSNorm is equivalent to T5LayerNorm
+        Llama3RMSNorm is equivalent to T5LayerNorm
         """
         super().__init__()
         self.weight = nn.Parameter(torch.ones(hidden_size))
@@ -51,13 +49,11 @@ class LlamaRMSNorm(nn.Module):
         hidden_states = hidden_states * torch.rsqrt(variance)
         return self.weight * hidden_states
 
-# mostly same
-class LlamaRotaryEmbedding(nn.Module):
-    inv_freq: torch.Tensor  # fix linting for `register_buffer`
+class Llama3RotaryEmbedding(nn.Module):
+    inv_freq: torch.Tensor
 
-    def __init__(self, config: LlamaConfig, device=None):
+    def __init__(self, config: Llama3Config, device=None):
         super().__init__()
-        # BC: "rope_type" was originally "type"
         if hasattr(config, "rope_scaling") and isinstance(config.rope_scaling, dict):
             self.rope_type = config.rope_scaling.get("rope_type", config.rope_scaling.get("type"))
         else:
@@ -92,8 +88,7 @@ class LlamaRotaryEmbedding(nn.Module):
 
         return cos.to(dtype=torch.bfloat16), sin.to(dtype=torch.bfloat16)
 
-# same
-class LlamaMLP(nn.Module):
+class Llama3MLP(nn.Module):
     def __init__(self, config, world_size):
         super().__init__()
         self.world_size = world_size
@@ -140,8 +135,8 @@ def naive_attention(
     return attn_output
 
 
-class LlamaAttention(nn.Module):
-    def __init__(self, config: LlamaConfig, kv_cache: Tuple[torch.Tensor, torch.Tensor], layer_idx: int, world_size: int = 1):
+class Llama3Attention(nn.Module):
+    def __init__(self, config: Llama3Config, kv_cache: Tuple[torch.Tensor, torch.Tensor], layer_idx: int, world_size: int = 1):
         super().__init__()
         self.world_size = world_size
         self.config = config
@@ -188,7 +183,7 @@ class LlamaAttention(nn.Module):
         self.o_proj = nn.Linear(
             (config.num_attention_heads // world_size) * self.head_dim, config.hidden_size, bias=config.attention_bias
         )
-        self.rotary_emb = LlamaRotaryEmbedding(config=self.config)
+        self.rotary_emb = Llama3RotaryEmbedding(config=self.config)
 
     def forward(
         self,
@@ -265,16 +260,16 @@ class LlamaAttention(nn.Module):
         return attn_output, None 
 
 
-class LlamaDecoderLayer(nn.Module):
-    def __init__(self, config: LlamaConfig, kv_cache: Tuple[torch.Tensor, torch.Tensor], layer_idx: int, world_size: int = 1):
+class Llama3DecoderLayer(nn.Module):
+    def __init__(self, config: Llama3Config, kv_cache: Tuple[torch.Tensor, torch.Tensor], layer_idx: int, world_size: int = 1):
         super().__init__()
         self.hidden_size = config.hidden_size
 
-        self.self_attn = LlamaAttention(config=config, kv_cache=kv_cache, layer_idx=layer_idx, world_size=world_size)
+        self.self_attn = Llama3Attention(config=config, kv_cache=kv_cache, layer_idx=layer_idx, world_size=world_size)
 
-        self.mlp = LlamaMLP(config, world_size)
-        self.input_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.post_attention_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.mlp = Llama3MLP(config, world_size)
+        self.input_layernorm = Llama3RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.post_attention_layernorm = Llama3RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(
         self,
@@ -306,8 +301,8 @@ class LlamaDecoderLayer(nn.Module):
         return outputs
 
 
-class LlamaPreTrainedModel(PreTrainedModel):
-    config_class = LlamaConfig
+class Llama3PreTrainedModel(PreTrainedModel):
+    config_class = Llama3Config
 
     def _init_weights(self, module):
         std = self.config.initializer_range
@@ -320,8 +315,8 @@ class LlamaPreTrainedModel(PreTrainedModel):
             if module.padding_idx is not None:
                 module.weight.data[module.padding_idx].zero_()
 
-class LlamaModel(LlamaPreTrainedModel):
-    def __init__(self, config: LlamaConfig, world_size: int = 1,
+class Llama3Model(Llama3PreTrainedModel):
+    def __init__(self, config: Llama3Config, world_size: int = 1,
         max_num_pages: int = 1, page_size: int = 4096):
         super().__init__(config)
         self.padding_idx = config.pad_token_id
@@ -354,10 +349,10 @@ class LlamaModel(LlamaPreTrainedModel):
         
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
         self.layers = nn.ModuleList(
-            [LlamaDecoderLayer(config, self.kv_cache, layer_idx, world_size) for layer_idx in range(config.num_hidden_layers)]
+            [Llama3DecoderLayer(config, self.kv_cache, layer_idx, world_size) for layer_idx in range(config.num_hidden_layers)]
         )
-        self.norm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.rotary_emb = LlamaRotaryEmbedding(config=config)
+        self.norm = Llama3RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.rotary_emb = Llama3RotaryEmbedding(config=config)
 
         self.post_init()
         
@@ -399,11 +394,10 @@ class LlamaModel(LlamaPreTrainedModel):
 
         return (hidden_states,)
 
-# mostly same
-class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
+class Llama3ForCausalLM(Llama3PreTrainedModel, GenerationMixin):
     def __init__(self, config, world_size=1, max_num_pages=1, page_size=4096):
         super().__init__(config)
-        self.model = LlamaModel(config, world_size, max_num_pages, page_size)
+        self.model = Llama3Model(config, world_size, max_num_pages, page_size)
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         self.post_init()

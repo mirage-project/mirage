@@ -5,7 +5,7 @@ import torch.distributed as dist
 from transformers import AutoTokenizer, AutoConfig
 from safetensors.torch import load_model
 
-from models.modeling_llama import LlamaForCausalLM
+from models.modeling_llama3 import Llama3ForCausalLM
 
 
 # ============================================================================
@@ -13,7 +13,6 @@ from models.modeling_llama import LlamaForCausalLM
 # ============================================================================
 
 def parse_arguments():
-    """Parse command line arguments for the demo."""
     parser = argparse.ArgumentParser(description="Llama3 MPK Demo")
     
     parser.add_argument("--use-mirage", action="store_true", 
@@ -75,7 +74,6 @@ def setup_env():
     return world_size, rank
 
 
-
 def load_model_and_tokenizer(args, world_size, rank):
     model_name = args.model
     
@@ -84,13 +82,13 @@ def load_model_and_tokenizer(args, world_size, rank):
             # Load model locally (necessary for multi-GPU case)
             print(f"Load model from model path: {args.model_path}")
             config = AutoConfig.from_pretrained(args.model_path)
-            model = LlamaForCausalLM(config, world_size, args.max_num_pages, args.page_size)
+            model = Llama3ForCausalLM(config, world_size, args.max_num_pages, args.page_size)
             load_model(
                 model, f"{args.model_path}/model{rank}-mp{world_size}.safetensors"
             )
             tokenizer = AutoTokenizer.from_pretrained(args.model_path)
         else:
-            model = LlamaForCausalLM.from_pretrained(model_name, world_size, max_num_pages=args.max_num_pages, page_size=args.page_size).to("cuda")
+            model = Llama3ForCausalLM.from_pretrained(model_name, world_size, max_num_pages=args.max_num_pages, page_size=args.page_size).to("cuda")
 
             tokenizer = AutoTokenizer.from_pretrained(model_name)
     
@@ -98,11 +96,10 @@ def load_model_and_tokenizer(args, world_size, rank):
 
 
 def process_eos_tokens(model, tokenizer):
-    """Process EOS token IDs to handle both single and multiple EOS tokens."""
     eos_token_id = model.config.eos_token_id
     if isinstance(eos_token_id, (list, tuple)):
         eos_token_ids = eos_token_id  # Keep all EOS tokens for checking
-        eos_token_id_for_mirage = eos_token_id[0]  # Use first for Mirage kernel
+        eos_token_id_for_mirage = eos_token_id[0]  # To make it simple first, use first for Mirage kernel
     else:
         eos_token_ids = [eos_token_id] if eos_token_id is not None else []
         eos_token_id_for_mirage = eos_token_id
@@ -118,12 +115,16 @@ def process_eos_tokens(model, tokenizer):
 # Utility Functions
 # ============================================================================
 
-def get_block_dim(n):
+def get_block_dim():
     return 128
 
+
 def grid_for_rmsnorm_linear_layer(size):
-    for grid_size in [96, 80, 64]:
-        if size % grid_size == 0:
+    if size < 4096:
+        raise ValueError("RMSNorm/Linear layer size too small")
+    for grid_size in [96, 80, 64]: # TODO: investigate why 48 (and smaller?) results in mem misalignment
+        if size % grid_size == 0 and (size // grid_size >= 128 or size // grid_size == 64):
+        # if size % grid_size == 0:
             return grid_size
     return 1
 
@@ -229,7 +230,7 @@ def setup_mirage_configuration(model, args, world_size, rank):
     fused_outdim_1 = (num_q_heads + 2 * num_kv_heads) * head_dim
     fused_outdim_2 = 2 * intermediate_size
 
-    print("\n[DEBUG] Mirage Model Config:")
+    print("\nMirage Model Config:")
     print(f"  hidden_size: {hidden_size}")
     print(f"  intermediate_size: {intermediate_size}")
     print(f"  num_attention_heads: {num_q_heads}")
@@ -240,7 +241,7 @@ def setup_mirage_configuration(model, args, world_size, rank):
     print(f"  padded_vocab_size: {padded_vocab_size}")
     print(f"  world_size: {world_size}")
     print(f"  num_local_q_heads: {num_local_q_heads}")
-    print(f"  num_local_kv_heads: {num_local_kv_heads}")
+    print(f"  num_local_kv_heads: {num_local_kv_heads}\n\n")
 
     return {
         'hidden_size': hidden_size,
@@ -332,7 +333,6 @@ def create_persistent_kernel(args, world_size, rank, input_data, config, eos_tok
 
 
 def attach_model_inputs(mpk, model, input_data, config):
-    """Attach input tensors to the persistent kernel."""
     # Attach basic inputs
     x = mpk.attach_input(torch_tensor=input_data['input_tokens'], name="input_token")
     cos_pos_embed = mpk.attach_input(
@@ -367,9 +367,6 @@ def create_intermediate_tensors(mpk, config, spec_decode_config, world_size, arg
         num_tokens_extend = spec_decode_config.spec_length + 1
     else:
         num_tokens_extend = 1
-     
-    # TODO: Make the code run well even if 96 % max_num_batched_tokens != 0
-    # assert(96 % args.max_num_batched_tokens == 0)
     
     tensors = {}
     
@@ -494,13 +491,7 @@ def add_embedding_layer(mpk, inputs, tensors, config, spec_decode_config):
     # TODO: Add speculative decoding token layer if needed
     
     # Add embedding layer
-    embed_out_dim = config['hidden_size']
-    embed_block_dim = get_block_dim(embed_out_dim)
-    if embed_out_dim % embed_block_dim != 0:
-        print(f"[EMBED][WARNING] output_dim={embed_out_dim} is not divisible by block_dim={embed_block_dim}, falling back to block_dim={embed_out_dim}")
-        embed_block_dim = embed_out_dim
-    print(f"[EMBED] output_dim={embed_out_dim}, block_dim={embed_block_dim}, divides? {embed_out_dim % embed_block_dim == 0}")
-    assert embed_out_dim % embed_block_dim == 0, f"EMBED: output_dim {embed_out_dim} not divisible by block_dim {embed_block_dim}"
+    embed_block_dim = get_block_dim()
     mpk.embed_layer(
         input=inputs['input_token'], 
         weight=inputs['embed_weight'], 
@@ -514,7 +505,6 @@ def add_embedding_layer(mpk, inputs, tensors, config, spec_decode_config):
 
 
 def add_transformer_layer(mpk, layer_idx, layer, x, inputs, tensors, config, world_size, spec_decode_config, model, args):
-    """Add a single transformer layer to the computation graph."""
     import mirage as mi
     
     # 1. Input layernorm + QKV projection
@@ -543,10 +533,8 @@ def add_transformer_layer(mpk, layer_idx, layer, x, inputs, tensors, config, wor
         name=f"layer_{layer_idx}_qkv_proj",
     )
     
-    # RMSNorm + Linear layers (split from fused version)
-    # Print status for RMSNorm
-    rmsnorm_out_dim = config['hidden_size']
-    rmsnorm_block_dim = get_block_dim(rmsnorm_out_dim)
+    # RMSNorm + Linear layers
+    rmsnorm_block_dim = get_block_dim()
     mpk.rmsnorm_layer(
         input=x,
         weight=w_norm,
@@ -555,14 +543,7 @@ def add_transformer_layer(mpk, layer_idx, layer, x, inputs, tensors, config, wor
         block_dim=(rmsnorm_block_dim, 1, 1),
     )
 
-    # Print status for QKV Linear
-    attn_in_dim = config['fused_outdim_1'] // world_size
-    attn_in_block_dim = get_block_dim(attn_in_dim)
-    if attn_in_dim % attn_in_block_dim != 0:
-        print(f"[L{layer_idx}][QKV][WARNING] output_dim={attn_in_dim} is not divisible by block_dim={attn_in_block_dim}, falling back to block_dim={attn_in_dim}")
-        attn_in_block_dim = attn_in_dim
-    print(f"[L{layer_idx}] QKV Linear: output_dim={attn_in_dim}, block_dim={attn_in_block_dim}, divides? {attn_in_dim % attn_in_block_dim == 0}")
-    assert attn_in_dim % attn_in_block_dim == 0, f"L{layer_idx} QKV Linear: output_dim {attn_in_dim} not divisible by block_dim {attn_in_block_dim}"
+    attn_in_block_dim = get_block_dim()
     mpk.linear_layer(
         input=tensors['rmsnorm_out'],
         weight=w_qkv,
@@ -581,16 +562,14 @@ def add_transformer_layer(mpk, layer_idx, layer, x, inputs, tensors, config, wor
         name=f"layer_{layer_idx}_v_cache"
     )
     
-    attn_out_dim = config['num_local_q_heads'] * config['head_dim']
-    attn_out_block_dim = get_block_dim(attn_out_dim)
-    print(f"[L{layer_idx}] Attention OUT: output_dim={attn_out_dim}, block_dim={attn_out_block_dim}, divides? {attn_out_dim % attn_out_block_dim == 0}")
+    attn_out_block_dim = get_block_dim()
     if spec_decode_config:
         mpk.single_batch_extend_attention_layer(
             input=tensors['attn_in'],
             k_cache=k_cache,
             v_cache=v_cache,
-            q_norm=None,  # Llama3 doesn't use q_norm - test qk_norm=false path
-            k_norm=None,  # Llama3 doesn't use k_norm - test qk_norm=false path
+            q_norm=None,
+            k_norm=None,
             cos_pos_embed=inputs['cos_pos_embed'],
             sin_pos_embed=inputs['sin_pos_embed'],
             output=tensors['attn_out'],
@@ -602,8 +581,8 @@ def add_transformer_layer(mpk, layer_idx, layer, x, inputs, tensors, config, wor
             input=tensors['attn_in'],
             k_cache=k_cache,
             v_cache=v_cache,
-            q_norm=None,  # Llama3 doesn't use q_norm - test qk_norm=false path
-            k_norm=None,  # Llama3 doesn't use k_norm - test qk_norm=false path
+            q_norm=None,
+            k_norm=None,
             cos_pos_embed=inputs['cos_pos_embed'],
             sin_pos_embed=inputs['sin_pos_embed'],
             output=tensors['attn_out'],
@@ -616,13 +595,7 @@ def add_transformer_layer(mpk, layer_idx, layer, x, inputs, tensors, config, wor
         torch_tensor=layer.self_attn.o_proj.weight, 
         name=f"layer_{layer_idx}_o_proj"
     )
-    attn_proj_out_dim = config['hidden_size']
-    attn_proj_block_dim = get_block_dim(attn_proj_out_dim)
-    if attn_proj_out_dim % attn_proj_block_dim != 0:
-        print(f"[L{layer_idx}][ATTN_PROJ][WARNING] output_dim={attn_proj_out_dim} is not divisible by block_dim={attn_proj_block_dim}, falling back to block_dim={attn_proj_out_dim}")
-        attn_proj_block_dim = attn_proj_out_dim
-    print(f"[L{layer_idx}] Attn PROJ: output_dim={attn_proj_out_dim}, block_dim={attn_proj_block_dim}, divides? {attn_proj_out_dim % attn_proj_block_dim == 0}")
-    assert attn_proj_out_dim % attn_proj_block_dim == 0, f"L{layer_idx} Attn PROJ: output_dim {attn_proj_out_dim} not divisible by block_dim {attn_proj_block_dim}"
+    attn_proj_block_dim = get_block_dim()
     mpk.linear_with_residual_layer(
         input=tensors['attn_out'],
         weight=w_o,
@@ -669,15 +642,9 @@ def add_transformer_layer(mpk, layer_idx, layer, x, inputs, tensors, config, wor
         name=f"layer_{layer_idx}_gatedup_proj",
     )
      
-    # RMSNorm + Linear for MLP (split from fused version)
+    # RMSNorm + Linear for MLP
     # MLP RMSNorm
-    mlp_rmsnorm_out_dim = config['hidden_size']
-    mlp_rmsnorm_block_dim = get_block_dim(mlp_rmsnorm_out_dim)
-    if mlp_rmsnorm_out_dim % mlp_rmsnorm_block_dim != 0:
-        print(f"[L{layer_idx}][MLP_RMSNORM][WARNING] output_dim={mlp_rmsnorm_out_dim} is not divisible by block_dim={mlp_rmsnorm_block_dim}, falling back to block_dim={mlp_rmsnorm_out_dim}")
-        mlp_rmsnorm_block_dim = mlp_rmsnorm_out_dim
-    print(f"[L{layer_idx}] MLP RMSNorm: output_dim={mlp_rmsnorm_out_dim}, block_dim={mlp_rmsnorm_block_dim}, divides? {mlp_rmsnorm_out_dim % mlp_rmsnorm_block_dim == 0}")
-    assert mlp_rmsnorm_out_dim % mlp_rmsnorm_block_dim == 0, f"L{layer_idx} MLP RMSNorm: output_dim {mlp_rmsnorm_out_dim} not divisible by block_dim {mlp_rmsnorm_block_dim}"
+    mlp_rmsnorm_block_dim = get_block_dim()
     mpk.rmsnorm_layer(
         input=x,
         weight=w_norm_mlp,
@@ -686,13 +653,7 @@ def add_transformer_layer(mpk, layer_idx, layer, x, inputs, tensors, config, wor
         block_dim=(mlp_rmsnorm_block_dim, 1, 1),
     )
     # MLP Linear
-    mlp_mid_dim = config['fused_outdim_2'] // world_size
-    mlp_mid_block_dim = get_block_dim(mlp_mid_dim)
-    if mlp_mid_dim % mlp_mid_block_dim != 0:
-        print(f"[L{layer_idx}][MLP_LINEAR][WARNING] output_dim={mlp_mid_dim} is not divisible by block_dim={mlp_mid_block_dim}, falling back to block_dim={mlp_mid_dim}")
-        mlp_mid_block_dim = mlp_mid_dim
-    print(f"[L{layer_idx}] MLP Linear: output_dim={mlp_mid_dim}, block_dim={mlp_mid_block_dim}, divides? {mlp_mid_dim % mlp_mid_block_dim == 0}")
-    assert mlp_mid_dim % mlp_mid_block_dim == 0, f"L{layer_idx} MLP Linear: output_dim {mlp_mid_dim} not divisible by block_dim {mlp_mid_block_dim}"
+    mlp_mid_block_dim = get_block_dim()
     mpk.linear_layer(
         input=tensors['rmsnorm_out'],
         weight=w_gatedup,
@@ -701,9 +662,7 @@ def add_transformer_layer(mpk, layer_idx, layer, x, inputs, tensors, config, wor
         block_dim=(mlp_mid_block_dim, 1, 1),
     )
     # SiLU Mul
-    silu_mul_dim = config['intermediate_size'] // world_size
-    silu_mul_block_dim = get_block_dim(silu_mul_dim)
-    print(f"[L{layer_idx}] SiLU Mul: output_dim={silu_mul_dim}, block_dim={silu_mul_block_dim}, divides? {silu_mul_dim % silu_mul_block_dim == 0}")
+    silu_mul_block_dim = get_block_dim()
     mpk.silu_mul_layer(
         input=tensors['mlp_mid'],
         output=tensors['silu_mul_out'],
@@ -716,13 +675,7 @@ def add_transformer_layer(mpk, layer_idx, layer, x, inputs, tensors, config, wor
         torch_tensor=layer.mlp.down_proj.weight, 
         name=f"layer_{layer_idx}_down_proj"
     )
-    mlp_out_dim = config['hidden_size']
-    mlp_out_block_dim = get_block_dim(mlp_out_dim)
-    if mlp_out_dim % mlp_out_block_dim != 0:
-        print(f"[L{layer_idx}][MLP_OUT][WARNING] output_dim={mlp_out_dim} is not divisible by block_dim={mlp_out_block_dim}, falling back to block_dim={mlp_out_dim}")
-        mlp_out_block_dim = mlp_out_dim
-    print(f"[L{layer_idx}] MLP OUT: output_dim={mlp_out_dim}, block_dim={mlp_out_block_dim}, divides? {mlp_out_dim % mlp_out_block_dim == 0}")
-    assert mlp_out_dim % mlp_out_block_dim == 0, f"L{layer_idx} MLP OUT: output_dim {mlp_out_dim} not divisible by block_dim {mlp_out_block_dim}"
+    mlp_out_block_dim = get_block_dim()
     mpk.linear_with_residual_layer(
         input=tensors['silu_mul_out'],
         weight=w_down,
@@ -750,32 +703,21 @@ def add_transformer_layer(mpk, layer_idx, layer, x, inputs, tensors, config, wor
 
 
 def add_final_layers(mpk, x, model, config, tensors, spec_decode_config, args):
-    """Add final normalization and language modeling head."""
-    
     # 1. Final RMSNorm + LM head projection
     w_norm = mpk.attach_input(
         torch_tensor=model.model.norm.weight, 
         name="model_norm_weight"
     )
     w_proj = mpk.attach_input(
-        torch_tensor=config['lm_head_weight'], 
+        torch_tensor=config['lm_head_weight'],
         name="lm_head"
     )
-    
-    # RMSNorm + Linear layers (split from fused version)
+
+    # RMSNorm + Linear layers
     lm_head_weight_shape0 = config['lm_head_weight'].shape[0]
-    print(f"[DEBUG] Final layers grid/tile sizes:")
-    print(f"  lm_head_weight.shape[0]: {lm_head_weight_shape0}")
-    print(f"  grid_for_rmsnorm_linear_layer(lm_head_weight.shape[0]): {grid_for_rmsnorm_linear_layer(lm_head_weight_shape0)}")
 
     # Final RMSNorm
-    final_rmsnorm_out_dim = config['hidden_size']
-    final_rmsnorm_block_dim = get_block_dim(final_rmsnorm_out_dim)
-    if final_rmsnorm_out_dim % final_rmsnorm_block_dim != 0:
-        print(f"[FINAL][RMSNORM][WARNING] output_dim={final_rmsnorm_out_dim} is not divisible by block_dim={final_rmsnorm_block_dim}, falling back to block_dim={final_rmsnorm_out_dim}")
-        final_rmsnorm_block_dim = final_rmsnorm_out_dim
-    print(f"[FINAL] RMSNorm: output_dim={final_rmsnorm_out_dim}, block_dim={final_rmsnorm_block_dim}, divides? {final_rmsnorm_out_dim % final_rmsnorm_block_dim == 0}")
-    assert final_rmsnorm_out_dim % final_rmsnorm_block_dim == 0, f"FINAL RMSNorm: output_dim {final_rmsnorm_out_dim} not divisible by block_dim {final_rmsnorm_block_dim}"
+    final_rmsnorm_block_dim = get_block_dim()
     mpk.rmsnorm_layer(
         input=x,
         weight=w_norm,
@@ -785,13 +727,7 @@ def add_final_layers(mpk, x, model, config, tensors, spec_decode_config, args):
     )
 
     # Final Linear
-    final_linear_out_dim = config['padded_vocab_size']
-    final_linear_block_dim = get_block_dim(final_linear_out_dim)
-    if final_linear_out_dim % final_linear_block_dim != 0:
-        print(f"[FINAL][LINEAR][WARNING] output_dim={final_linear_out_dim} is not divisible by block_dim={final_linear_block_dim}, falling back to block_dim={final_linear_out_dim}")
-        final_linear_block_dim = final_linear_out_dim
-    print(f"[FINAL] Linear: output_dim={final_linear_out_dim}, block_dim={final_linear_block_dim}, divides? {final_linear_out_dim % final_linear_block_dim == 0}")
-    assert final_linear_out_dim % final_linear_block_dim == 0, f"FINAL Linear: output_dim {final_linear_out_dim} not divisible by block_dim {final_linear_block_dim}"
+    final_linear_block_dim = get_block_dim()
     mpk.linear_layer(
         input=tensors['rmsnorm_out'],
         weight=w_proj,
@@ -899,7 +835,6 @@ def build_mirage_graph(model, args, world_size, rank, input_data, eos_token_id_f
 # ============================================================================
 
 def run_pytorch_generation(model, input_data, eos_token_ids, output_len=512):
-    """Run generation using PyTorch (baseline)."""
     tokens = input_data['tokens']
     prompt_len = input_data['prompt_lengths'][0].item()  # Get the first batch's prompt length
     position_embeddings = input_data['position_embeddings']
@@ -946,7 +881,6 @@ def run_pytorch_generation(model, input_data, eos_token_ids, output_len=512):
 
 
 def run_mirage_generation(model, mpk, input_data, tokenizer, args):
-    """Run generation using Mirage MPK."""
     tokens = input_data['tokens']
     position_embeddings = input_data['position_embeddings']
     step = input_data['step']
@@ -956,21 +890,6 @@ def run_mirage_generation(model, mpk, input_data, tokenizer, args):
     
     # Timing setup
     starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
-    
-    # Debug: Print initial state before MPK call
-    print("="*60)
-    print("DEBUG: Pre-MPK State")
-    print("="*60)
-    print("input_tokens:", input_data['input_tokens'].shape, input_data['input_tokens'])
-    print("output_tokens:", input_data['output_tokens'].shape, input_data['output_tokens'])
-    print("step (initial):", input_data['step'])
-    print("num_new_tokens:", input_data['num_new_tokens'])
-    print("tokens (first 40 for request 0):", tokens[0, :40])
-    print("prompt_lengths:", prompt_lengths)
-    
-    # Store initial states for comparison
-    initial_step = None
-    initial_tokens = None
 
     starter.record()
     mpk()
@@ -979,15 +898,6 @@ def run_mirage_generation(model, mpk, input_data, tokenizer, args):
     torch.cuda.synchronize()
     run_time = starter.elapsed_time(ender)
     
-    # Debug: Print state after MPK call
-    print("="*60)
-    print("DEBUG: Post-MPK State")
-    print("="*60)
-    print("input_tokens (after):", input_data['input_tokens'])
-    print("output_tokens (after):", input_data['output_tokens']) 
-    print("step (after):", step)
-    print("tokens (first 40 for request 0 after):", tokens[0, :40])
-     
     # Extract and display results
     print("="*60)
     print("Generation Results (Mirage)")
@@ -1009,7 +919,6 @@ def run_mirage_generation(model, mpk, input_data, tokenizer, args):
 # ============================================================================
 
 def run_generation_comparison(model, tokenizer, args, world_size, rank):
-    """Run and compare PyTorch vs Mirage generation."""
     # Process EOS tokens
     eos_token_id_for_mirage, eos_token_ids = process_eos_tokens(model, tokenizer)
     
@@ -1045,8 +954,6 @@ def run_generation_comparison(model, tokenizer, args, world_size, rank):
         print(f"\nPrompt length: {prompt_lengths[0].item()}")
         print(f"Generated length: {end_pos - prompt_lengths[0].item()}")
         print(f"Per-token latency: {run_time / (end_pos - prompt_lengths[0].item()):.4f} ms")
-    
-    print("Demo completed successfully!")
 
 
 def main():
