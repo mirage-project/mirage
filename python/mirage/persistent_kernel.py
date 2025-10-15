@@ -114,6 +114,7 @@ def get_compile_command(
     num_workers=None,
     num_local_schedulers=None,
     num_remote_schedulers=None,
+    use_cutlass_kernel=True,
 ):
     max_worker_per_scheduler = 128
     if num_workers != None and num_local_schedulers != None and num_remote_schedulers != None:
@@ -143,6 +144,7 @@ def get_compile_command(
         f"-I{os.path.join(mirage_deps_path, 'cutlass/tools/util/include')}",
         f"-I{os.path.join(mirage_home_path, 'deps/json/include')}",
         f"-DMAX_WORKER_PER_SCHEDULER={max_worker_per_scheduler}",
+        f"-DMIRAGE_USE_CUTLASS_KERNEL={'1' if use_cutlass_kernel else '0'}",
     ]
 
     flags = [
@@ -231,7 +233,8 @@ class PersistentKernel:
         meta_tensors: dict,
         profiler_tensor: torch.Tensor,
         trace_name: str,
-        spec_decode_config: SpecDecodeConfig
+        spec_decode_config: SpecDecodeConfig,
+        use_cutlass_kernel: bool
     ):
         self.__finalized__ = False
         self._is_compiled = False
@@ -255,6 +258,7 @@ class PersistentKernel:
         self.trace_name = trace_name
         self.use_nvshmem = True if world_size > 1 else False
         self.spec_decode_config = spec_decode_config
+        self.use_cutlass_kernel = use_cutlass_kernel
         self._spec_decode_handlers = {
             "promptlookup": self.prompt_lookup_spec_handler,
         }
@@ -1054,6 +1058,7 @@ class PersistentKernel:
             num_workers=self.num_workers,
             num_local_schedulers=self.num_local_schedulers, 
             num_remote_schedulers=self.num_remote_schedulers,
+            use_cutlass_kernel=self.use_cutlass_kernel,
         )
         print("Compiling megakernel using the following command line:")
         print(cc_cmd)
