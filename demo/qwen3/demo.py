@@ -9,13 +9,13 @@ import os
 # print limitation
 # torch.set_printoptions(threshold=2000)
 
-def grid_for_rmsnorm_linear_layer(size: int, use_cutlass_kernel: bool = True):
+def grid_for_rmsnorm_linear_layer(size: int):
     # 96 and 64 are enough to cover all Qwen3 model? Please update the method
     # if you meet any incompatibility.
-    if not use_cutlass_kernel and size / 96 > 400:
-        # TODO: An add-hoc workaround for current MPK linear kernel, because
-        # it may run out of shared memroy when the output size of each task is
-        # too big.
+    if size / 96 > 400:
+        # TODO: An add-hoc workaround for linear kernel, both MPK ptx and
+        # cutlass version will output unexpect result (not same out put for
+        # same prompt) if the OUTPUT_SIZE is too big, try to figure it out.
         assert size % 256 == 0, "FATAL: Linear layer size not support, it's {size}."
         return size // 256
     if size % 96 == 0:
@@ -585,7 +585,7 @@ if __name__ == "__main__":
             input=rmsnorm_out,
             weight=w_proj,
             output=argmax_in,
-            grid_dim=(grid_for_rmsnorm_linear_layer(w_proj.dim(0), mpk.use_cutlass_kernel), 1, 1),
+            grid_dim=(grid_for_rmsnorm_linear_layer(w_proj.dim(0)), 1, 1),
             block_dim=(128, 1, 1),
         )
         #mpk.rmsnorm_linear_layer(
