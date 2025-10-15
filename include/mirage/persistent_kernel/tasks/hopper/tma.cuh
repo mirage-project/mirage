@@ -13,7 +13,7 @@
  * limitations under the License.
  */
 #pragma once
-#include "../common.h"
+#include "../common/common_header.cuh"
 #include "barrier.cuh"
 #include "tma_2d.cuh"
 #include "tma_3d.cuh"
@@ -33,6 +33,11 @@ __device__ static inline void store_commit_group() {
 template <int N = 0>
 __device__ static inline void store_async_wait() {
   asm volatile("cp.async.bulk.wait_group %0;" : : "n"(N) : "memory");
+}
+
+__device__ __forceinline__ void prefetch_tma_descriptor(CUtensorMap const *p) {
+  uint64_t gmem_int_desc = reinterpret_cast<uint64_t>(p);
+  asm volatile("prefetch.tensormap [%0];" ::"l"(gmem_int_desc) : "memory");
 }
 
 } // namespace tma

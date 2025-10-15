@@ -14,15 +14,14 @@
  */
 
 #pragma once
-#include "../common.h"
-#include "../copy_sm80.cuh"
-#include "../dmem_layout.cuh"
-#include "../element_binary.cuh"
-#include "../element_unary.cuh"
-#include "../mma.cuh"
-#include "../reduction.cuh"
-#include "../smem_layout.cuh"
-#include "../utils.cuh"
+#include "../common/copy_sm80.cuh"
+#include "../common/dmem_layout.cuh"
+// #include "../element_binary.cuh"
+// #include "../element_unary.cuh"
+// #include "../mma.cuh"
+// #include "../reduction.cuh"
+// #include "../common/smem_layout.cuh"
+#include "../common/utils.cuh"
 #include "norm_hopper.cuh"
 #include "rotary_embedding_hopper.cuh"
 #include "smem_layout_tma.cuh"
@@ -244,7 +243,8 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
   constexpr size_t S_COMPUTE_DONE_SIZE = 8 * Kstages;
 
   constexpr size_t S_TOTAL_OFFSET = S_COMPUTE_DONE_OFFSET + S_COMPUTE_DONE_SIZE;
-  static_assert(S_TOTAL_OFFSET <= 224 * 1024);
+  static_assert(S_TOTAL_OFFSET <=
+                mirage::runtime::MAX_DYNAMIC_SHARED_MEMORY_SIZE);
 
   extern __shared__ char smem_ptr[];
 

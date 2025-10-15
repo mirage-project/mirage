@@ -6,10 +6,10 @@ torch.set_printoptions(sci_mode=False, profile="full")
 
 g = torch.Generator(device="cuda").manual_seed(1234)
 
-reduction_sizes = [4096, 12288]
-output_sizes = [64, 128, 256]
-# reduction_sizes = [4096]
-# output_sizes = [2048]
+# reduction_sizes = [4096, 12288]
+# output_sizes = [64, 128, 256]
+reduction_sizes = [4096]
+output_sizes = [64]
 batch_size = 8
 
 for reduction_size in reduction_sizes:
@@ -31,12 +31,12 @@ for reduction_size in reduction_sizes:
             batch_size, output_size, device="cuda", dtype=torch.bfloat16
         )
 
-        # for i in range(batch_size):
-        #     for j in range(reduction_size):
-        #         x[i, j] = 0.1 * (i * reduction_size + j)
-        # for i in range(output_size):
-        #     for j in range(reduction_size):
-        #         w[i, j] = 0.1
+        for i in range(batch_size):
+            for j in range(reduction_size):
+                x[i, j] = 0.1
+        for i in range(output_size):
+            for j in range(reduction_size):
+                w[i, j] = 0.1
 
         # swapAB version
         # (n, k) * (m, k) -> (n, m)

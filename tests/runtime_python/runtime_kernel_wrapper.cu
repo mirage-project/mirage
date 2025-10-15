@@ -579,7 +579,7 @@ void launch_multitoken_paged_attention(
     float k_eps) {
   dim3 grid_dim(1, 1, 1);
   dim3 block_dim(128, 1, 1);
-  size_t smem_size = mirage::runtime::MAX_SHARE_MEMORY_SIZE;
+  size_t smem_size = mirage::runtime::MAX_DYNAMIC_SHARED_MEMORY_SIZE;
 
   cudaFuncSetAttribute(multitoken_paged_attention_wrapper<T,
                                                           NUM_QO_HEADS,
