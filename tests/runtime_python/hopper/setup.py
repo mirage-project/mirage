@@ -28,7 +28,7 @@ setup(
                 os.path.join(this_dir, 'runtime_kernel_wrapper_hopper.cu'),
             ],
             include_dirs=[
-                os.path.join(this_dir, '../../../include/mirage/persistent_kernel/tasks'),
+                os.path.join(this_dir, '../../../include/mirage/persistent_kernel'),
                 os.path.join(this_dir, '../../../include'),
             ],
             libraries=["cuda"],

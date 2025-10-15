@@ -12,3 +12,5 @@
 #include "tasks/hopper/multitoken_paged_attention_hopper.cuh"
 #include "tasks/hopper/rmsnorm_hopper.cuh"
 #include "tasks/hopper/silu_mul_hopper.cuh"
+#include "tasks/ampere/multitoken_paged_attention.cuh"
+#include "tasks/blackwell/attention_sm100.cuh"
