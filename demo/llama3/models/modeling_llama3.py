@@ -246,12 +246,10 @@ class Llama3Attention(nn.Module):
                 True
             )
 
-        # Fix: reshape correctly based on actual tensor shape
-        if len(attn_output.shape) == 3 and attn_output.shape[0] == q_len:
-            # attn_output is [q_len, num_heads, head_dim], need to reshape to [bsz, q_len, local_qkv_size]
-            attn_output = attn_output.reshape(q_len, -1).unsqueeze(0).expand(bsz, -1, -1)
-        else:
-            attn_output = attn_output.reshape(bsz, q_len, self.local_qkv_size)
+        # if len(attn_output.shape) == 3 and attn_output.shape[0] == q_len:
+        #     attn_output = attn_output.reshape(q_len, -1).unsqueeze(0).expand(bsz, -1, -1)
+        # else:
+        attn_output = attn_output.reshape(bsz, q_len, self.local_qkv_size)
 
         attn_output = self.o_proj(attn_output)
         if self.world_size > 1:
