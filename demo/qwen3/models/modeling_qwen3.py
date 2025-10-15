@@ -505,7 +505,7 @@ class Qwen3Model(Qwen3PreTrainedModel):
 
 class Qwen3ForCausalLM(Qwen3PreTrainedModel, GenerationMixin):
 
-    def __init__(self, config, world_size, max_num_pages, page_size: int):
+    def __init__(self, config, world_size, max_num_pages, page_size):
         super().__init__(config)
         self.model = Qwen3Model(config, world_size, max_num_pages, page_size)
         self.vocab_size = config.vocab_size
