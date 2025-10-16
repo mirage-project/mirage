@@ -9,9 +9,15 @@ import os
 # print limitation
 # torch.set_printoptions(threshold=2000)
 
-def grid_for_rmsnorm_linear_layer(size):
+def grid_for_rmsnorm_linear_layer(size: int):
     # 96 and 64 are enough to cover all Qwen3 model? Please update the method
     # if you meet any incompatibility.
+    if size / 96 > 400:
+        # TODO: An add-hoc workaround for linear kernel, both MPK ptx and
+        # cutlass version will output unexpect result (not same out put for
+        # same prompt) if the OUTPUT_SIZE is too big, try to figure it out.
+        assert size % 256 == 0, "FATAL: Linear layer size not support, it's {size}."
+        return size // 256
     if size % 96 == 0:
         return 96
     elif size % 64 == 0:
@@ -72,6 +78,13 @@ if __name__ == "__main__":
     parser.add_argument("--model-path", type=str, default=None, help="Path to a local model (necessary for multi-GPU demo)")
     parser.add_argument(
         "--model", type=str, default='Qwen/Qwen3-8B', help="Model path on hugging face"
+    )
+    parser.add_argument(
+        "--no-use-cutlass-kernel",
+        action="store_false",
+        dest="use_cutlass_kernel",
+        default=True,
+        help="Not use the cutlass version kernel.",
     )
     parser.add_argument("--ignore-eos", action="store_true", help="Ignore eos token during generation")
     args = parser.parse_args()
@@ -242,6 +255,7 @@ if __name__ == "__main__":
             profiler_tensor=profiler_tensor,
             trace_name=args.trace_name,
             spec_decode_config=spec_decode_config,
+            use_cutlass_kernel=args.use_cutlass_kernel
         )
         
         if spec_decode_config and spec_decode_config.method == "promptlookup":
@@ -690,9 +704,12 @@ if __name__ == "__main__":
             generated_ids = tokens[r, : step[r] + 1]
             response = tokenizer.decode(generated_ids, skip_special_tokens=True)
             print(response)
+        
+        if total_num_requests > 1:
+            print(f"Output length of each batch is same: {(step.max() == step.min()).item()}")
 
-        print("Prompt length {}, generate length {}, per-token latency (both prefill and decode): {} ms".format(
-              prompt_lengths[0], step[0] + 1 - prompt_lengths[0], run_time / (step[0] + 1)
+        print("Prompt length {}, generate length {}, per-token latency (both prefill and decode): {:.3f} ms".format(
+              prompt_lengths[0], step.max().item() + 1 - prompt_lengths[0], run_time / (step.max().item() + 1)
             )
         )
     if world_size > 1:
