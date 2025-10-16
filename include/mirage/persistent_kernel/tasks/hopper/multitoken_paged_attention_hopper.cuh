@@ -29,7 +29,7 @@
 #include "utils.cuh"
 #include "wgmma.cuh"
 #define OUTPUT_PTR 1
-#define USE_TMA_Q 1
+#define USE_TMA_Q 0
 namespace kernel {
 
 template <typename T,
@@ -68,8 +68,8 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
     void const *sin_ptr,
     float q_eps,
     float k_eps,
-    void *output_ptr,
     void *qkv_ptr,
+    void *output_ptr,
     int head_group = 0) {
   constexpr int NUM_QO_PER_KV = NUM_QO_HEADS / NUM_KV_HEADS;
 
@@ -182,14 +182,9 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
   constexpr size_t S_V_BUFFER_OFFSET =
       (S_V_OFFSET + S_V_SIZE + 1023) / 1024 * 1024;
   constexpr size_t S_V_BUFFER_SIZE = S_K_SIZE;
-
-  constexpr size_t S_O_OFFSET =
-      (S_V_BUFFER_OFFSET + S_V_BUFFER_SIZE + 1023) / 1024 * 1024;
-  // constexpr size_t S_O_OFFSET = S_V_OFFSET;
-  constexpr size_t S_O_SIZE = S_Q_SIZE;
   // align to size of float
   constexpr size_t S_Q_NORM_SUM_OFFSET =
-      ((S_O_OFFSET + S_O_SIZE + sizeof(float) - 1) &
+      ((S_V_BUFFER_OFFSET + S_V_BUFFER_SIZE + sizeof(float) - 1) &
        ~size_t(sizeof(float) - 1));
   constexpr size_t S_Q_NORM_SUM_SIZE =
       sizeof(float) * 4; // 4 floats for 4 warps
@@ -225,8 +220,11 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
   constexpr size_t S_COMPUTE_DONE_OFFSET =
       (S_V_BARRIER_OFFSET + S_V_BARRIER_SIZE + 7) / 8 * 8;
   constexpr size_t S_COMPUTE_DONE_SIZE = 8 * Kstages;
+  // Reuse shared memory address of S_V to save space
+  constexpr size_t S_O_OFFSET = (S_V_OFFSET + S_V_SIZE + 1023) / 1024 * 1024;
+  constexpr size_t S_O_SIZE = S_Q_SIZE;
 
-  constexpr size_t S_TOTAL_OFFSET = S_COMPUTE_DONE_OFFSET + S_COMPUTE_DONE_SIZE;
+  constexpr size_t S_TOTAL_OFFSET = S_O_OFFSET + S_O_SIZE;
   static_assert(S_TOTAL_OFFSET <=
                 mirage::runtime::MAX_DYNAMIC_SHARED_MEMORY_SIZE);
 
@@ -454,16 +452,11 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
       }
 
       int curr_iter_len = min(seq_len - iter * KV_TILE_SIZE, KV_TILE_SIZE);
-
       int kv_tokens_to_process =
           min(curr_iter_len,
               max(iter * KV_TILE_SIZE + curr_iter_len - prompt_len, 0));
       int first_kv_token_to_process =
           iter * KV_TILE_SIZE + curr_iter_len - kv_tokens_to_process;
-
-      int begin = iter * KV_TILE_SIZE;
-      int cache_rows = max(0, min(curr_iter_len, prompt_len - begin));
-      int kv_rows = curr_iter_len - cache_rows;
 
       if (qk_norm) {
         // Q norm

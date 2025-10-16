@@ -739,9 +739,10 @@ using bfloat16 = type::bfloat16_t;
 
 //   switch (input.size(0)) {
 //     DISPATCH_LINEAR_HOPPER_BATCH_SIZE_CASE(8)
+//     DISPATCH_LINEAR_HOPPER_BATCH_SIZE_CASE(16)
+//     DISPATCH_LINEAR_HOPPER_BATCH_SIZE_CASE(32)
 //     /* \
 //     DISPATCH_LINEAR_HOPPER_BATCH_SIZE_CASE(1)
-//     DISPATCH_LINEAR_HOPPER_BATCH_SIZE_CASE(64)
 //     */
 //     default:
 //       printf("Unsupported batch size in test: %zu\n", output.size(0));
@@ -1004,8 +1005,8 @@ __global__ void multitoken_paged_attention_wrapper_hopper(
       sin_ptr,
       q_eps,
       k_eps,
-      output_ptr,
-      qkv_ptr);
+      qkv_ptr,
+      output_ptr);
 }
 
 template <typename T,
