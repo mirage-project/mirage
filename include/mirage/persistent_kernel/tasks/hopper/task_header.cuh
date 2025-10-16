@@ -3,6 +3,8 @@
 #include "tasks/ampere/embedding.cuh"
 #include "tasks/ampere/silu_mul.cuh"
 // Hopper task impls
+#include "tasks/ampere/multitoken_paged_attention.cuh"
+#include "tasks/blackwell/attention_sm100.cuh"
 #include "tasks/cute/hopper/gemm_ws.cuh"
 #include "tasks/cute/hopper/gemm_ws_cooperative.cuh"
 #include "tasks/cute/hopper/gemm_ws_mpk.cuh"
@@ -12,5 +14,3 @@
 #include "tasks/hopper/multitoken_paged_attention_hopper.cuh"
 #include "tasks/hopper/rmsnorm_hopper.cuh"
 #include "tasks/hopper/silu_mul_hopper.cuh"
-#include "tasks/ampere/multitoken_paged_attention.cuh"
-#include "tasks/blackwell/attention_sm100.cuh"
