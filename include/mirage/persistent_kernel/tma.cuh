@@ -475,7 +475,7 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
       constexpr int M = 3;
       constexpr int S = 3;
       constexpr int output_atom_size = 64;
-      constexpr int TILE_SIZE = 256;
+      constexpr int TILE_SIZE = 128;
 
       if (param_id == 0) {
         // TMA_INPUT
