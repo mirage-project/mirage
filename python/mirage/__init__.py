@@ -21,7 +21,8 @@ preload_so(_formal_verifier_so_path, "libformal_verifier.so")
 
 from .core import *
 from .kernel import *
-from .persistent_kernel import PersistentKernel
+from .mpk.persistent_kernel import PersistentKernel
+from .mpk.speculative import spec_decode_class
 from .threadblock import *
 
 

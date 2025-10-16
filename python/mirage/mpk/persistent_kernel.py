@@ -6,8 +6,8 @@ import shutil
 import sys
 import sysconfig
 
-from .core import *
-from .kernel import get_key_paths, KNGraph, TBGraph
+from ..core import *
+from ..kernel import get_key_paths, KNGraph, TBGraph
 from .speculative import (
     SpecDecodeConfig,
     PromptLookupConfig,
