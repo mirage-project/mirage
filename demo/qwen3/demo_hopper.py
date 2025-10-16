@@ -73,6 +73,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model", type=str, default='Qwen/Qwen3-8B', help="Model path on hugging face"
     )
+    parser.add_argument("--ignore-eos", action="store_true", help="Ignore eos token during generation")
     args = parser.parse_args()
     try:
         from mpi4py import MPI
@@ -225,7 +226,7 @@ if __name__ == "__main__":
             max_num_batched_tokens=args.max_num_batched_tokens,
             max_num_pages=args.max_num_pages,
             page_size=args.page_size,
-            eos_token_id=model.config.eos_token_id,
+            eos_token_id=model.config.eos_token_id if not args.ignore_eos else -1,
             meta_tensors={
                 "step": step,
                 "tokens": tokens,
