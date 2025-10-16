@@ -750,14 +750,17 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
 
     // store the output
 #if OUTPUT_PTR
+#pragma unroll
     for (int elem_idx = threadIdx.x;
-         elem_idx < num_tokens * NUM_QO_PER_KV * HEAD_DIM;
+         elem_idx < num_tokens * NUM_QO_PER_KV * HEAD_DIM / CP_CHUNK_SIZE;
          elem_idx += NUM_THREADS) {
-      int src_row = elem_idx / HEAD_DIM;
-      int src_col = elem_idx % HEAD_DIM;
+      int src_row = (elem_idx * CP_CHUNK_SIZE) / HEAD_DIM;
+      int src_col = (elem_idx * CP_CHUNK_SIZE) % HEAD_DIM;
       int dst_row = src_row / NUM_QO_PER_KV;
       int dst_col = src_col + (src_row % NUM_QO_PER_KV) * HEAD_DIM;
-      o_dmem.at(dst_row, dst_col) = o_smem.at(src_row, src_col);
+      // 128-bit vectorized copy
+      *reinterpret_cast<__uint128_t *>(o_dmem(dst_row, dst_col)) =
+          *reinterpret_cast<__uint128_t const *>(o_smem(src_row, src_col));
     }
 #else
     // copy back to dmem
