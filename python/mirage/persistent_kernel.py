@@ -352,7 +352,7 @@ class PersistentKernel:
         tb_graph.new_input(weight, (1, -1, -1), -1, True)
         tb_graph.new_input(output, (1, 0, -1), -1, True)
         self.kn_graph.customized([input, weight, output], tb_graph)
-        self.kn_graph.register_task(tb_graph, "embedding_hopper" if self.target_cc == 90 else "embedding", [input_source])
+        self.kn_graph.register_task(tb_graph, "embedding" if self.target_cc == 90 else "embedding", [input_source])
 
     def rmsnorm_layer(
         self,
@@ -710,7 +710,7 @@ class PersistentKernel:
         tb_graph.new_input(input, (1, -1, -1), 1, True)
         tb_graph.new_input(output, (1, -1, -1), 1, True)
         self.kn_graph.customized([input, output], tb_graph)
-        self.kn_graph.register_task(tb_graph, "silu_mul_hopper" if self.target_cc == 90 else "silu_mul")
+        self.kn_graph.register_task(tb_graph, "silu_mul" if self.target_cc == 90 else "silu_mul")
 
     def silu_mul_linear_with_residual_layer(
         self,
