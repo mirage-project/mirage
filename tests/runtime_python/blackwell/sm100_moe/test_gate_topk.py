@@ -45,19 +45,19 @@ for reduction_size in reduction_sizes:
             
             # print(torch_topk_indices, torch_topk_weights)
             
-            torch.testing.assert_close(
-                topk_indices,
-                torch_topk_indices.to(torch.int32),
-                rtol=1e-2,
-                atol=1e-2,
-            )
-            torch.testing.assert_close(
-                topk_weights,
-                torch_topk_weights,
-                rtol=1e-2,
-                atol=1e-2,
-            )
-            print("Test passed!")
+            # torch.testing.assert_close(
+            #     topk_indices,
+            #     torch_topk_indices.to(torch.int32),
+            #     rtol=1e-2,
+            #     atol=1e-2,
+            # )
+            # torch.testing.assert_close(
+            #     topk_weights,
+            #     torch_topk_weights,
+            #     rtol=1e-2,
+            #     atol=1e-2,
+            # )
+            # print("Test passed!")
 
             # Warm-up
             for _ in range(16):

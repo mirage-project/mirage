@@ -2,10 +2,6 @@
 #include <cstdio>
 #include <iostream>
 
-// Use Thrust to handle host/device allocations
-#include <thrust/device_vector.h>
-#include <thrust/host_vector.h>
-
 // Cutlass includes
 #include <cutlass/half.h> // F16 data type
 // #include <cutlass/util/print_error.hpp>

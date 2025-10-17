@@ -15,3 +15,4 @@
 #include "attention_sm100.cuh"
 #include "linear_sm100_mpk.cuh"
 #include "gate_topk_sm100.cuh"
+#include "w13_linear_sm100.cuh"

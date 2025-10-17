@@ -2,10 +2,6 @@
 #include <cstdio>
 #include <iostream>
 
-// Use Thrust to handle host/device allocations
-#include <thrust/device_vector.h>
-#include <thrust/host_vector.h>
-
 // Cutlass includes
 #include <cutlass/half.h> // F16 data type
 // #include <cutlass/util/print_error.hpp>
@@ -32,6 +28,7 @@
 #include "../common/dmem_layout.cuh"
 #include "../common/worker_config.h"
 #include "utils.cuh"
+#include "storage.cuh"
 // #include "../element_binary.cuh"
 // #include "../element_unary.cuh"
 // #include "../reduction.cuh"
@@ -101,33 +98,6 @@ struct TopKRedType {
       return result;
     }
   }
-};
-
-// The shared memory buffers for A, B, and C matrices.
-template <class TypeA,           // Tensor A data type
-          class TypeB,           // Tensor B data type
-          class TypeRed,         // Tensor C data type
-          class ASmemLayout,     
-          class BSmemLayout,
-          int Num_AB_Stage,
-          int Num_ACC_Stage> 
-struct GateTopKSharedStorage
-{
-  alignas(128) cute::ArrayEngine<TypeA, cute::cosize_v<ASmemLayout>> A;
-  alignas(128) cute::ArrayEngine<TypeB, cute::cosize_v<BSmemLayout>> B;
-
-  alignas(16) cute::uint64_t ab_full_mbar_ptr[Num_AB_Stage];  
-  alignas(16) cute::uint64_t ab_empty_mbar_ptr[Num_AB_Stage]; 
-
-  alignas(16) cute::uint64_t acc_full_mbar_ptr[Num_ACC_Stage];  
-  alignas(16) cute::uint64_t acc_empty_mbar_ptr[Num_ACC_Stage]; 
-
-  alignas(16) cute::uint32_t tmem_base_ptr; // Base pointer for TMEM allocation
-
-  alignas(16) TypeRed reduce_values_buffer[32];  // Buffer for reduction values
-
-  CUTE_DEVICE constexpr auto tensor_sA() { return cute::make_tensor(cute::make_smem_ptr(A.begin()), ASmemLayout{}); }
-  CUTE_DEVICE constexpr auto tensor_sB() { return cute::make_tensor(cute::make_smem_ptr(B.begin()), BSmemLayout{}); }
 };
 
 template <typename T_,
@@ -560,7 +530,7 @@ template <typename T_,
             }
           }
           
-          // argtopk
+          // argtopk + softmax
 
           static constexpr float minValue = -1.F;
           typename RedType::TypeCmp packedMax{};
@@ -613,7 +583,7 @@ template <typename T_,
 
             epilogue_wg_barrier.arrive_and_wait();
           }
-
+          
           if(threadIdx.x < BATCH_SIZE){
             cute::copy(tWeight_rWeight, mWeights(threadIdx.x, cute::_));
             cute::copy(tInd_rInd, mIndices(threadIdx.x, cute::_));

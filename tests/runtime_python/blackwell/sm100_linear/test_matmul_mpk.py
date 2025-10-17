@@ -6,7 +6,7 @@ torch.set_printoptions(sci_mode=False, profile="full")
 
 g = torch.Generator(device="cuda").manual_seed(1234)
 
-reduction_sizes = [64]
+reduction_sizes = [2048]
 output_sizes = [128]
 batch_size = 16
 
@@ -24,7 +24,6 @@ for reduction_size in reduction_sizes:
         )
         residual = torch.randn(batch_size, output_size, device="cuda", dtype=torch.bfloat16)
         output = torch.empty(batch_size, output_size, device="cuda", dtype=torch.bfloat16)
-        output_nobias = torch.empty(batch_size, output_size, device="cuda", dtype=torch.bfloat16)
 
         if not has_residual:
             residual = None

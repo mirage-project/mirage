@@ -307,7 +307,7 @@ void linear_sm100_mpk_kernel(torch::Tensor input,
 
   constexpr int BATCH_SIZE = 16;
   constexpr int OUTPUT_SIZE = 128;
-  constexpr int REDUCTION_SIZE = 64;
+  constexpr int REDUCTION_SIZE = 2048;
 
   assert(input.size(1) == REDUCTION_SIZE);
   assert(weight.size(0) == OUTPUT_SIZE);
