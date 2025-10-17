@@ -42,6 +42,25 @@ using bfloat16 = cute::bfloat16_t;
 // Fused TopK softmax for SM100
 #include "blackwell/topk_softmax_sm100.cuh"
 
+namespace {
+template <typename T, int EXPERTS>
+__global__ __launch_bounds__(256) void topk_softmax_kernel(
+    const T* __restrict__ gating_output,
+    float* __restrict__ topk_weights,
+    int* __restrict__ topk_indices,
+    int num_rows,
+    int k,
+    bool renormalize) {
+  static constexpr std::size_t MAX_BYTES_PER_LDG = 16;
+  static constexpr int BYTES_PER_LDG = (sizeof(T) * EXPERTS) < MAX_BYTES_PER_LDG ? (sizeof(T) * EXPERTS) : MAX_BYTES_PER_LDG;
+  using C = kernel::detail::TopkConstants<T, EXPERTS, BYTES_PER_LDG>;
+  static constexpr int VPT = C::VPT;
+  static constexpr int WARPS_PER_TB = 8; // 256 threads
+  kernel::topkGatingSoftmaxFused_device<T, VPT, EXPERTS, WARPS_PER_TB, BYTES_PER_LDG>(
+      gating_output, /*finished*/ nullptr, topk_weights, num_rows, topk_indices, k, 0, EXPERTS, renormalize);
+}
+} // namespace
+
 void topk_softmax_sm100_kernel(torch::Tensor gating_output,
                                torch::Tensor topk_indices,
                                torch::Tensor topk_weights);
@@ -66,15 +85,38 @@ void topk_softmax_sm100_kernel(torch::Tensor gating_output,
   auto gating_output_f = gating_output.to(at::kFloat);
 
   cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-  kernel::topk_softmax_fused_sm100<float>(
-      gating_output_f.data_ptr<float>(),
-      topk_weights.data_ptr<float>(),
-      topk_indices.data_ptr<int>(),
-      BATCH_SIZE,
-      OUTPUT_SIZE,
-      NUM_TOPK,
-      /*renormalize=*/true,
-      stream);
+  // launch grid using 256-thread blocks
+  auto launch = [&](auto experts_ct) {
+    constexpr int EXP = decltype(experts_ct)::value;
+    using T = float;
+    using C = kernel::detail::TopkConstants<T, EXP, ((sizeof(T)*EXP)<16?(sizeof(T)*EXP):16)>;
+    constexpr int ROWS_PER_WARP = C::ROWS_PER_WARP;
+    constexpr int WARPS_PER_TB = 8;
+    int num_warps = (BATCH_SIZE + ROWS_PER_WARP - 1) / ROWS_PER_WARP;
+    int num_blocks = (num_warps + WARPS_PER_TB - 1) / WARPS_PER_TB;
+    dim3 block_dim(32, WARPS_PER_TB);
+    topk_softmax_kernel<T, EXP><<<num_blocks, block_dim, 0, stream>>>(
+        gating_output_f.data_ptr<float>(),
+        topk_weights.data_ptr<float>(),
+        topk_indices.data_ptr<int>(),
+        BATCH_SIZE,
+        NUM_TOPK,
+        /*renormalize=*/true);
+  };
+
+  switch (OUTPUT_SIZE) {
+    case 1: launch(std::integral_constant<int,1>{}); break;
+    case 2: launch(std::integral_constant<int,2>{}); break;
+    case 4: launch(std::integral_constant<int,4>{}); break;
+    case 8: launch(std::integral_constant<int,8>{}); break;
+    case 16: launch(std::integral_constant<int,16>{}); break;
+    case 32: launch(std::integral_constant<int,32>{}); break;
+    case 64: launch(std::integral_constant<int,64>{}); break;
+    case 128: launch(std::integral_constant<int,128>{}); break;
+    case 256: launch(std::integral_constant<int,256>{}); break;
+    default:
+      printf("Unsupported num_experts=%d (must be power-of-two <= 256)\n", OUTPUT_SIZE);
+  }
 
   cudaError_t err = cudaGetLastError();
   if (err != cudaSuccess) {

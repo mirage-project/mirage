@@ -79,8 +79,7 @@ __device__ inline float _convert_to_float(T x) {
 // This kernel fuses the softmax, max and argmax into a single kernel.
 // Block size is strictly 256 (8 warps): dim3 block(WARP_SIZE, WARPS_PER_CTA)
 template <typename T, int VPT, int NUM_EXPERTS, int WARPS_PER_CTA, int BYTES_PER_LDG>
-__launch_bounds__(WARPS_PER_CTA * WARP_SIZE) __global__
-void topkGatingSoftmaxFused(
+__device__ __noinline__ void topkGatingSoftmaxFused_device(
     const T* __restrict__ input,   // [num_rows, NUM_EXPERTS]
     const bool* __restrict__ finished,
     float* __restrict__ output,    // [num_rows, k]
@@ -118,9 +117,7 @@ void topkGatingSoftmaxFused(
 
   const int thread_row_in_warp = threadIdx.x / THREADS_PER_ROW;
   const int thread_row = warp_base_row + thread_row_in_warp;
-  if (thread_row >= num_rows) {
-    return;
-  }
+  if (thread_row < num_rows) {
 
   const bool row_is_active = finished ? !finished[thread_row] : true;
 
@@ -227,6 +224,8 @@ void topkGatingSoftmaxFused(
       output[out_idx] = output[out_idx] * inv;
     }
   }
+  }
+  __syncthreads();
 }
 
 namespace detail {
@@ -239,58 +238,6 @@ struct TopkConstants {
   static constexpr int ROWS_PER_WARP = WARP_SIZE / (EXPERTS / VPT);
 };
 } // namespace detail
-
-template <typename T, int EXPERTS>
-static inline void _launch_topk_gating_softmax_fused_helper(
-    const T* gating_output,
-    float* topk_weights,
-    int* topk_indices,
-    const int num_rows,
-    const int k,
-    const bool renormalize,
-    cudaStream_t stream) {
-  static constexpr std::size_t MAX_BYTES_PER_LDG = 16;
-  static constexpr int BYTES_PER_LDG = (sizeof(T) * EXPERTS) < MAX_BYTES_PER_LDG ? (sizeof(T) * EXPERTS) : MAX_BYTES_PER_LDG;
-  using C = detail::TopkConstants<T, EXPERTS, BYTES_PER_LDG>;
-  static constexpr int VPT = C::VPT;
-  static constexpr int ROWS_PER_WARP = C::ROWS_PER_WARP;
-  static constexpr int WARPS_PER_TB = 8; // strictly 8 warps -> 256 threads
-
-  const int num_warps = (num_rows + ROWS_PER_WARP - 1) / ROWS_PER_WARP;
-  const int num_blocks = (num_warps + WARPS_PER_TB - 1) / WARPS_PER_TB;
-
-  dim3 block_dim(WARP_SIZE, WARPS_PER_TB);
-  topkGatingSoftmaxFused<T, VPT, EXPERTS, WARPS_PER_TB, BYTES_PER_LDG><<<num_blocks, block_dim, 0, stream>>>(
-      gating_output, /*finished*/ nullptr, topk_weights, num_rows, topk_indices, k, 0, EXPERTS, renormalize);
-}
-
-// Public entry: Fused top-k softmax (expects num_experts to be power of 2 up to 256)
-template <typename T>
-static inline void topk_softmax_fused_sm100(
-    const T* gating_output,
-    float* topk_weights,
-    int* topk_indices,
-    const int num_rows,
-    const int num_experts,
-    const int topk,
-    const bool renormalize,
-    cudaStream_t stream) {
-  switch (num_experts) {
-    case 1:  _launch_topk_gating_softmax_fused_helper<T, 1 >(gating_output, topk_weights, topk_indices, num_rows, topk, renormalize, stream); break;
-    case 2:  _launch_topk_gating_softmax_fused_helper<T, 2 >(gating_output, topk_weights, topk_indices, num_rows, topk, renormalize, stream); break;
-    case 4:  _launch_topk_gating_softmax_fused_helper<T, 4 >(gating_output, topk_weights, topk_indices, num_rows, topk, renormalize, stream); break;
-    case 8:  _launch_topk_gating_softmax_fused_helper<T, 8 >(gating_output, topk_weights, topk_indices, num_rows, topk, renormalize, stream); break;
-    case 16: _launch_topk_gating_softmax_fused_helper<T, 16>(gating_output, topk_weights, topk_indices, num_rows, topk, renormalize, stream); break;
-    case 32: _launch_topk_gating_softmax_fused_helper<T, 32>(gating_output, topk_weights, topk_indices, num_rows, topk, renormalize, stream); break;
-    case 64: _launch_topk_gating_softmax_fused_helper<T, 64>(gating_output, topk_weights, topk_indices, num_rows, topk, renormalize, stream); break;
-    case 128:_launch_topk_gating_softmax_fused_helper<T, 128>(gating_output, topk_weights, topk_indices, num_rows, topk, renormalize, stream); break;
-    case 256:_launch_topk_gating_softmax_fused_helper<T, 256>(gating_output, topk_weights, topk_indices, num_rows, topk, renormalize, stream); break;
-    default:
-      // Only the fused implementation (power-of-two experts up to 256) is supported here
-      // to keep a strict 256-thread kernel configuration.
-      printf("[topk_softmax_fused_sm100] Unsupported num_experts=%d (must be power-of-two <= 256)\n", num_experts);
-  }
-}
 
 } // namespace kernel
 
