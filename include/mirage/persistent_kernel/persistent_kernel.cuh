@@ -222,35 +222,36 @@ __device__ __forceinline__ bool
     }
   }
 
-  // Add a new prefill request
-  if (num_reqs < MPK_MAX_NUM_BATCHED_REQUESTS &&
-      num_tokens < MPK_MAX_NUM_BATCHED_TOKENS) {
+  // Add new prefill requests until we reach capacity
+  while (num_reqs < MPK_MAX_NUM_BATCHED_REQUESTS &&
+         num_tokens < MPK_MAX_NUM_BATCHED_TOKENS) {
     int next_request_id = *config.next_request_id;
-    if (next_request_id < config.total_num_requests) {
-      config.request_ids[num_reqs] = next_request_id;
-      config.qo_indptr_buffer[num_reqs] = num_tokens;
-      config.paged_kv_indptr_buffer[num_reqs] = num_pages;
-      // Prefill request
-      int num_new_tokens = min(config.prompt_length[next_request_id],
-                               MPK_MAX_NUM_BATCHED_TOKENS - num_tokens);
-      // Move tokens to input tokens
-      for (int j = 0; j < num_new_tokens; j++) {
-        config.input_tokens[num_tokens + j] =
-            config.tokens[next_request_id * MPK_MAX_SEQ_LENGTH + j];
-      }
-      int num_new_pages = (num_new_tokens + MPK_PAGE_SIZE - 1) / MPK_PAGE_SIZE;
-      config.paged_kv_last_page_len_buffer[num_reqs] =
-          num_new_tokens % MPK_PAGE_SIZE;
-      for (int j = 0; j < num_new_pages; j++) {
-        config.paged_kv_indices_buffer[num_pages + j] =
-            config.page_queue[page_queue_head % MPK_MAX_NUM_PAGES];
-        page_queue_head++;
-      }
-      num_tokens += num_new_tokens;
-      num_pages += num_new_pages;
-      num_reqs++;
-      *config.next_request_id = next_request_id + 1;
+    if (next_request_id >= config.total_num_requests) {
+      break;
     }
+    config.request_ids[num_reqs] = next_request_id;
+    config.qo_indptr_buffer[num_reqs] = num_tokens;
+    config.paged_kv_indptr_buffer[num_reqs] = num_pages;
+    // Prefill request
+    int num_new_tokens = min(config.prompt_length[next_request_id],
+                             MPK_MAX_NUM_BATCHED_TOKENS - num_tokens);
+    // Move tokens to input tokens
+    for (int j = 0; j < num_new_tokens; j++) {
+      config.input_tokens[num_tokens + j] =
+          config.tokens[next_request_id * MPK_MAX_SEQ_LENGTH + j];
+    }
+    int num_new_pages = (num_new_tokens + MPK_PAGE_SIZE - 1) / MPK_PAGE_SIZE;
+    config.paged_kv_last_page_len_buffer[num_reqs] =
+        num_new_tokens % MPK_PAGE_SIZE;
+    for (int j = 0; j < num_new_pages; j++) {
+      config.paged_kv_indices_buffer[num_pages + j] =
+          config.page_queue[page_queue_head % MPK_MAX_NUM_PAGES];
+      page_queue_head++;
+    }
+    num_tokens += num_new_tokens;
+    num_pages += num_new_pages;
+    num_reqs++;
+    *config.next_request_id = next_request_id + 1;
   }
 
   // Step 4: Update all unused requests slots

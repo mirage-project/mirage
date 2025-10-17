@@ -21,7 +21,7 @@ namespace mirage {
 namespace runtime {
 
 #if defined(MIRAGE_GRACE_HOPPER) || defined(MIRAGE_GRACE_BLACKWELL)
-constexpr int WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE = 4 * 1024;
+constexpr int WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE = 6 * 1024;
 #else
 constexpr int WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE = 3 * 1024;
 #endif

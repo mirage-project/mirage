@@ -28,14 +28,15 @@ setup(
                 os.path.join(this_dir, 'runtime_kernel_wrapper_hopper.cu'),
             ],
             include_dirs=[
-                os.path.join(this_dir, '../../../include/mirage/persistent_kernel/tasks'),
+                os.path.join(this_dir, '../../../include/mirage/persistent_kernel'),
                 os.path.join(this_dir, '../../../include'),
             ],
             libraries=["cuda"],
             library_dirs=cuda_library_dirs,
             extra_compile_args={
                 'cxx': ['-DMIRAGE_GRACE_HOPPER',
-                '-DMIRAGE_BACKEND_USE_CUDA'],
+                '-DMIRAGE_BACKEND_USE_CUDA',
+                '-DMPK_TARGET_CC=90'],
                 'nvcc': [
                     '-O3',
                     '-gencode=arch=compute_90a,code=sm_90a',

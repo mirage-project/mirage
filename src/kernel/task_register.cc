@@ -1063,6 +1063,7 @@ int TaskRegister::register_paged_attention_hopper_task(
   code.e("    task_desc->input_ptrs[6],");
   code.e("    1e-6f,");
   code.e("    1e-6f,");
+  code.e("    task_desc->input_ptrs[0],");
   code.e("    task_desc->output_ptrs[0],");
   code.e("    task_desc->head_group);");
 
@@ -1143,12 +1144,11 @@ int TaskRegister::register_linear_swapAB_hopper_task(
   constexpr int M = 3;
   constexpr int S = 3;
   constexpr int TMA_CP_ASYNC_SIZE = 64;
-  constexpr int TILE_SIZE = 256;
+  constexpr int TILE_SIZE = 128;
   constexpr int Kstages = 5;
   assert(batch_size <= 16);
-  // int const SMEM_M_SIZE = batch_size <= 8 ? 8 : 16; // batch size padded to
-  // 16
-  int const SMEM_M_SIZE = 16;
+  int const SMEM_M_SIZE = batch_size <= 8 ? 8 : 16;
+  // int const SMEM_M_SIZE = 16;
   int const output_tma_cp_size = output_size < 64 ? output_size : 64;
   int const output_atom_size = 64;
   code.e("using TMA_B = kernel::tma::tma_2d<bfloat16, $, $, $, $, $, $, $, $, "
