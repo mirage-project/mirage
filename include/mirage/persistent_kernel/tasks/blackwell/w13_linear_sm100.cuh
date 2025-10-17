@@ -769,6 +769,6 @@ __device__ __noinline__ void
     tmem_allocator.free(shared_storage.tmem_base_ptr, num_tmem_columns);
   }
 
-} // end linear_sm100_mpk_task_impl
+} // end w13_linear_sm100_task_impl
 
 } // namespace kernel

@@ -38,256 +38,77 @@
 
 using bfloat16 = cute::bfloat16_t;
 
-// gate_topk_sm100
+// topk_softmax_sm100
 
-template <typename T,
-          int BATCH_SIZE,
-          int OUTPUT_SIZE,
-          int REDUCTION_SIZE,
-          int NUM_TOPK,
-          class BiasTensor,
-          class IndicesTensor,
-          class WeightsTensor,
-          int MMA_M,
-          int MMA_N,
-          bool NoBias, 
-          int NUM_AB_STAGE = 8,
-          int NUM_ACC_STAGE = 2,
-          int NUM_C_STAGE = 4>
-__global__ __launch_bounds__(256, 1) void gate_topk_sm100_wrapper(
-    void * tma_a_desc_ptr,
-    void * tma_b_desc_ptr,
-    BiasTensor mBias,
-    IndicesTensor mIndices,
-    WeightsTensor mWeights) {
-
-  constexpr int B = 3;
-  constexpr int M = 3;
-  constexpr int S = 3;
-
-  constexpr int TMA_CP_ASYNC_SIZE =
-      64; // note that if swizzle 128 is used, 64 is maximal cp size
-  constexpr int TILE_SIZE =
-      64; // we should modify this param if we want larger tile size
-  constexpr int TMA_CP_ASYNC_REPEAT_COL =
-      (TILE_SIZE + TMA_CP_ASYNC_SIZE - 1) / TMA_CP_ASYNC_SIZE;
-  
-  using TMA_B =
-      kernel::tma::tma_2d<bfloat16,
-                          B,
-                          M,
-                          S,
-                          BATCH_SIZE,                      /*GMEM_ROW_*/
-                          REDUCTION_SIZE,                  /*GMEM_COL_*/
-                          MMA_N,                           /*SMEM_ROW_*/
-                          TMA_CP_ASYNC_SIZE,               /*SMEM_COL_*/
-                          REDUCTION_SIZE,                  /*GMEM_STRIDE_ROW_*/
-                          1,                               /*GMEM_STRIDE_COL_*/
-                          1,                               /*SMEM_REPEAT_ROW_*/
-                          TMA_CP_ASYNC_REPEAT_COL,         /*SMEM_REPEAT_COL_*/
-                          MMA_N * TMA_CP_ASYNC_SIZE, /*SMEM_STRIDE_*/
-                          true>;
-  using TMA_A =
-      kernel::tma::tma_2d<bfloat16,
-                          B,
-                          M,
-                          S,
-                          OUTPUT_SIZE,             /*GMEM_ROW_*/
-                          REDUCTION_SIZE,          /*GMEM_COL_*/
-                          MMA_M,                   /*SMEM_ROW_*/
-                          TMA_CP_ASYNC_SIZE,       /*SMEM_COL_*/
-                          REDUCTION_SIZE,          /*GMEM_STRIDE_ROW_*/
-                          1,                       /*GMEM_STRIDE_COL_*/
-                          1,                       /*SMEM_REPEAT_ROW_*/
-                          TMA_CP_ASYNC_REPEAT_COL, /*SMEM_REPEAT_COL_*/
-                          MMA_M * TMA_CP_ASYNC_SIZE, /*SMEM_STRIDE_*/
-                          true>;
-
-  TMA_A tma_a(static_cast<CUtensorMap*>(tma_a_desc_ptr));
-  TMA_B tma_b(static_cast<CUtensorMap*>(tma_b_desc_ptr));
-
-  kernel::gate_topk_sm100_task_impl<
-          T, 
-          TMA_A,
-          TMA_B,
-          BiasTensor,
-          IndicesTensor,
-          WeightsTensor,
-          MMA_M,
-          MMA_N,
-          BATCH_SIZE,
-          OUTPUT_SIZE,
-          REDUCTION_SIZE,
-          NUM_TOPK,
-          NoBias,
-          NUM_AB_STAGE,
-          NUM_ACC_STAGE,
-          NUM_C_STAGE>(tma_a, tma_b, mBias, mIndices, mWeights);
+template <typename T, int EXPERTS>
+__global__ __launch_bounds__(256) void topk_softmax_kernel(
+    const T* __restrict__ gating_output,
+    float* __restrict__ topk_weights,
+    int* __restrict__ topk_indices,
+    int num_rows,
+    int k,
+    bool renormalize) {
+  static constexpr std::size_t MAX_BYTES_PER_LDG = 16;
+  static constexpr int BYTES_PER_LDG = (sizeof(T) * EXPERTS) < MAX_BYTES_PER_LDG ? (sizeof(T) * EXPERTS) : MAX_BYTES_PER_LDG;
+  using C = kernel::detail::TopkConstants<T, EXPERTS, BYTES_PER_LDG>;
+  static constexpr int VPT = C::VPT;
+  static constexpr int WARPS_PER_TB = 8; // 256 threads
+  kernel::topk_softmax_task_impl<T, VPT, EXPERTS, WARPS_PER_TB, BYTES_PER_LDG>(
+      gating_output, /*finished*/ nullptr, topk_weights, num_rows, topk_indices, k, 0, EXPERTS, renormalize);
 }
 
-template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int REDUCTION_SIZE, int NUM_TOPK>
-void launch_gate_topk_sm100(void *input_ptr,
-                          void *weight_ptr,
-                          void *topk_indices_ptr,
-                          void *topk_weights_ptr,
-                          void *residual_ptr = nullptr) {
+// New: expose a direct fused TopK softmax without GEMM
+void topk_softmax_sm100_kernel(torch::Tensor gating_output,
+                               torch::Tensor topk_indices,
+                               torch::Tensor topk_weights) {
 
-  constexpr int B = 3;
-  constexpr int M = 3;
-  constexpr int S = 3;
+  const int BATCH_SIZE = static_cast<int>(gating_output.size(0));
+  const int OUTPUT_SIZE = static_cast<int>(gating_output.size(1));
+  const int NUM_TOPK = static_cast<int>(topk_indices.size(1));
 
-  constexpr int MMA_M = 128;
-  constexpr int MMA_N = 16;
-
-  constexpr int TMA_CP_ASYNC_SIZE =
-      64; // note that if swizzle 128 is used, 64 is maximal cp size
-  constexpr int TILE_SIZE =
-      64; // we should modify this param if we want larger tile size
-
-  // TMA_A tma_a(weight_ptr);
-  // TMA_B tma_b(input_ptr);
-  // TMA_OUT tma_out(output_ptr);
-
-  CUtensorMap host_i_desc;
-  CUtensorMap host_w_desc;
-  CUtensorMap *desc_i_ptr;
-  CUtensorMap *desc_w_ptr;
-
-  // TMA_INPUT
-  uint64_t i_gmem_shape[2] = {static_cast<uint64_t>(BATCH_SIZE),
-                            static_cast<uint64_t>(REDUCTION_SIZE)};
-  uint64_t i_gmem_stride[2] = {1, static_cast<uint64_t>(REDUCTION_SIZE)};
-  uint32_t i_smem_shape[2] = {static_cast<uint32_t>(MMA_N),
-                            static_cast<uint32_t>(TMA_CP_ASYNC_SIZE)};
-
-  size_t i_smem_repeat_col =
-      (TILE_SIZE + TMA_CP_ASYNC_SIZE - 1) / TMA_CP_ASYNC_SIZE;
-  mirage::runtime::fill_tma_desc<bfloat16, B, M, S, 2>(&host_i_desc,
-                                      static_cast<bfloat16 *>(input_ptr),
-                                      i_gmem_shape,
-                                      i_gmem_stride,
-                                      i_smem_shape,
-                                      1,
-                                      i_smem_repeat_col);
-
-  // TMA_WEIGHT
-  uint64_t w_gmem_shape[2] = {static_cast<uint64_t>(OUTPUT_SIZE),
-                            static_cast<uint64_t>(REDUCTION_SIZE)};
-  uint64_t w_gmem_stride[2] = {1, static_cast<uint64_t>(REDUCTION_SIZE)};
-  uint32_t w_smem_shape[2] = {static_cast<uint32_t>(MMA_M),
-                            static_cast<uint32_t>(TMA_CP_ASYNC_SIZE)};
-  size_t w_smem_repeat_col =
-      (TILE_SIZE + TMA_CP_ASYNC_SIZE - 1) / TMA_CP_ASYNC_SIZE;
-  mirage::runtime::fill_tma_desc<bfloat16, B, M, S, 2>(&host_w_desc,
-                                      static_cast<bfloat16 *>(weight_ptr),
-                                      w_gmem_shape,
-                                      w_gmem_stride,
-                                      w_smem_shape,
-                                      1,
-                                      w_smem_repeat_col);
-  
-  cudaMalloc(&desc_i_ptr, sizeof(CUtensorMap));
-  cudaMalloc(&desc_w_ptr, sizeof(CUtensorMap));
-
-  cudaMemcpy(desc_i_ptr, &host_i_desc, sizeof(CUtensorMap), cudaMemcpyHostToDevice);
-  cudaMemcpy(desc_w_ptr, &host_w_desc, sizeof(CUtensorMap), cudaMemcpyHostToDevice);
-
-  void *tma_desc_input;
-  void *tma_desc_weight;
-
-  tma_desc_input = desc_i_ptr;
-  tma_desc_weight = desc_w_ptr;
-
-  // Residual
-  cute::Layout layout_Bias = cute::make_layout(cute::make_shape(BATCH_SIZE, OUTPUT_SIZE), cute::make_stride(OUTPUT_SIZE, cute::Int<1>{}));
-  cute::Tensor mBias = cute::make_tensor(cute::make_gmem_ptr(static_cast<T*>(residual_ptr)), layout_Bias);
-
-  // Topk_indices
-  cute::Layout layout_indices = cute::make_layout(cute::make_shape(BATCH_SIZE, NUM_TOPK), cute::make_stride(NUM_TOPK, cute::Int<1>{}));
-  cute::Tensor mIndices = cute::make_tensor(cute::make_gmem_ptr(static_cast<int32_t*>(topk_indices_ptr)), layout_indices);
-
-  // Topk_weights
-  cute::Layout layout_weights = cute::make_layout(cute::make_shape(BATCH_SIZE, NUM_TOPK), cute::make_stride(NUM_TOPK, cute::Int<1>{}));
-  cute::Tensor mWeights = cute::make_tensor(cute::make_gmem_ptr(static_cast<float*>(topk_weights_ptr)), layout_weights);
-
-  dim3 grid_dim(1, 1, 1);
-  dim3 block_dim(256, 1, 1);
-  dim3 cluster_dim(1, 1, 1);
-  int smemBytes = 224 * 1024;
-
-  if(residual_ptr != nullptr){
-    auto* kernel_ptr = &gate_topk_sm100_wrapper<T,
-                                BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE, NUM_TOPK,
-                                decltype(mBias), decltype(mIndices), decltype(mWeights),
-                                MMA_M, MMA_N,
-                                false>;
-    CUTE_CHECK_ERROR(cudaFuncSetAttribute(kernel_ptr,
-                      cudaFuncAttributeMaxDynamicSharedMemorySize,
-                      smemBytes));
-    cutlass::ClusterLaunchParams params = {grid_dim, block_dim, cluster_dim, smemBytes};
-    cutlass::Status status = cutlass::launch_kernel_on_cluster(params, (void const*) kernel_ptr,
-                                                              tma_desc_weight, tma_desc_input, mBias, mIndices, mWeights);
-    CUTE_CHECK_LAST();
-
-    if (status != cutlass::Status::kSuccess) {
-      std::cerr << "Error: Failed at kernel Launch" << std::endl;
-    }
-  } else {
-    auto* kernel_ptr = &gate_topk_sm100_wrapper<T,
-                                BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE, NUM_TOPK,
-                                decltype(mBias), decltype(mIndices), decltype(mWeights),
-                                MMA_M, MMA_N,
-                                true>;
-    CUTE_CHECK_ERROR(cudaFuncSetAttribute(kernel_ptr,
-                      cudaFuncAttributeMaxDynamicSharedMemorySize,
-                      smemBytes));
-    cutlass::ClusterLaunchParams params = {grid_dim, block_dim, cluster_dim, smemBytes};
-    cutlass::Status status = cutlass::launch_kernel_on_cluster(params, (void const*) kernel_ptr,
-                                                              tma_desc_weight, tma_desc_input, mBias, mIndices, mWeights);
-    CUTE_CHECK_LAST();
-
-    if (status != cutlass::Status::kSuccess) {
-      std::cerr << "Error: Failed at kernel Launch" << std::endl;
-    }
-  }
-
-}
-
-void gate_topk_sm100_kernel(torch::Tensor input,
-                          torch::Tensor weight,
-                          c10::optional<at::Tensor> residual,
-                          torch::Tensor topk_indices,
-                          torch::Tensor topk_weights) {
-
-  void *input_ptr = input.data_ptr();
-  void *weight_ptr = weight.data_ptr();
-  bool has_residual = residual.has_value();
-  void *residual_ptr = has_residual ? residual->data_ptr() : nullptr;
-  void *topk_indices_ptr = topk_indices.data_ptr();
-  void *topk_weights_ptr = topk_weights.data_ptr();
-
-  // const int BATCH_SIZE = input.size(0);
-  // const int OUTPUT_SIZE = output.size(1);
-  // const int REDUCTION_SIZE = weight.size(1);
-
-  constexpr int BATCH_SIZE = 8;
-  constexpr int OUTPUT_SIZE = 128;
-  constexpr int REDUCTION_SIZE = 2048;
-  constexpr int NUM_TOPK = 8;
-
-  assert(input.size(1) == REDUCTION_SIZE);
-  assert(weight.size(0) == OUTPUT_SIZE);
   assert(topk_indices.size(0) == BATCH_SIZE && topk_indices.size(1) == NUM_TOPK);
   assert(topk_weights.size(0) == BATCH_SIZE && topk_weights.size(1) == NUM_TOPK);
-  assert(!has_residual);
 
-  launch_gate_topk_sm100<bfloat16, BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE, NUM_TOPK>(input_ptr, weight_ptr, topk_indices_ptr, topk_weights_ptr, residual_ptr);
-  cudaError_t err = cudaDeviceSynchronize();
+  // Ensure float input to fused kernel
+  auto gating_output_f = gating_output.to(at::kFloat);
+  // launch grid using 256-thread blocks
+  auto launch = [&](auto experts_ct) {
+    constexpr int EXP = decltype(experts_ct)::value;
+    using T = float;
+    using C = kernel::detail::TopkConstants<T, EXP, ((sizeof(T)*EXP)<16?(sizeof(T)*EXP):16)>;
+    constexpr int ROWS_PER_WARP = C::ROWS_PER_WARP;
+    constexpr int WARPS_PER_TB = 8;
+    int num_warps = (BATCH_SIZE + ROWS_PER_WARP - 1) / ROWS_PER_WARP;
+    int num_blocks = (num_warps + WARPS_PER_TB - 1) / WARPS_PER_TB;
+    dim3 block_dim(32, WARPS_PER_TB);
+    topk_softmax_kernel<T, EXP><<<num_blocks, block_dim, 0>>>(
+        gating_output_f.data_ptr<float>(),
+        topk_weights.data_ptr<float>(),
+        topk_indices.data_ptr<int>(),
+        BATCH_SIZE,
+        NUM_TOPK,
+        /*renormalize=*/true);
+  };
+
+  switch (OUTPUT_SIZE) {
+    case 1: launch(std::integral_constant<int,1>{}); break;
+    case 2: launch(std::integral_constant<int,2>{}); break;
+    case 4: launch(std::integral_constant<int,4>{}); break;
+    case 8: launch(std::integral_constant<int,8>{}); break;
+    case 16: launch(std::integral_constant<int,16>{}); break;
+    case 32: launch(std::integral_constant<int,32>{}); break;
+    case 64: launch(std::integral_constant<int,64>{}); break;
+    case 128: launch(std::integral_constant<int,128>{}); break;
+    case 256: launch(std::integral_constant<int,256>{}); break;
+    default:
+      printf("Unsupported num_experts=%d (must be power-of-two <= 256)\n", OUTPUT_SIZE);
+  }
+
+  cudaError_t err = cudaGetLastError();
   if (err != cudaSuccess) {
     printf("CUDA kernel launch error: %s\n", cudaGetErrorString(err));
   }
 }
-
 
 // w13_linear_sm100
 
@@ -520,6 +341,6 @@ void w13_linear_sm100_kernel(torch::Tensor input,
 
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-  m.def("gate_topk_sm100", &gate_topk_sm100_kernel, "Gate TopK kernel SM100");
+  m.def("topk_softmax_sm100", &topk_softmax_sm100_kernel, "TopK Softmax fused SM100");
   m.def("w13_linear_sm100", &w13_linear_sm100_kernel, "W13 Linear kernel SM100");
 }

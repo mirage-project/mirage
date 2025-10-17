@@ -79,7 +79,7 @@ __device__ inline float _convert_to_float(T x) {
 // This kernel fuses the softmax, max and argmax into a single kernel.
 // Block size is strictly 256 (8 warps): dim3 block(WARP_SIZE, WARPS_PER_CTA)
 template <typename T, int VPT, int NUM_EXPERTS, int WARPS_PER_CTA, int BYTES_PER_LDG>
-__device__ __noinline__ void topkGatingSoftmaxFused_device(
+__device__ __noinline__ void topk_softmax_task_impl(
     const T* __restrict__ input,   // [num_rows, NUM_EXPERTS]
     const bool* __restrict__ finished,
     float* __restrict__ output,    // [num_rows, k]
