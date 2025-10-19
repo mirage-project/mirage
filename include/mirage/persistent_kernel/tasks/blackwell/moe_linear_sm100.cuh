@@ -45,12 +45,13 @@ template <typename T_,
           int NUM_TOPK,
           int EXPERT_OFFSET,
           int EXPERT_STRIDE,
+          bool W13_LINEAR,
           bool NOBIAS,
           int NUM_AB_STAGE = 8,
           int NUM_ACC_STAGE = 2,
           int NUM_C_STAGE = 4>
 __device__ __noinline__ void
-    w13_linear_sm100_task_impl(const TMA_A &tma_a,
+    moe_linear_sm100_task_impl(const TMA_A &tma_a,
                                InputTensor mInput,
                                BiasTensor mBias,
                                IndicesTensor mRoutingIndices,
@@ -348,6 +349,7 @@ __device__ __noinline__ void
   constexpr int B = 3;
   constexpr int M = 3;
   constexpr int S = 3;
+  constexpr int cp_async_group_size = 32 / MMA_N;
 
   T_ *shared_weight = shared_storage.A.begin();
 
@@ -363,9 +365,9 @@ __device__ __noinline__ void
                               1>; // 64/64 = 1
   WeightSmem weight_smem(shared_weight);
 
-  // CP_ASYNC Atom for B
+  // CP_ASYNC Atom for B, todo: use MMA_N instead of hardcoded 16
   cute::TiledCopy copyB = make_tiled_copy(Copy_Atom<SM80_CP_ASYNC_CACHEALWAYS<uint128_t>, T_>{},
-                                    Layout<Shape<_16,_2>, Stride<_2,_1>>{},  // Thr layout
+                                    Layout<Shape<Int<MMA_N>,Int<cp_async_group_size>>, Stride<Int<cp_async_group_size>,_1>>{},  // Thr layout
                                     Layout<Shape< _1,_8>>{});               // Val layout
 
 //   if (cute::thread0()) {
@@ -460,6 +462,7 @@ __device__ __noinline__ void
     for (int expert_idx=0; expert_idx < NUM_EXPERTS; ++expert_idx){
         total_expert_count += mMask(expert_idx);
         if(mMask(expert_idx) == 1 && (total_expert_count-1) % EXPERT_STRIDE == EXPERT_OFFSET){
+            cute::Tensor tRoutingIndex = mRoutingIndices(expert_idx, cute::_);
             for (int m_tile = 0; m_tile < cute::size<3>(tCgA); ++m_tile) {
                 for (int n_tile = 0; n_tile < cute::size<3>(tCgB); ++n_tile) {
                     int num_prev_k_blk = total_k_tile_count;
@@ -506,8 +509,14 @@ __device__ __noinline__ void
                         }
 
                         // CP_ASYNC for loading B
-                        if(mRoutingIndices(expert_idx, lane_idx / 2) > 0){
-                            cute::copy(copyB, tBgB(_,_,_,_,k_tile), tBsB(_,_,_,_,smem_wr_buffer));
+                        int32_t topk_idx = tRoutingIndex(n_tile * MMA_N + lane_idx / cp_async_group_size);
+                        if(topk_idx > 0){
+                            if constexpr (W13_LINEAR){
+                                cute::copy(copyB, tBgB(_,_,_,_,k_tile), tBsB(_,_,_,_,smem_wr_buffer));
+                            }
+                            else{
+                                cute::copy(copyB, tBgB(_,_,_,_,k_tile,topk_idx-1), tBsB(_,_,_,_,smem_wr_buffer));
+                            }
                         }
 
                         cutlass::arch::cpasync_barrier_arrive_noinc(
@@ -672,6 +681,7 @@ __device__ __noinline__ void
     for (int expert_idx=0; expert_idx < NUM_EXPERTS; ++expert_idx){
         total_expert_count += mMask(expert_idx);
         if(mMask(expert_idx) == 1 && (total_expert_count-1) % EXPERT_STRIDE == EXPERT_OFFSET){
+            cute::Tensor tRoutingIndex = mRoutingIndices(expert_idx, cute::_);
             for (int m_tile = 0; m_tile < cute::size<3>(tCgA); ++m_tile) {
                 for (int n_tile = 0; n_tile < cute::size<3>(tCgB); ++n_tile) {
                     int acc_buf_idx = num_tiles_executed % NUM_ACC_STAGE;
@@ -744,13 +754,13 @@ __device__ __noinline__ void
                     //     cute::flatten(sC_epi(cute::_, 0, 0, c_smem_wr_buffer_idx));
                     // cute::copy(tCrC, sC_epi_slice(cute::_, threadIdx.x));
 
-                    // R2G store
+                    // R2G store, use cp.async.bulk here
                     CUTE_UNROLL
-                    for (int i = 0; i < BATCH_SIZE; ++i) {
+                    for (int i = 0; i < MMA_N; ++i) {
                         int32_t m_idx = m_tile * MMA_M + threadIdx.x;
                         int32_t n_idx = n_tile * MMA_N + i;
-                        if (mRoutingIndices(expert_idx, i) > 0) {
-                            mOutput(n_idx, mRoutingIndices(expert_idx, n_idx) - 1, m_idx) = tCrC[i];
+                        if (n_idx < BATCH_SIZE && tRoutingIndex(n_idx) > 0) {
+                            mOutput(n_idx, tRoutingIndex(n_idx) - 1, m_idx) = tCrC[i];
                         }
                     }
                     epilogue_wg_barrier.arrive_and_wait();
@@ -769,6 +779,6 @@ __device__ __noinline__ void
     tmem_allocator.free(shared_storage.tmem_base_ptr, num_tmem_columns);
   }
 
-} // end w13_linear_sm100_task_impl
+} // end moe_linear_sm100_task_impl
 
 } // namespace kernel

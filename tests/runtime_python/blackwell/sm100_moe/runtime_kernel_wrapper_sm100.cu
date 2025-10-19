@@ -45,6 +45,8 @@ __global__ __launch_bounds__(256) void topk_softmax_kernel(
     const T* __restrict__ gating_output,
     float* __restrict__ topk_weights,
     int* __restrict__ topk_indices,
+    int* __restrict__ mpk_routing_indices, // [EXPERTS, num_rows] expert-major
+    int* __restrict__ mpk_expert_mask,     // [EXPERTS]
     int num_rows,
     int k,
     bool renormalize) {
@@ -54,13 +56,25 @@ __global__ __launch_bounds__(256) void topk_softmax_kernel(
   static constexpr int VPT = C::VPT;
   static constexpr int WARPS_PER_TB = 8; // 256 threads
   kernel::topk_softmax_task_impl<T, VPT, EXPERTS, WARPS_PER_TB, BYTES_PER_LDG>(
-      gating_output, /*finished*/ nullptr, topk_weights, num_rows, topk_indices, k, 0, EXPERTS, renormalize);
+      gating_output,
+      /*finished*/ nullptr,
+      topk_weights,
+      num_rows,
+      topk_indices,
+      k,
+      mpk_routing_indices,
+      mpk_expert_mask,
+      /*start_expert=*/0,
+      /*end_expert=*/EXPERTS,
+      renormalize);
 }
 
 // New: expose a direct fused TopK softmax without GEMM
 void topk_softmax_sm100_kernel(torch::Tensor gating_output,
                                torch::Tensor topk_indices,
-                               torch::Tensor topk_weights) {
+                               torch::Tensor topk_weights,
+                               torch::Tensor mpk_routing_indices,
+                               torch::Tensor mpk_expert_mask) {
 
   const int BATCH_SIZE = static_cast<int>(gating_output.size(0));
   const int OUTPUT_SIZE = static_cast<int>(gating_output.size(1));
@@ -68,6 +82,8 @@ void topk_softmax_sm100_kernel(torch::Tensor gating_output,
 
   assert(topk_indices.size(0) == BATCH_SIZE && topk_indices.size(1) == NUM_TOPK);
   assert(topk_weights.size(0) == BATCH_SIZE && topk_weights.size(1) == NUM_TOPK);
+  assert(mpk_routing_indices.size(0) == OUTPUT_SIZE && mpk_routing_indices.size(1) == BATCH_SIZE);
+  assert(mpk_expert_mask.size(0) == OUTPUT_SIZE);
 
   // Ensure float input to fused kernel
   auto gating_output_f = gating_output.to(at::kFloat);
@@ -85,6 +101,8 @@ void topk_softmax_sm100_kernel(torch::Tensor gating_output,
         gating_output_f.data_ptr<float>(),
         topk_weights.data_ptr<float>(),
         topk_indices.data_ptr<int>(),
+        mpk_routing_indices.data_ptr<int>(),
+        mpk_expert_mask.data_ptr<int>(),
         BATCH_SIZE,
         NUM_TOPK,
         /*renormalize=*/true);
@@ -110,7 +128,7 @@ void topk_softmax_sm100_kernel(torch::Tensor gating_output,
   }
 }
 
-// w13_linear_sm100
+// moe_linear_sm100
 
 template <typename T,
           int BATCH_SIZE,
@@ -120,6 +138,7 @@ template <typename T,
           int NUM_TOPK,
           int EXPERT_OFFSET,
           int EXPERT_STRIDE,
+          bool W13_LINEAR,
           class InputTensor,
           class BiasTensor,
           class IndicesTensor,
@@ -131,7 +150,7 @@ template <typename T,
           int NUM_AB_STAGE = 8,
           int NUM_ACC_STAGE = 2,
           int NUM_C_STAGE = 4>
-__global__ __launch_bounds__(256, 1) void w13_linear_sm100_wrapper(
+__global__ __launch_bounds__(256, 1) void moe_linear_sm100_wrapper(
     void * tma_w_desc_ptr,
     InputTensor mInput,
     BiasTensor mBias,
@@ -168,7 +187,7 @@ __global__ __launch_bounds__(256, 1) void w13_linear_sm100_wrapper(
 
   TMA_A tma_a(static_cast<CUtensorMap*>(tma_w_desc_ptr));
 
-  kernel::w13_linear_sm100_task_impl<
+  kernel::moe_linear_sm100_task_impl<
           T, 
           TMA_A,
           InputTensor,
@@ -185,14 +204,15 @@ __global__ __launch_bounds__(256, 1) void w13_linear_sm100_wrapper(
           NUM_TOPK,
           EXPERT_OFFSET,
           EXPERT_STRIDE,
+          W13_LINEAR,
           NoBias,
           NUM_AB_STAGE,
           NUM_ACC_STAGE,
           NUM_C_STAGE>(tma_a, mInput, mBias, mRoutingIndices, mMask, mOutput);
 }
 
-template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int REDUCTION_SIZE, int NUM_EXPERTS, int NUM_TOPK, int EXPERT_OFFSET, int EXPERT_STRIDE>
-void launch_w13_linear_sm100(void *input_ptr,
+template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int REDUCTION_SIZE, int NUM_EXPERTS, int NUM_TOPK, int EXPERT_OFFSET, int EXPERT_STRIDE, bool W13_LINEAR=true>
+void launch_moe_linear_sm100(void *input_ptr,
                           void *weight_ptr,
                           void *mpk_routing_indices_ptr,
                           void *mpk_expert_mask_ptr,
@@ -236,10 +256,6 @@ void launch_w13_linear_sm100(void *input_ptr,
   void *tma_desc_weight;
   tma_desc_weight = desc_w_ptr;
 
-  // Input
-  cute::Layout layout_input = cute::make_layout(cute::make_shape(BATCH_SIZE, REDUCTION_SIZE), cute::make_stride(REDUCTION_SIZE, cute::Int<1>{}));
-  cute::Tensor mInput = cute::make_tensor(cute::make_gmem_ptr(static_cast<T*>(input_ptr)), layout_input);
-
   // Residual
   cute::Layout layout_bias = cute::make_layout(cute::make_shape(BATCH_SIZE, OUTPUT_SIZE, NUM_EXPERTS), cute::make_stride(OUTPUT_SIZE, cute::Int<1>{}, BATCH_SIZE * OUTPUT_SIZE));
   cute::Tensor mBias = cute::make_tensor(cute::make_gmem_ptr(static_cast<T*>(residual_ptr)), layout_bias);
@@ -261,45 +277,87 @@ void launch_w13_linear_sm100(void *input_ptr,
   dim3 cluster_dim(1, 1, 1);
   int smemBytes = 224 * 1024;
 
-  if(residual_ptr != nullptr){
-    auto* kernel_ptr = &w13_linear_sm100_wrapper<T,
-                                BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE, NUM_EXPERTS, NUM_TOPK, EXPERT_OFFSET, EXPERT_STRIDE,
-                                decltype(mInput), decltype(mBias), decltype(mRoutingIndices), decltype(mMask), decltype(mOutput),
-                                MMA_M, MMA_N,
-                                false>;
-    CUTE_CHECK_ERROR(cudaFuncSetAttribute(kernel_ptr,
-                      cudaFuncAttributeMaxDynamicSharedMemorySize,
-                      smemBytes));
-    cutlass::ClusterLaunchParams params = {grid_dim, block_dim, cluster_dim, smemBytes};
-    cutlass::Status status = cutlass::launch_kernel_on_cluster(params, (void const*) kernel_ptr,
-                                                              tma_desc_weight, mInput, mBias, mRoutingIndices, mMask, mOutput);
-    CUTE_CHECK_LAST();
+  // Input
+  if constexpr (W13_LINEAR) {
+    cute::Layout layout_input = cute::make_layout(cute::make_shape(BATCH_SIZE, REDUCTION_SIZE), cute::make_stride(REDUCTION_SIZE, cute::Int<1>{}));
+    cute::Tensor mInput = cute::make_tensor(cute::make_gmem_ptr(static_cast<T*>(input_ptr)), layout_input);  
+    if(residual_ptr != nullptr){
+      auto* kernel_ptr = &moe_linear_sm100_wrapper<T,
+                                  BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE, NUM_EXPERTS, NUM_TOPK, EXPERT_OFFSET, EXPERT_STRIDE, W13_LINEAR,
+                                  decltype(mInput), decltype(mBias), decltype(mRoutingIndices), decltype(mMask), decltype(mOutput),
+                                  MMA_M, MMA_N,
+                                  false>;
+      CUTE_CHECK_ERROR(cudaFuncSetAttribute(kernel_ptr,
+                        cudaFuncAttributeMaxDynamicSharedMemorySize,
+                        smemBytes));
+      cutlass::ClusterLaunchParams params = {grid_dim, block_dim, cluster_dim, smemBytes};
+      cutlass::Status status = cutlass::launch_kernel_on_cluster(params, (void const*) kernel_ptr,
+                                                                tma_desc_weight, mInput, mBias, mRoutingIndices, mMask, mOutput);
+      CUTE_CHECK_LAST();
 
-    if (status != cutlass::Status::kSuccess) {
-      std::cerr << "Error: Failed at kernel Launch" << std::endl;
+      if (status != cutlass::Status::kSuccess) {
+        std::cerr << "Error: Failed at kernel Launch" << std::endl;
+      }
+    } else {
+      auto* kernel_ptr = &moe_linear_sm100_wrapper<T,
+                                  BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE, NUM_EXPERTS, NUM_TOPK, EXPERT_OFFSET, EXPERT_STRIDE, W13_LINEAR,
+                                  decltype(mInput), decltype(mBias), decltype(mRoutingIndices), decltype(mMask), decltype(mOutput),
+                                  MMA_M, MMA_N,
+                                  true>;
+      CUTE_CHECK_ERROR(cudaFuncSetAttribute(kernel_ptr,
+                        cudaFuncAttributeMaxDynamicSharedMemorySize,
+                        smemBytes));
+      cutlass::ClusterLaunchParams params = {grid_dim, block_dim, cluster_dim, smemBytes};
+      cutlass::Status status = cutlass::launch_kernel_on_cluster(params, (void const*) kernel_ptr,
+                                                                tma_desc_weight, mInput, mBias, mRoutingIndices, mMask, mOutput);
+      CUTE_CHECK_LAST();
+
+      if (status != cutlass::Status::kSuccess) {
+        std::cerr << "Error: Failed at kernel Launch" << std::endl;
+      }
     }
   } else {
-    auto* kernel_ptr = &w13_linear_sm100_wrapper<T,
-                                BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE, NUM_EXPERTS, NUM_TOPK, EXPERT_OFFSET, EXPERT_STRIDE,
-                                decltype(mInput), decltype(mBias), decltype(mRoutingIndices), decltype(mMask), decltype(mOutput),
-                                MMA_M, MMA_N,
-                                true>;
-    CUTE_CHECK_ERROR(cudaFuncSetAttribute(kernel_ptr,
-                      cudaFuncAttributeMaxDynamicSharedMemorySize,
-                      smemBytes));
-    cutlass::ClusterLaunchParams params = {grid_dim, block_dim, cluster_dim, smemBytes};
-    cutlass::Status status = cutlass::launch_kernel_on_cluster(params, (void const*) kernel_ptr,
-                                                              tma_desc_weight, mInput, mBias, mRoutingIndices, mMask, mOutput);
-    CUTE_CHECK_LAST();
+    cute::Layout layout_input = cute::make_layout(cute::make_shape(BATCH_SIZE, REDUCTION_SIZE, NUM_TOPK), cute::make_stride(REDUCTION_SIZE * NUM_TOPK, cute::Int<1>{}, REDUCTION_SIZE));
+    cute::Tensor mInput = cute::make_tensor(cute::make_gmem_ptr(static_cast<T*>(input_ptr)), layout_input);
+    if(residual_ptr != nullptr){
+      auto* kernel_ptr = &moe_linear_sm100_wrapper<T,
+                                  BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE, NUM_EXPERTS, NUM_TOPK, EXPERT_OFFSET, EXPERT_STRIDE, W13_LINEAR,
+                                  decltype(mInput), decltype(mBias), decltype(mRoutingIndices), decltype(mMask), decltype(mOutput),
+                                  MMA_M, MMA_N,
+                                  false>;
+      CUTE_CHECK_ERROR(cudaFuncSetAttribute(kernel_ptr,
+                        cudaFuncAttributeMaxDynamicSharedMemorySize,
+                        smemBytes));
+      cutlass::ClusterLaunchParams params = {grid_dim, block_dim, cluster_dim, smemBytes};
+      cutlass::Status status = cutlass::launch_kernel_on_cluster(params, (void const*) kernel_ptr,
+                                                                tma_desc_weight, mInput, mBias, mRoutingIndices, mMask, mOutput);
+      CUTE_CHECK_LAST();
 
-    if (status != cutlass::Status::kSuccess) {
-      std::cerr << "Error: Failed at kernel Launch" << std::endl;
+      if (status != cutlass::Status::kSuccess) {
+        std::cerr << "Error: Failed at kernel Launch" << std::endl;
+      }
+    } else {
+      auto* kernel_ptr = &moe_linear_sm100_wrapper<T,
+                                  BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE, NUM_EXPERTS, NUM_TOPK, EXPERT_OFFSET, EXPERT_STRIDE, W13_LINEAR,
+                                  decltype(mInput), decltype(mBias), decltype(mRoutingIndices), decltype(mMask), decltype(mOutput),
+                                  MMA_M, MMA_N,
+                                  true>;
+      CUTE_CHECK_ERROR(cudaFuncSetAttribute(kernel_ptr,
+                        cudaFuncAttributeMaxDynamicSharedMemorySize,
+                        smemBytes));
+      cutlass::ClusterLaunchParams params = {grid_dim, block_dim, cluster_dim, smemBytes};
+      cutlass::Status status = cutlass::launch_kernel_on_cluster(params, (void const*) kernel_ptr,
+                                                                tma_desc_weight, mInput, mBias, mRoutingIndices, mMask, mOutput);
+      CUTE_CHECK_LAST();
+
+      if (status != cutlass::Status::kSuccess) {
+        std::cerr << "Error: Failed at kernel Launch" << std::endl;
+      }
     }
   }
-
 }
 
-void w13_linear_sm100_kernel(torch::Tensor input,
+void moe_w13_linear_sm100_kernel(torch::Tensor input,
                           torch::Tensor weight,
                           c10::optional<at::Tensor> residual,
                           torch::Tensor mpk_routing_indices,
@@ -332,7 +390,47 @@ void w13_linear_sm100_kernel(torch::Tensor input,
   assert(mpk_expert_mask.size(0) == NUM_EXPERTS);
   assert(!has_residual);
 
-  launch_w13_linear_sm100<bfloat16, BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE, NUM_EXPERTS, NUM_TOPK, EXPERT_OFFSET, EXPERT_STRIDE>(input_ptr, weight_ptr, mpk_routing_indices_ptr, mpk_expert_mask_ptr, output_ptr, residual_ptr);
+  launch_moe_linear_sm100<bfloat16, BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE, NUM_EXPERTS, NUM_TOPK, EXPERT_OFFSET, EXPERT_STRIDE, true>(input_ptr, weight_ptr, mpk_routing_indices_ptr, mpk_expert_mask_ptr, output_ptr, residual_ptr);
+  cudaError_t err = cudaDeviceSynchronize();
+  if (err != cudaSuccess) {
+    printf("CUDA kernel launch error: %s\n", cudaGetErrorString(err));
+  }
+}
+
+void moe_w2_linear_sm100_kernel(torch::Tensor input,
+                          torch::Tensor weight,
+                          c10::optional<at::Tensor> residual,
+                          torch::Tensor mpk_routing_indices,
+                          torch::Tensor mpk_expert_mask,
+                          torch::Tensor output) {
+
+  void *input_ptr = input.data_ptr();
+  void *weight_ptr = weight.data_ptr();
+  bool has_residual = residual.has_value();
+  void *residual_ptr = has_residual ? residual->data_ptr() : nullptr;
+  void *mpk_routing_indices_ptr = mpk_routing_indices.data_ptr();
+  void *mpk_expert_mask_ptr = mpk_expert_mask.data_ptr();
+  void *output_ptr = output.data_ptr();
+
+  // const int BATCH_SIZE = input.size(0);
+  // const int OUTPUT_SIZE = output.size(1);
+  // const int REDUCTION_SIZE = weight.size(1);
+
+  constexpr int BATCH_SIZE = 8;
+  constexpr int OUTPUT_SIZE = 128;
+  constexpr int REDUCTION_SIZE = 2048;
+  constexpr int NUM_EXPERTS = 128;
+  constexpr int NUM_TOPK = 8;
+  constexpr int EXPERT_OFFSET = 0;
+  constexpr int EXPERT_STRIDE = 12;
+
+  assert(input.size(0) == BATCH_SIZE && input.size(1) == NUM_TOPK && input.size(2) == REDUCTION_SIZE);
+  assert(weight.size(0) == NUM_EXPERTS && weight.size(1) == OUTPUT_SIZE && weight.size(2) == REDUCTION_SIZE);
+  assert(mpk_routing_indices.size(0) == NUM_EXPERTS && mpk_routing_indices.size(1) == BATCH_SIZE);
+  assert(mpk_expert_mask.size(0) == NUM_EXPERTS);
+  assert(!has_residual);
+
+  launch_moe_linear_sm100<bfloat16, BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE, NUM_EXPERTS, NUM_TOPK, EXPERT_OFFSET, EXPERT_STRIDE, false>(input_ptr, weight_ptr, mpk_routing_indices_ptr, mpk_expert_mask_ptr, output_ptr, residual_ptr);
   cudaError_t err = cudaDeviceSynchronize();
   if (err != cudaSuccess) {
     printf("CUDA kernel launch error: %s\n", cudaGetErrorString(err));
@@ -342,5 +440,6 @@ void w13_linear_sm100_kernel(torch::Tensor input,
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("topk_softmax_sm100", &topk_softmax_sm100_kernel, "TopK Softmax fused SM100");
-  m.def("w13_linear_sm100", &w13_linear_sm100_kernel, "W13 Linear kernel SM100");
+  m.def("moe_w13_linear_sm100", &moe_w13_linear_sm100_kernel, "MoE W13 Linear kernel SM100");
+  m.def("moe_w2_linear_sm100", &moe_w2_linear_sm100_kernel, "MoE W2 Linear kernel SM100");
 }

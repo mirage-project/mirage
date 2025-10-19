@@ -14,7 +14,7 @@ num_topk = 8
 expert_offset = 0
 expert_stride = 12
 
-is_w2_linear = False
+is_w2_linear = True
 has_residual = False
 
 for reduction_size in reduction_sizes:
@@ -23,7 +23,7 @@ for reduction_size in reduction_sizes:
             f"\n=== Testing batch_size = {batch_size} output_size = {output_size} reduction_size = {reduction_size} num_experts = {num_experts} num_topk = {num_topk} has_residual = {has_residual} ==="
         )
 
-        x = torch.randn((batch_size, reduction_size), device="cuda", dtype=torch.bfloat16)
+        x = torch.randn((batch_size, num_topk, reduction_size), device="cuda", dtype=torch.bfloat16)
         w = torch.randn((num_experts, output_size, reduction_size), device="cuda", dtype=torch.bfloat16)
         expert_score = torch.randn((batch_size, num_experts), device="cuda", dtype=torch.bfloat16)
         topk_expert_score, topk_expert_indices = torch.topk(expert_score, num_topk, dim=1)
@@ -47,7 +47,7 @@ for reduction_size in reduction_sizes:
             residual = None
             
         # mpk impl
-        runtime_kernel_blackwell.moe_w13_linear_sm100(x, w, residual, mpk_routing_indices, mpk_expert_mask, output)
+        runtime_kernel_blackwell.moe_w2_linear_sm100(x, w, residual, mpk_routing_indices, mpk_expert_mask, output)
         # reference impl
         expert_mask = torch.nn.functional.one_hot(topk_expert_indices, num_classes=num_experts).permute(2, 1, 0)
         expert_hit = torch.greater(expert_mask.sum(dim=(-1, -2)), 0).nonzero()
@@ -60,7 +60,7 @@ for reduction_size in reduction_sizes:
             idx, top_x = torch.where(expert_mask[expert_idx].squeeze(0))
             # Index the correct hidden states and compute the expert hidden state for
             # the current expert. 
-            current_state = x[None, top_x].reshape(-1, reduction_size)
+            current_state = x[None, top_x, idx].reshape(-1, reduction_size)
             # print(f"top_x {top_x} idx {idx}  expert {expert_idx} ")
             current_hidden_states = torch.matmul(current_state, expert_w.T)
             if has_residual:
@@ -80,7 +80,7 @@ for reduction_size in reduction_sizes:
 
         # Warm-up
         for _ in range(16):
-            runtime_kernel_blackwell.moe_w13_linear_sm100(x, w, residual, mpk_routing_indices, mpk_expert_mask, output)
+            runtime_kernel_blackwell.moe_w2_linear_sm100(x, w, residual, mpk_routing_indices, mpk_expert_mask, output)
 
         torch.cuda.synchronize()
         starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(
@@ -89,7 +89,7 @@ for reduction_size in reduction_sizes:
         repetitions = 1000
         starter.record()
         for rep in range(repetitions):
-            runtime_kernel_blackwell.moe_w13_linear_sm100(x, w, residual, mpk_routing_indices, mpk_expert_mask, output)
+            runtime_kernel_blackwell.moe_w2_linear_sm100(x, w, residual, mpk_routing_indices, mpk_expert_mask, output)
         ender.record()
         torch.cuda.synchronize()
         total_time = starter.elapsed_time(ender)
