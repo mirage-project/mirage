@@ -320,15 +320,92 @@ def generate_all_kernels(model, dummy_inputs, root_dir, dataset_name, min_num_op
     
     return all_kernels, kernel_input_dims
 
+class HybridModel:
+    """
+    Executable wrapper for Mirage + PyTorch hybrid execution.
+    
+    Automatically routes operations to either Mirage-optimized kernels 
+    or PyTorch fallback implementations.
+    """
+    
+    def __init__(self, execution_plan, input_tensor_ids, output_tensor_ids, parameter_tensors):
+        self.execution_plan = execution_plan
+        self.input_tensor_ids = input_tensor_ids
+        self.output_tensor_ids = output_tensor_ids
+        self.parameter_tensors = parameter_tensors  # dict: tensor_id -> parameter tensor
+    
+    def __call__(self, *inputs):
+        if len(inputs) != len(self.input_tensor_ids):
+            raise ValueError(f"Expected {len(self.input_tensor_ids)} input(s), got {len(inputs)}")
+        
+        device = inputs[0].device if inputs else 'cpu'
+        dtype = inputs[0].dtype
+        intermediates = {tid: tensor for tid, tensor in zip(self.input_tensor_ids, inputs)}
+        intermediates.update({tid: param.to(device=device, dtype=dtype) for tid, param in self.parameter_tensors.items()})
+        
+        for step_type, payload in self.execution_plan:
+            if step_type == "mirage":
+                kernel, input_ids, output_ids, const_dims = payload
+                # Convert inputs to float16 for Mirage
+                kernel_inputs = [intermediates[tid].to(torch.float16) for tid in input_ids]
+                for shape, value in const_dims:
+                    kernel_inputs.append(torch.full(shape, value, device=kernel_inputs[0].device, dtype=torch.float16))
+                outputs = kernel(inputs=kernel_inputs)
+                if not isinstance(outputs, list):
+                    outputs = [outputs]
+                # Convert outputs back to original dtype
+                for tid, tensor in zip(output_ids, outputs):
+                    intermediates[tid] = tensor.to(dtype)
+            elif step_type == "pytorch":
+                op, input_ids, output_id = payload
+                inputs = [intermediates[tid] for tid in input_ids]
+                result = self._execute_pytorch_op(op, inputs)
+                intermediates[output_id] = result
+        
+        outputs = [intermediates[tid] for tid in self.output_tensor_ids]
+        return outputs[0] if len(outputs) == 1 else outputs
+    
+    def _execute_pytorch_op(self, op, inputs):
+        fn = op.fn
+        if fn in ["Add", "Sub", "Mul", "Div"]:
+            return getattr(torch, fn.lower())(inputs[0], inputs[1])
+        elif fn == "MatMul":
+            return torch.matmul(inputs[0], inputs[1])
+        elif fn == "Gemm":
+            # General Matrix Multiply: Y = alpha * A @ B + beta * C
+            # For Linear layers: Y = A @ B^T + C (default alpha=1, beta=1)
+            matmul_result = torch.matmul(inputs[0], inputs[1].T)
+            if len(inputs) > 2:  # Has bias
+                return matmul_result + inputs[2]
+            return matmul_result
+        elif fn == "Relu":
+            return torch.relu(inputs[0])
+        elif fn == "Sigmoid":
+            return torch.sigmoid(inputs[0])
+        elif fn == "Transpose":
+            return inputs[0].transpose(-2, -1)
+        elif fn == "Reshape":
+            return inputs[0].reshape(op.output_tensor_shapes[0][0])
+        else:
+            raise NotImplementedError(f"PyTorch fallback for '{fn}' not implemented")
+
 def partition_graph_with_dp(model, 
                           dummy_input, 
                           IGNORE_OPS=None, 
                           UNSUPPORTED_OPS=None,
                           max_nodes_per_partition=4,
+                          dry_run=False,
                           ):
     """
-    Graph partitioning using graph_splitter + DP partitioning
+    Graph partitioning using graph_splitter + DP partitioning.
     
+    Returns a HybridModel that combines Mirage-optimized kernels with PyTorch fallback.
+    
+    Args:
+        dry_run: If True, skip superoptimize and use original kernel graphs for fast testing
+        
+    Returns:
+        HybridModel: Executable model with hybrid Mirage+PyTorch execution
     """
     
     from graph_splitter import process_operator_graph
@@ -338,6 +415,12 @@ def partition_graph_with_dp(model,
     print("Building computation graph...")
     unique_operators = {}
     operators = get_computation_graph(model, dummy_input, unique_operators, "onnx")
+    
+    # Load parameters from ONNX model
+    import onnx
+    onnx_model = onnx.load("scripts/onnx/inferred_model.onnx")
+    parameter_dict = {init.name: torch.from_numpy(onnx.numpy_helper.to_array(init)) 
+                     for init in onnx_model.graph.initializer}
     
     print("Splitting graph into supported/unsupported subgraphs...")
     if IGNORE_OPS is None:
@@ -349,8 +432,7 @@ def partition_graph_with_dp(model,
     
     print("Applying dynamic programming partitioning to large Mirage subgraphs...")
     
-    partitions = []
-    hashes = set()
+    fine_grained_partitions = []
     
     for sg_id, (sg_dict, sg_type) in enumerate(subgraphs):
         if sg_type == "mirage" and len(sg_dict) > max_nodes_per_partition:
@@ -373,31 +455,121 @@ def partition_graph_with_dp(model,
                 return cost_function(nodes, adj)
             partition_boundaries = solve_partitions(list(range(n)), cost_function_with_adj, max_nodes_per_partition, adj)
             
-            # Convert partitions to kernel graphs
+            # Convert partitions to subgraphs
             for p_id, boundary in enumerate(partition_boundaries):
                 start = 0 if p_id == 0 else partition_boundaries[p_id-1] 
                 partition_ops = ops_list[start:boundary]
-                
-                print(f"Partition {p_id}: {[op.name for op in partition_ops]}")
-                
-                partition_subgraph = {}
-                for op in partition_ops:
-                    partition_subgraph[op] = True
-                
-                    kernel_graph, dims = to_kernel_graph(partition_subgraph)
-                    graph_hash = kernel_graph.get_owner_independent_hash()
-                    if graph_hash in hashes:
-                        continue
-                    hashes.add(graph_hash)
-                    kernel_graph.to_json(f"original_{graph_hash}.json")
-                    try:
-                        print(f"Superoptimizing {graph_hash}")
-                        optimized_graph, best_perf = kernel_graph.superoptimize()
-                    except Exception as e:
-                        print(f"Subgraph {graph_hash} superoptimize failed with error: {e}")
-                        continue
+                partition_subgraph = {op: True for op in partition_ops}
+                fine_grained_partitions.append((partition_subgraph, "mirage"))
+                print(f"    Created partition {p_id}: {len(partition_ops)} ops")
+        else:
+            fine_grained_partitions.append((sg_dict, sg_type))
+    
+    # Build execution plan
+    print(f"\nOptimizing {sum(1 for _, t in fine_grained_partitions if t == 'mirage')} Mirage partitions...")
+    execution_plan = []
+    
+    for pid, (sg_dict, sg_type) in enumerate(fine_grained_partitions):
+        # Print partition info
+        ops_in_partition = [op for op in sorted_ops if op in sg_dict]
+        print(f"\n=== Partition {pid} ({sg_type}): {len(sg_dict)} ops ===")
+        print(f"  Operators: {[op.name for op in ops_in_partition]}")
+        
+        if sg_type == "mirage":
+            kernel_graph, dims = to_kernel_graph(sg_dict)
+            try:
+                if dry_run:
+                    # Dry run mode: compile original kernel without superoptimize
+                    # Create dummy inputs for compilation (Mirage uses float16)
+                    dummy_inputs = []
+                    for dim_info in dims:
+                        if dim_info[1] == "V":  # Variable input
+                            dummy_inputs.append(torch.randn(dim_info[0], dtype=torch.float16, device="cuda"))
+                        elif dim_info[1] == "C":  # Constant input
+                            dummy_inputs.append(torch.full(dim_info[0], dim_info[2], dtype=torch.float16, device="cuda"))
                     
-     
+                    # Compile the kernel
+                    kernel_graph.compile(inputs=dummy_inputs)
+                    optimized_kernel = kernel_graph
+                    print(f"  → Result: Dry run mode - compiled original kernel (no optimization)")
+                else:
+                    result = kernel_graph.superoptimize()
+                    # Handle both tuple (normal optimization) and single value (cached) returns
+                    if isinstance(result, tuple):
+                        optimized_kernel, _ = result
+                    else:
+                        optimized_kernel = result
+                    print(f"  ✓ Result: Mirage kernel optimized successfully")
+                
+                # Extract tensor IDs from subgraph
+                produced_in_subgraph = set()
+                for op in sg_dict:
+                    for _, tid in op.output_tensor_shapes:
+                        produced_in_subgraph.add(tid)
+                
+                input_ids = []
+                for op in sg_dict:
+                    for _, tid in op.input_tensor_shapes:
+                        if tid not in produced_in_subgraph and tid not in input_ids:
+                            input_ids.append(tid)
+                
+                output_ids = [tid for op in sg_dict for _, tid in op.output_tensor_shapes]
+                const_dims = [(d[0], d[2]) for d in dims if d[1] == "C"]
+                
+                execution_plan.append(("mirage", (optimized_kernel, input_ids, output_ids, const_dims)))
+            except Exception as e:
+                print(f"  ✗ Result: Superoptimize failed - {str(e)[:80]}...")
+                print(f"     Fallback: Using PyTorch execution")
+                for op in sg_dict:
+                    execution_plan.append(("pytorch", (op, [t for _, t in op.input_tensor_shapes], op.output_tensor_shapes[0][1])))
+        else:
+            print(f"  → Result: Using PyTorch execution (unsupported operations)")
+            for op in sg_dict:
+                execution_plan.append(("pytorch", (op, [t for _, t in op.input_tensor_shapes], op.output_tensor_shapes[0][1])))
+    
+    # Topological sort execution plan
+    def get_plan_io(step):
+        step_type, payload = step
+        if step_type == "mirage":
+            return payload[1], payload[2]  # input_ids, output_ids
+        else:  # pytorch
+            return payload[1], [payload[2]]  # input_ids, [output_id]
+    
+    sorted_plan = []
+    all_produced = {tid for op in sorted_ops for _, tid in op.output_tensor_shapes}
+    available = set(tid for op in sorted_ops for _, tid in op.input_tensor_shapes if tid not in all_produced)
+    remaining = execution_plan.copy()
+    
+    while remaining:
+        for step in remaining[:]:
+            inputs, outputs = get_plan_io(step)
+            if all(tid in available for tid in inputs):
+                sorted_plan.append(step)
+                available.update(outputs)
+                remaining.remove(step)
+        if len(sorted_plan) == len(execution_plan):
+            break
+    
+    execution_plan = sorted_plan
+    print(f"\n✓ Sorted execution plan: {len(execution_plan)} steps")
+    
+    # Infer model inputs/outputs
+    all_produced = {tid for op in sorted_ops for _, tid in op.output_tensor_shapes}
+    all_input_tensor_ids = [tid for op in sorted_ops for _, tid in op.input_tensor_shapes if tid not in all_produced]
+    all_input_tensor_ids = list(dict.fromkeys(all_input_tensor_ids))
+    
+    # Separate real inputs from parameters (ONNX orders: real_inputs + parameters)
+    num_real_inputs = 1 if not isinstance(dummy_input, (tuple, list)) else len(dummy_input)
+    input_tensor_ids = all_input_tensor_ids[:num_real_inputs]
+    param_names = list(parameter_dict.keys())
+    parameter_tensors = {tid: parameter_dict[param_names[i]] 
+                        for i, tid in enumerate(all_input_tensor_ids[num_real_inputs:])}
+    
+    all_consumed = {tid for op in sorted_ops for _, tid in op.input_tensor_shapes}
+    output_tensor_ids = [tid for op in sorted_ops for _, tid in op.output_tensor_shapes if tid not in all_consumed]
+    
+    print(f"✓ Loaded {len(parameter_tensors)} parameters, {len(input_tensor_ids)} real inputs, {len(output_tensor_ids)} outputs")
+    return HybridModel(execution_plan, input_tensor_ids, output_tensor_ids, parameter_tensors)
 
 def time_kernels(kernels, input_dims, device, iterations=1):
     times = []
