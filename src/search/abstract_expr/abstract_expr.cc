@@ -38,7 +38,7 @@ std::vector<bool> subexpr_to_final_expr(
   }
 
   bool *results_in_raw_array =
-      egg_equiv(exprs_c_str, static_cast<int>(exprs.size()));
+      is_subexpr(exprs_c_str, static_cast<int>(exprs.size()));
 
   std::vector<bool> results;
   for (size_t i = 0; i < exprs.size(); ++i) {
@@ -48,6 +48,12 @@ std::vector<bool> subexpr_to_final_expr(
   delete[] exprs_c_str;
 
   return results;
+}
+
+bool is_equivalent(std::shared_ptr<AbstractExpr const> expr1, std::shared_ptr<AbstractExpr const> expr2) {
+  std::string expr1_str = expr1->to_egg();
+  std::string expr2_str = expr2->to_egg();
+  return is_equiv(expr1_str.c_str(), expr2_str.c_str());
 }
 
 Var::Var(std::string const &name) : name(name) {}
@@ -242,7 +248,8 @@ std::string Red::to_string() const {
 
 std::string Red::to_egg() const {
   if (AbstractExpr::symbolic_expr) {
-    return "(gsum " + summand->to_egg() + ")";
+    return summand->to_egg();
+    // return "(gsum " + summand->to_egg() + ")";
   }
   return "(sum " + reduction_degree->to_string() + " " + summand->to_egg() +
          ")";

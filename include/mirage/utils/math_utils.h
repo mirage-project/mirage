@@ -26,4 +26,18 @@ inline T mod_inverse(T a, T modulus) {
   return mod_power(a, modulus - 2, modulus);
 }
 
+template <typename T>
+inline T int_pow(T base, T exp) {
+  assert(exp >= 0);
+  T result = 1;
+  while (exp > 0) {
+    if (exp % 2 == 1) {
+      result *= base;
+    }
+    exp = exp / 2;
+    base *= base;
+  }
+  return result;
+}
+
 } // namespace mirage

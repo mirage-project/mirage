@@ -1,9 +1,10 @@
 #pragma once
 
 #include "mirage/search/symbolic_graph/tensor_dim_expr.h"
-#include "mirage/search/symbolic_graph/dim_var_assignments.h"
+#include "mirage/search/symbolic_graph/dim_var_assignment.h"
 
 #include <vector>
+#include <optional>
 
 namespace mirage {
 namespace search {
@@ -65,8 +66,14 @@ public:
   bool add_constraints(
       std::unordered_set<TensorDimConstraint> const &constraints);
   bool satisfiable() const;
+  bool satisfiable_with_partial_assignment(DimVarAssignment const &partial_assignment) const;
   std::unordered_set<TensorDimConstraint> get_all_constraints() const;
-  DimVarAssignments get_a_satisfying_assignment() const;
+  DimVarAssignment get_a_satisfying_assignment() const;
+  DimVarAssignment get_a_satisfying_assignment_with_partial_assignment(DimVarAssignment const &partial_assignment) const;
+  std::optional<DimVarAssignment> maybe_get_a_satisfying_assignment() const;
+  std::optional<DimVarAssignment> maybe_get_a_satisfying_assignment_with_partial_assignment(DimVarAssignment const &partial_assignment) const;
+
+  TensorDimConstraints with_partial_assignment(DimVarAssignment const &partial_assignment) const;
 
   operator json() const;
 

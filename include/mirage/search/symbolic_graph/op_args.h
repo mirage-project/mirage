@@ -26,8 +26,11 @@ public:
 
 class KNInputOpArgs : public OpArgs {
 public:
-  KNInputOpArgs(std::vector<size_t> input_strides, int3 input_map);
+  KNInputOpArgs(std::vector<int> input_dims, std::vector<size_t> input_strides, mirage::type::DataType data_type, mirage::layout::DmemLayout layout, int3 input_map);
+  std::vector<int> input_dims;
   std::vector<size_t> input_strides;
+  mirage::type::DataType data_type;
+  mirage::layout::DmemLayout layout;
   int3 input_map;
 
   operator json() const override;
@@ -70,21 +73,30 @@ public:
 
 class TBInputOpArgs : public OpArgs {
 public:
-  TBInputOpArgs(SymbolicDTensor dtensor, SymbolicIMap const &imap);
+  // TBInputOpArgs(SymbolicDTensor dtensor, SymbolicIMap const &input_map);
+  // SymbolicDTensor dtensor;
+  // SymbolicIMap input_map;
+  TBInputOpArgs(SymbolicDTensor dtensor, std::vector<int> const &input_map, int forloop_dim);
   SymbolicDTensor dtensor;
-  SymbolicIMap imap;
+  std::vector<int> input_map;
+  int forloop_dim;
 
   operator json() const override;
 };
 
 class TBOutputOpArgs : public OpArgs {
 public:
-  TBOutputOpArgs(SymbolicDTensor dtensor,
-                 SymbolicOmap const &output_map,
-                 mirage::type::TBEpilogueType epilogue);
+  // TBOutputOpArgs(SymbolicDTensor dtensor,
+  //                SymbolicOmap const &output_map,
+  //                mirage::type::TBEpilogueType epilogue);
+  // SymbolicDTensor dtensor;
+  // SymbolicOmap output_map;
+  // mirage::type::TBEpilogueType epilogue;
+
+  TBOutputOpArgs(SymbolicDTensor dtensor, std::vector<int> const &output_map, type::TBEpilogueType epilogue);
   SymbolicDTensor dtensor;
-  SymbolicOmap output_map;
-  mirage::type::TBEpilogueType epilogue;
+  std::vector<int> output_map;
+  type::TBEpilogueType epilogue;
 
   operator json() const override;
 };

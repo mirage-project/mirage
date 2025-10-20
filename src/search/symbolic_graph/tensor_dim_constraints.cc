@@ -1,9 +1,10 @@
 #include "mirage/search/symbolic_graph/tensor_dim_constraints.h"
-#include "mirage/search/symbolic_graph/dim_var_assignments.h"
+#include "mirage/search/symbolic_graph/dim_var_assignment.h"
 #include "mirage/search/symbolic_graph/tensor_dim_expr.h"
 
 #include <iostream>
 #include <unordered_set>
+#include <atomic>
 
 namespace mirage {
 namespace search {
@@ -41,50 +42,67 @@ bool TensorDimConstraints::add_constraints(
 }
 
 bool TensorDimConstraints::satisfiable() const {
-  z3::context c;
-  z3::solver s(c);
-  DimVarAssignments empty_assign;
-  for (auto it = constraints.begin(); it != constraints.end(); ++it) {
-    s.add((*it)->to_z3(c, empty_assign));
-  }
-  // timing
-  // std::cerr << "Checking satisfiability" << std::endl;
-  // auto start_time = std::chrono::high_resolution_clock::now();
-  // bool result = s.check() == z3::sat;
-  // auto end_time = std::chrono::high_resolution_clock::now();
-  // std::cerr << "Result: " << result << std::endl;
-  // std::chrono::duration<double> duration = end_time - start_time;
-  // std::cerr << "Time taken: " << duration.count() << " seconds" << std::endl;
+  return satisfiable_with_partial_assignment(DimVarAssignment());
+}
 
-  // return result;
-  return s.check() == z3::sat;
+bool TensorDimConstraints::satisfiable_with_partial_assignment(DimVarAssignment const &partial_assignment) const {
+  return maybe_get_a_satisfying_assignment_with_partial_assignment(partial_assignment) != std::nullopt;
 }
 
 std::unordered_set<TensorDimConstraint> TensorDimConstraints::get_all_constraints() const {
   return std::unordered_set<TensorDimConstraint>(constraints.begin(), constraints.end());
 }
 
-DimVarAssignments TensorDimConstraints::get_a_satisfying_assignment() const {
+DimVarAssignment TensorDimConstraints::get_a_satisfying_assignment() const {
+  std::optional<DimVarAssignment> assignment = maybe_get_a_satisfying_assignment();
+  assert(assignment);
+  return *assignment;
+}
+
+DimVarAssignment TensorDimConstraints::get_a_satisfying_assignment_with_partial_assignment(DimVarAssignment const &partial_assignment) const {
+  std::optional<DimVarAssignment> assignment = maybe_get_a_satisfying_assignment_with_partial_assignment(partial_assignment);
+  assert(assignment);
+  return *assignment;
+}
+
+std::optional<DimVarAssignment> TensorDimConstraints::maybe_get_a_satisfying_assignment() const {
+  return maybe_get_a_satisfying_assignment_with_partial_assignment(DimVarAssignment());
+}
+
+std::optional<DimVarAssignment> TensorDimConstraints::maybe_get_a_satisfying_assignment_with_partial_assignment(DimVarAssignment const &partial_assignment) const {
   z3::context c;
   z3::solver s(c);
-  DimVarAssignments empty_assign;
   std::unordered_set<std::shared_ptr<TensorDimVar const>> all_vars;
   for (auto it = constraints.begin(); it != constraints.end(); ++it) {
-    s.add((*it)->to_z3(c, empty_assign));
+    s.add((*it)->to_z3(c, partial_assignment));
     auto vars = (*it)->get_all_vars();
     all_vars.insert(vars.begin(), vars.end());
   }
-  if (s.check() == z3::sat) {
+  bool result = s.check() == z3::sat;
+  if (result) {
     z3::model m = s.get_model();
-    DimVarAssignments assignment;
+    DimVarAssignment assignment;
     for (auto const &var : all_vars) {
-      z3::expr z3_var = var->to_z3(c, empty_assign, false);
-      assignment.assign(var->index, m.eval(z3_var).get_numeral_int());
+      if (partial_assignment.has_assignment(var->index)) {
+        assignment.assign(var->index, partial_assignment.get_value(var->index));
+      } else {
+        z3::expr z3_var = var->to_z3(c, partial_assignment, false);
+        assignment.assign(var->index, m.eval(z3_var).get_numeral_int());  
+      }
     }
     return assignment;
   }
-  assert(false);
-  return DimVarAssignments();
+  return std::nullopt;
+}
+
+TensorDimConstraints TensorDimConstraints::with_partial_assignment(DimVarAssignment const &partial_assignment) const {
+  std::unordered_set<TensorDimConstraint> new_constraints_set;
+  for (TensorDimConstraint const &constraint : constraints) {
+    new_constraints_set.insert(constraint->with_partial_assignment(partial_assignment));
+  }
+  TensorDimConstraints new_constraints;
+  new_constraints.add_constraints(new_constraints_set);
+  return new_constraints;
 }
 
 TensorDimConstraints::operator json() const {

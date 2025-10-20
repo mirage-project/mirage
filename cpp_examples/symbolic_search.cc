@@ -56,10 +56,11 @@ int main(int argc, char **argv) {
 
   search::GeneratorConfig config =
       search::GeneratorConfig::get_default_config();
+  config.verifier_type = search::VerifierType::FORMAL_VERIFIER;
   std::string checkpoint_file_name = "checkpoint_rms.json";
   search::KernelGraphGenerator gen(
       ref_graph, config, checkpoint_file_name.data());
   gen.generate_kernel_graphs_symbolic();
-
+  
   return 0;
 }

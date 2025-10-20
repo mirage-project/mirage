@@ -11,9 +11,11 @@ pub type Constant = i32;
 define_language! {
     pub enum Expr {
         "+" = Add([Id; 2]),
-        "-" = Sub([Id; 2]),
         "*" = SMul([Id; 2]),
         "/" = Div([Id; 2]),
+        "==" = Eq([Id; 2]),
+
+        "ite" = Ite([Id; 3]),
 
         "sum" = Sum([Id; 2]),
         "exp" = Exp(Id),
@@ -156,7 +158,7 @@ pub extern "C" fn get_egraph(expr: *const c_char) -> () {
 }
 
 #[no_mangle]
-pub extern "C" fn egg_equiv(subexprs: *const *const c_char, len: c_int) -> *mut bool {
+pub extern "C" fn is_subexpr(subexprs: *const *const c_char, len: c_int) -> *mut bool {
     
     let subexpr_vec: Vec<String> = unsafe {
         (0..len)
@@ -190,4 +192,33 @@ pub extern "C" fn egg_equiv(subexprs: *const *const c_char, len: c_int) -> *mut 
     let boxed = data.into_boxed_slice();
 
     Box::into_raw(boxed) as *mut bool
+}
+
+#[no_mangle]
+pub extern "C" fn is_equiv(expr1: *const c_char, expr2: *const c_char) -> bool {
+    let expr_str: &str = unsafe {
+            CStr::from_ptr(expr1)
+        }.to_str().unwrap_or("");
+
+    let expr2_str: &str = unsafe {
+            CStr::from_ptr(expr2)
+        }.to_str().unwrap_or("");
+
+    let expr1: RecExpr<Expr> = expr_str.parse().unwrap();
+    let expr2: RecExpr<Expr> = expr2_str.parse().unwrap();
+
+    let runner: Runner<Expr, ()> = Runner::default()
+        .with_iter_limit(100_000)
+        .with_node_limit(100_000)
+        .with_time_limit(Duration::from_secs(10))
+        .with_expr(&expr1)
+        .with_expr(&expr2)
+        .run(&rules(vec![]));
+
+    let id = runner.egraph.equivs(&expr1, &expr2);
+    if id.len() > 0 {
+        return true;
+    }
+
+    false
 }

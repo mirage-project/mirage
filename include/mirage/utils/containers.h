@@ -46,6 +46,9 @@ bool operator==(int3 const &lhs, int3 const &rhs);
 std::vector<unsigned int> to_vector(dim3 const &d);
 std::vector<int> to_vector(int3 const &d);
 
+int3 vec_to_int3(std::vector<int> const &v);
+dim3 vec_to_dim3(std::vector<unsigned int> const &v);
+
 template <typename T>
 std::vector<T> to_vector(int n, T *arr) {
   std::vector<T> v;
@@ -127,4 +130,51 @@ std::unordered_set<T> set_union(std::vector<std::unordered_set<T>> const &sets) 
     }
   }
   return s;
+}
+
+template <typename T>
+std::vector<T> pad_vector(std::vector<T> const &v, size_t n, T const &val) {
+  if (v.size() >= n) {
+    return v;
+  }
+  std::vector<T> result = v;
+  result.resize(n, val);
+  return result;
+}
+
+template <typename T, typename Acc, typename F>
+Acc foldl(std::vector<T> const &vec, Acc init, F f) {
+  Acc acc = init;
+  for (auto const &elem : vec) {
+    acc = f(acc, elem);
+  }
+  return acc;
+}
+
+template <typename T>
+std::vector<std::vector<T>> cartesian_product(const std::vector<std::vector<T>> &vecs) {
+  if (vecs.empty()) return {{}};
+  return foldl<std::vector<T>, std::vector<std::vector<T>>>(
+      vecs, std::vector<std::vector<T>>{{}},
+      [](const std::vector<std::vector<T>> &acc, const std::vector<T> &vec) {
+        std::vector<std::vector<T>> result;
+        for (const auto &x : acc) {
+          for (const auto &y : vec) {
+            std::vector<T> concatenated = x;
+            concatenated.push_back(y);
+            result.push_back(std::move(concatenated));
+          }
+        }
+        return result;
+      });
+}
+
+template <typename T, typename F>
+bool all_of(std::vector<T> const &v, F f) {
+  for (auto const &x : v) {
+    if (!f(x)) {
+      return false;
+    }
+  }
+  return true;
 }

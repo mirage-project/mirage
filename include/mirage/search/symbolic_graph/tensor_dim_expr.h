@@ -1,6 +1,6 @@
 #pragma once
 
-#include "mirage/search/symbolic_graph/dim_var_assignments.h"
+#include "mirage/search/symbolic_graph/dim_var_assignment.h"
 #include "mirage/utils/json_utils.h"
 #include "z3++.h"
 
@@ -18,10 +18,13 @@ public:
   TensorDimExpr() = default;
   virtual ~TensorDimExpr() = default;
 
-  virtual int get_value(DimVarAssignments const &assignments) const = 0;
+  virtual int get_value(DimVarAssignment const &assignments) const;
+  virtual std::optional<int> maybe_get_value(DimVarAssignment const &assignments) const;
+  virtual std::shared_ptr<TensorDimExpr const> with_partial_assignment(DimVarAssignment const &partial_assignment) const = 0;
   virtual z3::expr to_z3(z3::context &c,
-                         DimVarAssignments const &assign,
+                         DimVarAssignment const &assign,
                          bool log_scaled = false) const = 0;
+  virtual std::string to_egg() const = 0;
   virtual std::string to_string() const = 0;
   virtual std::unordered_set<std::shared_ptr<TensorDimVar const>> get_all_vars() const = 0;
   virtual bool is_var() const;
@@ -29,7 +32,6 @@ public:
   virtual bool is_add() const;
   virtual bool is_mul() const;
   virtual bool is_div() const;
-  virtual bool is_pow() const;
   virtual bool is_ite() const;
   virtual bool is_ge() const;
   virtual bool is_le() const;
@@ -41,6 +43,8 @@ public:
   virtual size_t hash() const = 0;
   virtual operator json() const = 0;
   virtual bool same_expr_as(std::shared_ptr<TensorDimExpr const>) const = 0;
+  bool symbolically_equivalent_to(std::shared_ptr<TensorDimExpr const> other) const;
+  bool is_one() const;
 };
 
 using SymbolicTensorDim = std::shared_ptr<TensorDimExpr const>;
@@ -86,10 +90,11 @@ public:
   TensorDimVar(tensor_dim_var_index_t index);
   tensor_dim_var_index_t index;
 
-  int get_value(DimVarAssignments const &assignments) const override;
+  std::shared_ptr<TensorDimExpr const> with_partial_assignment(DimVarAssignment const &partial_assignment) const override;
   z3::expr to_z3(z3::context &c,
-                 DimVarAssignments const &assign,
+                 DimVarAssignment const &assign,
                  bool log_scaled) const override;
+  std::string to_egg() const override;
   std::string to_string() const override;
   std::unordered_set<std::shared_ptr<TensorDimVar const>> get_all_vars() const override;
   bool is_var() const override;
@@ -107,10 +112,11 @@ public:
   TensorDimConst(int value);
   int value;
 
-  int get_value(DimVarAssignments const &assignments) const override;
+  std::shared_ptr<TensorDimExpr const> with_partial_assignment(DimVarAssignment const &partial_assignment) const override;
   z3::expr to_z3(z3::context &c,
-                 DimVarAssignments const &assign,
+                 DimVarAssignment const &assign,
                  bool log_scaled) const override;
+  std::string to_egg() const override;
   std::string to_string() const override;
   std::unordered_set<std::shared_ptr<TensorDimVar const>> get_all_vars() const override;
   bool is_const() const override;
@@ -128,10 +134,11 @@ public:
                std::shared_ptr<TensorDimExpr const> rhs);
   std::shared_ptr<TensorDimExpr const> lhs, rhs;
 
-  int get_value(DimVarAssignments const &assignments) const override;
+  std::shared_ptr<TensorDimExpr const> with_partial_assignment(DimVarAssignment const &partial_assignment) const override;
   z3::expr to_z3(z3::context &c,
-                 DimVarAssignments const &assign,
+                 DimVarAssignment const &assign,
                  bool log_scaled) const override;
+  std::string to_egg() const override;
   std::string to_string() const override;
   std::unordered_set<std::shared_ptr<TensorDimVar const>> get_all_vars() const override;
   bool is_add() const override;
@@ -153,10 +160,11 @@ public:
                std::shared_ptr<TensorDimExpr const> rhs);
   std::shared_ptr<TensorDimExpr const> lhs, rhs;
 
-  int get_value(DimVarAssignments const &assignments) const override;
+  std::shared_ptr<TensorDimExpr const> with_partial_assignment(DimVarAssignment const &partial_assignment) const override;
   z3::expr to_z3(z3::context &c,
-                 DimVarAssignments const &assign,
+                 DimVarAssignment const &assign,
                  bool log_scaled) const override;
+  std::string to_egg() const override;
   std::string to_string() const override;
   std::unordered_set<std::shared_ptr<TensorDimVar const>> get_all_vars() const override;
   bool is_mul() const override;
@@ -177,10 +185,11 @@ public:
                std::shared_ptr<TensorDimExpr const> rhs);
   std::shared_ptr<TensorDimExpr const> lhs, rhs;
 
-  int get_value(DimVarAssignments const &assignments) const override;
+  std::shared_ptr<TensorDimExpr const> with_partial_assignment(DimVarAssignment const &partial_assignment) const override;
   z3::expr to_z3(z3::context &c,
-                 DimVarAssignments const &assign,
+                 DimVarAssignment const &assign,
                  bool log_scaled) const override;
+  std::string to_egg() const override;
   std::string to_string() const override;
   std::unordered_set<std::shared_ptr<TensorDimVar const>> get_all_vars() const override;
   bool is_div() const override;
@@ -195,40 +204,17 @@ std::shared_ptr<TensorDimDiv const>
                       std::shared_ptr<TensorDimExpr const> rhs);
 std::shared_ptr<TensorDimDiv const> operator/(std::shared_ptr<TensorDimExpr const> lhs, std::shared_ptr<TensorDimExpr const> rhs);
 
-// NOTE: only supported in log-scaled expr
-class TensorDimPow : public TensorDimExpr {
-public:
-  TensorDimPow(std::shared_ptr<TensorDimExpr const> base,
-               std::shared_ptr<TensorDimExpr const> exp);
-  std::shared_ptr<TensorDimExpr const> base, exp;
-
-  int get_value(DimVarAssignments const &assignments) const override;
-  z3::expr to_z3(z3::context &c,
-                 DimVarAssignments const &assign,
-                 bool log_scaled) const override;
-  std::string to_string() const override;
-  std::unordered_set<std::shared_ptr<TensorDimVar const>> get_all_vars() const override;
-  bool is_pow() const override;
-  size_t hash() const override;
-  operator json() const override;
-  bool same_expr_as(std::shared_ptr<TensorDimExpr const>) const override;
-};
-
-std::shared_ptr<TensorDimPow const>
-    dim_expr_make_pow(std::shared_ptr<TensorDimExpr const> base,
-                      std::shared_ptr<TensorDimExpr const> exp);
-std::shared_ptr<TensorDimPow const> operator^(std::shared_ptr<TensorDimExpr const> base, std::shared_ptr<TensorDimExpr const> exp);
-
 class TensorDimIte : public TensorDimExpr {
 public:
   TensorDimIte(std::shared_ptr<TensorDimExpr const> cond,
                std::shared_ptr<TensorDimExpr const> true_case,
                std::shared_ptr<TensorDimExpr const> false_case);
   std::shared_ptr<TensorDimExpr const> cond, true_case, false_case;
-  int get_value(DimVarAssignments const &assignments) const override;
+  std::shared_ptr<TensorDimExpr const> with_partial_assignment(DimVarAssignment const &partial_assignment) const override;
   z3::expr to_z3(z3::context &c,
-                 DimVarAssignments const &assign,
+                 DimVarAssignment const &assign,
                  bool log_scaled) const override;
+  std::string to_egg() const override;
   std::string to_string() const override;
   std::unordered_set<std::shared_ptr<TensorDimVar const>> get_all_vars() const override;
   bool is_ite() const override;
@@ -247,10 +233,11 @@ public:
   TensorDimGe(std::shared_ptr<TensorDimExpr const> lhs,
                std::shared_ptr<TensorDimExpr const> rhs);
   std::shared_ptr<TensorDimExpr const> lhs, rhs;
-  int get_value(DimVarAssignments const &assignments) const override;
+  std::shared_ptr<TensorDimExpr const> with_partial_assignment(DimVarAssignment const &partial_assignment) const override;
   z3::expr to_z3(z3::context &c,
-                 DimVarAssignments const &assign,
+                 DimVarAssignment const &assign,
                  bool log_scaled) const override;
+  std::string to_egg() const override;
   std::string to_string() const override;
   std::unordered_set<std::shared_ptr<TensorDimVar const>> get_all_vars() const override;
   bool is_ge() const override;
@@ -270,10 +257,11 @@ public:
   TensorDimLe(std::shared_ptr<TensorDimExpr const> lhs,
                std::shared_ptr<TensorDimExpr const> rhs);
   std::shared_ptr<TensorDimExpr const> lhs, rhs;
-  int get_value(DimVarAssignments const &assignments) const override;
+  std::shared_ptr<TensorDimExpr const> with_partial_assignment(DimVarAssignment const &partial_assignment) const override;
   z3::expr to_z3(z3::context &c,
-                 DimVarAssignments const &assign,
+                 DimVarAssignment const &assign,
                  bool log_scaled) const override;
+  std::string to_egg() const override;
   std::string to_string() const override;
   std::unordered_set<std::shared_ptr<TensorDimVar const>> get_all_vars() const override;
   bool is_le() const override;
@@ -293,10 +281,11 @@ public:
   TensorDimLt(std::shared_ptr<TensorDimExpr const> lhs,
                std::shared_ptr<TensorDimExpr const> rhs);
   std::shared_ptr<TensorDimExpr const> lhs, rhs;
-  int get_value(DimVarAssignments const &assignments) const override;
+  std::shared_ptr<TensorDimExpr const> with_partial_assignment(DimVarAssignment const &partial_assignment) const override;
   z3::expr to_z3(z3::context &c,
-                 DimVarAssignments const &assign,
+                 DimVarAssignment const &assign,
                  bool log_scaled) const override;
+  std::string to_egg() const override;
   std::string to_string() const override;
   std::unordered_set<std::shared_ptr<TensorDimVar const>> get_all_vars() const override;
   bool is_lt() const override;
@@ -316,10 +305,11 @@ public:
   TensorDimGt(std::shared_ptr<TensorDimExpr const> lhs,
                std::shared_ptr<TensorDimExpr const> rhs);
   std::shared_ptr<TensorDimExpr const> lhs, rhs;
-  int get_value(DimVarAssignments const &assignments) const override;
+  std::shared_ptr<TensorDimExpr const> with_partial_assignment(DimVarAssignment const &partial_assignment) const override;
   z3::expr to_z3(z3::context &c,
-                 DimVarAssignments const &assign,
+                 DimVarAssignment const &assign,
                  bool log_scaled) const override;
+  std::string to_egg() const override;
   std::string to_string() const override;
   std::unordered_set<std::shared_ptr<TensorDimVar const>> get_all_vars() const override;
   bool is_gt() const override;
@@ -338,10 +328,11 @@ public:
   TensorDimEq(std::shared_ptr<TensorDimExpr const> lhs,
                std::shared_ptr<TensorDimExpr const> rhs);
   std::shared_ptr<TensorDimExpr const> lhs, rhs;
-  int get_value(DimVarAssignments const &assignments) const override;
+  std::shared_ptr<TensorDimExpr const> with_partial_assignment(DimVarAssignment const &partial_assignment) const override;
   z3::expr to_z3(z3::context &c,
-                 DimVarAssignments const &assign,
+                 DimVarAssignment const &assign,
                  bool log_scaled) const override;
+  std::string to_egg() const override;
   std::string to_string() const override;
   std::unordered_set<std::shared_ptr<TensorDimVar const>> get_all_vars() const override;
   bool is_eq() const override;
@@ -359,10 +350,11 @@ class TensorDimDisj : public TensorDimExpr {
 public:
   TensorDimDisj(std::vector<std::shared_ptr<TensorDimExpr const>> const &args);
   std::vector<std::shared_ptr<TensorDimExpr const>> args;
-  int get_value(DimVarAssignments const &assignments) const override;
+  std::shared_ptr<TensorDimExpr const> with_partial_assignment(DimVarAssignment const &partial_assignment) const override;
   z3::expr to_z3(z3::context &c,
-                 DimVarAssignments const &assign,
+                 DimVarAssignment const &assign,
                  bool log_scaled) const override;
+  std::string to_egg() const override;
   std::string to_string() const override;
   std::unordered_set<std::shared_ptr<TensorDimVar const>> get_all_vars() const override;
   bool is_disj() const override;

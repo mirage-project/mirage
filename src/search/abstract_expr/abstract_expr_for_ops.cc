@@ -248,6 +248,11 @@ std::shared_ptr<AbstractExpr const> get_abstract_expr(
       std::shared_ptr<TensorDimExpr const> reduction_size_expr = g.forloop_range * tensors[0].dims[tensors[0].dims.size() - 1] / dim_expr_make_const(g.reduction_dimx);
       return abstract_expr_make_red(reduction_size_expr, opds[0]);
     }
+    case type::TBOperatorType::TB_FORLOOP_ACCUM_RED_LD_MEAN_OP: {
+      assert(opds.size() == 1);
+      std::shared_ptr<TensorDimExpr const> reduction_size_expr = g.forloop_range * tensors[0].dims[tensors[0].dims.size() - 1];
+      return abstract_expr_make_red(reduction_size_expr, opds[0]);
+    }
     case type::TBOperatorType::TB_SQUARE_OP: {
       assert(opds.size() == 1);
       return abstract_expr_make_square(opds[0]);

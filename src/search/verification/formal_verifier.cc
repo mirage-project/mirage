@@ -1,13 +1,17 @@
 #include "mirage/search/verification/formal_verifier.h"
 #include "mirage/search/op_utils.h"
+#include "mirage/search/symbolic_graph/op_args.h"
+#include "mirage/search/symbolic_graph/symbolic_graph.h"
+#include "mirage/search/symbolic_graph/symbolic_op.h"
+#include "mirage/search/symbolic_graph/symbolic_tensor.h"
+#include "mirage/search/verification/output_match.h"
+#include "mirage/type.h"
 #include "mirage/utils/containers.h"
 
 #include <iostream>
 
 namespace mirage {
 namespace search {
-
-std::mutex FormalVerifier::formal_verifier_mutex;
 
 FormalVerifier::FormalVerifier(kernel::Graph const &input_graph) {
   for (kernel::KNOperator *op : input_graph.operators) {
@@ -16,11 +20,10 @@ FormalVerifier::FormalVerifier(kernel::Graph const &input_graph) {
           to_vector(op->input_tensors[0].num_dims, op->input_tensors[0].dim));
     }
   }
-  input_exprs = get_concrete_exprs(input_graph, true, all_dims);
+  input_exprs = get_concrete_exprs(input_graph, true);
 }
 
 OutputMatch FormalVerifier::verify(kernel::Graph const &graph) {
-  std::lock_guard<std::mutex> lock(formal_verifier_mutex);
 
   std::vector<std::vector<int>> shapes;
   auto is_output_tensor = [&](kernel::DTensor const &dtensor) {
@@ -42,7 +45,7 @@ OutputMatch FormalVerifier::verify(kernel::Graph const &graph) {
   }
   assert(shapes.size() == shapes_std.size());
   std::vector<std::string> graph_exprs =
-      get_concrete_exprs(graph, false, all_dims);
+      get_concrete_exprs(graph, false);
   assert(input_exprs.size() == graph_exprs.size());
 
   auto verify_with_match = [&](OutputMatch const &match) {
@@ -51,7 +54,33 @@ OutputMatch FormalVerifier::verify(kernel::Graph const &graph) {
         return false;
       }
       bool is_equiv =
-          check_equiv(input_exprs[i].c_str(), graph_exprs[match[i]].c_str());
+          check_equiv(input_exprs[i].c_str(), graph_exprs[match[i]].c_str(), false);
+      if (!is_equiv) {
+        return false;
+      }
+    }
+    return true;
+  };
+
+  OutputMatch match(input_exprs.size());
+  do {
+    if (verify_with_match(match)) {
+      return match;
+    }
+  } while (match.next());
+  return OutputMatch::invalid_match();
+}
+
+OutputMatch FormalVerifier::verify_symbolic_graph(SymbolicKNGraph const &graph) {
+  assert(input_exprs.size() == 1);
+  std::vector<SymbolicDTensor> output_tensors{graph.tensors.back()};
+  std::vector<std::string> graph_exprs = get_concrete_exprs(graph, false);
+
+  auto verify_with_match = [&](OutputMatch const &match) {
+    std::cerr << "concrete exprs: ";
+    for (size_t i = 0; i < match.size(); i++) {
+      std::cerr << input_exprs[i] << " " << graph_exprs[match[i]] << std::endl;
+      bool is_equiv = check_equiv(input_exprs[i].c_str(), graph_exprs[match[i]].c_str(), true);
       if (!is_equiv) {
         return false;
       }
@@ -70,17 +99,12 @@ OutputMatch FormalVerifier::verify(kernel::Graph const &graph) {
 
 std::vector<std::string>
     get_concrete_exprs(kernel::Graph const &graph,
-                       bool with_output_ops,
-                       std::unordered_set<std::string> &all_dims) {
+                       bool with_output_ops) {
   std::unordered_map<type::GuidType, std::string> tensor_exprs;
 
   std::string data_dim0 = "data_dim0";
   std::string data_dim1 = "data_dim1";
   std::string data_dim2 = "data_dim2";
-
-  all_dims.insert(data_dim0);
-  all_dims.insert(data_dim1);
-  all_dims.insert(data_dim2);
 
   std::string data_dim[3] = {data_dim0, data_dim1, data_dim2};
 
@@ -92,10 +116,6 @@ std::vector<std::string>
     std::string dy = "dy" + std::to_string(custom_kernel_id);
     std::string dz = "dz" + std::to_string(custom_kernel_id);
     std::string df = "df" + std::to_string(custom_kernel_id);
-    all_dims.insert(dx);
-    all_dims.insert(dy);
-    all_dims.insert(dz);
-    all_dims.insert(df);
     custom_kernel_id++;
     for (threadblock::TBOperator *op : graph.operators) {
       switch (op->op_type) {
@@ -266,7 +286,6 @@ std::vector<std::string>
             a = "(reduce " + a + " " + df + ")";
           }
           std::string reddim = "reddim" + std::to_string(redtox_id++);
-          all_dims.insert(reddim);
           int reduce_degree =
               op->input_tensors[0].dim[op->input_tensors[0].num_dims - 1] /
               op->output_tensors[0].dim[op->output_tensors[0].num_dims - 1];
@@ -477,6 +496,228 @@ std::vector<std::string>
     }
   }
   return output_exprs;
+}
+
+std::vector<std::string> get_concrete_exprs(SymbolicKNGraph const &graph, bool with_output_ops) {
+  std::string data_dim0 = "data_dim0";
+  std::string data_dim1 = "data_dim1";
+  std::string data_dim2 = "data_dim2";
+
+  std::string data_dim[3] = {data_dim0, data_dim1, data_dim2};
+
+  int custom_kernel_id = 0;
+
+  const int DUMMY_DIM = 7;
+
+  auto calc_stensor_exprs = [&](SymbolicTBGraph const &graph, std::vector<std::string> const &inputs) {
+    std::vector<std::string> tensor_exprs, output_dtensor_exprs;
+
+    bool is_forloop_greater_than_one = [&] {
+      for (auto const &op : graph.operators) {
+        if (op.op_type == type::TB_INPUT_OP) {
+          if (std::static_pointer_cast<TBInputOpArgs const>(op.args)->forloop_dim >= 0) {
+            return true;
+          }
+        }
+      }
+      return false;
+    }();
+
+    std::string dx = "dx" + std::to_string(custom_kernel_id);
+    std::string dy = "dy" + std::to_string(custom_kernel_id);
+    std::string dz = "dz" + std::to_string(custom_kernel_id);
+    std::string df = "df" + std::to_string(custom_kernel_id);
+    std::vector<std::string> parallel_dim{dx, dy, dz};
+    custom_kernel_id++;
+    for (size_t i = 0; i < graph.operators.size(); ++i) {
+      switch (graph.operators[i].op_type) {
+        case type::TBOperatorType::TB_INPUT_OP: {
+          auto args = std::static_pointer_cast<TBInputOpArgs const>(graph.operators[i].args);
+          std::string a = inputs[i];
+          // int3 input_map = vec_to_int3(args->input_map);
+          // int forloop_dim = args->forloop_dim;
+          for (size_t j = 0; j < args->input_map.size(); ++j) {
+            if (args->input_map[j] >= 0) {
+              size_t axis = args->dtensor.dims.size() - 1 - args->input_map[j];
+              a = "(partition " + a + " " + data_dim[axis] + " " + parallel_dim[j] + " " + std::to_string(DUMMY_DIM) + ")";
+            } else {
+              a = "(replicate " + a + " " + parallel_dim[j] + " " + std::to_string(DUMMY_DIM) + ")";
+            }
+          }
+          if (is_forloop_greater_than_one) {
+            if (args->forloop_dim >= 0) {
+              size_t axis = args->dtensor.dims.size() - 1 - args->forloop_dim;
+              a = "(partition " + a + " " + data_dim[axis] + " " + df + " " + std::to_string(DUMMY_DIM) + ")";
+            } else {
+              a = "(replicate " + a + " " + df + " " + std::to_string(DUMMY_DIM) + ")";
+            }
+          }
+          tensor_exprs.push_back(a);
+          break;
+        }
+        case type::TBOperatorType::TB_OUTPUT_OP: {
+          auto args = std::static_pointer_cast<TBOutputOpArgs const>(graph.operators[i].args);
+          std::string a = tensor_exprs[graph.input_indices[i][0]];
+          // int3 omap = vec_to_int3(args->output_map);
+          for (size_t j = 0; j < args->output_map.size(); ++j) {
+            if (args->output_map[j] >= 0) {
+              size_t axis = args->dtensor.dims.size() - 1 - args->output_map[j];
+              a = "(combine " + a + " " + data_dim[axis] + " " + parallel_dim[j] + ")";
+            } else {
+              a = "(reduce " + a + " " + parallel_dim[j] + ")";
+            }
+          }
+          output_dtensor_exprs.push_back(a);
+          break;
+        }
+        case type::TBOperatorType::TB_ADD_OP: {
+          std::string lhs = tensor_exprs[graph.input_indices[i][0]];
+          std::string rhs = tensor_exprs[graph.input_indices[i][1]];
+          std::string a = "(ew_add " + lhs + " " + rhs + ")";
+          tensor_exprs.push_back(a);
+          break;
+        }
+        case type::TBOperatorType::TB_DIV_OP: {
+          std::string lhs = tensor_exprs[graph.input_indices[i][0]];
+          std::string rhs = tensor_exprs[graph.input_indices[i][1]];
+          std::string a = "(bc_div " + lhs + " " + rhs + ")";
+          tensor_exprs.push_back(a);
+          break;
+        }
+        case type::TBOperatorType::TB_POW_OP: {
+          std::string base = tensor_exprs[graph.input_indices[i][0]];
+          std::string exponent = tensor_exprs[graph.input_indices[i][1]];
+          std::string a = "(bc_pow " + base + " " + exponent + ")";
+          tensor_exprs.push_back(a);
+          break;
+        }
+        case type::TBOperatorType::TB_EXP_OP: {
+          std::string a = tensor_exprs[graph.input_indices[i][0]];
+          a = "(ew_exp " + a + ")";
+          tensor_exprs.push_back(a);
+          break;
+        }
+        case type::TBOperatorType::TB_FORLOOP_ACCUM_NO_RED_OP: {
+          std::string a = tensor_exprs[graph.input_indices[i][0]];
+          if (is_forloop_greater_than_one) {
+            a = "(reduce " + a + " " + df + ")";
+          }
+          tensor_exprs.push_back(a);
+          break;
+        }
+        case type::TBOperatorType::TB_FORLOOP_ACCUM_RED_LD_RMS_OP: {
+          std::string a = tensor_exprs[graph.input_indices[i][0]];
+          a = "(square " + a + ")";
+          if (is_forloop_greater_than_one) {
+            a = "(reduce " + a + " " + df + ")";
+          }
+          a = "(sum " + a + " " + data_dim[0] + ")";
+          a = "(sqrt " + a + ")";
+          tensor_exprs.push_back(a);
+          break;
+        }
+        case type::TBOperatorType::TB_FORLOOP_ACCUM_RED_LD_SUM_OP: {
+          std::string a = tensor_exprs[graph.input_indices[i][0]];
+          if (is_forloop_greater_than_one) {
+            a = "(reduce " + a + " " + df + ")";
+          }
+          a = "(sum " + a + " " + data_dim[0] + ")";
+          tensor_exprs.push_back(a);
+          break;
+        }
+        case type::TBOperatorType::TB_MATMUL_OP: {
+          std::string lhs = tensor_exprs[graph.input_indices[i][0]];
+          std::string rhs = tensor_exprs[graph.input_indices[i][1]];
+          std::string a = "(matmul " + lhs + " " + rhs + ")";
+          tensor_exprs.push_back(a);
+          break;
+        }
+        case type::TBOperatorType::TB_MUL_OP: {
+          std::string lhs = tensor_exprs[graph.input_indices[i][0]];
+          std::string rhs = tensor_exprs[graph.input_indices[i][1]];
+          std::string a = "(ew_mul " + lhs + " " + rhs + ")";
+          tensor_exprs.push_back(a);
+          break;
+        }
+        case type::TBOperatorType::TB_RMS_NORM_OP: {
+          std::string a = tensor_exprs[graph.input_indices[i][0]];
+          a = "(rms_norm " + a + " " + data_dim[0] + ")";
+          tensor_exprs.push_back(a);
+          break;
+        }
+        case type::TBOperatorType::TB_SQUARE_OP: {
+          std::string a = tensor_exprs[graph.input_indices[i][0]];
+          a = "(square " + a + ")";
+          tensor_exprs.push_back(a);
+          break;
+        }
+        case type::TBOperatorType::TB_SQRT_OP: {
+          std::string a = tensor_exprs[graph.input_indices[i][0]];
+          a = "(sqrt " + a + ")";
+          tensor_exprs.push_back(a);
+          break;
+        }
+        case type::TBOperatorType::TB_SILU_OP: {
+          std::string a = tensor_exprs[graph.input_indices[i][0]];
+          a = "(silu " + a + ")";
+          tensor_exprs.push_back(a);
+          break;
+        }
+        case type::TBOperatorType::TB_GELU_OP: {
+          std::string a = tensor_exprs[graph.input_indices[i][0]];
+          a = "(gelu " + a + ")";
+          tensor_exprs.push_back(a);
+          break;
+        }
+        case type::TBOperatorType::TB_RELU_OP: {
+          std::string a = tensor_exprs[graph.input_indices[i][0]];
+          a = "(relu " + a + ")";
+          tensor_exprs.push_back(a);
+          break;
+        }
+        case type::TBOperatorType::TB_CLAMP_OP: {
+          std::string a = tensor_exprs[graph.input_indices[i][0]];
+          a = "(clamp " + a + ")";
+          tensor_exprs.push_back(a);
+          break;
+        }
+        default: {
+          assert(false && "Unsupported operator type");
+        }
+      }
+    }
+    return output_dtensor_exprs;
+  };
+
+  auto calc_dtensor_exprs = [&](SymbolicKNGraph const &graph) {
+    std::vector<std::string> tensor_exprs;
+    int input_id = 0;
+    for (size_t i = 0; i < graph.operators.size(); ++i) {
+      switch (graph.operators[i].op_type) {
+        case type::KNOperatorType::KN_INPUT_OP: {
+          std::string a = "input" + std::to_string(input_id++);
+          tensor_exprs.push_back(a);
+          break;
+        }
+        case type::KNOperatorType::KN_OUTPUT_OP: {
+          break;
+        }
+        case type::KNOperatorType::KN_CUSTOMIZED_OP: {
+          std::vector<std::string> input_exprs = vector_map(graph.input_indices[i], [&](int i) { return tensor_exprs[i]; });
+          std::vector<std::string> output_exprs = calc_stensor_exprs(std::static_pointer_cast<KNCustomizedOpArgs const>(graph.operators[i].args)->tb_graph_template, input_exprs);
+          tensor_exprs.insert(tensor_exprs.end(), output_exprs.begin(), output_exprs.end());
+          break;
+        }
+        default: {
+          assert(false && "Unsupported operator type");
+        }
+      }
+    }
+    return std::vector<std::string>{tensor_exprs.back()};
+  };
+
+  std::vector<std::string> tensor_exprs = calc_dtensor_exprs(graph);
+  return tensor_exprs;
 }
 
 } // namespace search

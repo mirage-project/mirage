@@ -2,6 +2,7 @@
 
 #include "mirage/search/config.h"
 #include "mirage/search/op_utils.h"
+#include "mirage/search/symbolic_graph/symbolic_tensor.h"
 
 namespace mirage {
 namespace search {
@@ -14,11 +15,11 @@ struct DimStrategy {
   std::vector<type::TBOperatorType> get_tbop_cand();
   std::vector<std::vector<int3>>
       get_input_map_cand(std::vector<DTensor> const &tensors, dim3 grid_dim);
-  std::vector<std::vector<int3>>
-      get_input_map_cand(std::vector<SymbolicDTensor> const &tensors);
+  std::vector<std::vector<std::vector<int>>>
+      get_input_map_cand(std::vector<SymbolicDTensor> const &tensors, size_t num_parallel_dims);
   std::vector<int3> get_output_map_cand(std::vector<STensor> const &tensors,
                                         dim3 grid_dim);
-  std::vector<int3> get_output_map_cand(SymbolicTBGraph const &tb_graph);
+  std::vector<std::vector<std::vector<int>>> get_output_map_cand(std::vector<SymbolicSTensor> const &tensors, size_t num_parallel_dims);
   std::vector<dim3> get_grid_dim_cand(std::vector<DTensor> const &tensors);
   std::vector<dim3> get_block_dim_cand(std::vector<DTensor> const &tensors,
                                        dim3 grid_dim);
@@ -35,6 +36,8 @@ struct DimStrategy {
   std::vector<std::vector<int>> get_unary_input(int num_tensors);
   std::vector<std::vector<int>> get_binary_input(int num_tensors);
   std::vector<std::vector<int>> get_nary_input(int num_tensors, int n);
+
+  std::vector<size_t> get_num_parallel_dims_cand(std::vector<SymbolicDTensor> const &tensors);
 
   template <typename OpType, typename TensorType>
   std::vector<std::vector<int>>

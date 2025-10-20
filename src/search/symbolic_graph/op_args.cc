@@ -3,8 +3,8 @@
 namespace mirage {
 namespace search {
 
-KNInputOpArgs::KNInputOpArgs(std::vector<size_t> input_strides, int3 input_map)
-    : input_strides(input_strides), input_map(input_map) {}
+KNInputOpArgs::KNInputOpArgs(std::vector<int> input_dims, std::vector<size_t> input_strides, mirage::type::DataType data_type, mirage::layout::DmemLayout layout, int3 input_map)
+    : input_dims(input_dims), input_strides(input_strides), data_type(data_type), layout(layout), input_map(input_map) {}
 
 KNOutputOpArgs::KNOutputOpArgs(std::vector<size_t> output_strides,
                                int3 output_map)
@@ -21,11 +21,11 @@ KNRMSNormOpArgs::KNRMSNormOpArgs(int normalized_size)
 KNCustomizedOpArgs::KNCustomizedOpArgs(SymbolicTBGraph tb_graph_template)
     : tb_graph_template(tb_graph_template) {}
 
-TBInputOpArgs::TBInputOpArgs(SymbolicDTensor dtensor, SymbolicIMap const &imap)
-    : dtensor(dtensor), imap(imap) {}
+TBInputOpArgs::TBInputOpArgs(SymbolicDTensor dtensor, std::vector<int> const &input_map, int forloop_dim)
+    : dtensor(dtensor), input_map(input_map), forloop_dim(forloop_dim) {}
 
 TBOutputOpArgs::TBOutputOpArgs(SymbolicDTensor dtensor,
-                              SymbolicOmap const &output_map,
+                              std::vector<int> const &output_map,
                                mirage::type::TBEpilogueType epilogue)
     : dtensor(dtensor), output_map(output_map),
       epilogue(epilogue) {}
@@ -48,7 +48,8 @@ EmptyOpArgs::operator json() const {
 }
 
 KNInputOpArgs::operator json() const {
-  return json{{"input_strides", input_strides}, {"input_map", input_map}};
+  return json{{"input_dims", input_dims}}; // TODO: remove, just for debugging
+  // return json{{"input_dims", input_dims}, {"input_strides", input_strides}, {"data_type", data_type}, {"layout", layout}, {"input_map", input_map}};
 }
 
 KNOutputOpArgs::operator json() const {
@@ -69,7 +70,7 @@ KNCustomizedOpArgs::operator json() const {
 }
 
 TBInputOpArgs::operator json() const {
-  return json{{"dtensor", dtensor}, {"input_map", imap}};
+  return json{{"dtensor", dtensor}, {"input_map", input_map}, {"forloop_dim", forloop_dim}};
 }
 
 TBOutputOpArgs::operator json() const {

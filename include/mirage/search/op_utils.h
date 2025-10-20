@@ -3,6 +3,7 @@
 #include "mirage/search/abstract_expr/abstract_expr.h"
 #include "mirage/search/config.h"
 #include "mirage/search/symbolic_graph/symbolic_graph.h"
+#include "mirage/utils/containers.h"
 #include "mirage/utils/hash_utils.h"
 
 namespace mirage {
@@ -50,11 +51,30 @@ TBOperator *create_op(threadblock::Graph &g,
 TBOperator *create_op(threadblock::Graph &g,
                       type::TBOperatorType type,
                       std::vector<STensor> const &inputs);
-size_t count_op_of_type(type::KNOperatorType op_type, kernel::Graph const &g);
-size_t count_op_of_type(type::TBOperatorType op_type,
-                        threadblock::Graph const &g);
-size_t count_op_of_type(type::KNOperatorType op_type, SymbolicKNGraph const &g);
-size_t count_op_of_type(type::TBOperatorType op_type, SymbolicTBGraph const &g);
+
+template <typename GraphType, typename OperatorType>
+size_t count_op_of_types(std::unordered_set<OperatorType> const &op_types, GraphType const &g) {
+  return filter(g.operators,[&](auto const &op) {
+    return contains(op_types, op->op_type);
+  }).size();
+}
+
+template <typename GraphType, typename OperatorType>
+size_t count_op_of_type(OperatorType op_type, GraphType const &g) {
+  return count_op_of_types(std::unordered_set<OperatorType>{op_type}, g);
+}
+
+template <typename GraphType, typename OperatorType>
+size_t count_symbolic_op_of_types(std::unordered_set<OperatorType> const &op_types, GraphType const &g) {
+  return filter(g.operators,[&](auto const &op) {
+    return contains(op_types, op.op_type);
+  }).size();
+}
+
+template <typename GraphType, typename OperatorType>
+size_t count_symbolic_op_of_type(OperatorType op_type, GraphType const &g) {
+  return count_symbolic_op_of_types(std::unordered_set<OperatorType>{op_type}, g);
+}
 
 } // namespace search
 } // namespace mirage

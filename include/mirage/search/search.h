@@ -82,7 +82,8 @@ private:
       std::vector<int> input_dtensor_indices_for_tb_graph,
       SearchLevel level,
       int search_depth);
-  bool instantiate_symbolic_graph(SymbolicKNGraph const &symbolic_graph);
+  bool verify_symbolic_graph(SymbolicKNGraph const &symbolic_graph);
+  std::vector<SymbolicKNGraphWithPartialAssignment> verified_symbolic_graphs;
 
   void preprocess(kernel::Graph const &computation_graph);
   bool verify(kernel::Graph &g);

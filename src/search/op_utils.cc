@@ -1,4 +1,5 @@
 #include "mirage/search/op_utils.h"
+#include "mirage/type.h"
 #include "mirage/utils/containers.h"
 
 namespace mirage {
@@ -143,6 +144,7 @@ KNOperator *create_op(kernel::Graph &g,
   if (inputs.size() == 2) {
     return create_op(g, type, inputs[0], inputs[1]);
   }
+  assert(false && "Unsupported operator arity");
   return nullptr;
 }
 
@@ -253,49 +255,6 @@ TBOperator *create_op(threadblock::Graph &g,
     return matmul;
   }
   return nullptr;
-}
-
-size_t count_op_of_type(type::KNOperatorType op_type, kernel::Graph const &g) {
-  int counter = 0;
-  for (auto const &op : g.operators) {
-    if (op->op_type == op_type) {
-      ++counter;
-    }
-  }
-  return counter;
-}
-
-size_t count_op_of_type(type::TBOperatorType op_type,
-                        threadblock::Graph const &g) {
-  int counter = 0;
-  for (auto const &op : g.operators) {
-    if (op->op_type == op_type) {
-      ++counter;
-    }
-  }
-  return counter;
-}
-
-size_t count_op_of_type(type::KNOperatorType op_type,
-                        SymbolicKNGraph const &g) {
-  int counter = 0;
-  for (auto const &op : g.operators) {
-    if (op.op_type == op_type) {
-      ++counter;
-    }
-  }
-  return counter;
-}
-
-size_t count_op_of_type(type::TBOperatorType op_type,
-                        SymbolicTBGraph const &g) {
-  int counter = 0;
-  for (auto const &op : g.operators) {
-    if (op.op_type == op_type) {
-      ++counter;
-    }
-  }
-  return counter;
 }
 
 } // namespace search

@@ -1,6 +1,8 @@
 #include "mirage/search/dim_strategy.h"
 #include "mirage/config.h"
+#include "mirage/search/symbolic_graph/symbolic_tensor.h"
 #include "mirage/utils/containers.h"
+#include <optional>
 
 namespace mirage {
 namespace search {
@@ -470,80 +472,90 @@ std::vector<std::vector<int>> DimStrategy::get_customized_input_cand_idx(
   }
 }
 
-void generate_input_map_cand(std::vector<SymbolicDTensor> const &tensors,
-                             std::vector<int3> imap_to_explore,
-                             std::vector<int3> cur,
-                             std::vector<std::vector<int3>> &results) {
-  if (cur.size() == tensors.size()) {
-    results.push_back(cur);
-    return;
-  }
-  for (int3 input_map : imap_to_explore) {
-    cur.push_back(input_map);
-    generate_input_map_cand(tensors, imap_to_explore, cur, results);
-    cur.pop_back();
-  }
-}
+std::vector<std::vector<std::vector<int>>> DimStrategy::get_input_map_cand(
+    std::vector<SymbolicDTensor> const &tensors,
+    size_t num_parallel_dims) {
 
-std::vector<std::vector<int3>> DimStrategy::get_input_map_cand(
-    std::vector<SymbolicDTensor> const &tensors) {
-  std::vector<std::vector<int3>> results;
-  std::vector<int3> imap_to_explore = {
-      {0, -1, 1},
-      {0, 1, -1},
-      {0, 2, -1},
-      {-1, -1, -1},
-      {1, -1, -1},
-      {0, -1, -1},
+  auto get_input_map_cand_for_one_dimension = [&](SymbolicDTensor const &tensor) {
+    std::vector<int> result;
+    result.push_back(-1);
+    for (size_t i = 0; i < tensor.dims.size(); ++i) {
+      result.push_back(i);
+    }
+    return result;
   };
-  generate_input_map_cand(tensors, imap_to_explore, {}, results);
-  return results;
+
+  auto get_input_map_cand_for_one_tensor = [&](SymbolicDTensor const &tensor) {
+    std::vector<int> input_map_cand_for_one_dimension = get_input_map_cand_for_one_dimension(tensor);
+    std::vector<std::vector<int>> input_map_cand_for_each_dimension(num_parallel_dims, input_map_cand_for_one_dimension);
+    return filter(cartesian_product(input_map_cand_for_each_dimension), [&](std::vector<int> const &input_cand) {
+      for (size_t i = 0; i < input_cand.size(); ++i) {
+        for (size_t j = 0; j < i; ++j) {
+          if (input_cand[i] != -1 && input_cand[i] == input_cand[j]) {
+            return false;
+          }
+        }
+      }
+      return true;
+    });
+  };
+
+  std::vector<std::vector<std::vector<int>>> input_map_cand_for_each_tensor = vector_map(tensors, get_input_map_cand_for_one_tensor);
+  return filter(cartesian_product(input_map_cand_for_each_tensor), [&](std::vector<std::vector<int>> const &input_cand) {
+    for (auto const &imap : input_cand) {
+      for (int i : imap) {
+        if (i != -1) {
+          return true;
+        }
+      }
+    }
+    return false;
+  });
 }
 
-std::vector<int3>
-    DimStrategy::get_output_map_cand(SymbolicTBGraph const &tb_graph) {
-  std::vector<int3> results;
-  std::vector<int3> omap_to_explore = config.omap_to_explore;
-  omap_to_explore = vector_concat(omap_to_explore,
-                                  {
-                                      {0, 1, -1},
-                                      {0, 2, 1},
-                                      {0, 2, -1},
-                                      {0, -1, -1},
-                                  });
-  if (!config._enable_attention_specific_optimization) {
-    omap_to_explore.push_back({1, -1, -1});
-  }
-  omap_to_explore = deduplicate(omap_to_explore);
-  results = omap_to_explore;
-  return results;
-}
+std::vector<std::vector<std::vector<int>>>
+    DimStrategy::get_output_map_cand(std::vector<SymbolicSTensor> const &tensors, size_t num_parallel_dims) {
 
-void generate_forloop_dim(std::vector<SymbolicDTensor> const &input_tensors,
-                          std::vector<int> fmap_to_explore,
-                          std::vector<int> cur,
-                          std::vector<std::vector<int>> &results) {
-  if (cur.size() == input_tensors.size()) {
-    results.push_back(cur);
-    return;
-  }
+  auto get_output_map_cand_for_one_dimension = [&](SymbolicSTensor const &tensor) {
+    std::vector<int> result;
+    for (size_t i = 0; i < tensor.dims.size(); ++i) {
+      result.push_back(i);
+    }
+    return result;
+  };
 
-  for (int dim : fmap_to_explore) {
-    cur.push_back(dim);
-    generate_forloop_dim(input_tensors, fmap_to_explore, cur, results);
-    cur.pop_back();
-  }
+  auto get_output_map_cand_for_one_tensor = [&](SymbolicSTensor const &tensor) {
+    std::vector<int> input_map_cand_for_one_dimension = get_output_map_cand_for_one_dimension(tensor);
+    std::vector<std::vector<int>> output_map_cand_for_each_dimension(num_parallel_dims, input_map_cand_for_one_dimension);
+    return filter(cartesian_product(output_map_cand_for_each_dimension), [&](std::vector<int> const &input_cand) {
+      for (size_t i = 0; i < input_cand.size(); ++i) {
+        for (size_t j = 0; j < i; ++j) {
+          if (input_cand[i] == input_cand[j]) {
+            return false;
+          }
+        }
+      }
+      return true;
+    });
+  };
+
+  std::vector<std::vector<std::vector<int>>> output_map_cand_for_each_tensor = vector_map(tensors, get_output_map_cand_for_one_tensor);
+  return cartesian_product(output_map_cand_for_each_tensor);
 }
 
 std::vector<std::vector<int>> DimStrategy::get_forloop_dim_cand(
     std::vector<SymbolicDTensor> const &input_tensers) {
-  std::vector<std::vector<int>> results;
-  std::vector<int> fmap_to_explore = {-1, 0, 1, 2};
-  if (!config.fmap_to_explore.empty()) {
-    fmap_to_explore = config.fmap_to_explore;
-  }
-  generate_forloop_dim(input_tensers, fmap_to_explore, {}, results);
-  return results;
+
+  auto get_forloop_dim_for_one_tensor = [&](SymbolicDTensor const &tensor) {
+    std::vector<int> result;
+    for (size_t i = 0; i < tensor.dims.size(); ++i) {
+      result.push_back(i);
+    }
+    return result;
+  };
+
+  std::vector<std::vector<int>> forloop_dim_cand_for_each_tensor = vector_map(input_tensers, get_forloop_dim_for_one_tensor);
+  return cartesian_product(forloop_dim_cand_for_each_tensor);
 }
 
 std::vector<std::vector<int>> DimStrategy::get_customized_input_cand_idx(
@@ -555,6 +567,18 @@ std::vector<std::vector<int>> DimStrategy::get_customized_input_cand_idx(
   } else {
     return {{num_inputs - 2, num_inputs - 1}};
   }
+}
+
+std::vector<size_t> DimStrategy::get_num_parallel_dims_cand(std::vector<SymbolicDTensor> const &tensors) {
+  size_t max_num_data_dims = 0;
+  for (SymbolicDTensor const &tensor : tensors) {
+    max_num_data_dims = std::max(max_num_data_dims, tensor.dims.size());
+  }
+  std::vector<size_t> results;
+  for (size_t i = 1; i <= max_num_data_dims; ++i) {
+    results.push_back(i);
+  }
+  return results;
 }
 
 } // namespace search

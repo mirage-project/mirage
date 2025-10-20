@@ -1,6 +1,6 @@
 #pragma once
 
-#include "mirage/search/symbolic_graph/dim_var_assignments.h"
+#include "mirage/search/symbolic_graph/dim_var_assignment.h"
 #include "mirage/search/symbolic_graph/tensor_dim_constraints.h"
 #include "mirage/utils/hash_utils.h"
 #include "mirage/utils/json_utils.h"
@@ -19,7 +19,8 @@ struct KVPair {
 };
 
 void get_egraph(char const *expr);
-bool *egg_equiv(char const **inputs, int len);
+bool *is_subexpr(char const **inputs, int len);
+bool is_equiv(char const *expr1, char const *expr2);
 }
 
 namespace mirage {
@@ -40,6 +41,8 @@ void initialize_final_expr(std::shared_ptr<AbstractExpr const> expr);
 bool subexpr_to_final_expr(std::shared_ptr<AbstractExpr const> expr);
 std::vector<bool> subexpr_to_final_expr(
     std::vector<std::shared_ptr<AbstractExpr const>> const &exprs);
+
+bool is_equivalent(std::shared_ptr<AbstractExpr const> expr1, std::shared_ptr<AbstractExpr const> expr2);
 
 class Var : public AbstractExpr {
 public:

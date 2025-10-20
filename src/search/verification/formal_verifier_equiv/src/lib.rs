@@ -504,7 +504,7 @@ pub fn rules(mut nums: Vec<u32>) -> Vec<Rewrite> {
 }
 
 #[no_mangle]
-pub extern "C" fn check_equiv(expr1: *const c_char, expr2: *const c_char) -> bool {
+pub extern "C" fn check_equiv(expr1: *const c_char, expr2: *const c_char, is_symbolic: bool) -> bool {
     let expr1_str: &str = unsafe {
             CStr::from_ptr(expr1)
         }.to_str().unwrap_or("");
@@ -515,9 +515,13 @@ pub extern "C" fn check_equiv(expr1: *const c_char, expr2: *const c_char) -> boo
 
     let re = Regex::new(r" (\d+)\)").unwrap();
 
-    let mut nums: Vec<u32> = re.captures_iter(expr2_str)
-        .filter_map(|cap| cap.get(1).unwrap().as_str().parse::<u32>().ok())
-        .collect();
+    let mut nums: Vec<u32> = if is_symbolic {
+        vec![]
+    } else {
+        re.captures_iter(expr2_str)
+            .filter_map(|cap| cap.get(1).unwrap().as_str().parse::<u32>().ok())
+            .collect()
+    };
 
     let runner = Runner::default()
     .with_iter_limit(100_000)
