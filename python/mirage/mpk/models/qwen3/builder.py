@@ -6,16 +6,17 @@ import torch.distributed as dist
 import argparse
 import os
 
-import mirage as mi
 from ..utils import grid_for_rmsnorm_linear_layer, max_factor_leq_n
-from ..graph_builder import GraphBuilder
+from ..graph_builder import GraphBuilder, MirageModelConfig
+from ...persistent_kernel import PersistentKernel
 from ...model_registry import register_model_builder
+from ....core import bfloat16, int64
 
 
 @register_model_builder("Qwen3", "Qwen/Qwen3-8B")
 class Qwen3Builder(GraphBuilder):
     model_name: str = "Qwen/Qwen3-8B"
-    def __init__(self, mpk: mi.PersistentKernel, weights: dict | None = None):
+    def __init__(self, mpk: PersistentKernel, weights: dict | None = None):
         super().__init__(mpk, weights)
         self.max_num_pages = mpk.max_num_pages
         self.page_size = mpk.page_size
@@ -24,7 +25,26 @@ class Qwen3Builder(GraphBuilder):
         self.output_tokens = mpk.meta_tensors["output_tokens"]
         
 
-    def build_from_vllm_graph(self, graph_path):
+    def build_from_vllm_graph(self, 
+                              model_config: MirageModelConfig):
+        self.position_embeddings = model_config.position_embeddings
+        
+        self.k_cache = model_config.k_cache # (num_layers, max_num_pages, page_size, num_kv_heads // world_size, head_dim)
+        self.v_cache = model_config.v_cache # (num_layers, max_num_pages, page_size, num_kv_heads // world_size, head_dim)
+        
+        self.hidden_size = model_config.hidden_size
+        self.intermediate_size = model_config.intermediate_size
+        
+        self.vocab_size = model_config.vocab_size
+        self.num_q_heads = model_config.num_q_heads
+        self.num_kv_heads = model_config.num_kv_heads
+        self.num_local_q_heads = self.num_q_heads // self.world_size
+        self.num_local_kv_heads = self.num_kv_heads // self.world_size
+        self.head_dim = model_config.head_dim
+        self.fused_outdim_1 = (self.num_q_heads + 2 * self.num_kv_heads) * self.head_dim
+        self.fused_outdim_2 = 2 * self.intermediate_size
+        
+        self.num_layers = model_config.num_layers
         raise NotImplementedError("build_from_vllm_graph is not implemented")
 
     def build_from_model(self, model_path: str | None = None):
@@ -42,8 +62,8 @@ class Qwen3Builder(GraphBuilder):
         self.positions = torch.arange(32768).unsqueeze(0).to(self.model.device)
         self.position_embeddings = self.model.model.rotary_emb(self.positions)
         
-        self.k_cache = self.model.model.kv_cache[0]
-        self.v_cache = self.model.model.kv_cache[1]
+        self.k_cache = self.model.model.kv_cache[0] # (num_layers, max_num_pages, page_size, num_kv_heads // world_size, head_dim)
+        self.v_cache = self.model.model.kv_cache[1] # (num_layers, max_num_pages, page_size, num_kv_heads // world_size, head_dim)
         
         self.hidden_size = self.model.config.hidden_size
         self.intermediate_size = self.model.config.intermediate_size
@@ -65,85 +85,85 @@ class Qwen3Builder(GraphBuilder):
         self.max_num_batched_tokens = self.mpk.max_num_batched_tokens
         self.y = self.mpk.new_tensor(
             dims=(self.max_num_batched_tokens, self.hidden_size),
-            dtype=mi.bfloat16,
+            dtype=bfloat16,
             name="embed_out",
             io_category="cuda_tensor",
         )
         self.rmsnorm_out = self.mpk.new_tensor(
             dims=(self.max_num_batched_tokens, self.hidden_size),
-            dtype=mi.bfloat16,
+            dtype=bfloat16,
             name="rmsnorm_out",
             io_category="cuda_tensor",
         )
         self.attn_in = self.mpk.new_tensor(
             dims=(self.max_num_batched_tokens, self.fused_outdim_1 // self.world_size), # [6, 6144]
-            dtype=mi.bfloat16,
+            dtype=bfloat16,
             name="attn_in",
             io_category="cuda_tensor",
         )
         self.attn_out = self.mpk.new_tensor(
             dims=(self.max_num_batched_tokens, self.num_local_q_heads * self.head_dim),
-            dtype=mi.bfloat16,
+            dtype=bfloat16,
             name="attn_out",
             io_category="cuda_tensor",
         )
         self.attn_proj_out = self.mpk.new_tensor(
             dims=(self.max_num_batched_tokens, self.hidden_size),
-            dtype=mi.bfloat16,
+            dtype=bfloat16,
             name="attn_proj_out",
             io_category="nvshmem_tensor" if self.world_size > 1 else "cuda_tensor",
         )
         self.allreduce_buf = self.mpk.new_tensor(
             dims=(self.world_size, self.max_num_batched_tokens, self.hidden_size),
-            dtype=mi.bfloat16,
+            dtype=bfloat16,
             name="all_reduce_buf",
             io_category="nvshmem_tensor" if self.world_size > 1 else "cuda_tensor",
         )
         self.attn_allreduce_out = self.mpk.new_tensor(
             dims=(self.max_num_batched_tokens, self.hidden_size),
-            dtype=mi.bfloat16,
+            dtype=bfloat16,
             name="attn_allreduce_out",
             io_category="nvshmem_tensor" if self.world_size > 1 else "cuda_tensor",
         )
         self.mlp_mid = self.mpk.new_tensor(
             dims=(self.max_num_batched_tokens, self.fused_outdim_2 // self.world_size),
-            dtype=mi.bfloat16,
+            dtype=bfloat16,
             name="mlp_mid",
             io_category="cuda_tensor",
         )
         self.silu_mul_out = self.mpk.new_tensor(
             dims=(self.max_num_batched_tokens, self.intermediate_size // self.world_size),
-            dtype=mi.bfloat16,
+            dtype=bfloat16,
             name="silu_mul_out",
             io_category="cuda_tensor",
         )
         self.mlp_out = self.mpk.new_tensor(
             dims=(self.max_num_batched_tokens, self.hidden_size),
-            dtype=mi.bfloat16,
+            dtype=bfloat16,
             name="mlp_out",
             io_category="nvshmem_tensor" if self.world_size > 1 else "cuda_tensor",
         )
         self.mlp_final = self.mpk.new_tensor(
             dims=(self.max_num_batched_tokens, self.hidden_size),
-            dtype=mi.bfloat16,
+            dtype=bfloat16,
             name="mlp_final",
             io_category="nvshmem_tensor" if self.world_size > 1 else "cuda_tensor",
         )
         self.argmax_in = self.mpk.new_tensor(
             dims=(self.max_num_batched_tokens, self.vocab_size),
-            dtype=mi.bfloat16,
+            dtype=bfloat16,
             name="argmax_in",
             io_category="cuda_tensor",
         )
         self.argmax_part_value = self.mpk.new_tensor(
             dims=(self.max_num_batched_tokens, self.mpk.num_workers),
-            dtype=mi.bfloat16,
+            dtype=bfloat16,
             name="argmax_part_value",
             io_category="cuda_tensor",
         )
         self.argmax_part_index = self.mpk.new_tensor(
             dims=(self.max_num_batched_tokens, self.mpk.num_workers),
-            dtype=mi.int64,
+            dtype=int64,
             name="argmax_part_index",
             io_category="cuda_tensor",
         )

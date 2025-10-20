@@ -23,6 +23,9 @@ from .core import *
 from .kernel import *
 from .mpk.persistent_kernel import PersistentKernel
 from .mpk.speculative import spec_decode_class
+# Re-export MPK interfaces for external integrations (e.g., vLLM Mirage backend)
+from .mpk.mpk import MPK, MPKMetadata
+from .mpk.models.graph_builder import MirageModelConfig
 from .threadblock import *
 
 
