@@ -180,7 +180,9 @@ struct alignas(16) TaskDesc {
     }
 #endif
   }
-  TaskDesc() {}
+  // remove "__host__ __device__" when build and instal mirage
+  // add them when running mirage to compile MPK with clang.
+  __host__ __device__ TaskDesc() {}
   TaskType task_type;
   unsigned variant_id;
   EventId trigger_event;

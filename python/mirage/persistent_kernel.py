@@ -147,14 +147,34 @@ def get_compile_command(
         f"-DMIRAGE_USE_CUTLASS_KERNEL={'1' if use_cutlass_kernel else '0'}",
     ]
 
+    # flags = [
+    #     "-shared",
+    #     "-std=c++17",
+    #     "-rdc=false" if not use_nvshmem else "-rdc=true",
+    #     "-use_fast_math",
+    #     "-lcuda",
+    #     "-Xcompiler=-fPIC",
+    #     "--expt-relaxed-constexpr",
+    #     "-o",
+    #     py_so_path,
+    # ]
+    # below for clang
     flags = [
         "-shared",
         "-std=c++17",
-        "-rdc=false" if not use_nvshmem else "-rdc=true",
+        # "-rdc=false" if not use_nvshmem else "-rdc=true",
         "-use_fast_math",
         "-lcuda",
-        "-Xcompiler=-fPIC",
-        "--expt-relaxed-constexpr",
+        "-L/usr/local/cuda/lib64",
+        "-lcudart",
+        "-isystem",
+        "/usr/include/c++/11",
+        "-isystem",
+        "/usr/include/x86_64-linux-gnu/c++/11",
+        "-L/usr/lib/x86_64-linux-gnu/libstdc++.so",
+        "-fPIC",
+        # "-Xcompiler=-fPIC",
+        # "--expt-relaxed-constexpr",
         "-o",
         py_so_path,
     ]
@@ -206,7 +226,9 @@ def get_compile_command(
         ]
     else:
         specific_cmd = [
-            "-arch=native",
+            # "-arch=native",
+            # below for clang
+            "--cuda-gpu-arch=sm_80",
         ]
     
     if profiling:
@@ -950,6 +972,8 @@ class PersistentKernel:
             shutil.copy(json_file_path, os.path.join(output_dir, "task_graph.json"))
 
         cc = shutil.which("nvcc")
+        # below for clang
+        cc = shutil.which("clang++-20")
         if cc is None:
             raise RuntimeError(
                 "nvcc not found. Please make sure you have installed CUDA."

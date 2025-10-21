@@ -12,6 +12,9 @@ import os
 def grid_for_rmsnorm_linear_layer(size: int):
     # 96 and 64 are enough to cover all Qwen3 model? Please update the method
     # if you meet any incompatibility.
+    # if we use 64 as output_size for all linear kernel, we will see perf gain with clang++ as compiler.
+    if size % 64 == 0:
+        return size // 64
     if size / 96 > 400:
         # TODO: An add-hoc workaround for linear kernel, both MPK ptx and
         # cutlass version will output unexpect result (not same out put for
