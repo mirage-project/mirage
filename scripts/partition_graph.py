@@ -10,6 +10,7 @@ from build_dataset import augment_partitions, serialize_subgraphs_to_json
 import os
 from generate_dag import solve_partitions, cost_function
 from graph_splitter import process_operator_graph
+from visualize_augs import visualize_partition, compare_augmentations
 
 def copy_subgraph(subgraph):
     new_subgraph = {}
@@ -94,7 +95,6 @@ def get_partitions_helper(op_node, curr_subgraph, num_ops, min_num_ops, max_num_
     valid_output_ops = []
     for output_op in op_node.output_ops:
         find_valid_output_ops(output_op, op_node.output_tensor_shapes[0][1], op_node.output_tensor_shapes[0][1], valid_output_ops, set())
-    
     for choose_k in range(1, len(valid_output_ops) + 1):
         curr_subgraph_copy = copy_subgraph(curr_subgraph)
         for comb_outputs in comb(valid_output_ops, choose_k):
@@ -161,14 +161,18 @@ def partition_graph_with_sampling(model,
     
     print(f"Found {len(valid_partitions)} valid partitions")
     
+    plt = visualize_partition(valid_partitions[0], "Example Valid Partition", "printed_partition0")
+    
     # Augment the valid partitions
     augmented_subgraphs = augment_partitions(
         valid_partitions=valid_partitions,
         UNSUPPORTED_OPS=UNSUPPORTED_OPS,
         IGNORE_OPS=IGNORE_OPS,
         augmentation_factor=augmentation_factor,
-        perturbation_strategies=['expand', 'contract', 'perturb']
+        perturbation_strategies=['expand', 'contract']
     )
+
+    compare_augmentations(valid_partitions[0], augmented_subgraphs[:3])
     
     print(f"Generated {len(augmented_subgraphs)} total subgraphs (including originals)")
     print(f"Augmentation ratio: {len(augmented_subgraphs) / len(valid_partitions):.1f}x")
@@ -181,41 +185,20 @@ def partition_graph_with_sampling(model,
 
 def function_map(graph, func, inputs, kwargs={}):
     match func.fn:
-        case "MatMul": return graph.matmul(*inputs)
-        case "ReduceSum": return graph.reduction(*inputs)
-        case "Exp": return graph.exp(*inputs)
-        case "Gelu": return graph.gelu(*inputs)
-        case "Relu": return graph.relu(*inputs)
+        case "MatMul": return graph.matmul(*inputs, **kwargs)
+        case "ReduceSum": return graph.reduction(*inputs, **kwargs)
+        case "Exp": return graph.exp(*inputs, **kwargs)
+        case "Gelu": return graph.gelu(*inputs, **kwargs)
+        case "Relu": return graph.relu(*inputs, **kwargs)
         case "Clip": return graph.clamp(*inputs, **kwargs)
-        case "Add": return graph.add(*inputs)
-        case "Mul": return graph.mul(*inputs)
-        case "Div": return graph.div(*inputs)
-        case "Reciprocal": return graph.div(*inputs)
-        case "Sqrt": return graph.sqrt(*inputs)
-        case "Pow": return graph.pow(*inputs)
-        case "Square": 
-            return graph.square(inputs[0])
-        case "Softmax": # In case of softmax, inputs must be of form (mat, axis)
-            exp = graph.exp(inputs[0])
-            summed = graph.reduction(exp, inputs[1])
-            return graph.div(exp, summed)
-        case "Sigmoid":
-            matrix = inputs[0]
-            ones = inputs[1]
-            neg_ones = inputs[2]
-            neg_mat = graph.mul(neg_ones, matrix)
-            neg_exp = graph.exp(neg_mat)
-            summed = graph.add(neg_exp, ones)
-            return graph.div(ones, summed)
-        case "Neg": 
-            return graph.mul(*inputs)
-        case "RMSNormalization": return graph.rms_norm(*inputs) # Onnx doesn't support different normalized shape
-        case "ReduceMean":
-            matrix = inputs[0]
-            dim = inputs[1]
-            num_els = inputs[2]
-            reduced = graph.reduction(matrix, dim)
-            return graph.div(reduced, num_els)
+        case "Add": return graph.add(*inputs, **kwargs)
+        case "Mul": return graph.mul(*inputs, **kwargs)
+        case "Div": return graph.div(*inputs, **kwargs)
+        case "Reciprocal": return graph.div(*inputs, **kwargs)
+        case "Sqrt": return graph.sqrt(*inputs, **kwargs)
+        case "Pow": return graph.pow(*inputs, **kwargs)
+        case "Square": return graph.square(inputs[0], **kwargs)
+        case "RMSNormalization": return graph.rms_norm(*inputs, **kwargs) # Onnx doesn't support different normalized shape
         case _: 
             raise NotImplementedError(f"{func.fn} not implemented")
 
@@ -234,41 +217,18 @@ def to_kernel_graph(subgraph):
             else:
                 inputs.append(intermediates[tensor_id][0])
                 intermediates[tensor_id][1] += 1
-        if (op.fn == "Sigmoid"):
-            assert len(op.input_tensor_shapes) == 1
-            assert len(inputs) == 1
-            shape = op.output_tensor_shapes[0][0]
-            dims.append((shape, "C", 1.0))
-            inputs.append(graph.new_input(dims=shape, dtype=mi.float16))
-            dims.append((shape, "C", -1.0))
-            inputs.append(graph.new_input(dims=shape, dtype=mi.float16))
-        elif (op.fn == "Neg"):
-            assert len(op.input_tensor_shapes) == 1
-            assert len(inputs) == 1
-            shape = op.output_tensor_shapes[0][0]
-            dims.append((shape, "C", -1.0))
-            inputs.append(graph.new_input(dims=shape, dtype=mi.float16))
-        elif (op.fn == "Reciprocal"):
-            assert len(op.input_tensor_shapes) == 1
-            assert len(inputs) == 1
-            shape = op.output_tensor_shapes[0][0]
-            dims.append((shape, "C", 1.0))
-            inputs.insert(0, graph.new_input(dims=shape, dtype=mi.float16))
-        elif (op.fn == "ReduceMean"):
-            assert len(op.input_tensor_shapes) == 1
-            assert len(inputs) == 1
-            shape = op.output_tensor_shapes[0][0]
-            num_els = op.output_tensor_shapes[0][0][-1]
-            dims.append((shape, "C", num_els))
-            dim = len(shape) - 1
-            inputs.append(dim)
-            inputs.append(graph.new_input(dims=shape, dtype=mi.float16))
-        elif (op.fn == "Softmax"):
-            assert len(op.input_tensor_shapes) == 1
-            assert len(inputs) == 1
-            last_dim = len(op.input_tensor_shapes[0][0]) - 1
-            inputs.append(last_dim)
-        inputs += op.additional_params
+        for arg, value in op.additional_params.items():
+            if arg == "arg0":
+                shape = shape = op.output_tensor_shapes[0][0]
+                dims = [(shape, "C", value)] + dims
+                inputs = [graph.new_input(dims=shape, dtype=mi.float16)] + inputs
+            elif arg == "arg1":
+                shape = shape = op.output_tensor_shapes[0][0]
+                dims.append((shape, "C", value))
+                inputs.append(graph.new_input(dims=shape, dtype=mi.float16))
+            else:
+                assert False, f"Unknown additional param {arg} for op {op.name} with fn {op.fn}"
+        
         kwargs = op.kwargs
         res = function_map(graph, op, inputs, kwargs)
         if type(res) == list:
@@ -285,10 +245,10 @@ def generate_all_kernels(model, dummy_inputs, root_dir, dataset_name, min_num_op
     kernel_input_dims = []
     all_kernels = []
     
-    done = [int(f.split("_")[1].split(".")[0]) for f in os.listdir(root_dir) if f.startswith("optimized_")]
+    done = [int(f.split("_")[1].split(".")[0]) for f in os.listdir(root_dir) if f.startswith("original_")]
     hashes = set(done)
 
-    performance = {}
+    performance = json.load(open(os.path.join(root_dir, f"{dataset_name}_performance.json"), "r")) if os.path.exists(os.path.join(root_dir, f"{dataset_name}_performance.json")) else {}
     for subgraph in subgraphs:
         kernel_graph, dims = to_kernel_graph(subgraph)
     
@@ -315,8 +275,8 @@ def generate_all_kernels(model, dummy_inputs, root_dir, dataset_name, min_num_op
         all_kernels.append(optimized_graph)
         kernel_input_dims.append(dims)
     
-    # save performance
-    json.dump(performance, open(os.path.join(root_dir, f"{dataset_name}_performance.json"), "w"))
+        # save performance
+        json.dump(performance, open(os.path.join(root_dir, f"{dataset_name}_performance.json"), "w"))
     
     return all_kernels, kernel_input_dims
 
@@ -328,12 +288,7 @@ def partition_graph_with_dp(model,
                           ):
     """
     Graph partitioning using graph_splitter + DP partitioning
-    
     """
-    
-    from graph_splitter import process_operator_graph
-    from generate_dag import solve_partitions, cost_function
-    import numpy as np
     
     print("Building computation graph...")
     unique_operators = {}
@@ -341,7 +296,7 @@ def partition_graph_with_dp(model,
     
     print("Splitting graph into supported/unsupported subgraphs...")
     if IGNORE_OPS is None:
-        IGNORE_OPS = {"Identity", "Cast", "Constant", "Dropout"}
+        IGNORE_OPS = {"Identity", "Cast", "CastLike", "Constant", "Dropout"}
     if UNSUPPORTED_OPS is None:
         UNSUPPORTED_OPS = set()
         
@@ -382,20 +337,22 @@ def partition_graph_with_dp(model,
                 
                 partition_subgraph = {}
                 for op in partition_ops:
-                    partition_subgraph[op] = True
+                    partition_subgraph[op] = True # True doesn't mean anything here - placeholder
                 
-                    kernel_graph, dims = to_kernel_graph(partition_subgraph)
-                    graph_hash = kernel_graph.get_owner_independent_hash()
-                    if graph_hash in hashes:
-                        continue
-                    hashes.add(graph_hash)
-                    kernel_graph.to_json(f"original_{graph_hash}.json")
-                    try:
-                        print(f"Superoptimizing {graph_hash}")
-                        optimized_graph, best_perf = kernel_graph.superoptimize()
-                    except Exception as e:
-                        print(f"Subgraph {graph_hash} superoptimize failed with error: {e}")
-                        continue
+                kernel_graph, dims = to_kernel_graph(partition_subgraph)
+                # graph_hash = kernel_graph.get_owner_independent_hash()
+                # if graph_hash in hashes:
+                #     continue
+                # hashes.add(graph_hash)
+                # kernel_graph.to_json(f"original_{graph_hash}.json")
+                # try:
+                #     print(f"Superoptimizing {graph_hash}")
+                #     optimized_graph, best_perf = kernel_graph.superoptimize()
+                # except Exception as e:
+                #     print(f"Subgraph {graph_hash} superoptimize failed with error: {e}")
+                #     continue
+
+    return subgraphs
                     
      
 

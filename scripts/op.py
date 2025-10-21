@@ -1,7 +1,7 @@
 import json
 
 class Operator:
-    def __init__(self, name=None, fn=None, input_ops=[], output_ops=[], input_tensor_shapes=[], output_tensor_shapes=[], additional_params=[], kwargs={}):
+    def __init__(self, name=None, fn=None, input_ops=[], output_ops=[], input_tensor_shapes=[], output_tensor_shapes=[], additional_params={}, kwargs={}):
         self.name = name
         self.fn = fn
         self.input_ops = input_ops
