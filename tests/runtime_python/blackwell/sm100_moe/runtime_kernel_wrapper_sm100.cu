@@ -45,6 +45,8 @@ __global__ __launch_bounds__(256) void topk_softmax_kernel(
     const T* __restrict__ gating_output,
     float* __restrict__ topk_weights,
     int* __restrict__ topk_indices,
+    int* __restrict__ mpk_routing_indices, // [EXPERTS, num_rows] expert-major
+    int* __restrict__ mpk_expert_mask,     // [EXPERTS]
     int num_rows,
     int k,
     bool renormalize) {
@@ -54,13 +56,25 @@ __global__ __launch_bounds__(256) void topk_softmax_kernel(
   static constexpr int VPT = C::VPT;
   static constexpr int WARPS_PER_TB = 8; // 256 threads
   kernel::topk_softmax_task_impl<T, VPT, EXPERTS, WARPS_PER_TB, BYTES_PER_LDG>(
-      gating_output, /*finished*/ nullptr, topk_weights, num_rows, topk_indices, k, 0, EXPERTS, renormalize);
+      gating_output,
+      /*finished*/ nullptr,
+      topk_weights,
+      num_rows,
+      topk_indices,
+      k,
+      mpk_routing_indices,
+      mpk_expert_mask,
+      /*start_expert=*/0,
+      /*end_expert=*/EXPERTS,
+      renormalize);
 }
 
 // New: expose a direct fused TopK softmax without GEMM
 void topk_softmax_sm100_kernel(torch::Tensor gating_output,
                                torch::Tensor topk_indices,
-                               torch::Tensor topk_weights) {
+                               torch::Tensor topk_weights,
+                               torch::Tensor mpk_routing_indices,
+                               torch::Tensor mpk_expert_mask) {
 
   const int BATCH_SIZE = static_cast<int>(gating_output.size(0));
   const int OUTPUT_SIZE = static_cast<int>(gating_output.size(1));
@@ -68,6 +82,8 @@ void topk_softmax_sm100_kernel(torch::Tensor gating_output,
 
   assert(topk_indices.size(0) == BATCH_SIZE && topk_indices.size(1) == NUM_TOPK);
   assert(topk_weights.size(0) == BATCH_SIZE && topk_weights.size(1) == NUM_TOPK);
+  assert(mpk_routing_indices.size(0) == OUTPUT_SIZE && mpk_routing_indices.size(1) == BATCH_SIZE);
+  assert(mpk_expert_mask.size(0) == OUTPUT_SIZE);
 
   // Ensure float input to fused kernel
   auto gating_output_f = gating_output.to(at::kFloat);
@@ -85,6 +101,8 @@ void topk_softmax_sm100_kernel(torch::Tensor gating_output,
         gating_output_f.data_ptr<float>(),
         topk_weights.data_ptr<float>(),
         topk_indices.data_ptr<int>(),
+        mpk_routing_indices.data_ptr<int>(),
+        mpk_expert_mask.data_ptr<int>(),
         BATCH_SIZE,
         NUM_TOPK,
         /*renormalize=*/true);

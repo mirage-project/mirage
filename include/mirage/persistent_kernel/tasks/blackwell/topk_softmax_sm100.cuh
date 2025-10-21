@@ -86,6 +86,8 @@ __device__ __noinline__ void topk_softmax_task_impl(
     const int num_rows,
     int* __restrict__ indices,     // [num_rows, k]
     const int k,
+    int* __restrict__ mpk_routing_indices, // [NUM_EXPERTS, num_rows] laid out as expert-major: expert * num_rows + row
+    int* __restrict__ mpk_expert_mask,     // [NUM_EXPERTS]
     const int start_expert,
     const int end_expert,
     const bool renormalize) {
@@ -203,6 +205,14 @@ __device__ __noinline__ void topk_softmax_task_impl(
       output[out_idx] = max_val;
       indices[out_idx] = should_process_row ? (expert - start_expert) : NUM_EXPERTS;
       row_sum_for_renormalize += max_val;
+      // Optionally populate MPK routing structures
+      if (should_process_row && mpk_routing_indices != nullptr && mpk_expert_mask != nullptr) {
+        const int local_expert = expert - start_expert;
+        // Write 1-based rank into routing indices; stride by num_rows per expert
+        mpk_routing_indices[local_expert * num_rows + thread_row] = k_idx + 1;
+        // Mark expert as active (idempotent). Atomic to avoid races across rows.
+        atomicExch(&mpk_expert_mask[local_expert], 1);
+      }
     }
 
     // Blank out the winning value for the next iteration
