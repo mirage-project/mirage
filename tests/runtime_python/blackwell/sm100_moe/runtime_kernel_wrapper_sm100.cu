@@ -40,7 +40,7 @@ using bfloat16 = cute::bfloat16_t;
 
 // topk_softmax_sm100
 
-template <typename T, int EXPERTS>
+template <typename T, int EXPERTS, int BYTES_PER_LDG>
 __global__ __launch_bounds__(256) void topk_softmax_kernel(
     const T* __restrict__ gating_output,
     float* __restrict__ topk_weights,
@@ -50,8 +50,6 @@ __global__ __launch_bounds__(256) void topk_softmax_kernel(
     int num_rows,
     int k,
     bool renormalize) {
-  static constexpr std::size_t MAX_BYTES_PER_LDG = 16;
-  static constexpr int BYTES_PER_LDG = (sizeof(T) * EXPERTS) < MAX_BYTES_PER_LDG ? (sizeof(T) * EXPERTS) : MAX_BYTES_PER_LDG;
   using C = kernel::detail::TopkConstants<T, EXPERTS, BYTES_PER_LDG>;
   static constexpr int VPT = C::VPT;
   static constexpr int WARPS_PER_TB = 8; // 256 threads
@@ -85,20 +83,14 @@ void topk_softmax_sm100_kernel(torch::Tensor gating_output,
   assert(mpk_routing_indices.size(0) == OUTPUT_SIZE && mpk_routing_indices.size(1) == BATCH_SIZE);
   assert(mpk_expert_mask.size(0) == OUTPUT_SIZE);
 
-  // Ensure float input to fused kernel
-  auto gating_output_f = gating_output.to(at::kFloat);
   // launch grid using 256-thread blocks
   auto launch = [&](auto experts_ct) {
     constexpr int EXP = decltype(experts_ct)::value;
-    using T = float;
-    using C = kernel::detail::TopkConstants<T, EXP, ((sizeof(T)*EXP)<16?(sizeof(T)*EXP):16)>;
-    constexpr int ROWS_PER_WARP = C::ROWS_PER_WARP;
-    constexpr int WARPS_PER_TB = 8;
-    int num_warps = (BATCH_SIZE + ROWS_PER_WARP - 1) / ROWS_PER_WARP;
-    int num_blocks = (num_warps + WARPS_PER_TB - 1) / WARPS_PER_TB;
-    dim3 block_dim(32, WARPS_PER_TB);
-    topk_softmax_kernel<T, EXP><<<num_blocks, block_dim, 0>>>(
-        gating_output_f.data_ptr<float>(),
+    using T = bfloat16;
+    dim3 grid_dim(1, 1, 1);
+    dim3 block_dim(256, 1, 1);
+    topk_softmax_kernel<T, EXP, ((sizeof(T)*EXP)<16?(sizeof(T)*EXP):16)><<<grid_dim, block_dim, 0>>>(
+        static_cast<const T*>(gating_output.data_ptr()),
         topk_weights.data_ptr<float>(),
         topk_indices.data_ptr<int>(),
         mpk_routing_indices.data_ptr<int>(),
@@ -484,10 +476,55 @@ void mul_sum_sm100_kernel(torch::Tensor input,
   }
 }
 
+// silu_mul
+
+template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int NUM_TOPK>
+__global__ __launch_bounds__(256) void silu_mul_wrapper(
+    void const *input_ptr,
+    void *output_ptr) {
+  constexpr int INTER_SIZE = OUTPUT_SIZE * 2;
+  kernel::silu_mul_task_impl<T, BATCH_SIZE, OUTPUT_SIZE, INTER_SIZE, OUTPUT_SIZE>(input_ptr, output_ptr, BATCH_SIZE*NUM_TOPK);
+}
+
+void silu_mul_kernel(torch::Tensor input,
+                     torch::Tensor output) {
+
+  using T = bfloat16;
+
+  void *input_ptr = input.data_ptr();
+  void *output_ptr = output.data_ptr();
+
+  constexpr int BATCH_SIZE = 1;
+  constexpr int OUTPUT_SIZE = 768;
+  constexpr int NUM_TOPK = 1;
+
+  assert(input.size(0) == BATCH_SIZE && input.size(1) == NUM_TOPK && input.size(2) == OUTPUT_SIZE*2);
+  assert(output.size(0) == BATCH_SIZE && output.size(1) == NUM_TOPK && output.size(2) == OUTPUT_SIZE);
+
+  dim3 grid_dim(1, 1, 1);
+  dim3 block_dim(256, 1, 1);
+  dim3 cluster_dim(1, 1, 1);
+  int smemBytes = 224 * 1024;
+
+  auto* kernel_ptr = &silu_mul_wrapper<T, BATCH_SIZE, OUTPUT_SIZE, NUM_TOPK>;
+  CUTE_CHECK_ERROR(cudaFuncSetAttribute(kernel_ptr,
+                    cudaFuncAttributeMaxDynamicSharedMemorySize,
+                    smemBytes));
+  cutlass::ClusterLaunchParams params = {grid_dim, block_dim, cluster_dim, smemBytes};
+  cutlass::Status status = cutlass::launch_kernel_on_cluster(params, (void const*) kernel_ptr,
+                                                            input_ptr, output_ptr);
+  CUTE_CHECK_LAST();
+
+  if (status != cutlass::Status::kSuccess) {
+    std::cerr << "Error: Failed at kernel Launch" << std::endl;
+  }
+}
+
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("topk_softmax_sm100", &topk_softmax_sm100_kernel, "TopK Softmax fused SM100");
   m.def("moe_w13_linear_sm100", &moe_w13_linear_sm100_kernel, "MoE W13 Linear kernel SM100");
   m.def("moe_w2_linear_sm100", &moe_w2_linear_sm100_kernel, "MoE W2 Linear kernel SM100");
   m.def("mul_sum_sm100", &mul_sum_sm100_kernel, "Mul Sum kernel SM100");
+  m.def("silu_mul", &silu_mul_kernel, "SiLU Mul kernel SM100");
 }
