@@ -134,7 +134,7 @@
    constexpr int M = 3;
    constexpr int S = 3;
  
-   constexpr int MMA_M = 128;
+   constexpr int MMA_M = 64;
    constexpr int MMA_N = 16;
  
    constexpr int TMA_CP_ASYNC_SIZE =
@@ -168,8 +168,9 @@
    tma_desc_weight = desc_w_ptr;
  
    // Residual
-   cute::Layout layout_bias = cute::make_layout(cute::make_shape(BATCH_SIZE, OUTPUT_SIZE, NUM_EXPERTS), cute::make_stride(OUTPUT_SIZE, cute::Int<1>{}, BATCH_SIZE * OUTPUT_SIZE));
-   cute::Tensor mBias = cute::make_tensor(cute::make_gmem_ptr(static_cast<T*>(residual_ptr)), layout_bias);
+  //  cute::Layout layout_bias = cute::make_layout(cute::make_shape(BATCH_SIZE, OUTPUT_SIZE, NUM_EXPERTS), cute::make_stride(OUTPUT_SIZE, cute::Int<1>{}, BATCH_SIZE * OUTPUT_SIZE));
+    cute::Layout layout_bias = cute::make_layout(cute::make_shape(OUTPUT_SIZE, BATCH_SIZE, NUM_EXPERTS), cute::make_stride(cute::Int<1>{}, OUTPUT_SIZE, BATCH_SIZE * OUTPUT_SIZE)); 
+    cute::Tensor mBias = cute::make_tensor(cute::make_gmem_ptr(static_cast<T*>(residual_ptr)), layout_bias);
  
    // Topk_indices
    cute::Layout layout_routing_indices = cute::make_layout(cute::make_shape(NUM_EXPERTS, BATCH_SIZE), cute::make_stride(BATCH_SIZE, cute::Int<1>{}));
@@ -180,7 +181,8 @@
    cute::Tensor mMask = cute::make_tensor(cute::make_gmem_ptr(static_cast<int32_t*>(mpk_expert_mask_ptr)), layout_expert_mask);
  
    // Output
-   cute::Layout layout_output = cute::make_layout(cute::make_shape(BATCH_SIZE, NUM_TOPK, OUTPUT_SIZE), cute::make_stride(NUM_TOPK * OUTPUT_SIZE, OUTPUT_SIZE, cute::Int<1>{}));
+  //  cute::Layout layout_output = cute::make_layout(cute::make_shape(BATCH_SIZE, NUM_TOPK, OUTPUT_SIZE), cute::make_stride(NUM_TOPK * OUTPUT_SIZE, OUTPUT_SIZE, cute::Int<1>{}));
+   cute::Layout layout_output = cute::make_layout(cute::make_shape(OUTPUT_SIZE, NUM_TOPK, BATCH_SIZE), cute::make_stride(cute::Int<1>{}, OUTPUT_SIZE, NUM_TOPK * OUTPUT_SIZE));
    cute::Tensor mOutput = cute::make_tensor(cute::make_gmem_ptr(static_cast<T*>(output_ptr)), layout_output);
  
    dim3 grid_dim(1, 1, 1);
