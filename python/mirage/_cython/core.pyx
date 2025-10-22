@@ -293,6 +293,10 @@ def get_tb_operator_type_string(int op_type):
 def convert_dtype_to_ctype(type : dtype):
     if type.is_int8():
         return DT_INT8
+    elif type.is_uint8():
+        return DT_UINT8
+    elif type.is_int16():
+        return DT_INT16
     elif type.is_uint16():
         return DT_UINT16
     elif type.is_fp16():
@@ -301,16 +305,26 @@ def convert_dtype_to_ctype(type : dtype):
         return DT_BFLOAT16
     elif type.is_fp32():
         return DT_FLOAT32
+    elif type.is_uint32():
+        return DT_UINT32
+    elif type.is_int32():
+        return DT_INT32
     elif type.is_int64():
         return DT_INT64
+    elif type.is_uint64():
+        return DT_UINT64
     elif type.is_fp64():
         return DT_DOUBLE
     else:
-        raise RuntimeError(f"Unsupported dtype: {dtype}")
+        raise RuntimeError(f"Unsupported dtype: {type}")
 
 def convert_dtype_to_torch_type(type : dtype):
     if type.is_int8():
         return torch.int8
+    elif type.is_uint8():
+        return torch.uint8
+    elif type.is_int16():
+        return torch.int16
     elif type.is_uint16():
         return torch.uint16
     elif type.is_fp16():
@@ -319,6 +333,8 @@ def convert_dtype_to_torch_type(type : dtype):
         return torch.bfloat16
     elif type.is_fp32():
         return torch.float32
+    elif type.is_int32():
+        return torch.int32
     elif type.is_int64():
         return torch.int64
     elif type.is_fp64():
@@ -329,6 +345,10 @@ def convert_dtype_to_torch_type(type : dtype):
 def convert_ctype_to_dtype(type):
     if type == DT_INT8:
         return int8
+    elif type == DT_UINT8:
+        return uint8
+    elif type == DT_INT16:
+        return int16
     elif type == DT_UINT16:
         return uint16
     elif type == DT_FLOAT16:
@@ -337,6 +357,14 @@ def convert_ctype_to_dtype(type):
         return bfloat16
     elif type == DT_FLOAT32:
         return float32
+    elif type == DT_INT32:
+        return int32
+    elif type == DT_UINT32:
+        return uint32
+    elif type == DT_INT64:
+        return int64
+    elif type == DT_UINT64:
+        return uint64
     elif type == DT_DOUBLE:
         return float64
     else:
@@ -345,6 +373,10 @@ def convert_ctype_to_dtype(type):
 def convert_torch_type_to_dtype(type):
     if type is torch.int8:
         return int8
+    elif type is torch.uint8:
+        return uint8
+    elif type is torch.int16:
+        return int16
     elif type is torch.uint16:
         return uint16
     elif type is torch.float16:
@@ -353,6 +385,8 @@ def convert_torch_type_to_dtype(type):
         return bfloat16
     elif type is torch.float32:
         return float32
+    elif type is torch.int32:
+        return int32
     elif type is torch.int64:
         return int64
     elif type is torch.float64:
