@@ -104,6 +104,7 @@ __global__ void init_kernel(RuntimeConfig config,
     config.sched_queues[0][0] = end_of_task_graph_event_pos;
     config.sched_queue_last_ready_event_id[0] = 1;
     // initialize metadata
+#ifdef MODE_OFFLINE
     for (int i = 0; i < config.total_num_requests; i++) {
       config.step[i] = 0;
     }
@@ -121,6 +122,7 @@ __global__ void init_kernel(RuntimeConfig config,
     for (int i = 0; i < MPK_MAX_NUM_PAGES; i++) {
       config.page_queue[i] = i;
     }
+#endif
   }
 }
 
