@@ -509,8 +509,9 @@ __device__ __noinline__ void
                         }
 
                         // CP_ASYNC for loading B
-                        int32_t topk_idx = tRoutingIndex(n_tile * MMA_N + lane_idx / cp_async_group_size);
-                        if(topk_idx > 0){
+                        int32_t token_idx = n_tile * MMA_N + lane_idx / cp_async_group_size;
+                        int32_t topk_idx = tRoutingIndex(token_idx);
+                        if(token_idx < BATCH_SIZE && topk_idx > 0){
                             if constexpr (W13_LINEAR){
                                 cute::copy(copyB, tBgB(_,_,_,_,k_tile), tBsB(_,_,_,_,smem_wr_buffer));
                             }

@@ -32,11 +32,6 @@
 #include "../common/dmem_layout.cuh"
 #include "../common/worker_config.h"
 #include "utils.cuh"
-// #include "../element_binary.cuh"
-// #include "../element_unary.cuh"
-// #include "../reduction.cuh"
-// #include "../smem_layout.cuh"
-// #include "../utils.cuh"
 #include "../hopper/barrier.cuh"
 #include "../hopper/smem_layout_tma.cuh"
 #include "../hopper/tma.cuh"
@@ -56,28 +51,13 @@
   3) This implementation assumes 8 warps are being used.
 */
 
-
 namespace kernel {
 
 static constexpr int WARP_SIZE = 32;
 
-// ========================== Util functions to convert types ==========================
-template <typename T>
-__device__ inline float _convert_to_float(T x) {
-  if constexpr (std::is_same_v<T, __half>) {
-    return __half2float(x);
-  } else if constexpr (std::is_same_v<T, __nv_bfloat16>) {
-    return __bfloat162float(x);
-  } else if constexpr (std::is_same_v<T, float>) {
-    return x;
-  } else {
-    return static_cast<float>(x);
-  }
-}
-
 // ====================== Fused TopK softmax kernel ===============================
 // This kernel fuses the softmax, max and argmax into a single kernel.
-// Block size is strictly 256 (8 warps): dim3 block(WARP_SIZE, WARPS_PER_CTA)
+// Block size is strictly 256 (8 warps): dim3 block(WARP_SIZE*WARPS_PER_CTA, 1, 1)
 template <typename T, int VPT, int NUM_EXPERTS, int WARPS_PER_CTA, int BYTES_PER_LDG>
 __device__ __noinline__ void topk_softmax_task_impl(
     const T* __restrict__ input,   // [num_rows, NUM_EXPERTS]
@@ -113,11 +93,12 @@ __device__ __noinline__ void topk_softmax_task_impl(
   static constexpr int ROWS_PER_WARP = ELTS_PER_WARP / ELTS_PER_ROW; // rows each warp processes
   static_assert(ELTS_PER_WARP % ELTS_PER_ROW == 0, "The elts per row must cleanly divide the total elt per warp");
   static constexpr int ROWS_PER_CTA = WARPS_PER_CTA * ROWS_PER_WARP;
+  
+  const int warp_idx = threadIdx.x / WARP_SIZE;
+  const int lane_idx = threadIdx.x % WARP_SIZE;
+  const int warp_base_row = warp_idx * ROWS_PER_WARP;
 
-  const int cta_base_row = blockIdx.x * ROWS_PER_CTA;
-  const int warp_base_row = cta_base_row + threadIdx.y * ROWS_PER_WARP;
-
-  const int thread_row_in_warp = threadIdx.x / THREADS_PER_ROW;
+  const int thread_row_in_warp = lane_idx / THREADS_PER_ROW;
   const int thread_row = warp_base_row + thread_row_in_warp;
   if (thread_row < num_rows) {
 
@@ -125,7 +106,7 @@ __device__ __noinline__ void topk_softmax_task_impl(
 
   // Compute per-thread read pointers
   const T* thread_row_ptr = input + thread_row * ELTS_PER_ROW;
-  const int thread_group_idx = threadIdx.x % THREADS_PER_ROW;
+  const int thread_group_idx = lane_idx % THREADS_PER_ROW;
   const int first_elt_read_by_thread = thread_group_idx * (BYTES_PER_LDG / sizeof(T));
   const T* thread_read_ptr = thread_row_ptr + first_elt_read_by_thread;
 
@@ -139,9 +120,11 @@ __device__ __noinline__ void topk_softmax_task_impl(
     row_chunk_vec_ptr[ii] = vec_thread_read_ptr[ii * THREADS_PER_ROW];
   }
 
+  cutlass::NumericConverter<float, T> converter;
+
   float row_chunk[VPT];
   for (int ii = 0; ii < VPT; ++ii) {
-    row_chunk[ii] = _convert_to_float<T>(row_chunk_temp[ii]);
+    row_chunk[ii] = converter(row_chunk_temp[ii]);
   }
 
   // Max reduction within subgroup
@@ -210,8 +193,9 @@ __device__ __noinline__ void topk_softmax_task_impl(
         const int local_expert = expert - start_expert;
         // Write 1-based rank into routing indices; stride by num_rows per expert
         mpk_routing_indices[local_expert * num_rows + thread_row] = k_idx + 1;
-        // Mark expert as active (idempotent). Atomic to avoid races across rows.
-        atomicExch(&mpk_expert_mask[local_expert], 1);
+        // // Mark expert as active (idempotent). Atomic to avoid races across rows.
+        // atomicExch(&mpk_expert_mask[local_expert], 1); // race condition might be okay here
+        mpk_expert_mask[local_expert] = 1;
       }
     }
 
