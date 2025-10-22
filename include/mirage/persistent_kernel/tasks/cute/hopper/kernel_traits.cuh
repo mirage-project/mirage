@@ -99,6 +99,7 @@ struct MMAKernelTraits {
   static constexpr int REDUCTION_SIZE = REDUCTION_SIZE_;
 
   static constexpr int NUM_STAGES = NUM_STAGES_;
+  static constexpr int RESIDUAL_LOAD_STAGES = 1;
   static constexpr int K_PIPE_MMAS = 1;
 
   static constexpr int FragmentSize = 1;
@@ -188,6 +189,15 @@ struct MMAKernelTraits {
                           Step<_2, _1, _3>,
                           Step<_1, _2, _3>>{}));
 
+  using SmemLayoutC = decltype(tile_to_shape(
+      SmemLayoutAtomC{},
+      make_shape(shape<0>(TileShape_MNK{}),
+                 shape<1>(TileShape_MNK{}),
+                 Int<RESIDUAL_LOAD_STAGES>{}),
+      cute::conditional_t<::cutlass::gemm::detail::is_major<0, StrideC>(),
+                          Step<_2, _1, _3>,
+                          Step<_1, _2, _3>>{}));
+
   using MainloopPipeline = cutlass::PipelineTmaAsync<NUM_STAGES>;
   using PipelineState = typename cutlass::PipelineState<NUM_STAGES>;
 
@@ -198,6 +208,9 @@ struct MMAKernelTraits {
                                          SmemLayoutAtomC>;
 
   static constexpr bool SwapAB = IS_SWAPAB::value;
+
+  // epilogue related
+  static constexpr int TMA_STORE_STAGES = NUM_STAGES;
 };
 
 } // namespace kernel

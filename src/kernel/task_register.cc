@@ -1235,7 +1235,7 @@ int TaskRegister::register_linear_swapAB_hopper_task(
          "tma_out(static_cast<CUtensorMap*>(task_desc->output_tma_desc_ptrs[0]["
          "0]));");
 
-  code.e(
+    code.e(
       "kernel::linear_swapAB_kernel_hopper<bfloat16, $, $, $, $, TMA_A, TMA_B, "
       "TMA_OUT, $, $>(",
       batch_size,
@@ -1244,9 +1244,13 @@ int TaskRegister::register_linear_swapAB_hopper_task(
       Kstages,
       with_residual ? "TMA_RESIDUAL" : "void",
       output_stride);
+  code.e("    task_desc->output_ptrs[0],");
   code.e("    tma_a,");
   code.e("    tma_b,");
   code.e("    tma_out, ");
+
+  
+  
   if (with_residual) {
     code.e("    &tma_residual");
   } else {
@@ -1317,7 +1321,7 @@ int TaskRegister::register_linear_cutlass_hopper_task(
          batch_size,
          KSTAGES);
   code.e("using Mainloop = kernel::CollectiveMainloop<KernelTraits>;");
-  code.e("using Epilogue = kernel::CollectiveEpilogue<KernelTraits>;");
+  code.e("using Epilogue = kernel::CollectiveTMAEpilogue<KernelTraits>;");
   // code.e("using StrideA = typename KernelTraits::StrideA;");
   // code.e("using StrideB = typename KernelTraits::StrideB;");
   // code.e("using StrideC = typename KernelTraits::StrideC;");
@@ -1363,7 +1367,7 @@ int TaskRegister::register_linear_cutlass_hopper_task(
   constexpr int TMA_CP_ASYNC_SIZE = 64;
   constexpr int Kstages = 5;
   assert(batch_size <= 16);
-  int const SMEM_M_SIZE = batch_size;
+  int const SMEM_M_SIZE = 16;
   int const output_tma_cp_size = output_size < 64 ? output_size : 64;
   int const output_atom_size = 64;
 
@@ -1403,6 +1407,41 @@ int TaskRegister::register_linear_cutlass_hopper_task(
          output_atom_size * TMA_CP_ASYNC_SIZE /*SMEM_STRIDE_*/
   );
 
+  if (with_residual) {
+    code.e(
+        "using TMA_RESIDUAL = kernel::tma::tma_2d<cutlass::bfloat16_t, $, $, $, $, $, $, "
+        "$, $, $, $, $, $, true>;",
+        0,
+        0,
+        0,
+        batch_size,                      /*GMEM_ROW_*/
+        output_size,                     /*GMEM_COL_*/
+        batch_size,                      /*SMEM_ROW_*/
+        output_tma_cp_size,              /*SMEM_COL_*/
+        output_stride,                   /*GMEM_STRIDE_ROW_*/
+        1,                               /*GMEM_STRIDE_COL_*/
+        1,                               /*SMEM_REPEAT_ROW_*/
+        1,                               /*SMEM_REPEAT_COL_*/
+        SMEM_M_SIZE * output_tma_cp_size /*SMEM_STRIDE_*/
+    );
+  }
+
+  code.e("using TMA_OUT = kernel::tma::tma_2d<cutlass::bfloat16_t, $, $, $, $, $, $, $, "
+         "$, $, $, $, $, true>;",
+         B,
+         M,
+         S,
+         batch_size,                      /*GMEM_ROW_*/
+         output_size,                     /*GMEM_COL_*/
+         batch_size,                      /*SMEM_ROW_*/
+         output_tma_cp_size,              /*SMEM_COL_*/
+         output_stride,                   /*GMEM_STRIDE_ROW_*/
+         1,                               /*GMEM_STRIDE_COL_*/
+         1,                               /*SMEM_REPEAT_ROW_*/
+         1,                               /*SMEM_REPEAT_COL_*/
+         SMEM_M_SIZE * output_tma_cp_size /*SMEM_STRIDE_*/
+  );
+
   code.inc_indent();
   code.e("TMA_A "
          "tma_a(static_cast<CUtensorMap*>(task_desc->input_tma_desc_ptrs[1][0])"
@@ -1410,19 +1449,26 @@ int TaskRegister::register_linear_cutlass_hopper_task(
   code.e("TMA_B "
          "tma_b(static_cast<CUtensorMap*>(task_desc->input_tma_desc_ptrs[0][0])"
          ");");
+  code.e("TMA_RESIDUAL "
+         "tma_residual(static_cast<CUtensorMap*>(task_desc->input_tma_desc_ptrs[2][0])"
+         ");");
+  code.e("TMA_OUT "
+         "tma_out(static_cast<CUtensorMap*>(task_desc->output_tma_desc_ptrs[0][0])"
+         ");");
 
   code.e("kernel::linear_cutlass_ws_hopper<Mainloop, Epilogue, false, "
-         "cutlass::bfloat16_t, $, $, $, TMA_A, TMA_B, "
-         "$, $>(",
+         "cutlass::bfloat16_t, $, $, $, TMA_A, TMA_B, TMA_OUT, "
+         "$, $>( ",
          batch_size,
          output_size,
          reduction_size,
          output_stride,
          with_residual);
+  code.e("    task_desc->output_ptrs[0],");
   code.e("    tma_a,");
   code.e("    tma_b,");
-  code.e("    task_desc->output_ptrs[0],");
-  code.e("    task_desc->input_ptrs[2]");
+  code.e("    tma_out,");
+  code.e("    &tma_residual");
   code.e(");");
 
   if (with_residual) {

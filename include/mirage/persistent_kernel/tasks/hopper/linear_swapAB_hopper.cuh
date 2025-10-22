@@ -41,11 +41,12 @@ template <typename T,
           typename TMA_RESIDUAL = void,
           int OUTPUT_STRIDE = OUTPUT_SIZE>
 __device__ __forceinline__ void
-    linear_swapAB_kernel_hopper(const TMA_A &tma_a,
+    linear_swapAB_kernel_hopper(void *output_ptr,
+                                const TMA_A &tma_a,
                                 const TMA_B &tma_b,
                                 const TMA_OUT &tma_out,
                                 const TMA_RESIDUAL *tma_residual = nullptr) {
-
+  T *d_output = static_cast<T *>(output_ptr);
   constexpr int TILE_SIZE =
       REDUCTION_SIZE < TMA_A::SMEM_COL * TMA_A::SMEM_REPEAT_COL
           ? REDUCTION_SIZE
@@ -352,6 +353,9 @@ __device__ __forceinline__ void
       wg_sync<THREADS_PER_WARPGROUP * CONSUMER_WARPGROUPS>(1);
       // copy back to dmem
       if (warp_idx % 4 == 0 && lane_id() == 0) {
+        //  if(blockIdx.x == 0 && HAS_RESIDUAL){
+        //   printf("blockIdx.x %d, first val beforex %f\n", blockIdx.x, (float)mm_output_smem.at(0, 0));
+        // }
         tma_out.tma_store_async(mm_output_smem(0, 0),
                                 {output_atom_idx * OUTPUT_ATOM_SIZE, 0});
         store_commit_group();
@@ -361,6 +365,11 @@ __device__ __forceinline__ void
       }
     }
     store_async_wait<0>();
+
+    // if(threadIdx.x == 0 && blockIdx.x == 0 &&(warp_idx % 4 == 0 ) && HAS_RESIDUAL ){
+    //     printf("blockIdx.x %d, first valx %f\n", blockIdx.x, (float)d_output[0]);
+
+    //   }
   }
 }
 } // namespace kernel

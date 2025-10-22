@@ -22,22 +22,21 @@
 
 #include "cute/numeric/numeric_types.hpp"
 #include "cutlass/cuda_host_adapter.hpp"
-#include <cute/numeric/integral_constant.hpp>
 #include <cute/tensor.hpp>
+#include <cute/numeric/integral_constant.hpp> 
+
 
 namespace kernel {
 template <typename Ktraits>
-struct CollectiveEpilogue {
+struct CollectiveTMAEpilogue {
 
   using DataTypeC = typename Ktraits::DataType;
   using StrideC = typename Ktraits::StrideC;
   using StrideD = typename Ktraits::StrideD;
   using ThreadEpilogueOp = typename Ktraits::ThreadOp;
 
-  using LoadPipeline =
-      cutlass::PipelineTransactionAsync<Ktraits::RESIDUAL_LOAD_STAGES>;
-  using LoadPipelineState =
-      cutlass::PipelineState<Ktraits::RESIDUAL_LOAD_STAGES>;
+  using LoadPipeline = cutlass::PipelineTmaAsync<Ktraits::RESIDUAL_LOAD_STAGES>;
+  using LoadPipelineState = typename cutlass::PipelineState<Ktraits::RESIDUAL_LOAD_STAGES>;
   constexpr static bool RequiresTransactionBytes = true;
 
   using StorePipeline =
@@ -62,7 +61,7 @@ struct CollectiveEpilogue {
   using Params = Arguments;
   using TiledMma = typename Ktraits::TiledMma;
 
-  using SmemLayoutC = typename Ktraits::SmemLayoutC;
+  using SmemLayoutC = typename Ktraits::SmemLayoutC; 
 
   template <class ProblemShape>
   CUTLASS_HOST_DEVICE static constexpr Arguments
@@ -73,16 +72,17 @@ struct CollectiveEpilogue {
 
   struct SharedStorage {
     struct TensorStorage : cute::aligned_struct<128, cute::Int<0>> {
-      cute::array_aligned<typename TiledMma::ValTypeC,
-                          cute::cosize_v<SmemLayoutC>>
-          smem_c;
+      cute::array_aligned<typename TiledMma::ValTypeA,
+                          cute::cosize_v<SmemLayoutC>> smem_c;
+      cute::array_aligned<typename TiledMma::ValTypeA,
+                          cute::cosize_v<SmemLayoutC>> smem_d;
     } tensors;
   };
 
   using TensorStorage = typename SharedStorage::TensorStorage;
 
   CUTLASS_HOST_DEVICE
-  CollectiveEpilogue(Arguments const &params_)
+  CollectiveTMAEpilogue(Arguments const &params_)
       : params(params_), epilogue_op(params_.thread) {}
 
   template <class ProblemShapeMNKL,

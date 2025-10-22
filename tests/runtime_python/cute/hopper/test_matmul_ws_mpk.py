@@ -21,7 +21,7 @@ runtime_kernel_cute_hopper.linear_mpk(weight, x, residual, output)
 
 # torch_out = torch.matmul(weight, x)
 torch_out = torch.matmul(x, weight.T)
-torch_out = torch_out + residual
+torch_out = torch_out
 print(output.shape)
 print(torch_out.shape)
 print("output from kernel:")

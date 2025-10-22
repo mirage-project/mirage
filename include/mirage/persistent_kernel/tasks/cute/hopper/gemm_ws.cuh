@@ -132,10 +132,10 @@ CUTLASS_DEVICE void gemm_kernel_tma_warp_specialized(
   epi_load_pipeline_params.dst_blockid = cute::block_rank_in_cluster();
   epi_load_pipeline_params.producer_arv_count = cutlass::NumThreadsPerWarp;
   epi_load_pipeline_params.consumer_arv_count = cutlass::NumThreadsPerWarpGroup;
-  if constexpr (CollectiveEpilogue::RequiresTransactionBytes) {
-    epi_load_pipeline_params.transaction_bytes =
-        epilogue_params.tma_transaction_bytes;
-  }
+  // if constexpr (CollectiveEpilogue::RequiresTransactionBytes) {
+  //   epi_load_pipeline_params.transaction_bytes =
+  //       epilogue_params.tma_transaction_bytes;
+  // }
   EpiLoadPipeline epi_load_pipeline(shared_storage.pipelines.epi_load,
                                     epi_load_pipeline_params);
   // Epilogue Store pipeline

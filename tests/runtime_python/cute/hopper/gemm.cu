@@ -35,6 +35,7 @@
 #include "cutlass/util/tensor_view_io.h"
 
 #include "epilogue.cuh"
+#include "epilogue_tma.cuh"
 #include "gemm_ws.cuh"
 #include "gemm_ws_mpk.cuh"
 #include "kernel_traits.cuh"
@@ -108,12 +109,20 @@ void launch_linear_hopper_cute(void *weight_ptr,
       stride_B,                           // dB
   };
 
+  // typename Epilogue::Arguments epilogue_args{
+  //     static_cast<T const *>(residual_ptr), // ptr_C
+  //     stride_C,                             // dC
+  //     static_cast<T *>(output_ptr),         // ptr_D
+  //     stride_C,                             // dD
+  //     {1.0f, 1.0f}                          // alpha and beta
+  // };
+
   typename Epilogue::Arguments epilogue_args{
       static_cast<T const *>(residual_ptr), // ptr_C
       stride_C,                             // dC
       static_cast<T *>(output_ptr),         // ptr_D
       stride_C,                             // dD
-      {1.0f, 1.0f}                          // alpha and beta
+      // {1.0f, 1.0f}                          // alpha and beta
   };
 
   typename Mainloop::template Params<true> mainloop_params =
@@ -194,10 +203,8 @@ void launch_linear_hopper_cute(void *weight_ptr,
 
 #define DISPATCH_LINEAR_CUTE_REDUCTION_SIZE(OUTPUT_SIZE, BATCH_SIZE)           \
   switch (weight.size(1)) {                                                    \
-    DISPATCH_LINEAR_CUTE_REDUCTION_SIZE_CASE(OUTPUT_SIZE, BATCH_SIZE, 4096)    \
-    /*                                                                         \
+    DISPATCH_LINEAR_CUTE_REDUCTION_SIZE_CASE(OUTPUT_SIZE, BATCH_SIZE, 4096)    \                                                                        \
     DISPATCH_LINEAR_CUTE_REDUCTION_SIZE_CASE(OUTPUT_SIZE, BATCH_SIZE, 12288)   \
-    */                                                                         \
     default:                                                                   \
       printf("Unsupported reduction size in test: %zu\n", input.size(1));      \
       break;                                                                   \
@@ -236,12 +243,12 @@ void linear_kernel(torch::Tensor weight,
   void *residual_ptr = residual.data_ptr();
   void *output_ptr = output.data_ptr();
 
-  switch (weight.size(0)) {
-    DISPATCH_LINEAR_CUTE_OUTPUT_SIZE_CASE(64)
-    default:
-      printf("Unsupported output size in test: %zu\n", weight.size(0));
-      break;
-  }
+  // switch (weight.size(0)) {
+  //   DISPATCH_LINEAR_CUTE_OUTPUT_SIZE_CASE(64)
+  //   default:
+  //     printf("Unsupported output size in test: %zu\n", weight.size(0));
+  //     break;
+  // }
 
   cudaError_t err = cudaDeviceSynchronize();
   if (err != cudaSuccess) {
@@ -256,14 +263,49 @@ template <typename CollectiveMainloop,
           int OUTPUT_SIZE,
           int REDUCTION_SIZE,
           typename TMA_A,
-          typename TMA_B>
+          typename TMA_B,
+          typename TMA_RESIDUAL,
+          typename TMA_OUT>
 __global__ __launch_bounds__(256, 1) void linear_kernel_hopper_cute_mpk_wrapper(
     CUTE_GRID_CONSTANT
     typename CollectiveMainloop::template Params<false> const mainloop_params,
     CUTE_GRID_CONSTANT
     typename CollectiveEpilogue::Params const epilogue_params,
     const __grid_constant__ TMA_A tma_a,
-    const __grid_constant__ TMA_B tma_b) {
+    const __grid_constant__ TMA_B tma_b,
+    const __grid_constant__ TMA_RESIDUAL tma_residual,
+    const __grid_constant__ TMA_OUT tma_out) {
+  kernel::linear_cutlass_ws_hopper<CollectiveMainloop,
+                                   CollectiveEpilogue,
+                                   false,
+                                   T,
+                                   BATCH_SIZE,
+                                   OUTPUT_SIZE,
+                                   REDUCTION_SIZE,
+                                   TMA_A,
+                                   TMA_B,
+                                   TMA_OUT,
+                                   OUTPUT_SIZE,
+                                   true>(tma_a, tma_b, tma_out, &tma_residual);
+}
+
+template <typename CollectiveMainloop,
+          typename CollectiveEpilogue,
+          typename T,
+          int BATCH_SIZE,
+          int OUTPUT_SIZE,
+          int REDUCTION_SIZE,
+          typename TMA_A,
+          typename TMA_B>
+__global__
+    __launch_bounds__(256, 1) void linear_kernel_hopper_cute_mpk__no_residual_wrapper(
+        CUTE_GRID_CONSTANT
+        typename CollectiveMainloop::template Params<false> const
+            mainloop_params,
+        CUTE_GRID_CONSTANT
+        typename CollectiveEpilogue::Params const epilogue_params,
+        const __grid_constant__ TMA_A tma_a,
+        const __grid_constant__ TMA_B tma_b) {
   kernel::linear_cutlass_ws_hopper<CollectiveMainloop,
                                    CollectiveEpilogue,
                                    false,
@@ -275,7 +317,7 @@ __global__ __launch_bounds__(256, 1) void linear_kernel_hopper_cute_mpk_wrapper(
                                    TMA_B,
                                    OUTPUT_SIZE,
                                    true>(
-      mainloop_params, epilogue_params, tma_a, tma_b);
+      mainloop_params, epilogue_params, tma_a, tma_b, nullptr);
 }
 
 template <typename T, int OUTPUT_SIZE, int BATCH_SIZE, int REDUCTION_SIZE>
@@ -309,7 +351,7 @@ void launch_linear_hopper_cute_mpk(void *weight_ptr,
                               4>;          // NUM_STAGES
 
   using Mainloop = kernel::CollectiveMainloop<KernelTraits>;
-  using Epilogue = kernel::CollectiveEpilogue<KernelTraits>;
+  using Epilogue = kernel::CollectiveTMAEpilogue<KernelTraits>;
 
   using StrideA = typename KernelTraits::StrideA;
   using StrideB = typename KernelTraits::StrideB;
@@ -336,8 +378,8 @@ void launch_linear_hopper_cute_mpk(void *weight_ptr,
       static_cast<T const *>(residual_ptr), // ptr_C
       stride_C,                             // dC
       static_cast<T *>(output_ptr),         // ptr_D
-      stride_C,                             // dD
-      {1.0f, 1.0f}                          // alpha and beta
+      stride_C                              // dD
+      // {1.0f, 1.0f}                          // alpha and beta
   };
 
   // typename Mainloop::Params mainloop_params =
@@ -362,6 +404,9 @@ void launch_linear_hopper_cute_mpk(void *weight_ptr,
 
   constexpr int OUTPUT_ATOM_SIZE = 64; // this is padded
   constexpr int SMEM_M_SIZE = BATCH_SIZE;
+
+  constexpr int OUTPUT_TMA_CP_SIZE = OUTPUT_SIZE < 64 ? OUTPUT_SIZE : 64;
+  constexpr int OUTPUT_ATOM_REPEAT_COL = 1;
   using TMA_B =
       kernel::tma::tma_2d<T,
                           B,
@@ -393,8 +438,39 @@ void launch_linear_hopper_cute_mpk(void *weight_ptr,
                           OUTPUT_ATOM_SIZE * TMA_CP_ASYNC_SIZE, /*SMEM_STRIDE_*/
                           true>;
 
+  using TMA_RESIDUAL = kernel::tma::tma_2d<T,
+                                           3,
+                                           3,
+                                           3,
+                                           BATCH_SIZE,
+                                           OUTPUT_SIZE,
+                                           BATCH_SIZE,
+                                           OUTPUT_TMA_CP_SIZE,
+                                           OUTPUT_SIZE,
+                                           1,
+                                           1,
+                                           OUTPUT_ATOM_REPEAT_COL,
+                                           SMEM_M_SIZE * OUTPUT_TMA_CP_SIZE,
+                                           true>;
+
+  using TMA_OUT = kernel::tma::tma_2d<T,
+                                      3,
+                                      3,
+                                      3,
+                                      BATCH_SIZE,
+                                      OUTPUT_SIZE,
+                                      BATCH_SIZE,
+                                      OUTPUT_TMA_CP_SIZE,
+                                      OUTPUT_SIZE,
+                                      1,
+                                      1,
+                                      OUTPUT_ATOM_REPEAT_COL,
+                                      SMEM_M_SIZE * TMA_CP_ASYNC_SIZE,
+                                      true>;
   TMA_A tma_a(weight_ptr);
   TMA_B tma_b(input_ptr);
+  TMA_RESIDUAL tma_residual(residual_ptr);
+  TMA_OUT tma_out(output_ptr);
 
   dim3 grid(1);
   dim3 block(256);
@@ -408,7 +484,9 @@ void launch_linear_hopper_cute_mpk(void *weight_ptr,
                                             OUTPUT_SIZE,
                                             REDUCTION_SIZE,
                                             TMA_A,
-                                            TMA_B>,
+                                            TMA_B,
+                                            TMA_RESIDUAL,
+                                            TMA_OUT>,
       cudaFuncAttributeMaxDynamicSharedMemorySize,
       shared_mem_size);
   // linear_kernel_hopper_cute_wrapper<Mainloop, Epilogue>
@@ -418,8 +496,8 @@ void launch_linear_hopper_cute_mpk(void *weight_ptr,
   cudaEventCreate(&start);
   cudaEventCreate(&stop);
 
-  constexpr int WARMUP_RUNS = 16;
-  constexpr int BENCHMARK_RUNS = 1000;
+  constexpr int WARMUP_RUNS = 0;
+  constexpr int BENCHMARK_RUNS = 1;
 
   printf("=== Kernel Performance Profiling ===\n");
 
@@ -431,9 +509,15 @@ void launch_linear_hopper_cute_mpk(void *weight_ptr,
                                           OUTPUT_SIZE,
                                           REDUCTION_SIZE,
                                           TMA_A,
-                                          TMA_B>
-        <<<grid, block, shared_mem_size>>>(
-            mainloop_params, epilogue_params, tma_a, tma_b);
+                                          TMA_B,
+                                          TMA_RESIDUAL,
+                                          TMA_OUT>
+        <<<grid, block, shared_mem_size>>>(mainloop_params,
+                                           epilogue_params,
+                                           tma_a,
+                                           tma_b,
+                                           tma_residual,
+                                           tma_out);
   }
   cudaDeviceSynchronize(); // Wait for all warmup runs to complete
 
@@ -451,9 +535,15 @@ void launch_linear_hopper_cute_mpk(void *weight_ptr,
                                           OUTPUT_SIZE,
                                           REDUCTION_SIZE,
                                           TMA_A,
-                                          TMA_B>
-        <<<grid, block, shared_mem_size>>>(
-            mainloop_params, epilogue_params, tma_a, tma_b);
+                                          TMA_B,
+                                          TMA_RESIDUAL,
+                                          TMA_OUT>
+        <<<grid, block, shared_mem_size>>>(mainloop_params,
+                                           epilogue_params,
+                                           tma_a,
+                                           tma_b,
+                                           tma_residual,
+                                           tma_out);
     cudaEventRecord(stop);
     cudaEventSynchronize(stop);
 
@@ -494,10 +584,8 @@ void launch_linear_hopper_cute_mpk(void *weight_ptr,
   switch (weight.size(1)) {                                                    \
     DISPATCH_LINEAR_CUTE_MPK_REDUCTION_SIZE_CASE(                              \
         OUTPUT_SIZE, BATCH_SIZE, 4096)                                         \
-    /*                                                                         \
     DISPATCH_LINEAR_CUTE_MPK_REDUCTION_SIZE_CASE(OUTPUT_SIZE, BATCH_SIZE,      \
     12288)                                                                     \
-    */                                                                         \
     default:                                                                   \
       printf("Unsupported reduction size in test: %zu\n", input.size(1));      \
       break;                                                                   \
@@ -550,6 +638,6 @@ void linear_mpk_kernel(torch::Tensor weight,
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-  m.def("linear", &linear_kernel, "Linear kernel");
+  // m.def("linear", &linear_kernel, "Linear kernel");
   m.def("linear_mpk", &linear_mpk_kernel, "Linear mpk kernel");
 }
