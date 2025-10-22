@@ -4,6 +4,7 @@ from typing import Optional, List
 # from .models.modeling_qwen3 import Qwen3ForCausalLM
 from .model_registry import get_builder
 from .models.graph_builder import MirageModelConfig
+from .speculative import spec_decode_class
 from ..utils import get_configurations_from_gpu
 from transformers import AutoTokenizer, AutoConfig
 from safetensors.torch import load_model
@@ -49,9 +50,11 @@ class MPKMetadata:
     # MirageModelConfig
     model_config: Optional[MirageModelConfig] = None
     # profiling
+    profiling: bool = False
     profiler_tensor: Optional[torch.Tensor] = None
     trace_name: Optional[str] = None
     # spec decode config
+    spec_decode: Optional[str] = None
     spec_decode_config: Optional[object] = None
     
     def check_valid(self):
@@ -64,35 +67,35 @@ class MPKMetadata:
             
     def info_as_string(self):
         info = "MPKMetadata info:"
-        info += f"Mode: {self.mode}\n"
-        info += f"Total number of requests: {self.total_num_requests}\n"
-        info += f"Number of remote schedulers: {self.num_remote_schedulers}\n"
-        info += f"Max sequence length: {self.max_seq_length}\n"
-        info += f"Max number of batched requests: {self.max_num_batched_requests}\n"
-        info += f"Max number of batched tokens: {self.max_num_batched_tokens}\n"
-        info += f"Max number of pages: {self.max_num_pages}\n"
-        info += f"Page size: {self.page_size}\n"
-        info += f"Max SM number: {self.max_sm_num}\n"
-        info += f"Device: {self.device}\n"
+        info += f"Mode: {self.mode if self.mode is not None else 'None'}\n"
+        info += f"Total number of requests: {self.total_num_requests if self.total_num_requests is not None else 'None'}\n"
+        info += f"Number of remote schedulers: {self.num_remote_schedulers if self.num_remote_schedulers is not None else 'None'}\n"
+        info += f"Max sequence length: {self.max_seq_length if self.max_seq_length is not None else 'None'}\n"
+        info += f"Max number of batched requests: {self.max_num_batched_requests if self.max_num_batched_requests is not None else 'None'}\n"
+        info += f"Max number of batched tokens: {self.max_num_batched_tokens if self.max_num_batched_tokens is not None else 'None'}\n"
+        info += f"Max number of pages: {self.max_num_pages if self.max_num_pages is not None else 'None'}\n"
+        info += f"Page size: {self.page_size if self.page_size is not None else 'None'}\n"
+        info += f"Max SM number: {self.max_sm_num if self.max_sm_num is not None else 'None'}\n"
+        info += f"Device: {self.device if self.device is not None else 'None'}\n"
         info += f"Weight from model: {self.weight_from_model}\n"
-        info += f"Model name: {self.model_name}\n"
-        info += f"Model path: {self.model_path}\n"
-        info += f"World size: {self.world_size}\n"
-        info += f"Rank: {self.rank}\n"
-        info += f"Step: {self.step.shape}\n"
-        info += f"Tokens: {self.tokens.shape}\n"
-        info += f"Input tokens: {self.input_tokens.shape}\n"
-        info += f"Output tokens: {self.output_tokens.shape}\n"
-        info += f"Num new tokens: {self.num_new_tokens.shape}\n"
-        info += f"Prompt lengths: {self.prompt_lengths.shape}\n"
-        info += f"QO indptr buffer: {self.qo_indptr_buffer.shape}\n"
-        info += f"Paged KV indptr buffer: {self.paged_kv_indptr_buffer.shape}\n"
-        info += f"Paged KV indices buffer: {self.paged_kv_indices_buffer.shape}\n"
-        info += f"Paged KV last page len buffer: {self.paged_kv_last_page_len_buffer.shape}\n"
+        info += f"Model name: {self.model_name if self.model_name is not None else 'None'}\n"
+        info += f"Model path: {self.model_path if self.model_path is not None else 'None'}\n"
+        info += f"World size: {self.world_size if self.world_size is not None else 'None'}\n"
+        info += f"Rank: {self.rank if self.rank is not None else 'None'}\n"
+        info += f"Step: {self.step.shape if self.step is not None else 'None'}\n"
+        info += f"Tokens: {self.tokens.shape if self.tokens is not None else 'None'}\n"
+        info += f"Input tokens: {self.input_tokens.shape if self.input_tokens is not None else 'None'}\n"
+        info += f"Output tokens: {self.output_tokens.shape if self.output_tokens is not None else 'None'}\n"
+        info += f"Num new tokens: {self.num_new_tokens.shape if self.num_new_tokens is not None else 'None'}\n"
+        info += f"Prompt lengths: {self.prompt_lengths.shape if self.prompt_lengths is not None else 'None'}\n"
+        info += f"QO indptr buffer: {self.qo_indptr_buffer.shape if self.qo_indptr_buffer is not None else 'None'}\n"
+        info += f"Paged KV indptr buffer: {self.paged_kv_indptr_buffer.shape if self.paged_kv_indptr_buffer is not None else 'None'}\n"
+        info += f"Paged KV indices buffer: {self.paged_kv_indices_buffer.shape if self.paged_kv_indices_buffer is not None else 'None'}\n"
+        info += f"Paged KV last page len buffer: {self.paged_kv_last_page_len_buffer.shape if self.paged_kv_last_page_len_buffer is not None else 'None'}\n"
         info += f"Model config: \n"
         info += self.model_config.info_as_string()
-        info += f"Profiler tensor: {self.profiler_tensor.shape}\n"
-        info += f"Trace name: {self.trace_name}\n"
+        info += f"Profiler tensor: {self.profiler_tensor.shape if self.profiler_tensor is not None else 'None'}\n"
+        info += f"Trace name: {self.trace_name if self.trace_name is not None else 'None'}\n"
         return info
         
     def write_to_file(self, file_path: str):
@@ -116,7 +119,8 @@ class MPK:
         self.device = args.device
         self.total_num_requests = args.total_num_requests
         self.weight_from_model = args.weight_from_model
-        self.state_dict = args.state_dict
+        self.max_seq_length = args.max_seq_length
+        self.max_num_batched_tokens = args.max_num_batched_tokens
         
         torch.set_default_dtype(torch.bfloat16)
         torch.cuda.set_device(self.rank)
@@ -141,7 +145,7 @@ class MPK:
         self.get_tensors()
         
         self.model_config = args.model_config
-        
+        self.with_lm_head = self.model_config.with_lm_head
             
         self.num_workers, self.num_schedulers = get_configurations_from_gpu(self.rank)
         # self.max_sm_num = args.max_sm_num
@@ -153,9 +157,9 @@ class MPK:
             num_workers=self.num_workers,
             num_local_schedulers=self.num_schedulers,
             num_remote_schedulers=0,
-            max_seq_length=args.max_seq_length,
+            max_seq_length=self.max_seq_length,
             max_num_batched_requests=args.max_num_batched_requests,
-            max_num_batched_tokens=args.max_num_batched_tokens,
+            max_num_batched_tokens=self.max_num_batched_tokens,
             max_num_pages=args.max_num_pages,
             page_size=args.page_size,
             eos_token_id=-1, #self.model.config.eos_token_id,
@@ -263,9 +267,9 @@ class MPK:
         args = self.metadata
         self.total_num_requests = args.max_num_batched_requests
                 
-        positions = torch.arange(32768).unsqueeze(0).to(self.model.device)
+        # positions = torch.arange(32768).unsqueeze(0).to(self.model.device)
         # TODO: What if using vllm?
-        self.position_embeddings = self.model.model.rotary_emb(positions)
+        # self.position_embeddings = self.model.model.rotary_emb(positions)
         
         # starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(
         #     enable_timing=True
@@ -278,11 +282,12 @@ class MPK:
         else:
             self.profiler_tensor = None
             
-        self.spec_decode_config = mi.speculative.spec_decode_class(
-            args.spec_decode,
-            ngram_size=args.ngram_size,
-            spec_length=args.spec_length,
-        )
+        if args.spec_decode:
+            self.spec_decode_config = spec_decode_class(
+                args.spec_decode,
+                ngram_size=args.ngram_size,
+                spec_length=args.spec_length,
+            )
         
         self.compensate_meta_tensors()
         
@@ -368,8 +373,8 @@ class MPK:
         if self.weight_from_model:
             self.model_builder.build_from_model()
         else:
-            self.model_builder.build_from_dict(self.state_dict)
-        self.tokenizer = self.model_builder.tokenizer
+            self.model_builder.build_from_config(self.model_config)
+        # self.tokenizer = self.model_builder.tokenizer
         
         self.is_built = True
         
@@ -395,6 +400,9 @@ class MPK:
         if not self.is_compiled:
             self.compile()
         self.persisten_kernel(**kwargs)
+        if not self.with_lm_head:
+            #return the last hidden state
+            return self.model_builder.rmsnorm_out
         
     def decode(self, ids: torch.Tensor):
         return self.model_builder.decode(ids)

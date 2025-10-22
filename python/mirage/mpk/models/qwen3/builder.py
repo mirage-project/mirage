@@ -25,7 +25,7 @@ class Qwen3Builder(GraphBuilder):
         self.output_tokens = mpk.meta_tensors["output_tokens"]
         
 
-    def build_from_vllm_graph(self, 
+    def build_from_config(self, 
                               model_config: MirageModelConfig):
         self.position_embeddings = model_config.position_embeddings
         
@@ -36,16 +36,20 @@ class Qwen3Builder(GraphBuilder):
         self.intermediate_size = model_config.intermediate_size
         
         self.vocab_size = model_config.vocab_size
-        self.num_q_heads = model_config.num_q_heads
-        self.num_kv_heads = model_config.num_kv_heads
-        self.num_local_q_heads = self.num_q_heads // self.world_size
-        self.num_local_kv_heads = self.num_kv_heads // self.world_size
+        # self.num_q_heads = model_config.num_q_heads
+        # self.num_kv_heads = model_config.num_kv_heads
+        # self.num_local_q_heads = self.num_q_heads // self.world_size
+        # self.num_local_kv_heads = self.num_kv_heads // self.world_size
+        self.num_local_q_heads = model_config.local_num_q_heads
+        self.num_local_kv_heads = model_config.local_num_kv_heads
         self.head_dim = model_config.head_dim
-        self.fused_outdim_1 = (self.num_q_heads + 2 * self.num_kv_heads) * self.head_dim
+        # self.fused_outdim_1 = (self.num_q_heads + 2 * self.num_kv_heads) * self.head_dim
+        self.fused_outdim_1 = (self.num_local_q_heads + 2 * self.num_local_kv_heads) * self.head_dim
         self.fused_outdim_2 = 2 * self.intermediate_size
         
         self.num_layers = model_config.num_layers
-        raise NotImplementedError("build_from_vllm_graph is not implemented")
+        # raise NotImplementedError("build_from_vllm_graph is not implemented")
+        self.build_from_dict(model_config.state_dict, model_config.with_lm_head)
 
     def build_from_model(self, model_path: str | None = None):
         with torch.device("cuda"):
@@ -74,12 +78,13 @@ class Qwen3Builder(GraphBuilder):
         self.num_local_q_heads = self.num_q_heads // self.world_size
         self.num_local_kv_heads = self.num_kv_heads // self.world_size
         self.head_dim = self.model.config.head_dim
-        self.fused_outdim_1 = (self.num_q_heads + 2 * self.num_kv_heads) * self.head_dim
+        # self.fused_outdim_1 = (self.num_q_heads + 2 * self.num_kv_heads) * self.head_dim
+        self.fused_outdim_1 = (self.local_num_q_heads + 2 * self.local_num_kv_heads) * self.head_dim
         self.fused_outdim_2 = 2 * self.intermediate_size
         
         self.num_layers = len(self.model.model.layers)
         
-        self.build_from_dict(self.model.state_dict())
+        self.build_from_dict(self.model.state_dict(), True)
         
     def new_intermediate_tensors(self):
         self.max_num_batched_tokens = self.mpk.max_num_batched_tokens
@@ -96,7 +101,7 @@ class Qwen3Builder(GraphBuilder):
             io_category="cuda_tensor",
         )
         self.attn_in = self.mpk.new_tensor(
-            dims=(self.max_num_batched_tokens, self.fused_outdim_1 // self.world_size), # [6, 6144]
+            dims=(self.max_num_batched_tokens, self.fused_outdim_1), # [6, 6144]
             dtype=bfloat16,
             name="attn_in",
             io_category="cuda_tensor",
@@ -168,7 +173,8 @@ class Qwen3Builder(GraphBuilder):
             io_category="cuda_tensor",
         )
         
-    def build_layers(self, state_dict):
+    def build_layers(self, 
+                     state_dict: dict):
         # add rmsnorm + linear
         for i in range(self.num_layers):
             prefix = f"model.layers.{i}."
@@ -189,12 +195,12 @@ class Qwen3Builder(GraphBuilder):
                 w_qkv = self.mpk.shuffle_tensors(
                     inputs=[w_q, w_k, w_v],
                     shuffled_dim=0,
-                    num_groups=self.num_kv_heads // self.world_size,
+                    num_groups=self.local_num_kv_heads,
                     name=f"layer_{i}_qkv_proj",
                 )
             elif f"{prefix}self_attn.qkv_proj.weight" in state_dict:
                 w_qkv = self.mpk.attach_input(
-                    torch_tensor=state_dict[f"{prefix}self_attn.qkv_proj.weight"], name=f"{prefix}qkv_proj"
+                    torch_tensor=state_dict[f"{prefix}self_attn.qkv_proj.weight"], name=f"layer_{i}_qkv_proj"
                 )
             else:
                 raise ValueError(f"No qkv projection weight found for layer {i}")
@@ -298,7 +304,7 @@ class Qwen3Builder(GraphBuilder):
                     name=f"layer_{i}_gatedup_proj",
                 )
             elif f"{prefix}mlp.gate_up_proj.weight" in state_dict:
-                rmsnorm_num_tasks = grid_for_rmsnorm_linear_layer(state_dict[f"{prefix}mlp.gate_up_proj.weight"].dim(0))
+                rmsnorm_num_tasks = grid_for_rmsnorm_linear_layer(state_dict[f"{prefix}mlp.gate_up_proj.weight"].shape[0])
                 w_gatedup = self.mpk.attach_input(
                     torch_tensor=state_dict[f"{prefix}mlp.gate_up_proj.weight"], name=f"layer_{i}_gatedup_proj"
                 )
@@ -349,18 +355,22 @@ class Qwen3Builder(GraphBuilder):
                 )
                 self.x = self.mlp_final
         
-    def build_from_dict(self, state_dict):
+    def build_from_dict(self, 
+                        state_dict: dict,
+                        with_lm_head: bool,
+                        ):
         # pad vocab_size to facilitate task graph creation
-        self.lm_head_weight = torch.cat(
-            (
-                state_dict["lm_head.weight"],
-                torch.full(
-                    (153600 - self.model.config.vocab_size, self.hidden_size), 0, device="cuda"
+        if with_lm_head:
+            self.lm_head_weight = torch.cat(
+                (
+                    state_dict["lm_head.weight"],
+                    torch.full(
+                        (153600 - self.model.config.vocab_size, self.hidden_size), 0, device="cuda"
+                    ),
                 ),
-            ),
-            0,
-        )
-        assert self.lm_head_weight.stride()[0] == self.hidden_size
+                0,
+            )
+            assert self.lm_head_weight.stride()[0] == self.hidden_size
         # if spec_decode_config and spec_decode_config.method == "promptlookup":
         #     all_tokens = mpk.attach_input(torch_tensor=tokens, name="all_tokens")
         #     num_tokens_extend = spec_decode_config.spec_length + 1
@@ -413,7 +423,6 @@ class Qwen3Builder(GraphBuilder):
         self.w_norm = self.mpk.attach_input(
             torch_tensor=state_dict["model.norm.weight"], name="model_norm_weight"
         )
-        self.w_proj = self.mpk.attach_input(torch_tensor=self.lm_head_weight, name="lm_head")
         self.mpk.rmsnorm_layer(
             input=self.x,
             weight=self.w_norm,
@@ -421,43 +430,45 @@ class Qwen3Builder(GraphBuilder):
             grid_dim=(self.mpk.max_num_batched_tokens, 1, 1),
             block_dim=(128, 1, 1),
         )
-        self.mpk.linear_layer(
-            input=self.rmsnorm_out,
-            weight=self.w_proj,
-            output=self.argmax_in,
-            grid_dim=(grid_for_rmsnorm_linear_layer(self.w_proj.dim(0)), 1, 1),
-            block_dim=(128, 1, 1),
-        )
+        if with_lm_head:
+            self.w_proj = self.mpk.attach_input(torch_tensor=self.lm_head_weight, name="lm_head")
+            self.mpk.linear_layer(
+                input=self.rmsnorm_out,
+                weight=self.w_proj,
+                output=self.argmax_in,
+                grid_dim=(grid_for_rmsnorm_linear_layer(self.w_proj.dim(0)), 1, 1),
+                block_dim=(128, 1, 1),
+            )
 
-        # add argmax layer
-        # if spec_decode_config and spec_decode_config.method == "promptlookup":
-        #     argmax_partial_grid_dim = (max_factor_leq_n(153600, 96 // (spec_decode_config.spec_length + 1)), 
-        #                                spec_decode_config.spec_length + 1, 
-        #                                1)
-        #     argmax_reduce_grid_dim = (1, spec_decode_config.spec_length + 1, 1)
-        # else:
-        argmax_partial_grid_dim = (self.mpk.num_workers, 1, 1)
-        argmax_reduce_grid_dim = (1, 1, 1)
-        self.mpk.argmax_partial_layer(
-            input=self.argmax_in,
-            output=(self.argmax_part_value, self.argmax_part_index),
-            grid_dim=argmax_partial_grid_dim,
-            block_dim=(128, 1, 1),
-        )
-        self.mpk.argmax_reduce_layer(
-            input=(self.argmax_part_value, self.argmax_part_index),
-            output=argmax_out,
-            grid_dim=argmax_reduce_grid_dim,
-            block_dim=(128, 1, 1),
-        )
-        # if spec_decode_config:
-        #     verify_out = self.mpk.verify_layer_dispatcher(
-        #         spec_decode_config = spec_decode_config,
-        #         spec_tokens = spec_tokens,
-        #         target_output = argmax_out,
-        #         grid_dim = (1, 1, 1),
-        #         block_dim = (128, 1, 1),
-        #     )
+            # add argmax layer
+            # if spec_decode_config and spec_decode_config.method == "promptlookup":
+            #     argmax_partial_grid_dim = (max_factor_leq_n(153600, 96 // (spec_decode_config.spec_length + 1)), 
+            #                                spec_decode_config.spec_length + 1, 
+            #                                1)
+            #     argmax_reduce_grid_dim = (1, spec_decode_config.spec_length + 1, 1)
+            # else:
+            argmax_partial_grid_dim = (self.mpk.num_workers, 1, 1)
+            argmax_reduce_grid_dim = (1, 1, 1)
+            self.mpk.argmax_partial_layer(
+                input=self.argmax_in,
+                output=(self.argmax_part_value, self.argmax_part_index),
+                grid_dim=argmax_partial_grid_dim,
+                block_dim=(128, 1, 1),
+            )
+            self.mpk.argmax_reduce_layer(
+                input=(self.argmax_part_value, self.argmax_part_index),
+                output=argmax_out,
+                grid_dim=argmax_reduce_grid_dim,
+                block_dim=(128, 1, 1),
+            )
+            # if spec_decode_config:
+            #     verify_out = self.mpk.verify_layer_dispatcher(
+            #         spec_decode_config = spec_decode_config,
+            #         spec_tokens = spec_tokens,
+            #         target_output = argmax_out,
+            #         grid_dim = (1, 1, 1),
+            #         block_dim = (128, 1, 1),
+            #     )
         
     def decode(self, ids: torch.Tensor):
         return self.tokenizer.decode(ids, skip_special_tokens=True)
