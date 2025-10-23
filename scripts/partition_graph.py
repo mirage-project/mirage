@@ -10,7 +10,7 @@ from build_dataset import augment_partitions, serialize_subgraphs_to_json
 import os
 from generate_dag import solve_partitions, cost_function
 from graph_splitter import process_operator_graph
-from visualize_augs import visualize_partition, compare_augmentations
+# from visualize_augs import visualize_partition, compare_augmentations
 
 def copy_subgraph(subgraph):
     new_subgraph = {}
@@ -328,7 +328,21 @@ class HybridModel:
     def _execute_pytorch_op(self, op, inputs):
         fn = op.fn
         if fn in ["Add", "Sub", "Mul", "Div"]:
-            return getattr(torch, fn.lower())(inputs[0], inputs[1])
+            # Handle operations with scalar constants in additional_params
+            if len(inputs) == 1 and hasattr(op, 'additional_params') and 'arg1' in op.additional_params:
+                scalar = op.additional_params['arg1']
+                if fn == "Add":
+                    return inputs[0] + scalar
+                elif fn == "Sub":
+                    return inputs[0] - scalar
+                elif fn == "Mul":
+                    return inputs[0] * scalar
+                elif fn == "Div":
+                    return inputs[0] / scalar
+            elif len(inputs) >= 2:
+                return getattr(torch, fn.lower())(inputs[0], inputs[1])
+            else:
+                raise ValueError(f"{fn} requires 2 inputs or additional_params, got {len(inputs)} inputs")
         elif fn == "MatMul":
             return torch.matmul(inputs[0], inputs[1])
         elif fn == "Gemm":
@@ -342,6 +356,12 @@ class HybridModel:
             return torch.relu(inputs[0])
         elif fn == "Sigmoid":
             return torch.sigmoid(inputs[0])
+        elif fn == "Exp":
+            return torch.exp(inputs[0])
+        elif fn == "Neg":
+            return torch.neg(inputs[0])
+        elif fn == "Reciprocal":
+            return torch.reciprocal(inputs[0])
         elif fn == "Transpose":
             return inputs[0].transpose(-2, -1)
         elif fn == "Reshape":
@@ -464,17 +484,22 @@ def partition_graph_with_dp(model,
                 
                 # Extract tensor IDs from subgraph
                 produced_in_subgraph = set()
+                consumed_in_subgraph = set()
                 for op in sg_dict:
                     for _, tid in op.output_tensor_shapes:
                         produced_in_subgraph.add(tid)
+                    for _, tid in op.input_tensor_shapes:
+                        consumed_in_subgraph.add(tid)
                 
+                # Input tensors: consumed but not produced in subgraph
                 input_ids = []
                 for op in sg_dict:
                     for _, tid in op.input_tensor_shapes:
                         if tid not in produced_in_subgraph and tid not in input_ids:
                             input_ids.append(tid)
                 
-                output_ids = [tid for op in sg_dict for _, tid in op.output_tensor_shapes]
+                # Output tensors: produced but not consumed in subgraph (exported to outside)
+                output_ids = [tid for tid in produced_in_subgraph if tid not in consumed_in_subgraph]
                 const_dims = [(d[0], d[2]) for d in dims if d[1] == "C"]
                 
                 execution_plan.append(("mirage", (optimized_kernel, input_ids, output_ids, const_dims)))

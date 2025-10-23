@@ -314,7 +314,8 @@ def parse_onnx_model(model, unique_operators):
 
         # output ops
         for out in op.output_ops:
-            out.input_ops.remove(op)
+            if op in out.input_ops:
+                out.input_ops.remove(op)
             out.input_ops.append(div_op)
         
         # add to operators
@@ -358,7 +359,8 @@ def parse_onnx_model(model, unique_operators):
 
         # output ops
         for out in op.output_ops:
-            out.input_ops.remove(op)
+            if op in out.input_ops:
+                out.input_ops.remove(op)
             out.input_ops.append(div_op)
         
         # add to operators
@@ -396,20 +398,21 @@ def parse_onnx_model(model, unique_operators):
         add_out_id = len(tensor_id) + 1
         tensor_id[f"add_out_{add_out_id}"] = add_out_id
         add_op.output_tensor_shapes = [(exp_op.output_tensor_shapes[0][0], add_out_id)]
-        exp_op.output_ops = [add_op]
-
+        
         # division op
         div_op = Operator(name=f"node_Div_{op_id}_sigmoid",
                           fn="Div",
-                          input_ops=[add_op, exp_op],
+                          input_ops=[exp_op, add_op],
                           output_ops=op.output_ops,
-                          input_tensor_shapes=[add_op.output_tensor_shapes[0], exp_op.output_tensor_shapes[0]],
+                          input_tensor_shapes=[exp_op.output_tensor_shapes[0], add_op.output_tensor_shapes[0]],
                           output_tensor_shapes=op.output_tensor_shapes)
+        exp_op.output_ops = [add_op, div_op]  # exp_op feeds both add_op and div_op
         add_op.output_ops = [div_op]
 
         # output ops
         for out in op.output_ops:
-            out.input_ops.remove(op)
+            if op in out.input_ops:
+                out.input_ops.remove(op)
             out.input_ops.append(div_op)
         
         # add to operators
@@ -443,7 +446,8 @@ def parse_onnx_model(model, unique_operators):
 
         # output ops
         for out in op.output_ops:
-            out.input_ops.remove(op)
+            if op in out.input_ops:
+                out.input_ops.remove(op)
             out.input_ops.append(mul_op)
         
         # add to operators
@@ -484,7 +488,8 @@ def parse_onnx_model(model, unique_operators):
 
         # output ops
         for out in op.output_ops:
-            out.input_ops.remove(op)
+            if op in out.input_ops:
+                out.input_ops.remove(op)
             out.input_ops.append(div_op)
         
         # add to operators
