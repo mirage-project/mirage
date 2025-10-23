@@ -270,25 +270,14 @@ struct SwizzleOffsetCalculator {
   static constexpr size_t B_BITS = B;
   static constexpr size_t M_BITS = M;
   static constexpr size_t S_BITS = S;
-  static constexpr size_t BLOCK_BITS = B + M + S;
-  static constexpr size_t M_AND_S_BITS = M + S;
 
-  static constexpr size_t MASK_IN_BLOCK = (1 << BLOCK_BITS) - 1;
-  static constexpr size_t MASK_S = (1 << S_BITS) - 1;
-  static constexpr size_t MASK_M = (1 << M_BITS) - 1;
+  static constexpr size_t MASK_B = (1 << B_BITS) - 1;
+  static constexpr size_t MASK_YYY = MASK_B << (M_BITS + S_BITS);
 
   __device__ __forceinline__ static size_t get_phy_offset(size_t logical_idx) {
-    const size_t block_idx = logical_idx >> BLOCK_BITS;
-    const size_t in_block_idx = logical_idx & MASK_IN_BLOCK;
-
-    const size_t irow = in_block_idx >> M_AND_S_BITS;
-    size_t icol = (in_block_idx >> M_BITS) & MASK_S;
-    icol ^= irow;
-
-    const size_t offset_in_bank = in_block_idx & MASK_M;
-
-    return (block_idx << BLOCK_BITS) + (irow << M_AND_S_BITS) +
-           (icol << M_BITS) + offset_in_bank;
+    // refer to
+    // https://github.com/NVIDIA/cutlass/blob/e6e2cc29f5e7611dfc6af0ed6409209df0068cf2/include/cute/swizzle.hpp#L76-L79.
+    return logical_idx ^ ((logical_idx & MASK_YYY) >> S_BITS);
   }
 };
 
