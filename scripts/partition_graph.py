@@ -161,7 +161,7 @@ def partition_graph_with_sampling(model,
     
     print(f"Found {len(valid_partitions)} valid partitions")
     
-    plt = visualize_partition(valid_partitions[0], "Example Valid Partition", "printed_partition0")
+    # plt = visualize_partition(valid_partitions[0], "Example Valid Partition", "printed_partition0")
     
     # Augment the valid partitions
     augmented_subgraphs = augment_partitions(
@@ -172,7 +172,7 @@ def partition_graph_with_sampling(model,
         perturbation_strategies=['expand', 'contract']
     )
 
-    compare_augmentations(valid_partitions[0], augmented_subgraphs[:3])
+    # compare_augmentations(valid_partitions[0], augmented_subgraphs[:3])
     
     print(f"Generated {len(augmented_subgraphs)} total subgraphs (including originals)")
     print(f"Augmentation ratio: {len(augmented_subgraphs) / len(valid_partitions):.1f}x")
