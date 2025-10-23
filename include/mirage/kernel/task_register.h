@@ -90,8 +90,6 @@ public:
   // SM100 tasks end
   int register_task_variant(TaskType type, std::string const &code);
 
-
-
 public:
   std::map<TaskType, std::vector<std::string>> all_task_variants;
 };
