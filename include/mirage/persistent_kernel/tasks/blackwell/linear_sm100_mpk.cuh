@@ -2,8 +2,6 @@
 #include <cstdio>
 #include <iostream>
 
-
-
 // Cutlass includes
 #include <cutlass/half.h> // F16 data type
 // #include <cutlass/util/print_error.hpp>
@@ -23,11 +21,11 @@
 
 #include "../common/dmem_layout.cuh"
 #include "../common/worker_config.h"
-#include "utils.cuh"
-#include "storage.cuh"
 #include "../hopper/barrier.cuh"
 #include "../hopper/smem_layout_tma.cuh"
 #include "../hopper/tma.cuh"
+#include "storage.cuh"
+#include "utils.cuh"
 
 namespace kernel {
 

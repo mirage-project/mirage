@@ -30,10 +30,10 @@ __device__ __forceinline__ void rms_norm_hopper_impl(void const *input_ptr,
     if constexpr (BYTES_PER_THREAD % 16 == 0) {
       return 16; // 128bit copy-async
     } else if constexpr (BYTES_PER_THREAD % 8 == 0) {
-      return 8;  // 64bit copy-async
+      return 8; // 64bit copy-async
     } else {
       static_assert(BYTES_PER_THREAD % 4 == 0);
-      return 4;  // 32bit copy-async
+      return 4; // 32bit copy-async
     }
   }();
   constexpr int CHUNK_SIZE = BYTES_PER_CP / sizeof(T);
@@ -68,9 +68,9 @@ __device__ __forceinline__ void rms_norm_hopper_impl(void const *input_ptr,
   // Warm up input tiles for the first atoms
   {
     load_smem<T, BYTES_PER_CP>(shared_input_buffer + threadIdx.x * CHUNK_SIZE,
-              d_input + threadIdx.x * CHUNK_SIZE);
+                               d_input + threadIdx.x * CHUNK_SIZE);
     load_smem<T, BYTES_PER_CP>(shared_weight_buffer + threadIdx.x * CHUNK_SIZE,
-              d_weight + threadIdx.x * CHUNK_SIZE);
+                               d_weight + threadIdx.x * CHUNK_SIZE);
     cp_async_fence();
   }
 
@@ -79,13 +79,14 @@ __device__ __forceinline__ void rms_norm_hopper_impl(void const *input_ptr,
   for (int for_idx = 0; for_idx < NUM_TILES; for_idx++) {
     // copy
     if (for_idx + 1 < NUM_TILES) {
-      load_smem<T, BYTES_PER_CP>(shared_input_buffer + threadIdx.x * CHUNK_SIZE +
-                    (for_idx + 1) * TILE_SIZE,
-                d_input + threadIdx.x * CHUNK_SIZE + (for_idx + 1) * TILE_SIZE);
-      load_smem<T, BYTES_PER_CP>(shared_weight_buffer + threadIdx.x * CHUNK_SIZE +
-                    (for_idx + 1) * TILE_SIZE,
-                d_weight + threadIdx.x * CHUNK_SIZE +
-                    (for_idx + 1) * TILE_SIZE);
+      load_smem<T, BYTES_PER_CP>(
+          shared_input_buffer + threadIdx.x * CHUNK_SIZE +
+              (for_idx + 1) * TILE_SIZE,
+          d_input + threadIdx.x * CHUNK_SIZE + (for_idx + 1) * TILE_SIZE);
+      load_smem<T, BYTES_PER_CP>(
+          shared_weight_buffer + threadIdx.x * CHUNK_SIZE +
+              (for_idx + 1) * TILE_SIZE,
+          d_weight + threadIdx.x * CHUNK_SIZE + (for_idx + 1) * TILE_SIZE);
       cp_async_fence();
       cp_async_wait<1>();
     } else if (for_idx + 1 == NUM_TILES) {
@@ -130,14 +131,14 @@ __device__ __forceinline__ void rms_norm_hopper_impl(void const *input_ptr,
 #pragma unroll
   for (int i = threadIdx.x; i < NUM_CHUNKS_OUTPUT; i += NUM_THREADS) {
     if constexpr (BYTES_PER_CP == 16) {
-        *((__uint128_t *)((void *)&d_output[i * CHUNK_SIZE])) =
-            *((__uint128_t *)((void *)&shared_output_buffer[i * CHUNK_SIZE]));
+      *((__uint128_t *)((void *)&d_output[i * CHUNK_SIZE])) =
+          *((__uint128_t *)((void *)&shared_output_buffer[i * CHUNK_SIZE]));
     } else if constexpr (BYTES_PER_CP == 8) {
-        *((uint64_t *)((void *)&d_output[i * CHUNK_SIZE])) =
-            *((uint64_t *)((void *)&shared_output_buffer[i * CHUNK_SIZE]));
+      *((uint64_t *)((void *)&d_output[i * CHUNK_SIZE])) =
+          *((uint64_t *)((void *)&shared_output_buffer[i * CHUNK_SIZE]));
     } else { // BYTES_PER_CP == 4
-        *((uint32_t *)((void *)&d_output[i * CHUNK_SIZE])) =
-            *((uint32_t *)((void *)&shared_output_buffer[i * CHUNK_SIZE]));
+      *((uint32_t *)((void *)&d_output[i * CHUNK_SIZE])) =
+          *((uint32_t *)((void *)&shared_output_buffer[i * CHUNK_SIZE]));
     }
   }
 }

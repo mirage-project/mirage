@@ -101,30 +101,28 @@ __device__ __noinline__ void
 
   cute::Tensor mA = cute::make_coord_tensor(cute::make_layout(
       cute::make_shape(OUTPUT_SIZE, REDUCTION_SIZE, NUM_EXPERTS),
-      cute::make_stride(
-          cute::E<1>{},
-          cute::E<0>{},
-          cute::E<1>{} * cute::Int<OUTPUT_SIZE>{}
-      )));
+      cute::make_stride(cute::E<1>{},
+                        cute::E<0>{},
+                        cute::E<1>{} * cute::Int<OUTPUT_SIZE>{})));
 
-//   if (cute::thread0()) {
-//     cute::print("mA:\t");
-//     cute::print(mA);
-//     cute::print("\n");
-//     cute::print("mInput:\t");
-//     cute::print(mInput);
-//     cute::print("\n");
-//     cute::print("mRoutingIndices:\t");
-//     cute::print(mRoutingIndices);
-//     cute::print("\n");
-//     cute::print("mMask:\t");
-//     cute::print(mMask);
-//     cute::print("\n");
-//     cute::print("mOutput:\t");
-//     cute::print(mOutput);
-//     cute::print("\n");
-//   }
-//   __syncthreads();
+  //   if (cute::thread0()) {
+  //     cute::print("mA:\t");
+  //     cute::print(mA);
+  //     cute::print("\n");
+  //     cute::print("mInput:\t");
+  //     cute::print(mInput);
+  //     cute::print("\n");
+  //     cute::print("mRoutingIndices:\t");
+  //     cute::print(mRoutingIndices);
+  //     cute::print("\n");
+  //     cute::print("mMask:\t");
+  //     cute::print(mMask);
+  //     cute::print("\n");
+  //     cute::print("mOutput:\t");
+  //     cute::print(mOutput);
+  //     cute::print("\n");
+  //   }
+  //   __syncthreads();
 
   cute::Tensor gA = cute::local_tile(
       mA,
@@ -146,20 +144,21 @@ __device__ __noinline__ void
   cute::Tensor gBias = cute::local_tile(
       mBias, cd_tiler, mma_coord, cute::Step<cute::_1, cute::_1, cute::X>{});
 
-//   if (cute::thread0()) {
-//     cute::print("gA:\t");
-//     cute::print(gA);
-//     cute::print("\n"); // gA:     ArithTuple(_0,_0) o
-//                        // (_128,_64,1,32,128):(_1@1,_1@0,_128@1,_64@0,_128@1)
-//     cute::print("gB:\t");
-//     cute::print(gB);
-//     cute::print("\n"); // gB:     gmem_ptr[16b](0x792c0b000000) o
-//                        // (_16,_64,1,32):(2048,_1,32768,_64)
-//     cute::print("gBias:\t");
-//     cute::print(gBias);
-//     cute::print("\n");
-//   }
-//   __syncthreads();
+  //   if (cute::thread0()) {
+  //     cute::print("gA:\t");
+  //     cute::print(gA);
+  //     cute::print("\n"); // gA:     ArithTuple(_0,_0) o
+  //                        //
+  //                        (_128,_64,1,32,128):(_1@1,_1@0,_128@1,_64@0,_128@1)
+  //     cute::print("gB:\t");
+  //     cute::print(gB);
+  //     cute::print("\n"); // gB:     gmem_ptr[16b](0x792c0b000000) o
+  //                        // (_16,_64,1,32):(2048,_1,32768,_64)
+  //     cute::print("gBias:\t");
+  //     cute::print(gBias);
+  //     cute::print("\n");
+  //   }
+  //   __syncthreads();
 
   // Pre-partitioned Tile Shape (MmaTile_M, MmaTile_K) to post-partitioned
   // (MmaA, NumMma_M, NumMma_K)
@@ -183,33 +182,35 @@ __device__ __noinline__ void
                        cute::Int<1>{},
                        cute::Int<NUM_C_STAGE>{});
 
-//   // Print and inspect mma_shape_A, and mma_shape_B for this example.
-//   if (cute::thread0()) {
-//     cute::print("mma_shape_A:\t");
-//     cute::print(mma_shape_A);
-//     cute::print("\n"); // mma_shape_A:  ((_128,_16),_1,_4,_8)
-//     cute::print("mma_shape_B:\t");
-//     cute::print(mma_shape_B);
-//     cute::print("\n"); // mma_shape_B:  ((_32,_16),_1,_4,_8)
-//     cute::print("mma_shape_C:\t");
-//     cute::print(mma_shape_C);
-//     cute::print("\n"); // mma_shape_C:  ((_32,_128),_1,_1,_4)
-//   }
-//   __syncthreads();
+  //   // Print and inspect mma_shape_A, and mma_shape_B for this example.
+  //   if (cute::thread0()) {
+  //     cute::print("mma_shape_A:\t");
+  //     cute::print(mma_shape_A);
+  //     cute::print("\n"); // mma_shape_A:  ((_128,_16),_1,_4,_8)
+  //     cute::print("mma_shape_B:\t");
+  //     cute::print(mma_shape_B);
+  //     cute::print("\n"); // mma_shape_B:  ((_32,_16),_1,_4,_8)
+  //     cute::print("mma_shape_C:\t");
+  //     cute::print(mma_shape_C);
+  //     cute::print("\n"); // mma_shape_C:  ((_32,_128),_1,_1,_4)
+  //   }
+  //   __syncthreads();
 
   auto sA_layout = cute::UMMA::tile_to_mma_shape(
       cute::UMMA::Layout_K_SW128_Atom<T_>{}, mma_shape_A);
   auto sB_layout = cute::UMMA::tile_to_mma_shape(
       cute::UMMA::Layout_K_SW128_Atom<T_>{}, mma_shape_B);
-  auto sB_cp_layout = cute::composition(sB_layout.layout_a(), sB_layout.offset(), cute::make_layout(
-      cute::make_shape(cute::get<0>(cute::shape(gB)),
-                       cute::get<1>(cute::shape(gB)),
-                       cute::Int<1>{},
-                       cute::Int<NUM_AB_STAGE>{}),
-      cute::make_stride(cute::get<1>(cute::shape(gB)),
-                        cute::Int<1>{},
-                        cute::Int<0>{},
-                        cute::Int<MMA_N * bK>{})));
+  auto sB_cp_layout = cute::composition(
+      sB_layout.layout_a(),
+      sB_layout.offset(),
+      cute::make_layout(cute::make_shape(cute::get<0>(cute::shape(gB)),
+                                         cute::get<1>(cute::shape(gB)),
+                                         cute::Int<1>{},
+                                         cute::Int<NUM_AB_STAGE>{}),
+                        cute::make_stride(cute::get<1>(cute::shape(gB)),
+                                          cute::Int<1>{},
+                                          cute::Int<0>{},
+                                          cute::Int<MMA_N * bK>{})));
   // constuct unswizzled layout for C
   auto sC_layout_fake = cute::UMMA::tile_to_mma_shape(
       cute::UMMA::Layout_K_INTER_Atom<T_>{}, mma_shape_C);
@@ -227,21 +228,21 @@ __device__ __noinline__ void
                                      sC_layout_fake.offset(),
                                      cute::make_layout(sC_shape, sC_stride));
 
-//   if (cute::thread0()) {
-//     cute::print("sA_layout:\t");
-//     cute::print(sA_layout);
-//     cute::print("\n");
-//     cute::print("sB_layout:\t");
-//     cute::print(sB_layout);
-//     cute::print("\n");
-//     cute::print("sC_layout:\t");
-//     cute::print(sC_layout);
-//     cute::print("\n");
-//     cute::print("sB_cp_layout:\t");
-//     cute::print(sB_cp_layout);
-//     cute::print("\n");
-//   }
-//   __syncthreads();
+  //   if (cute::thread0()) {
+  //     cute::print("sA_layout:\t");
+  //     cute::print(sA_layout);
+  //     cute::print("\n");
+  //     cute::print("sB_layout:\t");
+  //     cute::print(sB_layout);
+  //     cute::print("\n");
+  //     cute::print("sC_layout:\t");
+  //     cute::print(sC_layout);
+  //     cute::print("\n");
+  //     cute::print("sB_cp_layout:\t");
+  //     cute::print(sB_cp_layout);
+  //     cute::print("\n");
+  //   }
+  //   __syncthreads();
 
   using SharedStorage = MoESharedStorage<T_,
                                          T_,
@@ -293,15 +294,20 @@ __device__ __noinline__ void
 
   // Sync tmem allocation status between MMA and epilogue warps within CTA
   // 32 threads (mma) + 128 threads (epilog) to sync
-  cutlass::arch::NamedBarrier tmem_allocation_result_barrier(32 + 128, /*bar-id=*/cutlass::arch::ReservedNamedBarriers::TmemAllocBarrier);
-  cutlass::arch::NamedBarrier epilogue_wg_barrier(128, /*bar-id=*/cutlass::arch::ReservedNamedBarriers::EpilogueBarrier);
+  cutlass::arch::NamedBarrier tmem_allocation_result_barrier(
+      32 + 128,
+      /*bar-id=*/cutlass::arch::ReservedNamedBarriers::TmemAllocBarrier);
+  cutlass::arch::NamedBarrier epilogue_wg_barrier(
+      128, /*bar-id=*/cutlass::arch::ReservedNamedBarriers::EpilogueBarrier);
 
   // Represent the SMEM buffers for A and B
-  cute::Tensor tCsA = shared_storage.tensor_sA(); // (MmaA, NumMma_M, NumMma_K, Tiles_K)
-  cute::Tensor tCsB = shared_storage.tensor_sB(); // (MmaB, NumMma_M, NumMma_K, Tiles_K)
-  cute::Tensor sB = shared_storage.tensor_cp_sB(); // Layout for cp_async
+  cute::Tensor tCsA =
+      shared_storage.tensor_sA(); // (MmaA, NumMma_M, NumMma_K, Tiles_K)
+  cute::Tensor tCsB =
+      shared_storage.tensor_sB(); // (MmaB, NumMma_M, NumMma_K, Tiles_K)
+  cute::Tensor sB = shared_storage.tensor_cp_sB();  // Layout for cp_async
   cute::Tensor sC_epi = shared_storage.tensor_sC(); // (EpiTile)
-  
+
   //
   // Mma partitioning for A and B
   //
@@ -313,35 +319,35 @@ __device__ __noinline__ void
   cute::Tensor tCgB =
       cta_mma.partition_B(gB); // (MmaB, NumMma_N, NumMma_K, Tiles_K)
 
-//   if (cute::thread0()) {
-//     cute::print("tCgA:\t");
-//     cute::print(tCgA);
-//     cute::print("\n");
-//     cute::print("tCgB:\t");
-//     cute::print(tCgB);
-//     cute::print("\n");
-//     cute::print("tCsA:\t");
-//     cute::print(tCsA);
-//     cute::print("\n");
-//     cute::print("tCsB:\t");
-//     cute::print(tCsB);
-//     cute::print("\n");
-//     cute::print("sB:\t");
-//     cute::print(sB);
-//     cute::print("\n");
-//     cute::print("sC_epi:\t");
-//     cute::print(sC_epi);
-//     cute::print("\n");
-//   }
-//   __syncthreads();
+  //   if (cute::thread0()) {
+  //     cute::print("tCgA:\t");
+  //     cute::print(tCgA);
+  //     cute::print("\n");
+  //     cute::print("tCgB:\t");
+  //     cute::print(tCgB);
+  //     cute::print("\n");
+  //     cute::print("tCsA:\t");
+  //     cute::print(tCsA);
+  //     cute::print("\n");
+  //     cute::print("tCsB:\t");
+  //     cute::print(tCsB);
+  //     cute::print("\n");
+  //     cute::print("sB:\t");
+  //     cute::print(sB);
+  //     cute::print("\n");
+  //     cute::print("sC_epi:\t");
+  //     cute::print(sC_epi);
+  //     cute::print("\n");
+  //   }
+  //   __syncthreads();
 
   int tma_transaction_bytes_A =
       sizeof(T_) * cute::size<0>(mma_tiler) * cute::size<2>(mma_tiler);
 
-//   if (cute::thread0()) {
-//     printf("tma_transaction_bytes_A: %d\n", tma_transaction_bytes_A);
-//   }
-//   __syncthreads();
+  //   if (cute::thread0()) {
+  //     printf("tma_transaction_bytes_A: %d\n", tma_transaction_bytes_A);
+  //   }
+  //   __syncthreads();
 
   constexpr int TILE_SIZE = 64;
   constexpr int WEIGHT_TMA_TILE_SIZE = 64;
@@ -366,13 +372,15 @@ __device__ __noinline__ void
   WeightSmem weight_smem(shared_weight);
 
   // CP_ASYNC Atom for B, todo: use MMA_N instead of hardcoded 16
-  cute::TiledCopy copyB = make_tiled_copy(Copy_Atom<SM80_CP_ASYNC_CACHEALWAYS<uint128_t>, T_>{},
-                                    Layout<Shape<Int<MMA_N>,Int<cp_async_group_size>>, Stride<Int<cp_async_group_size>,_1>>{},  // Thr layout
-                                    Layout<Shape< _1,_8>>{});               // Val layout
+  cute::TiledCopy copyB = make_tiled_copy(
+      Copy_Atom<SM80_CP_ASYNC_CACHEALWAYS<uint128_t>, T_>{},
+      Layout<Shape<Int<MMA_N>, Int<cp_async_group_size>>,
+             Stride<Int<cp_async_group_size>, _1>>{}, // Thr layout
+      Layout<Shape<_1, _8>>{});                       // Val layout
 
-//   if (cute::thread0()) {
-//     cute::print_latex(copyB);
-//   } __syncthreads();
+  //   if (cute::thread0()) {
+  //     cute::print_latex(copyB);
+  //   } __syncthreads();
 
   // // check tma descriptor:
   // if(threadIdx.x == 0){
@@ -417,19 +425,17 @@ __device__ __noinline__ void
   cutlass::arch::fence_barrier_init();
   __syncthreads();
 
-//   if (cute::thread0()) {
-//     cute::print("tCrA:\t");
-//     cute::print(tCrA);
-//     cute::print("\n"); // tCrA:   UMMA::DescriptorIterator o (_1,_1,_4):(_0,_0,_2)
-//     cute::print("tCrB:\t");
-//     cute::print(tCrB);
-//     cute::print("\n"); // tCrB:   UMMA::DescriptorIterator o (_1,_1,_4):(_0,_0,_2)
-//     cute::print("tCtAcc:\t");
-//     cute::print(tCtAcc);
-//     cute::print("\n"); // tCtAcc: tmem_[32b](TMEM_ADDR) o
-//                        // ((_128,_256),_1,_1):((_65536,_1),_0,_0)
-//   }
-//   __syncthreads();
+  //   if (cute::thread0()) {
+  //     cute::print("tCrA:\t");
+  //     cute::print(tCrA);
+  //     cute::print("\n"); // tCrA:   UMMA::DescriptorIterator o
+  //     (_1,_1,_4):(_0,_0,_2) cute::print("tCrB:\t"); cute::print(tCrB);
+  //     cute::print("\n"); // tCrB:   UMMA::DescriptorIterator o
+  //     (_1,_1,_4):(_0,_0,_2) cute::print("tCtAcc:\t"); cute::print(tCtAcc);
+  //     cute::print("\n"); // tCtAcc: tmem_[32b](TMEM_ADDR) o
+  //                        // ((_128,_256),_1,_1):((_65536,_1),_0,_0)
+  //   }
+  //   __syncthreads();
 
   int k_tile_count = cute::size<4>(tCgA);
 
@@ -459,85 +465,94 @@ __device__ __noinline__ void
 
     int total_k_tile_count = 0;
     int total_expert_count = 0;
-    for (int expert_idx=0; expert_idx < NUM_EXPERTS; ++expert_idx){
-        total_expert_count += mMask(expert_idx);
-        if(mMask(expert_idx) == 1 && (total_expert_count-1) % EXPERT_STRIDE == EXPERT_OFFSET){
-            cute::Tensor tRoutingIndex = mRoutingIndices(expert_idx, cute::_);
-            for (int m_tile = 0; m_tile < cute::size<3>(tCgA); ++m_tile) {
-                for (int n_tile = 0; n_tile < cute::size<3>(tCgB); ++n_tile) {
-                    int num_prev_k_blk = total_k_tile_count;
-                    total_k_tile_count += k_tile_count;
+    for (int expert_idx = 0; expert_idx < NUM_EXPERTS; ++expert_idx) {
+      total_expert_count += mMask(expert_idx);
+      if (mMask(expert_idx) == 1 &&
+          (total_expert_count - 1) % EXPERT_STRIDE == EXPERT_OFFSET) {
+        cute::Tensor tRoutingIndex = mRoutingIndices(expert_idx, cute::_);
+        for (int m_tile = 0; m_tile < cute::size<3>(tCgA); ++m_tile) {
+          for (int n_tile = 0; n_tile < cute::size<3>(tCgB); ++n_tile) {
+            int num_prev_k_blk = total_k_tile_count;
+            total_k_tile_count += k_tile_count;
 
-                    int tma_wr_k_tile = 0;
-                    int smem_wr_buffer = (num_prev_k_blk + tma_wr_k_tile) % NUM_AB_STAGE;
-                    int tma_wr_ab_empty_phase =
-                        (num_prev_k_blk + tma_wr_k_tile) / NUM_AB_STAGE % 2 ^ 1;
+            int tma_wr_k_tile = 0;
+            int smem_wr_buffer =
+                (num_prev_k_blk + tma_wr_k_tile) % NUM_AB_STAGE;
+            int tma_wr_ab_empty_phase =
+                (num_prev_k_blk + tma_wr_k_tile) / NUM_AB_STAGE % 2 ^ 1;
 
-                    bool peek_ab_empty_status = kernel::try_wait_barrier(
-                        shared_storage.ab_empty_mbar_ptr[smem_wr_buffer],
-                        tma_wr_ab_empty_phase);
+            bool peek_ab_empty_status = kernel::try_wait_barrier(
+                shared_storage.ab_empty_mbar_ptr[smem_wr_buffer],
+                tma_wr_ab_empty_phase);
 
-                    // CUTE_UNROLL
-                    for (int k_tile = 0; k_tile < k_tile_count; ++k_tile) {
+            // CUTE_UNROLL
+            for (int k_tile = 0; k_tile < k_tile_count; ++k_tile) {
 
-                        int tma_wr_k_tile_next = tma_wr_k_tile + 1;
-                        int smem_wr_buffer_next =
-                            (num_prev_k_blk + tma_wr_k_tile_next) % NUM_AB_STAGE;
-                        int tma_wr_ab_empty_phase_next = smem_wr_buffer_next == 0
-                                                            ? tma_wr_ab_empty_phase ^ 1
-                                                            : tma_wr_ab_empty_phase;
+              int tma_wr_k_tile_next = tma_wr_k_tile + 1;
+              int smem_wr_buffer_next =
+                  (num_prev_k_blk + tma_wr_k_tile_next) % NUM_AB_STAGE;
+              int tma_wr_ab_empty_phase_next = smem_wr_buffer_next == 0
+                                                   ? tma_wr_ab_empty_phase ^ 1
+                                                   : tma_wr_ab_empty_phase;
 
-                        // Wait for an empty buffer
-                        if (!peek_ab_empty_status) {
-                            cute::wait_barrier(shared_storage.ab_empty_mbar_ptr[smem_wr_buffer],
-                                            tma_wr_ab_empty_phase);
-                        }
+              // Wait for an empty buffer
+              if (!peek_ab_empty_status) {
+                cute::wait_barrier(
+                    shared_storage.ab_empty_mbar_ptr[smem_wr_buffer],
+                    tma_wr_ab_empty_phase);
+              }
 
-                        // TMA for loading A
-                        if (cute::elect_one_sync()) {
-                            // TODO(Zhihao): add expert offset here
-                            int tma_coords_A[2] = {k_tile * TILE_SIZE,
-                                                m_tile * OUTPUT_ATOM_SIZE + expert_idx * OUTPUT_SIZE};
-                            weight_smem.set_ptr(shared_weight +
-                                                smem_wr_buffer * OUTPUT_ATOM_SIZE * TILE_SIZE);
-                            cute::set_barrier_transaction_bytes(
-                                shared_storage.a_full_mbar_ptr[smem_wr_buffer],
-                                tma_transaction_bytes_A);
-                            tma_a.tma_cp_async(a_full_mbar_ptr[smem_wr_buffer],
-                                            weight_smem.base_ptr,
-                                            tma_coords_A);
-                        }
+              // TMA for loading A
+              if (cute::elect_one_sync()) {
+                // TODO(Zhihao): add expert offset here
+                int tma_coords_A[2] = {k_tile * TILE_SIZE,
+                                       m_tile * OUTPUT_ATOM_SIZE +
+                                           expert_idx * OUTPUT_SIZE};
+                weight_smem.set_ptr(shared_weight + smem_wr_buffer *
+                                                        OUTPUT_ATOM_SIZE *
+                                                        TILE_SIZE);
+                cute::set_barrier_transaction_bytes(
+                    shared_storage.a_full_mbar_ptr[smem_wr_buffer],
+                    tma_transaction_bytes_A);
+                tma_a.tma_cp_async(a_full_mbar_ptr[smem_wr_buffer],
+                                   weight_smem.base_ptr,
+                                   tma_coords_A);
+              }
 
-                        // CP_ASYNC for loading B
-                        int32_t token_idx = n_tile * MMA_N + lane_idx / cp_async_group_size;
-                        int32_t topk_idx = tRoutingIndex(token_idx);
-                        if(token_idx < BATCH_SIZE && topk_idx > 0){
-                            if constexpr (W13_LINEAR){
-                                cute::copy(copyB, tBgB(_,_,_,_,k_tile), tBsB(_,_,_,_,smem_wr_buffer));
-                            }
-                            else{
-                                cute::copy(copyB, tBgB(_,_,_,_,k_tile,topk_idx-1), tBsB(_,_,_,_,smem_wr_buffer));
-                            }
-                        }
+              // CP_ASYNC for loading B
+              int32_t token_idx =
+                  n_tile * MMA_N + lane_idx / cp_async_group_size;
+              int32_t topk_idx = tRoutingIndex(token_idx);
+              if (token_idx < BATCH_SIZE && topk_idx > 0) {
+                if constexpr (W13_LINEAR) {
+                  cute::copy(copyB,
+                             tBgB(_, _, _, _, k_tile),
+                             tBsB(_, _, _, _, smem_wr_buffer));
+                } else {
+                  cute::copy(copyB,
+                             tBgB(_, _, _, _, k_tile, topk_idx - 1),
+                             tBsB(_, _, _, _, smem_wr_buffer));
+                }
+              }
 
-                        cutlass::arch::cpasync_barrier_arrive_noinc(
-                            &shared_storage.b_full_mbar_ptr[smem_wr_buffer]);
+              cutlass::arch::cpasync_barrier_arrive_noinc(
+                  &shared_storage.b_full_mbar_ptr[smem_wr_buffer]);
 
-                        if (tma_wr_k_tile_next < k_tile_count) {
-                            peek_ab_empty_status = kernel::try_wait_barrier(
-                                shared_storage.ab_empty_mbar_ptr[smem_wr_buffer_next],
-                                tma_wr_ab_empty_phase_next);
-                        }
+              if (tma_wr_k_tile_next < k_tile_count) {
+                peek_ab_empty_status = kernel::try_wait_barrier(
+                    shared_storage.ab_empty_mbar_ptr[smem_wr_buffer_next],
+                    tma_wr_ab_empty_phase_next);
+              }
 
-                        tma_wr_k_tile = tma_wr_k_tile_next;
-                        smem_wr_buffer = smem_wr_buffer_next;
-                        tma_wr_ab_empty_phase = tma_wr_ab_empty_phase_next;
+              tma_wr_k_tile = tma_wr_k_tile_next;
+              smem_wr_buffer = smem_wr_buffer_next;
+              tma_wr_ab_empty_phase = tma_wr_ab_empty_phase_next;
 
-                    } // end for k_tile
-                } // end for n_tile
-            } // end for m_tile
-        }  // end if mask
-    } // end for expert_idx
+            } // end for k_tile
+          }   // end for n_tile
+        }     // end for m_tile
+      }       // end if mask
+    }         // end for expert_idx
   } else if (warp_idx == 4) {
     // MMA warp (1)
 
@@ -548,91 +563,95 @@ __device__ __noinline__ void
     int total_k_tile_count = 0;
     int num_tiles_executed = 0;
     int total_expert_count = 0;
-    for (int expert_idx=0; expert_idx < NUM_EXPERTS; ++expert_idx){
-        total_expert_count += mMask(expert_idx);
-        if(mMask(expert_idx) == 1 && (total_expert_count-1) % EXPERT_STRIDE == EXPERT_OFFSET){
-            for (int m_tile = 0; m_tile < cute::size<3>(tCgA); ++m_tile) {
-                for (int n_tile = 0; n_tile < cute::size<3>(tCgB); ++n_tile) {
+    for (int expert_idx = 0; expert_idx < NUM_EXPERTS; ++expert_idx) {
+      total_expert_count += mMask(expert_idx);
+      if (mMask(expert_idx) == 1 &&
+          (total_expert_count - 1) % EXPERT_STRIDE == EXPERT_OFFSET) {
+        for (int m_tile = 0; m_tile < cute::size<3>(tCgA); ++m_tile) {
+          for (int n_tile = 0; n_tile < cute::size<3>(tCgB); ++n_tile) {
 
-                    int acc_buf_idx = num_tiles_executed % NUM_ACC_STAGE;
-                    auto tCtAcc_Slice = tCtAcc(cute::_, cute::_, cute::_, acc_buf_idx);
+            int acc_buf_idx = num_tiles_executed % NUM_ACC_STAGE;
+            auto tCtAcc_Slice = tCtAcc(cute::_, cute::_, cute::_, acc_buf_idx);
 
-                    int num_prev_k_blk = total_k_tile_count;
-                    total_k_tile_count += k_tile_count;
+            int num_prev_k_blk = total_k_tile_count;
+            total_k_tile_count += k_tile_count;
 
-                    int mma_rd_k_tile = 0;
-                    int smem_rd_buffer = (num_prev_k_blk + mma_rd_k_tile) % NUM_AB_STAGE;
-                    int mma_rd_ab_full_phase =
-                        (num_prev_k_blk + mma_rd_k_tile) / NUM_AB_STAGE % 2;
+            int mma_rd_k_tile = 0;
+            int smem_rd_buffer =
+                (num_prev_k_blk + mma_rd_k_tile) % NUM_AB_STAGE;
+            int mma_rd_ab_full_phase =
+                (num_prev_k_blk + mma_rd_k_tile) / NUM_AB_STAGE % 2;
 
-                    // Peek full phase
-                    bool peek_a_full_status = kernel::try_wait_barrier(
-                        shared_storage.a_full_mbar_ptr[smem_rd_buffer],
-                        mma_rd_ab_full_phase);
-                    bool peek_b_full_status = kernel::try_wait_barrier(
-                        shared_storage.b_full_mbar_ptr[smem_rd_buffer],
-                        mma_rd_ab_full_phase);
+            // Peek full phase
+            bool peek_a_full_status = kernel::try_wait_barrier(
+                shared_storage.a_full_mbar_ptr[smem_rd_buffer],
+                mma_rd_ab_full_phase);
+            bool peek_b_full_status = kernel::try_wait_barrier(
+                shared_storage.b_full_mbar_ptr[smem_rd_buffer],
+                mma_rd_ab_full_phase);
 
-                    int acc_empty_phase = num_tiles_executed / NUM_ACC_STAGE % 2 ^ 1;
-                    cute::wait_barrier(shared_storage.acc_empty_mbar_ptr[acc_buf_idx],
-                                    acc_empty_phase);
+            int acc_empty_phase = num_tiles_executed / NUM_ACC_STAGE % 2 ^ 1;
+            cute::wait_barrier(shared_storage.acc_empty_mbar_ptr[acc_buf_idx],
+                               acc_empty_phase);
 
-                    // Initialize the accumulator to zero
-                    tiled_mma.accumulate_ = cute::UMMA::ScaleOut::Zero;
+            // Initialize the accumulator to zero
+            tiled_mma.accumulate_ = cute::UMMA::ScaleOut::Zero;
 
-                    for (int k_tile = 0; k_tile < k_tile_count; ++k_tile) {
-                        int mma_rd_k_tile_next = mma_rd_k_tile + 1;
-                        int smem_rd_buffer_next =
-                            (num_prev_k_blk + mma_rd_k_tile_next) % NUM_AB_STAGE;
-                        int mma_rd_ab_full_phase_next = smem_rd_buffer_next == 0
-                                                            ? mma_rd_ab_full_phase ^ 1
-                                                            : mma_rd_ab_full_phase;
+            for (int k_tile = 0; k_tile < k_tile_count; ++k_tile) {
+              int mma_rd_k_tile_next = mma_rd_k_tile + 1;
+              int smem_rd_buffer_next =
+                  (num_prev_k_blk + mma_rd_k_tile_next) % NUM_AB_STAGE;
+              int mma_rd_ab_full_phase_next = smem_rd_buffer_next == 0
+                                                  ? mma_rd_ab_full_phase ^ 1
+                                                  : mma_rd_ab_full_phase;
 
-                        if (!peek_a_full_status) {
-                            cute::wait_barrier(shared_storage.a_full_mbar_ptr[smem_rd_buffer],
-                                            mma_rd_ab_full_phase);
-                        }
+              if (!peek_a_full_status) {
+                cute::wait_barrier(
+                    shared_storage.a_full_mbar_ptr[smem_rd_buffer],
+                    mma_rd_ab_full_phase);
+              }
 
-                        if (!peek_b_full_status) {
-                            cute::wait_barrier(shared_storage.b_full_mbar_ptr[smem_rd_buffer],
-                                            mma_rd_ab_full_phase);
-                        }
+              if (!peek_b_full_status) {
+                cute::wait_barrier(
+                    shared_storage.b_full_mbar_ptr[smem_rd_buffer],
+                    mma_rd_ab_full_phase);
+              }
 
-                        // Perform MMA operation
-                        for (int k_block = 0; k_block < cute::size<2>(tCrA); ++k_block) {
-                            cute::gemm(tiled_mma,
-                                    tCrA(cute::_, cute::_, k_block, smem_rd_buffer),
-                                    tCrB(cute::_, cute::_, k_block, smem_rd_buffer),
-                                    tCtAcc_Slice);
-                            tiled_mma.accumulate_ = cute::UMMA::ScaleOut::One;
-                        }
+              // Perform MMA operation
+              for (int k_block = 0; k_block < cute::size<2>(tCrA); ++k_block) {
+                cute::gemm(tiled_mma,
+                           tCrA(cute::_, cute::_, k_block, smem_rd_buffer),
+                           tCrB(cute::_, cute::_, k_block, smem_rd_buffer),
+                           tCtAcc_Slice);
+                tiled_mma.accumulate_ = cute::UMMA::ScaleOut::One;
+              }
 
-                        cutlass::arch::umma_arrive(
-                            &shared_storage.ab_empty_mbar_ptr[smem_rd_buffer]);
+              cutlass::arch::umma_arrive(
+                  &shared_storage.ab_empty_mbar_ptr[smem_rd_buffer]);
 
-                        if (mma_rd_k_tile_next < k_tile_count) {
-                            peek_a_full_status = kernel::try_wait_barrier(
-                                shared_storage.a_full_mbar_ptr[smem_rd_buffer_next],
-                                mma_rd_ab_full_phase_next);
-                            peek_b_full_status = kernel::try_wait_barrier(
-                                shared_storage.b_full_mbar_ptr[smem_rd_buffer_next],
-                                mma_rd_ab_full_phase_next);
-                        }
+              if (mma_rd_k_tile_next < k_tile_count) {
+                peek_a_full_status = kernel::try_wait_barrier(
+                    shared_storage.a_full_mbar_ptr[smem_rd_buffer_next],
+                    mma_rd_ab_full_phase_next);
+                peek_b_full_status = kernel::try_wait_barrier(
+                    shared_storage.b_full_mbar_ptr[smem_rd_buffer_next],
+                    mma_rd_ab_full_phase_next);
+              }
 
-                        mma_rd_k_tile = mma_rd_k_tile_next;
-                        smem_rd_buffer = smem_rd_buffer_next;
-                        mma_rd_ab_full_phase = mma_rd_ab_full_phase_next;
+              mma_rd_k_tile = mma_rd_k_tile_next;
+              smem_rd_buffer = smem_rd_buffer_next;
+              mma_rd_ab_full_phase = mma_rd_ab_full_phase_next;
 
-                    } // end for k_tile
+            } // end for k_tile
 
-                    cutlass::arch::umma_arrive(
-                        &shared_storage.acc_full_mbar_ptr[acc_buf_idx]);
-                    num_tiles_executed++;
+            cutlass::arch::umma_arrive(
+                &shared_storage.acc_full_mbar_ptr[acc_buf_idx]);
+            num_tiles_executed++;
 
-                } // end for n_tile
-            } // end for m_tile
-        }  // end if mask
-    } // end for expert_idx
+          } // end for n_tile
+        }   // end for m_tile
+      }     // end if mask
+    }       // end for expert_idx
   } else if (warp_idx < 4) {
     // Epilogue warps (4)
 
@@ -649,26 +668,29 @@ __device__ __noinline__ void
     cutlass::NumericConverter<AccType, TypeBias> converterBias;
     cutlass::NumericConverter<TypeC, AccType> converter;
 
-    cute::TiledCopy tiled_copy_t2r = cute::make_tmem_copy(cute::SM100_TMEM_LOAD_32dp32b1x{}, tCtAcc(cute::_, cute::_, cute::_, 0)); 
+    cute::TiledCopy tiled_copy_t2r =
+        cute::make_tmem_copy(cute::SM100_TMEM_LOAD_32dp32b1x{},
+                             tCtAcc(cute::_, cute::_, cute::_, 0));
     cute::ThrCopy thr_copy_t2r = tiled_copy_t2r.get_slice(threadIdx.x);
-    cute::Tensor tTR_tAcc = thr_copy_t2r.partition_S(tCtAcc); 
+    cute::Tensor tTR_tAcc = thr_copy_t2r.partition_S(tCtAcc);
 
     cute::Tensor tCgC_fake = cute::make_tensor<TypeC>(cute::shape(
         tCtAcc(cute::_, cute::_, cute::_, 0))); // (T2R, T2R_M, T2R_N)
     cute::Tensor tTR_rAcc_fake = thr_copy_t2r.partition_D(tCgC_fake);
-    cute::Tensor tTR_rAcc = cute::make_tensor<AccType>(cute::shape(tTR_rAcc_fake));
+    cute::Tensor tTR_rAcc =
+        cute::make_tensor<AccType>(cute::shape(tTR_rAcc_fake));
 
     // if(threadIdx.x == 0) {
-    //   cute::print("tiled_copy_t2r:\t"); 
+    //   cute::print("tiled_copy_t2r:\t");
     //   cute::print(tiled_copy_t2r);
-    //   cute::print("\n"); 
+    //   cute::print("\n");
     //   cute::print("thr_copy_t2r:\t");
-    //   cute::print(thr_copy_t2r); 
-    //   cute::print("\n"); 
-    //   cute::print("tTR_tAcc:\t"); 
+    //   cute::print(thr_copy_t2r);
+    //   cute::print("\n");
+    //   cute::print("tTR_tAcc:\t");
     //   cute::print(tTR_tAcc);
     //   cute::print("\n");
-    //   cute::print("tTR_rAcc:\t"); 
+    //   cute::print("tTR_rAcc:\t");
     //   cute::print(tTR_rAcc);
     //   cute::print("\n");
     //   cute::print("tCtAcc:\t");
@@ -679,99 +701,103 @@ __device__ __noinline__ void
 
     int num_tiles_executed = 0;
     int total_expert_count = 0;
-    for (int expert_idx=0; expert_idx < NUM_EXPERTS; ++expert_idx){
-        total_expert_count += mMask(expert_idx);
-        if(mMask(expert_idx) == 1 && (total_expert_count-1) % EXPERT_STRIDE == EXPERT_OFFSET){
-            cute::Tensor tRoutingIndex = mRoutingIndices(expert_idx, cute::_);
-            for (int m_tile = 0; m_tile < cute::size<3>(tCgA); ++m_tile) {
-                for (int n_tile = 0; n_tile < cute::size<3>(tCgB); ++n_tile) {
-                    int acc_buf_idx = num_tiles_executed % NUM_ACC_STAGE;
-                    int acc_full_phase = num_tiles_executed / NUM_ACC_STAGE % 2;
-                    int c_smem_wr_buffer_idx = num_tiles_executed % NUM_C_STAGE;
+    for (int expert_idx = 0; expert_idx < NUM_EXPERTS; ++expert_idx) {
+      total_expert_count += mMask(expert_idx);
+      if (mMask(expert_idx) == 1 &&
+          (total_expert_count - 1) % EXPERT_STRIDE == EXPERT_OFFSET) {
+        cute::Tensor tRoutingIndex = mRoutingIndices(expert_idx, cute::_);
+        for (int m_tile = 0; m_tile < cute::size<3>(tCgA); ++m_tile) {
+          for (int n_tile = 0; n_tile < cute::size<3>(tCgB); ++n_tile) {
+            int acc_buf_idx = num_tiles_executed % NUM_ACC_STAGE;
+            int acc_full_phase = num_tiles_executed / NUM_ACC_STAGE % 2;
+            int c_smem_wr_buffer_idx = num_tiles_executed % NUM_C_STAGE;
 
-                    cute::Tensor tCgBias = gBias(cute::_, cute::_, n_tile, m_tile, expert_idx); // (Mma_M, Mma_N)
-                    cute::Tensor tCrBiasTypeBias = cute::make_tensor<TypeBias>(
-                        cute::shape(tTR_rAcc(0, cute::_, 0, 0))); // (T2R_M, T2R_N)
-                    cute::Tensor tCrBiasTypeAcc =
-                        cute::make_tensor<AccType>(cute::shape(tCrBiasTypeBias));
-                    cute::Tensor tCrC =
-                        cute::make_tensor<TypeC>(cute::shape(tCrBiasTypeBias));
+            cute::Tensor tCgBias = gBias(
+                cute::_, cute::_, n_tile, m_tile, expert_idx); // (Mma_M, Mma_N)
+            cute::Tensor tCrBiasTypeBias = cute::make_tensor<TypeBias>(
+                cute::shape(tTR_rAcc(0, cute::_, 0, 0))); // (T2R_M, T2R_N)
+            cute::Tensor tCrBiasTypeAcc =
+                cute::make_tensor<AccType>(cute::shape(tCrBiasTypeBias));
+            cute::Tensor tCrC =
+                cute::make_tensor<TypeC>(cute::shape(tCrBiasTypeBias));
 
-                    // if(threadIdx.x == 0 and m_tile == 0 and n_tile == 0) {
-                    //   cute::print("tCgBias:\t"); 
-                    //   cute::print(tCgBias);
-                    //   cute::print("\n");
-                    //   cute::print("tCrBiasTypeBias:\t");
-                    //   cute::print(tCrBiasTypeBias);
-                    //   cute::print("\n"); // 
-                    //   cute::print("tCrBiasTypeAcc:\t");
-                    //   cute::print(tCrBiasTypeAcc); 
-                    //   cute::print("\n"); //
-                    //   cute::print("tCrC:\t");
-                    //   cute::print(tCrC);
-                    //   cute::print("\n");
-                    // } epilogue_wg_barrier.arrive_and_wait();
+            // if(threadIdx.x == 0 and m_tile == 0 and n_tile == 0) {
+            //   cute::print("tCgBias:\t");
+            //   cute::print(tCgBias);
+            //   cute::print("\n");
+            //   cute::print("tCrBiasTypeBias:\t");
+            //   cute::print(tCrBiasTypeBias);
+            //   cute::print("\n"); //
+            //   cute::print("tCrBiasTypeAcc:\t");
+            //   cute::print(tCrBiasTypeAcc);
+            //   cute::print("\n"); //
+            //   cute::print("tCrC:\t");
+            //   cute::print(tCrC);
+            //   cute::print("\n");
+            // } epilogue_wg_barrier.arrive_and_wait();
 
-                    // T2R and register operations
-                    if constexpr (!NOBIAS) {
-                        // this copy might conflict with TMA load, might add a wait barrier if
-                        // needed
-                        cute::copy(tCgBias(cute::_, threadIdx.x), tCrBiasTypeBias);
-                        // optimize with vectorized type conversion
+            // T2R and register operations
+            if constexpr (!NOBIAS) {
+              // this copy might conflict with TMA load, might add a wait
+              // barrier if needed
+              cute::copy(tCgBias(cute::_, threadIdx.x), tCrBiasTypeBias);
+              // optimize with vectorized type conversion
 
-                        CUTE_UNROLL
-                        for (int i = 0; i < tCrBiasTypeBias.size(); i++) {
-                            tCrBiasTypeAcc[i] = converterBias(tCrBiasTypeBias[i]);
-                        }
-                    }
+              CUTE_UNROLL
+              for (int i = 0; i < tCrBiasTypeBias.size(); i++) {
+                tCrBiasTypeAcc[i] = converterBias(tCrBiasTypeBias[i]);
+              }
+            }
 
-                    cute::wait_barrier(shared_storage.acc_full_mbar_ptr[acc_buf_idx],
-                                    acc_full_phase);
-                    // T2R copy
-                    cute::copy(tiled_copy_t2r,
-                            tTR_tAcc(cute::_, cute::_, cute::_, cute::_, acc_buf_idx),
-                            tTR_rAcc);
+            cute::wait_barrier(shared_storage.acc_full_mbar_ptr[acc_buf_idx],
+                               acc_full_phase);
+            // T2R copy
+            cute::copy(
+                tiled_copy_t2r,
+                tTR_tAcc(cute::_, cute::_, cute::_, cute::_, acc_buf_idx),
+                tTR_rAcc);
 
-                    // arrive acc empty buffer
-                    epilogue_wg_barrier.arrive_and_wait();
-                    if (cute::elect_one_sync()) {
-                        cute::arrive_barrier(shared_storage.acc_empty_mbar_ptr[acc_buf_idx]);
-                        }
+            // arrive acc empty buffer
+            epilogue_wg_barrier.arrive_and_wait();
+            if (cute::elect_one_sync()) {
+              cute::arrive_barrier(
+                  shared_storage.acc_empty_mbar_ptr[acc_buf_idx]);
+            }
 
-                        if constexpr (!NOBIAS) {
-                        CUTE_UNROLL
-                        for (int i = 0; i < tTR_rAcc.size(); i++) {
-                            tTR_rAcc[i] += tCrBiasTypeAcc[i];
-                        }
-                    }
+            if constexpr (!NOBIAS) {
+              CUTE_UNROLL
+              for (int i = 0; i < tTR_rAcc.size(); i++) {
+                tTR_rAcc[i] += tCrBiasTypeAcc[i];
+              }
+            }
 
-                    CUTE_UNROLL
-                    for (int i = 0; i < tCrC.size(); i++) {
-                        tCrC[i] = converter(tTR_rAcc[i]);
-                    }
+            CUTE_UNROLL
+            for (int i = 0; i < tCrC.size(); i++) {
+              tCrC[i] = converter(tTR_rAcc[i]);
+            }
 
-                    // // R2S copy
-                    // cute::Tensor sC_epi_slice =
-                    //     cute::flatten(sC_epi(cute::_, 0, 0, c_smem_wr_buffer_idx));
-                    // cute::copy(tCrC, sC_epi_slice(cute::_, threadIdx.x));
+            // // R2S copy
+            // cute::Tensor sC_epi_slice =
+            //     cute::flatten(sC_epi(cute::_, 0, 0, c_smem_wr_buffer_idx));
+            // cute::copy(tCrC, sC_epi_slice(cute::_, threadIdx.x));
 
-                    // R2G store, use cp.async.bulk here
-                    CUTE_UNROLL
-                    for (int i = 0; i < MMA_N; ++i) {
-                        int32_t m_idx = m_tile * MMA_M + threadIdx.x;
-                        int32_t n_idx = n_tile * MMA_N + i;
-                        if (n_idx < BATCH_SIZE && tRoutingIndex(n_idx) > 0) {
-                            mOutput(n_idx, tRoutingIndex(n_idx) - 1, m_idx) = tCrC[i];
-                        }
-                    }
-                    epilogue_wg_barrier.arrive_and_wait();
+            // R2G store, use cp.async.bulk here
+            CUTE_UNROLL
+            for (int i = 0; i < MMA_N; ++i) {
+              int32_t m_idx = m_tile * MMA_M + threadIdx.x;
+              int32_t n_idx = n_tile * MMA_N + i;
+              if (n_idx < BATCH_SIZE && tRoutingIndex(n_idx) > 0) {
+                mOutput(n_idx, tRoutingIndex(n_idx) - 1, m_idx) = tCrC[i];
+              }
+            }
+            epilogue_wg_barrier.arrive_and_wait();
 
-                    num_tiles_executed++;
-                } // end for n_tile
-            } // end for m_tile
-        }  // end if mask
-    } // end for expert_idx
-  } // end of epilogue warps
+            num_tiles_executed++;
+          } // end for n_tile
+        }   // end for m_tile
+      }     // end if mask
+    }       // end for expert_idx
+  }         // end of epilogue warps
   __syncthreads();
 
   if (warp_idx == 0) {

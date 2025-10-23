@@ -55,30 +55,33 @@ struct PipedSharedStorage {
 };
 
 // Gated Topk storage. The shared memory buffers for A, B, and C matrices.
-template <class TypeA,           // Tensor A data type
-          class TypeB,           // Tensor B data type
-          class TypeRed,         // Tensor C data type
-          class ASmemLayout,     
+template <class TypeA,   // Tensor A data type
+          class TypeB,   // Tensor B data type
+          class TypeRed, // Tensor C data type
+          class ASmemLayout,
           class BSmemLayout,
           int Num_AB_Stage,
-          int Num_ACC_Stage> 
-struct GateTopKSharedStorage
-{
+          int Num_ACC_Stage>
+struct GateTopKSharedStorage {
   alignas(128) cute::ArrayEngine<TypeA, cute::cosize_v<ASmemLayout>> A;
   alignas(128) cute::ArrayEngine<TypeB, cute::cosize_v<BSmemLayout>> B;
 
-  alignas(16) cute::uint64_t ab_full_mbar_ptr[Num_AB_Stage];  
-  alignas(16) cute::uint64_t ab_empty_mbar_ptr[Num_AB_Stage]; 
+  alignas(16) cute::uint64_t ab_full_mbar_ptr[Num_AB_Stage];
+  alignas(16) cute::uint64_t ab_empty_mbar_ptr[Num_AB_Stage];
 
-  alignas(16) cute::uint64_t acc_full_mbar_ptr[Num_ACC_Stage];  
-  alignas(16) cute::uint64_t acc_empty_mbar_ptr[Num_ACC_Stage]; 
+  alignas(16) cute::uint64_t acc_full_mbar_ptr[Num_ACC_Stage];
+  alignas(16) cute::uint64_t acc_empty_mbar_ptr[Num_ACC_Stage];
 
   alignas(16) cute::uint32_t tmem_base_ptr; // Base pointer for TMEM allocation
 
-  alignas(16) TypeRed reduce_values_buffer[32];  // Buffer for reduction values
+  alignas(16) TypeRed reduce_values_buffer[32]; // Buffer for reduction values
 
-  CUTE_DEVICE constexpr auto tensor_sA() { return cute::make_tensor(cute::make_smem_ptr(A.begin()), ASmemLayout{}); }
-  CUTE_DEVICE constexpr auto tensor_sB() { return cute::make_tensor(cute::make_smem_ptr(B.begin()), BSmemLayout{}); }
+  CUTE_DEVICE constexpr auto tensor_sA() {
+    return cute::make_tensor(cute::make_smem_ptr(A.begin()), ASmemLayout{});
+  }
+  CUTE_DEVICE constexpr auto tensor_sB() {
+    return cute::make_tensor(cute::make_smem_ptr(B.begin()), BSmemLayout{});
+  }
 };
 
 // MoE Linear task storage. The shared memory buffers for A, B, and C matrices.
@@ -118,6 +121,5 @@ struct MoESharedStorage {
     return cute::make_tensor(cute::make_smem_ptr(B.begin()), BSmemCpLayout{});
   }
 };
-
 
 } // namespace kernel
