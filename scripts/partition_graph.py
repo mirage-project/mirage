@@ -418,23 +418,8 @@ def partition_graph_with_dp(model,
                 print(f"Partition {p_id}: {[op.name for op in partition_ops]}")
                 
                 partition_subgraph = {}
-                for op in partition_ops:
-                    partition_subgraph[op] = True # True doesn't mean anything here - placeholder
-                
-                kernel_graph, dims = to_kernel_graph(partition_subgraph)
-                # graph_hash = kernel_graph.get_owner_independent_hash()
-                # if graph_hash in hashes:
-                #     continue
-                # hashes.add(graph_hash)
-                # kernel_graph.to_json(f"original_{graph_hash}.json")
-                # try:
-                #     print(f"Superoptimizing {graph_hash}")
-                #     optimized_graph, best_perf = kernel_graph.superoptimize()
-                # except Exception as e:
-                #     print(f"Subgraph {graph_hash} superoptimize failed with error: {e}")
-                #     continue
 
-    return subgraphs
+                kernel_graph, dims = to_kernel_graph(partition_subgraph)
                 partition_subgraph = {op: True for op in partition_ops}
                 fine_grained_partitions.append((partition_subgraph, "mirage"))
                 print(f"    Created partition {p_id}: {len(partition_ops)} ops")
