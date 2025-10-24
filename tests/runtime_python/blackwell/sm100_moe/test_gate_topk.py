@@ -21,13 +21,12 @@ for num_expert in num_experts_list:
         # Random gating outputs (pre-softmax logits) should be using bfloat16 but the bfloat16 range is a bit small for randn so we test with float here
         gating_output = torch.randn((batch_size, num_expert), device="cuda", dtype=torch.bfloat16, generator=g)
 
-        topk_indices = torch.empty(batch_size, num_topk, device="cuda", dtype=torch.int32)
         topk_weights = torch.empty(batch_size, num_topk, device="cuda", dtype=torch.float)
         mpk_routing_indices = torch.zeros((num_expert, batch_size), device="cuda", dtype=torch.int32)
         mpk_expert_mask = torch.zeros((num_expert,), device="cuda", dtype=torch.int32)
 
         # Run fused topk softmax
-        runtime_kernel_blackwell.topk_softmax_sm100(gating_output, topk_indices, topk_weights, mpk_routing_indices, mpk_expert_mask)
+        runtime_kernel_blackwell.topk_softmax_sm100(gating_output, topk_weights, mpk_routing_indices, mpk_expert_mask)
 
         # Reference: select topk then softmax over those values
         gating_output_f = gating_output.to(torch.float)
@@ -47,12 +46,6 @@ for num_expert in num_experts_list:
                 torch_routing_indices[expert_idx, token_idx] = topk_idx + 1
                 torch_expert_mask[expert_idx] = 1
 
-        torch.testing.assert_close(
-            topk_indices,
-            torch_topk_indices.to(torch.int32),
-            rtol=1e-2,
-            atol=1e-2,
-        )
         torch.testing.assert_close(
             topk_weights,
             torch_topk_weights,
@@ -75,7 +68,7 @@ for num_expert in num_experts_list:
 
         # Warm-up
         for _ in range(16):
-            runtime_kernel_blackwell.topk_softmax_sm100(gating_output, topk_indices, topk_weights, mpk_routing_indices, mpk_expert_mask)
+            runtime_kernel_blackwell.topk_softmax_sm100(gating_output, topk_weights, mpk_routing_indices, mpk_expert_mask)
 
         torch.cuda.synchronize()
         starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(
@@ -84,7 +77,7 @@ for num_expert in num_experts_list:
         repetitions = 1000
         starter.record()
         for rep in range(repetitions):
-            runtime_kernel_blackwell.topk_softmax_sm100(gating_output, topk_indices, topk_weights, mpk_routing_indices, mpk_expert_mask)
+            runtime_kernel_blackwell.topk_softmax_sm100(gating_output, topk_weights, mpk_routing_indices, mpk_expert_mask)
         ender.record()
         torch.cuda.synchronize()
         total_time = starter.elapsed_time(ender)

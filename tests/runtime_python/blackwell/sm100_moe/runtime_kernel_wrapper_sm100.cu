@@ -12,9 +12,9 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+#include "runtime_header.h"
 #include "blackwell/task_header.cuh"
 #include "hopper/tma_2d.cuh"
-#include "runtime_header.h"
 #include "tma.cuh"
 #include <cuda_runtime.h>
 #include <torch/extension.h>
@@ -44,7 +44,6 @@ template <typename T, int EXPERTS, int BYTES_PER_LDG>
 __global__ __launch_bounds__(256) void topk_softmax_kernel(
     T const *__restrict__ gating_output,
     float *__restrict__ topk_weights,
-    int *__restrict__ topk_indices,
     int *__restrict__ mpk_routing_indices, // [EXPERTS, num_rows] expert-major
     int *__restrict__ mpk_expert_mask,     // [EXPERTS]
     int num_rows,
@@ -58,7 +57,6 @@ __global__ __launch_bounds__(256) void topk_softmax_kernel(
       /*finished*/ nullptr,
       topk_weights,
       num_rows,
-      topk_indices,
       k,
       mpk_routing_indices,
       mpk_expert_mask,
@@ -69,17 +67,14 @@ __global__ __launch_bounds__(256) void topk_softmax_kernel(
 
 // New: expose a direct fused TopK softmax without GEMM
 void topk_softmax_sm100_kernel(torch::Tensor gating_output,
-                               torch::Tensor topk_indices,
                                torch::Tensor topk_weights,
                                torch::Tensor mpk_routing_indices,
                                torch::Tensor mpk_expert_mask) {
 
   int const BATCH_SIZE = static_cast<int>(gating_output.size(0));
   int const OUTPUT_SIZE = static_cast<int>(gating_output.size(1));
-  int const NUM_TOPK = static_cast<int>(topk_indices.size(1));
+  int const NUM_TOPK = static_cast<int>(topk_weights.size(1));
 
-  assert(topk_indices.size(0) == BATCH_SIZE &&
-         topk_indices.size(1) == NUM_TOPK);
   assert(topk_weights.size(0) == BATCH_SIZE &&
          topk_weights.size(1) == NUM_TOPK);
   assert(mpk_routing_indices.size(0) == OUTPUT_SIZE &&
@@ -98,7 +93,6 @@ void topk_softmax_sm100_kernel(torch::Tensor gating_output,
         <<<grid_dim, block_dim, 0>>>(
             static_cast<const T *>(gating_output.data_ptr()),
             topk_weights.data_ptr<float>(),
-            topk_indices.data_ptr<int>(),
             mpk_routing_indices.data_ptr<int>(),
             mpk_expert_mask.data_ptr<int>(),
             BATCH_SIZE,

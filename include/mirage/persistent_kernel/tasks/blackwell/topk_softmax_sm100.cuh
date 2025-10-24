@@ -70,7 +70,6 @@ __device__ __noinline__ void topk_softmax_task_impl(
     bool const *__restrict__ finished,
     float *__restrict__ output, // [num_rows, k]
     int const num_rows,
-    int *__restrict__ indices, // [num_rows, k]
     int const k,
     int *__restrict__ mpk_routing_indices, // [NUM_EXPERTS, num_rows] laid out
                                            // as expert-major: expert * num_rows
@@ -215,8 +214,8 @@ __device__ __noinline__ void topk_softmax_task_impl(
         bool const should_process_row = row_is_active && node_uses_expert;
         int const out_idx = k * thread_row + k_idx;
         output[out_idx] = max_val;
-        indices[out_idx] =
-            should_process_row ? (expert - start_expert) : NUM_EXPERTS;
+        // indices[out_idx] =
+        //     should_process_row ? (expert - start_expert) : NUM_EXPERTS;
         row_sum_for_renormalize += max_val;
         // Optionally populate MPK routing structures
         if (should_process_row && mpk_routing_indices != nullptr &&
