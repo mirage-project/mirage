@@ -293,7 +293,7 @@
    // const int REDUCTION_SIZE = weight.size(1);
  
    constexpr int BATCH_SIZE = 16;
-   constexpr int OUTPUT_SIZE = 128;
+   constexpr int OUTPUT_SIZE = 64;
    constexpr int REDUCTION_SIZE = 128;
    constexpr int NUM_EXPERTS = 128;
    constexpr int NUM_TOPK = 8;

@@ -7,7 +7,7 @@ torch.set_printoptions(sci_mode=False, profile="full")
 g = torch.Generator(device="cuda").manual_seed(1234)
 
 reduction_sizes = [128]
-output_sizes = [128]
+output_sizes = [64]
 batch_size = 16
 num_experts = 128
 num_topk = 8
@@ -49,9 +49,9 @@ for reduction_size in reduction_sizes:
         #     for j in range(output_size):
         #         for k in range(reduction_size):
         #             w[i, j, k] = 0.1
-        x.fill_(0)
-        w.fill_(1)
-        x[0, 0] = 0.1
+        # x.fill_(0)
+        # w.fill_(1)
+        # x[0, 0] = 0.1
 
         # for i in range(output_size):
         #     for j in range(reduction_size):
@@ -110,8 +110,8 @@ for reduction_size in reduction_sizes:
         # print("output from kernel:")
         # print(output)
         print("output[0,0,0] address is ", hex(output[0,0,0].data_ptr()))
-        # print("output_torch.shape is ", torch_out.shape, "output from torch:")
-        # print(torch_out)
+        print("output_torch.shape is ", torch_out.shape, "output from torch:")
+        print(torch_out)
 
         print("output.shape is ", output.shape, "output:")
         print(output)
