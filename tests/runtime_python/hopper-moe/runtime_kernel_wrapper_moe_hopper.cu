@@ -168,8 +168,7 @@
    tma_desc_weight = desc_w_ptr;
  
    // Residual
-  //  cute::Layout layout_bias = cute::make_layout(cute::make_shape(BATCH_SIZE, OUTPUT_SIZE, NUM_EXPERTS), cute::make_stride(OUTPUT_SIZE, cute::Int<1>{}, BATCH_SIZE * OUTPUT_SIZE));
-    cute::Layout layout_bias = cute::make_layout(cute::make_shape(OUTPUT_SIZE, BATCH_SIZE, NUM_EXPERTS), cute::make_stride(cute::Int<1>{}, OUTPUT_SIZE, BATCH_SIZE * OUTPUT_SIZE)); 
+    cute::Layout layout_bias = cute::make_layout(cute::make_shape(BATCH_SIZE, OUTPUT_SIZE, NUM_EXPERTS), cute::make_stride(OUTPUT_SIZE, cute::Int<1>{}, BATCH_SIZE * OUTPUT_SIZE));
     cute::Tensor mBias = cute::make_tensor(cute::make_gmem_ptr(static_cast<T*>(residual_ptr)), layout_bias);
  
    // Topk_indices
@@ -181,8 +180,12 @@
    cute::Tensor mMask = cute::make_tensor(cute::make_gmem_ptr(static_cast<int32_t*>(mpk_expert_mask_ptr)), layout_expert_mask);
  
    // Output
+   // NOTE(Yu): (B,K,O) will coalesce, so we use (B,O,K)
   //  cute::Layout layout_output = cute::make_layout(cute::make_shape(BATCH_SIZE, NUM_TOPK, OUTPUT_SIZE), cute::make_stride(NUM_TOPK * OUTPUT_SIZE, OUTPUT_SIZE, cute::Int<1>{}));
-   cute::Layout layout_output = cute::make_layout(cute::make_shape(OUTPUT_SIZE, NUM_TOPK, BATCH_SIZE), cute::make_stride(cute::Int<1>{}, OUTPUT_SIZE, NUM_TOPK * OUTPUT_SIZE));
+  cute::Layout layout_output = cute::make_layout(cute::make_shape(BATCH_SIZE, OUTPUT_SIZE, NUM_TOPK), cute::make_stride(NUM_TOPK * OUTPUT_SIZE, cute::Int<1>{}, OUTPUT_SIZE));
+  // transpose stride for batch size and output size
+  // cute::Layout layout_output = cute::make_layout(cute::make_shape(BATCH_SIZE, OUTPUT_SIZE, NUM_TOPK), cute::make_stride(cute::Int<1>{}, NUM_TOPK * OUTPUT_SIZE, OUTPUT_SIZE));
+   
    cute::Tensor mOutput = cute::make_tensor(cute::make_gmem_ptr(static_cast<T*>(output_ptr)), layout_output);
  
    dim3 grid_dim(1, 1, 1);
@@ -289,9 +292,9 @@
    // const int OUTPUT_SIZE = output.size(1);
    // const int REDUCTION_SIZE = weight.size(1);
  
-   constexpr int BATCH_SIZE = 8;
+   constexpr int BATCH_SIZE = 16;
    constexpr int OUTPUT_SIZE = 128;
-   constexpr int REDUCTION_SIZE = 2048;
+   constexpr int REDUCTION_SIZE = 128;
    constexpr int NUM_EXPERTS = 128;
    constexpr int NUM_TOPK = 8;
    constexpr int EXPERT_OFFSET = 0;
@@ -329,9 +332,9 @@
    // const int OUTPUT_SIZE = output.size(1);
    // const int REDUCTION_SIZE = weight.size(1);
  
-   constexpr int BATCH_SIZE = 8;
+   constexpr int BATCH_SIZE = 16;
    constexpr int OUTPUT_SIZE = 128;
-   constexpr int REDUCTION_SIZE = 2048;
+   constexpr int REDUCTION_SIZE = 128;
    constexpr int NUM_EXPERTS = 128;
    constexpr int NUM_TOPK = 8;
    constexpr int EXPERT_OFFSET = 0;

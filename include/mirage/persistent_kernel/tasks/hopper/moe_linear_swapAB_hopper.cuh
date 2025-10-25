@@ -108,6 +108,7 @@ moe_linear_sm90_task_impl(const TMA_A &tma_a,
   constexpr int num_tmem_columns = MMA_N * NUM_ACC_STAGE;
   using TypeAcc = float;
   constexpr int NUM_THREAD_PER_WARPGROUP = 128;
+  constexpr int CONSUMER_SYNC_BARRIER_ID = 5;
 
   // Define TileShape and AtomLayout
   constexpr int MMA_K = 64; // 16*4
@@ -150,10 +151,11 @@ moe_linear_sm90_task_impl(const TMA_A &tma_a,
   //   * Coordinate to use for slicing the partitioned tensor
   //   * Projection to ignore unwanted modes of the Tiler and Coordinate
   auto mma_coord = cute::select<1, 2, 3>(mma_coord_vmnk);
-  // auto cd_tiler =
-  //     cute::make_shape(bN, bM, bK); // (MmaTile_N, MmaTile_M, MmaTile_K)
   auto cd_tiler =
-  cute::make_shape(bM, bN, bK); // (MmaTile_M, MmaTile_N, MmaTile_K)
+      cute::make_shape(bN, bM, bK); // (MmaTile_N, MmaTile_M, MmaTile_K)
+  auto output_tiler = cute::make_shape(bN, bM, NUM_TOPK); // (MmaTile_N, MmaTile_M, NUM_TOPK)
+  // auto cd_tiler =
+  // cute::make_shape(bM, bN, bK); // (MmaTile_M, MmaTile_N, MmaTile_K)
 
   cute::Tensor mA = cute::make_coord_tensor(cute::make_layout(
       cute::make_shape(OUTPUT_SIZE, REDUCTION_SIZE, NUM_EXPERTS),
@@ -202,6 +204,9 @@ moe_linear_sm90_task_impl(const TMA_A &tma_a,
   cute::Tensor gBias = cute::local_tile(
       mBias, cd_tiler, mma_coord, cute::Step<cute::_1, cute::_1, cute::X>{});
 
+  cute::Tensor gOutput = cute::local_tile(mOutput, output_tiler, mma_coord, cute::Step<cute::_1, cute::_1, cute::X>{});
+      // cute::Tensor tCgD = thread_mma.partition_C(gOutputTile);
+
   if (cute::thread0()) {
     cute::print("mA:\t");
     cute::print(mA);
@@ -227,6 +232,11 @@ moe_linear_sm90_task_impl(const TMA_A &tma_a,
     cute::print("gBias:\t");
     cute::print(gBias);
     cute::print("\n");
+
+    printf("gOutput:\t");
+    cute::print(gOutput);
+    printf("\n");
+
   }
   __syncthreads();
 
@@ -489,7 +499,8 @@ cutlass::arch::NamedBarrier epilogue_wg_barrier(128, /*bar-id=*/cutlass::arch::R
   // Represent the SMEM buffers for A and B
   // cute::Tensor tCsA = shared_storage.tensor_sA(); // (MmaA, NumMma_M, NumMma_K, Tiles_K)
   // cute::Tensor tCsB = shared_storage.tensor_sB(); // (MmaB, NumMma_M, NumMma_K, Tiles_K)
-  cute::Tensor sB = shared_storage.tensor_cp_sB(); // Layout for cp_async
+  cute::Tensor sA = shared_storage.tensor_sA(); // (MmaA, NumMma_M, NumMma_K, Tiles_K)
+  cute::Tensor sB = shared_storage.tensor_cp_sB(); // (MmaB, NumMma_M, NumMma_K, Tiles_K)
   cute::Tensor sC_epi = shared_storage.tensor_sC(); // (EpiTile)
   constexpr int MmaWarpGroups = size(tiled_mma) / NUM_THREAD_PER_WARPGROUP;
   cute::Layout warp_group_thread_layout = cute::make_layout(cute::Int<MmaWarpGroups>{},
@@ -506,6 +517,12 @@ cutlass::arch::NamedBarrier epilogue_wg_barrier(128, /*bar-id=*/cutlass::arch::R
       cute::print("\n");
       // printf("size(tiled_mma): %d\n");
       // cute::print(size(tiled_mma));
+      printf("sA: ");
+      cute::print(sA);
+      printf("\n");
+      printf("sB: ");
+      cute::print(sB);
+      printf("\n");
       printf("tCsA: ");
       cute::print(tCsA);
       printf("\n");
@@ -571,7 +588,7 @@ cutlass::arch::NamedBarrier epilogue_wg_barrier(128, /*bar-id=*/cutlass::arch::R
 
   constexpr int TILE_SIZE = 64;
   constexpr int WEIGHT_TMA_TILE_SIZE = 64;
-  constexpr int OUTPUT_ATOM_SIZE = 128;
+  constexpr int OUTPUT_ATOM_SIZE = 64;
   constexpr int B = 3;
   constexpr int M = 3;
   constexpr int S = 3;
@@ -670,6 +687,9 @@ cutlass::arch::NamedBarrier epilogue_wg_barrier(128, /*bar-id=*/cutlass::arch::R
 
   // int k_tile_count = cute::size<4>(tCrA);
   int k_tile_count = REDUCTION_SIZE / 64;
+  if (threadIdx.x == 0) {
+    printf("k_tile_count: %d\n", k_tile_count);
+  }
   // constexpr int NUM_K_TILES = 
 
 // //   using TmemAllocator = cute::TMEM::Allocator1Sm;
@@ -681,31 +701,31 @@ cutlass::arch::NamedBarrier epilogue_wg_barrier(128, /*bar-id=*/cutlass::arch::R
     // DMA warp (4)
 
     const uint32_t lane_idx = cutlass::canonical_lane_idx();
-    cute::ThrCopy thr_copy_b = copyB.get_slice(lane_idx);
+    // cute::ThrCopy thr_copy_b = copyB.get_slice(lane_idx);
+    const uint32_t tid_in_wg = threadIdx.x % NUM_THREAD_PER_WARPGROUP;
+    cute::ThrCopy thr_copy_b = copyB.get_slice(tid_in_wg);
     cute::Tensor tBgB = thr_copy_b.partition_S(gB); // (ThrB, ThrTile_N)
     cute::Tensor tBsB = thr_copy_b.partition_D(sB); // (ThrB, ThrTile_N) NOTE(Yu): use cp_sb layout here
-    // if (threadIdx.x == 128) {
-    //   printf("cp_async_group_size: %d\n", cp_async_group_size);
-    //   printf("sB:\t");
-    //   cute::print(shared_storage.tensor_sB());
-    //   printf("\n");
-    //   printf("sB_cp_layout: ");
-    //   cute::print(shared_storage.tensor_cp_sB());
-    //   printf("\n");
-    //   cute::print("copyB:\t");
-    //   cute::print(copyB);
-    //   cute::print("\n");
-    //   cute::print("thr_copy_b:\t");
-    //   cute::print(thr_copy_b);
-    //   cute::print("\n");
-    //   cute::print("tBgB:\t");
-    //   cute::print(tBgB);
-    //   cute::print("\n");
-    //   cute::print("tBsB:\t");
-    //   cute::print(tBsB);
-    //   cute::print("\n");
-    // } 
-    // __syncwarp();
+    if (threadIdx.x == 128) {
+      // printf("cp_async_group_size: %d\n", cp_async_group_size);
+      // printf("sB:\t");
+      // cute::print(shared_storage.tensor_sB());
+      // printf("\n");
+      // printf("sB_cp_layout: ");
+      // cute::print(shared_storage.tensor_cp_sB());
+      // printf("\n");
+      // cute::print("copyB:\t");
+      // cute::print(copyB);
+      // cute::print("\n");
+      // cute::print("thr_copy_b:\t");
+      // cute::print(thr_copy_b);
+      // cute::print("\n");
+      // cute::print("tBgB:\t");
+      // cute::print(tBgB);
+      // cute::print("\n");
+
+    } 
+    __syncwarp();
 
     int total_k_tile_count = 0;
     int total_expert_count = 0;
@@ -769,11 +789,15 @@ cutlass::arch::NamedBarrier epilogue_wg_barrier(128, /*bar-id=*/cutlass::arch::R
                         //   printf()
                         // }
                         // CP_ASYNC for loading B
-                        int32_t topk_idx = tRoutingIndex(n_tile * MMA_N + lane_idx / cp_async_group_size);
                         // if (threadIdx.x == 128) {
                         //   printf("topk_idx: %d\n", topk_idx);
                         // }
-                        if(topk_idx > 0){
+
+
+                        // int32_t token_idx = n_tile * MMA_N + lane_idx / cp_async_group_size;
+                        int32_t token_idx = n_tile * MMA_N + tid_in_wg / cp_async_group_size;
+                        int32_t topk_idx = tRoutingIndex(token_idx);
+                        if(token_idx < BATCH_SIZE && topk_idx > 0){
                             if constexpr (W13_LINEAR){
                                 cute::copy(copyB, tBgB(cute::_,cute::_,cute::_,cute::_,k_tile), tBsB(cute::_,cute::_,cute::_,cute::_,smem_wr_buffer));
                             }
@@ -855,7 +879,8 @@ cutlass::arch::NamedBarrier epilogue_wg_barrier(128, /*bar-id=*/cutlass::arch::R
 
                     cute::Tensor accum = cute::partition_fragment_C(
                       tiled_mma, cute::take<0, 2>(mma_tiler)); // (MMA,MMA_M,MMA_N)
-
+                    // Clear the accumulator
+                    // cute::clear(accum);
                     // Initialize the accumulator to zero
                     tiled_mma.accumulate_ = cute::GMMA::ScaleOut::Zero;
 
@@ -876,9 +901,53 @@ cutlass::arch::NamedBarrier epilogue_wg_barrier(128, /*bar-id=*/cutlass::arch::R
                             cute::wait_barrier(shared_storage.b_full_mbar_ptr[smem_rd_buffer],
                                             mma_rd_ab_full_phase);
                         }
+#if 0
+                        if (threadIdx.x == 0) {
+                          printf("m_tile: %d, n_tile: %d, smem_rd_buffer: %d\n", m_tile, n_tile, smem_rd_buffer);
+                          for (int p = 0; p < 4; p++) {
+                            auto tCsA_tile = tCsA(cute::_, cute::_, p, smem_rd_buffer);
+                            printf("======== p = %d, n = %d, tCsA_tile: ========\n", p, n_tile);
+                            cute::print(tCsA_tile);
+                            printf("\n");
+                            auto start_ptr = tCsA_tile.data();
+                            printf("p = %d, start_ptr: %p\n", p, start_ptr);
+                            printf("p = %d, tCsA_tile raw data: \n", p);
+                            for (int i = 0; i < 64; i++) {
+                              for (int j = 0; j < 16; j++) {
+                                printf("%f ", static_cast<float>(*(start_ptr + i * 64 + j)));
+                              }
+                              printf("\n");
+                            }
+                            printf("\n");
+
+                            auto tCsB_tile = tCsB(cute::_, cute::_, p, smem_rd_buffer);
+                            printf("======== p = %d, n = %d, tCsB_tile: ========\n", p, n_tile);
+                            cute::print(tCsB_tile);
+                            printf("\n");
+                            auto start_ptr_b = tCsB_tile.data();
+                            cute::print(start_ptr_b);
+                            printf("\n");
+                            printf("start_ptr_b: %p\n", start_ptr_b);
+                            printf("\n");
+
+                            printf("p = %d, start_ptr_b: %p\n", p, start_ptr_b);
+                            printf("p = %d, tCsB_tile raw data: \n", p);
+                            for (int i = 0; i < 16; i++) {
+                              // printf("start ptr_b[%d]: %p\n", i, start_ptr_b + i * 64);
+                              for (int j = 0; j < 16; j++) {
+                                printf("%f ", static_cast<float>(*(start_ptr_b + i * 64 + j)));
+                              }
+                              printf("\n");
+                            }
+                            printf("\n");
+                          }
+                        }
+#endif
 
 
-
+                      cute::warpgroup_fence_operand(accum);
+                      {
+                        cute::warpgroup_arrive();
                         // Perform MMA operation
                         for (int k_block = 0; k_block < cute::size<2>(tCrA); ++k_block) {
                             cute::gemm(tiled_mma,
@@ -887,23 +956,29 @@ cutlass::arch::NamedBarrier epilogue_wg_barrier(128, /*bar-id=*/cutlass::arch::R
                                     accum);
                             tiled_mma.accumulate_ = cute::GMMA::ScaleOut::One;
                         }
-                         // only one thread will issue the arrive instruction
-                        if (threadIdx.x % NUM_THREAD_PER_WARPGROUP == 0) {
-                          cute::arrive_barrier(
-                              shared_storage.ab_empty_mbar_ptr[smem_rd_buffer]);
-                        }
-                        if (mma_rd_k_tile_next < k_tile_count) {
-                            peek_a_full_status = kernel::try_wait_barrier(
-                                shared_storage.a_full_mbar_ptr[smem_rd_buffer_next],
-                                mma_rd_ab_full_phase_next);
-                            peek_b_full_status = kernel::try_wait_barrier(
-                                shared_storage.b_full_mbar_ptr[smem_rd_buffer_next],
-                                mma_rd_ab_full_phase_next);
-                        }
+                        cute::warpgroup_commit_batch();
+                        cute::warpgroup_wait<0>();
+                      }
+                      cute::warpgroup_fence_operand(accum);
 
-                        mma_rd_k_tile = mma_rd_k_tile_next;
-                        smem_rd_buffer = smem_rd_buffer_next;
-                        mma_rd_ab_full_phase = mma_rd_ab_full_phase_next;
+                      // only one thread will issue the arrive instruction
+                      if (threadIdx.x % NUM_THREAD_PER_WARPGROUP == 0) {
+                        cute::arrive_barrier(
+                            shared_storage.ab_empty_mbar_ptr[smem_rd_buffer]);
+                      }
+                      if (mma_rd_k_tile_next < k_tile_count) {
+                          peek_a_full_status = kernel::try_wait_barrier(
+                              shared_storage.a_full_mbar_ptr[smem_rd_buffer_next],
+                              mma_rd_ab_full_phase_next);
+                          peek_b_full_status = kernel::try_wait_barrier(
+                              shared_storage.b_full_mbar_ptr[smem_rd_buffer_next],
+                              mma_rd_ab_full_phase_next);
+                      }
+
+                      mma_rd_k_tile = mma_rd_k_tile_next;
+                      smem_rd_buffer = smem_rd_buffer_next;
+                      mma_rd_ab_full_phase = mma_rd_ab_full_phase_next;
+                      
 
                     } // end for k_tile
                     
@@ -924,8 +999,8 @@ cutlass::arch::NamedBarrier epilogue_wg_barrier(128, /*bar-id=*/cutlass::arch::R
                     cutlass::NumericConverter<TypeAcc, TypeBias> TypeBias_to_TypeAcc;
                     cutlass::NumericConverter<TypeC, TypeAcc> TypeAcc_to_TypeC;
 
-                    cute::Tensor tCgBias = gBias(cute::_, cute::_, n_tile, m_tile, expert_idx); // (Mma_M, Mma_N)
-                    auto tTbias = thread_mma.partition_C(tCgBias);
+                    cute::Tensor gBiasTile = gBias(cute::_, cute::_, n_tile, m_tile, expert_idx); // (Mma_M, Mma_N)
+                    auto tCgBias = thread_mma.partition_C(gBiasTile);
 
                     // using ThreadOp = cutlass::epilogue::thread::LinearCombination<
                     //     TypeC, // ElementOutput_
@@ -938,50 +1013,120 @@ cutlass::arch::NamedBarrier epilogue_wg_barrier(128, /*bar-id=*/cutlass::arch::R
 
                     //     ThreadOp epilogue_op{};
 
+                    if (threadIdx.x == 0) {
+                      printf("gBias:");
+                      cute::print(gBias);
+                      printf("\n");
+                      printf("gBiasTile:");
+                      cute::print(gBiasTile);
+                      printf("\n");
+
+                      printf("size(accum): \n");
+                      cute::print(size(accum));
+                      printf("\n");
+                      printf("tCgBias.size(): ");
+                      cute::print(tCgBias.size());
+                      printf("\n");
+                      printf("tCgBias: ");
+                      cute::print(tCgBias);
+                      printf("\n");
+                      printf("accum: ");
+                      cute::print(accum);
+                      printf("\n");
+                    }
+
+                    wg_sync<NUM_THREAD_PER_WARPGROUP * CONSUMER_WARPGROUPS>(CONSUMER_SYNC_BARRIER_ID);
+
+                      if constexpr (!NOBIAS) {
                         CUTE_UNROLL
-                        for (int i = 0; i < size(accum); ++i) {
+                        for (int i = 0; i < tCgBias.size(); i++) {
+                          tCgBias(i) = TypeAcc_to_TypeC(accum(i));
+                          // if (threadIdx.x == 0) {
+                          //   printf("accum[i]: %f\n", static_cast<float>(accum[i]));
+                          //   // printf("tCgBias(i): %f\n", static_cast<float>(tCgBias(i)));
+                          //   printf("&tCgBias[%d]: %p, &accum[%d]: %p\n", i, &tCgBias[i], i, &accum[i]);
+                          //   printf("&tCgBias(%d): %p, &accum(%d): %p\n", i, &tCgBias(i), i, &accum(i));
+                          // }
+                        }
+                      }
+
+                      
+                      cute::Tensor gOutputTile = gOutput(cute::_, cute::_, n_tile, m_tile, expert_idx);
+                      cute::Tensor tCgD = thread_mma.partition_C(gOutputTile);
+
+                      if (threadIdx.x == 0) {
+                        printf("gOutputTile: ");
+                        cute::print(gOutputTile);
+                        printf("\n");
+                        printf("tCgD: ");
+                        cute::print(tCgD);
+                        printf("\n");
+                      }
+
+                      wg_sync<NUM_THREAD_PER_WARPGROUP * CONSUMER_WARPGROUPS>(CONSUMER_SYNC_BARRIER_ID);
+
+                      
+
+                      // for (int i = 0; i < accum.size(); i++) {
+                      //   // printf("accum[%d]: %f\n", i, static_cast<float>(accum(i)));
+                      //   tCgD[i] = TypeAcc_to_TypeC(accum(i));
+                      // }
+
+
+                        for (int i = 0; i < MMA_N; i++) {
                           int32_t m_idx = m_tile * MMA_M + threadIdx.x;
                           int32_t n_idx = n_tile * MMA_N + i;
+
+                          int topk_idx = tRoutingIndex(n_idx);
+
                         
                           bool pred = (n_idx < BATCH_SIZE);
                           TypeC fragD = TypeAcc_to_TypeC(accum(i));
                       
                           if constexpr (!NOBIAS) {
                             TypeBias fragC{};
-                            cutlass::arch::global_load<TypeBias, sizeof(TypeBias)>(fragC, &tTbias(i), pred);
+                            cutlass::arch::global_load<TypeBias, sizeof(TypeBias)>(fragC, &tCgBias(i), pred);
                             // fragD = epilogue_op(accum(i), fragC);
                             fragD += fragC;
                           }
                           // cutlass::arch::global_store<TypeAcc, sizeof(TypeAcc)>(fragD, &mOutput(n_idx, tRoutingIndex(n_idx) - 1, m_idx), pred);
-                          if (pred) {
+                          // if (pred) {
                             if constexpr (W13_LINEAR) {
-                              if (n_idx < BATCH_SIZE && tRoutingIndex(n_idx) > 0) {
-                                mOutput(n_idx, tRoutingIndex(n_idx) - 1, m_idx) = fragD;
+                              // if (threadIdx.x == 0 && i == 0) {
+                              //   printf("m_idx: %d, n_idx: %d, mOutput(m_idx, tRoutingIndex(n_idx) - 1, n_idx): %p\n", m_idx, n_idx, &mOutput(m_idx, tRoutingIndex(n_idx) - 1, n_idx));
+                              // }
+                              if (n_idx < BATCH_SIZE && tRoutingIndex(n_idx) > 0 && m_idx < OUTPUT_SIZE) {
+                                // tCgD[i] = fragD;
+                                mOutput(n_idx, m_idx, tRoutingIndex(n_idx) - 1) = fragD;
+                                if (1) {
+                                  printf("threadIdx.x: %d, m_idx: %d, tRoutingIndex(n_idx): %d, n_idx: %d, fragD: %f, mOutput(n_idx, m_idx, tRoutingIndex(n_idx) - 1): %f\n", threadIdx.x, m_idx, tRoutingIndex(n_idx), n_idx, static_cast<float>(fragD), static_cast<float>(mOutput(n_idx, m_idx, tRoutingIndex(n_idx) - 1)));
+                                  // printf("tCgBias[i]: %f, m_idx: %d, n_idx: %d, tRoutingIndex(n_idx): %d, mOutput(m_idx, tRoutingIndex(n_idx) - 1, n_idx): %p\n", static_cast<float>(tCgBias[i]), m_idx, n_idx, tRoutingIndex(n_idx), &mOutput(m_idx, tRoutingIndex(n_idx) - 1, n_idx));
+                                }
                               }
                             }
                             else {
-                              mOutput(n_idx, tRoutingIndex(n_idx) - 1, m_idx) = fragD;
+                              // mOutput(m_idx, tRoutingIndex(n_idx) - 1, n_idx) = fragD;
                             }
-                          }
-
-
+                          // }
                         }
 
+                        
 
-                    if (threadIdx.x == 0 && expert_idx == 0 && m_tile == 0 && n_tile == 0) {
-                      printf("tCgBias:\t");
-                      cute::print(tCgBias);
-                      printf("\n");
-                      printf("accum:\t");
-                      cute::print(accum);
-                      printf("\n");
-                      printf("tTbias:\t");
-                      cute::print(tTbias);
-                      printf("\n");
-                      // printf("fragD:\t");
-                      // cute::print(fragD);
-                      // printf("\n");
-                    }
+
+                    // if (threadIdx.x == 0 && expert_idx == 0 && m_tile == 0 && n_tile == 0) {
+                    //   printf("tCgBias:\t");
+                    //   cute::print(tCgBias);
+                    //   printf("\n");
+                    //   printf("accum:\t");
+                    //   cute::print(accum);
+                    //   printf("\n");
+                    //   printf("tCgBias:\t");
+                    //   cute::print(tCgBias);
+                    //   printf("\n");
+                    //   // printf("fragD:\t");
+                    //   // cute::print(fragD);
+                    //   // printf("\n");
+                    // }
 
 
   //                   CUTE_UNROLL
