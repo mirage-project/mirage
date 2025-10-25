@@ -1099,9 +1099,12 @@ cutlass::arch::NamedBarrier epilogue_wg_barrier(128, /*bar-id=*/cutlass::arch::R
                       wg_sync<NUM_THREAD_PER_WARPGROUP * CONSUMER_WARPGROUPS>(CONSUMER_SYNC_BARRIER_ID);
 
 
-                        for (int i = 0; i < MMA_N; i++) {
-                          int32_t m_idx = m_tile * MMA_M + threadIdx.x;
-                          int32_t n_idx = n_tile * MMA_N + i;
+                        for (int i = 0; i < MMA_N / 2; i++) {
+                          // int32_t m_idx = m_tile * MMA_M + threadIdx.x;
+                          // int32_t n_idx = n_tile * MMA_N + i;
+                          const int idx_in_warp = threadIdx.x % 32;
+                          int m_idx = (warp_idx % 4) * 16 + idx_in_warp / 4 + (i % 4 / 2) * 8;
+                          int n_idx = i / 4 * 8 + idx_in_warp % 4 * 2 + i % 2;
 
                           int topk_idx = tRoutingIndex(n_idx);
 
@@ -1132,7 +1135,8 @@ cutlass::arch::NamedBarrier epilogue_wg_barrier(128, /*bar-id=*/cutlass::arch::R
                                 // mOutput(n_idx, m_idx, tRoutingIndex(n_idx) - 1) = fragD;
                                 // mOutput(m_idx, n_idx, tRoutingIndex(n_idx) - 1) = fragD;
                                 printf("threadIdx.x: %d, i = %d, n_idx: %d, tRoutingIndex(n_idx): %d, m_idx: %d, output_smem.at(n_idx, m_idx): %f\n", threadIdx.x, i, n_idx, tRoutingIndex(n_idx), m_idx, static_cast<float>(output_smem.at(n_idx, m_idx)));
-                                mOutput(n_idx, m_idx, tRoutingIndex(n_idx) - 1) = output_smem.at(n_idx, m_idx);
+                                // mOutput(n_idx, m_idx, tRoutingIndex(n_idx) - 1) = output_smem.at(n_idx, m_idx);
+                                mOutput(n_idx, m_idx, tRoutingIndex(n_idx) - 1) = fragD;
 
                             //     if (1) {
                             //       printf("threadIdx.x: %d, i = %d, m_idx: %d, tRoutingIndex(n_idx): %d, n_idx: %d, fragD: %f, mOutput(n_idx, m_idx, tRoutingIndex(n_idx) - 1): %f\n", threadIdx.x, i, m_idx, tRoutingIndex(n_idx), n_idx, static_cast<float>(fragD), static_cast<float>(mOutput(n_idx, m_idx, tRoutingIndex(n_idx) - 1)));
@@ -1146,18 +1150,18 @@ cutlass::arch::NamedBarrier epilogue_wg_barrier(128, /*bar-id=*/cutlass::arch::R
                           }
                         }
 
-                        wg_sync<NUM_THREAD_PER_WARPGROUP * CONSUMER_WARPGROUPS>(CONSUMER_SYNC_BARRIER_ID);
-                        if (expert_idx == 0 && threadIdx.x == 0) {
-                          printf("output_smem: ");
-                          printf("&output_smem(0, 0): %p\n", &output_smem.at(0, 0));
-                          for (int i = 0; i < 16; i++) {
-                            for (int j = 0; j < 64; j++) {
-                              printf("%f ", static_cast<float>(output_smem.at(i, j)));
-                            }
-                            printf("\n");
-                          }
-                          printf("\n");
-                        }
+                        // wg_sync<NUM_THREAD_PER_WARPGROUP * CONSUMER_WARPGROUPS>(CONSUMER_SYNC_BARRIER_ID);
+                        // if (expert_idx == 0 && threadIdx.x == 0) {
+                        //   printf("output_smem: ");
+                        //   printf("&output_smem(0, 0): %p\n", &output_smem.at(0, 0));
+                        //   for (int i = 0; i < 16; i++) {
+                        //     for (int j = 0; j < 64; j++) {
+                        //       printf("%f ", static_cast<float>(output_smem.at(i, j)));
+                        //     }
+                        //     printf("\n");
+                        //   }
+                        //   printf("\n");
+                        // }
 
                         
 
