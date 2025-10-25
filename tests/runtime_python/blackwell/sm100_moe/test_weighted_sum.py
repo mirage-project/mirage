@@ -8,8 +8,8 @@ torch.set_printoptions(sci_mode=False, profile="full")
 
 g = torch.Generator(device="cuda").manual_seed(1234)
 
-output_sizes = [768]
-batch_size = 8
+output_sizes = [256]
+batch_size = 1
 num_experts = 128
 num_topk = 8
 
@@ -19,17 +19,19 @@ for output_size in output_sizes:
     )
 
     x = torch.randn((batch_size, num_topk, output_size), device="cuda", dtype=torch.bfloat16)
+    residual = torch.randn((batch_size, output_size), device="cuda", dtype=torch.bfloat16)
     expert_score = torch.randn((batch_size, num_experts), device="cuda", dtype=torch.bfloat16)
     topk_expert_score, topk_expert_indices = torch.topk(expert_score, num_topk, dim=1)
     torch_topk_weights = F.softmax(topk_expert_score, dim=1, dtype=torch.float)
     output = torch.zeros(batch_size, output_size, device="cuda", dtype=torch.bfloat16)
         
     # mpk impl
-    runtime_kernel_blackwell.mul_sum_sm100(x, torch_topk_weights, output)
+    runtime_kernel_blackwell.mul_sum_add_sm100(x, residual, torch_topk_weights, output)
     # reference impl
     torch_out = x.to(torch.float) * torch_topk_weights.unsqueeze(-1)
     torch_out = torch_out.sum(dim=1).to(torch.bfloat16)
-    
+    torch_out += residual
+
     torch.testing.assert_close(
         output,
         torch_out,
@@ -40,7 +42,7 @@ for output_size in output_sizes:
 
     # Warm-up
     for _ in range(16):
-        runtime_kernel_blackwell.mul_sum_sm100(x, torch_topk_weights, output)
+        runtime_kernel_blackwell.mul_sum_add_sm100(x, residual, torch_topk_weights, output)
 
     torch.cuda.synchronize()
     starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(
@@ -49,7 +51,7 @@ for output_size in output_sizes:
     repetitions = 1000
     starter.record()
     for rep in range(repetitions):
-        runtime_kernel_blackwell.mul_sum_sm100(x, torch_topk_weights, output)
+        runtime_kernel_blackwell.mul_sum_add_sm100(x, residual, torch_topk_weights, output)
     ender.record()
     torch.cuda.synchronize()
     total_time = starter.elapsed_time(ender)

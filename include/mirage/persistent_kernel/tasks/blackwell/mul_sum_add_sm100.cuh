@@ -17,16 +17,19 @@
 namespace kernel {
 
 template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int NUM_TOPK>
-__device__ __forceinline__ void mul_sum_sm100_task_impl(void const *input_ptr,
+__device__ __forceinline__ void mul_sum_add_sm100_task_impl(void const *input_ptr,
+                                                        void const *residual_ptr,
                                                         void const *weight_ptr,
                                                         void *output_ptr) {
   T const *__restrict__ d_input = static_cast<T const *>(input_ptr);
+  T const *__restrict__ d_residual = static_cast<T const *>(residual_ptr);
   float const *__restrict__ d_weight = static_cast<float const *>(weight_ptr);
   T *__restrict__ d_output = static_cast<T *>(output_ptr);
 
   for (int row_idx = 0; row_idx < BATCH_SIZE; ++row_idx) {
     for (int i = threadIdx.x; i < OUTPUT_SIZE; i += blockDim.x) {
-      float sum_val = 0.0f;
+      T res_val = d_residual[row_idx * OUTPUT_SIZE + i];
+      float sum_val = float(res_val);
 #pragma unroll
       for (int topk_idx = 0; topk_idx < NUM_TOPK; ++topk_idx) {
         T val = d_input[row_idx * OUTPUT_SIZE * NUM_TOPK +
@@ -37,6 +40,6 @@ __device__ __forceinline__ void mul_sum_sm100_task_impl(void const *input_ptr,
       d_output[row_idx * OUTPUT_SIZE + i] = T(sum_val);
     }
   }
-} // mul_sum_sm100_task_impl
+} // mul_sum_add_sm100_task_impl
 
 } // namespace kernel

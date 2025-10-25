@@ -585,31 +585,34 @@ void moe_w2_linear_sm100_kernel(torch::Tensor input,
   }
 }
 
-// mul_sum_sm100
+// mul_sum_add_sm100
 
 template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int NUM_TOPK>
-__global__ __launch_bounds__(256) void mul_sum_sm100_wrapper(
-    void const *input_ptr, void const *weight_ptr, void *output_ptr) {
-  kernel::mul_sum_sm100_task_impl<T, BATCH_SIZE, OUTPUT_SIZE, NUM_TOPK>(
-      input_ptr, weight_ptr, output_ptr);
+__global__ __launch_bounds__(256) void mul_sum_add_sm100_wrapper(
+    void const *input_ptr, void const *residual_ptr, void const *weight_ptr, void *output_ptr) {
+  kernel::mul_sum_add_sm100_task_impl<T, BATCH_SIZE, OUTPUT_SIZE, NUM_TOPK>(
+      input_ptr, residual_ptr, weight_ptr, output_ptr);
 }
 
-void mul_sum_sm100_kernel(torch::Tensor input,
+void mul_sum_add_sm100_kernel(torch::Tensor input,
+                          torch::Tensor residual,
                           torch::Tensor weight,
                           torch::Tensor output) {
 
   using T = bfloat16;
 
   void *input_ptr = input.data_ptr();
+  void *residual_ptr = residual.data_ptr();
   void *weight_ptr = weight.data_ptr();
   void *output_ptr = output.data_ptr();
 
-  constexpr int BATCH_SIZE = 8;
-  constexpr int OUTPUT_SIZE = 768;
+  constexpr int BATCH_SIZE = 1;
+  constexpr int OUTPUT_SIZE = 256;
   constexpr int NUM_TOPK = 8;
 
   assert(input.size(0) == BATCH_SIZE && input.size(1) == NUM_TOPK &&
          input.size(2) == OUTPUT_SIZE);
+  assert(residual.size(0) == BATCH_SIZE && residual.size(1) == OUTPUT_SIZE);
   assert(weight.size(0) == BATCH_SIZE && weight.size(1) == NUM_TOPK);
   assert(output.size(0) == BATCH_SIZE && output.size(1) == OUTPUT_SIZE);
 
@@ -619,13 +622,13 @@ void mul_sum_sm100_kernel(torch::Tensor input,
   int smemBytes = 224 * 1024;
 
   auto *kernel_ptr =
-      &mul_sum_sm100_wrapper<T, BATCH_SIZE, OUTPUT_SIZE, NUM_TOPK>;
+      &mul_sum_add_sm100_wrapper<T, BATCH_SIZE, OUTPUT_SIZE, NUM_TOPK>;
   CUTE_CHECK_ERROR(cudaFuncSetAttribute(
       kernel_ptr, cudaFuncAttributeMaxDynamicSharedMemorySize, smemBytes));
   cutlass::ClusterLaunchParams params = {
       grid_dim, block_dim, cluster_dim, smemBytes};
   cutlass::Status status = cutlass::launch_kernel_on_cluster(
-      params, (void const *)kernel_ptr, input_ptr, weight_ptr, output_ptr);
+      params, (void const *)kernel_ptr, input_ptr, residual_ptr, weight_ptr, output_ptr);
   CUTE_CHECK_LAST();
 
   if (status != cutlass::Status::kSuccess) {
@@ -689,6 +692,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("moe_w2_linear_sm100",
         &moe_w2_linear_sm100_kernel,
         "MoE W2 Linear kernel SM100");
-  m.def("mul_sum_sm100", &mul_sum_sm100_kernel, "Mul Sum kernel SM100");
+  m.def("mul_sum_add_sm100", &mul_sum_add_sm100_kernel, "Mul Sum Add kernel SM100");
   m.def("silu_mul", &silu_mul_kernel, "SiLU Mul kernel SM100");
 }
