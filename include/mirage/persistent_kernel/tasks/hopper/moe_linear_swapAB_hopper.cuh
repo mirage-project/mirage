@@ -716,17 +716,6 @@ if (threadIdx.x == 0) {
                     } // end for k_tile
                     
                     // Epilogue
-                    // int acc_full_phase = num_tiles_executed / NUM_ACC_STAGE % 2;
-                    // int c_smem_wr_buffer_idx = num_tiles_executed % NUM_C_STAGE;
-
-                    // cute::Tensor tCgBias = gBias(cute::_, cute::_, n_tile, m_tile, expert_idx); // (Mma_M, Mma_N)
-                    // cute::Tensor tCrBiasTypeBias = cute::make_tensor<TypeBias>(
-                    //     cute::shape(tTR_rAcc(0, cute::_, 0, 0))); // (T2R_M, T2R_N)
-                    // cute::Tensor tCrBiasTypeAcc =
-                    //     cute::make_tensor<TypeAcc>(cute::shape(tCrBiasTypeBias));
-                    // cute::Tensor tCrC =
-                    //     cute::make_tensor<TypeC>(cute::shape(tCrBiasTypeBias));
-
                     using TypeBias = T_;
                     using TypeC = T_;
                     cutlass::NumericConverter<TypeAcc, TypeBias> TypeBias_to_TypeAcc;
@@ -760,19 +749,13 @@ if (threadIdx.x == 0) {
                           if constexpr (!NOBIAS) {
                             TypeBias fragC{};
                             cutlass::arch::global_load<TypeBias, sizeof(TypeBias)>(fragC, &tCgBias(i), pred);
-                            // fragD = epilogue_op(accum(i), fragC);
                             fragD += fragC;
                           }
 
                           if (pred) {
-                            if constexpr (W13_LINEAR) {
                               if (n_idx < BATCH_SIZE && tRoutingIndex(n_idx) > 0 && m_idx < OUTPUT_SIZE) {
                                 mOutput(n_idx, m_idx, tRoutingIndex(n_idx) - 1) = fragD;
                               }
-                            }
-                            else {
-                              mOutput(n_idx, m_idx, tRoutingIndex(n_idx) - 1) = fragD;
-                            }
                           }
                         }
 
