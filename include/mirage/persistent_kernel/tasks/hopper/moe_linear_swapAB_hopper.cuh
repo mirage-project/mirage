@@ -50,11 +50,6 @@ struct MoESharedStorage {
   alignas(16) cute::uint64_t b_full_mbar_ptr[Num_AB_Stage];
   alignas(16) cute::uint64_t ab_empty_mbar_ptr[Num_AB_Stage];
 
-  // alignas(16) cute::uint64_t acc_full_mbar_ptr[Num_ACC_Stage];
-  // alignas(16) cute::uint64_t acc_empty_mbar_ptr[Num_ACC_Stage];
-
-//   alignas(16) cute::uint32_t tmem_base_ptr; // Base pointer for TMEM allocation
-
   CUTE_DEVICE constexpr auto tensor_sA() {
     return cute::make_tensor(cute::make_smem_ptr(A.begin()), ASmemLayout{});
   }
@@ -124,12 +119,6 @@ moe_linear_sm90_task_impl(const TMA_A &tma_a,
                                  cute::GMMA::Major::K,
                                  cute::GMMA::Major::K>(),
                                  AtomLayoutMNK{});
-
-    if (threadIdx.x == 0) {
-    cute::print("tiled_mma:\t");
-      cute::print(tiled_mma);
-      cute::print("\n");
-    }
       
   auto bM = cute::tile_size<0>(
       tiled_mma); // MMA Tile M. We'll use 1 MMAs per MMA Tile M.
@@ -154,8 +143,6 @@ moe_linear_sm90_task_impl(const TMA_A &tma_a,
   auto cd_tiler =
       cute::make_shape(bN, bM, bK); // (MmaTile_N, MmaTile_M, MmaTile_K)
   auto output_tiler = cute::make_shape(bN, bM, NUM_TOPK); // (MmaTile_N, MmaTile_M, NUM_TOPK)
-  // auto cd_tiler =
-  // cute::make_shape(bM, bN, bK); // (MmaTile_M, MmaTile_N, MmaTile_K)
 
   cute::Tensor mA = cute::make_coord_tensor(cute::make_layout(
       cute::make_shape(OUTPUT_SIZE, REDUCTION_SIZE, NUM_EXPERTS),
@@ -164,25 +151,6 @@ moe_linear_sm90_task_impl(const TMA_A &tma_a,
           cute::E<0>{},
           cute::E<1>{} * cute::Int<OUTPUT_SIZE>{}
       )));
-
-//   if (cute::thread0()) {
-//     cute::print("mA:\t");
-//     cute::print(mA);
-//     cute::print("\n");
-//     cute::print("mInput:\t");
-//     cute::print(mInput);
-//     cute::print("\n");
-//     cute::print("mRoutingIndices:\t");
-//     cute::print(mRoutingIndices);
-//     cute::print("\n");
-//     cute::print("mMask:\t");
-//     cute::print(mMask);
-//     cute::print("\n");
-//     cute::print("mOutput:\t");
-//     cute::print(mOutput);
-//     cute::print("\n");
-//   }
-//   __syncthreads();
 
   cute::Tensor gA = cute::local_tile(
       mA,
@@ -206,7 +174,7 @@ moe_linear_sm90_task_impl(const TMA_A &tma_a,
 
   cute::Tensor gOutput = cute::local_tile(mOutput, output_tiler, mma_coord, cute::Step<cute::_1, cute::_1, cute::X>{});
       // cute::Tensor tCgD = thread_mma.partition_C(gOutputTile);
-
+#if 0
   if (cute::thread0()) {
     cute::print("mA:\t");
     cute::print(mA);
@@ -239,6 +207,7 @@ moe_linear_sm90_task_impl(const TMA_A &tma_a,
 
   }
   __syncthreads();
+#endif
 
   // Pre-partitioned Tile Shape (MmaTile_M, MmaTile_K) to post-partitioned
   // (MmaA, NumMma_M, NumMma_K)
@@ -262,32 +231,6 @@ moe_linear_sm90_task_impl(const TMA_A &tma_a,
                        cute::Int<1>{},
                        cute::Int<NUM_C_STAGE>{});
 
-//   // Print and inspect mma_shape_A, and mma_shape_B for this example.
-//   if (cute::thread0()) {
-//     cute::print("mma_shape_A:\t");
-//     cute::print(mma_shape_A);
-//     cute::print("\n"); // mma_shape_A:  ((_128,_16),_1,_4,_8)
-//     cute::print("mma_shape_B:\t");
-//     cute::print(mma_shape_B);
-//     cute::print("\n"); // mma_shape_B:  ((_32,_16),_1,_4,_8)
-//     cute::print("mma_shape_C:\t");
-//     cute::print(mma_shape_C);
-//     cute::print("\n"); // mma_shape_C:  ((_32,_128),_1,_1,_4)
-//   }
-  __syncthreads();
-
-// if (threadIdx.x == 0) {
-//     cute::print("mma_shape_A:\t");
-//     cute::print(mma_shape_A);
-//     cute::print("\n");
-//     cute::print("mma_shape_B:\t");
-//     cute::print(mma_shape_B);
-//     cute::print("\n");
-// }
-
-//    auto sA_layout = cute::tile_to_shape(
-//        cute::GMMA::Layout_K_SW128_Atom<T_>{}, mma_shape_A);
-
     using SmemLayoutAtomA =
       decltype(cutlass::gemm::collective::detail::ss_smem_selector<
                cute::GMMA::Major::K,
@@ -303,7 +246,7 @@ moe_linear_sm90_task_impl(const TMA_A &tma_a,
                            cute::Step<cute::_1, cute::_2, cute::_3>{}));
 
 
-
+#if 0
     if (threadIdx.x == 0) {
         printf("mma_tiler:\t");
         cute::print(mma_tiler);
@@ -323,13 +266,8 @@ moe_linear_sm90_task_impl(const TMA_A &tma_a,
         cute::print("mma_shape_C:\t");
         cute::print(mma_shape_C);
         cute::print("\n");
-        // cute::print("sA_layout:\t");
-        // cute::print(sA_layout);
-        // cute::print("\n");
     }
-
-//    auto sB_layout = cute::tile_to_shape(
-//        cute::GMMA::Layout_K_SW128_Atom<T_>{}, mma_shape_B);
+#endif
 
 using SmemLayoutAtomB =
 decltype(cutlass::gemm::collective::detail::ss_smem_selector<
@@ -359,20 +297,6 @@ using SmemLayoutB = decltype(cute::tile_to_shape(
                         cute::Int<0>{},
                         cute::Int<MMA_N * bK>{})));
 
-// if (threadIdx.x == 0) {
-    // cute::print("sB_layout:\t");
-    // cute::print(sB_layout);
-    // cute::print("\n");
-
-    // cute::print("sB_cp_layout:\t");
-    // cute::print(sB_cp_layout);
-    // cute::print("\n");
-// }
-  // constuct unswizzled layout for C
-//   auto sC_layout_fake = cute::UMMA::tile_to_mma_shape(
-//       cute::UMMA::Layout_K_INTER_Atom<T_>{}, mma_shape_C);
-
-
 using SmemLayoutAtomC =
 decltype(cutlass::gemm::collective::detail::ss_smem_selector<
          cute::GMMA::Major::K,
@@ -387,25 +311,8 @@ using SmemLayoutC = decltype(cute::tile_to_shape(
                      cute::Step<cute::_1, cute::_2>{}));
     SmemLayoutC sC_layout;
 
-//    auto sC_layout_fake = cute::tile_to_shape(
-//        cute::GMMA::Layout_K_INTER_Atom<T_>{}, mma_shape_C);
-//   auto sC_shape = cute::make_shape(
-//       cute::make_shape(cute::Int<MMA_N>{}, cute::Int<MMA_M>{}),
-//       cute::Int<1>{},
-//       cute::Int<1>{},
-//       cute::make_shape(cute::Int<1>{}, cute::Int<NUM_C_STAGE>{}));
-//   auto sC_stride = cute::make_stride(
-//       cute::make_stride(cute::Int<MMA_M>{}, cute::Int<1>{}),
-//       cute::Int<0>{},
-//       cute::Int<0>{},
-//       cute::make_stride(cute::Int<0>{}, cute::Int<MMA_M * MMA_N>{}));
-//   auto sC_layout = cute::composition(sC_layout_fake.layout_a(),
-//                                      sC_layout_fake.offset(),
-//                                      cute::make_layout(sC_shape, sC_stride));
+#if 0
 if (threadIdx.x == 0) {
-//     cute::print("sC_layout_fake:\t");
-//     cute::print(sC_layout_fake);
-//     cute::print("\n");
     cute::print("smem layout atom c:\t");
     cute::print(SmemLayoutAtomC{});
     cute::print("\n");
@@ -425,22 +332,7 @@ if (threadIdx.x == 0) {
     cute::print(sC_layout);
     cute::print("\n");
 }
-
-//   if (cute::thread0()) {
-//     cute::print("sA_layout:\t");
-//     cute::print(sA_layout);
-//     cute::print("\n");
-//     cute::print("sB_layout:\t");
-//     cute::print(sB_layout);
-//     cute::print("\n");
-//     cute::print("sC_layout:\t");
-//     cute::print(sC_layout);
-//     cute::print("\n");
-//     cute::print("sB_cp_layout:\t");
-//     cute::print(sB_cp_layout);
-//     cute::print("\n");
-//   }
-//   __syncthreads();
+#endif
 
   using SharedStorage = MoESharedStorage<T_,
                                          T_,
@@ -482,27 +374,9 @@ if (threadIdx.x == 0) {
                       /* arrival count
                        */
                       1);
-    // cutlass::arch::detail::initialize_barrier_array_aligned<
-    //     cutlass::arch::ClusterBarrier,
-    //     NUM_ACC_STAGE>(shared_storage.acc_full_mbar_ptr,
-    //                    /* arrival count
-    //                     */
-    //                    1);
-    // cutlass::arch::detail::initialize_barrier_array_aligned<
-    //     cutlass::arch::ClusterBarrier,
-    //     NUM_ACC_STAGE>(shared_storage.acc_empty_mbar_ptr,
-    //                    /* arrival count */ 4);
   }
 
-  // Sync tmem allocation status between MMA and epilogue warps within CTA
-  // 32 threads (mma) + 128 threads (epilog) to sync
-//   cutlass::arch::NamedBarrier tmem_allocation_result_barrier(32 + 128, /*bar-id=*/cutlass::arch::ReservedNamedBarriers::TmemAllocBarrier);
-  
-cutlass::arch::NamedBarrier epilogue_wg_barrier(128, /*bar-id=*/cutlass::arch::ReservedNamedBarriers::EpilogueBarrier);
-
   // Represent the SMEM buffers for A and B
-  // cute::Tensor tCsA = shared_storage.tensor_sA(); // (MmaA, NumMma_M, NumMma_K, Tiles_K)
-  // cute::Tensor tCsB = shared_storage.tensor_sB(); // (MmaB, NumMma_M, NumMma_K, Tiles_K)
   cute::Tensor sA = shared_storage.tensor_sA(); // (MmaA, NumMma_M, NumMma_K, Tiles_K)
   cute::Tensor sB = shared_storage.tensor_cp_sB(); // (MmaB, NumMma_M, NumMma_K, Tiles_K)
   cute::Tensor sC_epi = shared_storage.tensor_sC(); // (EpiTile)
@@ -513,6 +387,7 @@ cutlass::arch::NamedBarrier epilogue_wg_barrier(128, /*bar-id=*/cutlass::arch::R
   auto thread_mma = tiled_mma.get_slice(warp_group_thread_layout(warp_group_idx));
   cute::Tensor tCsA = thread_mma.partition_A(shared_storage.tensor_sA()); // (MMA,MMA_M,MMA_K,PIPE)
   cute::Tensor tCsB = thread_mma.partition_B(shared_storage.tensor_sB()); // (MMA,MMA_N,MMA_K,PIPE)
+#if 0
     if (threadIdx.x == 0) {
       cute::print("mma warp groups:\t");
       cute::print(MmaWarpGroups);
@@ -534,61 +409,11 @@ cutlass::arch::NamedBarrier epilogue_wg_barrier(128, /*bar-id=*/cutlass::arch::R
       cute::print(tCsB);
       printf("\n");
     }
-
     __syncthreads();
-  // Allocate "fragments/descriptors"
-  // cute::Tensor tCrA = thread_mma.make_fragment_A(tCsA); // (MMA,MMA_M,MMA_K,PIPE)
-  // cute::Tensor tCrB = thread_mma.make_fragment_B(tCsB); // (MMA,MMA_N,MMA_K,PIPE)
-  //
-  // Mma partitioning for A and B
-  //
-
-  // auto mma_v = cute::get<0>(mma_coord_vmnk);
-  // cute::ThrMMA cta_mma = tiled_mma.get_slice(mma_v); // Use Peer CTA coordinate
-  // cute::Tensor tCgA =
-  //     thread_mma.partition_A(gA); // (MmaA, NumMma_M, NumMma_K, Tiles_K)
-  // cute::Tensor tCgB =
-  //     thread_mma.partition_B(gB); // (MmaB, NumMma_N, NumMma_K, Tiles_K)
-
-  // if (threadIdx.x == 0) {
-  // printf("tCgA: ");
-  // cute::print(tCgA);
-  // printf("\n");
-  // printf("tCgB: ");
-  // cute::print(tCgB);
-  // printf("\n");
-  // }
-
-
-//   if (cute::thread0()) {
-//     cute::print("tCgA:\t");
-//     cute::print(tCgA);
-//     cute::print("\n");
-//     cute::print("tCgB:\t");
-//     cute::print(tCgB);
-//     cute::print("\n");
-//     cute::print("tCsA:\t");
-//     cute::print(tCsA);
-//     cute::print("\n");
-//     cute::print("tCsB:\t");
-//     cute::print(tCsB);
-//     cute::print("\n");
-//     cute::print("sB:\t");
-//     cute::print(sB);
-//     cute::print("\n");
-//     cute::print("sC_epi:\t");
-//     cute::print(sC_epi);
-//     cute::print("\n");
-//   }
-//   __syncthreads();
+#endif
 
   int tma_transaction_bytes_A =
       sizeof(T_) * cute::size<0>(mma_tiler) * cute::size<2>(mma_tiler);
-
-//   if (cute::thread0()) {
-//     printf("tma_transaction_bytes_A: %d\n", tma_transaction_bytes_A);
-//   }
-//   __syncthreads();
 
   constexpr int TILE_SIZE = 64;
   constexpr int WEIGHT_TMA_TILE_SIZE = 64;
@@ -622,40 +447,9 @@ cutlass::arch::NamedBarrier epilogue_wg_barrier(128, /*bar-id=*/cutlass::arch::R
                    cute::Stride<cute::Int<cp_async_group_size>, cute::_1>>{},  // Thr layout
       cute::Layout<cute::Shape<cute::_1, cute::_8>>{});                        // Val layout
 
-//   if (cute::thread0()) {
-//     cute::print_latex(copyB);
-//   } __syncthreads();
-
-  // // check tma descriptor:
-  // if(threadIdx.x == 0){
-  //     printf("smem start addr: %u\n",
-  //     cute::cast_smem_ptr_to_uint(shared_memory)); printf("shared_weight:
-  //     %u\n", cute::cast_smem_ptr_to_uint(shared_weight));
-  // } __syncthreads();
-
-  // // Fence acquire tensor map:
-  // ptx::n32_t<128> size_bytes;
-  // // Since the tensor map was modified from the host using cudaMemcpy,
-  // // the scope should be .sys.
-  // ptx::fence_proxy_tensormap_generic(
-  //   ptx::sem_acquire, ptx::scope_sys, tma_a.desc_ptr, size_bytes
-  // );
-  // ptx::fence_proxy_tensormap_generic(
-  //   ptx::sem_acquire, ptx::scope_sys, tma_b.desc_ptr, size_bytes
-  // );
-  // ptx::fence_proxy_tensormap_generic(
-  //   ptx::sem_acquire, ptx::scope_sys, tma_out.desc_ptr, size_bytes
-  // );
-
-  // MMA Fragment Allocation
-  // We allocate "fragments" which are SMEM descriptors that serve as inputs to
-  // cute::gemm operations. For tcgen05.mma operations:
-  // - Matrices A and B are sourced from SMEM
-  // - tCrA and tCrB provide descriptor views of tCsA and tCsB respectively
-  // - The first mode of each descriptor represents the SMEM for a single MMA
-  // operation
   cute::Tensor tCrA = thread_mma.make_fragment_A(tCsA); // (MmaA, NumMma_M, NumMma_K, Tiles_K)
   cute::Tensor tCrB = thread_mma.make_fragment_B(tCsB); // (MmaB, NumMma_M, NumMma_K, Tiles_K)
+#if 0
     if (threadIdx.x == 0) {
       printf("tCrA: ");
       cute::print(tCrA);
@@ -664,42 +458,9 @@ cutlass::arch::NamedBarrier epilogue_wg_barrier(128, /*bar-id=*/cutlass::arch::R
       cute::print(tCrB);
       printf("\n");
     }
-//   auto acc_shape = cute::partition_shape_C(
-//       tiled_mma,
-//       cute::make_shape(cute::size<0>(mma_tiler),
-//                        cute::size<1>(mma_tiler),
-//                        cute::Int<NUM_ACC_STAGE>{})); // (MmaC, NumMma_M,
-                                                     // NumMma_N, NumAcc_Stage)
-  // (MMA, MMA_M, MMA_N, STAGE)
-  // auto tCtAcc = tiled_mma.make_fragment_C(acc_shape);
-//   cutlass::arch::fence_barrier_init();
-//   __syncthreads();
+#endif
 
-//   if (cute::thread0()) {
-//     cute::print("tCrA:\t");
-//     cute::print(tCrA);
-//     cute::print("\n"); // tCrA:   UMMA::DescriptorIterator o (_1,_1,_4):(_0,_0,_2)
-//     cute::print("tCrB:\t");
-//     cute::print(tCrB);
-//     cute::print("\n"); // tCrB:   UMMA::DescriptorIterator o (_1,_1,_4):(_0,_0,_2)
-//     cute::print("tCtAcc:\t");
-//     cute::print(tCtAcc);
-//     cute::print("\n"); // tCtAcc: tmem_[32b](TMEM_ADDR) o
-//                        // ((_128,_256),_1,_1):((_65536,_1),_0,_0)
-//   }
-//   __syncthreads();
-
-  // int k_tile_count = cute::size<4>(tCrA);
   int k_tile_count = REDUCTION_SIZE / 64;
-  if (threadIdx.x == 0) {
-    printf("k_tile_count: %d\n", k_tile_count);
-  }
-  // constexpr int NUM_K_TILES = 
-
-// //   using TmemAllocator = cute::TMEM::Allocator1Sm;
-// //   TmemAllocator tmem_allocator{};
-
-  __syncthreads(); // Wait for all threads until warp0 allocates TMEM
 
   if (warp_idx >= 4) {
     // DMA warp (4)
@@ -710,26 +471,28 @@ cutlass::arch::NamedBarrier epilogue_wg_barrier(128, /*bar-id=*/cutlass::arch::R
     cute::ThrCopy thr_copy_b = copyB.get_slice(tid_in_wg);
     cute::Tensor tBgB = thr_copy_b.partition_S(gB); // (ThrB, ThrTile_N)
     cute::Tensor tBsB = thr_copy_b.partition_D(sB); // (ThrB, ThrTile_N) NOTE(Yu): use cp_sb layout here
+#if 0
     if (threadIdx.x == 128) {
-      // printf("cp_async_group_size: %d\n", cp_async_group_size);
-      // printf("sB:\t");
-      // cute::print(shared_storage.tensor_sB());
-      // printf("\n");
-      // printf("sB_cp_layout: ");
-      // cute::print(shared_storage.tensor_cp_sB());
-      // printf("\n");
-      // cute::print("copyB:\t");
-      // cute::print(copyB);
-      // cute::print("\n");
-      // cute::print("thr_copy_b:\t");
-      // cute::print(thr_copy_b);
-      // cute::print("\n");
-      // cute::print("tBgB:\t");
-      // cute::print(tBgB);
-      // cute::print("\n");
+      printf("cp_async_group_size: %d\n", cp_async_group_size);
+      printf("sB:\t");
+      cute::print(shared_storage.tensor_sB());
+      printf("\n");
+      printf("sB_cp_layout: ");
+      cute::print(shared_storage.tensor_cp_sB());
+      printf("\n");
+      cute::print("copyB:\t");
+      cute::print(copyB);
+      cute::print("\n");
+      cute::print("thr_copy_b:\t");
+      cute::print(thr_copy_b);
+      cute::print("\n");
+      cute::print("tBgB:\t");
+      cute::print(tBgB);
+      cute::print("\n");
 
     } 
     __syncwarp();
+#endif
 
     int total_k_tile_count = 0;
     int total_expert_count = 0;
@@ -747,9 +510,6 @@ cutlass::arch::NamedBarrier epilogue_wg_barrier(128, /*bar-id=*/cutlass::arch::R
                   int tma_wr_ab_empty_phase =
                   (num_prev_k_blk + tma_wr_k_tile) / NUM_AB_STAGE % 2 ^ 1;
                   
-                  // if (threadIdx.x == 128) {
-                  //     printf("m_tile: %d, n_tile: %d, num_prev_k_blk: %d, total_k_tile_count: %d\n", m_tile, n_tile, num_prev_k_blk, total_k_tile_count);
-                  // }
                     bool peek_ab_empty_status = kernel::try_wait_barrier(
                         shared_storage.ab_empty_mbar_ptr[smem_wr_buffer],
                         tma_wr_ab_empty_phase);
@@ -763,15 +523,12 @@ cutlass::arch::NamedBarrier epilogue_wg_barrier(128, /*bar-id=*/cutlass::arch::R
                         int tma_wr_ab_empty_phase_next = smem_wr_buffer_next == 0
                                                             ? tma_wr_ab_empty_phase ^ 1
                                                             : tma_wr_ab_empty_phase;
-                        // if (threadIdx.x == 128) {
-                        //     printf("In producer: m_tile: %d, n_tile: %d, k_tile: %d, tma_wr_k_tile_next: %d, smem_wr_buffer_next: %d, tma_wr_ab_empty_phase_next: %d\n", m_tile, n_tile, k_tile, tma_wr_k_tile_next, smem_wr_buffer_next, tma_wr_ab_empty_phase_next);
-                        // }
 
                         // Wait for an empty buffer
-                        // if (!peek_ab_empty_status) {
+                        if (!peek_ab_empty_status) {
                             cute::wait_barrier(shared_storage.ab_empty_mbar_ptr[smem_wr_buffer],
                                             tma_wr_ab_empty_phase);
-                        // }
+                        }
 
                         // TMA for loading A
                         // only one thread will issue the tma instruction
@@ -788,15 +545,6 @@ cutlass::arch::NamedBarrier epilogue_wg_barrier(128, /*bar-id=*/cutlass::arch::R
                                             weight_smem.base_ptr,
                                             tma_coords_A);
                         }
-
-                        // if (threadIdx.x == 128){
-                        //   printf()
-                        // }
-                        // CP_ASYNC for loading B
-                        // if (threadIdx.x == 128) {
-                        //   printf("topk_idx: %d\n", topk_idx);
-                        // }
-
 
                         // int32_t token_idx = n_tile * MMA_N + lane_idx / cp_async_group_size;
                         int32_t token_idx = n_tile * MMA_N + tid_in_wg / cp_async_group_size;
@@ -832,10 +580,6 @@ cutlass::arch::NamedBarrier epilogue_wg_barrier(128, /*bar-id=*/cutlass::arch::R
   else if (warp_idx < 4) {
     // MMA warp (4)
 
-  //   // Wait for TMEM allocation to complete
-  //   // tmem_allocation_result_barrier.arrive_and_wait();
-  //   // tCtAcc.data() = shared_storage.tmem_base_ptr;
-
     int total_k_tile_count = 0;
     int num_tiles_executed = 0;
     int total_expert_count = 0;
@@ -843,20 +587,11 @@ cutlass::arch::NamedBarrier epilogue_wg_barrier(128, /*bar-id=*/cutlass::arch::R
     for (int expert_idx=0; expert_idx < NUM_EXPERTS; ++expert_idx){
         total_expert_count += mMask(expert_idx);
         cute::Tensor tRoutingIndex = mRoutingIndices(expert_idx, cute::_);
-        if (threadIdx.x == 0 && expert_idx == 0) {
-          printf("tRoutingIndices: ");
-          cute::print(mRoutingIndices);
-          printf("\n");
-          printf("tRoutingIndex: ");
-          cute::print(tRoutingIndex);
-          printf("\n");
-        }
         if(mMask(expert_idx) == 1 && (total_expert_count-1) % EXPERT_STRIDE == EXPERT_OFFSET){
             for (int m_tile = 0; m_tile < cute::size<2>(gA); ++m_tile) {
                 for (int n_tile = 0; n_tile < cute::size<2>(gB); ++n_tile) {
 
                     int acc_buf_idx = num_tiles_executed % NUM_ACC_STAGE;
-  //                   auto tCtAcc_Slice = tCtAcc(cute::_, cute::_, cute::_, acc_buf_idx);
 
                     int num_prev_k_blk = total_k_tile_count;
                     total_k_tile_count += k_tile_count;
@@ -865,21 +600,14 @@ cutlass::arch::NamedBarrier epilogue_wg_barrier(128, /*bar-id=*/cutlass::arch::R
                     int smem_rd_buffer = (num_prev_k_blk + mma_rd_k_tile) % NUM_AB_STAGE;
                     int mma_rd_ab_full_phase =
                         (num_prev_k_blk + mma_rd_k_tile) / NUM_AB_STAGE % 2;
-                    // if (threadIdx.x == 0) {
-                    //     printf("In consumer: m_tile: %d, n_tile: %d, acc_buf_idx: %d\n", m_tile, n_tile, acc_buf_idx);
-                    // }
 
-  //                   // Peek full phase
+                    // Peek full phase
                     bool peek_a_full_status = kernel::try_wait_barrier(
                         shared_storage.a_full_mbar_ptr[smem_rd_buffer],
                         mma_rd_ab_full_phase);
                     bool peek_b_full_status = kernel::try_wait_barrier(
                         shared_storage.b_full_mbar_ptr[smem_rd_buffer],
                         mma_rd_ab_full_phase);
-
-                    // int acc_empty_phase = num_tiles_executed / NUM_ACC_STAGE % 2 ^ 1;
-                    // cute::wait_barrier(shared_storage.acc_empty_mbar_ptr[acc_buf_idx],
-                    //                 acc_empty_phase);
 
                     cute::Tensor accum = cute::partition_fragment_C(
                       tiled_mma, cute::take<0, 2>(mma_tiler)); // (MMA,MMA_M,MMA_N)
@@ -896,56 +624,54 @@ cutlass::arch::NamedBarrier epilogue_wg_barrier(128, /*bar-id=*/cutlass::arch::R
                                                             ? mma_rd_ab_full_phase ^ 1
                                                             : mma_rd_ab_full_phase;
 
-                        // if (!peek_a_full_status) {
+                        if (!peek_a_full_status) {
                             cute::wait_barrier(shared_storage.a_full_mbar_ptr[smem_rd_buffer],
                                             mma_rd_ab_full_phase);
-                        // }
+                        }
 
-                        // if (!peek_b_full_status) {
+                        if (!peek_b_full_status) {
                             cute::wait_barrier(shared_storage.b_full_mbar_ptr[smem_rd_buffer],
                                             mma_rd_ab_full_phase);
-                        // }
-#if 1
+                        }
+#if 0
                         if (threadIdx.x == 0) {
                           printf("m_tile: %d, n_tile: %d, k_tile: %d, smem_rd_buffer: %d\n", m_tile, n_tile, k_tile, smem_rd_buffer);
                           for (int p = 0; p < 4; p++) {
-                            // auto tCsA_tile = tCsA(cute::_, cute::_, p, smem_rd_buffer);
-                            // printf("======== p = %d, n = %d, tCsA_tile: ========\n", p, n_tile);
-                            // cute::print(tCsA_tile);
-                            // printf("\n");
-                            // auto start_ptr = tCsA_tile.data();
-                            // printf("p = %d, start_ptr: %p\n", p, start_ptr);
-                            // printf("p = %d, tCsA_tile raw data: \n", p);
-                            // for (int i = 0; i < 64; i++) {
-                            //   for (int j = 0; j < 16; j++) {
-                            //     printf("%f ", static_cast<float>(*(start_ptr + i * 64 + j)));
-                            //   }
-                            //   printf("\n");
-                            // }
-                            // printf("\n");
+                            auto tCsA_tile = tCsA(cute::_, cute::_, p, smem_rd_buffer);
+                            printf("======== p = %d, n = %d, tCsA_tile: ========\n", p, n_tile);
+                            cute::print(tCsA_tile);
+                            printf("\n");
+                            auto start_ptr = tCsA_tile.data();
+                            printf("p = %d, start_ptr: %p\n", p, start_ptr);
+                            printf("p = %d, tCsA_tile raw data: \n", p);
+                            for (int i = 0; i < 64; i++) {
+                              for (int j = 0; j < 16; j++) {
+                                printf("%f ", static_cast<float>(*(start_ptr + i * 64 + j)));
+                              }
+                              printf("\n");
+                            }
+                            printf("\n");
 
-                            // auto tCsB_tile = tCsB(cute::_, cute::_, p, smem_rd_buffer);
-                            // printf("======== p = %d, n = %d, tCsB_tile: ========\n", p, n_tile);
-                            // cute::print(tCsB_tile);
-                            // printf("\n");
-                            // auto start_ptr_b = tCsB_tile.data();
-                            // cute::print(start_ptr_b);
-                            // printf("\n");
-                            // printf("start_ptr_b: %p\n", start_ptr_b);
-                            // printf("\n");
+                            auto tCsB_tile = tCsB(cute::_, cute::_, p, smem_rd_buffer);
+                            printf("======== p = %d, n = %d, tCsB_tile: ========\n", p, n_tile);
+                            cute::print(tCsB_tile);
+                            printf("\n");
+                            auto start_ptr_b = tCsB_tile.data();
+                            cute::print(start_ptr_b);
+                            printf("\n");
+                            printf("start_ptr_b: %p\n", start_ptr_b);
+                            printf("\n");
 
-                            // printf("p = %d, start_ptr_b: %p\n", p, start_ptr_b);
-                            // printf("p = %d, tCsB_tile raw data: \n", p);
-                            // for (int i = 0; i < 16; i++) {
-                            //   // printf("start ptr_b[%d]: %p\n", i, start_ptr_b + i * 64);
-                            //   for (int j = 0; j < 16; j++) {
-                            //     printf("%f ", static_cast<float>(*(start_ptr_b + i * 64 + j)));
-                            //   }
-                            //   printf("\n");
-                            // }
-                            // printf("\n");
-
-                            printf("tCrA(cute::_, cute::_, 0, smem_rd_buffer): \n");
+                            printf("p = %d, start_ptr_b: %p\n", p, start_ptr_b);
+                            printf("p = %d, tCsB_tile raw data: \n", p);
+                            for (int i = 0; i < 16; i++) {
+                              // printf("start ptr_b[%d]: %p\n", i, start_ptr_b + i * 64);
+                              for (int j = 0; j < 16; j++) {
+                                printf("%f ", static_cast<float>(*(start_ptr_b + i * 64 + j)));
+                              }
+                              printf("\n");
+                            }
+                            printf("\n");
                             cute::print_tensor(tCrA(cute::_, cute::_, 0, smem_rd_buffer));
                           }
                         }
@@ -1009,38 +735,6 @@ cutlass::arch::NamedBarrier epilogue_wg_barrier(128, /*bar-id=*/cutlass::arch::R
                     cute::Tensor gBiasTile = gBias(cute::_, cute::_, n_tile, m_tile, expert_idx); // (Mma_M, Mma_N)
                     auto tCgBias = thread_mma.partition_C(gBiasTile);
 
-                    // using ThreadOp = cutlass::epilogue::thread::LinearCombination<
-                    //     TypeC, // ElementOutput_
-                    //     1, // ElementCount_
-                    //     TypeAcc, // ElementAccumulator_
-                    //     TypeAcc, // ElementCompute_
-                    //     cutlass::epilogue::thread::ScaleType::Default, // Scale
-                    //     cutlass::FloatRoundStyle::round_to_nearest, // Round
-                    //     TypeBias>; // ElementSource_
-
-                    //     ThreadOp epilogue_op{};
-
-                    // if (threadIdx.x == 0) {
-                    //   printf("gBias:");
-                    //   cute::print(gBias);
-                    //   printf("\n");
-                    //   printf("gBiasTile:");
-                    //   cute::print(gBiasTile);
-                    //   printf("\n");
-
-                    //   printf("size(accum): \n");
-                    //   cute::print(size(accum));
-                    //   printf("\n");
-                    //   printf("tCgBias.size(): ");
-                    //   cute::print(tCgBias.size());
-                    //   printf("\n");
-                    //   printf("tCgBias: ");
-                    //   cute::print(tCgBias);
-                    //   printf("\n");
-                    //   printf("accum: ");
-                    //   cute::print(accum);
-                    //   printf("\n");
-                    // }
 
                     wg_sync<NUM_THREAD_PER_WARPGROUP * CONSUMER_WARPGROUPS>(CONSUMER_SYNC_BARRIER_ID);
 
@@ -1048,60 +742,11 @@ cutlass::arch::NamedBarrier epilogue_wg_barrier(128, /*bar-id=*/cutlass::arch::R
                         CUTE_UNROLL
                         for (int i = 0; i < tCgBias.size(); i++) {
                           tCgBias(i) = TypeAcc_to_TypeC(accum(i));
-                          // if (threadIdx.x == 0) {
-                          //   printf("accum[i]: %f\n", static_cast<float>(accum[i]));
-                          //   // printf("tCgBias(i): %f\n", static_cast<float>(tCgBias(i)));
-                          //   printf("&tCgBias[%d]: %p, &accum[%d]: %p\n", i, &tCgBias[i], i, &accum[i]);
-                          //   printf("&tCgBias(%d): %p, &accum(%d): %p\n", i, &tCgBias(i), i, &accum(i));
-                          // }
                         }
                       }
-
-                      
-                      cute::Tensor gOutputTile = gOutput(cute::_, cute::_, n_tile, m_tile, expert_idx);
-                      cute::Tensor tCgD = thread_mma.partition_C(gOutputTile);
-
-                      // if (threadIdx.x == 0) {
-                      //   printf("gOutputTile: ");
-                      //   cute::print(gOutputTile);
-                      //   printf("\n");
-                      //   printf("tCgD: ");
-                      //   cute::print(tCgD);
-                      //   printf("\n");
-                      //   // printf("MMA_N: %d,\n", MMA_N);
-                      // }
-
-                      wg_sync<NUM_THREAD_PER_WARPGROUP * CONSUMER_WARPGROUPS>(CONSUMER_SYNC_BARRIER_ID);
-
-                      
-
-                      // for (int i = 0; i < accum.size(); i++) {
-                      //   // printf("accum[%d]: %f\n", i, static_cast<float>(accum(i)));
-                      //   tCgD[i] = TypeAcc_to_TypeC(accum(i));
-                      // }
-                      // if (expert_idx == 0) {
-                      //   for (int i = 0; i < accum.size(); i++) {
-                      //     printf("threadIdx.x: %d, accum[%d]: %f\n", threadIdx.x, i, static_cast<float>(accum(i)));
-                      //   }
-                      // }
-                      for (int i = 0; i < MMA_N / 2; i++) {
-                        TypeC fragD = TypeAcc_to_TypeC(accum(i));
-
-                        const int idx_in_warp = threadIdx.x % 32;
-                        int row = (warp_idx % 4) * 16 + idx_in_warp / 4 + (i % 4 / 2) * 8;
-                        int col = i / 4 * 8 + idx_in_warp % 4 * 2 + i % 2;
-                        if (expert_idx == 0) {
-                          // printf("threadIdx.x: %d, idx in warp: %d, i = %d, row: %d, col: %d, fragD: %f, &output_smem.at(row, col): %p\n", threadIdx.x, idx_in_warp, i, row, col, static_cast<float>(fragD), &output_smem.at(row, col));
-                          output_smem.at(col, row) = fragD;
-                        }
-                      }
-
-                      wg_sync<NUM_THREAD_PER_WARPGROUP * CONSUMER_WARPGROUPS>(CONSUMER_SYNC_BARRIER_ID);
 
 
                         for (int i = 0; i < MMA_N / 2; i++) {
-                          // int32_t m_idx = m_tile * MMA_M + threadIdx.x;
-                          // int32_t n_idx = n_tile * MMA_N + i;
                           const int idx_in_warp = threadIdx.x % 32;
                           int m_idx = (warp_idx % 4) * 16 + idx_in_warp / 4 + (i % 4 / 2) * 8;
                           int n_idx = i / 4 * 8 + idx_in_warp % 4 * 2 + i % 2;
@@ -1119,90 +764,17 @@ cutlass::arch::NamedBarrier epilogue_wg_barrier(128, /*bar-id=*/cutlass::arch::R
                             fragD += fragC;
                           }
 
-
-
-                          // cutlass::arch::global_store<TypeAcc, sizeof(TypeAcc)>(fragD, &mOutput(n_idx, tRoutingIndex(n_idx) - 1, m_idx), pred);
                           if (pred) {
-                            // if constexpr (W13_LINEAR) {
-                            //   // if (threadIdx.x == 0 && i == 0) {
-                            //   //   printf("m_idx: %d, n_idx: %d, mOutput(m_idx, tRoutingIndex(n_idx) - 1, n_idx): %p\n", m_idx, n_idx, &mOutput(m_idx, tRoutingIndex(n_idx) - 1, n_idx));
-                            //   // }
-                            if (threadIdx.x == 0 && expert_idx == 0) {
-                              printf("&mOutput(0,0,0): %p, m_tile: %d, n_tile: %d, i: %d, n_idx: %d, m_idx: %d, tRoutingIndex(n_idx): %d\n", &mOutput(0,0,0), m_tile, n_tile, i, n_idx, m_idx, tRoutingIndex(n_idx));
-                            }
+                            if constexpr (W13_LINEAR) {
                               if (n_idx < BATCH_SIZE && tRoutingIndex(n_idx) > 0 && m_idx < OUTPUT_SIZE) {
-                            //     // tCgD[i] = fragD;
-                                // mOutput(n_idx, m_idx, tRoutingIndex(n_idx) - 1) = fragD;
-                                // mOutput(m_idx, n_idx, tRoutingIndex(n_idx) - 1) = fragD;
-                                printf("threadIdx.x: %d, i = %d, n_idx: %d, tRoutingIndex(n_idx): %d, m_idx: %d, output_smem.at(n_idx, m_idx): %f\n", threadIdx.x, i, n_idx, tRoutingIndex(n_idx), m_idx, static_cast<float>(output_smem.at(n_idx, m_idx)));
-                                // mOutput(n_idx, m_idx, tRoutingIndex(n_idx) - 1) = output_smem.at(n_idx, m_idx);
                                 mOutput(n_idx, m_idx, tRoutingIndex(n_idx) - 1) = fragD;
-
-                            //     if (1) {
-                            //       printf("threadIdx.x: %d, i = %d, m_idx: %d, tRoutingIndex(n_idx): %d, n_idx: %d, fragD: %f, mOutput(n_idx, m_idx, tRoutingIndex(n_idx) - 1): %f\n", threadIdx.x, i, m_idx, tRoutingIndex(n_idx), n_idx, static_cast<float>(fragD), static_cast<float>(mOutput(n_idx, m_idx, tRoutingIndex(n_idx) - 1)));
-                            //       // printf("tCgBias[i]: %f, m_idx: %d, n_idx: %d, tRoutingIndex(n_idx): %d, mOutput(m_idx, tRoutingIndex(n_idx) - 1, n_idx): %p\n", static_cast<float>(tCgBias[i]), m_idx, n_idx, tRoutingIndex(n_idx), &mOutput(m_idx, tRoutingIndex(n_idx) - 1, n_idx));
-                            //     }
-                            //   }
+                              }
                             }
-                            // else {
-                            //   // mOutput(m_idx, tRoutingIndex(n_idx) - 1, n_idx) = fragD;
-                            // }
+                            else {
+                              mOutput(n_idx, m_idx, tRoutingIndex(n_idx) - 1) = fragD;
+                            }
                           }
                         }
-
-                        // wg_sync<NUM_THREAD_PER_WARPGROUP * CONSUMER_WARPGROUPS>(CONSUMER_SYNC_BARRIER_ID);
-                        // if (expert_idx == 0 && threadIdx.x == 0) {
-                        //   printf("output_smem: ");
-                        //   printf("&output_smem(0, 0): %p\n", &output_smem.at(0, 0));
-                        //   for (int i = 0; i < 16; i++) {
-                        //     for (int j = 0; j < 64; j++) {
-                        //       printf("%f ", static_cast<float>(output_smem.at(i, j)));
-                        //     }
-                        //     printf("\n");
-                        //   }
-                        //   printf("\n");
-                        // }
-
-                        
-
-
-                    // if (threadIdx.x == 0 && expert_idx == 0 && m_tile == 0 && n_tile == 0) {
-                    //   printf("tCgBias:\t");
-                    //   cute::print(tCgBias);
-                    //   printf("\n");
-                    //   printf("accum:\t");
-                    //   cute::print(accum);
-                    //   printf("\n");
-                    //   printf("tCgBias:\t");
-                    //   cute::print(tCgBias);
-                    //   printf("\n");
-                    //   // printf("fragD:\t");
-                    //   // cute::print(fragD);
-                    //   // printf("\n");
-                    // }
-
-
-  //                   CUTE_UNROLL
-  //                   for (int i = 0; i < tCrC.size(); i++) {
-  //                       tCrC[i] = converter(tTR_rAcc[i]);
-  //                   }
-
-                    // // R2S copy
-                    // cute::Tensor sC_epi_slice =
-                    //     cute::flatten(sC_epi(cute::_, 0, 0, c_smem_wr_buffer_idx));
-                    // cute::copy(tCrC, sC_epi_slice(cute::_, threadIdx.x));
-
-  //                   // R2G store, use cp.async.bulk here
-  //                   CUTE_UNROLL
-  //                   for (int i = 0; i < MMA_N; ++i) {
-  //                       int32_t m_idx = m_tile * MMA_M + threadIdx.x;
-  //                       int32_t n_idx = n_tile * MMA_N + i;
-  //                       if (n_idx < BATCH_SIZE && tRoutingIndex(n_idx) > 0) {
-  //                           mOutput(n_idx, tRoutingIndex(n_idx) - 1, m_idx) = tCrC[i];
-  //                       }
-  //                   }
-
-
 
                     num_tiles_executed++;
                 } // end for n_tile
@@ -1210,146 +782,6 @@ cutlass::arch::NamedBarrier epilogue_wg_barrier(128, /*bar-id=*/cutlass::arch::R
         }  // end if mask
     } // end for expert_idx
   } 
-  // else if (warp_idx < 4) {
-  //   // Epilogue warps (4)
-
-  //   // Allocate TMEM for accumulators
-  //   if (warp_idx == 0) {
-  //     tmem_allocator.allocate(num_tmem_columns, &shared_storage.tmem_base_ptr);
-  //   }
-  //   tmem_allocation_result_barrier.arrive_and_wait();
-  //   tCtAcc.data() = shared_storage.tmem_base_ptr;
-
-  //   using TypeBias = T_;
-  //   using TypeC = T_;
-
-  //   cutlass::NumericConverter<TypeAcc, TypeBias> converterBias;
-  //   cutlass::NumericConverter<TypeC, TypeAcc> converter;
-
-  //   cute::TiledCopy tiled_copy_t2r = cute::make_tmem_copy(cute::SM100_TMEM_LOAD_32dp32b1x{}, tCtAcc(cute::_, cute::_, cute::_, 0)); 
-  //   cute::ThrCopy thr_copy_t2r = tiled_copy_t2r.get_slice(threadIdx.x);
-  //   cute::Tensor tTR_tAcc = thr_copy_t2r.partition_S(tCtAcc); 
-
-  //   cute::Tensor tCgC_fake = cute::make_tensor<TypeC>(cute::shape(
-  //       tCtAcc(cute::_, cute::_, cute::_, 0))); // (T2R, T2R_M, T2R_N)
-  //   cute::Tensor tTR_rAcc_fake = thr_copy_t2r.partition_D(tCgC_fake);
-  //   cute::Tensor tTR_rAcc = cute::make_tensor<TypeAcc>(cute::shape(tTR_rAcc_fake));
-
-  //   // if(threadIdx.x == 0) {
-  //   //   cute::print("tiled_copy_t2r:\t"); 
-  //   //   cute::print(tiled_copy_t2r);
-  //   //   cute::print("\n"); 
-  //   //   cute::print("thr_copy_t2r:\t");
-  //   //   cute::print(thr_copy_t2r); 
-  //   //   cute::print("\n"); 
-  //   //   cute::print("tTR_tAcc:\t"); 
-  //   //   cute::print(tTR_tAcc);
-  //   //   cute::print("\n");
-  //   //   cute::print("tTR_rAcc:\t"); 
-  //   //   cute::print(tTR_rAcc);
-  //   //   cute::print("\n");
-  //   //   cute::print("tCtAcc:\t");
-  //   //   cute::print(tCtAcc);
-  //   //   cute::print("\n");
-  //   //   printf("tmem_base_ptr: %u\n", shared_storage.tmem_base_ptr);
-  //   // } epilogue_wg_barrier.arrive_and_wait();
-
-  //   int num_tiles_executed = 0;
-  //   int total_expert_count = 0;
-  //   for (int expert_idx=0; expert_idx < NUM_EXPERTS; ++expert_idx){
-  //       total_expert_count += mMask(expert_idx);
-  //       if(mMask(expert_idx) == 1 && (total_expert_count-1) % EXPERT_STRIDE == EXPERT_OFFSET){
-  //           cute::Tensor tRoutingIndex = mRoutingIndices(expert_idx, cute::_);
-  //           for (int m_tile = 0; m_tile < cute::size<3>(tCgA); ++m_tile) {
-  //               for (int n_tile = 0; n_tile < cute::size<3>(tCgB); ++n_tile) {
-  //                   int acc_buf_idx = num_tiles_executed % NUM_ACC_STAGE;
-  //                   int acc_full_phase = num_tiles_executed / NUM_ACC_STAGE % 2;
-  //                   int c_smem_wr_buffer_idx = num_tiles_executed % NUM_C_STAGE;
-
-  //                   cute::Tensor tCgBias = gBias(cute::_, cute::_, n_tile, m_tile, expert_idx); // (Mma_M, Mma_N)
-  //                   cute::Tensor tCrBiasTypeBias = cute::make_tensor<TypeBias>(
-  //                       cute::shape(tTR_rAcc(0, cute::_, 0, 0))); // (T2R_M, T2R_N)
-  //                   cute::Tensor tCrBiasTypeAcc =
-  //                       cute::make_tensor<TypeAcc>(cute::shape(tCrBiasTypeBias));
-  //                   cute::Tensor tCrC =
-  //                       cute::make_tensor<TypeC>(cute::shape(tCrBiasTypeBias));
-
-  //                   // if(threadIdx.x == 0 and m_tile == 0 and n_tile == 0) {
-  //                   //   cute::print("tCgBias:\t"); 
-  //                   //   cute::print(tCgBias);
-  //                   //   cute::print("\n");
-  //                   //   cute::print("tCrBiasTypeBias:\t");
-  //                   //   cute::print(tCrBiasTypeBias);
-  //                   //   cute::print("\n"); // 
-  //                   //   cute::print("tCrBiasTypeAcc:\t");
-  //                   //   cute::print(tCrBiasTypeAcc); 
-  //                   //   cute::print("\n"); //
-  //                   //   cute::print("tCrC:\t");
-  //                   //   cute::print(tCrC);
-  //                   //   cute::print("\n");
-  //                   // } epilogue_wg_barrier.arrive_and_wait();
-
-  //                   // T2R and register operations
-  //                   if constexpr (!NOBIAS) {
-  //                       // this copy might conflict with TMA load, might add a wait barrier if
-  //                       // needed
-  //                       cute::copy(tCgBias(cute::_, threadIdx.x), tCrBiasTypeBias);
-  //                       // optimize with vectorized type conversion
-
-  //                       CUTE_UNROLL
-  //                       for (int i = 0; i < tCrBiasTypeBias.size(); i++) {
-  //                           tCrBiasTypeAcc[i] = converterBias(tCrBiasTypeBias[i]);
-  //                       }
-  //                   }
-
-  //                   cute::wait_barrier(shared_storage.acc_full_mbar_ptr[acc_buf_idx],
-  //                                   acc_full_phase);
-  //                   // T2R copy
-  //                   cute::copy(tiled_copy_t2r,
-  //                           tTR_tAcc(cute::_, cute::_, cute::_, cute::_, acc_buf_idx),
-  //                           tTR_rAcc);
-
-  //                   // arrive acc empty buffer
-  //                   epilogue_wg_barrier.arrive_and_wait();
-  //                   if (cute::elect_one_sync()) {
-  //                       cute::arrive_barrier(shared_storage.acc_empty_mbar_ptr[acc_buf_idx]);
-  //                       }
-
-  //                       if constexpr (!NOBIAS) {
-  //                       CUTE_UNROLL
-  //                       for (int i = 0; i < tTR_rAcc.size(); i++) {
-  //                           tTR_rAcc[i] += tCrBiasTypeAcc[i];
-  //                       }
-  //                   }
-
-  //                   CUTE_UNROLL
-  //                   for (int i = 0; i < tCrC.size(); i++) {
-  //                       tCrC[i] = converter(tTR_rAcc[i]);
-  //                   }
-
-  //                   // // R2S copy
-  //                   // cute::Tensor sC_epi_slice =
-  //                   //     cute::flatten(sC_epi(cute::_, 0, 0, c_smem_wr_buffer_idx));
-  //                   // cute::copy(tCrC, sC_epi_slice(cute::_, threadIdx.x));
-
-  //                   // R2G store, use cp.async.bulk here
-  //                   CUTE_UNROLL
-  //                   for (int i = 0; i < MMA_N; ++i) {
-  //                       int32_t m_idx = m_tile * MMA_M + threadIdx.x;
-  //                       int32_t n_idx = n_tile * MMA_N + i;
-  //                       if (n_idx < BATCH_SIZE && tRoutingIndex(n_idx) > 0) {
-  //                           mOutput(n_idx, tRoutingIndex(n_idx) - 1, m_idx) = tCrC[i];
-  //                       }
-  //                   }
-  //                   epilogue_wg_barrier.arrive_and_wait();
-
-  //                   num_tiles_executed++;
-  //               } // end for n_tile
-  //           } // end for m_tile
-  //       }  // end if mask
-  //   } // end for expert_idx
-  // } // end of epilogue warps
-//   __syncthreads();
 
 } // end moe_linear_sm90_task_impl
 
