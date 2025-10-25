@@ -26,53 +26,20 @@ for reduction_size in reduction_sizes:
         x = torch.randn((batch_size, reduction_size), device="cuda", dtype=torch.bfloat16)
         w = torch.randn((num_experts, output_size, reduction_size), device="cuda", dtype=torch.bfloat16)
         expert_score = torch.randn((batch_size, num_experts), device="cuda", dtype=torch.bfloat16)
-        # topk_expert_score, topk_expert_indices = torch.topk(expert_score, num_topk, dim=1)
-        topk_expert_indices = torch.zeros((batch_size, num_topk), dtype=torch.long, device="cuda")
+        topk_expert_score, topk_expert_indices = torch.topk(expert_score, num_topk, dim=1)
         expert_mask = torch.zeros((num_experts), device="cuda", dtype=torch.int32)
-        residual = torch.zeros(num_experts, batch_size, output_size, device="cuda", dtype=torch.bfloat16)
+        residual = torch.randn(num_experts, batch_size, output_size, device="cuda", dtype=torch.bfloat16)
         output = torch.zeros(batch_size, num_topk, output_size, device="cuda", dtype=torch.bfloat16)
         
         mpk_routing_indices = torch.zeros((num_experts, batch_size), device="cuda", dtype=torch.int32)
         mpk_expert_mask = torch.zeros((num_experts), device="cuda", dtype=torch.int32)
         
-        # for token_idx in range(batch_size):
-        #     for topk_idx in range(num_topk):
-        #         expert_idx = topk_expert_indices[token_idx, topk_idx]
-        #         mpk_routing_indices[expert_idx, token_idx] = topk_idx + 1
-        #         mpk_expert_mask[expert_idx] = 1
-                # print(f"token {token_idx} topk {topk_idx} expert {expert_idx}")
-
-        # for i in range(batch_size):
-        #     for j in range(reduction_size):
-        #             x[i, j] = 0.1
-        # for i in range(num_experts):
-        #     for j in range(output_size):
-        #         for k in range(reduction_size):
-        #             w[i, j, k] = 0.1
-        # x.fill_(0)
-        # w.fill_(1)
-        # x[0, 0] = 0.1
-
-        # for i in range(output_size):
-        #     for j in range(reduction_size):
-        #         w[0, i, j] = 0.1 * j + 0.1 * i * reduction_size
-        # for i in range(batch_size):
-        #     for j in range(reduction_size):
-        #         x[i, j] = 0.1 * j + 0.1 * i * reduction_size
-
-        # 所有 token 都分配给 expert 0
         for token_idx in range(batch_size):
-            # topk_expert_indices[token_idx] = [0, 0, 0, 0, ...]
-            # for topk_idx in range(num_topk):
-            expert_idx = 0
-            mpk_routing_indices[expert_idx, token_idx] = 1 
-        mpk_expert_mask[0] = 1  # only expert 0 is activated
-
-        # print("mpk_routing_indices.shape is ", mpk_routing_indices.shape, "mpk_routing_indices:")
-        # print(mpk_routing_indices)
-        # print("mpk_expert_mask.shape is ", mpk_expert_mask.shape, "mpk_expert_mask:")
-        # print(mpk_expert_mask)
-
+            for topk_idx in range(num_topk):
+                expert_idx = topk_expert_indices[token_idx, topk_idx]
+                mpk_routing_indices[expert_idx, token_idx] = topk_idx + 1
+                mpk_expert_mask[expert_idx] = 1
+                # print(f"token {token_idx} topk {topk_idx} expert {expert_idx}")
         
         print("num_expert activated:", mpk_expert_mask.sum().item())
                 
@@ -83,13 +50,8 @@ for reduction_size in reduction_sizes:
         runtime_kernel_moe_hopper.moe_w13_linear_sm90(x, w, residual, mpk_routing_indices, mpk_expert_mask, output)
         # reference impl
         expert_mask = torch.nn.functional.one_hot(topk_expert_indices, num_classes=num_experts).permute(2, 1, 0)
-        expert_mask[:,1:,:] = 0
         expert_hit = torch.greater(expert_mask.sum(dim=(-1, -2)), 0).nonzero()
         torch_out = torch.zeros((batch_size, num_topk, output_size), device="cuda", dtype=torch.bfloat16)
-        # print("expert_mask.shape is ", expert_mask.shape, "expert_mask:")
-        # print(expert_mask)
-        # print("expert_hit.shape is ", expert_hit.shape, "expert_hit:")
-        # print(expert_hit)
         for i, expert_idx in enumerate(expert_hit):
             if (i+expert_offset) % expert_stride != 0:
                 continue
@@ -107,17 +69,7 @@ for reduction_size in reduction_sizes:
                 current_hidden_states += current_residual
             torch_out[top_x, idx] = current_hidden_states
         
-        # print("output from kernel:")
-        # print(output)
-        print("output[0,0,0] address is ", hex(output[0,0,0].data_ptr()))
-        print("output_torch.shape is ", torch_out.shape, "output from torch:")
-        print(torch_out)
-
-        print("output.shape is ", output.shape, "output:")
-        print(output)
-
-
-        print(torch.allclose(output, torch_out, atol=1e-2, rtol=1e-2))
+        
         torch.testing.assert_close(
             output,
             torch_out,
@@ -127,19 +79,19 @@ for reduction_size in reduction_sizes:
         print("Test passed!")
 
         # Warm-up
-        # for _ in range(16):
-        #     runtime_kernel_moe_hopper.moe_w13_linear_sm90(x, w, residual, mpk_routing_indices, mpk_expert_mask, output)
+        for _ in range(16):
+            runtime_kernel_moe_hopper.moe_w13_linear_sm90(x, w, residual, mpk_routing_indices, mpk_expert_mask, output)
 
-        # torch.cuda.synchronize()
-        # starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(
-        #     enable_timing=True
-        # )
-        # repetitions = 1000
-        # starter.record()
-        # for rep in range(repetitions):
-        #     runtime_kernel_moe_hopper.moe_w13_linear_sm90(x, w, residual, mpk_routing_indices, mpk_expert_mask, output)
-        # ender.record()
-        # torch.cuda.synchronize()
-        # total_time = starter.elapsed_time(ender)
-        # avg_time = total_time / repetitions
-        # print(f"Average time over {repetitions} runs: {avg_time:.6f} ms")
+        torch.cuda.synchronize()
+        starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(
+            enable_timing=True
+        )
+        repetitions = 1000
+        starter.record()
+        for rep in range(repetitions):
+            runtime_kernel_blackwell.moe_w13_linear_sm100(x, w, residual, mpk_routing_indices, mpk_expert_mask, output)
+        ender.record()
+        torch.cuda.synchronize()
+        total_time = starter.elapsed_time(ender)
+        avg_time = total_time / repetitions
+        print(f"Average time over {repetitions} runs: {avg_time:.6f} ms")
