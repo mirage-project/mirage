@@ -96,8 +96,10 @@ __device__ static inline void arrive(Barrier &smem_barrier,
 }
 
 // Try wait on barrier without blocking
-__device__ static inline bool try_wait_barrier(uint64_t &smem_barrier, uint32_t phase) {
-  uint32_t smem_int_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(&smem_barrier));
+__device__ static inline bool try_wait_barrier(uint64_t &smem_barrier,
+                                               uint32_t phase) {
+  uint32_t smem_int_ptr =
+      static_cast<uint32_t>(__cvta_generic_to_shared(&smem_barrier));
   uint32_t waitComplete;
 
   asm volatile("{\n\t"
