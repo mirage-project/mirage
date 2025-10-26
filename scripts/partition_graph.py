@@ -295,23 +295,63 @@ class HybridModel:
         self.input_tensor_ids = input_tensor_ids
         self.output_tensor_ids = output_tensor_ids
         self.parameter_tensors = parameter_tensors  # dict: tensor_id -> parameter tensor
+
+        self._param_cache = {}
+        self._const_cache = {}
+    
+    def _get_params_on(self, device, dtype):
+        """Return dict of parameters placed on (device, dtype), cached."""
+        key = (device, dtype)
+        params = self._param_cache.get(key)
+        if params is None:
+            # Move once, cache for subsequent calls on same (device, dtype)
+            moved = {}
+            for tid, p in self.parameter_tensors.items():
+                tp = p
+                if tp.device != device or tp.dtype != dtype:
+                    tp = tp.to(device=device, dtype=dtype, non_blocking=True)
+                moved[tid] = tp
+            self._param_cache[key] = moved
+            params = moved
+        return params
+
+    def _get_const(self, device, shape, value, dtype=torch.float16):
+        """Return a constant tensor for Mirage kernels, cached per (device, shape, value, dtype)."""
+        key = (device, tuple(shape), float(value), dtype)
+        t = self._const_cache.get(key)
+        if t is None:
+            t = torch.full(shape, value, device=device, dtype=dtype)
+            self._const_cache[key] = t
+        return t
     
     def __call__(self, *inputs):
         if len(inputs) != len(self.input_tensor_ids):
             raise ValueError(f"Expected {len(self.input_tensor_ids)} input(s), got {len(inputs)}")
         
-        device = inputs[0].device if inputs else 'cpu'
-        dtype = inputs[0].dtype
+        device = inputs[0].device if inputs else torch.device('cpu')
+        dtype = inputs[0].dtype if inputs else torch.float16
         intermediates = {tid: tensor for tid, tensor in zip(self.input_tensor_ids, inputs)}
-        intermediates.update({tid: param.to(device=device, dtype=dtype) for tid, param in self.parameter_tensors.items()})
+
+        params_on_target = self._get_params_on(device, dtype)
+        intermediates.update(params_on_target)
         
         for step_type, payload in self.execution_plan:
             if step_type == "mirage":
                 kernel, input_ids, output_ids, const_dims = payload
-                # Convert inputs to float16 for Mirage
-                kernel_inputs = [intermediates[tid].to(torch.float16) for tid in input_ids]
+                
+                # Prepare inputs in fp16 ONLY if needed; avoid redundant casts
+                kernel_inputs = []
+                for tid in input_ids:
+                    t = intermediates[tid]
+                    if t.dtype is not torch.float16:
+                        t = t.to(torch.float16)
+                    kernel_inputs.append(t)
+
+                # Append cached constants (fp16) without recreating them every call
+                dev = kernel_inputs[0].device if kernel_inputs else device
                 for shape, value in const_dims:
-                    kernel_inputs.append(torch.full(shape, value, device=kernel_inputs[0].device, dtype=torch.float16))
+                    kernel_inputs.append(self._get_const(dev, shape, value, dtype=torch.float16))
+
                 outputs = kernel(inputs=kernel_inputs)
                 if not isinstance(outputs, list):
                     outputs = [outputs]
@@ -749,7 +789,6 @@ def time_kernels(kernels, input_dims, device, iterations=1):
             total_time += time.time() - start
         times.append(total_time / iterations)
     return times
-
 
 
 """
