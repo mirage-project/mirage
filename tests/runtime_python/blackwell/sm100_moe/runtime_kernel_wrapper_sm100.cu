@@ -12,9 +12,9 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-#include "runtime_header.h"
 #include "blackwell/task_header.cuh"
 #include "hopper/tma_2d.cuh"
+#include "runtime_header.h"
 #include "tma.cuh"
 #include <cuda_runtime.h>
 #include <torch/extension.h>
@@ -589,15 +589,18 @@ void moe_w2_linear_sm100_kernel(torch::Tensor input,
 
 template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int NUM_TOPK>
 __global__ __launch_bounds__(256) void mul_sum_add_sm100_wrapper(
-    void const *input_ptr, void const *residual_ptr, void const *weight_ptr, void *output_ptr) {
+    void const *input_ptr,
+    void const *residual_ptr,
+    void const *weight_ptr,
+    void *output_ptr) {
   kernel::mul_sum_add_sm100_task_impl<T, BATCH_SIZE, OUTPUT_SIZE, NUM_TOPK>(
       input_ptr, residual_ptr, weight_ptr, output_ptr);
 }
 
 void mul_sum_add_sm100_kernel(torch::Tensor input,
-                          torch::Tensor residual,
-                          torch::Tensor weight,
-                          torch::Tensor output) {
+                              torch::Tensor residual,
+                              torch::Tensor weight,
+                              torch::Tensor output) {
 
   using T = bfloat16;
 
@@ -627,8 +630,13 @@ void mul_sum_add_sm100_kernel(torch::Tensor input,
       kernel_ptr, cudaFuncAttributeMaxDynamicSharedMemorySize, smemBytes));
   cutlass::ClusterLaunchParams params = {
       grid_dim, block_dim, cluster_dim, smemBytes};
-  cutlass::Status status = cutlass::launch_kernel_on_cluster(
-      params, (void const *)kernel_ptr, input_ptr, residual_ptr, weight_ptr, output_ptr);
+  cutlass::Status status =
+      cutlass::launch_kernel_on_cluster(params,
+                                        (void const *)kernel_ptr,
+                                        input_ptr,
+                                        residual_ptr,
+                                        weight_ptr,
+                                        output_ptr);
   CUTE_CHECK_LAST();
 
   if (status != cutlass::Status::kSuccess) {
@@ -692,6 +700,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("moe_w2_linear_sm100",
         &moe_w2_linear_sm100_kernel,
         "MoE W2 Linear kernel SM100");
-  m.def("mul_sum_add_sm100", &mul_sum_add_sm100_kernel, "Mul Sum Add kernel SM100");
+  m.def("mul_sum_add_sm100",
+        &mul_sum_add_sm100_kernel,
+        "Mul Sum Add kernel SM100");
   m.def("silu_mul", &silu_mul_kernel, "SiLU Mul kernel SM100");
 }

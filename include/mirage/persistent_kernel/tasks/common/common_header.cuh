@@ -17,8 +17,8 @@
 #include "bfloat16.h"
 #include "copy_sm80.cuh"
 #include "dmem_layout.cuh"
-#include "utils.cuh"
 #include "runtime_header.h"
+#include "utils.cuh"
 
 #include <cassert>
 #include <cstdint>

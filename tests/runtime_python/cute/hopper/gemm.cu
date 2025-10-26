@@ -93,9 +93,11 @@ using bfloat16 = type::bfloat16_t;
 //   //   using StrideD = typename KernelTraits::StrideD;
 
 //   StrideA stride_A = cutlass::make_cute_packed_stride(
-//       StrideA{}, {KernelTraits::OUTPUT_SIZE, KernelTraits::REDUCTION_SIZE, 1});
+//       StrideA{}, {KernelTraits::OUTPUT_SIZE, KernelTraits::REDUCTION_SIZE,
+//       1});
 //   StrideB stride_B = cutlass::make_cute_packed_stride(
-//       StrideB{}, {KernelTraits::BATCH_SIZE, KernelTraits::REDUCTION_SIZE, 1});
+//       StrideB{}, {KernelTraits::BATCH_SIZE, KernelTraits::REDUCTION_SIZE,
+//       1});
 //   StrideC stride_C = cutlass::make_cute_packed_stride(
 //       StrideC{}, {KernelTraits::BATCH_SIZE, KernelTraits::OUTPUT_SIZE, 1});
 //   //   StrideD stride_D = cutlass::make_cute_packed_stride(
@@ -130,7 +132,8 @@ using bfloat16 = type::bfloat16_t;
 //                        cudaFuncAttributeMaxDynamicSharedMemorySize,
 //                        shared_mem_size);
 //   // linear_kernel_hopper_cute_wrapper<Mainloop, Epilogue>
-//   //     <<<grid, block, shared_mem_size>>>(mainloop_params, epilogue_params);
+//   //     <<<grid, block, shared_mem_size>>>(mainloop_params,
+//   epilogue_params);
 
 //   cudaEvent_t start, stop;
 //   cudaEventCreate(&start);
@@ -274,7 +277,7 @@ __global__ __launch_bounds__(256, 1) void linear_kernel_hopper_cute_mpk_wrapper(
                                    TMA_B,
                                    OUTPUT_SIZE,
                                    true>(
-                                    tma_a, tma_b, output_ptr, residual_ptr);
+      tma_a, tma_b, output_ptr, residual_ptr);
 }
 
 template <typename T, int OUTPUT_SIZE, int BATCH_SIZE, int REDUCTION_SIZE>
