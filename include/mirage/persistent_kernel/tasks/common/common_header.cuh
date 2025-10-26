@@ -18,6 +18,7 @@
 #include "copy_sm80.cuh"
 #include "dmem_layout.cuh"
 #include "utils.cuh"
+#include "runtime_header.h"
 
 #include <cassert>
 #include <cstdint>
