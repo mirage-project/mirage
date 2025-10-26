@@ -43,7 +43,6 @@ template <typename T_,
           int REDUCTION_SIZE,
           int NUM_EXPERTS,
           int NUM_TOPK,
-          int EXPERT_OFFSET,
           int EXPERT_STRIDE,
           bool W13_LINEAR,
           bool NOBIAS,
@@ -56,7 +55,8 @@ __device__ __noinline__ void
                                BiasTensor mBias,
                                IndicesTensor mRoutingIndices,
                                MaskTensor mMask,
-                               OutputTensor mOutput) {
+                               OutputTensor mOutput,
+                               const int expert_offset) {
   int warp_idx = cutlass::canonical_warp_idx_sync();
 
   // Construct the MMA grid coordinate from the CTA grid coordinate
@@ -468,7 +468,7 @@ __device__ __noinline__ void
     for (int expert_idx = 0; expert_idx < NUM_EXPERTS; ++expert_idx) {
       total_expert_count += mMask(expert_idx);
       if (mMask(expert_idx) == 1 &&
-          (total_expert_count - 1) % EXPERT_STRIDE == EXPERT_OFFSET) {
+          (total_expert_count - 1) % EXPERT_STRIDE == expert_offset) {
         cute::Tensor tRoutingIndex = mRoutingIndices(expert_idx, cute::_);
         for (int m_tile = 0; m_tile < cute::size<3>(tCgA); ++m_tile) {
           for (int n_tile = 0; n_tile < cute::size<3>(tCgB); ++n_tile) {
@@ -566,7 +566,7 @@ __device__ __noinline__ void
     for (int expert_idx = 0; expert_idx < NUM_EXPERTS; ++expert_idx) {
       total_expert_count += mMask(expert_idx);
       if (mMask(expert_idx) == 1 &&
-          (total_expert_count - 1) % EXPERT_STRIDE == EXPERT_OFFSET) {
+          (total_expert_count - 1) % EXPERT_STRIDE == expert_offset) {
         for (int m_tile = 0; m_tile < cute::size<3>(tCgA); ++m_tile) {
           for (int n_tile = 0; n_tile < cute::size<3>(tCgB); ++n_tile) {
 
@@ -704,7 +704,7 @@ __device__ __noinline__ void
     for (int expert_idx = 0; expert_idx < NUM_EXPERTS; ++expert_idx) {
       total_expert_count += mMask(expert_idx);
       if (mMask(expert_idx) == 1 &&
-          (total_expert_count - 1) % EXPERT_STRIDE == EXPERT_OFFSET) {
+          (total_expert_count - 1) % EXPERT_STRIDE == expert_offset) {
         cute::Tensor tRoutingIndex = mRoutingIndices(expert_idx, cute::_);
         for (int m_tile = 0; m_tile < cute::size<3>(tCgA); ++m_tile) {
           for (int n_tile = 0; n_tile < cute::size<3>(tCgB); ++n_tile) {

@@ -651,8 +651,6 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
         uint64_t gmem_shape[2] = {static_cast<uint64_t>(output_size),
                                   static_cast<uint64_t>(reduction_size)};
         uint64_t gmem_stride[2] = {1, static_cast<uint64_t>(reduction_size)};
-        // NOTE(Yu): even for output_size < output_atom_size, we still use
-        // output_atom_size as padding
         uint32_t smem_shape[2] = {static_cast<uint32_t>(MMA_M),
                                   static_cast<uint32_t>(cp_async_size)};
         constexpr int TILE_SIZE = 64;
@@ -686,6 +684,38 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
                                             smem_repeat_row,
                                             smem_repeat_col);
       }
+      break;
+    }
+    case TASK_MOE_W13_LINEAR_SM100:
+    case TASK_MOE_W2_LINEAR_SM100: {
+      int const cp_async_size = 64;
+      const size_t smem_repeat_row = 1;
+      constexpr int B = 3;
+      constexpr int M = 3;
+      constexpr int S = 3;
+      constexpr int MMA_M = 128;
+
+      if (param_id == 1) {
+        // TMA_WEIGHT
+        int const num_experts = tensor_desc.dim[0];
+        int const output_size = tensor_desc.dim[1];
+        int const reduction_size = tensor_desc.dim[2];
+        uint64_t gmem_shape[2] = {static_cast<uint64_t>(num_experts * output_size),
+                                  static_cast<uint64_t>(reduction_size)};
+        uint64_t gmem_stride[2] = {1, static_cast<uint64_t>(reduction_size)};
+        uint32_t smem_shape[2] = {static_cast<uint32_t>(MMA_M),
+                                  static_cast<uint32_t>(cp_async_size)};
+        constexpr int TILE_SIZE = 64;
+        size_t smem_repeat_col =
+            (TILE_SIZE + cp_async_size - 1) / cp_async_size;
+        fill_tma_desc<bfloat16, B, M, S, 2>(tma_desc,
+                                            tensor_desc.base_ptr,
+                                            gmem_shape,
+                                            gmem_stride,
+                                            smem_shape,
+                                            smem_repeat_row,
+                                            smem_repeat_col);
+      } 
       break;
     }
     default:
@@ -765,6 +795,17 @@ __host__ inline void create_tma_desc_by_task(FullTaskDesc &task_desc) {
                 : task_desc.outputs[param_id - task_desc.num_inputs];
         create_tma_desc_for_tensor(task_desc, tensor_desc, param_id, 0);
       }
+      break;
+    }
+    case TASK_MOE_W13_LINEAR_SM100:
+    case TASK_MOE_W2_LINEAR_SM100: {
+      // only weight (param_id=1) have 1 tma_desc
+      size_t param_id = 1;
+      TensorDesc &tensor_desc =
+          (param_id < task_desc.num_inputs)
+              ? task_desc.inputs[param_id]
+              : task_desc.outputs[param_id - task_desc.num_inputs];
+      create_tma_desc_for_tensor(task_desc, tensor_desc, param_id, 0);
       break;
     }
     case TASK_RMS_NORM_HOPPER: {

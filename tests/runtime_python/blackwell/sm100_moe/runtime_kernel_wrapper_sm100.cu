@@ -212,14 +212,13 @@ __global__ __launch_bounds__(256, 1) void moe_linear_sm100_wrapper(
                                      REDUCTION_SIZE,
                                      NUM_EXPERTS,
                                      NUM_TOPK,
-                                     EXPERT_OFFSET,
                                      EXPERT_STRIDE,
                                      W13_LINEAR,
                                      NoBias,
                                      NUM_AB_STAGE,
                                      NUM_ACC_STAGE,
                                      NUM_C_STAGE>(
-      tma_a, mInput, mBias, mRoutingIndices, mMask, mOutput);
+      tma_a, mInput, mBias, mRoutingIndices, mMask, mOutput, EXPERT_OFFSET);
 }
 
 template <typename T,
@@ -292,7 +291,7 @@ void launch_moe_linear_sm100(void *input_ptr,
       cute::make_gmem_ptr(static_cast<int32_t *>(mpk_routing_indices_ptr)),
       layout_routing_indices);
 
-  // Topk_weights
+  // Topk_mask
   cute::Layout layout_expert_mask = cute::make_layout(
       cute::make_shape(NUM_EXPERTS), cute::make_stride(cute::Int<1>{}));
   cute::Tensor mMask = cute::make_tensor(
@@ -550,11 +549,11 @@ void moe_w2_linear_sm100_kernel(torch::Tensor input,
 
   constexpr int BATCH_SIZE = 8;
   constexpr int OUTPUT_SIZE = 128;
-  constexpr int REDUCTION_SIZE = 2048;
+  constexpr int REDUCTION_SIZE = 768;
   constexpr int NUM_EXPERTS = 128;
   constexpr int NUM_TOPK = 8;
   constexpr int EXPERT_OFFSET = 0;
-  constexpr int EXPERT_STRIDE = 12;
+  constexpr int EXPERT_STRIDE = 9;
 
   assert(input.size(0) == BATCH_SIZE && input.size(1) == NUM_TOPK &&
          input.size(2) == REDUCTION_SIZE);
@@ -587,10 +586,10 @@ void moe_w2_linear_sm100_kernel(torch::Tensor input,
 
 // mul_sum_add_sm100
 
-template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int NUM_TOPK>
+template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int NUM_TOPK, int OUTPUT_STRIDE>
 __global__ __launch_bounds__(256) void mul_sum_add_sm100_wrapper(
     void const *input_ptr, void const *residual_ptr, void const *weight_ptr, void *output_ptr) {
-  kernel::mul_sum_add_sm100_task_impl<T, BATCH_SIZE, OUTPUT_SIZE, NUM_TOPK>(
+  kernel::mul_sum_add_sm100_task_impl<T, BATCH_SIZE, OUTPUT_SIZE, NUM_TOPK, OUTPUT_STRIDE>(
       input_ptr, residual_ptr, weight_ptr, output_ptr);
 }
 
@@ -606,8 +605,9 @@ void mul_sum_add_sm100_kernel(torch::Tensor input,
   void *weight_ptr = weight.data_ptr();
   void *output_ptr = output.data_ptr();
 
-  constexpr int BATCH_SIZE = 1;
+  constexpr int BATCH_SIZE = 8;
   constexpr int OUTPUT_SIZE = 256;
+  constexpr int OUTPUT_STRIDE = 256;
   constexpr int NUM_TOPK = 8;
 
   assert(input.size(0) == BATCH_SIZE && input.size(1) == NUM_TOPK &&
@@ -622,7 +622,7 @@ void mul_sum_add_sm100_kernel(torch::Tensor input,
   int smemBytes = 224 * 1024;
 
   auto *kernel_ptr =
-      &mul_sum_add_sm100_wrapper<T, BATCH_SIZE, OUTPUT_SIZE, NUM_TOPK>;
+      &mul_sum_add_sm100_wrapper<T, BATCH_SIZE, OUTPUT_SIZE, NUM_TOPK, OUTPUT_STRIDE>;
   CUTE_CHECK_ERROR(cudaFuncSetAttribute(
       kernel_ptr, cudaFuncAttributeMaxDynamicSharedMemorySize, smemBytes));
   cutlass::ClusterLaunchParams params = {

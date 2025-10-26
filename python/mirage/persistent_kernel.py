@@ -608,6 +608,126 @@ class PersistentKernel:
             self.kn_graph.register_task(tb_graph, "paged_attention_sm100", params)
         else:
             self.kn_graph.register_task(tb_graph, "paged_attention", params)
+    # MoE Layers
+    def moe_topk_softmax_routing_layer(
+        self,
+        input: DTensor,
+        output: tuple[DTensor, DTensor, DTensor],
+        grid_dim: tuple,
+        block_dim: tuple,
+    ):
+        # Currently assume that input/output
+        assert input.num_dims == 2  # (batch_size, num_experts)
+        assert len(output) == 3
+        moe_topk_weight, moe_routing_indices, moe_masks = output
+        assert moe_topk_weight.num_dims == 2  # (batch_size, num_experts_per_tok)
+        assert moe_routing_indices.num_dims == 2  # (num_experts, batch_size)
+        assert moe_masks.num_dims == 1  # (num_experts)
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(input, (-1, -1, -1), -1, True)
+        tb_graph.new_input(moe_topk_weight, (-1, -1, -1), -1, True)
+        tb_graph.new_input(moe_routing_indices, (-1, -1, -1), -1, True)
+        tb_graph.new_input(moe_masks, (-1, -1, -1), -1, True)
+        self.kn_graph.customized([input, moe_topk_weight, moe_routing_indices, moe_masks], tb_graph)
+
+        self.kn_graph.register_task(tb_graph, "moe_topk_softmax_sm100")
+        
+    def moe_w13_linear_layer(
+        self,
+        input: DTensor,
+        weight: DTensor,
+        moe_routing_indices: DTensor,
+        moe_mask: DTensor,
+        output: DTensor,
+        grid_dim: tuple,
+        block_dim: tuple,
+    ):
+        # Currently assume that input/output
+        assert input.num_dims == 2  # (batch_size, hidden_size / world_size)
+        assert weight.num_dims == 3  # (num_experts, 2*intermediate_size, hidden_size)
+        assert moe_routing_indices.num_dims == 2  # (num_experts_per_tok, batch_size)
+        assert moe_mask.num_dims == 1  # (num_experts)
+        assert output.num_dims == 3  # (batch_size, num_expert_per_tok, 2*intermediate_size)
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(input, (-1, -1, -1), 1, True)
+        tb_graph.new_input(weight, (-1, 1, -1), 2, True)
+        tb_graph.new_input(moe_routing_indices, (-1, -1, -1), -1, True)
+        tb_graph.new_input(moe_mask, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output, (-1, 2, -1), -1, True)
+        self.kn_graph.customized([input, weight, moe_routing_indices, moe_mask, output], tb_graph)
+
+        if self.target_cc == 100:
+            self.kn_graph.register_task(tb_graph, "moe_w13_linear_sm100")
+        else:
+            assert False
+            
+    def moe_silu_mul_layer(
+        self,
+        input: DTensor,
+        output: DTensor,
+        grid_dim: tuple,
+        block_dim: tuple,
+    ):
+        # Currently assume that input/output
+        assert input.num_dims == 3 # (batch_size, num_expert_per_tok, 2 * intermediate_size)
+        assert output.num_dims == 3 # (batch_size, num_expert_per_tok, intermediate_size)
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(input, (0, -1, -1), -1, True)
+        tb_graph.new_input(output, (0, -1, -1), -1, True)
+        self.kn_graph.customized([input, output], tb_graph)
+        self.kn_graph.register_task(tb_graph, "moe_silu_mul")
+            
+    def moe_w2_linear_layer(
+        self,
+        input: DTensor,
+        weight: DTensor,
+        moe_routing_indices: DTensor,
+        moe_mask: DTensor, 
+        output: DTensor,
+        grid_dim: tuple,
+        block_dim: tuple,
+    ):
+        # Currently assume that input/output
+        assert input.num_dims == 3  # (batch_size, num_expert_per_tok, intermediate_size)
+        assert weight.num_dims == 3  # (num_experts, hidden_size, intermediate_size)
+        assert moe_routing_indices.num_dims == 2  # (num_experts_per_tok, batch_size)
+        assert moe_mask.num_dims == 1  # (num_experts)
+        assert output.num_dims == 3  # (batch_size, num_expert_per_tok, hidden_size)
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(input, (-1, -1, -1), 2, True)
+        tb_graph.new_input(weight, (-1, 1, -1), 2, True)
+        tb_graph.new_input(moe_routing_indices, (-1, -1, -1), -1, True)
+        tb_graph.new_input(moe_mask, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output, (-1, 2, -1), -1, True)
+        self.kn_graph.customized([input, weight, moe_routing_indices, moe_mask, output], tb_graph)
+
+        if self.target_cc == 100:
+            self.kn_graph.register_task(tb_graph, "moe_w2_linear_sm100")
+        else:
+            assert False
+        
+    def moe_mul_sum_add_layer(
+        self,
+        input: DTensor,
+        weight: DTensor,
+        residual: DTensor,
+        output: DTensor,
+        grid_dim: tuple,
+        block_dim: tuple,
+    ):
+        # Currently assume that input/output
+        assert input.num_dims == 3  # (batch_size, num_experts_per_tok, hidden_size)
+        assert weight.num_dims == 2  # (batch_size, num_experts_per_tok)
+        assert residual.num_dims == 2  # (batch_size, hidden_size)
+        assert output.num_dims == 2  # (batch_size, hidden_size)
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(input, (0, 2, -1), -1, True)
+        tb_graph.new_input(weight, (0, -1, -1), -1, True)
+        tb_graph.new_input(residual, (0, 1, -1), -1, True)
+        tb_graph.new_input(output, (0, 1, -1), -1, True)
+        self.kn_graph.customized([input, weight, residual, output], tb_graph)
+
+        self.kn_graph.register_task(tb_graph, "moe_mul_sum_add_sm100")
 
     def linear_layer(
         self,

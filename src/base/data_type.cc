@@ -52,6 +52,8 @@ std::string get_datatype_str(DataType dtype) {
       return "half_t";
     case DT_UINT16:
       return "uint16";
+    case DT_INT32:
+      return "int32";
     case DT_FLOAT32:
       return "float";
     case DT_DOUBLE:

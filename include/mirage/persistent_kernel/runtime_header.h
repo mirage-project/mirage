@@ -94,11 +94,17 @@ enum TaskType {
   TASK_HOPPER_TASK_END = 198, // Hopper end placeholder, not a real task
   // SM100 Tasks
   TASK_SM100_TASK_BEGIN = 250, // SM100 start placeholder, not a real task
-  TASK_LINEAR_WITH_RESIDUAL_SM100 = 251,
-  TASK_LINEAR_SM100 = 252,
-  TASK_ATTN_SM100 = 253,
-  TASK_ARGMAX_REDUCE_SM100 = 254,
-  TASK_ARGMAX_PARTIAL_SM100 = 255,
+  TASK_SM100_TMA_START_TASK = 251,
+  TASK_LINEAR_WITH_RESIDUAL_SM100 = 252,
+  TASK_LINEAR_SM100 = 253,
+  TASK_MOE_W13_LINEAR_SM100 = 254,
+  TASK_MOE_W2_LINEAR_SM100 = 255,
+  TASK_SM100_TMA_END_TASK = 256,
+  TASK_ATTN_SM100 = 257,
+  TASK_ARGMAX_REDUCE_SM100 = 258,
+  TASK_ARGMAX_PARTIAL_SM100 = 259,
+  TASK_MOE_TOPK_SOFTMAX_SM100 = 260,
+  TASK_MOE_MUL_SUM_ADD_SM100 = 261,
   TASK_SM100_TASK_END = 298, // SM100 end placeholder, not a real task
   TASK_NVSHMEM_COPY = 199,
   TASK_SCHD_TASKS = 200,
@@ -143,7 +149,7 @@ struct FullTaskDesc {
   FullTaskDesc(TaskType t, int _variant_id)
       : task_type(t), variant_id(_variant_id), num_inputs(0), num_outputs(0),
         trigger_event(EVENT_INVALID_ID), dependent_event(EVENT_INVALID_ID),
-        request_id(-1) {}
+        request_id(-1), head_group(-1), expert_offset(-1) {}
   FullTaskDesc() {}
   TaskType task_type;
   unsigned variant_id;
@@ -154,13 +160,14 @@ struct FullTaskDesc {
   TensorDesc outputs[MAX_OUTPUTS_PER_TASK];
   int request_id; // Used for paged attention
   int head_group; // Used for paged attention hopper
+  int expert_offset; // Used for MoE
 };
 
 struct alignas(16) TaskDesc {
   TaskDesc(FullTaskDesc t)
       : task_type(t.task_type), variant_id(t.variant_id),
         trigger_event(t.trigger_event), dependent_event(t.dependent_event),
-        request_id(t.request_id), head_group(t.head_group) {
+        request_id(t.request_id), head_group(t.head_group), expert_offset(t.expert_offset) {
     for (int i = 0; i < t.num_inputs; i++) {
       input_ptrs[i] = t.inputs[i].base_ptr;
     }
@@ -197,6 +204,7 @@ struct alignas(16) TaskDesc {
     struct {
       int request_id; // Used for paged attention
       int head_group; // Used for paged attention hopper
+      int expert_offset; // Used for MoE
     };
     size_t xfer_size_in_bytes; // Used for nvshmem
   };

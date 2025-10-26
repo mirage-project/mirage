@@ -6,13 +6,13 @@ torch.set_printoptions(sci_mode=False, profile="full")
 
 g = torch.Generator(device="cuda").manual_seed(1234)
 
-reduction_sizes = [2048]
+reduction_sizes = [768]
 output_sizes = [128]
 batch_size = 8
 num_experts = 128
 num_topk = 8
 expert_offset = 0
-expert_stride = 12
+expert_stride = 9
 
 is_w2_linear = True
 has_residual = False
