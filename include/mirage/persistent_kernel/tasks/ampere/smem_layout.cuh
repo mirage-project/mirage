@@ -303,9 +303,9 @@ struct smem_row_2dcol {
   static constexpr size_t SIZE = ROW * COL;
   static constexpr size_t STAGE = STAGE_;
   static constexpr size_t STRIDE_OUTER_COL = ROW * INNER_COL;
-  static constexpr size_t STRIDE_ROW = INNER_COL; // a row just contains inner col elements
+  static constexpr size_t STRIDE_ROW =
+      INNER_COL; // a row just contains inner col elements
   static constexpr size_t STRIDE_STAGE = SIZE;
-  
 
   __device__ __forceinline__ smem_row_2dcol(T *ptr) : base_ptr(ptr) {}
 
@@ -313,24 +313,13 @@ struct smem_row_2dcol {
     base_ptr = ptr;
   }
 
-  // __device__ __forceinline__ T *operator()(size_t logical_idx_row,
-  //                                          size_t logical_idx_col) {
-  //   size_t inner_col = logical_idx_col & ((1 << log2_INNER_COL) - 1);
-  //   size_t outer_col = logical_idx_col >> log2_INNER_COL;
-  //   size_t logical_idx =
-  //       outer_col * STRIDE_OUTER_COL + logical_idx_row * STRIDE + inner_col;
-  //   // return &base_ptr[get_swizzled_offset(logical_idx)];
-  //   return &base_ptr[OffsetCalculator::get_phy_offset(logical_idx)];
-  // }
-  __device__ __forceinline__ T *operator()(size_t logical_idx_row,
-                                           size_t logical_idx_col,
-                                           size_t stage) {
+  __device__ __forceinline__ T *
+      operator()(size_t logical_idx_row, size_t logical_idx_col, size_t stage) {
     // stage was in row dim
     size_t inner_col = logical_idx_col & ((1 << log2_INNER_COL) - 1);
     size_t outer_col = logical_idx_col >> log2_INNER_COL;
-    size_t logical_idx = stage * STRIDE_STAGE +
-        outer_col * STRIDE_OUTER_COL + logical_idx_row * STRIDE_ROW + inner_col;
-    // return &base_ptr[get_swizzled_offset(logical_idx)];
+    size_t logical_idx = stage * STRIDE_STAGE + outer_col * STRIDE_OUTER_COL +
+                         logical_idx_row * STRIDE_ROW + inner_col;
     return &base_ptr[OffsetCalculator::get_phy_offset(logical_idx)];
   }
 };
@@ -357,7 +346,8 @@ struct smem_col_2drow {
   static constexpr size_t SIZE = ROW * COL;
   static constexpr size_t STAGE = STAGE_;
   static constexpr size_t STRIDE_OUTER_ROW = COL * INNER_ROW;
-  static constexpr size_t STRIDE_COL = INNER_ROW; // a col just contains inner row elements
+  static constexpr size_t STRIDE_COL =
+      INNER_ROW; // a col just contains inner row elements
   static constexpr size_t STRIDE_STAGE = SIZE;
 
   static constexpr size_t INNER_ROW_MASK = (1 << log2_INNER_ROW) - 1;
@@ -373,16 +363,16 @@ struct smem_col_2drow {
                                                     size_t stage) {
     size_t inner_row = logical_idx_row & INNER_ROW_MASK;
     size_t outer_row = logical_idx_row >> log2_INNER_ROW;
-    size_t logical_idx = stage * STRIDE_STAGE +
-        outer_row * STRIDE_OUTER_ROW + logical_idx_col * STRIDE_COL + inner_row;
+    size_t logical_idx = stage * STRIDE_STAGE + outer_row * STRIDE_OUTER_ROW +
+                         logical_idx_col * STRIDE_COL + inner_row;
     return logical_idx;
   }
 
-  __device__ __forceinline__ T *operator()(size_t logical_idx_row,
-                                           size_t logical_idx_col,
-                                                    size_t stage) {
+  __device__ __forceinline__ T *
+      operator()(size_t logical_idx_row, size_t logical_idx_col, size_t stage) {
     // stage was in col dim
-    size_t logical_idx = get_logical_idx(logical_idx_row, logical_idx_col, stage);
+    size_t logical_idx =
+        get_logical_idx(logical_idx_row, logical_idx_col, stage);
     return &base_ptr[OffsetCalculator::get_phy_offset(logical_idx)];
   }
 };
