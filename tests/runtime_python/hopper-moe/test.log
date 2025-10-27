@@ -1,3 +1,0 @@
-
-=== Testing batch_size = 8 output_size = 64 reduction_size = 2048 num_experts = 128 num_topk = 8 has_residual = False ===
-num_expert activated: 47

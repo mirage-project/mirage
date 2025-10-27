@@ -71,7 +71,6 @@ template <typename T_,
           int REDUCTION_SIZE,
           int NUM_EXPERTS,
           int NUM_TOPK,
-          int EXPERT_OFFSET,
           int EXPERT_STRIDE,
           bool W13_LINEAR,
           bool NOBIAS,
@@ -82,7 +81,8 @@ __device__ __forceinline__ void
                               BiasTensor mBias,
                               IndicesTensor mRoutingIndices,
                               MaskTensor mMask,
-                              OutputTensor mOutput) {
+                              OutputTensor mOutput,
+                              int const expert_offset) {
   int warp_idx = cutlass::canonical_warp_idx_sync();
 
   // Construct the MMA grid coordinate from the CTA grid coordinate
@@ -117,7 +117,7 @@ __device__ __forceinline__ void
       tiled_mma); // MMA Tile N. We'll use 1 MMAs per MMA Tile N.
   auto bK = cute::tile_size<2>(tiled_mma) *
             cute::Int<4>{}; // MMA Tile K. We'll use 4 MMAs per MMA Tile K. For
-                            // 16b types, tcgen05.mma has K16.
+                            // 16b types, wgmma has K16.
 
   auto mma_tiler = cute::make_shape(bM, bN, bK); // (MMA_M, MMA_N, MMA_K)
 
@@ -168,7 +168,7 @@ __device__ __forceinline__ void
                        mma_coord,
                        cute::Step<cute::_1, cute::_1, cute::X>{});
   // cute::Tensor tCgD = thread_mma.partition_C(gOutputTile);
-#if 0
+#if 1
   if (cute::thread0()) {
     cute::print("mA:\t");
     cute::print(mA);
@@ -185,12 +185,10 @@ __device__ __forceinline__ void
 
     cute::print("gA:\t");
     cute::print(gA);
-    cute::print("\n"); // gA:     ArithTuple(_0,_0) o
-                       // (_128,_64,1,32,128):(_1@1,_1@0,_128@1,_64@0,_128@1)
+    cute::print("\n");
     cute::print("gB:\t");
     cute::print(gB);
-    cute::print("\n"); // gB:     gmem_ptr[16b](0x792c0b000000) o
-                       // (_16,_64,1,32):(2048,_1,32768,_64)
+    cute::print("\n");
     cute::print("gBias:\t");
     cute::print(gBias);
     cute::print("\n");
@@ -198,7 +196,6 @@ __device__ __forceinline__ void
     printf("gOutput:\t");
     cute::print(gOutput);
     printf("\n");
-
   }
   __syncthreads();
 #endif
@@ -335,12 +332,13 @@ if (threadIdx.x == 0) {
       (reinterpret_cast<uintptr_t>(shared_memory) + 127) / 128 * 128;
   SharedStorage &shared_storage =
       *reinterpret_cast<SharedStorage *>(aligned_smem);
+#if 0
   T_ *shared_output =
       (T_ *)(((uintptr_t)aligned_smem + sizeof(SharedStorage) + 1023) / 1024 *
              1024);
   using OutputSmem = smem_tma<T_, 0, 0, 0, 16, 64, 1>;
   OutputSmem output_smem(shared_output);
-
+#endif
   // Initialize the barriers in shared memory
   if (warp_idx == 0) {
     cutlass::arch::detail::initialize_barrier_array_aligned<
@@ -493,7 +491,7 @@ if (threadIdx.x == 0) {
     for (int expert_idx = 0; expert_idx < NUM_EXPERTS; ++expert_idx) {
       total_expert_count += mMask(expert_idx);
       if (mMask(expert_idx) == 1 &&
-          (total_expert_count - 1) % EXPERT_STRIDE == EXPERT_OFFSET) {
+          (total_expert_count - 1) % EXPERT_STRIDE == expert_offset) {
         cute::Tensor tRoutingIndex = mRoutingIndices(expert_idx, cute::_);
         for (int m_tile = 0; m_tile < cute::size<2>(gA); ++m_tile) {
           for (int n_tile = 0; n_tile < cute::size<2>(gB); ++n_tile) {
@@ -598,7 +596,7 @@ if (threadIdx.x == 0) {
       total_expert_count += mMask(expert_idx);
       cute::Tensor tRoutingIndex = mRoutingIndices(expert_idx, cute::_);
       if (mMask(expert_idx) == 1 &&
-          (total_expert_count - 1) % EXPERT_STRIDE == EXPERT_OFFSET) {
+          (total_expert_count - 1) % EXPERT_STRIDE == expert_offset) {
         for (int m_tile = 0; m_tile < cute::size<2>(gA); ++m_tile) {
           for (int n_tile = 0; n_tile < cute::size<2>(gB); ++n_tile) {
 
@@ -731,8 +729,10 @@ if (threadIdx.x == 0) {
             cutlass::NumericConverter<TypeAcc, TypeBias> TypeBias_to_TypeAcc;
             cutlass::NumericConverter<TypeC, TypeAcc> TypeAcc_to_TypeC;
 
+#if 0
             cute::Tensor gBiasTile = gBias(
                 cute::_, cute::_, n_tile, m_tile, expert_idx); // (Mma_M, Mma_N)
+              // NOTE(Yu): thread_mma.partition_C may not partition it to correct layout, this should be fixed if we want to use partition provided by cutlass
             auto tCgBias = thread_mma.partition_C(gBiasTile);
 
             // if constexpr (!NOBIAS) {
@@ -741,6 +741,40 @@ if (threadIdx.x == 0) {
             //     tCgBias(i) = TypeAcc_to_TypeC(accum(i));
             //   }
             // }
+              if (threadIdx.x == 0) {
+                printf("gBiasTile: ");
+                cute::print(gBiasTile);
+                printf("\n");
+                printf("tCgBias: ");
+                cute::print(tCgBias);
+                printf("\n");
+                printf("accum: ");
+                cute::print(accum);
+                printf("\n");
+
+                printf("accum: ");
+                for (int i = 0; i < accum.size(); i++) {
+                  printf("%f ", static_cast<float>(accum(i)));
+                }
+                printf("\n");
+
+                if (!NOBIAS) {
+                  printf("tCgBias: ");
+                  auto start_ptr = tCgBias.data();
+                  for (int i = 0; i < tCgBias.size(); i++) {
+                    printf("%p %f \n", start_ptr + i, static_cast<float>(tCgBias(i)));
+                  }
+                  printf("\n");
+
+                  printf("gBiasTile start ptr: %p\n", gBiasTile.data());
+                  for (int i = 0; i < gBiasTile.size(); i++) {
+                    printf("%f ", static_cast<float>(gBiasTile(i)));
+                  }
+                  printf("\n");
+                }
+
+              }
+#endif
 
             for (int i = 0; i < MMA_N / 2; i++) {
               int const idx_in_warp = threadIdx.x % 32;
@@ -755,15 +789,23 @@ if (threadIdx.x == 0) {
               TypeC fragD = TypeAcc_to_TypeC(accum(i));
 
               if constexpr (!NOBIAS) {
-                TypeBias fragC{};
-                cutlass::arch::global_load<TypeBias, sizeof(TypeBias)>(
-                    fragC, &tCgBias(i), pred);
+// TypeBias fragC{};
+// cutlass::arch::global_load<TypeBias, sizeof(TypeBias)>(
+//     fragC, &tCgBias(i), pred);
+#if 0
                 if (threadIdx.x == 0) {
-                  printf("threadIdx.x: %d, fragC: %f\n",
-                         threadIdx.x,
-                         static_cast<float>(fragC));
+                  printf("pred: %d, m_idx: %d, n_idx: %d, topk_idx: %d, fragC: %f, fragD: %f, tCgBias(i): %f, &tCgBias(i): %p\n",
+                         pred,
+                         m_idx,
+                         n_idx,
+                         topk_idx,
+                         static_cast<float>(fragC),
+                         static_cast<float>(fragD),
+                         static_cast<float>(tCgBias(i)),
+                         &tCgBias(i));
                 }
-                fragD += fragC;
+#endif
+                fragD += mBias(n_idx, m_idx, expert_idx);
               }
               if (pred) {
                 mOutput(n_idx, m_idx, tRoutingIndex(n_idx) - 1) = fragD;

@@ -15,7 +15,7 @@ expert_offset = 0
 expert_stride = 12
 
 is_w2_linear = False
-has_residual = False
+has_residual = True
 
 for reduction_size in reduction_sizes:
     for output_size in output_sizes:

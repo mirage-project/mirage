@@ -45,7 +45,6 @@ template <typename T,
           int REDUCTION_SIZE,
           int NUM_EXPERTS,
           int NUM_TOPK,
-          int EXPERT_OFFSET,
           int EXPERT_STRIDE,
           bool W13_LINEAR,
           class InputTensor,
@@ -63,7 +62,8 @@ __global__ __launch_bounds__(256, 1) void moe_linear_sm90_wrapper(
     BiasTensor mBias,
     IndicesTensor mRoutingIndices,
     MaskTensor mMask,
-    OutputTensor mOutput) {
+    OutputTensor mOutput,
+    int const expert_offset) {
 
   constexpr int B = 3;
   constexpr int M = 3;
@@ -108,12 +108,11 @@ __global__ __launch_bounds__(256, 1) void moe_linear_sm90_wrapper(
                                     REDUCTION_SIZE,
                                     NUM_EXPERTS,
                                     NUM_TOPK,
-                                    EXPERT_OFFSET,
                                     EXPERT_STRIDE,
                                     W13_LINEAR,
                                     NoBias,
                                     NUM_AB_STAGE>(
-      tma_a, mInput, mBias, mRoutingIndices, mMask, mOutput);
+      tma_a, mInput, mBias, mRoutingIndices, mMask, mOutput, expert_offset);
 }
 
 template <typename T,
@@ -122,10 +121,10 @@ template <typename T,
           int REDUCTION_SIZE,
           int NUM_EXPERTS,
           int NUM_TOPK,
-          int EXPERT_OFFSET,
           int EXPERT_STRIDE,
           bool W13_LINEAR = true>
-void launch_moe_linear_sm90(void *input_ptr,
+void launch_moe_linear_sm90(int const expert_offset,
+                            void *input_ptr,
                             void *weight_ptr,
                             void *mpk_routing_indices_ptr,
                             void *mpk_expert_mask_ptr,
@@ -223,7 +222,6 @@ void launch_moe_linear_sm90(void *input_ptr,
                                                   REDUCTION_SIZE,
                                                   NUM_EXPERTS,
                                                   NUM_TOPK,
-                                                  EXPERT_OFFSET,
                                                   EXPERT_STRIDE,
                                                   W13_LINEAR,
                                                   decltype(mInput),
@@ -246,7 +244,8 @@ void launch_moe_linear_sm90(void *input_ptr,
                                             mBias,
                                             mRoutingIndices,
                                             mMask,
-                                            mOutput);
+                                            mOutput,
+                                            expert_offset);
       CUTE_CHECK_LAST();
 
       if (status != cutlass::Status::kSuccess) {
@@ -259,7 +258,6 @@ void launch_moe_linear_sm90(void *input_ptr,
                                                   REDUCTION_SIZE,
                                                   NUM_EXPERTS,
                                                   NUM_TOPK,
-                                                  EXPERT_OFFSET,
                                                   EXPERT_STRIDE,
                                                   W13_LINEAR,
                                                   decltype(mInput),
@@ -282,7 +280,8 @@ void launch_moe_linear_sm90(void *input_ptr,
                                             mBias,
                                             mRoutingIndices,
                                             mMask,
-                                            mOutput);
+                                            mOutput,
+                                            expert_offset);
       CUTE_CHECK_LAST();
 
       if (status != cutlass::Status::kSuccess) {
@@ -303,7 +302,6 @@ void launch_moe_linear_sm90(void *input_ptr,
                                                   REDUCTION_SIZE,
                                                   NUM_EXPERTS,
                                                   NUM_TOPK,
-                                                  EXPERT_OFFSET,
                                                   EXPERT_STRIDE,
                                                   W13_LINEAR,
                                                   decltype(mInput),
@@ -326,7 +324,8 @@ void launch_moe_linear_sm90(void *input_ptr,
                                             mBias,
                                             mRoutingIndices,
                                             mMask,
-                                            mOutput);
+                                            mOutput,
+                                            expert_offset);
       CUTE_CHECK_LAST();
 
       if (status != cutlass::Status::kSuccess) {
@@ -339,7 +338,6 @@ void launch_moe_linear_sm90(void *input_ptr,
                                                   REDUCTION_SIZE,
                                                   NUM_EXPERTS,
                                                   NUM_TOPK,
-                                                  EXPERT_OFFSET,
                                                   EXPERT_STRIDE,
                                                   W13_LINEAR,
                                                   decltype(mInput),
@@ -362,7 +360,8 @@ void launch_moe_linear_sm90(void *input_ptr,
                                             mBias,
                                             mRoutingIndices,
                                             mMask,
-                                            mOutput);
+                                            mOutput,
+                                            expert_offset);
       CUTE_CHECK_LAST();
 
       if (status != cutlass::Status::kSuccess) {
@@ -396,8 +395,8 @@ void moe_w13_linear_sm90_kernel(torch::Tensor input,
   constexpr int REDUCTION_SIZE = 2048;
   constexpr int NUM_EXPERTS = 128;
   constexpr int NUM_TOPK = 8;
-  constexpr int EXPERT_OFFSET = 0;
   constexpr int EXPERT_STRIDE = 12;
+  int const expert_offset = 0;
 
   assert(input.size(1) == REDUCTION_SIZE);
   assert(weight.size(0) == NUM_EXPERTS && weight.size(1) == OUTPUT_SIZE &&
@@ -405,7 +404,7 @@ void moe_w13_linear_sm90_kernel(torch::Tensor input,
   assert(mpk_routing_indices.size(0) == NUM_EXPERTS &&
          mpk_routing_indices.size(1) == BATCH_SIZE);
   assert(mpk_expert_mask.size(0) == NUM_EXPERTS);
-  assert(!has_residual);
+  //   assert(!has_residual);
 
   launch_moe_linear_sm90<bfloat16,
                          BATCH_SIZE,
@@ -413,9 +412,9 @@ void moe_w13_linear_sm90_kernel(torch::Tensor input,
                          REDUCTION_SIZE,
                          NUM_EXPERTS,
                          NUM_TOPK,
-                         EXPERT_OFFSET,
                          EXPERT_STRIDE,
-                         true>(input_ptr,
+                         true>(expert_offset,
+                               input_ptr,
                                weight_ptr,
                                mpk_routing_indices_ptr,
                                mpk_expert_mask_ptr,
@@ -451,8 +450,8 @@ void moe_w2_linear_sm90_kernel(torch::Tensor input,
   constexpr int REDUCTION_SIZE = 2048;
   constexpr int NUM_EXPERTS = 128;
   constexpr int NUM_TOPK = 8;
-  constexpr int EXPERT_OFFSET = 0;
   constexpr int EXPERT_STRIDE = 12;
+  int const expert_offset = 0;
 
   assert(input.size(0) == BATCH_SIZE && input.size(1) == NUM_TOPK &&
          input.size(2) == REDUCTION_SIZE);
@@ -461,7 +460,7 @@ void moe_w2_linear_sm90_kernel(torch::Tensor input,
   assert(mpk_routing_indices.size(0) == NUM_EXPERTS &&
          mpk_routing_indices.size(1) == BATCH_SIZE);
   assert(mpk_expert_mask.size(0) == NUM_EXPERTS);
-  assert(!has_residual);
+  //   assert(!has_residual);
 
   launch_moe_linear_sm90<bfloat16,
                          BATCH_SIZE,
@@ -469,9 +468,9 @@ void moe_w2_linear_sm90_kernel(torch::Tensor input,
                          REDUCTION_SIZE,
                          NUM_EXPERTS,
                          NUM_TOPK,
-                         EXPERT_OFFSET,
                          EXPERT_STRIDE,
-                         false>(input_ptr,
+                         false>(expert_offset,
+                                input_ptr,
                                 weight_ptr,
                                 mpk_routing_indices_ptr,
                                 mpk_expert_mask_ptr,
