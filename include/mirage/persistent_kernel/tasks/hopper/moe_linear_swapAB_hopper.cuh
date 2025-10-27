@@ -168,7 +168,7 @@ __device__ __forceinline__ void
                        mma_coord,
                        cute::Step<cute::_1, cute::_1, cute::X>{});
   // cute::Tensor tCgD = thread_mma.partition_C(gOutputTile);
-#if 1
+#if 0
   if (cute::thread0()) {
     cute::print("mA:\t");
     cute::print(mA);
@@ -427,7 +427,7 @@ if (threadIdx.x == 0) {
                               1>; // 64/64 = 1
   WeightSmem weight_smem(shared_weight);
 
-  // CP_ASYNC Atom for B, todo: use MMA_N instead of hardcoded 16
+  // CP_ASYNC Atom for B
   auto copyB = cute::make_tiled_copy(
       cute::Copy_Atom<cute::SM80_CP_ASYNC_CACHEALWAYS<cute::uint128_t>, T_>{},
       cute::Layout<
@@ -528,7 +528,6 @@ if (threadIdx.x == 0) {
               // TMA for loading A
               // only one thread will issue the tma instruction
               if (threadIdx.x % NUM_THREAD_PER_WARPGROUP == 0) {
-                // TODO(Zhihao): add expert offset here
                 int tma_coords_A[2] = {k_tile * TILE_SIZE,
                                        m_tile * OUTPUT_ATOM_SIZE +
                                            expert_idx * OUTPUT_SIZE};
