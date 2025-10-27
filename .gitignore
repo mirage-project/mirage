@@ -69,3 +69,7 @@ kernel*.cu
 test/[!.]*
 report
 ncu_tmp
+
+#nsys
+*.nsys-rep
+*.sqlite

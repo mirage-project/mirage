@@ -127,7 +127,7 @@ if __name__ == "__main__":
             model = Qwen3ForCausalLM.from_pretrained(model_name, world_size=1, max_num_pages=args.max_num_pages, page_size=args.page_size).to("cuda")
             tokenizer = AutoTokenizer.from_pretrained(model_name)
 
-    total_num_requests = args.max_num_batched_requests
+    total_num_requests = 1 if not args.use_mirage else args.max_num_batched_requests
     # get all model weight tensors
     tokens = torch.full((total_num_requests, args.max_seq_length), 0, dtype=torch.long, device="cuda")
 
@@ -640,6 +640,7 @@ if __name__ == "__main__":
     warmup = 0
     output_len = 512
     if not args.use_mirage:
+        prompt_len= prompt_lengths[0].item()
         for cur_pos in range(prompt_len, prompt_len + output_len):
             step.fill_(cur_pos - 1)
             input_ids = tokens[:, prev_pos:cur_pos]

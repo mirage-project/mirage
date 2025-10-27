@@ -73,6 +73,13 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model", type=str, default='Qwen/Qwen3-8B', help="Model path on hugging face"
     )
+    parser.add_argument(
+        "--no-use-cutlass-kernel",
+        action="store_false",
+        dest="use_cutlass_kernel",
+        default=True,
+        help="Not use the cutlass version kernel.",
+    )
     parser.add_argument("--ignore-eos", action="store_true", help="Ignore eos token during generation")
     args = parser.parse_args()
     try:
@@ -242,6 +249,7 @@ if __name__ == "__main__":
             profiler_tensor=profiler_tensor,
             trace_name=args.trace_name,
             spec_decode_config=spec_decode_config,
+            use_cutlass_kernel=args.use_cutlass_kernel,
         )
         
         if spec_decode_config and spec_decode_config.method == "promptlookup":

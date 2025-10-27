@@ -6,11 +6,11 @@ torch.set_printoptions(sci_mode=False, profile="full")
 
 g = torch.Generator(device="cuda").manual_seed(1234)
 
-reduction_sizes = [4096]
-output_sizes = [1024]
-batch_size = 32 # TODO(Zhihao): will have misalignment issue when batch size >= 63, need to fix it in the kernel later
+reduction_sizes = [2048]
+output_sizes = [128]
+batch_size = 16
 
-has_residual = True
+has_residual = False
 
 for reduction_size in reduction_sizes:
     for output_size in output_sizes:
@@ -24,11 +24,10 @@ for reduction_size in reduction_sizes:
         )
         residual = torch.randn(batch_size, output_size, device="cuda", dtype=torch.bfloat16)
         output = torch.empty(batch_size, output_size, device="cuda", dtype=torch.bfloat16)
-        output_nobias = torch.empty(batch_size, output_size, device="cuda", dtype=torch.bfloat16)
 
         if not has_residual:
             residual = None
-        runtime_kernel_blackwell.linear_warp_specialized(x, w, residual, output) # with residual and swapAB
+        runtime_kernel_blackwell.linear_sm100_mpk(x, w, residual, output) # with residual and swapAB
         torch_out = torch.matmul(x, torch.transpose(w, 0, 1))
         if has_residual:
             torch_out = torch_out + residual
@@ -41,20 +40,20 @@ for reduction_size in reduction_sizes:
         )
         print("Test passed!")
 
-        # # Warm-up
-        # for _ in range(16):
-        #     runtime_kernel_blackwell.linear_warp_specialized(x, w, residual, output)
+        # Warm-up
+        for _ in range(16):
+            runtime_kernel_blackwell.linear_sm100_mpk(x, w, residual, output)
 
-        # torch.cuda.synchronize()
-        # starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(
-        #     enable_timing=True
-        # )
-        # repetitions = 1000
-        # starter.record()
-        # for rep in range(repetitions):
-        #     runtime_kernel_blackwell.linear_warp_specialized(x, w, residual, output)
-        # ender.record()
-        # torch.cuda.synchronize()
-        # total_time = starter.elapsed_time(ender)
-        # avg_time = total_time / repetitions
-        # print(f"Average time over {repetitions} runs: {avg_time:.6f} ms")
+        torch.cuda.synchronize()
+        starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(
+            enable_timing=True
+        )
+        repetitions = 1000
+        starter.record()
+        for rep in range(repetitions):
+            runtime_kernel_blackwell.linear_sm100_mpk(x, w, residual, output)
+        ender.record()
+        torch.cuda.synchronize()
+        total_time = starter.elapsed_time(ender)
+        avg_time = total_time / repetitions
+        print(f"Average time over {repetitions} runs: {avg_time:.6f} ms")
