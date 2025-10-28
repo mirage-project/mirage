@@ -312,6 +312,23 @@ __device__ __forceinline__ bool
 }
 #endif
 
+#ifdef MODE_ONLINE_NOTOKEN
+__device__ __forceinline__ bool
+    prepare_next_batch(RuntimeConfig const &config, size_t iteration_num = 0) {
+      // TODO: iteration_num is a current workaround
+      // We may consider split EVENT_END_OF_TASK_GRAPH into
+      // EVENT_END_OF_TASK_GRAPH and EVENT_START_OF_TASK_GRAPH
+  printf("iteration_num: %zu\n", iteration_num);
+  if (iteration_num > 0) {
+    printf("[prepare_next_batch] blockIdx.x: %d, threadIdx.x: %d, Serving type: NO_TOKEN, return hidden state without token\n", blockIdx.x, threadIdx.x);
+    return false;
+  } else { // iteration_num == 0
+    printf("[prepare_next_batch] blockIdx.x: %d, threadIdx.x: %d, Serving type: NO_TOKEN, but before the first iteration\n", blockIdx.x, threadIdx.x);
+    return true;
+  }
+}
+#endif
+
 __device__ __forceinline__ int get_rand_sched_id(size_t event_index,
                                                  int worker_id,
                                                  int num_workers,
@@ -1050,7 +1067,7 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
 
   // Initialize nvshmem
   cudaSetDevice(my_rank);
-#if defined(MODE_OFFLINE) || defined(MODE_ONLINE)
+#if defined(MODE_OFFLINE) // || defined(MODE_ONLINE) || defined(MODE_ONLINE_NOTOKEN)
   global_runtime_config.request_ids =
       gpu_malloc<int>(sizeof(int) * (MPK_MAX_NUM_BATCHED_REQUESTS + 1));
   global_runtime_config.next_request_id = gpu_malloc<int>(sizeof(int));
@@ -1291,7 +1308,7 @@ extern "C" void finalize_persistent_kernel() {
   gpu_free(global_runtime_config.all_event_num_triggers);
   gpu_free(global_runtime_config.all_tasks);
   gpu_free(global_runtime_config.all_events);
-#if defined(MODE_OFFLINE) || defined(MODE_ONLINE)
+#if defined(MODE_OFFLINE) // || defined(MODE_ONLINE) || defined(MODE_ONLINE_NOTOKEN)
   gpu_free(global_runtime_config.next_request_id);
   gpu_free(global_runtime_config.page_queue);
   gpu_free(global_runtime_config.page_queue_head);

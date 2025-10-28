@@ -6,7 +6,7 @@ import torch.distributed as dist
 import argparse
 import os
 
-from ..utils import grid_for_rmsnorm_linear_layer, max_factor_leq_n
+from ..utils import grid_for_rmsnorm_linear_layer, shuffle_tensors
 from ..graph_builder import GraphBuilder, MirageModelConfig
 from ...persistent_kernel import PersistentKernel
 from ...model_registry import register_model_builder
@@ -87,91 +87,142 @@ class Qwen3Builder(GraphBuilder):
         self.build_from_dict(self.model.state_dict(), True)
         
     def new_intermediate_tensors(self):
+        if self.mpk.mode == "online_notoken":
+            fixed_tensor = True
+        else:
+            fixed_tensor = False
         self.max_num_batched_tokens = self.mpk.max_num_batched_tokens
-        self.y = self.mpk.new_tensor(
-            dims=(self.max_num_batched_tokens, self.hidden_size),
-            dtype=bfloat16,
-            name="embed_out",
-            io_category="cuda_tensor",
-        )
-        self.rmsnorm_out = self.mpk.new_tensor(
-            dims=(self.max_num_batched_tokens, self.hidden_size),
-            dtype=bfloat16,
-            name="rmsnorm_out",
-            io_category="cuda_tensor",
-        )
-        self.attn_in = self.mpk.new_tensor(
-            dims=(self.max_num_batched_tokens, self.fused_outdim_1), # [6, 6144]
-            dtype=bfloat16,
-            name="attn_in",
-            io_category="cuda_tensor",
-        )
-        self.attn_out = self.mpk.new_tensor(
-            dims=(self.max_num_batched_tokens, self.num_local_q_heads * self.head_dim),
-            dtype=bfloat16,
-            name="attn_out",
-            io_category="cuda_tensor",
-        )
-        self.attn_proj_out = self.mpk.new_tensor(
-            dims=(self.max_num_batched_tokens, self.hidden_size),
-            dtype=bfloat16,
-            name="attn_proj_out",
-            io_category="nvshmem_tensor" if self.world_size > 1 else "cuda_tensor",
-        )
-        self.allreduce_buf = self.mpk.new_tensor(
-            dims=(self.world_size, self.max_num_batched_tokens, self.hidden_size),
-            dtype=bfloat16,
-            name="all_reduce_buf",
-            io_category="nvshmem_tensor" if self.world_size > 1 else "cuda_tensor",
-        )
-        self.attn_allreduce_out = self.mpk.new_tensor(
-            dims=(self.max_num_batched_tokens, self.hidden_size),
-            dtype=bfloat16,
-            name="attn_allreduce_out",
-            io_category="nvshmem_tensor" if self.world_size > 1 else "cuda_tensor",
-        )
-        self.mlp_mid = self.mpk.new_tensor(
-            dims=(self.max_num_batched_tokens, self.fused_outdim_2 // self.world_size),
-            dtype=bfloat16,
-            name="mlp_mid",
-            io_category="cuda_tensor",
-        )
-        self.silu_mul_out = self.mpk.new_tensor(
-            dims=(self.max_num_batched_tokens, self.intermediate_size // self.world_size),
-            dtype=bfloat16,
-            name="silu_mul_out",
-            io_category="cuda_tensor",
-        )
-        self.mlp_out = self.mpk.new_tensor(
-            dims=(self.max_num_batched_tokens, self.hidden_size),
-            dtype=bfloat16,
-            name="mlp_out",
-            io_category="nvshmem_tensor" if self.world_size > 1 else "cuda_tensor",
-        )
-        self.mlp_final = self.mpk.new_tensor(
-            dims=(self.max_num_batched_tokens, self.hidden_size),
-            dtype=bfloat16,
-            name="mlp_final",
-            io_category="nvshmem_tensor" if self.world_size > 1 else "cuda_tensor",
-        )
-        self.argmax_in = self.mpk.new_tensor(
-            dims=(self.max_num_batched_tokens, self.vocab_size),
-            dtype=bfloat16,
-            name="argmax_in",
-            io_category="cuda_tensor",
-        )
-        self.argmax_part_value = self.mpk.new_tensor(
-            dims=(self.max_num_batched_tokens, self.mpk.num_workers),
-            dtype=bfloat16,
-            name="argmax_part_value",
-            io_category="cuda_tensor",
-        )
-        self.argmax_part_index = self.mpk.new_tensor(
-            dims=(self.max_num_batched_tokens, self.mpk.num_workers),
-            dtype=int64,
-            name="argmax_part_index",
-            io_category="cuda_tensor",
-        )
+        if fixed_tensor:
+            self.y_tensor = torch.zeros(self.max_num_batched_tokens, self.hidden_size, dtype=torch.bfloat16, device="cuda")
+            self.y = self.mpk.attach_input(torch_tensor=self.y_tensor, name="embed_out")
+            
+            # Allocate a torch tensor to store the returned hidden state
+            self.returned_hidden_state = torch.zeros(self.max_num_batched_tokens, self.hidden_size, dtype=torch.bfloat16, device="cuda")
+            self.rmsnorm_out = self.mpk.attach_input(torch_tensor=self.returned_hidden_state, name="rmsnorm_out")
+            
+            self.attn_in_tensor = torch.zeros(self.max_num_batched_tokens, self.fused_outdim_1, dtype=torch.bfloat16, device="cuda")
+            self.attn_in = self.mpk.attach_input(torch_tensor=self.attn_in_tensor, name="attn_in")
+            
+            self.attn_out_tensor = torch.zeros(self.max_num_batched_tokens, self.num_local_q_heads * self.head_dim, dtype=torch.bfloat16, device="cuda")
+            self.attn_out = self.mpk.attach_input(torch_tensor=self.attn_out_tensor, name="attn_out")
+            
+            self.attn_proj_out_tensor = torch.zeros(self.max_num_batched_tokens, self.hidden_size, dtype=torch.bfloat16, device="cuda")
+            self.attn_proj_out = self.mpk.attach_input(torch_tensor=self.attn_proj_out_tensor, name="attn_proj_out")
+            
+            self.allreduce_buf_tensor = torch.zeros(self.world_size, self.max_num_batched_tokens, self.hidden_size, dtype=torch.bfloat16, device="cuda")
+            self.allreduce_buf = self.mpk.attach_input(torch_tensor=self.allreduce_buf_tensor, name="all_reduce_buf")
+            
+            self.attn_allreduce_out_tensor = torch.zeros(self.max_num_batched_tokens, self.hidden_size, dtype=torch.bfloat16, device="cuda")
+            self.attn_allreduce_out = self.mpk.attach_input(torch_tensor=self.attn_allreduce_out_tensor, name="attn_allreduce_out")
+            
+            self.mlp_mid_tensor = torch.zeros(self.max_num_batched_tokens, self.fused_outdim_2 // self.world_size, dtype=torch.bfloat16, device="cuda")
+            self.mlp_mid = self.mpk.attach_input(torch_tensor=self.mlp_mid_tensor, name="mlp_mid")
+            
+            self.silu_mul_out_tensor = torch.zeros(self.max_num_batched_tokens, self.intermediate_size // self.world_size, dtype=torch.bfloat16, device="cuda")
+            self.silu_mul_out = self.mpk.attach_input(torch_tensor=self.silu_mul_out_tensor, name="silu_mul_out")
+            
+            self.mlp_out_tensor = torch.zeros(self.max_num_batched_tokens, self.hidden_size, dtype=torch.bfloat16, device="cuda")
+            self.mlp_out = self.mpk.attach_input(torch_tensor=self.mlp_out_tensor, name="mlp_out")
+            
+            self.mlp_final_tensor = torch.zeros(self.max_num_batched_tokens, self.hidden_size, dtype=torch.bfloat16, device="cuda")
+            self.mlp_final = self.mpk.attach_input(torch_tensor=self.mlp_final_tensor, name="mlp_final")
+            
+            if self.mpk.mode != "online_notoken":
+                self.argmax_in_tensor = torch.zeros(self.max_num_batched_tokens, self.vocab_size, dtype=torch.bfloat16, device="cuda")
+                self.argmax_in = self.mpk.attach_input(torch_tensor=self.argmax_in_tensor, name="argmax_in")
+                
+                self.argmax_part_value_tensor = torch.zeros(self.max_num_batched_tokens, self.mpk.num_workers, dtype=torch.bfloat16, device="cuda")
+                self.argmax_part_value = self.mpk.attach_input(torch_tensor=self.argmax_part_value_tensor, name="argmax_part_value")
+                
+                self.argmax_part_index_tensor = torch.zeros(self.max_num_batched_tokens, self.mpk.num_workers, dtype=torch.int64, device="cuda")
+                self.argmax_part_index = self.mpk.attach_input(torch_tensor=self.argmax_part_index_tensor, name="argmax_part_index")
+
+        else:
+            self.y = self.mpk.new_tensor(
+                dims=(self.max_num_batched_tokens, self.hidden_size),
+                dtype=bfloat16,
+                name="embed_out",
+                io_category="cuda_tensor",
+            )
+            self.rmsnorm_out = self.mpk.new_tensor(
+                dims=(self.max_num_batched_tokens, self.hidden_size),
+                dtype=bfloat16,
+                name="rmsnorm_out",
+                io_category="cuda_tensor",
+            )
+            self.attn_in = self.mpk.new_tensor(
+                dims=(self.max_num_batched_tokens, self.fused_outdim_1), # [6, 6144]
+                dtype=bfloat16,
+                name="attn_in",
+                io_category="cuda_tensor",
+            )
+            self.attn_out = self.mpk.new_tensor(
+                dims=(self.max_num_batched_tokens, self.num_local_q_heads * self.head_dim),
+                dtype=bfloat16,
+                name="attn_out",
+                io_category="cuda_tensor",
+            )
+            self.attn_proj_out = self.mpk.new_tensor(
+                dims=(self.max_num_batched_tokens, self.hidden_size),
+                dtype=bfloat16,
+                name="attn_proj_out",
+                io_category="nvshmem_tensor" if self.world_size > 1 else "cuda_tensor",
+            )
+            self.allreduce_buf = self.mpk.new_tensor(
+                dims=(self.world_size, self.max_num_batched_tokens, self.hidden_size),
+                dtype=bfloat16,
+                name="all_reduce_buf",
+                io_category="nvshmem_tensor" if self.world_size > 1 else "cuda_tensor",
+            )
+            self.attn_allreduce_out = self.mpk.new_tensor(
+                dims=(self.max_num_batched_tokens, self.hidden_size),
+                dtype=bfloat16,
+                name="attn_allreduce_out",
+                io_category="nvshmem_tensor" if self.world_size > 1 else "cuda_tensor",
+            )
+            self.mlp_mid = self.mpk.new_tensor(
+                dims=(self.max_num_batched_tokens, self.fused_outdim_2 // self.world_size),
+                dtype=bfloat16,
+                name="mlp_mid",
+                io_category="cuda_tensor",
+            )
+            self.silu_mul_out = self.mpk.new_tensor(
+                dims=(self.max_num_batched_tokens, self.intermediate_size // self.world_size),
+                dtype=bfloat16,
+                name="silu_mul_out",
+                io_category="cuda_tensor",
+            )
+            self.mlp_out = self.mpk.new_tensor(
+                dims=(self.max_num_batched_tokens, self.hidden_size),
+                dtype=bfloat16,
+                name="mlp_out",
+                io_category="nvshmem_tensor" if self.world_size > 1 else "cuda_tensor",
+            )
+            self.mlp_final = self.mpk.new_tensor(
+                dims=(self.max_num_batched_tokens, self.hidden_size),
+                dtype=bfloat16,
+                name="mlp_final",
+                io_category="nvshmem_tensor" if self.world_size > 1 else "cuda_tensor",
+            )
+            if self.mpk.mode != "online_notoken":
+                self.argmax_in = self.mpk.new_tensor(
+                    dims=(self.max_num_batched_tokens, self.vocab_size),
+                    dtype=bfloat16,
+                    name="argmax_in",
+                    io_category="cuda_tensor",
+                )
+                self.argmax_part_value = self.mpk.new_tensor(
+                    dims=(self.max_num_batched_tokens, self.mpk.num_workers),
+                    dtype=bfloat16,
+                    name="argmax_part_value",
+                    io_category="cuda_tensor",
+                )
+                self.argmax_part_index = self.mpk.new_tensor(
+                    dims=(self.max_num_batched_tokens, self.mpk.num_workers),
+                    dtype=int64,
+                    name="argmax_part_index",
+                    io_category="cuda_tensor",
+                )
         
     def build_layers(self, 
                      state_dict: dict):
@@ -183,22 +234,39 @@ class Qwen3Builder(GraphBuilder):
                 name=f"layer_{i}_input_layernorm",
             )
             if f"{prefix}self_attn.q_proj.weight" in state_dict:
-                w_q = self.mpk.attach_input(
-                    torch_tensor=state_dict[f"{prefix}self_attn.q_proj.weight"], name=f"layer_{i}_q_proj"
-                )
-                w_k = self.mpk.attach_input(
-                    torch_tensor=state_dict[f"{prefix}self_attn.k_proj.weight"], name=f"layer_{i}_k_proj"
-                )
-                w_v = self.mpk.attach_input(
-                    torch_tensor=state_dict[f"{prefix}self_attn.v_proj.weight"], name=f"layer_{i}_v_proj"
-                )
-                w_qkv = self.mpk.shuffle_tensors(
-                    inputs=[w_q, w_k, w_v],
-                    shuffled_dim=0,
-                    num_groups=self.local_num_kv_heads,
-                    name=f"layer_{i}_qkv_proj",
-                )
+                print(f"Building layer {i} with seperate q, k, v projection weights")
+                if self.mpk.mode == "online_notoken":
+                    print(f"Building layer {i} by shuffling q, k, v projection weights on python side")
+                    self.w_qkv_tensor = shuffle_tensors(
+                        [
+                            state_dict[f"{prefix}self_attn.q_proj.weight"],
+                            state_dict[f"{prefix}self_attn.k_proj.weight"],
+                            state_dict[f"{prefix}self_attn.v_proj.weight"],
+                        ],
+                        self.num_local_kv_heads,
+                        0,
+                    )
+                    w_qkv = self.mpk.attach_input(
+                        torch_tensor=self.w_qkv_tensor, name=f"layer_{i}_qkv_proj"
+                    )
+                else:
+                    w_q = self.mpk.attach_input(
+                        torch_tensor=state_dict[f"{prefix}self_attn.q_proj.weight"], name=f"layer_{i}_q_proj"
+                    )
+                    w_k = self.mpk.attach_input(
+                        torch_tensor=state_dict[f"{prefix}self_attn.k_proj.weight"], name=f"layer_{i}_k_proj"
+                    )
+                    w_v = self.mpk.attach_input(
+                        torch_tensor=state_dict[f"{prefix}self_attn.v_proj.weight"], name=f"layer_{i}_v_proj"
+                    )
+                    w_qkv = self.mpk.shuffle_tensors(
+                        inputs=[w_q, w_k, w_v],
+                        shuffled_dim=0,
+                        num_groups=self.num_local_kv_heads,
+                        name=f"layer_{i}_qkv_proj",
+                    )
             elif f"{prefix}self_attn.qkv_proj.weight" in state_dict:
+                print(f"Building layer {i} with unified qkv projection weights")
                 w_qkv = self.mpk.attach_input(
                     torch_tensor=state_dict[f"{prefix}self_attn.qkv_proj.weight"], name=f"layer_{i}_qkv_proj"
                 )
@@ -290,19 +358,36 @@ class Qwen3Builder(GraphBuilder):
                 name=f"layer_{i}_post_attn_layernorm",
             )
             if f"{prefix}mlp.gate_proj.weight" in state_dict:
-                w_gate_proj = self.mpk.attach_input(
-                    torch_tensor=state_dict[f"{prefix}mlp.gate_proj.weight"], name=f"layer_{i}_gate_proj"
+                rmsnorm_num_tasks = grid_for_rmsnorm_linear_layer(
+                    state_dict[f"{prefix}mlp.gate_proj.weight"].shape[0] 
+                    + state_dict[f"{prefix}mlp.up_proj.weight"].shape[0]
                 )
-                w_up_proj = self.mpk.attach_input(
-                    torch_tensor=state_dict[f"{prefix}mlp.up_proj.weight"], name=f"layer_{i}_up_proj"
-                )
-                rmsnorm_num_tasks = grid_for_rmsnorm_linear_layer(w_gate_proj.dim(0) + w_up_proj.dim(0))
-                w_gatedup = self.mpk.shuffle_tensors(
-                    inputs=[w_gate_proj, w_up_proj],
-                    shuffled_dim=0,
-                    num_groups=rmsnorm_num_tasks//2,
-                    name=f"layer_{i}_gatedup_proj",
-                )
+                if self.mpk.mode == "online_notoken":
+                    print(f"Building layer {i} by shuffling gate and up projection weights on python side")
+                    self.w_gatedup_tensor = shuffle_tensors(
+                        [
+                            state_dict[f"{prefix}mlp.gate_proj.weight"],
+                            state_dict[f"{prefix}mlp.up_proj.weight"],
+                        ],
+                        rmsnorm_num_tasks//2,
+                        0,
+                    )
+                    w_gatedup = self.mpk.attach_input(
+                        torch_tensor=self.w_gatedup_tensor, name=f"layer_{i}_gatedup_proj"
+                    )
+                else:
+                    w_gate_proj = self.mpk.attach_input(
+                        torch_tensor=state_dict[f"{prefix}mlp.gate_proj.weight"], name=f"layer_{i}_gate_proj"
+                    )
+                    w_up_proj = self.mpk.attach_input(
+                        torch_tensor=state_dict[f"{prefix}mlp.up_proj.weight"], name=f"layer_{i}_up_proj"
+                    )                    
+                    w_gatedup = self.mpk.shuffle_tensors(
+                        inputs=[w_gate_proj, w_up_proj],
+                        shuffled_dim=0,
+                        num_groups=rmsnorm_num_tasks//2,
+                        name=f"layer_{i}_gatedup_proj",
+                    )
             elif f"{prefix}mlp.gate_up_proj.weight" in state_dict:
                 rmsnorm_num_tasks = grid_for_rmsnorm_linear_layer(state_dict[f"{prefix}mlp.gate_up_proj.weight"].shape[0])
                 w_gatedup = self.mpk.attach_input(

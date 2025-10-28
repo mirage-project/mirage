@@ -1,3 +1,5 @@
+import torch
+
 def grid_for_rmsnorm_linear_layer(size):
     # 96 and 64 are enough to cover all Qwen3 model? Please update the method
     # if you meet any incompatibility.
@@ -19,3 +21,83 @@ def max_factor_leq_n(m: int, n: int) -> int:
                 max_factor = max(max_factor, m // i)
         i += 1
     return max_factor
+
+def shuffle_tensors(tensors: list[torch.Tensor], split: int, dim: int) -> torch.Tensor:
+    """Split each tensor along `dim` into `split` equal chunks and interleave chunks
+    by tensor order into a new tensor.
+
+    Example: given [Q, K, V], split=head_num, dim=0, result layout along dim is
+    [Q_head0, K_head0, V_head0, Q_head1, K_head1, V_head1, ...].
+
+    Args:
+        tensors: list of tensors to interleave. Must be same dtype/device and same
+                 shape on all non-`dim` dimensions. Each tensor.shape[dim] must be
+                 divisible by `split`.
+        split: number of equal chunks to split along `dim`.
+        dim: dimension index to split/interleave on (supports negative indices).
+
+    Returns:
+        A newly allocated tensor with the same rank as inputs. The size on `dim`
+        equals sum(t.shape[dim] for t in tensors).
+    """
+    if not tensors:
+        raise ValueError("tensors must be a non-empty list")
+
+    base = tensors[0]
+    dtype = base.dtype
+    device = base.device
+    ndim = base.ndim
+
+    # Normalize dim
+    if dim < 0:
+        dim = ndim + dim
+    if dim < 0 or dim >= ndim:
+        raise ValueError(f"dim out of range for {ndim}-D tensor: {dim}")
+
+    if split <= 0:
+        raise ValueError("split must be a positive integer")
+
+    # Validate shapes, dtype, device
+    base_shape = tuple(base.shape)
+    for idx, t in enumerate(tensors):
+        if t.dtype != dtype:
+            raise TypeError(f"All tensors must have same dtype; got {dtype} and {t.dtype} at index {idx}")
+        if t.device != device:
+            raise TypeError(f"All tensors must be on same device; got {device} and {t.device} at index {idx}")
+        if t.ndim != ndim:
+            raise ValueError(f"All tensors must have same rank; got {ndim} and {t.ndim} at index {idx}")
+        for d in range(ndim):
+            if d == dim:
+                continue
+            if t.shape[d] != base_shape[d]:
+                raise ValueError(
+                    f"Non-split dimensions must match; dim {d} differs: {base_shape[d]} vs {t.shape[d]} at index {idx}"
+                )
+        if t.shape[dim] % split != 0:
+            raise ValueError(
+                f"Tensor at index {idx} has size {t.shape[dim]} on dim {dim}, not divisible by split={split}"
+            )
+
+    per_tensor_chunk = [t.shape[dim] // split for t in tensors]
+    per_head_size = sum(per_tensor_chunk)
+    out_shape = list(base_shape)
+    out_shape[dim] = per_head_size * split  # equals sum(t.shape[dim])
+
+    out = torch.empty(out_shape, dtype=dtype, device=device)
+
+    def make_slice(start: int, length: int):
+        s = [slice(None)] * ndim
+        s[dim] = slice(start, start + length)
+        return tuple(s)
+
+    # Interleave by head index
+    write_head_base = 0
+    for i in range(split):
+        write_offset = 0
+        for t, chunk in zip(tensors, per_tensor_chunk):
+            read_start = i * chunk
+            out[make_slice(write_head_base + write_offset, chunk)] = t[make_slice(read_start, chunk)]
+            write_offset += chunk
+        write_head_base += per_head_size
+
+    return out

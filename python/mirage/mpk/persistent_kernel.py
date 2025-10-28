@@ -93,7 +93,7 @@ PyMODINIT_FUNC PyInit___mirage_launcher(void) {
 }
 """
 
-valid_persistent_kernel_modes = {"offline", "online", "onepass"}
+valid_persistent_kernel_modes = {"offline", "online", "online_notoken", "onepass"}
 
 def get_compile_command(
     mpk,
@@ -162,6 +162,8 @@ def get_compile_command(
         flags = flags + ["-DMODE_OFFLINE"]
     elif mpk.mode == "online":
         flags = flags + ["-DMODE_ONLINE"]
+    elif mpk.mode == "online_notoken":
+        flags = flags + ["-DMODE_ONLINE_NOTOKEN"]
     elif mpk.mode == "onepass":
         flags = flags + ["-DMODE_ONEPASS"]
     else:
@@ -926,14 +928,21 @@ class PersistentKernel:
         output_dir = kwargs.get("output_dir", None)
 
         MIRAGE_ROOT, INCLUDE_PATH, DEPS_PATH = get_key_paths()
-        tempdir_obj = tempfile.TemporaryDirectory()
-        tempdir = tempdir_obj.name
+        if self.mode == "online_notoken" or self.mode == "online":
+            # We will init for multiple times so the output directory should be permanent
+            tempdir = "./permanent_output_dir/"
+        else:
+            tempdir_obj = tempfile.TemporaryDirectory()
+            tempdir = tempdir_obj.name
+        os.makedirs(tempdir, exist_ok=True)
         results = self.kn_graph.generate_task_graph(num_gpus=self.world_size, my_gpu_id=self.mpi_rank)
 
         cuda_code_path = os.path.join(tempdir, "test.cu")
         so_path = os.path.join(tempdir, "test.cpython-38-x86_64-linux-gnu.so")
         # check json file
         json_file_path = os.path.join(tempdir, "task_graph.json")
+        # build if files are not exist
+            
         with open(json_file_path, "w") as f:
             f.write(results["json_file"])
         with open(cuda_code_path, "w") as f:
