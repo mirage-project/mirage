@@ -14,15 +14,12 @@
  */
 
 #pragma once
-#include "common.h"
-#include "copy_sm80.cuh"
-#include "dmem_layout.cuh"
 #include "element_binary.cuh"
 #include "element_unary.cuh"
 #include "mma.cuh"
 #include "reduction.cuh"
 #include "smem_layout.cuh"
-#include "utils.cuh"
+#include "tasks/common/common_header.cuh"
 namespace kernel {
 
 using bfloat16 = type::bfloat16_t;
@@ -130,7 +127,7 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
   constexpr size_t SHARED_OUTPUT_OFFSET =
       // MM_INTERMEDIATE_OFFSET +
       SHARED_WEIGHT_BUFFER_OFFSET +
-      sizeof(T) * TILE_SIZE * WEIGHT_PIPE_MAX * OUTPUT_SIZE;
+      sizeof(T) * TILE_SIZE * WEIGHT_PIPE_MAX * OUTPUT_ATOM_SIZE;
   // sizeof(T) * BATCH_SIZE * OUTPUT_SIZE
 
   // zero buffer
@@ -224,6 +221,8 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
 
   // Outer loop over K tiles; inner loop over output atoms
   // accumulator
+  // TODO: the NUM_OUTPUT_ATOMS will be big if OUTPUT_SIZE is big, then it may
+  // run out registers try to fix it later.
   float s_frag[NUM_OUTPUT_ATOMS][NUM_ITERS_M][NUM_ITERS_N][8];
 #pragma unroll
   for (uint32_t output_atom_idx = 0; output_atom_idx < NUM_OUTPUT_ATOMS;

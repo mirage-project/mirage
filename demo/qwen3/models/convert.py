@@ -1,6 +1,7 @@
 # Based on an implementation from DeepSeek-V3
 # https://github.com/deepseek-ai/DeepSeek-V3/blob/main/inference/convert.py
 
+import json
 import os
 import shutil
 from argparse import ArgumentParser
@@ -26,6 +27,18 @@ mapping = {
     "norm": ("norm", None),
     "lm_head": ("head", None),
 }
+
+
+def _tie_embeddings_enabled(hf_ckpt_path: str) -> bool:
+    config_path = os.path.join(hf_ckpt_path, "config.json")
+    if not os.path.exists(config_path):
+        return False
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            config = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return False
+    return bool(config.get("tie_word_embeddings", False))
 
 
 def main(hf_ckpt_path, save_path, mp):
@@ -64,6 +77,16 @@ def main(hf_ckpt_path, save_path, mp):
                     state_dicts[i][name] = new_param
 
     os.makedirs(save_path, exist_ok=True)
+
+    if _tie_embeddings_enabled(hf_ckpt_path):
+        for shard in state_dicts:
+            # safetensors.load_model expects tied weights to only keep lm_head.weight
+            if "lm_head.weight" in shard and "model.embed_tokens.weight" in shard:
+                print(
+                    "Tied embeddings detected. lm_head.weight and model.embed_tokens.weight"
+                    "only need one, removing model.embed_tokens.weight from shard."
+                )
+                shard.pop("model.embed_tokens.weight")
 
     for i in trange(mp):
         save_file(

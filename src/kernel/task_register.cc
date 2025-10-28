@@ -575,6 +575,50 @@ int TaskRegister::register_argmax_reduce_task(threadblock::Graph const &bgraph,
   return register_task_variant(TASK_ARGMAX_REDUCE, code.to_string());
 }
 
+int TaskRegister::register_reduce_task(threadblock::Graph const &bgraph,
+                                       std::vector<int> const &params) {
+  // params[0]: num_gpus
+  // params[1]: my_gpu_id
+  assert(params.size() == 2);
+  std::vector<tb::TBInputOp *> input_ops;
+  std::vector<tb::TBInputOp *> output_ops;
+  int num_inputs = 2;
+  int num_outputs = 1;
+
+  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    if (input_ops.size() < (size_t)num_inputs) {
+      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    } else {
+      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    }
+  }
+  // Currently support 2D reduction, buffer has an extra world_size dim
+  assert(input_ops[0]->output_tensors[0].num_dims == 2);
+  assert(input_ops[1]->output_tensors[0].num_dims == 3);
+  assert(output_ops[0]->output_tensors[0].num_dims == 2);
+  int batch_size = input_ops[0]->output_tensors[0].dim[0];
+  int output_size = input_ops[0]->output_tensors[0].dim[1];
+  // get output stride
+  assert(output_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
+  kn::KNInputOp *kn_input_op =
+      static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
+  int output_stride = static_cast<int>(kn_input_op->input_strides[0]);
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::reduction_kernel<bfloat16, $, $, $, $, $>(",
+         params[0],
+         params[1],
+         batch_size,
+         output_size,
+         output_stride);
+  code.e("    task_desc->input_ptrs[0],");
+  code.e("    task_desc->input_ptrs[1],");
+  code.e("    task_desc->output_ptrs[0]);");
+  return register_task_variant(TASK_REDUCE, code.to_string());
+}
+
 int TaskRegister::register_find_ngram_partial_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   // params[0]: ngram size
@@ -1019,6 +1063,7 @@ int TaskRegister::register_paged_attention_hopper_task(
   code.e("    task_desc->input_ptrs[6],");
   code.e("    1e-6f,");
   code.e("    1e-6f,");
+  code.e("    task_desc->input_ptrs[0],");
   code.e("    task_desc->output_ptrs[0],");
   code.e("    task_desc->head_group);");
 
@@ -1099,12 +1144,11 @@ int TaskRegister::register_linear_swapAB_hopper_task(
   constexpr int M = 3;
   constexpr int S = 3;
   constexpr int TMA_CP_ASYNC_SIZE = 64;
-  constexpr int TILE_SIZE = 256;
+  constexpr int TILE_SIZE = 128;
   constexpr int Kstages = 5;
   assert(batch_size <= 16);
-  // int const SMEM_M_SIZE = batch_size <= 8 ? 8 : 16; // batch size padded to
-  // 16
-  int const SMEM_M_SIZE = 16;
+  int const SMEM_M_SIZE = batch_size <= 8 ? 8 : 16;
+  // int const SMEM_M_SIZE = 16;
   int const output_tma_cp_size = output_size < 64 ? output_size : 64;
   int const output_atom_size = 64;
   code.e("using TMA_B = kernel::tma::tma_2d<bfloat16, $, $, $, $, $, $, $, $, "

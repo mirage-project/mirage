@@ -21,7 +21,7 @@ namespace mirage {
 namespace runtime {
 
 #if defined(MIRAGE_GRACE_HOPPER) || defined(MIRAGE_GRACE_BLACKWELL)
-constexpr int WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE = 4 * 1024;
+constexpr int WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE = 6 * 1024;
 #else
 constexpr int WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE = 3 * 1024;
 #endif
@@ -194,8 +194,13 @@ struct alignas(16) TaskDesc {
   void *output_tma_desc_ptrs[MAX_INPUTS_PER_TASK]
                             [mirage::config::MAX_TMA_DESC_PER_TENSOR];
 #endif
-  int request_id; // Used for paged attention
-  int head_group; // Used for paged attention hopper
+  union {
+    struct {
+      int request_id; // Used for paged attention
+      int head_group; // Used for paged attention hopper
+    };
+    size_t xfer_size_in_bytes; // Used for nvshmem
+  };
 };
 
 struct RuntimeConfig {
