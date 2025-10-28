@@ -7,6 +7,7 @@ from onnx import shape_inference
 from op import Operator
 import torch.nn.functional as F
 import custom_onnx_operators
+import numpy as np
 
 device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 
@@ -141,7 +142,7 @@ def parse_onnx_model(model, unique_operators):
             tensor_consumers[input_name].append(node_name)
             if input_name not in tensor_id:
                 tensor_id[input_name] = len(tensor_id)+1
-
+    
     operators = {}
 
     # store the operators in a dict
@@ -152,44 +153,44 @@ def parse_onnx_model(model, unique_operators):
         else:
             unique_operators[op_type] += 1
         node_name = node.name or f"{op_type}_{id(node)}"
-        additional_params = []
         kwargs = {}
-        if node.op_type == "Clip":
-            # Using .item() here pulls out the value from the rank-0 tensor
-            if node.min != None:
-                additional_params.append(node.min.item()) 
-            else: # Defaults are to do nothing but could be changed
-                additional_params.append(float('-inf'))
-            if node.max!= None:
-                additional_params.append(node.max.item()) 
-            else:
-                additional_params.append(float('inf'))
-        if node.op_type == "ReduceSum":
-            # TODO add ReduceMean here as well?
-            if node.axis != None:
-                axis = node.axis[0]
-                additional_params.append(axis)
-            else:
-                additional_params.append(0)
+
+        # TODO: fix specific operator attributes
+        # if node.op_type == "Clip":
+        #     # Using .item() here pulls out the value from the rank-0 tensor
+        #     if node.min != None:
+        #         kwargs["min"] = node.min.item()
+        #     else: # Defaults are to do nothing but could be changed
+        #         kwargs["min"] = float('-inf')
+        #     if node.max!= None:
+        #         kwargs["max"] = node.max.item()
+        #     else:
+        #         kwargs["max"] = float('inf')
+        # if node.op_type == "ReduceSum":
+        #     # TODO add ReduceMean here as well?
+        #     if node.axis != None:
+        #         axis = node.axis[0]
+        #         kwargs["axis"] = axis
+        #     else:
+        #         kwargs["axis"] = 0
+        if node.op_type == "Gather":
+            kwargs["axis"] = node.attribute[0].i
+        elif node.op_type == "Cast" or node.op_type == "CastLike":
+            # data type to cast to https://github.com/dmlc/tensorboard/blob/master/tensorboard/src/onnx.proto?utm_source=chatgpt.com
+            kwargs["to"] = node.attribute[0].i
 
         input_tensor_shapes = []
         for i, input_name in enumerate(node.input):
             if input_name in shape_value_dict and input_name in tensor_id:
                 shape = shape_value_dict[input_name]
 
-                # TODO we should leave modifying the graph structure to partition_graph.py
-                # since build_computational graph should faithfully construct the model
-                if i == 0:
-                    if op_type == "Softmax":
-                        shape = shape[:3]
+                # modifications for specific operators
                 if i == 1:
-                    if op_type in ["Div", "Add", "Pow"]:
-                        shape = input_tensor_shapes[0][0]
                     if op_type == "ReduceMean":
                         # the second tensor of ReduceMean is a 1x1 tensor with the reduction dimension
                         # TODO for now, we assume the last dimension is the reduction dimension always
                         continue
-                    if op_type == "MatMul":
+                    elif op_type == "MatMul":
                         if 0 in shape:
                             shape = tuple()
                         elif (len(input_tensor_shapes[0][0]) - len(shape)) == 1:
@@ -201,16 +202,12 @@ def parse_onnx_model(model, unique_operators):
         for output_name in node.output:
             if output_name in shape_value_dict and output_name in tensor_id:
                 shape = shape_value_dict[output_name]
-                if i == 0:
-                    if op_type == "Softmax":
-                        shape = shape[:3]
+
                 output_tensor_shapes.append((shape, tensor_id[output_name]))
-        
-        operator = Operator(name=node_name, fn=op_type, input_ops=[], output_ops=[], input_tensor_shapes=input_tensor_shapes, output_tensor_shapes=output_tensor_shapes, additional_params=additional_params, kwargs=kwargs)
-        # operator = {"name":node_name, "fn":op_type, "input_ops":[], "output_ops":[], "input_tensor_shapes":input_tensor_shapes, "output_tensor_shapes":output_tensor_shapes}
+
+        operator = Operator(name=node_name, fn=op_type, input_ops=[], output_ops=[], input_tensor_shapes=input_tensor_shapes, output_tensor_shapes=output_tensor_shapes, kwargs=kwargs)
         operators[node_name] = operator
         
-
     # Connect the input ops
     for node in model.graph.node:
         node_name = node.name or f"{node.op_type}_{id(node)}"
@@ -225,9 +222,6 @@ def parse_onnx_model(model, unique_operators):
                 dummy_const_operator = Operator(name=input_name, fn="Constant")
                 operators[node.name].input_ops.append(dummy_const_operator)
     
-    # print("After adding inputs")
-    # print(operators)
-    
     # Filling in output ops
     for node in model.graph.node:
         node_name = node.name or f"{node.op_type}_{id(node)}"
@@ -239,13 +233,285 @@ def parse_onnx_model(model, unique_operators):
             else:
                 dummy_const_operator = Operator(name=output_name, fn="Constant")
                 operators[node.name].output_ops.append(dummy_const_operator)
-    # print("After adding outputs")
-    # print(operators)
+    
+    # TODO: rather than doing the following to reassign tensor shapes, what about inserting reshape
+    # ops in the graph instead.
 
-    # print([node.name for node in model.graph.node])
-    # root_node = operators[model.graph.node[0].name]
-    # print_computational_graph(operators['node_Transpose_0'])
-    # print_computational_graph(root_node)
+    # pass to reassign tensor shapes
+    def reshape_tensor_pass(op, succ_shape, visited):
+        if not op.output_tensor_shapes:
+            return
+        if id(op) in visited:
+            return
+        visited.add(id(op))
+        
+        if op.fn == "MatMul":
+            succ_shape_tuple, _ = succ_shape  # Extract shape, ignore tensor_id
+            batch_dims = succ_shape_tuple[:-2]
+            
+            left_old_shape, left_tensor_id = op.input_tensor_shapes[0]
+            left_shape = (batch_dims + left_old_shape[-2:], left_tensor_id)
+            op.input_tensor_shapes[0] = left_shape
+            reshape_tensor_pass(op.input_ops[0], left_shape, visited)
+
+            right_old_shape, right_tensor_id = op.input_tensor_shapes[1]
+            right_shape = (batch_dims + right_old_shape[-2:], right_tensor_id)
+            op.input_tensor_shapes[1] = right_shape
+            reshape_tensor_pass(op.input_ops[1], right_shape, visited)
+        else:
+            new_shape, _ = succ_shape  # Extract shape, ignore tensor_id
+            for i in range(len(op.input_tensor_shapes)):
+                _, tensor_id = op.input_tensor_shapes[i]
+                op.input_tensor_shapes[i] = (new_shape, tensor_id)
+            op.output_tensor_shapes[0] = succ_shape
+            
+            for pred in op.input_ops:
+                # since we must have visited this node before during topological traversal,
+                # we know what the input and output shapes are the same
+                # Propagate with predecessor's own output (preserving its tensor_id)
+                if pred.output_tensor_shapes:
+                    reshape_tensor_pass(pred, pred.output_tensor_shapes[0], visited)
+
+    visited = set()
+    for node in model.graph.node: # ensure topological order
+        op = operators[node.name]
+        shape = op.output_tensor_shapes[0]
+        reshape_tensor_pass(op, shape, visited)
+    
+    # pass to expand softmax to constituent components
+    def expand_softmax_pass(op):
+        if op.fn != "Softmax":
+            return
+
+        # exp op
+        op_id = op.name.split('_')[-1]
+        exp_op = Operator(name=f"node_Exp_{op_id}_softmax", 
+                          fn="Exp",
+                          input_ops=[op.input_ops[0]],
+                          input_tensor_shapes=[op.input_tensor_shapes[0]])
+        
+        # input ops
+        for inp in op.input_ops:
+            inp.output_ops.remove(op)
+            inp.output_ops.append(exp_op)
+        exp_out_id = len(tensor_id) + 1
+        tensor_id[f"exp_out_{exp_out_id}"] = exp_out_id
+        exp_op.output_tensor_shapes = [(op.input_tensor_shapes[0][0], exp_out_id)]
+
+        # reduction op
+        red_op = Operator(name=f"node_ReduceSum_{op_id}_softmax",
+                          fn="ReduceSum",
+                          input_ops=[exp_op],
+                          input_tensor_shapes=[exp_op.output_tensor_shapes[0]],
+                          kwargs={'dim': 2})
+        red_out_id = len(tensor_id) + 1
+        tensor_id[f"red_out_{red_out_id}"] = red_out_id
+        red_op.output_tensor_shapes = [(exp_op.output_tensor_shapes[0][0], red_out_id)]
+        exp_op.output_ops = [red_op]
+
+        # division op
+        div_op = Operator(name=f"node_Div_{op_id}_softmax",
+                          fn="Div",
+                          input_ops=[exp_op, red_op],
+                          output_ops=op.output_ops,
+                          input_tensor_shapes=[exp_op.output_tensor_shapes[0], red_op.output_tensor_shapes[0]],
+                          output_tensor_shapes=op.output_tensor_shapes)
+        exp_op.output_ops = [div_op]
+
+        # output ops
+        for out in op.output_ops:
+            if op in out.input_ops:
+                out.input_ops.remove(op)
+            out.input_ops.append(div_op)
+        
+        # add to operators
+        operators[exp_op.name] = exp_op
+        operators[red_op.name] = red_op
+        operators[div_op.name] = div_op
+
+        # delete from operators
+        del operators[op.name]
+
+    # pass to expand reduce mean to constituent components
+    def expand_reduce_mean_pass(op):
+        if op.fn != "ReduceMean":   
+            return
+
+        # sum op
+        op_id = op.name.split('_')[-1]
+        sum_op = Operator(name=f"node_ReduceSum_{op_id}_reducemean", 
+                          fn="ReduceSum",
+                          input_ops=[op.input_ops[0]],
+                          input_tensor_shapes=[op.input_tensor_shapes[0]],
+                          kwargs={'dim': 2}) # pass axis parameter
+
+        # input ops
+        for inp in op.input_ops:
+            inp.output_ops.remove(op)
+            inp.output_ops.append(sum_op)
+        sum_out_id = len(tensor_id) + 1
+        tensor_id[f"sum_out_{sum_out_id}"] = sum_out_id
+        sum_op.output_tensor_shapes = [(op.output_tensor_shapes[0][0], sum_out_id)]
+
+        # division op
+        div_op = Operator(name=f"node_Div_{op_id}_reducemean",
+                          fn="Div",
+                          input_ops=[sum_op],
+                          input_tensor_shapes=[sum_op.output_tensor_shapes[0]],
+                          output_ops=op.output_ops,
+                          output_tensor_shapes=op.output_tensor_shapes,
+                          additional_params={"arg1": np.prod([dim for dim in sum_op.input_tensor_shapes[0][0]]) / np.prod([dim for dim in sum_op.output_tensor_shapes[0][0]])}) # pass the constant divisor
+        sum_op.output_ops = [div_op]
+
+        # output ops
+        for out in op.output_ops:
+            if op in out.input_ops:
+                out.input_ops.remove(op)
+            out.input_ops.append(div_op)
+        
+        # add to operators
+        operators[sum_op.name] = sum_op
+        operators[div_op.name] = div_op
+
+        # delete from operators
+        del operators[op.name]
+    
+    def expand_sigmoid_pass(op):
+        if op.fn != "Sigmoid":
+            return
+        
+        # exp op
+        op_id = op.name.split('_')[-1]
+        exp_op = Operator(name=f"node_Exp_{op_id}_sigmoid", 
+                          fn="Exp",
+                          input_ops=[op.input_ops[0]],
+                          input_tensor_shapes=[op.input_tensor_shapes[0]])
+        
+        # input ops
+        for inp in op.input_ops:
+            inp.output_ops.remove(op)
+            inp.output_ops.append(exp_op)
+        exp_out_id = len(tensor_id) + 1
+        tensor_id[f"exp_out_{exp_out_id}"] = exp_out_id
+        exp_op.output_tensor_shapes = [(op.input_tensor_shapes[0][0], exp_out_id)]
+
+        # addition op
+        add_op = Operator(name=f"node_Add_{op_id}_sigmoid",
+                          fn="Add",
+                          input_ops=[exp_op],
+                          input_tensor_shapes=[exp_op.output_tensor_shapes[0]],
+                          additional_params={"arg1": 1.0})
+        add_out_id = len(tensor_id) + 1
+        tensor_id[f"add_out_{add_out_id}"] = add_out_id
+        add_op.output_tensor_shapes = [(exp_op.output_tensor_shapes[0][0], add_out_id)]
+        
+        # division op
+        div_op = Operator(name=f"node_Div_{op_id}_sigmoid",
+                          fn="Div",
+                          input_ops=[exp_op, add_op],
+                          output_ops=op.output_ops,
+                          input_tensor_shapes=[exp_op.output_tensor_shapes[0], add_op.output_tensor_shapes[0]],
+                          output_tensor_shapes=op.output_tensor_shapes)
+        exp_op.output_ops = [add_op, div_op]  # exp_op feeds both add_op and div_op
+        add_op.output_ops = [div_op]
+
+        # output ops
+        for out in op.output_ops:
+            if op in out.input_ops:
+                out.input_ops.remove(op)
+            out.input_ops.append(div_op)
+        
+        # add to operators
+        operators[exp_op.name] = exp_op
+        operators[add_op.name] = add_op
+        operators[div_op.name] = div_op
+
+        # delete from operators
+        del operators[op.name]
+    
+    def expand_neg_pass(op):
+        if op.fn != "Neg":
+            return
+        
+        # multiplication op
+        op_id = op.name.split('_')[-1]
+        mul_op = Operator(name=f"node_Mul_{op_id}_neg", 
+                          fn="Mul",
+                          input_ops=[op.input_ops[0]],
+                          input_tensor_shapes=[op.input_tensor_shapes[0]],
+                          additional_params={"arg1": -1.0})
+        
+        # input ops
+        for inp in op.input_ops:
+            inp.output_ops.remove(op)
+            inp.output_ops.append(mul_op)
+        mul_out_id = len(tensor_id) + 1
+        tensor_id[f"mul_out_{mul_out_id}"] = mul_out_id
+        mul_op.output_tensor_shapes = [(op.input_tensor_shapes[0][0], mul_out_id)]
+        mul_op.output_ops = op.output_ops
+
+        # output ops
+        for out in op.output_ops:
+            if op in out.input_ops:
+                out.input_ops.remove(op)
+            out.input_ops.append(mul_op)
+        
+        # add to operators
+        operators[mul_op.name] = mul_op
+
+        # delete from operators
+        del operators[op.name]
+    
+    def expand_reciprocal_pass(op):
+        if op.fn != "Reciprocal":
+            return
+        
+        # addition op
+        op_id = op.name.split('_')[-1]
+        add_op = Operator(name=f"node_Add_{op_id}_reciprocal",
+                          fn="Add",
+                          input_ops=[op.input_ops[0]],
+                          input_tensor_shapes=[op.input_tensor_shapes[0]],
+                          additional_params={"arg1": 1.0})
+        add_out_id = len(tensor_id) + 1
+        tensor_id[f"add_out_{add_out_id}"] = add_out_id
+        add_op.output_tensor_shapes = [(op.input_tensor_shapes[0][0], add_out_id)]
+
+        # output ops
+        for inp in op.input_ops:
+            inp.output_ops.remove(op)
+            inp.output_ops.append(add_op)
+        
+        # division op
+        div_op = Operator(name=f"node_Div_{op_id}_reciprocal",
+                          fn="Div",
+                          input_ops=[add_op],
+                          input_tensor_shapes=[add_op.output_tensor_shapes[0]],
+                          output_ops=op.output_ops,
+                          output_tensor_shapes=op.output_tensor_shapes,
+                          additional_params={"arg1": 1.0}) # pass the constant divisor
+        add_op.output_ops = [div_op]
+
+        # output ops
+        for out in op.output_ops:
+            if op in out.input_ops:
+                out.input_ops.remove(op)
+            out.input_ops.append(div_op)
+        
+        # add to operators
+        operators[add_op.name] = add_op
+        operators[div_op.name] = div_op
+
+        # delete from operators
+        del operators[op.name]
+    
+    for op in list(operators.values()):
+        expand_softmax_pass(op)
+        expand_reduce_mean_pass(op)
+        expand_sigmoid_pass(op)
+        expand_neg_pass(op)
+        expand_reciprocal_pass(op)
+
     return operators
 
 def test_cfg():
@@ -354,7 +620,7 @@ def get_computation_graph(model, dummy_input, unique_operators, method):
                 model,
                 dummy_input,
                 onnx_path,
-                # dynamo=True
+                dynamo=True
             )
             
             shape_inference.infer_shapes_path(model_path="scripts/onnx/integrate_test.onnx",

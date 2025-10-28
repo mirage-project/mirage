@@ -11,7 +11,8 @@ def _shallow_copy_adjacency(partition: Dict[Any, List[Any]]) -> Dict[Any, List[A
     return {node: list(connections) for node, connections in partition.items()}
 
 def _expand_partition_adjacency(partition: Dict[Any, List[Any]], 
-                               all_operators: Dict[str, Any],
+                               UNSUPPORTED_OPS: set,
+                               IGNORE_OPS: set,
                                expansion_size: int = 2) -> Dict[Any, List[Any]]:
     """Expand a partition in adjacency list format by adding connected neighbors."""
     
@@ -24,15 +25,17 @@ def _expand_partition_adjacency(partition: Dict[Any, List[Any]],
     for op_node in partition_nodes:
         # Check input neighbors
         for input_op in op_node.input_ops:
-            if (hasattr(input_op, 'name') and 
-                input_op.name in all_operators and 
+            if (hasattr(input_op, 'fn') and 
+                input_op.fn not in UNSUPPORTED_OPS and 
+                input_op.fn not in IGNORE_OPS and
                 input_op not in partition_nodes):
                 boundary_candidates.append(input_op)
         
         # Check output neighbors  
         for output_op in op_node.output_ops:
-            if (hasattr(output_op, 'name') and 
-                output_op.name in all_operators and 
+            if (hasattr(output_op, 'fn') and 
+                output_op.fn not in UNSUPPORTED_OPS and
+                output_op.fn not in IGNORE_OPS and
                 output_op not in partition_nodes):
                 boundary_candidates.append(output_op)
     
