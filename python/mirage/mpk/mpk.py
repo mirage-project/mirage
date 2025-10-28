@@ -166,7 +166,6 @@ class MPK:
             eos_token_id=-1, #self.model.config.eos_token_id,
             meta_tensors={
                 "step": self.step,
-                "iteration_num": self.iteration_num,
                 "tokens": self.tokens,
                 "input_tokens": self.input_tokens,
                 "output_tokens": self.output_tokens,
@@ -183,7 +182,6 @@ class MPK:
         )
         meta_tensors = [
             self.step,
-            self.iteration_num,
             self.tokens,
             self.input_tokens,
             self.output_tokens,
@@ -240,8 +238,6 @@ class MPK:
         # TODO: This is a temporary workaround. Ideally we should only allocate tensors we need.
         if self.step is None:
             self.step = torch.full((self.total_num_requests, ), 0, dtype=torch.int32, device="cuda")
-        if self.iteration_num is None:
-            self.iteration_num = torch.full((1, ), 0, dtype=torch.int64, device="cuda")
         if self.tokens is None:
             self.tokens = torch.full((self.total_num_requests, self.max_seq_length), 0, dtype=torch.long, device="cuda")
         if self.input_tokens is None:
