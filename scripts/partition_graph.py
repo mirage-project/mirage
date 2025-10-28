@@ -4,6 +4,7 @@ import time
 import mirage as mi
 import json
 import numpy as np
+import warnings
 from op import Operator
 from build_computation_graph import get_computation_graph
 from build_dataset import augment_partitions, serialize_subgraphs_to_json
@@ -13,6 +14,23 @@ from graph_splitter import process_operator_graph
 
 from cost_model.in_ctx_partition import InCtxPartitioner
 # from visualize_augs import visualize_partition, compare_augmentations
+
+CAST_ID_TO_DTYPE = {
+    1: torch.float32,
+    2: torch.uint8,
+    3: torch.int8,
+    4: torch.uint16,
+    5: torch.int16,
+    6: torch.int32,
+    7: torch.int64,
+    9: torch.bool,
+    10: torch.float16,
+    11: torch.float64,
+    12: torch.uint32,
+    13: torch.uint64,
+    14: torch.complex64,
+    15: torch.complex128,
+}
 
 def copy_subgraph(subgraph):
     new_subgraph = {}
@@ -334,35 +352,37 @@ class HybridModel:
 
         params_on_target = self._get_params_on(device, dtype)
         intermediates.update(params_on_target)
-        
-        for step_type, payload in self.execution_plan:
-            if step_type == "mirage":
-                kernel, input_ids, output_ids, const_dims = payload
-                
-                # Prepare inputs in fp16 ONLY if needed; avoid redundant casts
-                kernel_inputs = []
-                for tid in input_ids:
-                    t = intermediates[tid]
-                    if t.dtype is not torch.float16:
-                        t = t.to(torch.float16)
-                    kernel_inputs.append(t)
 
-                # Append cached constants (fp16) without recreating them every call
-                dev = kernel_inputs[0].device if kernel_inputs else device
-                for shape, value in const_dims:
-                    kernel_inputs.append(self._get_const(dev, shape, value, dtype=torch.float16))
+        with torch.inference_mode():
+            for step_type, payload in self.execution_plan:
+                if step_type == "mirage":
+                    kernel, input_ids, output_ids, const_dims = payload
+                    
+                    # Prepare inputs in fp16 ONLY if needed; avoid redundant casts
+                    kernel_inputs = []
+                    for tid in input_ids:
+                        t = intermediates[tid]
+                        if t.dtype is not torch.float16:
+                            warnings.warn(f"Casting input tensor id {tid} from {t.dtype} to torch.float16. Consider providing inputs in float16 to avoid this overhead.")
+                            t = t.to(torch.float16)
+                        kernel_inputs.append(t)
 
-                outputs = kernel(inputs=kernel_inputs)
-                if not isinstance(outputs, list):
-                    outputs = [outputs]
-                # Convert outputs back to original dtype
-                for tid, tensor in zip(output_ids, outputs):
-                    intermediates[tid] = tensor.to(dtype)
-            elif step_type == "pytorch":
-                op, input_ids, output_id = payload
-                inputs = [intermediates[tid] for tid in input_ids]
-                result = self._execute_pytorch_op(op, inputs)
-                intermediates[output_id] = result
+                    # Append cached constants (fp16) without recreating them every call
+                    dev = kernel_inputs[0].device if kernel_inputs else device
+                    for shape, value in const_dims:
+                        kernel_inputs.append(self._get_const(dev, shape, value, dtype=torch.float16))
+
+                    outputs = kernel(inputs=kernel_inputs)
+                    if not isinstance(outputs, list):
+                        outputs = [outputs]
+                    # Convert outputs back to original dtype
+                    for tid, tensor in zip(output_ids, outputs):
+                        intermediates[tid] = tensor.to(dtype)
+                elif step_type == "pytorch":
+                    op, input_ids, output_id = payload
+                    inputs = [intermediates[tid] for tid in input_ids]
+                    result = self._execute_pytorch_op(op, inputs)
+                    intermediates[output_id] = result
         
         outputs = [intermediates[tid] for tid in self.output_tensor_ids]
         return outputs[0] if len(outputs) == 1 else outputs
@@ -408,6 +428,18 @@ class HybridModel:
             return inputs[0].transpose(-2, -1)
         elif fn == "Reshape":
             return inputs[0].reshape(op.output_tensor_shapes[0][0])
+        elif fn == "Expand":
+            out_shape = torch.broadcast_shapes(inputs[0].shape, tuple(op.output_tensor_shapes[0][0]))
+            return torch.broadcast_to(inputs[0], (out_shape))
+        elif fn == "Gather":
+            axis = op.kwargs.get("axis", 0)
+            return torch.gather(inputs[0], axis, inputs[1])
+        elif fn == "Cast" or fn == "CastLike":
+            to_dtype = CAST_ID_TO_DTYPE.get(op.kwargs.get("to"), None)
+            if to_dtype is not None:
+                return inputs[0].to(dtype=to_dtype)
+            else:
+                raise NotImplementedError(f"Cast to dtype id '{op.kwargs.get('to')}' not implemented")
         else:
             raise NotImplementedError(f"PyTorch fallback for '{fn}' not implemented")
 

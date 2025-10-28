@@ -142,7 +142,7 @@ def parse_onnx_model(model, unique_operators):
             tensor_consumers[input_name].append(node_name)
             if input_name not in tensor_id:
                 tensor_id[input_name] = len(tensor_id)+1
-
+    
     operators = {}
 
     # store the operators in a dict
@@ -154,23 +154,30 @@ def parse_onnx_model(model, unique_operators):
             unique_operators[op_type] += 1
         node_name = node.name or f"{op_type}_{id(node)}"
         kwargs = {}
-        if node.op_type == "Clip":
-            # Using .item() here pulls out the value from the rank-0 tensor
-            if node.min != None:
-                kwargs["min"] = node.min.item()
-            else: # Defaults are to do nothing but could be changed
-                kwargs["min"] = float('-inf')
-            if node.max!= None:
-                kwargs["max"] = node.max.item()
-            else:
-                kwargs["max"] = float('inf')
-        if node.op_type == "ReduceSum":
-            # TODO add ReduceMean here as well?
-            if node.axis != None:
-                axis = node.axis[0]
-                kwargs["axis"] = axis
-            else:
-                kwargs["axis"] = 0
+
+        # TODO: fix specific operator attributes
+        # if node.op_type == "Clip":
+        #     # Using .item() here pulls out the value from the rank-0 tensor
+        #     if node.min != None:
+        #         kwargs["min"] = node.min.item()
+        #     else: # Defaults are to do nothing but could be changed
+        #         kwargs["min"] = float('-inf')
+        #     if node.max!= None:
+        #         kwargs["max"] = node.max.item()
+        #     else:
+        #         kwargs["max"] = float('inf')
+        # if node.op_type == "ReduceSum":
+        #     # TODO add ReduceMean here as well?
+        #     if node.axis != None:
+        #         axis = node.axis[0]
+        #         kwargs["axis"] = axis
+        #     else:
+        #         kwargs["axis"] = 0
+        if node.op_type == "Gather":
+            kwargs["axis"] = node.attribute[0].i
+        elif node.op_type == "Cast" or node.op_type == "CastLike":
+            # data type to cast to https://github.com/dmlc/tensorboard/blob/master/tensorboard/src/onnx.proto?utm_source=chatgpt.com
+            kwargs["to"] = node.attribute[0].i
 
         input_tensor_shapes = []
         for i, input_name in enumerate(node.input):
@@ -227,7 +234,6 @@ def parse_onnx_model(model, unique_operators):
                 dummy_const_operator = Operator(name=output_name, fn="Constant")
                 operators[node.name].output_ops.append(dummy_const_operator)
     
-
     # TODO: rather than doing the following to reassign tensor shapes, what about inserting reshape
     # ops in the graph instead.
 
