@@ -17,7 +17,7 @@ CONTEXT (may be long, for reasoning only):
 - Analysis factors: compute intensity, bandwidth, parallelism, fusion, access patterns, cache efficiency.
 - Mirage source (search over thread/block/kernel configs):
 {mirage_code}
-- Calibrating examples (original → optimized → measured time):
+- Calibrating examples (original → measured time):
 {examples}
 
 STRICT OUTPUT CONTRACT:
@@ -203,7 +203,7 @@ def get_prediction(system_prompt, test_original, dataset_root,
     exec_time = parse_execution_time(content)
     return {"execution_time": exec_time}
 
-def run_pipeline(dataset_root, mirage_root, model, scale=1.0, train=0.8, shuffle=True):
+def run_pipeline(dataset_root, mirage_root, model_name, scale=1.0, train=0.8, shuffle=True):
     train_set, test_set = train_test_split(dataset_root, scale, train, shuffle)
     system_prompt = construct_prompt(train_set, dataset_root, mirage_root)
 

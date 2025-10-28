@@ -217,6 +217,8 @@ def get_sections_in_ctx(system_prompt, comp_graph, model_name, max_nodes_per_par
         format="json"  # ask for JSON output; some models enforce it strictly
     )
 
+    print(resp)
+
     print("Model response received, parsing...")
     output = parse_sections(resp)
 
