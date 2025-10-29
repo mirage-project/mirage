@@ -15,7 +15,8 @@ def grid_for_rmsnorm_linear_layer(size: int, use_cutlass_kernel: bool = True):
     if size % 64 == 0 and not use_cutlass_kernel:
         # TODO(Wenqin): the current linear kernel have some correctness bug and
         # perf regression if the OUTPUT_SIZE is too big, there is a workaround,
-        # will fix them later.
+        # will fix them later
+        # TODO(Wenqin): correctness issue was fixed, but perf regression still exist!!!
         return size // 64
     if size / 96 > 400:
         # TODO: An add-hoc workaround for linear kernel, both MPK ptx and
