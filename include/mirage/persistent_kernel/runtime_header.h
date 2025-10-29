@@ -16,6 +16,7 @@
 #pragma once
 
 #include "mirage/config.h"
+#include <cuda_runtime.h>
 
 namespace mirage {
 namespace runtime {
