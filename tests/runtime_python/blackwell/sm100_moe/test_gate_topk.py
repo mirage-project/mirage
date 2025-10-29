@@ -10,7 +10,7 @@ g = torch.Generator(device="cuda").manual_seed(1234)
 
 num_experts_list = [128]
 num_topks = [8]
-batch_size = 8
+batch_size = 1
 
 for num_expert in num_experts_list:
     for num_topk in num_topks:
@@ -66,20 +66,20 @@ for num_expert in num_experts_list:
         )
         print("Test passed!")
 
-        # Warm-up
-        for _ in range(16):
-            runtime_kernel_blackwell.topk_softmax_sm100(gating_output, topk_weights, mpk_routing_indices, mpk_expert_mask)
+        # # Warm-up
+        # for _ in range(16):
+        #     runtime_kernel_blackwell.topk_softmax_sm100(gating_output, topk_weights, mpk_routing_indices, mpk_expert_mask)
 
-        torch.cuda.synchronize()
-        starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(
-            enable_timing=True
-        )
-        repetitions = 1000
-        starter.record()
-        for rep in range(repetitions):
-            runtime_kernel_blackwell.topk_softmax_sm100(gating_output, topk_weights, mpk_routing_indices, mpk_expert_mask)
-        ender.record()
-        torch.cuda.synchronize()
-        total_time = starter.elapsed_time(ender)
-        avg_time = total_time / repetitions
-        print(f"Average time over {repetitions} runs: {avg_time:.6f} ms")
+        # torch.cuda.synchronize()
+        # starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(
+        #     enable_timing=True
+        # )
+        # repetitions = 1000
+        # starter.record()
+        # for rep in range(repetitions):
+        #     runtime_kernel_blackwell.topk_softmax_sm100(gating_output, topk_weights, mpk_routing_indices, mpk_expert_mask)
+        # ender.record()
+        # torch.cuda.synchronize()
+        # total_time = starter.elapsed_time(ender)
+        # avg_time = total_time / repetitions
+        # print(f"Average time over {repetitions} runs: {avg_time:.6f} ms")

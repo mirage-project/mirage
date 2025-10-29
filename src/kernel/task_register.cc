@@ -1860,12 +1860,12 @@ int TaskRegister::register_moe_topk_softmax_sm100_task(
   code.e("    task_desc->input_ptrs[0],");
   code.e("    nullptr,");
   code.e("    task_desc->output_ptrs[0],");
-  code.e("    batch_size,");
-  code.e("    num_experts_per_tok,");
+  code.e("    $,", batch_size);
+  code.e("    $,", num_experts_per_tok);
   code.e("    task_desc->output_ptrs[1],");
   code.e("    task_desc->output_ptrs[2],");
   code.e("    0,");
-  code.e("    num_experts,");
+  code.e("    $,", num_experts);
   code.e("    true);");
   return register_task_variant(TASK_MOE_TOPK_SOFTMAX_SM100, code.to_string());
 }

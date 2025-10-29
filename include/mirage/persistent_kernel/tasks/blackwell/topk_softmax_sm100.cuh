@@ -66,18 +66,23 @@ template <typename T,
           int WARPS_PER_CTA,
           int BYTES_PER_LDG>
 __device__ __noinline__ void topk_softmax_task_impl(
-    T const *__restrict__ input, // [num_rows, NUM_EXPERTS]
+    void const *__restrict__ input_ptr, // [num_rows, NUM_EXPERTS]
     bool const *__restrict__ finished,
-    float *__restrict__ output, // [num_rows, k]
+    void *__restrict__ output_ptr, // [num_rows, k]
     int const num_rows,
     int const k,
-    int *__restrict__ mpk_routing_indices, // [NUM_EXPERTS, num_rows] laid out
+    void *__restrict__ mpk_routing_indices_ptr, // [NUM_EXPERTS, num_rows] laid out
                                            // as expert-major: expert * num_rows
                                            // + row
-    int *__restrict__ mpk_expert_mask,     // [NUM_EXPERTS]
+    void *__restrict__ mpk_expert_mask_ptr,     // [NUM_EXPERTS]
     int const start_expert,
     int const end_expert,
     bool const renormalize) {
+  // Pointers
+  T const *input = static_cast<T const *>(input_ptr);
+  float *output = static_cast<float *>(output_ptr);
+  int *mpk_routing_indices = static_cast<int *>(mpk_routing_indices_ptr);
+  int *mpk_expert_mask = static_cast<int *>(mpk_expert_mask_ptr);
   // Compile-time checks
   static_assert(VPT == (VPT & -VPT), "VPT must be power of 2");
   static_assert(NUM_EXPERTS == (NUM_EXPERTS & -NUM_EXPERTS),
@@ -102,6 +107,8 @@ __device__ __noinline__ void topk_softmax_task_impl(
                 "THREADS_PER_ROW must be power of 2");
   static_assert(THREADS_PER_ROW <= WARP_SIZE,
                 "THREADS_PER_ROW can be at most warp size");
+  static_assert(THREADS_PER_ROW == WARP_SIZE || THREADS_PER_ROW == WARP_SIZE / 2, 
+                "This kernel only supports THREADS_PER_ROW of 16 or 32");
 
   // Work partitioning
   static constexpr int ELTS_PER_WARP = WARP_SIZE * VPT;
@@ -109,7 +116,6 @@ __device__ __noinline__ void topk_softmax_task_impl(
       ELTS_PER_WARP / ELTS_PER_ROW; // rows each warp processes
   static_assert(ELTS_PER_WARP % ELTS_PER_ROW == 0,
                 "The elts per row must cleanly divide the total elt per warp");
-  static constexpr int ROWS_PER_CTA = WARPS_PER_CTA * ROWS_PER_WARP;
 
   int const warp_idx = threadIdx.x / WARP_SIZE;
   int const lane_idx = threadIdx.x % WARP_SIZE;
@@ -117,6 +123,7 @@ __device__ __noinline__ void topk_softmax_task_impl(
 
   int const thread_row_in_warp = lane_idx / THREADS_PER_ROW;
   int const thread_row = warp_base_row + thread_row_in_warp;
+  uint32_t const warp_mask = (num_rows % 2 == 1 && thread_row == num_rows - 1) ? 0x0000ffff : 0xffffffff;
   if (thread_row < num_rows) {
 
     bool const row_is_active = finished ? !finished[thread_row] : true;
@@ -154,7 +161,7 @@ __device__ __noinline__ void topk_softmax_task_impl(
     }
     for (int mask = THREADS_PER_ROW / 2; mask > 0; mask /= 2) {
       float other =
-          __shfl_xor_sync(0xffffffff, thread_max, mask, THREADS_PER_ROW);
+          __shfl_xor_sync(warp_mask, thread_max, mask, THREADS_PER_ROW);
       thread_max = max(thread_max, other);
     }
 
@@ -165,7 +172,7 @@ __device__ __noinline__ void topk_softmax_task_impl(
       row_sum += row_chunk[ii];
     }
     for (int mask = THREADS_PER_ROW / 2; mask > 0; mask /= 2) {
-      row_sum += __shfl_xor_sync(0xffffffff, row_sum, mask, THREADS_PER_ROW);
+      row_sum += __shfl_xor_sync(warp_mask, row_sum, mask, THREADS_PER_ROW);
     }
 
     float const inv_row_sum = 1.f / row_sum;
@@ -196,9 +203,9 @@ __device__ __noinline__ void topk_softmax_task_impl(
       // index)
       for (int mask = THREADS_PER_ROW / 2; mask > 0; mask /= 2) {
         float other_max =
-            __shfl_xor_sync(0xffffffff, max_val, mask, THREADS_PER_ROW);
+            __shfl_xor_sync(warp_mask, max_val, mask, THREADS_PER_ROW);
         int other_expert =
-            __shfl_xor_sync(0xffffffff, expert, mask, THREADS_PER_ROW);
+            __shfl_xor_sync(warp_mask, expert, mask, THREADS_PER_ROW);
         if (other_max > max_val ||
             (other_max == max_val && other_expert < expert)) {
           max_val = other_max;
@@ -253,7 +260,6 @@ __device__ __noinline__ void topk_softmax_task_impl(
       }
     }
   }
-  __syncthreads();
 }
 
 namespace detail {

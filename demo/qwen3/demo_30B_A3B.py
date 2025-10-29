@@ -40,8 +40,8 @@ def max_factor_leq_n(m: int, n: int) -> int:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--use-mirage", action="store_true", help="Use Mirage kernels")
-    parser.add_argument("--max-num-batched-tokens", default=8, type=int, help="Max number of tokens in a batch")
-    parser.add_argument("--max-num-batched-requests", default=4, type=int, help="Max number of requests in a batch")
+    parser.add_argument("--max-num-batched-tokens", default=1, type=int, help="Max number of tokens in a batch")
+    parser.add_argument("--max-num-batched-requests", default=1, type=int, help="Max number of requests in a batch")
     parser.add_argument("--page-size", default=4096, type=int, help="Page size")
     parser.add_argument("--max-num-pages", default=16, type=int, help="Max num pages")
     parser.add_argument("--output-dir", help="Output files directory")
@@ -594,99 +594,99 @@ if __name__ == "__main__":
                 grid_dim=(1, 1, 1),
                 block_dim=(256, 1, 1),
             )
-            # # moe w13 linear
-            # mpk.moe_w13_linear_layer(
-            #     input=rmsnorm_out,
-            #     weight=w_gatedup,
-            #     moe_routing_indices=moe_routing_indices,
-            #     moe_mask=moe_mask,
-            #     output=mlp_mid,
-            #     grid_dim=(1, 12, 1),
-            #     block_dim=(256, 1, 1),
-            # )
-        #     mpk.moe_silu_mul_layer(
-        #         input=mlp_mid,
-        #         output=silu_mul_out,
-        #         grid_dim=(mpk.max_num_batched_tokens, 1, 1),
-        #         block_dim=(256, 1, 1),
-        #     )
-        #     mpk.moe_w2_linear_layer(
-        #         input=silu_mul_out,
-        #         weight=w_down_proj,
-        #         moe_routing_indices=moe_routing_indices,
-        #         moe_mask=moe_mask,
-        #         output=mlp_out,
-        #         grid_dim=(1, 16, 1),
-        #         block_dim=(256, 1, 1),
-        #     )
-        #     mpk.moe_mul_sum_add_layer(
-        #         input=mlp_out,
-        #         weight=moe_topk_weight,
-        #         residual=x,
-        #         output=mlp_weighted_sum_out,
-        #         grid_dim=(mpk.max_num_batched_tokens, hidden_size//256, 1),
-        #         block_dim=(256, 1, 1),
-        #     )
-        #     # reset residual input as x
-        #     x = mlp_weighted_sum_out
-        #     if world_size > 1:
-        #         mpk.allreduce_layer(
-        #             input=mlp_weighted_sum_out,
-        #             buffer=allreduce_buf,
-        #             output=mlp_final,
-        #             grid_dim=(hidden_size // 64, 1, 1),
-        #             block_dim=(256, 1, 1),
-        #         )
-        #         x = mlp_final
+            # moe w13 linear
+            mpk.moe_w13_linear_layer(
+                input=rmsnorm_out,
+                weight=w_gatedup,
+                moe_routing_indices=moe_routing_indices,
+                moe_mask=moe_mask,
+                output=mlp_mid,
+                grid_dim=(12, 12, 1),
+                block_dim=(256, 1, 1),
+            )
+            mpk.moe_silu_mul_layer(
+                input=mlp_mid,
+                output=silu_mul_out,
+                grid_dim=(mpk.max_num_batched_tokens, 1, 1),
+                block_dim=(256, 1, 1),
+            )
+            mpk.moe_w2_linear_layer(
+                input=silu_mul_out,
+                weight=w_down_proj,
+                moe_routing_indices=moe_routing_indices,
+                moe_mask=moe_mask,
+                output=mlp_out,
+                grid_dim=(9, 16, 1),
+                block_dim=(256, 1, 1),
+            )
+            mpk.moe_mul_sum_add_layer(
+                input=mlp_out,
+                weight=moe_topk_weight,
+                residual=x,
+                output=mlp_weighted_sum_out,
+                grid_dim=(mpk.max_num_batched_tokens, hidden_size//256, 1),
+                block_dim=(256, 1, 1),
+            )
+            # reset residual input as x
+            x = mlp_weighted_sum_out
+            if world_size > 1:
+                mpk.allreduce_layer(
+                    input=mlp_weighted_sum_out,
+                    buffer=allreduce_buf,
+                    output=mlp_final,
+                    grid_dim=(hidden_size // 64, 1, 1),
+                    block_dim=(256, 1, 1),
+                )
+                x = mlp_final
 
-        # # add rmsnorm_linear layer
-        # w_norm = mpk.attach_input(
-        #     torch_tensor=model.model.norm.weight, name="model_norm_weight"
-        # )
-        # w_proj = mpk.attach_input(torch_tensor=lm_head_weight, name="lm_head")
-        # mpk.rmsnorm_layer(
-        #     input=x,
-        #     weight=w_norm,
-        #     output=rmsnorm_out,
-        #     grid_dim=(mpk.max_num_batched_tokens, 1, 1),
-        #     block_dim=(256, 1, 1),
-        # )
-        # mpk.linear_layer(
-        #     input=rmsnorm_out,
-        #     weight=w_proj,
-        #     output=argmax_in,
-        #     grid_dim=(grid_for_rmsnorm_linear_layer(w_proj.dim(0)), 1, 1),
-        #     block_dim=(256, 1, 1),
-        # )
-        # # add argmax layer
-        # if spec_decode_config and spec_decode_config.method == "promptlookup":
-        #     argmax_partial_grid_dim = (max_factor_leq_n(153600, 96 // (spec_decode_config.spec_length + 1)), 
-        #                                spec_decode_config.spec_length + 1, 
-        #                                1)
-        #     argmax_reduce_grid_dim = (1, spec_decode_config.spec_length + 1, 1)
-        # else:
-        #     argmax_partial_grid_dim = (mpk.num_workers, 1, 1)
-        #     argmax_reduce_grid_dim = (1, 1, 1)
-        # mpk.argmax_partial_layer(
-        #     input=argmax_in,
-        #     output=(argmax_part_value, argmax_part_index),
-        #     grid_dim=argmax_partial_grid_dim,
-        #     block_dim=(256, 1, 1),
-        # )
-        # mpk.argmax_reduce_layer(
-        #     input=(argmax_part_value, argmax_part_index),
-        #     output=argmax_out,
-        #     grid_dim=argmax_reduce_grid_dim,
-        #     block_dim=(256, 1, 1),
-        # )
-        # if spec_decode_config:
-        #     verify_out = mpk.verify_layer_dispatcher(
-        #         spec_decode_config = spec_decode_config,
-        #         spec_tokens = spec_tokens,
-        #         target_output = argmax_out,
-        #         grid_dim = (1, 1, 1),
-        #         block_dim = (128, 1, 1),
-        #     )
+        # add rmsnorm_linear layer
+        w_norm = mpk.attach_input(
+            torch_tensor=model.model.norm.weight, name="model_norm_weight"
+        )
+        w_proj = mpk.attach_input(torch_tensor=lm_head_weight, name="lm_head")
+        mpk.rmsnorm_layer(
+            input=x,
+            weight=w_norm,
+            output=rmsnorm_out,
+            grid_dim=(mpk.max_num_batched_tokens, 1, 1),
+            block_dim=(256, 1, 1),
+        )
+        mpk.linear_layer(
+            input=rmsnorm_out,
+            weight=w_proj,
+            output=argmax_in,
+            grid_dim=(grid_for_rmsnorm_linear_layer(w_proj.dim(0)), 1, 1),
+            block_dim=(256, 1, 1),
+        )
+        # add argmax layer
+        if spec_decode_config and spec_decode_config.method == "promptlookup":
+            argmax_partial_grid_dim = (max_factor_leq_n(153600, 96 // (spec_decode_config.spec_length + 1)), 
+                                       spec_decode_config.spec_length + 1, 
+                                       1)
+            argmax_reduce_grid_dim = (1, spec_decode_config.spec_length + 1, 1)
+        else:
+            argmax_partial_grid_dim = (mpk.num_workers, 1, 1)
+            argmax_reduce_grid_dim = (1, 1, 1)
+        mpk.argmax_partial_layer(
+            input=argmax_in,
+            output=(argmax_part_value, argmax_part_index),
+            grid_dim=argmax_partial_grid_dim,
+            block_dim=(256, 1, 1),
+        )
+        mpk.argmax_reduce_layer(
+            input=(argmax_part_value, argmax_part_index),
+            output=argmax_out,
+            grid_dim=argmax_reduce_grid_dim,
+            block_dim=(256, 1, 1),
+        )
+        if spec_decode_config:
+            verify_out = mpk.verify_layer_dispatcher(
+                spec_decode_config = spec_decode_config,
+                spec_tokens = spec_tokens,
+                target_output = argmax_out,
+                grid_dim = (1, 1, 1),
+                block_dim = (128, 1, 1),
+            )
 
         results = mpk.kn_graph.generate_task_graph(num_gpus=world_size, my_gpu_id=rank)
         with open(f"task_graph_{rank}.json", "w") as f:
@@ -694,7 +694,7 @@ if __name__ == "__main__":
         with open(f"kernel_{rank}.cu", "w") as f:
             f.write(results["cuda_code"])
 
-        # mpk.compile(output_dir=args.output_dir)
+        mpk.compile(output_dir=args.output_dir)
 
     # g = torch.cuda.CUDAGraph()
     stream = torch.cuda.Stream()
@@ -737,25 +737,26 @@ if __name__ == "__main__":
             )
         )
     else:
-        # starter.record()
-        # mpk()
-        # ender.record()
-        # torch.cuda.synchronize()
-        # run_time = starter.elapsed_time(ender)
+        starter.record()
+        mpk()
+        ender.record()
+        torch.cuda.synchronize()
+        run_time = starter.elapsed_time(ender)
 
-        # print("tokens.shape = ", tokens.shape)
-        # for r in range(total_num_requests):
-        #     generated_ids = tokens[r, : step[r] + 1]
-        #     response = tokenizer.decode(generated_ids, skip_special_tokens=True)
-        #     print(response)
+        print("tokens.shape = ", tokens.shape)
+        print(tokens)
+        for r in range(total_num_requests):
+            generated_ids = tokens[r, : step[r] + 1]
+            response = tokenizer.decode(generated_ids, skip_special_tokens=True)
+            print(response)
         
-        # if total_num_requests > 1:
-        #     print(f"Output length of each batch is same: {(step.max() == step.min()).item()}")
+        if total_num_requests > 1:
+            print(f"Output length of each batch is same: {(step.max() == step.min()).item()}")
 
-        # print("Prompt length {}, generate length {}, per-token latency (both prefill and decode): {:.3f} ms".format(
-        #       prompt_lengths[0], step.max().item() + 1 - prompt_lengths[0], run_time / (step.max().item() + 1)
-        #     )
-        # )
+        print("Prompt length {}, generate length {}, per-token latency (both prefill and decode): {:.3f} ms".format(
+              prompt_lengths[0], step.max().item() + 1 - prompt_lengths[0], run_time / (step.max().item() + 1)
+            )
+        )
         pass
     if world_size > 1:
         dist.destroy_process_group()

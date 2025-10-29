@@ -710,7 +710,7 @@ __device__ __noinline__ void
           for (int n_tile = 0; n_tile < cute::size<3>(tCgB); ++n_tile) {
             int acc_buf_idx = num_tiles_executed % NUM_ACC_STAGE;
             int acc_full_phase = num_tiles_executed / NUM_ACC_STAGE % 2;
-            int c_smem_wr_buffer_idx = num_tiles_executed % NUM_C_STAGE;
+            // int c_smem_wr_buffer_idx = num_tiles_executed % NUM_C_STAGE;
 
             cute::Tensor tCgBias = gBias(
                 cute::_, cute::_, n_tile, m_tile, expert_idx); // (Mma_M, Mma_N)

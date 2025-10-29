@@ -42,10 +42,10 @@ using bfloat16 = cute::bfloat16_t;
 
 template <typename T, int EXPERTS, int BYTES_PER_LDG>
 __global__ __launch_bounds__(256) void topk_softmax_kernel(
-    T const *__restrict__ gating_output,
-    float *__restrict__ topk_weights,
-    int *__restrict__ mpk_routing_indices, // [EXPERTS, num_rows] expert-major
-    int *__restrict__ mpk_expert_mask,     // [EXPERTS]
+    void const *__restrict__ gating_output,
+    void *__restrict__ topk_weights,
+    void *__restrict__ mpk_routing_indices, // [EXPERTS, num_rows] expert-major
+    void *__restrict__ mpk_expert_mask,     // [EXPERTS]
     int num_rows,
     int k,
     bool renormalize) {
@@ -63,6 +63,7 @@ __global__ __launch_bounds__(256) void topk_softmax_kernel(
       /*start_expert=*/0,
       /*end_expert=*/EXPERTS,
       renormalize);
+  __syncthreads();
 }
 
 // New: expose a direct fused TopK softmax without GEMM
@@ -81,6 +82,11 @@ void topk_softmax_sm100_kernel(torch::Tensor gating_output,
          mpk_routing_indices.size(1) == BATCH_SIZE);
   assert(mpk_expert_mask.size(0) == OUTPUT_SIZE);
 
+  void *gating_output_ptr = gating_output.data_ptr();
+  void *topk_weights_ptr = topk_weights.data_ptr();
+  void *mpk_routing_indices_ptr = mpk_routing_indices.data_ptr();
+  void *mpk_expert_mask_ptr = mpk_expert_mask.data_ptr();
+
   // launch grid using 256-thread blocks
   auto launch = [&](auto experts_ct) {
     constexpr int EXP = decltype(experts_ct)::value;
@@ -91,37 +97,16 @@ void topk_softmax_sm100_kernel(torch::Tensor gating_output,
                         EXP,
                         ((sizeof(T) * EXP) < 16 ? (sizeof(T) * EXP) : 16)>
         <<<grid_dim, block_dim, 0>>>(
-            static_cast<const T *>(gating_output.data_ptr()),
-            topk_weights.data_ptr<float>(),
-            mpk_routing_indices.data_ptr<int>(),
-            mpk_expert_mask.data_ptr<int>(),
+            gating_output_ptr,
+            topk_weights_ptr,
+            mpk_routing_indices_ptr,
+            mpk_expert_mask_ptr,
             BATCH_SIZE,
             NUM_TOPK,
             /*renormalize=*/true);
   };
 
   switch (OUTPUT_SIZE) {
-    case 1:
-      launch(std::integral_constant<int, 1>{});
-      break;
-    case 2:
-      launch(std::integral_constant<int, 2>{});
-      break;
-    case 4:
-      launch(std::integral_constant<int, 4>{});
-      break;
-    case 8:
-      launch(std::integral_constant<int, 8>{});
-      break;
-    case 16:
-      launch(std::integral_constant<int, 16>{});
-      break;
-    case 32:
-      launch(std::integral_constant<int, 32>{});
-      break;
-    case 64:
-      launch(std::integral_constant<int, 64>{});
-      break;
     case 128:
       launch(std::integral_constant<int, 128>{});
       break;
@@ -129,7 +114,7 @@ void topk_softmax_sm100_kernel(torch::Tensor gating_output,
       launch(std::integral_constant<int, 256>{});
       break;
     default:
-      printf("Unsupported num_experts=%d (must be power-of-two <= 256)\n",
+      printf("Unsupported num_experts=%d (must be one of {128, 256})\n",
              OUTPUT_SIZE);
   }
 

@@ -52,7 +52,7 @@ unsigned long long int const EVENT_INVALID_ID = 0x7ffffffffffffffe;
 typedef unsigned long long int EventCounter;
 
 int const MAX_INPUTS_PER_TASK = 7;
-int const MAX_OUTPUTS_PER_TASK = 2;
+int const MAX_OUTPUTS_PER_TASK = 3;
 int const MAX_NUM_WORKERS = 128;
 
 enum TaskType {
@@ -149,7 +149,7 @@ struct FullTaskDesc {
   FullTaskDesc(TaskType t, int _variant_id)
       : task_type(t), variant_id(_variant_id), num_inputs(0), num_outputs(0),
         trigger_event(EVENT_INVALID_ID), dependent_event(EVENT_INVALID_ID),
-        request_id(-1), head_group(-1), expert_offset(-1) {}
+        request_id(-1), head_group(-1) {}
   FullTaskDesc() {}
   TaskType task_type;
   unsigned variant_id;
@@ -158,16 +158,20 @@ struct FullTaskDesc {
   EventId dependent_event;
   TensorDesc inputs[MAX_INPUTS_PER_TASK];
   TensorDesc outputs[MAX_OUTPUTS_PER_TASK];
-  int request_id; // Used for paged attention
-  int head_group; // Used for paged attention hopper
-  int expert_offset; // Used for MoE
+  union {
+    struct {
+      int request_id; // Used for paged attention
+      int head_group; // Used for paged attention hopper
+    };
+    int expert_offset; // Used for MoE
+  };
 };
 
 struct alignas(16) TaskDesc {
   TaskDesc(FullTaskDesc t)
       : task_type(t.task_type), variant_id(t.variant_id),
         trigger_event(t.trigger_event), dependent_event(t.dependent_event),
-        request_id(t.request_id), head_group(t.head_group), expert_offset(t.expert_offset) {
+        request_id(t.request_id), head_group(t.head_group) {
     for (int i = 0; i < t.num_inputs; i++) {
       input_ptrs[i] = t.inputs[i].base_ptr;
     }
@@ -204,8 +208,8 @@ struct alignas(16) TaskDesc {
     struct {
       int request_id; // Used for paged attention
       int head_group; // Used for paged attention hopper
-      int expert_offset; // Used for MoE
     };
+    int expert_offset; // Used for MoE
     size_t xfer_size_in_bytes; // Used for nvshmem
   };
 };

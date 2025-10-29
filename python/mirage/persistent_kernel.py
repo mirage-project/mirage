@@ -134,9 +134,9 @@ def get_compile_command(
         # "-O0",
         # "-g",
         # "-G",
-        # "--ptxas-options=-v",
-        # "-Xptxas=-v",
-        # "-lineinfo",
+        "--ptxas-options=-v",
+        "-Xptxas=-v",
+        "-lineinfo",
         f"-I{py_include_dir}",
         f"-I{mirage_inc_path}",
         f"-I{os.path.join(mirage_inc_path, 'mirage/persistent_kernel')}",
@@ -195,7 +195,6 @@ def get_compile_command(
             "-DMPK_ENABLE_TMA",
             "-DMIRAGE_GRACE_HOPPER",
             "-DNDEBUG",
-            # "-DMPK_ENABLE_VERBOSE",
         ] + (["-DMIRAGE_ENABLE_PROFILER"] if profiling else [])
     elif target_cc == 100:
         specific_cmd = [
@@ -624,8 +623,8 @@ class PersistentKernel:
         assert moe_routing_indices.num_dims == 2  # (num_experts, batch_size)
         assert moe_masks.num_dims == 1  # (num_experts)
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
-        tb_graph.new_input(input, (-1, -1, -1), -1, True)
-        tb_graph.new_input(moe_topk_weight, (-1, -1, -1), -1, True)
+        tb_graph.new_input(input, (0, -1, -1), -1, True)
+        tb_graph.new_input(moe_topk_weight, (0, -1, -1), -1, True)
         tb_graph.new_input(moe_routing_indices, (-1, -1, -1), -1, True)
         tb_graph.new_input(moe_masks, (-1, -1, -1), -1, True)
         self.kn_graph.customized([input, moe_topk_weight, moe_routing_indices, moe_masks], tb_graph)
