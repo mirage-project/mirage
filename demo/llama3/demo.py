@@ -47,6 +47,13 @@ def parse_arguments():
                        help="Max sequence length for spec decode")
     parser.add_argument("--spec-length", default=3, type=int,
                        help="Spec length for spec decode")
+    parser.add_argument(
+        "--no-use-cutlass-kernel",
+        action="store_false",
+        dest="use_cutlass_kernel",
+        default=True,
+        help="Not use the cutlass version kernel.",
+    )
     
     return parser.parse_args()
 
@@ -308,6 +315,7 @@ def create_persistent_kernel(args, world_size, rank, input_data, config, eos_tok
         profiler_tensor=profiler_tensor,
         trace_name=args.trace_name,
         spec_decode_config=spec_decode_config,
+        use_cutlass_kernel=args.use_cutlass_kernel,
     )
     
     return mpk, spec_decode_config
