@@ -85,8 +85,8 @@ __device__ __forceinline__ void
   constexpr int S = 3;
 
   int warp_idx = warp_id();
-  int idx_in_warp = threadIdx.x & 31;
-  int warpgroup_id = warp_idx / WARPGROUP_WARPS;
+  int warpgroup_id = warp_idx >> 2;
+  int lane_idx = threadIdx.x & 31;
 
   extern __shared__ char smem_ptr[];
   uintptr_t smem = (reinterpret_cast<uintptr_t>(smem_ptr) + 1023) / 1024 * 1024;
@@ -211,7 +211,7 @@ __device__ __forceinline__ void
   // warp specialization data movement warpgroup
   if (warpgroup_id == NUM_WARPGROUPS - 1) {
     // wg_decrease_regs<32>();
-    if (lane_id() == 0 && warp_idx == (NUM_WARPGROUPS * WARPGROUP_WARPS - 4)) {
+    if (lane_idx == 0 && warp_idx == (NUM_WARPGROUPS * WARPGROUP_WARPS - 4)) {
       prefetch_tma_descriptor(tma_a.desc_ptr);
       prefetch_tma_descriptor(tma_b.desc_ptr);
       prefetch_tma_descriptor(tma_out.desc_ptr);
@@ -225,7 +225,7 @@ __device__ __forceinline__ void
       int phase_residual = (output_atom_idx / Kstages) & 1;
 
       // launch tma for residual
-      if (lane_id() == 0 &&
+      if (lane_idx == 0 &&
           warp_idx == (NUM_WARPGROUPS * WARPGROUP_WARPS - 4)) {
 
         if constexpr (HAS_RESIDUAL) {
@@ -244,7 +244,7 @@ __device__ __forceinline__ void
       for (int i = 0; i < NUM_ITER_K; i++) {
         int slot = (output_atom_idx * NUM_ITER_K + i) % Kstages;
         int phase = ((output_atom_idx * NUM_ITER_K + i) / Kstages) & 1;
-        if (lane_id() == 0 &&
+        if (lane_idx == 0 &&
             warp_idx == (NUM_WARPGROUPS * WARPGROUP_WARPS - 4)) {
           wait(compute_done[slot], phase ^ 1);
           int tma_coords_A[2] = {i * TILE_SIZE,
@@ -309,7 +309,7 @@ __device__ __forceinline__ void
         wgmma::warpgroup_fence_fragment(s_frag);
 
         // flip compute done
-        if (idx_in_warp == 0 && (warp_idx & 3) == 0) {
+        if (lane_idx == 0 && (warp_idx & 3) == 0) {
           arrive(compute_done[slot], 1);
         }
       }
@@ -332,8 +332,8 @@ __device__ __forceinline__ void
                              slot_output * SMEM_M_SIZE * OUTPUT_ATOM_SIZE);
 #pragma unroll
       for (uint32_t i = 0; i < (SMEM_M_SIZE >> 2); i++) {
-        int row = ((warp_idx & 3) << 4) + ((i & 1) << 3) + (idx_in_warp >> 2);
-        int col = ((i >> 1) << 3) + ((idx_in_warp & 3) << 1);
+        int row = ((warp_idx & 3) << 4) + ((i & 1) << 3) + (lane_idx >> 2);
+        int col = ((i >> 1) << 3) + ((lane_idx & 3) << 1);
         if constexpr (HAS_RESIDUAL) {
           mm_output_smem.at(col, row) =
               bfloat16(s_frag[i << 1]) + residual_smem.at(col, row);
@@ -352,7 +352,7 @@ __device__ __forceinline__ void
       // this is inter-thread sync
       wg_sync<THREADS_PER_WARPGROUP * CONSUMER_WARPGROUPS>(1);
       // copy back to dmem
-      if ((warp_idx & 3) == 0 && lane_id() == 0) {
+      if ((warp_idx & 3) == 0 && lane_idx == 0) {
         tma_out.tma_store_async(mm_output_smem(0, 0),
                                 {output_atom_idx * OUTPUT_ATOM_SIZE, 0});
         store_commit_group();
