@@ -657,6 +657,8 @@ class PersistentKernel:
 
         if self.target_cc == 100:
             self.kn_graph.register_task(tb_graph, "moe_w13_linear_sm100")
+        elif self.target_cc == 90:
+            self.kn_graph.register_task(tb_graph, "moe_w13_linear_sm90")
         else:
             assert False
             
@@ -702,6 +704,8 @@ class PersistentKernel:
 
         if self.target_cc == 100:
             self.kn_graph.register_task(tb_graph, "moe_w2_linear_sm100")
+        elif self.target_cc == 90:
+            self.kn_graph.register_task(tb_graph, "moe_w2_linear_sm90")
         else:
             assert False
         

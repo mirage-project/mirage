@@ -2151,5 +2151,189 @@ int TaskRegister::register_moe_mul_sum_add_sm100_task(
   return register_task_variant(TASK_MOE_MUL_SUM_ADD_SM100, code.to_string());
 }
 
+int TaskRegister::register_moe_linear_sm90_task(
+  threadblock::Graph const &bgraph, std::vector<int> const &params, bool w13_linear) {
+assert(params.size() == 0);
+int num_experts = 0, num_experts_per_tok = 0, batch_size = 0, output_size = 0, orig_output_size = 0, reduction_size = 0, output_stride = 0;
+std::vector<tb::TBInputOp *> input_ops;
+std::vector<tb::TBInputOp *> output_ops;
+int num_inputs = 4;
+int num_outputs = 1;
+
+assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+for (auto const &op : bgraph.operators) {
+  assert(op->op_type == mirage::type::TB_INPUT_OP);
+  if (input_ops.size() < (size_t)num_inputs) {
+    input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+  } else {
+    output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+  }
+}
+assert(output_ops[0]->output_tensors[0].num_dims == 3);
+batch_size = output_ops[0]->output_tensors[0].dim[0];
+num_experts_per_tok = output_ops[0]->output_tensors[0].dim[1];
+output_size = output_ops[0]->output_tensors[0].dim[2];
+if(w13_linear){
+  assert(input_ops[0]->output_tensors[0].num_dims == 2);
+  reduction_size = input_ops[0]->output_tensors[0].dim[1];
+} else {
+  assert(input_ops[0]->output_tensors[0].num_dims == 3);
+  reduction_size = input_ops[0]->output_tensors[0].dim[2];
+  assert(input_ops[0]->output_tensors[0].dim[1] == num_experts_per_tok);
+}
+assert(input_ops[1]->output_tensors[0].num_dims == 3);
+num_experts = input_ops[1]->output_tensors[0].dim[0];
+assert(input_ops[0]->output_tensors[0].dim[0] == batch_size);
+assert(input_ops[1]->output_tensors[0].dim[1] == output_size);
+assert(input_ops[1]->output_tensors[0].dim[2] == reduction_size);
+assert(input_ops[2]->output_tensors[0].num_dims == 2);
+assert(input_ops[2]->output_tensors[0].dim[0] == num_experts);
+assert(input_ops[2]->output_tensors[0].dim[1] == batch_size);
+assert(input_ops[3]->output_tensors[0].num_dims == 1);
+assert(input_ops[3]->output_tensors[0].dim[0] == num_experts);
+// get output stride
+assert(output_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
+kn::KNInputOp *kn_input_op =
+    static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
+output_stride = static_cast<int>(kn_input_op->input_strides[1]);
+orig_output_size = input_ops[1]->dtensor.dim[1];
+
+mirage::transpiler::CodeKeeper code;
+code.inc_indent();
+// MoE constant:
+constexpr int expert_stride = 12;
+// define MMA
+constexpr int MMA_M = 128;
+constexpr int MMA_N = 16;
+constexpr int bM = 128;
+constexpr int bN = MMA_N;
+constexpr int bK = 64;
+constexpr int num_ab_stages = 8;
+constexpr int num_acc_stages = 2;
+constexpr int num_c_stages = 4;
+constexpr int num_tmem_columns = bN * num_acc_stages;
+assert(num_tmem_columns <= 512);
+// define TMAs
+constexpr int B = 3;
+constexpr int M = 3;
+constexpr int S = 3;
+constexpr int TMA_CP_ASYNC_SIZE = 64;
+constexpr int TILE_SIZE = 64;
+int const output_tma_cp_size = 128;
+int const output_atom_size = 128;
+// TMA_B for expert weights
+code.e("using TMA_A = kernel::tma::tma_2d<cute::bfloat16_t, $, $, $, $, $, "
+       "$, $, $, "
+       "$, $, $, $, true>;",
+       B,
+       M,
+       S,
+       (num_experts-1) * orig_output_size + output_size,       /*GMEM_ROW_*/
+       reduction_size,    /*GMEM_COL_*/
+       MMA_M,             /*SMEM_ROW_*/
+       TMA_CP_ASYNC_SIZE, /*SMEM_COL_*/
+       reduction_size,    /*GMEM_STRIDE_ROW_*/
+       1,                 /*GMEM_STRIDE_COL_*/
+       1,                 /*SMEM_REPEAT_ROW_*/
+       (TILE_SIZE + TMA_CP_ASYNC_SIZE - 1) /
+           TMA_CP_ASYNC_SIZE,    /*SMEM_REPEAT_COL_*/
+       MMA_M * TMA_CP_ASYNC_SIZE /*SMEM_STRIDE_*/
+);
+
+code.inc_indent();
+code.e("TMA_A "
+       "tma_a(static_cast<CUtensorMap*>(task_desc->input_tma_desc_ptrs[1][0])"
+       ");");
+// Bias Tensor setup
+code.e("cute::Layout layout_Bias = cute::make_layout(cute::make_shape($, $, $), "
+       "cute::make_stride($, cute::Int<1>{}, $));",
+       batch_size,
+       output_size,
+       num_experts,
+       output_stride,
+       output_stride * batch_size);
+code.e("cute::Tensor mBias = "
+       "cute::make_tensor(cute::make_gmem_ptr(static_cast<cute::bfloat16_t*>("
+       "$)), layout_Bias);",
+       "nullptr");
+// Topk_indices Tensor setup
+code.e("cute::Layout layout_routing_indices = cute::make_layout(cute::make_shape($, $), "
+       "cute::make_stride($, cute::Int<1>{}));",
+       num_experts,
+       batch_size,
+       batch_size);
+code.e("cute::Tensor mRoutingIndices = "
+       "cute::make_tensor(cute::make_gmem_ptr(static_cast<cute::int32_t*>("
+       "task_desc->input_ptrs[2])), layout_routing_indices);");
+// Topk_mask Tensor setup
+code.e("cute::Layout layout_expert_mask = cute::make_layout(cute::make_shape($), "
+       "cute::make_stride(cute::Int<1>{}));",
+       num_experts);
+code.e("cute::Tensor mMask = "
+       "cute::make_tensor(cute::make_gmem_ptr(static_cast<cute::int32_t*>("
+       "task_desc->input_ptrs[3])), layout_expert_mask);");
+// Output Tensor setup
+code.e("cute::Layout layout_output = cute::make_layout(cute::make_shape($, $, $), "
+       "cute::make_stride($, $, cute::Int<1>{}));",
+       batch_size,
+       num_experts_per_tok,
+       output_size,
+       num_experts_per_tok * output_stride,
+       output_stride);
+code.e("cute::Tensor mOutput = "
+       "cute::make_tensor(cute::make_gmem_ptr(static_cast<cute::bfloat16_t*>("
+       "task_desc->output_ptrs[0])), layout_output);");
+// Input Tensor setup
+if (w13_linear){
+  code.e("cute::Layout layout_input = cute::make_layout(cute::make_shape($, $), "
+       "cute::make_stride($, cute::Int<1>{}));",
+       batch_size,
+       reduction_size,
+       reduction_size);
+} else{
+  code.e("cute::Layout layout_input = cute::make_layout(cute::make_shape($, $, $), "
+       "cute::make_stride($, cute::Int<1>{}, $));",
+       batch_size,
+       reduction_size,
+       num_experts_per_tok,
+       num_experts_per_tok * reduction_size,
+       reduction_size);
+}
+code.e("cute::Tensor mInput = "
+       "cute::make_tensor(cute::make_gmem_ptr(static_cast<cute::bfloat16_t*>("
+       "task_desc->input_ptrs[0])), layout_input);");
+
+code.e("kernel::moe_linear_sm90_task_impl<cute::bfloat16_t, TMA_A, "
+       "decltype(mInput), decltype(mBias), decltype(mRoutingIndices), decltype(mMask), decltype(mOutput), "
+       "$, $, $, $, $, $, $, $, $, $, $, "
+       "$, $, $>(",
+       MMA_M,
+       MMA_N,
+       batch_size,
+       output_size,
+       orig_output_size,
+       reduction_size,
+       num_experts,
+       num_experts_per_tok,
+       expert_stride,
+       w13_linear ? "true" : "false",
+       /*no_bias*/"true",
+       num_ab_stages,
+       num_acc_stages,
+       num_c_stages);
+code.e("    tma_a,");
+code.e("    mInput,");
+code.e("    mBias,");
+code.e("    mRoutingIndices,");
+code.e("    mMask,");
+code.e("    mOutput,");
+code.e("    task_desc->expert_offset);");
+if (w13_linear) {
+  return register_task_variant(TASK_MOE_W13_LINEAR_SM90, code.to_string());
+} else {
+  return register_task_variant(TASK_MOE_W2_LINEAR_SM90, code.to_string());
+}
+}
+
 } // namespace runtime
 } // namespace mirage

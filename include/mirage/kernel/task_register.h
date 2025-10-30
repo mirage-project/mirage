@@ -77,6 +77,9 @@ public:
                                     std::vector<int> const &params);
   int register_embedding_hopper_task(threadblock::Graph const &bgraph,
                                      std::vector<int> const &params);
+  int register_moe_linear_sm90_task(threadblock::Graph const &bgraph,
+                                    std::vector<int> const &params,
+                                    bool w13_linear);
   // SM100 tasks
   int register_linear_sm100_task(threadblock::Graph const &bgraph,
                                  std::vector<int> const &params,

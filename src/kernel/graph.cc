@@ -561,6 +561,16 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
     int variant_id = task_register->register_embedding_hopper_task(
         customized->bgraph, params);
     task_config[op] = std::make_tuple(2, 1, TASK_EMBEDDING_HOPPER, variant_id);
+  } else if (name == "moe_w13_linear_sm90") {
+    int variant_id = task_register->register_moe_linear_sm90_task(
+        customized->bgraph, params, true /*w13_linear*/);
+    task_config[op] =
+        std::make_tuple(4, 1, TASK_MOE_W13_LINEAR_SM90, variant_id);
+  } else if (name == "moe_w2_linear_sm90") {
+    int variant_id = task_register->register_moe_linear_sm90_task(
+        customized->bgraph, params, false /*w13_linear*/);
+    task_config[op] =
+        std::make_tuple(4, 1, TASK_MOE_W2_LINEAR_SM90, variant_id);
   }
   // SM100 tasks
   else if (name == "linear_sm100") {
