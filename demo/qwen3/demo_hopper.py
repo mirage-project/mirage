@@ -9,14 +9,31 @@ import os
 # print limitation
 # torch.set_printoptions(threshold=2000)
 
-def grid_for_rmsnorm_linear_layer(size):
-    # 96 and 64 are enough to cover all Qwen3 model? Please update the method
-    # if you meet any incompatibility.
+def grid_for_linear_layer(size, with_residual=False):
+    # linear with residual layers tend to be more memory-bound compared to linear layers (without residual), so we use larger grid size for it.
+    # since the WGMMA M=64, we use 64 as the partitioned output size for linear with residual layers.
+    if with_residual:
+        if size % 64 == 0:
+            # Note this stands for the number of grids, where each block process 64 output size.
+            return size // 64
+    # Special case for the lm_head, where the output size is too large, we partition it to 256 output size.
+    if size >= 100_000:
+        return size // 256
+    # For linear without residual, we partitioned them to the number of worker SMs
+    if size % 128 == 0:
+        return 128
+    elif size % 96 == 0:
+        return 96
+    elif size % 64 == 0:
+        return 64
+
+def grid_for_rmsnorm_layer(size):
+    if size % 128 == 0:
+        return 128
     if size % 96 == 0:
         return 96
     elif size % 64 == 0:
         return 64
-    
 # Return the largest factor of m that is less than or equal to n
 # This is used to determine the grid size
 def max_factor_leq_n(m: int, n: int) -> int:
@@ -419,19 +436,9 @@ if __name__ == "__main__":
                 input=rmsnorm_out,
                 weight=w_qkv,
                 output=attn_in,
-                # grid_dim=(grid_for_rmsnorm_linear_layer(w_qkv.dim(0)), 1, 1),
-                # TODO: may worth trying other partition optimization for larger batches
-                grid_dim=(w_qkv.dim(0) // 64, 1, 1),
+                grid_dim=(grid_for_linear_layer(w_qkv.dim(0), with_residual=False), 1, 1),
                 block_dim=(256, 1, 1),
             )
-            #mpk.rmsnorm_linear_layer(
-            #    input=x,
-            #    weight_norm=w_norm,
-            #    weight_linear=w_qkv,
-            #    output=attn_in,
-            #    grid_dim=(grid_for_rmsnorm_linear_layer(w_qkv.dim(0)), 1, 1),
-            #    block_dim=(256, 1, 1),
-            #)
             # add attention
             w_q_norm = mpk.attach_input(
                 torch_tensor=layer.self_attn.q_norm.weight, name=f"layer_{i}_q_norm"
@@ -481,7 +488,7 @@ if __name__ == "__main__":
                 weight=w,
                 residual=x,
                 output=attn_proj_out,
-                grid_dim=(hidden_size // 64, 1, 1),
+                grid_dim=(grid_for_linear_layer(w.dim(0), with_residual=True), 1, 1),
                 block_dim=(256, 1, 1),
             )
             # reset residual input as x
@@ -507,7 +514,7 @@ if __name__ == "__main__":
             w_up_proj = mpk.attach_input(
                 torch_tensor=layer.mlp.up_proj.weight, name=f"layer_{i}_up_proj"
             )
-            rmsnorm_num_tasks = grid_for_rmsnorm_linear_layer(w_gate_proj.dim(0) + w_up_proj.dim(0))
+            rmsnorm_num_tasks = grid_for_rmsnorm_layer(w_gate_proj.dim(0) + w_up_proj.dim(0))
             w_gatedup = mpk.shuffle_tensors(
                 inputs=[w_gate_proj, w_up_proj],
                 shuffled_dim=0,
@@ -525,18 +532,9 @@ if __name__ == "__main__":
                 input=rmsnorm_out,
                 weight=w_gatedup,
                 output=mlp_mid,
-                grid_dim=(rmsnorm_num_tasks, 1, 1),
-                # grid_dim=((w_gate_proj.dim(0) + w_up_proj.dim(0)) // 64, 1, 1),
+                grid_dim=(grid_for_linear_layer(w_gatedup.dim(0), with_residual=False), 1, 1),
                 block_dim=(256, 1, 1),
             )
-            #mpk.rmsnorm_linear_layer(
-            #    input=x,
-            #    weight_norm=w_norm,
-            #    weight_linear=w_gatedup,
-            #    output=mlp_mid,
-            #    grid_dim=(rmsnorm_num_tasks, 1, 1),
-            #    block_dim=(256, 1, 1),
-            #)
             mpk.silu_mul_layer(
                 input=mlp_mid,
                 output=silu_mul_out,
@@ -552,7 +550,7 @@ if __name__ == "__main__":
                 weight=w,
                 residual=x,
                 output=mlp_out,
-                grid_dim=(hidden_size // 64, 1, 1),
+                grid_dim=(grid_for_linear_layer(w.dim(0), with_residual=True), 1, 1),
                 block_dim=(256, 1, 1),
             )
             # reset residual input as x
@@ -583,18 +581,9 @@ if __name__ == "__main__":
             input=rmsnorm_out,
             weight=w_proj,
             output=argmax_in,
-            # grid_dim=(grid_for_rmsnorm_linear_layer(w_proj.dim(0)), 1, 1),
-            grid_dim=(w_proj.dim(0) // 256, 1, 1),
+            grid_dim=(grid_for_linear_layer(w_proj.dim(0), with_residual=False), 1, 1),
             block_dim=(256, 1, 1),
         )
-        #mpk.rmsnorm_linear_layer(
-        #    input=x,
-        #    weight_norm=w_norm,
-        #    weight_linear=w_proj,
-        #    output=argmax_in,
-        #    grid_dim=(grid_for_rmsnorm_linear_layer(w_proj.dim(0)), 1, 1),
-        #    block_dim=(128, 1, 1),
-        #)
         # add argmax layer
         if spec_decode_config and spec_decode_config.method == "promptlookup":
             argmax_partial_grid_dim = (max_factor_leq_n(153600, 96 // (spec_decode_config.spec_length + 1)), 
@@ -702,8 +691,8 @@ if __name__ == "__main__":
             response = tokenizer.decode(generated_ids, skip_special_tokens=True)
             print(response)
 
-        print("Prompt length {}, generate length {}, per-token latency (both prefill and decode): {} ms".format(
-              prompt_lengths[0], step[0] + 1 - prompt_lengths[0], run_time / (step[0] + 1)
+        print("Prompt length {}, generate length {}, per-token latency (both prefill and decode): {:.3f} ms".format(
+              prompt_lengths[0], step.max().item() + 1 - prompt_lengths[0], run_time / (step.max().item() + 1)
             )
         )
     if world_size > 1:

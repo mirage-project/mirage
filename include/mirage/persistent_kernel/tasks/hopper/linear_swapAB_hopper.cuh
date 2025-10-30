@@ -85,8 +85,8 @@ __device__ __forceinline__ void
   constexpr int S = 3;
 
   int warp_idx = warp_id();
-  int idx_in_warp = threadIdx.x % 32;
-  int warpgroup_id = warp_idx / WARPGROUP_WARPS;
+  int warpgroup_id = warp_idx >> 2;
+  int lane_idx = threadIdx.x & 31;
 
   extern __shared__ char smem_ptr[];
   uintptr_t smem = (reinterpret_cast<uintptr_t>(smem_ptr) + 1023) / 1024 * 1024;
@@ -211,7 +211,7 @@ __device__ __forceinline__ void
   // warp specialization data movement warpgroup
   if (warpgroup_id == NUM_WARPGROUPS - 1) {
     // wg_decrease_regs<32>();
-    if (lane_id() == 0 && warp_idx == (NUM_WARPGROUPS * WARPGROUP_WARPS - 4)) {
+    if (lane_idx == 0 && warp_idx == (NUM_WARPGROUPS * WARPGROUP_WARPS - 4)) {
       prefetch_tma_descriptor(tma_a.desc_ptr);
       prefetch_tma_descriptor(tma_b.desc_ptr);
       prefetch_tma_descriptor(tma_out.desc_ptr);
@@ -222,10 +222,10 @@ __device__ __forceinline__ void
     for (int output_atom_idx = 0; output_atom_idx < NUM_ITER_N;
          output_atom_idx++) {
       int slot_residual = output_atom_idx % Kstages;
-      int phase_residual = (output_atom_idx / Kstages) % 2;
+      int phase_residual = (output_atom_idx / Kstages) & 1;
 
       // launch tma for residual
-      if (lane_id() == 0 &&
+      if (lane_idx == 0 &&
           warp_idx == (NUM_WARPGROUPS * WARPGROUP_WARPS - 4)) {
 
         if constexpr (HAS_RESIDUAL) {
@@ -240,11 +240,11 @@ __device__ __forceinline__ void
               {output_atom_idx * OUTPUT_TMA_TILE_SIZE, 0});
         }
       }
-
+#pragma unroll 1
       for (int i = 0; i < NUM_ITER_K; i++) {
         int slot = (output_atom_idx * NUM_ITER_K + i) % Kstages;
-        int phase = ((output_atom_idx * NUM_ITER_K + i) / Kstages) % 2;
-        if (lane_id() == 0 &&
+        int phase = ((output_atom_idx * NUM_ITER_K + i) / Kstages) & 1;
+        if (lane_idx == 0 &&
             warp_idx == (NUM_WARPGROUPS * WARPGROUP_WARPS - 4)) {
           wait(compute_done[slot], phase ^ 1);
           int tma_coords_A[2] = {i * TILE_SIZE,
@@ -266,21 +266,22 @@ __device__ __forceinline__ void
   } else {
     // warp specialization compute warpgroup
     // wg_increase_regs<160>();
-    float s_frag[SMEM_M_SIZE / 2];
+    float s_frag[SMEM_M_SIZE >> 1];
     for (int output_atom_idx = 0; output_atom_idx < NUM_ITER_N;
          output_atom_idx++) {
 
       constexpr int CLEAR_ITERS = SMEM_M_SIZE / 16 <= 0 ? 1 : SMEM_M_SIZE / 16;
 #pragma unroll
       for (int i = 0; i < CLEAR_ITERS; i++) {
-        clear_8_floats(s_frag + i * 8);
+        clear_8_floats(s_frag + (i << 3));
       }
 
       wg_sync<THREADS_PER_WARPGROUP * CONSUMER_WARPGROUPS>(1);
 
+#pragma unroll 1
       for (int i = 0; i < NUM_ITER_K; i++) {
         int slot = (output_atom_idx * NUM_ITER_K + i) % Kstages;
-        int phase = ((output_atom_idx * NUM_ITER_K + i) / Kstages) % 2;
+        int phase = ((output_atom_idx * NUM_ITER_K + i) / Kstages) & 1;
         // wait input, weight
         wait(input_barrier[slot], phase);
         wait(weight_barrier[slot], phase);
@@ -308,7 +309,7 @@ __device__ __forceinline__ void
         wgmma::warpgroup_fence_fragment(s_frag);
 
         // flip compute done
-        if (idx_in_warp == 0 && warp_idx % 4 == 0) {
+        if (lane_idx == 0 && (warp_idx & 3) == 0) {
           arrive(compute_done[slot], 1);
         }
       }
@@ -317,7 +318,7 @@ __device__ __forceinline__ void
       int phase_residual;
       if constexpr (HAS_RESIDUAL) {
         slot_residual = output_atom_idx % Kstages;
-        phase_residual = output_atom_idx / Kstages % 2;
+        phase_residual = output_atom_idx / Kstages & 1;
         wait(residual_barrier[slot_residual], phase_residual);
         residual_smem.set_ptr(shared_residual + slot_residual * SMEM_M_SIZE *
                                                     OUTPUT_TMA_TILE_SIZE);
@@ -325,22 +326,22 @@ __device__ __forceinline__ void
       // https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#asynchronous-warpgroup-level-matrix-register-fragment-wgmma-64n16:~:text=The%20layout%20of%20the%20fragments%20held%20by%20different%20threads%20is%20shown%20in%20Figure%20149.
       // write back to shared memory
       // wg_sync<THREADS_PER_WARPGROUP * CONSUMER_WARPGROUPS>(1);
-      store_async_wait<Kstages - 1>();
+      // store_async_wait<Kstages - 1>();
       int slot_output = output_atom_idx % Kstages;
       mm_output_smem.set_ptr(mm_output +
                              slot_output * SMEM_M_SIZE * OUTPUT_ATOM_SIZE);
-#pragma unroll 1
-      for (uint32_t i = 0; i < (SMEM_M_SIZE / 4); i++) {
-        int row = (warp_idx % 4) * 16 + (i % 2) * 8 + idx_in_warp / 4;
-        int col = (i / 2) * 8 + (idx_in_warp % 4) * 2;
+#pragma unroll
+      for (uint32_t i = 0; i < (SMEM_M_SIZE >> 2); i++) {
+        int row = ((warp_idx & 3) << 4) + ((i & 1) << 3) + (lane_idx >> 2);
+        int col = ((i >> 1) << 3) + ((lane_idx & 3) << 1);
         if constexpr (HAS_RESIDUAL) {
           mm_output_smem.at(col, row) =
-              bfloat16(s_frag[i * 2]) + residual_smem.at(col, row);
+              bfloat16(s_frag[i << 1]) + residual_smem.at(col, row);
           mm_output_smem.at(col + 1, row) =
-              bfloat16(s_frag[i * 2 + 1]) + residual_smem.at(col + 1, row);
+              bfloat16(s_frag[(i << 1) + 1]) + residual_smem.at(col + 1, row);
         } else {
-          mm_output_smem.at(col, row) = bfloat16(s_frag[i * 2]);
-          mm_output_smem.at(col + 1, row) = bfloat16(s_frag[i * 2 + 1]);
+          mm_output_smem.at(col, row) = bfloat16(s_frag[i << 1]);
+          mm_output_smem.at(col + 1, row) = bfloat16(s_frag[(i << 1) + 1]);
         }
       }
 
@@ -351,7 +352,7 @@ __device__ __forceinline__ void
       // this is inter-thread sync
       wg_sync<THREADS_PER_WARPGROUP * CONSUMER_WARPGROUPS>(1);
       // copy back to dmem
-      if (warp_idx % 4 == 0 && lane_id() == 0) {
+      if ((warp_idx & 3) == 0 && lane_idx == 0) {
         tma_out.tma_store_async(mm_output_smem(0, 0),
                                 {output_atom_idx * OUTPUT_ATOM_SIZE, 0});
         store_commit_group();
