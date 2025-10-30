@@ -40,6 +40,7 @@ template <typename T_,
           int MMA_N,
           int BATCH_SIZE,
           int OUTPUT_SIZE,
+          int ORIG_OUTPUT_SIZE,
           int REDUCTION_SIZE,
           int NUM_EXPERTS,
           int NUM_TOPK,
@@ -99,6 +100,7 @@ __device__ __noinline__ void
   auto cd_tiler =
       cute::make_shape(bN, bM, bK); // (MmaTile_N, MmaTile_M, MmaTile_K)
 
+  // TODO(Zhihao): remove the dependency of mA/gA/tCgA
   cute::Tensor mA = cute::make_coord_tensor(cute::make_layout(
       cute::make_shape(OUTPUT_SIZE, REDUCTION_SIZE, NUM_EXPERTS),
       cute::make_stride(cute::E<1>{},
@@ -507,7 +509,7 @@ __device__ __noinline__ void
                 // TODO(Zhihao): add expert offset here
                 int tma_coords_A[2] = {k_tile * TILE_SIZE,
                                        m_tile * OUTPUT_ATOM_SIZE +
-                                           expert_idx * OUTPUT_SIZE};
+                                           expert_idx * ORIG_OUTPUT_SIZE};
                 weight_smem.set_ptr(shared_weight + smem_wr_buffer *
                                                         OUTPUT_ATOM_SIZE *
                                                         TILE_SIZE);
@@ -787,6 +789,10 @@ __device__ __noinline__ void
               int32_t m_idx = m_tile * MMA_M + threadIdx.x;
               int32_t n_idx = n_tile * MMA_N + i;
               if (n_idx < BATCH_SIZE && tRoutingIndex(n_idx) > 0) {
+                // if(threadIdx.x == 0) {
+                //   printf("[LOG][MoE linear] expert_idx: %d, batch_idx: %d, topk_idx: %d, hidden_idx: %d, value: %f\n",
+                //     expert_idx, n_idx, tRoutingIndex(n_idx), m_idx, float(tCrC[i]));
+                // }
                 mOutput(n_idx, tRoutingIndex(n_idx) - 1, m_idx) = tCrC[i];
               }
             }

@@ -700,7 +700,8 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
         int const num_experts = tensor_desc.dim[0];
         int const output_size = tensor_desc.dim[1];
         int const reduction_size = tensor_desc.dim[2];
-        uint64_t gmem_shape[2] = {static_cast<uint64_t>(num_experts * output_size),
+        int const orig_output_size = tensor_desc.stride[0] / tensor_desc.stride[1];
+        uint64_t gmem_shape[2] = {static_cast<uint64_t>((num_experts-1) * orig_output_size + output_size),
                                   static_cast<uint64_t>(reduction_size)};
         uint64_t gmem_stride[2] = {1, static_cast<uint64_t>(reduction_size)};
         uint32_t smem_shape[2] = {static_cast<uint32_t>(MMA_M),

@@ -1873,7 +1873,7 @@ int TaskRegister::register_moe_topk_softmax_sm100_task(
 int TaskRegister::register_moe_linear_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params, bool w13_linear) {
   assert(params.size() == 0);
-  int num_experts = 0, num_experts_per_tok = 0, batch_size = 0, output_size = 0, reduction_size = 0, output_stride = 0;
+  int num_experts = 0, num_experts_per_tok = 0, batch_size = 0, output_size = 0, orig_output_size = 0, reduction_size = 0, output_stride = 0;
   std::vector<tb::TBInputOp *> input_ops;
   std::vector<tb::TBInputOp *> output_ops;
   int num_inputs = 4;
@@ -1914,7 +1914,8 @@ int TaskRegister::register_moe_linear_sm100_task(
   assert(output_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
   kn::KNInputOp *kn_input_op =
       static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
-  output_stride = static_cast<int>(kn_input_op->input_strides[0]);
+  output_stride = static_cast<int>(kn_input_op->input_strides[1]);
+  orig_output_size = input_ops[1]->dtensor.dim[1];
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
@@ -1946,7 +1947,7 @@ int TaskRegister::register_moe_linear_sm100_task(
          B,
          M,
          S,
-         num_experts * output_size,       /*GMEM_ROW_*/
+         (num_experts-1) * orig_output_size + output_size,       /*GMEM_ROW_*/
          reduction_size,    /*GMEM_COL_*/
          MMA_M,             /*SMEM_ROW_*/
          TMA_CP_ASYNC_SIZE, /*SMEM_COL_*/
@@ -2023,12 +2024,13 @@ int TaskRegister::register_moe_linear_sm100_task(
   
   code.e("kernel::moe_linear_sm100_task_impl<cute::bfloat16_t, TMA_A, "
          "decltype(mInput), decltype(mBias), decltype(mRoutingIndices), decltype(mMask), decltype(mOutput), "
-         "$, $, $, $, $, $, $, $, $, $, "
+         "$, $, $, $, $, $, $, $, $, $, $, "
          "$, $, $>(",
          MMA_M,
          MMA_N,
          batch_size,
          output_size,
+         orig_output_size,
          reduction_size,
          num_experts,
          num_experts_per_tok,

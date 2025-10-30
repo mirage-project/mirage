@@ -230,6 +230,8 @@ __device__ __noinline__ void topk_softmax_task_impl(
           int const local_expert = expert - start_expert;
           // Write 1-based rank into routing indices; stride by num_rows per
           // expert
+          // printf("[LOG][MoE softmax_gate_topk] batch_idx: %d, local_expert: %d, k_idx: %d\n",
+          //        thread_row, local_expert, k_idx);
           mpk_routing_indices[local_expert * num_rows + thread_row] = k_idx + 1;
           // // Mark expert as active (idempotent). Atomic to avoid races across
           // rows. atomicExch(&mpk_expert_mask[local_expert], 1); // race
@@ -257,6 +259,8 @@ __device__ __noinline__ void topk_softmax_task_impl(
       for (int k_idx = 0; k_idx < k; ++k_idx) {
         int const out_idx = k * thread_row + k_idx;
         output[out_idx] = output[out_idx] * inv;
+        // printf("[LOG][MoE softmax_gate_topk] batch_idx: %d, k_idx: %d, weight value: %f\n",
+        //          thread_row, k_idx, output[out_idx]);
       }
     }
   }

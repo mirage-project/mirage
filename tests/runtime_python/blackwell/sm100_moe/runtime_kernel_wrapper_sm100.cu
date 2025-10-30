@@ -194,6 +194,7 @@ __global__ __launch_bounds__(256, 1) void moe_linear_sm100_wrapper(
                                      MMA_N,
                                      BATCH_SIZE,
                                      OUTPUT_SIZE,
+                                     /*ORIG_OUTPUT_SIZE=*/OUTPUT_SIZE,
                                      REDUCTION_SIZE,
                                      NUM_EXPERTS,
                                      NUM_TOPK,
@@ -575,7 +576,7 @@ template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int NUM_TOPK, int OUTPUT_
 __global__ __launch_bounds__(256) void mul_sum_add_sm100_wrapper(
     void const *input_ptr, void const *residual_ptr, void const *weight_ptr, void *output_ptr) {
   kernel::mul_sum_add_sm100_task_impl<T, BATCH_SIZE, OUTPUT_SIZE, NUM_TOPK, OUTPUT_STRIDE>(
-      input_ptr, residual_ptr, weight_ptr, output_ptr);
+      input_ptr, weight_ptr, residual_ptr, output_ptr);
 }
 
 void mul_sum_add_sm100_kernel(torch::Tensor input,
