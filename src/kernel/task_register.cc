@@ -1993,10 +1993,10 @@ int TaskRegister::register_moe_linear_sm100_task(
          "task_desc->input_ptrs[3])), layout_expert_mask);");
   // Output Tensor setup
   code.e("cute::Layout layout_output = cute::make_layout(cute::make_shape($, $, $), "
-         "cute::make_stride($, $, cute::Int<1>{}));",
+         "cute::make_stride($, cute::Int<1>{}, $));",
          batch_size,
-         num_experts_per_tok,
          output_size,
+         num_experts_per_tok,
          num_experts_per_tok * output_stride,
          output_stride);
   code.e("cute::Tensor mOutput = "
@@ -2203,24 +2203,20 @@ code.inc_indent();
 // MoE constant:
 constexpr int expert_stride = 12;
 // define MMA
-constexpr int MMA_M = 128;
+constexpr int MMA_M = 64;
 constexpr int MMA_N = 16;
-constexpr int bM = 128;
+constexpr int bM = 64;
 constexpr int bN = MMA_N;
 constexpr int bK = 64;
 constexpr int num_ab_stages = 8;
-constexpr int num_acc_stages = 2;
-constexpr int num_c_stages = 4;
-constexpr int num_tmem_columns = bN * num_acc_stages;
-assert(num_tmem_columns <= 512);
 // define TMAs
 constexpr int B = 3;
 constexpr int M = 3;
 constexpr int S = 3;
 constexpr int TMA_CP_ASYNC_SIZE = 64;
 constexpr int TILE_SIZE = 64;
-int const output_tma_cp_size = 128;
-int const output_atom_size = 128;
+// int const output_tma_cp_size = 128;
+// int const output_atom_size = 128;
 // TMA_B for expert weights
 code.e("using TMA_A = kernel::tma::tma_2d<cute::bfloat16_t, $, $, $, $, $, "
        "$, $, $, "
@@ -2306,7 +2302,7 @@ code.e("cute::Tensor mInput = "
 code.e("kernel::moe_linear_sm90_task_impl<cute::bfloat16_t, TMA_A, "
        "decltype(mInput), decltype(mBias), decltype(mRoutingIndices), decltype(mMask), decltype(mOutput), "
        "$, $, $, $, $, $, $, $, $, $, $, "
-       "$, $, $>(",
+       "$>(",
        MMA_M,
        MMA_N,
        batch_size,
@@ -2318,9 +2314,7 @@ code.e("kernel::moe_linear_sm90_task_impl<cute::bfloat16_t, TMA_A, "
        expert_stride,
        w13_linear ? "true" : "false",
        /*no_bias*/"true",
-       num_ab_stages,
-       num_acc_stages,
-       num_c_stages);
+       num_ab_stages);
 code.e("    tma_a,");
 code.e("    mInput,");
 code.e("    mBias,");

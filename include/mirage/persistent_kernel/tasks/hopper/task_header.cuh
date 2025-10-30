@@ -14,3 +14,6 @@
 #include "tasks/hopper/multitoken_paged_attention_hopper.cuh"
 #include "tasks/hopper/rmsnorm_hopper.cuh"
 #include "tasks/hopper/silu_mul_hopper.cuh"
+#include "tasks/hopper/moe_linear_swapAB_hopper.cuh"
+#include "tasks/blackwell/mul_sum_add_sm100.cuh"
+#include "tasks/blackwell/topk_softmax_sm100.cuh"

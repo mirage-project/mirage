@@ -29,6 +29,7 @@
 #include "smem_layout_tma.cuh"
 #include "tma.cuh"
 #include "utils.cuh"
+#include "../blackwell/utils.cuh"
 namespace kernel {
 
 // MoE Linear task storage. The shared memory buffers for A, B, and C matrices.
@@ -68,6 +69,7 @@ template <typename T_,
           int MMA_N,
           int BATCH_SIZE,
           int OUTPUT_SIZE,
+          int ORIG_OUTPUT_SIZE,
           int REDUCTION_SIZE,
           int NUM_EXPERTS,
           int NUM_TOPK,
