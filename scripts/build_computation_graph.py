@@ -178,6 +178,25 @@ def parse_onnx_model(model, unique_operators):
         elif node.op_type == "Cast" or node.op_type == "CastLike":
             # data type to cast to https://github.com/dmlc/tensorboard/blob/master/tensorboard/src/onnx.proto?utm_source=chatgpt.com
             kwargs["to"] = node.attribute[0].i
+        elif node.op_type == "Constant":
+            attr = node.attribute[0]
+            if attr.type == onnx.AttributeProto.TENSOR:
+                value = onnx.numpy_helper.to_array(attr.t)
+            elif attr.type == onnx.AttributeProto.FLOAT:
+                value = attr.f
+            elif attr.type == onnx.AttributeProto.INT:
+                value = attr.i
+            elif attr.type == onnx.AttributeProto.FLOATS:
+                value = list(attr.floats)
+            elif attr.type == onnx.AttributeProto.INTS:
+                value = list(attr.ints)
+            else:
+                raise TypeError(f"Unsupported constant attribute type: {attr.type}")
+            # convert scalar or array to torch.Tensor
+            value = torch.as_tensor(value, dtype=torch.float32, device="cuda")
+            kwargs["t"] = value
+        elif node.op_type == "Transpose":
+            kwargs["perm"] = list(node.attribute[0].ints)
 
         input_tensor_shapes = []
         for i, input_name in enumerate(node.input):
@@ -238,45 +257,47 @@ def parse_onnx_model(model, unique_operators):
     # ops in the graph instead.
 
     # pass to reassign tensor shapes
-    def reshape_tensor_pass(op, succ_shape, visited):
-        if not op.output_tensor_shapes:
-            return
-        if id(op) in visited:
-            return
-        visited.add(id(op))
+    # def reshape_tensor_pass(op, succ_shape, visited):
+    #     if op.fn == "Reshape":
+    #         return
+    #     if not op.output_tensor_shapes:
+    #         return
+    #     if id(op) in visited:
+    #         return
+    #     visited.add(id(op))
         
-        if op.fn == "MatMul":
-            succ_shape_tuple, _ = succ_shape  # Extract shape, ignore tensor_id
-            batch_dims = succ_shape_tuple[:-2]
+    #     if op.fn == "MatMul":
+    #         succ_shape_tuple, _ = succ_shape  # Extract shape, ignore tensor_id
+    #         batch_dims = succ_shape_tuple[:-2]
             
-            left_old_shape, left_tensor_id = op.input_tensor_shapes[0]
-            left_shape = (batch_dims + left_old_shape[-2:], left_tensor_id)
-            op.input_tensor_shapes[0] = left_shape
-            reshape_tensor_pass(op.input_ops[0], left_shape, visited)
+    #         left_old_shape, left_tensor_id = op.input_tensor_shapes[0]
+    #         left_shape = (batch_dims + left_old_shape[-2:], left_tensor_id)
+    #         op.input_tensor_shapes[0] = left_shape
+    #         reshape_tensor_pass(op.input_ops[0], left_shape, visited)
 
-            right_old_shape, right_tensor_id = op.input_tensor_shapes[1]
-            right_shape = (batch_dims + right_old_shape[-2:], right_tensor_id)
-            op.input_tensor_shapes[1] = right_shape
-            reshape_tensor_pass(op.input_ops[1], right_shape, visited)
-        else:
-            new_shape, _ = succ_shape  # Extract shape, ignore tensor_id
-            for i in range(len(op.input_tensor_shapes)):
-                _, tensor_id = op.input_tensor_shapes[i]
-                op.input_tensor_shapes[i] = (new_shape, tensor_id)
-            op.output_tensor_shapes[0] = succ_shape
+    #         right_old_shape, right_tensor_id = op.input_tensor_shapes[1]
+    #         right_shape = (batch_dims + right_old_shape[-2:], right_tensor_id)
+    #         op.input_tensor_shapes[1] = right_shape
+    #         reshape_tensor_pass(op.input_ops[1], right_shape, visited)
+    #     else:
+    #         new_shape, _ = succ_shape  # Extract shape, ignore tensor_id
+    #         for i in range(len(op.input_tensor_shapes)):
+    #             _, tensor_id = op.input_tensor_shapes[i]
+    #             op.input_tensor_shapes[i] = (new_shape, tensor_id)
+    #         op.output_tensor_shapes[0] = succ_shape
             
-            for pred in op.input_ops:
-                # since we must have visited this node before during topological traversal,
-                # we know what the input and output shapes are the same
-                # Propagate with predecessor's own output (preserving its tensor_id)
-                if pred.output_tensor_shapes:
-                    reshape_tensor_pass(pred, pred.output_tensor_shapes[0], visited)
+    #         for pred in op.input_ops:
+    #             # since we must have visited this node before during topological traversal,
+    #             # we know what the input and output shapes are the same
+    #             # Propagate with predecessor's own output (preserving its tensor_id)
+    #             if pred.output_tensor_shapes:
+    #                 reshape_tensor_pass(pred, pred.output_tensor_shapes[0], visited)
 
-    visited = set()
-    for node in model.graph.node: # ensure topological order
-        op = operators[node.name]
-        shape = op.output_tensor_shapes[0]
-        reshape_tensor_pass(op, shape, visited)
+    # visited = set()
+    # for node in model.graph.node: # ensure topological order
+    #     op = operators[node.name]
+    #     shape = op.output_tensor_shapes[0]
+    #     reshape_tensor_pass(op, shape, visited)
     
     # pass to expand softmax to constituent components
     def expand_softmax_pass(op):
@@ -465,45 +486,37 @@ def parse_onnx_model(model, unique_operators):
     def expand_reciprocal_pass(op):
         if op.fn != "Reciprocal":
             return
-        
-        # addition op
-        op_id = op.name.split('_')[-1]
-        add_op = Operator(name=f"node_Add_{op_id}_reciprocal",
-                          fn="Add",
-                          input_ops=[op.input_ops[0]],
-                          input_tensor_shapes=[op.input_tensor_shapes[0]],
-                          additional_params={"arg1": 1.0})
-        add_out_id = len(tensor_id) + 1
-        tensor_id[f"add_out_{add_out_id}"] = add_out_id
-        add_op.output_tensor_shapes = [(op.input_tensor_shapes[0][0], add_out_id)]
+        op.additional_params = {"arg0": 1.0}
+    
+    def insert_broadcast_pass(op):
+        if op.fn in ["MatMul", "Gemm", "ReduceSum", "Expand", "Gather", "Transpose", "Unsqueeze", "Reshape"]:
+            return
+        for i, (shape, _) in enumerate(op.input_tensor_shapes):
+            if shape != op.output_tensor_shapes[0][0]:
+                # need to insert a broadcast
+                op_id = op.name.split('_')[-1]
+                broadcast_op = Operator(name=f"node_Expand_{op_id}_{i}",
+                                        fn="Expand",
+                                        input_ops=[op.input_ops[i]],
+                                        input_tensor_shapes=[op.input_tensor_shapes[i]],
+                                        output_tensor_shapes=[op.output_tensor_shapes[0]])
+                
+                # input ops
+                inp = op.input_ops[i]
+                if op in broadcast_op.input_ops:
+                    inp.output_ops.remove(op)
+                inp.output_ops.append(broadcast_op)
+                broadcast_out_id = len(tensor_id) + 1
+                tensor_id[f"broadcast_out_{broadcast_out_id}"] = broadcast_out_id
+                broadcast_op.output_tensor_shapes = [(op.output_tensor_shapes[0][0], broadcast_out_id)]
 
-        # output ops
-        for inp in op.input_ops:
-            inp.output_ops.remove(op)
-            inp.output_ops.append(add_op)
-        
-        # division op
-        div_op = Operator(name=f"node_Div_{op_id}_reciprocal",
-                          fn="Div",
-                          input_ops=[add_op],
-                          input_tensor_shapes=[add_op.output_tensor_shapes[0]],
-                          output_ops=op.output_ops,
-                          output_tensor_shapes=op.output_tensor_shapes,
-                          additional_params={"arg1": 1.0}) # pass the constant divisor
-        add_op.output_ops = [div_op]
+                # connect to current op
+                op.input_ops[i] = broadcast_op
+                op.input_tensor_shapes[i] = broadcast_op.output_tensor_shapes[0]
+                broadcast_op.output_ops = [op]
 
-        # output ops
-        for out in op.output_ops:
-            if op in out.input_ops:
-                out.input_ops.remove(op)
-            out.input_ops.append(div_op)
-        
-        # add to operators
-        operators[add_op.name] = add_op
-        operators[div_op.name] = div_op
-
-        # delete from operators
-        del operators[op.name]
+                # add to operators
+                operators[broadcast_op.name] = broadcast_op
     
     for op in list(operators.values()):
         expand_softmax_pass(op)
@@ -511,8 +524,10 @@ def parse_onnx_model(model, unique_operators):
         expand_sigmoid_pass(op)
         expand_neg_pass(op)
         expand_reciprocal_pass(op)
+        insert_broadcast_pass(op)
 
-    return operators
+    tensor_id_to_name = {v: k for k, v in tensor_id.items()}
+    return operators, tensor_id_to_name
 
 def test_cfg():
     # model = SimpleClassifier()
@@ -626,13 +641,13 @@ def get_computation_graph(model, dummy_input, unique_operators, method):
             shape_inference.infer_shapes_path(model_path="scripts/onnx/integrate_test.onnx",
                                               output_path="scripts/onnx/inferred_model.onnx") # for shape inference of inputs and outputs
             inferred_model = onnx.load("scripts/onnx/inferred_model.onnx")
-            operators = parse_onnx_model(inferred_model, unique_operators)
+            operators, tensor_id_to_name = parse_onnx_model(inferred_model, unique_operators)
 
             # for k, v in operators.items():
             #     print(k, " input ops: ", [(inp.name, inp.fn) for inp in v.input_ops])
             #     print(k, " output ops: ", [(out.name, out.fn) for out in v.output_ops])
 
-            return operators
+            return operators, tensor_id_to_name
         case _:
             print("Unsupported method for build_graph")
             return None

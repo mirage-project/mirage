@@ -23,8 +23,8 @@ VOCAB_SIZE = 16384
 NUM_BENCH_ITERS = 100
 NUM_BENCH_WARMUP = 10
 
-IGNORE_OPS = {"Constant", "Identity"}
-UNSUPPORTED_OPS = {"Gemm", "Expand", "Gather", "Reshape", "Transpose", "Cast", "CastLike"}
+IGNORE_OPS = set()
+UNSUPPORTED_OPS = {"Constant", "Identity", "Unsqueeze", "Abs", "Gemm", "Expand", "Gather", "Reshape", "Transpose", "Cast", "CastLike", "Tanh"}
 
 model_name_to_class = {
     "test-mlp": TestMLP,
@@ -84,10 +84,8 @@ def test_hybrid_model(mirage_root, dataset_root, dry_run: bool = True, cost_mode
     # Slightly improve backend perf variability on GPU
     torch.backends.cudnn.benchmark = True
 
-    device = torch.device("cuda")
-
     model_class = model_name_to_class[test_model_name]
-    model = model_class().to(device)
+    model = model_class().to(torch.device("cuda"))
     dummy_input = _get_input_tensor(test_model_name)
 
     print(f"\n{'='*60}")
@@ -127,11 +125,12 @@ def test_hybrid_model(mirage_root, dataset_root, dry_run: bool = True, cost_mode
 
     test_input = _get_input_tensor(test_model_name)
 
+    model = model.to(torch.device("cuda"))
     try:
         # Run both models
         with torch.no_grad():
             original_output = model(test_input)
-        hybrid_output = hybrid_model(test_input)
+        hybrid_output = hybrid_model(test_input)[-1]
 
         # Compare results
         max_diff = torch.max(torch.abs(hybrid_output - original_output)).item()
@@ -178,7 +177,7 @@ def test_hybrid_model(mirage_root, dataset_root, dry_run: bool = True, cost_mode
 
         speedup = pytorch_ms / hybrid_ms if hybrid_ms > 0 else float("inf")
 
-        print(f"Device: {device}")
+        print(f"Device: CUDA (fixed)")
         print(f"Input:  {tuple(bench_input.shape)}")
         print(f"Iterations: {iters} (warmup: {warmup})\n")
 

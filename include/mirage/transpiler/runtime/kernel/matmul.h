@@ -134,7 +134,7 @@ static void gemm(
                                  stride_n_C,
                                  batch_stride_C,
                                  batch_size,
-                                 COMPUTE_TYPE,
+                                 CUBLAS_COMPUTE_32F,
                                  CUBLAS_GEMM_DEFAULT);
   if (status != CUBLAS_STATUS_SUCCESS) {
     fprintf(stderr,
