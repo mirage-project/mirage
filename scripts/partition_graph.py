@@ -654,15 +654,15 @@ def partition_graph_with_dp(model,
     all_input_tensor_ids = [tid for op in sorted_ops for _, tid in op.input_tensor_shapes if tid not in all_produced]
     
     # Separate real inputs from parameters (ONNX orders: real_inputs + parameters)
-    input_tensor_ids = [15]
+    input_tensor_ids = []
     # Safer loop with index checking
     parameter_tensors = {}
     for tid in all_input_tensor_ids:
         pname = tensor_id_to_name[tid]
         if pname not in parameter_dict:
-            print(f"ERROR: param name '{pname}' with tid {tid} not found in parameter_dict keys")
-            continue
-        parameter_tensors[tid] = parameter_dict[pname]
+            input_tensor_ids.append(tid)
+        else:
+            parameter_tensors[tid] = parameter_dict[pname]
         
     all_consumed = {tid for op in sorted_ops for _, tid in op.input_tensor_shapes}
     output_tensor_ids = [tid for op in sorted_ops for _, tid in op.output_tensor_shapes if tid not in all_consumed]
