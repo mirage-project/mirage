@@ -2224,7 +2224,8 @@ code.e("using TMA_A = kernel::tma::tma_2d<cute::bfloat16_t, $, $, $, $, $, "
        B,
        M,
        S,
-       (num_experts-1) * orig_output_size + output_size,       /*GMEM_ROW_*/
+      //  (num_experts-1) * orig_output_size + output_size,       /*GMEM_ROW_*/
+      (num_experts) * orig_output_size,       /*GMEM_ROW_*/
        reduction_size,    /*GMEM_COL_*/
        MMA_M,             /*SMEM_ROW_*/
        TMA_CP_ASYNC_SIZE, /*SMEM_COL_*/
@@ -2270,10 +2271,10 @@ code.e("cute::Tensor mMask = "
        "task_desc->input_ptrs[3])), layout_expert_mask);");
 // Output Tensor setup
 code.e("cute::Layout layout_output = cute::make_layout(cute::make_shape($, $, $), "
-       "cute::make_stride($, $, cute::Int<1>{}));",
+       "cute::make_stride($, cute::Int<1>{}, $));",
        batch_size,
-       num_experts_per_tok,
        output_size,
+       num_experts_per_tok,
        num_experts_per_tok * output_stride,
        output_stride);
 code.e("cute::Tensor mOutput = "

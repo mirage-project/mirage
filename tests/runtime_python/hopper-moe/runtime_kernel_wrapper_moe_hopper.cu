@@ -105,6 +105,7 @@ __global__ __launch_bounds__(256, 1) void moe_linear_sm90_wrapper(
                                     MMA_N,
                                     BATCH_SIZE,
                                     OUTPUT_SIZE,
+                                    OUTPUT_SIZE, // ORIG_OUTPUT_SIZE
                                     REDUCTION_SIZE,
                                     NUM_EXPERTS,
                                     NUM_TOPK,

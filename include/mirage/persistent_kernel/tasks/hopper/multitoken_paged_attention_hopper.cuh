@@ -222,7 +222,7 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
   constexpr size_t S_COMPUTE_DONE_SIZE = 8 * Kstages;
   // Reuse shared memory address of S_V to save space
   constexpr size_t S_O_OFFSET = (S_V_OFFSET + S_V_SIZE + 1023) / 1024 * 1024;
-  constexpr size_t S_O_SIZE = S_Q_SIZE;
+  // constexpr size_t S_O_SIZE = S_Q_SIZE;
 
   constexpr size_t S_TOTAL_OFFSET = S_COMPUTE_DONE_OFFSET + S_COMPUTE_DONE_SIZE;
   static_assert(S_TOTAL_OFFSET <=

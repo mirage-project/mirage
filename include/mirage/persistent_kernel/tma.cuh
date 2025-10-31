@@ -739,7 +739,7 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
         uint64_t gmem_stride[2] = {1, static_cast<uint64_t>(reduction_size)};
         uint32_t smem_shape[2] = {static_cast<uint32_t>(MMA_M),
                                   static_cast<uint32_t>(cp_async_size)};
-        constexpr int TILE_SIZE = 128;
+        constexpr int TILE_SIZE = 64;
         size_t smem_repeat_col =
             (TILE_SIZE + cp_async_size - 1) / cp_async_size;
         fill_tma_desc<bfloat16, B, M, S, 2>(tma_desc,

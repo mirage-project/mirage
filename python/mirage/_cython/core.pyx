@@ -353,6 +353,8 @@ def convert_torch_type_to_dtype(type):
         return int8
     elif type is torch.uint16:
         return uint16
+    elif type is torch.int32:
+        return int32
     elif type is torch.float16:
         return float16
     elif type is torch.bfloat16:

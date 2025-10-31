@@ -69,7 +69,7 @@ template <typename T_,
           int MMA_N,
           int BATCH_SIZE,
           int OUTPUT_SIZE,
-          int ORIG_OUTPUT_SIZE,
+          int OUTPUT_STRIDE,
           int REDUCTION_SIZE,
           int NUM_EXPERTS,
           int NUM_TOPK,
@@ -95,7 +95,7 @@ __device__ __forceinline__ void
 
   using TypeAcc = float;
   constexpr int NUM_THREAD_PER_WARPGROUP = 128;
-  constexpr int CONSUMER_SYNC_BARRIER_ID = 5;
+  // constexpr int CONSUMER_SYNC_BARRIER_ID = 5;
 
   // Define TileShape and AtomLayout
   constexpr int MMA_K = 64; // 16*4
@@ -532,7 +532,7 @@ if (threadIdx.x == 0) {
               if (threadIdx.x % NUM_THREAD_PER_WARPGROUP == 0) {
                 int tma_coords_A[2] = {k_tile * TILE_SIZE,
                                        m_tile * OUTPUT_ATOM_SIZE +
-                                           expert_idx * OUTPUT_SIZE};
+                                           expert_idx * OUTPUT_STRIDE};
                 weight_smem.set_ptr(shared_weight + smem_wr_buffer *
                                                         OUTPUT_ATOM_SIZE *
                                                         TILE_SIZE);
@@ -809,6 +809,9 @@ if (threadIdx.x == 0) {
                 fragD += mBias(n_idx, m_idx, expert_idx);
               }
               if (pred) {
+                // if (threadIdx.x == 0 && n_idx == 0 && tRoutingIndex(n_idx) - 1 == 0 && m_idx <= 10) {
+                //   printf("n_idx: %d, m_idx: %d, tRoutingIndex(n_idx): %d, fragD: %f\n", n_idx, m_idx, tRoutingIndex(n_idx), static_cast<float>(fragD));
+                // }
                 mOutput(n_idx, m_idx, tRoutingIndex(n_idx) - 1) = fragD;
               }
             }
