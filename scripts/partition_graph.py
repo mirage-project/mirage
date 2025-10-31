@@ -533,6 +533,7 @@ def partition_graph_with_dp(model,
     # Build execution plan
     print(f"\nOptimizing {sum(1 for _, t in fine_grained_partitions if t == 'mirage')} Mirage partitions...")
     execution_plan = []
+    cached_mirage_kernels = {}
     
     for pid, (sg_dict, sg_type) in enumerate(fine_grained_partitions):
         # Print partition info
@@ -573,7 +574,10 @@ def partition_graph_with_dp(model,
                     dummy_inputs.append(torch.randn(dim_info[0], dtype=torch.float16, device="cuda"))
                 elif dim_info[1] == "C":  # Constant input
                     dummy_inputs.append(torch.full(dim_info[0], dim_info[2], dtype=torch.float16, device="cuda"))
+            
             try:
+                h = str(kernel_graph.get_owner_independent_hash())
+                # TODO: Sqrt doesn't work with superoptimizer currently
                 if dry_run or (len(sg_dict) == 1 and list(sg_dict.keys())[0].fn == "Sqrt"):
                     # # Dry run mode: compile original kernel without superoptimize
                     # # Create dummy inputs for compilation (Mirage uses float16)
@@ -581,9 +585,7 @@ def partition_graph_with_dp(model,
                     # The dummy inputs are not actually used in dry run mode
                     optimized_kernel = kernel_graph
                     print(f"  → Result: Dry run mode - use original kernel (no optimization)")
-                else:
-                    h = str(kernel_graph.get_owner_independent_hash())
-        
+                else:        
                     if os.path.isfile("optimized_" + h + ".json"):
                         print(f"  → Result: Loading cached optimized kernel for hash {h}")
                         optimized_kernel = mi.new_kernel_graph()
@@ -598,7 +600,14 @@ def partition_graph_with_dp(model,
                         optimized_kernel.to_json("optimized_" + h + ".json")
                         print(f"  ✓ Result: Mirage kernel optimized and cached with hash {h}")
                     print(f"  ✓ Result: Mirage kernel optimized successfully")
-                optimized_kernel.compile(inputs=dummy_inputs)
+                kernel_cache_key = (h, tuple(dummy_input.shape for dummy_input in dummy_inputs))
+                if kernel_cache_key in cached_mirage_kernels:
+                    optimized_kernel = cached_mirage_kernels[kernel_cache_key]
+                    print(f"     ✓ Using cached compiled kernel")
+                else:
+                    optimized_kernel.compile(inputs=dummy_inputs)
+                    cached_mirage_kernels[kernel_cache_key] = optimized_kernel
+                    print(f"     ✓ Compiled kernel and cached")
                 # check for kernel validity
                 print(f"Checking optimized kernel validity...")
                 output = optimized_kernel(inputs=dummy_inputs)
