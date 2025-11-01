@@ -35,7 +35,6 @@
 namespace kernel {
 
 using bfloat16 = type::bfloat16_t;
-
 template <typename T,
           int BATCH_SIZE,
           int OUTPUT_SIZE,
@@ -149,9 +148,6 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
 
   // output
   T *shared_output = (T *)(smem + SHARED_OUTPUT_OFFSET);
-  //   if(blockIdx.x == 0 && threadIdx.x == 0) {
-  //     printf("SHARED_OUTPUT_OFFSET: %d\n", SHARED_OUTPUT_OFFSET);
-  //   }
 
   // define the swizzle mode
   using ZeroBufferSmem = smem_row<T, 0, 0, 0, 1, 8, 8>;
@@ -167,6 +163,8 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
   using OutputFullSmem =
       smem_row<T, 3, 3, 3, BATCH_SIZE, OUTPUT_ATOM_SIZE, OUTPUT_ATOM_SIZE>;
 
+  // we no longger need zero buffer, but we could keep it to make sure shared
+  // memory was aligned.
   ZeroBufferSmem zero_buffer(zero_buf);
 
   InputSmem input_smem(shared_input_buffer);
@@ -181,7 +179,6 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
     // performance.
 #pragma unroll
     for (uint32_t nn = 0; nn < NUM_ITERS_N; nn++) {
-      // loop among OUTPUT_ATOM_SIZE
       float s_frag[8];
 
       // should we sync here? if NUM_ITERS_N > 1, I suppose we should do it,
@@ -200,19 +197,8 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
         int src_col = dst_col + (nn << log2_OUTPUT_ATOM_SIZE);
         // TODO: use ignore-src in load_smem to avoid if-else
         if (residual) {
-          // printf("load residual!\n");
-          // if (blockIdx.x == 63) {
-          //     printf("nn: %d, block 63, row: %d, dst_col: %d, src_col: %d,
-          //     it's value in gmem: %f\n", nn, row, dst_col, src_col,
-          //     float(*residual_dmem(row, src_col)));
-          // }
           load_smem(output_smem(row, dst_col), residual_dmem(row, src_col));
         } else {
-          // if (blockIdx.x == 0 && threadIdx.x == 64) {
-          // if (blockIdx.x == 0) {
-          //     printf("row: %d, col: %d, address: %p\n", row, col,
-          //     &output_smem.at(row, col));
-          // }
           *((__uint128_t *)((void *)&output_smem.at(row, dst_col))) = 0ul;
         }
       }
@@ -223,7 +209,6 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
         s_frag[r] = 0;
       }
 
-      int itile_to_read = 0;
       int ismem_read_stage = 0;
       int ismem_write_stage = 0;
 
@@ -235,10 +220,8 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
         // ADJUSTED_PIPE_MAX - 1 pipe.
         int src_stage_offset = istage << log2_TILE_SIZE;
 
-        // we only load input when we just enter a new loop for new iteration
-        // for atoms.
 #pragma unroll
-        for (int chu = 0; chu < NUM_CHUNKS_A / NUM_THREADS; chu++) {
+        for (int chunk = 0; chunk < NUM_CHUNKS_A / NUM_THREADS; chunk++) {
           int tid = threadIdx.x;
           int threadCol = (tid & (CHUNKS_PER_ROW_A - 1)) << log2_CHUNK_SIZE;
           int threadRow = tid >> log2_CHUNKS_PER_ROW_A;
@@ -247,7 +230,7 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
           int dst_col = threadCol;
           int src_col = dst_col + src_stage_offset;
 
-          int row_within = threadRow + chu * ROWS_PER_ITERATION;
+          int row_within = threadRow + chunk * ROWS_PER_ITERATION;
           int src_row = row_within;
           int dst_row = row_within;
 
@@ -255,7 +238,7 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
                     input_dmem(src_row, src_col));
         }
 #pragma unroll
-        for (int chu = 0; chu < NUM_CHUNKS_B / NUM_THREADS; chu++) {
+        for (int chunk = 0; chunk < NUM_CHUNKS_B / NUM_THREADS; chunk++) {
           int tid = threadIdx.x;
           int threadRow = (tid & (CHUNKS_PER_COL_B - 1)) << log2_CHUNK_SIZE;
           int threadCol = tid >> log2_CHUNKS_PER_COL_B;
@@ -264,7 +247,7 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
           int dst_row = threadRow;
           int src_row = dst_row + src_stage_offset;
 
-          int col_within = threadCol + chu * COLS_PER_ITERATION;
+          int col_within = threadCol + chunk * COLS_PER_ITERATION;
           int src_col = (nn << log2_OUTPUT_ATOM_SIZE) + col_within;
           int dst_col = col_within;
 
@@ -273,42 +256,14 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
         }
         cp_async_fence();
 
-        ++itile_to_read;
         ++ismem_write_stage;
-      } // warm up for PIPE_MAX - 1
+      } // warm up for ADJUSTED_PIPE_MAX - 1
 
       constexpr int PIPE_INSIDE_TILE = 2;
       uint32_t a_frag[PIPE_INSIDE_TILE][4], b_frag[PIPE_INSIDE_TILE][4];
       // wait for first warm up pipeline cp.async finished
       cp_async_wait<ADJUSTED_PIPE_MAX - 2>();
       __syncthreads();
-
-      // if(blockIdx.x == 63 && threadIdx.x == 0) {
-      //   for(int i = 0; i < 8; i ++) {
-      //     for(int j = 0; j < 128; j ++) {
-      //       printf("nn: %d, input_smem[%d][%d]: %f\n", nn, i, j,
-      //       (float)(*input_smem(i, j, 0)));
-      //     }
-      //   }
-      // }
-
-      // if(blockIdx.x == 63 && threadIdx.x == 0) {
-      //   for(int i = 0; i < 8; i ++) {
-      //     for(int j = 0; j < 64; j ++) {
-      //       printf("nn: %d, output_smem[%d][%d]: %f\n", nn, i, j,
-      //       (float)(*output_smem(i, j)));
-      //     }
-      //   }
-      // }
-
-      // if(blockIdx.x == 0 && threadIdx.x == 0) {
-      //   for(int i = 0; i < 128; i ++) {
-      //     for(int j = 0; j < 64; j ++) {
-      //       printf("nn: %d, weight_smem[%d][%d]: %f\n", nn, i, j,
-      //       (float)(*weight_smem(i, j, 0)));
-      //     }
-      //   }
-      // }
 
       int warmup_m_col =
           (warp_row << (4 + log2_NUM_ITERS_K)) + ((lane_idx >> 4) << 3);
@@ -321,8 +276,6 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
       DCHECK(warmup_n_col < OUTPUT_ATOM_SIZE);
       T *warmup_weight_ptr = weight_smem(warmup_n_row, warmup_n_col, 0);
 
-      // NOTE: if we just comment out the two below ldsm, we will see 20% perf
-      // gain!!! why?
       ldsm(warmup_input_ptr, a_frag[0]);
       ldsm(warmup_weight_ptr, b_frag[0]);
 
@@ -333,20 +286,22 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
           // TODO(Wenqin): use pointer advance for the pointer for input and
           // weight shared memory instead of address calculation for
           // input_smem and weight_smem, because in each iteration in the K
-          // dim, they just advanced a compile-time know offset, and it seems
-          // the CUTLASS version just use some ADD inst to do it. Loop over
-          // output atoms for this K-slice
+          // dim for the OUTER_ROW/COL, they just advanced a compile-time know
+          // offset, and it seems the CUTLASS version just use some ADD inst to
+          // do it.
           int k_next = (k + 1) % NUM_ITERS_K;
 
           if (k == 0) {
-            // loading next tile (itile_to_read) when k is 0 and itile_to_read
-            // small than FORLOOP_RANGE.
-            if (itile_to_read < FORLOOP_RANGE) {
-              int src_stage_offset = itile_to_read << log2_TILE_SIZE;
+            // loading next tile (for_idx + ADJUSTED_PIPE_MAX - 1) when k is 0.
+            if (for_idx + ADJUSTED_PIPE_MAX - 1 < FORLOOP_RANGE) {
+              int src_stage_offset = (for_idx + ADJUSTED_PIPE_MAX - 1)
+                                     << log2_TILE_SIZE;
               // Prefetch next weight tile into ring buffer stage_write
               // Load input tile at the first output tile
 #pragma unroll
-              for (int chu = 0; chu < NUM_CHUNKS_A / NUM_THREADS; chu++) {
+              for (int chunk = 0; chunk < NUM_CHUNKS_A / NUM_THREADS; chunk++) {
+                // we don't need to hoist the threadCol and threadRow,,
+                // accorrding to experiment, the nvcc could hoist these const.
                 int tid = threadIdx.x;
                 int threadCol = (tid & (CHUNKS_PER_ROW_A - 1))
                                 << log2_CHUNK_SIZE;
@@ -357,7 +312,7 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
                 int dst_col = threadCol;
                 int src_col = dst_col + src_stage_offset;
 
-                int row_within = threadRow + chu * ROWS_PER_ITERATION;
+                int row_within = threadRow + chunk * ROWS_PER_ITERATION;
                 int src_row = row_within;
                 int dst_row = row_within;
 
@@ -365,7 +320,7 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
                           input_dmem(src_row, src_col));
               }
 #pragma unroll
-              for (int chu = 0; chu < NUM_CHUNKS_B / NUM_THREADS; chu++) {
+              for (int chunk = 0; chunk < NUM_CHUNKS_B / NUM_THREADS; chunk++) {
                 int tid = threadIdx.x;
                 int threadRow = (tid & (CHUNKS_PER_COL_B - 1))
                                 << log2_CHUNK_SIZE;
@@ -376,14 +331,13 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
                 int dst_row = threadRow;
                 int src_row = dst_row + src_stage_offset;
 
-                int col_within = threadCol + chu * COLS_PER_ITERATION;
+                int col_within = threadCol + chunk * COLS_PER_ITERATION;
                 int src_col = (nn << log2_OUTPUT_ATOM_SIZE) + col_within;
                 int dst_col = col_within;
 
                 load_smem(weight_smem(dst_row, dst_col, ismem_write_stage),
                           weight_dmem(src_row, src_col));
               }
-              itile_to_read++;
               ismem_write_stage = (ismem_write_stage + 1) % ADJUSTED_PIPE_MAX;
             }
             cp_async_fence();
@@ -422,13 +376,11 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
 
           int smem_row = m_row;
           T *valid_input_ptr = input_smem(smem_row, m_col, ismem_read_stage);
-          T *invalid_input_ptr = zero_buffer(0, 0);
           // we don't need to check for is_input_valid, because we will use
           // num_active_tokens for the output, we will just pick valid output.
           T *input_ptr = valid_input_ptr;
 
           T *valid_weight_ptr = weight_smem(n_row, n_col, ismem_read_stage);
-          T *invalid_weight_ptr = zero_buffer(0, 0);
           T *weight_ptr = valid_weight_ptr;
 
           ldsm(input_ptr, a_frag[(k + 1) % PIPE_INSIDE_TILE]);
@@ -447,16 +399,11 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
         int col_within =
             (warp_col << 4) + ((lane_idx & 0x3) << 1) + ((i >> 1) << 3);
         int col = col_within;
-        if (row_in_warp < num_active_tokens && col_within < OUTPUT_ATOM_SIZE) {
-          // TODO: we may not col_within < OUTPUT_ATOM_SIZE check here.
-          // TODO: if we use "+=" here, we may use lots of registers.
+        DCHECK(col_within < OUTPUT_ATOM_SIZE);
+        if (row_in_warp < num_active_tokens) {
           output_smem.at(row_in_warp, col) += bfloat16(s_frag[(i << 1)]);
           output_smem.at(row_in_warp, col + 1) +=
               bfloat16(s_frag[(i << 1) | 0x1]);
-          // if(blockIdx.x == 63) {
-          //   printf("nn: %d, block 63 set [%d, %d] as %f\n", nn, row_in_warp,
-          //   col, float(output_smem.at(row_in_warp, col)));
-          // }
         }
       }
       __syncthreads();
@@ -468,17 +415,8 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
         int row = i / CHUNKS_PER_ROW_C;
         int src_col = (i % CHUNKS_PER_ROW_C) << log2_CHUNK_SIZE;
         int dst_col = src_col + (nn << log2_OUTPUT_ATOM_SIZE);
-        // if(blockIdx.x == 63) {
-        //   printf("thread: %d, src[%d, %d] to dst[%d, %d]\n", threadIdx.x,
-        //   row, src_col, row, dst_col);
-        // }
         *((__uint128_t *)((void *)&output_dmem.at(row, dst_col))) =
             *((__uint128_t *)((void *)&output_smem.at(row, src_col)));
-        // if(blockIdx.x == 63) {
-        //   printf("block 63 set gmem[%d, %d] as %f, its source in smem is:
-        //   %f\n", row, dst_col, float(output_dmem.at(row, dst_col)),
-        //   float(output_smem.at(row, src_col)));
-        // }
       }
     } // loop for NUM_ITERS_N, it may not be 1
   } // loop for NUM_ITERS_M, it should always be 1, no sense loop
