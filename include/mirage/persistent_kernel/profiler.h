@@ -42,9 +42,9 @@ constexpr uint32_t EVENT_INSTANT = 0x2;
 
 __device__ __forceinline__ void sleep_cycles(uint32_t cycles) {
   uint32_t start = 0, now = 0;
-  asm volatile("mov.u32 %0, %globaltimer_lo;" : "=r"(start));
+  asm volatile("mov.u32 %0, %%globaltimer_lo;" : "=r"(start));
   do {
-    asm volatile("mov.u32 %0, %globaltimer_lo;" : "=r"(now));
+    asm volatile("mov.u32 %0, %%globaltimer_lo;" : "=r"(now));
   } while ((now - start) < cycles);
 }
 
@@ -78,7 +78,7 @@ __device__ __forceinline__ uint32_t make_event_tag_instant(uint32_t base_tag,
 
 __device__ __forceinline__ uint32_t get_timestamp() {
   uint32_t volatile ret;
-  asm volatile("mov.u32 %0, %globaltimer_lo;" : "=r"(ret));
+  asm volatile("mov.u32 %0, %%globaltimer_lo;" : "=r"(ret));
   return ret;
 }
 
