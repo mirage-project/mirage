@@ -134,7 +134,7 @@ def get_compile_command(
         # "-O0",
         # "-g",
         # "-G",
-        "--ptxas-options=-v",
+        # "--ptxas-options=-v",
         # "-Xptxas=-v",
         # "-lineinfo",
         f"-I{py_include_dir}",

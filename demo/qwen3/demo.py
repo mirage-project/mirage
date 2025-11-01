@@ -13,10 +13,8 @@ def grid_for_rmsnorm_linear_layer(size: int, use_cutlass_kernel: bool = True):
     # 96 and 64 are enough to cover all Qwen3 model? Please update the method
     # if you meet any incompatibility.
     if size % 64 == 0 and not use_cutlass_kernel:
-        # TODO(Wenqin): the current linear kernel have some correctness bug and
-        # perf regression if the OUTPUT_SIZE is too big, there is a workaround,
-        # will fix them later
-        # TODO(Wenqin): correctness issue was fixed, but perf regression still exist!!!
+        # TODO(Wenqin): If we set OUTPUT_SIZE too much for PTX linear kernel,
+        # there is some regression.
         return size // 64
     if size / 96 > 400:
         # TODO: An add-hoc workaround for linear kernel, both MPK ptx and

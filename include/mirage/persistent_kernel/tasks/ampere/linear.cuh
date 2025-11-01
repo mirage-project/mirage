@@ -89,24 +89,19 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
   constexpr int log2_NUM_WARPS_N = log2_constexpr(NUM_WARPS_N);
   constexpr int log2_NUM_ITERS_K = log2_constexpr(NUM_ITERS_K);
 
-  int warp_idx = __shfl_sync(0xffffffff, threadIdx.x / 32, 0);
+  int warp_idx = warp_id();
   int warp_row = warp_idx >> log2_NUM_WARPS_N;
   int warp_col = warp_idx & (NUM_WARPS_N - 1);
-  int lane_idx = threadIdx.x & 0x1f;
+  int lane_idx = lane_id();
 
   T const *__restrict__ d_input = static_cast<T const *>(input_ptr);
   T const *__restrict__ d_weight = static_cast<T const *>(weight_ptr);
   T const *__restrict__ d_residual = static_cast<T const *>(residual_ptr);
   T *__restrict__ d_output = static_cast<T *>(output_ptr);
   // CANNOT perform residual when redisual_ptr is nullptr
-  //   if (residual_ptr == nullptr) {
-  //     assert(!residual);
-  //   }
-
-  // int bid = blockIdx.x;
-  // d_weight += OUTPUT_SIZE * REDUCTION_SIZE * bid;
-  // d_residual += OUTPUT_SIZE * bid;
-  // d_output += OUTPUT_SIZE * bid;
+  if (residual_ptr == nullptr) {
+    assert(!residual);
+  }
 
   using InputDmem = dmem_row_const<T, BATCH_SIZE, TILE_SIZE, REDUCTION_SIZE>;
   using WeightDmem =
@@ -401,6 +396,7 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
         int col = col_within;
         DCHECK(col_within < OUTPUT_ATOM_SIZE);
         if (row_in_warp < num_active_tokens) {
+          // TODO: try st.matrix here?
           output_smem.at(row_in_warp, col) += bfloat16(s_frag[(i << 1)]);
           output_smem.at(row_in_warp, col + 1) +=
               bfloat16(s_frag[(i << 1) | 0x1]);
