@@ -346,7 +346,19 @@ if __name__ == "__main__":
             name="attn_allreduce_out",
             io_category="nvshmem_tensor" if world_size > 1 else "cuda_tensor",
         )
-        # TODO(Zhihao): continue here to allocate moe buffers
+        # TODO(Zhihao): a temporary solution to combine MoE gate_proj and up_proj into one linear 
+        # layer on the torch side with extra memory requirements, need to have a shuffle kernel to do this properly
+        moe_gate_up_proj_torch_weights = []
+        moe_down_proj_torch_weights = []
+        for layer in model.model.layers:
+            moe_gate_up_proj_torch = []
+            moe_down_proj_torch = []
+            for expert_id in range(num_experts):
+                moe_gate_up_proj_torch.append(torch.concat([layer.mlp.experts[expert_id].gate_proj.weight, layer.mlp.experts[expert_id].up_proj.weight], dim=0))
+                moe_down_proj_torch.append(layer.mlp.experts[expert_id].down_proj.weight)
+            moe_gate_up_proj_torch_weights.append(torch.stack(moe_gate_up_proj_torch, dim=0)) # [num_experts, intermediate_size*2, hidden_size]
+            moe_down_proj_torch_weights.append(torch.stack(moe_down_proj_torch, dim=0)) # [num_experts, hidden_size, intermediate_size]
+
         moe_gate_out = mpk.new_tensor(
             dims=(args.max_num_batched_tokens, num_experts),
             dtype=mi.bfloat16,
@@ -445,8 +457,6 @@ if __name__ == "__main__":
         )
         x = y
         for i, layer in enumerate(model.model.layers):
-            # if i > 0:
-            #     break
             # add rmsnorm + linear
             w_norm = mpk.attach_input(
                 torch_tensor=layer.input_layernorm.weight,
@@ -551,24 +561,14 @@ if __name__ == "__main__":
                 name=f"layer_{i}_post_attn_layernorm",
             )
             
-            # TODO(Zhihao): a temporary solution to combine MoE gate_proj and up_proj into one linear 
-            # layer on the torch side with extra memory requirements, need to have a shuffle kernel to do this properly
-            moe_gate_up_proj_torch = []
-            moe_down_proj_torch = []
-            for expert_id in range(num_experts):
-                moe_gate_up_proj_torch.append(torch.concat([layer.mlp.experts[expert_id].gate_proj.weight, layer.mlp.experts[expert_id].up_proj.weight], dim=0))
-                moe_down_proj_torch.append(layer.mlp.experts[expert_id].down_proj.weight)
-            moe_gate_up_proj_torch = torch.stack(moe_gate_up_proj_torch, dim=0) # [num_experts, intermediate_size*2, hidden_size]
-            moe_down_proj_torch = torch.stack(moe_down_proj_torch, dim=0) # [num_experts, hidden_size, intermediate_size]
-            
             w_moe_gate = mpk.attach_input(
                 torch_tensor=layer.mlp.gate.weight, name=f"layer_{i}_moe_gate"
             )
             w_gatedup = mpk.attach_input(
-                torch_tensor=moe_gate_up_proj_torch, name=f"layer_{i}_gateup_proj"
+                torch_tensor=moe_gate_up_proj_torch_weights[i], name=f"layer_{i}_gateup_proj"
             )
             w_down_proj = mpk.attach_input(
-                torch_tensor=moe_down_proj_torch, name=f"layer_{i}_down_proj"
+                torch_tensor=moe_down_proj_torch_weights[i], name=f"layer_{i}_down_proj"
             )
             
             rmsnorm_num_tasks = grid_for_rmsnorm_linear_layer(w_gatedup.dim(1))
@@ -701,6 +701,26 @@ if __name__ == "__main__":
     warmup = 0
     output_len = 512
     if not args.use_mirage:
+        output_len = 3
+        prompt_len = prompt_lengths[0].item()
+        past_key_values = None
+
+        input_ids = tokens[:, :1].clone()
+        attention_mask = torch.ones_like(input_ids)
+
+        with torch.inference_mode():
+            out = model(
+                input_ids=input_ids, 
+                attention_mask=attention_mask,
+                use_cache=True,
+                past_key_values=None
+            )
+            past_key_values = out.past_key_values
+            next_token = out.logits[:, -1, :].argmax(dim=-1, keepdim=True)
+            print("decode step 1 out", out.logits[:, -1, :5], tokenizer.batch_decode(next_token[0], skip_special_tokens=True)[0])
+        
+        exit(0)
+        
         prompt_len= prompt_lengths[0].item()
         for cur_pos in range(prompt_len, prompt_len + output_len):
             step.fill_(cur_pos - 1)
@@ -744,7 +764,6 @@ if __name__ == "__main__":
         run_time = starter.elapsed_time(ender)
 
         print("tokens.shape = ", tokens.shape)
-        print(tokens)
         for r in range(total_num_requests):
             generated_ids = tokens[r, : step[r] + 1]
             response = tokenizer.decode(generated_ids, skip_special_tokens=True)

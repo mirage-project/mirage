@@ -789,10 +789,6 @@ __device__ __noinline__ void
               int32_t m_idx = m_tile * MMA_M + threadIdx.x;
               int32_t n_idx = n_tile * MMA_N + i;
               if (n_idx < BATCH_SIZE && tRoutingIndex(n_idx) > 0) {
-                // if(threadIdx.x == 0) {
-                //   printf("[LOG][MoE linear] expert_idx: %d, batch_idx: %d, topk_idx: %d, hidden_idx: %d, value: %f\n",
-                //     expert_idx, n_idx, tRoutingIndex(n_idx), m_idx, float(tCrC[i]));
-                // }
                 mOutput(n_idx, tRoutingIndex(n_idx) - 1, m_idx) = tCrC[i];
               }
             }
