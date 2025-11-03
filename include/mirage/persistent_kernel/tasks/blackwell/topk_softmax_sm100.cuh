@@ -83,6 +83,18 @@ __device__ __noinline__ void topk_softmax_task_impl(
   float *output = static_cast<float *>(output_ptr);
   int *mpk_routing_indices = static_cast<int *>(mpk_routing_indices_ptr);
   int *mpk_expert_mask = static_cast<int *>(mpk_expert_mask_ptr);
+  // initialize mpk_routing_indices and mpk_expert_mask to zero
+  for(int expert = start_expert + threadIdx.x; expert < end_expert; expert += blockDim.x) {
+    if (mpk_routing_indices != nullptr) {
+      for (int row = 0; row < num_rows; ++row) {
+        mpk_routing_indices[expert * num_rows + row] = 0;
+      }
+    }
+    if (mpk_expert_mask != nullptr) {
+      mpk_expert_mask[expert] = 0;
+    }
+  }
+  __syncthreads();
   // Compile-time checks
   static_assert(VPT == (VPT & -VPT), "VPT must be power of 2");
   static_assert(NUM_EXPERTS == (NUM_EXPERTS & -NUM_EXPERTS),
