@@ -176,6 +176,7 @@ if __name__ == "__main__":
     model_inputs = tokenizer([text], return_tensors="pt").to(model.device)
     for r in range(total_num_requests):
         for i in range(model_inputs.input_ids.shape[-1]):
+        # for i in range(args.max_seq_length):
             tokens[r, i] = model_inputs.input_ids[0, i]
     prompt_lengths = torch.full((total_num_requests,), model_inputs.input_ids.shape[-1], dtype=torch.int, device=model.device)
     positions = torch.arange(32768).unsqueeze(0).to(model.device)
@@ -315,17 +316,28 @@ if __name__ == "__main__":
             torch_tensor=position_embeddings[1][0, :4096, :],
             name="sin_position_embedding",
         )
-
         y = mpk.new_tensor(
             dims=(args.max_num_batched_tokens, hidden_size),
             dtype=mi.bfloat16,
             name="embed_out",
             io_category="cuda_tensor",
         )
+        rmsnorm_out_qkv = mpk.new_tensor(
+            dims=(args.max_num_batched_tokens, hidden_size),
+            dtype=mi.bfloat16,
+            name="rmsnorm_out_qkv",
+            io_category="cuda_tensor",
+        )
         rmsnorm_out = mpk.new_tensor(
             dims=(args.max_num_batched_tokens, hidden_size),
             dtype=mi.bfloat16,
             name="rmsnorm_out",
+            io_category="cuda_tensor",
+        )
+        rmsnorm_out_moe = mpk.new_tensor(
+            dims=(args.max_num_batched_tokens, hidden_size),
+            dtype=mi.bfloat16,
+            name="rmsnorm_out_moe",
             io_category="cuda_tensor",
         )
         attn_in = mpk.new_tensor(
@@ -358,13 +370,39 @@ if __name__ == "__main__":
             name="attn_allreduce_out",
             io_category="nvshmem_tensor" if world_size > 1 else "cuda_tensor",
         )
-        # TODO(Zhihao): continue here to allocate moe buffers
         moe_gate_out = mpk.new_tensor(
             dims=(args.max_num_batched_tokens, num_experts),
             dtype=mi.bfloat16,
             name="moe_gate_out",
             io_category="cuda_tensor",
         )
+        # TODO(Zhihao): a temporary solution to combine MoE gate_proj and up_proj into one linear 
+        # layer on the torch side with extra memory requirements, need to have a shuffle kernel to do this properly
+        moe_gate_up_proj_torch_weights = []
+        moe_down_proj_torch_weights = []
+        for layer in model.model.layers:
+            moe_gate_up_proj_torch = []
+            moe_down_proj_torch = []
+            for expert_id in range(num_experts):
+                expert = layer.mlp.experts[expert_id]
+                moe_gate_up_proj_torch.append(
+                    torch.concat([
+                        expert.gate_proj.weight.detach().clone(),
+                        expert.up_proj.weight.detach().clone()
+                    ], dim=0)
+                )
+                moe_down_proj_torch.append(
+                    expert.down_proj.weight.detach().clone()
+                )
+            moe_gate_up_proj_torch_weights.append(
+                torch.stack(moe_gate_up_proj_torch, dim=0)
+            )
+            moe_down_proj_torch_weights.append(
+                torch.stack(moe_down_proj_torch, dim=0)
+            )
+            del layer.mlp.experts
+            torch.cuda.empty_cache()
+
         moe_routing_indices = mpk.new_tensor(
             dims=(num_experts, args.max_num_batched_tokens),
             dtype=mi.int32,
@@ -373,7 +411,7 @@ if __name__ == "__main__":
         )
         moe_mask = mpk.new_tensor(
             dims=(num_experts,),
-            dtype=mi.int32,
+            dtype=mi.int64,
             name="moe_mask",
             io_category="cuda_tensor",
         )
@@ -383,12 +421,18 @@ if __name__ == "__main__":
             name="moe_topk_weight",
             io_category="cuda_tensor",
         )
-        mlp_mid = mpk.new_tensor(
-            dims=(args.max_num_batched_tokens, num_experts_per_tok, fused_outdim_2 // world_size),
-            dtype=mi.bfloat16,
-            name="mlp_mid",
-            io_category="cuda_tensor",
+        mlp_mid_torch = torch.empty(
+            (args.max_num_batched_tokens, num_experts_per_tok, fused_outdim_2 // world_size),
+            dtype=torch.bfloat16,
+            device="cuda",
         )
+        mlp_mid = mpk.attach_input(torch_tensor=mlp_mid_torch, name="mlp_mid")
+        # mlp_mid = mpk.new_tensor(
+        #     dims=(args.max_num_batched_tokens, num_experts_per_tok, fused_outdim_2 // world_size),
+        #     dtype=mi.bfloat16,
+        #     name="mlp_mid",
+        #     io_category="cuda_tensor",
+        # )
         silu_mul_out = mpk.new_tensor(
             dims=(args.max_num_batched_tokens, num_experts_per_tok, intermediate_size // world_size),
             dtype=mi.bfloat16,
@@ -457,8 +501,6 @@ if __name__ == "__main__":
         )
         x = y
         for i, layer in enumerate(model.model.layers):
-            # if i > 0:
-            #     break
             # add rmsnorm + linear
             w_norm = mpk.attach_input(
                 torch_tensor=layer.input_layernorm.weight,
@@ -473,6 +515,9 @@ if __name__ == "__main__":
             w_v = mpk.attach_input(
                 torch_tensor=layer.self_attn.v_proj.weight, name=f"layer_{i}_v_proj"
             )
+            print("iteration i = ", i, "layer.self_attn.q_proj.weight.shape is ", layer.self_attn.q_proj.weight.shape)
+            print("first ten elements of w_q, w_q[0,:10] = ", layer.self_attn.q_proj.weight[0,:10])
+
             w_qkv = mpk.shuffle_tensors(
                 inputs=[w_q, w_k, w_v],
                 shuffled_dim=0,
@@ -482,17 +527,18 @@ if __name__ == "__main__":
             mpk.rmsnorm_layer(
                 input=x,
                 weight=w_norm,
-                output=rmsnorm_out,
+                output=rmsnorm_out_qkv,
                 grid_dim=(mpk.max_num_batched_tokens, 1, 1),
                 block_dim=(256, 1, 1),
             )
             mpk.linear_layer(
-                input=rmsnorm_out,
+                input=rmsnorm_out_qkv,
                 weight=w_qkv,
                 output=attn_in,
                 grid_dim=(grid_for_linear_layer(w_qkv.dim(0), with_residual=False), 1, 1),
                 block_dim=(256, 1, 1),
             )
+
             # add attention
             w_q_norm = mpk.attach_input(
                 torch_tensor=layer.self_attn.q_norm.weight, name=f"layer_{i}_q_norm"
@@ -563,37 +609,26 @@ if __name__ == "__main__":
                 name=f"layer_{i}_post_attn_layernorm",
             )
             
-            # TODO(Zhihao): a temporary solution to combine MoE gate_proj and up_proj into one linear 
-            # layer on the torch side with extra memory requirements, need to have a shuffle kernel to do this properly
-            moe_gate_up_proj_torch = []
-            moe_down_proj_torch = []
-            for expert_id in range(num_experts):
-                moe_gate_up_proj_torch.append(torch.concat([layer.mlp.experts[expert_id].gate_proj.weight, layer.mlp.experts[expert_id].up_proj.weight], dim=0))
-                moe_down_proj_torch.append(layer.mlp.experts[expert_id].down_proj.weight)
-            moe_gate_up_proj_torch = torch.stack(moe_gate_up_proj_torch, dim=0) # [num_experts, intermediate_size*2, hidden_size]
-            moe_down_proj_torch = torch.stack(moe_down_proj_torch, dim=0) # [num_experts, hidden_size, intermediate_size]
-            
             w_moe_gate = mpk.attach_input(
                 torch_tensor=layer.mlp.gate.weight, name=f"layer_{i}_moe_gate"
             )
             w_gatedup = mpk.attach_input(
-                torch_tensor=moe_gate_up_proj_torch, name=f"layer_{i}_gateup_proj"
+                torch_tensor=moe_gate_up_proj_torch_weights[i], name=f"layer_{i}_gate_proj"
             )
             w_down_proj = mpk.attach_input(
-                torch_tensor=moe_down_proj_torch, name=f"layer_{i}_down_proj"
+                torch_tensor=moe_down_proj_torch_weights[i], name=f"layer_{i}_down_proj"
             )
-            
             rmsnorm_num_tasks = grid_for_rmsnorm_layer(w_gatedup.dim(1))
             mpk.rmsnorm_layer(
                 input=x,
                 weight=w_norm,
-                output=rmsnorm_out,
+                output=rmsnorm_out_moe,
                 grid_dim=(mpk.max_num_batched_tokens, 1, 1),
                 block_dim=(256, 1, 1),
             )
             # moe gate
             mpk.linear_layer(
-                input=rmsnorm_out,
+                input=rmsnorm_out_moe,
                 weight=w_moe_gate,
                 output=moe_gate_out,
                 grid_dim=(1, 1, 1),
@@ -608,29 +643,32 @@ if __name__ == "__main__":
             )
             # moe w13 linear
             mpk.moe_w13_linear_layer(
-                input=rmsnorm_out,
+                input=rmsnorm_out_moe,
                 weight=w_gatedup,
                 moe_routing_indices=moe_routing_indices,
                 moe_mask=moe_mask,
                 output=mlp_mid,
-                grid_dim=(12, 12, 1),
+                grid_dim=(8, 24, 1), # 1536//64=24 blocks for output size 1536
                 block_dim=(256, 1, 1),
             )
+            # silu_mul
             mpk.moe_silu_mul_layer(
                 input=mlp_mid,
                 output=silu_mul_out,
                 grid_dim=(mpk.max_num_batched_tokens, 1, 1),
                 block_dim=(256, 1, 1),
             )
+            # moe w2 linear
             mpk.moe_w2_linear_layer(
                 input=silu_mul_out,
                 weight=w_down_proj,
                 moe_routing_indices=moe_routing_indices,
                 moe_mask=moe_mask,
                 output=mlp_out,
-                grid_dim=(9, 16, 1),
+                grid_dim=(8, 32, 1), # 1536//64=32 blocks for output size 1536
                 block_dim=(256, 1, 1),
             )
+            # moe mul sum add
             mpk.moe_mul_sum_add_layer(
                 input=mlp_out,
                 weight=moe_topk_weight,
@@ -641,6 +679,7 @@ if __name__ == "__main__":
             )
             # reset residual input as x
             x = mlp_weighted_sum_out
+            
             if world_size > 1:
                 mpk.allreduce_layer(
                     input=mlp_weighted_sum_out,
