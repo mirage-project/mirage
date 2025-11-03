@@ -287,8 +287,8 @@ template <typename T,
           int M,
           int S,
           size_t ROW_,
-          size_t INNER_COL_,
-          size_t OUTER_COL_>
+          size_t COL_,
+          size_t STAGE_>
 struct smem_row_2dcol {
   T *__restrict__ base_ptr;
 
@@ -296,13 +296,16 @@ struct smem_row_2dcol {
   using OffsetCalculator = SwizzleOffsetCalculator<B, M, S>;
 
   static constexpr size_t ROW = ROW_;
-  static constexpr size_t INNER_COL = INNER_COL_;
-  static constexpr size_t log2_INNER_COL = log2_constexpr(INNER_COL_);
-  static constexpr size_t OUTER_COL = OUTER_COL_;
-  static constexpr size_t COL = INNER_COL * OUTER_COL;
+  static constexpr size_t INNER_COL = 128 / sizeof(T);
+  static constexpr size_t log2_INNER_COL = log2_constexpr(INNER_COL);
+  static constexpr size_t OUTER_COL = COL_ / INNER_COL;
+  static constexpr size_t COL = COL_;
   static constexpr size_t SIZE = ROW * COL;
+  static constexpr size_t STAGE = STAGE_;
   static constexpr size_t STRIDE_OUTER_COL = ROW * INNER_COL;
-  static constexpr size_t STRIDE = INNER_COL;
+  static constexpr size_t STRIDE_ROW =
+      INNER_COL; // a row just contains inner col elements
+  static constexpr size_t STRIDE_STAGE = SIZE;
 
   __device__ __forceinline__ smem_row_2dcol(T *ptr) : base_ptr(ptr) {}
 
@@ -310,28 +313,13 @@ struct smem_row_2dcol {
     base_ptr = ptr;
   }
 
-  static constexpr size_t size() {
-    return ROW * COL;
-  }
-
-  __device__ __forceinline__ int get_offset_in_bank(size_t logical_idx_row,
-                                                    size_t logical_idx_col) {
+  __device__ __forceinline__ T *
+      operator()(size_t logical_idx_row, size_t logical_idx_col, size_t stage) {
+    // stage was in row dim
     size_t inner_col = logical_idx_col & ((1 << log2_INNER_COL) - 1);
     size_t outer_col = logical_idx_col >> log2_INNER_COL;
-    size_t logical_idx =
-        outer_col * STRIDE_OUTER_COL + logical_idx_row * STRIDE + inner_col;
-    size_t in_block_idx = logical_idx & ((1 << (M + S + B)) - 1);
-    size_t offset_in_bank = in_block_idx & ((1 << M) - 1);
-    return offset_in_bank;
-  }
-
-  __device__ __forceinline__ T *operator()(size_t logical_idx_row,
-                                           size_t logical_idx_col) {
-    size_t inner_col = logical_idx_col & ((1 << log2_INNER_COL) - 1);
-    size_t outer_col = logical_idx_col >> log2_INNER_COL;
-    size_t logical_idx =
-        outer_col * STRIDE_OUTER_COL + logical_idx_row * STRIDE + inner_col;
-    // return &base_ptr[get_swizzled_offset(logical_idx)];
+    size_t logical_idx = stage * STRIDE_STAGE + outer_col * STRIDE_OUTER_COL +
+                         logical_idx_row * STRIDE_ROW + inner_col;
     return &base_ptr[OffsetCalculator::get_phy_offset(logical_idx)];
   }
 };
@@ -341,23 +329,26 @@ template <typename T,
           int B,
           int M,
           int S,
-          size_t INNER_ROW_,
-          size_t OUTER_ROW_,
-          size_t COL_>
+          size_t ROW_,
+          size_t COL_,
+          size_t STAGE_>
 struct smem_col_2drow {
   T *__restrict__ base_ptr;
 
   using value_type = T;
   using OffsetCalculator = SwizzleOffsetCalculator<B, M, S>;
 
-  static constexpr size_t INNER_ROW = INNER_ROW_;
-  static constexpr size_t log2_INNER_ROW = log2_constexpr(INNER_ROW_);
-  static constexpr size_t OUTER_ROW = OUTER_ROW_;
-  static constexpr size_t ROW = OUTER_ROW_ * INNER_ROW_;
   static constexpr size_t COL = COL_;
+  static constexpr size_t INNER_ROW = 128 / sizeof(T);
+  static constexpr size_t log2_INNER_ROW = log2_constexpr(INNER_ROW);
+  static constexpr size_t OUTER_ROW = ROW_ / INNER_ROW;
+  static constexpr size_t ROW = ROW_;
   static constexpr size_t SIZE = ROW * COL;
-  static constexpr size_t STRIDE_OUTER_ROW = COL * INNER_ROW_;
-  static constexpr size_t STRIDE = INNER_ROW_;
+  static constexpr size_t STAGE = STAGE_;
+  static constexpr size_t STRIDE_OUTER_ROW = COL * INNER_ROW;
+  static constexpr size_t STRIDE_COL =
+      INNER_ROW; // a col just contains inner row elements
+  static constexpr size_t STRIDE_STAGE = SIZE;
 
   static constexpr size_t INNER_ROW_MASK = (1 << log2_INNER_ROW) - 1;
 
@@ -367,38 +358,21 @@ struct smem_col_2drow {
     base_ptr = ptr;
   }
 
-  static constexpr size_t size() {
-    return ROW * COL;
-  }
-
-  __device__ __forceinline__ size_t get_swizzled_icol(size_t logical_idx) {
-    size_t block_idx = logical_idx >> (M + S + B);
-    size_t in_block_idx = logical_idx & ((1 << (M + S + B)) - 1);
-
-    size_t irow = in_block_idx >> (M + S);
-    size_t icol = (in_block_idx >> M) & ((1 << S) - 1);
-    icol ^= irow;
-    return icol;
-  }
-
   __device__ __forceinline__ size_t get_logical_idx(size_t logical_idx_row,
-                                                    size_t logical_idx_col) {
+                                                    size_t logical_idx_col,
+                                                    size_t stage) {
     size_t inner_row = logical_idx_row & INNER_ROW_MASK;
     size_t outer_row = logical_idx_row >> log2_INNER_ROW;
-    size_t logical_idx =
-        outer_row * STRIDE_OUTER_ROW + logical_idx_col * STRIDE + inner_row;
+    size_t logical_idx = stage * STRIDE_STAGE + outer_row * STRIDE_OUTER_ROW +
+                         logical_idx_col * STRIDE_COL + inner_row;
     return logical_idx;
   }
 
-  __device__ __forceinline__ size_t get_bank_idx(size_t logical_idx_row,
-                                                 size_t logical_idx_col) {
-    size_t logical_idx = get_logical_idx(logical_idx_row, logical_idx_col);
-    return get_swizzled_icol(logical_idx);
-  }
-
-  __device__ __forceinline__ T *operator()(size_t logical_idx_row,
-                                           size_t logical_idx_col) {
-    size_t logical_idx = get_logical_idx(logical_idx_row, logical_idx_col);
+  __device__ __forceinline__ T *
+      operator()(size_t logical_idx_row, size_t logical_idx_col, size_t stage) {
+    // stage was in col dim
+    size_t logical_idx =
+        get_logical_idx(logical_idx_row, logical_idx_col, stage);
     return &base_ptr[OffsetCalculator::get_phy_offset(logical_idx)];
   }
 };
