@@ -316,6 +316,15 @@ class HybridModel:
 
         self._param_cache = {}
         self._const_cache = {}
+
+    def _get_const(self, device, shape, value, dtype=torch.float16):
+        """Return a constant tensor for Mirage kernels, cached per (device, shape, value, dtype)."""
+        key = (device, tuple(shape), float(value), dtype)
+        t = self._const_cache.get(key)
+        if t is None:
+            t = torch.full(shape, value, device=device, dtype=dtype)
+            self._const_cache[key] = t
+        return t
     
     def _get_params_on(self, device, dtype):
         """Return dict of parameters placed on (device, dtype), cached."""
@@ -332,17 +341,8 @@ class HybridModel:
             self._param_cache[key] = moved
             params = moved
         return params
-
-    def _get_const(self, device, shape, value, dtype=torch.float16):
-        """Return a constant tensor for Mirage kernels, cached per (device, shape, value, dtype)."""
-        key = (device, tuple(shape), float(value), dtype)
-        t = self._const_cache.get(key)
-        if t is None:
-            t = torch.full(shape, value, device=device, dtype=dtype)
-            self._const_cache[key] = t
-        return t
     
-    def __call__(self, *inputs):
+    def __call__(self, *inputs, debug=False):
         if len(inputs) != len(self.input_tensor_ids):
             raise ValueError(f"Expected {len(self.input_tensor_ids)} input(s), got {len(inputs)}")
         device = inputs[0].device if inputs else torch.device('cuda')
@@ -364,6 +364,7 @@ class HybridModel:
                         t = intermediates[tid]
                         if t.dtype is not torch.float16:
                             warnings.warn(f"Casting input tensor id {tid} from {t.dtype} to torch.float16. Consider providing inputs in float16 to avoid this overhead.")
+                            _ = float(t.abs().sum()) # if this isn't here the cast to float16 might error out
                             t = t.to(torch.float16)
                         kernel_inputs.append(t)
 
@@ -377,7 +378,9 @@ class HybridModel:
                         outputs = [outputs]
                     # Convert outputs back to original dtype
                     for tid, tensor in zip(output_ids, outputs):
-                        _ = float(tensor.abs().sum())
+                        if debug:
+                            print(f"Mirage step {i}: tensor id {tid}, shape {tensor.shape}, dtype {tensor.dtype}")
+                            _ = float(tensor.abs().sum())
                         intermediates[tid] = tensor.to(dtype)
                 elif step_type == "pytorch":
                     op, input_ids, output_id = payload
@@ -386,7 +389,9 @@ class HybridModel:
                         raise ValueError(f"Input tensor ids {missing} not found in intermediates for PyTorch op {op.name}")
                     inputs = [intermediates[tid] for tid in input_ids]
                     result = self._execute_pytorch_op(op, inputs)
-                    _ = float(result.abs().sum())
+                    if debug:
+                        print(f"PyTorch step {i}: tensor id {output_id}, shape {result.shape}, dtype {result.dtype}")
+                        _ = float(result.abs().sum())
                     intermediates[output_id] = result
         
         outputs = [intermediates[tid] for tid in self.output_tensor_ids]
