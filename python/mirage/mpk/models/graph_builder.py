@@ -7,18 +7,18 @@ import torch
 @dataclass
 class MirageModelConfig:
     # model architecture
-    hidden_size: int
-    intermediate_size: int
-    vocab_size: int
-    local_num_q_heads: int
-    local_num_kv_heads: int
-    head_dim: int
-    num_layers: int
+    hidden_size: int = None
+    intermediate_size: int = None
+    vocab_size: int = None
+    local_num_q_heads: int = None
+    local_num_kv_heads: int = None
+    head_dim: int = None
+    num_layers: int = None
     # kv cache
-    k_cache: list[torch.Tensor]
-    v_cache: list[torch.Tensor]
+    k_cache: list[torch.Tensor] = None
+    v_cache: list[torch.Tensor] = None
     # position embeddings (cos, sin)
-    position_embeddings: tuple[torch.Tensor, torch.Tensor]
+    position_embeddings: tuple[torch.Tensor, torch.Tensor] = None
     # model weights
     state_dict: dict | None = None
     

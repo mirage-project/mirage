@@ -57,6 +57,8 @@ class MPKMetadata:
     # spec decode config
     spec_decode: Optional[str] = None
     spec_decode_config: Optional[object] = None
+    # use cutlass kernel
+    use_cutlass_kernel: bool = True
     
     def check_valid(self):
         if self.weight_from_model:
@@ -126,12 +128,21 @@ class MPK:
         torch.set_default_dtype(torch.bfloat16)
         torch.cuda.set_device(self.rank)
         
+        self.tokenizer = None
+        self.need_cpy_input = False
+        self.src_input_tokens = None
+        
         # if args.qo_indptr_buffer is None:
         #     self.get_tensors()
         # else:
         self.step = args.step
         self.tokens = args.tokens
-        self.input_tokens = args.input_tokens
+        if args.input_tokens.dtype != torch.int64:
+            self.need_cpy_input = True
+            self.input_tokens = torch.empty_like(args.input_tokens, dtype=torch.int64, device=args.input_tokens.device)
+            self.src_input_tokens = args.input_tokens
+        else:
+            self.input_tokens = args.input_tokens
         self.output_tokens = args.output_tokens
         self.num_new_tokens = args.num_new_tokens
         self.prompt_lengths = args.prompt_lengths
@@ -151,7 +162,7 @@ class MPK:
         self.num_workers, self.num_schedulers = get_configurations_from_gpu(self.rank)
         # self.max_sm_num = args.max_sm_num
         
-        self.persisten_kernel = PersistentKernel(
+        self.persistent_kernel = PersistentKernel(
             mode=args.mode,
             world_size=self.world_size,
             mpi_rank=self.rank,
@@ -163,7 +174,7 @@ class MPK:
             max_num_batched_tokens=self.max_num_batched_tokens,
             max_num_pages=args.max_num_pages,
             page_size=args.page_size,
-            eos_token_id=-1, #self.model.config.eos_token_id,
+            eos_token_id=151645,
             meta_tensors={
                 "step": self.step,
                 "tokens": self.tokens,
@@ -179,6 +190,7 @@ class MPK:
             profiler_tensor=self.profiler_tensor,
             trace_name=args.trace_name,
             spec_decode_config=self.spec_decode_config,
+            use_cutlass_kernel=args.use_cutlass_kernel
         )
         meta_tensors = [
             self.step,
@@ -194,25 +206,9 @@ class MPK:
         ]
         self.meta_tensors_ptr = [tensor.data_ptr() for tensor in meta_tensors]
         self.profiler_buffer_ptr = (
-            self.persisten_kernel.profiler_tensor.data_ptr() if self.persisten_kernel.profiler_tensor is not None else 0
+            self.persistent_kernel.profiler_tensor.data_ptr() if self.persistent_kernel.profiler_tensor is not None else 0
         )
-        
-        # print("Defining mpk...")
-        # self.define_mpk()
-        # print("Defining mpk... done")
 
-
-        # print("Generating task graph...")
-        # results = self.persisten_kernel.kn_graph.generate_task_graph(num_gpus=self.world_size, my_gpu_id=self.rank)
-        # print("Generating task graph... done")
-        # with open(f"task_graph_{self.rank}.json", "w") as f:
-        #     f.write(results["json_file"])
-        # with open(f"kernel_{self.rank}.cu", "w") as f:
-        #     f.write(results["cuda_code"])
-
-        # print("Compiling mpk...")
-        # self.persisten_kernel.compile(output_dir=args.output_dir)
-        # print("Compiling mpk... done")
         
         self.is_built = False
         self.task_graph_generated = False
@@ -237,27 +233,37 @@ class MPK:
     def compensate_meta_tensors(self):
         # TODO: This is a temporary workaround. Ideally we should only allocate tensors we need.
         if self.step is None:
+            print(f"Compensating step tensor")
             self.step = torch.full((self.total_num_requests, ), 0, dtype=torch.int32, device="cuda")
         if self.tokens is None:
+            print(f"Compensating tokens tensor")
             self.tokens = torch.full((self.total_num_requests, self.max_seq_length), 0, dtype=torch.long, device="cuda")
         if self.input_tokens is None:
+            print(f"Compensating input tokens tensor")
             self.input_tokens = torch.full((self.max_num_batched_tokens, 1), 0, dtype=torch.long, device="cuda")
         if self.output_tokens is None:
+            print(f"Compensating output tokens tensor")
             self.output_tokens = torch.full((self.max_num_batched_tokens, 1), 0, dtype=torch.long, device="cuda")
         if self.num_new_tokens is None:
+            print(f"Compensating num new tokens tensor")
             self.num_new_tokens = torch.full((self.total_num_requests, ), 1, dtype=torch.int32, device="cuda")
         if self.prompt_lengths is None:
+            print(f"Compensating prompt lengths tensor")
             self.prompt_lengths = torch.full((self.total_num_requests,), 0, dtype=torch.int32, device="cuda")
         if self.qo_indptr_buffer is None:
+            print(f"Compensating qo indptr buffer tensor")
             self.qo_indptr_buffer = torch.empty(
                 self.max_num_batched_requests + 1, dtype=torch.int32, device="cuda")
         if self.paged_kv_indptr_buffer is None:
+            print(f"Compensating paged kv indptr buffer tensor")
             self.paged_kv_indptr_buffer = torch.empty(
                 self.max_num_batched_requests + 1, dtype=torch.int32, device="cuda")
         if self.paged_kv_indices_buffer is None:
+            print(f"Compensating paged kv indices buffer tensor")
             self.paged_kv_indices_buffer = torch.empty(
                 self.max_num_pages, dtype=torch.int32, device="cuda")
         if self.paged_kv_last_page_len_buffer is None:
+            print(f"Compensating paged kv last page len buffer tensor")
             self.paged_kv_last_page_len_buffer = torch.empty(
                 self.max_num_batched_requests, dtype=torch.int32, device="cuda")
  
@@ -292,50 +298,43 @@ class MPK:
         
         self.compensate_meta_tensors()
         
-    def load_new_request(self, prompt):
+    def load_new_request(self, prompt, use_template=True):
         if not self.is_built:
             raise ValueError("Model is not built yet, so tokenizer is not available")
-        messages = [
-            {
-                "role": "system",
-                "content": "You are Qwen, created by Alibaba Cloud. You are a helpful assistant.",
-            },
-            {"role": "user", "content": prompt},
-        ]
-        text = self.tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
+                
+        if use_template:
+            messages = [
+                {
+                    "role": "system",
+                    "content": "You are Qwen, created by Alibaba Cloud. You are a helpful assistant.",
+                },
+                {"role": "user", "content": prompt},
+            ]
+            text = self.tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
+            )
+        else:
+            text = prompt
+
         model_inputs = self.tokenizer([text], return_tensors="pt").to(self.device)
         L = model_inputs.input_ids.shape[-1]
         self.tokens.zero_()
         src = model_inputs.input_ids[0]
         self.tokens[:, :L].copy_(src.unsqueeze(0).expand(self.total_num_requests, -1))
-                 
-        # Clear tensors
-        self.input_tokens.fill_(0)
-        self.output_tokens.fill_(0)
-        self.step.fill_(0)
-        self.num_new_tokens.fill_(1)
         self.prompt_lengths.fill_(model_inputs.input_ids.shape[-1])
-        # print(f"prompt_lengths filled with {model_inputs.input_ids.shape[-1]}")
         
-        self.qo_indptr_buffer.fill_(0)
-        self.paged_kv_indptr_buffer.fill_(0)
-        self.paged_kv_indices_buffer.fill_(0)
-        self.paged_kv_last_page_len_buffer.fill_(0)
-                
     def init_per_request(self):
         #meta_tensors_ptr = [tensor.data_ptr() for tensor in self.meta_tensors]
-        self.persisten_kernel.init_func(
+        self.persistent_kernel.init_func(
             self.meta_tensors_ptr,
             self.profiler_buffer_ptr,
-            self.persisten_kernel.mpi_rank,
-            self.persisten_kernel.num_workers,
-            self.persisten_kernel.num_local_schedulers,
-            self.persisten_kernel.num_remote_schedulers,
-            self.persisten_kernel.max_seq_length,
-            self.persisten_kernel.total_num_requests,
-            self.persisten_kernel.eos_token_id,
+            self.persistent_kernel.mpi_rank,
+            self.persistent_kernel.num_workers,
+            self.persistent_kernel.num_local_schedulers,
+            self.persistent_kernel.num_remote_schedulers,
+            self.persistent_kernel.max_seq_length,
+            self.persistent_kernel.total_num_requests,
+            self.persistent_kernel.eos_token_id,
         )
         
     def run(self, prompt):
@@ -344,7 +343,7 @@ class MPK:
             self.init_per_request()
         else:
             self.first_run = False
-        self.persisten_kernel()
+        self.persistent_kernel()
         torch.cuda.synchronize()
         all_responses = []
         for r in range(self.total_num_requests):
@@ -354,7 +353,7 @@ class MPK:
         return all_responses
     
     def grid_dim_sanitizer(self, grid_dim):
-        #TODO: Do better in sm num limit
+        # TODO: Do better in sm num limit
         dims = list(grid_dim)
         total_sm_num = dims[0] * dims[1] * dims[2]
         while total_sm_num > self.max_sm_num:
@@ -370,9 +369,10 @@ class MPK:
         
     def build(self):
         model_builder_class = get_builder(self.model_name)
-        self.model_builder = model_builder_class(self.persisten_kernel)
+        self.model_builder = model_builder_class(self.persistent_kernel)
         if self.weight_from_model:
             self.model_builder.build_from_model()
+            self.tokenizer = self.model_builder.tokenizer
         else:
             self.model_builder.build_from_config(self.model_config)
         # self.tokenizer = self.model_builder.tokenizer
@@ -383,7 +383,7 @@ class MPK:
         print("Generating task graph...")
         if not self.is_built:
             raise ValueError("Model is not built yet")
-        results = self.persisten_kernel.kn_graph.generate_task_graph(num_gpus=self.world_size, my_gpu_id=self.rank)
+        results = self.persistent_kernel.kn_graph.generate_task_graph(num_gpus=self.world_size, my_gpu_id=self.rank)
         print("Generating task graph... done")
         self.task_graph_generated = True
         return results
@@ -393,16 +393,18 @@ class MPK:
         if not self.task_graph_generated:
             self.generate_task_graph()
 
-        self.persisten_kernel.compile(output_dir=output_dir)
+        self.persistent_kernel.compile(output_dir=output_dir)
         print("Compiling mpk... done")
         self.is_compiled = True
         
     def __call__(self, **kwargs):
         if not self.is_compiled:
             self.compile()
-        self.persisten_kernel(**kwargs)
+        if self.need_cpy_input:
+            self.input_tokens.copy_(self.src_input_tokens.to(torch.int64))
+        self.persistent_kernel(**kwargs)
         
-        if not self.with_lm_head and self.persisten_kernel.mode == "online_notoken":
+        if not self.with_lm_head and self.persistent_kernel.mode == "online_notoken":
             #return the last hidden state
             print(f"[Mirage Side]Returning last hidden state of shape {self.model_builder.returned_hidden_state.shape}")
             return self.model_builder.returned_hidden_state
@@ -411,6 +413,6 @@ class MPK:
         return self.model_builder.decode(ids)
     
     def __del__(self):
-        self.persisten_kernel.finalize()
+        self.persistent_kernel.finalize()
         if self.world_size > 1:
             dist.destroy_process_group()

@@ -6,7 +6,7 @@ import torch.distributed as dist
 import argparse
 import os
 
-from ..utils import grid_for_rmsnorm_linear_layer, shuffle_tensors
+from ..utils import grid_for_rmsnorm_linear_layer, shuffle_tensors, inplace_shuffle_tensors
 from ..graph_builder import GraphBuilder, MirageModelConfig
 from ...persistent_kernel import PersistentKernel
 from ...model_registry import register_model_builder
@@ -23,6 +23,7 @@ class Qwen3Builder(GraphBuilder):
         self.world_size = mpk.world_size
         self.input_tokens = mpk.meta_tensors["input_tokens"]
         self.output_tokens = mpk.meta_tensors["output_tokens"]
+        self.tokenizer = None
         
 
     def build_from_config(self, 
@@ -79,7 +80,7 @@ class Qwen3Builder(GraphBuilder):
         self.num_local_kv_heads = self.num_kv_heads // self.world_size
         self.head_dim = self.model.config.head_dim
         # self.fused_outdim_1 = (self.num_q_heads + 2 * self.num_kv_heads) * self.head_dim
-        self.fused_outdim_1 = (self.local_num_q_heads + 2 * self.local_num_kv_heads) * self.head_dim
+        self.fused_outdim_1 = (self.num_local_q_heads + 2 * self.num_local_kv_heads) * self.head_dim
         self.fused_outdim_2 = 2 * self.intermediate_size
         
         self.num_layers = len(self.model.model.layers)
@@ -233,7 +234,23 @@ class Qwen3Builder(GraphBuilder):
                 torch_tensor=state_dict[f"{prefix}input_layernorm.weight"],
                 name=f"layer_{i}_input_layernorm",
             )
-            if f"{prefix}self_attn.q_proj.weight" in state_dict:
+            if (f"{prefix}self_attn.qkv_proj.weight" in state_dict) and (f"{prefix}self_attn.q_proj.weight" in state_dict):
+                    # Shuffle on CPU in place for qkv_proj.weight tensor
+                    print(f"Inplace shuffling qkv layer {i} projection weights on CPU")
+                    inplace_shuffle_tensors(
+                        [
+                            state_dict[f"{prefix}self_attn.q_proj.weight"], # views
+                            state_dict[f"{prefix}self_attn.k_proj.weight"],
+                            state_dict[f"{prefix}self_attn.v_proj.weight"],
+                        ],
+                        state_dict[f"{prefix}self_attn.qkv_proj.weight"], # target tensor
+                        self.num_local_kv_heads,
+                        0,
+                    )
+                    w_qkv = self.mpk.attach_input(
+                        torch_tensor=state_dict[f"{prefix}self_attn.qkv_proj.weight"], name=f"layer_{i}_qkv_proj"
+                    )
+            elif f"{prefix}self_attn.q_proj.weight" in state_dict:
                 print(f"Building layer {i} with seperate q, k, v projection weights")
                 if self.mpk.mode == "online_notoken":
                     print(f"Building layer {i} by shuffling q, k, v projection weights on python side")
@@ -246,6 +263,9 @@ class Qwen3Builder(GraphBuilder):
                         self.num_local_kv_heads,
                         0,
                     )
+                    assert self.w_qkv_tensor.is_contiguous(), "qkv tensor should be contiguous"
+                    # We need to self maintain the shuffled tensor to avoid recycling
+                    self.shuffled_tensors[f"layer_{i}_qkv_proj"] = self.w_qkv_tensor
                     w_qkv = self.mpk.attach_input(
                         torch_tensor=self.w_qkv_tensor, name=f"layer_{i}_qkv_proj"
                     )
@@ -357,7 +377,23 @@ class Qwen3Builder(GraphBuilder):
                 torch_tensor=state_dict[f"{prefix}post_attention_layernorm.weight"],
                 name=f"layer_{i}_post_attn_layernorm",
             )
-            if f"{prefix}mlp.gate_proj.weight" in state_dict:
+            # 
+            if (f"{prefix}mlp.gate_proj.weight" in state_dict) and (f"{prefix}mlp.gate_up_proj.weight" in state_dict):
+                print(f"Building layer {i} with unified gate and up projection weights")
+                rmsnorm_num_tasks = grid_for_rmsnorm_linear_layer(state_dict[f"{prefix}mlp.gate_up_proj.weight"].shape[0])
+                inplace_shuffle_tensors(
+                    [
+                        state_dict[f"{prefix}mlp.gate_proj.weight"], # views
+                        state_dict[f"{prefix}mlp.up_proj.weight"],
+                    ],
+                    state_dict[f"{prefix}mlp.gate_up_proj.weight"], # target tensor
+                    rmsnorm_num_tasks//2,
+                    0,
+                )
+                w_gatedup = self.mpk.attach_input(
+                    torch_tensor=state_dict[f"{prefix}mlp.gate_up_proj.weight"], name=f"layer_{i}_gatedup_proj"
+                )
+            elif f"{prefix}mlp.gate_proj.weight" in state_dict:
                 rmsnorm_num_tasks = grid_for_rmsnorm_linear_layer(
                     state_dict[f"{prefix}mlp.gate_proj.weight"].shape[0] 
                     + state_dict[f"{prefix}mlp.up_proj.weight"].shape[0]
@@ -372,6 +408,9 @@ class Qwen3Builder(GraphBuilder):
                         rmsnorm_num_tasks//2,
                         0,
                     )
+                    assert self.w_gatedup_tensor.is_contiguous(), "gatedup tensor should be contiguous"
+                    # We need to self maintain the shuffled tensor to avoid recycling
+                    self.shuffled_tensors[f"layer_{i}_gatedup_proj"] = self.w_gatedup_tensor
                     w_gatedup = self.mpk.attach_input(
                         torch_tensor=self.w_gatedup_tensor, name=f"layer_{i}_gatedup_proj"
                     )
@@ -554,6 +593,9 @@ class Qwen3Builder(GraphBuilder):
             #         grid_dim = (1, 1, 1),
             #         block_dim = (128, 1, 1),
             #     )
+            
+    def encode(self, text: str):
+        return self.tokenizer.encode(text, add_special_tokens=True)
         
     def decode(self, ids: torch.Tensor):
         return self.tokenizer.decode(ids, skip_special_tokens=True)

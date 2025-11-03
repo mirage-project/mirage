@@ -7,18 +7,11 @@ import argparse
 import os
 
 import mirage as mi
-from mirage.mpk.mpk import MPK, MPKMetadata
+from mirage.mpk.mpk import MPK, MPKMetadata, MirageModelConfig
 
 # print limitation
 # torch.set_printoptions(threshold=2000)
 
-def grid_for_rmsnorm_linear_layer(size):
-    # 96 and 64 are enough to cover all Qwen3 model? Please update the method
-    # if you meet any incompatibility.
-    if size % 96 == 0:
-        return 96
-    elif size % 64 == 0:
-        return 64
     
 # Return the largest factor of m that is less than or equal to n
 # This is used to determine the grid size
@@ -76,6 +69,14 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model", type=str, default='Qwen/Qwen3-8B', help="Model path on hugging face"
     )
+    parser.add_argument(
+        "--no-use-cutlass-kernel",
+        action="store_false",
+        dest="use_cutlass_kernel",
+        default=True,
+        help="Not use the cutlass version kernel.",
+    )
+    parser.add_argument("--ignore-eos", action="store_true", help="Ignore eos token during generation")
     args = parser.parse_args()
     
     # init_mpi()
@@ -89,7 +90,7 @@ if __name__ == "__main__":
     model_name = args.model
 
 
-    total_num_requests = args.max_num_batched_requests
+    total_num_requests = 1 if not args.use_mirage else args.max_num_batched_requests
     # get all model weight tensors
     tokens = torch.full((total_num_requests, args.max_seq_length), 0, dtype=torch.long, device="cuda")
 
@@ -162,14 +163,16 @@ if __name__ == "__main__":
         )
             
         # num_workers, num_schedulers = mi.get_configurations_from_gpu(self.rank)
-        qo_indptr_buffer = torch.empty(
+        qo_indptr_buffer = torch.zeros(
             args.max_num_batched_requests + 1, dtype=torch.int32, device="cuda")
-        paged_kv_indptr_buffer = torch.empty(
+        paged_kv_indptr_buffer = torch.zeros(
             args.max_num_batched_requests + 1, dtype=torch.int32, device="cuda")
-        paged_kv_indices_buffer = torch.empty(
+        paged_kv_indices_buffer = torch.zeros(
             args.max_num_pages, dtype=torch.int32, device="cuda")
-        paged_kv_last_page_len_buffer = torch.empty(
+        paged_kv_last_page_len_buffer = torch.zeros(
             args.max_num_batched_requests, dtype=torch.int32, device="cuda")
+        
+        mirage_model_config = MirageModelConfig(with_lm_head=True)
         
         mpk_metadata = MPKMetadata(
             mode="offline",
@@ -181,6 +184,7 @@ if __name__ == "__main__":
             max_num_pages=args.max_num_pages,
             page_size=args.page_size, #
             # model
+            weight_from_model=True,
             model_name=args.model,
             # meta tensors
             step=step,
@@ -193,10 +197,15 @@ if __name__ == "__main__":
             paged_kv_indptr_buffer=paged_kv_indptr_buffer,
             paged_kv_indices_buffer=paged_kv_indices_buffer,
             paged_kv_last_page_len_buffer=paged_kv_last_page_len_buffer,
+            # model config
+            model_config=mirage_model_config,
             # meta tensors end
+            profiling=args.profiling,
             profiler_tensor=profiler_tensor,
             trace_name=args.trace_name,
+            spec_decode=args.spec_decode,
             spec_decode_config=spec_decode_config,
+            use_cutlass_kernel=args.use_cutlass_kernel,
         )
         mpk = MPK(mpk_metadata)
         
@@ -253,16 +262,19 @@ if __name__ == "__main__":
         torch.cuda.synchronize()
         run_time = starter.elapsed_time(ender)
 
-        print("tokens.shape = ", tokens.shape)
         for r in range(total_num_requests):
             generated_ids = tokens[r, : step[r] + 1]
             # response = tokenizer.decode(generated_ids, skip_special_tokens=True)
             response = mpk.decode(generated_ids)
             print(response)
 
-        print("Prompt length {}, generate length {}, per-token latency (both prefill and decode): {} ms".format(
-              prompt_lengths[0], step[0] + 1 - prompt_lengths[0], run_time / (step[0] + 1)
+        print("Prompt length {}, generate length {}, per-token latency (both prefill and decode): {:.3f} ms".format(
+              prompt_lengths[0], step.max().item() + 1 - prompt_lengths[0], run_time / (step.max().item() + 1)
             )
         )
+        # print("Prompt length {}, generate length {}, per-token latency (both prefill and decode): {:.3f} ms".format(
+        #       prompt_lengths[0], step[0] + 1 - prompt_lengths[0], run_time / (step[0] + 1)
+        #     )
+        # )
     # if world_size > 1:
     #     dist.destroy_process_group()

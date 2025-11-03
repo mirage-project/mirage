@@ -182,8 +182,9 @@ __device__ __forceinline__ bool
       if ((step + num_tokens >= config.max_seq_length) ||
           ((config.tokens[request_id * MPK_MAX_SEQ_LENGTH + step +
                           num_tokens] == config.eos_token_id) &&
-           (step + num_tokens >= prompt_len))) {
+           (step + num_tokens >= prompt_len)))
 #endif
+      {
         // Request is done
         config.request_ids[i] = -1;
         // Free pages
@@ -856,7 +857,12 @@ __device__ __forceinline__ void execute_scheduler(RuntimeConfig config,
         printf("[SCHD] END_OF_TASK_GRAPH\n");
 #endif
         // Check if we want to continue
-        if (!prepare_next_batch(config)) {
+#ifdef MODE_ONLINE_NOTOKEN
+        if (!prepare_next_batch(config, iteration_num))
+#else
+        if (!prepare_next_batch(config))
+#endif
+        {
           terminate_schedulers(config);
         } else {
           // Launch task 1 (begin_task_graph) for the next iteration
@@ -1332,7 +1338,7 @@ extern "C" void finalize_persistent_kernel() {
   gpu_free(global_runtime_config.all_event_num_triggers);
   gpu_free(global_runtime_config.all_tasks);
   gpu_free(global_runtime_config.all_events);
-#if defined(MODE_OFFLINE) // || defined(MODE_ONLINE) || defined(MODE_ONLINE_NOTOKEN)
+#if defined(MODE_OFFLINE) || defined(MODE_ONLINE) // || defined(MODE_ONLINE_NOTOKEN)
   gpu_free(global_runtime_config.next_request_id);
   gpu_free(global_runtime_config.page_queue);
   gpu_free(global_runtime_config.page_queue_head);

@@ -3,6 +3,12 @@ import torch
 def grid_for_rmsnorm_linear_layer(size):
     # 96 and 64 are enough to cover all Qwen3 model? Please update the method
     # if you meet any incompatibility.
+    if size / 96 > 400:
+        # TODO: An ad-hoc workaround for linear kernel, both MPK ptx and
+        # cutlass version will output unexpect result (not same out put for
+        # same prompt) if the OUTPUT_SIZE is too big, try to figure it out.
+        assert size % 256 == 0, "FATAL: Linear layer size not support, it's {size}."
+        return size // 256
     if size % 96 == 0:
         return 96
     elif size % 64 == 0:
@@ -101,3 +107,19 @@ def shuffle_tensors(tensors: list[torch.Tensor], split: int, dim: int) -> torch.
         write_head_base += per_head_size
 
     return out
+
+def inplace_shuffle_tensors(tensors: list[torch.Tensor], target_tensor: torch.Tensor, split: int, dim: int) -> torch.Tensor:
+    """Split each tensor along `dim` into `split` equal chunks and interleave chunks
+    by tensor order into a new cpu tensor and copy the result to the target tensor.
+
+    Example: given [Q, K, V], split=head_num, dim=0, result layout along dim is
+    [Q_head0, K_head0, V_head0, Q_head1, K_head1, V_head1, ...].
+    """
+    if not tensors:
+        raise ValueError("tensors must be a non-empty list")
+
+    cpu_tensors = [t.to(device=torch.device("cpu"), dtype=torch.bfloat16, copy=True) for t in tensors]
+    cpu_result = shuffle_tensors(cpu_tensors, split, dim)
+    assert cpu_result.shape == target_tensor.shape, f"CPU result shape {cpu_result.shape} does not match target tensor shape {target_tensor.shape}"
+    target_tensor.copy_(cpu_result, non_blocking=True)
+    # return target_tensor
