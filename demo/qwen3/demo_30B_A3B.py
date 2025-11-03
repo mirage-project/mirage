@@ -356,8 +356,12 @@ if __name__ == "__main__":
             for expert_id in range(num_experts):
                 moe_gate_up_proj_torch.append(torch.concat([layer.mlp.experts[expert_id].gate_proj.weight, layer.mlp.experts[expert_id].up_proj.weight], dim=0))
                 moe_down_proj_torch.append(layer.mlp.experts[expert_id].down_proj.weight)
-            moe_gate_up_proj_torch_weights.append(torch.stack(moe_gate_up_proj_torch, dim=0)) # [num_experts, intermediate_size*2, hidden_size]
-            moe_down_proj_torch_weights.append(torch.stack(moe_down_proj_torch, dim=0)) # [num_experts, hidden_size, intermediate_size]
+            del layer.mlp.experts
+            layer.mlp.experts = {
+                "gate_up_proj": torch.stack(moe_gate_up_proj_torch, dim=0),
+                "down_proj": torch.stack(moe_down_proj_torch, dim=0),
+            }
+            torch.cuda.empty_cache()
 
         moe_gate_out = mpk.new_tensor(
             dims=(args.max_num_batched_tokens, num_experts),
@@ -565,10 +569,10 @@ if __name__ == "__main__":
                 torch_tensor=layer.mlp.gate.weight, name=f"layer_{i}_moe_gate"
             )
             w_gatedup = mpk.attach_input(
-                torch_tensor=moe_gate_up_proj_torch_weights[i], name=f"layer_{i}_gateup_proj"
+                torch_tensor=layer.mlp.experts["gate_up_proj"], name=f"layer_{i}_gateup_proj"
             )
             w_down_proj = mpk.attach_input(
-                torch_tensor=moe_down_proj_torch_weights[i], name=f"layer_{i}_down_proj"
+                torch_tensor=layer.mlp.experts["down_proj"], name=f"layer_{i}_down_proj"
             )
             
             rmsnorm_num_tasks = grid_for_rmsnorm_linear_layer(w_gatedup.dim(1))
