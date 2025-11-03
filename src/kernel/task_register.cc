@@ -1920,7 +1920,7 @@ int TaskRegister::register_moe_linear_sm100_task(
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
   // MoE constant:
-  constexpr int expert_stride = 12;
+  int expert_stride = (w13_linear) ? 12 : 9;
   // define MMA
   constexpr int MMA_M = 128;
   constexpr int MMA_N = 16;
