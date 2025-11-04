@@ -347,7 +347,8 @@ def parse_onnx_model(model, unique_operators):
 
         # input ops
         for inp in op.input_ops:
-            inp.output_ops.remove(op)
+            if op in inp.output_ops:
+                inp.output_ops.remove(op)
             inp.output_ops.append(sum_op)
         sum_out_id = len(tensor_id) + 1
         tensor_id[f"sum_out_{sum_out_id}"] = sum_out_id
@@ -366,7 +367,8 @@ def parse_onnx_model(model, unique_operators):
         # output ops
         for out in op.output_ops:
             if op in out.input_ops:
-                out.input_ops.remove(op)
+                if op in out.input_ops:
+                    out.input_ops.remove(op)
             out.input_ops.append(div_op)
         
         # add to operators
