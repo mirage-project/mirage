@@ -11,7 +11,7 @@ from build_computation_graph import get_computation_graph
 import os
 from generate_dag import solve_partitions, cost_function
 from graph_splitter import process_operator_graph
-
+from build_dataset import augment_partitions
 from cost_model.in_ctx_partition import InCtxPartitioner
 # from visualize_augs import visualize_partition, compare_augmentations
 
@@ -137,7 +137,7 @@ def partition_graph(model,
                     COMPOSITE_OPS=dict(),
                     IGNORE_OPS=set()): # these are operators that performs no operations on the tensors
     unique_operators = {}
-    operators = get_computation_graph(model, dummy_input, unique_operators, "onnx")
+    operators, _ = get_computation_graph(model, dummy_input, unique_operators, "onnx")
 
     all_subgraphs = []
     for _, op_node in operators.items():
@@ -171,8 +171,8 @@ def partition_graph_with_sampling(model,
     
     # Get the computation graph
     unique_operators = {}
-    operators = get_computation_graph(model, dummy_input, unique_operators, "onnx")
-
+    operators, _ = get_computation_graph(model, dummy_input, unique_operators, "onnx")
+    print("got comp graph")
     # Get valid partitions (already in adjacency list format)
     valid_partitions = []
     for _, op_node in operators.items():
@@ -828,7 +828,7 @@ def partition_graph_with_in_ctx_partitions(model,
     
     print("Building computation graph...")
     unique_operators = {}
-    operators = get_computation_graph(model, dummy_input, unique_operators, "onnx")
+    operators, _ = get_computation_graph(model, dummy_input, unique_operators, "onnx")
     
     # Load parameters from ONNX model
     import onnx
