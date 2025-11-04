@@ -1,18 +1,18 @@
 /*
- * Copyright (c) 2025 by FlashInfer team.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *   http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+* Copyright (c) 2025 by FlashInfer team.
+*
+* Licensed under the Apache License, Version 2.0 (the "License");
+* you may not use this file except in compliance with the License.
+* You may obtain a copy of the License at
+*
+*   http://www.apache.org/licenses/LICENSE-2.0
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific language governing permissions and
+* limitations under the License.
+*/
 
 #pragma once
 
@@ -31,10 +31,15 @@ __device__ __forceinline__ uint32_t get_thread_idx() {
   return (threadIdx.z * blockDim.y + threadIdx.y) * blockDim.x + threadIdx.x;
 }
 
+/*
+    13 bits      8 bits        9 bits         2 bits
+   [31-19]      [18-11]       [10-2]         [1-0]
+   [event no] [block group] [event type] [begin/end/instant]
+*/
 constexpr uint32_t EVENT_IDX_SHIFT = 2;
-constexpr uint32_t BLOCK_GROUP_IDX_SHIFT = 10;
+constexpr uint32_t BLOCK_GROUP_IDX_SHIFT = 11;
 // top 8 bits of the tag represents the nth event of the same type
-constexpr uint32_t EVENT_NO_SHIFT = 17;
+constexpr uint32_t EVENT_NO_SHIFT = 19;
 
 constexpr uint32_t EVENT_BEGIN = 0x0;
 constexpr uint32_t EVENT_END = 0x1;
@@ -49,31 +54,31 @@ __device__ __forceinline__ void sleep_cycles(uint32_t cycles) {
 }
 
 __device__ __forceinline__ uint32_t encode_tag(uint32_t block_group_idx,
-                                               uint32_t event_idx,
-                                               uint32_t event_type) {
+                                              uint32_t event_idx,
+                                              uint32_t event_type) {
   return (block_group_idx << BLOCK_GROUP_IDX_SHIFT) |
-         (event_idx << EVENT_IDX_SHIFT) | event_type;
+        (event_idx << EVENT_IDX_SHIFT) | event_type;
 }
 
 __device__ __forceinline__ uint32_t make_event_tag_start(uint32_t base_tag,
-                                                         uint32_t event_id,
-                                                         uint32_t event_no) {
+                                                        uint32_t event_id,
+                                                        uint32_t event_no) {
   return base_tag | (event_id << EVENT_IDX_SHIFT) |
-         (event_no << EVENT_NO_SHIFT) | EVENT_BEGIN;
+        (event_no << EVENT_NO_SHIFT) | EVENT_BEGIN;
 }
 
 __device__ __forceinline__ uint32_t make_event_tag_end(uint32_t base_tag,
-                                                       uint32_t event_id,
-                                                       uint32_t event_no) {
+                                                      uint32_t event_id,
+                                                      uint32_t event_no) {
   return base_tag | (event_id << EVENT_IDX_SHIFT) |
-         (event_no << EVENT_NO_SHIFT) | EVENT_END;
+        (event_no << EVENT_NO_SHIFT) | EVENT_END;
 }
 
 __device__ __forceinline__ uint32_t make_event_tag_instant(uint32_t base_tag,
-                                                           uint32_t event_id,
-                                                           uint32_t event_no) {
+                                                          uint32_t event_id,
+                                                          uint32_t event_no) {
   return base_tag | (event_id << EVENT_IDX_SHIFT) |
-         (event_no << EVENT_NO_SHIFT) | EVENT_INSTANT;
+        (event_no << EVENT_NO_SHIFT) | EVENT_INSTANT;
 }
 
 __device__ __forceinline__ uint32_t get_timestamp() {
