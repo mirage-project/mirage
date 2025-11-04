@@ -648,7 +648,7 @@ if __name__ == "__main__":
                 moe_routing_indices=moe_routing_indices,
                 moe_mask=moe_mask,
                 output=mlp_mid,
-                grid_dim=(8, 24, 1), # 1536//64=24 blocks for output size 1536
+                grid_dim=(5, 24, 1), # 1536//64=24 blocks for output size 1536
                 block_dim=(256, 1, 1),
             )
             # silu_mul
@@ -665,7 +665,7 @@ if __name__ == "__main__":
                 moe_routing_indices=moe_routing_indices,
                 moe_mask=moe_mask,
                 output=mlp_out,
-                grid_dim=(8, 32, 1), # 1536//64=32 blocks for output size 1536
+                grid_dim=(4, 32, 1), # 1536//64=32 blocks for output size 1536
                 block_dim=(256, 1, 1),
             )
             # moe mul sum add

@@ -2201,7 +2201,7 @@ orig_output_size = input_ops[1]->dtensor.dim[1];
 mirage::transpiler::CodeKeeper code;
 code.inc_indent();
 // MoE constant:
-constexpr int expert_stride = 12;
+const int expert_stride = w13_linear ? 5 : 4;
 // define MMA
 constexpr int MMA_M = 64;
 constexpr int MMA_N = 16;
