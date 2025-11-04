@@ -371,7 +371,7 @@ class MPK:
         model_builder_class = get_builder(self.model_name)
         self.model_builder = model_builder_class(self.persistent_kernel)
         if self.weight_from_model:
-            self.model_builder.build_from_model()
+            self.model_builder.build_from_model(model_name=self.model_name)
             self.tokenizer = self.model_builder.tokenizer
         else:
             self.model_builder.build_from_config(self.model_config)
@@ -389,10 +389,6 @@ class MPK:
         return results
     
     def compile(self, output_dir: str = None):
-        print("Compiling mpk...")
-        if not self.task_graph_generated:
-            self.generate_task_graph()
-
         self.persistent_kernel.compile(output_dir=output_dir)
         print("Compiling mpk... done")
         self.is_compiled = True
@@ -406,7 +402,6 @@ class MPK:
         
         if not self.with_lm_head and self.persistent_kernel.mode == "online_notoken":
             #return the last hidden state
-            print(f"[Mirage Side]Returning last hidden state of shape {self.model_builder.returned_hidden_state.shape}")
             return self.model_builder.returned_hidden_state
         
     def decode(self, ids: torch.Tensor):

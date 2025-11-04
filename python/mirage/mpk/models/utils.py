@@ -110,7 +110,7 @@ def shuffle_tensors(tensors: list[torch.Tensor], split: int, dim: int) -> torch.
 
 def inplace_shuffle_tensors(tensors: list[torch.Tensor], target_tensor: torch.Tensor, split: int, dim: int) -> torch.Tensor:
     """Split each tensor along `dim` into `split` equal chunks and interleave chunks
-    by tensor order into a new cpu tensor and copy the result to the target tensor.
+    by tensor order using a temporary GPU tensor, then copy into `target_tensor`.
 
     Example: given [Q, K, V], split=head_num, dim=0, result layout along dim is
     [Q_head0, K_head0, V_head0, Q_head1, K_head1, V_head1, ...].
@@ -118,8 +118,20 @@ def inplace_shuffle_tensors(tensors: list[torch.Tensor], target_tensor: torch.Te
     if not tensors:
         raise ValueError("tensors must be a non-empty list")
 
-    cpu_tensors = [t.to(device=torch.device("cpu"), dtype=torch.bfloat16, copy=True) for t in tensors]
-    cpu_result = shuffle_tensors(cpu_tensors, split, dim)
-    assert cpu_result.shape == target_tensor.shape, f"CPU result shape {cpu_result.shape} does not match target tensor shape {target_tensor.shape}"
-    target_tensor.copy_(cpu_result, non_blocking=True)
+    device = target_tensor.device
+    dtype = target_tensor.dtype
+
+    # Ensure inputs are on the same device/dtype as target; create temporary GPU views if needed
+    gpu_tensors = [
+        (t if (t.device == device and t.dtype == dtype) else t.to(device=device, dtype=dtype, non_blocking=True))
+        for t in tensors
+    ]
+
+    gpu_result = shuffle_tensors(gpu_tensors, split, dim)
+    assert gpu_result.shape == target_tensor.shape, (
+        f"GPU result shape {gpu_result.shape} does not match target tensor shape {target_tensor.shape}"
+    )
+    if gpu_result.dtype != dtype:
+        gpu_result = gpu_result.to(dtype=dtype, non_blocking=True)
+    target_tensor.copy_(gpu_result, non_blocking=True)
     # return target_tensor
