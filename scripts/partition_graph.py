@@ -220,7 +220,7 @@ def function_map(graph, func, inputs, kwargs={}):
             raise NotImplementedError(f"{func.fn} not implemented")
 
 # Take in an adjacency list formatted subgraph and generate a mirage kernel graph
-def to_kernel_graph(subgraph, output_ids):
+def to_kernel_graph(subgraph, output_ids=[]):
     graph = mi.new_kernel_graph()
     dims = []
     # stores output tensors of operations + their reference counts based on ID
@@ -322,8 +322,20 @@ def generate_all_augmented_kernels(input_configs, model, root_dir, dataset_name,
     performance = json.load(open(os.path.join(root_dir, f"{dataset_name}_performance.json"), "r")) if os.path.exists(os.path.join(root_dir, f"{dataset_name}_performance.json")) else {}
     
     for subgraph in all_subgraphs:
-        kernel_graph, dims = to_kernel_graph(subgraph)
-        
+        produced_in_subgraph = set()
+        consumed_in_subgraph = set()
+        for op in subgraph:
+            for _, tid in op.output_tensor_shapes:
+                produced_in_subgraph.add(tid)
+            for _, tid in op.input_tensor_shapes:
+                consumed_in_subgraph.add(tid)
+        output_ids = [tid for tid in produced_in_subgraph if tid not in consumed_in_subgraph]
+
+        try:
+            kernel_graph, dims = to_kernel_graph(subgraph, output_ids)
+        except NotImplementedError:
+            continue
+
         # check for duplicate subgraphs
         graph_hash = kernel_graph.get_owner_independent_hash()
         if graph_hash in hashes:
