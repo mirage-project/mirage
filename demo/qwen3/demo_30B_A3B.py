@@ -492,7 +492,7 @@ if __name__ == "__main__":
                 input=rmsnorm_out,
                 weight=w_qkv,
                 output=attn_in,
-                grid_dim=(grid_for_rmsnorm_linear_layer(w_qkv.dim(0)), 1, 1),
+                grid_dim=(grid_for_rmsnorm_linear_layer(w_qkv.dim(0)), 1, 1), # 5120 split into 64 tasks
                 block_dim=(256, 1, 1),
             )
             # add attention
@@ -544,7 +544,7 @@ if __name__ == "__main__":
                 weight=w,
                 residual=x,
                 output=attn_proj_out,
-                grid_dim=(hidden_size // 64, 1, 1),
+                grid_dim=(hidden_size // 128, 1, 1),
                 block_dim=(256, 1, 1),
             )
             # reset residual input as x
@@ -605,7 +605,7 @@ if __name__ == "__main__":
                 moe_routing_indices=moe_routing_indices,
                 moe_mask=moe_mask,
                 output=mlp_mid,
-                grid_dim=(12, 12, 1),
+                grid_dim=(10, 12, 1),
                 block_dim=(256, 1, 1),
             )
             mpk.moe_silu_mul_layer(
@@ -620,7 +620,7 @@ if __name__ == "__main__":
                 moe_routing_indices=moe_routing_indices,
                 moe_mask=moe_mask,
                 output=mlp_out,
-                grid_dim=(9, 16, 1),
+                grid_dim=(8, 16, 1),
                 block_dim=(256, 1, 1),
             )
             mpk.moe_mul_sum_add_layer(
@@ -659,7 +659,7 @@ if __name__ == "__main__":
             input=rmsnorm_out,
             weight=w_proj,
             output=argmax_in,
-            grid_dim=(grid_for_rmsnorm_linear_layer(w_proj.dim(0)), 1, 1),
+            grid_dim=(mpk.num_workers, 1, 1),
             block_dim=(256, 1, 1),
         )
         # add argmax layer
