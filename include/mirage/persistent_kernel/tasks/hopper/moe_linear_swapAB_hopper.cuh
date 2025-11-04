@@ -363,6 +363,8 @@ if (threadIdx.x == 0) {
                       1);
   }
 
+  __syncthreads();
+
   // Represent the SMEM buffers for A and B
   cute::Tensor sA =
       shared_storage.tensor_sA(); // (MmaA, NumMma_M, NumMma_K, Tiles_K)

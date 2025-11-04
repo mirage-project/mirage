@@ -400,8 +400,8 @@ if __name__ == "__main__":
             moe_down_proj_torch_weights.append(
                 torch.stack(moe_down_proj_torch, dim=0)
             )
+            torch.cuda.synchronize()
             del layer.mlp.experts
-            torch.cuda.empty_cache()
 
         moe_routing_indices = mpk.new_tensor(
             dims=(num_experts, args.max_num_batched_tokens),
@@ -515,9 +515,6 @@ if __name__ == "__main__":
             w_v = mpk.attach_input(
                 torch_tensor=layer.self_attn.v_proj.weight, name=f"layer_{i}_v_proj"
             )
-            print("iteration i = ", i, "layer.self_attn.q_proj.weight.shape is ", layer.self_attn.q_proj.weight.shape)
-            print("first ten elements of w_q, w_q[0,:10] = ", layer.self_attn.q_proj.weight[0,:10])
-
             w_qkv = mpk.shuffle_tensors(
                 inputs=[w_q, w_k, w_v],
                 shuffled_dim=0,
@@ -665,7 +662,7 @@ if __name__ == "__main__":
                 moe_routing_indices=moe_routing_indices,
                 moe_mask=moe_mask,
                 output=mlp_out,
-                grid_dim=(4, 32, 1), # 1536//64=32 blocks for output size 1536
+                grid_dim=(4, 32, 1), # 2048//64=32 blocks for output size 1536
                 block_dim=(256, 1, 1),
             )
             # moe mul sum add
