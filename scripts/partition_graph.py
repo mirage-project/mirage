@@ -233,7 +233,10 @@ def to_kernel_graph(subgraph, output_ids):
         for (shape, tensor_id) in op.input_tensor_shapes:
             if tensor_id not in intermediates:
                 dims.append((shape, "V"))
-                inputs.append(graph.new_input(dims=shape, dtype=mi.float16))
+                new_input = graph.new_input(dims=shape, dtype=mi.float16)
+                inputs.append(new_input)
+                # Record this input tensor in intermediates to avoid duplicates
+                intermediates[tensor_id] = [new_input, 0]
             else:
                 inputs.append(intermediates[tensor_id][0])
                 intermediates[tensor_id][1] += 1
@@ -316,6 +319,25 @@ class HybridModel:
 
         self._param_cache = {}
         self._const_cache = {}
+        self._expanded_cache = {}  # Cache for dimension-expanded tensors (e.g., 2D weight -> 3D)
+    
+    def _get_params_on(self, device, dtype):
+        """Return dict of parameters placed on device, keeping their original dtype."""
+        # Note: We only cache by device, not dtype, because parameters should keep their original dtype
+        # (e.g. embedding weights stay float32/float16 even if input tokens are int64)
+        key = (device,)
+        params = self._param_cache.get(key)
+        if params is None:
+            # Move to device once, keep original dtype, cache for subsequent calls
+            moved = {}
+            for tid, p in self.parameter_tensors.items():
+                tp = p
+                if tp.device != device:
+                    tp = tp.to(device=device, non_blocking=True)
+                moved[tid] = tp
+            self._param_cache[key] = moved
+            params = moved
+        return params
 
     def _get_const(self, device, shape, value, dtype=torch.float16):
         """Return a constant tensor for Mirage kernels, cached per (device, shape, value, dtype)."""
@@ -326,72 +348,96 @@ class HybridModel:
             self._const_cache[key] = t
         return t
     
-    def _get_params_on(self, device, dtype):
-        """Return dict of parameters placed on (device, dtype), cached."""
-        key = (device, dtype)
-        params = self._param_cache.get(key)
-        if params is None:
-            # Move once, cache for subsequent calls on same (device, dtype)
-            moved = {}
-            for tid, p in self.parameter_tensors.items():
-                tp = p
-                if tp.device != device or tp.dtype != dtype:
-                    tp = tp.to(device=device, dtype=dtype, non_blocking=True)
-                moved[tid] = tp
-            self._param_cache[key] = moved
-            params = moved
-        return params
-    
     def __call__(self, *inputs, debug=False):
         if len(inputs) != len(self.input_tensor_ids):
             raise ValueError(f"Expected {len(self.input_tensor_ids)} input(s), got {len(inputs)}")
         device = inputs[0].device if inputs else torch.device('cuda')
-        dtype = inputs[0].dtype if inputs else torch.float16
+        # Always use float16 for Mirage computations (inputs may be int64 for embeddings)
+        dtype = torch.float16
         intermediates = {tid: tensor for tid, tensor in zip(self.input_tensor_ids, inputs)}
         params_on_target = self._get_params_on(device, dtype)
         intermediates.update(params_on_target)
 
         with torch.inference_mode():
             for i, (step_type, payload) in enumerate(self.execution_plan):
+                # print(f"\n{'='*60}")
+                # print(f"Step {i}: {step_type.upper()}")
+                # print(f"{'='*60}")
+                
                 if step_type == "mirage":
-                    kernel, input_ids, output_ids, const_dims = payload
+                    kernel, input_ids, output_ids, const_dims, expected_shapes = payload
                     
                     # Prepare inputs in fp16 ONLY if needed; avoid redundant casts
                     kernel_inputs = []
-                    for tid in input_ids:
+                    for j, tid in enumerate(input_ids):
                         if tid not in intermediates:
                             raise ValueError(f"Input tensor id {tid} not found in intermediates")
                         t = intermediates[tid]
+                        
                         if t.dtype is not torch.float16:
-                            warnings.warn(f"Casting input tensor id {tid} from {t.dtype} to torch.float16. Consider providing inputs in float16 to avoid this overhead.")
-                            _ = float(t.abs().sum()) # if this isn't here the cast to float16 might error out
+                            if debug:
+                                warnings.warn(f"Casting input tensor id {tid} from {t.dtype} to torch.float16. Consider providing inputs in float16 to avoid this overhead.")
+                                _ = float(t.abs().sum()) # if this isn't here the cast to float16 might error out
                             t = t.to(torch.float16)
+                        
+                        # Match dimensions with expected shape (for MatMul broadcasting compatibility)
+                        expected_shape = expected_shapes[j]
+                        needs_expand = len(t.shape) < len(expected_shape)
+                        
+                        if needs_expand:
+                            # Need to expand dimensions (e.g., 2D weight -> 3D for batch matmul)
+                            # Check cache first to avoid repeated expand+contiguous
+                            cache_key = (tid, tuple(expected_shape))
+                            if cache_key in self._expanded_cache:
+                                # Use cached expanded+contiguous tensor
+                                t = self._expanded_cache[cache_key]
+                            else:
+                                # First time: expand and will be made contiguous below
+                                batch_size = expected_shape[0]
+                                t = t.unsqueeze(0).expand(batch_size, *t.shape)
+                        
+                        # Ensure tensor is contiguous for Mirage kernels
+                        if not t.is_contiguous():
+                            t = t.contiguous()
+                            # If this was an expanded tensor, cache the contiguous version
+                            if needs_expand:
+                                cache_key = (tid, tuple(expected_shape))
+                                self._expanded_cache[cache_key] = t
+                        
                         kernel_inputs.append(t)
 
                     # Append cached constants (fp16) without recreating them every call
                     dev = kernel_inputs[0].device if kernel_inputs else device
                     for shape, value in const_dims:
-                        kernel_inputs.append(self._get_const(dev, shape, value, dtype=torch.float16))
+                        c = self._get_const(dev, shape, value, dtype=torch.float16)
+                        kernel_inputs.append(c)
 
                     outputs = kernel(inputs=kernel_inputs)
                     if not isinstance(outputs, list):
                         outputs = [outputs]
-                    # Convert outputs back to original dtype
+                    # Mirage outputs are always float16, keep them as-is
                     for tid, tensor in zip(output_ids, outputs):
                         if debug:
                             print(f"Mirage step {i}: tensor id {tid}, shape {tensor.shape}, dtype {tensor.dtype}")
                             _ = float(tensor.abs().sum())
-                        intermediates[tid] = tensor.to(dtype)
+                        # Keep Mirage outputs in float16, don't convert to input dtype
+                        intermediates[tid] = tensor
                 elif step_type == "pytorch":
                     op, input_ids, output_id = payload
+                    
                     if not all(tid in intermediates for tid in input_ids):
                         missing = [tid for tid in input_ids if tid not in intermediates]
                         raise ValueError(f"Input tensor ids {missing} not found in intermediates for PyTorch op {op.name}")
                     inputs = [intermediates[tid] for tid in input_ids]
+                    
                     result = self._execute_pytorch_op(op, inputs)
                     if debug:
                         print(f"PyTorch step {i}: tensor id {output_id}, shape {result.shape}, dtype {result.dtype}")
                         _ = float(result.abs().sum())
+                    # Ensure PyTorch outputs are also float16 to maintain numerical consistency
+                    if result.dtype != dtype:
+                        result = result.to(dtype)
+                    
                     intermediates[output_id] = result
         
         outputs = [intermediates[tid] for tid in self.output_tensor_ids]
@@ -415,9 +461,12 @@ class HybridModel:
                 return getattr(torch, fn.lower())(inputs[0], inputs[1])
             else:
                 raise ValueError(f"{fn} requires 2 inputs or additional_params, got {len(inputs)} inputs")
-        elif fn == "MatMul" or fn == "Gemm":
-            matmul_result = torch.matmul(inputs[0].to(torch.float16), inputs[1].to(torch.float16))
-            if fn == "Gemm" and len(inputs) > 2:  # Has bias
+        elif fn == "MatMul":
+            return torch.matmul(inputs[0].to(torch.float16), inputs[1].to(torch.float16))
+        elif fn == "Gemm":
+            # ONNX Gemm: Y = alpha * A * B^T + beta * C (default transB=1)
+            matmul_result = torch.matmul(inputs[0].to(torch.float16), inputs[1].to(torch.float16).T)
+            if len(inputs) > 2:  # Has bias
                 return matmul_result + inputs[2]
             return matmul_result
         elif fn == "Relu":
@@ -497,7 +546,16 @@ def partition_graph_with_dp(model,
         
     subgraphs, _, sorted_ops = process_operator_graph(operators, IGNORE_OPS, UNSUPPORTED_OPS)
     
+    # Print original subgraph statistics
+    print("\n" + "="*60)
+    print("Original Subgraph Details:")
+    print("="*60)
+    for sg_id, (sg_dict, sg_type) in enumerate(subgraphs):
+        print(f"  Subgraph {sg_id} ({sg_type}): {len(sg_dict)} ops")
+    
+    print("\n" + "="*60)
     print("Applying dynamic programming partitioning to large Mirage subgraphs...")
+    print("="*60)
     
     fine_grained_partitions = []
     
@@ -534,6 +592,17 @@ def partition_graph_with_dp(model,
                 print(f"    Created partition {p_id}: {len(partition_ops)} ops")
         else:
             fine_grained_partitions.append((sg_dict, sg_type))
+    
+    # Print final partition statistics
+    mirage_count = sum(1 for _, t in fine_grained_partitions if t == "mirage")
+    pytorch_count = sum(1 for _, t in fine_grained_partitions if t == "pytorch")
+    print("\n" + "="*60)
+    print("Final Partition Statistics:")
+    print("="*60)
+    print(f"  Total partitions: {len(fine_grained_partitions)}")
+    print(f"  - Mirage partitions: {mirage_count}")
+    print(f"  - PyTorch partitions: {pytorch_count}")
+    print(f"  Original subgraphs: {len(subgraphs)} → Final partitions: {len(fine_grained_partitions)}")
     
     # Build execution plan
     print(f"\nOptimizing {sum(1 for _, t in fine_grained_partitions if t == 'mirage')} Mirage partitions...")
@@ -620,8 +689,9 @@ def partition_graph_with_dp(model,
                 print(f"     ✓ Compiled kernel successfully")
 
                 const_dims = [(d[0], d[2]) for d in dims if d[1] == "C"]
-                
-                execution_plan.append(("mirage", (optimized_kernel, input_ids, output_ids, const_dims)))
+                # Save expected input shapes for runtime dimension matching
+                expected_input_shapes = [d[0] for d in dims if d[1] == "V"]
+                execution_plan.append(("mirage", (optimized_kernel, input_ids, output_ids, const_dims, expected_input_shapes)))
             except Exception as e:
                 print(f"  ✗ Result: Superoptimize failed - {str(e)[:80]}...")
                 print(f"     Fallback: Using PyTorch execution")

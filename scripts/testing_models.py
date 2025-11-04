@@ -80,12 +80,11 @@ class TransformerBlock(nn.Module):
 
         # back to (B, T, D)
         a = a.transpose(1, 2).contiguous().view(B, T, self.d_model)
-        x = self.proj(a)
-
+        x = x + self.proj(a)
         # --- Feedforward ---
         h = self.rms2(x)
         h = self.fc2(F.silu(self.fc1(h)))
-        return h
+        return x + h
 
 
 class TestTransformer(nn.Module):
