@@ -180,28 +180,25 @@ def partition_graph_with_sampling(model,
                       UNSUPPORTED_OPS, COMPOSITE_OPS, IGNORE_OPS)
     
     print(f"Found {len(valid_partitions)} valid partitions")
-    
     # plt = visualize_partition(valid_partitions[0], "Example Valid Partition", "printed_partition0")
-    
+
+
     # Augment the valid partitions
     augmented_subgraphs = augment_partitions(
         valid_partitions=valid_partitions,
-        UNSUPPORTED_OPS=UNSUPPORTED_OPS,
-        IGNORE_OPS=IGNORE_OPS,
+        all_operators=operators,
         augmentation_factor=augmentation_factor,
-        perturbation_strategies=['expand', 'contract']
+        perturbation_strategies=['expand', 'contract'],
+        max_size = max_num_ops
     )
-
-    # compare_augmentations(valid_partitions[0], augmented_subgraphs[:3])
-    
+    # for i, subgraph in enumerate(augmented_subgraphs):
+    #     print(f"Subgraph {i}: {len(subgraph)} operators")
     print(f"Generated {len(augmented_subgraphs)} total subgraphs (including originals)")
-    print(f"Augmentation ratio: {len(augmented_subgraphs) / len(valid_partitions):.1f}x")
-    
-    # Serialize the results
-    serialize_subgraphs_to_json(augmented_subgraphs, 
-                               filename='scripts/augmented_partitions.json')
-    
+
     return augmented_subgraphs, unique_operators
+
+
+
 
 def function_map(graph, func, inputs, kwargs={}):
     match func.fn:
@@ -299,6 +296,59 @@ def generate_all_kernels(model, dummy_inputs, root_dir, dataset_name, min_num_op
         json.dump(performance, open(os.path.join(root_dir, f"{dataset_name}_performance.json"), "w"))
     
     return all_kernels, kernel_input_dims
+
+def generate_all_augmented_kernels(input_configs, model, root_dir, dataset_name, min_num_ops=2, max_num_ops=4, aug_factor=5, UNSUPPORTED_OPS=set(), COMPOSITE_OPS=set(), IGNORE_OPS=set()):
+    # Collect subgraphs from all input configurations
+    all_subgraphs = []
+    for batch_size, seq_len in input_configs:
+        print(f"\nProcessing config: batch={batch_size}, seq={seq_len}")
+        dummy_input = torch.ones(batch_size, seq_len, dtype=int)
+        
+        subgraphs, _ = partition_graph_with_sampling(model, dummy_input, min_num_ops, max_num_ops, aug_factor, UNSUPPORTED_OPS, COMPOSITE_OPS, IGNORE_OPS)
+        all_subgraphs.extend(subgraphs)
+        print(f"  Collected {len(subgraphs)} subgraphs from this config")
+    
+    print(f"\nTotal subgraphs collected: {len(all_subgraphs)}")
+    
+    kernel_input_dims = []
+    all_kernels = []
+    
+    done = [int(f.split("_")[1].split(".")[0]) for f in os.listdir(root_dir) if f.startswith("original_")]
+    hashes = set(done)
+    
+    performance = json.load(open(os.path.join(root_dir, f"{dataset_name}_performance.json"), "r")) if os.path.exists(os.path.join(root_dir, f"{dataset_name}_performance.json")) else {}
+    
+    for subgraph in all_subgraphs:
+        kernel_graph, dims = to_kernel_graph(subgraph)
+        
+        # check for duplicate subgraphs
+        graph_hash = kernel_graph.get_owner_independent_hash()
+        if graph_hash in hashes:
+            continue
+        hashes.add(graph_hash)
+        
+        # save original mugraph
+        kernel_graph.to_json(os.path.join(root_dir, f"original_{graph_hash}.json"))
+        
+        try:
+            print(f"Superoptimizing {graph_hash}")
+            optimized_graph, best_perf = kernel_graph.superoptimize()
+        except Exception as e:
+            print(f"Subgraph {graph_hash} superoptimize failed with error: {e}")
+            continue
+                
+        performance[graph_hash] = best_perf
+        
+        # save optimized mugraph
+        optimized_graph.to_json(os.path.join(root_dir, f"optimized_{graph_hash}.json"))
+        all_kernels.append(optimized_graph)
+        kernel_input_dims.append(dims)
+        
+        # save performance
+        json.dump(performance, open(os.path.join(root_dir, f"{dataset_name}_performance.json"), "w"))
+    
+    return all_kernels, kernel_input_dims
+
 
 class HybridModel:
     """
