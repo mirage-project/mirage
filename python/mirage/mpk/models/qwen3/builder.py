@@ -13,9 +13,8 @@ from ...model_registry import register_model_builder
 from ....core import bfloat16, int64
 
 
-@register_model_builder("Qwen3", "Qwen/Qwen3-8B")
+@register_model_builder("Qwen3", "Qwen/Qwen3-8B", "Qwen/Qwen3-1.7B", "Qwen/Qwen3-14B")
 class Qwen3Builder(GraphBuilder):
-    model_name: str = "Qwen/Qwen3-8B"
     def __init__(self, mpk: PersistentKernel, weights: dict | None = None):
         super().__init__(mpk, weights)
         self.max_num_pages = mpk.max_num_pages
@@ -24,7 +23,8 @@ class Qwen3Builder(GraphBuilder):
         self.input_tokens = mpk.meta_tensors["input_tokens"]
         self.output_tokens = mpk.meta_tensors["output_tokens"]
         self.tokenizer = None
-        
+        self.model_name: str = None
+        self.model_path: str = None
 
     def build_from_config(self, 
                               model_config: MirageModelConfig):
@@ -52,17 +52,22 @@ class Qwen3Builder(GraphBuilder):
         # raise NotImplementedError("build_from_vllm_graph is not implemented")
         self.build_from_dict(model_config.state_dict, model_config.with_lm_head)
 
-    def build_from_model(self, model_path: str | None = None):
+    def build_from_model(self, model_name: str, model_path: str | None = None):
+        
         with torch.device("cuda"):
             if model_path is not None:
+                self.model_path = model_path
                 print(f"Loading model from model path: {model_path}")
                 self.config = AutoConfig.from_pretrained(model_path)
                 self.model = Qwen3ForCausalLM(self.config, self.world_size, self.max_num_pages, self.page_size)
                 load_model(self.model, f"{model_path}/model{self.rank}-mp{self.world_size}.safetensors")
                 self.tokenizer = AutoTokenizer.from_pretrained(model_path)
-            else:
+            elif model_name is not None:
+                self.model_name = model_name
                 self.model = Qwen3ForCausalLM.from_pretrained(self.model_name, world_size=1, max_num_pages=self.max_num_pages, page_size=self.page_size).to("cuda")
                 self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
+            else:
+                raise ValueError("model_name or model_path is required")
         
         self.positions = torch.arange(32768).unsqueeze(0).to(self.model.device)
         self.position_embeddings = self.model.model.rotary_emb(self.positions)
@@ -84,6 +89,7 @@ class Qwen3Builder(GraphBuilder):
         self.fused_outdim_2 = 2 * self.intermediate_size
         
         self.num_layers = len(self.model.model.layers)
+        print(f"build_from_model: Model name: {self.model_name}, num_layers: {self.num_layers}, hidden_size: {self.hidden_size}, intermediate_size: {self.intermediate_size}, vocab_size: {self.vocab_size}, num_q_heads: {self.num_q_heads}, num_kv_heads: {self.num_kv_heads}, num_local_q_heads: {self.num_local_q_heads}, num_local_kv_heads: {self.num_local_kv_heads}, head_dim: {self.head_dim}, fused_outdim_1: {self.fused_outdim_1}, fused_outdim_2: {self.fused_outdim_2}")
         
         self.build_from_dict(self.model.state_dict(), True)
         
@@ -236,7 +242,6 @@ class Qwen3Builder(GraphBuilder):
             )
             if (f"{prefix}self_attn.qkv_proj.weight" in state_dict) and (f"{prefix}self_attn.q_proj.weight" in state_dict):
                     # Shuffle on CPU in place for qkv_proj.weight tensor
-                    print(f"Inplace shuffling qkv layer {i} projection weights on CPU")
                     inplace_shuffle_tensors(
                         [
                             state_dict[f"{prefix}self_attn.q_proj.weight"], # views
@@ -251,9 +256,7 @@ class Qwen3Builder(GraphBuilder):
                         torch_tensor=state_dict[f"{prefix}self_attn.qkv_proj.weight"], name=f"layer_{i}_qkv_proj"
                     )
             elif f"{prefix}self_attn.q_proj.weight" in state_dict:
-                print(f"Building layer {i} with seperate q, k, v projection weights")
                 if self.mpk.mode == "online_notoken":
-                    print(f"Building layer {i} by shuffling q, k, v projection weights on python side")
                     self.w_qkv_tensor = shuffle_tensors(
                         [
                             state_dict[f"{prefix}self_attn.q_proj.weight"],
@@ -286,7 +289,6 @@ class Qwen3Builder(GraphBuilder):
                         name=f"layer_{i}_qkv_proj",
                     )
             elif f"{prefix}self_attn.qkv_proj.weight" in state_dict:
-                print(f"Building layer {i} with unified qkv projection weights")
                 w_qkv = self.mpk.attach_input(
                     torch_tensor=state_dict[f"{prefix}self_attn.qkv_proj.weight"], name=f"layer_{i}_qkv_proj"
                 )
@@ -379,7 +381,6 @@ class Qwen3Builder(GraphBuilder):
             )
             # 
             if (f"{prefix}mlp.gate_proj.weight" in state_dict) and (f"{prefix}mlp.gate_up_proj.weight" in state_dict):
-                print(f"Building layer {i} with unified gate and up projection weights")
                 rmsnorm_num_tasks = grid_for_rmsnorm_linear_layer(state_dict[f"{prefix}mlp.gate_up_proj.weight"].shape[0])
                 inplace_shuffle_tensors(
                     [
@@ -399,7 +400,6 @@ class Qwen3Builder(GraphBuilder):
                     + state_dict[f"{prefix}mlp.up_proj.weight"].shape[0]
                 )
                 if self.mpk.mode == "online_notoken":
-                    print(f"Building layer {i} by shuffling gate and up projection weights on python side")
                     self.w_gatedup_tensor = shuffle_tensors(
                         [
                             state_dict[f"{prefix}mlp.gate_proj.weight"],

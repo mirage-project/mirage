@@ -126,37 +126,6 @@ __global__ void prepare_kernel(RuntimeConfig config,
   // Initialize worker queue last task id
   // Each worker now maintains a local and a remote worker queue
   for (int i = blockIdx.x * blockDim.x + threadIdx.x;
-       i < 2 * config.num_workers; i += blockDim.x * gridDim.x) {
-    config.worker_queue_last_ready_task_id[i] = 0;
-  }
-  // Initialize scheduler queue last event id
-  // We maintain one extra scheduler queue for the global scheduler
-  int num_schedulers = config.num_local_schedulers + config.num_remote_schedulers;
-  for (int i = blockIdx.x * blockDim.x + threadIdx.x;
-       i < num_schedulers + 1; i += blockDim.x * gridDim.x) {
-    config.sched_queue_last_ready_event_id[i] = 0;
-    config.sched_queue_next_free_event_id[i] = 0;
-  }
-  // Initialize all event counters
-  for (int i = blockIdx.x * blockDim.x + threadIdx.x;
-      i < config.num_events; i += blockDim.x * gridDim.x) {
-    config.all_event_counters[i] = 0;
-  }
-  // Send event to scheduler[0]
-  if (blockIdx.x == 0 && threadIdx.x == 0) {
-    assert(config.all_events[end_of_task_graph_event_pos].event_type ==
-           EVENT_END_OF_TASK_GRAPH);
-    config.sched_queue_next_free_event_id[0] = 1;
-    config.sched_queues[0][0] = end_of_task_graph_event_pos;
-    config.sched_queue_last_ready_event_id[0] = 1;
-  }
-}
-
-__global__ void prepare_kernel(RuntimeConfig config,
-                               int end_of_task_graph_event_pos) {
-  // Initialize worker queue last task id
-  // Each worker now maintains a local and a remote worker queue
-  for (int i = blockIdx.x * blockDim.x + threadIdx.x;
        i < 2 * config.num_workers;
        i += blockDim.x * gridDim.x) {
     config.worker_queue_last_ready_task_id[i] = 0;
@@ -379,12 +348,9 @@ __device__ __forceinline__ bool
       // TODO: iteration_num is a current workaround
       // We may consider split EVENT_END_OF_TASK_GRAPH into
       // EVENT_END_OF_TASK_GRAPH and EVENT_START_OF_TASK_GRAPH
-  printf("iteration_num: %zu\n", iteration_num);
   if (iteration_num > 0) {
-    printf("[prepare_next_batch] blockIdx.x: %d, threadIdx.x: %d, Serving type: NO_TOKEN, return hidden state without token\n", blockIdx.x, threadIdx.x);
     return false;
   } else { // iteration_num == 0
-    printf("[prepare_next_batch] blockIdx.x: %d, threadIdx.x: %d, Serving type: NO_TOKEN, but before the first iteration\n", blockIdx.x, threadIdx.x);
     return true;
   }
 }
@@ -1153,6 +1119,7 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
   global_runtime_config.my_gpu_id = mype;
   global_runtime_config.num_graphs = 1;
   global_runtime_config.split_worker_scheduler = true;
+  // global_runtime_config.split_worker_scheduler = false;
 
   std::vector<FullTaskDesc> all_fulltasks;
   std::vector<EventDesc> all_events;
