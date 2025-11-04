@@ -386,7 +386,7 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
                                      s_frag);
 
         } // loop for NUM_ITERS_K
-      } // loop for FORLOOP_RANGE
+      }   // loop for FORLOOP_RANGE
 
 #pragma unroll
       for (uint32_t i = 0; i < 4; i++) {
@@ -415,7 +415,7 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
             *((__uint128_t *)((void *)&output_smem.at(row, src_col)));
       }
     } // loop for NUM_ITERS_N, it may not be 1
-  } // loop for NUM_ITERS_M, it should always be 1, no sense loop
+  }   // loop for NUM_ITERS_M, it should always be 1, no sense loop
 }
 
 } // namespace kernel
