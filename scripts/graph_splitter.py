@@ -224,8 +224,7 @@ class GraphSplitter:
         
         in_degree = {node: 0 for node in all_nodes}
         for node, deps in dependencies.items():
-            for dep in deps:
-                in_degree[dep] += 1
+            in_degree[node] = len(deps)
         
         queue = [node for node, degree in in_degree.items() if degree == 0]
         result = []
@@ -298,7 +297,7 @@ class GraphSplitter:
         
         # Try to break cycles a limited number of times
         attempts = 0
-        max_attempts = 10
+        max_attempts = 100
         
         while not self._is_acyclic(subgraph_deps) and attempts < max_attempts:
             attempts += 1
@@ -307,34 +306,65 @@ class GraphSplitter:
             if not cycle:
                 break
             
-            # Find the largest splittable subgraph in the cycle
-            subgraph_to_split = None
-            max_size = 0
+            # Identify the back edge: cycle[-2] -> cycle[0]
+            back_edge_src = cycle[-2] if len(cycle) > 1 else cycle[0]
+            back_edge_tgt = cycle[0]
             
-            for sg_id in cycle:
-                if subgraphs[sg_id] is not None:
-                    sg_dict, _ = subgraphs[sg_id]
-                    size = len(sg_dict)
-                    if size > 1 and size > max_size:  # Only consider subgraphs with >1 operator
-                        max_size = size
-                        subgraph_to_split = sg_id
+            # Strategy: Precisely split the target of the back edge
+            # Find all ops in target that depend on source
+            if subgraphs[back_edge_tgt] is None or len(subgraphs[back_edge_tgt][0]) <= 1:
+                # Target can't be split, try source instead
+                back_edge_src, back_edge_tgt = back_edge_tgt, back_edge_src
             
-            # If no splittable subgraph found, print warning and break out
-            if subgraph_to_split is None:
-                print(f"Warning: Cannot break cycle {cycle} - all subgraphs have only one operator")
-                break
+            if subgraphs[back_edge_tgt] is None or len(subgraphs[back_edge_tgt][0]) <= 1:
+                # Neither can be split, try largest in cycle
+                subgraph_to_split = None
+                max_size = 0
+                for sg_id in cycle:
+                    if subgraphs[sg_id] is not None:
+                        sg_dict, _ = subgraphs[sg_id]
+                        if len(sg_dict) > 1 and len(sg_dict) > max_size:
+                            max_size = len(sg_dict)
+                            subgraph_to_split = sg_id
                 
-            print(f"Breaking cycle by splitting subgraph {subgraph_to_split} with {max_size} operators")
-            
-            sg_dict, sg_type = subgraphs[subgraph_to_split]
-            
-            # Split based on topological order
-            ops_in_sg = list(sg_dict.keys())
-            ops_in_sg.sort(key=lambda op: topo_indices[op])
-            
-            mid_point = len(ops_in_sg) // 2
-            first_half = {op: True for op in ops_in_sg[:mid_point]}
-            second_half = {op: True for op in ops_in_sg[mid_point:]}
+                if subgraph_to_split is None:
+                    print(f"Warning: Cannot break cycle {cycle} - all subgraphs have only one operator")
+                    break
+                
+                sg_dict, sg_type = subgraphs[subgraph_to_split]
+                ops_in_sg = list(sg_dict.keys())
+                ops_in_sg.sort(key=lambda op: topo_indices[op])
+                split_point = len(ops_in_sg) // 2
+                first_half = {op: True for op in ops_in_sg[:split_point]}
+                second_half = {op: True for op in ops_in_sg[split_point:]}
+            else:
+                # Precise split: separate ops that depend on back_edge_src
+                subgraph_to_split = back_edge_tgt
+                sg_dict, sg_type = subgraphs[back_edge_tgt]
+                
+                # Find ops that depend on back_edge_src via subgraph_io
+                ops_with_src_input = set()
+                if back_edge_tgt < len(subgraph_io):
+                    for op, inputs in subgraph_io[back_edge_tgt]["inputs"].items():
+                        for input_sg_id, _ in inputs:
+                            if input_sg_id == back_edge_src:
+                                ops_with_src_input.add(op)
+                                break
+                
+                # Split: ops that depend on src vs ops that don't
+                ops_to_move = [op for op in sg_dict.keys() if op in ops_with_src_input]
+                ops_to_keep = [op for op in sg_dict.keys() if op not in ops_with_src_input]
+                
+                # If all ops depend on src or none depend on src, fall back to middle split
+                if not ops_to_move or not ops_to_keep:
+                    ops_in_sg = list(sg_dict.keys())
+                    ops_in_sg.sort(key=lambda op: topo_indices[op])
+                    split_point = len(ops_in_sg) // 2
+                    first_half = {op: True for op in ops_in_sg[:split_point]}
+                    second_half = {op: True for op in ops_in_sg[split_point:]}
+                else:
+                    first_half = {op: True for op in ops_to_keep}
+                    second_half = {op: True for op in ops_to_move}
             
             # Replace with two new subgraphs
             subgraphs[subgraph_to_split] = None
@@ -358,6 +388,10 @@ class GraphSplitter:
             
             # Rebuild dependencies
             subgraph_deps = self._build_dependencies(subgraph_io)
+        
+        if not self._is_acyclic(subgraph_deps):
+            final_cycle = self._find_cycle(subgraph_deps)
+            print(f"Warning: Cycles still exist after {attempts} split attempts")
         
         # Compact the IDs to remove None entries
         return self._compact_subgraphs(subgraphs, subgraph_io, subgraph_deps)
@@ -424,6 +458,31 @@ class GraphSplitter:
             sg_io["outputs"] = updated_outputs
         
         return compact_subgraphs, compact_io, compact_deps
+    
+    def _print_subgraph_stats(self, subgraphs):
+        """Print subgraph statistics."""
+        from collections import Counter
+        
+        mirage_subgraphs = [(sg_id, sg) for sg_id, (sg, sg_type) in enumerate(subgraphs) if sg_type == "mirage"]
+        pytorch_subgraphs = [(sg_id, sg) for sg_id, (sg, sg_type) in enumerate(subgraphs) if sg_type == "pytorch"]
+        
+        # Count by size
+        mirage_sizes = Counter(len(sg) for _, sg in mirage_subgraphs)
+        pytorch_sizes = Counter(len(sg) for _, sg in pytorch_subgraphs)
+        
+        print(f"Total subgraphs: {len(subgraphs)} ({len(mirage_subgraphs)} mirage, {len(pytorch_subgraphs)} pytorch)")
+        
+        if mirage_sizes:
+            print(f"Mirage subgraph sizes: {dict(sorted(mirage_sizes.items()))}")
+            total_mirage_ops = sum(len(sg) for _, sg in mirage_subgraphs)
+            avg_mirage = total_mirage_ops / len(mirage_subgraphs) if mirage_subgraphs else 0
+            print(f"  Total mirage ops: {total_mirage_ops}, Avg: {avg_mirage:.1f} ops/subgraph")
+        
+        if pytorch_sizes:
+            print(f"PyTorch subgraph sizes: {dict(sorted(pytorch_sizes.items()))}")
+            total_pytorch_ops = sum(len(sg) for _, sg in pytorch_subgraphs)
+            avg_pytorch = total_pytorch_ops / len(pytorch_subgraphs) if pytorch_subgraphs else 0
+            print(f"  Total pytorch ops: {total_pytorch_ops}, Avg: {avg_pytorch:.1f} ops/subgraph")
     
     def _print_subgraph_info(self, subgraphs, subgraph_io):
         """Print detailed subgraph information."""
@@ -546,16 +605,6 @@ def process_operator_graph(operators: Dict, IGNORE_OPS: Set[str] = None, UNSUPPO
     print(f"  - Mirage subgraphs: {mirage_subgraphs_count}")
     print(f"  - PyTorch subgraphs: {pytorch_subgraphs_count}")
     print(f"  - Total subgraphs: {len(subgraphs)}")
-
-    
-    for sg_id, (sg, sg_type) in enumerate(subgraphs):
-        op_type = "mirage" if sg_type == "mirage" else "pytorch"
-        print(f"Subgraph {sg_id} ({op_type}) : {len(sg)} operators")
-        
-        tensor_inputs = subgraph_io[sg_id].get("tensor_inputs", {})
-        if tensor_inputs:
-            total_tensors = sum(len(indices) for indices in tensor_inputs.values())
-            print(f"  - Has {total_tensors} tensor inputs")
     
     # print("\nAdjacency List Representation (with Tensor Shapes and Connections):")
     # for sg_id, adj_list in enumerate(adjacency_list_subgraphs):
@@ -659,17 +708,7 @@ def remove_ignored_operators(operators_graph: Dict, IGNORE_OPS: Set[str]) -> Dic
     if not ignored_ops:
         return operators_graph
     
-    # Group operators by type for better logging
-    op_types = {}
-    for op in ignored_ops:
-        op_type = op.fn.lower() if isinstance(op.fn, str) else op.fn.lower()
-        if op_type not in op_types:
-            op_types[op_type] = 0
-        op_types[op_type] += 1
-    
-    print(f"Removing {len(ignored_ops)} ignored operators:")
-    for op_type, count in op_types.items():
-        print(f"  - {op_type}: {count} operators")
+    print(f"Removing {len(ignored_ops)} ignored operators")
     
     # CRITICAL PART: Find all connections that need bypass 
     # For each output operator that takes input from an ignored operator,

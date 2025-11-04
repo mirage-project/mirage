@@ -4,21 +4,30 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+import torch
+import torch.nn as nn
+
 class TestMLP(nn.Module):
     def __init__(self):
         super().__init__()
-        self.fc1 = nn.Linear(1024, 8192, dtype=torch.float16)
-        self.fc2 = nn.Linear(8192, 16384, dtype=torch.float16)
-        self.fc3 = nn.Linear(16384, 16384, dtype=torch.float16)
-        self.fc4 = nn.Linear(16384, 8192, dtype=torch.float16)
-        self.fc5 = nn.Linear(8192, 1024, dtype=torch.float16)
+        # Define weights manually instead of nn.Linear layers
+        self.w1 = nn.Parameter(torch.empty(1024, 8192, dtype=torch.float16))
+        self.w2 = nn.Parameter(torch.empty(8192, 16384, dtype=torch.float16))
+        self.w3 = nn.Parameter(torch.empty(16384, 16384, dtype=torch.float16))
+        self.w4 = nn.Parameter(torch.empty(16384, 8192, dtype=torch.float16))
+        self.w5 = nn.Parameter(torch.empty(8192, 1024, dtype=torch.float16))
+        
+        # Initialize weights similar to Linear
+        for w in [self.w1, self.w2, self.w3, self.w4, self.w5]:
+            nn.init.xavier_uniform_(w)
 
     def forward(self, x):
-        x = torch.relu(self.fc1(x))
-        x = torch.relu(self.fc2(x))
-        x = torch.relu(self.fc3(x))
-        x = torch.relu(self.fc4(x))
-        x = torch.sigmoid(self.fc5(x))
+        # Using torch.matmul instead of nn.Linear
+        x = torch.tanh(torch.matmul(x, self.w1))
+        x = torch.matmul(x, self.w2)
+        x = torch.matmul(x, self.w3)
+        x = torch.tanh(torch.matmul(x, self.w4))
+        x = torch.sigmoid(torch.matmul(x, self.w5))
         return x
 
 class TransformerBlock(nn.Module):
@@ -29,65 +38,86 @@ class TransformerBlock(nn.Module):
         self.n_heads = n_heads
         self.head_dim = d_model // n_heads
 
-        self.wq = nn.Linear(d_model, d_model, bias=False)
-        self.wk = nn.Linear(d_model, d_model, bias=False)
-        self.wv = nn.Linear(d_model, d_model, bias=False)
-        self.proj = nn.Linear(d_model, d_model, bias=False)
+        self.wq   = nn.Linear(d_model, d_model, bias=False, dtype=torch.float16)
+        self.wk   = nn.Linear(d_model, d_model, bias=False, dtype=torch.float16)
+        self.wv   = nn.Linear(d_model, d_model, bias=False, dtype=torch.float16)
+        self.proj = nn.Linear(d_model, d_model, bias=False, dtype=torch.float16)
 
-        self.rms1 = nn.RMSNorm(d_model, eps=1e-6)
-        self.rms2 = nn.RMSNorm(d_model, eps=1e-6)
+        self.rms1 = nn.RMSNorm(d_model, eps=1e-6, dtype=torch.float16)
+        self.rms2 = nn.RMSNorm(d_model, eps=1e-6, dtype=torch.float16)
 
         hidden = ff_mult * d_model
-        self.fc1 = nn.Linear(d_model, hidden, bias=False)
-        self.fc2 = nn.Linear(hidden, d_model, bias=False)
+        self.fc1 = nn.Linear(d_model, hidden, bias=False, dtype=torch.float16)
+        self.fc2 = nn.Linear(hidden, d_model, bias=False, dtype=torch.float16)
 
     def forward(self, x):
         # --- Attention ---
         h = self.rms1(x)
-        q = self.wq(h)
-        k = self.wk(h)
-        v = self.wv(h)
+        q = self.wq(h)  # (B, T, D)
+        k = self.wk(h)  # (B, T, D)
+        v = self.wv(h)  # (B, T, D)
 
         B, T, _ = q.shape
-        q = q.view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
-        k = k.view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
-        v = v.view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
+        H, Hd = self.n_heads, self.head_dim
 
-        attn = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
+        # reshape to (B, H, T, Hd) explicitly
+        q = q.view(B, T, H, Hd).transpose(1, 2).contiguous()
+        k = k.view(B, T, H, Hd).transpose(1, 2).contiguous()
+        v = v.view(B, T, H, Hd).transpose(1, 2).contiguous()
+
+        # attn logits: (B, H, T, T)
+        attn = torch.matmul(q, k.transpose(-2, -1))
+
+        # explicit scaling: create (1,1,1,1) tensor and expand to attn.shape
+        scale = (1.0 / math.sqrt(Hd))
+        scale = torch.tensor(scale, dtype=attn.dtype, device=attn.device).view(1, 1, 1, 1)
+        attn = attn * scale.expand_as(attn)
+
         attn = attn.softmax(dim=-1)
-        a = torch.matmul(attn, v)
-        a = a.transpose(1, 2).reshape(B, T, self.d_model)
-        x = x + self.proj(a)
 
+        # attention output: (B, H, T, Hd)
+        a = torch.matmul(attn, v)
+
+        # back to (B, T, D)
+        a = a.transpose(1, 2).contiguous().view(B, T, self.d_model)
+        x = x + self.proj(a)
         # --- Feedforward ---
         h = self.rms2(x)
         h = self.fc2(F.silu(self.fc1(h)))
         return x + h
 
+
 class TestTransformer(nn.Module):
     """Simplified large transformer for inference benchmarking (RMSNorm)."""
     def __init__(self, vocab_size=16384, max_seq_len=2048,
-                 d_model=4096, n_heads=32, n_layers=6, ff_mult=4):
+                 d_model=4096, n_heads=32, n_layers=1, ff_mult=4):
         super().__init__()
         self.vocab_size = vocab_size
-        self.tok_emb = nn.Embedding(vocab_size, d_model)
-        self.pos_emb = nn.Embedding(max_seq_len, d_model)
+        self.tok_emb = nn.Embedding(vocab_size, d_model, dtype=torch.float16)
+        self.pos_emb = nn.Embedding(max_seq_len, d_model, dtype=torch.float16)
         self.blocks = nn.ModuleList(
             [TransformerBlock(d_model, n_heads, ff_mult) for _ in range(n_layers)]
         )
-        self.rms_f = nn.RMSNorm(d_model, eps=1e-6)
-        self.head = nn.Linear(d_model, vocab_size, bias=False)
+        self.rms_f = nn.RMSNorm(d_model, eps=1e-6, dtype=torch.float16)
+        self.head = nn.Linear(d_model, vocab_size, bias=False, dtype=torch.float16)
 
     def forward(self, input_ids):
         if input_ids.dtype != torch.long:
             input_ids = input_ids.long()
-        _, T = input_ids.shape
 
-        # dummy positions, eliminates Range and Unsqueeze ops
-        pos = torch.ones((1, T), dtype=torch.long)
+        B, T = input_ids.shape
+        device = input_ids.device
 
-        x = self.tok_emb(input_ids) + self.pos_emb(pos)
+        # dummy positions = 1 for all tokens, shape (T,)
+        pos = torch.ones((1, T), dtype=torch.long, device=device)
+        pos_e = self.pos_emb(pos)                 # (1, T, D)
+        pos_e = pos_e.expand(B, T, -1).contiguous()  # (B, T, D) explicit
+
+        tok_e = self.tok_emb(input_ids)           # (B, T, D)
+        x = tok_e + pos_e                         # same shape, no implicit broadcast
+
         for blk in self.blocks:
             x = blk(x)
+
         x = self.rms_f(x)
         return self.head(x)
