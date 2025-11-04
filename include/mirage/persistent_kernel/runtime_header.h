@@ -191,7 +191,7 @@ struct alignas(16) TaskDesc {
 #ifdef MPK_ENABLE_TMA
   void *input_tma_desc_ptrs[MAX_INPUTS_PER_TASK]
                            [mirage::config::MAX_TMA_DESC_PER_TENSOR];
-  void *output_tma_desc_ptrs[MAX_INPUTS_PER_TASK]
+  void *output_tma_desc_ptrs[MAX_OUTPUTS_PER_TASK]
                             [mirage::config::MAX_TMA_DESC_PER_TENSOR];
 #endif
   union {

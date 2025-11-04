@@ -794,7 +794,7 @@ if (threadIdx.x == 0) {
 #if 0
                 if (threadIdx.x == 0) {
                   printf("pred: %d, m_idx: %d, n_idx: %d, topk_idx: %d, fragC: %f, fragD: %f, tCgBias(i): %f, &tCgBias(i): %p\n",
-                         pred,
+                        pred,
                          m_idx,
                          n_idx,
                          topk_idx,
