@@ -569,7 +569,7 @@ class HybridModel:
         elif fn == "Constant":
             return op.kwargs["t"]
         elif fn == "Identity":
-            return inputs[0].clone().detach()
+            return inputs[0]
         else:
             raise NotImplementedError(f"PyTorch fallback for '{fn}' not implemented")
 

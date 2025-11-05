@@ -11,6 +11,8 @@ torch.set_num_threads(1)        # intra-op CPU threads
 torch.set_num_interop_threads(1)  # inter-op CPU threads
 
 import torch.nn as nn
+from torch.profiler import profile, ProfilerActivity, record_function
+
 from partition_graph import HybridModel, partition_graph_with_dp, partition_graph_with_in_ctx_partitions
 from testing_models import TestMLP, TestTransformer
 
@@ -19,7 +21,7 @@ BATCH_SIZE_MLP = 32
 INPUT_DIM_MLP = 1024
 
 # for test_transformer
-BATCH_SIZE_TRANSFORMER = 2
+BATCH_SIZE_TRANSFORMER = 1
 SEQ_LEN = 1024
 VOCAB_SIZE = 16384
 
@@ -68,9 +70,16 @@ def _benchmark_model(model: nn.Module | HybridModel,
         start.record()
         for it in range(iters):
             if it == iters - 1:
-                with cProfile.Profile() as pr:
-                    _ = model(x)
-                pr.dump_stats(f"{profile_name}_profile.prof")
+                with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+                             record_shapes=True,
+                             with_stack=True,
+                             profile_memory=True) as prof:
+                    with record_function(profile_name):
+                        _ = model(x)
+                print(f"\n=== Profiling Result for '{profile_name}' ===")
+                ps = prof.key_averages().table(sort_by="cpu_time_total", row_limit=20)
+                print(ps)
+                print("=== End of Profiling Result ===\n")
             else:
                 _ = model(x)
         end.record()
