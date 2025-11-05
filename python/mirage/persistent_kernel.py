@@ -671,8 +671,8 @@ class PersistentKernel:
         assert input.num_dims == 3 # (batch_size, num_expert_per_tok, 2 * intermediate_size)
         assert output.num_dims == 3 # (batch_size, num_expert_per_tok, intermediate_size)
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
-        tb_graph.new_input(input, (0, -1, -1), -1, True)
-        tb_graph.new_input(output, (0, -1, -1), -1, True)
+        tb_graph.new_input(input, (0, 1, -1), -1, True)
+        tb_graph.new_input(output, (0, 1, -1), -1, True)
         self.kn_graph.customized([input, output], tb_graph)
         self.kn_graph.register_task(tb_graph, "moe_silu_mul")
             

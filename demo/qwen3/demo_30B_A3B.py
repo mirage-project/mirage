@@ -611,7 +611,7 @@ if __name__ == "__main__":
             mpk.moe_silu_mul_layer(
                 input=mlp_mid,
                 output=silu_mul_out,
-                grid_dim=(mpk.max_num_batched_tokens, 1, 1),
+                grid_dim=(mpk.max_num_batched_tokens, num_experts_per_tok, 1),
                 block_dim=(256, 1, 1),
             )
             mpk.moe_w2_linear_layer(
