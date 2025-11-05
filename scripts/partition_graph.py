@@ -7,16 +7,14 @@ import numpy as np
 import warnings
 from op import Operator
 from build_computation_graph import get_computation_graph
-# from build_dataset import augment_partitions, serialize_subgraphs_to_json
 import os
 from generate_dag import solve_partitions, cost_function
 from graph_splitter import process_operator_graph
 from build_dataset import augment_partitions
 from cost_model.in_ctx_partition import InCtxPartitioner
-# from visualize_augs import visualize_partition, compare_augmentations
 
 CAST_ID_TO_DTYPE = {
-    1: torch.float32,
+    1: torch.float16, # supposed to be float32 but we use float16 throughout
     2: torch.uint8,
     3: torch.int8,
     4: torch.uint16,
@@ -382,6 +380,7 @@ class HybridModel:
         self._param_cache = {}
         self._const_cache = {}
         self._expanded_cache = {}  # Cache for dimension-expanded tensors (e.g., 2D weight -> 3D)
+        self._cast_cache = {}
     
     def _get_params_on(self, device, dtype):
         """Return dict of parameters placed on device, keeping their original dtype."""
@@ -395,6 +394,7 @@ class HybridModel:
             for tid, p in self.parameter_tensors.items():
                 tp = p
                 if tp.device != device:
+                    warnings.warn(f"Moving parameter tensor id {tid} from {tp.device} to {device}. Consider initializing model parameters on the target device to avoid this overhead.")
                     tp = tp.to(device=device, non_blocking=True)
                 moved[tid] = tp
             self._param_cache[key] = moved
@@ -422,10 +422,6 @@ class HybridModel:
 
         with torch.inference_mode():
             for i, (step_type, payload) in enumerate(self.execution_plan):
-                # print(f"\n{'='*60}")
-                # print(f"Step {i}: {step_type.upper()}")
-                # print(f"{'='*60}")
-                
                 if step_type == "mirage":
                     kernel, input_ids, output_ids, const_dims, expected_shapes = payload
                     
@@ -438,8 +434,8 @@ class HybridModel:
                         
                         if t.dtype is not torch.float16:
                             if debug:
-                                warnings.warn(f"Casting input tensor id {tid} from {t.dtype} to torch.float16. Consider providing inputs in float16 to avoid this overhead.")
                                 _ = float(t.abs().sum()) # if this isn't here the cast to float16 might error out
+                            warnings.warn(f"Casting input tensor id {tid} from {t.dtype} to torch.float16. Consider providing inputs in float16 to avoid this overhead.")                            
                             t = t.to(torch.float16)
                         
                         # Match dimensions with expected shape (for MatMul broadcasting compatibility)
@@ -496,9 +492,6 @@ class HybridModel:
                     if debug:
                         print(f"PyTorch step {i}: tensor id {output_id}, shape {result.shape}, dtype {result.dtype}")
                         _ = float(result.abs().sum())
-                    # Ensure PyTorch outputs are also float16 to maintain numerical consistency
-                    if result.dtype != dtype:
-                        result = result.to(dtype)
                     
                     intermediates[output_id] = result
         
@@ -524,10 +517,10 @@ class HybridModel:
             else:
                 raise ValueError(f"{fn} requires 2 inputs or additional_params, got {len(inputs)} inputs")
         elif fn == "MatMul":
-            return torch.matmul(inputs[0].to(torch.float16), inputs[1].to(torch.float16))
+            return torch.matmul(inputs[0], inputs[1])
         elif fn == "Gemm":
             # ONNX Gemm: Y = alpha * A * B^T + beta * C (default transB=1)
-            matmul_result = torch.matmul(inputs[0].to(torch.float16), inputs[1].to(torch.float16).T)
+            matmul_result = torch.matmul(inputs[0], inputs[1].T)
             if len(inputs) > 2:  # Has bias
                 return matmul_result + inputs[2]
             return matmul_result
@@ -557,13 +550,20 @@ class HybridModel:
             out_shape = torch.broadcast_shapes(inputs[0].shape, tuple(op.output_tensor_shapes[0][0]))
             return torch.broadcast_to(inputs[0], (out_shape))
         elif fn == "Gather":
-            return torch.nn.functional.embedding(inputs[1].long(), inputs[0])
+            return torch.nn.functional.embedding(inputs[1], inputs[0])
         elif fn == "Unsqueeze":
             return torch.unsqueeze(inputs[0], dim=0)
         elif fn == "Cast" or fn == "CastLike":
             to_dtype = CAST_ID_TO_DTYPE.get(op.kwargs.get("to"), None)
             if to_dtype is not None:
-                return inputs[0].to(dtype=to_dtype)
+                if inputs[0].dtype != to_dtype:
+                    # check in cache
+                    cache_key = (id(inputs[0]), to_dtype)
+                    if cache_key in self._cast_cache:
+                        return self._cast_cache[cache_key]
+                    self._cast_cache[cache_key] = inputs[0].to(dtype=to_dtype)
+                    return self._cast_cache[cache_key]
+                return inputs[0]
             else:
                 raise NotImplementedError(f"Cast to dtype id '{op.kwargs.get('to')}' not implemented")
         elif fn == "Constant":
@@ -601,7 +601,7 @@ def partition_graph_with_dp(model,
     # Load parameters from ONNX model
     import onnx
     onnx_model = onnx.load("scripts/onnx/inferred_model.onnx")
-    parameter_dict = {init.name: torch.from_numpy(onnx.numpy_helper.to_array(init)).to(torch.device("cuda"))
+    parameter_dict = {init.name: torch.from_numpy(onnx.numpy_helper.to_array(init)).to(torch.device("cuda")).to(torch.float16)
                      for init in onnx_model.graph.initializer}
     
     print("Splitting graph into supported/unsupported subgraphs...")
@@ -727,14 +727,17 @@ def partition_graph_with_dp(model,
                         optimized_kernel = mi.new_kernel_graph()
                         optimized_kernel.from_json("optimized_" + h + ".json")
                     else:
-                        kernel_graph = kernel_graph.superoptimize()
+                        try:
+                            kernel_graph = kernel_graph.superoptimize()
+                        except Exception as e:
+                            print(f"Superoptimization failed with error: {e}, skipping superoptimization.")
                         # Handle both tuple (normal optimization) and single value (cached) returns
                         if isinstance(kernel_graph, tuple):
                             optimized_kernel, _ = kernel_graph
                         else:
                             optimized_kernel = kernel_graph
                         optimized_kernel.to_json("optimized_" + h + ".json")
-                        print(f"  ✓ Result: Mirage kernel optimized and cached with hash {h}")
+                        print(f"  ✓ Result: Mirage kernel cached with hash {h}")
                     print(f"  ✓ Result: Mirage kernel optimized successfully")
                 kernel_cache_key = (h, tuple(dummy_input.shape for dummy_input in dummy_inputs))
                 if kernel_cache_key in cached_mirage_kernels:

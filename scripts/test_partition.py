@@ -7,6 +7,9 @@ import argparse
 import cProfile, pstats
 import time
 import torch
+torch.set_num_threads(1)        # intra-op CPU threads
+torch.set_num_interop_threads(1)  # inter-op CPU threads
+
 import torch.nn as nn
 from partition_graph import HybridModel, partition_graph_with_dp, partition_graph_with_in_ctx_partitions
 from testing_models import TestMLP, TestTransformer
@@ -151,9 +154,6 @@ def test_hybrid_model(mirage_root, dataset_root, dry_run: bool = True, cost_mode
             print(f"\n  ✅ PASSED: Outputs match within tolerance (tol={tol})!")
         else:
             print(f"\n  ❌ FAILED: Differences too large")
-            print(f"     Original:  {original_output[0, :3]}")
-            print(f"     Hybrid:    {hybrid_output[0, :3]}")
-
     except Exception as e:
         print(f"✗ Execution failed: {e}")
         import traceback

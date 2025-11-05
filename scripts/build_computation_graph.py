@@ -193,7 +193,7 @@ def parse_onnx_model(model, unique_operators):
             else:
                 raise TypeError(f"Unsupported constant attribute type: {attr.type}")
             # convert scalar or array to torch.Tensor
-            value = torch.as_tensor(value, dtype=torch.float32, device="cuda")
+            value = torch.as_tensor(value, dtype=torch.float16, device="cuda")
             kwargs["t"] = value
         elif node.op_type == "Transpose":
             kwargs["perm"] = list(node.attribute[0].ints)
