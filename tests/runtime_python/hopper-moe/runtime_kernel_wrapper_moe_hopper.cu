@@ -190,7 +190,7 @@ void launch_moe_linear_sm90(int const expert_offset,
   cute::Layout layout_expert_mask = cute::make_layout(
       cute::make_shape(NUM_EXPERTS), cute::make_stride(cute::Int<1>{}));
   cute::Tensor mMask = cute::make_tensor(
-      cute::make_gmem_ptr(static_cast<bool *>(mpk_expert_mask_ptr)),
+      cute::make_gmem_ptr(static_cast<int8_t *>(mpk_expert_mask_ptr)),
       layout_expert_mask);
 
   // Output

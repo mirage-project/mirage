@@ -31,7 +31,7 @@ for reduction_size in reduction_sizes:
         output = torch.zeros(batch_size, num_topk, output_size, device="cuda", dtype=torch.bfloat16)
         
         mpk_routing_indices = torch.zeros((num_experts, batch_size), device="cuda", dtype=torch.int32)
-        mpk_expert_mask = torch.zeros((num_experts), device="cuda", dtype=torch.bool)
+        mpk_expert_mask = torch.zeros((num_experts), device="cuda", dtype=torch.int8)
         
         for token_idx in range(batch_size):
             for topk_idx in range(num_topk):

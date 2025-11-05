@@ -2267,7 +2267,7 @@ code.e("cute::Layout layout_expert_mask = cute::make_layout(cute::make_shape($),
        "cute::make_stride(cute::Int<1>{}));",
        num_experts);
 code.e("cute::Tensor mMask = "
-       "cute::make_tensor(cute::make_gmem_ptr(static_cast<cute::int32_t*>("
+       "cute::make_tensor(cute::make_gmem_ptr(static_cast<uint8_t*>("
        "task_desc->input_ptrs[3])), layout_expert_mask);");
 // Output Tensor setup
 code.e("cute::Layout layout_output = cute::make_layout(cute::make_shape($, $, $), "
