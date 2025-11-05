@@ -468,6 +468,21 @@ if (threadIdx.x == 0) {
     }
 #endif
 
+  // fetch expert mask and preprocessing
+  int32_t activated_expert_idx[(BATCH_SIZE * NUM_TOPK + EXPERT_STRIDE - 1) / EXPERT_STRIDE];
+  int32_t total_activated_experts = 0;
+  int32_t num_activated_experts = 0;
+
+  for(int expert_idx = 0; expert_idx < NUM_EXPERTS; ++expert_idx) {
+    int32_t expert_mask = mMask[expert_idx];
+    if (expert_mask == 1 && (total_activated_experts) % EXPERT_STRIDE == expert_offset) {
+      activated_expert_idx[num_activated_experts] = expert_idx;
+      num_activated_experts += 1;
+    }
+    total_activated_experts += expert_mask;
+  }
+  __syncthreads();
+
   int k_tile_count = REDUCTION_SIZE / 64;
 
   if (warp_idx >= 4) {
@@ -506,10 +521,12 @@ if (threadIdx.x == 0) {
     int total_k_tile_count = 0;
     int total_expert_count = 0;
 #pragma unroll 1
-    for (int expert_idx = 0; expert_idx < NUM_EXPERTS; ++expert_idx) {
-      total_expert_count += static_cast<int>(sMask.at(expert_idx));
-      if (sMask.at(expert_idx) == 1 &&
-          (total_expert_count - 1) % EXPERT_STRIDE == expert_offset) {
+    // for (int expert_idx = 0; expert_idx < NUM_EXPERTS; ++expert_idx) {
+    //   total_expert_count += static_cast<int>(sMask.at(expert_idx));
+      // if (sMask.at(expert_idx) == 1 &&
+      //     (total_expert_count - 1) % EXPERT_STRIDE == expert_offset) {
+    for (int activated_expert_offset = 0; activated_expert_offset < num_activated_experts; ++activated_expert_offset) {
+      int32_t expert_idx = activated_expert_idx[activated_expert_offset];
         cute::Tensor tRoutingIndex = mRoutingIndices(expert_idx, cute::_);
 #pragma unroll 1
         for (int m_tile = 0; m_tile < cute::size<2>(gA); ++m_tile) {
@@ -602,7 +619,7 @@ if (threadIdx.x == 0) {
             } // end for k_tile
           }   // end for n_tile
         }     // end for m_tile
-      }       // end if mask
+      // }       // end if mask
     }         // end for expert_idx
   } else if (warp_idx < 4) {
     // MMA warp (4)
@@ -611,11 +628,14 @@ if (threadIdx.x == 0) {
     int num_tiles_executed = 0;
     int total_expert_count = 0;
 #pragma unroll 1
-    for (int expert_idx = 0; expert_idx < NUM_EXPERTS; ++expert_idx) {
-      total_expert_count += static_cast<int>(sMask.at(expert_idx));
+    // for (int expert_idx = 0; expert_idx < NUM_EXPERTS; ++expert_idx) {
+      // total_expert_count += static_cast<int>(sMask.at(expert_idx));
+    for (int activated_expert_offset = 0; activated_expert_offset < num_activated_experts; ++activated_expert_offset) {
+      int32_t expert_idx = activated_expert_idx[activated_expert_offset];
+      
       cute::Tensor tRoutingIndex = mRoutingIndices(expert_idx, cute::_);
-      if (sMask.at(expert_idx) == 1 &&
-          (total_expert_count - 1) % EXPERT_STRIDE == expert_offset) {
+      // if (sMask.at(expert_idx) == 1 &&
+      //     (total_expert_count - 1) % EXPERT_STRIDE == expert_offset) {
 #pragma unroll 1
         for (int m_tile = 0; m_tile < cute::size<2>(gA); ++m_tile) {
           const int m_base = m_tile * OUTPUT_ATOM_SIZE;
@@ -834,7 +854,7 @@ if (threadIdx.x == 0) {
             num_tiles_executed++;
           } // end for n_tile
         }   // end for m_tile
-      }     // end if mask
+      // }     // end if mask
     }       // end for expert_idx
   }
 
