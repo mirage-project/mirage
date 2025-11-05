@@ -38,7 +38,8 @@ template <class TypeA, // Tensor A data type
           class ASmemLayout,
           class BSmemLayout,
           class BSmemCpLayout,
-          int Num_AB_Stage>
+          int Num_AB_Stage,
+          int NUM_EXPERTS>
 struct MoESharedStorage {
   alignas(128) cute::ArrayEngine<TypeA, cute::cosize_v<ASmemLayout>> A;
   alignas(128) cute::ArrayEngine<TypeB, cute::cosize_v<BSmemLayout>> B;
@@ -46,6 +47,8 @@ struct MoESharedStorage {
   alignas(16) cute::uint64_t a_full_mbar_ptr[Num_AB_Stage];
   alignas(16) cute::uint64_t b_full_mbar_ptr[Num_AB_Stage];
   alignas(16) cute::uint64_t ab_empty_mbar_ptr[Num_AB_Stage];
+
+  alignas(16) uint8_t sMask[NUM_EXPERTS];
 
   CUTE_DEVICE constexpr auto tensor_sA() {
     return cute::make_tensor(cute::make_smem_ptr(A.begin()), ASmemLayout{});
@@ -95,6 +98,7 @@ __device__ __forceinline__ void
 
   using TypeAcc = float;
   constexpr int NUM_THREAD_PER_WARPGROUP = 128;
+  const int idx_in_warp = threadIdx.x & 31;
   // constexpr int CONSUMER_SYNC_BARRIER_ID = 5;
 
   // Define TileShape and AtomLayout
@@ -102,6 +106,9 @@ __device__ __forceinline__ void
   using TileShape_MNK = decltype(cute::make_shape(
       cute::Int<MMA_M>{}, cute::Int<MMA_N>{}, cute::Int<MMA_K>{}));
   using AtomLayoutMNK = cute::Layout<cute::Shape<cute::_1, cute::_1, cute::_1>>;
+  // Smem layout for mask
+  // NOTE(Yu): No swizzling for mask
+  using SmemLayoutMask = smem_tma<uint8_t, 0, 0, 0, 1, 64, 2>;
 
   // Create TiledMma type and instance
   auto tiled_mma =
@@ -151,16 +158,14 @@ __device__ __forceinline__ void
       cute::Step<
           cute::_1,
           cute::X,
-          cute::_1>{}); // ArithTuple(_0,_0) o
-                        // (_128,_64,1,32,128):(_1@1,_1@0,_128@1,_64@0,_128@1)
+          cute::_1>{});
   cute::Tensor gB = cute::local_tile(
       mInput,
       mma_tiler,
       mma_coord,
       cute::Step<cute::X,
                  cute::_1,
-                 cute::_1>{}); // gmem_ptr[16b](0x792c0b000000) o
-                               // (_16,_64,1,32):(2048,_1,32768,_64)
+                 cute::_1>{});
   cute::Tensor gBias = cute::local_tile(
       mBias, cd_tiler, mma_coord, cute::Step<cute::_1, cute::_1, cute::X>{});
 
@@ -327,13 +332,15 @@ if (threadIdx.x == 0) {
                                          decltype(sA_layout),
                                          decltype(sB_layout),
                                          decltype(sB_cp_layout),
-                                         NUM_AB_STAGE>;
+                                         NUM_AB_STAGE,
+                                         NUM_EXPERTS>;
 
   extern __shared__ char shared_memory[];
   uintptr_t aligned_smem =
       (reinterpret_cast<uintptr_t>(shared_memory) + 127) / 128 * 128;
   SharedStorage &shared_storage =
       *reinterpret_cast<SharedStorage *>(aligned_smem);
+  SmemLayoutMask sMask(shared_storage.sMask);
 #if 0
   T_ *shared_output =
       (T_ *)(((uintptr_t)aligned_smem + sizeof(SharedStorage) + 1023) / 1024 *
@@ -341,6 +348,12 @@ if (threadIdx.x == 0) {
   using OutputSmem = smem_tma<T_, 0, 0, 0, 16, 64, 1>;
   OutputSmem output_smem(shared_output);
 #endif
+
+  // Initialize the mask in shared memory
+  for (int i = threadIdx.x; i < NUM_EXPERTS; i += blockDim.x) {
+    sMask.at(i) = mMask(i);
+  }
+  __syncthreads();
   // Initialize the barriers in shared memory
   if (warp_idx == 0) {
     cutlass::arch::detail::initialize_barrier_array_aligned<
@@ -492,12 +505,15 @@ if (threadIdx.x == 0) {
 
     int total_k_tile_count = 0;
     int total_expert_count = 0;
+#pragma unroll 1
     for (int expert_idx = 0; expert_idx < NUM_EXPERTS; ++expert_idx) {
-      total_expert_count += mMask(expert_idx);
-      if (mMask(expert_idx) == 1 &&
+      total_expert_count += static_cast<int>(sMask.at(expert_idx));
+      if (sMask.at(expert_idx) == 1 &&
           (total_expert_count - 1) % EXPERT_STRIDE == expert_offset) {
         cute::Tensor tRoutingIndex = mRoutingIndices(expert_idx, cute::_);
+#pragma unroll 1
         for (int m_tile = 0; m_tile < cute::size<2>(gA); ++m_tile) {
+#pragma unroll 1
           for (int n_tile = 0; n_tile < cute::size<2>(gB); ++n_tile) {
             int num_prev_k_blk = total_k_tile_count;
             total_k_tile_count += k_tile_count;
@@ -512,7 +528,7 @@ if (threadIdx.x == 0) {
                 shared_storage.ab_empty_mbar_ptr[smem_wr_buffer],
                 tma_wr_ab_empty_phase);
 
-            CUTE_UNROLL
+#pragma unroll 3
             for (int k_tile = 0; k_tile < k_tile_count; ++k_tile) {
 
               int tma_wr_k_tile_next = tma_wr_k_tile + 1;
@@ -594,13 +610,15 @@ if (threadIdx.x == 0) {
     int total_k_tile_count = 0;
     int num_tiles_executed = 0;
     int total_expert_count = 0;
-
+#pragma unroll 1
     for (int expert_idx = 0; expert_idx < NUM_EXPERTS; ++expert_idx) {
-      total_expert_count += mMask(expert_idx);
+      total_expert_count += static_cast<int>(sMask.at(expert_idx));
       cute::Tensor tRoutingIndex = mRoutingIndices(expert_idx, cute::_);
-      if (mMask(expert_idx) == 1 &&
+      if (sMask.at(expert_idx) == 1 &&
           (total_expert_count - 1) % EXPERT_STRIDE == expert_offset) {
+#pragma unroll 1
         for (int m_tile = 0; m_tile < cute::size<2>(gA); ++m_tile) {
+#pragma unroll 1
           for (int n_tile = 0; n_tile < cute::size<2>(gB); ++n_tile) {
 
             int num_prev_k_blk = total_k_tile_count;
@@ -626,7 +644,7 @@ if (threadIdx.x == 0) {
             cute::clear(accum);
             // Initialize the accumulator to zero
             tiled_mma.accumulate_ = cute::GMMA::ScaleOut::Zero;
-
+#pragma unroll 1
             for (int k_tile = 0; k_tile < k_tile_count; ++k_tile) {
               int mma_rd_k_tile_next = mma_rd_k_tile + 1;
               int smem_rd_buffer_next =
@@ -694,6 +712,7 @@ if (threadIdx.x == 0) {
               {
                 // Perform MMA operation
                 cute::warpgroup_arrive();
+#pragma unroll 3
                 for (int k_block = 0; k_block < cute::size<2>(tCrA);
                      ++k_block) {
                   cute::gemm(tiled_mma,
@@ -738,12 +757,6 @@ if (threadIdx.x == 0) {
               // NOTE(Yu): thread_mma.partition_C may not partition it to correct layout, this should be fixed if we want to use partition provided by cutlass
             auto tCgBias = thread_mma.partition_C(gBiasTile);
 
-            // if constexpr (!NOBIAS) {
-            //   CUTE_UNROLL
-            //   for (int i = 0; i < tCgBias.size(); i++) {
-            //     tCgBias(i) = TypeAcc_to_TypeC(accum(i));
-            //   }
-            // }
               if (threadIdx.x == 0) {
                 printf("gBiasTile: ");
                 cute::print(gBiasTile);
@@ -779,11 +792,11 @@ if (threadIdx.x == 0) {
               }
 #endif
 
-            for (int i = 0; i < MMA_N / 2; i++) {
-              int const idx_in_warp = threadIdx.x % 32;
+#pragma unroll 
+            for (int i = 0; i < (MMA_N >> 1); i++) {
               int m_idx =
-                  (warp_idx % 4) * 16 + idx_in_warp / 4 + (i % 4 / 2) * 8;
-              int n_idx = i / 4 * 8 + idx_in_warp % 4 * 2 + i % 2;
+                  ((warp_idx & 3) << 4) + (idx_in_warp >> 2) + (((i & 3) >> 1) << 3);
+              int n_idx = ((i >> 2) << 3) + ((idx_in_warp & 3) << 1) + (i & 1);
 
               int topk_idx = tRoutingIndex(n_idx);
 
