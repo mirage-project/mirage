@@ -618,6 +618,7 @@ if (threadIdx.x == 0) {
           (total_expert_count - 1) % EXPERT_STRIDE == expert_offset) {
 #pragma unroll 1
         for (int m_tile = 0; m_tile < cute::size<2>(gA); ++m_tile) {
+          const int m_base = m_tile * OUTPUT_ATOM_SIZE;
 #pragma unroll 1
           for (int n_tile = 0; n_tile < cute::size<2>(gB); ++n_tile) {
 
@@ -795,7 +796,7 @@ if (threadIdx.x == 0) {
 #pragma unroll 
             for (int i = 0; i < (MMA_N >> 1); i++) {
               int m_idx =
-                  ((warp_idx & 3) << 4) + (idx_in_warp >> 2) + (((i & 3) >> 1) << 3);
+                  ((warp_idx & 3) << 4) + (idx_in_warp >> 2) + (((i & 3) >> 1) << 3) + m_base;
               int n_idx = ((i >> 2) << 3) + ((idx_in_warp & 3) << 1) + (i & 1);
 
               int topk_idx = tRoutingIndex(n_idx);

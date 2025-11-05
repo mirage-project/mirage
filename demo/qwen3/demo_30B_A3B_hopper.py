@@ -426,13 +426,12 @@ if __name__ == "__main__":
             dtype=torch.bfloat16,
             device="cuda",
         )
-        mlp_mid = mpk.attach_input(torch_tensor=mlp_mid_torch, name="mlp_mid")
-        # mlp_mid = mpk.new_tensor(
-        #     dims=(args.max_num_batched_tokens, num_experts_per_tok, fused_outdim_2 // world_size),
-        #     dtype=mi.bfloat16,
-        #     name="mlp_mid",
-        #     io_category="cuda_tensor",
-        # )
+        mlp_mid = mpk.new_tensor(
+            dims=(args.max_num_batched_tokens, num_experts_per_tok, fused_outdim_2 // world_size),
+            dtype=mi.bfloat16,
+            name="mlp_mid",
+            io_category="cuda_tensor",
+        )
         silu_mul_out = mpk.new_tensor(
             dims=(args.max_num_batched_tokens, num_experts_per_tok, intermediate_size // world_size),
             dtype=mi.bfloat16,
