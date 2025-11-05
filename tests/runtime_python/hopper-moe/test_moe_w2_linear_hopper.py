@@ -27,12 +27,11 @@ for reduction_size in reduction_sizes:
         w = torch.randn((num_experts, output_size, reduction_size), device="cuda", dtype=torch.bfloat16)
         expert_score = torch.randn((batch_size, num_experts), device="cuda", dtype=torch.bfloat16)
         topk_expert_score, topk_expert_indices = torch.topk(expert_score, num_topk, dim=1)
-        expert_mask = torch.zeros((num_experts), device="cuda", dtype=torch.int32)
         residual = torch.randn(num_experts, batch_size, output_size, device="cuda", dtype=torch.bfloat16)
         output = torch.zeros(batch_size, num_topk, output_size, device="cuda", dtype=torch.bfloat16)
         
         mpk_routing_indices = torch.zeros((num_experts, batch_size), device="cuda", dtype=torch.int32)
-        mpk_expert_mask = torch.zeros((num_experts), device="cuda", dtype=torch.int32)
+        mpk_expert_mask = torch.zeros((num_experts), device="cuda", dtype=torch.bool)
         
         for token_idx in range(batch_size):
             for topk_idx in range(num_topk):
