@@ -38,8 +38,10 @@ __device__ __forceinline__ void silu_mul_task_impl(void const *input_ptr,
     d_output[batch_idx * O_STRIDE + offset] =
         T(input_val / (1.0f + expf(-input_val))) * mul_val;
     // if(offset == 0){
-    //   printf("[LOG][MoE silu_mul] batch_idx: %d, hidden_idx: %d, input_value: %f, mul_val: %f, value: %f\n",
-    //              batch_idx, offset, input_val, float(mul_val), float(d_output[batch_idx * O_STRIDE + offset]));
+    //   printf("[LOG][MoE silu_mul] batch_idx: %d, hidden_idx: %d, input_value:
+    //   %f, mul_val: %f, value: %f\n",
+    //              batch_idx, offset, input_val, float(mul_val),
+    //              float(d_output[batch_idx * O_STRIDE + offset]));
     // }
   }
 }

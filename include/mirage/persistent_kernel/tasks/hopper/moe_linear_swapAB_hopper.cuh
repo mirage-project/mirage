@@ -22,6 +22,7 @@
 #include <cute/numeric/integral_constant.hpp> // Compile time in constants such as _1, _256 etc.
 #include <cute/tensor.hpp>                    // CuTe tensor implementation
 
+#include "../blackwell/utils.cuh"
 #include "../common/dmem_layout.cuh"
 #include "../common/utils.cuh"
 #include "../common/worker_config.h"
@@ -29,7 +30,6 @@
 #include "smem_layout_tma.cuh"
 #include "tma.cuh"
 #include "utils.cuh"
-#include "../blackwell/utils.cuh"
 namespace kernel {
 
 // MoE Linear task storage. The shared memory buffers for A, B, and C matrices.
@@ -98,7 +98,7 @@ __device__ __forceinline__ void
 
   using TypeAcc = float;
   constexpr int NUM_THREAD_PER_WARPGROUP = 128;
-  const int idx_in_warp = threadIdx.x & 31;
+  int const idx_in_warp = threadIdx.x & 31;
   // constexpr int CONSUMER_SYNC_BARRIER_ID = 5;
 
   // Define TileShape and AtomLayout
@@ -152,20 +152,9 @@ __device__ __forceinline__ void
                         cute::E<1>{} * cute::Int<OUTPUT_SIZE>{})));
 
   cute::Tensor gA = cute::local_tile(
-      mA,
-      mma_tiler,
-      mma_coord,
-      cute::Step<
-          cute::_1,
-          cute::X,
-          cute::_1>{});
+      mA, mma_tiler, mma_coord, cute::Step<cute::_1, cute::X, cute::_1>{});
   cute::Tensor gB = cute::local_tile(
-      mInput,
-      mma_tiler,
-      mma_coord,
-      cute::Step<cute::X,
-                 cute::_1,
-                 cute::_1>{});
+      mInput, mma_tiler, mma_coord, cute::Step<cute::X, cute::_1, cute::_1>{});
   cute::Tensor gBias = cute::local_tile(
       mBias, cd_tiler, mma_coord, cute::Step<cute::_1, cute::_1, cute::X>{});
 
@@ -469,19 +458,21 @@ if (threadIdx.x == 0) {
 #endif
 
   // fetch expert mask and preprocessing
-  int32_t activated_expert_idx[(BATCH_SIZE * NUM_TOPK + EXPERT_STRIDE - 1) / EXPERT_STRIDE];
+  int32_t activated_expert_idx[(BATCH_SIZE * NUM_TOPK + EXPERT_STRIDE - 1) /
+                               EXPERT_STRIDE];
   int32_t total_activated_experts = 0;
   int32_t num_activated_experts = 0;
 
-  if(threadIdx.x < NUM_EXPERTS) {
+  if (threadIdx.x < NUM_EXPERTS) {
     shared_storage.expert_mask[threadIdx.x] = mMask[threadIdx.x];
   }
 
   __syncthreads();
 
-  for(int expert_idx = 0; expert_idx < NUM_EXPERTS; ++expert_idx) {
+  for (int expert_idx = 0; expert_idx < NUM_EXPERTS; ++expert_idx) {
     int32_t expert_mask = shared_storage.expert_mask[expert_idx];
-    if (expert_mask == 1 && (total_activated_experts) % EXPERT_STRIDE == expert_offset) {
+    if (expert_mask == 1 &&
+        (total_activated_experts) % EXPERT_STRIDE == expert_offset) {
       activated_expert_idx[num_activated_experts] = expert_idx;
       num_activated_experts += 1;
     }
@@ -529,104 +520,105 @@ if (threadIdx.x == 0) {
 #pragma unroll 1
     // for (int expert_idx = 0; expert_idx < NUM_EXPERTS; ++expert_idx) {
     //   total_expert_count += static_cast<int>(sMask.at(expert_idx));
-      // if (sMask.at(expert_idx) == 1 &&
-      //     (total_expert_count - 1) % EXPERT_STRIDE == expert_offset) {
-    for (int activated_expert_offset = 0; activated_expert_offset < num_activated_experts; ++activated_expert_offset) {
+    // if (sMask.at(expert_idx) == 1 &&
+    //     (total_expert_count - 1) % EXPERT_STRIDE == expert_offset) {
+    for (int activated_expert_offset = 0;
+         activated_expert_offset < num_activated_experts;
+         ++activated_expert_offset) {
       int32_t expert_idx = activated_expert_idx[activated_expert_offset];
-        cute::Tensor tRoutingIndex = mRoutingIndices(expert_idx, cute::_);
+      cute::Tensor tRoutingIndex = mRoutingIndices(expert_idx, cute::_);
 #pragma unroll 1
-        for (int m_tile = 0; m_tile < cute::size<2>(gA); ++m_tile) {
+      for (int m_tile = 0; m_tile < cute::size<2>(gA); ++m_tile) {
 #pragma unroll 1
-          for (int n_tile = 0; n_tile < cute::size<2>(gB); ++n_tile) {
-            int num_prev_k_blk = total_k_tile_count;
-            total_k_tile_count += k_tile_count;
+        for (int n_tile = 0; n_tile < cute::size<2>(gB); ++n_tile) {
+          int num_prev_k_blk = total_k_tile_count;
+          total_k_tile_count += k_tile_count;
 
-            int tma_wr_k_tile = 0;
-            int smem_wr_buffer =
-                (num_prev_k_blk + tma_wr_k_tile) % NUM_AB_STAGE;
-            int tma_wr_ab_empty_phase =
-                (num_prev_k_blk + tma_wr_k_tile) / NUM_AB_STAGE % 2 ^ 1;
+          int tma_wr_k_tile = 0;
+          int smem_wr_buffer = (num_prev_k_blk + tma_wr_k_tile) % NUM_AB_STAGE;
+          int tma_wr_ab_empty_phase =
+              (num_prev_k_blk + tma_wr_k_tile) / NUM_AB_STAGE % 2 ^ 1;
 
-            bool peek_ab_empty_status = kernel::try_wait_barrier(
-                shared_storage.ab_empty_mbar_ptr[smem_wr_buffer],
-                tma_wr_ab_empty_phase);
+          bool peek_ab_empty_status = kernel::try_wait_barrier(
+              shared_storage.ab_empty_mbar_ptr[smem_wr_buffer],
+              tma_wr_ab_empty_phase);
 
 #pragma unroll 3
-            for (int k_tile = 0; k_tile < k_tile_count; ++k_tile) {
+          for (int k_tile = 0; k_tile < k_tile_count; ++k_tile) {
 
-              int tma_wr_k_tile_next = tma_wr_k_tile + 1;
-              int smem_wr_buffer_next =
-                  (num_prev_k_blk + tma_wr_k_tile_next) % NUM_AB_STAGE;
-              int tma_wr_ab_empty_phase_next = smem_wr_buffer_next == 0
-                                                   ? tma_wr_ab_empty_phase ^ 1
-                                                   : tma_wr_ab_empty_phase;
+            int tma_wr_k_tile_next = tma_wr_k_tile + 1;
+            int smem_wr_buffer_next =
+                (num_prev_k_blk + tma_wr_k_tile_next) % NUM_AB_STAGE;
+            int tma_wr_ab_empty_phase_next = smem_wr_buffer_next == 0
+                                                 ? tma_wr_ab_empty_phase ^ 1
+                                                 : tma_wr_ab_empty_phase;
 
-              // Wait for an empty buffer
-              if (!peek_ab_empty_status) {
-                cute::wait_barrier(
-                    shared_storage.ab_empty_mbar_ptr[smem_wr_buffer],
-                    tma_wr_ab_empty_phase);
+            // Wait for an empty buffer
+            if (!peek_ab_empty_status) {
+              cute::wait_barrier(
+                  shared_storage.ab_empty_mbar_ptr[smem_wr_buffer],
+                  tma_wr_ab_empty_phase);
+            }
+
+            // TMA for loading A
+            // only one thread will issue the tma instruction
+            if (threadIdx.x % NUM_THREAD_PER_WARPGROUP == 0) {
+              int tma_coords_A[2] = {k_tile * TILE_SIZE,
+                                     m_tile * OUTPUT_ATOM_SIZE +
+                                         expert_idx * OUTPUT_STRIDE};
+              weight_smem.set_ptr(shared_weight + smem_wr_buffer *
+                                                      OUTPUT_ATOM_SIZE *
+                                                      TILE_SIZE);
+              cute::set_barrier_transaction_bytes(
+                  shared_storage.a_full_mbar_ptr[smem_wr_buffer],
+                  tma_transaction_bytes_A);
+              tma_a.tma_cp_async(a_full_mbar_ptr[smem_wr_buffer],
+                                 weight_smem.base_ptr,
+                                 tma_coords_A);
+            }
+
+            // int32_t token_idx = n_tile * MMA_N + lane_idx /
+            // cp_async_group_size;
+            int32_t token_idx =
+                n_tile * MMA_N + tid_in_wg / cp_async_group_size;
+            int32_t topk_idx = tRoutingIndex(token_idx);
+            if (token_idx < BATCH_SIZE && topk_idx > 0) {
+              if constexpr (W13_LINEAR) {
+                cute::copy(
+                    copyB,
+                    tBgB(cute::_, cute::_, cute::_, cute::_, k_tile),
+                    tBsB(cute::_, cute::_, cute::_, cute::_, smem_wr_buffer));
+              } else {
+                cute::copy(
+                    copyB,
+                    tBgB(cute::_,
+                         cute::_,
+                         cute::_,
+                         cute::_,
+                         k_tile,
+                         topk_idx - 1),
+                    tBsB(cute::_, cute::_, cute::_, cute::_, smem_wr_buffer));
               }
+            }
 
-              // TMA for loading A
-              // only one thread will issue the tma instruction
-              if (threadIdx.x % NUM_THREAD_PER_WARPGROUP == 0) {
-                int tma_coords_A[2] = {k_tile * TILE_SIZE,
-                                       m_tile * OUTPUT_ATOM_SIZE +
-                                           expert_idx * OUTPUT_STRIDE};
-                weight_smem.set_ptr(shared_weight + smem_wr_buffer *
-                                                        OUTPUT_ATOM_SIZE *
-                                                        TILE_SIZE);
-                cute::set_barrier_transaction_bytes(
-                    shared_storage.a_full_mbar_ptr[smem_wr_buffer],
-                    tma_transaction_bytes_A);
-                tma_a.tma_cp_async(a_full_mbar_ptr[smem_wr_buffer],
-                                   weight_smem.base_ptr,
-                                   tma_coords_A);
-              }
+            cutlass::arch::cpasync_barrier_arrive_noinc(
+                &shared_storage.b_full_mbar_ptr[smem_wr_buffer]);
 
-              // int32_t token_idx = n_tile * MMA_N + lane_idx /
-              // cp_async_group_size;
-              int32_t token_idx =
-                  n_tile * MMA_N + tid_in_wg / cp_async_group_size;
-              int32_t topk_idx = tRoutingIndex(token_idx);
-              if (token_idx < BATCH_SIZE && topk_idx > 0) {
-                if constexpr (W13_LINEAR) {
-                  cute::copy(
-                      copyB,
-                      tBgB(cute::_, cute::_, cute::_, cute::_, k_tile),
-                      tBsB(cute::_, cute::_, cute::_, cute::_, smem_wr_buffer));
-                } else {
-                  cute::copy(
-                      copyB,
-                      tBgB(cute::_,
-                           cute::_,
-                           cute::_,
-                           cute::_,
-                           k_tile,
-                           topk_idx - 1),
-                      tBsB(cute::_, cute::_, cute::_, cute::_, smem_wr_buffer));
-                }
-              }
+            if (tma_wr_k_tile_next < k_tile_count) {
+              peek_ab_empty_status = kernel::try_wait_barrier(
+                  shared_storage.ab_empty_mbar_ptr[smem_wr_buffer_next],
+                  tma_wr_ab_empty_phase_next);
+            }
 
-              cutlass::arch::cpasync_barrier_arrive_noinc(
-                  &shared_storage.b_full_mbar_ptr[smem_wr_buffer]);
+            tma_wr_k_tile = tma_wr_k_tile_next;
+            smem_wr_buffer = smem_wr_buffer_next;
+            tma_wr_ab_empty_phase = tma_wr_ab_empty_phase_next;
 
-              if (tma_wr_k_tile_next < k_tile_count) {
-                peek_ab_empty_status = kernel::try_wait_barrier(
-                    shared_storage.ab_empty_mbar_ptr[smem_wr_buffer_next],
-                    tma_wr_ab_empty_phase_next);
-              }
-
-              tma_wr_k_tile = tma_wr_k_tile_next;
-              smem_wr_buffer = smem_wr_buffer_next;
-              tma_wr_ab_empty_phase = tma_wr_ab_empty_phase_next;
-
-            } // end for k_tile
-          }   // end for n_tile
-        }     // end for m_tile
+          } // end for k_tile
+        }   // end for n_tile
+      }     // end for m_tile
       // }       // end if mask
-    }         // end for expert_idx
+    } // end for expert_idx
   } else if (warp_idx < 4) {
     // MMA warp (4)
 
@@ -635,62 +627,61 @@ if (threadIdx.x == 0) {
     int total_expert_count = 0;
 #pragma unroll 1
     // for (int expert_idx = 0; expert_idx < NUM_EXPERTS; ++expert_idx) {
-      // total_expert_count += static_cast<int>(sMask.at(expert_idx));
-    for (int activated_expert_offset = 0; activated_expert_offset < num_activated_experts; ++activated_expert_offset) {
+    // total_expert_count += static_cast<int>(sMask.at(expert_idx));
+    for (int activated_expert_offset = 0;
+         activated_expert_offset < num_activated_experts;
+         ++activated_expert_offset) {
       int32_t expert_idx = activated_expert_idx[activated_expert_offset];
-      
+
       cute::Tensor tRoutingIndex = mRoutingIndices(expert_idx, cute::_);
       // if (sMask.at(expert_idx) == 1 &&
       //     (total_expert_count - 1) % EXPERT_STRIDE == expert_offset) {
 #pragma unroll 1
-        for (int m_tile = 0; m_tile < cute::size<2>(gA); ++m_tile) {
-          const int m_base = m_tile * OUTPUT_ATOM_SIZE;
+      for (int m_tile = 0; m_tile < cute::size<2>(gA); ++m_tile) {
+        int const m_base = m_tile * OUTPUT_ATOM_SIZE;
 #pragma unroll 1
-          for (int n_tile = 0; n_tile < cute::size<2>(gB); ++n_tile) {
+        for (int n_tile = 0; n_tile < cute::size<2>(gB); ++n_tile) {
 
-            int num_prev_k_blk = total_k_tile_count;
-            total_k_tile_count += k_tile_count;
+          int num_prev_k_blk = total_k_tile_count;
+          total_k_tile_count += k_tile_count;
 
-            int mma_rd_k_tile = 0;
-            int smem_rd_buffer =
-                (num_prev_k_blk + mma_rd_k_tile) % NUM_AB_STAGE;
-            int mma_rd_ab_full_phase =
-                (num_prev_k_blk + mma_rd_k_tile) / NUM_AB_STAGE % 2;
+          int mma_rd_k_tile = 0;
+          int smem_rd_buffer = (num_prev_k_blk + mma_rd_k_tile) % NUM_AB_STAGE;
+          int mma_rd_ab_full_phase =
+              (num_prev_k_blk + mma_rd_k_tile) / NUM_AB_STAGE % 2;
 
-            // Peek full phase
-            bool peek_a_full_status = kernel::try_wait_barrier(
-                shared_storage.a_full_mbar_ptr[smem_rd_buffer],
-                mma_rd_ab_full_phase);
-            bool peek_b_full_status = kernel::try_wait_barrier(
-                shared_storage.b_full_mbar_ptr[smem_rd_buffer],
-                mma_rd_ab_full_phase);
+          // Peek full phase
+          bool peek_a_full_status = kernel::try_wait_barrier(
+              shared_storage.a_full_mbar_ptr[smem_rd_buffer],
+              mma_rd_ab_full_phase);
+          bool peek_b_full_status = kernel::try_wait_barrier(
+              shared_storage.b_full_mbar_ptr[smem_rd_buffer],
+              mma_rd_ab_full_phase);
 
-            cute::Tensor accum = cute::partition_fragment_C(
-                tiled_mma, cute::take<0, 2>(mma_tiler)); // (MMA,MMA_M,MMA_N)
-            // Clear the accumulator
-            cute::clear(accum);
-            // Initialize the accumulator to zero
-            tiled_mma.accumulate_ = cute::GMMA::ScaleOut::Zero;
+          cute::Tensor accum = cute::partition_fragment_C(
+              tiled_mma, cute::take<0, 2>(mma_tiler)); // (MMA,MMA_M,MMA_N)
+          // Clear the accumulator
+          cute::clear(accum);
+          // Initialize the accumulator to zero
+          tiled_mma.accumulate_ = cute::GMMA::ScaleOut::Zero;
 #pragma unroll 1
-            for (int k_tile = 0; k_tile < k_tile_count; ++k_tile) {
-              int mma_rd_k_tile_next = mma_rd_k_tile + 1;
-              int smem_rd_buffer_next =
-                  (num_prev_k_blk + mma_rd_k_tile_next) % NUM_AB_STAGE;
-              int mma_rd_ab_full_phase_next = smem_rd_buffer_next == 0
-                                                  ? mma_rd_ab_full_phase ^ 1
-                                                  : mma_rd_ab_full_phase;
+          for (int k_tile = 0; k_tile < k_tile_count; ++k_tile) {
+            int mma_rd_k_tile_next = mma_rd_k_tile + 1;
+            int smem_rd_buffer_next =
+                (num_prev_k_blk + mma_rd_k_tile_next) % NUM_AB_STAGE;
+            int mma_rd_ab_full_phase_next = smem_rd_buffer_next == 0
+                                                ? mma_rd_ab_full_phase ^ 1
+                                                : mma_rd_ab_full_phase;
 
-              if (!peek_a_full_status) {
-                cute::wait_barrier(
-                    shared_storage.a_full_mbar_ptr[smem_rd_buffer],
-                    mma_rd_ab_full_phase);
-              }
+            if (!peek_a_full_status) {
+              cute::wait_barrier(shared_storage.a_full_mbar_ptr[smem_rd_buffer],
+                                 mma_rd_ab_full_phase);
+            }
 
-              if (!peek_b_full_status) {
-                cute::wait_barrier(
-                    shared_storage.b_full_mbar_ptr[smem_rd_buffer],
-                    mma_rd_ab_full_phase);
-              }
+            if (!peek_b_full_status) {
+              cute::wait_barrier(shared_storage.b_full_mbar_ptr[smem_rd_buffer],
+                                 mma_rd_ab_full_phase);
+            }
 #if 0
                         if (threadIdx.x == 0) {
                           printf("m_tile: %d, n_tile: %d, k_tile: %d, smem_rd_buffer: %d\n", m_tile, n_tile, k_tile, smem_rd_buffer);
@@ -735,48 +726,47 @@ if (threadIdx.x == 0) {
                         }
 #endif
 
-              cute::warpgroup_fence_operand(accum);
-              {
-                // Perform MMA operation
-                cute::warpgroup_arrive();
+            cute::warpgroup_fence_operand(accum);
+            {
+              // Perform MMA operation
+              cute::warpgroup_arrive();
 #pragma unroll 3
-                for (int k_block = 0; k_block < cute::size<2>(tCrA);
-                     ++k_block) {
-                  cute::gemm(tiled_mma,
-                             tCrA(cute::_, cute::_, k_block, smem_rd_buffer),
-                             tCrB(cute::_, cute::_, k_block, smem_rd_buffer),
-                             accum);
-                  tiled_mma.accumulate_ = cute::GMMA::ScaleOut::One;
-                }
-                cute::warpgroup_commit_batch();
-                cute::warpgroup_wait<0>();
+              for (int k_block = 0; k_block < cute::size<2>(tCrA); ++k_block) {
+                cute::gemm(tiled_mma,
+                           tCrA(cute::_, cute::_, k_block, smem_rd_buffer),
+                           tCrB(cute::_, cute::_, k_block, smem_rd_buffer),
+                           accum);
+                tiled_mma.accumulate_ = cute::GMMA::ScaleOut::One;
               }
-              cute::warpgroup_fence_operand(accum);
+              cute::warpgroup_commit_batch();
+              cute::warpgroup_wait<0>();
+            }
+            cute::warpgroup_fence_operand(accum);
 
-              // only one thread will issue the arrive instruction
-              if (threadIdx.x % NUM_THREAD_PER_WARPGROUP == 0) {
-                cute::arrive_barrier(
-                    shared_storage.ab_empty_mbar_ptr[smem_rd_buffer]);
-              }
-              if (mma_rd_k_tile_next < k_tile_count) {
-                peek_a_full_status = kernel::try_wait_barrier(
-                    shared_storage.a_full_mbar_ptr[smem_rd_buffer_next],
-                    mma_rd_ab_full_phase_next);
-                peek_b_full_status = kernel::try_wait_barrier(
-                    shared_storage.b_full_mbar_ptr[smem_rd_buffer_next],
-                    mma_rd_ab_full_phase_next);
-              }
+            // only one thread will issue the arrive instruction
+            if (threadIdx.x % NUM_THREAD_PER_WARPGROUP == 0) {
+              cute::arrive_barrier(
+                  shared_storage.ab_empty_mbar_ptr[smem_rd_buffer]);
+            }
+            if (mma_rd_k_tile_next < k_tile_count) {
+              peek_a_full_status = kernel::try_wait_barrier(
+                  shared_storage.a_full_mbar_ptr[smem_rd_buffer_next],
+                  mma_rd_ab_full_phase_next);
+              peek_b_full_status = kernel::try_wait_barrier(
+                  shared_storage.b_full_mbar_ptr[smem_rd_buffer_next],
+                  mma_rd_ab_full_phase_next);
+            }
 
-              mma_rd_k_tile = mma_rd_k_tile_next;
-              smem_rd_buffer = smem_rd_buffer_next;
-              mma_rd_ab_full_phase = mma_rd_ab_full_phase_next;
-            } // end for k_tile
+            mma_rd_k_tile = mma_rd_k_tile_next;
+            smem_rd_buffer = smem_rd_buffer_next;
+            mma_rd_ab_full_phase = mma_rd_ab_full_phase_next;
+          } // end for k_tile
 
-            // Epilogue
-            using TypeBias = T_;
-            using TypeC = T_;
-            cutlass::NumericConverter<TypeAcc, TypeBias> TypeBias_to_TypeAcc;
-            cutlass::NumericConverter<TypeC, TypeAcc> TypeAcc_to_TypeC;
+          // Epilogue
+          using TypeBias = T_;
+          using TypeC = T_;
+          cutlass::NumericConverter<TypeAcc, TypeBias> TypeBias_to_TypeAcc;
+          cutlass::NumericConverter<TypeC, TypeAcc> TypeAcc_to_TypeC;
 
 #if 0
             cute::Tensor gBiasTile = gBias(
@@ -819,19 +809,19 @@ if (threadIdx.x == 0) {
               }
 #endif
 
-#pragma unroll 
-            for (int i = 0; i < (MMA_N >> 1); i++) {
-              int m_idx =
-                  ((warp_idx & 3) << 4) + (idx_in_warp >> 2) + (((i & 3) >> 1) << 3) + m_base;
-              int n_idx = ((i >> 2) << 3) + ((idx_in_warp & 3) << 1) + (i & 1);
+#pragma unroll
+          for (int i = 0; i < (MMA_N >> 1); i++) {
+            int m_idx = ((warp_idx & 3) << 4) + (idx_in_warp >> 2) +
+                        (((i & 3) >> 1) << 3) + m_base;
+            int n_idx = ((i >> 2) << 3) + ((idx_in_warp & 3) << 1) + (i & 1);
 
-              int topk_idx = tRoutingIndex(n_idx);
+            int topk_idx = tRoutingIndex(n_idx);
 
-              bool pred = (n_idx < BATCH_SIZE && tRoutingIndex(n_idx) > 0 &&
-                           m_idx < OUTPUT_SIZE);
-              TypeC fragD = TypeAcc_to_TypeC(accum(i));
+            bool pred = (n_idx < BATCH_SIZE && tRoutingIndex(n_idx) > 0 &&
+                         m_idx < OUTPUT_SIZE);
+            TypeC fragD = TypeAcc_to_TypeC(accum(i));
 
-              if constexpr (!NOBIAS) {
+            if constexpr (!NOBIAS) {
 // TypeBias fragC{};
 // cutlass::arch::global_load<TypeBias, sizeof(TypeBias)>(
 //     fragC, &tCgBias(i), pred);
@@ -848,20 +838,23 @@ if (threadIdx.x == 0) {
                          &tCgBias(i));
                 }
 #endif
-                fragD += mBias(n_idx, m_idx, expert_idx);
-              }
-              if (pred) {
-                // if (threadIdx.x == 0 && n_idx == 0 && tRoutingIndex(n_idx) - 1 == 0 && m_idx <= 10) {
-                //   printf("n_idx: %d, m_idx: %d, tRoutingIndex(n_idx): %d, fragD: %f\n", n_idx, m_idx, tRoutingIndex(n_idx), static_cast<float>(fragD));
-                // }
-                mOutput(n_idx, m_idx, tRoutingIndex(n_idx) - 1) = fragD;
-              }
+              fragD += mBias(n_idx, m_idx, expert_idx);
             }
-            num_tiles_executed++;
-          } // end for n_tile
-        }   // end for m_tile
+            if (pred) {
+              // if (threadIdx.x == 0 && n_idx == 0 && tRoutingIndex(n_idx) - 1
+              // == 0 && m_idx <= 10) {
+              //   printf("n_idx: %d, m_idx: %d, tRoutingIndex(n_idx): %d,
+              //   fragD: %f\n", n_idx, m_idx, tRoutingIndex(n_idx),
+              //   static_cast<float>(fragD));
+              // }
+              mOutput(n_idx, m_idx, tRoutingIndex(n_idx) - 1) = fragD;
+            }
+          }
+          num_tiles_executed++;
+        } // end for n_tile
+      }   // end for m_tile
       // }     // end if mask
-    }       // end for expert_idx
+    } // end for expert_idx
   }
 
 } // end moe_linear_sm90_task_impl

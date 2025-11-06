@@ -93,12 +93,12 @@ public:
   int register_moe_topk_softmax_sm100_task(threadblock::Graph const &bgraph,
                                            std::vector<int> const &params);
   int register_moe_linear_sm100_task(threadblock::Graph const &bgraph,
-                                           std::vector<int> const &params,
-                                           bool w13_linear);
+                                     std::vector<int> const &params,
+                                     bool w13_linear);
   int register_moe_silu_mul_task(threadblock::Graph const &bgraph,
-                                     std::vector<int> const &params);
+                                 std::vector<int> const &params);
   int register_moe_mul_sum_add_sm100_task(threadblock::Graph const &bgraph,
-                                     std::vector<int> const &params);
+                                          std::vector<int> const &params);
   // SM100 tasks end
   int register_task_variant(TaskType type, std::string const &code);
 

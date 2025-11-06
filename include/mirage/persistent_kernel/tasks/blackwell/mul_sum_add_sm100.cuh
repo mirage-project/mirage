@@ -16,11 +16,16 @@
 #include "tasks/common/common_header.cuh"
 namespace kernel {
 
-template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int NUM_TOPK, int OUTPUT_STRIDE>
-__device__ __forceinline__ void mul_sum_add_sm100_task_impl(void const *input_ptr,
-                                                        void const *weight_ptr,
-                                                        void const *residual_ptr,
-                                                        void *output_ptr) {
+template <typename T,
+          int BATCH_SIZE,
+          int OUTPUT_SIZE,
+          int NUM_TOPK,
+          int OUTPUT_STRIDE>
+__device__ __forceinline__ void
+    mul_sum_add_sm100_task_impl(void const *input_ptr,
+                                void const *weight_ptr,
+                                void const *residual_ptr,
+                                void *output_ptr) {
   T const *__restrict__ d_input = static_cast<T const *>(input_ptr);
   T const *__restrict__ d_residual = static_cast<T const *>(residual_ptr);
   float const *__restrict__ d_weight = static_cast<float const *>(weight_ptr);

@@ -212,7 +212,7 @@ struct alignas(16) TaskDesc {
       int request_id; // Used for paged attention
       int head_group; // Used for paged attention hopper
     };
-    int expert_offset; // Used for MoE
+    int expert_offset;         // Used for MoE
     size_t xfer_size_in_bytes; // Used for nvshmem
   };
 };

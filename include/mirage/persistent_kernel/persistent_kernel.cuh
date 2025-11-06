@@ -578,7 +578,8 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
                 config.all_event_num_triggers[event_index]) *
             get_task_iteration_num(task_ids[queue_pos]);
         EventCounter actual_counts = 0;
-        // printf("[LOG][DEPENDENCY] task_type: %d, waiting for event_id: %d to arrive with needed_counts: %d\n",
+        // printf("[LOG][DEPENDENCY] task_type: %d, waiting for event_id: %d to
+        // arrive with needed_counts: %d\n",
         //        task_desc->task_type,
         //        (int)event_id,
         //        (int)needed_counts);

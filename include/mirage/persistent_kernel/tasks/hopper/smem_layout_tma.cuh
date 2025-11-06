@@ -53,8 +53,7 @@ struct smem_tma {
     // Skip swizzling calculation for B == 0
     if constexpr (B == 0) {
       return logical_idx;
-    }
-    else {
+    } else {
       size_t block_idx = logical_idx >> (M + S + B);
       size_t in_block_idx = logical_idx & ((1 << (M + S + B)) - 1);
 

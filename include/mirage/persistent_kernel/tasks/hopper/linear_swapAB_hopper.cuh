@@ -225,8 +225,7 @@ __device__ __forceinline__ void
       int phase_residual = (output_atom_idx / Kstages) & 1;
 
       // launch tma for residual
-      if (lane_idx == 0 &&
-          warp_idx == (NUM_WARPGROUPS * WARPGROUP_WARPS - 4)) {
+      if (lane_idx == 0 && warp_idx == (NUM_WARPGROUPS * WARPGROUP_WARPS - 4)) {
 
         if constexpr (HAS_RESIDUAL) {
           wait(residual_done[slot_residual], phase_residual ^ 1);
