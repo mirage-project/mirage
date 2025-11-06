@@ -627,7 +627,7 @@ if __name__ == "__main__":
                 input=rmsnorm_out_moe,
                 weight=w_moe_gate,
                 output=moe_gate_out,
-                grid_dim=(1, 1, 1),
+                grid_dim=(num_experts // 16, 1, 1),
                 block_dim=(256, 1, 1),
             )
             # topk+softmax
@@ -702,7 +702,8 @@ if __name__ == "__main__":
             input=rmsnorm_out,
             weight=w_proj,
             output=argmax_in,
-            grid_dim=(grid_for_linear_layer(w_proj.dim(0), with_residual=False), 1, 1),
+            # grid_dim=(grid_for_linear_layer(w_proj.dim(0), with_residual=False), 1, 1),
+            grid_dim=(128, 1, 1),
             block_dim=(256, 1, 1),
         )
         # add argmax layer
