@@ -48,7 +48,7 @@ struct MoESharedStorage {
   alignas(16) cute::uint64_t b_full_mbar_ptr[Num_AB_Stage];
   alignas(16) cute::uint64_t ab_empty_mbar_ptr[Num_AB_Stage];
 
-  alignas(16) uint8_t sMask[NUM_EXPERTS];
+  alignas(16) uint8_t expert_mask[NUM_EXPERTS];
 
   CUTE_DEVICE constexpr auto tensor_sA() {
     return cute::make_tensor(cute::make_smem_ptr(A.begin()), ASmemLayout{});
@@ -340,7 +340,7 @@ if (threadIdx.x == 0) {
       (reinterpret_cast<uintptr_t>(shared_memory) + 127) / 128 * 128;
   SharedStorage &shared_storage =
       *reinterpret_cast<SharedStorage *>(aligned_smem);
-  SmemLayoutMask sMask(shared_storage.sMask);
+  // SmemLayoutMask sMask(shared_storage.sMask);
 #if 0
   T_ *shared_output =
       (T_ *)(((uintptr_t)aligned_smem + sizeof(SharedStorage) + 1023) / 1024 *
@@ -350,10 +350,10 @@ if (threadIdx.x == 0) {
 #endif
 
   // Initialize the mask in shared memory
-  for (int i = threadIdx.x; i < NUM_EXPERTS; i += blockDim.x) {
-    sMask.at(i) = mMask(i);
-  }
-  __syncthreads();
+  // for (int i = threadIdx.x; i < NUM_EXPERTS; i += blockDim.x) {
+  //   sMask.at(i) = mMask(i);
+  // }
+  // __syncthreads();
   // Initialize the barriers in shared memory
   if (warp_idx == 0) {
     cutlass::arch::detail::initialize_barrier_array_aligned<
@@ -473,15 +473,21 @@ if (threadIdx.x == 0) {
   int32_t total_activated_experts = 0;
   int32_t num_activated_experts = 0;
 
+  if(threadIdx.x < NUM_EXPERTS) {
+    shared_storage.expert_mask[threadIdx.x] = mMask[threadIdx.x];
+  }
+
+  __syncthreads();
+
   for(int expert_idx = 0; expert_idx < NUM_EXPERTS; ++expert_idx) {
-    int32_t expert_mask = mMask[expert_idx];
+    int32_t expert_mask = shared_storage.expert_mask[expert_idx];
     if (expert_mask == 1 && (total_activated_experts) % EXPERT_STRIDE == expert_offset) {
       activated_expert_idx[num_activated_experts] = expert_idx;
       num_activated_experts += 1;
     }
     total_activated_experts += expert_mask;
   }
-  __syncthreads();
+  __syncthreads(); // Wait for preprocessing done
 
   int k_tile_count = REDUCTION_SIZE / 64;
 
