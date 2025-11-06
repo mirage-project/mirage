@@ -65,7 +65,7 @@ template <typename T,
           int NUM_EXPERTS,
           int WARPS_PER_CTA,
           int BYTES_PER_LDG>
-__device__ __noinline__ void topk_softmax_task_impl(
+__device__ __forceinline__ void topk_softmax_task_impl(
     void const *__restrict__ input_ptr, // [num_rows, NUM_EXPERTS]
     bool const *__restrict__ finished,
     void *__restrict__ output_ptr, // [num_rows, k]
