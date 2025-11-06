@@ -478,13 +478,13 @@ void moe_w13_linear_sm100_kernel(torch::Tensor input,
   // const int OUTPUT_SIZE = output.size(1);
   // const int REDUCTION_SIZE = weight.size(1);
 
-  constexpr int BATCH_SIZE = 8;
+  constexpr int BATCH_SIZE = 1;
   constexpr int OUTPUT_SIZE = 128;
   constexpr int REDUCTION_SIZE = 2048;
   constexpr int NUM_EXPERTS = 128;
   constexpr int NUM_TOPK = 8;
   constexpr int EXPERT_OFFSET = 0;
-  constexpr int EXPERT_STRIDE = 12;
+  constexpr int EXPERT_STRIDE = 10;
 
   assert(input.size(1) == REDUCTION_SIZE);
   assert(weight.size(0) == NUM_EXPERTS && weight.size(1) == OUTPUT_SIZE &&
@@ -533,13 +533,13 @@ void moe_w2_linear_sm100_kernel(torch::Tensor input,
   // const int OUTPUT_SIZE = output.size(1);
   // const int REDUCTION_SIZE = weight.size(1);
 
-  constexpr int BATCH_SIZE = 8;
+  constexpr int BATCH_SIZE = 1;
   constexpr int OUTPUT_SIZE = 128;
   constexpr int REDUCTION_SIZE = 768;
   constexpr int NUM_EXPERTS = 128;
   constexpr int NUM_TOPK = 8;
   constexpr int EXPERT_OFFSET = 0;
-  constexpr int EXPERT_STRIDE = 9;
+  constexpr int EXPERT_STRIDE = 8;
 
   assert(input.size(0) == BATCH_SIZE && input.size(1) == NUM_TOPK &&
          input.size(2) == REDUCTION_SIZE);

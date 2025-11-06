@@ -12,9 +12,9 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+#include "runtime_header.h"
 #include "blackwell/task_header.cuh"
 #include "hopper/tma_2d.cuh"
-#include "runtime_header.h"
 #include "tma.cuh"
 #include <cuda_runtime.h>
 #include <torch/extension.h>
@@ -332,9 +332,9 @@ void linear_sm100_mpk_kernel(torch::Tensor input,
   // const int OUTPUT_SIZE = output.size(1);
   // const int REDUCTION_SIZE = weight.size(1);
 
-  constexpr int BATCH_SIZE = 16;
+  constexpr int BATCH_SIZE = 1;
   constexpr int OUTPUT_SIZE = 128;
-  constexpr int REDUCTION_SIZE = 2048;
+  constexpr int REDUCTION_SIZE = 768;
 
   assert(input.size(1) == REDUCTION_SIZE);
   assert(weight.size(0) == OUTPUT_SIZE);

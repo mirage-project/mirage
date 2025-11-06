@@ -50,7 +50,7 @@ template <typename T_,
           int NUM_AB_STAGE = 8,
           int NUM_ACC_STAGE = 2,
           int NUM_C_STAGE = 4>
-__device__ __noinline__ void
+__device__ __forceinline__ void
     moe_linear_sm100_task_impl(const TMA_A &tma_a,
                                InputTensor mInput,
                                BiasTensor mBias,
@@ -251,6 +251,7 @@ __device__ __noinline__ void
                                          decltype(sA_layout),
                                          decltype(sB_layout),
                                          decltype(sB_cp_layout),
+                                         NUM_EXPERTS,
                                          NUM_AB_STAGE,
                                          NUM_ACC_STAGE>;
 
@@ -444,8 +445,14 @@ __device__ __noinline__ void
   int32_t total_activated_experts = 0;
   int32_t num_activated_experts = 0;
 
+  if(threadIdx.x < NUM_EXPERTS) {
+    shared_storage.expert_mask[threadIdx.x] = mMask[threadIdx.x];
+  }
+
+  __syncthreads();
+
   for(int expert_idx = 0; expert_idx < NUM_EXPERTS; ++expert_idx) {
-    int32_t expert_mask = mMask[expert_idx];
+    int32_t expert_mask = shared_storage.expert_mask[expert_idx];
     if (expert_mask == 1 && (total_activated_experts) % EXPERT_STRIDE == expert_offset) {
       activated_expert_idx[num_activated_experts] = expert_idx;
       num_activated_experts += 1;

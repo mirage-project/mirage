@@ -8,11 +8,11 @@ g = torch.Generator(device="cuda").manual_seed(1234)
 
 reduction_sizes = [2048]
 output_sizes = [128]
-batch_size = 8
+batch_size = 1
 num_experts = 128
 num_topk = 8
 expert_offset = 0
-expert_stride = 12
+expert_stride = 10
 
 is_w2_linear = False
 has_residual = False
