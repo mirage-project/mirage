@@ -137,6 +137,7 @@ __global__
                                      OUTPUT_SIZE,
                                      REDUCTION_SIZE,
                                      NoBias,
+                                     /*SplitK=*/false,
                                      NUM_AB_STAGE,
                                      NUM_ACC_STAGE,
                                      NUM_C_STAGE>(tma_a, tma_b, mBias, tma_out);
@@ -436,7 +437,7 @@ __global__
   TMA_B tma_b(static_cast<CUtensorMap *>(tma_b_desc_ptr));
   TMA_OUT tma_out(static_cast<CUtensorMap *>(tma_out_desc_ptr));
 
-  kernel::linear_splitk_sm100_task_impl<T,
+  kernel::linear_sm100_mpk_task_impl<T,
                                      TMA_A,
                                      TMA_B,
                                      BiasTensor,
@@ -447,6 +448,7 @@ __global__
                                      OUTPUT_SIZE,
                                      REDUCTION_SIZE,
                                      NoBias,
+                                     /*SplitK=*/true,
                                      NUM_AB_STAGE,
                                      NUM_ACC_STAGE,
                                      NUM_C_STAGE>(tma_a, tma_b, mBias, tma_out);
@@ -644,7 +646,7 @@ void linear_splitk_sm100_kernel(torch::Tensor input,
 
   constexpr int BATCH_SIZE = 1;
   constexpr int OUTPUT_SIZE = 128;
-  constexpr int REDUCTION_SIZE = 256;
+  constexpr int REDUCTION_SIZE = 2048;
 
   assert(input.size(1) == REDUCTION_SIZE);
   assert(weight.size(0) == OUTPUT_SIZE);

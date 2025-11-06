@@ -28,7 +28,6 @@ setup(
             ],
             depends=[
                 os.path.join(this_dir, '../../../../include/mirage/persistent_kernel/tasks/blackwell/linear_sm100_mpk.cuh'),
-                os.path.join(this_dir, '../../../../include/mirage/persistent_kernel/tasks/blackwell/linear_splitk_sm100.cuh'),
                 os.path.join(this_dir, '../../../../include/mirage/persistent_kernel/tasks/blackwell/utils.cuh'),
             ],
             define_macros=macros,

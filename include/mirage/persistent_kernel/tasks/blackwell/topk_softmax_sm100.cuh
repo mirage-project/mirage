@@ -66,7 +66,7 @@ template <typename T,
           int WARPS_PER_CTA,
           int BYTES_PER_LDG>
 __device__ __forceinline__ void topk_softmax_task_impl(
-    void const *__restrict__ input_ptr, // [num_rows, NUM_EXPERTS]
+    void *__restrict__ input_ptr, // [num_rows, NUM_EXPERTS]
     bool const *__restrict__ finished,
     void *__restrict__ output_ptr, // [num_rows, k]
     int const num_rows,
@@ -79,7 +79,7 @@ __device__ __forceinline__ void topk_softmax_task_impl(
     int const end_expert,
     bool const renormalize) {
   // Pointers
-  T const *input = static_cast<T const *>(input_ptr);
+  T *input = static_cast<T *>(input_ptr);
   float *output = static_cast<float *>(output_ptr);
   int *mpk_routing_indices = static_cast<int *>(mpk_routing_indices_ptr);
   int *mpk_expert_mask = static_cast<int *>(mpk_expert_mask_ptr);
@@ -141,18 +141,18 @@ __device__ __forceinline__ void topk_softmax_task_impl(
     bool const row_is_active = finished ? !finished[thread_row] : true;
 
     // Compute per-thread read pointers
-    T const *thread_row_ptr = input + thread_row * ELTS_PER_ROW;
+    T *thread_row_ptr = input + thread_row * ELTS_PER_ROW;
     int const thread_group_idx = lane_idx % THREADS_PER_ROW;
     int const first_elt_read_by_thread =
         thread_group_idx * (BYTES_PER_LDG / sizeof(T));
-    T const *thread_read_ptr = thread_row_ptr + first_elt_read_by_thread;
+    T *thread_read_ptr = thread_row_ptr + first_elt_read_by_thread;
 
     using AccessType = cutlass::AlignedArray<T, ELTS_PER_LDG>;
     T row_chunk_temp[VPT];
     AccessType *row_chunk_vec_ptr =
         reinterpret_cast<AccessType *>(&row_chunk_temp);
-    AccessType const *vec_thread_read_ptr =
-        reinterpret_cast<AccessType const *>(thread_read_ptr);
+    AccessType *vec_thread_read_ptr =
+        reinterpret_cast<AccessType *>(thread_read_ptr);
 
     // Vectorized loads across the row
     for (int ii = 0; ii < LDG_PER_THREAD; ++ii) {
@@ -164,6 +164,12 @@ __device__ __forceinline__ void topk_softmax_task_impl(
     float row_chunk[VPT];
     for (int ii = 0; ii < VPT; ++ii) {
       row_chunk[ii] = converter(row_chunk_temp[ii]);
+      row_chunk_temp[ii] = static_cast<T>(0); // reset input buffer to 0 for split-k gate linear
+    }
+
+    // reset input buffer to 0 for split-k gate linear
+    for (int ii = 0; ii < LDG_PER_THREAD; ++ii) {
+      vec_thread_read_ptr[ii * THREADS_PER_ROW] = row_chunk_vec_ptr[ii];
     }
 
     // Max reduction within subgroup

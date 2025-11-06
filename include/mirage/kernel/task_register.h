@@ -78,6 +78,9 @@ public:
   int register_embedding_hopper_task(threadblock::Graph const &bgraph,
                                      std::vector<int> const &params);
   // SM100 tasks
+  int register_splitk_linear_sm100_task(threadblock::Graph const &bgraph,
+                                 std::vector<int> const &params,
+                                 bool with_residual);
   int register_linear_sm100_task(threadblock::Graph const &bgraph,
                                  std::vector<int> const &params,
                                  bool with_residual);
@@ -86,6 +89,8 @@ public:
   int register_argmax_partial_sm100_task(threadblock::Graph const &bgraph,
                                          std::vector<int> const &params);
   int register_argmax_reduce_sm100_task(threadblock::Graph const &bgraph,
+                                        std::vector<int> const &params);
+  int register_tensor_init_task(threadblock::Graph const &bgraph,
                                         std::vector<int> const &params);
   int register_moe_topk_softmax_sm100_task(threadblock::Graph const &bgraph,
                                            std::vector<int> const &params);

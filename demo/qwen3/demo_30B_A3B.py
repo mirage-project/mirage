@@ -87,6 +87,7 @@ if __name__ == "__main__":
         help="Not use the cutlass version kernel.",
     )
     parser.add_argument("--ignore-eos", action="store_true", help="Ignore eos token during generation")
+    parser.add_argument("--splitk-gate", action="store_true", help="Use split-k gating linear")
     args = parser.parse_args()
     try:
         from mpi4py import MPI
@@ -583,14 +584,25 @@ if __name__ == "__main__":
                 grid_dim=(mpk.max_num_batched_tokens, 1, 1),
                 block_dim=(256, 1, 1),
             )
-            # moe gate
-            mpk.linear_layer(
-                input=rmsnorm_out,
-                weight=w_moe_gate,
-                output=moe_gate_out,
-                grid_dim=(1, 1, 1),
-                block_dim=(256, 1, 1),
-            )
+            
+            if args.splitk_gate:
+                # moe gate with split-k
+                mpk.splitk_linear_layer(
+                    input=rmsnorm_out,
+                    weight=w_moe_gate,
+                    output=moe_gate_out,
+                    grid_dim=(1, hidden_size // 64, 1),
+                    block_dim=(256, 1, 1),
+                )
+            else:
+                # moe gate without split-k
+                mpk.linear_layer(
+                    input=rmsnorm_out,
+                    weight=w_moe_gate,
+                    output=moe_gate_out,
+                    grid_dim=(1, 1, 1),
+                    block_dim=(256, 1, 1),
+                )
             # topk+softmax
             mpk.moe_topk_softmax_routing_layer(
                 input=moe_gate_out,
