@@ -66,27 +66,25 @@ template <typename T,
           int WARPS_PER_CTA,
           int BYTES_PER_LDG>
 __device__ __forceinline__ void topk_softmax_task_impl(
-    void const *__restrict__ input_ptr, // [num_rows, NUM_EXPERTS]
+    void *__restrict__ input_ptr, // [num_rows, NUM_EXPERTS]
     bool const *__restrict__ finished,
     void *__restrict__ output_ptr, // [num_rows, k]
     int const num_rows,
     int const k,
-    void *__restrict__ mpk_routing_indices_ptr, // [NUM_EXPERTS, num_rows] laid
-                                                // out as expert-major: expert *
-                                                // num_rows
-                                                // + row
-    void *__restrict__ mpk_expert_mask_ptr, // [NUM_EXPERTS]
+    void *__restrict__ mpk_routing_indices_ptr, // [NUM_EXPERTS, num_rows] laid out
+                                           // as expert-major: expert * num_rows
+                                           // + row
+    void *__restrict__ mpk_expert_mask_ptr,     // [NUM_EXPERTS]
     int const start_expert,
     int const end_expert,
     bool const renormalize) {
   // Pointers
-  T const *input = static_cast<T const *>(input_ptr);
+  T *input = static_cast<T *>(input_ptr);
   float *output = static_cast<float *>(output_ptr);
   int *mpk_routing_indices = static_cast<int *>(mpk_routing_indices_ptr);
-  uint8_t *mpk_expert_mask = static_cast<uint8_t *>(mpk_expert_mask_ptr);
+  int *mpk_expert_mask = static_cast<int *>(mpk_expert_mask_ptr);
   // initialize mpk_routing_indices and mpk_expert_mask to zero
-  for (int expert = start_expert + threadIdx.x; expert < end_expert;
-       expert += blockDim.x) {
+  for(int expert = start_expert + threadIdx.x; expert < end_expert; expert += blockDim.x) {
     if (mpk_routing_indices != nullptr) {
       for (int row = 0; row < num_rows; ++row) {
         mpk_routing_indices[expert * num_rows + row] = 0;
@@ -121,8 +119,7 @@ __device__ __forceinline__ void topk_softmax_task_impl(
                 "THREADS_PER_ROW must be power of 2");
   static_assert(THREADS_PER_ROW <= WARP_SIZE,
                 "THREADS_PER_ROW can be at most warp size");
-  static_assert(THREADS_PER_ROW == WARP_SIZE ||
-                    THREADS_PER_ROW == WARP_SIZE / 2,
+  static_assert(THREADS_PER_ROW == WARP_SIZE || THREADS_PER_ROW == WARP_SIZE / 2, 
                 "This kernel only supports THREADS_PER_ROW of 16 or 32");
 
   // Work partitioning
@@ -138,26 +135,24 @@ __device__ __forceinline__ void topk_softmax_task_impl(
 
   int const thread_row_in_warp = lane_idx / THREADS_PER_ROW;
   int const thread_row = warp_base_row + thread_row_in_warp;
-  uint32_t const warp_mask = (num_rows % 2 == 1 && thread_row == num_rows - 1)
-                                 ? 0x0000ffff
-                                 : 0xffffffff;
+  uint32_t const warp_mask = (num_rows % 2 == 1 && thread_row == num_rows - 1) ? 0x0000ffff : 0xffffffff;
   if (thread_row < num_rows) {
 
     bool const row_is_active = finished ? !finished[thread_row] : true;
 
     // Compute per-thread read pointers
-    T const *thread_row_ptr = input + thread_row * ELTS_PER_ROW;
+    T *thread_row_ptr = input + thread_row * ELTS_PER_ROW;
     int const thread_group_idx = lane_idx % THREADS_PER_ROW;
     int const first_elt_read_by_thread =
         thread_group_idx * (BYTES_PER_LDG / sizeof(T));
-    T const *thread_read_ptr = thread_row_ptr + first_elt_read_by_thread;
+    T *thread_read_ptr = thread_row_ptr + first_elt_read_by_thread;
 
     using AccessType = cutlass::AlignedArray<T, ELTS_PER_LDG>;
     T row_chunk_temp[VPT];
     AccessType *row_chunk_vec_ptr =
         reinterpret_cast<AccessType *>(&row_chunk_temp);
-    AccessType const *vec_thread_read_ptr =
-        reinterpret_cast<AccessType const *>(thread_read_ptr);
+    AccessType *vec_thread_read_ptr =
+        reinterpret_cast<AccessType *>(thread_read_ptr);
 
     // Vectorized loads across the row
     for (int ii = 0; ii < LDG_PER_THREAD; ++ii) {
@@ -169,6 +164,12 @@ __device__ __forceinline__ void topk_softmax_task_impl(
     float row_chunk[VPT];
     for (int ii = 0; ii < VPT; ++ii) {
       row_chunk[ii] = converter(row_chunk_temp[ii]);
+      row_chunk_temp[ii] = static_cast<T>(0); // reset input buffer to 0 for split-k gate linear
+    }
+
+    // reset input buffer to 0 for split-k gate linear
+    for (int ii = 0; ii < LDG_PER_THREAD; ++ii) {
+      vec_thread_read_ptr[ii * THREADS_PER_ROW] = row_chunk_vec_ptr[ii];
     }
 
     // Max reduction within subgroup
@@ -247,9 +248,6 @@ __device__ __forceinline__ void topk_softmax_task_impl(
           int const local_expert = expert - start_expert;
           // Write 1-based rank into routing indices; stride by num_rows per
           // expert
-          // printf("[LOG][MoE softmax_gate_topk] batch_idx: %d, local_expert:
-          // %d, k_idx: %d\n",
-          //        thread_row, local_expert, k_idx);
           mpk_routing_indices[local_expert * num_rows + thread_row] = k_idx + 1;
           // // Mark expert as active (idempotent). Atomic to avoid races across
           // rows. atomicExch(&mpk_expert_mask[local_expert], 1); // race
@@ -277,9 +275,6 @@ __device__ __forceinline__ void topk_softmax_task_impl(
       for (int k_idx = 0; k_idx < k; ++k_idx) {
         int const out_idx = k * thread_row + k_idx;
         output[out_idx] = output[out_idx] * inv;
-        // printf("[LOG][MoE softmax_gate_topk] batch_idx: %d, k_idx: %d, weight
-        // value: %f\n",
-        //          thread_row, k_idx, output[out_idx]);
       }
     }
   }

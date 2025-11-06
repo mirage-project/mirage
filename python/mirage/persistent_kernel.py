@@ -732,6 +732,31 @@ class PersistentKernel:
 
         self.kn_graph.register_task(tb_graph, "moe_mul_sum_add_sm100")
 
+    def splitk_linear_layer(
+        self,
+        input: DTensor,
+        weight: DTensor,
+        output: DTensor,
+        grid_dim: tuple,
+        block_dim: tuple,
+    ):
+        # Currently assume that input/output
+        assert input.num_dims == 2  # (batch_size, hidden_size / world_size)
+        assert weight.num_dims == 2  # (hidden_size, hidden_size / world_size)
+        assert output.num_dims == 2  # (batch_size, hidden_size)
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(input, (-1, 1, -1), 1, True)
+        tb_graph.new_input(weight, (0, 1, -1), 1, True)
+        tb_graph.new_input(output, (1, -1, -1), -1, True)
+        self.kn_graph.customized([input, weight, output], tb_graph)
+
+        if self.target_cc == 100:
+            self.kn_graph.register_task(tb_graph, "splitk_linear_sm100")
+        elif self.target_cc == 90:
+            self.kn_graph.register_task(tb_graph, "splitk_linear_swapAB_hopper")
+        else:
+            assert False
+
     def linear_layer(
         self,
         input: DTensor,

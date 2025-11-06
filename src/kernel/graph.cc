@@ -571,6 +571,10 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
         customized->bgraph, params, false /*w13_linear*/);
     task_config[op] =
         std::make_tuple(4, 1, TASK_MOE_W2_LINEAR_SM90, variant_id);
+  } else if (name == "splitk_linear_swapAB_hopper") {
+    int variant_id = task_register->register_splitk_linear_swapAB_hopper_task(
+        customized->bgraph, params, false /*with_residual*/);
+    task_config[op] = std::make_tuple(2, 1, TASK_SPLITK_LINEAR_SWAPAB_HOPPER, variant_id);
   }
   // SM100 tasks
   else if (name == "linear_sm100") {

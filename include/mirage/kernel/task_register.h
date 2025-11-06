@@ -80,6 +80,9 @@ public:
   int register_moe_linear_sm90_task(threadblock::Graph const &bgraph,
                                     std::vector<int> const &params,
                                     bool w13_linear);
+  int register_splitk_linear_swapAB_hopper_task(threadblock::Graph const &bgraph,
+                                                std::vector<int> const &params,
+                                                bool with_residual);
   // SM100 tasks
   int register_linear_sm100_task(threadblock::Graph const &bgraph,
                                  std::vector<int> const &params,
