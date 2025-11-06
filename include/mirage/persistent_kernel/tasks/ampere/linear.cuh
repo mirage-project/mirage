@@ -20,16 +20,27 @@
 #include "reduction.cuh"
 #include "smem_layout.cuh"
 #include "tasks/common/common_header.cuh"
+
+#define DEBUG 0
+
+#if DEBUG
+#define DCHECK(condition)                                                      \
+  if ((condition) == 0) {                                                      \
+    printf("Dcheck failed at %s:%d\n", __FILE__, __LINE__);                    \
+  }
+#else
+#define DCHECK(condition)
+#endif // DEBUG
+
 namespace kernel {
 
 using bfloat16 = type::bfloat16_t;
-
 template <typename T,
           int BATCH_SIZE,
           int OUTPUT_SIZE,
           int REDUCTION_SIZE,
           int O_STRIDE = OUTPUT_SIZE,
-          int PIPE_MAX = 2>
+          int PIPE_MAX = 3>
 __device__ __forceinline__ void linear_kernel(void const *input_ptr,
                                               void const *weight_ptr,
                                               void const *residual_ptr,
@@ -37,30 +48,23 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
                                               int num_active_tokens,
                                               bool residual) {
   constexpr int CHUNK_SIZE = 16 / sizeof(T);
-  constexpr int OUTPUT_ATOM_SIZE = OUTPUT_SIZE <= 128 ? OUTPUT_SIZE : 128;
+  constexpr int OUTPUT_ATOM_SIZE = OUTPUT_SIZE <= 64 ? OUTPUT_SIZE : 64;
   constexpr int log2_OUTPUT_ATOM_SIZE = log2_constexpr(OUTPUT_ATOM_SIZE);
-  constexpr int NUM_OUTPUT_ATOMS =
-      (OUTPUT_SIZE + OUTPUT_ATOM_SIZE - 1) / OUTPUT_ATOM_SIZE;
 
   constexpr int TILE_SIZE = 128;
   constexpr int log2_TILE_SIZE = log2_constexpr(TILE_SIZE);
-  constexpr int SMEM_MAX_BANDWIDTH = 128 / sizeof(T);
   constexpr int FORLOOP_RANGE = REDUCTION_SIZE / TILE_SIZE;
 
-  constexpr int TOTAL_WEIGHT_BLOCKS_TO_LOAD =
-      FORLOOP_RANGE * NUM_OUTPUT_ATOMS; // For global pipe loading
-  constexpr int WEIGHT_PIPE_MAX = PIPE_MAX < TOTAL_WEIGHT_BLOCKS_TO_LOAD
-                                      ? PIPE_MAX
-                                      : TOTAL_WEIGHT_BLOCKS_TO_LOAD;
-  constexpr int INPUT_PIPE_MAX = WEIGHT_PIPE_MAX;
+  constexpr int ADJUSTED_PIPE_MAX =
+      PIPE_MAX < FORLOOP_RANGE ? PIPE_MAX : FORLOOP_RANGE;
 
   constexpr int NUM_CHUNKS_A = BATCH_SIZE * TILE_SIZE / CHUNK_SIZE;
   constexpr int NUM_CHUNKS_B = TILE_SIZE * OUTPUT_ATOM_SIZE / CHUNK_SIZE;
-  constexpr int NUM_CHUNKS_OUTPUT = BATCH_SIZE * OUTPUT_SIZE / CHUNK_SIZE;
+  constexpr int NUM_CHUNKS_OUTPUT = BATCH_SIZE * OUTPUT_ATOM_SIZE / CHUNK_SIZE;
 
   constexpr int CHUNKS_PER_ROW_A = TILE_SIZE / CHUNK_SIZE;
   constexpr int CHUNKS_PER_COL_B = TILE_SIZE / CHUNK_SIZE;
-  constexpr int CHUNKS_PER_ROW_C = OUTPUT_SIZE / CHUNK_SIZE;
+  constexpr int CHUNKS_PER_ROW_C = OUTPUT_ATOM_SIZE / CHUNK_SIZE;
 
   constexpr int log2_CHUNK_SIZE = log2_constexpr(CHUNK_SIZE);
   constexpr int log2_CHUNKS_PER_ROW_A = log2_constexpr(CHUNKS_PER_ROW_A);
@@ -77,9 +81,10 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
   // TODO: support NUM_ITERS_M > 1, i.e., BATCH_SIZE > 16
   constexpr int NUM_ITERS_M = 1;
   constexpr int NUM_ITERS_N =
-      (OUTPUT_ATOM_SIZE + NUM_WARPS_N * 16 - 1) / (NUM_WARPS_N * 16);
+      (OUTPUT_SIZE + OUTPUT_ATOM_SIZE - 1) / OUTPUT_ATOM_SIZE;
   constexpr int NUM_ITERS_K =
       (TILE_SIZE + NUM_WARPS_K * 16 - 1) / (NUM_WARPS_K * 16);
+  // constexpr int NUM_ITERS_K = 8;
 
   constexpr int log2_NUM_WARPS_N = log2_constexpr(NUM_WARPS_N);
   constexpr int log2_NUM_ITERS_K = log2_constexpr(NUM_ITERS_K);
@@ -121,14 +126,12 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
 
   constexpr size_t SHARED_WEIGHT_BUFFER_OFFSET =
       SHARED_INPUT_BUFFER_OFFSET +
-      sizeof(T) * BATCH_SIZE * INPUT_PIPE_MAX * TILE_SIZE;
-  // sizeof(T) * TILE_SIZE * WEIGHT_PIPE_MAX * OUTPUT_SIZE
+      sizeof(T) * BATCH_SIZE * ADJUSTED_PIPE_MAX * TILE_SIZE;
 
   constexpr size_t SHARED_OUTPUT_OFFSET =
       // MM_INTERMEDIATE_OFFSET +
       SHARED_WEIGHT_BUFFER_OFFSET +
-      sizeof(T) * TILE_SIZE * WEIGHT_PIPE_MAX * OUTPUT_ATOM_SIZE;
-  // sizeof(T) * BATCH_SIZE * OUTPUT_SIZE
+      sizeof(T) * TILE_SIZE * ADJUSTED_PIPE_MAX * OUTPUT_ATOM_SIZE;
 
   // zero buffer
   T *zero_buf = (T *)(smem + ZERO_BUFFER_OFFSET);
@@ -143,23 +146,20 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
 
   // define the swizzle mode
   using ZeroBufferSmem = smem_row<T, 0, 0, 0, 1, 8, 8>;
-  using InputSmem = smem_row_2dcol<T,
-                                   3,
-                                   3,
-                                   3,
-                                   BATCH_SIZE * INPUT_PIPE_MAX,
-                                   SMEM_MAX_BANDWIDTH,
-                                   TILE_SIZE / SMEM_MAX_BANDWIDTH>;
+  using InputSmem =
+      smem_row_2dcol<T, 3, 3, 3, BATCH_SIZE, TILE_SIZE, ADJUSTED_PIPE_MAX>;
   using WeightSmem = smem_col_2drow<T,
                                     3,
                                     3,
                                     3,
-                                    SMEM_MAX_BANDWIDTH,
-                                    TILE_SIZE / SMEM_MAX_BANDWIDTH,
-                                    WEIGHT_PIPE_MAX * OUTPUT_ATOM_SIZE>;
+                                    TILE_SIZE,
+                                    OUTPUT_ATOM_SIZE,
+                                    ADJUSTED_PIPE_MAX>;
   using OutputFullSmem =
-      smem_row<T, 3, 3, 3, BATCH_SIZE, OUTPUT_SIZE, OUTPUT_SIZE>;
+      smem_row<T, 3, 3, 3, BATCH_SIZE, OUTPUT_ATOM_SIZE, OUTPUT_ATOM_SIZE>;
 
+  // we no longger need zero buffer, but we could keep it to make sure shared
+  // memory was aligned.
   ZeroBufferSmem zero_buffer(zero_buf);
 
   InputSmem input_smem(shared_input_buffer);
@@ -167,208 +167,255 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
 
   OutputFullSmem output_smem(shared_output);
 
-  // Initialize output_smem: if residual is provided, preload it; otherwise zero
 #pragma unroll
-  for (int i = threadIdx.x; i < BATCH_SIZE * OUTPUT_SIZE / CHUNK_SIZE;
-       i += NUM_THREADS) {
-    int row = i / (OUTPUT_SIZE / CHUNK_SIZE);
-    int col = (i % (OUTPUT_SIZE / CHUNK_SIZE)) << log2_CHUNK_SIZE;
-    // TODO: use ignore-src in load_smem to avoid if-else
-    if (residual) {
-      load_smem(output_smem(row, col), residual_dmem(row, col));
-    } else {
-      *((__uint128_t *)((void *)&output_smem.at(row, col))) = 0ul;
-    }
-  }
-
-  // Warm up weight and input tiles for the first WEIGHT_PIPE_MAX - 1 atoms
-  int global_pipe_idx = 0;
-  // #pragma unroll 0
-  for (; global_pipe_idx < WEIGHT_PIPE_MAX - 1; ++global_pipe_idx) {
-    int src_stage_offset = (global_pipe_idx % NUM_OUTPUT_ATOMS)
-                           << log2_OUTPUT_ATOM_SIZE;
-    int buffer_stage_offset = (global_pipe_idx % WEIGHT_PIPE_MAX)
-                              << log2_OUTPUT_ATOM_SIZE;
-    int global_pipe_row = global_pipe_idx / NUM_OUTPUT_ATOMS;
-    int global_pipe_offset = global_pipe_row << log2_TILE_SIZE;
-    int input_pipe_offset = (global_pipe_row % INPUT_PIPE_MAX) * BATCH_SIZE;
-
-    // int buffer_stage = global_pipe_idx % WEIGHT_PIPE_MAX;
-    if (global_pipe_idx % NUM_OUTPUT_ATOMS == 0) {
+  for (uint32_t m = 0; m < NUM_ITERS_M; m++) {
+    // If we use NUM_ITERS_M and NUM_ITERS_N inside NUM_ITERS_K, the
+    // loop for NUM_ITERS_K couldn't be unrolled in nvcc which hurts
+    // performance.
 #pragma unroll
-      for (int i = threadIdx.x; i < NUM_CHUNKS_A; i += NUM_THREADS) {
-        int src_row = i >> log2_CHUNKS_PER_ROW_A;
-        int dst_row = src_row + input_pipe_offset;
+    for (uint32_t nn = 0; nn < NUM_ITERS_N; nn++) {
+      float s_frag[8];
 
-        int dst_col = (i & (CHUNKS_PER_ROW_A - 1)) << log2_CHUNK_SIZE;
-        int src_col = dst_col + global_pipe_offset;
-        load_smem(input_smem(dst_row, dst_col), input_dmem(src_row, src_col));
+      // should we sync here? if NUM_ITERS_N > 1, I suppose we should do it,
+      // because we will write output_smem later, but it may be still used in
+      // some warp which are still write to gmem.
+      if (NUM_ITERS_N > 1) {
+        __syncthreads();
       }
-    }
+      // Initialize output_smem: if residual is provided, preload it; otherwise
+      // zero
 #pragma unroll
-    for (int i = threadIdx.x; i < NUM_CHUNKS_B; i += NUM_THREADS) {
-      int dst_row = (i & (CHUNKS_PER_COL_B - 1)) << log2_CHUNK_SIZE;
-      int src_row = dst_row + global_pipe_offset;
-
-      int col_within = i >> log2_CHUNKS_PER_COL_B;
-      int src_col = src_stage_offset + col_within;
-      int dst_col = buffer_stage_offset + col_within;
-
-      load_smem(weight_smem(dst_row, dst_col), weight_dmem(src_row, src_col));
-    }
-    cp_async_fence();
-  }
-
-  // Outer loop over K tiles; inner loop over output atoms
-  // accumulator
-  // TODO: the NUM_OUTPUT_ATOMS will be big if OUTPUT_SIZE is big, then it may
-  // run out registers try to fix it later.
-  float s_frag[NUM_OUTPUT_ATOMS][NUM_ITERS_M][NUM_ITERS_N][8];
-#pragma unroll
-  for (uint32_t output_atom_idx = 0; output_atom_idx < NUM_OUTPUT_ATOMS;
-       output_atom_idx++) {
-#pragma unroll
-    for (uint32_t m = 0; m < NUM_ITERS_M; m++) {
-#pragma unroll
-      for (uint32_t n = 0; n < NUM_ITERS_N; n++) {
-        clear_8_floats(s_frag[output_atom_idx][m][n]);
+      for (int i = threadIdx.x; i < BATCH_SIZE * OUTPUT_ATOM_SIZE / CHUNK_SIZE;
+           i += NUM_THREADS) {
+        int row = i / (OUTPUT_ATOM_SIZE / CHUNK_SIZE);
+        int dst_col = (i % (OUTPUT_ATOM_SIZE / CHUNK_SIZE)) << log2_CHUNK_SIZE;
+        int src_col = dst_col + (nn << log2_OUTPUT_ATOM_SIZE);
+        // TODO: use ignore-src in load_smem to avoid if-else
+        if (residual) {
+          load_smem(output_smem(row, dst_col), residual_dmem(row, src_col));
+        } else {
+          *((__uint128_t *)((void *)&output_smem.at(row, dst_col))) = 0ul;
+        }
       }
-    }
-  }
-#pragma unroll 2
-  for (int for_idx = 0; for_idx < FORLOOP_RANGE; for_idx++) {
-    int cur_input_stage = for_idx % INPUT_PIPE_MAX;
 
-    // Loop over output atoms for this K-slice
+      // initialize registers
 #pragma unroll
-    for (int output_atom_idx = 0; output_atom_idx < NUM_OUTPUT_ATOMS;
-         ++output_atom_idx, ++global_pipe_idx) {
-      int src_stage_offset = (global_pipe_idx % NUM_OUTPUT_ATOMS)
-                             << log2_OUTPUT_ATOM_SIZE;
-      int buffer_stage_offset = (global_pipe_idx % WEIGHT_PIPE_MAX)
-                                << log2_OUTPUT_ATOM_SIZE;
-      int global_pipe_row = global_pipe_idx / NUM_OUTPUT_ATOMS;
-      int global_pipe_offset = global_pipe_row << log2_TILE_SIZE;
-      int input_pipe_offset = (global_pipe_row % INPUT_PIPE_MAX) * BATCH_SIZE;
+      for (uint32_t r = 0; r < 8; r++) {
+        s_frag[r] = 0;
+      }
 
-      // Prefetch next weight atom into ring buffer stage_write
-      if (global_pipe_idx < TOTAL_WEIGHT_BLOCKS_TO_LOAD) {
-        // Load input tile at the first output atom
-        if (global_pipe_idx % NUM_OUTPUT_ATOMS == 0) {
+      int ismem_read_stage = 0;
+      int ismem_write_stage = 0;
+
+      // Warm up weight and input tiles for the first ADJUSTED_PIPE_MAX - 1
+      // tile.
 #pragma unroll
-          for (int i = threadIdx.x; i < NUM_CHUNKS_A;
-               i += NUM_THREADS) { // 1 time
-            int src_row = i >> log2_CHUNKS_PER_ROW_A;
-            int dst_row = src_row + input_pipe_offset;
+      for (int istage = 0; istage < ADJUSTED_PIPE_MAX - 1; ++istage) {
+        // we don't need module for ADJUSTED_PIPE_MAX here, because we just load
+        // ADJUSTED_PIPE_MAX - 1 pipe.
+        int src_stage_offset = istage << log2_TILE_SIZE;
 
-            int dst_col = (i & (CHUNKS_PER_ROW_A - 1)) << log2_CHUNK_SIZE;
-            int src_col = dst_col + global_pipe_offset;
+#pragma unroll
+        for (int chunk = 0; chunk < NUM_CHUNKS_A / NUM_THREADS; chunk++) {
+          int tid = threadIdx.x;
+          int threadCol = (tid & (CHUNKS_PER_ROW_A - 1)) << log2_CHUNK_SIZE;
+          int threadRow = tid >> log2_CHUNKS_PER_ROW_A;
+          constexpr int ROWS_PER_ITERATION = NUM_THREADS / CHUNKS_PER_ROW_A;
 
-            load_smem(input_smem(dst_row, dst_col),
-                      input_dmem(src_row, src_col));
-          }
+          int dst_col = threadCol;
+          int src_col = dst_col + src_stage_offset;
+
+          int row_within = threadRow + chunk * ROWS_PER_ITERATION;
+          int src_row = row_within;
+          int dst_row = row_within;
+
+          load_smem(input_smem(dst_row, dst_col, istage),
+                    input_dmem(src_row, src_col));
         }
 #pragma unroll
-        for (int i = threadIdx.x; i < NUM_CHUNKS_B; i += NUM_THREADS) {
-          int dst_row = (i & (CHUNKS_PER_COL_B - 1)) << log2_CHUNK_SIZE;
-          int src_row = dst_row + global_pipe_offset;
+        for (int chunk = 0; chunk < NUM_CHUNKS_B / NUM_THREADS; chunk++) {
+          int tid = threadIdx.x;
+          int threadRow = (tid & (CHUNKS_PER_COL_B - 1)) << log2_CHUNK_SIZE;
+          int threadCol = tid >> log2_CHUNKS_PER_COL_B;
+          constexpr int COLS_PER_ITERATION = NUM_THREADS / CHUNKS_PER_COL_B;
 
-          int col_within = i >> log2_CHUNKS_PER_COL_B;
-          int src_col = src_stage_offset + col_within;
-          int dst_col = buffer_stage_offset + col_within;
+          int dst_row = threadRow;
+          int src_row = dst_row + src_stage_offset;
 
-          load_smem(weight_smem(dst_row, dst_col),
+          int col_within = threadCol + chunk * COLS_PER_ITERATION;
+          int src_col = (nn << log2_OUTPUT_ATOM_SIZE) + col_within;
+          int dst_col = col_within;
+
+          load_smem(weight_smem(dst_row, dst_col, istage),
                     weight_dmem(src_row, src_col));
         }
         cp_async_fence();
-        cp_async_wait<WEIGHT_PIPE_MAX - 1>();
-      } else if (global_pipe_idx == TOTAL_WEIGHT_BLOCKS_TO_LOAD) {
-        cp_async_wait<0>();
-      }
+
+        ++ismem_write_stage;
+      } // warm up for ADJUSTED_PIPE_MAX - 1
+
+      constexpr int PIPE_INSIDE_TILE = 2;
+      uint32_t a_frag[PIPE_INSIDE_TILE][4], b_frag[PIPE_INSIDE_TILE][4];
+      // wait for first warm up pipeline cp.async finished
+      cp_async_wait<ADJUSTED_PIPE_MAX - 2>();
       __syncthreads();
 
-      // MMA using the loaded input and weight tiles
-      uint32_t a_frag[4], b_frag[4];
-#pragma unroll
-      for (uint32_t m = 0; m < NUM_ITERS_M; m++) {
-        int m_row = (lane_idx & 0xF) + (m << 4);
-        bool is_input_valid = (m_row < num_active_tokens);
-        int smem_row = m_row + cur_input_stage * BATCH_SIZE;
-#pragma unroll
-        for (uint32_t n = 0; n < NUM_ITERS_N; n++) {
-          int n_col = (n << (4 + log2_NUM_WARPS_N)) + (warp_col << 4) +
-                      ((lane_idx >> 4) << 3) + (lane_idx & 0x7);
-          bool is_weight_valid = (n_col < OUTPUT_ATOM_SIZE);
-#pragma unroll
-          for (uint32_t k = 0; k < NUM_ITERS_K; k++) {
-            int m_col = (warp_row << (4 + log2_NUM_ITERS_K)) + (k << 4) +
-                        ((lane_idx >> 4) << 3);
-            int n_row = (warp_row << (4 + log2_NUM_ITERS_K)) + (k << 4) +
-                        (((lane_idx & 0xF) >> 3) << 3);
-            int weight_stage_read =
-                (for_idx * NUM_OUTPUT_ATOMS + output_atom_idx) %
-                WEIGHT_PIPE_MAX;
+      int warmup_m_col =
+          (warp_row << (4 + log2_NUM_ITERS_K)) + ((lane_idx >> 4) << 3);
+      int warmup_n_row =
+          (warp_row << (4 + log2_NUM_ITERS_K)) + (((lane_idx & 0xF) >> 3) << 3);
+      int warmup_smem_row = (lane_idx & 0xF);
+      int warmup_n_col =
+          (warp_col << 4) + ((lane_idx >> 4) << 3) + (lane_idx & 0x7);
+      T *warmup_input_ptr = input_smem(warmup_smem_row, warmup_m_col, 0);
+      DCHECK(warmup_n_col < OUTPUT_ATOM_SIZE);
+      T *warmup_weight_ptr = weight_smem(warmup_n_row, warmup_n_col, 0);
 
-            // Do not use ternary operator here, it will cause the
-            // compiler to generate branch among threads
-            T *valid_input_ptr = input_smem(smem_row, m_col);
-            T *invalid_input_ptr = zero_buffer(0, 0);
-            T *input_ptr = is_input_valid ? valid_input_ptr : invalid_input_ptr;
+      ldsm(warmup_input_ptr, a_frag[0]);
+      ldsm(warmup_weight_ptr, b_frag[0]);
 
-            T *valid_weight_ptr = weight_smem(
-                n_row, weight_stage_read * OUTPUT_ATOM_SIZE + n_col);
-            T *invalid_weight_ptr = zero_buffer(0, 0);
-            T *weight_ptr =
-                is_weight_valid ? valid_weight_ptr : invalid_weight_ptr;
+#pragma unroll 1
+      for (int for_idx = 0; for_idx < FORLOOP_RANGE; for_idx++) {
+#pragma unroll
+        for (int k = 0; k < NUM_ITERS_K; k++) {
+          // TODO(Wenqin): use pointer advance for the pointer for input and
+          // weight shared memory instead of address calculation for
+          // input_smem and weight_smem, because in each iteration in the K
+          // dim for the OUTER_ROW/COL, they just advanced a compile-time know
+          // offset, and it seems the CUTLASS version just use some ADD inst to
+          // do it.
+          int k_next = (k + 1) % NUM_ITERS_K;
 
-            ldsm(input_ptr, a_frag);
-            ldsm(weight_ptr, b_frag);
-            mma_m16n16k16_bf16bf16bf32(s_frag[output_atom_idx][m][n],
-                                       a_frag,
-                                       b_frag,
-                                       s_frag[output_atom_idx][m][n]);
-          }
+          if (k == 0) {
+            // loading next tile (for_idx + ADJUSTED_PIPE_MAX - 1) when k is 0.
+            if (for_idx + ADJUSTED_PIPE_MAX - 1 < FORLOOP_RANGE) {
+              int src_stage_offset = (for_idx + ADJUSTED_PIPE_MAX - 1)
+                                     << log2_TILE_SIZE;
+              // Prefetch next weight tile into ring buffer stage_write
+              // Load input tile at the first output tile
+#pragma unroll
+              for (int chunk = 0; chunk < NUM_CHUNKS_A / NUM_THREADS; chunk++) {
+                // we don't need to hoist the threadCol and threadRow,,
+                // accorrding to experiment, the nvcc could hoist these const.
+                int tid = threadIdx.x;
+                int threadCol = (tid & (CHUNKS_PER_ROW_A - 1))
+                                << log2_CHUNK_SIZE;
+                int threadRow = tid >> log2_CHUNKS_PER_ROW_A;
+                constexpr int ROWS_PER_ITERATION =
+                    NUM_THREADS / CHUNKS_PER_ROW_A; // 8
+
+                int dst_col = threadCol;
+                int src_col = dst_col + src_stage_offset;
+
+                int row_within = threadRow + chunk * ROWS_PER_ITERATION;
+                int src_row = row_within;
+                int dst_row = row_within;
+
+                load_smem(input_smem(dst_row, dst_col, ismem_write_stage),
+                          input_dmem(src_row, src_col));
+              }
+#pragma unroll
+              for (int chunk = 0; chunk < NUM_CHUNKS_B / NUM_THREADS; chunk++) {
+                int tid = threadIdx.x;
+                int threadRow = (tid & (CHUNKS_PER_COL_B - 1))
+                                << log2_CHUNK_SIZE;
+                int threadCol = tid >> log2_CHUNKS_PER_COL_B;
+                constexpr int COLS_PER_ITERATION =
+                    NUM_THREADS / CHUNKS_PER_COL_B; // 8
+
+                int dst_row = threadRow;
+                int src_row = dst_row + src_stage_offset;
+
+                int col_within = threadCol + chunk * COLS_PER_ITERATION;
+                int src_col = (nn << log2_OUTPUT_ATOM_SIZE) + col_within;
+                int dst_col = col_within;
+
+                load_smem(weight_smem(dst_row, dst_col, ismem_write_stage),
+                          weight_dmem(src_row, src_col));
+              }
+              ismem_write_stage = (ismem_write_stage + 1) % ADJUSTED_PIPE_MAX;
+            }
+            cp_async_fence();
+          } // k == 0 for load next tile
+
+          if (k == NUM_ITERS_K - 1) {
+            // wait cp.async because we will load next tile data in to regs
+            // when k == NUM_ITERS_K - 1.
+            if (FORLOOP_RANGE - for_idx > 2) {
+              cp_async_wait<ADJUSTED_PIPE_MAX - 2>();
+            } else {
+              cp_async_wait<0>();
+            }
+            __syncthreads();
+
+            // TODO(Wenqin): The comment out code below here is what we could
+            // do for just use ADD for input and weight shared memory pointer.
+            // int tmp_ismem_read_stage = ismem_read_stage;
+            ismem_read_stage = (ismem_read_stage + 1) % ADJUSTED_PIPE_MAX;
+            // input_ptr += (ismem_read_stage - tmp_ismem_read_stage) * (8 *
+            // 128); weight_ptr += (ismem_read_stage - tmp_ismem_read_stage) *
+            // (64 * 128);
+          } // k == NUM_ITERS_K - 1
+
+          static_assert(NUM_ITERS_M == 1);
+
+          int m_row = (lane_idx & 0xF) + (m << 4);
+          int n_col =
+              (warp_col << 4) + ((lane_idx >> 4) << 3) + (lane_idx & 0x7);
+          DCHECK(n_col < OUTPUT_ATOM_SIZE);
+
+          int m_col = (warp_row << (4 + log2_NUM_ITERS_K)) + (k_next << 4) +
+                      ((lane_idx >> 4) << 3);
+          int n_row = (warp_row << (4 + log2_NUM_ITERS_K)) + (k_next << 4) +
+                      (((lane_idx & 0xF) >> 3) << 3);
+
+          int smem_row = m_row;
+          T *valid_input_ptr = input_smem(smem_row, m_col, ismem_read_stage);
+          // we don't need to check for is_input_valid, because we will use
+          // num_active_tokens for the output, we will just pick valid output.
+          T *input_ptr = valid_input_ptr;
+
+          T *valid_weight_ptr = weight_smem(n_row, n_col, ismem_read_stage);
+          T *weight_ptr = valid_weight_ptr;
+
+          ldsm(input_ptr, a_frag[(k + 1) % PIPE_INSIDE_TILE]);
+          ldsm(weight_ptr, b_frag[(k + 1) % PIPE_INSIDE_TILE]);
+          mma_m16n16k16_bf16bf16bf32(s_frag,
+                                     a_frag[k % PIPE_INSIDE_TILE],
+                                     b_frag[k % PIPE_INSIDE_TILE],
+                                     s_frag);
+
+        } // loop for NUM_ITERS_K
+      }   // loop for FORLOOP_RANGE
+
+#pragma unroll
+      for (uint32_t i = 0; i < 4; i++) {
+        int row_in_warp = (lane_idx >> 2) + ((i & 0x1) << 3);
+        int col_within =
+            (warp_col << 4) + ((lane_idx & 0x3) << 1) + ((i >> 1) << 3);
+        int col = col_within;
+        DCHECK(col_within < OUTPUT_ATOM_SIZE);
+        if (row_in_warp < num_active_tokens) {
+          // TODO: try st.matrix here?
+          output_smem.at(row_in_warp, col) += bfloat16(s_frag[(i << 1)]);
+          output_smem.at(row_in_warp, col + 1) +=
+              bfloat16(s_frag[(i << 1) | 0x1]);
         }
       }
       __syncthreads();
-    }
-  }
-  // Accumulate this atom's contribution into the full output_smem at offset
-#pragma unroll
-  for (uint32_t output_atom_idx = 0; output_atom_idx < NUM_OUTPUT_ATOMS;
-       output_atom_idx++) {
-#pragma unroll
-    for (uint32_t m = 0; m < NUM_ITERS_M; m++) {
-#pragma unroll
-      for (uint32_t n = 0; n < NUM_ITERS_N; n++) {
-#pragma unroll
-        for (uint32_t i = 0; i < 4; i++) {
-          int row_in_warp = (lane_idx >> 2) + ((i & 0x1) << 3);
-          int col_within = (n << (4 + log2_NUM_WARPS_N)) + (warp_col << 4) +
-                           ((lane_idx & 0x3) << 1) + ((i >> 1) << 3);
-          int col = col_within + output_atom_idx * OUTPUT_ATOM_SIZE;
-          if (row_in_warp < num_active_tokens &&
-              col_within < OUTPUT_ATOM_SIZE) {
-            output_smem.at(row_in_warp, col) +=
-                bfloat16(s_frag[output_atom_idx][m][n][(i << 1)]);
-            output_smem.at(row_in_warp, col + 1) +=
-                bfloat16(s_frag[output_atom_idx][m][n][(i << 1) | 0x1]);
-          }
-        }
-      }
-    }
-  }
-  __syncthreads();
 
-  // Final writeback: store accumulated output (residual already included if
-  // any)
+      // Final writeback: store accumulated output (residual already included if
+      // any)
 #pragma unroll
-  for (int i = threadIdx.x; i < NUM_CHUNKS_OUTPUT; i += NUM_THREADS) {
-    int row = i / CHUNKS_PER_ROW_C;
-    int col = (i % CHUNKS_PER_ROW_C) << log2_CHUNK_SIZE;
-    *((__uint128_t *)((void *)&output_dmem.at(row, col))) =
-        *((__uint128_t *)((void *)&output_smem.at(row, col)));
-  }
+      for (int i = threadIdx.x; i < NUM_CHUNKS_OUTPUT; i += NUM_THREADS) {
+        int row = i / CHUNKS_PER_ROW_C;
+        int src_col = (i % CHUNKS_PER_ROW_C) << log2_CHUNK_SIZE;
+        int dst_col = src_col + (nn << log2_OUTPUT_ATOM_SIZE);
+        *((__uint128_t *)((void *)&output_dmem.at(row, dst_col))) =
+            *((__uint128_t *)((void *)&output_smem.at(row, src_col)));
+      }
+    } // loop for NUM_ITERS_N, it may not be 1
+  }   // loop for NUM_ITERS_M, it should always be 1, no sense loop
 }
 
 } // namespace kernel

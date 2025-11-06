@@ -9,9 +9,13 @@ import os
 # print limitation
 # torch.set_printoptions(threshold=2000)
 
-def grid_for_rmsnorm_linear_layer(size: int):
+def grid_for_rmsnorm_linear_layer(size: int, use_cutlass_kernel: bool = True):
     # 96 and 64 are enough to cover all Qwen3 model? Please update the method
     # if you meet any incompatibility.
+    if size % 64 == 0 and not use_cutlass_kernel:
+        # TODO(Wenqin): If we set OUTPUT_SIZE too much for PTX linear kernel,
+        # there is some regression.
+        return size // 64
     if size / 96 > 400:
         # TODO: An add-hoc workaround for linear kernel, both MPK ptx and
         # cutlass version will output unexpect result (not same out put for
@@ -425,7 +429,7 @@ if __name__ == "__main__":
                 input=rmsnorm_out,
                 weight=w_qkv,
                 output=attn_in,
-                grid_dim=(grid_for_rmsnorm_linear_layer(w_qkv.dim(0)), 1, 1),
+                grid_dim=(grid_for_rmsnorm_linear_layer(w_qkv.dim(0), args.use_cutlass_kernel), 1, 1),
                 block_dim=(128, 1, 1),
             )
             #mpk.rmsnorm_linear_layer(
@@ -511,7 +515,7 @@ if __name__ == "__main__":
             w_up_proj = mpk.attach_input(
                 torch_tensor=layer.mlp.up_proj.weight, name=f"layer_{i}_up_proj"
             )
-            rmsnorm_num_tasks = grid_for_rmsnorm_linear_layer(w_gate_proj.dim(0) + w_up_proj.dim(0))
+            rmsnorm_num_tasks = grid_for_rmsnorm_linear_layer(w_gate_proj.dim(0) + w_up_proj.dim(0), args.use_cutlass_kernel)
             w_gatedup = mpk.shuffle_tensors(
                 inputs=[w_gate_proj, w_up_proj],
                 shuffled_dim=0,
@@ -586,7 +590,7 @@ if __name__ == "__main__":
             input=rmsnorm_out,
             weight=w_proj,
             output=argmax_in,
-            grid_dim=(grid_for_rmsnorm_linear_layer(w_proj.dim(0)), 1, 1),
+            grid_dim=(grid_for_rmsnorm_linear_layer(w_proj.dim(0), args.use_cutlass_kernel), 1, 1),
             block_dim=(128, 1, 1),
         )
         #mpk.rmsnorm_linear_layer(
