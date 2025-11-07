@@ -82,7 +82,7 @@ __device__ __forceinline__ void topk_softmax_task_impl(
   T *input = static_cast<T *>(input_ptr);
   float *output = static_cast<float *>(output_ptr);
   int *mpk_routing_indices = static_cast<int *>(mpk_routing_indices_ptr);
-  int *mpk_expert_mask = static_cast<int *>(mpk_expert_mask_ptr);
+  uint8_t *mpk_expert_mask = static_cast<uint8_t *>(mpk_expert_mask_ptr);
   // initialize mpk_routing_indices and mpk_expert_mask to zero
   for(int expert = start_expert + threadIdx.x; expert < end_expert; expert += blockDim.x) {
     if (mpk_routing_indices != nullptr) {

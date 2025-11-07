@@ -2391,7 +2391,7 @@ int TaskRegister::register_splitk_linear_swapAB_hopper_task(threadblock::Graph c
     constexpr int M = 3;
     constexpr int S = 3;
     constexpr int TMA_CP_ASYNC_SIZE = 64;
-    constexpr int TILE_SIZE = 128;
+    constexpr int TILE_SIZE = 64;
     constexpr int Kstages = 5;
     assert(batch_size <= 16);
     int const SMEM_M_SIZE = batch_size <= 8 ? 8 : 16;

@@ -637,7 +637,7 @@ if __name__ == "__main__":
                     input=rmsnorm_out_moe,
                     weight=w_moe_gate,
                     output=moe_gate_out,
-                    grid_dim=(1, hidden_size // 128, 1),
+                    grid_dim=(2, hidden_size // 64, 1),
                     block_dim=(256, 1, 1),
                 )
             else:

@@ -3,6 +3,7 @@ from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 import os
 import shutil
 from os import path
+from glob import glob
 
 this_dir = os.path.dirname(os.path.abspath(__file__))
 
@@ -19,6 +20,14 @@ cuda_library_dirs = [
     os.path.join(cuda_home, "lib64", "stubs"),
 ]
 
+hopper_task_dir = os.path.join(
+    this_dir,
+    '../../../../include/mirage/persistent_kernel/tasks/hopper',
+)
+hopper_depends = sorted(
+    glob(os.path.join(hopper_task_dir, '**', '*.cuh'), recursive=True)
+)
+
 setup(
     name='runtime_kernel_hopper',
     ext_modules=[
@@ -27,6 +36,7 @@ setup(
             sources=[
                 os.path.join(this_dir, 'runtime_kernel_wrapper_hopper.cu'),
             ],
+            depends=hopper_depends,
             include_dirs=[
                 os.path.join(this_dir, '../../../include/mirage/persistent_kernel'),
                 os.path.join(this_dir, '../../../include'),
@@ -42,7 +52,6 @@ setup(
                     '-gencode=arch=compute_90a,code=sm_90a',
                     '-DMIRAGE_BACKEND_USE_CUDA',
                     '-DMIRAGE_GRACE_HOPPER',
-                    '-DMIRAGE_PROFILE_HOPPER',
                     '-DMIRAGE_BACKEND_USE_CUDA',
                     # '-DMIRAGE_PROFILE_HOPPER',
                 ]
