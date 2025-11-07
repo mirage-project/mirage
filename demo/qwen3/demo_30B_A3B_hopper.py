@@ -411,8 +411,8 @@ if __name__ == "__main__":
             io_category="cuda_tensor",
         )
         moe_mask = mpk.new_tensor(
-            dims=(num_experts,),
-            dtype=mi.int8,
+            dims=(num_experts + 1,),
+            dtype=mi.int32,
             name="moe_mask",
             io_category="cuda_tensor",
         )

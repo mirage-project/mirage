@@ -2388,7 +2388,7 @@ int TaskRegister::register_moe_linear_sm90_task(
   assert(input_ops[2]->output_tensors[0].dim[0] == num_experts);
   assert(input_ops[2]->output_tensors[0].dim[1] == batch_size);
   assert(input_ops[3]->output_tensors[0].num_dims == 1);
-  assert(input_ops[3]->output_tensors[0].dim[0] == num_experts);
+  assert(input_ops[3]->output_tensors[0].dim[0] == num_experts + 1);
   // get output stride
   assert(output_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
   kn::KNInputOp *kn_input_op =
@@ -2468,7 +2468,7 @@ int TaskRegister::register_moe_linear_sm90_task(
          "cute::make_stride(cute::Int<1>{}));",
          num_experts);
   code.e("cute::Tensor mMask = "
-         "cute::make_tensor(cute::make_gmem_ptr(static_cast<uint8_t*>("
+         "cute::make_tensor(cute::make_gmem_ptr(static_cast<cute::int32_t*>("
          "task_desc->input_ptrs[3])), layout_expert_mask);");
   // Output Tensor setup
   code.e("cute::Layout layout_output = cute::make_layout(cute::make_shape($, "

@@ -457,30 +457,32 @@ if (threadIdx.x == 0) {
     }
 #endif
 
-  // fetch expert mask and preprocessing
-  int32_t activated_expert_idx[(BATCH_SIZE * NUM_TOPK + EXPERT_STRIDE - 1) /
-                               EXPERT_STRIDE];
-  int32_t total_activated_experts = 0;
-  int32_t num_activated_experts = 0;
 
-  if (threadIdx.x < NUM_EXPERTS) {
-    shared_storage.expert_mask[threadIdx.x] = mMask[threadIdx.x];
-  }
+// fetch expert mask and preprocessing
+// int32_t activated_expert_idx[(BATCH_SIZE * NUM_TOPK + EXPERT_STRIDE - 1) /
+//                              EXPERT_STRIDE];
+// int32_t total_activated_experts = 0;
+// int32_t num_activated_experts = 0;
 
-  __syncthreads();
-
-  for (int expert_idx = 0; expert_idx < NUM_EXPERTS; ++expert_idx) {
-    int32_t expert_mask = shared_storage.expert_mask[expert_idx];
-    if (expert_mask == 1 &&
-        (total_activated_experts) % EXPERT_STRIDE == expert_offset) {
-      activated_expert_idx[num_activated_experts] = expert_idx;
-      num_activated_experts += 1;
-    }
-    total_activated_experts += expert_mask;
-  }
-  __syncthreads(); // Wait for preprocessing done
+// if (threadIdx.x < NUM_EXPERTS) {
+  //   shared_storage.expert_mask[threadIdx.x] = mMask[threadIdx.x];
+  // }
+  
+  // __syncthreads();
+  
+  // for (int expert_idx = 0; expert_idx < NUM_EXPERTS; ++expert_idx) {
+    //   int32_t expert_mask = shared_storage.expert_mask[expert_idx];
+    //   if (expert_mask == 1 &&
+    //       (total_activated_experts) % EXPERT_STRIDE == expert_offset) {
+      //     activated_expert_idx[num_activated_experts] = expert_idx;
+      //     num_activated_experts += 1;
+      //   }
+      //   total_activated_experts += expert_mask;
+      // }
+      __syncthreads(); // Wait for preprocessing done
 
   int k_tile_count = REDUCTION_SIZE / 64;
+  int num_activated_experts = mMask(NUM_EXPERTS); // last element stores num activated experts
 
   if (warp_idx >= 4) {
     // DMA warp (4)
@@ -522,10 +524,12 @@ if (threadIdx.x == 0) {
     //   total_expert_count += static_cast<int>(sMask.at(expert_idx));
     // if (sMask.at(expert_idx) == 1 &&
     //     (total_expert_count - 1) % EXPERT_STRIDE == expert_offset) {
-    for (int activated_expert_offset = 0;
-         activated_expert_offset < num_activated_experts;
-         ++activated_expert_offset) {
-      int32_t expert_idx = activated_expert_idx[activated_expert_offset];
+    // for (int activated_expert_offset = 0;
+    //      activated_expert_offset < num_activated_experts;
+    // ++activated_expert_offset) {
+      // int32_t expert_idx = activated_expert_idx[activated_expert_offset];
+    for (int activated_expert_offset = expert_offset; activated_expert_offset < num_activated_experts; activated_expert_offset+=EXPERT_STRIDE){
+      int32_t expert_idx = mMask[activated_expert_offset];
       cute::Tensor tRoutingIndex = mRoutingIndices(expert_idx, cute::_);
 #pragma unroll 1
       for (int m_tile = 0; m_tile < cute::size<2>(gA); ++m_tile) {
@@ -628,11 +632,10 @@ if (threadIdx.x == 0) {
 #pragma unroll 1
     // for (int expert_idx = 0; expert_idx < NUM_EXPERTS; ++expert_idx) {
     // total_expert_count += static_cast<int>(sMask.at(expert_idx));
-    for (int activated_expert_offset = 0;
+    for (int activated_expert_offset = expert_offset;
          activated_expert_offset < num_activated_experts;
-         ++activated_expert_offset) {
-      int32_t expert_idx = activated_expert_idx[activated_expert_offset];
-
+         activated_expert_offset+=EXPERT_STRIDE) {
+        int32_t expert_idx = mMask[activated_expert_offset];
       cute::Tensor tRoutingIndex = mRoutingIndices(expert_idx, cute::_);
       // if (sMask.at(expert_idx) == 1 &&
       //     (total_expert_count - 1) % EXPERT_STRIDE == expert_offset) {
