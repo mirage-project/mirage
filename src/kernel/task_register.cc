@@ -2016,7 +2016,7 @@ int TaskRegister::register_moe_topk_softmax_sm100_task(
   batch_size = output_ops[1]->output_tensors[0].dim[1];
   num_experts_per_tok = output_ops[0]->output_tensors[0].dim[1];
   assert(output_ops[0]->output_tensors[0].dim[0] == batch_size);
-  assert(output_ops[2]->output_tensors[0].dim[0] == num_experts);
+  assert(output_ops[2]->output_tensors[0].dim[0] == num_experts + 1);
   assert(input_ops[0]->dtensor.num_dims == 2);
   assert(input_ops[0]->output_tensors[0].dim[0] == batch_size);
   assert(input_ops[0]->output_tensors[0].dim[1] == num_experts);
@@ -2089,7 +2089,7 @@ int TaskRegister::register_moe_linear_sm100_task(
   assert(input_ops[2]->output_tensors[0].dim[0] == num_experts);
   assert(input_ops[2]->output_tensors[0].dim[1] == batch_size);
   assert(input_ops[3]->output_tensors[0].num_dims == 1);
-  assert(input_ops[3]->output_tensors[0].dim[0] == num_experts);
+  assert(input_ops[3]->output_tensors[0].dim[0] == num_experts + 1);
   // get output stride
   assert(output_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
   kn::KNInputOp *kn_input_op =
@@ -2167,7 +2167,7 @@ int TaskRegister::register_moe_linear_sm100_task(
   // Topk_mask Tensor setup
   code.e("cute::Layout layout_expert_mask = cute::make_layout(cute::make_shape($), "
          "cute::make_stride(cute::Int<1>{}));",
-         num_experts);
+         num_experts + 1);
   code.e("cute::Tensor mMask = "
          "cute::make_tensor(cute::make_gmem_ptr(static_cast<cute::int32_t*>("
          "task_desc->input_ptrs[3])), layout_expert_mask);");

@@ -436,29 +436,30 @@ __device__ __forceinline__ void
   //   __syncthreads();
 
   int k_tile_count = cute::size<4>(tCgA);
+  int num_activated_experts = mMask(NUM_EXPERTS); // last element stores num activated experts
 
   using TmemAllocator = cute::TMEM::Allocator1Sm;
   TmemAllocator tmem_allocator{};
 
-  // fetch expert mask and preprocessing
-  int32_t activated_expert_idx[(BATCH_SIZE * NUM_TOPK + EXPERT_STRIDE - 1) / EXPERT_STRIDE];
-  int32_t total_activated_experts = 0;
-  int32_t num_activated_experts = 0;
+  // // fetch expert mask and preprocessing
+  // int32_t activated_expert_idx[(BATCH_SIZE * NUM_TOPK + EXPERT_STRIDE - 1) / EXPERT_STRIDE];
+  // int32_t total_activated_experts = 0;
+  // int32_t num_activated_experts = 0;
 
-  if(threadIdx.x < NUM_EXPERTS) {
-    shared_storage.expert_mask[threadIdx.x] = mMask[threadIdx.x];
-  }
+  // if(threadIdx.x < NUM_EXPERTS) {
+  //   shared_storage.expert_mask[threadIdx.x] = mMask[threadIdx.x];
+  // }
 
-  __syncthreads();
+  // __syncthreads();
 
-  for(int expert_idx = 0; expert_idx < NUM_EXPERTS; ++expert_idx) {
-    int32_t expert_mask = shared_storage.expert_mask[expert_idx];
-    if (expert_mask == 1 && (total_activated_experts) % EXPERT_STRIDE == expert_offset) {
-      activated_expert_idx[num_activated_experts] = expert_idx;
-      num_activated_experts += 1;
-    }
-    total_activated_experts += expert_mask;
-  }
+  // for(int expert_idx = 0; expert_idx < NUM_EXPERTS; ++expert_idx) {
+  //   int32_t expert_mask = shared_storage.expert_mask[expert_idx];
+  //   if (expert_mask == 1 && (total_activated_experts) % EXPERT_STRIDE == expert_offset) {
+  //     activated_expert_idx[num_activated_experts] = expert_idx;
+  //     num_activated_experts += 1;
+  //   }
+  //   total_activated_experts += expert_mask;
+  // }
   __syncthreads(); // Wait for preprocessing done
   
   if (warp_idx == 5) {
@@ -481,8 +482,8 @@ __device__ __forceinline__ void
     // } __syncwarp();
 
     int total_k_tile_count = 0;
-    for (int activated_expert_offset = 0; activated_expert_offset < num_activated_experts; ++activated_expert_offset) {
-      int32_t expert_idx = activated_expert_idx[activated_expert_offset];
+    for (int activated_expert_offset = expert_offset; activated_expert_offset < num_activated_experts; activated_expert_offset+=EXPERT_STRIDE) {
+      int32_t expert_idx = mMask[activated_expert_offset];
       cute::Tensor tRoutingIndex = mRoutingIndices(expert_idx, cute::_);
       for (int m_tile = 0; m_tile < cute::size<3>(tCgA); ++m_tile) {
         for (int n_tile = 0; n_tile < cute::size<3>(tCgB); ++n_tile) {
@@ -575,7 +576,7 @@ __device__ __forceinline__ void
 
     int total_k_tile_count = 0;
     int num_tiles_executed = 0;
-    for (int activated_expert_offset = 0; activated_expert_offset < num_activated_experts; ++activated_expert_offset) {
+    for (int activated_expert_offset = expert_offset; activated_expert_offset < num_activated_experts; activated_expert_offset+=EXPERT_STRIDE) {
       for (int m_tile = 0; m_tile < cute::size<3>(tCgA); ++m_tile) {
         for (int n_tile = 0; n_tile < cute::size<3>(tCgB); ++n_tile) {
 
@@ -708,8 +709,8 @@ __device__ __forceinline__ void
     // } epilogue_wg_barrier.arrive_and_wait();
 
     int num_tiles_executed = 0;
-    for (int activated_expert_offset = 0; activated_expert_offset < num_activated_experts; ++activated_expert_offset) {
-      int32_t expert_idx = activated_expert_idx[activated_expert_offset];
+    for (int activated_expert_offset = expert_offset; activated_expert_offset < num_activated_experts; activated_expert_offset+=EXPERT_STRIDE) {
+      int32_t expert_idx = mMask[activated_expert_offset];
       cute::Tensor tRoutingIndex = mRoutingIndices(expert_idx, cute::_);
       for (int m_tile = 0; m_tile < cute::size<3>(tCgA); ++m_tile) {
         for (int n_tile = 0; n_tile < cute::size<3>(tCgB); ++n_tile) {

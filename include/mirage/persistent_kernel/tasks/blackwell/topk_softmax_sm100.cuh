@@ -74,8 +74,8 @@ __device__ __forceinline__ void topk_softmax_task_impl(
     void *__restrict__ mpk_routing_indices_ptr, // [NUM_EXPERTS, num_rows] laid out
                                            // as expert-major: expert * num_rows
                                            // + row
-    void *__restrict__ mpk_active_expert_ids_ptr, // [NUM_EXPERTS]
-    void *__restrict__ mpk_num_active_experts_ptr, // [1]
+    void *__restrict__ mpk_active_expert_ids_ptr, // [NUM_EXPERTS + 1] last element
+                                                // stores num active experts
     int const start_expert,
     int const end_expert,
     bool const renormalize) {
@@ -84,7 +84,6 @@ __device__ __forceinline__ void topk_softmax_task_impl(
   float *output = static_cast<float *>(output_ptr);
   int *mpk_routing_indices = static_cast<int *>(mpk_routing_indices_ptr);
   int *mpk_active_expert_ids = static_cast<int *>(mpk_active_expert_ids_ptr);
-  int *mpk_num_active_experts = static_cast<int *>(mpk_num_active_experts_ptr);
   // initialize routing indices to 0; active-id marks to -1; count to 0
   for (int expert = start_expert + threadIdx.x; expert < end_expert; expert += blockDim.x) {
     if (mpk_routing_indices != nullptr) {
@@ -96,8 +95,8 @@ __device__ __forceinline__ void topk_softmax_task_impl(
       mpk_active_expert_ids[expert - start_expert] = -1;
     }
   }
-  if (threadIdx.x == 0 && mpk_num_active_experts != nullptr) {
-    *mpk_num_active_experts = 0;
+  if (threadIdx.x == NUM_EXPERTS && mpk_active_expert_ids != nullptr) {
+    mpk_active_expert_ids[NUM_EXPERTS] = 0;
   }
   __syncthreads();
   // Compile-time checks
@@ -284,12 +283,12 @@ __device__ __forceinline__ void topk_softmax_task_impl(
   }
   __syncthreads();
   // Compact marks into a dense list and count
-  if (mpk_active_expert_ids != nullptr && mpk_num_active_experts != nullptr) {
+  if (mpk_active_expert_ids != nullptr) {
     for (int expert = start_expert + threadIdx.x; expert < end_expert; expert += blockDim.x) {
       int const local_expert = expert - start_expert;
       int const mark = mpk_active_expert_ids[local_expert];
       if (mark >= 0) {
-        int const pos = atomicAdd(mpk_num_active_experts, 1);
+        int const pos = atomicAdd(mpk_active_expert_ids+NUM_EXPERTS, 1);
         mpk_active_expert_ids[pos] = expert;
       }
     }
