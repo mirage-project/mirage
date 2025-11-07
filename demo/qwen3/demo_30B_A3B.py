@@ -87,6 +87,7 @@ if __name__ == "__main__":
         help="Not use the cutlass version kernel.",
     )
     parser.add_argument("--ignore-eos", action="store_true", help="Ignore eos token during generation")
+    parser.add_argument("--splitk-gate", action="store_true", help="Use split-k gating linear")
     args = parser.parse_args()
     try:
         from mpi4py import MPI
@@ -346,7 +347,23 @@ if __name__ == "__main__":
             name="attn_allreduce_out",
             io_category="nvshmem_tensor" if world_size > 1 else "cuda_tensor",
         )
-        # TODO(Zhihao): continue here to allocate moe buffers
+        # TODO(Zhihao): a temporary solution to combine MoE gate_proj and up_proj into one linear 
+        # layer on the torch side with extra memory requirements, need to have a shuffle kernel to do this properly
+        moe_gate_up_proj_torch_weights = []
+        moe_down_proj_torch_weights = []
+        for layer in model.model.layers:
+            moe_gate_up_proj_torch = []
+            moe_down_proj_torch = []
+            for expert_id in range(num_experts):
+                moe_gate_up_proj_torch.append(torch.concat([layer.mlp.experts[expert_id].gate_proj.weight, layer.mlp.experts[expert_id].up_proj.weight], dim=0))
+                moe_down_proj_torch.append(layer.mlp.experts[expert_id].down_proj.weight)
+            del layer.mlp.experts
+            layer.mlp.experts = {
+                "gate_up_proj": torch.stack(moe_gate_up_proj_torch, dim=0),
+                "down_proj": torch.stack(moe_down_proj_torch, dim=0),
+            }
+            torch.cuda.empty_cache()
+
         moe_gate_out = mpk.new_tensor(
             dims=(args.max_num_batched_tokens, num_experts),
             dtype=mi.bfloat16,
@@ -360,7 +377,7 @@ if __name__ == "__main__":
             io_category="cuda_tensor",
         )
         moe_mask = mpk.new_tensor(
-            dims=(num_experts,),
+            dims=(num_experts + 1,),
             dtype=mi.int32,
             name="moe_mask",
             io_category="cuda_tensor",
@@ -445,8 +462,6 @@ if __name__ == "__main__":
         )
         x = y
         for i, layer in enumerate(model.model.layers):
-            # if i > 0:
-            #     break
             # add rmsnorm + linear
             w_norm = mpk.attach_input(
                 torch_tensor=layer.input_layernorm.weight,
@@ -478,7 +493,7 @@ if __name__ == "__main__":
                 input=rmsnorm_out,
                 weight=w_qkv,
                 output=attn_in,
-                grid_dim=(grid_for_rmsnorm_linear_layer(w_qkv.dim(0)), 1, 1),
+                grid_dim=(grid_for_rmsnorm_linear_layer(w_qkv.dim(0)), 1, 1), # 5120 split into 64 tasks
                 block_dim=(256, 1, 1),
             )
             # add attention
@@ -530,7 +545,7 @@ if __name__ == "__main__":
                 weight=w,
                 residual=x,
                 output=attn_proj_out,
-                grid_dim=(hidden_size // 64, 1, 1),
+                grid_dim=(hidden_size // 128, 1, 1),
                 block_dim=(256, 1, 1),
             )
             # reset residual input as x
@@ -551,24 +566,14 @@ if __name__ == "__main__":
                 name=f"layer_{i}_post_attn_layernorm",
             )
             
-            # TODO(Zhihao): a temporary solution to combine MoE gate_proj and up_proj into one linear 
-            # layer on the torch side with extra memory requirements, need to have a shuffle kernel to do this properly
-            moe_gate_up_proj_torch = []
-            moe_down_proj_torch = []
-            for expert_id in range(num_experts):
-                moe_gate_up_proj_torch.append(torch.concat([layer.mlp.experts[expert_id].gate_proj.weight, layer.mlp.experts[expert_id].up_proj.weight], dim=0))
-                moe_down_proj_torch.append(layer.mlp.experts[expert_id].down_proj.weight)
-            moe_gate_up_proj_torch = torch.stack(moe_gate_up_proj_torch, dim=0) # [num_experts, intermediate_size*2, hidden_size]
-            moe_down_proj_torch = torch.stack(moe_down_proj_torch, dim=0) # [num_experts, hidden_size, intermediate_size]
-            
             w_moe_gate = mpk.attach_input(
                 torch_tensor=layer.mlp.gate.weight, name=f"layer_{i}_moe_gate"
             )
             w_gatedup = mpk.attach_input(
-                torch_tensor=moe_gate_up_proj_torch, name=f"layer_{i}_gateup_proj"
+                torch_tensor=layer.mlp.experts["gate_up_proj"], name=f"layer_{i}_gateup_proj"
             )
             w_down_proj = mpk.attach_input(
-                torch_tensor=moe_down_proj_torch, name=f"layer_{i}_down_proj"
+                torch_tensor=layer.mlp.experts["down_proj"], name=f"layer_{i}_down_proj"
             )
             
             rmsnorm_num_tasks = grid_for_rmsnorm_linear_layer(w_gatedup.dim(1))
@@ -579,14 +584,25 @@ if __name__ == "__main__":
                 grid_dim=(mpk.max_num_batched_tokens, 1, 1),
                 block_dim=(256, 1, 1),
             )
-            # moe gate
-            mpk.linear_layer(
-                input=rmsnorm_out,
-                weight=w_moe_gate,
-                output=moe_gate_out,
-                grid_dim=(1, 1, 1),
-                block_dim=(256, 1, 1),
-            )
+            
+            if args.splitk_gate:
+                # moe gate with split-k
+                mpk.splitk_linear_layer(
+                    input=rmsnorm_out,
+                    weight=w_moe_gate,
+                    output=moe_gate_out,
+                    grid_dim=(1, hidden_size // 64, 1),
+                    block_dim=(256, 1, 1),
+                )
+            else:
+                # moe gate without split-k
+                mpk.linear_layer(
+                    input=rmsnorm_out,
+                    weight=w_moe_gate,
+                    output=moe_gate_out,
+                    grid_dim=(1, 1, 1),
+                    block_dim=(256, 1, 1),
+                )
             # topk+softmax
             mpk.moe_topk_softmax_routing_layer(
                 input=moe_gate_out,
@@ -601,13 +617,13 @@ if __name__ == "__main__":
                 moe_routing_indices=moe_routing_indices,
                 moe_mask=moe_mask,
                 output=mlp_mid,
-                grid_dim=(12, 12, 1),
+                grid_dim=(10, 12, 1),
                 block_dim=(256, 1, 1),
             )
             mpk.moe_silu_mul_layer(
                 input=mlp_mid,
                 output=silu_mul_out,
-                grid_dim=(mpk.max_num_batched_tokens, 1, 1),
+                grid_dim=(mpk.max_num_batched_tokens, num_experts_per_tok, 1),
                 block_dim=(256, 1, 1),
             )
             mpk.moe_w2_linear_layer(
@@ -616,7 +632,7 @@ if __name__ == "__main__":
                 moe_routing_indices=moe_routing_indices,
                 moe_mask=moe_mask,
                 output=mlp_out,
-                grid_dim=(9, 16, 1),
+                grid_dim=(8, 16, 1),
                 block_dim=(256, 1, 1),
             )
             mpk.moe_mul_sum_add_layer(
@@ -655,7 +671,7 @@ if __name__ == "__main__":
             input=rmsnorm_out,
             weight=w_proj,
             output=argmax_in,
-            grid_dim=(grid_for_rmsnorm_linear_layer(w_proj.dim(0)), 1, 1),
+            grid_dim=(mpk.num_workers, 1, 1),
             block_dim=(256, 1, 1),
         )
         # add argmax layer
@@ -701,6 +717,26 @@ if __name__ == "__main__":
     warmup = 0
     output_len = 512
     if not args.use_mirage:
+        output_len = 3
+        prompt_len = prompt_lengths[0].item()
+        past_key_values = None
+
+        input_ids = tokens[:, :1].clone()
+        attention_mask = torch.ones_like(input_ids)
+
+        with torch.inference_mode():
+            out = model(
+                input_ids=input_ids, 
+                attention_mask=attention_mask,
+                use_cache=True,
+                past_key_values=None
+            )
+            past_key_values = out.past_key_values
+            next_token = out.logits[:, -1, :].argmax(dim=-1, keepdim=True)
+            print("decode step 1 out", out.logits[:, -1, :5], tokenizer.batch_decode(next_token[0], skip_special_tokens=True)[0])
+        
+        exit(0)
+        
         prompt_len= prompt_lengths[0].item()
         for cur_pos in range(prompt_len, prompt_len + output_len):
             step.fill_(cur_pos - 1)
@@ -744,7 +780,6 @@ if __name__ == "__main__":
         run_time = starter.elapsed_time(ender)
 
         print("tokens.shape = ", tokens.shape)
-        print(tokens)
         for r in range(total_num_requests):
             generated_ids = tokens[r, : step[r] + 1]
             response = tokenizer.decode(generated_ids, skip_special_tokens=True)

@@ -758,6 +758,77 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
       }
       break;
     }
+    case TASK_SPLITK_LINEAR_SM100: {
+      int const cp_async_size = 64;
+      const size_t smem_repeat_row = 1;
+      constexpr int B = 3;
+      constexpr int M = 3;
+      constexpr int S = 3;
+      constexpr int MMA_M = 128;
+      constexpr int MMA_N = 16;
+
+      if (param_id == 0) {
+        // TMA_INPUT
+        int const batch_size = tensor_desc.dim[0];
+        int const reduction_size = tensor_desc.dim[1];
+        int const reduction_stride = tensor_desc.stride[0];
+        uint64_t gmem_shape[2] = {static_cast<uint64_t>(batch_size),
+                                  static_cast<uint64_t>(reduction_size)};
+        uint64_t gmem_stride[2] = {1, static_cast<uint64_t>(reduction_stride)};
+        uint32_t smem_shape[2] = {static_cast<uint32_t>(MMA_N),
+                                  static_cast<uint32_t>(cp_async_size)};
+        constexpr int TILE_SIZE = 64;
+
+        size_t smem_repeat_col =
+            (TILE_SIZE + cp_async_size - 1) / cp_async_size;
+        fill_tma_desc<bfloat16, B, M, S, 2>(tma_desc,
+                                            tensor_desc.base_ptr,
+                                            gmem_shape,
+                                            gmem_stride,
+                                            smem_shape,
+                                            smem_repeat_row,
+                                            smem_repeat_col);
+      } else if (param_id == 1) {
+        // TMA_WEIGHT
+        int const output_size = tensor_desc.dim[0];
+        int const reduction_size = tensor_desc.dim[1];
+        int const reduction_stride = tensor_desc.stride[0];
+        uint64_t gmem_shape[2] = {static_cast<uint64_t>(output_size),
+                                  static_cast<uint64_t>(reduction_size)};
+        uint64_t gmem_stride[2] = {1, static_cast<uint64_t>(reduction_stride)};
+        uint32_t smem_shape[2] = {static_cast<uint32_t>(MMA_M),
+                                  static_cast<uint32_t>(cp_async_size)};
+        constexpr int TILE_SIZE = 64;
+        size_t smem_repeat_col =
+            (TILE_SIZE + cp_async_size - 1) / cp_async_size;
+        fill_tma_desc<bfloat16, B, M, S, 2>(tma_desc,
+                                            tensor_desc.base_ptr,
+                                            gmem_shape,
+                                            gmem_stride,
+                                            smem_shape,
+                                            smem_repeat_row,
+                                            smem_repeat_col);
+      } else if (param_id == 2) {
+        // TMA_OUT
+        int const batch_size = tensor_desc.dim[0];
+        int const output_size = tensor_desc.dim[1];
+        int const output_stride = (tensor_desc.stride[0]);
+        uint64_t gmem_shape[2] = {static_cast<uint64_t>(batch_size),
+                                  static_cast<uint64_t>(output_size)};
+        uint64_t gmem_stride[2] = {1, static_cast<uint64_t>(output_stride)};
+        uint32_t smem_shape[2] = {static_cast<uint32_t>(MMA_N),
+                                  static_cast<uint32_t>(MMA_M)};
+        size_t smem_repeat_col = 1;
+        fill_tma_desc<bfloat16, 0, M, S, 2>(tma_desc,
+                                            tensor_desc.base_ptr,
+                                            gmem_shape,
+                                            gmem_stride,
+                                            smem_shape,
+                                            smem_repeat_row,
+                                            smem_repeat_col);
+      }
+      break;
+    }
     case TASK_MOE_W13_LINEAR_SM100:
     case TASK_MOE_W2_LINEAR_SM100: {
       int const cp_async_size = 64;
@@ -861,7 +932,8 @@ __host__ inline void create_tma_desc_by_task(FullTaskDesc &task_desc) {
     case TASK_LINEAR_SWAPAB_WITH_RESIDUAL_HOPPER:
     case TASK_SPLITK_LINEAR_SWAPAB_HOPPER:
     case TASK_LINEAR_SM100:
-    case TASK_LINEAR_WITH_RESIDUAL_SM100: {
+    case TASK_LINEAR_WITH_RESIDUAL_SM100: 
+    case TASK_SPLITK_LINEAR_SM100: {
       // all tensors have 1 tma_desc
       for (size_t param_id = 0;
           param_id < task_desc.num_inputs + task_desc.num_outputs;

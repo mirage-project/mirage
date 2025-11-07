@@ -42,10 +42,10 @@ using bfloat16 = cute::bfloat16_t;
 
 template <typename T, int EXPERTS, int BYTES_PER_LDG>
 __global__ __launch_bounds__(256) void topk_softmax_kernel(
-    void const *__restrict__ gating_output,
+    void *__restrict__ gating_output,
     void *__restrict__ topk_weights,
     void *__restrict__ mpk_routing_indices, // [EXPERTS, num_rows] expert-major
-    void *__restrict__ mpk_expert_mask,     // [EXPERTS]
+    void *__restrict__ mpk_active_expert_ids,     // [EXPERTS + 1] last element stores num active experts
     int num_rows,
     int k,
     bool renormalize) {
@@ -59,7 +59,7 @@ __global__ __launch_bounds__(256) void topk_softmax_kernel(
       num_rows,
       k,
       mpk_routing_indices,
-      mpk_expert_mask,
+      mpk_active_expert_ids,
       /*start_expert=*/0,
       /*end_expert=*/EXPERTS,
       renormalize);
@@ -70,7 +70,7 @@ __global__ __launch_bounds__(256) void topk_softmax_kernel(
 void topk_softmax_sm100_kernel(torch::Tensor gating_output,
                                torch::Tensor topk_weights,
                                torch::Tensor mpk_routing_indices,
-                               torch::Tensor mpk_expert_mask) {
+                               torch::Tensor mpk_active_expert_ids) {
 
   int const BATCH_SIZE = static_cast<int>(gating_output.size(0));
   int const OUTPUT_SIZE = static_cast<int>(gating_output.size(1));
@@ -80,12 +80,12 @@ void topk_softmax_sm100_kernel(torch::Tensor gating_output,
          topk_weights.size(1) == NUM_TOPK);
   assert(mpk_routing_indices.size(0) == OUTPUT_SIZE &&
          mpk_routing_indices.size(1) == BATCH_SIZE);
-  assert(mpk_expert_mask.size(0) == OUTPUT_SIZE);
+  assert(mpk_active_expert_ids.size(0) == OUTPUT_SIZE + 1); // last element stores num active experts
 
   void *gating_output_ptr = gating_output.data_ptr();
   void *topk_weights_ptr = topk_weights.data_ptr();
   void *mpk_routing_indices_ptr = mpk_routing_indices.data_ptr();
-  void *mpk_expert_mask_ptr = mpk_expert_mask.data_ptr();
+  void *mpk_active_expert_ids_ptr = mpk_active_expert_ids.data_ptr();
 
   // launch grid using 256-thread blocks
   auto launch = [&](auto experts_ct) {
@@ -96,13 +96,14 @@ void topk_softmax_sm100_kernel(torch::Tensor gating_output,
     topk_softmax_kernel<T,
                         EXP,
                         ((sizeof(T) * EXP) < 16 ? (sizeof(T) * EXP) : 16)>
-        <<<grid_dim, block_dim, 0>>>(gating_output_ptr,
-                                     topk_weights_ptr,
-                                     mpk_routing_indices_ptr,
-                                     mpk_expert_mask_ptr,
-                                     BATCH_SIZE,
-                                     NUM_TOPK,
-                                     /*renormalize=*/true);
+        <<<grid_dim, block_dim, 0>>>(
+            gating_output_ptr,
+            topk_weights_ptr,
+            mpk_routing_indices_ptr,
+            mpk_active_expert_ids_ptr,
+            BATCH_SIZE,
+            NUM_TOPK,
+            /*renormalize=*/true);
   };
 
   switch (OUTPUT_SIZE) {
@@ -278,7 +279,7 @@ void launch_moe_linear_sm100(void *input_ptr,
 
   // Topk_mask
   cute::Layout layout_expert_mask = cute::make_layout(
-      cute::make_shape(NUM_EXPERTS), cute::make_stride(cute::Int<1>{}));
+      cute::make_shape(NUM_EXPERTS+1), cute::make_stride(cute::Int<1>{}));
   cute::Tensor mMask = cute::make_tensor(
       cute::make_gmem_ptr(static_cast<int32_t *>(mpk_expert_mask_ptr)),
       layout_expert_mask);
@@ -477,20 +478,20 @@ void moe_w13_linear_sm100_kernel(torch::Tensor input,
   // const int OUTPUT_SIZE = output.size(1);
   // const int REDUCTION_SIZE = weight.size(1);
 
-  constexpr int BATCH_SIZE = 8;
+  constexpr int BATCH_SIZE = 1;
   constexpr int OUTPUT_SIZE = 128;
   constexpr int REDUCTION_SIZE = 2048;
   constexpr int NUM_EXPERTS = 128;
   constexpr int NUM_TOPK = 8;
   constexpr int EXPERT_OFFSET = 0;
-  constexpr int EXPERT_STRIDE = 12;
+  constexpr int EXPERT_STRIDE = 10;
 
   assert(input.size(1) == REDUCTION_SIZE);
   assert(weight.size(0) == NUM_EXPERTS && weight.size(1) == OUTPUT_SIZE &&
          weight.size(2) == REDUCTION_SIZE);
   assert(mpk_routing_indices.size(0) == NUM_EXPERTS &&
          mpk_routing_indices.size(1) == BATCH_SIZE);
-  assert(mpk_expert_mask.size(0) == NUM_EXPERTS);
+  assert(mpk_expert_mask.size(0) == NUM_EXPERTS + 1);
   assert(!has_residual);
 
   launch_moe_linear_sm100<bfloat16,
@@ -532,13 +533,13 @@ void moe_w2_linear_sm100_kernel(torch::Tensor input,
   // const int OUTPUT_SIZE = output.size(1);
   // const int REDUCTION_SIZE = weight.size(1);
 
-  constexpr int BATCH_SIZE = 8;
+  constexpr int BATCH_SIZE = 1;
   constexpr int OUTPUT_SIZE = 128;
   constexpr int REDUCTION_SIZE = 768;
   constexpr int NUM_EXPERTS = 128;
   constexpr int NUM_TOPK = 8;
   constexpr int EXPERT_OFFSET = 0;
-  constexpr int EXPERT_STRIDE = 9;
+  constexpr int EXPERT_STRIDE = 8;
 
   assert(input.size(0) == BATCH_SIZE && input.size(1) == NUM_TOPK &&
          input.size(2) == REDUCTION_SIZE);
@@ -546,7 +547,7 @@ void moe_w2_linear_sm100_kernel(torch::Tensor input,
          weight.size(2) == REDUCTION_SIZE);
   assert(mpk_routing_indices.size(0) == NUM_EXPERTS &&
          mpk_routing_indices.size(1) == BATCH_SIZE);
-  assert(mpk_expert_mask.size(0) == NUM_EXPERTS);
+  assert(mpk_expert_mask.size(0) == NUM_EXPERTS + 1);
   assert(!has_residual);
 
   launch_moe_linear_sm100<bfloat16,

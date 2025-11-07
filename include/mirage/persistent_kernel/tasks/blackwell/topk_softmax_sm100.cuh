@@ -74,7 +74,8 @@ __device__ __forceinline__ void topk_softmax_task_impl(
     void *__restrict__ mpk_routing_indices_ptr, // [NUM_EXPERTS, num_rows] laid out
                                            // as expert-major: expert * num_rows
                                            // + row
-    void *__restrict__ mpk_expert_mask_ptr,     // [NUM_EXPERTS]
+    void *__restrict__ mpk_active_expert_ids_ptr, // [NUM_EXPERTS + 1] last element
+                                                // stores num active experts
     int const start_expert,
     int const end_expert,
     bool const renormalize) {
@@ -82,17 +83,20 @@ __device__ __forceinline__ void topk_softmax_task_impl(
   T *input = static_cast<T *>(input_ptr);
   float *output = static_cast<float *>(output_ptr);
   int *mpk_routing_indices = static_cast<int *>(mpk_routing_indices_ptr);
-  uint8_t *mpk_expert_mask = static_cast<uint8_t *>(mpk_expert_mask_ptr);
-  // initialize mpk_routing_indices and mpk_expert_mask to zero
-  for(int expert = start_expert + threadIdx.x; expert < end_expert; expert += blockDim.x) {
+  int *mpk_active_expert_ids = static_cast<int *>(mpk_active_expert_ids_ptr);
+  // initialize routing indices to 0; active-id marks to -1; count to 0
+  for (int expert = start_expert + threadIdx.x; expert < end_expert; expert += blockDim.x) {
     if (mpk_routing_indices != nullptr) {
       for (int row = 0; row < num_rows; ++row) {
         mpk_routing_indices[expert * num_rows + row] = 0;
       }
     }
-    if (mpk_expert_mask != nullptr) {
-      mpk_expert_mask[expert] = 0;
+    if (mpk_active_expert_ids != nullptr) {
+      mpk_active_expert_ids[expert - start_expert] = -1;
     }
+  }
+  if (threadIdx.x == NUM_EXPERTS && mpk_active_expert_ids != nullptr) {
+    mpk_active_expert_ids[NUM_EXPERTS] = 0;
   }
   __syncthreads();
   // Compile-time checks
@@ -243,16 +247,15 @@ __device__ __forceinline__ void topk_softmax_task_impl(
         //     should_process_row ? (expert - start_expert) : NUM_EXPERTS;
         row_sum_for_renormalize += max_val;
         // Optionally populate MPK routing structures
-        if (should_process_row && mpk_routing_indices != nullptr &&
-            mpk_expert_mask != nullptr) {
+        if (should_process_row && mpk_routing_indices != nullptr) {
           int const local_expert = expert - start_expert;
           // Write 1-based rank into routing indices; stride by num_rows per
           // expert
           mpk_routing_indices[local_expert * num_rows + thread_row] = k_idx + 1;
-          // // Mark expert as active (idempotent). Atomic to avoid races across
-          // rows. atomicExch(&mpk_expert_mask[local_expert], 1); // race
-          // condition might be okay here
-          mpk_expert_mask[local_expert] = 1;
+          // Sparse mark expert as active; idempotent without atomics
+          if (mpk_active_expert_ids != nullptr) {
+            mpk_active_expert_ids[local_expert] = local_expert;
+          }
         }
       }
 
@@ -275,6 +278,18 @@ __device__ __forceinline__ void topk_softmax_task_impl(
       for (int k_idx = 0; k_idx < k; ++k_idx) {
         int const out_idx = k * thread_row + k_idx;
         output[out_idx] = output[out_idx] * inv;
+      }
+    }
+  }
+  __syncthreads();
+  // Compact marks into a dense list and count
+  if (mpk_active_expert_ids != nullptr) {
+    for (int expert = start_expert + threadIdx.x; expert < end_expert; expert += blockDim.x) {
+      int const local_expert = expert - start_expert;
+      int const mark = mpk_active_expert_ids[local_expert];
+      if (mark >= 0) {
+        int const pos = atomicAdd(mpk_active_expert_ids+NUM_EXPERTS, 1);
+        mpk_active_expert_ids[pos] = expert;
       }
     }
   }
