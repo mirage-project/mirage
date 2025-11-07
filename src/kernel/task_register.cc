@@ -1237,13 +1237,14 @@ int TaskRegister::register_linear_swapAB_hopper_task(
 
   code.e(
       "kernel::linear_swapAB_kernel_hopper<bfloat16, $, $, $, $, TMA_A, TMA_B, "
-      "TMA_OUT, $, $>(",
+      "TMA_OUT, $, $, $>(",
       batch_size,
       output_size,
       reduction_size,
       Kstages,
       with_residual ? "TMA_RESIDUAL" : "void",
-      output_stride);
+      output_stride,
+      "false"/*SplitK*/);
   code.e("    tma_a,");
   code.e("    tma_b,");
   code.e("    tma_out, ");
@@ -2484,13 +2485,14 @@ int TaskRegister::register_splitk_linear_swapAB_hopper_task(threadblock::Graph c
   
     code.e(
         "kernel::linear_swapAB_kernel_hopper<bfloat16, $, $, $, $, TMA_A, TMA_B, "
-        "TMA_OUT, $, $, true>(",
+        "TMA_OUT, $, $, $>(",
         batch_size,
         output_size,
         reduction_size,
         Kstages,
         with_residual ? "TMA_RESIDUAL" : "void",
-        output_stride);
+        output_stride,
+        "true"/*SplitK*/);
     code.e("    tma_a,");
     code.e("    tma_b,");
     code.e("    tma_out, ");

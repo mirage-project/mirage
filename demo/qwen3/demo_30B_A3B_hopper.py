@@ -624,13 +624,6 @@ if __name__ == "__main__":
                 block_dim=(256, 1, 1),
             )
             # moe gate
-            # mpk.linear_layer(
-            #     input=rmsnorm_out_moe,
-            #     weight=w_moe_gate,
-            #     output=moe_gate_out,
-            #     grid_dim=(num_experts // 16, 1, 1),
-            #     block_dim=(256, 1, 1),
-            # )
             if args.splitk_gate:
                 # moe gate with split-k
                 mpk.splitk_linear_layer(
