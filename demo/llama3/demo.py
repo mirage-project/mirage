@@ -105,7 +105,7 @@ def load_model_and_tokenizer(args, world_size, rank):
 def process_eos_tokens(model, tokenizer):
     # currently, we only support single eos_token_id in mpk
     eos_token_id_for_mirage = tokenizer.eos_token_id
-    eos_token_ids = [tokenizer.convert_tokens_to_ids("<|eot_id|>")]
+    eos_token_ids = [eos_token_id_for_mirage]
     return eos_token_id_for_mirage, eos_token_ids
 
 
@@ -118,13 +118,16 @@ def get_block_dim():
 
 
 def grid_for_rmsnorm_linear_layer(size):
-    if size < 4096:
-        raise ValueError("RMSNorm/Linear layer size too small")
-    for grid_size in [96, 80, 64]: # TODO: investigate why 48 (and smaller?) results in mem misalignment
+    if size / 96 > 400:
+        # TODO: An add-hoc workaround for linear kernel, both MPK ptx and
+        # cutlass version will output unexpect result (not same out put for
+        # same prompt) if the OUTPUT_SIZE is too big, try to figure it out.
+        assert size % 256 == 0, f"FATAL: Linear layer size not support, it's {size}."
+        return size // 256
+    for grid_size in [96, 80, 64, 48]:
         if size % grid_size == 0 and (size // grid_size >= 128 or size // grid_size == 64):
-        # if size % grid_size == 0:
             return grid_size
-    return 1
+    raise ValueError(f"FATAL: RMSNorm/Linear layer size not support, it's {size}.")
 
 
 def max_factor_leq_n(m: int, n: int) -> int:
@@ -146,7 +149,7 @@ def prepare_test_prompt():
     messages = [
         {
             "role": "system",
-            "content": "You are a helpful assistant.",
+            "content": "You are llama, a helpful AI assistant.",
         },
         {"role": "user", "content": prompt},
     ]
@@ -159,13 +162,11 @@ def prepare_test_prompt():
 # ============================================================================
 
 def prepare_input_tensors(model, tokenizer, messages, args, use_mirage=True):
-    # Tokenize the input - handle missing chat template
     text = tokenizer.apply_chat_template(
         messages, tokenize=False, add_generation_prompt=True
     )
     model_inputs = tokenizer([text], return_tensors="pt").to(model.device)
-    
-    # Limit non-Mirage path to single request to avoid batching issues
+    print("Model input id shape:", model_inputs.input_ids.shape)
     num_requests = args.max_num_batched_requests if use_mirage else 1
     
     # Prepare tokens tensor
@@ -204,7 +205,7 @@ def setup_mirage_configuration(model, args, world_size, rank):
     hidden_size = model.config.hidden_size
     intermediate_size = model.config.intermediate_size
     # Pad vocab_size to facilitate task graph creation
-    padded_vocab_size = ((model.config.vocab_size + 95) // 96) * 96
+    padded_vocab_size = ((model.config.vocab_size + 2047) // 2048) * 2048
     lm_head_weight = torch.cat(
             (
                 model.lm_head.weight,
@@ -273,14 +274,13 @@ def create_persistent_kernel(args, world_size, rank, input_data, config, eos_tok
     )
     
     # Create auxiliary buffers for paged KV and QO
-    # Initialize with zeros to avoid uninitialized garbage data issues between qk_norm paths
-    qo_indptr_buffer = torch.zeros(
+    qo_indptr_buffer = torch.empty(
             args.max_num_batched_requests + 1, dtype=torch.int32, device="cuda")
-    paged_kv_indptr_buffer = torch.zeros(
+    paged_kv_indptr_buffer = torch.empty(
         args.max_num_batched_requests + 1, dtype=torch.int32, device="cuda")
-    paged_kv_indices_buffer = torch.zeros(
+    paged_kv_indices_buffer = torch.empty(
         args.max_num_pages, dtype=torch.int32, device="cuda")
-    paged_kv_last_page_len_buffer = torch.zeros(
+    paged_kv_last_page_len_buffer = torch.empty(
         args.max_num_batched_requests, dtype=torch.int32, device="cuda")
 
     # Get GPU configurations
@@ -315,6 +315,7 @@ def create_persistent_kernel(args, world_size, rank, input_data, config, eos_tok
         profiler_tensor=profiler_tensor,
         trace_name=args.trace_name,
         spec_decode_config=spec_decode_config,
+
         use_cutlass_kernel=args.use_cutlass_kernel,
     )
     
@@ -322,7 +323,7 @@ def create_persistent_kernel(args, world_size, rank, input_data, config, eos_tok
 
 
 def attach_model_inputs(mpk, model, input_data, config):
-    # Attach basic inputs
+    # Attach inputs
     x = mpk.attach_input(torch_tensor=input_data['input_tokens'], name="input_token")
     cos_pos_embed = mpk.attach_input(
         torch_tensor=input_data['position_embeddings'][0][0, :4096, :],
@@ -349,12 +350,6 @@ def attach_model_inputs(mpk, model, input_data, config):
 
 def create_intermediate_tensors(mpk, config, spec_decode_config, world_size, args):
     import mirage as mi
-    
-    # Calculate tensor dimensions based on speculative decoding
-    if spec_decode_config and spec_decode_config.method == "promptlookup":
-        num_tokens_extend = spec_decode_config.spec_length + 1
-    else:
-        num_tokens_extend = 1
     
     tensors = {}
     
@@ -763,7 +758,7 @@ def build_mirage_graph(model, args, world_size, rank, input_data, eos_token_id_f
     )
     
     # Handle speculative decoding token input if needed
-    spec_tokens = None  # Initialize spec_tokens
+    spec_tokens = None
     if spec_decode_config and spec_decode_config.method == "promptlookup":
         all_tokens = mpk.attach_input(torch_tensor=input_data['tokens'], name="all_tokens")
         spec_tokens = mpk.draft_forward_layer_dispatcher(
@@ -829,8 +824,7 @@ def run_pytorch_generation(model, input_data, eos_token_ids, output_len=512):
     
     stream = torch.cuda.Stream()
     prev_pos = 0
-    
-    # Timing setup
+
     starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
     warmup = 0
     
@@ -867,15 +861,7 @@ def run_pytorch_generation(model, input_data, eos_token_ids, output_len=512):
     return cur_pos, run_time
 
 
-def run_mirage_generation(model, mpk, input_data, tokenizer, args):
-    tokens = input_data['tokens']
-    position_embeddings = input_data['position_embeddings']
-    step = input_data['step']
-    prompt_lengths = input_data['prompt_lengths']
-    
-    stream = torch.cuda.Stream()
-    
-    # Timing setup
+def run_mirage_generation(mpk):
     starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
 
     starter.record()
@@ -885,7 +871,7 @@ def run_mirage_generation(model, mpk, input_data, tokenizer, args):
     torch.cuda.synchronize()
     run_time = starter.elapsed_time(ender)
 
-    return tokens, step, run_time
+    return run_time
 
 
 # ============================================================================
@@ -902,25 +888,29 @@ def run_generation_comparison(model, tokenizer, args, world_size, rank):
     
     if args.use_mirage:
         mpk = build_mirage_graph(model, args, world_size, rank, input_data, eos_token_id_for_mirage)
-        tokens, step, run_time = run_mirage_generation(model, mpk, input_data, tokenizer, args)
-        
+        run_time = run_mirage_generation(mpk)
+
         print("="*60)
-        print("Generation Results (PyTorch)")
+        print("Generation Results (MPK)")
         print("="*60)
 
-        print("tokens.shape = ", tokens.shape)
         prompt_lengths = input_data['prompt_lengths']
-        total_generated_tokens = 0
+        step = input_data['step']
+        tokens = input_data['tokens']
+        print("tokens.shape = ", tokens.shape)
         for r in range(args.max_num_batched_requests):
             generated_ids = tokens[r, : step[r] + 1]
             response = tokenizer.decode(generated_ids, skip_special_tokens=True)
             num_generated_tokens = (step[r] + 1 - prompt_lengths[r].item())
-            total_generated_tokens += num_generated_tokens
+            print("-"*40)
             print(f"Request {r}:, generate length = {num_generated_tokens}\n")
             print(response)
 
-        print("Prompt length {}, total generate length {}, per-token latency (both prefill and decode): {} ms".format(
-              input_data['prompt_lengths'][0], total_generated_tokens, run_time / total_generated_tokens
+        if args.max_num_batched_requests > 1:
+            print(f"Output length of each batch is same: {(step.max() == step.min()).item()}")
+
+        print("Prompt length {}, generate length {}, per-token latency (both prefill and decode): {} ms".format(
+              prompt_lengths[0], step.max().item() + 1 - prompt_lengths[0], run_time / (step.max().item() + 1)
             )
         )
         

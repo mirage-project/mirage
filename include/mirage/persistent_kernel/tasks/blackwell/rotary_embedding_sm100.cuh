@@ -52,6 +52,8 @@ __device__ __forceinline__ void rotary_embedding_sm100(InputSmem smem_input,
           float sin = static_cast<float>(cur_sin_ptr[offset]);
 
           float v_rot;
+
+          wg_barrier.arrive_and_wait();
           if (i < HEAD_DIM / 2) {
             float v1 = static_cast<float>(smem_input.at(row, col));
             float v2 =

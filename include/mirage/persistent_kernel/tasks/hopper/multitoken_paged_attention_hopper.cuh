@@ -112,17 +112,6 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
   // Load the paged KV indices into shared memory
   __shared__ int page_indices[MAX_PAGES_PER_REQUEST];
 
-#pragma unroll
-  for (int i = threadIdx.x; i < num_pages * sizeof(int) / 16;
-       i += NUM_THREADS) {
-    __uint128_t const *src_ptr =
-        reinterpret_cast<__uint128_t const *>(paged_kv_indices_buffer_ptr +
-                                              first_page_pos) +
-        i;
-    __uint128_t *dst_ptr = reinterpret_cast<__uint128_t *>(page_indices) + i;
-    *dst_ptr = *src_ptr;
-  }
-
   if (num_pages % (16 / sizeof(int)) != 0) {
     int tail_pages = num_pages % (16 / sizeof(int));
     int tail_offset = num_pages - tail_pages;
@@ -516,7 +505,7 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
                     (token_idx + seq_len - num_tokens) * HEAD_DIM,
                 static_cast<T const *>(sin_ptr) +
                     (token_idx + seq_len - num_tokens) * HEAD_DIM,
-                token_idx * NUM_QO_PER_KV);
+                token_idx);
           }
         }
         if (kv_tokens_to_process > 0) {
