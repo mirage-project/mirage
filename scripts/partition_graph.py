@@ -14,6 +14,7 @@ from graph_splitter import process_operator_graph
 from build_dataset import augment_partitions
 from cost_model.in_ctx_partition import InCtxPartitioner
 # from visualize_augs import visualize_partition, compare_augmentations
+import concurrent.futures
 
 CAST_ID_TO_DTYPE = {
     1: torch.float32,
@@ -300,7 +301,7 @@ def to_kernel_graph(subgraph, output_ids=[]):
     
 #     return all_kernels, kernel_input_dims
 
-def generate_all_augmented_kernels(input_configs, model, root_dir, dataset_name, min_num_ops=2, max_num_ops=4, aug_factor=5, UNSUPPORTED_OPS=set(), COMPOSITE_OPS=set(), IGNORE_OPS=set()):
+def generate_all_augmented_kernels(input_configs, model, root_dir, dataset_name, min_num_ops=2, max_num_ops=4, aug_factor=5, UNSUPPORTED_OPS=set(), COMPOSITE_OPS=set(), IGNORE_OPS=set(), timeout_minutes=5):
     # Collect subgraphs from all input configurations
     all_subgraphs = []
     for batch_size, seq_len in input_configs:
@@ -320,8 +321,12 @@ def generate_all_augmented_kernels(input_configs, model, root_dir, dataset_name,
     hashes = set(done)
     
     performance = json.load(open(os.path.join(root_dir, f"{dataset_name}_performance.json"), "r")) if os.path.exists(os.path.join(root_dir, f"{dataset_name}_performance.json")) else {}
+    print("Found ", performance)
+    timeout_seconds = timeout_minutes * 60
     
-    for subgraph in all_subgraphs:
+    for i, subgraph in enumerate(all_subgraphs):
+        print(f"\n[{i+1}/{len(all_subgraphs)}] Processing subgraph...")
+        
         produced_in_subgraph = set()
         consumed_in_subgraph = set()
         for op in subgraph:
@@ -329,29 +334,56 @@ def generate_all_augmented_kernels(input_configs, model, root_dir, dataset_name,
                 produced_in_subgraph.add(tid)
             for _, tid in op.input_tensor_shapes:
                 consumed_in_subgraph.add(tid)
+        
         output_ids = [tid for tid in produced_in_subgraph if tid not in consumed_in_subgraph]
-
+        
         try:
             kernel_graph, dims = to_kernel_graph(subgraph, output_ids)
         except NotImplementedError:
+            print(f"  ⚠ Skipped: NotImplementedError in to_kernel_graph")
             continue
-
+        
         # check for duplicate subgraphs
         graph_hash = kernel_graph.get_owner_independent_hash()
         if graph_hash in hashes:
+            print(f"  ⚠ Skipped: Duplicate hash {graph_hash}")
             continue
         hashes.add(graph_hash)
         
         # save original mugraph
         kernel_graph.to_json(os.path.join(root_dir, f"original_{graph_hash}.json"))
         
+        # Superoptimize with timeout
         try:
-            print(f"Superoptimizing {graph_hash}")
-            optimized_graph, best_perf = kernel_graph.superoptimize()
-        except Exception as e:
-            print(f"Subgraph {graph_hash} superoptimize failed with error: {e}")
-            continue
+            print(f"  Superoptimizing {graph_hash} (timeout: {timeout_minutes} min)...")
+            
+            # Use ThreadPoolExecutor with timeout
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(kernel_graph.superoptimize)
+                try:
+                    result = future.result(timeout=timeout_seconds)
+                    
+                    # Handle both tuple and single value returns
+                    if isinstance(result, tuple):
+                        optimized_graph, best_perf = result
+                    else:
+                        optimized_graph = result
+                        best_perf = -1  # Unknown performance
+                    
+                    print(f"  ✓ Optimization complete (perf: {best_perf})")
+                    
+                except concurrent.futures.TimeoutError:
+                    print(f"  ✗ TIMEOUT after {timeout_minutes} minutes - skipping this graph")
+                    # Remove the hash so we can retry later if needed
+                    hashes.remove(graph_hash)
+                    # Delete the original file since we didn't optimize it
+                    os.remove(os.path.join(root_dir, f"original_{graph_hash}.json"))
+                    continue
                 
+        except Exception as e:
+            print(f"  ✗ Superoptimize failed with error: {e}")
+            continue
+        
         performance[graph_hash] = best_perf
         
         # save optimized mugraph
@@ -359,11 +391,18 @@ def generate_all_augmented_kernels(input_configs, model, root_dir, dataset_name,
         all_kernels.append(optimized_graph)
         kernel_input_dims.append(dims)
         
-        # save performance
+        # save performance after each successful optimization
         json.dump(performance, open(os.path.join(root_dir, f"{dataset_name}_performance.json"), "w"))
+        print(f"  ✓ Saved optimized kernel {graph_hash}")
+    
+    print(f"\n{'='*60}")
+    print(f"FINAL STATS:")
+    print(f"  Total subgraphs processed: {len(all_subgraphs)}")
+    print(f"  Successfully optimized: {len(all_kernels)}")
+    print(f"  Success rate: {len(all_kernels)/len(all_subgraphs)*100:.1f}%")
+    print(f"{'='*60}")
     
     return all_kernels, kernel_input_dims
-
 
 class HybridModel:
     """
