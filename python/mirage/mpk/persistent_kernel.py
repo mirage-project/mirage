@@ -47,7 +47,13 @@ static PyObject *init_func(PyObject *self, PyObject *args) {
   }
   profiler_buffer = PyLong_AsVoidPtr(py_profiler_buffer);
 
-  init_persistent_kernel(meta_tensors, profiler_buffer, my_mpi_rank, num_workers, num_local_schedulers, num_remote_schedulers, max_seq_length, total_num_requests, eos_token_id);
+  init_persistent_kernel(meta_tensors, profiler_buffer, my_mpi_rank, num_workers, num_local_schedulers, num_remote_schedulers, max_seq_length, total_num_requests, eos_token_id, thread_id);
+
+  Py_RETURN_NONE;
+}
+
+static PyObject *init_request_func(PyObject *self, PyObject *args) {
+  init_request_resources();
 
   Py_RETURN_NONE;
 }
@@ -66,6 +72,7 @@ static PyObject *finalize_func(PyObject *self, PyObject *args) {
 
 static PyMethodDef ModuleMethods[] = {
   {"init_func", init_func, METH_VARARGS, "initialize persistent kernel"},
+  {"init_request_func", init_request_func, METH_VARARGS, "initialize request resources"},
   {"launch_func", launch_func, METH_VARARGS, "launch persistent kernel"},
   {"finalize_func", finalize_func, METH_VARARGS, "finalize persistent kernel"},
   {NULL, NULL, 0, NULL} // sentinel
@@ -1094,6 +1101,7 @@ class PersistentKernel:
         spec.loader.exec_module(mod)
         self.init_func = getattr(mod, "init_func")
         self.launch_func = getattr(mod, "launch_func")
+        self.init_request_func = getattr(mod, "init_request_func")
         self.finalize_func = getattr(mod, "finalize_func")
         print("Finished megakernel compilation...")
 

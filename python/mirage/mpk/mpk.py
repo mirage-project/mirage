@@ -37,6 +37,8 @@ class MPKMetadata:
     # multi device support
     world_size: int = 1
     rank: int = 0
+    num_workers: int = -1
+    num_schedulers: int = -1
     # Meta tensors
     step: Optional[torch.Tensor] = None
     tokens: Optional[torch.Tensor] = None
@@ -124,6 +126,9 @@ class MPK:
         self.weight_from_model = args.weight_from_model
         self.max_seq_length = args.max_seq_length
         self.max_num_batched_tokens = args.max_num_batched_tokens
+        self.max_sm_num = args.max_sm_num
+        self.num_workers = args.num_workers
+        self.num_schedulers = args.num_schedulers
         
         torch.set_default_dtype(torch.bfloat16)
         torch.cuda.set_device(self.rank)
@@ -159,7 +164,14 @@ class MPK:
         self.model_config = args.model_config
         self.with_lm_head = self.model_config.with_lm_head
             
-        self.num_workers, self.num_schedulers = get_configurations_from_gpu(self.rank)
+        # self.num_workers, self.num_schedulers = get_configurations_from_gpu(self.rank)
+        if self.num_workers <= 0 or self.num_schedulers <= 0:
+            self.num_workers, self.num_schedulers = get_configurations_from_gpu(self.rank)
+        else:
+            self.num_workers = args.num_workers
+            self.num_schedulers = args.num_schedulers
+        print(f"num_workers: {self.num_workers}, num_schedulers: {self.num_schedulers}")
+        
         # self.max_sm_num = args.max_sm_num
         
         self.persistent_kernel = PersistentKernel(
@@ -298,7 +310,7 @@ class MPK:
         
         self.compensate_meta_tensors()
         
-    def load_new_request(self, prompt, use_template=True):
+    def load_new_request(self, prompt: str, use_template: bool = True):
         if not self.is_built:
             raise ValueError("Model is not built yet, so tokenizer is not available")
                 
@@ -322,7 +334,32 @@ class MPK:
         src = model_inputs.input_ids[0]
         self.tokens[:, :L].copy_(src.unsqueeze(0).expand(self.total_num_requests, -1))
         self.prompt_lengths.fill_(model_inputs.input_ids.shape[-1])
+
+    def clear_buffers(self):
+        self.step.fill_(0)
+        self.tokens.fill_(0)
+        self.input_tokens.fill_(0)
+        self.output_tokens.fill_(0)
+        self.num_new_tokens.fill_(0)
+        self.prompt_lengths.fill_(0)
+        self.qo_indptr_buffer.fill_(0)
+        self.paged_kv_indptr_buffer.fill_(0)
+        self.paged_kv_indices_buffer.fill_(0)
+        self.paged_kv_last_page_len_buffer.fill_(0)
         
+    def print_buffers(self, logger = None):
+        if logger is not None:
+            logger.info(f"step: {self.step}")
+            logger.info(f"tokens: {self.tokens}")
+            logger.info(f"input_tokens: {self.input_tokens}")
+            logger.info(f"output_tokens: {self.output_tokens}")
+            logger.info(f"num_new_tokens: {self.num_new_tokens}")
+            logger.info(f"prompt_lengths: {self.prompt_lengths}")
+            logger.info(f"qo_indptr_buffer: {self.qo_indptr_buffer}")
+            logger.info(f"paged_kv_indptr_buffer: {self.paged_kv_indptr_buffer}")
+            logger.info(f"paged_kv_indices_buffer: {self.paged_kv_indices_buffer}")
+            logger.info(f"paged_kv_last_page_len_buffer: {self.paged_kv_last_page_len_buffer}")
+            
     def init_per_request(self):
         #meta_tensors_ptr = [tensor.data_ptr() for tensor in self.meta_tensors]
         self.persistent_kernel.init_func(
@@ -392,6 +429,9 @@ class MPK:
         self.persistent_kernel.compile(output_dir=output_dir)
         print("Compiling mpk... done")
         self.is_compiled = True
+        
+    def init_request_func(self):
+        self.persistent_kernel.init_request_func()
         
     def __call__(self, **kwargs):
         if not self.is_compiled:
