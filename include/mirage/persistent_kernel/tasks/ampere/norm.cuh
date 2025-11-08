@@ -113,7 +113,7 @@ __device__ __forceinline__ void rms_norm(InputSmem smem_input,
       } else {
         // we should keep __syncthreads number same as the for loop when
         // HEAD_DIM smaller than NUM_THREAD
-        for (uint32_t i = threadIdx.x; i < HEAD_DIM; i += NUM_THREADS) {
+        for (uint32_t i = 0; i < HEAD_DIM; i += NUM_THREADS) {
           if (rotary_emd) {
             __syncthreads();
             __syncthreads();
