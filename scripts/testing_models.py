@@ -3,7 +3,6 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
 import torch
 import torch.nn as nn
 
@@ -61,9 +60,9 @@ class TransformerBlock(nn.Module):
         H, Hd = self.n_heads, self.head_dim
 
         # reshape to (B, H, T, Hd) explicitly
-        q = q.view(B, T, H, Hd).transpose(1, 2).contiguous()
-        k = k.view(B, T, H, Hd).transpose(1, 2).contiguous()
-        v = v.view(B, T, H, Hd).transpose(1, 2).contiguous()
+        q = q.view(B, T, H, Hd).transpose(1, 2)
+        k = k.view(B, T, H, Hd).transpose(1, 2)
+        v = v.view(B, T, H, Hd).transpose(1, 2)
 
         # attn logits: (B, H, T, T)
         attn = torch.matmul(q, k.transpose(-2, -1))
