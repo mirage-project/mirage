@@ -99,7 +99,7 @@ __global__ void init_kernel(RuntimeConfig config) {
   // Only a single thread that initializes everything
   if (threadIdx.x == 0) {
     // initialize metadata
-#ifdef MODE_OFFLINE
+#if defined(MODE_OFFLINE) || defined(MODE_ONLINE)
     for (int i = 0; i < config.total_num_requests; i++) {
       config.step[i] = 0;
     }
@@ -1052,6 +1052,12 @@ static RuntimeConfig global_runtime_config;
 // meta_tensors[8]: paged_kv_indices_buffer
 // meta_tensors[9]: paged_kv_last_page_len_buffer
 
+extern "C" void init_request_resources() {
+  init_kernel<<<dim3(1, 1, 1), dim3(INIT_NUM_THREADS, 1, 1)>>>(
+    global_runtime_config);
+  cudaDeviceSynchronize();
+}
+
 extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
                                        void *profiler_buffer,
                                        int my_rank,
@@ -1259,9 +1265,10 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
   cudaStreamCreate(&global_runtime_config.scheduler_stream);
 
   // launch init kernel
-  init_kernel<<<dim3(1, 1, 1), dim3(INIT_NUM_THREADS, 1, 1)>>>(
-      global_runtime_config);
-  cudaDeviceSynchronize();
+  // init_kernel<<<dim3(1, 1, 1), dim3(INIT_NUM_THREADS, 1, 1)>>>(
+      // global_runtime_config);
+  // cudaDeviceSynchronize();
+  init_request_resources();
 #ifdef USE_NVSHMEM
   // Add a global barrier for all init_kernel to complete
   nvshmem_barrier_all();
