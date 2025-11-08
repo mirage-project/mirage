@@ -796,6 +796,7 @@ __device__ static inline void mma(float *frag, A_DESC a_desc, B_DESC b_desc) {
   // static_assert(SMEM_A::ROW == 64);
   // static_assert(SMEM_B::COL == 64);
   if constexpr (M == 64 && K == 16 && std::is_same<T, bfloat16>::value) {
+#pragma unroll
     for (int k = 0; k < (SMEM_A::COL / K); k++) {
       constexpr size_t a_col_param = get_col_param<SMEM_A>();
       constexpr size_t b_col_param = get_col_param<SMEM_B>();
@@ -1407,6 +1408,8 @@ __device__ static inline void
     // and tnspB=false
     constexpr int NUM_K_ITERS =
         (tnspB ? (SMEM_B::ROW + K - 1) / K : (SMEM_B::COL + K - 1) / K);
+
+#pragma unroll
     for (int k_iter = 0; k_iter < NUM_K_ITERS; k_iter++) {
       uint32_t *a_frag_k = a_frag + k_iter * 4;
 

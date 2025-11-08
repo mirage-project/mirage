@@ -38,17 +38,20 @@ __device__ __forceinline__ void cp_async_fence() {
 #endif
 }
 
-// load 128 bytes values from global to shared memory async
-template <typename T>
+// load BYTES (and prefetch 128 bytes) from global to shared memory async
+template <typename T, int BYTES = 16>
 __device__ __forceinline__ void load_smem(T *smem_ptr, T const *gmem_ptr) {
 #ifdef CP_ASYNC_SM80_ENABLED
+  static_assert(BYTES == 4 || BYTES == 8 || BYTES == 16,
+                "cp.async only supports 4, 8, or 16 bytes");
+
   uint32_t smem_int_ptr =
       static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr));
-  asm volatile("cp.async.cg.shared.global.L2::128B [%0], [%1], %2, %3;\n" ::"r"(
+  asm volatile("cp.async.ca.shared.global.L2::128B [%0], [%1], %2, %3;\n" ::"r"(
                    smem_int_ptr),
                "l"(gmem_ptr),
-               "n"(16),
-               "r"(16));
+               "n"(BYTES),
+               "r"(BYTES));
 #endif
 }
 

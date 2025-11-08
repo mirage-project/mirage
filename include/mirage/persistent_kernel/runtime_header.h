@@ -16,6 +16,7 @@
 #pragma once
 
 #include "mirage/config.h"
+#include <cuda_runtime.h>
 
 namespace mirage {
 namespace runtime {
@@ -190,7 +191,7 @@ struct alignas(16) TaskDesc {
 #ifdef MPK_ENABLE_TMA
   void *input_tma_desc_ptrs[MAX_INPUTS_PER_TASK]
                            [mirage::config::MAX_TMA_DESC_PER_TENSOR];
-  void *output_tma_desc_ptrs[MAX_INPUTS_PER_TASK]
+  void *output_tma_desc_ptrs[MAX_OUTPUTS_PER_TASK]
                             [mirage::config::MAX_TMA_DESC_PER_TENSOR];
 #endif
   union {
@@ -205,6 +206,7 @@ struct alignas(16) TaskDesc {
 struct RuntimeConfig {
   int num_workers, num_local_schedulers, num_remote_schedulers, num_graphs;
   int num_gpus, my_gpu_id;
+  int num_events;
   unsigned long long int per_worker_queue_len, per_sched_queue_len;
   unsigned long long int *worker_queue_last_ready_task_id;
   unsigned long long int *sched_queue_last_ready_event_id;
@@ -238,6 +240,7 @@ struct RuntimeConfig {
 #endif
   void *profiler_buffer;
   bool split_worker_scheduler;
+  cudaStream_t worker_stream, scheduler_stream;
 };
 
 } // namespace runtime

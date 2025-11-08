@@ -36,7 +36,8 @@ import time
 from .rope import apply_rotary_pos_emb_triton
 
 class Llama3RMSNorm(nn.Module):
-    def __init__(self, hidden_size, eps=1e-5):
+
+    def __init__(self, hidden_size, eps=1e-6):
         """
         Llama3RMSNorm is equivalent to T5LayerNorm
         """
@@ -168,6 +169,7 @@ class Llama3Attention(nn.Module):
             config.num_hidden_layers,
             16,
             4096,
+mi
             self.num_key_value_heads // world_size,
             self.head_dim,
         )

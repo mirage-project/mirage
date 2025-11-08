@@ -41,6 +41,8 @@ event_name_list = {
     158: "TASK_LINEAR_CUTLASS_WITH_RESIDUAL_HOPPER",
     159: "TASK_SILU_MUL_HOPPER",
     160: "TASK_EMBEDDING_HOPPER",
+    161: "TASK_MOE_W13_LINEAR_SM90",
+    162: "TASK_MOE_W2_LINEAR_SM90",
     198: "TASK_HOPPER_TASK_END",
     199: "TASK_NVSHMEM_COPY",
     200: "TASK_SCHD_TASKS",
@@ -48,11 +50,15 @@ event_name_list = {
     202: "TASK_GET_EVENT",
     203: "TASK_GET_NEXT_TASK",
     250: "TASK_SM100_TASK_BEGIN",
-    251: "TASK_LINEAR_WITH_RESIDUAL_SM100",
-    252: "TASK_LINEAR_SM100",
-    253: "TASK_ATTN_SM100",
-    254: "TASK_ARGMAX_REDUCE_SM100",
-    255: "TASK_ARGMAX_PARTIAL_SM100",
+    252: "TASK_LINEAR_WITH_RESIDUAL_SM100",
+    253: "TASK_LINEAR_SM100",
+    254: "TASK_MOE_W13_LINEAR_SM100",
+    255: "TASK_MOE_W2_LINEAR_SM100",
+    257: "TASK_ATTN_SM100",
+    258: "TASK_ARGMAX_REDUCE_SM100",
+    259: "TASK_ARGMAX_PARTIAL_SM100",
+    260: "TASK_MOE_TOPK_SOFTMAX_SM100",
+    261: "TASK_MOE_MUL_SUM_ADD_SM100",
     298: "TASK_SM100_TASK_END",
 }
 
@@ -64,9 +70,9 @@ class EventType(Enum):
 
 
 def decode_tag(tag, num_blocks, num_groups):
-    event_no = tag >> 17
-    block_group_tag = (tag >> 10) & 0x7F
-    event_idx = (tag >> 2) & 0xFF
+    event_no = tag >> 19
+    block_group_tag = (tag >> 11) & 0xFF
+    event_idx = (tag >> 2) & 0x1FF
     event_type = tag & 0x3
     return (
         event_no,
