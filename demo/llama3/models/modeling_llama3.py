@@ -52,8 +52,6 @@ class Llama3RMSNorm(nn.Module):
         return self.weight * hidden_states
 
 class Llama3RotaryEmbedding(nn.Module):
-    inv_freq: torch.Tensor
-
     def __init__(self, config: Llama3Config, device=None):
         super().__init__()
         if hasattr(config, "rope_scaling") and isinstance(config.rope_scaling, dict):
@@ -160,16 +158,15 @@ class Llama3Attention(nn.Module):
         num_layers, max_num_pages, page_size, num_kv_heads_per_device, head_dim = kv_cache[0].shape
         assert kv_cache[0].shape == (
             config.num_hidden_layers,
-            16,
-            4096,
+            max_num_pages,
+            page_size,
             self.num_key_value_heads // world_size,
             self.head_dim,
         )
         assert kv_cache[1].shape == (
             config.num_hidden_layers,
-            16,
-            4096,
-mi
+            max_num_pages,
+            page_size,
             self.num_key_value_heads // world_size,
             self.head_dim,
         )
@@ -249,9 +246,6 @@ mi
                 True
             )
 
-        # if len(attn_output.shape) == 3 and attn_output.shape[0] == q_len:
-        #     attn_output = attn_output.reshape(q_len, -1).unsqueeze(0).expand(bsz, -1, -1)
-        # else:
         attn_output = attn_output.reshape(bsz, q_len, self.local_qkv_size)
 
         attn_output = self.o_proj(attn_output)
@@ -279,7 +273,9 @@ class Llama3DecoderLayer(nn.Module):
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         step: torch.Tensor = None,
         stream: torch.cuda.Stream = None,
-    ) -> torch.Tensor:
+    ) -> Tuple[
+        torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]
+    ]:
         residual = hidden_states
 
         # Self Attention
@@ -373,8 +369,9 @@ class Llama3Model(Llama3PreTrainedModel):
         stream: torch.cuda.Stream = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
     ):
-        if inputs_embeds is None:
-            inputs_embeds = self.embed_tokens(input_ids)
+        inputs_embeds = self.embed_tokens(input_ids)
+
+        causal_mask = None
 
         hidden_states = inputs_embeds
 
@@ -384,7 +381,7 @@ class Llama3Model(Llama3PreTrainedModel):
         for decoder_layer in self.layers:
             layer_outputs = decoder_layer(
                 hidden_states,
-                attention_mask=attention_mask,
+                attention_mask=causal_mask,
                 position_embeddings=position_embeddings,
                 step=step,
                 stream=stream,
@@ -405,14 +402,19 @@ class Llama3ForCausalLM(Llama3PreTrainedModel, GenerationMixin):
 
     def get_input_embeddings(self):
         return self.model.embed_tokens
+
     def set_input_embeddings(self, value):
         self.model.embed_tokens = value
+
     def get_output_embeddings(self):
         return self.lm_head
+    
     def set_output_embeddings(self, new_embeddings):
         self.lm_head = new_embeddings
+
     def set_decoder(self, decoder):
         self.model = decoder
+
     def get_decoder(self):
         return self.model
 
