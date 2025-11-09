@@ -53,8 +53,9 @@ static PyObject *init_func(PyObject *self, PyObject *args) {
 }
 
 static PyObject *init_request_func(PyObject *self, PyObject *args) {
+  Py_BEGIN_ALLOW_THREADS
   init_request_resources();
-
+  Py_END_ALLOW_THREADS
   Py_RETURN_NONE;
 }
 
@@ -135,6 +136,12 @@ def get_compile_command(
 
     common_cmd = [
         cc,
+        # "--default-stream per-thread" is used to create new stream for 
+        # each host thread as default stream instead of using the same 
+        # legacy stream for all host threads
+        # This is important in multi-threaded environment.
+        "--default-stream",
+        "per-thread",
         file_name,
         "-O3",
         # Use following flags when debugging
