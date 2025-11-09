@@ -2403,9 +2403,6 @@ int TaskRegister::register_moe_linear_sm90_task(
   // define MMA
   constexpr int MMA_M = 64;
   constexpr int MMA_N = 16;
-  constexpr int bM = 64;
-  constexpr int bN = MMA_N;
-  constexpr int bK = 64;
   constexpr int num_ab_stages = 8;
   // define TMAs
   constexpr int B = 3;
