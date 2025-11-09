@@ -38,8 +38,8 @@ __device__ __forceinline__ void rotary_embedding(InputSmem smem_input,
       T const *cur_cos_ptr = cos_ptr + win_idx * HEAD_DIM;
       T const *cur_sin_ptr = sin_ptr + win_idx * HEAD_DIM;
 
-#pragma unroll
       if (threadIdx.x < HEAD_DIM) {
+#pragma unroll
         for (uint32_t i = threadIdx.x; i < HEAD_DIM; i += NUM_THREADS) {
           int offset = (i / HEAD_DIM) * HEAD_DIM + i;
 

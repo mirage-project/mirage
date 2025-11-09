@@ -128,7 +128,7 @@ if __name__ == "__main__":
             )
             tokenizer = AutoTokenizer.from_pretrained(args.model_path)
         else:
-            model = Qwen3ForCausalLM.from_pretrained(model_name, world_size=1, max_num_pages=args.max_num_pages, page_size=args.page_size).to("cuda")
+            model = Qwen3ForCausalLM.from_pretrained(model_name, world_size, max_num_pages=args.max_num_pages, page_size=args.page_size).to("cuda")
             tokenizer = AutoTokenizer.from_pretrained(model_name)
 
     total_num_requests = 1 if not args.use_mirage else args.max_num_batched_requests
