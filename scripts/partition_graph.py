@@ -12,11 +12,8 @@ from generate_dag import solve_partitions, cost_function
 from graph_splitter import process_operator_graph
 from build_dataset import augment_partitions
 from cost_model.in_ctx_partition import InCtxPartitioner
-<<<<<<< HEAD
 # from visualize_augs import visualize_partition, compare_augmentations
 import concurrent.futures
-=======
->>>>>>> a6642d0b0b393ab84055031644965ed28f1e108a
 
 CAST_ID_TO_DTYPE = {
     1: torch.float16, # supposed to be float32 but we use float16 throughout
