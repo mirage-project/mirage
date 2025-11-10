@@ -15,22 +15,29 @@ class SubgraphData:
 
 class GraphSplitter:
     """
-    Two-stage graph splitting algorithm for mixed operator graphs.
+    Four-stage graph splitting and optimization algorithm for mixed operator graphs.
     
-    Stage 1 (split_graph): Conservative splitting for correctness
-    - Topological ordering with conservative merging (only merge when len == 1)
-    - Guarantees acyclic and connected subgraphs
-    - May produce smaller fragment subgraphs (intentional for correctness)
+    Stage 1: Conservative splitting for correctness
+      - Topological ordering with conservative merging
+      - Only merge when: 1 same-type upstream + 0 cross-type inputs
+      - Guarantees acyclic and connected subgraphs
+      - May produce smaller fragment subgraphs (intentional for correctness)
     
-    Stage 2 (merge_subgraphs): Aggressive optimization for performance
-    - Attempts to merge small subgraphs on top of Stage 1 results
-    - Performs cycle checks before each merge (safety brake)
-    - Only merges when safe, maintaining acyclic property
+    Stage 2: First merge optimization
+      - Merge same-type subgraphs with cycle safety checks
+      
+    Stage 3: Demote small Mirage subgraphs
+      - Convert small Mirage subgraphs to PyTorch
+      - Reduces overhead and creates more merge opportunities
+      
+    Stage 4: Second merge optimization
+      - Merge again (now including demoted subgraphs)
+      - Produces larger, more efficient PyTorch regions
     
     Architecture benefits:
-    - Separation of concerns: correctness (Stage 1) vs performance (Stage 2)
-    - Easy to debug: can disable Stage 2 independently
-    - Easy to extend: can add more optimization strategies
+    - Separation of concerns: correctness vs optimization
+    - Iterative refinement: merge -> demote -> merge
+    - Easy to debug and extend
     """
     
     def __init__(self, unsupported_ops=None):
@@ -112,7 +119,7 @@ class GraphSplitter:
                         diff_type_input_sgs.add(input_sg_id)
 
             # Decision: merge or create new
-            if len(same_type_input_sgs) == 1:
+            if len(same_type_input_sgs) == 1 and len(diff_type_input_sgs) == 0:
                 # Safe merge: only one upstream of same type
                 target_sg_id = list(same_type_input_sgs)[0]
                 subgraphs[target_sg_id][0][op] = True
@@ -186,14 +193,14 @@ class GraphSplitter:
     def demote_small_mirage_subgraphs(self, subgraphs: List[Tuple[Dict, str]], 
                                       max_size_to_demote: int = 1) -> List[Tuple[Dict, str]]:
         """
-        Stage 1.5: Demote small Mirage subgraphs to PyTorch.
+        Stage 3: Demote small Mirage subgraphs to PyTorch.
         
         Rationale: Very small Mirage subgraphs (especially size-1) may not be worth
         the overhead of Mirage execution and subgraph switching. Demoting them to
-        PyTorch allows them to merge with surrounding PyTorch subgraphs in Stage 2.
+        PyTorch allows them to merge with surrounding PyTorch subgraphs in Stage 4.
         
         Args:
-            subgraphs: Subgraphs from Stage 1
+            subgraphs: Subgraphs from Stage 2
             max_size_to_demote: Demote Mirage subgraphs with size <= this value
             
         Returns:
@@ -208,11 +215,11 @@ class GraphSplitter:
                 demoted_count += 1
         
         if demoted_count > 0:
-            print(f"\n[Stage 1.5] Demoted {demoted_count} small Mirage subgraphs (size <= {max_size_to_demote}) to PyTorch")
+            print(f"  Demoted {demoted_count} small Mirage subgraphs (size <= {max_size_to_demote}) to PyTorch")
             mirage_count = sum(1 for _, (_, sg_type) in enumerate(subgraphs) if sg_type == "mirage")
             print(f"  Remaining Mirage subgraphs: {mirage_count}")
         else:
-            print(f"\n[Stage 1.5] No small Mirage subgraphs to demote")
+            print(f"  No small Mirage subgraphs to demote")
         
         return subgraphs
     
@@ -221,7 +228,7 @@ class GraphSplitter:
                        subgraph_io: List[Dict],
                        max_iterations: int = 10) -> Tuple[List[Tuple[Dict, str]], Dict[int, Set[int]], List[Dict]]:
         """
-        Stage 2: Aggressive optimization - merge fragment subgraphs.
+        Merge optimization - merge fragment subgraphs.
         
         Strategy:
         1. Attempt to merge subgraphs into upstream subgraphs of the same type
@@ -229,7 +236,7 @@ class GraphSplitter:
         3. Iterate until no more merges possible
         
         Args:
-            subgraphs: Subgraphs from Stage 1
+            subgraphs: Input subgraphs
             subgraph_deps: Subgraph dependencies
             subgraph_io: Subgraph I/O relationships
             max_iterations: Maximum number of iterations
@@ -237,8 +244,6 @@ class GraphSplitter:
         Returns:
             Optimized (subgraphs, subgraph_deps, subgraph_io)
         """
-        print(f"\n[Stage 2] Starting optimization (max_iter={max_iterations})...")
-        
         merged_count = 0
         iteration = 0
         
@@ -290,9 +295,8 @@ class GraphSplitter:
             subgraphs, subgraph_deps, subgraph_io
         )
         
-        print(f"[Stage 2] Optimization complete")
-        print(f"  Merge count: {merged_count}")
-        print(f"  Final subgraph count: {len(subgraphs)}")
+        print(f"  Merged {merged_count} subgraphs")
+        print(f"  Result: {len(subgraphs)} subgraphs")
         
         return subgraphs, subgraph_deps, subgraph_io
     
@@ -539,23 +543,25 @@ class GraphSplitter:
 def process_operator_graph(operators: Dict, 
                           IGNORE_OPS: Set[str] = None, 
                           UNSUPPORTED_OPS: Set[str] = None,
-                          enable_demotion: bool = True,
                           demotion_size_threshold: int = 1,
-                          enable_merge: bool = True) -> Tuple[List[Tuple[Dict, str]], Dict[int, Set[int]], List[Any]]:
+                          merge_iterations_round1: int = 100,
+                          merge_iterations_round2: int = 100) -> Tuple[List[Tuple[Dict, str]], Dict[int, Set[int]], List[Any]]:
     """
-    Two-stage subgraph splitting algorithm.
+    Multi-stage subgraph splitting and optimization algorithm.
     
-    Stage 1: Conservative splitting (guaranteed correctness)
-    Stage 1.5: Demotion of small Mirage subgraphs (optional)
-    Stage 2: Aggressive merging (optional optimization)
+    Pipeline:
+      Stage 1: Conservative splitting (guaranteed correctness)
+      Stage 2: Merge same-type subgraphs (first optimization)
+      Stage 3: Demote small Mirage subgraphs to PyTorch
+      Stage 4: Merge again (second optimization, now with demoted subgraphs)
     
     Args:
         operators: Operator dictionary
         IGNORE_OPS: Set of operator names to ignore/remove
         UNSUPPORTED_OPS: Set of operator names not supported by Mirage
-        enable_demotion: Whether to demote small Mirage subgraphs (default True)
-        demotion_size_threshold: Demote Mirage subgraphs with size <= this value
-        enable_merge: Whether to enable Stage 2 optimization (default True)
+        demotion_size_threshold: Demote Mirage subgraphs with size <= this value (default 2)
+        merge_iterations_round1: Max iterations for Stage 2 (default 100)
+        merge_iterations_round2: Max iterations for Stage 4 (default 100)
         
     Returns:
         Tuple[List, Dict, List]: Subgraphs, dependencies, sorted operators
@@ -566,29 +572,39 @@ def process_operator_graph(operators: Dict,
     splitter = GraphSplitter(UNSUPPORTED_OPS)
     
     print("\n" + "="*70)
-    print("Two-Stage Subgraph Splitting Algorithm")
+    print("Four-Stage Subgraph Splitting Algorithm")
     print("="*70)
     
     # Stage 1: Conservative splitting
     subgraphs, subgraph_deps, subgraph_io, sorted_ops = splitter.split_graph(operators_graph)
     
-    # Stage 1.5: Demotion of small Mirage subgraphs (optional)
-    if enable_demotion:
-        subgraphs = splitter.demote_small_mirage_subgraphs(
-            subgraphs, 
-            max_size_to_demote=demotion_size_threshold
-        )
-    else:
-        print("\n[Stage 1.5] Skipped (enable_demotion=False)")
+    # Stage 2: First merge pass
+    print(f"\n[Stage 2] Merge same-type subgraphs...")
+    subgraphs, subgraph_deps, subgraph_io = splitter.merge_subgraphs(
+        subgraphs, subgraph_deps, subgraph_io, 
+        max_iterations=merge_iterations_round1
+    )
     
-    # Stage 2: Aggressive merging (optional)
-    if enable_merge:
-        subgraphs, subgraph_deps, subgraph_io = splitter.merge_subgraphs(
-            subgraphs, subgraph_deps, subgraph_io, 
-            max_iterations=100
-        )
-    else:
-        print("\n[Stage 2] Skipped (enable_merge=False)")
+    # Stage 3: Demotion of small Mirage subgraphs
+    print(f"\n[Stage 3] Demote small Mirage subgraphs (size <= {demotion_size_threshold})...")
+    subgraphs = splitter.demote_small_mirage_subgraphs(
+        subgraphs, 
+        max_size_to_demote=demotion_size_threshold
+    )
+    
+    # Rebuild I/O relationships after demotion (types changed)
+    op_to_subgraph = {}
+    for sg_id, (sg_dict, _) in enumerate(subgraphs):
+        for op in sg_dict:
+            op_to_subgraph[op] = sg_id
+    subgraph_io = splitter._build_io_relationships(subgraphs, op_to_subgraph)
+    
+    # Stage 4: Second merge pass (with demoted subgraphs)
+    print(f"\n[Stage 4] Merge again (including demoted subgraphs)...")
+    subgraphs, subgraph_deps, subgraph_io = splitter.merge_subgraphs(
+        subgraphs, subgraph_deps, subgraph_io, 
+        max_iterations=merge_iterations_round2
+    )
     
     # Final statistics
     print("\n" + "="*70)
