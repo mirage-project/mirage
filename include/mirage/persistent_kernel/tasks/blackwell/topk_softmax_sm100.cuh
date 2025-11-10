@@ -34,7 +34,6 @@
 #include "../hopper/barrier.cuh"
 #include "../hopper/smem_layout_tma.cuh"
 #include "../hopper/tma.cuh"
-#include "utils.cuh"
 
 // ====================== TopK softmax things ===============================
 
