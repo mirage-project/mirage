@@ -17,11 +17,12 @@
 namespace kernel {
 
 template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int OUTPUT_STRIDE>
-__device__ __forceinline__ void tensor_init_sm100_task_impl(void *input_ptr, float init_val=0.0f) {
+__device__ __forceinline__ void
+    tensor_init_sm100_task_impl(void *input_ptr, float init_val = 0.0f) {
   T *__restrict__ d_input = static_cast<T *>(input_ptr);
   for (int row_idx = 0; row_idx < BATCH_SIZE; ++row_idx) {
     for (int i = threadIdx.x; i < OUTPUT_SIZE; i += blockDim.x) {
-        d_input[row_idx * OUTPUT_STRIDE + i] = T(init_val);
+      d_input[row_idx * OUTPUT_STRIDE + i] = T(init_val);
     }
   }
 } // tensor_init_sm100_task_impl

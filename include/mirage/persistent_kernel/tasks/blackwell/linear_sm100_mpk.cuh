@@ -673,17 +673,16 @@ __device__ __noinline__ void
             .arrive_and_wait(); // Ensure all threads have issued fence
 
         if (warp_idx == 0 && cute::elect_one_sync()) {
-          if constexpr (SplitK){
+          if constexpr (SplitK) {
             tma_out.tma_reduce_add_async(
-              mm_output_smem.base_ptr,
-              {m_tile * OUTPUT_ATOM_SIZE, n_tile * INPUT_TMA_TILE_SIZE});
-          }
-          else{
+                mm_output_smem.base_ptr,
+                {m_tile * OUTPUT_ATOM_SIZE, n_tile * INPUT_TMA_TILE_SIZE});
+          } else {
             tma_out.tma_store_async(
-              mm_output_smem.base_ptr,
-              {m_tile * OUTPUT_ATOM_SIZE, n_tile * INPUT_TMA_TILE_SIZE});
+                mm_output_smem.base_ptr,
+                {m_tile * OUTPUT_ATOM_SIZE, n_tile * INPUT_TMA_TILE_SIZE});
           }
-          
+
           cute::tma_store_arrive();
           cute::tma_store_wait<NUM_C_STAGE - 1>();
         }

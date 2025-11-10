@@ -356,15 +356,12 @@ __device__ __forceinline__ void
         // tma_out.tma_store_async(mm_output_smem(0, 0),
         //                         {output_atom_idx * OUTPUT_ATOM_SIZE, 0});
 
-        if constexpr (SplitK){
-          tma_out.tma_reduce_add_async(
-            mm_output_smem(0, 0),
-            {output_atom_idx * OUTPUT_ATOM_SIZE, 0});
-        }
-        else{
-          tma_out.tma_store_async(
-            mm_output_smem(0, 0),
-            {output_atom_idx * OUTPUT_ATOM_SIZE, 0});
+        if constexpr (SplitK) {
+          tma_out.tma_reduce_add_async(mm_output_smem(0, 0),
+                                       {output_atom_idx * OUTPUT_ATOM_SIZE, 0});
+        } else {
+          tma_out.tma_store_async(mm_output_smem(0, 0),
+                                  {output_atom_idx * OUTPUT_ATOM_SIZE, 0});
         }
 
         store_commit_group();

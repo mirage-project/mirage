@@ -188,7 +188,7 @@ void launch_moe_linear_sm90(int const expert_offset,
 
   // Topk_weights
   cute::Layout layout_expert_mask = cute::make_layout(
-      cute::make_shape(NUM_EXPERTS+1), cute::make_stride(cute::Int<1>{}));
+      cute::make_shape(NUM_EXPERTS + 1), cute::make_stride(cute::Int<1>{}));
   cute::Tensor mMask = cute::make_tensor(
       cute::make_gmem_ptr(static_cast<int32_t *>(mpk_expert_mask_ptr)),
       layout_expert_mask);

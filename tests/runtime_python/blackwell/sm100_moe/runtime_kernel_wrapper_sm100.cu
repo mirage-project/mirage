@@ -45,7 +45,8 @@ __global__ __launch_bounds__(256) void topk_softmax_kernel(
     void *__restrict__ gating_output,
     void *__restrict__ topk_weights,
     void *__restrict__ mpk_routing_indices, // [EXPERTS, num_rows] expert-major
-    void *__restrict__ mpk_active_expert_ids,     // [EXPERTS + 1] last element stores num active experts
+    void *__restrict__ mpk_active_expert_ids, // [EXPERTS + 1] last element
+                                              // stores num active experts
     int num_rows,
     int k,
     bool renormalize) {
@@ -80,7 +81,8 @@ void topk_softmax_sm100_kernel(torch::Tensor gating_output,
          topk_weights.size(1) == NUM_TOPK);
   assert(mpk_routing_indices.size(0) == OUTPUT_SIZE &&
          mpk_routing_indices.size(1) == BATCH_SIZE);
-  assert(mpk_active_expert_ids.size(0) == OUTPUT_SIZE + 1); // last element stores num active experts
+  assert(mpk_active_expert_ids.size(0) ==
+         OUTPUT_SIZE + 1); // last element stores num active experts
 
   void *gating_output_ptr = gating_output.data_ptr();
   void *topk_weights_ptr = topk_weights.data_ptr();
@@ -96,14 +98,13 @@ void topk_softmax_sm100_kernel(torch::Tensor gating_output,
     topk_softmax_kernel<T,
                         EXP,
                         ((sizeof(T) * EXP) < 16 ? (sizeof(T) * EXP) : 16)>
-        <<<grid_dim, block_dim, 0>>>(
-            gating_output_ptr,
-            topk_weights_ptr,
-            mpk_routing_indices_ptr,
-            mpk_active_expert_ids_ptr,
-            BATCH_SIZE,
-            NUM_TOPK,
-            /*renormalize=*/true);
+        <<<grid_dim, block_dim, 0>>>(gating_output_ptr,
+                                     topk_weights_ptr,
+                                     mpk_routing_indices_ptr,
+                                     mpk_active_expert_ids_ptr,
+                                     BATCH_SIZE,
+                                     NUM_TOPK,
+                                     /*renormalize=*/true);
   };
 
   switch (OUTPUT_SIZE) {
@@ -279,7 +280,7 @@ void launch_moe_linear_sm100(void *input_ptr,
 
   // Topk_mask
   cute::Layout layout_expert_mask = cute::make_layout(
-      cute::make_shape(NUM_EXPERTS+1), cute::make_stride(cute::Int<1>{}));
+      cute::make_shape(NUM_EXPERTS + 1), cute::make_stride(cute::Int<1>{}));
   cute::Tensor mMask = cute::make_tensor(
       cute::make_gmem_ptr(static_cast<int32_t *>(mpk_expert_mask_ptr)),
       layout_expert_mask);

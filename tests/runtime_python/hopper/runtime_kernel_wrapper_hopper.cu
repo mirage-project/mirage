@@ -37,8 +37,7 @@ template <typename T,
           typename TMA_RESIDUAL,
           typename TMA_OUT,
           int Kstages = 4>
-__global__ __launch_bounds__(256, 1) void
-linear_kernel_swapAB_hopper_wrapper(
+__global__ __launch_bounds__(256, 1) void linear_kernel_swapAB_hopper_wrapper(
     const __grid_constant__ TMA_A tma_a,
     const __grid_constant__ TMA_B tma_b,
     const __grid_constant__ TMA_RESIDUAL tma_residual,
@@ -63,8 +62,7 @@ template <typename T,
           typename TMA_OUT,
           int Kstages = 4>
 __global__
-    __launch_bounds__(256, 1) void
-    linear_kernel_swapAB_no_residual_hopper_wrapper(
+    __launch_bounds__(256, 1) void linear_kernel_swapAB_no_residual_hopper_wrapper(
         const __grid_constant__ TMA_A tma_a,
         const __grid_constant__ TMA_B tma_b,
         const __grid_constant__ TMA_OUT tma_out) {
@@ -107,13 +105,14 @@ void launch_linear_swapAB(void *input_ptr,
                           B,
                           M,
                           S,
-                          BATCH_SIZE,                      /*GMEM_ROW_*/
-                          REDUCTION_SIZE,                  /*GMEM_COL_*/
-                          BATCH_SIZE,                      /*SMEM_ROW_*/
-                          TMA_CP_ASYNC_SIZE,               /*SMEM_COL_*/
-                          REDUCTION_SIZE, /*GMEM_STRIDE_ROW_*/ 1,
-                          /*GMEM_STRIDE_COL_*/ 1, /*SMEM_REPEAT_ROW_*/
-                          TMA_CP_ASYNC_REPEAT_COL, /*SMEM_REPEAT_COL_*/
+                          BATCH_SIZE,        /*GMEM_ROW_*/
+                          REDUCTION_SIZE,    /*GMEM_COL_*/
+                          BATCH_SIZE,        /*SMEM_ROW_*/
+                          TMA_CP_ASYNC_SIZE, /*SMEM_COL_*/
+                          REDUCTION_SIZE,
+                          /*GMEM_STRIDE_ROW_*/ 1,
+                          /*GMEM_STRIDE_COL_*/ 1,          /*SMEM_REPEAT_ROW_*/
+                          TMA_CP_ASYNC_REPEAT_COL,         /*SMEM_REPEAT_COL_*/
                           SMEM_M_SIZE * TMA_CP_ASYNC_SIZE, /*SMEM_STRIDE_*/
                           true>;
   using TMA_A =
@@ -1199,7 +1198,8 @@ void linear_swapAB_kernel(torch::Tensor input,
 //   constexpr int WARMUP_RUNS = 16;
 //   constexpr int BENCHMARK_RUNS = 1000;
 
-//   printf("=== Multitoken Paged Attention Kernel Performance Profiling ===\n");
+//   printf("=== Multitoken Paged Attention Kernel Performance Profiling
+//   ===\n");
 
 //   for (int i = 0; i < WARMUP_RUNS; i++) {
 //     multitoken_paged_attention_wrapper_hopper<T,
@@ -1348,14 +1348,12 @@ void linear_swapAB_kernel(torch::Tensor input,
 //   int const *paged_kv_last_page_len_buffer_ptr =
 //       paged_kv_last_page_len_buffer.data_ptr<int>();
 
-//   void const *q_norm_weight_ptr = qk_norm ? q_norm_weight->data_ptr() : nullptr;
-//   void const *k_norm_weight_ptr = qk_norm ? k_norm_weight->data_ptr() : nullptr;
-//   void const *cos_ptr = rope ? cos->data_ptr() : nullptr;
-//   void const *sin_ptr = rope ? sin->data_ptr() : nullptr;
-//   int const qo_heads = 4;
-//   int const kv_heads = 1;
-//   int const head_dim = 128;
-//   int const qkv_stride = (qo_heads + 2 * kv_heads) * head_dim;
+//   void const *q_norm_weight_ptr = qk_norm ? q_norm_weight->data_ptr() :
+//   nullptr; void const *k_norm_weight_ptr = qk_norm ?
+//   k_norm_weight->data_ptr() : nullptr; void const *cos_ptr = rope ?
+//   cos->data_ptr() : nullptr; void const *sin_ptr = rope ? sin->data_ptr() :
+//   nullptr; int const qo_heads = 4; int const kv_heads = 1; int const head_dim
+//   = 128; int const qkv_stride = (qo_heads + 2 * kv_heads) * head_dim;
 //   assert(qkv_stride == qkv.stride(0));
 //   int const kv_stride = head_dim * kv_heads;
 //   assert(kv_stride == paged_k_cache.stride(1));

@@ -306,7 +306,7 @@ __device__ __forceinline__ void
       shared_storage.tensor_sA(); // (MmaA, NumMma_M, NumMma_K, Tiles_K)
   cute::Tensor tCsB =
       shared_storage.tensor_sB(); // (MmaB, NumMma_M, NumMma_K, Tiles_K)
-  cute::Tensor sB = shared_storage.tensor_cp_sB();  // Layout for cp_async
+  cute::Tensor sB = shared_storage.tensor_cp_sB(); // Layout for cp_async
 
   //
   // Mma partitioning for A and B
@@ -436,15 +436,16 @@ __device__ __forceinline__ void
   //   __syncthreads();
 
   int k_tile_count = cute::size<4>(tCgA);
-  int num_activated_experts = mMask(NUM_EXPERTS); // last element stores num activated experts
+  int num_activated_experts =
+      mMask(NUM_EXPERTS); // last element stores num activated experts
 
   using TmemAllocator = cute::TMEM::Allocator1Sm;
   TmemAllocator tmem_allocator{};
 
   // // fetch expert mask and preprocessing
-  // int32_t activated_expert_idx[(BATCH_SIZE * NUM_TOPK + EXPERT_STRIDE - 1) / EXPERT_STRIDE];
-  // int32_t total_activated_experts = 0;
-  // int32_t num_activated_experts = 0;
+  // int32_t activated_expert_idx[(BATCH_SIZE * NUM_TOPK + EXPERT_STRIDE - 1) /
+  // EXPERT_STRIDE]; int32_t total_activated_experts = 0; int32_t
+  // num_activated_experts = 0;
 
   // if(threadIdx.x < NUM_EXPERTS) {
   //   shared_storage.expert_mask[threadIdx.x] = mMask[threadIdx.x];
@@ -454,14 +455,15 @@ __device__ __forceinline__ void
 
   // for(int expert_idx = 0; expert_idx < NUM_EXPERTS; ++expert_idx) {
   //   int32_t expert_mask = shared_storage.expert_mask[expert_idx];
-  //   if (expert_mask == 1 && (total_activated_experts) % EXPERT_STRIDE == expert_offset) {
+  //   if (expert_mask == 1 && (total_activated_experts) % EXPERT_STRIDE ==
+  //   expert_offset) {
   //     activated_expert_idx[num_activated_experts] = expert_idx;
   //     num_activated_experts += 1;
   //   }
   //   total_activated_experts += expert_mask;
   // }
   __syncthreads(); // Wait for preprocessing done
-  
+
   if (warp_idx == 5) {
     // DMA warp (1)
 
@@ -482,7 +484,9 @@ __device__ __forceinline__ void
     // } __syncwarp();
 
     int total_k_tile_count = 0;
-    for (int activated_expert_offset = expert_offset; activated_expert_offset < num_activated_experts; activated_expert_offset+=EXPERT_STRIDE) {
+    for (int activated_expert_offset = expert_offset;
+         activated_expert_offset < num_activated_experts;
+         activated_expert_offset += EXPERT_STRIDE) {
       int32_t expert_idx = mMask[activated_expert_offset];
       cute::Tensor tRoutingIndex = mRoutingIndices(expert_idx, cute::_);
       for (int m_tile = 0; m_tile < cute::size<3>(tCgA); ++m_tile) {
@@ -491,8 +495,7 @@ __device__ __forceinline__ void
           total_k_tile_count += k_tile_count;
 
           int tma_wr_k_tile = 0;
-          int smem_wr_buffer =
-              (num_prev_k_blk + tma_wr_k_tile) % NUM_AB_STAGE;
+          int smem_wr_buffer = (num_prev_k_blk + tma_wr_k_tile) % NUM_AB_STAGE;
           int tma_wr_ab_empty_phase =
               (num_prev_k_blk + tma_wr_k_tile) / NUM_AB_STAGE % 2 ^ 1;
 
@@ -507,8 +510,8 @@ __device__ __forceinline__ void
             int smem_wr_buffer_next =
                 (num_prev_k_blk + tma_wr_k_tile_next) % NUM_AB_STAGE;
             int tma_wr_ab_empty_phase_next = smem_wr_buffer_next == 0
-                                                  ? tma_wr_ab_empty_phase ^ 1
-                                                  : tma_wr_ab_empty_phase;
+                                                 ? tma_wr_ab_empty_phase ^ 1
+                                                 : tma_wr_ab_empty_phase;
 
             // Wait for an empty buffer
             if (!peek_ab_empty_status) {
@@ -521,8 +524,8 @@ __device__ __forceinline__ void
             if (cute::elect_one_sync()) {
               // TODO(Zhihao): add expert offset here
               int tma_coords_A[2] = {k_tile * TILE_SIZE,
-                                      m_tile * OUTPUT_ATOM_SIZE +
-                                          expert_idx * ORIG_OUTPUT_SIZE};
+                                     m_tile * OUTPUT_ATOM_SIZE +
+                                         expert_idx * ORIG_OUTPUT_SIZE};
               weight_smem.set_ptr(shared_weight + smem_wr_buffer *
                                                       OUTPUT_ATOM_SIZE *
                                                       TILE_SIZE);
@@ -530,23 +533,22 @@ __device__ __forceinline__ void
                   shared_storage.a_full_mbar_ptr[smem_wr_buffer],
                   tma_transaction_bytes_A);
               tma_a.tma_cp_async(a_full_mbar_ptr[smem_wr_buffer],
-                                  weight_smem.base_ptr,
-                                  tma_coords_A);
+                                 weight_smem.base_ptr,
+                                 tma_coords_A);
             }
 
             // CP_ASYNC for loading B
-            int32_t token_idx =
-                n_tile * MMA_N + lane_idx / cp_async_group_size;
+            int32_t token_idx = n_tile * MMA_N + lane_idx / cp_async_group_size;
             int32_t topk_idx = tRoutingIndex(token_idx);
             if (token_idx < BATCH_SIZE && topk_idx > 0) {
               if constexpr (W13_LINEAR) {
                 cute::copy(copyB,
-                            tBgB(_, _, _, _, k_tile),
-                            tBsB(_, _, _, _, smem_wr_buffer));
+                           tBgB(_, _, _, _, k_tile),
+                           tBsB(_, _, _, _, smem_wr_buffer));
               } else {
                 cute::copy(copyB,
-                            tBgB(_, _, _, _, k_tile, topk_idx - 1),
-                            tBsB(_, _, _, _, smem_wr_buffer));
+                           tBgB(_, _, _, _, k_tile, topk_idx - 1),
+                           tBsB(_, _, _, _, smem_wr_buffer));
               }
             }
 
@@ -566,7 +568,7 @@ __device__ __forceinline__ void
           } // end for k_tile
         }   // end for n_tile
       }     // end for m_tile
-    }         // end for expert_idx
+    }       // end for expert_idx
   } else if (warp_idx == 4) {
     // MMA warp (1)
 
@@ -576,7 +578,9 @@ __device__ __forceinline__ void
 
     int total_k_tile_count = 0;
     int num_tiles_executed = 0;
-    for (int activated_expert_offset = expert_offset; activated_expert_offset < num_activated_experts; activated_expert_offset+=EXPERT_STRIDE) {
+    for (int activated_expert_offset = expert_offset;
+         activated_expert_offset < num_activated_experts;
+         activated_expert_offset += EXPERT_STRIDE) {
       for (int m_tile = 0; m_tile < cute::size<3>(tCgA); ++m_tile) {
         for (int n_tile = 0; n_tile < cute::size<3>(tCgB); ++n_tile) {
 
@@ -587,8 +591,7 @@ __device__ __forceinline__ void
           total_k_tile_count += k_tile_count;
 
           int mma_rd_k_tile = 0;
-          int smem_rd_buffer =
-              (num_prev_k_blk + mma_rd_k_tile) % NUM_AB_STAGE;
+          int smem_rd_buffer = (num_prev_k_blk + mma_rd_k_tile) % NUM_AB_STAGE;
           int mma_rd_ab_full_phase =
               (num_prev_k_blk + mma_rd_k_tile) / NUM_AB_STAGE % 2;
 
@@ -602,7 +605,7 @@ __device__ __forceinline__ void
 
           int acc_empty_phase = num_tiles_executed / NUM_ACC_STAGE % 2 ^ 1;
           cute::wait_barrier(shared_storage.acc_empty_mbar_ptr[acc_buf_idx],
-                              acc_empty_phase);
+                             acc_empty_phase);
 
           // Initialize the accumulator to zero
           tiled_mma.accumulate_ = cute::UMMA::ScaleOut::Zero;
@@ -616,23 +619,21 @@ __device__ __forceinline__ void
                                                 : mma_rd_ab_full_phase;
 
             if (!peek_a_full_status) {
-              cute::wait_barrier(
-                  shared_storage.a_full_mbar_ptr[smem_rd_buffer],
-                  mma_rd_ab_full_phase);
+              cute::wait_barrier(shared_storage.a_full_mbar_ptr[smem_rd_buffer],
+                                 mma_rd_ab_full_phase);
             }
 
             if (!peek_b_full_status) {
-              cute::wait_barrier(
-                  shared_storage.b_full_mbar_ptr[smem_rd_buffer],
-                  mma_rd_ab_full_phase);
+              cute::wait_barrier(shared_storage.b_full_mbar_ptr[smem_rd_buffer],
+                                 mma_rd_ab_full_phase);
             }
 
             // Perform MMA operation
             for (int k_block = 0; k_block < cute::size<2>(tCrA); ++k_block) {
               cute::gemm(tiled_mma,
-                          tCrA(cute::_, cute::_, k_block, smem_rd_buffer),
-                          tCrB(cute::_, cute::_, k_block, smem_rd_buffer),
-                          tCtAcc_Slice);
+                         tCrA(cute::_, cute::_, k_block, smem_rd_buffer),
+                         tCrB(cute::_, cute::_, k_block, smem_rd_buffer),
+                         tCtAcc_Slice);
               tiled_mma.accumulate_ = cute::UMMA::ScaleOut::One;
             }
 
@@ -709,7 +710,9 @@ __device__ __forceinline__ void
     // } epilogue_wg_barrier.arrive_and_wait();
 
     int num_tiles_executed = 0;
-    for (int activated_expert_offset = expert_offset; activated_expert_offset < num_activated_experts; activated_expert_offset+=EXPERT_STRIDE) {
+    for (int activated_expert_offset = expert_offset;
+         activated_expert_offset < num_activated_experts;
+         activated_expert_offset += EXPERT_STRIDE) {
       int32_t expert_idx = mMask[activated_expert_offset];
       cute::Tensor tRoutingIndex = mRoutingIndices(expert_idx, cute::_);
       for (int m_tile = 0; m_tile < cute::size<3>(tCgA); ++m_tile) {
@@ -756,12 +759,11 @@ __device__ __forceinline__ void
           }
 
           cute::wait_barrier(shared_storage.acc_full_mbar_ptr[acc_buf_idx],
-                              acc_full_phase);
+                             acc_full_phase);
           // T2R copy
-          cute::copy(
-              tiled_copy_t2r,
-              tTR_tAcc(cute::_, cute::_, cute::_, cute::_, acc_buf_idx),
-              tTR_rAcc);
+          cute::copy(tiled_copy_t2r,
+                     tTR_tAcc(cute::_, cute::_, cute::_, cute::_, acc_buf_idx),
+                     tTR_rAcc);
 
           // arrive acc empty buffer
           epilogue_wg_barrier.arrive_and_wait();
@@ -797,8 +799,8 @@ __device__ __forceinline__ void
           num_tiles_executed++;
         } // end for n_tile
       }   // end for m_tile
-    }       // end for expert_idx
-  }         // end of epilogue warps
+    }     // end for expert_idx
+  }       // end of epilogue warps
   __syncthreads();
 
   if (warp_idx == 0) {

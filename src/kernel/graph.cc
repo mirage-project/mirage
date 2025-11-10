@@ -574,7 +574,8 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
   } else if (name == "splitk_linear_swapAB_hopper") {
     int variant_id = task_register->register_splitk_linear_swapAB_hopper_task(
         customized->bgraph, params, false /*with_residual*/);
-    task_config[op] = std::make_tuple(2, 1, TASK_SPLITK_LINEAR_SWAPAB_HOPPER, variant_id);
+    task_config[op] =
+        std::make_tuple(2, 1, TASK_SPLITK_LINEAR_SWAPAB_HOPPER, variant_id);
   }
   // SM100 tasks
   else if (name == "linear_sm100") {
@@ -584,7 +585,8 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
   } else if (name == "splitk_linear_sm100") {
     int variant_id = task_register->register_splitk_linear_sm100_task(
         customized->bgraph, params, false /*with_residual*/);
-    task_config[op] = std::make_tuple(2, 1, TASK_SPLITK_LINEAR_SM100, variant_id);
+    task_config[op] =
+        std::make_tuple(2, 1, TASK_SPLITK_LINEAR_SM100, variant_id);
   } else if (name == "linear_with_residual_sm100") {
     int variant_id = task_register->register_linear_sm100_task(
         customized->bgraph, params, true /*with_residual*/);
@@ -605,10 +607,9 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
     task_config[op] =
         std::make_tuple(2, 1, TASK_ARGMAX_REDUCE_SM100, variant_id);
   } else if (name == "tensor_init") {
-    int variant_id = task_register->register_tensor_init_task(
-        customized->bgraph, params);
-    task_config[op] =
-        std::make_tuple(2, 1, TASK_TENSOR_INIT, variant_id);
+    int variant_id =
+        task_register->register_tensor_init_task(customized->bgraph, params);
+    task_config[op] = std::make_tuple(2, 1, TASK_TENSOR_INIT, variant_id);
   } else if (name == "moe_topk_softmax_sm100") {
     int variant_id = task_register->register_moe_topk_softmax_sm100_task(
         customized->bgraph, params);

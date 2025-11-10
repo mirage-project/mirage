@@ -957,7 +957,7 @@ class PersistentKernel:
         tb_graph.new_input(output_value, (1, 0, -1), -1, True)
         tb_graph.new_input(output_index, (1, 0, -1), -1, True)
         self.kn_graph.customized([input, output_value, output_index], tb_graph)
-        if self.target_cc == 100:
+        if self.target_cc == 100 or self.target_cc == 90:
             self.kn_graph.register_task(tb_graph, "argmax_partial_sm100", [num_tasks])
         else:
             self.kn_graph.register_task(tb_graph, "argmax_partial", [num_tasks])

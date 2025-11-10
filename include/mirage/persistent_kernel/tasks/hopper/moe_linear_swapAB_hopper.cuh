@@ -347,7 +347,8 @@ __device__ __forceinline__ void
       thread_mma.make_fragment_B(tCsB); // (MmaB, NumMma_M, NumMma_K, Tiles_K)
 
   int k_tile_count = REDUCTION_SIZE / 64;
-  int num_activated_experts = mMask(NUM_EXPERTS); // last element stores num activated experts
+  int num_activated_experts =
+      mMask(NUM_EXPERTS); // last element stores num activated experts
 
   if (warp_idx >= 4) {
     // DMA warp (4)
@@ -359,7 +360,9 @@ __device__ __forceinline__ void
 
     int total_k_tile_count = 0;
 #pragma unroll 1
-    for (int activated_expert_offset = expert_offset; activated_expert_offset < num_activated_experts; activated_expert_offset+=EXPERT_STRIDE){
+    for (int activated_expert_offset = expert_offset;
+         activated_expert_offset < num_activated_experts;
+         activated_expert_offset += EXPERT_STRIDE) {
       int32_t expert_idx = mMask[activated_expert_offset];
       cute::Tensor tRoutingIndex = mRoutingIndices(expert_idx, cute::_);
 #pragma unroll 1
@@ -450,15 +453,15 @@ __device__ __forceinline__ void
           } // end for k_tile
         }   // end for n_tile
       }     // end for m_tile
-    } // end for expert_idx
+    }       // end for expert_idx
   } else if (warp_idx < 4) {
     // MMA warp (4)
     int total_k_tile_count = 0;
 #pragma unroll 1
     for (int activated_expert_offset = expert_offset;
          activated_expert_offset < num_activated_experts;
-         activated_expert_offset+=EXPERT_STRIDE) {
-        int32_t expert_idx = mMask[activated_expert_offset];
+         activated_expert_offset += EXPERT_STRIDE) {
+      int32_t expert_idx = mMask[activated_expert_offset];
       cute::Tensor tRoutingIndex = mRoutingIndices(expert_idx, cute::_);
 #pragma unroll 1
       for (int m_tile = 0; m_tile < cute::size<2>(gA); ++m_tile) {
@@ -570,7 +573,7 @@ __device__ __forceinline__ void
           }
         } // end for n_tile
       }   // end for m_tile
-    } // end for expert_idx
+    }     // end for expert_idx
   }
 
 } // end moe_linear_sm90_task_impl
