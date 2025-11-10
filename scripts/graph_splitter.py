@@ -729,26 +729,52 @@ def remove_ignored_operators(operators_graph: Dict, IGNORE_OPS: Set[str]) -> Dic
         if not source_tensors:
             continue
             
+        # Find which input of downstream ops should be replaced by matching tensor IDs
         for out_op in ig_op.output_ops:
-            for j, in_op in enumerate(out_op.input_ops):
-                if in_op == ig_op and j < len(out_op.input_tensor_shapes) and source_tensors:
-                    replacements[(out_op, j)] = source_tensors[0]
+            ignored_output_tid = ig_op.output_tensor_shapes[0][1] if ig_op.output_tensor_shapes else None
+            
+            if ignored_output_tid is not None:
+                for j, (shape, tid) in enumerate(out_op.input_tensor_shapes):
+                    if tid == ignored_output_tid:
+                        replacements[(out_op, j)] = source_tensors[0]
+                        break
     
+    # Apply replacements: update both input_ops and input_tensor_shapes
     for (out_op, input_idx), (source_op, tensor_id) in replacements.items():
         out_op.input_ops[input_idx] = source_op
         
-        if hasattr(source_op, 'output_tensor_shapes'):
+        # Update input_tensor_shapes with the correct tensor ID from source
+        if hasattr(source_op, 'output_tensor_shapes') and source_op.output_tensor_shapes:
             for shape in source_op.output_tensor_shapes:
                 if shape and shape[1] == tensor_id:
                     out_op.input_tensor_shapes[input_idx] = shape
                     break
+        else:
+            # For parameter/constant nodes without output_tensor_shapes, keep shape but update tensor ID
+            if input_idx < len(out_op.input_tensor_shapes):
+                old_shape = out_op.input_tensor_shapes[input_idx]
+                out_op.input_tensor_shapes[input_idx] = (old_shape[0], tensor_id)
     
     result = {op: True for op in operators_graph if op not in ignored_ops}
     
+    # Clean up input_ops/output_ops AND synchronize input_tensor_shapes to keep them aligned
     for op in result:
         op.output_ops = [next_op for next_op in op.output_ops if next_op in result]
-        op.input_ops = [prev_op for prev_op in op.input_ops if prev_op in result]
+        
+        # Filter input_ops and simultaneously filter input_tensor_shapes to keep them in sync
+        new_input_ops = []
+        new_input_tensor_shapes = []
+        for i, prev_op in enumerate(op.input_ops):
+            # Keep this input if it's in the result graph OR it's a parameter/constant node
+            if prev_op in result or prev_op not in operators_graph:
+                new_input_ops.append(prev_op)
+                if i < len(op.input_tensor_shapes):
+                    new_input_tensor_shapes.append(op.input_tensor_shapes[i])
+        
+        op.input_ops = new_input_ops
+        op.input_tensor_shapes = new_input_tensor_shapes
     
+    # Update output_ops of source operators
     for (out_op, input_idx), (source_op, tensor_id) in replacements.items():
         if source_op in result and out_op in result and out_op not in source_op.output_ops:
             source_op.output_ops.append(out_op)
