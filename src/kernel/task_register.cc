@@ -401,6 +401,52 @@ int TaskRegister::register_silu_mul_task(threadblock::Graph const &bgraph,
   return register_task_variant(TASK_SILU_MUL, code.to_string());
 }
 
+int TaskRegister::register_identity_task(threadblock::Graph const &bgraph,
+                                        std::vector<int> const &params) {
+  assert(params.size() == 0);
+  std::vector<tb::TBInputOp *> input_ops;
+  std::vector<tb::TBInputOp *> output_ops;
+  int num_inputs = 1;
+  int num_outputs = 1;
+  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    if (input_ops.size() < (size_t)num_inputs) {
+      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    } else {
+      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    }
+  }
+  // Both input and output tensors should be row major
+  assert(input_ops[0]->dtensor.layout == layout::DmemRowMajor);
+  assert(output_ops[0]->dtensor.layout == layout::DmemRowMajor);
+  // Both input and output tensors should be INPUT OP
+  assert(input_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
+  assert(output_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
+  // Shape should be guranteed by higher-level APIs
+
+  int outer_dim_size = 1, inner_dim_size, outer_dim_stride, output_size;
+  for (int i = 0; i < input_ops[0]->dtensor.num_dims - 1; i++) {
+    outer_dim_size *= input_ops[0]->dtensor.dim[i];
+  }
+  inner_dim_size = input_ops[0]->dtensor.dim[input_ops[0]->dtensor.num_dims - 1];
+  outer_dim_stride = inner_dim_size;
+  output_size = output_ops[0]->output_tensors[0].dim[
+    output_ops[0]->output_tensors[0].num_dims - 1];
+  // assert(output_size >= bgraph.block_dim.x);
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::identity_task_impl<bfloat16, $, $, $, $>(",
+         outer_dim_size,
+         inner_dim_size,
+         outer_dim_stride,
+         output_size);
+  code.e("    task_desc->input_ptrs[0],");
+  code.e("    task_desc->output_ptrs[0]);");
+  return register_task_variant(TASK_IDENTITY, code.to_string());
+}
+
 int TaskRegister::register_silu_mul_linear_with_residual_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   assert(params.size() == 0);

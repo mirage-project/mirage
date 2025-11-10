@@ -45,6 +45,8 @@ public:
                            bool with_residual);
   int register_silu_mul_task(threadblock::Graph const &bgraph,
                              std::vector<int> const &params);
+  int register_identity_task(threadblock::Graph const &bgraph,
+                             std::vector<int> const &params);
   int register_silu_mul_linear_with_residual_task(
       threadblock::Graph const &bgraph, std::vector<int> const &params);
   int register_argmax_partial_task(threadblock::Graph const &bgraph,
