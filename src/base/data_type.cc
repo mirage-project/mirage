@@ -56,8 +56,6 @@ std::string get_datatype_str(DataType dtype) {
       return "int32";
     case DT_FLOAT32:
       return "float";
-    case DT_INT32:
-      return "int";
     case DT_DOUBLE:
       return "double";
     default:

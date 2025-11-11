@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Optional, List
+from typing import Optional
 
 # from .models.modeling_qwen3 import Qwen3ForCausalLM
 from .model_registry import get_builder
@@ -7,14 +7,11 @@ from .models.graph_builder import MirageModelConfig
 from .persistent_kernel import PersistentKernel
 from .speculative import spec_decode_class
 from ..utils import get_configurations_from_gpu
-from transformers import AutoTokenizer, AutoConfig
-from safetensors.torch import load_model
+
 import torch
 import torch.distributed as dist
-import argparse
+
 import os
-import mirage as mi
-from . import models
 
 @dataclass
 class MPKMetadata:
@@ -66,9 +63,9 @@ class MPKMetadata:
         if self.weight_from_model:
             assert (self.model_name is not None) or (self.model_path is not None), "model_name or model_path is required when weight_from_model is True"
         else:
-            assert self.state_dict is not None, "state_dict is required when weight_from_model is False"
-            assert self.k_cache is not None, "k_cache is required when weight_from_model is False"
-            assert self.v_cache is not None, "v_cache is required when weight_from_model is False"
+            assert self.model_config.state_dict is not None, "state_dict is required when weight_from_model is False"
+            assert self.model_config.k_cache is not None, "k_cache is required when weight_from_model is False"
+            assert self.model_config.v_cache is not None, "v_cache is required when weight_from_model is False"
             
     def info_as_string(self):
         info = "MPKMetadata info:"
@@ -137,9 +134,6 @@ class MPK:
         self.need_cpy_input = False
         self.src_input_tokens = None
         
-        # if args.qo_indptr_buffer is None:
-        #     self.get_tensors()
-        # else:
         self.step = args.step
         self.tokens = args.tokens
         if args.input_tokens.dtype != torch.int64:
@@ -376,10 +370,9 @@ class MPK:
         
     def run(self, prompt):
         self.load_new_request(prompt)
-        if not self.first_run:
-            self.init_per_request()
-        else:
-            self.first_run = False
+        
+        self.init_per_request()
+
         self.persistent_kernel()
         torch.cuda.synchronize()
         all_responses = []

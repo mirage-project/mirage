@@ -2,9 +2,6 @@ from .modeling_qwen3 import Qwen3ForCausalLM
 from transformers import AutoTokenizer, AutoConfig
 from safetensors.torch import load_model
 import torch
-import torch.distributed as dist
-import argparse
-import os
 
 from ..utils import grid_for_rmsnorm_linear_layer, shuffle_tensors, inplace_shuffle_tensors
 from ..graph_builder import GraphBuilder, MirageModelConfig
@@ -25,6 +22,8 @@ class Qwen3Builder(GraphBuilder):
         self.tokenizer = None
         self.model_name: str = None
         self.model_path: str = None
+        self.shuffled_tensors = {}
+        self.rank = mpk.mpi_rank
 
     def build_from_config(self, 
                               model_config: MirageModelConfig):
@@ -324,6 +323,7 @@ class Qwen3Builder(GraphBuilder):
                 torch_tensor=self.v_cache[i], name=f"layer_{i}_v_cache"
             )
             
+            # TODO(Jianan Ji): spec_decode_config handling (see previous implementation)
             # if spec_decode_config:
             #     self.mpk.single_batch_extend_attention_layer(
             #         input=attn_in,
@@ -495,6 +495,7 @@ class Qwen3Builder(GraphBuilder):
                 0,
             )
             assert self.lm_head_weight.stride()[0] == self.hidden_size
+        # TODO(Jianan Ji): spec_decode_config handling (see previous implementation)
         # if spec_decode_config and spec_decode_config.method == "promptlookup":
         #     all_tokens = mpk.attach_input(torch_tensor=tokens, name="all_tokens")
         #     num_tokens_extend = spec_decode_config.spec_length + 1
@@ -514,7 +515,7 @@ class Qwen3Builder(GraphBuilder):
         self.new_intermediate_tensors()
         
         argmax_out = self.mpk.attach_input(torch_tensor=self.output_tokens, name="output_token")
-
+        # TODO(Jianan Ji): spec_decode_config handling (see previous implementation)
         # add spec tokens layer
         # if spec_decode_config:
         #     spec_tokens = self.mpk.draft_forward_layer_dispatcher(
@@ -565,6 +566,7 @@ class Qwen3Builder(GraphBuilder):
             )
 
             # add argmax layer
+            # TODO(Jianan Ji): spec_decode_config handling (see previous implementation)
             # if spec_decode_config and spec_decode_config.method == "promptlookup":
             #     argmax_partial_grid_dim = (max_factor_leq_n(153600, 96 // (spec_decode_config.spec_length + 1)), 
             #                                spec_decode_config.spec_length + 1, 
@@ -585,6 +587,7 @@ class Qwen3Builder(GraphBuilder):
                 grid_dim=argmax_reduce_grid_dim,
                 block_dim=(128, 1, 1),
             )
+            # TODO(Jianan Ji): spec_decode_config handling (see previous implementation)
             # if spec_decode_config:
             #     verify_out = self.mpk.verify_layer_dispatcher(
             #         spec_decode_config = spec_decode_config,

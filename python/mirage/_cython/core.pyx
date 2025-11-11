@@ -331,8 +331,6 @@ def convert_dtype_to_torch_type(type : dtype):
         return torch.float16
     elif type.is_bf16():
         return torch.bfloat16
-    elif type.is_int32():
-        return torch.int32
     elif type.is_fp32():
         return torch.float32
     elif type.is_int32():
@@ -361,8 +359,6 @@ def convert_ctype_to_dtype(type):
         return int32
     elif type == DT_FLOAT32:
         return float32
-    elif type == DT_INT32:
-        return int32
     elif type == DT_UINT32:
         return uint32
     elif type == DT_INT64:
@@ -383,8 +379,6 @@ def convert_torch_type_to_dtype(type):
         return int16
     elif type is torch.uint16:
         return uint16
-    elif type is torch.int32:
-        return int32
     elif type is torch.float16:
         return float16
     elif type is torch.bfloat16:
