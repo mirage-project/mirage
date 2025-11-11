@@ -91,7 +91,7 @@ __device__ __forceinline__ void
   T *shared_output = (T *)(smem + 128);
   T *zero_buf = (T *)(smem);
 
-  //shared_v_buffer + offset = 67456
+  // shared_v_buffer + offset = 67456
 
   //
   float *qnorm_sum = (float *)(smem + 67456);
@@ -106,9 +106,7 @@ __device__ __forceinline__ void
   float *max_smem = (float *)(smem + 640);
   float *o_smem = (float *)(smem + 1152);
 
-
-  //o_smem_offset += 16384
-
+  // o_smem_offset += 16384
 
   // float *qnorm_sum = (float *)(smem + 84864);
   // float *knorm_sum = (float *)(smem + 84880);

@@ -31,7 +31,8 @@ __device__ __forceinline__ void rotary_embedding_hopper(InputSmem smem_input,
                                                         int token_offset = 0) {
   // Avoid sync divergence dead lock.
   static_assert(HEAD_DIM < NUM_THREADS || HEAD_DIM % NUM_THREADS == 0);
-  constexpr int ROTARY_PARTICIPATING_THREADS = (NUM_THREADS < HEAD_DIM ? NUM_THREADS : HEAD_DIM);
+  constexpr int ROTARY_PARTICIPATING_THREADS =
+      (NUM_THREADS < HEAD_DIM ? NUM_THREADS : HEAD_DIM);
 #pragma unroll
   for (int win_idx = 0; win_idx < WINDOW_SIZE; ++win_idx) {
 
