@@ -3,7 +3,6 @@ from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 import os
 import shutil
 from os import path
-from glob import glob
 
 this_dir = os.path.dirname(os.path.abspath(__file__))
 
@@ -20,39 +19,38 @@ cuda_library_dirs = [
     os.path.join(cuda_home, "lib64", "stubs"),
 ]
 
-hopper_task_dir = os.path.join(
-    this_dir,
-    '../../../../include/mirage/persistent_kernel/tasks/hopper',
-)
-hopper_depends = sorted(
-    glob(os.path.join(hopper_task_dir, '**', '*.cuh'), recursive=True)
-)
-
 setup(
-    name='runtime_kernel_hopper',
+    name='runtime_kernel_moe_hopper',
     ext_modules=[
         CUDAExtension(
-            name='runtime_kernel_hopper',
+            name='runtime_kernel_moe_hopper',
             sources=[
-                os.path.join(this_dir, 'runtime_kernel_wrapper_hopper.cu'),
+                os.path.join(this_dir, 'runtime_kernel_wrapper_moe_hopper.cu'),
             ],
-            depends=hopper_depends,
+            depends=[
+                os.path.join(this_dir, '../../../../include/mirage/persistent_kernel/tasks/hopper/moe_linear_swapAB_hopper.cuh'),
+            ],
             include_dirs=[
                 os.path.join(this_dir, '../../../include/mirage/persistent_kernel'),
+                os.path.join(this_dir, '../../../include/mirage/persistent_kernel/tasks/'),
                 os.path.join(this_dir, '../../../include'),
+                os.path.join(this_dir, '../../../deps/cutlass/include'),
+                os.path.join(this_dir, '../../../deps/cutlass/tools/util/include'),
             ],
             libraries=["cuda"],
             library_dirs=cuda_library_dirs,
             extra_compile_args={
                 'cxx': ['-DMIRAGE_GRACE_HOPPER',
                 '-DMIRAGE_BACKEND_USE_CUDA',
-                '-DMPK_TARGET_CC=90'],
+                '-DMPK_TARGET_CC=90',
+                '-DMPK_ENABLE_TMA'],
                 'nvcc': [
                     '-O3',
                     '-gencode=arch=compute_90a,code=sm_90a',
                     '-DMIRAGE_BACKEND_USE_CUDA',
                     '-DMIRAGE_GRACE_HOPPER',
                     '-DMIRAGE_BACKEND_USE_CUDA',
+                    '-DMPK_ENABLE_TMA',
                     # '-DMIRAGE_PROFILE_HOPPER',
                 ]
             }

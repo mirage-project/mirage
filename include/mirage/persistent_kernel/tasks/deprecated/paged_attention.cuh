@@ -161,14 +161,7 @@ __device__ __forceinline__ void
 
   int const num_pages = (seq_len + PAGE_SIZE - 1) / PAGE_SIZE;
   __shared__ int page_indices[MAX_PAGES_PER_REQUEST];
-#pragma unroll
-  for (int i = threadIdx.x; i < num_pages * sizeof(int) / 16;
-       i += NUM_THREADS) {
-    __uint128_t const *src_ptr =
-        reinterpret_cast<__uint128_t const *>(d_indices_buffer) + i;
-    __uint128_t *dst_ptr = reinterpret_cast<__uint128_t *>(page_indices) + i;
-    *dst_ptr = *src_ptr;
-  }
+
   if (num_pages % (16 / sizeof(int)) != 0) {
     int tail_pages = num_pages % (16 / sizeof(int));
     int tail_offset = num_pages - tail_pages;

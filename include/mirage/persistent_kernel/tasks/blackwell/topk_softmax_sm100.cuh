@@ -16,9 +16,7 @@
 #include <cutlass/numeric_types.h>
 
 // CuTe includes
-#include <cute/algorithm/cooperative_copy.hpp> // Auto vectorized copy operation
 #include <cute/arch/cluster_sm90.hpp> // CuTe functions for querying the details of cluster launched
-#include <cute/arch/tmem_allocator_sm100.hpp> // TMEM allocator for SM100
 #include <cute/numeric/integral_constant.hpp> // Compile time in constants such as _1, _256 etc.
 #include <cute/tensor.hpp>                    // CuTe tensor implementation
 // using namespace cute;
@@ -34,7 +32,6 @@
 #include "../hopper/barrier.cuh"
 #include "../hopper/smem_layout_tma.cuh"
 #include "../hopper/tma.cuh"
-#include "utils.cuh"
 
 // ====================== TopK softmax things ===============================
 
@@ -71,11 +68,13 @@ __device__ __forceinline__ void topk_softmax_task_impl(
     void *__restrict__ output_ptr, // [num_rows, k]
     int const num_rows,
     int const k,
-    void *__restrict__ mpk_routing_indices_ptr, // [NUM_EXPERTS, num_rows] laid out
-                                           // as expert-major: expert * num_rows
-                                           // + row
-    void *__restrict__ mpk_active_expert_ids_ptr, // [NUM_EXPERTS + 1] last element
-                                                // stores num active experts
+    void *__restrict__ mpk_routing_indices_ptr, // [NUM_EXPERTS, num_rows] laid
+                                                // out as expert-major: expert *
+                                                // num_rows
+                                                // + row
+    void *__restrict__ mpk_active_expert_ids_ptr, // [NUM_EXPERTS + 1] last
+                                                  // element stores num active
+                                                  // experts
     int const start_expert,
     int const end_expert,
     bool const renormalize) {
@@ -85,7 +84,8 @@ __device__ __forceinline__ void topk_softmax_task_impl(
   int *mpk_routing_indices = static_cast<int *>(mpk_routing_indices_ptr);
   int *mpk_active_expert_ids = static_cast<int *>(mpk_active_expert_ids_ptr);
   // initialize routing indices to 0; active-id marks to -1; count to 0
-  for (int expert = start_expert + threadIdx.x; expert < end_expert; expert += blockDim.x) {
+  for (int expert = start_expert + threadIdx.x; expert < end_expert;
+       expert += blockDim.x) {
     if (mpk_routing_indices != nullptr) {
       for (int row = 0; row < num_rows; ++row) {
         mpk_routing_indices[expert * num_rows + row] = 0;
@@ -123,7 +123,8 @@ __device__ __forceinline__ void topk_softmax_task_impl(
                 "THREADS_PER_ROW must be power of 2");
   static_assert(THREADS_PER_ROW <= WARP_SIZE,
                 "THREADS_PER_ROW can be at most warp size");
-  static_assert(THREADS_PER_ROW == WARP_SIZE || THREADS_PER_ROW == WARP_SIZE / 2, 
+  static_assert(THREADS_PER_ROW == WARP_SIZE ||
+                    THREADS_PER_ROW == WARP_SIZE / 2,
                 "This kernel only supports THREADS_PER_ROW of 16 or 32");
 
   // Work partitioning
@@ -139,7 +140,9 @@ __device__ __forceinline__ void topk_softmax_task_impl(
 
   int const thread_row_in_warp = lane_idx / THREADS_PER_ROW;
   int const thread_row = warp_base_row + thread_row_in_warp;
-  uint32_t const warp_mask = (num_rows % 2 == 1 && thread_row == num_rows - 1) ? 0x0000ffff : 0xffffffff;
+  uint32_t const warp_mask = (num_rows % 2 == 1 && thread_row == num_rows - 1)
+                                 ? 0x0000ffff
+                                 : 0xffffffff;
   if (thread_row < num_rows) {
 
     bool const row_is_active = finished ? !finished[thread_row] : true;
@@ -168,7 +171,8 @@ __device__ __forceinline__ void topk_softmax_task_impl(
     float row_chunk[VPT];
     for (int ii = 0; ii < VPT; ++ii) {
       row_chunk[ii] = converter(row_chunk_temp[ii]);
-      row_chunk_temp[ii] = static_cast<T>(0); // reset input buffer to 0 for split-k gate linear
+      row_chunk_temp[ii] =
+          static_cast<T>(0); // reset input buffer to 0 for split-k gate linear
     }
 
     // reset input buffer to 0 for split-k gate linear
@@ -284,11 +288,12 @@ __device__ __forceinline__ void topk_softmax_task_impl(
   __syncthreads();
   // Compact marks into a dense list and count
   if (mpk_active_expert_ids != nullptr) {
-    for (int expert = start_expert + threadIdx.x; expert < end_expert; expert += blockDim.x) {
+    for (int expert = start_expert + threadIdx.x; expert < end_expert;
+         expert += blockDim.x) {
       int const local_expert = expert - start_expert;
       int const mark = mpk_active_expert_ids[local_expert];
       if (mark >= 0) {
-        int const pos = atomicAdd(mpk_active_expert_ids+NUM_EXPERTS, 1);
+        int const pos = atomicAdd(mpk_active_expert_ids + NUM_EXPERTS, 1);
         mpk_active_expert_ids[pos] = expert;
       }
     }

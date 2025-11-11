@@ -32,8 +32,8 @@ __device__ __forceinline__ uint32_t get_thread_idx() {
 }
 
 /*
-    13 bits      8 bits        9 bits         2 bits
-   [31-19]      [18-11]       [10-2]         [1-0]
+     13 bits      8 bits        9 bits         2 bits
+    [31-19]      [18-11]       [10-2]         [1-0]
    [event no] [block group] [event type] [begin/end/instant]
 */
 constexpr uint32_t EVENT_IDX_SHIFT = 2;

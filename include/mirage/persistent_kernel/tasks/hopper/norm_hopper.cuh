@@ -32,8 +32,12 @@ __device__ __forceinline__ void rms_norm_hopper(InputSmem smem_input,
                                                 bool rotary_emd = false,
                                                 T const *cos_ptr = nullptr,
                                                 T const *sin_ptr = nullptr) {
-  // For __syncthread divergence dead lock.
-  static_assert(NUM_THREADS <= HEAD_DIM || HEAD_DIM % 32 == 0);
+  // Avoid sync divergence dead lock.
+  if (rotary_emd) {
+    static_assert(HEAD_DIM < NUM_THREADS || HEAD_DIM % NUM_THREADS == 0);
+  }
+  constexpr int ROTARY_PARTICIPATING_THREADS = (NUM_THREADS < HEAD_DIM ? NUM_THREADS : HEAD_DIM);
+
   // smem_input: NUM_HEADS * (WINDOW_SIZE or CHUNK_SIZE), HEAD_DIM
   // TODO(Wenqin): handle if speculative window of k span two chunks.
   int warp_idx = warp_id();
@@ -82,50 +86,39 @@ __device__ __forceinline__ void rms_norm_hopper(InputSmem smem_input,
       float rms_rcp = rsqrt(reduce_smem[0] / float(HEAD_DIM) + eps);
 
       // multiply with weight
-      if (threadIdx.x < HEAD_DIM) {
 #pragma unroll
-        for (uint32_t i = threadIdx.x; i < HEAD_DIM; i += NUM_THREADS) {
-          int row = smem_seq_idx * NUM_HEAD + head_idx;
-          int col = i;
-          float val = (float)smem_input.at(row, col);
-          float w = (float)weight_ptr[i];
-          val *= rms_rcp * w;
-          smem_input.at(row, col) = (T)val;
+      for (uint32_t i = threadIdx.x; i < HEAD_DIM; i += NUM_THREADS) {
+        int row = smem_seq_idx * NUM_HEAD + head_idx;
+        int col = i;
+        float val = (float)smem_input.at(row, col);
+        float w = (float)weight_ptr[i];
+        val *= rms_rcp * w;
+        smem_input.at(row, col) = (T)val;
 
-          if (rotary_emd) {
-            // we should do rope for all the window size q and k, because they
-            // came from hidden states, we didn't apply rope yet.
-            wg_sync<NUM_THREADS>(BARRIER_ID);
-            T const *cur_cos_ptr = cos_ptr + win_idx * HEAD_DIM;
-            T const *cur_sin_ptr = sin_ptr + win_idx * HEAD_DIM;
-            float cos = (float)cur_cos_ptr[i];
-            float sin = (float)cur_sin_ptr[i];
+        if (rotary_emd) {
+          // we should do rope for all the window size q and k, because they
+          // came from hidden states, we didn't apply rope yet.
+          wg_sync<ROTARY_PARTICIPATING_THREADS>(BARRIER_ID);
+          T const *cur_cos_ptr = cos_ptr + win_idx * HEAD_DIM;
+          T const *cur_sin_ptr = sin_ptr + win_idx * HEAD_DIM;
+          float cos = (float)cur_cos_ptr[i];
+          float sin = (float)cur_sin_ptr[i];
 
-            float v_rot;
-            if (i < HEAD_DIM / 2) {
-              float v1 = (float)smem_input.at(row, col);
-              float v2 = (float)smem_input.at(row, col + HEAD_DIM / 2);
-              v_rot = v1 * cos - v2 * sin;
-            } else {
-              float v1 = (float)smem_input.at(row, col);
-              float v2 = (float)smem_input.at(row, col - HEAD_DIM / 2);
-              v_rot = v1 * cos + v2 * sin;
-            }
-            wg_sync<NUM_THREADS>(BARRIER_ID);
-            // output shape (window_size, head_num, head_dim)
-            smem_input.at(row, col) = (T)v_rot;
+          float v_rot;
+          if (i < HEAD_DIM / 2) {
+            float v1 = (float)smem_input.at(row, col);
+            float v2 = (float)smem_input.at(row, col + HEAD_DIM / 2);
+            v_rot = v1 * cos - v2 * sin;
+          } else {
+            float v1 = (float)smem_input.at(row, col);
+            float v2 = (float)smem_input.at(row, col - HEAD_DIM / 2);
+            v_rot = v1 * cos + v2 * sin;
           }
-        } // i
-      } else {
-        // we should keep __syncthreads number same as the for loop when
-        // HEAD_DIM smaller than NUM_THREAD
-        for (uint32_t i = threadIdx.x; i < HEAD_DIM; i += NUM_THREADS) {
-          if (rotary_emd) {
-            wg_sync<NUM_THREADS>(BARRIER_ID);
-            wg_sync<NUM_THREADS>(BARRIER_ID);
-          }
+          wg_sync<ROTARY_PARTICIPATING_THREADS>(BARRIER_ID);
+          // output shape (window_size, head_num, head_dim)
+          smem_input.at(row, col) = (T)v_rot;
         }
-      }
+      } // i
     } // head_idx
   }   // win_idx
 }

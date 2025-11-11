@@ -1,4 +1,4 @@
-from models.modeling_qwen3 import Qwen3ForCausalLM
+from transformers import Qwen3MoeForCausalLM
 from transformers import AutoTokenizer, AutoConfig
 from safetensors.torch import load_model
 import torch
@@ -34,6 +34,7 @@ def grid_for_rmsnorm_layer(size):
         return 96
     elif size % 64 == 0:
         return 64
+
 # Return the largest factor of m that is less than or equal to n
 # This is used to determine the grid size
 def max_factor_leq_n(m: int, n: int) -> int:
@@ -51,7 +52,7 @@ def max_factor_leq_n(m: int, n: int) -> int:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--use-mirage", action="store_true", help="Use Mirage kernels")
-    parser.add_argument("--max-num-batched-tokens", default=8, type=int, help="Max number of tokens in a batch")
+    parser.add_argument("--max-num-batched-tokens", default=1, type=int, help="Max number of tokens in a batch")
     parser.add_argument("--max-num-batched-requests", default=1, type=int, help="Max number of requests in a batch")
     parser.add_argument("--page-size", default=4096, type=int, help="Page size")
     parser.add_argument("--max-num-pages", default=16, type=int, help="Max num pages")
@@ -88,7 +89,7 @@ if __name__ == "__main__":
 
     parser.add_argument("--model-path", type=str, default=None, help="Path to a local model (necessary for multi-GPU demo)")
     parser.add_argument(
-        "--model", type=str, default='Qwen/Qwen3-8B', help="Model path on hugging face"
+        "--model", type=str, default='Qwen/Qwen3-30B-A3B', help="Model path on hugging face"
     )
     parser.add_argument(
         "--no-use-cutlass-kernel",
@@ -98,6 +99,7 @@ if __name__ == "__main__":
         help="Not use the cutlass version kernel.",
     )
     parser.add_argument("--ignore-eos", action="store_true", help="Ignore eos token during generation")
+    parser.add_argument("--splitk-gate", action="store_true", help="Use split-k gating linear")
     args = parser.parse_args()
     try:
         from mpi4py import MPI
@@ -129,16 +131,16 @@ if __name__ == "__main__":
             # load model locally (necessary for multi-GPU case)
             print(f"Load model from model path: {args.model_path}")
             config = AutoConfig.from_pretrained(args.model_path)
-            model = Qwen3ForCausalLM(config, world_size, args.max_num_pages, args.page_size)
+            model = Qwen3MoeForCausalLM(config)
             load_model(
                 model, f"{args.model_path}/model{rank}-mp{world_size}.safetensors"
             )
             tokenizer = AutoTokenizer.from_pretrained(args.model_path)
         else:
-            model = Qwen3ForCausalLM.from_pretrained(model_name, world_size=1, max_num_pages=args.max_num_pages, page_size=args.page_size).to("cuda")
+            model = Qwen3MoeForCausalLM.from_pretrained(model_name).to("cuda")
             tokenizer = AutoTokenizer.from_pretrained(model_name)
 
-    total_num_requests = args.max_num_batched_requests
+    total_num_requests = 1 if not args.use_mirage else args.max_num_batched_requests
     # get all model weight tensors
     tokens = torch.full((total_num_requests, args.max_seq_length), 0, dtype=torch.long, device="cuda")
 
@@ -175,10 +177,36 @@ if __name__ == "__main__":
     model_inputs = tokenizer([text], return_tensors="pt").to(model.device)
     for r in range(total_num_requests):
         for i in range(model_inputs.input_ids.shape[-1]):
+        # for i in range(args.max_seq_length):
             tokens[r, i] = model_inputs.input_ids[0, i]
-    prompt_lengths = torch.full((total_num_requests,), model_inputs.input_ids.shape[-1], dtype=torch.int, device="cuda")
+    prompt_lengths = torch.full((total_num_requests,), model_inputs.input_ids.shape[-1], dtype=torch.int, device=model.device)
     positions = torch.arange(32768).unsqueeze(0).to(model.device)
-    position_embeddings = model.model.rotary_emb(positions)
+    dummy_x_for_device = torch.empty(1, dtype=torch.bfloat16, device=model.device)
+    position_embeddings = model.model.rotary_emb(dummy_x_for_device, positions)
+    
+    # kv_cache tensors
+    key_cache_torch = torch.empty(
+        (
+            model.config.num_hidden_layers,
+            args.max_num_pages,
+            args.page_size,
+            model.config.num_key_value_heads // world_size,
+            model.config.head_dim,
+        ),
+        dtype=torch.bfloat16,
+        device="cuda",
+    )
+    value_cache_torch = torch.empty(
+        (
+            model.config.num_hidden_layers,
+            args.max_num_pages,
+            args.page_size,
+            model.config.num_key_value_heads // world_size,
+            model.config.head_dim,
+        ),
+        dtype=torch.bfloat16,
+        device="cuda",
+    )
 
     # get all model weight tensors
     input_tokens = torch.full((args.max_num_batched_tokens, 1), 0, dtype=torch.long, device="cuda")
@@ -195,7 +223,7 @@ if __name__ == "__main__":
         import mirage as mi
 
         hidden_size = model.config.hidden_size
-        intermediate_size = model.config.intermediate_size
+        intermediate_size = model.config.moe_intermediate_size
         # pad vocab_size to facilitate task graph creation
         lm_head_weight = torch.cat(
             (
@@ -215,6 +243,8 @@ if __name__ == "__main__":
         head_dim = model.config.head_dim
         fused_outdim_1 = (num_q_heads + 2 * num_kv_heads) * head_dim
         fused_outdim_2 = 2 * intermediate_size
+        num_experts = model.config.num_experts
+        num_experts_per_tok = model.config.num_experts_per_tok
 
         if args.profiling:
             profiler_tensor = torch.zeros(
@@ -266,7 +296,7 @@ if __name__ == "__main__":
             profiler_tensor=profiler_tensor,
             trace_name=args.trace_name,
             spec_decode_config=spec_decode_config,
-            use_cutlass_kernel=args.use_cutlass_kernel,
+            use_cutlass_kernel=args.use_cutlass_kernel
         )
         
         if spec_decode_config and spec_decode_config.method == "promptlookup":
@@ -287,17 +317,28 @@ if __name__ == "__main__":
             torch_tensor=position_embeddings[1][0, :4096, :],
             name="sin_position_embedding",
         )
-
         y = mpk.new_tensor(
             dims=(args.max_num_batched_tokens, hidden_size),
             dtype=mi.bfloat16,
             name="embed_out",
             io_category="cuda_tensor",
         )
+        rmsnorm_out_qkv = mpk.new_tensor(
+            dims=(args.max_num_batched_tokens, hidden_size),
+            dtype=mi.bfloat16,
+            name="rmsnorm_out_qkv",
+            io_category="cuda_tensor",
+        )
         rmsnorm_out = mpk.new_tensor(
             dims=(args.max_num_batched_tokens, hidden_size),
             dtype=mi.bfloat16,
             name="rmsnorm_out",
+            io_category="cuda_tensor",
+        )
+        rmsnorm_out_moe = mpk.new_tensor(
+            dims=(args.max_num_batched_tokens, hidden_size),
+            dtype=mi.bfloat16,
+            name="rmsnorm_out_moe",
             io_category="cuda_tensor",
         )
         attn_in = mpk.new_tensor(
@@ -330,22 +371,84 @@ if __name__ == "__main__":
             name="attn_allreduce_out",
             io_category="nvshmem_tensor" if world_size > 1 else "cuda_tensor",
         )
+        moe_gate_out = mpk.new_tensor(
+            dims=(args.max_num_batched_tokens, num_experts),
+            dtype=mi.bfloat16,
+            name="moe_gate_out",
+            io_category="cuda_tensor",
+        )
+        # TODO(Zhihao): a temporary solution to combine MoE gate_proj and up_proj into one linear 
+        # layer on the torch side with extra memory requirements, need to have a shuffle kernel to do this properly
+        moe_gate_up_proj_torch_weights = []
+        moe_down_proj_torch_weights = []
+        for layer in model.model.layers:
+            moe_gate_up_proj_torch = []
+            moe_down_proj_torch = []
+            for expert_id in range(num_experts):
+                expert = layer.mlp.experts[expert_id]
+                moe_gate_up_proj_torch.append(
+                    torch.concat([
+                        expert.gate_proj.weight.detach().clone(),
+                        expert.up_proj.weight.detach().clone()
+                    ], dim=0)
+                )
+                moe_down_proj_torch.append(
+                    expert.down_proj.weight.detach().clone()
+                )
+            moe_gate_up_proj_torch_weights.append(
+                torch.stack(moe_gate_up_proj_torch, dim=0)
+            )
+            moe_down_proj_torch_weights.append(
+                torch.stack(moe_down_proj_torch, dim=0)
+            )
+            torch.cuda.synchronize()
+            del layer.mlp.experts
+
+        moe_routing_indices = mpk.new_tensor(
+            dims=(num_experts, args.max_num_batched_tokens),
+            dtype=mi.int32,
+            name="moe_routing_indices",
+            io_category="cuda_tensor",
+        )
+        moe_mask = mpk.new_tensor(
+            dims=(num_experts + 1,),
+            dtype=mi.int32,
+            name="moe_mask",
+            io_category="cuda_tensor",
+        )
+        moe_topk_weight = mpk.new_tensor(
+            dims=(args.max_num_batched_tokens, num_experts_per_tok),
+            dtype=mi.float32,
+            name="moe_topk_weight",
+            io_category="cuda_tensor",
+        )
+        mlp_mid_torch = torch.empty(
+            (args.max_num_batched_tokens, num_experts_per_tok, fused_outdim_2 // world_size),
+            dtype=torch.bfloat16,
+            device="cuda",
+        )
         mlp_mid = mpk.new_tensor(
-            dims=(args.max_num_batched_tokens, fused_outdim_2 // world_size),
+            dims=(args.max_num_batched_tokens, num_experts_per_tok, fused_outdim_2 // world_size),
             dtype=mi.bfloat16,
             name="mlp_mid",
             io_category="cuda_tensor",
         )
         silu_mul_out = mpk.new_tensor(
-            dims=(args.max_num_batched_tokens, intermediate_size // world_size),
+            dims=(args.max_num_batched_tokens, num_experts_per_tok, intermediate_size // world_size),
             dtype=mi.bfloat16,
             name="silu_mul_out",
             io_category="cuda_tensor",
         )
         mlp_out = mpk.new_tensor(
-            dims=(args.max_num_batched_tokens, hidden_size),
+            dims=(args.max_num_batched_tokens, num_experts_per_tok, hidden_size),
             dtype=mi.bfloat16,
             name="mlp_out",
+            io_category="cuda_tensor"
+        )
+        mlp_weighted_sum_out = mpk.new_tensor(
+            dims=(args.max_num_batched_tokens, hidden_size),
+            dtype=mi.bfloat16,
+            name="mlp_weighted_sum_out",
             io_category="nvshmem_tensor" if world_size > 1 else "cuda_tensor",
         )
         mlp_final = mpk.new_tensor(
@@ -373,12 +476,6 @@ if __name__ == "__main__":
             io_category="cuda_tensor",
         )
         argmax_out = mpk.attach_input(torch_tensor=output_tokens, name="output_token")
-        #argmax_out = mpk.new_tensor(
-        #    dims=(args.max_num_batched_tokens, 1),
-        #    dtype=mi.int64,
-        #    name="argmax_out",
-        #    io_category="cuda_tensor",
-        #)
 
         # add spec tokens layer
         if spec_decode_config:
@@ -398,7 +495,6 @@ if __name__ == "__main__":
             input=x, 
             weight=w, 
             output=y, 
-            # grid_dim=(max_factor_leq_n(hidden_size, 96 // args.max_num_batched_tokens), total_tokens_per_iter, 1), 
             grid_dim=(1, 1, 1), 
             block_dim=(256, 1, 1),
             input_source=1,
@@ -428,17 +524,18 @@ if __name__ == "__main__":
             mpk.rmsnorm_layer(
                 input=x,
                 weight=w_norm,
-                output=rmsnorm_out,
+                output=rmsnorm_out_qkv,
                 grid_dim=(mpk.max_num_batched_tokens, 1, 1),
                 block_dim=(256, 1, 1),
             )
             mpk.linear_layer(
-                input=rmsnorm_out,
+                input=rmsnorm_out_qkv,
                 weight=w_qkv,
                 output=attn_in,
                 grid_dim=(grid_for_linear_layer(w_qkv.dim(0), with_residual=False), 1, 1),
                 block_dim=(256, 1, 1),
             )
+
             # add attention
             w_q_norm = mpk.attach_input(
                 torch_tensor=layer.self_attn.q_norm.weight, name=f"layer_{i}_q_norm"
@@ -447,10 +544,10 @@ if __name__ == "__main__":
                 torch_tensor=layer.self_attn.k_norm.weight, name=f"layer_{i}_k_norm"
             )
             k_cache = mpk.attach_input(
-                torch_tensor=model.model.kv_cache[0][i], name=f"layer_{i}_k_cache"
+                torch_tensor=key_cache_torch[i], name=f"layer_{i}_k_cache"
             )
             v_cache = mpk.attach_input(
-                torch_tensor=model.model.kv_cache[1][i], name=f"layer_{i}_v_cache"
+                torch_tensor=value_cache_torch[i], name=f"layer_{i}_v_cache"
             )
             # TODO: Later attention kernels should be merged as one
             if spec_decode_config:
@@ -488,7 +585,7 @@ if __name__ == "__main__":
                 weight=w,
                 residual=x,
                 output=attn_proj_out,
-                grid_dim=(grid_for_linear_layer(w.dim(0), with_residual=True), 1, 1),
+                grid_dim=(hidden_size // 64, 1, 1),
                 block_dim=(256, 1, 1),
             )
             # reset residual input as x
@@ -508,56 +605,92 @@ if __name__ == "__main__":
                 torch_tensor=layer.post_attention_layernorm.weight,
                 name=f"layer_{i}_post_attn_layernorm",
             )
-            w_gate_proj = mpk.attach_input(
-                torch_tensor=layer.mlp.gate_proj.weight, name=f"layer_{i}_gate_proj"
+            
+            w_moe_gate = mpk.attach_input(
+                torch_tensor=layer.mlp.gate.weight, name=f"layer_{i}_moe_gate"
             )
-            w_up_proj = mpk.attach_input(
-                torch_tensor=layer.mlp.up_proj.weight, name=f"layer_{i}_up_proj"
+            w_gatedup = mpk.attach_input(
+                torch_tensor=moe_gate_up_proj_torch_weights[i], name=f"layer_{i}_gate_proj"
             )
-            rmsnorm_num_tasks = grid_for_rmsnorm_layer(w_gate_proj.dim(0) + w_up_proj.dim(0))
-            w_gatedup = mpk.shuffle_tensors(
-                inputs=[w_gate_proj, w_up_proj],
-                shuffled_dim=0,
-                num_groups=rmsnorm_num_tasks//2,
-                name=f"layer_{i}_gatedup_proj",
+            w_down_proj = mpk.attach_input(
+                torch_tensor=moe_down_proj_torch_weights[i], name=f"layer_{i}_down_proj"
             )
+            rmsnorm_num_tasks = grid_for_rmsnorm_layer(w_gatedup.dim(1))
             mpk.rmsnorm_layer(
                 input=x,
                 weight=w_norm,
-                output=rmsnorm_out,
+                output=rmsnorm_out_moe,
                 grid_dim=(mpk.max_num_batched_tokens, 1, 1),
                 block_dim=(256, 1, 1),
             )
-            mpk.linear_layer(
-                input=rmsnorm_out,
-                weight=w_gatedup,
-                output=mlp_mid,
-                grid_dim=(grid_for_linear_layer(w_gatedup.dim(0), with_residual=False), 1, 1),
+            # moe gate
+            if args.splitk_gate:
+                # moe gate with split-k
+                mpk.splitk_linear_layer(
+                    input=rmsnorm_out_moe,
+                    weight=w_moe_gate,
+                    output=moe_gate_out,
+                    grid_dim=(2, hidden_size // 64, 1),
+                    block_dim=(256, 1, 1),
+                )
+            else:
+                # moe gate without split-k
+                mpk.linear_layer(
+                    input=rmsnorm_out_moe,
+                    weight=w_moe_gate,
+                    output=moe_gate_out,
+                    grid_dim=(num_experts // 16, 1, 1),
+                    block_dim=(256, 1, 1),
+                )
+            # topk+softmax
+            mpk.moe_topk_softmax_routing_layer(
+                input=moe_gate_out,
+                output=(moe_topk_weight, moe_routing_indices, moe_mask),
+                grid_dim=(1, 1, 1),
                 block_dim=(256, 1, 1),
             )
-            mpk.silu_mul_layer(
+            # moe w13 linear
+            mpk.moe_w13_linear_layer(
+                input=rmsnorm_out_moe,
+                weight=w_gatedup,
+                moe_routing_indices=moe_routing_indices,
+                moe_mask=moe_mask,
+                output=mlp_mid,
+                grid_dim=(5, 24, 1), # 1536//64=24 blocks for output size 1536
+                block_dim=(256, 1, 1),
+            )
+            # silu_mul
+            mpk.moe_silu_mul_layer(
                 input=mlp_mid,
                 output=silu_mul_out,
-                grid_dim=(rmsnorm_num_tasks//2, 1, 1),
+                grid_dim=(mpk.max_num_batched_tokens, num_experts_per_tok, 1),
                 block_dim=(256, 1, 1),
             )
-            # add silu_mul_linear layer
-            w = mpk.attach_input(
-                torch_tensor=layer.mlp.down_proj.weight, name=f"layer_{i}_down_proj"
-            )
-            mpk.linear_with_residual_layer(
+            # moe w2 linear
+            mpk.moe_w2_linear_layer(
                 input=silu_mul_out,
-                weight=w,
-                residual=x,
+                weight=w_down_proj,
+                moe_routing_indices=moe_routing_indices,
+                moe_mask=moe_mask,
                 output=mlp_out,
-                grid_dim=(grid_for_linear_layer(w.dim(0), with_residual=True), 1, 1),
+                grid_dim=(4, 32, 1), # 2048//64=32 blocks for output size 1536
+                block_dim=(256, 1, 1),
+            )
+            # moe mul sum add
+            mpk.moe_mul_sum_add_layer(
+                input=mlp_out,
+                weight=moe_topk_weight,
+                residual=x,
+                output=mlp_weighted_sum_out,
+                grid_dim=(mpk.max_num_batched_tokens, hidden_size//256, 1),
                 block_dim=(256, 1, 1),
             )
             # reset residual input as x
-            x = mlp_out
+            x = mlp_weighted_sum_out
+            
             if world_size > 1:
                 mpk.allreduce_layer(
-                    input=mlp_out,
+                    input=mlp_weighted_sum_out,
                     buffer=allreduce_buf,
                     output=mlp_final,
                     grid_dim=(hidden_size // 64, 1, 1),
@@ -581,7 +714,8 @@ if __name__ == "__main__":
             input=rmsnorm_out,
             weight=w_proj,
             output=argmax_in,
-            grid_dim=(grid_for_linear_layer(w_proj.dim(0), with_residual=False), 1, 1),
+            # grid_dim=(grid_for_linear_layer(w_proj.dim(0), with_residual=False), 1, 1),
+            grid_dim=(mpk.num_workers, 1, 1),
             block_dim=(256, 1, 1),
         )
         # add argmax layer
@@ -611,7 +745,7 @@ if __name__ == "__main__":
                 spec_tokens = spec_tokens,
                 target_output = argmax_out,
                 grid_dim = (1, 1, 1),
-                block_dim = (256, 1, 1),
+                block_dim = (128, 1, 1),
             )
 
         results = mpk.kn_graph.generate_task_graph(num_gpus=world_size, my_gpu_id=rank)
@@ -623,62 +757,83 @@ if __name__ == "__main__":
         mpk.compile(output_dir=args.output_dir)
 
     # g = torch.cuda.CUDAGraph()
-    stream = torch.cuda.Stream()
-    warmup = 0
     output_len = 512
     if not args.use_mirage:
-        for cur_pos in range(prompt_lengths[0], prompt_lengths[0] + output_len):
-            step.fill_(cur_pos - 1)
-            input_ids = tokens[:, prev_pos:cur_pos]
-            cos_embeddings = position_embeddings[0][:, prev_pos:cur_pos]
-            sin_embeddings = position_embeddings[1][:, prev_pos:cur_pos]
-            logits = model.forward(
+        prompt_len = prompt_lengths[0].item()
+        max_new_tokens = min(output_len, args.max_seq_length - prompt_len)
+        eos_token_id = model.config.eos_token_id if not args.ignore_eos else None
+        
+        # Initialize input with full prompt sequence
+        input_ids = tokens[:, :prompt_len].clone()
+        attention_mask = torch.ones_like(input_ids)
+        past_key_values = None
+        
+        # First forward pass: build KV cache
+        with torch.inference_mode():
+            out = model(
                 input_ids=input_ids,
-                position_embeddings=(cos_embeddings, sin_embeddings),
-                step=step,
-                stream=stream,
+                attention_mask=attention_mask,
+                use_cache=True,
+                past_key_values=None
             )
-            next_token = logits.argmax(dim=-1)
-            next_token = next_token[0, -1]
-            tokens[0, cur_pos] = next_token
-            prev_pos = cur_pos
-            if next_token == model.config.eos_token_id:
-                break
-            if cur_pos == prompt_lengths[0] + warmup:
-                torch.cuda.synchronize()
-                starter.record()
+            past_key_values = out.past_key_values
+            next_token = out.logits[:, -1, :].argmax(dim=-1, keepdim=True)  # (1, 1)
+            
+        # Start timing from first generated token
+        torch.cuda.synchronize()
+        starter.record()
+        generated_tokens = []
+        
+        # Incremental decoding loop
+        with torch.inference_mode():
+            for t in range(max_new_tokens):
+                # Update tokens array
+                cur_pos = prompt_len + t
+                tokens[0, cur_pos] = next_token[0, 0].item()
+                generated_tokens.append(next_token.clone())
+                
+                # Check EOS
+                if eos_token_id is not None and next_token[0, 0].item() == eos_token_id:
+                    break
+                
+                # Extend attention_mask
+                attention_mask = torch.cat([attention_mask, torch.ones_like(next_token)], dim=1)
+                
+                # Forward pass with only the last generated token + KV cache
+                out = model(
+                    input_ids=next_token,
+                    attention_mask=attention_mask,
+                    use_cache=True,
+                    past_key_values=past_key_values
+                )
+                past_key_values = out.past_key_values
+                
+                # Get next token
+                logits_last = out.logits[:, -1, :]
+                next_token = logits_last.argmax(dim=-1, keepdim=True)  # (1, 1)
 
         ender.record()
         torch.cuda.synchronize()
         run_time = starter.elapsed_time(ender)
 
-        generated_ids = tokens[:, :prev_pos]
+        # Build full sequence
+        num_generated = len(generated_tokens)
+        if num_generated > 0:
+            generated_ids = torch.cat([input_ids] + generated_tokens, dim=1)
+            final_pos = prompt_len + num_generated
+        else:
+            generated_ids = input_ids
+            final_pos = prompt_len
 
-        response = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
+        response = tokenizer.batch_decode(generated_ids[0:1], skip_special_tokens=True)[0]
         print(response)
-        print(
-            "Prompt length {}, generate length {}, per-token latency {} ms".format(
-                prompt_lengths[0], cur_pos - prompt_lengths[0], run_time / (cur_pos - prompt_lengths[0])
+        if num_generated > 0:
+            print(
+                "Prompt length {}, generate length {}, per-token latency {:.3f} ms".format(
+                    prompt_len, num_generated, run_time / num_generated
+                )
             )
-        )
     else:
-        # prefill phase
-        #step.fill_(prompt_len - 1)
-        #input_ids = tokens[:, 0:prompt_len]
-        #cos_embeddings = position_embeddings[0][:, 0:prompt_len]
-        #sin_embeddings = position_embeddings[1][:, 0:prompt_len]
-        #logits = model.forward(
-        #    input_ids=input_ids,
-        #    position_embeddings=(cos_embeddings, sin_embeddings),
-        #    step=step,
-        #    stream=stream,
-        #)
-        #next_token = logits.argmax(dim=-1)
-        #next_token = next_token[0, -1]
-        #tokens[0, prompt_len] = next_token
-        #torch.cuda.synchronize()
-        #step.fill_(prompt_len)
-
         starter.record()
         mpk()
         ender.record()
@@ -686,14 +841,19 @@ if __name__ == "__main__":
         run_time = starter.elapsed_time(ender)
 
         print("tokens.shape = ", tokens.shape)
+        print(tokens)
         for r in range(total_num_requests):
             generated_ids = tokens[r, : step[r] + 1]
             response = tokenizer.decode(generated_ids, skip_special_tokens=True)
             print(response)
+        
+        if total_num_requests > 1:
+            print(f"Output length of each batch is same: {(step.max() == step.min()).item()}")
 
         print("Prompt length {}, generate length {}, per-token latency (both prefill and decode): {:.3f} ms".format(
               prompt_lengths[0], step.max().item() + 1 - prompt_lengths[0], run_time / (step.max().item() + 1)
             )
         )
+        pass
     if world_size > 1:
         dist.destroy_process_group()

@@ -348,7 +348,6 @@ void linear_sm100_mpk_kernel(torch::Tensor input,
   }
 }
 
-
 // sm100_linear_splitk
 
 template <typename T,
@@ -362,12 +361,11 @@ template <typename T,
           int NUM_AB_STAGE = 8,
           int NUM_ACC_STAGE = 2,
           int NUM_C_STAGE = 4>
-__global__
-    __launch_bounds__(256,
-                      1) void linear_splitk_sm100_wrapper(void *tma_a_desc_ptr,
-                                                       void *tma_b_desc_ptr,
-                                                       BiasTensor mBias,
-                                                       void *tma_out_desc_ptr) {
+__global__ __launch_bounds__(256, 1) void linear_splitk_sm100_wrapper(
+    void *tma_a_desc_ptr,
+    void *tma_b_desc_ptr,
+    BiasTensor mBias,
+    void *tma_out_desc_ptr) {
 
   constexpr int B = 3;
   constexpr int M = 3;
@@ -456,9 +454,9 @@ __global__
 
 template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int REDUCTION_SIZE>
 void launch_linear_splitk_sm100(void *input_ptr,
-                             void *weight_ptr,
-                             void *output_ptr,
-                             void *residual_ptr = nullptr) {
+                                void *weight_ptr,
+                                void *output_ptr,
+                                void *residual_ptr = nullptr) {
 
   constexpr int B = 3;
   constexpr int M = 3;
@@ -578,13 +576,13 @@ void launch_linear_splitk_sm100(void *input_ptr,
 
   if (residual_ptr != nullptr) {
     auto *kernel_ptr = &linear_splitk_sm100_wrapper<T,
-                                                 BATCH_SIZE,
-                                                 OUTPUT_SIZE,
-                                                 REDUCTION_SIZE,
-                                                 decltype(mBias),
-                                                 MMA_M,
-                                                 MMA_N,
-                                                 false>;
+                                                    BATCH_SIZE,
+                                                    OUTPUT_SIZE,
+                                                    REDUCTION_SIZE,
+                                                    decltype(mBias),
+                                                    MMA_M,
+                                                    MMA_N,
+                                                    false>;
     CUTE_CHECK_ERROR(cudaFuncSetAttribute(
         kernel_ptr, cudaFuncAttributeMaxDynamicSharedMemorySize, smemBytes));
     cutlass::ClusterLaunchParams params = {
@@ -603,13 +601,13 @@ void launch_linear_splitk_sm100(void *input_ptr,
     }
   } else {
     auto *kernel_ptr = &linear_splitk_sm100_wrapper<T,
-                                                 BATCH_SIZE,
-                                                 OUTPUT_SIZE,
-                                                 REDUCTION_SIZE,
-                                                 decltype(mBias),
-                                                 MMA_M,
-                                                 MMA_N,
-                                                 true>;
+                                                    BATCH_SIZE,
+                                                    OUTPUT_SIZE,
+                                                    REDUCTION_SIZE,
+                                                    decltype(mBias),
+                                                    MMA_M,
+                                                    MMA_N,
+                                                    true>;
     CUTE_CHECK_ERROR(cudaFuncSetAttribute(
         kernel_ptr, cudaFuncAttributeMaxDynamicSharedMemorySize, smemBytes));
     cutlass::ClusterLaunchParams params = {
@@ -630,9 +628,9 @@ void launch_linear_splitk_sm100(void *input_ptr,
 }
 
 void linear_splitk_sm100_kernel(torch::Tensor input,
-                             torch::Tensor weight,
-                             c10::optional<at::Tensor> residual,
-                             torch::Tensor output) {
+                                torch::Tensor weight,
+                                c10::optional<at::Tensor> residual,
+                                torch::Tensor output) {
 
   void *input_ptr = input.data_ptr();
   void *weight_ptr = weight.data_ptr();
@@ -662,6 +660,7 @@ void linear_splitk_sm100_kernel(torch::Tensor input,
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def(
       "linear_sm100_mpk", &linear_sm100_mpk_kernel, "Linear kernel SM100 MPK");
-  m.def(
-      "linear_splitk_sm100", &linear_splitk_sm100_kernel, "Linear kernel SM100 SplitK");
+  m.def("linear_splitk_sm100",
+        &linear_splitk_sm100_kernel,
+        "Linear kernel SM100 SplitK");
 }

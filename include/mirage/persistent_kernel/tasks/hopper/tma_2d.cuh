@@ -208,7 +208,7 @@ public:
   template <int NDIM>
   __device__ inline void
       launch_tma_reduce_add_async(void *smem_ptr,
-                             int const (&tma_coords)[NDIM]) const {
+                                  int const (&tma_coords)[NDIM]) const {
 #if defined(MIRAGE_GRACE_HOPPER) || defined(MIRAGE_GRACE_BLACKWELL)
     uint64_t gmem_int_desc = reinterpret_cast<uint64_t>(desc_ptr);
     uint32_t smem_int_ptr =
@@ -230,17 +230,18 @@ public:
       c4 = tma_coords[4];
     }
 
-    asm volatile("cp.reduce.async.bulk.tensor.5d.global.shared::cta.add.bulk_group [%0, "
-                 "{%2, %3, %4, %5, %6}], [%1];"
-                 :
-                 : "l"(gmem_int_desc),
-                   "r"(smem_int_ptr),
-                   "r"(c0),
-                   "r"(c1),
-                   "r"(c2),
-                   "r"(c3),
-                   "r"(c4)
-                 : "memory");
+    asm volatile(
+        "cp.reduce.async.bulk.tensor.5d.global.shared::cta.add.bulk_group [%0, "
+        "{%2, %3, %4, %5, %6}], [%1];"
+        :
+        : "l"(gmem_int_desc),
+          "r"(smem_int_ptr),
+          "r"(c0),
+          "r"(c1),
+          "r"(c2),
+          "r"(c3),
+          "r"(c4)
+        : "memory");
 #elif defined(__CUDA_ARCH__)
     asm volatile("brkpt;\n" ::);
 #endif

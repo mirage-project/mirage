@@ -28,7 +28,7 @@ uint16_t const FP_PQ = 13861;
 uint16_t const FP_P_MUL_Q_MOD_1 = 167;
 // FP_Q_MUL_P_MOD_1 is a multiplier of Q and is 1 module P
 uint16_t const FP_Q_MUL_P_MOD_1 = 13695;
-size_t const MAX_NUM_THREADBLOCKS_PER_KERNEL = 1024;
+size_t const MAX_NUM_THREADBLOCKS_PER_KERNEL = 4096;
 int const MAX_NUM_DEVICES = 16;
 constexpr int MAX_TENSOR_DIMS = 4;
 int const DEFAULT_TB_REDUCTION_DIMX = 64;

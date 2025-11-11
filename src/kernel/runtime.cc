@@ -374,7 +374,10 @@ void register_mugraph(
             task.head_group = bid.y;
           }
           // Set expert_offset for MoE tasks
-          if (task_type == TASK_MOE_W13_LINEAR_SM100 || task_type == TASK_MOE_W2_LINEAR_SM100) {
+          if (task_type == TASK_MOE_W13_LINEAR_SM100 ||
+              task_type == TASK_MOE_W2_LINEAR_SM100 ||
+              task_type == TASK_MOE_W13_LINEAR_SM90 ||
+              task_type == TASK_MOE_W2_LINEAR_SM90) {
             task.expert_offset = bid.x;
           }
           // Initialize input tensors to the task
@@ -1347,10 +1350,15 @@ TaskGraphResult print_task_graph(
   task_type_to_name[TASK_ARGMAX_PARTIAL_SM100] = "TASK_ARGMAX_PARTIAL_SM100";
   task_type_to_name[TASK_ARGMAX_REDUCE_SM100] = "TASK_ARGMAX_REDUCE_SM100";
   task_type_to_name[TASK_TENSOR_INIT] = "TASK_TENSOR_INIT";
-  task_type_to_name[TASK_MOE_TOPK_SOFTMAX_SM100] = "TASK_MOE_TOPK_SOFTMAX_SM100";
+  task_type_to_name[TASK_MOE_TOPK_SOFTMAX_SM100] =
+      "TASK_MOE_TOPK_SOFTMAX_SM100";
   task_type_to_name[TASK_MOE_W13_LINEAR_SM100] = "TASK_MOE_W13_LINEAR_SM100";
   task_type_to_name[TASK_MOE_W2_LINEAR_SM100] = "TASK_MOE_W2_LINEAR_SM100";
   task_type_to_name[TASK_MOE_MUL_SUM_ADD_SM100] = "TASK_MOE_MUL_SUM_ADD_SM100";
+  task_type_to_name[TASK_MOE_W13_LINEAR_SM90] = "TASK_MOE_W13_LINEAR_SM90";
+  task_type_to_name[TASK_MOE_W2_LINEAR_SM90] = "TASK_MOE_W2_LINEAR_SM90";
+  task_type_to_name[TASK_SPLITK_LINEAR_SWAPAB_HOPPER] =
+      "TASK_SPLITK_LINEAR_SWAPAB_HOPPER";
 
   code.e("__device__ __forceinline__");
   code.e("void _execute_task(TaskDesc const* task_desc,");

@@ -561,6 +561,21 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
     int variant_id = task_register->register_embedding_hopper_task(
         customized->bgraph, params);
     task_config[op] = std::make_tuple(2, 1, TASK_EMBEDDING_HOPPER, variant_id);
+  } else if (name == "moe_w13_linear_sm90") {
+    int variant_id = task_register->register_moe_linear_sm90_task(
+        customized->bgraph, params, true /*w13_linear*/);
+    task_config[op] =
+        std::make_tuple(4, 1, TASK_MOE_W13_LINEAR_SM90, variant_id);
+  } else if (name == "moe_w2_linear_sm90") {
+    int variant_id = task_register->register_moe_linear_sm90_task(
+        customized->bgraph, params, false /*w13_linear*/);
+    task_config[op] =
+        std::make_tuple(4, 1, TASK_MOE_W2_LINEAR_SM90, variant_id);
+  } else if (name == "splitk_linear_swapAB_hopper") {
+    int variant_id = task_register->register_splitk_linear_swapAB_hopper_task(
+        customized->bgraph, params, false /*with_residual*/);
+    task_config[op] =
+        std::make_tuple(2, 1, TASK_SPLITK_LINEAR_SWAPAB_HOPPER, variant_id);
   }
   // SM100 tasks
   else if (name == "linear_sm100") {
@@ -570,7 +585,8 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
   } else if (name == "splitk_linear_sm100") {
     int variant_id = task_register->register_splitk_linear_sm100_task(
         customized->bgraph, params, false /*with_residual*/);
-    task_config[op] = std::make_tuple(2, 1, TASK_SPLITK_LINEAR_SM100, variant_id);
+    task_config[op] =
+        std::make_tuple(2, 1, TASK_SPLITK_LINEAR_SM100, variant_id);
   } else if (name == "linear_with_residual_sm100") {
     int variant_id = task_register->register_linear_sm100_task(
         customized->bgraph, params, true /*with_residual*/);
@@ -591,10 +607,9 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
     task_config[op] =
         std::make_tuple(2, 1, TASK_ARGMAX_REDUCE_SM100, variant_id);
   } else if (name == "tensor_init") {
-    int variant_id = task_register->register_tensor_init_task(
-        customized->bgraph, params);
-    task_config[op] =
-        std::make_tuple(2, 1, TASK_TENSOR_INIT, variant_id);
+    int variant_id =
+        task_register->register_tensor_init_task(customized->bgraph, params);
+    task_config[op] = std::make_tuple(2, 1, TASK_TENSOR_INIT, variant_id);
   } else if (name == "moe_topk_softmax_sm100") {
     int variant_id = task_register->register_moe_topk_softmax_sm100_task(
         customized->bgraph, params);
@@ -606,10 +621,9 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
     task_config[op] =
         std::make_tuple(4, 1, TASK_MOE_W13_LINEAR_SM100, variant_id);
   } else if (name == "moe_silu_mul") {
-    int variant_id = task_register->register_moe_silu_mul_task(
-        customized->bgraph, params);
-    task_config[op] =
-        std::make_tuple(1, 1, TASK_SILU_MUL, variant_id);
+    int variant_id =
+        task_register->register_moe_silu_mul_task(customized->bgraph, params);
+    task_config[op] = std::make_tuple(1, 1, TASK_SILU_MUL, variant_id);
   } else if (name == "moe_w2_linear_sm100") {
     int variant_id = task_register->register_moe_linear_sm100_task(
         customized->bgraph, params, false /*w13_linear*/);

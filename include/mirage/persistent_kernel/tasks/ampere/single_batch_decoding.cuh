@@ -14,7 +14,6 @@
  */
 
 #pragma once
-#include "common.h"
 #include "copy_sm80.cuh"
 #include "dmem_layout.cuh"
 #include "element_binary.cuh"
@@ -92,26 +91,31 @@ __device__ __forceinline__ void
   T *shared_output = (T *)(smem + 128);
   T *zero_buf = (T *)(smem);
 
-  // flashattn metadata
-  float *d_smem = (float *)(smem + 67456);
-  float *max_smem = (float *)(smem + 67968);
-  float *o_smem = (float *)(smem + 68480);
+  //shared_v_buffer + offset = 67456
 
-  float *qnorm_sum = (float *)(smem + 84864);
-  float *knorm_sum = (float *)(smem + 84880);
+  //
+  float *qnorm_sum = (float *)(smem + 67456);
+  float *knorm_sum = (float *)(smem + 67472);
+
+  // flashattn metadata
+  // float *d_smem = (float *)(smem + 67456);
+  // float *max_smem = (float *)(smem + 67968);
+  // float *o_smem = (float *)(smem + 68480);
+
+  float *d_smem = (float *)(smem + 128);
+  float *max_smem = (float *)(smem + 640);
+  float *o_smem = (float *)(smem + 1152);
+
+
+  //o_smem_offset += 16384
+
+
+  // float *qnorm_sum = (float *)(smem + 84864);
+  // float *knorm_sum = (float *)(smem + 84880);
   // define the swizzle mode
 
   // zero buffer
   smem_row<T, 1, 1, 1, 1, 8, 8> zero_buffer(zero_buf);
-  // smem_row<T, 3, 3, 3, NUM_Q_HEADS, 128, 128> q_smem(shared_q);
-  // //(16, 128) per stage
-  // smem_row<T, 3, 3, 3, KV_CHUNK_SIZE, 128, 128> k_cache_smem(shared_k);
-  // smem_row<T, 3, 3, 3, KV_CHUNK_SIZE, 128, 128> k_cache_smem_buffer(
-  //     shared_k_buffer);
-
-  // smem_row<T, 3, 3, 3, KV_CHUNK_SIZE, 128, 128> v_cache_smem(shared_v);
-  // smem_row<T, 3, 3, 3, KV_CHUNK_SIZE, 128, 128> v_cache_smem_buffer(
-  //     shared_v_buffer);
 
   using QSmem = smem_row<T, 3, 3, 3, NUM_Q_HEADS, 128, 128>;
   using KSmem = smem_row<T, 3, 3, 3, KV_CHUNK_SIZE, 128, 128>;
