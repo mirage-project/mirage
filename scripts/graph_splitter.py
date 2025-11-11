@@ -158,37 +158,39 @@ class GraphSplitter:
         return subgraphs, deps_dict, subgraph_io, sorted_ops
     
     def _topological_sort(self, operators_graph: Dict) -> List[Any]:
-        """Topologically sort operators based on data flow dependencies."""
-        in_degree = {op: 0 for op in operators_graph}
+        """Topologically sort operators based on data flow dependencies. Uses DFS post-order (reversed)
+        """
+        # Build adjacency list
         adj = defaultdict(list)
+        for op in operators_graph:
+            if hasattr(op, 'output_ops'):
+                for output_op in op.output_ops:
+                    if output_op in operators_graph:
+                        adj[op].append(output_op)
+        
+        visited, in_stack, post_order = set(), set(), []
+        
+        def dfs(node):
+            if node in in_stack:
+                raise ValueError(f"Cycle detected at {getattr(node, 'name', node)}")
+            if node in visited:
+                return
+            
+            visited.add(node)
+            in_stack.add(node)
+            for next_op in adj[node]:
+                dfs(next_op)
+            in_stack.remove(node)
+            post_order.append(node)
         
         for op in operators_graph:
-            if not hasattr(op, 'output_ops'):
-                continue
-            for output_op in op.output_ops:
-                if output_op in operators_graph:
-                    adj[op].append(output_op)
-                    in_degree[output_op] += 1
+            if op not in visited:
+                dfs(op)
         
-        queue = deque([op for op, degree in in_degree.items() if degree == 0])
-        result = []
+        if len(post_order) != len(operators_graph):
+            raise ValueError("Topological sort incomplete")
         
-        while queue:
-            current = queue.popleft()
-            result.append(current)
-            
-            for output_op in adj[current]:
-                in_degree[output_op] -= 1
-                if in_degree[output_op] == 0:
-                    queue.append(output_op)
-        
-        if len(result) != len(operators_graph):
-            cycle_nodes = [op.name if hasattr(op, 'name') else str(op) 
-                          for op, count in in_degree.items() if count > 0]
-            print(f"ERROR: Operator graph contains cycles. Nodes in cycle: {cycle_nodes[:10]}...")
-            raise ValueError("Operator graph contains cycles")
-            
-        return result
+        return post_order[::-1]
     
     def demote_small_mirage_subgraphs(self, subgraphs: List[Tuple[Dict, str]], 
                                       max_size_to_demote: int = 1) -> List[Tuple[Dict, str]]:
