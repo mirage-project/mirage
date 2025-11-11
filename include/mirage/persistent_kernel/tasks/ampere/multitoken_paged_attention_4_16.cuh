@@ -387,7 +387,7 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl_4_16(
                   (token_idx + seq_len - num_tokens) * HEAD_DIM,
               static_cast<T const *>(sin_ptr) +
                   (token_idx + seq_len - num_tokens) * HEAD_DIM,
-              token_idx * NUM_QO_PER_KV);
+              token_idx);
         }
       }
       if (kv_tokens_to_process > 0) {
