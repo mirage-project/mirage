@@ -719,6 +719,17 @@ def remove_ignored_operators(operators_graph: Dict, IGNORE_OPS: Set[str]) -> Dic
     for ig_op in ignored_ops:
         if not hasattr(ig_op, 'output_ops') or not hasattr(ig_op, 'input_ops'):
             continue
+        
+        # Check that ignored ops have at most 1 input and 1 output
+        num_inputs = len(ig_op.input_tensor_shapes) if hasattr(ig_op, 'input_tensor_shapes') else 0
+        num_outputs = len(ig_op.output_tensor_shapes) if hasattr(ig_op, 'output_tensor_shapes') else 0
+        
+        if num_inputs > 1 or num_outputs > 1:
+            raise ValueError(
+                f"Ignored op '{ig_op.fn}' has {num_inputs} inputs and {num_outputs} outputs. "
+                f"IGNORE_OPS should only contain operators with at most 1 input and 1 output. "
+                f"Consider moving '{ig_op.fn}' to UNSUPPORTED_OPS instead."
+            )
             
         source_tensors = []
         if hasattr(ig_op, 'input_tensor_shapes') and ig_op.input_ops:
