@@ -343,11 +343,11 @@ __device__ __forceinline__ bool
 #endif
 
 #ifdef MODE_ONLINE_NOTOKEN
-__device__ __forceinline__ bool
-    prepare_next_batch(RuntimeConfig const &config, size_t iteration_num = 0) {
-      // TODO: iteration_num is a current workaround
-      // We may consider split EVENT_END_OF_TASK_GRAPH into
-      // EVENT_END_OF_TASK_GRAPH and EVENT_START_OF_TASK_GRAPH
+__device__ __forceinline__ bool prepare_next_batch(RuntimeConfig const &config,
+                                                   size_t iteration_num = 0) {
+  // TODO: iteration_num is a current workaround
+  // We may consider split EVENT_END_OF_TASK_GRAPH into
+  // EVENT_END_OF_TASK_GRAPH and EVENT_START_OF_TASK_GRAPH
   if (iteration_num > 0) {
     return false;
   } else { // iteration_num == 0
@@ -743,7 +743,6 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
 // need to alter as there is only one warp per block
 __device__ __forceinline__ void execute_scheduler(RuntimeConfig config,
                                                   int offset) {
-  // printf("[Scheduler host %d] execute_scheduler Starts!\n", config.thread_id);
   int const num_schedulers =
       config.num_local_schedulers + config.num_remote_schedulers;
   // if we have more than 4 warps per thread block
@@ -1055,7 +1054,7 @@ static RuntimeConfig global_runtime_config;
 
 extern "C" void init_request_resources() {
   init_kernel<<<dim3(1, 1, 1), dim3(INIT_NUM_THREADS, 1, 1)>>>(
-    global_runtime_config);
+      global_runtime_config);
   cudaStreamSynchronize(NULL);
 }
 
@@ -1262,8 +1261,10 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
                        cudaFuncAttributeMaxDynamicSharedMemorySize,
                        MAX_DYNAMIC_SHARED_MEMORY_SIZE);
   // Create worker and scheduler streams
-  cudaStreamCreateWithFlags(&global_runtime_config.worker_stream, cudaStreamNonBlocking);
-  cudaStreamCreateWithFlags(&global_runtime_config.scheduler_stream, cudaStreamNonBlocking);
+  cudaStreamCreateWithFlags(&global_runtime_config.worker_stream,
+                            cudaStreamNonBlocking);
+  cudaStreamCreateWithFlags(&global_runtime_config.scheduler_stream,
+                            cudaStreamNonBlocking);
 
   init_request_resources();
 #ifdef USE_NVSHMEM
@@ -1308,13 +1309,16 @@ extern "C" void launch_persistent_kernel() {
                        global_runtime_config.scheduler_stream>>>(
         global_runtime_config);
 
-    cudaError_t err_worker = cudaStreamSynchronize(global_runtime_config.worker_stream);
-    cudaError_t err_scheduler = cudaStreamSynchronize(global_runtime_config.scheduler_stream);
+    cudaError_t err_worker =
+        cudaStreamSynchronize(global_runtime_config.worker_stream);
+    cudaError_t err_scheduler =
+        cudaStreamSynchronize(global_runtime_config.scheduler_stream);
     if (err_worker != cudaSuccess) {
       printf("CUDA kernel launch error: %s\n", cudaGetErrorString(err_worker));
     }
     if (err_scheduler != cudaSuccess) {
-      printf("CUDA kernel launch error: %s\n", cudaGetErrorString(err_scheduler));
+      printf("CUDA kernel launch error: %s\n",
+             cudaGetErrorString(err_scheduler));
     }
 
     printf("Finished Launch Persistent Kernel\n");
@@ -1351,7 +1355,7 @@ extern "C" void finalize_persistent_kernel() {
   gpu_free(global_runtime_config.all_event_num_triggers);
   gpu_free(global_runtime_config.all_tasks);
   gpu_free(global_runtime_config.all_events);
-#if defined(MODE_OFFLINE) || defined(MODE_ONLINE) // || defined(MODE_ONLINE_NOTOKEN)
+#if defined(MODE_OFFLINE) || defined(MODE_ONLINE)
   gpu_free(global_runtime_config.next_request_id);
   gpu_free(global_runtime_config.page_queue);
   gpu_free(global_runtime_config.page_queue_head);

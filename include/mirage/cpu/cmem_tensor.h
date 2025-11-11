@@ -52,7 +52,7 @@ struct CTensor {
         data_type_size = 2;
         break;
       }
-      case DT_FLOAT32: 
+      case DT_FLOAT32:
       case DT_INT32: {
         data_type_size = 4;
         break;
