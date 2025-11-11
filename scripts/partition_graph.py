@@ -767,15 +767,23 @@ def partition_graph_with_dp(model,
                         optimized_kernel = mi.new_kernel_graph()
                         optimized_kernel.from_json("optimized_" + h + ".json")
                     else:
-                        try:
-                            kernel_graph = kernel_graph.superoptimize()
-                        except Exception as e:
-                            print(f"Superoptimization failed with error: {e}, skipping superoptimization.")
+                        # Superoptimize and check for success
+                        kernel_graph = kernel_graph.superoptimize()
+                        
+                        # Check if superoptimization succeeded
+                        if kernel_graph is None:
+                            raise RuntimeError("Superoptimization failed: returned None (0 mugraphs found)")
+                        
                         # Handle both tuple (normal optimization) and single value (cached) returns
                         if isinstance(kernel_graph, tuple):
                             optimized_kernel, _ = kernel_graph
                         else:
                             optimized_kernel = kernel_graph
+                        
+                        # Verify we got a valid kernel
+                        if optimized_kernel is None:
+                            raise RuntimeError("Superoptimization failed: no valid kernel graph")
+                        
                         optimized_kernel.to_json("optimized_" + h + ".json")
                         print(f"  ✓ Result: Mirage kernel cached with hash {h}")
                     print(f"  ✓ Result: Mirage kernel optimized successfully")
