@@ -320,11 +320,14 @@ def parse_onnx_model(model, unique_operators):
         exp_op.output_tensor_shapes = [(op.input_tensor_shapes[0][0], exp_out_id)]
 
         # reduction op
+        input_shape = op.input_tensor_shapes[0][0]
+        reduce_dim = len(input_shape) - 1 if len(input_shape) > 0 else 0
+        
         red_op = Operator(name=f"node_ReduceSum_{op_id}_softmax",
                           fn="ReduceSum",
                           input_ops=[exp_op],
                           input_tensor_shapes=[exp_op.output_tensor_shapes[0]],
-                          kwargs={'dim': 2})
+                          kwargs={'dim': reduce_dim})
         red_out_id = len(tensor_id) + 1
         tensor_id[f"red_out_{red_out_id}"] = red_out_id
         red_op.output_tensor_shapes = [(exp_op.output_tensor_shapes[0][0], red_out_id)]
@@ -360,11 +363,14 @@ def parse_onnx_model(model, unique_operators):
 
         # sum op
         op_id = op.name.split('_')[-1]
+        input_shape = op.input_tensor_shapes[0][0]
+        reduce_dim = len(input_shape) - 1 if len(input_shape) > 0 else 0
+        
         sum_op = Operator(name=f"node_ReduceSum_{op_id}_reducemean", 
                           fn="ReduceSum",
                           input_ops=[op.input_ops[0]],
                           input_tensor_shapes=[op.input_tensor_shapes[0]],
-                          kwargs={'dim': 2}) # pass axis parameter
+                          kwargs={'dim': reduce_dim}) # pass axis parameter
 
         # input ops
         for inp in op.input_ops:
