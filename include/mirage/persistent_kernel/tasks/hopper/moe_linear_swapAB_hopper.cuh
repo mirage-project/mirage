@@ -38,7 +38,6 @@
 #include <cute/numeric/integral_constant.hpp> // Compile time in constants such as _1, _256 etc.
 #include <cute/tensor.hpp>                    // CuTe tensor implementation
 
-#include "../blackwell/utils.cuh"
 #include "../common/dmem_layout.cuh"
 #include "../common/utils.cuh"
 #include "../common/worker_config.h"
