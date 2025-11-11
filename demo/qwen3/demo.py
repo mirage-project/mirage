@@ -128,7 +128,7 @@ if __name__ == "__main__":
             )
             tokenizer = AutoTokenizer.from_pretrained(args.model_path)
         else:
-            model = Qwen3ForCausalLM.from_pretrained(model_name, world_size=1, max_num_pages=args.max_num_pages, page_size=args.page_size).to("cuda")
+            model = Qwen3ForCausalLM.from_pretrained(model_name, world_size, max_num_pages=args.max_num_pages, page_size=args.page_size).to("cuda")
             tokenizer = AutoTokenizer.from_pretrained(model_name)
 
     total_num_requests = 1 if not args.use_mirage else args.max_num_batched_requests
@@ -590,7 +590,7 @@ if __name__ == "__main__":
             input=rmsnorm_out,
             weight=w_proj,
             output=argmax_in,
-            grid_dim=(grid_for_rmsnorm_linear_layer(w_proj.dim(0), args.use_cutlass_kernel), 1, 1),
+            grid_dim=(mpk.num_workers, 1, 1),
             block_dim=(128, 1, 1),
         )
         #mpk.rmsnorm_linear_layer(

@@ -151,6 +151,21 @@ public:
 
   template <int NDIM>
   __device__ inline void
+      tma_reduce_add_async(T *smem_ptr, int const (&tma_coords)[NDIM]) const {
+#pragma unroll
+    for (size_t i = 0; i < SMEM_REPEAT_ROW; i++) {
+      for (size_t j = 0; j < SMEM_REPEAT_COL; j++) {
+        int smem_offset = SMEM_STRIDE_ * j;
+        int const tma_coords_local[NDIM] = {
+            tma_coords[0] + static_cast<int>(j * SMEM_COL),
+            tma_coords[1] + static_cast<int>(i * SMEM_ROW)};
+        launch_tma_reduce_add_async(smem_ptr + smem_offset, tma_coords_local);
+      }
+    }
+  }
+
+  template <int NDIM>
+  __device__ inline void
       launch_tma_store_async(void *smem_ptr,
                              int const (&tma_coords)[NDIM]) const {
 #if defined(MIRAGE_GRACE_HOPPER) || defined(MIRAGE_GRACE_BLACKWELL)
@@ -185,6 +200,48 @@ public:
                    "r"(c3),
                    "r"(c4)
                  : "memory");
+#elif defined(__CUDA_ARCH__)
+    asm volatile("brkpt;\n" ::);
+#endif
+  }
+
+  template <int NDIM>
+  __device__ inline void
+      launch_tma_reduce_add_async(void *smem_ptr,
+                                  int const (&tma_coords)[NDIM]) const {
+#if defined(MIRAGE_GRACE_HOPPER) || defined(MIRAGE_GRACE_BLACKWELL)
+    uint64_t gmem_int_desc = reinterpret_cast<uint64_t>(desc_ptr);
+    uint32_t smem_int_ptr =
+        static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr));
+    int c0 = 0, c1 = 0, c2 = 0, c3 = 0, c4 = 0;
+    if constexpr (NDIM > 0) {
+      c0 = tma_coords[0];
+    }
+    if constexpr (NDIM > 1) {
+      c1 = tma_coords[1];
+    }
+    if constexpr (NDIM > 2) {
+      c2 = tma_coords[2];
+    }
+    if constexpr (NDIM > 3) {
+      c3 = tma_coords[3];
+    }
+    if constexpr (NDIM > 4) {
+      c4 = tma_coords[4];
+    }
+
+    asm volatile(
+        "cp.reduce.async.bulk.tensor.5d.global.shared::cta.add.bulk_group [%0, "
+        "{%2, %3, %4, %5, %6}], [%1];"
+        :
+        : "l"(gmem_int_desc),
+          "r"(smem_int_ptr),
+          "r"(c0),
+          "r"(c1),
+          "r"(c2),
+          "r"(c3),
+          "r"(c4)
+        : "memory");
 #elif defined(__CUDA_ARCH__)
     asm volatile("brkpt;\n" ::);
 #endif

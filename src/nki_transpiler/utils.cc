@@ -14,6 +14,9 @@ std::string mirage_dtype_to_nki(type::DataType dt) {
     case type::DataType::DT_INT8:
       nki_type = "nl.int8";
       break;
+    case type::DataType::DT_INT32:
+      nki_type = "nl.int32";
+      break;
     case type::DataType::DT_UINT16:
       nki_type = "nl.uint16";
       break;

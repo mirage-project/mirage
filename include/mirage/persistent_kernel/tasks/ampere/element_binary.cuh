@@ -13,6 +13,7 @@
  * limitations under the License.
  */
 #pragma once
+#include "common_header.cuh"
 namespace kernel {
 
 template <typename SMEM_DST, typename SMEM_SRC0, typename SMEM_SRC1>

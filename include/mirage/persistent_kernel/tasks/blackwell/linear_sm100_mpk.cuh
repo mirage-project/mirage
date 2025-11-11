@@ -25,7 +25,6 @@
 #include "../hopper/smem_layout_tma.cuh"
 #include "../hopper/tma.cuh"
 #include "storage.cuh"
-#include "utils.cuh"
 
 namespace kernel {
 
@@ -40,6 +39,7 @@ template <typename T_,
           int OUTPUT_SIZE,
           int REDUCTION_SIZE,
           bool NOBIAS,
+          bool SplitK,
           int NUM_AB_STAGE = 8,
           int NUM_ACC_STAGE = 2,
           int NUM_C_STAGE = 4>
@@ -672,9 +672,16 @@ __device__ __noinline__ void
             .arrive_and_wait(); // Ensure all threads have issued fence
 
         if (warp_idx == 0 && cute::elect_one_sync()) {
-          tma_out.tma_store_async(
-              mm_output_smem.base_ptr,
-              {m_tile * OUTPUT_ATOM_SIZE, n_tile * INPUT_TMA_TILE_SIZE});
+          if constexpr (SplitK) {
+            tma_out.tma_reduce_add_async(
+                mm_output_smem.base_ptr,
+                {m_tile * OUTPUT_ATOM_SIZE, n_tile * INPUT_TMA_TILE_SIZE});
+          } else {
+            tma_out.tma_store_async(
+                mm_output_smem.base_ptr,
+                {m_tile * OUTPUT_ATOM_SIZE, n_tile * INPUT_TMA_TILE_SIZE});
+          }
+
           cute::tma_store_arrive();
           cute::tma_store_wait<NUM_C_STAGE - 1>();
         }

@@ -16,4 +16,5 @@
 #include "linear_sm100_mpk.cuh"
 #include "moe_linear_sm100.cuh"
 #include "mul_sum_add_sm100.cuh"
+#include "tensor_init.cuh"
 #include "topk_softmax_sm100.cuh"

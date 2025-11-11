@@ -28,7 +28,10 @@ __device__ __forceinline__ void rotary_embedding_sm100(InputSmem smem_input,
                                                        T const *cos_ptr,
                                                        T const *sin_ptr,
                                                        int token_offset = 0) {
+  static_assert(HEAD_DIM < NUM_THREADS || HEAD_DIM % NUM_THREADS == 0);
   cutlass::arch::NamedBarrier wg_barrier(NUM_THREADS, /*bar-id*/ 6);
+  constexpr int ROTARY_PARTICIPATING_THREADS = (NUM_THREADS < HEAD_DIM ? NUM_THREADS : HEAD_DIM);
+  cutlass::arch::NamedBarrier wg_barrier_rotary(ROTARY_PARTICIPATING_THREADS, /*bar-id*/ 7);
   if (threadIdx.x < NUM_THREADS) {
 #pragma unroll
     for (int win_idx = 0; win_idx < WINDOW_SIZE; ++win_idx) {
@@ -52,6 +55,8 @@ __device__ __forceinline__ void rotary_embedding_sm100(InputSmem smem_input,
           float sin = static_cast<float>(cur_sin_ptr[offset]);
 
           float v_rot;
+
+          wg_barrier_rotary.arrive_and_wait();
           if (i < HEAD_DIM / 2) {
             float v1 = static_cast<float>(smem_input.at(row, col));
             float v2 =
@@ -63,7 +68,7 @@ __device__ __forceinline__ void rotary_embedding_sm100(InputSmem smem_input,
                 static_cast<float>(smem_input.at(row, col - HEAD_DIM / 2));
             v_rot = v1 * cos + v2 * sin;
           }
-          wg_barrier.arrive_and_wait();
+          wg_barrier_rotary.arrive_and_wait();
           smem_input.at(row, col) = static_cast<T>(v_rot);
         }
       }

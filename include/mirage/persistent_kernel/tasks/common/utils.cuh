@@ -19,6 +19,8 @@
 namespace kernel {
 using bfloat16 = type::bfloat16_t;
 
+constexpr float log2e = 1.44269504088896340736f;
+
 constexpr int log2_constexpr(int n, int p = 0) {
   return (n <= 1) ? p : log2_constexpr(n >> 1, p + 1);
 }

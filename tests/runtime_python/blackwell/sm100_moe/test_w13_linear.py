@@ -8,11 +8,11 @@ g = torch.Generator(device="cuda").manual_seed(1234)
 
 reduction_sizes = [2048]
 output_sizes = [128]
-batch_size = 8
+batch_size = 1
 num_experts = 128
 num_topk = 8
 expert_offset = 0
-expert_stride = 12
+expert_stride = 10
 
 is_w2_linear = False
 has_residual = False
@@ -31,23 +31,6 @@ for reduction_size in reduction_sizes:
         residual = torch.randn(num_experts, batch_size, output_size, device="cuda", dtype=torch.bfloat16)
         output = torch.zeros(batch_size, num_topk, output_size, device="cuda", dtype=torch.bfloat16)
         
-        mpk_routing_indices = torch.zeros((num_experts, batch_size), device="cuda", dtype=torch.int32)
-        mpk_expert_mask = torch.zeros((num_experts), device="cuda", dtype=torch.int32)
-        
-        for token_idx in range(batch_size):
-            for topk_idx in range(num_topk):
-                expert_idx = topk_expert_indices[token_idx, topk_idx]
-                mpk_routing_indices[expert_idx, token_idx] = topk_idx + 1
-                mpk_expert_mask[expert_idx] = 1
-                # print(f"token {token_idx} topk {topk_idx} expert {expert_idx}")
-        
-        print("num_expert activated:", mpk_expert_mask.sum().item())
-                
-        if not has_residual:
-            residual = None
-            
-        # mpk impl
-        runtime_kernel_blackwell.moe_w13_linear_sm100(x, w, residual, mpk_routing_indices, mpk_expert_mask, output)
         # reference impl
         expert_mask = torch.nn.functional.one_hot(topk_expert_indices, num_classes=num_experts).permute(2, 1, 0)
         expert_hit = torch.greater(expert_mask.sum(dim=(-1, -2)), 0).nonzero()
@@ -68,7 +51,25 @@ for reduction_size in reduction_sizes:
                 current_residual = expert_residual[None, top_x].reshape(-1, output_size)
                 current_hidden_states += current_residual
             torch_out[top_x, idx] = current_hidden_states
+            
+        # mpk impl
+        mpk_routing_indices = torch.zeros((num_experts, batch_size), device="cuda", dtype=torch.int32)
+        mpk_expert_mask = torch.zeros((num_experts+1), device="cuda", dtype=torch.int32)
         
+        for token_idx in range(batch_size):
+            for topk_idx in range(num_topk):
+                expert_idx = topk_expert_indices[token_idx, topk_idx]
+                mpk_routing_indices[expert_idx, token_idx] = topk_idx + 1
+
+        for i, expert_idx in enumerate(expert_hit):
+            mpk_expert_mask[i] = expert_idx
+        mpk_expert_mask[num_experts] = len(expert_hit)  # end marker
+
+        print("num_expert activated:", mpk_expert_mask[num_experts].item())
+
+        if not has_residual:
+            residual = None
+        runtime_kernel_blackwell.moe_w13_linear_sm100(x, w, residual, mpk_routing_indices, mpk_expert_mask, output)
         
         torch.testing.assert_close(
             output,

@@ -16,11 +16,15 @@
 #include "tasks/common/common_header.cuh"
 namespace kernel {
 
-template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int NUM_TOPK>
+template <typename T,
+          int BATCH_SIZE,
+          int OUTPUT_SIZE,
+          int NUM_TOPK,
+          int OUTPUT_STRIDE>
 __device__ __forceinline__ void
     mul_sum_add_sm100_task_impl(void const *input_ptr,
-                                void const *residual_ptr,
                                 void const *weight_ptr,
+                                void const *residual_ptr,
                                 void *output_ptr) {
   T const *__restrict__ d_input = static_cast<T const *>(input_ptr);
   T const *__restrict__ d_residual = static_cast<T const *>(residual_ptr);
@@ -29,16 +33,16 @@ __device__ __forceinline__ void
 
   for (int row_idx = 0; row_idx < BATCH_SIZE; ++row_idx) {
     for (int i = threadIdx.x; i < OUTPUT_SIZE; i += blockDim.x) {
-      T res_val = d_residual[row_idx * OUTPUT_SIZE + i];
+      T res_val = d_residual[row_idx * OUTPUT_STRIDE + i];
       float sum_val = float(res_val);
 #pragma unroll
       for (int topk_idx = 0; topk_idx < NUM_TOPK; ++topk_idx) {
-        T val = d_input[row_idx * OUTPUT_SIZE * NUM_TOPK +
-                        topk_idx * OUTPUT_SIZE + i];
+        T val = d_input[row_idx * OUTPUT_STRIDE * NUM_TOPK +
+                        topk_idx * OUTPUT_STRIDE + i];
         float weight = d_weight[row_idx * NUM_TOPK + topk_idx];
         sum_val += float(val) * weight;
       }
-      d_output[row_idx * OUTPUT_SIZE + i] = T(sum_val);
+      d_output[row_idx * OUTPUT_STRIDE + i] = T(sum_val);
     }
   }
 } // mul_sum_add_sm100_task_impl
