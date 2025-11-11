@@ -14,7 +14,7 @@
  */
 
 #pragma once
-#include "common_header.cuh"
+#include "tasks/common/common_header.cuh"
 namespace kernel {
 enum class ElementUnaryOpType {
   EXP,
