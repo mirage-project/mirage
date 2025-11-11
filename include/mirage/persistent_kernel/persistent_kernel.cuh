@@ -179,7 +179,7 @@ __device__ __forceinline__ bool
       }
       config.step[request_id] = step + num_tokens;
 #ifdef MPK_ENABLE_PROFILING
-      if (true) {
+      if (true)
 #else
       if ((step + num_tokens >= config.max_seq_length) ||
           ((config.tokens[request_id * MPK_MAX_SEQ_LENGTH + step +
