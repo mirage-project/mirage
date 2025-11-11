@@ -452,7 +452,7 @@ struct smem_row_2dcol {
     size_t inner_col = logical_idx_col & ((1 << log2_INNER_COL) - 1);
     size_t outer_col = logical_idx_col >> log2_INNER_COL;
     size_t logical_idx =
-        outer_col * STRIDE_OUTER_COL + logical_idx_row * STRIDE + inner_col;
+        outer_col * STRIDE_OUTER_COL + logical_idx_row * STRIDE_ROW + inner_col;
     // return &base_ptr[get_swizzled_offset(logical_idx)];
     return base_ptr[OffsetCalculator::get_phy_offset(logical_idx)];
   }
