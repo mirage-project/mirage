@@ -1056,6 +1056,7 @@ static RuntimeConfig global_runtime_config;
 extern "C" void init_request_resources() {
   init_kernel<<<dim3(1, 1, 1), dim3(INIT_NUM_THREADS, 1, 1)>>>(
     global_runtime_config);
+  cudaStreamSynchronize(NULL);
 }
 
 extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
@@ -1265,7 +1266,6 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
   cudaStreamCreateWithFlags(&global_runtime_config.scheduler_stream, cudaStreamNonBlocking);
 
   init_request_resources();
-  cudaStreamSynchronize(NULL);
 #ifdef USE_NVSHMEM
   // Add a global barrier for all init_kernel to complete
   nvshmem_barrier_all();
