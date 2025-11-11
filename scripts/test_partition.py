@@ -143,7 +143,7 @@ def test_hybrid_model(mirage_root, dataset_root, dry_run: bool = True, cost_mode
         # Run both models
         with torch.no_grad():
             original_output = model(test_input)
-        hybrid_output = hybrid_model(test_input, debug=False)[-1]
+        hybrid_output = hybrid_model(test_input, debug=False)
 
         # Compare results
         max_diff = torch.max(torch.abs(hybrid_output - original_output)).item()

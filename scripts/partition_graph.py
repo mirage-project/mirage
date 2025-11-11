@@ -644,6 +644,11 @@ def partition_graph_with_dp(model,
     parameter_dict = {init.name: torch.from_numpy(onnx.numpy_helper.to_array(init)).to(torch.device("cuda")).to(torch.float16)
                      for init in onnx_model.graph.initializer}
     
+    # Get actual output tensor IDs from ONNX model
+    output_tensor_names = [output.name for output in onnx_model.graph.output]
+    name_to_tensor_id = {name: tid for tid, name in tensor_id_to_name.items()}
+    onnx_output_tensor_ids = [name_to_tensor_id[name] for name in output_tensor_names if name in name_to_tensor_id]
+    
     print("Splitting graph into supported/unsupported subgraphs...")
         
     subgraphs, _, sorted_ops = process_operator_graph(operators, IGNORE_OPS, UNSUPPORTED_OPS)
@@ -860,9 +865,9 @@ def partition_graph_with_dp(model,
             input_tensor_ids.append(tid)
         else:
             parameter_tensors[tid] = parameter_dict[pname]
-        
-    all_consumed = {tid for op in sorted_ops for _, tid in op.input_tensor_shapes}
-    output_tensor_ids = [tid for op in sorted_ops for _, tid in op.output_tensor_shapes if tid not in all_consumed]
+    
+    # Use the actual ONNX output tensor IDs instead of inferring from unconsumed tensors
+    output_tensor_ids = onnx_output_tensor_ids
     
     print(f"✓ Loaded {len(parameter_tensors)} parameters, {len(input_tensor_ids)} real inputs, {len(output_tensor_ids)} outputs")
     return HybridModel(execution_plan, input_tensor_ids, output_tensor_ids, parameter_tensors)
@@ -891,13 +896,18 @@ def partition_graph_with_in_ctx_partitions(model,
     
     print("Building computation graph...")
     unique_operators = {}
-    operators, _ = get_computation_graph(model, dummy_input, unique_operators, "onnx")
+    operators, tensor_id_to_name = get_computation_graph(model, dummy_input, unique_operators, "onnx")
     
     # Load parameters from ONNX model
     import onnx
     onnx_model = onnx.load("scripts/onnx/inferred_model.onnx")
     parameter_dict = {init.name: torch.from_numpy(onnx.numpy_helper.to_array(init)) 
                      for init in onnx_model.graph.initializer}
+    
+    # Get actual output tensor IDs from ONNX model
+    output_tensor_names = [output.name for output in onnx_model.graph.output]
+    name_to_tensor_id = {name: tid for tid, name in tensor_id_to_name.items()}
+    onnx_output_tensor_ids = [name_to_tensor_id[name] for name in output_tensor_names if name in name_to_tensor_id]
     
     print("Splitting graph into supported/unsupported subgraphs...")
     if IGNORE_OPS is None:
@@ -1038,8 +1048,8 @@ def partition_graph_with_in_ctx_partitions(model,
     parameter_tensors = {tid: parameter_dict[param_names[i]] 
                         for i, tid in enumerate(all_input_tensor_ids[num_real_inputs:])}
     
-    all_consumed = {tid for op in sorted_ops for _, tid in op.input_tensor_shapes}
-    output_tensor_ids = [tid for op in sorted_ops for _, tid in op.output_tensor_shapes if tid not in all_consumed]
+    # Use the actual ONNX output tensor IDs instead of inferring from unconsumed tensors
+    output_tensor_ids = onnx_output_tensor_ids
     
     print(f"✓ Loaded {len(parameter_tensors)} parameters, {len(input_tensor_ids)} real inputs, {len(output_tensor_ids)} outputs")
     return HybridModel(execution_plan, input_tensor_ids, output_tensor_ids, parameter_tensors)
