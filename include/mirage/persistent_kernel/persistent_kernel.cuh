@@ -616,7 +616,7 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
 #endif
     } else {
 #ifdef MPK_ENABLE_VERBOSE
-      if (threadIdx.x == 0 && blockIdx.x == 0) {
+      if (threadIdx.x == 0) {
         printf("[worker] _execute_task EXECUTE_TASK %d\n",
                task_desc->task_type);
       }

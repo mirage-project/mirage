@@ -39,7 +39,8 @@ template <typename T,
           typename TMA_B,
           typename TMA_OUT,
           typename TMA_RESIDUAL = void,
-          int OUTPUT_STRIDE = OUTPUT_SIZE>
+          int OUTPUT_STRIDE = OUTPUT_SIZE,
+          bool SplitK = false>
 __device__ __forceinline__ void
     linear_swapAB_kernel_hopper(const TMA_A &tma_a,
                                 const TMA_B &tma_b,
@@ -352,8 +353,17 @@ __device__ __forceinline__ void
       wg_sync<THREADS_PER_WARPGROUP * CONSUMER_WARPGROUPS>(1);
       // copy back to dmem
       if ((warp_idx & 3) == 0 && lane_idx == 0) {
-        tma_out.tma_store_async(mm_output_smem(0, 0),
-                                {output_atom_idx * OUTPUT_ATOM_SIZE, 0});
+        // tma_out.tma_store_async(mm_output_smem(0, 0),
+        //                         {output_atom_idx * OUTPUT_ATOM_SIZE, 0});
+
+        if constexpr (SplitK) {
+          tma_out.tma_reduce_add_async(mm_output_smem(0, 0),
+                                       {output_atom_idx * OUTPUT_ATOM_SIZE, 0});
+        } else {
+          tma_out.tma_store_async(mm_output_smem(0, 0),
+                                  {output_atom_idx * OUTPUT_ATOM_SIZE, 0});
+        }
+
         store_commit_group();
         if constexpr (HAS_RESIDUAL) {
           arrive(residual_done[slot_residual], 1);

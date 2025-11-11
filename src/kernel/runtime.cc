@@ -373,6 +373,13 @@ void register_mugraph(
           if (task_type == TASK_PAGED_ATTENTION_HOPPER) {
             task.head_group = bid.y;
           }
+          // Set expert_offset for MoE tasks
+          if (task_type == TASK_MOE_W13_LINEAR_SM100 ||
+              task_type == TASK_MOE_W2_LINEAR_SM100 ||
+              task_type == TASK_MOE_W13_LINEAR_SM90 ||
+              task_type == TASK_MOE_W2_LINEAR_SM90) {
+            task.expert_offset = bid.x;
+          }
           // Initialize input tensors to the task
           for (auto const &input : input_ops) {
             TensorDesc desc;
@@ -628,6 +635,7 @@ TaskGraphResult print_task_graph(
            "task_desc(static_cast<TaskType>(task.at(\"task_type\")),");
     code.e("            task.at(\"variant_id\"));");
     code.e("task_desc.request_id = task.at(\"request_id\").get<int>();");
+    code.e("task_desc.expert_offset = task.at(\"expert_offset\").get<int>();");
     code.e("if (task.at(\"trigger_event\").is_number_integer()) {");
     code.e("task_desc.trigger_event = task.at(\"trigger_event\").get<unsigned "
            "long long int>();");
@@ -691,8 +699,8 @@ TaskGraphResult print_task_graph(
     code.e("create_tma_desc_by_task(task_desc);");
     code.e("}");
     // SM100 Tasks
-    code.e("if (task.at(\"task_type\") > TASK_SM100_TASK_BEGIN && "
-           "task.at(\"task_type\") < TASK_ATTN_SM100) {");
+    code.e("if (task.at(\"task_type\") > TASK_SM100_TMA_START_TASK && "
+           "task.at(\"task_type\") < TASK_SM100_TMA_END_TASK) {");
     code.e("create_tma_desc_by_task(task_desc);");
     code.e("}");
     code.e("#endif");
@@ -827,7 +835,8 @@ TaskGraphResult print_task_graph(
              {"outputs", {}},
              {"trigger_event", EVENT_INVALID_ID},
              {"dependent_event", EVENT_INVALID_ID},
-             {"request_id", -1}});
+             {"request_id", -1},
+             {"expert_offset", -1}});
   }
   // generate task[1]
   {
@@ -840,7 +849,8 @@ TaskGraphResult print_task_graph(
              {"trigger_event",
               get_event_id(my_gpu_id, 1 /*event_pos*/, false /*is_nvshmem*/)},
              {"dependent_event", EVENT_INVALID_ID},
-             {"request_id", -1}});
+             {"request_id", -1},
+             {"expert_offset", -1}});
   }
   // generate all other tasks
   size_t task_pos = 2;
@@ -901,7 +911,8 @@ TaskGraphResult print_task_graph(
                                 {"outputs", {}},
                                 {"trigger_event", task_desc.trigger_event},
                                 {"dependent_event", task_desc.dependent_event},
-                                {"request_id", task_desc.request_id}};
+                                {"request_id", task_desc.request_id},
+                                {"expert_offset", task_desc.expert_offset}};
               off_t offset = 0;
               // Add input
               int3 input_map = input_ops[0]->input_map;
@@ -1058,7 +1069,8 @@ TaskGraphResult print_task_graph(
                    {"outputs", {}},
                    {"trigger_event", task_desc.trigger_event},
                    {"dependent_event", task_desc.dependent_event},
-                   {"request_id", task_desc.request_id}};
+                   {"request_id", task_desc.request_id},
+                   {"expert_offset", task_desc.expert_offset}};
       for (int i = 0; i < task_desc.num_inputs; i++) {
         if (input_ops[i]->dtensor == kernel::DTensor::EMPTY_TENSOR) {
           json json_dims = json::array();
@@ -1333,9 +1345,20 @@ TaskGraphResult print_task_graph(
   task_type_to_name[TASK_LINEAR_SM100] = "TASK_LINEAR_SM100";
   task_type_to_name[TASK_LINEAR_WITH_RESIDUAL_SM100] =
       "TASK_LINEAR_WITH_RESIDUAL_SM100";
+  task_type_to_name[TASK_SPLITK_LINEAR_SM100] = "TASK_SPLITK_LINEAR_SM100";
   task_type_to_name[TASK_ATTN_SM100] = "TASK_ATTN_SM100";
   task_type_to_name[TASK_ARGMAX_PARTIAL_SM100] = "TASK_ARGMAX_PARTIAL_SM100";
   task_type_to_name[TASK_ARGMAX_REDUCE_SM100] = "TASK_ARGMAX_REDUCE_SM100";
+  task_type_to_name[TASK_TENSOR_INIT] = "TASK_TENSOR_INIT";
+  task_type_to_name[TASK_MOE_TOPK_SOFTMAX_SM100] =
+      "TASK_MOE_TOPK_SOFTMAX_SM100";
+  task_type_to_name[TASK_MOE_W13_LINEAR_SM100] = "TASK_MOE_W13_LINEAR_SM100";
+  task_type_to_name[TASK_MOE_W2_LINEAR_SM100] = "TASK_MOE_W2_LINEAR_SM100";
+  task_type_to_name[TASK_MOE_MUL_SUM_ADD_SM100] = "TASK_MOE_MUL_SUM_ADD_SM100";
+  task_type_to_name[TASK_MOE_W13_LINEAR_SM90] = "TASK_MOE_W13_LINEAR_SM90";
+  task_type_to_name[TASK_MOE_W2_LINEAR_SM90] = "TASK_MOE_W2_LINEAR_SM90";
+  task_type_to_name[TASK_SPLITK_LINEAR_SWAPAB_HOPPER] =
+      "TASK_SPLITK_LINEAR_SWAPAB_HOPPER";
 
   code.e("__device__ __forceinline__");
   code.e("void _execute_task(TaskDesc const* task_desc,");

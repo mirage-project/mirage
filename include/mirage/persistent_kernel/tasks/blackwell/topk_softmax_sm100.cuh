@@ -16,9 +16,7 @@
 #include <cutlass/numeric_types.h>
 
 // CuTe includes
-#include <cute/algorithm/cooperative_copy.hpp> // Auto vectorized copy operation
 #include <cute/arch/cluster_sm90.hpp> // CuTe functions for querying the details of cluster launched
-#include <cute/arch/tmem_allocator_sm100.hpp> // TMEM allocator for SM100
 #include <cute/numeric/integral_constant.hpp> // Compile time in constants such as _1, _256 etc.
 #include <cute/tensor.hpp>                    // CuTe tensor implementation
 // using namespace cute;
@@ -34,7 +32,6 @@
 #include "../hopper/barrier.cuh"
 #include "../hopper/smem_layout_tma.cuh"
 #include "../hopper/tma.cuh"
-#include "utils.cuh"
 
 // ====================== TopK softmax things ===============================
 
@@ -65,19 +62,43 @@ template <typename T,
           int NUM_EXPERTS,
           int WARPS_PER_CTA,
           int BYTES_PER_LDG>
-__device__ __noinline__ void topk_softmax_task_impl(
-    T const *__restrict__ input, // [num_rows, NUM_EXPERTS]
+__device__ __forceinline__ void topk_softmax_task_impl(
+    void *__restrict__ input_ptr, // [num_rows, NUM_EXPERTS]
     bool const *__restrict__ finished,
-    float *__restrict__ output, // [num_rows, k]
+    void *__restrict__ output_ptr, // [num_rows, k]
     int const num_rows,
     int const k,
-    int *__restrict__ mpk_routing_indices, // [NUM_EXPERTS, num_rows] laid out
-                                           // as expert-major: expert * num_rows
-                                           // + row
-    int *__restrict__ mpk_expert_mask,     // [NUM_EXPERTS]
+    void *__restrict__ mpk_routing_indices_ptr, // [NUM_EXPERTS, num_rows] laid
+                                                // out as expert-major: expert *
+                                                // num_rows
+                                                // + row
+    void *__restrict__ mpk_active_expert_ids_ptr, // [NUM_EXPERTS + 1] last
+                                                  // element stores num active
+                                                  // experts
     int const start_expert,
     int const end_expert,
     bool const renormalize) {
+  // Pointers
+  T *input = static_cast<T *>(input_ptr);
+  float *output = static_cast<float *>(output_ptr);
+  int *mpk_routing_indices = static_cast<int *>(mpk_routing_indices_ptr);
+  int *mpk_active_expert_ids = static_cast<int *>(mpk_active_expert_ids_ptr);
+  // initialize routing indices to 0; active-id marks to -1; count to 0
+  for (int expert = start_expert + threadIdx.x; expert < end_expert;
+       expert += blockDim.x) {
+    if (mpk_routing_indices != nullptr) {
+      for (int row = 0; row < num_rows; ++row) {
+        mpk_routing_indices[expert * num_rows + row] = 0;
+      }
+    }
+    if (mpk_active_expert_ids != nullptr) {
+      mpk_active_expert_ids[expert - start_expert] = -1;
+    }
+  }
+  if (threadIdx.x == NUM_EXPERTS && mpk_active_expert_ids != nullptr) {
+    mpk_active_expert_ids[NUM_EXPERTS] = 0;
+  }
+  __syncthreads();
   // Compile-time checks
   static_assert(VPT == (VPT & -VPT), "VPT must be power of 2");
   static_assert(NUM_EXPERTS == (NUM_EXPERTS & -NUM_EXPERTS),
@@ -102,6 +123,9 @@ __device__ __noinline__ void topk_softmax_task_impl(
                 "THREADS_PER_ROW must be power of 2");
   static_assert(THREADS_PER_ROW <= WARP_SIZE,
                 "THREADS_PER_ROW can be at most warp size");
+  static_assert(THREADS_PER_ROW == WARP_SIZE ||
+                    THREADS_PER_ROW == WARP_SIZE / 2,
+                "This kernel only supports THREADS_PER_ROW of 16 or 32");
 
   // Work partitioning
   static constexpr int ELTS_PER_WARP = WARP_SIZE * VPT;
@@ -109,7 +133,6 @@ __device__ __noinline__ void topk_softmax_task_impl(
       ELTS_PER_WARP / ELTS_PER_ROW; // rows each warp processes
   static_assert(ELTS_PER_WARP % ELTS_PER_ROW == 0,
                 "The elts per row must cleanly divide the total elt per warp");
-  static constexpr int ROWS_PER_CTA = WARPS_PER_CTA * ROWS_PER_WARP;
 
   int const warp_idx = threadIdx.x / WARP_SIZE;
   int const lane_idx = threadIdx.x % WARP_SIZE;
@@ -117,23 +140,26 @@ __device__ __noinline__ void topk_softmax_task_impl(
 
   int const thread_row_in_warp = lane_idx / THREADS_PER_ROW;
   int const thread_row = warp_base_row + thread_row_in_warp;
+  uint32_t const warp_mask = (num_rows % 2 == 1 && thread_row == num_rows - 1)
+                                 ? 0x0000ffff
+                                 : 0xffffffff;
   if (thread_row < num_rows) {
 
     bool const row_is_active = finished ? !finished[thread_row] : true;
 
     // Compute per-thread read pointers
-    T const *thread_row_ptr = input + thread_row * ELTS_PER_ROW;
+    T *thread_row_ptr = input + thread_row * ELTS_PER_ROW;
     int const thread_group_idx = lane_idx % THREADS_PER_ROW;
     int const first_elt_read_by_thread =
         thread_group_idx * (BYTES_PER_LDG / sizeof(T));
-    T const *thread_read_ptr = thread_row_ptr + first_elt_read_by_thread;
+    T *thread_read_ptr = thread_row_ptr + first_elt_read_by_thread;
 
     using AccessType = cutlass::AlignedArray<T, ELTS_PER_LDG>;
     T row_chunk_temp[VPT];
     AccessType *row_chunk_vec_ptr =
         reinterpret_cast<AccessType *>(&row_chunk_temp);
-    AccessType const *vec_thread_read_ptr =
-        reinterpret_cast<AccessType const *>(thread_read_ptr);
+    AccessType *vec_thread_read_ptr =
+        reinterpret_cast<AccessType *>(thread_read_ptr);
 
     // Vectorized loads across the row
     for (int ii = 0; ii < LDG_PER_THREAD; ++ii) {
@@ -145,6 +171,13 @@ __device__ __noinline__ void topk_softmax_task_impl(
     float row_chunk[VPT];
     for (int ii = 0; ii < VPT; ++ii) {
       row_chunk[ii] = converter(row_chunk_temp[ii]);
+      row_chunk_temp[ii] =
+          static_cast<T>(0); // reset input buffer to 0 for split-k gate linear
+    }
+
+    // reset input buffer to 0 for split-k gate linear
+    for (int ii = 0; ii < LDG_PER_THREAD; ++ii) {
+      vec_thread_read_ptr[ii * THREADS_PER_ROW] = row_chunk_vec_ptr[ii];
     }
 
     // Max reduction within subgroup
@@ -154,7 +187,7 @@ __device__ __noinline__ void topk_softmax_task_impl(
     }
     for (int mask = THREADS_PER_ROW / 2; mask > 0; mask /= 2) {
       float other =
-          __shfl_xor_sync(0xffffffff, thread_max, mask, THREADS_PER_ROW);
+          __shfl_xor_sync(warp_mask, thread_max, mask, THREADS_PER_ROW);
       thread_max = max(thread_max, other);
     }
 
@@ -165,7 +198,7 @@ __device__ __noinline__ void topk_softmax_task_impl(
       row_sum += row_chunk[ii];
     }
     for (int mask = THREADS_PER_ROW / 2; mask > 0; mask /= 2) {
-      row_sum += __shfl_xor_sync(0xffffffff, row_sum, mask, THREADS_PER_ROW);
+      row_sum += __shfl_xor_sync(warp_mask, row_sum, mask, THREADS_PER_ROW);
     }
 
     float const inv_row_sum = 1.f / row_sum;
@@ -196,9 +229,9 @@ __device__ __noinline__ void topk_softmax_task_impl(
       // index)
       for (int mask = THREADS_PER_ROW / 2; mask > 0; mask /= 2) {
         float other_max =
-            __shfl_xor_sync(0xffffffff, max_val, mask, THREADS_PER_ROW);
+            __shfl_xor_sync(warp_mask, max_val, mask, THREADS_PER_ROW);
         int other_expert =
-            __shfl_xor_sync(0xffffffff, expert, mask, THREADS_PER_ROW);
+            __shfl_xor_sync(warp_mask, expert, mask, THREADS_PER_ROW);
         if (other_max > max_val ||
             (other_max == max_val && other_expert < expert)) {
           max_val = other_max;
@@ -218,16 +251,15 @@ __device__ __noinline__ void topk_softmax_task_impl(
         //     should_process_row ? (expert - start_expert) : NUM_EXPERTS;
         row_sum_for_renormalize += max_val;
         // Optionally populate MPK routing structures
-        if (should_process_row && mpk_routing_indices != nullptr &&
-            mpk_expert_mask != nullptr) {
+        if (should_process_row && mpk_routing_indices != nullptr) {
           int const local_expert = expert - start_expert;
           // Write 1-based rank into routing indices; stride by num_rows per
           // expert
           mpk_routing_indices[local_expert * num_rows + thread_row] = k_idx + 1;
-          // // Mark expert as active (idempotent). Atomic to avoid races across
-          // rows. atomicExch(&mpk_expert_mask[local_expert], 1); // race
-          // condition might be okay here
-          mpk_expert_mask[local_expert] = 1;
+          // Sparse mark expert as active; idempotent without atomics
+          if (mpk_active_expert_ids != nullptr) {
+            mpk_active_expert_ids[local_expert] = local_expert;
+          }
         }
       }
 
@@ -254,6 +286,18 @@ __device__ __noinline__ void topk_softmax_task_impl(
     }
   }
   __syncthreads();
+  // Compact marks into a dense list and count
+  if (mpk_active_expert_ids != nullptr) {
+    for (int expert = start_expert + threadIdx.x; expert < end_expert;
+         expert += blockDim.x) {
+      int const local_expert = expert - start_expert;
+      int const mark = mpk_active_expert_ids[local_expert];
+      if (mark >= 0) {
+        int const pos = atomicAdd(mpk_active_expert_ids + NUM_EXPERTS, 1);
+        mpk_active_expert_ids[pos] = expert;
+      }
+    }
+  }
 }
 
 namespace detail {

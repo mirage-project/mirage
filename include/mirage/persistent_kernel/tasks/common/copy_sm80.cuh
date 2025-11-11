@@ -12,6 +12,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+#include <cstdint>
 #pragma once
 namespace kernel {
 
@@ -52,6 +53,23 @@ __device__ __forceinline__ void load_smem(T *smem_ptr, T const *gmem_ptr) {
                "l"(gmem_ptr),
                "n"(BYTES),
                "r"(BYTES));
+#endif
+}
+
+template <typename T, int BYTES = 16>
+__device__ __forceinline__ void
+    load_smem_with_predict(T *smem_ptr, T const *gmem_ptr, bool pred) {
+#ifdef CP_ASYNC_SM80_ENABLED
+  static_assert(BYTES == 4 || BYTES == 8 || BYTES == 16,
+                "cp.async only supports 4, 8, or 16 bytes");
+  int src_in_bytes = pred ? BYTES : 0;
+  uint32_t smem_int_ptr =
+      static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr));
+  asm volatile("cp.async.ca.shared.global.L2::128B [%0], [%1], %2, %3;\n" ::"r"(
+                   smem_int_ptr),
+               "l"(gmem_ptr),
+               "n"(BYTES),
+               "r"(src_in_bytes));
 #endif
 }
 

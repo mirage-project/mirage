@@ -105,6 +105,7 @@ __global__ __launch_bounds__(256, 1) void moe_linear_sm90_wrapper(
                                     MMA_N,
                                     BATCH_SIZE,
                                     OUTPUT_SIZE,
+                                    OUTPUT_SIZE, // ORIG_OUTPUT_SIZE
                                     REDUCTION_SIZE,
                                     NUM_EXPERTS,
                                     NUM_TOPK,
@@ -187,7 +188,7 @@ void launch_moe_linear_sm90(int const expert_offset,
 
   // Topk_weights
   cute::Layout layout_expert_mask = cute::make_layout(
-      cute::make_shape(NUM_EXPERTS), cute::make_stride(cute::Int<1>{}));
+      cute::make_shape(NUM_EXPERTS + 1), cute::make_stride(cute::Int<1>{}));
   cute::Tensor mMask = cute::make_tensor(
       cute::make_gmem_ptr(static_cast<int32_t *>(mpk_expert_mask_ptr)),
       layout_expert_mask);
@@ -403,7 +404,7 @@ void moe_w13_linear_sm90_kernel(torch::Tensor input,
          weight.size(2) == REDUCTION_SIZE);
   assert(mpk_routing_indices.size(0) == NUM_EXPERTS &&
          mpk_routing_indices.size(1) == BATCH_SIZE);
-  assert(mpk_expert_mask.size(0) == NUM_EXPERTS);
+  assert(mpk_expert_mask.size(0) == NUM_EXPERTS + 1);
   //   assert(!has_residual);
 
   launch_moe_linear_sm90<bfloat16,
@@ -459,7 +460,7 @@ void moe_w2_linear_sm90_kernel(torch::Tensor input,
          weight.size(2) == REDUCTION_SIZE);
   assert(mpk_routing_indices.size(0) == NUM_EXPERTS &&
          mpk_routing_indices.size(1) == BATCH_SIZE);
-  assert(mpk_expert_mask.size(0) == NUM_EXPERTS);
+  assert(mpk_expert_mask.size(0) == NUM_EXPERTS + 1);
   //   assert(!has_residual);
 
   launch_moe_linear_sm90<bfloat16,

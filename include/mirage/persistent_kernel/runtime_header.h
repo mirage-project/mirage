@@ -53,7 +53,7 @@ unsigned long long int const EVENT_INVALID_ID = 0x7ffffffffffffffe;
 typedef unsigned long long int EventCounter;
 
 int const MAX_INPUTS_PER_TASK = 7;
-int const MAX_OUTPUTS_PER_TASK = 2;
+int const MAX_OUTPUTS_PER_TASK = 3;
 int const MAX_NUM_WORKERS = 128;
 
 enum TaskType {
@@ -92,14 +92,25 @@ enum TaskType {
   TASK_LINEAR_CUTLASS_WITH_RESIDUAL_HOPPER = 158,
   TASK_SILU_MUL_HOPPER = 159,
   TASK_EMBEDDING_HOPPER = 160,
+  TASK_MOE_W13_LINEAR_SM90 = 161,
+  TASK_MOE_W2_LINEAR_SM90 = 162,
+  TASK_SPLITK_LINEAR_SWAPAB_HOPPER = 163,
   TASK_HOPPER_TASK_END = 198, // Hopper end placeholder, not a real task
   // SM100 Tasks
-  TASK_SM100_TASK_BEGIN = 250, // SM100 start placeholder, not a real task
-  TASK_LINEAR_WITH_RESIDUAL_SM100 = 251,
-  TASK_LINEAR_SM100 = 252,
-  TASK_ATTN_SM100 = 253,
-  TASK_ARGMAX_REDUCE_SM100 = 254,
-  TASK_ARGMAX_PARTIAL_SM100 = 255,
+  TASK_SM100_TASK_BEGIN = 230, // SM100 start placeholder, not a real task
+  TASK_SM100_TMA_START_TASK = 231,
+  TASK_SPLITK_LINEAR_SM100 = 251,
+  TASK_LINEAR_WITH_RESIDUAL_SM100 = 252,
+  TASK_LINEAR_SM100 = 253,
+  TASK_MOE_W13_LINEAR_SM100 = 254,
+  TASK_MOE_W2_LINEAR_SM100 = 255,
+  TASK_SM100_TMA_END_TASK = 256,
+  TASK_ATTN_SM100 = 257,
+  TASK_ARGMAX_REDUCE_SM100 = 258,
+  TASK_ARGMAX_PARTIAL_SM100 = 259,
+  TASK_MOE_TOPK_SOFTMAX_SM100 = 260,
+  TASK_MOE_MUL_SUM_ADD_SM100 = 261,
+  TASK_TENSOR_INIT = 262,
   TASK_SM100_TASK_END = 298, // SM100 end placeholder, not a real task
   TASK_NVSHMEM_COPY = 199,
   TASK_SCHD_TASKS = 200,
@@ -144,7 +155,7 @@ struct FullTaskDesc {
   FullTaskDesc(TaskType t, int _variant_id)
       : task_type(t), variant_id(_variant_id), num_inputs(0), num_outputs(0),
         trigger_event(EVENT_INVALID_ID), dependent_event(EVENT_INVALID_ID),
-        request_id(-1) {}
+        request_id(-1), head_group(-1) {}
   FullTaskDesc() {}
   TaskType task_type;
   unsigned variant_id;
@@ -153,8 +164,13 @@ struct FullTaskDesc {
   EventId dependent_event;
   TensorDesc inputs[MAX_INPUTS_PER_TASK];
   TensorDesc outputs[MAX_OUTPUTS_PER_TASK];
-  int request_id; // Used for paged attention
-  int head_group; // Used for paged attention hopper
+  union {
+    struct {
+      int request_id; // Used for paged attention
+      int head_group; // Used for paged attention hopper
+    };
+    int expert_offset; // Used for MoE
+  };
 };
 
 struct alignas(16) TaskDesc {
@@ -199,6 +215,7 @@ struct alignas(16) TaskDesc {
       int request_id; // Used for paged attention
       int head_group; // Used for paged attention hopper
     };
+    int expert_offset;         // Used for MoE
     size_t xfer_size_in_bytes; // Used for nvshmem
   };
 };

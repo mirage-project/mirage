@@ -14,7 +14,72 @@
  */
 #include "tasks/common/utils.cuh"
 #pragma once
+
 namespace kernel {
+
+template <typename T,
+          int B,
+          int M,
+          int S,
+          size_t ROW_,
+          size_t COL_,
+          size_t STRIDE_>
+struct smem_row_tiled {
+  T *__restrict__ base_ptr;
+
+  // Problem sizes
+  static constexpr uint32_t ROW = ROW_;
+  static constexpr uint32_t COL = COL_;
+  static constexpr uint32_t STRIDE = STRIDE_;
+  static constexpr uint32_t STRIDE_B128 = static_cast<uint32_t>(STRIDE / 8);
+
+  // Fixed atom = 8 x 64
+  static constexpr uint32_t AtomRBits = 3;                      // 8
+  static constexpr uint32_t AtomCBits = 6;                      // 64
+  static constexpr uint32_t AtomBits = AtomRBits + AtomCBits;   // 9
+  static constexpr uint32_t AtomRMask = (1u << AtomRBits) - 1u; // 0b111
+  static constexpr uint32_t AtomCMask = (1u << AtomCBits) - 1u; // 0b11_1111
+
+  static constexpr uint32_t ColTiles = COL >> AtomCBits;
+
+  static constexpr uint32_t MASK_B = (1u << B) - 1u;
+  static constexpr uint32_t M_PLUS_S = M + S;
+
+  static_assert(B <= AtomRBits, "B must fit in the 3 row-in-atom bits");
+  static_assert(M_PLUS_S <= AtomCBits,
+                "M+S must not exceed 6 for 64-col atoms");
+
+  __device__ __forceinline__ smem_row_tiled(T *p) : base_ptr(p) {}
+  __device__ __forceinline__ void set_ptr(T *p) {
+    base_ptr = p;
+  }
+
+  __device__ __forceinline__ uint4 *get_128B_aligned_ptr(uint32_t row,
+                                                         uint32_t col) {
+    return reinterpret_cast<uint4 *>(base_ptr) + row * STRIDE_B128 +
+           (col ^ (row & AtomRMask));
+  }
+
+  __device__ __forceinline__ T *operator()(uint32_t row, uint32_t col) const {
+    const uint32_t r_outer = row >> AtomRBits;          // /8
+    const uint32_t c_outer = col >> AtomCBits;          // /64
+    const uint32_t tile = r_outer * ColTiles + c_outer; //
+
+    const uint32_t r_in = row & AtomRMask; // 0..7
+    const uint32_t c_in = col & AtomCMask; // 0..63
+
+    const uint32_t c_swz = c_in ^ ((r_in & MASK_B) << M);
+
+    const uint32_t idx = (tile << AtomBits) | (r_in << AtomCBits) | c_swz;
+
+    return base_ptr + idx;
+  }
+
+  __device__ __forceinline__ T &at(uint32_t r, uint32_t c) {
+    return *(*this)(r, c);
+  }
+};
+
 template <typename T,
           int B,
           int M,
@@ -25,9 +90,6 @@ template <typename T,
 struct smem_row {
   T *__restrict__ base_ptr;
   using value_type = T;
-  static constexpr int b = B;
-  static constexpr int m = M;
-  static constexpr int s = S;
 
   static constexpr size_t ROW = ROW_;
   static constexpr size_t COL = COL_;
@@ -287,6 +349,68 @@ template <typename T,
           int M,
           int S,
           size_t ROW_,
+          size_t INNER_COL_,
+          size_t OUTER_COL_>
+struct smem_row_2drow {
+  T *__restrict__ base_ptr;
+
+  using value_type = T;
+  using OffsetCalculator = SwizzleOffsetCalculator<B, M, S>;
+
+  static constexpr size_t ROW = ROW_;
+  static constexpr size_t INNER_COL = INNER_COL_;
+  static constexpr size_t log2_INNER_COL = log2_constexpr(INNER_COL_);
+  static constexpr size_t OUTER_COL = OUTER_COL_;
+  static constexpr size_t COL = INNER_COL * OUTER_COL;
+  static constexpr size_t SIZE = ROW * COL;
+  static constexpr size_t STRIDE_OUTER_COL = INNER_COL;
+  static constexpr size_t STRIDE = INNER_COL * OUTER_COL;
+
+  __device__ __forceinline__ smem_row_2drow(T *ptr) : base_ptr(ptr) {}
+
+  __device__ __forceinline__ void set_ptr(T *ptr) {
+    base_ptr = ptr;
+  }
+
+  static constexpr size_t size() {
+    return ROW * COL;
+  }
+
+  __device__ __forceinline__ T &at(size_t logical_idx_row,
+                                   size_t logical_idx_col) {
+    // size_t inner_col = logical_idx_col & ((1 << log2_INNER_COL) - 1);
+    // size_t outer_col = logical_idx_col >> log2_INNER_COL;
+
+    size_t inner_col = (logical_idx_col % INNER_COL);
+    size_t outer_col = (logical_idx_col / INNER_COL) % OUTER_COL;
+
+    size_t logical_idx =
+        outer_col * STRIDE_OUTER_COL + logical_idx_row * STRIDE + inner_col;
+    // return &base_ptr[get_swizzled_offset(logical_idx)];
+    return base_ptr[OffsetCalculator::get_phy_offset(logical_idx)];
+  }
+
+  __device__ __forceinline__ T *operator()(size_t logical_idx_row,
+                                           size_t logical_idx_col) {
+    // size_t inner_col = logical_idx_col & ((1 << log2_INNER_COL) - 1);
+    // size_t outer_col = logical_idx_col >> log2_INNER_COL;
+
+    size_t inner_col = (logical_idx_col % INNER_COL);
+    size_t outer_col = (logical_idx_col / INNER_COL) % OUTER_COL;
+
+    size_t logical_idx =
+        outer_col * STRIDE_OUTER_COL + logical_idx_row * STRIDE + inner_col;
+    // return &base_ptr[get_swizzled_offset(logical_idx)];
+    return &base_ptr[OffsetCalculator::get_phy_offset(logical_idx)];
+  }
+};
+
+// Row-major layout with split column dimension: OUTER_COL x INNER_COL
+template <typename T,
+          int B,
+          int M,
+          int S,
+          size_t ROW_,
           size_t COL_,
           size_t STAGE_>
 struct smem_row_2dcol {
@@ -321,6 +445,16 @@ struct smem_row_2dcol {
     size_t logical_idx = stage * STRIDE_STAGE + outer_col * STRIDE_OUTER_COL +
                          logical_idx_row * STRIDE_ROW + inner_col;
     return &base_ptr[OffsetCalculator::get_phy_offset(logical_idx)];
+  }
+
+  __device__ __forceinline__ T &at(size_t logical_idx_row,
+                                   size_t logical_idx_col) {
+    size_t inner_col = logical_idx_col & ((1 << log2_INNER_COL) - 1);
+    size_t outer_col = logical_idx_col >> log2_INNER_COL;
+    size_t logical_idx =
+        outer_col * STRIDE_OUTER_COL + logical_idx_row * STRIDE + inner_col;
+    // return &base_ptr[get_swizzled_offset(logical_idx)];
+    return base_ptr[OffsetCalculator::get_phy_offset(logical_idx)];
   }
 };
 

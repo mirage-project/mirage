@@ -31,12 +31,12 @@ for reduction_size in reduction_sizes:
             batch_size, output_size, device="cuda", dtype=torch.bfloat16
         )
 
-        for i in range(batch_size):
-            for j in range(reduction_size):
-                x[i, j] = 0.1
-        for i in range(output_size):
-            for j in range(reduction_size):
-                w[i, j] = 0.1
+        # for i in range(batch_size):
+        #     for j in range(reduction_size):
+        #         x[i, j] = 0.1
+        # for i in range(output_size):
+        #     for j in range(reduction_size):
+        #         w[i, j] = 0.1
 
         # swapAB version
         # (n, k) * (m, k) -> (n, m)

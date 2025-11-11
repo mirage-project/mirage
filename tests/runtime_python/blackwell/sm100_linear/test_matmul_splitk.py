@@ -6,7 +6,7 @@ torch.set_printoptions(sci_mode=False, profile="full")
 
 g = torch.Generator(device="cuda").manual_seed(1234)
 
-reduction_sizes = [768]
+reduction_sizes = [2048]
 output_sizes = [128]
 batch_size = 1
 
@@ -22,19 +22,18 @@ for reduction_size in reduction_sizes:
         w = torch.randn(
             (output_size, reduction_size), device="cuda", dtype=torch.bfloat16
         )
-        residual = torch.randn(batch_size, output_size, device="cuda", dtype=torch.bfloat16)
-        output = torch.empty(batch_size, output_size, device="cuda", dtype=torch.bfloat16)
+        acc_output = torch.randn(batch_size, output_size, device="cuda", dtype=torch.bfloat16)
+        torch_acc_output = acc_output.clone()
 
         if not has_residual:
             residual = None
-        runtime_kernel_blackwell.linear_sm100_mpk(x, w, residual, output) # with residual and swapAB
+        runtime_kernel_blackwell.linear_splitk_sm100(x, w, residual, acc_output) # with residual and swapAB
         torch_out = torch.matmul(x, torch.transpose(w, 0, 1))
-        if has_residual:
-            torch_out = torch_out + residual
+        torch_acc_out = torch_out + torch_acc_output
         
         torch.testing.assert_close(
-            output,
-            torch_out,
+            acc_output,
+            torch_acc_out,
             rtol=1e-2,
             atol=1e-2,
         )
@@ -42,7 +41,7 @@ for reduction_size in reduction_sizes:
 
         # Warm-up
         for _ in range(16):
-            runtime_kernel_blackwell.linear_sm100_mpk(x, w, residual, output)
+            runtime_kernel_blackwell.linear_splitk_sm100(x, w, residual, acc_output)
 
         torch.cuda.synchronize()
         starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(
@@ -51,7 +50,7 @@ for reduction_size in reduction_sizes:
         repetitions = 1000
         starter.record()
         for rep in range(repetitions):
-            runtime_kernel_blackwell.linear_sm100_mpk(x, w, residual, output)
+            runtime_kernel_blackwell.linear_splitk_sm100(x, w, residual, acc_output)
         ender.record()
         torch.cuda.synchronize()
         total_time = starter.elapsed_time(ender)
