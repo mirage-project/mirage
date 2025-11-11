@@ -1,0 +1,7 @@
+[
+  {
+    "directory": "/home/jianan/mirage",
+    "file": "/home/jianan/mirage/tools/clangd/tu_dummy.cu",
+    "command": "clang++ -std=c++17 -xcuda --cuda-path=/usr/local/cuda --cuda-gpu-arch=sm_90a -I/home/jianan/mirage/include -I/home/jianan/mirage/include/mirage/persistent_kernel -I/home/jianan/mirage/deps/cutlass/include -I/home/jianan/mirage/deps/cutlass/tools/util/include -I/home/jianan/mirage/deps/json/include -I/usr/include/nvshmem_12 -I/usr/include -DMIRAGE_BACKEND_USE_CUDA -DMPK_TARGET_CC=90 -DMODE_OFFLINE -DMPK_ENABLE_TMA -include /home/jianan/mirage/tools/clangd/clangd_overrides.h -c /home/jianan/mirage/tools/clangd/tu_dummy.cu -o /dev/null"
+  }
+]
