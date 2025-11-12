@@ -27,6 +27,10 @@ header_files += glob.glob(os.path.join(include_dir_2, '*.cuh'))
 header_files += glob.glob(os.path.join(spec_decode_include_dir, '*.cuh'))
 header_files += glob.glob(os.path.join(header_root_dir, '*.h'))
 
+cutlass_root            = os.path.join(this_dir, '../../../deps/cutlass')
+cutlass_include_dir     = os.path.join(cutlass_root, 'include')
+cutlass_util_include_dir= os.path.join(cutlass_root, 'tools', 'util', 'include')  # some helpers live here
+
 print(header_files)
 
 macros=[("MIRAGE_BACKEND_USE_CUDA", None), ("MIRAGE_FINGERPRINT_USE_CUDA", None)]
@@ -45,6 +49,8 @@ setup(
                 header_root_dir,
                 include_dir_2,
                 include_dir_3,
+                cutlass_include_dir,
+                cutlass_util_include_dir,
             ],
             extra_compile_args={
                 'cxx': [],

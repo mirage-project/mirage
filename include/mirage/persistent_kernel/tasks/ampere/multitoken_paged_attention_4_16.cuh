@@ -185,13 +185,12 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl_4_16(
       sizeof(float) * MMA_ITERS_M * NUM_THREADS * 64;
 
   // stage3 output buffer
-  constexpr size_t S_O_OFFSET = ZERO_BUFFER_OFFSET + S_V_BUFFER_SIZE;
+  constexpr size_t S_O_OFFSET = S_O_BUFFER_OFFSET + S_O_BUFFER_SIZE;
   constexpr size_t S_O_SIZE = S_Q_SIZE;
 
   constexpr size_t S_TOTAL_OFFSET =
-      (S_O_BUFFER_OFFSET + S_O_BUFFER_SIZE >
-       S_K_NORM_SUM_OFFSET + S_K_NORM_SUM_SIZE)
-          ? (S_O_BUFFER_OFFSET + S_O_BUFFER_SIZE)
+      (S_O_OFFSET + S_O_SIZE > S_K_NORM_SUM_OFFSET + S_K_NORM_SUM_SIZE)
+          ? (S_O_OFFSET + S_O_SIZE)
           : (S_K_NORM_SUM_OFFSET + S_K_NORM_SUM_SIZE);
 
   static_assert(S_TOTAL_OFFSET <=
@@ -507,10 +506,13 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl_4_16(
 #pragma unroll
       for (int frag_idx = 0; frag_idx < 8; frag_idx++) {
         x_frag_f[m][frag_idx] =
-            x_frag_f[m][frag_idx] != -inf
-                ? expf(x_frag_f[m][frag_idx] * sm_scale -
-                       m_local[m][(frag_idx & 0x3) >> 1] * sm_scale)
-                : 0.f;
+            // x_frag_f[m][frag_idx] != -inf
+            //     ? expf(x_frag_f[m][frag_idx] * sm_scale -
+            //            m_local[m][(frag_idx & 0x3) >> 1] * sm_scale)
+            //     : 0.f;
+            x_frag_f[m][frag_idx] =
+                expf(x_frag_f[m][frag_idx] * sm_scale -
+                     m_local[m][(frag_idx & 0x3) >> 1] * sm_scale);
         d_partial[m][(frag_idx & 0x3) >> 1] += x_frag_f[m][frag_idx];
       }
     }

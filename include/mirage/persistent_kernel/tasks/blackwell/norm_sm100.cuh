@@ -29,8 +29,10 @@ __device__ __forceinline__ void rms_norm_sm100(InputSmem smem_input,
                                                T const *cos_ptr = nullptr,
                                                T const *sin_ptr = nullptr) {
   cutlass::arch::NamedBarrier wg_barrier(NUM_THREADS, /*bar-id*/ 6);
-  constexpr int ROTARY_PARTICIPATING_THREADS = (NUM_THREADS < HEAD_DIM ? NUM_THREADS : HEAD_DIM);
-  cutlass::arch::NamedBarrier wg_barrier_rotary(ROTARY_PARTICIPATING_THREADS, /*bar-id*/ 7);
+  constexpr int ROTARY_PARTICIPATING_THREADS =
+      (NUM_THREADS < HEAD_DIM ? NUM_THREADS : HEAD_DIM);
+  cutlass::arch::NamedBarrier wg_barrier_rotary(ROTARY_PARTICIPATING_THREADS,
+                                                /*bar-id*/ 7);
   if (threadIdx.x < NUM_THREADS) {
     // Avoid sync divergence dead lock.
     if (rotary_emd) {
@@ -117,8 +119,8 @@ __device__ __forceinline__ void rms_norm_sm100(InputSmem smem_input,
             smem_input.at(row, col) = (T)v_rot;
           }
         } // i
-      } // head_idx
-    }   // win_idx
+      }   // head_idx
+    }     // win_idx
   }
 }
 } // namespace kernel
