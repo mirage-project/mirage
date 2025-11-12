@@ -1255,7 +1255,7 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
                        MAX_DYNAMIC_SHARED_MEMORY_SIZE);
   cudaFuncSetAttribute(scheduler_kernel,
                        cudaFuncAttributeMaxDynamicSharedMemorySize,
-                       MAX_DYNAMIC_SHARED_MEMORY_SIZE);
+                       1024);
   cudaFuncSetAttribute(persistent_kernel,
                        cudaFuncAttributeMaxDynamicSharedMemorySize,
                        MAX_DYNAMIC_SHARED_MEMORY_SIZE);
