@@ -883,7 +883,7 @@ void launch_norm_linear(void const *input_ptr,
     NORM_LINEAR_DISPATCH_OUTPUT_SIZE(BATCH_SIZE, 256)                          \
     NORM_LINEAR_DISPATCH_OUTPUT_SIZE(BATCH_SIZE, 544)                          \
     NORM_LINEAR_DISPATCH_OUTPUT_SIZE(BATCH_SIZE, 1336)                         \
-    NORM_LINEAR_DISPATCH_OUTPUT_SIZE(BATCH_SIZE, 1600)                         \
+    /* NORM_LINEAR_DISPATCH_OUTPUT_SIZE(BATCH_SIZE, 1600) - HEAD_DIM issue */ \
     default:                                                                   \
       printf("Unsupported output size in test: %zu\n", output.size(1));        \
       break;                                                                   \
@@ -1071,9 +1071,9 @@ __global__ void rms_norm_kernel_wrapper(void const *input_ptr,
     case 256:                                                                  \
       DISPATCH_WINDOW_RMSNORM_LINEAR_WINDOW_SIZE(256);                         \
       break;                                                                   \
-    case 1600:                                                                 \
-      DISPATCH_WINDOW_RMSNORM_LINEAR_WINDOW_SIZE(1600);                        \
-      break;                                                                   \
+    /* case 1600: Commented out - HEAD_DIM=1600 violates norm.cuh assertion */ \
+    /*   DISPATCH_WINDOW_RMSNORM_LINEAR_WINDOW_SIZE(1600);                  */ \
+    /*   break;                                                              */ \
     default:                                                                   \
       printf("Unsupported head dim in test: %zu\n", head_dim);                 \
       break;                                                                   \

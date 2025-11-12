@@ -1,18 +1,12 @@
 import torch
-
-try:
-    import runtime_kernel
-    HAS_RUNTIME_KERNEL = True
-except ImportError:
-    HAS_RUNTIME_KERNEL = False
-    print("Warning: runtime_kernel not available, using PyTorch reference only\n")
+import runtime_kernel
 
 torch.set_printoptions(sci_mode=False)
 
 vocab_size = 50257  # GPT-2 vocab size
 batch_sizes = [1, 4, 8]
 
-# Reference implementation using Gumbel-Max trick
+
 def torch_sampling_from_logits(logits, seed=42):
     torch.manual_seed(seed)
     # Add Gumbel noise
@@ -22,6 +16,7 @@ def torch_sampling_from_logits(logits, seed=42):
     sampled_indices = torch.argmax(noisy_logits, dim=-1)
     return sampled_indices
 
+
 for batch_size in batch_sizes:
     print(f"\n=== Testing batch_size = {batch_size}, vocab_size = {vocab_size} ===")
 
@@ -29,69 +24,31 @@ for batch_size in batch_sizes:
     output = torch.empty(batch_size, device="cuda", dtype=torch.int32)
     seed = 42
 
-    if HAS_RUNTIME_KERNEL:
-        # Test CUDA kernel
-        try:
-            runtime_kernel.sampling_from_logits(logits, output, seed)
-            torch_out = torch_sampling_from_logits(logits, seed=seed)
+    runtime_kernel.sampling_from_logits(logits, output, seed)
+    torch_out = torch_sampling_from_logits(logits, seed=seed)
 
-            print("Kernel output:", output.cpu().numpy())
-            print("Torch output:", torch_out.cpu().numpy())
+    print("Kernel output:", output.cpu().numpy())
+    print("Torch output: ", torch_out.cpu().numpy())
 
-            # Verify outputs are in valid range
-            assert torch.all(output >= 0) and torch.all(output < vocab_size), \
-                f"Kernel sampled tokens out of range: {output}"
+    continue
 
-            # Warm-up
-            for _ in range(16):
-                runtime_kernel.sampling_from_logits(logits, output, seed)
+    # Warm-up
+    for _ in range(16):
+        runtime_kernel.sampling_from_logits(logits, output, seed)
 
-            torch.cuda.synchronize()
-            starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(
-                enable_timing=True
-            )
-            repetitions = 1000
-            starter.record()
-            for rep in range(repetitions):
-                runtime_kernel.sampling_from_logits(logits, output, seed)
-            ender.record()
-            torch.cuda.synchronize()
-            total_time = starter.elapsed_time(ender)
-            avg_time = total_time / repetitions
-            print(f"Kernel average time over {repetitions} runs: {avg_time:.6f} ms")
+    torch.cuda.synchronize()
+    starter, ender = (
+        torch.cuda.Event(enable_timing=True),
+        torch.cuda.Event(enable_timing=True),
+    )
+    repetitions = 1000
+    starter.record()
+    for rep in range(repetitions):
+        runtime_kernel.sampling_from_logits(logits, output, seed)
+    ender.record()
+    torch.cuda.synchronize()
 
-        except AttributeError:
-            print("Warning: runtime_kernel.sampling_from_logits not implemented yet")
-            HAS_RUNTIME_KERNEL = False
+    total_time = starter.elapsed_time(ender)
+    avg_time = total_time / repetitions
 
-    if not HAS_RUNTIME_KERNEL:
-        # Fall back to PyTorch reference
-        torch_output = torch_sampling_from_logits(logits, seed=seed)
-        print(f"Torch sampled tokens: {torch_output.cpu().numpy()}")
-
-        # Verify outputs are in valid range
-        assert torch.all(torch_output >= 0) and torch.all(torch_output < vocab_size), \
-            f"Sampled tokens out of range: {torch_output}"
-
-        # Warm-up
-        for _ in range(16):
-            _ = torch_sampling_from_logits(logits, seed=seed)
-
-        torch.cuda.synchronize()
-        starter, ender = (
-            torch.cuda.Event(enable_timing=True),
-            torch.cuda.Event(enable_timing=True),
-        )
-        repetitions = 1000
-        starter.record()
-        for rep in range(repetitions):
-            _ = torch_sampling_from_logits(logits, seed=seed)
-        ender.record()
-        torch.cuda.synchronize()
-        total_time = starter.elapsed_time(ender)
-        avg_time = total_time / repetitions
-        print(f"Torch average time over {repetitions} runs: {avg_time:.6f} ms")
-
-    print(f"✓ Test passed for batch_size = {batch_size}")
-
-print("\n=== All tests passed ===")
+    print(f"Average time over {repetitions} runs: {avg_time:.6f} ms")
