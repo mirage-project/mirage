@@ -104,7 +104,15 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
 
     // Load the paged KV indices into shared memory
     __shared__ int page_indices[MAX_PAGES_PER_REQUEST];
-
+#pragma unroll
+    for (int i = threadIdx.x; i < num_pages * sizeof(int) / 16;
+         i += NUM_THREADS) {
+      __uint128_t const *src_ptr =
+          reinterpret_cast<__uint128_t const *>(paged_kv_indices_buffer_ptr) +
+          i;
+      __uint128_t *dst_ptr = reinterpret_cast<__uint128_t *>(page_indices) + i;
+      *dst_ptr = *src_ptr;
+    }
     if (num_pages % (16 / sizeof(int)) != 0) {
       int tail_pages = num_pages % (16 / sizeof(int));
       int tail_offset = num_pages - tail_pages;
