@@ -1656,20 +1656,6 @@ void rope(torch::Tensor input,
 // Sampling from Logits
 
 template <typename T, typename IdType, int BATCH_SIZE, int VOCAB_SIZE>
-__global__ void sampling_from_logits_wrapper(void const *logits_ptr,
-                                              void *output_ptr,
-                                              uint64_t seed) {
-  sampling_from_logits_kernel<1024, 4, T, IdType>(
-      (T*)logits_ptr,
-      (IdType*)output_ptr,
-      nullptr,     // indices
-      VOCAB_SIZE,
-      seed,        // philox_seed
-      0            // philox_offset
-  );
-}
-
-template <typename T, typename IdType, int BATCH_SIZE, int VOCAB_SIZE>
 void launch_sampling_from_logits(void const *logits_ptr,
                                   void *output_ptr,
                                   uint64_t seed) {
@@ -1679,8 +1665,15 @@ void launch_sampling_from_logits(void const *logits_ptr,
                                                        1024,
                                                        SAMPLING_REDUCE_ALGO>::TempStorage);
 
-  sampling_from_logits_wrapper<T, IdType, BATCH_SIZE, VOCAB_SIZE>
-      <<<grid_dim, block_dim, smem_size>>>(logits_ptr, output_ptr, seed);
+  sampling_from_logits_kernel<1024, 4, T, IdType>
+      <<<grid_dim, block_dim, smem_size>>>(
+          (T*)logits_ptr,
+          (IdType*)output_ptr,
+          nullptr,     // indices
+          VOCAB_SIZE,
+          seed,        // philox_seed
+          0            // philox_offset
+      );
 }
 
 void sampling_from_logits(torch::Tensor logits,
