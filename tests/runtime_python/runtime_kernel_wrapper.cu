@@ -1,5 +1,6 @@
 #include "runtime_header.h"
 #include "tasks/ampere/task_header.cuh"
+#include "tasks/blackwell/task_header.cuh"
 #include <cstdio>
 #include <cuda_runtime.h>
 #include <torch/extension.h>
@@ -15,6 +16,9 @@ using kernel::multitoken_paged_attention_task_impl;
 // using kernel::norm_linear_task_impl;
 // using kernel::paged_attention_task_impl;
 using kernel::rotary_embedding;
+using kernel::sampling_from_logits_kernel;
+using kernel::SamplingDataAndIndex;
+using kernel::SAMPLING_REDUCE_ALGO;
 // using kernel::silu_mul_linear_task_impl;
 // using kernel::single_batch_decoding_kernel;
 // using kernel::single_batch_extend_kernel;
@@ -1649,6 +1653,66 @@ void rope(torch::Tensor input,
 }
 #endif
 
+// Sampling from Logits
+
+template <typename T, typename IdType, int BATCH_SIZE, int VOCAB_SIZE>
+__global__ void sampling_from_logits_wrapper(void const *logits_ptr,
+                                              void *output_ptr,
+                                              uint64_t seed) {
+  sampling_from_logits_kernel<1024, 4, T, IdType>(
+      (T*)logits_ptr,
+      (IdType*)output_ptr,
+      nullptr,     // indices
+      VOCAB_SIZE,
+      seed,        // philox_seed
+      0            // philox_offset
+  );
+}
+
+template <typename T, typename IdType, int BATCH_SIZE, int VOCAB_SIZE>
+void launch_sampling_from_logits(void const *logits_ptr,
+                                  void *output_ptr,
+                                  uint64_t seed) {
+  dim3 grid_dim(BATCH_SIZE, 1, 1);
+  dim3 block_dim(1024, 1, 1);
+  size_t smem_size = sizeof(typename cub::BlockReduce<SamplingDataAndIndex<T, IdType>,
+                                                       1024,
+                                                       SAMPLING_REDUCE_ALGO>::TempStorage);
+
+  sampling_from_logits_wrapper<T, IdType, BATCH_SIZE, VOCAB_SIZE>
+      <<<grid_dim, block_dim, smem_size>>>(logits_ptr, output_ptr, seed);
+}
+
+void sampling_from_logits(torch::Tensor logits,
+                          torch::Tensor output,
+                          int64_t seed) {
+  void const *logits_ptr = logits.data_ptr();
+  void *output_ptr = output.data_ptr();
+
+  uint32_t batch_size = logits.size(0);
+  uint32_t vocab_size = logits.size(1);
+
+  // Use template dispatch based on vocab size
+  if (vocab_size == 50257) {
+    if (batch_size == 1) {
+      launch_sampling_from_logits<float, int, 1, 50257>(logits_ptr, output_ptr, seed);
+    } else if (batch_size == 4) {
+      launch_sampling_from_logits<float, int, 4, 50257>(logits_ptr, output_ptr, seed);
+    } else if (batch_size == 8) {
+      launch_sampling_from_logits<float, int, 8, 50257>(logits_ptr, output_ptr, seed);
+    } else {
+      printf("Unsupported batch size in sampling test: %u\n", batch_size);
+    }
+  } else {
+    printf("Unsupported vocab size in sampling test: %u\n", vocab_size);
+  }
+
+  cudaError_t err = cudaDeviceSynchronize();
+  if (err != cudaSuccess) {
+    printf("Sampling kernel error: %s\n", cudaGetErrorString(err));
+  }
+}
+
 // pybind11 bindings
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
@@ -1696,6 +1760,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("multitoken_paged_attention",
         &multitoken_paged_attention,
         "Multitoken Paged Attention");
+  m.def("sampling_from_logits", &sampling_from_logits, "Sampling from Logits kernel");
   // m.def("rms_norm", &rms_norm, "Window RMSNorm");
   // m.def("rope", &rope, "RoPE kernel");
 }
