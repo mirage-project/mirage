@@ -179,7 +179,7 @@ __device__ __forceinline__ bool
 #ifdef MPK_ENABLE_PROFILING
       if (true) {
 #else
-      if ((step + num_tokens >= config.max_seq_length) ||
+      if ((step + num_tokens + 1 >= config.max_seq_length) ||
           ((config.tokens[request_id * MPK_MAX_SEQ_LENGTH + step +
                           num_tokens] == config.eos_token_id) &&
            (step + num_tokens >= prompt_len))) {
