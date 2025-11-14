@@ -606,21 +606,6 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
       return;
     } else if (task_desc->task_type == TASK_BEGIN_TASK_GRAPH) {
       // Do nothing
-#ifdef USE_NVSHMEM
-    } else if (task_desc->task_type == TASK_NVSHMEM_COPY) {
-      size_t event_index = get_event_position_index(task_desc->trigger_event);
-      int gpu_id = static_cast<int>(get_event_gpu_id(task_desc->trigger_event));
-      assert(gpu_id < config.num_gpus);
-      assert(gpu_id != config.my_gpu_id);
-      nvshmemx_putmem_signal_block(
-          task_desc->output_ptrs[0],
-          task_desc->input_ptrs[0],
-          task_desc->xfer_size_in_bytes,
-          reinterpret_cast<uint64_t *>(&config.all_event_counters[event_index]),
-          1 /*signal*/,
-          NVSHMEM_SIGNAL_ADD,
-          gpu_id);
-#endif
     } else {
 #ifdef MPK_ENABLE_VERBOSE
       if (threadIdx.x == 0 && blockIdx.x == 0) {

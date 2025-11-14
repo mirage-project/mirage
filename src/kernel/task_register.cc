@@ -623,6 +623,7 @@ int TaskRegister::register_argmax_reduce_task(threadblock::Graph const &bgraph,
 
 int TaskRegister::register_reduce_task(threadblock::Graph const &bgraph,
                                        std::vector<int> const &params) {
+  // Currently, allreduce task is split to two sub-tasks: allgather + reduce
   // params[0]: num_gpus
   // params[1]: my_gpu_id
   assert(params.size() == 2);
@@ -640,6 +641,13 @@ int TaskRegister::register_reduce_task(threadblock::Graph const &bgraph,
       output_ops.push_back(static_cast<tb::TBInputOp *>(op));
     }
   }
+  // For now, the memory partition of the input[0] results in a strided
+  // 2D tensor, which cannot be directly transferred by a single nvshmem
+  // memput. So we use for loop to iterate over the first dim and transfer each
+  // row. If the upperlayer changes this layout, this "for-loop" method can
+  // fail. So we assert it here just in case.
+  assert(input_ops[0]->input_map.x == 1 && input_ops[0]->input_map.y == -1 &&
+         input_ops[0]->input_map.z == -1);
   // Currently support 2D reduction, buffer has an extra world_size dim
   assert(input_ops[0]->output_tensors[0].num_dims == 2);
   assert(input_ops[1]->output_tensors[0].num_dims == 3);
@@ -647,10 +655,34 @@ int TaskRegister::register_reduce_task(threadblock::Graph const &bgraph,
   int batch_size = input_ops[0]->output_tensors[0].dim[0];
   int output_size = input_ops[0]->output_tensors[0].dim[1];
   // get output stride
+  assert(input_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
   assert(output_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
   kn::KNInputOp *kn_input_op =
-      static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
+    static_cast<kn::KNInputOp *>(input_ops[0]->dtensor.owner_op);
+  int input_stride = static_cast<int>(kn_input_op->input_strides[0]);
+  kn_input_op = static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
   int output_stride = static_cast<int>(kn_input_op->input_strides[0]);
+  assert(input_stride == output_stride);
+  // Register nvshmem copy task (allgather)
+  mirage::transpiler::CodeKeeper c;
+  c.inc_indent();
+  c.e("size_t event_index = get_event_position_index(task_desc->trigger_event);");
+  c.inc_indent();
+  c.e("int gpu_id = static_cast<int>(get_event_gpu_id(task_desc->trigger_event));");
+  c.e("assert(gpu_id < runtime_config.num_gpus);");
+  c.e("assert(gpu_id != runtime_config.my_gpu_id);");
+  c.e("for (int i = 0; i < $; i++) {", batch_size);
+  c.e("  nvshmemx_putmem_signal_block(");
+  c.e("      reinterpret_cast<char*>(task_desc->output_ptrs[0]) + i * $ * sizeof(bfloat16),", input_stride);
+  c.e("      reinterpret_cast<char*>(task_desc->input_ptrs[0]) + i * $ * sizeof(bfloat16),", output_stride);
+  c.e("      task_desc->xfer_size_in_bytes / $,", batch_size);
+  c.e("      reinterpret_cast<uint64_t *>(&runtime_config.all_event_counters[event_index]),");
+  c.e("      1 /*signal*/,");
+  c.e("      NVSHMEM_SIGNAL_ADD,");
+  c.e("      gpu_id);");
+  c.e("}");
+  register_task_variant(TASK_NVSHMEM_COPY, c.to_string());
+  // Register reduction kernel
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
   code.e("kernel::reduction_kernel<bfloat16, $, $, $, $, $>(",

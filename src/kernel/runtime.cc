@@ -298,6 +298,8 @@ void register_mugraph(
           } // for bid.z
         }   // for bid.y
       }     // for bid.x
+      // (zepeng) The for loop to transfer strided tensor using nvshmem (hacky)
+      int for_loop = input_ops[0]->dtensor.dim[0];  
       for (bid.x = 0; bid.x < bgraph.grid_dim.x; bid.x++) {
         for (bid.y = 0; bid.y < bgraph.grid_dim.y; bid.y++) {
           for (bid.z = 0; bid.z < bgraph.grid_dim.z; bid.z++) {
@@ -306,7 +308,8 @@ void register_mugraph(
             event_desc_1.event_type = EVENT_LAUNCH_TASKS;
             event_desc_1.first_task_id = all_tasks.size();
             event_desc_1.last_task_id = all_tasks.size() + 1;
-            event_desc_1.num_triggers = num_gpus - 1;
+            // event_desc_1.num_triggers = num_gpus - 1;
+            event_desc_1.num_triggers = (num_gpus - 1) * for_loop;
             assert(ag_pre_task_map.find(bid) != ag_pre_task_map.end());
             std::map<int, TaskId> pre_tasks = ag_pre_task_map.find(bid)->second;
             for (auto const &t : pre_tasks) {
@@ -558,6 +561,11 @@ bool sanity_check(mirage::kernel::Graph const &graph,
         if (event_pos == 0) {
           continue;
         }
+        // These events counts are manually adjusted. Each task of nvshmem cpy
+        // will update BS times of event counter, not just once.
+        if (desc.task_type == runtime::TASK_NVSHMEM_COPY) {
+            event_counts[event_pos] -= desc.inputs[0].dim[0] - 1;
+        }
         assert(event_counts[event_pos] > 0);
         event_counts[event_pos]--;
         if (event_counts[event_pos] == 0) {
@@ -577,8 +585,10 @@ bool sanity_check(mirage::kernel::Graph const &graph,
       }
     }
   }
-  printf("Triggered events: %zu\n", triggered_events.size());
-  printf("Executed tasks: %zu\n", executed_tasks.size());
+  printf("Number of all events: %zu\n", all_events.size());
+  printf("Number of all tasks: %zu\n", all_tasks.size());
+  printf("Number of triggered events: %zu\n", triggered_events.size());
+  printf("Number of executed tasks: %zu\n", executed_tasks.size());
   return true;
 }
 
@@ -1320,6 +1330,7 @@ TaskGraphResult print_task_graph(
   task_type_to_name[TASK_LINEAR_WITH_RESIDUAL] = "TASK_LINEAR_WITH_RESIDUAL";
   task_type_to_name[TASK_ARGMAX_PARTIAL] = "TASK_ARGMAX_PARTIAL";
   task_type_to_name[TASK_ARGMAX_REDUCE] = "TASK_ARGMAX_REDUCE";
+  task_type_to_name[TASK_NVSHMEM_COPY] = "TASK_NVSHMEM_COPY";
   task_type_to_name[TASK_REDUCE] = "TASK_REDUCE";
   task_type_to_name[TASK_FIND_NGRAM_PARTIAL] = "TASK_FIND_NGRAM_PARTIAL";
   task_type_to_name[TASK_FIND_NGRAM_GLOBAL] = "TASK_FIND_NGRAM_GLOBAL";
