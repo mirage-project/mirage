@@ -570,7 +570,6 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
       if (task_desc->dependent_event != EVENT_INVALID_ID) {
         // Wait until the event has been triggered enough times
         EventId event_id = task_desc->dependent_event;
-        assert(!is_nvshmem_event(event_id));
         assert(get_event_gpu_id(event_id) == config.my_gpu_id);
         size_t event_index = get_event_position_index(event_id);
         EventCounter needed_counts =
