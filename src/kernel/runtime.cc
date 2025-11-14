@@ -34,6 +34,10 @@ size_t get_event_id(int my_gpu_id, size_t event_pos, bool nvshmem_event) {
   return event_id;
 }
 
+bool is_nvshmem_event(size_t event_id) {
+  return (event_id & EVENT_NVSHMEM_TAG) > 0;
+}
+
 struct Dim3Comparator {
   bool operator()(dim3 const &a, dim3 const &b) const {
     if (a.x != b.x) {
@@ -177,6 +181,7 @@ void register_mugraph(
   std::vector<tb::TBInputOp *> pre_output_ops;
   kn::KNCustomizedOp const *pre_op = nullptr;
   std::map<dim3, TaskId, Dim3Comparator> pre_task_map;
+  std::unordered_set<size_t> nvshmem_events_idx;
   for (auto const &op : graph.operators) {
     if (op->op_type == type::KNOperatorType::KN_INPUT_OP) {
       continue;
@@ -308,6 +313,7 @@ void register_mugraph(
               all_tasks[t.second].trigger_event =
                   get_event_id(t.first, all_events.size(), true);
             }
+            nvshmem_events_idx.insert(all_events.size());
             all_events.push_back(event_desc_1);
             // Step 2: create a task for reduce
             FullTaskDesc task(TASK_REDUCE, 0 /*variant_id*/);
@@ -507,11 +513,15 @@ void register_mugraph(
     if (all_events[e].event_type == EVENT_LAUNCH_TASKS ||
         all_events[e].event_type == EVENT_LAUNCH_MASSIVE_TASKS) {
       all_events[e].event_type = EVENT_EMPTY;
+      bool is_nvshmem_event = false;
+      if (nvshmem_events_idx.count(e) > 0) {
+        is_nvshmem_event = true;
+      }
       for (size_t t = all_events[e].first_task_id;
            t < all_events[e].last_task_id;
            t++) {
         all_tasks[t].dependent_event =
-            get_event_id(my_gpu_id, e, false /*nvshmem_event*/);
+            get_event_id(my_gpu_id, e, is_nvshmem_event /*nvshmem_event*/);
       }
     }
   }
