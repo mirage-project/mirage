@@ -105,7 +105,7 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl_32_64(
   // seq_len = 7 * 64 + 64 = 512
   // num tokens = 8
   // Load the paged KV indices into shared memory
-  __shared__ int page_indices[MAX_PAGES_PER_REQUEST];
+  __shared__ __align__(16) int page_indices[MAX_PAGES_PER_REQUEST];
 #pragma unroll
   for (int i = threadIdx.x; i < num_pages * sizeof(int) / 16;
        i += NUM_THREADS) {
@@ -193,7 +193,7 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl_32_64(
 
   // stage3 output buffer
   constexpr size_t S_O_OFFSET = ZERO_BUFFER_OFFSET + ZERO_BUFFER_OFFSET;
-  constexpr size_t S_O_SIZE = S_Q_SIZE;
+  // constexpr size_t S_O_SIZE = S_Q_SIZE;
 
   constexpr size_t S_TOTAL_OFFSET =
       (S_O_BUFFER_OFFSET + S_O_BUFFER_SIZE >

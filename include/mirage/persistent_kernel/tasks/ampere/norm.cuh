@@ -32,10 +32,13 @@ __device__ __forceinline__ void rms_norm(InputSmem smem_input,
   if (rotary_emd) {
     static_assert(HEAD_DIM < NUM_THREADS || HEAD_DIM % NUM_THREADS == 0);
   }
-  constexpr int ROTARY_PARTICIPATING_THREADS = (NUM_THREADS < HEAD_DIM ? NUM_THREADS : HEAD_DIM);
+  constexpr int ROTARY_PARTICIPATING_THREADS =
+      (NUM_THREADS < HEAD_DIM ? NUM_THREADS : HEAD_DIM);
   // Ampere doesn't support cutlass barrier, use cooperative groups.
   auto block_group = cooperative_groups::this_thread_block();
-  auto participating_group = cooperative_groups::tiled_partition<ROTARY_PARTICIPATING_THREADS>(block_group);
+  auto participating_group =
+      cooperative_groups::tiled_partition<ROTARY_PARTICIPATING_THREADS>(
+          block_group);
 
   // smem_input: NUM_HEADS * (WINDOW_SIZE or CHUNK_SIZE), HEAD_DIM
   // TODO(Wenqin): handle if speculative window of k span two chunks.
@@ -118,7 +121,7 @@ __device__ __forceinline__ void rms_norm(InputSmem smem_input,
           smem_input.at(row, col) = (T)v_rot;
         }
       } // i
-    } // head_idx
-  }   // win_idx
+    }   // head_idx
+  }     // win_idx
 }
 } // namespace kernel
