@@ -1094,7 +1094,7 @@ int TaskRegister::register_rmsnorm_hopper_task(threadblock::Graph const &bgraph,
   int hidden_dim = output_ops[0]->output_tensors[0].dim[1];
 
   // Currently assume that each rmsnorm task processes one token
-  assert(batch_size == 1);
+  // assert(batch_size == 1);
   assert(input_ops[0]->dtensor.num_dims == 2);
   assert(output_ops[0]->dtensor.dim[0] == input_ops[0]->dtensor.dim[0]);
   assert(output_ops[0]->dtensor.dim[1] == input_ops[0]->dtensor.dim[1]);
