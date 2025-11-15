@@ -33,7 +33,7 @@ cutlass_util_include_dir= os.path.join(cutlass_root, 'tools', 'util', 'include')
 
 print(header_files)
 
-macros=[("MIRAGE_BACKEND_USE_CUDA", None), ("MIRAGE_FINGERPRINT_USE_CUDA", None)]
+macros=[("MIRAGE_BACKEND_USE_CUDA", None), ("MIRAGE_FINGERPRINT_USE_CUDA", None), ("MIRAGE_GRACE_HOPPER", None), ("MIRAGE_GRACE_BLACKWELL", None)]
 BuildExtension, CUDAExtension = get_torch_ext()
 setup(
     name='runtime_kernel',
@@ -58,6 +58,7 @@ setup(
                     '-O3',
                     "-lineinfo",  
                     '-gencode=arch=compute_80,code=sm_80',
+                    '-gencode=arch=compute_100a,code=sm_100a',
                 ]
             }
         )

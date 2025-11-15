@@ -35,6 +35,7 @@ def get_color_map(prefix: Literal["TASK", "EVENT"]) -> dict[int, tuple[str, str]
 supported_data_types = {
     940: ("float16", 2),
     941: ("bfloat16", 2),
+    950: ("float32", 4),
     965: ("int64", 8),
 }
 

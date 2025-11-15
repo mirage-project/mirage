@@ -380,6 +380,10 @@ void register_mugraph(
               task_type == TASK_MOE_W2_LINEAR_SM90) {
             task.expert_offset = bid.x;
           }
+          // Set paged attention split kv task kv_idx
+          if (task_type == TASK_PAGED_ATTENTION_SPLIT_KV_SM100) {
+            task.kv_idx = bid.z;
+          }
           // Initialize input tensors to the task
           for (auto const &input : input_ops) {
             TensorDesc desc;
@@ -1359,6 +1363,10 @@ TaskGraphResult print_task_graph(
   task_type_to_name[TASK_MOE_W2_LINEAR_SM90] = "TASK_MOE_W2_LINEAR_SM90";
   task_type_to_name[TASK_SPLITK_LINEAR_SWAPAB_HOPPER] =
       "TASK_SPLITK_LINEAR_SWAPAB_HOPPER";
+  task_type_to_name[TASK_PAGED_ATTENTION_SPLIT_KV_SM100] =
+      "TASK_PAGED_ATTENTION_SPLIT_KV_SM100";
+  task_type_to_name[TASK_PAGED_ATTENTION_SPLIT_KV_MERGE_SM100] =
+      "TASK_PAGED_ATTENTION_SPLIT_KV_MERGE_SM100";
 
   code.e("__device__ __forceinline__");
   code.e("void _execute_task(TaskDesc const* task_desc,");

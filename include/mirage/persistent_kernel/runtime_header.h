@@ -111,6 +111,8 @@ enum TaskType {
   TASK_MOE_TOPK_SOFTMAX_SM100 = 260,
   TASK_MOE_MUL_SUM_ADD_SM100 = 261,
   TASK_TENSOR_INIT = 262,
+  TASK_PAGED_ATTENTION_SPLIT_KV_SM100 = 263,
+  TASK_PAGED_ATTENTION_SPLIT_KV_MERGE_SM100 = 264,
   TASK_SM100_TASK_END = 298, // SM100 end placeholder, not a real task
   TASK_NVSHMEM_COPY = 199,
   TASK_SCHD_TASKS = 200,
@@ -168,8 +170,9 @@ struct FullTaskDesc {
     struct {
       int request_id; // Used for paged attention
       int head_group; // Used for paged attention hopper
+      int kv_idx; // Used for paged attention split kv
+      int expert_offset; // Used for MoE
     };
-    int expert_offset; // Used for MoE
   };
 };
 
@@ -214,8 +217,9 @@ struct alignas(16) TaskDesc {
     struct {
       int request_id; // Used for paged attention
       int head_group; // Used for paged attention hopper
+      int kv_idx; // Used for paged attention split kv
+      int expert_offset;         // Used for MoE
     };
-    int expert_offset;         // Used for MoE
     size_t xfer_size_in_bytes; // Used for nvshmem
   };
 };

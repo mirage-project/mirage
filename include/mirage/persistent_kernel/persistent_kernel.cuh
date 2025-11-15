@@ -58,6 +58,7 @@ using namespace kernel;
 #endif
 #define INIT_NUM_THREADS 128
 
+// #define MPK_ENABLE_VERBOSE
 __device__ __forceinline__ void
     _execute_task(TaskDesc const *task_desc,
                   RuntimeConfig const &runtime_config);

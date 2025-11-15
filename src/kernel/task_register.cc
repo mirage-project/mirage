@@ -2689,5 +2689,139 @@ int TaskRegister::register_splitk_linear_swapAB_hopper_task(
                                code.to_string());
 }
 
+
+int TaskRegister::register_paged_attention_split_kv_sm100_task(
+  threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params[0]: num_q_heads
+  // params[1]: num_kv_heads
+  // params[2]: qk_norm
+  // params[3]: rotary_emd
+  // params[4]: max_seq_len
+  // params[5]: page_size
+  assert(params.size() == 6);
+  std::vector<tb::TBInputOp *> input_ops;
+  std::vector<tb::TBInputOp *> output_ops;
+  int num_inputs = 8;
+  int num_outputs = 1;
+
+  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    if (input_ops.size() < (size_t)num_inputs) {
+      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    } else {
+      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    }
+  }
+  assert(output_ops[0]->output_tensors[0].num_dims == 3);
+  int qkv_stride = input_ops[0]->dtensor.dim[1];
+  int output_size = output_ops[0]->dtensor.dim[2];
+  int num_q_heads = params[0];
+  int num_kv_heads = params[1];
+  int head_dim = output_size / num_q_heads;
+  int kv_stride = head_dim * num_kv_heads;
+  int max_seq_len = params[4];
+  int page_size = params[5];
+  // Assert that k_cache has the same head_dim
+  assert(input_ops[1]->output_tensors[0].num_dims == 4);
+  assert(head_dim == input_ops[1]->output_tensors[0].dim[3]);
+  assert(input_ops[2]->output_tensors[0].num_dims == 4);
+  assert(head_dim == input_ops[2]->output_tensors[0].dim[3]);
+  int max_tokens = input_ops[0]->dtensor.dim[0];
+  constexpr int SEQ_LEN_PER_BLOCK = 256;
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::multitoken_paged_attention_task_impl_32_64_split_kv<bfloat16, $, $, $, $, $, "
+        "$, $, $, $, $>(",
+        num_q_heads / num_kv_heads,
+        1,
+        kv_stride,
+        qkv_stride,
+        output_size,
+        head_dim,
+        SEQ_LEN_PER_BLOCK,
+        max_seq_len,
+        page_size,
+        max_tokens);
+  code.e("    task_desc->input_ptrs[0],");
+  code.e("    task_desc->input_ptrs[1],");
+  code.e("    task_desc->input_ptrs[2],");
+  code.e("    task_desc->output_ptrs[0],");
+  code.e("    runtime_config.qo_indptr_buffer,");
+  code.e("    runtime_config.paged_kv_indptr_buffer,");
+  code.e("    runtime_config.paged_kv_indices_buffer,");
+  code.e("    runtime_config.paged_kv_last_page_len_buffer,");
+  code.e("    task_desc->request_id,");
+  code.e("    $,", params[2] > 0);
+  code.e("    $,", params[3] > 0);
+  code.e("    task_desc->input_ptrs[3],");
+  code.e("    task_desc->input_ptrs[4],");
+  code.e("    task_desc->input_ptrs[5],");
+  code.e("    task_desc->input_ptrs[6],");
+  code.e("    1e-6f,");
+  code.e("    1e-6f,");
+  code.e("    task_desc->input_ptrs[7],");
+  code.e("    task_desc->kv_idx);");
+  return register_task_variant(TASK_PAGED_ATTENTION_SPLIT_KV_SM100, code.to_string());
+}
+
+
+int TaskRegister::register_paged_attention_split_kv_merge_sm100_task(
+  threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params[0]: num_qo_heads_per_kv
+  // params[1]: head_dim
+  // params[2]: max_seq_len
+  // params[3]: page_size
+  assert(params.size() == 4);
+  std::vector<tb::TBInputOp *> input_ops;
+  std::vector<tb::TBInputOp *> output_ops;
+  int num_inputs = 2;
+  int num_outputs = 1;
+
+  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    if (input_ops.size() < (size_t)num_inputs) {
+      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    } else {
+      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    }
+  }
+  assert(output_ops[0]->output_tensors[0].num_dims == 2);
+  int qkv_stride = input_ops[0]->dtensor.dim[1];
+  int output_size = output_ops[0]->dtensor.dim[1];
+  int num_q_heads_per_kv = params[0];
+  int head_dim = params[1];
+  int max_seq_len = params[2];
+  int page_size = params[3];
+
+  int max_tokens = input_ops[0]->dtensor.dim[0];
+  constexpr int SEQ_LEN_PER_BLOCK = 256;
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+
+  code.e("kernel::merge_splitkv<bfloat16, $, $, $, $, $, "
+    "$, $, $>(",
+    num_q_heads_per_kv,
+    1,
+    head_dim,
+    max_tokens,
+    true,
+    (max_seq_len / SEQ_LEN_PER_BLOCK),
+    SEQ_LEN_PER_BLOCK,
+    page_size);
+    code.e("    task_desc->input_ptrs[0],");
+    code.e("    task_desc->input_ptrs[1],");
+    code.e("    runtime_config.qo_indptr_buffer,");
+    code.e("    runtime_config.paged_kv_indptr_buffer,");
+    code.e("    runtime_config.paged_kv_last_page_len_buffer,");
+    code.e("    task_desc->request_id,");
+    code.e("    task_desc->output_ptrs[0]);");
+    return register_task_variant(TASK_PAGED_ATTENTION_SPLIT_KV_MERGE_SM100, code.to_string());
+}
+
+
 } // namespace runtime
 } // namespace mirage

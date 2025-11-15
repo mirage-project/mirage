@@ -18,7 +18,7 @@
 // decrease register files in a wg
 template <uint32_t RegCount>
 static __device__ __forceinline__ void wg_decrease_regs() {
-#ifdef MIRAGE_GRACE_HOPPER
+#if defined(MIRAGE_GRACE_HOPPER) || defined(MIRAGE_GRACE_BLACKWELL)
   asm volatile("setmaxnreg.dec.sync.aligned.u32 %0;\n" : : "n"(RegCount));
 #elif defined(__CUDA_ARCH__)
   asm volatile("brkpt;\n" ::);
@@ -28,7 +28,7 @@ static __device__ __forceinline__ void wg_decrease_regs() {
 // sync inside a warp group
 template <int GROUP_THREADS>
 static __device__ __forceinline__ void wg_sync(uint32_t barrier_id) {
-#ifdef MIRAGE_GRACE_HOPPER
+#if defined(MIRAGE_GRACE_HOPPER) || defined(MIRAGE_GRACE_BLACKWELL)
   asm volatile("bar.sync %0, %1;\n" ::"r"(barrier_id), "n"(GROUP_THREADS));
 #elif defined(__CUDA_ARCH__)
   asm volatile("brkpt;\n" ::);
@@ -38,7 +38,7 @@ static __device__ __forceinline__ void wg_sync(uint32_t barrier_id) {
 // increase register files in a wg
 template <uint32_t RegCount>
 static __device__ __forceinline__ void wg_increase_regs() {
-#ifdef MIRAGE_GRACE_HOPPER
+#if defined(MIRAGE_GRACE_HOPPER) || defined(MIRAGE_GRACE_BLACKWELL)
   asm volatile("setmaxnreg.inc.sync.aligned.u32 %0;\n" : : "n"(RegCount));
 #elif defined(__CUDA_ARCH__)
   asm volatile("brkpt;\n" ::);

@@ -18,27 +18,37 @@
 namespace kernel {
 
 template <typename T,
-          int NUM_QO_HEADS,
+          int NUM_QO_HEADS_PER_KV,
           int NUM_KV_HEADS,
           int HEAD_DIM,
           int MAX_TOKENS = 8,
           bool PARTITION_KV=true,
-          int NUM_KV_CHUNKS=1>
-__device__ __forceinline__ void merge_splitkv(void const * lse,
-void const *o, int const *qo_indptr_buffer_ptr, int request_id, void *output){
-    
+          int NUM_KV_CHUNKS=1,
+          int KV_CHUNK_SIZE=256,
+          int PAGE_SIZE=4096>
+__device__ __forceinline__ void merge_splitkv(void const *lse,
+void const *o, int const *qo_indptr_buffer_ptr, int const *paged_kv_indptr_buffer_ptr, int const *paged_kv_last_page_len_buffer_ptr, int request_id, void *output){
+    if (threadIdx.x >= 128) return;
     const T *o_ptr = reinterpret_cast<const T*>(o);
     T *output_ptr = reinterpret_cast<T*>(output);
     const float *lse_ptr = reinterpret_cast<const float *>(lse);
-    // constexpr int GLOBAL_ITERS_M = (NUM_QO_HEADS + 64 - 1) / 64;
+    // constexpr int GLOBAL_ITERS_M = (NUM_QO_HEADS_PER_KV + 64 - 1) / 64;
+    if (threadIdx.x == 0){
+        printf("blockIdx.x %d, NUM_QO_HEADS_PER_KV %d, merge_splitkv, lse_ptr %p, o_ptr %p, output_ptr %p\n", blockIdx.x, NUM_QO_HEADS_PER_KV, lse, o, output);
+    }
     
+    int const first_page_pos = paged_kv_indptr_buffer_ptr[request_id];
+    int const last_page_pos = paged_kv_indptr_buffer_ptr[request_id + 1];
+    int const num_pages = last_page_pos - first_page_pos;
+    int seq_len = (num_pages - 1) * PAGE_SIZE + paged_kv_last_page_len_buffer_ptr[request_id];
+    
+    int num_chunks = (seq_len + KV_CHUNK_SIZE - 1) / KV_CHUNK_SIZE;
 
-
-    //size of o and output is NUM_QO_HEADS * MAX_TOKENS * 128
+    //size of o and output is NUM_QO_HEADS_PER_KV * MAX_TOKENS * 128
     //let each thread process one
-    constexpr int NUM_QO_PER_KV = NUM_QO_HEADS / NUM_KV_HEADS;
-    constexpr int NUM_Q = MAX_TOKENS * NUM_QO_PER_KV;
-    constexpr int GLOBAL_ITERS_M = (NUM_Q + 64 - 1) / 64;
+    // constexpr int NUM_QO_PER_KV = NUM_QO_HEADS_PER_KV / NUM_KV_HEADS;
+    // constexpr int NUM_Q = MAX_TOKENS * NUM_QO_PER_KV;
+    // constexpr int GLOBAL_ITERS_M = (NUM_Q + 64 - 1) / 64;
 
     int const first_token_pos = qo_indptr_buffer_ptr[request_id];
     int const last_token_pos = qo_indptr_buffer_ptr[request_id + 1];
@@ -58,7 +68,7 @@ void const *o, int const *qo_indptr_buffer_ptr, int request_id, void *output){
 
     //let 16 threads to process one head_dim
 #pragma unroll
-    for (int tok = group_id; tok < num_tokens * NUM_QO_HEADS; tok += num_groups) {
+    for (int tok = group_id; tok < num_tokens * NUM_QO_HEADS_PER_KV; tok += num_groups) {
         int head_partition = thread_in_group;
 
 #pragma unroll
@@ -67,12 +77,12 @@ void const *o, int const *qo_indptr_buffer_ptr, int request_id, void *output){
             float d_global = 1.f;
             float o_global = 0.f;
 #pragma unroll
-         for(int kv_idx = 0; kv_idx < NUM_KV_CHUNKS; ++kv_idx){
+         for(int kv_idx = 0; kv_idx < num_chunks; ++kv_idx){
             //process 8 tokens
             float m_prev = m_global,
             d_prev = d_global; // save previous values
-            int lse_offset = kv_idx * (MAX_TOKENS * NUM_QO_HEADS) + tok;
-            int o_offset = (kv_idx * (MAX_TOKENS * NUM_QO_HEADS) + tok) * HEAD_DIM +  head_partition * VAL_PER_THREAD + i;
+            int lse_offset = kv_idx * (MAX_TOKENS * NUM_QO_HEADS_PER_KV) + tok;
+            int o_offset = (kv_idx * (MAX_TOKENS * NUM_QO_HEADS_PER_KV) + tok) * HEAD_DIM +  head_partition * VAL_PER_THREAD + i;
 
 
             float other_m = lse_ptr[lse_offset],

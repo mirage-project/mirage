@@ -222,9 +222,30 @@ __global__ void multitoken_paged_attention_wrapper(
                     k_eps,
                     reinterpret_cast<void*>(lse_block),
                     blockIdx.x);
-  
-   kernel::merge_splitkv<T, NUM_QO_HEADS, NUM_KV_HEADS, HEAD_DIM, MAX_TOKENS, PARTITION_KV, (MAX_SEQ_LEN / 256)>(lse_tmp, o_tmp, qo_indptr_buffer_ptr, request_id, output_ptr);               
 }
+
+
+template <typename T,
+          int NUM_QO_HEADS,
+          int NUM_KV_HEADS,
+          int KV_CACHE_STRIDE,
+          int QKV_STRIDE,
+          int O_STRIDE,
+          int HEAD_DIM,
+          int MAX_SEQ_LEN,
+          int PAGE_SIZE,
+          int MAX_TOKENS = 16,
+          bool PARTITION_KV = true>
+__global__ void merge_splitkv_wrapper(
+    int const *qo_indptr_buffer_ptr,
+    int const *paged_kv_indptr_buffer_ptr,
+    int const *paged_kv_last_page_len_buffer_ptr,
+    int request_id,
+    void *o_tmp,
+    void *lse_tmp,
+    void *output_ptr) {
+      kernel::merge_splitkv<T, NUM_QO_HEADS, NUM_KV_HEADS, HEAD_DIM, MAX_TOKENS, PARTITION_KV, (MAX_SEQ_LEN / 256), 256, PAGE_SIZE>(lse_tmp, o_tmp, qo_indptr_buffer_ptr, paged_kv_indptr_buffer_ptr, paged_kv_last_page_len_buffer_ptr, request_id, output_ptr);               
+    }
 
 template <typename T,
           int NUM_QO_HEADS,
@@ -310,6 +331,38 @@ void launch_multitoken_paged_attention(
                                            k_eps,
                                           o_tmp_ptr,
                                         lse_tmp_ptr);
+
+  cudaDeviceSynchronize();
+
+
+  cudaFuncSetAttribute(
+    merge_splitkv_wrapper<T,
+                          NUM_QO_HEADS,
+                          NUM_KV_HEADS,
+                          KV_CACHE_STRIDE,
+                          QKV_STRIDE,
+                          O_STRIDE,
+                          HEAD_DIM,
+                          MAX_SEQ_LEN,
+                          PAGE_SIZE,
+                          MAX_TOKENS,
+                          PARTITION_KV>,
+  cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
+
+  merge_splitkv_wrapper<T,
+                        NUM_QO_HEADS,
+                        NUM_KV_HEADS,
+                        KV_CACHE_STRIDE,
+                        QKV_STRIDE,
+                        O_STRIDE,
+                        HEAD_DIM,
+                        MAX_SEQ_LEN,
+                        PAGE_SIZE,
+                        MAX_TOKENS,
+                        PARTITION_KV>
+                        <<<dim3(1,1,1), block_dim, smem_size>>>(qo_indptr_buffer_ptr, paged_kv_indptr_buffer_ptr, paged_kv_last_page_len_buffer_ptr, request_id, o_tmp_ptr, lse_tmp_ptr, output_ptr);
+
+  cudaDeviceSynchronize();
 
   // cudaEvent_t start, stop;
   // cudaEventCreate(&start);
