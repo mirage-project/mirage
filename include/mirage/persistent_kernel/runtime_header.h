@@ -260,6 +260,8 @@ struct RuntimeConfig {
   void *profiler_buffer;
   bool split_worker_scheduler;
   cudaStream_t worker_stream, scheduler_stream;
+  cudaEvent_t prepare_done_event;
+  cudaEvent_t worker_done_event, scheduler_done_event;
 };
 
 } // namespace runtime

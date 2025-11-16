@@ -1274,7 +1274,7 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
 
 // Entry point for C/C++
 // TODO: change launch config
-extern "C" void launch_persistent_kernel() {
+extern "C" void launch_persistent_kernel(cudaStream_t default_stream) {
   // int device;
   // cudaGetDevice(&device);
   // int sm_count;
@@ -1283,15 +1283,20 @@ extern "C" void launch_persistent_kernel() {
   {
     int end_of_task_graph_event_pos = global_runtime_config.num_events - 1;
     prepare_kernel<<<dim3(global_runtime_config.num_workers, 1, 1),
-                     dim3(128, 1, 1)>>>(global_runtime_config,
+                     dim3(128, 1, 1),
+                     default_stream>>>(global_runtime_config,
                                         end_of_task_graph_event_pos);
-    cudaStreamSynchronize(NULL);
+    // cudaStreamSynchronize(NULL);
+    cudaEventRecord(global_runtime_config.prepare_done_event, default_stream);
   }
   int num_schedulers = global_runtime_config.num_local_schedulers +
                        global_runtime_config.num_remote_schedulers;
   if (global_runtime_config.split_worker_scheduler) {
     printf("worker kernel & scheduler kernel\n");
     printf("smem size: %d\n", MAX_DYNAMIC_SHARED_MEMORY_SIZE);
+
+    cudaStreamWaitEvent(global_runtime_config.worker_stream, global_runtime_config.prepare_done_event, 0);
+    cudaStreamWaitEvent(global_runtime_config.scheduler_stream, global_runtime_config.prepare_done_event, 0);
 
     // The split kernel does not support NVSHMEM because
     // nvshmemx_collective_launch launches kernels sequentially, which blocks
@@ -1308,19 +1313,26 @@ extern "C" void launch_persistent_kernel() {
                        global_runtime_config.scheduler_stream>>>(
         global_runtime_config);
 
-    cudaError_t err_worker =
-        cudaStreamSynchronize(global_runtime_config.worker_stream);
-    cudaError_t err_scheduler =
-        cudaStreamSynchronize(global_runtime_config.scheduler_stream);
-    if (err_worker != cudaSuccess) {
-      printf("CUDA kernel launch error: %s\n", cudaGetErrorString(err_worker));
-    }
-    if (err_scheduler != cudaSuccess) {
-      printf("CUDA kernel launch error: %s\n",
-             cudaGetErrorString(err_scheduler));
-    }
+    // cudaError_t err_worker =
+    //     cudaStreamSynchronize(global_runtime_config.worker_stream);
+    // cudaError_t err_scheduler =
+    //     cudaStreamSynchronize(global_runtime_config.scheduler_stream);
+    // if (err_worker != cudaSuccess) {
+    //   printf("CUDA kernel launch error: %s\n", cudaGetErrorString(err_worker));
+    // }
+    // if (err_scheduler != cudaSuccess) {
+    //   printf("CUDA kernel launch error: %s\n",
+    //          cudaGetErrorString(err_scheduler));
+    // }
 
-    printf("Finished Launch Persistent Kernel\n");
+    cudaEventRecord(global_runtime_config.worker_done_event, global_runtime_config.worker_stream);
+    cudaEventRecord(global_runtime_config.scheduler_done_event, global_runtime_config.scheduler_stream);
+
+    cudaStreamWaitEvent(default_stream, global_runtime_config.worker_done_event, 0);
+    cudaStreamWaitEvent(default_stream, global_runtime_config.scheduler_done_event, 0);
+    printf("Finished Launching Persistent Kernel (Async)\n");
+
+    // printf("Finished Launch Persistent Kernel\n");
   } else {
     printf("a single persistent kernel\n");
     int num_sms_to_use = global_runtime_config.num_workers + num_schedulers / 4;
