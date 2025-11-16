@@ -134,9 +134,9 @@ def get_compile_command(
         # "-O0",
         # "-g",
         # "-G",
-        # "--ptxas-options=-v",
-        # "-Xptxas=-v",
-        # "-lineinfo",
+        "--ptxas-options=-v",
+        "-Xptxas=-v",
+        "-lineinfo",
         f"-I{py_include_dir}",
         f"-I{mirage_inc_path}",
         f"-I{os.path.join(mirage_inc_path, 'mirage/persistent_kernel')}",
@@ -300,9 +300,9 @@ class PersistentKernel:
         io_category: str = "cuda_tensor",
     ) -> DTensor:
         # Assert a row-major layout
-        if strides is not None:
-            for d in range(len(dims) - 1):
-                assert strides[d] == strides[d + 1] * dims[d + 1]
+        # if strides is not None:
+        #     for d in range(len(dims) - 1):
+        #         assert strides[d] == strides[d + 1] * dims[d + 1]
         t = self.kn_graph.new_input(dims=dims, strides=strides, dtype=dtype)
         # FIXME: currently assert that name is not None
         assert name is not None
@@ -620,23 +620,26 @@ class PersistentKernel:
         sin_pos_embed: DTensor,
         lse: DTensor,
         output: DTensor,
+        attention_params: tuple,
         grid_dim: tuple,
         block_dim: tuple,
     ):
         # Currently assume that input/output
         assert input.num_dims == 2  # (num_tokens, fused_outdim / world_size)
-        assert output.num_dims == 3  # (num_tokens, num_chunks, hidden_size / world_size)
         assert k_cache.num_dims == 4  # (num_pages, page_size, kv_heads, head_dim)
         assert v_cache.num_dims == 4  # (num_pages, page_size, kv_heads, head_dim)
         assert k_cache.dim(0) == self.max_num_pages
         assert v_cache.dim(0) == self.max_num_pages
         assert k_cache.dim(1) == self.page_size
         assert v_cache.dim(1) == self.page_size
-        assert lse.num_dims == 3  # (num_tokens, num_chunks, num_q_heads)
+        assert output.num_dims == 3  # (num_tokens, num_kv_chunks * num_qo_per_kv * head_dim / world_size, num_kv_heads)
+        assert lse.num_dims == 3  # (num_tokens, num_kv_chunks * num_qo_per_kv / world_size, num_kv_heads)
 
         head_dim = k_cache.dim(3)
         num_kv_heads = k_cache.dim(2)
-        num_q_heads = output.dim(2) // head_dim
+        num_q_heads = attention_params[0]
+        num_kv_chunks = attention_params[1]
+        
         rotary_embed = 0
         if cos_pos_embed is not None or sin_pos_embed is not None:
             assert cos_pos_embed.num_dims == 2  # (seq_len, head_dim)
@@ -658,7 +661,8 @@ class PersistentKernel:
         # params[3]: rotary_embed
         # params[4]: max_seq_len
         # params[5]: page_size
-        params = [num_q_heads, num_kv_heads, qk_norm, rotary_embed, self.max_seq_length, self.page_size]
+        # params[6]: num_kv_chunks
+        params = [num_q_heads, num_kv_heads, qk_norm, rotary_embed, self.max_seq_length, self.page_size, num_kv_chunks]
 
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         assert grid_dim[0] == self.max_num_batched_requests
@@ -696,22 +700,24 @@ class PersistentKernel:
         lse: DTensor,
         output_tmp: DTensor,
         output: DTensor,
+        attention_params: tuple,
         grid_dim: tuple,
         block_dim: tuple,
     ):
-        assert lse.num_dims == 3  # (num_tokens, num_chunks, num_q_heads)
+        assert lse.num_dims == 3  # (num_tokens, num_kv_chunks * num_qo_per_kv / world_size, num_kv_heads)
         assert output_tmp.num_dims == 3  # (num_tokens, num_chunks, hidden_size / world_size)
         assert output.num_dims == 2  # (num_tokens, hidden_size / world_size)
 
-        num_q_heads = lse.dim(2)
-        head_dim = output.dim(1) / num_q_heads
+        num_q_heads = attention_params[0]
+        head_dim = attention_params[1]
         num_qo_heads_per_kv = num_q_heads / grid_dim[1]
-
+        num_kv_heads = grid_dim[1]
         # params[0]: num_qo_heads_per_kv
         # params[1]: head_dim
         # params[2]: max_seq_len
         # params[3]: page_size
-        params = [num_qo_heads_per_kv, head_dim, self.max_seq_length, self.page_size]
+        # params[4]: num_kv_heads
+        params = [num_qo_heads_per_kv, head_dim, self.max_seq_length, self.page_size, num_kv_heads]
 
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         tb_graph.new_input(lse, (-1, 2, -1), -1, True)

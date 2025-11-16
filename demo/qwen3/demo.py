@@ -303,13 +303,15 @@ if __name__ == "__main__":
             io_category="cuda_tensor",
         )
         lse = mpk.new_tensor(
-            dims=(args.max_num_batched_tokens, num_kv_cache_chunks, num_local_q_heads),
+            dims=(args.max_num_batched_tokens, num_kv_cache_chunks * num_local_q_heads // num_local_kv_heads, num_local_kv_heads),
+            strides=(num_kv_cache_chunks * num_local_q_heads, 1, num_kv_cache_chunks * num_local_q_heads // num_local_kv_heads),
             dtype=mi.float32,
             name="lse",
             io_category="cuda_tensor",
         )
         attn_out_tmp = mpk.new_tensor(
-            dims=(args.max_num_batched_tokens, num_kv_cache_chunks, num_local_q_heads * head_dim),
+            dims=(args.max_num_batched_tokens, num_kv_cache_chunks * num_local_q_heads // num_local_kv_heads * head_dim, num_local_kv_heads),
+            strides=(num_kv_cache_chunks * num_local_q_heads, 1, num_kv_cache_chunks * num_local_q_heads // num_local_kv_heads * head_dim),
             dtype=mi.bfloat16,
             name="attn_out_tmp",
             io_category="cuda_tensor",
@@ -466,7 +468,7 @@ if __name__ == "__main__":
             )
             k_cache = mpk.attach_input(
                 torch_tensor=model.model.kv_cache[0][i], name=f"layer_{i}_k_cache"
-            )
+            ) 
             v_cache = mpk.attach_input(
                 torch_tensor=model.model.kv_cache[1][i], name=f"layer_{i}_v_cache"
             )
@@ -495,6 +497,7 @@ if __name__ == "__main__":
                     sin_pos_embed=sin_pos_embed,
                     lse=lse,
                     output=attn_out_tmp,
+                    attention_params=(num_local_q_heads, num_kv_cache_chunks),
                     grid_dim=(mpk.max_num_batched_requests, num_local_kv_heads, num_kv_cache_chunks),
                     block_dim=(128, 1, 1),
                 )
@@ -503,6 +506,7 @@ if __name__ == "__main__":
                     lse=lse,
                     output_tmp=attn_out_tmp,
                     output=attn_out,
+                    attention_params=(num_local_q_heads, head_dim),
                     grid_dim=(mpk.max_num_batched_requests, num_local_kv_heads, 1),
                     block_dim=(128, 1, 1),
                 )

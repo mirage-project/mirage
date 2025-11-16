@@ -33,6 +33,7 @@ namespace kernel {
 template <typename T,
           int NUM_QO_HEADS,
           int NUM_KV_HEADS,
+          int NUM_QO_GROUPS,
           int KV_CACHE_STRIDE,
           int QKV_STRIDE,
           int O_STRIDE,
@@ -63,11 +64,9 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl_32_64_split
     float k_eps,
     void *lse,
     int kv_idx) {
-  if (threadIdx.x == 0){
-    // printf("blockIdx.x %d, NUM_QO_HEADS %d, start multitoken_paged_attention_32_64_split_kv, qkv_ptr %p, paged_k_cache_ptr %p, paged_v_cache_ptr %p, output_ptr %p\n", blockIdx.x, NUM_QO_HEADS, qkv_ptr, paged_k_cache_ptr, paged_v_cache_ptr, output_ptr);
-  }
-  return;
+
   if (threadIdx.x >= 128) return;
+  
   constexpr int NUM_QO_PER_KV = NUM_QO_HEADS / NUM_KV_HEADS;
 
   constexpr int CP_CHUNK_SIZE = 16 / sizeof(T);
@@ -124,9 +123,11 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl_32_64_split
                       paged_kv_last_page_len_buffer_ptr[request_id];
   
   int const global_seq_len = seq_len;
-  
+
   seq_len = PARTITION_KV ? (((seq_len - kv_idx * SEQ_LEN) >= SEQ_LEN) ? SEQ_LEN : (seq_len - kv_idx * SEQ_LEN)) : seq_len;  
-  if (seq_len < 0) {
+
+  
+  if (seq_len <= 0) {
     return;
   }
 
@@ -323,15 +324,24 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl_32_64_split
       // load from KV Cache
       // int page_idx = page_indices[(dst_row + cp_finished_seq_len) /
       // PAGE_SIZE];
-      int page_offset = (dst_row + cp_finished_seq_len) % PAGE_SIZE;
+      int page_offset = (dst_row + cp_finished_seq_len + kv_cache_offset) % PAGE_SIZE;
       int src_row = page_idx_0 * PAGE_SIZE + page_offset;
       load_smem(k_buffer_smem(dst_row, col), paged_k_cache_dmem(src_row, col));
       load_smem(v_buffer_smem(dst_row, col), paged_v_cache_dmem(src_row, col));
+
+      // if((float)k_buffer_smem.at(dst_row, col) >=  0.2f){
+      //   printf("kv idx %d, dst_row %d, dst_col %d, src_row %d, value %f\n", kv_idx, dst_row, col, src_row, (float)k_buffer_smem.at(dst_row, col));
+      // }
+
+      
     } else {
       // load from QKV
       int src_row = dst_row + cp_finished_seq_len - (seq_len - num_tokens);
       load_smem(k_buffer_smem(dst_row, col), k_dmem(src_row, col));
       load_smem(v_buffer_smem(dst_row, col), v_dmem(src_row, col));
+      // if((float)k_buffer_smem.at(dst_row, col) >=  0.2f){
+      //   printf("kv idx %d, dst_row %d, dst_col %d, src_row %d, value %f\n", kv_idx, dst_row, col, src_row, (float)k_buffer_smem.at(dst_row, col));
+      // }
     }
   }
   cp_async_fence();
@@ -379,6 +389,10 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl_32_64_split
           //    page_indices[(dst_row + cp_finished_seq_len) / PAGE_SIZE];
           int page_offset = (dst_row + cp_finished_seq_len + kv_cache_offset) % PAGE_SIZE;
           int src_row = page_idx * PAGE_SIZE + page_offset;
+
+          // if((float)k_buffer_smem.at(dst_row, col) >= 0.2f){
+          //   printf("kv idx %d, dst_row %d, dst_col %d, src_row %d, value %f\n", kv_idx, dst_row, col, src_row, (float)k_buffer_smem.at(dst_row, col));
+          // }
           load_smem(k_smem(dst_row, col), (paged_k_cache_dmem(src_row, col)));
           load_smem(v_smem(dst_row, col), (paged_v_cache_dmem(src_row, col)));
         } else {
@@ -387,6 +401,9 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl_32_64_split
           int src_row = dst_row + cp_finished_seq_len - (seq_len - num_tokens);
           // if(threadIdx.x == 0){
             // printf("blockIdx.x %d, src_row %d, dst_row %d, col %d\n", blockIdx.x, src_row, dst_row, col);
+          // }
+          // if((float)k_buffer_smem.at(dst_row, col) >= 0.2f){
+          //   printf("kv idx %d, dst_row %d, dst_col %d, src_row %d, value %f\n", kv_idx, dst_row, col, src_row, (float)k_buffer_smem.at(dst_row, col));
           // }
           load_smem(k_smem(dst_row, col), (k_dmem(src_row, col)));
           load_smem(v_smem(dst_row, col), (v_dmem(src_row, col)));
@@ -438,9 +455,9 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl_32_64_split
             0 /*token_offset*/,
             rope,
             static_cast<T const *>(cos_ptr) +
-                (seq_len - num_tokens) * HEAD_DIM,
+                (global_seq_len - num_tokens) * HEAD_DIM,
             static_cast<T const *>(sin_ptr) +
-                (seq_len - num_tokens) * HEAD_DIM);
+                (global_seq_len - num_tokens) * HEAD_DIM);
       }
       // K norm
       if (kv_tokens_to_process > 0) {
@@ -458,9 +475,9 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl_32_64_split
             curr_iter_len - kv_tokens_to_process,
             rope,
             static_cast<T const *>(cos_ptr) +
-                first_kv_token_to_process * HEAD_DIM,
+                (first_kv_token_to_process + kv_cache_offset) * HEAD_DIM,
             static_cast<T const *>(sin_ptr) +
-                first_kv_token_to_process * HEAD_DIM);
+                (first_kv_token_to_process + kv_cache_offset) * HEAD_DIM);
       }
     } else if (rope) {
       if (iter == 0) {
@@ -476,9 +493,9 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl_32_64_split
                                   CONSUMER_WARPGROUP_SYNC_BARRIER_ID>(
               q_smem,
               static_cast<T const *>(cos_ptr) +
-                  (token_idx + seq_len - num_tokens) * HEAD_DIM,
+                  (token_idx + global_seq_len - num_tokens) * HEAD_DIM,
               static_cast<T const *>(sin_ptr) +
-                  (token_idx + seq_len - num_tokens) * HEAD_DIM,
+                  (token_idx + global_seq_len - num_tokens) * HEAD_DIM,
               token_idx);
         }
       }
@@ -495,9 +512,9 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl_32_64_split
                                   CONSUMER_WARPGROUP_SYNC_BARRIER_ID>(
               k_smem,
               static_cast<T const *>(cos_ptr) +
-                  (token_idx + first_kv_token_to_process) * HEAD_DIM,
+                  (token_idx + first_kv_token_to_process + kv_cache_offset) * HEAD_DIM,
               static_cast<T const *>(sin_ptr) +
-                  (token_idx + first_kv_token_to_process) * HEAD_DIM,
+                  (token_idx + first_kv_token_to_process + kv_cache_offset) * HEAD_DIM,
               token_idx + curr_iter_len - kv_tokens_to_process);
         }
       }
@@ -515,13 +532,15 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl_32_64_split
         int col = elem_idx % HEAD_DIM;
         // int page_idx = page_indices[(token_idx + first_kv_token_to_process) /
         // PAGE_SIZE];
-        int page_offset = (token_idx + first_kv_token_to_process) % PAGE_SIZE;
+        int page_offset = (token_idx + first_kv_token_to_process + kv_cache_offset) % PAGE_SIZE;
         int src_row = (token_idx + first_kv_token_to_process) % KV_TILE_SIZE;
         int dst_row = page_idx * PAGE_SIZE + page_offset;
         paged_k_cache_dmem.at(dst_row, col) = k_smem.at(src_row, col);
         paged_v_cache_dmem.at(dst_row, col) = v_smem.at(src_row, col);
       }
     }
+
+    // printf("kv idx %d, kv cache first value %f, kv_tokens_to_process %d\n", kv_idx, (float)paged_k_cache_dmem.at(0, 0), kv_tokens_to_process);
 
     // compute X = QK^T
     // NOTE(Jinchen): we use m16n16k16 mma, and let warp layout be
@@ -561,10 +580,9 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl_32_64_split
           ldsm(src_ptr_Q, q_frag);
           ldsm(src_ptr_KT, kt_frag);
 
-          //     if(threadIdx.x == 0 && iter == 3){
-          //     printf("q frag is n %d, k %d, value %d\n", n,k, q_frag[0]);
-          //     printf("kt_frag frag is n %d, k %d, kt_col %d,curr_iter_len %d,
-          //     value %d\n", n,k, kt_col, curr_iter_len , kt_frag[0]);
+          // if(threadIdx.x == 0 ){
+          //     printf("kv idx %d, q frag is n %d, k %d, value %f\n", kv_idx, n,k, (float)src_ptr_Q[0]);
+          //     printf("kv idx %d, kt_frag frag is n %d, k %d, kt_col %d,curr_iter_len %d, value %f\n", kv_idx, n,k, kt_col, curr_iter_len , (float)src_ptr_KT[0]);
           // }
           mma_m16n16k16_bf16bf16bf32(
               x_frag_f[m][n], q_frag, kt_frag, x_frag_f[m][n]);
@@ -572,6 +590,10 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl_32_64_split
       }
     }
     wg_sync<128>(CONSUMER_WARPGROUP_SYNC_BARRIER_ID);
+
+    // if(threadIdx.x == 0){
+    //   printf("QKT, kv idx %d, x_frag_f[0][0][0] %f\n", kv_idx, x_frag_f[0][0][0]);
+    // }
 
 
 
@@ -761,7 +783,8 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl_32_64_split
     int dst_col = src_col + (src_row % NUM_QO_PER_KV) * HEAD_DIM;
 
     // printf("blockIdx.x %d, threadIdx.x %d, dst_row %d, dst_col %d, val %f\n",blockIdx.x,  threadIdx.x, dst_row, dst_col, (float)o_smem.at(src_row, src_col));
-   o_dmem.at(dst_row, dst_col) = o_smem.at(src_row, src_col);
+   
+    o_dmem.at(dst_row, dst_col) = o_smem.at(src_row, src_col);
   }
 
   //store the log exp sum if use split KV
@@ -773,11 +796,13 @@ if(PARTITION_KV){
         for (uint32_t j = 0; j < 2; ++j) {
          int idx = m * 64 + warp_idx * 16 + j * 8 + lane_idx / 4;
          if(idx < (num_tokens * NUM_QO_HEADS)){
-            reinterpret_cast<float *>(lse)[idx] = ptx_log2(d[m][j]) + m_local[m][j];
 
-            // if(blockIdx.x == 0 && j == 0 ){
-            //   printf("d %f, m %f\n", d[m][j], m_local[m][j]);
-            // }
+            int token_idx = idx / NUM_QO_HEADS;
+            int head_idx = idx % NUM_QO_HEADS;
+
+            int offset = head_idx + token_idx * NUM_KV_CHUNKS * NUM_QO_HEADS * NUM_QO_GROUPS;
+            
+            reinterpret_cast<float *>(lse)[offset] = ptx_log2(d[m][j]) + m_local[m][j];
          }
          
     }
@@ -785,8 +810,6 @@ if(PARTITION_KV){
   wg_sync<128>(CONSUMER_WARPGROUP_SYNC_BARRIER_ID);
   }
 
-  if (threadIdx.x == 0){
-    // printf("blockIdx.x %d, NUM_QO_HEADS %d, end multitoken_paged_attention_32_64_split_kv, qkv_ptr %p, paged_k_cache_ptr %p, paged_v_cache_ptr %p, output_ptr %p\n", blockIdx.x, NUM_QO_HEADS, qkv_ptr, paged_k_cache_ptr, paged_v_cache_ptr, output_ptr);
-  }
+
 }
 } // namespace kernel

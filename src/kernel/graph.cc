@@ -637,7 +637,7 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
   } else if (name == "paged_attention_split_kv_sm100") {
     int variant_id = task_register->register_paged_attention_split_kv_sm100_task(
         customized->bgraph, params);
-    task_config[op] = std::make_tuple(8, 1, TASK_PAGED_ATTENTION_SPLIT_KV_SM100, variant_id);
+    task_config[op] = std::make_tuple(7, 2, TASK_PAGED_ATTENTION_SPLIT_KV_SM100, variant_id);
   } else if (name == "paged_attention_split_kv_merge_sm100") {
     int variant_id = task_register->register_paged_attention_split_kv_merge_sm100_task(
         customized->bgraph, params);

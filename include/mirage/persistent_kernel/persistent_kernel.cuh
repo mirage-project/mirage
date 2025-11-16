@@ -1106,6 +1106,10 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
   std::vector<TaskDesc> all_tasks;
   for (auto const &ft : all_fulltasks) {
     TaskDesc task_desc(ft);
+    // if (ft.task_type == TASK_PAGED_ATTENTION_SPLIT_KV_SM100 || ft.task_type == TASK_PAGED_ATTENTION_SPLIT_KV_MERGE_SM100) {
+    //   printf("ft.kv_idx %d\n", ft.kv_idx);
+    //   printf("ft.merge_task_offset %d\n", ft.merge_task_offset);
+    // }
     // Reinterpret part of TaskDesc to save xfer_size information
     if (ft.task_type == TASK_NVSHMEM_COPY) {
       int size_in_bytes = 2;
