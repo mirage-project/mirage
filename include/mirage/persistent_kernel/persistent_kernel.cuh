@@ -58,6 +58,18 @@ using namespace kernel;
 #endif
 #define INIT_NUM_THREADS 128
 
+#ifndef CUDA_CHECK
+#define CUDA_CHECK(call)                                                      \
+    do {                                                                      \
+        cudaError_t err = call;                                               \
+        if (err != cudaSuccess) {                                             \
+            fprintf(stderr, "CUDA error at %s:%d: %s\n",                      \
+                    __FILE__, __LINE__, cudaGetErrorString(err));             \
+            exit(1);                                                          \
+        }                                                                     \
+    } while (0)
+#endif
+
 __device__ __forceinline__ void
     _execute_task(TaskDesc const *task_desc,
                   RuntimeConfig const &runtime_config);

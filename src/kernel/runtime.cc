@@ -774,7 +774,7 @@ TaskGraphResult print_task_graph(
         for (int i = 0; i < desc.tensor.num_dims; i++) {
           size *= desc.tensor.dim[i];
         }
-        code.e("cudaMalloc(&$, $);", desc.name, size);
+        code.e("CUDA_CHECK(cudaMalloc(&$, $));", desc.name, size);
         if (use_json_format) {
           code.e("all_tensors[\"$\"] = $;", desc.name, desc.name);
         }
@@ -787,6 +787,7 @@ TaskGraphResult print_task_graph(
           size *= desc.tensor.dim[i];
         }
         code.e("void *$ = nvshmem_malloc($);", desc.name, size);
+        code.e("assert($ != nullptr);", desc.name);
         if (use_json_format) {
           code.e("all_tensors[\"$\"] = $;", desc.name, desc.name);
         }
@@ -799,7 +800,7 @@ TaskGraphResult print_task_graph(
         for (int i = 0; i < desc.tensor.num_dims; i++) {
           size *= desc.tensor.dim[i];
         }
-        code.e("cudaMalloc(&$, $);", desc.name, size);
+        code.e("CUDA_CHECK(cudaMalloc(&$, $));", desc.name, size);
 
         size_t bytes_per_row = size / desc.tensor.dim[0];
         size_t bytes_per_group = 0;
@@ -813,9 +814,9 @@ TaskGraphResult print_task_graph(
         }
         size_t start_addr_offset = 0;
         for (int i = 0; i < desc.sub_descs.size(); i++) {
-          code.e("cudaMemcpy2DAsync(reinterpret_cast<void *>($ + $), $, "
+          code.e("CUDA_CHECK(cudaMemcpy2DAsync(reinterpret_cast<void *>($ + $), $, "
                  "reinterpret_cast<const void *>($), $, $, $, "
-                 "cudaMemcpyDeviceToDevice);",
+                 "cudaMemcpyDeviceToDevice));",
                  desc.name,         /*dst address*/
                  start_addr_offset, /*dst bytes offset between each copy*/
                  bytes_per_group,   /*dst bytes offset between each copy*/
