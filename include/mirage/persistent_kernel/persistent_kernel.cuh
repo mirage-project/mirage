@@ -1262,6 +1262,9 @@ extern "C" void launch_persistent_kernel() {
                      dim3(128, 1, 1)>>>(global_runtime_config,
                                         end_of_task_graph_event_pos);
     cudaDeviceSynchronize();
+#ifdef USE_NVSHMEM
+    nvshmem_barrier_all();
+#endif
   }
   int num_schedulers = global_runtime_config.num_local_schedulers +
                        global_runtime_config.num_remote_schedulers;
