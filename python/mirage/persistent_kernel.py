@@ -967,8 +967,8 @@ class PersistentKernel:
             
         if output_dir is not None:
             os.makedirs(output_dir, exist_ok=True)
-            shutil.copy(cuda_code_path, os.path.join(output_dir, "test.cu"))
-            shutil.copy(json_file_path, os.path.join(output_dir, "task_graph.json"))
+            shutil.copy(cuda_code_path, os.path.join(output_dir, f"test_rank{self.mpi_rank}.cu"))
+            shutil.copy(json_file_path, os.path.join(output_dir, f"task_graph_rank{self.mpi_rank}.json"))
 
         cc = shutil.which("nvcc")
         if cc is None:
