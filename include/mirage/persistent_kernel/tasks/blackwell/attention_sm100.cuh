@@ -382,7 +382,7 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
 #pragma unroll
           for (int token_idx = 0; token_idx < num_tokens; token_idx++) {
             // q rope
-            rotary_embedding_sm100<T, QOSmem, NUM_QO_PER_KV, HEAD_DIM>(
+            rotary_embedding_sm100<T, QOSmem, NUM_QO_PER_KV, 1, HEAD_DIM>(
                 q_smem,
                 static_cast<T const *>(cos_ptr) +
                     (token_idx + seq_len - num_tokens) * HEAD_DIM,
@@ -395,7 +395,7 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
           for (int token_idx = 0; token_idx < kv_tokens_to_process;
                token_idx++) {
             // k rope
-            rotary_embedding_sm100<T, KVSmem, 1, HEAD_DIM>(
+            rotary_embedding_sm100<T, KVSmem, 1, 1, HEAD_DIM>(
                 k_smem,
                 static_cast<T const *>(cos_ptr) +
                     (token_idx + first_kv_token_to_process) * HEAD_DIM,
