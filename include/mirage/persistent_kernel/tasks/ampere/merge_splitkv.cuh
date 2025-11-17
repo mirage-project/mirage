@@ -74,20 +74,21 @@ __device__ __forceinline__ void
 
   int thread_in_group = threadIdx.x % THREADS_PER_TOKEN;
   int group_id = threadIdx.x / THREADS_PER_TOKEN;
+  int head_partition = thread_in_group;
 
   // let 16 threads to process one head_dim
-#pragma unroll
+#pragma unroll 1
   for (int tok = group_id; tok < num_tokens * NUM_QO_HEADS_PER_KV;
        tok += num_groups) {
-    int head_partition = thread_in_group;
+    
+    int token_idx = tok / NUM_QO_HEADS_PER_KV;
+    int head_idx = tok % NUM_QO_HEADS_PER_KV;
 
-#pragma unroll
+#pragma unroll 1
     for (int i = 0; i < VAL_PER_THREAD; ++i) {
       float m_global = -inf;
       float d_global = 1.f;
       float o_global = 0.f;
-      int token_idx = tok / NUM_QO_HEADS_PER_KV;
-      int head_idx = tok % NUM_QO_HEADS_PER_KV;
 #pragma unroll
       for (int kv_idx = 0; kv_idx < num_chunks; ++kv_idx) {
         // process 8 tokens
