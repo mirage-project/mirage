@@ -31,11 +31,11 @@ struct dmem_row {
     return &base_ptr[logical_idx];
   }
 
-__device__ __forceinline__ size_t offset(size_t logical_idx_row,
-      size_t logical_idx_col) {
-  size_t logical_idx = logical_idx_row * STRIDE + logical_idx_col;
-  // assert(logical_idx < (ROW*COL));
-  return logical_idx;
+  __device__ __forceinline__ size_t offset(size_t logical_idx_row,
+                                           size_t logical_idx_col) {
+    size_t logical_idx = logical_idx_row * STRIDE + logical_idx_col;
+    // assert(logical_idx < (ROW*COL));
+    return logical_idx;
   }
 
   __device__ __forceinline__ T &at(size_t logical_idx) {

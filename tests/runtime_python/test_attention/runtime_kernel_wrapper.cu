@@ -1,7 +1,7 @@
 
 #include "bfloat16.h"
-#include "multitoken_paged_attention_32_64_split_kv.cuh"
 #include "merge_splitkv.cuh"
+#include "multitoken_paged_attention_32_64_split_kv.cuh"
 #include "single_batch_decoding.cuh"
 #include <cstdio>
 #include <cuda_runtime.h>
@@ -186,44 +186,44 @@ __global__ void multitoken_paged_attention_wrapper(
     void *o_tmp,
     void *lse_tmp) {
 
-  float* lse_base = static_cast<float*>(lse_tmp);
-  float* lse_block = lse_base + NUM_QO_HEADS * MAX_TOKENS * blockIdx.x;
+  float *lse_base = static_cast<float *>(lse_tmp);
+  float *lse_block = lse_base + NUM_QO_HEADS * MAX_TOKENS * blockIdx.x;
 
-  T* o_tmp_base = static_cast<T*>(o_tmp);
-  T* o_tmp_block = o_tmp_base + NUM_QO_HEADS * MAX_TOKENS * HEAD_DIM * blockIdx.x;
-  kernel::multitoken_paged_attention_task_impl_32_64_split_kv<
-      T,
-      NUM_QO_HEADS,
-      NUM_KV_HEADS,
-      KV_CACHE_STRIDE,
-      QKV_STRIDE,
-      O_STRIDE,
-      HEAD_DIM,
-      256,
-      MAX_SEQ_LEN,
-      PAGE_SIZE,
-      MAX_TOKENS,
-      PARTITION_KV>(qkv_ptr,
-                    paged_k_cache_ptr,
-                    paged_v_cache_ptr,
-                    reinterpret_cast<void*>(o_tmp_block),
-                    qo_indptr_buffer_ptr,
-                    paged_kv_indptr_buffer_ptr,
-                    paged_kv_indices_buffer_ptr,
-                    paged_kv_last_page_len_buffer_ptr,
-                    request_id,
-                    qk_norm,
-                    rope,
-                    q_norm_weight_ptr,
-                    k_norm_weight_ptr,
-                    cos_ptr,
-                    sin_ptr,
-                    q_eps,
-                    k_eps,
-                    reinterpret_cast<void*>(lse_block),
-                    blockIdx.x);
+  T *o_tmp_base = static_cast<T *>(o_tmp);
+  T *o_tmp_block =
+      o_tmp_base + NUM_QO_HEADS * MAX_TOKENS * HEAD_DIM * blockIdx.x;
+  kernel::multitoken_paged_attention_task_impl_32_64_split_kv<T,
+                                                              NUM_QO_HEADS,
+                                                              NUM_KV_HEADS,
+                                                              KV_CACHE_STRIDE,
+                                                              QKV_STRIDE,
+                                                              O_STRIDE,
+                                                              HEAD_DIM,
+                                                              256,
+                                                              MAX_SEQ_LEN,
+                                                              PAGE_SIZE,
+                                                              MAX_TOKENS,
+                                                              PARTITION_KV>(
+      qkv_ptr,
+      paged_k_cache_ptr,
+      paged_v_cache_ptr,
+      reinterpret_cast<void *>(o_tmp_block),
+      qo_indptr_buffer_ptr,
+      paged_kv_indptr_buffer_ptr,
+      paged_kv_indices_buffer_ptr,
+      paged_kv_last_page_len_buffer_ptr,
+      request_id,
+      qk_norm,
+      rope,
+      q_norm_weight_ptr,
+      k_norm_weight_ptr,
+      cos_ptr,
+      sin_ptr,
+      q_eps,
+      k_eps,
+      reinterpret_cast<void *>(lse_block),
+      blockIdx.x);
 }
-
 
 template <typename T,
           int NUM_QO_HEADS,
@@ -236,16 +236,30 @@ template <typename T,
           int PAGE_SIZE,
           int MAX_TOKENS = 16,
           bool PARTITION_KV = true>
-__global__ void merge_splitkv_wrapper(
-    int const *qo_indptr_buffer_ptr,
-    int const *paged_kv_indptr_buffer_ptr,
-    int const *paged_kv_last_page_len_buffer_ptr,
-    int request_id,
-    void *o_tmp,
-    void *lse_tmp,
-    void *output_ptr) {
-      kernel::merge_splitkv<T, NUM_QO_HEADS, NUM_KV_HEADS, HEAD_DIM, MAX_TOKENS, PARTITION_KV, (MAX_SEQ_LEN / 256), 256, PAGE_SIZE>(lse_tmp, o_tmp, qo_indptr_buffer_ptr, paged_kv_indptr_buffer_ptr, paged_kv_last_page_len_buffer_ptr, request_id, output_ptr);               
-    }
+__global__ void
+    merge_splitkv_wrapper(int const *qo_indptr_buffer_ptr,
+                          int const *paged_kv_indptr_buffer_ptr,
+                          int const *paged_kv_last_page_len_buffer_ptr,
+                          int request_id,
+                          void *o_tmp,
+                          void *lse_tmp,
+                          void *output_ptr) {
+  kernel::merge_splitkv<T,
+                        NUM_QO_HEADS,
+                        NUM_KV_HEADS,
+                        HEAD_DIM,
+                        MAX_TOKENS,
+                        PARTITION_KV,
+                        (MAX_SEQ_LEN / 256),
+                        256,
+                        PAGE_SIZE>(lse_tmp,
+                                   o_tmp,
+                                   qo_indptr_buffer_ptr,
+                                   paged_kv_indptr_buffer_ptr,
+                                   paged_kv_last_page_len_buffer_ptr,
+                                   request_id,
+                                   output_ptr);
+}
 
 template <typename T,
           int NUM_QO_HEADS,
@@ -277,7 +291,7 @@ void launch_multitoken_paged_attention(
     float q_eps,
     float k_eps,
     void *o_tmp_ptr,
-   void *lse_tmp_ptr) {
+    void *lse_tmp_ptr) {
 
   dim3 grid_dim(PARTITION_KV ? MAX_SEQ_LEN / 256 : 1, 1, 1);
   dim3 block_dim(128, 1, 1);
@@ -286,20 +300,19 @@ void launch_multitoken_paged_attention(
 
   size_t smem_size = mirage::runtime::MAX_DYNAMIC_SHARED_MEMORY_SIZE;
 
-  cudaFuncSetAttribute(
-      multitoken_paged_attention_wrapper<T,
-                                         NUM_QO_HEADS,
-                                         NUM_KV_HEADS,
-                                         KV_CACHE_STRIDE,
-                                         QKV_STRIDE,
-                                         O_STRIDE,
-                                         HEAD_DIM,
-                                         MAX_SEQ_LEN,
-                                         PAGE_SIZE,
-                                         MAX_TOKENS,
-                                        PARTITION_KV>,
-      cudaFuncAttributeMaxDynamicSharedMemorySize,
-      smem_size);
+  cudaFuncSetAttribute(multitoken_paged_attention_wrapper<T,
+                                                          NUM_QO_HEADS,
+                                                          NUM_KV_HEADS,
+                                                          KV_CACHE_STRIDE,
+                                                          QKV_STRIDE,
+                                                          O_STRIDE,
+                                                          HEAD_DIM,
+                                                          MAX_SEQ_LEN,
+                                                          PAGE_SIZE,
+                                                          MAX_TOKENS,
+                                                          PARTITION_KV>,
+                       cudaFuncAttributeMaxDynamicSharedMemorySize,
+                       smem_size);
 
   multitoken_paged_attention_wrapper<T,
                                      NUM_QO_HEADS,
@@ -329,25 +342,24 @@ void launch_multitoken_paged_attention(
                                            sin_ptr,
                                            q_eps,
                                            k_eps,
-                                          o_tmp_ptr,
-                                        lse_tmp_ptr);
+                                           o_tmp_ptr,
+                                           lse_tmp_ptr);
 
   cudaDeviceSynchronize();
 
-
-  cudaFuncSetAttribute(
-    merge_splitkv_wrapper<T,
-                          NUM_QO_HEADS,
-                          NUM_KV_HEADS,
-                          KV_CACHE_STRIDE,
-                          QKV_STRIDE,
-                          O_STRIDE,
-                          HEAD_DIM,
-                          MAX_SEQ_LEN,
-                          PAGE_SIZE,
-                          MAX_TOKENS,
-                          PARTITION_KV>,
-  cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
+  cudaFuncSetAttribute(merge_splitkv_wrapper<T,
+                                             NUM_QO_HEADS,
+                                             NUM_KV_HEADS,
+                                             KV_CACHE_STRIDE,
+                                             QKV_STRIDE,
+                                             O_STRIDE,
+                                             HEAD_DIM,
+                                             MAX_SEQ_LEN,
+                                             PAGE_SIZE,
+                                             MAX_TOKENS,
+                                             PARTITION_KV>,
+                       cudaFuncAttributeMaxDynamicSharedMemorySize,
+                       smem_size);
 
   merge_splitkv_wrapper<T,
                         NUM_QO_HEADS,
@@ -359,8 +371,14 @@ void launch_multitoken_paged_attention(
                         MAX_SEQ_LEN,
                         PAGE_SIZE,
                         MAX_TOKENS,
-                        PARTITION_KV>
-                        <<<dim3(1,1,1), block_dim, smem_size>>>(qo_indptr_buffer_ptr, paged_kv_indptr_buffer_ptr, paged_kv_last_page_len_buffer_ptr, request_id, o_tmp_ptr, lse_tmp_ptr, output_ptr);
+                        PARTITION_KV><<<dim3(1, 1, 1), block_dim, smem_size>>>(
+      qo_indptr_buffer_ptr,
+      paged_kv_indptr_buffer_ptr,
+      paged_kv_last_page_len_buffer_ptr,
+      request_id,
+      o_tmp_ptr,
+      lse_tmp_ptr,
+      output_ptr);
 
   cudaDeviceSynchronize();
 
@@ -467,36 +485,36 @@ void launch_multitoken_paged_attention(
   // cudaEventDestroy(stop);
 }
 
-template<typename T,
-         int NUM_QO_HEADS,
-         int NUM_KV_HEADS,
-         int KV_CACHE_STRIDE,
-         int QKV_STRIDE,
-         int O_STRIDE,
-         int HEAD_DIM,
-         int PAGE_SIZE,
-         int MAX_TOKENS>
+template <typename T,
+          int NUM_QO_HEADS,
+          int NUM_KV_HEADS,
+          int KV_CACHE_STRIDE,
+          int QKV_STRIDE,
+          int O_STRIDE,
+          int HEAD_DIM,
+          int PAGE_SIZE,
+          int MAX_TOKENS>
 void launch_multitoken_paged_attention_dispatch(
-    void const* qkv_ptr,
-    void* paged_k_cache_ptr,
-    void* paged_v_cache_ptr,
-    void* output_ptr,
-    int const* qo_indptr_buffer_ptr,
-    int const* paged_kv_indptr_buffer_ptr,
-    int const* paged_kv_indices_buffer_ptr,
-    int const* paged_kv_last_page_len_buffer_ptr,
+    void const *qkv_ptr,
+    void *paged_k_cache_ptr,
+    void *paged_v_cache_ptr,
+    void *output_ptr,
+    int const *qo_indptr_buffer_ptr,
+    int const *paged_kv_indptr_buffer_ptr,
+    int const *paged_kv_indices_buffer_ptr,
+    int const *paged_kv_last_page_len_buffer_ptr,
     int request_id,
     bool qk_norm,
     bool rope,
-    void const* q_norm_weight_ptr,
-    void const* k_norm_weight_ptr,
-    void const* cos_ptr,
-    void const* sin_ptr,
+    void const *q_norm_weight_ptr,
+    void const *k_norm_weight_ptr,
+    void const *cos_ptr,
+    void const *sin_ptr,
     float q_eps,
     float k_eps,
-    void* o_tmp_ptr,
-    void* lse_tmp_ptr,
-  int seq_len) {
+    void *o_tmp_ptr,
+    void *lse_tmp_ptr,
+    int seq_len) {
 
   switch (seq_len) {
     case 256:
@@ -563,7 +581,7 @@ void launch_multitoken_paged_attention_dispatch(
           lse_tmp_ptr);
       break;
 
-      case 1024:
+    case 1024:
       launch_multitoken_paged_attention<T,
                                         NUM_QO_HEADS,
                                         NUM_KV_HEADS,
@@ -595,7 +613,7 @@ void launch_multitoken_paged_attention_dispatch(
           lse_tmp_ptr);
       break;
 
-      case 2048:
+    case 2048:
       launch_multitoken_paged_attention<T,
                                         NUM_QO_HEADS,
                                         NUM_KV_HEADS,
@@ -627,7 +645,7 @@ void launch_multitoken_paged_attention_dispatch(
           lse_tmp_ptr);
       break;
 
-      case 4096:
+    case 4096:
       launch_multitoken_paged_attention<T,
                                         NUM_QO_HEADS,
                                         NUM_KV_HEADS,
@@ -659,7 +677,7 @@ void launch_multitoken_paged_attention_dispatch(
           lse_tmp_ptr);
       break;
 
-      case 8192:
+    case 8192:
       launch_multitoken_paged_attention<T,
                                         NUM_QO_HEADS,
                                         NUM_KV_HEADS,
@@ -777,7 +795,7 @@ void multitoken_paged_attention(
       k_eps,
       o_tmp_ptr,
       lse_tmp_ptr,
-    seq_len);
+      seq_len);
 
   cudaError_t err = cudaDeviceSynchronize();
   if (err != cudaSuccess) {

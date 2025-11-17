@@ -635,13 +635,17 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
     task_config[op] =
         std::make_tuple(3, 1, TASK_MOE_MUL_SUM_ADD_SM100, variant_id);
   } else if (name == "paged_attention_split_kv_sm100") {
-    int variant_id = task_register->register_paged_attention_split_kv_sm100_task(
-        customized->bgraph, params);
-    task_config[op] = std::make_tuple(7, 2, TASK_PAGED_ATTENTION_SPLIT_KV_SM100, variant_id);
+    int variant_id =
+        task_register->register_paged_attention_split_kv_sm100_task(
+            customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(7, 2, TASK_PAGED_ATTENTION_SPLIT_KV_SM100, variant_id);
   } else if (name == "paged_attention_split_kv_merge_sm100") {
-    int variant_id = task_register->register_paged_attention_split_kv_merge_sm100_task(
-        customized->bgraph, params);
-    task_config[op] = std::make_tuple(2, 1, TASK_PAGED_ATTENTION_SPLIT_KV_MERGE_SM100, variant_id);
+    int variant_id =
+        task_register->register_paged_attention_split_kv_merge_sm100_task(
+            customized->bgraph, params);
+    task_config[op] = std::make_tuple(
+        2, 1, TASK_PAGED_ATTENTION_SPLIT_KV_MERGE_SM100, variant_id);
   } else {
     printf("Unsupported task name: %s\n", name);
     assert(false && "Unsupported task type");

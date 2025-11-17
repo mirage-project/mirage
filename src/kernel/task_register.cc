@@ -2689,9 +2689,8 @@ int TaskRegister::register_splitk_linear_swapAB_hopper_task(
                                code.to_string());
 }
 
-
 int TaskRegister::register_paged_attention_split_kv_sm100_task(
-  threadblock::Graph const &bgraph, std::vector<int> const &params) {
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
   // params[0]: num_q_heads
   // params[1]: num_kv_heads
   // params[2]: qk_norm
@@ -2736,21 +2735,22 @@ int TaskRegister::register_paged_attention_split_kv_sm100_task(
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
-  code.e("kernel::multitoken_paged_attention_task_impl_32_64_split_kv<bfloat16, $, $, $, $, $, $, "
-        "$, $, $, $, $, $, $>(",
-        num_q_heads / num_kv_heads,
-        1,
-        num_kv_heads,
-        kv_stride,
-        qkv_stride,
-        output_size * num_kv_chunks, // o_stride should consider num_kv_chunks
-        head_dim,
-        SEQ_LEN_PER_BLOCK,
-        max_seq_len,
-        page_size,
-        max_tokens,
-        "true", // PARTITION_KV
-        num_kv_chunks);
+  code.e("kernel::multitoken_paged_attention_split_kv_task_impl<bfloat16, $, "
+         "$, $, $, $, $, "
+         "$, $, $, $, $, $, $>(",
+         num_q_heads / num_kv_heads,
+         1,
+         num_kv_heads,
+         kv_stride,
+         qkv_stride,
+         output_size * num_kv_chunks, // o_stride should consider num_kv_chunks
+         head_dim,
+         SEQ_LEN_PER_BLOCK,
+         max_seq_len,
+         page_size,
+         max_tokens,
+         "true", // PARTITION_KV
+         num_kv_chunks);
   code.e("    task_desc->input_ptrs[0],");
   code.e("    task_desc->input_ptrs[1],");
   code.e("    task_desc->input_ptrs[2],");
@@ -2770,12 +2770,12 @@ int TaskRegister::register_paged_attention_split_kv_sm100_task(
   code.e("    1e-6f,");
   code.e("    task_desc->output_ptrs[0],");
   code.e("    task_desc->kv_idx);");
-  return register_task_variant(TASK_PAGED_ATTENTION_SPLIT_KV_SM100, code.to_string());
+  return register_task_variant(TASK_PAGED_ATTENTION_SPLIT_KV_SM100,
+                               code.to_string());
 }
 
-
 int TaskRegister::register_paged_attention_split_kv_merge_sm100_task(
-  threadblock::Graph const &bgraph, std::vector<int> const &params) {
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
   // params[0]: num_qo_heads_per_kv
   // params[1]: head_dim
   // params[2]: max_seq_len
@@ -2812,27 +2812,27 @@ int TaskRegister::register_paged_attention_split_kv_merge_sm100_task(
   code.inc_indent();
 
   code.e("kernel::merge_splitkv<bfloat16, $, $, $, $, $, $, "
-    "$, $, $>(",
-    num_q_heads_per_kv,
-    1,
-    num_kv_heads,
-    head_dim,
-    max_tokens,
-    true,
-    (max_seq_len / SEQ_LEN_PER_BLOCK),
-    SEQ_LEN_PER_BLOCK,
-    page_size);
-    code.e("    task_desc->input_ptrs[0],");
-    code.e("    task_desc->input_ptrs[1],");
-    code.e("    runtime_config.qo_indptr_buffer,");
-    code.e("    runtime_config.paged_kv_indptr_buffer,");
-    code.e("    runtime_config.paged_kv_last_page_len_buffer,");
-    code.e("    task_desc->request_id,");
-    code.e("    task_desc->output_ptrs[0],");
-    code.e("    task_desc->merge_task_offset);");
-    return register_task_variant(TASK_PAGED_ATTENTION_SPLIT_KV_MERGE_SM100, code.to_string());
+         "$, $, $>(",
+         num_q_heads_per_kv,
+         1,
+         num_kv_heads,
+         head_dim,
+         max_tokens,
+         true,
+         (max_seq_len / SEQ_LEN_PER_BLOCK),
+         SEQ_LEN_PER_BLOCK,
+         page_size);
+  code.e("    task_desc->input_ptrs[0],");
+  code.e("    task_desc->input_ptrs[1],");
+  code.e("    runtime_config.qo_indptr_buffer,");
+  code.e("    runtime_config.paged_kv_indptr_buffer,");
+  code.e("    runtime_config.paged_kv_last_page_len_buffer,");
+  code.e("    task_desc->request_id,");
+  code.e("    task_desc->output_ptrs[0],");
+  code.e("    task_desc->merge_task_offset);");
+  return register_task_variant(TASK_PAGED_ATTENTION_SPLIT_KV_MERGE_SM100,
+                               code.to_string());
 }
-
 
 } // namespace runtime
 } // namespace mirage

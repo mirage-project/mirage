@@ -365,7 +365,7 @@ void register_mugraph(
               (task_type == TASK_PAGED_ATTENTION_1) ||
               (task_type == TASK_PAGED_ATTENTION_2) ||
               (task_type == TASK_PAGED_ATTENTION_HOPPER) ||
-              (task_type == TASK_PAGED_ATTENTION_SPLIT_KV_SM100)||
+              (task_type == TASK_PAGED_ATTENTION_SPLIT_KV_SM100) ||
               (TASK_PAGED_ATTENTION_SPLIT_KV_MERGE_SM100) ||
               (task_type == TASK_ATTN_SM100)) {
             // Note that we assume grid_dim.x corresponds to
@@ -383,8 +383,8 @@ void register_mugraph(
             task.expert_offset = bid.x;
           }
           // Set paged attention split kv task kv_idx
-          if (task_type == TASK_PAGED_ATTENTION_SPLIT_KV_SM100
-             || task_type == TASK_PAGED_ATTENTION_SPLIT_KV_MERGE_SM100) {
+          if (task_type == TASK_PAGED_ATTENTION_SPLIT_KV_SM100 ||
+              task_type == TASK_PAGED_ATTENTION_SPLIT_KV_MERGE_SM100) {
             task.kv_idx = bid.z;
             task.merge_task_offset = bid.y;
           }
@@ -645,7 +645,8 @@ TaskGraphResult print_task_graph(
     code.e("task_desc.request_id = task.at(\"request_id\").get<int>();");
     code.e("task_desc.expert_offset = task.at(\"expert_offset\").get<int>();");
     code.e("task_desc.kv_idx = task.at(\"kv_idx\").get<int>();");
-    code.e("task_desc.merge_task_offset = task.at(\"merge_task_offset\").get<int>();");
+    code.e("task_desc.merge_task_offset = "
+           "task.at(\"merge_task_offset\").get<int>();");
     code.e("if (task.at(\"trigger_event\").is_number_integer()) {");
     code.e("task_desc.trigger_event = task.at(\"trigger_event\").get<unsigned "
            "long long int>();");
@@ -919,16 +920,17 @@ TaskGraphResult print_task_graph(
               assert(task_desc.dependent_event != EVENT_INVALID_ID);
               assert(task_desc.num_inputs == 1);
               assert(task_desc.num_outputs == 1);
-              json json_task = {{"task_type", task_desc.task_type},
-                                {"variant_id", task_desc.variant_id},
-                                {"inputs", {}},
-                                {"outputs", {}},
-                                {"trigger_event", task_desc.trigger_event},
-                                {"dependent_event", task_desc.dependent_event},
-                                {"request_id", task_desc.request_id},
-                                {"expert_offset", task_desc.expert_offset},
-                                {"kv_idx", task_desc.kv_idx},
-                                {"merge_task_offset", task_desc.merge_task_offset}};
+              json json_task = {
+                  {"task_type", task_desc.task_type},
+                  {"variant_id", task_desc.variant_id},
+                  {"inputs", {}},
+                  {"outputs", {}},
+                  {"trigger_event", task_desc.trigger_event},
+                  {"dependent_event", task_desc.dependent_event},
+                  {"request_id", task_desc.request_id},
+                  {"expert_offset", task_desc.expert_offset},
+                  {"kv_idx", task_desc.kv_idx},
+                  {"merge_task_offset", task_desc.merge_task_offset}};
               off_t offset = 0;
               // Add input
               int3 input_map = input_ops[0]->input_map;

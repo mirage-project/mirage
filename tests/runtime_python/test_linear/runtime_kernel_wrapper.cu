@@ -21,21 +21,20 @@ __global__ void linear_kernel_wrapper(void const *input_ptr,
       true);
 }
 
-
-
 template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int REDUCTION_SIZE>
-void launch_linear( void const *input_ptr,
-                                      void const *weight_ptr,
-                                      void const *residual_ptr,
-                                      void *output_ptr) {
+void launch_linear(void const *input_ptr,
+                   void const *weight_ptr,
+                   void const *residual_ptr,
+                   void *output_ptr) {
   dim3 grid_dim(1, 1, 1);
   dim3 block_dim(128, 1, 1);
 
   size_t smem_size = mirage::runtime::MAX_DYNAMIC_SHARED_MEMORY_SIZE;
 
-  cudaFuncSetAttribute(linear_kernel_wrapper<T, BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE>,
-                       cudaFuncAttributeMaxDynamicSharedMemorySize,
-                       smem_size);
+  cudaFuncSetAttribute(
+      linear_kernel_wrapper<T, BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE>,
+      cudaFuncAttributeMaxDynamicSharedMemorySize,
+      smem_size);
 
   cudaEvent_t start, stop;
   cudaEventCreate(&start);
@@ -45,10 +44,8 @@ void launch_linear( void const *input_ptr,
   constexpr int BENCHMARK_RUNS = 1;
 
   linear_kernel_wrapper<T, BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE>
-        <<<grid_dim, block_dim, smem_size>>>(input_ptr,
-                                             weight_ptr,
-                                             residual_ptr,
-                                             output_ptr);
+      <<<grid_dim, block_dim, smem_size>>>(
+          input_ptr, weight_ptr, residual_ptr, output_ptr);
 }
 void linear(torch::Tensor input,
             torch::Tensor weight,
@@ -60,13 +57,8 @@ void linear(torch::Tensor input,
   void const *residual_ptr = residual.data_ptr();
   void *output_ptr = output.data_ptr();
 
-  
-
-  launch_linear<bfloat16,8, 64, 4096>(
-      input_ptr,
-      weight_ptr,
-      residual_ptr,
-      output_ptr);
+  launch_linear<bfloat16, 8, 64, 4096>(
+      input_ptr, weight_ptr, residual_ptr, output_ptr);
 
   cudaError_t err = cudaDeviceSynchronize();
   if (err != cudaSuccess) {
@@ -77,7 +69,5 @@ void linear(torch::Tensor input,
 // pybind11 bindings
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-  m.def("linear",
-        &linear,
-        "linear kernel");
+  m.def("linear", &linear, "linear kernel");
 }
