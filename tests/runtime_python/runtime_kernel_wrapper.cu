@@ -1655,27 +1655,6 @@ void rope(torch::Tensor input,
 
 // Sampling from Logits
 
-template <typename T, typename IdType, int BATCH_SIZE, int VOCAB_SIZE>
-void launch_sampling_from_logits(void const *logits_ptr,
-                                 void *output_ptr,
-                                 uint64_t seed) {
-  dim3 grid_dim(BATCH_SIZE, 1, 1);
-  dim3 block_dim(256, 1, 1);
-  size_t smem_size =
-      sizeof(typename cub::BlockReduce<SamplingDataAndIndex<T, IdType>,
-                                       256,
-                                       SAMPLING_REDUCE_ALGO>::TempStorage);
-
-  sampling_from_logits_kernel<256, 4, T, IdType>
-      <<<grid_dim, block_dim, smem_size>>>((T *)logits_ptr,
-                                           (IdType *)output_ptr,
-                                           nullptr, // indices
-                                           VOCAB_SIZE,
-                                           seed, // philox_seed
-                                           0     // philox_offset
-      );
-}
-
 void sampling_from_logits(torch::Tensor logits,
                           torch::Tensor output,
                           int64_t seed) {
@@ -1685,20 +1664,23 @@ void sampling_from_logits(torch::Tensor logits,
   uint32_t batch_size = logits.size(0);
   uint32_t vocab_size = logits.size(1);
 
-  // Use template dispatch based on vocab size
   if (vocab_size == 50257) {
-    if (batch_size == 1) {
-      launch_sampling_from_logits<float, int, 1, 50257>(
-          logits_ptr, output_ptr, seed);
-    } else if (batch_size == 4) {
-      launch_sampling_from_logits<float, int, 4, 50257>(
-          logits_ptr, output_ptr, seed);
-    } else if (batch_size == 8) {
-      launch_sampling_from_logits<float, int, 8, 50257>(
-          logits_ptr, output_ptr, seed);
-    } else {
-      printf("Unsupported batch size in sampling test: %u\n", batch_size);
-    }
+    dim3 grid_dim(batch_size, 1, 1);
+    dim3 block_dim(256, 1, 1);
+    size_t smem_size =
+        sizeof(typename cub::BlockReduce<SamplingDataAndIndex<float, int>,
+                                         256,
+                                         SAMPLING_REDUCE_ALGO>::TempStorage);
+
+    sampling_from_logits_kernel<256, 4, float, int>
+        <<<grid_dim, block_dim, smem_size>>>(
+            (float *)logits_ptr,
+            (int *)output_ptr,
+            nullptr,      // indices
+            vocab_size,
+            seed,         // philox_seed
+            0             // philox_offset
+        );
   } else {
     printf("Unsupported vocab size in sampling test: %u\n", vocab_size);
   }
