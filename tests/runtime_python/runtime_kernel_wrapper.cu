@@ -1660,12 +1660,12 @@ void launch_sampling_from_logits(void const *logits_ptr,
                                   void *output_ptr,
                                   uint64_t seed) {
   dim3 grid_dim(BATCH_SIZE, 1, 1);
-  dim3 block_dim(1024, 1, 1);
+  dim3 block_dim(256, 1, 1);
   size_t smem_size = sizeof(typename cub::BlockReduce<SamplingDataAndIndex<T, IdType>,
-                                                       1024,
+                                                       256,
                                                        SAMPLING_REDUCE_ALGO>::TempStorage);
 
-  sampling_from_logits_kernel<1024, 4, T, IdType>
+  sampling_from_logits_kernel<256, 4, T, IdType>
       <<<grid_dim, block_dim, smem_size>>>(
           (T*)logits_ptr,
           (IdType*)output_ptr,
