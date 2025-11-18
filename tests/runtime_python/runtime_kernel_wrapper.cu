@@ -17,8 +17,8 @@ using kernel::multitoken_paged_attention_task_impl;
 // using kernel::paged_attention_task_impl;
 using kernel::rotary_embedding;
 using kernel::sampling_from_logits_kernel;
-using kernel::SamplingDataAndIndex;
 using kernel::SAMPLING_REDUCE_ALGO;
+using kernel::SamplingDataAndIndex;
 // using kernel::silu_mul_linear_task_impl;
 // using kernel::single_batch_decoding_kernel;
 // using kernel::single_batch_extend_kernel;
@@ -883,7 +883,7 @@ void launch_norm_linear(void const *input_ptr,
     NORM_LINEAR_DISPATCH_OUTPUT_SIZE(BATCH_SIZE, 256)                          \
     NORM_LINEAR_DISPATCH_OUTPUT_SIZE(BATCH_SIZE, 544)                          \
     NORM_LINEAR_DISPATCH_OUTPUT_SIZE(BATCH_SIZE, 1336)                         \
-    /* NORM_LINEAR_DISPATCH_OUTPUT_SIZE(BATCH_SIZE, 1600) - HEAD_DIM issue */ \
+    /* NORM_LINEAR_DISPATCH_OUTPUT_SIZE(BATCH_SIZE, 1600) - HEAD_DIM issue */  \
     default:                                                                   \
       printf("Unsupported output size in test: %zu\n", output.size(1));        \
       break;                                                                   \
@@ -1073,7 +1073,7 @@ __global__ void rms_norm_kernel_wrapper(void const *input_ptr,
       break;                                                                   \
     /* case 1600: Commented out - HEAD_DIM=1600 violates norm.cuh assertion */ \
     /*   DISPATCH_WINDOW_RMSNORM_LINEAR_WINDOW_SIZE(1600);                  */ \
-    /*   break;                                                              */ \
+    /*   break; */                                                                            \
     default:                                                                   \
       printf("Unsupported head dim in test: %zu\n", head_dim);                 \
       break;                                                                   \
@@ -1657,22 +1657,22 @@ void rope(torch::Tensor input,
 
 template <typename T, typename IdType, int BATCH_SIZE, int VOCAB_SIZE>
 void launch_sampling_from_logits(void const *logits_ptr,
-                                  void *output_ptr,
-                                  uint64_t seed) {
+                                 void *output_ptr,
+                                 uint64_t seed) {
   dim3 grid_dim(BATCH_SIZE, 1, 1);
   dim3 block_dim(256, 1, 1);
-  size_t smem_size = sizeof(typename cub::BlockReduce<SamplingDataAndIndex<T, IdType>,
-                                                       256,
-                                                       SAMPLING_REDUCE_ALGO>::TempStorage);
+  size_t smem_size =
+      sizeof(typename cub::BlockReduce<SamplingDataAndIndex<T, IdType>,
+                                       256,
+                                       SAMPLING_REDUCE_ALGO>::TempStorage);
 
   sampling_from_logits_kernel<256, 4, T, IdType>
-      <<<grid_dim, block_dim, smem_size>>>(
-          (T*)logits_ptr,
-          (IdType*)output_ptr,
-          nullptr,     // indices
-          VOCAB_SIZE,
-          seed,        // philox_seed
-          0            // philox_offset
+      <<<grid_dim, block_dim, smem_size>>>((T *)logits_ptr,
+                                           (IdType *)output_ptr,
+                                           nullptr, // indices
+                                           VOCAB_SIZE,
+                                           seed, // philox_seed
+                                           0     // philox_offset
       );
 }
 
@@ -1688,11 +1688,14 @@ void sampling_from_logits(torch::Tensor logits,
   // Use template dispatch based on vocab size
   if (vocab_size == 50257) {
     if (batch_size == 1) {
-      launch_sampling_from_logits<float, int, 1, 50257>(logits_ptr, output_ptr, seed);
+      launch_sampling_from_logits<float, int, 1, 50257>(
+          logits_ptr, output_ptr, seed);
     } else if (batch_size == 4) {
-      launch_sampling_from_logits<float, int, 4, 50257>(logits_ptr, output_ptr, seed);
+      launch_sampling_from_logits<float, int, 4, 50257>(
+          logits_ptr, output_ptr, seed);
     } else if (batch_size == 8) {
-      launch_sampling_from_logits<float, int, 8, 50257>(logits_ptr, output_ptr, seed);
+      launch_sampling_from_logits<float, int, 8, 50257>(
+          logits_ptr, output_ptr, seed);
     } else {
       printf("Unsupported batch size in sampling test: %u\n", batch_size);
     }
@@ -1753,7 +1756,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("multitoken_paged_attention",
         &multitoken_paged_attention,
         "Multitoken Paged Attention");
-  m.def("sampling_from_logits", &sampling_from_logits, "Sampling from Logits kernel");
+  m.def("sampling_from_logits",
+        &sampling_from_logits,
+        "Sampling from Logits kernel");
   // m.def("rms_norm", &rms_norm, "Window RMSNorm");
   // m.def("rope", &rope, "RoPE kernel");
 }

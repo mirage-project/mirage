@@ -68,7 +68,7 @@ for batch_size in batch_sizes:
         print(f"  Batch {batch_size}: PASS - all {num_trials} samples in valid range [0, {vocab_size})")
 
 
-# Test 4: Statistical frequency test (THE CRITICAL TEST)
+# Test 4: Statistical frequency test
 print("\n=== Test 4: Statistical Frequency Validation ===")
 print("This validates that sampling distribution matches expected probabilities")
 print("Using cosine similarity metric (should be > 0.99 for correct implementation)\n")
