@@ -34,6 +34,10 @@ size_t get_event_id(int my_gpu_id, size_t event_pos, bool nvshmem_event) {
   return event_id;
 }
 
+bool is_nvshmem_event(size_t event_id) {
+  return (event_id & EVENT_NVSHMEM_TAG) > 0;
+}
+
 struct Dim3Comparator {
   bool operator()(dim3 const &a, dim3 const &b) const {
     if (a.x != b.x) {
@@ -177,6 +181,7 @@ void register_mugraph(
   std::vector<tb::TBInputOp *> pre_output_ops;
   kn::KNCustomizedOp const *pre_op = nullptr;
   std::map<dim3, TaskId, Dim3Comparator> pre_task_map;
+  std::unordered_set<size_t> nvshmem_events_idx;
   for (auto const &op : graph.operators) {
     if (op->op_type == type::KNOperatorType::KN_INPUT_OP) {
       continue;
@@ -293,6 +298,8 @@ void register_mugraph(
           } // for bid.z
         }   // for bid.y
       }     // for bid.x
+      // (zepeng) The for loop to transfer strided tensor using nvshmem (hacky)
+      int for_loop = input_ops[0]->dtensor.dim[0];  
       for (bid.x = 0; bid.x < bgraph.grid_dim.x; bid.x++) {
         for (bid.y = 0; bid.y < bgraph.grid_dim.y; bid.y++) {
           for (bid.z = 0; bid.z < bgraph.grid_dim.z; bid.z++) {
@@ -301,13 +308,15 @@ void register_mugraph(
             event_desc_1.event_type = EVENT_LAUNCH_TASKS;
             event_desc_1.first_task_id = all_tasks.size();
             event_desc_1.last_task_id = all_tasks.size() + 1;
-            event_desc_1.num_triggers = num_gpus - 1;
+            // event_desc_1.num_triggers = num_gpus - 1;
+            event_desc_1.num_triggers = (num_gpus - 1) * for_loop;
             assert(ag_pre_task_map.find(bid) != ag_pre_task_map.end());
             std::map<int, TaskId> pre_tasks = ag_pre_task_map.find(bid)->second;
             for (auto const &t : pre_tasks) {
               all_tasks[t.second].trigger_event =
                   get_event_id(t.first, all_events.size(), true);
             }
+            nvshmem_events_idx.insert(all_events.size());
             all_events.push_back(event_desc_1);
             // Step 2: create a task for reduce
             FullTaskDesc task(TASK_REDUCE, 0 /*variant_id*/);
@@ -514,11 +523,15 @@ void register_mugraph(
     if (all_events[e].event_type == EVENT_LAUNCH_TASKS ||
         all_events[e].event_type == EVENT_LAUNCH_MASSIVE_TASKS) {
       all_events[e].event_type = EVENT_EMPTY;
+      bool is_nvshmem_event = false;
+      if (nvshmem_events_idx.count(e) > 0) {
+        is_nvshmem_event = true;
+      }
       for (size_t t = all_events[e].first_task_id;
            t < all_events[e].last_task_id;
            t++) {
         all_tasks[t].dependent_event =
-            get_event_id(my_gpu_id, e, false /*nvshmem_event*/);
+            get_event_id(my_gpu_id, e, is_nvshmem_event /*nvshmem_event*/);
       }
     }
   }
@@ -555,6 +568,11 @@ bool sanity_check(mirage::kernel::Graph const &graph,
         if (event_pos == 0) {
           continue;
         }
+        // These events counts are manually adjusted. Each task of nvshmem cpy
+        // will update BS times of event counter, not just once.
+        if (desc.task_type == runtime::TASK_NVSHMEM_COPY) {
+            event_counts[event_pos] -= desc.inputs[0].dim[0] - 1;
+        }
         assert(event_counts[event_pos] > 0);
         event_counts[event_pos]--;
         if (event_counts[event_pos] == 0) {
@@ -574,8 +592,10 @@ bool sanity_check(mirage::kernel::Graph const &graph,
       }
     }
   }
-  printf("Triggered events: %zu\n", triggered_events.size());
-  printf("Executed tasks: %zu\n", executed_tasks.size());
+  printf("Number of all events: %zu\n", all_events.size());
+  printf("Number of all tasks: %zu\n", all_tasks.size());
+  printf("Number of triggered events: %zu\n", triggered_events.size());
+  printf("Number of executed tasks: %zu\n", executed_tasks.size());
   return true;
 }
 
@@ -762,7 +782,7 @@ TaskGraphResult print_task_graph(
         for (int i = 0; i < desc.tensor.num_dims; i++) {
           size *= desc.tensor.dim[i];
         }
-        code.e("cudaMalloc(&$, $);", desc.name, size);
+        code.e("CUDA_CHECK(cudaMalloc(&$, $));", desc.name, size);
         if (use_json_format) {
           code.e("all_tensors[\"$\"] = $;", desc.name, desc.name);
         }
@@ -775,6 +795,7 @@ TaskGraphResult print_task_graph(
           size *= desc.tensor.dim[i];
         }
         code.e("void *$ = nvshmem_malloc($);", desc.name, size);
+        code.e("assert($ != nullptr);", desc.name);
         if (use_json_format) {
           code.e("all_tensors[\"$\"] = $;", desc.name, desc.name);
         }
@@ -787,7 +808,7 @@ TaskGraphResult print_task_graph(
         for (int i = 0; i < desc.tensor.num_dims; i++) {
           size *= desc.tensor.dim[i];
         }
-        code.e("cudaMalloc(&$, $);", desc.name, size);
+        code.e("CUDA_CHECK(cudaMalloc(&$, $));", desc.name, size);
 
         size_t bytes_per_row = size / desc.tensor.dim[0];
         size_t bytes_per_group = 0;
@@ -801,9 +822,9 @@ TaskGraphResult print_task_graph(
         }
         size_t start_addr_offset = 0;
         for (int i = 0; i < desc.sub_descs.size(); i++) {
-          code.e("cudaMemcpy2DAsync(reinterpret_cast<void *>($ + $), $, "
+          code.e("CUDA_CHECK(cudaMemcpy2DAsync(reinterpret_cast<void *>($ + $), $, "
                  "reinterpret_cast<const void *>($), $, $, $, "
-                 "cudaMemcpyDeviceToDevice);",
+                 "cudaMemcpyDeviceToDevice));",
                  desc.name,         /*dst address*/
                  start_addr_offset, /*dst bytes offset between each copy*/
                  bytes_per_group,   /*dst bytes offset between each copy*/
@@ -1315,12 +1336,14 @@ TaskGraphResult print_task_graph(
   task_type_to_name[TASK_RMS_NORM_LINEAR] = "TASK_RMS_NORM_LINEAR";
   task_type_to_name[TASK_ATTENTION_1] = "TASK_ATTENTION_1";
   task_type_to_name[TASK_SILU_MUL] = "TASK_SILU_MUL";
+  task_type_to_name[TASK_IDENTITY] = "TASK_IDENTITY";
   task_type_to_name[TASK_SILU_MUL_LINEAR_WITH_RESIDUAL] =
       "TASK_SILU_MUL_LINEAR_WITH_RESIDUAL";
   task_type_to_name[TASK_LINEAR] = "TASK_LINEAR";
   task_type_to_name[TASK_LINEAR_WITH_RESIDUAL] = "TASK_LINEAR_WITH_RESIDUAL";
   task_type_to_name[TASK_ARGMAX_PARTIAL] = "TASK_ARGMAX_PARTIAL";
   task_type_to_name[TASK_ARGMAX_REDUCE] = "TASK_ARGMAX_REDUCE";
+  task_type_to_name[TASK_NVSHMEM_COPY] = "TASK_NVSHMEM_COPY";
   task_type_to_name[TASK_REDUCE] = "TASK_REDUCE";
   task_type_to_name[TASK_FIND_NGRAM_PARTIAL] = "TASK_FIND_NGRAM_PARTIAL";
   task_type_to_name[TASK_FIND_NGRAM_GLOBAL] = "TASK_FIND_NGRAM_GLOBAL";

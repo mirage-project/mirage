@@ -11,6 +11,7 @@
 #include "rmsnorm.cuh"
 #include "rotary_embedding.cuh"
 #include "silu_mul.cuh"
+#include "identity.cuh"
 
 #if MIRAGE_USE_CUTLASS_KERNEL
 #include "linear_cutlass.cuh"

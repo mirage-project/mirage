@@ -58,6 +58,18 @@ using namespace kernel;
 #endif
 #define INIT_NUM_THREADS 128
 
+#ifndef CUDA_CHECK
+#define CUDA_CHECK(call)                                                      \
+    do {                                                                      \
+        cudaError_t err = call;                                               \
+        if (err != cudaSuccess) {                                             \
+            fprintf(stderr, "CUDA error at %s:%d: %s\n",                      \
+                    __FILE__, __LINE__, cudaGetErrorString(err));             \
+            exit(1);                                                          \
+        }                                                                     \
+    } while (0)
+#endif
+
 __device__ __forceinline__ void
     _execute_task(TaskDesc const *task_desc,
                   RuntimeConfig const &runtime_config);
@@ -179,7 +191,7 @@ __device__ __forceinline__ bool
 #ifdef MPK_ENABLE_PROFILING
       if (true) {
 #else
-      if ((step + num_tokens >= config.max_seq_length) ||
+      if ((step + num_tokens + 1 >= config.max_seq_length) ||
           ((config.tokens[request_id * MPK_MAX_SEQ_LENGTH + step +
                           num_tokens] == config.eos_token_id) &&
            (step + num_tokens >= prompt_len))) {
@@ -570,7 +582,6 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
       if (task_desc->dependent_event != EVENT_INVALID_ID) {
         // Wait until the event has been triggered enough times
         EventId event_id = task_desc->dependent_event;
-        assert(!is_nvshmem_event(event_id));
         assert(get_event_gpu_id(event_id) == config.my_gpu_id);
         size_t event_index = get_event_position_index(event_id);
         EventCounter needed_counts =
@@ -578,10 +589,17 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
                 config.all_event_num_triggers[event_index]) *
             get_task_iteration_num(task_ids[queue_pos]);
         EventCounter actual_counts = 0;
-        while (actual_counts < needed_counts) {
-          actual_counts =
-              ld_acquire_gpu_u64(&config.all_event_counters[event_index]);
-          __nanosleep(10);
+        if (is_nvshmem_event(event_id)) {
+          nvshmem_signal_wait_until(
+            reinterpret_cast<uint64_t*>(&config.all_event_counters[event_index]), 
+            NVSHMEM_CMP_EQ, 
+            needed_counts);
+        } else {
+          while (actual_counts < needed_counts) {
+            actual_counts =
+                ld_acquire_sys_u64(&config.all_event_counters[event_index]);
+            __nanosleep(10);
+          }
         }
       }
     }
@@ -599,21 +617,6 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
       return;
     } else if (task_desc->task_type == TASK_BEGIN_TASK_GRAPH) {
       // Do nothing
-#ifdef USE_NVSHMEM
-    } else if (task_desc->task_type == TASK_NVSHMEM_COPY) {
-      size_t event_index = get_event_position_index(task_desc->trigger_event);
-      int gpu_id = static_cast<int>(get_event_gpu_id(task_desc->trigger_event));
-      assert(gpu_id < config.num_gpus);
-      assert(gpu_id != config.my_gpu_id);
-      nvshmemx_putmem_signal_block(
-          task_desc->output_ptrs[0],
-          task_desc->input_ptrs[0],
-          task_desc->xfer_size_in_bytes,
-          reinterpret_cast<uint64_t *>(&config.all_event_counters[event_index]),
-          1 /*signal*/,
-          NVSHMEM_SIGNAL_ADD,
-          gpu_id);
-#endif
     } else {
 #ifdef MPK_ENABLE_VERBOSE
       if (threadIdx.x == 0) {
@@ -1259,6 +1262,9 @@ extern "C" void launch_persistent_kernel() {
                      dim3(128, 1, 1)>>>(global_runtime_config,
                                         end_of_task_graph_event_pos);
     cudaDeviceSynchronize();
+#ifdef USE_NVSHMEM
+    nvshmem_barrier_all();
+#endif
   }
   int num_schedulers = global_runtime_config.num_local_schedulers +
                        global_runtime_config.num_remote_schedulers;
