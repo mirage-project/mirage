@@ -421,6 +421,77 @@ class HybridModel:
         self._const_cache = {}
         self._expanded_cache = {}  # Cache for dimension-expanded tensors (e.g., 2D weight -> 3D)
         self._cast_cache = {}
+        
+        # Initialize operation handlers
+        self._init_op_handlers()
+    
+    def _handle_binary_op_with_scalar(self, op, inputs, fn_name):
+        """Handle binary ops that can work with scalars from additional_params"""
+        if len(inputs) == 1 and hasattr(op, 'additional_params') and 'arg1' in op.additional_params:
+            scalar = op.additional_params['arg1']
+            op_map = {
+                "Add": lambda x, s: x + s,
+                "Sub": lambda x, s: x - s,
+                "Mul": lambda x, s: x * s,
+                "Div": lambda x, s: x / s,
+            }
+            return op_map[fn_name](inputs[0], scalar)
+        elif len(inputs) >= 2:
+            return getattr(torch, fn_name.lower())(inputs[0], inputs[1])
+        else:
+            raise ValueError(f"{fn_name} requires 2 inputs or additional_params, got {len(inputs)} inputs")
+    
+    def _handle_gemm(self, inputs):
+        """ONNX Gemm: Y = alpha * A * B^T + beta * C (default transB=1)"""
+        matmul_result = torch.matmul(inputs[0], inputs[1].T)
+        if len(inputs) > 2:  # Has bias
+            return matmul_result + inputs[2]
+        return matmul_result
+    
+    def _handle_cast(self, op, inputs):
+        """Handle Cast and CastLike operations"""
+        to_dtype = CAST_ID_TO_DTYPE.get(op.kwargs.get("to"), None)
+        if to_dtype is not None:
+            if inputs[0].dtype != to_dtype:
+                # check in cache
+                cache_key = (id(inputs[0]), to_dtype)
+                if cache_key in self._cast_cache:
+                    return self._cast_cache[cache_key]
+                self._cast_cache[cache_key] = inputs[0].to(dtype=to_dtype)
+                return self._cast_cache[cache_key]
+            return inputs[0]
+        else:
+            raise NotImplementedError(f"Cast to dtype id '{op.kwargs.get('to')}' not implemented")
+    
+    def _init_op_handlers(self):
+        """Initialize the operation dispatch table"""
+        self._op_handlers = {
+            "Add": lambda op, inputs: self._handle_binary_op_with_scalar(op, inputs, "Add"),
+            "Sub": lambda op, inputs: self._handle_binary_op_with_scalar(op, inputs, "Sub"),
+            "Mul": lambda op, inputs: self._handle_binary_op_with_scalar(op, inputs, "Mul"),
+            "Div": lambda op, inputs: self._handle_binary_op_with_scalar(op, inputs, "Div"),
+            "Pow": lambda op, inputs: self._handle_binary_op_with_scalar(op, inputs, "Pow"),
+            "MatMul": lambda op, inputs: torch.matmul(inputs[0], inputs[1]),
+            "Gemm": lambda op, inputs: self._handle_gemm(inputs),
+            "Relu": lambda op, inputs: torch.relu(inputs[0]),
+            "Tanh": lambda op, inputs: torch.tanh(inputs[0]),
+            "Sigmoid": lambda op, inputs: torch.sigmoid(inputs[0]),
+            "Exp": lambda op, inputs: torch.exp(inputs[0]),
+            "Neg": lambda op, inputs: torch.neg(inputs[0]),
+            "Sqrt": lambda op, inputs: torch.sqrt(inputs[0]),
+            "Reciprocal": lambda op, inputs: torch.reciprocal(inputs[0]),
+            "ReduceSum": lambda op, inputs: torch.sum(inputs[0], **op.kwargs, keepdims=True),
+            "Transpose": lambda op, inputs: torch.permute(inputs[0], dims=op.kwargs["perm"]),
+            "Reshape": lambda op, inputs: inputs[0].reshape(op.output_tensor_shapes[0][0]),
+            "Abs": lambda op, inputs: torch.abs(inputs[0]),
+            "Expand": lambda op, inputs: torch.broadcast_to(inputs[0], torch.broadcast_shapes(inputs[0].shape, tuple(op.output_tensor_shapes[0][0]))),
+            "Gather": lambda op, inputs: torch.nn.functional.embedding(inputs[1], inputs[0]),
+            "Unsqueeze": lambda op, inputs: torch.unsqueeze(inputs[0], dim=0),
+            "Cast": lambda op, inputs: self._handle_cast(op, inputs),
+            "CastLike": lambda op, inputs: self._handle_cast(op, inputs),
+            "Constant": lambda op, inputs: op.kwargs["t"],
+            "Identity": lambda op, inputs: inputs[0],
+        }
     
     def _get_params_on(self, device, dtype):
         """Return dict of parameters placed on device, keeping their original dtype."""
@@ -539,79 +610,15 @@ class HybridModel:
         return outputs[0] if len(outputs) == 1 else outputs
     
     def _execute_pytorch_op(self, op, inputs):
+        """Execute a PyTorch operation using the dispatch table"""
         fn = op.fn
-        if fn in ["Add", "Sub", "Mul", "Div", "Pow"]:
-            # Handle operations with scalar constants in additional_params
-            if len(inputs) == 1 and hasattr(op, 'additional_params') and 'arg1' in op.additional_params:
-                scalar = op.additional_params['arg1']
-                if fn == "Add":
-                    return inputs[0] + scalar
-                elif fn == "Sub":
-                    return inputs[0] - scalar
-                elif fn == "Mul":
-                    return inputs[0] * scalar
-                elif fn == "Div":
-                    return inputs[0] / scalar
-            elif len(inputs) >= 2:
-                return getattr(torch, fn.lower())(inputs[0], inputs[1])
-            else:
-                raise ValueError(f"{fn} requires 2 inputs or additional_params, got {len(inputs)} inputs")
-        elif fn == "MatMul":
-            return torch.matmul(inputs[0], inputs[1])
-        elif fn == "Gemm":
-            # ONNX Gemm: Y = alpha * A * B^T + beta * C (default transB=1)
-            matmul_result = torch.matmul(inputs[0], inputs[1].T)
-            if len(inputs) > 2:  # Has bias
-                return matmul_result + inputs[2]
-            return matmul_result
-        elif fn == "Relu":
-            return torch.relu(inputs[0])
-        elif fn == "Tanh":
-            return torch.tanh(inputs[0])
-        elif fn == "Sigmoid":
-            return torch.sigmoid(inputs[0])
-        elif fn == "Exp":
-            return torch.exp(inputs[0])
-        elif fn == "Neg":
-            return torch.neg(inputs[0])
-        elif fn == "Sqrt":
-            return torch.sqrt(inputs[0])
-        elif fn == "Reciprocal":
-            return torch.reciprocal(inputs[0])
-        elif fn == "ReduceSum":
-            return torch.sum(inputs[0], **op.kwargs, keepdims=True)
-        elif fn == "Transpose":
-            return torch.permute(inputs[0], dims=op.kwargs["perm"])
-        elif fn == "Reshape":
-            return inputs[0].reshape(op.output_tensor_shapes[0][0])
-        elif fn == "Abs":
-            return torch.abs(inputs[0])
-        elif fn == "Expand":
-            out_shape = torch.broadcast_shapes(inputs[0].shape, tuple(op.output_tensor_shapes[0][0]))
-            return torch.broadcast_to(inputs[0], (out_shape))
-        elif fn == "Gather":
-            return torch.nn.functional.embedding(inputs[1], inputs[0])
-        elif fn == "Unsqueeze":
-            return torch.unsqueeze(inputs[0], dim=0)
-        elif fn == "Cast" or fn == "CastLike":
-            to_dtype = CAST_ID_TO_DTYPE.get(op.kwargs.get("to"), None)
-            if to_dtype is not None:
-                if inputs[0].dtype != to_dtype:
-                    # check in cache
-                    cache_key = (id(inputs[0]), to_dtype)
-                    if cache_key in self._cast_cache:
-                        return self._cast_cache[cache_key]
-                    self._cast_cache[cache_key] = inputs[0].to(dtype=to_dtype)
-                    return self._cast_cache[cache_key]
-                return inputs[0]
-            else:
-                raise NotImplementedError(f"Cast to dtype id '{op.kwargs.get('to')}' not implemented")
-        elif fn == "Constant":
-            return op.kwargs["t"]
-        elif fn == "Identity":
-            return inputs[0]
-        else:
+        
+        # Lookup and execute the operation
+        handler = self._op_handlers.get(fn)
+        if handler is None:
             raise NotImplementedError(f"PyTorch fallback for '{fn}' not implemented")
+        
+        return handler(op, inputs)
 
 def partition_graph_with_dp(model, 
                           dummy_input, 
