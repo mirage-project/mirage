@@ -32,6 +32,39 @@ CAST_ID_TO_DTYPE = {
     15: torch.complex128,
 }
 
+def check_subgraph_exceeds_mirage_constraint(sg_dict, max_mirage_ops):
+    """
+    Check if a subgraph exceeds the mirage constraint:
+    num_inputs + num_outputs + num_operators > max_mirage_ops
+    
+    Args:
+        sg_dict: Dictionary representing the subgraph (keys are operators)
+        max_mirage_ops: Maximum allowed value for the constraint
+    
+    Returns:
+        True if constraint is exceeded, False otherwise
+    """
+    # Count operators
+    num_operators = len(sg_dict)
+    
+    # Collect all tensor IDs produced and consumed in the subgraph
+    produced_in_subgraph = set()
+    consumed_in_subgraph = set()
+    for op in sg_dict:
+        for _, tid in op.output_tensor_shapes:
+            produced_in_subgraph.add(tid)
+        for _, tid in op.input_tensor_shapes:
+            consumed_in_subgraph.add(tid)
+    
+    # Input tensors: consumed but not produced in subgraph
+    num_inputs = len(consumed_in_subgraph - produced_in_subgraph)
+    
+    # Output tensors: produced but not consumed in subgraph
+    num_outputs = len(produced_in_subgraph - consumed_in_subgraph)
+    
+    # Check if constraint is exceeded
+    return num_inputs + num_outputs + num_operators > max_mirage_ops
+
 def copy_subgraph(subgraph):
     new_subgraph = {}
     for from_op, to_ops in subgraph.items():
@@ -625,6 +658,7 @@ def partition_graph_with_dp(model,
                           IGNORE_OPS, 
                           UNSUPPORTED_OPS,
                           max_nodes_per_partition=4,
+                          max_mirage_ops=9,
                           dry_run=False,
                           ):
     """
@@ -674,7 +708,7 @@ def partition_graph_with_dp(model,
     fine_grained_partitions = []
     
     for sg_id, (sg_dict, sg_type) in enumerate(subgraphs):
-        if sg_type == "mirage" and len(sg_dict) > max_nodes_per_partition:
+        if sg_type == "mirage" and check_subgraph_exceeds_mirage_constraint(sg_dict, max_mirage_ops):
             print(f"  Partitioning subgraph {sg_id} ({len(sg_dict)} ops)...")
             
             # Extract operators in topological order
@@ -692,7 +726,7 @@ def partition_graph_with_dp(model,
             # Apply DAG partitioning with connectivity constraint
             def cost_function_with_adj(nodes):
                 return cost_function(nodes, adj)
-            partition_boundaries = solve_partitions(list(range(n)), cost_function_with_adj, max_nodes_per_partition, adj)
+            partition_boundaries = solve_partitions(list(range(n)), cost_function_with_adj, max_nodes_per_partition, adj, max_mirage_ops)
             
             # Convert partitions to subgraphs
             for p_id, boundary in enumerate(partition_boundaries):
