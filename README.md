@@ -119,5 +119,10 @@ month = jul
 }
 ```
 
+## Publications
+
+- **Mirage: A Multi-Level Superoptimizer for Tensor Programs**. *OSDI 2025*. [[PDF]](https://www.usenix.org/system/files/osdi25-wu-mengdi.pdf)
+- **Identity Testing for Circuits with Exponentiation Gates**. *ITCS 2026* [[arXiv]](https://arxiv.org/pdf/2506.04529)
+
 ## License
 Mirage uses Apache License 2.0.

@@ -5,7 +5,7 @@
 #include "mirage/utils/containers.h"
 #include "mirage/utils/json_utils.h"
 #include "mirage/utils/hash_utils.h"
-
+#include "mirage/vector_types.h"
 #include <unordered_map>
 #include <vector>
 

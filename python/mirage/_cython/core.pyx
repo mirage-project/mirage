@@ -301,6 +301,8 @@ def convert_dtype_to_ctype(type : dtype):
         return DT_BFLOAT16
     elif type.is_fp32():
         return DT_FLOAT32
+    elif type.is_int32():
+        return DT_INT32
     elif type.is_int64():
         return DT_INT64
     elif type.is_fp64():
@@ -317,6 +319,8 @@ def convert_dtype_to_torch_type(type : dtype):
         return torch.float16
     elif type.is_bf16():
         return torch.bfloat16
+    elif type.is_int32():
+        return torch.int32
     elif type.is_fp32():
         return torch.float32
     elif type.is_int64():
@@ -335,6 +339,8 @@ def convert_ctype_to_dtype(type):
         return float16
     elif type == DT_BFLOAT16:
         return bfloat16
+    elif type == DT_INT32:
+        return int32
     elif type == DT_FLOAT32:
         return float32
     elif type == DT_DOUBLE:
@@ -347,6 +353,8 @@ def convert_torch_type_to_dtype(type):
         return int8
     elif type is torch.uint16:
         return uint16
+    elif type is torch.int32:
+        return int32
     elif type is torch.float16:
         return float16
     elif type is torch.bfloat16:
@@ -944,6 +952,23 @@ cdef class CyKNGraph:
         cdef CppDTensor* ptr = self.p_kgraph.fuse_tensors(cinputs, fused_dim, num_groups, cname)
         output = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
         return DTensor(output)
+
+    def shuffle_tensors(self, list[DTensor] inputs, int shuffled_dim, int num_groups, str name):
+        cdef vector[const CppDTensor*] cinputs
+        cinputs.resize(len(inputs))
+        cdef DTensor t
+        for i in range(len(inputs)):
+            assert(type(inputs[i]) == DTensor)
+            t = inputs[i]
+            cinputs[i] = t.c_ptr
+        cdef char* cname = NULL
+        if name is not None:
+            py_byte_string = name.encode('UTF-8')
+            cname = py_byte_string
+        cdef CppDTensor* ptr = self.p_kgraph.shuffle_tensors(cinputs, shuffled_dim, num_groups, cname)
+        output = ctypes.cast(<unsigned long long>ptr, ctypes.c_void_p)
+        return DTensor(output)
+
 
     def register_task(self, CyTBGraph bgraph, str task_type, list[int] params):
         cdef char* cname = NULL

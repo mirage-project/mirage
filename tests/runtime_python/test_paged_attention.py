@@ -51,6 +51,8 @@ def torch_paged_attention(
     paged_v_cache,
     paged_kv_indices_buffer,
     seq_len,
+    qk_norm,
+    rope,
     q_norm_weight,
     k_norm_weight,
     cos,
@@ -68,17 +70,23 @@ def torch_paged_attention(
         dim=0,
     )
 
-    norm_q = rmsnorm(q, q_norm_weight, eps)
-    norm_k = rmsnorm(k_cache[seq_len - 1, :], k_norm_weight, eps)
-    q_rot, k_rot = apply_rotary_pos_emb(norm_q, norm_k, cos, sin)
+    if qk_norm:
+        norm_q = rmsnorm(q, q_norm_weight, eps)
+        norm_k = rmsnorm(k_cache[seq_len - 1, :], k_norm_weight, eps)
+    else:
+        norm_q = q
+        norm_k = k_cache[seq_len - 1, :]
 
-    q = q_rot.squeeze(1)
-    k_cache[seq_len - 1, :] = k_rot
-    paged_k_cache[page_indices[-1], (seq_len - 1) % page_size, :] = k_rot
+    if rope:
+        norm_q, norm_k = apply_rotary_pos_emb(norm_q, norm_k, cos, sin)
+
+    q_out = norm_q.squeeze(1)
+    k_cache[seq_len - 1, :] = norm_k
+    paged_k_cache[page_indices[-1], (seq_len - 1) % page_size, :] = norm_k
 
     k = k_cache[:seq_len, :]
     v = v_cache[:seq_len, :]
-    scores = torch.matmul(q, k.transpose(-2, -1))
+    scores = torch.matmul(q_out, k.transpose(-2, -1))
     mask = torch.arange(seq_len, device=scores.device)[None, :] <= (seq_len - 1)
     scores = scores.masked_fill(~mask[None, None, :], float("-inf"))
     attn = F.softmax(scores / np.sqrt(head_dim), dim=-1)
@@ -152,6 +160,8 @@ for seq_len in range(1, 513):
         torch_paged_v_cache,
         paged_kv_indices_buffer,
         seq_len,
+        True,
+        True,
         q_norm_weight,
         k_norm_weight,
         torch_cos,

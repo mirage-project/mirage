@@ -1,20 +1,5 @@
-#include "argmax.cuh"
-#include "bfloat16.h"
-#include "linear.cuh"
-#include "multitoken_paged_attention.cuh"
-#include "norm.cuh"
-#include "norm_linear.cuh"
-// #include "norm_linear_original.cuh"
-#include "bfloat16.h"
-#include "embedding.cuh"
-#include "paged_attention.cuh"
-#include "prompt_lookup.cuh"
-#include "rotary_embedding.cuh"
-#include "silu_mul_linear.cuh"
-#include "single_batch_decoding.cuh"
-#include "single_batch_extend.cuh"
-#include "single_batch_gqa.cuh"
-#include "target_verify.cuh"
+#include "runtime_header.h"
+#include "tasks/ampere/task_header.cuh"
 #include <cstdio>
 #include <cuda_runtime.h>
 #include <torch/extension.h>
@@ -23,20 +8,21 @@
 using kernel::argmax_partial_kernel;
 using kernel::argmax_reduce_kernel;
 using kernel::embedding_kernel;
-using kernel::find_ngram_global_kernel;
-using kernel::find_ngram_partial_kernel;
+// using kernel::find_ngram_global_kernel;
+// using kernel::find_ngram_partial_kernel;
 using kernel::linear_kernel;
 using kernel::multitoken_paged_attention_task_impl;
-using kernel::norm_linear_task_impl;
-using kernel::paged_attention_task_impl;
+// using kernel::norm_linear_task_impl;
+// using kernel::paged_attention_task_impl;
 using kernel::rotary_embedding;
-using kernel::silu_mul_linear_task_impl;
-using kernel::single_batch_decoding_kernel;
-using kernel::single_batch_extend_kernel;
-using kernel::single_batch_gqa_kernel;
-using kernel::target_verify_greedy_kernel;
+// using kernel::silu_mul_linear_task_impl;
+// using kernel::single_batch_decoding_kernel;
+// using kernel::single_batch_extend_kernel;
+// using kernel::single_batch_gqa_kernel;
+// using kernel::target_verify_greedy_kernel;
 using bfloat16 = type::bfloat16_t;
 
+#ifdef DEPRECATED_TESTS
 template <typename T>
 __global__ void single_batch_gqa_kernel_wrapper(void const *qkv_ptr,
                                                 void *k_cache_ptr,
@@ -344,8 +330,11 @@ void single_batch_extend(
   }
 }
 
+#endif
+
 // Paged Attention
 
+#ifdef DEPRECATED_TESTS
 template <typename T,
           int NUM_Q_PER_KV,
           int HEAD_DIM,
@@ -490,15 +479,20 @@ void paged_attention(
   }
 }
 
+#endif
+
 // Multitoken Paged Attention
 
 template <typename T,
           int NUM_QO_HEADS,
           int NUM_KV_HEADS,
+          int KV_CACHE_STRIDE,
+          int QKV_STRIDE,
+          int O_STRIDE,
           int HEAD_DIM,
-          int PAGE_SIZE,
           int MAX_SEQ_LEN,
-          int MAX_TOKENS = 1>
+          int PAGE_SIZE,
+          int MAX_TOKENS = 8>
 __global__ void multitoken_paged_attention_wrapper(
     void const *qkv_ptr,
     void *paged_k_cache_ptr,
@@ -520,9 +514,12 @@ __global__ void multitoken_paged_attention_wrapper(
   multitoken_paged_attention_task_impl<T,
                                        NUM_QO_HEADS,
                                        NUM_KV_HEADS,
+                                       KV_CACHE_STRIDE,
+                                       QKV_STRIDE,
+                                       O_STRIDE,
                                        HEAD_DIM,
-                                       PAGE_SIZE,
                                        MAX_SEQ_LEN,
+                                       PAGE_SIZE,
                                        MAX_TOKENS>(
       qkv_ptr,
       paged_k_cache_ptr,
@@ -546,10 +543,13 @@ __global__ void multitoken_paged_attention_wrapper(
 template <typename T,
           int NUM_QO_HEADS,
           int NUM_KV_HEADS,
+          int KV_CACHE_STRIDE,
+          int QKV_STRIDE,
+          int O_STRIDE,
           int HEAD_DIM,
-          int PAGE_SIZE,
           int MAX_SEQ_LEN,
-          int MAX_TOKENS = 1>
+          int PAGE_SIZE,
+          int MAX_TOKENS = 8>
 void launch_multitoken_paged_attention(
     void const *qkv_ptr,
     void *paged_k_cache_ptr,
@@ -570,24 +570,31 @@ void launch_multitoken_paged_attention(
     float k_eps) {
   dim3 grid_dim(1, 1, 1);
   dim3 block_dim(128, 1, 1);
-  size_t smem_size = 112640;
+  size_t smem_size = mirage::runtime::MAX_DYNAMIC_SHARED_MEMORY_SIZE;
 
   cudaFuncSetAttribute(multitoken_paged_attention_wrapper<T,
                                                           NUM_QO_HEADS,
                                                           NUM_KV_HEADS,
+                                                          KV_CACHE_STRIDE,
+                                                          QKV_STRIDE,
+                                                          O_STRIDE,
                                                           HEAD_DIM,
-                                                          PAGE_SIZE,
                                                           MAX_SEQ_LEN,
+                                                          PAGE_SIZE,
                                                           MAX_TOKENS>,
                        cudaFuncAttributeMaxDynamicSharedMemorySize,
                        smem_size);
 
+#ifndef MIRAGE_PROFILE_AMPERE
   multitoken_paged_attention_wrapper<T,
                                      NUM_QO_HEADS,
                                      NUM_KV_HEADS,
+                                     KV_CACHE_STRIDE,
+                                     QKV_STRIDE,
+                                     O_STRIDE,
                                      HEAD_DIM,
-                                     PAGE_SIZE,
                                      MAX_SEQ_LEN,
+                                     PAGE_SIZE,
                                      MAX_TOKENS>
       <<<grid_dim, block_dim, smem_size>>>(qkv_ptr,
                                            paged_k_cache_ptr,
@@ -606,6 +613,106 @@ void launch_multitoken_paged_attention(
                                            sin_ptr,
                                            q_eps,
                                            k_eps);
+#else
+
+  cudaEvent_t start, stop;
+  cudaEventCreate(&start);
+  cudaEventCreate(&stop);
+
+  constexpr int WARMUP_RUNS = 16;
+  constexpr int BENCHMARK_RUNS = 1000;
+
+  printf("=== Multitoken Paged Attention Kernel Performance Profiling ===\n");
+
+  for (int i = 0; i < WARMUP_RUNS; i++) {
+    multitoken_paged_attention_wrapper<T,
+                                       NUM_QO_HEADS,
+                                       NUM_KV_HEADS,
+                                       HEAD_DIM,
+                                       PAGE_SIZE,
+                                       MAX_SEQ_LEN,
+                                       MAX_TOKENS>
+        <<<grid_dim, block_dim, smem_size>>>(qkv_ptr,
+                                             paged_k_cache_ptr,
+                                             paged_v_cache_ptr,
+                                             output_ptr,
+                                             qo_indptr_buffer_ptr,
+                                             paged_kv_indptr_buffer_ptr,
+                                             paged_kv_indices_buffer_ptr,
+                                             paged_kv_last_page_len_buffer_ptr,
+                                             request_id,
+                                             qk_norm,
+                                             rope,
+                                             q_norm_weight_ptr,
+                                             k_norm_weight_ptr,
+                                             cos_ptr,
+                                             sin_ptr,
+                                             q_eps,
+                                             k_eps);
+  }
+  cudaDeviceSynchronize();
+
+  printf("Running %d benchmark iterations...\n", BENCHMARK_RUNS);
+
+  float *iteration_times = new float[BENCHMARK_RUNS];
+  float total_time_ms = 0.0f;
+
+  for (int i = 0; i < BENCHMARK_RUNS; i++) {
+    cudaEventRecord(start);
+    multitoken_paged_attention_wrapper<T,
+                                       NUM_QO_HEADS,
+                                       NUM_KV_HEADS,
+                                       HEAD_DIM,
+                                       PAGE_SIZE,
+                                       MAX_SEQ_LEN,
+                                       MAX_TOKENS>
+        <<<grid_dim, block_dim, smem_size>>>(qkv_ptr,
+                                             paged_k_cache_ptr,
+                                             paged_v_cache_ptr,
+                                             output_ptr,
+                                             qo_indptr_buffer_ptr,
+                                             paged_kv_indptr_buffer_ptr,
+                                             paged_kv_indices_buffer_ptr,
+                                             paged_kv_last_page_len_buffer_ptr,
+                                             request_id,
+                                             qk_norm,
+                                             rope,
+                                             q_norm_weight_ptr,
+                                             k_norm_weight_ptr,
+                                             cos_ptr,
+                                             sin_ptr,
+                                             q_eps,
+                                             k_eps);
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+
+    float iteration_time_ms;
+    cudaEventElapsedTime(&iteration_time_ms, start, stop);
+
+    iteration_times[i] = iteration_time_ms;
+    total_time_ms += iteration_time_ms;
+  }
+
+  float avg_time_ms = total_time_ms / BENCHMARK_RUNS;
+
+  printf("\n=== Multitoken Paged Attention Performance Results ===\n");
+  printf("Configuration:\n");
+  printf("  NUM_QO_HEADS=%d, NUM_KV_HEADS=%d, HEAD_DIM=%d\n",
+         NUM_QO_HEADS,
+         NUM_KV_HEADS,
+         HEAD_DIM);
+  printf("  PAGE_SIZE=%d, MAX_SEQ_LEN=%d, MAX_TOKENS=%d\n",
+         PAGE_SIZE,
+         MAX_SEQ_LEN,
+         MAX_TOKENS);
+  printf("  Average: %.3f ms\n", avg_time_ms);
+
+  printf("===============================\n");
+
+  delete[] iteration_times;
+  cudaEventDestroy(start);
+  cudaEventDestroy(stop);
+#endif
 }
 
 void multitoken_paged_attention(
@@ -642,8 +749,26 @@ void multitoken_paged_attention(
   void const *k_norm_weight_ptr = qk_norm ? k_norm_weight->data_ptr() : nullptr;
   void const *cos_ptr = rope ? cos->data_ptr() : nullptr;
   void const *sin_ptr = rope ? sin->data_ptr() : nullptr;
+  int const qo_heads = 4;
+  int const kv_heads = 1;
+  int const head_dim = 128;
+  int const qkv_stride = (qo_heads + 2 * kv_heads) * head_dim;
+  assert(qkv_stride == qkv.stride(0));
+  int const kv_stride = head_dim * kv_heads;
+  assert(kv_stride == paged_k_cache.stride(1));
+  int const o_stride = head_dim * qo_heads;
+  int const page_size = 4096;
+  int const max_seq_len = 512;
 
-  launch_multitoken_paged_attention<bfloat16, 4, 1, 128, 64, 512, 4>(
+  launch_multitoken_paged_attention<bfloat16,
+                                    qo_heads,
+                                    kv_heads,
+                                    kv_stride,
+                                    qkv_stride,
+                                    o_stride,
+                                    head_dim,
+                                    max_seq_len,
+                                    page_size>(
       qkv_ptr,
       paged_k_cache_ptr,
       paged_v_cache_ptr,
@@ -668,8 +793,9 @@ void multitoken_paged_attention(
   }
 }
 
-// RMSNorm Linear
+#ifdef DEPRECATED_TESTS
 
+// RMSNorm Linear
 template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int REDUCTION_SIZE>
 __global__ void norm_linear_kernel_wrapper(void const *input_ptr,
                                            void const *norm_weight_ptr,
@@ -799,6 +925,7 @@ void norm_linear(torch::Tensor input,
     printf("CUDA kernel launch error: %s\n", cudaGetErrorString(err));
   }
 }
+#endif
 
 // Window RMSNorm Linear
 
@@ -854,14 +981,15 @@ __global__ void rms_norm_kernel_wrapper(void const *input_ptr,
   T const *rope_cos_ptr = static_cast<T const *>(cos_ptr);
   T const *rope_sin_ptr = static_cast<T const *>(sin_ptr);
 
-  kernel::rms_norm<T, Smem, HEAD_NUM, WINDOW_SIZE, HEAD_DIM>(input_smem,
-                                                             norm_weight_ptr,
-                                                             reduce_smem,
-                                                             eps,
-                                                             token_offset,
-                                                             rotary_emd,
-                                                             rope_cos_ptr,
-                                                             rope_sin_ptr);
+  kernel::rms_norm<T, Smem, HEAD_NUM, HEAD_DIM>(input_smem,
+                                                norm_weight_ptr,
+                                                reduce_smem,
+                                                eps,
+                                                WINDOW_SIZE,
+                                                token_offset,
+                                                rotary_emd,
+                                                rope_cos_ptr,
+                                                rope_sin_ptr);
 
   __syncthreads();
 
@@ -1011,7 +1139,7 @@ void rms_norm(torch::Tensor input, // shape [batch, window_size, head_dim]
 }
 
 // SiLU MUL Linear
-
+#ifdef DEPRECATED_TESTS
 template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int REDUCTION_SIZE>
 __global__ void silu_mul_linear_kernel_wrapper(void const *input_ptr,
                                                void const *weight_ptr,
@@ -1077,6 +1205,8 @@ void silu_mul_linear(torch::Tensor input,
     SILU_MUL_LINEAR_DISPATCH_BATCH_SIZE(4)
     SILU_MUL_LINEAR_DISPATCH_BATCH_SIZE(5)
     SILU_MUL_LINEAR_DISPATCH_BATCH_SIZE(6)
+    SILU_MUL_LINEAR_DISPATCH_BATCH_SIZE(7)
+    SILU_MUL_LINEAR_DISPATCH_BATCH_SIZE(8)
     default:
       printf("Unsupported output size in test: %zu\n", output.size(1));
       break;
@@ -1087,16 +1217,22 @@ void silu_mul_linear(torch::Tensor input,
     printf("CUDA kernel launch error: %s\n", cudaGetErrorString(err));
   }
 }
+#endif
 
 // Linear
-
+#ifdef DEPRECATED_TESTS
 template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int REDUCTION_SIZE>
 __global__ void linear_kernel_wrapper(void const *input_ptr,
                                       void const *weight_ptr,
                                       void const *residual_ptr,
                                       void *output_ptr) {
   linear_kernel<T, BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE>(
-      input_ptr, weight_ptr, residual_ptr, output_ptr);
+      input_ptr,
+      weight_ptr,
+      residual_ptr,
+      output_ptr,
+      BATCH_SIZE /*num_active_tokens*/,
+      true);
 }
 
 template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int REDUCTION_SIZE>
@@ -1163,6 +1299,7 @@ void linear(torch::Tensor input,
     printf("CUDA kernel launch error: %s\n", cudaGetErrorString(err));
   }
 }
+#endif
 
 // Embedding Kernel
 template <typename T, int CHUNK_SIZE, int OUTPUT_DIM_SIZE>
@@ -1209,6 +1346,7 @@ void embedding(torch::Tensor input,
   }
 }
 
+#ifdef DEPRECATED_TESTS
 // Prompt Lookup Kernel
 template <int NGRAM_SIZE, int NUM_WORKERS>
 __global__ void
@@ -1315,7 +1453,9 @@ void verify(torch::Tensor spec_tokens,
     printf("CUDA kernel launch error in verify: %s\n", cudaGetErrorString(err));
   }
 }
+#endif
 
+#ifdef DEPRECATED_TESTS
 // Argmax Kernel
 template <typename T, int BATCH_SIZE, int CHUNK_SIZE, int NUM_PARTIAL_TASKS>
 __global__ void
@@ -1337,10 +1477,13 @@ __global__ void
                                   chunk_idx;
 
   argmax_partial_kernel<T, BATCH_SIZE, CHUNK_SIZE, NUM_PARTIAL_TASKS>(
-      row_input_ptr, row_output_val_ptr, row_output_idx_ptr);
+      row_input_ptr,
+      row_output_val_ptr,
+      row_output_idx_ptr,
+      BATCH_SIZE /*num_active_tokens*/);
 }
 
-template <typename T, int CHUNK_SIZE, int NUM_PARTIAL_TASKS>
+template <typename T, int BATCH_SIZE, int CHUNK_SIZE, int NUM_PARTIAL_TASKS>
 __global__ void
     argmax_reduce_kernel_wrapper(void const *__restrict__ input_val_ptr,
                                  void const *__restrict__ input_idx_ptr,
@@ -1356,8 +1499,11 @@ __global__ void
   long long *row_output_ptr =
       static_cast<long long *>(final_output_ptr) + row_idx;
 
-  argmax_reduce_kernel<T, CHUNK_SIZE, NUM_PARTIAL_TASKS>(
-      row_input_val_ptr, row_input_idx_ptr, row_output_ptr, step, tokens);
+  argmax_reduce_kernel<T, BATCH_SIZE, CHUNK_SIZE, NUM_PARTIAL_TASKS>(
+      row_input_val_ptr,
+      row_input_idx_ptr,
+      row_output_ptr,
+      BATCH_SIZE /*num_active_tokens*/);
 }
 
 void argmax(torch::Tensor input,
@@ -1409,7 +1555,7 @@ void argmax(torch::Tensor input,
 
   // Launch reduce kernel
   dim3 reduce_grid_dim(1, n_row, 1);
-  argmax_reduce_kernel_wrapper<bfloat16, CHUNK_SIZE, TASK_PER_BATCH>
+  argmax_reduce_kernel_wrapper<bfloat16, BATCH_SIZE, CHUNK_SIZE, TASK_PER_BATCH>
       <<<reduce_grid_dim, block_dim>>>(
           partial_val.data_ptr(),
           partial_idx.data_ptr(),
@@ -1501,54 +1647,55 @@ void rope(torch::Tensor input,
     printf("rotary_embedding kernel error: %s\n", cudaGetErrorString(err));
   }
 }
+#endif
 
 // pybind11 bindings
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-  m.def("prompt_lookup", &prompt_lookup, "Prompt lookup kernel");
-  m.def("embedding", &embedding, "Embedding kernel");
-  m.def("linear", &linear, "Linear kernel");
-  m.def("argmax", &argmax, "Argmax kernel");
-  m.def("verify", &verify, "Target verification kernel");
-  m.def("norm_linear", &norm_linear, "RMSNorm Linear kernel");
-  m.def("silu_mul_linear", &silu_mul_linear, "SILU MUL Linear kernel");
-  m.def("single_batch_decoding",
-        &single_batch_decoding,
-        py::arg("qkv"),
-        py::arg("k_cache"),
-        py::arg("v_cache"),
-        py::arg("output"),
-        py::arg("seq_len"),
-        py::arg("qk_norm"),
-        py::arg("rotary_embed"),
-        py::arg("qnorm_weight") = py::none(),
-        py::arg("knorm_weight") = py::none(),
-        py::arg("cos") = py::none(),
-        py::arg("sin") = py::none(),
-        py::arg("q_eps") = 0.0f,
-        py::arg("k_eps") = 0.0f);
-  m.def("single_batch_extend",
-        &single_batch_extend,
-        py::arg("qkv"),
-        py::arg("k_cache"),
-        py::arg("v_cache"),
-        py::arg("output"),
-        py::arg("seq_len"),
-        py::arg("extend_num"),
-        py::arg("qk_norm"),
-        py::arg("rotary_embed"),
-        py::arg("qnorm_weight") = py::none(),
-        py::arg("knorm_weight") = py::none(),
-        py::arg("cos") = py::none(),
-        py::arg("sin") = py::none(),
-        py::arg("q_eps") = 0.0f,
-        py::arg("k_eps") = 0.0f,
-        py::arg("q_norm_debug") = py::none(),
-        py::arg("k_norm_debug") = py::none());
-  m.def("paged_attention", &paged_attention, "Paged Attention");
+  // m.def("prompt_lookup", &prompt_lookup, "Prompt lookup kernel");
+  // m.def("embedding", &embedding, "Embedding kernel");
+  // m.def("linear", &linear, "Linear kernel");
+  // m.def("argmax", &argmax, "Argmax kernel");
+  // m.def("verify", &verify, "Target verification kernel");
+  // m.def("norm_linear", &norm_linear, "RMSNorm Linear kernel");
+  // m.def("silu_mul_linear", &silu_mul_linear, "SILU MUL Linear kernel");
+  // m.def("single_batch_decoding",
+  //       &single_batch_decoding,
+  //       py::arg("qkv"),
+  //       py::arg("k_cache"),
+  //       py::arg("v_cache"),
+  //       py::arg("output"),
+  //       py::arg("seq_len"),
+  //       py::arg("qk_norm"),
+  //       py::arg("rotary_embed"),
+  //       py::arg("qnorm_weight") = py::none(),
+  //       py::arg("knorm_weight") = py::none(),
+  //       py::arg("cos") = py::none(),
+  //       py::arg("sin") = py::none(),
+  //       py::arg("q_eps") = 0.0f,
+  //       py::arg("k_eps") = 0.0f);
+  // m.def("single_batch_extend",
+  //       &single_batch_extend,
+  //       py::arg("qkv"),
+  //       py::arg("k_cache"),
+  //       py::arg("v_cache"),
+  //       py::arg("output"),
+  //       py::arg("seq_len"),
+  //       py::arg("extend_num"),
+  //       py::arg("qk_norm"),
+  //       py::arg("rotary_embed"),
+  //       py::arg("qnorm_weight") = py::none(),
+  //       py::arg("knorm_weight") = py::none(),
+  //       py::arg("cos") = py::none(),
+  //       py::arg("sin") = py::none(),
+  //       py::arg("q_eps") = 0.0f,
+  //       py::arg("k_eps") = 0.0f,
+  //       py::arg("q_norm_debug") = py::none(),
+  //       py::arg("k_norm_debug") = py::none());
+  // m.def("paged_attention", &paged_attention, "Paged Attention");
   m.def("multitoken_paged_attention",
         &multitoken_paged_attention,
         "Multitoken Paged Attention");
-  m.def("rms_norm", &rms_norm, "Window RMSNorm");
-  m.def("rope", &rope, "RoPE kernel");
+  // m.def("rms_norm", &rms_norm, "Window RMSNorm");
+  // m.def("rope", &rope, "RoPE kernel");
 }

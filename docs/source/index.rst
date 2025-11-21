@@ -23,6 +23,7 @@ Getting Started
    cuda-transpiler
    triton-transpiler
    tutorials/index
+   linear_kernel
 
 .. Indices and tables
 .. ==================

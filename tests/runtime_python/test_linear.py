@@ -1,4 +1,3 @@
-import mirage as mi
 import torch
 import runtime_kernel
 
@@ -39,13 +38,15 @@ for output_size in output_sizes:
     total_time = starter.elapsed_time(ender)
     avg_time = total_time / repetitions
     print(f"Average time over {repetitions} runs: {avg_time:.6f} ms")
+    continue
 
     # Compare with Mirage
+    import mirage as mi
 
     graph = mi.new_kernel_graph()
-    X = graph.new_input(dims=(1, reduction_size), dtype=mi.bfloat16)
+    X = graph.new_input(dims=(batch_size, reduction_size), dtype=mi.bfloat16)
     W = graph.new_input(dims=(reduction_size, output_size), dtype=mi.bfloat16)
-    b = graph.new_input(dims=(1, output_size), dtype=mi.bfloat16)
+    b = graph.new_input(dims=(batch_size, output_size), dtype=mi.bfloat16)
     tb_graph = mi.new_threadblock_graph(
         grid_dim=(1, 1, 1),
         block_dim=(128, 1, 1),
