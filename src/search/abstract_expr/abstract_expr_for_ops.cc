@@ -1,5 +1,6 @@
 #include "mirage/search/abstract_expr/abstract_expr_for_ops.h"
 #include "mirage/search/symbolic_graph/tensor_dim_expr.h"
+#include "mirage/search/symbolic_graph/op_args.h"
 #include <iostream>
 
 namespace mirage {
@@ -187,6 +188,17 @@ std::shared_ptr<AbstractExpr const> get_abstract_expr(
     std::vector<SymbolicSTensor> const &tensors,
     std::vector<std::shared_ptr<AbstractExpr const>> const &opds,
     SymbolicTBGraph const &g) {
+  bool is_forloop_greater_than_one = [&]() {
+    for (size_t i = 0; i < g.operators.size(); ++i) {
+      if (g.operators[i].op_type == type::TBOperatorType::TB_INPUT_OP) {
+        if (std::static_pointer_cast<TBInputOpArgs const>(g.operators[i].args)->forloop_dim >= 0) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }();
+  SymbolicTensorDim forloop_range = is_forloop_greater_than_one ? g.forloop_range : dim_expr_make_const(1);
   switch (op) {
     case type::TBOperatorType::TB_INPUT_OP:
     case type::TBOperatorType::TB_OUTPUT_OP: {
@@ -231,26 +243,29 @@ std::shared_ptr<AbstractExpr const> get_abstract_expr(
     }
     case type::TBOperatorType::TB_FORLOOP_ACCUM_NO_RED_OP: {
       assert(opds.size() == 1);
-      return abstract_expr_make_red(g.forloop_range, opds[0]);
+      return abstract_expr_make_red(forloop_range, opds[0]);
     }
     case type::TBOperatorType::TB_FORLOOP_ACCUM_RED_LD_RMS_OP: {
       assert(opds.size() == 1);
-      std::shared_ptr<TensorDimExpr const> reduction_size_expr = g.forloop_range * tensors[0].dims[tensors[0].dims.size() - 1];
+      std::shared_ptr<TensorDimExpr const> reduction_size_expr = forloop_range * tensors[0].dims[tensors[0].dims.size() - 1];
       return abstract_expr_make_rms(reduction_size_expr, opds[0]);
     }
     case type::TBOperatorType::TB_FORLOOP_ACCUM_RED_LD_SUM_OP: {
       assert(opds.size() == 1);
-      std::shared_ptr<TensorDimExpr const> reduction_size_expr = g.forloop_range * tensors[0].dims[tensors[0].dims.size() - 1];
+      std::shared_ptr<TensorDimExpr const> reduction_size_expr = forloop_range * tensors[0].dims[tensors[0].dims.size() - 1];
       return abstract_expr_make_red(reduction_size_expr, opds[0]);
     }
     case type::TBOperatorType::TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP: {
       assert(opds.size() == 1);
-      std::shared_ptr<TensorDimExpr const> reduction_size_expr = g.forloop_range * tensors[0].dims[tensors[0].dims.size() - 1] / dim_expr_make_const(g.reduction_dimx);
+      if (!g.reduction_degree) {
+        return nullptr;
+      }
+      std::shared_ptr<TensorDimExpr const> reduction_size_expr = g.reduction_degree;
       return abstract_expr_make_red(reduction_size_expr, opds[0]);
     }
     case type::TBOperatorType::TB_FORLOOP_ACCUM_RED_LD_MEAN_OP: {
       assert(opds.size() == 1);
-      std::shared_ptr<TensorDimExpr const> reduction_size_expr = g.forloop_range * tensors[0].dims[tensors[0].dims.size() - 1];
+      std::shared_ptr<TensorDimExpr const> reduction_size_expr = forloop_range * tensors[0].dims[tensors[0].dims.size() - 1];
       return abstract_expr_make_red(reduction_size_expr, opds[0]);
     }
     case type::TBOperatorType::TB_SQUARE_OP: {

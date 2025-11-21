@@ -364,5 +364,8 @@ public:
 };
 std::shared_ptr<TensorDimDisj const> dim_expr_make_disj(std::vector<std::shared_ptr<TensorDimExpr const>> const &args);
 
+int get_value_with_all_vars_two(std::shared_ptr<TensorDimExpr const> expr);
+int get_value_with_all_vars_random(std::shared_ptr<TensorDimExpr const> expr);
+
 } // namespace search
 } // namespace mirage

@@ -204,6 +204,12 @@ pub extern "C" fn is_equiv(expr1: *const c_char, expr2: *const c_char) -> bool {
             CStr::from_ptr(expr2)
         }.to_str().unwrap_or("");
 
+    let re = Regex::new(r"\(sum (\d+)\b").unwrap();
+
+    let nums: Vec<u32> = re.captures_iter(&format!("{}{}", expr_str, expr2_str))
+        .filter_map(|cap| cap.get(1).unwrap().as_str().parse::<u32>().ok())
+        .collect();
+
     let expr1: RecExpr<Expr> = expr_str.parse().unwrap();
     let expr2: RecExpr<Expr> = expr2_str.parse().unwrap();
 
@@ -213,7 +219,7 @@ pub extern "C" fn is_equiv(expr1: *const c_char, expr2: *const c_char) -> bool {
         .with_time_limit(Duration::from_secs(10))
         .with_expr(&expr1)
         .with_expr(&expr2)
-        .run(&rules(vec![]));
+        .run(&rules(nums));
 
     let id = runner.egraph.equivs(&expr1, &expr2);
     if id.len() > 0 {

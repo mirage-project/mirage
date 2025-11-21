@@ -9,8 +9,8 @@ GeneratorConfig GeneratorConfig::get_default_config() {
       5 /* max_num_kernel_graph_op */,
       1 /* max_num_threadblock_graphs */,
       3 /* max_num_threadblock_graph_inputs */,
-      1 /* max_num_threadblock_graph_outputs */,
-      16 /* search_thread */,
+      2 /* max_num_threadblock_graph_outputs */,
+      128 /* search_thread */,
       VerifierType::PROBABILISTIC_VERIFIER,
       {
           // type::KN_MATMUL_OP,

@@ -9,6 +9,8 @@
 #include "mirage/utils/containers.h"
 
 #include <iostream>
+#include <unordered_map>
+#include <vector>
 
 namespace mirage {
 namespace search {
@@ -75,13 +77,24 @@ OutputMatch FormalVerifier::verify_symbolic_graph(SymbolicKNGraph const &graph) 
   assert(input_exprs.size() == 1);
   std::vector<SymbolicDTensor> output_tensors{graph.tensors.back()};
   std::vector<std::string> graph_exprs = get_concrete_exprs(graph, false);
+  assert(output_tensors.size() == graph_exprs.size());
+
+  auto is_shape_match = [&](std::vector<int> const &shape_std, SymbolicDTensor const &symbolic_tensor) {
+    std::vector<int> shape_symbolic;
+    for (size_t i = 0; i < symbolic_tensor.dims.size(); i++) {
+      shape_symbolic.push_back(get_value_with_all_vars_random(symbolic_tensor.dims[i]));
+    }
+    return shape_std == shape_symbolic;
+  };
 
   auto verify_with_match = [&](OutputMatch const &match) {
-    std::cerr << "concrete exprs: ";
     for (size_t i = 0; i < match.size(); i++) {
-      std::cerr << input_exprs[i] << " " << graph_exprs[match[i]] << std::endl;
+      if (!is_shape_match(shapes_std[i], output_tensors[match[i]])) {
+        return false;
+      }
       bool is_equiv = check_equiv(input_exprs[i].c_str(), graph_exprs[match[i]].c_str(), true);
       if (!is_equiv) {
+        std::cerr << "Rejected by expression mismatch" << std::endl;
         return false;
       }
     }
@@ -505,10 +518,6 @@ std::vector<std::string> get_concrete_exprs(SymbolicKNGraph const &graph, bool w
 
   std::string data_dim[3] = {data_dim0, data_dim1, data_dim2};
 
-  int custom_kernel_id = 0;
-
-  const int DUMMY_DIM = 7;
-
   auto calc_stensor_exprs = [&](SymbolicTBGraph const &graph, std::vector<std::string> const &inputs) {
     std::vector<std::string> tensor_exprs, output_dtensor_exprs;
 
@@ -523,33 +532,35 @@ std::vector<std::string> get_concrete_exprs(SymbolicKNGraph const &graph, bool w
       return false;
     }();
 
-    std::string dx = "dx" + std::to_string(custom_kernel_id);
-    std::string dy = "dy" + std::to_string(custom_kernel_id);
-    std::string dz = "dz" + std::to_string(custom_kernel_id);
-    std::string df = "df" + std::to_string(custom_kernel_id);
-    std::vector<std::string> parallel_dim{dx, dy, dz};
-    custom_kernel_id++;
+    std::vector<std::string> parallel_dim = vector_map(graph.grid_dim, [&](SymbolicTensorDim const &dim) {
+      assert(dim->is_var());
+      return dim->to_string();
+    });
+    std::vector<int> dummy_dim_size = vector_map(graph.grid_dim, [&](SymbolicTensorDim const &dim) {
+      assert(dim->is_var());
+      return (int)std::static_pointer_cast<TensorDimVar const>(dim)->index;
+    });
+    std::string forloop_range = graph.forloop_range->to_string();
+    int dummy_fsize = std::static_pointer_cast<TensorDimVar const>(graph.forloop_range)->index;
     for (size_t i = 0; i < graph.operators.size(); ++i) {
       switch (graph.operators[i].op_type) {
         case type::TBOperatorType::TB_INPUT_OP: {
           auto args = std::static_pointer_cast<TBInputOpArgs const>(graph.operators[i].args);
           std::string a = inputs[i];
-          // int3 input_map = vec_to_int3(args->input_map);
-          // int forloop_dim = args->forloop_dim;
           for (size_t j = 0; j < args->input_map.size(); ++j) {
             if (args->input_map[j] >= 0) {
               size_t axis = args->dtensor.dims.size() - 1 - args->input_map[j];
-              a = "(partition " + a + " " + data_dim[axis] + " " + parallel_dim[j] + " " + std::to_string(DUMMY_DIM) + ")";
+              a = "(partition " + a + " " + data_dim[axis] + " " + parallel_dim[j] + " " + std::to_string(dummy_dim_size[j]) + ")";
             } else {
-              a = "(replicate " + a + " " + parallel_dim[j] + " " + std::to_string(DUMMY_DIM) + ")";
+              a = "(replicate " + a + " " + parallel_dim[j] + " " + std::to_string(dummy_dim_size[j]) + ")";
             }
           }
           if (is_forloop_greater_than_one) {
             if (args->forloop_dim >= 0) {
               size_t axis = args->dtensor.dims.size() - 1 - args->forloop_dim;
-              a = "(partition " + a + " " + data_dim[axis] + " " + df + " " + std::to_string(DUMMY_DIM) + ")";
+              a = "(partition " + a + " " + data_dim[axis] + " " + forloop_range + " " + std::to_string(dummy_fsize) + ")";
             } else {
-              a = "(replicate " + a + " " + df + " " + std::to_string(DUMMY_DIM) + ")";
+              a = "(replicate " + a + " " + forloop_range + " " + std::to_string(dummy_fsize) + ")";
             }
           }
           tensor_exprs.push_back(a);
@@ -600,7 +611,7 @@ std::vector<std::string> get_concrete_exprs(SymbolicKNGraph const &graph, bool w
         case type::TBOperatorType::TB_FORLOOP_ACCUM_NO_RED_OP: {
           std::string a = tensor_exprs[graph.input_indices[i][0]];
           if (is_forloop_greater_than_one) {
-            a = "(reduce " + a + " " + df + ")";
+            a = "(reduce " + a + " " + forloop_range + ")";
           }
           tensor_exprs.push_back(a);
           break;
@@ -609,7 +620,7 @@ std::vector<std::string> get_concrete_exprs(SymbolicKNGraph const &graph, bool w
           std::string a = tensor_exprs[graph.input_indices[i][0]];
           a = "(square " + a + ")";
           if (is_forloop_greater_than_one) {
-            a = "(reduce " + a + " " + df + ")";
+            a = "(reduce " + a + " " + forloop_range + ")";
           }
           a = "(sum " + a + " " + data_dim[0] + ")";
           a = "(sqrt " + a + ")";
@@ -619,9 +630,25 @@ std::vector<std::string> get_concrete_exprs(SymbolicKNGraph const &graph, bool w
         case type::TBOperatorType::TB_FORLOOP_ACCUM_RED_LD_SUM_OP: {
           std::string a = tensor_exprs[graph.input_indices[i][0]];
           if (is_forloop_greater_than_one) {
-            a = "(reduce " + a + " " + df + ")";
+            a = "(reduce " + a + " " + forloop_range + ")";
           }
           a = "(sum " + a + " " + data_dim[0] + ")";
+          tensor_exprs.push_back(a);
+          break;
+        }
+        case type::TBOperatorType::TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP: {
+          std::string a = tensor_exprs[graph.input_indices[i][0]];
+          if (is_forloop_greater_than_one) {
+            a = "(reduce " + a + " " + forloop_range + ")";
+          }
+          // std::string reddim = "reddim" + std::to_string(redtox_id++);
+          assert(graph.reduction_degree);
+          assert(graph.reduction_degree->is_var());
+          std::string reddim = graph.reduction_degree->to_string();
+          int reduce_degree = (int)std::static_pointer_cast<TensorDimVar const>(graph.reduction_degree)->index;
+          a = "(partition " + a + " " + data_dim[0] + " " + reddim + " " +
+              std::to_string(reduce_degree) + ")";
+          a = "(reduce " + a + " " + reddim + ")";
           tensor_exprs.push_back(a);
           break;
         }
@@ -682,6 +709,7 @@ std::vector<std::string> get_concrete_exprs(SymbolicKNGraph const &graph, bool w
           break;
         }
         default: {
+          std::cerr << "Unsupported operator type: " << json(graph.operators[i].op_type) << std::endl;
           assert(false && "Unsupported operator type");
         }
       }

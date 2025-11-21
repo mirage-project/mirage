@@ -40,8 +40,8 @@ TBElementBinaryOpArgs::TBElementBinaryOpArgs(
     mirage::type::TBOperatorType op_type)
     : op_type(op_type) {}
 
-TBReductionOpArgs::TBReductionOpArgs(int reduce_dim, int reduce_size)
-    : reduce_dim(reduce_dim), reduce_size(reduce_size) {}
+TBReductionOpArgs::TBReductionOpArgs(int reduce_dim, SymbolicTensorDim reduce_degree)
+    : reduce_dim(reduce_dim), reduce_degree(reduce_degree) {}
 
 EmptyOpArgs::operator json() const {
   return json{{}};
@@ -92,7 +92,7 @@ TBElementBinaryOpArgs::operator json() const {
 }
 
 TBReductionOpArgs::operator json() const {
-  return json{{"reduce_dim", reduce_dim}, {"reduce_size", reduce_size}};
+  return json{{"reduce_dim", reduce_dim}, {"reduce_degree", *reduce_degree}};
 }
 
 } // namespace search

@@ -933,6 +933,24 @@ bool TensorDimExpr::is_one() const {
   return false;
 }
 
+int get_value_with_all_vars_two(std::shared_ptr<TensorDimExpr const> expr) {
+  std::unordered_set<std::shared_ptr<TensorDimVar const>> all_vars = expr->get_all_vars();
+  DimVarAssignment assignment;
+  for (auto const &var : all_vars) {
+    assignment.assign(var->index, 2);
+  }
+  return expr->get_value(assignment);
+}
+
+int get_value_with_all_vars_random(std::shared_ptr<TensorDimExpr const> expr) {
+  std::unordered_set<std::shared_ptr<TensorDimVar const>> all_vars = expr->get_all_vars();
+  DimVarAssignment assignment;
+  for (auto const &var : all_vars) {
+    assignment.assign(var->index, (int)var->index + 2);
+  }
+  return expr->get_value(assignment);
+}
+
 } // namespace search
 } // namespace mirage
 

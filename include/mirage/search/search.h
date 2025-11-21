@@ -81,7 +81,8 @@ private:
       std::shared_ptr<SymbolicTBGraph> tb_graph,
       std::vector<int> input_dtensor_indices_for_tb_graph,
       SearchLevel level,
-      int search_depth);
+      int search_depth,
+      bool is_a_new_thread_start = false);
   bool verify_symbolic_graph(SymbolicKNGraph const &symbolic_graph);
   std::vector<SymbolicKNGraphWithPartialAssignment> verified_symbolic_graphs;
 

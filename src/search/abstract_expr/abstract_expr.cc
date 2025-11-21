@@ -3,9 +3,11 @@
 #include <cassert>
 #include <cmath>
 #include <iostream>
+#include <memory>
 #include <thread>
 #include <vector>
 
+#include "mirage/search/symbolic_graph/dim_var_assignment.h"
 #include "mirage/search/symbolic_graph/tensor_dim_expr.h"
 #include "mirage/utils/containers.h"
 #include "mirage/utils/z3_utils.h"
@@ -229,7 +231,8 @@ std::string RMS::to_string() const {
 
 std::string RMS::to_egg() const {
   if (AbstractExpr::symbolic_expr) {
-    return "(grms " + elems->to_egg() + ")";
+    int value = get_value_with_all_vars_two(reduction_degree);
+    return "(rms " + std::to_string(value) + " " + elems->to_egg() + ")";
   }
   return "(rms " + reduction_degree->to_string() + " " + elems->to_egg() + ")";
 }
@@ -248,8 +251,8 @@ std::string Red::to_string() const {
 
 std::string Red::to_egg() const {
   if (AbstractExpr::symbolic_expr) {
-    return summand->to_egg();
-    // return "(gsum " + summand->to_egg() + ")";
+    int value = get_value_with_all_vars_two(reduction_degree);
+    return "(sum " + std::to_string(value) + " " + summand->to_egg() + ")";
   }
   return "(sum " + reduction_degree->to_string() + " " + summand->to_egg() +
          ")";

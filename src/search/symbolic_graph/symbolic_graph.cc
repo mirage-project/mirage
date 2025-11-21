@@ -11,6 +11,7 @@
 #include "mirage/utils/containers.h"
 
 #include <iostream>
+#include <unordered_set>
 
 namespace mirage {
 namespace search {
@@ -26,7 +27,6 @@ SymbolicTBGraph::SymbolicTBGraph(tensor_dim_var_index_t dim_variable_index_base,
   block_dim.push_back(std::make_shared<TensorDimConst>(1));
   block_dim.push_back(std::make_shared<TensorDimConst>(1));
   forloop_range = SymbolicTensorDim(std::make_shared<TensorDimVar>(next_dim_variable_index++));
-  reduction_dimx = (int)next_dim_variable_index++;
 }
 
 bool SymbolicTBGraph::remove_last_operator() {
@@ -54,6 +54,27 @@ threadblock::Graph *SymbolicTBGraph::to_threadblock_graph(
                      assignment.get_value(block_dim[1]),
                      assignment.get_value(block_dim[2]));
   int forloop_range_val = assignment.get_value(forloop_range);
+  int reduction_dimx = [&]() {
+    std::unordered_set<int> reduction_dimx_candidates;
+    for (size_t i = 0; i < this->operators.size(); ++i) {
+      if (this->operators[i].op_type == type::TBOperatorType::TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP) {
+        std::shared_ptr<TBReductionOpArgs const> args = std::static_pointer_cast<TBReductionOpArgs const>(this->operators[i].args);
+        SymbolicSTensor reduced_tensor = this->tensors[this->output_indices[i][0]];
+        int reduction_dimx = assignment.get_value(reduced_tensor.dims[args->reduce_dim]);
+        reduction_dimx_candidates.insert(reduction_dimx);
+      }
+    }
+    if (reduction_dimx_candidates.empty()) {
+      return 1;
+    }
+    if (reduction_dimx_candidates.size() == 1) {
+      return *reduction_dimx_candidates.begin();
+    }
+    return -1;
+  }();
+  if (reduction_dimx == -1) {
+    return nullptr;
+  }
   threadblock::Graph *graph = new threadblock::Graph(
       grid_dim_val, block_dim_val, forloop_range_val, reduction_dimx);
 
@@ -76,7 +97,6 @@ threadblock::Graph *SymbolicTBGraph::to_threadblock_graph(
       op = create_op(*graph, this->operators[i].op_type, input_tensors);
     }
     if (op == nullptr) {
-      // std::cerr << "failed to create threadblock operator " << json(this->operators[i].op_type) << std::endl;
       delete graph;
       return nullptr;
     }
@@ -109,7 +129,6 @@ bool SymbolicTBGraph::add_operator(type::TBOperatorType op_type,
   for (size_t i = 1; i < input_indices.size(); i++) {
     if (tensors[input_indices[i]].after_accum !=
         tensors[input_indices[0]].after_accum) {
-      // std::cerr << "failed to add operator: " << json(op_type) << " because the after_accum is not the same" << std::endl;
       return false;
     }
   }
@@ -170,6 +189,9 @@ bool SymbolicTBGraph::add_operator(type::TBOperatorType op_type,
     case type::TBOperatorType::TB_MUL_OP:
     case type::TBOperatorType::TB_DIV_OP: {
       assert(input_indices.size() == 2);
+      if (input_indices[0] == input_indices[1]) {
+        return false;
+      }
       SymbolicSTensor A = this->tensors[input_indices[0]];
       SymbolicSTensor B = this->tensors[input_indices[1]];
       if (A.dims.size() != B.dims.size()) {
@@ -183,7 +205,6 @@ bool SymbolicTBGraph::add_operator(type::TBOperatorType op_type,
           if (A.dims[i]->symbolically_equivalent_to(B.dims[i])) {
             continue;
           }
-          // std::cerr << "failed on elementwise, the dims are not equivalent: " << A.dims[i]->to_egg() << " and " << B.dims[i]->to_egg() << std::endl;
           return false;
         }
       }
@@ -205,7 +226,6 @@ bool SymbolicTBGraph::add_operator(type::TBOperatorType op_type,
       }
       {
         if (A.dims[A.dims.size() - 1]->is_one()) {
-          // std::cerr << "failed on forloop accum, the dim is one: " << A.dims[A.dims.size() - 1]->to_egg() << std::endl;
           return false;
         }
       }
@@ -221,8 +241,7 @@ bool SymbolicTBGraph::add_operator(type::TBOperatorType op_type,
           dim_templates[dim_templates.size() - 1] = dim_expr_make_const(1);
         } else if (op_type ==
                    type::TBOperatorType::TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP) {
-          dim_templates[dim_templates.size() - 1] = 
-              dim_expr_make_const(this->reduction_dimx);
+          dim_templates[dim_templates.size() - 1] = dim_templates[dim_templates.size() - 1] / this->reduction_degree;
         }
         SymbolicSTensor B(dim_templates, true);
         this->tensors.push_back(B);
@@ -246,11 +265,12 @@ bool SymbolicTBGraph::add_operator(type::TBOperatorType op_type,
           if (A.dims[i]->is_one() || B.dims[i]->is_one()) {
             continue;
           }
-          // std::cerr << "failed on matmul, the dims are not equivalent: " << A.dims[i]->to_egg() << " and " << B.dims[i]->to_egg() << std::endl;
+          if (A.dims[i]->symbolically_equivalent_to(B.dims[i])) {
+            continue;
+          }
           return false;
         }
         if (!A.dims[A.dims.size() - 1]->symbolically_equivalent_to(B.dims[B.dims.size() - 2])) {
-          // std::cerr << "failed on matmul, the dims are not equivalent: " << A.dims[A.dims.size() - 1]->to_egg() << " and " << B.dims[B.dims.size() - 2]->to_egg() << std::endl;
           return false;
         }
       }
@@ -276,7 +296,7 @@ bool SymbolicTBGraph::add_operator(type::TBOperatorType op_type,
         return false;
       }
       this->operators.push_back(SymbolicTBOp(
-          op_type, std::make_shared<TBReductionOpArgs>(reduction_dim, 1)));
+          op_type, std::make_shared<TBReductionOpArgs>(reduction_dim, dim_expr_make_const(1))));
       {
         std::vector<SymbolicTensorDim> dim_templates = A.dims;
         dim_templates[reduction_dim] = dim_expr_make_const(1);
@@ -300,10 +320,10 @@ bool SymbolicTBGraph::add_operator(type::TBOperatorType op_type,
       this->operators.push_back(
           SymbolicTBOp(op_type,
                        std::make_shared<TBReductionOpArgs>(
-                           reduction_dim, this->reduction_dimx)));
+                           reduction_dim, this->reduction_degree)));
       {
         std::vector<SymbolicTensorDim> dim_templates = A.dims;
-        dim_templates[reduction_dim] = dim_expr_make_const(this->reduction_dimx);
+        dim_templates[reduction_dim] = dim_templates[reduction_dim] / this->reduction_degree;
         SymbolicSTensor B(dim_templates, A.after_accum);
         this->tensors.push_back(B);
       }
@@ -665,15 +685,22 @@ SymbolicTBGraph::operator json() const {
   for (auto const &dim : block_dim) {
     block_dim_json.push_back(json(*dim));
   }
+  json reduction_degree_json;
+  if (reduction_degree) {
+    reduction_degree_json = json(*reduction_degree);
+  } else {
+    reduction_degree_json = json(nullptr);
+  }
   return json{
       {"grid_dim", grid_dim_json},
       {"block_dim", block_dim_json},
       {"forloop_range", *forloop_range},
-      {"reduction_dimx", reduction_dimx},
+      {"reduction_degree", reduction_degree_json},
       {"operators", operators},
       {"tensors", tensors},
       {"input_indices", input_indices},
       {"output_indices", output_indices},
+      {"num_operators", operators.size()},
   };
 }
 

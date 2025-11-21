@@ -127,8 +127,9 @@ class TBElementBinaryOpArgs : public OpArgs {
 
 class TBReductionOpArgs : public OpArgs {
 public:
-  TBReductionOpArgs(int reduce_dim, int reduce_size);
-  int reduce_dim, reduce_size;
+  TBReductionOpArgs(int reduce_dim, SymbolicTensorDim reduce_degree);
+  int reduce_dim;
+  SymbolicTensorDim reduce_degree;
 
   operator json() const override;
 };

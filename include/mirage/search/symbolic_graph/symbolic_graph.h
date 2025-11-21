@@ -40,7 +40,7 @@ public:
 
   std::vector<SymbolicTensorDim> grid_dim, block_dim;
   SymbolicTensorDim forloop_range;
-  int reduction_dimx;
+  SymbolicTensorDim reduction_degree;
   std::vector<SymbolicTBOp> operators;
   std::vector<SymbolicSTensor> tensors;
   std::vector<std::vector<int>> input_indices;

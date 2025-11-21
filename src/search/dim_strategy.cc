@@ -1,7 +1,10 @@
 #include "mirage/search/dim_strategy.h"
 #include "mirage/config.h"
 #include "mirage/search/symbolic_graph/symbolic_tensor.h"
+#include "mirage/type.h"
 #include "mirage/utils/containers.h"
+#include "mirage/search/symbolic_graph/op_args.h"
+#include <iostream>
 #include <optional>
 
 namespace mirage {
@@ -500,17 +503,47 @@ std::vector<std::vector<std::vector<int>>> DimStrategy::get_input_map_cand(
     });
   };
 
-  std::vector<std::vector<std::vector<int>>> input_map_cand_for_each_tensor = vector_map(tensors, get_input_map_cand_for_one_tensor);
-  return filter(cartesian_product(input_map_cand_for_each_tensor), [&](std::vector<std::vector<int>> const &input_cand) {
-    for (auto const &imap : input_cand) {
-      for (int i : imap) {
-        if (i != -1) {
-          return true;
+  auto no_redundant_parallel_dim = [&](std::vector<std::vector<int>> const &input_cand) {
+    for (size_t i = 0; i < num_parallel_dims; ++i) {
+      bool is_used = false;
+      for (auto const &imap : input_cand) {
+        if (imap[i] != -1) {
+          is_used = true;
+          break;
         }
       }
+      if (!is_used) {
+        return false;
+      }
     }
-    return false;
-  });
+    return true;
+  };
+
+  std::vector<std::vector<std::vector<int>>> input_map_cand_for_each_tensor = vector_map(tensors, get_input_map_cand_for_one_tensor);
+  // return filter(cartesian_product(input_map_cand_for_each_tensor), no_redundant_parallel_dim);
+  auto result = filter(cartesian_product(input_map_cand_for_each_tensor), no_redundant_parallel_dim);
+  std::vector<std::vector<int>> expected = {
+    {0, -1, 1},
+    {0, 2, -1},
+    {0, 1, -1},
+  };
+  std::vector<std::vector<int>> expected2 = {
+    {0, 1},
+    {0, 1},
+  };
+  if (num_parallel_dims == 3 && tensors.size() == 3) {
+    if (!contains(result, expected)) {
+      std::cerr << "result: " << json(result) << std::endl;
+    }
+    assert(contains(result, expected));
+  }
+  if (num_parallel_dims == 2 && tensors.size() == 2) {
+    if (!contains(result, expected2)) {
+      std::cerr << "result: " << json(result) << std::endl;
+    }
+    assert(contains(result, expected2));
+  }
+  return result;
 }
 
 std::vector<std::vector<std::vector<int>>>
@@ -548,6 +581,7 @@ std::vector<std::vector<int>> DimStrategy::get_forloop_dim_cand(
 
   auto get_forloop_dim_for_one_tensor = [&](SymbolicDTensor const &tensor) {
     std::vector<int> result;
+    result.push_back(-1);
     for (size_t i = 0; i < tensor.dims.size(); ++i) {
       result.push_back(i);
     }
@@ -577,6 +611,24 @@ std::vector<size_t> DimStrategy::get_num_parallel_dims_cand(std::vector<Symbolic
   std::vector<size_t> results;
   for (size_t i = 1; i <= max_num_data_dims; ++i) {
     results.push_back(i);
+  }
+  return results;
+}
+
+std::vector<SymbolicTensorDim> DimStrategy::get_reduction_degree_cand(SymbolicKNGraph const &kn_graph) {
+  std::vector<SymbolicTensorDim> results;
+  for (auto const &op : kn_graph.operators) {
+    if (op.op_type == type::KN_CUSTOMIZED_OP) {
+      std::shared_ptr<KNCustomizedOpArgs const> args =
+          std::static_pointer_cast<KNCustomizedOpArgs const>(op.args);
+      SymbolicTBGraph tb_graph = args->tb_graph_template;
+      for (auto const &grid_dim : tb_graph.grid_dim) {
+        results.push_back(grid_dim);
+      }
+    }
+  }
+  if (results.empty()) {
+    results.push_back(nullptr);
   }
   return results;
 }

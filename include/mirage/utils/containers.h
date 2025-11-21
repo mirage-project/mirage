@@ -178,3 +178,12 @@ bool all_of(std::vector<T> const &v, F f) {
   }
   return true;
 }
+
+template <typename T>
+std::vector<T> random_sample(std::vector<T> const &v, int k) {
+  std::vector<T> result;
+  for (int i = 0; i < k; ++i) {
+    result.push_back(v[rand() % v.size()]);
+  }
+  return result;
+}

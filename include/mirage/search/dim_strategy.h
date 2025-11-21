@@ -3,6 +3,7 @@
 #include "mirage/search/config.h"
 #include "mirage/search/op_utils.h"
 #include "mirage/search/symbolic_graph/symbolic_tensor.h"
+#include "mirage/search/symbolic_graph/tensor_dim_expr.h"
 
 namespace mirage {
 namespace search {
@@ -33,6 +34,7 @@ struct DimStrategy {
                              dim3 grid_dim,
                              dim3 block_dim,
                              std::vector<int> const &forloop_dim);
+  std::vector<SymbolicTensorDim> get_reduction_degree_cand(SymbolicKNGraph const &kn_graph);
   std::vector<std::vector<int>> get_unary_input(int num_tensors);
   std::vector<std::vector<int>> get_binary_input(int num_tensors);
   std::vector<std::vector<int>> get_nary_input(int num_tensors, int n);

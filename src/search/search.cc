@@ -16,11 +16,13 @@
 #include "mirage/type.h"
 #include "mirage/utils/containers.h"
 #include "mirage/utils/json_utils.h"
+#include "mirage/search/auto_tuner/auto_tuner.h"
 
 #include <fstream>
 #include <iostream>
 #include <memory>
 #include <thread>
+#include <omp.h>
 
 namespace mirage {
 namespace search {
@@ -33,7 +35,7 @@ KernelGraphGenerator::KernelGraphGenerator(
     : config(config), dim_strategy(DimStrategy(config)),
       checkpoint_filename(checkpoint_filename), verbose(verbose),
       num_total_random_tests(0), num_valid_kernel_graphs(0),
-      num_total_states(0), num_symbolic_graphs(0), num_tasks(0), multithread_threshold_depth(5) {
+      num_total_states(0), num_symbolic_graphs(0), num_tasks(0), multithread_threshold_depth(10) {
   // setting num_thread
   unsigned int max_num_threads = std::thread::hardware_concurrency();
   if (config.search_thread > max_num_threads) {
@@ -463,8 +465,13 @@ void KernelGraphGenerator::generate_kernel_graphs_symbolic() {
     kn_graph->add_input(dim, strides, data_type, layout);
   }
 
-  generate_next_symbolic_operator(
-      kn_graph, nullptr, {}, SearchLevel::LV_KERNEL, 0);
+#pragma omp parallel num_threads(num_thread)
+  {
+    #pragma omp single
+    {
+      generate_next_symbolic_operator(kn_graph, nullptr, {}, SearchLevel::LV_KERNEL, 0, true);
+    }
+  }
   std::cerr << num_symbolic_graphs << std::endl;
   printf("[Search] Symbolic search finished. Time elapsed: %fsec\n",
          std::chrono::duration<double>(std::chrono::steady_clock::now() -
@@ -582,12 +589,14 @@ void KernelGraphGenerator::show_statistics() const {
   double elapsed_time = get_elapsed_time_in_sec();
   double states_per_second = num_total_states.load() / elapsed_time;
   printf(
-      "[Search] States: %d, Random tests: %d, Valid mugraphs: %d, Time: %lf, States per second: %lf\r",
+      "[Search] States: %d, Random tests: %d, Valid mugraphs: %d, Time: %lf, States per second: %lf, Threads: %d\r",
       num_total_states.load(),
       num_total_random_tests.load(),
       num_valid_kernel_graphs.load(),
       elapsed_time,
-      states_per_second);
+      states_per_second,
+      omp_get_num_threads()
+    );
 }
 
 void KernelGraphGenerator::generate_next_symbolic_operator(
@@ -595,33 +604,31 @@ void KernelGraphGenerator::generate_next_symbolic_operator(
     std::shared_ptr<SymbolicTBGraph> tb_graph,
     std::vector<int> input_dtensor_indices_for_tb_graph,
     SearchLevel level,
-    int search_depth) {
+    int search_depth,
+    bool is_a_new_thread_start) {
 
-  if (0 < search_depth && search_depth <= (int)multithread_threshold_depth) {
+  if (!is_a_new_thread_start && search_depth <= (int)multithread_threshold_depth) {
     std::shared_ptr<SymbolicKNGraph> kn_graph_copy =
         std::make_shared<SymbolicKNGraph>(*kn_graph);
     std::shared_ptr<SymbolicTBGraph> tb_graph_copy;
     if (tb_graph) {
       tb_graph_copy = std::make_shared<SymbolicTBGraph>(*tb_graph);
     }
-#if !defined(MIRAGE_FINGERPRINT_USE_CPU) || defined(MIRAGE_USE_FORMAL_VERIFIER)
-#pragma omp task
-#endif
-    generate_next_symbolic_operator(kn_graph_copy,
-                                    tb_graph_copy,
-                                    input_dtensor_indices_for_tb_graph,
-                                    level,
-                                    -search_depth);
+    {
+      #pragma omp task
+          generate_next_symbolic_operator(kn_graph_copy,
+                                          tb_graph_copy,
+                                          input_dtensor_indices_for_tb_graph,
+                                          level,
+                                          search_depth,
+                                          true);      
+    }
     return;
   }
 
   ++num_total_states;
-  if (num_total_states % 100 == 1) {
+  if (num_total_states % 10000 == 1) {
     show_statistics();
-  }
-
-  if (search_depth < 0) {
-    search_depth = -search_depth;
   }
 
   if (level == SearchLevel::LV_KERNEL) {
@@ -676,7 +683,8 @@ void KernelGraphGenerator::generate_next_symbolic_operator(
                                             tb_graph,
                                             input_dtensor_indices_for_tb_graph,
                                             level,
-                                            search_depth + 1);
+                                            search_depth + 1,
+                                            false);
             // Revert the changes
             kn_graph->remove_last_operator();
           }
@@ -702,34 +710,38 @@ void KernelGraphGenerator::generate_next_symbolic_operator(
               input_tensor_idx, [&](int i) { return kn_graph->tensors[i]; });
 
           for (size_t num_parallel_dims : dim_strategy.get_num_parallel_dims_cand(input_tensors)) {
+            std::cerr << "number of configurations: " << dim_strategy.get_input_map_cand(input_tensors, num_parallel_dims).size()
+              * dim_strategy.get_forloop_dim_cand(input_tensors).size()
+              * dim_strategy.get_reduction_degree_cand(*kn_graph).size() << std::endl;
 
             for (auto const &input_maps : dim_strategy.get_input_map_cand(input_tensors, num_parallel_dims)) {
               for (auto const &forloop_dims : dim_strategy.get_forloop_dim_cand(input_tensors)) {
+                for (auto const &reduction_degree : dim_strategy.get_reduction_degree_cand(*kn_graph)) {
 
-                std::shared_ptr<SymbolicTBGraph> new_tb_graph = std::make_shared<SymbolicTBGraph>(
-                        kn_graph->next_dim_variable_index, num_parallel_dims);
-                // TODO: symbolize reduction dimension
-                new_tb_graph->reduction_dimx = config.reduction_dimx;
+                  std::shared_ptr<SymbolicTBGraph> new_tb_graph = std::make_shared<SymbolicTBGraph>(
+                          kn_graph->next_dim_variable_index, num_parallel_dims);
+                  new_tb_graph->reduction_degree = reduction_degree;
 
-                // Try to create input operators
-                bool input_created = true;
-                for (size_t i = 0; i < input_tensors.size(); ++i) {
-                  SymbolicDTensor dtensor = input_tensors[i];
-                  if (!new_tb_graph->add_input(dtensor, input_maps[i], forloop_dims[i])) {
-                    input_created = false;
-                    break;
+                  // Try to create input operators
+                  bool input_created = true;
+                  for (size_t i = 0; i < input_tensors.size(); ++i) {
+                    SymbolicDTensor dtensor = input_tensors[i];
+                    if (!new_tb_graph->add_input(dtensor, input_maps[i], forloop_dims[i])) {
+                      input_created = false;
+                      break;
+                    }
+                  }
+
+                  if (input_created) {
+                    // Recursively generate the next operator
+                    generate_next_symbolic_operator(kn_graph,
+                                                    new_tb_graph,
+                                                    input_tensor_idx,
+                                                    SearchLevel::LV_THREADBLOCK,
+                                                    search_depth + 1,
+                                                    false);
                   }
                 }
-
-                if (input_created) {
-                  // Recursively generate the next operator
-                  generate_next_symbolic_operator(kn_graph,
-                                                  new_tb_graph,
-                                                  input_tensor_idx,
-                                                  SearchLevel::LV_THREADBLOCK,
-                                                  search_depth + 1);
-                }
-
               }
             }
           }
@@ -793,7 +805,7 @@ void KernelGraphGenerator::generate_next_symbolic_operator(
                   *tb_graph, input_dtensor_indices_for_tb_graph)) {
             // Recursively generate the next operator
             generate_next_symbolic_operator(
-                kn_graph, nullptr, {}, SearchLevel::LV_KERNEL, search_depth + 1);
+                kn_graph, nullptr, {}, SearchLevel::LV_KERNEL, search_depth + 1, false);
             // Revert the changes
             kn_graph->remove_last_operator();
           }
@@ -806,7 +818,6 @@ void KernelGraphGenerator::generate_next_symbolic_operator(
       }
     };
     
-
     finalize_threadblock_graph_level();
 
     // Upper bound of the number of operators
@@ -814,17 +825,29 @@ void KernelGraphGenerator::generate_next_symbolic_operator(
       return;
     }
 
-    if (count_symbolic_op_of_types(std::unordered_set<type::TBOperatorType>{
-      type::TBOperatorType::TB_FORLOOP_ACCUM_NO_RED_OP,
-      type::TBOperatorType::TB_FORLOOP_ACCUM_RED_LD_SUM_OP,
-      type::TBOperatorType::TB_FORLOOP_ACCUM_RED_LD_MEAN_OP,
-      type::TBOperatorType::TB_FORLOOP_ACCUM_RED_LD_RMS_OP,
-      type::TBOperatorType::TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP,
-      type::TBOperatorType::TB_FORLOOP_ACCUM_NO_RED_RESCALE_OP,
-      type::TBOperatorType::TB_FORLOOP_ACCUM_RED_LD_SUM_RESCALE_OP,
-      type::TBOperatorType::TB_FORLOOP_ACCUM_MAX_OP,
-    }, *tb_graph) > 2) {
+    auto is_reduction_op = [&](type::TBOperatorType op_type) {
+      return op_type == type::TBOperatorType::TB_FORLOOP_ACCUM_NO_RED_OP ||
+             op_type == type::TBOperatorType::TB_FORLOOP_ACCUM_RED_LD_SUM_OP ||
+             op_type == type::TBOperatorType::TB_FORLOOP_ACCUM_RED_LD_MEAN_OP ||
+             op_type == type::TBOperatorType::TB_FORLOOP_ACCUM_RED_LD_RMS_OP ||
+             op_type == type::TBOperatorType::TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP ||
+             op_type == type::TBOperatorType::TB_FORLOOP_ACCUM_NO_RED_RESCALE_OP ||
+             op_type == type::TBOperatorType::TB_FORLOOP_ACCUM_RED_LD_SUM_RESCALE_OP ||
+             op_type == type::TBOperatorType::TB_FORLOOP_ACCUM_MAX_OP;
+    };
+
+    if (filter(vector_map(tb_graph->operators, [&](auto const &op) { return op.op_type; }), is_reduction_op).size() > 2) {
       return;
+    }
+
+    for (size_t i = 0; i < tb_graph->operators.size(); ++i) {
+      for (size_t j = i + 1; j < tb_graph->operators.size(); ++j) {
+        if (is_reduction_op(tb_graph->operators[i].op_type)
+            && is_reduction_op(tb_graph->operators[j].op_type)
+            && tb_graph->input_indices[i][0] == tb_graph->input_indices[j][0]) {
+          return;
+        }
+      }
     }
 
     // Evaluate the abstract expressions
@@ -838,20 +861,38 @@ void KernelGraphGenerator::generate_next_symbolic_operator(
       abstract_expr_eval(*tb_graph, input_exprs, abs_exprs, output_exprs);
     }
 
-    std::vector<type::TBOperatorType> op_for_debug = {
+    std::vector<type::TBOperatorType> ops_for_debug = {
       type::TB_INPUT_OP,
       type::TB_INPUT_OP,
-      type::TB_FORLOOP_ACCUM_RED_LD_RMS_OP,
+      type::TB_INPUT_OP,
+      type::TB_MATMUL_OP,
+      type::TB_EXP_OP,
+      type::TB_FORLOOP_ACCUM_RED_LD_SUM_OP,
       type::TB_MATMUL_OP,
       type::TB_FORLOOP_ACCUM_NO_RED_OP,
-      type::TB_DIV_OP,
     };
+
+
+    if (count_symbolic_op_of_type(type::KNOperatorType::KN_CUSTOMIZED_OP,
+      *kn_graph) > 0) {
+      ops_for_debug = std::vector<type::TBOperatorType>{
+        type::TB_INPUT_OP,
+        type::TB_INPUT_OP,
+        type::TB_FORLOOP_ACCUM_RED_LD_SUM_OP,
+        type::TB_FORLOOP_ACCUM_REDTOX_LD_SUM_OP,
+        type::TB_DIV_OP,
+      };
+    }
+
+    if (tb_graph->operators.size() >= ops_for_debug.size()) {
+      return;
+    }
 
     // Case B2: Generate pre-defined threadblock operator
     for (type::TBOperatorType op_type : dim_strategy.get_tbop_cand()) {
-      // if (op_type != op_for_debug[tb_graph->operators.size()]) {
-      //   continue;
-      // }
+      if (tb_graph->operators.size() >= ops_for_debug.size() || op_type != ops_for_debug[tb_graph->operators.size()]) {
+        continue;
+      }
       for (auto const &input_idx :
            dim_strategy.get_input_cand_idx(op_type, tb_graph->tensors)) {
         Order order(input_idx, static_cast<int>(op_type));
@@ -869,8 +910,8 @@ void KernelGraphGenerator::generate_next_symbolic_operator(
         // Obtain the abstract expression of the output tensor
         std::shared_ptr<AbstractExpr const> expr =
             get_abstract_expr(op_type, input_tensors, input_exprs, *tb_graph);
-        // Check if the abstract expression is a subexpression of the final
-        // output
+
+        // Check if the abstract expression is a subexpression of the final output
         if (!check_abstract_expr(expr)) {
           continue;
         }
@@ -882,7 +923,8 @@ void KernelGraphGenerator::generate_next_symbolic_operator(
                                           tb_graph,
                                           input_dtensor_indices_for_tb_graph,
                                           level,
-                                          search_depth + 1);
+                                          search_depth + 1,
+                                          false);
           // Revert the changes
           tb_graph->remove_last_operator();
         } else {
@@ -896,7 +938,7 @@ void KernelGraphGenerator::generate_next_symbolic_operator(
 bool KernelGraphGenerator::verify_symbolic_graph(
     SymbolicKNGraph const &symbolic_graph) {
   // Check whether abstract expression is equivalent to the final expression
-  {
+  if (false) {
     std::vector<std::shared_ptr<AbstractExpr const>> exprs;
     abstract_expr_eval(symbolic_graph, exprs);
     std::shared_ptr<AbstractExpr const> expr = exprs.back();
@@ -910,11 +952,19 @@ bool KernelGraphGenerator::verify_symbolic_graph(
   std::shared_ptr<FormalVerifier> verifier = std::dynamic_pointer_cast<FormalVerifier>(this->verifier);
   assert(verifier);
 
+  // std::cerr << "verifying symbolic graph: " << json(symbolic_graph) << std::endl;
+
   OutputMatch match = verifier->verify_symbolic_graph(symbolic_graph);
 
   if (match.is_valid()) {
-    ++num_symbolic_graphs;
+    // ++num_symbolic_graphs;
     std::cerr << "verified symbolic graph: " << json(symbolic_graph) << std::endl;
+    ++num_valid_kernel_graphs;
+    // AutoTuner auto_tuner(AutoTunerConfig{});
+    // DimVarAssignment assignment = auto_tuner.tune(symbolic_graph);
+    // kernel::Graph *tuned_graph = symbolic_graph.to_kernel_graph(assignment);
+    // std::cerr << "tuned graph: " << json(*tuned_graph) << std::endl;
+    // delete tuned_graph;
     return true;
   } else {
     return false;
