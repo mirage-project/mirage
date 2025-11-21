@@ -1067,7 +1067,7 @@ int TaskRegister::register_paged_attention_hopper_task(
   code.e("    1e-6f,");
   code.e("    task_desc->input_ptrs[0],");
   code.e("    task_desc->output_ptrs[0],");
-  code.e("    task_desc->head_group);");
+  code.e("    task_desc->task_metadata.head_group);");
 
   return register_task_variant(TASK_PAGED_ATTENTION_HOPPER, code.to_string());
 }
@@ -2242,7 +2242,7 @@ int TaskRegister::register_moe_linear_sm100_task(
   code.e("    mRoutingIndices,");
   code.e("    mMask,");
   code.e("    mOutput,");
-  code.e("    task_desc->expert_offset);");
+  code.e("    task_desc->task_metadata.expert_offset);");
   if (w13_linear) {
     return register_task_variant(TASK_MOE_W13_LINEAR_SM100, code.to_string());
   } else {
@@ -2528,7 +2528,7 @@ int TaskRegister::register_moe_linear_sm90_task(
   code.e("    mRoutingIndices,");
   code.e("    mMask,");
   code.e("    mOutput,");
-  code.e("    task_desc->expert_offset);");
+  code.e("    task_desc->task_metadata.expert_offset);");
   if (w13_linear) {
     return register_task_variant(TASK_MOE_W13_LINEAR_SM90, code.to_string());
   } else {
@@ -2769,9 +2769,8 @@ int TaskRegister::register_paged_attention_split_kv_sm100_task(
   code.e("    1e-6f,");
   code.e("    1e-6f,");
   code.e("    task_desc->output_ptrs[0],");
-  code.e("    task_desc->kv_idx);");
-  return register_task_variant(TASK_PAGED_ATTENTION_SPLIT_KV_SM100,
-                               code.to_string());
+  code.e("    task_desc->task_metadata.kv_idx);");
+  return register_task_variant(TASK_PAGED_ATTENTION_SPLIT_KV_SM100, code.to_string());
 }
 
 int TaskRegister::register_paged_attention_split_kv_merge_sm100_task(
@@ -2812,26 +2811,25 @@ int TaskRegister::register_paged_attention_split_kv_merge_sm100_task(
   code.inc_indent();
 
   code.e("kernel::merge_splitkv<bfloat16, $, $, $, $, $, $, "
-         "$, $, $>(",
-         num_q_heads_per_kv,
-         1,
-         num_kv_heads,
-         head_dim,
-         max_tokens,
-         true,
-         (max_seq_len / SEQ_LEN_PER_BLOCK),
-         SEQ_LEN_PER_BLOCK,
-         page_size);
-  code.e("    task_desc->input_ptrs[0],");
-  code.e("    task_desc->input_ptrs[1],");
-  code.e("    runtime_config.qo_indptr_buffer,");
-  code.e("    runtime_config.paged_kv_indptr_buffer,");
-  code.e("    runtime_config.paged_kv_last_page_len_buffer,");
-  code.e("    task_desc->request_id,");
-  code.e("    task_desc->output_ptrs[0],");
-  code.e("    task_desc->merge_task_offset);");
-  return register_task_variant(TASK_PAGED_ATTENTION_SPLIT_KV_MERGE_SM100,
-                               code.to_string());
+    "$, $, $>(",
+    num_q_heads_per_kv,
+    1,
+    num_kv_heads,
+    head_dim,
+    max_tokens,
+    true,
+    (max_seq_len / SEQ_LEN_PER_BLOCK),
+    SEQ_LEN_PER_BLOCK,
+    page_size);
+    code.e("    task_desc->input_ptrs[0],");
+    code.e("    task_desc->input_ptrs[1],");
+    code.e("    runtime_config.qo_indptr_buffer,");
+    code.e("    runtime_config.paged_kv_indptr_buffer,");
+    code.e("    runtime_config.paged_kv_last_page_len_buffer,");
+    code.e("    task_desc->request_id,");
+    code.e("    task_desc->output_ptrs[0],");
+    code.e("    task_desc->task_metadata.merge_task_offset);");
+    return register_task_variant(TASK_PAGED_ATTENTION_SPLIT_KV_MERGE_SM100, code.to_string());
 }
 
 } // namespace runtime

@@ -100,7 +100,7 @@ __device__ __forceinline__ void
   //  the scale factor for normalization in softmax
   float const sm_scale = 1.0f / sqrtf(static_cast<float>(HEAD_DIM)) * log2e;
 
-  size_t KV_CACHE_OFFSET = kv_idx * SEQ_LEN;
+  // size_t KV_CACHE_OFFSET = kv_idx * SEQ_LEN;
 
   int warp_idx = warp_id();
   int lane_idx = lane_id();
@@ -258,9 +258,9 @@ __device__ __forceinline__ void
 
   float *s_q_norm_sum = reinterpret_cast<float *>(smem + S_Q_NORM_SUM_OFFSET);
   float *s_k_norm_sum = reinterpret_cast<float *>(smem + S_K_NORM_SUM_OFFSET);
-  float *s_m_buffer = reinterpret_cast<float *>(smem + S_M_BUFFER_OFFSET);
-  float *s_d_buffer = reinterpret_cast<float *>(smem + S_D_BUFFER_OFFSET);
-  float *s_o_buffer = reinterpret_cast<float *>(smem + S_O_BUFFER_OFFSET);
+  // float *s_m_buffer = reinterpret_cast<float *>(smem + S_M_BUFFER_OFFSET);
+  // float *s_d_buffer = reinterpret_cast<float *>(smem + S_D_BUFFER_OFFSET);
+  // float *s_o_buffer = reinterpret_cast<float *>(smem + S_O_BUFFER_OFFSET);
 
   // STensors' layouts
   using ZeroBufferSmem = smem_row<T, 0, 0, 0, 1, 8, 8>;

@@ -157,9 +157,10 @@ struct FullTaskDesc {
   FullTaskDesc(TaskType t, int _variant_id)
       : task_type(t), variant_id(_variant_id), num_inputs(0), num_outputs(0),
         trigger_event(EVENT_INVALID_ID), dependent_event(EVENT_INVALID_ID),
-        request_id(-1), head_group(-1), expert_offset(-1), kv_idx(-1),
-        merge_task_offset(-1) {}
-  FullTaskDesc() {}
+        request_id(-1) {
+    task_metadata.raw_payload = ~0ull;
+  }
+  FullTaskDesc() : request_id(-1) { task_metadata.raw_payload = ~0ull; }
   TaskType task_type;
   unsigned variant_id;
   int num_inputs, num_outputs;
@@ -167,24 +168,33 @@ struct FullTaskDesc {
   EventId dependent_event;
   TensorDesc inputs[MAX_INPUTS_PER_TASK];
   TensorDesc outputs[MAX_OUTPUTS_PER_TASK];
-  // union {
-  struct {
-    int request_id;        // Used for paged attention
-    int head_group;        // Used for paged attention hopper
-    int expert_offset;     // Used for MoE
-    int kv_idx;            // Used for paged attention split kv
-    int merge_task_offset; // Used for paged attention split kv merge
-  };
-  // };
+  int request_id; // Used for paged attention
+  union TaskMetadata {
+    struct {
+      int head_group; // Used for paged attention hopper
+    };
+    struct {
+      int expert_offset; // Used for MoE
+    };
+    struct {
+      int kv_idx; // Used for paged attention split kv
+      int merge_task_offset; // Used for paged attention split kv merge
+    };
+    struct {
+      size_t xfer_size_in_bytes; // Used for nvshmem
+    };
+    unsigned long long raw_payload;
+  } task_metadata;
 };
+
+static_assert(sizeof(FullTaskDesc::TaskMetadata) == sizeof(unsigned long long),
+              "FullTaskDesc::TaskMetadata layout changed; update raw_payload type.");
 
 struct alignas(16) TaskDesc {
   TaskDesc(FullTaskDesc t)
       : task_type(t.task_type), variant_id(t.variant_id),
         trigger_event(t.trigger_event), dependent_event(t.dependent_event),
-        request_id(t.request_id), head_group(t.head_group),
-        expert_offset(t.expert_offset), kv_idx(t.kv_idx),
-        merge_task_offset(t.merge_task_offset) {
+        request_id(t.request_id), task_metadata(t.task_metadata) {
     for (int i = 0; i < t.num_inputs; i++) {
       input_ptrs[i] = t.inputs[i].base_ptr;
     }
@@ -204,7 +214,7 @@ struct alignas(16) TaskDesc {
     }
 #endif
   }
-  TaskDesc() {}
+  TaskDesc() { task_metadata.raw_payload = ~0ull; }
   TaskType task_type;
   unsigned variant_id;
   EventId trigger_event;
@@ -217,16 +227,8 @@ struct alignas(16) TaskDesc {
   void *output_tma_desc_ptrs[MAX_OUTPUTS_PER_TASK]
                             [mirage::config::MAX_TMA_DESC_PER_TENSOR];
 #endif
-  // union {
-  struct {
-    int request_id;        // Used for paged attention
-    int head_group;        // Used for paged attention hopper
-    int kv_idx;            // Used for paged attention split kv
-    int expert_offset;     // Used for MoE
-    int merge_task_offset; // Used for paged attention split kv merge
-  };
-  size_t xfer_size_in_bytes; // Used for nvshmem
-  // };
+int request_id; // Used for paged attention
+FullTaskDesc::TaskMetadata task_metadata;
 };
 
 struct RuntimeConfig {

@@ -609,7 +609,7 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
       nvshmemx_putmem_signal_block(
           task_desc->output_ptrs[0],
           task_desc->input_ptrs[0],
-          task_desc->xfer_size_in_bytes,
+          task_desc->task_metadata.xfer_size_in_bytes,
           reinterpret_cast<uint64_t *>(&config.all_event_counters[event_index]),
           1 /*signal*/,
           NVSHMEM_SIGNAL_ADD,
@@ -1117,7 +1117,7 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
       for (int i = 0; i < ft.inputs[0].num_dims; i++) {
         size_in_bytes *= ft.inputs[0].dim[i];
       }
-      task_desc.xfer_size_in_bytes = size_in_bytes;
+      task_desc.task_metadata.xfer_size_in_bytes = size_in_bytes;
     }
     all_tasks.push_back(task_desc);
   }
