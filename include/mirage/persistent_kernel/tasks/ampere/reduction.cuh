@@ -158,7 +158,7 @@ __device__ __forceinline__ void reduction_kernel(void const *input_ptr,
         accum += static_cast<float>(d_input[batch * OUTPUT_STRIDE + offset]);
       } else {
         accum += static_cast<float>(d_buffer[i * BATCH_SIZE * OUTPUT_STRIDE +
-                          batch * OUTPUT_STRIDE + offset]);
+                                             batch * OUTPUT_STRIDE + offset]);
       }
     }
     d_output[batch * OUTPUT_STRIDE + offset] = static_cast<T>(accum);

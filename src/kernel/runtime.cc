@@ -299,7 +299,7 @@ void register_mugraph(
         }   // for bid.y
       }     // for bid.x
       // (zepeng) The for loop to transfer strided tensor using nvshmem (hacky)
-      int for_loop = input_ops[0]->dtensor.dim[0];  
+      int for_loop = input_ops[0]->dtensor.dim[0];
       for (bid.x = 0; bid.x < bgraph.grid_dim.x; bid.x++) {
         for (bid.y = 0; bid.y < bgraph.grid_dim.y; bid.y++) {
           for (bid.z = 0; bid.z < bgraph.grid_dim.z; bid.z++) {
@@ -571,7 +571,7 @@ bool sanity_check(mirage::kernel::Graph const &graph,
         // These events counts are manually adjusted. Each task of nvshmem cpy
         // will update BS times of event counter, not just once.
         if (desc.task_type == runtime::TASK_NVSHMEM_COPY) {
-            event_counts[event_pos] -= desc.inputs[0].dim[0] - 1;
+          event_counts[event_pos] -= desc.inputs[0].dim[0] - 1;
         }
         assert(event_counts[event_pos] > 0);
         event_counts[event_pos]--;
@@ -822,7 +822,8 @@ TaskGraphResult print_task_graph(
         }
         size_t start_addr_offset = 0;
         for (int i = 0; i < desc.sub_descs.size(); i++) {
-          code.e("CUDA_CHECK(cudaMemcpy2DAsync(reinterpret_cast<void *>($ + $), $, "
+          code.e("CUDA_CHECK(cudaMemcpy2DAsync(reinterpret_cast<void *>($ + "
+                 "$), $, "
                  "reinterpret_cast<const void *>($), $, $, $, "
                  "cudaMemcpyDeviceToDevice));",
                  desc.name,         /*dst address*/

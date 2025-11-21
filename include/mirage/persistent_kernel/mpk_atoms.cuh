@@ -56,7 +56,10 @@ __device__ __forceinline__ unsigned long long int
 __device__ __forceinline__ unsigned long long int
     ld_acquire_sys_u64(unsigned long long int *addr) {
   unsigned long long int val;
-  asm volatile("ld.acquire.sys.u64 %0, [%1];" : "=l"(val) : "l"(addr) : "memory");
+  asm volatile("ld.acquire.sys.u64 %0, [%1];"
+               : "=l"(val)
+               : "l"(addr)
+               : "memory");
   return val;
 }
 

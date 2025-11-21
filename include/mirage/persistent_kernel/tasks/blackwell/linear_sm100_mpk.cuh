@@ -438,8 +438,7 @@ __device__ __noinline__ void
           if (cute::elect_one_sync()) {
             int tma_coords_A[2] = {k_tile * TILE_SIZE,
                                    m_tile * OUTPUT_ATOM_SIZE};
-            int tma_coords_B[2] = {k_tile * TILE_SIZE,
-                                   n_tile * MMA_N};
+            int tma_coords_B[2] = {k_tile * TILE_SIZE, n_tile * MMA_N};
             input_weight_smem.set_ptr(
                 shared_weight + smem_wr_buffer * OUTPUT_ATOM_SIZE * TILE_SIZE);
             input_smem.set_ptr(shared_input +
