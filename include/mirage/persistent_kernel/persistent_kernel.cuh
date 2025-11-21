@@ -59,15 +59,18 @@ using namespace kernel;
 #define INIT_NUM_THREADS 128
 
 #ifndef CUDA_CHECK
-#define CUDA_CHECK(call)                                                      \
-    do {                                                                      \
-        cudaError_t err = call;                                               \
-        if (err != cudaSuccess) {                                             \
-            fprintf(stderr, "CUDA error at %s:%d: %s\n",                      \
-                    __FILE__, __LINE__, cudaGetErrorString(err));             \
-            exit(1);                                                          \
-        }                                                                     \
-    } while (0)
+#define CUDA_CHECK(call)                                                       \
+  do {                                                                         \
+    cudaError_t err = call;                                                    \
+    if (err != cudaSuccess) {                                                  \
+      fprintf(stderr,                                                          \
+              "CUDA error at %s:%d: %s\n",                                     \
+              __FILE__,                                                        \
+              __LINE__,                                                        \
+              cudaGetErrorString(err));                                        \
+      exit(1);                                                                 \
+    }                                                                          \
+  } while (0)
 #endif
 
 __device__ __forceinline__ void
@@ -591,9 +594,10 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
         EventCounter actual_counts = 0;
         if (is_nvshmem_event(event_id)) {
           nvshmem_signal_wait_until(
-            reinterpret_cast<uint64_t*>(&config.all_event_counters[event_index]), 
-            NVSHMEM_CMP_EQ, 
-            needed_counts);
+              reinterpret_cast<uint64_t *>(
+                  &config.all_event_counters[event_index]),
+              NVSHMEM_CMP_EQ,
+              needed_counts);
         } else {
           while (actual_counts < needed_counts) {
             actual_counts =

@@ -404,7 +404,7 @@ int TaskRegister::register_silu_mul_task(threadblock::Graph const &bgraph,
 }
 
 int TaskRegister::register_identity_task(threadblock::Graph const &bgraph,
-                                        std::vector<int> const &params) {
+                                         std::vector<int> const &params) {
   assert(params.size() == 0);
   std::vector<tb::TBInputOp *> input_ops;
   std::vector<tb::TBInputOp *> output_ops;
@@ -431,10 +431,12 @@ int TaskRegister::register_identity_task(threadblock::Graph const &bgraph,
   for (int i = 0; i < input_ops[0]->dtensor.num_dims - 1; i++) {
     outer_dim_size *= input_ops[0]->dtensor.dim[i];
   }
-  inner_dim_size = input_ops[0]->dtensor.dim[input_ops[0]->dtensor.num_dims - 1];
+  inner_dim_size =
+      input_ops[0]->dtensor.dim[input_ops[0]->dtensor.num_dims - 1];
   outer_dim_stride = inner_dim_size;
-  output_size = output_ops[0]->output_tensors[0].dim[
-    output_ops[0]->output_tensors[0].num_dims - 1];
+  output_size = output_ops[0]
+                    ->output_tensors[0]
+                    .dim[output_ops[0]->output_tensors[0].num_dims - 1];
   // assert(output_size >= bgraph.block_dim.x);
 
   mirage::transpiler::CodeKeeper code;
@@ -660,7 +662,7 @@ int TaskRegister::register_reduce_task(threadblock::Graph const &bgraph,
   assert(input_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
   assert(output_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
   kn::KNInputOp *kn_input_op =
-    static_cast<kn::KNInputOp *>(input_ops[0]->dtensor.owner_op);
+      static_cast<kn::KNInputOp *>(input_ops[0]->dtensor.owner_op);
   int input_stride = static_cast<int>(kn_input_op->input_strides[0]);
   kn_input_op = static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
   int output_stride = static_cast<int>(kn_input_op->input_strides[0]);
@@ -668,17 +670,24 @@ int TaskRegister::register_reduce_task(threadblock::Graph const &bgraph,
   // Register nvshmem copy task (allgather)
   mirage::transpiler::CodeKeeper c;
   c.inc_indent();
-  c.e("size_t event_index = get_event_position_index(task_desc->trigger_event);");
+  c.e("size_t event_index = "
+      "get_event_position_index(task_desc->trigger_event);");
   c.inc_indent();
-  c.e("int gpu_id = static_cast<int>(get_event_gpu_id(task_desc->trigger_event));");
+  c.e("int gpu_id = "
+      "static_cast<int>(get_event_gpu_id(task_desc->trigger_event));");
   c.e("assert(gpu_id < runtime_config.num_gpus);");
   c.e("assert(gpu_id != runtime_config.my_gpu_id);");
   c.e("for (int i = 0; i < $; i++) {", batch_size);
   c.e("  nvshmemx_putmem_signal_block(");
-  c.e("      reinterpret_cast<char*>(task_desc->output_ptrs[0]) + i * $ * sizeof(bfloat16),", input_stride);
-  c.e("      reinterpret_cast<char*>(task_desc->input_ptrs[0]) + i * $ * sizeof(bfloat16),", output_stride);
+  c.e("      reinterpret_cast<char*>(task_desc->output_ptrs[0]) + i * $ * "
+      "sizeof(bfloat16),",
+      input_stride);
+  c.e("      reinterpret_cast<char*>(task_desc->input_ptrs[0]) + i * $ * "
+      "sizeof(bfloat16),",
+      output_stride);
   c.e("      task_desc->xfer_size_in_bytes / $,", batch_size);
-  c.e("      reinterpret_cast<uint64_t *>(&runtime_config.all_event_counters[event_index]),");
+  c.e("      reinterpret_cast<uint64_t "
+      "*>(&runtime_config.all_event_counters[event_index]),");
   c.e("      1 /*signal*/,");
   c.e("      NVSHMEM_SIGNAL_ADD,");
   c.e("      gpu_id);");

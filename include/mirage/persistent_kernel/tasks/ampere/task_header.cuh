@@ -6,12 +6,12 @@
 
 #include "argmax.cuh"
 #include "embedding.cuh"
+#include "identity.cuh"
 #include "multitoken_paged_attention.cuh"
 #include "reduction.cuh"
 #include "rmsnorm.cuh"
 #include "rotary_embedding.cuh"
 #include "silu_mul.cuh"
-#include "identity.cuh"
 
 #if MIRAGE_USE_CUTLASS_KERNEL
 #include "linear_cutlass.cuh"
