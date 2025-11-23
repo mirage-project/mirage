@@ -84,6 +84,8 @@ public:
       threadblock::Graph const &bgraph,
       std::vector<int> const &params,
       bool with_residual);
+  int register_paged_attention_split_kv_hopper_task(
+      threadblock::Graph const &bgraph, std::vector<int> const &params);
   // SM100 tasks
   int register_splitk_linear_sm100_task(threadblock::Graph const &bgraph,
                                         std::vector<int> const &params,

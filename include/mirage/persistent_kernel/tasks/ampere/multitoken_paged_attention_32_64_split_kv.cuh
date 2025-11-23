@@ -809,7 +809,7 @@ __device__ __forceinline__ void
 
   // store the log exp sum if use split KV
 
-  if (PARTITION_KV) {
+  if constexpr (PARTITION_KV) {
 #pragma unroll
     for (int m = 0; m < GLOBAL_ITERS_M; m++) {
 #pragma unroll

@@ -367,13 +367,11 @@ void register_mugraph(
               (task_type == TASK_PAGED_ATTENTION_HOPPER) ||
               (task_type == TASK_PAGED_ATTENTION_SPLIT_KV_SM100) ||
               (TASK_PAGED_ATTENTION_SPLIT_KV_MERGE_SM100) ||
+              (task_type == TASK_PAGED_ATTENTION_SPLIT_KV_HOPPER) ||
               (task_type == TASK_ATTN_SM100)) {
             // Note that we assume grid_dim.x corresponds to
             // the request dimension
             task.request_id = bid.x;
-          }
-          if (task_type == TASK_PAGED_ATTENTION_HOPPER) {
-            task.task_metadata.head_group = bid.y;
           }
           // Set expert_offset for MoE tasks
           if (task_type == TASK_MOE_W13_LINEAR_SM100 ||
@@ -384,7 +382,8 @@ void register_mugraph(
           }
           // Set paged attention split kv task kv_idx
           if (task_type == TASK_PAGED_ATTENTION_SPLIT_KV_SM100
-             || task_type == TASK_PAGED_ATTENTION_SPLIT_KV_MERGE_SM100) {
+             || task_type == TASK_PAGED_ATTENTION_SPLIT_KV_MERGE_SM100
+             || task_type == TASK_PAGED_ATTENTION_SPLIT_KV_HOPPER) {
             task.task_metadata.kv_idx = bid.z;
             task.task_metadata.merge_task_offset = bid.y;
           }
@@ -1071,7 +1070,6 @@ TaskGraphResult print_task_graph(
       tgbody.e("{");
       tgbody.e("FullTaskDesc task_desc(static_cast<TaskType>($));",
                task_desc.task_type);
-      tgbody.e("task_desc.task_metadata.head_group = $;", task_desc.task_metadata.head_group);
       size_t gpu_id = ((task_desc.trigger_event >> 32) & 0xffff);
       size_t event_pos = (task_desc.trigger_event & 0xffffffff);
       bool is_nvshmem_event =
@@ -1381,6 +1379,8 @@ TaskGraphResult print_task_graph(
       "TASK_PAGED_ATTENTION_SPLIT_KV_SM100";
   task_type_to_name[TASK_PAGED_ATTENTION_SPLIT_KV_MERGE_SM100] =
       "TASK_PAGED_ATTENTION_SPLIT_KV_MERGE_SM100";
+  task_type_to_name[TASK_PAGED_ATTENTION_SPLIT_KV_HOPPER] =
+      "TASK_PAGED_ATTENTION_SPLIT_KV_HOPPER";
 
   code.e("__device__ __forceinline__");
   code.e("void _execute_task(TaskDesc const* task_desc,");

@@ -95,6 +95,7 @@ enum TaskType {
   TASK_MOE_W13_LINEAR_SM90 = 161,
   TASK_MOE_W2_LINEAR_SM90 = 162,
   TASK_SPLITK_LINEAR_SWAPAB_HOPPER = 163,
+  TASK_PAGED_ATTENTION_SPLIT_KV_HOPPER = 164,
   TASK_HOPPER_TASK_END = 198, // Hopper end placeholder, not a real task
   // SM100 Tasks
   TASK_SM100_TASK_BEGIN = 230, // SM100 start placeholder, not a real task
@@ -170,9 +171,6 @@ struct FullTaskDesc {
   TensorDesc outputs[MAX_OUTPUTS_PER_TASK];
   int request_id; // Used for paged attention
   union TaskMetadata {
-    struct {
-      int head_group; // Used for paged attention hopper
-    };
     struct {
       int expert_offset; // Used for MoE
     };

@@ -692,6 +692,8 @@ class PersistentKernel:
         )
         if self.target_cc == 100:
             self.kn_graph.register_task(tb_graph, "paged_attention_split_kv_sm100", params)
+        elif self.target_cc == 90:
+            self.kn_graph.register_task(tb_graph, "paged_attention_split_kv_hopper", params)
         else:
             raise ValueError(f"Unsupported target CC: {self.target_cc}")
 
@@ -731,7 +733,7 @@ class PersistentKernel:
             ],
             tb_graph,
         )
-        if self.target_cc == 100:
+        if self.target_cc == 100 or self.target_cc == 90:
             self.kn_graph.register_task(tb_graph, "paged_attention_split_kv_merge_sm100", params)
         else:
             raise ValueError(f"Unsupported target CC: {self.target_cc}")
