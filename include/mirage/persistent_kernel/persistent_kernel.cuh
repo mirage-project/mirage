@@ -593,11 +593,13 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
             get_task_iteration_num(task_ids[queue_pos]);
         EventCounter actual_counts = 0;
         if (is_nvshmem_event(event_id)) {
+#ifdef USE_NVSHMEM
           nvshmem_signal_wait_until(
               reinterpret_cast<uint64_t *>(
                   &config.all_event_counters[event_index]),
               NVSHMEM_CMP_EQ,
               needed_counts);
+#endif
         } else {
           while (actual_counts < needed_counts) {
             actual_counts =
