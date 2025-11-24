@@ -2076,8 +2076,7 @@ int TaskRegister::register_sampling_sm100_task(threadblock::Graph const &bgraph,
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
-  code.e("kernel::sampling_from_logits_kernel<256, 4, $, bfloat16, int>(",
-         batch_size);
+  code.e("kernel::sampling_from_logits_kernel<256, 4, bfloat16, int>(");
   code.e("    static_cast<bfloat16*>(task_desc->input_ptrs[0]),");
   code.e("    static_cast<int*>(task_desc->output_ptrs[0]),");
   code.e("    $,", vocab_size);

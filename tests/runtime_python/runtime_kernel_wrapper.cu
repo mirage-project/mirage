@@ -1658,7 +1658,6 @@ void rope(torch::Tensor input,
 // Wrapper __global__ kernel that calls the __device__ function
 template <uint32_t BLOCK_THREADS,
           uint32_t VEC_SIZE,
-          int BATCH_SIZE,
           typename DType,
           typename IdType>
 __global__ void sampling_from_logits_test_wrapper(DType *logits,
@@ -1669,7 +1668,6 @@ __global__ void sampling_from_logits_test_wrapper(DType *logits,
                                                   int batch_size) {
   kernel::sampling_from_logits_kernel<BLOCK_THREADS,
                                       VEC_SIZE,
-                                      BATCH_SIZE,
                                       DType,
                                       IdType>(
       logits, output, vocab_size, philox_seed, philox_offset, batch_size);
@@ -1692,7 +1690,7 @@ void sampling_from_logits(torch::Tensor logits,
                                          256,
                                          SAMPLING_REDUCE_ALGO>::TempStorage);
 
-    sampling_from_logits_test_wrapper<256, 4, 1, float, int>
+    sampling_from_logits_test_wrapper<256, 4, float, int>
         <<<grid_dim, block_dim, smem_size>>>((float *)logits_ptr,
                                              (int *)output_ptr,
                                              vocab_size,

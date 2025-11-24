@@ -156,7 +156,6 @@ constexpr BlockReduceAlgorithm SAMPLING_REDUCE_ALGO =
 
 template <uint32_t BLOCK_THREADS,
           uint32_t VEC_SIZE,
-          int BATCH_SIZE,
           typename DType,
           typename IdType>
 __device__ __forceinline__ void
