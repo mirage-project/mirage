@@ -800,7 +800,7 @@ def partition_graph_with_dp(model,
             try:
                 h = str(kernel_graph.get_owner_independent_hash())
                 # TODO: Sqrt doesn't work with superoptimizer currently
-                if dry_run or (len(sg_dict) == 1 and list(sg_dict.keys())[0].fn == "Sqrt"):
+                if dry_run:
                     # # Dry run mode: compile original kernel without superoptimize
                     # # Create dummy inputs for compilation (Mirage uses float16)
 
@@ -842,10 +842,10 @@ def partition_graph_with_dp(model,
                     cached_mirage_kernels[kernel_cache_key] = optimized_kernel
                     print(f"     ✓ Compiled kernel and cached")
                 # check for kernel validity
-                print(f"Checking optimized kernel validity...")
+                print(f"Checking kernel validity...")
                 output = optimized_kernel(inputs=dummy_inputs)
                 _ = float(output[0].abs().sum())
-                print(f"     ✓ Compiled kernel successfully")
+                print(f"     ✓ Kernel validity verified")
 
                 const_dims = [(d[0], d[2]) for d in dims if d[1] == "C"]
                 # Save expected input shapes for runtime dimension matching

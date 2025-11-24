@@ -29,7 +29,7 @@ NUM_BENCH_ITERS = 100
 NUM_BENCH_WARMUP = 10
 
 IGNORE_OPS = set()
-UNSUPPORTED_OPS = {"Constant", "Identity", "Unsqueeze", "Abs", "Gemm", "Expand", "Gather", "Reshape", "Transpose", "Cast", "CastLike", "Tanh", "ReduceSum", "Pow"}
+UNSUPPORTED_OPS = {"Constant", "Identity", "Unsqueeze", "Abs", "Gemm", "Expand", "Gather", "Reshape", "Transpose", "Cast", "CastLike", "Tanh"}
 
 model_name_to_class = {
     "test-mlp": TestMLP,
@@ -69,25 +69,23 @@ def _benchmark_model(model: nn.Module | HybridModel,
         end = torch.cuda.Event(enable_timing=True)
         start.record()
         for it in range(iters):
-            # if it == iters - 1:
-            #     with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
-            #                  record_shapes=True,
-            #                  with_stack=True,
-            #                  profile_memory=True) as prof:
-            #         with record_function(profile_name):
-            #             _ = model(x)
-            #     print(f"\n=== Profiling Result for '{profile_name}' ===")
-            #     ps = prof.key_averages().table(sort_by="cpu_time_total", row_limit=20)
-            #     print(ps)
-            #     print("=== End of Profiling Result ===\n")
-            # else:
-                # _ = model(x)
             _ = model(x)
         end.record()
         torch.cuda.synchronize()
         # elapsed_time returns milliseconds
         total_ms = start.elapsed_time(end)
         avg_ms = total_ms / max(1, iters)
+
+        with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+                        record_shapes=True,
+                        with_stack=True,
+                        profile_memory=True) as prof:
+            with record_function(profile_name):
+                _ = model(x)
+        print(f"\n=== Profiling Result for '{profile_name}' ===")
+        ps = prof.key_averages().table(sort_by="cpu_time_total", row_limit=20)
+        print(ps)
+        print("=== End of Profiling Result ===\n")
 
     return avg_ms
 

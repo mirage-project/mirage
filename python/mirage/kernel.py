@@ -131,7 +131,7 @@ def get_cc_cmd(target, cc, FILE_NAME, py_include_dir, INCLUDE_PATH, DEPS_PATH, s
         f"-I{os.path.join(DEPS_PATH, 'cutlass/include')}",
         "-shared",
         "-std=c++17",
-        "-use_fast_math",
+        # "-use_fast_math",
         "-lcublas",
         "-Xcompiler=-fPIC",
         "--expt-relaxed-constexpr",
