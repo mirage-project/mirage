@@ -883,7 +883,7 @@ void launch_norm_linear(void const *input_ptr,
     NORM_LINEAR_DISPATCH_OUTPUT_SIZE(BATCH_SIZE, 256)                          \
     NORM_LINEAR_DISPATCH_OUTPUT_SIZE(BATCH_SIZE, 544)                          \
     NORM_LINEAR_DISPATCH_OUTPUT_SIZE(BATCH_SIZE, 1336)                         \
-    /* NORM_LINEAR_DISPATCH_OUTPUT_SIZE(BATCH_SIZE, 1600) - HEAD_DIM issue */  \
+    NORM_LINEAR_DISPATCH_OUTPUT_SIZE(BATCH_SIZE, 1600)                         \
     default:                                                                   \
       printf("Unsupported output size in test: %zu\n", output.size(1));        \
       break;                                                                   \
