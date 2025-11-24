@@ -4,7 +4,10 @@ from safetensors.torch import load_model
 import torch
 import torch.distributed as dist
 import argparse
-import os
+import os, json
+
+DEFAULT_SAVE_DIR = os.path.join("outputs", "qwen3")
+MAX_SAVE_TOKENS = 100
 
 # print limitation
 # torch.set_printoptions(threshold=2000)
@@ -91,6 +94,28 @@ if __name__ == "__main__":
         help="Not use the cutlass version kernel.",
     )
     parser.add_argument("--ignore-eos", action="store_true", help="Ignore eos token during generation")
+
+    # -------- Args for CI tests ----------
+    parser.add_argument("--max-new-tokens", type=int, default=None, help="Decode cap for CI determinism")
+    parser.add_argument("--temperature", type=float, default=0.0)
+    parser.add_argument("--top_p", type=float, default=1.0)
+    parser.add_argument("--do-sample", dest="do_sample", action="store_true", help="Enable sampling (default off)")
+    parser.add_argument(
+        "--save-tokens",
+        nargs="?",
+        const="auto",
+        default=None,
+        help=(
+            "Optionally dump first N generated token_ids, text, and latency to JSON. "
+            "If path omitted, saves to outputs/qwen3/{torch_output.json|mpk_output.json}."
+        ),
+    )
+    parser.add_argument("--prompt",
+        type=str,
+        default="Give me a short introduction to large language model.",
+        help="Custom prompt text to generate from.",
+    )
+
     args = parser.parse_args()
     try:
         from mpi4py import MPI
@@ -104,6 +129,16 @@ if __name__ == "__main__":
     except ImportError:
         world_size = 1
         rank = 0
+
+    if args.save_tokens:
+        if args.save_tokens == "auto":
+            filename = "mpk_output.json" if args.use_mirage else "torch_output.json"
+            save_path = os.path.join(DEFAULT_SAVE_DIR, filename)
+        else:
+            save_path = args.save_tokens
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    else:
+        save_path = None
 
     if world_size > 1:
         dist.init_process_group(backend="nccl", init_method="env://")
@@ -135,7 +170,7 @@ if __name__ == "__main__":
     # get all model weight tensors
     tokens = torch.full((total_num_requests, args.max_seq_length), 0, dtype=torch.long, device="cuda")
 
-    prompt = "Give me a short introduction to large language model."
+    prompt = args.prompt
     # This prompt is copied from https://github.com/apoorvumang/prompt-lookup-decoding/blob/main/demo-pld.ipynb
     code_text = """import numpy as np
                 import matplotlib.pyplot as plt
@@ -642,10 +677,13 @@ if __name__ == "__main__":
     # g = torch.cuda.CUDAGraph()
     stream = torch.cuda.Stream()
     warmup = 0
-    output_len = 512
+    # Decode up to user cap or buffer size
+    output_len = args.max_new_tokens if args.max_new_tokens is not None else (tokens.size(1) - prompt_lengths[0].item())
+    output_len = max(0, min(output_len, tokens.size(1) - prompt_lengths[0].item()))
     if not args.use_mirage:
-        prompt_len= prompt_lengths[0].item()
-        for cur_pos in range(prompt_len, prompt_len + output_len):
+        prompt_len = prompt_lengths[0].item()
+        decode_limit = prompt_len + output_len
+        for cur_pos in range(prompt_len, decode_limit):
             step.fill_(cur_pos - 1)
             input_ids = tokens[:, prev_pos:cur_pos]
             cos_embeddings = position_embeddings[0][:, prev_pos:cur_pos]
@@ -670,7 +708,8 @@ if __name__ == "__main__":
         torch.cuda.synchronize()
         run_time = starter.elapsed_time(ender)
 
-        generated_ids = tokens[:, :prev_pos]
+        end_idx = prev_pos + 1
+        generated_ids = tokens[:, :end_idx]
 
         response = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
         print(response)
@@ -679,24 +718,26 @@ if __name__ == "__main__":
                 prompt_len, cur_pos - prompt_len, run_time / (cur_pos - prompt_len)
             )
         )
-    else:
-        # prefill phase
-        #step.fill_(prompt_len - 1)
-        #input_ids = tokens[:, 0:prompt_len]
-        #cos_embeddings = position_embeddings[0][:, 0:prompt_len]
-        #sin_embeddings = position_embeddings[1][:, 0:prompt_len]
-        #logits = model.forward(
-        #    input_ids=input_ids,
-        #    position_embeddings=(cos_embeddings, sin_embeddings),
-        #    step=step,
-        #    stream=stream,
-        #)
-        #next_token = logits.argmax(dim=-1)
-        #next_token = next_token[0, -1]
-        #tokens[0, prompt_len] = next_token
-        #torch.cuda.synchronize()
-        #step.fill_(prompt_len)
+        
+        # -------- CI dumps outputs to json files ----------
+        if save_path and rank == 0:
+            tokens_generated = max(0, end_idx - prompt_len)
+            per_tok_ms = run_time / max(tokens_generated, 1)
+            slice_end = min(end_idx, prompt_len + MAX_SAVE_TOKENS)
+            token_ids = tokens[0, prompt_len:slice_end].tolist()
+            out = {
+                "token_ids": token_ids,
+                "text": tokenizer.decode(tokens[0, :end_idx], skip_special_tokens=True),
+                "latency_ms_per_token": per_tok_ms,
+                "prompt_length": prompt_len,
+                "generate_length": tokens_generated,
+                "mode": "torch",
+            }
+            with open(save_path, "w") as f:
+                json.dump(out, f, indent=2)
+            print(f"Saved tokens to {save_path}")
 
+    else:
         starter.record()
         mpk()
         ender.record()
@@ -716,5 +757,27 @@ if __name__ == "__main__":
               prompt_lengths[0], step.max().item() + 1 - prompt_lengths[0], run_time / (step.max().item() + 1)
             )
         )
+
+        # -------- CI dumps outputs to json files ----------
+        if save_path and rank == 0:
+            end_idx = step[0].item() + 1
+            prompt_len = prompt_lengths[0].item()
+            tokens_generated = max(0, end_idx - prompt_len)
+            per_tok_ms = run_time / max(tokens_generated, 1)
+            slice_end = min(end_idx, prompt_len + MAX_SAVE_TOKENS)
+            token_ids = tokens[0, prompt_len:slice_end].tolist()
+            response_text = tokenizer.decode(tokens[0, :end_idx], skip_special_tokens=True)
+            out = {
+                "token_ids": token_ids,
+                "text": response_text,
+                "latency_ms_per_token": per_tok_ms,
+                "prompt_length": prompt_len,
+                "generate_length": tokens_generated,
+                "mode": "mpk",
+            }
+            with open(save_path, "w") as f:
+                json.dump(out, f, indent=2)
+            print(f"Saved tokens to {save_path}")
+
     if world_size > 1:
         dist.destroy_process_group()

@@ -480,6 +480,10 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
     int variant_id =
         task_register->register_silu_mul_task(customized->bgraph, params);
     task_config[op] = std::make_tuple(1, 1, TASK_SILU_MUL, variant_id);
+  } else if (name == "identity") {
+    int variant_id =
+        task_register->register_identity_task(customized->bgraph, params);
+    task_config[op] = std::make_tuple(1, 1, TASK_IDENTITY, variant_id);
   } else if (name == "silu_mul_linear_with_residual") {
     int variant_id = task_register->register_silu_mul_linear_with_residual_task(
         customized->bgraph, params);
@@ -496,6 +500,7 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
         task_register->register_argmax_reduce_task(customized->bgraph, params);
     task_config[op] = std::make_tuple(2, 1, TASK_ARGMAX_REDUCE, variant_id);
   } else if (name == "allreduce") {
+    // `register_reduce_task` will register two tasks, but we only record one
     int variant_id =
         task_register->register_reduce_task(customized->bgraph, params);
     task_config[op] = std::make_tuple(2, 1, TASK_ALLREDUCE, variant_id);
