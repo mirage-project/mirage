@@ -1073,7 +1073,7 @@ __global__ void rms_norm_kernel_wrapper(void const *input_ptr,
       break;                                                                   \
     /* case 1600: Commented out - HEAD_DIM=1600 violates norm.cuh assertion */ \
     /*   DISPATCH_WINDOW_RMSNORM_LINEAR_WINDOW_SIZE(1600);                  */ \
-    /*   break; */                                                                            \
+    /*   break; */                                                             \
     default:                                                                   \
       printf("Unsupported head dim in test: %zu\n", head_dim);                 \
       break;                                                                   \
@@ -1662,19 +1662,17 @@ template <uint32_t BLOCK_THREADS,
           typename DType,
           typename IdType>
 __global__ void sampling_from_logits_test_wrapper(DType *logits,
-                                                   IdType *output,
-                                                   uint32_t vocab_size,
-                                                   uint64_t philox_seed,
-                                                   uint64_t philox_offset,
-                                                   int batch_size) {
-  kernel::sampling_from_logits_kernel<BLOCK_THREADS, VEC_SIZE, BATCH_SIZE, DType, IdType>(
-      logits,
-      output,
-      vocab_size,
-      philox_seed,
-      philox_offset,
-      batch_size
-  );
+                                                  IdType *output,
+                                                  uint32_t vocab_size,
+                                                  uint64_t philox_seed,
+                                                  uint64_t philox_offset,
+                                                  int batch_size) {
+  kernel::sampling_from_logits_kernel<BLOCK_THREADS,
+                                      VEC_SIZE,
+                                      BATCH_SIZE,
+                                      DType,
+                                      IdType>(
+      logits, output, vocab_size, philox_seed, philox_offset, batch_size);
 }
 
 void sampling_from_logits(torch::Tensor logits,
@@ -1687,7 +1685,7 @@ void sampling_from_logits(torch::Tensor logits,
   uint32_t vocab_size = logits.size(1);
 
   if (vocab_size == 50257) {
-    dim3 grid_dim(1, 1, 1);  // Single block processes all batches
+    dim3 grid_dim(1, 1, 1); // Single block processes all batches
     dim3 block_dim(256, 1, 1);
     size_t smem_size =
         sizeof(typename cub::BlockReduce<SamplingDataAndIndex<float, int>,
@@ -1695,13 +1693,12 @@ void sampling_from_logits(torch::Tensor logits,
                                          SAMPLING_REDUCE_ALGO>::TempStorage);
 
     sampling_from_logits_test_wrapper<256, 4, 1, float, int>
-        <<<grid_dim, block_dim, smem_size>>>(
-            (float *)logits_ptr,
-            (int *)output_ptr,
-            vocab_size,
-            seed,         // philox_seed
-            0,            // philox_offset
-            batch_size    // batch_size
+        <<<grid_dim, block_dim, smem_size>>>((float *)logits_ptr,
+                                             (int *)output_ptr,
+                                             vocab_size,
+                                             seed,      // philox_seed
+                                             0,         // philox_offset
+                                             batch_size // batch_size
         );
   } else {
     printf("Unsupported vocab size in sampling test: %u\n", vocab_size);

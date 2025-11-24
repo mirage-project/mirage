@@ -158,13 +158,13 @@ template <uint32_t BLOCK_THREADS,
           int BATCH_SIZE,
           typename DType,
           typename IdType>
-__device__ __forceinline__ void sampling_from_logits_kernel(
-    DType *logits,
-    IdType *output,
-    uint32_t d,
-    uint64_t philox_seed,
-    uint64_t philox_offset,
-    int batch_size) {
+__device__ __forceinline__ void
+    sampling_from_logits_kernel(DType *logits,
+                                IdType *output,
+                                uint32_t d,
+                                uint64_t philox_seed,
+                                uint64_t philox_offset,
+                                int batch_size) {
   const uint32_t tx = threadIdx.x;
 
   using SharedMem = typename BlockReduce<SamplingDataAndIndex<DType, IdType>,
@@ -186,8 +186,8 @@ __device__ __forceinline__ void sampling_from_logits_kernel(
 
       // Load logits vector if within bounds
       if ((i * BLOCK_THREADS + tx) * VEC_SIZE < d) {
-        logits_vec.cast_load(logits + batch_idx * d + i * BLOCK_THREADS * VEC_SIZE +
-                             tx * VEC_SIZE);
+        logits_vec.cast_load(logits + batch_idx * d +
+                             i * BLOCK_THREADS * VEC_SIZE + tx * VEC_SIZE);
       }
 
       // Generate Gumbel noise

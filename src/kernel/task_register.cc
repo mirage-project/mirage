@@ -1964,8 +1964,8 @@ int TaskRegister::register_argmax_reduce_sm100_task(
   return register_task_variant(TASK_ARGMAX_REDUCE_SM100, code.to_string());
 }
 
-int TaskRegister::register_sampling_sm100_task(
-    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+int TaskRegister::register_sampling_sm100_task(threadblock::Graph const &bgraph,
+                                               std::vector<int> const &params) {
   // params[0]: seed
   assert(params.size() == 1);
   std::vector<tb::TBInputOp *> input_ops;
@@ -1989,7 +1989,8 @@ int TaskRegister::register_sampling_sm100_task(
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
-  code.e("kernel::sampling_from_logits_kernel<256, 4, $, bfloat16, int>(", batch_size);
+  code.e("kernel::sampling_from_logits_kernel<256, 4, $, bfloat16, int>(",
+         batch_size);
   code.e("    static_cast<bfloat16*>(task_desc->input_ptrs[0]),");
   code.e("    static_cast<int*>(task_desc->output_ptrs[0]),");
   code.e("    $,", vocab_size);
