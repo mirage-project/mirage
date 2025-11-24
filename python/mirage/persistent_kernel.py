@@ -988,7 +988,27 @@ class PersistentKernel:
             self.kn_graph.register_task(
                 tb_graph, "argmax_reduce", [self.argmax_partial_output_size]
             )
-        
+
+    def sampling_sm100_layer(
+        self,
+        logits: DTensor,      # [batch_size, vocab_size]
+        output: DTensor,      # [batch_size, 1]
+        grid_dim: tuple,
+        block_dim: tuple,
+        seed: int = 42,
+    ):
+        """Sampling from logits using Gumbel-Max trick for stochastic token generation."""
+        assert logits.num_dims == 2      # (batch_size, vocab_size)
+        assert output.num_dims == 2      # (batch_size, 1)
+
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(logits, (0, -1, -1), -1, True)
+        tb_graph.new_input(output, (0, -1, -1), -1, True)
+        self.kn_graph.customized([logits, output], tb_graph)
+
+        # Register task with seed parameter
+        self.kn_graph.register_task(tb_graph, "sampling_sm100", [seed])
+
     def find_ngram_partial_layer(
         self, input: DTensor, output: DTensor, grid_dim: tuple, block_dim: tuple, ngram_size: int = 3):
         # Currently assume that input/output

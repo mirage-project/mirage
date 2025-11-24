@@ -155,16 +155,17 @@ constexpr BlockReduceAlgorithm SAMPLING_REDUCE_ALGO =
 
 template <uint32_t BLOCK_THREADS,
           uint32_t VEC_SIZE,
+          int BATCH_SIZE,
           typename DType,
           typename IdType>
-__global__ void sampling_from_logits_kernel(DType *logits,
-                                            IdType *output,
-                                            IdType *indices,
-                                            uint32_t d,
-                                            uint64_t philox_seed,
-                                            uint64_t philox_offset) {
-  const uint32_t bx = blockIdx.x, tx = threadIdx.x;
-  const uint32_t row_idx = indices == nullptr ? bx : indices[bx];
+__device__ __forceinline__ void sampling_from_logits_kernel(
+    DType *logits,
+    IdType *output,
+    uint32_t d,
+    uint64_t philox_seed,
+    uint64_t philox_offset,
+    int batch_size) {
+  const uint32_t tx = threadIdx.x;
 
   using SharedMem = typename BlockReduce<SamplingDataAndIndex<DType, IdType>,
                                          BLOCK_THREADS,
@@ -172,49 +173,55 @@ __global__ void sampling_from_logits_kernel(DType *logits,
   extern __shared__ __align__(alignof(SharedMem)) uint8_t smem_sampling_logit[];
   auto &temp_storage = reinterpret_cast<SharedMem &>(smem_sampling_logit);
 
-  sampling_vec_t<DType, VEC_SIZE> logits_vec;
-  SamplingDataAndIndex<DType, IdType> max_data = {
-      -cuda::std::numeric_limits<DType>::infinity(), 0};
+  // Loop over all batches
+  for (int batch_idx = 0; batch_idx < batch_size; ++batch_idx) {
+    sampling_vec_t<DType, VEC_SIZE> logits_vec;
+    SamplingDataAndIndex<DType, IdType> max_data = {
+        -cuda::std::numeric_limits<DType>::infinity(), 0};
 
-  // Process logits in chunks with vectorized loads
-  for (uint32_t i = 0; i < sampling_ceil_div(d, BLOCK_THREADS * VEC_SIZE);
-       ++i) {
-    logits_vec.fill(-cuda::std::numeric_limits<DType>::infinity());
+    // Process logits in chunks with vectorized loads
+    for (uint32_t i = 0; i < sampling_ceil_div(d, BLOCK_THREADS * VEC_SIZE);
+         ++i) {
+      logits_vec.fill(-cuda::std::numeric_limits<DType>::infinity());
 
-    // Load logits vector if within bounds
-    if ((i * BLOCK_THREADS + tx) * VEC_SIZE < d) {
-      logits_vec.cast_load(logits + row_idx * d + i * BLOCK_THREADS * VEC_SIZE +
-                           tx * VEC_SIZE);
-    }
+      // Load logits vector if within bounds
+      if ((i * BLOCK_THREADS + tx) * VEC_SIZE < d) {
+        logits_vec.cast_load(logits + batch_idx * d + i * BLOCK_THREADS * VEC_SIZE +
+                             tx * VEC_SIZE);
+      }
 
-    // Generate Gumbel noise
-    sampling_vec_t<DType, VEC_SIZE> gumbel_noise =
-        GenerateSamplingGumbelNoise<DType, VEC_SIZE>(
-            philox_seed,
-            philox_offset,
-            static_cast<uint64_t>(bx * d +
-                                  (i * BLOCK_THREADS + tx) * VEC_SIZE));
+      // Generate Gumbel noise
+      sampling_vec_t<DType, VEC_SIZE> gumbel_noise =
+          GenerateSamplingGumbelNoise<DType, VEC_SIZE>(
+              philox_seed,
+              philox_offset,
+              static_cast<uint64_t>(batch_idx * d +
+                                    (i * BLOCK_THREADS + tx) * VEC_SIZE));
 
-    // Add noise to logits and prepare for reduction
-    SamplingDataAndIndex<DType, IdType> cur_data[VEC_SIZE];
+      // Add noise to logits and prepare for reduction
+      SamplingDataAndIndex<DType, IdType> cur_data[VEC_SIZE];
 #pragma unroll
-    for (uint32_t j = 0; j < VEC_SIZE; ++j) {
-      cur_data[j].data = (i * BLOCK_THREADS + tx) * VEC_SIZE + j < d
-                             ? logits_vec[j] + gumbel_noise[j]
-                             : -cuda::std::numeric_limits<DType>::infinity();
-      cur_data[j].index = (i * BLOCK_THREADS + tx) * VEC_SIZE + j;
+      for (uint32_t j = 0; j < VEC_SIZE; ++j) {
+        cur_data[j].data = (i * BLOCK_THREADS + tx) * VEC_SIZE + j < d
+                               ? logits_vec[j] + gumbel_noise[j]
+                               : -cuda::std::numeric_limits<DType>::infinity();
+        cur_data[j].index = (i * BLOCK_THREADS + tx) * VEC_SIZE + j;
+      }
+
+      // Find maximum across block
+      max_data += BlockReduce<SamplingDataAndIndex<DType, IdType>,
+                              BLOCK_THREADS,
+                              SAMPLING_REDUCE_ALGO>(temp_storage)
+                      .template Sum<VEC_SIZE>(cur_data);
     }
 
-    // Find maximum across block
-    max_data += BlockReduce<SamplingDataAndIndex<DType, IdType>,
-                            BLOCK_THREADS,
-                            SAMPLING_REDUCE_ALGO>(temp_storage)
-                    .template Sum<VEC_SIZE>(cur_data);
-  }
+    // Write output for this batch
+    if (tx == 0) {
+      output[batch_idx] = max_data.index;
+    }
 
-  // Write output
-  if (tx == 0) {
-    output[bx] = max_data.index;
+    // Sync before next batch iteration to reuse shared memory
+    __syncthreads();
   }
 }
 

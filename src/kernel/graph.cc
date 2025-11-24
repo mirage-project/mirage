@@ -606,6 +606,11 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
         customized->bgraph, params);
     task_config[op] =
         std::make_tuple(2, 1, TASK_ARGMAX_REDUCE_SM100, variant_id);
+  } else if (name == "sampling_sm100") {
+    int variant_id = task_register->register_sampling_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(1, 1, TASK_SAMPLING_SM100, variant_id);
   } else if (name == "tensor_init") {
     int variant_id =
         task_register->register_tensor_init_task(customized->bgraph, params);

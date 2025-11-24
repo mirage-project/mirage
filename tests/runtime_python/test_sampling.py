@@ -82,7 +82,7 @@ for config_name, test_vocab_size, distribution_fn, dist_kwargs in test_configs:
     print(f"Config: {config_name} (vocab_size={test_vocab_size})")
 
     torch.manual_seed(42)
-    num_trials = 5000000  # 5M samples for statistical significance
+    num_trials = 5000000
 
     # Generate logits from specified distribution
     logits = distribution_fn((1, test_vocab_size), "cuda", **dist_kwargs)

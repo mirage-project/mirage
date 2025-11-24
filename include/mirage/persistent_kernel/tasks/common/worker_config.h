@@ -26,4 +26,8 @@ constexpr float inf = 5e4;
 #if defined(MIRAGE_GRACE_HOPPER) || defined(MIRAGE_GRACE_BLACKWELL)
 constexpr int WORKER_NUM_THREADS = 256;   // Grace Hopper setting
 constexpr int CONSUMER_NUM_THREADS = 128; // Grace Hopper setting
+#else
+// Default settings for other architectures
+constexpr int WORKER_NUM_THREADS = 128;
+constexpr int CONSUMER_NUM_THREADS = 128;
 #endif
