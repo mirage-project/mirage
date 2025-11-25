@@ -440,29 +440,7 @@ __device__ __forceinline__ void
 
   using TmemAllocator = cute::TMEM::Allocator1Sm;
   TmemAllocator tmem_allocator{};
-
-  // // fetch expert mask and preprocessing
-  // int32_t activated_expert_idx[(BATCH_SIZE * NUM_TOPK + EXPERT_STRIDE - 1) /
-  // EXPERT_STRIDE]; int32_t total_activated_experts = 0; int32_t
-  // num_activated_experts = 0;
-
-  // if(threadIdx.x < NUM_EXPERTS) {
-  //   shared_storage.expert_mask[threadIdx.x] = mMask[threadIdx.x];
-  // }
-
-  // __syncthreads();
-
-  // for(int expert_idx = 0; expert_idx < NUM_EXPERTS; ++expert_idx) {
-  //   int32_t expert_mask = shared_storage.expert_mask[expert_idx];
-  //   if (expert_mask == 1 && (total_activated_experts) % EXPERT_STRIDE ==
-  //   expert_offset) {
-  //     activated_expert_idx[num_activated_experts] = expert_idx;
-  //     num_activated_experts += 1;
-  //   }
-  //   total_activated_experts += expert_mask;
-  // }
   __syncthreads(); // Wait for preprocessing done
-
   if (warp_idx == 5) {
     // DMA warp (1)
 

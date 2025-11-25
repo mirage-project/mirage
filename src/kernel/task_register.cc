@@ -2306,12 +2306,11 @@ int TaskRegister::register_moe_linear_sm100_task(
          "cute::make_tensor(cute::make_gmem_ptr(static_cast<cute::int32_t*>("
          "task_desc->input_ptrs[3])), layout_expert_mask);");
   // Output Tensor setup
-  code.e("cute::Layout layout_output = cute::make_layout(cute::make_shape($, "
-         "$, $), "
-         "cute::make_stride($, cute::Int<1>{}, $));",
+  code.e("cute::Layout layout_output = cute::make_layout(cute::make_shape($, $, $), "
+         "cute::make_stride($, $, cute::Int<1>{}));",
          batch_size,
-         output_size,
          num_experts_per_tok,
+         output_size,
          num_experts_per_tok * output_stride,
          output_stride);
   code.e("cute::Tensor mOutput = "

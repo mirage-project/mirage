@@ -150,8 +150,8 @@ public:
   }
 
   template <int NDIM>
-  __device__ inline void
-      tma_reduce_add_async(T *smem_ptr, int const (&tma_coords)[NDIM]) const {
+  __device__ inline void tma_reduce_add_async(T *smem_ptr,
+                                         int const (&tma_coords)[NDIM]) const {
 #pragma unroll
     for (size_t i = 0; i < SMEM_REPEAT_ROW; i++) {
       for (size_t j = 0; j < SMEM_REPEAT_COL; j++) {

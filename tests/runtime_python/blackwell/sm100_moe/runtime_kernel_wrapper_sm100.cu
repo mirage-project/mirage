@@ -12,9 +12,9 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+#include "runtime_header.h"
 #include "blackwell/task_header.cuh"
 #include "hopper/tma_2d.cuh"
-#include "runtime_header.h"
 #include "tma.cuh"
 #include <cuda_runtime.h>
 #include <torch/extension.h>
