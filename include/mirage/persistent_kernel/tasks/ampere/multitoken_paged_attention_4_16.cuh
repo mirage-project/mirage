@@ -46,7 +46,7 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl_4_16(
     int const *paged_kv_indptr_buffer_ptr,
     int const *paged_kv_indices_buffer_ptr,
     int const *paged_kv_last_page_len_buffer_ptr,
-    int request_id,
+    int16_t request_id,
     bool qk_norm,
     bool rope,
     void const *q_norm_weight_ptr,

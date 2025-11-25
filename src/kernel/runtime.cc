@@ -371,7 +371,7 @@ void register_mugraph(
               (task_type == TASK_ATTN_SM100)) {
             // Note that we assume grid_dim.x corresponds to
             // the request dimension
-            task.request_id = bid.x;
+            task.task_metadata.request_id = bid.x;
           }
           // Set expert_offset for MoE tasks
           if (task_type == TASK_MOE_W13_LINEAR_SM100 ||
@@ -641,7 +641,7 @@ TaskGraphResult print_task_graph(
     code.e("FullTaskDesc "
            "task_desc(static_cast<TaskType>(task.at(\"task_type\")),");
     code.e("            task.at(\"variant_id\"));");
-    code.e("task_desc.request_id = task.at(\"request_id\").get<int>();");
+    code.e("task_desc.task_metadata.request_id = task.at(\"request_id\").get<int>();");
     code.e("task_desc.task_metadata.expert_offset = task.at(\"expert_offset\").get<int>();");
     code.e("task_desc.task_metadata.kv_idx = task.at(\"kv_idx\").get<int>();");
     code.e("task_desc.task_metadata.merge_task_offset = task.at(\"merge_task_offset\").get<int>();");
@@ -924,7 +924,7 @@ TaskGraphResult print_task_graph(
                                 {"outputs", {}},
                                 {"trigger_event", task_desc.trigger_event},
                                 {"dependent_event", task_desc.dependent_event},
-                                {"request_id", task_desc.request_id},
+                                {"request_id", task_desc.task_metadata.request_id},
                                 {"expert_offset", task_desc.task_metadata.expert_offset},
                                 {"kv_idx", task_desc.task_metadata.kv_idx},
                                 {"merge_task_offset", task_desc.task_metadata.merge_task_offset}};
@@ -1083,7 +1083,7 @@ TaskGraphResult print_task_graph(
                    {"outputs", {}},
                    {"trigger_event", task_desc.trigger_event},
                    {"dependent_event", task_desc.dependent_event},
-                   {"request_id", task_desc.request_id},
+                   {"request_id", task_desc.task_metadata.request_id},
                    {"expert_offset", task_desc.task_metadata.expert_offset},
                    {"kv_idx", task_desc.task_metadata.kv_idx},
                    {"merge_task_offset", task_desc.task_metadata.merge_task_offset}};

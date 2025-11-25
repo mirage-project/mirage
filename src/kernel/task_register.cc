@@ -284,7 +284,7 @@ int TaskRegister::register_paged_attention_task(
   code.e("    runtime_config.paged_kv_indptr_buffer,");
   code.e("    runtime_config.paged_kv_indices_buffer,");
   code.e("    runtime_config.paged_kv_last_page_len_buffer,");
-  code.e("    task_desc->request_id,");
+  code.e("    task_desc->task_metadata.request_id,");
   code.e("    $,", params[2] > 0);
   code.e("    $,", params[3] > 0);
   code.e("    task_desc->input_ptrs[3],");
@@ -1053,7 +1053,7 @@ int TaskRegister::register_paged_attention_hopper_task(
   code.e("    runtime_config.paged_kv_indptr_buffer,");
   code.e("    runtime_config.paged_kv_indices_buffer,");
   code.e("    runtime_config.paged_kv_last_page_len_buffer,");
-  code.e("    task_desc->request_id,");
+  code.e("    task_desc->task_metadata.request_id,");
   code.e("    $,", params[2] > 0); // qk_norm
   code.e("    $,", params[3] > 0); // rope
   code.e("    task_desc->input_ptrs[3],");
@@ -1879,7 +1879,7 @@ int TaskRegister::register_paged_attention_sm100_task(
   code.e("    runtime_config.paged_kv_indptr_buffer,");
   code.e("    runtime_config.paged_kv_indices_buffer,");
   code.e("    runtime_config.paged_kv_last_page_len_buffer,");
-  code.e("    task_desc->request_id,");
+  code.e("    task_desc->task_metadata.request_id,");
   code.e("    $,", params[2] > 0);
   code.e("    $,", params[3] > 0);
   code.e("    task_desc->input_ptrs[3],");
@@ -2757,7 +2757,7 @@ int TaskRegister::register_paged_attention_split_kv_sm100_task(
   code.e("    runtime_config.paged_kv_indptr_buffer,");
   code.e("    runtime_config.paged_kv_indices_buffer,");
   code.e("    runtime_config.paged_kv_last_page_len_buffer,");
-  code.e("    task_desc->request_id,");
+  code.e("    task_desc->task_metadata.request_id,");
   code.e("    $,", params[2] > 0);
   code.e("    $,", params[3] > 0);
   code.e("    task_desc->input_ptrs[3],");
@@ -2824,7 +2824,7 @@ int TaskRegister::register_paged_attention_split_kv_merge_sm100_task(
     code.e("    runtime_config.qo_indptr_buffer,");
     code.e("    runtime_config.paged_kv_indptr_buffer,");
     code.e("    runtime_config.paged_kv_last_page_len_buffer,");
-    code.e("    task_desc->request_id,");
+    code.e("    task_desc->task_metadata.request_id,");
     code.e("    task_desc->output_ptrs[0],");
     code.e("    task_desc->task_metadata.merge_task_offset);");
     return register_task_variant(TASK_PAGED_ATTENTION_SPLIT_KV_MERGE_SM100, code.to_string());
@@ -2899,7 +2899,7 @@ code.e("    runtime_config.qo_indptr_buffer,");
 code.e("    runtime_config.paged_kv_indptr_buffer,");
 code.e("    runtime_config.paged_kv_indices_buffer,");
 code.e("    runtime_config.paged_kv_last_page_len_buffer,");
-code.e("    task_desc->request_id,");
+code.e("    task_desc->task_metadata.request_id,");
 code.e("    $,", params[2] > 0);
 code.e("    $,", params[3] > 0);
 code.e("    task_desc->input_ptrs[3],");

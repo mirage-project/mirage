@@ -49,7 +49,7 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
     int const *paged_kv_indptr_buffer_ptr,
     int const *paged_kv_indices_buffer_ptr,
     int const *paged_kv_last_page_len_buffer_ptr,
-    int request_id,
+    int16_t request_id,
     bool qk_norm,
     bool rope,
     void const *q_norm_weight_ptr,
@@ -192,8 +192,8 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
     constexpr size_t S_O_BUFFER_SIZE =
         sizeof(float) * MMA_ITERS_M * NUM_THREADS * 64;
     constexpr size_t S_TOTAL_OFFSET = S_O_BUFFER_OFFSET + S_O_BUFFER_SIZE;
-    // static_assert(S_TOTAL_OFFSET <=
-    //               mirage::runtime::MAX_DYNAMIC_SHARED_MEMORY_SIZE);
+    static_assert(S_TOTAL_OFFSET <=
+                  mirage::runtime::MAX_DYNAMIC_SHARED_MEMORY_SIZE);
 
     extern __shared__ char smem[];
 

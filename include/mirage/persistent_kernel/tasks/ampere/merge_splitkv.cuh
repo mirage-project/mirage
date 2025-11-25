@@ -35,7 +35,7 @@ __device__ __forceinline__ void
                   int const *qo_indptr_buffer_ptr,
                   int const *paged_kv_indptr_buffer_ptr,
                   int const *paged_kv_last_page_len_buffer_ptr,
-                  int request_id,
+                  int16_t request_id,
                   void *output,
                   int merge_task_offset) {
   if (threadIdx.x >= 128) {

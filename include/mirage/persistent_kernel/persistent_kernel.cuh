@@ -162,7 +162,7 @@ __device__ __forceinline__ bool
   int page_queue_tail = *config.page_queue_tail;
   // Step 1: finalize previous batch
   for (int i = 0; i < MPK_MAX_NUM_BATCHED_REQUESTS; i++) {
-    int request_id = config.request_ids[i];
+    int16_t request_id = config.request_ids[i];
     if (request_id != -1) {
       // Step 1.1: move output_tokens to tokens
       int step = config.step[request_id];
@@ -209,7 +209,7 @@ __device__ __forceinline__ bool
   int num_reqs = 0, num_tokens = 0;
   num_pages = 0;
   for (int i = 0; i < MPK_MAX_NUM_BATCHED_REQUESTS; i++) {
-    int request_id = config.request_ids[i];
+    int16_t request_id = config.request_ids[i];
     if (request_id != -1) {
       int kv_indptr = config.paged_kv_indptr_buffer[i];
       int num_old_pages = config.paged_kv_indptr_buffer[i + 1] - kv_indptr;
