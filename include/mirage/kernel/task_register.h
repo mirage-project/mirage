@@ -99,6 +99,8 @@ public:
                                          std::vector<int> const &params);
   int register_argmax_reduce_sm100_task(threadblock::Graph const &bgraph,
                                         std::vector<int> const &params);
+  int register_sampling_sm100_task(threadblock::Graph const &bgraph,
+                                   std::vector<int> const &params);
   int register_tensor_init_task(threadblock::Graph const &bgraph,
                                 std::vector<int> const &params);
   int register_moe_topk_softmax_sm100_task(threadblock::Graph const &bgraph,
