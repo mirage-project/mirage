@@ -74,18 +74,37 @@ class ExportWrapper(nn.Module):
     def forward(self, input_ids):
         return self.model(input_ids)
 
+
 # Use the wrapper for export
 wrapped_model = ExportWrapper(model)
 
+# input_configs = [
+#     (1, 4),
+#     (2, 16),
+#     (4, 16),
+#     (8, 8),
+#     (1, 8),    # Small batch, short sequence
+#     (2, 16),   # Medium
+#     (4, 32),   # Larger
+#     (1, 64),   # Long sequence
+#     (8, 8),    
+# ]
+
 input_configs = [
-    (1, 8),    # Small batch, short sequence
-    (2, 16),   # Medium
-    (4, 32),   # Larger
-    (1, 64),   # Long sequence
-    (8, 8),    
+    # Small safe configs
+    (1, 8), (1, 16), (1, 32), (1, 64), (1, 128),
+    (2, 8), (2, 16), (2, 32), (2, 64),
+    (4, 8), (4, 16), (4, 32),
+    (8, 8), (8, 16), (8, 32),
+    (16, 8), (16, 16),
+    (32, 8),
+    
+    # Edge cases
+    (1, 4), (1, 256),
+    
+    # Non-power-of-2
+    (3, 12), (5, 20), (7, 24),
 ]
-
-
 generate_all_augmented_kernels(
     input_configs=input_configs,
     model=wrapped_model,
