@@ -174,6 +174,34 @@ def prune_duplicate_subgraphs(subgraphs):
     
     return unique_subgraphs, num_duplicates
 
+def get_total_partition_ops(partition: Dict[Any, List[Any]]) -> int:
+    """
+    total = operators + external_inputs + external_outputs
+    """
+    partition_nodes = set(partition.keys())
+    
+    # Count operators
+    num_operators = len(partition_nodes)
+    
+    # Count external inputs (input_ops not in partition)
+    external_inputs = set()
+    for op_node in partition_nodes:
+        for input_op in op_node.input_ops:
+            if input_op not in partition_nodes:
+                # This is an external input - will become a kernel input op
+                external_inputs.add(id(input_op)) 
+    
+    # Count external outputs (output_ops not in partition)
+    external_outputs = set()
+    for op_node in partition_nodes:
+        for output_op in op_node.output_ops:
+            if output_op not in partition_nodes:
+                # This is an external output - will become a kernel output op
+                external_outputs.add(id(output_op))
+    
+    total_kernel_ops = num_operators + len(external_inputs) + len(external_outputs)
+    
+    return total_kernel_ops
 
 def augment_partitions(valid_partitions,
                       all_operators,
@@ -181,7 +209,7 @@ def augment_partitions(valid_partitions,
                       perturbation_strategies=None,
                       prune_duplicates=True,
                       min_size=2,
-                      max_size=4,
+                      max_size=9,
                       UNSUPPORTED_OPS=set(),
                       IGNORE_OPS=set()):
     """
@@ -215,9 +243,9 @@ def augment_partitions(valid_partitions,
         for _ in range(augmentation_factor):
             strategy = random.choice(perturbation_strategies)
             augmented = None
-            
+            current_size = get_total_partition_ops(partition)
+
             if strategy == 'expand':
-                current_size = len(partition)
                 max_expansion = max_size - current_size
                 if max_expansion > 0:
                     expansion_size = random.randint(1, min(3, max_expansion))
@@ -228,8 +256,8 @@ def augment_partitions(valid_partitions,
                     continue # too large to expand
 
             elif strategy == 'contract':
-                if len(partition) > min_size:
-                    max_contraction = len(partition) - min_size
+                if current_size > min_size:
+                    max_contraction = current_size - min_size
                     contraction_size = random.randint(1, min(2, max_contraction))
                     augmented = _contract_partition_adjacency(partition, contraction_size)
                 else:
@@ -238,7 +266,7 @@ def augment_partitions(valid_partitions,
             else:
                 continue
             
-            if augmented and min_size <= len(augmented) <= max_size:
+            if augmented and min_size <= get_total_partition_ops(augmented) <= max_size:
                 augmented_subgraphs.append(augmented)
     
     print(f"Generated {len(augmented_subgraphs)} structural variations (before deduplication)")
