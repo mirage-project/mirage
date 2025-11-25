@@ -80,7 +80,7 @@ __device__ __forceinline__ void
 #pragma unroll 1
   for (int tok = group_id; tok < num_tokens * NUM_QO_HEADS_PER_KV;
        tok += num_groups) {
-    
+
     int token_idx = tok / NUM_QO_HEADS_PER_KV;
     int head_idx = tok % NUM_QO_HEADS_PER_KV;
 

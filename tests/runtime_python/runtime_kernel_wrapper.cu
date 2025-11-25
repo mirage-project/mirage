@@ -1666,10 +1666,7 @@ __global__ void sampling_from_logits_test_wrapper(DType *logits,
                                                   uint64_t philox_seed,
                                                   uint64_t philox_offset,
                                                   int batch_size) {
-  kernel::sampling_from_logits_kernel<BLOCK_THREADS,
-                                      VEC_SIZE,
-                                      DType,
-                                      IdType>(
+  kernel::sampling_from_logits_kernel<BLOCK_THREADS, VEC_SIZE, DType, IdType>(
       logits, output, vocab_size, philox_seed, philox_offset, batch_size);
 }
 
