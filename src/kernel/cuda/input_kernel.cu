@@ -72,13 +72,16 @@ bool KNInputOp::profile(ProfileResult &profile) {
 __global__ void init_input_fingerprint(char *fp_base_ptr,
                                        DTensor const A,
                                        size_t num_elements,
-                                       int gpu_id) {
+                                       int gpu_id,
+                                       int input_idx) {
   int idx = (threadIdx.x + blockIdx.x * blockDim.x);
   mirage::type::FPType *fp_ptr =
       (mirage::type::FPType *)(fp_base_ptr + A.fp_offset);
   if (idx < num_elements) {
     // FIXME: replace this with curand to generate random numbers
-    fp_ptr[idx] = (idx + gpu_id * num_elements) % FP_PQ;
+    // Ensures different INPUTs have distinct fingerprints
+    size_t offset = (size_t)input_idx * 100003; // Large prime to separate inputs
+    fp_ptr[idx] = (offset + idx + gpu_id * num_elements) % FP_PQ;
   }
 }
 
@@ -86,6 +89,18 @@ bool KNInputOp::fingerprint(void) {
   // assert a 1-D GPU mesh
   assert(kgraph->gpu_dim.y == 1);
   assert(kgraph->gpu_dim.z == 1);
+  
+  // Determine the INPUT op's logical index among all INPUTs for consistent fingerprinting
+  int input_idx = 0;
+  for (size_t i = 0; i < kgraph->operators.size(); i++) {
+    if (kgraph->operators[i] == this) {
+      break;
+    }
+    if (kgraph->operators[i]->op_type == type::KNOperatorType::KN_INPUT_OP) {
+      input_idx++;
+    }
+  }
+  
   int const num_threads_per_blk = 1024;
   mirage::kernel::DeviceMemoryManager *dmm =
       mirage::kernel::DeviceMemoryManager::get_instance();
@@ -99,7 +114,8 @@ bool KNInputOp::fingerprint(void) {
         dmm->fp_base_ptr[gpu_id],
         output_tensors[0],
         output_tensors[0].num_elements(),
-        gpu_id);
+        gpu_id,
+        input_idx);
     checkCUDA(cudaDeviceSynchronize());
   }
   return true;
