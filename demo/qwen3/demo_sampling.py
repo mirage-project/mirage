@@ -4,10 +4,8 @@ from safetensors.torch import load_model
 import torch
 import torch.distributed as dist
 import argparse
-import os, json
-
-DEFAULT_SAVE_DIR = os.path.join("outputs", "qwen3")
-MAX_SAVE_TOKENS = 100
+import os
+import random
 
 # print limitation
 # torch.set_printoptions(threshold=2000)
@@ -48,7 +46,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--use-mirage", action="store_true", help="Use Mirage kernels")
     parser.add_argument("--max-num-batched-tokens", default=8, type=int, help="Max number of tokens in a batch")
-    parser.add_argument("--max-num-batched-requests", default=1, type=int, help="Max number of requests in a batch")
+    parser.add_argument("--max-num-batched-requests", default=4, type=int, help="Max number of requests in a batch")
     parser.add_argument("--page-size", default=4096, type=int, help="Page size")
     parser.add_argument("--max-num-pages", default=16, type=int, help="Max num pages")
     parser.add_argument("--output-dir", help="Output files directory")
@@ -94,29 +92,6 @@ if __name__ == "__main__":
         help="Not use the cutlass version kernel.",
     )
     parser.add_argument("--ignore-eos", action="store_true", help="Ignore eos token during generation")
-
-    # -------- Args for CI tests ----------
-    parser.add_argument("--max-new-tokens", type=int, default=None, help="Decode cap for CI determinism")
-    parser.add_argument("--temperature", type=float, default=0.0)
-    parser.add_argument("--top_p", type=float, default=1.0)
-    parser.add_argument("--do-sample", dest="do_sample", action="store_true", help="Enable sampling (default off)")
-    parser.add_argument(
-        "--save-tokens",
-        nargs="?",
-        const="auto",
-        default=None,
-        help=(
-            "Optionally dump first N generated token_ids, text, and latency to JSON. "
-            "If path omitted, saves to outputs/qwen3/{torch_output.json|mpk_output.json}."
-        ),
-    )
-    parser.add_argument("--prompt",
-        type=str,
-        default="Give me a short introduction to large language model.",
-        help="Custom prompt text to generate from.",
-    )
-
-    parser.add_argument("--split-kv-cache", action="store_true", help="Use split-kv cache")
     args = parser.parse_args()
     try:
         from mpi4py import MPI
@@ -130,16 +105,6 @@ if __name__ == "__main__":
     except ImportError:
         world_size = 1
         rank = 0
-
-    if args.save_tokens:
-        if args.save_tokens == "auto":
-            filename = "mpk_output.json" if args.use_mirage else "torch_output.json"
-            save_path = os.path.join(DEFAULT_SAVE_DIR, filename)
-        else:
-            save_path = args.save_tokens
-        os.makedirs(os.path.dirname(save_path), exist_ok=True)
-    else:
-        save_path = None
 
     if world_size > 1:
         dist.init_process_group(backend="nccl", init_method="env://")
@@ -159,10 +124,9 @@ if __name__ == "__main__":
             print(f"Load model from model path: {args.model_path}")
             config = AutoConfig.from_pretrained(args.model_path)
             model = Qwen3ForCausalLM(config, world_size, args.max_num_pages, args.page_size)
-            # load_model(
-            #     model, f"{args.model_path}/model{rank}-mp{world_size}.safetensors"
-            # )
-            model = Qwen3ForCausalLM.from_pretrained(args.model_path, world_size, max_num_pages=args.max_num_pages, page_size=args.page_size).to("cuda")
+            load_model(
+                model, f"{args.model_path}/model{rank}-mp{world_size}.safetensors"
+            )
             tokenizer = AutoTokenizer.from_pretrained(args.model_path)
         else:
             model = Qwen3ForCausalLM.from_pretrained(model_name, world_size, max_num_pages=args.max_num_pages, page_size=args.page_size).to("cuda")
@@ -172,7 +136,7 @@ if __name__ == "__main__":
     # get all model weight tensors
     tokens = torch.full((total_num_requests, args.max_seq_length), 0, dtype=torch.long, device="cuda")
 
-    prompt = args.prompt
+    prompt = "Give me a short introduction to large language model."
     # This prompt is copied from https://github.com/apoorvumang/prompt-lookup-decoding/blob/main/demo-pld.ipynb
     code_text = """import numpy as np
                 import matplotlib.pyplot as plt
@@ -245,7 +209,6 @@ if __name__ == "__main__":
         head_dim = model.config.head_dim
         fused_outdim_1 = (num_q_heads + 2 * num_kv_heads) * head_dim
         fused_outdim_2 = 2 * intermediate_size
-        num_kv_cache_chunks = max(1, args.max_seq_length // 256)
 
         if args.profiling:
             profiler_tensor = torch.zeros(
@@ -337,20 +300,6 @@ if __name__ == "__main__":
             name="attn_in",
             io_category="cuda_tensor",
         )
-        lse = mpk.new_tensor(
-            dims=(args.max_num_batched_tokens, num_kv_cache_chunks * num_local_q_heads // num_local_kv_heads, num_local_kv_heads),
-            strides=(num_kv_cache_chunks * num_local_q_heads, 1, num_kv_cache_chunks * num_local_q_heads // num_local_kv_heads),
-            dtype=mi.float32,
-            name="lse",
-            io_category="cuda_tensor",
-        )
-        attn_out_tmp = mpk.new_tensor(
-            dims=(args.max_num_batched_tokens, num_kv_cache_chunks * num_local_q_heads // num_local_kv_heads * head_dim, num_local_kv_heads),
-            strides=(num_kv_cache_chunks * num_local_q_heads, 1, num_kv_cache_chunks * num_local_q_heads // num_local_kv_heads * head_dim),
-            dtype=mi.bfloat16,
-            name="attn_out_tmp",
-            io_category="cuda_tensor",
-        )
         attn_out = mpk.new_tensor(
             dims=(args.max_num_batched_tokens, num_local_q_heads * head_dim),
             dtype=mi.bfloat16,
@@ -405,26 +354,7 @@ if __name__ == "__main__":
             name="argmax_in",
             io_category="cuda_tensor",
         )
-        argmax_part_value = mpk.new_tensor(
-            dims=(args.max_num_batched_tokens, mpk.num_workers),
-            dtype=mi.bfloat16,
-            name="argmax_part_value",
-            io_category="cuda_tensor",
-        )
-        argmax_part_index = mpk.new_tensor(
-            dims=(args.max_num_batched_tokens, mpk.num_workers),
-            dtype=mi.int64,
-            name="argmax_part_index",
-            io_category="cuda_tensor",
-        )
         argmax_out = mpk.attach_input(torch_tensor=output_tokens, name="output_token")
-        #argmax_out = mpk.new_tensor(
-        #    dims=(args.max_num_batched_tokens, 1),
-        #    dtype=mi.int64,
-        #    name="argmax_out",
-        #    io_category="cuda_tensor",
-        #)
-
         # add spec tokens layer
         if spec_decode_config:
             spec_tokens = mpk.draft_forward_layer_dispatcher(
@@ -450,8 +380,6 @@ if __name__ == "__main__":
         )
         x = y
         for i, layer in enumerate(model.model.layers):
-            # if i > 0:
-            #     break
             # add rmsnorm + linear
             w_norm = mpk.attach_input(
                 torch_tensor=layer.input_layernorm.weight,
@@ -503,7 +431,7 @@ if __name__ == "__main__":
             )
             k_cache = mpk.attach_input(
                 torch_tensor=model.model.kv_cache[0][i], name=f"layer_{i}_k_cache"
-            ) 
+            )
             v_cache = mpk.attach_input(
                 torch_tensor=model.model.kv_cache[1][i], name=f"layer_{i}_v_cache"
             )
@@ -521,30 +449,6 @@ if __name__ == "__main__":
                     grid_dim=(1, num_local_kv_heads, 1), #TODO: further divide across batch dim
                     block_dim=(128, 1, 1),
                 )
-            elif args.split_kv_cache:
-                mpk.paged_attention_split_kv_layer(
-                    input=attn_in,
-                    k_cache=k_cache,
-                    v_cache=v_cache,
-                    q_norm=w_q_norm,
-                    k_norm=w_k_norm,
-                    cos_pos_embed=cos_pos_embed,
-                    sin_pos_embed=sin_pos_embed,
-                    lse=lse,
-                    output=attn_out_tmp,
-                    attention_params=(num_local_q_heads, num_kv_cache_chunks),
-                    grid_dim=(mpk.max_num_batched_requests, num_local_kv_heads, num_kv_cache_chunks),
-                    block_dim=(128, 1, 1),
-                )
-
-                mpk.paged_attention_split_kv_merge_layer(
-                    lse=lse,
-                    output_tmp=attn_out_tmp,
-                    output=attn_out,
-                    attention_params=(num_local_q_heads, head_dim),
-                    grid_dim=(mpk.max_num_batched_requests, num_local_kv_heads, 1),
-                    block_dim=(128, 1, 1),
-                )
             else:
                 mpk.paged_attention_layer(
                     input=attn_in,
@@ -558,8 +462,6 @@ if __name__ == "__main__":
                     grid_dim=(mpk.max_num_batched_requests, num_local_kv_heads, 1),
                     block_dim=(128, 1, 1),
                 )
-            
-            
             # add linear w/ residual
             w = mpk.attach_input(
                 torch_tensor=layer.self_attn.o_proj.weight, name=f"layer_{i}_o_proj"
@@ -681,26 +583,14 @@ if __name__ == "__main__":
         #    grid_dim=(grid_for_rmsnorm_linear_layer(w_proj.dim(0)), 1, 1),
         #    block_dim=(128, 1, 1),
         #)
-        # add argmax layer
-        if spec_decode_config and spec_decode_config.method == "promptlookup":
-            argmax_partial_grid_dim = (max_factor_leq_n(153600, 96 // (spec_decode_config.spec_length + 1)), 
-                                       spec_decode_config.spec_length + 1, 
-                                       1)
-            argmax_reduce_grid_dim = (1, spec_decode_config.spec_length + 1, 1)
-        else:
-            argmax_partial_grid_dim = (mpk.num_workers, 1, 1)
-            argmax_reduce_grid_dim = (1, 1, 1)
-        mpk.argmax_partial_layer(
-            input=argmax_in,
-            output=(argmax_part_value, argmax_part_index),
-            grid_dim=argmax_partial_grid_dim,
-            block_dim=(128, 1, 1),
-        )
-        mpk.argmax_reduce_layer(
-            input=(argmax_part_value, argmax_part_index),
+
+        # Add sampling layer
+        mpk.sampling_sm100_layer(
+            logits=argmax_in,
             output=argmax_out,
-            grid_dim=argmax_reduce_grid_dim,
-            block_dim=(128, 1, 1),
+            grid_dim=(args.max_num_batched_tokens, 1, 1),
+            block_dim=(256, 1, 1),
+            seed=random.randint(0, 2**31 - 1),
         )
         if spec_decode_config:
             verify_out = mpk.verify_layer_dispatcher(
@@ -722,13 +612,10 @@ if __name__ == "__main__":
     # g = torch.cuda.CUDAGraph()
     stream = torch.cuda.Stream()
     warmup = 0
-    # Decode up to user cap or buffer size
-    output_len = args.max_new_tokens if args.max_new_tokens is not None else (tokens.size(1) - prompt_lengths[0].item())
-    output_len = max(0, min(output_len, tokens.size(1) - prompt_lengths[0].item()))
+    output_len = 512
     if not args.use_mirage:
-        prompt_len = prompt_lengths[0].item()
-        decode_limit = prompt_len + output_len
-        for cur_pos in range(prompt_len, decode_limit):
+        prompt_len= prompt_lengths[0].item()
+        for cur_pos in range(prompt_len, prompt_len + output_len):
             step.fill_(cur_pos - 1)
             input_ids = tokens[:, prev_pos:cur_pos]
             cos_embeddings = position_embeddings[0][:, prev_pos:cur_pos]
@@ -753,8 +640,7 @@ if __name__ == "__main__":
         torch.cuda.synchronize()
         run_time = starter.elapsed_time(ender)
 
-        end_idx = prev_pos + 1
-        generated_ids = tokens[:, :end_idx]
+        generated_ids = tokens[:, :prev_pos]
 
         response = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
         print(response)
@@ -763,26 +649,24 @@ if __name__ == "__main__":
                 prompt_len, cur_pos - prompt_len, run_time / (cur_pos - prompt_len)
             )
         )
-        
-        # -------- CI dumps outputs to json files ----------
-        if save_path and rank == 0:
-            tokens_generated = max(0, end_idx - prompt_len)
-            per_tok_ms = run_time / max(tokens_generated, 1)
-            slice_end = min(end_idx, prompt_len + MAX_SAVE_TOKENS)
-            token_ids = tokens[0, prompt_len:slice_end].tolist()
-            out = {
-                "token_ids": token_ids,
-                "text": tokenizer.decode(tokens[0, :end_idx], skip_special_tokens=True),
-                "latency_ms_per_token": per_tok_ms,
-                "prompt_length": prompt_len,
-                "generate_length": tokens_generated,
-                "mode": "torch",
-            }
-            with open(save_path, "w") as f:
-                json.dump(out, f, indent=2)
-            print(f"Saved tokens to {save_path}")
-
     else:
+        # prefill phase
+        #step.fill_(prompt_len - 1)
+        #input_ids = tokens[:, 0:prompt_len]
+        #cos_embeddings = position_embeddings[0][:, 0:prompt_len]
+        #sin_embeddings = position_embeddings[1][:, 0:prompt_len]
+        #logits = model.forward(
+        #    input_ids=input_ids,
+        #    position_embeddings=(cos_embeddings, sin_embeddings),
+        #    step=step,
+        #    stream=stream,
+        #)
+        #next_token = logits.argmax(dim=-1)
+        #next_token = next_token[0, -1]
+        #tokens[0, prompt_len] = next_token
+        #torch.cuda.synchronize()
+        #step.fill_(prompt_len)
+
         starter.record()
         mpk()
         ender.record()
@@ -802,27 +686,5 @@ if __name__ == "__main__":
               prompt_lengths[0], step.max().item() + 1 - prompt_lengths[0], run_time / (step.max().item() + 1)
             )
         )
-
-        # -------- CI dumps outputs to json files ----------
-        if save_path and rank == 0:
-            end_idx = step[0].item() + 1
-            prompt_len = prompt_lengths[0].item()
-            tokens_generated = max(0, end_idx - prompt_len)
-            per_tok_ms = run_time / max(tokens_generated, 1)
-            slice_end = min(end_idx, prompt_len + MAX_SAVE_TOKENS)
-            token_ids = tokens[0, prompt_len:slice_end].tolist()
-            response_text = tokenizer.decode(tokens[0, :end_idx], skip_special_tokens=True)
-            out = {
-                "token_ids": token_ids,
-                "text": response_text,
-                "latency_ms_per_token": per_tok_ms,
-                "prompt_length": prompt_len,
-                "generate_length": tokens_generated,
-                "mode": "mpk",
-            }
-            with open(save_path, "w") as f:
-                json.dump(out, f, indent=2)
-            print(f"Saved tokens to {save_path}")
-
     if world_size > 1:
         dist.destroy_process_group()

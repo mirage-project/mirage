@@ -14,6 +14,7 @@
  */
 #pragma once
 #include "../common/utils.cuh"
+#include "../common/worker_config.h"
 namespace kernel {
 
 template <typename T,

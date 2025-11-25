@@ -1034,6 +1034,27 @@ class PersistentKernel:
         self.kn_graph.customized([input, output], tb_graph)
         self.kn_graph.register_task(tb_graph, "silu_mul" if self.target_cc == 90 else "silu_mul")
 
+    def identity_layer(
+        self,
+        input: DTensor,
+        output: DTensor,
+        grid_dim: tuple,
+        block_dim: tuple,
+        dependent_tensor: DTensor = None,
+    ):
+        # TODO: Add support from kn_graph
+        last_dim = 0
+        assert input.num_dims == output.num_dims
+        for i in range(input.num_dims):
+            assert input.dim(i) == output.dim(i)
+            last_dim = i
+        assert last_dim == 1 or last_dim == 2
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(input, (last_dim, -1, -1), 1, True)
+        tb_graph.new_input(output, (last_dim, -1, -1), 1, True)
+        self.kn_graph.customized([input, output], tb_graph)
+        self.kn_graph.register_task(tb_graph, "identity")
+
     def silu_mul_linear_with_residual_layer(
         self,
         input: DTensor,
@@ -1118,7 +1139,27 @@ class PersistentKernel:
             self.kn_graph.register_task(
                 tb_graph, "argmax_reduce", [self.argmax_partial_output_size]
             )
-        
+
+    def sampling_sm100_layer(
+        self,
+        logits: DTensor,      # [batch_size, vocab_size]
+        output: DTensor,      # [batch_size, 1]
+        grid_dim: tuple,
+        block_dim: tuple,
+        seed: int = 42,
+    ):
+        """Sampling from logits using Gumbel-Max trick for stochastic token generation."""
+        assert logits.num_dims == 2      # (batch_size, vocab_size)
+        assert output.num_dims == 2      # (batch_size, 1)
+
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(logits, (0, -1, -1), -1, True)
+        tb_graph.new_input(output, (0, -1, -1), -1, True)
+        self.kn_graph.customized([logits, output], tb_graph)
+
+        # Register task with seed parameter
+        self.kn_graph.register_task(tb_graph, "sampling_sm100", [seed])
+
     def find_ngram_partial_layer(
         self, input: DTensor, output: DTensor, grid_dim: tuple, block_dim: tuple, ngram_size: int = 3):
         # Currently assume that input/output
@@ -1268,8 +1309,8 @@ class PersistentKernel:
             
         if output_dir is not None:
             os.makedirs(output_dir, exist_ok=True)
-            shutil.copy(cuda_code_path, os.path.join(output_dir, "test.cu"))
-            shutil.copy(json_file_path, os.path.join(output_dir, "task_graph.json"))
+            shutil.copy(cuda_code_path, os.path.join(output_dir, f"test_rank{self.mpi_rank}.cu"))
+            shutil.copy(json_file_path, os.path.join(output_dir, f"task_graph_rank{self.mpi_rank}.json"))
 
         cc = shutil.which("nvcc")
         if cc is None:
