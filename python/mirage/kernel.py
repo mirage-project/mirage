@@ -131,7 +131,7 @@ def get_cc_cmd(target, cc, FILE_NAME, py_include_dir, INCLUDE_PATH, DEPS_PATH, s
         f"-I{os.path.join(DEPS_PATH, 'cutlass/include')}",
         "-shared",
         "-std=c++17",
-        "-use_fast_math",
+        # "-use_fast_math",
         "-lcublas",
         "-Xcompiler=-fPIC",
         "--expt-relaxed-constexpr",
@@ -376,19 +376,19 @@ class KNGraph:
         result = generate_cuda_program(
             self.cygraph, target_cc=target_cc, input_strides=input_strides, num_warp_groups = num_warp_groups, pipeline_stages = pipeline_stages, profiling = profiling
         )
-        if result["max_smem_size"] > get_shared_memory_capacity(target_cc):
-            # the transpiled kernel exceeds shared memory limit
-            print(
-                f"required shared memory size {result['max_smem_size']} exceed max shared memory size of current gpu arch {get_shared_memory_capacity(target_cc)}"
-            )
-            self._is_compiled = True
-            self._valid_cuda_kernels = False
-            self._error_message = "shared memory usage exceed limit"
+        # if result["max_smem_size"] > get_shared_memory_capacity(target_cc):
+        #     # the transpiled kernel exceeds shared memory limit
+        #     print(
+        #         f"required shared memory size {result['max_smem_size']} exceed max shared memory size of current gpu arch {get_shared_memory_capacity(target_cc)}"
+        #     )
+        #     self._is_compiled = True
+        #     self._valid_cuda_kernels = False
+        #     self._error_message = "shared memory usage exceed limit"
 
-            if async_:
-                return Handle([], None)
-            else:
-                return None
+        #     if async_:
+        #         return Handle([], None)
+        #     else:
+        #         return None
 
         MIRAGE_ROOT, INCLUDE_PATH, DEPS_PATH = get_key_paths()
         # if True:

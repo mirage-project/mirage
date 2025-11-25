@@ -32,6 +32,39 @@ CAST_ID_TO_DTYPE = {
     15: torch.complex128,
 }
 
+def check_subgraph_exceeds_mirage_constraint(sg_dict, max_mirage_ops):
+    """
+    Check if a subgraph exceeds the mirage constraint:
+    num_inputs + num_outputs + num_operators > max_mirage_ops
+    
+    Args:
+        sg_dict: Dictionary representing the subgraph (keys are operators)
+        max_mirage_ops: Maximum allowed value for the constraint
+    
+    Returns:
+        True if constraint is exceeded, False otherwise
+    """
+    # Count operators
+    num_operators = len(sg_dict)
+    
+    # Collect all tensor IDs produced and consumed in the subgraph
+    produced_in_subgraph = set()
+    consumed_in_subgraph = set()
+    for op in sg_dict:
+        for _, tid in op.output_tensor_shapes:
+            produced_in_subgraph.add(tid)
+        for _, tid in op.input_tensor_shapes:
+            consumed_in_subgraph.add(tid)
+    
+    # Input tensors: consumed but not produced in subgraph
+    num_inputs = len(consumed_in_subgraph - produced_in_subgraph)
+    
+    # Output tensors: produced but not consumed in subgraph
+    num_outputs = len(produced_in_subgraph - consumed_in_subgraph)
+    
+    # Check if constraint is exceeded
+    return num_inputs + num_outputs + num_operators > max_mirage_ops
+
 def copy_subgraph(subgraph):
     new_subgraph = {}
     for from_op, to_ops in subgraph.items():
@@ -421,6 +454,77 @@ class HybridModel:
         self._const_cache = {}
         self._expanded_cache = {}  # Cache for dimension-expanded tensors (e.g., 2D weight -> 3D)
         self._cast_cache = {}
+        
+        # Initialize operation handlers
+        self._init_op_handlers()
+    
+    def _handle_binary_op_with_scalar(self, op, inputs, fn_name):
+        """Handle binary ops that can work with scalars from additional_params"""
+        if len(inputs) == 1 and hasattr(op, 'additional_params') and 'arg1' in op.additional_params:
+            scalar = op.additional_params['arg1']
+            op_map = {
+                "Add": lambda x, s: x + s,
+                "Sub": lambda x, s: x - s,
+                "Mul": lambda x, s: x * s,
+                "Div": lambda x, s: x / s,
+            }
+            return op_map[fn_name](inputs[0], scalar)
+        elif len(inputs) >= 2:
+            return getattr(torch, fn_name.lower())(inputs[0], inputs[1])
+        else:
+            raise ValueError(f"{fn_name} requires 2 inputs or additional_params, got {len(inputs)} inputs")
+    
+    def _handle_gemm(self, inputs):
+        """ONNX Gemm: Y = alpha * A * B^T + beta * C (default transB=1)"""
+        matmul_result = torch.matmul(inputs[0], inputs[1].T)
+        if len(inputs) > 2:  # Has bias
+            return matmul_result + inputs[2]
+        return matmul_result
+    
+    def _handle_cast(self, op, inputs):
+        """Handle Cast and CastLike operations"""
+        to_dtype = CAST_ID_TO_DTYPE.get(op.kwargs.get("to"), None)
+        if to_dtype is not None:
+            if inputs[0].dtype != to_dtype:
+                # check in cache
+                cache_key = (id(inputs[0]), to_dtype)
+                if cache_key in self._cast_cache:
+                    return self._cast_cache[cache_key]
+                self._cast_cache[cache_key] = inputs[0].to(dtype=to_dtype)
+                return self._cast_cache[cache_key]
+            return inputs[0]
+        else:
+            raise NotImplementedError(f"Cast to dtype id '{op.kwargs.get('to')}' not implemented")
+    
+    def _init_op_handlers(self):
+        """Initialize the operation dispatch table"""
+        self._op_handlers = {
+            "Add": lambda op, inputs: self._handle_binary_op_with_scalar(op, inputs, "Add"),
+            "Sub": lambda op, inputs: self._handle_binary_op_with_scalar(op, inputs, "Sub"),
+            "Mul": lambda op, inputs: self._handle_binary_op_with_scalar(op, inputs, "Mul"),
+            "Div": lambda op, inputs: self._handle_binary_op_with_scalar(op, inputs, "Div"),
+            "Pow": lambda op, inputs: self._handle_binary_op_with_scalar(op, inputs, "Pow"),
+            "MatMul": lambda op, inputs: torch.matmul(inputs[0], inputs[1]),
+            "Gemm": lambda op, inputs: self._handle_gemm(inputs),
+            "Relu": lambda op, inputs: torch.relu(inputs[0]),
+            "Tanh": lambda op, inputs: torch.tanh(inputs[0]),
+            "Sigmoid": lambda op, inputs: torch.sigmoid(inputs[0]),
+            "Exp": lambda op, inputs: torch.exp(inputs[0]),
+            "Neg": lambda op, inputs: torch.neg(inputs[0]),
+            "Sqrt": lambda op, inputs: torch.sqrt(inputs[0]),
+            "Reciprocal": lambda op, inputs: torch.reciprocal(inputs[0]),
+            "ReduceSum": lambda op, inputs: torch.sum(inputs[0], **op.kwargs, keepdims=True),
+            "Transpose": lambda op, inputs: torch.permute(inputs[0], dims=op.kwargs["perm"]),
+            "Reshape": lambda op, inputs: inputs[0].reshape(op.output_tensor_shapes[0][0]),
+            "Abs": lambda op, inputs: torch.abs(inputs[0]),
+            "Expand": lambda op, inputs: torch.broadcast_to(inputs[0], torch.broadcast_shapes(inputs[0].shape, tuple(op.output_tensor_shapes[0][0]))),
+            "Gather": lambda op, inputs: torch.nn.functional.embedding(inputs[1], inputs[0]),
+            "Unsqueeze": lambda op, inputs: torch.unsqueeze(inputs[0], dim=0),
+            "Cast": lambda op, inputs: self._handle_cast(op, inputs),
+            "CastLike": lambda op, inputs: self._handle_cast(op, inputs),
+            "Constant": lambda op, inputs: op.kwargs["t"],
+            "Identity": lambda op, inputs: inputs[0],
+        }
     
     def _get_params_on(self, device, dtype):
         """Return dict of parameters placed on device, keeping their original dtype."""
@@ -539,85 +643,22 @@ class HybridModel:
         return outputs[0] if len(outputs) == 1 else outputs
     
     def _execute_pytorch_op(self, op, inputs):
+        """Execute a PyTorch operation using the dispatch table"""
         fn = op.fn
-        if fn in ["Add", "Sub", "Mul", "Div", "Pow"]:
-            # Handle operations with scalar constants in additional_params
-            if len(inputs) == 1 and hasattr(op, 'additional_params') and 'arg1' in op.additional_params:
-                scalar = op.additional_params['arg1']
-                if fn == "Add":
-                    return inputs[0] + scalar
-                elif fn == "Sub":
-                    return inputs[0] - scalar
-                elif fn == "Mul":
-                    return inputs[0] * scalar
-                elif fn == "Div":
-                    return inputs[0] / scalar
-            elif len(inputs) >= 2:
-                return getattr(torch, fn.lower())(inputs[0], inputs[1])
-            else:
-                raise ValueError(f"{fn} requires 2 inputs or additional_params, got {len(inputs)} inputs")
-        elif fn == "MatMul":
-            return torch.matmul(inputs[0], inputs[1])
-        elif fn == "Gemm":
-            # ONNX Gemm: Y = alpha * A * B^T + beta * C (default transB=1)
-            matmul_result = torch.matmul(inputs[0], inputs[1].T)
-            if len(inputs) > 2:  # Has bias
-                return matmul_result + inputs[2]
-            return matmul_result
-        elif fn == "Relu":
-            return torch.relu(inputs[0])
-        elif fn == "Tanh":
-            return torch.tanh(inputs[0])
-        elif fn == "Sigmoid":
-            return torch.sigmoid(inputs[0])
-        elif fn == "Exp":
-            return torch.exp(inputs[0])
-        elif fn == "Neg":
-            return torch.neg(inputs[0])
-        elif fn == "Sqrt":
-            return torch.sqrt(inputs[0])
-        elif fn == "Reciprocal":
-            return torch.reciprocal(inputs[0])
-        elif fn == "ReduceSum":
-            return torch.sum(inputs[0], **op.kwargs, keepdims=True)
-        elif fn == "Transpose":
-            return torch.permute(inputs[0], dims=op.kwargs["perm"])
-        elif fn == "Reshape":
-            return inputs[0].reshape(op.output_tensor_shapes[0][0])
-        elif fn == "Abs":
-            return torch.abs(inputs[0])
-        elif fn == "Expand":
-            out_shape = torch.broadcast_shapes(inputs[0].shape, tuple(op.output_tensor_shapes[0][0]))
-            return torch.broadcast_to(inputs[0], (out_shape))
-        elif fn == "Gather":
-            return torch.nn.functional.embedding(inputs[1], inputs[0])
-        elif fn == "Unsqueeze":
-            return torch.unsqueeze(inputs[0], dim=0)
-        elif fn == "Cast" or fn == "CastLike":
-            to_dtype = CAST_ID_TO_DTYPE.get(op.kwargs.get("to"), None)
-            if to_dtype is not None:
-                if inputs[0].dtype != to_dtype:
-                    # check in cache
-                    cache_key = (id(inputs[0]), to_dtype)
-                    if cache_key in self._cast_cache:
-                        return self._cast_cache[cache_key]
-                    self._cast_cache[cache_key] = inputs[0].to(dtype=to_dtype)
-                    return self._cast_cache[cache_key]
-                return inputs[0]
-            else:
-                raise NotImplementedError(f"Cast to dtype id '{op.kwargs.get('to')}' not implemented")
-        elif fn == "Constant":
-            return op.kwargs["t"]
-        elif fn == "Identity":
-            return inputs[0]
-        else:
+        
+        # Lookup and execute the operation
+        handler = self._op_handlers.get(fn)
+        if handler is None:
             raise NotImplementedError(f"PyTorch fallback for '{fn}' not implemented")
+        
+        return handler(op, inputs)
 
 def partition_graph_with_dp(model, 
                           dummy_input, 
                           IGNORE_OPS, 
                           UNSUPPORTED_OPS,
                           max_nodes_per_partition=4,
+                          max_mirage_ops=9,
                           dry_run=False,
                           ):
     """
@@ -644,6 +685,11 @@ def partition_graph_with_dp(model,
     parameter_dict = {init.name: torch.from_numpy(onnx.numpy_helper.to_array(init)).to(torch.device("cuda")).to(torch.float16)
                      for init in onnx_model.graph.initializer}
     
+    # Get actual output tensor IDs from ONNX model
+    output_tensor_names = [output.name for output in onnx_model.graph.output]
+    name_to_tensor_id = {name: tid for tid, name in tensor_id_to_name.items()}
+    onnx_output_tensor_ids = [name_to_tensor_id[name] for name in output_tensor_names if name in name_to_tensor_id]
+    
     print("Splitting graph into supported/unsupported subgraphs...")
         
     subgraphs, _, sorted_ops = process_operator_graph(operators, IGNORE_OPS, UNSUPPORTED_OPS)
@@ -662,7 +708,7 @@ def partition_graph_with_dp(model,
     fine_grained_partitions = []
     
     for sg_id, (sg_dict, sg_type) in enumerate(subgraphs):
-        if sg_type == "mirage" and len(sg_dict) > max_nodes_per_partition:
+        if sg_type == "mirage" and check_subgraph_exceeds_mirage_constraint(sg_dict, max_mirage_ops):
             print(f"  Partitioning subgraph {sg_id} ({len(sg_dict)} ops)...")
             
             # Extract operators in topological order
@@ -680,7 +726,7 @@ def partition_graph_with_dp(model,
             # Apply DAG partitioning with connectivity constraint
             def cost_function_with_adj(nodes):
                 return cost_function(nodes, adj)
-            partition_boundaries = solve_partitions(list(range(n)), cost_function_with_adj, max_nodes_per_partition, adj)
+            partition_boundaries = solve_partitions(list(range(n)), cost_function_with_adj, max_nodes_per_partition, adj, max_mirage_ops)
             
             # Convert partitions to subgraphs
             for p_id, boundary in enumerate(partition_boundaries):
@@ -754,7 +800,7 @@ def partition_graph_with_dp(model,
             try:
                 h = str(kernel_graph.get_owner_independent_hash())
                 # TODO: Sqrt doesn't work with superoptimizer currently
-                if dry_run or (len(sg_dict) == 1 and list(sg_dict.keys())[0].fn == "Sqrt"):
+                if dry_run:
                     # # Dry run mode: compile original kernel without superoptimize
                     # # Create dummy inputs for compilation (Mirage uses float16)
 
@@ -796,10 +842,10 @@ def partition_graph_with_dp(model,
                     cached_mirage_kernels[kernel_cache_key] = optimized_kernel
                     print(f"     ✓ Compiled kernel and cached")
                 # check for kernel validity
-                print(f"Checking optimized kernel validity...")
+                print(f"Checking kernel validity...")
                 output = optimized_kernel(inputs=dummy_inputs)
                 _ = float(output[0].abs().sum())
-                print(f"     ✓ Compiled kernel successfully")
+                print(f"     ✓ Kernel validity verified")
 
                 const_dims = [(d[0], d[2]) for d in dims if d[1] == "C"]
                 # Save expected input shapes for runtime dimension matching
@@ -860,9 +906,9 @@ def partition_graph_with_dp(model,
             input_tensor_ids.append(tid)
         else:
             parameter_tensors[tid] = parameter_dict[pname]
-        
-    all_consumed = {tid for op in sorted_ops for _, tid in op.input_tensor_shapes}
-    output_tensor_ids = [tid for op in sorted_ops for _, tid in op.output_tensor_shapes if tid not in all_consumed]
+    
+    # Use the actual ONNX output tensor IDs instead of inferring from unconsumed tensors
+    output_tensor_ids = onnx_output_tensor_ids
     
     print(f"✓ Loaded {len(parameter_tensors)} parameters, {len(input_tensor_ids)} real inputs, {len(output_tensor_ids)} outputs")
     return HybridModel(execution_plan, input_tensor_ids, output_tensor_ids, parameter_tensors)
@@ -891,13 +937,18 @@ def partition_graph_with_in_ctx_partitions(model,
     
     print("Building computation graph...")
     unique_operators = {}
-    operators, _ = get_computation_graph(model, dummy_input, unique_operators, "onnx")
+    operators, tensor_id_to_name = get_computation_graph(model, dummy_input, unique_operators, "onnx")
     
     # Load parameters from ONNX model
     import onnx
     onnx_model = onnx.load("scripts/onnx/inferred_model.onnx")
     parameter_dict = {init.name: torch.from_numpy(onnx.numpy_helper.to_array(init)) 
                      for init in onnx_model.graph.initializer}
+    
+    # Get actual output tensor IDs from ONNX model
+    output_tensor_names = [output.name for output in onnx_model.graph.output]
+    name_to_tensor_id = {name: tid for tid, name in tensor_id_to_name.items()}
+    onnx_output_tensor_ids = [name_to_tensor_id[name] for name in output_tensor_names if name in name_to_tensor_id]
     
     print("Splitting graph into supported/unsupported subgraphs...")
     if IGNORE_OPS is None:
@@ -1038,8 +1089,8 @@ def partition_graph_with_in_ctx_partitions(model,
     parameter_tensors = {tid: parameter_dict[param_names[i]] 
                         for i, tid in enumerate(all_input_tensor_ids[num_real_inputs:])}
     
-    all_consumed = {tid for op in sorted_ops for _, tid in op.input_tensor_shapes}
-    output_tensor_ids = [tid for op in sorted_ops for _, tid in op.output_tensor_shapes if tid not in all_consumed]
+    # Use the actual ONNX output tensor IDs instead of inferring from unconsumed tensors
+    output_tensor_ids = onnx_output_tensor_ids
     
     print(f"✓ Loaded {len(parameter_tensors)} parameters, {len(input_tensor_ids)} real inputs, {len(output_tensor_ids)} outputs")
     return HybridModel(execution_plan, input_tensor_ids, output_tensor_ids, parameter_tensors)

@@ -29,7 +29,7 @@ NUM_BENCH_ITERS = 100
 NUM_BENCH_WARMUP = 10
 
 IGNORE_OPS = set()
-UNSUPPORTED_OPS = {"Constant", "Identity", "Unsqueeze", "Abs", "Gemm", "Expand", "Gather", "Reshape", "Transpose", "Cast", "CastLike", "Tanh", "ReduceSum", "Pow"}
+UNSUPPORTED_OPS = {"Constant", "Identity", "Unsqueeze", "Abs", "Gemm", "Expand", "Gather", "Reshape", "Transpose", "Cast", "CastLike", "Tanh"}
 
 model_name_to_class = {
     "test-mlp": TestMLP,
@@ -69,30 +69,29 @@ def _benchmark_model(model: nn.Module | HybridModel,
         end = torch.cuda.Event(enable_timing=True)
         start.record()
         for it in range(iters):
-            if it == iters - 1:
-                with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
-                             record_shapes=True,
-                             with_stack=True,
-                             profile_memory=True) as prof:
-                    with record_function(profile_name):
-                        _ = model(x)
-                print(f"\n=== Profiling Result for '{profile_name}' ===")
-                ps = prof.key_averages().table(sort_by="cpu_time_total", row_limit=20)
-                print(ps)
-                print("=== End of Profiling Result ===\n")
-            else:
-                _ = model(x)
+            _ = model(x)
         end.record()
         torch.cuda.synchronize()
         # elapsed_time returns milliseconds
         total_ms = start.elapsed_time(end)
         avg_ms = total_ms / max(1, iters)
 
+        with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+                        record_shapes=True,
+                        with_stack=True,
+                        profile_memory=True) as prof:
+            with record_function(profile_name):
+                _ = model(x)
+        print(f"\n=== Profiling Result for '{profile_name}' ===")
+        ps = prof.key_averages().table(sort_by="cpu_time_total", row_limit=20)
+        print(ps)
+        print("=== End of Profiling Result ===\n")
+
     return avg_ms
 
 
 def test_hybrid_model(mirage_root, dataset_root, dry_run: bool = True, cost_model: str = "dp", model_name: str = "gpt-oss:120b",
-                      max_nodes_per_partition: int = 4, scale: float = 1.0, test_model_name: str = "test-transformer"):
+                      max_nodes_per_partition: int = 4, max_mirage_ops: int = 9, scale: float = 1.0, test_model_name: str = "test-transformer"):
     assert torch.cuda.is_available(), "HybridModel test requires a CUDA-capable GPU."
     # Slightly improve backend perf variability on GPU
     torch.backends.cudnn.benchmark = True
@@ -111,6 +110,7 @@ def test_hybrid_model(mirage_root, dataset_root, dry_run: bool = True, cost_mode
             model,
             dummy_input,
             max_nodes_per_partition=max_nodes_per_partition,
+            max_mirage_ops=max_mirage_ops,
             IGNORE_OPS=IGNORE_OPS,
             UNSUPPORTED_OPS=UNSUPPORTED_OPS,
             dry_run=dry_run
@@ -143,7 +143,7 @@ def test_hybrid_model(mirage_root, dataset_root, dry_run: bool = True, cost_mode
         # Run both models
         with torch.no_grad():
             original_output = model(test_input)
-        hybrid_output = hybrid_model(test_input, debug=False)[-1]
+        hybrid_output = hybrid_model(test_input, debug=False)
 
         # Compare results
         max_diff = torch.max(torch.abs(hybrid_output - original_output)).item()
@@ -234,6 +234,12 @@ if __name__ == "__main__":
         help="Maximum number of nodes per partition for in-context partitioning (if cost_model='in_ctx')."
     )
     parser.add_argument(
+        "--max-mirage-ops",
+        type=int,
+        default=9,
+        help="Maximum number of kernel ops for Mirage superoptimization."
+    )
+    parser.add_argument(
         "--scale",
         type=float,
         default=1.0,
@@ -259,5 +265,5 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     test_hybrid_model(dry_run=args.dry_run, cost_model=args.cost_model, model_name=args.model_name,
-                      max_nodes_per_partition=args.max_nodes_per_partition, scale=args.scale, mirage_root=args.mirage_root,
+                      max_nodes_per_partition=args.max_nodes_per_partition, max_mirage_ops=args.max_mirage_ops, scale=args.scale, mirage_root=args.mirage_root,
                       dataset_root=args.dataset_root, test_model_name=args.test_model_name)
