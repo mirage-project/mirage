@@ -116,18 +116,7 @@ def test_hybrid_model(mirage_root, dataset_root, dry_run: bool = True, cost_mode
             dry_run=dry_run
         )
     elif cost_model == "in_ctx":
-        hybrid_model = partition_graph_with_in_ctx_partitions(
-            model,
-            dummy_input,
-            dataset_root=dataset_root,
-            mirage_root=mirage_root,
-            model_name=model_name,
-            max_nodes_per_partition=max_nodes_per_partition,
-            scale=scale,
-            IGNORE_OPS=IGNORE_OPS,
-            UNSUPPORTED_OPS=UNSUPPORTED_OPS,
-            dry_run=dry_run
-        )
+        raise ValueError("in_ctx is deprecated")
     else:
         raise ValueError("Invalid cost_model. Use 'dp' or 'in_ctx'.")
 
